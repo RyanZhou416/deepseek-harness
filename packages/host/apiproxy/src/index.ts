@@ -59,6 +59,12 @@ export interface Config {
    * @default 1024
    */
   coldBlankProbeMaxBytes?: number
+  /**
+   * Milliseconds an owned, durable, unsubscribed idle Web session remains live
+   * before its AgentHandle is disposed. Zero disables eviction.
+   * @default 300000
+   */
+  idleSessionRetentionMs?: number
 }
 
 /**
@@ -77,6 +83,7 @@ export class ApiProxyService extends Service implements ApiProxy {
     sessionExportCompressionLevel: z.number().step(1).min(0).max(9)
       .default(DEFAULT_SESSION_LOG_COMPRESSION_LEVEL) as z<SessionLogCompressionLevel>,
     coldBlankProbeMaxBytes: z.natural().default(DEFAULT_COLD_BLANK_PROBE_MAX_BYTES),
+    idleSessionRetentionMs: z.natural().default(300_000),
   })
 
   readonly sessions: ApiProxy['sessions']
@@ -106,6 +113,9 @@ export class ApiProxyService extends Service implements ApiProxy {
       ...(config.coldBlankProbeMaxBytes === undefined
         ? {}
         : { coldBlankProbeMaxBytes: config.coldBlankProbeMaxBytes }),
+      ...(config.idleSessionRetentionMs === undefined
+        ? {}
+        : { idleSessionRetentionMs: config.idleSessionRetentionMs }),
     })
     this.sessions = api.sessions
     this.subagents = api.subagents

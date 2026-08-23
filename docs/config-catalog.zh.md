@@ -822,6 +822,12 @@ export interface Config {
    * @default 1024
    */
   coldBlankProbeMaxBytes?: number
+  /**
+   * Milliseconds an owned, durable, unsubscribed idle Web session remains live
+   * before its AgentHandle is disposed. Zero disables eviction.
+   * @default 300000
+   */
+  idleSessionRetentionMs?: number
 }
 ```
 
@@ -1441,6 +1447,28 @@ export interface ReconnectConfig {
 
 来源：[`packages/mcp/mcp-client/src/index.ts:98`](../packages/mcp/mcp-client/src/index.ts)
 
+<a id="deepseek-aidsh-memory-admission"></a>
+
+## `@deepseek-ai/dsh-memory-admission`
+
+需要：`agents`
+
+```ts config-catalog
+/** Configurable process-wide admission limits. */
+export interface Config {
+  /** Maximum admitted agent steps across the process. Defaults to 8. */
+  maxConcurrentSteps?: number
+  /** Heap-used ratio that closes new admission. Defaults to 0.82. */
+  heapHighWatermarkRatio?: number
+  /** Heap-used ratio that reopens admission after pressure. Defaults to 0.72. */
+  heapLowWatermarkRatio?: number
+  /** Heap resampling interval while callers wait. Defaults to 100ms. */
+  sampleIntervalMs?: number
+}
+```
+
+来源：[`packages/guard/memory-admission/src/index.ts:26`](../packages/guard/memory-admission/src/index.ts)
+
 <a id="deepseek-aidsh-message-feedback"></a>
 
 ## `@deepseek-ai/dsh-message-feedback`
@@ -1841,7 +1869,7 @@ export type JournalMode = 'wal' | 'delete' | 'truncate' | 'persist'
 
 依赖：[`SessionQueryConfig`](../packages/session-query/session-query/src/index.ts)
 
-来源：[`packages/session-query/session-query-sqlite/src/index.ts:89`](../packages/session-query/session-query-sqlite/src/index.ts)
+来源：[`packages/session-query/session-query-sqlite/src/index.ts:90`](../packages/session-query/session-query-sqlite/src/index.ts)
 
 <a id="deepseek-aidsh-session-reference"></a>
 

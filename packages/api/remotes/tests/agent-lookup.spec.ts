@@ -75,6 +75,30 @@ describe('API Remote Agent resolver races', () => {
     await ctx.fiber.dispose()
   })
 
+  it('transfers a resumed handle to the Host owner and disposes it when ownership rejects', async () => {
+    const ctx = await createContext()
+    const sessionId = sid('owned-resume-handle')
+    const meta = header(sessionId)
+    let published: Session | undefined
+    provideSession(ctx, meta, () => {
+      published = ctx.sessions.create(sessionId, { meta: { cwd: '/proj' } })
+      return Promise.resolve({ meta, events: [] })
+    })
+    const dispose = vi.fn(() => Promise.resolve())
+    vi.spyOn(ctx.agents, 'resume').mockImplementation(async () => {
+      if (published === undefined) throw new Error('Session was not published')
+      return { agent: stubAgent(ctx, published), dispose }
+    })
+    const owner = vi.fn(() => { throw new Error('owner rejected handle') })
+
+    const result = await createApiRemoteAgentResolver(ctx, { ownHandle: owner })(sessionId)
+
+    expect(result).toMatchObject({ error: { code: 'internal' } })
+    expect(owner).toHaveBeenCalledOnce()
+    expect(dispose).toHaveBeenCalledOnce()
+    await ctx.fiber.dispose()
+  })
+
   it('rejects a subagent Session published after durable inspection', async () => {
     const ctx = await createContext()
     const sessionId = sid('owned-attach-race')

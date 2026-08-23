@@ -10,7 +10,7 @@ import { dirname } from 'node:path'
 import { z as zod } from 'zod'
 import type { Context } from '@deepseek-ai/cordis'
 import { installModelSelection } from '@deepseek-ai/dsh-agent'
-import type { Agent, ModelSelection, ModelSelectionRef, AgentOptions, AgentStatus } from '@deepseek-ai/dsh-agent'
+import type { Agent, AgentHandle, ModelSelection, ModelSelectionRef, AgentOptions, AgentStatus } from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-agent-presets/types'
 import { AttachmentError, admitEncodedImages } from '@deepseek-ai/dsh-attachment'
 import type { ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
@@ -615,6 +615,8 @@ export interface ApiProxyDefaults {
   sessionExportCompressionLevel?: SessionLogCompressionLevel
   /** Maximum artifact size eligible for one cold blankness read. */
   coldBlankProbeMaxBytes?: number
+  /** Idle retention for durable Host-owned Web sessions; absent or zero disables eviction. */
+  idleSessionRetentionMs?: number
   /**
    * Whether handing a path to the native opener can work at all — the
    * `hasDocument` capability the preset roster reports, and the switch
@@ -1064,6 +1066,7 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
     ?? DEFAULT_SESSION_LOG_COMPRESSION_LEVEL
   const coldBlankProbeMaxBytes = defaults.coldBlankProbeMaxBytes
     ?? DEFAULT_COLD_BLANK_PROBE_MAX_BYTES
+  const idleSessionRetentionMs = defaults.idleSessionRetentionMs ?? 0
   /** The seed model each create/resume declares; re-read so it never goes stale. */
   const agentOptions = (): AgentOptions => {
     const { provider, model } = defaults.defaultModelSelection()
@@ -1087,6 +1090,100 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
   const pendingApprovals = new Map<RpcId, PendingApproval>()
   const muxQueues = new Set<FrameQueue<RpcRequest<MuxFrame>>>()
   const imageAdmissionChains = new WeakMap<Agent, Promise<void>>()
+  const ownedAgentHandles = new Map<SessionId, AgentHandle>()
+  const idleEvictionTimers = new Map<SessionId, ReturnType<typeof setTimeout>>()
+  const idleEvictions = new Map<SessionId, Promise<void>>()
+  const residentEvictions = new WeakSet<Session>()
+
+  const cancelIdleEviction = (sessionId: SessionId): void => {
+    const timer = idleEvictionTimers.get(sessionId)
+    if (timer === undefined) return
+    clearTimeout(timer)
+    idleEvictionTimers.delete(sessionId)
+  }
+
+  const hasPendingInteraction = (sessionId: SessionId): boolean =>
+    [...pendingQuestions.values()].some(question => question.sessionId === sessionId)
+    || [...pendingApprovals.values()].some(approval => approval.sessionId === sessionId)
+
+  const hasActiveOwnedWork = (agent: Agent): boolean => {
+    if (agent.status !== 'idle' || agent.inbox.hasPending) return true
+    if (ctx.agents.list().some(candidate => ctx.agents.isOwnedBy(candidate.id, agent))) return true
+    if (hasPendingInteraction(agent.id)) return true
+    const jobs = ctx.get('jobs')
+    return jobs?.list(agent).some(job => job.status === 'running' || job.status === 'stopping') ?? false
+  }
+
+  const evictIdleAgent = async (agent: Agent): Promise<void> => {
+    const owned = ownedAgentHandles.get(agent.id)
+    if (owned?.agent !== agent || idleEvictions.has(agent.id)) return
+    if (muxQueues.size > 0 || hasActiveOwnedWork(agent)) return
+    const operation = (async () => {
+      const persistence = ctx.get('sessionPersistence')
+      if (persistence === undefined) return
+      const participated = await ctx.sessions.flush(agent.session)
+      if (!participated) return
+      const persisted = (await persistence.listSnapshots()).some(snapshot => snapshot.header.id === agent.id)
+      if (!persisted) return
+      if (muxQueues.size > 0 || hasActiveOwnedWork(agent)) return
+      if (ownedAgentHandles.get(agent.id) !== owned
+        || ctx.agents.get(agent.id) !== agent
+        || ctx.sessions.get(agent.id) !== agent.session) return
+      residentEvictions.add(agent.session)
+      try {
+        await owned.dispose()
+      } catch (error: unknown) {
+        if (ctx.sessions.get(agent.id) === agent.session) residentEvictions.delete(agent.session)
+        throw error
+      }
+    })().finally(() => {
+      idleEvictions.delete(agent.id)
+      const live = ctx.agents.get(agent.id)
+      if (live === agent) scheduleIdleEviction(agent)
+    })
+    idleEvictions.set(agent.id, operation)
+    await operation
+  }
+
+  function scheduleIdleEviction(agent: Agent): void {
+    cancelIdleEviction(agent.id)
+    if (idleSessionRetentionMs === 0 || muxQueues.size > 0) return
+    if (ownedAgentHandles.get(agent.id)?.agent !== agent || hasActiveOwnedWork(agent)) return
+    const timer = setTimeout(() => {
+      idleEvictionTimers.delete(agent.id)
+      void evictIdleAgent(agent).catch((error: unknown) => {
+        ctx.logger.warn(`api-proxy: idle session "${agent.id}" eviction failed: ${String(error)}`)
+      })
+    }, idleSessionRetentionMs)
+    timer.unref()
+    idleEvictionTimers.set(agent.id, timer)
+  }
+
+  const ownAgentHandle = (handle: AgentHandle): Agent => {
+    const { agent } = handle
+    const existing = ownedAgentHandles.get(agent.id)
+    if (existing !== undefined && existing.agent !== agent) {
+      throw new Error(`api-proxy: session "${agent.id}" already has another owned AgentHandle`)
+    }
+    ownedAgentHandles.set(agent.id, handle)
+    scheduleIdleEviction(agent)
+    return agent
+  }
+
+  ctx.on('agent/status', ({ agent, status }) => {
+    if (ownedAgentHandles.get(agent.id)?.agent !== agent) return
+    if (status === 'running') cancelIdleEviction(agent.id)
+    else scheduleIdleEviction(agent)
+  })
+  ctx.on('agent/disposed', ({ agent }) => {
+    cancelIdleEviction(agent.id)
+    if (ownedAgentHandles.get(agent.id)?.agent === agent) ownedAgentHandles.delete(agent.id)
+  })
+  ctx.effect(() => () => {
+    for (const timer of idleEvictionTimers.values()) clearTimeout(timer)
+    idleEvictionTimers.clear()
+    ownedAgentHandles.clear()
+  }, 'api-proxy.idle-session-eviction')
 
   /** Serialize image admission with model selection for one agent. */
   function serializeImageAdmission<T>(agent: Agent, operation: () => Promise<T>): Promise<T> {
@@ -1224,6 +1321,7 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
     agentOptions,
     setup: async ({ meta, events }) =>
       (await composeAgent(resolveSessionPreset({ header: meta, events }))).setup,
+    ownHandle: (handle) => { ownAgentHandle(handle) },
   })
 
   /** Send one transient frame to every connected mux consumer. */
@@ -1615,11 +1713,11 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
           // session's history was produced under that composition, and
           // rebuilding it differently would replay tool calls the model can no
           // longer make.
-          return (await ctx.agents.resume({
+          return ownAgentHandle(await ctx.agents.resume({
             resumeSessionId: sessionId,
             agentOptions: agentOptions(),
             setup: (await composeAgent(storedPreset)).setup,
-          })).agent
+          }))
         }
 
         try {
@@ -1628,7 +1726,7 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
           throw new Error(`failed to ensure project directory "${cwd}": ${String(error)}`, { cause: error })
         }
         const composition = await composeAgent(presetId)
-        return (await ctx.agents.create({
+        return ownAgentHandle(await ctx.agents.create({
           sessionId,
           agentOptions: agentOptions(),
           meta: {
@@ -1636,7 +1734,7 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
             ...composition.agentPreset === undefined ? {} : { agentPreset: composition.agentPreset },
           },
           setup: composition.setup,
-        })).agent
+        }))
       })().catch((error: unknown) => {
         // Another Host entry path may have published the same identity while
         // this operation crossed an asynchronous persistence/filesystem step.
@@ -3347,6 +3445,8 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
     events: {
       mux(_request, signal) {
         const queue = new FrameQueue<RpcRequest<MuxFrame>>()
+        for (const timer of idleEvictionTimers.values()) clearTimeout(timer)
+        idleEvictionTimers.clear()
         muxQueues.add(queue)
         for (const session of ctx.sessions.list()) {
           subscribeSession(queue, session)
@@ -3446,6 +3546,9 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
         return queue.iterate(signal, () => {
           muxQueues.delete(queue)
           for (const dispose of disposers) dispose()
+          if (muxQueues.size === 0) {
+            for (const handle of ownedAgentHandles.values()) scheduleIdleEviction(handle.agent)
+          }
         })
       },
 
@@ -3473,6 +3576,7 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
             }))
           }),
           ctx.on('session/disposed', (session: Session) => {
+            if (residentEvictions.has(session)) return
             queue.push(frame({ type: 'host/session-removed', sessionId: session.id }))
           }),
           ctx.on('agent/status', ({ agent, status }: { agent: Agent; status: AgentStatus }) => {
