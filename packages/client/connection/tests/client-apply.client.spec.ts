@@ -253,6 +253,34 @@ describe('connection client apply', () => {
     fetch.mockRestore()
   })
 
+  it('closes silent or lagged WebSocket downlinks so the controller can reconnect', async () => {
+    ;(globalThis as Win).location = {
+      hostname: 'localhost', search: '', origin: 'http://localhost:3080',
+    }
+    ;(globalThis as WebSocketGlobal).WebSocket = FakeWebSocket as unknown as typeof WebSocket
+
+    const lagged = new WebApiClient(undefined, { heartbeatTimeoutMs: 100, heartbeatMaxLagMs: 10 })
+    const laggedIterator = lagged.events.mux({}, new AbortController().signal)[Symbol.asyncIterator]()
+    const laggedEnd = laggedIterator.next()
+    await vi.waitFor(() => { expect(sockets[0]?.readyState).toBe(FakeWebSocket.OPEN) })
+    sockets[0]!.receive(JSON.stringify({
+      type: 'server-request', rpcId: 'heartbeat-fresh', method: 'stream/heartbeat',
+      payload: { type: 'stream/heartbeat', sentAt: Date.now() },
+    }))
+    expect(sockets[0]?.readyState).toBe(FakeWebSocket.OPEN)
+    sockets[0]!.receive(JSON.stringify({
+      type: 'server-request', rpcId: 'heartbeat-lagged', method: 'stream/heartbeat',
+      payload: { type: 'stream/heartbeat', sentAt: Date.now() - 100 },
+    }))
+    await expect(laggedEnd).resolves.toMatchObject({ done: true })
+
+    const silent = new WebApiClient(undefined, { heartbeatTimeoutMs: 20, heartbeatMaxLagMs: 10 })
+    const silentIterator = silent.events.host({}, new AbortController().signal)[Symbol.asyncIterator]()
+    const silentEnd = silentIterator.next()
+    await expect(silentEnd).resolves.toMatchObject({ done: true })
+    expect(sockets[1]?.readyState).toBe(FakeWebSocket.CLOSED)
+  })
+
   it('maps an HTTPS page origin to a secure WebSocket URL', async () => {
     ;(globalThis as Win).location = {
       hostname: 'harness.example', search: '', origin: 'https://harness.example',

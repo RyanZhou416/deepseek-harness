@@ -30,6 +30,9 @@ export type {
 export {
   RpcId,
   SESSION_SEARCH_RESULT_LIMIT,
+  STREAM_HEARTBEAT_INTERVAL_MS,
+  STREAM_HEARTBEAT_MAX_LAG_MS,
+  STREAM_HEARTBEAT_TIMEOUT_MS,
   transportError,
 } from '@deepseek-ai/dsh-host-apiproxy/api'
 export { AbstractApiClient } from '@deepseek-ai/dsh-host-apiproxy/client'

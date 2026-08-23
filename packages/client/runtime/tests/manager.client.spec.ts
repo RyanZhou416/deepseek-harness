@@ -833,6 +833,8 @@ describe('remaining branches', () => {
     const manager = new SessionManager(api, fakeRemote())
     manager.handleMuxEnvelope({ rpcId: 'e' as never, payload: { type: 'stream/error', error: { code: 'internal', message: 'x', details: {} } } })
     manager.handleHostEnvelope({ rpcId: 'e2' as never, payload: { type: 'stream/error', error: { code: 'internal', message: 'x', details: {} } } })
+    manager.handleMuxEnvelope({ rpcId: 'hb1' as never, payload: { type: 'stream/heartbeat', sentAt: 1 } })
+    manager.handleHostEnvelope({ rpcId: 'hb2' as never, payload: { type: 'stream/heartbeat', sentAt: 1 } })
     manager.handleHostEnvelope({ rpcId: 'e3' as never, payload: { type: 'future/host-frame' } as never })
     const session = manager.get(S1)
     manager.handleMuxEnvelope({ rpcId: 'q1' as never, payload: { type: 'question/requested', sessionId: S1, questions: [] } })

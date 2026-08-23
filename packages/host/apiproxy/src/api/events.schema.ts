@@ -41,6 +41,7 @@ const messageSchema = z.object({
 
 /** MuxFrame union (payload slot of a mux-stream ServerRequest). */
 export const muxFrameSchema = z.discriminatedUnion('type', [
+  z.object({ type: z.literal('stream/heartbeat'), sentAt: z.number().int().nonnegative() }),
   z.object({ type: z.literal('session/event'), sessionId: sessionIdSchema, event: sessionEventSchema, view: toolEventViewSchema.optional() }),
   z.object({ type: z.literal('session/subscribed'), sessionId: sessionIdSchema, lastSeq: z.number().int() }),
   z.object({ type: z.literal('approval/requested'), sessionId: sessionIdSchema, approvalId: approvalRequestIdSchema, toolName: z.string(), callId: z.string().optional(), reason: z.string().optional() }),
@@ -68,6 +69,7 @@ export const muxFrameSchema = z.discriminatedUnion('type', [
 
 /** HostFrame union (payload slot of a host-stream ServerRequest). */
 export const hostFrameSchema = z.discriminatedUnion('type', [
+  z.object({ type: z.literal('stream/heartbeat'), sentAt: z.number().int().nonnegative() }),
   z.object({
     type: z.literal('host/session-added'),
     sessionId: sessionIdSchema,

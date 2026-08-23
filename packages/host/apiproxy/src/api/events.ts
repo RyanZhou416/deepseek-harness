@@ -17,6 +17,19 @@ import type { RpcError, RpcId, RpcRequest } from './rpc.ts'
 import type { JobView } from './jobs.ts'
 import type { WorkspaceView } from './workspace.ts'
 
+/** Transport keepalive cadence. Heartbeats ride the same queue as business frames. */
+export const STREAM_HEARTBEAT_INTERVAL_MS = 5_000
+/** Missing-heartbeat bound before a browser tears down and reconnects the stream. */
+export const STREAM_HEARTBEAT_TIMEOUT_MS = 20_000
+/** Maximum accepted queueing delay for one received heartbeat. */
+export const STREAM_HEARTBEAT_MAX_LAG_MS = 10_000
+
+/** Transient transport liveness marker; never persisted in a Session log. */
+export interface StreamHeartbeatFrame {
+  type: 'stream/heartbeat'
+  sentAt: number
+}
+
 // Client-side consumers take the render-intent vocabulary from the contract;
 // dsh-tools remains its owner.
 export type { ToolCallView, ToolResultView } from '@deepseek-ai/dsh-tools/presentation'
@@ -67,6 +80,7 @@ export interface EventsApi {
  * approval/question frames (requested = answerable server-request, the rest are pure pushes).
  */
 export type MuxFrame =
+  | StreamHeartbeatFrame
   | { type: 'session/event'; sessionId: SessionId; event: SessionEvent; view?: ToolEventView }
   | { type: 'session/subscribed'; sessionId: SessionId; lastSeq: number }
   | { type: 'approval/requested'; sessionId: SessionId; approvalId: ApprovalRequestId; toolName: string; callId?: CallId; reason?: string }
@@ -125,6 +139,7 @@ export type MuxFrame =
  * workspace-changed — `workspace.list` re-baselines it on reconnect).
  */
 export type HostFrame =
+  | StreamHeartbeatFrame
   | {
     type: 'host/session-added'
     sessionId: SessionId

@@ -43,6 +43,7 @@ import type {
   QueuedInboxItem, SessionSummary, SettingsNamespaceView, SubagentAddress, JobView, ToolEventView,
   WorkspaceId, WorkspaceView,
 } from './api/index.ts'
+import { STREAM_HEARTBEAT_INTERVAL_MS } from './api/events.ts'
 import {
   DEFAULT_SESSION_LOG_COMPRESSION_LEVEL,
   flushLiveSessionLog,
@@ -3445,6 +3446,10 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
     events: {
       mux(_request, signal) {
         const queue = new FrameQueue<RpcRequest<MuxFrame>>()
+        const heartbeat = setInterval(() => {
+          queue.push(frame({ type: 'stream/heartbeat', sentAt: Date.now() }))
+        }, STREAM_HEARTBEAT_INTERVAL_MS)
+        heartbeat.unref()
         for (const timer of idleEvictionTimers.values()) clearTimeout(timer)
         idleEvictionTimers.clear()
         muxQueues.add(queue)
@@ -3490,6 +3495,7 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
         // opened mid-turn) backscans the session's in-memory events instead.
         const openCalls = new Map<SessionId, Map<string, { name: string; args: unknown }>>()
         const disposers = [
+          () => { clearInterval(heartbeat) },
           ctx.on('session/event', (session: Session, event: SessionEvent) => {
             if (event.type === 'tool/call') {
               const data = event.data as ToolCallData
@@ -3554,6 +3560,10 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
 
       host(_request, signal) {
         const queue = new FrameQueue<RpcRequest<HostFrame>>()
+        const heartbeat = setInterval(() => {
+          queue.push(frame({ type: 'stream/heartbeat', sentAt: Date.now() }))
+        }, STREAM_HEARTBEAT_INTERVAL_MS)
+        heartbeat.unref()
         const committedWorkspaces = ctx.workspaceRegistry.list()
         const committedWorkspaceIds = new Set(
           committedWorkspaces.map(workspace => String(workspace.id)),
@@ -3564,6 +3574,7 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
         // reconnecting clients, so only later changes need frames.
         let archivedSessionIds = ctx.workspaceRegistry.archivedSessionIds
         const disposers = [
+          () => { clearInterval(heartbeat) },
           ctx.on('session/created', (session: Session) => {
             queue.push(frame({
               type: 'host/session-added',

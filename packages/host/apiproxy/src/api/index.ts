@@ -56,7 +56,12 @@ export type { JobView } from './jobs.ts'
 export type { WorkspaceApi, WorkspaceId, WorkspaceView } from './workspace.ts'
 export type { SkillsApi, SkillEntry } from './skills.ts'
 export type { AgentPresetsApi, AgentPresetEntry } from './agent-presets.ts'
-export type { EventsApi, MuxFrame, HostFrame, QueuedInboxItem, ToolCallView, ToolEventView, ToolResultView } from './events.ts'
+export type { EventsApi, MuxFrame, HostFrame, QueuedInboxItem, StreamHeartbeatFrame, ToolCallView, ToolEventView, ToolResultView } from './events.ts'
+export {
+  STREAM_HEARTBEAT_INTERVAL_MS,
+  STREAM_HEARTBEAT_MAX_LAG_MS,
+  STREAM_HEARTBEAT_TIMEOUT_MS,
+} from './events.ts'
 export type { GoalsApi, GoalId, GoalRef } from './goals.ts'
 export type { SettingsApi, SettingsNamespaceView, SettingsPathOpView, SettingsSecretView } from './settings.ts'
 export type { CredentialsApi, CredentialView } from './credentials.ts'

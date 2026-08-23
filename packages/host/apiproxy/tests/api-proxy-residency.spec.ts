@@ -6,6 +6,7 @@ import { SessionPersistenceRevision } from '@deepseek-ai/dsh-session-persistence
 import TypertRegistry from '@deepseek-ai/dsh-typert-registry'
 import UserQuestionService from '@deepseek-ai/dsh-user-questions'
 import { createApiProxy } from '@deepseek-ai/dsh-host-apiproxy'
+import { STREAM_HEARTBEAT_INTERVAL_MS } from '@deepseek-ai/dsh-host-apiproxy/api'
 import { RpcId, type RpcRequest } from '@deepseek-ai/dsh-host-apiproxy/api/rpc'
 
 const sessionId = SessionId('resident-session')
@@ -88,6 +89,36 @@ async function resumeThroughLookup(ctx: Context): Promise<Agent> {
 }
 
 describe('Host-owned idle session residency', () => {
+  it('emits transient heartbeats on both event queues and stops them on abort', async () => {
+    vi.useFakeTimers()
+    try {
+      const { ctx, api } = await harness(1_000)
+      const muxAbort = new AbortController()
+      const hostAbort = new AbortController()
+      const mux = api.events.mux(request({}), muxAbort.signal)[Symbol.asyncIterator]()
+      const host = api.events.host(request({}), hostAbort.signal)[Symbol.asyncIterator]()
+      const muxBeat = mux.next()
+      const hostBeat = host.next()
+
+      await vi.advanceTimersByTimeAsync(STREAM_HEARTBEAT_INTERVAL_MS)
+      const expectedSentAt = Date.now()
+      await expect(muxBeat).resolves.toMatchObject({
+        value: { payload: { type: 'stream/heartbeat', sentAt: expectedSentAt } },
+      })
+      await expect(hostBeat).resolves.toMatchObject({
+        value: { payload: { type: 'stream/heartbeat', sentAt: expectedSentAt } },
+      })
+
+      muxAbort.abort()
+      hostAbort.abort()
+      await expect(mux.next()).resolves.toMatchObject({ done: true })
+      await expect(host.next()).resolves.toMatchObject({ done: true })
+      await ctx.fiber.dispose()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('flushes and unloads an unsubscribed durable idle session', async () => {
     const { ctx, disposeHandle } = await harness(10)
     const agent = await resumeThroughLookup(ctx)
