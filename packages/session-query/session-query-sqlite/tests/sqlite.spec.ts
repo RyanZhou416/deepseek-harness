@@ -414,7 +414,7 @@ describe('SQLite session search', () => {
     expect(append).toHaveBeenCalledOnce()
   })
 
-  it('reuses one exact-generation result without exposing its cached copy to caller mutation', async () => {
+  it('reuses bounded exact-generation pages without exposing cached copies to caller mutation', async () => {
     const ctx = await liveContext()
     const session = ctx.sessions.create(SessionId('one-entry-search-cache'), { seed: messageEvents('common marker') })
     const engine = ctx.sessionQuery as SqliteSessionQueryEngine
@@ -438,6 +438,32 @@ describe('SQLite session search', () => {
       { surfaceOp: 'append' },
     )
     await ctx.sessionQuery.searchSessions({ query: 'common marker' })
+    expect(query).toHaveBeenCalledTimes(2)
+  })
+
+  it('retains adjacent cursor pages within the existing maxLimit item budget', async () => {
+    const ctx = await liveContext({ path: ':memory:', defaultLimit: 1, maxLimit: 4 })
+    ctx.sessions.create(SessionId('cache-page-a'), { seed: messageEvents('common marker') })
+    ctx.sessions.create(SessionId('cache-page-b'), { seed: messageEvents('common marker') })
+    ctx.sessions.create(SessionId('cache-page-c'), { seed: messageEvents('common marker') })
+    const engine = ctx.sessionQuery as SqliteSessionQueryEngine
+    const queryProbe = engine as unknown as {
+      _querySessions: (...args: unknown[]) => unknown[]
+    }
+    const query = vi.spyOn(queryProbe, '_querySessions')
+
+    const first = await ctx.sessionQuery.searchSessions({ query: 'common marker', limit: 1 })
+    expect(first.nextCursor).toBeDefined()
+    const cursor = first.nextCursor
+    if (cursor === undefined) throw new Error('first cached page did not provide a continuation cursor')
+    const second = await ctx.sessionQuery.searchSessions({
+      query: 'common marker',
+      limit: 1,
+      cursor,
+    })
+    expect(second.items).toHaveLength(1)
+    await ctx.sessionQuery.searchSessions({ query: 'common marker', limit: 1 })
+
     expect(query).toHaveBeenCalledTimes(2)
   })
 

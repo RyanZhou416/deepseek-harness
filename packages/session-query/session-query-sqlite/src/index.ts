@@ -140,8 +140,41 @@ interface ObservedSession {
 }
 
 interface CachedSearchPage<T> {
-  readonly key: string
   readonly value: T
+  readonly weight: number
+}
+
+class BoundedSearchPageCache<T> {
+  private readonly pages = new Map<string, CachedSearchPage<T>>()
+  private weight = 0
+
+  constructor(private readonly maxWeight: number) {}
+
+  get(key: string): T | undefined {
+    const cached = this.pages.get(key)
+    if (cached === undefined) return undefined
+    this.pages.delete(key)
+    this.pages.set(key, cached)
+    return cached.value
+  }
+
+  set(key: string, value: T, weight: number): void {
+    const existing = this.pages.get(key)
+    if (existing !== undefined) {
+      this.weight -= existing.weight
+      this.pages.delete(key)
+    }
+    const boundedWeight = Math.max(1, weight)
+    this.pages.set(key, { value, weight: boundedWeight })
+    this.weight += boundedWeight
+    while (this.weight > this.maxWeight && this.pages.size > 1) {
+      const oldestKey = this.pages.keys().next().value
+      if (oldestKey === undefined) break
+      const oldest = this.pages.get(oldestKey)
+      this.pages.delete(oldestKey)
+      this.weight -= oldest?.weight ?? 0
+    }
+  }
 }
 
 interface ObservedPersistedSession {
@@ -244,9 +277,9 @@ export class SqliteSessionQueryEngine extends SessionQueryEngine {
   private _tail: Promise<void> = Promise.resolve()
   private _closed = false
   private _closePromise: Promise<void> | undefined
-  /** One exact-generation result per scope prevents duplicate scans without retaining an unbounded query cache. */
-  private _sessionSearchCache: CachedSearchPage<SessionSearchPage<SessionSearchHit>> | undefined
-  private _eventSearchCache: CachedSearchPage<SessionEventSearchPage> | undefined
+  /** Exact-generation pages retain one bounded result budget per scope. */
+  private readonly _sessionSearchCache: BoundedSearchPageCache<SessionSearchPage<SessionSearchHit>>
+  private readonly _eventSearchCache: BoundedSearchPageCache<SessionEventSearchPage>
   private readonly _optionalPersistenceFiber: Fiber
 
   constructor(ctx: Context, config: Config) {
@@ -254,6 +287,8 @@ export class SqliteSessionQueryEngine extends SessionQueryEngine {
     // register `ctx.sessionQuery`; keep that same validated value afterward.
     super(ctx, config = resolveConfig(config))
     this.config = config as ResolvedConfig
+    this._sessionSearchCache = new BoundedSearchPageCache(this.config.maxLimit)
+    this._eventSearchCache = new BoundedSearchPageCache(this.config.maxLimit)
     this._optionalPersistenceFiber = ctx.inject(['sessionPersistence'], (childCtx: Context) => {
       const service = childCtx.sessionPersistence
       const binding = { identity: Symbol(), service }
@@ -292,9 +327,8 @@ export class SqliteSessionQueryEngine extends SessionQueryEngine {
         ? 0
         : decodeCursor(normalized.cursor, this._instance, 'sessions', fingerprint, generation)
       const cacheKey = `${generation}\0${fingerprint}\0${normalized.cursor ?? ''}`
-      if (this._sessionSearchCache?.key === cacheKey) {
-        return cloneSessionSearchPage(this._sessionSearchCache.value)
-      }
+      const cached = this._sessionSearchCache.get(cacheKey)
+      if (cached !== undefined) return cloneSessionSearchPage(cached)
       const rows = this._querySessions(normalized, offset, persistenceBinding)
       const result = page(rows, normalized.limit, row => this._sessionHit(row), cursorOffset => encodeCursor({
         version: 1,
@@ -304,7 +338,7 @@ export class SqliteSessionQueryEngine extends SessionQueryEngine {
         generation,
         offset: cursorOffset,
       }), offset)
-      this._sessionSearchCache = { key: cacheKey, value: cloneSessionSearchPage(result) }
+      this._sessionSearchCache.set(cacheKey, cloneSessionSearchPage(result), result.items.length)
       return result
     })
   }
@@ -326,9 +360,8 @@ export class SqliteSessionQueryEngine extends SessionQueryEngine {
         ? 0
         : decodeCursor(normalized.cursor, this._instance, 'events', fingerprint, target.generation)
       const cacheKey = `${target.generation}\0${fingerprint}\0${normalized.cursor ?? ''}`
-      if (this._eventSearchCache?.key === cacheKey) {
-        return cloneEventSearchPage(this._eventSearchCache.value)
-      }
+      const cached = this._eventSearchCache.get(cacheKey)
+      if (cached !== undefined) return cloneEventSearchPage(cached)
       const rows = this._queryEvents(normalized, offset, persistenceBinding)
       const result: SessionEventSearchPage = {
         session: target.header,
@@ -341,7 +374,7 @@ export class SqliteSessionQueryEngine extends SessionQueryEngine {
           offset: cursorOffset,
         }), offset),
       }
-      this._eventSearchCache = { key: cacheKey, value: cloneEventSearchPage(result) }
+      this._eventSearchCache.set(cacheKey, cloneEventSearchPage(result), result.items.length)
       return result
     })
   }

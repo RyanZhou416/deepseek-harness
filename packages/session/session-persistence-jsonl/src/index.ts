@@ -96,6 +96,11 @@ interface FileRevisionIdentity {
   readonly ctimeNs: bigint
 }
 
+interface CachedHeader {
+  readonly revision: PersistenceRevision
+  readonly header: SessionHeader
+}
+
 /** Build the source-qualified revision shared by full and lightweight reads. */
 function fileRevision(identity: FileRevisionIdentity): PersistenceRevision {
   return SessionPersistenceRevision([
@@ -144,6 +149,8 @@ export class JsonlSessionPersistence extends SessionPersistence implements Persi
   private compression: JsonlCompression
   private coordinator: PersistenceCoordinator<JsonlTornMarker>
   private rootEncodingCheck: Promise<void> | undefined
+  /** Validated immutable headers keyed by the exact stat-derived log revision. */
+  private readonly listedHeaders = new Map<string, CachedHeader>()
 
   constructor(ctx: Context, public config: Config) {
     super(ctx)
@@ -475,6 +482,7 @@ export class JsonlSessionPersistence extends SessionPersistence implements Persi
     signal?.throwIfAborted()
     const artifacts: Array<{ header: SessionHeader; path: string }> = []
     const ids = new Set<SessionId>()
+    const listedPaths = new Set<string>()
     for (const project of await this.listProjectDirs(signal)) {
       signal?.throwIfAborted()
       for (const dir of await this.listSessionDirs(project, signal)) {
@@ -487,22 +495,38 @@ export class JsonlSessionPersistence extends SessionPersistence implements Persi
         const pathExists = await this.exists(path)
         signal?.throwIfAborted()
         if (!pathExists) continue
-        // Read only headers so listing scales with session count, not log size.
-        const first = this.compression === 'zstd'
-          ? await this.readFirstZstdLine(path, signal)
-          : await this.readFirstLine(path, signal)
+        const identity = await stat(path, { bigint: true })
         signal?.throwIfAborted()
-        if (first === undefined) continue // empty/half-written file
-        const meta = parseHeaderMeta(first)
-        if (meta === undefined) continue // not a session header
-        await this.assertStoredIdentity(path, meta, undefined, signal)
-        signal?.throwIfAborted()
+        const revision = fileRevision(identity)
+        const cached = this.listedHeaders.get(path)
+        let meta: SessionHeader
+        if (cached?.revision === revision) {
+          meta = cached.header
+        } else {
+          // Read only changed headers so repeated listing scales with cheap stat
+          // observations rather than one Zstandard decode per stored session.
+          const first = this.compression === 'zstd'
+            ? await this.readFirstZstdLine(path, signal)
+            : await this.readFirstLine(path, signal)
+          signal?.throwIfAborted()
+          if (first === undefined) continue // empty/half-written file
+          const parsed = parseHeaderMeta(first)
+          if (parsed === undefined) continue // not a session header
+          await this.assertStoredIdentity(path, parsed, undefined, signal)
+          signal?.throwIfAborted()
+          meta = parsed
+          this.listedHeaders.set(path, { revision, header: meta })
+        }
+        listedPaths.add(path)
         if (ids.has(meta.id)) {
           throw new Error(`duplicate JSONL session id "${meta.id}" appears in multiple project directories`)
         }
         ids.add(meta.id)
-        artifacts.push({ header: meta, path })
+        artifacts.push({ header: { ...meta }, path })
       }
+    }
+    for (const cachedPath of this.listedHeaders.keys()) {
+      if (!listedPaths.has(cachedPath)) this.listedHeaders.delete(cachedPath)
     }
     signal?.throwIfAborted()
     return artifacts
