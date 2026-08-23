@@ -20,6 +20,7 @@ import SessionQueryEngine, {
   SessionQueryError,
   SessionSearchCursor,
   assertSessionHeadersCompatible,
+  buildAppendedSessionEventSearchDocuments,
   buildSessionEventSearchDocuments,
 } from '@deepseek-ai/dsh-session-query'
 import type {
@@ -129,6 +130,18 @@ interface ObservedSession {
   /** Materialize searchable text only when reconciliation found a changed source. */
   readonly documents: () => SessionEventSearchDocument[]
   readonly fingerprint: string
+  /** Live-only append proof and suffix projector; persisted observations omit it. */
+  readonly live?: {
+    readonly sourceIdentity: string
+    readonly eventCount: number
+    readonly replaceGeneration: number
+    readonly appendedDocuments: (fromIndex: number) => SessionEventSearchDocument[]
+  }
+}
+
+interface CachedSearchPage<T> {
+  readonly key: string
+  readonly value: T
 }
 
 interface ObservedPersistedSession {
@@ -160,6 +173,11 @@ interface IndexedLiveRow {
   persisted: number
   generation: number
 }
+
+type LiveIndexWrite =
+  | { readonly kind: 'replace'; readonly entry: ObservedSession; readonly generation: number; readonly persisted: boolean }
+  | { readonly kind: 'append'; readonly entry: ObservedSession; readonly generation: number; readonly persisted: boolean; readonly fromIndex: number }
+  | { readonly kind: 'metadata'; readonly entry: ObservedSession; readonly generation: number; readonly persisted: boolean }
 
 interface SessionHeaderRow {
   session_id: string
@@ -226,6 +244,9 @@ export class SqliteSessionQueryEngine extends SessionQueryEngine {
   private _tail: Promise<void> = Promise.resolve()
   private _closed = false
   private _closePromise: Promise<void> | undefined
+  /** One exact-generation result per scope prevents duplicate scans without retaining an unbounded query cache. */
+  private _sessionSearchCache: CachedSearchPage<SessionSearchPage<SessionSearchHit>> | undefined
+  private _eventSearchCache: CachedSearchPage<SessionEventSearchPage> | undefined
   private readonly _optionalPersistenceFiber: Fiber
 
   constructor(ctx: Context, config: Config) {
@@ -270,8 +291,12 @@ export class SqliteSessionQueryEngine extends SessionQueryEngine {
       const offset = normalized.cursor === undefined
         ? 0
         : decodeCursor(normalized.cursor, this._instance, 'sessions', fingerprint, generation)
+      const cacheKey = `${generation}\0${fingerprint}\0${normalized.cursor ?? ''}`
+      if (this._sessionSearchCache?.key === cacheKey) {
+        return cloneSessionSearchPage(this._sessionSearchCache.value)
+      }
       const rows = this._querySessions(normalized, offset, persistenceBinding)
-      return page(rows, normalized.limit, row => this._sessionHit(row), cursorOffset => encodeCursor({
+      const result = page(rows, normalized.limit, row => this._sessionHit(row), cursorOffset => encodeCursor({
         version: 1,
         instance: this._instance,
         scope: 'sessions',
@@ -279,6 +304,8 @@ export class SqliteSessionQueryEngine extends SessionQueryEngine {
         generation,
         offset: cursorOffset,
       }), offset)
+      this._sessionSearchCache = { key: cacheKey, value: cloneSessionSearchPage(result) }
+      return result
     })
   }
 
@@ -298,8 +325,12 @@ export class SqliteSessionQueryEngine extends SessionQueryEngine {
       const offset = normalized.cursor === undefined
         ? 0
         : decodeCursor(normalized.cursor, this._instance, 'events', fingerprint, target.generation)
+      const cacheKey = `${target.generation}\0${fingerprint}\0${normalized.cursor ?? ''}`
+      if (this._eventSearchCache?.key === cacheKey) {
+        return cloneEventSearchPage(this._eventSearchCache.value)
+      }
       const rows = this._queryEvents(normalized, offset, persistenceBinding)
-      return {
+      const result: SessionEventSearchPage = {
         session: target.header,
         ...page(rows, normalized.limit, row => this._eventHit(row), cursorOffset => encodeCursor({
           version: 1,
@@ -310,6 +341,8 @@ export class SqliteSessionQueryEngine extends SessionQueryEngine {
           offset: cursorOffset,
         }), offset),
       }
+      this._eventSearchCache = { key: cacheKey, value: cloneEventSearchPage(result) }
+      return result
     })
   }
 
@@ -428,12 +461,28 @@ export class SqliteSessionQueryEngine extends SessionQueryEngine {
     let nextMainGeneration = this._mainGeneration()
     let nextLocalGeneration = this._localGeneration
     if (persistentChanges.length > 0 || persistentDeletes.length > 0) nextMainGeneration += 1
-    const liveReplacements = liveChanges.map((entry) => {
+    const liveWrites: LiveIndexWrite[] = liveChanges.map((entry) => {
       nextLocalGeneration = Math.max(nextLocalGeneration, nextMainGeneration) + 1
+      const indexed = liveById.get(entry.header.id)
+      const persisted = observation.persisted.has(entry.header.id)
+      if (indexed?.fingerprint === entry.fingerprint) {
+        return { kind: 'metadata', entry, generation: nextLocalGeneration, persisted }
+      }
+      const fromIndex = appendedDocumentBoundary(indexed, entry)
+      if (fromIndex !== undefined) {
+        return {
+          kind: 'append',
+          entry,
+          generation: nextLocalGeneration,
+          persisted,
+          fromIndex,
+        }
+      }
       return {
+        kind: 'replace',
         entry,
         generation: nextLocalGeneration,
-        persisted: observation.persisted.has(entry.header.id),
+        persisted,
       }
     })
 
@@ -452,8 +501,14 @@ export class SqliteSessionQueryEngine extends SessionQueryEngine {
           db.prepare('UPDATE search_state SET global_generation = ? WHERE singleton = 1').run(nextMainGeneration)
         }
         for (const row of liveDeletes) this._deleteSession('live', row.id as SessionId)
-        for (const { entry, generation, persisted } of liveReplacements) {
-          this._replaceLiveSession(entry, generation, persisted)
+        for (const write of liveWrites) {
+          if (write.kind === 'append') {
+            this._appendLiveSession(write.entry, write.fromIndex, write.generation, write.persisted)
+          } else if (write.kind === 'metadata') {
+            this._updateLiveSession(write.entry, write.generation, write.persisted)
+          } else {
+            this._replaceLiveSession(write.entry, write.generation, write.persisted)
+          }
         }
         db.exec('COMMIT')
       } catch (error: unknown) {
@@ -613,11 +668,39 @@ export class SqliteSessionQueryEngine extends SessionQueryEngine {
       persisted ? 1 : 0,
       generation,
     )
-    const insert = db.prepare(`
+    this._insertLiveDocuments(entry.documents())
+  }
+
+  /** Extend one unchanged live lifecycle whose canonical surface saw no replacement. */
+  private _appendLiveSession(
+    entry: ObservedSession,
+    fromIndex: number,
+    generation: number,
+    persisted: boolean,
+  ): void {
+    const live = entry.live
+    /* v8 ignore next -- appendedDocumentBoundary admits only live observations. */
+    if (live === undefined) throw new Error(`missing live append proof for session "${entry.header.id}"`)
+    this._updateLiveSession(entry, generation, persisted)
+    this._insertLiveDocuments(live.appendedDocuments(fromIndex))
+  }
+
+  /** Refresh one live row without rewriting its unchanged FTS documents. */
+  private _updateLiveSession(entry: ObservedSession, generation: number, persisted: boolean): void {
+    this._requireDb().prepare(`
+      UPDATE temp.live_sessions
+      SET fingerprint = ?, persisted = ?, generation = ?
+      WHERE id = ?
+    `).run(entry.fingerprint, persisted ? 1 : 0, generation, entry.header.id)
+  }
+
+  /** Insert a detached document batch into the live FTS table. */
+  private _insertLiveDocuments(documents: readonly SessionEventSearchDocument[]): void {
+    const insert = this._requireDb().prepare(`
       INSERT INTO temp.live_docs (text, session_id, seq, type, time, surface, codepoint_length)
       VALUES (?, ?, ?, ?, ?, ?, ?)
     `)
-    for (const document of entry.documents()) {
+    for (const document of documents) {
       const text = sanitizeFtsText(document.text)
       insert.run(
         text,
@@ -856,11 +939,21 @@ function selectedDocumentsParams(query: string, persistenceVisible: boolean): Ar
 
 function observeLive(session: Session): ObservedSession {
   const events = session.events
-  return observeSession(
-    session.header,
-    events,
-    `${liveSourceIdentity(session)}:${events.length}`,
-  )
+  const sourceIdentity = liveSourceIdentity(session)
+  const replaceGeneration = session.surface.replaceGeneration
+  return {
+    ...observeSession(
+      session.header,
+      events,
+      `${sourceIdentity}:${events.length}:${replaceGeneration}`,
+    ),
+    live: {
+      sourceIdentity,
+      eventCount: events.length,
+      replaceGeneration,
+      appendedDocuments: fromIndex => buildAppendedSessionEventSearchDocuments(session.id, events, fromIndex),
+    },
+  }
 }
 
 function observeSession(
@@ -889,6 +982,46 @@ function liveSourceIdentity(session: Session): string {
     liveSourceIdentities.set(session, identity)
   }
   return identity
+}
+
+interface ParsedLiveFingerprint {
+  readonly sourceIdentity: string
+  readonly eventCount: number
+  readonly replaceGeneration: number
+}
+
+/** Parse only fingerprints minted by the current append-aware implementation. */
+function parseLiveFingerprint(value: string): ParsedLiveFingerprint | undefined {
+  const match = /^(.*):(\d+):(\d+)$/.exec(value)
+  if (match === null) return
+  const eventCount = Number(match[2])
+  const replaceGeneration = Number(match[3])
+  if (!Number.isSafeInteger(eventCount) || !Number.isSafeInteger(replaceGeneration)) return
+  return {
+    // oxlint-disable-next-line typescript/no-non-null-assertion -- a successful match owns all capture groups.
+    sourceIdentity: match[1]!,
+    eventCount,
+    replaceGeneration,
+  }
+}
+
+/**
+ * Return the first suffix index only when canonical live-surface state proves
+ * all prior document classifications remain valid.
+ */
+function appendedDocumentBoundary(
+  indexed: IndexedLiveRow | undefined,
+  entry: ObservedSession,
+): number | undefined {
+  if (indexed === undefined || entry.live === undefined) return
+  const previous = parseLiveFingerprint(indexed.fingerprint)
+  if (
+    previous === undefined
+    || previous.sourceIdentity !== entry.live.sourceIdentity
+    || previous.replaceGeneration !== entry.live.replaceGeneration
+    || previous.eventCount >= entry.live.eventCount
+  ) return
+  return previous.eventCount
 }
 
 function materializePersistenceSnapshots(
@@ -971,6 +1104,29 @@ function page<Row, Item>(
   return {
     items: rows.slice(0, limit).map(convert),
     ...hasMore ? { nextCursor: nextCursor(offset + limit) } : {},
+  }
+}
+
+/** Clone one bounded result page so a caller cannot mutate the single-entry cache. */
+function cloneSessionSearchPage(
+  source: SessionSearchPage<SessionSearchHit>,
+): SessionSearchPage<SessionSearchHit> {
+  return {
+    items: source.items.map(item => ({
+      ...item,
+      header: { ...item.header },
+      bestMatch: { ...item.bestMatch },
+    })),
+    ...source.nextCursor === undefined ? {} : { nextCursor: source.nextCursor },
+  }
+}
+
+/** Clone one bounded event page while sharing only immutable branded scalars. */
+function cloneEventSearchPage(source: SessionEventSearchPage): SessionEventSearchPage {
+  return {
+    session: { ...source.session },
+    items: source.items.map(item => ({ ...item })),
+    ...source.nextCursor === undefined ? {} : { nextCursor: source.nextCursor },
   }
 }
 

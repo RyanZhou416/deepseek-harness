@@ -357,6 +357,90 @@ describe('SQLite session search', () => {
     }
   })
 
+  it('appends an unchanged live surface tail and falls back to replacement after a surface rewrite', async () => {
+    const ctx = await liveContext()
+    const session = ctx.sessions.create(SessionId('incremental-live-index'))
+    const first = session.append(
+      'user/message',
+      createUserMessage({
+        content: [{ type: 'text', text: 'first marker' }], source: { kind: 'user' },
+      }),
+      { surfaceOp: 'append' },
+    )
+    session.append(
+      'user/message',
+      createUserMessage({
+        content: [{ type: 'text', text: 'second marker' }], source: { kind: 'user' },
+      }),
+      { surfaceOp: 'append' },
+    )
+    const engine = ctx.sessionQuery as SqliteSessionQueryEngine
+    const writeProbe = engine as unknown as {
+      _replaceLiveSession: (...args: unknown[]) => void
+      _appendLiveSession: (...args: unknown[]) => void
+    }
+    const replace = vi.spyOn(writeProbe, '_replaceLiveSession')
+    const append = vi.spyOn(writeProbe, '_appendLiveSession')
+
+    await ctx.sessionQuery.searchSessions({ query: 'marker' })
+    expect(replace).toHaveBeenCalledOnce()
+    expect(append).not.toHaveBeenCalled()
+
+    session.append(
+      'user/message',
+      createUserMessage({
+        content: [{ type: 'text', text: 'third marker' }], source: { kind: 'user' },
+      }),
+      { surfaceOp: 'append' },
+    )
+    await expect(ctx.sessionQuery.searchEvents({ sessionId: session.id, query: 'third marker' }))
+      .resolves.toMatchObject({ items: [{ seq: 2, surface: 'current' }] })
+    expect(append).toHaveBeenCalledOnce()
+    expect(replace).toHaveBeenCalledOnce()
+
+    session.append(
+      'user/message',
+      createUserMessage({
+        content: [{ type: 'text', text: 'replacement marker' }], source: { kind: 'plugin', plugin: 'test' },
+      }),
+      { surfaceOp: { op: 'replace', start: first.seq, end: first.seq }, sourceEventSeqs: [first.seq] },
+    )
+    await expect(ctx.sessionQuery.searchEvents({
+      sessionId: session.id,
+      query: 'replacement marker',
+      filters: [{ kind: 'surface', values: ['current'] }],
+    })).resolves.toMatchObject({ items: [{ seq: 3, surface: 'current' }] })
+    expect(replace).toHaveBeenCalledTimes(2)
+    expect(append).toHaveBeenCalledOnce()
+  })
+
+  it('reuses one exact-generation result without exposing its cached copy to caller mutation', async () => {
+    const ctx = await liveContext()
+    const session = ctx.sessions.create(SessionId('one-entry-search-cache'), { seed: messageEvents('common marker') })
+    const engine = ctx.sessionQuery as SqliteSessionQueryEngine
+    const queryProbe = engine as unknown as {
+      _querySessions: (...args: unknown[]) => unknown[]
+    }
+    const query = vi.spyOn(queryProbe, '_querySessions')
+
+    const first = await ctx.sessionQuery.searchSessions({ query: 'common marker' })
+    const callerOwnedItems = first.items as unknown[]
+    callerOwnedItems.splice(0)
+    await expect(ctx.sessionQuery.searchSessions({ query: 'common marker' }))
+      .resolves.toMatchObject({ items: [{ header: { id: session.id } }] })
+    expect(query).toHaveBeenCalledOnce()
+
+    session.append(
+      'user/message',
+      createUserMessage({
+        content: [{ type: 'text', text: 'common marker tail' }], source: { kind: 'user' },
+      }),
+      { surfaceOp: 'append' },
+    )
+    await ctx.sessionQuery.searchSessions({ query: 'common marker' })
+    expect(query).toHaveBeenCalledTimes(2)
+  })
+
   it('excludes assistant reasoning while indexing visible answer text', async () => {
     const ctx = await liveContext()
     const session = ctx.sessions.create(SessionId('reasoning'))
