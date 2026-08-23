@@ -92,8 +92,23 @@ export class TokenMeter extends Service {
 
     // Readers catch up independently, while eager observation bounds ordinary
     // read latency without creating state for sessions no consumer has read.
-    ctx.on('session/event', (session) => {
-      if (this.states.has(session)) this._sync(session)
+    ctx.on('session/event', (session, event) => {
+      const state = this.states.get(session)
+      if (state === undefined) return
+
+      // The event is published after it enters the durable log, so an active
+      // meter can fold that exact frozen value without materializing the
+      // public whole-log snapshot on every append. A listener registered
+      // earlier may already have called measure() during the same dispatch;
+      // in that case the cursor is one past this event and there is nothing to
+      // do. Any other cursor shape falls back to the replay path so restored
+      // or unexpectedly lagging state keeps the original catch-up semantics.
+      if (state.consumedEvents === event.seq) {
+        this._foldEvent(session, state, event)
+        state.consumedEvents += 1
+      } else if (state.consumedEvents !== event.seq + 1) {
+        this._sync(session)
+      }
     })
   }
 
@@ -171,9 +186,13 @@ export class TokenMeter extends Service {
       this.states.set(session, state)
     }
 
-    while (state.consumedEvents < session.events.length) {
+    // One immutable snapshot is sufficient for the complete synchronous
+    // catch-up. Re-reading the accessor for every cursor step is unnecessary
+    // even though the cached array identity is stable between appends.
+    const events = session.events
+    while (state.consumedEvents < events.length) {
       // oxlint-disable-next-line typescript/no-non-null-assertion -- contiguous session seqs index the durable log
-      const event = session.events[state.consumedEvents]!
+      const event = events[state.consumedEvents]!
       this._foldEvent(session, state, event)
       state.consumedEvents += 1
     }

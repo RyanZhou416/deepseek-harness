@@ -42,6 +42,28 @@ describe('SessionWriteBehind', () => {
     expect(controller.hasWork).toBe(false)
   })
 
+  it('borrows the exact recursively frozen live event without cloning it', async () => {
+    const seen: SessionEvent[] = []
+    const controller = new SessionWriteBehind({
+      maxDelayMs: 200,
+      write: async (events) => { seen.push(...events) },
+      reportBackgroundFailure: vi.fn(),
+    })
+    const frozen = Object.freeze({
+      ...event(0),
+      data: Object.freeze({ turn: 1 }),
+    }) as SessionEvent<'turn/start'>
+    const clone = vi.spyOn(globalThis, 'structuredClone')
+
+    controller.enqueueFrozen(frozen)
+    await controller.flush()
+
+    expect(clone).not.toHaveBeenCalled()
+    expect(seen).toEqual([frozen])
+    expect(seen[0]).toBe(frozen)
+    clone.mockRestore()
+  })
+
   it('coalesces twenty events admitted ten milliseconds apart into one 200 ms batch', async () => {
     vi.useFakeTimers()
     const batches: number[][] = []

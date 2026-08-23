@@ -334,6 +334,29 @@ describe('SQLite session search', () => {
       .resolves.toMatchObject({ items: [{ header: { ...session.header, seedLength: 1 }, live: true, persisted: false }] })
   })
 
+  it('borrows immutable live history instead of cloning every event for indexing', async () => {
+    const ctx = await liveContext()
+    const session = ctx.sessions.create(SessionId('borrow-live-index'))
+    for (let index = 0; index < 32; index += 1) {
+      session.append(
+        'user/message',
+        createUserMessage({
+          content: [{ type: 'text', text: `needle ${index}` }], source: { kind: 'user' },
+        }),
+        { surfaceOp: 'append' },
+      )
+    }
+    const clone = vi.spyOn(globalThis, 'structuredClone')
+
+    try {
+      await expect(ctx.sessionQuery.searchSessions({ query: 'needle' }))
+        .resolves.toMatchObject({ items: [{ header: { id: session.id } }] })
+      expect(clone).not.toHaveBeenCalled()
+    } finally {
+      clone.mockRestore()
+    }
+  })
+
   it('excludes assistant reasoning while indexing visible answer text', async () => {
     const ctx = await liveContext()
     const session = ctx.sessions.create(SessionId('reasoning'))

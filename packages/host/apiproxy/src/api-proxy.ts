@@ -354,6 +354,7 @@ function presetFailure(request: RpcRequest<unknown>, error: unknown): RpcRespons
 /** Simple async queue: core callbacks push, the AsyncIterable pulls; abort/return cleans up. */
 class FrameQueue<F> {
   private buffer: F[] = []
+  private head = 0
   private waiter: (() => void) | undefined
   private done = false
 
@@ -373,7 +374,21 @@ class FrameQueue<F> {
     signal.addEventListener('abort', onAbort, { once: true })
     try {
       while (true) {
-        while (this.buffer.length > 0) yield this.buffer.shift() as F
+        while (this.head < this.buffer.length) {
+          // Clear consumed slots before yielding so a paused consumer does not
+          // retain already-delivered frames. The cursor avoids Array.shift()'s
+          // repeated front removal while preserving the one-frame FIFO wire
+          // contract. Once drained, reset both fields so the backing array
+          // cannot retain a long-lived high-water mark.
+          const item = this.buffer[this.head] as F
+          this.buffer[this.head] = undefined as F
+          this.head += 1
+          yield item
+        }
+        if (this.head > 0) {
+          this.buffer = []
+          this.head = 0
+        }
         if (this.done || signal.aborted) return
         await new Promise<void>((resolve) => { this.waiter = resolve })
         this.waiter = undefined
@@ -777,7 +792,7 @@ function historyPage(
  */
 type HistorySource =
   | { readonly kind: 'attached'; readonly session: Session }
-  | { readonly kind: 'detached'; readonly header: SessionHeader; readonly events: SessionEvent[] }
+  | { readonly kind: 'detached'; readonly header: SessionHeader; readonly events: readonly SessionEvent[] }
 
 function projectionsFor(ctx: Context, session: Session): SessionProjectionsBlock | undefined {
   const registry = ctx.get('sessionProjections')
@@ -1432,7 +1447,7 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
   type SessionReadState = {
     id: SessionId
     header: SessionHeader
-    events: SessionEvent[]
+    events: readonly SessionEvent[]
   }
 
   /** Read one stable session prefix without acquiring an Agent owner. */
@@ -1442,7 +1457,9 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
       return {
         id: attached.id,
         header: attached.header,
-        events: [...attached.events],
+        // The public log snapshot is immutable and remains fixed after a
+        // later append, so borrowing it is already a stable read cut.
+        events: attached.events,
       }
     }
     const inspected = await inspectServable(sessionId)
@@ -1504,12 +1521,15 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
   function historyCutOf(
     source: HistorySource,
     includeProjections: boolean,
-  ): { events: SessionEvent[]; projections?: SessionProjectionsBlock } {
+  ): { events: readonly SessionEvent[]; projections?: SessionProjectionsBlock } {
     if (source.kind === 'detached') {
       const projections = includeProjections ? detachedProjectionsFor(ctx, source.events) : undefined
       return { events: source.events, ...projections === undefined ? {} : { projections } }
     }
-    const events = [...source.session.events]
+    // Session.events is a cached immutable point-in-time array. Reusing that
+    // snapshot avoids a second full-log array allocation for every history
+    // page while preserving the adjacent projection cut below.
+    const events = source.session.events
     const projections = includeProjections ? projectionsFor(ctx, source.session) : undefined
     return { events, ...projections === undefined ? {} : { projections } }
   }

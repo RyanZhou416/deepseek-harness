@@ -1,4 +1,4 @@
-import { describe, expect, expectTypeOf, it } from 'vitest'
+import { describe, expect, expectTypeOf, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import { createUserMessage, CallId, createMessage } from '@deepseek-ai/dsh-llm'
 import type { ContentBlock, Message, TokenUsage } from '@deepseek-ai/dsh-llm'
@@ -695,5 +695,28 @@ describe('malformed replay and listener lifecycle', () => {
     activeMeter = ctx.tokenMeter
     expect(activeMeter.measure(session).logRevision).toBe(3)
     await secondFiber.dispose()
+  })
+
+  it('folds active live events without materializing the public log snapshot', async () => {
+    const ctx = new Context()
+    await ctx.plugin(SessionStore)
+    await ctx.plugin(SessionProjectionRegistry)
+    const fiber = await ctx.plugin(TokenMeter)
+    const session = ctx.sessions.create(SessionId('incremental-live-fold'))
+    ctx.tokenMeter.measure(session)
+
+    const eventsGetter = vi.spyOn(Session.prototype, 'events', 'get')
+    // Vitest resolves an accessor spy through the prototype before wrapping it.
+    eventsGetter.mockClear()
+    session.append('todo/write', { todos: [] })
+    const initialPublicationReads = eventsGetter.mock.calls.length
+    for (let index = 1; index < 32; index += 1) {
+      session.append('todo/write', { todos: [] })
+    }
+    expect(eventsGetter).toHaveBeenCalledTimes(initialPublicationReads)
+    eventsGetter.mockRestore()
+
+    expect(ctx.tokenMeter.measure(session).logRevision).toBe(session.seq)
+    await fiber.dispose()
   })
 })

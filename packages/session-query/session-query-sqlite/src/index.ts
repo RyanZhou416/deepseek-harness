@@ -4,7 +4,7 @@
  * @module @deepseek-ai/dsh-session-query-sqlite
  */
 
-import { createHash, randomUUID } from 'node:crypto'
+import { randomUUID } from 'node:crypto'
 import type { DatabaseSync } from 'node:sqlite'
 import { Context, Service, type Fiber } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
@@ -125,9 +125,10 @@ interface ResolvedConfig {
 }
 
 interface ObservedSession {
-  header: SessionHeader
-  documents: SessionEventSearchDocument[]
-  fingerprint: string
+  readonly header: SessionHeader
+  /** Materialize searchable text only when reconciliation found a changed source. */
+  readonly documents: () => SessionEventSearchDocument[]
+  readonly fingerprint: string
 }
 
 interface ObservedPersistedSession {
@@ -585,7 +586,7 @@ export class SqliteSessionQueryEngine extends SessionQueryEngine {
       INSERT INTO persisted_docs (text, session_id, seq, type, time, surface, codepoint_length)
       VALUES (?, ?, ?, ?, ?, ?, ?)
     `)
-    for (const document of entry.documents) {
+    for (const document of entry.documents()) {
       const text = sanitizeFtsText(document.text)
       insert.run(
         text,
@@ -616,7 +617,7 @@ export class SqliteSessionQueryEngine extends SessionQueryEngine {
       INSERT INTO temp.live_docs (text, session_id, seq, type, time, surface, codepoint_length)
       VALUES (?, ?, ?, ?, ?, ?, ?)
     `)
-    for (const document of entry.documents) {
+    for (const document of entry.documents()) {
       const text = sanitizeFtsText(document.text)
       insert.run(
         text,
@@ -854,19 +855,40 @@ function selectedDocumentsParams(query: string, persistenceVisible: boolean): Ar
 }
 
 function observeLive(session: Session): ObservedSession {
-  return observeSession(session.header, session.events)
+  const events = session.events
+  return observeSession(
+    session.header,
+    events,
+    `${liveSourceIdentity(session)}:${events.length}`,
+  )
 }
 
-function observeSession(header: SessionHeader, events: readonly SessionEvent[]): ObservedSession {
-  const detachedHeader = structuredClone(header)
-  const detachedEvents = events.map(event => structuredClone(event))
+function observeSession(
+  header: SessionHeader,
+  events: readonly SessionEvent[],
+  fingerprint = '',
+): ObservedSession {
+  // Both live Session values and persistence inspections are immutable by
+  // contract. Borrow them during this reconciliation and defer the expensive
+  // semantic projection until the stored fingerprint proves replacement is
+  // necessary. Search documents own only scalar metadata and extracted text.
   return {
-    header: detachedHeader,
-    documents: buildSessionEventSearchDocuments(detachedHeader.id, detachedEvents),
-    fingerprint: createHash('sha256')
-      .update(JSON.stringify({ header: detachedHeader, events: detachedEvents }))
-      .digest('base64url'),
+    header,
+    documents: () => buildSessionEventSearchDocuments(header.id, events),
+    fingerprint,
   }
+}
+
+/** Per-object identity for the connection-local live index; weak keys cannot retain sessions. */
+const liveSourceIdentities = new WeakMap<Session, string>()
+
+function liveSourceIdentity(session: Session): string {
+  let identity = liveSourceIdentities.get(session)
+  if (identity === undefined) {
+    identity = randomUUID()
+    liveSourceIdentities.set(session, identity)
+  }
+  return identity
 }
 
 function materializePersistenceSnapshots(

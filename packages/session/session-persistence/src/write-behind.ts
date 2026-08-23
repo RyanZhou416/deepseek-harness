@@ -43,8 +43,24 @@ export class SessionWriteBehind {
    * @param event - frozen live event to retain independently of its producer.
    */
   enqueue(event: SessionEvent): void {
+    this.enqueueOwned(structuredClone(event))
+  }
+
+  /**
+   * Queue one already deep-frozen live-log event without cloning its object
+   * graph. Session.append() owns JSON detachment and recursive freezing before
+   * publication, so the persistence listener can safely share that immutable
+   * value while avoiding a second full payload allocation on the append path.
+   * @param event - deep-frozen event published by Session.append().
+   */
+  enqueueFrozen(event: SessionEvent): void {
+    this.enqueueOwned(event)
+  }
+
+  /** Admit one persistence-safe event reference and schedule its batch. */
+  private enqueueOwned(event: SessionEvent): void {
     const wasEmpty = this.pending.length === 0
-    this.pending.push(structuredClone(event))
+    this.pending.push(event)
     if (this.barrier !== undefined) return
     if (this.automaticPaused) {
       this.automaticPaused = false
@@ -137,7 +153,11 @@ export class SessionWriteBehind {
 
   /** Start one stable pending prefix, retaining it in order if durability fails. */
   private startWrite(background: boolean): Promise<void> {
-    const batch = this.pending.splice(0)
+    // Transfer the complete backing array in O(1). New appends get a fresh
+    // queue while this immutable prefix is in flight; a failed write still
+    // prepends the original batch below.
+    const batch = this.pending
+    this.pending = []
     this.cancelTimer()
     this.deadlineExpired = false
     const operation = Promise.resolve().then(() => this.options.write(batch))
