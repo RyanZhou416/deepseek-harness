@@ -1,7 +1,8 @@
 /**
  * Process-wide agent-step admission. The plugin delays proposed steps before
  * model-history assembly while either the concurrency limit or V8 heap
- * hysteresis is closed; admitted steps retain their slot through `step/end`.
+ * hysteresis is closed; admitted steps retain their slot through the final
+ * `assistant/message`, while `step/end` is a failure-path fallback.
  * @module @deepseek-ai/dsh-memory-admission
  */
 
@@ -24,7 +25,7 @@ export const inject = ['agents']
 
 /** Configurable process-wide admission limits. */
 export interface Config {
-  /** Maximum admitted agent steps across the process. Defaults to 8. */
+  /** Maximum admitted agent model phases across the process. Defaults to 8. */
   maxConcurrentSteps?: number
   /** Heap-used ratio that closes new admission. Defaults to 0.82. */
   heapHighWatermarkRatio?: number
@@ -99,9 +100,9 @@ export function apply(ctx: Context, config: Config): void {
   })
 
   ctx.on('session/event', (session, event) => {
-    if (event.type !== 'step/end') return
+    if (event.type !== 'assistant/message' && event.type !== 'step/end') return
     const reservation = reservations.get(session.id)
-    /* v8 ignore next -- a valid Session emits step/end only for the pre-step turn/step that owns its reservation. */
+    /* v8 ignore next -- a valid Session emits both release events only for the pre-step turn/step that owns its reservation. */
     if (reservation === undefined
       || reservation.turn !== event.data.turn
       || reservation.step !== event.data.step) return

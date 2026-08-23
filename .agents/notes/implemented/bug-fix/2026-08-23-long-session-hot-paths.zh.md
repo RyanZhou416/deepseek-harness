@@ -30,11 +30,11 @@ JSONL 持久化把每个已验证不可变头绑定到精确的 stat 日志修�
 
 并发 JSONL `list()` 与 `listSnapshots()` 调用共享一次元数据扫描；快照结果直接携带该次 扫描唯一一次 stat 得到的修订号，不再对每个文件重复 stat。调用方取消只放弃自己的 等待。浏览器历史请求保留现有连续区间协议，首次、重连或更早页每次请求 20 条 append-origin message。
 
-base 组合挂载进程级 memory-admission guard。FIFO reservation 限制已获准 step 数，V8 heap 达到压力水位时关闭新准入；高低水位形成滞回，活跃 step 则自然运行到匹配的 `step/end`。API Proxy 只保留自己拥有的顶层 Agent handle。配置的 retention 到期后， idle handle 只有在没有 inbox 工作、child Agent、pending interaction、active job 或 mux subscriber，且 flush 与持久化快照证明已落盘时才会转冷。驻留卸载仍发布普通后端 dispose 生命周期，但保留客户端的持久会话列表行。
+base 组合挂载进程级 memory-admission guard。FIFO reservation 限制已获准 model phase 数，V8 heap 达到压力水位时关闭新准入；高低水位形成滞回，每个 reservation 则在最终 `assistant/message` 处释放，避免 tool execution 等待 child Agent 时继续占用容量。`step/end`、idle 和 dispose 是兜底释放点。API Proxy 只保留自己拥有的顶层 Agent handle。配置的 retention 到期后，idle handle 只有在没有 inbox 工作、child Agent、pending interaction、active job 或 mux subscriber，且 flush 与持久化快照证明已落盘时才会转冷。驻留卸载仍发布普通后端 dispose 生命周期，但保留客户端的持久会话列表行。
 
 ## 验证
 
-token-meter 测试固定监听器顺序追赶、服务重载、畸形事件重试，并证明首次实时发布 之后不会随每次 append 重新读取完整公共日志。API proxy 套件继续固定 FIFO 帧内容 和流清理。write-behind 测试同时固定可变借入输入的复制路径与冻结事件保持身份的路径。 SQLite 搜索测试证明实时索引协调不会对不可变历史执行 `structuredClone`，纯追加回归 固定尾部插入路径，surface replacement 固定完整 fold 回退，结果缓存回归固定相邻 游标页复用、代际失效和调用方修改隔离。JSONL 测试固定头复用、stat 修订号失效以及 共享扫描、单次 stat 快照和调用方独立取消语义。真实 AgentLoop 与 Loader 组合测试固定 memory-admission 的并发、滞回、取消和 step 生命周期释放；API resolver／residency 测试 固定 handle 转交、持久性检查、mux 保留与持久列表行保留。既有搜索、游标、surface、 持久化和并发套件继续固定结果契约。
+token-meter 测试固定监听器顺序追赶、服务重载、畸形事件重试，并证明首次实时发布之后不会随每次 append 重新读取完整公共日志。API proxy 套件继续固定 FIFO 帧内容和流清理。write-behind 测试同时固定可变借入输入的复制路径与冻结事件保持身份的路径。SQLite 搜索测试证明实时索引协调不会对不可变历史执行 `structuredClone`，纯追加回归固定尾部插入路径，surface replacement 固定完整 fold 回退，结果缓存回归固定相邻游标页复用、代际失效和调用方修改隔离。JSONL 测试固定头复用、stat 修订号失效以及共享扫描、单次 stat 快照和调用方独立取消语义。真实 AgentLoop 与 Loader 组合测试固定 memory-admission 的并发、滞回、取消以及 tool／subagent wait 之前的 model-phase 释放；API resolver／residency 测试固定 handle 转交、持久性检查、mux 保留与持久列表行保留。既有搜索、游标、surface、持久化和并发套件继续固定结果契约。
 
 隔离的 4 GiB 堆 Web 实例使用 118 个真实会话（148,657,249 字节）的只读副本。 最大会话的 50-message 对照请求展开为 20,434 个连续事件和 4,523,242 字节 JSON， 耗时 6.46 秒；发布的 20-message 页面观测到 10,769 个事件、2,330,763 字节 JSON， 耗时 2.35 秒。短时混合负载中，按 stat 限定的头复用把 Node 私有提交峰值从约 1.89 GiB 降到 0.89 GiB；不同的宽泛搜索仍会占满一个核心并超时。这些数据把安全的 元数据改进与尚未解决的历史／宽查询执行边界工作区分开来。
 
@@ -44,4 +44,4 @@ token-meter 测试固定监听器顺序追赶、服务重载、畸形事件重�
 
 ## 后果
 
-活跃长流不再为 token-meter 的每次更新重新物化完整公共事件快照；队列交付避免重复 删除数组头部，同时不改变会话文件、事件溯源、RPC schema 或回放。持久化批处理不再 复制每个实时 payload，会话搜索／历史读取也避免冗余完整日志克隆和提前执行实时索引 工作。纯实时追加会扩展 FTS 索引而不是替换它；相同搜索会复用有界、与调用方修改 隔离的游标页；重复 JSONL 列表避免重复发现、stat 和未变化 Zstandard 头解码，同时仍按 精确 stat 修订号失效。step 准入限制并发增长；已落盘、无订阅的 idle Web 会话会释放 Agent 与 Session heap，而不改变存储日志或列表身份。surface rewrite 保留规范的完整 fold 行为。活跃和已订阅会话仍驻留，`FrameQueue` 仍没有背压上限，Chat 仍承担每个已加载行 的 DOM 和 React 内存；按消息限制的历史页仍可能包含数万个 raw event，首次或不同的 宽泛 SQLite 查询也仍为同步。会话格式版本、事件 schema、Zstandard 产物和存储路径均不 改变；更大的线协议与执行边界决策仍属于独立工作。
+活跃长流不再为 token-meter 的每次更新重新物化完整公共事件快照；队列交付避免重复删除数组头部，同时不改变会话文件、事件溯源、RPC schema 或回放。持久化批处理不再复制每个实时 payload，会话搜索／历史读取也避免冗余完整日志克隆和提前执行实时索引工作。纯实时追加会扩展 FTS 索引而不是替换它；相同搜索会复用有界、与调用方修改隔离的游标页；重复 JSONL 列表避免重复发现、stat 和未变化 Zstandard 头解码，同时仍按精确 stat 修订号失效。Model-phase 准入限制并发增长，但不跨 tool 或 subagent wait 保留容量；已落盘、无订阅的 idle Web 会话会释放 Agent 与 Session heap，而不改变存储日志或列表身份。surface rewrite 保留规范的完整 fold 行为。活跃和已订阅会话仍驻留，`FrameQueue` 仍没有背压上限，Chat 仍承担每个已加载行的 DOM 和 React 内存；按消息限制的历史页仍可能包含数万个 raw event，首次或不同的宽泛 SQLite 查询也仍为同步。会话格式版本、事件 schema、Zstandard 产物和存储路径均不改变；更大的线协议与执行边界决策仍属于独立工作。

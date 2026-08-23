@@ -78,6 +78,14 @@ describe('StepAdmissionGate', () => {
     controller.abort(cancelReason)
     await expect(cancelled).rejects.toBe(cancelReason)
 
+    const nonErrorController = new AbortController()
+    const nonError = gate.acquire(nonErrorController.signal)
+    nonErrorController.abort('raw abort reason')
+    await expect(nonError).rejects.toMatchObject({
+      message: 'memory-admission: admission aborted',
+      cause: 'raw abort reason',
+    })
+
     const queued = gate.acquire(new AbortController().signal)
     const closeReason = new Error('gate closed')
     gate.close(closeReason)

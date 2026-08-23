@@ -1454,7 +1454,7 @@ Requires: `agents`
 ```ts config-catalog
 /** Configurable process-wide admission limits. */
 export interface Config {
-  /** Maximum admitted agent steps across the process. Defaults to 8. */
+  /** Maximum admitted agent model phases across the process. Defaults to 8. */
   maxConcurrentSteps?: number
   /** Heap-used ratio that closes new admission. Defaults to 0.82. */
   heapHighWatermarkRatio?: number
@@ -1465,7 +1465,7 @@ export interface Config {
 }
 ```
 
-Source: [`packages/guard/memory-admission/src/index.ts:26`](../packages/guard/memory-admission/src/index.ts)
+Source: [`packages/guard/memory-admission/src/index.ts:27`](../packages/guard/memory-admission/src/index.ts)
 
 <a id="deepseek-aidsh-message-feedback"></a>
 

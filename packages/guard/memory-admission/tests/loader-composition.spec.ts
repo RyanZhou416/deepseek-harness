@@ -7,6 +7,7 @@ import { Context } from '@deepseek-ai/cordis'
 import Loader from '@deepseek-ai/cordis-plugin-loader'
 import Include from '@deepseek-ai/cordis-plugin-include'
 import AgentRegistry, { Inbox, agentEvents, type Agent, type AgentStatus } from '@deepseek-ai/dsh-agent'
+import { createMessage } from '@deepseek-ai/dsh-llm'
 import SessionStore, { SessionId } from '@deepseek-ai/dsh-session'
 import * as MemoryAdmission from '@deepseek-ai/dsh-memory-admission'
 
@@ -43,7 +44,7 @@ function registerAgent(ctx: Context, id: string): Agent {
 }
 
 describe('memory admission real Loader composition', () => {
-  it('boots cordis.yml and serializes two proposed steps', async () => {
+  it('boots cordis.yml and releases a slot before the first step enters its tool phase', async () => {
     root = await mkdtemp(join(tmpdir(), 'dsh-memory-admission-loader-'))
     const configPath = join(root, 'cordis.yml')
     await writeFile(configPath, [
@@ -100,7 +101,16 @@ describe('memory admission real Loader composition', () => {
 
     first.session.append('turn/start', { turn: 1 })
     first.session.append('step/start', { turn: 1, step: 1 })
-    first.session.append('step/end', { turn: 1, step: 1 })
+    first.session.append('assistant/message', {
+      turn: 1,
+      step: 1,
+      message: createMessage({
+        role: 'assistant',
+        content: [],
+        source: { kind: 'model', provider: 'mock', model: 'mock' },
+      }),
+    }, { surfaceOp: 'append' })
     expect((await secondDecision).kind).toBe('enter')
+    first.session.append('step/end', { turn: 1, step: 1 })
   })
 })

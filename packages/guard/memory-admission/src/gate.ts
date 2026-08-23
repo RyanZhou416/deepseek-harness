@@ -50,7 +50,9 @@ export class StepAdmissionGate {
           /* v8 ignore next -- admitted waiters remove this listener before resolve; a later abort cannot re-enter it. */
           if (index < 0) return
           this.waiters.splice(index, 1)
-          reject(signal.reason)
+          reject(signal.reason instanceof Error
+            ? signal.reason
+            : new Error('memory-admission: admission aborted', { cause: signal.reason }))
           this.drain()
         },
       }
