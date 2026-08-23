@@ -6,6 +6,8 @@
 
 对于每条可到达本地根 Agent 或可继续子 Agent 的提示词，运行时都会采样浏览器当前的 `Intl.DateTimeFormat().resolvedOptions().timeZone`，并只把该值附加到这一次 Session 或 subagent 提示词 RPC。该值既不缓存，也不包含在 Session 创建或 fork 状态中，因此旅行与并发标签页都能保留消息本地的来源信息。浏览器若无法提供非空时区，会在本地拒绝该提示词，而不会悄然使用部署状态代替。
 
+首次打开 Session、重连修复和加载更早记录时，每次最多向 Host 请求 20 条 append-origin message。Host 仍返回一个连续的 raw event 区间，因此单个 message group 可以包含超过 20 个事件；分页只改变保留窗口大小，不改变事件 seq 或持久历史。
+
 设置所有者共用本包定义的不依赖 React 的 `SettingsScopeSpec`、`SettingsScope` 与快照类型。ui-settings 拥有 `ctx.settingsScope.bind(spec)`、对应的 Host 传输、schema 校验与生命周期；详见[该包的约定](../ui-settings/README.zh.md)。
 
 <a id="slot-declaration-injection"></a>

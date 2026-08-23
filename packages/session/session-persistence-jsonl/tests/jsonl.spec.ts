@@ -448,85 +448,65 @@ describe('JsonlSessionPersistence: durability and crash semantics', () => {
     await expect(persistence.readStoredRevision(m.id, controller.signal)).rejects.toBe(reason)
   })
 
-  it('omits a snapshot artifact removed after discovery', async () => {
-    const m = meta('vanishing-snapshot')
+  it('shares one metadata scan and reuses its exact revision for snapshot callers', async () => {
+    const m = meta('shared-list-scan')
     await ctx.sessionPersistence.create(m)
     await ctx.sessionPersistence.append(m.id, oneTurnLog())
+    const path = rawLogPath(root, m.cwd, m.id)
+    statRace.path = path
     const persistence = ctx.sessionPersistence as unknown as {
-      listArtifacts(): Promise<Array<{ header: SessionHeader; path: string }>>
+      scanArtifacts(): Promise<unknown[]>
     }
-    const listArtifacts = persistence.listArtifacts.bind(persistence)
-    const discovery = vi.spyOn(persistence, 'listArtifacts').mockImplementation(async () => {
-      const artifacts = await listArtifacts()
-      await rm(artifacts[0]!.path)
-      return artifacts
-    })
+    const scan = vi.spyOn(persistence, 'scanArtifacts')
 
-    await expect(ctx.sessionPersistence.listSnapshots()).resolves.toEqual([])
-    discovery.mockRestore()
+    const [headers, snapshots, repeated] = await Promise.all([
+      ctx.sessionPersistence.list(),
+      ctx.sessionPersistence.listSnapshots(),
+      ctx.sessionPersistence.list(),
+    ])
+
+    expect(headers).toMatchObject([{ id: m.id }])
+    expect(repeated).toEqual(headers)
+    expect(snapshots).toMatchObject([{ header: { id: m.id } }])
+    expect(scan).toHaveBeenCalledOnce()
+    expect(statRace.reads).toBe(1)
   })
 
-  it('surfaces non-ENOENT snapshot stat failures after discovery', async () => {
+  it('lets one caller cancel without cancelling a shared metadata scan', async () => {
     const persistence = ctx.sessionPersistence as unknown as {
-      listArtifacts(): Promise<Array<{ header: SessionHeader; path: string }>>
+      scanArtifacts(): Promise<unknown[]>
     }
-    const discovery = vi.spyOn(persistence, 'listArtifacts').mockResolvedValue([{
-      header: meta('snapshot-stat-failure'),
-      path: `${root}\0snapshot-stat-failure`,
-    }])
-
-    await expect(ctx.sessionPersistence.listSnapshots()).rejects.toThrow(/null bytes/)
-    discovery.mockRestore()
-  })
-
-  it('forwards snapshot-list cancellation and awaits in-flight discovery cleanup', async () => {
-    const persistence = ctx.sessionPersistence as unknown as {
-      listArtifacts(signal?: AbortSignal): Promise<Array<{ header: SessionHeader; path: string }>>
-    }
-    const started = Promise.withResolvers<AbortSignal>()
-    const cleanup = Promise.withResolvers<undefined>()
-    vi.spyOn(persistence, 'listArtifacts').mockImplementation(async (signal) => {
-      if (signal === undefined) throw new Error('expected snapshot-list signal')
-      started.resolve(signal)
-      await cleanup.promise
-      return []
-    })
-    const reason = new Error('JSONL snapshot discovery cancelled')
+    const scanResult = Promise.withResolvers<unknown[]>()
+    const scan = vi.spyOn(persistence, 'scanArtifacts').mockReturnValue(scanResult.promise)
+    const owner = ctx.sessionPersistence.list()
+    const reason = new Error('JSONL shared listing caller cancelled')
     const controller = new AbortController()
-    const pending = ctx.sessionPersistence.listSnapshots(controller.signal)
-    expect(await started.promise).toBe(controller.signal)
-    let settled = false
-    void pending.then(
-      () => { settled = true },
-      () => { settled = true },
-    )
+    const cancelled = ctx.sessionPersistence.listSnapshots(controller.signal)
 
     controller.abort(reason)
-    await Promise.resolve()
-    expect(settled).toBe(false)
-
-    cleanup.resolve(undefined)
-    await expect(pending).rejects.toBe(reason)
+    await expect(cancelled).rejects.toBe(reason)
+    scanResult.resolve([])
+    await expect(owner).resolves.toEqual([])
+    expect(scan).toHaveBeenCalledOnce()
   })
 
-  it('checks cancellation after an uncancellable snapshot stat settles', async () => {
-    const m = meta('snapshot-stat-cancellation')
-    await ctx.sessionPersistence.create(m)
-    await ctx.sessionPersistence.append(m.id, oneTurnLog())
+  it('shares a metadata scan failure and retries the next listing', async () => {
     const persistence = ctx.sessionPersistence as unknown as {
-      listArtifacts(signal?: AbortSignal): Promise<Array<{ header: SessionHeader; path: string }>>
+      scanArtifacts(): Promise<unknown[]>
     }
-    const discovery = vi.spyOn(persistence, 'listArtifacts').mockResolvedValue([{
-      header: m,
-      path: rawLogPath(root, m.cwd, m.id),
-    }])
-    const reason = new Error('JSONL snapshot stat cancelled')
-    const controller = new AbortController()
-    const pending = ctx.sessionPersistence.listSnapshots(controller.signal)
-    queueMicrotask(() => { controller.abort(reason) })
+    const first = Promise.withResolvers<unknown[]>()
+    const scan = vi.spyOn(persistence, 'scanArtifacts')
+      .mockReturnValueOnce(first.promise)
+      .mockResolvedValueOnce([])
+    const left = ctx.sessionPersistence.list()
+    const right = ctx.sessionPersistence.listSnapshots()
+    const failure = new Error('shared metadata scan failed')
 
-    await expect(pending).rejects.toBe(reason)
-    expect(discovery).toHaveBeenCalledWith(controller.signal)
+    first.reject(failure)
+    await expect(left).rejects.toBe(failure)
+    await expect(right).rejects.toBe(failure)
+    await expect(ctx.sessionPersistence.list()).resolves.toEqual([])
+    expect(scan).toHaveBeenCalledTimes(2)
   })
 
   it('rejects a stored v0 log containing a legacy request/header-delta event', async () => {

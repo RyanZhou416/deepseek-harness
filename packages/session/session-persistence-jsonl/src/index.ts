@@ -101,6 +101,32 @@ interface CachedHeader {
   readonly header: SessionHeader
 }
 
+interface ListedArtifact {
+  readonly header: SessionHeader
+  readonly path: string
+  readonly revision: PersistenceRevision
+}
+
+/** Await a shared listing without granting one caller cancellation ownership of the underlying scan. */
+function awaitListing<T>(pending: Promise<T>, signal?: AbortSignal): Promise<T> {
+  if (signal === undefined) return pending
+  signal.throwIfAborted()
+  return new Promise<T>((resolve, reject) => {
+    const aborted = (): void => { reject(signal.reason) }
+    signal.addEventListener('abort', aborted, { once: true })
+    void pending.then(
+      (value) => {
+        signal.removeEventListener('abort', aborted)
+        resolve(value)
+      },
+      (error: unknown) => {
+        signal.removeEventListener('abort', aborted)
+        reject(error)
+      },
+    )
+  })
+}
+
 /** Build the source-qualified revision shared by full and lightweight reads. */
 function fileRevision(identity: FileRevisionIdentity): PersistenceRevision {
   return SessionPersistenceRevision([
@@ -151,6 +177,8 @@ export class JsonlSessionPersistence extends SessionPersistence implements Persi
   private rootEncodingCheck: Promise<void> | undefined
   /** Validated immutable headers keyed by the exact stat-derived log revision. */
   private readonly listedHeaders = new Map<string, CachedHeader>()
+  /** One filesystem discovery shared by concurrent metadata callers. */
+  private listing: Promise<ListedArtifact[]> | undefined
 
   constructor(ctx: Context, public config: Config) {
     super(ctx)
@@ -457,46 +485,52 @@ export class JsonlSessionPersistence extends SessionPersistence implements Persi
 
   /** List metadata plus a stat-derived identity for each append-only log. */
   async listSnapshots(signal?: AbortSignal): Promise<SessionPersistenceSnapshot[]> {
-    const snapshots: SessionPersistenceSnapshot[] = []
-    for (const artifact of await this.listArtifacts(signal)) {
-      signal?.throwIfAborted()
-      try {
-        const identity = await stat(artifact.path, { bigint: true })
-        signal?.throwIfAborted()
-        snapshots.push({
-          header: artifact.header,
-          revision: fileRevision(identity),
-        })
-      } catch (error: unknown) {
-        signal?.throwIfAborted()
-        if (!isENOENT(error)) throw error
-      }
-    }
+    const snapshots = (await this.listArtifacts(signal)).map(artifact => ({
+      header: artifact.header,
+      revision: artifact.revision,
+    }))
     signal?.throwIfAborted()
     return snapshots
   }
 
-  private async listArtifacts(signal?: AbortSignal): Promise<Array<{ header: SessionHeader; path: string }>> {
+  private async listArtifacts(signal?: AbortSignal): Promise<ListedArtifact[]> {
     signal?.throwIfAborted()
+    const active = this.listing
+    if (active !== undefined) return this.cloneListed(await awaitListing(active, signal))
+    const scan = this.scanArtifacts()
+    this.listing = scan
+    void scan.finally(() => {
+      if (this.listing === scan) this.listing = undefined
+    }).catch(() => undefined)
+    return this.cloneListed(await awaitListing(scan, signal))
+  }
+
+  /** Clone cached immutable headers so callers retain the historical detached-list ownership. */
+  private cloneListed(artifacts: readonly ListedArtifact[]): ListedArtifact[] {
+    return artifacts.map(artifact => ({ ...artifact, header: { ...artifact.header } }))
+  }
+
+  /** Discover one exact metadata snapshot; caller cancellation never owns this shared operation. */
+  private async scanArtifacts(): Promise<ListedArtifact[]> {
     await this.ensureRootEncoding()
-    signal?.throwIfAborted()
-    const artifacts: Array<{ header: SessionHeader; path: string }> = []
+    const artifacts: ListedArtifact[] = []
     const ids = new Set<SessionId>()
     const listedPaths = new Set<string>()
-    for (const project of await this.listProjectDirs(signal)) {
-      signal?.throwIfAborted()
-      for (const dir of await this.listSessionDirs(project, signal)) {
-        signal?.throwIfAborted()
+    for (const project of await this.listProjectDirs()) {
+      for (const dir of await this.listSessionDirs(project)) {
         const opposite = join(dir, `session${logSuffix(this.oppositeCompression())}`)
         const oppositeExists = await this.exists(opposite)
-        signal?.throwIfAborted()
         if (oppositeExists) throw this.encodingMismatch(opposite)
         const path = join(dir, `session${logSuffix(this.compression)}`)
         const pathExists = await this.exists(path)
-        signal?.throwIfAborted()
         if (!pathExists) continue
-        const identity = await stat(path, { bigint: true })
-        signal?.throwIfAborted()
+        let identity: FileRevisionIdentity
+        try {
+          identity = await stat(path, { bigint: true })
+        } catch (error: unknown) {
+          if (isENOENT(error)) continue
+          throw error
+        }
         const revision = fileRevision(identity)
         const cached = this.listedHeaders.get(path)
         let meta: SessionHeader
@@ -506,14 +540,12 @@ export class JsonlSessionPersistence extends SessionPersistence implements Persi
           // Read only changed headers so repeated listing scales with cheap stat
           // observations rather than one Zstandard decode per stored session.
           const first = this.compression === 'zstd'
-            ? await this.readFirstZstdLine(path, signal)
-            : await this.readFirstLine(path, signal)
-          signal?.throwIfAborted()
+            ? await this.readFirstZstdLine(path)
+            : await this.readFirstLine(path)
           if (first === undefined) continue // empty/half-written file
           const parsed = parseHeaderMeta(first)
           if (parsed === undefined) continue // not a session header
-          await this.assertStoredIdentity(path, parsed, undefined, signal)
-          signal?.throwIfAborted()
+          await this.assertStoredIdentity(path, parsed)
           meta = parsed
           this.listedHeaders.set(path, { revision, header: meta })
         }
@@ -522,13 +554,12 @@ export class JsonlSessionPersistence extends SessionPersistence implements Persi
           throw new Error(`duplicate JSONL session id "${meta.id}" appears in multiple project directories`)
         }
         ids.add(meta.id)
-        artifacts.push({ header: { ...meta }, path })
+        artifacts.push({ header: meta, path, revision })
       }
     }
     for (const cachedPath of this.listedHeaders.keys()) {
       if (!listedPaths.has(cachedPath)) this.listedHeaders.delete(cachedPath)
     }
-    signal?.throwIfAborted()
     return artifacts
   }
 

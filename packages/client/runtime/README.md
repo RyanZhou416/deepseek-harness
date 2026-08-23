@@ -6,6 +6,8 @@ Client cordis boot and React-free object services: SlotRegistry wraps SlotCore a
 
 For each prompt that can reach a local root or continuable child Agent, the runtime samples the browser's current `Intl.DateTimeFormat().resolvedOptions().timeZone` and attaches it to that one Session or subagent prompt RPC. It is neither cached nor included in Session creation or fork state, so travel and concurrent tabs keep message-local provenance. A browser that cannot provide a non-empty zone fails the prompt locally instead of silently substituting deployment state.
 
+Initial Session open, reconnect repair, and load-older requests each ask the Host for at most 20 append-origin messages. The Host still returns one contiguous raw event range, so one message group may carry more than 20 events; paging changes retained window size without changing event sequence or durable history.
+
 Settings owners share the React-free `SettingsScopeSpec`, `SettingsScope`, and snapshot types defined here. ui-settings owns `ctx.settingsScope.bind(spec)`, its Host transport, schema validation, and lifecycle; see [its package contract](../ui-settings/README.md).
 
 ## Slot declaration injection

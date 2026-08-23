@@ -29,7 +29,7 @@ import { resolvedClientTimeZone } from '../time-zone.ts'
 import { SessionQueueMirror } from './queue-mirror.ts'
 
 /** Messages requested per history page. */
-export const PAGE_MESSAGES = 50
+export const PAGE_MESSAGES = 20
 
 /** Manager-owned observers of a Session object's local state edges. */
 export interface SessionOptions {
