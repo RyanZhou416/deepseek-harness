@@ -27,6 +27,7 @@ import { ProjectionValueStore } from './projection-store.ts'
 import type { ProjectionsBaseline } from './projection-store.ts'
 import { resolvedClientTimeZone } from '../time-zone.ts'
 import { SessionQueueMirror } from './queue-mirror.ts'
+import { DEFAULT_LIVE_WINDOW_REBASE_EVENT_THRESHOLD } from '../../config.ts'
 
 /** Messages requested per history page. */
 export const PAGE_MESSAGES = 20
@@ -54,6 +55,8 @@ export interface SessionOptions {
   projections?: ProjectionValueStore
   /** Runtime registries used by this Session-owned Conversation assembler. */
   conversation?: ConversationRuntime
+  /** Raw-event count that rebases a finalized live tail through settled history. */
+  liveWindowRebaseEventThreshold?: number
 }
 
 /**
@@ -69,6 +72,8 @@ export class Session implements SessionFace {
    *  Kept parallel rather than merged so `events` stays the raw log slice (model-visible ⟺ logged). */
   private views: (ToolEventView | undefined)[] = []
   private baseSeq = 0
+  /** Raw tail covered by the possibly sparse projected window. */
+  private tailSeq: number | null = null
   private hasMore = false
   private openState: OpenState = 'cold'
   private openError: RpcError | null = null
@@ -83,7 +88,7 @@ export class Session implements SessionFace {
   private pendingCache: { rev: number; value: PendingInteraction[] } | null = null
   /** Authoritative stream-only inbox snapshot; pending work never hits history. */
   private readonly queueMirror = new SessionQueueMirror()
-  /** Session-owned business Context engine over the contiguous raw window. */
+  /** Session-owned business Context engine over projected history plus its contiguous live tail. */
   private readonly conversation: ConversationNodeAssembler
   private running = false
   private address: SubagentAddress | undefined
@@ -105,8 +110,12 @@ export class Session implements SessionFace {
   private liveBuffer: { event: SessionEvent; view: ToolEventView | undefined }[] = []
   /** Gap repair in flight; live events detour to the buffer until the tail page lands. */
   private stitching = false
+  /** A finalized model phase asked for a bounded tail rebase once stitching permits it. */
+  private liveWindowRebasePending = false
   /** subscribed.lastSeq baseline (gap detection; null when no subscribed frame arrived — degrade to the liveBuffer dedup path). */
   private subscribedLastSeq: number | null = null
+  /** Resolved plugin setting. */
+  private readonly liveWindowRebaseEventThreshold: number
 
   /**
    * Per-session projection value store (push model; see the session-projection
@@ -146,6 +155,8 @@ export class Session implements SessionFace {
     private readonly options: SessionOptions = {},
   ) {
     this.projections = options.projections ?? new ProjectionValueStore()
+    this.liveWindowRebaseEventThreshold = options.liveWindowRebaseEventThreshold
+      ?? DEFAULT_LIVE_WINDOW_REBASE_EVENT_THRESHOLD
     this.address = options.address
     this.parentAvailable = options.parentAvailable ?? false
     this.conversation = options.conversation === undefined
@@ -382,27 +393,29 @@ export class Session implements SessionFace {
     if (this.openState !== 'open' || !this.hasMore || this.loadingOlder) return
     this.loadingOlder = true
     this.notifier.markDirty()
+    const generation = this.openGeneration
+    const beforeSeq = this.baseSeq
     try {
-      const { result } = await this.history({ beforeSeq: this.baseSeq, maxMessages: PAGE_MESSAGES })
+      const { result } = await this.history({ beforeSeq, maxMessages: PAGE_MESSAGES })
+      if (generation !== this.openGeneration || this.baseSeq !== beforeSeq) return
       if (!result.ok) return // keep the window as-is; do not overwrite openError (open already succeeded)
       const older = result.value.events
-      if (older.length === 0) {
+      const range = resolvedHistoryRange(older, result.value.range)
+      if (range === null) {
         this.hasMore = result.value.hasMore
         this.conversation.prepend([], this.hasMore)
         return
       }
-      const tail = older[older.length - 1]
-      if (tail === undefined || tail.event.seq + 1 !== this.baseSeq) {
+      if (range.endSeq + 1 !== beforeSeq) {
         // Continuity assertion: on violation drop the page fail-soft rather than render an out-of-order stream.
-        console.error(`[web-runtime] history page discontinuous: tail seq ${tail?.event.seq} vs baseSeq ${this.baseSeq}`)
+        console.error(`[web-runtime] history page discontinuous: tail seq ${range.endSeq} vs baseSeq ${this.baseSeq}`)
         this.hasMore = false
         this.conversation.prepend([], false)
         return
       }
       this.events = [...older.map(e => e.event), ...this.events]
       this.views = [...older.map(e => e.view), ...this.views]
-      /* v8 ignore next -- the ?? arm needs older[0] undefined, but the empty-page branch above already returned. */
-      this.baseSeq = older[0]?.event.seq ?? this.baseSeq
+      this.baseSeq = range.startSeq
       this.hasMore = result.value.hasMore
       this.conversation.prepend(older.map(conversationInput), this.hasMore)
     } catch (error) {
@@ -431,12 +444,14 @@ export class Session implements SessionFace {
     this.events = []
     this.views = []
     this.baseSeq = 0
+    this.tailSeq = null
     // Superseded, not settled: the baseline replay re-sends still-pending requested frames verbatim
     // (same rpcId), re-minting fresh waits; a stale reference's respond() still reaches the host.
     this.pending.clear()
     this.pendingRev++
     this.subscribedLastSeq = null
     this.liveBuffer = []
+    this.liveWindowRebasePending = false
     this.notifier.markDirty()
     await this.open()
   }
@@ -627,15 +642,28 @@ export class Session implements SessionFace {
         this.openError = result.error
         return
       }
-      this.installWindow(result.value.events, result.value.hasMore, result.value.projections)
+      this.installWindow(
+        result.value.events,
+        result.value.hasMore,
+        result.value.range,
+        result.value.projections,
+      )
       // Gap detection: baseline past the window tail and liveBuffer did not cover it -> pull the tail page once more.
       const tailSeq = this.windowTailSeq()
       if (this.subscribedLastSeq !== null && tailSeq !== null && this.subscribedLastSeq > tailSeq) {
         result = (await this.history({ maxMessages: PAGE_MESSAGES })).result
         if (generation !== this.openGeneration) return
-        if (result.ok) this.installWindow(result.value.events, result.value.hasMore, result.value.projections)
+        if (result.ok) {
+          this.installWindow(
+            result.value.events,
+            result.value.hasMore,
+            result.value.range,
+            result.value.projections,
+          )
+        }
       }
       this.openState = 'open'
+      this.maybeRebaseLiveWindow()
     } catch (error) {
       if (generation !== this.openGeneration) return
       this.openState = 'error'
@@ -653,19 +681,95 @@ export class Session implements SessionFace {
    *  back into liveBuffer where nothing ever drains it — a silent drop loop.
    *  A carried projections block seeds the value store (higher seq wins, so a stale
    *  baseline cannot overwrite a newer push frame); the window events themselves are
-   *  never folded — the host is the only computation site. */
-  private installWindow(entries: HistoryEntry[], hasMore: boolean, projections?: ProjectionsBaseline): void {
+   *  never folded — the host is the only computation site.
+   * @returns whether every buffered live event stitched without another gap.
+   */
+  private installWindow(
+    entries: HistoryEntry[],
+    hasMore: boolean,
+    range?: { startSeq: number; endSeq: number } | null,
+    projections?: ProjectionsBaseline,
+  ): boolean {
+    const resolvedRange = resolvedHistoryRange(entries, range)
+    return this.replaceWindow(
+      entries,
+      resolvedRange?.startSeq ?? 0,
+      resolvedRange?.endSeq ?? null,
+      hasMore,
+      projections,
+    )
+  }
+
+  /**
+   * Merge a settled tail refresh without withdrawing already loaded older pages.
+   * @returns whether every buffered live event stitched without another gap.
+   */
+  private installRebasedWindow(
+    entries: HistoryEntry[],
+    range?: { startSeq: number; endSeq: number } | null,
+    projections?: ProjectionsBaseline,
+  ): boolean | undefined {
+    const next = resolvedHistoryRange(entries, range)
+    const previousTail = this.tailSeq
+    if (next === null
+      || previousTail === null
+      || next.startSeq < this.baseSeq
+      || next.startSeq > previousTail + 1
+      || next.endSeq < previousTail) {
+      return undefined
+    }
+    const prefix: HistoryEntry[] = []
+    for (let index = 0; index < this.events.length; index++) {
+      const event = this.events[index] as SessionEvent
+      if (event.seq >= next.startSeq) break
+      const view = this.views[index]
+      prefix.push({ event, ...view === undefined ? {} : { view } })
+    }
+    return this.replaceWindow(
+      [...prefix, ...entries],
+      this.baseSeq,
+      next.endSeq,
+      this.hasMore,
+      projections,
+    )
+  }
+
+  /** Install projected entries and stitch the generation's buffered live suffix. */
+  private replaceWindow(
+    entries: HistoryEntry[],
+    baseSeq: number,
+    tailSeq: number | null,
+    hasMore: boolean,
+    projections?: ProjectionsBaseline,
+  ): boolean {
     this.events = entries.map(e => e.event)
     this.views = entries.map(e => e.view)
-    this.baseSeq = this.events[0]?.seq ?? 0
+    this.baseSeq = baseSeq
+    this.tailSeq = tailSeq
     this.hasMore = hasMore
+    this.liveWindowRebasePending = false
     if (this.events.some(event => event.type === 'turn/start')) this.firstPromptPendingTurn = false
     this.conversation.replaceWindow(entries.map(conversationInput), hasMore)
     if (projections !== undefined) this.projections.seed(projections)
+    const stitched = this.stitchLiveBuffer()
+    this.notifier.markDirty()
+    return stitched
+  }
+
+  /** Append the buffered generation suffix until empty or its first raw seq gap. */
+  private stitchLiveBuffer(): boolean {
     const buffered = this.liveBuffer
     this.liveBuffer = []
-    for (const item of buffered) this.appendLive(item.event, item.view)
-    this.notifier.markDirty()
+    for (let index = 0; index < buffered.length; index++) {
+      const item = buffered[index] as (typeof buffered)[number]
+      const tailSeq = this.windowTailSeq()
+      if (tailSeq !== null && item.event.seq > tailSeq + 1) {
+        this.liveBuffer.push(...buffered.slice(index))
+        break
+      }
+      this.scheduleConversation(this.appendLive(item.event, item.view))
+    }
+    return this.liveBuffer.length === 0
   }
 
   /** Seq-guarded append shared by stitching and the open-state live path. */
@@ -674,20 +778,23 @@ export class Session implements SessionFace {
     if (tailSeq !== null && event.seq <= tailSeq) return 'none' // replay overlap, drop
     this.events.push(event)
     this.views.push(view)
+    this.tailSeq = event.seq
     if (event.type === 'turn/start') this.firstPromptPendingTurn = false
     const queueChanged = this.queueMirror.acceptDurable(event)
     const publication = this.conversation.append({ event, view })
+    if (event.type === 'assistant/message') this.liveWindowRebasePending = true
+    this.maybeRebaseLiveWindow()
     return queueChanged ? 'immediate' : publication
   }
 
   /** Land a live session/event (open/repair in flight -> buffer; overlapping seq -> drop;
    *  a seq gap -> buffer + tail-page repull instead of appending a hole (a gap is an
-   *  expected reconnect-window artifact, repaired by refetch). The window stays one contiguous
-   *  raw range, which lets Conversation Definitions correlate every recorded event between its
-   *  ends and lets a compaction checkpoint resolve its cited summary event. */
+   *  expected reconnect-window artifact, repaired by refetch). History entries may be sparse,
+   *  but their explicit raw range keeps live continuity and pagination exact. */
   private acceptLiveEvent(event: SessionEvent, view?: ToolEventView): void {
     if (this.openState === 'loading' || this.stitching) {
       this.liveBuffer.push({ event, view })
+      if (event.type === 'assistant/message') this.liveWindowRebasePending = true
       return
     }
     if (this.openState !== 'open') return // cold/error: no window upkeep (history fully backfills on open)
@@ -709,27 +816,80 @@ export class Session implements SessionFace {
   /** Resync-lite: repull the tail page and stitch the liveBuffer through the shared
    *  installWindow path. No openState transition — the UI keeps the current window (no loading
    *  flash); events arriving meanwhile detour to liveBuffer via the stitching flag. */
-  private async repairGap(): Promise<void> {
+  private async repairGap(retrying = false): Promise<void> {
     /* v8 ignore next -- re-entry guard: acceptLiveEvent already detours to liveBuffer while stitching, so no second call reaches here. */
     if (this.stitching) return
     this.stitching = true
     const generation = this.openGeneration
+    let retryGap = false
     try {
       const { result } = await this.history({ maxMessages: PAGE_MESSAGES })
       // Failure or superseded by a full resync: drop — the resync path rebuilds and clears the buffer itself.
       if (result.ok && generation === this.openGeneration && this.openState === 'open') {
-        this.installWindow(result.value.events, result.value.hasMore, result.value.projections)
+        retryGap = !this.installWindow(
+          result.value.events,
+          result.value.hasMore,
+          result.value.range,
+          result.value.projections,
+        )
       }
     } catch (error) {
       console.error('[web-runtime] gap repair failed:', error)
     } finally {
       this.stitching = false
+      if (retryGap && !retrying) void this.repairGap(true)
+      else this.maybeRebaseLiveWindow()
     }
   }
 
   private windowTailSeq(): number | null {
-    const tail = this.events[this.events.length - 1]
-    return tail === undefined ? null : tail.seq
+    return this.tailSeq
+  }
+
+  /** Replace an oversized finalized live window with the Host's settled sparse tail projection. */
+  private maybeRebaseLiveWindow(): void {
+    if (!this.liveWindowRebasePending
+      || this.events.length < this.liveWindowRebaseEventThreshold
+      || this.openState !== 'open'
+      || this.stitching) return
+    this.liveWindowRebasePending = false
+    void this.rebaseLiveWindow()
+  }
+
+  /** Single-flight tail refresh; live tool/turn events stitch after the projected baseline. */
+  private async rebaseLiveWindow(): Promise<void> {
+    /* v8 ignore next -- maybeRebaseLiveWindow and same-tick stitching writes prevent re-entry. */
+    if (this.stitching) return
+    this.stitching = true
+    const generation = this.openGeneration
+    let installed = false
+    let retryGap = false
+    let retryOnNextAppend = false
+    try {
+      const { result } = await this.history({ maxMessages: PAGE_MESSAGES })
+      if (result.ok && generation === this.openGeneration && this.openState === 'open') {
+        const stitched = this.installRebasedWindow(
+          result.value.events,
+          result.value.range,
+          result.value.projections,
+        )
+        if (stitched !== undefined) {
+          retryGap = !stitched
+          installed = true
+        }
+      }
+    } catch (error) {
+      console.error('[web-runtime] live window rebase failed:', error)
+    } finally {
+      if (!installed && generation === this.openGeneration && this.openState === 'open') {
+        retryGap = !this.stitchLiveBuffer()
+        this.liveWindowRebasePending = true
+        retryOnNextAppend = true
+      }
+      this.stitching = false
+      if (retryGap) void this.repairGap()
+      else if (!retryOnNextAppend) this.maybeRebaseLiveWindow()
+    }
   }
 
   private buildSnapshot(): ConversationSnapshot {
@@ -775,17 +935,30 @@ export class Session implements SessionFace {
   private history(payload: { beforeSeq?: number; maxMessages?: number }): Promise<RpcResponse<{
     events: HistoryEntry[]
     hasMore: boolean
+    range?: { startSeq: number; endSeq: number } | null
     projections?: ProjectionsBaseline
   }>> {
+    const projected = { ...payload, projection: 'settled' as const }
     return this.address === undefined
-      ? this.api.sessions.history({ sessionId: this.sessionId, ...payload })
-      : this.api.subagents.history({ ...this.address, ...payload })
+      ? this.api.sessions.history({ sessionId: this.sessionId, ...projected })
+      : this.api.subagents.history({ ...this.address, ...projected })
   }
 }
 
 /** Convert one wire history row into the assembler's transport-neutral input. */
 function conversationInput(entry: HistoryEntry): ConversationEventInput {
   return { event: entry.event, view: entry.view }
+}
+
+/** Resolve optional wire range metadata for both sparse and contiguous history transports. */
+function resolvedHistoryRange(
+  entries: readonly HistoryEntry[],
+  range?: { startSeq: number; endSeq: number } | null,
+): { startSeq: number; endSeq: number } | null {
+  if (range !== undefined) return range
+  const first = entries[0]?.event.seq
+  const last = entries.at(-1)?.event.seq
+  return first === undefined || last === undefined ? null : { startSeq: first, endSeq: last }
 }
 
 /** A generic command row alone remains control-plane content; every other visible Chat Node activates the conversation. */

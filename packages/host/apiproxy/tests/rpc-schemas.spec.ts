@@ -36,7 +36,9 @@ import { hostFrameSchema, muxFrameSchema, askUserQuestionItemSchema } from '../s
 import { approvalRequestIdSchema, approvalResponsePayloadSchema } from '../src/api/approvals.schema.ts'
 import { askUserQuestionAnswerSchema, questionResponsePayloadSchema } from '../src/api/questions.schema.ts'
 import { goalEditRequestSchema } from '../src/api/goals.schema.ts'
-import { subagentPromptRequestSchema } from '../src/api/subagents.schema.ts'
+import {
+  subagentHistoryRequestSchema, subagentHistoryValueSchema, subagentPromptRequestSchema,
+} from '../src/api/subagents.schema.ts'
 
 describe('RpcId', () => {
   it('brands a raw string at zero runtime cost', () => {
@@ -196,13 +198,26 @@ describe('sessions domain schemas', () => {
     expect(sessionCreateRequestSchema.parse({ workspaceId: 'w1', sessionId: 's1' }).sessionId).toBe('s1')
     expect(() => sessionCreateRequestSchema.parse({ workspaceId: 'w1', cwd: '/w' })).toThrow(/not both/)
     expect(sessionCreateValueSchema.parse({ sessionId: 's1' }).sessionId).toBe('s1')
-    expect(sessionHistoryRequestSchema.parse({ sessionId: 's1', beforeSeq: 3, maxMessages: 5 }).beforeSeq).toBe(3)
+    expect(sessionHistoryRequestSchema.parse({
+      sessionId: 's1', beforeSeq: 3, maxMessages: 5, projection: 'settled',
+    })).toMatchObject({ beforeSeq: 3, projection: 'settled' })
     expect(() => sessionHistoryRequestSchema.parse({ sessionId: 's1', maxMessages: 0 })).toThrow()
+    expect(() => sessionHistoryRequestSchema.parse({ sessionId: 's1', projection: 'raw' })).toThrow()
     expect(sessionHistoryValueSchema.parse({
       events: [],
       hasMore: false,
+      range: { startSeq: 3, endSeq: 9 },
       modelSelection: { provider: 'deepseek-official', model: 'deepseek-v4-flash' },
-    }).hasMore).toBe(false)
+    })).toMatchObject({ hasMore: false, range: { startSeq: 3, endSeq: 9 } })
+    expect(sessionHistoryValueSchema.parse({ events: [], hasMore: false })).toEqual({
+      events: [], hasMore: false,
+    })
+    expect(() => sessionHistoryValueSchema.parse({
+      events: [], hasMore: false, range: { startSeq: -1, endSeq: 9 },
+    })).toThrow()
+    expect(() => sessionHistoryValueSchema.parse({
+      events: [], hasMore: false, range: { startSeq: 10, endSeq: 9 },
+    })).toThrow(/startSeq/)
     expect(sessionModelsRequestSchema.parse({ sessionId: 's1' }).sessionId).toBe('s1')
     expect(sessionModelsValueSchema.parse({
       current: { provider: 'deepseek-official', model: 'deepseek-v4-flash', reasoningEffort: 'max' },
@@ -291,6 +306,18 @@ describe('sessions domain schemas', () => {
 })
 
 describe('subagent domain schemas', () => {
+  it('carries the optional settled-history request and raw range response', () => {
+    expect(subagentHistoryRequestSchema.parse({
+      parentSessionId: 'parent', childSessionId: 'child', mode: 'one-shot', projection: 'settled',
+    }).projection).toBe('settled')
+    expect(() => subagentHistoryRequestSchema.parse({
+      parentSessionId: 'parent', childSessionId: 'child', mode: 'one-shot', projection: 'raw',
+    })).toThrow()
+    expect(subagentHistoryValueSchema.parse({
+      events: [], hasMore: false, range: null,
+    })).toEqual({ events: [], hasMore: false, range: null })
+  })
+
   it('carries optional request-local browser-zone provenance on prompts', () => {
     expect(subagentPromptRequestSchema.parse({
       parentSessionId: 'parent',

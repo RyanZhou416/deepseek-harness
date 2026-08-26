@@ -8,7 +8,7 @@ import type { MessageId } from '@deepseek-ai/dsh-llm/brand'
 import type { ContentBlock } from '@deepseek-ai/dsh-llm/types'
 import type { SessionId } from '@deepseek-ai/dsh-session/types'
 import type { RpcRequest, RpcResponse } from './rpc.ts'
-import type { HistoryEntry, SessionProjectionsBlock } from './sessions.ts'
+import type { HistoryEntry, HistoryRange, SessionProjectionsBlock } from './sessions.ts'
 
 /** Complete durable direct-child catalog row. */
 export type SubagentListEntry =
@@ -80,11 +80,18 @@ export interface SubagentsApi {
    * message-aligned pagination and render intents, without Agent activation.
    */
   history(
-    request: RpcRequest<SubagentAddress & { beforeSeq?: number; maxMessages?: number }>,
+    request: RpcRequest<SubagentAddress & {
+      beforeSeq?: number
+      maxMessages?: number
+      /** Opt into the browser-efficient completed-stream projection. */
+      projection?: 'settled'
+    }>,
     signal?: AbortSignal,
   ): Promise<RpcResponse<{
     events: HistoryEntry[]
     hasMore: boolean
+    /** Raw interval covered by the sparse event projection; null for an empty page. */
+    range?: HistoryRange | null
     projections?: SessionProjectionsBlock
   }>>
 

@@ -5,7 +5,7 @@ import type { MessageId } from '@deepseek-ai/dsh-llm/brand'
 import type { RequestPayload, ResponseValue } from './rpc-map.ts'
 import type { Wire } from './rpc.schema.ts'
 import {
-  contentBlockSchema, historyEntrySchema, sessionIdSchema, sessionProjectionsBlockSchema,
+  contentBlockSchema, historyEntrySchema, historyRangeSchema, sessionIdSchema, sessionProjectionsBlockSchema,
 } from './sessions.schema.ts'
 import type { SubagentListEntry } from './subagents.ts'
 
@@ -52,12 +52,14 @@ export const subagentHistoryRequestSchema = z.object({
   mode: z.union([z.literal('one-shot'), z.literal('continuable')]),
   beforeSeq: z.number().int().nonnegative().optional(),
   maxMessages: z.number().int().positive().optional(),
+  projection: z.literal('settled').optional(),
 }) satisfies z.ZodType<Wire<RequestPayload<'subagent.history'>>>
 
 /** subagent.history response value. */
 export const subagentHistoryValueSchema = z.object({
   events: z.array(historyEntrySchema),
   hasMore: z.boolean(),
+  range: historyRangeSchema.nullable().optional(),
   projections: sessionProjectionsBlockSchema.optional(),
 }) as unknown as z.ZodType<Wire<ResponseValue<'subagent.history'>>>
 

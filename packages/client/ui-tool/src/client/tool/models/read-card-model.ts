@@ -66,12 +66,15 @@ export function readCardModel(block: ToolCallBlock, sessionCwd?: string, home?: 
   if (!('kind' in block)) return null
   const result = block.resultView?.card === 'read' ? block.resultView : null
   if (result === null) return null
-  // Lines arrive frozen off the snapshot; copy into the primitive's own line
-  // shape so the card never holds a reference into the runtime's cache.
-  const lines: ReadBlockLine[] = result.lines.map(line => ({ number: line.number, text: line.text }))
+  let lines: ReadBlockLine[] | undefined
   return {
     label: result.title ?? abbreviateHomePath(relativizeToCwd(result.path, sessionCwd), home),
-    lines,
+    // A collapsed row only needs to know that this model exists. Copy the
+    // potentially large line window when ReadBlock actually reads it.
+    get lines(): ReadBlockLine[] {
+      lines ??= result.lines.map(line => ({ number: line.number, text: line.text }))
+      return lines
+    },
     totalLines: result.totalLines,
     lang: result.lang,
   }

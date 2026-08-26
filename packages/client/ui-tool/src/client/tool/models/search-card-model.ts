@@ -137,24 +137,40 @@ export function searchCardModel(block: ToolCallBlock): SearchCardModel | null {
   // uncapped card holds every match/path, so the raw text adds nothing the card
   // does not already show. When capped, the raw result's `Full … stored at …`
   // locator is the only way to retrieve the omitted rows, so include it.
-  const recovery = result.truncated ? flattenContent(block.content) : undefined
+  let recoveryReady = false
+  let recovery: string | undefined
+  const getRecovery = () => {
+    if (!recoveryReady) {
+      recovery = result.truncated ? flattenContent(block.content) : undefined
+      recoveryReady = true
+    }
+    return recovery
+  }
   if (result.shape === 'matches') {
     // `files` rides the untrusted wire frame: the host schema checks `card`/`shape`
     // strings but not the grouped `files` fields, so validate them before
     // SearchBlock, which would crash on a missing or malformed `files`.
     // Invalid fields select the generic view.
     if (!isValidFiles(result.files)) return null
-    return { title: result.title, recovery, card: { kind: 'matches', files: result.files, ...common } }
+    return {
+      title: result.title,
+      get recovery() { return getRecovery() },
+      card: { kind: 'matches', files: result.files, ...common },
+    }
   }
   // `shape` rides the same untrusted wire frame as `card`, so a version mismatch
   // or a loose protocol producer could deliver a `card: 'search'` subtype this
   // client does not compile. Guard the paths shape explicitly: an unknown shape
   // falls to the generic path rather than being rendered as a paths card, which
   // would leave SearchBlock calling `.length`/`.map` on an absent `paths`.
-  // oxlint-disable-next-line typescript/no-unnecessary-condition -- shape is wire data; the compiled union cannot prove this exhaustive.
-  if (result.shape !== 'paths') return null
+  const wireShape: string = result.shape
+  if (wireShape !== 'paths') return null
   // `paths` is likewise unchecked by the wire schema; a known shape with a
   // missing/malformed array would crash the paths card at `.map`.
   if (!Array.isArray(result.paths) || !result.paths.every((path): path is string => typeof path === 'string')) return null
-  return { title: result.title, recovery, card: { kind: 'paths', paths: result.paths, ...common } }
+  return {
+    title: result.title,
+    get recovery() { return getRecovery() },
+    card: { kind: 'paths', paths: result.paths, ...common },
+  }
 }

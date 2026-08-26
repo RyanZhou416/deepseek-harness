@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
+import { createMessage } from '@deepseek-ai/dsh-llm'
 import type { SessionEvent, SessionHeader, SessionId } from '@deepseek-ai/dsh-session'
 import { SubagentError } from '@deepseek-ai/dsh-subagent'
 import { RpcId } from '../src/api/rpc.ts'
@@ -28,6 +29,7 @@ function bench(options: {
   /** Every registered projection unit throws on this child's payloads. */
   projectionsThrow?: true
   historyParent?: SessionId
+  historyEvents?: SessionEvent[]
 } = {}) {
   const parent = { id: PARENT }
   const child = options.childStatus === undefined
@@ -66,7 +68,7 @@ function bench(options: {
   const childHeader = {
     version: 0, id: CHILD, createdAt: 1, cwd: '/proj', parentSession: options.historyParent ?? PARENT,
   } satisfies SessionHeader
-  const childEvents = [
+  const childEvents = options.historyEvents ?? [
     { type: 'user/message', seq: 0, time: 1, data: { content: [{ type: 'text', text: 'work' }], source: { kind: 'user' } } },
   ] as unknown as SessionEvent[]
   const inspect = vi.fn(() => Promise.resolve({ meta: childHeader, events: childEvents }))
@@ -157,7 +159,11 @@ describe('subagent gateway', () => {
     }))
     expect(response.result).toMatchObject({
       ok: true,
-      value: { hasMore: false, events: [{ event: { type: 'user/message', seq: 0 } }] },
+      value: {
+        hasMore: false,
+        range: { startSeq: 0, endSeq: 0 },
+        events: [{ event: { type: 'user/message', seq: 0 } }],
+      },
     })
     expect(inspect).toHaveBeenCalledWith(CHILD)
     expect(restore).toHaveBeenCalledTimes(1)
@@ -171,11 +177,71 @@ describe('subagent gateway', () => {
     }))
     expect(response.result).toMatchObject({
       ok: true,
-      value: { hasMore: false, projections: { asOfSeq: 3 } },
+      value: { hasMore: false, range: { startSeq: 0, endSeq: 0 }, projections: { asOfSeq: 3 } },
     })
     expect(snapshot).toHaveBeenCalledTimes(1)
     expect(restore).not.toHaveBeenCalled()
     expect(inspect).not.toHaveBeenCalled()
+  })
+
+  it('projects settled model chunks on the subagent history path and reports an empty raw range', async () => {
+    const chunk = (seq: number, text: string): SessionEvent => ({
+      type: 'assistant/chunk', seq, time: seq, data: {
+        turn: 1, step: 1, chunk: { type: 'text-delta', index: 0, text },
+      },
+    })
+    const chunks = [chunk(1, 'a'), chunk(2, 'b')]
+    const message: SessionEvent<'assistant/message'> = {
+      type: 'assistant/message',
+      seq: 3,
+      time: 3,
+      data: {
+        turn: 1,
+        step: 1,
+        message: createMessage({
+          role: 'assistant', content: [{ type: 'text', text: 'ab' }],
+          source: { kind: 'model', provider: 'p', model: 'm' },
+        }),
+      },
+      surfaceOp: 'append',
+      sourceEventSeqs: [1, 2],
+    }
+    const historyEvents = [
+      { type: 'turn/start', seq: 0, time: 0, data: { turn: 1 } } as SessionEvent,
+      ...chunks,
+      message,
+    ]
+    const settled = bench({ historyEvents })
+
+    const raw = await settled.api.subagents.history(request({
+      parentSessionId: PARENT, childSessionId: CHILD, mode: 'continuable', maxMessages: 1,
+    }))
+    if (!raw.result.ok) throw new Error('raw history failed')
+    expect(raw.result.value.events.map(entry => entry.event.seq)).toEqual([1, 2, 3])
+    expect(raw.result.value.events.at(-1)?.event).toHaveProperty('sourceEventSeqs', [1, 2])
+
+    const response = await settled.api.subagents.history(request({
+      parentSessionId: PARENT, childSessionId: CHILD, mode: 'continuable', maxMessages: 1,
+      projection: 'settled',
+    }))
+
+    expect(response.result).toMatchObject({
+      ok: true,
+      value: {
+        range: { startSeq: 1, endSeq: 3 },
+        events: [
+          { event: { type: 'assistant/chunk', seq: 1, time: 1 } },
+          { event: { type: 'assistant/message', seq: 3 } },
+        ],
+      },
+    })
+    if (response.result.ok) expect(response.result.value.events[1]?.event).not.toHaveProperty('sourceEventSeqs')
+    expect(message.sourceEventSeqs).toEqual([1, 2])
+
+    const empty = bench({ historyEvents: [] })
+    expect((await empty.api.subagents.history(request({
+      parentSessionId: PARENT, childSessionId: CHILD, mode: 'continuable',
+    }))).result).toMatchObject({ ok: true, value: { events: [], range: null } })
   })
 
   it('serves the page without projections when a hostile unit breaks the fold', async () => {

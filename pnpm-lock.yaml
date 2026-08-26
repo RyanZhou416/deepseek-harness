@@ -1624,6 +1624,9 @@ importers:
 
   packages/client/runtime:
     dependencies:
+      '@deepseek-ai/schemastery':
+        specifier: link:../../../vendor/schemastery
+        version: link:../../../vendor/schemastery
       immer:
         specifier: ^10.1.1
         version: 10.2.0

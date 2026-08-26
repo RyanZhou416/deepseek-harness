@@ -37,7 +37,7 @@ import {
 import type { PresetBearingSession } from '@deepseek-ai/dsh-agent-presets'
 import type {} from '@deepseek-ai/dsh-tools'
 import type {
-  ApiProxy, ConfigurableProviderView, CredentialView, GoalRef, HistoryEntry, HostFrame,
+  ApiProxy, ConfigurableProviderView, CredentialView, GoalRef, HistoryEntry, HistoryRange, HostFrame,
   ModelCatalogFailure, ModelProviderGroup,
   ModelReasoning, MuxFrame, PromptContentPart, QuestionResponsePayload, SessionListMetadata, SessionProjectionsBlock, SessionSearchItem,
   QueuedInboxItem, SessionSummary, SettingsNamespaceView, SubagentAddress, JobView, ToolEventView,
@@ -111,6 +111,7 @@ import {
   inspectApiRemoteSession,
 } from '@deepseek-ai/dsh-api-remotes'
 import { canOpenNativePath, openNativePath, openNativeTextFile } from './native-path-opener.ts'
+import { projectSettledHistoryPage } from './settled-history.ts'
 
 /** Page size when history is called without maxMessages. */
 const DEFAULT_MAX_MESSAGES = 50
@@ -767,14 +768,23 @@ function historyPage(
   beforeSeq: number | undefined,
   maxMessages: number | undefined,
   scope?: ScopeKey,
-): { events: HistoryEntry[]; hasMore: boolean } {
+  projection?: 'settled',
+): { events: HistoryEntry[]; hasMore: boolean; range: HistoryRange | null } {
   const page = paginate(events, beforeSeq, maxMessages ?? DEFAULT_MAX_MESSAGES)
+  const first = page.events[0]
+  const last = page.events[page.events.length - 1]
+  const projected = projection === 'settled'
+    ? projectSettledHistoryPage(events, page.events)
+    : page.events
   return {
-    events: page.events.map((event) => {
-      const view = viewFor(ctx, event, callId => backscanArgs(page.events, callId), scope)
+    events: projected.map((event) => {
+      const view = viewFor(ctx, event, callId => backscanArgs(projected, callId), scope)
       return { event, ...view === undefined ? {} : { view } }
     }),
     hasMore: page.hasMore,
+    range: first === undefined || last === undefined
+      ? null
+      : { startSeq: first.seq, endSeq: last.seq },
   }
 }
 
@@ -2271,7 +2281,7 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
       },
 
       async history(request) {
-        const { sessionId, beforeSeq, maxMessages } = request.payload
+        const { sessionId, beforeSeq, maxMessages, projection } = request.payload
         try {
           const source = await historySourceFor(sessionId)
           // Both awaits happen BEFORE the cut. Ensuring the recorded
@@ -2282,10 +2292,11 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
           // at N with a baseline folded to N+1.
           const scope = await presenterScopeFor(sessionId, sourceSession(source))
           const cut = historyCutOf(source, beforeSeq === undefined)
-          const page = historyPage(ctx, cut.events, beforeSeq, maxMessages, scope)
+          const page = historyPage(ctx, cut.events, beforeSeq, maxMessages, scope, projection)
           return ok(request, {
             events: page.events,
             hasMore: page.hasMore,
+            range: page.range,
             ...cut.projections === undefined ? {} : { projections: cut.projections },
           })
         } catch (error: unknown) {
@@ -2686,7 +2697,7 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
 
       async history(request, signal) {
         const {
-          parentSessionId, childSessionId, mode, beforeSeq, maxMessages,
+          parentSessionId, childSessionId, mode, beforeSeq, maxMessages, projection,
         } = request.payload
         const verified = await catalogChild(ctx, {
           parentSessionId, childSessionId, mode,
@@ -2749,7 +2760,7 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
             details: { childSessionId },
           })
         }
-        const page = historyPage(ctx, events, beforeSeq, maxMessages)
+        const page = historyPage(ctx, events, beforeSeq, maxMessages, undefined, projection)
         return ok(request, { ...page, ...projections === undefined ? {} : { projections } })
       },
 

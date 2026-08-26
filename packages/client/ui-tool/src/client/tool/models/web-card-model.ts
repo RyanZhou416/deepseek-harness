@@ -42,15 +42,20 @@ export function webCardModel(block: ToolCallBlock): WebBlockProps | null {
   const result = block.resultView
   if (result?.card !== 'web') return null
   if (result.kind === 'search') {
+    let sources: Extract<WebBlockProps, { kind: 'search' }>['sources'] | undefined
     return {
       kind: 'search',
       answer: result.answer,
-      sources: result.sources.map(source => ({
-        url: source.url,
-        title: source.title,
-        snippet: source.snippet,
-        publishedAt: source.publishedAt,
-      })),
+      // Source lists can be large; a collapsed row only needs the web-card tag.
+      get sources() {
+        sources ??= result.sources.map(source => ({
+          url: source.url,
+          title: source.title,
+          snippet: source.snippet,
+          publishedAt: source.publishedAt,
+        }))
+        return sources
+      },
       truncated: result.truncated,
     }
   }
@@ -61,8 +66,8 @@ export function webCardModel(block: ToolCallBlock): WebBlockProps | null {
   // an unknown `card` tag takes above. The static union narrows `kind` to
   // `'fetch'` here, but the runtime value is off the wire, so the guard and its
   // null fallthrough are load-bearing despite the type.
-  // oxlint-disable-next-line typescript/no-unnecessary-condition
-  if (result.kind === 'fetch') {
+  const wireKind: string = result.kind
+  if (wireKind === 'fetch') {
     return {
       kind: 'fetch',
       url: result.url,

@@ -81,7 +81,12 @@ export class FakeApiClient implements IApiClient {
   readonly defaultModel: ModelSelection = { provider: 'deepseek-official', model: 'deepseek-v4-flash' }
   onRename: (payload: unknown) => Promise<RpcResponse<{ title: string; seq: number }>> = () => Promise.resolve(ok({ title: 'fk-renamed', seq: 0 }))
   onFork: (payload: unknown) => Promise<RpcResponse<{ sessionId: SessionId }>> = () => Promise.resolve(ok({ sessionId: 'fk-fork' as SessionId }))
-  onHistory: (payload: { sessionId: SessionId; beforeSeq?: number; maxMessages?: number })
+  onHistory: (payload: {
+    sessionId: SessionId
+    beforeSeq?: number
+    maxMessages?: number
+    projection?: 'settled'
+  })
   => Promise<RpcResponse<{ events: never[]; hasMore: boolean }>> =
     () => Promise.resolve(ok({ events: [], hasMore: false }))
 
@@ -145,7 +150,12 @@ export class FakeApiClient implements IApiClient {
       return this.record('session.search', payload, this.onSearch(payload))
     },
     create: (payload: unknown) => this.record('session.create', payload, this.onCreate(payload)),
-    history: (payload: { sessionId: SessionId; beforeSeq?: number; maxMessages?: number }) =>
+    history: (payload: {
+      sessionId: SessionId
+      beforeSeq?: number
+      maxMessages?: number
+      projection?: 'settled'
+    }) =>
       this.record('session.history', payload, this.onHistory(payload)),
     models: (payload: unknown) => this.record('session.models', payload, this.onModels(payload)),
     selectModel: (payload: { provider: string; model: string }) =>

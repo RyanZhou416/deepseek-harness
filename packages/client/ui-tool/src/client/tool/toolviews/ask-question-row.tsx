@@ -74,8 +74,7 @@ export function AskQuestionRow({ toolName, block, inspect, t }: AskQuestionRowPr
       icon={<IconQuestionOutline14 />}
       title={t('ask.rowTitle')}
       summary={summary}
-      body={model.body}
-      output={model.output}
+      details={model}
       state={state}
       inspect={inspect}
     />

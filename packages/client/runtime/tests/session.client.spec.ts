@@ -372,6 +372,230 @@ describe('live event path', () => {
     const seqs = session.getSnapshot().nodes.map(n => n.seq)
     expect(seqs).toEqual([1, 3, 7, 9]) // both turns' user/assistant, no hole, no duplicate 9
   })
+
+  it('rebases an oversized finalized live stream and stitches later tool events onto the sparse tail', async () => {
+    const api = new FakeApiClient()
+    api.onHistory = () => histResponse([])
+    const session = new Session(SID, api, fakeRemote(), {
+      conversation: TEST_CONVERSATION,
+      liveWindowRebaseEventThreshold: 5,
+    })
+    await session.open()
+    const rebase = deferred<Awaited<ReturnType<FakeApiClient['onHistory']>>>()
+    api.onHistory = () => rebase.promise
+    const feed = (event: SessionEvent) => {
+      session.handleMuxEnvelope('rebase' as never, { type: 'session/event', sessionId: SID, event })
+    }
+
+    feed(ev.turnStart(0, 1))
+    feed(ev.user(1, '长任务'))
+    feed(ev.stepStart(2, 1))
+    feed(ev.chunkStart(3, 1))
+    feed(ev.chunkText(4, 1, '中间流'))
+    expect(api.callsOf('session.history')).toHaveLength(1)
+    expect(chatSeqs(session.getSnapshot())).toEqual([0, 1, 2, 3, 4])
+
+    const finalized = {
+      ...ev.assistant(5, 1, '最终结果'),
+      sourceEventSeqs: [3, 4],
+    } as SessionEvent
+    feed(finalized)
+    expect(api.callsOf('session.history')).toHaveLength(2)
+    feed(ev.toolCall(6, 1, 'call-1', 'read', '{}'))
+    feed(ev.toolResult(7, 1, 'call-1', 'done'))
+    feed(ev.stepEnd(8, 1))
+    feed(ev.stepStart(9, 1, 1))
+    feed(ev.chunkText(10, 1, '第二步流', 1))
+    feed(ev.assistant(11, 1, '第二步结果', 1))
+    expect(api.callsOf('session.history')).toHaveLength(2)
+
+    const projectedFinal = ev.assistant(5, 1, '最终结果')
+    api.onHistory = () => Promise.resolve(ok({
+      events: entries([
+        ev.turnStart(0, 1), ev.user(1, '长任务'), ev.stepStart(2, 1), projectedFinal,
+        ev.toolCall(6, 1, 'call-1', 'read', '{}'), ev.toolResult(7, 1, 'call-1', 'done'),
+        ev.stepEnd(8, 1), ev.stepStart(9, 1, 1), ev.assistant(11, 1, '第二步结果', 1),
+      ]) as never[],
+      hasMore: false,
+      range: { startSeq: 0, endSeq: 11 },
+    }))
+    rebase.resolve(ok({
+      events: entries([
+        ev.turnStart(0, 1), ev.user(1, '长任务'), ev.stepStart(2, 1), projectedFinal,
+      ]) as never[],
+      hasMore: false,
+      range: { startSeq: 0, endSeq: 5 },
+    }))
+    await vi.waitFor(() => {
+      expect(api.callsOf('session.history')).toHaveLength(3)
+      expect(chatSeqs(session.getSnapshot())).toEqual([0, 1, 2, 5, 6, 7, 8, 9, 11])
+    })
+    const finalEvent = chatEvents(session.getSnapshot())
+      .find(input => input.event.type === 'assistant/message')?.event
+    expect(finalEvent).not.toHaveProperty('sourceEventSeqs')
+  })
+
+  it.each(['business', 'transport'] as const)(
+    'keeps buffered live events after a %s rebase failure and retries only on a later append',
+    async (failure) => {
+      const api = new FakeApiClient()
+      api.onHistory = () => histResponse([])
+      const session = new Session(SID, api, fakeRemote(), {
+        conversation: TEST_CONVERSATION,
+        liveWindowRebaseEventThreshold: 3,
+      })
+      await session.open()
+      const failed = deferred<Awaited<ReturnType<FakeApiClient['onHistory']>>>()
+      api.onHistory = () => failed.promise
+      const feed = (event: SessionEvent) => {
+        session.handleMuxEnvelope('failed-rebase' as never, {
+          type: 'session/event', sessionId: SID, event,
+        })
+      }
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined)
+      try {
+        feed(ev.turnStart(0, 1))
+        feed(ev.stepStart(1, 1))
+        feed(ev.chunkStart(2, 1))
+        feed(ev.assistant(3, 1, '完成'))
+        feed(ev.toolCall(4, 1, 'call-1', 'read', '{}'))
+        if (failure === 'business') {
+          failed.resolve(err({ code: 'internal', message: 'rebase rejected', details: {} }))
+        } else {
+          failed.reject(new Error('rebase transport down'))
+        }
+        await vi.waitFor(() => {
+          expect(chatSeqs(session.getSnapshot())).toEqual([0, 1, 2, 3, 4])
+        })
+        expect(api.callsOf('session.history')).toHaveLength(2)
+
+        api.onHistory = () => Promise.resolve(ok({
+          events: entries([
+            ev.turnStart(0, 1), ev.stepStart(1, 1), ev.assistant(3, 1, '完成'),
+            ev.toolCall(4, 1, 'call-1', 'read', '{}'), ev.stepEnd(5, 1),
+          ]) as never[],
+          hasMore: false,
+          range: { startSeq: 0, endSeq: 5 },
+        }))
+        feed(ev.stepEnd(5, 1))
+        await vi.waitFor(() => { expect(api.callsOf('session.history')).toHaveLength(3) })
+        expect(chatSeqs(session.getSnapshot())).toEqual([0, 1, 3, 4, 5])
+        expect(errorSpy).toHaveBeenCalledTimes(failure === 'transport' ? 1 : 0)
+      } finally {
+        errorSpy.mockRestore()
+      }
+    },
+  )
+
+  it('repairs a mux gap discovered while installing a settled live-window rebase', async () => {
+    const api = new FakeApiClient()
+    api.onHistory = () => histResponse([])
+    const session = new Session(SID, api, fakeRemote(), {
+      conversation: TEST_CONVERSATION,
+      liveWindowRebaseEventThreshold: 3,
+    })
+    await session.open()
+    const firstRebase = deferred<Awaited<ReturnType<FakeApiClient['onHistory']>>>()
+    api.onHistory = () => firstRebase.promise
+    const feed = (event: SessionEvent) => {
+      session.handleMuxEnvelope('rebase-gap' as never, { type: 'session/event', sessionId: SID, event })
+    }
+    feed(ev.turnStart(0, 1))
+    feed(ev.stepStart(1, 1))
+    feed(ev.chunkStart(2, 1))
+    feed(ev.assistant(3, 1, '完成'))
+    feed(ev.stepEnd(5, 1)) // seq 4 was lost while the rebase was in flight
+
+    api.onHistory = () => Promise.resolve(ok({
+      events: entries([
+        ev.turnStart(0, 1), ev.stepStart(1, 1), ev.assistant(3, 1, '完成'),
+        ev.toolCall(4, 1, 'call-1', 'read', '{}'), ev.stepEnd(5, 1),
+      ]) as never[],
+      hasMore: false,
+      range: { startSeq: 0, endSeq: 5 },
+    }))
+    firstRebase.resolve(ok({
+      events: entries([ev.turnStart(0, 1), ev.stepStart(1, 1), ev.assistant(3, 1, '完成')]) as never[],
+      hasMore: false,
+      range: { startSeq: 0, endSeq: 3 },
+    }))
+
+    await vi.waitFor(() => { expect(api.callsOf('session.history')).toHaveLength(3) })
+    await vi.waitFor(() => {
+      expect(chatSeqs(session.getSnapshot())).toEqual([0, 1, 3, 4, 5])
+    })
+  })
+
+  it('hands a buffered mux gap from a failed rebase to ordinary gap repair', async () => {
+    const api = new FakeApiClient()
+    api.onHistory = () => histResponse([])
+    const session = new Session(SID, api, fakeRemote(), {
+      conversation: TEST_CONVERSATION,
+      liveWindowRebaseEventThreshold: 3,
+    })
+    await session.open()
+    const rebase = deferred<Awaited<ReturnType<FakeApiClient['onHistory']>>>()
+    api.onHistory = () => rebase.promise
+    const feed = (event: SessionEvent) => {
+      session.handleMuxEnvelope('failed-gap' as never, { type: 'session/event', sessionId: SID, event })
+    }
+    feed(ev.turnStart(0, 1))
+    feed(ev.stepStart(1, 1))
+    feed(ev.chunkStart(2, 1))
+    feed(ev.assistant(3, 1, '完成'))
+    feed(ev.stepEnd(5, 1))
+    api.onHistory = () => Promise.resolve(ok({
+      events: entries([
+        ev.turnStart(0, 1), ev.stepStart(1, 1), ev.assistant(3, 1, '完成'),
+        ev.toolCall(4, 1, 'call-1', 'read', '{}'), ev.stepEnd(5, 1),
+      ]) as never[],
+      hasMore: false,
+      range: { startSeq: 0, endSeq: 5 },
+    }))
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined)
+    try {
+      rebase.reject(new Error('failed before gap repair'))
+      await vi.waitFor(() => { expect(api.callsOf('session.history')).toHaveLength(3) })
+      await vi.waitFor(() => {
+        expect(chatSeqs(session.getSnapshot())).toEqual([0, 1, 3, 4, 5])
+      })
+      expect(errorSpy).toHaveBeenCalledOnce()
+    } finally {
+      errorSpy.mockRestore()
+    }
+  })
+
+  it('retries a still-discontinuous gap repair with the buffered suffix intact', async () => {
+    const { api, session } = await opened([ev.turnStart(0, 1), ev.user(1, '开始')])
+    const firstRepair = deferred<Awaited<ReturnType<FakeApiClient['onHistory']>>>()
+    api.onHistory = () => firstRepair.promise
+    session.handleMuxEnvelope('repair-gap-1' as never, {
+      type: 'session/event', sessionId: SID, event: ev.stepStart(4, 1),
+    })
+    session.handleMuxEnvelope('repair-gap-2' as never, {
+      type: 'session/event', sessionId: SID, event: ev.chunkStart(6, 1),
+    })
+    api.onHistory = () => Promise.resolve(ok({
+      events: entries([
+        ev.turnStart(0, 1), ev.user(1, '开始'), ev.commandRun(2, 'c', 'noop'),
+        ev.commandDone(3, 'c'), ev.stepStart(4, 1), ev.chunkText(5, 1, '补齐'),
+        ev.chunkStart(6, 1),
+      ]) as never[],
+      hasMore: false,
+      range: { startSeq: 0, endSeq: 6 },
+    }))
+    firstRepair.resolve(ok({
+      events: entries([
+        ev.turnStart(0, 1), ev.user(1, '开始'), ev.commandRun(2, 'c', 'noop'),
+        ev.commandDone(3, 'c'), ev.stepStart(4, 1),
+      ]) as never[],
+      hasMore: false,
+      range: { startSeq: 0, endSeq: 4 },
+    }))
+
+    await vi.waitFor(() => { expect(api.callsOf('session.history')).toHaveLength(3) })
+    await vi.waitFor(() => { expect(chatSeqs(session.getSnapshot())).toContain(6) })
+  })
 })
 
 describe('paging', () => {
@@ -385,9 +609,36 @@ describe('paging', () => {
     await session.open()
     await session.loadOlder()
     const snapshot = session.getSnapshot()
-    expect(api.callsOf('session.history')).toMatchObject([{}, { beforeSeq: 6 }].map(p => ({ sessionId: SID, ...p })))
+    expect(api.callsOf('session.history')).toMatchObject([{}, { beforeSeq: 6 }].map(p => ({
+      sessionId: SID,
+      projection: 'settled',
+      ...p,
+    })))
     expect(snapshot.hasMore).toBe(false)
     expect(snapshot.nodes.map(n => n.seq)).toEqual([1, 3, 7, 9])
+  })
+
+  it('uses raw history ranges to prepend sparse projected pages and detect later live gaps', async () => {
+    const older = [ev.user(1, '旧问'), ev.assistant(4, 0, '旧答'), ev.turnEnd(5, 0)]
+    const newer = [ev.user(7, '新问'), ev.assistant(10, 1, '新答'), ev.turnEnd(11, 1)]
+    const { api, session } = makeSession()
+    api.onHistory = payload => Promise.resolve(ok(payload.beforeSeq === undefined
+      ? { events: entries(newer) as never[], hasMore: true, range: { startSeq: 6, endSeq: 11 } }
+      : { events: entries(older) as never[], hasMore: false, range: { startSeq: 0, endSeq: 5 } }))
+    await session.open()
+    await session.loadOlder()
+    expect(chatSeqs(session.getSnapshot())).toEqual([1, 4, 5, 7, 10, 11])
+
+    api.onHistory = () => Promise.resolve(ok({
+      events: entries([...older, ...newer, ev.turnStart(12, 2)]) as never[],
+      hasMore: false,
+      range: { startSeq: 0, endSeq: 12 },
+    }))
+    session.handleMuxEnvelope('sparse-gap' as never, {
+      type: 'session/event', sessionId: SID, event: ev.user(13, '连续直播'),
+    })
+    await vi.waitFor(() => { expect(api.callsOf('session.history')).toHaveLength(3) })
+    await vi.waitFor(() => { expect(chatSeqs(session.getSnapshot())).toContain(13) })
   })
 
   it('installs a page without interpreting business replacement metadata', async () => {
@@ -443,6 +694,103 @@ describe('paging', () => {
     await Promise.all([first, second])
     expect(api.callsOf('session.history')).toHaveLength(2) // open + one page, not two
   })
+
+  it('keeps an in-flight older page valid while a live-window rebase preserves its base', async () => {
+    const api = new FakeApiClient()
+    api.onHistory = () => Promise.resolve(ok({
+      events: entries([ev.user(11, '新问'), ev.assistant(13, 1, '新答'), ev.turnEnd(15, 1)]) as never[],
+      hasMore: true,
+      range: { startSeq: 10, endSeq: 15 },
+    }))
+    const session = new Session(SID, api, fakeRemote(), {
+      conversation: TEST_CONVERSATION,
+      liveWindowRebaseEventThreshold: 3,
+    })
+    await session.open()
+    const older = deferred<Awaited<ReturnType<FakeApiClient['onHistory']>>>()
+    api.onHistory = payload => payload.beforeSeq === undefined
+      ? Promise.resolve(ok({
+        events: entries([
+          ev.assistant(13, 1, '新答'), ev.turnEnd(15, 1), ev.assistant(16, 2, '直播'),
+        ]) as never[],
+        hasMore: true,
+        range: { startSeq: 12, endSeq: 16 },
+      }))
+      : older.promise
+    const loading = session.loadOlder()
+    session.handleMuxEnvelope('page-race' as never, {
+      type: 'session/event', sessionId: SID, event: ev.assistant(16, 2, '直播'),
+    })
+    await vi.waitFor(() => { expect(api.callsOf('session.history')).toHaveLength(3) })
+    older.resolve(ok({
+      events: entries([ev.user(1, '过时旧页'), ev.turnEnd(9, 0)]) as never[],
+      hasMore: false,
+      range: { startSeq: 0, endSeq: 9 },
+    }))
+    await loading
+    expect(session.getSnapshot().hasMore).toBe(false)
+    expect(chatSeqs(session.getSnapshot())).toContain(1)
+  })
+
+  it('keeps loaded older nodes while a finalized tail rebase releases streamed chunks', async () => {
+    const api = new FakeApiClient()
+    api.onHistory = () => Promise.resolve(ok({
+      events: entries(plainTurn(12, 2, '尾问', '尾答')) as never[],
+      hasMore: true,
+      range: { startSeq: 12, endSeq: 17 },
+    }))
+    const session = new Session(SID, api, fakeRemote(), {
+      conversation: TEST_CONVERSATION,
+      liveWindowRebaseEventThreshold: 10,
+    })
+    await session.open()
+    api.onHistory = payload => payload.beforeSeq === 12
+      ? Promise.resolve(ok({
+        events: entries(plainTurn(6, 1, '旧问', '旧答')) as never[],
+        hasMore: true,
+        range: { startSeq: 6, endSeq: 11 },
+      }))
+      : Promise.resolve(ok({
+        events: entries([
+          ...plainTurn(12, 2, '尾问', '尾答'),
+          ev.turnStart(18, 3), ev.stepStart(19, 3), ev.assistant(22, 3, '最终结果'),
+        ]) as never[],
+        hasMore: false,
+        range: { startSeq: 12, endSeq: 22 },
+      }))
+    await session.loadOlder()
+    expect(chatSeqs(session.getSnapshot())).toContain(7)
+
+    const feed = (event: SessionEvent) => {
+      session.handleMuxEnvelope('preserve-older' as never, {
+        type: 'session/event', sessionId: SID, event,
+      })
+    }
+    feed(ev.turnStart(18, 3))
+    feed(ev.stepStart(19, 3))
+    feed(ev.chunkStart(20, 3))
+    feed(ev.chunkText(21, 3, '超长中间流'))
+    feed({ ...ev.assistant(22, 3, '最终结果'), sourceEventSeqs: [20, 21] } as SessionEvent)
+
+    await vi.waitFor(() => { expect(api.callsOf('session.history')).toHaveLength(3) })
+    await vi.waitFor(() => {
+      const seqs = chatSeqs(session.getSnapshot())
+      expect(seqs).toContain(7)
+      expect(seqs).toContain(22)
+      expect(seqs).not.toContain(20)
+      expect(seqs).not.toContain(21)
+    })
+    expect(session.getSnapshot().hasMore).toBe(true)
+
+    api.onHistory = () => Promise.resolve(ok({
+      events: entries(plainTurn(0, 0, '更旧问', '更旧答')) as never[],
+      hasMore: false,
+      range: { startSeq: 0, endSeq: 5 },
+    }))
+    await session.loadOlder()
+    expect(session.getSnapshot().hasMore).toBe(false)
+    expect(chatSeqs(session.getSnapshot())).toContain(1)
+  })
 })
 
 describe('prompt and cancel errors', () => {
@@ -459,7 +807,10 @@ describe('prompt and cancel errors', () => {
     expect(prompted).toEqual({ ok: true, value: { accepted: true } })
     expect(cancelled).toEqual({ ok: true, value: { accepted: true } })
     expect(api.callsOf('subagent.history')).toEqual([
-      { parentSessionId: PARENT, childSessionId: SID, mode: 'continuable', maxMessages: 20 },
+      {
+        parentSessionId: PARENT, childSessionId: SID, mode: 'continuable',
+        maxMessages: 20, projection: 'settled',
+      },
     ])
     expect(api.callsOf('subagent.prompt')).toEqual([
       {
@@ -511,7 +862,10 @@ describe('prompt and cancel errors', () => {
     expect(prompted).toMatchObject({ ok: false, error: { code: 'subagent-not-resumable' } })
     expect(cancelled).toMatchObject({ ok: false, error: { code: 'subagent-delivery-unavailable' } })
     expect(api.callsOf('subagent.history')).toEqual([
-      { parentSessionId: PARENT, childSessionId: SID, mode: 'one-shot', maxMessages: 20 },
+      {
+        parentSessionId: PARENT, childSessionId: SID, mode: 'one-shot',
+        maxMessages: 20, projection: 'settled',
+      },
     ])
     expect(api.callsOf('subagent.prompt')).toEqual([])
     expect(api.callsOf('subagent.interrupt')).toEqual([])

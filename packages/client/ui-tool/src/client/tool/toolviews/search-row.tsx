@@ -49,14 +49,13 @@ export function SearchRow({ toolName, block, inspect, t }: SearchRowProps) {
       // The result view's replacement title outranks the args-derived summary,
       // matching the terminal card's description precedence.
       summary={search?.title ?? model.summary}
-      body={null}
+      details={model}
+      showInput={false}
       // A settled call with no search card (errored search, nested run_code
       // sub-dispatch, legacy generic result) has its text nowhere else to go;
       // ToolRow's Output section carries it, and errorSummary its first line.
-      // When a card is present ToolRow renders it instead of the output, so
-      // model.output passes unconditionally and the four card rows stay
-      // symmetric.
-      output={model.output}
+      // When a card is present ToolRow renders it instead of the output. The
+      // details model keeps the full text lazy until the generic body opens.
       errorSummary={model.errorSummary}
       search={search}
       state={model.state}

@@ -71,8 +71,7 @@ export function TodoRow({ toolName, block, inspect, t }: TodoRowProps) {
       title={t('todo.rowTitle')}
       summary={summary.text}
       summarySuffix={summary.extra > 0 ? `+${summary.extra}` : null}
-      body={model.body}
-      output={model.output}
+      details={model}
       errorSummary={model.errorSummary}
       state={model.state}
       inspect={inspect}

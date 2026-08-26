@@ -30,7 +30,7 @@ SQLite 会话查询协调器借用不可变的实时／持久化观察，以连�
 
 JSONL 持久化把每个已验证不可变头绑定到精确的 stat 日志修订号（设备、inode、大小、 mtime 和 ctime）。未变化的列表会复用头；append、替换或外部 writer 改变修订号后会 重新验证。成功列表中已经不存在的条目会从缓存移除。API 的历史／fork 读取复用已经 不可变的 `Session.events` 切面，不再在截取所需页面或前缀前分配第二份完整日志数组。
 
-并发 JSONL `list()` 与 `listSnapshots()` 调用共享一次元数据扫描；快照结果直接携带该次 扫描唯一一次 stat 得到的修订号，不再对每个文件重复 stat。调用方取消只放弃自己的 等待。浏览器历史请求保留现有连续区间协议，首次、重连或更早页每次请求 20 条 append-origin message。
+并发 JSONL `list()` 与 `listSnapshots()` 调用共享一次元数据扫描；快照结果直接携带该次 扫描唯一一次 stat 得到的修订号，不再对每个文件重复 stat。调用方取消只放弃自己的 等待。浏览器历史请求在首次、重连或更早页每次请求 20 条 append-origin message，并使用[已结算稀疏投影](2026-08-26-settled-history-browser-window.zh.md)；raw API 读取仍然可用。
 
 base 组合挂载进程级 memory-admission guard。FIFO reservation 限制已获准 model phase 数，V8 heap 达到压力水位时关闭新准入；高低水位形成滞回，每个 reservation 则在最终 `assistant/message` 处释放，避免 tool execution 等待 child Agent 时继续占用容量。`step/end`、idle 和 dispose 是兜底释放点。API Proxy 只保留自己拥有的顶层 Agent handle。配置的 retention 到期后，idle handle 只有在没有 inbox 工作、child Agent、pending interaction、active job 或 mux subscriber，且 flush 与持久化快照证明已落盘时才会转冷。驻留卸载仍发布普通后端 dispose 生命周期，但保留客户端的持久会话列表行。
 
@@ -51,4 +51,4 @@ token-meter 测试固定监听器顺序追赶、服务重载、畸形事件重�
 
 ## 后果
 
-活跃长流不再为 token-meter 的每次更新重新物化完整公共事件快照；队列交付避免重复删除数组头部，同时不改变会话文件、事件溯源或回放。持久化批处理不再复制每个实时 payload，会话搜索／历史读取也避免冗余完整日志克隆和提前执行实时索引工作。纯实时追加会扩展 FTS 索引而不是替换它；相同搜索会复用有界、与调用方修改隔离的游标页；重复 JSONL 列表避免重复发现、stat 和未变化 Zstandard 头解码，同时仍按精确 stat 修订号失效。Model-phase 准入限制并发增长，但不跨 tool 或 subagent wait 保留容量；已落盘、无订阅的 idle Web 会话会释放 Agent 与 Session heap，而不改变存储日志或列表身份。陈旧浏览器代际现在会自动重连并从 history 修复，不再要求手动刷新。surface rewrite 保留规范的完整 fold 行为。活跃和已订阅会话仍驻留，`FrameQueue` 仍没有硬背压容量，Chat 仍承担每个已加载行的 DOM 和 React 内存；按消息限制的历史页仍可能包含数万个 raw event，首次或不同的宽泛 SQLite 查询也仍为同步。瞬态 RPC 帧 union 新增 `stream/heartbeat`；Session event schema、会话格式版本、Zstandard 产物和存储路径均不改变。
+活跃长流不再为 token-meter 的每次更新重新物化完整公共事件快照；队列交付避免重复删除数组头部，同时不改变会话文件、事件溯源或回放。持久化批处理不再复制每个实时 payload，会话搜索／历史读取也避免冗余完整日志克隆和提前执行实时索引工作。纯实时追加会扩展 FTS 索引而不是替换它；相同搜索会复用有界、与调用方修改隔离的游标页；重复 JSONL 列表避免重复发现、stat 和未变化 Zstandard 头解码，同时仍按精确 stat 修订号失效。Model-phase 准入限制并发增长，但不跨 tool 或 subagent wait 保留容量；已落盘、无订阅的 idle Web 会话会释放 Agent 与 Session heap，而不改变存储日志或列表身份。陈旧浏览器代际现在会自动重连并从 history 修复，不再要求手动刷新。surface rewrite 保留规范的完整 fold 行为。活跃和已订阅会话仍驻留，`FrameQueue` 仍没有硬背压容量，Chat 仍承担每个已加载行的 DOM 和 React 内存；按消息限制的 raw API 页面仍可能包含数万个事件，而浏览器使用已结算稀疏投影；首次或不同的宽泛 SQLite 查询也仍为同步。瞬态 RPC 帧 union 新增 `stream/heartbeat`；Session event schema、会话格式版本、Zstandard 产物和存储路径均不改变。

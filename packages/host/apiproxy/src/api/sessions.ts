@@ -61,13 +61,21 @@ declare module '@deepseek-ai/dsh-llm' {
 }
 
 /**
- * One history page entry: the raw event plus the optional host-computed render
- * intent (same semantics as the mux frame's `view` slot — a pagination-time
- * derivation, never persisted).
+ * One history page entry plus the optional host-computed render intent.
+ * Events are raw by default; the opt-in settled projection may omit completed
+ * stream chunks and chunk-only provenance without changing the durable log.
  */
 export interface HistoryEntry {
   event: SessionEvent
   view?: ToolEventView
+}
+
+/** Raw seq interval covered by one possibly sparse history projection. */
+export interface HistoryRange {
+  /** First raw event seq selected by pagination. */
+  startSeq: number
+  /** Last raw event seq selected by pagination. */
+  endSeq: number
 }
 
 /**
@@ -267,8 +275,10 @@ export interface SessionsApi {
 
   /**
    * Reads a window of history events; page boundaries align to append-origin message
-   * boundaries: one page = all raw events owned by a whole number of such messages (including
-   * their chunk / tool events), never cut mid-message. Model-only replacement copies consume no
+   * boundaries: one page = all events owned by a whole number of such messages. With
+   * `projection: 'settled'`, completed assistant streams retain their usage records, first token
+   * delta, and final message, while `range` reports the raw interval those sparse events cover.
+   * Model-only replacement copies consume no
    * `maxMessages`, so a compaction's `compaction/summary` record stays on the page of its replacement. The tail
    * page (beforeSeq absent) additionally carries the in-flight
    * partial — chunk events already emitted for the last unfinalized message.
@@ -283,8 +293,20 @@ export interface SessionsApi {
    * Reading history uses an attached Session or persistence inspection and
    * never resumes or publishes an Agent.
    */
-  history(request: RpcRequest<{ sessionId: SessionId; beforeSeq?: number; maxMessages?: number }>):
-  Promise<RpcResponse<{ events: HistoryEntry[]; hasMore: boolean; projections?: SessionProjectionsBlock }>>
+  history(request: RpcRequest<{
+    sessionId: SessionId
+    beforeSeq?: number
+    maxMessages?: number
+    /** Opt into the browser-efficient completed-stream projection. */
+    projection?: 'settled'
+  }>):
+  Promise<RpcResponse<{
+    events: HistoryEntry[]
+    hasMore: boolean
+    /** Raw interval covered by `events`; null for an empty page. Always sent by this Host. */
+    range?: HistoryRange | null
+    projections?: SessionProjectionsBlock
+  }>>
 
   /**
    * Reads a fresh advisory model directory for an ordinary session. Provider

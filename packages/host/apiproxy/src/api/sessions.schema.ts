@@ -11,7 +11,7 @@ import type { MessageId } from '@deepseek-ai/dsh-llm/brand'
 import type { RequestPayload, ResponseValue } from './rpc-map.ts'
 import type { Wire } from './rpc.schema.ts'
 import type {
-  HistoryEntry, ModelCatalogFailure, ModelCatalogModel, ModelProviderGroup, ModelReasoning,
+  HistoryEntry, HistoryRange, ModelCatalogFailure, ModelCatalogModel, ModelProviderGroup, ModelReasoning,
   ModelReasoningEffort, ModelSelection, SessionListMetadata, SessionProjectionsBlock, SessionSearchItem, SessionSummary,
 } from './sessions.ts'
 import type { ToolEventView } from './events.ts'
@@ -143,6 +143,7 @@ export const sessionHistoryRequestSchema = z.object({
   sessionId: sessionIdSchema,
   beforeSeq: z.number().int().nonnegative().optional(),
   maxMessages: z.number().int().positive().optional(),
+  projection: z.literal('settled').optional(),
 }) satisfies z.ZodType<Wire<RequestPayload<'session.history'>>>
 
 /** Complete provider/model selection. */
@@ -204,6 +205,12 @@ export const historyEntrySchema: z.ZodType<Wire<HistoryEntry>> = z.object({
   view: toolEventViewSchema.optional(),
 }) as unknown as z.ZodType<Wire<HistoryEntry>>
 
+/** Raw seq interval covered by one sparse history projection. */
+export const historyRangeSchema: z.ZodType<Wire<HistoryRange>> = z.object({
+  startSeq: z.number().int().nonnegative(),
+  endSeq: z.number().int().nonnegative(),
+}).refine(range => range.startSeq <= range.endSeq, 'history range startSeq must not exceed endSeq')
+
 /**
  * Projection baseline passthrough: `values` stays a wide record — each value
  * was already parsed by its provider's own schema on the host side, and
@@ -239,6 +246,7 @@ export const imageLimitsProjectionSchema = z.object({
 export const sessionHistoryValueSchema: z.ZodType<Wire<ResponseValue<'session.history'>>> = z.object({
   events: z.array(historyEntrySchema),
   hasMore: z.boolean(),
+  range: historyRangeSchema.nullable().optional(),
   projections: sessionProjectionsBlockSchema.optional(),
 })
 

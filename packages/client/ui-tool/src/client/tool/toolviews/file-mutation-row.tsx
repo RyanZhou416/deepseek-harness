@@ -40,8 +40,8 @@ export function FileMutationRow({ toolName, block, cwd, home, openFile, inspect,
       icon={<IconEditOutline16 size={14} />}
       title={model.title}
       summary={model.summary}
-      body={null}
-      output={model.output}
+      details={model}
+      showInput={false}
       errorSummary={model.errorSummary}
       diff={diff}
       state={model.state}

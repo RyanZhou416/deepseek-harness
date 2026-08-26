@@ -78,8 +78,20 @@ export function classifyTool(toolName: string): ToolRowVariant {
   return TOOL_VARIANTS[toolName] ?? 'others'
 }
 
-/** Everything ToolRow needs, derived once from the frozen slice. */
-export interface ToolRowModel {
+/** Expanded text material derived only after a Tool row opens. */
+export interface ToolRowDetailsModel {
+  /** Whether reading `body` can produce an Input section. */
+  hasBody: boolean
+  /** Whether reading `output` can produce an Output section. */
+  hasOutput: boolean
+  /** Expanded-body input text (pretty args); null = no input section. */
+  readonly body: string | null
+  /** Flattened result text ({@link resultText}); null while running or when the result carries no text. */
+  readonly output: string | null
+}
+
+/** Everything ToolRow needs, with expanded strings deferred behind getters. */
+export interface ToolRowModel extends ToolRowDetailsModel {
   variant: ToolRowVariant
   title: string
   summary: string
@@ -89,10 +101,6 @@ export interface ToolRowModel {
    * relative values against the session cwd before opening.
    */
   filePath: string | undefined
-  /** Expanded-body input text (pretty args); null = no input section. */
-  body: string | null
-  /** Flattened result text ({@link resultText}); null while running or when the result carries no text. */
-  output: string | null
   /** First line of the result text on an error row; null for every other state. */
   errorSummary: string | null
   state: ToolRowState
@@ -129,6 +137,27 @@ function parseArgs(argsRaw: string): unknown {
 function firstLine(text: string): string {
   const nl = text.indexOf('\n')
   return nl === -1 ? text : text.slice(0, nl)
+}
+
+/** Whether flattening a settled result would produce a non-empty string. */
+function hasResultText(node: ToolResultNode): boolean {
+  if (node.content.length === 0) return node.error !== undefined
+  if (node.content.length > 1) return true
+  return node.content.some(block => block.type !== 'text' || block.text !== '')
+}
+
+/** First flattened output line without materializing the complete result. */
+function resultFirstLine(node: ToolResultNode): string | null {
+  if (node.content.length === 0) {
+    return node.error === undefined ? null : `${node.error.name}: ${node.error.code}`
+  }
+  // A durable result's content is a JSON array, so a non-empty array has a
+  // concrete first element (it cannot carry a sparse slot across the wire).
+  const first = node.content[0] as ToolResultNode['content'][number]
+  const text = first.type === 'text' ? first.text : '{'
+  if (text !== '') return firstLine(text)
+  // Two empty blocks flatten to a newline: output exists, but its first line is empty.
+  return node.content.length > 1 ? '' : null
 }
 
 function pickString(args: Record<string, unknown>, keys: readonly string[]): string | undefined {
@@ -230,18 +259,26 @@ export function toolRowModel(toolName: string, block: ToolCallBlock, cwd?: strin
   const summary = variant === 'others' && toolName !== '' && toolTitle === undefined
     ? `${toolName} · ${base}`
     : base
-  // The empty string is "no text" for both derived result fields: a settled
-  // call with blank content has nothing to expand, and a blank first line
-  // would erase the collapsed error row's summary slot.
-  const output = done ? (resultText(block) || null) : null
-  const errorSummary = state === 'error' && output !== null ? firstLine(output) : null
+  const hasBody = argsRaw !== ''
+  const hasOutput = done && hasResultText(block)
+  const errorSummary = state === 'error' && done ? resultFirstLine(block) : null
+  let body: string | null | undefined
+  let output: string | null | undefined
   return {
     variant,
     title: toolTitle ?? VARIANT_TITLES[variant],
     summary,
     filePath: deriveFilePath(variant, argsRaw),
-    body: deriveBody(variant, argsRaw),
-    output,
+    hasBody,
+    hasOutput,
+    get body() {
+      if (body === undefined) body = deriveBody(variant, argsRaw)
+      return body
+    },
+    get output() {
+      if (output === undefined) output = done ? (resultText(block) || null) : null
+      return output
+    },
     errorSummary,
     state,
   }

@@ -45,18 +45,16 @@ export interface DiffCardModel {
  * @param diffs - the view's `diffs` field, unverified.
  * @returns the validated hunks, or null when the payload is not usable.
  */
-function narrowDiffs(diffs: unknown): DiffHunk[] | null {
+function narrowDiffs(diffs: unknown): readonly DiffHunk[] | null {
   if (!Array.isArray(diffs) || diffs.length === 0) return null
-  const out: DiffHunk[] = []
   for (const hunk of diffs) {
     if (typeof hunk !== 'object' || hunk === null) return null
     const { path, oldText, newText } = hunk as Record<string, unknown>
     if (typeof path !== 'string') return null
     if (oldText !== null && typeof oldText !== 'string') return null
     if (typeof newText !== 'string') return null
-    out.push({ path, oldText, newText })
   }
-  return out
+  return diffs as DiffHunk[]
 }
 
 /**
@@ -86,12 +84,28 @@ export function diffCardModel(block: ToolCallBlock): DiffCardModel | null {
     // Running: the call view may carry the intended diff; the result is absent.
     const call = block.callView?.card === 'diff' ? block.callView : null
     const diffs = call === null ? null : narrowDiffs(call.diffs)
-    return diffs === null ? null : { card: { diffs } }
+    let copied: DiffHunk[] | undefined
+    return diffs === null ? null : {
+      card: {
+        get diffs(): DiffHunk[] {
+          copied ??= diffs.map(({ path, oldText, newText }) => ({ path, oldText, newText }))
+          return copied
+        },
+      },
+    }
   }
   // Settled: the result view's applied hunks replace the call-time diff. A
   // window that dropped the call head leaves only the result, which still
   // renders — the result view carries the whole change.
   const result = block.resultView?.card === 'diff' ? block.resultView : null
   const diffs = result === null ? null : narrowDiffs(result.diffs)
-  return diffs === null ? null : { card: { diffs } }
+  let copied: DiffHunk[] | undefined
+  return diffs === null ? null : {
+    card: {
+      get diffs(): DiffHunk[] {
+        copied ??= diffs.map(({ path, oldText, newText }) => ({ path, oldText, newText }))
+        return copied
+      },
+    },
+  }
 }

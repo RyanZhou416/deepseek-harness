@@ -71,7 +71,7 @@ export function BashRow({ toolName, block, sessionId, useSessions, inspect, t }:
   // full error reachable instead of collapsing the row to the first line.
   const genericError = terminal === null
     && model.state === 'error'
-    && (model.body !== null || model.output !== null)
+    && (model.hasBody || model.hasOutput)
   const expandable = terminal !== null || genericError
   const open = expanded && expandable
   const failureLine = model.state === 'error' ? model.errorSummary : null

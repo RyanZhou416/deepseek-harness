@@ -131,8 +131,9 @@ export interface ConversationViewDefinitions {
 }
 
 /**
- * Session-owned incremental engine that assembles business Contexts from a
- * contiguous Event window and materializes registered view snapshots.
+ * Session-owned incremental engine that assembles business Contexts from
+ * projected history Events plus their contiguous live tail and materializes
+ * registered view snapshots.
  */
 export class ConversationNodeAssembler implements ConversationViewSnapshotStore {
   private readonly contexts = new Map<string, InternalContext>()
@@ -161,7 +162,7 @@ export class ConversationNodeAssembler implements ConversationViewSnapshotStore 
 
   /**
    * Replace the complete loaded window after open, resync, or gap repair.
-   * @param entries - complete contiguous window.
+   * @param entries - complete projected window; settled history may omit redundant chunks.
    * @param hasMore - whether older history remains outside the window.
    * @returns immediate publication request.
    */

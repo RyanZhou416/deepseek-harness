@@ -14,7 +14,9 @@ import type { ConversationNodeDefinition } from '../src/client/contract/conversa
 import { Session } from '../src/client/sessions/session.ts'
 import type { SessionRuntime } from '../src/client/sessions/service.ts'
 import type { WorkspaceRuntime } from '../src/client/workspaces/service.ts'
+import type { Config } from '../src/config.ts'
 import { FakeApiClient, fakeRemote, ok } from './fake-api.client.ts'
+import { ev } from './event-script.client.ts'
 
 interface Bench {
   ctx: Context
@@ -23,7 +25,7 @@ interface Bench {
   stopped: number
 }
 
-async function mount(): Promise<Bench> {
+async function mount(config: Config = {}): Promise<Bench> {
   const ctx = new Context()
   await ctx.plugin(TypertRegistry)
   const api = new FakeApiClient()
@@ -46,7 +48,7 @@ async function mount(): Promise<Bench> {
   ctx.reflect.provide('connection', handle)
   ctx.reflect.provide('remote', {})
   ctx.reflect.provide('remote.commands', fakeRemote().commands)
-  await ctx.plugin(RuntimeClient).await()
+  await ctx.plugin(RuntimeClient, config).await()
   return bench
 }
 
@@ -143,6 +145,32 @@ describe('runtime client apply', () => {
 
     expect(rebuild).toHaveBeenCalledOnce()
     rebuild.mockRestore()
+  })
+
+  it('passes the configured live-window threshold into runtime-created Sessions', async () => {
+    const bench = await mount({ liveWindowRebaseEventThreshold: 3 })
+    const sessionId = 's-bounded' as never
+    bench.sinks?.onHostEnvelope?.({
+      rpcId: 'r-bounded' as never,
+      payload: { type: 'host/session-added', blank: false, sessionId } as never,
+    })
+    await flushMicrotasks()
+    const sessions = bench.ctx.get('sessions') as SessionRuntime
+    sessions.open(sessionId)
+    await flushMicrotasks()
+    expect(bench.api.callsOf('session.history')).toHaveLength(1)
+
+    const feed = (event: ReturnType<typeof ev.turnStart>) => {
+      bench.sinks?.onMuxEnvelope?.({
+        rpcId: 'mux-bounded' as never,
+        payload: { type: 'session/event', sessionId, event },
+      })
+    }
+    feed(ev.turnStart(0, 1))
+    feed(ev.stepStart(1, 1))
+    feed(ev.chunkStart(2, 1))
+    feed(ev.assistant(3, 1, '完成'))
+    await vi.waitFor(() => { expect(bench.api.callsOf('session.history')).toHaveLength(2) })
   })
 
   it('stops the stream loop when the plugin fiber unloads', async () => {

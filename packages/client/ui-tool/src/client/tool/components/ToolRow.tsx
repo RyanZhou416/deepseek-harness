@@ -20,15 +20,16 @@
 import { useState, type KeyboardEvent, type MouseEvent, type ReactNode } from 'react'
 import clsx from 'clsx'
 import {
-  CodeBlock, DiffBlock, DisclosureRow, IconInspectOutline12, ReadBlock, SearchBlock, StateDot, TerminalBlock, WebBlock,
+  DisclosureRow, StateDot,
 } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { WebBlockProps } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { TranslateNS } from '@deepseek-ai/dsh-client-ui-slots'
-import { CHAT_DIFF_MAX_LINES, type DiffCardModel } from '../models/diff-card-model.ts'
-import { CHAT_READ_MAX_LINES, type ReadCardModel } from '../models/read-card-model.ts'
-import { CHAT_SEARCH_MAX_LINES, type SearchCardModel } from '../models/search-card-model.ts'
-import { terminalBlockLabels, type TerminalCardModel } from '../models/terminal-card-model.ts'
-import type { ToolRowState, ToolRowVariant } from '../models/tool-call-model.ts'
+import type { DiffCardModel } from '../models/diff-card-model.ts'
+import type { ReadCardModel } from '../models/read-card-model.ts'
+import type { SearchCardModel } from '../models/search-card-model.ts'
+import type { TerminalCardModel } from '../models/terminal-card-model.ts'
+import type { ToolRowDetailsModel, ToolRowState, ToolRowVariant } from '../models/tool-call-model.ts'
+import { ToolRowBody } from './ToolRowBody.tsx'
 import css from './ToolRow.module.css'
 
 export interface ToolRowProps {
@@ -49,10 +50,10 @@ export interface ToolRowProps {
    * error row, whose collapsed summary is the failure line instead.
    */
   summarySuffix?: string | null | undefined
-  /** Expanded-body input text; null = no input section. */
-  body: string | null
-  /** Flattened result text for the expanded Output section; null/absent = no output section. */
-  output?: string | null | undefined
+  /** Lazy text details; the row reads the large strings only after expansion. */
+  details: ToolRowDetailsModel
+  /** Whether the expanded generic body includes Tool arguments. */
+  showInput?: boolean | undefined
   /** Error first line shown as the collapsed summary on an error row; null/absent = keep `summary`. */
   errorSummary?: string | null | undefined
   /**
@@ -133,8 +134,8 @@ export function ToolRow({
   title,
   summary,
   summarySuffix,
-  body,
-  output,
+  details,
+  showInput = true,
   errorSummary,
   terminal,
   diff,
@@ -152,12 +153,11 @@ export function ToolRow({
   const readBody = read ?? null
   const searchBody = search ?? null
   const webBody = web ?? null
-  const outputText = output ?? null
   // A card replaces the text body; a call carries at most one card kind, so the
   // card props are mutually exclusive. Any of them, or a text body/output,
   // makes the row expandable.
   const card = terminalBody ?? diffBody ?? readBody ?? searchBody ?? webBody
-  const expandable = body !== null || outputText !== null || card !== null
+  const expandable = (showInput && details.hasBody) || details.hasOutput || card !== null
   const open = expanded && expandable
   // The run-state label AT needs: the StateDot and the running sweep are both
   // aria-hidden / colour-only, so a stopped or running row is otherwise silent.
@@ -185,9 +185,6 @@ export function ToolRow({
   const fileLinkKeyDown = (event: KeyboardEvent<HTMLButtonElement>) => {
     if (event.key === 'Enter' || event.key === ' ') event.stopPropagation()
   }
-  // The code variant's program renders through CodeBlock (shiki), so only its
-  // output joins the IN/OUT card; every other variant's input does too.
-  const cardBody = variant === 'code' ? null : body
   // The state substitution rides the idle icon slot, so an expandable error
   // row keeps DisclosureRow's icon→chevron hover preview (its default) instead
   // of losing it with the icon.
@@ -231,76 +228,21 @@ export function ToolRow({
           </>
         )}
       >
-        {/* The wrapper (sibling of the header row, so clicks inside never
-            toggle it) carries the expanded body and the Inspect pill below. */}
-        <div className={css.bodyWrap}>
-          {terminalBody !== null
-            ? (
-              <TerminalBlock
-                {...terminalBody.card}
-                maxLines={Infinity}
-                labels={terminalBlockLabels(t)}
-                className={css.terminalBody}
-              />
-            )
-            : diffBody !== null
-              ? <DiffBlock {...diffBody.card} maxLines={CHAT_DIFF_MAX_LINES} className={css.diffBody} />
-              : readBody !== null
-                ? <ReadBlock {...readBody} maxLines={CHAT_READ_MAX_LINES} className={css.readBody} />
-                : searchBody !== null
-                  ? (
-                    <>
-                      <SearchBlock {...searchBody.card} maxLines={CHAT_SEARCH_MAX_LINES} className={css.searchBody} />
-                      {/* A capped search's recovery locator lives only in the result
-                          text; show it below the card so the dropped rows survive. */}
-                      {searchBody.recovery !== undefined && (
-                        <div className={css.searchRecovery}>{searchBody.recovery}</div>
-                      )}
-                    </>
-                  )
-                  : webBody !== null
-                    ? <WebBlock {...webBody} className={css.webBody} />
-                    : (
-                      <>
-                        {variant === 'code' && body !== null && (
-                          <div className={css.bodyScroll}>
-                            <CodeBlock code={body} lang="typescript" copyLabel={t('copy')} copiedLabel={t('copied')} className={css.codeBody} />
-                          </div>
-                        )}
-                        {(cardBody !== null || outputText !== null) && (
-                          <div className={css.ioCard}>
-                            {cardBody !== null && (
-                              <div className={css.ioSection}>
-                                <span className={css.ioLabel}>IN</span>
-                                <span className={css.ioText}>{cardBody}</span>
-                              </div>
-                            )}
-                            {cardBody !== null && outputText !== null && (
-                              <span className={css.ioDivider} aria-hidden />
-                            )}
-                            {outputText !== null && (
-                              <div className={css.ioSection}>
-                                <span className={css.ioLabel}>OUT</span>
-                                <span className={css.ioText} data-error={state === 'error' || undefined}>
-                                  {outputText}
-                                </span>
-                              </div>
-                            )}
-                          </div>
-                        )}
-                      </>
-                    )}
-          {inspect !== undefined && (
-            <button
-              type="button"
-              className={css.inspectButton}
-              onClick={inspect}
-            >
-              <IconInspectOutline12 />
-              Inspect
-            </button>
-          )}
-        </div>
+        {open ? (
+          <ToolRowBody
+            t={t}
+            variant={variant}
+            details={details}
+            showInput={showInput}
+            state={state}
+            terminal={terminalBody}
+            diff={diffBody}
+            read={readBody}
+            search={searchBody}
+            web={webBody}
+            inspect={inspect}
+          />
+        ) : null}
       </DisclosureRow>
     </div>
   )

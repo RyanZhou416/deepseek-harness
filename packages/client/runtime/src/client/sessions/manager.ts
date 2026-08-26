@@ -11,6 +11,7 @@ import type {
 import { transportError } from '@deepseek-ai/dsh-host-apiproxy/api'
 import { mergeOrderedBaseline } from '../ordered-baseline.ts'
 import type { ConversationRuntime } from './conversation-assembler.ts'
+import { DEFAULT_LIVE_WINDOW_REBASE_EVENT_THRESHOLD } from '../../config.ts'
 import type { SessionListEntry, TitledSessionSummary } from './lineage.ts'
 import { flattenLineage } from './lineage.ts'
 import type { PendingInteractionStatus } from './pending.ts'
@@ -170,6 +171,7 @@ export class SessionManager {
     restoredSelection?: SessionId,
     restoredAddress?: SubagentAddress,
     private readonly conversation?: ConversationRuntime,
+    private readonly liveWindowRebaseEventThreshold = DEFAULT_LIVE_WINDOW_REBASE_EVENT_THRESHOLD,
   ) {
     this.selected = restoredSelection
     if (restoredAddress !== undefined) this.addresses.set(restoredAddress.childSessionId, restoredAddress)
@@ -319,6 +321,7 @@ export class SessionManager {
       },
       projections: this.projectionStore(sessionId),
       ...this.conversation === undefined ? {} : { conversation: this.conversation },
+      liveWindowRebaseEventThreshold: this.liveWindowRebaseEventThreshold,
     })
   }
 

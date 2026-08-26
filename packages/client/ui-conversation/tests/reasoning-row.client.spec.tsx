@@ -97,6 +97,11 @@ describe('ReasoningRow', () => {
     )
     const row = view.getByRole('button')
 
+    // DisclosureRow owns the lazy mount: only the one-line summary exists
+    // until the user asks for the complete reasoning text.
+    expect(view.queryByText(/Check persistence/)).toBeNull()
+    expect(view.container.querySelector('[class*="thinkBody"]')).toBeNull()
+
     fireEvent.click(view.getByText('Inspect the session'))
     expect(row.getAttribute('aria-expanded')).toBe('true')
     expect(view.getByText(/Check persistence/)).toBeTruthy()

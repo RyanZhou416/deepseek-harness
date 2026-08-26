@@ -37,6 +37,7 @@ import type { SessionListPhase, SessionSearchResultItem, SubagentCatalogSnapshot
 import type { PendingInteractionStatus } from './pending.ts'
 import { SessionProvideChannel } from './provide.ts'
 import type { Session } from './session.ts'
+import { DEFAULT_LIVE_WINDOW_REBASE_EVENT_THRESHOLD } from '../../config.ts'
 
 /** Session list row projected from the host list RPC plus live stream increments. */
 export interface SessionSummary {
@@ -225,6 +226,12 @@ export interface SessionProvideDescriptor {
   resolve(binding: SessionBinding): SessionProvideContribution
 }
 
+/** Session object-layer residency settings resolved by the runtime plugin. */
+export interface SessionRuntimeOptions {
+  /** Raw-event count that rebases finalized live tails through settled history. */
+  liveWindowRebaseEventThreshold: number
+}
+
 /** Root sessions service: list store, current selection, object-layer manager, scope tree, bindings, and breadcrumb routes. */
 export class SessionRuntime implements ISessions {
   /**
@@ -274,12 +281,16 @@ export class SessionRuntime implements ISessions {
    * @param api - wire client shared with every Session.
    * @param remote - generated Remote namespaces shared with every Session.
    * @param conversationRuntime - same-pass registry instances, when runtime apply owns them.
+   * @param options - resolved browser Session residency settings.
    */
   constructor(
     private readonly rootCtx: Context,
     api: IApiClient,
     remote: SessionRemotes,
     conversationRuntime?: ConversationRuntime,
+    options: SessionRuntimeOptions = {
+      liveWindowRebaseEventThreshold: DEFAULT_LIVE_WINDOW_REBASE_EVENT_THRESHOLD,
+    },
   ) {
     this.selection = createSnapshotStore<SessionSelection>(
       {},
@@ -298,6 +309,7 @@ export class SessionRuntime implements ISessions {
       restored.sessionId,
       restored.subagentAddress,
       conversation,
+      options.liveWindowRebaseEventThreshold,
     )
     this.list = createSnapshotStore<SessionListState>({
       ids: [], byId: {}, current: undefined, phase: 'pending',

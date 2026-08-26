@@ -283,9 +283,20 @@ describe('mux live view computation', () => {
     expect(summaryIndex).toBeGreaterThan(-1)
     expect(page[summaryIndex + 1]?.seq).toBe(summary.seq + 1)
     expect(page.map(event => event.seq)).toEqual(page.map((_event, index) => third.seq + index))
+    expect(response.result.value.range).toEqual({ startSeq: third.seq, endSeq: summary.seq + 1 })
+
+    const compactStartSeq = response.result.value.range?.startSeq
+    if (compactStartSeq === undefined) throw new Error('expected compact history range')
+    const older = await api.sessions.history({
+      rpcId: RpcId('t-hist-compact-older'),
+      payload: { sessionId: session.id, beforeSeq: compactStartSeq, maxMessages: 2 },
+    })
+    if (!older.result.ok) throw new Error('unreachable')
+    expect(older.result.value.range?.endSeq).toBe(third.seq - 1)
+    expect(older.result.value.events.at(-1)?.event.seq).toBe(third.seq - 1)
   })
 
-  it('paginates a message with many provenance sources without variadic argument expansion', async () => {
+  it('paginates many chunk sources before projecting them from the wire response', async () => {
     const { ctx } = await harness()
     const api = createApiProxy(ctx, { defaultModelSelection: () => ({ provider: 'p', model: 'm' }), cwd: '/tmp' })
     const session = ctx.sessions.create()
@@ -296,6 +307,7 @@ describe('mux live view computation', () => {
       step: 1,
       chunk: { type: 'text-delta', index, text: 'x' },
     }).seq)
+    const firstToken = session.events[sources[0] as number] as SessionEvent
     const message = session.append('assistant/message', {
       turn: 1,
       step: 1,
@@ -312,16 +324,59 @@ describe('mux live view computation', () => {
       return scalarMin(...values)
     })
     try {
-      const response = await api.sessions.history({
-        rpcId: RpcId('t-hist-large-provenance'),
+      const raw = await api.sessions.history({
+        rpcId: RpcId('t-hist-large-provenance-raw'),
         payload: { sessionId: session.id, maxMessages: 1 },
       })
+      if (!raw.result.ok) throw new Error('unreachable')
+      expect(raw.result.value.events.map(entry => entry.event.seq)).toEqual([...sources, message.seq])
+      expect(raw.result.value.events.at(-1)?.event).toHaveProperty('sourceEventSeqs', sources)
+
+      const response = await api.sessions.history({
+        rpcId: RpcId('t-hist-large-provenance'),
+        payload: { sessionId: session.id, maxMessages: 1, projection: 'settled' },
+      })
       if (!response.result.ok) throw new Error('unreachable')
-      expect(response.result.value.events.map(entry => entry.event.seq)).toEqual([...sources, message.seq])
+      expect(response.result.value.events.map(entry => entry.event.seq)).toEqual([sources[0], message.seq])
+      expect(response.result.value.events[0]?.event).toMatchObject({
+        type: 'assistant/chunk', seq: firstToken.seq, time: firstToken.time,
+      })
+      expect(response.result.value.events[1]?.event).not.toHaveProperty('sourceEventSeqs')
+      expect(response.result.value.range).toEqual({ startSeq: sources[0], endSeq: message.seq })
       expect(response.result.value.hasMore).toBe(true)
+      expect(message.sourceEventSeqs).toEqual(sources)
+
+      const projectedStartSeq = response.result.value.range?.startSeq
+      if (projectedStartSeq === undefined) throw new Error('expected projected history range')
+      const older = await api.sessions.history({
+        rpcId: RpcId('t-hist-large-provenance-older'),
+        payload: {
+          sessionId: session.id,
+          beforeSeq: projectedStartSeq,
+          maxMessages: 1,
+          projection: 'settled',
+        },
+      })
+      if (!older.result.ok) throw new Error('unreachable')
+      expect(older.result.value.range).toEqual({ startSeq: 0, endSeq: 0 })
+      expect(older.result.value.events.map(entry => entry.event.seq)).toEqual([0])
     } finally {
       min.mockRestore()
     }
+  })
+
+  it('reports a null raw range for an empty history page', async () => {
+    const { ctx } = await harness()
+    const api = createApiProxy(ctx, { defaultModelSelection: () => ({ provider: 'p', model: 'm' }), cwd: '/tmp' })
+    const session = ctx.sessions.create()
+    ctx.agents.register({ id: session.id, session, status: 'idle', ctx } as Agent)
+
+    const response = await api.sessions.history({
+      rpcId: RpcId('t-hist-empty-range'), payload: { sessionId: session.id },
+    })
+
+    if (!response.result.ok) throw new Error('unreachable')
+    expect(response.result.value).toMatchObject({ events: [], hasMore: false, range: null })
   })
 
   it('drops a disposed session from the live open-call table (result after dispose gets no view)', async () => {
