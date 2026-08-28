@@ -1,6 +1,6 @@
 import { describe, expect, expectTypeOf, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
-import { createUserMessage, CallId, createMessage } from '@deepseek-ai/dsh-llm'
+import { createUserMessage, ToolCallId, createMessage } from '@deepseek-ai/dsh-llm'
 import type { ContentBlock, Message, TokenUsage } from '@deepseek-ai/dsh-llm'
 import SessionStore, { Session, SessionId, canonicalHeader } from '@deepseek-ai/dsh-session'
 import type { EpochHeader, SessionEvent } from '@deepseek-ai/dsh-session'
@@ -134,10 +134,10 @@ describe('TokenMeter pricing', () => {
     const blocks: ContentBlock[] = [
       { type: 'text', text: 'abcd' },
       { type: 'reasoning', text: 'ab' },
-      { type: 'tool-call', id: CallId('c'), name: 'read', arguments: '{"x":1}' },
+      { type: 'tool-call', id: ToolCallId('c'), name: 'read', arguments: '{"x":1}' },
       {
         type: 'tool-result',
-        toolCallId: CallId('c'),
+        toolCallId: ToolCallId('c'),
         content: [{ type: 'text', text: 'xy' }],
         isError: false,
       },
@@ -185,7 +185,8 @@ describe('TokenMeter pricing', () => {
     expect(Object.isFrozen(snapshot.nodes[0])).toBe(true)
     expectSurfaceTotal(snapshot)
     expect(() => {
-      ;(snapshot.nodes as Array<{ seq: number; tokens: number }>).push({ seq: 99, tokens: 1 })
+      ;(snapshot.nodes as Array<{ seq: number; tokens: number; heuristicTokens: number }>)
+        .push({ seq: 99, tokens: 1, heuristicTokens: 1 })
     }).toThrow(TypeError)
     expect(() => {
       ;(snapshot.nodes[0] as { seq: number; tokens: number }).tokens = 1
@@ -437,7 +438,7 @@ describe('replay anchors and surface folds', () => {
     })
     const measurement = meter().measure(session)
     const assistant = session.events.find(event => event.type === 'assistant/message')!
-    expect(measurement.nodes).toEqual([{ seq: assistant.seq, tokens: 0 }])
+    expect(measurement.nodes).toEqual([{ seq: assistant.seq, tokens: 0, heuristicTokens: 0 }])
     expect(measurement.surfaceTokens).toBe(0)
     expectSurfaceTotal(measurement)
   })
@@ -465,6 +466,32 @@ describe('malformed replay and listener lifecycle', () => {
       }),
     }, { surfaceOp: 'append', sourceEventSeqs: [] })
     expectRepeatedFailure(meter(), session, /no matching step\/start/)
+  })
+
+  it('leaves the priced surface uncommitted when a later validation step rejects the event', () => {
+    // A valid append plan whose anchor validation throws: only commit
+    // ordering keeps the surface from double-counting across retries.
+    const session = Session.create(SessionId('bad-step-surface'))
+    appendHeader(session, header('deepseek-v4-flash'))
+    session.append('assistant/message', {
+      turn: 1,
+      step: 1,
+      message: createMessage({
+        role: 'assistant',
+        content: [{ type: 'text', text: 'planned but never committed' }],
+        source: {
+          kind: 'model',
+          ...{ provider: 'mock', model: 'deepseek-v4-flash' },
+        },
+      }),
+    }, { surfaceOp: 'append', sourceEventSeqs: [] })
+    const service = meter()
+    const states = (service as unknown as {
+      states: WeakMap<Session, { surface: unknown[] }>
+    }).states
+    expectRepeatedFailure(service, session, /no matching step\/start/)
+    const state = states.get(session)
+    expect(state?.surface).toEqual([])
   })
 
   it('clears completed step boundaries and rejects overlapping or late step events', () => {
@@ -697,26 +724,25 @@ describe('malformed replay and listener lifecycle', () => {
     await secondFiber.dispose()
   })
 
-  it('folds active live events without materializing the public log snapshot', async () => {
+  it('folds active live events without replay catch-up on every append', async () => {
     const ctx = new Context()
     await ctx.plugin(SessionStore)
     await ctx.plugin(SessionProjectionRegistry)
     const fiber = await ctx.plugin(TokenMeter)
     const session = ctx.sessions.create(SessionId('incremental-live-fold'))
-    ctx.tokenMeter.measure(session)
+    const meter = ctx.tokenMeter
+    meter.measure(session)
+    const syncProbe = meter as unknown as { _sync: (value: Session) => void }
+    const sync = vi.spyOn(syncProbe, '_sync')
 
-    const eventsGetter = vi.spyOn(Session.prototype, 'events', 'get')
-    // Vitest resolves an accessor spy through the prototype before wrapping it.
-    eventsGetter.mockClear()
-    session.append('todo/write', { todos: [] })
-    const initialPublicationReads = eventsGetter.mock.calls.length
-    for (let index = 1; index < 32; index += 1) {
+    for (let index = 0; index < 32; index += 1) {
       session.append('todo/write', { todos: [] })
     }
-    expect(eventsGetter).toHaveBeenCalledTimes(initialPublicationReads)
-    eventsGetter.mockRestore()
+    expect(sync).not.toHaveBeenCalled()
 
-    expect(ctx.tokenMeter.measure(session).logRevision).toBe(session.seq)
+    expect(meter.measure(session).logRevision).toBe(session.seq)
+    expect(sync).toHaveBeenCalledOnce()
+    sync.mockRestore()
     await fiber.dispose()
   })
 })

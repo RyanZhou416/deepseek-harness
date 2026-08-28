@@ -134,7 +134,7 @@ async function waitIdle(agents: readonly Agent[]): Promise<void> {
 }
 
 describe('memory admission plugin', () => {
-  it('holds one reservation through the complete real agent step', async () => {
+  it('holds one reservation through the real model phase', async () => {
     const ctx = new Context()
     await mountAgentLoopTestDependencies(ctx)
     await ctx.plugin(AgentLoop, { agents: [] })

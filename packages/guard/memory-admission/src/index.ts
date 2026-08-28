@@ -20,7 +20,9 @@ declare module '@deepseek-ai/cordis' {
   }
 }
 
+/** Cordis plugin name. */
 export const name = 'memory-admission'
+/** Services required before process-wide admission listeners can install. */
 export const inject = ['agents']
 
 /** Configurable process-wide admission limits. */
@@ -35,6 +37,7 @@ export interface Config {
   sampleIntervalMs?: number
 }
 
+/** Loader schema for process-wide admission limits. */
 export const Config: z<Config> = z.object({
   maxConcurrentSteps: z.number().step(1).min(1).default(8),
   heapHighWatermarkRatio: z.number().min(0.01).max(0.99).default(0.82),
@@ -63,7 +66,11 @@ function heapRatio(): number {
   return process.memoryUsage().heapUsed / getHeapStatistics().heap_size_limit
 }
 
-/** Install the process-wide pre-step admission policy. */
+/**
+ * Install the process-wide pre-step admission policy.
+ * @param ctx - Cordis context carrying the Agent registry and lifecycle events.
+ * @param config - validated process-wide admission limits.
+ */
 export function apply(ctx: Context, config: Config): void {
   const gate = new StepAdmissionGate(resolveConfig(config), heapRatio)
   const reservations = new Map<SessionId, Reservation>()

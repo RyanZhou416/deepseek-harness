@@ -2,5 +2,5 @@
 # side as of the last confirmed-consistent state. Both languages carry equal authority;
 # after editing either side, bring the other along and re-record with:
 #   pnpm run verify-translation-pairing --write packages/guard/memory-admission/README.md
-README.md: 7cbf773e8033e4c2c0b2fdaa52042675153d0201
-README.zh.md: 1e8774c96e5a9b745467cc1dd85c50a6759f7717
+README.md: 289e940479ef23a57060695d129ad3d97c508bc2
+README.zh.md: ef231a41325f2d61455451cecbb946e9074292b9

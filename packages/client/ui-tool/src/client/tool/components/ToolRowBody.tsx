@@ -1,15 +1,16 @@
 /** Expanded Tool-row content, mounted only while its disclosure is open. */
-import {
-  CodeBlock, DiffBlock, IconInspectOutline12, ReadBlock, SearchBlock, TerminalBlock, WebBlock,
-} from '@deepseek-ai/dsh-client-ui-primitives'
+import { CodeBlock, DiffBlock, IconInspectOutline12, ReadBlock, SearchBlock, TerminalBlock, WebBlock } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { ReactNode } from 'react'
-import type { WebBlockProps } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { TranslateNS } from '@deepseek-ai/dsh-client-ui-slots'
 import { CHAT_DIFF_MAX_LINES, type DiffCardModel } from '../models/diff-card-model.ts'
 import { CHAT_READ_MAX_LINES, type ReadCardModel } from '../models/read-card-model.ts'
 import { CHAT_SEARCH_MAX_LINES, type SearchCardModel } from '../models/search-card-model.ts'
-import { terminalBlockLabels, type TerminalCardModel } from '../models/terminal-card-model.ts'
+import { localizeTerminalCardModel, terminalBlockLabels, type TerminalCardModel } from '../models/terminal-card-model.ts'
+import { diffBlockLabels, readBlockLabels, searchBlockLabels, webBlockLabels } from '../models/primitive-labels.ts'
+import type { AskQuestionCardModel } from '../models/ask-question-card-model.ts'
 import type { ToolRowDetailsModel, ToolRowState, ToolRowVariant } from '../models/tool-call-model.ts'
+import type { WebCardModelProps } from '../models/web-card-model.ts'
+import { AskQuestionCard } from './AskQuestionCard.tsx'
 import css from './ToolRow.module.css'
 
 /** Material needed only by an expanded Tool row. */
@@ -19,11 +20,12 @@ export interface ToolRowBodyProps {
   details: ToolRowDetailsModel
   showInput: boolean
   state: ToolRowState
+  askQuestion: AskQuestionCardModel | null
   terminal: TerminalCardModel | null
   diff: DiffCardModel | null
   read: ReadCardModel | null
   search: SearchCardModel | null
-  web: WebBlockProps | null
+  web: WebCardModelProps | null
   inspect?: (() => void) | undefined
 }
 
@@ -33,33 +35,36 @@ export interface ToolRowBodyProps {
  * @returns the expanded Tool details body.
  */
 export function ToolRowBody({
-  t, variant, details, showInput, state, terminal, diff, read, search, web, inspect,
+  t, variant, details, showInput, state, askQuestion, terminal, diff, read, search, web, inspect,
 }: ToolRowBodyProps) {
   let content: ReactNode
-  if (terminal !== null) {
+  if (askQuestion !== null) {
+    content = <AskQuestionCard card={askQuestion} />
+  } else if (terminal !== null) {
+    const localized = localizeTerminalCardModel(terminal, t)
     content = (
       <TerminalBlock
-        {...terminal.card}
+        {...localized.card}
         maxLines={Infinity}
         labels={terminalBlockLabels(t)}
         className={css.terminalBody}
       />
     )
   } else if (diff !== null) {
-    content = <DiffBlock {...diff.card} maxLines={CHAT_DIFF_MAX_LINES} className={css.diffBody} />
+    content = <DiffBlock {...diff.card} labels={diffBlockLabels(t)} maxLines={CHAT_DIFF_MAX_LINES} className={css.diffBody} />
   } else if (read !== null) {
-    content = <ReadBlock {...read} maxLines={CHAT_READ_MAX_LINES} className={css.readBody} />
+    content = <ReadBlock {...read} labels={readBlockLabels(t)} maxLines={CHAT_READ_MAX_LINES} className={css.readBody} />
   } else if (search !== null) {
     content = (
       <>
-        <SearchBlock {...search.card} maxLines={CHAT_SEARCH_MAX_LINES} className={css.searchBody} />
+        <SearchBlock {...search.card} labels={searchBlockLabels(t)} maxLines={CHAT_SEARCH_MAX_LINES} className={css.searchBody} />
         {search.recovery !== undefined && (
           <div className={css.searchRecovery}>{search.recovery}</div>
         )}
       </>
     )
   } else if (web !== null) {
-    content = <WebBlock {...web} className={css.webBody} />
+    content = <WebBlock {...web} labels={webBlockLabels(t)} className={css.webBody} />
   } else {
     // Pretty args and flattened output can be very large. Their lazy getters
     // are intentionally first read only in this mounted, cardless branch.
@@ -83,7 +88,7 @@ export function ToolRowBody({
           <div className={css.ioCard}>
             {cardBody !== null && (
               <div className={css.ioSection}>
-                <span className={css.ioLabel}>IN</span>
+                <span className={css.ioLabel}>{t('row.input')}</span>
                 <span className={css.ioText}>{cardBody}</span>
               </div>
             )}
@@ -92,7 +97,7 @@ export function ToolRowBody({
             )}
             {output !== null && (
               <div className={css.ioSection}>
-                <span className={css.ioLabel}>OUT</span>
+                <span className={css.ioLabel}>{t('row.output')}</span>
                 <span className={css.ioText} data-error={state === 'error' || undefined}>
                   {output}
                 </span>
@@ -113,7 +118,7 @@ export function ToolRowBody({
           onClick={inspect}
         >
           <IconInspectOutline12 />
-          Inspect
+          {t('row.inspect')}
         </button>
       )}
     </div>
