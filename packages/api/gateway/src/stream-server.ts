@@ -45,6 +45,8 @@ export class RemoteStreamMuxServer {
    */
   handleUpgrade(req: IncomingMessage, socket: Duplex, head: Buffer): void {
     this.server.handleUpgrade(req, socket, head, (websocket) => {
+      this.heartbeatAlive.set(websocket, true)
+      websocket.on('pong', () => { this.heartbeatAlive.set(websocket, true) })
       this.startHeartbeat()
       this.heartbeatAlive.set(websocket, true)
       websocket.on('pong', () => { this.heartbeatAlive.set(websocket, true) })

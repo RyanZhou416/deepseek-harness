@@ -50,15 +50,15 @@ describe('Remote stream mux server carrier lifecycle', () => {
     await closed
   })
 
-  it('terminates a half-open carrier that misses the next Pong deadline', async () => {
-    const entry = await startMux(async (_endpoint, _payload, signal) => waitForAbort(signal), 10)
+  it('terminates a socket that does not answer the previous heartbeat', async () => {
+    const entry = await startMux(async (_endpoint, _payload, signal) => waitForAbort(signal), 20)
     const client = await connect(entry.url)
     const serverSocket = acceptedSocket(entry.mux)
-    client.pause()
-
-    await vi.waitFor(() => { expect(serverSocket.readyState).toBe(WebSocket.CLOSED) }, { timeout: 100 })
+    serverSocket.removeAllListeners('pong')
+    const terminated = vi.spyOn(serverSocket, 'terminate')
     const closed = once(client, 'close')
-    client.resume()
+
+    await vi.waitFor(() => { expect(terminated).toHaveBeenCalledOnce() })
     await closed
   })
 
@@ -205,7 +205,7 @@ const mapFailure: RemoteStreamFailureMapper = error => ({
   details: {},
 })
 
-async function startMux(open: RemoteStreamOpener, heartbeatIntervalMs = 30_000): Promise<RunningMux> {
+async function startMux(open: RemoteStreamOpener, heartbeatIntervalMs = 2_000): Promise<RunningMux> {
   const mux = new RemoteStreamMuxServer(open, mapFailure, heartbeatIntervalMs)
   const http = createServer()
   http.on('upgrade', (request, socket, head) => { mux.handleUpgrade(request, socket, head) })

@@ -13,9 +13,9 @@ import { ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import type { Session, SessionEvent, SessionHeader, SessionId } from '@deepseek-ai/dsh-session'
 import type {} from '@deepseek-ai/dsh-session-persistence'
 import { SessionQueryError, type SessionObservation } from '@deepseek-ai/dsh-session-query'
-import { TypertLookupFailure } from '@deepseek-ai/dsh-typert-protocol'
+import { RemoteError } from '@deepseek-ai/dsh-typert-protocol'
 import type {} from '@deepseek-ai/dsh-typert-registry'
-import type { ModelSelection, SessionError } from './types.ts'
+import type { ModelSelection } from './types.ts'
 
 /** Cold Session identity absent from persistence. */
 export class ApiSessionNotFound extends Error {}
@@ -59,10 +59,7 @@ export class ApiSessionPresetConflict extends Error {
 }
 
 /** Failures produced while resolving one ordinary Session identity to its live Agent. */
-export type ApiSessionAgentError = Extract<
-  SessionError,
-  { readonly code: 'session-not-found' | 'agent-busy' | 'internal' }
->
+export type ApiSessionAgentError = RemoteError<'session/not-found' | 'session/agent-busy' | 'gateway/internal'>
 
 /** Result of resolving one ordinary Session identity to its live Agent. */
 export type ApiSessionAgentResult =
@@ -99,11 +96,11 @@ export function hasApiSessionSubagentOwner(
  * @returns a stable Session-domain failure.
  */
 export function apiSessionSubagentOwnershipError(sessionId: SessionId): ApiSessionAgentError {
-  return {
-    code: 'agent-busy',
-    message: `session "${sessionId}" is owned by subagent routing`,
-    details: { reason: 'use subagent delivery for this child session' },
-  }
+  return new RemoteError(
+    'session/agent-busy',
+    `session "${sessionId}" is owned by subagent routing`,
+    { reason: 'use subagent delivery for this child session' },
+  )
 }
 
 /**
@@ -159,17 +156,17 @@ export class ApiSessionAgentController {
   ) {
     ctx.typert.lookups.configure('agent', async (sessionId: SessionId) => {
       const found = await this.resolveAgent(sessionId)
-      if ('error' in found) throw new TypertLookupFailure(found.error)
+      if ('error' in found) throw found.error
       return found.agent
     })
     ctx.typert.lookups.configure('session', async (sessionId: SessionId) => {
       const found = await this.resolveAgent(sessionId)
-      if ('error' in found) throw new TypertLookupFailure(found.error)
+      if ('error' in found) throw found.error
       return found.agent.session
     })
     ctx.typert.contexts.configureHost('agent', async (sessionId: SessionId) => {
       const found = await this.resolveAgent(sessionId)
-      if ('error' in found) throw new TypertLookupFailure(found.error)
+      if ('error' in found) throw found.error
       return found.agent.ctx
     })
     ctx.on('agent/status', ({ agent, status }) => {
@@ -274,13 +271,7 @@ export class ApiSessionAgentController {
       return { agent: await resume }
     } catch (error: unknown) {
       if (error instanceof ApiSessionNotFound) {
-        return {
-          error: {
-            code: 'session-not-found',
-            message: error.message,
-            details: { sessionId },
-          },
-        }
+        return { error: new RemoteError('session/not-found', error.message, { sessionId }) }
       }
       if (error instanceof ApiSessionSubagentOwnership) {
         return { error: apiSessionSubagentOwnershipError(error.sessionId) }
@@ -292,11 +283,11 @@ export class ApiSessionAgentController {
         return { error: apiSessionSubagentOwnershipError(sessionId) }
       }
       return {
-        error: {
-          code: 'internal',
-          message: `resume failed for session "${sessionId}": ${String(error)}`,
-          details: {},
-        },
+        error: new RemoteError(
+          'gateway/internal',
+          `resume failed for session "${sessionId}": ${String(error)}`,
+          {},
+        ),
       }
     }
   }
