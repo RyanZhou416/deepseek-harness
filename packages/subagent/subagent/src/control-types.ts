@@ -129,6 +129,20 @@ export interface SubagentPromptReceipt {
   readonly messageId: MessageId
 }
 
+/** Durable parent address plus one still-pending child inbox occurrence. */
+export interface SubagentQueueSteerRequest {
+  readonly parentSessionId: SessionId
+  readonly childSessionId: SessionId
+  /** Required continuable-address discriminator. */
+  readonly mode: 'continuable'
+  readonly itemId: MessageId
+}
+
+/** Acknowledgement that one queued child message moved to next-step steering. */
+export interface SubagentQueueSteerReceipt {
+  readonly accepted: true
+}
+
 /** Uniform acknowledgement that one interrupt request was admitted. */
 export interface SubagentInterruptReceipt {
   readonly accepted: true
@@ -157,6 +171,10 @@ declare module '@deepseek-ai/dsh-typert-protocol' {
     'subagent/attachment-unsupported': { readonly childSessionId: SessionId; readonly reason: string }
     /** The child exists but its inbox cannot admit the message now. */
     'subagent/delivery-unavailable': { readonly childSessionId: SessionId }
+    /** The selected FIFO occurrence is no longer pending. */
+    'subagent/queue-item-not-found': { readonly childSessionId: SessionId; readonly itemId: MessageId }
+    /** The child has no running Activation whose current step can be steered. */
+    'subagent/steer-unavailable': { readonly childSessionId: SessionId; readonly itemId: MessageId }
     /** The deployment mounts no session-projection registry. */
     'subagent/projections-unavailable': {}
   }

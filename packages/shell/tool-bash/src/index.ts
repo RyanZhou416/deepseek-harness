@@ -33,11 +33,14 @@ export const inject = ['tools', 'shell', 'systemPrompt', 'shellEnv']
 export interface Config {
   /** Expose `run_in_background` (default true); disabled calls are also rejected. */
   enableRunInBackground?: boolean
+  /** Force every command into an owner-scoped background job (default false). */
+  forceRunInBackground?: boolean
 }
 
 /** Runtime configuration schema for the bash tool plugin. */
 export const Config: z<Config> = z.object({
   enableRunInBackground: z.boolean().default(true),
+  forceRunInBackground: z.boolean().default(false),
 })
 
 /** Parsed tool args; execute validates value constraints absent from ParameterSchemaSpec. */
@@ -66,10 +69,16 @@ function validateBashArgs(args: BashToolArgs): void {
   validateEscalationArgs(args.sandbox_permissions, args.justification)
 }
 
-function bashDescription(backgroundEnabled: boolean, escalationModes: readonly SandboxMode[]): string {
-  const background = backgroundEnabled
-    ? 'Set `run_in_background: true` for long-running commands: the call returns a job id immediately; read its output with `job_output` and stop it with `job_kill`.'
-    : 'Background execution is not available; long-running commands must finish within the timeout.'
+function bashDescription(
+  backgroundEnabled: boolean,
+  forceRunInBackground: boolean,
+  escalationModes: readonly SandboxMode[],
+): string {
+  const background = forceRunInBackground
+    ? 'Every command starts an owner-scoped background job and returns its id immediately; read output with `job_output` and stop it with `job_kill`.'
+    : backgroundEnabled
+      ? 'Set `run_in_background: true` for long-running commands: the call returns a job id immediately; read its output with `job_output` and stop it with `job_kill`.'
+      : 'Background execution is not available; long-running commands must finish within the timeout.'
   const base = 'Execute a bash command (`bash -c`) and return its stdout/stderr. '
     + 'Each call runs in a fresh shell: no state (cwd, variables, functions) persists between calls — '
     + 'pass `workdir` instead of using `cd`. Non-zero exits are reported as `[exit code: N]`. '
@@ -98,8 +107,8 @@ function bashDescription(backgroundEnabled: boolean, escalationModes: readonly S
  */
 type BashCallArgs = { command: string; description: string; workdir?: string; run_in_background?: boolean }
 
-function presentBashCall(args: BashCallArgs): GenericCallView | TerminalCallView {
-  if (args.run_in_background === true) {
+function presentBashCall(args: BashCallArgs, forceRunInBackground = false): GenericCallView | TerminalCallView {
+  if (forceRunInBackground || args.run_in_background === true) {
     return {
       card: 'generic',
       title: args.command,
@@ -120,11 +129,17 @@ function presentBashCall(args: BashCallArgs): GenericCallView | TerminalCallView
  * Present completed foreground output as a terminal; background acknowledgements
  * and execution errors use generic fenced output without an exit-status pill.
  */
-function presentBashResult(args: unknown, result: ToolResult): ToolResultView | undefined {
+function presentBashResult(
+  args: unknown,
+  result: ToolResult,
+  forceRunInBackground = false,
+): ToolResultView | undefined {
   const block = result.content.length === 1 ? result.content[0] : undefined
   if (block === undefined || block.type !== 'text') return undefined
   const raw = block.text
-  const isBackground = typeof args === 'object' && args !== null && (args as { run_in_background?: unknown }).run_in_background === true
+  const isBackground = forceRunInBackground
+    || (typeof args === 'object' && args !== null
+      && (args as { run_in_background?: unknown }).run_in_background === true)
   // Background acknowledgements and errors have no terminal exit status.
   if (isBackground || result.isError) {
     return { card: 'generic', content: [{ type: 'text', text: `\`\`\`console\n${raw.replace(/\n+$/, '')}\n\`\`\`` }] }
@@ -188,6 +203,14 @@ const BACKGROUND_OUTPUT_PROPERTIES = {
 
 export function apply(ctx: Context, config: Config = {}): void {
   const backgroundEnabled = config.enableRunInBackground ?? true
+  const forceRunInBackground = config.forceRunInBackground ?? false
+  if (forceRunInBackground && !backgroundEnabled) {
+    throw new Error('tool-bash: forceRunInBackground requires enableRunInBackground')
+  }
+  if (forceRunInBackground && ctx.get('jobs') === undefined) {
+    ctx.inject(['jobs'], (jobsCtx: Context) => { apply(jobsCtx, config) })
+    return
+  }
   const defaultMode = ctx.shell.sandboxMode
   const escalationModes: readonly SandboxMode[] = defaultMode === undefined ? [] : ESCALATION_TARGETS
   const sandboxPolicy: SandboxPolicyService | undefined = defaultMode === undefined ? undefined : ctx.get('sandboxPolicy')
@@ -240,7 +263,7 @@ export function apply(ctx: Context, config: Config = {}): void {
 
   ctx.tools.register(defineTool({
     name: 'bash',
-    description: bashDescription(backgroundEnabled, escalationModes),
+    description: bashDescription(backgroundEnabled, forceRunInBackground, escalationModes),
     parameters: {
       command: { type: 'string', required: true, description: 'The bash command to execute.' },
       description: {
@@ -252,7 +275,7 @@ export function apply(ctx: Context, config: Config = {}): void {
       },
       timeoutMs: { type: 'number', description: 'Timeout in milliseconds. The executor applies its configured default and cap, and kills the command on expiry.' },
       workdir: { type: 'string', description: 'Working directory for this command. Defaults to the session workspace; a relative path is resolved against it.' },
-      ...backgroundEnabled ? {
+      ...backgroundEnabled && !forceRunInBackground ? {
         run_in_background: { type: 'boolean' as const, description: 'Run in the background and return a job id immediately (collect with job_output, stop with job_kill). No timeout applies.' },
       } : {},
       ...escalationModes.length > 0 ? {
@@ -345,7 +368,7 @@ export function apply(ctx: Context, config: Config = {}): void {
         dshEnv,
         ...policy !== undefined ? { sandboxPolicy: policy } : {},
       }
-      if (args.run_in_background === true) {
+      if (forceRunInBackground || args.run_in_background === true) {
         // Undeclared keys are allowed, so schema omission also needs enforcement.
         if (!backgroundEnabled) {
           throw new Error('run_in_background is disabled for this deployment (enableRunInBackground: false)')
@@ -387,7 +410,7 @@ export function apply(ctx: Context, config: Config = {}): void {
       }
       return { kind: 'foreground' as const, ...canonicalBashResult(result) }
     },
-    presentCall: presentBashCall,
-    presentResult: presentBashResult,
+    presentCall: args => presentBashCall(args, forceRunInBackground),
+    presentResult: (args, result) => presentBashResult(args, result, forceRunInBackground),
   }))
 }

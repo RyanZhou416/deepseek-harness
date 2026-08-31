@@ -16,13 +16,13 @@ Client Connection 服务暴露 identity 稳定的 `ctx.connection.state` observa
 
 [Web Client 架构](../architecture/2026-07-19-gui-web-client-architecture.zh.md)、[Remote 事件投递](../architecture/2026-08-10-remote-event-delivery.zh.md)和[会话事件传输](../architecture/2026-08-18-session-history-and-event-transport.zh.md)继续持有各自更宽的所有权决策；本笔记只取代其中原有的重试时序。
 
-Settings 外壳是恢复功能专用消费方，因此直接注入 Connection；普通功能代码仍使用 `ctx.remote`。它的私有 hooks compartment 绑定状态 observable 与重连命令。展开的侧边栏在 Settings 右侧渲染 `ConnectionIndicator`：`disconnected` 是浅黄色的**连接异常**操作；`connecting` 保持黄色，其中一至三个点每 500ms 前进一次，与 retry 时序无关；恢复后则以浅绿色显示**连接成功**并驻留 2 秒。鼠标悬浮或键盘聚焦任一黄色状态时只把文字改为**立即重连**；按压反馈采用轻微的警告色过渡，不使用原生 title tooltip。所有可见状态都为最宽的本地化文字预留空间，并使用固定的图标列和左对齐文字列，因此状态变化不会移动控件或改变其宽度。首次启动和未曾中断的健康连接都不渲染。
+Settings 外壳是恢复功能专用消费方，因此直接注入 Connection；普通功能代码仍使用 `ctx.remote`。它的私有 hooks compartment 绑定状态 observable 与重连命令。它会在 Settings 右侧和顶部居中的 `shell.overlay` 中渲染同一个紧凑 `ConnectionIndicator`，因此侧边栏收起不会隐藏后端掉线：`disconnected` 是浅黄色的**连接异常**操作；`connecting` 保持黄色，其中一至三个点每 500ms 前进一次，与 retry 时序无关；恢复后则以浅绿色显示**连接成功**并驻留 2 秒。鼠标悬浮或键盘聚焦任一黄色状态时只把文字改为**立即重连**；按压反馈采用轻微的警告色过渡，不使用原生 title tooltip。所有可见状态都为最宽的本地化文字预留空间，并使用固定的图标列和左对齐文字列，因此状态变化不会移动控件或改变其宽度。首次启动和未曾中断的健康连接都不渲染。
 
 ## Alternatives considered
 
 **固定每 2 秒重试且不进入终态。**不采用，因为长时间故障会持续产生连接流量。保留的指数策略先快速重试，再逐步降低频率，并在 10s 档失败后留下稳定的恢复操作。
 
-**在视口顶部渲染全宽 `ConnectionBanner`。**不采用，因为状态应放在用户指定的恢复操作旁，全局覆盖层还会占用无关页面界面框架。该原语是内联 `ConnectionIndicator`；首次标签发布前不存在 `ConnectionBanner` 兼容导出。
+**在视口顶部渲染全宽 `ConnectionBanner`。**不采用，因为全宽条会占用无关页面界面框架。全局展示使用与 Settings 相同且可操作的紧凑 `ConnectionIndicator`，只占据顶部居中的自身范围；首次标签发布前不存在 `ConnectionBanner` 兼容导出。
 
 **通过 `ctx.remote.$connection` 暴露生命周期控制。**不采用，因为 retry 状态与命令属于 Connection 服务，而不是 Remote 方法 namespace。直接使用 `ctx.connection` 仍是例外；本指示器本身负责控制重连，因此符合该例外。
 
@@ -34,8 +34,8 @@ Settings 外壳是恢复功能专用消费方，因此直接注入 Connection；
 
 手动重连会刻意中断共享物理 socket 的全部 logical Remote stream。它们既有的 generation supervisor 会通过新 baseline 或 cursor 恢复状态；单向通知仍不重放。
 
-连接状态与浏览器网络输入都位于 React-free 传输层。Settings 组件只接收框架绑定的 selector hook 与普通回调，因此没有 UI store 复制传输状态；只有 2 秒成功提示和 500ms 点动画属于展示层本地状态。
+连接状态与浏览器网络输入都位于 React-free 传输层。Settings 外壳的两个展示都接收官方 observable 与普通回调，因此没有 UI store 复制传输状态；只有各自的 2 秒成功提示和 500ms 点动画属于展示层本地状态。
 
 ## Testing
 
-Connection 与 Gateway 测试固定 2 秒心跳及 Pong deadline、指数 retry 上限与日志、浏览器离线暂停和在线重置、手动重置序列、每次请求只替换一个 socket、状态去重、listener 隔离与 dispose。组件测试固定健康状态下不显示、悬浮与操作文案、独立点动画、点击行为与 2 秒成功状态。组装 Web 测试通过随附浏览器应用驱动浏览器 offline/online 转换、失败的 WebSocket 尝试、稳定的指示器几何、手动恢复与成功确认。
+Connection 与 Gateway 测试固定 2 秒心跳及 Pong deadline、指数 retry 上限与日志、浏览器离线暂停和在线重置、手动重置序列、每次请求只替换一个 socket、状态去重、listener 隔离与 dispose。组件测试固定健康状态下不显示、悬浮与操作文案、独立点动画、点击行为、2 秒成功状态，以及不受侧边栏状态影响的全局可见性。组装 Web 测试通过随附浏览器应用驱动浏览器 offline/online 转换、失败的 WebSocket 尝试、稳定的指示器几何、手动恢复与成功确认。

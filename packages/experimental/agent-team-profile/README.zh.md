@@ -38,7 +38,7 @@ profile 必须已经包含 `@deepseek-ai/dsh-base`，本层会使用其中的 Su
 
 ### 获得的功能
 
-本层会添加 Agent Teams domain，以及 Team-scoped 创建、roster、消息、interrupt、等待与任务板工具。它会禁用工具名与 Team control 重叠的全局 continuable-child control 行，同时保留 `subagent` 与 `subagent_fork` 作为一次性 delegation 工具。
+本层会添加 Agent Teams domain，以及 Team-scoped 创建、roster、消息、interrupt、等待与任务板工具。它会禁用工具名与 Team control 重叠的全局 continuable-child control 行，同时保留 `subagent` 与 `subagent_fork` 作为一次性 delegation 工具。Bash 与 PowerShell 命令总是作为 job 启动，阻塞中的 `job_output` 等待会在 next-step 输入到达所属 agent 时让出。
 
 -----
 
@@ -48,7 +48,7 @@ profile 必须已经包含 `@deepseek-ai/dsh-base`，本层会使用其中的 Su
 <details>
 <summary>实现细节——点击展开</summary>
 
-本包的运行时内容是 [`cordis.patch.yml`](cordis.patch.yml)。在 `dsh-base` 之后应用时，patch 会禁用 `tool-subagent-control`、`tool-subagent-list-agents` 与 `tool-subagent-report`，把 fresh 与 fork Subagent 行设置为 `one-shot`，并以显式 provider 和限制插入 Team service 与工具行。
+本包的运行时内容是 [`cordis.patch.yml`](cordis.patch.yml)。在 `dsh-base` 之后应用时，patch 会禁用 `tool-subagent-control`、`tool-subagent-list-agents` 与 `tool-subagent-report`，强制基础 shell 工具进入 job，让阻塞的 job-output 等待响应 next-step 输入，把 fresh 与 fork Subagent 行设置为 `one-shot`，并以显式 provider 和限制插入 Team service 与工具行。
 
 | 文件 | 职责 |
 |---|---|

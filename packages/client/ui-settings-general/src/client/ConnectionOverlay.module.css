@@ -1,0 +1,8 @@
+.overlay {
+  position: fixed;
+  top: 8px;
+  left: 50%;
+  z-index: 120;
+  transform: translateX(-50%);
+  pointer-events: auto;
+}

@@ -48,8 +48,6 @@ export class RemoteStreamMuxServer {
       this.heartbeatAlive.set(websocket, true)
       websocket.on('pong', () => { this.heartbeatAlive.set(websocket, true) })
       this.startHeartbeat()
-      this.heartbeatAlive.set(websocket, true)
-      websocket.on('pong', () => { this.heartbeatAlive.set(websocket, true) })
       const connection = new RemoteStreamMuxConnection(websocket, this.open, this.failure)
       const done = connection.run()
       this.connections.add(done)

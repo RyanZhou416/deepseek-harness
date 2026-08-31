@@ -175,6 +175,24 @@ describe('LocalJobRegistry.start', () => {
     },
   )
 
+  it.each([0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY, 2_147_483_648])(
+    'rejects invalid terminalJobRetentionMs config: %s',
+    async (terminalJobRetentionMs) => {
+      const ctx = new Context()
+      await expect(ctx.plugin(LocalJobRegistry, { terminalJobRetentionMs }))
+        .rejects.toThrow()
+    },
+  )
+
+  it.each([0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY, Number.MAX_SAFE_INTEGER + 1])(
+    'rejects invalid maxRetainedTerminalJobsPerOwner config: %s',
+    async (maxRetainedTerminalJobsPerOwner) => {
+      const ctx = new Context()
+      await expect(ctx.plugin(LocalJobRegistry, { maxRetainedTerminalJobsPerOwner }))
+        .rejects.toThrow()
+    },
+  )
+
   it('accepts the largest safe integer limit', async () => {
     const ctx = await harness({ maxConcurrentJobsPerOwner: Number.MAX_SAFE_INTEGER })
     expect(ctx.jobs).toBeInstanceOf(LocalJobRegistry)
@@ -274,18 +292,21 @@ describe('LocalJobRegistry reads and settlement', () => {
   it('stream kinds read a consuming delta; terminal reads mark reported', async () => {
     const ctx = await harness()
     const chunks = ['first', '', 'rest']
-    const p = producer({ readOutput: () => chunks.shift() ?? '' })
+    const readOutput = vi.fn(() => chunks.shift() ?? '')
+    const p = producer({ readOutput })
     const id = ctx.jobs.start(p.spec)
 
     expect(ctx.jobs.read(id)).toMatchObject({ text: 'first', snapshot: { status: 'running', reported: false } })
     expect(ctx.jobs.read(id).text).toBe('')
 
-    p.settle({ status: 'completed', detail: 'exit code: 0' })
+    p.settle({ status: 'completed', detail: 'exit code: 0', output: 'must not replay for a stream job' })
     await tick()
     const read = ctx.jobs.read(id)
     expect(read.text).toBe('rest')
     expect(read.snapshot).toMatchObject({ status: 'completed', detail: 'exit code: 0', reported: true })
     expect(read.snapshot.finishedAt).toBeTypeOf('number')
+    expect(ctx.jobs.read(id).text).toBe('')
+    expect(readOutput).toHaveBeenCalledTimes(3)
   })
 
   it('projects a producer-owned model output limit into reads and snapshots', async () => {
@@ -387,6 +408,277 @@ describe('LocalJobRegistry reads and settlement', () => {
     p.settle({ status: 'completed' })
     await tick()
     expect(seen).toEqual([])
+  })
+})
+
+describe('LocalJobRegistry terminal retention', () => {
+  it('keeps legacy unlimited terminal history when retention config is omitted', async () => {
+    const ctx = await harness()
+    const jobs = Array.from({ length: 3 }, () => producer())
+    const ids = jobs.map(job => ctx.jobs.start(job.spec))
+    for (const job of jobs) job.settle({ status: 'completed' })
+    await tick()
+
+    expect(ctx.jobs.list().map(job => job.id)).toEqual(ids)
+  })
+
+  it('uses the count target only for reported terminal records', async () => {
+    const ctx = await harness({ maxRetainedTerminalJobsPerOwner: 1 })
+    const first = producer({ kind: 'subagent' })
+    const firstId = ctx.jobs.start(first.spec)
+    first.settle({ status: 'completed', output: 'first result' })
+    await tick()
+    expect(ctx.jobs.read(firstId).text).toBe('first result')
+
+    const second = producer()
+    const secondId = ctx.jobs.start(second.spec)
+    second.settle({ status: 'failed' })
+    await tick()
+    expect(() => ctx.jobs.get(firstId)).toThrow(`unknown job ${firstId}`)
+    expect(ctx.jobs.get(secondId).reported).toBe(false)
+
+    const third = producer()
+    const thirdId = ctx.jobs.start(third.spec)
+    third.settle({ status: 'killed' })
+    await tick()
+    // Both unreported records survive the count target; TTL is their bound.
+    expect(ctx.jobs.list().map(job => job.id)).toEqual([secondId, thirdId])
+  })
+
+  it('selects the oldest reported finish incrementally when jobs settle out of registration order', async () => {
+    vi.useFakeTimers({ now: 1_000 })
+    try {
+      const ctx = await harness({ maxRetainedTerminalJobsPerOwner: 2 })
+      const registeredFirst = producer()
+      const firstId = ctx.jobs.start(registeredFirst.spec)
+      const finishedFirst = producer()
+      const earliestId = ctx.jobs.start(finishedFirst.spec)
+      const newest = producer()
+      const newestId = ctx.jobs.start(newest.spec)
+
+      finishedFirst.settle({ status: 'completed' })
+      await Promise.resolve()
+      ctx.jobs.read(earliestId)
+      await vi.advanceTimersByTimeAsync(10)
+      registeredFirst.settle({ status: 'completed' })
+      await Promise.resolve()
+      ctx.jobs.read(firstId)
+      await vi.advanceTimersByTimeAsync(10)
+      newest.settle({ status: 'completed' })
+      await Promise.resolve()
+
+      expect(() => ctx.jobs.get(earliestId)).toThrow(`unknown job ${earliestId}`)
+      expect(ctx.jobs.get(firstId).status).toBe('completed')
+      expect(ctx.jobs.get(newestId).status).toBe('completed')
+      await ctx.fiber.dispose()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('settles, reports, prunes, and expires through indexes without iterating the full store', async () => {
+    vi.useFakeTimers({ now: 10_000 })
+    const ctx = await harness({
+      terminalJobRetentionMs: 1_000,
+      maxRetainedTerminalJobsPerOwner: 1,
+    })
+    const first = producer({ kind: 'subagent' })
+    const firstId = ctx.jobs.start(first.spec)
+    const second = producer({ kind: 'subagent' })
+    const secondId = ctx.jobs.start(second.spec)
+    const third = producer({ kind: 'subagent' })
+    const thirdId = ctx.jobs.start(third.spec)
+    first.settle({ status: 'completed', output: 'first' })
+    await Promise.resolve()
+    expect(ctx.jobs.read(firstId).text).toBe('first')
+
+    const service = ctx.jobs as unknown as {
+      store: Map<JobId, unknown>
+      retentionTimer?: ReturnType<typeof setTimeout>
+    }
+    const firstTimer = service.retentionTimer
+    expect(firstTimer).toBeDefined()
+    expect(vi.getTimerCount()).toBe(1)
+    const values = vi.spyOn(service.store, 'values').mockImplementation(() => {
+      throw new Error('retention hot path iterated the complete job store')
+    })
+    try {
+      await vi.advanceTimersByTimeAsync(100)
+      second.settle({ status: 'completed', output: 'second' })
+      await Promise.resolve()
+      expect(service.retentionTimer).toBe(firstTimer)
+      expect(() => ctx.jobs.get(firstId)).toThrow(`unknown job ${firstId}`)
+      expect(ctx.jobs.read(secondId).text).toBe('second')
+
+      await vi.advanceTimersByTimeAsync(100)
+      third.settle({ status: 'completed', output: 'third' })
+      await Promise.resolve()
+      expect(service.retentionTimer).toBe(firstTimer)
+      expect(() => ctx.jobs.get(secondId)).toThrow(`unknown job ${secondId}`)
+      expect(ctx.jobs.get(thirdId).reported).toBe(false)
+      expect(vi.getTimerCount()).toBe(1)
+
+      await vi.advanceTimersByTimeAsync(800)
+      expect(ctx.jobs.get(thirdId).status).toBe('completed')
+      await vi.advanceTimersByTimeAsync(200)
+      expect(() => ctx.jobs.get(thirdId)).toThrow(`unknown job ${thirdId}`)
+      expect(vi.getTimerCount()).toBe(0)
+    } finally {
+      values.mockRestore()
+      await ctx.fiber.dispose()
+      vi.useRealTimers()
+    }
+  })
+
+  it('defers wait/kill count pruning until their immediate follow-up read can finish', async () => {
+    const ctx = await harness({ maxRetainedTerminalJobsPerOwner: 1 })
+    const first = producer()
+    const firstId = ctx.jobs.start(first.spec)
+    first.settle({ status: 'completed' })
+    const second = producer()
+    const secondId = ctx.jobs.start(second.spec)
+    second.settle({ status: 'failed' })
+    await tick()
+
+    await expect(ctx.jobs.wait(firstId, 1_000)).resolves.toMatchObject({ reported: true })
+    expect(ctx.jobs.get(firstId).reported).toBe(true)
+    await tick()
+    expect(() => ctx.jobs.get(firstId)).toThrow(`unknown job ${firstId}`)
+    expect(ctx.jobs.get(secondId).reported).toBe(false)
+
+    const third = producer()
+    const thirdId = ctx.jobs.start(third.spec)
+    third.settle({ status: 'killed' })
+    await tick()
+    expect(ctx.jobs.kill(secondId)).toBe('already-finished')
+    expect(ctx.jobs.get(secondId).reported).toBe(true)
+    await tick()
+    expect(() => ctx.jobs.get(secondId)).toThrow(`unknown job ${secondId}`)
+    expect(ctx.jobs.get(thirdId).reported).toBe(false)
+  })
+
+  it('shares one timer between deferred count pruning and the next TTL expiry', async () => {
+    vi.useFakeTimers({ now: 20_000 })
+    try {
+      const ctx = await harness({
+        terminalJobRetentionMs: 5_000,
+        maxRetainedTerminalJobsPerOwner: 1,
+      })
+      const first = producer()
+      const firstId = ctx.jobs.start(first.spec)
+      const second = producer()
+      const secondId = ctx.jobs.start(second.spec)
+      first.settle({ status: 'completed' })
+      second.settle({ status: 'completed' })
+      await Promise.resolve()
+      expect(vi.getTimerCount()).toBe(1)
+
+      await expect(ctx.jobs.wait(firstId, 1_000)).resolves.toMatchObject({ reported: true })
+      expect(ctx.jobs.get(firstId).reported).toBe(true)
+      expect(vi.getTimerCount()).toBe(1)
+      await vi.advanceTimersByTimeAsync(0)
+      expect(() => ctx.jobs.get(firstId)).toThrow(`unknown job ${firstId}`)
+      expect(ctx.jobs.get(secondId).reported).toBe(false)
+      expect(vi.getTimerCount()).toBe(1)
+      await ctx.fiber.dispose()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('protects a released waiter from a sibling settlement until output collection', async () => {
+    const ctx = await harness({ maxRetainedTerminalJobsPerOwner: 1 })
+    const waited = producer()
+    const waitedId = ctx.jobs.start(waited.spec)
+    const sibling = producer()
+    const siblingId = ctx.jobs.start(sibling.spec)
+    const waiting = ctx.jobs.wait(waitedId, 1_000)
+
+    waited.settle({ status: 'completed', output: 'waited result' })
+    sibling.settle({ status: 'failed' })
+    const snapshot = await waiting
+    expect(snapshot).toMatchObject({ id: waitedId, status: 'completed', reported: true })
+    expect(ctx.jobs.read(waitedId).text).toBe('waited result')
+    expect(ctx.jobs.get(siblingId).reported).toBe(false)
+  })
+
+  it('applies count pruning independently to exact owners and the unowned bucket', async () => {
+    const ctx = await harness({ maxRetainedTerminalJobsPerOwner: 1 })
+    const alice = stubAgent(ctx, 'alice-retention')
+    const bob = stubAgent(ctx, 'bob-retention')
+    ctx.agents.register(alice)
+    ctx.agents.register(bob)
+
+    const aliceOld = producer({ owner: alice })
+    const aliceOldId = ctx.jobs.start(aliceOld.spec)
+    aliceOld.settle({ status: 'completed' })
+    const bobOnly = producer({ owner: bob })
+    const bobOnlyId = ctx.jobs.start(bobOnly.spec)
+    bobOnly.settle({ status: 'completed' })
+    const unownedOld = producer()
+    const unownedOldId = ctx.jobs.start(unownedOld.spec)
+    unownedOld.settle({ status: 'completed' })
+    await tick()
+    ctx.jobs.read(aliceOldId, alice)
+    ctx.jobs.read(unownedOldId)
+
+    const aliceNew = producer({ owner: alice })
+    const aliceNewId = ctx.jobs.start(aliceNew.spec)
+    aliceNew.settle({ status: 'completed' })
+    const unownedNew = producer()
+    const unownedNewId = ctx.jobs.start(unownedNew.spec)
+    unownedNew.settle({ status: 'completed' })
+    await tick()
+
+    expect(() => ctx.jobs.get(aliceOldId, alice)).toThrow(`unknown job ${aliceOldId}`)
+    expect(() => ctx.jobs.get(unownedOldId)).toThrow(`unknown job ${unownedOldId}`)
+    expect(ctx.jobs.get(aliceNewId, alice).status).toBe('completed')
+    expect(ctx.jobs.get(bobOnlyId, bob).status).toBe('completed')
+    expect(ctx.jobs.get(unownedNewId).status).toBe('completed')
+
+    await disposeAgentScope(alice)
+    await disposeAgentScope(bob)
+  })
+
+  it('expires every terminal status together while preserving running and stopping jobs', async () => {
+    vi.useFakeTimers({ now: 10_000 })
+    try {
+      const ctx = await harness({ terminalJobRetentionMs: 1_000 })
+      const seen: (string | undefined)[] = []
+      ctx.jobs.onJobsChanged(owner => void seen.push(owner?.id))
+      const terminal = (['completed', 'killed', 'failed'] as const).map((status) => {
+        const p = producer()
+        const id = ctx.jobs.start(p.spec)
+        p.settle({ status })
+        return { id, p }
+      })
+      const running = producer()
+      const runningId = ctx.jobs.start(running.spec)
+      const stopping = producer()
+      const stoppingId = ctx.jobs.start(stopping.spec)
+      ctx.jobs.kill(stoppingId)
+      await Promise.resolve()
+
+      const service = ctx.jobs as unknown as { retentionTimer?: ReturnType<typeof setTimeout> }
+      expect(service.retentionTimer).toBeDefined()
+      seen.length = 0
+      await vi.advanceTimersByTimeAsync(999)
+      for (const { id } of terminal) expect(ctx.jobs.get(id).status).not.toBe('running')
+
+      await vi.advanceTimersByTimeAsync(1)
+      for (const { id } of terminal) expect(() => ctx.jobs.get(id)).toThrow(`unknown job ${id}`)
+      expect(ctx.jobs.get(runningId).status).toBe('running')
+      expect(ctx.jobs.get(stoppingId).status).toBe('stopping')
+      expect(seen).toEqual([undefined])
+
+      running.settle({ status: 'completed' })
+      stopping.settle({ status: 'killed' })
+      await Promise.resolve()
+      await ctx.fiber.dispose()
+      expect(service.retentionTimer).toBeUndefined()
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })
 

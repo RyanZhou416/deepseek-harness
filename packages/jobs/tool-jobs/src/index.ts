@@ -42,6 +42,11 @@ export interface Config {
    * completion wakes it again.
    */
   maxConsecutiveWakes?: number
+  /**
+   * Whether pending next-step input ends a blocking `job_output` wait without
+   * cancelling the job (default false).
+   */
+  yieldWaitOnNextStep?: boolean
 }
 
 export const Config: z<Config> = z.object({
@@ -49,6 +54,7 @@ export const Config: z<Config> = z.object({
   maxWaitTimeoutMs: z.number().min(1).default(600_000),
   completionDelivery: z.union(['quiet', 'wakeup'] as const).default('wakeup'),
   maxConsecutiveWakes: z.number().min(1).default(3),
+  yieldWaitOnNextStep: z.boolean().default(false),
 })
 
 /** Task state safe for model-authored programs; ownership/bookkeeping fields are omitted. */
@@ -206,6 +212,40 @@ export function apply(ctx: Context, config: Config): void {
   const waitCap = config.maxWaitTimeoutMs ?? 600_000
   const delivery = config.completionDelivery ?? 'wakeup'
   const wakeBudget = config.maxConsecutiveWakes ?? 3
+  const yieldWaitOnNextStep = config.yieldWaitOnNextStep ?? false
+
+  const nextStepWaiters = new WeakMap<Agent, Set<() => void>>()
+  if (yieldWaitOnNextStep) {
+    ctx.on('agent/inbox/inserted', ({ agent, message }) => {
+      if (!agent.inbox.nextStep.some(candidate => candidate.id === message.id)) return
+      const waiters = nextStepWaiters.get(agent)
+      if (waiters === undefined) return
+      nextStepWaiters.delete(agent)
+      for (const resolve of waiters) resolve()
+    })
+  }
+
+  /** Observe the next pending next-step input without consuming it. */
+  const waitForNextStep = (agent: Agent): { promise: Promise<void>; dispose: () => void } => {
+    if (agent.inbox.nextStep.length > 0) {
+      return { promise: Promise.resolve(), dispose: () => {} }
+    }
+    const ready = Promise.withResolvers<void>()
+    let waiters = nextStepWaiters.get(agent)
+    if (waiters === undefined) {
+      waiters = new Set()
+      nextStepWaiters.set(agent, waiters)
+    }
+    const resolve = (): void => { ready.resolve() }
+    waiters.add(resolve)
+    return {
+      promise: ready.promise,
+      dispose: () => {
+        waiters.delete(resolve)
+        if (waiters.size === 0) nextStepWaiters.delete(agent)
+      },
+    }
+  }
 
   // Turns this plugin opened on each owner since that owner last consumed
   // human input. Keyed by the exact Agent, so a same-session replacement
@@ -302,12 +342,18 @@ export function apply(ctx: Context, config: Config): void {
     name: 'job_output',
     description: 'Read a background job. Stream jobs return only output since the previous read; '
       + 'final-output jobs return their result after settlement. Every response ends with '
-      + '`[status: ...]`. Reads are non-blocking unless `wait: true`, which waits up to the configured cap.',
+      + '`[status: ...]`. Reads are non-blocking unless `wait: true`, which waits up to the configured cap.'
+      + (yieldWaitOnNextStep ? ' Pending next-step input ends that wait without cancelling the job.' : ''),
     // A timed-out wait returns job state rather than a TOOL_TIMEOUT error, so
     // this tool owns its deadline instead of using ToolDefinition.timeoutMs.
     parameters: {
       job_id: { type: 'string', required: true, description: 'Job id returned by the tool that started the background work.' },
-      wait: { type: 'boolean', description: 'Block until the job reaches a terminal status or the timeout expires. A timed-out wait returns [status: running] and leaves the job alive.' },
+      wait: {
+        type: 'boolean',
+        description: yieldWaitOnNextStep
+          ? 'Block until the job reaches a terminal status, the timeout expires, or next-step input arrives. A wait that ends while the job is live returns [status: running] and leaves it alive.'
+          : 'Block until the job reaches a terminal status or the timeout expires. A timed-out wait returns [status: running] and leaves the job alive.',
+      },
       timeout_ms: { type: 'number', description: 'Max wait in milliseconds (only meaningful with wait: true). Defaults to the configured wait timeout; capped by the configured maximum.' },
     },
     finalizeContent: finalizeTaskContent,
@@ -330,7 +376,25 @@ export function apply(ctx: Context, config: Config): void {
       const id = validateJobId(args.job_id)
       if (args.wait === true) {
         const timeout = Math.min(args.timeout_ms ?? waitDefault, waitCap)
-        await ctx.jobs.wait(id, timeout, exec.agent, exec.signal)
+        if (yieldWaitOnNextStep && exec.agent !== undefined) {
+          const nextStep = waitForNextStep(exec.agent)
+          const yieldController = new AbortController()
+          void nextStep.promise.then(() => { yieldController.abort() })
+          try {
+            await ctx.jobs.wait(
+              id,
+              timeout,
+              exec.agent,
+              AbortSignal.any([exec.signal, yieldController.signal]),
+            )
+          } catch (error: unknown) {
+            if (exec.signal.aborted || !yieldController.signal.aborted) throw error
+          } finally {
+            nextStep.dispose()
+          }
+        } else {
+          await ctx.jobs.wait(id, timeout, exec.agent, exec.signal)
+        }
       }
       const read = ctx.jobs.read(id, exec.agent)
       return { text: read.text, job: publicJob(read.snapshot) }

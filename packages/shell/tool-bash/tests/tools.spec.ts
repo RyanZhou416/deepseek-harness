@@ -45,7 +45,7 @@ async function setup() {
 }
 
 /** Full harness: the generic job runtime + its controller, then the bash tool. */
-async function setupWithTasks() {
+async function setupWithTasks(toolConfig: ToolBash.Config = {}) {
   const ctx = new Context()
   await ctx.plugin(SystemPrompt)
   await ctx.plugin(ToolRuntime)
@@ -56,7 +56,7 @@ async function setupWithTasks() {
   ;(ctx.subprocess as LocalSubprocessRuntime).internals = { spillDir }
   await ctx.plugin(BashEnvPlugin)
   await ctx.plugin(LocalBashExecutor, { timeoutMs: 10_000, graceMs: 200 })
-  await ctx.plugin(ToolBash)
+  await ctx.plugin(ToolBash, toolConfig)
   return ctx
 }
 
@@ -449,6 +449,36 @@ describe('bash tool', () => {
 })
 
 describe('background execution through the job runtime', () => {
+  it('can force every command into a background job without a model argument', async () => {
+    const ctx = await setupWithTasks({ forceRunInBackground: true })
+    const schema = ctx.tools.schemas().find(candidate => candidate.name === 'bash')!
+    expect(schema.parameters.properties).not.toHaveProperty('run_in_background')
+    expect(schema.description).toContain('Every command starts an owner-scoped background job')
+
+    const started = await call(ctx, 'bash', { command: 'echo forced', description: 'test command' })
+    expect(started.value).toEqual({ kind: 'background', jobId: 'bash-1' })
+    expect(ctx.tools.get('bash')?.presentCall?.({ command: 'echo forced', description: 'test command' }))
+      .toMatchObject({ card: 'generic' })
+    await call(ctx, 'job_output', { job_id: 'bash-1', wait: true })
+  })
+
+  it('defers forced background mode until jobs arrives and rejects incompatible config', async () => {
+    const ctx = new Context()
+    await ctx.plugin(SystemPrompt)
+    await ctx.plugin(ToolRuntime)
+    await ctx.plugin(LocalSubprocessRuntime)
+    await ctx.plugin(BashEnvPlugin)
+    await ctx.plugin(LocalBashExecutor, {})
+    await ctx.plugin(ToolBash, { forceRunInBackground: true })
+    expect(ctx.tools.get('bash')).toBeUndefined()
+    await ctx.plugin(LocalJobRegistry)
+    await new Promise(resolve => setTimeout(resolve, 0))
+    expect(ctx.tools.get('bash')).toBeDefined()
+    await expect(ctx.plugin(ToolBash, {
+      enableRunInBackground: false, forceRunInBackground: true,
+    })).rejects.toThrow('requires enableRunInBackground')
+  })
+
   it('run_in_background acks with the job id, readable through the REAL job_output tool', async () => {
     const ctx = await setupWithTasks()
     const started = await call(ctx, 'bash', { command: 'echo bg-ok', description: 'test command', run_in_background: true })

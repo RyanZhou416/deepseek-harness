@@ -80,6 +80,10 @@
 
     - id: jobs
       name: '@deepseek-ai/dsh-jobs-local'
+      # Bound process-local terminal history without changing live-job admission.
+      config:
+        terminalJobRetentionMs: 3600000
+        maxRetainedTerminalJobsPerOwner: 100
 
     - id: llm-retry
       name: '@deepseek-ai/dsh-llm-retry'
@@ -387,14 +391,6 @@
     - id: timeout-policy
       name: '@deepseek-ai/dsh-tool-call-timeout-policy'
 
-    - id: memory-admission
-      name: '@deepseek-ai/dsh-memory-admission'
-      config:
-        maxConcurrentSteps: 8
-        heapHighWatermarkRatio: 0.82
-        heapLowWatermarkRatio: 0.72
-        sampleIntervalMs: 100
-
     - id: spill-local
       name: '@deepseek-ai/dsh-spill-local'
 
@@ -493,7 +489,6 @@
     # agents, while Web creates sessions on client request.
     - id: agent-loop
       name: '@deepseek-ai/dsh-agent-loop'
-      inject: [memoryAdmission]
       config:
         agents: []
 

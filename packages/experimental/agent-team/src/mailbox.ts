@@ -92,6 +92,7 @@ export class TeamMailbox {
     for (const message of messages) {
       signal.throwIfAborted()
       if (membership.role === 'lead' && message.delivery === 'quiet'
+        && message.senderId !== membership.root.id
         && message.targetId !== membership.root.id && this.ctx.agents.get(message.targetId) === undefined) continue
       await this.tryDispatch(membership.root, message, signal)
     }
@@ -246,6 +247,21 @@ export class TeamMailbox {
         }
         root.inject(input)
         return await this.checkpointDelivered(root, root.session, message.id)
+      }
+      const leadDirective = message.senderId === root.id
+      if (leadDirective) {
+        if (target === undefined) {
+          const recorded = await this.persistedTargetRecorded(message.targetId, message.id, signal)
+          if (recorded === undefined) return false
+          if (recorded) {
+            await this.markDelivered(root, message.id, message.targetId)
+            return true
+          }
+        }
+        await this.ctx.subagents.steer(root, message.targetId, content, { source, signal })
+        return target === undefined
+          ? true
+          : await this.checkpointDelivered(root, target.session, message.id)
       }
       if (message.delivery === 'quiet') {
         if (target === undefined) return false

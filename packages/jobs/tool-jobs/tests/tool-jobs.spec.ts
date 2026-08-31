@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import { ToolCallId } from '@deepseek-ai/dsh-llm'
+import type { UserMessage } from '@deepseek-ai/dsh-llm'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime from '@deepseek-ai/dsh-tools'
 import AgentRegistry, { emitAgentEvent } from '@deepseek-ai/dsh-agent'
@@ -49,6 +50,7 @@ function fakeAgent(ctx: Context, sessionId: string, delivery: FakeDelivery = {})
     ctx: scopeFiber.ctx,
     inject: delivery.inject ?? (() => {}),
     followup: delivery.followup ?? (() => {}),
+    inbox: { nextTurn: [], nextStep: [] },
     status: delivery.status ?? 'running',
     session: { id, header: { version: 0, id, createdAt: 0 } },
   } as unknown as Agent
@@ -131,6 +133,7 @@ describe('tool-jobs setup', () => {
   it('defaults delivery to wakeup and rejects an unknown lane', () => {
     expect(ToolTasks.Config({}).completionDelivery).toBe('wakeup')
     expect(ToolTasks.Config({}).maxConsecutiveWakes).toBe(3)
+    expect(ToolTasks.Config({}).yieldWaitOnNextStep).toBe(false)
     expect(() => ToolTasks.Config({ completionDelivery: 'loud' as never })).toThrow()
     expect(() => ToolTasks.Config({ maxConsecutiveWakes: 0 })).toThrow()
   })
@@ -337,6 +340,132 @@ describe('job_output', () => {
     // promptly (≤ the 20ms cap), not after ten minutes.
     const result = await call(ctx, 'job_output', { job_id: 'bash-1', wait: true, timeout_ms: 600_000 })
     expect(text(result)).toBe('(no new output)\n[status: running]')
+  })
+
+  it('optionally yields a live wait when next-step input enters the owner inbox', async () => {
+    const { ctx } = await setup({ yieldWaitOnNextStep: true })
+    const owner = fakeAgent(ctx, 'sess-steered')
+    const p = producer({ owner })
+    ctx.jobs.start(p.spec)
+
+    let settled = false
+    const pending = call(ctx, 'job_output', {
+      job_id: 'bash-1', wait: true, timeout_ms: 600_000,
+    }, owner).finally(() => { settled = true })
+    await tick()
+    expect(settled).toBe(false)
+
+    const queued = createUserMessage({
+      content: [{ type: 'text', text: 'ordinary queued work' }],
+      source: { kind: 'user' },
+    })
+    ;(owner.inbox.nextTurn as UserMessage[]).push(queued)
+    emitAgentEvent(ctx, owner, 'agent/inbox/inserted', { message: queued })
+    await tick()
+    expect(settled).toBe(false)
+
+    const steering = createUserMessage({
+      content: [{ type: 'text', text: 'steer now' }],
+      source: { kind: 'user' },
+    })
+    ;(owner.inbox.nextStep as UserMessage[]).push(steering)
+    emitAgentEvent(ctx, owner, 'agent/inbox/inserted', { message: steering })
+
+    expect(text(await pending)).toBe('(no new output)\n[status: running]')
+    expect(ctx.jobs.get(JobId('bash-1'), owner).status).toBe('running')
+    p.settle({ status: 'completed' })
+  })
+
+  it('keeps the default wait independent from next-step input', async () => {
+    const { ctx } = await setup()
+    const owner = fakeAgent(ctx, 'sess-compatible')
+    const p = producer({ owner })
+    ctx.jobs.start(p.spec)
+
+    let settled = false
+    const pending = call(ctx, 'job_output', { job_id: 'bash-1', wait: true }, owner)
+      .finally(() => { settled = true })
+    const steering = createUserMessage({
+      content: [{ type: 'text', text: 'does not change default waits' }],
+      source: { kind: 'user' },
+    })
+    ;(owner.inbox.nextStep as UserMessage[]).push(steering)
+    emitAgentEvent(ctx, owner, 'agent/inbox/inserted', { message: steering })
+    await tick()
+    expect(settled).toBe(false)
+
+    p.settle({ status: 'completed' })
+    expect(text(await pending)).toBe('(no new output)\n[status: completed]')
+  })
+
+  it('yields immediately for input that was already pending before the wait', async () => {
+    const { ctx } = await setup({ yieldWaitOnNextStep: true })
+    const owner = fakeAgent(ctx, 'sess-pending')
+    const p = producer({ owner })
+    ctx.jobs.start(p.spec)
+    const steering = createUserMessage({
+      content: [{ type: 'text', text: 'already pending' }],
+      source: { kind: 'user' },
+    })
+    ;(owner.inbox.nextStep as UserMessage[]).push(steering)
+    emitAgentEvent(ctx, owner, 'agent/inbox/inserted', { message: steering })
+
+    const result = await call(ctx, 'job_output', { job_id: 'bash-1', wait: true }, owner)
+    expect(text(result)).toBe('(no new output)\n[status: running]')
+    p.settle({ status: 'completed' })
+  })
+
+  it('releases every concurrent wait for one owner on the same next-step edge', async () => {
+    const { ctx } = await setup({ yieldWaitOnNextStep: true })
+    const owner = fakeAgent(ctx, 'sess-multiple')
+    const p = producer({ owner })
+    ctx.jobs.start(p.spec)
+    const first = call(ctx, 'job_output', { job_id: 'bash-1', wait: true }, owner)
+    const second = call(ctx, 'job_output', { job_id: 'bash-1', wait: true }, owner)
+    await tick()
+    const steering = createUserMessage({
+      content: [{ type: 'text', text: 'release both waits' }],
+      source: { kind: 'user' },
+    })
+    ;(owner.inbox.nextStep as UserMessage[]).push(steering)
+    emitAgentEvent(ctx, owner, 'agent/inbox/inserted', { message: steering })
+
+    await expect(Promise.all([first, second])).resolves.toHaveLength(2)
+    p.settle({ status: 'completed' })
+  })
+
+  it('preserves caller cancellation and ordinary job lookup failures when yielding is enabled', async () => {
+    const { ctx } = await setup({ yieldWaitOnNextStep: true })
+    const owner = fakeAgent(ctx, 'sess-failures')
+    const p = producer({ owner })
+    ctx.jobs.start(p.spec)
+    const controller = new AbortController()
+    const cancelled = ctx.tools.execute({
+      signal: controller.signal,
+      callId: ToolCallId('call-cancelled-wait'),
+      name: 'job_output',
+      arguments: { job_id: 'bash-1', wait: true },
+      agent: owner,
+    })
+    await tick()
+    controller.abort()
+    expect((await cancelled).isError).toBe(true)
+    expect(ctx.jobs.get(JobId('bash-1'), owner).status).toBe('running')
+
+    const missing = await call(ctx, 'job_output', {
+      job_id: 'bash-99', wait: true,
+    }, owner)
+    expect(missing.isError).toBe(true)
+    p.settle({ status: 'completed' })
+  })
+
+  it('keeps unowned waits on the ordinary timeout-or-settlement path', async () => {
+    const { ctx } = await setup({ yieldWaitOnNextStep: true })
+    const p = producer()
+    ctx.jobs.start(p.spec)
+    const pending = call(ctx, 'job_output', { job_id: 'bash-1', wait: true })
+    p.settle({ status: 'completed' })
+    expect(text(await pending)).toBe('(no new output)\n[status: completed]')
   })
 
   it('rejects an empty or unknown job id as an errored result', async () => {

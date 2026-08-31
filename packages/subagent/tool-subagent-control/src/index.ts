@@ -1,6 +1,6 @@
 /**
  * The globally named `send_message` and `interrupt_agent` tools: thin
- * model-facing adapters over `ctx.subagents.followup()` and
+ * model-facing adapters over `ctx.subagents.steer()` and
  * `ctx.subagents.interrupt()`. They perform no lifecycle routing of their own —
  * residency, cold resume, and interrupt authorization belong to the subagent
  * service — and they live apart from the provider-bound
@@ -28,8 +28,8 @@ export function apply(ctx: Context): void {
     name: 'send_message',
     description:
       'Send a message to a background subagent by its subagent id, continuing the same conversation. It '
-      + 'becomes the subagent\'s next turn: if it is still working, the message waits until its current turn '
-      + 'finishes, so it cannot redirect work already underway. This call returns no answer from the '
+      + 'joins the subagent at its nearest step boundary: if it is still working, the current model request '
+      + 'or tool call finishes first, then the message can redirect the remaining work. This call returns no answer from the '
       + 'subagent — only confirmation that the message was delivered — so use it to give it more work. A '
       + 'failure means the message was NOT delivered.',
     parameters: {
@@ -54,7 +54,7 @@ export function apply(ctx: Context): void {
       },
       render: (args, _value) => [{
         type: 'text',
-        text: `message queued as the next turn for subagent ${args.subagent_id}`,
+        text: `message steered to the nearest step for subagent ${args.subagent_id}`,
       }],
     },
     async execute(args, exec) {
@@ -64,7 +64,7 @@ export function apply(ctx: Context): void {
         throw new Error('send_message requires a calling agent (exec.agent was undefined)')
       }
       const message: ContentBlock[] = [{ type: 'text', text: args.message }]
-      const messageId = await ctx.subagents.followup(
+      const messageId = await ctx.subagents.steer(
         parent,
         brandString<SessionId>(args.subagent_id),
         message,

@@ -958,6 +958,19 @@ export interface Config {
    * omission defaults to 10.
    */
   maxConcurrentJobsPerOwner?: number
+  /**
+   * Milliseconds to retain a terminal job before removing it, whether or not
+   * its result was reported. Omission preserves terminal jobs until owner or
+   * service disposal.
+   */
+  terminalJobRetentionMs?: number
+  /**
+   * Target maximum terminal jobs retained per exact owner or in the shared
+   * unowned bucket. Count pruning removes only reported records; unreported
+   * records remain until {@link terminalJobRetentionMs} expires or teardown.
+   * Omission disables count pruning.
+   */
+  maxRetainedTerminalJobsPerOwner?: number
 }
 ```
 
@@ -1514,28 +1527,6 @@ export interface ReconnectConfig {
 ```
 
 来源：[`packages/mcp/mcp-client/src/index.ts:98`](../packages/mcp/mcp-client/src/index.ts)
-
-<a id="deepseek-aidsh-memory-admission"></a>
-
-## `@deepseek-ai/dsh-memory-admission`
-
-需要：`agents`
-
-```ts config-catalog
-/** Configurable process-wide admission limits. */
-export interface Config {
-  /** Maximum admitted agent model phases across the process. Defaults to 8. */
-  maxConcurrentSteps?: number
-  /** Heap-used ratio that closes new admission. Defaults to 0.82. */
-  heapHighWatermarkRatio?: number
-  /** Heap-used ratio that reopens admission after pressure. Defaults to 0.72. */
-  heapLowWatermarkRatio?: number
-  /** Heap resampling interval while callers wait. Defaults to 100ms. */
-  sampleIntervalMs?: number
-}
-```
-
-来源：[`packages/guard/memory-admission/src/index.ts:29`](../packages/guard/memory-admission/src/index.ts)
 
 <a id="deepseek-aidsh-message-feedback"></a>
 
@@ -2704,6 +2695,8 @@ export type TokenMeterConfig = Record<string, never>
 export interface Config {
   /** Expose `run_in_background` (default true); disabled calls are also rejected. */
   enableRunInBackground?: boolean
+  /** Force every command into an owner-scoped background job (default false). */
+  forceRunInBackground?: boolean
 }
 ```
 
@@ -2826,6 +2819,11 @@ export interface Config {
    * completion wakes it again.
    */
   maxConsecutiveWakes?: number
+  /**
+   * Whether pending next-step input ends a blocking `job_output` wait without
+   * cancelling the job (default false).
+   */
+  yieldWaitOnNextStep?: boolean
 }
 
 /**
@@ -2869,6 +2867,8 @@ export interface Config {
 export interface Config {
   /** Expose `run_in_background` (default true); disabled calls are also rejected. */
   enableRunInBackground?: boolean
+  /** Force every command into an owner-scoped background job (default false). */
+  forceRunInBackground?: boolean
 }
 ```
 

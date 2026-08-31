@@ -373,12 +373,17 @@ describe('Agent scope disposal lifecycle', () => {
     const held = sessionIds[0]
     if (retained === undefined || held === undefined) throw new Error('fixture requires sessions')
     await feedList(b, sessionIds.map(id => ({ id })))
-    for (const id of sessionIds) b.svc.open(id)
-    await vi.waitFor(() => {
-      for (const id of sessionIds) {
+    for (const id of sessionIds) {
+      b.svc.open(id)
+      await vi.waitFor(() => {
         expect(b.svc.binding(id)?.session.getSnapshot().openState).toBe('open')
-      }
-    })
+      })
+    }
+    await vi.waitFor(() => { expect(aborted.size).toBe(sessionIds.length - 1) })
+    for (const id of sessionIds.slice(0, -1)) {
+      expect(b.svc.binding(id)?.session.getSnapshot().openState).toBe('cold')
+    }
+    expect(b.svc.binding(retained)?.session.getSnapshot().openState).toBe('open')
 
     const pruned = sessionIds.slice(0, -1)
     await feedList(b, [{ id: retained }])
@@ -419,7 +424,7 @@ describe('current selection (migrated from ui-layout, arbitrated into the list s
     expect(b.svc.list.getSnapshot().current).toBe('s1') // failed open leaves the selection alone
   })
 
-  it('clear() blanks list.current and the persisted selection', async () => {
+  it('clear() blanks list.current, persists the empty selection, and closes the staged history', async () => {
     const storage = new Map<string, string>()
     vi.stubGlobal('localStorage', {
       getItem: (k: string) => storage.get(k) ?? null,
@@ -430,9 +435,11 @@ describe('current selection (migrated from ui-layout, arbitrated into the list s
     const b = bench()
     await feedList(b, [{ id: 's1' }])
     b.svc.open(sid('s1'))
+    await vi.waitFor(() => { expect(b.api.activeFollows(sid('s1'))).toBe(1) })
     expect(storage.get('dsh.sessions.current')).toContain('s1')
     b.svc.clear()
     expect(b.svc.list.getSnapshot().current).toBeUndefined()
+    await vi.waitFor(() => { expect(b.api.activeFollows(sid('s1'))).toBe(0) })
     // Persisted wipe: a fresh service with the same storage stays on empty.
     const again = bench()
     await feedList(again, [{ id: 's1' }])
@@ -476,7 +483,7 @@ describe('binding and stage lifecycle', () => {
     expect(b.svc.scope(sid('s1'))).toBeDefined()
   })
 
-  it('staging (current write) opens the session event window; resolution and re-staging do not re-pull', async () => {
+  it('staging keeps only the current history open and reopens a retained binding on return', async () => {
     const b = bench()
     await feedList(b, [{ id: 's1' }, { id: 's2' }])
     const followStarts = () => b.api.followStarts.map(String)
@@ -487,7 +494,9 @@ describe('binding and stage lifecycle', () => {
     b.svc.open(sid('s1'))
     await vi.waitFor(() => {
       expect(followStarts()).toEqual(['s1'])
+      expect(b.api.activeFollows(sid('s1'))).toBe(1)
     })
+    const firstBinding = b.svc.binding(sid('s1'))
     // Same current again: no second pull.
     b.svc.open(sid('s1'))
     expect(followStarts()).toHaveLength(1)
@@ -495,7 +504,16 @@ describe('binding and stage lifecycle', () => {
     b.svc.open(sid('s2'))
     await vi.waitFor(() => {
       expect(followStarts()).toEqual(['s1', 's2'])
+      expect(b.api.activeFollows(sid('s1'))).toBe(0)
+      expect(b.api.activeFollows(sid('s2'))).toBe(1)
     })
+    b.svc.open(sid('s1'))
+    await vi.waitFor(() => {
+      expect(followStarts()).toEqual(['s1', 's2', 's1'])
+      expect(b.api.activeFollows(sid('s1'))).toBe(1)
+      expect(b.api.activeFollows(sid('s2'))).toBe(0)
+    })
+    expect(b.svc.binding(sid('s1'))).toBe(firstBinding)
   })
 
   it('startup restore: a persisted selection validated by the first projection opens its window unprompted', async () => {
@@ -838,9 +856,11 @@ describe('coverage tails (branch duals)', () => {
     await vi.waitFor(() => { expect(b.api.followStarts).toHaveLength(1) })
     await feedList(b, []) // removed while staged: current masks to undefined, stage holds → deferred
     expect(b.svc.scope(sid('s1'))).toBeDefined()
+    expect(b.api.activeFollows(sid('s1'))).toBe(1)
     // Resurfacing re-projects current = s1: same stage occupant, no second pull.
     await feedList(b, [{ id: 's1' }])
     expect(b.api.followStarts).toHaveLength(1)
+    expect(b.api.activeFollows(sid('s1'))).toBe(1)
     expect(b.svc.list.getSnapshot().current).toBe('s1')
   })
 

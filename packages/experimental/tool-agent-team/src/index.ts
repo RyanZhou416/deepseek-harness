@@ -34,7 +34,7 @@ The Team Lead and all teammates share the same working directory and filesystem.
 
 Prefer read/edit/write for file changes. If a file operation returns FS_STALE_VERSION, read the current file, rebase your intended change onto the new content, and retry. Bash, formatters, code generators, and scripts are not fully protected by the filesystem version guard; coordinate them explicitly and have the Lead review the final diff and run tests.
 
-Use send_message for quiet information that must not start an idle teammate. Use followup_task when the target should run another turn. A delivered peer item starts with its stable message id and sender name. A successful send is already durable even when its result says queued; do not resend it. Shared-task workflow is list, get, claim with the current revision, perform the work, then complete. Task readiness never starts an owner. Before wait_agent, use list_agents and make sure another required member is running or provisioning; use followup_task first when the required member is inactive. wait_agent observes only changes after that call starts, never wakes a member, and returns noProgress immediately when no other member can produce a change. Re-list after wakeup or timeout. The Lead must wait for required teammates before giving the final answer.`
+A delivered peer item starts with its stable message id and sender name. A successful send is already durable even when its result says queued; do not resend it. Shared-task workflow is list, get, claim with the current revision, perform the work, then complete. Task readiness never starts an owner. Before wait_agent, use list_agents and make sure another required member is running or provisioning; use followup_task first when the required member is inactive. wait_agent observes only changes after that call starts, never wakes a member, and returns noProgress immediately when no other member can produce a change. Re-list after wakeup or timeout. The Lead must wait for required teammates before giving the final answer.`
 
 const ACTIVE_WAIT_STATUSES: ReadonlySet<TeamMemberView['status']> = new Set(['running', 'provisioning'])
 const NO_ACTIVE_PEER_MESSAGE = 'No other Team member is running or provisioning. wait_agent cannot make progress or wake inactive teammates. Re-list with list_agents and team_task_list, then use followup_task to wake each required inactive teammate before waiting again.'
@@ -158,6 +158,7 @@ function callingAgent(agent: Agent | undefined, toolName: string): Agent {
 /** Register the complete Team tool set in one exact Agent scope. */
 function install(agent: Agent, ctx: Context, config: Required<Config>): () => void {
   const scoped = agent.ctx
+  const membership = ctx.agentTeams.membership(agent)
   const disposers: Array<() => unknown> = []
   const register = (disposer: () => unknown): void => { disposers.push(disposer) }
   try {
@@ -165,8 +166,10 @@ function install(agent: Agent, ctx: Context, config: Required<Config>): () => vo
       name: 'team:policy',
       order: scoped.systemPrompt.getSectionOrder('TEAM_POLICY'),
       text: () => {
-        const membership = ctx.agentTeams.membership(agent)
-        return `${POLICY}\n\nYour Team role is ${membership.role}; your Team name is ${membership.name}; Team id is ${membership.id}.`
+        const delivery = membership.role === 'lead'
+          ? 'Every message you send to a teammate is delivered at its nearest step boundary, regardless of which messaging tool you call.'
+          : 'Use send_message for quiet information that must not start an idle member. Use followup_task when the target should run another turn.'
+        return `${POLICY}\n\n${delivery}\n\nYour Team role is ${membership.role}; your Team name is ${membership.name}; Team id is ${membership.id}.`
       },
     }))
 
@@ -202,8 +205,12 @@ function install(agent: Agent, ctx: Context, config: Required<Config>): () => vo
       register(scoped.tools.register(defineTool({
         name: toolName,
         description: delivery === 'quiet'
-          ? 'Send durable information to another Team member without starting an idle member.'
-          : 'Send a durable follow-up task to another Team member and start a turn when needed.',
+          ? membership.role === 'lead'
+            ? 'Send a durable directive to a teammate at its nearest step boundary.'
+            : 'Send durable information to another Team member without starting an idle member.'
+          : membership.role === 'lead'
+            ? 'Send a durable directive to a teammate at its nearest step boundary.'
+            : 'Send a durable follow-up task to another Team member and start a turn when needed.',
         parameters: {
           target: { type: 'string', required: true, description: 'Team member name, or lead.' },
           message: { type: 'string', required: true, description: 'Self-contained message for the target.' },

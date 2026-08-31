@@ -9,7 +9,7 @@ English | [中文](README.zh.md)
 
 ## Summary
 
-`dsh-tool-subagent-control` adds the global control tools for continuable children: `send_message` delivers a follow-up message that becomes the child's next turn, `interrupt_agent` stops a child's current turn while keeping its queue and descendants intact, and `list_agents` (from the separately loadable `list-agents` plugin) lists continuable children by durable id and label. The tools are global, so any number of delegation tools never duplicates them. These tools cover only the parent-to-child direction; the child-to-parent direction belongs to the independently installed `dsh-tool-subagent-report`. No tool's presence decides whether a delegation tool starts continuable work.
+`dsh-tool-subagent-control` adds the global control tools for continuable children: `send_message` steers a child at its nearest step boundary, `interrupt_agent` stops a child's current turn while keeping its queue and descendants intact, and `list_agents` (from the separately loadable `list-agents` plugin) lists continuable children by durable id and label. The tools are global, so any number of delegation tools never duplicates them. These tools cover only the parent-to-child direction; the child-to-parent direction belongs to the independently installed `dsh-tool-subagent-report`. No tool's presence decides whether a delegation tool starts continuable work.
 
 ## Table of Contents
 
@@ -46,7 +46,7 @@ This package takes no configuration: the root plugin provides `send_message` and
 
 ### send_message
 
-Sends a message that becomes the child's next FIFO turn: a working child finishes its current turn first, so a message cannot redirect work already underway. The call returns only acceptance (the accepted message's stable `messageId`), never the child's reply — the child's transcript by its id is the source of what it did. A failure — an unauthorized or unknown child, a descriptor-less child that cannot be resumed, or rejected admission — states the message was not delivered.
+Sends a message to the child's nearest step boundary: an in-flight model request or tool call finishes first, then the message can redirect the remaining work without waiting behind ordinary follow-up turns. The call returns only acceptance (the accepted message's stable `messageId`), never the child's reply — the child's transcript by its id is the source of what it did. A failure — an unauthorized or unknown child, a descriptor-less child that cannot be resumed, or rejected admission — states the message was not delivered.
 
 ### interrupt_agent
 
@@ -68,7 +68,7 @@ This section explains what the tools delegate to the subagent service; the obser
 
 ### Design concept
 
-Thin adapters over `ctx.subagents.followup()`, `interrupt()`, and the list projections; the tools perform no lifecycle routing. Residency, cold resume, and interrupt authorization belong to the service, and the tools pass the exact live calling agent (`exec.agent`) as the authority the service verifies against the target's recorded lineage.
+Thin adapters over `ctx.subagents.steer()`, `interrupt()`, and the list projections; the tools perform no lifecycle routing. Residency, cold resume, and interrupt authorization belong to the service, and the tools pass the exact live calling agent (`exec.agent`) as the authority the service verifies against the target's recorded lineage.
 
 ### Delivery and signal ownership
 
@@ -137,7 +137,7 @@ Append-only; each result follows the reusable request prefix.
 
 #### What the model sees
 
-`message queued as the next turn for subagent <subagent_id>` on acceptance; the canonical output carries the accepted `messageId`. A failure — an unauthorized or unknown child, a descriptor-less child that cannot be resumed, or admission rejected — is an errored result whose message states the message was not delivered.
+`message steered to the nearest step for subagent <subagent_id>` on acceptance; the canonical output carries the accepted `messageId`. A failure — an unauthorized or unknown child, a descriptor-less child that cannot be resumed, or admission rejected — is an errored result whose message states the message was not delivered.
 
 #### Token effect
 
@@ -168,8 +168,8 @@ Append-only; each result follows the reusable request prefix.
 
 These limits define what the control tools cannot observe or steer; they are current package constraints.
 
-- **A queued message has no independent result** — acceptance returns only its inbox `messageId`; the child's work lands in the durable child Session and is never collected through this tool. A child granted `report` may send selected content back separately, but that message is not this call's result.
-- **No steering of the current turn** — every message opens a later FIFO turn, so a message sent while the child is working runs only after its current turn finishes and cannot redirect it.
+- **An accepted message has no independent result** — acceptance returns only its inbox `messageId`; the child's work lands in the durable child Session and is never collected through this tool. A child granted `report` may send selected content back separately, but that message is not this call's result.
+- **Steering waits for the current step** — it does not cancel an in-flight model request or tool call; a non-yielding tool can still delay delivery until it returns.
 - **Listing is a snapshot, not a delivery promise** — it may race publication, disposal, or a later message, and another process may activate a child this process reports as `ready`; cross-process accuracy requires a shared lease. `interrupt_agent` performs the authoritative live-lineage check itself, so discovery staleness cannot grant authority.
 - **No pagination or deletion** — the complete stably ordered set is returned, and persisted children remain listed for as long as their sessions remain in persistence; a service-level bound or delete operation is a later product decision.
 

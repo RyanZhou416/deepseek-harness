@@ -8,7 +8,7 @@ Status: implemented
 
 多条彼此独立的热路径会让工作量随完整 Session 日志增长。活跃 token meter 会在每个 event 后重新读取公共整日志快照；persistence 会在批处理前再次 clone 已经脱离来源且递归冻结的 event；实时全文搜索会 clone、序列化并重新投影完整 Session；JSONL 列表会反复解码未变化的 header；相邻搜索页也会在单页缓存中互相驱逐。
 
-高并发工作负载对 model phase 准入和空闲 Web Agent 驻留也没有进程级上界。模型响应已经结束后，Tool 或 subagent 等待仍可能占用容量；即使没有浏览器跟随，已经持久化的空闲 Session 也会保持 attached。
+高并发工作负载中的空闲 Web Agent 驻留没有上界。即使没有浏览器跟随，已经持久化的空闲 Session 也会保持 attached。
 
 无损的[打包 Session 历史传输](../architecture/2026-08-15-packed-session-history-transport.zh.md)限制了重新打开和重连成本，但持续打开的浏览器标签页仍接收标量实时 event。一个异常长且已经完成的回答仍可能在 Client window 中留下数万条标量 chunk。折叠的 Tool 行也会在读者展开前执行 JSON 解析、结果扁平化和 card model 构造。
 
@@ -24,8 +24,6 @@ SQLite session-query provider 通过弱引用身份区分实时 Session，并使
 
 JSONL persistence 按精确 stat 派生的 artifact revision 缓存每个已验证 header。并发 list 与 snapshot-list 请求共享一次元数据扫描，调用方取消只放弃自己的等待。artifact revision 变化会强制重新验证，成功的 discovery 会清理已经不存在的条目。
 
-Base bundle 挂载一个进程级 FIFO memory-admission guard。默认最多同时准入八个 model phase；V8 heap 达到上限的 0.82 时关闭准入，降至 0.72 时重新开放。reservation 在匹配的最终 `assistant/message` 处释放，早于 Tool execution 或 child Agent 等待；`step/end`、idle、取消与 dispose 负责清理。该 guard 只改变调度，不写 Session event。
-
 Session Controller 拥有其创建或恢复的每个 Agent handle。只要 history follower、待处理 inbox、owned child、活跃 job 或 running 状态仍需要它，已经持久化的空闲 Agent 就继续驻留。达到配置的五分钟保留时间后，controller flush Session、确认 persistence snapshot，并且只 dispose 自己持有的 handle；列表行与日志继续保留，之后可正常冷恢复。
 
 Client Session state 统计每次 opening snapshot 之后收到的标量 event。数量达到 20,000 后，下一个最终 `assistant/message` 只 restart 一次 `RemoteJournalStream`；官方 follow opening 随后用无损 packed window 替换标量 tail，并重置计数。未完成的 model phase 始终保持精确；实现不增加 settled projection、稀疏 sequence range 或另一套 history API。
@@ -36,7 +34,7 @@ Gateway Ping/Pong 保持严格的 WebSocket 控制帧协议。每次 Ping 都把
 
 ## Verification
 
-定向 token-meter、write-behind、SQLite query、JSONL persistence、memory-admission、Session Controller、Tool row 与 Gateway 测试分别固定各条增量或有界路径。memory-admission composition 测试使用真实 Agent loop，证明容量会在 Tool 与 subagent 工作前释放。Session Controller 通过可注入的小阈值证明只有标量流量不会 restart，而超过阈值后的第一个最终 message 会触发一次 replacement generation。Gateway 测试证明 Ping/Pong 不携带应用消息，并会终止错过下一个 Pong deadline 的 peer。
+定向 token-meter、write-behind、SQLite query、JSONL persistence、Session Controller、Tool row 与 Gateway 测试分别固定各条增量或有界路径。Session Controller 通过可注入的小阈值证明只有标量流量不会 restart，而超过阈值后的第一个最终 message 会触发一次 replacement generation。Gateway 测试证明 Ping/Pong 不携带应用消息，并会终止错过下一个 Pong deadline 的 peer。
 
 事故规模的 history 在一个按 message 对齐的页面中包含 256,008 个逻辑 event，其中 256,004 个是 Assistant chunk。packed transport 保留所有逻辑 event，但把连续同 block chunk 表示成少量 record；live rebase 会在回答 final 后应用同一种表示，而不引入有损 projection。
 
@@ -56,6 +54,6 @@ Gateway Ping/Pong 保持严格的 WebSocket 控制帧协议。每次 Ping 都把
 
 ## Consequences
 
-长流在 token accounting、persistence batching、JSONL discovery 与 live search indexing 中不再重复分配完整日志。模型并发和空闲 Host residency 获得上界，同时不改变模型输入、event 顺序或持久身份。重新打开、重连以及已经 final 的超大 live window 使用官方无损 packed 表示；折叠 Tool 行不会执行与隐藏内容大小成比例的工作。半开 mux socket 会在两个配置 heartbeat interval 内进入既有重连路径。
+长流在 token accounting、persistence batching、JSONL discovery 与 live search indexing 中不再重复分配完整日志。空闲 Host residency 获得上界，同时不改变模型输入、event 顺序或持久身份。重新打开、重连以及已经 final 的超大 live window 使用官方无损 packed 表示；折叠 Tool 行不会执行与隐藏内容大小成比例的工作。半开 mux socket 会在两个配置 heartbeat interval 内进入既有重连路径。
 
 当 Agent 活跃时，Host 的实时 Session 日志仍完整驻留；未完成 response 可以在最终 message 到达前超过 Client 阈值；第一次不同的宽泛 SQLite 查询仍可能阻塞一个 Host thread；Chat 也仍会挂载每个已加载 presentation row。这些 fork 特有的有界化不会引入 Session event 类型、`SESSION_FORMAT_VERSION`、JSONL storage path 或 migration。

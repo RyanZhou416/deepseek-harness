@@ -75,6 +75,22 @@ describe('ConversationController', () => {
     } as never)
     await expect(b.scoped.updateQueue('item-2' as never, { kind: 'steer' })).resolves.toBeUndefined()
     b.updateQueue.mockResolvedValueOnce({
+      ok: false,
+      error: new RemoteError('subagent/queue-item-not-found', 'claimed', {
+        parentSessionId: 'parent', childSessionId: 'child', itemId: 'item-subagent',
+      } as never),
+    } as never)
+    await expect(b.scoped.updateQueue('item-subagent' as never, { kind: 'steer' }))
+      .resolves.toBeUndefined()
+    b.updateQueue.mockResolvedValueOnce({
+      ok: false,
+      error: new RemoteError('subagent/steer-unavailable', 'closed', {
+        parentSessionId: 'parent', childSessionId: 'child', itemId: 'item-subagent',
+      } as never),
+    } as never)
+    await expect(b.scoped.updateQueue('item-subagent' as never, { kind: 'steer' }))
+      .resolves.toBeUndefined()
+    b.updateQueue.mockResolvedValueOnce({
       ok: false, error: new RemoteError('session/queue-item-not-found', 'claimed', { itemId: 'item-1' as QueuedMessage['id'] }),
     } as never)
     await expect(b.scoped.updateQueue('item-3' as never, { kind: 'remove' }))

@@ -20,6 +20,7 @@ import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
 import type {} from '@deepseek-ai/dsh-client-locale/client'
 import type {} from '@deepseek-ai/dsh-client-ui-renderer/client'
 import type {} from '@deepseek-ai/dsh-client-ui-session/client'
+import type {} from '@deepseek-ai/dsh-client-ui-layout/client'
 import type {
   SettingsOnboardingStep, SettingsRootInjected, SettingsSectionRow,
 } from './shell-contract.ts'
@@ -30,6 +31,7 @@ import { SettingsDocumentAction } from './SettingsDocumentAction.tsx'
 import type { SettingsDocumentActionInjected } from './SettingsDocumentAction.tsx'
 import { SettingsDocumentStore } from './settings-document-store.ts'
 import { en, zh, type SettingsKey } from './locales.ts'
+import { ConnectionOverlay } from './ConnectionOverlay.tsx'
 
 export type {
   CloseLabelProps, HeaderContentProps, TriggerContentProps,
@@ -156,6 +158,16 @@ export function apply(ctx: ClientContext): void {
     },
     inject: shellInjected,
   }, SettingsRoot))
+  ctx.slots.inject('shell.overlay', () => ctx.slots.register({
+    name: 'shell.overlay',
+    id: 'backend-connection-status',
+    order: -1000,
+    locale: NS,
+    inject: () => ({
+      connectionState: connection.state,
+      reconnect: () => { connection.reconnect() },
+    }),
+  }, ConnectionOverlay))
 
   ctx.slots.inject('settings.trigger', () =>
     ctx.slots.register({ name: 'settings.trigger', locale: NS }, TriggerContent))

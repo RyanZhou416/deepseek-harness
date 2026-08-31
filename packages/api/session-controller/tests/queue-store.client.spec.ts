@@ -232,6 +232,40 @@ describe('queue operation transport', () => {
     ])
     expect(session.getSnapshot().queue).toBe(before)
   })
+
+  it('routes only steering through a continuable child durable parent address', async () => {
+    const api = new FakeApiClient()
+    const session = new Session(SID, fakeRemote(api), {
+      address: {
+        parentSessionId: 'parent' as SessionId,
+        childSessionId: SID,
+        mode: 'continuable',
+      },
+    })
+
+    await expect(session.updateQueue(iid('q-child'), { kind: 'steer' }))
+      .resolves.toEqual({ ok: true, value: { accepted: true } })
+    expect(api.callsOf('subagents.steerQueuedByParent')).toEqual([{
+      parentSessionId: 'parent', childSessionId: SID, mode: 'continuable', itemId: 'q-child',
+    }])
+    await expect(session.updateQueue(iid('q-child'), { kind: 'remove' }))
+      .resolves.toMatchObject({ ok: false, error: { code: 'subagent/delivery-unavailable' } })
+    expect(api.callsOf('session.updateQueue')).toEqual([])
+  })
+
+  it('keeps one-shot child queues read-only', async () => {
+    const api = new FakeApiClient()
+    const session = new Session(SID, fakeRemote(api), {
+      address: {
+        parentSessionId: 'parent' as SessionId,
+        childSessionId: SID,
+        mode: 'one-shot',
+      },
+    })
+    await expect(session.updateQueue(iid('q-child'), { kind: 'steer' }))
+      .resolves.toMatchObject({ ok: false, error: { code: 'subagent/not-resumable' } })
+    expect(api.callsOf('subagents.steerQueuedByParent')).toEqual([])
+  })
 })
 
 describe('queue reconnect semantics', () => {

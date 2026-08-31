@@ -48,7 +48,7 @@ One-shot children run once and settle with a single result, plus an optional str
 
 ### Following up, interrupting, and discovering
 
-Continuable children answer follow-up messages as their next turns, and the parent can interrupt a running turn or list its children at any time. Discovery covers both shapes: the service lists direct children and the full descendant tree — mode, activity, and lineage — reading live session state and optional persistence, without loading any child.
+Continuable children answer FIFO follow-ups as later turns or accept steering at the nearest step boundary. The parent can interrupt a running turn or list its children at any time. A browser viewing a running continuable child may promote one exact pending next-turn message to next-step steering under the durable direct-parent address; inactive and one-shot children remain read-only. Discovery covers both shapes: the service lists direct children and the full descendant tree — mode, activity, and lineage — reading live session state and optional persistence, without loading any child.
 
 ### Failure and recovery
 
@@ -76,7 +76,7 @@ This section explains how the service is built and where the observable behavior
 | File | Role |
 |---|---|
 | [`src/index.ts`](src/index.ts) | Service entry: provider registry, start and continuation API, lifecycle events |
-| [`src/continuation.ts`](src/continuation.ts) | Continuable children: identity reservation, Activation residency, follow-up, interrupt, settlement |
+| [`src/continuation.ts`](src/continuation.ts) | Continuable children: identity reservation, Activation residency, follow-up, steering, interrupt, settlement |
 | [`src/types.ts`](src/types.ts) | Public request, result, and provider contracts |
 | [`src/descriptor.ts`](src/descriptor.ts) | Versioned `subagent/descriptor` session-event vocabulary |
 | [`src/child-agent.ts`](src/child-agent.ts) | Child composition, delegated policy, depth helpers |
@@ -90,7 +90,7 @@ A request is validated against the provider's advertised capabilities, a durable
 
 ### Continuable flow
 
-The manager reserves a child identity, resolves the durable descriptor, creates (or cold-resumes) the child Agent, installs it in an Activation, and submits the prompt. Later messages become FIFO turns through the child's own inbox; an absent Activation cold-resumes from the persisted session. When a resident Activation settles, the manager tells the child's direct parent in the parent's own turn stream.
+The manager reserves a child identity, resolves the durable descriptor, creates (or cold-resumes) the child Agent, installs it in an Activation, and submits the prompt. Follow-ups become FIFO turns, while steering joins the nearest step boundary; both routes use the child's inbox and cold-resume an absent Activation. When a resident Activation settles, the manager tells the child's direct parent in the parent's own turn stream.
 
 ### Ownership and invariants
 
@@ -163,7 +163,7 @@ These limits define when the seam is a poor fit or needs special operational car
 
 - **ACP children remain one-shot and are not trace-enumerable** — an ACP run has no local child session in the parent's session corpus, and remote providers need an Activation ownership contract before they can support continuable children.
 - **No host-user continuation** — `followup()` requires the exact live direct parent; only `interrupt()` accepts a durable human parent address.
-- **Continuation messages never steer** — parent-to-child follow-ups enqueue later turns; they never redirect the child's current turn.
+- **Steering waits for a step boundary** — it does not cancel an in-flight model request or tool call; only that step's completion lets the child claim the message.
 - **Wake gap during cancellation convergence** — a follow-up accepted after an interrupt signal but before the driver becomes idle stays queued until another waking send.
 - **Process-local residency** — the Activation inbox and ownership graph do not coordinate two harness processes; concurrent access to one persistence store needs a durable mailbox and cross-process lease protocol.
 - **No replay of accepted-but-unlogged messages** — a crash can lose an accepted prompt that never reached the child's session log; the lost message is not replayed automatically.

@@ -68,7 +68,7 @@ Only the Lead can create teammates or interrupt them.
 
 Any member can send a message to any other member or to the Lead. A live member receives it immediately; an offline member's messages queue and arrive when it resumes. Messages are never lost and never delivered twice.
 
-Two delivery modes cover the two common intents: a quiet message delivers information without starting an idle teammate (use it for updates that can wait), and a follow-up makes the message the recipient's next turn (use it to hand over work). The sender always sees the outcome — delivered now, or queued. A queued message is already safely stored, so it must not be resent.
+Lead-to-teammate messages always steer the child at its nearest step boundary; the requested quiet or follow-up mode cannot put a Lead directive behind queued turns. Messages from teammates retain the two peer modes: quiet information does not start an idle member, while a follow-up becomes the recipient's next turn. The sender always sees the outcome — delivered now, or queued. A queued message is already safely stored, so it must not be resent.
 
 ### Shared task board
 

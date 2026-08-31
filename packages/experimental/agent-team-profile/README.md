@@ -38,7 +38,7 @@ The profile must already contain `@deepseek-ai/dsh-base`, whose Subagent service
 
 ### What you get
 
-The layer adds the Agent Teams domain and its scoped creation, roster, messaging, interruption, waiting, and task-board tools. It disables the global continuable-child control rows whose tool names overlap with Team controls, while leaving `subagent` and `subagent_fork` available as one-shot delegation tools.
+The layer adds the Agent Teams domain and its scoped creation, roster, messaging, interruption, waiting, and task-board tools. It disables the global continuable-child control rows whose tool names overlap with Team controls, while leaving `subagent` and `subagent_fork` available as one-shot delegation tools. Bash and PowerShell commands always start as jobs, and a blocking `job_output` wait yields when next-step input reaches its owner.
 
 -----
 
@@ -48,7 +48,7 @@ The layer adds the Agent Teams domain and its scoped creation, roster, messaging
 <details>
 <summary>Implementation internals — click to expand</summary>
 
-The package's runtime content is [`cordis.patch.yml`](cordis.patch.yml). Applied after `dsh-base`, the patch disables `tool-subagent-control`, `tool-subagent-list-agents`, and `tool-subagent-report`; sets the fresh and fork Subagent rows to `one-shot`; and inserts the Team service and tool rows with explicit providers and limits.
+The package's runtime content is [`cordis.patch.yml`](cordis.patch.yml). Applied after `dsh-base`, the patch disables `tool-subagent-control`, `tool-subagent-list-agents`, and `tool-subagent-report`; forces the base shell tools onto jobs; makes blocking job-output waits yield to next-step input; sets the fresh and fork Subagent rows to `one-shot`; and inserts the Team service and tool rows with explicit providers and limits.
 
 | File | Role |
 |---|---|

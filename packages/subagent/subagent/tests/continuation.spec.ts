@@ -144,6 +144,19 @@ function followup(
   })
 }
 
+function steer(
+  ctx: Context,
+  parent: Agent,
+  childId: SessionId,
+  content: ReturnType<typeof message>,
+  signal: AbortSignal = testSignal,
+) {
+  return ctx.subagents.steer(parent, childId, content, {
+    source: { kind: 'user' },
+    signal,
+  })
+}
+
 /**
  * Exercise manager-wide teardown through the package-private owner rather than
  * adding the irreversible operation to the public service contract.
@@ -563,6 +576,71 @@ describe('SubagentRuntime.followup residency routing', () => {
     await waitNoActivation(ctx, started.childId)
     const loaded = await ctx.sessionPersistence.load(started.childId)
     expect(userTexts(loaded.events)).toEqual(['child task', 'first follow-up', 'second follow-up'])
+  })
+
+  it('steers a running Activation at its next step instead of queueing another turn', async () => {
+    const releaseFirst = Promise.withResolvers<undefined>()
+    const adapter = new GatedAdapter([
+      { chunks: textResponse('first'), gate: releaseFirst.promise },
+      { chunks: textResponse('steered') },
+    ])
+    const { ctx, parent } = await setupWith(adapter)
+    const started = await ctx.subagents.startContinuable(startSpec(parent))
+    await vi.waitFor(() => { expect(adapter.requests).toHaveLength(1) })
+    const child = ctx.agents.get(started.childId)
+    if (child === undefined) throw new Error('expected a live child')
+
+    const messageId = await steer(ctx, parent, started.childId, message('lead directive'))
+    expect(child.inbox.nextStep.map(input => input.id)).toContain(messageId)
+    expect(child.inbox.nextTurn).toHaveLength(0)
+
+    releaseFirst.resolve(undefined)
+    await waitNoActivation(ctx, started.childId)
+    const loaded = await ctx.sessionPersistence.load(started.childId)
+    expect(userTexts(loaded.events)).toEqual(['child task', 'lead directive'])
+    expect(loaded.events.filter(event => event.type === 'turn/start')).toHaveLength(1)
+  })
+
+  it('promotes one parent-addressed pending turn into next-step steering', async () => {
+    const releaseFirst = Promise.withResolvers<undefined>()
+    const adapter = new GatedAdapter([
+      { chunks: textResponse('first'), gate: releaseFirst.promise },
+      { chunks: textResponse('steered') },
+    ])
+    const { ctx, parent } = await setupWith(adapter)
+    const started = await ctx.subagents.startContinuable(startSpec(parent))
+    await vi.waitFor(() => { expect(adapter.requests).toHaveLength(1) })
+    const child = ctx.agents.get(started.childId)
+    if (child === undefined) throw new Error('expected a live child')
+    const messageId = await followup(ctx, parent, started.childId, message('queued directive'))
+    const manager = (ctx.subagents as unknown as {
+      continuations: {
+        steerPendingByParent(
+          childId: SessionId,
+          parentId: SessionId,
+          messageId: MessageId,
+          signal: AbortSignal,
+        ): Promise<string>
+      }
+    }).continuations
+
+    await expect(manager.steerPendingByParent(
+      started.childId, parent.id, messageId, testSignal,
+    )).resolves.toBe('steered')
+    expect(child.inbox.nextTurn).toHaveLength(0)
+    expect(child.inbox.nextStep.map(input => input.id)).toEqual([messageId])
+    await expect(manager.steerPendingByParent(
+      started.childId, parent.id, messageId, testSignal,
+    )).resolves.toBe('not-found')
+    await expect(manager.steerPendingByParent(
+      started.childId, SessionId('wrong-parent'), messageId, testSignal,
+    )).rejects.toMatchObject({ code: 'UNAUTHORIZED' })
+
+    releaseFirst.resolve(undefined)
+    await waitNoActivation(ctx, started.childId)
+    await expect(manager.steerPendingByParent(
+      started.childId, parent.id, messageId, testSignal,
+    )).resolves.toBe('unavailable')
   })
 
   it('cold-resumes a settled child into a new Activation', async () => {
@@ -2278,7 +2356,7 @@ describe('continuable lifecycle observation', () => {
 })
 
 describe('continuable public API', () => {
-  it('exposes no host authority, residency query, cancellation, steering, or report operation', async () => {
+  it('exposes child steering without adding host authority, residency, cancellation, or report operations', async () => {
     const { ctx } = await setup([])
     const subagents: Record<string, unknown> = ctx.subagents as unknown as Record<string, unknown>
     for (const absent of [
@@ -2287,13 +2365,13 @@ describe('continuable public API', () => {
       'kill',
       'report',
       'resume',
-      'steer',
       'steerContinuable',
       'userAuthority',
     ]) {
       expect(subagents[absent]).toBeUndefined()
     }
-    // No steering tool and no report tool are registered by this seam.
+    expect(subagents.steer).toBeTypeOf('function')
+    // The service operation does not register a model-facing steering or report tool.
     const names = ctx.tools.schemas().map(schema => schema.name)
     expect(names).not.toContain('report')
     expect(names).not.toContain('steer_subagent')

@@ -549,6 +549,21 @@ async startContinuable(spec: ContinuableStartSpec): Promise<ContinuableStart>
 async followup( parent: Agent, childId: SessionId, content: ContentBlock[], options: SubagentFollowupOptions, ): Promise<MessageId>
 
 /**
+ * Deliver one later message to a continuable child's nearest step boundary.
+ * A running child finishes its current step before claiming the message; an
+ * idle or absent child wakes or cold-resumes. The caller signal owns the
+ * operation only until inbox acceptance.
+ * @param parent - the exact live direct parent authorizing this delivery.
+ * @param childId - durable child session id.
+ * @param content - user-role content to deliver.
+ * @param options - the message source fields and caller cancellation.
+ * @returns the accepted message's inbox id.
+ * @throws when continuation services are unavailable, parent authority is
+ *   rejected, or the message was not admitted.
+ */
+async steer( parent: Agent, childId: SessionId, content: ContentBlock[], options: SubagentFollowupOptions, ): Promise<MessageId>
+
+/**
  * Interrupt one live continuable child's current turn under a human parent
  * address or an exact live ancestor Agent. Fire-and-return: the cancel
  * signal is issued before this returns, but the target may keep running
@@ -678,6 +693,20 @@ listDescendants(rootSessionId: SessionId, signal?: AbortSignal): Promise<Subagen
  *   `subagent/delivery-unavailable`, `gateway/cancelled`, or `gateway/internal`.
  */
 @Remote('prompt') async prompt(request: SubagentPromptRequest, signal: AbortSignal): Promise<SubagentPromptReceipt>
+
+/**
+ * Promote one browser-selected child queue occurrence to next-step steering
+ * under its durable direct-parent address. The target must have a live,
+ * running Activation; this operation neither resumes an inactive child nor
+ * requires the parent Agent to be live.
+ * @param request - durable parent/child address and pending message identity.
+ * @param signal - carrier cancellation before the inbox move commits.
+ * @returns acknowledgement that the occurrence moved to next-step steering.
+ * @throws {RemoteError} `gateway/bad-request`, `gateway/cancelled`,
+ *   `subagent/unauthorized`, `subagent/queue-item-not-found`,
+ *   `subagent/steer-unavailable`, or `gateway/internal`.
+ */
+@Remote('steerQueuedByParent') async steerQueuedByParent( request: SubagentQueueSteerRequest, signal: AbortSignal, ): Promise<SubagentQueueSteerReceipt>
 
 /**
  * Remote face of {@link interrupt} under one durable parent address. No

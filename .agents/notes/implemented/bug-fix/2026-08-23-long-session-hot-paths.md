@@ -8,7 +8,7 @@ English | [中文](2026-08-23-long-session-hot-paths.zh.md)
 
 Several independent hot paths made work grow with the complete Session log. An active token meter reread the public whole-log snapshot after each event; persistence cloned already detached and recursively frozen events before batching; live full-text search cloned, serialized, and reprojected the complete Session; JSONL listing repeatedly decoded stable headers; and adjacent search pages displaced each other from a one-page cache.
 
-High-concurrency workloads also admitted model phases and retained idle Web-created Agents without process-wide bounds. Tool or subagent waits could retain capacity after the model response had already finished, and a durable idle Session remained attached even when no browser followed it.
+High-concurrency workloads also retained idle Web-created Agents without a residency bound. A durable idle Session remained attached even when no browser followed it.
 
 The lossless [packed Session history transport](../architecture/2026-08-15-packed-session-history-transport.md) bounds reopen and reconnect costs, but a browser tab that remains open still receives scalar live events. One exceptionally long completed answer can therefore leave tens of thousands of scalar chunks in the Client window. Collapsed Tool rows also performed JSON parsing, result flattening, and card-model construction before the reader opened them.
 
@@ -24,8 +24,6 @@ The SQLite session-query provider identifies each live Session object weakly and
 
 JSONL persistence caches each validated header against the exact stat-derived artifact revision. Concurrent list and snapshot-list requests share one metadata scan, while cancellation abandons only the caller's wait. A changed artifact revision forces validation and successful discovery prunes absent entries.
 
-The base bundle mounts one process-wide FIFO memory-admission guard. At most eight model phases are admitted by default; V8 heap pressure closes admission at 0.82 of the heap limit and reopens it at 0.72. A reservation releases at the matching final `assistant/message`, before Tool execution or a child Agent wait, with `step/end`, idle, cancellation, and disposal as cleanup paths. The guard changes scheduling only and writes no Session event.
-
 Session Controller owns every Agent handle it creates or resumes. A durable idle Agent remains resident while a history follower, pending inbox item, owned child, active job, or running state needs it. After the configured five-minute retention, the controller flushes the Session, verifies a persistence snapshot, and disposes only its owned handle; the list row and log remain available for normal cold resume.
 
 Client Session state counts scalar events received after each opening snapshot. Once the count reaches 20,000, the next final `assistant/message` restarts its `RemoteJournalStream` once. The official follow opening then replaces the scalar tail with the lossless packed window and resets the count. An unfinished model phase remains exact, and the implementation adds no settled projection, sparse sequence range, or alternate history API.
@@ -36,7 +34,7 @@ Gateway Ping/Pong retains the strict WebSocket control-frame protocol. Each Ping
 
 ## Verification
 
-Focused token-meter, write-behind, SQLite query, JSONL persistence, memory-admission, Session Controller, Tool-row, and Gateway suites pin each incremental or bounded path. The memory-admission composition test uses the real Agent loop and proves release before Tool and subagent work. Session Controller uses a small injected threshold to prove that scalar traffic alone does not restart, while the first final message past the threshold causes one replacement generation. Gateway coverage proves Ping/Pong carries no application message and terminates a peer that misses the next Pong deadline.
+Focused token-meter, write-behind, SQLite query, JSONL persistence, Session Controller, Tool-row, and Gateway suites pin each incremental or bounded path. Session Controller uses a small injected threshold to prove that scalar traffic alone does not restart, while the first final message past the threshold causes one replacement generation. Gateway coverage proves Ping/Pong carries no application message and terminates a peer that misses the next Pong deadline.
 
 The incident-scale history contained 256,008 logical events in one message-aligned page, including 256,004 Assistant chunks. The packed transport keeps every logical event but represents consecutive same-block chunks as a small number of records; live rebasing applies that same representation after the answer becomes final instead of inventing a lossy projection.
 
@@ -56,6 +54,6 @@ The incident-scale history contained 256,008 logical events in one message-align
 
 ## Consequences
 
-Long streams avoid repeated whole-log allocation in token accounting, persistence batching, JSONL discovery, and live search indexing. Model concurrency and idle Host residency are bounded without changing model input, event ordering, or durable identity. Reopened, reconnected, and finalized oversized live windows use the official lossless packed representation, while collapsed Tool rows avoid work proportional to hidden content. Half-open mux sockets enter the existing reconnect path within two configured heartbeat intervals.
+Long streams avoid repeated whole-log allocation in token accounting, persistence batching, JSONL discovery, and live search indexing. Idle Host residency is bounded without changing model input, event ordering, or durable identity. Reopened, reconnected, and finalized oversized live windows use the official lossless packed representation, while collapsed Tool rows avoid work proportional to hidden content. Half-open mux sockets enter the existing reconnect path within two configured heartbeat intervals.
 
 The live Host Session log remains fully resident while its Agent is active, an unfinished response may exceed the Client threshold until its final message arrives, the first varied broad SQLite query can still block one Host thread, and Chat still mounts every loaded presentation row. No Session event type, `SESSION_FORMAT_VERSION`, JSONL storage path, or migration is introduced by these fork-specific bounds.

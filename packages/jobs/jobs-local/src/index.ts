@@ -14,7 +14,7 @@ import z from '@deepseek-ai/schemastery'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { AnonymousEntries, ScopedLayers, scopeOf } from '@deepseek-ai/dsh-scope'
 import type { ScopeLayer } from '@deepseek-ai/dsh-scope'
-import { deadline, timeoutOf } from '@deepseek-ai/dsh-timeout'
+import { deadline, MAX_TIMER_DELAY_MS, timeoutOf } from '@deepseek-ai/dsh-timeout'
 import { JobRegistry, JobId } from '@deepseek-ai/dsh-jobs'
 import type {
   JobDoneListener, JobKind, JobOutcome, JobRead, JobSnapshot, JobStart, JobStatus,
@@ -34,6 +34,19 @@ export interface Config {
    * omission defaults to 10.
    */
   maxConcurrentJobsPerOwner?: number
+  /**
+   * Milliseconds to retain a terminal job before removing it, whether or not
+   * its result was reported. Omission preserves terminal jobs until owner or
+   * service disposal.
+   */
+  terminalJobRetentionMs?: number
+  /**
+   * Target maximum terminal jobs retained per exact owner or in the shared
+   * unowned bucket. Count pruning removes only reported records; unreported
+   * records remain until {@link terminalJobRetentionMs} expires or teardown.
+   * Omission disables count pruning.
+   */
+  maxRetainedTerminalJobsPerOwner?: number
 }
 
 /** The registry's mutable per-job record (never handed out — see {@link LocalJobRegistry.snapshot}). */
@@ -46,12 +59,20 @@ interface TrackedTask {
   owner: Agent | undefined
   cancel: (reason?: string) => void
   readOutput: (() => string) | undefined
+  /** Whether reads use consuming producer output rather than replayable final output. */
+  streamOutput: boolean
   status: JobStatus
   detail: string | undefined
   output: string | undefined
+  /** Stable Map insertion order used to break equal-finish-time retention ties. */
+  registrationOrder: number
   startedAt: number
   finishedAt: number | undefined
   reported: boolean
+  /** Whether this terminal record contributes to its owner's indexed count. */
+  terminalIndexed: boolean
+  /** Whether one lightweight candidate exists in the owner's reported heap. */
+  reportedIndexed: boolean
   /** Resolves once the terminal snapshot is recorded and listeners notified. */
   settled: Promise<void>
   /** Resolver for {@link settled}, called by the first effective settlement. */
@@ -65,6 +86,85 @@ interface TrackedTask {
 /** True for the three terminal {@link JobStatus} values. */
 function isTerminal(status: JobStatus): boolean {
   return status === 'completed' || status === 'killed' || status === 'failed'
+}
+
+/** Lightweight terminal identity retained by ordered indexes after a job is removed. */
+interface TerminalRef {
+  readonly id: JobId
+  readonly finishedAt: number
+  readonly registrationOrder: number
+}
+
+/** One terminal deadline in the process-wide expiry heap. */
+interface ExpiryRef extends TerminalRef {
+  readonly expiresAt: number
+}
+
+/** Incremental terminal state for one exact owner or the shared unowned bucket. */
+interface TerminalBucket {
+  count: number
+  readonly reported: MinHeap<TerminalRef>
+}
+
+/** Minimal binary min-heap used by the private retention indexes. */
+class MinHeap<T> {
+  private readonly values: T[] = []
+
+  constructor(private readonly compare: (left: T, right: T) => number) {}
+
+  peek(): T | undefined {
+    return this.values[0]
+  }
+
+  push(value: T): void {
+    const values = this.values
+    let index = values.push(value) - 1
+    while (index > 0) {
+      const parent = Math.floor((index - 1) / 2)
+      const parentValue = values[parent] as T
+      if (this.compare(parentValue, value) <= 0) break
+      values[index] = parentValue
+      index = parent
+    }
+    values[index] = value
+  }
+
+  pop(): T | undefined {
+    const values = this.values
+    const first = values[0]
+    const last = values.pop()
+    if (values.length === 0 || last === undefined) return first
+    let index = 0
+    while (true) {
+      const left = index * 2 + 1
+      if (left >= values.length) break
+      const right = left + 1
+      let child = left
+      if (right < values.length
+        && this.compare(values[right] as T, values[left] as T) < 0) child = right
+      const childValue = values[child] as T
+      if (this.compare(last, childValue) <= 0) break
+      values[index] = childValue
+      index = child
+    }
+    values[index] = last
+    return first
+  }
+
+  clear(): void {
+    this.values.length = 0
+  }
+}
+
+/** Oldest terminal first, preserving the former stable Map-order tie break. */
+function compareTerminalRef(left: TerminalRef, right: TerminalRef): number {
+  return left.finishedAt - right.finishedAt
+    || left.registrationOrder - right.registrationOrder
+}
+
+/** Nearest expiry first, with the same stable terminal tie break. */
+function compareExpiryRef(left: ExpiryRef, right: ExpiryRef): number {
+  return left.expiresAt - right.expiresAt || compareTerminalRef(left, right)
 }
 
 /**
@@ -95,12 +195,29 @@ export class LocalJobRegistry extends JobRegistry {
       .min(1)
       .max(Number.MAX_SAFE_INTEGER)
       .default(DEFAULT_MAX_CONCURRENT_TASKS_PER_OWNER),
+    terminalJobRetentionMs: z.number()
+      .step(1)
+      .min(1)
+      .max(MAX_TIMER_DELAY_MS),
+    maxRetainedTerminalJobsPerOwner: z.number()
+      .step(1)
+      .min(1)
+      .max(Number.MAX_SAFE_INTEGER),
   })
 
   /** Schemastery-defaulted active-job limit. */
   private readonly maxConcurrentJobsPerOwner: number
+  /** Optional wall-clock expiry for terminal records. */
+  private readonly terminalJobRetentionMs: number | undefined
+  /** Optional per-owner target for reported terminal records. */
+  private readonly maxRetainedTerminalJobsPerOwner: number | undefined
   private store = new Map<JobId, TrackedTask>()
   private counters = new Map<string, number>()
+  private nextRegistrationOrder = 0
+  /** Exact-owner terminal counts and oldest-reported candidate heaps. */
+  private readonly terminalBuckets = new Map<Agent | undefined, TerminalBucket>()
+  /** Process-wide terminal deadlines; removed jobs leave only lightweight stale refs. */
+  private readonly expiry = new MinHeap<ExpiryRef>(compareExpiryRef)
   /**
    * Surfaces and listeners layered by the scope that registered them, in the
    * tools-registry shape: a contribution files into its registering context's
@@ -115,6 +232,11 @@ export class LocalJobRegistry extends JobRegistry {
    */
   private readonly layers = new ScopedLayers<JobLayer>(() => new JobLayer(), () => {})
   private listenersClosed = false
+  /** One service-owned timer shared by deferred count pruning and terminal expiry. */
+  private retentionTimer: ReturnType<typeof setTimeout> | undefined
+  private retentionTimerDeadline: number | undefined
+  /** Owners whose newly reported terminals receive one next-task count prune. */
+  private readonly deferredPruneOwners = new Set<Agent | undefined>()
   /** Owner agents with attached scope cleanup, mapped to the exact disposer. */
   private ownerCleanups = new Map<Agent, () => Promise<void> | void>()
   /** Service context used by detached settlement continuations and teardown. */
@@ -124,6 +246,8 @@ export class LocalJobRegistry extends JobRegistry {
     super(ctx)
     // Schemastery validates and fills the default before constructing the service.
     this.maxConcurrentJobsPerOwner = (config as Required<Config>).maxConcurrentJobsPerOwner
+    this.terminalJobRetentionMs = config.terminalJobRetentionMs
+    this.maxRetainedTerminalJobsPerOwner = config.maxRetainedTerminalJobsPerOwner
     this.selfCtx = ctx
     ctx.effect(() => () => this.disposeAll(), 'jobs teardown')
   }
@@ -162,12 +286,16 @@ export class LocalJobRegistry extends JobRegistry {
       owner: spec.owner,
       cancel: hooks.cancel.bind(hooks),
       readOutput: hooks.readOutput?.bind(hooks),
+      streamOutput: hooks.readOutput !== undefined,
       status: 'running',
       detail: undefined,
       output: undefined,
+      registrationOrder: this.nextRegistrationOrder++,
       startedAt: Date.now(),
       finishedAt: undefined,
       reported: false,
+      terminalIndexed: false,
+      reportedIndexed: false,
       settled,
       markSettled,
       waiters: 0,
@@ -205,18 +333,23 @@ export class LocalJobRegistry extends JobRegistry {
   read(id: JobId, caller?: Agent): JobRead {
     const job = this.expect(id)
     this.assertAccess(job, caller)
-    const text = job.readOutput !== undefined
-      ? job.readOutput()
-      : isTerminal(job.status) ? job.output ?? '' : ''
-    if (isTerminal(job.status)) job.reported = true
-    return { text, snapshot: this.snapshot(job) }
+    const readOutput = job.readOutput
+    const text = readOutput !== undefined
+      ? readOutput()
+      : job.streamOutput ? '' : isTerminal(job.status) ? job.output ?? '' : ''
+    if (!isTerminal(job.status)) return { text, snapshot: this.snapshot(job) }
+    // A terminal stream cannot produce more bytes after `done`; its first
+    // successful read consumed the remaining delta, so release the producer
+    // closure while preserving subsequent empty reads.
+    if (readOutput !== undefined) job.readOutput = undefined
+    return { text, snapshot: this.reportTerminal(job) }
   }
 
   kill(id: JobId, caller?: Agent, reason?: string): 'requested' | 'already-finished' {
     const job = this.expect(id)
     this.assertAccess(job, caller)
     if (isTerminal(job.status)) {
-      job.reported = true
+      this.reportTerminal(job, true)
       return 'already-finished'
     }
     // Cancel first so a throw leaves both lifecycle and notice state unchanged.
@@ -274,8 +407,7 @@ export class LocalJobRegistry extends JobRegistry {
         uncount()
       }
     }
-    if (isTerminal(job.status)) job.reported = true
-    return this.snapshot(job)
+    return isTerminal(job.status) ? this.reportTerminal(job, true) : this.snapshot(job)
   }
 
   onJobDone(listener: JobDoneListener): () => void {
@@ -377,6 +509,26 @@ export class LocalJobRegistry extends JobRegistry {
   }
 
   /**
+   * Mark one terminal result collected and apply count retention. Wait and
+   * kill callers defer pruning one task so their immediate read/get can finish.
+   */
+  private reportTerminal(job: TrackedTask, deferPrune = false): JobSnapshot {
+    job.reported = true
+    this.indexReportedTerminal(job)
+    const snapshot = this.snapshot(job)
+    if (deferPrune) this.scheduleReportedPrune(job.owner)
+    else if (this.pruneReportedTerminals(job.owner)) this.notifyChanged(job.owner)
+    return snapshot
+  }
+
+  /** Batch deferred count pruning behind the current tool operation. */
+  private scheduleReportedPrune(owner: Agent | undefined): void {
+    if (this.maxRetainedTerminalJobsPerOwner === undefined || this.listenersClosed) return
+    this.deferredPruneOwners.add(owner)
+    this.scheduleRetentionTimer(Date.now())
+  }
+
+  /**
    * The change observers that own `owner`'s updates, resolved exactly like
    * {@link listenersFor}: the global layer — a host composition's own carrier,
    * which serves every owner — then each scoped layer along the owner's chain.
@@ -419,13 +571,21 @@ export class LocalJobRegistry extends JobRegistry {
     job.detail = outcome.detail
     job.output = outcome.output
     job.finishedAt = Date.now()
+    // Terminal records never call cancel again. Drop its bound hooks object,
+    // which can otherwise retain producer resources until owner teardown.
+    job.cancel = () => {}
     if (job.waiters > 0) job.reported = true
+    this.indexTerminal(job)
     const snapshot = this.snapshot(job)
     const waitResolvers = [...job.waitResolvers]
     job.waitResolvers.clear()
     for (const resolveWait of waitResolvers) resolveWait()
     job.markSettled()
     this.notifyChanged(job.owner)
+    // Publish any count-driven removal before completion: a reporter may open
+    // a model turn synchronously and must see the final visible set. Protect
+    // the just-settled id for a waiter that was released above.
+    if (this.pruneReportedTerminals(job.owner, job.id)) this.notifyChanged(job.owner)
     if (this.listenersClosed) return
     for (const listener of this.listenersFor(job.owner)) {
       try {
@@ -437,6 +597,180 @@ export class LocalJobRegistry extends JobRegistry {
         this.selfCtx.logger.warn(`jobs: onJobDone listener threw for ${job.id}: ${String(error)}`)
       }
     }
+    this.armNextTerminalExpiry()
+  }
+
+  /**
+   * Remove the oldest reported terminal records until one owner bucket reaches
+   * its configured target. Live and unreported records are never candidates.
+   * @param owner - exact lifecycle owner, or undefined for the shared unowned bucket.
+   * @param protectedId - a just-settled id that an already-released waiter may read next.
+   * @returns whether the visible set changed.
+   */
+  private pruneReportedTerminals(owner: Agent | undefined, protectedId?: JobId): boolean {
+    const maximum = this.maxRetainedTerminalJobsPerOwner
+    if (maximum === undefined) return false
+    const bucket = this.terminalBuckets.get(owner)
+    if (bucket === undefined) return false
+    this.discardStaleReportedHead(owner, bucket)
+    let excess = bucket.count - maximum
+    if (excess <= 0) return false
+    let changed = false
+    const blocked: TerminalRef[] = []
+    while (excess > 0) {
+      const candidate = bucket.reported.pop()
+      if (candidate === undefined) break
+      const job = this.resolveReportedCandidate(owner, candidate)
+      if (job === undefined) continue
+      // A settlement may release a waiter before that wait continuation can
+      // collect output. Another same-turn settlement must not remove its id.
+      if (job.waiters > 0 || job.id === protectedId) {
+        blocked.push(candidate)
+        continue
+      }
+      if (this.removeTerminal(job)) {
+        changed = true
+        excess -= 1
+      }
+    }
+    for (const candidate of blocked) bucket.reported.push(candidate)
+    return changed
+  }
+
+  /** Add one settled job to its exact-owner count and ordered retention indexes. */
+  private indexTerminal(job: TrackedTask): void {
+    if (job.terminalIndexed) return
+    const countEnabled = this.maxRetainedTerminalJobsPerOwner !== undefined
+    const retentionMs = this.terminalJobRetentionMs
+    const expiryEnabled = retentionMs !== undefined
+    if (!countEnabled && !expiryEnabled) return
+    const finishedAt = job.finishedAt
+    /* v8 ignore next -- settle assigns finishedAt before indexing. */
+    if (finishedAt === undefined) throw new Error(`terminal job ${job.id} has no finish time`)
+    job.terminalIndexed = true
+    if (countEnabled) {
+      let bucket = this.terminalBuckets.get(job.owner)
+      if (bucket === undefined) {
+        bucket = { count: 0, reported: new MinHeap(compareTerminalRef) }
+        this.terminalBuckets.set(job.owner, bucket)
+      }
+      bucket.count += 1
+      if (job.reported) this.indexReportedTerminal(job)
+    }
+    if (expiryEnabled) {
+      this.expiry.push({
+        ...this.refOf(job),
+        expiresAt: finishedAt + retentionMs,
+      })
+    }
+  }
+
+  /** Add one newly reported terminal to its owner's oldest-first candidate heap. */
+  private indexReportedTerminal(job: TrackedTask): void {
+    if (this.maxRetainedTerminalJobsPerOwner === undefined
+      || !job.terminalIndexed || job.reportedIndexed) return
+    const bucket = this.terminalBuckets.get(job.owner)
+    /* v8 ignore next -- every indexed terminal owns a bucket. */
+    if (bucket === undefined) throw new Error(`terminal job ${job.id} has no owner bucket`)
+    job.reportedIndexed = true
+    bucket.reported.push(this.refOf(job))
+  }
+
+  /** Project one lightweight ordered reference from an indexed terminal job. */
+  private refOf(job: TrackedTask): TerminalRef {
+    const finishedAt = job.finishedAt
+    /* v8 ignore next -- only indexed terminal jobs reach this helper. */
+    if (finishedAt === undefined) throw new Error(`terminal job ${job.id} has no finish time`)
+    return { id: job.id, finishedAt, registrationOrder: job.registrationOrder }
+  }
+
+  /** Resolve one reported-heap entry, discarding removed or superseded refs. */
+  private resolveReportedCandidate(owner: Agent | undefined, candidate: TerminalRef): TrackedTask | undefined {
+    const job = this.store.get(candidate.id)
+    if (job === undefined || job.owner !== owner || !job.terminalIndexed || !job.reported
+      || job.finishedAt !== candidate.finishedAt
+      || job.registrationOrder !== candidate.registrationOrder) return undefined
+    return job
+  }
+
+  /** Drop stale oldest entries without traversing the complete candidate heap. */
+  private discardStaleReportedHead(owner: Agent | undefined, bucket: TerminalBucket): void {
+    while (true) {
+      const candidate = bucket.reported.peek()
+      if (candidate === undefined || this.resolveReportedCandidate(owner, candidate) !== undefined) return
+      bucket.reported.pop()
+    }
+  }
+
+  /** Remove one terminal record and decrement only its exact-owner index. */
+  private removeTerminal(job: TrackedTask): boolean {
+    if (!this.store.delete(job.id)) return false
+    if (!job.terminalIndexed) return true
+    job.terminalIndexed = false
+    job.reportedIndexed = false
+    if (this.maxRetainedTerminalJobsPerOwner === undefined) return true
+    const bucket = this.terminalBuckets.get(job.owner)
+    /* v8 ignore next -- indexed terminals always contribute to one bucket. */
+    if (bucket === undefined) return true
+    bucket.count -= 1
+    if (bucket.count === 0) this.terminalBuckets.delete(job.owner)
+    return true
+  }
+
+  /** Return the nearest still-live expiry while lazily dropping stale refs. */
+  private nextTerminalExpiry(): ExpiryRef | undefined {
+    while (true) {
+      const candidate = this.expiry.peek()
+      if (candidate === undefined) return undefined
+      const job = this.store.get(candidate.id)
+      if (job !== undefined && job.terminalIndexed
+        && job.finishedAt === candidate.finishedAt
+        && job.registrationOrder === candidate.registrationOrder) return candidate
+      this.expiry.pop()
+    }
+  }
+
+  /** Schedule the single maintenance timer earlier only when required. */
+  private scheduleRetentionTimer(deadline: number): void {
+    if (this.listenersClosed) return
+    if (this.retentionTimer !== undefined
+      && this.retentionTimerDeadline !== undefined
+      && this.retentionTimerDeadline <= deadline) return
+    if (this.retentionTimer !== undefined) clearTimeout(this.retentionTimer)
+    this.retentionTimerDeadline = deadline
+    this.retentionTimer = setTimeout(() => {
+      this.retentionTimer = undefined
+      this.retentionTimerDeadline = undefined
+      const deferred = [...this.deferredPruneOwners]
+      this.deferredPruneOwners.clear()
+      for (const owner of deferred) {
+        if (this.pruneReportedTerminals(owner)) this.notifyChanged(owner)
+      }
+      this.expireTerminalJobs()
+      this.armNextTerminalExpiry()
+    }, Math.max(0, deadline - Date.now()))
+    this.retentionTimer.unref()
+  }
+
+  /** Point maintenance at the current valid expiry without resetting an earlier timer. */
+  private armNextTerminalExpiry(): void {
+    const next = this.nextTerminalExpiry()
+    if (next !== undefined) this.scheduleRetentionTimer(next.expiresAt)
+  }
+
+  /** Expire every due terminal record from the ordered deadline heap. */
+  private expireTerminalJobs(): void {
+    if (this.terminalJobRetentionMs === undefined) return
+    const now = Date.now()
+    const changedOwners = new Set<Agent | undefined>()
+    while (true) {
+      const candidate = this.nextTerminalExpiry()
+      if (candidate === undefined || candidate.expiresAt > now) break
+      this.expiry.pop()
+      const job = this.store.get(candidate.id)
+      if (job !== undefined && this.removeTerminal(job)) changedOwners.add(job.owner)
+    }
+    for (const owner of changedOwners) this.notifyChanged(owner)
   }
 
   /**
@@ -468,7 +802,10 @@ export class LocalJobRegistry extends JobRegistry {
     const owned = [...this.store.values()].filter(job => job.owner === owner)
     this.cancelForTeardown(owned, 'owner disposed')
     await Promise.all(owned.map(job => job.settled))
-    for (const job of owned) this.store.delete(job.id)
+    for (const job of owned) {
+      if (job.terminalIndexed) this.removeTerminal(job)
+      else this.store.delete(job.id)
+    }
     // Removal is the one visible-set change no per-job record carries, so it
     // must be announced here or an observer keeps the dropped rows forever.
     if (owned.length > 0) this.notifyChanged(owner)
@@ -482,6 +819,10 @@ export class LocalJobRegistry extends JobRegistry {
     // The flag is the whole guard: each layer entry's undo belongs to the fiber
     // that registered it, so this service may not drop them on its own way out.
     this.listenersClosed = true
+    if (this.retentionTimer !== undefined) clearTimeout(this.retentionTimer)
+    this.retentionTimer = undefined
+    this.retentionTimerDeadline = undefined
+    this.deferredPruneOwners.clear()
     const all = [...this.store.values()]
     this.cancelForTeardown(all, 'jobs service disposed')
     await Promise.all(all.map(job => job.settled))
@@ -492,6 +833,8 @@ export class LocalJobRegistry extends JobRegistry {
     // received after a registry reload.
     const emptied = new Set(all.map(job => job.owner))
     this.store.clear()
+    this.terminalBuckets.clear()
+    this.expiry.clear()
     for (const owner of emptied) this.notifyChanged(owner)
     // Detach cross-fiber owner effects after the shared store is quiescent.
     const ownerCleanups = [...this.ownerCleanups.values()]

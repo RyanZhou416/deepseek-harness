@@ -2,5 +2,5 @@
 # side as of the last confirmed-consistent state. Both languages carry equal authority;
 # after editing either side, bring the other along and re-record with:
 #   pnpm run verify-translation-pairing --write .agents/notes/implemented/bug-fix/2026-08-23-long-session-hot-paths.md
-2026-08-23-long-session-hot-paths.md: 0006a15237e9e513023b11f65ca2ce906ca0093f
-2026-08-23-long-session-hot-paths.zh.md: 9c3f5e63077bdbb7d3d6d602aa0d6aec4d261149
+2026-08-23-long-session-hot-paths.md: 5e7808406602e5c758e35141ed0200a14ade6011
+2026-08-23-long-session-hot-paths.zh.md: c772c49f0eb06c22f835d51ec14d3ffdf008f6d6
