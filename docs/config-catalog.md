@@ -954,6 +954,19 @@ export interface Config {
    * omission defaults to 10.
    */
   maxConcurrentJobsPerOwner?: number
+  /**
+   * Milliseconds to retain a terminal job before removing it, whether or not
+   * its result was reported. Omission preserves terminal jobs until owner or
+   * service disposal.
+   */
+  terminalJobRetentionMs?: number
+  /**
+   * Target maximum terminal jobs retained per exact owner or in the shared
+   * unowned bucket. Count pruning removes only reported records; unreported
+   * records remain until {@link terminalJobRetentionMs} expires or teardown.
+   * Omission disables count pruning.
+   */
+  maxRetainedTerminalJobsPerOwner?: number
 }
 ```
 
@@ -2696,6 +2709,8 @@ Requires: `tools` · `shell` · `systemPrompt` · `shellEnv`
 export interface Config {
   /** Expose `run_in_background` (default true); disabled calls are also rejected. */
   enableRunInBackground?: boolean
+  /** Force every command into an owner-scoped background job (default false). */
+  forceRunInBackground?: boolean
 }
 ```
 
@@ -2818,6 +2833,11 @@ export interface Config {
    * completion wakes it again.
    */
   maxConsecutiveWakes?: number
+  /**
+   * Whether pending next-step input ends a blocking `job_output` wait without
+   * cancelling the job (default false).
+   */
+  yieldWaitOnNextStep?: boolean
 }
 
 /**
@@ -2861,6 +2881,8 @@ Requires: `tools` · `shell` · `systemPrompt` · `shellEnv`
 export interface Config {
   /** Expose `run_in_background` (default true); disabled calls are also rejected. */
   enableRunInBackground?: boolean
+  /** Force every command into an owner-scoped background job (default false). */
+  forceRunInBackground?: boolean
 }
 ```
 
@@ -3065,6 +3087,8 @@ Requires: `terminals` · `tools` · `systemPrompt`
 export interface Config {
   /** Expose `run_in_background` and accept background sends (default true). */
   enableRunInBackground?: boolean
+  /** Force every terminal send into an owner-scoped background job (default false). */
+  forceRunInBackground?: boolean
   /** Maximum UTF-8 bytes in one complete terminal or task-output result. */
   maxResultBytes?: number
 }

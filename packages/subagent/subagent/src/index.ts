@@ -47,6 +47,8 @@ import type {
   SubagentPromptReceipt,
   SubagentPromptRequest,
   SubagentPromptRequestId,
+  SubagentQueueSteerReceipt,
+  SubagentQueueSteerRequest,
 } from './control-types.ts'
 import type {
   ContinuableCreateRequest,
@@ -263,6 +265,28 @@ export class SubagentRuntime extends TypertRemoteService {
   }
 
   /**
+   * Deliver one later message to a continuable child's nearest step boundary.
+   * A running child finishes its current step before claiming the message; an
+   * idle or absent child wakes or cold-resumes. The caller signal owns the
+   * operation only until inbox acceptance.
+   * @param parent - the exact live direct parent authorizing this delivery.
+   * @param childId - durable child session id.
+   * @param content - user-role content to deliver.
+   * @param options - the message source fields and caller cancellation.
+   * @returns the accepted message's inbox id.
+   * @throws when continuation services are unavailable, parent authority is
+   *   rejected, or the message was not admitted.
+   */
+  async steer(
+    parent: Agent,
+    childId: SessionId,
+    content: ContentBlock[],
+    options: SubagentFollowupOptions,
+  ): Promise<MessageId> {
+    return this.requireContinuations().steer(parent, childId, content, options)
+  }
+
+  /**
    * Interrupt one live continuable child's current turn under a human parent
    * address or an exact live ancestor Agent. Fire-and-return: the cancel
    * signal is issued before this returns, but the target may keep running
@@ -459,6 +483,62 @@ export class SubagentRuntime extends TypertRemoteService {
     } catch (error: unknown) {
       return rejectPrompt(error, childSessionId, signal)
     }
+  }
+
+  /**
+   * Promote one browser-selected child queue occurrence to next-step steering
+   * under its durable direct-parent address. The target must have a live,
+   * running Activation; this operation neither resumes an inactive child nor
+   * requires the parent Agent to be live.
+   * @param request - durable parent/child address and pending message identity.
+   * @param signal - carrier cancellation before the inbox move commits.
+   * @returns acknowledgement that the occurrence moved to next-step steering.
+   * @throws {TypertRemoteFailure} `bad-request`, `cancelled`,
+   *   `subagent-unauthorized`, `subagent-queue-item-not-found`,
+   *   `subagent-steer-unavailable`, or `internal`.
+   */
+  @Remote('steerQueuedByParent')
+  async steerQueuedByParent(
+    request: SubagentQueueSteerRequest,
+    signal: AbortSignal,
+  ): Promise<SubagentQueueSteerReceipt> {
+    validateControlRequest('subagent.steerQueued', request)
+    let outcome: 'steered' | 'not-found' | 'unavailable'
+    try {
+      outcome = await this.continuations?.steerPendingByParent(
+        request.childSessionId,
+        request.parentSessionId,
+        request.itemId,
+        signal,
+      ) ?? 'unavailable'
+    } catch (error: unknown) {
+      if (signal.aborted || (error instanceof SubagentError && error.code === 'CANCELLED')) {
+        return rejectControl('cancelled', 'subagent queue steering was cancelled', {})
+      }
+      if (error instanceof SubagentError && error.code === 'UNAUTHORIZED') {
+        return rejectControl(
+          'subagent-unauthorized',
+          'subagent does not belong to this parent',
+          { childSessionId: request.childSessionId },
+        )
+      }
+      return rejectControl('internal', 'subagent queue steering failed', {})
+    }
+    if (outcome === 'not-found') {
+      return rejectControl(
+        'subagent-queue-item-not-found',
+        'queued subagent message is no longer pending',
+        { childSessionId: request.childSessionId, itemId: request.itemId },
+      )
+    }
+    if (outcome === 'unavailable') {
+      return rejectControl(
+        'subagent-steer-unavailable',
+        'subagent is not running and cannot accept queued steering',
+        { childSessionId: request.childSessionId, itemId: request.itemId },
+      )
+    }
+    return { accepted: true }
   }
 
   /**

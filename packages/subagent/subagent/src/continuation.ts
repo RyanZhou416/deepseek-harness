@@ -155,6 +155,12 @@ export interface SubagentFollowupOptions {
   readonly signal: AbortSignal
 }
 
+/** Child inbox boundary selected by one continuable delivery. */
+type ContinuableDelivery = 'next-turn' | 'next-step'
+
+/** Result of promoting one durable child queue occurrence under its parent address. */
+export type SubagentPendingSteerOutcome = 'steered' | 'not-found' | 'unavailable'
+
 /**
  * The residency state of one continuable child, derived from Agent quiescence
  * and the owned-child set rather than a second state machine:
@@ -509,11 +515,41 @@ export class SubagentContinuationManager {
     content: ContentBlock[],
     options: SubagentFollowupOptions,
   ): Promise<MessageId> {
+    return this.deliver(parent, childId, content, options, 'next-turn')
+  }
+
+  /**
+   * Deliver one later message at the child's nearest step boundary. A running
+   * child consumes it after the current step; an idle or absent child wakes or
+   * cold-resumes exactly as a FIFO follow-up does.
+   * @param parent - the exact live direct parent authorizing this delivery.
+   * @param childId - the durable child session id.
+   * @param content - the user-role content to deliver.
+   * @param options - the message source fields and caller cancellation.
+   * @returns the accepted message's inbox id.
+   */
+  async steer(
+    parent: Agent,
+    childId: SessionId,
+    content: ContentBlock[],
+    options: SubagentFollowupOptions,
+  ): Promise<MessageId> {
+    return this.deliver(parent, childId, content, options, 'next-step')
+  }
+
+  /** Route one continuable delivery through the child lock and residency owner. */
+  private async deliver(
+    parent: Agent,
+    childId: SessionId,
+    content: ContentBlock[],
+    options: SubagentFollowupOptions,
+    delivery: ContinuableDelivery,
+  ): Promise<MessageId> {
     this.assertAdmitting(parent)
     while (true) {
       const live = await this.locks.run(childId, async () => {
         const activation = this.activations.get(childId)
-        if (activation === undefined) return this.coldResume(parent, childId, content, options)
+        if (activation === undefined) return this.coldResume(parent, childId, content, options, delivery)
         // A delivery that arrives after the disposal transaction began must not
         // reach a handle being torn down; wait for release, then cold-resume.
         /* v8 ignore next 3 -- the send-versus-dispose cutoff: reaching this arm needs a
@@ -523,7 +559,7 @@ export class SubagentContinuationManager {
         if (activation.disposal !== undefined) {
           return activation.disposal.then(() => undefined, () => undefined)
         }
-        return this.submitAdmitted(activation, content, options.source, parent, options.signal)
+        return this.submitAdmitted(activation, content, options.source, parent, options.signal, delivery)
       })
       /* v8 ignore start -- only the lost-cutoff arm above returns undefined, so only that
        * race reaches the retry below, which then cold-resumes a new Activation. */
@@ -532,6 +568,48 @@ export class SubagentContinuationManager {
       options.signal.throwIfAborted()
       /* v8 ignore stop */
     }
+  }
+
+  /**
+   * Promote one still-pending FIFO turn into next-step steering under the
+   * child's durable direct-parent address. The operation never materializes an
+   * inactive child: only a running Agent has a current step to steer.
+   * @param childId - durable continuable child identity.
+   * @param parentSessionId - direct parent address authorizing the operation.
+   * @param messageId - pending next-turn occurrence to promote.
+   * @param signal - caller cancellation before the synchronous inbox move.
+   * @returns whether the occurrence moved, disappeared, or cannot currently steer.
+   * @throws {SubagentError} `UNAUTHORIZED` when the address does not own the live child.
+   */
+  async steerPendingByParent(
+    childId: SessionId,
+    parentSessionId: SessionId,
+    messageId: MessageId,
+    signal: AbortSignal,
+  ): Promise<SubagentPendingSteerOutcome> {
+    signal.throwIfAborted()
+    return this.locks.run<SubagentPendingSteerOutcome>(childId, () => {
+      signal.throwIfAborted()
+      if (this.draining) return Promise.resolve('unavailable')
+      const activation = this.activations.get(childId)
+      if (activation === undefined || activation.disposal !== undefined
+        || activation.handle.agent.status !== 'running') return Promise.resolve('unavailable')
+      if (activation.handle.agent.session.header.parentSession !== parentSessionId) {
+        throw new SubagentError(
+          `subagent "${childId}" belongs to another parent session`,
+          'UNAUTHORIZED',
+        )
+      }
+      const message = activation.handle.agent.inbox.nextTurn
+        .find(candidate => candidate.id === messageId)
+      if (message === undefined) return Promise.resolve('not-found')
+      /* v8 ignore next -- the child lock and same synchronous span keep the located occurrence pending. */
+      if (!activation.handle.agent.inbox.remove(messageId)) return Promise.resolve('not-found')
+      this.admitWaking(activation, message.id, () => {
+        activation.handle.agent.steer(message)
+      })
+      return Promise.resolve('steered')
+    })
   }
 
   /**
@@ -951,6 +1029,7 @@ export class SubagentContinuationManager {
     childId: SessionId,
     content: ContentBlock[],
     options: SubagentFollowupOptions,
+    delivery: ContinuableDelivery,
   ): Promise<MessageId> {
     const query = this.requireSessionQuery()
     let observation: SessionObservation
@@ -1001,7 +1080,14 @@ export class SubagentContinuationManager {
       if (error instanceof SubagentError) throw error
       throw new SubagentError(`subagent "${childId}" is unavailable`, 'NOT_RESUMABLE', { cause: error })
     }
-    return await this.submitMaterialized(activation, content, options.source, parent, options.signal)
+    return await this.submitMaterialized(
+      activation,
+      content,
+      options.source,
+      parent,
+      options.signal,
+      delivery,
+    )
   }
 
   /**
@@ -1019,9 +1105,10 @@ export class SubagentContinuationManager {
     source: MessageSource,
     parent: Agent,
     signal: AbortSignal,
+    delivery: ContinuableDelivery = 'next-turn',
   ): Promise<MessageId> {
     try {
-      return this.submitAdmitted(activation, content, source, parent, signal)
+      return this.submitAdmitted(activation, content, source, parent, signal, delivery)
     } catch (error: unknown) {
       /* v8 ignore next -- rollback disposal failures must not mask the
        * pre-acceptance signal, drain, or lifecycle failure. */
@@ -1205,13 +1292,15 @@ export class SubagentContinuationManager {
     content: ContentBlock[],
     source: MessageSource,
     parent: Agent,
+    delivery: ContinuableDelivery,
   ): MessageId {
     // Parent-originated delivery keeps the parent live through ownership, so
     // establish it before the message can enter the child's inbox.
     this.acquireOwnership(parent, activation.childId)
     const message = createUserMessage({ content, source })
     const accepted = this.admitWaking(activation, message.id, () => {
-      activation.handle.agent.followup(message)
+      if (delivery === 'next-step') activation.handle.agent.steer(message)
+      else activation.handle.agent.followup(message)
     })
     // Past this point the caller has an id for this child, so its eventual
     // settlement is something the parent is owed an account of.
@@ -1257,6 +1346,7 @@ export class SubagentContinuationManager {
     source: MessageSource,
     parent: Agent,
     signal: AbortSignal,
+    delivery: ContinuableDelivery,
   ): MessageId {
     signal.throwIfAborted()
     this.assertAdmitting(parent)
@@ -1273,7 +1363,7 @@ export class SubagentContinuationManager {
       activation.childId,
       activation.handle.agent.session.header.parentSession,
     )
-    return this.submit(activation, content, source, parent)
+    return this.submit(activation, content, source, parent, delivery)
   }
 
   /**

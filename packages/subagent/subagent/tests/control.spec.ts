@@ -45,6 +45,15 @@ function promptRequest(clientTimeZone?: string) {
   }
 }
 
+function queueSteerRequest() {
+  return {
+    parentSessionId: PARENT,
+    childSessionId: CHILD,
+    mode: 'continuable' as const,
+    itemId: 'queued-message' as MessageId,
+  }
+}
+
 function emptyIdFailure(method: string, field: string) {
   return {
     code: 'bad-request',
@@ -255,6 +264,78 @@ describe('subagent prompt Remote', () => {
 
     await expect(subagents.prompt(promptRequest(), signal))
       .rejects.toMatchObject({ failure: { code: 'cancelled' } })
+  })
+})
+
+describe('subagent queued-steering Remote', () => {
+  function installManager(
+    subagents: SubagentRuntime,
+    outcome: 'steered' | 'not-found' | 'unavailable' = 'steered',
+  ) {
+    const steerPendingByParent = vi.fn().mockResolvedValue(outcome)
+    ;(subagents as unknown as { continuations: unknown }).continuations = { steerPendingByParent }
+    return steerPendingByParent
+  }
+
+  it('validates every durable address field before reaching the manager', async () => {
+    const { subagents } = await bench()
+    const steer = installManager(subagents)
+    for (const [field, value] of [
+      ['parentSessionId', SessionId('')],
+      ['childSessionId', SessionId('')],
+      ['itemId', '' as MessageId],
+    ] as const) {
+      await expect(subagents.steerQueuedByParent({
+        ...queueSteerRequest(), [field]: value,
+      }, signal)).rejects.toMatchObject({
+        failure: emptyIdFailure('subagent.steerQueued', field),
+      })
+    }
+    expect(steer).not.toHaveBeenCalled()
+  })
+
+  it('forwards the durable address and acknowledges the committed inbox move', async () => {
+    const { subagents } = await bench()
+    const steer = installManager(subagents)
+
+    await expect(subagents.steerQueuedByParent(queueSteerRequest(), signal))
+      .resolves.toEqual({ accepted: true })
+    expect(steer).toHaveBeenCalledWith(CHILD, PARENT, 'queued-message', signal)
+  })
+
+  it('maps stale, inactive, unauthorized, cancelled, and unexpected outcomes', async () => {
+    const { subagents } = await bench()
+    const steer = installManager(subagents, 'not-found')
+    await expect(subagents.steerQueuedByParent(queueSteerRequest(), signal))
+      .rejects.toMatchObject({ failure: { code: 'subagent-queue-item-not-found' } })
+
+    steer.mockResolvedValue('unavailable')
+    await expect(subagents.steerQueuedByParent(queueSteerRequest(), signal))
+      .rejects.toMatchObject({ failure: { code: 'subagent-steer-unavailable' } })
+
+    steer.mockRejectedValue(new SubagentError('wrong parent', 'UNAUTHORIZED'))
+    await expect(subagents.steerQueuedByParent(queueSteerRequest(), signal))
+      .rejects.toMatchObject({ failure: { code: 'subagent-unauthorized' } })
+
+    steer.mockRejectedValue(new SubagentError('stopped', 'CANCELLED'))
+    await expect(subagents.steerQueuedByParent(queueSteerRequest(), signal))
+      .rejects.toMatchObject({ failure: { code: 'cancelled' } })
+
+    steer.mockRejectedValue(new Error('broken inbox'))
+    await expect(subagents.steerQueuedByParent(queueSteerRequest(), signal))
+      .rejects.toMatchObject({ failure: { code: 'internal' } })
+
+    const aborted = new AbortController()
+    aborted.abort()
+    steer.mockRejectedValue(new Error('carrier stopped'))
+    await expect(subagents.steerQueuedByParent(queueSteerRequest(), aborted.signal))
+      .rejects.toMatchObject({ failure: { code: 'cancelled' } })
+  })
+
+  it('reports the missing continuation manager as temporarily unavailable', async () => {
+    const { subagents } = await bench()
+    await expect(subagents.steerQueuedByParent(queueSteerRequest(), signal))
+      .rejects.toMatchObject({ failure: { code: 'subagent-steer-unavailable' } })
   })
 })
 

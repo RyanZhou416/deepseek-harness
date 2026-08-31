@@ -48,7 +48,7 @@ kind: "package-reference"
 
 ### 后续消息、中断与发现
 
-可继续子 agent 把后续消息作为下一个轮次回答，父级随时可以中断运行中的轮次或列举自己的子级。发现覆盖两种形态：服务列举直接子级与完整后代树——模式、活动状态与血缘——直接读取在线会话状态与可选持久化，不加载任何子 agent。
+可继续子 agent 把 FIFO 后续消息作为后续轮次回答，或在最近 step 边界接受 steering。父级随时可以中断运行中的轮次或列举自己的子级。浏览器查看运行中的可继续子级时，可以依据持久直接父级地址，把一条确切的 pending next-turn 消息提升为 next-step steering；inactive 与一次性子级保持只读。发现覆盖两种形态：服务列举直接子级与完整后代树——模式、活动状态与血缘——直接读取在线会话状态与可选持久化，不加载任何子 agent。
 
 ### 失败与恢复
 
@@ -76,7 +76,7 @@ kind: "package-reference"
 | 文件 | 职责 |
 |---|---|
 | [`src/index.ts`](src/index.ts) | 服务入口：提供方注册表、启动与继续 API、生命周期事件 |
-| [`src/continuation.ts`](src/continuation.ts) | 可继续子级：身份预留、Activation 驻留、后续消息、中断、结算 |
+| [`src/continuation.ts`](src/continuation.ts) | 可继续子级：身份预留、Activation 驻留、后续消息、steering、中断、结算 |
 | [`src/types.ts`](src/types.ts) | 公开的请求、结果与提供方约定 |
 | [`src/descriptor.ts`](src/descriptor.ts) | 版本化的 `subagent/descriptor` 会话事件词汇 |
 | [`src/child-agent.ts`](src/child-agent.ts) | 子级组装、委派策略、深度辅助函数 |
@@ -90,7 +90,7 @@ kind: "package-reference"
 
 ### 可继续流程
 
-管理器预留子 agent 身份、解析持久化描述符、创建（或冷恢复）子 agent、把它安装进 Activation 并提交提示词。后续消息经子 agent 自己的 inbox 成为 FIFO 轮次；没有 Activation 时从持久化会话冷恢复。当驻留 Activation 结算时，管理器会在父级自身的轮次流中告知该子级的直接父级。
+管理器预留子 agent 身份、解析持久化描述符、创建（或冷恢复）子 agent、把它安装进 Activation 并提交提示词。后续消息成为 FIFO 轮次，steering 则加入最近的 step 边界；两条路径都使用子 agent 自己的 inbox，并在没有 Activation 时从持久化会话冷恢复。当驻留 Activation 结算时，管理器会在父级自身的轮次流中告知该子级的直接父级。
 
 ### 所有权与不变式
 
@@ -163,7 +163,7 @@ You are a delegated subagent: your permission scope was fixed when you were star
 
 - **ACP 子级仍为一次性，且无法通过追踪枚举**——ACP 运行在父级会话语料中没有本地子会话，远程提供方需要 Activation 所有权约定才能支持可继续子级。
 - **无 host-user 继续执行**——`followup()` 要求确切在线直接父级；只有 `interrupt()` 接受持久化的人类父级地址。
-- **继续执行消息绝不 steering（中途引导）**——父到子的后续消息排入后续轮次；它们绝不会重定向子级当前轮次。
+- **Steering 等待 step 边界**——它不会取消进行中的模型请求或工具调用；子级只能在该 step 完成后领取消息。
 - **取消收敛期间存在唤醒缺口**——中断信号发出后、driver 进入 idle 前被接受的后续消息会保持排队，直到另一条唤醒发送到达。
 - **驻留仅限进程内**——Activation inbox 与所有权图不会在两个 harness 进程之间协调；对单个持久化存储的并发访问需要持久化邮箱与跨进程租约协议。
 - **不回放已接受但未记录的消息**——崩溃可能丢失从未写入子会话日志、已被接受的提示词；丢失的消息不会自动回放。

@@ -111,11 +111,10 @@ describe('dsh-tool-subagent-control', () => {
     // The continuable path has no Task, so the schema must not promise one.
     expect(schemas[0]!.description).not.toContain('job_output')
     expect(schemas[0]!.description).not.toContain('job id')
-    // Follow-up ordering is model-visible: it cannot redirect the open turn.
-    expect(schemas[0]!.description).toContain('next turn')
+    expect(schemas[0]!.description).toContain('nearest step boundary')
   })
 
-  it('cold-resumes a settled child and reports the queued next turn', async () => {
+  it('cold-resumes a settled child and reports accepted steering', async () => {
     const { ctx, parent } = await setup([textResponse('first answer'), textResponse('second answer')])
     const started = await ctx.subagents.startContinuable({
       provider: 'spawn',
@@ -131,7 +130,7 @@ describe('dsh-tool-subagent-control', () => {
     }, parent)
 
     expect(result.isError).toBe(false)
-    expect(text(result)).toBe(`message queued as the next turn for subagent ${started.childId}`)
+    expect(text(result)).toBe(`message steered to the nearest step for subagent ${started.childId}`)
     await waitNoActivation(ctx, started.childId)
 
     const loaded = await ctx.sessionPersistence.load(started.childId)
@@ -144,8 +143,13 @@ describe('dsh-tool-subagent-control', () => {
     })
   })
 
-  it('queues behind an open turn instead of joining it', async () => {
-    const { ctx, parent, adapter } = await setup([textResponse('first'), textResponse('second')])
+  it('joins a running child at its nearest step boundary', async () => {
+    const releaseFirst = Promise.withResolvers<undefined>()
+    const adapter = new GatedAdapter([
+      { chunks: textResponse('first'), gate: releaseFirst.promise },
+      { chunks: textResponse('second') },
+    ])
+    const { ctx, parent } = await setupWith(adapter)
     const started = await ctx.subagents.startContinuable({
       provider: 'spawn',
       label: 'long work',
@@ -159,14 +163,18 @@ describe('dsh-tool-subagent-control', () => {
       message: 'also consider Y',
     }, parent)
     expect(result.isError).toBe(false)
+    const child = ctx.agents.get(started.childId)
+    expect(child?.inbox.nextStep).toHaveLength(1)
+    expect(child?.inbox.nextTurn).toHaveLength(0)
 
+    releaseFirst.resolve(undefined)
     await waitNoActivation(ctx, started.childId)
     const loaded = await ctx.sessionPersistence.load(started.childId)
     const prompts = loaded.events.flatMap(event => event.type === 'user/message' && event.data.source.kind !== 'plugin'
       ? event.data.content.flatMap(block => block.type === 'text' ? [block.text] : [])
       : [])
-    // A follow-up is its own later turn, never steering inside the first one.
     expect(prompts).toEqual(['long work', 'also consider Y'])
+    expect(loaded.events.filter(event => event.type === 'turn/start')).toHaveLength(1)
   })
 
   it('reports a delivery failure as an errored, not-delivered result', async () => {
@@ -267,9 +275,9 @@ describe('dsh-tool-subagent-control interrupt_agent', () => {
     expect(cancelSpy).toHaveBeenCalledExactlyOnceWith({ kind: 'parent' }, { keepInbox: true })
     releaseFirst.resolve(undefined)
     await child.whenIdle()
-    // Parked, not resumed: the queued follow-up waits for a waking send.
+    // Parked, not resumed: the accepted steering waits for a later waking send.
     expect(adapter.requests).toHaveLength(1)
-    expect(child.inbox.nextTurn).toHaveLength(1)
+    expect(child.inbox.nextStep).toHaveLength(1)
 
     const waking = await callTool(ctx, 'send_message', {
       subagent_id: started.childId,

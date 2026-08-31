@@ -325,6 +325,29 @@ describe('tool-terminal foreground API', () => {
     expect(() => { ToolPty.apply(invalid.ctx, { maxResultBytes: 63 }) }).toThrow('at least 64')
   })
 
+  it('can force every send into a background job without a model argument', async () => {
+    const { ctx, agent } = await setup(true, { forceRunInBackground: true })
+    const definition = ctx.tools.get('terminal_send')
+    expect(definition?.parameters).not.toHaveProperty('properties.run_in_background')
+    expect(definition?.description).toContain('Every send returns an owner-scoped background job id')
+    await call(ctx, 'terminal_open', { type: 'stub' }, agent)
+
+    const started = await call(ctx, 'terminal_send', {
+      sessionId: 'pty-1', text: 'build',
+    }, agent)
+    expect(started.value).toEqual({ kind: 'background', jobId: 'pty-send-1' })
+    expect(definition?.presentCall?.({ sessionId: 'pty-1', text: 'build' }))
+      .toMatchObject({ card: 'generic' })
+  })
+
+  it('rejects forced terminal background mode without its required capabilities', async () => {
+    await expect(setup(false, { forceRunInBackground: true }))
+      .rejects.toThrow('requires @deepseek-ai/dsh-jobs')
+    await expect(setup(true, {
+      enableRunInBackground: false, forceRunInBackground: true,
+    })).rejects.toThrow('requires enableRunInBackground')
+  })
+
   it('bounds normalized errors and preserves allocated ids at the minimum result cap', async () => {
     const { ctx, agent } = await setup(true, { maxResultBytes: 64 })
     const failed = await call(ctx, 'terminal_open', { type: 'x'.repeat(1_000) }, agent)

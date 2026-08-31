@@ -11,13 +11,12 @@ export const inject = ['agents', 'sessionPersistence', 'subagents']
  * deterministic ordering plus authored child durability failures:
  *
  *  - `PLACEHOLDER_CHILD_ID` in a scripted `send_message` is remapped to the real
- *    child so both follow-ups queue onto the same live inbox in FIFO order.
+ *    child so both steering messages reach the same live next-step inbox.
  *  - The unknown-id `send_message` (`UNKNOWN_CHILD_ID`) resolves through a
- *    persistence load fenced behind both accepted follow-ups, so the transcript
+ *    persistence load fenced behind both accepted messages, so the transcript
  *    records the same order on every runner.
- *  - The child's final continuation turn fails its durability checkpoint with a
- *    fixed message, so the scenario proves child-first disposal survives a failed
- *    last flush.
+ *  - The child's final best-effort flush fails with a fixed message, so the
+ *    scenario proves child-first disposal still releases a completed activation.
  *  - Under `DSH_SUBAGENT_PUBLISHED_FAILURE`, a one-shot child's first
  *    follow-up fails after publication, so its model prompt never runs; its
  *    published handle then also fails disposal, so the parent observes both
@@ -25,12 +24,12 @@ export const inject = ['agents', 'sessionPersistence', 'subagents']
  */
 const PLACEHOLDER_CHILD_ID = '33333333-3333-4333-8333-333333333333'
 const UNKNOWN_CHILD_ID = '22222222-2222-4222-8222-222222222222'
-/** The child continuation turn whose durability checkpoint is forced to fail. */
-const FAILED_CHECKPOINT_TURN = 3
+/** The child turn whose final best-effort flush is forced to fail. */
+const FAILED_CHECKPOINT_TURN = 1
 
 /** Fail the child checkpoint and stabilize the authored follow-up failure ordering. */
 export function apply(ctx: Context): void {
-  const followupsAccepted = Promise.withResolvers<undefined>()
+  const messagesAccepted = Promise.withResolvers<undefined>()
   const parentTurnClosed = Promise.withResolvers<undefined>()
   let parentClosed = false
   const publishedFailure = process.env.DSH_SUBAGENT_PUBLISHED_FAILURE === '1'
@@ -57,13 +56,13 @@ export function apply(ctx: Context): void {
   // The unavailable-child lookup is real asynchronous I/O. Fence it behind both
   // authored follow-ups so runner speed cannot reorder the exact log.
   persistence.load = async (id) => {
-    if (id === UNKNOWN_CHILD_ID) await followupsAccepted.promise
+    if (id === UNKNOWN_CHILD_ID) await messagesAccepted.promise
     return load.call(persistence, id)
   }
   ctx.effect(() => () => {
     agents.create = create
     persistence.load = load
-    followupsAccepted.resolve(undefined)
+    messagesAccepted.resolve(undefined)
     parentTurnClosed.resolve(undefined)
   }, 'subagent snapshot ordering')
 
@@ -86,29 +85,29 @@ export function apply(ctx: Context): void {
   // never reach the live inbox.
   let realChildId: string | undefined
   const subagents = ctx.subagents as unknown as {
-    followup: (authority: unknown, childId: SessionId, content: unknown, options: unknown) => Promise<unknown>
+    steer: (authority: unknown, childId: SessionId, content: unknown, options: unknown) => Promise<unknown>
   }
-  const deliver = subagents.followup.bind(subagents)
-  subagents.followup = (authority, childId, content, options) => {
+  const deliver = subagents.steer.bind(subagents)
+  subagents.steer = (authority, childId, content, options) => {
     const mapped = childId === PLACEHOLDER_CHILD_ID && realChildId !== undefined
       ? SessionId(realChildId)
       : childId
     return deliver(authority, mapped, content, options)
   }
 
-  // Both authored follow-ups reach the child inbox before the unknown-id lookup
-  // runs, so the queued FIFO order is what the transcript records. The first
+  // Both authored steering messages reach the child inbox before the unknown-id
+  // lookup runs, so one next-step claim preserves their order. The first
   // child enqueue is the initial delegation, which also pins the real child id.
   let accepted = 0
   ctx.on('agent/inbox/inserted', ({ agent }) => {
     if (agent.session.header.parentSession === undefined) return
     if (realChildId === undefined) realChildId = agent.session.header.id
     accepted += 1
-    if (accepted >= 3) followupsAccepted.resolve(undefined)
+    if (accepted >= 3) messagesAccepted.resolve(undefined)
   })
   ctx.on('agent/pre-step', async ({ agent }, next) => {
     if (agent.session.header.parentSession === undefined) return next()
-    await followupsAccepted.promise
+    await messagesAccepted.promise
     // The published-failure variant's child never reaches a step (its follow-up
     // throws), and its parent turn awaits that child, so only the continuable
     // scenario takes the settlement fence.
@@ -116,9 +115,9 @@ export function apply(ctx: Context): void {
     return next()
   })
 
-  // The child's ordinary per-turn flushes succeed; only the final continuation
-  // turn's durability checkpoint fails, turning that turn/end into a durable
-  // error the parent never sees.
+  // Inbox checkpoints run before the child opens its turn. Once the child is
+  // idle, its final best-effort flush fails without changing the completed turn
+  // or the settlement account delivered to the parent.
   const childTurn = new WeakMap<object, number>()
   ctx.on('session/event', (session, event) => {
     if (session.header.parentSession === undefined || event.type !== 'turn/start') return

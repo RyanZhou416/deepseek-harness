@@ -133,7 +133,7 @@ persisted Session
 
 `SubagentRuntime.startContinuable()` 会预留稳定的子 agent id，对版本化的 `subagent/descriptor` payload 建立快照，向指定提供方索取其分离的 `ContinuableCreateSpec`，通过私有的 activation-owner 作用域创建子 Agent，建立任何可继续父级的所有权，并提交初始提示词。当收件箱（inbox）准入产出消息 id 时，它以 `{ childId, messageId }` resolve——无需等待轮次开始，也无需等待消息进入会话日志。在该准入之前的任何失败都会以两个 id 都不返回的方式 reject，并 dispose（资源释放）任何已创建的 handle，回滚 Activation 与父级所有权。
 
-`SubagentRuntime.followup()` 是唯一的继续执行消息操作，其路由仅取决于 Activation 的驻留状态：
+`SubagentRuntime.followup()` 投递 FIFO 轮次，`SubagentRuntime.steer()` 则投递到最近 step 边界。两项操作都只按 Activation 驻留状态路由：
 
 | Activation 状态 | `followup` |
 |---|---|
@@ -143,7 +143,7 @@ persisted Session
 
 `running` 表示 Agent 拥有活跃的准入或轮次，或正在唤醒收件箱工作；`waiting` 表示它已完全停稳，但仍拥有至少一个尚未完成 dispose 的子 Activation；`settled` 表示已完全停稳且其拥有的每个子级都已 dispose，此时管理器会 dispose [`AgentHandle`](core.zh.md#creation-and-ownership) 并移除该 Activation。管理器根据 Agent 的完全停稳状态与其拥有的子级集合推导这些内部条件，而非维护第二套执行状态机。
 
-Agent 收件箱是唯一的队列。每条继续执行消息都会成为一个 `Agent.followup()` FIFO 轮次，因此已接受的消息共享同一个可观测顺序，且后续消息无法改变已在进行中的轮次。投递成功会返回被接受的 `MessageId`；既有的 `agent/inbox/inserted`、`agent/inbox/claimed` 与 `agent/inbox/discarded` 事件仍是消息生命周期的观测点，继续执行层不定义任何 subagent 专属的投递路由。
+Agent 收件箱是唯一的队列。后续消息成为独立 FIFO 轮次；steering 加入运行中子级最近的后续 step，或唤醒 idle 子级。投递成功会返回被接受的 `MessageId`；既有的 `agent/inbox/inserted`、`agent/inbox/claimed` 与 `agent/inbox/discarded` 事件仍是消息生命周期的观测点，继续执行层不定义任何 subagent 专属的投递路由。
 
 后续操作的权限来自确切的在线 Agent 工具上下文。已认证的 Agent 必须是持久化子 agent 在 `SessionHeader.parentSession` 中记录的直接父级。`MessageSource` 与 `senderSessionId` 记录谁提供了已准入的消息，但不授予任何权限；可选的面向模型工具使用 `CoordinatorMessageSource`。
 
@@ -553,6 +553,21 @@ async startContinuable(spec: ContinuableStartSpec): Promise<ContinuableStart>
 async followup( parent: Agent, childId: SessionId, content: ContentBlock[], options: SubagentFollowupOptions, ): Promise<MessageId>
 
 /**
+ * Deliver one later message to a continuable child's nearest step boundary.
+ * A running child finishes its current step before claiming the message; an
+ * idle or absent child wakes or cold-resumes. The caller signal owns the
+ * operation only until inbox acceptance.
+ * @param parent - the exact live direct parent authorizing this delivery.
+ * @param childId - durable child session id.
+ * @param content - user-role content to deliver.
+ * @param options - the message source fields and caller cancellation.
+ * @returns the accepted message's inbox id.
+ * @throws when continuation services are unavailable, parent authority is
+ *   rejected, or the message was not admitted.
+ */
+async steer( parent: Agent, childId: SessionId, content: ContentBlock[], options: SubagentFollowupOptions, ): Promise<MessageId>
+
+/**
  * Interrupt one live continuable child's current turn under a human parent
  * address or an exact live ancestor Agent. Fire-and-return: the cancel
  * signal is issued before this returns, but the target may keep running
@@ -682,6 +697,20 @@ listDescendants(rootSessionId: SessionId, signal?: AbortSignal): Promise<Subagen
  *   `internal`.
  */
 @Remote('prompt') async prompt(request: SubagentPromptRequest, signal: AbortSignal): Promise<SubagentPromptReceipt>
+
+/**
+ * Promote one browser-selected child queue occurrence to next-step steering
+ * under its durable direct-parent address. The target must have a live,
+ * running Activation; this operation neither resumes an inactive child nor
+ * requires the parent Agent to be live.
+ * @param request - durable parent/child address and pending message identity.
+ * @param signal - carrier cancellation before the inbox move commits.
+ * @returns acknowledgement that the occurrence moved to next-step steering.
+ * @throws {TypertRemoteFailure} `bad-request`, `cancelled`,
+ *   `subagent-unauthorized`, `subagent-queue-item-not-found`,
+ *   `subagent-steer-unavailable`, or `internal`.
+ */
+@Remote('steerQueuedByParent') async steerQueuedByParent( request: SubagentQueueSteerRequest, signal: AbortSignal, ): Promise<SubagentQueueSteerReceipt>
 
 /**
  * Remote face of {@link interrupt} under one durable parent address. No

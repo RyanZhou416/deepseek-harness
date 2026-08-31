@@ -145,6 +145,7 @@ export const SERVICE_PAGE: Record<string, string> = {
  */
 export const SERVICE_WALK_EXEMPTIONS: Record<string, string> = {
   agent: 'not a service: the DX accessor field on Agent.ctx (root accessor defaulting to undefined) — docs/subsystems/core.md owns the Agent handle',
+  memoryAdmission: 'interface-typed StepAdmissionGate readiness service — packages/guard/memory-admission/README.md owns the API',
   appReady: 'not a service: launcher-provided successful-startup signal — packages/boot/cmdline/README.md owns the launcher contract',
   appExit: 'not a service: launcher-provided bounded process-exit callback — packages/boot/cmdline/README.md owns the launcher contract',
   cmdlineArgs: 'not a service: launcher-provided immutable app argument accessor — packages/boot/cmdline/README.md owns the launcher contract',
@@ -485,6 +486,8 @@ export const LINK_MAP: Readonly<Record<string, string>> = {
   SubagentPromptReceipt: 'subagent.md',
   SubagentPromptRequest: 'subagent.md',
   SubagentProvider: 'subagent.md',
+  SubagentQueueSteerReceipt: 'subagent.md',
+  SubagentQueueSteerRequest: 'subagent.md',
   SubagentReportDelivery: 'subagent.md',
   SubagentReportMessageSource: 'subagent.md',
   SubagentReportOptions: 'subagent.md',

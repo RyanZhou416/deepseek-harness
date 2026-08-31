@@ -53,13 +53,14 @@ kind: "package-reference"
 | 字段 | 默认值 | 含义 |
 |---|---|---|
 | `enableRunInBackground` | `true` | 公开并接受 `run_in_background`；设为 `false` 时移除 schema 字段并拒绝该参数 |
+| `forceRunInBackground` | `false` | 隐藏 `run_in_background` 并让每次发送返回 owner-scoped job；要求后台支持与 `ctx.jobs` |
 | `maxResultBytes` | `262144` | 每个完整终端结果的 UTF-8 上限（最小值 `64`）；在等待、会话、分页、截断与任务状态元数据全部加入后计算 |
 
 生成的[配置目录](../../../docs/config-catalog.zh.md#deepseek-aidsh-tool-terminal)与[工具目录](../../../docs/tool-catalog.zh.md#deepseek-aidsh-tool-terminal)是配置字段与 schema 的穷尽式真源。
 
 ### 后台发送
 
-`terminal_send(run_in_background: true)` 立即返回 job id，而不是等待。任务用 `job_output` 收集——它会等待并读取增量输出——用 `job_kill` 停止，后者向前台进程组投递真正的 `SIGINT`。缺少任务接口面时，后台模式会在写入输入之前失败。
+`terminal_send(run_in_background: true)` 立即返回 job id，而不是等待；`forceRunInBackground: true` 对每次发送应用相同行为并移除模型参数。任务用 `job_output` 收集，用 `job_kill` 停止，后者向前台进程组投递真正的 `SIGINT`。缺少任务接口面时，后台模式会在写入输入之前失败；后台支持或 `ctx.jobs` 缺失时，强制模式会在加载时失败。
 
 ### 可观察结果与失败
 

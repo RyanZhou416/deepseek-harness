@@ -77,6 +77,33 @@ describe('Session open', () => {
     expect(api.callsOf('session.history')).toEqual([])
   })
 
+  it('suspends an open history stream and reopens it from durable history', async () => {
+    const { api, session } = makeSession()
+    await session.open()
+    expect(api.activeFollows(SID)).toBe(1)
+
+    await session.suspendHistory()
+    expect(session.getSnapshot().openState).toBe('cold')
+    expect(api.activeFollows(SID)).toBe(0)
+
+    await session.open()
+    expect(api.activeFollows(SID)).toBe(1)
+    expect(api.callsOf('session.follow')).toHaveLength(2)
+  })
+
+  it('invalidates an in-flight open before suspension waits for transport disposal', async () => {
+    const { api, session } = makeSession()
+    const gate = deferred<Awaited<ReturnType<FakeApiClient['onHistory']>>>()
+    api.onHistory = () => gate.promise
+    const opening = session.open()
+    const suspended = session.suspendHistory()
+    gate.resolve(ok({ records: [], hasMore: false }))
+
+    await Promise.all([opening, suspended])
+    expect(session.getSnapshot().openState).toBe('cold')
+    expect(api.activeFollows(SID)).toBe(0)
+  })
+
   it('lands an error result in openState=error with the RpcError kept', async () => {
     const { api, session } = makeSession()
     api.onHistory = () => Promise.resolve(err({ code: 'session-not-found', message: 'gone', details: { sessionId: SID } }))
@@ -262,6 +289,37 @@ describe('paging', () => {
     await Promise.all([first, second])
     expect(api.callsOf('session.follow')).toHaveLength(1)
     expect(api.callsOf('session.history')).toHaveLength(1)
+  })
+
+  it('does not let a suspended old page clear a reopened generation loading state', async () => {
+    const { api, session } = makeSession()
+    const tail = plainTurn(6, 1, 'new', 'tail')
+    api.onHistory = () => histResponse(tail, true)
+    await session.open()
+
+    const oldPage = deferred<Awaited<ReturnType<FakeApiClient['onHistory']>>>()
+    api.onHistory = payload => payload.beforeSeq === undefined
+      ? histResponse(tail, true)
+      : oldPage.promise
+    const oldLoading = session.loadOlder()
+    expect(session.getSnapshot().loadingOlder).toBe(true)
+
+    await session.suspendHistory()
+    await session.open()
+    const newPage = deferred<Awaited<ReturnType<FakeApiClient['onHistory']>>>()
+    api.onHistory = payload => payload.beforeSeq === undefined
+      ? histResponse(tail, true)
+      : newPage.promise
+    const newLoading = session.loadOlder()
+    expect(session.getSnapshot().loadingOlder).toBe(true)
+
+    oldPage.resolve(ok({ records: [], hasMore: false }))
+    await oldLoading
+    expect(session.getSnapshot().loadingOlder).toBe(true)
+
+    newPage.resolve(ok({ records: [], hasMore: false }))
+    await newLoading
+    expect(session.getSnapshot().loadingOlder).toBe(false)
   })
 })
 
@@ -732,6 +790,31 @@ describe('resync', () => {
     const cold = makeSession()
     await cold.session.resync()
     expect(cold.api.calls).toEqual([]) // never opened: no traffic
+  })
+
+  it('does not reopen after navigation suspension wins during resync disposal', async () => {
+    const { api, session } = makeSession()
+    await session.open()
+    const release = deferred<undefined>()
+    const originalDispose = SessionEventStream.prototype.dispose
+    const dispose = vi.spyOn(SessionEventStream.prototype, 'dispose').mockImplementation(async function (
+      this: SessionEventStream,
+    ) {
+      await originalDispose.call(this)
+      await release.promise
+    })
+    try {
+      const resyncing = session.resync()
+      await vi.waitFor(() => { expect(api.activeFollows(SID)).toBe(0) })
+      const navigatingAway = session.suspendHistory()
+      release.resolve(undefined)
+      await Promise.all([resyncing, navigatingAway])
+
+      expect(session.getSnapshot().openState).toBe('cold')
+      expect(api.callsOf('session.follow')).toHaveLength(1)
+    } finally {
+      dispose.mockRestore()
+    }
   })
 
   it('drops a stale in-flight open superseded by resync (generation guard)', async () => {

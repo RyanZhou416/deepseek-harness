@@ -98,7 +98,7 @@ kind: "package-reference"
 
 #### 模型看到的内容
 
-不增加 system 文本或 tool schema。进程处于压力下时，请求可能更晚开始。
+不增加 system 文本或 tool schema。`agent/pre-step` 等待进程容量或更低 heap 压力时，请求可能更晚开始。
 
 #### Token 影响
 

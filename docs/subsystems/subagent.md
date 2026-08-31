@@ -133,7 +133,7 @@ persisted Session
 
 `SubagentRuntime.startContinuable()` reserves the stable child id, snapshots the versioned `subagent/descriptor` payload, asks the named provider for its detached `ContinuableCreateSpec`, creates the child Agent through a private activation-owner scope, establishes any continuable-parent ownership, and submits the initial prompt. It resolves with `{ childId, messageId }` when inbox acceptance yields the message id — without waiting for the turn to start or for the message to enter the Session log. Every failure before that acceptance rejects with neither id, disposing any created handle and rolling back the Activation and parent ownership.
 
-`SubagentRuntime.followup()` is the sole continuation-message operation, and routing depends only on Activation residency:
+`SubagentRuntime.followup()` delivers a FIFO turn, while `SubagentRuntime.steer()` delivers at the nearest step boundary. Both operations route only by Activation residency:
 
 | Activation state | `followup` |
 |---|---|
@@ -143,7 +143,7 @@ persisted Session
 
 `running` means the Agent has an active admission or turn, or waking inbox work; `waiting` means it is quiescent but still owns at least one child Activation that has not completed disposal; `settled` means quiescent with every owned child disposed, at which point the manager disposes the [`AgentHandle`](core.md#creation-and-ownership) and removes the Activation. The manager derives these internal conditions from Agent quiescence and the owned-child set rather than maintaining a second execution state machine.
 
-The Agent inbox is the only queue. Every continuation message becomes one `Agent.followup()` FIFO turn, so accepted messages have one observable order and a follow-up cannot redirect a turn already underway. Successful delivery returns the accepted `MessageId`; the existing `agent/inbox/inserted`, `agent/inbox/claimed`, and `agent/inbox/discarded` events remain the message-lifecycle observations, and the continuation layer defines no subagent-specific delivery route.
+The Agent inbox is the only queue. Follow-ups become individual FIFO turns; steering joins the running child's nearest later step or wakes an idle child. Successful delivery returns the accepted `MessageId`; the existing `agent/inbox/inserted`, `agent/inbox/claimed`, and `agent/inbox/discarded` events remain the message-lifecycle observations, and the continuation layer defines no subagent-specific delivery route.
 
 Follow-up authority comes from an exact live Agent tool context. The authenticated Agent must be the durable child's direct parent recorded in `SessionHeader.parentSession`. `MessageSource` and `senderSessionId` record who supplied an admitted message but grant no authority; the optional model-facing tool uses `CoordinatorMessageSource`.
 
@@ -549,6 +549,21 @@ async startContinuable(spec: ContinuableStartSpec): Promise<ContinuableStart>
 async followup( parent: Agent, childId: SessionId, content: ContentBlock[], options: SubagentFollowupOptions, ): Promise<MessageId>
 
 /**
+ * Deliver one later message to a continuable child's nearest step boundary.
+ * A running child finishes its current step before claiming the message; an
+ * idle or absent child wakes or cold-resumes. The caller signal owns the
+ * operation only until inbox acceptance.
+ * @param parent - the exact live direct parent authorizing this delivery.
+ * @param childId - durable child session id.
+ * @param content - user-role content to deliver.
+ * @param options - the message source fields and caller cancellation.
+ * @returns the accepted message's inbox id.
+ * @throws when continuation services are unavailable, parent authority is
+ *   rejected, or the message was not admitted.
+ */
+async steer( parent: Agent, childId: SessionId, content: ContentBlock[], options: SubagentFollowupOptions, ): Promise<MessageId>
+
+/**
  * Interrupt one live continuable child's current turn under a human parent
  * address or an exact live ancestor Agent. Fire-and-return: the cancel
  * signal is issued before this returns, but the target may keep running
@@ -678,6 +693,20 @@ listDescendants(rootSessionId: SessionId, signal?: AbortSignal): Promise<Subagen
  *   `internal`.
  */
 @Remote('prompt') async prompt(request: SubagentPromptRequest, signal: AbortSignal): Promise<SubagentPromptReceipt>
+
+/**
+ * Promote one browser-selected child queue occurrence to next-step steering
+ * under its durable direct-parent address. The target must have a live,
+ * running Activation; this operation neither resumes an inactive child nor
+ * requires the parent Agent to be live.
+ * @param request - durable parent/child address and pending message identity.
+ * @param signal - carrier cancellation before the inbox move commits.
+ * @returns acknowledgement that the occurrence moved to next-step steering.
+ * @throws {TypertRemoteFailure} `bad-request`, `cancelled`,
+ *   `subagent-unauthorized`, `subagent-queue-item-not-found`,
+ *   `subagent-steer-unavailable`, or `internal`.
+ */
+@Remote('steerQueuedByParent') async steerQueuedByParent( request: SubagentQueueSteerRequest, signal: AbortSignal, ): Promise<SubagentQueueSteerReceipt>
 
 /**
  * Remote face of {@link interrupt} under one durable parent address. No

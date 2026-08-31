@@ -36,6 +36,8 @@ export const MIN_MAX_RESULT_BYTES = 64
 export interface Config {
   /** Expose `run_in_background` and accept background sends (default true). */
   enableRunInBackground?: boolean
+  /** Force every terminal send into an owner-scoped background job (default false). */
+  forceRunInBackground?: boolean
   /** Maximum UTF-8 bytes in one complete terminal or task-output result. */
   maxResultBytes?: number
 }
@@ -43,6 +45,7 @@ export interface Config {
 /** Schemastery configuration for the terminal tool consumer. */
 export const Config: z<Config> = z.object({
   enableRunInBackground: z.boolean().default(true),
+  forceRunInBackground: z.boolean().default(false),
   maxResultBytes: z.number().step(1).min(MIN_MAX_RESULT_BYTES).max(Number.MAX_SAFE_INTEGER).default(DEFAULT_MAX_RESULT_BYTES),
 })
 
@@ -146,7 +149,14 @@ function sendDetail(result: TerminalSendResult): string {
 /** Register all terminal tools and the minimal usage guidance. */
 export function apply(ctx: Context, config: Config = {}): void {
   const enableRunInBackground = config.enableRunInBackground ?? true
+  const forceRunInBackground = config.forceRunInBackground ?? false
   const maxResultBytes = config.maxResultBytes ?? DEFAULT_MAX_RESULT_BYTES
+  if (forceRunInBackground && !enableRunInBackground) {
+    throw new Error('tool-terminal: forceRunInBackground requires enableRunInBackground')
+  }
+  if (forceRunInBackground && ctx.get('jobs') === undefined) {
+    throw new Error('tool-terminal: forceRunInBackground requires @deepseek-ai/dsh-jobs')
+  }
   if (!Number.isSafeInteger(maxResultBytes) || maxResultBytes < MIN_MAX_RESULT_BYTES) {
     throw new Error(`tool-terminal: maxResultBytes must be a safe integer of at least ${MIN_MAX_RESULT_BYTES}`)
   }
@@ -198,12 +208,14 @@ export function apply(ctx: Context, config: Config = {}): void {
   ctx.tools.register(defineTool({
     name: 'terminal_send',
     description: 'Send text to a persistent terminal. By default Enter is submitted and the call waits for a prompt, stdin wait, output silence, timeout, or session exit.'
-      + (enableRunInBackground ? ' Background mode returns a job id for job_output/job_kill.' : ''),
+      + (forceRunInBackground
+        ? ' Every send returns an owner-scoped background job id for job_output/job_kill.'
+        : enableRunInBackground ? ' Background mode returns a job id for job_output/job_kill.' : ''),
     parameters: {
       sessionId: { type: 'string', required: true, description: 'Terminal session id returned by terminal_open or terminal_list.' },
       text: { type: 'string', required: true, description: 'UTF-8 text to write to the terminal.' },
       submit: { type: 'boolean', description: 'Submit Enter after text (default true). Set false for control characters or incomplete REPL input.' },
-      ...enableRunInBackground
+      ...enableRunInBackground && !forceRunInBackground
         ? { run_in_background: { type: 'boolean' as const, description: 'Return a job id immediately; collect with job_output or stop with job_kill.' } }
         : {},
     },
@@ -248,7 +260,7 @@ export function apply(ctx: Context, config: Config = {}): void {
       const owner = requireAgent(exec.agent)
       const id = sessionId(args)
       const request = { text: args.text, submit: args.submit ?? true }
-      if (args.run_in_background === true) {
+      if (forceRunInBackground || args.run_in_background === true) {
         if (!enableRunInBackground) throw new Error('background terminal sends are disabled by tool-terminal configuration')
         const jobs = ctx.get('jobs')
         if (jobs === undefined) throw new Error('background terminal sends require @deepseek-ai/dsh-jobs and @deepseek-ai/dsh-tool-jobs')
@@ -282,7 +294,7 @@ export function apply(ctx: Context, config: Config = {}): void {
     },
     presentCall(args) {
       const parsed = args as Partial<SendArgs>
-      if (parsed.run_in_background === true) {
+      if (forceRunInBackground || parsed.run_in_background === true) {
         return { card: 'generic', title: `Send to terminal ${parsed.sessionId as string} in background`, kind: 'execute', rawInput: parsed.text }
       }
       // Keep these Host-only fallbacks aligned with the conversation locale
@@ -290,7 +302,7 @@ export function apply(ctx: Context, config: Config = {}): void {
       return { card: 'terminal', title: parsed.text || '(send input)', description: `Terminal ${parsed.sessionId as string}` }
     },
     presentResult(args, result) {
-      if ((args as Partial<SendArgs>).run_in_background === true || result.isError) return undefined
+      if (forceRunInBackground || (args as Partial<SendArgs>).run_in_background === true || result.isError) return undefined
       const raw = rawContentText(result.content)
       return raw === undefined ? undefined : { card: 'terminal', output: raw }
     },

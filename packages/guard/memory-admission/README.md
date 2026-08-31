@@ -98,7 +98,7 @@ The generated [configuration catalog](../../../docs/config-catalog.md#deepseek-a
 
 #### What the model sees
 
-No added system text or tool schema. A request may start later under process pressure.
+No added system text or tool schema. A request may start later while `agent/pre-step` waits for process capacity or lower heap pressure.
 
 #### Token effect
 

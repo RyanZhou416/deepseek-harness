@@ -1,9 +1,9 @@
 // Web e2e scenario (browserless): the subagents interrupt Remote against the real
 // composition. A live continuable child holds its model turn open through a
 // replay hang entry; plain HTTP queues a follow-up, interrupts the turn, and
-// proves from the real session state that the turn aborted, the follow-up
-// parked without auto-starting a new turn, and a later waking send resumed the
-// preserved FIFO order. No browser: the RPC surface is the product surface
+// proves from the real session state that a queued follow-up can be promoted
+// to next-step steering, survives interruption, and joins a later waking send.
+// No browser: the RPC surface is the product surface
 // under test, and subagent-interrupt-ui.e2e.ts owns the composer interaction.
 import { randomUUID } from 'node:crypto'
 import { existsSync } from 'node:fs'
@@ -80,13 +80,12 @@ describe.skipIf(MODE === 'record')('web e2e: subagents/interruptByParent over th
   beforeAll(async () => {
     sidecarRoot = await mkdtemp(join(tmpdir(), 'dsh-web-subagent-interrupt-'))
     readyFile = join(sidecarRoot, 'hang-ready')
-    // Whole-script replacement: the child's three model calls are the hang
-    // (turn 1, interrupted), the parked follow-up's turn, and the waking turn.
+    // Whole-script replacement: the child's model calls are the hang (turn 1,
+    // interrupted) and one resumed turn carrying steering plus the waking send.
     // The parent never runs a turn, so the child claims this primary script.
     await writeFile(join(sidecarRoot, 'replay.override.json'), JSON.stringify([
       { kind: 'hang', readyFile },
       textCompletion('resumed response one'),
-      textCompletion('resumed response two'),
     ]))
     // Header-only primary fixture: the bare-array override replaces the
     // derived script entirely; the path only anchors replay installation.
@@ -128,8 +127,9 @@ describe.skipIf(MODE === 'record')('web e2e: subagents/interruptByParent over th
     if (failures.length > 1) throw new AggregateError(failures, 'subagent interrupt teardown failed')
   })
 
-  it('parks a queued follow-up on interrupt and resumes it FIFO on a waking send', async () => {
-    // Queue the follow-up while the turn is still open, then interrupt.
+  it('promotes a child queue row to steering and preserves it across interrupt', async () => {
+    // Queue the follow-up while the turn is still open, then promote the exact
+    // durable occurrence through the browser-facing parent-address Remote.
     const queued = await remote<{ messageId: string }>(scaffold, 'subagents/prompt', {
       request: {
         requestId: randomUUID(),
@@ -139,7 +139,16 @@ describe.skipIf(MODE === 'record')('web e2e: subagents/interruptByParent over th
         content: [{ type: 'text', text: FOLLOWUP }],
       },
     })
-    expect(queued).toMatchObject({ ok: true })
+    if (!queued.ok) throw new Error(`subagents.prompt failed: ${queued.error.code}`)
+    const steered = await remote<{ accepted: true }>(scaffold, 'subagents/steerQueuedByParent', {
+      request: {
+        parentSessionId: parentId,
+        childSessionId: childId,
+        mode: 'continuable',
+        itemId: queued.value.messageId,
+      },
+    })
+    expect(steered).toMatchObject({ ok: true, value: { accepted: true } })
 
     const settled = scaffold.whenTurnSettled()
     const interrupted = await remote<{ accepted: true }>(scaffold, 'subagents/interruptByParent', {
@@ -153,17 +162,18 @@ describe.skipIf(MODE === 'record')('web e2e: subagents/interruptByParent over th
     expect(await settled).toBe(childId)
 
     // Parked, not resumed: the Activation stays resident with an idle driver,
-    // the follow-up is retained, and no second turn opened.
+    // the promoted next-step input is retained, and no second turn opened.
     const child = scaffold.ctx.agents.get(childId)
     expect(child).toBeDefined()
     expect(child!.status).toBe('idle')
-    expect(child!.inbox.nextTurn).toHaveLength(1)
+    expect(child!.inbox.nextTurn).toHaveLength(0)
+    expect(child!.inbox.nextStep).toHaveLength(1)
     expect(child!.session.events.filter(event => event.type === 'turn/start')).toHaveLength(1)
     const lastEnd = child!.session.events.filter(event => event.type === 'turn/end').at(-1)
     expect((lastEnd)?.data.reason.kind).toBe('aborted')
 
-    // Only an explicit waking send resumes the parked queue, FIFO, then the
-    // child runs both turns to completion and settles.
+    // Only an explicit waking send resumes the parked steering. The next turn
+    // claims next-step input before its one ordinary FIFO message.
     const waking = await remote<{ messageId: string }>(scaffold, 'subagents/prompt', {
       request: {
         requestId: randomUUID(),
@@ -187,6 +197,6 @@ describe.skipIf(MODE === 'record')('web e2e: subagents/interruptByParent over th
     const turnEndKinds = loaded.events
       .filter(event => event.type === 'turn/end')
       .map(event => (event).data.reason.kind)
-    expect(turnEndKinds).toEqual(['aborted', 'completed', 'completed'])
+    expect(turnEndKinds).toEqual(['aborted', 'completed'])
   }, 120_000)
 })

@@ -52,11 +52,14 @@ export const inject = ['tools', 'shell', 'systemPrompt', 'shellEnv']
 export interface Config {
   /** Expose `run_in_background` (default true); disabled calls are also rejected. */
   enableRunInBackground?: boolean
+  /** Force every command into an owner-scoped background job (default false). */
+  forceRunInBackground?: boolean
 }
 
 /** Runtime configuration schema for the pwsh tool plugin. */
 export const Config: z<Config> = z.object({
   enableRunInBackground: z.boolean().default(true),
+  forceRunInBackground: z.boolean().default(false),
 })
 
 /** Parsed tool args; execute validates value constraints absent from ParameterSchemaSpec. */
@@ -100,10 +103,16 @@ function validatePwshArgs(args: PwshToolArgs): void {
 }
 /* jscpd:ignore-end */
 
-function pwshDescription(backgroundEnabled: boolean, escalationModes: readonly SandboxMode[]): string {
-  const background = backgroundEnabled
-    ? 'Set `run_in_background: true` for long-running commands: the call returns a job id immediately; read its output with `job_output` and stop it with `job_kill`.'
-    : 'Background execution is not available; long-running commands must finish within the timeout.'
+function pwshDescription(
+  backgroundEnabled: boolean,
+  forceRunInBackground: boolean,
+  escalationModes: readonly SandboxMode[],
+): string {
+  const background = forceRunInBackground
+    ? 'Every command starts an owner-scoped background job and returns its id immediately; read output with `job_output` and stop it with `job_kill`.'
+    : backgroundEnabled
+      ? 'Set `run_in_background: true` for long-running commands: the call returns a job id immediately; read its output with `job_output` and stop it with `job_kill`.'
+      : 'Background execution is not available; long-running commands must finish within the timeout.'
   const base = 'Execute a PowerShell command (`pwsh -Command`) and return its stdout/stderr. '
     + 'Each call runs in a fresh pwsh process: no state (cwd, variables, functions) persists between calls — '
     + 'pass `workdir` instead of using `cd`. Paths use native Windows form (`C:\\...`); read environment '
@@ -194,6 +203,13 @@ const BACKGROUND_OUTPUT_PROPERTIES = {
 /* jscpd:ignore-start -- deliberate mirror of dsh-tool-bash's apply() preamble (pwsh-tool-and-executor Agent Note). */
 export function apply(ctx: Context, config: Config = {}): void {
   const backgroundEnabled = config.enableRunInBackground ?? true
+  const forceRunInBackground = config.forceRunInBackground ?? false
+  if (forceRunInBackground && !backgroundEnabled) {
+    throw new Error('tool-pwsh: forceRunInBackground requires enableRunInBackground')
+  }
+  if (forceRunInBackground && ctx.get('jobs') === undefined) {
+    throw new Error('tool-pwsh: forceRunInBackground requires @deepseek-ai/dsh-jobs')
+  }
   const defaultMode = ctx.shell.sandboxMode
   const escalationModes: readonly SandboxMode[] = defaultMode === undefined ? [] : ESCALATION_TARGETS
   const sandboxPolicy: SandboxPolicyService | undefined = defaultMode === undefined ? undefined : ctx.get('sandboxPolicy')
@@ -250,7 +266,7 @@ export function apply(ctx: Context, config: Config = {}): void {
 
   ctx.tools.register(defineTool({
     name: 'pwsh',
-    description: pwshDescription(backgroundEnabled, escalationModes),
+    description: pwshDescription(backgroundEnabled, forceRunInBackground, escalationModes),
     /* jscpd:ignore-start -- deliberate mirror of dsh-tool-bash's parameter surface (pwsh-tool-and-executor Agent Note). */
     parameters: {
       command: { type: 'string', required: true, description: 'The PowerShell command to execute.' },
@@ -263,7 +279,7 @@ export function apply(ctx: Context, config: Config = {}): void {
       },
       timeoutMs: { type: 'number', description: 'Timeout in milliseconds. The executor applies its configured default and cap, and kills the command on expiry.' },
       workdir: { type: 'string', description: 'Working directory for this command. Defaults to the session workspace; a relative path is resolved against it.' },
-      ...backgroundEnabled ? {
+      ...backgroundEnabled && !forceRunInBackground ? {
         run_in_background: { type: 'boolean' as const, description: 'Run in the background and return a job id immediately (collect with job_output, stop with job_kill). No timeout applies.' },
       } : {},
       ...escalationModes.length > 0 ? {
@@ -362,7 +378,7 @@ export function apply(ctx: Context, config: Config = {}): void {
         dshEnv: ctx.shellEnv.collect(exec),
         ...policy !== undefined ? { sandboxPolicy: policy } : {},
       }
-      if (args.run_in_background === true) {
+      if (forceRunInBackground || args.run_in_background === true) {
         // Undeclared keys are allowed, so schema omission also needs enforcement.
         if (!backgroundEnabled) {
           throw new Error('run_in_background is disabled for this deployment (enableRunInBackground: false)')
@@ -409,7 +425,7 @@ export function apply(ctx: Context, config: Config = {}): void {
     presentCall: (args: PwshToolArgs): TerminalCallView | GenericCallView => {
       // Background acknowledgements carry no terminal exit status; the generic
       // card mirrors the bash tool's background presentation.
-      if (args.run_in_background === true) {
+      if (forceRunInBackground || args.run_in_background === true) {
         return {
           card: 'generic',
           title: args.command,
@@ -431,7 +447,9 @@ export function apply(ctx: Context, config: Config = {}): void {
       const block = result.content.length === 1 ? result.content[0] : undefined
       if (block === undefined || block.type !== 'text') return undefined
       const raw = block.text
-      const isBackground = typeof args === 'object' && args !== null && (args as { run_in_background?: unknown }).run_in_background === true
+      const isBackground = forceRunInBackground
+        || (typeof args === 'object' && args !== null
+          && (args as { run_in_background?: unknown }).run_in_background === true)
       // Background acknowledgements and errors have no terminal exit status.
       if (isBackground || result.isError) {
         return { card: 'generic', content: [{ type: 'text', text: `\`\`\`console\n${raw.replace(/\n+$/, '')}\n\`\`\`` }] }

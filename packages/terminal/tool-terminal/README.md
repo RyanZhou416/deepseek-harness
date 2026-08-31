@@ -53,13 +53,14 @@ The tools need `ctx.terminals` — a backend must be mounted — and the system-
 | Field | Default | Meaning |
 |---|---|---|
 | `enableRunInBackground` | `true` | Expose and accept `run_in_background`; `false` removes the schema field and rejects the argument |
+| `forceRunInBackground` | `false` | Hide `run_in_background` and return an owner-scoped job for every send; requires background support and `ctx.jobs` |
 | `maxResultBytes` | `262144` | UTF-8 cap (minimum `64`) for each complete terminal result after wait, session, pagination, truncation, and job-status metadata |
 
 The generated [configuration catalog](../../../docs/config-catalog.md#deepseek-aidsh-tool-terminal) and [tool catalog](../../../docs/tool-catalog.md#deepseek-aidsh-tool-terminal) are the exhaustive sources for config fields and schemas.
 
 ### Background sends
 
-`terminal_send(run_in_background: true)` returns a job id immediately instead of waiting. The job is collected with `job_output`, which waits and reads incremental output, and stopped with `job_kill`, which delivers a real `SIGINT` to the foreground process group. Background mode fails before writing input when the jobs surface is absent.
+`terminal_send(run_in_background: true)` returns a job id immediately instead of waiting. `forceRunInBackground: true` applies the same behavior to every send and removes the model argument. The job is collected with `job_output` and stopped with `job_kill`, which delivers a real `SIGINT` to the foreground process group. Background mode fails before writing input when the jobs surface is absent; forced mode fails at load when background support or `ctx.jobs` is absent.
 
 ### Observable outcomes and failures
 

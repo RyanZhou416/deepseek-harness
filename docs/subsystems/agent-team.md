@@ -25,7 +25,7 @@ Every member starts in `provisioning` and reaches exactly one terminal roster ph
 
 ## Durable mailbox
 
-The Lead Session first stores the complete queued message. A target receipt is acknowledged only after its pending inbox item or recorded user message is durable, leaving queued-minus-delivered as the recovery mailbox.
+The Lead Session first stores the complete queued message. A target receipt is acknowledged only after its pending inbox item or recorded user message is durable, leaving queued-minus-delivered as the recovery mailbox. Lead-originated messages steer teammates at their nearest step boundary; teammate-originated messages retain the recorded quiet or wakeup mode.
 
 ```ts type-equiv
 /** One peer message retained until its target Session records it. */

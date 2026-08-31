@@ -31,6 +31,12 @@ const CONTROL_ID_SCHEMAS = {
     childSessionId: SESSION_ID_SCHEMA,
     mode: z.literal('continuable'),
   }),
+  'subagent.steerQueued': z.object({
+    parentSessionId: SESSION_ID_SCHEMA,
+    childSessionId: SESSION_ID_SCHEMA,
+    mode: z.literal('continuable'),
+    itemId: z.string().min(1),
+  }),
 } as const
 
 /**

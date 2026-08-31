@@ -1,0 +1,6 @@
+# Bilingual-pair consistency record (docs/i18n/README.md): the git blob hash of each
+# side as of the last confirmed-consistent state. Both languages carry equal authority;
+# after editing either side, bring the other along and re-record with:
+#   pnpm run verify-translation-pairing --write .agents/notes/implemented/bug-fix/2026-08-31-bounded-transient-runtime-retention.md
+2026-08-31-bounded-transient-runtime-retention.md: 89f990802a270bc070b0999cb7f7ac7e28176d9b
+2026-08-31-bounded-transient-runtime-retention.zh.md: 93785e0f2f8975b2ca69dfda8e219394ebec1fb1

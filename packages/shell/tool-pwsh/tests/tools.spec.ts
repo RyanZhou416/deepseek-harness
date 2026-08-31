@@ -697,6 +697,30 @@ describe('sandbox escalation through ctx.approval', () => {
 })
 
 describe('background execution through the job runtime', () => {
+  it('can force every command into a background job without a model argument', async () => {
+    const { ctx } = await setupWithTasks({ forceRunInBackground: true })
+    const schema = ctx.tools.schemas().find(candidate => candidate.name === 'pwsh')!
+    expect(schema.parameters.properties).not.toHaveProperty('run_in_background')
+    expect(schema.description).toContain('Every command starts an owner-scoped background job')
+
+    const started = await call(ctx, 'pwsh', {
+      command: 'Write-Output forced', description: 'test command',
+    })
+    expect(started.value).toEqual({ kind: 'background', jobId: 'pwsh-1' })
+    expect(ctx.tools.get('pwsh')?.presentCall?.({
+      command: 'Write-Output forced', description: 'test command',
+    })).toMatchObject({ card: 'generic' })
+    await call(ctx, 'job_output', { job_id: 'pwsh-1', wait: true })
+  })
+
+  it('rejects forced background mode without its required capabilities', async () => {
+    await expect(setup({ forceRunInBackground: true }))
+      .rejects.toThrow('requires @deepseek-ai/dsh-jobs')
+    await expect(setup({
+      enableRunInBackground: false, forceRunInBackground: true,
+    })).rejects.toThrow('requires enableRunInBackground')
+  })
+
   it('run_in_background acks with the job id, readable through the REAL job_output tool', async () => {
     const { ctx } = await setupWithTasks()
     const started = await call(ctx, 'pwsh', { command: 'Write-Output bg-ok', description: 'test command', run_in_background: true })

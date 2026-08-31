@@ -1,0 +1,6 @@
+# Bilingual-pair consistency record (docs/i18n/README.md): the git blob hash of each
+# side as of the last confirmed-consistent state. Both languages carry equal authority;
+# after editing either side, bring the other along and re-record with:
+#   pnpm run verify-translation-pairing --write .agents/notes/implemented/feature/2026-08-30-steer-responsive-agent-team-work.md
+2026-08-30-steer-responsive-agent-team-work.md: 37079c3d041d1066754aeffa8a8cf3dcbf34a719
+2026-08-30-steer-responsive-agent-team-work.zh.md: b41cab74db4a459bc3b35a7b8c384bba299be364

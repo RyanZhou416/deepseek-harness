@@ -75,6 +75,12 @@ describe('ConversationController', () => {
     } as never)
     await expect(b.scoped.updateQueue('item-2' as never, { kind: 'steer' })).resolves.toBeUndefined()
     b.updateQueue.mockResolvedValueOnce({
+      ok: false,
+      error: { code: 'subagent-queue-item-not-found', message: 'claimed', details: {} },
+    } as never)
+    await expect(b.scoped.updateQueue('item-subagent' as never, { kind: 'steer' }))
+      .resolves.toBeUndefined()
+    b.updateQueue.mockResolvedValueOnce({
       ok: false, error: { code: 'queue-item-not-found', message: 'claimed', details: {} },
     } as never)
     await expect(b.scoped.updateQueue('item-3' as never, { kind: 'remove' }))

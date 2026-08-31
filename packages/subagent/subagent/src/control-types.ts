@@ -114,14 +114,28 @@ export interface SubagentPromptReceipt {
   readonly messageId: MessageId
 }
 
+/** Durable parent address plus one still-pending child inbox occurrence. */
+export interface SubagentQueueSteerRequest {
+  readonly parentSessionId: SessionId
+  readonly childSessionId: SessionId
+  /** Required continuable-address discriminator. */
+  readonly mode: 'continuable'
+  readonly itemId: MessageId
+}
+
+/** Acknowledgement that one queued child message moved to next-step steering. */
+export interface SubagentQueueSteerReceipt {
+  readonly accepted: true
+}
+
 /** Uniform acknowledgement that one interrupt request was admitted. */
 export interface SubagentInterruptReceipt {
   readonly accepted: true
 }
 
 /**
- * Failure details the control surface answers with. The catalog read, the
- * prompt, and the interrupt produce these codes; a Client fabricates
+ * Failure details the control surface answers with. The catalog read, prompt,
+ * queued steering, and interrupt produce these codes; a Client fabricates
  * `subagent-not-resumable` and `subagent-delivery-unavailable` for a one-shot
  * address it refuses before the call, so both planes read one vocabulary.
  */
@@ -133,6 +147,8 @@ export interface SubagentControlErrorDetailsMap {
   'subagent-not-resumable': { readonly childSessionId: SessionId }
   'subagent-unauthorized': { readonly childSessionId: SessionId }
   'subagent-delivery-unavailable': { readonly childSessionId: SessionId }
+  'subagent-queue-item-not-found': { readonly childSessionId: SessionId; readonly itemId: MessageId }
+  'subagent-steer-unavailable': { readonly childSessionId: SessionId; readonly itemId: MessageId }
   'subagent-projections-unavailable': Record<never, never>
   internal: Record<never, never>
 }

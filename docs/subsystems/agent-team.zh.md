@@ -25,7 +25,7 @@ interface TeamMemberSnapshot {
 
 ## 持久 mailbox
 
-Lead Session 首先存储完整 queued message。只有 target 的 pending inbox 条目或已记录用户消息完成持久化，才会写入独立 acknowledgement event，queued-minus-delivered 因而构成恢复 mailbox。
+Lead Session 首先存储完整 queued message。只有 target 的 pending inbox 条目或已记录用户消息完成持久化，才会写入独立 acknowledgement event，queued-minus-delivered 因而构成恢复 mailbox。Lead 发起的消息会在 teammate 最近的 step 边界进行 steering；teammate 发起的消息保留记录的 quiet 或 wakeup 模式。
 
 ```ts type-equiv
 /** One peer message retained until its target Session records it. */
