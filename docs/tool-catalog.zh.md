@@ -1624,7 +1624,7 @@ lsp 工具将提供方选择和语言服务器子进程置于 ctx.lsp 之后，�
 
 ### `list_agents`
 
-按持久 id 和标签列出你的可继续后台 subagent。用它回忆你启动过哪些 subagent，而不是轮询完成情况——subagent 完成时你会被告知。状态来自实时注册表：running 表示 agent 此刻正在工作；idle 表示已加载但处于轮次之间，可能正在等待它启动的 agent；ready 表示它只存在于存储中——可恢复而非终态，也不表示有结果等待收集；`send_message` 会在同一对话上开启新的轮次，且无论处于哪种状态，直接子级都仍可作为 `send_message` 的目标。该快照并非投递承诺；`send_message` 会执行权威检查，仍可能失败。无法读取的子级会作为诊断信息报告，而不会被静默丢弃。`descendants` 作用域会按稳定的前序顺序遍历你下方的整棵树，并为每个条目标注其持久的直接父会话 id 和深度。只有深度为 1 的条目可以使用 `send_message`；更深的条目只能作为 `interrupt_agent` 的候选目标。
+按持久 id 和标签列出你的可继续后台 subagent。用它回忆你启动过哪些 subagent，而不是轮询完成情况——subagent 完成时你会被告知。状态来自实时注册表：running 表示 agent 此刻正在工作；idle 表示已加载但处于轮次之间，可能正在等待它启动的 agent；ready 表示它只存在于存储中——可恢复而非终态，也不表示有结果等待收集；`send_message` 会在最近 step 边界 steering 同一对话，且无论处于哪种状态，直接子级都仍可作为 `send_message` 的目标。该快照并非投递承诺；`send_message` 会执行权威检查，仍可能失败。无法读取的子级会作为诊断信息报告，而不会被静默丢弃。`descendants` 作用域会按稳定的前序顺序遍历你下方的整棵树，并为每个条目标注其持久的直接父会话 id 和深度。只有深度为 1 的条目可以使用 `send_message`；更深的条目只能作为 `interrupt_agent` 的候选目标。
 
 ```json
 {
@@ -1646,7 +1646,7 @@ lsp 工具将提供方选择和语言服务器子进程置于 ctx.lsp 之后，�
 
 ### `send_message`
 
-根据 subagent id 向后台 subagent 发送消息，继续同一段对话。该消息会成为 subagent 的下一轮次：如果它仍在工作，消息会等待当前轮次结束，因此无法改变已经开始的工作方向。此调用不会返回 subagent 的答案，只会确认消息已投递，因此请用它分派更多工作。调用失败表示消息**未**投递。
+根据 subagent id 向后台 subagent 发送消息，继续同一段对话。该消息会在最近 step 边界进入 subagent：如果它仍在工作，当前模型请求或工具调用会先完成，随后该消息可以改变余下工作的方向。此调用不会返回 subagent 的答案，只会确认消息已投递，因此请用它分派更多工作。调用失败表示消息**未**投递。
 
 ```json
 {
@@ -1778,7 +1778,7 @@ lsp 工具将提供方选择和语言服务器子进程置于 ctx.lsp 之后，�
 
 ### `followup_task`
 
-向另一名 Team member 发送持久 follow-up task，并在需要时启动一个 turn。
+向 teammate 发送持久指令，并在其最近 step 边界进入。
 
 ```json
 {
@@ -1838,7 +1838,7 @@ lsp 工具将提供方选择和语言服务器子进程置于 ctx.lsp 之后，�
 
 ### `send_message`
 
-向另一名 Team member 发送持久信息，但不启动 idle member。
+向 teammate 发送持久指令，并在其最近 step 边界进入。
 
 ```json
 {

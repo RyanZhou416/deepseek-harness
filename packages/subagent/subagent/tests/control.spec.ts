@@ -11,6 +11,7 @@ import SubagentRuntime, {
   SubagentError,
   type SubagentListEntry,
   type SubagentPromptRequestId,
+  type SubagentQueueAction,
 } from '@deepseek-ai/dsh-subagent'
 
 const PARENT = SessionId('parent')
@@ -45,12 +46,13 @@ function promptRequest(clientTimeZone?: string) {
   }
 }
 
-function queueSteerRequest() {
+function queueUpdateRequest(action: SubagentQueueAction = { kind: 'steer' }) {
   return {
     parentSessionId: PARENT,
     childSessionId: CHILD,
     mode: 'continuable' as const,
     itemId: 'queued-message' as MessageId,
+    action,
   }
 }
 
@@ -282,72 +284,112 @@ describe('subagent prompt Remote', () => {
   })
 })
 
-describe('subagent queued-steering Remote', () => {
+describe('subagent queue-update Remote', () => {
   function installManager(
     subagents: SubagentRuntime,
-    outcome: 'steered' | 'not-found' | 'unavailable' = 'steered',
+    outcome: 'updated' | 'not-found' | 'unavailable' = 'updated',
   ) {
-    const steerPendingByParent = vi.fn().mockResolvedValue(outcome)
-    ;(subagents as unknown as { continuations: unknown }).continuations = { steerPendingByParent }
-    return steerPendingByParent
+    const updatePendingByParent = vi.fn().mockResolvedValue(outcome)
+    ;(subagents as unknown as { continuations: unknown }).continuations = { updatePendingByParent }
+    return updatePendingByParent
   }
 
   it('validates every durable address field before reaching the manager', async () => {
     const { subagents } = await bench()
-    const steer = installManager(subagents)
+    const update = installManager(subagents)
     for (const [field, value] of [
       ['parentSessionId', SessionId('')],
       ['childSessionId', SessionId('')],
       ['itemId', '' as MessageId],
     ] as const) {
-      await expect(subagents.steerQueuedByParent({
-        ...queueSteerRequest(), [field]: value,
-      }, signal)).rejects.toMatchObject(emptyIdFailure('subagent.steerQueued', field))
+      await expect(subagents.updateQueuedByParent({
+        ...queueUpdateRequest(), [field]: value,
+      }, signal)).rejects.toMatchObject(emptyIdFailure('subagent.updateQueue', field))
     }
-    expect(steer).not.toHaveBeenCalled()
+    expect(update).not.toHaveBeenCalled()
   })
 
-  it('forwards the durable address and acknowledges the committed inbox move', async () => {
+  it('forwards the durable address and each mutation', async () => {
     const { subagents } = await bench()
-    const steer = installManager(subagents)
+    const update = installManager(subagents)
 
-    await expect(subagents.steerQueuedByParent(queueSteerRequest(), signal))
-      .resolves.toEqual({ accepted: true })
-    expect(steer).toHaveBeenCalledWith(CHILD, PARENT, 'queued-message', signal)
+    for (const action of [
+      { kind: 'edit' as const, content: [{ type: 'text' as const, text: 'revised' }] },
+      { kind: 'remove' as const },
+      { kind: 'steer' as const },
+    ]) {
+      await expect(subagents.updateQueuedByParent(queueUpdateRequest(action), signal))
+        .resolves.toEqual({ accepted: true })
+      expect(update).toHaveBeenLastCalledWith(CHILD, PARENT, 'queued-message', action, signal)
+    }
+  })
+
+  it('rejects non-text edits before reaching the manager', async () => {
+    const { subagents } = await bench()
+    const update = installManager(subagents)
+    await expect(subagents.updateQueuedByParent(queueUpdateRequest({
+      kind: 'edit',
+      content: [{ type: 'image', data: 'x', mediaType: 'image/png' } as never],
+    }), signal)).rejects.toMatchObject({
+      code: 'subagent/attachment-unsupported',
+      details: { childSessionId: CHILD, reason: 'QUEUE_EDIT_NON_TEXT' },
+    })
+    expect(update).not.toHaveBeenCalled()
+  })
+
+  it('rejects malformed edit blocks at the wire boundary', async () => {
+    const { subagents } = await bench()
+    const update = installManager(subagents)
+    for (const content of [
+      [null],
+      [{}],
+      [{ type: 'text', text: 42 }],
+    ]) {
+      await expect(subagents.updateQueuedByParent({
+        ...queueUpdateRequest(),
+        action: { kind: 'edit', content },
+      } as never, signal)).rejects.toMatchObject({
+        code: 'gateway/bad-request',
+        message: 'invalid payload for subagent.updateQueue',
+      })
+    }
+    expect(update).not.toHaveBeenCalled()
   })
 
   it('maps stale, inactive, unauthorized, cancelled, and unexpected outcomes', async () => {
     const { subagents } = await bench()
-    const steer = installManager(subagents, 'not-found')
-    await expect(subagents.steerQueuedByParent(queueSteerRequest(), signal))
+    const update = installManager(subagents, 'not-found')
+    await expect(subagents.updateQueuedByParent(queueUpdateRequest(), signal))
       .rejects.toMatchObject({ code: 'subagent/queue-item-not-found' })
 
-    steer.mockResolvedValue('unavailable')
-    await expect(subagents.steerQueuedByParent(queueSteerRequest(), signal))
+    update.mockResolvedValue('unavailable')
+    await expect(subagents.updateQueuedByParent(queueUpdateRequest(), signal))
       .rejects.toMatchObject({ code: 'subagent/steer-unavailable' })
+    await expect(subagents.updateQueuedByParent(queueUpdateRequest({ kind: 'remove' }), signal))
+      .rejects.toMatchObject({ code: 'subagent/delivery-unavailable' })
 
-    steer.mockRejectedValue(new SubagentError('wrong parent', 'UNAUTHORIZED'))
-    await expect(subagents.steerQueuedByParent(queueSteerRequest(), signal))
+    update.mockRejectedValue(new SubagentError('wrong parent', 'UNAUTHORIZED'))
+    await expect(subagents.updateQueuedByParent(queueUpdateRequest(), signal))
       .rejects.toMatchObject({ code: 'subagent/unauthorized' })
 
-    steer.mockRejectedValue(new SubagentError('stopped', 'CANCELLED'))
-    await expect(subagents.steerQueuedByParent(queueSteerRequest(), signal))
+    update.mockRejectedValue(new SubagentError('stopped', 'CANCELLED'))
+    await expect(subagents.updateQueuedByParent(queueUpdateRequest(), signal))
       .rejects.toMatchObject({ code: 'gateway/cancelled' })
 
-    steer.mockRejectedValue(new Error('broken inbox'))
-    await expect(subagents.steerQueuedByParent(queueSteerRequest(), signal))
+    update.mockRejectedValue(new Error('broken inbox'))
+    await expect(subagents.updateQueuedByParent(queueUpdateRequest(), signal))
       .rejects.toMatchObject({ code: 'gateway/internal' })
 
     const aborted = new AbortController()
     aborted.abort()
-    steer.mockRejectedValue(new Error('carrier stopped'))
-    await expect(subagents.steerQueuedByParent(queueSteerRequest(), aborted.signal))
+    update.mockRejectedValue(new Error('carrier stopped'))
+    await expect(subagents.updateQueuedByParent(queueUpdateRequest(), aborted.signal))
       .rejects.toMatchObject({ code: 'gateway/cancelled' })
   })
 
   it('reports the missing continuation manager as temporarily unavailable', async () => {
     const { subagents } = await bench()
-    await expect(subagents.steerQueuedByParent(queueSteerRequest(), signal))
+    await expect(subagents.updateQueuedByParent(queueUpdateRequest(), signal))
       .rejects.toMatchObject({ code: 'subagent/steer-unavailable' })
   })
 })

@@ -601,45 +601,60 @@ describe('SubagentRuntime.followup residency routing', () => {
     expect(loaded.events.filter(event => event.type === 'turn/start')).toHaveLength(1)
   })
 
-  it('promotes one parent-addressed pending turn into next-step steering', async () => {
+  it('edits, removes, or steers an exact parent-addressed pending turn', async () => {
     const releaseFirst = Promise.withResolvers<undefined>()
     const adapter = new GatedAdapter([
       { chunks: textResponse('first'), gate: releaseFirst.promise },
       { chunks: textResponse('steered') },
+      { chunks: textResponse('edited') },
     ])
     const { ctx, parent } = await setupWith(adapter)
     const started = await ctx.subagents.startContinuable(startSpec(parent))
     await vi.waitFor(() => { expect(adapter.requests).toHaveLength(1) })
     const child = ctx.agents.get(started.childId)
     if (child === undefined) throw new Error('expected a live child')
-    const messageId = await followup(ctx, parent, started.childId, message('queued directive'))
+    const editId = await followup(ctx, parent, started.childId, message('edit me'))
+    const removeId = await followup(ctx, parent, started.childId, message('remove me'))
+    const steerId = await followup(ctx, parent, started.childId, message('steer me'))
     const manager = (ctx.subagents as unknown as {
       continuations: {
-        steerPendingByParent(
+        updatePendingByParent(
           childId: SessionId,
           parentId: SessionId,
           messageId: MessageId,
+          action: { kind: 'edit'; content: ReturnType<typeof message> }
+            | { kind: 'remove' }
+            | { kind: 'steer' },
           signal: AbortSignal,
         ): Promise<string>
       }
     }).continuations
 
-    await expect(manager.steerPendingByParent(
-      started.childId, parent.id, messageId, testSignal,
-    )).resolves.toBe('steered')
-    expect(child.inbox.nextTurn).toHaveLength(0)
-    expect(child.inbox.nextStep.map(input => input.id)).toEqual([messageId])
-    await expect(manager.steerPendingByParent(
-      started.childId, parent.id, messageId, testSignal,
+    await expect(manager.updatePendingByParent(
+      started.childId, parent.id, editId, { kind: 'edit', content: message('revised') }, testSignal,
+    )).resolves.toBe('updated')
+    expect(child.inbox.nextTurn.find(input => input.id === editId)?.content)
+      .toEqual(message('revised'))
+    await expect(manager.updatePendingByParent(
+      started.childId, parent.id, removeId, { kind: 'remove' }, testSignal,
+    )).resolves.toBe('updated')
+    expect(child.inbox.nextTurn.some(input => input.id === removeId)).toBe(false)
+    await expect(manager.updatePendingByParent(
+      started.childId, parent.id, steerId, { kind: 'steer' }, testSignal,
+    )).resolves.toBe('updated')
+    expect(child.inbox.nextTurn.map(input => input.id)).toEqual([editId])
+    expect(child.inbox.nextStep.map(input => input.id)).toEqual([steerId])
+    await expect(manager.updatePendingByParent(
+      started.childId, parent.id, steerId, { kind: 'steer' }, testSignal,
     )).resolves.toBe('not-found')
-    await expect(manager.steerPendingByParent(
-      started.childId, SessionId('wrong-parent'), messageId, testSignal,
+    await expect(manager.updatePendingByParent(
+      started.childId, SessionId('wrong-parent'), editId, { kind: 'remove' }, testSignal,
     )).rejects.toMatchObject({ code: 'UNAUTHORIZED' })
 
     releaseFirst.resolve(undefined)
     await waitNoActivation(ctx, started.childId)
-    await expect(manager.steerPendingByParent(
-      started.childId, parent.id, messageId, testSignal,
+    await expect(manager.updatePendingByParent(
+      started.childId, parent.id, editId, { kind: 'remove' }, testSignal,
     )).resolves.toBe('unavailable')
   })
 
@@ -2631,7 +2646,7 @@ describe('SubagentRuntime.interrupt', () => {
     const started = await ctx.subagents.startContinuable(startSpec(parent))
     await vi.waitFor(() => { expect(adapter.requests).toHaveLength(1) })
     const child = ctx.agents.get(started.childId)!
-    await followup(ctx, parent, started.childId, message('parked B'))
+    const parkedB = await followup(ctx, parent, started.childId, message('parked B'))
     await followup(ctx, parent, started.childId, message('parked C'))
     const cancelSpy = vi.spyOn(child, 'cancel')
 
@@ -2649,12 +2664,29 @@ describe('SubagentRuntime.interrupt', () => {
     expect(child.status).toBe('idle')
     expect(ctx.agents.get(started.childId)).toBe(child)
 
+    // Editing an accepted parked occurrence publishes a discard/insert pair,
+    // but must retain the manager reservation that keeps this idle Activation
+    // resident until an explicit waking send claims the preserved queue.
+    await expect(ctx.subagents.updateQueuedByParent({
+      parentSessionId: parent.id,
+      childSessionId: started.childId,
+      mode: 'continuable',
+      itemId: parkedB,
+      action: { kind: 'edit', content: message('edited B') },
+    }, testSignal)).resolves.toEqual({ accepted: true })
+    await Promise.resolve()
+    expect(child.inbox.nextTurn.map(input => input.content)).toEqual([
+      message('edited B'),
+      message('parked C'),
+    ])
+    expect(ctx.agents.get(started.childId)).toBe(child)
+
     // Only an explicit waking send restores the driver; the parked items then
     // run before it in the existing FIFO order.
     await followup(ctx, parent, started.childId, message('waking D'))
     await waitNoActivation(ctx, started.childId)
     const loaded = await ctx.sessionPersistence.load(started.childId)
-    expect(userTexts(loaded.events)).toEqual(['child task', 'parked B', 'parked C', 'waking D'])
+    expect(userTexts(loaded.events)).toEqual(['child task', 'edited B', 'parked C', 'waking D'])
     const turnEnds = loaded.events
       .filter(event => event.type === 'turn/end')
       .map(event => (event).data.reason.kind)

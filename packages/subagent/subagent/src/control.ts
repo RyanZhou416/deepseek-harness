@@ -17,6 +17,12 @@ import type {
 import { SubagentError } from './error.ts'
 
 const SESSION_ID_SCHEMA = z.string().min(1)
+const QUEUE_EDIT_BLOCK_SCHEMA = z.union([
+  z.object({ type: z.literal('text'), text: z.string() }),
+  // Preserve a structured non-text block long enough for the Remote to return
+  // the stable attachment-unsupported error instead of a generic bad request.
+  z.object({ type: z.string().min(1) }).refine(block => block.type !== 'text'),
+])
 const CONTROL_ID_SCHEMAS = {
   'subagent.list': z.object({ parentSessionId: SESSION_ID_SCHEMA }),
   'subagent.prompt': z.object({
@@ -29,11 +35,16 @@ const CONTROL_ID_SCHEMAS = {
     childSessionId: SESSION_ID_SCHEMA,
     mode: z.literal('continuable'),
   }),
-  'subagent.steerQueued': z.object({
+  'subagent.updateQueue': z.object({
     parentSessionId: SESSION_ID_SCHEMA,
     childSessionId: SESSION_ID_SCHEMA,
     mode: z.literal('continuable'),
     itemId: z.string().min(1),
+    action: z.discriminatedUnion('kind', [
+      z.object({ kind: z.literal('edit'), content: z.array(QUEUE_EDIT_BLOCK_SCHEMA) }),
+      z.object({ kind: z.literal('remove') }),
+      z.object({ kind: z.literal('steer') }),
+    ]),
   }),
 } as const
 

@@ -311,21 +311,12 @@ export class Session implements SessionFace {
         ),
       }
     }
-    if (action.kind !== 'steer') {
-      return {
-        ok: false,
-        error: new RemoteError(
-          'subagent/delivery-unavailable',
-          'subagent queue editing and removal are unavailable',
-          { childSessionId: this.address.childSessionId },
-        ),
-      }
-    }
-    return this.remote.subagents.steerQueuedByParent({
+    return this.remote.subagents.updateQueuedByParent({
       parentSessionId: this.address.parentSessionId,
       childSessionId: this.address.childSessionId,
       mode: 'continuable',
       itemId,
+      action,
     })
   }
 

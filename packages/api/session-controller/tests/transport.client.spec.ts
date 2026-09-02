@@ -84,7 +84,7 @@ function sessionClient(remote: SessionTransportRemote): SessionRemotes {
     subagents: {
       list: () => Promise.reject(new Error('stream tests never read the subagent catalog')),
       prompt: () => Promise.reject(new Error('stream tests never prompt a subagent')),
-      steerQueuedByParent: () => Promise.reject(new Error('stream tests never steer a subagent')),
+      updateQueuedByParent: () => Promise.reject(new Error('stream tests never update a subagent queue')),
       interruptByParent: () => Promise.reject(new Error('stream tests never interrupt a subagent')),
     },
   }

@@ -129,17 +129,24 @@ export interface SubagentPromptReceipt {
   readonly messageId: MessageId
 }
 
-/** Durable parent address plus one still-pending child inbox occurrence. */
-export interface SubagentQueueSteerRequest {
+/** One browser-requested mutation of a still-pending child FIFO occurrence. */
+export type SubagentQueueAction =
+  | { readonly kind: 'edit'; readonly content: readonly ContentBlock[] }
+  | { readonly kind: 'remove' }
+  | { readonly kind: 'steer' }
+
+/** Durable parent address plus one still-pending child inbox mutation. */
+export interface SubagentQueueUpdateRequest {
   readonly parentSessionId: SessionId
   readonly childSessionId: SessionId
   /** Required continuable-address discriminator. */
   readonly mode: 'continuable'
   readonly itemId: MessageId
+  readonly action: SubagentQueueAction
 }
 
-/** Acknowledgement that one queued child message moved to next-step steering. */
-export interface SubagentQueueSteerReceipt {
+/** Acknowledgement that one queued child mutation committed. */
+export interface SubagentQueueUpdateReceipt {
   readonly accepted: true
 }
 
@@ -150,7 +157,7 @@ export interface SubagentInterruptReceipt {
 
 /**
  * Failure details the control surface answers with. The catalog read, the
- * prompt, and the interrupt produce these codes; a Client fabricates
+ * prompt, queue update, and interrupt produce these codes; a Client fabricates
  * `subagent/not-resumable` and `subagent/delivery-unavailable` for a one-shot
  * address it refuses before the call, so both planes read one vocabulary.
  */

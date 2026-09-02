@@ -133,21 +133,23 @@ persisted Session
 
 `SubagentRuntime.startContinuable()` reserves the stable child id, snapshots the versioned `subagent/descriptor` payload, asks the named provider for its detached `ContinuableCreateSpec`, creates the child Agent through a private activation-owner scope, establishes any continuable-parent ownership, and submits the initial prompt. It resolves with `{ childId, messageId }` when inbox acceptance yields the message id — without waiting for the turn to start or for the message to enter the Session log. Every failure before that acceptance rejects with neither id, disposing any created handle and rolling back the Activation and parent ownership.
 
-`SubagentRuntime.followup()` is the sole continuation-message operation, and routing depends only on Activation residency:
+`SubagentRuntime.followup()` and `steer()` are the two continuation-message operations. Both use the same residency routing; they differ only in the inbox boundary selected for the accepted message:
 
-| Activation state | `followup` |
-|---|---|
-| `running` | enqueue in the same Activation |
-| `waiting` | wake the same Activation |
-| no Activation | cold-resume a new Activation |
+| Activation state | `followup` | `steer` |
+|---|---|---|
+| `running` | enqueue for a later FIFO turn | enter at the nearest step boundary |
+| `waiting` | wake the same Activation | wake the same Activation |
+| no Activation | cold-resume a new Activation | cold-resume a new Activation |
 
 `running` means the Agent has an active admission or turn, or waking inbox work; `waiting` means it is quiescent but still owns at least one child Activation that has not completed disposal; `settled` means quiescent with every owned child disposed, at which point the manager disposes the [`AgentHandle`](core.md#creation-and-ownership) and removes the Activation. The manager derives these internal conditions from Agent quiescence and the owned-child set rather than maintaining a second execution state machine.
 
-The Agent inbox is the only queue. Every continuation message becomes one `Agent.followup()` FIFO turn, so accepted messages have one observable order and a follow-up cannot redirect a turn already underway. Successful delivery returns the accepted `MessageId`; the existing `agent/inbox/inserted`, `agent/inbox/claimed`, and `agent/inbox/discarded` events remain the message-lifecycle observations, and the continuation layer defines no subagent-specific delivery route.
+The Agent inbox is the only queue. A follow-up enters `nextTurn`; steering enters `nextStep` and waits for the current model request or tool call rather than cancelling it. Successful delivery returns the accepted `MessageId`; the existing `agent/inbox/inserted`, `agent/inbox/claimed`, and `agent/inbox/discarded` events remain the message-lifecycle observations.
 
-Follow-up authority comes from an exact live Agent tool context. The authenticated Agent must be the durable child's direct parent recorded in `SessionHeader.parentSession`. `MessageSource` and `senderSessionId` record who supplied an admitted message but grant no authority; the optional model-facing tool uses `CoordinatorMessageSource`.
+Under a durable direct-parent address, `updateQueuedByParent()` may edit or remove one exact pending `nextTurn` occurrence on a live continuable child; steering additionally requires a running child and moves that occurrence to `nextStep`. Editing preserves the message identity and source and accepts text content only. These queue mutations never cold-resume an inactive child, and one-shot children remain read-only.
 
-For both operations the caller signal owns lookup, materialization, and admission only until inbox acceptance. Afterwards the manager owns the Activation independently: later caller cancellation neither cancels the accepted turn nor disposes the child, and the seam exposes no steering operation.
+Delivery authority comes from an exact live Agent tool context. The authenticated Agent must be the durable child's direct parent recorded in `SessionHeader.parentSession`. `MessageSource` and `senderSessionId` record who supplied an admitted message but grant no authority; the optional model-facing tool uses `CoordinatorMessageSource`.
+
+For follow-up and steering, the caller signal owns lookup, materialization, and admission only until inbox acceptance. Afterwards the manager owns the Activation independently: later caller cancellation neither cancels the accepted message nor disposes the child.
 
 `SubagentRuntime.interrupt(targetSessionId, authority)` is the one public stop: it authorizes synchronously, issues `Agent.cancel(cause, { keepInbox: true })` on the live target, and returns without awaiting quiescence. The Activation, its unclaimed pending inbox work, and published descendants are untouched; work already claimed into the interrupted turn is not requeued. Once the interrupted driver is idle, a waking send resumes the parked FIFO queue. An absent target — unknown, one-shot, or already settled — and a manager-less composition are accepted no-ops. For a live target, a mismatched parent address or caller outside its live ancestry rejects with `UNAUTHORIZED`; stale ancestor objects and self-targeting ancestor requests reject before target lookup.
 
@@ -695,18 +697,19 @@ listDescendants(rootSessionId: SessionId, signal?: AbortSignal): Promise<Subagen
 @Remote('prompt') async prompt(request: SubagentPromptRequest, signal: AbortSignal): Promise<SubagentPromptReceipt>
 
 /**
- * Promote one browser-selected child queue occurrence to next-step steering
- * under its durable direct-parent address. The target must have a live,
- * running Activation; this operation neither resumes an inactive child nor
- * requires the parent Agent to be live.
- * @param request - durable parent/child address and pending message identity.
+ * Edit, remove, or steer one browser-selected child queue occurrence under
+ * its durable direct-parent address. The target must have a live Activation;
+ * steering additionally requires it to be running. This operation neither
+ * resumes an inactive child nor requires the parent Agent to be live.
+ * @param request - durable parent/child address, pending message identity, and mutation.
  * @param signal - carrier cancellation before the inbox move commits.
- * @returns acknowledgement that the occurrence moved to next-step steering.
+ * @returns acknowledgement that the selected mutation committed.
  * @throws {RemoteError} `gateway/bad-request`, `gateway/cancelled`,
- *   `subagent/unauthorized`, `subagent/queue-item-not-found`,
+ *   `subagent/attachment-unsupported`, `subagent/unauthorized`,
+ *   `subagent/queue-item-not-found`, `subagent/delivery-unavailable`,
  *   `subagent/steer-unavailable`, or `gateway/internal`.
  */
-@Remote('steerQueuedByParent') async steerQueuedByParent( request: SubagentQueueSteerRequest, signal: AbortSignal, ): Promise<SubagentQueueSteerReceipt>
+@Remote('updateQueuedByParent') async updateQueuedByParent( request: SubagentQueueUpdateRequest, signal: AbortSignal, ): Promise<SubagentQueueUpdateReceipt>
 
 /**
  * Remote face of {@link interrupt} under one durable parent address. No

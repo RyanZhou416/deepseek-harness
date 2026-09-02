@@ -233,7 +233,7 @@ describe('queue operation transport', () => {
     expect(session.getSnapshot().queue).toBe(before)
   })
 
-  it('routes only steering through a continuable child durable parent address', async () => {
+  it('routes every queue mutation through a continuable child durable parent address', async () => {
     const api = new FakeApiClient()
     const session = new Session(SID, fakeRemote(api), {
       address: {
@@ -243,13 +243,22 @@ describe('queue operation transport', () => {
       },
     })
 
-    await expect(session.updateQueue(iid('q-child'), { kind: 'steer' }))
-      .resolves.toEqual({ ok: true, value: { accepted: true } })
-    expect(api.callsOf('subagents.steerQueuedByParent')).toEqual([{
-      parentSessionId: 'parent', childSessionId: SID, mode: 'continuable', itemId: 'q-child',
-    }])
-    await expect(session.updateQueue(iid('q-child'), { kind: 'remove' }))
-      .resolves.toMatchObject({ ok: false, error: { code: 'subagent/delivery-unavailable' } })
+    const actions = [
+      { kind: 'edit' as const, content: text('revised') },
+      { kind: 'remove' as const },
+      { kind: 'steer' as const },
+    ]
+    for (const action of actions) {
+      await expect(session.updateQueue(iid('q-child'), action))
+        .resolves.toEqual({ ok: true, value: { accepted: true } })
+    }
+    expect(api.callsOf('subagents.updateQueuedByParent')).toEqual(actions.map(action => ({
+      parentSessionId: 'parent',
+      childSessionId: SID,
+      mode: 'continuable',
+      itemId: 'q-child',
+      action,
+    })))
     expect(api.callsOf('session.updateQueue')).toEqual([])
   })
 
@@ -262,9 +271,15 @@ describe('queue operation transport', () => {
         mode: 'one-shot',
       },
     })
-    await expect(session.updateQueue(iid('q-child'), { kind: 'steer' }))
-      .resolves.toMatchObject({ ok: false, error: { code: 'subagent/not-resumable' } })
-    expect(api.callsOf('subagents.steerQueuedByParent')).toEqual([])
+    for (const action of [
+      { kind: 'edit' as const, content: text('revised') },
+      { kind: 'remove' as const },
+      { kind: 'steer' as const },
+    ]) {
+      await expect(session.updateQueue(iid('q-child'), action))
+        .resolves.toMatchObject({ ok: false, error: { code: 'subagent/not-resumable' } })
+    }
+    expect(api.callsOf('subagents.updateQueuedByParent')).toEqual([])
   })
 })
 

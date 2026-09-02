@@ -47,8 +47,8 @@ import type {
   SubagentPromptReceipt,
   SubagentPromptRequest,
   SubagentPromptRequestId,
-  SubagentQueueSteerReceipt,
-  SubagentQueueSteerRequest,
+  SubagentQueueUpdateReceipt,
+  SubagentQueueUpdateRequest,
 } from './control-types.ts'
 import type {
   ContinuableCreateRequest,
@@ -486,36 +486,46 @@ export class SubagentRuntime extends TypertRemoteService {
   }
 
   /**
-   * Promote one browser-selected child queue occurrence to next-step steering
-   * under its durable direct-parent address. The target must have a live,
-   * running Activation; this operation neither resumes an inactive child nor
-   * requires the parent Agent to be live.
-   * @param request - durable parent/child address and pending message identity.
+   * Edit, remove, or steer one browser-selected child queue occurrence under
+   * its durable direct-parent address. The target must have a live Activation;
+   * steering additionally requires it to be running. This operation neither
+   * resumes an inactive child nor requires the parent Agent to be live.
+   * @param request - durable parent/child address, pending message identity, and mutation.
    * @param signal - carrier cancellation before the inbox move commits.
-   * @returns acknowledgement that the occurrence moved to next-step steering.
+   * @returns acknowledgement that the selected mutation committed.
    * @throws {RemoteError} `gateway/bad-request`, `gateway/cancelled`,
-   *   `subagent/unauthorized`, `subagent/queue-item-not-found`,
+   *   `subagent/attachment-unsupported`, `subagent/unauthorized`,
+   *   `subagent/queue-item-not-found`, `subagent/delivery-unavailable`,
    *   `subagent/steer-unavailable`, or `gateway/internal`.
    */
-  @Remote('steerQueuedByParent')
-  async steerQueuedByParent(
-    request: SubagentQueueSteerRequest,
+  @Remote('updateQueuedByParent')
+  async updateQueuedByParent(
+    request: SubagentQueueUpdateRequest,
     signal: AbortSignal,
-  ): Promise<SubagentQueueSteerReceipt> {
-    validateControlRequest('subagent.steerQueued', request)
-    let outcome: 'steered' | 'not-found' | 'unavailable'
+  ): Promise<SubagentQueueUpdateReceipt> {
+    validateControlRequest('subagent.updateQueue', request)
+    if (request.action.kind === 'edit'
+      && request.action.content.some(block => block.type !== 'text')) {
+      throw new RemoteError(
+        'subagent/attachment-unsupported',
+        'subagent queue edits accept text content only',
+        { childSessionId: request.childSessionId, reason: 'QUEUE_EDIT_NON_TEXT' },
+      )
+    }
+    let outcome: 'updated' | 'not-found' | 'unavailable'
     try {
-      outcome = await this.continuations?.steerPendingByParent(
+      outcome = await this.continuations?.updatePendingByParent(
         request.childSessionId,
         request.parentSessionId,
         request.itemId,
+        request.action,
         signal,
       ) ?? 'unavailable'
     } catch (error: unknown) {
       if (signal.aborted || (error instanceof SubagentError && error.code === 'CANCELLED')) {
         throw new RemoteError(
           'gateway/cancelled',
-          'subagent queue steering was cancelled',
+          'subagent queue update was cancelled',
           {},
           { cause: error },
         )
@@ -528,7 +538,7 @@ export class SubagentRuntime extends TypertRemoteService {
           { cause: error },
         )
       }
-      throw new RemoteError('gateway/internal', 'subagent queue steering failed', {}, { cause: error })
+      throw new RemoteError('gateway/internal', 'subagent queue update failed', {}, { cause: error })
     }
     if (outcome === 'not-found') {
       throw new RemoteError(
@@ -538,6 +548,13 @@ export class SubagentRuntime extends TypertRemoteService {
       )
     }
     if (outcome === 'unavailable') {
+      if (request.action.kind !== 'steer') {
+        throw new RemoteError(
+          'subagent/delivery-unavailable',
+          'subagent is not live and cannot update its queue',
+          { childSessionId: request.childSessionId },
+        )
+      }
       throw new RemoteError(
         'subagent/steer-unavailable',
         'subagent is not running and cannot accept queued steering',

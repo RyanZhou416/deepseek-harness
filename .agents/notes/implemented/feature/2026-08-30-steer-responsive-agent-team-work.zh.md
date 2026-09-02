@@ -20,7 +20,7 @@ Status: implemented
 
 全局面向模型的 `send_message` control 同样调用 Subagent steering，因此 Agent Teams 之外的普通 coordinator-to-child 指令也使用最近 step 行为。host-user 与浏览器 prompt 路径保留 FIFO follow-up 投递；修改模型工具不会重新分类人类输入。
 
-浏览器 Queue Dock 会在运行中的可继续子级对话里公开已有的 steering action。Client 通过专用 `subagents/steerQueuedByParent` Remote 路由该操作；Remote 会授权持久直接父级地址，并且只提升选中的 pending next-turn occurrence。Remote 使用共享的 namespaced `RemoteError` 代码 `subagent/queue-item-not-found` 与 `subagent/steer-unavailable` 报告过期和 inactive 目标。subagent queue 仍不能编辑或移除。
+浏览器 Queue Dock 会在 live 可继续子级对话里公开排队消息的编辑、移除与 steering action。Client 通过专用 `subagents/updateQueuedByParent` Remote 路由这些操作；Remote 会授权持久直接父级地址，并且只修改选中的 pending next-turn occurrence。编辑保留身份与 source，移除会持久取消该 occurrence，steering 还要求子级正在运行，随后把消息移入 next-step 输入。Remote 使用 `subagent/queue-item-not-found` 报告过期 occurrence，使用 `subagent/delivery-unavailable` 报告不可用的编辑或移除，并使用 `subagent/steer-unavailable` 报告不可用的 steering。
 
 Bash 与 PowerShell 工具 consumer 接受默认值为 `false` 的 `forceRunInBackground`。启用后，consumer 隐藏 `run_in_background`，等待 `ctx.jobs` 后再注册，并把每条命令作为 owner-scoped job 启动后返回 id。进程由 job runtime 持有，直到完成、取消、owner dispose 或 service dispose。
 
@@ -40,7 +40,7 @@ Bash 与 PowerShell 工具 consumer 接受默认值为 `false` 的 `forceRunInBa
 
 ## Testing
 
-Subagent 测试区分运行中 Activation 的 next-step steering 与 FIFO follow-up，并保留既有授权、冷恢复、dispose 与一次性行为。Queue Dock 与 Client 测试覆盖可继续子级 action、一次性只读状态、持久地址路由、过期 occurrence 收敛，以及隐藏编辑与移除操作。Team mailbox 测试覆盖 Lead steering、teammate quiet/FIFO 投递、target-local 串行、持久化恢复、中断与 pending 限额。Job 测试证明 next-step 让出保持任务运行、next-turn 消息不会让出且默认行为不变。Bash、PowerShell 与 profile 测试证明强制 job 会移除模型参数、返回真实 job id、呈现后台结果，并在 loader 并发激活时安全等待 jobs 能力。
+Subagent 测试区分运行中 Activation 的 next-step steering 与 FIFO follow-up，并保留既有授权、冷恢复、dispose 与一次性行为。Queue Dock 与 Client 测试覆盖可继续子级的编辑、移除、steering、一次性只读状态、持久地址路由与过期 occurrence 收敛。Team mailbox 测试覆盖 Lead steering、teammate quiet/FIFO 投递、target-local 串行、持久化恢复、中断与 pending 限额。Job 测试证明 next-step 让出保持任务运行、next-turn 消息不会让出且默认行为不变。Bash、PowerShell 与 profile 测试证明强制 job 会移除模型参数、返回真实 job id、呈现后台结果，并在 loader 并发激活时安全等待 jobs 能力。
 
 ## Consequences
 

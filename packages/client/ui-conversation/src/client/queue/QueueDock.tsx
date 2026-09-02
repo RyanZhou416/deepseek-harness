@@ -28,8 +28,7 @@ export function QueueDock({ useSession, updateQueue, notify, t }: QueueDockProps
   const queue = useMemo(() => inbox.filter(row => row.placement === 'queued'), [inbox])
   const running = useSession(s => s.running)
   const subagent = useSession(s => s.subagent)
-  const queueMutable = subagent === null
-  const queueSteerable = queueMutable || subagent.address.mode === 'continuable'
+  const queueMutable = subagent === null || subagent.address.mode === 'continuable'
   const [editing, setEditing] = useState<{ id: QueueItemId; text: string } | null>(null)
   const [busy, setBusy] = useState<QueueItemId | null>(null)
   const [collapsed, setCollapsed] = useState(true)
@@ -42,7 +41,7 @@ export function QueueDock({ useSession, updateQueue, notify, t }: QueueDockProps
 
   if (queue.length === 0) return null
 
-  const interactionActive = queueSteerable && (editing !== null || busy !== null)
+  const interactionActive = queueMutable && (editing !== null || busy !== null)
   const expanded = !collapsed || interactionActive
   const listVisible = queue.length === 1 || expanded
 
@@ -117,7 +116,7 @@ export function QueueDock({ useSession, updateQueue, notify, t }: QueueDockProps
                   />
                 )
                 : <span className={css.preview}>{projectUserText(row.preview, [])}</span>}
-              {queueSteerable && <div className={css.actions}>
+              {queueMutable && <div className={css.actions}>
                 {editing?.id === row.id
                   ? (
                     <>
@@ -147,7 +146,7 @@ export function QueueDock({ useSession, updateQueue, notify, t }: QueueDockProps
                   )
                   : (
                     <>
-                      {queueMutable && <Tooltip label={t('queue.edit')} side="bottom" delayMs={500} disabled={row.text === null}>
+                      <Tooltip label={t('queue.edit')} side="bottom" delayMs={500} disabled={row.text === null}>
                         <button
                           type="button"
                           className={css.action}
@@ -162,8 +161,8 @@ export function QueueDock({ useSession, updateQueue, notify, t }: QueueDockProps
                         >
                           <IconEditOutline16 size={14} />
                         </button>
-                      </Tooltip>}
-                      {queueMutable && <Tooltip label={t('queue.remove')} side="bottom" delayMs={500}>
+                      </Tooltip>
+                      <Tooltip label={t('queue.remove')} side="bottom" delayMs={500}>
                         <button
                           type="button"
                           className={css.action}
@@ -179,7 +178,7 @@ export function QueueDock({ useSession, updateQueue, notify, t }: QueueDockProps
                         >
                           <IconTrashOutline16 size={14} />
                         </button>
-                      </Tooltip>}
+                      </Tooltip>
                       <Tooltip label={t('queue.steer')} side="bottom" delayMs={500} disabled={!running}>
                         <button
                           type="button"

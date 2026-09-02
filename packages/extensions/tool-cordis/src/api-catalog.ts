@@ -2270,11 +2270,11 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
         throws: ['{RemoteError} `gateway/bad-request`, `subagent/attachment-unsupported`, `subagent/invalid-time-zone`, `subagent/parent-unavailable`, `subagent/not-resumable`, `subagent/unauthorized`, `subagent/delivery-unavailable`, `gateway/cancelled`, or `gateway/internal`.'],
       },
       {
-        signature: '@Remote(\'steerQueuedByParent\') async steerQueuedByParent( request: SubagentQueueSteerRequest, signal: AbortSignal, ): Promise<SubagentQueueSteerReceipt>',
-        description: 'Promote one browser-selected child queue occurrence to next-step steering under its durable direct-parent address. The target must have a live, running Activation; this operation neither resumes an inactive child nor requires the parent Agent to be live.',
-        parameters: [{ name: 'request', description: 'durable parent/child address and pending message identity.' }, { name: 'signal', description: 'carrier cancellation before the inbox move commits.' }],
-        returns: 'acknowledgement that the occurrence moved to next-step steering.',
-        throws: ['{RemoteError} `gateway/bad-request`, `gateway/cancelled`, `subagent/unauthorized`, `subagent/queue-item-not-found`, `subagent/steer-unavailable`, or `gateway/internal`.'],
+        signature: '@Remote(\'updateQueuedByParent\') async updateQueuedByParent( request: SubagentQueueUpdateRequest, signal: AbortSignal, ): Promise<SubagentQueueUpdateReceipt>',
+        description: 'Edit, remove, or steer one browser-selected child queue occurrence under its durable direct-parent address. The target must have a live Activation; steering additionally requires it to be running. This operation neither resumes an inactive child nor requires the parent Agent to be live.',
+        parameters: [{ name: 'request', description: 'durable parent/child address, pending message identity, and mutation.' }, { name: 'signal', description: 'carrier cancellation before the inbox move commits.' }],
+        returns: 'acknowledgement that the selected mutation committed.',
+        throws: ['{RemoteError} `gateway/bad-request`, `gateway/cancelled`, `subagent/attachment-unsupported`, `subagent/unauthorized`, `subagent/queue-item-not-found`, `subagent/delivery-unavailable`, `subagent/steer-unavailable`, or `gateway/internal`.'],
       },
       {
         signature: '@Remote(\'interruptByParent\') interruptByParent( childSessionId: SessionId, parentSessionId: SessionId, mode: \'continuable\', ): SubagentInterruptReceipt',
@@ -5474,12 +5474,16 @@ export const TYPE_API: readonly TypeApiEntry[] = [
     declaration: 'export interface SubagentProvider {\n    readonly name: string;\n    readonly capabilities: SubagentCapabilities;\n    readonly inheritsParentContext: boolean;\n    readonly agentRouteDefaults?: Readonly<{\n        provider: string;\n        model: string;\n    }>;\n    start(request: ResolvedSubagentStartRequest): Promise<SubagentRun>;\n    prepareContinuable?(request: ContinuableCreateRequest): Promise<ContinuableCreateSpec>;\n}',
   },
   {
-    name: 'SubagentQueueSteerReceipt',
-    declaration: 'export interface SubagentQueueSteerReceipt {\n    readonly accepted: true;\n}',
+    name: 'SubagentQueueAction',
+    declaration: 'export type SubagentQueueAction = {\n    readonly kind: \'edit\';\n    readonly content: readonly ContentBlock[];\n} | {\n    readonly kind: \'remove\';\n} | {\n    readonly kind: \'steer\';\n};',
   },
   {
-    name: 'SubagentQueueSteerRequest',
-    declaration: 'export interface SubagentQueueSteerRequest {\n    readonly parentSessionId: SessionId;\n    readonly childSessionId: SessionId;\n    readonly mode: \'continuable\';\n    readonly itemId: MessageId;\n}',
+    name: 'SubagentQueueUpdateReceipt',
+    declaration: 'export interface SubagentQueueUpdateReceipt {\n    readonly accepted: true;\n}',
+  },
+  {
+    name: 'SubagentQueueUpdateRequest',
+    declaration: 'export interface SubagentQueueUpdateRequest {\n    readonly parentSessionId: SessionId;\n    readonly childSessionId: SessionId;\n    readonly mode: \'continuable\';\n    readonly itemId: MessageId;\n    readonly action: SubagentQueueAction;\n}',
   },
   {
     name: 'SubagentReportDelivery',
@@ -5511,7 +5515,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'SubagentRuntime',
-    declaration: 'export class SubagentRuntime extends TypertRemoteService {\n    constructor(ctx: Context);\n    async startContinuable(spec: ContinuableStartSpec): Promise<ContinuableStart>;\n    async followup(parent: Agent, childId: SessionId, content: ContentBlock[], options: SubagentFollowupOptions): Promise<MessageId>;\n    async steer(parent: Agent, childId: SessionId, content: ContentBlock[], options: SubagentFollowupOptions): Promise<MessageId>;\n    interrupt(targetSessionId: SessionId, authority: SubagentInterruptAuthority): void;\n    async reportFrom(child: Agent, content: ContentBlock[], options: SubagentReportOptions): Promise<MessageId>;\n    registerContinuableSetup(contribution: ContinuableSetupContribution): () => void;\n    async drainContinuableDescendants(parents: readonly Agent[]): Promise<void>;\n    async drainContinuableChildren(parent: Agent, childIds: readonly SessionId[]): Promise<void>;\n    listChildren(parentSessionId: SessionId, signal?: AbortSignal): Promise<SubagentListEntry[]>;\n    listDescendants(rootSessionId: SessionId, signal?: AbortSignal): Promise<SubagentDescendantListEntry[]>;\n    @Remote(\'list\')\n    async remoteExportList(parentSessionId: SessionId, signal: AbortSignal): Promise<SubagentCatalog>;\n    @Remote(\'prompt\')\n    async prompt(request: SubagentPromptRequest, signal: AbortSignal): Promise<SubagentPromptReceipt>;\n    @Remote(\'steerQueuedByParent\')\n    async steerQueuedByParent(request: SubagentQueueSteerRequest, signal: AbortSignal): Promise<SubagentQu /* …truncated — full shape in source */',
+    declaration: 'export class SubagentRuntime extends TypertRemoteService {\n    constructor(ctx: Context);\n    async startContinuable(spec: ContinuableStartSpec): Promise<ContinuableStart>;\n    async followup(parent: Agent, childId: SessionId, content: ContentBlock[], options: SubagentFollowupOptions): Promise<MessageId>;\n    async steer(parent: Agent, childId: SessionId, content: ContentBlock[], options: SubagentFollowupOptions): Promise<MessageId>;\n    interrupt(targetSessionId: SessionId, authority: SubagentInterruptAuthority): void;\n    async reportFrom(child: Agent, content: ContentBlock[], options: SubagentReportOptions): Promise<MessageId>;\n    registerContinuableSetup(contribution: ContinuableSetupContribution): () => void;\n    async drainContinuableDescendants(parents: readonly Agent[]): Promise<void>;\n    async drainContinuableChildren(parent: Agent, childIds: readonly SessionId[]): Promise<void>;\n    listChildren(parentSessionId: SessionId, signal?: AbortSignal): Promise<SubagentListEntry[]>;\n    listDescendants(rootSessionId: SessionId, signal?: AbortSignal): Promise<SubagentDescendantListEntry[]>;\n    @Remote(\'list\')\n    async remoteExportList(parentSessionId: SessionId, signal: AbortSignal): Promise<SubagentCatalog>;\n    @Remote(\'prompt\')\n    async prompt(request: SubagentPromptRequest, signal: AbortSignal): Promise<SubagentPromptReceipt>;\n    @Remote(\'updateQueuedByParent\')\n    async updateQueuedByParent(request: SubagentQueueUpdateRequest, signal: AbortSignal): Promise<Subagen /* …truncated — full shape in source */',
   },
   {
     name: 'SubagentStartRequest',

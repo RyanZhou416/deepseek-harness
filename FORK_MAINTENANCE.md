@@ -4,7 +4,7 @@
 
 本文是 `RyanZhou416/deepseek-harness` 的 fork 维护真源，记录官方仓库之外仍需保留的源码行为、启动脚本、外置 DSH_HOME、插件补丁、会话数据红线、合并流程和验证入口。上游合并或插件升级不得只按文件覆盖；维护者必须逐项证明某个 fork 行为已由上游等价实现，才能删除对应代码、配置和测试。
 
-本文描述已提交基线 `7b86d0a01b` 与 2026-09-02 审计到的仓库外运行层。工作树中的未提交文件不属于已发布基线；维护者必须先保存其独立快照，再更新本文的状态。
+本文描述当前 `master` 的已提交源码行为与 2026-09-02 审计到的仓库外运行层。具体发布 SHA 以 `git rev-parse origin/master` 为准；任何尚未提交的工作树文件都不属于同事可取得的发布基线。
 
 ## Contents
 
@@ -28,7 +28,8 @@
 |---|---|---|
 | Fork remote | `origin = https://github.com/RyanZhou416/deepseek-harness.git` | 唯一常规推送目标 |
 | Official remote | `upstream = https://github.com/deepseek-ai/deepseek-harness.git` | 只用于 fetch 和合并官方 release tag |
-| Published fork | `master = origin/master = 7b86d0a01b` | 16 GiB Windows Host 启动基线 |
+| Published fork | `master = origin/master` | 当前 fork 源码、16 GiB Windows Host 与 continuable-subagent Queue edit/remove/steer 基线；SHA 用 Git 读取 |
+| Pre-Queue behavior anchor | `7b86d0a01b` | Queue 仅支持 steer 时的历史定位点，不是当前发布基线 |
 | Alpha.2 integration | `133c48c733` / `origin/integrate/upstream-alpha2` | 长任务、AgentTeams 和 transient retention 整合提交 |
 | Official merge | `e481d7cb31` | 合并 `dsh-v0.1.2-alpha.2` (`0a53fb55be`) |
 | Pre-alpha.2 WIP backup | `origin/backup/wip-before-alpha2-20260831 = f1c600d51e` | 逐文件恢复证据；它是 sibling，禁止用它 reset 当前 master |
@@ -51,9 +52,9 @@ Alpha.4 的物理 JSONL `seedLength` 仍可由 decoder 兼容，但逻辑 `Sessi
 | Isolated process workers | `C:\Project\deepseek-harness-data\process-workers` |
 | Isolated validation home | `C:\Project\deepseek-harness-data\validation-home` and separately created validation copies |
 
-### Protected uncommitted work
+### Working-tree protection
 
-2026-09-02 审计时，主工作树包含一组未提交的 continuable-subagent Queue edit/remove/steer 在制修改，覆盖 Subagent 控制 API、Session Remote、Queue Dock、E2E、生成目录和中英文文档。它不是 `7b86d0a01b` 的已发布能力，也不属于本文档提交；任何上游合并前必须先检查 `git status --short --branch`，将仍存在的在制修改提交到独立 `backup/wip-before-<tag>-<date>` 分支并推送 `origin`，禁止只依赖 stash。
+Continuable-subagent Queue edit/remove/steer 已作为当前 `master` 的正式行为提交，覆盖 Subagent 控制 API、Session Remote、Queue Dock、E2E、生成目录和中英文文档。任何后续上游合并前仍必须检查 `git status --short --branch`；若出现新的在制修改，先提交到独立 `backup/wip-before-<tag>-<date>` 分支并推送 `origin`，禁止只依赖 stash。
 
 -----
 
@@ -167,9 +168,9 @@ Private AgentTeams profile 显式强制 Bash/PowerShell 命令作为 owner-scope
 
 #### Browser Queue Dock
 
-已提交 `7b86d0a01b` 只允许 running continuable child 将一个 pending next-turn occurrence 提升为 next-step；one-shot queue 只读，subagent edit/remove 被隐藏并拒绝。Remote 名称为 `steerQueuedByParent`，stale/inactive 使用 namespaced errors。
+当前 Queue Dock 允许 direct parent 对 live continuable child 的一个精确 pending `nextTurn` occurrence 执行 edit、remove 或 steer。Edit 只接受文本并保留原 message identity/source；remove 持久取消该 occurrence；steer 只在 child 正在运行时把同一 occurrence 提升到 `nextStep`。Idle continuable child 可 edit/remove，one-shot 与 inactive child 保持只读。
 
-2026-09-02 工作树的未提交 WIP 正在把该能力扩展为 edit/remove/steer。维护者不得在它提交前把新 Remote 或 UI 当作已发布 API，也不得在上游合并时丢掉这些在制文件。
+浏览器通过 `updateQueuedByParent` Remote 携带 durable parent/child address、item id 与 mutation。Host 在 wire boundary 验证文本结构，复用 durable direct-parent address authorization 与 per-child serialization，且不要求 parent Agent 在线；stale、inactive、unauthorized、non-text 和 cancelled 均使用 namespaced errors。该实现复用既有 `agent/inbox/spliced`，不新增 Session event type，也不改变磁盘格式。上游替代必须保持 occurrence identity、idle edit/remove、running-only steer、one-shot read-only、direct-parent authority 和这些失败语义。
 
 ### Local launch and build scripts
 
@@ -262,6 +263,7 @@ Profile 注册 `dsh-sdk-process-raw` 和 `subagent_process`：SDK profile、独�
 | Jobs one-hour TTL / 100 terminal target | Preserve | Official alpha.4 does not provide it |
 | Fixed Agent/model-step admission | Retired | Never restore `memory-admission` |
 | Generic parent/child steer | Prefer alpha.4 official replacement | Migrate consumers and keep behavior tests |
+| Continuable-child exact Queue edit/remove/steer | Preserve | Require durable occurrence identity, idle edit/remove, running-only steer, one-shot read-only and direct-parent authorization |
 | Durable Team Lead mailbox steer | Preserve separately | Generic adjacent steer alone is insufficient |
 | Forced Team shell background / yielding wait | Preserve | Require explicit opt-in and job ownership semantics |
 | Global disconnect overlay | Preserve | Official replacement must remain visible with collapsed sidebar |
@@ -313,6 +315,10 @@ pnpm exec vitest run packages/llm/token-meter/tests/token-meter.spec.ts packages
 pnpm exec vitest run packages/api/session-controller/tests/agent-residency.host.spec.ts packages/api/session-controller/tests/session.client.spec.ts packages/api/session-controller/tests/sessions-service.client.spec.ts packages/client/ui-tool/tests/tool-row.client.spec.tsx packages/client/ui-tool/tests/tool-row-lazy.client.spec.tsx packages/client/ui-settings-general/tests/connection-overlay.client.spec.tsx
 
 pnpm exec vitest run packages/jobs/jobs-local/tests/jobs.spec.ts packages/jobs/jobs-local/tests/loader-composition.spec.ts packages/jobs/tool-jobs/tests/tool-jobs.spec.ts packages/subagent/subagent/tests/continuation.spec.ts packages/subagent/subagent/tests/control.spec.ts packages/subagent/tool-subagent-control/tests/tool-subagent-control.spec.ts packages/experimental/agent-team/tests/team.spec.ts packages/experimental/agent-team-profile/tests/profile.spec.ts packages/shell/tool-pwsh/tests/tools.spec.ts
+
+pnpm exec vitest run packages/api/session-controller/tests/queue-store.client.spec.ts packages/api/session-controller/tests/transport.client.spec.ts packages/client/ui-conversation/tests/queue-dock.client.spec.tsx
+
+pnpm exec vitest run --config vitest.web.config.ts apps/web/tests/subagent-interrupt.e2e.ts
 ```
 
 Windows 的 Bash suite 被官方 Vitest 配置排除；它需要 Linux/macOS lane 或专门的 POSIX shell 环境，不能以 PowerShell mirror 结果冒充 Bash 实测。
@@ -358,4 +364,4 @@ git status --short --branch
 
 ## Dev Note
 
-本文是 fork-local 维护参考，不属于 DeepSeek 官方文档网站，也不承诺当前 `upstream/master` 的版本号长期不变。每次上游合并、插件替换、默认值变化、外置 profile 变化或在制 Queue API 提交后，维护者必须在同一提交中更新本文；若某项被官方等价替代，应记录替代 owner 与验证，然后删除本 fork 的重复实现。
+本文是 fork-local 维护参考，不属于 DeepSeek 官方文档网站，也不承诺当前 `upstream/master` 的版本号长期不变。每次上游合并、插件替换、默认值变化、外置 profile 变化或 Queue API 行为变化后，维护者必须在同一提交中更新本文；若某项被官方等价替代，应记录替代 owner 与验证，然后删除本 fork 的重复实现。

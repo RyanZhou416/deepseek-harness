@@ -133,21 +133,23 @@ persisted Session
 
 `SubagentRuntime.startContinuable()` 会预留稳定的子 agent id，对版本化的 `subagent/descriptor` payload 建立快照，向指定提供方索取其分离的 `ContinuableCreateSpec`，通过私有的 activation-owner 作用域创建子 Agent，建立任何可继续父级的所有权，并提交初始提示词。当收件箱（inbox）准入产出消息 id 时，它以 `{ childId, messageId }` resolve——无需等待轮次开始，也无需等待消息进入会话日志。在该准入之前的任何失败都会以两个 id 都不返回的方式 reject，并 dispose（资源释放）任何已创建的 handle，回滚 Activation 与父级所有权。
 
-`SubagentRuntime.followup()` 是唯一的继续执行消息操作，其路由仅取决于 Activation 的驻留状态：
+`SubagentRuntime.followup()` 与 `steer()` 是两种继续执行消息操作。二者使用同一套驻留路由，区别仅在于已接受消息进入哪个 inbox 边界：
 
-| Activation 状态 | `followup` |
-|---|---|
-| `running` | 在同一 Activation 中入队 |
-| `waiting` | 唤醒同一 Activation |
-| 无 Activation | 冷恢复一个新的 Activation |
+| Activation 状态 | `followup` | `steer` |
+|---|---|---|
+| `running` | 入队为后续 FIFO 轮次 | 在最近 step 边界进入 |
+| `waiting` | 唤醒同一 Activation | 唤醒同一 Activation |
+| 无 Activation | 冷恢复一个新的 Activation | 冷恢复一个新的 Activation |
 
 `running` 表示 Agent 拥有活跃的准入或轮次，或正在唤醒收件箱工作；`waiting` 表示它已完全停稳，但仍拥有至少一个尚未完成 dispose 的子 Activation；`settled` 表示已完全停稳且其拥有的每个子级都已 dispose，此时管理器会 dispose [`AgentHandle`](core.zh.md#creation-and-ownership) 并移除该 Activation。管理器根据 Agent 的完全停稳状态与其拥有的子级集合推导这些内部条件，而非维护第二套执行状态机。
 
-Agent 收件箱是唯一的队列。每条继续执行消息都会成为一个 `Agent.followup()` FIFO 轮次，因此已接受的消息共享同一个可观测顺序，且后续消息无法改变已在进行中的轮次。投递成功会返回被接受的 `MessageId`；既有的 `agent/inbox/inserted`、`agent/inbox/claimed` 与 `agent/inbox/discarded` 事件仍是消息生命周期的观测点，继续执行层不定义任何 subagent 专属的投递路由。
+Agent 收件箱是唯一的队列。Follow-up 进入 `nextTurn`；steering 进入 `nextStep`，并等待当前模型请求或工具调用结束，而不是取消它。投递成功会返回被接受的 `MessageId`；既有的 `agent/inbox/inserted`、`agent/inbox/claimed` 与 `agent/inbox/discarded` 事件仍是消息生命周期的观测点。
 
-后续操作的权限来自确切的在线 Agent 工具上下文。已认证的 Agent 必须是持久化子 agent 在 `SessionHeader.parentSession` 中记录的直接父级。`MessageSource` 与 `senderSessionId` 记录谁提供了已准入的消息，但不授予任何权限；可选的面向模型工具使用 `CoordinatorMessageSource`。
+在持久化直接父级地址下，`updateQueuedByParent()` 可以编辑或删除在线 continuable child 的一个确切待处理 `nextTurn` occurrence；steering 还要求 child 正在运行，并把该 occurrence 移到 `nextStep`。编辑会保留消息 identity 与 source，且只接受文本内容。这些队列修改不会冷恢复 inactive child，one-shot child 仍保持只读。
 
-对于这两种操作，调用方 signal 仅在收件箱接受之前掌管查找、物化与准入。此后管理器独立掌管该 Activation：之后的调用方取消既不会取消已接受的轮次，也不会 dispose 子 agent，并且该 seam 不对外暴露任何 steering（中途引导）操作。
+投递权限来自确切的在线 Agent 工具上下文。已认证的 Agent 必须是持久化子 agent 在 `SessionHeader.parentSession` 中记录的直接父级。`MessageSource` 与 `senderSessionId` 记录谁提供了已准入的消息，但不授予任何权限；可选的面向模型工具使用 `CoordinatorMessageSource`。
+
+对于 follow-up 与 steering，调用方 signal 仅在收件箱接受之前掌管查找、物化与准入。此后管理器独立掌管该 Activation：之后的调用方取消既不会取消已接受的消息，也不会 dispose 子 agent。
 
 `SubagentRuntime.interrupt(targetSessionId, authority)` 是唯一的公开停止操作：它同步完成鉴权，对在线目标发出 `Agent.cancel(cause, { keepInbox: true })`，然后不等待完全停稳即返回。Activation、其尚未领取的待处理 inbox 工作与已发布的后代均不受影响；已被领取进入中断轮次的工作不会重新入队。被中断的 driver 进入 idle 后，一次唤醒发送会恢复被暂停的 FIFO 队列。不存在的目标——未知、一次性或已结算——以及未绑定管理器的组合是被接受的 no-op。对在线目标，错误的 parent 地址或不在其在线祖先链中的调用方会以 `UNAUTHORIZED` 拒绝；陈旧的 ancestor 对象和指向自身的 ancestor 请求会在查找目标前拒绝。
 
@@ -699,18 +701,19 @@ listDescendants(rootSessionId: SessionId, signal?: AbortSignal): Promise<Subagen
 @Remote('prompt') async prompt(request: SubagentPromptRequest, signal: AbortSignal): Promise<SubagentPromptReceipt>
 
 /**
- * Promote one browser-selected child queue occurrence to next-step steering
- * under its durable direct-parent address. The target must have a live,
- * running Activation; this operation neither resumes an inactive child nor
- * requires the parent Agent to be live.
- * @param request - durable parent/child address and pending message identity.
+ * Edit, remove, or steer one browser-selected child queue occurrence under
+ * its durable direct-parent address. The target must have a live Activation;
+ * steering additionally requires it to be running. This operation neither
+ * resumes an inactive child nor requires the parent Agent to be live.
+ * @param request - durable parent/child address, pending message identity, and mutation.
  * @param signal - carrier cancellation before the inbox move commits.
- * @returns acknowledgement that the occurrence moved to next-step steering.
+ * @returns acknowledgement that the selected mutation committed.
  * @throws {RemoteError} `gateway/bad-request`, `gateway/cancelled`,
- *   `subagent/unauthorized`, `subagent/queue-item-not-found`,
+ *   `subagent/attachment-unsupported`, `subagent/unauthorized`,
+ *   `subagent/queue-item-not-found`, `subagent/delivery-unavailable`,
  *   `subagent/steer-unavailable`, or `gateway/internal`.
  */
-@Remote('steerQueuedByParent') async steerQueuedByParent( request: SubagentQueueSteerRequest, signal: AbortSignal, ): Promise<SubagentQueueSteerReceipt>
+@Remote('updateQueuedByParent') async updateQueuedByParent( request: SubagentQueueUpdateRequest, signal: AbortSignal, ): Promise<SubagentQueueUpdateReceipt>
 
 /**
  * Remote face of {@link interrupt} under one durable parent address. No

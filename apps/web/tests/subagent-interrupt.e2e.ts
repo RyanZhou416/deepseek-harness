@@ -1,9 +1,8 @@
 // Web e2e scenario (browserless): the subagents interrupt Remote against the real
 // composition. A live continuable child holds its model turn open through a
-// replay hang entry; plain HTTP queues a follow-up, interrupts the turn, and
-// proves from the real session state that the turn aborted, the follow-up
-// parked without auto-starting a new turn, and a later waking send resumed the
-// preserved FIFO order. No browser: the RPC surface is the product surface
+// replay hang entry; plain HTTP queues three follow-ups, edits one, removes
+// one, steers one, interrupts the turn, and proves the retained inbox resumes
+// in its selected order. No browser: the RPC surface is the product surface
 // under test, and subagent-interrupt-ui.e2e.ts owns the composer interaction.
 import { randomUUID } from 'node:crypto'
 import { existsSync } from 'node:fs'
@@ -17,7 +16,10 @@ import { launchWebScaffold, webSnapshotMode, type WebScaffold } from './scaffold
 
 const MODE = webSnapshotMode()
 const INITIAL = 'Explain event sourcing in one sentence.'
-const FOLLOWUP = 'Now give the same explanation to a human reader.'
+const EDIT = 'Rewrite this queued explanation.'
+const EDITED = 'Give the same explanation to a human reader.'
+const REMOVE = 'Discard this queued explanation.'
+const STEER = 'Prioritize the concise explanation.'
 const WAKING = 'And add one concrete example.'
 
 type RpcResult<T> = { ok: true; value: T } | { ok: false; error: { code: string; message: string } }
@@ -81,7 +83,7 @@ describe.skipIf(MODE === 'record')('web e2e: subagents/interruptByParent over th
     sidecarRoot = await mkdtemp(join(tmpdir(), 'dsh-web-subagent-interrupt-'))
     readyFile = join(sidecarRoot, 'hang-ready')
     // Whole-script replacement: the child's three model calls are the hang
-    // (turn 1, interrupted), the parked follow-up's turn, and the waking turn.
+    // (turn 1, interrupted), the steered-plus-edited turn, and the waking turn.
     // The parent never runs a turn, so the child claims this primary script.
     await writeFile(join(sidecarRoot, 'replay.override.json'), JSON.stringify([
       { kind: 'hang', readyFile },
@@ -128,18 +130,43 @@ describe.skipIf(MODE === 'record')('web e2e: subagents/interruptByParent over th
     if (failures.length > 1) throw new AggregateError(failures, 'subagent interrupt teardown failed')
   })
 
-  it('parks a queued follow-up on interrupt and resumes it FIFO on a waking send', async () => {
-    // Queue the follow-up while the turn is still open, then interrupt.
-    const queued = await remote<{ messageId: string }>(scaffold, 'subagents/prompt', {
-      request: {
-        requestId: randomUUID(),
-        parentSessionId: parentId,
-        childSessionId: childId,
-        mode: 'continuable',
-        content: [{ type: 'text', text: FOLLOWUP }],
+  it('edits, removes, and steers exact child queue rows before resuming', async () => {
+    const queue = async (text: string): Promise<string> => {
+      const result = await remote<{ messageId: string }>(scaffold, 'subagents/prompt', {
+        request: {
+          requestId: randomUUID(),
+          parentSessionId: parentId,
+          childSessionId: childId,
+          mode: 'continuable',
+          content: [{ type: 'text', text }],
+        },
+      })
+      if (!result.ok) throw new Error(`subagents.prompt failed: ${result.error.code}`)
+      return result.value.messageId
+    }
+    const editId = await queue(EDIT)
+    const removeId = await queue(REMOVE)
+    const steerId = await queue(STEER)
+    const update = (itemId: string, action: object) => remote<{ accepted: true }>(
+      scaffold,
+      'subagents/updateQueuedByParent',
+      {
+        request: {
+          parentSessionId: parentId,
+          childSessionId: childId,
+          mode: 'continuable',
+          itemId,
+          action,
+        },
       },
-    })
-    expect(queued).toMatchObject({ ok: true })
+    )
+    await expect(update(editId, {
+      kind: 'edit', content: [{ type: 'text', text: EDITED }],
+    })).resolves.toMatchObject({ ok: true, value: { accepted: true } })
+    await expect(update(removeId, { kind: 'remove' }))
+      .resolves.toMatchObject({ ok: true, value: { accepted: true } })
+    await expect(update(steerId, { kind: 'steer' }))
+      .resolves.toMatchObject({ ok: true, value: { accepted: true } })
 
     const settled = scaffold.whenTurnSettled()
     const interrupted = await remote<{ accepted: true }>(scaffold, 'subagents/interruptByParent', {
@@ -152,18 +179,19 @@ describe.skipIf(MODE === 'record')('web e2e: subagents/interruptByParent over th
     // aborted turn/end (the composition's first turn/end) before asserting.
     expect(await settled).toBe(childId)
 
-    // Parked, not resumed: the Activation stays resident with an idle driver,
-    // the follow-up is retained, and no second turn opened.
+    // Parked, not resumed: the Activation retains one edited FIFO item and one
+    // steering item, while the removed occurrence stays canceled.
     const child = scaffold.ctx.agents.get(childId)
     expect(child).toBeDefined()
     expect(child!.status).toBe('idle')
     expect(child!.inbox.nextTurn).toHaveLength(1)
+    expect(child!.inbox.nextStep).toHaveLength(1)
     expect(child!.session.events.filter(event => event.type === 'turn/start')).toHaveLength(1)
     const lastEnd = child!.session.events.filter(event => event.type === 'turn/end').at(-1)
     expect((lastEnd)?.data.reason.kind).toBe('aborted')
 
-    // Only an explicit waking send resumes the parked queue, FIFO, then the
-    // child runs both turns to completion and settles.
+    // Only an explicit waking send resumes the parked inbox. The next request
+    // claims steering before the edited FIFO item, then the waking turn runs.
     const waking = await remote<{ messageId: string }>(scaffold, 'subagents/prompt', {
       request: {
         requestId: randomUUID(),
@@ -183,7 +211,9 @@ describe.skipIf(MODE === 'record')('web e2e: subagents/interruptByParent over th
       && event.data.source.kind === 'user'
       ? event.data.content.flatMap(block => block.type === 'text' ? [block.text] : [])
       : [])
-    expect(userTexts).toEqual([INITIAL, FOLLOWUP, WAKING])
+    expect(userTexts).toEqual([INITIAL, STEER, EDITED, WAKING])
+    expect(userTexts).not.toContain(EDIT)
+    expect(userTexts).not.toContain(REMOVE)
     const turnEndKinds = loaded.events
       .filter(event => event.type === 'turn/end')
       .map(event => (event).data.reason.kind)

@@ -31,9 +31,9 @@ import type {
   AgentSetupCommit,
   CreateAgentOptions,
 } from '@deepseek-ai/dsh-agent'
-import { ReasoningEffortId, boundContextSummary, createUserMessage, errorChain } from '@deepseek-ai/dsh-llm'
+import { ReasoningEffortId, boundContextSummary, createUserMessage, errorChain, freezeMessage } from '@deepseek-ai/dsh-llm'
 import type { ContentBlock, MessageId, MessageSource } from '@deepseek-ai/dsh-llm'
-import type { SessionEvent, SessionId } from '@deepseek-ai/dsh-session'
+import type { SessionEvent, SessionId, UserMessage } from '@deepseek-ai/dsh-session'
 import type { SessionPersistence } from '@deepseek-ai/dsh-session-persistence'
 import type { SessionObservation, SessionQueryEngine } from '@deepseek-ai/dsh-session-query'
 import type { ToolRestriction } from '@deepseek-ai/dsh-tools'
@@ -54,6 +54,7 @@ import type { ContinuableCreateRequest, ContinuableCreateSpec, SubagentResult, S
 import type { ActivationObserver, ActivationTerminal } from './lifecycle.ts'
 import { SubagentError } from './error.ts'
 import type SubagentActivationSetupRegistry from './activation-setup-registry.ts'
+import type { SubagentQueueAction } from './control-types.ts'
 
 /** Attribution for a model coordinator's follow-up to one of its children. */
 export interface CoordinatorMessageSource {
@@ -158,8 +159,8 @@ export interface SubagentFollowupOptions {
 /** Child inbox boundary selected by one continuable delivery. */
 type ContinuableDelivery = 'next-turn' | 'next-step'
 
-/** Result of promoting one durable child queue occurrence under its parent address. */
-export type SubagentPendingSteerOutcome = 'steered' | 'not-found' | 'unavailable'
+/** Result of mutating one durable child queue occurrence under its parent address. */
+export type SubagentPendingQueueOutcome = 'updated' | 'not-found' | 'unavailable'
 
 /**
  * The residency state of one continuable child, derived from Agent quiescence
@@ -571,29 +572,30 @@ export class SubagentContinuationManager {
   }
 
   /**
-   * Promote one still-pending FIFO turn into next-step steering under the
-   * child's durable direct-parent address. The operation never materializes an
-   * inactive child: only a running Agent has a current step to steer.
+   * Edit, remove, or steer one still-pending FIFO turn under the child's
+   * durable direct-parent address. The operation never materializes an
+   * inactive child; steering additionally requires a running Agent.
    * @param childId - durable continuable child identity.
    * @param parentSessionId - direct parent address authorizing the operation.
    * @param messageId - pending next-turn occurrence to promote.
    * @param signal - caller cancellation before the synchronous inbox move.
-   * @returns whether the occurrence moved, disappeared, or cannot currently steer.
+   * @param action - exact mutation to apply to the pending occurrence.
+   * @returns whether the occurrence changed, disappeared, or cannot currently mutate.
    * @throws {SubagentError} `UNAUTHORIZED` when the address does not own the live child.
    */
-  async steerPendingByParent(
+  async updatePendingByParent(
     childId: SessionId,
     parentSessionId: SessionId,
     messageId: MessageId,
+    action: SubagentQueueAction,
     signal: AbortSignal,
-  ): Promise<SubagentPendingSteerOutcome> {
+  ): Promise<SubagentPendingQueueOutcome> {
     signal.throwIfAborted()
-    return this.locks.run<SubagentPendingSteerOutcome>(childId, () => {
+    return this.locks.run<SubagentPendingQueueOutcome>(childId, () => {
       signal.throwIfAborted()
       if (this.draining) return Promise.resolve('unavailable')
       const activation = this.activations.get(childId)
-      if (activation === undefined || activation.disposal !== undefined
-        || activation.handle.agent.status !== 'running') return Promise.resolve('unavailable')
+      if (activation === undefined || activation.disposal !== undefined) return Promise.resolve('unavailable')
       if (activation.handle.agent.session.header.parentSession !== parentSessionId) {
         throw new SubagentError(
           `subagent "${childId}" belongs to another parent session`,
@@ -603,12 +605,30 @@ export class SubagentContinuationManager {
       const message = activation.handle.agent.inbox.nextTurn
         .find(candidate => candidate.id === messageId)
       if (message === undefined) return Promise.resolve('not-found')
-      /* v8 ignore next -- the child lock and same synchronous span keep the located occurrence pending. */
-      if (!activation.handle.agent.inbox.remove(messageId)) return Promise.resolve('not-found')
-      this.admitWaking(activation, message.id, () => {
-        activation.handle.agent.steer(message)
-      })
-      return Promise.resolve('steered')
+      if (action.kind === 'steer' && activation.handle.agent.status !== 'running') {
+        return Promise.resolve('unavailable')
+      }
+      if (action.kind === 'edit') {
+        const wasAccepted = activation.accepted.has(messageId)
+        /* v8 ignore next -- the child lock and same synchronous span keep the located occurrence pending. */
+        if (!activation.handle.agent.inbox.replace(messageId, freezeMessage<UserMessage>({
+          ...message,
+          content: [...action.content],
+        }))) return Promise.resolve('not-found')
+        // Inbox.replace publishes discard + insert for the same durable id.
+        // Restore this manager's accepted reservation before the settlement
+        // watcher can observe the idle Activation in its next microtask.
+        if (wasAccepted) activation.accepted.add(messageId)
+      } else {
+        /* v8 ignore next -- the child lock and same synchronous span keep the located occurrence pending. */
+        if (!activation.handle.agent.inbox.remove(messageId)) return Promise.resolve('not-found')
+        if (action.kind === 'steer') {
+          this.admitWaking(activation, message.id, () => {
+            activation.handle.agent.steer(message)
+          })
+        }
+      }
+      return Promise.resolve('updated')
     })
   }
 

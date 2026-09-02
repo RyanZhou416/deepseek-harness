@@ -48,7 +48,7 @@ One-shot children run once and settle with a single result, plus an optional str
 
 ### Following up, interrupting, and discovering
 
-Continuable children answer FIFO follow-ups as later turns or accept steering at the nearest step boundary. The parent can interrupt a running turn or list its children at any time. A browser viewing a running continuable child may promote one exact pending next-turn message to next-step steering under the durable direct-parent address; inactive and one-shot children remain read-only. Discovery covers both shapes: the service lists direct children and the full descendant tree — mode, activity, and lineage — reading live session state and optional persistence, without loading any child.
+Continuable children answer FIFO follow-ups as later turns or accept steering at the nearest step boundary. The parent can interrupt a running turn or list its children at any time. A browser viewing a live continuable child may edit or remove one exact pending next-turn message under the durable direct-parent address; a running child also permits promotion to next-step steering. Inactive and one-shot children remain read-only. Discovery covers both shapes: the service lists direct children and the full descendant tree — mode, activity, and lineage — reading live session state and optional persistence, without loading any child.
 
 ### Failure and recovery
 
