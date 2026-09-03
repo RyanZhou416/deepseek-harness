@@ -4,7 +4,7 @@
 
 本文是 `RyanZhou416/deepseek-harness` 的 fork 维护真源，记录官方仓库之外仍需保留的源码行为、启动脚本、外置 DSH_HOME、插件补丁、会话数据红线、合并流程和验证入口。上游合并或插件升级不得只按文件覆盖；维护者必须逐项证明某个 fork 行为已由上游等价实现，才能删除对应代码、配置和测试。
 
-本文描述当前 `master` 的已提交源码行为与 2026-09-02 审计到的仓库外运行层。具体发布 SHA 以 `git rev-parse origin/master` 为准；任何尚未提交的工作树文件都不属于同事可取得的发布基线。
+本文描述当前 `master` 的已提交源码行为与 2026-09-04 审计到的仓库外运行层。具体发布 SHA 以 `git rev-parse origin/master` 为准；任何尚未提交的工作树文件都不属于同事可取得的发布基线。
 
 ## Contents
 
@@ -28,18 +28,18 @@
 |---|---|---|
 | Fork remote | `origin = https://github.com/RyanZhou416/deepseek-harness.git` | 唯一常规推送目标 |
 | Official remote | `upstream = https://github.com/deepseek-ai/deepseek-harness.git` | 只用于 fetch 和合并官方 release tag |
-| Published fork | `master = origin/master = eb0cbabe39` | 当前运行中的 alpha.2 fork、16 GiB Windows Host 与 continuable-subagent Queue edit/remove/steer 基线 |
+| Published fork | `master = origin/master` | `dsh-v0.1.2-rc.1` 官方结构、16 GiB Windows Host、长任务保护与 continuable-subagent Queue edit/remove/steer 基线；精确 SHA 用 Git 查询，避免文档自引用失真 |
 | Pre-Queue behavior anchor | `7b86d0a01b` | Queue 仅支持 steer 时的历史定位点，不是当前发布基线 |
 | Alpha.2 integration | `133c48c733` / `origin/integrate/upstream-alpha2` | 长任务、AgentTeams 和 transient retention 整合提交 |
-| Official merge | `e481d7cb31` | 合并 `dsh-v0.1.2-alpha.2` (`0a53fb55be`) |
+| Alpha.2 official merge | `e481d7cb31` | 合并 `dsh-v0.1.2-alpha.2` (`0a53fb55be`) |
 | Pre-alpha.2 WIP backup | `origin/backup/wip-before-alpha2-20260831 = f1c600d51e` | 逐文件恢复证据；它是 sibling，禁止用它 reset 当前 master |
 | Older local backup | `backup/pre-upstream-0.1.2-alpha.1-20260829 = 595cd48136` | alpha.1 前的本地证据 |
 | Integration worktree | `C:\Project\deepseek-harness-alpha2-integration` at `133c48c733` | alpha.2 整合留档，不是当前运行目录 |
 | Pre-RC.1 backup | `origin/backup/pre-upstream-rc1-20260904 = eb0cbabe39` | RC.1 整合前已推送的完整 fork 恢复点 |
-| RC.1 integration | `integrate/upstream-rc1`, worktree `C:\Project\deepseek-harness-rc1-integration` | 官方 merge checkpoint `646dffed9f`，fork 行为正在独立 worktree 移植 |
+| RC.1 integration | `integrate/upstream-rc1`, worktree `C:\Project\deepseek-harness-rc1-integration` | 已完成：官方 merge `646dffed9f`、fork 行为移植 `a19e092544`、生成物与类型修正验证 `42aec50270` |
 | Current official target | `dsh-v0.1.2-rc.1 = a66e470204` on 2026-09-04 | 精确不可变 tag；不要改合并已越过该 tag 的 rolling `upstream/master` |
 
-已发布 `master` 的兼容基线仍是 alpha.2；RC.1 整合只发生在独立 worktree。RC.1 已重构 Session indexed reads、Tool 展开懒计算、相邻 Agent messaging、Chat/Conversation/Trajectory 性能和连接容错；integration 先采用这些官方机制，再按本文的行为与测试补回仍缺失部分，禁止整体 cherry-pick alpha.2 旧文件。
+当前维护的 `master` 兼容基线是 RC.1。整合采用 RC.1 重构后的 Session indexed reads、Tool 展开懒计算、相邻 Agent messaging、Chat/Conversation/Trajectory 性能和连接容错，再按本文的行为与测试补回仍缺失部分；后续合并仍禁止整体 cherry-pick alpha.2 旧文件。
 
 RC.1 的物理 JSONL `seedLength` 仍可由 decoder 兼容，`SESSION_FORMAT_VERSION` 仍为 `0`；逻辑 `SessionHeader` 已从 `seedLength` 演进到 `isSeeded`，并引入 branded `SessionSeq` / `SessionLogOffset`。RC.1 还兼容 v3/v4/v5 projection cache，并对无法解析的单条派生缓存执行 backup-and-skip。第三方插件和本地 AgentTeams 包即使磁盘数据可读，也必须重新构建并在隔离 profile 验证逻辑 API。
 
@@ -201,9 +201,9 @@ Web profile 插入 `memory-watchdog.cjs`：250 ms 采样、60 s 日志、heap ra
 | `dshmarket` | `1.38.1` | Enabled | RC.1 隔离 profile 精确升级到 `1.41.0`；停机冷启动，保持 `allowRestart:false` |
 | `@nanmicoder/dsh-agent-teams` | `0.1.14-dsh012.4` local tgz | Enabled | 禁止被 npm latest 直接覆盖，见下一节 |
 | `dsh-plugin-subscriptions` | `0.5.3` | Installed, disabled | RC.1 隔离 profile 精确升级 `0.6.0` 后仍先禁用；首次启用显式收紧 `rateLimit.wait` |
-| `@vlln/dsh-task-status` | `0.3.1` | Installed, disabled | 用户已批准删除；当前 live profile 只在停机切换时移除，RC.1 profile 不得携带 |
+| `@vlln/dsh-task-status` | Removed | Not installed | 2026-09-04 已从依赖、bundle、patch、lockfile 和 `node_modules` 删除；RC.1 profile 不得恢复 |
 | `dsh-context` | `0.37.0` | Installed, disabled | RC.1 隔离 profile 精确升级 `0.41.3`；该版已改为按需 header content并有 RC.1 compatibility matrix |
-| `dsh-shell-command` | Not installed | Commented configuration only | 用户已批准删除残留注释；RC.1 profile 不安装，当前 live patch 只在停机切换时清理 |
+| `dsh-shell-command` | Removed | No package or configuration | 2026-09-04 已删除残留注释；RC.1 profile 不安装 |
 | `@deepseek-ai/dsh-subagent-dsh-sdk` | Link to source checkout | Enabled for process provider | 跟随源码构建，worker 数据与主 sessions 隔离 |
 
 当前 live profile 的 `minimumReleaseAgeExclude` 只允许精确版本：`dsh-plugin-subscriptions@0.5.3`、`dsh-context@0.37.0`、`dshmarket@1.36.0`、`dshmarket@1.38.1`。RC.1 隔离升级若被 release-age 阻止，只可为已审计的 `dsh-plugin-subscriptions@0.6.0`、`dsh-context@0.41.3`、`dshmarket@1.41.0` 增加精确项；禁止 wildcard，也禁止未经审计的 `pnpm update --latest`。
@@ -236,11 +236,11 @@ Preset 位于 `.agent-presets\chatgpt-dsh`。`no-escalation.cjs` 从 pwsh/write/
 
 Profile 注册 `dsh-sdk-process-raw` 和 `subagent_process`：SDK profile、独立 `dshHome=C:/Project/deepseek-harness-data/process-workers`、`deepseek-official/deepseek-v4-flash`、`maxTokens=65536`、每 worker 4096 MiB heap、one-shot、非 background、`maxDepth=provider-managed`。主 profile 不施加额外固定 Agent 并发上限，worker sessions 不进入主 `sessions`。
 
-已知遗留风险：`process-workers\profiles\sdk\cordis.patch.yml` 仍引用主仓已经删除的旧 `memory-admission`，对应 node_modules junction 已失效。下一次实际启用或重新物化 worker profile 前必须删除/适配这条 stale row 并做隔离验证；禁止为了修它把固定 Agent concurrency package 加回主仓。
+`process-workers\profiles\sdk\cordis.patch.yml` 中失效的旧 `memory-admission` row 已于 2026-09-04 删除；`local-memory-watchdog` 和其余 worker 配置保留。后续不得为了 worker profile 再把固定 Agent concurrency package 加回主仓。
 
 ### Diagnostics
 
-`diagnostics\memory-watchdog.ndjson`、`supervisor.log` 和 Node reports 是故障证据。旧 supervisor 行可能记录历史 restart，不能用旧行判断当前行为；当前脚本的新行以 `restart=disabled` 为准。日志当前没有自动轮转，维护者只能针对已确认的具体文件人工归档，禁止对 DSH_HOME 运行宽泛递归清理。
+`diagnostics\memory-watchdog.ndjson`、`supervisor.log` 和 Node reports 是故障证据。旧 supervisor 行可能记录历史 restart，不能用旧行判断当前行为；当前脚本的新行以 `restart=disabled` 为准。日志当前没有自动轮转，维护者只能针对已确认的具体文件人工归档，禁止对 DSH_HOME 运行宽泛递归清理。RC.1 profile 清理前的五个配置文件及 SHA-256 基线保存在 `diagnostics\profile-backups\pre-rc1-20260904-015259`，不含 Session 或附件。
 
 `diagnostics\deleted-*-artifacts-*` 与 `validation-web-full-partial-node-modules-*` 是上游删除包的可恢复构建残留，不是 Session。清理前仍需解析绝对路径并与 sessions/attachments/storages 分离。
 
@@ -325,6 +325,7 @@ Windows 的 Bash suite 被官方 Vitest 配置排除；它需要 Linux/macOS lan
 
 ```powershell
 pnpm run verify-config-catalog
+pnpm run verify-cordis-catalog
 pnpm run verify-cordis-api
 pnpm run verify-tool-catalog
 pnpm run verify-translation-pairing
@@ -356,7 +357,7 @@ git status --short --branch
 - 第一次不同的 broad SQLite query 仍可能同步占用一个 Host thread。
 - Watchdog 是最后一道优雅停机保护，不是 steady-state 回收机制，也不保证十小时高并发绝不退出。
 - `run.command` 没有 Windows `run.cmd` 的 16 GiB heap 设置。
-- Process-worker SDK profile 的 stale `memory-admission` row 必须在 RC.1 切换时删除；不得用其他固定 Agent 并发限制替代。
+- Process-worker SDK profile 的 stale `memory-admission` row 已删除；不得用其他固定 Agent 并发限制替代。
 - Local AgentTeams `.4` 需要以 RC.1 API 重建，并吸收官方 0.1.15 route authentication 和 post-release failure handling，同时保留本地 nearest-step delivery、retired-member guard 与 cold-captain mailbox；在完成前禁止切换真实 profile。
 - Diagnostics 目前没有自动轮转，长期运行后需按具体文件人工归档。
 
