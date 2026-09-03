@@ -4,6 +4,18 @@
 
 此目录存放必须与本 fork 的 DSH API 同步适配、并随 fork 一起分发的插件源码。它与官方 `packages/` 目录分离，避免常规 DSH 上游合并把第三方插件误当成官方 workspace package，也把未来冲突限制在 `fork-plugins/` 内。
 
+## macOS profile setup
+
+`build.command` 成功后，`setup.command` 会校验并把当前 Agent Teams 与 Context 产物安装到接收 Mac 的 `web` profile，并应用 Context 低开销 bounds。它不会导入其他机器的运行数据，且只备份可能被改动的四个本机 profile 配置文件；可以先在零写入情况下查看精确动作：
+
+```sh
+./setup.command --dry-run
+./setup.command
+./run.command
+```
+
+该 setup 会刻意省略 marketplace 插件、subscriptions、watchdog、自定义 preset 和 process-worker profile。这些可选运行时选择由每台机器单独管理。
+
 ## Agent Teams
 
 - 源码：`fork-plugins/dsh-agent-teams`

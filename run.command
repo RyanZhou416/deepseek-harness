@@ -5,23 +5,13 @@ set -eu
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 cd "$SCRIPT_DIR"
 
-DSH_NODE_BIN_DIR=/usr/local/bin
-if [ ! -x "$DSH_NODE_BIN_DIR/node" ] || [ ! -x "$DSH_NODE_BIN_DIR/corepack" ]; then
-  printf '%s\n' "Node.js and Corepack were not found in $DSH_NODE_BIN_DIR" >&2
+DSH_MACOS_RUNTIME_HELPER=$SCRIPT_DIR/scripts/fork-macos-runtime.sh
+if [ ! -r "$DSH_MACOS_RUNTIME_HELPER" ]; then
+  printf '%s\n' "ERROR: Missing macOS runtime helper $DSH_MACOS_RUNTIME_HELPER." >&2
   exit 1
 fi
-PATH=$DSH_NODE_BIN_DIR:$PATH
-export PATH
-
-COREPACK_NPM_REGISTRY=${COREPACK_NPM_REGISTRY:-https://registry.npmmirror.com}
-npm_config_registry=${npm_config_registry:-$COREPACK_NPM_REGISTRY}
-export COREPACK_NPM_REGISTRY npm_config_registry
-
-DSH_COREPACK_SHIMS=${TMPDIR:-/tmp}/dsh-corepack-shims
-mkdir -p "$DSH_COREPACK_SHIMS"
-
-corepack enable pnpm --install-directory "$DSH_COREPACK_SHIMS"
-PATH=$DSH_COREPACK_SHIMS:$PATH
-export PATH
+. "$DSH_MACOS_RUNTIME_HELPER"
+dsh_prepare_macos_toolchain "$SCRIPT_DIR"
+dsh_prepare_macos_web_runtime
 
 pnpm dsh web

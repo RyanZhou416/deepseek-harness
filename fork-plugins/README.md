@@ -4,6 +4,18 @@ English | [中文](README.zh.md)
 
 This directory contains plugin sources that must track this fork's DSH APIs and ship with the fork. Keeping them outside the official `packages/` tree prevents routine upstream DSH merges from treating third-party plugins as official workspace packages and confines future conflicts to `fork-plugins/`.
 
+## macOS profile setup
+
+After `build.command` succeeds, `setup.command` verifies and installs the current Agent Teams and Context artifacts into the receiving Mac's `web` profile and applies the Context low-overhead bounds. It imports no other machine's runtime data and backs up only the four local profile configuration files it may change; inspect the exact actions without writing anything first:
+
+```sh
+./setup.command --dry-run
+./setup.command
+./run.command
+```
+
+The setup intentionally omits marketplace plugins, subscriptions, watchdogs, custom presets, and process-worker profiles. Each machine owns those optional runtime choices separately.
+
 ## Agent Teams
 
 - Source: `fork-plugins/dsh-agent-teams`

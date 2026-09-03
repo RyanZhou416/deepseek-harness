@@ -30,15 +30,15 @@
 | Official remote | `upstream = https://github.com/deepseek-ai/deepseek-harness.git` | 只用于 fetch 和合并官方 release tag |
 | Published fork | `master = origin/master` | `dsh-v0.1.2-rc.1` 官方结构、16 GiB Windows Host、长任务保护与 continuable-subagent Queue edit/remove/steer 基线；精确 SHA 用 Git 查询，避免文档自引用失真 |
 | Pre-Queue behavior anchor | `7b86d0a01b` | Queue 仅支持 steer 时的历史定位点，不是当前发布基线 |
-| Alpha.2 integration | `133c48c733` / `origin/integrate/upstream-alpha2` | 长任务、AgentTeams 和 transient retention 整合提交 |
+| Alpha.2 integration history | `133c48c733` | 长任务、AgentTeams 和 transient retention 的已合并历史锚点；集成分支已删除 |
 | Alpha.2 official merge | `e481d7cb31` | 合并 `dsh-v0.1.2-alpha.2` (`0a53fb55be`) |
 | Pre-alpha.2 WIP backup | `origin/backup/wip-before-alpha2-20260831 = f1c600d51e` | 逐文件恢复证据；它是 sibling，禁止用它 reset 当前 master |
-| Older local backup | `backup/pre-upstream-0.1.2-alpha.1-20260829 = 595cd48136` | alpha.1 前的本地证据 |
-| Integration worktree | `C:\Project\deepseek-harness-alpha2-integration` at `133c48c733` | alpha.2 整合留档，不是当前运行目录 |
-| Pre-RC.1 backup | `origin/backup/pre-upstream-rc1-20260904 = eb0cbabe39` | RC.1 整合前已推送的完整 fork 恢复点 |
-| RC.1 integration | `integrate/upstream-rc1`, worktree `C:\Project\deepseek-harness-rc1-integration` | 已完成：官方 merge `646dffed9f`、fork 行为移植 `a19e092544`、生成物与类型修正验证 `42aec50270` |
+| Older backup history | `595cd48136` | alpha.1 前的已合并恢复锚点；本地分支已删除 |
+| Pre-RC.1 backup history | `eb0cbabe39` | RC.1 整合前的已合并恢复锚点；远程分支已删除 |
+| RC.1 integration history | `646dffed9f` / `a19e092544` / `42aec50270` | 官方 merge、fork 行为移植与生成物修正已进入 `master`；集成分支和 worktree 已删除 |
 | Current official target | `dsh-v0.1.2-rc.1 = a66e470204` on 2026-09-04 | 精确不可变 tag；不要改合并已越过该 tag 的 rolling `upstream/master` |
 | AgentTeams subtree | `fork-plugins/dsh-agent-teams` | 上游 `main@232a338fc9` + PR #124 `098e4e97eb` + 本 fork RC.1 适配；subtree content commit `c1abf16c86` |
+| Context subtree | `fork-plugins/dsh-context` | 上游 `v0.41.3@dce08e0db3` + 本 fork 投影和关闭 modal 性能优化 |
 
 当前维护的 `master` 兼容基线是 RC.1。整合采用 RC.1 重构后的 Session indexed reads、Tool 展开懒计算、相邻 Agent messaging、Chat/Conversation/Trajectory 性能和连接容错，再按本文的行为与测试补回仍缺失部分；后续合并仍禁止整体 cherry-pick alpha.2 旧文件。
 
@@ -173,9 +173,11 @@ Private AgentTeams profile 显式强制 Bash/PowerShell 命令作为 owner-scope
 
 ### Local launch and build scripts
 
-仓库新增 [build.cmd](build.cmd)、[run.cmd](run.cmd)、[build.command](build.command) 与 [run.command](run.command)。Windows 脚本准备 Corepack/pnpm 和镜像 registry；`build.cmd` 执行 install + build，`run.cmd` 默认 `DSH_HOME=C:\Project\deepseek-harness-data`，创建 diagnostics，并追加 `--max-old-space-size=16384` 与 Node fatal/uncaught reports 后运行 Web profile。
+仓库包含 [build.cmd](build.cmd)、[run.cmd](run.cmd)、[build.command](build.command)、[run.command](run.command) 与 [setup.command](setup.command)。Windows 脚本准备 Corepack/pnpm 和镜像 registry；`build.cmd` 执行 install + build，`run.cmd` 默认 `DSH_HOME=C:\Project\deepseek-harness-data`，创建 diagnostics，并追加 `--max-old-space-size=16384` 与 Node fatal/uncaught reports 后运行 Web profile。
 
-macOS `.command` 脚本要求 `/usr/local/bin/node` 与 Corepack，设置镜像后执行 build 或 Web；它没有 16 GiB `NODE_OPTIONS`，也没有 Windows DSH_HOME 默认值。不要在文档或合并中声称两个平台启动策略完全相同。
+macOS 的 `build.command` 和 `run.command` 共用 `scripts/fork-macos-runtime.sh`。该 helper 从 `PATH`、Apple Silicon Homebrew 和 Intel Homebrew 路径查找 Node，拒绝不受支持的 Node 23，仅在私有临时目录安装固定 Corepack fallback，并使用仓库锁定的 pnpm。`run.command` 默认 `DSH_HOME=~/.dsh`，创建权限 `0700` 的 diagnostics，启用 Node fatal/uncaught reports，并把 V8 old-space 设为物理内存的一半且限制在 4–16 GiB；`DSH_MAX_OLD_SPACE_MIB` 可显式覆盖。它不会静默重启 Host。
+
+macOS 的 `setup.command` 是一次性显式 profile 安装入口。它校验并安装仓内 Agent Teams 和 Context tgz，为 Context 应用低开销 bounds，且只备份它可能改动的 profile 配置四文件。它不导入或修改另一台机器的 Session、附件、DSH credential store、projection cache 或 `.agent-teams`；`--dry-run` 不创建 Harness home 或 package-manager 目录。
 
 ### Derived files
 
@@ -203,11 +205,11 @@ Web profile 插入 `memory-watchdog.cjs`：250 ms 采样、60 s 日志、heap ra
 | `@nanmicoder/dsh-agent-teams` | `0.1.15-dsh012rc1.2` fork tgz | Enabled | 完整源码和可安装产物均随 fork 维护；禁止被 npm latest 直接覆盖，见下一节 |
 | `dsh-plugin-subscriptions` | `0.6.0` | Installed, disabled | RC.1 隔离启动通过；profile 固定 `rateLimit.wait:false`，后续单独启用验证真实账户 |
 | `@vlln/dsh-task-status` | Removed | Not installed | 2026-09-04 已从依赖、bundle、patch、lockfile 和 `node_modules` 删除；RC.1 profile 不得恢复 |
-| `dsh-context` | `0.41.3` | Installed, disabled | 官方 compatibility matrix 明确支持 RC.1，隔离启动通过；主 profile 首次稳定后再单独启用 |
+| `dsh-context` | `0.41.3-dsh012rc1.1` fork tgz | Enabled | profile 固定仓内 artifact，并使用 `300/60/100/400/100` 低开销 bounds；源码与回滚规则见 `fork-plugins/dsh-context/FORK_MAINTENANCE.md` |
 | `dsh-shell-command` | Removed | No package or configuration | 2026-09-04 已删除残留注释；RC.1 profile 不安装 |
 | `@deepseek-ai/dsh-subagent-dsh-sdk` | Link to source checkout | Enabled for process provider | 跟随源码构建，worker 数据与主 sessions 隔离 |
 
-当前 live profile 的 `minimumReleaseAgeExclude` 只允许三个已审计精确版本：`dsh-plugin-subscriptions@0.6.0`、`dsh-context@0.41.3`、`dshmarket@1.41.0`。禁止 wildcard，也禁止未经审计的 `pnpm update --latest`；AgentTeams 使用本地 `file:` tgz，不依赖 release-age 例外。
+当前 live profile 的 `minimumReleaseAgeExclude` 只允许两个已审计精确版本：`dsh-plugin-subscriptions@0.6.0` 和 `dshmarket@1.41.0`。禁止 wildcard，也禁止未经审计的 `pnpm update --latest`；AgentTeams 与 Context 使用本地 `file:` tgz，不依赖 release-age 例外。
 
 ### Local AgentTeams package
 
@@ -229,6 +231,14 @@ Web profile 插入 `memory-watchdog.cjs`：250 ms 采样、60 s 日志、heap ra
 `.local-plugins-src\...dsh012.2/.3/.4` 只是历史解包产物，不能再当维护源。以后用 `git subtree pull --prefix=fork-plugins/dsh-agent-teams https://github.com/NanmiCoder/dsh-agent-teams.git main --squash` 获取官方更新，再在 fork 内重放和验证上述行为；不得用 npm install 覆盖 subtree。
 
 官方 AgentTeams `0.1.15` 仍只原生支持 DSH alpha.2；本 fork 以 `main@232a338fc9`、未合并 PR #124 `098e4e97eb` 和历史 `.4` 行为生成 `0.1.15-dsh012rc1.2`。`.2` 还封住公共 `sendMessage()` 对 retired member 的冷恢复旁路，并消除活动面板每秒重读永久 mailbox 历史的热点。PR #119 是较旧的 alpha.4 双兼容方案，没有叠加。后续若 PR #124 或等价实现进入上游，先按行为测试去重，再提升 subtree 基线和私有版本；profile 始终安装 fork artifact。
+
+### Local Context package
+
+维护真源位于 `fork-plugins\dsh-context`，当前 profile 通过 `file:` 安装 `fork-plugins\releases\dsh-context-0.41.3-dsh012rc1.1.tgz`，SHA256 为 `C260E939F79A52AADC1626180DAA1E25E9119C29FE7E138C0CCFB3EC0E2DE3D4`。该版本保持 `contextTimeline` / `contextHeaders` projection key、wire schema、持久状态 schema、`stateVersion` 和 Session event 不变。
+
+本地优化包含 timeline fold 字段级 copy-on-write、dirty retention trim、恢复态首 view bounds clamp、Host-only 状态的引用稳定 wire view，以及关闭 `/context` modal 时的 projection/conversation 订阅释放。真实 profile 使用 `maxRequestSteps: 300`、`maxKeptTurns: 60`、`maxEvents: 100`、`maxNodes: 400` 和 `maxArchiveNodes: 100`。这些上限只缩小 Context 派生展示，不修改 Session 历史。
+
+更新时使用 `git subtree pull --prefix=fork-plugins/dsh-context https://github.com/bowenliang123/dsh-context.git <tag> --squash`，再逐项重放 `fork-plugins/dsh-context/FORK_MAINTENANCE.md` 所列行为。不得用 npm latest 直接覆盖真实 profile。
 
 ### ChatGPT subagent preset
 
@@ -372,7 +382,7 @@ corepack pnpm@11.7.0 verify
 - Host 的普通 Agent loop 仍主要运行在一个 Node event loop；process worker 是显式 one-shot 旁路，不是透明的全局多核调度。
 - 第一次不同的 broad SQLite query 仍可能同步占用一个 Host thread。
 - Watchdog 是最后一道优雅停机保护，不是 steady-state 回收机制，也不保证十小时高并发绝不退出。
-- `run.command` 没有 Windows `run.cmd` 的 16 GiB heap 设置。
+- macOS `run.command` 已具备自适应 4–16 GiB heap 与 Node reports，但不包含 Windows 外置 watchdog、safe supervisor、ChatGPT preset 或 process-worker profile；物理 macOS 冷启动仍是主机资格验证的必需步骤。
 - Process-worker SDK profile 的 stale `memory-admission` row 已删除；不得用其他固定 Agent 并发限制替代。
 - AgentTeams 已随 fork 维护，但 nearest-step 优化仍依赖 fork 的可选 symbol seam；在纯官方 RC.1 上会回退 FIFO Host Queue。每次 DSH 或 AgentTeams 上游更新都必须重新跑两条路径、退休成员和冷队长邮箱测试。
 - AgentTeams 的 append/claim/ack 仍会整份重写单个 mailbox JSONL；未读投影缓存已消除不变文件的每秒重读/解析，但超长高频写邮箱仍存在 O(N) 写放大。下一步只能在保持旧 JSONL 可读和归档历史完整的前提下优化。

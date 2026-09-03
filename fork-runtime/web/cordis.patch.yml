@@ -1,0 +1,8 @@
+- id: dsh-context
+  disabled: false
+  config:
+    maxRequestSteps: 300
+    maxKeptTurns: 60
+    maxEvents: 100
+    maxNodes: 400
+    maxArchiveNodes: 100
