@@ -1,3 +1,5 @@
+// DeepSeek Harness fork modification: allocation and projection-delivery optimizations. See ../../FORK_MAINTENANCE.md.
+
 /**
  * The context-timeline fold — replays a session's durable event log into the
  * per-request context-composition timeline.
@@ -149,6 +151,158 @@ export interface TimelineState {
   pendingShadowEventSeq?: number
 }
 
+const enum DirtyField {
+  Surface = 1,
+  Sums = 2,
+  Requests = 4,
+  Events = 8,
+  Archived = 16,
+  CallNames = 32,
+  Timing = 64,
+}
+
+/** One event's private copy-on-write state. */
+class TimelineDraft {
+  private next: TimelineState | undefined
+  private dirtyFields = 0
+
+  constructor(readonly base: TimelineState) {}
+
+  get current(): TimelineState {
+    return this.next ?? this.base
+  }
+
+  get changed(): boolean {
+    return this.next !== undefined
+  }
+
+  state(): TimelineState {
+    return this.next ??= { ...this.base }
+  }
+
+  isDirty(field: DirtyField): boolean {
+    return (this.dirtyFields & field) !== 0
+  }
+
+  surface(): SurfaceNode[] {
+    if (!this.isDirty(DirtyField.Surface)) {
+      this.state().surface = [...this.current.surface]
+      this.dirtyFields |= DirtyField.Surface
+    }
+    return this.current.surface
+  }
+
+  sums(): Record<Category, number> {
+    if (!this.isDirty(DirtyField.Sums)) {
+      this.state().sums = { ...this.current.sums }
+      this.dirtyFields |= DirtyField.Sums
+    }
+    return this.current.sums
+  }
+
+  requests(): RequestRecord[] {
+    if (!this.isDirty(DirtyField.Requests)) {
+      this.state().requests = [...this.current.requests]
+      this.dirtyFields |= DirtyField.Requests
+    }
+    return this.current.requests
+  }
+
+  replaceRequests(requests: RequestRecord[]): void {
+    this.state().requests = requests
+    this.dirtyFields |= DirtyField.Requests
+  }
+
+  events(): ContextEventRecord[] {
+    if (!this.isDirty(DirtyField.Events)) {
+      this.state().events = [...this.current.events]
+      this.dirtyFields |= DirtyField.Events
+    }
+    return this.current.events
+  }
+
+  replaceEvents(events: ContextEventRecord[]): void {
+    this.state().events = events
+    this.dirtyFields |= DirtyField.Events
+  }
+
+  archived(): SurfaceNode[] {
+    if (!this.isDirty(DirtyField.Archived)) {
+      this.state().archived = [...this.current.archived]
+      this.dirtyFields |= DirtyField.Archived
+    }
+    return this.current.archived
+  }
+
+  replaceArchived(archived: SurfaceNode[]): void {
+    this.state().archived = archived
+    this.dirtyFields |= DirtyField.Archived
+  }
+
+  callNames(): Record<string, { name: string; start: number }> {
+    if (!this.isDirty(DirtyField.CallNames)) {
+      this.state().callNames = { ...this.current.callNames }
+      this.dirtyFields |= DirtyField.CallNames
+    }
+    return this.current.callNames
+  }
+
+  replaceCallNames(callNames: Record<string, { name: string; start: number }>): void {
+    this.state().callNames = callNames
+    this.dirtyFields |= DirtyField.CallNames
+  }
+
+  timing(): TimingTotals {
+    if (!this.isDirty(DirtyField.Timing)) {
+      const current = this.current.timing
+      this.state().timing = current === undefined
+        ? { wallMs: 0, ttftMs: 0, genMs: 0, calls: 0, toolsMs: 0, toolCalls: 0, tools: {} }
+        : { ...current, tools: { ...current.tools } }
+      this.dirtyFields |= DirtyField.Timing
+    }
+    return this.current.timing as TimingTotals
+  }
+}
+
+const normalizedBounds = new WeakMap<TimelineState, string>()
+const timelineViewIdentities = new WeakMap<TimelineState, object>()
+
+function boundsKey(bounds: FoldBounds): string {
+  return `${bounds.maxRequestSteps}/${bounds.maxKeptTurns}/${bounds.maxEvents}/${bounds.maxNodes}/${bounds.maxArchiveNodes}`
+}
+
+function isNormalizedFor(state: TimelineState, bounds: FoldBounds): boolean {
+  return normalizedBounds.get(state) === boundsKey(bounds)
+}
+
+function markNormalized(state: TimelineState, bounds: FoldBounds): void {
+  normalizedBounds.set(state, boundsKey(bounds))
+}
+
+function hasSameViewInputs(previous: TimelineState, next: TimelineState): boolean {
+  return previous.surface === next.surface
+    && previous.sums === next.sums
+    && previous.systemTokens === next.systemTokens
+    && previous.toolsTokens === next.toolsTokens
+    && previous.model === next.model
+    && previous.provider === next.provider
+    && previous.contextWindow === next.contextWindow
+    && previous.requests === next.requests
+    && previous.events === next.events
+    && previous.archived === next.archived
+    && previous.cost === next.cost
+    && previous.archiveFloor === next.archiveFloor
+    && previous.timing === next.timing
+}
+
+function timelineViewIdentity(state: TimelineState): object {
+  return timelineViewIdentities.get(state) ?? state
+}
+
+function inheritTimelineView(previous: TimelineState, next: TimelineState): void {
+  timelineViewIdentities.set(next, timelineViewIdentity(previous))
+}
+
 export function trimToLastTurns(requests: RequestRecord[], maxTurns: number): RequestRecord[] {
   let runs = 0
   let start = requests.length
@@ -177,24 +331,33 @@ function countTurnRuns(requests: RequestRecord[]): number {
   return runs
 }
 
-function trimState(st: TimelineState, bounds: FoldBounds): void {
+function trimState(draft: TimelineDraft, bounds: FoldBounds, force: boolean): void {
   // Trim by WHOLE turn-runs as soon as the run count crosses the cap —
   // not only when the raw step count does — so the state stays
   // deterministically at the newest ~maxKeptTurns turns (a threshold-only
   // policy would oscillate: trim to 1200, regrow to 1500, trim again).
-  if (countTurnRuns(st.requests) > bounds.maxKeptTurns) {
-    st.requests = trimToLastTurns(st.requests, bounds.maxKeptTurns)
+  if (force || draft.isDirty(DirtyField.Requests)) {
+    let requests = draft.current.requests
+    if (countTurnRuns(requests) > bounds.maxKeptTurns) {
+      requests = trimToLastTurns(requests, bounds.maxKeptTurns)
+      draft.replaceRequests(requests)
+    }
+    // Pathological many-step turns: hard step backstop after the turn trim.
+    if (requests.length > bounds.maxRequestSteps) {
+      draft.replaceRequests(requests.slice(-bounds.maxRequestSteps))
+    }
   }
-  // Pathological many-step turns: hard step backstop after the turn trim.
-  if (st.requests.length > bounds.maxRequestSteps) {
-    st.requests = st.requests.slice(-bounds.maxRequestSteps)
+  if (force || draft.isDirty(DirtyField.Events)) {
+    const events = draft.current.events
+    if (events.length > bounds.maxEvents) draft.replaceEvents(events.slice(-bounds.maxEvents))
   }
-  if (st.events.length > bounds.maxEvents) st.events = st.events.slice(-bounds.maxEvents)
   // Archive retention (the Context browser's per-step reconstruction raw
   // material). Entries leave in removal order (oldest `gone` first), so the
   // newest dropped `gone` is the last dropped entry's — recorded as
   // `archiveFloor` for the client's approximate-reconstruction note.
-  if (st.archived.length > 0) {
+  if ((force || draft.isDirty(DirtyField.Requests) || draft.isDirty(DirtyField.Archived))
+    && draft.current.archived.length > 0) {
+    const st = draft.current
     let drop = 0
     // Removals at or before the oldest retained request can only reconstruct
     // steps the requests trim already forgot.
@@ -208,10 +371,19 @@ function trimState(st: TimelineState, bounds: FoldBounds): void {
     }
     if (drop > 0) {
       const floor = st.archived[drop - 1].gone
-      if (floor !== undefined) st.archiveFloor = Math.max(st.archiveFloor ?? 0, floor)
-      st.archived = st.archived.slice(drop)
+      if (floor !== undefined) draft.state().archiveFloor = Math.max(st.archiveFloor ?? 0, floor)
+      draft.replaceArchived(st.archived.slice(drop))
     }
   }
+}
+
+function boundedStateForView(state: TimelineState, bounds: FoldBounds): TimelineState {
+  if (isNormalizedFor(state, bounds)) return state
+  const draft = new TimelineDraft(state)
+  trimState(draft, bounds, true)
+  const bounded = draft.current
+  markNormalized(bounded, bounds)
+  return bounded
 }
 
 export function createTimelineState(): TimelineState {
@@ -239,8 +411,10 @@ function categoryOf(type: string, message: { source?: MessageSource } | undefine
  * `st.surface` are shared with the persisted previous state, so `gone` must
  * never be written onto them directly.
  */
-function archiveRemoved(st: TimelineState, removed: SurfaceNode[], goneSeq: number): void {
-  for (const n of removed) st.archived.push({ ...n, gone: goneSeq })
+function archiveRemoved(draft: TimelineDraft, removed: SurfaceNode[], goneSeq: number): void {
+  if (removed.length === 0) return
+  const archived = draft.archived()
+  for (const n of removed) archived.push({ ...n, gone: goneSeq })
 }
 
 interface SurfaceEventLike {
@@ -287,12 +461,13 @@ function skillNameOf(msg: MessageLike | null | undefined): string {
 }
 
 function applySurface(
-  st: TimelineState,
+  draft: TimelineDraft,
   ev: SurfaceEventLike,
   type: string,
   data: { error?: boolean } | undefined,
   message: MessageLike | null | undefined,
 ): SurfaceNode {
+  const st = draft.current
   const cat = categoryOf(type, message ?? undefined)
   const node: SurfaceNode = {
     seq: ev.seq,
@@ -339,7 +514,7 @@ function applySurface(
     const toolEntry = srcEntry ?? blockEntry
     if (toolEntry !== undefined) {
       node.tool = toolEntry.name
-      const timing = ensureTiming(st)
+      const timing = draft.timing()
       const dur = durOf(toolEntry.start, ev.time)
       timing.toolsMs += dur
       timing.toolCalls += 1
@@ -349,12 +524,13 @@ function applySurface(
     // folds in (see TimelineState.callNames). Rebuild without the used ids
     // (no dynamic delete, per repo lint) — consume-once holds the map at
     // pending-call size, so the copy is trivial.
-    if (typeof srcId === 'string' || typeof blockId === 'string') {
+    if ((typeof srcId === 'string' && Object.hasOwn(st.callNames, srcId))
+      || (typeof blockId === 'string' && Object.hasOwn(st.callNames, blockId))) {
       const kept: Record<string, { name: string; start: number }> = {}
       for (const k in st.callNames) {
         if (k !== srcId && k !== blockId) kept[k] = st.callNames[k]
       }
-      st.callNames = kept
+      draft.replaceCallNames(kept)
     }
     if (data?.error) node.err = true
   } else if (source?.kind === 'skill-invocation') {
@@ -374,10 +550,14 @@ function applySurface(
 
   // Consume the armed shadow claim here (a later surface event would expire it, per the shadow-price protocol); DELETE the fields —
   // assigning `undefined` would break the plain-JSON persisted-state precondition (see TimelineState).
-  const shadowedSeqs = st.pendingShadowedSeqs
-  const shadowEventSeq = st.pendingShadowEventSeq
-  delete st.pendingShadowedSeqs
-  delete st.pendingShadowEventSeq
+  const shadowedSeqs = draft.current.pendingShadowedSeqs
+  const shadowEventSeq = draft.current.pendingShadowEventSeq
+  const next = draft.state()
+  delete next.pendingShadowedSeqs
+  delete next.pendingShadowEventSeq
+
+  const surface = draft.surface()
+  const sums = draft.sums()
 
   const op = ev.surfaceOp as { op?: string; start?: number; end?: number } | null | undefined
   if (op !== null && typeof op === 'object' && op.op === 'replace') {
@@ -390,41 +570,42 @@ function applySurface(
       const shadowed = new Set(shadowedSeqs)
       const kept: SurfaceNode[] = []
       const removed: SurfaceNode[] = []
-      for (const n of st.surface) {
-        if (shadowed.has(n.seq)) { st.sums[n.cat] -= n.tokens; removed.push(n) }
+      for (const n of surface) {
+        if (shadowed.has(n.seq)) { sums[n.cat] -= n.tokens; removed.push(n) }
         else kept.push(n)
       }
-      archiveRemoved(st, removed, ev.seq)
-      st.surface = kept
-      st.sums[cat] += node.tokens
-      st.surface.push(node)
+      archiveRemoved(draft, removed, ev.seq)
+      next.surface = kept
+      sums[cat] += node.tokens
+      kept.push(node)
       // Rewrite the metering event's row from its gross shadow price to the
       // NET freed amount (the replacement re-adds its own tokens), so the
       // number matches the drop the trend chart shows. The record is cloned:
       // the events array's elements are shared with the persisted state.
       if (shadowEventSeq !== undefined) {
         const removedSum = removed.reduce((sum, n) => sum + n.tokens, 0)
-        const i = st.events.findIndex(e => e.seq === shadowEventSeq)
-        if (i >= 0) st.events[i] = { ...st.events[i], tokens: Math.max(0, removedSum - node.tokens) }
+        const events = draft.events()
+        const i = events.findIndex(e => e.seq === shadowEventSeq)
+        if (i >= 0) events[i] = { ...events[i], tokens: Math.max(0, removedSum - node.tokens) }
       }
       return node
     }
     let si = -1
     let ei = -1
-    for (let i = 0; i < st.surface.length; i++) {
-      if (si < 0 && st.surface[i].seq === op.start) si = i
-      if (st.surface[i].seq === op.end) { ei = i; break }
+    for (let i = 0; i < surface.length; i++) {
+      if (si < 0 && surface[i].seq === op.start) si = i
+      if (surface[i].seq === op.end) { ei = i; break }
     }
     if (si >= 0 && ei >= si) {
-      const removed = st.surface.splice(si, ei - si + 1, node)
-      archiveRemoved(st, removed, ev.seq)
-      for (const r of removed) st.sums[r.cat] -= r.tokens
-      st.sums[cat] += node.tokens
+      const removed = surface.splice(si, ei - si + 1, node)
+      archiveRemoved(draft, removed, ev.seq)
+      for (const r of removed) sums[r.cat] -= r.tokens
+      sums[cat] += node.tokens
       return node
     }
   }
-  st.surface.push(node)
-  st.sums[cat] += node.tokens
+  surface.push(node)
+  sums[cat] += node.tokens
   return node
 }
 
@@ -558,18 +739,6 @@ function isTokenDelta(chunk: unknown): boolean {
 }
 
 /**
- * The fold's private timing accumulator: created on first use, and CLONED on
- * every later ensure() (see `applyTimeline`) — the object left in the
- * persisted previous state is never written into in place.
- */
-function ensureTiming(st: TimelineState): TimingTotals {
-  if (st.timing === undefined) {
-    st.timing = { wallMs: 0, ttftMs: 0, genMs: 0, calls: 0, toolsMs: 0, toolCalls: 0, tools: {} }
-  }
-  return st.timing
-}
-
-/**
  * Tally one completed tool call into the per-name ranking, bounded to
  * TOOL_TIMING_CAP names: repeated names update in place, a new name beyond
  * the cap evicts the smallest tally first (the ranking's tail), so state
@@ -604,22 +773,8 @@ function bumpToolTotals(timing: TimingTotals, name: string, ms: number): void {
 }
 
 export function applyTimeline(state: TimelineState, event: TimelineEvent, bounds: FoldBounds): TimelineState {
-  let st: TimelineState | undefined
-  const ensure = (): TimelineState => st ??= {
-    ...state,
-    surface: [...state.surface],
-    sums: { ...state.sums },
-    requests: [...state.requests],
-    events: [...state.events],
-    archived: [...state.archived],
-    callNames: { ...state.callNames },
-    // The timing totals are shared with the persisted previous state —
-    // private working copies for this event's accumulations (per-name rows
-    // are replaced, never mutated, so a one-level copy suffices for them).
-    ...(state.timing !== undefined
-      ? { timing: { ...state.timing, tools: { ...state.timing.tools } } }
-      : {}),
-  }
+  let draft: TimelineDraft | undefined
+  const edit = (): TimelineDraft => draft ??= new TimelineDraft(state)
 
   const data = event.data
   // The projection registry drives `apply` straight off the session/event bus
@@ -637,7 +792,8 @@ export function applyTimeline(state: TimelineState, event: TimelineEvent, bounds
           config?: { model?: unknown; provider?: unknown }
         }
         const tools = Array.isArray(header.tools) ? header.tools : []
-        const s = ensure()
+        const d = edit()
+        const s = d.state()
         // Tools TOTAL = dsh's whole-array price (one JSON string of every schema).
         s.toolsTokens = estimateToolsTotal(tools)
         s.systemTokens = estimateSystemTokens(header.system)
@@ -656,13 +812,13 @@ export function applyTimeline(state: TimelineState, event: TimelineEvent, bounds
         // sessions — lastModel survived in the projection state, so record it
         // too. Firing only on a real change keeps the list equal to the record.
         if ((data?.reason === 'change' || data?.reason === 'resume') && s.model && s.lastModel && s.model !== s.lastModel) {
-          s.events.push({ seq: event.seq, time: event.time, kind: 'model', from: s.lastModel, to: s.model })
+          d.events().push({ seq: event.seq, time: event.time, kind: 'model', from: s.lastModel, to: s.model })
         }
         if (s.model) s.lastModel = s.model
         break
       }
       case 'request/context': {
-        const s = ensure()
+        const s = edit().state()
         // Route/capacity metadata: request/context is logged only when the route or capacity changes (after request/header), so it updates
         // the current route display — never firing a model-switch event on its own.
         if (data && typeof data.contextWindow === 'number') s.contextWindow = data.contextWindow
@@ -672,8 +828,7 @@ export function applyTimeline(state: TimelineState, event: TimelineEvent, bounds
       }
       case 'tool/call': {
         if (data && typeof data.callId === 'string' && typeof data.name === 'string') {
-          const s = ensure()
-          s.callNames[data.callId] = { name: data.name, start: event.time }
+          edit().callNames()[data.callId] = { name: data.name, start: event.time }
         }
         break
       }
@@ -685,7 +840,7 @@ export function applyTimeline(state: TimelineState, event: TimelineEvent, bounds
         const start = state.stepStart
         if (start === undefined || start.firstToken !== undefined) return state
         if (!isTokenDelta(data?.chunk)) return state
-        const s = ensure()
+        const s = edit().state()
         s.stepStart = { time: start.time, firstToken: event.time }
         break
       }
@@ -696,7 +851,7 @@ export function applyTimeline(state: TimelineState, event: TimelineEvent, bounds
         // the whole step against this instant. Always a state change (a new
         // slot value), even over an un-consumed predecessor — sequential logs
         // never hit that, hostile ones just supersede it.
-        const s = ensure()
+        const s = edit().state()
         s.stepStart = { time: event.time }
         break
       }
@@ -705,19 +860,19 @@ export function applyTimeline(state: TimelineState, event: TimelineEvent, bounds
         // refold) — nothing to price, and the state must stay reference-equal.
         const start = state.stepStart
         if (start === undefined) return state
-        const s = ensure()
-        ensureTiming(s).wallMs += durOf(start.time, event.time)
+        const d = edit()
+        d.timing().wallMs += durOf(start.time, event.time)
         // Consume-once: DELETE the optional field — assigning `undefined`
         // would break the plain-JSON persisted-state precondition.
-        delete s.stepStart
+        delete d.state().stepStart
         break
       }
       case 'user/message': {
-      // `deriveEventMessage` is the canonical per-event projection: returns
-      // `event.data` for user/message (no `data.message` indirection).
+        // `deriveEventMessage` is the canonical per-event projection: returns
+        // `event.data` for user/message (no `data.message` indirection).
         const msg = deriveEventMessage(event as never) as MessageLike | null
-        const s = ensure()
-        const node = applySurface(s, event, event.type, data, msg)
+        const d = edit()
+        const node = applySurface(d, event, event.type, data, msg)
         const source = msg?.source
         if (isInjection(source)) {
           const rec: ContextEventRecord = {
@@ -734,17 +889,17 @@ export function applyTimeline(state: TimelineState, event: TimelineEvent, bounds
               rec.detail = source.summary
             }
           }
-          s.events.push(rec)
+          d.events().push(rec)
         }
         break
       }
       case 'tool/result': {
       // The model-visible message is data.message; `deriveEventMessage`
-      // returns that directly (the envelope also carries callId/error; pricing
-      // the envelope would miss all content).
+        // returns that directly (the envelope also carries callId/error; pricing
+        // the envelope would miss all content).
         const toolMsg = deriveEventMessage(event as never) as MessageLike | null
-        const s = ensure()
-        const node = applySurface(s, event, event.type, data, toolMsg)
+        const d = edit()
+        const node = applySurface(d, event, event.type, data, toolMsg)
         // A skill load via the `skill` tool returns the loaded skill's
         // instructions as a tool result — content the harness injected into the
         // model's context. Keep it a tool result (that is what it is), but make
@@ -760,16 +915,17 @@ export function applyTimeline(state: TimelineState, event: TimelineEvent, bounds
           const name = skillNameOf(toolMsg)
           if (name !== '') {
             node.skill = name
-            s.events.push({ seq: event.seq, time: event.time, kind: 'inject', form: 'instructions', sub: 'skill', name, tokens: node.tokens })
+            d.events().push({ seq: event.seq, time: event.time, kind: 'inject', form: 'instructions', sub: 'skill', name, tokens: node.tokens })
           }
         }
         break
       }
       case 'assistant/message': {
-      // Snapshot the request exactly as dispatched: current surface + header,
-      // before this response joins the surface.
+        // Snapshot the request exactly as dispatched: current surface + header,
+        // before this response joins the surface.
         const usage = data?.usage as UsageLike | null | undefined
-        const s = ensure()
+        const d = edit()
+        const s = d.state()
         const total = s.systemTokens + s.toolsTokens + s.sums.user + s.sums.inject + s.sums.assistant + s.sums.tool
         const record: RequestRecord = {
           time: event.time, seq: event.seq,
@@ -815,13 +971,13 @@ export function applyTimeline(state: TimelineState, event: TimelineEvent, bounds
             })
           }
         }
-        s.requests.push(record)
+        d.requests().push(record)
         // Timing: one completed model call; its wait/generation split prices
         // off the slot's first-token stamp when the stream carried one (a
         // chunk-less call — legacy log, aborted step — stays unattributed and
         // lands in the card's residue). The pending slot stays armed —
         // the step's tool calls and `step/end` still follow.
-        const timing = ensureTiming(s)
+        const timing = d.timing()
         timing.calls += 1
         const stepStart = state.stepStart
         if (stepStart !== undefined && stepStart.firstToken !== undefined) {
@@ -832,28 +988,28 @@ export function applyTimeline(state: TimelineState, event: TimelineEvent, bounds
         // null when the content array is empty (usage-only events project to no
         // message — same rule as dsh's surface fold).
         const asstMsg = deriveEventMessage(event as never) as MessageLike | null
-        applySurface(s, event, event.type, data, asstMsg)
+        applySurface(d, event, event.type, data, asstMsg)
         break
       }
       case 'plan/mode': {
-      // Plan mode adds a guidance section to every model request while
-      // active — a real context-composition change, so it earns an event.
+        // Plan mode adds a guidance section to every model request while
+        // active — a real context-composition change, so it earns an event.
         if (data && typeof data.active === 'boolean') {
-          const s = ensure()
-          s.events.push({ seq: event.seq, time: event.time, kind: 'mode', name: data.active ? 'plan.on' : 'plan.off' })
+          edit().events().push({ seq: event.seq, time: event.time, kind: 'mode', name: data.active ? 'plan.on' : 'plan.off' })
         }
         break
       }
       case 'compaction/summary':
       case 'compaction/prune': {
-        const s = ensure()
+        const d = edit()
+        const s = d.state()
         // Arm the shadow-price claim: the replacement that follows this
         // event synchronously shadows exactly these node seqs.
         if (data && Array.isArray(data.shadowedSeqs)) {
           s.pendingShadowedSeqs = data.shadowedSeqs.filter((x): x is number => typeof x === 'number')
           s.pendingShadowEventSeq = event.seq
         }
-        s.events.push({
+        d.events().push({
           seq: event.seq, time: event.time, kind: event.type === 'compaction/summary' ? 'compaction' : 'prune',
           tokens: data && typeof data.shadowedTokenCount === 'number' ? data.shadowedTokenCount : 0,
           ...(event.type === 'compaction/summary' && data && Array.isArray(data.shadowedSeqs)
@@ -871,14 +1027,46 @@ export function applyTimeline(state: TimelineState, event: TimelineEvent, bounds
     // dropped WHOLE: any partial mutation lived on private lazy clones, so
     // falling back to the previous state reference keeps the transition
     // all-or-nothing.
-    st = undefined
+    draft = undefined
   }
 
-  if (st !== undefined) {
-    trimState(st, bounds)
-    return st
+  if (draft?.changed === true) {
+    const eventState = draft.current
+    const eventChangedView = !hasSameViewInputs(state, eventState)
+    const forceNormalization = !isNormalizedFor(state, bounds)
+    const requestsBeforeTrim = eventState.requests
+    const eventsBeforeTrim = eventState.events
+    const archivedBeforeTrim = eventState.archived
+    const archiveFloorBeforeTrim = eventState.archiveFloor
+    trimState(draft, bounds, forceNormalization)
+    const next = draft.current
+    markNormalized(next, bounds)
+    const normalizationChangedView = forceNormalization
+      && (next.requests !== requestsBeforeTrim
+        || next.events !== eventsBeforeTrim
+        || next.archived !== archivedBeforeTrim
+        || next.archiveFloor !== archiveFloorBeforeTrim)
+    if (!eventChangedView && !normalizationChangedView) inheritTimelineView(state, next)
+    return next
   }
   return state
+}
+
+/**
+ * Create the projection definition's reference-stable wire view. Host-only
+ * state transitions inherit the previous identity, which lets the harness's
+ * raw-view `Object.is` gate suppress schema work and broadcasts.
+ */
+export function createTimelineView(bounds: FoldBounds): (state: TimelineState) => Snapshot {
+  const views = new WeakMap<object, Snapshot>()
+  return (state: TimelineState): Snapshot => {
+    const identity = timelineViewIdentity(state)
+    const cached = views.get(identity)
+    if (cached !== undefined) return cached
+    const view = buildTimelineView(state, bounds)
+    views.set(identity, view)
+    return view
+  }
 }
 
 /**
@@ -886,7 +1074,8 @@ export function applyTimeline(state: TimelineState, event: TimelineEvent, bounds
    * COPIES
   * — the persisted state objects are never mutated.
  */
-export function buildTimelineView(state: TimelineState, bounds: FoldBounds): Snapshot {
+export function buildTimelineView(rawState: TimelineState, bounds: FoldBounds): Snapshot {
+  const state = boundedStateForView(rawState, bounds)
   const surfaceTotal = state.sums.user + state.sums.inject + state.sums.assistant + state.sums.tool
   // NOTE: provider-anchored occupancy (the official chat ring) is NOT folded
   // here since 0.11 — the Client reads token-meter's own `contextPressure`

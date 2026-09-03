@@ -143,6 +143,20 @@ In **Settings → Plugins → Plugin configuration**, the **Context** card holds
 - **Compatibility** — works on `@deepseek-ai/dsh` **0.1.1-rc2+** and **0.1.2-alpha2+**. The per-release matrix and how it is verified: [docs/compatibility.md](docs/compatibility.md).
 - **I18n** — UI in English and 简体中文.
 
+## DeepSeek Harness fork build
+
+The vendored `0.41.3-dsh012rc1.1` build keeps the `contextTimeline` projection key, wire response fields, persisted state schema, and session event vocabulary unchanged. It reduces host allocations with field-level copy-on-write state, skips retention scans for unchanged collections, clamps restored projection views to the active bounds, reuses wire views across host-only state changes, and leaves the `/context` data subscriptions unmounted while its dialog is closed. Maintenance and rollback details live in [FORK_MAINTENANCE.md](FORK_MAINTENANCE.md).
+
+The fork's low-overhead profile uses these existing configuration fields:
+
+```yaml
+maxRequestSteps: 300
+maxKeptTurns: 60
+maxEvents: 100
+maxNodes: 400
+maxArchiveNodes: 100
+```
+
 ## Like it?
 
 If `dsh-context` helped you understand what your agent is carrying around, a ⭐ on [GitHub](https://github.com/bowenliang123/dsh-context) is much appreciated — and issues/PRs are welcome!

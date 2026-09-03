@@ -1,3 +1,5 @@
+// DeepSeek Harness fork modification: reference-stable contextTimeline wire views. See ../../FORK_MAINTENANCE.md.
+
 /**
  * The `contextTimeline` session projection unit — the plugin's data plane.
  *
@@ -23,7 +25,7 @@ import type { Config } from './config'
 import { resolveBounds } from './config'
 import type { ProjectionDefinition } from './compat'
 import type { ContextTimeline } from '../shared/types'
-import { applyTimeline, buildTimelineView, createTimelineState } from './fold'
+import { applyTimeline, createTimelineState, createTimelineView } from './fold'
 import type { TimelineState } from './fold'
 
 /** Validate the wire payload before it leaves the host (strict: no drift). */
@@ -187,7 +189,7 @@ const timelineStateSchema = z.object({
  */
 export function createContextTimelineDefinition(config: Config): ProjectionDefinition<'contextTimeline', TimelineState> {
   const bounds = resolveBounds(config)
-  const view = (state: TimelineState): ContextTimeline => buildTimelineView(state, bounds)
+  const view: (state: TimelineState) => ContextTimeline = createTimelineView(bounds)
   const definition: ProjectionDefinition<'contextTimeline', TimelineState> = {
     key: 'contextTimeline',
     stateSchema: timelineStateSchema,

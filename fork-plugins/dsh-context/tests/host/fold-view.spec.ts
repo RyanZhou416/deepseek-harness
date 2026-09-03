@@ -1,3 +1,4 @@
+// DeepSeek Harness fork modification: reference-stable wire-view coverage. See ../../FORK_MAINTENANCE.md.
 // Wire-view tests for buildTimelineView (src/host/fold.ts): counters,
 // non-aliasing copies, the cost buckets, the serving window (newest tail +
 // pinned injects + coverage floors), event→request attribution, and view
@@ -284,7 +285,7 @@ describe('buildTimelineView event attribution', () => {
 })
 
 describe('buildTimelineView purity', () => {
-  test('repeated views are deep-equal but distinct, and the state is untouched', () => {
+  test('repeated definition views reuse one detached value and leave state untouched', () => {
     const { def, state } = driveTimeline([
       header(1, { model: 'm', provider: 'p' }),
       userMessage(2, [{ type: 'text', text: 'a' }]),
@@ -293,10 +294,9 @@ describe('buildTimelineView purity', () => {
     const before = assertPlainJson(state)
     const v1 = def.wire.view(state)
     const v2 = def.wire.view(state)
-    assert.notEqual(v1, v2)
-    assert.notEqual(v1.nodes, v2.nodes)
-    assert.notEqual(v1.requests, v2.requests)
-    assert.deepEqual(v1, v2)
+    assert.equal(v1, v2)
+    assert.notEqual(v1.nodes, state.surface)
+    assert.notEqual(v1.requests, state.requests)
     assert.deepEqual(assertPlainJson(state), before, 'view() must not mutate the persisted state')
   })
 })

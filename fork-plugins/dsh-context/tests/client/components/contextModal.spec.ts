@@ -1,3 +1,4 @@
+// DeepSeek Harness fork modification: closed-modal subscription coverage. See ../../../FORK_MAINTENANCE.md.
 // ContextModal (src/client/components/contextModal.tsx) — the /context
 // dialog rendered through the REGISTERED composition (makeContextModal over
 // a TestClientCtx), with the per-session modal store driving open/close,
@@ -9,6 +10,7 @@ import { afterEach, describe, test, vi } from 'vitest'
 import { React, h } from '../../../src/client/react'
 import { makeContextModal } from '../../../src/client/components/contextModal'
 import { modalStoreOf, setPendingConsume, takePendingConsume } from '../../../src/client/modalStore'
+import type { UseChatLike, UseSessionLike } from '../../../src/client/services'
 import type { ContextTimeline } from '../../../src/shared/types'
 import { DICT_EN } from '../../../src/client/i18n'
 import { TestClientCtx, TestSessions, asClientCtx } from '../helpers/harness'
@@ -59,6 +61,48 @@ describe('ContextModal', () => {
     }))
     assert.equal(m2.container.childElementCount, 0)
     await m2.unmount()
+  })
+
+  test('the closed gate does not mount projection or conversation hooks', async () => {
+    const ctx = new TestClientCtx({ services: { sessions: new TestSessions() } })
+    const ContextModal = makeContextModal(asClientCtx(ctx), kit)
+    const sid = 'sm-gated'
+    modalStoreOf(sid).set(false)
+    const useProjection = vi.fn(() => timeline())
+    let chatCalls = 0
+    let sessionCalls = 0
+    const useChat: UseChatLike = selector => {
+      chatCalls++
+      return selector({ legacy: { nodes: [] } })
+    }
+    const useSession: UseSessionLike = selector => {
+      sessionCalls++
+      return selector({ nodes: [] })
+    }
+    const props = {
+      sessionId: sid,
+      useContextModal: boundModalHook(sid),
+      useProjection,
+      useChat,
+      useSession,
+    }
+    const m = await mount(h(ContextModal, props))
+    assert.equal(useProjection.mock.calls.length, 0)
+    assert.equal(chatCalls, 0)
+    assert.equal(sessionCalls, 0)
+
+    await act(async () => { modalStoreOf(sid).set(true) })
+    assert.equal(useProjection.mock.calls.length, 4)
+    assert.equal(chatCalls, 1)
+    assert.equal(sessionCalls, 1)
+
+    await act(async () => { modalStoreOf(sid).set(false) })
+    const callsAfterClose = useProjection.mock.calls.length
+    await m.update(h(ContextModal, props))
+    assert.equal(useProjection.mock.calls.length, callsAfterClose, 'a closed parent render must not remount projection hooks')
+    assert.equal(chatCalls, 1)
+    assert.equal(sessionCalls, 1)
+    await m.unmount()
   })
 
   test('open with no projection hook (or an empty one) shows the loading view', async () => {

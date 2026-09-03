@@ -1,6 +1,6 @@
 {
   "name": "dsh-context",
-  "version": "0.41.3",
+  "version": "0.41.3-dsh012rc1.1",
   "description": "A DeepSeek Harness plugin for context insight and management, with context dashboard and context command, for understanding how the context is made of, and how it evolves.",
   "author": "bowenliang123",
   "repository": {
@@ -11,6 +11,7 @@
   "bugs": {
     "url": "https://github.com/bowenliang123/dsh-context/issues"
   },
+  "dshForkNotice": "Modified by RyanZhou416/deepseek-harness; see FORK_MAINTENANCE.md",
   "type": "module",
   "engines": {
     "node": "^22.19.0 || >=24.0.0"
@@ -30,6 +31,7 @@
     "lib/index.js",
     "lib/index.d.ts",
     "cordis.patch.yml",
+    "FORK_MAINTENANCE.md",
     "README.md",
     "LICENSE"
   ],

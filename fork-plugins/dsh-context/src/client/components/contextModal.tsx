@@ -1,3 +1,5 @@
+// DeepSeek Harness fork modification: closed modals mount no projection or conversation subscriptions. See ../../../FORK_MAINTENANCE.md.
+
 /**
  * The /context command's centered dialog — the same data as the Context tab (the pushed `contextTimeline` projection) distilled to the
  * current-composition overview and the shared Context browser; rendered from the `conversation.input.overlay` slot and opened/closed
@@ -32,9 +34,13 @@ export function makeContextModal(ctx: ClientCtx, kit: ViewKit): (props: ContextM
   const ContextBrowser = makeContextBrowser(kit, StackedBar)
   const ErrorBoundary = makeErrorBoundary(t)
 
+  function ContextModalGate(props: ContextModalProps): ReactNS.ReactElement | null {
+    const open = typeof props.useContextModal === 'function' ? props.useContextModal(s => s) : false
+    return open ? h(ContextModalBody, props) : null
+  }
+
   function ContextModalBody(props: ContextModalProps): ReactNS.ReactElement | null {
     const sessionId = typeof props.sessionId === 'string' ? props.sessionId : ''
-    const open = typeof props.useContextModal === 'function' ? props.useContextModal(s => s) : false
     const data = typeof props.useProjection === 'function'
       ? timelineOf(props.useProjection('contextTimeline'))
       : null
@@ -47,9 +53,8 @@ export function makeContextModal(ctx: ClientCtx, kit: ViewKit): (props: ContextM
     const headers = typeof props.useProjection === 'function'
       ? headersOf(props.useProjection('contextHeaders'))
       : null
-    // Conversation-window join for the browser (both seats are hooks — read
-    // unconditionally here, before the closed early return, so the hook order
-    // stays stable across open/close).
+    // Conversation-window join for the browser. ContextModalGate mounts this
+    // hook compartment only while the dialog is open.
     const convNodes = conversationNodesOf(props)
     const [hoverCat, setHoverCat] = React.useState<string | null>(null)
     // Dock the mask beside the shell sidebar: 0 until the frame measure lands
@@ -82,7 +87,6 @@ export function makeContextModal(ctx: ClientCtx, kit: ViewKit): (props: ContextM
     }, [ctx, sessionId])
 
     React.useEffect(() => {
-      if (!open) return undefined
       const previous = document.activeElement instanceof HTMLElement ? document.activeElement : null
       const onKey = (ev: KeyboardEvent) => {
         if (ev.key !== 'Escape') return
@@ -95,14 +99,13 @@ export function makeContextModal(ctx: ClientCtx, kit: ViewKit): (props: ContextM
         window.removeEventListener('keydown', onKey, true)
         if (previous !== null && document.contains(previous)) previous.focus()
       }
-    }, [open, close])
+    }, [close])
 
     // Dock the mask to the main column: measure the sidebar track once before
     // first paint, then follow the frame's inline template while open (sidebar
     // drags, collapse toggles and narrow-viewport re-solves all rewrite it).
     // An unresolved frame keeps the full-viewport mask.
     React.useLayoutEffect(() => {
-      if (!open) return undefined
       const dock = measureDock(backdropRef.current)
       setDockLeft(dock.left)
       if (dock.frame === null) return undefined
@@ -111,9 +114,7 @@ export function makeContextModal(ctx: ClientCtx, kit: ViewKit): (props: ContextM
       })
       observer.observe(dock.frame, { attributes: true, attributeFilter: ['style'] })
       return () => { observer.disconnect() }
-    }, [open])
-
-    if (!open) return null
+    }, [])
 
     const head = data !== null ? headlineOf(data, pressure, breakdown) : null
     const subtitle = data !== null ? (data.model ? data.model : '') + (data.provider ? ' · ' + data.provider : '') : ''
@@ -153,6 +154,6 @@ export function makeContextModal(ctx: ClientCtx, kit: ViewKit): (props: ContextM
   }
 
   return function ContextModal(props: ContextModalProps): ReactNS.ReactElement | null {
-    return h(ErrorBoundary, null, h(ContextModalBody, props))
+    return h(ErrorBoundary, null, h(ContextModalGate, props))
   }
 }
