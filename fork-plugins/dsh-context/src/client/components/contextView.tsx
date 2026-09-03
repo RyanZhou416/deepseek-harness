@@ -1,0 +1,477 @@
+/**
+ * Context tab root: renders the harness-pushed `contextTimeline` projection and composes stats, composition, history, events and messages;
+ * never calls RPC and holds no cache — the harness owns the projection pipeline end to end.
+ */
+
+import type * as ReactNS from 'react'
+import type { ContextEventRecord, RequestRecord, SurfaceNode } from '../../shared/types'
+import { briefNodes, briefOf } from '../brief'
+import { headlineOf } from '../headline'
+import type { SessionStandardProps } from '../services'
+import { contextBreakdownOf, contextPressureOf, conversationNodesOf, headersOf, imageLoaderOf, numOf, timelineOf, tokenUsageOf } from '../services'
+import type { ClientCtx, ConversationNodeLike } from '../services'
+import { makeContentFetcher, makeHeaderFetcher } from '../historyPage'
+import { canOpenPathsOf, openPathVia, workspaceOf } from '../services'
+import { activityOf, locateStepOf } from '../fileActivity'
+import type { FileOp } from '../fileActivity'
+import type { ContextSettings } from '../settings'
+import type { ViewKit } from '../viewkit'
+import { makeContextBrowser } from './browser'
+import { makeAgentGraph } from './agentGraph'
+import { makeDonut } from './donut'
+import { makeCurrentComposition } from './currentComposition'
+import { makeEventList } from './events'
+import { makeFileCard } from './fileCard'
+import { makePluginInfo } from './pluginInfo'
+import { makeRequestDetail } from './requestDetail'
+import { makeStatsContext } from './statsContext'
+import { makeStatsTiming } from './statsTiming'
+import { makeStatsTokens } from './statsTokens'
+import { makeLegend, makeStackedBar } from './stackedBar'
+import { aggregateByTurn, attachMarkers, jumpTargetOf, makeTrendChart } from './trendChart'
+
+import { React, h } from '../react'
+import { takeContextFocus } from '../viewFocus'
+import { makeErrorBoundary } from './errorBoundary'
+
+// The context page scrolls inside the conversation's shared `[data-conversation-scroll]` container, which the chat bottom-anchors — mirror
+// the chat's chatScroll pattern: a module-level per-session position ledger (survives tab remounts), restored once content renders; first
+// visits start at the top.
+const viewScroll = new Map<string, number>()
+
+const EVENT_KINDS = ['inject', 'compaction', 'prune', 'model', 'mode'] as const
+
+export type ContextViewProps = SessionStandardProps
+
+export function makeContextView(
+  ctx: ClientCtx,
+  kit: ViewKit,
+  settings: ContextSettings,
+): (props: ContextViewProps) => ReactNS.ReactElement {
+  const { t } = kit
+  const StackedBar = makeStackedBar(kit)
+  const Legend = makeLegend(kit)
+  const CurrentComposition = makeCurrentComposition(kit, StackedBar, Legend)
+  const TrendChart = makeTrendChart(kit)
+  const RequestDetail = makeRequestDetail(kit, StackedBar)
+  const EventList = makeEventList(kit)
+  const FileCard = makeFileCard(kit, settings)
+  const Donut = makeDonut(kit)
+  const StatsContext = makeStatsContext(kit)
+  const StatsTiming = makeStatsTiming(kit, Donut)
+  const StatsTokens = makeStatsTokens(kit, Donut)
+  const PluginInfo = makePluginInfo(kit)
+  const ContextBrowser = makeContextBrowser(kit, StackedBar)
+  const AgentGraph = makeAgentGraph(ctx, kit)
+  const ErrorBoundary = makeErrorBoundary(t)
+
+  // The body renders under the error boundary: a corrupt projection value (past the timelineOf shape guard) degrades to a styled error
+  // card, not a white screen; the boundary itself has NO hooks, so the body's hook order and loading/data flow stay unchanged.
+  function ContextViewBody(props: ContextViewProps): ReactNS.ReactElement {
+    const sessionId = props.sessionId
+    const data = typeof props.useProjection === 'function'
+      ? timelineOf(props.useProjection('contextTimeline'))
+      : null
+    // Official token-meter `contextPressure` projection — the same key the chat's context ring reads; token-meter owns estimation, the Host
+    // no longer mirrors it. Absent → derived fallback.
+    const pressure = typeof props.useProjection === 'function'
+      ? contextPressureOf(props.useProjection('contextPressure'))
+      : null
+    // Official token-meter `tokenUsage` projection — the same data the chat stats line below the input box reads for its '缓存命中' figure, so
+    // the stats board's cache-hit cell reuses it verbatim; absent → the cell drops to a dash instead of estimating.
+    const usage = typeof props.useProjection === 'function'
+      ? tokenUsageOf(props.useProjection('tokenUsage'))
+      : null
+    // Official token-meter `contextBreakdown` projection — the exact rows the chat ring's click-open panel shows, so the overview legend
+    // reads identically by construction; absent → the fold's own same-estimator sums inside headlineOf.
+    const breakdown = typeof props.useProjection === 'function'
+      ? contextBreakdownOf(props.useProjection('contextBreakdown'))
+      : null
+    // `contextHeaders` companion projection (full system prompt + tool schemas) for the Context browser; absent key = older Host half →
+    // those sections degrade to tokens-only with a note.
+    const headers = typeof props.useProjection === 'function'
+      ? headersOf(props.useProjection('contextHeaders'))
+      : null
+    const [selectedSeq, setSelectedSeq] = React.useState<number | null>(null)
+    const [hoveredSeq, setHoveredSeq] = React.useState<number | null>(null)
+    const [hoverTurn, setHoverTurn] = React.useState<number | null>(null)
+    // Mount-time default from the plugin settings card; in-chart toggling stays mount-local and never writes back.
+    const [granularity, setGranularity] = React.useState<'step' | 'turn'>(() => settings.defaultGranularity())
+    // 'total' plots each request's cumulative composition, 'delta' its incremental change vs the previous one;
+    // like granularity, the default is read at mount and in-chart toggling never writes back.
+    const [trendMode, setTrendMode] = React.useState<'total' | 'delta'>(() => settings.defaultTrendMode())
+    // Strip-clicked turn: chart switches to turn granularity and scroll-centers that turn's bar, then clears via onFocusTurnHandled.
+    const [focusTurn, setFocusTurn] = React.useState<number | null>(null)
+    // Chat → Context jump: the assistant-action relay's one-shot request, held until the projection data is in, then resolved into a
+    // turn-level pin below (mirrors the strip-click's consume-once focus flow).
+    const [jumpSeq, setJumpSeq] = React.useState<number | null>(null)
+    const [hoverCat, setHoverCat] = React.useState<string | null>(null)
+    const [pickedKinds, setPickedKinds] = React.useState<string[]>([...EVENT_KINDS])
+    const toggleKind = (k: string) => {
+      setPickedKinds((p) => {
+        if (p.length === EVENT_KINDS.length) return [k]
+        if (!p.includes(k)) return [...p, k]
+        return p.length === 1 ? [...EVENT_KINDS] : p.filter(x => x !== k)
+      })
+    }
+    // Step-brief → browser reveal bridge: one-shot focus request consumed by the Context browser.
+    const [nodeFocus, setNodeFocus] = React.useState<{ step: number | 'live'; seq: number; cat: SurfaceNode['cat'] } | null>(null)
+    const clearNodeFocus = React.useCallback(() => { setNodeFocus(null) }, [])
+
+    // Session-authorized durable-image loader for the browser's attachment cards, resolved through the harness conversation service —
+    // whichever face the running harness serves (`resolveImage` pre-0.1.2, `imageUrl` since); absent service/session degrades the cards
+    // to metadata-only, never an error.
+    const loadImage = React.useMemo(
+      () => imageLoaderOf(ctx, typeof sessionId === 'string' ? sessionId : undefined),
+      [ctx, sessionId],
+    )
+
+    // Targeted full-content fetch for browser nodes outside the conversation window (one seq-anchored history read per expanded row);
+    // absent face/session degrades to the static hint — never an error.
+    const fetchContent = React.useMemo(
+      () => (typeof sessionId === 'string' && sessionId !== '' ? makeContentFetcher(ctx, sessionId) : undefined),
+      [ctx, sessionId],
+    )
+    // On-demand header epoch content (system prompt text, tool schemas) for the Context browser — one seq-anchored history read per
+    // opened epoch; the `contextHeaders` projection carries metadata only. Same degradation shape as fetchContent.
+    const fetchHeader = React.useMemo(
+      () => (typeof sessionId === 'string' && sessionId !== '' ? makeHeaderFetcher(ctx, sessionId) : undefined),
+      [ctx, sessionId],
+    )
+
+    const rootRef = React.useRef<HTMLDivElement | null>(null)
+    const scrollerRef = React.useRef<HTMLElement | null>(null)
+    // The session whose position was already applied this mount — re-applying on re-renders would yank the reader's scroll.
+    const restoredRef = React.useRef<string | null>(null)
+
+    // Restore the saved position (or the top on first visit) in a layout effect, so the chat's bottom-anchored position never flashes in
+    // first.
+    React.useLayoutEffect(() => {
+      if (typeof sessionId !== 'string' || sessionId === '' || data === null) return
+      if (restoredRef.current === sessionId) return
+      restoredRef.current = sessionId
+      /* v8 ignore next 3 -- a layout effect body only runs while mounted and
+         both render paths attach rootRef, so the null arm cannot fire. */
+      const scroller = rootRef.current !== null
+        ? rootRef.current.closest('[data-conversation-scroll]')
+        : null
+      if (scroller === null) return
+      scrollerRef.current = scroller as HTMLElement
+      scroller.scrollTop = viewScroll.get(sessionId) ?? 0
+    }, [sessionId, data])
+
+    // Save the position on unmount/session change — a layout-effect cleanup, so it fires before the incoming view's own layout effects
+    // re-scroll the shared container.
+    React.useLayoutEffect(() => {
+      return () => {
+        if (typeof sessionId !== 'string' || sessionId === '') return
+        const scroller = scrollerRef.current
+        if (scroller === null) return
+        viewScroll.set(sessionId, scroller.scrollTop)
+      }
+    }, [sessionId])
+
+    // No locale subscription here: the harness slot outlet subscribes the
+    // LocaleFace revision and re-renders every entry on a locale switch, and
+    // the kit's bound `t` reads the active locale at call time.
+
+    // Hooks stay unconditional (Rules of Hooks): the projection value can arrive AFTER a loading first render, and an early return above
+    // these useMemos would grow the hook count between renders (React #310); fall back to empty collections and keep the loading return
+    // below the last hook.
+    const requests = data ? data.requests : []
+    const events = data ? data.events : []
+    const shownEvents = pickedKinds.length === EVENT_KINDS.length ? events : events.filter(e => pickedKinds.includes(e.kind))
+    // Per-step bars, or one per turn (each turn's LAST step's record); memoized so hover-driven re-renders keep bar props identity-stable —
+    // the chart's memoized bars then skip reconciliation (turn-mode aggregation allocates).
+    const displayRequests = React.useMemo(
+      () => (granularity === 'turn' ? aggregateByTurn(requests) : requests),
+      [requests, granularity],
+    )
+    const markers = React.useMemo(() => attachMarkers(displayRequests, events), [displayRequests, events])
+
+    // Chat → Context jump, leg 1: pick up the assistant-action relay's request for this session (once per mount).
+    React.useEffect(() => {
+      if (typeof sessionId !== 'string' || sessionId === '') return
+      const seq = takeContextFocus(sessionId)
+      if (seq !== null) setJumpSeq(seq)
+    }, [sessionId])
+
+    // Leg 2: the action row belongs to the reply that CLOSED a turn, so the jump is turn-level — flip the chart to turn bars, pin that
+    // turn's aggregate (the relayed seq is the turn's last request, exactly the aggregate's record), and center it: the same flow as a
+    // turn-strip click. An aged-out turn clamps to the oldest retained bar. No page-scroller anchor → the reset degrades quietly.
+    React.useEffect(() => {
+      if (jumpSeq === null || data === null) return
+      setJumpSeq(null)
+      const target = jumpTargetOf(aggregateByTurn(requests), jumpSeq)
+      if (target === null) return
+      setGranularity('turn')
+      setSelectedSeq(target.seq)
+      setFocusTurn(target.turn ?? 0)
+      // The restore layout effect resolved the shared scroller on this same data render (layout effects precede this one).
+      if (scrollerRef.current !== null) scrollerRef.current.scrollTop = 0
+    }, [jumpSeq, data, requests])
+
+    // Step-brief raw material: every served node seq-sorted (live tail + archive), and the conversation-snapshot
+    // join the brief uses for call-argument enrichment (same join the Context browser builds).
+    const briefList = React.useMemo(() => (data ? briefNodes(data) : []), [data])
+    // The conversation-window join, from whichever seat the harness provides
+    // (`useChat` on 0.1.2+, the session snapshot before it). Both seats are
+    // real hooks — invoked unconditionally per render (stable order), only
+    // the result picked; undefined join = render without it, never an error.
+    const convNodes = conversationNodesOf(props)
+    const bySeq = React.useMemo(() => {
+      const m = new Map<number, ConversationNodeLike>()
+      for (const n of convNodes ?? []) m.set(n.seq, n)
+      return m
+    }, [convNodes])
+
+    // Active bar / pin lookup — derived BEFORE the loading-return so the hooks below stay unconditional (React #310).
+    let pinnedIdx = -1
+    for (let i = 0; i < displayRequests.length; i++) if (displayRequests[i].seq === selectedSeq) pinnedIdx = i
+    const pinnedReq = pinnedIdx >= 0 ? displayRequests[pinnedIdx] : null
+    let activeIdx = -1
+    if (hoveredSeq !== null) {
+      for (let i = 0; i < displayRequests.length; i++) if (displayRequests[i].seq === hoveredSeq) { activeIdx = i; break }
+    }
+    if (activeIdx < 0) activeIdx = pinnedIdx
+    if (activeIdx < 0 && displayRequests.length > 0) activeIdx = displayRequests.length - 1
+    const activeReq = activeIdx >= 0 ? displayRequests[activeIdx] : null
+    // File activity follows the same active bar: the EXCLUSIVE upper bound is the next RAW request's seq, so the picked step's own
+    // tool calls (results land before the next request) count too; the latest bar's null bound serves everything.
+    let filesBefore: number | null = null
+    if (activeReq !== null) {
+      // The active bar's seq always exists in the raw list (turn aggregates keep their last step's record).
+      const ri = requests.findIndex(r => r.seq === activeReq.seq)
+      filesBefore = ri + 1 < requests.length ? requests[ri + 1].seq : null
+    }
+    // The active bar's semantic identity ("what this step was about"); pure derivation over the served nodes, null when nothing is known.
+    const brief = React.useMemo(
+      () => (activeReq !== null ? briefOf(briefList, displayRequests, activeIdx) : null),
+      [activeReq, briefList, displayRequests, activeIdx],
+    )
+    const convOf = React.useCallback((seq: number): ConversationNodeLike | undefined => bySeq.get(seq), [bySeq])
+
+    // File activity follows the same active bar: recomputed when the brief source, the conversation join, or the
+    // upper bound moves — hover/select elsewhere (composition chips, kind filters) leaves every input reference
+    // untouched, so the whole-fold activityOf walk is skipped on those renders.
+    const fileActivity = React.useMemo(
+      () => activityOf(briefList, convOf, filesBefore),
+      [briefList, convOf, filesBefore],
+    )
+    // The session's workspace root — './'-relative row paths when known; read per
+    // render (an observable snapshot), so the next projection push re-renders with it.
+    const workspace = typeof ctx.get === 'function' ? workspaceOf(ctx, typeof sessionId === 'string' ? sessionId : undefined) : undefined
+    // The system-opener affordance rides the same ctx; both resolve before the early return.
+    const fileOpener = React.useMemo(
+      () => (typeof ctx.get === 'function' && canOpenPathsOf(ctx) ? openPathVia(ctx) : undefined),
+      [ctx],
+    )
+    const locateFileOp = React.useCallback((op: FileOp): void => {
+      // A nested Code-Mode op has no surface row of its own — it reveals on
+      // its parent run_code result (whose removal stamp the op carries).
+      const seq = op.parent ?? op.seq
+      const step = locateStepOf(requests, seq, op.gone)
+      if (step === null) return
+      setNodeFocus({ step, seq, cat: 'tool' })
+    }, [requests])
+    // A brief row's reveal target: inputs/opener live in the picked step's OWN assembled surface; the response node (seq === the
+    // request's) first appears in the NEXT step's surface — or the live surface when the last bar is picked.
+    const locateNode = React.useCallback((node: SurfaceNode, isResponse: boolean): void => {
+      /* v8 ignore next 1 -- locateNode is only wired to brief rows, and
+         brief !== null guarantees activeReq !== null in the same closure. */
+      if (activeReq === null) return
+      const next = isResponse && activeIdx + 1 < displayRequests.length ? displayRequests[activeIdx + 1] : null
+      const step: number | 'live' = isResponse ? (next !== null ? next.seq : 'live') : activeReq.seq
+      setNodeFocus({ step, seq: node.seq, cat: node.cat })
+    }, [activeReq, activeIdx, displayRequests])
+
+    if (!data) {
+      return <div className="lc-root" ref={rootRef}><div className="lc-empty">{t('loading')}</div></div>
+    }
+
+    const markerOf = (req: RequestRecord): ContextEventRecord | undefined => {
+      const i = displayRequests.indexOf(req)
+      /* v8 ignore next 1 -- the only caller passes displayRequests[activeIdx],
+         an element of the very array indexOf scans. */
+      return i >= 0 ? markers[i] : undefined
+    }
+
+    // Provider-anchored CURRENT occupancy (contextPressure.projectedTokens): the headline, because the fixed 4-chars/token heuristic
+    // undercounts CJK by ~10–15% — proportions stay heuristic but are anchored to the real billed total. Shared with the /context popup
+    // (headline.ts); composition rides the official `contextBreakdown` rows.
+    const head = headlineOf(data, pressure, breakdown)
+    let fileScope = t('files.scopeLatest')
+    if (activeReq !== null && filesBefore !== null) {
+      fileScope = activeReq.stepCount !== undefined && activeReq.stepCount > 1
+        ? t('detail.turn', { t: activeReq.turn ?? 0, n: activeReq.stepCount })
+        : t('detail.step', { t: activeReq.turn ?? 0, s: activeReq.step ?? 0 })
+    }
+
+    // Turn highlight is hover-only: the turn strip hover wins, then the hovered bar's turn — no fallback, so a pinned or default selection
+    // never keeps a turn glowing.
+    let activeTurn: number | null = hoverTurn
+    if (activeTurn === null && hoveredSeq !== null) {
+      for (const req of displayRequests) if (req.seq === hoveredSeq) { activeTurn = req.turn ?? null; break }
+    }
+
+    // The trend card mirrors the SAME shared category hover the browser's live link uses: the overview's 'free' key drops
+    // (no segment in the chart or the detail bar), and every bar + the detail bar light that category's segment.
+    const trendHoverCat = hoverCat !== null && hoverCat !== 'free' ? hoverCat : null
+
+    // The cost cell prices in the active locale (zh → CNY, else USD), read at render time — the locale subscription above already
+    // re-renders on a switch; older hosts without getLocale fall back to USD.
+    const localeSvc = ctx.get('locale')
+    const activeLocale = localeSvc !== undefined && typeof localeSvc.getLocale === 'function'
+      ? localeSvc.getLocale().active
+      : 'en'
+    const subtitle = (data.model ?? '') + (data.provider ? ' · ' + data.provider : '')
+
+    return (
+      <div className="lc-root" ref={rootRef}>
+
+        <div className="lc-cols lc-head">
+          <StatsContext requests={requests} events={events} toolCalls={data.toolCalls} images={data.images}
+            cost={data.cost} locale={activeLocale} />
+          <StatsTokens usage={usage} />
+          <StatsTiming timing={data.timing ?? null} locale={activeLocale} />
+          <PluginInfo />
+        </div>
+
+        <div className="lc-cols">
+          <div className="lc-col">
+            <CurrentComposition
+              head={head}
+              subtitle={subtitle}
+              hoverKey={hoverCat}
+              onHoverKey={setHoverCat}
+            />
+
+            <div className="lc-card">
+              <div className="lc-card-title">
+                <span className="lc-card-title-text">{t('trend.title')}</span>
+                <span className="lc-card-sub">{t('trend.hint')}</span>
+                <div className="lc-trend-ctl">
+                  <div className="lc-gran">
+                    <button
+                      className={'lc-gran-btn' + (granularity === 'step' ? ' lc-gran-on' : '')}
+                      onClick={() => { setGranularity('step') }}
+                    >{t('gran.step')}</button>
+                    <button
+                      className={'lc-gran-btn' + (granularity === 'turn' ? ' lc-gran-on' : '')}
+                      onClick={() => { setGranularity('turn') }}
+                    >{t('gran.turn')}</button>
+                  </div>
+                  <div className="lc-gran" title={t('gran.modeHint')}>
+                    <button
+                      className={'lc-gran-btn' + (trendMode === 'total' ? ' lc-gran-on' : '')}
+                      onClick={() => { setTrendMode('total') }}
+                    >{t('gran.total')}</button>
+                    <button
+                      className={'lc-gran-btn' + (trendMode === 'delta' ? ' lc-gran-on' : '')}
+                      onClick={() => { setTrendMode('delta') }}
+                    >{t('gran.delta')}</button>
+                  </div>
+                </div>
+              </div>
+              {displayRequests.length === 0
+                ? <div className="lc-empty">{t('trend.empty')}</div>
+                : (
+                  <div>
+                    <TrendChart
+                      // Remount per session: switching sessions re-anchors the chart at the newest bars instead of inheriting stale scroll
+                      // state.
+                      key={sessionId}
+                      // Render ALL retained requests (bounded by the host's maxKeptTurns/maxRequestSteps config) so earlier turns/steps
+                      // stay reachable via horizontal scroll.
+                      requests={displayRequests}
+                      markers={markers}
+                      selectedSeq={pinnedReq ? pinnedReq.seq : null}
+                      hoveredSeq={hoveredSeq}
+                      activeTurn={activeTurn}
+                      granularity={granularity}
+                      mode={trendMode}
+                      focusTurn={focusTurn}
+                      hoverCat={trendHoverCat}
+                      onSelect={setSelectedSeq}
+                      onHover={setHoveredSeq}
+                      onHoverTurn={setHoverTurn}
+                      onPickTurn={(turn) => { setGranularity('turn'); setFocusTurn(turn) }}
+                      onFocusTurnHandled={() => { setFocusTurn(null) }}
+                    />
+                    <RequestDetail
+                      request={activeReq}
+                      // Delta mode pairs the detail with the SAME previous record the chart diffs against (first bar: null).
+                      prev={trendMode === 'delta' && activeIdx >= 0 ? (activeIdx > 0 ? displayRequests[activeIdx - 1] : null) : undefined}
+                      /* v8 ignore next 1 -- RequestDetail renders only when
+                         displayRequests.length > 0, which forces activeReq
+                         non-null via the activeIdx fallback above. */
+                      marker={activeReq !== null ? markerOf(activeReq) : undefined}
+                      brief={brief}
+                      convOf={convOf}
+                      onLocate={locateNode}
+                      hoverKey={trendHoverCat}
+                    />
+                  </div>
+                )}
+            </div>
+          </div>
+
+          {/* `lc-col-browser` stretches the browser card to the left column's height — Context tab only; the /context modal must stay
+              content-sized.
+              */}
+          <div className="lc-col lc-col-browser">
+            <ContextBrowser
+              data={data}
+              headers={headers}
+              convNodes={convNodes}
+              fetchContent={fetchContent}
+              fetchHeader={fetchHeader}
+              previewSeq={hoveredSeq}
+              pinSeq={pinnedReq !== null ? pinnedReq.seq : null}
+              hoverKey={hoverCat}
+              onHoverKey={setHoverCat}
+              nodeFocus={nodeFocus}
+              onNodeFocusHandled={clearNodeFocus}
+              loadImage={loadImage}
+            />
+          </div>
+        </div>
+
+        <div className="lc-cols">
+          <div className="lc-card lc-col">
+            <div className="lc-card-title">
+              <span className="lc-card-title-text">{t('events.title')}</span>
+              <div className="lc-kinds">
+                {EVENT_KINDS.map(k => (
+                  <button
+                    key={k}
+                    className={'lc-gran-btn' + (pickedKinds.includes(k) ? ' lc-gran-on lc-kind-' + k : '')}
+                    onClick={() => { toggleKind(k) }}
+                  >{t('kind.' + k)}</button>
+                ))}
+              </div>
+            </div>
+            <EventList events={shownEvents} />
+          </div>
+          <FileCard activity={fileActivity} scope={fileScope} workspace={workspace} onOpen={fileOpener} onLocate={locateFileOp} />
+        </div>
+
+        <AgentGraph
+          sessionId={typeof sessionId === 'string' ? sessionId : undefined}
+          self={{
+            head,
+            billed: usage !== null ? numOf(usage.uncachedInputTokens) + numOf(usage.outputTokens)
+              + numOf(usage.cacheReadTokens) + numOf(usage.cacheWriteTokens) : null,
+            requests: requests.length,
+          }}
+        />
+
+        <div className="lc-foot">{t('footer')}</div>
+      </div>
+    )
+  }
+
+  return function ContextView(props: ContextViewProps): ReactNS.ReactElement {
+    return h(ErrorBoundary, null, h(ContextViewBody, props))
+  }
+}
