@@ -12,13 +12,13 @@
       "path": "../../../vendor/cordis"
     },
     {
+      "path": "../../../vendor/schemastery"
+    },
+    {
       "path": "../ui-slots"
     },
     {
       "path": "../ui-primitives"
-    },
-    {
-      "path": "../ui-layout"
     },
     {
       "path": "../ui-renderer"
@@ -40,9 +40,6 @@
     },
     {
       "path": "../../settings/settings"
-    },
-    {
-      "path": "../../runtime-diagnostics/invariants"
     },
     {
       "path": "../../api/remotes/tsconfig.client.json"

@@ -29,7 +29,7 @@ kind: "package-reference"
 
 ### 何时选择
 
-当消费方受益于每会话一份产物——导航、外部工具或可逐行读取的原始日志——时选择此后端。当单一可查询数据库更适合部署时，选择 [SQLite](../session-persistence-sqlite/README.zh.md)。后端把会话保存在部署控制的根下：项目本地、共享、临时或集中式。
+当消费方受益于每会话一份产物——导航、外部工具或可逐行读取的原始日志——时选择此后端。它是随产品交付的唯一 Session 持久化 provider。后端把会话保存在部署控制的根下：项目本地、共享、临时或集中式。
 
 ### 最小配置
 
@@ -54,7 +54,7 @@ kind: "package-reference"
 
 ### 磁盘布局
 
-每个会话在可读项目目录下获得一个会话自有目录；日志第一个逻辑行是不可变 `SessionHeader`，之后每个逻辑事件一条存储记录（或每个符合条件的连续段一条打包分片行）。存储记录使用下文所述的无损来源序列表示：
+每个会话在可读项目目录下获得一个会话自有目录；第一个逻辑行是私有 v0 物理 header，之后每个逻辑事件一条存储记录（或每个符合条件的连续段一条打包分片行）。其可选数字 `seedLength` 保持字节兼容：缺席解码为 `SessionHeader.isSeeded: false`，零或正值解码为 `isSeeded: true` 加精确 `inheritedEventCount`。存储记录使用下文所述的无损来源序列表示：
 
 ```text
 <root>/
@@ -72,7 +72,7 @@ kind: "package-reference"
 
 ### 读取日志
 
-`inspect(id)` 返回不可变的平衡视图，不提交恢复。`readFrom(id, fromSeq)` 为水位消费方返回该序列号及之后的已存储事件；JSONL 这类顺序介质解析整个产物并向前跳过。选择 `compression: 'none'` 后，日志是外部读取方可直接消费的换行分隔文本；压缩默认值必须经后端读取。
+`inspect(id)` 返回带精确继承切点的不可变平衡视图，不提交恢复。`readFrom(id, fromOffset)` 接受 `SessionLogOffset`，返回该偏移及之后的已存储事件，并在后缀旁保留同一切点；JSONL 这类顺序介质解析整个产物并向前跳过。仅 header 的列表读取不读事件正文即可公开 `isSeeded`。选择 `compression: 'none'` 后，日志是外部读取方可直接消费的换行分隔文本；压缩默认值必须经后端读取。
 
 -----
 
@@ -88,8 +88,6 @@ kind: "package-reference"
 
 该后端是共享 [PersistenceCoordinator](../session-persistence/README.zh.md#understand-the-implementation) 之上的一层薄存储：它加载已存储记录、追加批次、提交修复，并把生命周期编排委托给协调器。其物理身份是文件修订值：device、inode、size 与纳秒时间戳标识一份日志，并在追加或修复后改变，这正是 `listSnapshots` 与保留准备结果校验所使用的身份。
 
-并发 `list()` 与 `listSnapshots()` 调用共享一次元数据发现和每个产物的一次 `stat`。经过验证的 header 会在对应文件修订值保持不变时复用；每个调用方获得独立的 header 对象，取消一个调用方只会拒绝它自己的等待，不会取消共享扫描。
-
 ### 物理编码
 
 默认产物是独立 [Zstandard 帧](../../../.agents/notes/implemented/architecture/2026-07-19-zstandard-jsonl-session-logs.zh.md) 的标准拼接：一个仅包含 header 行的带校验和帧，后跟每个持久 append 批次一个带校验和帧，使用 Node 内置 Zstandard API 的默认压缩级别（无级别开关）。`sourceEventSeqs` 使用无损存储形式：至少包含三个序列号的连续段会变成 `[start, end]` 区间对，其他列表原样保留；读取时会展开回精确的内存数组。列表只读取并验证 header 帧。`compression: 'none'` 保留相同的存储形式逻辑行，但不使用帧压缩。一个根只属于一种编码：启动发现与定向查找会拒绝相反后缀，且不提供格式或压缩迁移、混合根回退或双写。启用 `packChunks` 时，符合条件的 ≥3 个连续同 block `assistant/chunk` delta 事件连续段会变成一行打包行（`text-chunks`/`reasoning-chunks`/`tool-call-chunks`），其 `seq0`/`time0` 与各成员的 `dt` 间隔精确重建每个成员；无损 codec 位于 `dsh-session`，读取与布局无关，因此打包、非打包与混合文件加载结果一致。
@@ -102,7 +100,7 @@ kind: "package-reference"
 | [`src/format.ts`](src/format.ts) | 日志路径派生、header 编码、记录扫描、打包行布局 |
 | [`src/zstd.ts`](src/zstd.ts) | Zstandard 帧压缩、解码与帧扫描 |
 | [`src/win32.ts`](src/win32.ts) | Windows write-through 发布与目录创建 |
-| [`src/invariant.ts`](src/invariant.ts) | 不变式伴生插件（无运行时不变式；身份在存储层强制） |
+| — | 不发布运行时不变式伴生入口；身份在存储层强制。 |
 
 </details>
 
@@ -115,7 +113,6 @@ kind: "package-reference"
 
 - [会话持久化子系统](../../../docs/subsystems/persistence.zh.md)——后端无关的服务语义与提供方关系。
 - [会话持久化 seam](../session-persistence/README.zh.md)——本后端实现的服务约定。
-- [SQLite 持久化后端](../session-persistence-sqlite/README.zh.md)——可选启用的单数据库替代方案。
 - [项目会话目录决策](../../../.agents/notes/implemented/architecture/2026-07-24-project-session-directories.zh.md)——项目与会话目录布局背后的取舍。
 - [Zstandard JSONL 会话日志](../../../.agents/notes/implemented/architecture/2026-07-19-zstandard-jsonl-session-logs.zh.md)——带校验和帧编码的理由。
 

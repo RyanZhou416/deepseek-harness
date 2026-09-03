@@ -8,23 +8,6 @@
 - id: tool-subagent-list-agents
   disabled: true
 
-- id: tool-subagent-report
-  disabled: true
-
-- id: tool-bash
-  config:
-    enableRunInBackground: true
-    forceRunInBackground: true
-
-- id: tool-pwsh
-  config:
-    enableRunInBackground: true
-    forceRunInBackground: true
-
-- id: tool-jobs
-  config:
-    yieldWaitOnNextStep: true
-
 - id: tool-subagent
   config:
     provider: spawn

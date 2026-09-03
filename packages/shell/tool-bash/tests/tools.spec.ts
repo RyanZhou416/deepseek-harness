@@ -11,7 +11,7 @@ import ToolRuntime, { TOOL_ABORTED, TOOL_ABORTED_BEFORE_DISPATCH } from '@deepse
 import AgentRegistry from '@deepseek-ai/dsh-agent'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { turnBoundaryProjectionDefinition } from '@deepseek-ai/dsh-agent-loop'
-import SessionStore, { SessionId } from '@deepseek-ai/dsh-session'
+import SessionStore, { SessionId, SessionLogOffset, SessionSeq } from '@deepseek-ai/dsh-session'
 import JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
 import LocalJobRegistry from '@deepseek-ai/dsh-jobs-local'
 import * as ToolTasks from '@deepseek-ai/dsh-tool-jobs'
@@ -45,7 +45,7 @@ async function setup() {
 }
 
 /** Full harness: the generic job runtime + its controller, then the bash tool. */
-async function setupWithTasks(toolConfig: ToolBash.Config = {}) {
+async function setupWithTasks() {
   const ctx = new Context()
   await ctx.plugin(SystemPrompt)
   await ctx.plugin(ToolRuntime)
@@ -56,7 +56,7 @@ async function setupWithTasks(toolConfig: ToolBash.Config = {}) {
   ;(ctx.subprocess as LocalSubprocessRuntime).internals = { spillDir }
   await ctx.plugin(BashEnvPlugin)
   await ctx.plugin(LocalBashExecutor, { timeoutMs: 10_000, graceMs: 200 })
-  await ctx.plugin(ToolBash, toolConfig)
+  await ctx.plugin(ToolBash)
   return ctx
 }
 
@@ -205,18 +205,37 @@ function sandboxAgent(
   ctx?: Context,
   onAppend?: (type: string) => void,
 ): Agent {
-  const events: Array<{ type: string; data?: Record<string, unknown> }> = [{ type: 'turn/start', data: { turn: 1 } }]
-  if (mode !== undefined) events.push({ type: 'sandbox/mode', data: { mode } })
+  const events: Array<{
+    type: string
+    seq: ReturnType<typeof SessionSeq>
+    time: number
+    data: Record<string, unknown>
+  }> = [{ type: 'turn/start', seq: SessionSeq(0), time: 0, data: { turn: 1 } }]
+  if (mode !== undefined) {
+    events.push({ type: 'sandbox/mode', seq: SessionSeq(1), time: 1, data: { mode } })
+  }
   const id = SessionId('sandbox-session')
   return {
     id,
     ...ctx === undefined ? {} : { ctx: ctx.plugin(() => {}).ctx },
     session: {
       id,
-      header: { version: 0, id, createdAt: 0 },
-      events,
+      header: { version: 0, id, createdAt: 0, isSeeded: false },
+      inheritedEventCount: SessionLogOffset(0),
+      firstLiveSeq: SessionLogOffset(0),
+      get seq() { return SessionLogOffset(events.length) },
+      eventAt: (seq: ReturnType<typeof SessionSeq>) => events[seq],
+      snapshotEvents: (
+        fromSeq = SessionLogOffset(0),
+        toSeqExclusive = SessionLogOffset(events.length),
+      ) => events.slice(fromSeq, toSeqExclusive),
       append: (type: string, data: Record<string, unknown>) => {
-        const event = { type, data }
+        const event = {
+          type,
+          seq: SessionSeq(events.length),
+          time: events.length,
+          data,
+        }
         events.push(event)
         onAppend?.(type)
         return event
@@ -449,36 +468,6 @@ describe('bash tool', () => {
 })
 
 describe('background execution through the job runtime', () => {
-  it('can force every command into a background job without a model argument', async () => {
-    const ctx = await setupWithTasks({ forceRunInBackground: true })
-    const schema = ctx.tools.schemas().find(candidate => candidate.name === 'bash')!
-    expect(schema.parameters.properties).not.toHaveProperty('run_in_background')
-    expect(schema.description).toContain('Every command starts an owner-scoped background job')
-
-    const started = await call(ctx, 'bash', { command: 'echo forced', description: 'test command' })
-    expect(started.value).toEqual({ kind: 'background', jobId: 'bash-1' })
-    expect(ctx.tools.get('bash')?.presentCall?.({ command: 'echo forced', description: 'test command' }))
-      .toMatchObject({ card: 'generic' })
-    await call(ctx, 'job_output', { job_id: 'bash-1', wait: true })
-  })
-
-  it('defers forced background mode until jobs arrives and rejects incompatible config', async () => {
-    const ctx = new Context()
-    await ctx.plugin(SystemPrompt)
-    await ctx.plugin(ToolRuntime)
-    await ctx.plugin(LocalSubprocessRuntime)
-    await ctx.plugin(BashEnvPlugin)
-    await ctx.plugin(LocalBashExecutor, {})
-    await ctx.plugin(ToolBash, { forceRunInBackground: true })
-    expect(ctx.tools.get('bash')).toBeUndefined()
-    await ctx.plugin(LocalJobRegistry)
-    await new Promise(resolve => setTimeout(resolve, 0))
-    expect(ctx.tools.get('bash')).toBeDefined()
-    await expect(ctx.plugin(ToolBash, {
-      enableRunInBackground: false, forceRunInBackground: true,
-    })).rejects.toThrow('requires enableRunInBackground')
-  })
-
   it('run_in_background acks with the job id, readable through the REAL job_output tool', async () => {
     const ctx = await setupWithTasks()
     const started = await call(ctx, 'bash', { command: 'echo bg-ok', description: 'test command', run_in_background: true })
@@ -655,10 +644,10 @@ describe('sandbox escalation through the generic task producer', () => {
     expect(prompted).not.toHaveBeenCalled()
 
     const malformed = sandboxAgent()
-    ;(malformed.session.events as unknown as Array<{ type: string; data: { mode: string } }>).push({
-      type: 'sandbox/mode',
-      data: { mode: 'unknown-mode' },
-    })
+    ;(malformed.session.append as unknown as (
+      type: string,
+      data: Record<string, unknown>,
+    ) => unknown)('sandbox/mode', { mode: 'unknown-mode' })
     expect(text(await call(ctx, 'bash', escalate, malformed))).toContain('not strictly wider')
   })
 

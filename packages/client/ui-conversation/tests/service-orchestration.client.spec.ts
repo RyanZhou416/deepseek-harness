@@ -75,22 +75,6 @@ describe('ConversationController', () => {
     } as never)
     await expect(b.scoped.updateQueue('item-2' as never, { kind: 'steer' })).resolves.toBeUndefined()
     b.updateQueue.mockResolvedValueOnce({
-      ok: false,
-      error: new RemoteError('subagent/queue-item-not-found', 'claimed', {
-        parentSessionId: 'parent', childSessionId: 'child', itemId: 'item-subagent',
-      } as never),
-    } as never)
-    await expect(b.scoped.updateQueue('item-subagent' as never, { kind: 'steer' }))
-      .resolves.toBeUndefined()
-    b.updateQueue.mockResolvedValueOnce({
-      ok: false,
-      error: new RemoteError('subagent/steer-unavailable', 'closed', {
-        parentSessionId: 'parent', childSessionId: 'child', itemId: 'item-subagent',
-      } as never),
-    } as never)
-    await expect(b.scoped.updateQueue('item-subagent' as never, { kind: 'steer' }))
-      .resolves.toBeUndefined()
-    b.updateQueue.mockResolvedValueOnce({
       ok: false, error: new RemoteError('session/queue-item-not-found', 'claimed', { itemId: 'item-1' as QueuedMessage['id'] }),
     } as never)
     await expect(b.scoped.updateQueue('item-3' as never, { kind: 'remove' }))
@@ -201,6 +185,7 @@ describe('sendSession submission echo', () => {
       const sending = b.root.sendSession(session, '带图', [attachment!.id], 'queue')
       // Synchronous: the echo is registered before any encoding starts.
       expect(b.beginSubmission).toHaveBeenCalledWith(expect.objectContaining({
+        mode: 'queue',
         text: '带图',
         images: [expect.objectContaining({ previewUrl: 'blob:echo-1', name: 'a.png' })],
       }))
@@ -221,6 +206,29 @@ describe('sendSession submission echo', () => {
       await expect(sending).resolves.toEqual({ kind: 'success' })
       expect(b.root.draftImages([attachment!.id])).toEqual([])
       expect(b.revoked).toHaveBeenCalledWith('blob:echo-1')
+    } finally {
+      b.restore()
+    }
+    await b.runtime.dispose()
+  })
+
+  it('passes each delivery mode before image serialization', async () => {
+    const b = await echoBench()
+    try {
+      await b.runtime.sessions.updateSessionSnapshot('s1', (draft) => { draft.running = true })
+      const session = b.runtime.sessions.binding('s1')!.session
+      await expect(b.root.sendSession(session, '立即纠偏', [], 'steer'))
+        .resolves.toEqual({ kind: 'success' })
+      expect(b.beginSubmission).toHaveBeenLastCalledWith(expect.objectContaining({
+        mode: 'steer',
+        text: '立即纠偏',
+      }))
+      await expect(b.root.sendSession(session, '稍后处理', [], 'queue'))
+        .resolves.toEqual({ kind: 'success' })
+      expect(b.beginSubmission).toHaveBeenLastCalledWith(expect.objectContaining({
+        mode: 'queue',
+        text: '稍后处理',
+      }))
     } finally {
       b.restore()
     }

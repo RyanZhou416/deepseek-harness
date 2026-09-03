@@ -1,17 +1,25 @@
 import { useMemo, useState, type KeyboardEvent, type MouseEvent, type ReactNode } from 'react'
 import clsx from 'clsx'
 import {
-  DisclosureRow, StateDot, diffTotals,
+  CodeBlock, DiffBlock, DisclosureRow, IconInspectOutline12, ReadBlock, SearchBlock, StateDot, TerminalBlock, WebBlock,
+  diffTotals,
 } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { TranslateNS } from '@deepseek-ai/dsh-client-ui-slots'
-import type { DiffCardModel } from '../models/diff-card-model.ts'
-import type { ReadCardModel } from '../models/read-card-model.ts'
-import type { SearchCardModel } from '../models/search-card-model.ts'
-import { localizeTerminalCardModel, type TerminalCardModel } from '../models/terminal-card-model.ts'
+import { CHAT_DIFF_MAX_LINES, type DiffCardModel } from '../models/diff-card-model.ts'
+import { CHAT_READ_MAX_LINES, type ReadCardModel } from '../models/read-card-model.ts'
+import { CHAT_SEARCH_MAX_LINES, type SearchCardModel } from '../models/search-card-model.ts'
+import {
+  localizeTerminalCardModel, terminalBlockLabels, type TerminalCardModel,
+} from '../models/terminal-card-model.ts'
+import {
+  diffBlockLabels, readBlockLabels, searchBlockLabels, webBlockLabels,
+} from '../models/primitive-labels.ts'
 import type { AskQuestionCardModel } from '../models/ask-question-card-model.ts'
-import type { ToolRowDetailsModel, ToolRowState, ToolRowVariant } from '../models/tool-call-model.ts'
+import {
+  formatToolBody, type ToolRowState, type ToolRowVariant,
+} from '../models/tool-call-model.ts'
 import type { WebCardModelProps } from '../models/web-card-model.ts'
-import { ToolRowBody } from './ToolRowBody.tsx'
+import { AskQuestionCard } from './AskQuestionCard.tsx'
 import css from './ToolRow.module.css'
 
 export interface ToolRowProps {
@@ -30,10 +38,10 @@ export interface ToolRowProps {
    * error row, whose collapsed summary is the failure line instead.
    */
   summarySuffix?: string | null | undefined
-  /** Lazily derived input and output text for the expanded body. */
-  details: ToolRowDetailsModel
-  /** Whether the expanded generic body shows input arguments. */
-  showInput?: boolean | undefined
+  /** Original argument JSON formatted only while the row is expanded. */
+  bodyRaw?: string | null | undefined
+  /** Flattened result text for the expanded Output section; null/absent = no output section. */
+  output?: string | null | undefined
   /** Ask-user transcript card; card fields are mutually exclusive and replace text sections. */
   askQuestion?: AskQuestionCardModel | null | undefined
   /** Error first line shown as the collapsed summary on an error row; null/absent = keep `summary`. */
@@ -88,8 +96,8 @@ export function ToolRow({
   title,
   summary,
   summarySuffix,
-  details,
-  showInput = true,
+  bodyRaw,
+  output,
   askQuestion,
   errorSummary,
   terminal,
@@ -103,21 +111,31 @@ export function ToolRow({
   inspect,
 }: ToolRowProps) {
   const [expanded, setExpanded] = useState(false)
-  const terminalBody = terminal ?? null
+  const terminalLabels = useMemo(() => terminalBlockLabels(t), [t])
+  const diffLabels = useMemo(() => diffBlockLabels(t), [t])
+  const readLabels = useMemo(() => readBlockLabels(t), [t])
+  const searchLabels = useMemo(() => searchBlockLabels(t), [t])
+  const webLabels = useMemo(() => webBlockLabels(t), [t])
+  const terminalBody = terminal === undefined || terminal === null
+    ? null
+    : localizeTerminalCardModel(terminal, t)
   const diffBody = diff ?? null
   const readBody = read ?? null
   const searchBody = search ?? null
   const webBody = web ?? null
   const askQuestionBody = askQuestion ?? null
+  const outputText = output ?? null
   const card = askQuestionBody ?? terminalBody ?? diffBody ?? readBody ?? searchBody ?? webBody
-  const expandable = (showInput && details.hasBody) || details.hasOutput || card !== null
+  const expandable = bodyRaw != null || outputText !== null || card !== null
   const open = expanded && expandable
+  const bodyText = useMemo(
+    () => open && card === null && bodyRaw != null ? formatToolBody(variant, bodyRaw) : null,
+    [bodyRaw, card, open, variant],
+  )
   const status = stateStatus(state, t)
   // A failure must replace, not supplement, the normal summary.
   const failureLine = state === 'error' ? errorSummary ?? null : null
-  const summaryText = failureLine
-    ?? (terminalBody === null ? undefined : localizeTerminalCardModel(terminalBody, t).description)
-    ?? summary
+  const summaryText = failureLine ?? terminalBody?.description ?? summary
   // A diff row's collapsed line carries the card's +/- totals (the same
   // numbers the expanded footer prints) so the change size reads without
   // expanding; an explicit summarySuffix (none today on diff rows) wins.
@@ -142,6 +160,9 @@ export function ToolRow({
   const fileLinkKeyDown = (event: KeyboardEvent<HTMLButtonElement>) => {
     if (event.key === 'Enter' || event.key === ' ') event.stopPropagation()
   }
+  // The code variant's program renders through CodeBlock (shiki), so only its
+  // output joins the IN/OUT card; every other variant's input does too.
+  const cardBody = variant === 'code' ? null : bodyText
   return (
     <div className={css.root} data-variant={variant} data-tool={toolName} data-state={state}>
       {status !== null && <span className={css.visuallyHidden}>{status}</span>}
@@ -184,20 +205,81 @@ export function ToolRow({
           </>
         )}
       >
-        <ToolRowBody
-          t={t}
-          variant={variant}
-          details={details}
-          showInput={showInput}
-          state={state}
-          askQuestion={askQuestionBody}
-          terminal={terminalBody}
-          diff={diffBody}
-          read={readBody}
-          search={searchBody}
-          web={webBody}
-          inspect={inspect}
-        />
+        <div className={css.bodyWrap}>
+          {askQuestionBody !== null
+            ? <AskQuestionCard card={askQuestionBody} />
+            : terminalBody !== null
+              ? (
+                <TerminalBlock
+                  {...terminalBody.card}
+                  maxLines={Infinity}
+                  labels={terminalLabels}
+                  className={css.terminalBody}
+                />
+              )
+              : diffBody !== null
+                ? <DiffBlock {...diffBody.card} labels={diffLabels} maxLines={CHAT_DIFF_MAX_LINES} className={css.diffBody} />
+                : readBody !== null
+                  ? <ReadBlock {...readBody} labels={readLabels} maxLines={CHAT_READ_MAX_LINES} className={css.readBody} />
+                  : searchBody !== null
+                    ? (
+                      <>
+                        <SearchBlock
+                          {...searchBody.card}
+                          labels={searchLabels}
+                          maxLines={CHAT_SEARCH_MAX_LINES}
+                          className={css.searchBody}
+                        />
+                        {/* A capped search's recovery locator lives only in the result
+                          text; show it below the card so the dropped rows survive. */}
+                        {searchBody.recovery !== undefined && (
+                          <div className={css.searchRecovery}>{searchBody.recovery}</div>
+                        )}
+                      </>
+                    )
+                    : webBody !== null
+                      ? <WebBlock {...webBody} labels={webLabels} className={css.webBody} />
+                      : (
+                        <>
+                          {variant === 'code' && bodyText !== null && (
+                            <div className={css.bodyScroll}>
+                              <CodeBlock code={bodyText} lang="typescript" copyLabel={t('copy')} copiedLabel={t('copied')} className={css.codeBody} />
+                            </div>
+                          )}
+                          {(cardBody !== null || outputText !== null) && (
+                            <div className={css.ioCard}>
+                              {cardBody !== null && (
+                                <div className={css.ioSection}>
+                                  <span className={css.ioLabel}>{t('row.input')}</span>
+                                  <span className={css.ioText}>{cardBody}</span>
+                                </div>
+                              )}
+                              {cardBody !== null && outputText !== null && (
+                                <span className={css.ioDivider} aria-hidden />
+                              )}
+                              {outputText !== null && (
+                                <div className={css.ioSection}>
+                                  <span className={css.ioLabel}>{t('row.output')}</span>
+                                  <span className={css.ioText} data-error={state === 'error' || undefined}>
+                                    {outputText}
+                                  </span>
+                                </div>
+                              )}
+                            </div>
+                          )}
+                        </>
+                      )}
+          {inspect !== undefined && (
+            <button
+              type="button"
+              className={css.inspectButton}
+              onClick={inspect}
+            >
+              <IconInspectOutline12 />
+              {t('row.inspect')}
+            </button>
+          )}
+        </div>
       </DisclosureRow>
     </div>
   )

@@ -57,7 +57,7 @@ Try it by asking the Lead model: "create a teammate named reviewer to check the 
 The ten tools group into four capabilities:
 
 - **Create a teammate** — `spawn_teammate` takes a name, a description, and the initial task; only the Lead can call it.
-- **Send messages** — the Lead's `send_message` and `followup_task` both steer a teammate at its nearest step boundary; teammate callers retain quiet and next-turn delivery respectively.
+- **Send messages** — `send_message` delivers information without waking an idle teammate; `followup_task` makes the message the recipient's next turn and wakes it when needed.
 - **See and wait** — `list_agents` shows the roster with live status; `wait_agent` waits for the next team change; `interrupt_agent` stops a teammate's current turn (Lead only).
 - **Manage the task board** — `team_task_create`, `team_task_list`, `team_task_get`, and `team_task_update` add, browse, read, and update shared tasks.
 
@@ -92,7 +92,7 @@ The [Agent Teams Agent Note](../../../.agents/notes/implemented/feature/2026-08-
 | File | Role |
 |---|---|
 | [`src/index.ts`](src/index.ts) | Plugin entry: config, the fixed policy text, and the ten scoped tool registrations |
-| [`src/invariant.ts`](src/invariant.ts) | Invariant companion (no runtime invariant; delegation is observable only through `ctx.agentTeams`) |
+| — | No runtime invariant companion is published; the Team service owns durable and authorization relations. |
 
 ### Policy and tools
 

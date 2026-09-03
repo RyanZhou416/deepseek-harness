@@ -5,7 +5,7 @@ import type { FileHandle } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { performance } from 'node:perf_hooks'
-import SessionStore, { SessionId } from '@deepseek-ai/dsh-session'
+import SessionStore, { SessionId, SessionLogOffset, SessionSeq } from '@deepseek-ai/dsh-session'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
 import { logPath, scanLog, sessionDir, toHeaderLine, type JsonlCompression } from '../src/format.ts'
@@ -332,6 +332,22 @@ describe('Zstandard frame structure', () => {
 })
 
 describe('JsonlSessionPersistence: default Zstandard encoding', () => {
+  it('lists seeded metadata from the header frame without decoding the event body', async () => {
+    const root = await freshRoot()
+    const ctx = await mount(root)
+    const header = { ...meta('zstd-header-only-seeded', '/work'), isSeeded: true }
+    const path = logPath(root, '/work', header.id, 'zstd')
+    await mkdir(sessionDir(root, '/work', header.id), { recursive: true })
+    const headerFrame = await compressZstdFrame(
+      `${JSON.stringify(toHeaderLine(header, SessionLogOffset(0)))}\n`,
+    )
+    await writeFile(path, Buffer.concat([headerFrame, Buffer.from('invalid event frame')]))
+
+    await expect(ctx.sessionPersistence.list()).resolves.toEqual([
+      expect.objectContaining({ id: header.id, isSeeded: true }),
+    ])
+  })
+
   it('materializes an explicitly durable empty session as one header frame', async () => {
     const root = await freshRoot()
     const ctx = await mount(root)
@@ -342,7 +358,11 @@ describe('JsonlSessionPersistence: default Zstandard encoding', () => {
     const buffer = await readFile(logPath(root, '/work', session.id, 'zstd'))
     expect(scanZstdFrames(buffer).frames).toHaveLength(1)
     expect((await decodeCompleteFrames(buffer)).toString()).toBe(`${JSON.stringify(toHeaderLine(session.header))}\n`)
-    await expect(ctx.sessionPersistence.load(session.id)).resolves.toEqual({ meta: session.header, events: [] })
+    await expect(ctx.sessionPersistence.load(session.id)).resolves.toEqual({
+      meta: session.header,
+      inheritedEventCount: 0,
+      events: [],
+    })
   })
 
   it('writes .jsonl.zstd by default with one header frame and one first-batch frame', async () => {
@@ -423,13 +443,13 @@ describe('JsonlSessionPersistence: default Zstandard encoding', () => {
       ...base.slice(0, 3),
       ...Array.from({ length: 3 }, (_, index): SessionEvent => ({
         type: 'assistant/chunk',
-        seq: 3 + index,
+        seq: SessionSeq(3 + index),
         time: 4 + index,
         data: { turn: 1, step: 1, chunk: { type: 'text-delta', index: 0, text: `part-${index}` } },
       })),
       ...base.slice(3).map((event): SessionEvent => ({
         ...event,
-        seq: event.seq + 3,
+        seq: SessionSeq(event.seq + 3),
         time: event.time + 3,
       })),
     ]
@@ -479,29 +499,6 @@ describe('JsonlSessionPersistence: default Zstandard encoding', () => {
     await expect(ctx.sessionPersistence.load(header.id)).rejects.toThrow(/frame at byte .* failed validation/)
   })
 
-  it('reuses a validated header until the stat-derived log revision changes', async () => {
-    const root = await freshRoot()
-    const ctx = await mount(root)
-    const header = meta('listed-header-cache')
-    await ctx.sessionPersistence.create(header)
-    await ctx.sessionPersistence.append(header.id, oneTurnLog())
-    const persistence = ctx.sessionPersistence as unknown as {
-      readFirstZstdLine(path: string, signal?: AbortSignal): Promise<string | undefined>
-    }
-    const readHeader = vi.spyOn(persistence, 'readFirstZstdLine')
-
-    await expect(ctx.sessionPersistence.list()).resolves.toMatchObject([{ id: header.id }])
-    await expect(ctx.sessionPersistence.listSnapshots()).resolves.toMatchObject([{ header }])
-    expect(readHeader).toHaveBeenCalledOnce()
-
-    await ctx.sessionPersistence.append(header.id, [
-      { type: 'turn/start', seq: 6, time: 7, data: { turn: 2 } },
-      { type: 'turn/end', seq: 7, time: 8, data: { turn: 2, reason: { kind: 'completed' } } },
-    ] as SessionEvent[])
-    await expect(ctx.sessionPersistence.list()).resolves.toMatchObject([{ id: header.id }])
-    expect(readHeader).toHaveBeenCalledTimes(2)
-  })
-
   it('stops multi-frame inspection when cancellation arrives at a slice deadline', async () => {
     const root = await freshRoot()
     const ctx = await mount(root)
@@ -547,10 +544,6 @@ describe('JsonlSessionPersistence: default Zstandard encoding', () => {
       await ctx.sessionPersistence.create(header)
       await ctx.sessionPersistence.append(header.id, oneTurnLog())
       await ctx.sessionPersistence.list()
-      await ctx.sessionPersistence.append(header.id, [
-        { type: 'turn/start', seq: 6, time: 7, data: { turn: 2 } },
-        { type: 'turn/end', seq: 7, time: 8, data: { turn: 2, reason: { kind: 'completed' } } },
-      ] as SessionEvent[])
       const path = logPath(root, header.cwd, header.id, compression)
       const probe = await open(path, 'r')
       const prototype = Object.getPrototypeOf(probe) as { read: HeaderRead }

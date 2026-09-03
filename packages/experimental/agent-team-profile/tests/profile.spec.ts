@@ -37,10 +37,6 @@ describe('Agent Teams profile bundle', () => {
     }[]
     expect(patches.find(patch => patch.id === 'tool-subagent-control')).toMatchObject({ disabled: true })
     expect(patches.find(patch => patch.id === 'tool-subagent-list-agents')).toMatchObject({ disabled: true })
-    expect(patches.find(patch => patch.id === 'tool-subagent-report')).toMatchObject({ disabled: true })
-    expect(patches.find(patch => patch.id === 'tool-bash')?.config).toMatchObject({ forceRunInBackground: true })
-    expect(patches.find(patch => patch.id === 'tool-pwsh')?.config).toMatchObject({ forceRunInBackground: true })
-    expect(patches.find(patch => patch.id === 'tool-jobs')?.config).toMatchObject({ yieldWaitOnNextStep: true })
     expect(patches.find(patch => patch.id === 'tool-subagent')?.config).toMatchObject({ backgroundMode: 'one-shot' })
     expect(patches.find(patch => patch.id === 'tool-subagent-fork')?.config).toMatchObject({ backgroundMode: 'one-shot' })
     const inserted = patches.flatMap(patch => patch.insert ?? [])

@@ -29,7 +29,7 @@ kind: "package-reference"
 
 ### 三个工具
 
-- `job_output(job_id, wait?, timeout_ms?)`——读取任务输出。流任务只返回自上次读取以来的输出；最终输出任务在结算后返回其结果。每个响应都以 `[status: ...]` 结尾。除非 `wait: true`，否则读取是非阻塞的；启用 `yieldWaitOnNextStep` 后，next-step 输入也会结束该等待，但不会取消任务。
+- `job_output(job_id, wait?, timeout_ms?)`——读取任务输出。流任务只返回自上次读取以来的输出；最终输出任务在结算后返回其结果。每个响应都以 `[status: ...]` 结尾。除非 `wait: true`，否则读取是非阻塞的；`wait: true` 最多等待到配置上限，超时时仍让运行中的任务保持存活。
 - `job_list()`——列出你的后台任务及其 id、kind 与状态，每行一个：`<id> [<kind>] <status> — <label>`。
 - `job_kill(job_id, reason?)`——立即请求取消运行中的任务；任务在其工作真正停止后以 `killed` 结算。终止任务返回其当前快照，可选的原因会被记录并转发给任务。
 
@@ -55,13 +55,12 @@ kind: "package-reference"
 | `maxWaitTimeoutMs` | `600,000` | 模型所给等待时间的上限；更大的值向下收敛到它 |
 | `completionDelivery` | `wakeup` | `wakeup` 为空闲所有者开启一轮；`quiet` 让通知继续待领 |
 | `maxConsecutiveWakes` | `3` | 一个所有者可由唤醒开启的轮数，超出后通知降级为注入 |
-| `yieldWaitOnNextStep` | `false` | next-step 输入到达所属 agent 时结束阻塞中的 `job_output` 等待 |
 
 生成的[配置目录](../../../docs/config-catalog.zh.md#deepseek-aidsh-tool-jobs)是每个受支持字段及其 JSDoc 的穷尽式真源。
 
 ### 可能出什么问题
 
-组合中未加载 `tool-jobs` 的 agent 无法启动后台工作：本插件的控制器正是生产方 `ctx.jobs.start()` 得以启用所依赖的。模型给出的等待时间超过 `maxWaitTimeoutMs` 时会向下收敛到上限。超时与配置的 next-step 让出都会返回 `[status: running]`，并保持在线任务不变。待领于空闲所有者的完成通知无法在该所有者释放后存活。
+组合中未加载 `tool-jobs` 的 agent 无法启动后台工作：本插件的控制器正是生产方 `ctx.jobs.start()` 得以启用所依赖的。模型给出的等待时间超过 `maxWaitTimeoutMs` 时会向下收敛到上限，超时的等待返回 `[status: running]` 并让任务保持存活，而不是失败。待领于空闲所有者的完成通知无法在该所有者释放后存活。
 
 -----
 
@@ -84,7 +83,7 @@ kind: "package-reference"
 | 文件 | 职责 |
 |---|---|
 | [`src/index.ts`](src/index.ts) | 插件入口：工具注册、完成监听器、提示词区段、输出上限 |
-| [`src/invariant.ts`](src/invariant.ts) | 不变式伴生插件（无运行时不变式；执行关系归能力 seam 所有） |
+| — | 不发布运行时不变式伴生入口；执行关系归能力 seam 所有。 |
 
 ### 输出上限
 

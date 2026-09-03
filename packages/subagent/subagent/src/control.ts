@@ -7,22 +7,14 @@
  */
 
 import type { Context } from '@deepseek-ai/cordis'
-import type { ContentBlock } from '@deepseek-ai/dsh-llm'
+import { AttachmentError } from '@deepseek-ai/dsh-attachment'
 import type { SessionId } from '@deepseek-ai/dsh-session'
 import { RemoteError } from '@deepseek-ai/dsh-typert-protocol'
 import { z } from 'zod'
-import type {
-  SubagentCatalog, SubagentListEntry, SubagentPromptContentPart,
-} from './control-types.ts'
+import type { SubagentCatalog, SubagentListEntry } from './control-types.ts'
 import { SubagentError } from './error.ts'
 
 const SESSION_ID_SCHEMA = z.string().min(1)
-const QUEUE_EDIT_BLOCK_SCHEMA = z.union([
-  z.object({ type: z.literal('text'), text: z.string() }),
-  // Preserve a structured non-text block long enough for the Remote to return
-  // the stable attachment-unsupported error instead of a generic bad request.
-  z.object({ type: z.string().min(1) }).refine(block => block.type !== 'text'),
-])
 const CONTROL_ID_SCHEMAS = {
   'subagent.list': z.object({ parentSessionId: SESSION_ID_SCHEMA }),
   'subagent.prompt': z.object({
@@ -34,17 +26,6 @@ const CONTROL_ID_SCHEMAS = {
     parentSessionId: SESSION_ID_SCHEMA,
     childSessionId: SESSION_ID_SCHEMA,
     mode: z.literal('continuable'),
-  }),
-  'subagent.updateQueue': z.object({
-    parentSessionId: SESSION_ID_SCHEMA,
-    childSessionId: SESSION_ID_SCHEMA,
-    mode: z.literal('continuable'),
-    itemId: z.string().min(1),
-    action: z.discriminatedUnion('kind', [
-      z.object({ kind: z.literal('edit'), content: z.array(QUEUE_EDIT_BLOCK_SCHEMA) }),
-      z.object({ kind: z.literal('remove') }),
-      z.object({ kind: z.literal('steer') }),
-    ]),
   }),
 } as const
 
@@ -63,38 +44,6 @@ export function validateControlRequest(
   if (!parsed.success) {
     throw new RemoteError('gateway/bad-request', `invalid payload for ${method}`, { issues: parsed.error.issues })
   }
-}
-
-/**
- * Admit the content one continuation may deliver, refusing every image.
- *
- * The blocks become the child's user message verbatim, and this surface admits
- * no attachment: nothing here registers encoded bytes with the attachment
- * service, so an image would reach the child as a reference nothing resolves.
- * The wire accepts the encoded upload so this refusal — not a Client that
- * strips the block — is what the caller is answered with. Other block types
- * still cross unnarrowed.
- * @param childSessionId - the addressed child, named by the refusal.
- * @param content - blocks the caller asked to deliver.
- * @returns the admitted blocks, in order, as the durable content vocabulary.
- * @throws {RemoteError} `subagent/attachment-unsupported` when any block is an image.
- */
-export function admitPromptContent(
-  childSessionId: SessionId,
-  content: readonly SubagentPromptContentPart[],
-): ContentBlock[] {
-  const admitted: ContentBlock[] = []
-  for (const block of content) {
-    if (block.type === 'image') {
-      throw new RemoteError(
-        'subagent/attachment-unsupported',
-        'subagent continuation does not accept images',
-        { childSessionId, reason: 'SUBAGENT_IMAGE_UNSUPPORTED' },
-      )
-    }
-    admitted.push(block)
-  }
-  return admitted
 }
 
 /**
@@ -158,8 +107,18 @@ export function rejectPrompt(error: unknown, childSessionId: SessionId, signal: 
   if (isCancellation(error, signal)) {
     throw new RemoteError('gateway/cancelled', 'subagent prompt was cancelled', {}, { cause: error })
   }
+  if (error instanceof AttachmentError) {
+    throw new RemoteError('subagent/attachment-invalid', error.message, { reason: error.code }, { cause: error })
+  }
   if (error instanceof SubagentError) {
     switch (error.code) {
+      case 'MODEL_DOES_NOT_SUPPORT_IMAGES':
+        throw new RemoteError(
+          'subagent/attachment-invalid',
+          error.message,
+          { reason: error.code },
+          { cause: error },
+        )
       case 'NOT_RESUMABLE':
         throw new RemoteError(
           'subagent/not-resumable',

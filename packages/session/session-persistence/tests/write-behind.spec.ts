@@ -1,9 +1,9 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import type { SessionEvent } from '@deepseek-ai/dsh-session'
+import { SessionSeq, type SessionEvent } from '@deepseek-ai/dsh-session'
 import { SessionWriteBehind } from '../src/write-behind.ts'
 
 /** Minimal ordered event fixture; batching does not interpret event vocabulary. */
-function event(seq: number): SessionEvent<'turn/start'> {
+function event(seq: SessionSeq): SessionEvent<'turn/start'> {
   return {
     type: 'turn/start',
     seq,
@@ -25,12 +25,12 @@ describe('SessionWriteBehind', () => {
       write: async (events) => { batches.push(structuredClone(events) as SessionEvent[]) },
       reportBackgroundFailure: vi.fn(),
     })
-    const first = event(0)
+    const first = event(SessionSeq(0))
 
     controller.enqueue(first)
     first.data.turn = 99
     await vi.advanceTimersByTimeAsync(150)
-    controller.enqueue(event(1))
+    controller.enqueue(event(SessionSeq(1)))
     await vi.advanceTimersByTimeAsync(49)
     expect(batches).toEqual([])
 
@@ -42,28 +42,6 @@ describe('SessionWriteBehind', () => {
     expect(controller.hasWork).toBe(false)
   })
 
-  it('borrows the exact recursively frozen live event without cloning it', async () => {
-    const seen: SessionEvent[] = []
-    const controller = new SessionWriteBehind({
-      maxDelayMs: 200,
-      write: async (events) => { seen.push(...events) },
-      reportBackgroundFailure: vi.fn(),
-    })
-    const frozen = Object.freeze({
-      ...event(0),
-      data: Object.freeze({ turn: 1 }),
-    }) as SessionEvent<'turn/start'>
-    const clone = vi.spyOn(globalThis, 'structuredClone')
-
-    controller.enqueueFrozen(frozen)
-    await controller.flush()
-
-    expect(clone).not.toHaveBeenCalled()
-    expect(seen).toEqual([frozen])
-    expect(seen[0]).toBe(frozen)
-    clone.mockRestore()
-  })
-
   it('coalesces twenty events admitted ten milliseconds apart into one 200 ms batch', async () => {
     vi.useFakeTimers()
     const batches: number[][] = []
@@ -73,10 +51,10 @@ describe('SessionWriteBehind', () => {
       reportBackgroundFailure: vi.fn(),
     })
 
-    controller.enqueue(event(0))
+    controller.enqueue(event(SessionSeq(0)))
     for (let seq = 1; seq < 20; seq += 1) {
       await vi.advanceTimersByTimeAsync(10)
-      controller.enqueue(event(seq))
+      controller.enqueue(event(SessionSeq(seq)))
     }
     expect(batches).toEqual([])
 
@@ -98,14 +76,14 @@ describe('SessionWriteBehind', () => {
       reportBackgroundFailure: vi.fn(),
     })
 
-    controller.enqueue(event(0))
+    controller.enqueue(event(SessionSeq(0)))
     const first = controller.flush()
     const second = controller.flush()
     expect(second).toBe(first)
     await Promise.resolve()
     expect(batches).toEqual([[0]])
 
-    controller.enqueue(event(1))
+    controller.enqueue(event(SessionSeq(1)))
     gate.resolve(true)
     await first
     expect(batches).toEqual([[0], [1]])
@@ -123,7 +101,7 @@ describe('SessionWriteBehind', () => {
     })
 
     const barrier = controller.flush()
-    controller.enqueue(event(0))
+    controller.enqueue(event(SessionSeq(0)))
     await barrier
     expect(batches).toEqual([])
     expect(vi.getTimerCount()).toBe(1)
@@ -146,10 +124,10 @@ describe('SessionWriteBehind', () => {
       reportBackgroundFailure: vi.fn(),
     })
 
-    controller.enqueue(event(0))
+    controller.enqueue(event(SessionSeq(0)))
     await vi.advanceTimersByTimeAsync(200)
     expect(batches).toEqual([[0]])
-    controller.enqueue(event(1))
+    controller.enqueue(event(SessionSeq(1)))
     await vi.advanceTimersByTimeAsync(200)
     expect(batches).toEqual([[0]])
 
@@ -172,9 +150,9 @@ describe('SessionWriteBehind', () => {
       reportBackgroundFailure: vi.fn(),
     })
 
-    controller.enqueue(event(0))
+    controller.enqueue(event(SessionSeq(0)))
     await vi.advanceTimersByTimeAsync(200)
-    controller.enqueue(event(1))
+    controller.enqueue(event(SessionSeq(1)))
     await vi.advanceTimersByTimeAsync(50)
     gate.resolve(true)
     await vi.advanceTimersByTimeAsync(0)
@@ -202,14 +180,14 @@ describe('SessionWriteBehind', () => {
       reportBackgroundFailure: report,
     })
 
-    controller.enqueue(event(0))
+    controller.enqueue(event(SessionSeq(0)))
     await vi.advanceTimersByTimeAsync(200)
     expect(report).toHaveBeenCalledWith(failure)
     expect(controller.hasWork).toBe(true)
     await vi.advanceTimersByTimeAsync(1_000)
     expect(batches).toEqual([[0]])
 
-    controller.enqueue(event(1))
+    controller.enqueue(event(SessionSeq(1)))
     await vi.advanceTimersByTimeAsync(199)
     expect(batches).toEqual([[0]])
     await vi.advanceTimersByTimeAsync(1)
@@ -234,7 +212,7 @@ describe('SessionWriteBehind', () => {
       reportBackgroundFailure: report,
     })
 
-    controller.enqueue(event(0))
+    controller.enqueue(event(SessionSeq(0)))
     await vi.advanceTimersByTimeAsync(200)
     const first = controller.flush()
     const second = controller.flush()
@@ -261,12 +239,12 @@ describe('SessionWriteBehind', () => {
       reportBackgroundFailure: report,
     })
 
-    controller.enqueue(event(0))
+    controller.enqueue(event(SessionSeq(0)))
     await expect(controller.flush()).rejects.toBe(failure)
     expect(report).not.toHaveBeenCalled()
     expect(controller.hasWork).toBe(true)
 
-    controller.enqueue(event(1))
+    controller.enqueue(event(SessionSeq(1)))
     await vi.advanceTimersByTimeAsync(200)
     expect(batches).toEqual([[0], [0, 1]])
     await controller.flush()
@@ -286,7 +264,7 @@ describe('SessionWriteBehind', () => {
       reportBackgroundFailure: vi.fn(),
     })
 
-    for (let seq = 0; seq < batchSize; seq += 1) controller.enqueue(event(seq))
+    for (let seq = 0; seq < batchSize; seq += 1) controller.enqueue(event(SessionSeq(seq)))
     await expect(controller.flush()).rejects.toBe(failure)
     expect(controller.hasWork).toBe(true)
 

@@ -4,11 +4,18 @@
  * @module @deepseek-ai/dsh-session-query-sqlite
  */
 
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import type { DatabaseSync } from 'node:sqlite'
 import { Context, Service, type Fiber } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
-import type { Session, SessionEvent, SessionHeader, SessionId } from '@deepseek-ai/dsh-session'
+import { SessionSeq } from '@deepseek-ai/dsh-session'
+import type {
+  Session,
+  SessionEvent,
+  SessionHeader,
+  SessionId,
+  SessionLogOffset,
+} from '@deepseek-ai/dsh-session'
 import type SessionPersistence from '@deepseek-ai/dsh-session-persistence'
 import type {
   SessionPersistenceRevision,
@@ -20,7 +27,6 @@ import SessionQueryEngine, {
   SessionQueryError,
   SessionSearchCursor,
   assertSessionHeadersCompatible,
-  buildAppendedSessionEventSearchDocuments,
   buildSessionEventSearchDocuments,
 } from '@deepseek-ai/dsh-session-query'
 import type {
@@ -126,55 +132,10 @@ interface ResolvedConfig {
 }
 
 interface ObservedSession {
-  readonly header: SessionHeader
-  /** Materialize searchable text only when reconciliation found a changed source. */
-  readonly documents: () => SessionEventSearchDocument[]
-  readonly fingerprint: string
-  /** Live-only append proof and suffix projector; persisted observations omit it. */
-  readonly live?: {
-    readonly sourceIdentity: string
-    readonly eventCount: number
-    readonly replaceGeneration: number
-    readonly appendedDocuments: (fromIndex: number) => SessionEventSearchDocument[]
-  }
-}
-
-interface CachedSearchPage<T> {
-  readonly value: T
-  readonly weight: number
-}
-
-class BoundedSearchPageCache<T> {
-  private readonly pages = new Map<string, CachedSearchPage<T>>()
-  private weight = 0
-
-  constructor(private readonly maxWeight: number) {}
-
-  get(key: string): T | undefined {
-    const cached = this.pages.get(key)
-    if (cached === undefined) return undefined
-    this.pages.delete(key)
-    this.pages.set(key, cached)
-    return cached.value
-  }
-
-  set(key: string, value: T, weight: number): void {
-    const existing = this.pages.get(key)
-    if (existing !== undefined) {
-      this.weight -= existing.weight
-      this.pages.delete(key)
-    }
-    const boundedWeight = Math.max(1, weight)
-    this.pages.set(key, { value, weight: boundedWeight })
-    this.weight += boundedWeight
-    while (this.weight > this.maxWeight && this.pages.size > 1) {
-      const oldestKey = this.pages.keys().next().value
-      if (oldestKey === undefined) break
-      const oldest = this.pages.get(oldestKey)
-      this.pages.delete(oldestKey)
-      this.weight -= oldest?.weight ?? 0
-    }
-  }
+  header: SessionHeader
+  inheritedEventCount: SessionLogOffset
+  documents: SessionEventSearchDocument[]
+  fingerprint: string
 }
 
 interface ObservedPersistedSession {
@@ -206,11 +167,6 @@ interface IndexedLiveRow {
   persisted: number
   generation: number
 }
-
-type LiveIndexWrite =
-  | { readonly kind: 'replace'; readonly entry: ObservedSession; readonly generation: number; readonly persisted: boolean }
-  | { readonly kind: 'append'; readonly entry: ObservedSession; readonly generation: number; readonly persisted: boolean; readonly fromIndex: number }
-  | { readonly kind: 'metadata'; readonly entry: ObservedSession; readonly generation: number; readonly persisted: boolean }
 
 interface SessionHeaderRow {
   session_id: string
@@ -277,9 +233,6 @@ export class SqliteSessionQueryEngine extends SessionQueryEngine {
   private _tail: Promise<void> = Promise.resolve()
   private _closed = false
   private _closePromise: Promise<void> | undefined
-  /** Exact-generation pages retain one bounded result budget per scope. */
-  private readonly _sessionSearchCache: BoundedSearchPageCache<SessionSearchPage<SessionSearchHit>>
-  private readonly _eventSearchCache: BoundedSearchPageCache<SessionEventSearchPage>
   private readonly _optionalPersistenceFiber: Fiber
 
   constructor(ctx: Context, config: Config) {
@@ -287,8 +240,6 @@ export class SqliteSessionQueryEngine extends SessionQueryEngine {
     // register `ctx.sessionQuery`; keep that same validated value afterward.
     super(ctx, config = resolveConfig(config))
     this.config = config as ResolvedConfig
-    this._sessionSearchCache = new BoundedSearchPageCache(this.config.maxLimit)
-    this._eventSearchCache = new BoundedSearchPageCache(this.config.maxLimit)
     this._optionalPersistenceFiber = ctx.inject(['sessionPersistence'], (childCtx: Context) => {
       const service = childCtx.sessionPersistence
       const binding = { identity: Symbol(), service }
@@ -326,11 +277,8 @@ export class SqliteSessionQueryEngine extends SessionQueryEngine {
       const offset = normalized.cursor === undefined
         ? 0
         : decodeCursor(normalized.cursor, this._instance, 'sessions', fingerprint, generation)
-      const cacheKey = `${generation}\0${fingerprint}\0${normalized.cursor ?? ''}`
-      const cached = this._sessionSearchCache.get(cacheKey)
-      if (cached !== undefined) return cloneSessionSearchPage(cached)
       const rows = this._querySessions(normalized, offset, persistenceBinding)
-      const result = page(rows, normalized.limit, row => this._sessionHit(row), cursorOffset => encodeCursor({
+      return page(rows, normalized.limit, row => this._sessionHit(row), cursorOffset => encodeCursor({
         version: 1,
         instance: this._instance,
         scope: 'sessions',
@@ -338,8 +286,6 @@ export class SqliteSessionQueryEngine extends SessionQueryEngine {
         generation,
         offset: cursorOffset,
       }), offset)
-      this._sessionSearchCache.set(cacheKey, cloneSessionSearchPage(result), result.items.length)
-      return result
     })
   }
 
@@ -359,11 +305,8 @@ export class SqliteSessionQueryEngine extends SessionQueryEngine {
       const offset = normalized.cursor === undefined
         ? 0
         : decodeCursor(normalized.cursor, this._instance, 'events', fingerprint, target.generation)
-      const cacheKey = `${target.generation}\0${fingerprint}\0${normalized.cursor ?? ''}`
-      const cached = this._eventSearchCache.get(cacheKey)
-      if (cached !== undefined) return cloneEventSearchPage(cached)
       const rows = this._queryEvents(normalized, offset, persistenceBinding)
-      const result: SessionEventSearchPage = {
+      return {
         session: target.header,
         ...page(rows, normalized.limit, row => this._eventHit(row), cursorOffset => encodeCursor({
           version: 1,
@@ -374,8 +317,6 @@ export class SqliteSessionQueryEngine extends SessionQueryEngine {
           offset: cursorOffset,
         }), offset),
       }
-      this._eventSearchCache.set(cacheKey, cloneEventSearchPage(result), result.items.length)
-      return result
     })
   }
 
@@ -494,28 +435,12 @@ export class SqliteSessionQueryEngine extends SessionQueryEngine {
     let nextMainGeneration = this._mainGeneration()
     let nextLocalGeneration = this._localGeneration
     if (persistentChanges.length > 0 || persistentDeletes.length > 0) nextMainGeneration += 1
-    const liveWrites: LiveIndexWrite[] = liveChanges.map((entry) => {
+    const liveReplacements = liveChanges.map((entry) => {
       nextLocalGeneration = Math.max(nextLocalGeneration, nextMainGeneration) + 1
-      const indexed = liveById.get(entry.header.id)
-      const persisted = observation.persisted.has(entry.header.id)
-      if (indexed?.fingerprint === entry.fingerprint) {
-        return { kind: 'metadata', entry, generation: nextLocalGeneration, persisted }
-      }
-      const fromIndex = appendedDocumentBoundary(indexed, entry)
-      if (fromIndex !== undefined) {
-        return {
-          kind: 'append',
-          entry,
-          generation: nextLocalGeneration,
-          persisted,
-          fromIndex,
-        }
-      }
       return {
-        kind: 'replace',
         entry,
         generation: nextLocalGeneration,
-        persisted,
+        persisted: observation.persisted.has(entry.header.id),
       }
     })
 
@@ -534,14 +459,8 @@ export class SqliteSessionQueryEngine extends SessionQueryEngine {
           db.prepare('UPDATE search_state SET global_generation = ? WHERE singleton = 1').run(nextMainGeneration)
         }
         for (const row of liveDeletes) this._deleteSession('live', row.id as SessionId)
-        for (const write of liveWrites) {
-          if (write.kind === 'append') {
-            this._appendLiveSession(write.entry, write.fromIndex, write.generation, write.persisted)
-          } else if (write.kind === 'metadata') {
-            this._updateLiveSession(write.entry, write.generation, write.persisted)
-          } else {
-            this._replaceLiveSession(write.entry, write.generation, write.persisted)
-          }
+        for (const { entry, generation, persisted } of liveReplacements) {
+          this._replaceLiveSession(entry, generation, persisted)
         }
         db.exec('COMMIT')
       } catch (error: unknown) {
@@ -597,7 +516,11 @@ export class SqliteSessionQueryEngine extends SessionQueryEngine {
             const loaded = await persistence.inspect(entry.header.id, signal)
             assertNotAborted(signal)
             assertSessionHeadersCompatible(entry.header, loaded.meta)
-            entry.loaded = observeSession(loaded.meta, loaded.events)
+            entry.loaded = observeSession(
+              loaded.meta,
+              loaded.inheritedEventCount,
+              loaded.events,
+            )
           }
           assertNotAborted(signal)
           const afterSnapshots = await persistence.listSnapshots(signal)
@@ -666,7 +589,7 @@ export class SqliteSessionQueryEngine extends SessionQueryEngine {
         (id, version, created_at, cwd, parent_session, seed_length, delegation_depth, agent_preset, revision, generation)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
-      ...headerBindings(entry.header),
+      ...headerBindings(entry.header, entry.inheritedEventCount),
       revision,
       generation,
     )
@@ -674,7 +597,7 @@ export class SqliteSessionQueryEngine extends SessionQueryEngine {
       INSERT INTO persisted_docs (text, session_id, seq, type, time, surface, codepoint_length)
       VALUES (?, ?, ?, ?, ?, ?, ?)
     `)
-    for (const document of entry.documents()) {
+    for (const document of entry.documents) {
       const text = sanitizeFtsText(document.text)
       insert.run(
         text,
@@ -696,44 +619,16 @@ export class SqliteSessionQueryEngine extends SessionQueryEngine {
         (id, version, created_at, cwd, parent_session, seed_length, delegation_depth, agent_preset, fingerprint, persisted, generation)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
-      ...headerBindings(entry.header),
+      ...headerBindings(entry.header, entry.inheritedEventCount),
       entry.fingerprint,
       persisted ? 1 : 0,
       generation,
     )
-    this._insertLiveDocuments(entry.documents())
-  }
-
-  /** Extend one unchanged live lifecycle whose canonical surface saw no replacement. */
-  private _appendLiveSession(
-    entry: ObservedSession,
-    fromIndex: number,
-    generation: number,
-    persisted: boolean,
-  ): void {
-    const live = entry.live
-    /* v8 ignore next -- appendedDocumentBoundary admits only live observations. */
-    if (live === undefined) throw new Error(`missing live append proof for session "${entry.header.id}"`)
-    this._updateLiveSession(entry, generation, persisted)
-    this._insertLiveDocuments(live.appendedDocuments(fromIndex))
-  }
-
-  /** Refresh one live row without rewriting its unchanged FTS documents. */
-  private _updateLiveSession(entry: ObservedSession, generation: number, persisted: boolean): void {
-    this._requireDb().prepare(`
-      UPDATE temp.live_sessions
-      SET fingerprint = ?, persisted = ?, generation = ?
-      WHERE id = ?
-    `).run(entry.fingerprint, persisted ? 1 : 0, generation, entry.header.id)
-  }
-
-  /** Insert a detached document batch into the live FTS table. */
-  private _insertLiveDocuments(documents: readonly SessionEventSearchDocument[]): void {
-    const insert = this._requireDb().prepare(`
+    const insert = db.prepare(`
       INSERT INTO temp.live_docs (text, session_id, seq, type, time, surface, codepoint_length)
       VALUES (?, ?, ?, ?, ?, ?, ?)
     `)
-    for (const document of documents) {
+    for (const document of entry.documents) {
       const text = sanitizeFtsText(document.text)
       insert.run(
         text,
@@ -858,7 +753,7 @@ export class SqliteSessionQueryEngine extends SessionQueryEngine {
   private _eventHit(row: SearchRow): SessionEventSearchHit {
     return {
       sessionId: row.session_id as SessionId,
-      seq: row.seq,
+      seq: SessionSeq(row.seq),
       type: row.type as SessionEventSearchHit['type'],
       time: row.time,
       surface: row.surface as SessionEventSearchHit['surface'],
@@ -883,14 +778,17 @@ export class SqliteSessionQueryEngine extends SessionQueryEngine {
  * @param header - the session header being written.
  * @returns one bound value per header column.
  */
-function headerBindings(header: SessionHeader): (string | number | null)[] {
+function headerBindings(
+  header: SessionHeader,
+  inheritedEventCount: SessionLogOffset,
+): (string | number | null)[] {
   return [
     header.id,
     header.version,
     header.createdAt,
     header.cwd ?? null,
     header.parentSession ?? null,
-    header.seedLength ?? null,
+    header.isSeeded ? inheritedEventCount : null,
     header.delegationDepth ?? null,
     header.agentPreset ?? null,
   ]
@@ -971,90 +869,24 @@ function selectedDocumentsParams(query: string, persistenceVisible: boolean): Ar
 }
 
 function observeLive(session: Session): ObservedSession {
-  const events = session.events
-  const sourceIdentity = liveSourceIdentity(session)
-  const replaceGeneration = session.surface.replaceGeneration
-  return {
-    ...observeSession(
-      session.header,
-      events,
-      `${sourceIdentity}:${events.length}:${replaceGeneration}`,
-    ),
-    live: {
-      sourceIdentity,
-      eventCount: events.length,
-      replaceGeneration,
-      appendedDocuments: fromIndex => buildAppendedSessionEventSearchDocuments(session.id, events, fromIndex),
-    },
-  }
+  return observeSession(session.header, session.inheritedEventCount, session.snapshotEvents())
 }
 
 function observeSession(
   header: SessionHeader,
+  inheritedEventCount: SessionLogOffset,
   events: readonly SessionEvent[],
-  fingerprint = '',
 ): ObservedSession {
-  // Both live Session values and persistence inspections are immutable by
-  // contract. Borrow them during this reconciliation and defer the expensive
-  // semantic projection until the stored fingerprint proves replacement is
-  // necessary. Search documents own only scalar metadata and extracted text.
+  const detachedHeader = structuredClone(header)
+  const detachedEvents = events.map(event => structuredClone(event))
   return {
-    header,
-    documents: () => buildSessionEventSearchDocuments(header.id, events),
-    fingerprint,
+    header: detachedHeader,
+    inheritedEventCount,
+    documents: buildSessionEventSearchDocuments(detachedHeader.id, detachedEvents),
+    fingerprint: createHash('sha256')
+      .update(JSON.stringify({ header: detachedHeader, inheritedEventCount, events: detachedEvents }))
+      .digest('base64url'),
   }
-}
-
-/** Per-object identity for the connection-local live index; weak keys cannot retain sessions. */
-const liveSourceIdentities = new WeakMap<Session, string>()
-
-function liveSourceIdentity(session: Session): string {
-  let identity = liveSourceIdentities.get(session)
-  if (identity === undefined) {
-    identity = randomUUID()
-    liveSourceIdentities.set(session, identity)
-  }
-  return identity
-}
-
-interface ParsedLiveFingerprint {
-  readonly sourceIdentity: string
-  readonly eventCount: number
-  readonly replaceGeneration: number
-}
-
-/** Parse only fingerprints minted by the current append-aware implementation. */
-function parseLiveFingerprint(value: string): ParsedLiveFingerprint | undefined {
-  const match = /^(.*):(\d+):(\d+)$/.exec(value)
-  if (match === null) return
-  const eventCount = Number(match[2])
-  const replaceGeneration = Number(match[3])
-  if (!Number.isSafeInteger(eventCount) || !Number.isSafeInteger(replaceGeneration)) return
-  return {
-    // oxlint-disable-next-line typescript/no-non-null-assertion -- a successful match owns all capture groups.
-    sourceIdentity: match[1]!,
-    eventCount,
-    replaceGeneration,
-  }
-}
-
-/**
- * Return the first suffix index only when canonical live-surface state proves
- * all prior document classifications remain valid.
- */
-function appendedDocumentBoundary(
-  indexed: IndexedLiveRow | undefined,
-  entry: ObservedSession,
-): number | undefined {
-  if (indexed === undefined || entry.live === undefined) return
-  const previous = parseLiveFingerprint(indexed.fingerprint)
-  if (
-    previous === undefined
-    || previous.sourceIdentity !== entry.live.sourceIdentity
-    || previous.replaceGeneration !== entry.live.replaceGeneration
-    || previous.eventCount >= entry.live.eventCount
-  ) return
-  return previous.eventCount
 }
 
 function materializePersistenceSnapshots(
@@ -1108,7 +940,7 @@ function sameHeader(a: SessionHeader, b: SessionHeader): boolean {
     && a.createdAt === b.createdAt
     && a.cwd === b.cwd
     && a.parentSession === b.parentSession
-    && a.seedLength === b.seedLength
+    && a.isSeeded === b.isSeeded
     && (a.delegationDepth ?? 0) === (b.delegationDepth ?? 0)
     && a.agentPreset === b.agentPreset
 }
@@ -1120,7 +952,7 @@ function rowHeader(row: SessionHeaderRow): SessionHeader {
     createdAt: row.created_at,
     ...row.cwd === null ? {} : { cwd: row.cwd },
     ...row.parent_session === null ? {} : { parentSession: row.parent_session as SessionId },
-    ...row.seed_length === null ? {} : { seedLength: row.seed_length },
+    isSeeded: row.seed_length !== null,
     ...row.delegation_depth === null ? {} : { delegationDepth: row.delegation_depth },
     ...row.agent_preset === null ? {} : { agentPreset: row.agent_preset },
   }
@@ -1137,29 +969,6 @@ function page<Row, Item>(
   return {
     items: rows.slice(0, limit).map(convert),
     ...hasMore ? { nextCursor: nextCursor(offset + limit) } : {},
-  }
-}
-
-/** Clone one bounded result page so a caller cannot mutate the single-entry cache. */
-function cloneSessionSearchPage(
-  source: SessionSearchPage<SessionSearchHit>,
-): SessionSearchPage<SessionSearchHit> {
-  return {
-    items: source.items.map(item => ({
-      ...item,
-      header: { ...item.header },
-      bestMatch: { ...item.bestMatch },
-    })),
-    ...source.nextCursor === undefined ? {} : { nextCursor: source.nextCursor },
-  }
-}
-
-/** Clone one bounded event page while sharing only immutable branded scalars. */
-function cloneEventSearchPage(source: SessionEventSearchPage): SessionEventSearchPage {
-  return {
-    session: { ...source.session },
-    items: source.items.map(item => ({ ...item })),
-    ...source.nextCursor === undefined ? {} : { nextCursor: source.nextCursor },
   }
 }
 

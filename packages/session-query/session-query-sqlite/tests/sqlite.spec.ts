@@ -5,12 +5,17 @@ import { DatabaseSync } from 'node:sqlite'
 import { chmod, mkdtemp, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
-import SessionStore, { SESSION_FORMAT_VERSION, SessionId } from '@deepseek-ai/dsh-session'
+import SessionStore, {
+  SESSION_FORMAT_VERSION,
+  SessionId,
+  SessionLogOffset,
+  SessionSeq,
+} from '@deepseek-ai/dsh-session'
 import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import type { SessionEvent, SessionHeader, SessionId as SessionIdType } from '@deepseek-ai/dsh-session'
 import SessionPersistence, { SessionPersistenceRevision } from '@deepseek-ai/dsh-session-persistence'
-import type { SessionPersistenceSnapshot } from '@deepseek-ai/dsh-session-persistence'
-import SqliteSessionPersistence from '@deepseek-ai/dsh-session-persistence-sqlite'
+import type { SessionEventSuffix, SessionInspection, SessionPersistenceSnapshot } from '@deepseek-ai/dsh-session-persistence'
+import JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
 import SqliteSessionQueryEngine, {
   SESSION_QUERY_SQLITE_SCHEMA_VERSION,
 } from '@deepseek-ai/dsh-session-query-sqlite'
@@ -38,13 +43,13 @@ async function temporaryPath(name = 'search.db'): Promise<string> {
 }
 
 function header(id: string, createdAt = 1, extra: Partial<SessionHeader> = {}): SessionHeader {
-  return { version: SESSION_FORMAT_VERSION, id: SessionId(id), createdAt, ...extra }
+  return { version: SESSION_FORMAT_VERSION, id: SessionId(id), createdAt, isSeeded: false, ...extra }
 }
 
-function messageEvents(text: string, time = 1): SessionEvent[] {
+function messageEvents(text: string, time = 1): SessionEvent<'user/message'>[] {
   return [{
     type: 'user/message',
-    seq: 0,
+    seq: SessionSeq(0),
     time,
     data: createUserMessage({
       content: [{ type: 'text', text }], source: { kind: 'user' },
@@ -70,7 +75,11 @@ function replaceCursorOffset(
 class TestPersistence extends SessionPersistence {
   override readonly supportsRawArtifacts = false
 
-  static entries = new Map<SessionIdType, { meta: SessionHeader; events: SessionEvent[] }>()
+  static entries = new Map<SessionIdType, {
+    meta: SessionHeader
+    inheritedEventCount?: SessionLogOffset
+    events: SessionEvent[]
+  }>()
   static revisions = new Map<SessionIdType, number>()
   static nextRevision = 0
   static loads = new Map<SessionIdType, number>()
@@ -96,7 +105,11 @@ class TestPersistence extends SessionPersistence {
     return Promise.reject(new Error('not used'))
   }
 
-  static reset(entries: readonly { meta: SessionHeader; events: SessionEvent[] }[] = []): void {
+  static reset(entries: readonly {
+    meta: SessionHeader
+    inheritedEventCount?: SessionLogOffset
+    events: SessionEvent[]
+  }[] = []): void {
     this.entries = new Map()
     this.revisions = new Map()
     this.loads = new Map()
@@ -113,13 +126,21 @@ class TestPersistence extends SessionPersistence {
     this.failure = undefined
   }
 
-  static set(entry: { meta: SessionHeader; events: SessionEvent[] }): void {
+  static set(entry: {
+    meta: SessionHeader
+    inheritedEventCount?: SessionLogOffset
+    events: SessionEvent[]
+  }): void {
     this.entries.set(entry.meta.id, structuredClone(entry))
     this.revisions.set(entry.meta.id, ++this.nextRevision)
   }
 
-  create(meta: SessionHeader): Promise<void> {
-    TestPersistence.set({ meta, events: [] })
+  create(meta: SessionHeader, inheritedEventCount?: SessionLogOffset): Promise<void> {
+    TestPersistence.set({
+      meta,
+      ...inheritedEventCount === undefined ? {} : { inheritedEventCount },
+      events: [],
+    })
     return Promise.resolve()
   }
 
@@ -131,7 +152,7 @@ class TestPersistence extends SessionPersistence {
     return Promise.resolve()
   }
 
-  async load(id: SessionIdType): Promise<{ meta: SessionHeader; events: SessionEvent[] }> {
+  async load(id: SessionIdType): Promise<SessionInspection> {
     TestPersistence.loads.set(id, (TestPersistence.loads.get(id) ?? 0) + 1)
     if (TestPersistence.failure !== undefined) throw TestPersistence.failure
     const entry = TestPersistence.entries.get(id)
@@ -142,10 +163,13 @@ class TestPersistence extends SessionPersistence {
       effect(entry)
       TestPersistence.revisions.set(id, ++TestPersistence.nextRevision)
     }
-    return structuredClone(entry)
+    return {
+      ...structuredClone(entry),
+      inheritedEventCount: entry.inheritedEventCount ?? SessionLogOffset(0),
+    }
   }
 
-  async inspect(id: SessionIdType, signal?: AbortSignal): Promise<{ meta: SessionHeader; events: SessionEvent[] }> {
+  async inspect(id: SessionIdType, signal?: AbortSignal): Promise<SessionInspection> {
     TestPersistence.inspections.set(id, (TestPersistence.inspections.get(id) ?? 0) + 1)
     TestPersistence.inspectSignals.push(signal)
     if (TestPersistence.failure !== undefined) throw TestPersistence.failure
@@ -153,12 +177,19 @@ class TestPersistence extends SessionPersistence {
     if (entry === undefined) throw new Error('missing test session')
     await TestPersistence.inspectEffect?.(entry, signal)
     TestPersistence.inspectEffect = undefined
-    return structuredClone(entry)
+    return {
+      ...structuredClone(entry),
+      inheritedEventCount: entry.inheritedEventCount ?? SessionLogOffset(0),
+    }
   }
 
-  async readFrom(id: SessionIdType, fromSeq: number, signal?: AbortSignal): Promise<{ meta: SessionHeader; events: SessionEvent[] }> {
+  async readFrom(
+    id: SessionIdType,
+    fromSeq: SessionLogOffset,
+    signal?: AbortSignal,
+  ): Promise<SessionEventSuffix> {
     const whole = await this.inspect(id, signal)
-    return { meta: whole.meta, events: whole.events.filter(event => event.seq >= fromSeq) }
+    return { ...whole, fromSeq, events: whole.events.filter(event => event.seq >= fromSeq) }
   }
 
   async list(): Promise<SessionHeader[]> {
@@ -322,10 +353,12 @@ describe('SQLite session search', () => {
   it('searches two-character Unicode61 tokens in live-only sessions', async () => {
     const ctx = await liveContext({ path: ':memory:', snippetChars: 20 })
     const session = ctx.sessions.create(SessionId('live'), {
+      seed: messageEvents('inherited context'),
+      inheritedEventCount: SessionLogOffset(1),
       // agentPreset rides along: the index rebuilds the header a caller reads,
       // and a session listed under the wrong composition is a lie about what it
       // ran. The full-header comparison below is what pins every column.
-      meta: { cwd: '/work', createdAt: 10, seedLength: 1, delegationDepth: 2, agentPreset: 'minimal' },
+      meta: { cwd: '/work', createdAt: 10, isSeeded: true, delegationDepth: 2, agentPreset: 'minimal' },
     })
     session.append(
       'user/message',
@@ -337,144 +370,44 @@ describe('SQLite session search', () => {
 
     await expect(ctx.sessionQuery.searchEvents({ sessionId: session.id, query: 'AI' }))
       .resolves.toMatchObject({
-        session: { ...session.header, seedLength: 1 },
-        items: [{ sessionId: session.id, seq: 0, snippet: 'An AI helper' }],
+        session: session.header,
+        items: [{ sessionId: session.id, seq: 2, snippet: 'An AI helper' }],
       })
     await expect(ctx.sessionQuery.searchSessions({ query: 'AI' }))
-      .resolves.toMatchObject({ items: [{ header: { ...session.header, seedLength: 1 }, live: true, persisted: false }] })
+      .resolves.toMatchObject({ items: [{ header: session.header, live: true, persisted: false }] })
+    const db = (ctx.sessionQuery as unknown as { _db: DatabaseSync })._db
+    expect(db.prepare('SELECT seed_length FROM temp.live_sessions WHERE id = ?').get(session.id))
+      .toEqual({ seed_length: 1 })
   })
 
-  it('borrows immutable live history instead of cloning every event for indexing', async () => {
+  it('retains a persisted inherited cut and reindexes when that source identity changes', async () => {
+    const meta = header('persisted-seed-cut', 10, { isSeeded: true })
+    const events: SessionEvent[] = [
+      ...messageEvents('persisted cut needle'),
+      { ...messageEvents('second inherited event')[0]!, seq: SessionSeq(1) },
+    ]
+    TestPersistence.reset([{
+      meta,
+      inheritedEventCount: SessionLogOffset(1),
+      events,
+    }])
     const ctx = await liveContext()
-    const session = ctx.sessions.create(SessionId('borrow-live-index'))
-    for (let index = 0; index < 32; index += 1) {
-      session.append(
-        'user/message',
-        createUserMessage({
-          content: [{ type: 'text', text: `needle ${index}` }], source: { kind: 'user' },
-        }),
-        { surfaceOp: 'append' },
-      )
-    }
-    const clone = vi.spyOn(globalThis, 'structuredClone')
+    await ctx.plugin(TestPersistence)
+    const db = (ctx.sessionQuery as unknown as { _db: DatabaseSync })._db
 
-    try {
-      await expect(ctx.sessionQuery.searchSessions({ query: 'needle' }))
-        .resolves.toMatchObject({ items: [{ header: { id: session.id } }] })
-      expect(clone).not.toHaveBeenCalled()
-    } finally {
-      clone.mockRestore()
-    }
-  })
+    await expect(ctx.sessionQuery.searchSessions({ query: 'needle' }))
+      .resolves.toMatchObject({ items: [{ header: { ...meta, isSeeded: true } }] })
+    expect(db.prepare('SELECT seed_length FROM persisted_sessions WHERE id = ?').get(meta.id))
+      .toEqual({ seed_length: 1 })
 
-  it('appends an unchanged live surface tail and falls back to replacement after a surface rewrite', async () => {
-    const ctx = await liveContext()
-    const session = ctx.sessions.create(SessionId('incremental-live-index'))
-    const first = session.append(
-      'user/message',
-      createUserMessage({
-        content: [{ type: 'text', text: 'first marker' }], source: { kind: 'user' },
-      }),
-      { surfaceOp: 'append' },
-    )
-    session.append(
-      'user/message',
-      createUserMessage({
-        content: [{ type: 'text', text: 'second marker' }], source: { kind: 'user' },
-      }),
-      { surfaceOp: 'append' },
-    )
-    const engine = ctx.sessionQuery as SqliteSessionQueryEngine
-    const writeProbe = engine as unknown as {
-      _replaceLiveSession: (...args: unknown[]) => void
-      _appendLiveSession: (...args: unknown[]) => void
-    }
-    const replace = vi.spyOn(writeProbe, '_replaceLiveSession')
-    const append = vi.spyOn(writeProbe, '_appendLiveSession')
-
-    await ctx.sessionQuery.searchSessions({ query: 'marker' })
-    expect(replace).toHaveBeenCalledOnce()
-    expect(append).not.toHaveBeenCalled()
-
-    session.append(
-      'user/message',
-      createUserMessage({
-        content: [{ type: 'text', text: 'third marker' }], source: { kind: 'user' },
-      }),
-      { surfaceOp: 'append' },
-    )
-    await expect(ctx.sessionQuery.searchEvents({ sessionId: session.id, query: 'third marker' }))
-      .resolves.toMatchObject({ items: [{ seq: 2, surface: 'current' }] })
-    expect(append).toHaveBeenCalledOnce()
-    expect(replace).toHaveBeenCalledOnce()
-
-    session.append(
-      'user/message',
-      createUserMessage({
-        content: [{ type: 'text', text: 'replacement marker' }], source: { kind: 'plugin', plugin: 'test' },
-      }),
-      { surfaceOp: { op: 'replace', start: first.seq, end: first.seq }, sourceEventSeqs: [first.seq] },
-    )
-    await expect(ctx.sessionQuery.searchEvents({
-      sessionId: session.id,
-      query: 'replacement marker',
-      filters: [{ kind: 'surface', values: ['current'] }],
-    })).resolves.toMatchObject({ items: [{ seq: 3, surface: 'current' }] })
-    expect(replace).toHaveBeenCalledTimes(2)
-    expect(append).toHaveBeenCalledOnce()
-  })
-
-  it('reuses bounded exact-generation pages without exposing cached copies to caller mutation', async () => {
-    const ctx = await liveContext()
-    const session = ctx.sessions.create(SessionId('one-entry-search-cache'), { seed: messageEvents('common marker') })
-    const engine = ctx.sessionQuery as SqliteSessionQueryEngine
-    const queryProbe = engine as unknown as {
-      _querySessions: (...args: unknown[]) => unknown[]
-    }
-    const query = vi.spyOn(queryProbe, '_querySessions')
-
-    const first = await ctx.sessionQuery.searchSessions({ query: 'common marker' })
-    const callerOwnedItems = first.items as unknown[]
-    callerOwnedItems.splice(0)
-    await expect(ctx.sessionQuery.searchSessions({ query: 'common marker' }))
-      .resolves.toMatchObject({ items: [{ header: { id: session.id } }] })
-    expect(query).toHaveBeenCalledOnce()
-
-    session.append(
-      'user/message',
-      createUserMessage({
-        content: [{ type: 'text', text: 'common marker tail' }], source: { kind: 'user' },
-      }),
-      { surfaceOp: 'append' },
-    )
-    await ctx.sessionQuery.searchSessions({ query: 'common marker' })
-    expect(query).toHaveBeenCalledTimes(2)
-  })
-
-  it('retains adjacent cursor pages within the existing maxLimit item budget', async () => {
-    const ctx = await liveContext({ path: ':memory:', defaultLimit: 1, maxLimit: 4 })
-    ctx.sessions.create(SessionId('cache-page-a'), { seed: messageEvents('common marker') })
-    ctx.sessions.create(SessionId('cache-page-b'), { seed: messageEvents('common marker') })
-    ctx.sessions.create(SessionId('cache-page-c'), { seed: messageEvents('common marker') })
-    const engine = ctx.sessionQuery as SqliteSessionQueryEngine
-    const queryProbe = engine as unknown as {
-      _querySessions: (...args: unknown[]) => unknown[]
-    }
-    const query = vi.spyOn(queryProbe, '_querySessions')
-
-    const first = await ctx.sessionQuery.searchSessions({ query: 'common marker', limit: 1 })
-    expect(first.nextCursor).toBeDefined()
-    const cursor = first.nextCursor
-    if (cursor === undefined) throw new Error('first cached page did not provide a continuation cursor')
-    const second = await ctx.sessionQuery.searchSessions({
-      query: 'common marker',
-      limit: 1,
-      cursor,
+    TestPersistence.set({
+      meta,
+      inheritedEventCount: SessionLogOffset(2),
+      events,
     })
-    expect(second.items).toHaveLength(1)
-    await ctx.sessionQuery.searchSessions({ query: 'common marker', limit: 1 })
-
-    expect(query).toHaveBeenCalledTimes(2)
+    await ctx.sessionQuery.searchSessions({ query: 'needle' })
+    expect(db.prepare('SELECT seed_length FROM persisted_sessions WHERE id = ?').get(meta.id))
+      .toEqual({ seed_length: 2 })
   })
 
   it('excludes assistant reasoning while indexing visible answer text', async () => {
@@ -511,14 +444,14 @@ describe('SQLite session search', () => {
     const ctx = await liveContext({ path: ':memory:', defaultLimit: 10, maxLimit: 20 })
     const parent = SessionId('parent')
     const events: SessionEvent[] = [
-      { type: 'user/message', seq: 0, time: 10, data: createUserMessage({
+      { type: 'user/message', seq: SessionSeq(0), time: 10, data: createUserMessage({
         content: [{ type: 'text', text: 'needle original' }], source: { kind: 'user' },
       }), surfaceOp: 'append' },
-      { type: 'assistant/chunk', seq: 1, time: 11, data: { turn: 1, step: 1, chunk: { type: 'text-delta', index: 0, text: 'needle raw' } } },
-      { type: 'user/message', seq: 2, time: 12, data: createUserMessage({
+      { type: 'assistant/chunk', seq: SessionSeq(1), time: 11, data: { turn: 1, step: 1, chunk: { type: 'text-delta', index: 0, text: 'needle raw' } } },
+      { type: 'user/message', seq: SessionSeq(2), time: 12, data: createUserMessage({
         content: [{ type: 'text', text: 'needle summary' }], source: { kind: 'plugin', plugin: 'test' },
-      }), surfaceOp: { op: 'replace', start: 0, end: 0 }, sourceEventSeqs: [0] },
-      { type: 'turn/end', seq: 3, time: 13, data: { turn: 1, reason: { kind: 'error', error: { message: 'needle failure', code: 'UNKNOWN' } } } },
+      }), surfaceOp: { op: 'replace', start: SessionSeq(0), end: SessionSeq(0) }, sourceEventSeqs: [SessionSeq(0)] },
+      { type: 'turn/end', seq: SessionSeq(3), time: 13, data: { turn: 1, reason: { kind: 'error', error: { message: 'needle failure', code: 'UNKNOWN' } } } },
     ]
     ctx.sessions.create(SessionId('a'), { seed: events, meta: { cwd: '/a', parentSession: parent, createdAt: 20 } })
     ctx.sessions.create(SessionId('b'), { seed: messageEvents('needle peer', 12), meta: { createdAt: 20 } })
@@ -675,8 +608,8 @@ describe('SQLite session search', () => {
     const target = ctx.sessions.create(SessionId('target'), {
       seed: [
         ...messageEvents('needle one', 10),
-        { ...messageEvents('needle two', 11)[0]!, seq: 1 },
-        { ...messageEvents('needle three', 12)[0]!, seq: 2 },
+        { ...messageEvents('needle two', 11)[0]!, seq: SessionSeq(1) },
+        { ...messageEvents('needle three', 12)[0]!, seq: SessionSeq(2) },
       ],
     })
     ctx.sessions.create(SessionId('other'), { seed: messageEvents('needle other', 10) })
@@ -1018,7 +951,7 @@ describe('SQLite reconciliation and source lifecycle', () => {
     const durable = header('post-reconcile-unmount')
     TestPersistence.reset([{ meta: durable, events: [
       ...messageEvents('durable needle', 1),
-      { ...messageEvents('durable needle again', 2)[0]!, seq: 1 },
+      { ...messageEvents('durable needle again', 2)[0]!, seq: SessionSeq(1) },
     ] }])
     const ctx = await liveContext({ path: ':memory:', defaultLimit: 1, maxLimit: 2 })
     const persistence = await ctx.plugin(TestPersistence)
@@ -1907,21 +1840,24 @@ describe('SQLite schema, cancellation, and real persistence integration', () => 
     await persistence.dispose()
   })
 
-  it('combines the real SQLite persistence backend with the real search service keylessly', async () => {
-    const persistencePath = await temporaryPath('canonical.db')
+  it('combines the real JSONL persistence backend with the real SQLite search service keylessly', async () => {
+    const persistenceRoot = await temporaryPath('canonical')
     const searchPath = await temporaryPath('derived.db')
     const ctx = new Context()
     await ctx.plugin(SessionStore)
     await ctx.plugin(SessionProjectionRegistry)
-    const persistence = await ctx.plugin(SqliteSessionPersistence, { path: persistencePath })
+    const persistence = await ctx.plugin(JsonlSessionPersistence, {
+      root: persistenceRoot,
+      compression: 'none',
+    })
     const search = await ctx.plugin(SqliteSessionQueryEngine, { path: searchPath })
     const meta = header('real', 10, { cwd: '/work' })
     await ctx.sessionPersistence.create(meta)
-    await ctx.sessionPersistence.append(meta.id, messageEvents('real SQLite needle'))
+    await ctx.sessionPersistence.append(meta.id, messageEvents('real search needle'))
 
-    await expect(ctx.sessionQuery.searchSessions({ query: 'SQLite needle' }))
+    await expect(ctx.sessionQuery.searchSessions({ query: 'search needle' }))
       .resolves.toMatchObject({ items: [{ header: meta, persisted: true, live: false }] })
-    await expect(ctx.sessionQuery.searchEvents({ sessionId: meta.id, query: 'SQLite needle' }))
+    await expect(ctx.sessionQuery.searchEvents({ sessionId: meta.id, query: 'search needle' }))
       .resolves.toMatchObject({ session: meta, items: [{ sessionId: meta.id, seq: 0 }] })
     await expect(ctx.sessionQuery.searchEvents({ sessionId: SessionId('absent'), query: 'needle' }))
       .rejects.toThrow(expectCode('SESSION_QUERY_SESSION_NOT_FOUND'))
@@ -1930,16 +1866,19 @@ describe('SQLite schema, cancellation, and real persistence integration', () => 
     await persistence.dispose()
   })
 
-  it('reconciles colliding local revisions when a derived index reopens against another SQLite store', async () => {
-    const persistencePathA = await temporaryPath('canonical-a.db')
-    const persistencePathB = await temporaryPath('canonical-b.db')
+  it('reconciles colliding local revisions when a derived index reopens against another JSONL store', async () => {
+    const persistenceRootA = await temporaryPath('canonical-a')
+    const persistenceRootB = await temporaryPath('canonical-b')
     const searchPath = await temporaryPath('derived-collision.db')
     const shared = header('same-id', 10)
 
     const first = new Context()
     await first.plugin(SessionStore)
     await first.plugin(SessionProjectionRegistry)
-    const persistenceA = await first.plugin(SqliteSessionPersistence, { path: persistencePathA })
+    const persistenceA = await first.plugin(JsonlSessionPersistence, {
+      root: persistenceRootA,
+      compression: 'none',
+    })
     await first.sessionPersistence.create(shared)
     await first.sessionPersistence.append(shared.id, messageEvents('alpha source'))
     const inspectA = vi.spyOn(first.sessionPersistence, 'inspect')
@@ -1953,7 +1892,10 @@ describe('SQLite schema, cancellation, and real persistence integration', () => 
     const reopened = new Context()
     await reopened.plugin(SessionStore)
     await reopened.plugin(SessionProjectionRegistry)
-    const persistenceAAgain = await reopened.plugin(SqliteSessionPersistence, { path: persistencePathA })
+    const persistenceAAgain = await reopened.plugin(JsonlSessionPersistence, {
+      root: persistenceRootA,
+      compression: 'none',
+    })
     const reopenedInspect = vi.spyOn(reopened.sessionPersistence, 'inspect')
     const searchAAgain = await reopened.plugin(SqliteSessionQueryEngine, { path: searchPath })
     await expect(reopened.sessionQuery.searchSessions({ query: 'alpha' }))
@@ -1965,7 +1907,10 @@ describe('SQLite schema, cancellation, and real persistence integration', () => 
     const second = new Context()
     await second.plugin(SessionStore)
     await second.plugin(SessionProjectionRegistry)
-    const persistenceB = await second.plugin(SqliteSessionPersistence, { path: persistencePathB })
+    const persistenceB = await second.plugin(JsonlSessionPersistence, {
+      root: persistenceRootB,
+      compression: 'none',
+    })
     await second.sessionPersistence.create(shared)
     await second.sessionPersistence.append(shared.id, messageEvents('bravo source'))
     const inspectB = vi.spyOn(second.sessionPersistence, 'inspect')

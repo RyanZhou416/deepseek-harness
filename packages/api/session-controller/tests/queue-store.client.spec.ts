@@ -6,7 +6,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import type { ContentBlock, UserMessage } from '@deepseek-ai/dsh-llm/types'
-import type { SessionEvent } from '@deepseek-ai/dsh-session/types'
+import { SessionSeq, type SessionEvent } from '@deepseek-ai/dsh-session/types'
 import type { MessageId, RpcId, SessionId } from '@deepseek-ai/dsh-api-remotes/client'
 import type { SessionControlFrame } from '@deepseek-ai/dsh-api-session-controller/types'
 import { Session } from '../src/client/sessions/session.ts'
@@ -73,7 +73,7 @@ describe('Session queue snapshot intake', () => {
     ])
   })
 
-  it('marks mixed-content messages non-editable while retaining their preview', () => {
+  it('marks mixed-content messages non-editable and keeps image blocks out of the text preview', () => {
     const session = makeSession()
     session.handleControlFrame(queueFrame([{
       id: 'q-image',
@@ -86,7 +86,9 @@ describe('Session queue snapshot intake', () => {
       {
         id: 'q-image', placement: 'queued',
         content: [{ type: 'text', text: 'hi' }, { type: 'image', data: 'x' }],
-        preview: 'hi [image]', text: null,
+        // Image blocks render as thumbnails from `content`, so the preview
+        // carries only the text; non-image foreign blocks keep their marker.
+        preview: 'hi', text: null,
       },
     ])
   })
@@ -158,12 +160,12 @@ describe('Session queue snapshot intake', () => {
       { id: 's-second', body: '', placement: 'steering', message },
     ]))
     const durable = {
-      seq: 0,
+      seq: SessionSeq(0),
       time: 1_700_000_000_000,
       type: 'user/message',
       surfaceOp: 'append',
       data: message,
-    } as SessionEvent
+    } satisfies SessionEvent
 
     await api.pushFollow(SID, { type: 'event', event: durable as never })
     await vi.waitFor(() => {
@@ -231,55 +233,6 @@ describe('queue operation transport', () => {
       },
     ])
     expect(session.getSnapshot().queue).toBe(before)
-  })
-
-  it('routes every queue mutation through a continuable child durable parent address', async () => {
-    const api = new FakeApiClient()
-    const session = new Session(SID, fakeRemote(api), {
-      address: {
-        parentSessionId: 'parent' as SessionId,
-        childSessionId: SID,
-        mode: 'continuable',
-      },
-    })
-
-    const actions = [
-      { kind: 'edit' as const, content: text('revised') },
-      { kind: 'remove' as const },
-      { kind: 'steer' as const },
-    ]
-    for (const action of actions) {
-      await expect(session.updateQueue(iid('q-child'), action))
-        .resolves.toEqual({ ok: true, value: { accepted: true } })
-    }
-    expect(api.callsOf('subagents.updateQueuedByParent')).toEqual(actions.map(action => ({
-      parentSessionId: 'parent',
-      childSessionId: SID,
-      mode: 'continuable',
-      itemId: 'q-child',
-      action,
-    })))
-    expect(api.callsOf('session.updateQueue')).toEqual([])
-  })
-
-  it('keeps one-shot child queues read-only', async () => {
-    const api = new FakeApiClient()
-    const session = new Session(SID, fakeRemote(api), {
-      address: {
-        parentSessionId: 'parent' as SessionId,
-        childSessionId: SID,
-        mode: 'one-shot',
-      },
-    })
-    for (const action of [
-      { kind: 'edit' as const, content: text('revised') },
-      { kind: 'remove' as const },
-      { kind: 'steer' as const },
-    ]) {
-      await expect(session.updateQueue(iid('q-child'), action))
-        .resolves.toMatchObject({ ok: false, error: { code: 'subagent/not-resumable' } })
-    }
-    expect(api.callsOf('subagents.updateQueuedByParent')).toEqual([])
   })
 })
 

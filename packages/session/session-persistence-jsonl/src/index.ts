@@ -19,13 +19,21 @@ import {
   SessionPersistence, SessionPersistenceRevision, PersistenceCoordinator, SessionFormatUnsupportedError,
   type BorrowedSessionSource,
   type PersistenceBackend, type SessionLocation, type SessionPersistenceSnapshot,
-  type SessionInspection,
+  type SessionEventSuffix, type SessionInspection,
   type SessionPersistenceRevision as PersistenceRevision, type SessionRawArtifact,
+  type SessionStorageMetadata,
   type StoredPrefix,
 } from '@deepseek-ai/dsh-session-persistence'
-import type { Session, SessionEvent, SessionId, SessionHeader, SessionPreparation } from '@deepseek-ai/dsh-session'
+import type {
+  Session,
+  SessionEvent,
+  SessionId,
+  SessionHeader,
+  SessionLogOffset,
+  SessionPreparation,
+} from '@deepseek-ai/dsh-session'
 import {
-  encodeSegment, eventLines, logPath, logSuffix, parseHeaderMeta, projectDir, scanLog, sessionDir,
+  encodeSegment, eventLines, logPath, logSuffix, parseHeader, parseHeaderMeta, projectDir, scanLog, sessionDir,
   SessionLogScanner, toHeaderLine,
   type JsonlCompression,
 } from './format.ts'
@@ -98,43 +106,6 @@ interface FileRevisionIdentity {
   readonly ctimeNs: bigint
 }
 
-interface CachedHeader {
-  readonly revision: PersistenceRevision
-  readonly header: SessionHeader
-}
-
-interface ListedArtifact {
-  readonly header: SessionHeader
-  readonly path: string
-  readonly revision: PersistenceRevision
-}
-
-/** Await a shared listing without granting one caller cancellation ownership of the underlying scan. */
-function awaitListing<T>(pending: Promise<T>, signal?: AbortSignal): Promise<T> {
-  if (signal === undefined) return pending
-  signal.throwIfAborted()
-  return new Promise<T>((resolve, reject) => {
-    const aborted = (): void => {
-      reject(signal.reason instanceof Error
-        ? signal.reason
-        : new Error('JSONL metadata listing aborted', { cause: signal.reason }))
-    }
-    signal.addEventListener('abort', aborted, { once: true })
-    void pending.then(
-      (value) => {
-        signal.removeEventListener('abort', aborted)
-        resolve(value)
-      },
-      (error: unknown) => {
-        signal.removeEventListener('abort', aborted)
-        reject(error instanceof Error
-          ? error
-          : new Error(`JSONL metadata listing failed: ${String(error)}`, { cause: error }))
-      },
-    )
-  })
-}
-
 /** Build the source-qualified revision shared by full and lightweight reads. */
 function fileRevision(identity: FileRevisionIdentity): PersistenceRevision {
   return SessionPersistenceRevision([
@@ -183,10 +154,6 @@ export class JsonlSessionPersistence extends SessionPersistence implements Persi
   private compression: JsonlCompression
   private coordinator: PersistenceCoordinator<JsonlTornMarker>
   private rootEncodingCheck: Promise<void> | undefined
-  /** Validated immutable headers keyed by the exact stat-derived log revision. */
-  private readonly listedHeaders = new Map<string, CachedHeader>()
-  /** One filesystem discovery shared by concurrent metadata callers. */
-  private listing: Promise<ListedArtifact[]> | undefined
 
   constructor(ctx: Context, public config: Config) {
     super(ctx)
@@ -216,8 +183,8 @@ export class JsonlSessionPersistence extends SessionPersistence implements Persi
     return { kind: 'jsonl', path: logPath(this.root, meta.cwd, meta.id, this.compression) }
   }
 
-  create(meta: SessionHeader): Promise<void> {
-    return this.coordinator.create(meta)
+  create(meta: SessionHeader, inheritedEventCount?: SessionLogOffset): Promise<void> {
+    return this.coordinator.create(meta, inheritedEventCount)
   }
 
   override ensureMaterialized(session: Session): Promise<void> {
@@ -246,7 +213,7 @@ export class JsonlSessionPersistence extends SessionPersistence implements Persi
 
   // JSONL is sequential media: no loadStoredFrom hook, so the coordinator
   // parses the stored prefix (both encodings) and skips forward to fromSeq.
-  readFrom(id: SessionId, fromSeq: number, signal?: AbortSignal): Promise<{ meta: SessionHeader; events: SessionEvent[] }> {
+  readFrom(id: SessionId, fromSeq: SessionLogOffset, signal?: AbortSignal): Promise<SessionEventSuffix> {
     return this.coordinator.readFrom(id, fromSeq, signal)
   }
 
@@ -323,13 +290,13 @@ export class JsonlSessionPersistence extends SessionPersistence implements Persi
     } else {
       content = buffer.toString('utf8')
     }
-    const meta = parseHeaderMeta(content.split('\n', 1)[0] as string)
-    if (meta === undefined || meta.id !== id) {
+    const storage = parseHeader(content.split('\n', 1)[0] as string)
+    if (storage === undefined || storage.meta.id !== id) {
       throw new Error(`corrupt session log: invalid header line in "${path}"`)
     }
     // The logical artifact name is `session.jsonl` regardless of the physical
     // encoding suffix (`.jsonl.zstd` marks compression only).
-    return { meta, filename: 'session.jsonl', content }
+    return { ...storage, filename: 'session.jsonl', content }
   }
 
   /**
@@ -370,10 +337,11 @@ export class JsonlSessionPersistence extends SessionPersistence implements Persi
         prefix = await this.readZstdPrefix(buffer, signal)
       } else {
         signal?.throwIfAborted()
-        const { meta, events, committedBytes } = scanLog(buffer)
+        const { meta, inheritedEventCount, events, committedBytes } = scanLog(buffer)
         signal?.throwIfAborted()
         prefix = {
           meta,
+          inheritedEventCount,
           events,
           ...committedBytes < buffer.byteLength
             ? { tornMarker: { truncateTo: committedBytes, recoveredEvents: [] } }
@@ -435,7 +403,11 @@ export class JsonlSessionPersistence extends SessionPersistence implements Persi
       }
       if (tornStart === undefined) {
         const prefix = scanner.finish()
-        return { meta: prefix.meta, events: prefix.events }
+        return {
+          meta: prefix.meta,
+          inheritedEventCount: prefix.inheritedEventCount,
+          events: prefix.events,
+        }
       }
 
       let recoveredPlaintext: Buffer = Buffer.alloc(0)
@@ -454,6 +426,7 @@ export class JsonlSessionPersistence extends SessionPersistence implements Persi
       signal?.throwIfAborted()
       return {
         meta: recoveredPrefix.meta,
+        inheritedEventCount: recoveredPrefix.inheritedEventCount,
         events: recoveredPrefix.events,
         tornMarker: {
           truncateTo: tornStart,
@@ -470,18 +443,22 @@ export class JsonlSessionPersistence extends SessionPersistence implements Persi
   }
 
   /** Durably append a batch, lazily materializing the file when not yet present. */
-  async appendBatch(meta: SessionHeader, events: readonly SessionEvent[], isMaterialized: boolean): Promise<void> {
+  async appendBatch(
+    storage: SessionStorageMetadata,
+    events: readonly SessionEvent[],
+    isMaterialized: boolean,
+  ): Promise<void> {
     await this.ensureRootEncoding()
     if (isMaterialized) {
-      await this.appendLines(meta, events)
+      await this.appendLines(storage.meta, events)
     } else {
-      await this.materialize(meta, events)
+      await this.materialize(storage, events)
     }
   }
 
   /** Materialize a header-only JSONL artifact for an explicitly durable empty session. */
-  async materializeHeader(meta: SessionHeader): Promise<void> {
-    await this.materialize(meta, [])
+  async materializeHeader(storage: SessionStorageMetadata): Promise<void> {
+    await this.materialize(storage, [])
   }
 
   /**
@@ -490,10 +467,11 @@ export class JsonlSessionPersistence extends SessionPersistence implements Persi
    * does not require this to be atomic.
    */
   async commitRepair(
-    meta: SessionHeader,
+    storage: SessionStorageMetadata,
     tornMarker: JsonlTornMarker | undefined,
     closers: readonly SessionEvent[],
   ): Promise<void> {
+    const { meta } = storage
     if (tornMarker !== undefined) await this.repair(meta, tornMarker.truncateTo)
     const repairedEvents = [...(tornMarker?.recoveredEvents ?? []), ...closers]
     if (repairedEvents.length > 0) await this.appendLines(meta, repairedEvents)
@@ -507,93 +485,74 @@ export class JsonlSessionPersistence extends SessionPersistence implements Persi
 
   /** List metadata plus a stat-derived identity for each append-only log. */
   async listSnapshots(signal?: AbortSignal): Promise<SessionPersistenceSnapshot[]> {
-    const snapshots = (await this.listArtifacts(signal)).map(artifact => ({
-      header: artifact.header,
-      revision: artifact.revision,
-    }))
+    const snapshots: SessionPersistenceSnapshot[] = []
+    for (const artifact of await this.listArtifacts(signal)) {
+      signal?.throwIfAborted()
+      try {
+        const identity = await stat(artifact.path, { bigint: true })
+        signal?.throwIfAborted()
+        snapshots.push({
+          header: artifact.header,
+          revision: fileRevision(identity),
+        })
+      } catch (error: unknown) {
+        signal?.throwIfAborted()
+        if (!isENOENT(error)) throw error
+      }
+    }
     signal?.throwIfAborted()
     return snapshots
   }
 
-  private async listArtifacts(signal?: AbortSignal): Promise<ListedArtifact[]> {
+  private async listArtifacts(signal?: AbortSignal): Promise<Array<{ header: SessionHeader; path: string }>> {
     signal?.throwIfAborted()
-    const active = this.listing
-    if (active !== undefined) return this.cloneListed(await awaitListing(active, signal))
-    const scan = this.scanArtifacts()
-    this.listing = scan
-    void scan.finally(() => {
-      if (this.listing === scan) this.listing = undefined
-    }).catch(() => undefined)
-    return this.cloneListed(await awaitListing(scan, signal))
-  }
-
-  /** Clone cached immutable headers so callers retain the historical detached-list ownership. */
-  private cloneListed(artifacts: readonly ListedArtifact[]): ListedArtifact[] {
-    return artifacts.map(artifact => ({ ...artifact, header: { ...artifact.header } }))
-  }
-
-  /** Discover one exact metadata snapshot; caller cancellation never owns this shared operation. */
-  private async scanArtifacts(): Promise<ListedArtifact[]> {
     await this.ensureRootEncoding()
-    const artifacts: ListedArtifact[] = []
+    signal?.throwIfAborted()
+    const artifacts: Array<{ header: SessionHeader; path: string }> = []
     const ids = new Set<SessionId>()
-    const listedPaths = new Set<string>()
-    for (const project of await this.listProjectDirs()) {
-      for (const dir of await this.listSessionDirs(project)) {
+    for (const project of await this.listProjectDirs(signal)) {
+      signal?.throwIfAborted()
+      for (const dir of await this.listSessionDirs(project, signal)) {
+        signal?.throwIfAborted()
         const opposite = join(dir, `session${logSuffix(this.oppositeCompression())}`)
         const oppositeExists = await this.exists(opposite)
+        signal?.throwIfAborted()
         if (oppositeExists) throw this.encodingMismatch(opposite)
         const path = join(dir, `session${logSuffix(this.compression)}`)
         const pathExists = await this.exists(path)
+        signal?.throwIfAborted()
         if (!pathExists) continue
-        let identity: FileRevisionIdentity
-        try {
-          identity = await stat(path, { bigint: true })
-        } catch (error: unknown) {
-          if (isENOENT(error)) continue
-          throw error
-        }
-        const revision = fileRevision(identity)
-        const cached = this.listedHeaders.get(path)
-        let meta: SessionHeader
-        if (cached?.revision === revision) {
-          meta = cached.header
-        } else {
-          // Read only changed headers so repeated listing scales with cheap stat
-          // observations rather than one Zstandard decode per stored session.
-          const first = this.compression === 'zstd'
-            ? await this.readFirstZstdLine(path)
-            : await this.readFirstLine(path)
-          if (first === undefined) continue // empty/half-written file
-          const parsed = parseHeaderMeta(first)
-          if (parsed === undefined) continue // not a session header
-          await this.assertStoredIdentity(path, parsed)
-          meta = parsed
-          this.listedHeaders.set(path, { revision, header: meta })
-        }
-        listedPaths.add(path)
+        // Read only headers so listing scales with session count, not log size.
+        const first = this.compression === 'zstd'
+          ? await this.readFirstZstdLine(path, signal)
+          : await this.readFirstLine(path, signal)
+        signal?.throwIfAborted()
+        if (first === undefined) continue // empty/half-written file
+        const meta = parseHeaderMeta(first)
+        if (meta === undefined) continue // not a session header
+        await this.assertStoredIdentity(path, meta, undefined, signal)
+        signal?.throwIfAborted()
         if (ids.has(meta.id)) {
           throw new Error(`duplicate JSONL session id "${meta.id}" appears in multiple project directories`)
         }
         ids.add(meta.id)
-        artifacts.push({ header: meta, path, revision })
+        artifacts.push({ header: meta, path })
       }
     }
-    for (const cachedPath of this.listedHeaders.keys()) {
-      if (!listedPaths.has(cachedPath)) this.listedHeaders.delete(cachedPath)
-    }
+    signal?.throwIfAborted()
     return artifacts
   }
 
   // --- materialization / append / repair (file mechanics) ---
 
   /** Atomically write the header line + first batch (temp-write, fsync, publish). */
-  private async materialize(meta: SessionHeader, events: readonly SessionEvent[]): Promise<void> {
+  private async materialize(storage: SessionStorageMetadata, events: readonly SessionEvent[]): Promise<void> {
+    const { meta } = storage
     const project = projectDir(this.root, meta.cwd)
     const dir = sessionDir(this.root, meta.cwd, meta.id)
     const finalPath = logPath(this.root, meta.cwd, meta.id, this.compression)
     await this.rejectOppositeArtifact(meta.cwd, meta.id)
-    const content = await this.encodeMaterialization(meta, events)
+    const content = await this.encodeMaterialization(storage, events)
     /* v8 ignore next -- native Windows coverage exercises this platform dispatch; Linux covers the POSIX peer */
     if (process.platform === 'win32') {
       await this.materializeWin32(project, dir, finalPath, meta.id, content)
@@ -693,8 +652,11 @@ export class JsonlSessionPersistence extends SessionPersistence implements Persi
   }
 
   /** Encode the header and first batch without combining their frame boundaries. */
-  private async encodeMaterialization(meta: SessionHeader, events: readonly SessionEvent[]): Promise<Buffer | string> {
-    const header = JSON.stringify(toHeaderLine(meta)) + '\n'
+  private async encodeMaterialization(
+    storage: SessionStorageMetadata,
+    events: readonly SessionEvent[],
+  ): Promise<Buffer | string> {
+    const header = JSON.stringify(toHeaderLine(storage.meta, storage.inheritedEventCount)) + '\n'
     if (events.length === 0) {
       return this.compression === 'none' ? header : compressZstdFrame(header)
     }
