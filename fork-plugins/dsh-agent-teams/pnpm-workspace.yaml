@@ -1,0 +1,10 @@
+allowBuilds:
+  '@deepseek-ai/dsh-subprocess-local': false
+  '@google/genai': false
+  koffi: false
+  node-pty: false
+  protobufjs: false
+
+# This private workspace pins every direct Harness dependency to the audited
+# RC.1 release; its independent lockfile is the supply-chain boundary.
+minimumReleaseAge: 0
