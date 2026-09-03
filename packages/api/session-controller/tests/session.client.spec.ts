@@ -6,6 +6,7 @@ import type { SessionId } from '@deepseek-ai/dsh-api-remotes/client'
 import { RemoteStreamCarrierError } from '@deepseek-ai/dsh-api-gateway/client'
 import { RemoteError } from '@deepseek-ai/dsh-typert-protocol'
 import { JUMP_PAGE_MESSAGES, Session, type SessionOptions } from '../src/client/sessions/session.ts'
+import { SessionEventStream } from '../src/client/transport.ts'
 import { FakeApiClient, deferred, err, fakeRemote, ok } from './fake-api.client.ts'
 import { entries, ev, historyValue, plainTurn } from './event-script.client.ts'
 
@@ -75,6 +76,30 @@ describe('Session open', () => {
     await session.open()
     expect(api.callsOf('session.follow')).toHaveLength(1)
     expect(api.callsOf('session.history')).toEqual([])
+  })
+
+  it('suspends an open history stream and reopens it from durable history', async () => {
+    const { api, session } = makeSession()
+    await session.open()
+    expect(api.activeFollows(SID)).toBe(1)
+    await session.suspendHistory()
+    expect(session.getSnapshot().openState).toBe('cold')
+    expect(api.activeFollows(SID)).toBe(0)
+    await session.open()
+    expect(api.activeFollows(SID)).toBe(1)
+    expect(api.callsOf('session.follow')).toHaveLength(2)
+  })
+
+  it('invalidates an in-flight open before suspension waits for transport disposal', async () => {
+    const { api, session } = makeSession()
+    const gate = deferred<Awaited<ReturnType<FakeApiClient['onHistory']>>>()
+    api.onHistory = () => gate.promise
+    const opening = session.open()
+    const suspended = session.suspendHistory()
+    gate.resolve(ok(historyValue([], false)))
+    await Promise.all([opening, suspended])
+    expect(session.getSnapshot().openState).toBe('cold')
+    expect(api.activeFollows(SID)).toBe(0)
   })
 
   it('lands an error result in openState=error with the Remote failure kept', async () => {
@@ -367,6 +392,37 @@ describe('paging', () => {
     // The stale loop must not page the new generation toward its old target:
     // history calls are the gated page and the resync tail only.
     expect(api.callsOf('session.history')).toHaveLength(1)
+    expect(session.getSnapshot().loadingOlder).toBe(false)
+  })
+
+  it('does not let a suspended jump promise or its cleanup take over a reopened generation', async () => {
+    const tail = plainTurn(SessionSeq(12), 2, 'new', 'tail')
+    const middle = plainTurn(SessionSeq(6), 1, 'middle', 'page')
+    const { api, session } = makeSession()
+    api.onHistory = () => histResponse(tail, true)
+    await session.open()
+
+    const oldPage = deferred<Awaited<ReturnType<FakeApiClient['onHistory']>>>()
+    api.onHistory = () => oldPage.promise
+    const oldJump = session.loadThrough(SessionSeq(0))
+    const suspending = session.suspendHistory()
+
+    const newPage = deferred<Awaited<ReturnType<FakeApiClient['onHistory']>>>()
+    api.onHistory = payload => payload.beforeSeq === undefined
+      ? histResponse(tail, true)
+      : newPage.promise
+    await session.open()
+    const newJump = session.loadThrough(SessionSeq(6))
+    expect(session.loadThrough(SessionSeq(6))).toBe(newJump)
+    expect(session.getSnapshot().loadingOlder).toBe(true)
+
+    oldPage.resolve(ok(historyValue(middle, true)))
+    await Promise.all([oldJump, suspending])
+    expect(session.getSnapshot().loadingOlder).toBe(true)
+    expect(session.loadThrough(SessionSeq(6))).toBe(newJump)
+
+    newPage.resolve(ok(historyValue(middle, true)))
+    await newJump
     expect(session.getSnapshot().loadingOlder).toBe(false)
   })
 
@@ -924,6 +980,30 @@ describe('resync', () => {
     const cold = makeSession()
     await cold.session.resync()
     expect(cold.api.calls).toEqual([]) // never opened: no traffic
+  })
+
+  it('does not reopen after navigation suspension wins during resync disposal', async () => {
+    const { api, session } = makeSession()
+    await session.open()
+    const release = deferred<undefined>()
+    const originalDispose = SessionEventStream.prototype.dispose
+    const dispose = vi.spyOn(SessionEventStream.prototype, 'dispose').mockImplementation(async function (
+      this: SessionEventStream,
+    ) {
+      await originalDispose.call(this)
+      await release.promise
+    })
+    try {
+      const resyncing = session.resync()
+      await vi.waitFor(() => { expect(api.activeFollows(SID)).toBe(0) })
+      const navigatingAway = session.suspendHistory()
+      release.resolve(undefined)
+      await Promise.all([resyncing, navigatingAway])
+      expect(session.getSnapshot().openState).toBe('cold')
+      expect(api.callsOf('session.follow')).toHaveLength(1)
+    } finally {
+      dispose.mockRestore()
+    }
   })
 
   it('drops a stale in-flight open superseded by resync (generation guard)', async () => {

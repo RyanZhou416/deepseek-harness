@@ -16,7 +16,7 @@ The Gateway sent WebSocket Ping frames but accepted an open socket indefinitely 
 
 ## Decision
 
-The token meter folds the exact frozen event supplied by `session/event` whenever its cursor matches that append. Cold or unexpectedly lagging state captures one immutable `session.events` snapshot and replays it once.
+The RC.1 token meter keeps an exact consumed offset and reads only unseen records through the indexed `Session.eventAt(SessionSeq)` API. The fork's former direct-append fast path and `Session.events` fallback are retired because the official path no longer materializes the complete log.
 
 Persistence exposes a trusted `enqueueFrozen()` path for the deep-frozen value published by `Session.append()`. The standalone borrowed-input path still clones. A write transfers the pending backing array in O(1), and a failed write prepends that same batch before later events.
 

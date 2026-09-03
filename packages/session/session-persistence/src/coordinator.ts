@@ -1306,10 +1306,11 @@ export class PersistenceCoordinator<TornMarker = unknown> {
       void this.initFor(session)
     })
 
-    // Keep a persistence-owned copy of each frozen event and start its bounded window.
+    // Live publication supplies a detached, recursively frozen event; share
+    // that immutable graph with write-behind instead of cloning its payload.
     ctx.on('session/event', (session, event) => {
       const live = this.initFor(session)
-      live.writes.enqueue(event)
+      live.writes.enqueueFrozen(event)
     })
 
     // Callers use flush as the immediate durability barrier for buffered writes.

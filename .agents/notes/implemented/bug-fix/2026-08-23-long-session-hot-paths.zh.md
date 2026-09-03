@@ -16,7 +16,7 @@ Gateway 会发送 WebSocket Ping，但不会因为已打开的 socket 长期没�
 
 ## Decision
 
-当 cursor 与本次 append 匹配时，token meter 直接 fold `session/event` 提供的精确冻结 event。冷状态或意外落后的状态只捕获一次不可变 `session.events` 快照并完成一次 replay。
+RC.1 token meter 保存精确的已消费 offset，并只通过索引化 `Session.eventAt(SessionSeq)` API 读取未消费记录。官方路径已不再物化完整日志，因此 fork 原有的直接 append 快路径与 `Session.events` fallback 已退役。
 
 Persistence 为 `Session.append()` 发布的深度冻结值提供可信的 `enqueueFrozen()` 路径；独立的借用输入入口仍执行 clone。写入通过 O(1) 转移 pending backing array；失败时将同一 batch 放回后续 event 之前。
 

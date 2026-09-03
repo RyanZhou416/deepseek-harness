@@ -43,10 +43,12 @@ export class SessionHistoryController {
   /**
    * @param ctx - Host context carrying Session query and projection services.
    * @param promote - starts ordinary Session activation after snapshot delivery.
+   * @param retain - keeps an addressed Agent resident for the follower lifetime.
    */
   constructor(
     private readonly ctx: Context,
     private readonly promote: (observation: SessionObservation) => void,
+    private readonly retain: (sessionId: SessionId) => () => void = () => () => {},
   ) {
     ctx.effect(() => () => {
       for (const close of this.closeFollowers) close()
@@ -106,6 +108,7 @@ export class SessionHistoryController {
     validateFollowRequest(request)
     const { address } = request
     const target = addressId(address)
+    const releaseRetention = this.retain(target)
     const buffered = new Deque<SessionEvent>()
     let snapshotCursor: SessionSeqCursor | undefined
     let wake: (() => void) | undefined
@@ -182,6 +185,7 @@ export class SessionHistoryController {
         yield entryFor(item)
       }
     } finally {
+      releaseRetention()
       this.closeFollowers.delete(close)
       signal.removeEventListener('abort', onAbort)
       disposeCreated()

@@ -499,6 +499,29 @@ describe('JsonlSessionPersistence: default Zstandard encoding', () => {
     await expect(ctx.sessionPersistence.load(header.id)).rejects.toThrow(/frame at byte .* failed validation/)
   })
 
+  it('reuses a validated header until the stat-derived log revision changes', async () => {
+    const root = await freshRoot()
+    const ctx = await mount(root)
+    const header = meta('listed-header-cache')
+    await ctx.sessionPersistence.create(header)
+    await ctx.sessionPersistence.append(header.id, oneTurnLog())
+    const persistence = ctx.sessionPersistence as unknown as {
+      readFirstZstdLine(path: string, signal?: AbortSignal): Promise<string | undefined>
+    }
+    const readHeader = vi.spyOn(persistence, 'readFirstZstdLine')
+
+    await expect(ctx.sessionPersistence.list()).resolves.toMatchObject([{ id: header.id }])
+    await expect(ctx.sessionPersistence.listSnapshots()).resolves.toMatchObject([{ header }])
+    expect(readHeader).toHaveBeenCalledOnce()
+
+    await ctx.sessionPersistence.append(header.id, [
+      { type: 'turn/start', seq: SessionSeq(6), time: 7, data: { turn: 2 } },
+      { type: 'turn/end', seq: SessionSeq(7), time: 8, data: { turn: 2, reason: { kind: 'completed' } } },
+    ])
+    await expect(ctx.sessionPersistence.list()).resolves.toMatchObject([{ id: header.id }])
+    expect(readHeader).toHaveBeenCalledTimes(2)
+  })
+
   it('stops multi-frame inspection when cancellation arrives at a slice deadline', async () => {
     const root = await freshRoot()
     const ctx = await mount(root)
@@ -544,6 +567,10 @@ describe('JsonlSessionPersistence: default Zstandard encoding', () => {
       await ctx.sessionPersistence.create(header)
       await ctx.sessionPersistence.append(header.id, oneTurnLog())
       await ctx.sessionPersistence.list()
+      await ctx.sessionPersistence.append(header.id, [
+        { type: 'turn/start', seq: SessionSeq(6), time: 7, data: { turn: 2 } },
+        { type: 'turn/end', seq: SessionSeq(7), time: 8, data: { turn: 2, reason: { kind: 'completed' } } },
+      ])
       const path = logPath(root, header.cwd, header.id, compression)
       const probe = await open(path, 'r')
       const prototype = Object.getPrototypeOf(probe) as { read: HeaderRead }

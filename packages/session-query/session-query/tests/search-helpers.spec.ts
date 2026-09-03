@@ -9,6 +9,7 @@ import SessionStore, {
 import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import type { SessionEvent, SessionHeader } from '@deepseek-ai/dsh-session'
 import {
+  buildAppendedSessionEventSearchDocuments,
   buildSessionEventRecords,
   buildSessionEventSearchDocuments,
   compileSessionTextFilter,
@@ -174,6 +175,26 @@ describe('session-query document and filter helpers', () => {
       [2, 'replacement', 'current'],
       [3, 'interrupted', 'log-only'],
     ])
+  })
+
+  it('classifies a proven append-only suffix without folding its indexed prefix', () => {
+    const suffix: SessionEvent[] = [
+      { type: 'user/message', seq: SessionSeq(4), time: 14, data: createUserMessage({
+        content: [{ type: 'text', text: 'new tail' }], source: { kind: 'user' },
+      }), surfaceOp: 'append' },
+      { type: 'turn/end', seq: SessionSeq(5), time: 15, data: { turn: 2, reason: { kind: 'interrupted' } } },
+    ]
+
+    expect(buildAppendedSessionEventSearchDocuments(id, suffix).map(document => [
+      document.seq,
+      document.text,
+      document.surface,
+    ])).toEqual([
+      [4, 'new tail', 'current'],
+      [5, 'interrupted', 'log-only'],
+    ])
+    expect(() => buildAppendedSessionEventSearchDocuments(id, [events[2]!]))
+      .toThrow(expectCode('SESSION_QUERY_INVALID_SURFACE'))
   })
 
   it('applies every session clause with OR values and validates closed values', () => {

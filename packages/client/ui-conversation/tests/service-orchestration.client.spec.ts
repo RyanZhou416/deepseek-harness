@@ -75,9 +75,25 @@ describe('ConversationController', () => {
     } as never)
     await expect(b.scoped.updateQueue('item-2' as never, { kind: 'steer' })).resolves.toBeUndefined()
     b.updateQueue.mockResolvedValueOnce({
+      ok: false,
+      error: new RemoteError('subagent/steer-unavailable', 'closed', {
+        childSessionId: 's1' as never,
+        itemId: 'item-3' as QueuedMessage['id'],
+      }),
+    } as never)
+    await expect(b.scoped.updateQueue('item-3' as never, { kind: 'steer' })).resolves.toBeUndefined()
+    b.updateQueue.mockResolvedValueOnce({
+      ok: false,
+      error: new RemoteError('subagent/queue-item-not-found', 'claimed', {
+        childSessionId: 's1' as never,
+        itemId: 'item-4' as QueuedMessage['id'],
+      }),
+    } as never)
+    await expect(b.scoped.updateQueue('item-4' as never, { kind: 'steer' })).resolves.toBeUndefined()
+    b.updateQueue.mockResolvedValueOnce({
       ok: false, error: new RemoteError('session/queue-item-not-found', 'claimed', { itemId: 'item-1' as QueuedMessage['id'] }),
     } as never)
-    await expect(b.scoped.updateQueue('item-3' as never, { kind: 'remove' }))
+    await expect(b.scoped.updateQueue('item-5' as never, { kind: 'remove' }))
       .rejects.toThrow('conversation.updateQueue failed: session/queue-item-not-found: claimed')
     await b.runtime.dispose()
   })
@@ -439,6 +455,34 @@ describe('InputHub queue steering (empty-draft accelerated Enter)', () => {
     } as never)
     b.shell.steerQueue()
     await vi.waitFor(() => { expect(b.updateQueue).toHaveBeenCalledTimes(2) })
+    expect(b.shell.notices.getSnapshot()).toBeNull()
+
+    await b.runtime.sessions.updateSessionSnapshot('s1', (draft) => {
+      draft.queue = [row('q-4')]
+    })
+    b.updateQueue.mockResolvedValueOnce({
+      ok: false,
+      error: new RemoteError('subagent/steer-unavailable', 'closed', {
+        childSessionId: 's1' as never,
+        itemId: 'q-4' as QueuedMessage['id'],
+      }),
+    } as never)
+    b.shell.steerQueue()
+    await vi.waitFor(() => { expect(b.updateQueue).toHaveBeenCalledTimes(3) })
+    expect(b.shell.notices.getSnapshot()).toBeNull()
+
+    await b.runtime.sessions.updateSessionSnapshot('s1', (draft) => {
+      draft.queue = [row('q-5')]
+    })
+    b.updateQueue.mockResolvedValueOnce({
+      ok: false,
+      error: new RemoteError('subagent/queue-item-not-found', 'claimed', {
+        childSessionId: 's1' as never,
+        itemId: 'q-5' as QueuedMessage['id'],
+      }),
+    } as never)
+    b.shell.steerQueue()
+    await vi.waitFor(() => { expect(b.updateQueue).toHaveBeenCalledTimes(4) })
     expect(b.shell.notices.getSnapshot()).toBeNull()
     await b.runtime.dispose()
   })

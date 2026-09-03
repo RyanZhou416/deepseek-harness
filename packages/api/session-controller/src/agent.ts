@@ -4,13 +4,15 @@ import { mkdir } from 'node:fs/promises'
 import type { Context } from '@deepseek-ai/cordis'
 import { installModelSelection } from '@deepseek-ai/dsh-agent'
 import type {
-  Agent, AgentOptions, AgentSetup, ModelSelection as AgentModelSelection, ModelSelectionRef,
+  Agent, AgentHandle, AgentOptions, AgentSetup, ModelSelection as AgentModelSelection, ModelSelectionRef,
 } from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-agent-default-model'
 import type {} from '@deepseek-ai/dsh-agent-presets'
+import type {} from '@deepseek-ai/dsh-jobs'
 import { ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import type { Session, SessionId } from '@deepseek-ai/dsh-session'
 import type { SessionInspection } from '@deepseek-ai/dsh-session-persistence'
+import type {} from '@deepseek-ai/dsh-session-persistence'
 import { SessionQueryError, type SessionObservation } from '@deepseek-ai/dsh-session-query'
 import { RemoteError } from '@deepseek-ai/dsh-typert-protocol'
 import type {} from '@deepseek-ai/dsh-typert-registry'
@@ -142,9 +144,22 @@ export class ApiSessionAgentController {
   private readonly creations = new Map<SessionId, Promise<Agent>>()
   private readonly selections = new WeakMap<Agent, InstalledSelection>()
   private readonly imageAdmissionChains = new WeakMap<Agent, Promise<void>>()
+  private readonly ownedHandles = new Map<SessionId, AgentHandle>()
+  private readonly idleTimers = new Map<SessionId, ReturnType<typeof setTimeout>>()
+  private readonly idleEvictions = new Map<SessionId, Promise<void>>()
+  private readonly followerCounts = new Map<SessionId, number>()
+  private readonly residencyEvictions = new WeakSet<Session>()
+  private readonly runtimeParents = new WeakMap<Agent, Agent>()
+  private stopping = false
 
-  /** @param ctx - Host context carrying Agent, model, persistence, and Typert services. */
-  constructor(private readonly ctx: Context) {
+  /**
+   * @param ctx - Host context carrying Agent, model, persistence, and Typert services.
+   * @param idleSessionRetentionMs - idle interval before a durable, unfollowed owned Agent unloads; zero disables it.
+   */
+  constructor(
+    private readonly ctx: Context,
+    private readonly idleSessionRetentionMs = 0,
+  ) {
     ctx.typert.lookups.configure('agent', async (sessionId: SessionId) => {
       const found = await this.resolveAgent(sessionId)
       if ('error' in found) throw found.error
@@ -160,6 +175,92 @@ export class ApiSessionAgentController {
       if ('error' in found) throw found.error
       return found.agent.ctx
     })
+    ctx.on('agent/created', ({ agent }) => {
+      for (const { agent: parent } of this.ownedHandles.values()) {
+        if (!this.ctx.agents.isOwnedBy(agent.id, parent)) continue
+        this.runtimeParents.set(agent, parent)
+        this.cancelIdleEviction(parent.id)
+        break
+      }
+    })
+    ctx.on('agent/status', ({ agent, status }) => {
+      if (this.ownedHandles.get(agent.id)?.agent !== agent) return
+      if (status === 'running') this.cancelIdleEviction(agent.id)
+      else this.scheduleIdleEviction(agent)
+    })
+    ctx.on('agent/disposed', ({ agent }) => {
+      const parent = this.runtimeParents.get(agent)
+      if (parent !== undefined) this.scheduleIdleEviction(parent)
+      this.cancelIdleEviction(agent.id)
+      if (this.ownedHandles.get(agent.id)?.agent === agent) this.ownedHandles.delete(agent.id)
+    })
+    ctx.inject(['jobs'], (jobsCtx) => {
+      jobsCtx.jobs.onJobsChanged((owner) => {
+        if (owner !== undefined) {
+          if (this.ownedHandles.get(owner.id)?.agent === owner) this.scheduleIdleEviction(owner)
+          return
+        }
+        for (const { agent } of this.ownedHandles.values()) this.scheduleIdleEviction(agent)
+      })
+    })
+    ctx.effect(() => async () => {
+      this.stopping = true
+      for (const timer of this.idleTimers.values()) clearTimeout(timer)
+      this.idleTimers.clear()
+      await Promise.allSettled([...this.idleEvictions.values()])
+      this.ownedHandles.clear()
+      this.followerCounts.clear()
+    }, 'api-session.idle-agent-residency')
+  }
+
+  /**
+   * Adopt a Session Controller-created Agent handle for bounded idle residency.
+   * @param handle - exclusive teardown capability returned by Agent creation or resume.
+   * @returns the handle's Agent.
+   */
+  adoptHandle(handle: AgentHandle): Agent {
+    const { agent } = handle
+    const existing = this.ownedHandles.get(agent.id)
+    if (existing !== undefined && existing.agent !== agent) {
+      throw new Error(`api-session: session "${agent.id}" already has another owned AgentHandle`)
+    }
+    this.ownedHandles.set(agent.id, handle)
+    for (const candidate of this.ctx.agents.list()) {
+      if (candidate !== agent && this.ctx.agents.isOwnedBy(candidate.id, agent)) {
+        this.runtimeParents.set(candidate, agent)
+      }
+    }
+    this.scheduleIdleEviction(agent)
+    return agent
+  }
+
+  /**
+   * Keep one addressed Agent resident while a live history follower is attached.
+   * @param sessionId - ordinary Session identity whose follower is active.
+   * @returns an idempotent release callback.
+   */
+  retainForFollower(sessionId: SessionId): () => void {
+    this.followerCounts.set(sessionId, (this.followerCounts.get(sessionId) ?? 0) + 1)
+    this.cancelIdleEviction(sessionId)
+    let active = true
+    return () => {
+      if (!active) return
+      active = false
+      const remaining = (this.followerCounts.get(sessionId) ?? 1) - 1
+      if (remaining > 0) this.followerCounts.set(sessionId, remaining)
+      else this.followerCounts.delete(sessionId)
+      const agent = this.ownedHandles.get(sessionId)?.agent
+      if (agent !== undefined) this.scheduleIdleEviction(agent)
+    }
+  }
+
+  /**
+   * Test whether Session disposal is an internal residency transition rather than deletion.
+   * @param session - Session delivered by `session/disposed`.
+   * @returns whether list consumers must retain the durable row.
+   */
+  isResidencyEviction(session: Session): boolean {
+    return this.residencyEvictions.has(session)
   }
 
   /**
@@ -184,6 +285,7 @@ export class ApiSessionAgentController {
     sessionId: SessionId,
     observation?: SessionObservation,
   ): Promise<ApiSessionAgentResult> {
+    await this.waitForIdleEviction(sessionId)
     const live = this.liveAgent(sessionId)
     if (live !== undefined) return live
     const attached = this.ctx.sessions.get(sessionId)
@@ -199,6 +301,7 @@ export class ApiSessionAgentController {
     try {
       return { agent: await resume }
     } catch (error: unknown) {
+      await this.waitForIdleEviction(sessionId)
       if (error instanceof ApiSessionNotFound) {
         return { error: new RemoteError('session/not-found', error.message, { sessionId }) }
       }
@@ -235,10 +338,12 @@ export class ApiSessionAgentController {
     checkPersistedIdentity: boolean,
     presetId?: string,
   ): Promise<Agent> {
+    await this.waitForIdleEviction(sessionId)
     let creation = this.creations.get(sessionId)
     if (creation === undefined) {
       creation = this.createOrAdopt(sessionId, cwd, checkPersistedIdentity, presetId)
-        .catch((error: unknown) => {
+        .catch(async (error: unknown) => {
+          await this.waitForIdleEviction(sessionId)
           const live = this.ctx.agents.get(sessionId)
           if (live !== undefined) {
             if (hasApiSessionSubagentOwner(this.ctx, live.session, live)) {
@@ -395,6 +500,77 @@ export class ApiSessionAgentController {
       : { agent }
   }
 
+  private cancelIdleEviction(sessionId: SessionId): void {
+    const timer = this.idleTimers.get(sessionId)
+    if (timer === undefined) return
+    clearTimeout(timer)
+    this.idleTimers.delete(sessionId)
+  }
+
+  /** Wait for a started teardown before any live fast path may return its Agent. */
+  private async waitForIdleEviction(sessionId: SessionId): Promise<void> {
+    const eviction = this.idleEvictions.get(sessionId)
+    if (eviction === undefined) return
+    try {
+      await eviction
+    } catch {
+      // The timer-owned observer reports the failure. Callers re-evaluate the
+      // registry after settlement instead of reusing the pre-teardown object.
+    }
+  }
+
+  private hasActiveOwnedWork(agent: Agent): boolean {
+    if ((this.followerCounts.get(agent.id) ?? 0) > 0) return true
+    if (agent.status !== 'idle' || agent.inbox.hasPending) return true
+    if (this.ctx.agents.list().some(candidate => this.ctx.agents.isOwnedBy(candidate.id, agent))) return true
+    const jobs = this.ctx.get('jobs')
+    return jobs?.list(agent).some(job => job.status === 'running' || job.status === 'stopping') ?? false
+  }
+
+  private scheduleIdleEviction(agent: Agent): void {
+    this.cancelIdleEviction(agent.id)
+    if (this.stopping || this.idleSessionRetentionMs === 0 || this.hasActiveOwnedWork(agent)) return
+    if (this.ownedHandles.get(agent.id)?.agent !== agent || this.idleEvictions.has(agent.id)) return
+    const timer = setTimeout(() => {
+      this.idleTimers.delete(agent.id)
+      void this.evictIdleAgent(agent).catch((error: unknown) => {
+        this.ctx.logger.warn(`api-session: idle session "${agent.id}" eviction failed: ${String(error)}`)
+      })
+    }, this.idleSessionRetentionMs)
+    timer.unref()
+    this.idleTimers.set(agent.id, timer)
+  }
+
+  private async evictIdleAgent(agent: Agent): Promise<void> {
+    const owned = this.ownedHandles.get(agent.id)
+    if (owned?.agent !== agent || this.idleEvictions.has(agent.id) || this.hasActiveOwnedWork(agent)) return
+    const operation = (async () => {
+      const persistence = this.ctx.get('sessionPersistence')
+      if (persistence === undefined) return
+      const participated = await this.ctx.sessions.flush(agent.session)
+      if (!participated) return
+      const persisted = (await persistence.listSnapshots()).some(snapshot => snapshot.header.id === agent.id)
+      if (!persisted || this.hasActiveOwnedWork(agent)) return
+      if (this.ownedHandles.get(agent.id) !== owned
+        || this.ctx.agents.get(agent.id) !== agent
+        || this.ctx.sessions.get(agent.id) !== agent.session) return
+      this.residencyEvictions.add(agent.session)
+      try {
+        await owned.dispose()
+      } catch (error: unknown) {
+        if (this.ctx.sessions.get(agent.id) === agent.session) {
+          this.residencyEvictions.delete(agent.session)
+        }
+        throw error
+      }
+    })().finally(() => {
+      this.idleEvictions.delete(agent.id)
+      if (!this.stopping && this.ctx.agents.get(agent.id) === agent) this.scheduleIdleEviction(agent)
+    })
+    this.idleEvictions.set(agent.id, operation)
+    await operation
+  }
+
   private async resume(sessionId: SessionId, supplied?: SessionObservation): Promise<Agent> {
     if (supplied !== undefined) return this.resumeObserved(sessionId, supplied)
     try {
@@ -425,11 +601,11 @@ export class ApiSessionAgentController {
     if (published !== undefined && hasApiSessionSubagentOwner(this.ctx, published, live)) {
       throw new ApiSessionSubagentOwnership(sessionId)
     }
-    return (await this.ctx.agents.resume({
+    return this.adoptHandle(await this.ctx.agents.resume({
       resumeSessionId: sessionId,
       agentOptions: this.agentOptions(),
       setup: composition.setup,
-    })).agent
+    }))
   }
 
   private async createOrAdopt(
@@ -438,6 +614,7 @@ export class ApiSessionAgentController {
     checkPersistedIdentity: boolean,
     presetId: string | undefined,
   ): Promise<Agent> {
+    await this.waitForIdleEviction(sessionId)
     const attached = this.ctx.sessions.get(sessionId)
     const live = this.ctx.agents.get(sessionId)
     if (attached !== undefined && hasApiSessionSubagentOwner(this.ctx, attached, live)) {
@@ -457,11 +634,11 @@ export class ApiSessionAgentController {
         const storedPreset = this.presetForObservation(observation)
         this.assertPresetUnchanged(sessionId, presetId, storedPreset)
         const composition = await this.composeAgent(storedPreset)
-        return (await this.ctx.agents.resume({
+        return this.adoptHandle(await this.ctx.agents.resume({
           resumeSessionId: sessionId,
           agentOptions: this.agentOptions(),
           setup: composition.setup,
-        })).agent
+        }))
       } catch (error: unknown) {
         if (!(error instanceof SessionQueryError)
           || error.code !== 'SESSION_QUERY_SESSION_NOT_FOUND') throw error
@@ -474,7 +651,7 @@ export class ApiSessionAgentController {
       throw new Error(`failed to ensure project directory "${cwd}": ${String(error)}`, { cause: error })
     }
     const composition = await this.composeAgent(presetId)
-    return (await this.ctx.agents.create({
+    return this.adoptHandle(await this.ctx.agents.create({
       sessionId,
       agentOptions: this.agentOptions(),
       meta: {
@@ -482,7 +659,7 @@ export class ApiSessionAgentController {
         ...(composition.agentPreset === undefined ? {} : { agentPreset: composition.agentPreset }),
       },
       setup: composition.setup,
-    })).agent
+    }))
   }
 
   private agentOptions(): AgentOptions {

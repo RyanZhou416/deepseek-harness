@@ -9,6 +9,7 @@
 import type { PromptContentPart } from '@deepseek-ai/dsh-attachment/types'
 import type { Branded } from '@deepseek-ai/dsh-brand'
 import type { MessageId } from '@deepseek-ai/dsh-llm/brand'
+import type { ContentBlock } from '@deepseek-ai/dsh-llm/types'
 import type { SessionId } from '@deepseek-ai/dsh-session/types'
 
 /**
@@ -117,6 +118,27 @@ export interface SubagentPromptReceipt {
   readonly messageId: MessageId
 }
 
+/** One browser-requested mutation of a still-pending child FIFO occurrence. */
+export type SubagentQueueAction =
+  | { readonly kind: 'edit'; readonly content: readonly ContentBlock[] }
+  | { readonly kind: 'remove' }
+  | { readonly kind: 'steer' }
+
+/** Durable parent address plus one still-pending child inbox mutation. */
+export interface SubagentQueueUpdateRequest {
+  readonly parentSessionId: SessionId
+  readonly childSessionId: SessionId
+  /** Required continuable-address discriminator. */
+  readonly mode: 'continuable'
+  readonly itemId: MessageId
+  readonly action: SubagentQueueAction
+}
+
+/** Acknowledgement that one queued child mutation committed. */
+export interface SubagentQueueUpdateReceipt {
+  readonly accepted: true
+}
+
 /** Uniform acknowledgement that one interrupt request was admitted. */
 export interface SubagentInterruptReceipt {
   readonly accepted: true
@@ -138,8 +160,14 @@ declare module '@deepseek-ai/dsh-typert-protocol' {
     'subagent/unauthorized': { readonly childSessionId: SessionId }
     /** Image admission or model image-capability refusal. */
     'subagent/attachment-invalid': { readonly reason: string }
+    /** A queue edit attempted to introduce a non-text content block. */
+    'subagent/attachment-unsupported': { readonly childSessionId: SessionId; readonly reason: string }
     /** The child exists but its inbox cannot admit the message now. */
     'subagent/delivery-unavailable': { readonly childSessionId: SessionId }
+    /** The selected FIFO occurrence is no longer pending. */
+    'subagent/queue-item-not-found': { readonly childSessionId: SessionId; readonly itemId: MessageId }
+    /** The child has no running Activation whose current step can be steered. */
+    'subagent/steer-unavailable': { readonly childSessionId: SessionId; readonly itemId: MessageId }
     /** The deployment mounts no session-projection registry. */
     'subagent/projections-unavailable': {}
   }

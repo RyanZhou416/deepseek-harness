@@ -28,18 +28,20 @@
 |---|---|---|
 | Fork remote | `origin = https://github.com/RyanZhou416/deepseek-harness.git` | 唯一常规推送目标 |
 | Official remote | `upstream = https://github.com/deepseek-ai/deepseek-harness.git` | 只用于 fetch 和合并官方 release tag |
-| Published fork | `master = origin/master` | 当前 fork 源码、16 GiB Windows Host 与 continuable-subagent Queue edit/remove/steer 基线；SHA 用 Git 读取 |
+| Published fork | `master = origin/master = eb0cbabe39` | 当前运行中的 alpha.2 fork、16 GiB Windows Host 与 continuable-subagent Queue edit/remove/steer 基线 |
 | Pre-Queue behavior anchor | `7b86d0a01b` | Queue 仅支持 steer 时的历史定位点，不是当前发布基线 |
 | Alpha.2 integration | `133c48c733` / `origin/integrate/upstream-alpha2` | 长任务、AgentTeams 和 transient retention 整合提交 |
 | Official merge | `e481d7cb31` | 合并 `dsh-v0.1.2-alpha.2` (`0a53fb55be`) |
 | Pre-alpha.2 WIP backup | `origin/backup/wip-before-alpha2-20260831 = f1c600d51e` | 逐文件恢复证据；它是 sibling，禁止用它 reset 当前 master |
 | Older local backup | `backup/pre-upstream-0.1.2-alpha.1-20260829 = 595cd48136` | alpha.1 前的本地证据 |
 | Integration worktree | `C:\Project\deepseek-harness-alpha2-integration` at `133c48c733` | alpha.2 整合留档，不是当前运行目录 |
-| Current official observation | `dsh-v0.1.2-alpha.4 = 4e84901e64` on 2026-09-02 | 尚未合并；每次维护必须重新 fetch，不能把这里的“最新”当常量 |
+| Pre-RC.1 backup | `origin/backup/pre-upstream-rc1-20260904 = eb0cbabe39` | RC.1 整合前已推送的完整 fork 恢复点 |
+| RC.1 integration | `integrate/upstream-rc1`, worktree `C:\Project\deepseek-harness-rc1-integration` | 官方 merge checkpoint `646dffed9f`，fork 行为正在独立 worktree 移植 |
+| Current official target | `dsh-v0.1.2-rc.1 = a66e470204` on 2026-09-04 | 精确不可变 tag；不要改合并已越过该 tag 的 rolling `upstream/master` |
 
-当前 fork 的兼容基线仍是 alpha.2。官方 alpha.4 已重构 Session indexed reads、Tool 展开懒计算、相邻 Agent steer、Chat/Conversation/Trajectory 性能和连接容错；下一次合并应优先采用这些官方机制，再按本文的行为与测试补回仍缺失的部分，禁止整体 cherry-pick alpha.2 旧文件。
+已发布 `master` 的兼容基线仍是 alpha.2；RC.1 整合只发生在独立 worktree。RC.1 已重构 Session indexed reads、Tool 展开懒计算、相邻 Agent messaging、Chat/Conversation/Trajectory 性能和连接容错；integration 先采用这些官方机制，再按本文的行为与测试补回仍缺失部分，禁止整体 cherry-pick alpha.2 旧文件。
 
-Alpha.4 的物理 JSONL `seedLength` 仍可由 decoder 兼容，但逻辑 `SessionHeader` 已从 `seedLength` 演进到 `isSeeded`，并引入 branded `SessionSeq` / `SessionLogOffset`。第三方插件和本地 AgentTeams 包即使磁盘数据可读，也必须重新构建并在隔离 profile 验证逻辑 API。
+RC.1 的物理 JSONL `seedLength` 仍可由 decoder 兼容，`SESSION_FORMAT_VERSION` 仍为 `0`；逻辑 `SessionHeader` 已从 `seedLength` 演进到 `isSeeded`，并引入 branded `SessionSeq` / `SessionLogOffset`。RC.1 还兼容 v3/v4/v5 projection cache，并对无法解析的单条派生缓存执行 backup-and-skip。第三方插件和本地 AgentTeams 包即使磁盘数据可读，也必须重新构建并在隔离 profile 验证逻辑 API。
 
 ### Local paths
 
@@ -78,9 +80,7 @@ Continuable-subagent Queue edit/remove/steer 已作为当前 `master` 的正式�
 
 #### Incremental token accounting
 
-`packages/llm/token-meter/src/index.ts` 直接折叠 `session/event` 提供的已冻结 append event；只有 cursor 异常或 cold state 才捕获一次 immutable Session snapshot 并补齐。此机制避免活跃长会话每个 event 都重新读取完整 `session.events`。
-
-官方 alpha.4 已加入 indexed event reads 和 immutable snapshot 复用。合并时应先 benchmark 官方路径；只有官方读法确实消除整数组 materialization 后，才可退役 fork fast path。
+RC.1 官方 `packages/llm/token-meter/src/index.ts` 保存精确 consumed offset，并只通过 `Session.eventAt(SessionSeq)` 读取未消费记录。它已经消除每次 event 的整日志 materialization，因此 integration 退役 fork 原有 direct-event fast path 与 `Session.events` fallback；不得为了保留旧文件重新引入。
 
 #### Persistence write-behind ownership
 
@@ -136,7 +136,7 @@ Count pruning 只删除最旧且已 reported 的 completed/killed/failed records
 
 `packages/client/ui-tool` 的 `ToolRowDetailsModel` 在折叠状态只暴露 summary/state 和 `hasBody` / `hasOutput`。`ToolRowBody` 仅在 disclosure 打开时读取 cached getters，推迟 pretty args、flattened output、error full text 和大型 card array copies。
 
-官方 alpha.4 已延迟 generic Tool body formatting，但审计时仍未覆盖 output flatten 与全部大型 card copy。下一次合并应保留官方 ToolRow 结构，只补回仍缺失的 lazy materialization，不能整体保留 alpha.2 组件文件。
+RC.1 已延迟 generic Tool body formatting；integration 在其行为上补回仍缺失的 output flatten 与大型 card array lazy materialization。后续合并应继续以官方结构为基线，只保留这一可测缺口。
 
 #### Global backend-disconnect overlay
 
@@ -148,9 +148,7 @@ Count pruning 只删除最旧且已 reported 的 completed/killed/failed records
 
 #### Continuable child steer
 
-已提交基线让 `SubagentRuntime.steer()` 与 FIFO `followup()` 并存。Steer 复用 exact-live-parent authorization、per-child serialization、cold resume、Activation ownership 和 inbox acceptance cancellation；running child 在最近 step boundary 接收，idle child 会被唤醒。全局 model-facing `send_message` 同样使用 steer。
-
-官方 alpha.4 的 adjacent `sendMessage(sender,target,...)` 更完整地统一 direct parent/child steer并支持 image。合并 alpha.4 时 generic fork API 应迁移到官方实现，不应坚持旧 `.steer()` 命名；但 durable AgentTeams mailbox 仍需单独核验。
+RC.1 官方 `SubagentRuntime.sendMessage(sender,target,...)` 统一 direct parent/child messaging 并支持 image；integration 已采用它，未恢复 fork 旧公开 `.steer()` / `.followup()`。Fork 仅保留 symbol-keyed Host adapter，使 Team mailbox 在最近 step 投递时仍保有 Team message provenance；durable AgentTeams mailbox 仍需单独核验。
 
 #### Lead-to-teammate mailbox delivery
 
@@ -200,15 +198,15 @@ Web profile 插入 `memory-watchdog.cjs`：250 ms 采样、60 s 日志、heap ra
 
 | Package | Installed | Runtime state | Preserve rule |
 |---|---:|---|---|
-| `dshmarket` | `1.38.1` | Enabled | 升级时审计 lock 与 marketplace state |
+| `dshmarket` | `1.38.1` | Enabled | RC.1 隔离 profile 精确升级到 `1.41.0`；停机冷启动，保持 `allowRestart:false` |
 | `@nanmicoder/dsh-agent-teams` | `0.1.14-dsh012.4` local tgz | Enabled | 禁止被 npm latest 直接覆盖，见下一节 |
-| `dsh-plugin-subscriptions` | `0.5.3` | Installed, disabled | `llm-subscriptions disabled:true` 与 market disabled state 都保留，直到新版隔离验证 |
-| `@vlln/dsh-task-status` | `0.3.1` | Installed, disabled | 当前 Host buffers 无界且浏览器 1 Hz 全量轮询；只损失状态浮层 |
-| `dsh-context` | `0.37.0` | Installed, disabled | 当前会跨会话常驻 prompt/tool-schema 并周期 clone；禁用不影响 Session/Team 状态 |
-| `dsh-shell-command` | Not installed | Commented configuration only | 不得因 patch 注释误判为启用；恢复前验证 module table/client runtime |
+| `dsh-plugin-subscriptions` | `0.5.3` | Installed, disabled | RC.1 隔离 profile 精确升级 `0.6.0` 后仍先禁用；首次启用显式收紧 `rateLimit.wait` |
+| `@vlln/dsh-task-status` | `0.3.1` | Installed, disabled | 用户已批准删除；当前 live profile 只在停机切换时移除，RC.1 profile 不得携带 |
+| `dsh-context` | `0.37.0` | Installed, disabled | RC.1 隔离 profile 精确升级 `0.41.3`；该版已改为按需 header content并有 RC.1 compatibility matrix |
+| `dsh-shell-command` | Not installed | Commented configuration only | 用户已批准删除残留注释；RC.1 profile 不安装，当前 live patch 只在停机切换时清理 |
 | `@deepseek-ai/dsh-subagent-dsh-sdk` | Link to source checkout | Enabled for process provider | 跟随源码构建，worker 数据与主 sessions 隔离 |
 
-`minimumReleaseAgeExclude` 只允许精确版本：`dsh-plugin-subscriptions@0.5.3`、`dsh-context@0.37.0`、`dshmarket@1.36.0`、`dshmarket@1.38.1`。新版本不会自动继承白名单；禁止 wildcard，也禁止未经审计的 `pnpm update --latest`。
+当前 live profile 的 `minimumReleaseAgeExclude` 只允许精确版本：`dsh-plugin-subscriptions@0.5.3`、`dsh-context@0.37.0`、`dshmarket@1.36.0`、`dshmarket@1.38.1`。RC.1 隔离升级若被 release-age 阻止，只可为已审计的 `dsh-plugin-subscriptions@0.6.0`、`dsh-context@0.41.3`、`dshmarket@1.41.0` 增加精确项；禁止 wildcard，也禁止未经审计的 `pnpm update --latest`。
 
 ### Local AgentTeams package
 
@@ -217,20 +215,20 @@ Web profile 插入 `memory-watchdog.cjs`：250 ms 采样、60 s 日志、heap ra
 必须保留的 `.4` 行为：
 
 1. Team 内部队长指令、scheduler assignment、peer delivery 和 mailbox recovery 对成员使用 Subagent steer，在最近 step boundary 进入。
-2. `followup` 与 `steer` 都拒绝冷恢复已退休 Team member；人类在成员会话发送的普通消息仍走 Session FIFO。
-3. Client 使用 alpha.2 `uiConversation`，Host 使用 `SystemPrompt.getSectionOrder('TEAM_POLICY')`，peers 对齐 alpha.2。
+2. 模型 `sendMessage()` 与 Team Host adapter 都拒绝冷恢复已退休 Team member；人类在成员会话发送的普通消息仍走 Session FIFO。
+3. Client 继续使用 `uiConversation`，Host 使用 `SystemPrompt.getSectionOrder('TEAM_POLICY')`；新包必须重新构建并把 peers 对齐 RC.1。
 4. 普通 captain 不驻留时，成员报告先通过 Host Session Controller cold resume captain，再投递。
 5. Captain Session start 会重投 durable mailbox；成功消息逐条 ack，失败记录及后缀释放 delivery lease，避免丢报和错误确认。
 
 `.local-plugins-src\...dsh012.2/.3/.4` 只是解包后的已构建 `lib` 与发布说明，不含完整 upstream `src/tests/scripts`，不能当作长期源码仓。升级必须从官方 AgentTeams source/tag 开始，再逐条移植并验证上述行为。
 
-官方 AgentTeams `0.1.15` 已原生支持 DSH alpha.2，并加入 raw Web route authentication；其 post-release main 还处理 blank optional fields 与 unrecoverable member failures。当前 `.4` 尚未证明包含这些安全与 failure-settlement 修复，而官方包也未包含本 fork 的全部 steer/cold-captain mailbox 行为。下一次适配应以官方 `0.1.15` 或后继 release 为底，补回 `.4` 行为，生成新的本地版本；禁止直接把 profile 改为 `@latest`。
+官方 AgentTeams `0.1.15` 只原生支持 DSH alpha.2，并加入 raw Web route authentication；其 post-release main 还处理 blank optional fields 与 unrecoverable member failures。它与当前 `.4` 都调用 RC.1 已删除的 Session/Subagent API，不能直接启动。RC.1 适配应以最新 main、PR #124 的 `ownEvents()` 生命周期方案、PR #119 的 `sendMessage()` 方向和 `.4` 行为为输入，生成新的固定本地版本；禁止直接把 profile 改为 `@latest`。
 
 ### ChatGPT subagent preset
 
 `profiles\web\chatgpt-subagent-preset.cjs` 对 parentSession subagent 检测 provider `codex` 或 model `^gpt-`，在首次 step 前 recompose 到 `chatgpt-dsh`，并持久追加 `agent-preset/selected`。顶层会话和非 ChatGPT 子代理不受影响，失败采取 fail-open。
 
-Preset 位于 `.agent-presets\chatgpt-dsh`。`no-escalation.cjs` 从 pwsh/write/edit schema 隐藏 sandbox permission 参数，但不改变 executor。升级 preset API 时必须验证 recompose、standing mount 和 Session event 恢复。
+Preset 位于 `.agent-presets\chatgpt-dsh`。`no-escalation.cjs` 从 pwsh/write/edit schema 隐藏 sandbox permission 参数，但不改变 executor；它使用的 assemble 事件与字段在 RC.1 仍存在。当前 `agent.cordis.yml` 是 alpha.2 standard 的副本，RC.1 切换时必须从 RC.1 standard 重建后补回 persona 与 `no-escalation`，并验证新增 `command-goal`、recompose、standing mount 和 Session event 恢复。
 
 `bounded-subagent-provider.cjs` 仍在磁盘但没有 profile 引用。它是 dormant 历史文件，默认会固定限流；用户明确禁止固定 Agent 并发，因此不得重新插入。
 
@@ -252,23 +250,23 @@ Profile 注册 `dsh-sdk-process-raw` 和 `subagent_process`：SDK profile、独�
 
 | Behavior | Status | Upstream merge rule |
 |---|---|---|
-| Token meter incremental fold | Preserve, re-evaluate on alpha.4 indexed reads | Benchmark official API; retire only if whole-log materialization is absent |
+| Token meter direct-event fast path | Retired in RC.1 integration | Keep official indexed `eventAt()` fold; do not restore `Session.events` fallback |
 | Frozen persistence enqueue and O(1) batch | Preserve | Require identical ownership and failed-write ordering |
 | JSONL metadata revision cache/shared scan | Preserve | Require append/replace/delete and caller-cancellation equivalence |
 | SQLite suffix indexing/bounded page LRU | Preserve | Require canonical replacement detection and bounded detached cache |
 | Five-minute idle Agent eviction | Preserve | Require flush + persistence proof + exclusions + cold resume |
 | Off-stage history suspension | Preserve | Require stream detach without losing scoped Client state |
 | 20k final-message packed rebase | Preserve | Require lossless live rebaseline with no unfinished-message gap |
-| Tool output/card lazy calculation | Partially overlapped by alpha.4 | Adopt official component structure, retain remaining lazy output/card behavior |
-| Jobs one-hour TTL / 100 terminal target | Preserve | Official alpha.4 does not provide it |
+| Tool output/card lazy calculation | Ported onto RC.1 | Retain only output/card laziness not supplied by official input-body deferral |
+| Jobs one-hour TTL / 100 terminal target | Preserve | Official RC.1 does not provide it |
 | Fixed Agent/model-step admission | Retired | Never restore `memory-admission` |
-| Generic parent/child steer | Prefer alpha.4 official replacement | Migrate consumers and keep behavior tests |
+| Generic parent/child messaging | Replaced by RC.1 official `sendMessage()` | Never restore the old public `.steer()` API |
 | Continuable-child exact Queue edit/remove/steer | Preserve | Require durable occurrence identity, idle edit/remove, running-only steer, one-shot read-only and direct-parent authorization |
 | Durable Team Lead mailbox steer | Preserve separately | Generic adjacent steer alone is insufficient |
 | Forced Team shell background / yielding wait | Preserve | Require explicit opt-in and job ownership semantics |
 | Global disconnect overlay | Preserve | Official replacement must remain visible with collapsed sidebar |
 | Windows/macOS launch/build scripts | Preserve | Official launcher must cover local heap/report/path needs before removal |
-| Local AgentTeams `.4` | Preserve until rebased | Never install npm latest over it directly |
+| Local AgentTeams `.4` behavior | Rebase required for RC.1 | Build a new fixed RC.1 package; never install npm latest over the live profile |
 | Dormant fixed-concurrency wrapper | Do not preserve as active behavior | It may remain evidence, but must not be mounted |
 
 -----
@@ -281,7 +279,7 @@ Profile 注册 `dsh-sdk-process-raw` 和 `subagent_process`：SDK profile、独�
 4. Run `git fetch --tags --prune upstream` and record `master`, `origin/master`, `upstream/master` and the exact release-tag SHAs.
 5. Create `integrate/upstream-<tag>` in a separate worktree from clean master. Merge the exact official release tag with `--no-ff`; do not merge rolling `upstream/master` directly.
 6. Resolve Session/core/API/schema/package layout/generated catalogs/lockfile with official structure first. Resolve conflict files individually; do not apply repository-wide `-X theirs` and do not wholesale cherry-pick old fork commits.
-7. Commit the pure official merge before porting fork behavior. Re-implement only the still-missing rows in [Preservation matrix](#preservation-matrix), using official alpha.4 APIs and focused tests.
+7. Commit the official-first merge before porting fork behavior. Re-implement only the still-missing rows in [Preservation matrix](#preservation-matrix), using official RC.1 APIs and focused tests.
 8. Take official lockfile first, update manifests during ports, then regenerate with the pinned pnpm version. Update owner source before generated catalogs and bilingual sidecars.
 9. Build and test only in the integration worktree. Boot a copied DSH_HOME, validate the long-session clone and every enabled plugin, then compare source Session hashes.
 10. Push `origin/integrate/upstream-<tag>`. After it passes, fast-forward master and push normally; never raw force-push.
@@ -353,13 +351,13 @@ git status --short --branch
 ## Known limitations
 
 - 活跃 Agent 的 Host `Session.log` 仍完整常驻；一个持续输出的单会话仍可能线性增长。当前改动不是 active-log paging。
-- 当前 alpha.2 Chat 仍会挂载所有已加载 presentation rows；Tool lazy 和 packed rebase 不能替代完整 Chat virtualization。官方 alpha.4 的新版性能路径应在下次合并时优先评估。
+- RC.1 已显著降低长会话初始化、流式更新、代码高亮、布局与导航预览成本，但仍不等价于完整 variable-height Chat virtualization；Tool lazy 与 packed rebase 也不能替代它。
 - Host 的普通 Agent loop 仍主要运行在一个 Node event loop；process worker 是显式 one-shot 旁路，不是透明的全局多核调度。
 - 第一次不同的 broad SQLite query 仍可能同步占用一个 Host thread。
 - Watchdog 是最后一道优雅停机保护，不是 steady-state 回收机制，也不保证十小时高并发绝不退出。
 - `run.command` 没有 Windows `run.cmd` 的 16 GiB heap 设置。
-- Process-worker SDK profile 的 stale `memory-admission` row 必须在再次启用 worker 前修复。
-- Local AgentTeams `.4` 需要吸收官方 0.1.15 route authentication 和 post-release failure handling，同时保留本地 steer、retired-member guard 与 cold-captain mailbox；在完成前禁止直接覆盖。
+- Process-worker SDK profile 的 stale `memory-admission` row 必须在 RC.1 切换时删除；不得用其他固定 Agent 并发限制替代。
+- Local AgentTeams `.4` 需要以 RC.1 API 重建，并吸收官方 0.1.15 route authentication 和 post-release failure handling，同时保留本地 nearest-step delivery、retired-member guard 与 cold-captain mailbox；在完成前禁止切换真实 profile。
 - Diagnostics 目前没有自动轮转，长期运行后需按具体文件人工归档。
 
 ## Dev Note

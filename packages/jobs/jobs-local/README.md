@@ -9,7 +9,7 @@ English | [中文](README.zh.md)
 
 ## Summary
 
-`dsh-jobs-local` runs background jobs inside the harness process: work keeps running while the agent moves on, and the owning agent can read, wait on, list, and cancel it, with completion delivered as an in-session notice when `dsh-tool-jobs` is also mounted. It implements the `dsh-jobs` contract with in-memory records handed out as fresh snapshots, never live state. A per-owner concurrency limit (default 10) bounds how many jobs one agent can have running or stopping at once; jobs die with the harness process and are not durable across restarts.
+`dsh-jobs-local` runs background jobs inside the harness process: work keeps running while the agent moves on, and the owning agent can read, wait on, list, and cancel it, with completion delivered as an in-session notice when `dsh-tool-jobs` is also mounted. It implements the `dsh-jobs` contract with in-memory records handed out as fresh snapshots, never live state. A per-owner concurrency limit (default 10) bounds how many jobs one agent can have running or stopping at once; optional terminal-record TTL and count policies bound completed history without touching live work. Jobs die with the harness process and are not durable across restarts.
 
 ## Table of Contents
 
@@ -33,7 +33,9 @@ Choose it when jobs should live in the harness process and die with it. Avoid it
 
 ### Minimal configuration
 
-Loading the plugin registers `ctx.jobs`; `maxConcurrentJobsPerOwner` is optional and defaults to `10`.
+Loading the plugin registers `ctx.jobs`; `maxConcurrentJobsPerOwner` is optional and defaults to `10`. Terminal retention is opt-in, so omitting both retention fields preserves records until owner or service disposal.
+
+The shipped `dsh-base` composition enables a one-hour terminal TTL and a target of 100 terminal records per exact owner; these policies do not change live-job admission.
 
 ```yaml
 - name: '@deepseek-ai/dsh-jobs-local'
@@ -42,6 +44,8 @@ Loading the plugin registers `ctx.jobs`; `maxConcurrentJobsPerOwner` is optional
 | Field | Default | Meaning |
 |---|---|---|
 | `maxConcurrentJobsPerOwner` | `10` | Maximum `running` plus `stopping` jobs per exact owner, or in the shared unowned bucket |
+| `terminalJobRetentionMs` | disabled | Wall-clock lifetime of every terminal record; expiry also removes an unreported result |
+| `maxRetainedTerminalJobsPerOwner` | disabled | Target terminal count per exact owner or shared unowned bucket; count pruning removes only reported records |
 
 The generated [configuration catalog](../../../docs/config-catalog.md#deepseek-aidsh-jobs-local) is the exhaustive source for the accepted field.
 
@@ -51,11 +55,11 @@ The limit counts the exact owner's `running` and `stopping` records; all unowned
 
 ### Lifecycle
 
-Jobs belong to their owner and backend, not to the producer tool, so producer or controller reloads do not stop them. When an agent that owns jobs is disposed, its jobs are cancelled, their producers awaited, and their snapshots removed; service disposal does the same for every remaining job. A cancellation that throws during teardown force-fails the record and warns that the work may be orphaned, so teardown never deadlocks.
+Jobs belong to their owner and backend, not to the producer tool, so producer or controller reloads do not stop them. Optional retention removes only `completed`, `killed`, or `failed` records; `running` and `stopping` work is never a retention candidate. When an agent that owns jobs is disposed, its jobs are cancelled, their producers awaited, and their snapshots removed; service disposal does the same for every remaining job. A cancellation that throws during teardown force-fails the record and warns that the work may be orphaned, so teardown never deadlocks.
 
 ### What can go wrong
 
-Starting work fails without a controller that serves the owner — loading `dsh-tool-jobs` attaches one, and `start()` otherwise refuses with a message naming it. A producer cancel that returns without settling `done` stays indistinguishable from a slow stop and can stall teardown while holding one capacity slot. Every record disappears when the harness process exits.
+Starting work fails without a controller that serves the owner — loading `dsh-tool-jobs` attaches one, and `start()` otherwise refuses with a message naming it. A producer cancel that returns without settling `done` stays indistinguishable from a slow stop and can stall teardown while holding one capacity slot. A configured TTL deliberately makes an old job id unknown after expiry; choose a lifetime long enough for the owner to collect relevant results. Every remaining record disappears when the harness process exits.
 
 -----
 
@@ -73,6 +77,7 @@ This section explains the design decisions behind the registry and points at the
 - **Owner-relative layers, one process-wide registry.** Controllers, completion listeners, and change observers are filed into the scope that registered them (`ScopedLayers`), and reads union the global layer with the owner's scope chain — so one preset's job controls never hold `start()` open for an agent whose own composition loads none, and a settlement reaches only the listeners its owner's composition registered.
 - **Preflight before start.** `start()` checks controller service, spec validity, live ownership, and capacity before invoking the producer, so a rejection leaves no job id or execution resource; registration commits without a later failable step.
 - **First-wins settlement, completion last.** The earliest terminal outcome records once, releases waiters, and notifies listeners once with per-listener containment; completion is announced after the record is committed and the visible-set change published, because a reporter may open a model turn synchronously.
+- **Incremental terminal indexes and one timer.** Exact-owner counts and oldest-reported candidates update at settlement or collection, while one process-wide min-heap orders TTL deadlines. Deferred count pruning and the nearest expiry share one unreferenced timer, so terminal settlement never rescans or sorts the complete job store.
 - **Teardown never deadlocks.** A throwing cancel force-fails the record and reports a possible orphan instead of stalling disposal.
 
 ### Source map
@@ -89,6 +94,10 @@ This section explains the design decisions behind the registry and points at the
 ### Admission and settlement
 
 `activeTaskCount` counts authoritative records per exact owner or in the shared unowned bucket. `settle` marks a job reported when waiters are pending, resolves every waiter, records the terminal snapshot, announces the visible-set change, then notifies completion listeners. Pending waits mark the job reported before listeners run so completion reporters do not duplicate notices; a teardown cancel marks it for the same reason — nothing will read a notice addressed to an owner being destroyed.
+
+### Terminal retention
+
+`terminalJobRetentionMs` removes every terminal record at its wall-clock deadline, including an unreported result. `maxRetainedTerminalJobsPerOwner` is an earlier memory-pressure target: when a bucket exceeds it, the registry removes the oldest reported terminal records first and leaves unreported records for TTL or teardown. Exact owners have independent incremental candidate heaps, while all unowned records share one bucket; a process-wide expiry heap carries lightweight ids rather than retaining removed job records. Omission of either field disables that policy and its indexes, preserving the package's default behavior. Retained final output remains idempotent, retained stream output remains consuming, and terminal stream records release their producer reader after the first successful post-settlement read.
 
 ### Teardown
 
@@ -129,6 +138,7 @@ No direct invalidation; the named consumers own any request-prefix changes.
 These limits define when the registry is a poor fit. They are current package constraints, not a task backlog.
 
 - **Jobs are process-local** — records die with the harness process; durable or cross-restart execution needs a separate backend implementing the seam.
+- **Terminal retention expires collection ids** — after a configured TTL or reported-record count removal, `job_output`, `job_kill`, and direct registry reads reject the removed id as unknown; durable result lookup needs a persistent backend.
 - **A silently ineffective cancel can stall teardown and hold capacity** — if `cancel` returns without settling `done`, the registry cannot distinguish it from a slow stop; the job keeps one bucket slot for the rest of the service lifetime, and only an explicit throw can be force-failed safely.
 
 <a id="dev-note"></a>

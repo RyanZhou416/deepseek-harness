@@ -2,5 +2,5 @@
 # side as of the last confirmed-consistent state. Both languages carry equal authority;
 # after editing either side, bring the other along and re-record with:
 #   pnpm run verify-translation-pairing --write .agents/notes/implemented/bug-fix/2026-08-31-bounded-transient-runtime-retention.md
-2026-08-31-bounded-transient-runtime-retention.md: 3ab691c164d02dbfc70192e82196ddaf1249bbe9
-2026-08-31-bounded-transient-runtime-retention.zh.md: d7c307189182a7521cba665ef4a48e664ab76b11
+2026-08-31-bounded-transient-runtime-retention.md: 3cb1fd53c71a29101637ad1833bd6a42f31d3794
+2026-08-31-bounded-transient-runtime-retention.zh.md: 320544b435179efcdeea90a06448546f450f74c2

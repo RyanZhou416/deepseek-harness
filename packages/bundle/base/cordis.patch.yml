@@ -80,6 +80,10 @@
 
     - id: jobs
       name: '@deepseek-ai/dsh-jobs-local'
+      # Bound process-local terminal history without changing live-job admission.
+      config:
+        terminalJobRetentionMs: 3600000
+        maxRetainedTerminalJobsPerOwner: 100
 
     - id: llm-retry
       name: '@deepseek-ai/dsh-llm-retry'

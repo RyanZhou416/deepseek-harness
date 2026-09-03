@@ -2,7 +2,8 @@
 
 import { act, cleanup, fireEvent, render } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import type { ConnectionState, ConnectionStateSource } from '@deepseek-ai/dsh-client-connection/client'
+import { useEffect, useState } from 'react'
+import type { ConnectionState } from '@deepseek-ai/dsh-client-connection/client'
 import { ConnectionOverlay } from '../src/client/ConnectionOverlay.tsx'
 import type { ConnectionOverlayProps } from '../src/client/ConnectionOverlay.tsx'
 
@@ -14,15 +15,17 @@ afterEach(() => {
 function source(initial: ConnectionState | undefined) {
   let state = initial
   const listeners = new Set<() => void>()
-  const connectionState: ConnectionStateSource = {
-    getSnapshot: () => state,
-    subscribe: (listener) => {
+  const useConnectionState: ConnectionOverlayProps['useConnectionState'] = selector => {
+    const [, force] = useState(0)
+    useEffect(() => {
+      const listener = () => { force(value => value + 1) }
       listeners.add(listener)
       return () => { listeners.delete(listener) }
-    },
+    }, [])
+    return selector(state)
   }
   return {
-    connectionState,
+    useConnectionState,
     publish(next: ConnectionState | undefined) {
       state = next
       for (const listener of [...listeners]) listener()
@@ -36,7 +39,7 @@ describe('ConnectionOverlay', () => {
     const state = source('connected')
     const reconnect = vi.fn()
     const props = {
-      connectionState: state.connectionState,
+      useConnectionState: state.useConnectionState,
       reconnect,
       t: (key: string) => key,
     } as ConnectionOverlayProps

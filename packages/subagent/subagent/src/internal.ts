@@ -40,9 +40,23 @@ export function isAdjacentAgentSendMessageTool(definition: ToolDefinition | unde
  */
 export const queueSubagentPrompt = Symbol.for('dsh.subagent.queuePrompt')
 
+/** Process-stable symbol-keyed nearest-step delivery for host protocols. */
+export const steerSubagentPrompt = Symbol.for('dsh.subagent.steerPrompt')
+
 /** Runtime face required by the host-only Queue adapter. */
 export interface HostPromptQueue {
   [queueSubagentPrompt](
+    parent: Agent,
+    childId: SessionId,
+    content: ContentBlock[],
+    source: MessageSource,
+    signal: AbortSignal,
+  ): Promise<MessageId>
+}
+
+/** Runtime face required by a host protocol that preserves its own provenance while steering. */
+export interface HostPromptSteer {
+  [steerSubagentPrompt](
     parent: Agent,
     childId: SessionId,
     content: ContentBlock[],
@@ -70,6 +84,33 @@ export function queueHostSubagentPrompt(
   signal: AbortSignal,
 ): Promise<MessageId> {
   return (runtime as unknown as HostPromptQueue)[queueSubagentPrompt](
+    parent,
+    childId,
+    content,
+    source,
+    signal,
+  )
+}
+
+/**
+ * Steer one host-protocol message without widening the public Service operation set.
+ * @param runtime - subagent runtime owning continuation residency.
+ * @param parent - exact live direct parent authorizing delivery.
+ * @param childId - durable direct-child session id.
+ * @param content - host-authored content to deliver.
+ * @param source - durable host-protocol provenance.
+ * @param signal - caller cancellation before inbox acceptance.
+ * @returns the accepted message's inbox id.
+ */
+export function steerHostSubagentPrompt(
+  runtime: SubagentRuntime,
+  parent: Agent,
+  childId: SessionId,
+  content: ContentBlock[],
+  source: MessageSource,
+  signal: AbortSignal,
+): Promise<MessageId> {
+  return (runtime as unknown as HostPromptSteer)[steerSubagentPrompt](
     parent,
     childId,
     content,

@@ -8,7 +8,7 @@ import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import type { ContentBlock } from '@deepseek-ai/dsh-llm'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import type { Session, SessionEvent } from '@deepseek-ai/dsh-session'
-import { queueHostSubagentPrompt } from '@deepseek-ai/dsh-subagent/internal'
+import { queueHostSubagentPrompt, steerHostSubagentPrompt } from '@deepseek-ai/dsh-subagent/internal'
 import { errorMessage, TeamError } from './error.ts'
 import type { TeamJournal } from './journal.ts'
 import type { TeamRuntimeLifecycle } from './lifecycle.ts'
@@ -94,6 +94,7 @@ export class TeamMailbox {
     for (const message of messages) {
       signal.throwIfAborted()
       if (membership.role === 'lead' && message.delivery === 'quiet'
+        && message.senderId !== membership.root.id
         && message.targetId !== membership.root.id && this.ctx.agents.get(message.targetId) === undefined) continue
       await this.tryDispatch(membership.root, message, signal)
     }
@@ -248,6 +249,21 @@ export class TeamMailbox {
         }
         root.inject(input)
         return await this.checkpointDelivered(root, root.session, message.id)
+      }
+      const leadDirective = message.senderId === root.id
+      if (leadDirective) {
+        if (target === undefined) {
+          const recorded = await this.persistedTargetRecorded(message.targetId, message.id, signal)
+          if (recorded === undefined) return false
+          if (recorded) {
+            await this.markDelivered(root, message.id, message.targetId)
+            return true
+          }
+        }
+        await steerHostSubagentPrompt(this.ctx.subagents, root, message.targetId, content, source, signal)
+        return target === undefined
+          ? true
+          : await this.checkpointDelivered(root, target.session, message.id)
       }
       if (message.delivery === 'quiet') {
         if (target === undefined) return false

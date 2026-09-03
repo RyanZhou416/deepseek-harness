@@ -408,7 +408,7 @@ describe('QueueDock', () => {
     expect(rendered.getByLabelText('插话发送').getAttribute('title')).toBe('仅运行中可插话发送')
   })
 
-  it('renders a session-backed subagent Queue without unsupported actions', () => {
+  it('lets a continuable subagent edit, remove, or steer queued work', async () => {
     const snap = {
       ...snapshotWith([row('i-subagent', 'pending child follow-up')]),
       subagent: {
@@ -421,11 +421,48 @@ describe('QueueDock', () => {
       },
     }
     const source = liveSession(snap)
+    const updateQueue = vi.fn(() => Promise.resolve())
     const view = render(
-      <QueueDock {...kitFor(snap)} useSession={source.useSession} />,
+      <QueueDock {...kitFor(snap, { updateQueue })} useSession={source.useSession} />,
     )
 
     expect(view.getByText('pending child follow-up')).toBeTruthy()
+    fireEvent.click(view.getByLabelText('编辑排队消息'))
+    fireEvent.change(view.getByLabelText('编辑排队消息'), {
+      target: { value: 'revised child follow-up' },
+    })
+    fireEvent.click(view.getByLabelText('保存排队消息'))
+    await waitFor(() => {
+      expect(updateQueue).toHaveBeenCalledWith(iid('i-subagent'), {
+        kind: 'edit',
+        content: [{ type: 'text', text: 'revised child follow-up' }],
+      })
+    })
+    fireEvent.click(view.getByLabelText('删除排队消息'))
+    await waitFor(() => {
+      expect(updateQueue).toHaveBeenCalledWith(iid('i-subagent'), { kind: 'remove' })
+    })
+    fireEvent.click(view.getByLabelText('插话发送'))
+    await waitFor(() => {
+      expect(updateQueue).toHaveBeenCalledWith(iid('i-subagent'), { kind: 'steer' })
+    })
+  })
+
+  it('keeps one-shot subagent queues read-only', () => {
+    const snap = {
+      ...snapshotWith([row('i-one-shot', 'finished child queue')]),
+      subagent: {
+        address: {
+          parentSessionId: 'parent' as SessionId,
+          childSessionId: SID,
+          mode: 'one-shot' as const,
+        },
+        parentAvailable: true,
+      },
+    }
+    const source = liveSession(snap)
+    const view = render(<QueueDock {...kitFor(snap)} useSession={source.useSession} />)
+    expect(view.getByText('finished child queue')).toBeTruthy()
     expect(view.queryByLabelText('编辑排队消息')).toBeNull()
     expect(view.queryByLabelText('删除排队消息')).toBeNull()
     expect(view.queryByLabelText('插话发送')).toBeNull()

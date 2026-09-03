@@ -164,8 +164,8 @@ export function apply(ctx: ClientContext): void {
     order: -1000,
     locale: NS,
     inject: () => ({
-      connectionState: connection.state,
       reconnect: () => { connection.reconnect() },
+      hooks: { connectionState: connection.state },
     }),
   }, ConnectionOverlay))
 

@@ -11,7 +11,10 @@ import { SessionId, type Session } from '@deepseek-ai/dsh-session'
 import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
 import SubagentService from '@deepseek-ai/dsh-subagent'
-import { queueSubagentPrompt, type HostPromptQueue } from '@deepseek-ai/dsh-subagent/internal'
+import {
+  steerSubagentPrompt,
+  type HostPromptSteer,
+} from '@deepseek-ai/dsh-subagent/internal'
 import * as SubagentFork from '@deepseek-ai/dsh-subagent-fork-in-process'
 import * as SubagentSpawn from '@deepseek-ai/dsh-subagent-spawn-in-process'
 import { MockAdapter, textResponse } from '../../../core/agent-loop/tests/mock-adapter.ts'
@@ -1105,7 +1108,7 @@ describe('Team mailbox and waiting', () => {
     expect(first.status).toBe('accepted')
     expect(flushed).toEqual([lead.id, target.id, lead.id])
     expect(durable(lead).pendingMessages).toEqual([])
-    expect(target.inbox.nextTurn.some(message => message.source.kind === 'team-message'
+    expect(target.inbox.nextStep.some(message => message.source.kind === 'team-message'
       && message.source.messageId === first.messageId)).toBe(true)
 
     flushed.length = 0
@@ -1116,7 +1119,7 @@ describe('Team mailbox and waiting', () => {
     expect(second.status).toBe('accepted')
     expect(flushed).toEqual([lead.id, target.id, lead.id])
     expect(durable(lead).pendingMessages).toEqual([])
-    expect(target.inbox.nextTurn.filter(message => message.source.kind === 'team-message'
+    expect(target.inbox.nextStep.filter(message => message.source.kind === 'team-message'
       && (message.source.messageId === first.messageId || message.source.messageId === second.messageId)))
       .toHaveLength(2)
 
@@ -1132,7 +1135,7 @@ describe('Team mailbox and waiting', () => {
     const entered = Promise.withResolvers<undefined>()
     const release = Promise.withResolvers<undefined>()
     const admitted: string[] = []
-    vi.spyOn(ctx.subagents as unknown as HostPromptQueue, queueSubagentPrompt)
+    vi.spyOn(ctx.subagents as unknown as HostPromptSteer, steerSubagentPrompt)
       .mockImplementation(async (_parent, _childId, blocks) => {
         const last = blocks.at(-1)
         const text = last?.type === 'text' ? last.text : ''
@@ -1255,7 +1258,7 @@ describe('Team mailbox and waiting', () => {
     expect(uncertain.status).toBe('queued')
     inspect.mockRestore()
 
-    vi.spyOn(ctx.subagents as unknown as HostPromptQueue, queueSubagentPrompt)
+    vi.spyOn(ctx.subagents as unknown as HostPromptSteer, steerSubagentPrompt)
       .mockRejectedValueOnce(new Error('delivery unavailable'))
     const failed = await ctx.agentTeams.sendMessage(lead, {
       target: 'inactive-target', content: content('delivery failure'), delivery: 'wakeup', signal: SIGNAL,
@@ -1313,33 +1316,37 @@ describe('Team mailbox and waiting', () => {
   })
 
   it('enforces message byte and pending-count limits without encouraging retry after enqueue', async () => {
-    const { ctx, lead } = await setup([textResponse('idle')], {
+    const { ctx, lead } = await setup(['hang', textResponse('idle')], {
       maxMessageBytes: 256,
       maxPendingMessagesPerMember: 1,
     })
+    const senderStarted = await spawn(ctx, lead, 'sender')
+    const sender = await waitRunning(ctx, senderStarted.member.id)
     const target = await spawn(ctx, lead, 'target')
     await waitNoAgent(ctx, target.member.id)
-    await expect(ctx.agentTeams.sendMessage(lead, {
+    await expect(ctx.agentTeams.sendMessage(sender, {
       target: 'target', content: content('x'.repeat(300)), delivery: 'quiet', signal: SIGNAL,
     })).rejects.toMatchObject({ code: 'TEAM_MESSAGE_TOO_LARGE' })
-    const queued = await ctx.agentTeams.sendMessage(lead, {
+    const queued = await ctx.agentTeams.sendMessage(sender, {
       target: 'target', content: content('one'), delivery: 'quiet', signal: SIGNAL,
     })
     expect(queued.status).toBe('queued')
-    await expect(ctx.agentTeams.sendMessage(lead, {
+    await expect(ctx.agentTeams.sendMessage(sender, {
       target: 'target', content: content('two'), delivery: 'quiet', signal: SIGNAL,
     })).rejects.toMatchObject({ code: 'TEAM_MAILBOX_FULL' })
-    await expect(ctx.agentTeams.sendMessage(lead, {
-      target: 'lead', content: content('self'), delivery: 'quiet', signal: SIGNAL,
+    await expect(ctx.agentTeams.sendMessage(sender, {
+      target: 'sender', content: content('self'), delivery: 'quiet', signal: SIGNAL,
     })).rejects.toMatchObject({ code: 'TEAM_SELF_MESSAGE' })
-    await expect(ctx.agentTeams.sendMessage(lead, {
+    await expect(ctx.agentTeams.sendMessage(sender, {
       target: 'missing', content: content('unknown target'), delivery: 'quiet', signal: SIGNAL,
     })).rejects.toMatchObject({ code: 'TEAM_MEMBER_NOT_FOUND' })
     const controller = new AbortController()
     controller.abort(new TeamError('cancelled before queue', 'TEST_CANCELLED'))
-    await expect(ctx.agentTeams.sendMessage(lead, {
+    await expect(ctx.agentTeams.sendMessage(sender, {
       target: 'target', content: content('cancelled'), delivery: 'quiet', signal: controller.signal,
     })).rejects.toMatchObject({ code: 'TEST_CANCELLED' })
+    ctx.agentTeams.interrupt(lead, 'sender')
+    await waitNoAgent(ctx, sender.id)
   })
 
   it('interrupts only the current turn and retains an already accepted follow-up', async () => {
@@ -1352,7 +1359,7 @@ describe('Team mailbox and waiting', () => {
     expect(followup.status).toBe('accepted')
     expect(ctx.agentTeams.interrupt(lead, 'worker')).toEqual({ previousStatus: 'running' })
     await vi.waitFor(() => { expect(worker.status).toBe('idle') })
-    expect(worker.inbox.nextTurn.some(message => message.source.kind === 'team-message'
+    expect(worker.inbox.nextStep.some(message => message.source.kind === 'team-message'
       && message.source.messageId === followup.messageId)).toBe(true)
     worker.cancel({ kind: 'parent' })
     await waitNoAgent(ctx, worker.id)
@@ -1563,7 +1570,7 @@ describe('Team mailbox and waiting', () => {
     const entered = Promise.withResolvers<undefined>()
     const aborted = Promise.withResolvers<undefined>()
     const release = Promise.withResolvers<undefined>()
-    vi.spyOn(ctx.subagents as unknown as HostPromptQueue, queueSubagentPrompt)
+    vi.spyOn(ctx.subagents as unknown as HostPromptSteer, steerSubagentPrompt)
       .mockImplementation(async (_parent, _childId, _content, _source, signal) => {
         entered.resolve(undefined)
         return await new Promise<never>((_resolve, reject) => {

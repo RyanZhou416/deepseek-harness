@@ -1,8 +1,10 @@
-import { useLayoutEffect, useRef, useState, useSyncExternalStore } from 'react'
-import type { ConnectionStateSource } from '@deepseek-ai/dsh-client-connection/client'
+import { useLayoutEffect, useRef, useState } from 'react'
+import type { ConnectionState } from '@deepseek-ai/dsh-client-connection/client'
 import { ConnectionIndicator } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { ConnectionIndicatorState } from '@deepseek-ai/dsh-client-ui-primitives'
-import type { PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
+import type {
+  HostObservable, InjectFace, PropsLocale, PropsRuntime,
+} from '@deepseek-ai/dsh-client-ui-slots'
 import type { SettingsKey } from './locales.ts'
 import css from './ConnectionOverlay.module.css'
 
@@ -10,26 +12,24 @@ const RECOVERY_CONFIRMATION_MS = 2_000
 
 /** Global connection status injected into the shell overlay. */
 export interface ConnectionOverlayInjected {
-  readonly connectionState: ConnectionStateSource
   readonly reconnect: () => void
+  readonly hooks: {
+    readonly connectionState: HostObservable<ConnectionState | undefined>
+  }
 }
 
 export type ConnectionOverlayProps =
   & PropsRuntime<'shell.overlay'>
   & PropsLocale<'settings'>
-  & ConnectionOverlayInjected
+  & InjectFace<ConnectionOverlayInjected>
 
 /**
  * Keep backend loss visible even when the sidebar is collapsed or Settings is closed.
  * @param props - shell runtime, localized copy, and the official Connection state source.
  * @returns the global indicator, or null while the initial connection is healthy and quiet.
  */
-export function ConnectionOverlay({ connectionState, reconnect, t }: ConnectionOverlayProps) {
-  const state = useSyncExternalStore(
-    connectionState.subscribe,
-    connectionState.getSnapshot,
-    connectionState.getSnapshot,
-  )
+export function ConnectionOverlay({ useConnectionState, reconnect, t }: ConnectionOverlayProps) {
+  const state = useConnectionState(value => value)
   const previous = useRef(state)
   const [showRecovery, setShowRecovery] = useState(false)
 

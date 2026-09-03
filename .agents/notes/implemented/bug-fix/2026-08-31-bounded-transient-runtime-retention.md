@@ -12,11 +12,11 @@ These transient owners made the live heap grow with navigation history and compl
 
 ## Decision
 
-Only the staged Client Session keeps its history follow open. Selecting another Session or explicitly clearing the selection synchronously detaches the previous stream while preserving its Session scope, binding, current window, projections, queue, and feature state. Reselecting it opens a fresh stream from durable history. A masked list gap retains the stage because it is transport state rather than user navigation.
+Only the staged Client Session keeps its history follow open. Selecting another Session or explicitly clearing the selection synchronously detaches the previous stream while preserving its Session scope, binding, current window, projections, queue, and feature state. Reselecting it opens a fresh stream from durable history. A masked list gap retains the stage because it is transport state rather than user navigation. Suspension invalidates an in-flight jump generation before disposal, so stale pagination cleanup cannot unlock or replace a reopened stream.
 
 `dsh-jobs-local` accepts optional `terminalJobRetentionMs` and `maxRetainedTerminalJobsPerOwner` policies. TTL expiry removes any terminal record; count pruning removes the oldest reported terminal records within each exact-owner bucket and the shared unowned bucket. Running and stopping jobs are never retention candidates. The base composition enables a one-hour TTL and a target of 100 terminal records per owner.
 
-Continuable subagents keep their existing lifecycle: the continuation manager disposes a settled Activation immediately and cold-resumes it on later delivery. No external idle timer or Agent concurrency limit is added.
+Continuable subagents keep their existing lifecycle: the continuation manager disposes a settled Activation immediately and cold-resumes it on later delivery. Owned-child disposal and Job state changes re-evaluate a blocked parent retention timer. Once Agent eviction starts, a concurrent resolver waits for its teardown to settle before it may return a live Agent or cold-resume the Session; no caller can accept work on the disposing instance. No external idle timer or Agent concurrency limit is added.
 
 ## Alternatives considered
 

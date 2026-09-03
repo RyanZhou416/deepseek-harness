@@ -86,7 +86,7 @@ kind: "package-reference"
 
 ### 设计理念
 
-该后端是共享 [PersistenceCoordinator](../session-persistence/README.zh.md#understand-the-implementation) 之上的一层薄存储：它加载已存储记录、追加批次、提交修复，并把生命周期编排委托给协调器。其物理身份是文件修订值：device、inode、size 与纳秒时间戳标识一份日志，并在追加或修复后改变，这正是 `listSnapshots` 与保留准备结果校验所使用的身份。
+该后端是共享 [PersistenceCoordinator](../session-persistence/README.zh.md#understand-the-implementation) 之上的一层薄存储：它加载已存储记录、追加批次、提交修复，并把生命周期编排委托给协调器。其物理身份是文件修订值：device、inode、size 与纳秒时间戳标识一份日志，并在追加或修复后改变，这正是 `listSnapshots` 与保留准备结果校验所使用的身份。元数据列表按该精确修订保留每个已验证 header，在成功 discovery 后清理缺失路径，并让并发 `list` 与 `listSnapshots` 调用方共享一次 scan；取消一个调用方只会放弃其自身等待。
 
 ### 物理编码
 

@@ -310,10 +310,11 @@ export class ClientSessions implements ISessions {
    * Clear the current selection so the layout shows the no-session empty
    * state (new-session affordance and the workspace preselection flow).
    * Wipes the persisted selection too — a reload stays on empty until the
-   * user opens or starts a session. The staged scope keeps its frozen view
-   * per the masked-gap contract until the next open() moves the stage.
+   * user opens or starts a session. The former scope keeps its frozen view,
+   * but its history transport remains suspended until another open.
    */
   clear(): void {
+    this.suspendWatchedHistory()
     this.manager.clearSelection()
   }
 
@@ -524,7 +525,9 @@ export class ClientSessions implements ISessions {
     // transiently absent) holds the stage: tearing down on the gap would
     // destroy exactly the frozen scope the mask exists to preserve.
     if (current === undefined || snapshot.byId[current] === undefined || current === this.watched) return
+    const previous = this.watched
     this.watched = current
+    if (previous !== undefined) this.suspendHistory(previous)
     this.sweepDeferred()
     const record = this.resolve(current)
     /* v8 ignore next 3 -- defensive: current is always a listed id (open()
@@ -534,6 +537,23 @@ export class ClientSessions implements ISessions {
       void record.session.open()
       void this.manager.refreshSubagents(current)
     }
+  }
+
+  /** Stop one off-stage history stream without disposing its Session scope. */
+  private suspendHistory(id: SessionId): void {
+    const session = this.scopes.get(id)?.session
+    if (session === undefined) return
+    void session.suspendHistory().catch((error: unknown) => {
+      console.error(`[session-controller] failed to suspend history for ${id}:`, error)
+    })
+  }
+
+  /** Explicit clear releases the stage; masked list gaps continue holding it. */
+  private suspendWatchedHistory(): void {
+    const watched = this.watched
+    if (watched === undefined) return
+    this.watched = undefined
+    this.suspendHistory(watched)
   }
 
   /**

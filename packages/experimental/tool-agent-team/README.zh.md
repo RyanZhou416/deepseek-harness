@@ -57,7 +57,7 @@ kind: "package-reference"
 十个工具分为四类能力：
 
 - **创建 teammate**——`spawn_teammate` 接收名字、描述与初始任务；只有 Lead 可以调用它。
-- **发送消息**——`send_message` 在不唤醒 idle teammate 的情况下传达信息；`followup_task` 让消息成为接收方的下一个轮次，并在需要时唤醒它。
+- **发送消息**——Lead 的 `send_message` 与 `followup_task` 都会在 teammate 最近的 step 边界进行 steering；teammate 调用方则分别保留 quiet 与 next-turn 投递。
 - **查看与等待**——`list_agents` 显示带实时状态的 roster；`wait_agent` 等待下一次团队变化；`interrupt_agent` 停止 teammate 的当前轮次（仅限 Lead）。
 - **管理任务板**——`team_task_create`、`team_task_list`、`team_task_get` 与 `team_task_update` 添加、浏览、读取与更新共享任务。
 

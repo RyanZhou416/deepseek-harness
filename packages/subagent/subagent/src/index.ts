@@ -48,6 +48,8 @@ import type {
   SubagentPromptReceipt,
   SubagentPromptRequest,
   SubagentPromptRequestId,
+  SubagentQueueUpdateReceipt,
+  SubagentQueueUpdateRequest,
 } from './control-types.ts'
 import type {
   ContinuableCreateRequest,
@@ -75,7 +77,7 @@ import { listChildren as listSubagentChildren, listDescendants as listSubagentDe
 import type { SubagentDescendantListEntry, SubagentListEntry } from './list-children.ts'
 import { snapshotSubagentDescriptor } from './descriptor.ts'
 import { subagentIdentityProjectionDefinition, subagentTimingProjectionDefinition } from './projection.ts'
-import { queueSubagentPrompt } from './internal.ts'
+import { queueSubagentPrompt, steerSubagentPrompt } from './internal.ts'
 
 export * from './out-of-process.ts'
 export { AssistantOutputFold, finalAssistantOutput } from './assistant-output.ts'
@@ -275,6 +277,17 @@ export class SubagentRuntime extends TypertRemoteService {
     return this.requireContinuations().queuePrompt(parent, childId, content, source, signal)
   }
 
+  /** Host-protocol nearest-step delivery that retains protocol-owned provenance. */
+  private [steerSubagentPrompt](
+    parent: Agent,
+    childId: SessionId,
+    content: ContentBlock[],
+    source: MessageSource,
+    signal: AbortSignal,
+  ): Promise<MessageId> {
+    return this.requireContinuations().steerPrompt(parent, childId, content, source, signal)
+  }
+
   /**
    * Interrupt one live continuable child's current turn under a human parent
    * address or an exact live ancestor Agent. Fire-and-return: the cancel
@@ -456,6 +469,85 @@ export class SubagentRuntime extends TypertRemoteService {
     } catch (error: unknown) {
       return rejectPrompt(error, childSessionId, signal)
     }
+  }
+
+  /**
+   * Edit, remove, or steer one browser-selected child queue occurrence under
+   * its durable direct-parent address. The target must have a live Activation;
+   * steering additionally requires it to be running. This operation neither
+   * resumes an inactive child nor requires the parent Agent to be live.
+   * @param request - durable parent/child address, pending message identity, and mutation.
+   * @param signal - carrier cancellation before the inbox mutation commits.
+   * @returns acknowledgement that the selected mutation committed.
+   * @throws {RemoteError} `gateway/bad-request`, `gateway/cancelled`,
+   *   `subagent/attachment-unsupported`, `subagent/unauthorized`,
+   *   `subagent/queue-item-not-found`, `subagent/delivery-unavailable`,
+   *   `subagent/steer-unavailable`, or `gateway/internal`.
+   */
+  @Remote('updateQueuedByParent')
+  async updateQueuedByParent(
+    request: SubagentQueueUpdateRequest,
+    signal: AbortSignal,
+  ): Promise<SubagentQueueUpdateReceipt> {
+    validateControlRequest('subagent.updateQueue', request)
+    if (request.action.kind === 'edit'
+      && request.action.content.some(block => block.type !== 'text')) {
+      throw new RemoteError(
+        'subagent/attachment-unsupported',
+        'subagent queue edits accept text content only',
+        { childSessionId: request.childSessionId, reason: 'QUEUE_EDIT_NON_TEXT' },
+      )
+    }
+    let outcome: 'updated' | 'not-found' | 'unavailable'
+    try {
+      outcome = await this.continuations?.updatePendingByParent(
+        request.childSessionId,
+        request.parentSessionId,
+        request.itemId,
+        request.action,
+        signal,
+      ) ?? 'unavailable'
+    } catch (error: unknown) {
+      if (signal.aborted || (error instanceof SubagentError && error.code === 'CANCELLED')) {
+        throw new RemoteError(
+          'gateway/cancelled',
+          'subagent queue update was cancelled',
+          {},
+          { cause: error },
+        )
+      }
+      if (error instanceof SubagentError && error.code === 'UNAUTHORIZED') {
+        throw new RemoteError(
+          'subagent/unauthorized',
+          'subagent does not belong to this parent',
+          { childSessionId: request.childSessionId },
+          { cause: error },
+        )
+      }
+      throw new RemoteError('gateway/internal', 'subagent queue update failed', {}, { cause: error })
+    }
+    if (outcome === 'not-found') {
+      throw new RemoteError(
+        'subagent/queue-item-not-found',
+        'queued subagent message is no longer pending',
+        { childSessionId: request.childSessionId, itemId: request.itemId },
+      )
+    }
+    if (outcome === 'unavailable') {
+      if (request.action.kind !== 'steer') {
+        throw new RemoteError(
+          'subagent/delivery-unavailable',
+          'subagent is not live and cannot update its queue',
+          { childSessionId: request.childSessionId },
+        )
+      }
+      throw new RemoteError(
+        'subagent/steer-unavailable',
+        'subagent is not running and cannot accept queued steering',
+        { childSessionId: request.childSessionId, itemId: request.itemId },
+      )
+    }
+    return { accepted: true }
   }
 
   /**

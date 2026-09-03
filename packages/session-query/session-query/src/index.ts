@@ -66,7 +66,11 @@ export {
   SessionQueryError,
 } from './config.ts'
 export { extractSessionEventText } from './extraction.ts'
-export { buildSessionEventRecords, buildSessionEventSearchDocuments } from './documents.ts'
+export {
+  buildAppendedSessionEventSearchDocuments,
+  buildSessionEventRecords,
+  buildSessionEventSearchDocuments,
+} from './documents.ts'
 export {
   compileSessionTextFilter,
   filterSessionEventDocuments,

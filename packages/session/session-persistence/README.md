@@ -87,7 +87,7 @@ The package is the Service Definition of a capability seam with two halves. The 
 
 ### The write path at a glance
 
-Each `session/event` copies the event into its session's controller. The first pending event starts a fixed batching window; later events join without resetting its deadline. Expiry starts one durable append; events admitted during that write form a separately bounded follow-up batch. `session/flush` cancels the wait and drains through quiescence, so the loop uses it as the ordering and error-observation checkpoint before the next turn. A rejected background write retains its events and pauses automatic retry; a new event starts a fresh window, while explicit flush or backend teardown retries immediately.
+Each `session/event` shares the detached, recursively frozen event published by `Session.append()` with its session's controller; the standalone borrowed-input enqueue still clones. The first pending event starts a fixed batching window; later events join without resetting its deadline. Expiry transfers the pending backing array in O(1) and starts one durable append; events admitted during that write form a separately bounded follow-up batch. `session/flush` cancels the wait and drains through quiescence, so the loop uses it as the ordering and error-observation checkpoint before the next turn. A rejected background write restores its original batch before later events and pauses automatic retry; a new event starts a fresh window, while explicit flush or backend teardown retries immediately.
 
 ### Stored-record compatibility
 

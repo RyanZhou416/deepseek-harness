@@ -87,7 +87,7 @@ const headers = await ctx.sessionPersistence.list()        // every stored sessi
 
 ### 写入路径概览
 
-每个 `session/event` 把事件复制到其会话的 controller。第一个待处理事件开启固定批处理窗口；后续事件加入但不重置截止时间。窗口到期后启动一次持久追加；该次写入期间接纳的事件形成另一个独立有界的后续批次。`session/flush` 取消等待并排空至完全停稳，因此 loop 在下一轮次前把它用作排序与错误观察检查点。被拒绝的后台写入保留其事件并暂停自动重试；新事件开启新窗口，而显式 flush 或后端拆卸会立即重试。
+每个 `session/event` 都会把 `Session.append()` 发布的已分离、递归冻结事件共享给其会话 controller；独立的借用输入 enqueue 仍会执行 clone。第一个待处理事件开启固定批处理窗口；后续事件加入但不重置截止时间。窗口到期后以 O(1) 转移 pending backing array，并启动一次持久追加；该次写入期间接纳的事件形成另一个独立有界的后续批次。`session/flush` 取消等待并排空至完全停稳，因此 loop 在下一轮次前把它用作排序与错误观察检查点。被拒绝的后台写入会把原批次恢复到后续事件之前并暂停自动重试；新事件开启新窗口，而显式 flush 或后端拆卸会立即重试。
 
 ### 存储记录兼容
 

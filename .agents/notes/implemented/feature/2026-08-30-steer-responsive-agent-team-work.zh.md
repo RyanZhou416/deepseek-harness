@@ -14,11 +14,11 @@ Status: implemented
 
 ## Decision
 
-可继续 Subagent service 在 FIFO `followup()` 旁公开 `steer(parent, childId, content, options)`。两项操作都保留 exact-live-parent 授权、per-child 串行、冷恢复、Activation 所有权与 inbox 接受前取消。Steering 调用子 Agent 已有的 `steer()` 操作，因此运行中的子级会在最近 step 边界领取消息，idle 子级则会被唤醒。
+RC.1 将 `SubagentRuntime.sendMessage(sender, target, content, options)` 作为公开的相邻 Agent 操作。它负责 live-lineage 授权、per-child 串行、冷恢复、Activation 所有权与 inbox 接受前取消，并在最近 step 边界 steer 运行中的子级。Fork 不恢复原有公开 `steer()` 或 `followup()` 方法，只增加一个 symbol-keyed Host-only adapter，在复用同一 continuation 投递机制时保留协议 provenance。
 
-无论模型请求 quiet 还是 wakeup 模式，Agent Teams 都会通过 Subagent steering 投递每条 Lead-to-teammate mailbox 消息。teammate 发起的 peer 消息保留 [Agent Teams 决策](2026-08-05-agent-teams.zh.md)中的持久 quiet 与 next-turn 模式。Team service 根据确切 membership 与 sender identity 推导该策略；提示词和工具参数不负责强制执行。
+无论模型请求 quiet 还是 wakeup 模式，Agent Teams 都会通过 Host-only Subagent steering adapter 投递每条 Lead-to-teammate mailbox 消息。该 adapter 保留持久 Team message source，而不是冒充 Agent sender。teammate 发起的 peer 消息保留 [Agent Teams 决策](2026-08-05-agent-teams.zh.md)中的持久 quiet 与 next-turn 模式。Team service 根据确切 membership 与 sender identity 推导该策略；提示词和工具参数不负责强制执行。
 
-全局面向模型的 `send_message` control 同样调用 Subagent steering，因此 Agent Teams 之外的普通 coordinator-to-child 指令也使用最近 step 行为。host-user 与浏览器 prompt 路径保留 FIFO follow-up 投递；修改模型工具不会重新分类人类输入。
+全局面向模型的 `send_message` control 使用 RC.1 的公开 `sendMessage()`，因此 Agent Teams 之外的普通 coordinator-to-child 指令同样使用最近 step 行为。host-user 与浏览器 prompt 路径保留 FIFO 投递；Host-only Team adapter 不会重新分类人类输入。
 
 浏览器 Queue Dock 会在 live 可继续子级对话里公开排队消息的编辑、移除与 steering action。Client 通过专用 `subagents/updateQueuedByParent` Remote 路由这些操作；Remote 会授权持久直接父级地址，并且只修改选中的 pending next-turn occurrence。编辑保留身份与 source，移除会持久取消该 occurrence，steering 还要求子级正在运行，随后把消息移入 next-step 输入。Remote 使用 `subagent/queue-item-not-found` 报告过期 occurrence，使用 `subagent/delivery-unavailable` 报告不可用的编辑或移除，并使用 `subagent/steer-unavailable` 报告不可用的 steering。
 
@@ -48,4 +48,4 @@ Lead 指令仍需等待子级当前模型请求或工具调用完成；steering 
 
 同一 step 中接受的多条 Lead 指令仍是有序 next-step 消息，并一起进入下一次请求。该设计消除后续轮次的队头阻塞，而不会静默替换持久指令。
 
-通用后台与等待选项在 false 默认值下不增加任何行为或 schema 变更。全局面向模型的 `send_message` 工具有意从后续轮次 FIFO 改为最近 step steering。私有 Team profile 会让 shell 调用返回 job id，并允许 `job_output(wait: true)` 在 next-step 输入待处理时于超时前返回 `[status: running]`。
+通用后台与等待选项在 false 默认值下不增加任何行为或 schema 变更。RC.1 负责全局 `send_message` 工具的最近 step 行为；本 fork 不增加与其竞争的通用消息 API。私有 Team profile 会让 shell 调用返回 job id，并允许 `job_output(wait: true)` 在 next-step 输入待处理时于超时前返回 `[status: running]`。

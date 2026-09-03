@@ -1,6 +1,6 @@
 /** Shared event metadata and semantic-document projection. */
 
-import { foldSurface } from '@deepseek-ai/dsh-session'
+import { foldSurface, isAppendSurfaceEvent, isReplacementSurfaceEvent } from '@deepseek-ai/dsh-session'
 import type { SessionEvent, SessionId, SessionSeq } from '@deepseek-ai/dsh-session'
 import type { SessionEventRecord, SessionEventSearchDocument, SessionEventSurface } from './types.ts'
 import { SessionQueryError } from './config.ts'
@@ -47,6 +47,42 @@ export function buildSessionEventSearchDocuments(
       type: event.type,
       time: event.time,
       surface: surfaceBySeq.get(event.seq) ?? 'log-only',
+      text,
+    })
+  }
+  return documents
+}
+
+/**
+ * Build documents for a suffix whose live Session lifecycle and canonical
+ * surface replacement generation are unchanged from the indexed prefix.
+ * Prior surface classifications therefore remain valid: an appended surface
+ * event is current and every non-surface event is log-only. A replacement
+ * rejects so an invalid fast-path admission rolls back its index transaction.
+ * @param sessionId - session that owns the log.
+ * @param events - newly appended immutable events only.
+ * @returns searchable documents owned by the suffix.
+ */
+export function buildAppendedSessionEventSearchDocuments(
+  sessionId: SessionId,
+  events: readonly SessionEvent[],
+): SessionEventSearchDocument[] {
+  const documents: SessionEventSearchDocument[] = []
+  for (const event of events) {
+    if (isReplacementSurfaceEvent(event)) {
+      throw new SessionQueryError(
+        `live session append suffix unexpectedly contains a surface replacement at seq ${event.seq}`,
+        'SESSION_QUERY_INVALID_SURFACE',
+      )
+    }
+    const text = extractSessionEventText(event)
+    if (text.length === 0) continue
+    documents.push({
+      sessionId,
+      seq: event.seq,
+      type: event.type,
+      time: event.time,
+      surface: isAppendSurfaceEvent(event) ? 'current' : 'log-only',
       text,
     })
   }

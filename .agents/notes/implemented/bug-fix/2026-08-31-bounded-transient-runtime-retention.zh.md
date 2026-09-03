@@ -12,11 +12,11 @@ Status: implemented
 
 ## 决策
 
-只有 staged Client Session 保持 history follow 打开。选择其他 Session 或显式清空选择会同步摘掉上一条 stream，同时保留其 Session scope、binding、当前 window、projection、queue 与功能状态。再次选择时会从持久历史打开新 stream。临时 list masked gap 会保留 stage，因为它属于 transport 状态而不是用户导航。
+只有 staged Client Session 保持 history follow 打开。选择其他 Session 或显式清空选择会同步摘掉上一条 stream，同时保留其 Session scope、binding、当前 window、projection、queue 与功能状态。再次选择时会从持久历史打开新 stream。临时 list masked gap 会保留 stage，因为它属于 transport 状态而不是用户导航。Suspension 会在 disposal 前让正在运行的 jump generation 失效，因此陈旧分页 cleanup 无法提前解锁或替换重新打开的 stream。
 
 `dsh-jobs-local` 接受可选的 `terminalJobRetentionMs` 与 `maxRetainedTerminalJobsPerOwner` 策略。TTL 到期会移除任意终态记录；数量裁剪会在每个精确所有者桶和共享无主桶中移除最旧的已报告终态记录。运行中和停止中的 job 永远不是留存策略候选。基础组合启用一小时 TTL 与每个所有者 100 条终态记录的目标。
 
-可续传 subagent 保持既有生命周期：continuation manager 会立即释放 settled Activation，并在后续投递时冷恢复。这里不增加外部 idle timer，也不增加 Agent 并发限制。
+可续传 subagent 保持既有生命周期：continuation manager 会立即释放 settled Activation，并在后续投递时冷恢复。Owned child disposal 与 Job 状态变化会重新评估此前被阻塞的父级 retention timer。Agent eviction 一旦开始，并发 resolver 会等待 teardown 结算，随后才能返回 live Agent 或 cold-resume Session；任何调用方都不会在正在销毁的实例上接受工作。这里不增加外部 idle timer，也不增加 Agent 并发限制。
 
 ## 备选方案
 
