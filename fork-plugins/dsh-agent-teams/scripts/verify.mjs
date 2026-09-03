@@ -17,17 +17,23 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
   CAPTAIN_KEY,
+  acknowledgeMailbox,
   appendMailbox,
+  claimMailboxDelivery,
   createMessage,
   createTeamDir,
   findTeamByCaptain,
   findTeamByParticipant,
   readMailbox,
+  readUnreadMailbox,
   readTeam,
+  releaseMailboxDelivery,
   removeTeamDir,
+  resetUnreadMailboxCache,
   sanitizeKey,
   transitionError,
   unsatisfiedDependencies,
+  unreadMailboxCacheStats,
   withTeamLock,
 } from '../lib/state.js'
 import {
@@ -625,6 +631,89 @@ try {
   check('mailbox skips malformed JSON and malformed shapes', inbox.length === 2 && malformedLines.join(',') === '3,4')
   check('missing mailbox reads empty', (await readMailbox(stateRoot, team.id, 'nobody')).length === 0)
 
+  const captainMailboxFile = join(stateRoot, team.id, 'inbox', `${CAPTAIN_KEY}.jsonl`)
+  const captainMailboxBeforeProjection = await readFile(captainMailboxFile, 'utf8')
+  resetUnreadMailboxCache()
+  const coldMalformed = []
+  const coldUnread = await readUnreadMailbox(stateRoot, team.id, CAPTAIN_KEY, line => coldMalformed.push(line))
+  const coldUnreadStats = unreadMailboxCacheStats()
+  const warmMalformed = []
+  const warmUnread = await readUnreadMailbox(stateRoot, team.id, CAPTAIN_KEY, line => warmMalformed.push(line))
+  const warmUnreadStats = unreadMailboxCacheStats()
+  check('unread projection preserves BOM/malformed ordering and diagnostics',
+    coldUnread.map(message => message.id).join(',') === inbox.map(message => message.id).join(',')
+      && warmUnread.map(message => message.id).join(',') === coldUnread.map(message => message.id).join(',')
+      && coldMalformed.join(',') === '3,4'
+      && warmMalformed.join(',') === '3,4')
+  check('unchanged unread polling reuses one parsed projection',
+    coldUnreadStats.misses === 1
+      && coldUnreadStats.fileReads === 1
+      && warmUnreadStats.hits === 1
+      && warmUnreadStats.fileReads === 1)
+  check('unread projection reads never rewrite mailbox bytes',
+    (await readFile(captainMailboxFile, 'utf8')) === captainMailboxBeforeProjection)
+
+  const cacheAgent = 'cache-worker'
+  const cacheMessage = createMessage('captain', cacheAgent, 'cache-original')
+  await appendMailbox(stateRoot, team.id, cacheAgent, cacheMessage)
+  resetUnreadMailboxCache()
+  const firstProjection = await readUnreadMailbox(stateRoot, team.id, cacheAgent)
+  firstProjection[0].content = 'caller-mutated'
+  firstProjection.push(createMessage('caller', cacheAgent, 'caller-only'))
+  const secondProjection = await readUnreadMailbox(stateRoot, team.id, cacheAgent)
+  check('callers cannot mutate the cached unread projection',
+    secondProjection.length === 1 && secondProjection[0]?.content === 'cache-original')
+
+  const leaseBase = Date.now()
+  await claimMailboxDelivery(stateRoot, team.id, cacheAgent, [cacheMessage.id])
+  const leasedProjection = await readUnreadMailbox(stateRoot, team.id, cacheAgent)
+  const originalDateNow = Date.now
+  let expiredProjection
+  Date.now = () => leaseBase + 61_000
+  try {
+    expiredProjection = await readUnreadMailbox(stateRoot, team.id, cacheAgent)
+  } finally {
+    Date.now = originalDateNow
+  }
+  check('an unchanged cached lease naturally becomes unread after expiry',
+    leasedProjection.length === 0 && expiredProjection.length === 1)
+  await releaseMailboxDelivery(stateRoot, team.id, cacheAgent, [cacheMessage.id])
+  check('release invalidates and restores the exact unread record',
+    (await readUnreadMailbox(stateRoot, team.id, cacheAgent))[0]?.id === cacheMessage.id)
+  await acknowledgeMailbox(stateRoot, team.id, cacheAgent, [cacheMessage.id])
+  check('acknowledgement invalidates and removes the unread record',
+    (await readUnreadMailbox(stateRoot, team.id, cacheAgent)).length === 0)
+  check('mailbox mutations invalidate cached projections only after success',
+    unreadMailboxCacheStats().invalidations >= 3)
+
+  const externalAgent = 'external-replace'
+  const externalMessage = createMessage('captain', externalAgent, 'AAAA')
+  await appendMailbox(stateRoot, team.id, externalAgent, externalMessage)
+  resetUnreadMailboxCache()
+  await readUnreadMailbox(stateRoot, team.id, externalAgent)
+  const externalFile = join(stateRoot, team.id, 'inbox', `${externalAgent}.jsonl`)
+  await new Promise(resolve => setTimeout(resolve, 2))
+  await writeFile(externalFile, (await readFile(externalFile, 'utf8')).replace('AAAA', 'BBBB'), 'utf8')
+  check('same-length external replacement invalidates by file identity metadata',
+    (await readUnreadMailbox(stateRoot, team.id, externalAgent))[0]?.content === 'BBBB')
+
+  resetUnreadMailboxCache()
+  const limits = unreadMailboxCacheStats()
+  for (let index = 0; index < limits.maxEntries + 8; index += 1) {
+    const agent = `lru-${index}`
+    await appendMailbox(stateRoot, team.id, agent, createMessage('captain', agent, `message-${index}`))
+    await readUnreadMailbox(stateRoot, team.id, agent)
+  }
+  const bounded = unreadMailboxCacheStats()
+  const missesBeforeEvictedRead = bounded.misses
+  const evicted = await readUnreadMailbox(stateRoot, team.id, 'lru-0')
+  const afterEvictedRead = unreadMailboxCacheStats()
+  check('unread projection LRU remains bounded and evicted entries rebuild exactly',
+    bounded.entries <= bounded.maxEntries
+      && bounded.bytes <= bounded.maxBytes
+      && evicted[0]?.content === 'message-0'
+      && afterEvictedRead.misses === missesBeforeEvictedRead + 1)
+
   const duplicateCaptain = { ...team, id: 'duplicate-captain', members: [] }
   await createTeamDir(stateRoot, duplicateCaptain)
   let duplicateCaptainRejected = false
@@ -661,16 +750,22 @@ try {
 
   await removeTeamDir(stateRoot, team.id)
   check('removeTeamDir removes the team', await readTeam(stateRoot, team.id) === undefined)
+  check('removeTeamDir releases every unread projection for that team',
+    unreadMailboxCacheStats().entries === 0)
 
   // Archive keeps the team data for post-delete review.
   const archiveTeam = { ...team, id: sanitizeKey('Archive Team') }
   await createTeamDir(stateRoot, archiveTeam)
+  await appendMailbox(stateRoot, archiveTeam.id, CAPTAIN_KEY, createMessage('member', CAPTAIN_KEY, 'archive me'))
+  await readUnreadMailbox(stateRoot, archiveTeam.id, CAPTAIN_KEY)
   const { archiveTeamDir, readArchivedTeam, listArchivedTeamIds } = await import('../lib/state.js')
   await archiveTeamDir(stateRoot, archiveTeam.id)
   check('archive moves the team out of live scan', await readTeam(stateRoot, archiveTeam.id) === undefined)
   check('archive keeps team.json readable', (await readArchivedTeam(stateRoot, archiveTeam.id))?.id === archiveTeam.id)
   check('archive lists the team id', (await listArchivedTeamIds(stateRoot)).includes(archiveTeam.id))
   check('archive dir skips live readTeam', await readTeam(stateRoot, 'archive') === undefined)
+  check('archive invalidates live and prior archive unread projections',
+    unreadMailboxCacheStats().entries === 0)
 } finally {
   await rm(stateRoot, { recursive: true, force: true })
 }

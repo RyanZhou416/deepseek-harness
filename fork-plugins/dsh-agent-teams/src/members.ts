@@ -723,10 +723,10 @@ export function interruptMember(ctx: Context, captain: Agent, childId: string): 
  * persisted conversation inaccessible. Exact ids keep unrelated subagents
  * untouched while the prompt-queue boundary still prevents further model turns.
  *
- * RC.1 exposes symbol-keyed Queue and nearest-step host adapters through
- * `@deepseek-ai/dsh-subagent/internal`. The guard wraps both paths so a retired
- * member cannot be cold-resumed by either kind of protocol delivery. The wrap
- * is idempotent per runtime and degrades to the paths the exact host provides.
+ * RC.1 exposes public adjacent-Agent messaging plus symbol-keyed Queue and
+ * nearest-step host adapters. The guard wraps all three paths so a retired
+ * member cannot be cold-resumed by any protocol delivery. The wrap is
+ * idempotent per runtime and degrades to the optional host paths available.
  */
 export function installRetiredMemberGuard(ctx: Context, stateDir: string): void {
   const runtime = ctx.subagents
@@ -734,12 +734,9 @@ export function installRetiredMemberGuard(ctx: Context, stateDir: string): void 
     // Wrap the runtime object itself: the real runtime inherits the symbol-keyed
     // method from its class prototype, while test doubles own it directly.
     const host = runtime as unknown as Record<symbol, unknown>
+    const originalSendMessage = runtime.sendMessage
     const originalQueue = host[queueSubagentPrompt] as HostPromptQueue[typeof queueSubagentPrompt] | undefined
     const originalSteer = host[steerSubagentPrompt] as HostPromptSteer[typeof steerSubagentPrompt] | undefined
-    if (originalQueue === undefined && originalSteer === undefined) {
-      ctx.logger.warn('agent-teams: subagent runtime has no host prompt delivery seam; retired-member guard skipped')
-      return () => undefined
-    }
     if (host[retiredGuardMarker] === true) return () => undefined
     const assertNotRetired = async (parent: Agent, childId: SessionId): Promise<void> => {
       const retired = await readRetiredMemberIds(join(parent.session.header.cwd ?? process.cwd(), stateDir))
@@ -762,10 +759,16 @@ export function installRetiredMemberGuard(ctx: Context, stateDir: string): void 
           await assertNotRetired(parent, childId)
           return originalSteer.call(this, parent, childId, content, source, signal)
         }
+    const guardedSendMessage: typeof runtime.sendMessage = async (sender, targetId, content, options) => {
+      await assertNotRetired(sender, targetId)
+      return originalSendMessage.call(runtime, sender, targetId, content, options)
+    }
+    runtime.sendMessage = guardedSendMessage
     if (guardedQueue !== undefined) host[queueSubagentPrompt] = guardedQueue
     if (guardedSteer !== undefined) host[steerSubagentPrompt] = guardedSteer
     host[retiredGuardMarker] = true
     return () => {
+      if (runtime.sendMessage === guardedSendMessage) runtime.sendMessage = originalSendMessage
       if (guardedQueue !== undefined && host[queueSubagentPrompt] === guardedQueue) host[queueSubagentPrompt] = originalQueue
       if (guardedSteer !== undefined && host[steerSubagentPrompt] === guardedSteer) host[steerSubagentPrompt] = originalSteer
       host[retiredGuardMarker] = false

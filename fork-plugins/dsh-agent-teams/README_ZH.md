@@ -30,7 +30,7 @@
 
 ## 版本更新
 
-> **RyanZhou416 fork 构建：**`0.1.15-dsh012rc1.1` 随 DeepSeek Harness fork
+> **RyanZhou416 fork 构建：**`0.1.15-dsh012rc1.2` 随 DeepSeek Harness fork
 > 一起维护，目标版本为 `dsh-v0.1.2-rc.1`。它保留上游 0.1.15 修复、应用尚未
 > 合并的上游 PR #124，并保留本 fork 的最近 step 投递与冷队长持久邮箱恢复。
 > 下方 npm 版本说明仍是 Agent Teams 官方发布的兼容性记录。

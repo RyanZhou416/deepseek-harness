@@ -15,8 +15,8 @@
 
 import { createHash, randomUUID } from 'node:crypto'
 import { readFileSync } from 'node:fs'
-import { mkdir, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises'
-import { join } from 'node:path'
+import { mkdir, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises'
+import { join, sep } from 'node:path'
 import { TERMINAL_TASK_STATUSES, type TaskStatus, type TeamMember, type TeamMessage, type TeamProfileSnapshot, type TeamState, type TeamTask } from './types.ts'
 import { hasValidQualityTaskFields, isReviewPolicy, normalizeBlankOptionalTaskFields } from './quality-gates.ts'
 
@@ -50,6 +50,140 @@ const RETIRED_MEMBERS_FILE = 'retired-members.json'
 
 /** In-process per-team mutation queues (promise chains). */
 const locks = new Map<string, Promise<unknown>>()
+
+/** Bounded process-local projection cache; it never owns acknowledged history. */
+const UNREAD_MAILBOX_CACHE_MAX_ENTRIES = 256
+const UNREAD_MAILBOX_CACHE_MAX_BYTES = 8 * 1024 * 1024
+
+interface MailboxDiagnostic {
+  readonly lineNumber: number
+  readonly message: string
+}
+
+interface UnreadMailboxCacheEntry {
+  readonly signature: string
+  readonly pending: readonly Readonly<TeamMessage>[]
+  readonly diagnostics: readonly MailboxDiagnostic[]
+  readonly bytes: number
+}
+
+const unreadMailboxCache = new Map<string, UnreadMailboxCacheEntry>()
+let unreadMailboxCacheBytes = 0
+let unreadMailboxCacheHits = 0
+let unreadMailboxCacheMisses = 0
+let unreadMailboxFileReads = 0
+let unreadMailboxCacheInvalidations = 0
+
+/** Internal observability used by the plugin's offline performance checks. */
+export interface UnreadMailboxCacheStats {
+  readonly entries: number
+  readonly bytes: number
+  readonly hits: number
+  readonly misses: number
+  readonly fileReads: number
+  readonly invalidations: number
+  readonly maxEntries: number
+  readonly maxBytes: number
+}
+
+/** Snapshot unread-projection cache counters without exposing cached content. */
+export function unreadMailboxCacheStats(): UnreadMailboxCacheStats {
+  return {
+    entries: unreadMailboxCache.size,
+    bytes: unreadMailboxCacheBytes,
+    hits: unreadMailboxCacheHits,
+    misses: unreadMailboxCacheMisses,
+    fileReads: unreadMailboxFileReads,
+    invalidations: unreadMailboxCacheInvalidations,
+    maxEntries: UNREAD_MAILBOX_CACHE_MAX_ENTRIES,
+    maxBytes: UNREAD_MAILBOX_CACHE_MAX_BYTES,
+  }
+}
+
+/** Clear only the transient projection cache and counters; disk is untouched. */
+export function resetUnreadMailboxCache(): void {
+  unreadMailboxCache.clear()
+  unreadMailboxCacheBytes = 0
+  unreadMailboxCacheHits = 0
+  unreadMailboxCacheMisses = 0
+  unreadMailboxFileReads = 0
+  unreadMailboxCacheInvalidations = 0
+}
+
+function isMissingFile(error: unknown): boolean {
+  return error instanceof Error
+    && 'code' in error
+    && (error as NodeJS.ErrnoException).code === 'ENOENT'
+}
+
+async function mailboxFileSignature(file: string): Promise<string> {
+  try {
+    const value = await stat(file, { bigint: true })
+    return `${value.dev}:${value.ino}:${value.size}:${value.mtimeNs}:${value.ctimeNs}`
+  } catch (error: unknown) {
+    if (isMissingFile(error)) return 'missing'
+    throw error
+  }
+}
+
+function removeUnreadMailboxCacheEntry(file: string): void {
+  const existing = unreadMailboxCache.get(file)
+  if (existing === undefined) return
+  unreadMailboxCache.delete(file)
+  unreadMailboxCacheBytes -= existing.bytes
+}
+
+function invalidateUnreadMailbox(file: string): void {
+  if (!unreadMailboxCache.has(file)) return
+  removeUnreadMailboxCacheEntry(file)
+  unreadMailboxCacheInvalidations += 1
+}
+
+function invalidateTeamUnreadMailboxes(stateRoot: string, teamId: string): void {
+  const inbox = join(stateRoot, teamId, 'inbox')
+  const prefix = `${inbox}${sep}`
+  for (const file of [...unreadMailboxCache.keys()]) {
+    if (file === inbox || file.startsWith(prefix)) invalidateUnreadMailbox(file)
+  }
+}
+
+function rememberUnreadMailbox(file: string, entry: UnreadMailboxCacheEntry): void {
+  removeUnreadMailboxCacheEntry(file)
+  if (entry.bytes > UNREAD_MAILBOX_CACHE_MAX_BYTES) return
+  while (unreadMailboxCache.size >= UNREAD_MAILBOX_CACHE_MAX_ENTRIES
+    || unreadMailboxCacheBytes + entry.bytes > UNREAD_MAILBOX_CACHE_MAX_BYTES) {
+    const oldest = unreadMailboxCache.keys().next().value as string | undefined
+    if (oldest === undefined) break
+    removeUnreadMailboxCacheEntry(oldest)
+  }
+  unreadMailboxCache.set(file, entry)
+  unreadMailboxCacheBytes += entry.bytes
+}
+
+function touchUnreadMailbox(file: string, entry: UnreadMailboxCacheEntry): void {
+  unreadMailboxCache.delete(file)
+  unreadMailboxCache.set(file, entry)
+}
+
+function replayMailboxDiagnostics(
+  diagnostics: readonly MailboxDiagnostic[],
+  onMalformedLine?: (lineNumber: number, error: unknown) => void,
+): void {
+  if (onMalformedLine === undefined) return
+  for (const diagnostic of diagnostics) {
+    onMalformedLine(diagnostic.lineNumber, new Error(diagnostic.message))
+  }
+}
+
+function availableUnreadMessages(
+  pending: readonly Readonly<TeamMessage>[],
+  now: number,
+): TeamMessage[] {
+  return pending
+    .filter(message => message.deliveryClaimedAt === undefined
+      || now - message.deliveryClaimedAt >= MAILBOX_DELIVERY_LEASE_MS)
+    .map(message => ({ ...message }))
+}
 
 /**
  * Serialize mutations of one team across the whole process.
@@ -204,6 +338,7 @@ export async function createTeamDir(stateRoot: string, state: TeamState): Promis
   const dir = join(stateRoot, state.id)
   await mkdir(join(dir, 'inbox'), { recursive: true })
   await atomicWriteText(join(dir, 'team.json'), JSON.stringify(state, null, 2))
+  invalidateTeamUnreadMailboxes(stateRoot, state.id)
 }
 
 /**
@@ -396,6 +531,31 @@ export async function appendMailbox(
   }
   const separator = existing !== '' && !existing.endsWith('\n') ? '\n' : ''
   await atomicWriteText(file, `${existing}${separator}${JSON.stringify(message)}\n`)
+  invalidateUnreadMailbox(file)
+}
+
+function parseMailboxText(
+  raw: string,
+  onMalformedLine?: (lineNumber: number, error: unknown) => void,
+): TeamMessage[] {
+  const messages: TeamMessage[] = []
+  for (const [index, rawLine] of raw.split('\n').entries()) {
+    const line = stripLeadingBom(rawLine)
+    if (line.trim() === '') continue
+    let value: unknown
+    try {
+      value = JSON.parse(line)
+    } catch {
+      onMalformedLine?.(index + 1, new Error('invalid JSON'))
+      continue
+    }
+    if (!isTeamMessage(value)) {
+      onMalformedLine?.(index + 1, new Error('invalid message shape'))
+      continue
+    }
+    messages.push(value)
+  }
+  return messages
 }
 
 /**
@@ -416,28 +576,9 @@ export async function readMailbox(
   const file = join(stateRoot, teamId, 'inbox', `${sanitizeKey(agentKey)}.jsonl`)
   try {
     const raw = await readFile(file, 'utf8')
-    const messages: TeamMessage[] = []
-    for (const [index, rawLine] of raw.split('\n').entries()) {
-      const line = stripLeadingBom(rawLine)
-      if (line.trim() === '') continue
-      let value: unknown
-      try {
-        value = JSON.parse(line)
-      } catch {
-        onMalformedLine?.(index + 1, new Error('invalid JSON'))
-        continue
-      }
-      if (!isTeamMessage(value)) {
-        onMalformedLine?.(index + 1, new Error('invalid message shape'))
-        continue
-      }
-      messages.push(value)
-    }
-    return messages
+    return parseMailboxText(raw, onMalformedLine)
   } catch (error: unknown) {
-    if (error instanceof Error && 'code' in error && (error as NodeJS.ErrnoException).code === 'ENOENT') {
-      return []
-    }
+    if (isMissingFile(error)) return []
     throw error
   }
 }
@@ -449,11 +590,41 @@ export async function readUnreadMailbox(
   agentKey: string,
   onMalformedLine?: (lineNumber: number, error: unknown) => void,
 ): Promise<TeamMessage[]> {
+  const file = join(stateRoot, teamId, 'inbox', `${sanitizeKey(agentKey)}.jsonl`)
   const now = Date.now()
-  return (await readMailbox(stateRoot, teamId, agentKey, onMalformedLine))
-    .filter(message => message.readAt === undefined
-      && (message.deliveryClaimedAt === undefined
-        || now - message.deliveryClaimedAt >= MAILBOX_DELIVERY_LEASE_MS))
+  const signatureBefore = await mailboxFileSignature(file)
+  const cached = unreadMailboxCache.get(file)
+  if (cached !== undefined && cached.signature === signatureBefore) {
+    unreadMailboxCacheHits += 1
+    touchUnreadMailbox(file, cached)
+    replayMailboxDiagnostics(cached.diagnostics, onMalformedLine)
+    return availableUnreadMessages(cached.pending, now)
+  }
+
+  unreadMailboxCacheMisses += 1
+  const diagnostics: MailboxDiagnostic[] = []
+  let raw = ''
+  try {
+    unreadMailboxFileReads += 1
+    raw = await readFile(file, 'utf8')
+  } catch (error: unknown) {
+    if (!isMissingFile(error)) throw error
+  }
+  const messages = parseMailboxText(raw, (lineNumber, error) => {
+    const message = error instanceof Error ? error.message : String(error)
+    diagnostics.push({ lineNumber, message })
+    onMalformedLine?.(lineNumber, error)
+  })
+  const pending = messages
+    .filter(message => message.readAt === undefined)
+    .map(message => Object.freeze({ ...message }))
+  const signatureAfter = await mailboxFileSignature(file)
+  if (signatureAfter === signatureBefore) {
+    const bytes = pending.reduce((total, message) => total + Buffer.byteLength(JSON.stringify(message)), 0)
+      + diagnostics.reduce((total, diagnostic) => total + Buffer.byteLength(diagnostic.message) + 16, 0)
+    rememberUnreadMailbox(file, { signature: signatureAfter, pending, diagnostics, bytes })
+  }
+  return availableUnreadMessages(pending, now)
 }
 
 async function mutateMailbox(
@@ -485,6 +656,7 @@ async function mutateMailbox(
     }
   })
   await atomicWriteText(file, lines.join('\n'))
+  invalidateUnreadMailbox(file)
 }
 
 /** Lease selected fallback messages to one delivery path. */
@@ -846,6 +1018,7 @@ function isTeamMessage(value: unknown): value is TeamMessage {
  */
 export async function removeTeamDir(stateRoot: string, teamId: string): Promise<void> {
   await rm(join(stateRoot, teamId), { recursive: true, force: true })
+  invalidateTeamUnreadMailboxes(stateRoot, teamId)
 }
 
 /**
@@ -921,6 +1094,8 @@ export async function archiveTeamDir(stateRoot: string, teamId: string): Promise
   // The new generation is authoritative. A failed cleanup only leaves a
   // hidden recovery directory, which archive discovery deliberately ignores.
   if (displaced) await rm(previous, { recursive: true, force: true }).catch(() => undefined)
+  invalidateTeamUnreadMailboxes(stateRoot, teamId)
+  invalidateTeamUnreadMailboxes(archiveRoot, teamId)
 }
 
 /**

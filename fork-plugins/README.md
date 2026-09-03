@@ -7,11 +7,15 @@ package，也把未来冲突限制在 `fork-plugins/` 内。
 ## Agent Teams
 
 - 源码：`fork-plugins/dsh-agent-teams`
-- 当前私有版本：`0.1.15-dsh012rc1.1`
+- 当前私有版本：`0.1.15-dsh012rc1.2`
 - 上游底座：`NanmiCoder/dsh-agent-teams main@232a338fc9`
 - API 迁移：上游 PR #124 `098e4e97eb`
-- 安装产物：`fork-plugins/releases/nanmicoder-dsh-agent-teams-0.1.15-dsh012rc1.1.tgz`
-- 产物 SHA256：`EA5AD853B26FB095511088DA97386C827ECA5C00622B1901B9370421F6010F54`
+- 安装产物：`fork-plugins/releases/nanmicoder-dsh-agent-teams-0.1.15-dsh012rc1.2.tgz`
+- 产物 SHA256：`22312117EE48C46FE00CD5926A9D2B3FFC9788DA4A1098B11DF17E9F4FA520D9`
+
+`.2` 同时保护 RC.1 公共 `sendMessage()`、Host Queue 与 fork nearest-step
+三条退休成员入口，并用有界 unread-only LRU 消除活动面板对不变 mailbox JSONL
+的每秒全量重读；磁盘格式保持不变。
 
 构建和验证：
 

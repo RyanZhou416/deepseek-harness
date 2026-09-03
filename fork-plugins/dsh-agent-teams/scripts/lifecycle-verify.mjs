@@ -239,6 +239,11 @@ const ctx = {
     async [steerSubagentPrompt](parent, childId, content, source, signal) {
       return this[queueSubagentPrompt](parent, childId, content, source, signal)
     },
+    async sendMessage(parent, childId, content, options) {
+      return this[steerSubagentPrompt](parent, childId, content, {
+        kind: 'agent-message', senderId: parent.id,
+      }, options.signal)
+    },
     interrupt(childId) {
       const child = liveAgents.get(childId)
       if (child) {
@@ -979,6 +984,17 @@ try {
   }
   check('removing a member blocks direct nearest-step host delivery',
     removedSteerRejected && deliveries.length === deliveriesBeforeRemovedSteer)
+  let removedPublicMessageRejected = false
+  const deliveriesBeforeRemovedPublicMessage = deliveries.length
+  try {
+    await ctx.subagents.sendMessage(captain, alpha.id, [{ type: 'text', text: 'must not send' }], {
+      signal: new AbortController().signal,
+    })
+  } catch (error) {
+    removedPublicMessageRejected = error?.code === 'NOT_RESUMABLE'
+  }
+  check('removing a member blocks public adjacent-Agent sendMessage delivery',
+    removedPublicMessageRejected && deliveries.length === deliveriesBeforeRemovedPublicMessage)
   let removedRejected = false
   try {
     await call('agent_teams_update_task', {
