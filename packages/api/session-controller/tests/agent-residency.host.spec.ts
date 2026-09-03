@@ -9,7 +9,7 @@ import SessionController from '../src/index.ts'
 
 const roots: Context[] = []
 const sessionId = SessionId('resident-session')
-const header: SessionHeader = { version: 0, id: sessionId, createdAt: 1, cwd: '/project' }
+const header: SessionHeader = { version: 0, id: sessionId, createdAt: 1, cwd: '/project', isSeeded: false }
 
 afterEach(async () => {
   vi.useRealTimers()

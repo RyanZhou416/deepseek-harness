@@ -149,6 +149,8 @@ Authority comes from the exact live sender. Parent-to-child delivery requires th
 
 For `startContinuable()` and `sendMessage()`, the caller signal owns lookup, materialization, and admission only until inbox acceptance. Afterwards the manager owns the Activation independently: later caller cancellation neither cancels the accepted turn nor disposes the child. Human browser prompts remain a separate private Queue adapter and therefore still produce distinct FIFO turns.
 
+The browser can address one exact pending `nextTurn` occurrence on a live continuable child through `updateQueuedByParent()`. Editing replaces text content while preserving the message id and source, removal durably cancels the occurrence, and steering moves that same occurrence to `nextStep` only while the child is running. Idle continuable children permit edit and removal; inactive and one-shot children remain read-only. The Remote validates text edits at the wire, authorizes the durable direct-parent address without requiring the parent Agent to be live, and never cold-resumes a child merely to mutate its queue.
+
 `SubagentRuntime.interrupt(targetSessionId, authority)` is the one public stop: it authorizes synchronously, issues `Agent.cancel(cause, { keepInbox: true })` on the live target, and returns without awaiting quiescence. The Activation, its unclaimed pending inbox work, and published descendants are untouched; work already claimed into the interrupted turn is not requeued. Once the interrupted driver is idle, a waking send resumes the parked FIFO queue. An absent target — unknown, one-shot, or already settled — and a manager-less composition are accepted no-ops. For a live target, a mismatched parent address or caller outside its live ancestry rejects with `UNAUTHORIZED`; stale ancestor objects and self-targeting ancestor requests reject before target lookup.
 
 ```ts type-equiv
@@ -624,6 +626,21 @@ listDescendants(rootSessionId: SessionId, signal?: AbortSignal): Promise<Subagen
  *   `subagent/delivery-unavailable`, `gateway/cancelled`, or `gateway/internal`.
  */
 @Remote('prompt') async prompt(request: SubagentPromptRequest, signal: AbortSignal): Promise<SubagentPromptReceipt>
+
+/**
+ * Edit, remove, or steer one browser-selected child queue occurrence under
+ * its durable direct-parent address. The target must have a live Activation;
+ * steering additionally requires it to be running. This operation neither
+ * resumes an inactive child nor requires the parent Agent to be live.
+ * @param request - durable parent/child address, pending message identity, and mutation.
+ * @param signal - carrier cancellation before the inbox mutation commits.
+ * @returns acknowledgement that the selected mutation committed.
+ * @throws {RemoteError} `gateway/bad-request`, `gateway/cancelled`,
+ *   `subagent/attachment-unsupported`, `subagent/unauthorized`,
+ *   `subagent/queue-item-not-found`, `subagent/delivery-unavailable`,
+ *   `subagent/steer-unavailable`, or `gateway/internal`.
+ */
+@Remote('updateQueuedByParent') async updateQueuedByParent( request: SubagentQueueUpdateRequest, signal: AbortSignal, ): Promise<SubagentQueueUpdateReceipt>
 
 /**
  * Remote face of {@link interrupt} under one durable parent address. No

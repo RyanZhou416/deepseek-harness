@@ -1750,7 +1750,7 @@ lsp 工具将提供方选择和语言服务器子进程置于 ctx.lsp 之后，�
 
 ### `followup_task`
 
-向另一名 Team member 发送持久 follow-up task，并在需要时启动一个 turn。
+在最近 step 边界向 teammate 发送持久指令。
 
 ```json
 {
@@ -1810,7 +1810,7 @@ lsp 工具将提供方选择和语言服务器子进程置于 ctx.lsp 之后，�
 
 ### `send_message`
 
-向另一名 Team member 发送持久信息，但不启动 idle member。
+在最近 step 边界向 teammate 发送持久指令。
 
 ```json
 {

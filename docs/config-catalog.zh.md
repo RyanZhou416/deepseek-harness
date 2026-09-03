@@ -212,12 +212,14 @@ export interface Config {
 export interface Config {
   /** Maximum cold Session artifact size eligible for one full projection observation. */
   readonly coldBlankProbeMaxBytes?: number
+  /** Milliseconds an owned, durable, unfollowed idle Session remains live; zero disables eviction. */
+  readonly idleSessionRetentionMs?: number
   /** Override platform desktop-opener detection. */
   readonly nativeOpen?: boolean
 }
 ```
 
-来源：[`packages/api/session-controller/src/index.ts:68`](../packages/api/session-controller/src/index.ts)
+来源：[`packages/api/session-controller/src/index.ts:70`](../packages/api/session-controller/src/index.ts)
 
 <a id="deepseek-aidsh-api-settings-controller"></a>
 
@@ -930,6 +932,19 @@ export interface Config {
    * omission defaults to 10.
    */
   maxConcurrentJobsPerOwner?: number
+  /**
+   * Milliseconds to retain a terminal job before removing it, whether or not
+   * its result was reported. Omission preserves terminal jobs until owner or
+   * service disposal.
+   */
+  terminalJobRetentionMs?: number
+  /**
+   * Target maximum terminal jobs retained per exact owner or in the shared
+   * unowned bucket. Count pruning removes only reported records; unreported
+   * records remain until {@link terminalJobRetentionMs} expires or teardown.
+   * Omission disables count pruning.
+   */
+  maxRetainedTerminalJobsPerOwner?: number
 }
 ```
 
@@ -1930,7 +1945,7 @@ export type JournalMode = 'wal' | 'delete' | 'truncate' | 'persist'
 
 依赖：[`SessionQueryConfig`](../packages/session-query/session-query/src/index.ts)
 
-来源：[`packages/session-query/session-query-sqlite/src/index.ts:96`](../packages/session-query/session-query-sqlite/src/index.ts)
+来源：[`packages/session-query/session-query-sqlite/src/index.ts:97`](../packages/session-query/session-query-sqlite/src/index.ts)
 
 <a id="deepseek-aidsh-session-reference"></a>
 
@@ -2627,6 +2642,8 @@ export type TokenMeterConfig = Record<string, never>
 export interface Config {
   /** Expose `run_in_background` (default true); disabled calls are also rejected. */
   enableRunInBackground?: boolean
+  /** Force every command into an owner-scoped background job (default false). */
+  forceRunInBackground?: boolean
 }
 ```
 
@@ -2749,6 +2766,11 @@ export interface Config {
    * completion wakes it again.
    */
   maxConsecutiveWakes?: number
+  /**
+   * Whether pending next-step input ends a blocking `job_output` wait without
+   * cancelling the job (default false).
+   */
+  yieldWaitOnNextStep?: boolean
 }
 
 /**
@@ -2792,6 +2814,8 @@ export interface Config {
 export interface Config {
   /** Expose `run_in_background` (default true); disabled calls are also rejected. */
   enableRunInBackground?: boolean
+  /** Force every command into an owner-scoped background job (default false). */
+  forceRunInBackground?: boolean
 }
 ```
 

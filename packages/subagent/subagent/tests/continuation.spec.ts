@@ -149,7 +149,7 @@ function queuePrompt(
         content: ContentBlock[],
         source: { kind: 'user' },
         signal: AbortSignal,
-      ): Promise<string>
+      ): Promise<MessageId>
     }
   }).continuations
   if (manager === undefined) throw new Error('expected a bound continuation manager')

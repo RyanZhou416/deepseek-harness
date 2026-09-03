@@ -278,7 +278,7 @@ export class SubagentRuntime extends TypertRemoteService {
   }
 
   /** Host-protocol nearest-step delivery that retains protocol-owned provenance. */
-  private [steerSubagentPrompt](
+  [steerSubagentPrompt](
     parent: Agent,
     childId: SessionId,
     content: ContentBlock[],

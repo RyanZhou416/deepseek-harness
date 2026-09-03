@@ -149,6 +149,8 @@ Agent 收件箱是唯一队列。每条 Agent 消息都使用 `Agent.steer()`：
 
 对于 `startContinuable()` 与 `sendMessage()`，调用方 signal 仅在收件箱接受之前掌管查找、物化与准入。此后管理器独立掌管该 Activation：之后的调用方取消既不会取消已接受的轮次，也不会 dispose 子 agent。浏览器中的人类提示仍由私有 Queue 适配器处理，因此继续产生独立 FIFO 轮次。
 
+浏览器可以通过 `updateQueuedByParent()` 寻址 live 可续传 child 中一个精确的 pending `nextTurn` occurrence。编辑会在保留 message id 与 source 的同时替换文本内容；移除会持久取消该 occurrence；steering 只在 child 正在运行时把同一 occurrence 移入 `nextStep`。Idle 可续传 child 允许编辑和移除；inactive 与 one-shot child 保持只读。Remote 会在 wire 上验证文本编辑，依据持久 direct-parent 地址授权且不要求 parent Agent 在线，也绝不会仅为修改队列而冷恢复 child。
+
 `SubagentRuntime.interrupt(targetSessionId, authority)` 是唯一的公开停止操作：它同步完成鉴权，对在线目标发出 `Agent.cancel(cause, { keepInbox: true })`，然后不等待完全停稳即返回。Activation、其尚未领取的待处理 inbox 工作与已发布的后代均不受影响；已被领取进入中断轮次的工作不会重新入队。被中断的 driver 进入 idle 后，一次唤醒发送会恢复被暂停的 FIFO 队列。不存在的目标——未知、一次性或已结算——以及未绑定管理器的组合是被接受的 no-op。对在线目标，错误的 parent 地址或不在其在线祖先链中的调用方会以 `UNAUTHORIZED` 拒绝；陈旧的 ancestor 对象和指向自身的 ancestor 请求会在查找目标前拒绝。
 
 ```ts type-equiv
@@ -628,6 +630,21 @@ listDescendants(rootSessionId: SessionId, signal?: AbortSignal): Promise<Subagen
  *   `subagent/delivery-unavailable`, `gateway/cancelled`, or `gateway/internal`.
  */
 @Remote('prompt') async prompt(request: SubagentPromptRequest, signal: AbortSignal): Promise<SubagentPromptReceipt>
+
+/**
+ * Edit, remove, or steer one browser-selected child queue occurrence under
+ * its durable direct-parent address. The target must have a live Activation;
+ * steering additionally requires it to be running. This operation neither
+ * resumes an inactive child nor requires the parent Agent to be live.
+ * @param request - durable parent/child address, pending message identity, and mutation.
+ * @param signal - carrier cancellation before the inbox mutation commits.
+ * @returns acknowledgement that the selected mutation committed.
+ * @throws {RemoteError} `gateway/bad-request`, `gateway/cancelled`,
+ *   `subagent/attachment-unsupported`, `subagent/unauthorized`,
+ *   `subagent/queue-item-not-found`, `subagent/delivery-unavailable`,
+ *   `subagent/steer-unavailable`, or `gateway/internal`.
+ */
+@Remote('updateQueuedByParent') async updateQueuedByParent( request: SubagentQueueUpdateRequest, signal: AbortSignal, ): Promise<SubagentQueueUpdateReceipt>
 
 /**
  * Remote face of {@link interrupt} under one durable parent address. No

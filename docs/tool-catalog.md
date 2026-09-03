@@ -1744,7 +1744,7 @@ The kind-agnostic background-job controller: background bash commands, PTY sends
 
 ### `followup_task`
 
-Send a durable follow-up task to another Team member and start a turn when needed.
+Send a durable directive to a teammate at its nearest step boundary.
 
 ```json
 {
@@ -1804,7 +1804,7 @@ Source: [`packages/experimental/tool-agent-team/src/index.ts`](../packages/exper
 
 ### `send_message`
 
-Send durable information to another Team member without starting an idle member.
+Send a durable directive to a teammate at its nearest step boundary.
 
 ```json
 {
