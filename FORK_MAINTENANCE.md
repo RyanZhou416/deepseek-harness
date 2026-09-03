@@ -38,6 +38,7 @@
 | Pre-RC.1 backup | `origin/backup/pre-upstream-rc1-20260904 = eb0cbabe39` | RC.1 整合前已推送的完整 fork 恢复点 |
 | RC.1 integration | `integrate/upstream-rc1`, worktree `C:\Project\deepseek-harness-rc1-integration` | 已完成：官方 merge `646dffed9f`、fork 行为移植 `a19e092544`、生成物与类型修正验证 `42aec50270` |
 | Current official target | `dsh-v0.1.2-rc.1 = a66e470204` on 2026-09-04 | 精确不可变 tag；不要改合并已越过该 tag 的 rolling `upstream/master` |
+| AgentTeams subtree | `fork-plugins/dsh-agent-teams` | 上游 `main@232a338fc9` + PR #124 `098e4e97eb` + 本 fork RC.1 适配；subtree content commit `c1abf16c86` |
 
 当前维护的 `master` 兼容基线是 RC.1。整合采用 RC.1 重构后的 Session indexed reads、Tool 展开懒计算、相邻 Agent messaging、Chat/Conversation/Trajectory 性能和连接容错，再按本文的行为与测试补回仍缺失部分；后续合并仍禁止整体 cherry-pick alpha.2 旧文件。
 
@@ -199,7 +200,7 @@ Web profile 插入 `memory-watchdog.cjs`：250 ms 采样、60 s 日志、heap ra
 | Package | Installed | Runtime state | Preserve rule |
 |---|---:|---|---|
 | `dshmarket` | `1.38.1` | Enabled | RC.1 隔离 profile 精确升级到 `1.41.0`；停机冷启动，保持 `allowRestart:false` |
-| `@nanmicoder/dsh-agent-teams` | `0.1.14-dsh012.4` local tgz | Enabled | 禁止被 npm latest 直接覆盖，见下一节 |
+| `@nanmicoder/dsh-agent-teams` | `0.1.15-dsh012rc1.1` fork tgz | Enabled | 完整源码和可安装产物均随 fork 维护；禁止被 npm latest 直接覆盖，见下一节 |
 | `dsh-plugin-subscriptions` | `0.5.3` | Installed, disabled | RC.1 隔离 profile 精确升级 `0.6.0` 后仍先禁用；首次启用显式收紧 `rateLimit.wait` |
 | `@vlln/dsh-task-status` | Removed | Not installed | 2026-09-04 已从依赖、bundle、patch、lockfile 和 `node_modules` 删除；RC.1 profile 不得恢复 |
 | `dsh-context` | `0.37.0` | Installed, disabled | RC.1 隔离 profile 精确升级 `0.41.3`；该版已改为按需 header content并有 RC.1 compatibility matrix |
@@ -210,19 +211,23 @@ Web profile 插入 `memory-watchdog.cjs`：250 ms 采样、60 s 日志、heap ra
 
 ### Local AgentTeams package
 
-当前 profile 通过 `file:` 安装 `profiles\web\.local-plugins\nanmicoder-dsh-agent-teams-0.1.14-dsh012.4.tgz`，SHA256 为 `FA2916BBAF45C18F6AE956D3678CE9943E959BC231AAEDFA10EE480CE561DD89`。旧 `.1`–`.3` tarballs 是 rollback evidence，不得在确认 `.4` 和后继包稳定前覆盖。
+维护真源位于 `fork-plugins\dsh-agent-teams`，完整保留上游源码、测试、构建脚本和资产。当前 profile 通过 `file:` 安装 `fork-plugins\releases\nanmicoder-dsh-agent-teams-0.1.15-dsh012rc1.1.tgz`，SHA256 为 `EA5AD853B26FB095511088DA97386C827ECA5C00622B1901B9370421F6010F54`。该 package 标记为 private，禁止用上游 npm scope 发布。
 
-必须保留的 `.4` 行为：
+旧 `.1`–`.4` tarballs 与 `dsh-agent-teams-0.1.14-dsh012.1.bundle` 继续保留为 rollback evidence；其中 `.bundle` 是包含 `.1` 完整历史的 Git bundle，不得随意清理。当前 fork artifact 已随 Git 提交，同事不再依赖这台机器的外置 `.local-plugins-src`。
 
-1. Team 内部队长指令、scheduler assignment、peer delivery 和 mailbox recovery 对成员使用 Subagent steer，在最近 step boundary 进入。
-2. 模型 `sendMessage()` 与 Team Host adapter 都拒绝冷恢复已退休 Team member；人类在成员会话发送的普通消息仍走 Session FIFO。
-3. Client 继续使用 `uiConversation`，Host 使用 `SystemPrompt.getSectionOrder('TEAM_POLICY')`；新包必须重新构建并把 peers 对齐 RC.1。
-4. 普通 captain 不驻留时，成员报告先通过 Host Session Controller cold resume captain，再投递。
-5. Captain Session start 会重投 durable mailbox；成功消息逐条 ack，失败记录及后缀释放 delivery lease，避免丢报和错误确认。
+必须保留的 fork 行为：
 
-`.local-plugins-src\...dsh012.2/.3/.4` 只是解包后的已构建 `lib` 与发布说明，不含完整 upstream `src/tests/scripts`，不能当作长期源码仓。升级必须从官方 AgentTeams source/tag 开始，再逐条移植并验证上述行为。
+1. 保留上游 main 的 authenticated Web routes、blank optional normalization、reasoning-effort 透传和 unrecoverable member failure settlement。
+2. PR #124 的 `agent/session-start`、`Session.ownEvents()` 与官方 Host Queue fallback 必须保留；不得恢复已删除的 `registerContinuableSetup`、`Session.events` 或 `header.seedLength`。
+3. Team 内部队长指令、scheduler assignment、peer delivery 和 mailbox recovery 在 fork runtime 上使用可选 symbol-keyed Host steer，在最近 step boundary 进入；普通官方 RC.1 runtime 上安全回退 Host Queue。
+4. Queue 与 fork steer 两条 Host 路径都拒绝冷恢复已退休 Team member；人类在成员会话发送的普通消息仍走 Session FIFO。
+5. Client 使用 `uiConversation` 和 RC.1 `[data-composer-input]`，Host 使用 `SystemPrompt.getSectionOrder('TEAM_POLICY')`；依赖固定为 RC.1。
+6. 普通 captain 不驻留时，成员报告先通过 Host Session Controller cold resume captain；Captain Session start 会重投 durable mailbox，成功逐条 ack，失败记录及后缀释放 delivery lease。
+7. Windows directory rename 使用独立的 5 次重试预算；构建清理目标用跨平台 `basename()` 校验。
 
-官方 AgentTeams `0.1.15` 只原生支持 DSH alpha.2，并加入 raw Web route authentication；其 post-release main 还处理 blank optional fields 与 unrecoverable member failures。它与当前 `.4` 都调用 RC.1 已删除的 Session/Subagent API，不能直接启动。RC.1 适配应以最新 main、PR #124 的 `ownEvents()` 生命周期方案、PR #119 的 `sendMessage()` 方向和 `.4` 行为为输入，生成新的固定本地版本；禁止直接把 profile 改为 `@latest`。
+`.local-plugins-src\...dsh012.2/.3/.4` 只是历史解包产物，不能再当维护源。以后用 `git subtree pull --prefix=fork-plugins/dsh-agent-teams https://github.com/NanmiCoder/dsh-agent-teams.git main --squash` 获取官方更新，再在 fork 内重放和验证上述行为；不得用 npm install 覆盖 subtree。
+
+官方 AgentTeams `0.1.15` 仍只原生支持 DSH alpha.2；本 fork 以 `main@232a338fc9`、未合并 PR #124 `098e4e97eb` 和历史 `.4` 行为生成 `0.1.15-dsh012rc1.1`。PR #119 是较旧的 alpha.4 双兼容方案，没有叠加。后续若 PR #124 或等价实现进入上游，先按行为测试去重，再提升 subtree 基线和私有版本；profile 始终安装 fork artifact。
 
 ### ChatGPT subagent preset
 
@@ -240,7 +245,7 @@ Profile 注册 `dsh-sdk-process-raw` 和 `subagent_process`：SDK profile、独�
 
 ### Diagnostics
 
-`diagnostics\memory-watchdog.ndjson`、`supervisor.log` 和 Node reports 是故障证据。旧 supervisor 行可能记录历史 restart，不能用旧行判断当前行为；当前脚本的新行以 `restart=disabled` 为准。日志当前没有自动轮转，维护者只能针对已确认的具体文件人工归档，禁止对 DSH_HOME 运行宽泛递归清理。RC.1 profile 清理前的五个配置文件及 SHA-256 基线保存在 `diagnostics\profile-backups\pre-rc1-20260904-015259`，不含 Session 或附件。
+`diagnostics\memory-watchdog.ndjson`、`supervisor.log` 和 Node reports 是故障证据。旧 supervisor 行可能记录历史 restart，不能用旧行判断当前行为；当前脚本的新行以 `restart=disabled` 为准。日志当前没有自动轮转，维护者只能针对已确认的具体文件人工归档，禁止对 DSH_HOME 运行宽泛递归清理。RC.1 profile 清理前的五个配置文件及 SHA-256 基线保存在 `diagnostics\profile-backups\pre-rc1-20260904-015259`；AgentTeams 切换前的四个 profile 文件保存在 `diagnostics\profile-backups\pre-agentteams-rc1-20260904-022034`。两者都不含 Session 或附件。
 
 `diagnostics\deleted-*-artifacts-*` 与 `validation-web-full-partial-node-modules-*` 是上游删除包的可恢复构建残留，不是 Session。清理前仍需解析绝对路径并与 sessions/attachments/storages 分离。
 
@@ -266,7 +271,7 @@ Profile 注册 `dsh-sdk-process-raw` 和 `subagent_process`：SDK profile、独�
 | Forced Team shell background / yielding wait | Preserve | Require explicit opt-in and job ownership semantics |
 | Global disconnect overlay | Preserve | Official replacement must remain visible with collapsed sidebar |
 | Windows/macOS launch/build scripts | Preserve | Official launcher must cover local heap/report/path needs before removal |
-| Local AgentTeams `.4` behavior | Rebase required for RC.1 | Build a new fixed RC.1 package; never install npm latest over the live profile |
+| Fork-vendored AgentTeams behavior | Adapted and tested on RC.1 | Pull upstream through subtree, retain the private version/artifact, and never install npm latest over the live profile |
 | Dormant fixed-concurrency wrapper | Do not preserve as active behavior | It may remain evidence, but must not be mounted |
 
 -----
@@ -336,6 +341,15 @@ git diff --check
 git status --short --branch
 ```
 
+AgentTeams subtree 另跑（每个命令保持短批次）：
+
+```powershell
+cd fork-plugins\dsh-agent-teams
+corepack pnpm@11.7.0 typecheck
+corepack pnpm@11.7.0 build
+corepack pnpm@11.7.0 verify
+```
+
 只改 fork 维护文档时至少运行 `pnpm run test:docs` 与 `git diff --check`。涉及 packages、profile manifest 或 generated output 时再运行相应 focused tests、build 和 hygiene；不要为了提交重复已经通过且未受影响的行为测试。
 
 ### Isolated runtime checks
@@ -358,7 +372,7 @@ git status --short --branch
 - Watchdog 是最后一道优雅停机保护，不是 steady-state 回收机制，也不保证十小时高并发绝不退出。
 - `run.command` 没有 Windows `run.cmd` 的 16 GiB heap 设置。
 - Process-worker SDK profile 的 stale `memory-admission` row 已删除；不得用其他固定 Agent 并发限制替代。
-- Local AgentTeams `.4` 需要以 RC.1 API 重建，并吸收官方 0.1.15 route authentication 和 post-release failure handling，同时保留本地 nearest-step delivery、retired-member guard 与 cold-captain mailbox；在完成前禁止切换真实 profile。
+- AgentTeams 已随 fork 维护，但 nearest-step 优化仍依赖 fork 的可选 symbol seam；在纯官方 RC.1 上会回退 FIFO Host Queue。每次 DSH 或 AgentTeams 上游更新都必须重新跑两条路径、退休成员和冷队长邮箱测试。
 - Diagnostics 目前没有自动轮转，长期运行后需按具体文件人工归档。
 
 ## Dev Note
