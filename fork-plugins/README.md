@@ -17,6 +17,17 @@ package，也把未来冲突限制在 `fork-plugins/` 内。
 三条退休成员入口，并用有界 unread-only LRU 消除活动面板对不变 mailbox JSONL
 的每秒全量重读；磁盘格式保持不变。
 
+同事 clone 本 fork、设置好自己的 `DSH_HOME` 并关闭正在运行的 DSH 后，可在
+仓库根执行：
+
+```powershell
+$artifact = (Resolve-Path .\fork-plugins\releases\nanmicoder-dsh-agent-teams-0.1.15-dsh012rc1.2.tgz).Path
+node --import tsx/esm apps/cli/src/bin.ts plugin --profile web add $artifact
+```
+
+这只更新同事自己的 profile；不会复制或覆盖任何 Session、附件或
+`.agent-teams` 数据。
+
 构建和验证：
 
 ```powershell
