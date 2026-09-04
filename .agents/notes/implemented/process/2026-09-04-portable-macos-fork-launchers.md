@@ -12,7 +12,7 @@ Copying the Windows Harness home is not a deployment mechanism. Its profile cont
 
 ## Decision
 
-`build.command` and `run.command` source `scripts/fork-macos-runtime.sh`. The helper discovers Node from `PATH`, `/opt/homebrew/bin`, or `/usr/local/bin`; accepts Node `22.19+` or `24+` while rejecting Node 23; installs the pinned Corepack fallback `0.34.5` only under a private per-user temporary directory; and requires the exact pnpm version from the repository `packageManager` field.
+`build.command` and `run.command` source `scripts/fork-macos-runtime.sh`. The helper discovers Node from `PATH`, `/opt/homebrew/bin`, or `/usr/local/bin`; accepts Node `22.19+` or `24+` while rejecting Node 23; installs the pinned Corepack fallback `0.34.5` only under a private per-user temporary directory; and requires the exact pnpm version from the repository `packageManager` field. Before starting the pinned pnpm shim, the helper disables Corepack's interactive download prompt, announces the preparation, and leaves startup diagnostics visible; a cold cache can download without waiting on an invisible terminal question.
 
 `build.command` remains an install-and-build operation. `run.command` resolves blank, tilde-prefixed, relative, and absolute `DSH_HOME` values with the Harness path rules, creates a non-symlink diagnostics directory with mode `0700`, and adds fatal and uncaught Node reports without supervising or restarting the Host. Its default V8 old-space budget is half of physical memory, clamped from 4 GiB through 16 GiB; `DSH_MAX_OLD_SPACE_MIB` is an explicit validated override.
 

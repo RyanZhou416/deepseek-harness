@@ -169,9 +169,10 @@ process.stdout.write(manifest.packageManager)
 }
 
 dsh_prepare_macos_corepack() {
+  COREPACK_ENABLE_DOWNLOAD_PROMPT=0
   COREPACK_NPM_REGISTRY=${COREPACK_NPM_REGISTRY:-https://registry.npmmirror.com}
   npm_config_registry=${npm_config_registry:-$COREPACK_NPM_REGISTRY}
-  export COREPACK_NPM_REGISTRY npm_config_registry
+  export COREPACK_ENABLE_DOWNLOAD_PROMPT COREPACK_NPM_REGISTRY npm_config_registry
 
   dsh_prepare_macos_private_runtime || return 1
 
@@ -215,7 +216,8 @@ dsh_prepare_macos_toolchain() {
   dsh_read_expected_pnpm_version "$DSH_MACOS_TOOLCHAIN_ROOT" || return 1
   dsh_prepare_macos_corepack || return 1
 
-  if ! DSH_ACTUAL_PNPM_VERSION=$(pnpm --version 2>/dev/null); then
+  printf '%s\n' "Preparing pnpm $DSH_EXPECTED_PNPM_VERSION through Corepack..."
+  if ! DSH_ACTUAL_PNPM_VERSION=$(pnpm --version); then
     dsh_macos_runtime_error 'The pnpm Corepack shim did not start.'
     return 1
   fi
@@ -224,6 +226,7 @@ dsh_prepare_macos_toolchain() {
       "packageManager requires pnpm $DSH_EXPECTED_PNPM_VERSION, but Corepack started $DSH_ACTUAL_PNPM_VERSION."
     return 1
   fi
+  printf '%s\n' "Prepared pnpm $DSH_ACTUAL_PNPM_VERSION."
 }
 
 dsh_heap_mib_from_physical_bytes() {

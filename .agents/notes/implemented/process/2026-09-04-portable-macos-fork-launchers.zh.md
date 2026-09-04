@@ -12,7 +12,7 @@ Status: implemented
 
 ## 决策
 
-`build.command` 和 `run.command` 会 source `scripts/fork-macos-runtime.sh`。该 helper 会从 `PATH`、`/opt/homebrew/bin` 或 `/usr/local/bin` 发现 Node；接受 Node `22.19+` 或 `24+` 并拒绝 Node 23；仅在每用户私有临时目录安装固定的 Corepack fallback `0.34.5`；并强制使用仓库 `packageManager` 字段中的精确 pnpm 版本。
+`build.command` 和 `run.command` 会 source `scripts/fork-macos-runtime.sh`。该 helper 会从 `PATH`、`/opt/homebrew/bin` 或 `/usr/local/bin` 发现 Node；接受 Node `22.19+` 或 `24+` 并拒绝 Node 23；仅在每用户私有临时目录安装固定的 Corepack fallback `0.34.5`；并强制使用仓库 `packageManager` 字段中的精确 pnpm 版本。启动固定版本的 pnpm shim 前，helper 会禁用 Corepack 的交互式下载确认、显示准备进度，并保留启动诊断输出；冷缓存下载不会等待不可见的终端问题。
 
 `build.command` 仍然只执行安装和构建。`run.command` 按 Harness 路径规则解析空白、带 tilde 前缀、相对和绝对 `DSH_HOME` 值，创建模式为 `0700` 的非符号链接 diagnostics 目录，并加入 fatal 和 uncaught Node 报告，但不监督或重启 Host。其默认 V8 old-space 预算为物理内存的一半，并限制在 4 GiB 至 16 GiB；`DSH_MAX_OLD_SPACE_MIB` 是显式且会被校验的覆盖值。
 

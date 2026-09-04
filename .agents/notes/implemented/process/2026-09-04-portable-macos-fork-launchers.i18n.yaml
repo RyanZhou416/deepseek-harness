@@ -2,5 +2,5 @@
 # side as of the last confirmed-consistent state. Both languages carry equal authority;
 # after editing either side, bring the other along and re-record with:
 #   pnpm run verify-translation-pairing --write .agents/notes/implemented/process/2026-09-04-portable-macos-fork-launchers.md
-2026-09-04-portable-macos-fork-launchers.md: 842baebae5912c924a2fbfc5608ef429fb48f7b0
-2026-09-04-portable-macos-fork-launchers.zh.md: db703c340f1280352a51ae3202bc59e2c40ae797
+2026-09-04-portable-macos-fork-launchers.md: 9bfe27c359e354b2496e641704843e287c8b64fc
+2026-09-04-portable-macos-fork-launchers.zh.md: 7ceb30fcf6f96e594cb3ba8c728826c9698d2bfc

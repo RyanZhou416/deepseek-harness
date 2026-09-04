@@ -4,6 +4,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  realpathSync,
   rmSync,
   statSync,
   symlinkSync,
@@ -168,6 +169,65 @@ ${checks}
     expect(result.stdout.trim().split('\n')).toEqual(cases.map(([name, , expected]) => `${name}=${expected}`))
   })
 
+  it.skipIf(process.platform === 'win32')('starts pinned pnpm without a hidden Corepack prompt', () => {
+    const root = fixture()
+    const bin = join(root, 'bin')
+    const shims = join(root, 'shims')
+    const corepackLog = join(root, 'corepack.log')
+    const pnpmPath = join(root, 'pnpm')
+    mkdirSync(bin, { recursive: true })
+    mkdirSync(shims)
+    writeExecutable(pnpmPath, [
+      '#!/bin/sh',
+      'printf \'%s\\n\' \'pnpm startup diagnostic\' >&2',
+      'printf \'%s\\n\' \'11.7.0\'',
+    ])
+    writeExecutable(join(bin, 'corepack'), [
+      '#!/bin/sh',
+      'printf \'prompt=%s\\nregistry=%s\\n\' "$COREPACK_ENABLE_DOWNLOAD_PROMPT" "$COREPACK_NPM_REGISTRY" > "$DSH_TEST_COREPACK_LOG"',
+      'install_directory=',
+      'while [ "$#" -gt 0 ]; do',
+      '  if [ "$1" = "--install-directory" ]; then shift; install_directory=$1; fi',
+      '  shift',
+      'done',
+      '/bin/ln -sf "$DSH_TEST_PNPM" "$install_directory/pnpm"',
+    ])
+    const result = runShell(`
+. ${quoteForShell(pathForShell(helperPath))}
+dsh_prepare_macos_node() { :; }
+dsh_read_expected_pnpm_version() {
+  DSH_PACKAGE_MANAGER=pnpm@11.7.0
+  DSH_EXPECTED_PNPM_VERSION=11.7.0
+}
+dsh_prepare_macos_private_runtime() {
+  DSH_COREPACK_HOME=$DSH_TEST_ROOT/corepack
+  DSH_COREPACK_SHIMS=$DSH_TEST_SHIMS
+  COREPACK_HOME=$DSH_TEST_ROOT/cache
+  npm_config_cache=$DSH_TEST_ROOT/npm-cache
+  export COREPACK_HOME npm_config_cache
+  /bin/mkdir -p "$DSH_COREPACK_HOME" "$DSH_COREPACK_SHIMS" "$COREPACK_HOME" "$npm_config_cache"
+}
+PATH=$DSH_TEST_BIN:/bin:/usr/bin
+export PATH
+dsh_prepare_macos_toolchain "$DSH_TEST_ROOT"
+`, {
+      DSH_TEST_BIN: pathForShell(bin),
+      DSH_TEST_COREPACK_LOG: pathForShell(corepackLog),
+      DSH_TEST_PNPM: pathForShell(pnpmPath),
+      DSH_TEST_ROOT: pathForShell(root),
+      DSH_TEST_SHIMS: pathForShell(shims),
+    })
+
+    expectSuccess(result)
+    expect(readFileSync(corepackLog, 'utf8').trim().split('\n')).toEqual([
+      'prompt=0',
+      'registry=https://registry.npmmirror.com',
+    ])
+    expect(result.stdout).toContain('Preparing pnpm 11.7.0 through Corepack...\n')
+    expect(result.stdout).toContain('Prepared pnpm 11.7.0.\n')
+    expect(result.stderr).toContain('pnpm startup diagnostic\n')
+  })
+
   it.skipIf(process.platform === 'win32')('resolves blank, tilde, and relative DSH_HOME values like the Harness', () => {
     const root = fixture()
     const home = join(root, 'user-home')
@@ -201,7 +261,7 @@ printf 'relative=%s\\n' "$(dsh_resolve_macos_home)"
       `tilde=${home}`,
       `slash=${join(home, 'nested')}`,
       `backslash=${join(home, 'nested')}`,
-      `relative=${join(root, 'relative-home')}`,
+      `relative=${join(realpathSync(root), 'relative-home')}`,
     ])
   })
 
