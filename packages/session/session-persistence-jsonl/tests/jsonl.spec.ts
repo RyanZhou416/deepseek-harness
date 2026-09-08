@@ -1286,6 +1286,29 @@ describe('JsonlSessionPersistence: durability and crash semantics', () => {
     await reopened.fiber.dispose()
   })
 
+  it('reuses the Session-owned frozen event graph for routed write batches', async () => {
+    const m = meta('frozen-routed-event', '/work')
+    const handle = await ctx.sessionPersistence.create(m) as JsonlSessionHandle
+    const service = ctx.sessionPersistence as unknown as {
+      persistBatch: (...args: [SessionHeader, readonly SessionEvent[], boolean]) => Promise<void>
+    }
+    const persisted = vi.spyOn(service, 'persistBatch')
+    const frozen = Object.freeze({
+      type: 'turn/start' as const,
+      seq: SessionSeq(0),
+      time: 1,
+      data: Object.freeze({ turn: 1 }),
+    })
+
+    handle.enqueueLive(frozen, () => {})
+    await handle.drainLive()
+    await handle.flush()
+
+    expect(persisted).toHaveBeenCalledOnce()
+    expect(persisted.mock.calls[0]?.[1][0]).toBe(frozen)
+    await handle.close()
+  })
+
   it('service flush skips a write claim whose handle is still opening', async () => {
     const m = meta('opening-claim', '/work')
     await writeLog(ctx.sessionPersistence, m, oneTurnLog())

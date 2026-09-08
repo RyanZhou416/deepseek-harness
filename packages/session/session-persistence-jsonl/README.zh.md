@@ -91,6 +91,8 @@ kind: "package-reference"
 
 该后端拥有自己完整的存储运行时（`src/storage.ts`）：`JsonlSessionHandle` 承载逐句柄修改链、带固定批处理窗口与 single-flight 排空的已路由实时事件缓冲、单调读取与幂等 close；一个 tracker 持有进程内单写者认领、teardown 清扫所遍历的打开句柄集合，以及后端自己的会话监听器所路由进的已创建但未实体化待定会话。历史正文读取共享每个 Session 唯一的一次 Decode/Migrate preparation，按 revision 为键的有界 memo 让紧接的观察到恢复交接复用该解析；backend 在 memo 化前只对每个 event graph 深度冻结一次，因此后续 handle read 无需复制或再次冻结。只有写 open 才发布准备好的后继。本包有意只暴露默认插件导出与配置类型——具体类不是具名导出，因此消费方只耦合 `ctx.sessionPersistence`，其可观察行为由共享 seam 测试套件（`runPersistenceContract`/`runLiveWritePathContract`）钉住。其变更令牌是尽力而为的文件修订值：device、inode、size 与纳秒时间戳标识一份日志，供 `stat`/`list`、在并发 append 撕裂读取时重试的稳定读取循环，以及发布前源检查使用。
 
+已路由实时事件路径保留 `Session` 已完成分离与深度冻结的确切 event graph，在批次开始时交换 pending backing array，并把失败批次恢复到后续到达项之前。Metadata scan 按所选 generation revision 保留已验证 header，并让并发 `list()` 调用方共用一次文件系统发现；单个调用方可以停止等待而不取消共享扫描，append、replacement 或 removal 会自然使缓存 revision 失效。
+
 ### 物理编码
 
 默认产物是独立 [Zstandard 帧](../../../.agents/notes/implemented/architecture/2026-07-19-zstandard-jsonl-session-logs.zh.md) 的标准拼接：一个仅包含 header 行的带校验和帧，后跟每个持久 append 批次一个带校验和帧，使用 Node 内置 Zstandard API 的默认压缩级别（无级别开关）。当前 v2 为每个事件写一行；`sourceEventSeqs` 使用无损存储形式：至少包含三个序列号的连续段会变成 `[start, end]` 区间对，其他列表原样保留；读取时会展开回精确的内存数组。历史迁移会复用一个 Zstandard decoder，让已解析行流经有状态格式 Stage，并通过一个压缩 context 以约 1 MiB 主线程分片流式写入当前记录，同时只保留最终当前事件、有界 decoder 状态与必需的序号重映射表。列表只读取并验证 header 帧。`compression: 'none'` 保留相同的存储形式逻辑行，但不使用帧压缩。一个根只属于一种编码：启动发现与定向查找会拒绝使用另一后缀的 generation；格式迁移保留已配置编码，而压缩转换、混合根回退与双写仍不受支持。冻结的 v0 与 v1 codec 仅为历史 generation 保留 packed-row decoder。

@@ -20,6 +20,7 @@
     "**/.node-next-types-*/**",
     "**/.oxlint-contract-*/**", // Scratch files created by the executable lint-contract tests.
     "**/oxlint-contract-*", // Flat probes use real TypeScript project include paths.
+    "fork-plugins/**", // Fork-managed plugins run their own pinned lint and verification workflows.
     "packages/typert/generator/tests/fixtures/type-model/**", // tsgolint rejects this fixture's preserved project shapes before rules run.
     "website/.generated/**",
     "vendor/**", // Vendored source keeps upstream style and idioms.

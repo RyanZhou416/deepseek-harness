@@ -39,10 +39,10 @@ fi
 DSH_RUNTIME_HELPER=$SCRIPT_DIR/scripts/fork-macos-runtime.sh
 DSH_SETUP_HELPER=$SCRIPT_DIR/fork-runtime/setup-profile.mjs
 DSH_CONTEXT_PATCH=$SCRIPT_DIR/fork-runtime/web/cordis.patch.yml
-DSH_AGENT_TEAMS_ARTIFACT=$SCRIPT_DIR/fork-plugins/releases/nanmicoder-dsh-agent-teams-0.1.15-dsh012rc1.2.tgz
-DSH_CONTEXT_ARTIFACT=$SCRIPT_DIR/fork-plugins/releases/dsh-context-0.41.3-dsh012rc1.1.tgz
-DSH_AGENT_TEAMS_SHA256=22312117EE48C46FE00CD5926A9D2B3FFC9788DA4A1098B11DF17E9F4FA520D9
-DSH_CONTEXT_SHA256=C260E939F79A52AADC1626180DAA1E25E9119C29FE7E138C0CCFB3EC0E2DE3D4
+DSH_AGENT_TEAMS_ARTIFACT=$SCRIPT_DIR/fork-plugins/releases/nanmicoder-dsh-agent-teams-0.1.15-dsh013alpha2.1.tgz
+DSH_CONTEXT_ARTIFACT=$SCRIPT_DIR/fork-plugins/releases/dsh-context-0.41.3-dsh013alpha2.1.tgz
+DSH_AGENT_TEAMS_SHA256=557D0C9FFB5962137AE8D2A4AF406498A80268FA6E0742630937CB7C72D72F9C
+DSH_CONTEXT_SHA256=8C681B385616770B397A5C44E5676A63C9F84F7C6E54061EE0BAE8F5194388B8
 
 for DSH_REQUIRED_FILE in \
   "$DSH_RUNTIME_HELPER" \
@@ -86,10 +86,10 @@ node "$DSH_SETUP_HELPER" verify-sha256 \
   "$DSH_CONTEXT_ARTIFACT" "$DSH_CONTEXT_SHA256"
 tar -xOzf "$DSH_AGENT_TEAMS_ARTIFACT" package/package.json \
   | node "$DSH_SETUP_HELPER" verify-manifest \
-    '@nanmicoder/dsh-agent-teams' '0.1.15-dsh012rc1.2'
+    '@nanmicoder/dsh-agent-teams' '0.1.15-dsh013alpha2.1'
 tar -xOzf "$DSH_CONTEXT_ARTIFACT" package/package.json \
   | node "$DSH_SETUP_HELPER" verify-manifest \
-    'dsh-context' '0.41.3-dsh012rc1.1'
+    'dsh-context' '0.41.3-dsh013alpha2.1'
 
 # Reject an ambiguous user patch before package installation changes anything.
 node "$DSH_SETUP_HELPER" merge-patch \

@@ -15,7 +15,7 @@ afterEach(() => {
 function source(initial: ConnectionState | undefined) {
   let state = initial
   const listeners = new Set<() => void>()
-  const useConnectionState: ConnectionOverlayProps['useConnectionState'] = selector => {
+  const useConnectionState: ConnectionOverlayProps['useConnectionState'] = (selector) => {
     const [, force] = useState(0)
     useEffect(() => {
       const listener = () => { force(value => value + 1) }

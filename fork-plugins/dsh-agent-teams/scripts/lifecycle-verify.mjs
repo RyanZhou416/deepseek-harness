@@ -8,7 +8,7 @@
  * rounds, removal recovery, mailbox fallback and concurrent claims.
  */
 
-import { queueSubagentPrompt, queueHostSubagentPrompt } from '@deepseek-ai/dsh-subagent/internal'
+import { deliverSubagentPrompt, queueHostSubagentPrompt } from '@deepseek-ai/dsh-subagent/internal'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -17,8 +17,6 @@ import { haltTeamWork, redeliverCaptainMailbox, registerAgentTeamsTools } from '
 import { buildActivationDirective, invokedAgentTeamsGoal, invokedAgentTeamsInvocation, installAgentTeamsGestureBoundary, profileCommandName, registerAgentTeamsCommand } from '../lib/command.js'
 import { readArchivedTeam, readMailbox, readTeam, readUnreadMailbox } from '../lib/state.js'
 import { collectArchivedTeamsActivity } from '../lib/snapshot.js'
-
-const steerSubagentPrompt = Symbol.for('dsh.subagent.steerPrompt')
 
 const workspace = await mkdtemp(join(tmpdir(), 'dsh-agent-teams-lifecycle-'))
 const definitions = new Map()
@@ -228,21 +226,17 @@ const ctx = {
     async listDescendants(parentId) {
       return this.listChildren(parentId)
     },
-    // Official RC.1 Queue plus the fork's optional nearest-step Host seam.
-    async [queueSubagentPrompt](_parent, childId, content) {
+    async [deliverSubagentPrompt](_parent, childId, content) {
       if (failNextDelivery.delete(childId)) throw new Error('injected delivery failure')
       deliveries.push({ childId, content })
       const child = liveAgents.get(childId)
       if (child) child.status = 'running'
       return `message-${++messageSeq}`
     },
-    async [steerSubagentPrompt](parent, childId, content, source, signal) {
-      return this[queueSubagentPrompt](parent, childId, content, source, signal)
-    },
     async sendMessage(parent, childId, content, options) {
-      return this[steerSubagentPrompt](parent, childId, content, {
+      return this[deliverSubagentPrompt](parent, childId, content, {
         kind: 'agent-message', senderId: parent.id,
-      }, options.signal)
+      }, options.signal, 'steer')
     },
     interrupt(childId) {
       const child = liveAgents.get(childId)
@@ -976,9 +970,9 @@ try {
   let removedSteerRejected = false
   const deliveriesBeforeRemovedSteer = deliveries.length
   try {
-    await ctx.subagents[steerSubagentPrompt](captain, alpha.id, [{ type: 'text', text: 'must not steer' }], {
+    await ctx.subagents[deliverSubagentPrompt](captain, alpha.id, [{ type: 'text', text: 'must not steer' }], {
       kind: 'plugin', plugin: 'verification',
-    }, new AbortController().signal)
+    }, new AbortController().signal, 'steer')
   } catch (error) {
     removedSteerRejected = error?.code === 'NOT_RESUMABLE'
   }

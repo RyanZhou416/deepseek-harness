@@ -7,7 +7,7 @@ import { join } from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
 import { LlmError } from '@deepseek-ai/dsh-llm'
 import { apply as installRetry } from '@deepseek-ai/dsh-llm-retry'
-import { queueSubagentPrompt } from '@deepseek-ai/dsh-subagent/internal'
+import { deliverSubagentPrompt } from '@deepseek-ai/dsh-subagent/internal'
 import { installMemberSelectionRuntime } from '../lib/members.js'
 import { installTeamScheduler } from '../lib/scheduler.js'
 import { appendMailbox, createMessage, createTeamDir, readTeam, readMailbox, readUnreadMailbox, withTeamLock, writeTeam } from '../lib/state.js'
@@ -77,8 +77,7 @@ async function fixture(t, { captainStatus = 'idle', fallback, captainOffline = f
     agents: { get(id) { return id === child.id ? child : id === captain.id && !captainOffline ? captain : undefined } },
     on(name, listener) { if (name === 'agent/session-start') sessionStart = listener; return () => {} },
     subagents: {
-      // alpha.5 Queue seam: deliveries go through the symbol-keyed host prompt queue.
-      async [queueSubagentPrompt](_captain, id, content) { deliveries.push({ id, content }); return 'accepted' },
+      async [deliverSubagentPrompt](_captain, id, content) { deliveries.push({ id, content }); return 'accepted' },
     },
   }
   const scheduler = installTeamScheduler(ctx, { stateDir: '.agent-teams' })

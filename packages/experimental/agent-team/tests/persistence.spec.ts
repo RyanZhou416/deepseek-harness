@@ -373,6 +373,7 @@ for (const backend of backends) {
         senderId: rootId,
         senderName: 'lead',
         targetId: started.member.id,
+        delivery: 'wakeup',
         content: [{ type: 'text', text: 'already recorded before acknowledgement' }],
       }
       firstLead.session.append('team/message/queued', {
@@ -425,6 +426,7 @@ for (const backend of backends) {
         senderId: rootId,
         senderName: 'lead',
         targetId: childId,
+        delivery: 'wakeup',
         content: [{ type: 'text', text: 'already durable in target inbox' }],
       }
       root.session.append('team/member', {

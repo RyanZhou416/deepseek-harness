@@ -3,7 +3,7 @@ import { pathToFileURL } from 'node:url'
 
 // Keep prereleases away from npm's default channel, including manual publishes.
 export function releaseMetadata(pkg) {
-  const match = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-(alpha|beta|rc|dsh012rc1)\.(0|[1-9]\d*))?$/.exec(pkg.version)
+  const match = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-(alpha|beta|rc|dsh012rc1|dsh013alpha2)\.(0|[1-9]\d*))?$/.exec(pkg.version)
   if (!match) throw new Error(`Unsupported release version: ${pkg.version}`)
   const distTag = match[4] ?? 'latest'
   if (pkg.publishConfig?.tag !== distTag) {

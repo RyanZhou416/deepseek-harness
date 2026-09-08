@@ -145,7 +145,7 @@ In **Settings → Plugins → Plugin configuration**, the **Context** card holds
 
 ## DeepSeek Harness fork build
 
-The vendored `0.41.3-dsh012rc1.1` build keeps the `contextTimeline` projection key, wire response fields, persisted state schema, and session event vocabulary unchanged. It reduces host allocations with field-level copy-on-write state, skips retention scans for unchanged collections, clamps restored projection views to the active bounds, reuses wire views across host-only state changes, and leaves the `/context` data subscriptions unmounted while its dialog is closed. Maintenance and rollback details live in [FORK_MAINTENANCE.md](FORK_MAINTENANCE.md).
+The vendored `0.41.3-dsh013alpha2.1` build keeps the `contextTimeline` projection key, wire response fields, persisted state schema, and session event vocabulary unchanged. It reduces host allocations with field-level copy-on-write state, skips retention scans for unchanged collections, clamps restored projection views to the active bounds, reuses wire views across host-only state changes, and leaves the `/context` data subscriptions unmounted while its dialog is closed. Maintenance and rollback details live in [FORK_MAINTENANCE.md](FORK_MAINTENANCE.md).
 
 The fork's low-overhead profile uses these existing configuration fields:
 

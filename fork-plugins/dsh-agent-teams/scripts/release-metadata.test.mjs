@@ -22,13 +22,15 @@ for (const channel of ['alpha', 'beta', 'rc']) {
 }
 
 test('fork-local compatibility releases use their explicit private channel', () => {
-  assert.deepEqual(releaseMetadata({
-    version: '0.1.15-dsh012rc1.1',
-    private: true,
-    publishConfig: { tag: 'dsh012rc1' },
-  }), {
-    value: '0.1.15-dsh012rc1.1', dist_tag: 'dsh012rc1', prerelease: true,
-  })
+  for (const channel of ['dsh012rc1', 'dsh013alpha2']) {
+    assert.deepEqual(releaseMetadata({
+      version: `0.1.15-${channel}.1`,
+      private: true,
+      publishConfig: { tag: channel },
+    }), {
+      value: `0.1.15-${channel}.1`, dist_tag: channel, prerelease: true,
+    })
+  }
 })
 
 test('reject inconsistent stable channels and unsupported version formats', () => {

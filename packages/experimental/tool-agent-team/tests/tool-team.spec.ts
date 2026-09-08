@@ -26,6 +26,7 @@ const SIGNAL = new AbortController().signal
 const TOOL_NAMES = [
   'spawn_teammate',
   'send_message',
+  'followup_task',
   'list_agents',
   'wait_agent',
   'interrupt_agent',
@@ -414,18 +415,19 @@ describe('dsh-tool-team', () => {
   })
 
   it('reinstalls Team scope before a cold-resumed teammate request', async () => {
-    const { ctx, lead } = await setup([textResponse('first'), 'hang'])
+    const { ctx, lead } = await setup([textResponse('first'), 'hang', 'hang'])
     const spawned = await execute(ctx, lead, 'spawn_teammate', {
       name: 'cold-worker', description: 'cold worker', prompt: 'finish once',
     })
     const childId = spawnedChildId(spawned)
     await vi.waitFor(() => { expect(ctx.agents.get(childId)).toBeUndefined() }, { timeout: 5_000 })
 
-    await ctx.agentTeams.sendMessage(lead, {
+    const resumedMessage = await ctx.agentTeams.sendMessage(lead, {
       target: 'cold-worker',
       content: [{ type: 'text', text: 'resume with Team scope' }],
       signal: SIGNAL,
     })
+    expect(resumedMessage.status).toBe('accepted')
     const resumed = await waitRunning(ctx, childId)
     expect((await assembly(ctx, resumed)).tools.map(schema => schema.name)
       .filter(name => TOOL_NAMES.includes(name)).sort()).toEqual(TOOL_NAMES)

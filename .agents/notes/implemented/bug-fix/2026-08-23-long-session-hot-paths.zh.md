@@ -10,23 +10,21 @@ Status: implemented
 
 高并发工作负载中的空闲 Web Agent 驻留没有上界。即使没有浏览器跟随，已经持久化的空闲 Session 也会保持 attached。
 
-无损的[打包 Session 历史传输](../architecture/2026-08-15-packed-session-history-transport.zh.md)限制了重新打开和重连成本，但持续打开的浏览器标签页仍接收标量实时 event。一个异常长且已经完成的回答仍可能在 Client window 中留下数万条标量 chunk。折叠的 Tool 行也会在读者展开前执行 JSON 解析、结果扁平化和 card model 构造。
+Alpha.2 把 in-flight Assistant frame 保留在持久 history window 之外，并把它们结算进紧凑的 `assistant/message` 或 `assistant/attempt` record。折叠的 Tool 行仍会在读者展开前执行结果扁平化与大型 card array copy。
 
 Gateway 会发送 WebSocket Ping，但不会因为已打开的 socket 长期没有 Pong 而处置它。半开 carrier 因此只能等待 TCP 或网络中间层发现故障，之后既有重连和 journal repair 路径才会运行。
 
 ## Decision
 
-RC.1 token meter 保存精确的已消费 offset，并只通过索引化 `Session.eventAt(SessionSeq)` API 读取未消费记录。官方路径已不再物化完整日志，因此 fork 原有的直接 append 快路径与 `Session.events` fallback 已退役。
+Alpha.2 token meter 保存精确的已消费 offset，并只通过 indexed Session access 读取未消费记录。官方路径不会物化完整日志，因此 fork 原有的直接 append 快路径与整日志 fallback 继续保持缺席。
 
-Persistence 为 `Session.append()` 发布的深度冻结值提供可信的 `enqueueFrozen()` 路径；独立的借用输入入口仍执行 clone。写入通过 O(1) 转移 pending backing array；失败时将同一 batch 放回后续 event 之前。
+JSONL handle 的 routed live-event 路径保留 `Session.append()` 发布的深度冻结值。公开 `SessionHandle.append()` 仍在异步工作前 clone borrowed input。routed write 通过 O(1) 转移 pending backing array；失败时将同一 batch 放回后续 event 之前。
 
 SQLite session-query provider 通过弱引用身份区分实时 Session，并使用 event 数量与规范 surface replacement generation 组成 fingerprint。已经证明为纯 append 的后缀只增加新搜索文档；replacement 或生命周期变化仍执行完整确定性 fold。精确 generation 的 Session 与 event 结果页使用由既有 `maxLimit` 限制总 item 权重的 LRU，返回页与缓存副本相互隔离。
 
-JSONL persistence 按精确 stat 派生的 artifact revision 缓存每个已验证 header。并发 list 与 snapshot-list 请求共享一次元数据扫描，调用方取消只放弃自己的等待。artifact revision 变化会强制重新验证，成功的 discovery 会清理已经不存在的条目。
+JSONL persistence 按精确 stat 派生的 selected-generation revision 缓存每个已验证 header。并发 `list()` 请求共享一次 metadata scan，调用方取消只放弃自己的等待。artifact revision 变化会强制重新验证，成功的 discovery 会清理已经不存在的条目。
 
 Session Controller 拥有其创建或恢复的每个 Agent handle。只要 history follower、待处理 inbox、owned child、活跃 job 或 running 状态仍需要它，已经持久化的空闲 Agent 就继续驻留。达到配置的五分钟保留时间后，controller flush Session、确认 persistence snapshot，并且只 dispose 自己持有的 handle；列表行与日志继续保留，之后可正常冷恢复。
-
-Client Session state 统计每次 opening snapshot 之后收到的标量 event。数量达到 20,000 后，下一个最终 `assistant/message` 只 restart 一次 `RemoteJournalStream`；官方 follow opening 随后用无损 packed window 替换标量 tail，并重置计数。未完成的 model phase 始终保持精确；实现不增加 settled projection、稀疏 sequence range 或另一套 history API。
 
 折叠的 Tool 行只派生轻量 title、summary、state 与 presence flag。展开 body 拥有 formatted arguments、flattened results、recovery text 和专用 card model 的缓存 getter，因此隐藏细节只会在展开后支付一次成本。
 
@@ -34,17 +32,13 @@ Gateway Ping/Pong 保持严格的 WebSocket 控制帧协议。每次 Ping 都把
 
 ## Verification
 
-定向 token-meter、write-behind、SQLite query、JSONL persistence、Session Controller、Tool row 与 Gateway 测试分别固定各条增量或有界路径。Session Controller 通过可注入的小阈值证明只有标量流量不会 restart，而超过阈值后的第一个最终 message 会触发一次 replacement generation。Gateway 测试证明 Ping/Pong 不携带应用消息，并会终止错过下一个 Pong deadline 的 peer。
+定向 SQLite query、JSONL persistence、Session Controller、Tool row 与 Gateway 测试分别固定各条增量或有界路径。Gateway 测试证明 Ping/Pong 不携带应用消息，并会终止错过下一个 Pong deadline 的 peer。
 
-事故规模的 history 在一个按 message 对齐的页面中包含 256,008 个逻辑 event，其中 256,004 个是 Assistant chunk。packed transport 保留所有逻辑 event，但把连续同 block chunk 表示成少量 record；live rebase 会在回答 final 后应用同一种表示，而不引入有损 projection。
+事故规模的 history 在一个按 message 对齐的页面中包含 256,008 个逻辑 event，其中 256,004 个是 Assistant chunk。Alpha.2 会迁移历史 generation，并投影持久 Assistant attempt，而不会在结算后继续保留 token-sized Client row。
 
 ## Alternatives considered
 
 **删除或重写已存储 chunk。** 拒绝，因为 chunk 仍是持久 replay 和诊断证据，其 sequence、timestamp、provenance、fork 与崩溃恢复语义均可观察。
-
-**保留 fork 的 settled sparse history projection。** 在上游 packed transport 发布后拒绝。稀疏 projection 会移除 source sequence reference 并只选择展示子集，而官方 packed record 无损，并且已经参与 reconnect、gap repair 与 pagination。
-
-**按 event 数量裁剪 raw page 或 live stream。** 拒绝，因为静默 gap 会破坏 Tool pairing、replacement provenance、compaction record 和 journal repair。在已 final 的回答后替换完整 generation 可以保留显式 cursor，并让官方 stream 验证连续性。
 
 **先实现 Chat DOM virtualization。** 不作为第一项修复，因为超大 history 的解析、校验、Conversation fold 和 model 驻留都发生在 React render 之前。等 scroll、selection、find-in-page、accessibility 与 variable-height anchor 行为明确后，virtualization 仍可减少 mounted DOM。
 
@@ -54,6 +48,6 @@ Gateway Ping/Pong 保持严格的 WebSocket 控制帧协议。每次 Ping 都把
 
 ## Consequences
 
-长流在 token accounting、persistence batching、JSONL discovery 与 live search indexing 中不再重复分配完整日志。空闲 Host residency 获得上界，同时不改变模型输入、event 顺序或持久身份。重新打开、重连以及已经 final 的超大 live window 使用官方无损 packed 表示；折叠 Tool 行不会执行与隐藏内容大小成比例的工作。半开 mux socket 会在两个配置 heartbeat interval 内进入既有重连路径。
+长流在 token accounting、persistence batching、JSONL discovery 与 live search indexing 中不再重复分配完整日志。空闲 Host residency 获得上界，同时不改变模型输入、event 顺序或持久身份。Alpha.2 拥有 in-flight Assistant settlement；折叠 Tool 行不会执行与隐藏内容大小成比例的工作。半开 mux socket 会在两个配置 heartbeat interval 内进入既有重连路径。
 
-当 Agent 活跃时，Host 的实时 Session 日志仍完整驻留；未完成 response 可以在最终 message 到达前超过 Client 阈值；第一次不同的宽泛 SQLite 查询仍可能阻塞一个 Host thread；Chat 也仍会挂载每个已加载 presentation row。这些 fork 特有的有界化不会引入 Session event 类型、`SESSION_FORMAT_VERSION`、JSONL storage path 或 migration。
+当 Agent 活跃时，Host 的实时 Session 日志仍完整驻留；第一次不同的宽泛 SQLite 查询仍可能阻塞一个 Host thread；Chat 也仍会挂载每个已加载 presentation row。这些 fork 特有的有界化不会引入 Session event 类型、`SESSION_FORMAT_VERSION`、JSONL storage path 或 migration。

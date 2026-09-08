@@ -1,6 +1,6 @@
 import { Context } from '@deepseek-ai/cordis'
 import AgentRegistry, { Inbox, type Agent, type AgentHandle, type AgentStatus } from '@deepseek-ai/dsh-agent'
-import SessionStore, { SessionId, type Session, type SessionHeader } from '@deepseek-ai/dsh-session'
+import SessionStore, { SESSION_FORMAT_VERSION, SessionId, type Session, type SessionHeader } from '@deepseek-ai/dsh-session'
 import { SessionPersistenceRevision } from '@deepseek-ai/dsh-session-persistence'
 import TypertRegistry from '@deepseek-ai/dsh-typert-registry'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -9,7 +9,13 @@ import SessionController from '../src/index.ts'
 
 const roots: Context[] = []
 const sessionId = SessionId('resident-session')
-const header: SessionHeader = { version: 0, id: sessionId, createdAt: 1, cwd: '/project', isSeeded: false }
+const header: SessionHeader = {
+  version: SESSION_FORMAT_VERSION,
+  id: sessionId,
+  createdAt: 1,
+  cwd: '/project',
+  isSeeded: false,
+}
 
 afterEach(async () => {
   vi.useRealTimers()
@@ -67,7 +73,7 @@ async function harness(
     } as never)
   }
   ctx.provide('sessionPersistence', {
-    listSnapshots: () => Promise.resolve([{ header, revision: SessionPersistenceRevision('resident:1') }]),
+    stat: () => Promise.resolve({ header, revision: SessionPersistenceRevision('resident:1') }),
   } as never)
   ctx.on('session/flush', () => Promise.resolve())
   const session = ctx.sessions.prepare(sessionId, { meta: header })
@@ -173,7 +179,7 @@ describe('Session Controller idle Agent residency', () => {
     const controller = new ApiSessionAgentController(ctx, 100)
     const release = controller.retainForFollower(sessionId)
     ctx.provide('sessionPersistence', {
-      listSnapshots: () => Promise.resolve([{ header, revision: SessionPersistenceRevision('resident:1') }]),
+      stat: () => Promise.resolve({ header, revision: SessionPersistenceRevision('resident:1') }),
     } as never)
     ctx.on('session/flush', () => Promise.resolve())
     const session = ctx.sessions.prepare(sessionId, { meta: header })
@@ -201,7 +207,7 @@ describe('Session Controller idle Agent residency', () => {
     const { ctx, controller, agent, disposeHandle } = await harness(100)
     const childId = SessionId('resident-child')
     const childSession = ctx.sessions.prepare(childId, {
-      meta: { version: 0, id: childId, createdAt: 2, cwd: '/project' },
+      meta: { version: SESSION_FORMAT_VERSION, id: childId, createdAt: 2, cwd: '/project', isSeeded: false },
     })
     const detachChildSession = ctx.sessions.enter(childSession)
     ctx.sessions.announce(childSession)

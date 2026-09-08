@@ -41,11 +41,12 @@ kind: "package-reference"
 - name: '@deepseek-ai/dsh-tool-pwsh'
 ```
 
-唯一的配置字段用于开关后台支持。
+两个配置字段用于公开可选后台执行，或强制每次调用进入后台。
 
 | 字段 | 默认值 | 含义 |
 |---|---|---|
 | `enableRunInBackground` | `true` | 暴露 `run_in_background`；为 `false` 时拒绝强制后台调用 |
+| `forceRunInBackground` | `false` | 隐藏 `run_in_background` 并把每条命令作为 owner-scoped job 启动；要求后台支持与 `ctx.jobs` |
 
 生成的[配置目录](../../../docs/config-catalog.zh.md#deepseek-aidsh-tool-pwsh)是每个受支持字段及其 JSDoc 的穷尽式真源；生成的[工具目录](../../../docs/tool-catalog.zh.md#deepseek-aidsh-tool-pwsh)携带完整参数 schema。
 
@@ -59,7 +60,7 @@ kind: "package-reference"
 
 ### 可能出什么问题
 
-没有 PowerShell 执行器的组合永远不会激活该工具，且注入的服务（`tools`、`shell`、`systemPrompt`、`shellEnv`）必须全部存在。没有任务运行时的后台调用会以 `background jobs unavailable: load @deepseek-ai/dsh-jobs and @deepseek-ai/dsh-tool-jobs` 失败；没有沙箱执行器时的 `sandbox_permissions` 会以 `sandbox_permissions is not available in this composition (no sandboxing executor to escalate)` 失败。
+没有 PowerShell 执行器的组合永远不会激活该工具，且注入的服务（`tools`、`shell`、`systemPrompt`、`shellEnv`）必须全部存在。没有任务运行时的后台调用会以 `background jobs unavailable: load @deepseek-ai/dsh-jobs and @deepseek-ai/dsh-tool-jobs` 失败；没有沙箱执行器时的 `sandbox_permissions` 会以 `sandbox_permissions is not available in this composition (no sandboxing executor to escalate)` 失败。启用 `forceRunInBackground` 时，工具注册会等待 `ctx.jobs`，因此 loader 并发激活不会把有效组合变成启动失败。
 
 -----
 

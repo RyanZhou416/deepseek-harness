@@ -1,4 +1,4 @@
-import { useMemo, useState, type KeyboardEvent } from 'react'
+import { useState, type KeyboardEvent } from 'react'
 import type { Context } from '@deepseek-ai/cordis'
 import clsx from 'clsx'
 import {
@@ -14,7 +14,7 @@ import {
   terminalCardModel,
   terminalFailed,
 } from '../models/terminal-card-model.ts'
-import { formatToolBody, toolRowModel, type ToolRowState } from '../models/tool-call-model.ts'
+import { toolRowModel, type ToolRowState } from '../models/tool-call-model.ts'
 import { CONVERSATION_NS as NS } from '../../locale.ts'
 import css from './bash-sample.module.css'
 
@@ -58,15 +58,11 @@ export function BashRow({ toolName, block, sessionId, useSessions, inspect, t }:
   // background acknowledgements and malformed calls remain collapsed.
   const genericBody = terminal === null
     && (model.state === 'error' || isSettledPersistentShellCall(block) || isSpilledShellCall(block))
-    && (model.bodyRaw !== null || model.output !== null)
+    && (model.hasBody || model.hasOutput)
   const expandable = terminal !== null || genericBody
   const open = expanded && expandable
-  const body = useMemo(
-    () => open && genericBody && model.bodyRaw !== null
-      ? formatToolBody(model.variant, model.bodyRaw)
-      : null,
-    [genericBody, model.bodyRaw, model.variant, open],
-  )
+  const body = open && genericBody ? model.body : null
+  const output = open && genericBody ? model.output : null
   const failureLine = model.state === 'error' ? model.errorSummary : null
   const toggleExpand = () => {
     setExpanded(v => !v)
@@ -127,14 +123,14 @@ export function BashRow({ toolName, block, sessionId, useSessions, inspect, t }:
                     <span className={css.ioText}>{body}</span>
                   </div>
                 )}
-                {body !== null && model.output !== null && (
+                {body !== null && output !== null && (
                   <span className={css.ioDivider} aria-hidden />
                 )}
-                {model.output !== null && (
+                {output !== null && (
                   <div className={css.ioSection}>
                     <span className={css.ioLabel}>{t('row.output')}</span>
                     <span className={css.ioText} data-error={state === 'error' || undefined}>
-                      {model.output}
+                      {output}
                     </span>
                   </div>
                 )}

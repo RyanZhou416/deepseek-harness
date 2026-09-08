@@ -10,23 +10,21 @@ Several independent hot paths made work grow with the complete Session log. An a
 
 High-concurrency workloads also retained idle Web-created Agents without a residency bound. A durable idle Session remained attached even when no browser followed it.
 
-The lossless [packed Session history transport](../architecture/2026-08-15-packed-session-history-transport.md) bounds reopen and reconnect costs, but a browser tab that remains open still receives scalar live events. One exceptionally long completed answer can therefore leave tens of thousands of scalar chunks in the Client window. Collapsed Tool rows also performed JSON parsing, result flattening, and card-model construction before the reader opened them.
+Alpha.2 keeps in-flight Assistant frames outside the durable history window and settles them into compact `assistant/message` or `assistant/attempt` records. Collapsed Tool rows still performed result flattening and large card-array copies before the reader opened them.
 
 The Gateway sent WebSocket Ping frames but accepted an open socket indefinitely without observing a Pong. A half-open carrier could therefore wait for TCP or an intermediary to detect failure before the existing reconnect and journal-repair path ran.
 
 ## Decision
 
-The RC.1 token meter keeps an exact consumed offset and reads only unseen records through the indexed `Session.eventAt(SessionSeq)` API. The fork's former direct-append fast path and `Session.events` fallback are retired because the official path no longer materializes the complete log.
+The alpha.2 token meter keeps an exact consumed offset and reads only unseen records through indexed Session access. The fork's former direct-append fast path and whole-log fallback remain absent because the official path does not materialize the complete log.
 
-Persistence exposes a trusted `enqueueFrozen()` path for the deep-frozen value published by `Session.append()`. The standalone borrowed-input path still clones. A write transfers the pending backing array in O(1), and a failed write prepends that same batch before later events.
+The JSONL handle's routed live-event path retains the deep-frozen value published by `Session.append()`. Public `SessionHandle.append()` still clones borrowed input before asynchronous work. A routed write transfers the pending backing array in O(1), and a failed write prepends that same batch before later events.
 
 The SQLite session-query provider identifies each live Session object weakly and fingerprints its event count plus canonical surface replacement generation. A proven append-only suffix adds only its new search documents; replacement or lifecycle changes retain the complete deterministic fold. Exact-generation Session and event result pages use an item-weighted LRU bounded by the existing `maxLimit`, and returned pages are detached from cached copies.
 
-JSONL persistence caches each validated header against the exact stat-derived artifact revision. Concurrent list and snapshot-list requests share one metadata scan, while cancellation abandons only the caller's wait. A changed artifact revision forces validation and successful discovery prunes absent entries.
+JSONL persistence caches each validated header against the exact stat-derived selected-generation revision. Concurrent `list()` requests share one metadata scan, while cancellation abandons only the caller's wait. A changed artifact revision forces validation and successful discovery prunes absent entries.
 
 Session Controller owns every Agent handle it creates or resumes. A durable idle Agent remains resident while a history follower, pending inbox item, owned child, active job, or running state needs it. After the configured five-minute retention, the controller flushes the Session, verifies a persistence snapshot, and disposes only its owned handle; the list row and log remain available for normal cold resume.
-
-Client Session state counts scalar events received after each opening snapshot. Once the count reaches 20,000, the next final `assistant/message` restarts its `RemoteJournalStream` once. The official follow opening then replaces the scalar tail with the lossless packed window and resets the count. An unfinished model phase remains exact, and the implementation adds no settled projection, sparse sequence range, or alternate history API.
 
 Collapsed Tool rows derive only their lightweight title, summary, state, and presence flags. The expanded body owns cached getters for formatted arguments, flattened results, recovery text, and specialized card models, so hidden detail cost is paid at most once and only after expansion.
 
@@ -34,17 +32,13 @@ Gateway Ping/Pong retains the strict WebSocket control-frame protocol. Each Ping
 
 ## Verification
 
-Focused token-meter, write-behind, SQLite query, JSONL persistence, Session Controller, Tool-row, and Gateway suites pin each incremental or bounded path. Session Controller uses a small injected threshold to prove that scalar traffic alone does not restart, while the first final message past the threshold causes one replacement generation. Gateway coverage proves Ping/Pong carries no application message and terminates a peer that misses the next Pong deadline.
+Focused SQLite query, JSONL persistence, Session Controller, Tool-row, and Gateway suites pin each incremental or bounded path. Gateway coverage proves Ping/Pong carries no application message and terminates a peer that misses the next Pong deadline.
 
-The incident-scale history contained 256,008 logical events in one message-aligned page, including 256,004 Assistant chunks. The packed transport keeps every logical event but represents consecutive same-block chunks as a small number of records; live rebasing applies that same representation after the answer becomes final instead of inventing a lossy projection.
+The incident-scale history contained 256,008 logical events in one message-aligned page, including 256,004 Assistant chunks. Alpha.2 migrates historical generations and projects durable Assistant attempts without retaining token-sized Client rows after settlement.
 
 ## Alternatives considered
 
 **Delete or rewrite stored chunks.** Rejected because chunks remain durable replay and diagnostic evidence, and their sequence, timestamp, provenance, fork, and crash-recovery semantics are observable.
-
-**Retain the fork's settled sparse history projection.** Rejected after the upstream packed transport shipped. The sparse projection removed source sequence references and selected only a presentation subset, while the official packed record is lossless and already participates in reconnect, gap repair, and pagination.
-
-**Clip a raw page or live stream at an event count.** Rejected because a silent gap breaks Tool pairing, replacement provenance, compaction records, and journal repair. Replacing the complete generation after a finalized answer preserves an explicit cursor and lets the official stream validate continuity.
 
 **Start with Chat DOM virtualization.** Rejected as the first repair because oversized history parsing, validation, Conversation folding, and retained model construction precede React rendering. Virtualization can still reduce mounted DOM after scroll, selection, find-in-page, accessibility, and variable-height anchor behavior are specified.
 
@@ -54,6 +48,6 @@ The incident-scale history contained 256,008 logical events in one message-align
 
 ## Consequences
 
-Long streams avoid repeated whole-log allocation in token accounting, persistence batching, JSONL discovery, and live search indexing. Idle Host residency is bounded without changing model input, event ordering, or durable identity. Reopened, reconnected, and finalized oversized live windows use the official lossless packed representation, while collapsed Tool rows avoid work proportional to hidden content. Half-open mux sockets enter the existing reconnect path within two configured heartbeat intervals.
+Long streams avoid repeated whole-log allocation in token accounting, persistence batching, JSONL discovery, and live search indexing. Idle Host residency is bounded without changing model input, event ordering, or durable identity. Alpha.2 owns in-flight Assistant settlement, while collapsed Tool rows avoid work proportional to hidden content. Half-open mux sockets enter the existing reconnect path within two configured heartbeat intervals.
 
-The live Host Session log remains fully resident while its Agent is active, an unfinished response may exceed the Client threshold until its final message arrives, the first varied broad SQLite query can still block one Host thread, and Chat still mounts every loaded presentation row. No Session event type, `SESSION_FORMAT_VERSION`, JSONL storage path, or migration is introduced by these fork-specific bounds.
+The live Host Session log remains fully resident while its Agent is active, the first varied broad SQLite query can still block one Host thread, and Chat still mounts every loaded presentation row. No Session event type, `SESSION_FORMAT_VERSION`, JSONL storage path, or migration is introduced by these fork-specific bounds.

@@ -82,10 +82,12 @@ kind: "package-reference"
 
 ### 设计理念
 
-本后端建立在一个分离与三项承诺之上：
+本后端建立在一个分离与五项承诺之上：
 
 - **派生索引，绝不动源存储。** FTS 行存放在专用可丢弃数据库中；这里的代码从不打开 session-persistence 数据库。
 - **实时优先的观察。** 一个串行化状态机比较持久化快照修订，只通过短生命周期读取 handle 读取新增或已更改日志，并在一个事务中对账，因此搜索反映最新的稳定状态。
+- **增量实时索引。** 稳定的 live Session identity、event count 与 surface replacement generation 能证明对账何时只需追加新 suffix；replacement 或生命周期变化会重建该 Session 的 TEMP row。
+- **有界结果复用。** 精确 generation、request 与 cursor key 在两个独立的 item-weighted LRU cache 中保留 detached Session 与 event page，每个 cache 都受 `maxLimit` 约束。
 - **世代绑定的游标。** 每次语料库变化都会递增世代；游标携带其创建时的世代，宁可陈旧失败也不返回偏移后的页面。
 - **字面短语即数据。** 调用方查询文本被引成一个 FTS5 短语，查询语法保持惰性；保留高亮标记在索引前从文档中剥离。
 

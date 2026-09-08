@@ -14,13 +14,13 @@ Status: implemented
 
 ## Decision
 
-RC.1 将 `SubagentRuntime.sendMessage(sender, target, content, options)` 作为公开的相邻 Agent 操作。它负责 live-lineage 授权、per-child 串行、冷恢复、Activation 所有权与 inbox 接受前取消，并在最近 step 边界 steer 运行中的子级。Fork 不恢复原有公开 `steer()` 或 `followup()` 方法，只增加一个 symbol-keyed Host-only adapter，在复用同一 continuation 投递机制时保留协议 provenance。
+Alpha.2 将 `SubagentRuntime.sendMessage(sender, target, content, options)` 作为公开的相邻 Agent 操作。它负责 live-lineage 授权、per-child 串行、冷恢复、Activation 所有权与 inbox 接受前取消，并在最近 step 边界 steer 运行中的子级。Fork 不恢复原有公开 `steer()` 或 `followup()` 方法；Team 投递使用官方 symbol-keyed Host queue 与 Steer adapter，使协议 provenance 进入同一 continuation 机制。
 
-无论模型请求 quiet 还是 wakeup 模式，Agent Teams 都会通过 Host-only Subagent steering adapter 投递每条 Lead-to-teammate mailbox 消息。该 adapter 保留持久 Team message source，而不是冒充 Agent sender。teammate 发起的 peer 消息保留 [Agent Teams 决策](2026-08-05-agent-teams.zh.md)中的持久 quiet 与 next-turn 模式。Team service 根据确切 membership 与 sender identity 推导该策略；提示词和工具参数不负责强制执行。
+Agent Teams 通过 Host Steer 把 Lead 指令投递给 live teammate，并通过 Host Queue 唤醒 inactive teammate。两种 adapter 都保留持久 Team message source，而不是冒充 Agent sender。teammate 发起的 peer 消息保留 [Agent Teams 决策](2026-08-05-agent-teams.zh.md)中的持久 quiet 与 next-turn 模式；后续 wakeup 会在自身之前准入更早的 quiet mail。Team service 根据确切 membership 与 sender identity 推导该策略；提示词和工具参数不负责强制执行。
 
-全局面向模型的 `send_message` control 使用 RC.1 的公开 `sendMessage()`，因此 Agent Teams 之外的普通 coordinator-to-child 指令同样使用最近 step 行为。host-user 与浏览器 prompt 路径保留 FIFO 投递；Host-only Team adapter 不会重新分类人类输入。
+全局面向模型的 `send_message` control 使用 alpha.2 的公开 `sendMessage()`，因此 Agent Teams 之外的普通 coordinator-to-child 指令同样使用最近 step 行为。host-user 与浏览器 prompt 路径保留 FIFO 投递；Host-only Team adapter 不会重新分类人类输入。
 
-浏览器 Queue Dock 会在 live 可继续子级对话里公开排队消息的编辑、移除与 steering action。Client 通过专用 `subagents/updateQueuedByParent` Remote 路由这些操作；Remote 会授权持久直接父级地址，并且只修改选中的 pending next-turn occurrence。编辑保留身份与 source，移除会持久取消该 occurrence，steering 还要求子级正在运行，随后把消息移入 next-step 输入。Remote 使用 `subagent/queue-item-not-found` 报告过期 occurrence，使用 `subagent/delivery-unavailable` 报告不可用的编辑或移除，并使用 `subagent/steer-unavailable` 报告不可用的 steering。
+Alpha.2 通过按 Session 寻址的 `session.updateQueue` Remote 路由 Queue Dock 的编辑、移除与 Steer action。它只修改一个 pending occurrence，编辑会保留身份与 source，移除会持久记录，并以 Session domain failure 报告 stale occurrence 或不可用 Steer。Continuable child 与普通 Session 使用同一操作；fork 不再携带独立 subagent Queue Remote 或错误词汇。
 
 Bash 与 PowerShell 工具 consumer 接受默认值为 `false` 的 `forceRunInBackground`。启用后，consumer 隐藏 `run_in_background`，等待 `ctx.jobs` 后再注册，并把每条命令作为 owner-scoped job 启动后返回 id。进程由 job runtime 持有，直到完成、取消、owner dispose 或 service dispose。
 
@@ -40,7 +40,7 @@ Bash 与 PowerShell 工具 consumer 接受默认值为 `false` 的 `forceRunInBa
 
 ## Testing
 
-Subagent 测试区分运行中 Activation 的 next-step steering 与 FIFO follow-up，并保留既有授权、冷恢复、dispose 与一次性行为。Queue Dock 与 Client 测试覆盖可继续子级的编辑、移除、steering、一次性只读状态、持久地址路由与过期 occurrence 收敛。Team mailbox 测试覆盖 Lead steering、teammate quiet/FIFO 投递、target-local 串行、持久化恢复、中断与 pending 限额。Job 测试证明 next-step 让出保持任务运行、next-turn 消息不会让出且默认行为不变。Bash、PowerShell 与 profile 测试证明强制 job 会移除模型参数、返回真实 job id、呈现后台结果，并在 loader 并发激活时安全等待 jobs 能力。
+Subagent 与 Session Controller 测试区分 next-step steering 与 FIFO follow-up，并覆盖 Queue 编辑、移除、stale occurrence 收敛、授权、冷恢复、dispose 与一次性行为。Team mailbox 测试覆盖 live Lead steering、inactive-child wakeup、teammate quiet/FIFO 投递、target-local 串行、持久化恢复、中断与 pending 限额。Job 测试证明 next-step 让出保持任务运行、next-turn 消息不会让出且默认行为不变。Bash、PowerShell 与 profile 测试证明强制 job 会移除模型参数、返回真实 job id、呈现后台结果，并在 loader 并发激活时安全等待 jobs 能力。
 
 ## Consequences
 
@@ -48,4 +48,4 @@ Lead 指令仍需等待子级当前模型请求或工具调用完成；steering 
 
 同一 step 中接受的多条 Lead 指令仍是有序 next-step 消息，并一起进入下一次请求。该设计消除后续轮次的队头阻塞，而不会静默替换持久指令。
 
-通用后台与等待选项在 false 默认值下不增加任何行为或 schema 变更。RC.1 负责全局 `send_message` 工具的最近 step 行为；本 fork 不增加与其竞争的通用消息 API。私有 Team profile 会让 shell 调用返回 job id，并允许 `job_output(wait: true)` 在 next-step 输入待处理时于超时前返回 `[status: running]`。
+通用后台与等待选项在 false 默认值下不增加任何行为或 schema 变更。Alpha.2 拥有全局 `send_message` 工具与 `session.updateQueue`；本 fork 不增加与其竞争的通用消息 API。私有 Team profile 会让 shell 调用返回 job id，并允许 `job_output(wait: true)` 在 next-step 输入待处理时于超时前返回 `[status: running]`。

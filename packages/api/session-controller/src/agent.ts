@@ -549,8 +549,8 @@ export class ApiSessionAgentController {
       if (persistence === undefined) return
       const participated = await this.ctx.sessions.flush(agent.session)
       if (!participated) return
-      const persisted = (await persistence.listSnapshots()).some(snapshot => snapshot.header.id === agent.id)
-      if (!persisted || this.hasActiveOwnedWork(agent)) return
+      const persisted = await persistence.stat(agent.id)
+      if (persisted === undefined || this.hasActiveOwnedWork(agent)) return
       if (this.ownedHandles.get(agent.id) !== owned
         || this.ctx.agents.get(agent.id) !== agent
         || this.ctx.sessions.get(agent.id) !== agent.session) return

@@ -19,18 +19,18 @@ The setup intentionally omits marketplace plugins, subscriptions, watchdogs, cus
 ## Agent Teams
 
 - Source: `fork-plugins/dsh-agent-teams`
-- Current private version: `0.1.15-dsh012rc1.2`
+- Current private version: `0.1.15-dsh013alpha2.1`
 - Upstream base: `NanmiCoder/dsh-agent-teams main@232a338fc9`
 - API migration: upstream PR #124 `098e4e97eb`
-- Distribution artifact: `fork-plugins/releases/nanmicoder-dsh-agent-teams-0.1.15-dsh012rc1.2.tgz`
-- Artifact SHA256: `22312117EE48C46FE00CD5926A9D2B3FFC9788DA4A1098B11DF17E9F4FA520D9`
+- Distribution artifact: `fork-plugins/releases/nanmicoder-dsh-agent-teams-0.1.15-dsh013alpha2.1.tgz`
+- Artifact SHA256: `557D0C9FFB5962137AE8D2A4AF406498A80268FA6E0742630937CB7C72D72F9C`
 
 The `.2` build protects all three retired-member entry points: the RC.1 public `sendMessage()`, Host Queue, and the fork's nearest-step path. Its bounded unread-only LRU also removes the active panel's once-per-second full reread of unchanged mailbox JSONL files. The on-disk format remains unchanged.
 
 After cloning this fork, setting their own `DSH_HOME`, and stopping any running DSH instance, a colleague can run this command from the repository root:
 
 ```powershell
-$artifact = (Resolve-Path .\fork-plugins\releases\nanmicoder-dsh-agent-teams-0.1.15-dsh012rc1.2.tgz).Path
+$artifact = (Resolve-Path .\fork-plugins\releases\nanmicoder-dsh-agent-teams-0.1.15-dsh013alpha2.1.tgz).Path
 node --import tsx/esm apps/cli/src/bin.ts plugin --profile web add $artifact
 ```
 
@@ -60,10 +60,10 @@ Agent Teams durable data belongs to each workspace's `.agent-teams/` directory; 
 ## Context
 
 - Source: `fork-plugins/dsh-context`
-- Current private version: `0.41.3-dsh012rc1.1`
+- Current private version: `0.41.3-dsh013alpha2.1`
 - Upstream base: `bowenliang123/dsh-context v0.41.3@dce08e0db3`
-- Distribution artifact: `fork-plugins/releases/dsh-context-0.41.3-dsh012rc1.1.tgz`
-- Artifact SHA256: `C260E939F79A52AADC1626180DAA1E25E9119C29FE7E138C0CCFB3EC0E2DE3D4`
+- Distribution artifact: `fork-plugins/releases/dsh-context-0.41.3-dsh013alpha2.1.tgz`
+- Artifact SHA256: `8C681B385616770B397A5C44E5676A63C9F84F7C6E54061EE0BAE8F5194388B8`
 
 This build preserves the `contextTimeline` projection key, wire schema, persisted state schema, and session event vocabulary. Field-level copy-on-write, dirty retention trimming, first-view restored-state bounds, and a reference-stable view cache reduce Host allocation and publication costs. A closed `/context` modal retains only its open-state subscription. See `fork-plugins/dsh-context/FORK_MAINTENANCE.md` for maintenance and rollback rules.
 

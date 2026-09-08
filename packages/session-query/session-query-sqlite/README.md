@@ -82,10 +82,12 @@ This section explains the design decisions behind the backend and points at the 
 
 ### Design philosophy
 
-The backend is built on one separation and three commitments:
+The backend is built on one separation and five commitments:
 
 - **Derived index, never the source store.** The FTS rows live in a dedicated disposable database; the session-persistence database is never opened here.
 - **Live-preferred observation.** One serialized state machine compares persistence snapshot revisions, reads only new or changed logs through short-lived read handles, and reconciles in one transaction, so a search reflects the newest stable state.
+- **Incremental live indexing.** A stable live Session identity, event count, and surface-replacement generation prove when reconciliation can append only the new suffix; a replacement or lifecycle change rebuilds that Session's TEMP rows.
+- **Bounded result reuse.** Exact generation, request, and cursor keys retain detached Session and event pages in separate item-weighted LRU caches, each bounded by `maxLimit`.
 - **Generation-bound cursors.** Every corpus change bumps a generation; cursors carry the generation they were created under and fail stale rather than returning a shifted page.
 - **Literal phrases as data.** Caller query text is quoted into one FTS5 phrase so query syntax stays inert, and reserved highlight markers are stripped from documents before indexing.
 

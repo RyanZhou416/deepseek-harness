@@ -9,7 +9,7 @@ kind: "package-reference"
 
 ## 概述
 
-`dsh-jobs-local` 在 harness 进程内运行后台任务：工作会在 agent 继续推进的同时保持运行，拥有它的 agent 可以读取、等待、列出和取消它；同时挂载 `dsh-tool-jobs` 时，完成以会话内通知送达。它用内存记录实现 `dsh-jobs` 约定，并且只交出全新快照，从不交出实时状态。按所有者的并发上限（默认 10）约束一个 agent 同时处于运行或停止中的任务数量；任务会随 harness 进程终止而消失，无法跨重启持久。
+`dsh-jobs-local` 在 harness 进程内运行后台任务：工作会在 agent 继续推进的同时保持运行，拥有它的 agent 可以读取、等待、列出和取消它；同时挂载 `dsh-tool-jobs` 时，完成以会话内通知送达。它用内存记录实现 `dsh-jobs` 约定，并且只交出全新快照，从不交出实时状态。按所有者的并发上限（默认 10）约束一个 agent 同时处于运行或停止中的任务数量；可选的终态记录 TTL 与数量策略在不触碰 live work 的情况下限制已完成历史。任务会随 harness 进程终止而消失，无法跨重启持久。
 
 ## 目录
 
@@ -33,7 +33,7 @@ kind: "package-reference"
 
 ### 最小配置
 
-加载插件即注册 `ctx.jobs`；`maxConcurrentJobsPerOwner` 可选，默认为 `10`。
+加载插件即注册 `ctx.jobs`；`maxConcurrentJobsPerOwner` 可选，默认为 `10`。终态保留策略是 opt-in；省略两个保留字段时，记录会一直保留到 owner 或服务释放。已发布的 `dsh-base` 组合启用一小时终态 TTL，并把每个精确 owner 的终态记录目标设为 100；这些策略不改变 live-job 准入。
 
 ```yaml
 - name: '@deepseek-ai/dsh-jobs-local'
@@ -42,6 +42,8 @@ kind: "package-reference"
 | 字段 | 默认值 | 含义 |
 |---|---|---|
 | `maxConcurrentJobsPerOwner` | `10` | 每个精确所有者，或共享的无主桶中，`running` 加 `stopping` 任务的最大数量 |
+| `terminalJobRetentionMs` | 禁用 | 每条终态记录的 wall-clock 生命周期；到期也会移除未报告结果 |
+| `maxRetainedTerminalJobsPerOwner` | 禁用 | 每个精确 owner 或共享无主桶的终态数量目标；数量裁剪只移除已报告记录 |
 
 生成的[配置目录](../../../docs/config-catalog.zh.md#deepseek-aidsh-jobs-local)是每个受支持字段的穷尽式真源。
 
@@ -73,6 +75,7 @@ kind: "package-reference"
 - **按所有者分层，一个进程级注册表。** 控制器、完成监听器与变更观察者归档到注册方所在的 scope（`ScopedLayers`），读取把全局层与所有者的 scope 链求并集——因此某个 preset 的任务控制绝不会为自身组合未加载任何控制器的 agent 保持 `start()` 可用，一次结算也只会抵达其所有者所属组合注册的监听器。
 - **启动前先预检。** `start()` 在调用生产方之前检查控制器服务、spec 有效性、仍存活的所有权与容量，因此拒绝不会留下 job id 或执行资源；注册一旦提交，后续不再有可失败步骤。
 - **结算首次优先，完成最后。** 最早的终止结果只记录一次，释放等待方，并只通知监听器一次，各监听器故障单独隔离；完成在记录提交且可见集变更发布之后才宣布，因为报告方可能同步开启一个模型轮次。
+- **增量终态保留。** 精确 owner 数量与最早已报告候选项在结算或收集时更新；一个进程级最小堆与 unref timer 排列 TTL deadline，无需反复扫描或排序完整 job store。
 - **销毁永不死锁。** 抛出的取消会强制失败记录并报告可能的孤立工作，而不是让释放停滞。
 
 ### 源码地图
@@ -129,6 +132,7 @@ kind: "package-reference"
 这些限制说明注册表何时不合适。它们是当前包约束，不是任务积压。
 
 - **任务只存在于进程本地**——记录会随 harness 进程终止而消失；持久或跨重启执行需要一个单独实现该 seam 的后端。
+- **终态保留会使收集 id 到期**——配置的 TTL 或已报告记录数量裁剪移除记录后，控制操作会把该 id 拒绝为未知；持久结果查找需要持久化后端。
 - **静默无效的取消可能使销毁停滞并持续占用容量**——如果 `cancel` 返回后始终未结算 `done`，注册表就无法将其与缓慢停止区分开；该任务会在服务剩余生命周期内持续占用一个桶名额，只有显式抛出异常才能安全地强制标为失败。
 
 <a id="dev-note"></a>

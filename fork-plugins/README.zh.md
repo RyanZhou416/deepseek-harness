@@ -19,18 +19,18 @@
 ## Agent Teams
 
 - 源码：`fork-plugins/dsh-agent-teams`
-- 当前私有版本：`0.1.15-dsh012rc1.2`
+- 当前私有版本：`0.1.15-dsh013alpha2.1`
 - 上游底座：`NanmiCoder/dsh-agent-teams main@232a338fc9`
 - API 迁移：上游 PR #124 `098e4e97eb`
-- 安装产物：`fork-plugins/releases/nanmicoder-dsh-agent-teams-0.1.15-dsh012rc1.2.tgz`
-- 产物 SHA256：`22312117EE48C46FE00CD5926A9D2B3FFC9788DA4A1098B11DF17E9F4FA520D9`
+- 安装产物：`fork-plugins/releases/nanmicoder-dsh-agent-teams-0.1.15-dsh013alpha2.1.tgz`
+- 产物 SHA256：`557D0C9FFB5962137AE8D2A4AF406498A80268FA6E0742630937CB7C72D72F9C`
 
 `.2` 版本同时保护 RC.1 公共 `sendMessage()`、Host Queue 与 fork nearest-step 三条退休成员入口。它的有界 unread-only LRU 也会消除活动面板对未变 mailbox JSONL 文件的每秒全量重读；磁盘格式保持不变。
 
 同事 clone 本 fork、设置好自己的 `DSH_HOME` 并关闭正在运行的 DSH 后，可在仓库根目录执行：
 
 ```powershell
-$artifact = (Resolve-Path .\fork-plugins\releases\nanmicoder-dsh-agent-teams-0.1.15-dsh012rc1.2.tgz).Path
+$artifact = (Resolve-Path .\fork-plugins\releases\nanmicoder-dsh-agent-teams-0.1.15-dsh013alpha2.1.tgz).Path
 node --import tsx/esm apps/cli/src/bin.ts plugin --profile web add $artifact
 ```
 
@@ -60,10 +60,10 @@ Agent Teams 的持久数据属于各工作区 `.agent-teams/` 目录；本目录
 ## Context
 
 - 源码：`fork-plugins/dsh-context`
-- 当前私有版本：`0.41.3-dsh012rc1.1`
+- 当前私有版本：`0.41.3-dsh013alpha2.1`
 - 上游底座：`bowenliang123/dsh-context v0.41.3@dce08e0db3`
-- 安装产物：`fork-plugins/releases/dsh-context-0.41.3-dsh012rc1.1.tgz`
-- 产物 SHA256：`C260E939F79A52AADC1626180DAA1E25E9119C29FE7E138C0CCFB3EC0E2DE3D4`
+- 安装产物：`fork-plugins/releases/dsh-context-0.41.3-dsh013alpha2.1.tgz`
+- 产物 SHA256：`8C681B385616770B397A5C44E5676A63C9F84F7C6E54061EE0BAE8F5194388B8`
 
 该版本保留 `contextTimeline` projection key、wire schema、持久状态 schema 和会话事件词汇。它使用字段级 copy-on-write、dirty retention trim、恢复态首个 view 的 bounds 和引用稳定的 view cache 来降低 Host 分配与发布开销；关闭的 `/context` modal 只保留打开状态订阅。维护与回滚规则见 `fork-plugins/dsh-context/FORK_MAINTENANCE.md`。
 

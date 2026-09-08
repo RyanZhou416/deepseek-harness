@@ -999,11 +999,12 @@ describe('resync', () => {
     const { api, session } = makeSession()
     await session.open()
     const release = deferred<undefined>()
-    const originalDispose = SessionEventStream.prototype.dispose
-    const dispose = vi.spyOn(SessionEventStream.prototype, 'dispose').mockImplementation(async function (
+    const dispose = vi.spyOn(SessionEventStream.prototype, 'dispose')
+    dispose.mockImplementation(async function (
       this: SessionEventStream,
     ) {
-      await originalDispose.call(this)
+      dispose.mockRestore()
+      await this.dispose()
       await release.promise
     })
     try {

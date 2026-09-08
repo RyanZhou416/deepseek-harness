@@ -17,11 +17,11 @@ import type { Context } from '@deepseek-ai/cordis'
 import { installModelSelection, type Agent, type ModelSelection } from '@deepseek-ai/dsh-agent'
 // Declaration merge only: makes ctx.subagents visible.
 import { foldSubagentDescriptor, SubagentError } from '@deepseek-ai/dsh-subagent'
-// RC.1 host-protocol Queue/nearest-step delivery with plugin-owned provenance.
 import {
+  deliverSubagentPrompt,
   queueHostSubagentPrompt,
-  queueSubagentPrompt,
-  type HostPromptQueue,
+  steerHostSubagentPrompt,
+  type HostPromptDeliverer,
 } from '@deepseek-ai/dsh-subagent/internal'
 import { createUserMessage, LlmError, ReasoningEffortId, type ContentBlock, type MessageSource } from '@deepseek-ai/dsh-llm'
 import type { Session, SessionId } from '@deepseek-ai/dsh-session'
@@ -35,20 +35,6 @@ export const PERSONA_PROTOCOL_MAX_CHARS = 400
 
 /** Process-stable marker that one runtime's prompt queue already carries the retired guard. */
 const retiredGuardMarker = Symbol.for('dsh-agent-teams.retired-guard')
-
-/** Optional fork seam that preserves AgentTeams provenance on nearest-step delivery. */
-const steerSubagentPrompt = Symbol.for('dsh.subagent.steerPrompt')
-
-/** Structural face of the optional fork seam; official RC.1 falls back to its host Queue adapter. */
-interface HostPromptSteer {
-  [steerSubagentPrompt](
-    parent: Agent,
-    childId: SessionId,
-    content: ContentBlock[],
-    source: MessageSource,
-    signal: AbortSignal,
-  ): Promise<unknown>
-}
 
 /** Captain-only AgentTeams tools hidden from newly spawned members. */
 const MEMBER_DENIED_TOOLS = [
@@ -683,11 +669,10 @@ export async function deliverToMember(
     const targetId = brandedSessionId(childId)
     const content: ContentBlock[] = [{ type: 'text', text }]
     const source: MessageSource = { kind: 'plugin', plugin: 'dsh-agent-teams' }
-    const hostSteer = (ctx.subagents as unknown as Partial<HostPromptSteer>)[steerSubagentPrompt]
-    if (hostSteer === undefined) {
+    if (ctx.agents.get(targetId) === undefined) {
       await queueHostSubagentPrompt(ctx.subagents, captain, targetId, content, source, signal)
     } else {
-      await hostSteer.call(ctx.subagents as unknown as HostPromptSteer, captain, targetId, content, source, signal)
+      await steerHostSubagentPrompt(ctx.subagents, captain, targetId, content, source, signal)
     }
     return true
   } catch (error: unknown) {
@@ -712,7 +697,7 @@ export function interruptMember(ctx: Context, captain: Agent, childId: string): 
 }
 
 /**
- * Install the missing per-child retirement boundary on Harness RC.1.
+ * Install the missing per-child retirement boundary on Harness alpha.2.
  *
  * Upstream `interrupt()` deliberately preserves continuable sessions and the
  * upstream seam exposes no targeted forget/retire method. The durable
@@ -723,10 +708,10 @@ export function interruptMember(ctx: Context, captain: Agent, childId: string): 
  * persisted conversation inaccessible. Exact ids keep unrelated subagents
  * untouched while the prompt-queue boundary still prevents further model turns.
  *
- * RC.1 exposes public adjacent-Agent messaging plus symbol-keyed Queue and
- * nearest-step host adapters. The guard wraps all three paths so a retired
+ * Alpha.2 exposes public adjacent-Agent messaging plus one symbol-keyed Host
+ * delivery adapter. The guard wraps both paths so a retired
  * member cannot be cold-resumed by any protocol delivery. The wrap is
- * idempotent per runtime and degrades to the optional host paths available.
+ * idempotent per runtime and leaves unrelated children unchanged.
  */
 export function installRetiredMemberGuard(ctx: Context, stateDir: string): void {
   const runtime = ctx.subagents
@@ -735,8 +720,7 @@ export function installRetiredMemberGuard(ctx: Context, stateDir: string): void 
     // method from its class prototype, while test doubles own it directly.
     const host = runtime as unknown as Record<symbol, unknown>
     const originalSendMessage = runtime.sendMessage
-    const originalQueue = host[queueSubagentPrompt] as HostPromptQueue[typeof queueSubagentPrompt] | undefined
-    const originalSteer = host[steerSubagentPrompt] as HostPromptSteer[typeof steerSubagentPrompt] | undefined
+    const originalDelivery = host[deliverSubagentPrompt] as HostPromptDeliverer[typeof deliverSubagentPrompt] | undefined
     if (host[retiredGuardMarker] === true) return () => undefined
     const assertNotRetired = async (parent: Agent, childId: SessionId): Promise<void> => {
       const retired = await readRetiredMemberIds(join(parent.session.header.cwd ?? process.cwd(), stateDir))
@@ -747,30 +731,24 @@ export function installRetiredMemberGuard(ctx: Context, stateDir: string): void 
         )
       }
     }
-    const guardedQueue: HostPromptQueue[typeof queueSubagentPrompt] | undefined = originalQueue === undefined
+    const guardedDelivery: HostPromptDeliverer[typeof deliverSubagentPrompt] | undefined = originalDelivery === undefined
       ? undefined
-      : async function (this: HostPromptQueue, parent, childId, content, source, signal) {
+      : async function (this: HostPromptDeliverer, parent, childId, content, source, signal, delivery) {
           await assertNotRetired(parent, childId)
-          return originalQueue.call(this, parent, childId, content, source, signal)
-        }
-    const guardedSteer: HostPromptSteer[typeof steerSubagentPrompt] | undefined = originalSteer === undefined
-      ? undefined
-      : async function (this: HostPromptSteer, parent, childId, content, source, signal) {
-          await assertNotRetired(parent, childId)
-          return originalSteer.call(this, parent, childId, content, source, signal)
+          return originalDelivery.call(this, parent, childId, content, source, signal, delivery)
         }
     const guardedSendMessage: typeof runtime.sendMessage = async (sender, targetId, content, options) => {
       await assertNotRetired(sender, targetId)
       return originalSendMessage.call(runtime, sender, targetId, content, options)
     }
     runtime.sendMessage = guardedSendMessage
-    if (guardedQueue !== undefined) host[queueSubagentPrompt] = guardedQueue
-    if (guardedSteer !== undefined) host[steerSubagentPrompt] = guardedSteer
+    if (guardedDelivery !== undefined) host[deliverSubagentPrompt] = guardedDelivery
     host[retiredGuardMarker] = true
     return () => {
       if (runtime.sendMessage === guardedSendMessage) runtime.sendMessage = originalSendMessage
-      if (guardedQueue !== undefined && host[queueSubagentPrompt] === guardedQueue) host[queueSubagentPrompt] = originalQueue
-      if (guardedSteer !== undefined && host[steerSubagentPrompt] === guardedSteer) host[steerSubagentPrompt] = originalSteer
+      if (guardedDelivery !== undefined && host[deliverSubagentPrompt] === guardedDelivery) {
+        host[deliverSubagentPrompt] = originalDelivery
+      }
       host[retiredGuardMarker] = false
     }
   }, 'agent-teams: retired member guard')

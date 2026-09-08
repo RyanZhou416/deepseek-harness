@@ -7,7 +7,6 @@ import type {
   SubagentCatalog, SubagentInterruptReceipt, SubagentPromptReceipt,
   WorkspaceId, WorkspaceView,
 } from '@deepseek-ai/dsh-api-remotes/client'
-import type { SubagentQueueUpdateReceipt } from '@deepseek-ai/dsh-subagent/client'
 import type {
   SessionAddress,
   SessionAssistantStreamBaseline,
@@ -174,8 +173,6 @@ export class FakeApiClient {
     = () => Promise.resolve(ok({ entries: [], parentAvailable: true }))
   onSubagentPrompt: (payload: unknown) => Promise<RemoteResult<SubagentPromptReceipt>>
     = () => Promise.resolve(ok({ messageId: 'fake-message' as MessageId }))
-  onSubagentQueueUpdate: (payload: unknown) => Promise<RemoteResult<SubagentQueueUpdateReceipt>>
-    = () => Promise.resolve(ok({ accepted: true as const }))
 
   onSubagentInterrupt: (payload: unknown) => Promise<RemoteResult<SubagentInterruptReceipt>>
     = () => Promise.resolve(ok({ accepted: true as const }))
@@ -251,11 +248,6 @@ export class FakeApiClient {
           this.onSubagentList(parentSessionId),
         ),
         prompt: request => this.record('subagents.prompt', request, this.onSubagentPrompt(request)),
-        updateQueuedByParent: request => this.record(
-          'subagents.updateQueuedByParent',
-          request,
-          this.onSubagentQueueUpdate(request),
-        ),
         interruptByParent: (childSessionId, parentSessionId, mode) => this.record(
           'subagents.interruptByParent',
           { childSessionId, parentSessionId, mode },

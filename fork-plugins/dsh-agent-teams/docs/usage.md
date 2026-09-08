@@ -10,7 +10,7 @@
 |---|---|
 | `ctx.tools` 注册表 | 注册 11 个 `agent_teams_*` 工具（与 `tool-workflow` 同一注册路径） |
 | `ctx.subagents.startContinuable()` | 创建成员：durable 可续聊子代理，带成员 persona |
-| RC.1 Host prompt adapter | fork 提供最近 step 投递时优先使用；官方 RC.1 上回退到有来源信息的 FIFO Queue，二者都可冷恢复收件成员 |
+| Alpha.2 Host prompt adapter | live 成员使用有来源信息的最近 step Steer；inactive 成员使用 Queue 冷恢复 |
 | 持久化团队成员表 + `ctx.agents` | 前者保存 durable 成员身份，后者提供真实 `running / idle / ready` 活动状态（不依赖易变的子代理目录投影） |
 | `agent/status` | 成员进入 idle 后触发共享任务池自动续领与下一轮唤醒 |
 | `ctx.systemPrompt.section()` | 注册"AgentTeams 使用策略"提示段 |

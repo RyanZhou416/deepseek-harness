@@ -9,7 +9,7 @@
  * never reimplemented here.
  */
 
-import { queueSubagentPrompt } from '@deepseek-ai/dsh-subagent/internal'
+import { deliverSubagentPrompt } from '@deepseek-ai/dsh-subagent/internal'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -133,7 +133,7 @@ function mountRuntime() {
       async listDescendants(parentId) {
         return this.listChildren(parentId)
       },
-      async [queueSubagentPrompt](_parent, childId, content) {
+      async [deliverSubagentPrompt](_parent, childId, content) {
         const remaining = failDeliveryCount.get(childId) ?? 0
         if (remaining > 0) {
           failDeliveryCount.set(childId, remaining - 1)

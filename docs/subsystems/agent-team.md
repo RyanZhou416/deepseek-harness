@@ -34,11 +34,13 @@ interface TeamMessageSnapshot {
   readonly senderId: SessionId
   readonly senderName: string
   readonly targetId: SessionId
+  /** Quiet delivery waits for existing work; wakeup delivery starts idle peers. */
+  readonly delivery: 'quiet' | 'wakeup'
   readonly content: ContentBlock[]
 }
 ```
 
-Every message attempts Steer delivery. A running target receives it at the nearest step boundary, an idle target starts a turn, and an inactive teammate cold-resumes. Scheduling is not stored in the durable record because callers cannot select another mode.
+Lead directives use nearest-step Steer for a live teammate and Queue to wake an inactive teammate. Teammate messages store `quiet` or `wakeup`: quiet delivery waits for existing work, while wakeup starts an idle or inactive target and admits earlier quiet mail first.
 
 The target Session keeps message identity and sender attribution on both the pending inbox item and the eventual user message. Folding that source across inbox and history is the target-side de-duplication key; the model-visible framing repeats the id and sender.
 

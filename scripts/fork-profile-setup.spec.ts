@@ -89,8 +89,8 @@ it('preserves unrelated context patch rows and handles idempotence, dry-run, and
 it('rejects drift in artifacts, profile pins, patches, and composed config', () => {
   const root = mkdtempSync(join(tmpdir(), 'dsh setup verify with spaces '))
   try {
-    const agentArtifact = join(root, 'nanmicoder-dsh-agent-teams-0.1.15-dsh012rc1.2.tgz')
-    const contextArtifact = join(root, 'dsh-context-0.41.3-dsh012rc1.1.tgz')
+    const agentArtifact = join(root, 'nanmicoder-dsh-agent-teams-0.1.15-dsh013alpha2.1.tgz')
+    const contextArtifact = join(root, 'dsh-context-0.41.3-dsh013alpha2.1.tgz')
     writeFileSync(agentArtifact, 'agent artifact')
     writeFileSync(contextArtifact, 'context artifact')
     const digest = createHash('sha256').update('agent artifact').digest('hex')
@@ -105,11 +105,11 @@ it('rejects drift in artifacts, profile pins, patches, and composed config', () 
     mkdirSync(contextInstall, { recursive: true })
     writeFileSync(join(agentInstall, 'package.json'), JSON.stringify({
       name: '@nanmicoder/dsh-agent-teams',
-      version: '0.1.15-dsh012rc1.2',
+      version: '0.1.15-dsh013alpha2.1',
     }))
     writeFileSync(join(contextInstall, 'package.json'), JSON.stringify({
       name: 'dsh-context',
-      version: '0.41.3-dsh012rc1.1',
+      version: '0.41.3-dsh013alpha2.1',
     }))
     const profileManifest = join(profile, 'package.json')
     writeFileSync(profileManifest, JSON.stringify({
@@ -137,10 +137,10 @@ it('rejects drift in artifacts, profile pins, patches, and composed config', () 
     expect(secondPin.stdout).toMatch(/^unchanged packageManager pnpm@11\.7\.0/u)
     expect(readFileSync(profileManifest, 'utf8')).toBe(pinned)
     writeFileSync(join(profile, 'pnpm-lock.yaml'), [
-      'nanmicoder-dsh-agent-teams-0.1.15-dsh012rc1.2.tgz',
-      '0.1.15-dsh012rc1.2',
-      'dsh-context-0.41.3-dsh012rc1.1.tgz',
-      '0.41.3-dsh012rc1.1',
+      'nanmicoder-dsh-agent-teams-0.1.15-dsh013alpha2.1.tgz',
+      '0.1.15-dsh013alpha2.1',
+      'dsh-context-0.41.3-dsh013alpha2.1.tgz',
+      '0.41.3-dsh013alpha2.1',
     ].join('\n'))
     writeFileSync(join(profile, 'cordis.patch.yml'), readFileSync(template, 'utf8'))
 

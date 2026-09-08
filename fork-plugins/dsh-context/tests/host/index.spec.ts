@@ -46,7 +46,7 @@ function appendRealEnvelopes(session: Session): void {
     step: 0,
     message: { content: [{ type: 'text', text: 'hello' }] },
     usage: { inputTokens: 10, outputTokens: 5 },
-  } as never, { surfaceOp: 'append', sourceEventSeqs: [] })
+  } as never, { surfaceOp: 'append' })
 }
 
 async function boot() {

@@ -116,7 +116,7 @@ try {
   await reloaded.inertia
   assert(paths.every(path => routes.has(path)), 'reload restores exactly one registration')
   await reloaded.dispose()
-  console.log('PASS Web routes: real RC.1 authentication, trusted origins, fail-closed startup, disposal and reload')
+  console.log('PASS Web routes: real alpha.2 authentication, trusted origins, fail-closed startup, disposal and reload')
 } finally {
   await ctx.fiber.dispose()
   server.closeAllConnections()

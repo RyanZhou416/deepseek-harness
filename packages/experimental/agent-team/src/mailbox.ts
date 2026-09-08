@@ -8,7 +8,7 @@ import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import type { ContentBlock } from '@deepseek-ai/dsh-llm'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import type { Session, SessionEvent } from '@deepseek-ai/dsh-session'
-import { steerHostSubagentPrompt } from '@deepseek-ai/dsh-subagent/internal'
+import { queueHostSubagentPrompt, steerHostSubagentPrompt } from '@deepseek-ai/dsh-subagent/internal'
 import { errorMessage, TeamError } from './error.ts'
 import type { TeamJournal } from './journal.ts'
 import type { TeamRuntimeLifecycle } from './lifecycle.ts'
@@ -23,9 +23,14 @@ import type {
   TeamMessageSnapshot,
 } from './types.ts'
 
+type ResolvedSendTeamMessageRequest = Omit<SendTeamMessageRequest, 'delivery'> & {
+  readonly delivery: TeamMessageSnapshot['delivery']
+}
+
 /** Owns every process-local state transition for the durable Team mailbox. */
 export class TeamMailbox {
   private readonly dispatchTails = new Map<SessionId, Promise<void>>()
+  private readonly activeDispatches = new Map<SessionId, TeamMessageSnapshot>()
   private readonly inFlightMessages = new Set<TeamMessageId>()
   private readonly inFlightDispatches = new Set<Promise<unknown>>()
 
@@ -56,6 +61,7 @@ export class TeamMailbox {
     if (this.lifecycle.disposed) throw new TeamError('Agent Teams service is disposing', 'TEAM_DISPOSED')
     const operation = this.sendAdmitted(caller, {
       ...request,
+      delivery: request.delivery ?? 'wakeup',
       signal: AbortSignal.any([request.signal, this.lifecycle.signal]),
     })
     return await this.trackDispatch(operation)
@@ -93,6 +99,9 @@ export class TeamMailbox {
       && (membership.role === 'lead' || message.targetId === agent.id))
     for (const message of messages) {
       signal.throwIfAborted()
+      if (membership.role === 'lead' && message.delivery === 'quiet'
+        && message.senderId !== membership.root.id
+        && message.targetId !== membership.root.id && this.ctx.agents.get(message.targetId) === undefined) continue
       await this.tryDispatch(membership.root, message, signal)
     }
   }
@@ -108,7 +117,7 @@ export class TeamMailbox {
   /** Queue and dispatch one mailbox item admitted before the disposal cutoff. */
   private async sendAdmitted(
     caller: Agent,
-    request: SendTeamMessageRequest,
+    request: ResolvedSendTeamMessageRequest,
   ): Promise<SendTeamMessageResult> {
     const membership = this.roster.membership(caller)
     request.signal.throwIfAborted()
@@ -132,6 +141,7 @@ export class TeamMailbox {
         senderId: caller.id,
         senderName: membership.name,
         targetId: target.id,
+        delivery: request.delivery,
         content,
       }
       if (Buffer.byteLength(JSON.stringify(this.deliveryContent(queued)), 'utf8') > this.maxMessageBytes) {
@@ -186,6 +196,12 @@ export class TeamMailbox {
     message: TeamMessageSnapshot,
     signal: AbortSignal,
   ): Promise<boolean> {
+    const active = this.activeDispatches.get(message.targetId)
+    const live = message.targetId === root.id ? root : this.ctx.agents.get(message.targetId)
+    if (active !== undefined && live !== undefined && message.delivery === 'quiet'
+      && this.messagePrecedes(root, message.id, active.id)) {
+      return await this.dispatchOnce(root, message, signal)
+    }
     return await this.serializeDispatch(message, () => this.dispatchThrough(root, message, signal))
   }
 
@@ -196,8 +212,16 @@ export class TeamMailbox {
   ): Promise<boolean> {
     const targetId = message.targetId
     const prior = this.dispatchTails.get(targetId) ?? Promise.resolve()
+    const dispatch = async (): Promise<boolean> => {
+      this.activeDispatches.set(targetId, message)
+      try {
+        return await operation()
+      } finally {
+        this.activeDispatches.delete(targetId)
+      }
+    }
     /* v8 ignore next -- dispatch tails absorb rejection, so the recovery callback is a fail-safe backstop. */
-    const run = prior.then(operation, operation)
+    const run = prior.then(dispatch, dispatch)
     /* v8 ignore next -- dispatchOnce contains delivery failures and serializeDispatch itself does not throw. */
     const tail = run.then(() => undefined, () => undefined)
     this.dispatchTails.set(targetId, tail)
@@ -223,7 +247,12 @@ export class TeamMailbox {
       const ownsInFlight = !this.inFlightMessages.has(candidate.id)
       if (ownsInFlight) this.inFlightMessages.add(candidate.id)
       try {
-        if (!await this.dispatchOnce(root, candidate, signal)) return false
+        // A later waking item authorizes starting the target; deliver earlier
+        // quiet mail first so the durable mailbox order remains model-visible.
+        const admitted = message.delivery === 'wakeup' && candidate.delivery === 'quiet'
+          ? { ...candidate, delivery: 'wakeup' as const }
+          : candidate
+        if (!await this.dispatchOnce(root, admitted, signal)) return false
       } finally {
         if (ownsInFlight) this.inFlightMessages.delete(candidate.id)
       }
@@ -248,8 +277,35 @@ export class TeamMailbox {
       const content = this.deliveryContent(message)
       if (message.targetId === root.id) {
         const input = createUserMessage({ content, source })
-        root.steer(input)
+        if (message.delivery === 'wakeup') {
+          root.followup(input)
+          return await this.checkpointDelivered(root, root.session, message.id)
+        }
+        root.inject(input)
         return await this.checkpointDelivered(root, root.session, message.id)
+      }
+      const leadDirective = message.senderId === root.id
+      if (leadDirective) {
+        if (target === undefined) {
+          const recorded = await this.persistedTargetRecorded(message.targetId, message.id, signal)
+          if (recorded === undefined) return false
+          if (recorded) {
+            await this.markDelivered(root, message.id, message.targetId)
+            return true
+          }
+          await queueHostSubagentPrompt(this.ctx.subagents, root, message.targetId, content, source, signal)
+          const resumed = this.ctx.agents.get(message.targetId)
+          return resumed === undefined
+            ? true
+            : await this.checkpointDelivered(root, resumed.session, message.id)
+        }
+        await steerHostSubagentPrompt(this.ctx.subagents, root, message.targetId, content, source, signal)
+        return await this.checkpointDelivered(root, target.session, message.id)
+      }
+      if (message.delivery === 'quiet') {
+        if (target === undefined) return false
+        target.inject(createUserMessage({ content, source }))
+        return await this.checkpointDelivered(root, target.session, message.id)
       }
       if (target === undefined) {
         const recorded = await this.persistedTargetRecorded(message.targetId, message.id, signal)
@@ -259,14 +315,21 @@ export class TeamMailbox {
           return true
         }
       }
-      await steerHostSubagentPrompt(this.ctx.subagents, root, message.targetId, content, source, signal)
-      return target === undefined
+      await queueHostSubagentPrompt(this.ctx.subagents, root, message.targetId, content, source, signal)
+      const admittedTarget = target ?? this.ctx.agents.get(message.targetId)
+      return admittedTarget === undefined
         ? true
-        : await this.checkpointDelivered(root, target.session, message.id)
+        : await this.checkpointDelivered(root, admittedTarget.session, message.id)
     } catch (error: unknown) {
       this.ctx.logger.warn(`team message "${message.id}" remains queued: ${errorMessage(error)}`)
       return false
     }
+  }
+
+  /** Whether `left` was durably queued before `right` in one Lead log. */
+  private messagePrecedes(root: Agent, left: TeamMessageId, right: TeamMessageId): boolean {
+    const ids = this.journal.state(root).messages.map(message => message.id)
+    return ids.indexOf(left) < ids.indexOf(right)
   }
 
   /** Flush one live target receipt before the Lead records its delivered edge. */

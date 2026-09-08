@@ -34,11 +34,13 @@ interface TeamMessageSnapshot {
   readonly senderId: SessionId
   readonly senderName: string
   readonly targetId: SessionId
+  /** Quiet delivery waits for existing work; wakeup delivery starts idle peers. */
+  readonly delivery: 'quiet' | 'wakeup'
   readonly content: ContentBlock[]
 }
 ```
 
-每条消息都会尝试 Steer 投递。running target 在最近的步骤边界收到消息，idle target 启动一个轮次，inactive teammate 则冷恢复。调用方不能选择其他模式，因此持久记录不存储调度方式。
+Lead 指令对 live teammate 使用最近 step Steer，并用 Queue 唤醒 inactive teammate。teammate 消息会存储 `quiet` 或 `wakeup`：quiet 投递等待已有工作，wakeup 则启动 idle 或 inactive target，并优先准入更早的 quiet mail。
 
 target Session 会在 pending inbox 条目和最终用户消息上保留消息身份与发送者归因。跨 inbox 与历史折叠该 source 构成 target 侧去重键；模型可见的 framing 会重复 id 和发送者。
 

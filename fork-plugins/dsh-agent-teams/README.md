@@ -30,8 +30,8 @@ Ask in natural language. The plugin provides the team protocol, eleven coordinat
 
 ## Releases
 
-> **RyanZhou416 fork build:** `0.1.15-dsh012rc1.2` is vendored with the
-> DeepSeek Harness fork and targets `dsh-v0.1.2-rc.1`. It keeps the upstream
+> **RyanZhou416 fork build:** `0.1.15-dsh013alpha2.1` is vendored with the
+> DeepSeek Harness fork and targets `dsh-v0.1.3-alpha.2`. It keeps the upstream
 > 0.1.15 fixes, applies upstream PR #124, and preserves the fork's nearest-step
 > delivery and durable cold-captain mailbox recovery. The official npm release
 > information below remains the upstream compatibility record.

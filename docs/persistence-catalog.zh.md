@@ -815,7 +815,7 @@ export type SessionEvent<T extends SessionEventType = SessionEventType> = {
 
 类型：[TeamId](subsystems/agent-team.zh.md) · [TeamMemberSnapshot](subsystems/agent-team.zh.md)
 
-来源：[`packages/experimental/agent-team/src/types.ts:204`](../packages/experimental/agent-team/src/types.ts)
+来源：[`packages/experimental/agent-team/src/types.ts:225`](../packages/experimental/agent-team/src/types.ts)
 
 <a id="teammessagedelivered--log-only"></a>
 
@@ -833,7 +833,7 @@ export type SessionEvent<T extends SessionEventType = SessionEventType> = {
 
 类型：[TeamId](subsystems/agent-team.zh.md) · [TeamMessageId](subsystems/agent-team.zh.md)
 
-来源：[`packages/experimental/agent-team/src/types.ts:210`](../packages/experimental/agent-team/src/types.ts)
+来源：[`packages/experimental/agent-team/src/types.ts:231`](../packages/experimental/agent-team/src/types.ts)
 
 <a id="teammessagequeued--log-only"></a>
 
@@ -846,7 +846,7 @@ export type SessionEvent<T extends SessionEventType = SessionEventType> = {
 
 类型：[TeamId](subsystems/agent-team.zh.md) · [TeamMessageSnapshot](subsystems/agent-team.zh.md)
 
-来源：[`packages/experimental/agent-team/src/types.ts:208`](../packages/experimental/agent-team/src/types.ts)
+来源：[`packages/experimental/agent-team/src/types.ts:229`](../packages/experimental/agent-team/src/types.ts)
 
 <a id="teamtask--log-only"></a>
 
@@ -859,7 +859,7 @@ export type SessionEvent<T extends SessionEventType = SessionEventType> = {
 
 类型：[TeamId](subsystems/agent-team.zh.md) · [TeamTaskSnapshot](subsystems/agent-team.zh.md)
 
-来源：[`packages/experimental/agent-team/src/types.ts:206`](../packages/experimental/agent-team/src/types.ts)
+来源：[`packages/experimental/agent-team/src/types.ts:227`](../packages/experimental/agent-team/src/types.ts)
 
 ### `todo/*`
 
