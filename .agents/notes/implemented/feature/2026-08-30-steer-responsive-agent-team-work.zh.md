@@ -18,6 +18,8 @@ Alpha.2 将 `SubagentRuntime.sendMessage(sender, target, content, options)` 作�
 
 Agent Teams 通过 Host Steer 把 Lead 指令投递给 live teammate，并通过 Host Queue 唤醒 inactive teammate。两种 adapter 都保留持久 Team message source，而不是冒充 Agent sender。teammate 发起的 peer 消息保留 [Agent Teams 决策](2026-08-05-agent-teams.zh.md)中的持久 quiet 与 next-turn 模式；后续 wakeup 会在自身之前准入更早的 quiet mail。Team service 根据确切 membership 与 sender identity 推导该策略；提示词和工具参数不负责强制执行。
 
+仓内维护的 `@nanmicoder/dsh-agent-teams` 构建通过 `harness-compat` adapter 识别测试覆盖的精确 Harness contract 中的 lifecycle setup、FIFO Queue、统一 Queue/Steer 和公开相邻 Agent 消息操作。其发行兼容策略只接受 `dsh-v0.1.3-alpha.2`；legacy adapter 只作为回归 fixture，不构成 package 兼容声明。退休成员守卫包装运行宿主实际提供的全部操作，并在所属 Cordis scope 结束时恢复原生 property descriptor。
+
 全局面向模型的 `send_message` control 使用 alpha.2 的公开 `sendMessage()`，因此 Agent Teams 之外的普通 coordinator-to-child 指令同样使用最近 step 行为。host-user 与浏览器 prompt 路径保留 FIFO 投递；Host-only Team adapter 不会重新分类人类输入。
 
 Alpha.2 通过按 Session 寻址的 `session.updateQueue` Remote 路由 Queue Dock 的编辑、移除与 Steer action。它只修改一个 pending occurrence，编辑会保留身份与 source，移除会持久记录，并以 Session domain failure 报告 stale occurrence 或不可用 Steer。Continuable child 与普通 Session 使用同一操作；fork 不再携带独立 subagent Queue Remote 或错误词汇。
@@ -40,7 +42,7 @@ Bash 与 PowerShell 工具 consumer 接受默认值为 `false` 的 `forceRunInBa
 
 ## Testing
 
-Subagent 与 Session Controller 测试区分 next-step steering 与 FIFO follow-up，并覆盖 Queue 编辑、移除、stale occurrence 收敛、授权、冷恢复、dispose 与一次性行为。Team mailbox 测试覆盖 live Lead steering、inactive-child wakeup、teammate quiet/FIFO 投递、target-local 串行、持久化恢复、中断与 pending 限额。Job 测试证明 next-step 让出保持任务运行、next-turn 消息不会让出且默认行为不变。Bash、PowerShell 与 profile 测试证明强制 job 会移除模型参数、返回真实 job id、呈现后台结果，并在 loader 并发激活时安全等待 jobs 能力。
+Subagent 与 Session Controller 测试区分 next-step steering 与 FIFO follow-up，并覆盖 Queue 编辑、移除、stale occurrence 收敛、授权、冷恢复、dispose 与一次性行为。仓内插件测试覆盖各 adapter 变体的 lifecycle setup、精确 Alpha.2 live-Steer 与 inactive-Queue 路由、Host 与公开路径的退休成员拒绝、冷 Captain 邮箱重投递和依赖组检查。Team mailbox 测试覆盖 live Lead steering、inactive-child wakeup、teammate quiet/FIFO 投递、target-local 串行、持久化恢复、中断与 pending 限额。Job 测试证明 next-step 让出保持任务运行、next-turn 消息不会让出且默认行为不变。Bash、PowerShell 与 profile 测试证明强制 job 会移除模型参数、返回真实 job id、呈现后台结果，并在 loader 并发激活时安全等待 jobs 能力。
 
 ## Consequences
 

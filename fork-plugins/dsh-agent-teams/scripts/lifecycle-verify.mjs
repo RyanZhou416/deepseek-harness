@@ -13,10 +13,16 @@ import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { LlmError } from '@deepseek-ai/dsh-llm'
-import { haltTeamWork, redeliverCaptainMailbox, registerAgentTeamsTools } from '../lib/tools.js'
+import { haltTeamWork, registerAgentTeamsTools } from '../lib/tools.js'
 import { buildActivationDirective, invokedAgentTeamsGoal, invokedAgentTeamsInvocation, installAgentTeamsGestureBoundary, profileCommandName, registerAgentTeamsCommand } from '../lib/command.js'
 import { readArchivedTeam, readMailbox, readTeam, readUnreadMailbox } from '../lib/state.js'
 import { collectArchivedTeamsActivity } from '../lib/snapshot.js'
+
+const legacyHarness = process.argv.includes('--legacy-harness')
+const modernHarness = process.argv.includes('--modern-harness')
+if (legacyHarness && modernHarness) throw new Error('select at most one Harness compatibility mode')
+const alpha2Harness = !legacyHarness && !modernHarness
+const hostQueue = Symbol.for('dsh.subagent.queuePrompt')
 
 const workspace = await mkdtemp(join(tmpdir(), 'dsh-agent-teams-lifecycle-'))
 const definitions = new Map()
@@ -39,11 +45,8 @@ function check(label, condition, detail = '') {
 
 function session(parentSession) {
   return {
-    header: { cwd: workspace, parentSession },
-    events: [],
-    ownEvents() {
-      return this.events.slice(this.header.inheritedEventCount ?? 0)
-    },
+    header: { cwd: workspace, parentSession, ...(legacyHarness ? { seedLength: 0 } : {}) },
+    ...legacyHarness ? { events: [] } : { ownEvents() { return this._ownEvents ?? [] } },
     append() {},
     requestHeader() {
       return { config: { provider: 'fake', model: 'fake-model', reasoningEffort: 'high' } }
@@ -86,16 +89,25 @@ function publishStatus(subject, status) {
   for (const listener of listeners.get('agent/status') ?? []) listener({ agent: subject, status })
 }
 
+async function acceptPrompt(childId, content, delivery = 'queue') {
+  if (failNextDelivery.delete(childId)) throw new Error('injected delivery failure')
+  deliveries.push({ childId, content, delivery })
+  const child = liveAgents.get(childId)
+  if (child) child.status = 'running'
+  return `message-${++messageSeq}`
+}
+
 /**
- * Give one child the Agent-scoped context the bridge needs: the plugin reads
- * `agent.ctx` from the `agent/session-start` payload and installs its
- * per-child listeners (model selection, request-error bridge) there, exactly
- * like the harness Agent does.
+ * Compose one child's scoped context like the harness does, so the plugin's
+ * continuable setup can install its per-child listeners (model selection and
+ * the `agent/request-error` bridge) against a dispatchable registry.
  */
 function childContext(child) {
   const registry = new Map()
   childListeners.set(child.id, registry)
-  child.ctx = {
+  return {
+    agent: child,
+    effect(setup) { return setup() },
     on(name, listener) {
       const current = registry.get(name) ?? []
       current.push(listener)
@@ -103,7 +115,6 @@ function childContext(child) {
       return () => registry.set(name, (registry.get(name) ?? []).filter(candidate => candidate !== listener))
     },
   }
-  return child.ctx
 }
 
 /** Dispatch one failed model request to a child's request-error listeners. */
@@ -137,26 +148,12 @@ function emitTurnError(child, failure) {
 const captain = makeAgent('captain-session')
 liveAgents.set(captain.id, captain)
 let advertisedModels = []
-let captainResolveCount = 0
-let captainResolutionEnabled = true
 // A non-AgentTeams continuable sibling must survive every team lifecycle
 // operation untouched.
 children.push({ id: 'foreign-session', label: 'unrelated continuable', mode: 'continuable' })
 
 const ctx = {
   effect(setup) { return setup() },
-  get(name) {
-    if (name !== 'sessionController') return undefined
-    return {
-      async resolveAgent(id) {
-        if (id !== captain.id || !captainResolutionEnabled) return { error: { code: 'SESSION_NOT_FOUND' } }
-        captainResolveCount += 1
-        liveAgents.set(captain.id, captain)
-        for (const listener of listeners.get('agent/session-start') ?? []) listener({ agent: captain })
-        return { agent: captain }
-      },
-    }
-  },
   tools: {
     register(definition) {
       definitions.set(definition.name, definition)
@@ -182,6 +179,10 @@ const ctx = {
     },
   },
   subagents: {
+    registerContinuableSetup(setup) {
+      continuableSetups.push(setup)
+      return () => {}
+    },
     getProvider(name) {
       if (name !== 'spawn') return undefined
       return { prepareContinuable() {}, capabilities: { persona: true, toolFilter: true } }
@@ -196,7 +197,7 @@ const ctx = {
       liveAgents.set(id, child)
       children.push({ id, label: spec.label, mode: 'continuable' })
       if (typeof spec.label === 'string' && spec.label.startsWith('agent-teams:')) {
-        child.session.events = [{
+        child.session[legacyHarness ? 'events' : '_ownEvents'] = [{
           type: 'subagent/descriptor',
           data: {
             version: 3,
@@ -208,10 +209,12 @@ const ctx = {
           },
         }]
       }
-      // alpha.5: the plugin installs the member bridge from the global
-      // `agent/session-start` event instead of registerContinuableSetup.
-      childContext(child)
-      for (const listener of listeners.get('agent/session-start') ?? []) listener({ agent: child })
+      child.ctx = childContext(child)
+      if (!legacyHarness) {
+        for (const listener of listeners.get('agent/session-start') ?? []) listener({ agent: child, source: 'startup' })
+      } else {
+        for (const setup of continuableSetups) setup(child.ctx)
+      }
       return { childId: id, messageId: `welcome-${childSeq}` }
     },
     async listChildren(parentId) {
@@ -226,12 +229,11 @@ const ctx = {
     async listDescendants(parentId) {
       return this.listChildren(parentId)
     },
-    async [deliverSubagentPrompt](_parent, childId, content) {
-      if (failNextDelivery.delete(childId)) throw new Error('injected delivery failure')
-      deliveries.push({ childId, content })
-      const child = liveAgents.get(childId)
-      if (child) child.status = 'running'
-      return `message-${++messageSeq}`
+    async [deliverSubagentPrompt](_parent, childId, content, _source, _signal, delivery = 'queue') {
+      return acceptPrompt(childId, content, delivery)
+    },
+    async followup(_parent, childId, content) {
+      return acceptPrompt(childId, content, 'queue')
     },
     async sendMessage(parent, childId, content, options) {
       return this[deliverSubagentPrompt](parent, childId, content, {
@@ -260,9 +262,34 @@ const ctx = {
   logger: { debug() {}, warn() {} },
 }
 
+if (modernHarness) {
+  const followup = ctx.subagents.followup
+  delete ctx.subagents[deliverSubagentPrompt]
+  delete ctx.subagents.followup
+  delete ctx.subagents.registerContinuableSetup
+  ctx.subagents[hostQueue] = function (parent, childId, content, source, signal) {
+    return followup.call(this, parent, childId, content, { source, signal })
+  }
+  ctx.subagents.sendMessage = async function () { throw new Error('team jobs must use FIFO, not steer') }
+} else if (alpha2Harness) {
+  delete ctx.subagents.followup
+  delete ctx.subagents.registerContinuableSetup
+}
+
+function directPrompt(parent, childId, content, options) {
+  if (modernHarness) {
+    return ctx.subagents[hostQueue](parent, childId, content, options.source, options.signal)
+  }
+  if (alpha2Harness) {
+    return ctx.subagents[deliverSubagentPrompt](parent, childId, content, options.source, options.signal, 'queue')
+  }
+  return ctx.subagents.followup(parent, childId, content, options)
+}
+
 const agentTeamsRuntime = registerAgentTeamsTools(ctx, {
   stateDir: '.agent-teams',
   memberProvider: 'spawn',
+  fallback: { provider: 'backup', model: 'backup-model' },
   memberMaxDepth: 1,
   maxMembers: 8,
   profiles: {
@@ -452,6 +479,8 @@ try {
       && deliveries.some(delivery => delivery.childId === analyst.id)
       && !deliveries.some(delivery => delivery.childId === implementer.id && String(delivery.content?.[0]?.text ?? '').includes('Implement')))
   const firstAssignment = deliveries.find(delivery => delivery.childId === analyst.id)
+  check('resident member assignments use nearest-step delivery on Alpha.2',
+    !alpha2Harness || firstAssignment?.delivery === 'steer')
   const assignmentText = Array.isArray(firstAssignment?.content)
     ? firstAssignment.content.map(block => block.text ?? '').join('\n')
     : String(firstAssignment?.content ?? '')
@@ -810,6 +839,9 @@ try {
   const alpha = liveAgents.get(addedAlpha.member_id)
   const beta = liveAgents.get(addedBeta.member_id)
   const gamma = liveAgents.get(addedGamma.member_id)
+  check('manually added members persist the global fallback for later activations',
+    (await state())?.members.every(member => member.fallback?.provider === 'backup'
+      && member.fallback?.model === 'backup-model'))
   publishStatus(alpha, 'idle')
   publishStatus(beta, 'idle')
   publishStatus(gamma, 'idle')
@@ -819,6 +851,17 @@ try {
   check('idle assigned member is claimed and woken automatically',
     firstAttempt?.status === 'claimed' && firstAttempt.assignee === 'alpha'
       && deliveries.some(delivery => delivery.childId === alpha.id))
+  let captainClaimRejected = false
+  const beforeCaptainClaim = JSON.stringify(await task(t1.task_id))
+  const beforeCaptainClaimDeliveries = deliveries.length
+  try {
+    await call('agent_teams_claim_task', { task_id: t1.task_id, assignee: 'alpha' })
+  } catch (error) {
+    captainClaimRejected = /member|reassign_task/.test(String(error))
+  }
+  check('captain cannot mint a claim capability for a member; use reassign_task',
+    captainClaimRejected && JSON.stringify(await task(t1.task_id)) === beforeCaptainClaim
+      && deliveries.length === beforeCaptainClaimDeliveries)
   const alphaClaim = await call('agent_teams_claim_task', { task_id: t1.task_id }, alpha)
   check('member observes the scheduler attempt idempotently', alphaClaim.attempt_id === firstAttempt?.attemptId)
   await call('agent_teams_update_task', {
@@ -841,24 +884,122 @@ try {
   // must be idempotent until the captain performs an explicit reassignment.
   publishStatus(alpha, 'idle')
   await new Promise(resolve => setTimeout(resolve, 20))
-  // Normal continuable settlement disposes its live AgentHandle between
-  // turns. The process-local idle observation must still distinguish this
-  // parked attempt from a cold process restart.
-  liveAgents.delete(alpha.id)
+  // The idle member remains resident, so repeated status kicks must keep
+  // its current attempt parked rather than spuriously waking it again.
   const deliveriesBeforeParkedKicks = deliveries.length
+  const parkedAttemptBeforeRateLimitRecovery = await task(t1.task_id)
+  // Model the provider-facing failure boundary from #66: the member's turn
+  // has ended after a rate-limit response, but its durable task capability is
+  // still open. Repeated scheduler/status kicks must park that capability
+  // instead of minting a fresh attempt and inference request each time.
+  for (let kick = 0; kick < 20; kick += 1) {
+    await call('agent_teams_status', {})
+  }
+  await new Promise(resolve => setTimeout(resolve, 20))
+  const parkedAlpha = await task(t1.task_id)
+  check('rate-limited idle owner does not enter an unbounded retry loop (#66)',
+    parkedAlpha?.status === 'in_progress'
+      && parkedAlpha.attempt === parkedAttemptBeforeRateLimitRecovery?.attempt
+      && parkedAlpha.attemptId === parkedAttemptBeforeRateLimitRecovery?.attemptId
+      && deliveries.length === deliveriesBeforeParkedKicks)
+  liveAgents.set(alpha.id, alpha)
+
+  // Harness normally disposes a continuable AgentHandle after settlement. The
+  // in-process idle observation remains authoritative, so a non-resident
+  // parked owner must not be mistaken for a cold restart on every status poll.
+  liveAgents.delete(alpha.id)
+  const deliveriesBeforeDisposedParkedKicks = deliveries.length
   await Promise.all([
     call('agent_teams_status', {}),
     call('agent_teams_status', {}),
     call('agent_teams_status', {}),
   ])
   await new Promise(resolve => setTimeout(resolve, 20))
-  const parkedAlpha = await task(t1.task_id)
-  check('resident idle owner keeps its open attempt across repeated scheduler kicks',
-    parkedAlpha?.status === 'in_progress'
-      && parkedAlpha.attempt === alphaClaim.attempt
-      && parkedAlpha.attemptId === alphaClaim.attempt_id
-      && deliveries.length === deliveriesBeforeParkedKicks)
+  const disposedParkedAlpha = await task(t1.task_id)
+  check('disposed settled owner keeps its parked attempt across repeated scheduler kicks',
+    disposedParkedAlpha?.status === 'in_progress'
+      && disposedParkedAlpha.attempt === alphaClaim.attempt
+      && disposedParkedAlpha.attemptId === alphaClaim.attempt_id
+      && deliveries.length === deliveriesBeforeDisposedParkedKicks)
   liveAgents.set(alpha.id, alpha)
+
+  // Unobserved recovery whose followup fails must restore the original open
+  // capability and consume that generation's budget. Later status kicks must
+  // not recast it into pending or a new attempt.
+  const tRecoverFail = await call('agent_teams_create_task', {
+    subject: 'unobserved recovery delivery failure', assignee: 'gamma',
+  })
+  const recoverFailDispatch = await task(tRecoverFail.task_id)
+  check('idle assigned gamma is claimed for the recovery-failure fixture',
+    recoverFailDispatch?.status === 'claimed' && recoverFailDispatch.assignee === 'gamma')
+  const recoverFailClaim = await call('agent_teams_claim_task', { task_id: tRecoverFail.task_id }, gamma)
+  await call('agent_teams_update_task', {
+    task_id: tRecoverFail.task_id, status: 'in_progress', attempt_id: recoverFailClaim.attempt_id,
+  }, gamma)
+  liveAgents.delete(gamma.id)
+  failNextDelivery.add(gamma.id)
+  const deliveriesBeforeFailedRecovery = deliveries.length
+  await call('agent_teams_status', {})
+  await new Promise(resolve => setTimeout(resolve, 20))
+  const rolledBackRecovery = await task(tRecoverFail.task_id)
+  await Promise.all([
+    call('agent_teams_status', {}),
+    call('agent_teams_status', {}),
+    call('agent_teams_status', {}),
+  ])
+  await new Promise(resolve => setTimeout(resolve, 20))
+  const throttledFailedRecovery = await task(tRecoverFail.task_id)
+  check('failed unobserved recovery restores the original capability and later kicks do not recast it',
+    rolledBackRecovery?.status === 'in_progress'
+      && rolledBackRecovery.assignee === 'gamma'
+      && rolledBackRecovery.attempt === recoverFailClaim.attempt
+      && rolledBackRecovery.attemptId === recoverFailClaim.attempt_id
+      && deliveries.length === deliveriesBeforeFailedRecovery
+      && throttledFailedRecovery?.status === 'in_progress'
+      && throttledFailedRecovery.attempt === recoverFailClaim.attempt
+      && throttledFailedRecovery.attemptId === recoverFailClaim.attempt_id
+      && deliveries.length === deliveriesBeforeFailedRecovery)
+  liveAgents.set(gamma.id, gamma)
+  const recoverFailComplete = await call('agent_teams_claim_task', { task_id: tRecoverFail.task_id }, gamma)
+  await call('agent_teams_update_task', {
+    task_id: tRecoverFail.task_id,
+    status: 'completed',
+    output: 'closed failed-recovery fixture',
+    attempt_id: recoverFailComplete.attempt_id,
+  }, gamma)
+  check('restored capability remains usable after a failed recovery delivery',
+    recoverFailComplete.attempt_id === recoverFailClaim.attempt_id
+      && (await task(tRecoverFail.task_id))?.status === 'completed')
+  publishStatus(gamma, 'idle')
+
+  // A durable task with no process-local idle observation is a cold/unobserved
+  // owner. It gets exactly one fresh capability, then the recovery marker is
+  // sticky even if the new AgentHandle is still absent on later status kicks.
+  liveAgents.delete(beta.id)
+  const deliveriesBeforeColdRecovery = deliveries.length
+  await call('agent_teams_status', {})
+  await new Promise(resolve => setTimeout(resolve, 20))
+  const coldRecoveredBeta = await task(t2.task_id)
+  const deliveriesAfterColdRecovery = deliveries.length
+  const coldRecoveryDelivery = deliveries[deliveriesBeforeColdRecovery]
+  await Promise.all([
+    call('agent_teams_status', {}),
+    call('agent_teams_status', {}),
+    call('agent_teams_status', {}),
+  ])
+  await new Promise(resolve => setTimeout(resolve, 20))
+  const throttledRecoveredBeta = await task(t2.task_id)
+  check('unobserved missing owner recovers once and repeated kicks do not rotate it again',
+    coldRecoveredBeta?.status === 'claimed'
+      && coldRecoveredBeta.assignee === 'beta'
+      && coldRecoveredBeta.attempt === betaClaim.attempt + 1
+      && coldRecoveredBeta.attemptId !== betaClaim.attempt_id
+      && deliveriesAfterColdRecovery === deliveriesBeforeColdRecovery + 1
+      && (!alpha2Harness || coldRecoveryDelivery?.delivery === 'queue')
+      && throttledRecoveredBeta?.attempt === coldRecoveredBeta.attempt
+      && throttledRecoveredBeta?.attemptId === coldRecoveredBeta.attemptId
+      && deliveries.length === deliveriesAfterColdRecovery)
+  liveAgents.set(beta.id, beta)
 
   publishStatus(beta, 'idle')
   await new Promise(resolve => setTimeout(resolve, 20))
@@ -870,8 +1011,9 @@ try {
   check('captain message resumes a parked owner without rotating its attempt',
     resumedBeta.delivered === 'wake'
       && deliveries.length === deliveriesBeforeResume + 1
-      && resumedBetaTask?.attempt === betaClaim.attempt
-      && resumedBetaTask.attemptId === betaClaim.attempt_id)
+      && (!alpha2Harness || deliveries.at(-1)?.delivery === 'steer')
+      && resumedBetaTask?.attempt === coldRecoveredBeta?.attempt
+      && resumedBetaTask.attemptId === coldRecoveredBeta?.attemptId)
 
   let unsafeCaptainTakeoverRejected = false
   try {
@@ -887,10 +1029,10 @@ try {
     task_id: t1.task_id, assignee: 'gamma', reason: 'alpha is stuck',
   })
   const reassigned = await task(t1.task_id)
-  check('reassignment quiesces old owner and creates a new attempt',
+  check('reassignment quiesces recovered owner and creates a new attempt',
     takeover.assignee === 'gamma' && reassigned?.status === 'claimed'
-      && reassigned.attemptId !== alphaClaim.attempt_id
-      && takeover.attempt === alphaClaim.attempt + 1)
+      && reassigned.attemptId !== disposedParkedAlpha?.attemptId
+      && takeover.attempt === (disposedParkedAlpha?.attempt ?? 0) + 1)
   let staleRejected = false
   try {
     await call('agent_teams_update_task', {
@@ -908,12 +1050,16 @@ try {
   await call('agent_teams_update_task', {
     task_id: t1.task_id, status: 'completed', output: 'gamma result', attempt_id: gammaClaim.attempt_id,
   }, gamma)
+  const recoveredBetaClaim = await call('agent_teams_claim_task', { task_id: t2.task_id }, beta)
   await call('agent_teams_update_task', {
-    task_id: t2.task_id, status: 'completed', output: 'beta result', attempt_id: betaClaim.attempt_id,
+    task_id: t2.task_id, status: 'in_progress', attempt_id: recoveredBetaClaim.attempt_id,
   }, beta)
-  check('resumed member completes with the original parked capability',
+  await call('agent_teams_update_task', {
+    task_id: t2.task_id, status: 'completed', output: 'beta result', attempt_id: recoveredBetaClaim.attempt_id,
+  }, beta)
+  check('resumed recovered member completes with its throttled capability',
     (await task(t2.task_id))?.status === 'completed'
-      && (await task(t2.task_id))?.attemptId === betaClaim.attempt_id)
+      && (await task(t2.task_id))?.attemptId === recoveredBetaClaim.attempt_id)
   publishStatus(beta, 'idle')
   publishStatus(gamma, 'idle')
   await new Promise(resolve => setTimeout(resolve, 20))
@@ -959,9 +1105,9 @@ try {
   let removedFollowupRejected = false
   const deliveriesBeforeRemovedFollowup = deliveries.length
   try {
-    await queueHostSubagentPrompt(ctx.subagents, captain, alpha.id, [{ type: 'text', text: 'must not resume' }], {
-      kind: 'plugin', plugin: 'verification',
-    }, new AbortController().signal)
+    await directPrompt(captain, alpha.id, [{ type: 'text', text: 'must not resume' }], {
+      source: { kind: 'plugin', plugin: 'verification' }, signal: new AbortController().signal,
+    })
   } catch (error) {
     removedFollowupRejected = error?.code === 'NOT_RESUMABLE'
   }
@@ -977,7 +1123,7 @@ try {
     removedSteerRejected = error?.code === 'NOT_RESUMABLE'
   }
   check('removing a member blocks direct nearest-step host delivery',
-    removedSteerRejected && deliveries.length === deliveriesBeforeRemovedSteer)
+    !alpha2Harness || (removedSteerRejected && deliveries.length === deliveriesBeforeRemovedSteer))
   let removedPublicMessageRejected = false
   const deliveriesBeforeRemovedPublicMessage = deliveries.length
   try {
@@ -1019,31 +1165,6 @@ try {
   await call('agent_teams_status', {})
   check('status kick redelivers and acknowledges fallback exactly once',
     (await readUnreadMailbox(stateRoot, teamId, 'gamma')).length === 0)
-
-  liveAgents.delete(captain.id)
-  const coldCaptainReport = await call('agent_teams_send_message', {
-    to: 'captain', content: 'cold captain delivery',
-  }, gamma)
-  check('member report cold-resumes its ordinary captain before delivery',
-    coldCaptainReport.delivered === 'live'
-      && captainResolveCount === 1
-      && liveAgents.get(captain.id) === captain
-      && (await readUnreadMailbox(stateRoot, teamId, 'captain')).length === 0)
-
-  liveAgents.delete(captain.id)
-  captainResolutionEnabled = false
-  const deferredCaptainReport = await call('agent_teams_send_message', {
-    to: 'captain', content: 'durable captain fallback',
-  }, gamma)
-  const deferredCaptainUnread = await readUnreadMailbox(stateRoot, teamId, 'captain')
-  captainResolutionEnabled = true
-  liveAgents.set(captain.id, captain)
-  const redeliveredCaptain = await redeliverCaptainMailbox(ctx, { stateDir: '.agent-teams' }, captain)
-  check('captain startup redelivery acknowledges each durable mailbox record',
-    deferredCaptainReport.delivered === 'mailbox'
-      && deferredCaptainUnread.length === 1
-      && redeliveredCaptain === 1
-      && (await readUnreadMailbox(stateRoot, teamId, 'captain')).length === 0)
 
   beta.status = 'running'
   gamma.status = 'running'
@@ -1206,9 +1327,9 @@ try {
   let coldFollowupRejected = false
   const deliveriesBeforeColdFollowup = deliveries.length
   try {
-    await queueHostSubagentPrompt(ctx.subagents, captain, gamma.id, [{ type: 'text', text: 'must stay retired' }], {
-      kind: 'plugin', plugin: 'verification',
-    }, new AbortController().signal)
+    await directPrompt(captain, gamma.id, [{ type: 'text', text: 'must stay retired' }], {
+      source: { kind: 'plugin', plugin: 'verification' }, signal: new AbortController().signal,
+    })
   } catch (error) {
     coldFollowupRejected = error?.code === 'NOT_RESUMABLE'
   }
@@ -1217,11 +1338,11 @@ try {
   check('team shutdown leaves unrelated continuable subagents untouched',
     (await ctx.subagents.listChildren(captain.id))
       .some(child => child.id === 'foreign-session' && child.mode === 'continuable'))
-  const foreignFollowup = await queueHostSubagentPrompt(ctx.subagents, captain, 'foreign-session', [
+  const foreignFollowup = await directPrompt(captain, 'foreign-session', [
     { type: 'text', text: 'unrelated work still routes' },
   ], {
-    kind: 'plugin', plugin: 'verification',
-  }, new AbortController().signal)
+    source: { kind: 'plugin', plugin: 'verification' }, signal: new AbortController().signal,
+  })
   check('team shutdown leaves unrelated continuable followup untouched',
     typeof foreignFollowup === 'string'
       && deliveries.some(delivery => delivery.childId === 'foreign-session'))

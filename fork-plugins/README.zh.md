@@ -19,18 +19,18 @@
 ## Agent Teams
 
 - 源码：`fork-plugins/dsh-agent-teams`
-- 当前私有版本：`0.1.15-dsh013alpha2.1`
-- 上游底座：`NanmiCoder/dsh-agent-teams main@232a338fc9`
-- API 迁移：上游 PR #124 `098e4e97eb`
-- 安装产物：`fork-plugins/releases/nanmicoder-dsh-agent-teams-0.1.15-dsh013alpha2.1.tgz`
-- 产物 SHA256：`557D0C9FFB5962137AE8D2A4AF406498A80268FA6E0742630937CB7C72D72F9C`
+- 当前私有版本：`0.1.16-dsh013alpha2.1`
+- 上游底座：`NanmiCoder/dsh-agent-teams v0.1.16-rc.1@eb09334f9a`
+- 私有宿主目标：`dsh-v0.1.3-alpha.2`
+- 安装产物：`fork-plugins/releases/nanmicoder-dsh-agent-teams-0.1.16-dsh013alpha2.1.tgz`
+- 产物 SHA256：`3D83C44E1846D07F077B4677D69182A4C25F97C4A92337C243CA1BDF6E2BD35D`
 
-`.2` 版本同时保护 RC.1 公共 `sendMessage()`、Host Queue 与 fork nearest-step 三条退休成员入口。它的有界 unread-only LRU 也会消除活动面板对未变 mailbox JSONL 文件的每秒全量重读；磁盘格式保持不变。
+该构建加入上游 rc.1 的 fallback 持久化、parked-attempt 恢复、请求限额、兼容性 doctor、模型徽标和可见 resize handle，同时保留 Alpha.2 live-Steer/inactive-Queue 投递、冷 Captain 邮箱恢复、全部退休成员入口守卫和有界 unread-only LRU。磁盘格式保持不变。
 
 同事 clone 本 fork、设置好自己的 `DSH_HOME` 并关闭正在运行的 DSH 后，可在仓库根目录执行：
 
 ```powershell
-$artifact = (Resolve-Path .\fork-plugins\releases\nanmicoder-dsh-agent-teams-0.1.15-dsh013alpha2.1.tgz).Path
+$artifact = (Resolve-Path .\fork-plugins\releases\nanmicoder-dsh-agent-teams-0.1.16-dsh013alpha2.1.tgz).Path
 node --import tsx/esm apps/cli/src/bin.ts plugin --profile web add $artifact
 ```
 
@@ -40,17 +40,17 @@ node --import tsx/esm apps/cli/src/bin.ts plugin --profile web add $artifact
 
 ```powershell
 cd fork-plugins\dsh-agent-teams
-corepack pnpm@11.7.0 install --frozen-lockfile --ignore-scripts
-corepack pnpm@11.7.0 typecheck
-corepack pnpm@11.7.0 build
-corepack pnpm@11.7.0 verify
-corepack pnpm@11.7.0 pack --pack-destination ..\releases
+corepack pnpm@10.30.2 install --frozen-lockfile --ignore-scripts
+corepack pnpm@10.30.2 typecheck
+corepack pnpm@10.30.2 build
+corepack pnpm@10.30.2 verify
+corepack pnpm@10.30.2 pack --pack-destination ..\releases
 ```
 
 更新官方 Agent Teams 前，先保证 DSH 已关闭并保留 profile 配置备份，再执行：
 
 ```powershell
-git subtree pull --prefix=fork-plugins/dsh-agent-teams https://github.com/NanmiCoder/dsh-agent-teams.git main --squash
+git subtree pull --prefix=fork-plugins/dsh-agent-teams https://github.com/NanmiCoder/dsh-agent-teams.git <tag> --squash
 ```
 
 随后重新移植或退役 `FORK_MAINTENANCE.md` 所列 fork 行为、提升私有版本、构建新 tgz，并在隔离 `DSH_HOME` 中验证启动。不得把 npm `@latest` 直接安装到真实 profile。

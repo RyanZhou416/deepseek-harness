@@ -39,7 +39,7 @@
 | Alpha.2 integration | `6481bd2cbb` plus the following fork port | 官方结构 merge 位于该提交；fork 行为重做位于其后的 `master` 提交 |
 | Pre-alpha.2 integration backup | `backup/pre-upstream-dsh-v0.1.3-alpha.2-20260908 = 5ef0e2f82f` | 合并前可恢复源码基线；真实 DSH_HOME 仍需独立备份 |
 | Current official target | `dsh-v0.1.3-alpha.2 = 82a5fd61a7` on 2026-09-07 | 精确不可变 tag；不要改合并已越过该 tag 的 rolling `upstream/master` |
-| AgentTeams subtree | `fork-plugins/dsh-agent-teams` | 上游 `main@232a338fc9` + PR #124 `098e4e97eb` + 本 fork 私有适配；subtree content commit `c1abf16c86` |
+| AgentTeams subtree | `fork-plugins/dsh-agent-teams` | 上游 `v0.1.16-rc.1@eb09334f9a` + 本 fork Alpha.2 私有适配；subtree merge 记录精确 split |
 | Context subtree | `fork-plugins/dsh-context` | 上游 `v0.41.3@dce08e0db3` + 本 fork 投影和关闭 modal 性能优化 |
 
 当前维护的源码兼容基线是 `dsh-v0.1.3-alpha.2`。整合采用官方 handle-based Session persistence、Session format v2、通用 `session.updateQueue`、cursorless Assistant frame、长会话恢复和连接容错，再按本文的行为与测试补回仍缺失部分；后续合并禁止整体恢复 RC.1 文件。
@@ -198,7 +198,7 @@ Web profile 插入 `memory-watchdog.cjs`：250 ms 采样、60 s 日志、heap ra
 | Package | Installed | Runtime state | Preserve rule |
 |---|---:|---|---|
 | `dshmarket` | `1.41.0` | Enabled | RC.1 隔离启动与首屏通过；profile 固定 `allowRestart:false`，禁止插件静默重启 Host |
-| `@nanmicoder/dsh-agent-teams` | `0.1.15-dsh012rc1.2` live; `0.1.15-dsh013alpha2.1` repository candidate | Stop before source launch | `setup.command` 切换到已验证 alpha.2 artifact；禁止被 npm latest 直接覆盖 |
+| `@nanmicoder/dsh-agent-teams` | `0.1.15-dsh012rc1.2` live; `0.1.16-dsh013alpha2.1` repository candidate | Stop before source launch | `setup.command` 切换到已验证 alpha.2 artifact；禁止被 npm latest/next 直接覆盖 |
 | `dsh-plugin-subscriptions` | `0.6.0` | Installed, disabled | RC.1 隔离启动通过；profile 固定 `rateLimit.wait:false`，后续单独启用验证真实账户 |
 | `@vlln/dsh-task-status` | Removed | Not installed | 2026-09-04 已从依赖、bundle、patch、lockfile 和 `node_modules` 删除；RC.1 profile 不得恢复 |
 | `dsh-context` | `0.41.3-dsh012rc1.1` live; `0.41.3-dsh013alpha2.1` repository candidate | Stop before source launch | `setup.command` 切换到 alpha.2 artifact 并保留 `300/60/100/400/100` bounds；源码与回滚规则见 `fork-plugins/dsh-context/FORK_MAINTENANCE.md` |
@@ -209,24 +209,24 @@ Web profile 插入 `memory-watchdog.cjs`：250 ms 采样、60 s 日志、heap ra
 
 ### Local AgentTeams package
 
-维护真源位于 `fork-plugins\dsh-agent-teams`，完整保留上游源码、测试、构建脚本和资产。仓库安装器使用 `fork-plugins\releases\nanmicoder-dsh-agent-teams-0.1.15-dsh013alpha2.1.tgz`，SHA256 为 `557D0C9FFB5962137AE8D2A4AF406498A80268FA6E0742630937CB7C72D72F9C`。该 package 标记为 private，禁止用上游 npm scope 发布；RC.1 artifact 留作回滚。
+维护真源位于 `fork-plugins\dsh-agent-teams`，完整保留上游源码、测试、构建脚本和资产。仓库安装器使用 `fork-plugins\releases\nanmicoder-dsh-agent-teams-0.1.16-dsh013alpha2.1.tgz`，SHA256 为 `3D83C44E1846D07F077B4677D69182A4C25F97C4A92337C243CA1BDF6E2BD35D`。该 package 标记为 private，禁止用上游 npm scope 发布；旧 artifact 留作回滚。
 
 旧 `.1`–`.4` tarballs 与 `dsh-agent-teams-0.1.14-dsh012.1.bundle` 继续保留为 rollback evidence；其中 `.bundle` 是包含 `.1` 完整历史的 Git bundle，不得随意清理。当前 fork artifact 已随 Git 提交，同事不再依赖这台机器的外置 `.local-plugins-src`。
 
 必须保留的 fork 行为：
 
-1. 保留上游 main 的 authenticated Web routes、blank optional normalization、reasoning-effort 透传和 unrecoverable member failure settlement。
-2. PR #124 的 `agent/session-start`、`Session.ownEvents()` 与官方 Host Queue fallback 必须保留；不得恢复已删除的 `registerContinuableSetup`、`Session.events` 或 `header.seedLength`。
-3. Team 内部队长指令、scheduler assignment、peer delivery 和 mailbox recovery 在 fork runtime 上使用可选 symbol-keyed Host steer，在最近 step boundary 进入；普通官方 RC.1 runtime 上安全回退 Host Queue。
-4. Queue 与 fork steer 两条 Host 路径都拒绝冷恢复已退休 Team member；人类在成员会话发送的普通消息仍走 Session FIFO。
-5. Client 使用 `uiConversation` 和 RC.1 `[data-composer-input]`，Host 使用 `SystemPrompt.getSectionOrder('TEAM_POLICY')`；依赖固定为 RC.1。
+1. 保留上游 v0.1.16-rc.1 的 authenticated Web routes、bounded request bodies、fallback 持久化、parked-attempt 单次恢复、安全 captain reassignment、reasoning-effort 透传和 unrecoverable member failure settlement。
+2. Alpha.2 发行路径使用 `agent/session-start`、`Session.ownEvents()` 与统一 Host delivery adapter；legacy setup、session event 和 Host Queue 形态只保留为兼容性回归 fixture，不构成发行兼容声明。
+3. Team 内部队长指令、scheduler assignment、peer delivery 和 mailbox recovery 对 live member 使用 Host Steer 在最近 step boundary 进入，对 inactive member 使用 Host Queue 创建可冷恢复的独立 turn。
+4. Queue、Steer 与公开 `sendMessage()` 都拒绝向已退休 Team member 投递；人类在成员会话发送的普通消息仍走 Session FIFO。
+5. Client 使用 `uiConversation` 和 Alpha.2 `[data-composer-input]`，Host 使用 `SystemPrompt.getSectionOrder('TEAM_POLICY')`；package peer、development dependency、完整 DSH override cohort 与 lockfile 固定为 `0.1.3-alpha.2`。
 6. 普通 captain 不驻留时，成员报告先通过 Host Session Controller cold resume captain；Captain Session start 会重投 durable mailbox，成功逐条 ack，失败记录及后缀释放 delivery lease。
 7. Windows directory rename 使用独立的 5 次重试预算；构建清理目标用跨平台 `basename()` 校验。
 8. `readUnreadMailbox()` 使用只保留 pending 消息的 256-entry / 8 MiB 有界 LRU，并以 `dev/ino/size/mtimeNs/ctimeNs` 检测文件替换；lease 每次按当前时间重算，append/claim/release/ack/archive/remove 成功后精确失效。完整历史读取和磁盘 JSONL 字节格式不变。
 
-`.local-plugins-src\...dsh012.2/.3/.4` 只是历史解包产物，不能再当维护源。以后用 `git subtree pull --prefix=fork-plugins/dsh-agent-teams https://github.com/NanmiCoder/dsh-agent-teams.git main --squash` 获取官方更新，再在 fork 内重放和验证上述行为；不得用 npm install 覆盖 subtree。
+`.local-plugins-src\...dsh012.2/.3/.4` 只是历史解包产物，不能再当维护源。以后用 `git subtree pull --prefix=fork-plugins/dsh-agent-teams https://github.com/NanmiCoder/dsh-agent-teams.git <tag> --squash` 获取精确官方发布，再在 fork 内重放和验证上述行为；不得用 npm install 覆盖 subtree。
 
-官方 AgentTeams `0.1.15` 的原始基线早于当前 Harness；本 fork 以 `main@232a338fc9`、未合并 PR #124 `098e4e97eb` 和历史 `.4` 行为生成 `0.1.15-dsh013alpha2.1`。该版本适配 alpha.2 的统一 Host delivery adapter，封住公共 `sendMessage()` 与 Host Queue/Steer 对 retired member 的冷恢复旁路，并消除活动面板每秒重读永久 mailbox 历史的热点。后续若 PR #124 或等价实现进入上游，先按行为测试去重，再提升 subtree 基线和私有版本；profile 始终安装 fork artifact。
+本 fork 以 `v0.1.16-rc.1@eb09334f9a` 生成 `0.1.16-dsh013alpha2.1`。上游 release candidate 已吸收 PR #124 等兼容性分析并加入恢复、安全、UI 与发布验证；fork adapter 继续覆盖 Alpha.2 的统一 Host delivery，封住公开 `sendMessage()` 与 Host Queue/Steer 对 retired member 的冷恢复旁路，并消除活动面板每秒重读永久 mailbox 历史的热点。后续上游发布先按行为测试去重，再提升 subtree 基线和私有版本；profile 始终安装 fork artifact。
 
 ### Local Context package
 

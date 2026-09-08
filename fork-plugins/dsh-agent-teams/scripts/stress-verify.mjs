@@ -37,11 +37,8 @@ function check(label, condition, detail = '') {
 
 function session(parentSession) {
   return {
-    header: { cwd: workspace, parentSession },
+    header: { cwd: workspace, parentSession, seedLength: 0 },
     events: [],
-    ownEvents() {
-      return this.events.slice(this.header.inheritedEventCount ?? 0)
-    },
     append() {},
     requestHeader() {
       return { config: { provider: 'stress', model: 'stress-model', reasoningEffort: 'high' } }
@@ -106,6 +103,9 @@ function mountRuntime() {
       },
     },
     subagents: {
+      registerContinuableSetup() {
+        return () => {}
+      },
       getProvider(name) {
         if (name !== 'spawn') return undefined
         return { prepareContinuable() {}, capabilities: { persona: true, toolFilter: true } }
@@ -148,6 +148,9 @@ function mountRuntime() {
         child.status = 'running'
         deliveries.push({ childId, content, runtime: runtime?.generation ?? 0 })
         return `message-${++messageSeq}`
+      },
+      async sendMessage() {
+        throw new Error('scheduler delivery must not use public messaging')
       },
       interrupt(childId) {
         const child = liveAgents.get(childId)

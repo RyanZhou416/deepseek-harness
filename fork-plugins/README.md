@@ -19,18 +19,18 @@ The setup intentionally omits marketplace plugins, subscriptions, watchdogs, cus
 ## Agent Teams
 
 - Source: `fork-plugins/dsh-agent-teams`
-- Current private version: `0.1.15-dsh013alpha2.1`
-- Upstream base: `NanmiCoder/dsh-agent-teams main@232a338fc9`
-- API migration: upstream PR #124 `098e4e97eb`
-- Distribution artifact: `fork-plugins/releases/nanmicoder-dsh-agent-teams-0.1.15-dsh013alpha2.1.tgz`
-- Artifact SHA256: `557D0C9FFB5962137AE8D2A4AF406498A80268FA6E0742630937CB7C72D72F9C`
+- Current private version: `0.1.16-dsh013alpha2.1`
+- Upstream base: `NanmiCoder/dsh-agent-teams v0.1.16-rc.1@eb09334f9a`
+- Private host target: `dsh-v0.1.3-alpha.2`
+- Distribution artifact: `fork-plugins/releases/nanmicoder-dsh-agent-teams-0.1.16-dsh013alpha2.1.tgz`
+- Artifact SHA256: `3D83C44E1846D07F077B4677D69182A4C25F97C4A92337C243CA1BDF6E2BD35D`
 
-The `.2` build protects all three retired-member entry points: the RC.1 public `sendMessage()`, Host Queue, and the fork's nearest-step path. Its bounded unread-only LRU also removes the active panel's once-per-second full reread of unchanged mailbox JSONL files. The on-disk format remains unchanged.
+This build adds the upstream rc.1 fallback persistence, parked-attempt recovery, request limits, compatibility doctor, model badges, and visible resize handles. It preserves Alpha.2 live-Steer/inactive-Queue delivery, cold Captain mailbox recovery, all retired-member entry-point guards, and the bounded unread-only LRU. The on-disk format remains unchanged.
 
 After cloning this fork, setting their own `DSH_HOME`, and stopping any running DSH instance, a colleague can run this command from the repository root:
 
 ```powershell
-$artifact = (Resolve-Path .\fork-plugins\releases\nanmicoder-dsh-agent-teams-0.1.15-dsh013alpha2.1.tgz).Path
+$artifact = (Resolve-Path .\fork-plugins\releases\nanmicoder-dsh-agent-teams-0.1.16-dsh013alpha2.1.tgz).Path
 node --import tsx/esm apps/cli/src/bin.ts plugin --profile web add $artifact
 ```
 
@@ -40,17 +40,17 @@ Build and verification:
 
 ```powershell
 cd fork-plugins\dsh-agent-teams
-corepack pnpm@11.7.0 install --frozen-lockfile --ignore-scripts
-corepack pnpm@11.7.0 typecheck
-corepack pnpm@11.7.0 build
-corepack pnpm@11.7.0 verify
-corepack pnpm@11.7.0 pack --pack-destination ..\releases
+corepack pnpm@10.30.2 install --frozen-lockfile --ignore-scripts
+corepack pnpm@10.30.2 typecheck
+corepack pnpm@10.30.2 build
+corepack pnpm@10.30.2 verify
+corepack pnpm@10.30.2 pack --pack-destination ..\releases
 ```
 
 Before updating from official Agent Teams, stop DSH and retain a profile configuration backup, then run:
 
 ```powershell
-git subtree pull --prefix=fork-plugins/dsh-agent-teams https://github.com/NanmiCoder/dsh-agent-teams.git main --squash
+git subtree pull --prefix=fork-plugins/dsh-agent-teams https://github.com/NanmiCoder/dsh-agent-teams.git <tag> --squash
 ```
 
 Reapply or retire the fork behavior listed in `FORK_MAINTENANCE.md`, advance the private version, build a new tgz, and validate startup with an isolated `DSH_HOME`. Never install npm `@latest` directly into a real profile.
