@@ -4,8 +4,7 @@
  *
  * Members are durable continuable subagents of the captain, so a member keeps
  * its conversation across turns and across harness restarts: the captain
- * queues host prompts into its inbox (see {@link deliverToMember}), it works
- * through its turn
+ * queues its next turn through {@link deliverToMember}, it works through its turn
  * (updating team state through the `agent_teams_*` tools), and becomes idle
  * again. Its final assistant message is not readable programmatically, so the
  * member persists its report into the captain's mailbox and the task records,
@@ -16,39 +15,17 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { installModelSelection, type Agent, type ModelSelection } from '@deepseek-ai/dsh-agent'
 // Declaration merge only: makes ctx.subagents visible.
-import { foldSubagentDescriptor, SubagentError } from '@deepseek-ai/dsh-subagent'
-// RC.1 host-protocol Queue/nearest-step delivery with plugin-owned provenance.
-import {
-  queueHostSubagentPrompt,
-  queueSubagentPrompt,
-  type HostPromptQueue,
-} from '@deepseek-ai/dsh-subagent/internal'
-import { createUserMessage, LlmError, ReasoningEffortId, type ContentBlock, type MessageSource } from '@deepseek-ai/dsh-llm'
+import { foldSubagentDescriptor } from '@deepseek-ai/dsh-subagent'
+import { createUserMessage, LlmError, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import type { Session, SessionId } from '@deepseek-ai/dsh-session'
 import { join } from 'node:path'
+import { guardSubagentDelivery, installContinuableMemberSetup, queueMemberPrompt, sessionOwnEvents } from './harness-compat.ts'
 import { acknowledgeMailbox, appendMailbox, CAPTAIN_KEY, createMessage, readRetiredMemberIds, readTeamSync, readTeam, releaseMailboxDelivery, withTeamLock, writeTeam } from './state.ts'
 import { appendTeamEvent, captainSessionOf } from './events.ts'
 import { TERMINAL_TASK_STATUSES, type TeamMember, type TeamState, type TeamTask } from './types.ts'
 
 /** Persona snapshot of a profile protocol; the full text lives on team.json. */
 export const PERSONA_PROTOCOL_MAX_CHARS = 400
-
-/** Process-stable marker that one runtime's prompt queue already carries the retired guard. */
-const retiredGuardMarker = Symbol.for('dsh-agent-teams.retired-guard')
-
-/** Optional fork seam that preserves AgentTeams provenance on nearest-step delivery. */
-const steerSubagentPrompt = Symbol.for('dsh.subagent.steerPrompt')
-
-/** Structural face of the optional fork seam; official RC.1 falls back to its host Queue adapter. */
-interface HostPromptSteer {
-  [steerSubagentPrompt](
-    parent: Agent,
-    childId: SessionId,
-    content: ContentBlock[],
-    source: MessageSource,
-    signal: AbortSignal,
-  ): Promise<unknown>
-}
 
 /** Captain-only AgentTeams tools hidden from newly spawned members. */
 const MEMBER_DENIED_TOOLS = [
@@ -281,12 +258,14 @@ function selectionFromMember(member: TeamMember | undefined): MemberLlmSelection
   const provider = (member.activeProvider ?? member.provider).trim()
   const model = (member.activeModel ?? member.model).trim()
   if (provider === '' || model === '') return undefined
-  const reasoningEffort = member.reasoningEffort?.trim()
+  // Effort ids belong to the original model. After a fallback, its own
+  // provider default remains authoritative, including after cold recovery.
+  const reasoningEffort = member.fallbackActive === true ? undefined : member.reasoningEffort?.trim()
   return {
     provider,
     model,
     ...reasoningEffort === undefined || reasoningEffort === '' ? {} : { reasoningEffort },
-    ...member.fallback === undefined ? {} : { fallback: member.fallback },
+    ...member.fallback === undefined || member.fallbackActive === true ? {} : { fallback: member.fallback },
   }
 }
 
@@ -380,13 +359,6 @@ export async function resolveMemberLlmSelection(
  * cold resume restores the same selection from the owning team's durable
  * record. Legacy members without a complete saved route retain Harness's
  * descriptor provider/model behavior.
- *
- * DSH 0.1.2-alpha.5 removed `ctx.subagents.registerContinuableSetup`: the
- * continuation manager composes continuable children itself and exposes no
- * per-child creation hook. `agent/session-start` is the surviving per-Agent
- * lifecycle surface — it fires for fresh startup and cold resume alike, before
- * the first turn — so the bridge installs there, filtering by the durable
- * subagent descriptor and caching verdicts per Agent in a WeakMap.
  */
 export function installMemberSelectionRuntime(
   ctx: Context,
@@ -394,22 +366,19 @@ export function installMemberSelectionRuntime(
   onFailureSettled?: (workspace: string, teamId: string, memberName: string) => Promise<void>,
 ): MemberSelectionRuntime {
   const pending = new Map<string, MemberLlmSelection>()
-  const installed = new WeakSet<object>()
-  ctx.on('agent/session-start', ({ agent: child }) => {
-    if (child === undefined || installed.has(child)) return
-    const descriptor = foldSubagentDescriptor(child.session.ownEvents())
+  installContinuableMemberSetup(ctx, (childCtx) => {
+    const child = childCtx.agent
+    if (child === undefined) return () => undefined
+    const descriptor = foldSubagentDescriptor(sessionOwnEvents(child.session))
     if (descriptor?.mode !== 'continuable' || !descriptor.label.startsWith(MEMBER_LABEL_PREFIX)) {
-      return
+      return () => undefined
     }
-    // Install synchronously: an await here would let the child's initial
-    // model request win the race against the selection override below.
-    installed.add(child)
-    const childCtx = child.ctx
+
     const parentSessionId = child.session.header.parentSession
-    if (parentSessionId === undefined) return
+    if (parentSessionId === undefined) return () => undefined
     const identity = descriptor.label.slice(MEMBER_LABEL_PREFIX.length)
     const separator = identity.indexOf(':')
-    if (separator < 1 || separator === identity.length - 1) return
+    if (separator < 1 || separator === identity.length - 1) return () => undefined
     const teamId = identity.slice(0, separator)
     const memberName = identity.slice(separator + 1)
     const workspace = child.session.header.cwd ?? process.cwd()
@@ -418,7 +387,7 @@ export function installMemberSelectionRuntime(
     let selection = pending.get(key)
     if (selection === undefined) {
       const team = readTeamSync(stateRoot, teamId)
-      if (team === undefined || team.captainSessionId !== parentSessionId) return
+      if (team?.captainSessionId !== parentSessionId) return () => undefined
       const durableMember = team.members.find(member => member.name === memberName)
       selection = selectionFromMember(durableMember)
       if (selection !== undefined && (descriptor.agentProvider !== durableMember?.provider || descriptor.agentModel !== durableMember?.model)) {
@@ -471,12 +440,12 @@ export function installMemberSelectionRuntime(
       }
     })
     // Legacy teams still need failure reporting even without a saved route.
-    if (selection === undefined) return
+    if (selection === undefined) return disposeFailure
     const selectionRef = { current: modelSelection(selection), assembled: undefined as ModelSelection | undefined }
-    installModelSelection(childCtx, selectionRef)
+    const disposeSelection = installModelSelection(childCtx, selectionRef)
     const fallback = selection.fallback
     let switched = false
-    childCtx.on('agent/request-error', async (payload, next) => {
+    const disposeFallback = childCtx.on('agent/request-error', async (payload, next) => {
       if (payload.agent.id !== child.id || payload.signal.aborted) return next()
       const transition = selectFallbackRoute(selectionRef.current ?? { provider: selection.provider, model: selection.model }, fallback, payload.failure.code, switched)
       // selectFallbackRoute only retries when a fallback route exists; the
@@ -484,6 +453,10 @@ export function installMemberSelectionRuntime(
       if (fallback !== undefined && transition.retry) {
         switched = transition.switched
         selectionRef.current = transition.selection
+        // Request recovery repeats buildRequest inside the current step; it
+        // does not re-run prompt assembly. Override that captured route too,
+        // otherwise the authorized retry would hit the failed primary again.
+        selectionRef.assembled = transition.selection
         await updateFallbackState(stateRoot, teamId, memberName, fallback, ctx).catch((error: unknown) => {
           ctx.logger.warn(`agent-teams: failed to persist fallback route: ${String(error)}`)
         })
@@ -492,6 +465,11 @@ export function installMemberSelectionRuntime(
       }
       return next()
     })
+    return () => {
+      disposeFallback()
+      disposeSelection()
+      disposeFailure()
+    }
   })
 
   return {
@@ -646,6 +624,9 @@ export async function spawnMember(
         agentOptions: {
           provider: llmSelection.provider,
           model: llmSelection.model,
+          ...llmSelection.reasoningEffort === undefined
+            ? {}
+            : { reasoningEffort: ReasoningEffortId(llmSelection.reasoningEffort) },
         },
         ...config.maxDepth !== undefined ? { maxDepth: config.maxDepth } : {},
       },
@@ -656,7 +637,7 @@ export async function spawnMember(
 }
 
 /**
- * Deliver one message to a member at its nearest model-step boundary. Best effort: a
+ * Deliver one message to a member as its next FIFO turn. Best effort: a
  * failure (member gone or not continuable) is logged and reported as `false`
  * so the caller can decide (mailbox delivery still happened).
  *
@@ -680,15 +661,7 @@ export async function deliverToMember(
   signal: AbortSignal,
 ): Promise<boolean> {
   try {
-    const targetId = brandedSessionId(childId)
-    const content: ContentBlock[] = [{ type: 'text', text }]
-    const source: MessageSource = { kind: 'plugin', plugin: 'dsh-agent-teams' }
-    const hostSteer = (ctx.subagents as unknown as Partial<HostPromptSteer>)[steerSubagentPrompt]
-    if (hostSteer === undefined) {
-      await queueHostSubagentPrompt(ctx.subagents, captain, targetId, content, source, signal)
-    } else {
-      await hostSteer.call(ctx.subagents as unknown as HostPromptSteer, captain, targetId, content, source, signal)
-    }
+    await queueMemberPrompt(ctx.subagents, captain, brandedSessionId(childId), [{ type: 'text', text }], signal)
     return true
   } catch (error: unknown) {
     ctx.logger.warn(`agent-teams: prompt delivery to member ${childId} failed: ${String(error)}`)
@@ -712,65 +685,22 @@ export function interruptMember(ctx: Context, captain: Agent, childId: string): 
 }
 
 /**
- * Install the missing per-child retirement boundary on Harness RC.1.
+ * Install the missing per-child retirement boundary above Harness rc.6.
  *
  * Upstream `interrupt()` deliberately preserves continuable sessions and the
  * upstream seam exposes no targeted forget/retire method. The durable
- * AgentTeams index therefore rejects host prompt delivery before it can
- * cold-resume a retired member. Catalog rows deliberately remain discoverable:
- * the direct-child catalog authorizes historical transcript reads and
+ * AgentTeams index therefore rejects every inbox delivery before it can cold-resume a
+ * retired member. Catalog rows deliberately remain discoverable: Harness rc.8
+ * uses the direct-child catalog to authorize historical transcript reads and
  * `openSubagent()`, so filtering those rows would make an archived member's
  * persisted conversation inaccessible. Exact ids keep unrelated subagents
- * untouched while the prompt-queue boundary still prevents further model turns.
- *
- * RC.1 exposes symbol-keyed Queue and nearest-step host adapters through
- * `@deepseek-ai/dsh-subagent/internal`. The guard wraps both paths so a retired
- * member cannot be cold-resumed by either kind of protocol delivery. The wrap
- * is idempotent per runtime and degrades to the paths the exact host provides.
+ * untouched while the delivery boundary still prevents further model turns.
  */
 export function installRetiredMemberGuard(ctx: Context, stateDir: string): void {
-  const runtime = ctx.subagents
-  ctx.effect(() => {
-    // Wrap the runtime object itself: the real runtime inherits the symbol-keyed
-    // method from its class prototype, while test doubles own it directly.
-    const host = runtime as unknown as Record<symbol, unknown>
-    const originalQueue = host[queueSubagentPrompt] as HostPromptQueue[typeof queueSubagentPrompt] | undefined
-    const originalSteer = host[steerSubagentPrompt] as HostPromptSteer[typeof steerSubagentPrompt] | undefined
-    if (originalQueue === undefined && originalSteer === undefined) {
-      ctx.logger.warn('agent-teams: subagent runtime has no host prompt delivery seam; retired-member guard skipped')
-      return () => undefined
-    }
-    if (host[retiredGuardMarker] === true) return () => undefined
-    const assertNotRetired = async (parent: Agent, childId: SessionId): Promise<void> => {
-      const retired = await readRetiredMemberIds(join(parent.session.header.cwd ?? process.cwd(), stateDir))
-      if (retired.has(childId)) {
-        throw new SubagentError(
-          `AgentTeams member "${String(childId)}" was retired and cannot be resumed`,
-          'NOT_RESUMABLE',
-        )
-      }
-    }
-    const guardedQueue: HostPromptQueue[typeof queueSubagentPrompt] | undefined = originalQueue === undefined
-      ? undefined
-      : async function (this: HostPromptQueue, parent, childId, content, source, signal) {
-          await assertNotRetired(parent, childId)
-          return originalQueue.call(this, parent, childId, content, source, signal)
-        }
-    const guardedSteer: HostPromptSteer[typeof steerSubagentPrompt] | undefined = originalSteer === undefined
-      ? undefined
-      : async function (this: HostPromptSteer, parent, childId, content, source, signal) {
-          await assertNotRetired(parent, childId)
-          return originalSteer.call(this, parent, childId, content, source, signal)
-        }
-    if (guardedQueue !== undefined) host[queueSubagentPrompt] = guardedQueue
-    if (guardedSteer !== undefined) host[steerSubagentPrompt] = guardedSteer
-    host[retiredGuardMarker] = true
-    return () => {
-      if (guardedQueue !== undefined && host[queueSubagentPrompt] === guardedQueue) host[queueSubagentPrompt] = originalQueue
-      if (guardedSteer !== undefined && host[steerSubagentPrompt] === guardedSteer) host[steerSubagentPrompt] = originalSteer
-      host[retiredGuardMarker] = false
-    }
-  }, 'agent-teams: retired member guard')
+  guardSubagentDelivery(ctx, async (parent, childId) => {
+    const retired = await readRetiredMemberIds(join(parent.session.header.cwd ?? process.cwd(), stateDir))
+    return retired.has(childId)
+  })
 }
 
 /**

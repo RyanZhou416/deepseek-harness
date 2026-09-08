@@ -542,8 +542,6 @@ function stripLeadingBom(value: string): string {
 
 /** Rename attempts before falling back to a direct overwrite. */
 const ATOMIC_RENAME_RETRIES = 3
-/** Directory locks can outlive a file replacement's fallback window on Windows. */
-const ATOMIC_DIRECTORY_RENAME_RETRIES = 5
 /** Pause between rename attempts, giving a briefly-locking owner time to finish. */
 const ATOMIC_RENAME_RETRY_DELAY_MS = 50
 /**
@@ -863,7 +861,7 @@ async function renameWithRetry(from: string, to: string): Promise<void> {
       await rename(from, to)
       return
     } catch (error: unknown) {
-      if (isRetryableRenameError(error) && attempt < ATOMIC_DIRECTORY_RENAME_RETRIES) {
+      if (isRetryableRenameError(error) && attempt < ATOMIC_RENAME_RETRIES) {
         await sleep(ATOMIC_RENAME_RETRY_DELAY_MS)
         continue
       }

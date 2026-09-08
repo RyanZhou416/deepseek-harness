@@ -24,7 +24,6 @@ import {
   archiveTeamDir,
   beginTaskAttempt,
   CAPTAIN_KEY,
-  claimMailboxDelivery,
   createMessage,
   createTeamDir,
   findTeamByCaptain,
@@ -412,58 +411,6 @@ export async function haltTeamWork(input: {
   }
 }
 
-/** Resolve a cold ordinary captain through the optional Host Session owner. */
-export async function resolveCaptainForDelivery(ctx: Context, captainSessionId: string): Promise<Agent | undefined> {
-  const sessionId = captainSessionId as SessionId
-  const live = ctx.agents.get(sessionId)
-  if (live !== undefined) return live
-  const sessions = ctx.get('sessionController') as {
-    resolveAgent(id: SessionId): Promise<{ agent: Agent } | { error: { code: string } }>
-  } | undefined
-  if (sessions === undefined) return undefined
-  try {
-    const resolved = await sessions.resolveAgent(sessionId)
-    if ('error' in resolved) {
-      ctx.logger.warn(`agent-teams: captain ${captainSessionId} could not resume for mailbox delivery: ${resolved.error.code}`)
-      return undefined
-    }
-    return resolved.agent
-  } catch (error: unknown) {
-    ctx.logger.warn(`agent-teams: captain ${captainSessionId} resume failed: ${String(error)}`)
-    return undefined
-  }
-}
-
-/**
- * Claim and redeliver unread captain mailbox records when its Agent becomes
- * resident. Each record is acknowledged only after steering accepts it; a
- * failed record and the untouched suffix are released for a later activation.
- */
-export async function redeliverCaptainMailbox(ctx: Context, config: ToolsConfig, captain: Agent): Promise<number> {
-  const stateRoot = stateRootOf(workspaceOf(captain), config)
-  const team = await findTeamByCaptain(stateRoot, captain.id)
-  if (team === undefined) return 0
-  const messages = await withTeamLock(teamLockKey(stateRoot, team.id), async () => {
-    const unread = await readUnreadMailbox(stateRoot, team.id, CAPTAIN_KEY)
-    if (unread.length > 0) {
-      await claimMailboxDelivery(stateRoot, team.id, CAPTAIN_KEY, unread.map(message => message.id))
-    }
-    return unread
-  })
-  for (const [index, message] of messages.entries()) {
-    if (!steerCaptainReport(captain, message.from, message.content)) {
-      await withTeamLock(teamLockKey(stateRoot, team.id), () => (
-        releaseMailboxDelivery(stateRoot, team.id, CAPTAIN_KEY, messages.slice(index).map(item => item.id))
-      ))
-      return index
-    }
-    await withTeamLock(teamLockKey(stateRoot, team.id), () => (
-      acknowledgeMailbox(stateRoot, team.id, CAPTAIN_KEY, [message.id])
-    ))
-  }
-  return messages.length
-}
-
 /** Context queued after the human rejects a staged plan. */
 export function stagedPlanDiscardContext(teamName: string): string {
   return [
@@ -495,11 +442,6 @@ export function registerAgentTeamsTools(ctx: Context, config: ToolsConfig): Agen
   const memberSelections = installMemberSelectionRuntime(ctx, config.stateDir, (workspace, teamId, memberName) => (
     scheduler.kickMember(workspace, teamId, memberName)
   ))
-  ctx.on('agent/session-start', ({ agent }) => {
-    void redeliverCaptainMailbox(ctx, config, agent).catch((error: unknown) => {
-      ctx.logger.warn(`agent-teams: captain mailbox redelivery failed for ${agent.id}: ${String(error)}`)
-    })
-  })
 
   const updateStagedPlanBatch: AgentTeamsRuntime['updateStagedPlanBatch'] = async (captain, teamId, mutations, signal) => {
     if (mutations.length === 0) throw new Error('at least one staged plan operation is required')
@@ -1111,6 +1053,7 @@ export function registerAgentTeamsTools(ctx: Context, config: ToolsConfig): Agen
           provider: selection.provider,
           model: selection.model,
           reasoningEffort: selection.reasoningEffort,
+          ...selection.fallback === undefined ? {} : { fallback: selection.fallback },
           executionPrompt: trimmedOptional(args.executionPrompt),
           joinedAt: Date.now(),
           status: 'idle',
@@ -1498,10 +1441,10 @@ export function registerAgentTeamsTools(ctx: Context, config: ToolsConfig): Agen
 
   ctx.tools.register(defineTool({
     name: 'agent_teams_claim_task',
-    description: 'Claim one ready task for a member (or yourself). A member cannot own a second unfinished task. The returned attempt_id is required for that member\'s updates and becomes stale after retry/reassignment.',
+    description: 'Members claim their own ready task or read their existing attempt_id. Captains must use reassign_task to assign and wake a member; claim_task does not dispatch work. A member cannot own a second unfinished task. The returned attempt_id is required for updates and becomes stale after retry/reassignment.',
     parameters: {
       task_id: { type: 'string', required: true, description: 'The task id to claim.' },
-      assignee: { type: 'string', description: 'Member to claim for (captain only; defaults to the task\'s assignee).' },
+      assignee: { type: 'string', description: 'Deprecated: claim_task only supports a member claiming its own task. Captains must use reassign_task.' },
     },
     output: {
       schema: {
@@ -1533,9 +1476,11 @@ export function registerAgentTeamsTools(ctx: Context, config: ToolsConfig): Agen
         }
         let assignee = task.assignee
         if (identity.kind === 'captain') {
-          if (args.assignee !== undefined) {
-            requireMember(fresh, args.assignee)
-            assignee = args.assignee
+          // A captain may read the capability of its already-started takeover,
+          // but must never create a member claim without dispatching it (#125).
+          if (args.assignee !== undefined || task.assignee !== CAPTAIN_KEY
+              || (task.status !== 'claimed' && task.status !== 'in_progress')) {
+            throw new Error('claim_task is for members claiming their own task; captains must use agent_teams_reassign_task to assign and wake a member')
           }
         } else {
           if (args.assignee !== undefined) {
@@ -1854,7 +1799,7 @@ export function registerAgentTeamsTools(ctx: Context, config: ToolsConfig): Agen
 
       // Resolve the exact live captain only after releasing the state lock.
       // The plugin mailbox is already durable if live delivery cannot proceed.
-      const captain = await resolveCaptainForDelivery(ctx, prepared.fresh.captainSessionId)
+      const captain = ctx.agents.get(prepared.fresh.captainSessionId as SessionId)
       if (prepared.kind === 'captain') {
         let delivered: 'live' | 'mailbox' = 'mailbox'
         if (captain !== undefined && prepared.identity.kind === 'member') {
@@ -1901,7 +1846,7 @@ export function registerAgentTeamsTools(ctx: Context, config: ToolsConfig): Agen
 
   ctx.tools.register(defineTool({
     name: 'agent_teams_status',
-    description: 'Team snapshot: members with live activity and tasks with status/assignee/dependencies/output. Captains also see every team mailbox; members see only their own inbox. Poll this to watch progress.',
+    description: 'Team snapshot: members with live activity and tasks with status/assignee/dependencies/output. Captains also see every team mailbox; members see only their own inbox. Use after mailbox progress deliveries or for an explicit status request. After dispatch, end your turn while members work; do not repeatedly poll.',
     parameters: {},
     output: {
       schema: { type: 'object', additionalProperties: true, properties: {} },

@@ -166,8 +166,8 @@ check(
   `files = ${JSON.stringify(pkg.files)}`,
 )
 check(
-  'scoped package is private or explicitly publishes publicly',
-  pkg.private === true || !pkg.name.startsWith('@') || pkg.publishConfig?.access === 'public',
+  'scoped package publishes publicly',
+  !pkg.name.startsWith('@') || pkg.publishConfig?.access === 'public',
   'scoped packages default to restricted without publishConfig.access = "public"',
 )
 const requiredPeers = Object.keys(pkg.peerDependencies ?? {})
@@ -208,9 +208,10 @@ check(
       === JSON.stringify(placeholders(agentTeamsEn[key]))),
 )
 check(
-  'client registers the official locale namespace on both visible slots',
+  'client uses the uiConversation event registry and registers the official locale namespace',
   AGENT_TEAMS_LOCALE_NAMESPACE === 'agentTeams'
     && clientIndexSource.includes("'uiConversation', 'slots', 'sessions', 'locale', 'modelDirectories'")
+    && clientIndexSource.includes('ctx.uiConversation.events.register(agentTeamsCardDefinition)')
     && clientIndexSource.includes('ctx.locale.register(AGENT_TEAMS_LOCALE_NAMESPACE, { zh, en })')
     && clientIndexSource.match(/locale:\s*AGENT_TEAMS_LOCALE_NAMESPACE/gu)?.length === 2,
 )
@@ -365,6 +366,13 @@ check(
   'missing token bridges make panel fills and DAG borders transparent',
 )
 check(
+  'working member and captain states use the fallback-bearing business color bridge',
+  activityPanelSource.includes('data-activity={member.activity}')
+    && activityPanelCss.includes(".memberState[data-activity='working']")
+    && /\.memberState\[data-activity='working'\][^{]*\{[^}]*color:\s*var\(--dsw-alias-bg-fill-business\)/su.test(activityPanelCss),
+  'an unguarded host business token makes the working label and glyph fall back to tertiary gray',
+)
+check(
   'activity panel uses the shell overlay instead of a page-breaking body portal',
   clientIndexSource.includes("ctx.slots.inject('shell.overlay'")
     && !clientIndexSource.includes('createRoot')
@@ -383,6 +391,12 @@ check(
     && activityPanelSource.includes('data-height-mode=')
     && activityPanelSource.includes("height: autoHeight ? 'auto'")
     && activityPanelCss.includes('.resizeHandle')
+    && activityPanelCss.includes(".resizeHandle[data-resize-edge='left']::after")
+    && activityPanelCss.includes(".resizeHandle[data-resize-edge='bottom']::after")
+    && activityPanelCss.includes('.resizeHandle:hover::after')
+    && activityPanelCss.includes('pointer-events: auto')
+    && activityPanelCss.includes('width: 28px')
+    && activityPanelCss.includes('height: 28px')
     && activityPanelCss.includes('scrollbar-width: thin')
     && !activityPanelCss.includes('scrollbar-width: none'),
   'interactive panel controls must stay visible to browser verification',
@@ -424,6 +438,51 @@ check(
     && activityPanelCss.includes('.taskDetailModel')
     && activityPanelCss.includes('.memberModel'),
   'the right-side card must show which model a running subtask is using',
+)
+// Member model badge contract (inline compact pill): the render path derives
+// one full member route and shows only its last segment visibly, while the
+// noninteractive span keeps the full route in title, aria-label, and the
+// data-member-model DOM probe. The badge must sit inside memberLine after the
+// role and before the member state; the old standalone third-line row is gone.
+const memberMapStart = activityPanelSource.indexOf('team.members.map((member) => {')
+const memberBadgeSection = activityPanelSource.slice(
+  memberMapStart,
+  activityPanelSource.indexOf('css.assignmentLine', memberMapStart),
+)
+check(
+  'member model badge renders compact text inline with full-route metadata',
+  memberBadgeSection.includes('compactModelLabel(memberModel)')
+    && memberBadgeSection.includes('<span className={css.memberModel}')
+    && memberBadgeSection.includes('data-member-model={memberModel}')
+    && memberBadgeSection.includes('title={memberModel}')
+    && memberBadgeSection.includes('aria-label={memberModel}')
+    && memberBadgeSection.includes('role="img"')
+    && memberBadgeSection.indexOf('css.memberRole') < memberBadgeSection.indexOf('css.memberModel')
+    && memberBadgeSection.indexOf('css.memberModel') < memberBadgeSection.indexOf('css.memberState'),
+  'the badge must be a noninteractive role=img span inside memberLine after role and before member state, carrying the full route in title/aria-label/data-member-model',
+)
+check(
+  'the old separate third-line member model span and locale key are removed',
+  !activityPanelSource.includes("t('member.model'")
+    && !localesSource.includes("'member.model'"),
+  'the previous standalone model row and its orphaned locale key must not remain',
+)
+const memberModelCssStart = activityPanelCss.indexOf('.memberModel {')
+const memberModelCssBlock = activityPanelCss.slice(
+  memberModelCssStart,
+  activityPanelCss.indexOf('}', memberModelCssStart) + 1,
+)
+check(
+  'member model badge is a compact neutral inline pill that truncates without overflowing',
+  memberModelCssBlock.includes('display: inline-flex')
+    && memberModelCssBlock.includes('border-radius: 999px')
+    && memberModelCssBlock.includes('background: var(--dsw-alias-bg-fill-neutral)')
+    && memberModelCssBlock.includes('max-width: 132px')
+    && memberModelCssBlock.includes('min-width: 0')
+    && memberModelCssBlock.includes('overflow: hidden')
+    && memberModelCssBlock.includes('text-overflow: ellipsis')
+    && memberModelCssBlock.includes('white-space: nowrap'),
+  'the .memberModel pill needs bounded shrinkable width, ellipsis, and neutral fill so long routes never overflow the panel',
 )
 check(
   'activity polling combines card demand with current-session cold discovery',
@@ -783,6 +842,22 @@ check(
     && taskModelLabel({ assignee: 'analyst', model: 'openai/gpt-5.6-sol' }, []) === 'openai/gpt-5.6-sol'
     && taskModelLabel({ assignee: 'analyst' }, [{ name: 'analyst', provider: 'grok', model: 'grok-4.5' }]) === 'grok/grok-4.5'
     && taskModelLabel({ assignee: 'analyst' }, []) === '',
+)
+check(
+  'existing member route helpers retain expanded fallback regression coverage',
+  memberRouteLabel({ provider: 'openai', model: 'gpt-5.6-sol' }) === 'openai/gpt-5.6-sol'
+    && compactModelLabel('openai/gpt-5.6-sol') === 'gpt-5.6-sol'
+    && memberRouteLabel({ model: 'grok-4.6' }) === 'grok-4.6'
+    && compactModelLabel('grok-4.6') === 'grok-4.6'
+    && memberRouteLabel({}) === ''
+    && memberRouteLabel(undefined) === ''
+    && compactModelLabel('') === ''
+    && compactModelLabel('   ') === ''
+    && memberRouteLabel({ provider: ' openai ', model: ' gpt-5.6-sol ' }) === 'openai/gpt-5.6-sol'
+    && memberRouteLabel({ provider: ' ', model: ' gpt-5.6-sol ' }) === 'gpt-5.6-sol'
+    && compactModelLabel(' openai/gpt-5.6-sol ') === 'gpt-5.6-sol'
+    && memberRouteLabel({ provider: 'openai/org', model: 'gpt-5.6-sol' }) === 'openai/org/gpt-5.6-sol'
+    && compactModelLabel('openai/org/gpt-5.6-sol') === 'gpt-5.6-sol',
 )
 const panelBounds = { width: 1440, height: 900, anchorRight: 1440 }
 const dockedPanel = resolvePanelGeometry(DEFAULT_PANEL_LAYOUT, panelBounds)
@@ -1331,42 +1406,23 @@ function descriptorEvent(label, agentProvider = 'descriptor-provider', agentMode
   }
 }
 
-// alpha.5 dropped `registerContinuableSetup`; the plugin installs the member
-// bridge from the global `agent/session-start` event instead. This fake ctx
-// records that listener and exposes a dispatch helper per child Agent.
-function fakePluginContext() {
+function fakeChildContext({ label, parentSessionId, cwd, agentProvider, agentModel }) {
   const listeners = new Map()
   return {
     listeners,
-    on(name, listener) {
-      listeners.set(name, listener)
-      return () => listeners.delete(name)
-    },
-    emitSessionStart(agent) {
-      return listeners.get('agent/session-start')?.({ agent })
-    },
-  }
-}
-
-function fakeChildContext({ label, parentSessionId, cwd, agentProvider, agentModel }) {
-  const listeners = new Map()
-  const agent = {
-    id: label,
-    status: 'idle',
-    whenIdle: async () => undefined,
-    session: {
-      header: { parentSession: parentSessionId, cwd },
-      ownEvents: () => [descriptorEvent(label, agentProvider, agentModel)],
-    },
-    // The bridge installs per-child listeners on `agent.ctx`.
-    ctx: {
+    context: {
+      agent: {
+        session: {
+          header: { parentSession: parentSessionId, cwd, seedLength: 0 },
+          events: [descriptorEvent(label, agentProvider, agentModel)],
+        },
+      },
       on(name, listener) {
         listeners.set(name, listener)
         return () => listeners.delete(name)
       },
     },
   }
-  return { listeners, agent, context: agent }
 }
 
 async function routedConfig(child) {
@@ -1380,19 +1436,27 @@ async function routedConfig(child) {
   }))
 }
 
-const pluginCtx = fakePluginContext()
-const selectionRuntime = installMemberSelectionRuntime(pluginCtx, '.agent-teams')
+let setupMemberSelection
+const selectionRuntime = installMemberSelectionRuntime({
+  subagents: {
+    registerContinuableSetup: (setup) => {
+      setupMemberSelection = setup
+      return () => undefined
+    },
+  },
+}, '.agent-teams')
 const freshChild = fakeChildContext({
   label: 'agent-teams:fresh-team:backend',
   parentSessionId: 'captain-session',
   cwd: process.cwd(),
 })
+let disposeFresh
 await selectionRuntime.withPending(
   'captain-session',
   'agent-teams:fresh-team:backend',
   overriddenSelection,
   async () => {
-    pluginCtx.emitSessionStart(freshChild.agent)
+    disposeFresh = setupMemberSelection(freshChild.context)
   },
 )
 const freshRoute = await routedConfig(freshChild)
@@ -1402,9 +1466,7 @@ check(
     && freshRoute.model === 'other-model'
     && freshRoute.reasoningEffort === 'low',
 )
-// Per-child listeners now unwind with the Agent's scope; the fake ctx has no
-// scope to dispose, so emitting session-start again must stay inert instead.
-pluginCtx.emitSessionStart(freshChild.agent)
+disposeFresh()
 
 const restoreWorkspace = await mkdtemp(join(tmpdir(), 'dsh-agent-teams-selection-'))
 try {
@@ -1433,7 +1495,7 @@ try {
     agentProvider: 'cold-provider',
     agentModel: 'cold-model',
   })
-  pluginCtx.emitSessionStart(coldChild.agent)
+  const disposeCold = setupMemberSelection(coldChild.context)
   const coldRoute = await routedConfig(coldChild)
   check(
     'cold-resumed child restores provider, model, and reasoning from team.json',
@@ -1441,6 +1503,7 @@ try {
       && coldRoute.model === 'cold-model'
       && coldRoute.reasoningEffort === 'high',
   )
+  disposeCold()
 } finally {
   await rm(restoreWorkspace, { recursive: true, force: true })
 }
@@ -1574,9 +1637,9 @@ try {
       }
       // Archive moves the whole team directory with `rename(source, target)`.
       // The same Windows delete-sharing EPERM applies when a file below the
-      // directory is momentarily locked, so it retries the rename. A short
-      // (≈150 ms) lock falls inside the retry window and must not abort the
-      // archive.
+      // directory is momentarily locked, so it retries the rename. Release
+      // the real lock only after observing the first OS rename rejection;
+      // PowerShell startup/scheduling must not race a 150 ms retry budget.
       const { archiveTeamDir } = await import('../lib/state.js')
       const transientTeam = {
         name: 'Transient Lock Team',
@@ -1589,44 +1652,73 @@ try {
       }
       await createTeamDir(atomicStateRoot, transientTeam)
       const transientJson = join(atomicStateRoot, transientTeam.id, 'team.json')
+      const transientSource = join(atomicStateRoot, transientTeam.id)
       const flasher = spawn(
         'powershell.exe',
         ['-NoProfile', '-NonInteractive', '-Command',
           `$f = '${transientJson.replaceAll("'", "''")}';
            $s = [System.IO.File]::Open($f, [IO.FileMode]::Open, [IO.FileAccess]::ReadWrite, [IO.FileShare]::ReadWrite);
            [Console]::Out.WriteLine('HELD_T'); [Console]::Out.Flush();
-           Start-Sleep -Milliseconds 80; $s.Dispose()`],
-        { stdio: ['ignore', 'pipe', 'inherit'] },
+           [void][Console]::In.ReadLine(); $s.Dispose();
+           [Console]::Out.WriteLine('RELEASED_T'); [Console]::Out.Flush()`],
+        { stdio: ['pipe', 'pipe', 'inherit'] },
       )
-      const flashed = await new Promise((resolve, reject) => {
+      const waitForMarker = (marker, trigger = () => {}) => new Promise((resolve, reject) => {
         let buffer = ''
         const onData = (chunk) => {
           buffer += chunk.toString()
-          if (buffer.includes('HELD_T')) { cleanup(); resolve(true) }
+          if (buffer.includes(marker)) { cleanup(); resolve(true) }
         }
-        const onExit = () => { cleanup(); reject(new Error('transient holder exited before arming')) }
+        const onError = (error) => { cleanup(); reject(error) }
+        const onExit = () => { cleanup(); reject(new Error(`transient holder exited before ${marker}`)) }
         const timer = setTimeout(() => {
           cleanup()
-          reject(new Error('timed out waiting for the transient lock holder'))
+          reject(new Error(`timed out waiting for transient lock marker ${marker}`))
         }, 10_000)
         function cleanup() {
           clearTimeout(timer)
           flasher.stdout.off('data', onData)
           flasher.off('exit', onExit)
+          flasher.off('error', onError)
+          flasher.stdin.off('error', onError)
         }
         flasher.stdout.on('data', onData)
         flasher.on('exit', onExit)
+        flasher.on('error', onError)
+        flasher.stdin.on('error', onError)
+        trigger()
       })
+      const fsPromises = (await import('node:fs/promises')).default
+      const { syncBuiltinESMExports } = await import('node:module')
+      const originalRename = fsPromises.rename
+      let archiveRenameCalls = 0
+      let observedLockRejection = false
       try {
-        // The flasher releases after ~80 ms (plus process exit jitter): the
-        // lock must outlive the first rename attempt but land comfortably
-        // inside the 3x50 ms retry budget, including the PowerShell dispose
-        // jitter that previously pushed a 140 ms hold past it (issue #108).
+        const flashed = await waitForMarker('HELD_T')
+        // Delegate every attempt to the real filesystem. Only coordinate
+        // release after the first actual sharing violation, then rethrow that
+        // same error so archiveTeamDir itself must perform the retry.
+        fsPromises.rename = async (from, to) => {
+          if (from !== transientSource) return originalRename(from, to)
+          archiveRenameCalls += 1
+          try {
+            return await originalRename(from, to)
+          } catch (error) {
+            if (!observedLockRejection && ['EPERM', 'EACCES', 'EBUSY'].includes(error.code)) {
+              observedLockRejection = true
+              await waitForMarker('RELEASED_T', () => flasher.stdin.end('release\n'))
+            }
+            throw error
+          }
+        }
+        syncBuiltinESMExports()
         await archiveTeamDir(atomicStateRoot, transientTeam.id)
         const archived = await readFile(join(atomicStateRoot, 'archive', transientTeam.id, 'team.json'), 'utf8')
         check(
           'archiveTeamDir survives a transient Windows directory lock via rename retries',
-          flashed && JSON.parse(archived).id === transientTeam.id,
+          flashed && observedLockRejection && archiveRenameCalls >= 2
+            && JSON.parse(archived).id === transientTeam.id,
+          `observed real lock = ${observedLockRejection}, rename attempts = ${archiveRenameCalls}`,
         )
       } catch (error) {
         check(
@@ -1635,7 +1727,15 @@ try {
           String(error),
         )
       } finally {
+        fsPromises.rename = originalRename
+        syncBuiltinESMExports()
         flasher.kill()
+        if (flasher.exitCode === null && flasher.signalCode === null) {
+          await new Promise((resolve) => {
+            const timer = setTimeout(resolve, 5_000)
+            flasher.once('exit', () => { clearTimeout(timer); resolve() })
+          })
+        }
       }
     } finally {
       holder.kill()

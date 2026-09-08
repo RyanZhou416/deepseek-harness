@@ -7,10 +7,12 @@ import { join } from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
 import { LlmError } from '@deepseek-ai/dsh-llm'
 import { apply as installRetry } from '@deepseek-ai/dsh-llm-retry'
-import { queueSubagentPrompt } from '@deepseek-ai/dsh-subagent/internal'
 import { installMemberSelectionRuntime } from '../lib/members.js'
 import { installTeamScheduler } from '../lib/scheduler.js'
 import { appendMailbox, createMessage, createTeamDir, readTeam, readMailbox, readUnreadMailbox, withTeamLock, writeTeam } from '../lib/state.js'
+
+const modernHarness = process.argv.includes('--modern-harness')
+const hostQueue = Symbol.for('dsh.subagent.queuePrompt')
 
 async function eventually(predicate) {
   for (let i = 0; i < 100; i++) {
@@ -45,49 +47,66 @@ async function fixture(t, { captainStatus = 'idle', fallback, captainOffline = f
   }
   let resolveIdle
   const idle = new Promise(resolve => { resolveIdle = resolve })
-  const childListeners = new Map()
   const child = {
     id: 'worker-session', status: 'running',
     whenIdle: () => child.status === 'idle' ? Promise.resolve() : idle,
     session: {
-      header: { cwd: workspace, parentSession: captain.id },
-      ownEvents: () => [{ type: 'subagent/descriptor', data: {
+      header: { cwd: workspace, parentSession: captain.id, seedLength: 0 },
+      events: [{ type: 'subagent/descriptor', data: {
         version: 3, mode: 'continuable', provider: 'spawn', label: 'agent-teams:team:worker',
         agentProvider: 'fake', agentModel: 'primary',
       } }],
       append(type, data) { sessionEvents.push({ type, data }) },
     },
-    // alpha.5 bridge reads this member id from the payload; keep the branded
-    // SessionId shape of the real runtime (`ctx.agents.get(id)` uses it).
-    ctx: {
-      on(name, listener) { childListeners.set(name, listener); return () => childListeners.delete(name) },
-    },
   }
-  Object.defineProperty(child, Symbol.toPrimitive, { value: () => child.id })
-  child.ctx.agent = child
   await createTeamDir(stateRoot, {
     id: 'team', name: 'Team', captainSessionId: captain.id, createdAt: 1, taskSeq: 1,
     members: [{ id: child.id, name: 'worker', status: 'working', joinedAt: 1, provider: 'fake', model: 'primary' }],
     tasks: [{ id: 't1', subject: 'work', assignee: 'worker', status: 'in_progress', dependencies: [], attempt: 1, attemptId: 'a1', createdAt: 1, updatedAt: 1 }],
   })
-  // alpha.5: the bridge installs from the global `agent/session-start` event.
-  let sessionStart
+  let setup
+  const rootListeners = new Map()
+  const disposers = []
   const ctx = {
     logger: { debug() {}, warn(message) { warnings.push(message) } },
     agents: { get(id) { return id === child.id ? child : id === captain.id && !captainOffline ? captain : undefined } },
-    on(name, listener) { if (name === 'agent/session-start') sessionStart = listener; return () => {} },
+    on(name, listener) { rootListeners.set(name, listener); return () => rootListeners.delete(name) },
+    effect(setup) { const dispose = setup(); disposers.push(dispose); return dispose },
     subagents: {
-      // alpha.5 Queue seam: deliveries go through the symbol-keyed host prompt queue.
-      async [queueSubagentPrompt](_captain, id, content) { deliveries.push({ id, content }); return 'accepted' },
+      registerContinuableSetup(fn) { setup = fn },
+      async followup(_captain, id, content) { deliveries.push({ id, content }); return 'accepted' },
     },
+  }
+  if (modernHarness) {
+    const oldEvents = child.session.events
+    delete child.session.events
+    delete child.session.header.seedLength
+    child.session.ownEvents = () => oldEvents
+    const followup = ctx.subagents.followup
+    delete ctx.subagents.followup
+    delete ctx.subagents.registerContinuableSetup
+    ctx.subagents[hostQueue] = function (parent, id, content, source, signal) {
+      return followup.call(this, parent, id, content, { source, signal })
+    }
+    ctx.subagents.sendMessage = () => { throw new Error('failure recovery must not steer a job') }
+    setup = childCtx => {
+      child.ctx = childCtx
+      rootListeners.get('agent/session-start')({ agent: child, source: 'startup' })
+      return () => { for (const dispose of disposers) dispose() }
+    }
   }
   const scheduler = installTeamScheduler(ctx, { stateDir: '.agent-teams' })
   const runtime = installMemberSelectionRuntime(ctx, '.agent-teams', (workspace, teamId, memberName) => (
     scheduler.kickMember(workspace, teamId, memberName)
   ))
-  await runtime.withPending(captain.id, 'agent-teams:team:worker', {
+  const dispose = await runtime.withPending(captain.id, 'agent-teams:team:worker', {
     provider: 'fake', model: 'primary', ...fallback ? { fallback } : {},
-  }, () => sessionStart({ agent: child }))
+  }, () => setup({
+    agent: child,
+    effect(setup) { const dispose = setup(); disposers.push(dispose); return dispose },
+    on(name, listener) { listeners.set(name, listener); return () => listeners.delete(name) },
+  }))
+  t.after(dispose)
   let retryHandler
   let projection
   let retryState = {}
@@ -107,7 +126,7 @@ async function fixture(t, { captainStatus = 'idle', fallback, captainOffline = f
   const payload = (policy, code = failure.code, signal = new AbortController().signal) => ({
     agent: child, turn: 1, step: 0, provider: 'fake', failure: { ...failure, code }, retryPolicy: policy, signal,
   })
-  const memberError = (value, next = async () => undefined) => childListeners.get('agent/request-error')?.(value, next) ?? next()
+  const memberError = (value, next = async () => undefined) => listeners.get('agent/request-error')?.(value, next) ?? next()
   const settleSilently = () => {
     // The real driver settles after emitting agent/error. Deliberately omit
     // agent/status so recovery cannot depend on that edge reaching the plugin.
@@ -122,7 +141,7 @@ async function fixture(t, { captainStatus = 'idle', fallback, captainOffline = f
     unread: () => readUnreadMailbox(stateRoot, 'team', 'captain'),
     retry: (policy, code) => { const value = payload(policy, code); return retryHandler(value, () => memberError(value)) },
     terminal({ settle = true, turn = 1 } = {}) {
-      pendingFailures.push(childListeners.get('agent/error')?.({ agent: child, turn, step: 0, error: new LlmError(failure.message, failure.code) }))
+      pendingFailures.push(listeners.get('agent/error')?.({ agent: child, turn, step: 0, error: new LlmError(failure.message, failure.code) }))
       if (settle) settleSilently()
     },
   }
