@@ -1,8 +1,8 @@
-// Sessions remain resident after creation; only the staged Session keeps its history Remote open.
+// Sessions remain resident after creation so their open Remote sources keep running off-screen.
 
 import type { Context } from '@deepseek-ai/cordis'
 import { randomUUID } from '@deepseek-ai/dsh-util-crypto'
-import type { AttachmentIdType, ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
+import type { AttachmentIdType, FileAttachmentRef, ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
 import type { SubagentAddress } from '@deepseek-ai/dsh-subagent/client'
 import type { MessageId } from '@deepseek-ai/dsh-llm/brand'
 import { SessionLogOffset, SessionSeq, type SessionId } from '@deepseek-ai/dsh-session/types'
@@ -12,6 +12,7 @@ import type {
   PromptContentPart,
   QueueAction,
   SessionAddress,
+  SessionAssistantStreamBaseline,
   SessionControlFrame,
   SessionProjectionBaseline,
   SessionQueuedItem,
@@ -29,12 +30,17 @@ import type {
 } from '../contract/events.ts'
 import { Notifier } from './notifier.ts'
 import { isRemoteFailure } from '@deepseek-ai/dsh-api-gateway/client'
-import { RemoteError, type RemoteFailure, type RemoteResult } from '@deepseek-ai/dsh-typert-protocol'
+import { RemoteError } from '@deepseek-ai/dsh-typert-protocol'
+import type { RemoteFailure, RemoteResult } from '@deepseek-ai/dsh-typert-protocol'
 import type { SessionRemotes } from './remotes.ts'
 import { ProjectionValueStore } from './projection-store.ts'
 import type { ProjectionsBaseline } from './projection-store.ts'
 import { resolvedClientTimeZone } from '../time-zone.ts'
 import { SessionQueueMirror } from './queue-mirror.ts'
+import {
+  ClientAssistantStream,
+  type ClientAssistantStreamResult,
+} from './assistant-stream.ts'
 
 function projectionsBaseline(value: SessionProjectionBaseline): ProjectionsBaseline {
   return {
@@ -48,9 +54,6 @@ export const PAGE_MESSAGES = 50
 
 /** Messages requested per page while a turn jump loops backwards (fewer, larger round trips). */
 export const JUMP_PAGE_MESSAGES = 200
-
-/** Scalar live events retained before a completed answer requests a packed rebaseline. */
-export const DEFAULT_LIVE_EVENT_REBASE_THRESHOLD = 20_000
 
 /** Manager-owned observers of a Session object's local state edges. */
 export interface SessionOptions {
@@ -73,8 +76,6 @@ export interface SessionOptions {
    * private store (bare object-layer construction).
    */
   projections?: ProjectionValueStore
-  /** Positive scalar live-event count that requests one packed stream rebaseline after an `assistant/message`. */
-  liveEventRebaseThreshold?: number
 }
 
 /**
@@ -98,10 +99,9 @@ export class Session implements SessionFace {
   private jumpTargetSeq: SessionSeq | null = null
   /** The running jump loop's completion, shared by retargeting callers. */
   private jumpPromise: Promise<void> | null = null
-  /** Invalidates detached jump-loop cleanup when another generation takes ownership. */
-  private jumpGeneration = 0
   /** Authoritative stream-only inbox snapshot; pending work never hits history. */
   private readonly queueMirror = new SessionQueueMirror()
+  private readonly assistantStream = new ClientAssistantStream()
   private running = false
   private address: SubagentAddress | undefined
   private parentAvailable: boolean | undefined
@@ -128,11 +128,6 @@ export class Session implements SessionFace {
   }>()
   /** Owns the addressed page/follow lifecycle while this Session is open. */
   private events: SessionEventStream | undefined
-  /** Detached stream disposals retained until teardown reaches transport quiescence. */
-  private readonly eventDisposals = new Set<Promise<void>>()
-  private readonly liveEventRebaseThreshold: number
-  private scalarLiveEvents = 0
-  private liveRebaseRequested = false
 
   /**
    * Per-session projection value store (push model; see the session-projection
@@ -171,12 +166,6 @@ export class Session implements SessionFace {
     private readonly remote: SessionRemotes,
     private readonly options: SessionOptions = {},
   ) {
-    const liveEventRebaseThreshold = options.liveEventRebaseThreshold
-      ?? DEFAULT_LIVE_EVENT_REBASE_THRESHOLD
-    if (!Number.isSafeInteger(liveEventRebaseThreshold) || liveEventRebaseThreshold <= 0) {
-      throw new Error('liveEventRebaseThreshold must be a positive safe integer')
-    }
-    this.liveEventRebaseThreshold = liveEventRebaseThreshold
     this.projections = options.projections ?? new ProjectionValueStore()
     this.address = options.address
     this.parentAvailable = options.parentAvailable
@@ -222,7 +211,7 @@ export class Session implements SessionFace {
         : 'transcript',
       time: Date.now(),
       text: input.text,
-      images: input.images,
+      attachments: input.attachments,
     }]
     this.submissionSettlements.set(requestId, { onRetire: input.onRetire, retiring: false })
     // The blank → engaging edge flips here, ahead of prompt(): the composer
@@ -234,7 +223,7 @@ export class Session implements SessionFace {
 
   /**
    * Send (queue/steer passed through 1:1); failures land in the snapshot's promptError.
-   * @param content - text plus browser-owned temporary image uploads.
+   * @param content - text, browser-owned temporary image uploads, and staged-file receipts.
    * @param mode - queue appends after the current turn; steer interrupts it.
    * @param signal - optional caller cancellation for the complete admission round-trip.
    * @param requestId - identity from {@link beginSubmission}; a failed identified prompt retires its echo.
@@ -264,13 +253,26 @@ export class Session implements SessionFace {
         content,
         clientTimeZone,
       }, signal)
+    } else if (content.some(part => part.type === 'file')) {
+      result = {
+        ok: false,
+        error: new RemoteError(
+          'subagent/attachment-invalid',
+          'subagent continuation does not accept files',
+          { reason: 'SUBAGENT_FILE_UNSUPPORTED' },
+        ),
+      }
     } else {
+      // The preceding branch rejects file parts before the narrower subagent
+      // wire type is used; this array is not filtered or reordered.
+      const routedContent = content as Exclude<PromptContentPart, { readonly type: 'file' }>[]
       const routed = await this.remote.subagents.prompt({
         requestId: randomUUID() as SessionRequestId,
         parentSessionId: this.address.parentSessionId,
         childSessionId: this.address.childSessionId,
         mode: 'continuable',
-        content,
+        delivery: mode,
+        content: routedContent,
         clientTimeZone: resolvedClientTimeZone(),
       }, signal)
       result = routed.ok ? { ok: true, value: { accepted: true } } : routed
@@ -317,26 +319,7 @@ export class Session implements SessionFace {
 
   /** Apply one operation to a still-pending queue occurrence. */
   async updateQueue(itemId: MessageId, action: QueueAction): Promise<RemoteResult<{ accepted: true }>> {
-    if (this.address === undefined) {
-      return this.remote.session.updateQueue({ sessionId: this.sessionId, itemId, action })
-    }
-    if (this.address.mode === 'one-shot') {
-      return {
-        ok: false,
-        error: new RemoteError(
-          'subagent/not-resumable',
-          'one-shot subagent conversations are read-only',
-          { childSessionId: this.address.childSessionId },
-        ),
-      }
-    }
-    return this.remote.subagents.updateQueuedByParent({
-      parentSessionId: this.address.parentSessionId,
-      childSessionId: this.address.childSessionId,
-      mode: 'continuable',
-      itemId,
-      action,
-    })
+    return this.remote.session.updateQueue({ sessionId: this.sessionId, itemId, action })
   }
 
   /**
@@ -404,40 +387,11 @@ export class Session implements SessionFace {
     return promise
   }
 
-  /**
-   * Stop the off-stage history Remote while preserving the Session object,
-   * current window, projections, queue, and scoped feature state. A later
-   * {@link open} replaces the retained window from durable Host history.
-   *
-   * The generation and ownership fields move before the first await so a
-   * rapid away-and-back selection can open a new stream without the old
-   * disposal overwriting it.
-   * @returns when every detached history stream has reached quiescence.
-   */
-  suspendHistory(): Promise<void> {
-    this.openGeneration++
-    const events = this.events
-    this.events = undefined
-    this.openPromise = null
-    this.openState = 'cold'
-    this.openError = null
-    this.loadingOlder = false
-    this.jumpGeneration++
-    this.jumpTargetSeq = null
-    this.jumpPromise = null
-    this.scalarLiveEvents = 0
-    this.liveRebaseRequested = false
-    this.notifier.markDirty()
-    if (events !== undefined) this.startEventDisposal(events)
-    return this.drainEventDisposals()
-  }
-
   /** Page up: pull one earlier page with the window's first seq as beforeSeq and prepend. */
   async loadOlder(): Promise<void> {
     if (this.openState !== 'open' || !this.hasMore || this.loadingOlder) return
     const events = this.events
     if (events === undefined) return
-    const generation = this.openGeneration
     this.loadingOlder = true
     this.notifier.markDirty()
     try {
@@ -447,7 +401,6 @@ export class Session implements SessionFace {
         console.error('[session-controller] loadOlder failed:', error)
       }
     } finally {
-      if (generation !== this.openGeneration || this.events !== events) return
       this.loadingOlder = false
       this.notifier.markDirty()
     }
@@ -473,8 +426,7 @@ export class Session implements SessionFace {
     // stream generation; this pass then stops instead of paging the new
     // generation toward its old target.
     const generation = this.openGeneration
-    const jumpGeneration = ++this.jumpGeneration
-    const operation = (async () => {
+    this.jumpPromise = (async () => {
       try {
         while (this.hasMore && this.jumpTargetSeq !== null && this.baseSeq > this.jumpTargetSeq) {
           if (generation !== this.openGeneration) return
@@ -491,15 +443,13 @@ export class Session implements SessionFace {
           console.error('[session-controller] loadThrough failed:', error)
         }
       } finally {
-        if (generation !== this.openGeneration || this.jumpGeneration !== jumpGeneration) return
         this.jumpTargetSeq = null
         this.jumpPromise = null
         this.loadingOlder = false
         this.notifier.markDirty()
       }
     })()
-    this.jumpPromise = operation
-    return operation
+    return this.jumpPromise
   }
 
   /** Rebuild an opened history source after address replacement.
@@ -507,9 +457,15 @@ export class Session implements SessionFace {
    *  reconnecting control stream and remains untouched. */
   async resync(): Promise<void> {
     if (this.openState === 'cold') return // never opened: no window to rebuild (doOpen flips to 'loading' synchronously, so cold implies no in-flight open)
-    const suspendedGeneration = this.openGeneration + 1
-    await this.suspendHistory()
-    if (this.openGeneration !== suspendedGeneration || !this.historyIsCold()) return
+    this.openGeneration++
+    const events = this.events
+    this.events = undefined
+    await events?.dispose()
+    this.openPromise = null
+    this.openState = 'cold'
+    this.openError = null
+    this.baseSeq = SessionLogOffset(0)
+    this.notifier.markDirty()
     await this.open()
   }
 
@@ -638,15 +594,13 @@ export class Session implements SessionFace {
     for (const requestId of [...this.submissionSettlements.keys()]) {
       this.retireFailedSubmission(requestId)
     }
-    await this.suspendHistory()
+    this.openGeneration++
+    const events = this.events
+    this.events = undefined
+    await events?.dispose()
   }
 
   // ---- Private ----
-
-  /** Read the current stream state without carrying a pre-await narrowing. */
-  private historyIsCold(): boolean {
-    return this.openState === 'cold'
-  }
 
   /** @param generation - openGeneration at launch; stale passes cannot publish after replacement. */
   private async doOpen(generation: number): Promise<void> {
@@ -686,27 +640,65 @@ export class Session implements SessionFace {
           change.entries,
           change.hasMore,
           change.page.projections === undefined ? undefined : projectionsBaseline(change.page.projections),
+          change.page.assistantStream,
         )
         return
       case 'prepend':
         this.prependWindow(change.entries, change.hasMore)
         return
       case 'append':
-        if (this.appendLive(change.entry)) this.notifier.markDirty()
+        this.publishAssistantEntry(this.assistantStream.acceptDurable(change.entry))
+        return
+      case 'assistant-stream':
+        this.publishAssistantEntry(this.assistantStream.acceptFrame(change.frame))
     }
   }
 
   /** Replace the complete contiguous window and apply page-owned projection metadata. */
-  private installWindow(entries: readonly SessionEventLikeEntry[], hasMore: boolean, projections?: ProjectionsBaseline): void {
-    this.scalarLiveEvents = 0
-    this.liveRebaseRequested = false
+  private installWindow(
+    entries: readonly SessionEventLikeEntry[],
+    hasMore: boolean,
+    projections?: ProjectionsBaseline,
+    assistantStream?: SessionAssistantStreamBaseline,
+  ): void {
+    // A durable gap-repair page has no assistant baseline. Clearing transient
+    // attempts makes a held notification reopen follow once for an atomic
+    // page/baseline pair instead of applying it to an unrelated repair cut.
+    const visible = this.assistantStream.replace(entries, assistantStream)
     this.baseSeq = SessionLogOffset(entries[0]?.event.seq ?? 0)
     this.hasMore = hasMore
-    if (entries.some(entry => entry.event.type === 'turn/start')) this.firstPromptPendingTurn = false
+    if (visible.some(entry => entry.event.type === 'turn/start')) this.firstPromptPendingTurn = false
     if (projections !== undefined) this.projections.seed(projections)
-    this.eventSource.replace(entries, hasMore)
-    for (const entry of entries) this.observeSubmissionEvent(entry.event)
+    this.eventSource.replace(visible, hasMore)
+    for (const entry of visible) this.observeSubmissionEvent(entry.event)
     this.notifier.markDirty()
+  }
+
+  private publishAssistantEntry(result: ClientAssistantStreamResult): void {
+    if (result?.type === 'rebaseline') {
+      const events = this.events
+      queueMicrotask(() => {
+        if (events !== undefined && this.events === events) events.restart()
+      })
+      return
+    }
+    if (result?.type === 'settlement') {
+      this.eventSource.settleAssistant(result.attemptId, result.entry)
+      this.observeSubmissionEvent(result.entry.event)
+      this.notifier.markDirty()
+      return
+    }
+    if (result?.type === 'abandonment') {
+      this.eventSource.settleAssistant(result.attemptId)
+      this.notifier.markDirty()
+      return
+    }
+    if (result?.type === 'publish' && this.appendLive(result.entry)) {
+      this.notifier.markDirty()
+    } else if (result?.type === 'transient') {
+      this.eventSource.append(result.entry)
+      this.notifier.markDirty()
+    }
   }
 
   /** Prepend one stream-validated history page. */
@@ -723,16 +715,6 @@ export class Session implements SessionFace {
     if (event.type === 'turn/start') this.firstPromptPendingTurn = false
     const queueChanged = this.queueMirror.acceptDurable(event)
     this.eventSource.append(entry)
-    this.scalarLiveEvents++
-    if (!this.liveRebaseRequested
-      && this.scalarLiveEvents >= this.liveEventRebaseThreshold
-      && event.type === 'assistant/message') {
-      this.liveRebaseRequested = true
-      const events = this.events
-      queueMicrotask(() => {
-        if (events !== undefined && this.events === events && this.liveRebaseRequested) events.restart()
-      })
-    }
     // After the feed append: the conversation assembly's animation frame is
     // registered by the feed subscribers above, so the echo-retirement frame
     // scheduled here always runs after the durable node became renderable.
@@ -749,7 +731,7 @@ export class Session implements SessionFace {
     const data = event.data as { readonly source?: unknown; readonly content?: unknown } | undefined
     const source = data?.source as { readonly kind?: unknown; readonly rpcId?: unknown } | undefined
     if (source?.kind !== 'user' || typeof source.rpcId !== 'string') return
-    this.scheduleObservedRetirement(source.rpcId as SessionRequestId, imageRefsIn(data?.content))
+    this.scheduleObservedRetirement(source.rpcId as SessionRequestId, attachmentRefsIn(data?.content))
   }
 
   /** Retire echoes whose prompts landed in the host inbox instead of the log (running-turn submissions). */
@@ -757,7 +739,7 @@ export class Session implements SessionFace {
     if (this.submissionSettlements.size === 0) return
     for (const item of items) {
       if (item.rpcId !== undefined) {
-        this.scheduleObservedRetirement(item.rpcId, imageRefsIn(item.message.content))
+        this.scheduleObservedRetirement(item.rpcId, attachmentRefsIn(item.message.content))
       }
     }
   }
@@ -770,7 +752,7 @@ export class Session implements SessionFace {
    */
   private scheduleObservedRetirement(
     requestId: SessionRequestId,
-    attachments: readonly ImageAttachmentRef[],
+    attachments: readonly (ImageAttachmentRef | FileAttachmentRef)[],
   ): void {
     const settlement = this.submissionSettlements.get(requestId)
     if (settlement === undefined || settlement.retiring) return
@@ -806,34 +788,8 @@ export class Session implements SessionFace {
     this.openPromise = null
     this.openState = 'error'
     this.openError = error
-    this.startEventDisposal(events)
+    void events.dispose()
     this.notifier.markDirty()
-  }
-
-  /** Start one transport disposal and keep it reachable until settlement. */
-  private startEventDisposal(events: SessionEventStream): void {
-    const disposal = events.dispose()
-    this.eventDisposals.add(disposal)
-    void disposal.then(
-      () => { this.eventDisposals.delete(disposal) },
-      () => { this.eventDisposals.delete(disposal) },
-    )
-  }
-
-  /** Await every stream detached before or during this drain. */
-  private async drainEventDisposals(): Promise<void> {
-    const failures: unknown[] = []
-    while (this.eventDisposals.size > 0) {
-      const batch = [...this.eventDisposals]
-      const settled = await Promise.allSettled(batch)
-      for (const disposal of batch) this.eventDisposals.delete(disposal)
-      for (const result of settled) {
-        if (result.status === 'rejected') failures.push(result.reason)
-      }
-    }
-    if (failures.length > 0) {
-      throw new AggregateError(failures, `session ${this.sessionId} history stream disposal failed`)
-    }
   }
 
   private buildSnapshot(): SessionSnapshot {
@@ -874,15 +830,16 @@ function scheduleFrame(fn: () => void): void {
   else setTimeout(fn, 0)
 }
 
-/** Image attachment references in one structurally-read content block list, in block order. */
-function imageRefsIn(content: unknown): readonly ImageAttachmentRef[] {
+/** Attachment references in one structurally-read content block list, in block order. */
+function attachmentRefsIn(content: unknown): readonly (ImageAttachmentRef | FileAttachmentRef)[] {
   if (!Array.isArray(content)) return []
-  const refs: ImageAttachmentRef[] = []
+  const refs: Array<ImageAttachmentRef | FileAttachmentRef> = []
   for (const block of content) {
     if (typeof block !== 'object' || block === null) continue
     const candidate = block as { readonly type?: unknown; readonly attachment?: unknown }
-    if (candidate.type === 'image' && typeof candidate.attachment === 'object' && candidate.attachment !== null) {
-      refs.push(candidate.attachment as ImageAttachmentRef)
+    if ((candidate.type === 'image' || candidate.type === 'file')
+      && typeof candidate.attachment === 'object' && candidate.attachment !== null) {
+      refs.push(candidate.attachment as ImageAttachmentRef | FileAttachmentRef)
     }
   }
   return refs
