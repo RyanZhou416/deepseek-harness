@@ -124,6 +124,38 @@ describe('streaming V2 system prompt migration', () => {
     expect(() => migrate([...opening(), event('step/end', { turn: 1, step: 1 }), event('request/header', request('late'))])).toThrow(/outside an open step/)
   })
 
+  it('closes one released V2 turn interrupted by a next-step wake before its replacement turn', () => {
+    const wake = { ...user('wake'), source: { kind: 'plugin', plugin: 'completion-notice' } }
+    const input = [
+      ...opening(),
+      event('assistant/attempt', { turn: 1, step: 1, stream: [] }),
+      event('step/end', { turn: 1, step: 1 }),
+      event('agent/inbox/spliced', { target: 'next-step', start: 0, inserted: [wake] }),
+      event('turn/start', { turn: 2 }),
+      event('agent/inbox/spliced', { target: 'next-step', start: 0, removedCount: 1, inserted: [] }),
+      event('step/start', { turn: 2, step: 1 }),
+      event('user/message', wake, 'append'),
+      event('step/end', { turn: 2, step: 1 }),
+      event('turn/end', { turn: 2, reason: { kind: 'completed' } }),
+    ]
+    const output = migrate(input)
+    expect(output.events.filter(e => e.type === 'turn/end').map(e => e.data)).toEqual([
+      { turn: 1, reason: { kind: 'interrupted' } },
+      { turn: 2, reason: { kind: 'completed' } },
+    ])
+    expect(output.events.findIndex(e => e.type === 'turn/end')).toBeLessThan(
+      output.events.findIndex(e => e.type === 'turn/start' && (e.data as SessionFormatJsonObject)['turn'] === 2),
+    )
+
+    const variants = [
+      input.map((e, index) => index === 4 ? event('agent/inbox/spliced', { target: 'next-step', start: 0, inserted: [] }) : e),
+      input.map((e, index) => index === 4 ? event('agent/inbox/spliced', { target: 'next-turn', start: 0, inserted: [wake] }) : e),
+      input.map((e, index) => index === 3 ? event('feedback/record', { text: 'step remains open' }) : e),
+      input.map((e, index) => index === 5 ? event('turn/start', { turn: 3 }) : e),
+    ]
+    for (const variant of variants) expect(() => migrate(variant)).toThrow()
+  })
+
   it.each([undefined, 0, 1, 2])('preserves delivery generation coordinates (%s) and validates ownership before promotion', (version) => {
     const marker = event('session-log-deepseek/delivery-accepted', { sessionId: header.id, throughSeq: 1, ...(version === undefined ? {} : { sessionFormatVersion: version }) })
     const target = migrate([...opening(), marker])
@@ -234,6 +266,26 @@ describe('streaming V2 system prompt migration', () => {
       { ...message, content: [{ type: 'file', attachment: { ...attachment, bytes: -1 } }] },
     ]
     for (const bad of badMessages) expect(() => migrate([...opening(), event('user/message', bad, 'append')])).toThrow()
+  })
+
+  it('preserves fork-published AgentTeams command sources and rejects unaudited fields', () => {
+    for (const source of [
+      { kind: 'agent-teams-command' },
+      { kind: 'agent-teams-command', goal: '实现吧' },
+      { kind: 'agent-teams-command', goal: 'review this', profile: 'quality' },
+    ]) {
+      const message = { ...user('agent-teams'), source }
+      const output = migrate([...opening(), event('user/message', message, 'append')])
+      expect(output.events.at(-1)?.data).toEqual(message)
+    }
+    for (const source of [
+      { kind: 'agent-teams-command', goal: '' },
+      { kind: 'agent-teams-command', profile: 1 },
+      { kind: 'agent-teams-command', goal: 'work', sourceEventSeq: 0 },
+    ]) {
+      expect(() => migrate([...opening(), event('user/message', { ...user(), source }, 'append')]))
+        .toThrow(/agent-teams-command source/)
+    }
   })
 
   it.each([0, 1, 2])('restores log-only failed attempts from V%s without invoking the V0 event inventory', (version) => {

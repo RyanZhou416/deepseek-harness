@@ -7,7 +7,7 @@ import { RELEASED_V2_EVENT_DISPOSITIONS } from '@deepseek-ai/dsh-session-format-
 
 /** Audited surface event names; all other admitted events are log-only. */
 export const SURFACE_TYPES: ReadonlySet<string> = new Set(['system/message', 'user/message', 'assistant/message', 'tool/result'])
-const SOURCE_KINDS = new Set(['user', 'plugin', 'model', 'tool', 'agent-instructions', 'session-reference', 'team-message', 'goal', 'skill-invocation', 'skill-catalog', 'coordinator', 'subagent-report', 'subagent-settled', 'webhook', 'agent-message'])
+const SOURCE_KINDS = new Set(['user', 'plugin', 'model', 'tool', 'agent-instructions', 'session-reference', 'team-message', 'goal', 'skill-invocation', 'skill-catalog', 'coordinator', 'subagent-report', 'subagent-settled', 'webhook', 'agent-message', 'agent-teams-command'])
 
 /**
  * Require a JSON object at the durable input boundary.
@@ -116,6 +116,14 @@ function assertSource(message: SessionFormatJsonObject): void {
     keys(source, ['kind', 'form', 'senderSessionId'], [], 'agent-message source')
     if (source['form'] !== 'relay' || typeof source['senderSessionId'] !== 'string' || source['senderSessionId'].length === 0) {
       throw new SessionFormatError('agent-message source requires relay form and senderSessionId')
+    }
+  }
+  if (source['kind'] === 'agent-teams-command') {
+    keys(source, ['kind'], ['goal', 'profile'], 'agent-teams-command source')
+    for (const field of ['goal', 'profile']) {
+      if (source[field] !== undefined && (typeof source[field] !== 'string' || source[field].length === 0)) {
+        throw new SessionFormatError(`agent-teams-command source ${field} must be a non-empty string when present`)
+      }
     }
   }
 }

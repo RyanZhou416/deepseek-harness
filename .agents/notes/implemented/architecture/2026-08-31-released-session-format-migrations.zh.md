@@ -70,7 +70,7 @@ Chain 中不存在 `flatMap`、spread expansion、中间 event array 或 schedul
 
 [V2 到 V3 README](../../../../packages/session/session-format-v2-to-v3/README.zh.md#v2-to-v3-specification)是该迁移边转换、保留与拒绝规则的单一规范真源；单列的[原生准入章节](../../../../packages/session/session-format-v2-to-v3/README.zh.md#native-v3-admission)避免将仅当前版本支持的能力误认为历史转换。已发布 V2 codec 仍归 V1→V2 所有，并被复用而非复制。[系统提示词](2026-09-02-system-prompt-as-surface-node.zh.md)、[PTC](../feature/2026-06-15-ptc.zh.md)和[规范信封](2026-09-06-v3-canonical-session-envelopes.zh.md)记录保留各自独立依据，而非重复转换规范。[格式版本实操手册](../../../../docs/cookbook/adding-a-session-format-version.zh.md)负责包接线、当前消费方、快照后继代际与验证命令。
 
-历史内容准入归入边所有，而非原生 V3 扩展校验。在不了解字段的情况下保留未知块，不能证明迁移保留了其含义。因此，[源审计](../../../../packages/session/session-format-v2-to-v3/README.zh.md#source-audit)在明确归其所有的内容位置（包括未完成的流）使用同一历史种类集合。它检查已接纳的内容而不改写，并且不解释归其他所有者所有的不透明 JSON。收紧原生准入或修改冻结的前代校验器，会改变独立承诺，而非证明转换安全。
+历史内容准入归入边所有，而非原生 V3 扩展校验。在不了解字段的情况下保留未知块，不能证明迁移保留了其含义。因此，[源审计](../../../../packages/session/session-format-v2-to-v3/README.zh.md#source-audit)在明确归其所有的内容位置（包括未完成的流）使用同一历史种类集合。它检查已接纳的内容而不改写，并且不解释归其他所有者所有的不透明 JSON。入边会静态校验并保留本 fork 已发布的 `agent-teams-command` 来源；已安装插件不能扩展这个集合。收紧原生准入或修改冻结的前代校验器，会改变独立承诺，而非证明转换安全。
 
 预设更名覆盖创建头部和每条选择事件，因为最新选择决定恢复时的预设，而更早的选择决定历史 fork 的预设。只改写最后一条选择会丢失这种区别。已发布的 `code` 标识表示旧内置预设；迁移不依赖已安装的预设列表，因此相同字节在每台主机上产生相同结果。原生 V3 的自定义标识仍可使用，无需全局运行时别名。
 
@@ -84,7 +84,7 @@ Chain 中不存在 `flatMap`、spread expansion、中间 event array 或 schedul
 
 每个 released codec 会用显式 `strict` 或 `recoverable` 策略创建 row decoder。Decoder 每次通过不同的 context 方法校验并 emit 一个 event 或 codec-owned `SessionFormatEventRun`。v0-to-v1 与 v1-to-v2 都实现 `transformEvent()` 和 `transformRun()`，因此 packed Assistant chunk 可以直接到达 folding edge，无需先变成数百万个普通事件。
 
-v0-to-v1 除了有限的 released-v0 归一化外，会保留逻辑 header、seq、引用、时间戳与 payload。它转换已移除的 `steering/message` 与 `compact/*` 事件名称，接受出现在对应 `step/end` 之后的已发布 `llm/retry`，按 turn／step／provider／policy chain 为缺失的 `llm/retry.retryId` 确定性补值，并为省略 id 的旧 compaction group 确定性补充同一个 `compactionId`。v1-to-v2 负责 attempt folding 与引用重写，并且只 emit 已结算的 v2 event。它会把旧的 goal 来源 user message 拆成 `goal/change` 与原本的模型可见 message。它还会为一种有限的已发布 restart 插入 interrupted `turn/end`：一个没有 open step 的 open turn 后出现非空 `next-turn` inbox splice，随后直接开始编号连续的下一轮。
+v0-to-v1 除了有限的 released-v0 归一化外，会保留逻辑 header、seq、引用、时间戳与 payload。它转换已移除的 `steering/message` 与 `compact/*` 事件名称，接受出现在对应 `step/end` 之后的已发布 `llm/retry`，按 turn／step／provider／policy chain 为缺失的 `llm/retry.retryId` 确定性补值，并为省略 id 的旧 compaction group 确定性补充同一个 `compactionId`。v1-to-v2 负责 attempt folding 与引用重写，并且只 emit 已结算的 v2 event。它会把旧的 goal 来源 user message 拆成 `goal/change` 与原本的模型可见 message。它还会为一种有限的已发布 restart 插入 interrupted `turn/end`：一个没有 open step 的 open turn 后出现非空 `next-turn` inbox splice，随后直接开始编号连续的下一轮。V2-to-V3 负责对应的本 fork 已发布 `next-step` wake 模式，并要求同样的 step 已关闭、插入非空和 turn 编号连续证据。
 
 Catalog 为 production、Worker、fixture 与 replay 暴露同一个 `createRestore()`。Recovery policy 与最终 validation policy 在 restore 创建时一次确定。Historical production 使用 recoverable source parsing 与 transformed-current validation；这种策略会在迁移后校验已发布 current 结果，而已经是 current 的输入只接受 codec 校验。Worker 与 fixture verification 使用 strict parsing 与已安装 current 格式的完整 restoration。Migration stage 或 transformed-current validation 的拒绝会保持为 `SessionFormatUnsupportedMigrationError`；物理解码失败仍是 corruption。Test support 只保留 fixture 自身需要的 token 和 envelope materialization。
 

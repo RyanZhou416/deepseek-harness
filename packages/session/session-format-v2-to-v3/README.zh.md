@@ -87,6 +87,8 @@ const targetHeader = sessionFormatV2ToV3.migrateHeader(sourceHeader)
 
 不存在递归数值字段改写。投递的 `throughSeq` 和 `sessionFormatVersion`、会话引用的 `capturedThroughSeq` 和 `capturedFormatVersion`、工作流本地 `seq`、流块索引、轮次/步骤编号、收件箱索引、token/字节计数以及所有标识都保留源值。内嵌 assistant 流、模型回放状态、工具参数/结果、标题请求输入文本及 `data.system` 保留已记录的含义。压缩（compaction）载荷端点保持 `start/end` 名称；仅信封替换端点被重命名。
 
+一种已发布 V2 生命周期模式会获得有界结构补全。如果一个 turn 已无开放 step，一条非空 `next-step` inbox 插入紧邻下一编号 `turn/start`，且没有记录 `turn/end`，迁移边会在该插入之后、替代 turn 之前补入 reason 为 `interrupted` 的 `turn/end`。该事件使用替代 turn 的时间戳。空插入、`next-turn` 插入、尚未关闭的 step、中间事件或不连续 turn 编号都会被拒绝，而不会修复。
+
 对于有种子的 Session，最后一条带有 `data.inherited: true` 的 `session/end-seed` 标识源切点。其源序号等于继承事件数，不含该标记；其映射后的目标序号即目标切点。此前的合成事件属于继承部分，此后的属于本地部分。未标记继承的结束标记不建立切点。若提供 `sourceInheritedEventCount`，则必须一致；有种子但没有标记的日志，以及无种子却有继承标记的日志都会被拒绝。无种子阶段公开 `headerInheritedEventCount: 0`；有种子阶段保持未知，直到 `finish()` 推导精确切点。这也支持前一阶段改变事件数、无法在 EOF 前提供切点的 V0/V1 迁移链。
 
 <a id="ptc-vocabulary"></a>
@@ -118,6 +120,8 @@ V2 `session-log-deepseek/delivery-accepted` 若携带 `data.sessionFormatVersion
 ### 源审计与拒绝
 
 迁移分类[已发布 V2 事件清单](../session-format-v1-to-v2/src/dispositions.ts)，包括仅日志的 `assistant/attempt`，以及 `feedback/message-put` 和 `feedback/message-delete`。[载荷校验器](src/payload.ts)应用精确的已接纳信封和载荷成员，以及已发布嵌套校验。未知事件（即使可忽略）以及被检查记录中未经审计的成员均被拒绝。消息来源分类覆盖下表的五个 Message 位置：未知来源种类会被拒绝，agent（智能体）中继归属则被接纳，但标识不会被解释为 Session 引用。
+
+本 fork 已发布的 V2 `agent-teams-command` 来源只接纳精确的 `kind` 字段，以及可选的非空字符串 `goal` 和 `profile` 字段。来源对象会原样保留。这条静态规则覆盖本 fork 已写入的日志；已安装插件不能扩大迁移准入，其他外置来源种类仍会被拒绝。
 
 内容审计仅接纳 `text`、`reasoning`、`image`、`file`、`tool-call` 和 `tool-result`。它校验归本格式所有的块字段，并在以下有限位置递归审计每层嵌套的 `tool-result.content`：
 
