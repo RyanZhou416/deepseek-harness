@@ -1153,11 +1153,27 @@ describe('running and lock semantics', () => {
   })
 
   it('a session switch refocuses the editable surface with preventScroll', () => {
+    onTestFinished(() => { vi.unstubAllGlobals() })
+    const matchMedia = vi.fn(() => ({ matches: false }) as MediaQueryList)
+    vi.stubGlobal('matchMedia', matchMedia)
     const { view, textarea, props } = bench({ draft: 'line one' })
     const focused: (boolean | undefined)[] = []
     textarea.focus = (options?: FocusOptions) => { focused.push(options?.preventScroll) }
     act(() => { view.rerender(<InputBar {...props} sessionId={'s2' as SessionId} />) })
     expect(focused).toEqual([true])
+    expect(matchMedia).toHaveBeenCalledWith('(pointer: coarse)')
+  })
+
+  it('a session switch does not refocus the editable surface for a coarse primary pointer', () => {
+    onTestFinished(() => { vi.unstubAllGlobals() })
+    const matchMedia = vi.fn(() => ({ matches: true }) as MediaQueryList)
+    vi.stubGlobal('matchMedia', matchMedia)
+    const { view, textarea, props } = bench({ draft: 'line one' })
+    const focused: (boolean | undefined)[] = []
+    textarea.focus = (options?: FocusOptions) => { focused.push(options?.preventScroll) }
+    act(() => { view.rerender(<InputBar {...props} sessionId={'s2' as SessionId} />) })
+    expect(focused).toEqual([])
+    expect(matchMedia).toHaveBeenCalledWith('(pointer: coarse)')
   })
 
   it('a persisted draft adopted after mount does not steal focus from another control', () => {

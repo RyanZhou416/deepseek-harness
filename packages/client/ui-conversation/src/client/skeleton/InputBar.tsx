@@ -40,6 +40,11 @@ import css from './InputBar.module.css'
 
 export type InputBarProps = ComposerBarProps
 
+/** Whether CSS reports a coarse primary pointer for the navigation autofocus policy. */
+function hasCoarsePrimaryPointer(): boolean {
+  return typeof window.matchMedia === 'function' && window.matchMedia('(pointer: coarse)').matches
+}
+
 export const InputBar = memo(function InputBar({
   useSession, useInput, inputActions, keyboard, addFiles, removeAttachment, resolveDraftAttachments,
   retryFileUpload,
@@ -176,13 +181,15 @@ export const InputBar = memo(function InputBar({
     else if (rect.top < box.top) scrollEl.scrollTop -= box.top - rect.top
   }
 
-  // Unlock (mount / session switch) returns focus to the box, and owns the
-  // reveal that comes with it. Lexical's focus() suppresses the browser's
-  // scroll walk (preventScroll inside), so the reveal in our own scrollport
-  // is ours to perform — switching to a longer draft otherwise leaves the
-  // caret (restored at the draft's end) off screen.
+  // On a fine primary pointer, unlock (mount / session switch) returns focus
+  // to the box and owns the reveal that comes with it. A coarse primary
+  // pointer waits for a direct editor gesture so navigation does not summon
+  // the software keyboard. Lexical's focus() suppresses the browser's scroll
+  // walk (preventScroll inside), so the reveal in our own scrollport is ours
+  // to perform — switching to a longer draft otherwise leaves the caret
+  // (restored at the draft's end) off screen.
   useEffect(() => {
-    if (locked || editor === null) return
+    if (locked || editor === null || hasCoarsePrimaryPointer()) return
     // Lexical's focus() restores the editor selection but never calls the DOM
     // focus itself; preventScroll keeps the conversation scrollport still.
     editor.getRootElement()?.focus({ preventScroll: true })
