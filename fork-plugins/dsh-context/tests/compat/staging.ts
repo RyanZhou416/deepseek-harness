@@ -243,13 +243,7 @@ export function runDriver(baseline: Baseline): DriverReport {
   ensureHostDeps(baseline)
   stageFile(baseline, 'packages/session/session-projection/src/index.ts', join('registry', 'index.ts'))
   stageFile(baseline, 'packages/session/session-projection/src/types.ts', join('registry', 'types.ts'))
-  // The lossless-JSON probe the projection cache's write path uses (moved
-  // between packages across the baselines; self-contained either way).
-  if (baseline.id === 'v0.1.1-rc.2') {
-    stageFile(baseline, 'packages/core/session/src/json.ts', join('dsh', 'json-values.ts'))
-  } else {
-    stageFile(baseline, 'packages/util/values/src/index.ts', join('dsh', 'json-values.ts'))
-  }
+  stageFile(baseline, 'packages/util/values/src/index.ts', join('dsh', 'json-values.ts'))
   const driver = join(STAGE, baseline.id, 'driver.mjs')
   writeFileSync(driver, driverSource(`file://${join(REPO, 'lib', 'index.js')}`))
   const run = spawnSync(process.execPath, [driver], { cwd: STAGE, encoding: 'utf8', timeout: 60_000 })
@@ -274,11 +268,21 @@ export const SLOT_SEAMS = [
   'settings.plugin.item',
 ] as const
 
-/** The event families the host fold switches on (src/host/fold.ts). */
+/**
+ * The event families the host fold switches on (src/host/fold.ts) — the UNION
+ * over every supported generation. No single harness line carries them all
+ * (`assistant/chunk` and `tool/code-dispatch` are V0/V2-only; `system/message`
+ * and `tool/ptc-dispatch` are V3-only), so the per-baseline probe asserts the
+ * baseline's own `foldEventTypes` subset, and a matrix test asserts this union
+ * equals the baselines' union — a fold case added without a baseline list
+ * fails loudly instead of going unprobed.
+ */
 export const FOLD_EVENT_TYPES = [
   'request/header', 'request/context', 'step/start', 'step/end',
   'user/message', 'tool/call', 'tool/result', 'assistant/message',
-  'plan/mode', 'compaction/summary', 'compaction/prune',
+  'assistant/chunk', 'assistant/attempt',
+  'tool/code-dispatch', 'tool/ptc-dispatch',
+  'plan/mode', 'compaction/summary', 'compaction/prune', 'system/message',
 ] as const
 
 /** The tag's durable-event vocabulary (packages/core/session/src/known-event-types.ts). */

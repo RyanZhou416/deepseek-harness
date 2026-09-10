@@ -29,7 +29,18 @@ if (reasons.length > 0) {
 // The always-runnable part (no checkout needed): every specifier the built
 // bundle requires at runtime must be seeded by EACH baseline's platform
 // module table — a require the shell cannot answer is a guaranteed boot
-// crash on that generation (0.1.1's table, for one, lacks dsh-client-store).
+// crash on that generation.
+describe('compat matrix — the per-baseline fold vocabularies', () => {
+  test('their union covers every event family the fold switches on', () => {
+    const union = new Set(BASELINES.flatMap(baseline => baseline.foldEventTypes))
+    assert.deepEqual(
+      staging.FOLD_EVENT_TYPES.filter(type => !union.has(type)),
+      [],
+      'a fold case no baseline declares would go unprobed',
+    )
+  })
+})
+
 describe.skipIf(staging.artifactsMissing())('compat matrix — bundle requires vs baseline module tables', () => {
   test.each(BASELINES)('$id: the platform module table answers every bundle require', (baseline) => {
     assert.deepEqual(
@@ -42,9 +53,12 @@ describe.skipIf(staging.artifactsMissing())('compat matrix — bundle requires v
 describe.skipIf(reasons.length > 0)('compat matrix — real dsh sources per baseline', () => {
   describe.each(BASELINES)('$id (tag $tag, cordis $cordis)', (baseline) => {
     let report: staging.DriverReport
+    // 60s: the driver's own spawn budget. A cold stage dir (fresh clone,
+    // cache miss, dependency re-pin) runs a real npm install inside the hook,
+    // which the 10s default ceiling cannot cover.
     beforeAll(() => {
       report = staging.runDriver(baseline)
-    })
+    }, 60_000)
 
     test('host: the plugin applies into the tag\'s real registry', () => {
       assert.equal(report.registered, true)
@@ -102,24 +116,44 @@ describe.skipIf(reasons.length > 0)('compat matrix — real dsh sources per base
       )
     })
 
-    test('client: finalized-nodes seat (useChat on 0.1.2+, session snapshot before)', () => {
-      const ok = baseline.client.chatNodesSeat === 'useChat'
-        ? staging.dshHasString(baseline.tag, 'useChat', 'packages/client/ui-chat/src/client/contract/slots.ts')
-        : staging.dshHasString(baseline.tag, 'nodes: legacy.nodes', 'packages/client/runtime/src/client/sessions/session.ts')
-      assert.equal(ok, true)
+    test('client: finalized-nodes seat (useChat ChatSnapshot)', () => {
+      assert.equal(staging.dshHasString(baseline.tag, 'useChat', 'packages/client/ui-chat/src/client/contract/slots.ts'), true)
     })
 
     test('client: durable-image loader service', () => {
-      assert.equal(staging.dshHasString(baseline.tag, baseline.client.imageFace.method, 'packages/client/*/src/**'), true)
+      assert.equal(staging.dshHasString(baseline.tag, baseline.client.imageFaceMethod, 'packages/client/*/src/**'), true)
     })
 
-    test('client: the history face of this generation', () => {
-      if (baseline.client.historyFace === 'remote.session.page') {
-        assert.equal(staging.dshHasString(baseline.tag, "'remote.session'", 'packages/api/*/src/**'), true)
-      } else {
-        assert.equal(staging.dshHasString(baseline.tag, 'api.sessions.history', 'packages/client/connection/src/**'), true)
-        // The plugin must fall back: no gateway session namespace on this line.
-        assert.equal(staging.dshHasString(baseline.tag, "'remote.session'", 'packages/api/*/src/**'), false)
+    test('client: the gateway history face of this generation', () => {
+      assert.equal(staging.dshHasString(baseline.tag, "'remote.session'", 'packages/api/*/src/**'), true)
+    })
+
+    test('detail channel: the Connection RPC faces and the registry stateOf exist', () => {
+      const dc = baseline.client.detailChannel
+      assert.equal(staging.dshHasString(baseline.tag, dc.hostRpcNeedle, dc.hostRpcFile), true, 'host RPC registry face')
+      assert.equal(staging.dshHasString(baseline.tag, dc.clientRpcNeedle, dc.clientRpcFile), true, 'browser RPC caller face')
+      assert.equal(staging.dshHasString(baseline.tag, dc.registryNeedle, dc.registryFile), true, 'registry stateOf face')
+    })
+
+    test('client: the right Sidebar tab seam (optional per generation)', () => {
+      const sidebar = baseline.client.sidebar
+      if (sidebar === undefined) {
+        // No right Sidebar on this line: the plugin's deferred registration
+        // must never fire, which the always-on client lane pins. Assert the
+        // absence itself so a moved seam cannot read as "unsupported here".
+        assert.equal(staging.dshHasString(baseline.tag, 'sidebarRightTabs', 'packages/client/*/src/**'), false)
+        return
+      }
+      assert.equal(staging.dshHasString(baseline.tag, sidebar.serviceNeedle, sidebar.serviceFile), true, 'tab-type registry service')
+      assert.equal(staging.dshHasString(baseline.tag, sidebar.slotNeedle, sidebar.slotFile), true, 'keyed body seat')
+    })
+
+    test('client: the right Sidebar guide-entry contract (the contribution\'s shape)', () => {
+      const sidebar = baseline.client.sidebar
+      // No right Sidebar on this line: the entry is never contributed there.
+      if (sidebar === undefined) return
+      for (const field of sidebar.guideEntry.fields) {
+        assert.equal(staging.dshHasString(baseline.tag, field, sidebar.guideEntry.file), true, `guide-entry field: ${field}`)
       }
     })
 
@@ -127,10 +161,22 @@ describe.skipIf(reasons.length > 0)('compat matrix — real dsh sources per base
       assert.equal(staging.dshHasString(baseline.tag, baseline.client.markdownChrome, 'packages/client/ui-primitives/src/markdown/MarkdownText.tsx'), true)
     })
 
-    test('host: the fold\'s event vocabulary exists in the durable log', async () => {
+    test('host: the fold\'s event vocabulary for this generation exists in the durable log', async () => {
       const known = await staging.knownEventTypesOf(baseline)
-      const missing = staging.FOLD_EVENT_TYPES.filter(type => !known.has(type))
+      const missing = baseline.foldEventTypes.filter(type => !known.has(type))
       assert.deepEqual(missing, [])
+    })
+
+    test('host: the step-boundary identity guard seam (issue #51)', () => {
+      const sg = baseline.stepGuard
+      for (const needle of sg.loopNeedles) {
+        assert.equal(staging.dshHasString(baseline.tag, needle, sg.loopFile), true, `loop seam: ${needle}`)
+      }
+      assert.equal(
+        staging.dshHasString(baseline.tag, 'prepend: true', sg.prependProofFile),
+        true,
+        'the prepend listener option the guard rides',
+      )
     })
 
     test('client: platform module table answers every bundle require', async () => {

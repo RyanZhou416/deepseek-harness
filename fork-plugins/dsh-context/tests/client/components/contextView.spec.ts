@@ -5,16 +5,16 @@
 // garbage / well-formed, granularity/trend-mode state, brief→browser
 // locate bridge, kind filter, scroll ledger, locale arms, error boundary).
 
+import { act, createElement as h, type ReactElement } from 'react'
 import assert from 'node:assert/strict'
-import { act } from 'react'
 import { createRoot } from 'react-dom/client'
 import { afterEach, describe, test, vi } from 'vitest'
-import { h } from '../../../src/client/react'
 import { makeContextView } from '../../../src/client/components/contextView'
+import { watchHistoryFaces } from '../../../src/client/historyPage'
 import { requestContextFocus, takeContextFocus } from '../../../src/client/viewFocus'
 import { createContextSettings } from '../../../src/client/settings'
 import type { SettingsScopeLike } from '../../../src/client/settings'
-import type { UseSessionLike } from '../../../src/client/services'
+import type { UseChatLike } from '../../../src/client/services'
 import type { ContextTimeline } from '../../../src/shared/types'
 import { DICT_EN } from '../../../src/client/i18n'
 import { TestClientCtx, TestLocale, asClientCtx } from '../helpers/harness'
@@ -92,7 +92,7 @@ function buttonByText(container: ParentNode, label: string): HTMLElement {
 }
 
 /** Mount inside a `[data-conversation-scroll]` scroller so the view's shared-scrollport probes find it. */
-async function mountInScroller(el: React.ReactElement, scroller: HTMLElement) {
+async function mountInScroller(el: ReactElement, scroller: HTMLElement) {
   const inner = document.createElement('div')
   scroller.appendChild(inner)
   document.body.appendChild(scroller)
@@ -102,7 +102,7 @@ async function mountInScroller(el: React.ReactElement, scroller: HTMLElement) {
   })
   return {
     container: inner,
-    async update(next: React.ReactElement) {
+    async update(next: ReactElement) {
       await act(async () => {
         root.render(next)
       })
@@ -181,6 +181,76 @@ describe('ContextView — projection guards', () => {
   })
 })
 
+describe('ContextView — the sidebar host', () => {
+  test('the panel drops the context-stats and plugin-info head cards, keeping the two donut cards', async () => {
+    const View = makeView(new TestClientCtx())
+    const projections = projectionsFor(richTimeline())
+
+    const tab = await mount(h(View, { useProjection: projections }))
+    assert.equal(queryAll(tab.container, '.lc-stats').length, 1, 'the tab keeps the context stats')
+    assert.equal(queryAll(tab.container, '.lc-pi-grid').length, 1, 'the tab keeps the plugin info')
+    await tab.unmount()
+
+    const panel = await mount(h(View, { host: 'sidebar', useProjection: projections }))
+    assert.equal(queryAll(panel.container, '.lc-stats').length, 0, 'the panel drops the context stats')
+    assert.equal(queryAll(panel.container, '.lc-pi-grid').length, 0, 'the panel drops the plugin info')
+    assert.equal(queryAll(panel.container, '.lc-head > .lc-card').length, 2, 'the head row keeps its two donut cards')
+    assert.equal(queryAll(panel.container, '.lc-head > .lc-col-donut').length, 2, 'token usage and timing')
+    await panel.unmount()
+  })
+
+  test('both hosts arrange the main row as composition+trend beside the browser', async () => {
+    const View = makeView(new TestClientCtx())
+    const projections = projectionsFor(richTimeline())
+
+    for (const props of [{ useProjection: projections }, { host: 'sidebar' as const, useProjection: projections }]) {
+      const m = await mount(h(View, props))
+      const cols = queryAll(m.container, '.lc-cols-main > .lc-col')
+      assert.equal(cols.length, 2, 'one two-column split')
+      assert.ok(cols[0].querySelector('.lc-overview-num') !== null, 'composition leads the left column')
+      assert.ok(cols[0].querySelector('.lc-trend-ctl') !== null, 'the trend follows in the same column')
+      assert.ok(cols[1].querySelector('.lc-br-dna-ctl') !== null, 'the browser owns the right column')
+      await m.unmount()
+    }
+  })
+})
+
+describe('ContextView — baseline gate', () => {
+  test('a gated host renders the zeroed cards under the upgrade modal', async () => {
+    const View = makeView(new TestClientCtx())
+    const m = await mount(h(View, {
+      sessionId: 'sv-gated',
+      useProjection: projectionsFor(timeline({ unsupported: { current: '0.1.1-rc.2', minimum: '0.1.2-rc.1' } })),
+    }))
+    // The modal pops over the tab, naming both versions.
+    assert.ok(m.container.querySelector('.lc-modal-backdrop') !== null)
+    const card = query(m.container, '.lc-gate-card')
+    assert.ok(text(card).includes(DICT_EN['gate.title']))
+    assert.ok(text(card).includes('v0.1.1-rc.2'))
+    assert.ok(text(card).includes('v0.1.2-rc.1'))
+    // The cards keep rendering the fallback's zeroed data behind it.
+    assert.ok(text(m.container).includes(DICT_EN['overview.title']))
+    assert.ok(text(m.container).includes(DICT_EN['trend.empty']))
+    assert.ok(text(m.container).includes(DICT_EN['events.empty']))
+    // Dismissal reveals the (blank) cards.
+    await click(buttonByText(m.container, DICT_EN['gate.ok']))
+    assert.equal(m.container.querySelector('.lc-modal-backdrop'), null)
+    assert.ok(text(m.container).includes(DICT_EN['stats.title']))
+    await m.unmount()
+  })
+
+  test('a malformed gate record never opens the modal', async () => {
+    const View = makeView(new TestClientCtx())
+    const m = await mount(h(View, {
+      sessionId: 'sv-gate-junk',
+      useProjection: projectionsFor(timeline({ unsupported: { current: 7 } })),
+    }))
+    assert.equal(m.container.querySelector('.lc-modal-backdrop'), null)
+    assert.ok(text(m.container).includes(DICT_EN['overview.title']))
+    await m.unmount()
+  })
+})
+
 /** The rich tab: full projection (stats, chart, markers, browser headers) over two turns plus a turn-less step. */
 async function mountRich(sessionId: string) {
   const View = makeView(new TestClientCtx())
@@ -189,7 +259,9 @@ async function mountRich(sessionId: string) {
     useProjection: projectionsFor(richTimeline(), {
       contextHeaders: { headers: [{ seq: 1, time: T0, system: 'SYS', tools: [{ name: 'bash', tokens: 12, description: 'run' }] }] },
     }),
-    useSession: (sel => sel({ nodes: [] })) as UseSessionLike,
+    useChat: (sel =>
+        sel({
+          legacy: { nodes: [] } })) as UseChatLike,
   }))
   return m
 }
@@ -206,7 +278,7 @@ describe('ContextView — interactions', () => {
     assert.ok(text(m.container).includes(DICT_EN['files.scopeLatest']))
     assert.ok(text(m.container).includes(DICT_EN['browser.liveNow']))
     // Turn strip partitions the two turn groups (turn 1 + the turn-less 0).
-    assert.deepEqual(queryAll(m.container, '.lc-turn-label').map(el => text(el)), ['T1', 'T0'])
+    assert.deepEqual(queryAll(m.container, '.lc-turn-label').map(el => text(el)), ['1', '0'])
     await m.unmount()
   })
 
@@ -347,6 +419,55 @@ describe('ContextView — interactions', () => {
     await m.unmount()
   })
 
+  test('expanding a browser category focuses the trend bars on it; collapsing restores all', async () => {
+    const m = await mountRich('sv-focus')
+    assert.equal(text(query(m.container, '.lc-axis-top')), '420', 'unfocused: the axis tops at the largest whole-bar total')
+    // Five segments on the bar: richTimeline carries no injects, so inject renders none.
+    assert.equal(queryAll(m.container, '.lc-bar[data-seq="4"] .lc-bar-stack > .lc-cat-seg').length, 5)
+
+    // Expanding the browser's assistant category focuses every bar on it — one segment per bar, the axis
+    // rescaled to the category's own max (20/60/80; the first rides its provider-prompt anchor to 21).
+    await click(queryAll(m.container, '.lc-br-cat-row')[4])
+    assert.equal(text(query(m.container, '.lc-axis-top')), '80')
+    const segs = queryAll(m.container, '.lc-bar .lc-bar-stack > .lc-cat-seg')
+    assert.equal(segs.length, 3)
+    for (const s of segs) assert.equal(s.getAttribute('data-cat'), 'assistant')
+    assert.ok(text(m.container).includes(DICT_EN['trend.focus'].replace('{cat}', DICT_EN['cat.assistant'])),
+      'the card subtitle names the focused category')
+
+    // Collapsing the category restores the whole composition and drops the subtitle.
+    await click(queryAll(m.container, '.lc-br-cat-row')[4])
+    assert.equal(text(query(m.container, '.lc-axis-top')), '420')
+    assert.equal(queryAll(m.container, '.lc-bar[data-seq="4"] .lc-bar-stack > .lc-cat-seg').length, 5)
+    const trendCard = queryAll(m.container, '.lc-card').find(c => text(c).includes(DICT_EN['trend.title']))
+    assert.ok(trendCard !== undefined && trendCard.querySelector('.lc-card-sub') === null, 'unfocused: no subtitle')
+    await m.unmount()
+  })
+
+  test('the adaptive switch rides the trend title and toggles mount-locally', async () => {
+    const m = await mountRich('sv-adaptive')
+    const card = queryAll(m.container, '.lc-card').find(c => text(c).includes(DICT_EN['trend.title']))
+    assert.ok(card !== undefined)
+    const titleText = query(card, '.lc-card-title-text')
+    assert.equal(text(titleText), DICT_EN['trend.title'])
+
+    // The switch is the title text's NEXT sibling — left of the card's right-hand control cluster.
+    const toggleOf = () => buttonByText(m.container, DICT_EN['trend.adaptive'])
+    assert.equal(toggleOf().parentElement?.previousElementSibling, titleText)
+    assert.equal(toggleOf().parentElement?.getAttribute('title'), DICT_EN['trend.adaptiveHint'])
+    assert.ok(!toggleOf().className.includes('lc-gran-on'), 'off at mount')
+
+    // Toggling is mount-local: the chart keeps rendering (jsdom has no layout, so the zero-width viewport falls
+    // back to the whole-log axis instead of flattening the bars) and nothing is written back to settings.
+    await click(toggleOf())
+    assert.ok(toggleOf().className.includes('lc-gran-on'))
+    assert.equal(text(query(m.container, '.lc-axis-top')), '420')
+    await click(toggleOf())
+    assert.ok(!toggleOf().className.includes('lc-gran-on'))
+    assert.equal(text(query(m.container, '.lc-axis-top')), '420')
+    await m.unmount()
+  })
+
   test('delta mode pairs the detail with the previous record; first bar has none', async () => {
     const m = await mountRich('sv-delta')
     const chart = query(m.container, '.lc-chart')
@@ -420,7 +541,9 @@ describe('ContextView — file activity card', () => {
     const m = await mount(h(View, {
       sessionId,
       useProjection: projectionsFor(fileTimeline()),
-      useSession: (sel => sel({ nodes: fileConv })) as UseSessionLike,
+      useChat: (sel =>
+        sel({
+          legacy: { nodes: fileConv } })) as UseChatLike,
     }))
     const card = queryAll(m.container, '.lc-card').find(c => text(c).includes(DICT_EN['files.title']))
     assert.ok(card !== undefined)
@@ -512,7 +635,9 @@ describe('ContextView — file activity card', () => {
     const m = await mount(h(View, {
       sessionId: 'sv-ptc-locate',
       useProjection: projectionsFor(ptcTimeline),
-      useSession: (sel => sel({ nodes: ptcConv })) as UseSessionLike,
+      useChat: (sel =>
+        sel({
+          legacy: { nodes: ptcConv } })) as UseChatLike,
     }))
     const card = queryAll(m.container, '.lc-card').find(c => text(c).includes(DICT_EN['files.title']))
     assert.ok(card !== undefined)
@@ -530,12 +655,20 @@ describe('ContextView — file activity card', () => {
 
   test('the session workspace relativizes row paths; the host opener opens the resolved file', async () => {
     const opened: string[] = []
+    const calls: string[] = []
     const ctx = new TestClientCtx({
       services: {
         sessions: { list: { getSnapshot: () => ({ byId: { 'sv-files-open': { cwd: '/repo' } } }) } },
         connection: {
-          hostDescription: { getSnapshot: () => ({ canOpenPath: true }) },
-          api: { host: { openPath: (r: { path: string }) => { opened.push(r.path); return Promise.resolve({ opened: true }) } } },
+          isLoopback: true,
+          rpc: {
+            call: (_channel: string, endpoint: string, payload: unknown) => {
+              if (endpoint === 'session/canOpenWorkspacePath') return Promise.resolve({ ok: true, value: true })
+              calls.push(endpoint)
+              opened.push((payload as { args: { request: { path: string } } }).args.request.path)
+              return Promise.resolve({ ok: true, value: { opened: true } })
+            },
+          },
         },
       },
     })
@@ -546,19 +679,45 @@ describe('ContextView — file activity card', () => {
     const m = await mount(h(View, {
       sessionId: 'sv-files-open',
       useProjection: projectionsFor(fileTimeline()),
-      useSession: (sel => sel({ nodes: conv })) as UseSessionLike,
+      useChat: (sel =>
+        sel({
+          legacy: { nodes: conv } })) as UseChatLike,
     }))
+    // The capability probe is an RPC round-trip: the answer lands in state on the next flush.
+    await flush()
     const card = queryAll(m.container, '.lc-card').find(c => text(c).includes(DICT_EN['files.title']))
     assert.ok(card !== undefined)
     // The read inside the session cwd displays './'-relative…
     const row = query(card, '.lc-fa-row')
     assert.ok(row.querySelector('.lc-fa-path em')?.textContent === './src/')
-    // …and its name opens on the system through the host RPC.
+    // …and its name opens on the system through the session's open remote.
     const name = query(row, '.lc-fa-file')
     assert.equal(name.getAttribute('title'), DICT_EN['files.open'])
     await click(name)
     assert.deepEqual(opened, ['/repo/src/a.ts'])
+    assert.deepEqual(calls, ['session/openWorkspacePath'])
     await m.unmount()
+  })
+
+  test('a capability probe that settles after unmount drops its answer', async () => {
+    let resolveProbe!: (value: unknown) => void
+    const ctx = new TestClientCtx({
+      services: {
+        connection: {
+          isLoopback: true,
+          rpc: { call: () => new Promise(resolve => { resolveProbe = resolve }) },
+        },
+      },
+    })
+    const View = makeView(ctx)
+    const m = await mount(h(View, {
+      sessionId: 'sv-open-late',
+      useProjection: projectionsFor(fileTimeline()),
+    }))
+    await m.unmount()
+    // The late "yes" arrives on a dead view: the stale answer is dropped whole.
+    resolveProbe({ ok: true, value: true })
+    await new Promise(resolve => setTimeout(resolve, 0))
   })
 
   test('a ctx without service access degrades the card wiring, not the view', async () => {
@@ -572,53 +731,59 @@ describe('ContextView — file activity card', () => {
 })
 
 describe('ContextView — targeted content fetch and image loading', () => {
-  test('opening an un-joined node reads one seq-anchored history page through the connection api', async () => {
-    const calls: { sessionId: string; beforeSeq: number }[] = []
+  test('opening an un-joined node reads one seq-anchored history page through the gateway remote', async () => {
+    const calls: { sessionId: string; throughSeq: number; beforeSeq: number }[] = []
     const ctx = new TestClientCtx({
       services: {
-        connection: {
-          api: {
-            sessions: {
-              history: (request: { sessionId: string; beforeSeq: number }) => {
-                calls.push(request)
-                return Promise.resolve({
-                  result: {
-                    ok: true,
-                    value: {
-                      events: [
-                        { event: { type: 'user/message', seq: request.beforeSeq - 1, data: { content: [{ type: 'text', text: 'OLD FULL BODY' }] } } },
-                      ],
-                    },
-                  },
-                })
-              },
+        remote: {
+          session: {
+            page: (request: { address: { sessionId: string }; throughSeq: number; beforeSeq: number }) => {
+              calls.push({ sessionId: request.address.sessionId, throughSeq: request.throughSeq, beforeSeq: request.beforeSeq })
+              return Promise.resolve({
+                ok: true,
+                value: {
+                  records: [
+                    { type: 'event', event: { type: 'user/message', seq: request.throughSeq, data: { content: [{ type: 'text', text: 'OLD FULL BODY' }] } } },
+                  ],
+                },
+              })
             },
           },
         },
       },
     })
+    // The direct `remote.session` service is hostile, as on the real host:
+    // the face resolves only through the declared inject.
+    ctx.setService('remote.session', { get page() { throw new Error('cannot get property "remote.session" without inject') } })
+    watchHistoryFaces(asClientCtx(ctx))
     const View = makeView(ctx)
     const m = await mount(h(View, {
       sessionId: 'sv-page',
       useProjection: projectionsFor(timeline({ nodes: [{ seq: 1, cat: 'user', tokens: 5, text: 'old msg' }] })),
-      useSession: (sel => sel({ nodes: [] })) as UseSessionLike,
+      useChat: (sel =>
+        sel({
+          legacy: { nodes: [] } })) as UseChatLike,
     }))
     const catRow = queryAll(m.container, '.lc-br-cat-row').find(r => text(r).includes(DICT_EN['cat.user']))
     assert.ok(catRow !== undefined)
     // The lone node auto-expands with the category, which triggers the fetch.
     await click(catRow)
     await flush()
-    assert.deepEqual(calls, [{ sessionId: 'sv-page', beforeSeq: 2 }], 'one read anchored just past the seq')
+    assert.deepEqual(calls, [{ sessionId: 'sv-page', throughSeq: 1, beforeSeq: 2 }], 'one read anchored just past the seq')
     assert.ok(text(m.container).includes('OLD FULL BODY'), 'mapped page content renders')
     await m.unmount()
+    // Unload the declared slot so no face stales into the next test.
+    ctx.dispose()
   })
 
-  test('without a connection face an uncached node shows the static note', async () => {
+  test('without a history face an uncached node shows the static note', async () => {
     const View = makeView(new TestClientCtx())
     const m = await mount(h(View, {
       sessionId: 'sv-nopage',
       useProjection: projectionsFor(timeline({ nodes: [{ seq: 1, cat: 'user', tokens: 5, text: 'old msg' }] })),
-      useSession: (sel => sel({ nodes: [] })) as UseSessionLike,
+      useChat: (sel =>
+        sel({
+          legacy: { nodes: [] } })) as UseChatLike,
     }))
     const catRow = queryAll(m.container, '.lc-br-cat-row').find(r => text(r).includes(DICT_EN['cat.user']))
     assert.ok(catRow !== undefined)
@@ -631,8 +796,8 @@ describe('ContextView — targeted content fetch and image loading', () => {
     const resolved: [string, unknown][] = []
     const ctx = new TestClientCtx({
       services: {
-        conversation: {
-          resolveImage: (sessionId: string, attachment: unknown) => {
+        uiConversation: {
+          imageUrl: (sessionId: string, attachment: unknown) => {
             resolved.push([sessionId, attachment])
             return Promise.resolve('blob:pic')
           },
@@ -646,14 +811,14 @@ describe('ContextView — targeted content fetch and image loading', () => {
         images: 1,
         nodes: [{ seq: 1, cat: 'user', tokens: 400, text: 'see this', imgs: 1 }],
       })),
-      useSession: (sel =>
+      useChat: (sel =>
         sel({
-          nodes: [{
+          legacy: { nodes: [{
             kind: 'user',
             seq: 1,
             content: [{ type: 'image', attachment: { attachmentId: 'att-1', name: 'pic.png', bytes: 2048, width: 640, height: 480 } }],
-          }],
-        })) as UseSessionLike,
+          }] }
+        })) as UseChatLike,
     }))
     const catRow = queryAll(m.container, '.lc-br-cat-row').find(r => text(r).includes(DICT_EN['cat.user']))
     assert.ok(catRow !== undefined)
@@ -666,8 +831,8 @@ describe('ContextView — targeted content fetch and image loading', () => {
     await m.unmount()
   })
 
-  test('a conversation service without resolveImage degrades quietly', async () => {
-    const ctx = new TestClientCtx({ services: { conversation: {} } })
+  test('a conversation service without imageUrl degrades quietly', async () => {
+    const ctx = new TestClientCtx({ services: { uiConversation: {} } })
     const View = makeView(ctx)
     const m = await mount(h(View, {
       sessionId: 'sv-noimg',
@@ -772,11 +937,13 @@ describe('ContextView — locale and settings', () => {
           { seq: 9, cat: 'tool', tokens: 30, tool: 'read', text: 'z', time: T0 + 8000 },
         ],
       })),
-      useSession: (sel => sel({ nodes: [
+      useChat: (sel =>
+        sel({
+          legacy: { nodes: [
         { kind: 'tool', seq: 7, call: { name: 'read', argsRaw: JSON.stringify({ file_path: '/z.ts' }) } },
         { kind: 'tool', seq: 8, call: { name: 'read', argsRaw: JSON.stringify({ file_path: '/a.ts' }) } },
         { kind: 'tool', seq: 9, call: { name: 'read', argsRaw: JSON.stringify({ file_path: '/z.ts' }) } },
-      ] })) as UseSessionLike,
+      ] } })) as UseChatLike,
     }))
     assert.ok(buttonByText(m.container, DICT_EN['gran.turn']).className.includes('lc-gran-on'))
     assert.ok(buttonByText(m.container, DICT_EN['gran.delta']).className.includes('lc-gran-on'))
@@ -888,5 +1055,160 @@ describe('ContextView — chat→Context jump', () => {
     assert.equal(scroller2.scrollTop, 0, 'the jump lands at the top of the tab')
     assert.ok(query(m2.container, '.lc-bar[data-seq="4"]').className.includes('lc-bar-selected'))
     await m2.unmount()
+  })
+})
+
+describe('ContextView — the split generation (slim head + detail channel)', () => {
+  /** A slim wire head: the pushed value with the collections empty and the counters/markers on. */
+  function slimHead(over: Record<string, unknown> = {}): ContextTimeline {
+    return timeline({
+      model: 'deepseek-v4-flash',
+      provider: 'deepseek',
+      contextWindow: 128000,
+      toolCalls: 3,
+      images: 1,
+      counts: { turns: 1, steps: 3, injects: 1, compactions: 1, prunes: 0 },
+      last: { seq: 6, total: 420, prompt: 410 },
+      detailRev: 6,
+      ...over,
+    })
+  }
+
+  /** The matching detail payload (richTimeline's collections). */
+  function slimDetail(rev = 6): Record<string, unknown> {
+    const rich = richTimeline()
+    return {
+      rev,
+      requests: rich.requests,
+      events: rich.events,
+      nodes: rich.nodes,
+      droppedNodes: rich.droppedNodes,
+      archive: rich.archive,
+    }
+  }
+
+  /** A ctx whose connection.rpc.call serves (or fails) the detail endpoint. */
+  function slimCtx(serve: () => Promise<unknown>): TestClientCtx {
+    return new TestClientCtx({
+      services: {
+        connection: { rpc: { call: (_channel: string, _endpoint: string, _payload: unknown) => serve() } },
+      },
+    })
+  }
+
+  async function until(fn: () => boolean, message: string): Promise<void> {
+    for (let i = 0; i < 400; i++) {
+      if (fn()) return
+      await new Promise(resolve => setTimeout(resolve, 5))
+    }
+    assert.fail(message)
+  }
+
+  test('the head paints the counters immediately; the detail collections land through the channel', async () => {
+    const ctx = slimCtx(async () => ({ ok: true, value: slimDetail() }))
+    const View = makeView(ctx)
+    const m = await mount(h(View, { sessionId: 'sv-slim', useProjection: projectionsFor(slimHead()) }))
+
+    // First paint: the counters are real (no detail needed), the detail cards name the pending read.
+    const values = queryAll(m.container, '.lc-stat-value').map(el => text(el))
+    assert.deepEqual(values.slice(0, 2), ['1', '3'], 'turns/steps from the head counters')
+    assert.ok(text(m.container).includes(DICT_EN['detail.loading']))
+    assert.equal(queryAll(m.container, '.lc-bar').length, 0, 'the chart waits for the detail')
+    assert.equal(queryAll(m.container, '.lc-br-pick option').length, 1, 'the picker holds only the live row')
+
+    // The detail lands: every card renders its real content, the notes clear.
+    await until(() => queryAll(m.container, '.lc-bar').length === 3, 'the detail never landed')
+    assert.ok(!text(m.container).includes(DICT_EN['detail.loading']))
+    assert.ok(text(m.container).includes('heads-up'), 'the events list serves the detail')
+    assert.equal(queryAll(m.container, '.lc-br-pick option').length, 4, 'live + three steps')
+    assert.ok(text(m.container).includes('reply three'), 'the brief rows serve the detail')
+    assert.ok(text(m.container).includes(DICT_EN['files.empty']), 'no file ops in this detail')
+    await m.unmount()
+  })
+
+  test('a failed detail read arms the retry notes; one click refires and the cards land', async () => {
+    let online = false
+    const ctx = slimCtx(async () => {
+      if (!online) throw new Error('offline')
+      return { ok: true, value: slimDetail() }
+    })
+    const View = makeView(ctx)
+    const m = await mount(h(View, { sessionId: 'sv-slim-fail', useProjection: projectionsFor(slimHead()) }))
+    await until(() => text(m.container).includes(DICT_EN['detail.loadFailed']), 'the failure never surfaced')
+    assert.equal(queryAll(m.container, '.lc-bar').length, 0)
+
+    online = true
+    await click(query(m.container, '.lc-br-retry'))
+    await until(() => queryAll(m.container, '.lc-bar').length === 3, 'the retry never recovered the cards')
+    assert.ok(!text(m.container).includes(DICT_EN['detail.loadFailed']))
+    assert.ok(text(m.container).includes('heads-up'))
+    await m.unmount()
+  })
+
+  test('the jump relay survives the split: held while the detail reads, resolves when it lands', async () => {
+    const ctx = slimCtx(async () => ({ ok: true, value: slimDetail() }))
+    const View = makeView(ctx)
+    // The jump is armed BEFORE the view mounts (the chat action relay) — the
+    // detail read is still pending, so the pin must wait for it (not consume
+    // and clamp against an empty record list).
+    requestContextFocus('sv-slim-jump', 4)
+    const m = await mount(h(View, { sessionId: 'sv-slim-jump', useProjection: projectionsFor(slimHead()) }))
+    assert.equal(queryAll(m.container, '.lc-bar-selected').length, 0, 'nothing pins before the detail')
+    await until(
+      () => queryAll(m.container, '.lc-bar[data-seq="4"]')[0]?.className.includes('lc-bar-selected') === true,
+      'the jump never resolved',
+    )
+    assert.equal(takeContextFocus('sv-slim-jump'), null)
+    await m.unmount()
+  })
+})
+
+describe('ContextView — the op-log generation (fileOps on the detail payload)', () => {
+  test('the File Activity card renders the fold-derived ops, no conversation join needed', async () => {
+    const ctx = new TestClientCtx({
+      services: {
+        connection: {
+          rpc: {
+            call: async () => ({
+              ok: true,
+              value: {
+                rev: 1,
+                requests: [{ seq: 2, turn: 1, step: 1, time: T0, system: 1, tools: 2, user: 3, inject: 0, assistant: 4, tool: 5, total: 15 }],
+                events: [],
+                nodes: [],
+                droppedNodes: 0,
+                archive: [],
+                // The op log covers the full session — the conversation window
+                // join plays no role in this card on this generation.
+                fileOps: [
+                  { seq: 1, path: '/ws/README.md', kind: 'read', tool: 'read', err: false, added: 0, removed: 0, read: { start: 1, count: 12 } },
+                  { seq: 2, path: '/ws/src/a.ts', kind: 'write', tool: 'edit', err: false, added: 3, removed: 1 },
+                ],
+              },
+            }),
+          },
+        },
+      },
+    })
+    const View = makeView(ctx)
+    const m = await mount(h(View, {
+      sessionId: 'sv-opslog',
+      useProjection: projectionsFor(timeline({
+        counts: { turns: 1, steps: 1, injects: 0, compactions: 0, prunes: 0 },
+        detailRev: 1,
+      })),
+    }))
+    const until2 = async (fn: () => boolean): Promise<void> => {
+      for (let i = 0; i < 400; i++) {
+        if (fn()) return
+        await new Promise(r => setTimeout(r, 5))
+      }
+      assert.fail('the detail never landed')
+    }
+    await until2(() => text(m.container).includes('README.md'))
+    assert.ok(text(m.container).includes('a.ts'), 'both served ops row')
+    assert.ok(text(m.container).includes('+3'), 'the edit delta shows')
+    assert.ok(!text(m.container).includes('No file reads'), 'not the empty state')
+    await m.unmount()
   })
 })

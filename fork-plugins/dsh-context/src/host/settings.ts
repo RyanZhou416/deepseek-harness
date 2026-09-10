@@ -16,22 +16,14 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type { SettingsNamespace } from '@deepseek-ai/dsh-settings'
 import z from '@deepseek-ai/schemastery'
+import type { PluginSettings } from '../shared/types'
 
 /** The namespace is the join key between the Host registration and the browser card. */
 export const SETTINGS_NAMESPACE = 'dsh-context'
 
-export type DefaultGranularity = 'step' | 'turn'
-
-export type DefaultTrendMode = 'total' | 'delta'
-
-/** File Activity row order: most operations first, most-recently-touched first, or path ascending. */
-export type DefaultFileSort = 'count' | 'latest' | 'path'
-
-export interface PluginSettings {
-  defaultGranularity: DefaultGranularity
-  defaultTrendMode: DefaultTrendMode
-  defaultFileSort: DefaultFileSort
-}
+// The preference vocabulary is declared once in shared/types.ts; re-exported
+// here so host-side consumers keep their canonical import path.
+export type { DefaultFileSort, DefaultGranularity, DefaultTrendMode, PluginSettings } from '../shared/types'
 
 /** Section schema: also the wire envelope the browser scope validates against. */
 export const SettingsSchema: z<PluginSettings> = z.object({
@@ -44,11 +36,9 @@ export const SettingsSchema: z<PluginSettings> = z.object({
 /** Serve the namespace while a settings provider is composed; inert otherwise. */
 export function installSettings(ctx: Context): void {
   ctx.inject(['settings'], (sctx) => {
-    // dsh 0.1.2-alpha.2 removed the `settingsNamespace()` brand helper — its own
-    // packages now register the raw string. The literal matches the namespace
-    // pattern every version enforces somewhere (inside `register` on 0.1.2-alpha.2,
-    // inside the removed helper before that), and the branded cast only satisfies
-    // the pre-0.1.2 type face.
+    // The settings packages register the raw namespace string (the
+    // `settingsNamespace()` brand helper is long gone); the branded cast
+    // only satisfies the dsh-settings type face.
     sctx.settings.register(SETTINGS_NAMESPACE as SettingsNamespace, SettingsSchema)
   })
 }

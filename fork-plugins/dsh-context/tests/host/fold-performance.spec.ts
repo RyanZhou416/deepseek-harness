@@ -1,10 +1,10 @@
-// DeepSeek Harness fork modification: copy-on-write, dirty-trim, and restored-view bounds coverage. See ../../FORK_MAINTENANCE.md.
+// DeepSeek Harness fork modification: low-overhead bounds and restored-view coverage. See ../../FORK_MAINTENANCE.md.
 
 import assert from 'node:assert/strict'
 import { describe, test } from 'vitest'
 import { buildTimelineView, createTimelineState } from '../../src/host/fold'
-import type { ContextEventRecord, RequestRecord, SurfaceNode } from '../../src/shared/types'
-import { planMode, toolCall } from './helpers/events'
+import type { ContextEventRecord, FileOpRecord, RequestRecord, SurfaceNode } from '../../src/shared/types'
+import { planMode, systemMessage, toolCall, userMessage } from './helpers/events'
 import { assertPlainJson, timelineDef } from './helpers/projection'
 
 const LEAN_BOUNDS = {
@@ -13,6 +13,7 @@ const LEAN_BOUNDS = {
   maxEvents: 100,
   maxNodes: 400,
   maxArchiveNodes: 100,
+  maxFileOps: 100,
 }
 
 function request(seq: number, turn: number, step: number): RequestRecord {
@@ -46,16 +47,45 @@ describe('timeline allocation bounds', () => {
     assert.equal(next.archived, state.archived)
   })
 
-  test('host-only state changes reuse the wire view while visible changes replace it', () => {
+  test('a system replacement with no ordinary-surface match keeps the surface fields shared', () => {
     const def = timelineDef(LEAN_BOUNDS)
-    const initial = def.init()
-    const firstView = def.wire.view(initial)
+    const state = def.init()
+    const next = def.apply(state, systemMessage(1, { surfaceOp: { op: 'replace', startSeq: 90, endSeq: 99 } }))
 
-    const pendingCall = def.apply(initial, toolCall(1, { callId: 'c1', name: 'bash' }))
-    assert.equal(def.wire.view(pendingCall), firstView)
+    assert.notEqual(next, state)
+    assert.equal(next.surface, state.surface)
+    assert.equal(next.sums, state.sums)
+    assert.equal(next.archived, state.archived)
+  })
 
-    const visible = def.apply(pendingCall, planMode(2, { active: true }))
-    assert.notEqual(def.wire.view(visible), firstView)
+  test('a hostile shadow claim with no live match degrades to the replacement node', () => {
+    const def = timelineDef(LEAN_BOUNDS)
+    const state = def.init()
+    state.pendingShadowedSeqs = [999]
+    const next = def.apply(state, userMessage(
+      1,
+      [{ type: 'text', text: 'replacement' }],
+      undefined,
+      { surfaceOp: { op: 'replace', start: 90, end: 99 } },
+    ))
+
+    assert.equal(next.surface.length, 1)
+    assert.equal(next.surface[0]?.seq, 1)
+    assert.equal(next.archived.length, 0)
+  })
+
+  test('host-only state changes reuse both wire generations while visible changes replace them', () => {
+    for (const slim of [false, true]) {
+      const def = timelineDef(LEAN_BOUNDS, slim)
+      const initial = def.init()
+      const firstView = def.wire.view(initial)
+
+      const pendingCall = def.apply(initial, toolCall(1, { callId: 'c1', name: 'bash' }))
+      assert.equal(def.wire.view(pendingCall), firstView)
+
+      const visible = def.apply(pendingCall, planMode(2, { active: true }))
+      assert.notEqual(def.wire.view(visible), firstView)
+    }
   })
 
   test('a normalized state trims only the collection changed by the next event', () => {
@@ -97,6 +127,15 @@ describe('timeline allocation bounds', () => {
       tokens: 1,
       gone: 1001 + index,
     }))
+    state.fileOps = Array.from({ length: 120 }, (_, index): FileOpRecord => ({
+      seq: index + 1,
+      path: `file-${String(index + 1)}`,
+      kind: 'read',
+      tool: 'read',
+      err: false,
+      added: 0,
+      removed: 0,
+    }))
     const before = assertPlainJson(state)
 
     const view = def.wire.view(state)
@@ -108,6 +147,9 @@ describe('timeline allocation bounds', () => {
     assert.equal(view.archive.length, 100)
     assert.equal(view.archive[0].seq, 21)
     assert.equal(view.archiveFloor, 1020)
+    assert.equal(view.fileOps?.length, 100)
+    assert.equal(view.fileOps?.[0]?.seq, 21)
+    assert.equal(view.fileOpsFloor, 20)
     assert.deepEqual(assertPlainJson(state), before, 'serving a bounded view must not rewrite restored state')
 
     const normalized = def.apply(state, toolCall(326, { callId: 'c1', name: 'bash' }))
@@ -117,6 +159,8 @@ describe('timeline allocation bounds', () => {
     assert.equal(normalizedView.events.length, 100)
     assert.equal(normalizedView.archive.length, 100)
     assert.equal(normalizedView.archiveFloor, 1020)
+    assert.equal(normalizedView.fileOps?.length, 100)
+    assert.equal(normalizedView.fileOpsFloor, 20)
   })
 
   test('a normalized state skips the retention scan before building its view', () => {

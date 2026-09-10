@@ -8,7 +8,7 @@
 // state that fails the projection cache's plain-JSON write gate (issues
 // #5-#7, #27-#30 — session creation/titles broke host-wide), a stale-row
 // restore that must seed through stateSchema, and an init that must tolerate
-// the 0.1.2 header argument.
+// the registry's header argument.
 //
 // The real-code complement — the ACTUAL dsh registry sources per tag — runs
 // in the `compat` vitest project (tests/compat/matrix.spec.ts).
@@ -66,9 +66,9 @@ function fullLog(): TimelineEvent[] {
 function bootSession(baselineIndex: number, log = fullLog()): { driver: RegistryDriver; session: SessionLike; log: TimelineEvent[] } {
   const baseline = BASELINES[baselineIndex]
   const driver = new RegistryDriver(baseline)
-  driver.register(createContextTimelineDefinition({}))
+  driver.register(createContextTimelineDefinition({}, () => false))
   driver.register(createContextHeadersDefinition())
-  const session: SessionLike = { seq: 0, header: { id: 's-matrix', cwd: '/tmp' }, events: [] }
+  const session: SessionLike = { seq: 0, header: { id: 's-matrix', cwd: '/tmp' }, inheritedEventCount: 0, events: [] }
   driver.sessionCreated(session)
   for (const event of log) {
     session.events[event.seq] = event
@@ -92,19 +92,53 @@ for (const [index, baseline] of BASELINES.entries()) {
       assert.equal(headers.headers[0].tools[0].name, 'bash')
     })
 
-    test('init tolerates the baseline call shape: with the header arg when the registry passes one, without before', () => {
-      const timelineDef = createContextTimelineDefinition({})
+    test('the split generation (slim head) rides the same registry contract', () => {
+      // The slim head is the wire value when the detail channel is live
+      // (host/detail.ts): the registry drives, caches, restores, and gates it
+      // identically — only the served value differs.
+      const driver = new RegistryDriver(baseline)
+      driver.register(createContextTimelineDefinition({}, () => true))
+      driver.register(createContextHeadersDefinition())
+      const session: SessionLike = { seq: 0, header: { id: 's-slim', cwd: '/tmp' }, inheritedEventCount: 0, events: [] }
+      driver.sessionCreated(session)
+      // One log instance (the envelope builders' clock is monotonic — a second
+      // call would mint fresh times and the restore comparison would drift).
+      const log = fullLog()
+      for (const event of log) {
+        session.events[event.seq] = event
+        session.seq = event.seq + 1
+        driver.driveEvent(session, event)
+      }
+      const timeline = driver.snapshot(session).values.contextTimeline as {
+        detailRev?: number
+        counts?: { steps: number }
+        nodes: unknown[]
+        requests: unknown[]
+      }
+      assert.equal(typeof timeline.detailRev, 'number', 'the split marker rides the push feed')
+      assert.equal(timeline.counts?.steps, 2, 'the counters travel on the head')
+      assert.equal(timeline.nodes.length, 0, 'the collections stay off the wire')
+      assert.equal(timeline.requests.length, 0)
+      // The cache contract is unchanged: plain-JSON rows, and a restore that
+      // refolds to the live cut.
+      assert.ok(driver.checkpointJson(session) !== undefined)
+      const cold = driver.restore({}, log, 0, session.header)
+      assert.deepEqual(cold.values, driver.snapshot(session).values)
+    })
+
+    test('init tolerates the registry call shape: the header and inherited-count arguments go unobserved', () => {
+      const timelineDef = createContextTimelineDefinition({}, () => false)
       const headersDef = createContextHeadersDefinition()
       const probe = { id: 's-init', cwd: '/tmp' }
       for (const def of [timelineDef, headersDef]) {
         const bare = (def.init as () => unknown)()
-        const headed = (def.init as (header: unknown) => unknown)(probe)
-        assert.deepEqual(bare, headed, 'the zero-argument init ignores the 0.1.2 header argument')
+        const headed = (def.init as (header: unknown, inheritedEventCount: number) => unknown)(probe, 7)
+        assert.deepEqual(bare, headed, 'the zero-argument init ignores the registry arguments')
       }
-      // And through the driver, whose init arity follows the baseline.
+      // And through the driver, whose init arity follows the registry's.
       const driver = new RegistryDriver(baseline)
-      driver.register(createContextTimelineDefinition({}))
-      const session: SessionLike = { seq: 0, header: probe, events: [] }
+      driver.register(createContextTimelineDefinition({}, () => false))
+      const session: SessionLike = { seq: 0, header: probe, inheritedEventCount: 7, events: [] }
       driver.sessionCreated(session)
       assert.equal(driver.snapshot(session).values.contextTimeline !== undefined, true)
     })
@@ -117,7 +151,7 @@ for (const [index, baseline] of BASELINES.entries()) {
       assert.ok(rows !== undefined, 'checkpoint rows are losslessly JSON-serializable')
       for (const key of ['contextTimeline', 'contextHeaders']) {
         const row = rows[key] as { ver: number; seq: number }
-        assert.equal(row.ver, key === 'contextTimeline' ? 13 : 1)
+        assert.equal(row.ver, key === 'contextTimeline' ? 15 : 1)
         assert.equal(row.seq, 11)
       }
       // And the write-gate equivalent on every intermediate state of a fresh fold.
@@ -210,7 +244,7 @@ for (const [index, baseline] of BASELINES.entries()) {
       const { driver: current, session } = bootSession(index, log)
       const rows = current.checkpoint(session)
       const rolledBack = new RegistryDriver(baseline)
-      rolledBack.register({ ...createContextTimelineDefinition({}), stateVersion: 12 })
+      rolledBack.register({ ...createContextTimelineDefinition({}, () => false), stateVersion: 12 })
       rolledBack.register(createContextHeadersDefinition())
       assert.equal(rolledBack.viewCheckpoint(rows).contextTimeline, undefined)
       const restored = rolledBack.restore(rows, log, 0, session.header)
@@ -251,22 +285,22 @@ for (const [index, baseline] of BASELINES.entries()) {
 
     test('registry registration rules: bad stateVersion and shared-key version conflicts are refused', () => {
       const driver = new RegistryDriver(baseline)
-      const def = createContextTimelineDefinition({})
+      const def = createContextTimelineDefinition({}, () => false)
       assert.throws(() => driver.register({ ...def, key: 'x' as never, stateVersion: -1 }), RegistryViolationError)
       assert.throws(() => driver.register({ ...def, key: 'y' as never, stateVersion: 1.5 }), RegistryViolationError)
       driver.register(def)
       // Same key at the SAME stateVersion shares the registration (preset ref-counting).
-      assert.doesNotThrow(() => driver.register(createContextTimelineDefinition({})))
-      assert.throws(() => driver.register({ ...def, stateVersion: 14 }), RegistryViolationError)
+      assert.doesNotThrow(() => driver.register(createContextTimelineDefinition({}, () => false)))
+      assert.throws(() => driver.register({ ...def, stateVersion: 16 }), RegistryViolationError)
     })
   })
 }
 
 describe('registry contract — settings namespace seam', () => {
-  // Both baselines enforce `/^[a-z][a-z0-9-]*$/` on registered namespaces —
-  // inside the removed `settingsNamespace()` helper before 0.1.2-alpha.2,
-  // inside `settings.register` since. The plugin registers the raw literal
-  // (branded cast), so the literal must pass the pattern on every baseline.
+  // The settings module enforces `/^[a-z][a-z0-9-]*$/` on registered
+  // namespaces (inside `settings.register` on the supported baselines). The
+  // plugin registers the raw literal (branded cast), so the literal must
+  // pass the pattern.
   const NAMESPACE_PATTERN = /^[a-z][a-z0-9-]*$/
   const SETTINGS_NAMESPACE = 'dsh-context'
 

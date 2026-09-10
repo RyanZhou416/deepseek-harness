@@ -3,12 +3,11 @@
 // /context trigger source, and the deferred settingsScope inject — plus real
 // renders of the registered components.
 
+import { createElement as h, type ReactElement } from 'react'
 import assert from 'node:assert/strict'
-import type { ReactElement } from 'react'
 import { describe, test } from 'vitest'
 import { DICT_EN, DICT_ZH } from '../../src/client/i18n'
 import { modalStoreOf, type ModalStore } from '../../src/client/modalStore'
-import { h } from '../../src/client/react'
 import type { SettingsField, SettingsScopeLike, SettingsState } from '../../src/client/settings'
 import { TestClientCtx, TestSessions, asClientCtx } from './helpers/harness'
 import { click, mount, query, queryAll } from './helpers/kit'
@@ -229,6 +228,35 @@ describe('client entry: settingsScope inject', () => {
     ctx.setService('settingsScope', undefined)
     applyTo(ctx)
     assert.equal(ctx.slots.of('settings.plugin.item').length, 0)
+    ctx.dispose()
+  })
+})
+
+describe('client entry: right Sidebar Context tab', () => {
+  test('absent sidebar registry at apply time: no tab, no body seat, no throw', () => {
+    const ctx = new TestClientCtx()
+    applyTo(ctx)
+    assert.deepEqual(ctx.slots.of('sidebar.right.pane.tab'), [])
+    ctx.dispose()
+  })
+
+  test('armed later: the pending inject registers the Context tab type and body', () => {
+    const ctx = new TestClientCtx()
+    applyTo(ctx)
+    const definitions: { id?: string; kind?: string; title?: () => string }[] = []
+    ctx.setService('sidebarRightTabs', {
+      register: (definition: { id?: string; kind?: string; title?: () => string }) => {
+        definitions.push(definition)
+        return () => {}
+      },
+    })
+    assert.equal(definitions.length, 1)
+    assert.equal(definitions[0].id, 'dsh-context')
+    assert.equal(definitions[0].kind, 'dsh-context')
+    assert.equal(definitions[0].title?.(), 'Context')
+    const bodies = ctx.slots.of('sidebar.right.pane.tab')
+    assert.equal(bodies.length, 1)
+    assert.equal(bodies[0].registration.key, 'dsh-context')
     ctx.dispose()
   })
 })

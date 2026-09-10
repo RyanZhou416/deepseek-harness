@@ -5,6 +5,8 @@
 // cut and the change feed.
 
 import assert from 'node:assert/strict'
+import { join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { describe, test } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import SessionStore from '@deepseek-ai/dsh-session'
@@ -12,10 +14,24 @@ import type { Session } from '@deepseek-ai/dsh-session'
 import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import { apply, inject, name } from '../../src/host/index'
 import { createContextTimelineDefinition } from '../../src/host/timeline'
+import { BASELINE_DSH_VERSION } from '../../src/shared/version'
 import type {} from '../../src/shared/types'
 
 const plugin = { name, inject, apply } as never
 const noConfig = {} as never
+
+/** The committed version-probe homes (see version.spec.ts). */
+const HOMES = fileURLToPath(new URL('./fixtures/version/homes', import.meta.url))
+
+/** Boot with the probe's home anchor pointing at one fixture harness home. */
+async function bootWithHome(home: string) {
+  const ctx = new Context()
+  ctx.provide('dshHomePath', (...segments: string[]) => join(HOMES, home, ...segments))
+  await ctx.plugin(SessionStore)
+  await ctx.plugin(SessionProjectionRegistry)
+  const fiber = await ctx.plugin(plugin, noConfig)
+  return { ctx, fiber }
+}
 
 /** Poll until the pending plugin fiber has started and folded the log. */
 async function until<T>(read: () => T | undefined, message: string): Promise<T> {
@@ -97,7 +113,7 @@ describe('dsh-context host plugin', () => {
     assert.ok(timeline.length > 0, 'contextTimeline changes notified')
     const last = timeline.at(-1)?.value
     assert.equal(
-      createContextTimelineDefinition({}).wire.viewSchema.safeParse(last).success,
+      createContextTimelineDefinition({}, () => false).wire.viewSchema.safeParse(last).success,
       true,
       'the notified value is the validated wire view',
     )
@@ -168,6 +184,61 @@ describe('dsh-context host plugin', () => {
     assert.equal(snapshot.values.contextHeaders, undefined)
   })
 
+  test('the split generation with the detail channel live: slim wire head + the endpoint serves the collections', async () => {
+    const ctx = new Context()
+    let handler: ((endpoint: string, payload: unknown) => Promise<unknown>) | undefined
+    ctx.provide('connection', {
+      rpc: {
+        handle: (_channel: string, h: never) => {
+          handler = h
+          return () => {}
+        },
+      },
+    })
+    await ctx.plugin(SessionStore)
+    await ctx.plugin(SessionProjectionRegistry)
+    await ctx.plugin(plugin, noConfig)
+    const session = ctx.sessions.create()
+    appendRealEnvelopes(session)
+    // A file-tool pair: the fold-derived op log serves through the detail endpoint.
+    const call = session.append('tool/call', { turn: 1, step: 1, callId: 'c1', name: 'read', arguments: JSON.stringify({ file_path: 'src/a.ts' }) } as never)
+    session.append('tool/result', {
+      callId: 'c1',
+      message: { content: [{ type: 'tool-result', toolCallId: 'c1', content: [{ type: 'text', text: 'ok' }] }], source: { kind: 'tool', callId: 'c1' } },
+    } as never, { surfaceOp: 'append', sourceEventSeqs: [call.seq] })
+
+    const timeline = ctx.sessionProjections.snapshot(session).values.contextTimeline
+    assert.ok(timeline !== undefined)
+    assert.equal(typeof timeline.detailRev, 'number', 'the split marker rides the slim head')
+    assert.deepEqual(timeline.counts, { turns: 1, steps: 1, injects: 0, compactions: 0, prunes: 0 })
+    assert.equal(timeline.nodes.length, 0, 'the collections stay off the wire value')
+    assert.equal(timeline.requests.length, 0)
+
+    assert.ok(handler !== undefined, 'the detail channel registered')
+    const result = await handler('detail', { sessionId: session.header.id }) as {
+      ok: boolean
+      value: { rev: number; nodes: unknown[]; requests: unknown[] } | null
+    }
+    assert.equal(result.ok, true)
+    assert.ok(result.value !== null, 'a viewed session is live — its detail serves')
+    assert.equal(result.value.rev, timeline.detailRev, 'the payload mirrors the head revision')
+    assert.equal(result.value.nodes.length, 3, 'user + assistant + tool-result surface nodes')
+    assert.equal(result.value.requests.length, 1)
+    // The fold-derived op log rides the detail payload.
+    const ops = (result.value as { fileOps?: { path: string; kind: string; tool: string }[] }).fileOps
+    assert.deepEqual(ops?.map(o => [o.kind, o.tool, o.path]), [['read', 'read', 'src/a.ts']])
+  })
+
+  test('without the connection service the wire value stays inline', async () => {
+    const { ctx } = await boot()
+    const session = ctx.sessions.create()
+    appendRealEnvelopes(session)
+    const timeline = ctx.sessionProjections.snapshot(session).values.contextTimeline
+    assert.ok(timeline !== undefined)
+    assert.equal(timeline.detailRev, undefined, 'no channel, no split marker')
+    assert.equal(timeline.nodes.length, 2, 'the collections ride the wire value as before')
+  })
+
   test('stays pending without the registry, starts when it arrives', async () => {
     const ctx = new Context()
     await ctx.plugin(SessionStore)
@@ -184,5 +255,46 @@ describe('dsh-context host plugin', () => {
     )
     assert.equal(timeline.ok, true, 'the late-mounted registry folds the already-appended log')
     await fiber
+  })
+})
+
+describe('the baseline gate', () => {
+  test('a below-baseline harness gets the fallback units instead of the folds', async () => {
+    const { ctx } = await bootWithHome('old')
+    const session = ctx.sessions.create()
+    appendRealEnvelopes(session)
+
+    const timeline = ctx.sessionProjections.snapshot(session).values.contextTimeline
+    assert.ok(timeline !== undefined, 'the fallback unit still delivers (no eternal loading)')
+    assert.deepEqual(timeline.unsupported, { current: '0.1.1-rc.2', minimum: BASELINE_DSH_VERSION })
+    assert.equal(timeline.current.total, 0, 'the log is NOT folded below the baseline')
+    assert.equal(timeline.nodes.length, 0, 'real appends leave no surface nodes')
+    assert.equal(timeline.model, undefined, 'no model metadata either')
+
+    const headers = ctx.sessionProjections.snapshot(session).values.contextHeaders
+    assert.ok(headers !== undefined)
+    assert.deepEqual(headers.headers, [], 'the header epoch is not folded either')
+  })
+
+  test('the baseline itself and newer compose the real units', async () => {
+    for (const home of ['baseline', 'future']) {
+      const { ctx } = await bootWithHome(home)
+      const session = ctx.sessions.create()
+      appendRealEnvelopes(session)
+      const timeline = ctx.sessionProjections.snapshot(session).values.contextTimeline
+      assert.ok(timeline !== undefined, home)
+      assert.equal(timeline.unsupported, undefined, home)
+      assert.ok(timeline.current.total > 0, `the real fold runs on ${home}`)
+    }
+  })
+
+  test('an unparseable harness version fails open into the real units', async () => {
+    const { ctx } = await bootWithHome('dev')
+    const session = ctx.sessions.create()
+    appendRealEnvelopes(session)
+    const timeline = ctx.sessionProjections.snapshot(session).values.contextTimeline
+    assert.ok(timeline !== undefined)
+    assert.equal(timeline.unsupported, undefined)
+    assert.ok(timeline.current.total > 0, 'a dev-channel harness build is never gated')
   })
 })

@@ -12,14 +12,13 @@
  * empty frame here.
  */
 
+import { act, createElement as h } from 'react'
 import assert from 'node:assert/strict'
 import { afterAll, beforeAll, describe, test } from 'vitest'
-import { act } from 'react'
-import { h } from '../../../src/client/react'
 import { aggregateByTurn, attachMarkers, jumpTargetOf, makeTrendChart, type TrendChartProps } from '../../../src/client/components/trendChart'
 import { CATS } from '../../../src/client/categories'
 import type { ContextEventRecord, RequestRecord } from '../../../src/shared/types'
-import { click, flush, hover, makeKit, mount, query, queryAll, unhover } from '../helpers/kit'
+import { click, flush, hover, makeKit, mount, query, queryAll, unhover, wheel } from '../helpers/kit'
 
 const kit = makeKit()
 const TrendChart = makeTrendChart(kit)
@@ -189,7 +188,7 @@ describe('TrendChart step granularity, total mode', () => {
     assert.equal(query(m.container, '.lc-axis-q1').textContent, '150')
     assert.equal(query(m.container, '.lc-axis-bot').textContent, '0')
 
-    // Turn strip: T1 spans two step columns (2*16-2 = 30px), the turnless request lands in group T0 (14px);
+    // Turn strip: turn 1 spans two step columns (2*16-2 = 30px), the turnless request lands in group 0 (14px);
     // zebra fills alternate and stay disjoint from the category palette.
     const turns = queryAll(m.container, '.lc-turn')
     assert.equal(turns.length, 2)
@@ -197,36 +196,41 @@ describe('TrendChart step granularity, total mode', () => {
     assert.equal(turns[1].style.width, '14px')
     assert.ok(turns[0].style.background.includes('0.12'))
     assert.ok(turns[1].style.background.includes('0.26'))
-    assert.deepEqual(turns.map(t => t.textContent), ['T1', 'T0'])
+    assert.deepEqual(turns.map(t => t.textContent), ['1', '0'])
     await m.unmount()
   })
 
-  test('provider prompt anchors bar height; zero/absent prompt and zero total fall back honestly', async () => {
-    const r1 = req(1, { turn: 1, step: 0 })
-    const r2 = req(2, { turn: 1, step: 1, system: 200, tools: 100, user: 60, inject: 40, assistant: 80, tool: 120, total: 600, prompt: 1200 })
-    const r3 = req(3, { turn: 2, step: 0, prompt: 0 }) // prompt 0 → not an anchor, total drives
-    const r4 = req(4, { turn: 3, step: 0, system: 0, tools: 0, user: 0, inject: 0, assistant: 0, tool: 0, total: 0, prompt: 500 })
-    const m = await mount(h(TrendChart, propsOf([r1, r2, r3, r4])))
+  test('plots raw fold figures: the provider prompt never rescales the stack, so constant categories stay flat', async () => {
+    const composition = { system: 200, tools: 100, user: 60, inject: 40, assistant: 80, tool: 120, total: 600 }
+    const r1 = req(1, { turn: 1, step: 0, ...composition })
+    const r2 = req(2, { turn: 1, step: 1, ...composition, prompt: 1200 })
+    const r3 = req(3, { turn: 2, step: 0, system: 0, tools: 0, user: 0, inject: 0, assistant: 0, tool: 0, total: 0, prompt: 500 })
+    const m = await mount(h(TrendChart, propsOf([r1, r2, r3])))
 
-    // maxTotal follows the provider prompt (1200), not the heuristic sum.
-    assert.equal(query(m.container, '.lc-axis-top').textContent, '1.2k')
+    // maxTotal follows the heuristic totals (600), not the provider prompt (1200).
+    assert.equal(query(m.container, '.lc-axis-top').textContent, '600')
     const bs = bars(m.container)
-    assert.equal(bs.length, 4)
-    // r2 anchor = 1200/600 = 2: the system segment rides 200*2 against the 1200 max.
+    assert.equal(bs.length, 3)
+    // Identical compositions plot IDENTICAL segment heights regardless of the reported prompt — a constant
+    // system prompt must not ride the provider/heuristic ratio (that per-request rescale faked growth into
+    // categories the fold never changed).
+    const segs1 = queryAll(bs[0], '.lc-bar-stack > div')
     const segs2 = queryAll(bs[1], '.lc-bar-stack > div')
-    assert.equal(segs2[0].style.height, `${Math.round(200 * 2 / 1200 * CHART_H)}px`)
-    // r4 anchors to prompt (500) but every category is zero → the stack renders no segments.
-    assert.equal(queryAll(bs[3], '.lc-bar-stack > div').length, 0)
+    assert.equal(segs1.length, 6)
+    assert.deepEqual(segs2.map(s => s.style.height), segs1.map(s => s.style.height))
+    assert.equal(segs1[0].style.height, `${Math.round(200 / 600 * CHART_H)}px`)
+    // A usage-only record (prompt without messages) still renders no segments.
+    assert.equal(queryAll(bs[2], '.lc-bar-stack > div').length, 0)
 
     // The tip is placed over its bar's visible slice imperatively (transform, not `left`), so it never
     // contributes to the scroller's overflow — see the overlay test below.
     const { spies, handlers } = makeSpies()
-    await m.update(h(TrendChart, { ...propsOf([r1, r2, r3, r4]), ...handlers, hoveredSeq: 2 }))
+    await m.update(h(TrendChart, { ...propsOf([r1, r2, r3]), ...handlers, hoveredSeq: 2 }))
     const tip = query(m.container, '.lc-chart-tip')
-    // Rows: identity, then the ACTUAL anchor total the bar is drawn against (provider prompt 1200 → '1.2k').
+    // Rows: identity, then the SAME total the bar is drawn against (the heuristic 600, not the prompt 1200).
     assert.deepEqual(
       queryAll(tip, 'span').map(r => r.textContent),
-      [kit.t('tip.step', { t: 1, s: 1 }), kit.t('tip.total', { n: '1.2k' })],
+      [kit.t('tip.step', { t: 1, s: 1 }), kit.t('tip.total', { n: '600' })],
     )
     assert.equal(tip.style.transform, 'translate(23px, 0)') // idx 1 * 16 + BAR_W/2, scrollLeft 0
     assert.ok(spies.hover.length === 0, 'hover callback only fires from real mouseover')
@@ -356,7 +360,7 @@ describe('TrendChart turn granularity', () => {
     assert.equal(turns.length, 2)
     // Aggregated groups always occupy exactly one column.
     assert.deepEqual(turns.map(t => t.style.width), ['14px', '14px'])
-    assert.deepEqual(turns.map(t => t.textContent), ['T1', 'T2'])
+    assert.deepEqual(turns.map(t => t.textContent), ['1', '2'])
 
     // Multi-step aggregate → tip.turn; a single-step aggregate still speaks TURN ("共 1 步"), never the step index.
     await m.update(h(TrendChart, propsOf(agg, { granularity: 'turn', hoveredSeq: t1s1.seq })))
@@ -467,6 +471,224 @@ describe('TrendChart category hover-link', () => {
   })
 })
 
+describe('TrendChart category focus (the browser open category)', () => {
+  const r1 = req(1, { turn: 1, step: 0 })
+  const r2 = req(2, { turn: 1, step: 1, system: 200, tools: 100, user: 60, inject: 40, assistant: 80, tool: 120, total: 600 })
+
+  test('total mode plots only the focused category, rescaled to its own max, and the tip names it', async () => {
+    const m = await mount(h(TrendChart, propsOf([r1, r2], { focusCat: 'tool' })))
+    // maxTotal follows the focused figure (60 / 120), not the bars' whole compositions (300 / 600).
+    assert.equal(query(m.container, '.lc-axis-top').textContent, '120')
+    const bs = bars(m.container)
+    const segs1 = queryAll(bs[0], '.lc-bar-stack > div')
+    assert.equal(segs1.length, 1)
+    assert.equal(segs1[0].getAttribute('data-cat'), 'tool')
+    assertColor(segs1[0].style.background, CATS[5].color)
+    assert.equal(segs1[0].style.height, `${Math.round(60 / 120 * CHART_H)}px`)
+    assert.equal(queryAll(bs[1], '.lc-bar-stack > div')[0].style.height, `${CHART_H}px`)
+
+    // The tooltip's metric row names the focused category and carries its own figure.
+    await m.update(h(TrendChart, propsOf([r1, r2], { focusCat: 'tool', hoveredSeq: 1 })))
+    assert.deepEqual(
+      queryAll(query(m.container, '.lc-chart-tip'), 'span').map(r => r.textContent),
+      [kit.t('tip.step', { t: 1, s: 0 }), kit.t('tip.cat', { cat: kit.catLabel('tool'), n: '60' })],
+    )
+    await m.unmount()
+  })
+
+  test('the focused figure is the raw fold value; a category at zero everywhere keeps the unit axis', async () => {
+    // r1a carries usage: the focused tool value (60) still plots as-is — no provider rescale.
+    const r1a = req(1, { turn: 1, step: 0, prompt: 600 })
+    const m = await mount(h(TrendChart, propsOf([r1a, r2], { focusCat: 'tool' })))
+    assert.equal(query(m.container, '.lc-axis-top').textContent, '120')
+    assert.equal(queryAll(bars(m.container)[0], '.lc-bar-stack > div')[0].style.height, `${Math.round(60 / 120 * CHART_H)}px`)
+    await m.unmount()
+
+    const zero = req(9, { turn: 1, step: 0, system: 0, tools: 0, user: 0, inject: 0, assistant: 0, tool: 0, total: 0 })
+    const mz = await mount(h(TrendChart, propsOf([zero], { focusCat: 'user' })))
+    assert.equal(query(mz.container, '.lc-axis-top').textContent, '1')
+    assert.equal(queryAll(bars(mz.container)[0], '.lc-bar-stack > div').length, 0)
+    await mz.unmount()
+  })
+
+  test('delta mode diffs the focused category only', async () => {
+    const base = req(1, { turn: 1, step: 0 })
+    const grown = req(2, { turn: 1, step: 1, system: 130, tools: 50, user: 30, inject: 20, assistant: 40, tool: 60, total: 330 })
+    const shrunk = req(3, { turn: 2, step: 0, system: 90, tools: 50, user: 30, inject: 20, assistant: 40, tool: 60, total: 290 })
+    const m = await mount(h(TrendChart, propsOf([base, grown, shrunk], { mode: 'delta', focusCat: 'system' })))
+    // Only the system deltas (+30 / -40) drive the scale: maxUp 30, maxDown 40.
+    assert.equal(query(m.container, '.lc-axis-top').textContent, '+30')
+    assert.equal(query(m.container, '.lc-axis-bot').textContent, '-40')
+    const bs = bars(m.container)
+    assert.equal(queryAll(bs[0], '.lc-bar-up > div').length, 0)
+    const up = queryAll(bs[1], '.lc-bar-up > div')
+    assert.equal(up.length, 1)
+    assert.equal(up[0].getAttribute('data-cat'), 'system')
+    assert.equal(up[0].style.height, `${Math.round(30 * CHART_H / 70)}px`)
+    const down = queryAll(bs[2], '.lc-bar-down > div')
+    assert.equal(down.length, 1)
+    assert.equal(down[0].style.height, `${Math.round(40 * CHART_H / 70)}px`)
+
+    // The delta tip reports the focused category's signed change.
+    await m.update(h(TrendChart, propsOf([base, grown, shrunk], { mode: 'delta', focusCat: 'system', hoveredSeq: 2 })))
+    assert.ok(query(m.container, '.lc-chart-tip').textContent!.includes(kit.t('tip.delta', { n: '+30' })))
+    await m.unmount()
+  })
+
+  test('an unknown focus key and an explicit null degrade to the unfocused chart', async () => {
+    for (const focusCat of ['nope', null]) {
+      const m = await mount(h(TrendChart, propsOf([r1, r2], { focusCat })))
+      assert.equal(queryAll(bars(m.container)[0], '.lc-bar-stack > div').length, 6)
+      assert.equal(query(m.container, '.lc-axis-top').textContent, '600')
+      await m.unmount()
+    }
+  })
+})
+
+describe('TrendChart adaptive scale (the title-adjacent toggle)', () => {
+  /** 30 steps of one category: bar 0 carries the spike, the rest a flat 100 — 25 columns fit the test viewport. */
+  function spikedSteps(): RequestRecord[] {
+    const out: RequestRecord[] = []
+    for (let i = 0; i < 30; i++) {
+      const total = i === 0 ? 900 : 100
+      out.push(req(i + 1, { turn: 1, step: i, system: total, tools: 0, user: 0, inject: 0, assistant: 0, tool: 0, total }))
+    }
+    return out
+  }
+
+  test('rescales to the visible window, follows the scroll, and yields to the whole-log scale when switched off', async () => {
+    const reqs = spikedSteps()
+    const m = await mount(h(TrendChart, propsOf(reqs, { adaptive: true })))
+    await flush()
+    const scroll = query<LayoutEl>(m.container, '.lc-chart-scroll')
+    // Mount anchors at the newest bars (scrollLeft 80 over scrollWidth 480 / clientWidth 400): the 900 spike at
+    // bar 0 is off screen, so the visible 100s scale the axis and the bars fill the chart.
+    assert.equal(scroll.scrollLeft, 80)
+    assert.equal(query(m.container, '.lc-axis-top').textContent, '100')
+    assert.equal(queryAll(bars(m.container)[29], '.lc-bar-stack > div')[0].style.height, `${CHART_H}px`)
+
+    // Back to the left edge: the spike is on screen and takes the scale back.
+    await scrollTo(scroll, 0)
+    assert.equal(query(m.container, '.lc-axis-top').textContent, '900')
+    assert.equal(queryAll(bars(m.container)[29], '.lc-bar-stack > div')[0].style.height, `${Math.round(100 / 900 * CHART_H)}px`)
+
+    // A scroll inside a window whose maxima do not move keeps the same scale (bars 4..28 are all 100).
+    await scrollTo(scroll, 64)
+    assert.equal(query(m.container, '.lc-axis-top').textContent, '100')
+
+    // Switched off: the whole-log scale returns even though a visible window is still measured.
+    await m.update(h(TrendChart, propsOf(reqs, { adaptive: false })))
+    assert.equal(query(m.container, '.lc-axis-top').textContent, '900')
+    await m.unmount()
+  })
+
+  test('a column wholly in the 2px gap outside the viewport does not join the window', async () => {
+    const m = await mount(h(TrendChart, propsOf(spikedSteps(), { adaptive: true })))
+    await flush()
+    const scroll = query<LayoutEl>(m.container, '.lc-chart-scroll')
+    // scrollLeft 15 lands in the gap after bar 0's 14px column: the spike is off screen and must not scale the axis.
+    await scrollTo(scroll, 15)
+    assert.equal(query(m.container, '.lc-axis-top').textContent, '100')
+    // One pixel earlier its column is still (partly) on screen and takes the scale back.
+    await scrollTo(scroll, 13)
+    assert.equal(query(m.container, '.lc-axis-top').textContent, '900')
+    await m.unmount()
+  })
+
+  test('an empty history or a zero-width viewport keeps the previous scale', async () => {
+    const empty = await mount(h(TrendChart, propsOf([], { adaptive: true })))
+    assert.equal(query(empty.container, '.lc-axis-top').textContent, '1')
+    await empty.unmount()
+
+    // A hidden pane (zero width) has nothing visible to scale to: the measured scale stands instead of collapsing
+    // every bar onto a unit axis.
+    const m = await mount(h(TrendChart, propsOf(spikedSteps(), { adaptive: true })))
+    await flush()
+    const scroll = query<LayoutEl>(m.container, '.lc-chart-scroll')
+    scroll.__clientW = 0
+    await scrollEvent(scroll)
+    assert.equal(query(m.container, '.lc-axis-top').textContent, '100')
+    await m.unmount()
+  })
+
+  test('delta mode rescales the diverging arms; an all-zero window keeps the whole-log zero line', async () => {
+    const step = (i: number, system: number): RequestRecord =>
+      req(i + 1, { turn: 1, step: i, system, tools: 0, user: 0, inject: 0, assistant: 0, tool: 0, total: system })
+    // Deltas: bar 1 jumps +500, bars 2..29 grow +10 each, with a -30 dip carried from bar 20 on.
+    const reqs = [step(0, 100), step(1, 600)]
+    for (let i = 2; i < 30; i++) reqs.push(step(i, 600 + (i - 1) * 10 - (i >= 20 ? 40 : 0)))
+    const m = await mount(h(TrendChart, propsOf(reqs, { mode: 'delta', adaptive: true })))
+    await flush()
+    // Mount anchors right (scrollLeft 80): the visible +10/-30 deltas scale both arms (maxUp 10, maxDown 30),
+    // lifting the zero line to 28px off the floor and stretching the +10 segment to 28px.
+    assert.equal(query(m.container, '.lc-axis-top').textContent, '+10')
+    assert.equal(query(m.container, '.lc-axis-bot').textContent, '-30')
+    assert.equal(query(m.container, '.lc-axis-mid').style.top, `${13 + 28}px`)
+    assert.equal(queryAll(bars(m.container)[29], '.lc-bar-up > div')[0].style.height, `${Math.round(10 * CHART_H / 40)}px`)
+    assert.equal(queryAll(bars(m.container)[20], '.lc-bar-down > div')[0].style.height, `${Math.round(30 * CHART_H / 40)}px`)
+    await m.unmount()
+
+    // Bars 0..24 carry no change at all and the +500 sits at bar 25: the all-zero window has no scale of its own,
+    // so the whole-log zero line stands instead of collapsing onto the chart top.
+    const flat = [step(0, 100)]
+    for (let i = 1; i < 25; i++) flat.push(step(i, 100))
+    flat.push(step(25, 600))
+    const m2 = await mount(h(TrendChart, propsOf(flat, { mode: 'delta', adaptive: true })))
+    await flush()
+    await scrollTo(query<LayoutEl>(m2.container, '.lc-chart-scroll'), 0)
+    assert.equal(query(m2.container, '.lc-axis-top').textContent, '+500')
+    assert.equal(query(m2.container, '.lc-axis-mid').style.top, `${13 + CHART_H}px`)
+    await m2.unmount()
+  })
+
+  test('a container resize re-measures the visible window through the observer', async () => {
+    const callbacks: (() => void)[] = []
+    class FakeResizeObserver {
+      constructor(cb: () => void) { callbacks.push(cb) }
+      observe(): void {}
+      disconnect(): void {}
+    }
+    const holder = globalThis as { ResizeObserver?: unknown }
+    const saved = holder.ResizeObserver
+    holder.ResizeObserver = FakeResizeObserver
+    try {
+      const m = await mount(h(TrendChart, propsOf(spikedSteps(), { adaptive: true })))
+      await flush()
+      const scroll = query<LayoutEl>(m.container, '.lc-chart-scroll')
+      assert.equal(query(m.container, '.lc-axis-top').textContent, '100')
+      assert.equal(callbacks.length, 1)
+      // The pane widens back to the whole log while the reader sits at the left edge — a resize renders nothing,
+      // so only the observer's callback re-measures.
+      scroll.__clientW = 480
+      scroll.__scrollL = 0
+      await act(async () => { callbacks[0]() })
+      assert.equal(query(m.container, '.lc-axis-top').textContent, '900')
+      await m.unmount()
+    } finally {
+      holder.ResizeObserver = saved
+    }
+  })
+
+  test('the chart scroller cancels a horizontal swipe at either edge (browser history guard)', async () => {
+    const reqs: RequestRecord[] = []
+    for (let i = 0; i < 40; i++) reqs.push(req(i + 1, { turn: 1, step: i }))
+    const m = await mount(h(TrendChart, propsOf(reqs)))
+    await flush()
+    const scroll = query<LayoutEl>(m.container, '.lc-chart-scroll')
+    // Mount anchors at the newest bars: a further rightward swipe is the browser's forward gesture, leftward
+    // still scrolls the chart, and a vertical-dominant gesture belongs to the page.
+    assert.equal(scroll.scrollLeft, 240)
+    assert.equal(wheel(scroll, 30, 0), true, 'right edge cancels the forward swipe')
+    assert.equal(wheel(scroll, -30, 0), false, 'leftward still scrolls the chart')
+    assert.equal(wheel(scroll, 30, 120), false, 'vertical-dominant gestures stay with the page')
+    await scrollTo(scroll, 0)
+    assert.equal(wheel(scroll, -30, 0), true, 'left edge cancels the back swipe')
+    await scrollTo(scroll, 100)
+    assert.equal(wheel(scroll, -30, 0), false, 'mid-chart leftward still scrolls')
+    await m.unmount()
+  })
+})
+
 describe('TrendChart markers', () => {
   test('compaction/prune markers render the ✂ glyph with a positioned or bare title', async () => {
     const reqs = [req(1, { turn: 1, step: 0 }), req(2, { turn: 1, step: 1 }), req(3, { turn: 2, step: 0 })]
@@ -494,7 +716,7 @@ describe('TrendChart tooltips', () => {
   const r1 = req(1, { turn: 1, step: 0 })
   const r4 = req(4, { turn: undefined, step: undefined })
 
-  test('hover floats a two-row tip (identity + anchor total) and clears on leave', async () => {
+  test('hover floats a two-row tip (identity + bar total) and clears on leave', async () => {
     const { spies, handlers } = makeSpies()
     const reqs = [r1, r4]
     const m = await mount(h(TrendChart, propsOf(reqs, handlers)))
@@ -684,10 +906,10 @@ describe('TrendChart scroll anchoring', () => {
     const m = await mount(h(TrendChart, propsOf(agg, { granularity: 'turn' })))
     const scroll = query<LayoutEl>(m.container, '.lc-chart-scroll')
     const labels = queryAll(m.container, '.lc-turn-label')
-    assert.deepEqual(labels.map(l => l.textContent), ['T10', 'T11', 'T12'])
+    assert.deepEqual(labels.map(l => l.textContent), ['10', '11', '12'])
 
-    // 20px labels over 14px blocks (dx pinned at 0, natively centered): boxes [-3,17], [13,33], [29,49] — T11
-    // collides with the kept T10 and hides; T12 clears it (past box + gap) and stays visible.
+    // 20px labels over 14px blocks (dx pinned at 0, natively centered): boxes [-3,17], [13,33], [29,49] — 11
+    // collides with the kept 10 and hides; 12 clears it (past box + gap) and stays visible.
     for (const l of labels) Object.defineProperty(l, 'offsetWidth', { configurable: true, get: () => 20 })
     await scrollEvent(scroll)
     assert.equal(labels[0].style.visibility, '')
@@ -701,6 +923,39 @@ describe('TrendChart scroll anchoring', () => {
     await scrollEvent(scroll)
     assert.equal(labels[1].style.visibility, '', 'repeat scroll with unchanged geometry writes nothing')
     await m.unmount()
+  })
+
+  test('the strip shrinks every label to the largest size at which the tightest adjacent pair fits', async () => {
+    // One/two-digit turns at the 16px column pitch fit the 10px base (est. 6.5px/digit + 2px gap vs 16px) → no override.
+    const single = await mount(h(TrendChart, propsOf(
+      aggregateByTurn([req(1, { turn: 1 }), req(2, { turn: 2 }), req(3, { turn: 10 })]),
+      { granularity: 'turn' },
+    )))
+    assert.equal(query<HTMLElement>(single.container, '.lc-turns').style.fontSize, '')
+    await single.unmount()
+
+    // Three-digit labels over 14px blocks: est. need 21.5px vs 16px pitch → floor(10 * 16/21.5) = 7px for EVERY label.
+    const three = await mount(h(TrendChart, propsOf(
+      aggregateByTurn([req(1, { turn: 100 }), req(2, { turn: 101 })]),
+      { granularity: 'turn' },
+    )))
+    assert.equal(query<HTMLElement>(three.container, '.lc-turns').style.fontSize, '7px')
+    await three.unmount()
+
+    // Four-digit pairs clamp at the 6px floor (the measured chain stays the last-resort guard below it).
+    const four = await mount(h(TrendChart, propsOf(
+      aggregateByTurn([req(1, { turn: 1000 }), req(2, { turn: 1001 })]),
+      { granularity: 'turn' },
+    )))
+    assert.equal(query<HTMLElement>(four.container, '.lc-turns').style.fontSize, '6px')
+    await four.unmount()
+
+    // Wide step-mode blocks buy room: ten-step turns carry three-digit labels at the base size.
+    const wide: RequestRecord[] = []
+    for (let i = 0; i < 20; i++) wide.push(req(i + 1, { turn: 100 + Math.floor(i / 10), step: i % 10 }))
+    const step = await mount(h(TrendChart, propsOf(wide)))
+    assert.equal(query<HTMLElement>(step.container, '.lc-turns').style.fontSize, '')
+    await step.unmount()
   })
 })
 

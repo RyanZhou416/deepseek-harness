@@ -16,8 +16,11 @@
 .lc-chart-wrap { position: relative; flex: 1; min-width: 0; }
 /* No `scrollbar-width`/`scrollbar-color` here: either would make Chromium/Safari drop every
    ::-webkit-scrollbar* rule (see dsh ui-theme scrollbar.css), falling back to the OS overlay
-   bar that auto-hides — dsh's global 8px skin below stays visible instead. */
-.lc-chart-scroll { overflow-x: auto; overflow-y: hidden; scrollbar-gutter: stable; padding-bottom: var(--dsh-scrollbar-width, 8px); }
+   bar that auto-hides — dsh's global 8px skin below stays visible instead.
+   `overscroll-behavior-x: contain` stops a swipe past either edge from chaining into the browser's history
+   navigation (back at the left edge, forward at the right) — the same guard dsh's own horizontal scrollers
+   carry (WebKit ignores it for history, so overscroll.ts cancels the wheel there too). */
+.lc-chart-scroll { overflow-x: auto; overflow-y: hidden; overscroll-behavior-x: contain; scrollbar-gutter: stable; padding-bottom: var(--dsh-scrollbar-width, 8px); }
 .lc-chart { position: relative; display: flex; align-items: flex-end; gap: 2px; height: 130px; padding-top: 18px; box-sizing: border-box; width: max-content; min-width: 100%; }
 .lc-grid { position: absolute; left: 0; right: 0; border-top: 1px dashed var(--dsw-alias-border-l2); pointer-events: none; }
 .lc-grid-top { top: 18px; }
@@ -53,11 +56,21 @@
 .lc-bar-in-turn { background: rgba(128,128,128,0.14); }
 .lc-bar-stack { display: flex; flex-direction: column-reverse; width: 100%; }
 .lc-bar-stack > div { width: 100%; }
-/* Delta mode: diverging stacks anchored at the zero line — growth piles up from it, shrinkage hangs down. */
+/* Rounded ends on each bar's outer corners only (the idiom radius, .lc-bar's 2px): the topmost segment
+   carries the two top corners, the bottommost the two bottom, and an only segment all four — inner
+   boundaries stay square so stacked segments never show background gaps between colors. */
+.lc-bar-stack > div:first-child { border-radius: 0 0 2px 2px; }
+.lc-bar-stack > div:last-child { border-radius: 2px 2px 0 0; }
+.lc-bar-stack > div:only-child { border-radius: 2px; }
+/* Delta mode: diverging stacks anchored at the zero line — growth piles up from it, shrinkage hangs down.
+   Only each arm's OUTER end rounds (an arm's last segment, top corners on the up-arm / bottom on the
+   down-arm; :last-child also covers a single-segment arm) — the zero-line joins stay square and crisp. */
 .lc-bar-up, .lc-bar-down { position: absolute; left: 0; width: 100%; display: flex; }
 .lc-bar-up { flex-direction: column-reverse; }
 .lc-bar-down { flex-direction: column; }
 .lc-bar-up > div, .lc-bar-down > div { width: 100%; }
+.lc-bar-up > div:last-child { border-radius: 2px 2px 0 0; }
+.lc-bar-down > div:last-child { border-radius: 0 0 2px 2px; }
 /*
  Category hover-link (overview/browser → trend card): the chart container carries the hovered
  category key (`data-catdim`), so CSS alone lights that key's segment in EVERY bar and recedes
@@ -76,9 +89,14 @@
 /*
  Turn strip: NEUTRAL zebra fills (inline, see TURN_FILLS) — never the category palette, or the strip reads as a detached bottom segment of the bars.
  */
-.lc-turns { display: flex; gap: 2px; overflow: hidden; margin-top: 4px; }
+/* Same sizing as .lc-chart: as an in-flow child of the scroller the strip would otherwise cap at the
+   viewport width (clientWidth) and overflow:hidden would clip every block past the first screen — the
+   strip must span the full scrollable column grid instead. */
+.lc-turns { display: flex; gap: 2px; overflow: hidden; margin-top: 4px; width: max-content; min-width: 100%; }
 .lc-turn { flex: none; box-sizing: border-box; text-align: center; font-size: 10px; line-height: 14px; font-weight: 600; color: var(--dsw-alias-label-secondary); border-radius: 3px; height: 14px; white-space: nowrap; cursor: pointer; transition: filter var(--ds-transition-duration, 0.2s) var(--ds-ease-in-out, ease-in-out), opacity var(--ds-transition-duration, 0.2s) var(--ds-ease-in-out, ease-in-out); }
 .lc-turn-on { filter: brightness(1.35); color: var(--dsw-alias-label-primary); }
-/* Labels render at natural width, centered over their block — a 2-digit "T12" over a 14px turn bar overflows the
-   block instead of ellipsizing away; updateTurnLabels thins labels that would collide. */
+/* Labels render at natural width, centered over their block — a 2-digit "12" over a 14px turn bar overflows the
+   block instead of ellipsizing away. The render pass sets one shrunk font size on .lc-turns when the tightest
+   adjacent label pair would collide at this 10px base (mirrored as LABEL_FONT in trendChart.tsx);
+   updateTurnLabels' thinning chain stays only as the measured last resort past the 6px floor. */
 .lc-turn-label { display: inline-block; }

@@ -20,6 +20,10 @@ export interface PartsPart {
   value: number
   /** Heuristic count shown by the legend and tooltips (defaults to value). */
   raw?: number
+  /** Tooltip display name (defaults to the category label of `key`) — DNA mode names individual items. */
+  label?: string
+  /** Shared-hover group: an incoming hover key equal to a part's group lights it (DNA bands light per category). */
+  group?: string
 }
 
 export const CATS: { key: Category | 'system' | 'tools'; color: string }[] = [
@@ -31,10 +35,10 @@ export const CATS: { key: Category | 'system' | 'tools'; color: string }[] = [
   { key: 'tool', color: '#14b8a6' },
 ]
 
-const MESSAGE_CATS: readonly (Category | 'system' | 'tools')[] = ['user', 'inject', 'assistant', 'tool']
+/** Category key → bar color, for per-item bands (the browser's DNA mode) that bypass the CATS-order part builders. */
+export const CAT_COLOR = Object.fromEntries(CATS.map(c => [c.key, c.color])) as Record<Category | 'system' | 'tools', string>
 
-/** Category key → chart color, built once from CATS. */
-export const CAT_COLORS: Record<string, string> = Object.fromEntries(CATS.map(c => [c.key, c.color]))
+const MESSAGE_CATS: readonly (Category | 'system' | 'tools')[] = ['user', 'inject', 'assistant', 'tool']
 
 export function partsOf(breakdown: Snapshot['current'] | RequestRecord): PartsPart[] {
   return CATS.map((c) => {

@@ -5,8 +5,9 @@
 
 import assert from 'node:assert/strict'
 import { describe, test } from 'vitest'
-import { absPathOf, activityOf, displayPathOf, formOf, glyphOf, kindOfCall, kindOfTool, linesOf, locateStepOf, pathOfArgs } from '../../src/client/fileActivity'
-import type { FileActivity } from '../../src/client/fileActivity'
+import { absPathOf, activityOf, activityOfOps, displayPathOf, formOf, glyphOf, locateStepOf } from '../../src/client/fileActivity'
+import { kindOfCall, kindOfTool, linesOf, pathOfArgs } from '../../src/shared/fileOps'
+import type { FileActivity, FileOp } from '../../src/client/fileActivity'
 import type { ConversationNodeLike } from '../../src/client/services'
 import type { RequestRecord, SurfaceNode } from '../../src/shared/types'
 
@@ -506,16 +507,21 @@ describe('activityOf — search meta attribution', () => {
         meta: { shape: 'paths', truncated: false, total: 1, paths: ['/old.ts'] },
       }),
     ])
-    assert.deepEqual(a.entries.map(e => e.path), ['/old.ts', 'broad', '/src/a.ts', '/src/b.ts'])
-    const first = a.entries[2]
-    assert.equal(first.searches, 1)
-    assert.equal(first.ops[0].hits, 2)
-    assert.equal(first.ops[0].detail, 'needle')
-    assert.equal(a.entries[3].ops[0].hits, 1)
+    // The searched target rows too: '/src' (the narrowed path) and the two
+    // pathless patterns ride ahead of their hit files.
+    assert.deepEqual(a.entries.map(e => e.path), ['old', '/old.ts', 'broad', '/src', '/src/a.ts', '/src/b.ts'])
+    const byPath = new Map(a.entries.map(e => [e.path, e]))
+    const srcA = byPath.get('/src/a.ts')!
+    assert.equal(srcA.searches, 1)
+    assert.equal(srcA.ops[0].hits, 2)
+    assert.equal(srcA.ops[0].detail, 'needle')
+    assert.equal(byPath.get('/src/b.ts')!.ops[0].hits, 1)
+    // The searched directory's row carries the pattern detail.
+    assert.equal(byPath.get('/src')!.ops[0].detail, 'needle')
     // The archived, timeless meta row carries the node's stamp (and no time).
-    assert.equal(a.entries[0].ops[0].gone, 20)
-    assert.equal(a.entries[0].ops[0].time, undefined)
-    assert.deepEqual(a.totals.search, { files: 4, ops: 4 })
+    assert.equal(byPath.get('/old.ts')!.ops[0].gone, 20)
+    assert.equal(byPath.get('/old.ts')!.ops[0].time, undefined)
+    assert.deepEqual(a.totals.search, { files: 6, ops: 6 })
   })
 
   test('an include filter joins the detail; glob metas row without hit counts', () => {
@@ -527,10 +533,13 @@ describe('activityOf — search meta attribution', () => {
         meta: { shape: 'paths', truncated: false, total: 2, paths: ['/r.md', '/o.md'] },
       }),
     ])
-    assert.deepEqual(a.entries.map(e => e.path), ['/r.md', '/o.md', '/a.ts'])
-    assert.equal(a.entries[2].ops[0].detail, 'needle (*.ts)')
-    assert.equal(a.entries[1].ops[0].hits, undefined) // a listed path matched no lines
-    assert.equal(a.entries[1].ops[0].detail, '**/*.md')
+    // Each call rows its target (the pattern) plus the hit files.
+    assert.deepEqual(a.entries.map(e => e.path), ['**/*.md', '/r.md', '/o.md', 'needle', '/a.ts'])
+    const byPath = new Map(a.entries.map(e => [e.path, e]))
+    assert.equal(byPath.get('/a.ts')!.ops[0].detail, 'needle (*.ts)')
+    assert.equal(byPath.get('/o.md')!.ops[0].hits, undefined) // a listed path matched no lines
+    assert.equal(byPath.get('/o.md')!.ops[0].detail, '**/*.md')
+    assert.equal(byPath.get('needle')!.ops[0].pattern, true, 'the pathless target is a pattern row')
   })
 
   test('malformed or empty metas fall back to the pattern row', () => {
@@ -556,7 +565,8 @@ describe('activityOf — search meta attribution', () => {
     const a = run([op(10, 'grep', { pattern: 'needle', path: '/src' }, {}, {
       meta: { shape: 'paths', truncated: false, total: 2, paths: ['/a.ts', ''] },
     })])
-    assert.deepEqual(a.entries.map(e => e.path), ['/a.ts'])
+    // The valid sibling attributes; the searched path rows as the call's target.
+    assert.deepEqual(a.entries.map(e => e.path), ['/src', '/a.ts'])
   })
 
   test('a truncated flag is required — a missing one falls back', () => {
@@ -743,5 +753,63 @@ describe('absPathOf', () => {
     assert.equal(absPathOf('src/a.ts', undefined), undefined)
     assert.equal(absPathOf('./src/a.ts', ws), undefined)
     assert.equal(absPathOf('C:\\repo\\a.ts', ws), 'C:\\repo\\a.ts')
+  })
+})
+
+describe('activityOfOps — the fold-derived op log', () => {
+  function op(over: Partial<FileOp> & { seq: number; path: string }): FileOp {
+    return { kind: 'read', tool: 'read', err: false, added: 0, removed: 0, ...over }
+  }
+
+  test('aggregates the fold-derived records per file (newest first), scoped by the exclusive bound', () => {
+    const ops = [
+      op({ seq: 1, path: 'a.ts', read: { start: 1, count: 5 } }),
+      op({ seq: 2, path: 'b.ts', kind: 'write', tool: 'write', added: 3 }),
+      op({ seq: 3, path: 'a.ts', kind: 'write', tool: 'edit', added: 1, removed: 2 }),
+      op({ seq: 4, path: 'c.ts', kind: 'search', tool: 'grep', hits: 7 }),
+    ]
+    const all = activityOfOps(ops, [], null)
+    assert.deepEqual(all.entries.map(e => [e.path, e.reads, e.writes, e.searches]), [
+      ['c.ts', 0, 0, 1],
+      ['a.ts', 1, 1, 0],
+      ['b.ts', 0, 1, 0],
+    ])
+    assert.deepEqual([all.totals.read.ops, all.totals.write.ops, all.totals.search.ops], [1, 2, 1])
+    const a = all.entries[1]
+    assert.deepEqual(a.ops.map(o => o.seq), [3, 1], 'ops newest first within the file')
+    assert.deepEqual([a.added, a.removed], [1, 2])
+    // Scope: before = 3 drops seq 3+ (a nested op keys on its parent result).
+    const scoped = activityOfOps(ops, [], 3)
+    assert.deepEqual(scoped.entries.map(e => e.path).sort(), ['a.ts', 'b.ts'])
+    assert.deepEqual([scoped.totals.read.ops, scoped.totals.write.ops, scoped.totals.search.ops], [1, 1, 0])
+  })
+
+  test('a nested op scopes by its parent result seq (the legacy node-level rule)', () => {
+    const ops = [
+      op({ seq: 2, path: 'a.ts', parent: 5, program: 'p' }),
+      op({ seq: 3, path: 'b.ts' }),
+    ]
+    // before = 5: the parent-keyed op (key 5) is out, the plain seq-3 op is in.
+    const scoped = activityOfOps(ops, [], 5)
+    assert.deepEqual(scoped.entries.map(e => e.path), ['b.ts'])
+  })
+
+  test('gone joins from the detail archive by the op node (or its parent), never overriding an op stamp', () => {
+    const ops = [
+      op({ seq: 1, path: 'a.ts' }),
+      op({ seq: 2, path: 'b.ts', gone: 50 }),
+      op({ seq: 3, path: 'c.ts', parent: 10 }),
+    ]
+    const archive = [
+      { seq: 1, cat: 'tool' as const, tokens: 1, gone: 40 },
+      { seq: 2, cat: 'tool' as const, tokens: 1, gone: 99 },
+      { seq: 10, cat: 'tool' as const, tokens: 1, gone: 77 },
+      { seq: 30, cat: 'tool' as const, tokens: 1 }, // a live-window echo row: no stamp, joins nothing
+    ]
+    const out = activityOfOps(ops, archive, null)
+    const byPath = new Map(out.entries.map(e => [e.path, e]))
+    assert.equal(byPath.get('a.ts')?.ops[0].gone, 40, 'the archive stamp joins')
+    assert.equal(byPath.get('b.ts')?.ops[0].gone, 50, 'the op\'s own stamp wins')
+    assert.equal(byPath.get('c.ts')?.ops[0].gone, 77, 'a nested op reads its parent\'s stamp')
   })
 })

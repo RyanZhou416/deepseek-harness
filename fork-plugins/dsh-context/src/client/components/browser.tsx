@@ -1,13 +1,17 @@
-import type * as ReactNS from 'react'
-import { UNKNOWN_TOOL_SOURCE, type Category, type ContextHeaders, type ContextTimeline, type HeaderEpochContent, type HeaderTool, type RequestRecord, type SurfaceNode } from '../../shared/types'
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ChangeEvent, type ReactElement, type ReactNode } from 'react'
+import { UNKNOWN_TOOL_SOURCE, type Category, type ContextHeaders, type ContextTimeline, type HeaderTool, type RequestRecord, type SurfaceNode } from '../../shared/types'
 import { assemble } from '../assemble'
 import type { Assembled } from '../assemble'
-import { CATS, partsOf } from '../categories'
-import { React } from '../react'
+import { CATS, CAT_COLOR, partsOf } from '../categories'
+import { dnaOf } from '../dna'
+import type { DnaItem } from '../dna'
 import type { ContentFetcher, ConversationNodeLike, HeaderFetcher } from '../services'
 import type { ViewKit } from '../viewkit'
 import { blockSummaryOf, callSummaryOf, parseCallArgs } from '../callSummary'
+import type { DetailState } from '../timelineSource'
+import { makeDetailNote } from './detailNote'
 import { makeNodeText } from './nodes'
+import { fetchMissNote, useFetchOnMiss } from './fetchOnMiss'
 import { imageRefOf, makeImageCard } from './images'
 import type { ImageKit } from './images'
 import { makeRichText } from './richText'
@@ -19,10 +23,9 @@ export interface ContextBrowserProps {
   data: ContextTimeline
   headers: ContextHeaders | null
   /**
-   * The conversation-window nodes, already resolved by the caller from
-   * whichever seat the harness provides (`useChat` on 0.1.2+, the session
-   * snapshot before it) — the browser itself stays seat-free so the hook
-   * order lives in exactly one place.
+   * The conversation-window nodes, resolved by the caller from the `useChat`
+   * seat — the browser itself stays seat-free so the hook order lives in
+   * exactly one place.
    */
   convNodes?: readonly ConversationNodeLike[]
   /**
@@ -50,7 +53,19 @@ export interface ContextBrowserProps {
   onNodeFocusHandled?: () => void
   hoverKey?: string | null
   onHoverKey?: (key: string | null) => void
+  /**
+   * Reports the open category (null once none opens): the Context tab focuses the trend chart's bars on it.
+   * Absent (the /context modal) — the accordion stays purely internal.
+   */
+  onOpenCat?: (cat: string | null) => void
   loadImage?: ImageLoader
+  /**
+   * The timeline source's detail state (split generation): while the first
+   * detail read is pending or settled without data, a note strip names the
+   * state (the picker/sections otherwise show a misleading empty surface).
+   */
+  detailState?: DetailState
+  onDetailRetry?: () => void
 }
 
 interface ParamSchema {
@@ -124,7 +139,7 @@ function ParamRow(props: {
   name: string
   schema: ParamSchema
   required: boolean
-}): ReactNS.ReactElement {
+}): ReactElement {
   const typeLabel = typeOf(props.schema)
   const desc = props.schema.description
   return (
@@ -148,15 +163,17 @@ function ParamRow(props: {
 function Section(props: {
   label: string
   labelClass?: string
+  /** Fold the head's trailing group onto a second line under width pressure (rich-text heads; the call-name head must stay one-line). */
+  foldHead?: boolean
   count?: number
-  actions?: ReactNS.ReactNode
-  meta?: ReactNS.ReactNode
-  children: ReactNS.ReactNode
-}): ReactNS.ReactElement {
+  actions?: ReactNode
+  meta?: ReactNode
+  children: ReactNode
+}): ReactElement {
   const right = props.actions !== undefined || props.meta !== undefined
   return (
     <div className="lc-ts-card">
-      <div className="lc-ts-card-head">
+      <div className={'lc-ts-card-head' + (props.foldHead === true ? ' lc-ts-card-head-wrap' : '')}>
         {/* The title recovers an ellipsized label: long mono call names truncate under width pressure. */}
         <b className={props.labelClass} title={props.label}>{props.label}</b>
         {right ? <span className="lc-ts-card-right">{props.meta}{props.actions}</span> : null}
@@ -177,14 +194,18 @@ function TextSection(props: {
   text: string
   rich: RichKit
   lines: (n: number) => string
-}): ReactNS.ReactElement {
+}): ReactElement {
   const { rich } = props
   const [mode, setMode] = rich.useRichMode()
-  const lineCount = React.useMemo(() => lineCountOf(props.text), [props.text])
+  const lineCount = useMemo(() => lineCountOf(props.text), [props.text])
   return (
     <Section
       label={props.label}
-      actions={<rich.RichSwitch mode={mode} onPick={setMode} />}
+      foldHead
+      actions={<>
+        <rich.RichSwitch mode={mode} onPick={setMode} />
+        <rich.RichCopy text={props.text} />
+      </>}
       meta={<span className="lc-ts-card-meta">{props.lines(lineCount)}</span>}
     >
       <rich.RichText text={props.text} mode={mode} />
@@ -192,7 +213,7 @@ function TextSection(props: {
   )
 }
 
-function RawSection(props: { label: string; text: string }): ReactNS.ReactElement {
+function RawSection(props: { label: string; text: string }): ReactElement {
   return (
     <Section label={props.label}>
       <pre className="lc-ts-desc-body lc-br-dim">{props.text}</pre>
@@ -223,15 +244,15 @@ function RowToolbar(props: {
   placeholder: string
   tip?: string
   onChange: (v: string) => void
-  children?: ReactNS.ReactNode
-}): ReactNS.ReactElement {
+  children?: ReactNode
+}): ReactElement {
   return (
     <div className="lc-br-toolctl">
       <input
         className="lc-br-tool-search"
         value={props.value}
         placeholder={props.placeholder}
-        onChange={(ev: ReactNS.ChangeEvent<HTMLInputElement>) => { props.onChange(ev.target.value) }}
+        onChange={(ev: ChangeEvent<HTMLInputElement>) => { props.onChange(ev.target.value) }}
       />
       {props.children !== undefined
         ? <span className="lc-gran" role="group" title={props.tip}>{props.children}</span>
@@ -258,11 +279,11 @@ function ToolSchema(props: {
     show: string
     hide: string
   }
-}): ReactNS.ReactElement {
+}): ReactElement {
   const { rich } = props
-  const [jsonOpen, setJsonOpen] = React.useState(false)
-  const params = React.useMemo(() => paramsOf(props.schema), [props.schema])
-  const rows = React.useMemo<{ name: string; schema: ParamSchema; required: boolean }[]>(() => {
+  const [jsonOpen, setJsonOpen] = useState(false)
+  const params = useMemo(() => paramsOf(props.schema), [props.schema])
+  const rows = useMemo<{ name: string; schema: ParamSchema; required: boolean }[]>(() => {
     if (params === null) return []
     const props = (params as { properties?: unknown }).properties
     if (props === null || typeof props !== 'object') return []
@@ -281,7 +302,7 @@ function ToolSchema(props: {
   // Pretty-printed only while the row's JSON is open: a tools section lists
   // dozens of schemas, and eager stringification of every collapsed row
   // dominated the section's render cost.
-  const schemaJson = React.useMemo(
+  const schemaJson = useMemo(
     () => jsonOpen ? JSON.stringify(props.schema, null, 2) : '',
     [props.schema, jsonOpen],
   )
@@ -318,7 +339,7 @@ interface DetailLabels {
   images: string
   other: string
   lines: (n: number) => string
-  callState: (err: boolean, exit: number | null) => ReactNS.ReactNode
+  callState: (err: boolean, exit: number | null) => ReactNode
 }
 
 /**
@@ -333,9 +354,9 @@ function BlocksBody(props: {
   rich: RichKit
   img: ImageKit
   labels: DetailLabels
-}): ReactNS.ReactElement {
+}): ReactElement {
   const { rich, img, labels } = props
-  const out: ReactNS.ReactNode[] = []
+  const out: ReactNode[] = []
   let images: ImageRefLike[] = []
   const flushImages = (): void => {
     if (images.length === 0) return
@@ -447,9 +468,9 @@ function ToolCallCard(props: {
   name: string
   argsRaw: unknown
   arrow?: string
-  status?: ReactNS.ReactNode
-}): ReactNS.ReactElement {
-  const args = React.useMemo(() => parseCallArgs(props.argsRaw), [props.argsRaw])
+  status?: ReactNode
+}): ReactElement {
+  const args = useMemo(() => parseCallArgs(props.argsRaw), [props.argsRaw])
   return (
     <Section
       label={(props.arrow ?? '→') + ' ' + props.name}
@@ -465,7 +486,7 @@ function ToolCallCard(props: {
   )
 }
 
-function CallArgRow(props: { name: string; value: unknown }): ReactNS.ReactElement {
+function CallArgRow(props: { name: string; value: unknown }): ReactElement {
   const v = props.value
   /* v8 ignore next 2 -- the only caller maps Object.keys of a JSON.parse'd
      object, which never holds undefined values; defensive. */
@@ -483,11 +504,11 @@ function CallArgRow(props: { name: string; value: unknown }): ReactNS.ReactEleme
 function NodeContent(props: {
   node: SurfaceNode
   conv: ConversationNodeLike | undefined
-  hint: ReactNS.ReactNode
+  hint: ReactNode
   rich: RichKit
   img: ImageKit
   labels: DetailLabels
-}): ReactNS.ReactElement {
+}): ReactElement {
   const { node, conv, rich, img, labels } = props
   if (conv === undefined) {
     // The join missed (node outside the loaded window): the 80-char preview
@@ -541,7 +562,7 @@ function byCatOf(asm: Assembled): Partial<Record<Category, SurfaceNode[]>> {
 }
 
 function countOf(asm: Assembled, byCat: Partial<Record<Category, SurfaceNode[]>>, c: string): number {
-  if (c === 'system') return asm.header !== null && asm.header.systemTokens !== undefined ? 1 : 0
+  if (c === 'system') return asm.system !== null ? 1 : 0
   if (c === 'tools') return asm.header !== null ? asm.header.tools.length : 0
   return byCat[c as Category]?.length ?? 0
 }
@@ -551,11 +572,18 @@ function lastOfTurn(requests: RequestRecord[], turn: number): RequestRecord | nu
   return null
 }
 
+/**
+ * DNA bands keep at least this share of the occupied region, so a tiny item (a 25-token user message in a 40k
+ * context) stays a hoverable/clickable filament instead of a sub-pixel sliver. Tooltips still report true shares.
+ */
+const DNA_MIN_BAND = 0.35
+
 export function makeContextBrowser(
   kit: ViewKit,
-  StackedBar: (props: StackedBarProps) => ReactNS.ReactElement,
-): (props: ContextBrowserProps) => ReactNS.ReactElement {
+  StackedBar: (props: StackedBarProps) => ReactElement,
+): (props: ContextBrowserProps) => ReactElement {
   const { t, fmt, fmtTime, catLabel } = kit
+  const DetailNote = makeDetailNote(kit)
   const nodeText = makeNodeText(kit)
   const rich = makeRichText(kit)
   const ImageCard = makeImageCard(kit)
@@ -563,105 +591,87 @@ export function makeContextBrowser(
   // descriptions, system text, and message bodies stay in sync.
   const lineLabel = (n: number): string => t(n === 1 ? 'block.line' : 'block.lines', { n })
 
-  return function ContextBrowser(props: ContextBrowserProps): ReactNS.ReactElement {
+  return function ContextBrowser(props: ContextBrowserProps): ReactElement {
     const { data, headers } = props
     // 'live' = the current surface (the NEXT request's context); number = a retained step's seq.
-    const [sel, setSel] = React.useState<'live' | number>('live')
-    const [openCat, setOpenCat] = React.useState<string | null>(null)
-    const [openElem, setOpenElem] = React.useState<string | null>(null)
+    const [sel, setSel] = useState<'live' | number>('live')
+    const [openCat, setOpenCat] = useState<string | null>(null)
+    const [openElem, setOpenElem] = useState<string | null>(null)
     // The open category's row-filter text plus the tools' row order. The
     // filter is a lens on the OPEN category: opening a different one resets
     // it, while step picks (setOpenCat(null) below) keep it so the same lens
     // compares epochs.
-    const [rowQuery, setRowQuery] = React.useState('')
-    const [toolSort, setToolSort] = React.useState<'size' | 'name'>('size')
+    const [rowQuery, setRowQuery] = useState('')
+    const [toolSort, setToolSort] = useState<'size' | 'name'>('size')
+    // DNA mode: the composition bar redraws as ONE band per context item in prompt order (dna.ts), hovered/clicked per item.
+    const [dna, setDna] = useState(false)
+    const [dnaKey, setDnaKey] = useState<string | null>(null)
+    // Every open-category change (toggle, step pick, pin, brief reveal) reports outward so the Context tab
+    // can focus the trend chart on the open category.
+    const onOpenCat = props.onOpenCat
+    const setCat = (c: string | null): void => {
+      setOpenCat(c)
+      if (onOpenCat !== undefined) onOpenCat(c)
+    }
 
     // Full message content: the conversation-window join first (zero cost),
     // plus nodes fetched on demand for seqs outside the window (node arrays
     // are stable references per snapshot; the map memoizes over them).
     const convNodes = props.convNodes
-    const [fetched, setFetched] = React.useState<Map<number, ConversationNodeLike>>(() => new Map())
-    const bySeq = React.useMemo(() => {
+    const convBySeq = useMemo(() => {
       const m = new Map<number, ConversationNodeLike>()
       for (const n of convNodes ?? []) m.set(n.seq, n)
-      for (const [seq, n] of fetched) if (!m.has(seq)) m.set(seq, n)
       return m
-    }, [convNodes, fetched])
+    }, [convNodes])
 
     // The open element's surface-node seq ('sys'/'tool:*' keys never join).
     const openSeq = openElem !== null && openElem.startsWith('n')
       ? Number(openElem.slice(1))
       : null
-    // Fetch-on-miss state machine: one targeted history read per expanded row
-    // whose seq the join missed. `failed` arms the retry button; `absent`
-    // means the page came back without the seq — it is not in the durable log.
-    const missingSeq = openSeq !== null && !bySeq.has(openSeq) ? openSeq : null
+    // Fetch-on-miss: one targeted history read per expanded row whose seq the
+    // join missed (fetchOnMiss.tsx; landed values cache by seq — history is
+    // immutable). `failed` arms the retry button; `absent` means the page
+    // came back without the seq — it is not in the durable log.
     const fetchContent = props.fetchContent
-    const [missState, setMissState] = React.useState<'idle' | 'loading' | 'absent' | 'failed'>('idle')
-    const [retry, setRetry] = React.useState(0)
-    React.useEffect(() => {
-      if (missingSeq === null || fetchContent === undefined) return
-      let live = true
-      setMissState('loading')
-      fetchContent(missingSeq).then((node) => {
-        if (!live) return
-        if (node === null) {
-          setMissState('absent')
-          return
-        }
-        setFetched((prev) => {
-          const next = new Map(prev)
-          next.set(missingSeq, node)
-          return next
-        })
-        setMissState('idle')
-      }, (error: unknown) => {
-        console.warn('dsh-context: targeted history read failed', error)
-        if (live) setMissState('failed')
-      })
-      return () => { live = false }
-    }, [missingSeq, fetchContent, retry])
+    const miss = useFetchOnMiss(
+      openSeq !== null && !convBySeq.has(openSeq) ? openSeq : null,
+      fetchContent,
+      'dsh-context: targeted history read failed',
+    )
+    const bySeq = useMemo(() => {
+      if (miss.values.size === 0) return convBySeq
+      const m = new Map(convBySeq)
+      for (const [seq, n] of miss.values) if (!m.has(seq)) m.set(seq, n)
+      return m
+    }, [convBySeq, miss.values])
     // Pin linkage: a pinned bar selects its step (same accordion reset as a manual pick); unpin returns to live — a manual pick here is
     // overridden only when a NEW pin lands.
     const pinSeq = props.pinSeq
-    React.useEffect(() => {
+    useEffect(() => {
       setSel(pinSeq === null || pinSeq === undefined ? 'live' : pinSeq)
-      setOpenCat(null)
+      setCat(null)
       setOpenElem(null)
-    }, [pinSeq])
+    }, [pinSeq, onOpenCat])
     // Step-brief reveal: select the owning step, open the node's category + element (the pagination effect above already pulls older
     // history for a missing join), then arm a one-shot scroll consumed by the layout effect once the row renders.
-    const rootRef = React.useRef<HTMLDivElement | null>(null)
-    const focusScrollRef = React.useRef(false)
+    const rootRef = useRef<HTMLDivElement | null>(null)
+    const focusScrollRef = useRef(false)
     const nodeFocus = props.nodeFocus
-    React.useEffect(() => {
+    useEffect(() => {
       if (nodeFocus === null || nodeFocus === undefined) return
       setSel(nodeFocus.step)
-      setOpenCat(nodeFocus.cat)
+      setCat(nodeFocus.cat)
       setOpenElem('n' + String(nodeFocus.seq))
       focusScrollRef.current = true
       if (props.onNodeFocusHandled !== undefined) props.onNodeFocusHandled()
-    }, [nodeFocus, props.onNodeFocusHandled])
-    React.useLayoutEffect(() => {
+    }, [nodeFocus, props.onNodeFocusHandled, onOpenCat])
+    useLayoutEffect(() => {
       if (!focusScrollRef.current) return
       focusScrollRef.current = false
       rootRef.current?.querySelector('.lc-br-elem-on')?.scrollIntoView({ block: 'nearest' })
     })
-    // The note an un-joined open row shows, per fetch state: legacy static hint
-    // (no fetcher), in-flight loading, log-absent, or a failed read with retry.
-    const missNote: ReactNS.ReactNode = fetchContent === undefined
-      ? t('browser.noContent')
-      : missState === 'loading'
-        ? t('browser.loading')
-        : missState === 'absent'
-          ? t('browser.notInLog')
-          : missState === 'failed'
-            ? (
-              <button type="button" className="lc-br-retry" onClick={() => { setRetry(r => r + 1) }}>
-                {t('browser.loadFailed')}
-              </button>
-            )
-            : t('browser.noContent')
+    // The note an un-joined open row shows, per fetch state (fetchOnMiss.tsx).
+    const missNote = fetchMissNote(t, fetchContent, miss.state, miss.retry, 'browser.noContent')
 
     const requests = data.requests
     const hoverReq = props.previewSeq !== null && props.previewSeq !== undefined
@@ -679,63 +689,36 @@ export function makeContextBrowser(
       : null
     const view = assemble(data, headers, seq)
 
-    // Header epoch CONTENT (system prompt text, tool descriptions/schemas):
-    // the projection carries metadata only, so the selected step's epoch is
-    // fetched on demand — one seq-anchored history read when its system or
-    // tools section first opens. Content caches per epoch (history is
-    // immutable); the fetch states mirror the row-miss machine above.
-    const [headerContent, setHeaderContent] = React.useState<Map<number, HeaderEpochContent>>(() => new Map())
-    const [headerState, setHeaderState] = React.useState<'idle' | 'loading' | 'absent' | 'failed'>('idle')
-    const [headerRetry, setHeaderRetry] = React.useState(0)
+    // Header/tool epoch CONTENT (tool descriptions/schemas) and the system
+    // prompt TEXT: the projections carry metadata only, so the selected step's
+    // sources are fetched on demand — one seq-anchored history read per open
+    // section. The system prompt rides the timeline's own `systems` nodes (a
+    // V3 `system/message`, or the V0/V2 epoch that carried `header.system`),
+    // the tools the header epoch; both map through the same fetcher. Content
+    // caches per seq — history is immutable.
     const fetchHeader = props.fetchHeader
     const headerSeq = view.header !== null ? view.header.seq : null
-    const headerNeeded = view.header !== null
-      && headerSeq !== null
-      && !headerContent.has(headerSeq)
-      && (openCat === 'system' || openCat === 'tools')
-    React.useEffect(() => {
-      if (!headerNeeded || fetchHeader === undefined) return
-      let live = true
-      setHeaderState('loading')
-      fetchHeader(headerSeq).then((content) => {
-        if (!live) return
-        if (content === null) {
-          setHeaderState('absent')
-          return
-        }
-        setHeaderContent((prev) => {
-          const next = new Map(prev)
-          next.set(headerSeq, content)
-          return next
-        })
-        setHeaderState('idle')
-      }, (error: unknown) => {
-        console.warn('dsh-context: header content fetch failed', error)
-        if (live) setHeaderState('failed')
-      })
-      return () => { live = false }
-    }, [headerNeeded, headerSeq, fetchHeader, headerRetry])
-    // The note a not-yet-loaded epoch section shows, per fetch state: legacy
-    // metadata-only hint (no fetcher), in-flight loading, log-absent, or a
-    // failed read with retry.
-    const headerNote: ReactNS.ReactNode = fetchHeader === undefined
-      ? t('browser.headerMetaOnly')
-      : headerState === 'loading' || headerState === 'idle'
-        ? t('browser.loading')
-        : headerState === 'absent'
-          ? t('browser.notInLog')
-          : (
-            <button type="button" className="lc-br-retry" onClick={() => { setHeaderRetry(r => r + 1) }}>
-              {t('browser.loadFailed')}
-            </button>
-          )
+    const systemSeq = view.system !== null ? view.system.seq : null
+    const contentSeq = openCat === 'system' ? systemSeq : openCat === 'tools' ? headerSeq : null
+    const epoch = useFetchOnMiss(
+      contentSeq,
+      fetchHeader,
+      'dsh-context: header content fetch failed',
+    )
+    const headerContent = epoch.values
+    // The note a not-yet-loaded epoch section shows, per fetch state (fetchOnMiss.tsx).
+    const headerNote = fetchMissNote(t, fetchHeader, epoch.state, epoch.retry, 'browser.headerMetaOnly')
 
     const breakdown = req !== null ? req : data.current
     const parts = partsOf(breakdown)
     const total = breakdown.total
+    // The open category stays lit in the composition bar (category mode: its segment; DNA mode: its bands' group) even
+    // without pointer hover — a pointer hover overrides the pin, the pin resumes on leave. Dropped when the shown
+    // step's composition holds nothing for the category, so the bar never reads all-dimmed with nothing lit.
+    const pinKey = openCat !== null && (breakdown[openCat as Category | 'system' | 'tools'] || 0) > 0 ? openCat : null
     const pick = (v: string) => {
       setSel(v === 'live' ? 'live' : Number(v))
-      setOpenCat(null)
+      setCat(null)
       setOpenElem(null)
     }
 
@@ -749,13 +732,52 @@ export function makeContextBrowser(
 
     const byCat = byCatOf(view)
 
+    // DNA mode: per-item bands in prompt order (dna.ts). The band label names the item the way its accordion row would
+    // (skill name, tool name, injection form, else the category label), with the item's time appended.
+    const dnaLabel = (it: DnaItem): string => {
+      let base: string
+      if (!('node' in it)) {
+        base = it.cat === 'system' ? catLabel('system') : it.key.slice('tool:'.length)
+      } else {
+        const n = it.node
+        base = n.skill !== undefined ? t('node.skillTag', { name: n.skill })
+          : n.cat === 'tool' ? (n.tool ?? '?')
+            : n.cat === 'inject' ? t('form.' + (n.form || 'context'))
+              : catLabel(n.cat)
+      }
+      return it.time !== undefined ? base + ' · ' + fmtTime(it.time) : base
+    }
+    const dnaItems = dna ? dnaOf(view) : null
+    const dnaByKey = new Map(dnaItems?.map(it => [it.key, it] as const) ?? [])
+    const dnaParts = dnaItems?.map(it => ({
+      key: it.key,
+      color: CAT_COLOR[it.cat],
+      value: it.tokens,
+      label: dnaLabel(it),
+      group: it.cat,
+    })) ?? null
+    // A band hover is honored only while its key names a RENDERED band: a push can drop the band under a resting
+    // pointer (compaction, tail slide) without a mouseleave, and a dead key exact-matches nothing — the bar would
+    // sit all-dimmed with nothing lit (the same invariant the pin's `breakdown` gate keeps).
+    const liveDnaKey = dnaKey !== null && dnaByKey.has(dnaKey) ? dnaKey : null
+    // A band click opens its category + element row below (the same reveal the step brief uses) and scrolls it into view.
+    const pickDna = (key: string): void => {
+      const it = dnaByKey.get(key)
+      /* v8 ignore next 1 -- the bar only reports keys of the parts it was handed; defensive. */
+      if (it === undefined) return
+      setCat(it.cat)
+      setRowQuery('')
+      setOpenElem(key)
+      focusScrollRef.current = true
+    }
+
     const toolCount = (c: string): number => countOf(view, byCat, c)
 
     // A category holding exactly one item opens that row with the category, so
     // one click lands on the content directly (the lone prompt / tool schema /
     // surface node).
     const singleKeyOf = (c: string): string | null => {
-      if (c === 'system') return view.header?.systemTokens !== undefined ? 'sys' : null
+      if (c === 'system') return view.system !== null ? 'sys' : null
       if (c === 'tools') {
         const tools = view.header?.tools
         return tools !== undefined && tools.length === 1 ? 'tool:' + tools[0].name : null
@@ -772,11 +794,11 @@ export function makeContextBrowser(
         || ((c === 'system' || c === 'tools') && view.header === null)
       if (!openable) return
       if (openCat === c) {
-        setOpenCat(null)
+        setCat(null)
         setOpenElem(null)
         return
       }
-      setOpenCat(c)
+      setCat(c)
       // A different category opens unfiltered — the lens belongs to the open one.
       setRowQuery('')
       setOpenElem(singleKeyOf(c))
@@ -788,9 +810,9 @@ export function makeContextBrowser(
      * result scans while collapsed.
      */
     const elemRow = (
-      key: string, tag: ReactNS.ReactNode | null, preview: string,
-      tokens: number, time: number | undefined, body: ReactNS.ReactNode,
-      err = false, trailing: ReactNS.ReactNode = null,
+      key: string, tag: ReactNode | null, preview: string,
+      tokens: number, time: number | undefined, body: ReactNode,
+      err = false, trailing: ReactNode = null,
     ) => {
       const open = openElem === key
       return (
@@ -809,11 +831,18 @@ export function makeContextBrowser(
       )
     }
 
-    const catBody = (c: string): ReactNS.ReactNode => {
+    const catBody = (c: string): ReactNode => {
       if (c === 'system') {
-        if (view.header === null) return <div className="lc-br-note">{t(headers === null ? 'browser.noHeader' : 'browser.noEpoch')}</div>
-        const content = headerContent.get(view.header.seq)
-        // Metadata-only until the epoch's content resolves (fetched when the
+        // No prompt in force at this step. The category only opens without one
+        // when there is no header epoch at all (the openable guard above), so
+        // the note names the missing PROJECTION — no headers service versus
+        // headers that carried no epoch yet.
+        const sys = view.system
+        if (sys === null) {
+          return <div className="lc-br-note">{t(headers === null ? 'browser.noHeader' : 'browser.noEpoch')}</div>
+        }
+        const content = headerContent.get(sys.seq)
+        // Metadata-only until the prompt's event resolves (fetched when the
         // section opens; the note names the state).
         if (content === undefined) return <div className="lc-br-note">{headerNote}</div>
         if (content.system === undefined) return <div className="lc-br-note">{t('browser.noSystem')}</div>
@@ -877,7 +906,7 @@ export function makeContextBrowser(
         }
         // The open row's body: the fetched content's description, parameter
         // table, and raw JSON — or the epoch's fetch-state note.
-        const toolBody = (tool: HeaderTool): ReactNS.ReactNode => {
+        const toolBody = (tool: HeaderTool): ReactNode => {
           if (content === undefined) return <div className="lc-br-note">{headerNote}</div>
           const row = contentByName.get(tool.name)
           return row === undefined
@@ -1002,6 +1031,15 @@ export function makeContextBrowser(
       <div className="lc-card" ref={rootRef}>
         <div className="lc-card-title">
           <span className="lc-card-title-text">{t('browser.title')}</span>
+          <span className="lc-gran lc-br-dna-ctl" role="group" title={t('browser.dnaTip')}>
+            <button
+              type="button"
+              className={'lc-gran-btn' + (dna ? ' lc-gran-on' : '')}
+              onClick={() => { setDna(on => !on) }}
+            >
+              {t('browser.dna')}
+            </button>
+          </span>
           <span className="lc-br-hint">{t('browser.deltaHint')}</span>
           <select
             className="lc-br-pick"
@@ -1029,16 +1067,21 @@ export function makeContextBrowser(
             : null}
         </div>
 
-        <div className="lc-br-bar">
+        <div className={'lc-br-bar' + (dna ? ' lc-br-bar-dna' : '')}>
           <StackedBar
-            parts={parts}
+            parts={dnaParts ?? parts}
             height={10}
-            // Mirrored hover link (see `linked` above): while the browser shows the live surface, its bar highlights the shared category
-            // key and reports hovers back to the overview; tip stays off — a cross-card hover must not float a second tooltip over a bar
-            // the pointer does not rest on.
-            hoverKey={linked ? linkKey : undefined}
-            onHoverKey={linked ? props.onHoverKey : undefined}
-            tip={false}
+            // Highlight precedence: pointer hover (local in DNA mode, the shared link otherwise) over the open-category pin.
+            // The mirrored link (see `linked` above) works while the browser shows the live surface; it is ONE-WAY in DNA
+            // mode — an incoming category key lights that category's BANDS (the parts' `group`), while band hovers stay
+            // on the bar and never report upward (the overview keeps showing the live category composition). Tip stays
+            // off in category mode: a cross-card hover must not float a second tooltip over a bar the pointer does not
+            // rest on — and the group-keyed pin never exact-matches a DNA band, so the pinned highlight floats no tip.
+            hoverKey={dna ? liveDnaKey ?? linkKey ?? pinKey : linkKey ?? pinKey}
+            onHoverKey={dna ? setDnaKey : linked ? props.onHoverKey : undefined}
+            tip={dna}
+            onPickKey={dna ? pickDna : undefined}
+            minBand={dna ? DNA_MIN_BAND : undefined}
           />
         </div>
 
@@ -1047,6 +1090,12 @@ export function makeContextBrowser(
           : null}
         {view.approximate
           ? <div className="lc-br-note">{t('browser.approx')}</div>
+          : null}
+        {props.detailState === 'loading'
+          ? <DetailNote state="loading" className="lc-br-note" />
+          : null}
+        {props.detailState === 'failed' && props.onDetailRetry !== undefined
+          ? <DetailNote state="failed" onRetry={props.onDetailRetry} className="lc-br-note" />
           : null}
 
         <div className="lc-br-cats">

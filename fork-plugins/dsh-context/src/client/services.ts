@@ -1,18 +1,23 @@
 /**
- * Client-side service contracts — the exact API surface this plugin consumes
- * from the harness web half.
+ * Client-side harness boundary — the exact API surface this plugin consumes
+ * from the harness web half, plus the sanitizers that re-prove every
+ * delivered value at that boundary.
  *
  * The plugin bundles its own code but relies on the reader to deliver the
- * framework standard kit to slot components (`sessionId`, `useSession`,
+ * framework standard kit to slot components (`sessionId`, `useChat`,
  * `useProjection`, `t` …); only the small faces below are referenced across
- * modules. These are TYPE-ONLY: the runtime services come from the user's
- * harness. This plugin no longer calls any RPC — data arrives as pushed
- * session projections (`useProjection` standard seat).
+ * modules. The INTERFACES are type-only (the runtime services come from the
+ * user's harness); the `*Of` functions are the runtime guards the
+ * no-white-screen guarantee rides on. Data arrives as pushed session
+ * projections (`useProjection` standard seat); the ONE exception is the
+ * gateway history page read (`remote.session.page`, see historyPage.ts) that
+ * fetches a request-header epoch's content on demand.
  */
 
 import type { Context } from '@deepseek-ai/cordis'
+import type { ComponentType } from 'react'
 import { estimateSystemTokens } from '../shared/estimate'
-import type { ContextBreakdown, ContextHeaders, ContextPressure, ContextTimeline, HeaderEpochContent, TimingTotals, TokenUsage, ToolTimingTotals } from '../shared/types'
+import type { ContextBreakdown, ContextHeaders, ContextPressure, ContextTimeline, HeaderEpochContent, SystemPromptNode, TimingTotals, TokenUsage, ToolTimingTotals } from '../shared/types'
 
 export interface LocaleService {
   register(ns: string, dicts: Record<string, Record<string, string>>): () => void
@@ -40,6 +45,47 @@ export interface SlotsService {
     registration: SlotRegistration,
     component: (props: { sessionId?: string } & Record<string, unknown>) => unknown,
   ): unknown
+}
+
+/**
+ * One guide-page capsule a right-Sidebar tab type contributes (dsh
+ * 0.1.5-rc.1+): the glyph, the title, and the optional one-line description,
+ * exactly the fields `SidebarRightGuideEntry` carries.
+ */
+export interface SidebarGuideEntryLike {
+  /** Ascending position among every registered type's entries. */
+  order: number
+  title: () => string
+  /**
+   * One line under the title on what picking the capsule opens; the guide
+   * renders it only while it lists few enough entries. Optional, so a line
+   * whose guide body ignores it simply goes without.
+   */
+  description?: () => string
+  icon?: ComponentType<{ size?: number }>
+}
+
+/** One right-Sidebar tab type registration (the fields this plugin uses). */
+export interface SidebarTabDefinitionLike {
+  /** This implementation's identity, unique across every registration. */
+  id: string
+  /** What `openTab` names; also the page address's discriminator. */
+  kind: string
+  /** The tab chip's text, captured when the tab opens. */
+  title: () => string
+  /** Entry capsules for the guide page (omitted = the type stays off it). */
+  guide?: readonly SidebarGuideEntryLike[]
+}
+
+/**
+ * The right Sidebar's tab-type registry (`ctx.sidebarRightTabs`), as far as
+ * this plugin consumes it. OPTIONAL by contract: the service ships only on the
+ * 0.1.5 line (0.1.5-rc.1+ supported), so the plugin reaches it through a
+ * deferred inject and stays fully functional (no pending fiber, no throw)
+ * without it.
+ */
+export interface SidebarTabsFace {
+  register(definition: SidebarTabDefinitionLike): () => void
 }
 
 /**
@@ -77,8 +123,10 @@ export interface ConversationNodeLike {
  * A durable image attachment reference, as far as this plugin consumes it
  * (dsh's `ImageAttachmentRef`, minimally re-typed so the plugin stays free
  * of an attachment-package dependency). The durable log holds only this ref
- * — never inline bytes. Since dsh 0.1.1 the width/height/bytes describe the
- * NORMALIZED raster (long edge 2048px); `originalDimensions` carries the
+ * — never inline bytes. Since dsh 0.1.2-rc.1 the width/height/bytes describe
+ * the NORMALIZED raster under a deployment-resolvable policy (defaults:
+ * total-pixel budget 2048×2048, long edge capped at 8192px — the 0.1.1 line
+ * capped the long edge at 2048px); `originalDimensions` carries the
  * pre-normalization size when normalization reduced the image.
  */
 export interface ImageRefLike {
@@ -95,25 +143,19 @@ export type ImageLoader = (attachment: ImageRefLike) => Promise<string>
 
 /**
  * The harness conversation client service, minimally typed for image
- * resolution — the same call the chat view's own message images ride on.
- * Renamed across dsh versions: `ctx.conversation.resolveImage` before
- * 0.1.2, `ctx.uiConversation.imageUrl` since. Whichever face is present
- * serves the loader; absence degrades the cards to metadata-only.
+ * resolution — the same call the chat view's own message images ride on
+ * (`ctx.uiConversation.imageUrl`).
  */
-export interface ConversationFace {
-  resolveImage?(sessionId: string, attachment: ImageRefLike): Promise<string>
-}
-
 export interface UiConversationFace {
   imageUrl?(sessionId: string, attachment: ImageRefLike): Promise<string>
 }
 
 /**
- * A session-authorized durable-image loader over whichever conversation
- * face the running harness provides (`resolveImage` pre-0.1.2, `imageUrl`
- * since), or undefined when neither service is composed — the caller
- * degrades to metadata-only cards. Hostile snapshots and throwing service
- * reads are caught: this helper can never take a render down.
+ * A session-authorized durable-image loader over the harness conversation
+ * face (`uiConversation.imageUrl`), or undefined when the service is not
+ * composed — the caller degrades to metadata-only cards. Hostile snapshots
+ * and throwing service reads are caught: this helper can never take a
+ * render down.
  */
 export function imageLoaderOf(
   ctx: ClientCtx,
@@ -121,73 +163,42 @@ export function imageLoaderOf(
 ): ImageLoader | undefined {
   if (typeof sessionId !== 'string' || sessionId === '') return undefined
   try {
-    const legacy = ctx.get('conversation') as ConversationFace | undefined
-    if (legacy !== undefined && typeof legacy.resolveImage === 'function') {
-      const resolveImage = legacy.resolveImage.bind(legacy)
-      return attachment => resolveImage(sessionId, attachment)
-    }
-    const modern = ctx.get('uiConversation') as UiConversationFace | undefined
-    if (modern !== undefined && typeof modern.imageUrl === 'function') {
-      const imageUrl = modern.imageUrl.bind(modern)
+    const conversation = ctx.get('uiConversation') as UiConversationFace | undefined
+    if (conversation !== undefined && typeof conversation.imageUrl === 'function') {
+      const imageUrl = conversation.imageUrl.bind(conversation)
       return attachment => imageUrl(sessionId, attachment)
     }
   } catch { /* absent or hostile service — metadata-only cards */ }
   return undefined
 }
 
-export type UseSessionLike = <T>(
-  selector: (snapshot: {
-    nodes?: readonly ConversationNodeLike[]
-  }) => T,
-) => T
-
 /**
- * The `useChat` standard seat (dsh 0.1.2+: the finalized chat nodes moved
- * from the session snapshot to a per-view `ChatSnapshot` whose `legacy`
- * slice keeps the plain `ConversationNode[]`). Minimally typed: the selector
- * receives the harness snapshot (untrusted — re-proved outside), and the
- * slice it returns must be reference-stable so the framework's
- * selector-hook equality can gate re-renders.
+ * The `useChat` standard seat (the finalized chat nodes live on a per-view
+ * `ChatSnapshot` whose `legacy` slice keeps the plain `ConversationNode[]`).
+ * Minimally typed: the selector receives the harness snapshot (untrusted —
+ * re-proved outside), and the slice it returns must be reference-stable so
+ * the framework's selector-hook equality can gate re-renders.
  */
 export type UseChatLike = <T>(selector: (snapshot: unknown) => T) => T
 
 /**
- * The conversation-window nodes this plugin joins on, from whichever seat
- * the running harness provides — `useChat` (`ChatSnapshot.legacy.nodes`) on
- * dsh 0.1.2+, the session snapshot's own `nodes` before that. Returns
- * undefined when neither seat delivers a real array (absent seat, older or
- * foreign harness, hostile snapshot) — callers render without the join,
- * never an error.
- *
- * Hook-order contract: the seats are real React hooks, so BOTH are invoked
- * on every call whenever present (the chat seat first, the session seat
- * second) and only the RESULT is picked conditionally — a stable call order
- * across renders. Selectors return stable slice references so the
- * framework's snapshot equality can gate re-renders.
+ * The conversation-window nodes this plugin joins on, from the `useChat`
+ * seat (`ChatSnapshot.legacy.nodes`). Returns undefined when the seat does
+ * not deliver a real array (absent seat, foreign harness, hostile snapshot)
+ * — callers render without the join, never an error.
  */
 export function conversationNodesOf(props: {
   useChat?: UseChatLike
-  useSession?: UseSessionLike
 }): readonly ConversationNodeLike[] | undefined {
   const useChat: unknown = props.useChat
-  let chatNodes: unknown
-  if (typeof useChat === 'function') {
-    try {
-      // `s.legacy` is a stable object; the array is read outside the selector.
-      const slice = (useChat as UseChatLike)((s: unknown) =>
-        s !== null && typeof s === 'object' ? (s as { legacy?: unknown }).legacy : undefined)
-      chatNodes = slice !== null && typeof slice === 'object' ? (slice as { nodes?: unknown }).nodes : undefined
-    } catch { /* hostile seat — the session snapshot still answers */ }
-  }
-  const useSession: unknown = props.useSession
-  let sessionNodes: unknown
-  if (typeof useSession === 'function') {
-    try {
-      sessionNodes = (useSession as UseSessionLike)(s => s.nodes)
-    } catch { /* hostile seat — the join degrades to nothing */ }
-  }
-  if (Array.isArray(chatNodes)) return chatNodes as readonly ConversationNodeLike[]
-  if (Array.isArray(sessionNodes)) return sessionNodes as readonly ConversationNodeLike[]
+  if (typeof useChat !== 'function') return undefined
+  try {
+    // `s.legacy` is a stable object; the array is read outside the selector.
+    const slice = (useChat as UseChatLike)((s: unknown) =>
+      s !== null && typeof s === 'object' ? (s as { legacy?: unknown }).legacy : undefined)
+    const nodes = slice !== null && typeof slice === 'object' ? (slice as { nodes?: unknown }).nodes : undefined
+    return Array.isArray(nodes) ? nodes as readonly ConversationNodeLike[] : undefined
+  } catch { /* hostile seat — the join degrades to nothing */ }
   return undefined
 }
 
@@ -200,9 +211,30 @@ export function conversationNodesOf(props: {
 export interface SessionStandardProps {
   sessionId?: string
   useProjection?: (key: string) => unknown
-  useSession?: UseSessionLike
-  /** The chat-view snapshot seat (dsh 0.1.2+; see {@link UseChatLike}). */
+  /** The chat-view snapshot seat (see {@link UseChatLike}). */
   useChat?: UseChatLike
+}
+
+/**
+ * The Context view's props: the framework standard kit plus this plugin's own
+ * host marker. The right Sidebar's panel registration sets `host`, so the SAME
+ * view drops the head cards a narrow column cannot serve.
+ */
+export interface ContextViewProps extends SessionStandardProps {
+  /** Set only by the right-Sidebar registration; absent in the conversation tab and the /context modal. */
+  host?: 'sidebar'
+}
+
+/**
+ * Read one projection key through the standard seat, narrowed at the
+ * boundary: null when the seat is absent (a harness without the projection
+ * pipeline) or the delivered value fails the narrow. The seat is a real
+ * hook — call this unconditionally at the top of the component, one call
+ * per key, in a stable order.
+ */
+export function projectionOf<T>(props: SessionStandardProps, key: string, narrow: (value: unknown) => T | null): T | null {
+  if (typeof props.useProjection !== 'function') return null
+  return narrow(props.useProjection(key))
 }
 
 export type ClientCtx = Context & {
@@ -215,8 +247,10 @@ export type ClientCtx = Context & {
  * it is not one. The boundary type is Record<string, unknown> on purpose:
  * every field read below must re-prove itself (the no-white-screen
  * guarantee), so no field may borrow the wire type before its check.
+ * Shared by every sanitizer here and by the agent-tree derivation
+ * (agentTree.ts) — the ONE record guard for the whole client half.
  */
-function asRecord(value: unknown): Record<string, unknown> | null {
+export function asRecord(value: unknown): Record<string, unknown> | null {
   if (value === null || value === undefined || typeof value !== 'object') return null
   return value as Record<string, unknown>
 }
@@ -229,9 +263,32 @@ export function numOf(value: unknown): number {
   return typeof value === 'number' && Number.isFinite(value) ? value : 0
 }
 
-function objectsOf<T>(value: unknown): T[] {
+/** Shared per-item collection guard: drop non-object entries, keep the rest. */
+export function objectsOf<T>(value: unknown): T[] {
   if (!Array.isArray(value)) return []
   return value.filter((v): v is T => v !== null && typeof v === 'object')
+}
+
+/**
+ * The fast path's collection check: a real array whose entries are ALL
+ * records. A null/primitive entry would pass a bare Array.isArray yet throw
+ * on the first property read downstream (`req.seq` on null), so it sends the
+ * value down the sanitizing slow path, where `objectsOf` drops it.
+ */
+function recordsOnly(value: unknown): boolean {
+  return Array.isArray(value) && value.every(e => e !== null && typeof e === 'object')
+}
+
+/**
+ * Narrow a delivered `unsupported` gate record (the host's baseline gate —
+ * see host/fallback.ts): both version strings re-proved, anything else
+ * degrades to null (no gate shown) instead of rendering garbage.
+ */
+export function unsupportedOf(value: unknown): { current: string; minimum: string } | null {
+  const data = asRecord(value)
+  if (data === null) return null
+  if (typeof data.current !== 'string' || typeof data.minimum !== 'string') return null
+  return { current: data.current, minimum: data.minimum }
 }
 
 /**
@@ -259,10 +316,11 @@ export function timelineOf(value: unknown): ContextTimeline | null {
     && ['system', 'tools', 'user', 'inject', 'assistant', 'tool', 'total']
       .every(k => typeof (current as Record<string, unknown>)[k] === 'number')
   if (numericBreakdown
-    && Array.isArray(data.requests)
-    && Array.isArray(data.events)
-    && Array.isArray(data.nodes)
-    && Array.isArray(data.archive)
+    && recordsOnly(data.requests)
+    && recordsOnly(data.events)
+    && recordsOnly(data.nodes)
+    && recordsOnly(data.archive)
+    && systemsFastOk(data.systems)
     && timingFastOk(data.timing)) {
     // Well-formed: pass the delivered value through untouched (cheap, and reference-stable so plain re-renders stay zero-copy).
     return data as unknown as ContextTimeline
@@ -272,8 +330,15 @@ export function timelineOf(value: unknown): ContextTimeline | null {
     ? data.cost as ContextTimeline['cost']
     : undefined
   const timing = timingOf(data.timing)
-  return {
+  // The baseline-gate record survives sanitizing: a fallback payload that
+  // somehow fails the fast path must still pop the gate modal.
+  const unsupported = unsupportedOf(data.unsupported)
+  // The split-generation head fields survive sanitizing too.
+  const counts = countsOf(data.counts)
+  const last = lastOf(data.last)
+  const safe: ContextTimeline = {
     ok: true,
+    ...(unsupported !== null ? { unsupported } : {}),
     ...(typeof data.model === 'string' ? { model: data.model } : {}),
     ...(typeof data.provider === 'string' ? { provider: data.provider } : {}),
     ...(typeof data.contextWindow === 'number' ? { contextWindow: data.contextWindow } : {}),
@@ -293,10 +358,87 @@ export function timelineOf(value: unknown): ContextTimeline | null {
     ...(typeof data.images === 'number' ? { images: data.images } : {}),
     ...(typeof data.toolCalls === 'number' ? { toolCalls: data.toolCalls } : {}),
     archive: objectsOf(data.archive),
+    ...(counts !== undefined ? { counts } : {}),
+    ...(last !== undefined ? { last } : {}),
+    ...(typeof data.detailRev === 'number' && Number.isFinite(data.detailRev) ? { detailRev: data.detailRev } : {}),
     ...(cost !== undefined ? { cost } : {}),
     ...(timing !== null ? { timing } : {}),
+    ...(data.systems !== undefined ? { systems: systemsOf(data.systems) } : {}),
     ...(typeof data.surfaceFloor === 'number' ? { surfaceFloor: data.surfaceFloor } : {}),
     ...(typeof data.archiveFloor === 'number' ? { archiveFloor: data.archiveFloor } : {}),
+    ...(data.fileOps !== undefined ? { fileOps: objectsOf(data.fileOps) } : {}),
+    ...(typeof data.fileOpsFloor === 'number' ? { fileOpsFloor: data.fileOpsFloor } : {}),
+  }
+  return safe
+}
+
+/**
+ * The live system-prompt nodes, re-proved per entry and sorted by seq: an
+ * entry missing a finite seq/time/tokens drops out (the browser then falls
+ * back to the header epoch), so a hostile collection can never produce a NaN
+ * prompt figure or an unfetchable seq. Absent or empty stays absent.
+ */
+function systemsOf(value: unknown): ContextTimeline['systems'] {
+  const list = objectsOf<Record<string, unknown>>(value)
+  const out: SystemPromptNode[] = []
+  for (const entry of list) {
+    const { seq, time, tokens } = entry
+    if (typeof seq !== 'number' || !Number.isFinite(seq)) continue
+    if (typeof time !== 'number' || !Number.isFinite(time)) continue
+    if (typeof tokens !== 'number' || !Number.isFinite(tokens)) continue
+    out.push({ seq, time, tokens })
+  }
+  return out.sort((a, b) => a.seq - b.seq)
+}
+
+/**
+ * The fast path's check for the live system-prompt nodes: every entry must
+ * carry the three finite numbers the browser reads — `seq` for the per-step
+ * resolution, `time` for the DNA band, `tokens` for its width. A primitive
+ * entry, or one whose fields are not numbers, sends the payload down the
+ * sanitizing slow path (`systemsOf` drops it) instead of leaking `undefined`
+ * into the bar math. An absent list is fine.
+ */
+function systemsFastOk(value: unknown): boolean {
+  if (value === undefined) return true
+  if (!Array.isArray(value)) return false
+  return value.every((entry) => {
+    if (entry === null || typeof entry !== 'object') return false
+    const { seq, time, tokens } = entry as Record<string, unknown>
+    return typeof seq === 'number' && Number.isFinite(seq)
+      && typeof time === 'number' && Number.isFinite(time)
+      && typeof tokens === 'number' && Number.isFinite(tokens)
+  })
+}
+
+/**
+ * The split head's count figures, re-proved field by field: a present-but-
+ * partial record zeroes its unreadable fields (the stats board's no-NaN
+ * guarantee), an absent or non-record value stays absent (legacy generation
+ * — callers derive the counts from the collections instead).
+ */
+function countsOf(value: unknown): ContextTimeline['counts'] {
+  const data = asRecord(value)
+  if (data === null) return undefined
+  return {
+    turns: numOf(data.turns),
+    steps: numOf(data.steps),
+    injects: numOf(data.injects),
+    compactions: numOf(data.compactions),
+    prunes: numOf(data.prunes),
+  }
+}
+
+/** The split head's newest-request summary; absent or shapeless stays absent. */
+function lastOf(value: unknown): ContextTimeline['last'] {
+  const data = asRecord(value)
+  if (data === null) return undefined
+  if (typeof data.seq !== 'number' || !Number.isFinite(data.seq)) return undefined
+  if (typeof data.total !== 'number' || !Number.isFinite(data.total)) return undefined
+  return {
+    seq: data.seq,
+    total: data.total,
+    ...(typeof data.prompt === 'number' && Number.isFinite(data.prompt) ? { prompt: data.prompt } : {}),
   }
 }
 
@@ -305,11 +447,19 @@ export function timelineOf(value: unknown): ContextTimeline | null {
  * `contextPressure` projection (provider-anchored occupancy of the next
  * request). Absent key or value = the meter's projection is not composed
  * (e.g. a harness without the session-projection registry) — callers fall
- * back to their derived anchor, so the UI degrades gracefully.
+ * back to their derived anchor, so the UI degrades gracefully. The three
+ * fields are independent last-wins records on the wire (dsh's strict wire
+ * schema), so each is re-proved on its own: a wrong-typed field drops out,
+ * the readable ones survive.
  */
 export function contextPressureOf(value: unknown): ContextPressure | null {
-  const data: unknown = asRecord(value)
-  return data as ContextPressure | null
+  const data = asRecord(value)
+  if (data === null) return null
+  const out: ContextPressure = {}
+  if (typeof data.pressureTokens === 'number' && Number.isFinite(data.pressureTokens)) out.pressureTokens = data.pressureTokens
+  if (typeof data.projectedTokens === 'number' && Number.isFinite(data.projectedTokens)) out.projectedTokens = data.projectedTokens
+  if (typeof data.contextWindow === 'number' && Number.isFinite(data.contextWindow)) out.contextWindow = data.contextWindow
+  return out
 }
 
 /**
@@ -333,11 +483,20 @@ export function contextBreakdownOf(value: unknown): ContextBreakdown | null {
  * Narrow a delivered projection value to the official token-meter
  * `tokenUsage` projection (durable cumulative provider usage). Absent key or
  * value = the meter's projection is not composed (or no request has reported
- * usage yet) — callers drop the cache-hit cell to a dash.
+ * usage yet) — callers drop the cache-hit cell to a dash. The wire schema is
+ * strict with all four buckets REQUIRED (dsh token-meter's projectionSchema),
+ * so a partial/corrupt value degrades the whole value to null instead of
+ * undercounting the billed total.
  */
 export function tokenUsageOf(value: unknown): TokenUsage | null {
-  const data: unknown = asRecord(value)
-  return data as TokenUsage | null
+  const data = asRecord(value)
+  if (data === null) return null
+  const { uncachedInputTokens, outputTokens, cacheReadTokens, cacheWriteTokens } = data
+  if (typeof uncachedInputTokens !== 'number' || !Number.isFinite(uncachedInputTokens)) return null
+  if (typeof outputTokens !== 'number' || !Number.isFinite(outputTokens)) return null
+  if (typeof cacheReadTokens !== 'number' || !Number.isFinite(cacheReadTokens)) return null
+  if (typeof cacheWriteTokens !== 'number' || !Number.isFinite(cacheWriteTokens)) return null
+  return { uncachedInputTokens, outputTokens, cacheReadTokens, cacheWriteTokens }
 }
 
 /**
@@ -346,6 +505,15 @@ export function tokenUsageOf(value: unknown): TokenUsage | null {
  */
 function msNumOf(value: unknown): number {
   return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : 0
+}
+
+/**
+ * The OPTIONAL timing scalars (the generation split): a real non-negative
+ * number passes, anything else — including absence — reads as undefined so the
+ * field stays absent on the narrowed value (see `timingOf`).
+ */
+function optMsNumOf(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : undefined
 }
 
 /**
@@ -360,6 +528,13 @@ function timingFastOk(value: unknown): boolean {
   const t = value as Record<string, unknown>
   for (const k of ['wallMs', 'ttftMs', 'genMs', 'calls', 'toolsMs', 'toolCalls']) {
     if (typeof t[k] !== 'number') return false
+  }
+  // The generation split is optional but, when present, must be a finite
+  // non-negative number — the same gate the slow path applies, so a hostile
+  // bucket cannot slip through the fast path (see `timingOf`).
+  for (const k of ['reasoningMs', 'textMs', 'toolArgMs']) {
+    const v = t[k]
+    if (v !== undefined && (typeof v !== 'number' || !Number.isFinite(v) || v < 0)) return false
   }
   const tools = t.tools
   if (tools === null || typeof tools !== 'object' || Array.isArray(tools)) return false
@@ -397,7 +572,7 @@ export function timingOf(value: unknown): TimingTotals | null {
       tools[k] = { calls, ms }
     }
   }
-  return {
+  const totals: TimingTotals = {
     wallMs: msNumOf(data.wallMs),
     ttftMs: msNumOf(data.ttftMs),
     genMs: msNumOf(data.genMs),
@@ -406,6 +581,16 @@ export function timingOf(value: unknown): TimingTotals | null {
     toolCalls: msNumOf(data.toolCalls),
     tools,
   }
+  // The generation split stays ABSENT when the host did not serve it (a row
+  // cached before the split) or served a non-number: the card then renders the
+  // un-split shape instead of three meaningless zero rows.
+  const reasoning = optMsNumOf(data.reasoningMs)
+  if (reasoning !== undefined) totals.reasoningMs = reasoning
+  const textMs = optMsNumOf(data.textMs)
+  if (textMs !== undefined) totals.textMs = textMs
+  const toolArgMs = optMsNumOf(data.toolArgMs)
+  if (toolArgMs !== undefined) totals.toolArgMs = toolArgMs
+  return totals
 }
 
 /**
@@ -415,9 +600,11 @@ export function timingOf(value: unknown): TimingTotals | null {
  * browser degrades its system/tools sections to a metadata-only note.
  *
  * Entry-level shape is checked too: a malformed epoch (corrupt payload with
- * a missing tools list or wrong-typed systemTokens) would crash the
- * browser's tools/sections reads, so the WHOLE projection degrades to null
- * and the card falls back to its metadata-only note. The epoch CONTENT is
+ * a missing tools list, a wrong-typed systemTokens, or a tool row whose
+ * name/tokens the browser reads blindly — `tool.name.toLowerCase()` and
+ * `b.tokens - a.tokens` throw on junk) would crash the browser's
+ * tools/sections reads, so the WHOLE projection degrades to null and the
+ * card falls back to its metadata-only note. The epoch CONTENT is
  * not part of this value — the browser fetches it per epoch on demand.
  *
  * The pre-#37 wire generation carries the system TEXT instead of its token
@@ -435,6 +622,13 @@ export function headersOf(value: unknown): ContextHeaders | null {
     const entry = h as { tools?: unknown; systemTokens?: unknown }
     if (!Array.isArray(entry.tools)) return null
     if (entry.systemTokens !== undefined && (typeof entry.systemTokens !== 'number' || !Number.isFinite(entry.systemTokens))) return null
+    for (const t of entry.tools as unknown[]) {
+      if (t === null || typeof t !== 'object') return null
+      const tool = t as { name?: unknown; tokens?: unknown; plugin?: unknown }
+      if (typeof tool.name !== 'string') return null
+      if (typeof tool.tokens !== 'number' || !Number.isFinite(tool.tokens)) return null
+      if (tool.plugin !== undefined && typeof tool.plugin !== 'string') return null
+    }
   }
   let legacy = false
   for (const entry of headers.headers as { systemTokens?: unknown; system?: unknown }[]) {
@@ -506,48 +700,21 @@ export interface SessionsFace {
   scope(id: string): SessionScopeFace | undefined
 }
 
-/**
- * One raw durable-log event as the history RPC serves it (the wire envelope
- * the Host fold consumes, minimally re-typed): every field re-proved by the
- * mapper before use (the no-white-screen guarantee).
- */
-export interface HistoryEventLike {
-  type?: unknown
-  seq?: unknown
-  data?: unknown
-}
-
 /** One history page row: the raw event plus the optional host-computed view. */
 export interface HistoryEntryLike {
   event?: unknown
 }
 
 /**
- * The sessions domain of the shared api client (`connection.api.sessions`),
- * narrowed to the one verb the targeted content fetch rides on: a
- * seq-anchored history page whose boundaries align to whole append-origin
- * messages, so `beforeSeq: seq + 1` always covers that seq when the log
- * still holds it. This is the dsh <= 0.1.1 face — the RPC was rewritten in
- * 0.1.2 into `remote.session.page` (see {@link SessionPageFace}). Every
- * response field is re-proven at runtime.
- */
-export interface SessionsHistoryFace {
-  history(request: { sessionId: string; beforeSeq: number }): Promise<{
-    result?: { ok?: unknown; value?: { events?: unknown; records?: unknown } | null } | null
-  }>
-}
-
-/**
- * The seq-anchored history page verb of the dsh 0.1.2+ gateway remotes: the
+ * The seq-anchored history page verb of the harness gateway remotes: the
  * session namespace mounts as a traced cordis service literally named
  * `remote.session`. The plugin resolves it through the DECLARED inject
  * (`watchHistoryFaces` in historyPage.ts — a non-declared read of the
  * traced proxy throws), so reads are undefined on harnesses that never
- * mount it (the 0.1.1 remotes carry no session namespace) rather than
- * crashing. `throughSeq` is the inclusive log cut (a seq that must exist in
- * the log), `beforeSeq` the exclusive upper bound, and the response wraps
- * the rows in a `ClientResult`-style envelope. Rows are
- * `SessionHistoryRecord`s — `{type:'event', event}` entries plus packed
+ * mount it rather than crashing. `throughSeq` is the inclusive log cut (a
+ * seq that must exist in the log), `beforeSeq` the exclusive upper bound,
+ * and the response wraps the rows in a `ClientResult`-style envelope. Rows
+ * are `SessionHistoryRecord`s — `{type:'event', event}` entries plus packed
  * `{type:'chunks', …}` runs the mapper skips (every event the fold needs —
  * user/assistant messages, tool calls/results, compaction summaries — is
  * always served verbatim; only streaming deltas pack).
@@ -561,14 +728,37 @@ export interface SessionPageFace {
   }, signal?: AbortSignal): Promise<unknown>
 }
 
-/** The connection service face, as far as this plugin consumes it. */
+/**
+ * The connection service face, as far as this plugin consumes it: the
+ * generic Connection RPC caller (the harness's unary channel transport)
+ * plus the loopback fact the harness's own open affordances gate on.
+ */
 export interface ConnectionFace {
-  api?: {
-    sessions?: SessionsHistoryFace
-    host?: { openPath?(request: { path: string }): Promise<unknown> }
+  /** Whether the page reaches the Host on the operator's own machine. */
+  isLoopback?: boolean
+  rpc?: {
+    call?(channel: string, endpoint: string, payload: unknown, signal?: AbortSignal): Promise<unknown>
   }
-  /** Observable host description (dsh's HostDescriptionSource); `canOpenPath` gates the open affordance. */
-  hostDescription?: { getSnapshot(): unknown }
+}
+
+/** The session-namespace workspace-opener remotes, ridden through the generic '/api' channel. */
+const OPEN_CHANNEL = '/api'
+const CAN_OPEN_ENDPOINT = 'session/canOpenWorkspacePath'
+const OPEN_ENDPOINT = 'session/openWorkspacePath'
+
+/**
+ * The connection's bound generic-RPC caller, or undefined when the service
+ * is absent or hostile — every read is guarded, so this can never throw.
+ */
+export function rpcCallOf(ctx: ClientCtx): ((channel: string, endpoint: string, payload: unknown) => Promise<unknown>) | undefined {
+  try {
+    const rpc = asRecord((ctx.get('connection') as ConnectionFace | undefined)?.rpc)
+    const fn = rpc?.call
+    if (rpc !== null && typeof fn === 'function') {
+      return (fn as (channel: string, endpoint: string, payload: unknown) => Promise<unknown>).bind(rpc)
+    }
+  } catch { /* absent or hostile connection — the caller degrades off */ }
+  return undefined
 }
 
 /**
@@ -593,32 +783,43 @@ export function workspaceOf(ctx: ClientCtx, sessionId: string | undefined): stri
   }
 }
 
-/** Whether this deployment can hand a path to the user's native desktop (the
- * host description's `canOpenPath`); false when unknown. */
-export function canOpenPathsOf(ctx: ClientCtx): boolean {
+/**
+ * Whether this deployment can hand a path to the user's native desktop: the
+ * page must reach the Host on the operator's own machine (`isLoopback`, the
+ * harness's own gate) AND the session controller's opener capability remote
+ * must answer true. The capability is an RPC round-trip now (the synchronous
+ * host-description fact is gone), so the answer is asynchronous; every
+ * absence, hostility, or transport failure resolves false — never a rejection.
+ */
+export async function canOpenPathsOf(ctx: ClientCtx): Promise<boolean> {
+  const call = rpcCallOf(ctx)
+  if (call === undefined) return false
   try {
-    const source = (ctx.get('connection') as ConnectionFace | undefined)?.hostDescription
-    const snapshot = typeof source?.getSnapshot === 'function' ? source.getSnapshot() : undefined
-    const can = snapshot !== null && typeof snapshot === 'object' ? (snapshot as { canOpenPath?: unknown }).canOpenPath : undefined
-    return can === true
+    const connection = ctx.get('connection') as ConnectionFace | undefined
+    if (connection?.isLoopback !== true) return false
+    const result = await call(OPEN_CHANNEL, CAN_OPEN_ENDPOINT, { args: {} })
+    const r = asRecord(result)
+    return r !== null && r.ok === true && r.value === true
   } catch {
     return false
   }
 }
 
 /**
- * The system path opener, or undefined when the deployment lacks the RPC.
- * Fire-and-forget: rejections (unknown path, no desktop) swallow — the
- * affordance is best-effort by nature.
+ * The system path opener over the session controller's open remote, or
+ * undefined when the connection carries no RPC caller. Fire-and-forget:
+ * rejections (unknown path, no desktop, offline) swallow — the affordance
+ * is best-effort by nature.
  */
 export function openPathVia(ctx: ClientCtx): ((path: string) => void) | undefined {
-  const host = (ctx.get('connection') as ConnectionFace | undefined)?.api?.host
-  if (host === undefined || typeof host.openPath !== 'function') return undefined
-  // Bound up front: an implementation relying on `this` survives the hand-off.
-  const openPath = host.openPath.bind(host)
+  const call = rpcCallOf(ctx)
+  if (call === undefined) return undefined
   return (path: string): void => {
     try {
-      void openPath({ path }).catch(() => { /* the open is best-effort; a failure stays silent */ })
+      // `args` is a plain object keyed by the remote's declared parameter
+      // names (the gateway's wire contract — an array is rejected host-side).
+      void call(OPEN_CHANNEL, OPEN_ENDPOINT, { args: { request: { path } } })
+        .catch(() => { /* the open is best-effort; a failure stays silent */ })
     } catch { /* same contract, for a synchronously throwing transport */ }
   }
 }

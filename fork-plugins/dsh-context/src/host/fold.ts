@@ -1,4 +1,4 @@
-// DeepSeek Harness fork modification: allocation and projection-delivery optimizations. See ../../FORK_MAINTENANCE.md.
+// DeepSeek Harness fork modification: field-level copy-on-write and restored-view bounds. See ../../FORK_MAINTENANCE.md.
 
 /**
  * The context-timeline fold — replays a session's durable event log into the
@@ -21,8 +21,8 @@
  *   the request/event records are the raw material of `buildTimelineView`.
  */
 
-import type { Category, ContextEventRecord, CostFamilyUsage, RequestRecord, SessionCostUsage, Snapshot, SurfaceNode, TimingTotals, ToolTimingTotals } from '../shared/types'
-import { estimateSystemTokens } from '../shared/estimate'
+import type { Category, ContextEventRecord, ContextTimelineDetail, CostFamilyUsage, FileOpRecord, RequestRecord, SessionCostUsage, Snapshot, SurfaceNode, SystemPromptNode, TimingTotals, ToolTimingTotals } from '../shared/types'
+import { estimateSystemContent, estimateSystemTokens } from '../shared/estimate'
 import type { FoldBounds } from './config'
 import {
   estimateMessage,
@@ -35,6 +35,9 @@ import {
 } from './pricing'
 import type { ContentBlock, MessageSource } from './pricing'
 import { deriveEventMessage } from '@deepseek-ai/dsh-session'
+import { decodeKindOfBlock, decodeSpansOfStream, firstTokenTimeOfStream, isTokenChunk, replaceRangeOf } from './logShapes'
+import type { DecodeKind } from './logShapes'
+import { opsOfCall, parseCallArgs } from '../shared/fileOps'
 
 /**
  * The runtime event envelope this fold consumes. The core
@@ -68,6 +71,27 @@ export interface TimelineState {
   surface: SurfaceNode[]
   sums: Record<Category, number>
   systemTokens: number
+  /**
+   * The live system-prompt nodes, oldest first — a V3 log's `system/message`
+   * surface nodes, or the single entry a V0/V2 `request/header.header.system`
+   * envelope defines. `systemTokens` is the LAST entry with tokens > 0 (the
+   * harness's own "last nonempty surviving system" rule), so an empty dormant
+   * node keeps its position without clearing the prompt. Bounded by
+   * SYSTEM_NODES_MAX. ABSENT on rows folded before this field existed — the
+   * wire then serves no `systems` and the client falls back to the header
+   * epoch's own envelope figure.
+   */
+  systems?: SystemPromptNode[]
+  /**
+   * Whether `systems` was built from the V0/V2 request ENVELOPE
+   * (`header.system`) rather than from V3 `system/message` events. Only then
+   * may a system-less header CLEAR the list: its canonical V0 meaning is
+   * "this request has no system prompt", while a V3 header never carries one
+   * (its prompt lives in the message history). Absent = log-sourced, and
+   * never materialized as an `undefined`-valued property (plain-JSON
+   * precondition — see the note above `model`).
+   */
+  systemsFromHeader?: true
   toolsTokens: number
   /**
    * The projection-cache precondition is plain JSON: a property whose value
@@ -95,13 +119,22 @@ export interface TimelineState {
   archived: SurfaceNode[]
   /**
    * Session-cost raw material: cumulative billed-token totals per DeepSeek
-   * V4 model family and pricing period (see SessionCostUsage). Running
+   * model family and pricing period (see SessionCostUsage). Running
    * totals — never trimmed, so the estimate always covers the COMPLETE
    * session log even after the request/event retention bounds cut in.
-   * Absent until a v4-flash / v4-pro request reports usage.
+   * Absent until a DeepSeek flash/pro request reports usage.
    */
   cost?: SessionCostUsage
   archiveFloor?: number
+  /**
+   * The detail collections' revision marker (see ContextTimelineDetail):
+   * bumped by every fold that mutates the request records, context events,
+   * live surface, or the removed-node archive — the slim wire head carries
+   * it so an open tab knows its fetched detail went stale. Absent until the
+   * first detail fold (undefined reads as 0; never materialize an
+   * `undefined`-valued property — the plain-JSON precondition above).
+   */
+  detailRev?: number
   /**
    * Whole-session timing totals (see TimingTotals) — running sums over the
    * COMPLETE session log, like `cost`. Absent until the first step or tool
@@ -119,17 +152,24 @@ export interface TimelineState {
    * one those events close — a hostile interleaved log degrades to skipped
    * durations, never to unbounded state. Same arm/remove lifecycle as
    * `pendingShadowedSeqs`.
+   *
+   * `decode` and `block` carry the generation split (reasoning / answer text /
+   * tool arguments — see TimingTotals): a V0 log's `assistant/chunk`
+   * `block-start` markers open `block` and close the previous one into
+   * `decode`; a V2+ log carries no such events, so `decode` stays absent and
+   * `assistant/message` reads the spans off its embedded stream instead.
    */
-  stepStart?: { time: number; firstToken?: number }
+  stepStart?: { time: number; firstToken?: number; decode?: Record<DecodeKind, number>; block?: { kind: DecodeKind; since: number } }
   /**
-   * Tool callId → the call's name and start instant, armed by `tool/call` and
-   * DELETED when its `tool/result` folds in (one result per call, in log
-   * order) — the map stays at pending-call size instead of growing for the
-   * session's whole lifetime (it is persisted state, shallow-copied by every
-   * fold step). The start instant prices the call's duration into
-   * `timing.toolsMs` when the result arrives.
+   * Tool callId → the call's name, start instant, and raw arguments, armed by
+   * `tool/call` and DELETED when its `tool/result` folds in (one result per
+   * call, in log order) — the map stays at pending-call size instead of
+   * growing for the session's whole lifetime (it is persisted state,
+   * shallow-copied by every fold step). The start instant prices the call's
+   * duration into `timing.toolsMs` when the result arrives; the raw arguments
+   * feed the file-op derivation (shared/fileOps.ts) at that same moment.
    */
-  callNames: Record<string, { name: string; start: number }>
+  callNames: Record<string, { name: string; start: number; argsRaw?: string }>
   /**
    * Seq list of the surface nodes the next replacement will shadow, armed by
    * the metering event (`compaction/summary` | `compaction/prune`) and
@@ -149,6 +189,25 @@ export interface TimelineState {
    * arm/remove lifecycle as `pendingShadowedSeqs`.
    */
   pendingShadowEventSeq?: number
+  /**
+   * The fold-derived file-operation log (the File Activity card's raw
+   * material, shared/fileOps.ts): one record per executed file op, appended
+   * in log order — at `tool/result` (the armed call's arguments + the
+   * result's meta) and at a run_code result's flush of its nested
+   * dispatches. Bounded by `maxFileOps`; the trim stamps `fileOpsFloor`.
+   */
+  fileOps: FileOpRecord[]
+  /** The newest dropped op's seq (the card's coverage floor for the served op log). */
+  fileOpsFloor?: number
+  /**
+   * Nested Code-Mode ops buffered by their top run_code call id until the
+   * parent's result folds (the dispatch events land BEFORE it, and the ops'
+   * locate target is that result's seq). Flushed (and the key deleted) when
+   * the result with that callId folds; absent until the first dispatch books
+   * an op. Bounded by PENDING_CODE_OPS_MAX — a hostile log that never
+   * settles a run_code cannot grow it.
+   */
+  pendingCodeOps?: Record<string, FileOpRecord[]>
 }
 
 const enum DirtyField {
@@ -157,11 +216,10 @@ const enum DirtyField {
   Requests = 4,
   Events = 8,
   Archived = 16,
-  CallNames = 32,
-  Timing = 64,
+  FileOps = 32,
 }
 
-/** One event's private copy-on-write state. */
+/** One event's private field-level copy-on-write state. */
 class TimelineDraft {
   private next: TimelineState | undefined
   private dirtyFields = 0
@@ -192,6 +250,11 @@ class TimelineDraft {
     return this.current.surface
   }
 
+  replaceSurface(surface: SurfaceNode[]): void {
+    this.state().surface = surface
+    this.dirtyFields |= DirtyField.Surface
+  }
+
   sums(): Record<Category, number> {
     if (!this.isDirty(DirtyField.Sums)) {
       this.state().sums = { ...this.current.sums }
@@ -201,10 +264,8 @@ class TimelineDraft {
   }
 
   requests(): RequestRecord[] {
-    if (!this.isDirty(DirtyField.Requests)) {
-      this.state().requests = [...this.current.requests]
-      this.dirtyFields |= DirtyField.Requests
-    }
+    this.state().requests = [...this.current.requests]
+    this.dirtyFields |= DirtyField.Requests
     return this.current.requests
   }
 
@@ -214,10 +275,8 @@ class TimelineDraft {
   }
 
   events(): ContextEventRecord[] {
-    if (!this.isDirty(DirtyField.Events)) {
-      this.state().events = [...this.current.events]
-      this.dirtyFields |= DirtyField.Events
-    }
+    this.state().events = [...this.current.events]
+    this.dirtyFields |= DirtyField.Events
     return this.current.events
   }
 
@@ -227,10 +286,8 @@ class TimelineDraft {
   }
 
   archived(): SurfaceNode[] {
-    if (!this.isDirty(DirtyField.Archived)) {
-      this.state().archived = [...this.current.archived]
-      this.dirtyFields |= DirtyField.Archived
-    }
+    this.state().archived = [...this.current.archived]
+    this.dirtyFields |= DirtyField.Archived
     return this.current.archived
   }
 
@@ -239,27 +296,33 @@ class TimelineDraft {
     this.dirtyFields |= DirtyField.Archived
   }
 
-  callNames(): Record<string, { name: string; start: number }> {
-    if (!this.isDirty(DirtyField.CallNames)) {
-      this.state().callNames = { ...this.current.callNames }
-      this.dirtyFields |= DirtyField.CallNames
-    }
+  callNames(): TimelineState['callNames'] {
+    this.state().callNames = { ...this.current.callNames }
     return this.current.callNames
   }
 
-  replaceCallNames(callNames: Record<string, { name: string; start: number }>): void {
+  replaceCallNames(callNames: TimelineState['callNames']): void {
     this.state().callNames = callNames
-    this.dirtyFields |= DirtyField.CallNames
+  }
+
+  fileOps(): FileOpRecord[] {
+    if (!this.isDirty(DirtyField.FileOps)) {
+      this.state().fileOps = [...this.current.fileOps]
+      this.dirtyFields |= DirtyField.FileOps
+    }
+    return this.current.fileOps
+  }
+
+  replaceFileOps(fileOps: FileOpRecord[]): void {
+    this.state().fileOps = fileOps
+    this.dirtyFields |= DirtyField.FileOps
   }
 
   timing(): TimingTotals {
-    if (!this.isDirty(DirtyField.Timing)) {
-      const current = this.current.timing
-      this.state().timing = current === undefined
-        ? { wallMs: 0, ttftMs: 0, genMs: 0, calls: 0, toolsMs: 0, toolCalls: 0, tools: {} }
-        : { ...current, tools: { ...current.tools } }
-      this.dirtyFields |= DirtyField.Timing
-    }
+    const current = this.current.timing
+    this.state().timing = current === undefined
+      ? { wallMs: 0, ttftMs: 0, genMs: 0, calls: 0, toolsMs: 0, toolCalls: 0, tools: {} }
+      : { ...current, tools: { ...current.tools } }
     return this.current.timing as TimingTotals
   }
 }
@@ -268,7 +331,7 @@ const normalizedBounds = new WeakMap<TimelineState, string>()
 const timelineViewIdentities = new WeakMap<TimelineState, object>()
 
 function boundsKey(bounds: FoldBounds): string {
-  return `${bounds.maxRequestSteps}/${bounds.maxKeptTurns}/${bounds.maxEvents}/${bounds.maxNodes}/${bounds.maxArchiveNodes}`
+  return `${bounds.maxRequestSteps}/${bounds.maxKeptTurns}/${bounds.maxEvents}/${bounds.maxNodes}/${bounds.maxArchiveNodes}/${bounds.maxFileOps}`
 }
 
 function isNormalizedFor(state: TimelineState, bounds: FoldBounds): boolean {
@@ -283,6 +346,7 @@ function hasSameViewInputs(previous: TimelineState, next: TimelineState): boolea
   return previous.surface === next.surface
     && previous.sums === next.sums
     && previous.systemTokens === next.systemTokens
+    && previous.systems === next.systems
     && previous.toolsTokens === next.toolsTokens
     && previous.model === next.model
     && previous.provider === next.provider
@@ -292,7 +356,10 @@ function hasSameViewInputs(previous: TimelineState, next: TimelineState): boolea
     && previous.archived === next.archived
     && previous.cost === next.cost
     && previous.archiveFloor === next.archiveFloor
+    && previous.detailRev === next.detailRev
     && previous.timing === next.timing
+    && previous.fileOps === next.fileOps
+    && previous.fileOpsFloor === next.fileOpsFloor
 }
 
 function timelineViewIdentity(state: TimelineState): object {
@@ -351,6 +418,16 @@ function trimState(draft: TimelineDraft, bounds: FoldBounds, force: boolean): vo
     const events = draft.current.events
     if (events.length > bounds.maxEvents) draft.replaceEvents(events.slice(-bounds.maxEvents))
   }
+  // The file-op log: newest tail; the newest dropped op's seq rides
+  // `fileOpsFloor` (the same coverage-floor family as archiveFloor).
+  if (force || draft.isDirty(DirtyField.FileOps)) {
+    const fileOps = draft.current.fileOps
+    if (fileOps.length > bounds.maxFileOps) {
+      const drop = fileOps.length - bounds.maxFileOps
+      draft.state().fileOpsFloor = Math.max(draft.current.fileOpsFloor ?? 0, fileOps[drop - 1].seq)
+      draft.replaceFileOps(fileOps.slice(drop))
+    }
+  }
   // Archive retention (the Context browser's per-step reconstruction raw
   // material). Entries leave in removal order (oldest `gone` first), so the
   // newest dropped `gone` is the last dropped entry's — recorded as
@@ -396,6 +473,7 @@ export function createTimelineState(): TimelineState {
     events: [],
     archived: [],
     callNames: {},
+    fileOps: [],
   }
 }
 
@@ -407,14 +485,110 @@ function categoryOf(type: string, message: { source?: MessageSource } | undefine
 }
 
 /**
+ * Mark the detail collections dirty (TimelineState.detailRev). Every caller
+ * is a fold branch that just mutated the requests/events/surface/archive;
+ * branches that touch only the working slots (stepStart, callNames, the
+ * shadow claim) or the envelope scalars do NOT bump — the served detail is
+ * unchanged, and an open tab has nothing to refetch.
+ */
+function bumpDetailRev(st: TimelineState): void {
+  st.detailRev = (st.detailRev ?? 0) + 1
+}
+
+/**
+ * Bound on the live system-prompt nodes (TimelineState.systems). The
+ * effective figure is the LAST nonempty node, so dropping the oldest can only
+ * under-report a pathological log whose newest SYSTEM_NODES_MAX nodes are all
+ * empty while an older one still carried text.
+ */
+const SYSTEM_NODES_MAX = 8
+
+/** The effective system-prompt price: the last nonempty node, else 0 (the harness's own rule). */
+function systemTokensOf(systems: readonly SystemPromptNode[]): number {
+  for (let i = systems.length - 1; i >= 0; i--) {
+    if (systems[i].tokens > 0) return systems[i].tokens
+  }
+  return 0
+}
+
+/** Append one system-prompt node, bounding the list (see SYSTEM_NODES_MAX). */
+function pushSystem(st: TimelineState, node: SystemPromptNode): void {
+  const systems = [...(st.systems ?? []), node]
+  st.systems = systems.length > SYSTEM_NODES_MAX ? systems.slice(-SYSTEM_NODES_MAX) : systems
+  st.systemTokens = systemTokensOf(st.systems)
+}
+
+/**
+ * Bound on the buffered nested Code-Mode ops (TimelineState.pendingCodeOps)
+ * — a hostile log that dispatches without settling the parent run_code
+ * cannot grow the persisted state past this.
+ */
+const PENDING_CODE_OPS_MAX = 200
+
+/** JSON-stringify an unknown argument payload; a hostile (cyclic) value yields no args. */
+function argsRawOf(value: unknown): string | undefined {
+  if (typeof value === 'string') return value
+  if (value === undefined || value === null) return undefined
+  try {
+    return JSON.stringify(value)
+  } catch {
+    return undefined
+  }
+}
+
+/** Append op records to the fold-derived log (the trim lives in trimState, with the other collections). */
+function pushFileOps(draft: TimelineDraft, ops: FileOpRecord[]): void {
+  const fileOps = draft.fileOps()
+  for (const op of ops) fileOps.push(op)
+}
+
+/**
+ * Buffer nested Code-Mode ops under their top run_code call id (they flush
+ * when the parent's result folds — the ops' locate target). A full buffer
+ * drops new arrivals wholesale (defensive logs only).
+ */
+function bufferCodeOps(draft: TimelineDraft, rootCallId: string, ops: FileOpRecord[]): void {
+  const pending = draft.current.pendingCodeOps ?? {}
+  let total = 0
+  for (const k in pending) total += pending[k].length
+  if (total + ops.length > PENDING_CODE_OPS_MAX) return
+  draft.state().pendingCodeOps = { ...pending, [rootCallId]: [...(pending[rootCallId] ?? []), ...ops] }
+}
+
+/**
  * Archive removed surface nodes as stamped COPIES — the objects leaving
  * `st.surface` are shared with the persisted previous state, so `gone` must
  * never be written onto them directly.
  */
 function archiveRemoved(draft: TimelineDraft, removed: SurfaceNode[], goneSeq: number): void {
-  if (removed.length === 0) return
   const archived = draft.archived()
   for (const n of removed) archived.push({ ...n, gone: goneSeq })
+}
+
+/**
+ * Remove every live surface node whose seq the replacement claims, keeping the
+ * per-category sums equal to the surviving nodes and archiving the removals.
+ * Removal follows the SEQ list, not the declared range: pruned replacement
+ * nodes keep their own seqs beyond the range end, so a range-based removal
+ * would leave them behind and overcount. Returns the removed nodes.
+ */
+function removeSurfaceSeqs(draft: TimelineDraft, claimed: ReadonlySet<number>, goneSeq: number): SurfaceNode[] {
+  if (claimed.size === 0) return []
+  const kept: SurfaceNode[] = []
+  const removed: SurfaceNode[] = []
+  for (const n of draft.current.surface) {
+    if (claimed.has(n.seq)) {
+      removed.push(n)
+    } else {
+      kept.push(n)
+    }
+  }
+  if (removed.length === 0) return removed
+  const sums = draft.sums()
+  for (const n of removed) sums[n.cat] -= n.tokens
+  archiveRemoved(draft, removed, goneSeq)
+  draft.replaceSurface(kept)
+  return removed
 }
 
 interface SurfaceEventLike {
@@ -427,6 +601,17 @@ interface MessageLike {
   content?: ContentBlock[]
   source?: MessageSource
   error?: boolean
+}
+
+/**
+ * The message nested under an event payload's `message` field
+ * (`system/message`, `assistant/message`, `tool/result`) — read structurally
+ * rather than through `deriveEventMessage`, whose 0.1.2-rc.1 generation knows
+ * nothing of the V3 `system/message` variant. A malformed payload reads null.
+ */
+function messageOf(data: Record<string, unknown> | undefined): MessageLike | null {
+  const message = data?.message
+  return message !== null && typeof message === 'object' ? message : null
 }
 
 /**
@@ -467,7 +652,7 @@ function applySurface(
   data: { error?: boolean } | undefined,
   message: MessageLike | null | undefined,
 ): SurfaceNode {
-  const st = draft.current
+  const st = draft.state()
   const cat = categoryOf(type, message ?? undefined)
   const node: SurfaceNode = {
     seq: ev.seq,
@@ -524,9 +709,8 @@ function applySurface(
     // folds in (see TimelineState.callNames). Rebuild without the used ids
     // (no dynamic delete, per repo lint) — consume-once holds the map at
     // pending-call size, so the copy is trivial.
-    if ((typeof srcId === 'string' && Object.hasOwn(st.callNames, srcId))
-      || (typeof blockId === 'string' && Object.hasOwn(st.callNames, blockId))) {
-      const kept: Record<string, { name: string; start: number }> = {}
+    if (typeof srcId === 'string' || typeof blockId === 'string') {
+      const kept: TimelineState['callNames'] = {}
       for (const k in st.callNames) {
         if (k !== srcId && k !== blockId) kept[k] = st.callNames[k]
       }
@@ -550,34 +734,22 @@ function applySurface(
 
   // Consume the armed shadow claim here (a later surface event would expire it, per the shadow-price protocol); DELETE the fields —
   // assigning `undefined` would break the plain-JSON persisted-state precondition (see TimelineState).
-  const shadowedSeqs = draft.current.pendingShadowedSeqs
-  const shadowEventSeq = draft.current.pendingShadowEventSeq
-  const next = draft.state()
-  delete next.pendingShadowedSeqs
-  delete next.pendingShadowEventSeq
+  const shadowedSeqs = st.pendingShadowedSeqs
+  const shadowEventSeq = st.pendingShadowEventSeq
+  delete st.pendingShadowedSeqs
+  delete st.pendingShadowEventSeq
 
-  const surface = draft.surface()
-  const sums = draft.sums()
-
-  const op = ev.surfaceOp as { op?: string; start?: number; end?: number } | null | undefined
-  if (op !== null && typeof op === 'object' && op.op === 'replace') {
+  const op = replaceRangeOf(ev.surfaceOp)
+  if (op !== null) {
     if (Array.isArray(shadowedSeqs) && shadowedSeqs.length > 0) {
       // The producer's shadow price covers exactly these node seqs, which can
       // include replacement nodes BEYOND the declared range end (their own
       // seqs postdate the range). Removing by seqs keeps our per-category
       // bookkeeping equal to the producer's total — a range-based removal
       // would leave those nodes behind and overcount.
-      const shadowed = new Set(shadowedSeqs)
-      const kept: SurfaceNode[] = []
-      const removed: SurfaceNode[] = []
-      for (const n of surface) {
-        if (shadowed.has(n.seq)) { sums[n.cat] -= n.tokens; removed.push(n) }
-        else kept.push(n)
-      }
-      archiveRemoved(draft, removed, ev.seq)
-      next.surface = kept
-      sums[cat] += node.tokens
-      kept.push(node)
+      const removed = removeSurfaceSeqs(draft, new Set(shadowedSeqs), ev.seq)
+      draft.sums()[cat] += node.tokens
+      draft.surface().push(node)
       // Rewrite the metering event's row from its gross shadow price to the
       // NET freed amount (the replacement re-adds its own tokens), so the
       // number matches the drop the trend chart shows. The record is cloned:
@@ -590,22 +762,30 @@ function applySurface(
       }
       return node
     }
+    // No shadow claim: the replacement names its span directly, read off BOTH
+    // endpoint spellings (logShapes.replaceRangeOf) and spliced IN PLACE — the
+    // harness's own surface semantics (the replacing node takes the span's
+    // position). BOTH endpoints must name live nodes, exactly as the harness's
+    // registry validates; a malformed span degrades to an append, which keeps
+    // the nodes rather than silently dropping context.
     let si = -1
     let ei = -1
-    for (let i = 0; i < surface.length; i++) {
-      if (si < 0 && surface[i].seq === op.start) si = i
-      if (surface[i].seq === op.end) { ei = i; break }
+    const currentSurface = draft.current.surface
+    for (let i = 0; i < currentSurface.length; i++) {
+      if (si < 0 && currentSurface[i].seq === op.start) si = i
+      if (currentSurface[i].seq === op.end) { ei = i; break }
     }
     if (si >= 0 && ei >= si) {
-      const removed = surface.splice(si, ei - si + 1, node)
+      const removed = draft.surface().splice(si, ei - si + 1, node)
       archiveRemoved(draft, removed, ev.seq)
+      const sums = draft.sums()
       for (const r of removed) sums[r.cat] -= r.tokens
       sums[cat] += node.tokens
       return node
     }
   }
-  surface.push(node)
-  sums[cat] += node.tokens
+  draft.surface().push(node)
+  draft.sums()[cat] += node.tokens
   return node
 }
 
@@ -648,15 +828,16 @@ function tokenCountOf(value: unknown): number | null {
 }
 
 /**
- * The DeepSeek V4 model family a model name prices as — matched on the NAME
+ * The DeepSeek model family a model name prices as — matched on the NAME
  * alone (provider-agnostic: official API, proxies, OpenRouter spellings like
- * `deepseek/deepseek-v4-flash` all land here). Null for any other model:
- * non-V4 usage is simply not priced.
+ * `deepseek/deepseek-v4.1-flash` and `deepseek/deepseek-flash` all land
+ * here). The name must carry a DeepSeek marker (`v4` or `deepseek`) so a
+ * foreign flash/pro-named model (gemini-2.0-flash) is never priced.
  */
 function costFamilyOf(model: string | undefined): 'flash' | 'pro' | null {
   if (model === undefined) return null
   const m = model.toLowerCase()
-  if (!m.includes('v4')) return null
+  if (!m.includes('v4') && !m.includes('deepseek')) return null
   if (m.includes('flash')) return 'flash'
   if (m.includes('pro')) return 'pro'
   return null
@@ -704,14 +885,17 @@ function accumulateCost(st: TimelineState, time: number, usage: BilledUsage): vo
 /**
  * Advance the fold over ONE committed session event under the projection
  * contract. Uninteresting events return the same reference (`Object.is` gates
- * the change feed); any change returns a new reference over a lazy shallow
- * clone, so the persisted state is never mutated in place by the caller.
+ * the change feed); a changed event clones only the state fields it mutates,
+ * so the persisted state is never mutated in place by the caller.
  * `bounds` come from the plugin config (config.ts) — retention only, they
  * never change the state shape.
  */
 
 /** The timing card's per-tool ranking cap: the busiest 16 names are kept. */
 const TOOL_TIMING_CAP = 16
+
+/** The decode buckets of the generation split, in card order (see TimingTotals). */
+const DECODE_KINDS: readonly DecodeKind[] = ['reasoning', 'text', 'toolarg']
 
 /** Non-negative, NaN-proof duration between two instants (hostile times degrade to 0). */
 function durOf(from: number, to: number): number {
@@ -720,22 +904,16 @@ function durOf(from: number, to: number): number {
 }
 
 /**
- * Whether a stream chunk carries a non-empty token delta — the first-token
- * marker the TTFT fold waits for (the same rule as the harness's own
- * session-stats fold). Shape-guarded: a malformed chunk is just not a token.
+ * Fold one block's decode span into the totals' generation split (see
+ * TimingTotals). A zero span stays ABSENT — the field then carries the
+ * "no time was decoded in this bucket" fact without adding dead properties to
+ * every pre-split-shaped state, and the card reads absence as 0.
  */
-function isTokenDelta(chunk: unknown): boolean {
-  if (chunk === null || typeof chunk !== 'object') return false
-  const c = chunk as { type?: unknown; text?: unknown; argumentsDelta?: unknown; name?: unknown }
-  switch (c.type) {
-    case 'text-delta':
-    case 'reasoning-delta':
-      return typeof c.text === 'string' && c.text !== ''
-    case 'tool-call-delta':
-      return (typeof c.argumentsDelta === 'string' && c.argumentsDelta !== '') || c.name !== undefined
-    default:
-      return false
-  }
+function addDecode(timing: TimingTotals, kind: DecodeKind, ms: number): void {
+  if (!(ms > 0)) return
+  if (kind === 'reasoning') timing.reasoningMs = (timing.reasoningMs ?? 0) + ms
+  else if (kind === 'text') timing.textMs = (timing.textMs ?? 0) + ms
+  else timing.toolArgMs = (timing.toolArgMs ?? 0) + ms
 }
 
 /**
@@ -796,7 +974,23 @@ export function applyTimeline(state: TimelineState, event: TimelineEvent, bounds
         const s = d.state()
         // Tools TOTAL = dsh's whole-array price (one JSON string of every schema).
         s.toolsTokens = estimateToolsTotal(tools)
-        s.systemTokens = estimateSystemTokens(header.system)
+        // The V0/V2 system prompt rides this ENVELOPE; V3 rejects it outright
+        // (surface.ts: "must omit header.system; use system/message") and
+        // carries the prompt as a surface node instead. A present string is
+        // the envelope's own prompt for every request in its series; an
+        // absent one means "this request has no system prompt" ONLY when the
+        // list was envelope-sourced — otherwise the header is a V3 snapshot
+        // and the log's system nodes stay untouched.
+        const systemText = header.system
+        if (typeof systemText === 'string' && systemText !== '') {
+          s.systems = [{ seq: event.seq, time: event.time, tokens: estimateSystemTokens(systemText) }]
+          s.systemsFromHeader = true
+          s.systemTokens = systemTokensOf(s.systems)
+        } else if (s.systemsFromHeader === true) {
+          s.systems = []
+          delete s.systemsFromHeader
+          s.systemTokens = 0
+        }
         // Current route/model: the durable request envelope is the source of
         // truth (request/context is only route/capacity metadata, appended
         // AFTER request/header per request — see agent-loop `buildRequest`).
@@ -813,8 +1007,38 @@ export function applyTimeline(state: TimelineState, event: TimelineEvent, bounds
         // too. Firing only on a real change keeps the list equal to the record.
         if ((data?.reason === 'change' || data?.reason === 'resume') && s.model && s.lastModel && s.model !== s.lastModel) {
           d.events().push({ seq: event.seq, time: event.time, kind: 'model', from: s.lastModel, to: s.model })
+          bumpDetailRev(s)
         }
         if (s.model) s.lastModel = s.model
+        break
+      }
+      case 'system/message': {
+        // The V3 system prompt: a SURFACE node (position 0 of the harness's
+        // ordered surface) that the plugin tracks outside its message
+        // categories — it is the envelope figure's source, never a
+        // user/inject/assistant/tool node, so it must not enter `surface` or
+        // `sums` (that would double-count it against `systemTokens`).
+        const d = edit()
+        const s = d.state()
+        // Consume the armed shadow claim (the shadow-price protocol expires it
+        // on the next surface event) — a system node never carries one.
+        delete s.pendingShadowedSeqs
+        delete s.pendingShadowEventSeq
+        const op = replaceRangeOf(event.surfaceOp)
+        if (op !== null) {
+          const systems = s.systems ?? []
+          s.systems = systems.filter(n => n.seq < op.start || n.seq > op.end)
+          // Defensive: a replacement claiming ordinary surface nodes (never
+          // produced by dsh's system-prompt projection) removes them too, so
+          // the surface and its sums stay consistent with the claim.
+          const claimed = new Set<number>()
+          for (const n of d.current.surface) {
+            if (n.seq >= op.start && n.seq <= op.end) claimed.add(n.seq)
+          }
+          if (removeSurfaceSeqs(d, claimed, event.seq).length > 0) bumpDetailRev(s)
+        }
+        delete s.systemsFromHeader
+        pushSystem(s, { seq: event.seq, time: event.time, tokens: estimateSystemContent(messageOf(data)?.content) })
         break
       }
       case 'request/context': {
@@ -828,20 +1052,91 @@ export function applyTimeline(state: TimelineState, event: TimelineEvent, bounds
       }
       case 'tool/call': {
         if (data && typeof data.callId === 'string' && typeof data.name === 'string') {
-          edit().callNames()[data.callId] = { name: data.name, start: event.time }
+          // The raw arguments ride along for the result-time file-op derivation (shared/fileOps.ts).
+          const argsRaw = argsRawOf(data.arguments)
+          edit().callNames()[data.callId] = {
+            name: data.name,
+            start: event.time,
+            ...(argsRaw !== undefined ? { argsRaw } : {}),
+          }
+        }
+        break
+      }
+      case 'tool/code-dispatch':
+      case 'tool/ptc-dispatch': {
+        // A nested PTC (Code Mode) call settling inside a run_code program:
+        // one settled sub-dispatch books its file ops exactly like a top-level
+        // call — minus meta (the dispatch event carries none, so read windows
+        // and per-file search attribution degrade to the argument-only
+        // forms). The ops buffer under the top run_code call id and flush
+        // when its result folds (their locate target is that result's row).
+        // BOTH vocabulary generations land here: `tool/code-dispatch` on
+        // V0/V2 logs, `tool/ptc-dispatch` on V3 (the rename keeps the payload).
+        const rootCallId = data?.rootCallId
+        const name = data?.name
+        if (typeof rootCallId === 'string' && typeof name === 'string') {
+          const ops = opsOfCall({
+            seq: event.seq,
+            time: event.time,
+            tool: name,
+            argsRaw: argsRawOf(data?.arguments),
+            err: data?.isError === true,
+          })
+          if (ops.length > 0) {
+            bufferCodeOps(edit(), rootCallId, ops)
+          }
         }
         break
       }
       case 'assistant/chunk': {
-      // The token flood: every stream chunk is one event, so this case stays
-      // cheap and mostly reference-stable — only the open step's FIRST token
-      // delta stamps the slot (later deltas and steps without a slot return
-      // the same state). A malformed chunk just is not a token.
+      // V0 stream events: the token flood, one event per chunk, so this case
+      // stays cheap and mostly reference-stable — only the open step's FIRST
+      // token delta stamps the slot (later deltas and steps without a slot
+      // return the same state). V2+ logs carry no such events; their timed
+      // stream rides `assistant/message` / `assistant/attempt` (see below).
+      //
+      // A `block-start` marker opens a decode block (reasoning / answer text /
+      // tool arguments) and closes the previous one into the slot's decode
+      // spans, so the generation window splits by what was being decoded.
+        const start = state.stepStart
+        if (start === undefined) return state
+        const chunk = data?.chunk as { type?: unknown; blockType?: unknown } | null | undefined
+        if (chunk !== null && typeof chunk === 'object' && chunk.type === 'block-start') {
+          const kind = decodeKindOfBlock(chunk.blockType)
+          // An unknown marker still CLOSES the open block (its end is real);
+          // only the interval it would open stays unattributed.
+          if (start.block === undefined && kind === undefined) return state
+          const s = edit().state()
+          const decode = { ...(start.decode ?? { reasoning: 0, text: 0, toolarg: 0 }) }
+          if (start.block !== undefined) decode[start.block.kind] += durOf(start.block.since, event.time)
+          // The next block is ABSENT (not undefined-valued) when unknown — the
+          // plain-JSON persisted-state precondition (see TimelineState).
+          s.stepStart = {
+            time: start.time,
+            ...(start.firstToken !== undefined ? { firstToken: start.firstToken } : {}),
+            decode,
+            ...(kind !== undefined ? { block: { kind, since: event.time } } : {}),
+          }
+          break
+        }
+        if (start.firstToken !== undefined) return state
+        if (!isTokenChunk(data?.chunk)) return state
+        const s = edit().state()
+        s.stepStart = { ...start, firstToken: event.time }
+        break
+      }
+      case 'assistant/attempt': {
+      // V2+: one model attempt that committed no surface message. Its embedded
+      // stream still carries the attempt's first token, which the harness's own
+      // sessionStats fold stamps on the open step the same way — an in-step
+      // retry therefore keeps its real TTFT instead of falling into the card's
+      // residue.
         const start = state.stepStart
         if (start === undefined || start.firstToken !== undefined) return state
-        if (!isTokenDelta(data?.chunk)) return state
+        const first = firstTokenTimeOfStream(data?.stream)
+        if (first === undefined) return state
         const s = edit().state()
-        s.stepStart = { time: start.time, firstToken: event.time }
+        s.stepStart = { time: start.time, firstToken: first }
         break
       }
       case 'step/start': {
@@ -868,10 +1163,12 @@ export function applyTimeline(state: TimelineState, event: TimelineEvent, bounds
         break
       }
       case 'user/message': {
-        // `deriveEventMessage` is the canonical per-event projection: returns
-        // `event.data` for user/message (no `data.message` indirection).
+      // `deriveEventMessage` is the canonical per-event projection: returns
+      // `event.data` for user/message (no `data.message` indirection).
         const msg = deriveEventMessage(event as never) as MessageLike | null
         const d = edit()
+        const s = d.state()
+        bumpDetailRev(s)
         const node = applySurface(d, event, event.type, data, msg)
         const source = msg?.source
         if (isInjection(source)) {
@@ -895,11 +1192,54 @@ export function applyTimeline(state: TimelineState, event: TimelineEvent, bounds
       }
       case 'tool/result': {
       // The model-visible message is data.message; `deriveEventMessage`
-        // returns that directly (the envelope also carries callId/error; pricing
-        // the envelope would miss all content).
+      // returns that directly (the envelope also carries callId/error; pricing
+      // the envelope would miss all content).
         const toolMsg = deriveEventMessage(event as never) as MessageLike | null
+        // Read the pairing BEFORE applySurface consumes it (consume-once):
+        // the armed call's name/arguments pair this result into file ops, and
+        // the result's callId is the flush key for buffered Code-Mode ops.
+        const msgSource = toolMsg?.source as { callId?: unknown } | undefined
+        const srcId = msgSource?.callId
+        const firstBlock = toolMsg?.content?.[0] as { toolCallId?: unknown; isError?: unknown } | undefined
+        const blockId = firstBlock?.toolCallId
+        const pendingEntry = (typeof srcId === 'string' ? state.callNames[srcId] : undefined)
+          ?? (typeof blockId === 'string' ? state.callNames[blockId] : undefined)
+        const buffered = (typeof srcId === 'string' ? state.pendingCodeOps?.[srcId] : undefined)
+          ?? (typeof blockId === 'string' ? state.pendingCodeOps?.[blockId] : undefined)
         const d = edit()
+        const s = d.state()
+        bumpDetailRev(s)
         const node = applySurface(d, event, event.type, data, toolMsg)
+        // The file-op derivation (shared/fileOps.ts): the armed call's
+        // arguments + the result's presentation meta. Unpaired results book
+        // nothing (parity with the surface node's missing tool label).
+        if (pendingEntry !== undefined) {
+          const ops = opsOfCall({
+            seq: event.seq,
+            time: event.time,
+            tool: pendingEntry.name,
+            argsRaw: pendingEntry.argsRaw,
+            meta: data?.meta,
+            err: Boolean(data?.error) || firstBlock?.isError === true,
+          })
+          pushFileOps(d, ops)
+        }
+        if (buffered !== undefined && buffered.length > 0) {
+          // The run_code root settles: its nested ops land with `parent` = this
+          // result's row, plus the program description off its call arguments.
+          const program = parseCallArgs(pendingEntry?.argsRaw)?.description
+          pushFileOps(d, buffered.map(op => ({
+            ...op,
+            parent: event.seq,
+            ...(typeof program === 'string' && program !== '' ? { program } : {}),
+          })))
+          const kept: Record<string, FileOpRecord[]> = {}
+          for (const k in s.pendingCodeOps) {
+            if (k !== srcId && k !== blockId) kept[k] = s.pendingCodeOps[k]
+          }
+          if (Object.keys(kept).length > 0) s.pendingCodeOps = kept
+          else delete s.pendingCodeOps
+        }
         // A skill load via the `skill` tool returns the loaded skill's
         // instructions as a tool result — content the harness injected into the
         // model's context. Keep it a tool result (that is what it is), but make
@@ -921,11 +1261,12 @@ export function applyTimeline(state: TimelineState, event: TimelineEvent, bounds
         break
       }
       case 'assistant/message': {
-        // Snapshot the request exactly as dispatched: current surface + header,
-        // before this response joins the surface.
+      // Snapshot the request exactly as dispatched: current surface + header,
+      // before this response joins the surface.
         const usage = data?.usage as UsageLike | null | undefined
         const d = edit()
         const s = d.state()
+        bumpDetailRev(s)
         const total = s.systemTokens + s.toolsTokens + s.sums.user + s.sums.inject + s.sums.assistant + s.sums.tool
         const record: RequestRecord = {
           time: event.time, seq: event.seq,
@@ -973,16 +1314,40 @@ export function applyTimeline(state: TimelineState, event: TimelineEvent, bounds
         }
         d.requests().push(record)
         // Timing: one completed model call; its wait/generation split prices
-        // off the slot's first-token stamp when the stream carried one (a
-        // chunk-less call — legacy log, aborted step — stays unattributed and
-        // lands in the card's residue). The pending slot stays armed —
-        // the step's tool calls and `step/end` still follow.
+        // off the slot's first-token stamp. That stamp comes from a V0
+        // `assistant/chunk` delta or, when the log carries none, from the
+        // message's own EMBEDDED stream (V2+ settlements) — the same fallback
+        // the harness's sessionStats fold applies. A call whose stream carried
+        // no token (legacy log, aborted step) stays unattributed and lands in
+        // the card's residue. The pending slot stays armed — the step's tool
+        // calls and `step/end` still follow.
         const timing = d.timing()
         timing.calls += 1
         const stepStart = state.stepStart
-        if (stepStart !== undefined && stepStart.firstToken !== undefined) {
-          timing.ttftMs += durOf(stepStart.time, stepStart.firstToken)
-          timing.genMs += durOf(stepStart.firstToken, event.time)
+        if (stepStart !== undefined) {
+          const firstToken = stepStart.firstToken ?? firstTokenTimeOfStream(data?.stream)
+          if (firstToken !== undefined) {
+            timing.ttftMs += durOf(stepStart.time, firstToken)
+            timing.genMs += durOf(firstToken, event.time)
+            // Generation split: a V0 log's chunk stream accumulated the block
+            // spans in the slot (its last block closes HERE, at the message);
+            // a V2+ log has no chunk events, so the spans come off the embedded
+            // stream. Either way the three buckets tile the generation window
+            // and only the settlement tail stays unattributed. The split is
+            // priced ONLY when the window was: an unstamped call's model time
+            // is unattributed wholesale, so its spans must not reappear as
+            // generation time the caller never charged.
+            if (stepStart.decode !== undefined) {
+              const decode = { ...stepStart.decode }
+              if (stepStart.block !== undefined) {
+                decode[stepStart.block.kind] += durOf(stepStart.block.since, event.time)
+              }
+              for (const kind of DECODE_KINDS) addDecode(timing, kind, decode[kind])
+            } else {
+              const spans = decodeSpansOfStream(data?.stream, event.time)
+              for (const kind of DECODE_KINDS) addDecode(timing, kind, spans[kind])
+            }
+          }
         }
         // `deriveEventMessage` returns `data.message` for assistant/message, or
         // null when the content array is empty (usage-only events project to no
@@ -992,10 +1357,13 @@ export function applyTimeline(state: TimelineState, event: TimelineEvent, bounds
         break
       }
       case 'plan/mode': {
-        // Plan mode adds a guidance section to every model request while
-        // active — a real context-composition change, so it earns an event.
+      // Plan mode adds a guidance section to every model request while
+      // active — a real context-composition change, so it earns an event.
         if (data && typeof data.active === 'boolean') {
-          edit().events().push({ seq: event.seq, time: event.time, kind: 'mode', name: data.active ? 'plan.on' : 'plan.off' })
+          const d = edit()
+          const s = d.state()
+          d.events().push({ seq: event.seq, time: event.time, kind: 'mode', name: data.active ? 'plan.on' : 'plan.off' })
+          bumpDetailRev(s)
         }
         break
       }
@@ -1003,6 +1371,7 @@ export function applyTimeline(state: TimelineState, event: TimelineEvent, bounds
       case 'compaction/prune': {
         const d = edit()
         const s = d.state()
+        bumpDetailRev(s)
         // Arm the shadow-price claim: the replacement that follows this
         // event synchronously shadows exactly these node seqs.
         if (data && Array.isArray(data.shadowedSeqs)) {
@@ -1038,6 +1407,8 @@ export function applyTimeline(state: TimelineState, event: TimelineEvent, bounds
     const eventsBeforeTrim = eventState.events
     const archivedBeforeTrim = eventState.archived
     const archiveFloorBeforeTrim = eventState.archiveFloor
+    const fileOpsBeforeTrim = eventState.fileOps
+    const fileOpsFloorBeforeTrim = eventState.fileOpsFloor
     trimState(draft, bounds, forceNormalization)
     const next = draft.current
     markNormalized(next, bounds)
@@ -1045,7 +1416,9 @@ export function applyTimeline(state: TimelineState, event: TimelineEvent, bounds
       && (next.requests !== requestsBeforeTrim
         || next.events !== eventsBeforeTrim
         || next.archived !== archivedBeforeTrim
-        || next.archiveFloor !== archiveFloorBeforeTrim)
+        || next.archiveFloor !== archiveFloorBeforeTrim
+        || next.fileOps !== fileOpsBeforeTrim
+        || next.fileOpsFloor !== fileOpsFloorBeforeTrim)
     if (!eventChangedView && !normalizationChangedView) inheritTimelineView(state, next)
     return next
   }
@@ -1053,40 +1426,21 @@ export function applyTimeline(state: TimelineState, event: TimelineEvent, bounds
 }
 
 /**
- * Create the projection definition's reference-stable wire view. Host-only
- * state transitions inherit the previous identity, which lets the harness's
- * raw-view `Object.is` gate suppress schema work and broadcasts.
+ * The envelope scalars both wire generations share: current composition, the
+ * live-surface counters, and the copied cost/timing totals. Served value
+ * fields are COPIES — the served value must never alias persisted state.
+ * Optional scalars use conditional spread: an unknown value must not
+ * materialize an `undefined`-valued property (the lossless-JSON pipeline —
+ * a single such property can fail the whole push, the failure mode behind
+ * issue #29).
  */
-export function createTimelineView(bounds: FoldBounds): (state: TimelineState) => Snapshot {
-  const views = new WeakMap<object, Snapshot>()
-  return (state: TimelineState): Snapshot => {
-    const identity = timelineViewIdentity(state)
-    const cached = views.get(identity)
-    if (cached !== undefined) return cached
-    const view = buildTimelineView(state, bounds)
-    views.set(identity, view)
-    return view
-  }
-}
-
-/**
-   * Serve the projection's wire view: bound the surface nodes to the newest tail and attach each event to the request around it; stamp
-   * COPIES
-  * — the persisted state objects are never mutated.
- */
-export function buildTimelineView(rawState: TimelineState, bounds: FoldBounds): Snapshot {
-  const state = boundedStateForView(rawState, bounds)
+function headFieldsOf(state: TimelineState): Snapshot {
   const surfaceTotal = state.sums.user + state.sums.inject + state.sums.assistant + state.sums.tool
   // NOTE: provider-anchored occupancy (the official chat ring) is NOT folded
   // here since 0.11 — the Client reads token-meter's own `contextPressure`
   // projection key for it (token-meter owns estimation and replay). This
   // value keeps only the heuristic composition; `current.total` includes the
   // envelope (system + tools) and the live surface.
-  // Optional scalars use conditional spread: an unknown value must not
-  // materialize an `undefined`-valued property on the served view. The wire
-  // value travels the harness's lossless-JSON pipeline — a single
-  // `undefined`-valued property can fail the whole push (the failure mode
-  // behind issue #29), so absence beats a present-but-undefined key.
   const result: Snapshot = {
     ok: true,
     ...(state.model !== undefined ? { model: state.model } : {}),
@@ -1107,13 +1461,13 @@ export function buildTimelineView(rawState: TimelineState, bounds: FoldBounds): 
     // count. Calls still in flight (no result yet) and results compacted or
     // pruned out of the surface are both excluded.
     toolCalls: state.surface.reduce((n, node) => node.cat === 'tool' ? n + 1 : n, 0),
-    requests: state.requests.map(r => ({ ...r })),
-    events: state.events.map(e => ({ ...e })),
+    requests: [],
+    events: [],
     nodes: [],
     droppedNodes: 0,
-    archive: state.archived.map(n => ({ ...n })),
+    archive: [],
   }
-  // The cost totals ride the wire as COPIES (same rule as requests/events:
+  // The cost totals ride the wire as COPIES (same rule as the collections:
   // the served value must never alias persisted state).
   if (state.cost !== undefined) {
     const copyFam = (f: CostFamilyUsage | undefined): CostFamilyUsage | undefined => {
@@ -1135,6 +1489,37 @@ export function buildTimelineView(rawState: TimelineState, bounds: FoldBounds): 
     const tools: Record<string, ToolTimingTotals> = {}
     for (const k in state.timing.tools) tools[k] = { ...state.timing.tools[k] }
     result.timing = { ...state.timing, tools }
+  }
+  // The live system-prompt nodes ride the wire as COPIES: the browser resolves
+  // the prompt in force at any step from them and fetches its TEXT on demand
+  // from `seq` — a `system/message` event on V3, the epoch's `request/header`
+  // on V0/V2. Absent when the log carried none, which is exactly the legacy
+  // shape older clients already degrade on (they fall back to the epoch).
+  if (state.systems !== undefined && state.systems.length > 0) {
+    result.systems = state.systems.map(n => ({ ...n }))
+  }
+  return result
+}
+
+/**
+ * The heavy collections: copies of the retained request records and context
+ * events (each event attached to the requests around it — the chart's ✂
+ * anchoring), the bounded served surface window, and the removed-node
+ * archive. Shared verbatim by the inline wire view (channel-less hosts) and
+ * the on-demand detail payload (host/detail.ts).
+ */
+function detailCollectionsOf(rawState: TimelineState, bounds: FoldBounds): Omit<ContextTimelineDetail, 'rev'> {
+  const state = boundedStateForView(rawState, bounds)
+  const result: Omit<ContextTimelineDetail, 'rev'> = {
+    requests: state.requests.map(r => ({ ...r })),
+    events: state.events.map(e => ({ ...e })),
+    nodes: [],
+    droppedNodes: 0,
+    archive: state.archived.map(n => ({ ...n })),
+    // The fold-derived file-op log rides the collections (the inline view and
+    // the detail payload share this builder) — COPIES, never state aliases.
+    fileOps: state.fileOps.map(o => ({ ...o })),
+    ...(state.fileOpsFloor !== undefined ? { fileOpsFloor: state.fileOpsFloor } : {}),
   }
   // The served slice: the newest `maxNodes` tail PLUS every live inject node
   // older than the tail. Injections (AGENTS.md, session-start context, …)
@@ -1183,4 +1568,74 @@ export function buildTimelineView(rawState: TimelineState, bounds: FoldBounds): 
     }
   }
   return result
+}
+
+/**
+ * The split generation's SLIM wire head: the envelope scalars plus the
+ * precomputed count figures, the newest request's billing summary (the
+ * headline's derived anchor), and the detail revision marker. Small enough
+ * to ride every delivery channel whole (~1KB) — the heavy collections moved
+ * to the on-demand detail channel (host/detail.ts).
+ */
+export function buildTimelineHead(rawState: TimelineState, bounds?: FoldBounds): Snapshot {
+  const state = bounds === undefined ? rawState : boundedStateForView(rawState, bounds)
+  const result = headFieldsOf(state)
+  // The stats board's count figures, over the RETAINED records (the same set
+  // the detail serves): distinct turn values and per-kind event tallies.
+  const turns = new Set<number>()
+  for (const r of state.requests) turns.add(r.turn ?? 0)
+  let injects = 0
+  let compactions = 0
+  let prunes = 0
+  for (const e of state.events) {
+    if (e.kind === 'inject') injects++
+    else if (e.kind === 'compaction') compactions++
+    else if (e.kind === 'prune') prunes++
+  }
+  result.counts = { turns: turns.size, steps: state.requests.length, injects, compactions, prunes }
+  const last = state.requests.at(-1)
+  if (last !== undefined) {
+    result.last = { seq: last.seq, total: last.total, ...(typeof last.prompt === 'number' ? { prompt: last.prompt } : {}) }
+  }
+  result.detailRev = state.detailRev ?? 0
+  return result
+}
+
+/**
+ * Create the projection definition's reference-stable view across both wire
+ * generations. Host-only transitions reuse the prior identity, while the
+ * inline and slim generations retain independent cached values.
+ */
+export function createTimelineView(bounds: FoldBounds, slim: () => boolean): (state: TimelineState) => Snapshot {
+  const inlineViews = new WeakMap<object, Snapshot>()
+  const slimViews = new WeakMap<object, Snapshot>()
+  return (state: TimelineState): Snapshot => {
+    const useSlim = slim()
+    const views = useSlim ? slimViews : inlineViews
+    const identity = timelineViewIdentity(state)
+    const cached = views.get(identity)
+    if (cached !== undefined) return cached
+    const view = useSlim ? buildTimelineHead(state, bounds) : buildTimelineView(state, bounds)
+    views.set(identity, view)
+    return view
+  }
+}
+
+/**
+ * The on-demand detail payload (host/detail.ts serves it off the live fold
+ * state): the heavy collections plus the revision marker the head carries.
+ */
+export function buildTimelineDetail(state: TimelineState, bounds: FoldBounds): ContextTimelineDetail {
+  return { rev: state.detailRev ?? 0, ...detailCollectionsOf(state, bounds) }
+}
+
+/**
+   * Serve the INLINE projection wire view (channel-less hosts): the head
+   * scalars with the detail collections in place — the shape every delivery
+   * channel carried before the split generation. Bound the surface nodes to
+   * the newest tail and attach each event to the request around it; stamp
+   * COPIES — the persisted state objects are never mutated.
+ */
+export function buildTimelineView(state: TimelineState, bounds: FoldBounds): Snapshot {
+  return { ...headFieldsOf(state), ...detailCollectionsOf(state, bounds) }
 }
