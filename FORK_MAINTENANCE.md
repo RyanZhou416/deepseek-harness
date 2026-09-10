@@ -200,7 +200,7 @@ Web profile 插入 `memory-watchdog.cjs`：250 ms 采样、60 s 日志、heap ra
 | Package | Installed | Runtime state | Preserve rule |
 |---|---:|---|---|
 | `dshmarket` | `1.41.0` | Enabled | RC.1 隔离启动与首屏通过；profile 固定 `allowRestart:false`，禁止插件静默重启 Host |
-| `@nanmicoder/dsh-agent-teams` | `0.1.16-dsh015alpha2.1` live; `0.1.16-dsh015rc1.1` repository candidate | Stop before profile update | `setup.command` 固定 RC.1 artifact；禁止被 npm latest/next 直接覆盖 |
+| `@nanmicoder/dsh-agent-teams` | `0.1.16-dsh015rc1.1` | Enabled | `setup.command` 固定 RC.1 artifact；禁止被 npm latest/next 直接覆盖 |
 | `dsh-plugin-subscriptions` | `0.6.0` | Installed, disabled | RC.1 隔离启动通过；profile 固定 `rateLimit.wait:false`，后续单独启用验证真实账户 |
 | `@vlln/dsh-task-status` | Removed | Not installed | 2026-09-04 已从依赖、bundle、patch、lockfile 和 `node_modules` 删除；RC.1 profile 不得恢复 |
 | `dsh-context` | `0.41.3-dsh013alpha2.1` | Enabled | 保留 `300/60/100/400/100` bounds；源码与回滚规则见 `fork-plugins/dsh-context/FORK_MAINTENANCE.md` |
