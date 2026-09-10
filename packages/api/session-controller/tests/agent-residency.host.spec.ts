@@ -1,5 +1,6 @@
 import { Context } from '@deepseek-ai/cordis'
-import AgentRegistry, { Inbox, type Agent, type AgentHandle, type AgentStatus } from '@deepseek-ai/dsh-agent'
+import AgentRegistry, { type Agent, type AgentHandle, type AgentStatus } from '@deepseek-ai/dsh-agent'
+import { createInboxStub } from '@deepseek-ai/dsh-agent-loop-testkit'
 import SessionStore, { SESSION_FORMAT_VERSION, SessionId, type Session, type SessionHeader } from '@deepseek-ai/dsh-session'
 import { SessionPersistenceRevision } from '@deepseek-ai/dsh-session-persistence'
 import TypertRegistry from '@deepseek-ai/dsh-typert-registry'
@@ -24,7 +25,7 @@ afterEach(async () => {
 
 function fakeAgent(ctx: Context, session: Session): Agent {
   const scope = ctx.plugin(() => {})
-  const inbox = new Inbox(session, { inserted: () => {}, discarded: () => {}, claimed: () => {} })
+  const inbox = createInboxStub()
   let status: AgentStatus = 'idle'
   return {
     id: session.id,

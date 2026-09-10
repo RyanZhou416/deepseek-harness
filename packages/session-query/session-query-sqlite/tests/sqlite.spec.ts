@@ -404,7 +404,7 @@ describe('SQLite session search', () => {
       createUserMessage({
         content: [{ type: 'text', text: 'replacement marker' }], source: { kind: 'plugin', plugin: 'test' },
       }),
-      { surfaceOp: { op: 'replace', start: first.seq, end: first.seq }, sourceEventSeqs: [first.seq] },
+      { surfaceOp: { op: 'replace', startSeq: first.seq, endSeq: first.seq }, sourceEventSeqs: [first.seq] },
     )
     await expect(ctx.sessionQuery.searchEvents({
       sessionId: session.id,

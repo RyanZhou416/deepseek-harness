@@ -4,6 +4,7 @@ import { describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import AgentRegistry, { agentEvents } from '@deepseek-ai/dsh-agent'
 import type { Agent, AgentHandle, CreateAgentOptions } from '@deepseek-ai/dsh-agent'
+import { createInboxStub } from '@deepseek-ai/dsh-agent-loop-testkit'
 import { createUserMessage, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import type { LlmCallConfig } from '@deepseek-ai/dsh-llm'
 import SessionStore, { SESSION_FORMAT_VERSION, SessionLogOffset, SessionSeq } from '@deepseek-ai/dsh-session'
@@ -38,7 +39,13 @@ async function composed(workspaces: readonly Workspace[] = []): Promise<Context>
       })
       const agent = {} as Agent
       const agentCtx = ownerCtx
-      Object.assign(agent, { id: session.id, session, status: 'idle', ctx: agentCtx })
+      Object.assign(agent, {
+        id: session.id,
+        session,
+        inbox: createInboxStub(),
+        status: 'idle',
+        ctx: agentCtx,
+      })
       await options.setup?.(agentCtx, agent)
       ctx.agents.register(agent)
       return { agent, dispose: () => Promise.resolve() }
@@ -78,7 +85,13 @@ function liveAgent(
       reason: { kind: 'aborted', reason: { kind: 'user' } },
     })
   }
-  ctx.agents.register({ id: session.id, session, status: 'idle', ctx } as Agent)
+  ctx.agents.register({
+    id: session.id,
+    session,
+    inbox: createInboxStub(),
+    status: 'idle',
+    ctx,
+  } as Agent)
   return session
 }
 
