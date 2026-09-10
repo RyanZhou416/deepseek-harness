@@ -523,7 +523,7 @@ export class ApiSessionAgentController {
 
   private hasActiveOwnedWork(agent: Agent): boolean {
     if ((this.followerCounts.get(agent.id) ?? 0) > 0) return true
-    if (agent.status !== 'idle' || agent.inbox.hasPending) return true
+    if (agent.status !== 'idle' || agent.inbox.nextTurn.length > 0 || agent.inbox.nextStep.length > 0) return true
     if (this.ctx.agents.list().some(candidate => this.ctx.agents.isOwnedBy(candidate.id, agent))) return true
     const jobs = this.ctx.get('jobs')
     return jobs?.list(agent).some(job => job.status === 'running' || job.status === 'stopping') ?? false
