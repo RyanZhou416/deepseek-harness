@@ -1,3 +1,5 @@
+// DeepSeek Harness fork modification: the RC.1 append fixture omits forbidden assistant provenance. See ../../FORK_MAINTENANCE.md.
+
 // Integration tests for the Host-half plugin module (src/host/index.ts)
 // against the REAL cordis registry, session store, and session-projection
 // registry — the dsh-canonical harness: real envelopes appended to a real

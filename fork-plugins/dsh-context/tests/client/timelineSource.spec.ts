@@ -25,6 +25,7 @@ afterEach(() => {
   vi.restoreAllMocks()
   vi.useRealTimers()
 })
+
 /** A render-safe detail payload (the shape the host endpoint serves). */
 function detail(rev: number, over: Record<string, unknown> = {}): ContextTimelineDetail {
   return {
