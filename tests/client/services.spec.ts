@@ -1,8 +1,7 @@
 // Projection narrowing (src/client/services.ts): the no-white-screen wire
 // guards — numOf, timelineOf fast/slow paths, contextPressureOf,
-// contextBreakdownOf, tokenUsageOf, timingOf, headersOf — plus the dual-face helpers
-// that keep the plugin alive across the dsh 0.1.1/0.1.2 service seams
-// (conversationNodesOf, imageLoaderOf).
+// contextBreakdownOf, tokenUsageOf, timingOf, headersOf — plus the seat
+// helpers over the harness service faces (conversationNodesOf, imageLoaderOf).
 
 import assert from 'node:assert/strict'
 import { describe, test } from 'vitest'
@@ -18,6 +17,7 @@ import {
   timelineOf,
   timingOf,
   tokenUsageOf,
+  unsupportedOf,
   workspaceOf,
 } from '../../src/client/services'
 import type { ClientCtx, ConversationNodeLike } from '../../src/client/services'
@@ -26,58 +26,39 @@ import type { TimingTotals } from '../../src/shared/types'
 /** The chat-view snapshot face: the selector sees the whole snapshot. */
 const useChatOf = (snapshot: unknown) => (<T>(sel: (s: unknown) => T) => sel(snapshot))
 
-describe('conversationNodesOf — the dual-seat window join', () => {
+describe('conversationNodesOf — the chat-seat window join', () => {
   const nodes: ConversationNodeLike[] = [{ kind: 'user', seq: 1 }, { kind: 'assistant', seq: 2 }]
 
-  test('prefers the 0.1.2+ chat seat (ChatSnapshot.legacy.nodes)', () => {
-    const out = conversationNodesOf({ useChat: useChatOf({ legacy: { nodes } }), useSession: (sel) => sel({ nodes: [] }) })
-    assert.equal(out, nodes)
-  })
-
-  test('falls back to the pre-0.1.2 session-snapshot nodes', () => {
-    const out = conversationNodesOf({ useSession: (sel) => sel({ nodes }) })
+  test('serves the chat seat (ChatSnapshot.legacy.nodes)', () => {
+    const out = conversationNodesOf({ useChat: useChatOf({ legacy: { nodes } }) })
     assert.equal(out, nodes)
   })
 
   test('absent seats, non-array payloads, and hostile seats degrade to undefined', () => {
     assert.equal(conversationNodesOf({}), undefined)
     assert.equal(conversationNodesOf({ useChat: useChatOf({}) }), undefined, 'chat snapshot without legacy')
-    assert.equal(conversationNodesOf({ useSession: (sel) => sel({}) }), undefined, 'session snapshot without nodes')
-    assert.equal(
-      conversationNodesOf({ useChat: useChatOf(null), useSession: (sel) => sel(null as unknown as { nodes?: readonly ConversationNodeLike[] }) }),
-      undefined,
-      'null snapshots',
-    )
-    const hostile = () => { throw new Error('boom') }
-    assert.equal(conversationNodesOf({ useChat: hostile, useSession: hostile }), undefined)
-    // A hostile chat seat still lets the session seat answer — both are probed.
-    const out = conversationNodesOf({ useChat: hostile, useSession: (sel) => sel({ nodes }) })
-    assert.equal(out, nodes)
+    assert.equal(conversationNodesOf({ useChat: useChatOf(null) }), undefined, 'null snapshot')
+    assert.equal(conversationNodesOf({ useChat: () => { throw new Error('boom') } }), undefined, 'hostile seat')
   })
 })
 
-describe('imageLoaderOf — the dual-conversation-face loader', () => {
+describe('imageLoaderOf — the uiConversation loader', () => {
   const ctxWith = (services: Record<string, unknown>): ClientCtx => ({ get: (name: string) => services[name] }) as unknown as ClientCtx
   const attachment = { attachmentId: 'a1' }
 
-  test('prefers the legacy resolveImage face (dsh <= 0.1.1)', async () => {
+  test('uses the uiConversation.imageUrl face', async () => {
     const calls: string[] = []
-    const load = imageLoaderOf(ctxWith({ conversation: { resolveImage: (sid: string, att: { attachmentId: string }) => {
+    const load = imageLoaderOf(ctxWith({ uiConversation: { imageUrl: (sid: string, att: { attachmentId: string }) => {
       calls.push(sid + ':' + att.attachmentId)
-      return Promise.resolve('blob:legacy')
+      return Promise.resolve('blob:modern')
     } } }), 'sv')
-    assert.equal(await load!(attachment), 'blob:legacy')
-    assert.deepEqual(calls, ['sv:a1'])
-  })
-
-  test('uses the 0.1.2+ uiConversation.imageUrl face when the legacy one is absent', async () => {
-    const load = imageLoaderOf(ctxWith({ uiConversation: { imageUrl: () => Promise.resolve('blob:modern') } }), 'sv')
     assert.equal(await load!(attachment), 'blob:modern')
+    assert.deepEqual(calls, ['sv:a1'])
   })
 
   test('absent faces, bad session ids, and hostile service reads degrade to undefined', () => {
     assert.equal(imageLoaderOf(ctxWith({}), 'sv'), undefined)
-    assert.equal(imageLoaderOf(ctxWith({ conversation: {} }), 'sv'), undefined)
+    assert.equal(imageLoaderOf(ctxWith({ uiConversation: {} }), 'sv'), undefined)
     assert.equal(imageLoaderOf(ctxWith({}), undefined), undefined)
     assert.equal(imageLoaderOf(ctxWith({}), ''), undefined)
     const ctxThrows = { get: (): never => { throw new Error('service absent') } } as unknown as ClientCtx
@@ -174,6 +155,19 @@ describe('timelineOf', () => {
     assert.deepEqual(out.nodes, [node])
   })
 
+  test('a junk entry inside an otherwise well-formed value leaves the fast path and is dropped', () => {
+    // The cheap pass-through requires every collection's entries to be records:
+    // a null/primitive element would throw on the first downstream property
+    // read (`req.seq` on null), so the value takes the sanitizing path instead.
+    const good = { seq: 1, time: 1, system: 0, tools: 0, user: 1, inject: 0, assistant: 0, tool: 0, total: 1 }
+    const out = timelineOf({ ok: true, current, requests: [good, null], events: [], nodes: [], archive: [], droppedNodes: 0 })
+    assert.ok(out !== null)
+    assert.deepEqual(out.requests, [good])
+    const junkNodes = timelineOf({ ok: true, current, requests: [], events: [7], nodes: [], archive: [], droppedNodes: 0 })
+    assert.ok(junkNodes !== null)
+    assert.deepEqual(junkNodes.events, [])
+  })
+
   test('model/provider/contextWindow: wrong-typed dropped, right-typed kept', () => {
     const kept = timelineOf({ current: 1, model: 'm', provider: 'p', contextWindow: 100 })
     assert.ok(kept !== null)
@@ -218,12 +212,113 @@ describe('timelineOf', () => {
     assert.equal(timelineOf({ current: 1, droppedNodes: 4 })?.droppedNodes, 4)
     assert.equal(timelineOf({ current: 1, droppedNodes: 'x' })?.droppedNodes, 0)
   })
+
+  test('the unsupported gate record survives the sanitizing slow path only when well-formed', () => {
+    const kept = timelineOf({ current: 1, unsupported: { current: '0.1.1-rc.2', minimum: '0.1.2-rc.1' } })
+    assert.ok(kept !== null)
+    assert.deepEqual(kept.unsupported, { current: '0.1.1-rc.2', minimum: '0.1.2-rc.1' })
+    for (const bad of ['x', null, {}, { current: 1, minimum: 'm' }, { current: 'c' }]) {
+      const out = timelineOf({ current: 1, unsupported: bad })
+      assert.ok(out !== null)
+      assert.ok(!('unsupported' in out), JSON.stringify(bad))
+    }
+  })
+
+  test('the split-generation slim head: counters/anchor/revision survive, the absent collections zero out', () => {
+    const head = {
+      ok: true,
+      model: 'm',
+      current,
+      counts: { turns: 3, steps: 12, injects: 2, compactions: 1, prunes: 0 },
+      last: { seq: 9, total: 100, prompt: 90 },
+      detailRev: 12,
+      fileOps: [{ seq: 2, path: 'a.ts', kind: 'read', tool: 'read', err: false, added: 0, removed: 0 }],
+      fileOpsFloor: 5,
+    }
+    const out = timelineOf(head)
+    assert.ok(out !== null)
+    assert.deepEqual(out.counts, { turns: 3, steps: 12, injects: 2, compactions: 1, prunes: 0 })
+    assert.deepEqual(out.last, { seq: 9, total: 100, prompt: 90 })
+    assert.equal(out.detailRev, 12)
+    assert.deepEqual(out.requests, [])
+    assert.deepEqual(out.nodes, [])
+    assert.deepEqual(out.archive, [])
+    assert.equal(out.fileOps?.length, 1, 'the op log survives the head sanitize')
+    assert.equal(out.fileOpsFloor, 5)
+  })
+
+  test('the slim head fields re-prove: partial counts zero per field, shapeless last/detailRev drop', () => {
+    const out = timelineOf({ current, counts: { turns: 2, steps: 'many' }, last: { seq: 'x' }, detailRev: 'r' })
+    assert.ok(out !== null)
+    assert.deepEqual(out.counts, { turns: 2, steps: 0, injects: 0, compactions: 0, prunes: 0 })
+    assert.ok(!('last' in out), 'a wrong-typed seq drops the anchor whole')
+    assert.ok(!('detailRev' in out), 'a wrong-typed revision drops the marker (reads as the inline generation)')
+    const noCounts = timelineOf({ current, counts: 'junk', last: null, detailRev: NaN })
+    assert.ok(noCounts !== null)
+    assert.ok(!('counts' in noCounts))
+    assert.ok(!('last' in noCounts))
+    assert.ok(!('detailRev' in noCounts))
+    // A wrong-typed total drops the anchor too; a prompt-less anchor keeps just seq/total.
+    const badTotal = timelineOf({ current, last: { seq: 1, total: 'x' } })
+    assert.ok(badTotal !== null && !('last' in badTotal))
+    const noPrompt = timelineOf({ current, last: { seq: 1, total: 7 } })
+    assert.ok(noPrompt !== null)
+    assert.deepEqual(noPrompt.last, { seq: 1, total: 7 })
+  })
+
+  test('a slim head carrying the (empty) collections passes through by reference, markers intact', () => {
+    // The host's head builder emits the four collections as empty lists, so
+    // the split generation rides the cheap pass-through path like any
+    // well-formed value — the markers/counts survive untouched.
+    const head = {
+      ok: true,
+      current,
+      counts: { turns: 1, steps: 1, injects: 0, compactions: 0, prunes: 0 },
+      last: { seq: 1, total: 7 },
+      detailRev: 1,
+      requests: [],
+      events: [],
+      nodes: [],
+      archive: [],
+      droppedNodes: 0,
+    }
+    assert.equal(timelineOf(head), head)
+  })
+})
+
+describe('unsupportedOf', () => {
+  test('well-formed records pass through as plain data', () => {
+    assert.deepEqual(unsupportedOf({ current: '0.1.1-rc.2', minimum: '0.1.2-rc.1' }), { current: '0.1.1-rc.2', minimum: '0.1.2-rc.1' })
+  })
+
+  test('non-records and wrong-typed fields degrade to null', () => {
+    assert.equal(unsupportedOf(null), null)
+    assert.equal(unsupportedOf(undefined), null)
+    assert.equal(unsupportedOf('x'), null)
+    assert.equal(unsupportedOf(5), null)
+    assert.equal(unsupportedOf({}), null)
+    assert.equal(unsupportedOf({ current: 'c' }), null)
+    assert.equal(unsupportedOf({ minimum: 'm' }), null)
+    assert.equal(unsupportedOf({ current: 1, minimum: 'm' }), null)
+    assert.equal(unsupportedOf({ current: 'c', minimum: null }), null)
+  })
 })
 
 describe('contextPressureOf', () => {
-  test('records pass through', () => {
-    const value = { pressureTokens: 10, surfaceTokens: 20 }
-    assert.equal(contextPressureOf(value), value)
+  test('the three wire fields pass, each re-proved as a finite number', () => {
+    assert.deepEqual(
+      contextPressureOf({ pressureTokens: 10, projectedTokens: 30, contextWindow: 128000 }),
+      { pressureTokens: 10, projectedTokens: 30, contextWindow: 128000 },
+    )
+  })
+
+  test('wrong-typed/non-finite fields drop out individually; unknown fields never ride along', () => {
+    // surfaceTokens is a state-internal field of the meter's fold — the strict
+    // wire schema never delivers it, and the sanitizer must not either.
+    assert.deepEqual(contextPressureOf({ pressureTokens: 10, surfaceTokens: 20 }), { pressureTokens: 10 })
+    assert.deepEqual(contextPressureOf({ projectedTokens: 'x' }), {})
+    assert.deepEqual(contextPressureOf({ contextWindow: Number.NaN }), {})
+    assert.deepEqual(contextPressureOf({}), {})
   })
 
   test('non-records degrade to null', () => {
@@ -258,9 +353,23 @@ describe('contextBreakdownOf', () => {
 })
 
 describe('tokenUsageOf', () => {
-  test('records pass through', () => {
-    const value = { total: { input: 100 } }
-    assert.equal(tokenUsageOf(value), value)
+  test('the four-bucket wire value passes as a value', () => {
+    assert.deepEqual(
+      tokenUsageOf({ uncachedInputTokens: 1, outputTokens: 2, cacheReadTokens: 3, cacheWriteTokens: 4 }),
+      { uncachedInputTokens: 1, outputTokens: 2, cacheReadTokens: 3, cacheWriteTokens: 4 },
+    )
+  })
+
+  test('a missing/wrong-typed/non-finite bucket degrades the WHOLE value to null', () => {
+    // The buckets sum into the billed total — a partial value would silently
+    // undercount, so anything short of the strict wire shape is dropped whole.
+    assert.equal(tokenUsageOf({ uncachedInputTokens: 1, outputTokens: 2, cacheReadTokens: 3 }), null, 'missing bucket')
+    assert.equal(tokenUsageOf({ total: { input: 100 } }), null, 'a foreign record shape')
+    const good = { uncachedInputTokens: 1, outputTokens: 2, cacheReadTokens: 3, cacheWriteTokens: 4 }
+    for (const key of Object.keys(good) as (keyof typeof good)[]) {
+      assert.equal(tokenUsageOf({ ...good, [key]: 'x' }), null, `${key} wrong-typed`)
+      assert.equal(tokenUsageOf({ ...good, [key]: Number.NaN }), null, `${key} non-finite`)
+    }
   })
 
   test('non-records degrade to null', () => {
@@ -317,6 +426,88 @@ describe('timingOf', () => {
     assert.deepEqual(out?.tools, {})
     assert.equal(Object.getPrototypeOf(out?.tools ?? {}), Object.prototype)
   })
+
+  test('the generation split passes through when well-formed', () => {
+    const out = timingOf({ ...wellFormed, reasoningMs: 5_000, textMs: 2_000, toolArgMs: 3_000 })
+    assert.deepEqual(out, { ...wellFormed, reasoningMs: 5_000, textMs: 2_000, toolArgMs: 3_000 })
+  })
+
+  test('absent split fields stay ABSENT — the card keeps the un-split shape', () => {
+    const out = timingOf(wellFormed)
+    assert.ok(out !== null)
+    assert.equal(Object.hasOwn(out, 'reasoningMs'), false)
+    assert.equal(Object.hasOwn(out, 'textMs'), false)
+    assert.equal(Object.hasOwn(out, 'toolArgMs'), false)
+  })
+
+  test('a wrong-typed or negative split field drops alone, keeping the rest', () => {
+    const out = timingOf({ ...wellFormed, reasoningMs: 'x', textMs: -5, toolArgMs: 1_000 })
+    assert.equal(out?.reasoningMs, undefined)
+    assert.equal(out?.textMs, undefined)
+    assert.equal(out?.toolArgMs, 1_000)
+  })
+
+  test('the fast path rejects a non-finite split field (routed to the slow path)', () => {
+    // timelineOf's fast path must not pass a payload through with a NaN bucket.
+    const out = timingOf({ ...wellFormed, reasoningMs: Number.NaN })
+    assert.equal(out?.reasoningMs, undefined)
+    assert.equal(out?.wallMs, wellFormed.wallMs)
+  })
+})
+
+describe('timelineOf — the live system-prompt nodes', () => {
+  const current = { system: 1, tools: 2, user: 3, inject: 4, assistant: 5, tool: 6, total: 7 }
+  const base = { ok: true, current, requests: [], events: [], nodes: [], archive: [], droppedNodes: 0 }
+
+  test('a well-formed systems list passes through by reference (fast path)', () => {
+    const wire = { ...base, systems: [{ seq: 3, time: 300, tokens: 42 }] }
+    assert.equal(timelineOf(wire), wire)
+  })
+
+  test('a malformed list takes the sanitizing slow path: entries re-proved and seq-ordered', () => {
+    const wire = {
+      ...base,
+      systems: [
+        { seq: 9, time: 900, tokens: 5 },
+        null,
+        7,
+        { seq: 'x', time: 1, tokens: 1 },
+        { seq: 2, time: Number.NaN, tokens: 1 },
+        { seq: 2, time: 200, tokens: 'nope' },
+        { seq: 2, time: 200, tokens: 8 },
+        { seq: 5, time: 500, tokens: 3 },
+      ],
+    }
+    const out = timelineOf(wire)
+    assert.ok(out !== (wire as unknown))
+    assert.deepEqual(out?.systems, [
+      { seq: 2, time: 200, tokens: 8 },
+      { seq: 5, time: 500, tokens: 3 },
+      { seq: 9, time: 900, tokens: 5 },
+    ])
+  })
+
+  test('an all-record list with a non-numeric field takes the slow path: no partially numeric pass-through', () => {
+    // Every entry is a real object, so the collection guard alone would wave the
+    // list through; the fast path must still refuse it — a missing/non-finite
+    // field would otherwise reach the browser's bar math as undefined/NaN.
+    const wire = {
+      ...base,
+      systems: [
+        { seq: 2, time: 200 },
+        { seq: 4, time: Number.NaN, tokens: 7 },
+        { seq: 6, time: 600, tokens: 9 },
+      ],
+    }
+    const out = timelineOf(wire)
+    assert.ok(out !== (wire as unknown))
+    assert.deepEqual(out?.systems, [{ seq: 6, time: 600, tokens: 9 }])
+  })
+
+  test('an absent systems key stays absent; a non-list becomes empty', () => {
+    assert.equal('systems' in (timelineOf(base) ?? {}), false)
+    assert.deepEqual(timelineOf({ ...base, systems: 'nope' })?.systems, [])
+  })
 })
 
 describe('timelineOf — timing integration', () => {
@@ -359,6 +550,10 @@ describe('timelineOf — timing integration', () => {
     assert.deepEqual(sanitized({ ...timing, tools: { bash: 5 } }), { ...timing, tools: {} })
     assert.deepEqual(sanitized({ ...timing, tools: { bash: { calls: 'x', ms: 1 } } }), { ...timing, tools: {} })
     assert.deepEqual(sanitized({ ...timing, tools: { bash: { calls: 1, ms: 'x' } } }), { ...timing, tools: {} })
+    // A bad generation-split bucket routes down too and drops alone.
+    assert.deepEqual(sanitized({ ...timing, reasoningMs: 'x' }), timing)
+    assert.deepEqual(sanitized({ ...timing, textMs: Number.NaN }), timing)
+    assert.deepEqual(sanitized({ ...timing, toolArgMs: -1 }), timing)
   })
 })
 
@@ -385,6 +580,21 @@ describe('headersOf', () => {
   test('an entry with a defined non-numeric systemTokens degrades the whole value to null', () => {
     assert.equal(headersOf({ headers: [{ tools: [], systemTokens: 'x' }] }), null)
     assert.equal(headersOf({ headers: [{ tools: [], systemTokens: Number.NaN }] }), null)
+  })
+
+  test('a malformed tool entry degrades the whole value to null (the browser reads name/tokens blindly)', () => {
+    assert.equal(headersOf({ headers: [{ tools: [42] }] }), null, 'primitive tool row')
+    assert.equal(headersOf({ headers: [{ tools: [null] }] }), null, 'null tool row')
+    assert.equal(headersOf({ headers: [{ tools: [{ name: 7, tokens: 10 }] }] }), null, 'non-string name')
+    assert.equal(headersOf({ headers: [{ tools: [{ name: 'bash' }] }] }), null, 'missing tokens')
+    assert.equal(headersOf({ headers: [{ tools: [{ name: 'bash', tokens: 'x' }] }] }), null, 'non-numeric tokens')
+    assert.equal(headersOf({ headers: [{ tools: [{ name: 'bash', tokens: Number.NaN }] }] }), null, 'NaN tokens')
+    assert.equal(headersOf({ headers: [{ tools: [{ name: 'bash', tokens: 1, plugin: 7 }] }] }), null, 'non-string plugin')
+  })
+
+  test('a tool entry with an optional plugin string passes', () => {
+    const value = { headers: [{ seq: 1, time: 1, tools: [{ name: 'bash', tokens: 10, plugin: 'mcp:x' }] }] }
+    assert.equal(headersOf(value), value)
   })
 
   test('a valid value passes through by reference', () => {
@@ -453,39 +663,68 @@ describe('workspaceOf', () => {
     // A service lookup itself may throw; both readers degrade instead of blanking the view.
     const ctxThrows = { get: throwProp } as unknown as ClientCtx
     assert.equal(workspaceOf(ctxThrows, 'sv'), undefined)
-    assert.equal(canOpenPathsOf(ctxThrows), false)
-    // A host description that throws on call or on the capability read.
-    assert.equal(canOpenPathsOf(ctxWith({ connection: { hostDescription: { getSnapshot: throwProp } } })), false)
-    assert.equal(canOpenPathsOf(ctxWith({ connection: { hostDescription: { getSnapshot: () => Object.defineProperty({}, 'canOpenPath', { get: throwProp }) } } })), false)
   })
 })
 
 describe('canOpenPathsOf / openPathVia', () => {
   const ctxWith = (services: Record<string, unknown>): ClientCtx => ({ get: (name: string) => services[name] }) as unknown as ClientCtx
-  const connection = {
-    hostDescription: { getSnapshot: () => ({ canOpenPath: true }) },
-    api: { host: { openPath: () => Promise.resolve({ opened: true }) } },
-  }
+  /** A loopback connection whose generic RPC answers per endpoint. */
+  const rpcConn = (routes: Record<string, () => unknown>, over: Record<string, unknown> = {}): Record<string, unknown> => ({
+    isLoopback: true,
+    rpc: { call: (channel: string, endpoint: string) => Promise.resolve(routes[endpoint]?.()) },
+    ...over,
+  })
+  const openable = (): Record<string, unknown> =>
+    rpcConn({ 'session/canOpenWorkspacePath': () => ({ ok: true, value: true }) })
 
-  test('the capability bit gates the opener', () => {
-    assert.equal(canOpenPathsOf(ctxWith({ connection })), true)
-    assert.equal(canOpenPathsOf(ctxWith({ connection: { hostDescription: { getSnapshot: () => ({}) } } })), false)
-    assert.equal(canOpenPathsOf(ctxWith({})), false)
+  test('the capability remote gates the opener, behind the loopback fact', async () => {
+    assert.equal(await canOpenPathsOf(ctxWith({ connection: openable() })), true)
+    // The remote's answer is re-proved: non-true values and failed results are both "no".
+    assert.equal(await canOpenPathsOf(ctxWith({ connection: rpcConn({ 'session/canOpenWorkspacePath': () => ({ ok: true, value: false }) }) })), false)
+    assert.equal(await canOpenPathsOf(ctxWith({ connection: rpcConn({ 'session/canOpenWorkspacePath': () => ({ ok: false }) }) })), false)
+    assert.equal(await canOpenPathsOf(ctxWith({ connection: rpcConn({ 'session/canOpenWorkspacePath': () => 'garbage' }) })), false)
+    // The harness's own gate: a page not on the operator's machine never opens.
+    assert.equal(await canOpenPathsOf(ctxWith({ connection: { isLoopback: false, rpc: openable().rpc } })), false)
+    // No connection service at all.
+    assert.equal(await canOpenPathsOf(ctxWith({})), false)
+  })
+
+  test('hostile connections and failed transports resolve false, never reject', async () => {
+    const throwProp = (): never => { throw new Error('boom') }
+    // A service lookup itself may throw.
+    assert.equal(await canOpenPathsOf({ get: throwProp } as unknown as ClientCtx), false)
+    // An rpc face whose call read throws; a loopback fact that throws on read.
+    assert.equal(await canOpenPathsOf(ctxWith({ connection: { isLoopback: true, rpc: { get call(): unknown { return throwProp() } } } })), false)
+    assert.equal(await canOpenPathsOf(ctxWith({ connection: { get isLoopback(): boolean { return throwProp() }, rpc: openable().rpc } })), false)
+    // A call that is not a function, and one that rejects.
+    assert.equal(await canOpenPathsOf(ctxWith({ connection: { isLoopback: true, rpc: { call: 7 } } })), false)
+    assert.equal(await canOpenPathsOf(ctxWith({ connection: { isLoopback: true, rpc: { call: () => Promise.reject(new Error('offline')) } } })), false)
   })
 
   test('openPathVia returns a fire-and-forget caller that swallows failures', async () => {
-    const rejecting = { api: { host: { openPath: () => Promise.reject(new Error('no desktop')) } } }
-    const open = openPathVia(ctxWith({ connection: rejecting }))
+    const open = openPathVia(ctxWith({ connection: { rpc: { call: () => Promise.reject(new Error('no desktop')) } } }))
     assert.ok(open !== undefined)
     open('/repo/a.ts') // must not throw
+    // A synchronously throwing transport joins the same silence.
+    const syncThrow = openPathVia(ctxWith({ connection: { rpc: { call: () => { throw new Error('sync') } } } }))
+    syncThrow!('/repo/a.ts')
     assert.equal(openPathVia(ctxWith({})), undefined)
   })
 
-  test('the opener forwards the requested path', async () => {
-    const calls: string[] = []
-    const open = openPathVia(ctxWith({ connection: { api: { host: { openPath: (r: { path: string }) => { calls.push(r.path); return Promise.resolve({ opened: true }) } } } } }))
+  test('the opener forwards the requested path through the open remote', async () => {
+    const calls: { channel: string; endpoint: string; payload: unknown }[] = []
+    const open = openPathVia(ctxWith({
+      connection: {
+        rpc: {
+          call: (channel: string, endpoint: string, payload: unknown) => {
+            calls.push({ channel, endpoint, payload })
+            return Promise.resolve({ ok: true, value: { opened: true } })
+          },
+        },
+      },
+    }))
     open!('/repo/a.ts')
     await new Promise(resolve => setTimeout(resolve, 0))
-    assert.deepEqual(calls, ['/repo/a.ts'])
+    assert.deepEqual(calls, [{ channel: '/api', endpoint: 'session/openWorkspacePath', payload: { args: { request: { path: '/repo/a.ts' } } } }])
   })
 })

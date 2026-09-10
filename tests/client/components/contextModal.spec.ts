@@ -3,12 +3,12 @@
 // a TestClientCtx), with the per-session modal store driving open/close,
 // real sessions faces for the consume-token bail, and real projections.
 
+import { act, createElement as h, useSyncExternalStore } from 'react'
 import assert from 'node:assert/strict'
-import { act } from 'react'
 import { afterEach, describe, test, vi } from 'vitest'
-import { React, h } from '../../../src/client/react'
 import { makeContextModal } from '../../../src/client/components/contextModal'
 import { modalStoreOf, setPendingConsume, takePendingConsume } from '../../../src/client/modalStore'
+import { watchHistoryFaces } from '../../../src/client/historyPage'
 import type { ContextTimeline } from '../../../src/shared/types'
 import { DICT_EN } from '../../../src/client/i18n'
 import { TestClientCtx, TestSessions, asClientCtx } from '../helpers/harness'
@@ -34,7 +34,7 @@ function timeline(over: Record<string, unknown> = {}): ContextTimeline {
 function boundModalHook(sessionId: string) {
   const store = modalStoreOf(sessionId)
   return (sel: (open: boolean) => boolean): boolean =>
-    React.useSyncExternalStore(store.subscribe, () => sel(store.getSnapshot()))
+    useSyncExternalStore(store.subscribe, () => sel(store.getSnapshot()))
 }
 
 const OPEN = (): boolean => true
@@ -404,5 +404,109 @@ describe('ContextModal', () => {
     assert.equal(modalStoreOf(sid).getSnapshot(), false)
     assert.equal(document.activeElement, document.body)
     await m.unmount()
+  })
+})
+
+describe('ContextModal — the split generation', () => {
+  /** Poll until the predicate holds (the detail store's debounce rides real timers). */
+  async function until(fn: () => boolean, message: string): Promise<void> {
+    for (let i = 0; i < 400; i++) {
+      if (fn()) return
+      await new Promise(resolve => setTimeout(resolve, 5))
+    }
+    assert.fail(message)
+  }
+
+  test('the modal shares the detail channel: the browser lands the collections on open', async () => {
+    const ctx = new TestClientCtx({
+      services: {
+        sessions: new TestSessions(),
+        connection: {
+          rpc: {
+            call: async () => ({
+              ok: true,
+              value: {
+                rev: 1,
+                requests: [{ seq: 1, turn: 1, step: 1, time: 1, system: 1, tools: 2, user: 3, inject: 4, assistant: 5, tool: 6, total: 21 }],
+                events: [],
+                nodes: [{ seq: 1, cat: 'assistant', tokens: 5, text: 'modal reply' }],
+                droppedNodes: 0,
+                archive: [],
+              },
+            }),
+          },
+        },
+      },
+    })
+    const ContextModal = makeContextModal(asClientCtx(ctx), kit)
+    const head = timeline({
+      counts: { turns: 1, steps: 1, injects: 0, compactions: 0, prunes: 0 },
+      last: { seq: 1, total: 21, prompt: 20 },
+      detailRev: 1,
+    })
+    const m = await mount(h(ContextModal, {
+      sessionId: 'sm-slim',
+      useContextModal: OPEN,
+      useProjection: (key: string) => (key === 'contextTimeline' ? head : undefined),
+    }))
+    // The composition card paints off the head while the browser's detail note shows.
+    assert.ok(text(m.container).includes(DICT_EN['overview.title']))
+    assert.ok(text(m.container).includes(DICT_EN['detail.loading']))
+    // The detail lands: the browser serves the step picker + the sections.
+    await until(() => !text(m.container).includes(DICT_EN['detail.loading']), 'the modal detail never landed')
+    assert.equal(queryAll(m.container, '.lc-br-pick option').length, 2, 'live + the one served step')
+    assert.ok(text(m.container).includes('1 Item'), 'the assistant section counts the served node')
+    await m.unmount()
+  })
+
+  test('a mount that raced the declared inject heals when the face lands mid-open', async () => {
+    // The race: the modal mounts (and its fetchers snapshot the face) BEFORE
+    // `remote` composes — the degraded note shows — then the inject fires and
+    // the OPEN system section must auto-fetch without any user action.
+    const calls: { sessionId: string; throughSeq: number; beforeSeq: number }[] = []
+    const ctx = new TestClientCtx({ services: { sessions: new TestSessions() } })
+    // Armed before either service exists: the inject stays pending, the race.
+    watchHistoryFaces(asClientCtx(ctx))
+    const ContextModal = makeContextModal(asClientCtx(ctx), kit)
+    const projections: Record<string, unknown> = {
+      contextTimeline: timeline(),
+      contextHeaders: { headers: [{ seq: 1, time: 0, systemTokens: 5, tools: [] }] },
+    }
+    const m = await mount(h(ContextModal, {
+      sessionId: 'sm-race',
+      useContextModal: OPEN,
+      useProjection: (key: string) => projections[key],
+    }))
+    const sysRow = queryAll(m.container, '.lc-br-cat-row').find(r => text(r).includes(DICT_EN['cat.system']))
+    assert.ok(sysRow !== undefined)
+    await click(sysRow)
+    assert.ok(text(m.container).includes(DICT_EN['browser.headerMetaOnly']), 'the faceless mount shows the static note')
+
+    // The face lands mid-open (cordis replays the pending inject): the modal
+    // re-renders, the fetcher builds, and the open epoch fetches by itself.
+    // The face rides INSIDE the `remote` facade; the `remote.session` service
+    // key stays hostile, as on the real host.
+    await act(async () => {
+      ctx.setService('remote.session', { get page() { throw new Error('cannot get property "remote.session" without inject') } })
+      ctx.setService('remote', {
+        session: {
+          page: (request: { address: { sessionId: string }; throughSeq: number; beforeSeq: number }) => {
+            calls.push({ sessionId: request.address.sessionId, throughSeq: request.throughSeq, beforeSeq: request.beforeSeq })
+            return Promise.resolve({
+              ok: true,
+              value: {
+                records: [{ type: 'event', event: { type: 'request/header', seq: 1, time: 1, data: { header: { system: 'HEALED SYSTEM PROMPT', tools: [] } } } }],
+              },
+            })
+          },
+        },
+      })
+    })
+    await until(() => text(m.container).includes('HEALED SYSTEM PROMPT'), 'the open epoch never healed after the face landed')
+    assert.ok(!text(m.container).includes(DICT_EN['browser.headerMetaOnly']))
+    assert.deepEqual(calls, [{ sessionId: 'sm-race', throughSeq: 1, beforeSeq: 2 }])
+    await m.unmount()
+    // Unload the declared slot so no face stales into the next test.
+    ctx.dispose()
   })
 })

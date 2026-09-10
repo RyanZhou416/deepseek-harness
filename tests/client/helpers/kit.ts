@@ -3,9 +3,8 @@
 // contracts, not mocks of plugin code). Shared by every client spec so each
 // test file stays small and stateless.
 
-import { act } from 'react'
+import { act, type ReactElement, type ReactNode } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
-import type { ReactElement, ReactNode } from 'react'
 import { DICT_EN, DICT_ZH } from '../../../src/client/i18n'
 import type { Translate } from '../../../src/client/i18n'
 import { makeViewKit, type ViewKit } from '../../../src/client/viewkit'
@@ -122,6 +121,13 @@ export async function keydown(key: string, target: HTMLElement | Window = window
   await act(async () => {
     target.dispatchEvent(new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true }))
   })
+}
+
+/** Dispatch a real wheel gesture on an element and report whether a listener canceled it. */
+export function wheel(el: Element, deltaX: number, deltaY: number): boolean {
+  const event = new WheelEvent('wheel', { bubbles: true, cancelable: true, deltaX, deltaY })
+  el.dispatchEvent(event)
+  return event.defaultPrevented
 }
 
 export type { ReactElement, ReactNode }

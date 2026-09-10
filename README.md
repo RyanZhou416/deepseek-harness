@@ -8,19 +8,20 @@
 
 **The best [DeepSeek Harness plugin](https://www.deepseek.com/harness/) for Agent's context insights and management.**
 
-`dsh-context` provides full context lifecycle management features.
+[`dsh-context`](https://www.npmjs.com/package/dsh-context) provides full context lifecycle management features.
 - **Context tab** — an UI context dashboard for DeepSeek Harness's context stats, composition, trend, events, and messages.
+- **Context panel** — the same dashboard as a right-sidebar tab (dsh 0.1.5-rc.1+): pick **Context** on the sidebar's guide page and the panel opens beside the chat.
 - **`/context` command** — the slash command shows the context model for current context composition and recent context evolution.
 
 ## Install / Update
 
-To Install from any DeepSeek Harness installation:
+Install [`dsh-context`](https://www.npmjs.com/package/dsh-context) plugin from [DeepSeek Harness](https://www.npmjs.com/package/@deepseek-ai/dsh):
 
 ```sh
 dsh plugin --profile web add dsh-context
 ```
 
-Or to update the `dsh-context` plugin:
+Or update the `dsh-context` plugin:
 
 ```sh
 dsh plugin --profile web update dsh-context@latest
@@ -91,7 +92,7 @@ Pick **Live (next request)** or any retained step, and browse what that request 
 
 ![A tool result expanded with Raw/Markdown toggle](https://raw.githubusercontent.com/bowenliang123/dsh-context/main/docs/context-browser-tool-result.png)
 
-- **Image payloads render as cards** — thumbnails with name, dimensions, stored size, and the official DeepSeek image-token estimate (dsh 0.1.1+ multimodal pipeline, e.g. `read_image` results and image attachments):
+- **Image payloads render as cards** — thumbnails with name, dimensions, stored size, and the official DeepSeek image-token estimate (the dsh multimodal pipeline, e.g. `read_image` results and image attachments):
 
 ![An image payload rendered as a thumbnail card](https://raw.githubusercontent.com/bowenliang123/dsh-context/main/docs/context-browser-images.png)
 
@@ -140,7 +141,7 @@ In **Settings → Plugins → Plugin configuration**, the **Context** card holds
 ## Good to know
 
 - **Estimates vs actuals** — category figures use dsh's own fixed-density heuristic (the same one as its built-in token meter); the pinned trend details and Token/Timing rings show provider-reported actuals next to them.
-- **Compatibility** — works on `@deepseek-ai/dsh` **0.1.1-rc2+** and **0.1.2-alpha2+**. The per-release matrix and how it is verified: [docs/compatibility.md](docs/compatibility.md).
+- **Compatibility** — works on `@deepseek-ai/dsh` **0.1.2-rc1+**, across the V0 (0.1.2-rc.x), V2 (0.1.3-alpha.x), and V3 (0.1.5-alpha.x+) session-log generations. The per-release matrix and how it is verified: [docs/compatibility.md](docs/compatibility.md).
 - **I18n** — UI in English and 简体中文.
 
 ## Like it?

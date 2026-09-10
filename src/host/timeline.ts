@@ -23,7 +23,7 @@ import type { Config } from './config'
 import { resolveBounds } from './config'
 import type { ProjectionDefinition } from './compat'
 import type { ContextTimeline } from '../shared/types'
-import { applyTimeline, buildTimelineView, createTimelineState } from './fold'
+import { applyTimeline, buildTimelineHead, buildTimelineView, createTimelineState } from './fold'
 import type { TimelineState } from './fold'
 
 /** Validate the wire payload before it leaves the host (strict: no drift). */
@@ -40,6 +40,13 @@ const surfaceNodeSchema = z.object({
   err: z.boolean().optional(),
   skill: z.string().optional(),
   calls: z.array(z.string()).optional(),
+}).strict()
+
+/** One live system-prompt node (shared/types.ts SystemPromptNode). */
+const systemPromptNodeSchema = z.object({
+  seq: z.number().int().nonnegative(),
+  time: z.number(),
+  tokens: z.number().int().nonnegative(),
 }).strict()
 
 const requestRecordSchema = z.object({
@@ -78,6 +85,28 @@ const contextEventSchema = z.object({
   step: z.number().optional(),
 }).strict()
 
+/** The fold-derived file-operation record (shared/types.ts FileOpRecord). */
+const fileOpSchema = z.object({
+  seq: z.number().int().nonnegative(),
+  path: z.string(),
+  kind: z.enum(['read', 'write', 'search']),
+  tool: z.string(),
+  time: z.number().optional(),
+  err: z.boolean(),
+  added: z.number().int().nonnegative(),
+  removed: z.number().int().nonnegative(),
+  detail: z.string().optional(),
+  hits: z.number().int().positive().optional(),
+  read: z.union([
+    z.object({ start: z.number().int().positive(), count: z.number().int().nonnegative() }).strict(),
+    z.object({ count: z.number().int().positive(), est: z.literal(true) }).strict(),
+  ]).optional(),
+  parent: z.number().int().nonnegative().optional(),
+  program: z.string().optional(),
+  pattern: z.literal(true).optional(),
+  gone: z.number().int().nonnegative().optional(),
+}).strict()
+
 const currentSchema = z.object({
   system: z.number().int().nonnegative(),
   tools: z.number().int().nonnegative(),
@@ -109,33 +138,75 @@ const timingTotalsSchema = z.object({
   wallMs: z.number().nonnegative(),
   ttftMs: z.number().nonnegative(),
   genMs: z.number().nonnegative(),
+  // Additive-optional (see TimingTotals): rows cached before the generation
+  // split carry `genMs` without these, and must keep parsing.
+  reasoningMs: z.number().nonnegative().optional(),
+  textMs: z.number().nonnegative().optional(),
+  toolArgMs: z.number().nonnegative().optional(),
   calls: z.number().int().nonnegative(),
   toolsMs: z.number().nonnegative(),
   toolCalls: z.number().int().nonnegative(),
   tools: z.record(z.string(), toolTimingSchema),
 }).strict()
 
-const contextTimelineSchema = z.object({
+/** The baseline-gate record the fallback unit serves (see fallback.ts). */
+const unsupportedSchema = z.object({
+  current: z.string(),
+  minimum: z.string(),
+}).strict()
+
+/** The stats board's precomputed count figures (the split head — see Snapshot.counts). */
+const countsSchema = z.object({
+  turns: z.number().int().nonnegative(),
+  steps: z.number().int().nonnegative(),
+  injects: z.number().int().nonnegative(),
+  compactions: z.number().int().nonnegative(),
+  prunes: z.number().int().nonnegative(),
+}).strict()
+
+/** The newest retained request's billing summary (the split head's headline anchor). */
+const lastSchema = z.object({
+  seq: z.number(),
+  total: z.number().int().nonnegative(),
+  prompt: z.number().int().nonnegative().optional(),
+}).strict()
+
+/**
+ * One wire contract for both generations: the SPLIT head (envelope scalars +
+ * counts/last/detailRev; the heavy collections stay absent — they ride the
+ * on-demand detail channel, host/detail.ts) and the INLINE value
+ * (channel-less hosts and the fallback unit carry the collections in place).
+ * The collections are therefore optional on the schema; the split marker is
+ * `detailRev` (present ⟺ split).
+ */
+export const contextTimelineSchema = z.object({
   ok: z.literal(true),
+  unsupported: unsupportedSchema.optional(),
   model: z.string().optional(),
   provider: z.string().optional(),
   contextWindow: z.number().optional(),
   current: currentSchema,
   images: z.number().int().nonnegative().optional(),
   toolCalls: z.number().int().nonnegative().optional(),
-  requests: z.array(requestRecordSchema),
-  events: z.array(contextEventSchema),
+  counts: countsSchema.optional(),
+  last: lastSchema.optional(),
+  detailRev: z.number().int().nonnegative().optional(),
+  requests: z.array(requestRecordSchema).optional(),
+  events: z.array(contextEventSchema).optional(),
   cost: z.object({ flash: costFamilySchema.optional(), pro: costFamilySchema.optional() }).strict().optional(),
   timing: timingTotalsSchema.optional(),
-  nodes: z.array(surfaceNodeSchema),
-  droppedNodes: z.number().int().nonnegative(),
-  archive: z.array(surfaceNodeSchema),
+  systems: z.array(systemPromptNodeSchema).optional(),
+  nodes: z.array(surfaceNodeSchema).optional(),
+  droppedNodes: z.number().int().nonnegative().optional(),
+  archive: z.array(surfaceNodeSchema).optional(),
   surfaceFloor: z.number().int().nonnegative().optional(),
   archiveFloor: z.number().int().nonnegative().optional(),
+  fileOps: z.array(fileOpSchema).optional(),
+  fileOpsFloor: z.number().int().nonnegative().optional(),
 }).strict() as unknown as z.ZodType<ContextTimeline>
 
 /**
- * The persisted fold-state schema (the dsh 0.1.1-rc.1+ `stateSchema`
+ * The persisted fold-state schema (the registry's `stateSchema`
  * contract). Validates the plain-JSON `TimelineState` before a checkpoint
  * row seeds a fold — the same shape guarantee the projection cache's
  * plain-JSON precondition already enforces at write time.
@@ -149,6 +220,8 @@ const timelineStateSchema = z.object({
     tool: z.number().int().nonnegative(),
   }).strict(),
   systemTokens: z.number().int().nonnegative(),
+  systems: z.array(systemPromptNodeSchema).optional(),
+  systemsFromHeader: z.literal(true).optional(),
   toolsTokens: z.number().int().nonnegative(),
   model: z.string().optional(),
   provider: z.string().optional(),
@@ -160,10 +233,20 @@ const timelineStateSchema = z.object({
   cost: z.object({ flash: costFamilySchema.optional(), pro: costFamilySchema.optional() }).strict().optional(),
   archiveFloor: z.number().optional(),
   timing: timingTotalsSchema.optional(),
-  stepStart: z.object({ time: z.number(), firstToken: z.number().optional() }).strict().optional(),
-  callNames: z.record(z.string(), z.object({ name: z.string(), start: z.number() }).strict()),
+  stepStart: z.object({
+    time: z.number(),
+    firstToken: z.number().optional(),
+    // The generation split's in-flight accumulator (see TimelineState.stepStart).
+    decode: z.object({ reasoning: z.number(), text: z.number(), toolarg: z.number() }).strict().optional(),
+    block: z.object({ kind: z.enum(['reasoning', 'text', 'toolarg']), since: z.number() }).strict().optional(),
+  }).strict().optional(),
+  callNames: z.record(z.string(), z.object({ name: z.string(), start: z.number(), argsRaw: z.string().optional() }).strict()),
   pendingShadowedSeqs: z.array(z.number()).optional(),
   pendingShadowEventSeq: z.number().optional(),
+  detailRev: z.number().int().nonnegative().optional(),
+  fileOps: z.array(fileOpSchema),
+  fileOpsFloor: z.number().int().nonnegative().optional(),
+  pendingCodeOps: z.record(z.string(), z.array(fileOpSchema)).optional(),
 }) as unknown as z.ZodType<TimelineState>
 
 /**
@@ -184,10 +267,25 @@ const timelineStateSchema = z.object({
  * `wire` block the registry treats the unit as host-only and never delivers
  * `contextTimeline` to the browser (the Context tab would stay on its
  * loading screen forever).
+ *
+ * `slim` selects the wire generation PER SERVE (a liveness probe, not a
+ * fixed flag): while the on-demand detail channel is live (host/detail.ts),
+ * the wire value is the SLIM head (buildTimelineHead) — the heavy
+ * collections no longer ride every session.list row, control baseline,
+ * follow snapshot, and push frame. Before the channel arms (the connection
+ * service may activate after this plugin) or on a deployment whose
+ * connection/sessions services never compose, the unit serves the INLINE
+ * value so the tab keeps working end to end. Both generations validate
+ * against the same schema (the collections are optional on it), and both
+ * fold the SAME state — the split is view-only, so no `stateVersion` bump
+ * and no cached-row invalidation comes with it (the `detailRev` state field
+ * is additive-optional: older rows restore without it and read as revision
+ * 0).
  */
-export function createContextTimelineDefinition(config: Config): ProjectionDefinition<'contextTimeline', TimelineState> {
+export function createContextTimelineDefinition(config: Config, slim: () => boolean): ProjectionDefinition<'contextTimeline', TimelineState> {
   const bounds = resolveBounds(config)
-  const view = (state: TimelineState): ContextTimeline => buildTimelineView(state, bounds)
+  const view = (state: TimelineState): ContextTimeline =>
+    slim() ? buildTimelineHead(state) : buildTimelineView(state, bounds)
   const definition: ProjectionDefinition<'contextTimeline', TimelineState> = {
     key: 'contextTimeline',
     stateSchema: timelineStateSchema,
@@ -225,7 +323,26 @@ export function createContextTimelineDefinition(config: Config): ProjectionDefin
     // previously rode the state verbatim and failed the wire/state schemas'
     // integer gates on EVERY later delivery, permanently freezing the
     // session's projection feed (issue #44); cached rows refold clean.
-    stateVersion: 13,
+    // 14: the fold-derived file-operation log joined the state (`fileOps` +
+    // `fileOpsFloor` + the pending Code-Mode buffer; `callNames` entries grew
+    // the raw call arguments) — the File Activity card's full-log coverage,
+    // replacing the client-side conversation-window derivation. Cached rows
+    // refold from the log, which rebuilds the op log for sessions started
+    // under older plugin builds.
+    // 15: a search with the complete matched-file meta now books its call
+    // TARGET (the searched path / the pattern) in addition to the per-file
+    // hit rows — the op log's fold semantics changed, so cached rows refold.
+    //
+    // 15 since 0.47: the fold reads BOTH supported log generations (see
+    // host/logShapes.ts) — V3 `system/message` nodes, embedded assistant
+    // streams, `startSeq`/`endSeq` replacements, `tool/ptc-dispatch`. The new
+    // state fields (`systems`, `systemsFromHeader`) are additive-OPTIONAL, so
+    // cached rows keep parsing and stay USABLE: a bump would invalidate every
+    // row and orphan the key for idle sessions, which have no refresh channel
+    // until they go live again (the #37 regression) — strictly worse than a
+    // pre-fix session showing its corrected figures from the next folded
+    // event onward.
+    stateVersion: 15,
   }
   return definition
 }

@@ -2,19 +2,17 @@
  * The assistant-message action that jumps to the Context tab at this reply's
  * turn. Registered on the harness `conversation.chat.assistant-actions` seat
  * (the icon row beside copy/branch), it receives the finalized reply's durable
- * message id, resolves the matching assistant node's seq off whichever node
- * seat the running harness serves (`useChat` on 0.1.2+, the session snapshot
- * before it), records it in the viewFocus relay, and activates the Context
+ * message id, resolves the matching assistant node's seq off the `useChat`
+ * node seat, records it in the viewFocus relay, and activates the Context
  * tab — where the jump pins the reply's TURN (see contextView's leg 2). An
  * unresolvable seq still switches tabs, just without a pin; a message id that
  * is not a plain string renders nothing at all.
  */
 
+import { type ReactElement } from 'react'
 import { Tooltip } from '@deepseek-ai/dsh-client-ui-primitives'
-import type * as ReactNS from 'react'
-import type { ConversationNodeLike, UseChatLike, UseSessionLike } from '../services'
+import type { ConversationNodeLike, UseChatLike } from '../services'
 import { conversationNodesOf } from '../services'
-import { React } from '../react'
 import { activateContextTab, requestContextFocus } from '../viewFocus'
 import type { ViewKit } from '../viewkit'
 
@@ -23,7 +21,6 @@ export interface ContextJumpProps {
   messageId?: unknown
   sessionId?: unknown
   useChat?: UseChatLike
-  useSession?: UseSessionLike
 }
 
 /**
@@ -43,7 +40,7 @@ export function seqOfMessageId(nodes: readonly ConversationNodeLike[] | undefine
 }
 
 /** The jump glyph: the plugin's mini stacked composition bars, same 16px outline family as the shipped row icons. */
-function JumpIcon(): ReactNS.ReactElement {
+function JumpIcon(): ReactElement {
   return (
     <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
       <rect x="2" y="3" width="12" height="2" rx="1" fill="currentColor" />
@@ -53,9 +50,9 @@ function JumpIcon(): ReactNS.ReactElement {
   )
 }
 
-export function makeContextJumpButton(kit: ViewKit): (props: ContextJumpProps) => ReactNS.ReactElement | null {
+export function makeContextJumpButton(kit: ViewKit): (props: ContextJumpProps) => ReactElement | null {
   const { t } = kit
-  return function ContextJump(props: ContextJumpProps): ReactNS.ReactElement | null {
+  return function ContextJump(props: ContextJumpProps): ReactElement | null {
     const messageId = props.messageId
     // Interruption-frozen partials address no durable message — the owner
     // already withholds them, and anything else non-string is ignored.

@@ -3,10 +3,9 @@
 // and line deltas, expandable operation logs, the op-level locate hook,
 // workspace-relative path display, and the system-open affordance.
 
+import { act, createElement as h } from 'react'
 import assert from 'node:assert/strict'
-import { act } from 'react'
 import { describe, test } from 'vitest'
-import { h } from '../../../src/client/react'
 import { makeFileCard } from '../../../src/client/components/fileCard'
 import type { FileActivity, FileEntry, FileOp } from '../../../src/client/fileActivity'
 import { createContextSettings } from '../../../src/client/settings'
@@ -19,7 +18,7 @@ const FileCard = makeFileCard(kit, settings)
 const T0 = 1700000000000
 
 function fileOp(seq: number, kind: FileOp['kind'], tool: string, over: Partial<FileOp> = {}): FileOp {
-  return { seq, kind, tool, time: T0 + seq, err: false, added: 0, removed: 0, ...over }
+  return { seq, kind, tool, time: T0 + seq, err: false, added: 0, removed: 0, path: '', ...over }
 }
 
 function entry(path: string, over: Partial<FileEntry>): FileEntry {
@@ -521,5 +520,36 @@ describe('FileCard — workspace display and system open', () => {
     await click(baseOf(rowOf(m2.container, 'rel/b.md')))
     assert.deepEqual(opened, [])
     await m2.unmount()
+  })
+})
+
+describe('FileCard — the split generation detail states', () => {
+  test('a pending detail read shows the loading note instead of the empty claim', async () => {
+    const m = await mount(h(FileCard, {
+      activity: richActivity({ entries: [] }),
+      scope: 'live',
+      state: 'loading',
+      onRetry: () => {},
+    }))
+    assert.ok(text(m.container).includes('Loading history'))
+    assert.ok(!text(m.container).includes('No file reads'))
+    await m.unmount()
+  })
+
+  test('a failed detail read arms the retry button; without one the empty claim stays', async () => {
+    let retries = 0
+    const m = await mount(h(FileCard, {
+      activity: richActivity({ entries: [] }),
+      scope: 'live',
+      state: 'failed',
+      onRetry: () => { retries++ },
+    }))
+    await click(query(m.container, '.lc-br-retry'))
+    assert.equal(retries, 1)
+
+    const inert = await mount(h(FileCard, { activity: richActivity({ entries: [] }), scope: 'live', state: 'failed' }))
+    assert.ok(text(inert.container).includes('No file reads'), 'no retry wired — the plain empty state')
+    await inert.unmount()
+    await m.unmount()
   })
 })

@@ -11,8 +11,9 @@
  * session. A harness without the outward sessions service hides the card.
  */
 
-import type * as ReactNS from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, type KeyboardEvent, type ReactElement } from 'react'
 import { CATS } from '../categories'
+import { containHorizontalOverscroll } from '../overscroll'
 import type { ClientCtx } from '../services'
 import type { ViewKit } from '../viewkit'
 import type { AgentNode, AgentSelfStats } from '../agentTree'
@@ -20,14 +21,12 @@ import {
   AGENT_NODE_R,
   AGENT_RING_R,
   agentForestOf,
-  fmtDuration,
+  fmtDurationCompact,
   layoutForest,
   openAgentSession,
   ringSegments,
   sessionsFaceOf,
 } from '../agentTree'
-
-import { React } from '../react'
 
 export interface AgentGraphProps {
   sessionId?: string
@@ -49,35 +48,35 @@ export function ringColorOf(pct: number | null): string {
 export function makeAgentGraph(
   ctx: ClientCtx,
   kit: ViewKit,
-): (props: AgentGraphProps) => ReactNS.ReactElement | null {
+): (props: AgentGraphProps) => ReactElement | null {
   const { t, fmt, catLabel } = kit
 
-  function AgentGraph(props: AgentGraphProps): ReactNS.ReactElement | null {
+  function AgentGraph(props: AgentGraphProps): ReactElement | null {
     // Resolved lazily at mount (not at apply): the outward sessions service
     // belongs to the client runtime's composition, and a deployment without
     // it simply keeps the card hidden.
-    const face = React.useMemo(() => sessionsFaceOf(ctx), [])
-    const subscribe = React.useCallback((fn: () => void) => {
+    const face = useMemo(() => sessionsFaceOf(ctx), [])
+    const subscribe = useCallback((fn: () => void) => {
       if (face === null) return () => {}
       /* v8 ignore next 2 -- sessionsFaceOf returns a face only after proving list.subscribe. */
       if (face.list === undefined) return () => {}
       return face.list.subscribe(fn)
     }, [face])
-    const getSnapshot = React.useCallback(() => {
+    const getSnapshot = useCallback(() => {
       if (face === null) return null
       /* v8 ignore next 2 -- sessionsFaceOf proves list before returning the face. */
       if (face.list === undefined) return null
       return face.list.getSnapshot()
     }, [face])
-    const snapshot = React.useSyncExternalStore(subscribe, getSnapshot)
+    const snapshot = useSyncExternalStore(subscribe, getSnapshot)
     const sessionId = props.sessionId
-    const [hoverId, setHoverId] = React.useState<string | null>(null)
+    const [hoverId, setHoverId] = useState<string | null>(null)
 
     // The layout is fully responsive: re-run it whenever the stage's visible
     // width changes (sidebar toggles, window resizes, split views).
-    const stageRef = React.useRef<HTMLDivElement | null>(null)
-    const [stageWidth, setStageWidth] = React.useState(0)
-    React.useEffect(() => {
+    const stageRef = useRef<HTMLDivElement | null>(null)
+    const [stageWidth, setStageWidth] = useState(0)
+    useEffect(() => {
       /* v8 ignore start -- jsdom has neither ResizeObserver nor layout; tests exercise the natural-pitch fallback (stageWidth 0). */
       const el = stageRef.current
       if (el === null || typeof ResizeObserver !== 'function') return
@@ -87,17 +86,26 @@ export function makeAgentGraph(
       return () => { observer.disconnect() }
       /* v8 ignore stop */
     }, [])
+    // A horizontal swipe running off the stage's edge must not chain into the browser's history navigation
+    // (overscroll.ts): the sheet's overscroll-behavior-x covers Chromium/Firefox, this covers WebKit.
+    useEffect(() => {
+      const el = stageRef.current
+      /* v8 ignore next 1 -- the stage renders whenever the card does, and React
+         attaches refs before effects run; el is never null here. */
+      if (el === null) return
+      return containHorizontalOverscroll(el)
+    }, [])
 
     // Discover the current session's direct-child catalog once per session:
     // catalog-derived children join the list rows (and gain navigation
     // addresses). Fire-and-forget — the card renders from list rows alone.
-    React.useEffect(() => {
+    useEffect(() => {
       if (face === null || typeof sessionId !== 'string' || sessionId === '') return
       if (typeof face.refreshSubagents !== 'function') return
       face.refreshSubagents(sessionId).catch(() => {})
     }, [face, sessionId])
 
-    const built = React.useMemo(() => {
+    const built = useMemo(() => {
       const forest = agentForestOf(snapshot, sessionId, props.self)
       return forest !== null ? { forest, layout: layoutForest(forest, stageWidth) } : null
     }, [snapshot, sessionId, props.self, stageWidth])
@@ -117,7 +125,7 @@ export function makeAgentGraph(
       if (id === current.id) return
       openAgentSession(face, id)
     }
-    const keyOpen = (id: string) => (ev: ReactNS.KeyboardEvent) => {
+    const keyOpen = (id: string) => (ev: KeyboardEvent) => {
       if (ev.key !== 'Enter' && ev.key !== ' ') return
       ev.preventDefault()
       open(id)
@@ -225,12 +233,12 @@ interface NodeViewProps {
   hovered: boolean
   onHover: (id: string | null) => void
   onOpen: (id: string) => void
-  onKeyOpen: (ev: ReactNS.KeyboardEvent) => void
+  onKeyOpen: (ev: KeyboardEvent) => void
   t: ViewKit['t']
   fmt: ViewKit['fmt']
 }
 
-function AgentNodeView(props: NodeViewProps): ReactNS.ReactElement {
+function AgentNodeView(props: NodeViewProps): ReactElement {
   const { node, x, y, captionW } = props
   const pct = node.head !== null ? node.head.pct : null
   const ring = 2 * Math.PI * AGENT_RING_R
@@ -286,7 +294,7 @@ function AgentNodeView(props: NodeViewProps): ReactNS.ReactElement {
 }
 
 /** The detail strip mirroring the hovered (or current) node: identity, occupancy, activity, and the open hint. */
-function Inspector(props: { node: AgentNode; t: ViewKit['t']; fmt: ViewKit['fmt'] }): ReactNS.ReactElement {
+function Inspector(props: { node: AgentNode; t: ViewKit['t']; fmt: ViewKit['fmt'] }): ReactElement {
   const { node, t, fmt } = props
   const bits: string[] = []
   if (node.head !== null) {
@@ -297,7 +305,7 @@ function Inspector(props: { node: AgentNode; t: ViewKit['t']; fmt: ViewKit['fmt'
   }
   if (node.requests > 0) bits.push(t('agents.requests', { n: node.requests }))
   if (node.billed !== null && node.billed > 0) bits.push(t('agents.billed', { n: fmt(node.billed) }))
-  if (node.durationMs !== null) bits.push(fmtDuration(node.durationMs))
+  if (node.durationMs !== null) bits.push(fmtDurationCompact(node.durationMs))
   return (
     <div className="lc-agents-inspector">
       <b className="lc-agents-inspector-name">{node.label}</b>

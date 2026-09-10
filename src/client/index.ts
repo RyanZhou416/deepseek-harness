@@ -6,12 +6,13 @@
  * context-composition timeline: current makeup, per-request stacked-bar
  * history, context events, and the live message list.
  *
- * Since v0.9 the tab needs no custom data plane: the Host half pushes its
- * fold through the harness's session-projection pipeline
- * (`contextTimeline` projection key), and this half reads the finished value
- * from the framework standard kit (`useProjection('contextTimeline')`, a
- * standard prop on every session-scope slot component). No polling, no RPC,
- * no client-side cache.
+ * Since v0.9 the tab rides the harness's session-projection pipeline
+ * (`contextTimeline` projection key), read from the framework standard kit
+ * (`useProjection('contextTimeline')`, a standard prop on every session-scope
+ * slot component). The wire value is the split generation's slim head; the
+ * heavy collections arrive on demand from the host's detail endpoint, one
+ * read per viewing client (timelineSource.ts). No polling, no stale-while-
+ * revalidate cache.
  *
  * This module is the body of the package's `./client` bundle: tsdown
  * (tsdown.config.ts) bundles it (external `react` — the browser module table
@@ -21,6 +22,7 @@
  * beyond the bundled source.
  */
 
+import { createElement as h } from 'react'
 import { DICT_EN, DICT_ZH } from './i18n'
 import { registerContextCommand } from './command'
 import { makeContextModal } from './components/contextModal'
@@ -31,6 +33,7 @@ import { createContextSettings, type SettingsField, type SettingsScopeBinderFace
 import { makeContextView } from './components/contextView'
 import { makeContextJumpButton } from './components/contextJump'
 import { watchHistoryFaces } from './historyPage'
+import { watchSidebarContextTab } from './sidebar'
 import { makeViewKit } from './viewkit'
 
 // Theme-native styles: the bundle's global-CSS channel injects each sheet as
@@ -53,8 +56,6 @@ import './styles/detailSections.css'
 import './styles/attachments.css'
 import './styles/agentGraph.css'
 
-import { h } from './react'
-
 const NS = 'dsh-context'
 
 function apply(ctx: ClientCtx): void {
@@ -68,12 +69,12 @@ function apply(ctx: ClientCtx): void {
   const t = ctx.locale.bind(NS)
 
   const kit = makeViewKit(t)
-  // History faces of the 0.1.2+ gateway remotes, resolved through the
+  // History face of the harness gateway remotes, resolved through the
   // DECLARED inject — a non-declared read of the traced `remote.session`
   // proxy throws ("cannot get property … without inject") and would take
-  // the browser down with the view. Injection waits for the service and
-  // never fires on hosts that lack the namespace (the pre-0.1.2 legacy
-  // `connection` face carries those reads instead).
+  // the browser down with the view. Injection waits for the service; a
+  // harness that never composes the namespace never fires the callback and
+  // the targeted fetches simply stay absent.
   watchHistoryFaces(ctx)
   const settings = createContextSettings()
   const ContextView = makeContextView(ctx, kit, settings)
@@ -86,6 +87,11 @@ function apply(ctx: ClientCtx): void {
       props => h(ContextView, props),
     )
   })
+
+  // Right Sidebar (dsh 0.1.5-rc.1+): the same view as a panel tab, offered
+  // from the sidebar's guide page. Optional by contract — a harness without
+  // the sidebar services simply never gets the tab (see sidebar.ts).
+  watchSidebarContextTab(ctx, ContextView, t, NS)
 
   // Chat → Context jump: an icon in each finalized reply's action row that
   // opens this tab pinned to that reply's turn (see contextJump.tsx; the

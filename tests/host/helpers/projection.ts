@@ -28,7 +28,7 @@ export interface TimelineDefLike {
   apply(state: TimelineState, event: TimelineEvent): TimelineState
   wire: {
     /** The wire gate every delivery channel parses the served value with. */
-    viewSchema: { parse(value: unknown): unknown }
+    viewSchema: { parse(value: unknown): unknown; safeParse(value: unknown): { success: boolean } }
     view(state: TimelineState): ContextTimeline
   }
 }
@@ -40,8 +40,8 @@ export interface HeadersDefLike {
   wire: { view(state: HeadersState): ContextHeaders }
 }
 
-export function timelineDef(config?: Config): TimelineDefLike {
-  return createContextTimelineDefinition(config ?? {}) as unknown as TimelineDefLike
+export function timelineDef(config?: Config, slim = false): TimelineDefLike {
+  return createContextTimelineDefinition(config ?? {}, () => slim) as unknown as TimelineDefLike
 }
 
 export function headersDef(): HeadersDefLike {
@@ -50,8 +50,8 @@ export function headersDef(): HeadersDefLike {
 
 /**
  * Lossless-JSON probe and detach, inlined with the dsh `snapshotJsonValue`
- * semantics (the export left `@deepseek-ai/dsh-session` in 0.1.2-alpha.2, and
- * the test fixtures must track no single dsh face). Returns undefined when the
+ * semantics (the export lives in `@deepseek-ai/dsh-util-values`, and the
+ * test fixtures must track no single dsh face). Returns undefined when the
  * value is not losslessly JSON-serializable: an undefined/function/symbol
  * member, a non-finite number, a non-plain object, or a cycle. Shared with the
  * compat matrix's registry driver (tests/host/compat/registryDriver.ts).
