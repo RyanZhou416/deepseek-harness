@@ -17,7 +17,7 @@ import process from 'node:process'
 
 const AGENT_TEAMS = {
   name: '@nanmicoder/dsh-agent-teams',
-  version: '0.1.16-dsh013alpha2.1',
+  version: '0.1.16-dsh015alpha2.1',
 }
 const CONTEXT = {
   name: 'dsh-context',

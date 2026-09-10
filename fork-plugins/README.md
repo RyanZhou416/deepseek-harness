@@ -19,18 +19,18 @@ The setup intentionally omits marketplace plugins, subscriptions, watchdogs, cus
 ## Agent Teams
 
 - Source: `fork-plugins/dsh-agent-teams`
-- Current private version: `0.1.16-dsh013alpha2.1`
-- Upstream base: `NanmiCoder/dsh-agent-teams v0.1.16-rc.1@eb09334f9a`
-- Private host target: `dsh-v0.1.3-alpha.2`
-- Distribution artifact: `fork-plugins/releases/nanmicoder-dsh-agent-teams-0.1.16-dsh013alpha2.1.tgz`
-- Artifact SHA256: `3D83C44E1846D07F077B4677D69182A4C25F97C4A92337C243CA1BDF6E2BD35D`
+- Current private version: `0.1.16-dsh015alpha2.1`
+- Upstream base: `NanmiCoder/dsh-agent-teams v0.1.16-rc.3@bf17f93d35`
+- Private host target: `dsh-v0.1.5-alpha.2`
+- Distribution artifact: `fork-plugins/releases/nanmicoder-dsh-agent-teams-0.1.16-dsh015alpha2.1.tgz`
+- Artifact SHA256: `E2BD90AD8823CE95CD2D256BD51522B2C6B51C78E4E7DCD97B585AFF0D652A75`
 
-This build adds the upstream rc.1 fallback persistence, parked-attempt recovery, request limits, compatibility doctor, model badges, and visible resize handles. It preserves Alpha.2 live-Steer/inactive-Queue delivery, cold Captain mailbox recovery, all retired-member entry-point guards, and the bounded unread-only LRU. The on-disk format remains unchanged.
+This build adds the upstream rc.3 stable capability presentation, existing-team reuse guidance, Web approval wakeup, and settled team-lock cleanup. It preserves live-Steer/inactive-Queue delivery, cold Captain mailbox recovery, all retired-member entry-point guards, the bounded unread-only LRU, fallback persistence, and parked-attempt recovery. The on-disk format remains unchanged.
 
 After cloning this fork, setting their own `DSH_HOME`, and stopping any running DSH instance, a colleague can run this command from the repository root:
 
 ```powershell
-$artifact = (Resolve-Path .\fork-plugins\releases\nanmicoder-dsh-agent-teams-0.1.16-dsh013alpha2.1.tgz).Path
+$artifact = (Resolve-Path .\fork-plugins\releases\nanmicoder-dsh-agent-teams-0.1.16-dsh015alpha2.1.tgz).Path
 node --import tsx/esm apps/cli/src/bin.ts plugin --profile web add $artifact
 ```
 

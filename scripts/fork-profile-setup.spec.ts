@@ -89,7 +89,7 @@ it('preserves unrelated context patch rows and handles idempotence, dry-run, and
 it('rejects drift in artifacts, profile pins, patches, and composed config', () => {
   const root = mkdtempSync(join(tmpdir(), 'dsh setup verify with spaces '))
   try {
-    const agentArtifact = join(root, 'nanmicoder-dsh-agent-teams-0.1.16-dsh013alpha2.1.tgz')
+    const agentArtifact = join(root, 'nanmicoder-dsh-agent-teams-0.1.16-dsh015alpha2.1.tgz')
     const contextArtifact = join(root, 'dsh-context-0.41.3-dsh013alpha2.1.tgz')
     writeFileSync(agentArtifact, 'agent artifact')
     writeFileSync(contextArtifact, 'context artifact')
@@ -105,7 +105,7 @@ it('rejects drift in artifacts, profile pins, patches, and composed config', () 
     mkdirSync(contextInstall, { recursive: true })
     writeFileSync(join(agentInstall, 'package.json'), JSON.stringify({
       name: '@nanmicoder/dsh-agent-teams',
-      version: '0.1.16-dsh013alpha2.1',
+      version: '0.1.16-dsh015alpha2.1',
     }))
     writeFileSync(join(contextInstall, 'package.json'), JSON.stringify({
       name: 'dsh-context',
@@ -137,8 +137,8 @@ it('rejects drift in artifacts, profile pins, patches, and composed config', () 
     expect(secondPin.stdout).toMatch(/^unchanged packageManager pnpm@11\.7\.0/u)
     expect(readFileSync(profileManifest, 'utf8')).toBe(pinned)
     writeFileSync(join(profile, 'pnpm-lock.yaml'), [
-      'nanmicoder-dsh-agent-teams-0.1.16-dsh013alpha2.1.tgz',
-      '0.1.16-dsh013alpha2.1',
+      'nanmicoder-dsh-agent-teams-0.1.16-dsh015alpha2.1.tgz',
+      '0.1.16-dsh015alpha2.1',
       'dsh-context-0.41.3-dsh013alpha2.1.tgz',
       '0.41.3-dsh013alpha2.1',
     ].join('\n'))

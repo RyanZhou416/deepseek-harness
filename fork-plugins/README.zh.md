@@ -19,18 +19,18 @@
 ## Agent Teams
 
 - 源码：`fork-plugins/dsh-agent-teams`
-- 当前私有版本：`0.1.16-dsh013alpha2.1`
-- 上游底座：`NanmiCoder/dsh-agent-teams v0.1.16-rc.1@eb09334f9a`
-- 私有宿主目标：`dsh-v0.1.3-alpha.2`
-- 安装产物：`fork-plugins/releases/nanmicoder-dsh-agent-teams-0.1.16-dsh013alpha2.1.tgz`
-- 产物 SHA256：`3D83C44E1846D07F077B4677D69182A4C25F97C4A92337C243CA1BDF6E2BD35D`
+- 当前私有版本：`0.1.16-dsh015alpha2.1`
+- 上游底座：`NanmiCoder/dsh-agent-teams v0.1.16-rc.3@bf17f93d35`
+- 私有宿主目标：`dsh-v0.1.5-alpha.2`
+- 安装产物：`fork-plugins/releases/nanmicoder-dsh-agent-teams-0.1.16-dsh015alpha2.1.tgz`
+- 产物 SHA256：`E2BD90AD8823CE95CD2D256BD51522B2C6B51C78E4E7DCD97B585AFF0D652A75`
 
-该构建加入上游 rc.1 的 fallback 持久化、parked-attempt 恢复、请求限额、兼容性 doctor、模型徽标和可见 resize handle，同时保留 Alpha.2 live-Steer/inactive-Queue 投递、冷 Captain 邮箱恢复、全部退休成员入口守卫和有界 unread-only LRU。磁盘格式保持不变。
+该构建加入上游 rc.3 的稳定 capability 展示、已有团队复用指引、Web 批准唤醒和已结束团队锁清理，同时保留 live-Steer/inactive-Queue 投递、冷 Captain 邮箱恢复、全部退休成员入口守卫、有界 unread-only LRU、fallback 持久化和 parked-attempt 恢复。磁盘格式保持不变。
 
 同事 clone 本 fork、设置好自己的 `DSH_HOME` 并关闭正在运行的 DSH 后，可在仓库根目录执行：
 
 ```powershell
-$artifact = (Resolve-Path .\fork-plugins\releases\nanmicoder-dsh-agent-teams-0.1.16-dsh013alpha2.1.tgz).Path
+$artifact = (Resolve-Path .\fork-plugins\releases\nanmicoder-dsh-agent-teams-0.1.16-dsh015alpha2.1.tgz).Path
 node --import tsx/esm apps/cli/src/bin.ts plugin --profile web add $artifact
 ```
 
