@@ -32,15 +32,10 @@
 | Pre-Queue behavior anchor | `7b86d0a01b` | Queue 仅支持 steer 时的历史定位点，不是当前发布基线 |
 | Alpha.2 integration history | `133c48c733` | 长任务、AgentTeams 和 transient retention 的已合并历史锚点；集成分支已删除 |
 | Alpha.2 official merge | `e481d7cb31` | 合并 `dsh-v0.1.2-alpha.2` (`0a53fb55be`) |
-| Pre-alpha.2 WIP backup | `origin/backup/wip-before-alpha2-20260831 = f1c600d51e` | 逐文件恢复证据；它是 sibling，禁止用它 reset 当前 master |
 | Older backup history | `595cd48136` | alpha.1 前的已合并恢复锚点；本地分支已删除 |
 | Pre-RC.1 backup history | `eb0cbabe39` | RC.1 整合前的已合并恢复锚点；远程分支已删除 |
 | RC.1 integration history | `646dffed9f` / `a19e092544` / `42aec50270` | 官方 merge、fork 行为移植与生成物修正已进入 `master`；集成分支和 worktree 已删除 |
 | Alpha.2 integration | `6481bd2cbb` plus the following fork port | 官方结构 merge 位于该提交；fork 行为重做位于其后的 `master` 提交 |
-| Pre-alpha.2 integration backup | `backup/pre-upstream-dsh-v0.1.3-alpha.2-20260908 = 5ef0e2f82f` | 合并前可恢复源码基线；真实 DSH_HOME 仍需独立备份 |
-| Pre-0.1.5 integration backup | `backup/pre-upstream-dsh-v0.1.5-alpha.2-20260910 = 0142680498` | 合并前源码与 jobs 唤醒修复的恢复基线；真实 DSH_HOME 仍需独立备份 |
-| Pre-0.1.5 RC.1 integration backup | `backup/pre-upstream-dsh-v0.1.5-rc.1-20260910 = 59008c418e` | 合并前包含历史 v2 Session 恢复修复的源码基线；真实 DSH_HOME 仍需独立备份 |
-| Pre-Context 0.49 integration backup | `backup/pre-dsh-context-v0.49.0-20260910 = 1c30c1e712` | Context subtree 合并前的源码恢复点；真实 profile 与 Session 未包含在该分支中 |
 | Current official target | `dsh-v0.1.5-rc.1 = 183f08e9c6` on 2026-09-10 | 精确不可变 tag；不要改合并已越过该 tag 的 rolling `upstream/master` |
 | AgentTeams subtree | `fork-plugins/dsh-agent-teams` | 上游 `v0.1.16-rc.3@bf17f93d35` + 本 fork 0.1.5 RC.1 私有适配；subtree merge 记录精确 split |
 | Context subtree | `fork-plugins/dsh-context` | 上游 `v0.49.0@40bb97c563` + 本 fork 字段级投影和关闭 modal 性能优化 |
