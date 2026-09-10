@@ -6,3 +6,4 @@
     maxEvents: 100
     maxNodes: 400
     maxArchiveNodes: 100
+    maxFileOps: 100

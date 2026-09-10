@@ -21,13 +21,14 @@ const AGENT_TEAMS = {
 }
 const CONTEXT = {
   name: 'dsh-context',
-  version: '0.41.3-dsh013alpha2.1',
+  version: '0.49.0-dsh015rc1.1',
   bounds: {
     maxRequestSteps: 300,
     maxKeptTurns: 60,
     maxEvents: 100,
     maxNodes: 400,
     maxArchiveNodes: 100,
+    maxFileOps: 100,
   },
 }
 

@@ -60,11 +60,11 @@ Agent Teams 的持久数据属于各工作区 `.agent-teams/` 目录；本目录
 ## Context
 
 - 源码：`fork-plugins/dsh-context`
-- 当前私有版本：`0.41.3-dsh013alpha2.1`
-- 上游底座：`bowenliang123/dsh-context v0.41.3@dce08e0db3`
-- 安装产物：`fork-plugins/releases/dsh-context-0.41.3-dsh013alpha2.1.tgz`
-- 产物 SHA256：`8C681B385616770B397A5C44E5676A63C9F84F7C6E54061EE0BAE8F5194388B8`
+- 当前私有版本：`0.49.0-dsh015rc1.1`
+- 上游底座：`bowenliang123/dsh-context v0.49.0@40bb97c563`
+- 安装产物：`fork-plugins/releases/dsh-context-0.49.0-dsh015rc1.1.tgz`
+- 产物 SHA256：`13966640E7CF22452A02843C5663105A4857E5BDDE484917953817140D41D081`
 
-该版本保留 `contextTimeline` projection key、wire schema、持久状态 schema 和会话事件词汇。它使用字段级 copy-on-write、dirty retention trim、恢复态首个 view 的 bounds 和引用稳定的 view cache 来降低 Host 分配与发布开销；关闭的 `/context` modal 只保留打开状态订阅。维护与回滚规则见 `fork-plugins/dsh-context/FORK_MAINTENANCE.md`。
+该版本采用上游 V0/V2/V3 fold、精简 head 加按需 detail 传输、Host 侧 File Activity 与右侧 Sidebar 面板。它使用字段级 copy-on-write、dirty retention trim、恢复态首个 view bounds 和引用稳定的 inline/slim cache 来降低 Host 分配与发布开销；关闭的 `/context` modal 只保留打开状态订阅。维护与回滚规则见 `fork-plugins/dsh-context/FORK_MAINTENANCE.md`。
 
-低开销部署值为 `maxRequestSteps: 300`、`maxKeptTurns: 60`、`maxEvents: 100`、`maxNodes: 400` 和 `maxArchiveNodes: 100`。修改 profile 前必须确认 DSH 已停止；插件更新过程不得读取、迁移或删除 Session、附件、凭据或 projection cache 数据。
+低开销部署值为 `maxRequestSteps: 300`、`maxKeptTurns: 60`、`maxEvents: 100`、`maxNodes: 400`、`maxArchiveNodes: 100` 和 `maxFileOps: 100`。修改 profile 前必须确认 DSH 已停止；插件更新过程不得读取、迁移或删除 Session、附件、凭据或 projection cache 数据。

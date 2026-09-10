@@ -60,11 +60,11 @@ Agent Teams durable data belongs to each workspace's `.agent-teams/` directory; 
 ## Context
 
 - Source: `fork-plugins/dsh-context`
-- Current private version: `0.41.3-dsh013alpha2.1`
-- Upstream base: `bowenliang123/dsh-context v0.41.3@dce08e0db3`
-- Distribution artifact: `fork-plugins/releases/dsh-context-0.41.3-dsh013alpha2.1.tgz`
-- Artifact SHA256: `8C681B385616770B397A5C44E5676A63C9F84F7C6E54061EE0BAE8F5194388B8`
+- Current private version: `0.49.0-dsh015rc1.1`
+- Upstream base: `bowenliang123/dsh-context v0.49.0@40bb97c563`
+- Distribution artifact: `fork-plugins/releases/dsh-context-0.49.0-dsh015rc1.1.tgz`
+- Artifact SHA256: `13966640E7CF22452A02843C5663105A4857E5BDDE484917953817140D41D081`
 
-This build preserves the `contextTimeline` projection key, wire schema, persisted state schema, and session event vocabulary. Field-level copy-on-write, dirty retention trimming, first-view restored-state bounds, and a reference-stable view cache reduce Host allocation and publication costs. A closed `/context` modal retains only its open-state subscription. See `fork-plugins/dsh-context/FORK_MAINTENANCE.md` for maintenance and rollback rules.
+This build adopts upstream V0/V2/V3 folding, slim-head plus on-demand-detail delivery, host-side File Activity, and the right-Sidebar panel. Field-level copy-on-write, dirty retention trimming, first-view restored-state bounds, and reference-stable inline/slim caches reduce Host allocation and publication costs. A closed `/context` modal retains only its open-state subscription. See `fork-plugins/dsh-context/FORK_MAINTENANCE.md` for maintenance and rollback rules.
 
-The low-overhead deployment values are `maxRequestSteps: 300`, `maxKeptTurns: 60`, `maxEvents: 100`, `maxNodes: 400`, and `maxArchiveNodes: 100`. Confirm that DSH has stopped before changing a profile. Never read, migrate, or delete Session, attachment, credential, or projection-cache data during a plugin update.
+The low-overhead deployment values are `maxRequestSteps: 300`, `maxKeptTurns: 60`, `maxEvents: 100`, `maxNodes: 400`, `maxArchiveNodes: 100`, and `maxFileOps: 100`. Confirm that DSH has stopped before changing a profile. Never read, migrate, or delete Session, attachment, credential, or projection-cache data during a plugin update.

@@ -40,9 +40,10 @@
 | Pre-alpha.2 integration backup | `backup/pre-upstream-dsh-v0.1.3-alpha.2-20260908 = 5ef0e2f82f` | 合并前可恢复源码基线；真实 DSH_HOME 仍需独立备份 |
 | Pre-0.1.5 integration backup | `backup/pre-upstream-dsh-v0.1.5-alpha.2-20260910 = 0142680498` | 合并前源码与 jobs 唤醒修复的恢复基线；真实 DSH_HOME 仍需独立备份 |
 | Pre-0.1.5 RC.1 integration backup | `backup/pre-upstream-dsh-v0.1.5-rc.1-20260910 = 59008c418e` | 合并前包含历史 v2 Session 恢复修复的源码基线；真实 DSH_HOME 仍需独立备份 |
+| Pre-Context 0.49 integration backup | `backup/pre-dsh-context-v0.49.0-20260910 = 1c30c1e712` | Context subtree 合并前的源码恢复点；真实 profile 与 Session 未包含在该分支中 |
 | Current official target | `dsh-v0.1.5-rc.1 = 183f08e9c6` on 2026-09-10 | 精确不可变 tag；不要改合并已越过该 tag 的 rolling `upstream/master` |
 | AgentTeams subtree | `fork-plugins/dsh-agent-teams` | 上游 `v0.1.16-rc.3@bf17f93d35` + 本 fork 0.1.5 RC.1 私有适配；subtree merge 记录精确 split |
-| Context subtree | `fork-plugins/dsh-context` | 上游 `v0.41.3@dce08e0db3` + 本 fork 投影和关闭 modal 性能优化 |
+| Context subtree | `fork-plugins/dsh-context` | 上游 `v0.49.0@40bb97c563` + 本 fork 字段级投影和关闭 modal 性能优化 |
 
 当前维护的源码兼容基线是 `dsh-v0.1.5-rc.1`。整合采用官方 handle-based Session persistence、Session format v3、通用 `session.updateQueue`、cursorless Assistant frame、长会话恢复和连接容错，再按本文的行为与测试补回仍缺失部分；后续合并禁止整体恢复旧版文件。
 
@@ -203,7 +204,7 @@ Web profile 插入 `memory-watchdog.cjs`：250 ms 采样、60 s 日志、heap ra
 | `@nanmicoder/dsh-agent-teams` | `0.1.16-dsh015rc1.1` | Enabled | `setup.command` 固定 RC.1 artifact；禁止被 npm latest/next 直接覆盖 |
 | `dsh-plugin-subscriptions` | `0.6.0` | Installed, disabled | RC.1 隔离启动通过；profile 固定 `rateLimit.wait:false`，后续单独启用验证真实账户 |
 | `@vlln/dsh-task-status` | Removed | Not installed | 2026-09-04 已从依赖、bundle、patch、lockfile 和 `node_modules` 删除；RC.1 profile 不得恢复 |
-| `dsh-context` | `0.41.3-dsh013alpha2.1` | Enabled | 保留 `300/60/100/400/100` bounds；源码与回滚规则见 `fork-plugins/dsh-context/FORK_MAINTENANCE.md` |
+| `dsh-context` | `0.49.0-dsh015rc1.1` | Enabled | 保留 `300/60/100/400/100/100` bounds；源码与回滚规则见 `fork-plugins/dsh-context/FORK_MAINTENANCE.md` |
 | `dsh-shell-command` | Removed | No package or configuration | 2026-09-04 已删除残留注释；RC.1 profile 不安装 |
 | `@deepseek-ai/dsh-subagent-dsh-sdk` | Link to source checkout | Enabled for process provider | 跟随源码构建，worker 数据与主 sessions 隔离 |
 
@@ -232,9 +233,9 @@ Web profile 插入 `memory-watchdog.cjs`：250 ms 采样、60 s 日志、heap ra
 
 ### Local Context package
 
-维护真源位于 `fork-plugins\dsh-context`，仓库安装器使用 `fork-plugins\releases\dsh-context-0.41.3-dsh013alpha2.1.tgz`，SHA256 为 `8C681B385616770B397A5C44E5676A63C9F84F7C6E54061EE0BAE8F5194388B8`。该版本保持 `contextTimeline` / `contextHeaders` projection key、wire schema、持久状态 schema、`stateVersion` 和 Session event 不变。
+维护真源位于 `fork-plugins\dsh-context`，仓库安装器使用 `fork-plugins\releases\dsh-context-0.49.0-dsh015rc1.1.tgz`，SHA256 为 `13966640E7CF22452A02843C5663105A4857E5BDDE484917953817140D41D081`。该版本采用上游 V0/V2/V3 fold、Host 侧 File Activity、右侧 Sidebar 面板与 slim-head/on-demand-detail 传输，并保持 `contextTimeline` / `contextHeaders` key 和 Session event vocabulary 不变。上游 `stateVersion: 15` 使不兼容的旧 projection checkpoint 从不可变 Session 日志重新派生；安装流程不删除 cache，也不转换 Session artifact。
 
-本地优化包含 timeline fold 字段级 copy-on-write、dirty retention trim、恢复态首 view bounds clamp、Host-only 状态的引用稳定 wire view，以及关闭 `/context` modal 时的 projection/conversation 订阅释放。真实 profile 使用 `maxRequestSteps: 300`、`maxKeptTurns: 60`、`maxEvents: 100`、`maxNodes: 400` 和 `maxArchiveNodes: 100`。这些上限只缩小 Context 派生展示，不修改 Session 历史。
+本地优化包含 timeline fold 字段级 copy-on-write、request/event/archive/file-op dirty retention trim、恢复态首个 slim/inline/detail value 的 bounds clamp、Host-only 状态的引用稳定 inline/slim cache，以及关闭 `/context` modal 时的 projection/detail/history/conversation 订阅释放。真实 profile 使用 `maxRequestSteps: 300`、`maxKeptTurns: 60`、`maxEvents: 100`、`maxNodes: 400`、`maxArchiveNodes: 100` 和 `maxFileOps: 100`。这些上限只缩小 Context 派生展示，不修改 Session 历史。
 
 更新时使用 `git subtree pull --prefix=fork-plugins/dsh-context https://github.com/bowenliang123/dsh-context.git <tag> --squash`，再逐项重放 `fork-plugins/dsh-context/FORK_MAINTENANCE.md` 所列行为。不得用 npm latest 直接覆盖真实 profile。
 
