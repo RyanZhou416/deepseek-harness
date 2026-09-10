@@ -30,7 +30,7 @@ Ask in natural language. The plugin provides the team protocol, 13 coordination 
 
 ## Releases
 
-> **RyanZhou416 fork build:** `0.1.16-dsh015alpha2.1` vendors upstream [v0.1.16-rc.3](./release-notes/v0.1.16-rc.3.md) and targets `dsh-v0.1.5-alpha.2`. It includes the upstream team-lock cleanup, stable capability presentation, existing-team reuse guidance, and Web approval wakeups while preserving nearest-step member delivery, durable cold-captain mailbox recovery, retired-member delivery guards, and bounded unread-mailbox projection caching. Install the repository artifact instead of an npm tag.
+> **RyanZhou416 fork build:** `0.1.16-dsh015rc1.1` vendors upstream [v0.1.16-rc.3](./release-notes/v0.1.16-rc.3.md) and targets `dsh-v0.1.5-rc.1`. It includes the upstream team-lock cleanup, stable capability presentation, existing-team reuse guidance, and Web approval wakeups while preserving nearest-step member delivery, durable cold-captain mailbox recovery, retired-member delivery guards, and bounded unread-mailbox projection caching. Install the repository artifact instead of an npm tag.
 
 The upstream release candidate remains on npm's `next` channel for its own 0.1.2 compatibility matrix. Check [GitHub Releases](https://github.com/NanmiCoder/dsh-agent-teams/releases) for upstream availability and history.
 
@@ -52,14 +52,14 @@ The conversation card and activity panel use Harness's official locale service. 
 ## Install and choose versions
 
 > [!IMPORTANT]
-> **`0.1.16-dsh015alpha2.1` is a private fork build.** It supports only the exact `dsh-v0.1.5-alpha.2` host cohort. Install the checked-in tgz through the fork setup workflow; do not substitute npm `latest` or `next`.
+> **`0.1.16-dsh015rc1.1` is a private fork build.** It supports only the exact `dsh-v0.1.5-rc.1` host cohort. Install the checked-in tgz through the fork setup workflow; do not substitute npm `latest` or `next`.
 
 | Use case | DeepSeek Harness | AgentTeams plugin |
 | --- | --- | --- |
-| Fork acceptance target | **`0.1.5-alpha.2`** | **`0.1.16-dsh015alpha2.1`** |
+| Fork acceptance target | **`0.1.5-rc.1`** | **`0.1.16-dsh015rc1.1`** |
 | Other versions, source HEAD, embedded Desktop cores | Outside the current matrix | Keep a known working exact pair or complete acceptance before adding a target. |
 
-[compatibility.json](./compatibility.json) is the single source for development and verification. It pins the private `dsh015alpha2` channel and the exact host cohort.
+[compatibility.json](./compatibility.json) is the single source for development and verification. It pins the private `dsh015rc1` channel and the exact host cohort.
 
 ### Ordinary users: keep a matching host and plugin
 
@@ -91,13 +91,13 @@ The doctor checks the DSH dependency cohort, duplicate runtime identities and th
 
 ### Developers: test the exact fork host
 
-Development uses exact `0.1.5-alpha.2` packages, cohort-wide `pnpm.overrides`, and a frozen lockfile. The runtime runner creates an isolated installation, profile, and workspace, installs the candidate tgz, and checks the resolved dependency cohort.
+Development uses exact `0.1.5-rc.1` packages, cohort-wide `pnpm.overrides`, and a frozen lockfile. The runtime runner creates an isolated installation, profile, and workspace, installs the candidate tgz, and checks the resolved dependency cohort.
 
 ```sh
 node scripts/harness-runtime-verify.mjs \
-  --host-version 0.1.5-alpha.2 \
+  --host-version 0.1.5-rc.1 \
   --artifact ./agent-teams-candidate.tgz \
-  --report-dir /tmp/agent-teams-alpha2-check
+  --report-dir /tmp/agent-teams-rc1-check
 ```
 
 This developer command downloads the host into temporary directories without modifying existing user profiles. It uses deterministic model responses with the real CLI, plugin, sessions, tools and subagents. See the [maintenance workflow](./docs/maintenance-workflow.md) for coverage and release requirements.

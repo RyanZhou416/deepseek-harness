@@ -30,7 +30,7 @@
 
 ## 版本更新
 
-> **RyanZhou416 fork 构建：**`0.1.16-dsh015alpha2.1` 基于上游 [v0.1.16-rc.3](./release-notes/v0.1.16-rc.3.md)，目标版本为 `dsh-v0.1.5-alpha.2`。它纳入上游团队锁清理、稳定 capability 展示、已有团队复用指引与 Web 批准唤醒，同时保留最近 step 成员投递、冷队长持久邮箱恢复、退休成员投递守卫和有界未读邮箱投影缓存。请安装仓库内产物，不要使用 npm 标签。
+> **RyanZhou416 fork 构建：**`0.1.16-dsh015rc1.1` 基于上游 [v0.1.16-rc.3](./release-notes/v0.1.16-rc.3.md)，目标版本为 `dsh-v0.1.5-rc.1`。它纳入上游团队锁清理、稳定 capability 展示、已有团队复用指引与 Web 批准唤醒，同时保留最近 step 成员投递、冷队长持久邮箱恢复、退休成员投递守卫和有界未读邮箱投影缓存。请安装仓库内产物，不要使用 npm 标签。
 
 上游发布候选仍位于 npm `next` 渠道，并使用它自己的 0.1.2 兼容矩阵。上游发布状态与历史见 [GitHub Releases](https://github.com/NanmiCoder/dsh-agent-teams/releases)。
 
@@ -51,14 +51,14 @@
 ## 安装与版本选择
 
 > [!IMPORTANT]
-> **`0.1.16-dsh015alpha2.1` 是私有 fork 构建。** 它只支持精确的 `dsh-v0.1.5-alpha.2` 宿主依赖组。请通过 fork 安装流程安装仓库内 tgz，不要替换为 npm `latest` 或 `next`。
+> **`0.1.16-dsh015rc1.1` 是私有 fork 构建。** 它只支持精确的 `dsh-v0.1.5-rc.1` 宿主依赖组。请通过 fork 安装流程安装仓库内 tgz，不要替换为 npm `latest` 或 `next`。
 
 | 使用场景 | DeepSeek Harness | AgentTeams 插件 |
 | --- | --- | --- |
-| Fork 验收目标 | **`0.1.5-alpha.2`** | **`0.1.16-dsh015alpha2.1`** |
+| Fork 验收目标 | **`0.1.5-rc.1`** | **`0.1.16-dsh015rc1.1`** |
 | 其他版本、源码 HEAD、Desktop 内置核心 | 不在当前支持清单中 | 保留已工作的精确组合，或单独完成验收后加入清单。 |
 
-宿主矩阵只有一个来源：[compatibility.json](./compatibility.json)。开发与验证都读取它，其中固定了私有 `dsh015alpha2` 渠道和精确宿主依赖组。
+宿主矩阵只有一个来源：[compatibility.json](./compatibility.json)。开发与验证都读取它，其中固定了私有 `dsh015rc1` 渠道和精确宿主依赖组。
 
 ### 普通用户：固定匹配的宿主与插件
 
@@ -90,13 +90,13 @@ dsh web --profile agent-teams-preview
 
 ### 开发者：测试精确 fork 宿主
 
-开发依赖通过精确的 `0.1.5-alpha.2`、整组 `pnpm.overrides` 和 frozen lockfile 固定。运行时验证器会创建隔离安装、profile 与工作区，安装候选 tgz，并核对实际解析的依赖组。
+开发依赖通过精确的 `0.1.5-rc.1`、整组 `pnpm.overrides` 和 frozen lockfile 固定。运行时验证器会创建隔离安装、profile 与工作区，安装候选 tgz，并核对实际解析的依赖组。
 
 ```sh
 node scripts/harness-runtime-verify.mjs \
-  --host-version 0.1.5-alpha.2 \
+  --host-version 0.1.5-rc.1 \
   --artifact ./agent-teams-candidate.tgz \
-  --report-dir /tmp/agent-teams-alpha2-check
+  --report-dir /tmp/agent-teams-rc1-check
 ```
 
 这是会创建临时目录并下载宿主的开发验收命令，不会修改已有用户 profile。模型适配器使用固定测试响应；CLI、插件、会话、工具与子代理使用真实宿主实现。完整范围和发布流程见[维护流程](./docs/maintenance-workflow.md)。

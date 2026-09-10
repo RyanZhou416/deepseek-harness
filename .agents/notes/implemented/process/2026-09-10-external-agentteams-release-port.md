@@ -12,9 +12,9 @@ The fork additionally relies on nearest-step member delivery, cold Captain mailb
 
 ## Decision
 
-The fork vendors the exact external tag `v0.1.16-rc.3` under [`fork-plugins/dsh-agent-teams`](../../../../fork-plugins/dsh-agent-teams) and distributes the private `0.1.16-dsh015alpha2.1` artifact only for DSH `0.1.5-alpha.2`. Its manifest, peer declarations, development dependencies, pnpm overrides, lockfile, compatibility policy, setup scripts, and checked-in SHA-256 all identify that exact pair.
+The fork vendors the exact external tag `v0.1.16-rc.3` under [`fork-plugins/dsh-agent-teams`](../../../../fork-plugins/dsh-agent-teams) and distributes the private `0.1.16-dsh015rc1.1` artifact only for DSH `0.1.5-rc.1`. Its manifest, peer declarations, development dependencies, pnpm overrides, lockfile, compatibility policy, setup scripts, and checked-in SHA-256 all identify that exact pair.
 
-The runtime keeps the upstream final-tail deletion in `withTeamLock()` and its serial handoff tests. The DSH 0.1.5 port passes the unpublished Agent explicitly into member setup, reads current Session events through `ownEvents()`, uses the unified Host Queue/Steer adapter, and retains every fork delivery, recovery, retirement, and cache behavior listed in [`FORK_MAINTENANCE.md`](../../../../FORK_MAINTENANCE.md#local-agentteams-package).
+The runtime keeps the upstream final-tail deletion in `withTeamLock()` and its serial handoff tests. The DSH 0.1.5 RC.1 port passes the unpublished Agent explicitly into member setup, reads current Session events through `ownEvents()`, uses the unified Host Queue/Steer adapter, and retains every fork delivery, recovery, retirement, and cache behavior listed in [`FORK_MAINTENANCE.md`](../../../../FORK_MAINTENANCE.md#local-agentteams-package).
 
 Profile installation uses the checked-in artifact rather than npm `latest` or `next`. It changes executable plugin code only; workspace `.agent-teams` records, Sessions, attachments, and credentials remain untouched. A profile restart is required before the new code is active.
 

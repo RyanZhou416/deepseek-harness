@@ -42,7 +42,13 @@ test('private policy rejects floating targets, duplicates, and public alpha reco
     assert.throws(() => validatePolicy({ ...policy, supportedHosts: [{ version, track: 'recommended' }] }))
   }
   assert.throws(() => validatePolicy({ ...policy, supportedHosts: [...policy.supportedHosts, policy.supportedHosts[0]] }))
-  assert.throws(() => validatePolicy({ ...policy, previewTag: 'next' }), /Alpha\/beta/)
+  const alphaPolicy = {
+    ...policy,
+    recommendedHost: '0.1.3-alpha.2',
+    previewTag: 'next',
+    supportedHosts: [{ version: '0.1.3-alpha.2', track: 'recommended' }],
+  }
+  assert.throws(() => validatePolicy(alphaPolicy), /Alpha\/beta/)
   assert.throws(() => validatePackageCompatibility({ devDependencies: { '@deepseek-ai/dsh': '^0.1.3-alpha.2' } }))
 })
 

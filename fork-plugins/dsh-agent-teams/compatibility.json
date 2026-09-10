@@ -1,8 +1,8 @@
 {
   "schemaVersion": 1,
-  "recommendedHost": "0.1.5-alpha.2",
-  "previewTag": "dsh015alpha2",
+  "recommendedHost": "0.1.5-rc.1",
+  "previewTag": "dsh015rc1",
   "supportedHosts": [
-    { "version": "0.1.5-alpha.2", "track": "recommended" }
+    { "version": "0.1.5-rc.1", "track": "recommended" }
   ]
 }

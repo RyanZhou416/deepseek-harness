@@ -12,9 +12,9 @@ Status: implemented
 
 ## 决策
 
-本 fork 在 [`fork-plugins/dsh-agent-teams`](../../../../fork-plugins/dsh-agent-teams) 中引入精确的外置 tag `v0.1.16-rc.3`，并且只为 DSH `0.1.5-alpha.2` 分发私有产物 `0.1.16-dsh015alpha2.1`。manifest、peer 声明、开发依赖、pnpm overrides、lockfile、兼容策略、setup 脚本和仓库内 SHA-256 全部指向这一精确组合。
+本 fork 在 [`fork-plugins/dsh-agent-teams`](../../../../fork-plugins/dsh-agent-teams) 中引入精确的外置 tag `v0.1.16-rc.3`，并且只为 DSH `0.1.5-rc.1` 分发私有产物 `0.1.16-dsh015rc1.1`。manifest、peer 声明、开发依赖、pnpm overrides、lockfile、兼容策略、setup 脚本和仓库内 SHA-256 全部指向这一精确组合。
 
-运行时保留上游 `withTeamLock()` 的末尾队列项删除逻辑及其串行交接测试。DSH 0.1.5 适配会把未发布 Agent 显式传入成员 setup，通过 `ownEvents()` 读取当前 Session 事件，使用统一 Host Queue/Steer adapter，并保留 [`FORK_MAINTENANCE.md`](../../../../FORK_MAINTENANCE.md#local-agentteams-package) 列出的全部 fork 投递、恢复、退休和缓存行为。
+运行时保留上游 `withTeamLock()` 的末尾队列项删除逻辑及其串行交接测试。DSH 0.1.5 RC.1 适配会把未发布 Agent 显式传入成员 setup，通过 `ownEvents()` 读取当前 Session 事件，使用统一 Host Queue/Steer adapter，并保留 [`FORK_MAINTENANCE.md`](../../../../FORK_MAINTENANCE.md#local-agentteams-package) 列出的全部 fork 投递、恢复、退休和缓存行为。
 
 Profile 安装使用仓库内产物，不使用 npm `latest` 或 `next`。安装只更换可执行插件代码；工作区 `.agent-teams` 记录、Session、附件和凭据均不修改。新代码必须在 profile 重启后才会生效。
 
