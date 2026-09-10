@@ -1,0 +1,10 @@
+version: 1
+scenario: background-job-wait-wake
+profile: headless
+composition: background-job-wait-wake
+recording: authored
+header:
+  class: background-job-wait-wake
+  pin: true
+replay:
+  override: true

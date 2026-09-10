@@ -342,6 +342,29 @@ describe('job_output', () => {
     expect(text(result)).toBe('(no new output)\n[status: running]')
   })
 
+  it('preserves one completion wake when a blocking read returns a live owned job', async () => {
+    const { ctx } = await setup({ maxConsecutiveWakes: 1, yieldWaitOnNextStep: true })
+    const inject = vi.fn()
+    const followup = vi.fn()
+    const owner = fakeAgent(ctx, 'sess-wait-entitlement', { inject, followup, status: 'idle' })
+
+    await settleTasks(ctx, owner, 1)
+    const waiting = producer({ owner })
+    ctx.jobs.start(waiting.spec)
+    const steering = createUserMessage({
+      content: [{ type: 'text', text: 'yield the blocking read' }],
+      source: { kind: 'user' },
+    })
+    ;(owner.inbox.nextStep as UserMessage[]).push(steering)
+    const result = await call(ctx, 'job_output', { job_id: 'bash-2', wait: true }, owner)
+    expect(text(result)).toBe('(no new output)\n[status: running]')
+
+    waiting.settle({ status: 'completed' })
+    await tick()
+    expect(followup).toHaveBeenCalledTimes(2)
+    expect(inject).not.toHaveBeenCalled()
+  })
+
   it('optionally yields a live wait when next-step input enters the owner inbox', async () => {
     const { ctx } = await setup({ yieldWaitOnNextStep: true })
     const owner = fakeAgent(ctx, 'sess-steered')
@@ -714,7 +737,9 @@ describe('completion notice delivery', () => {
   it('degrades to injection once the consecutive wake budget is spent', async () => {
     const { ctx } = await setup({ maxConsecutiveWakes: 2 })
     const inject = vi.fn()
-    const followup = vi.fn()
+    const followup = vi.fn(() => {
+      emitAgentEvent(ctx, owner, 'agent/status', { status: 'running' })
+    })
     const owner = fakeAgent(ctx, 'sess-1', { inject, followup, status: 'idle' })
 
     await settleTasks(ctx, owner, 3)
@@ -739,6 +764,24 @@ describe('completion notice delivery', () => {
     })
     await settleTasks(ctx, owner, 1)
     expect(followup).toHaveBeenCalledTimes(2)
+  })
+
+  it('restores the consecutive wake budget when another source starts the driver', async () => {
+    const { ctx } = await setup({ maxConsecutiveWakes: 1 })
+    const inject = vi.fn()
+    const followup = vi.fn()
+    const owner = fakeAgent(ctx, 'sess-external-wake', { inject, followup, status: 'idle' })
+
+    await settleTasks(ctx, owner, 1)
+    ;(owner.inbox.nextTurn as UserMessage[]).push(createUserMessage({
+      content: [{ type: 'text', text: 'outside wake' }],
+      source: { kind: 'plugin', plugin: 'other-waker' },
+    }))
+    emitAgentEvent(ctx, owner, 'agent/status', { status: 'running' })
+    await settleTasks(ctx, owner, 1)
+
+    expect(followup).toHaveBeenCalledTimes(2)
+    expect(inject).not.toHaveBeenCalled()
   })
 
   it('neither wakes nor injects into an owner its own teardown is draining', async () => {
@@ -792,17 +835,20 @@ describe('completion notice delivery', () => {
     expect(inject).not.toHaveBeenCalled()
   })
 
-  it('keeps the budget spent when the owner only claims plugin notices', async () => {
+  it('keeps the budget spent when a driver only carries tool-jobs notices', async () => {
     const { ctx } = await setup({ maxConsecutiveWakes: 1 })
     const followup = vi.fn()
     const owner = fakeAgent(ctx, 'sess-1', { followup, status: 'idle' })
 
     await settleTasks(ctx, owner, 1)
+    const notice = createUserMessage({
+      content: [{ type: 'text', text: 'background job bash-1 finished' }],
+      source: { kind: 'plugin', plugin: 'tool-jobs', form: 'notice', summary: 'bash' },
+    })
+    ;(owner.inbox.nextStep as UserMessage[]).push(notice)
+    emitAgentEvent(ctx, owner, 'agent/status', { status: 'running' })
     emitAgentEvent(ctx, owner, 'agent/inbox/claimed', {
-      message: createUserMessage({
-        content: [{ type: 'text', text: 'background job bash-1 finished' }],
-        source: { kind: 'plugin', plugin: 'tool-jobs', form: 'notice', summary: 'bash' },
-      }),
+      message: notice,
       turn: 1,
     })
     await settleTasks(ctx, owner, 1)

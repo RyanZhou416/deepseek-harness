@@ -9,7 +9,7 @@ English | [中文](README.zh.md)
 
 ## Summary
 
-`dsh-tool-jobs` gives the agent three kind-independent tools for background work — `job_output`, `job_list`, and `job_kill` — so any job the agent started, whether a background command, a PTY send, or a subagent, is read, listed, and cancelled through the same controls. When a job finishes, the owning agent is told in-session: a busy agent gets the notice in its next step, an idle agent is woken with a follow-up turn, bounded per owner. Loading the plugin also attaches the job controller that lets producers start background work. The tools are generic UI cards over `ctx.jobs`; configuration tunes wait timeouts and completion delivery.
+`dsh-tool-jobs` gives the agent three kind-independent tools for background work — `job_output`, `job_list`, and `job_kill` — so any job the agent started, whether a background command, a PTY send, or a subagent, is read, listed, and cancelled through the same controls. When a job finishes, the owning agent is told in-session: a busy agent gets the notice in its next step, while an idle agent is woken within a bounded consecutive chain or after an explicit blocking read returned that job live. Loading the plugin also attaches the job controller that lets producers start background work. The tools are generic UI cards over `ctx.jobs`; configuration tunes wait timeouts and completion delivery.
 
 ## Table of Contents
 
@@ -39,7 +39,7 @@ The three tools return `{ text, job }`, `PublicJobSnapshot[]`, and `{ outcome: '
 
 When a job finishes, the owning agent receives `background job <id> (<kind>: <label>) finished [status: ...]. Read its output with job_output.` as an in-session message. A busy agent has the notice injected into its next step — the turn cannot close while the inbox holds it, so several jobs settling together cost one step rather than one turn each. An idle agent is instead woken with a follow-up turn, because an unclaimed notice is a completion the model never learns about. A kill or a terminal read/wait marks the completion reported and suppresses the redundant notice, as does the teardown cancel that drains an owner or the service.
 
-Waking is bounded: each owner may be woken `maxConsecutiveWakes` times before further notices degrade to injection, and claiming any user-authored message restores the budget. The bound exists because the chain is self-exciting — a woken turn may start the background job whose completion wakes it again. `completionDelivery: quiet` keeps even idle owners on the injection lane, which deterministic transcripts need.
+Waking is bounded: each owner may have `maxConsecutiveWakes` consecutive turns opened by this plugin before further notices degrade to injection. A driver start from another source or a claimed user-authored message restores the budget. A blocking `job_output` that returns an owned job still live reserves that job's next completion wake even when the budget is spent; settlement, a terminal read, or kill consumes the reservation. The bound still stops an unobserved self-exciting chain in which each woken turn starts the next background job. `completionDelivery: quiet` keeps even idle owners on the injection lane, which deterministic transcripts need.
 
 ### Minimal configuration
 
@@ -54,7 +54,7 @@ Loading the plugin with no config is the common path; a `waitTimeoutMs` above `m
 | `waitTimeoutMs` | `30,000` | Wait used when `wait: true` omits `timeout_ms` |
 | `maxWaitTimeoutMs` | `600,000` | Cap for model-supplied waits; larger values clamp down to it |
 | `completionDelivery` | `wakeup` | `wakeup` opens a turn on an idle owner; `quiet` leaves the notice pending |
-| `maxConsecutiveWakes` | `3` | Turns one owner may open by wake before notices degrade to injection |
+| `maxConsecutiveWakes` | `3` | Consecutive turns this plugin may open before unreserved notices degrade to injection |
 | `yieldWaitOnNextStep` | `false` | End a blocking `job_output` wait when next-step input reaches its owning agent |
 
 The generated [configuration catalog](../../../docs/config-catalog.md#deepseek-aidsh-tool-jobs) is the exhaustive source for every accepted field and its JSDoc.
@@ -92,7 +92,7 @@ This section explains the design decisions behind the tools and points at the co
 
 ### Notice delivery lanes
 
-`onJobDone` skips jobs already reported or unowned. A `wakeup` delivery opens a turn on an idle owner while the budget lasts, tracked per exact `Agent` in a `WeakMap`; claiming a user-authored message (`agent/inbox/claimed`) resets that owner's budget. A busy owner — or any notice past the budget, or `quiet` delivery — is injected into the next-step inbox instead. Teardown settlements arrive already `reported`, so disposal never spends a model request announcing a notice nobody can read.
+`onJobDone` skips jobs already reported or unowned. A `wakeup` delivery opens a turn on an idle owner while the consecutive budget lasts, tracked per exact `Agent` in a `WeakMap`; a driver start not caused by this delivery or a claimed user-authored message resets that owner's count. A blocking read that returns a live owned job records one job-id reservation, which lets that completion open a turn past the count. A busy owner — or an unreserved notice past the budget, or `quiet` delivery — is injected into the next-step inbox instead. Teardown settlements arrive already `reported`, so disposal never spends a model request announcing a notice nobody can read.
 
 </details>
 
@@ -158,7 +158,7 @@ Reads return output or `(no new output)` followed by `[status: <status>]` and op
 
 #### Token effect
 
-Results and notices remain in parent history until compaction. Stream reads do not repeat consumed output; a producer-supplied `outputLimitBytes` bounds each complete read or notice. Under `wakeup`, a notice reaching an idle owner also buys a model request the user did not ask for, capped per owner by `maxConsecutiveWakes`; a notice reaching a busy owner adds a step to the turn it is already paying for.
+Results and notices remain in parent history until compaction. Stream reads do not repeat consumed output; a producer-supplied `outputLimitBytes` bounds each complete read or notice. Under `wakeup`, a notice reaching an idle owner also buys a model request the user did not ask for. `maxConsecutiveWakes` caps an unreserved chain; an explicit blocking read that returned the job live reserves its completion wake. A notice reaching a busy owner adds a step to the turn it is already paying for.
 
 #### KV Cache effect
 
@@ -171,8 +171,8 @@ Append-only; newly visible content follows the reusable request prefix and does 
 
 These limits define when the tools are a poor fit. They are current package constraints, not a task backlog.
 
-- **A settlement inside the driver's retirement window still strands its notice** — between the turn loop's last inbox check and the driver committing its idle phase the owner still reads as busy, so the notice is injected and nothing wakes. Steering has the same hole; closing it belongs to `agent-loop`.
-- **A spent wake budget is not restored by time** — only user-authored input refills it, so an unattended agent whose budget ran out collects its remaining notices on the next turn something else opens.
+- **An unobserved self-exciting chain still stops at the wake budget** — a completion whose job was not returned live by a blocking read degrades to injection after `maxConsecutiveWakes` consecutive turns opened by this plugin.
+- **Repeated blocking reads can sustain an unattended chain** — every `job_output(wait: true)` that returns an owned job live reserves that job's completion wake; deterministic deployments must use `completionDelivery: quiet` or an external turn policy.
 - **A notice pending on an idle owner does not survive that owner's disposal** — the disposal cancel clears the unclaimed inbox, and the log keeps the insert/cancel pair as the record.
 - **Stream reads are single-consumer** — independent observers need another runtime API.
 - **Unowned jobs have no session fence** — external callers must supply policy or avoid them.

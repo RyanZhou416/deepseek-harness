@@ -2816,8 +2816,9 @@ export interface Config {
   /** Whether a completion opens a turn on an idle owner (default `wakeup`). */
   completionDelivery?: CompletionDelivery
   /**
-   * Turns one owner may have opened by completion wakes before the next
-   * notice degrades to injection, reset by any user-authored input (default 3).
+   * Consecutive turns one owner may have opened by completion wakes before the
+   * next notice degrades to injection. User input or a driver start outside
+   * this delivery resets the count (default 3).
    * Bounds the self-exciting chain where a woken turn starts the job whose
    * completion wakes it again.
    */

@@ -16,21 +16,27 @@ The delivery machinery was never the obstacle. `Agent.send(message, target, wake
 
 ## Decision
 
-An unreported completion picks its lane from what the owner is doing. A busy owner is injected, unchanged. An idle owner is woken with `followup()`.
+An unreported completion picks its lane from what the owner is doing. A busy owner is injected. An idle owner is woken with `followup()` while the consecutive budget permits it, and a blocking read that returned that owned job live reserves its next completion wake. AgentLoop replays any input admitted after a running driver makes its final inbox decision, so neither delivery lane can strand work during retirement.
 
 This adopts the delivery rule the [continuation manager](2026-08-06-manager-owned-subagent-settlement-delivery.md) already ships for subagent settlement, where "steering rather than injecting is deliberate … This is a correctness rule, not a deployment preference." The two paths do not overlap: `tool-subagent` registers a Task only for a one-shot background child and returns `continuable` before reaching that code, so a child is delivered by exactly one of the two mechanisms.
 
 ### The busy owner keeps injection
 
-For a driver that is genuinely running, `steer()` and `inject()` are the same delivery: `wakeDriver()` returns early without latching for a running, unaborted phase. They differ only for an owner whose turn is cancelled but has not yet converged, where steering redirects to the next turn and replays the wake at convergence.
+For a driver that is running and still accepting steps, `steer()` and `inject()` are the same delivery: the loop claims either from the next-step inbox. After the final empty-inbox decision, both deliveries latch a replacement driver for pending input. They differ for an owner whose turn is cancelled but has not yet converged, where steering redirects to the next turn and replays the wake at convergence.
 
 Injection is correct there. A cancelled turn is a user pressing stop, and reopening one on their behalf launders an interrupt into a model request they did not ask for. The turn loop already covers the ordinary case: it cannot close while the next-step inbox holds anything, so a notice arriving before that check extends the current turn, and several tasks settling together cost one step rather than one turn each.
 
+### Retirement preserves admitted input
+
+After the turn loop's final empty-inbox decision, the running phase marks itself as retiring. `send()` sets the existing convergence wake latch when input is admitted in that phase. The driver publishes idle, then starts a replacement driver only when the inbox still contains the latched work. This adds no public phase or session event, and `inject()` called after the idle publication remains non-waking.
+
 ### Waking is bounded, and the bound is not time
 
-`maxConsecutiveWakes` (default 3) caps the turns one owner may open this way; beyond it a notice degrades to injection and waits for the next turn. Claiming any user-authored message restores the budget — claiming, not arrival, because that is the point human input actually enters a step. Notices this plugin queued never refill it.
+`maxConsecutiveWakes` (default 3) caps consecutive turns this plugin opens for one owner; beyond it an unreserved notice degrades to injection and waits for the next turn. A driver start not caused by this delivery resets the count, so subagent settlement, steering, or another input source breaks the chain. Claiming a user-authored message also restores the budget when that message joins an already-running driver. Notices this plugin queued never refill it.
 
-The bound exists because this chain is self-exciting in a way subagent settlement is not. Settlement is bounded by how many children the model spawned; a woken turn can start the background job whose completion wakes it again, with nobody watching. `dsh run` needs no separate policy: its one user message is claimed in the first turn and never repeats, so the budget is spent monotonically and the process terminates.
+The bound exists because this chain is self-exciting in a way subagent settlement is not. Settlement is bounded by how many children the model spawned; a woken turn can start the background job whose completion wakes it again, with nobody watching. `dsh run` spends the same consecutive budget for jobs it does not explicitly wait on; a blocking live read deliberately opts one exact completion back into waking.
+
+A blocking `job_output` that returns an owned job still running records a one-shot reservation for that job id. Its later completion may wake the idle owner after the consecutive count is spent, because the model explicitly declared that its next action depends on the job. Settlement consumes the reservation even when another waiter already reported the result; a terminal read or kill also clears it.
 
 `completionDelivery: quiet` restores the old lane for idle owners. It exists for deterministic transcripts; job completion independently retains `quiet | wakeup` because its bounded owner-turn policy differs from next-step subagent reports.
 
@@ -52,25 +58,26 @@ The bound exists because this chain is self-exciting in a way subagent settlemen
 
 **Refusing to reopen a turn that already produced a visible answer,** Codex's `MailboxDeliveryPhase` latch. That latch is the default this decision deliberately inverts: waking after the model has spoken is the entire point, and the wake budget is the bound instead.
 
-**A wall-clock window** on top of the counter. For an interactive agent the slow case is the wanted one — an hour-long build finishing and the agent resuming is the feature — and `dsh run` is already bounded by the counter it cannot refill. Worth revisiting only if an unattended long-lived deployment appears.
+**A wall-clock window** on top of the counter. For an interactive agent the slow case is the wanted one — an hour-long build finishing and the agent resuming is the feature — while an unobserved `dsh run` chain remains bounded by the counter. A blocking live read is the explicit exception, independent of elapsed time.
 
 **Suppressing `onJobDone` entirely during owner drain,** symmetric with the service-wide `listenersClosed`. It reads cleaner and removes a signal that is not only for notices: the force-fail record and the runtime invariant both observe teardown settlements. The `reported` bit denies exactly the reporters and nothing else.
 
 ## Consequences
 
-- Default behavior changes: an idle owner now spends a model request per completion, capped at `maxConsecutiveWakes` per owner between user messages. Deployments that want the old behavior set `completionDelivery: quiet`.
+- Default behavior changes: an idle owner spends a model request per completion while `maxConsecutiveWakes` permits the consecutive chain. Another source starting the driver resets the count, and a blocking read that returned the job live reserves one completion wake. Deployments that want no unsolicited turns set `completionDelivery: quiet`.
 - The `tool-jobs` prompt section needs no edit; "You are notified in-session when a task finishes" became true rather than aspirational.
 - `JobSnapshot.reported` gains teardown as a fourth setter, documented at the Service Definition and in [the subsystem reference](../../../../docs/subsystems/jobs.md).
 - `settle()` announces completion after committing the record and publishing the visible-set change. Any listener relying on running before waiters were released or before `onJobsChanged` now runs after both.
 - The `tool-bash` real-composition test dropped its second user message: settlement alone carries the notice into a turn that collects the output. It asserts the durable outcome rather than a turn boundary, because whether the command outlives its turn is a race; the lane choice is pinned in `tool-jobs` unit tests instead.
-- Unit coverage pins idle wake, busy injection, quiet delivery, budget exhaustion, budget restore on user input, non-restore on plugin notices, and teardown silence.
+- The keyless `background-job-wait-wake` scenario spends three consecutive wakes, returns the fourth owned job live from a blocking read, and records its reserved completion opening the final turn.
+- Unit coverage pins idle wake, busy injection, quiet delivery, budget exhaustion, reset by user input or an outside driver start, non-reset by a plugin notice inside the same driver, explicit-wait reservation, retirement replay, and teardown silence.
 
 ### Accepted risks
 
-A spent budget is restored only by user input. An unattended agent that exhausts it collects its remaining notices whenever something else opens a turn, and nothing re-arms it in the meantime.
+An unattended agent can exceed the consecutive count by repeatedly making blocking reads that return live jobs. Each bypass remains tied to one exact owner and job id, but a deployment that requires a hard model-request ceiling must use `completionDelivery: quiet` or an external turn policy.
 
 A notice pending on an idle owner under `quiet` still dies with that owner's disposal, unchanged from before: the disposal cancel clears the unclaimed inbox and the log keeps the insert/cancel pair as the record. The [settlement delivery note](2026-08-06-manager-owned-subagent-settlement-delivery.md) owns the offline-mailbox discussion this would need.
 
 Whether a completion extends the running turn or opens a new one is a genuine race for short-lived tasks, so no authored transcript can hold both orders. Assembled coverage asserts the outcome; the lane choice is pinned in unit tests.
 
-One microtask window survives: a settlement landing after the turn loop's last inbox check but before the driver commits its idle phase still reads `status === 'running'`, so it injects and nothing wakes. Steering would not close it either — `wakeDriver()` latches only for maintenance and post-cancel phases, not for a driver between its final check and its own retirement. Closing it needs an `agent-loop` boundary that publishes retirement before the last claim, which is a core-agent decision rather than a delivery-policy one.
+The retirement latch applies only after the running driver makes its final empty-inbox decision. Context injected after the driver publishes idle retains the public non-waking behavior and waits for follow-up or steering.

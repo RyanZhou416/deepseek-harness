@@ -107,6 +107,9 @@ interface Agent {
    * cancel leaves it parked. A wake submitted while already idle always opens
    * its turn boundary, even when its message is cleared before the driver
    * claims ([cancel-convergence wake latch](../../../../.agents/notes/implemented/bug-fix/2026-08-07-cancel-convergence-wake-latch.md)).
+   * Input admitted after a running driver makes its final inbox decision
+   * is replayed after that driver converges to idle
+   * ([retirement wake latch](../../../../.agents/notes/implemented/feature/2026-08-11-background-job-completion-wakes-an-idle-owner.md)).
    * @param message - identified content and the source that supplied it.
    * @param target - the preferred next-turn or next-step inbox boundary.
    * @param wakeup - whether delivery may wake the driver.
@@ -132,9 +135,10 @@ interface Agent {
   /**
    * Queue model-facing context for the next pre-step without waking the
    * driver. A running driver claims it at the nearest later step boundary;
-   * idle drivers leave it pending until follow-up or steering
-   * wakes them. It may miss a request whose pre-step already claimed its
-   * batch. Cancellation or disposal may discard pending context.
+   * context admitted during driver retirement is replayed after convergence.
+   * Idle drivers leave new context pending until follow-up or steering wakes
+   * them. It may miss a request whose pre-step already claimed its batch.
+   * Cancellation or disposal may discard pending context.
    * @param message - identified injected context and the source that supplied it.
    */
   inject(message: UserMessage): void

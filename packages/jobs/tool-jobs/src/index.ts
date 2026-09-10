@@ -36,8 +36,9 @@ export interface Config {
   /** Whether a completion opens a turn on an idle owner (default `wakeup`). */
   completionDelivery?: CompletionDelivery
   /**
-   * Turns one owner may have opened by completion wakes before the next
-   * notice degrades to injection, reset by any user-authored input (default 3).
+   * Consecutive turns one owner may have opened by completion wakes before the
+   * next notice degrades to injection. User input or a driver start outside
+   * this delivery resets the count (default 3).
    * Bounds the self-exciting chain where a woken turn starts the job whose
    * completion wakes it again.
    */
@@ -248,9 +249,11 @@ export function apply(ctx: Context, config: Config): void {
   }
 
   // Turns this plugin opened on each owner since that owner last consumed
-  // human input. Keyed by the exact Agent, so a same-session replacement
-  // starts with a full budget.
+  // human input or another source started its driver. Keyed by the exact Agent,
+  // so a same-session replacement starts with a full budget.
   const spentWakes = new WeakMap<Agent, number>()
+  const deliveringWake = new WeakSet<Agent>()
+  const awaitedCompletions = new WeakMap<Agent, Set<JobId>>()
   if (waitDefault > waitCap) {
     throw new Error(`tool-jobs: waitTimeoutMs (${waitDefault}) exceeds maxWaitTimeoutMs (${waitCap})`)
   }
@@ -261,11 +264,34 @@ export function apply(ctx: Context, config: Config): void {
   }
   // Nothing spends the budget under quiet delivery, so nothing needs to refill it.
   if (delivery === 'wakeup') {
+    ctx.on('agent/status', ({ agent, status }) => {
+      if (status !== 'running' || deliveringWake.has(agent)) return
+      const pending = [...agent.inbox.nextStep, ...agent.inbox.nextTurn]
+      if (pending.some(message => message.source.kind !== 'plugin' || message.source.plugin !== 'tool-jobs')) {
+        spentWakes.delete(agent)
+      }
+    })
     ctx.on('agent/inbox/claimed', ({ agent, message }) => {
       // Claiming is the point the human's input actually enters a step; a notice
       // this plugin itself queued must not refill the budget it just spent.
       if (message.source.kind === 'user') spentWakes.delete(agent)
     })
+  }
+
+  const rememberAwaitedCompletion = (agent: Agent, id: JobId): void => {
+    let ids = awaitedCompletions.get(agent)
+    if (ids === undefined) {
+      ids = new Set()
+      awaitedCompletions.set(agent, ids)
+    }
+    ids.add(id)
+  }
+
+  const forgetAwaitedCompletion = (agent: Agent, id: JobId): boolean => {
+    const ids = awaitedCompletions.get(agent)
+    if (ids === undefined || !ids.delete(id)) return false
+    if (ids.size === 0) awaitedCompletions.delete(agent)
+    return true
   }
 
   const outputLimits = new WeakMap<ToolExecution, number>()
@@ -316,6 +342,7 @@ export function apply(ctx: Context, config: Config): void {
   // chain reaches, so a mount under one preset never sees another preset's
   // agents; this listener owns delivery, not the choice of whom to deliver to.
   ctx.jobs.onJobDone((snapshot, owner) => {
+    const awaited = owner === undefined ? false : forgetAwaitedCompletion(owner, snapshot.id)
     if (snapshot.reported || owner === undefined) return
     const message = createUserMessage({
       content: [{
@@ -330,9 +357,14 @@ export function apply(ctx: Context, config: Config): void {
       },
     })
     const spent = spentWakes.get(owner) ?? 0
-    if (delivery === 'wakeup' && owner.status === 'idle' && spent < wakeBudget) {
-      spentWakes.set(owner, spent + 1)
-      owner.followup(message)
+    if (delivery === 'wakeup' && owner.status === 'idle' && (awaited || spent < wakeBudget)) {
+      spentWakes.set(owner, Math.min(spent + 1, wakeBudget))
+      deliveringWake.add(owner)
+      try {
+        owner.followup(message)
+      } finally {
+        deliveringWake.delete(owner)
+      }
       return
     }
     owner.inject(message)
@@ -397,6 +429,15 @@ export function apply(ctx: Context, config: Config): void {
         }
       }
       const read = ctx.jobs.read(id, exec.agent)
+      if (exec.agent !== undefined) {
+        if (args.wait === true
+          && read.snapshot.ownerSession !== undefined
+          && (read.snapshot.status === 'running' || read.snapshot.status === 'stopping')) {
+          rememberAwaitedCompletion(exec.agent, id)
+        } else if (read.snapshot.status !== 'running' && read.snapshot.status !== 'stopping') {
+          forgetAwaitedCompletion(exec.agent, id)
+        }
+      }
       return { text: read.text, job: publicJob(read.snapshot) }
     },
     presentCall: args => presentTaskCall(`Read output from background job ${args.job_id}`, 'read', args.job_id),
@@ -453,6 +494,7 @@ export function apply(ctx: Context, config: Config): void {
     execute(args, exec) {
       const id = validateJobId(args.job_id)
       const result = ctx.jobs.kill(id, exec.agent, args.reason)
+      if (exec.agent !== undefined) forgetAwaitedCompletion(exec.agent, id)
       // A snapshot describes current state without consuming pending output.
       const snapshot = publicJob(ctx.jobs.get(id, exec.agent))
       return Promise.resolve({

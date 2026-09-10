@@ -1,0 +1,5 @@
+# Deterministic completion-wake composition: the fixture settles each job only
+# after its owner reaches idle, without depending on process or clock timing.
+- insert:
+    - id: snapshot-idle-job
+      name: '../../../packages/test-support/session-snapshot/tests/fixtures/idle-job.ts'

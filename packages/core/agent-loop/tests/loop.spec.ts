@@ -936,6 +936,36 @@ describe('agent loop', () => {
     expect(flat).not.toContain('<context source=')
   })
 
+  it.each(['inject', 'steer'] as const)('replays %s input that lands during driver retirement', async (method) => {
+    const adapter = new MockAdapter([textResponse('first reply'), textResponse('late reply')])
+    const ctx = await harness(adapter)
+    const agent = await ctx.agentLoop.create(SessionId(`retirement-${method}`), {
+      provider: 'mock',
+      model: 'mock',
+    })
+    let scheduled = false
+    ctx.on('session/event', (session, event) => {
+      if (session !== agent.session || event.type !== 'turn/end' || scheduled) return
+      scheduled = true
+      // The queued microtask runs after turn() makes its final inbox decision
+      // but before kick() commits idle, deterministically exercising retirement.
+      queueMicrotask(() => {
+        agent[method](createUserMessage({
+          content: [{ type: 'text', text: `late ${method}` }],
+          source: method === 'inject' ? { kind: 'plugin', plugin: 'late-input' } : { kind: 'user' },
+        }))
+      })
+    })
+
+    send(agent, 'start')
+    await agent.whenIdle()
+
+    expect(userTexts(agent)).toEqual(['start', `late ${method}`])
+    expect(adapter.requests).toHaveLength(2)
+    expect(agent.session.snapshotEvents().filter(event => event.type === 'turn/start')).toHaveLength(2)
+    expect(agent.inbox.nextStep).toHaveLength(0)
+  })
+
   it('inject() persists structured context content verbatim with durable source', async () => {
     const adapter = new MockAdapter([textResponse('ok')])
     const ctx = await harness(adapter)
