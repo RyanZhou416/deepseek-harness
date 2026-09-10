@@ -122,6 +122,7 @@ export type StagedPlanMutation =
 
 /** Runtime bridge shared by model-facing tools and the Web staging surface. */
 export interface AgentTeamsRuntime {
+  isPendingMember(agent: Agent): boolean
   updateStagedPlan(captain: Agent, teamId: string, mutation: StagedPlanMutation, signal?: AbortSignal): Promise<TeamState>
   updateStagedPlanBatch(captain: Agent, teamId: string, mutations: readonly StagedPlanMutation[], signal?: AbortSignal): Promise<TeamState>
   approveStagedTeam(captain: Agent, teamId: string, signal?: AbortSignal): Promise<{ teamId: string; members: number; tasks: number }>
@@ -411,6 +412,16 @@ export async function haltTeamWork(input: {
   }
 }
 
+/** Web approval has no tool result in the captain's conversation. */
+export function stagedPlanApprovedContext(teamName: string): string {
+  return [
+    `The user approved the staged AgentTeams plan "${teamName}" from the pre-run review UI.`,
+    'Approval has committed; the scheduler owns dispatch of the approved team. Do not approve again, recreate the roster, or send messages merely to start assigned tasks.',
+    'Acknowledge the approval and handle any reports or user work already pending. Yield only when waiting for members is the remaining action. Their reports will wake you automatically; do not busy-poll status or keep a turn running just to wait.',
+    'On a report, inspect the result and coordinate the next necessary action. If work has since been halted, respect that state and resume only on an explicit user request.',
+  ].join('\n')
+}
+
 /** Context queued after the human rejects a staged plan. */
 export function stagedPlanDiscardContext(teamName: string): string {
   return [
@@ -666,6 +677,7 @@ export function registerAgentTeamsTools(ctx: Context, config: ToolsConfig): Agen
   }
 
   const runtime: AgentTeamsRuntime = {
+    isPendingMember: memberSelections.isPendingMember,
     updateStagedPlan,
     updateStagedPlanBatch,
     approveStagedTeam,
@@ -726,7 +738,10 @@ export function registerAgentTeamsTools(ctx: Context, config: ToolsConfig): Agen
         const current = await findTeamByParticipant(stateRoot, captain.id)
         if (current !== undefined) {
           const relationship = current.captainSessionId === captain.id ? 'lead' : 'belong to'
-          throw new Error(`you already ${relationship} team "${current.name}" — end or leave it before creating another`)
+          const guidance = current.captainSessionId === captain.id
+            ? 'Use agent_teams_status and continue the existing team. Do not delete and recreate it merely to continue work. End it only when the user explicitly wants a separate new team.'
+            : 'Continue your assigned member work and report to your captain; do not create a separate team.'
+          throw new Error(`you already ${relationship} team "${current.name}" (id ${current.id}). ${guidance}`)
         }
         return withTeamLock(teamLockKey(stateRoot, teamId), async () => {
           const existing = await readTeam(stateRoot, teamId)
@@ -2032,7 +2047,7 @@ export function registerAgentTeamsTools(ctx: Context, config: ToolsConfig): Agen
 
   ctx.tools.register(defineTool({
     name: 'agent_teams_delete',
-    description: 'End your team: interrupts all members (best effort) and deletes the team\'s state directory (team file, tasks, mailboxes). Use when the team\'s work is done or abandoned.',
+    description: 'End and archive your team: interrupts members and moves the current tasks and mailboxes out of active state for later inspection. Use when the work is done or explicitly abandoned. A same-name archive replaces its previous generation.',
     parameters: {},
     output: {
       schema: {
@@ -2045,7 +2060,7 @@ export function registerAgentTeamsTools(ctx: Context, config: ToolsConfig): Agen
       },
       render: (args, value) => [{
         type: 'text',
-        text: `Team "${value.team_name}" deleted.`,
+        text: `Team "${value.team_name}" ended and archived.`,
       }],
     },
     async execute(_args, exec) {
