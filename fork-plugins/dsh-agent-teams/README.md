@@ -22,7 +22,7 @@
 
 `dsh-agent-teams` turns the current DeepSeek Harness session into a captain that can assemble durable sub-agents, split a goal into dependency-aware tasks, and coordinate work through direct messages.
 
-Ask in natural language. The plugin provides the team protocol, eleven coordination tools, persistent state, an automatic shared-task scheduler, and a live Web UI—without requiring a separate workflow engine.
+Ask in natural language. The plugin provides the team protocol, 13 coordination tools, persistent state, an automatic shared-task scheduler, and a live Web UI—without requiring a separate workflow engine.
 
 <p align="center">
   <img src="./assets/ui.png" width="100%" alt="DeepSeek Harness conversation with the AgentTeams live activity panel, members, tasks, dependencies, and reports">
@@ -30,7 +30,7 @@ Ask in natural language. The plugin provides the team protocol, eleven coordinat
 
 ## Releases
 
-> **RyanZhou416 fork build:** `0.1.16-dsh013alpha2.1` vendors upstream [v0.1.16-rc.1](./release-notes/v0.1.16-rc.1.md) and targets `dsh-v0.1.3-alpha.2`. It keeps the upstream compatibility, recovery, security, and Web UI fixes while preserving nearest-step member delivery, durable cold-captain mailbox recovery, retired-member delivery guards, and bounded unread-mailbox projection caching. Install the repository artifact instead of an npm tag.
+> **RyanZhou416 fork build:** `0.1.16-dsh015alpha2.1` vendors upstream [v0.1.16-rc.3](./release-notes/v0.1.16-rc.3.md) and targets `dsh-v0.1.5-alpha.2`. It includes the upstream team-lock cleanup, stable capability presentation, existing-team reuse guidance, and Web approval wakeups while preserving nearest-step member delivery, durable cold-captain mailbox recovery, retired-member delivery guards, and bounded unread-mailbox projection caching. Install the repository artifact instead of an npm tag.
 
 The upstream release candidate remains on npm's `next` channel for its own 0.1.2 compatibility matrix. Check [GitHub Releases](https://github.com/NanmiCoder/dsh-agent-teams/releases) for upstream availability and history.
 
@@ -52,24 +52,20 @@ The conversation card and activity panel use Harness's official locale service. 
 ## Install and choose versions
 
 > [!IMPORTANT]
-> **`0.1.16-dsh013alpha2.1` is a private fork build.** It supports only the exact `dsh-v0.1.3-alpha.2` host cohort. Install the checked-in tgz through the fork setup workflow; do not substitute npm `latest` or `next`.
+> **`0.1.16-dsh015alpha2.1` is a private fork build.** It supports only the exact `dsh-v0.1.5-alpha.2` host cohort. Install the checked-in tgz through the fork setup workflow; do not substitute npm `latest` or `next`.
 
-| Harness host | Candidate track | Installation rule |
+| Use case | DeepSeek Harness | AgentTeams plugin |
 | --- | --- | --- |
-| **0.1.3-alpha.2** | Fork acceptance target | Use the repository artifact and keep the complete DSH dependency cohort at this exact version. |
+| Fork acceptance target | **`0.1.5-alpha.2`** | **`0.1.16-dsh015alpha2.1`** |
 | Other versions, source HEAD, embedded Desktop cores | Outside the current matrix | Keep a known working exact pair or complete acceptance before adding a target. |
 
-[compatibility.json](./compatibility.json) is the single source for development and verification. It pins the private `dsh013alpha2` channel and the exact host cohort.
+[compatibility.json](./compatibility.json) is the single source for development and verification. It pins the private `dsh015alpha2` channel and the exact host cohort.
 
 ### Ordinary users: keep a matching host and plugin
 
 Use the fork's [plugin installation workflow](../README.md), which verifies the repository artifact digest before it updates the selected profile.
 
-Restart the actual Harness process after changing either side and refresh the browser. Updating a global CLI does not replace an embedded Desktop core or another source checkout. For an unpublished checkout, use the source build below.
-
-An exact npm CLI version can still contain broad transitive dependencies. Preserve a verified lockfile and inspect the actual installation. Do not delete credentials or `.agent-teams` data to address a version mismatch.
-
-### Build and verify this candidate
+**After installation, stop and restart Harness for that profile, then refresh the browser.**
 
 In a checkout containing this change:
 
@@ -95,11 +91,11 @@ The doctor checks the DSH dependency cohort, duplicate runtime identities and th
 
 ### Developers: test the exact fork host
 
-Development uses exact `0.1.3-alpha.2` packages, cohort-wide `pnpm.overrides`, and a frozen lockfile. The runtime runner creates an isolated installation, profile, and workspace, installs the candidate tgz, and checks the resolved dependency cohort.
+Development uses exact `0.1.5-alpha.2` packages, cohort-wide `pnpm.overrides`, and a frozen lockfile. The runtime runner creates an isolated installation, profile, and workspace, installs the candidate tgz, and checks the resolved dependency cohort.
 
 ```sh
 node scripts/harness-runtime-verify.mjs \
-  --host-version 0.1.3-alpha.2 \
+  --host-version 0.1.5-alpha.2 \
   --artifact ./agent-teams-candidate.tgz \
   --report-dir /tmp/agent-teams-alpha2-check
 ```
@@ -116,7 +112,7 @@ Then ask for a team directly:
 
 ## How it works
 
-1. The current session creates a team and becomes its captain.
+1. For a request to use AgentTeams, the captain follows the core protocol already in its system instructions. It continues an existing team and uses `agent_teams_status` when current state needs checking. When no team exists, the goal becomes a staged plan for review.
 2. The captain adds role-specific members backed by continuable sub-agents.
 3. The goal becomes tasks with owners and explicit dependencies.
 4. The shared scheduler uses real `running / idle / ready` state to atomically claim one ready task per idle member and wake it. An interrupted resident attempt stays parked and can resume through a direct message without losing its capability; after a cold process restart, the scheduler retries stranded open work with a fresh attempt.
@@ -126,6 +122,8 @@ Then ask for a team directly:
 Team state is stored under `<workspace>/.agent-teams/`; the Web panel reads that disk truth and combines it with live sub-agent activity.
 
 Member creation is zero-interaction by default: a member on the captain's current LLM route snapshots that provider, model, and reasoning effort, while a member on a requested alternative route snapshots the target model's default effort; later continuations restore the resolved snapshot. Only an explicit heterogeneous-team request (for example, “backend on provider A/model X, frontend on provider B/model Y”) supplies a member-specific `provider` + `model`; there is no per-member model or reasoning prompt.
+
+Captain sessions keep the concise core protocol and the original 13 native team tools from their first request. All business tools are directly available; no loading tool or extra activation call is needed. Configured profiles retain their bounded directory in the fixed system prompt. Creating, approving, continuing or ending a team does not rewrite the system prompt or tool schemas. Core rules remain available after history compaction or discarded code-mode tool results. Members receive four team tools, fixed member instructions, and their ordinary coding/research tools. Web approval wakes the captain with a control message; later member reports wake it again. See the [fixed protocol and benchmark contract](./docs/progressive-loading.md).
 
 ## Slash command
 
@@ -141,7 +139,7 @@ command), describe the goal, and press Enter.
 The command pipeline claims the line, then preserves that exact input as an
 ordinary user follow-up so it remains visible in the main chat. The gesture
 boundary adds the deterministic activation directive at pre-step, so the
-captain protocol still starts immediately. The invocation is also durably
+first model request follows the staged planning protocol without a mandatory helper call. The invocation is also durably
 logged (`command/run` / `command/done`).
 
 Surfaces without command adjudication (for example the headless CLI) get the

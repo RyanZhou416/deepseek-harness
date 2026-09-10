@@ -22,7 +22,7 @@
 
 `dsh-agent-teams` 让当前 DeepSeek Harness 会话成为队长：创建可续聊的子 Agent、把目标拆成有依赖的任务，并通过直达消息协调成员工作。
 
-你只需用自然语言提出目标。插件会提供团队协议、11 个协作工具、持久化状态、自动共享任务调度和实时 Web UI，不需要额外的 Workflow 引擎。
+你只需用自然语言提出目标。插件会提供精简的固定团队协议、13 个业务工具、持久化状态、自动共享任务调度和实时 Web UI，不需要额外的 Workflow 引擎。
 
 <p align="center">
   <img src="./assets/ui.png" width="100%" alt="DeepSeek Harness 对话与 AgentTeams 实时活动面板，展示成员、任务依赖和回报">
@@ -30,7 +30,7 @@
 
 ## 版本更新
 
-> **RyanZhou416 fork 构建：**`0.1.16-dsh013alpha2.1` 基于上游 [v0.1.16-rc.1](./release-notes/v0.1.16-rc.1.md)，目标版本为 `dsh-v0.1.3-alpha.2`。它纳入上游兼容、恢复、安全与 Web UI 修复，同时保留最近 step 成员投递、冷队长持久邮箱恢复、退休成员投递守卫和有界未读邮箱投影缓存。请安装仓库内产物，不要使用 npm 标签。
+> **RyanZhou416 fork 构建：**`0.1.16-dsh015alpha2.1` 基于上游 [v0.1.16-rc.3](./release-notes/v0.1.16-rc.3.md)，目标版本为 `dsh-v0.1.5-alpha.2`。它纳入上游团队锁清理、稳定 capability 展示、已有团队复用指引与 Web 批准唤醒，同时保留最近 step 成员投递、冷队长持久邮箱恢复、退休成员投递守卫和有界未读邮箱投影缓存。请安装仓库内产物，不要使用 npm 标签。
 
 上游发布候选仍位于 npm `next` 渠道，并使用它自己的 0.1.2 兼容矩阵。上游发布状态与历史见 [GitHub Releases](https://github.com/NanmiCoder/dsh-agent-teams/releases)。
 
@@ -51,24 +51,20 @@
 ## 安装与版本选择
 
 > [!IMPORTANT]
-> **`0.1.16-dsh013alpha2.1` 是私有 fork 构建。** 它只支持精确的 `dsh-v0.1.3-alpha.2` 宿主依赖组。请通过 fork 安装流程安装仓库内 tgz，不要替换为 npm `latest` 或 `next`。
+> **`0.1.16-dsh015alpha2.1` 是私有 fork 构建。** 它只支持精确的 `dsh-v0.1.5-alpha.2` 宿主依赖组。请通过 fork 安装流程安装仓库内 tgz，不要替换为 npm `latest` 或 `next`。
 
-| Harness 宿主 | 本次候选的定位 | 使用原则 |
+| 使用场景 | DeepSeek Harness | AgentTeams 插件 |
 | --- | --- | --- |
-| **0.1.3-alpha.2** | Fork 验收目标 | 使用仓库内产物，并把整组 DSH 依赖保持在此精确版本。 |
+| Fork 验收目标 | **`0.1.5-alpha.2`** | **`0.1.16-dsh015alpha2.1`** |
 | 其他版本、源码 HEAD、Desktop 内置核心 | 不在当前支持清单中 | 保留已工作的精确组合，或单独完成验收后加入清单。 |
 
-宿主矩阵只有一个来源：[compatibility.json](./compatibility.json)。开发与验证都读取它，其中固定了私有 `dsh013alpha2` 渠道和精确宿主依赖组。
+宿主矩阵只有一个来源：[compatibility.json](./compatibility.json)。开发与验证都读取它，其中固定了私有 `dsh015alpha2` 渠道和精确宿主依赖组。
 
 ### 普通用户：固定匹配的宿主与插件
 
 请使用 fork 的[插件安装流程](../README.zh.md)。该流程在更新所选 profile 前会校验仓库产物摘要。
 
-宿主或插件更新后，停止并重启实际运行的 Harness，再刷新浏览器。全局 CLI 升级不会更换 Desktop 内置核心，也不会更新另一个源码工作区。尚未发布的 checkout 可使用下方源码构建方式。
-
-npm 的精确 CLI 版本仍可能包含宽范围间接依赖。升级时保留已验证的锁文件，对实际安装路径运行诊断；不要通过删除凭据或 `.agent-teams` 来处理版本错配。
-
-### 从源码验证本次候选
+**安装后，停止并重新启动该 profile 的 Harness 进程，再刷新浏览器。**
 
 在包含本次改动的插件 checkout 中：
 
@@ -94,11 +90,11 @@ dsh web --profile agent-teams-preview
 
 ### 开发者：测试精确 fork 宿主
 
-开发依赖通过精确的 `0.1.3-alpha.2`、整组 `pnpm.overrides` 和 frozen lockfile 固定。运行时验证器会创建隔离安装、profile 与工作区，安装候选 tgz，并核对实际解析的依赖组。
+开发依赖通过精确的 `0.1.5-alpha.2`、整组 `pnpm.overrides` 和 frozen lockfile 固定。运行时验证器会创建隔离安装、profile 与工作区，安装候选 tgz，并核对实际解析的依赖组。
 
 ```sh
 node scripts/harness-runtime-verify.mjs \
-  --host-version 0.1.3-alpha.2 \
+  --host-version 0.1.5-alpha.2 \
   --artifact ./agent-teams-candidate.tgz \
   --report-dir /tmp/agent-teams-alpha2-check
 ```
@@ -112,6 +108,8 @@ node scripts/harness-runtime-verify.mjs \
 接着直接用自然语言拉团队：
 
 > 使用 AgentTeams 审查 v0.5.3 之后的提交，分别从性能、安全和产品角度分工，最后输出一份汇总报告。
+
+队长会话从第一轮起保留精简的固定核心协议和原有 13 个业务工具，直接调用，无需额外的加载工具或激活调用。已配置模板的精简目录固定保留。创建、批准、继续或结束团队都不会改写系统提示词和工具 schema，会话压缩或代码模式丢弃工具结果也不会丢失核心规则。成员保留四个团队工具、固定成员说明及普通编程/研究工具。Web 批准后会通知并唤醒队长，后续成员报告会再次唤醒它，无需忙轮询。详见[固定协议与 benchmark 标准](./docs/progressive-loading.md)。
 
 ## 工作方式
 
@@ -196,7 +194,7 @@ pnpm verify
 
 在 `cordis.patch.yml` 的 `profiles` 中配置完整团队模板。每个 profile 都提供成员阵容，可独立指定 provider、model、role、reasoning_effort。`taskPlanning: captain` 表示只提供阵容和约束，由 Captain 根据用户目标设计 DAG；省略该字段或设为 `seed` 时，展开模板中的固定任务图。使用 `/agent-teams --profile <名称> <目标>` 显式激活；不会把首个普通 token 隐式识别为 profile。
 
-普通 `/agent-teams` 流程会调用 `agent_teams_create({ profile, approval: "required" })`：只落盘可编辑的成员占位和 DAG，不创建子会话、不领取任务。成员模型和推理等级直接读取 Harness 的模型目录。「返回对话修改」会终止仍在运行的规划轮次，让队长先追问修改方向，再用一次原子操作更新同一份草案；「放弃本次计划」经二次确认后会归档草案、中止轮次，并向模型注入不得自动重建团队的控制上下文。只有点击「确认并启动团队」才会按最终配置原子创建成员并启动就绪任务。运行中团队的停止入口位于该团队的面板标题，点击后需要二次确认，不再占用输入区域。直接工具调用方可显式传 `approval: "automatic"` 保留旧的立即执行路径。审查或测试失败不会解锁下游；自动 repair/review 不依赖 failed review。
+普通 `/agent-teams` 流程继续已有团队，按需调用 `agent_teams_status` 确认状态；仅在没有当前团队时调用 `agent_teams_create({ profile, approval: "required" })`：只落盘可编辑的成员占位和 DAG，不创建子会话、不领取任务。成员模型和推理等级直接读取 Harness 的模型目录。「返回对话修改」会终止仍在运行的规划轮次，让队长先追问修改方向，再用一次原子操作更新同一份草案；「放弃本次计划」经二次确认后会归档草案、中止轮次，并向模型注入不得自动重建团队的控制上下文。只有点击「确认并启动团队」才会按最终配置原子创建成员并启动就绪任务。运行中团队的停止入口位于该团队的面板标题，点击后需要二次确认，不再占用输入区域。直接工具调用方可显式传 `approval: "automatic"` 保留旧的立即执行路径。审查或测试失败不会解锁下游；自动 repair/review 不依赖 failed review。
 
 ## 许可证
 

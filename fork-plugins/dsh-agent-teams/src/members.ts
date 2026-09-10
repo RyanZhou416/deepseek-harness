@@ -23,20 +23,13 @@ import { deliverMemberPrompt, guardSubagentDelivery, installContinuableMemberSet
 import { acknowledgeMailbox, appendMailbox, CAPTAIN_KEY, createMessage, readRetiredMemberIds, readTeamSync, readTeam, releaseMailboxDelivery, withTeamLock, writeTeam } from './state.ts'
 import { appendTeamEvent, captainSessionOf } from './events.ts'
 import { TERMINAL_TASK_STATUSES, type TeamMember, type TeamState, type TeamTask } from './types.ts'
+import { CAPTAIN_TOOL_NAMES } from './tool-names.ts'
 
 /** Persona snapshot of a profile protocol; the full text lives on team.json. */
 export const PERSONA_PROTOCOL_MAX_CHARS = 400
 
 /** Captain-only AgentTeams tools hidden from newly spawned members. */
-const MEMBER_DENIED_TOOLS = [
-  'agent_teams_create',
-  'agent_teams_add_member',
-  'agent_teams_remove_member',
-  'agent_teams_reassign_task',
-  'agent_teams_create_task',
-  'agent_teams_resume',
-  'agent_teams_delete',
-] as const
+const MEMBER_DENIED_TOOLS = CAPTAIN_TOOL_NAMES
 
 /**
  * Restore the SessionId brand on a value that round-tripped through the
@@ -88,6 +81,8 @@ export interface MemberLlmSelectionRequest {
 
 /** Process-local bridge between spawn admission and synchronous child setup. */
 export interface MemberSelectionRuntime {
+  /** Trusted fresh-child admission, before the durable member id is written. */
+  isPendingMember(agent: Agent): boolean
   /** Make one selection visible while Harness materializes the fresh child. */
   withPending<T>(
     parentSessionId: string,
@@ -366,8 +361,8 @@ export function installMemberSelectionRuntime(
   onFailureSettled?: (workspace: string, teamId: string, memberName: string) => Promise<void>,
 ): MemberSelectionRuntime {
   const pending = new Map<string, MemberLlmSelection>()
-  installContinuableMemberSetup(ctx, (childCtx) => {
-    const child = childCtx.agent
+  installContinuableMemberSetup(ctx, (childCtx, suppliedChild) => {
+    const child = suppliedChild ?? (childCtx as Context & { agent?: Agent }).agent
     if (child === undefined) return () => undefined
     const descriptor = foldSubagentDescriptor(sessionOwnEvents(child.session))
     if (descriptor?.mode !== 'continuable' || !descriptor.label.startsWith(MEMBER_LABEL_PREFIX)) {
@@ -387,7 +382,7 @@ export function installMemberSelectionRuntime(
     let selection = pending.get(key)
     if (selection === undefined) {
       const team = readTeamSync(stateRoot, teamId)
-      if (team?.captainSessionId !== parentSessionId) return () => undefined
+      if (team === undefined || team.captainSessionId !== parentSessionId) return () => undefined
       const durableMember = team.members.find(member => member.name === memberName)
       selection = selectionFromMember(durableMember)
       if (selection !== undefined && (descriptor.agentProvider !== durableMember?.provider || descriptor.agentModel !== durableMember?.model)) {
@@ -408,7 +403,7 @@ export function installMemberSelectionRuntime(
         // Capture the attempt synchronously at the event, before any lock wait
         // can let a captain reassign it or replace the member/team generation.
         const snapshot = readTeamSync(stateRoot, teamId)
-        if (snapshot?.captainSessionId !== parentSessionId) return
+        if (snapshot === undefined || snapshot.captainSessionId !== parentSessionId) return
         const member = snapshot.members.find(item => item.id === child.id && item.name === memberName && item.status !== 'removed')
         if (member === undefined) return
         const task = snapshot.tasks.find(item => item.assignee === memberName
@@ -428,7 +423,7 @@ export function installMemberSelectionRuntime(
         await withTeamLock(`team:${stateRoot}:${teamId}`, async () => {
           const team = await readTeam(stateRoot, teamId)
           const current = team?.members.find(item => item.id === child.id && item.name === memberName && item.status !== 'removed')
-          if (team?.captainSessionId !== parentSessionId || current === undefined || child.status !== 'idle') return
+          if (team === undefined || team.captainSessionId !== parentSessionId || current === undefined || child.status !== 'idle') return
           if (current.status !== 'idle') {
             current.status = 'idle'
             await writeTeam(stateRoot, team)
@@ -473,6 +468,12 @@ export function installMemberSelectionRuntime(
   })
 
   return {
+    isPendingMember(agent) {
+      const parent = agent.session.header.parentSession
+      const descriptor = foldSubagentDescriptor(sessionOwnEvents(agent.session))
+      return parent !== undefined && descriptor?.mode === 'continuable'
+        && pending.has(pendingSelectionKey(parent, descriptor.label))
+    },
     async withPending<T>(
       parentSessionId: string,
       label: string,

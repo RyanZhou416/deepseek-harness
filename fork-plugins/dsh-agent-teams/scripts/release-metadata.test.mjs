@@ -35,7 +35,7 @@ for (const suffix of ['alpha', 'beta', 'rc']) {
 }
 
 test('fork compatibility releases use their explicit private channel', () => {
-  for (const channel of ['dsh012rc1', 'dsh013alpha2']) {
+  for (const channel of ['dsh012rc1', 'dsh015alpha2', 'dsh015alpha2']) {
     const version = `0.1.16-${channel}.1`
     assert.deepEqual(releaseMetadata(fixture(version, channel)), {
       value: version,
@@ -49,8 +49,8 @@ test('reject unsupported versions and unbounded peers', () => {
   for (const version of ['0.1.16-dev.1', '0.1.16-alpha.01', '0.1.16-alpha.1\n', 'v0.1.16', '0.1']) {
     assert.throws(() => releaseMetadata(fixture(version, policy.previewTag)))
   }
-  const mixed = fixture('0.1.16-dsh013alpha2.1', 'dsh013alpha2')
-  mixed.peerDependencies['@deepseek-ai/dsh-agent'] = '^0.1.3-alpha.2'
+  const mixed = fixture('0.1.16-dsh015alpha2.1', 'dsh015alpha2')
+  mixed.peerDependencies['@deepseek-ai/dsh-agent'] = '^0.1.5-alpha.2'
   assert.throws(() => releaseMetadata(mixed), /enumerate/)
 })
 

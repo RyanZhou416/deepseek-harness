@@ -195,13 +195,27 @@ export async function withTeamLock<T>(key: string, fn: () => Promise<T>): Promis
   const previous = locks.get(key) ?? Promise.resolve()
   let release!: () => void
   const gate = new Promise<void>((resolve) => { release = resolve })
-  locks.set(key, previous.then(() => gate))
+  const tail = previous.then(() => gate)
+  locks.set(key, tail)
   await previous
   try {
     return await fn()
   } finally {
     release()
+    // Drop this key's queue entry once we are still its tail, so settled
+    // teams do not leave one resolved promise chained forever (the same
+    // cleanup discipline as the scheduler's serializeMember). A successor
+    // that already appended itself owns the map slot; keep its entry.
+    if (locks.get(key) === tail) locks.delete(key)
   }
+}
+
+/**
+ * Keys with an in-process lock queue (held or waiting), snapshot for
+ * diagnostics and leak checks. The queue promises themselves stay private.
+ */
+export function teamLockQueueKeys(): readonly string[] {
+  return [...locks.keys()]
 }
 
 /** Longest key emitted before truncating and appending a digest. */
@@ -399,15 +413,25 @@ export async function writeTeam(stateRoot: string, state: TeamState): Promise<vo
 }
 
 /** Read the durable set of member session ids retired by remove/delete. */
+function parseRetiredMemberIds(raw: string): Set<string> {
+  const parsed: unknown = JSON.parse(stripLeadingBom(raw))
+  if (!Array.isArray(parsed) || parsed.some(value => typeof value !== 'string' || value === '')) {
+    throw new Error('invalid AgentTeams retired member index')
+  }
+  return new Set(parsed)
+}
+
+/** Synchronous role hydration before the host's first prompt assembly. */
+export function readRetiredMemberIdsSync(stateRoot: string): Set<string> {
+  try { return parseRetiredMemberIds(readFileSync(join(stateRoot, RETIRED_MEMBERS_FILE), 'utf8')) } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return new Set()
+    throw error
+  }
+}
+
 export async function readRetiredMemberIds(stateRoot: string): Promise<Set<string>> {
   try {
-    const parsed: unknown = JSON.parse(stripLeadingBom(
-      await readFile(join(stateRoot, RETIRED_MEMBERS_FILE), 'utf8'),
-    ))
-    if (!Array.isArray(parsed) || parsed.some(value => typeof value !== 'string' || value === '')) {
-      throw new Error('invalid AgentTeams retired member index')
-    }
-    return new Set(parsed)
+    return parseRetiredMemberIds(await readFile(join(stateRoot, RETIRED_MEMBERS_FILE), 'utf8'))
   } catch (error: unknown) {
     if (error instanceof Error && 'code' in error && (error as NodeJS.ErrnoException).code === 'ENOENT') {
       return new Set()

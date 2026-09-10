@@ -14,7 +14,7 @@ const hostPromptQueue = Symbol.for('dsh.subagent.queuePrompt')
 /** Unified Host Queue/Steer adapter used by Harness 0.1.3 Alpha.2. */
 const hostPromptDelivery = Symbol.for('dsh.subagent.deliverPrompt')
 
-type Setup = (childCtx: Context) => () => void
+type Setup = (childCtx: Context, child?: Agent) => () => void
 type Followup = (parent: Agent, childId: SessionId, content: ContentBlock[], options: {
   source: MessageSource; signal: AbortSignal
 }) => Promise<MessageId>
@@ -87,7 +87,7 @@ export function installContinuableMemberSetup(ctx: Context, setup: Setup): void 
       let teardown: () => void
       try {
         // This notification is synchronous; setup must win the first request.
-        teardown = setup(agent.ctx)
+        teardown = setup(agent.ctx, agent)
       } catch (error: unknown) {
         const failure = new Error(
           `agent-teams: member initialization failed: ${String(error)}`,

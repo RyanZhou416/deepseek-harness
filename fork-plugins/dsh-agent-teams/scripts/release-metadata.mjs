@@ -4,7 +4,7 @@ import { policy, validatePackageCompatibility } from './compatibility.mjs'
 
 // Keep every prerelease and fork build away from npm's default channel.
 export function releaseMetadata(pkg, support = policy) {
-  const match = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-(alpha|beta|rc|dsh012rc1|dsh013alpha2)\.(0|[1-9]\d*))?$/.exec(pkg.version)
+  const match = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-(alpha|beta|rc|dsh012rc1|dsh013alpha2|dsh015alpha2)\.(0|[1-9]\d*))?$/.exec(pkg.version)
   if (!match || match[0] !== pkg.version) throw new Error(`Unsupported release version: ${pkg.version}`)
   validatePackageCompatibility(pkg, support)
   const channel = match[4]

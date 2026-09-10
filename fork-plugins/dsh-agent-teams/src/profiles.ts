@@ -217,7 +217,7 @@ function formatProfileListingLine(entry: ListedTeamProfile): string {
     ? 'captain planning'
     : countLabel(Array.isArray(entry.config.tasks) ? entry.config.tasks.length : 0, 'task')
   const counts = `(${countLabel(memberCount, 'member')}, ${graph})`
-  const summary = protocolSummary(entry.config.protocol)
+  const summary = protocolSummary(entry.config.protocol) ?? protocolSummary(entry.config.description)
   return summary === undefined
     ? `- ${entry.name} ${counts}`
     : `- ${entry.name} ${counts}: ${summary}`
