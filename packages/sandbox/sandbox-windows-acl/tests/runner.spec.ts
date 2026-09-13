@@ -7,7 +7,7 @@
 
 import { spawnSync } from 'node:child_process'
 import { existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
@@ -25,13 +25,6 @@ function pwshAvailable(): boolean {
   return spawnSync(resolvePwshPath(), ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', '$true'], { encoding: 'utf8' }).status === 0
 }
 
-function runRunner(args: string[], timeoutMs = 30_000) {
-  return spawnSync(process.execPath, ['--import', 'tsx/esm', runnerEntry, ...args], {
-    timeout: timeoutMs,
-    encoding: 'utf8',
-  })
-}
-
 describe.skipIf(!isWin32 || !pwshAvailable())('windows-acl runner', () => {
   let scratchRoot!: string
   let writableDir!: string
@@ -47,11 +40,22 @@ describe.skipIf(!isWin32 || !pwshAvailable())('windows-acl runner', () => {
   // hosts; the probe test skips itself when the directory cannot be created.
   let publicProbeDir: string | undefined
 
+  function runRunner(args: string[], timeoutMs = 30_000) {
+    // The restricted child must not inherit an ambient Temp DACL that grants Everyone writes.
+    const env = Object.fromEntries(Object.entries(process.env).filter(([name]) => !/^(TEMP|TMP)$/iu.test(name)))
+    return spawnSync(process.execPath, ['--import', 'tsx/esm', runnerEntry, ...args], {
+      timeout: timeoutMs,
+      encoding: 'utf8',
+      env: { ...env, TEMP: isolatedTemp, TMP: isolatedTemp },
+    })
+  }
+
   beforeAll(() => {
-    scratchRoot = mkdtempSync(join(tmpdir(), 'dsh-acl-runner-'))
+    // WRITE_RESTRICTED permits Everyone ACEs, so ambient Temp is not a denial oracle.
+    scratchRoot = mkdtempSync(join(homedir(), 'dsh-acl-runner-'))
     writableDir = join(scratchRoot, 'writable')
     mkdirSync(writableDir)
-    isolatedTemp = mkdtempSync(join(tmpdir(), 'dsh-acl-runner-temp-'))
+    isolatedTemp = mkdtempSync(join(homedir(), 'dsh-acl-runner-temp-'))
     secretFile = join(scratchRoot, 'secret.txt')
     writeFileSync(secretFile, 'top secret - must stay readable to prove the read boundary')
     escapeFile = join(scratchRoot, 'escaped.txt')

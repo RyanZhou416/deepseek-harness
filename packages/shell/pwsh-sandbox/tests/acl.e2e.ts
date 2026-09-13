@@ -17,6 +17,7 @@ import type { SandboxExecutionPolicy } from '@deepseek-ai/dsh-sandbox'
 import { resolvePwshPath } from '@deepseek-ai/dsh-pwsh-local'
 import { LocalSandboxProvider } from '@deepseek-ai/dsh-sandbox-local'
 import { SandboxPolicyService } from '@deepseek-ai/dsh-sandbox-policy'
+import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import LocalSubprocessRuntime from '@deepseek-ai/dsh-subprocess-local'
 import { SandboxPwshExecutor } from '../src/index.ts'
 
@@ -29,34 +30,42 @@ function pwshAvailable(): boolean {
 describe.skipIf(!isWin32 || !pwshAvailable())('pwsh-sandbox real ACL confinement', () => {
   let scratchRoot!: string
   let writableDir!: string
-  let outsideTempDir!: string
+  let outsideDir!: string
   let secretFile!: string
   let escapeFile!: string
   let executor!: SandboxPwshExecutor
+  const fibers: Array<{ dispose(): Promise<void> }> = []
 
   beforeAll(async () => {
-    // The workspace escape sits under the profile. A separate directory under
-    // the ambient temp root proves that the root itself is not granted: the
-    // runner creates its own private child and rewrites TMP/TEMP to it.
+    // The sibling directory has no workspace or private-temp grant. The ambient
+    // temp root cannot be a denial oracle when its DACL grants Everyone writes.
     scratchRoot = mkdtempSync(join(homedir(), 'dsh-pwsh-sandbox-e2e-'))
     writableDir = join(scratchRoot, 'writable')
     mkdirSync(writableDir)
-    outsideTempDir = mkdtempSync(join(tmpdir(), 'dsh-pwsh-sandbox-e2e-outside-temp-'))
+    outsideDir = join(scratchRoot, 'outside')
+    mkdirSync(outsideDir)
     secretFile = join(scratchRoot, 'secret.txt')
     writeFileSync(secretFile, 'top secret - must stay readable to prove the read boundary')
     escapeFile = join(scratchRoot, 'escaped.txt')
 
     const ctx = new Context()
-    await ctx.plugin(LocalSandboxProvider, {})
-    await ctx.plugin(SandboxPolicyService, { mode: 'workspace-write', workspaceRoot: writableDir })
-    await ctx.plugin(LocalSubprocessRuntime)
-    await ctx.plugin(SandboxPwshExecutor, {})
+    fibers.push(await ctx.plugin(SessionProjectionRegistry))
+    fibers.push(await ctx.plugin(LocalSandboxProvider, {}))
+    fibers.push(await ctx.plugin(SandboxPolicyService, { mode: 'workspace-write', workspaceRoot: writableDir }))
+    fibers.push(await ctx.plugin(LocalSubprocessRuntime))
+    fibers.push(await ctx.plugin(SandboxPwshExecutor, {}))
     executor = ctx.shell as SandboxPwshExecutor
   })
 
-  afterAll(() => {
-    rmSync(scratchRoot, { recursive: true, force: true })
-    rmSync(outsideTempDir, { recursive: true, force: true })
+  afterAll(async () => {
+    const failures: unknown[] = []
+    for (const fiber of fibers.reverse()) {
+      try { await fiber.dispose() } catch (error) { failures.push(error) }
+    }
+    if (scratchRoot !== undefined) {
+      try { rmSync(scratchRoot, { recursive: true, force: true }) } catch (error) { failures.push(error) }
+    }
+    if (failures.length > 0) throw new AggregateError(failures, 'ACL e2e teardown failed')
   })
 
   it('read-only: ordinary path writes denied, reads fine, partial and denial facts ride the result', async () => {
@@ -64,14 +73,14 @@ describe.skipIf(!isWin32 || !pwshAvailable())('pwsh-sandbox real ACL confinement
     const probe = [
       "$ErrorActionPreference='SilentlyContinue';",
       `try{Set-Content -Path '${writableDir}\\ro-write.txt' -Value ok -ErrorAction Stop;'TARGET-WRITE: OK'}catch{'TARGET-WRITE: DENIED'};`,
-      `try{Set-Content -Path '${outsideTempDir}\\ro-write.txt' -Value ok -ErrorAction Stop;'TEMP-WRITE: OK'}catch{'TEMP-WRITE: DENIED'};`,
+      `try{Set-Content -Path '${outsideDir}\\ro-write.txt' -Value ok -ErrorAction Stop;'OUTSIDE-WRITE: OK'}catch{'OUTSIDE-WRITE: DENIED'};`,
       `try{Set-Content -Path '${escapeFile}' -Value ok -ErrorAction Stop;'ESCAPE-WRITE: OK'}catch{'ESCAPE-WRITE: DENIED'};`,
       `try{Get-Content '${secretFile}' -ErrorAction Stop | Out-Null;'SECRET-READ: OK'}catch{'SECRET-READ: DENIED'}`,
     ].join('')
     const result = await executor.run(executor.resolve({ command: probe, sandboxPolicy: policy }))
     expect(result.exitCode, `stderr: ${result.stderr.text}`).toBe(0)
     expect(result.stdout.text).toContain('TARGET-WRITE: DENIED')
-    expect(result.stdout.text).toContain('TEMP-WRITE: DENIED')
+    expect(result.stdout.text).toContain('OUTSIDE-WRITE: DENIED')
     expect(result.stdout.text).toContain('ESCAPE-WRITE: DENIED')
     expect(result.stdout.text).toContain('SECRET-READ: OK')
     expect(existsSync(join(writableDir, 'ro-write.txt'))).toBe(false)
@@ -93,7 +102,7 @@ describe.skipIf(!isWin32 || !pwshAvailable())('pwsh-sandbox real ACL confinement
       "$ErrorActionPreference='SilentlyContinue';",
       `try{Set-Content -Path '${writableDir}\\ww-write.txt' -Value ok -ErrorAction Stop;'TARGET-WRITE: OK'}catch{'TARGET-WRITE: DENIED'};`,
       "try{Set-Content -Path (Join-Path $env:TEMP 'ww-write.txt') -Value ok -ErrorAction Stop;'TEMP-WRITE: OK'}catch{'TEMP-WRITE: DENIED'};",
-      `try{Set-Content -Path '${outsideTempDir}\\ww-write.txt' -Value ok -ErrorAction Stop;'AMBIENT-TEMP-WRITE: OK'}catch{'AMBIENT-TEMP-WRITE: DENIED'};`,
+      `try{Set-Content -Path '${outsideDir}\\ww-write.txt' -Value ok -ErrorAction Stop;'OUTSIDE-WRITE: OK'}catch{'OUTSIDE-WRITE: DENIED'};`,
       `try{Set-Content -Path '${escapeFile}' -Value ok -ErrorAction Stop;'ESCAPE-WRITE: OK'}catch{'ESCAPE-WRITE: DENIED'};`,
       `try{Get-Content '${secretFile}' -ErrorAction Stop | Out-Null;'SECRET-READ: OK'}catch{'SECRET-READ: DENIED'};`,
       "'TEMP-PATH: ' + $env:TEMP",
@@ -102,11 +111,11 @@ describe.skipIf(!isWin32 || !pwshAvailable())('pwsh-sandbox real ACL confinement
     expect(result.exitCode, `stderr: ${result.stderr.text}`).toBe(0)
     expect(result.stdout.text).toContain('TARGET-WRITE: OK')
     expect(result.stdout.text).toContain('TEMP-WRITE: OK')
-    expect(result.stdout.text).toContain('AMBIENT-TEMP-WRITE: DENIED')
+    expect(result.stdout.text).toContain('OUTSIDE-WRITE: DENIED')
     expect(result.stdout.text).toContain('ESCAPE-WRITE: DENIED')
     expect(result.stdout.text).toContain('SECRET-READ: OK')
     expect(existsSync(join(writableDir, 'ww-write.txt'))).toBe(true)
-    expect(existsSync(join(outsideTempDir, 'ww-write.txt'))).toBe(false)
+    expect(existsSync(join(outsideDir, 'ww-write.txt'))).toBe(false)
     expect(existsSync(escapeFile)).toBe(false)
     const privateTemp = result.stdout.text.match(/^TEMP-PATH: (.+)$/mu)?.[1]?.trim()
     expect(privateTemp).toBeDefined()
