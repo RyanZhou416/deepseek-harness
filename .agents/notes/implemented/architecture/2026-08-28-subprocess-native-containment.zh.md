@@ -12,7 +12,7 @@ detached POSIX 进程组、Windows direct-parent 遍历与 PTY 后代扫描只�
 
 ## Decision
 
-`LocalSubprocessRuntime` 会在 target 执行前选择一个 provider 私有的 managed-range owner。符合条件的 Linux 普通命令与 PTY 进入临时 user-systemd scope；符合条件的 Windows 普通命令进入由私有 runner 拥有的 unnamed kill-on-close Job。不支持的宿主使用既有较弱 fallback，并在 provider 生命周期内只警告一次。选定的 native 路径一旦可能已经执行 target，provider 绝不重放 target。
+`LocalSubprocessRuntime` 会在 target 执行前选择一个 provider 私有的 managed-range owner。符合条件的 Linux 普通命令与 PTY 进入临时 user-systemd scope；Windows 普通命令进入由私有 runner 拥有的 unnamed kill-on-close Job。不支持的非 Windows 普通命令宿主使用既有较弱 fallback，并在 provider 生命周期内只警告一次。选定的 native 路径一旦可能已经执行 target，provider 绝不重放 target。
 
 普通 `SubprocessHandle` 没有 PID 或公共 startup 状态。`.done` 报告 direct target result 或 startup／provider failure，`terminate()` 向所选 range 发送信号，`waitForExit()` 只有在同一 range 被证明为空后才成功。`SubprocessTerminalHandle.pid` 继续属于终端约定，因为 PTY identity 与前台检查需要它。
 
@@ -28,7 +28,7 @@ request 被消费或 manager 已观察到 loaded unit 都能建立 scope ownersh
 
 ### Windows runner 与 Job
 
-Windows parent 从 bootstrap cwd 与环境启动 provider runner，把原始 target argv 放在私有 `--` 分隔符之后，并等待 Node 的 runner `spawn` 事件后才发送恰好一条 start request。runner 在 spawn 前报错时，direct launch failure 会原样保留，同时证明 Job range 从未存在，因此 empty-range wait 成功；spawn 后的 infrastructure failure 仍是不确定状态，会使 range settlement reject。除此之外，Node IPC 还承载幂等 terminate control 与恰好一个 result。runner 的 fd 0 至 fd 2 相互隔离，fd 3 承载 IPC，fd 4 至 fd 6 承载 target stdin、stdout 与 stderr。忽略 stdin 时，fd 4 继承平台 null-device descriptor；其他模式使用 pipe。共享 Win32 层通过 Node 导出的 `uv_get_osfhandle()` 把 fd 4 至 fd 6 映射为 OS handle，拒绝 null 以及 Koffi 暴露的 unsigned `UV_INVALID_OS_FILE_HANDLE` 与 `UV_INVALID_FILE_DESCRIPTOR` sentinel，临时启用有效 handle 的继承，并通过 `STARTF_USESTDHANDLES` 传入。`spawnCurrentTokenJobProcess` 要求单独解析的 `applicationName` 与完整 target 环境，并使用 `CREATE_UNICODE_ENVIRONMENT` 传入排序、双 NUL 结尾的 UTF-16LE 块，其中包括 `=X:` 驱动器条目，而不修改 runner 环境。suspended target 进入 Job 并恢复后，runner 只关闭 fd 4 至 fd 6；它绝不改写或销毁 Node 标准流。parent 把 pipe carrier stream 作为普通句柄的 stdio 返回，用户字节绝不经过 IPC。
+Windows parent 从 bootstrap cwd 与环境启动 provider runner，把原始 target argv 放在私有 `--` 分隔符之后，并等待 Node 的 runner `spawn` 事件后才发送恰好一条 start request。runner 在 spawn 前报错时，direct launch failure 会原样保留，同时证明 Job range 从未存在，因此 empty-range wait 成功；spawn 后的 infrastructure failure 仍是不确定状态，会使 range settlement reject。除此之外，Node IPC 还承载幂等 terminate control 与恰好一个 result。runner 的 fd 0 至 fd 2 相互隔离，fd 3 承载 IPC，fd 4 至 fd 6 承载 target stdin、stdout 与 stderr。忽略 stdin 时，fd 4 继承平台 null-device descriptor；其他模式使用 pipe。共享 Win32 层通过 Node 导出的 `uv_get_osfhandle()` 把 fd 4 至 fd 6 映射为 OS handle，拒绝 null 以及 Koffi 暴露的 unsigned `UV_INVALID_OS_FILE_HANDLE` 与 `UV_INVALID_FILE_DESCRIPTOR` sentinel，临时启用有效 handle 的继承，并通过 `STARTF_USESTDHANDLES` 传入。`spawnCurrentTokenJobProcess` 要求单独解析的 `applicationName` 与完整 target 环境，并使用 `CREATE_UNICODE_ENVIRONMENT` 传入排序、双 NUL 结尾的 UTF-16LE 块，其中包括 `=X:` 驱动器条目，而不修改 runner 环境。它按照[控制台隔离决策](2026-09-14-windows-subprocess-console-isolation.zh.md)在独立的隐藏控制台中创建 target。suspended target 进入 Job 并恢复后，runner 只关闭 fd 4 至 fd 6；它绝不改写或销毁 Node 标准流。parent 把 pipe carrier stream 作为普通句柄的 stdio 返回，用户字节绝不经过 IPC。
 
 runner 是 target process handle 与 unnamed Job handle 的唯一 owner。`spawnCurrentTokenJobProcess` 以 suspended 状态创建 target，把它分配给不允许 active breakaway 的 kill-on-close Job，并只在分配后恢复。runner 轮询 direct process 获取 target exit code，并轮询 Job 获取 active-process count。只有 direct result 已通过 IPC send callback 交付且 Job 已报告零 active process 后，runner 才成功退出；parent 只把这次 clean exit 映射成成功的 `waitForExit()`。
 
@@ -42,7 +42,7 @@ selector 是 per-spawn locator 或 sentinel，不是凭据或持久格式。Linu
 
 ### Fallback 与 cleanup
 
-准确 bootstrap、现代且可读的 user-systemd manager，或保留 literal argv 的 scope 不可用时，Linux 会在 target 执行前进入 fallback。runner 入口、Win32 bindings 或 current-token Job probe 不可用时，Windows 普通启动会进入 fallback。macOS 普通启动、Windows ConPTY 与其他不受支持的宿主保留既有 PGID、`taskkill /T` 或带身份围栏的 PTY 观察机制。warning 会明确说明：逃离这些可观察关系的后代不保证被终止，也不保证延迟 `waitForExit()`。
+准确 bootstrap、现代且可读的 user-systemd manager，或保留 literal argv 的 scope 不可用时，Linux 会在 target 执行前进入 fallback。runner 入口、Win32 bindings 或 current-token Job probe 不可用时，Windows 普通启动会在 target 执行前拒绝；fallback 可能继承宿主控制台。macOS 普通启动、Windows ConPTY 与其他不受支持的宿主保留既有 PGID 或带身份围栏的 PTY 观察机制。warning 会明确说明：逃离这些可观察关系的后代不保证被终止，也不保证延迟 `waitForExit()`。
 
 正常 Cordis dispose 会独立启动 direct-result 与 range observation、请求终止，并等待每个自有 range。消费方 teardown 不检查普通 PID；它会保留原始 operation 或 startup error，同时尝试 terminate 与 final wait，并按消费方既有错误顺序保留 cleanup failure。range 一旦被确认为空，就会永久禁止后续向陈旧 identity 发送信号。
 
@@ -80,4 +80,4 @@ selector 是 per-spawn locator 或 sentinel，不是凭据或持久格式。Linu
 
 受支持的 Linux 普通与 PTY 启动、Windows 普通启动会在后代逃离进程组或 direct parent 退出后继续拥有它们，同时 direct target result 与 range 完全停稳保持独立。代价是每次 spawn 都需要一次 Linux manager 检查与 scope／request，或一套 Windows runner／IPC／Job 生命周期，而且所选 owner 无法证明 settlement 时会显式失败。
 
-fallback 宿主继续运行命令，但携带可见的较弱保证。Windows ConPTY、macOS native containment、active breakaway 后代、旧版或缺失的 user-systemd 环境、target replay、持久 runner recovery，以及 JavaScript 无法执行的终止路径均不属于本决策。
+除 Windows 普通命令外，fallback 宿主仍能运行命令，但携带可见的较弱保证。Windows ConPTY、macOS native containment、active breakaway 后代、旧版或缺失的 user-systemd 环境、target replay、持久 runner recovery，以及 JavaScript 无法执行的终止路径均不属于本决策。

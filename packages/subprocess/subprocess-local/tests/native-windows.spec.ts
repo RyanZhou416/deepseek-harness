@@ -1,11 +1,17 @@
 import { spawn, spawnSync } from 'node:child_process'
 import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { afterAll, describe, expect, it } from 'vitest'
+import koffi from 'koffi'
+import { Context } from '@deepseek-ai/cordis'
 import type { SubprocessSpawnSpec } from '@deepseek-ai/dsh-subprocess'
 import { targetEnvironment } from '../src/runner-launch.ts'
-import { bindManagedProcess } from '../src/spawn.ts'
+import { bindManagedProcess, spawnSubprocess } from '../src/spawn.ts'
+import type { LocalSubprocessHandle } from '../src/spawn.ts'
+import LocalSubprocessRuntime from '../src/index.ts'
 import { launchWindowsJob, probeWindowsJob } from '../src/windows-job.ts'
 
 const scratch = mkdtempSync(join(tmpdir(), 'dsh-native-windows-'))
@@ -22,6 +28,22 @@ function spec(argv: string[], graceMs = 100, env?: NodeJS.ProcessEnv): Subproces
     },
     graceMs,
     env,
+  }
+}
+
+async function observe(handle: LocalSubprocessHandle) {
+  try {
+    const outcome = await handle.done
+    const rangeEmpty = await handle.waitForExit()
+    return {
+      outcome,
+      rangeEmpty,
+      stdout: handle.collected.stdout?.readFrom(0).text,
+      stderr: handle.collected.stderr?.readFrom(0).text,
+    }
+  } finally {
+    handle.terminate()
+    await Promise.allSettled([handle.done, handle.waitForExit()])
   }
 }
 
@@ -81,9 +103,137 @@ function directSpawnFailure(argv: readonly string[], cwd = scratch): Promise<Spa
   })
 }
 
-const windowsNative = process.platform === 'win32' && probeWindowsJob()
+const isWindows = process.platform === 'win32'
+const windowsNative = isWindows && probeWindowsJob()
+
+it.skipIf(!isWindows)('requires the native Windows Job launch used by ordinary commands', () => {
+  expect(probeWindowsJob()).toBe(true)
+})
 
 describe.skipIf(!windowsNative)('Windows Job native containment', () => {
+  it('gives the direct command a hidden console separate from its caller', async () => {
+    const getConsoleWindow = koffi.load('kernel32.dll').func('GetConsoleWindow', 'void*', [])
+    const callerConsole = koffi.address(getConsoleWindow()).toString()
+    const koffiPath = createRequire(import.meta.url).resolve('koffi')
+    const script = `
+      const koffi = require(${JSON.stringify(koffiPath)})
+      const getConsoleWindow = koffi.load('kernel32.dll').func('GetConsoleWindow', 'void*', [])
+      process.stdout.write(koffi.address(getConsoleWindow()).toString())
+    `
+    const request = spec([process.execPath, '-e', script])
+    const result = await observe(bindManagedProcess(request, launchWindowsJob(request, targetEnvironment(request))))
+    expect(result.outcome).toEqual({ exitCode: 0, signal: null })
+    expect(result.rangeEmpty).toBe(true)
+    expect(result.stdout).not.toBe('0')
+    expect(result.stdout).not.toBe(callerConsole)
+  })
+
+  it('contains a real console-wide CTRL_C_EVENT inside the direct command console', async () => {
+    const getConsoleWindow = koffi.load('kernel32.dll').func('GetConsoleWindow', 'void*', [])
+    const callerConsole = koffi.address(getConsoleWindow()).toString()
+    const koffiPath = createRequire(import.meta.url).resolve('koffi')
+    const script = `
+      const koffi = require(${JSON.stringify(koffiPath)})
+      const kernel32 = koffi.load('kernel32.dll')
+      const ownConsole = koffi.address(kernel32.func('GetConsoleWindow', 'void*', [])()).toString()
+      if (ownConsole === '0' || ownConsole === ${JSON.stringify(callerConsole)}) process.exit(42)
+      if (!kernel32.func('SetConsoleCtrlHandler', 'int', ['void*', 'int'])(null, 1)) process.exit(43)
+      if (!kernel32.func('GenerateConsoleCtrlEvent', 'int', ['uint32', 'uint32'])(0, 0)) process.exit(44)
+      process.stdout.write('console-wide event stayed in child console')
+    `
+    const request = spec([process.execPath, '-e', script])
+    const unisolated = await observe(spawnSubprocess(request, { platform: 'win32' }))
+    expect(unisolated.outcome).toEqual({ exitCode: 42, signal: null })
+    expect(unisolated.rangeEmpty).toBe(true)
+    const isolated = await observe(bindManagedProcess(request, launchWindowsJob(request, targetEnvironment(request))))
+    expect(isolated.outcome).toEqual({ exitCode: 0, signal: null })
+    expect(isolated.rangeEmpty).toBe(true)
+    expect(isolated.stdout).toBe('console-wide event stayed in child console')
+    const followup = spec([process.execPath, '-e', "process.stdout.write('host-alive')"])
+    const next = await observe(bindManagedProcess(followup, launchWindowsJob(followup, targetEnvironment(followup))))
+    expect(next.outcome).toEqual({ exitCode: 0, signal: null })
+    expect(next.rangeEmpty).toBe(true)
+    expect(next.stdout).toBe('host-alive')
+  })
+
+  it('lets a restricted-token command inherit the outer runner console', async () => {
+    const getConsoleWindow = koffi.load('kernel32.dll').func('GetConsoleWindow', 'void*', [])
+    const callerConsole = koffi.address(getConsoleWindow()).toString()
+    const koffiPath = createRequire(import.meta.url).resolve('koffi')
+    const sandboxRunner = fileURLToPath(new URL('../../../sandbox/sandbox-windows-acl/src/runner.ts', import.meta.url))
+    const probe = `
+      const koffi = require(${JSON.stringify(koffiPath)})
+      const kernel32 = koffi.load('kernel32.dll')
+      const ownConsole = koffi.address(kernel32.func('GetConsoleWindow', 'void*', [])()).toString()
+      if (ownConsole === '0' || ownConsole === ${JSON.stringify(callerConsole)}) process.exit(42)
+      if (!kernel32.func('GenerateConsoleCtrlEvent', 'int', ['uint32', 'uint32'])(0, 0)) process.exit(44)
+      process.stdout.write(ownConsole)
+    `
+    const request = spec([
+      process.execPath, '--import', import.meta.resolve('tsx/esm'), sandboxRunner,
+      '--workspace', scratch, '--temp', scratch, '--mode', 'read-only',
+      '--', process.execPath, '-e', probe,
+    ])
+    const result = await observe(bindManagedProcess(request, launchWindowsJob(request, targetEnvironment(request))))
+    expect(result.outcome, result.stderr).toEqual({ exitCode: 0, signal: null })
+    expect(result.rangeEmpty).toBe(true)
+    expect(result.stdout).not.toBe('0')
+    expect(result.stdout).not.toBe(callerConsole)
+  })
+
+  it('keeps a terminal console-wide event inside its PTY', async () => {
+    const getConsoleWindow = koffi.load('kernel32.dll').func('GetConsoleWindow', 'void*', [])
+    const callerConsole = koffi.address(getConsoleWindow()).toString()
+    const koffiPath = createRequire(import.meta.url).resolve('koffi')
+    const barrier = join(scratch, 'terminal-console-signal-barrier')
+    const script = `
+      const koffi = require(${JSON.stringify(koffiPath)})
+      const { existsSync } = require('node:fs')
+      const kernel32 = koffi.load('kernel32.dll')
+      const deadline = Date.now() + 10000
+      const runAfterBarrier = () => {
+        if (!existsSync(process.argv[1])) {
+          if (Date.now() > deadline) process.exit(45)
+          setTimeout(runAfterBarrier, 10)
+          return
+        }
+        const ownConsole = koffi.address(kernel32.func('GetConsoleWindow', 'void*', [])()).toString()
+        if (ownConsole === '0' || ownConsole === ${JSON.stringify(callerConsole)}) process.exit(42)
+        if (!kernel32.func('SetConsoleCtrlHandler', 'int', ['void*', 'int'])(null, 1)) process.exit(43)
+        if (!kernel32.func('GenerateConsoleCtrlEvent', 'int', ['uint32', 'uint32'])(0, 0)) process.exit(44)
+        process.stdout.write('pty event stayed in terminal console')
+      }
+      runAfterBarrier()
+    `
+    const ctx = new Context()
+    const fiber = await ctx.plugin(LocalSubprocessRuntime)
+    let terminal: Awaited<ReturnType<typeof ctx.subprocess.spawnTerminal>> | undefined
+    try {
+      terminal = await ctx.subprocess.spawnTerminal({
+        argv: [process.execPath, '-e', script, barrier],
+        cwd: scratch,
+        rows: 24,
+        cols: 80,
+        graceMs: 1_000,
+      })
+      let output = ''
+      terminal.output.on('data', (chunk) => { output += String(chunk) })
+      const active = terminal
+      const outputEnded = new Promise<void>((resolve, reject) => {
+        active.output.once('end', resolve)
+        active.output.once('error', reject)
+      })
+      active.output.resume()
+      writeFileSync(barrier, 'go', { flag: 'wx' })
+      await expect(active.done).resolves.toEqual({ exitCode: 0, signal: null })
+      await outputEnded
+      expect(output).toContain('pty event stayed in terminal console')
+    } finally {
+      if (terminal !== undefined) await terminal.terminate()
+      await fiber.dispose()
+    }
+  })
+
   it('keeps raw stdin writable while the runner starts the target', async () => {
     const output = join(scratch, `stdin-${Date.now()}.txt`)
     const script = `

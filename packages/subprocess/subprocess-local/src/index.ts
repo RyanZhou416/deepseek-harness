@@ -202,6 +202,7 @@ export class LocalSubprocessRuntime extends SubprocessRuntime {
     if (kind === 'ordinary' && platform === 'win32') {
       const available = probeWindowsJob()
       if (available) return 'windows-job'
+      throw new Error('subprocess-local: Windows Job launch is unavailable; refusing a command that could inherit the host console')
     }
     this.warnFallback(platform, kind, fallbackReason)
     return 'fallback'

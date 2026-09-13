@@ -23,9 +23,10 @@
  * Known boundaries (inherent to restricted tokens, not this port):
  *  - writes are restricted; reads, network, and process visibility are NOT
  *    (WRITE_RESTRICTED intersects only write accesses);
- *  - console isolation is unavailable — children share the host console
- *    (CREATE_NO_WINDOW / CREATE_NEW_CONSOLE children die with
- *    STATUS_DLL_INIT_FAILED under the restriction);
+ *  - restricted children cannot create their own console
+ *    (CREATE_NO_WINDOW / CREATE_NEW_CONSOLE fail with STATUS_DLL_INIT_FAILED);
+ *    the Harness subprocess provider isolates its unrestricted runner first,
+ *    while direct AclSandbox callers own their parent-console isolation;
  *  - the private temp directory and every writable directory must be owned by the
  *    caller (owner-implicit WRITE_DAC);
  *  - grants are standing ACE mutations on real directories. WORKSPACE grants

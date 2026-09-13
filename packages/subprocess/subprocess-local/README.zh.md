@@ -9,7 +9,7 @@ kind: "package-reference"
 
 ## 概述
 
-在任何于宿主机上运行子进程的组合中挂载 `dsh-subprocess-local`。它解析本地可执行文件，为普通 Linux 与 Windows 命令以及受支持的 Linux 终端会话提供由 OS 所有的受管范围，并通过 `node-pty` 提供真实终端会话；不受支持的宿主使用明确披露的较弱 fallback。它没有任何配置，因此每项处置方式、限制、终端尺寸与宽限期都随 spawn 请求来自调用方能力 seam。输出收集在内存中保留一段有界尾部，并可选地用 spill 文件恢复完整流；子进程从清理后的环境起步；dispose（资源释放）会终止并等待每个选定范围或会话完全停稳。
+在任何于宿主机上运行子进程的组合中挂载 `dsh-subprocess-local`。它解析本地可执行文件，为普通 Linux 与 Windows 命令以及受支持的 Linux 终端会话提供由 OS 所有的受管范围，并通过 `node-pty` 提供真实终端会话。它没有任何配置，因此每项处置方式、限制、终端尺寸与宽限期都随 spawn 请求来自调用方能力 seam。输出收集在内存中保留一段有界尾部，并可选地用 spill 文件恢复完整流；子进程从清理后的环境起步；dispose（资源释放）会终止并等待每个选定范围或会话完全停稳。
 
 ## 目录
 
@@ -25,7 +25,7 @@ kind: "package-reference"
 <a id="use-this-package"></a>
 ## 使用本包
 
-把提供方与它的消费方挂载在同一组合中，并完全按子进程服务的规定启动进程；本包只决定这些进程在宿主机上如何运行。在 Windows 上，非终端子进程与 `taskkill` 辅助进程会隐藏窗口，因此后台操作不会抢占焦点。遵循进程启动可见性设置的 GUI 窗口也会被隐藏。
+把提供方与它的消费方挂载在同一组合中，并完全按子进程服务的规定启动进程；本包只决定这些进程在宿主机上如何运行。在 Windows 上，每条普通命令获得与 Harness 宿主分离的隐藏控制台；沙箱 runner 也先获得该控制台，再让受限子进程继承。原生 Job runner 不可用时，Windows 普通命令拒绝启动。`taskkill` 辅助进程也会隐藏窗口；GUI 窗口仅在遵循启动可见性设置时才会隐藏。
 
 ### 挂载提供方
 
@@ -68,7 +68,7 @@ kind: "package-reference"
 
 ### 设计理念
 
-每次 spawn 都为信号发送与完全停稳选择同一个 owner。受支持的 Linux 普通命令与终端启动使用临时 user-systemd scope，受支持的 Windows 普通命令使用由 helper 持有、关闭时终止成员的 Job。macOS、旧版或不可用的 user-systemd，以及不可用的 Windows 原生支持使用既有 detached 进程组、`taskkill` 或终端 session 观察，并只告警一次。native 路径可能已经启动命令后，本提供方绝不会通过 fallback 重放该命令。
+每次 spawn 都为信号发送与完全停稳选择同一个 owner。受支持的 Linux 普通命令与终端启动使用临时 user-systemd scope，Windows 普通命令要求由 helper 持有、关闭时终止成员的 Job 和独立目标控制台。macOS、旧版或不可用的 user-systemd，以及 Windows 终端使用既有进程组或终端 session 观察，并只告警一次。native 路径可能已经启动命令后，本提供方绝不会通过 fallback 重放该命令。
 
 ### 源码地图
 
@@ -90,7 +90,7 @@ kind: "package-reference"
 
 ### 主流程
 
-一次 spawn 会同步校验最终 argv、cwd 与环境，在用户命令可能运行前选择 containment，并在目标身份保持私有的情况下返回句柄。Linux 普通命令与终端启动使用私有的一次性请求；scope 内的 bootstrap 会恢复目标 cwd 与环境、解析可执行文件、清除 fd 0 至 fd 2 的 close-on-exec 标记，再以原始 argv 进入 libc `execve()`。Windows 普通命令会隔离 runner 的 fd 0 至 fd 2、把 fd 3 留给 IPC，并用 fd 4 至 fd 6 承载 target stdio；runner 把这些 CRT 描述符解析成 OS handle，以 suspended 状态创建 target，将其加入 Job、恢复运行，再只关闭 carrier 描述符。`done` 会在 direct command 及其 stdio 屏障结算后完成，`waitForExit()` 则分别等待所选 scope、Job、进程组或已观察 session 变空。
+一次 spawn 会同步校验最终 argv、cwd 与环境，在用户命令可能运行前选择 containment，并在目标身份保持私有的情况下返回句柄。Linux 普通命令与终端启动使用私有的一次性请求；scope 内的 bootstrap 会恢复目标 cwd 与环境、解析可执行文件、清除 fd 0 至 fd 2 的 close-on-exec 标记，再以原始 argv 进入 libc `execve()`。Windows 普通命令会隔离 runner 的 fd 0 至 fd 2、把 fd 3 留给 IPC，并用 fd 4 至 fd 6 承载 target stdio；runner 把这些 CRT 描述符解析成 OS handle，在新的隐藏控制台中以 suspended 状态创建 target，将其加入 Job、恢复运行，再只关闭 carrier 描述符。`done` 会在 direct command 及其 stdio 屏障结算后完成，`waitForExit()` 则分别等待所选 scope、Job、进程组或已观察 session 变空。
 
 ### 安全不变式
 
@@ -130,9 +130,10 @@ spill 文件以 `0600` 权限、`O_EXCL` 与随机名称在 `0700` 每进程目�
 这些限制说明本提供方何时不合适，或何时需要特别的运维注意。它们是当前包约束，不是通用平台对比或任务积压。
 
 - **native ownership 有明确宿主要求**——Linux 需要可读的 user manager 与 `systemd-run --expand-environment=no`；旧版 systemd 使用带告警的 PGID fallback。macOS 因没有受支持的公开 persistent owner，始终使用该 fallback。
+- **Windows 普通命令要求原生隔离**——runner 入口、Win32 绑定或当前令牌 Job 支持不可用时，`spawn()` 在命令执行前拒绝；它不会使用可能共享 Harness 控制台的普通 `taskkill` fallback。
 - **native 选择具有有界的每次 spawn 成本**——Linux 会重复检查 bootstrap 入口、libc `execve`/`fcntl` bindings、存活的 user manager 与 literal-argv scope 支持，直到这套完整探测首次成功；后续符合条件的普通命令或终端 spawn 只重新检查存活的 user manager。Windows 会在每次普通 spawn 前重新检查 runner 入口、bindings 与当前 Job 支持。Linux 深度探测的成功状态与 fallback 告警去重会在 provider 生命周期内持续保留。所有探测都会在用户命令可能运行前完成，子进程探测的超时为 5 秒。每次 Linux 启动都会创建私有请求目录，以 50 毫秒间隔检查尚未确定的 scope 建立状态；scope 已建立且仍 active 后，查询间隔按指数增长，最多为 5 秒。Windows 普通命令会保留一个 runner 与一条 IPC 通道，直到 Job 报告活动进程数为零。目标会直接继承标准句柄，不使用 named-pipe stdio 或结果文件。
 - **Windows Job inheritance 有明确排除项**——普通后代默认继承 Job，但 breakaway 进程不在保证范围。目标只在 Job 分配后启动；runner 若在 create-to-assignment 极窄区间遭外力终止，可能留下 suspended target。
-- **Windows 终端信号是控制台级的**——SIGINT 以 `\x03` Ctrl-C 输入写入投递，由 conhost 转为控制台级 CTRL_C 事件；SIGTSTP 与 SIGHUP 被拒绝（不可用）；不带 `/F` 的 `taskkill` 无法终止控制台进程，因此拆卸的 TERM 档是 `/F` 升级前的宽限等待。Windows 就绪没有精确的 stdin-wait 档：prompt-marker 快路径把 shell pid 作为伪前台进程组比较，其余由静默与计时档覆盖。
+- **Windows 终端信号作用于其 PTY 控制台**——SIGINT 以 `\x03` Ctrl-C 输入写入投递，由 conhost 转为终端自身伪控制台内的事件，不会送往 Harness 宿主控制台；SIGTSTP 与 SIGHUP 被拒绝（不可用）。不带 `/F` 的 `taskkill` 无法终止控制台进程，因此拆卸的 TERM 档是 `/F` 升级前的宽限等待。Windows 就绪没有精确的 stdin-wait 档：prompt-marker 快路径把 shell pid 作为伪前台进程组比较，其余由静默与计时档覆盖。
 - **fallback 终端 ownership 仍依赖观察**——在 macOS 或缺少可用 user-systemd 的 Linux 上，子进程如果在任何前台检查快照之前重新设定父进程，或离开自有终端 session，就可能逃出进程表扫描。本地提供方不会新增持续进程表监视器；受支持的 Linux native 模式改由 scope membership 持有这些后代。
 - **进程内清理要求退出阶段仍能执行 JavaScript**——直接 `process.exit()`、默认未捕获异常和默认未处理 rejection 会发出 Node 同步 `exit` 事件。未安装 handler 时，`SIGTERM`、`SIGINT` 或 `SIGHUP` 的默认 OS 处置不会发出该事件；应用只有安装执行正常 dispose 或调用 `process.exit()` 的 handler 才能覆盖这些信号。`SIGKILL`、fatal OOM、`process.abort()`、native crash、断电，以及任何无法运行 JavaScript 的故障，都需要外部 supervisor、容器 init 或等价的 OS owner 负责。
 - **凭据清除依赖名称启发式规则**——只匹配 `*KEY*`／`*PASSWORD*`／`*SECRET*`／`*TOKEN*`；名称不同的 secret（例如 `*PASSPHRASE*`）会继续传递，对误删变量引入白名单属于已记录的后续工作。

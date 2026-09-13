@@ -10,11 +10,15 @@ import {
   Win32Error,
 } from '../src/index.ts'
 import {
+  CREATE_NEW_CONSOLE,
   CREATE_SUSPENDED,
   CREATE_UNICODE_ENVIRONMENT,
   JOBOBJECT_BASIC_ACCOUNTING_ACTIVE_PROCESSES_OFFSET,
   JOBOBJECT_BASIC_ACCOUNTING_SIZE,
   JobObjectBasicAccountingInformation,
+  STARTF_USESHOWWINDOW,
+  STARTF_USESTDHANDLES,
+  SW_HIDE,
   WAIT_TIMEOUT,
 } from '../src/abi.ts'
 import { PROCESS_INFORMATION, STARTUPINFOW } from '../src/ffi.ts'
@@ -116,7 +120,7 @@ describe('ordinary Job process operations', () => {
       null,
       null,
       1,
-      CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT,
+      CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT | CREATE_NEW_CONSOLE,
       environment,
       'C:\\work',
       expect.anything(),
@@ -162,7 +166,13 @@ describe('ordinary Job process operations', () => {
       }),
     })
     expect(spawnCurrentTokenJobProcess(bindings, options())).toEqual({ pid: 1234, process: 60n, job: 50n })
-    expect(startup).toMatchObject({ hStdInput: 104n, hStdOutput: 105n, hStdError: 106n })
+    expect(startup).toMatchObject({
+      dwFlags: STARTF_USESTDHANDLES | STARTF_USESHOWWINDOW,
+      wShowWindow: SW_HIDE,
+      hStdInput: 104n,
+      hStdOutput: 105n,
+      hStdError: 106n,
+    })
     expect(uvGetOsfhandle).toHaveBeenNthCalledWith(1, 4)
     expect(uvGetOsfhandle).toHaveBeenNthCalledWith(2, 5)
     expect(uvGetOsfhandle).toHaveBeenNthCalledWith(3, 6)

@@ -831,7 +831,7 @@ describe('LocalSubprocessRuntime', () => {
         selectContainmentMode(kind: 'ordinary' | 'terminal'): 'linux-scope' | 'windows-job' | 'fallback'
       }).selectContainmentMode.bind(windowsRuntime)
 
-      expect(windowsSelect('ordinary')).toBe('fallback')
+      expect(() => windowsRuntime.spawn(spec('true'))).toThrow('refusing a command that could inherit the host console')
       expect(windowsSelect('ordinary')).toBe('windows-job')
       expect(windowsSelect('ordinary')).toBe('windows-job')
       expect(probeWindowsJob).toHaveBeenCalledTimes(3)
