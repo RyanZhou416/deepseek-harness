@@ -170,6 +170,8 @@ describe('user/message injection records', () => {
     assert.equal(state.events.length, 1)
     assert.equal(state.events[0].form, 'context')
     assert.equal(state.events[0].name, 'plugin')
+    // The same identity rides the surface node for the browser rows.
+    assert.equal(state.surface[0].name, 'plugin')
   })
 
   test('skill-invocation records sub-skill with its name', () => {
@@ -179,6 +181,9 @@ describe('user/message injection records', () => {
     assert.equal(state.events[0].sub, 'skill')
     assert.equal(state.events[0].name, 'code-review')
     assert.equal(state.events[0].form, 'skill')
+    // The skill name already labels the node (`skill`); no duplicate stamp.
+    assert.ok(!('name' in state.surface[0]))
+    assert.equal(state.surface[0].skill, 'code-review')
   })
 
   test('a nameless skill-invocation records ?', () => {
@@ -195,6 +200,7 @@ describe('user/message injection records', () => {
     assert.equal(state.events.length, 1)
     assert.ok(!('name' in state.events[0]), 'empty producer label stays absent')
     assert.equal(state.events[0].detail, 'heads up')
+    assert.ok(!('name' in state.surface[0]), 'the node stays unstamped too')
   })
 
   test('a notice with an empty summary records no detail', () => {
@@ -202,6 +208,7 @@ describe('user/message injection records', () => {
       userMessage(1, text('note'), { kind: 'plugin', plugin: 'dsh-x', form: 'notice', summary: '' }),
     ])
     assert.equal(state.events[0].name, 'dsh-x')
+    assert.equal(state.surface[0].name, 'dsh-x')
     assert.ok(!('detail' in state.events[0]))
   })
 
@@ -210,7 +217,19 @@ describe('user/message injection records', () => {
       userMessage(1, text('catalog'), { kind: 'skill-catalog', form: 'catalog' }),
     ])
     assert.equal(state.events[0].name, 'skill-catalog')
+    assert.equal(state.surface[0].name, 'skill-catalog')
     assert.ok(!('detail' in state.events[0]))
+  })
+
+  test('an agent-instructions source names its reconciled files on the event and the node', () => {
+    const { state } = driveTimeline([
+      userMessage(1, text('instructions'), {
+        kind: 'agent-instructions', form: 'instructions',
+        changes: [{ path: 'AGENTS.md' }, { path: 'AGENTS.md' }, { path: '' }, null],
+      }),
+    ])
+    assert.equal(state.events[0].name, 'AGENTS.md')
+    assert.equal(state.surface[0].name, 'AGENTS.md')
   })
 
   test('a non-injection user message records no event', () => {
@@ -223,24 +242,37 @@ describe('user/message injection records', () => {
 describe('tool/result skill tagging', () => {
   const skillBody = (name: string) => text(`<skill_content name="${name}">instructions</skill_content>`)
 
-  test('a skill-tool result carrying skill content tags the node and records the inject', () => {
+  test('a skill-tool result carrying skill content re-buckets to `skill` and records the inject', () => {
     const { state } = driveTimeline([
       toolCall(1, { callId: 'c1', name: 'skill' }),
       toolResult(2, { callId: 'c1', content: skillBody('pdf') }),
+      assistantMessage(3, { turn: 1, step: 1 }),
     ])
-    const node = state.surface.at(-1)
+    const node = state.surface.at(-2)
     assert.equal(node?.tool, 'skill')
     assert.equal(node?.skill, 'pdf')
+    assert.equal(node?.cat, 'skill')
+    // The price moved from the tool bucket to the skill one (issue #66)…
+    assert.equal(state.sums.tool, 0)
+    assert.equal(state.sums.skill, node?.tokens)
+    // …and the per-request record carries the skill figure in its total.
+    assert.equal(state.requests.at(-1)?.skill, node?.tokens)
+    assert.ok((state.requests.at(-1)?.total ?? 0) >= (node?.tokens ?? 0))
     assert.deepEqual(state.events, [
       { seq: 2, time: state.events[0].time, kind: 'inject', form: 'instructions', sub: 'skill', name: 'pdf', tokens: node?.tokens },
     ])
   })
 
-  test('an untraced result (tool/call gone) tags from the wrapper alone', () => {
+  test('an untraced result (tool/call gone) tags from the wrapper alone and keeps its tool identity', () => {
     // No tool/call armed: node.tool resolves to undefined — the content
-    // wrapper is trusted (a missed tag is worse than a content guess).
+    // wrapper is trusted (a missed tag is worse than a content guess). The
+    // `skill` stamp keeps the load countable as a tool call.
     const { state } = driveTimeline([toolResult(1, { callId: 'zz', content: skillBody('xlsx') })])
-    assert.equal(state.surface.at(-1)?.skill, 'xlsx')
+    const node = state.surface.at(-1)
+    assert.equal(node?.skill, 'xlsx')
+    assert.equal(node?.cat, 'skill')
+    assert.equal(node?.tool, 'skill')
+    assert.equal(state.sums.skill, node?.tokens)
     assert.equal(state.events[0].name, 'xlsx')
   })
 
@@ -426,13 +458,15 @@ describe('hostile provider usage (issue #44: stats must survive nonconforming fi
 
   test('sanitized buckets accumulate into the session-cost totals', () => {
     const { state } = driveTimeline([
-      header(1, { model: 'deepseek-v4-flash' }),
+      header(1, { model: 'deepseek-v4-flash', provider: 'deepseek-official' }),
       assistantMessage(2, {
         usage: { inputTokens: -100, cacheReadTokens: 300.4, cacheWriteTokens: '10', outputTokens: 0.2 },
-        time: Date.UTC(2024, 0, 1, 22, 0, 0), // 06:00 Beijing Monday — off-peak
+        time: Date.UTC(2024, 0, 1, 2, 0, 0), // Mon 02:00 UTC — peak
       }),
     ])
-    assert.deepEqual(state.cost?.flash?.off, { uncached: 0, cacheRead: 300, cacheWrite: 10, output: 0 })
+    assert.deepEqual(state.cost?.['deepseek-official']?.['deepseek-v4-flash']?.peak, {
+      uncached: 0, cacheRead: 300, cacheWrite: 10, output: 0,
+    })
   })
 })
 
@@ -517,88 +551,123 @@ describe('unknown event types', () => {
 })
 
 describe('session-cost accumulation', () => {
-  // DeepSeek peak windows: weekdays 09:00-12:00 and 14:00-18:00 Beijing
-  // (UTC+8). 2024-01-01 is a Monday; 2024-01-06/07 the weekend.
   const usage = { inputTokens: 100 }
+  // DeepSeek peak windows: UTC weekdays 01:00–04:00 and 06:00–10:00. 2024-01-01
+  // is a Monday; 2024-01-06/07 the weekend. 02:00 UTC Monday is peak; the
+  // helpers' default clock (1970-01-01T00:00:01 UTC) is off-peak.
+  const PEAK = Date.UTC(2024, 0, 1, 2, 0, 0)
+  const at100 = (seq: number, time: number) => assistantMessage(seq, { usage, time })
 
-  test('no model, non-V4 model, and bare deepseek-v4 are never priced', () => {
+  test('no model never prices; any named model accumulates', () => {
     assert.equal(driveTimeline([assistantMessage(1, { usage })]).state.cost, undefined)
     assert.equal(
-      driveTimeline([header(1, { model: 'deepseek-v3' }), assistantMessage(2, { usage })]).state.cost,
-      undefined,
+      driveTimeline([header(1, { model: 'deepseek-v3' }), assistantMessage(2, { usage })]).state.cost?.['']?.['deepseek-v3']?.peak?.uncached,
+      100,
+      'the fold records every model verbatim; pricing filters on the client',
     )
     assert.equal(
-      driveTimeline([header(1, { model: 'deepseek-v4' }), assistantMessage(2, { usage })]).state.cost,
-      undefined,
-      'v4 without a flash/pro suffix matches no family',
+      driveTimeline([header(1, { model: 'gemini-2.0-flash' }), assistantMessage(2, { usage })]).state.cost?.['']?.['gemini-2.0-flash']?.peak?.uncached,
+      100,
     )
   })
 
-  test('v4-flash usage lands in the flash family; v4-pro in pro', () => {
+  test('usage keys by provider, then by model', () => {
     const flash = driveTimeline([header(1, { model: 'deepseek-v4-flash' }), assistantMessage(2, { usage })]).state.cost
-    assert.equal(flash?.flash?.off?.uncached, 100)
-    assert.equal(flash?.pro, undefined)
-    const pro = driveTimeline([header(1, { model: 'deepseek-v4-pro' }), assistantMessage(2, { usage })]).state.cost
-    assert.equal(pro?.pro?.off?.uncached, 100)
-    assert.equal(pro?.flash, undefined)
+    assert.equal(flash?.['']?.['deepseek-v4-flash']?.peak?.uncached, 100, 'a provider-less header books under the empty key')
+    const pro = driveTimeline([header(1, { provider: 'deepseek-official', model: 'deepseek-v4-pro' }), at100(2, PEAK)]).state.cost
+    assert.equal(pro?.['deepseek-official']?.['deepseek-v4-pro']?.peak?.uncached, 100)
   })
 
-  test('v4.1 spellings land in the same families', () => {
-    const flash = driveTimeline([header(1, { model: 'deepseek-v4.1-flash' }), assistantMessage(2, { usage })]).state.cost
-    assert.equal(flash?.flash?.off?.uncached, 100)
-    assert.equal(flash?.pro, undefined)
-    const pro = driveTimeline([header(1, { model: 'deepseek-v4.1-pro' }), assistantMessage(2, { usage })]).state.cost
-    assert.equal(pro?.pro?.off?.uncached, 100)
-    assert.equal(pro?.flash, undefined)
+  test('different providers and models book separate buckets', () => {
+    const { state } = driveTimeline([
+      header(1, { provider: 'deepseek-official', model: 'deepseek-v4-flash' }),
+      at100(2, PEAK),
+      header(3, { provider: 'deepseek-official', model: 'deepseek-v4-pro' }),
+      at100(4, PEAK),
+      header(5, { provider: 'kimi-coding', model: 'kimi-k2.7-code' }),
+      assistantMessage(6, { usage }),
+    ])
+    assert.equal(state.cost?.['deepseek-official']?.['deepseek-v4-flash']?.peak?.uncached, 100)
+    assert.equal(state.cost?.['deepseek-official']?.['deepseek-v4-pro']?.peak?.uncached, 100)
+    assert.equal(state.cost?.['kimi-coding']?.['kimi-k2.7-code']?.peak?.uncached, 100)
+    assertPlainJson(state)
   })
 
-  test('deepseek-flash (no v4 marker) rides the flash family; foreign flash names never price', () => {
-    const flash = driveTimeline([header(1, { model: 'deepseek-flash' }), assistantMessage(2, { usage })]).state.cost
-    assert.equal(flash?.flash?.off?.uncached, 100)
-    assert.equal(flash?.pro, undefined)
-    const proxy = driveTimeline([header(1, { model: 'deepseek/deepseek-flash' }), assistantMessage(2, { usage })]).state.cost
-    assert.equal(proxy?.flash?.off?.uncached, 100, 'provider-prefixed spellings land too')
-    assert.equal(
-      driveTimeline([header(1, { model: 'gemini-2.0-flash' }), assistantMessage(2, { usage })]).state.cost,
-      undefined,
-      'a foreign flash-named model carries no DeepSeek marker and matches no family',
-    )
+  test('consecutive samples of one (provider, model) accumulate', () => {
+    const { state } = driveTimeline([
+      header(1, { provider: 'kimi-coding', model: 'kimi-k2.7-code' }),
+      assistantMessage(2, { usage }),
+      assistantMessage(3, { usage }),
+    ])
+    assert.equal(state.cost?.['kimi-coding']?.['kimi-k2.7-code']?.peak?.uncached, 200)
   })
 
-  test('peak-window boundaries and weekends split the periods', () => {
+  test('only DeepSeek splits peak/off-peak; other providers always book list price', () => {
+    const night = Date.UTC(2024, 0, 3, 23, 0, 0) // Wed 23:00 UTC — off-peak for DeepSeek
+    const deepseek = driveTimeline([
+      header(1, { provider: 'deepseek-official', model: 'deepseek-v4-flash' }),
+      at100(2, night),
+    ]).state.cost?.['deepseek-official']?.['deepseek-v4-flash']
+    assert.equal(deepseek?.off?.uncached, 100)
+    assert.equal(deepseek?.peak, undefined)
+    const kimi = driveTimeline([
+      header(1, { provider: 'kimi-coding', model: 'kimi-k3' }),
+      at100(2, night),
+    ]).state.cost?.['kimi-coding']?.['kimi-k3']
+    assert.equal(kimi?.peak?.uncached, 100, 'a flat-rate provider never books off-peak')
+    assert.equal(kimi?.off, undefined)
+  })
+
+  test('DeepSeek peak-window boundaries and weekends split the periods', () => {
     const at100 = (seq: number, time: number) => assistantMessage(seq, { usage, time })
     const { state } = driveTimeline([
-      header(1, { model: 'deepseek-v4-flash' }),
-      at100(2, Date.UTC(2024, 0, 1, 1, 0, 0)), // Mon 09:00 BJT — peak opens
-      at100(3, Date.UTC(2024, 0, 1, 4, 0, 0)), // Mon 12:00 BJT — peak closed
-      at100(4, Date.UTC(2024, 0, 1, 6, 0, 0)), // Mon 14:00 BJT — peak reopens
-      at100(5, Date.UTC(2024, 0, 1, 10, 0, 0)), // Mon 18:00 BJT — peak closed
-      at100(6, Date.UTC(2024, 0, 6, 2, 0, 0)), // Sat 10:00 BJT — weekend off-peak
-      at100(7, Date.UTC(2024, 0, 7, 2, 0, 0)), // Sun 10:00 BJT — weekend off-peak
+      header(1, { provider: 'deepseek-official', model: 'deepseek-v4-flash' }),
+      at100(2, Date.UTC(2024, 0, 1, 1, 0, 0)), // Mon 01:00 UTC — peak opens
+      at100(3, Date.UTC(2024, 0, 1, 4, 0, 0)), // Mon 04:00 UTC — peak closed
+      at100(4, Date.UTC(2024, 0, 1, 6, 0, 0)), // Mon 06:00 UTC — peak reopens
+      at100(5, Date.UTC(2024, 0, 1, 10, 0, 0)), // Mon 10:00 UTC — peak closed
+      at100(6, Date.UTC(2024, 0, 6, 2, 0, 0)), // Sat 02:00 UTC — weekend off-peak
+      at100(7, Date.UTC(2024, 0, 7, 2, 0, 0)), // Sun 02:00 UTC — weekend off-peak
     ])
-    const flash = state.cost?.flash
-    assert.equal(flash?.peak?.uncached, 200, 'two same-period samples accumulate (09:00 + 14:00)')
-    assert.equal(flash?.off?.uncached, 400, '12:00, 18:00, Saturday and Sunday are off-peak')
+    const flash = state.cost?.['deepseek-official']?.['deepseek-v4-flash']
+    assert.equal(flash?.peak?.uncached, 200, 'two same-period samples accumulate (01:00 + 06:00 UTC)')
+    assert.equal(flash?.off?.uncached, 400, '04:00, 10:00 UTC and the weekend are off-peak')
     assertPlainJson(state)
+  })
+
+  test('a request/context provider switch rekeys the following samples', () => {
+    const { state } = driveTimeline([
+      header(1, { model: 'deepseek-v4-flash' }),
+      assistantMessage(2, { usage }),
+      requestContext(3, { provider: 'deepseek-official', model: 'deepseek-v4-flash' }),
+      at100(4, PEAK),
+    ])
+    assert.equal(state.cost?.['']?.['deepseek-v4-flash']?.peak?.uncached, 100)
+    assert.equal(state.cost?.['deepseek-official']?.['deepseek-v4-flash']?.peak?.uncached, 100)
   })
 
   test('missing usage buckets accumulate as zero', () => {
     const { state } = driveTimeline([
-      header(1, { model: 'deepseek-v4-flash' }),
-      assistantMessage(2, { usage: { inputTokens: 100 }, time: Date.UTC(2024, 0, 1, 1, 0, 0) }),
+      header(1, { provider: 'deepseek-official', model: 'deepseek-v4-flash' }),
+      at100(2, PEAK),
     ])
-    assert.deepEqual(state.cost?.flash?.peak, { uncached: 100, cacheRead: 0, cacheWrite: 0, output: 0 })
+    assert.deepEqual(state.cost?.['deepseek-official']?.['deepseek-v4-flash']?.peak, {
+      uncached: 100, cacheRead: 0, cacheWrite: 0, output: 0,
+    })
+    assert.equal(state.cost?.['deepseek-official']?.['deepseek-v4-flash']?.off, undefined)
   })
 
   test('full usage buckets accumulate per bucket', () => {
     const { state } = driveTimeline([
-      header(1, { model: 'deepseek-v4-pro' }),
+      header(1, { provider: 'deepseek-official', model: 'deepseek-v4-pro' }),
       assistantMessage(2, {
         usage: { inputTokens: 10, cacheReadTokens: 20, cacheWriteTokens: 30, outputTokens: 40 },
-        time: Date.UTC(2024, 0, 1, 1, 0, 0),
+        time: PEAK,
       }),
     ])
-    assert.deepEqual(state.cost?.pro?.peak, { uncached: 10, cacheRead: 20, cacheWrite: 30, output: 40 })
+    assert.deepEqual(state.cost?.['deepseek-official']?.['deepseek-v4-pro']?.peak, {
+      uncached: 10, cacheRead: 20, cacheWrite: 30, output: 40,
+    })
   })
 })
 

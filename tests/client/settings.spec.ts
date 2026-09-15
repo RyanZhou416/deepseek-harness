@@ -47,13 +47,17 @@ describe('createContextSettings defaults', () => {
     const s = createContextSettings()
     assert.deepEqual(s.store.getSnapshot(), {
       status: 'loading',
+      placement: 'all',
       granularity: 'step',
       mode: 'total',
+      toolSort: 'count',
       fileSort: 'count',
       writable: false,
     })
+    assert.equal(s.defaultPlacement(), 'all')
     assert.equal(s.defaultGranularity(), 'step')
     assert.equal(s.defaultTrendMode(), 'total')
+    assert.equal(s.defaultToolSort(), 'count')
     assert.equal(s.defaultFileSort(), 'count')
   })
 })
@@ -77,6 +81,8 @@ describe('set', () => {
     const s = createContextSettings()
     s.set('defaultGranularity', 'turn')
     assert.equal(s.defaultGranularity(), 'turn')
+    s.set('defaultPlacement', 'sidebar')
+    assert.equal(s.defaultPlacement(), 'sidebar')
   })
 
   test('an unchanged value does not notify listeners', () => {
@@ -128,6 +134,32 @@ describe('set', () => {
     await new Promise(resolve => setTimeout(resolve, 0))
     assert.equal(s.defaultFileSort(), 'path')
   })
+
+  test('a rejected placement write degrades to all when the scope carries no valid value', async () => {
+    // Fail open: the unpersisted echo must not keep hiding an entry until
+    // the next reload — with nothing valid in the scope's truth, fall back
+    // to `all`.
+    const s = createContextSettings()
+    const scope = new TestSettingsScope({ status: 'ready', value: {}, writable: true })
+    s.attach(scope)
+    scope.failSet = true
+    s.set('defaultPlacement', 'sidebar')
+    assert.equal(s.defaultPlacement(), 'sidebar', 'the optimistic echo lands first')
+    await new Promise(resolve => setTimeout(resolve, 0))
+    assert.equal(s.defaultPlacement(), 'all', 'the echo degrades instead of staying unpersisted')
+  })
+
+  test('a rejected placement write rolls back to the scope\'s valid truth', async () => {
+    // The scope truth itself is a valid placement: the rollback restores it,
+    // no forced degrade.
+    const s = createContextSettings()
+    const scope = new TestSettingsScope({ status: 'ready', value: { defaultPlacement: 'sidebar' }, writable: true })
+    s.attach(scope)
+    scope.failSet = true
+    s.set('defaultPlacement', 'tab')
+    await new Promise(resolve => setTimeout(resolve, 0))
+    assert.equal(s.defaultPlacement(), 'sidebar')
+  })
 })
 
 describe('attach', () => {
@@ -135,14 +167,22 @@ describe('attach', () => {
     const s = createContextSettings()
     const scope = new TestSettingsScope({
       status: 'ready',
-      value: { defaultGranularity: 'turn', defaultTrendMode: 'delta', defaultFileSort: 'path' },
+      value: {
+        defaultPlacement: 'sidebar',
+        defaultGranularity: 'turn',
+        defaultTrendMode: 'delta',
+        defaultToolSort: 'name',
+        defaultFileSort: 'path',
+      },
       writable: true,
     })
     s.attach(scope)
     assert.deepEqual(s.store.getSnapshot(), {
       status: 'ready',
+      placement: 'sidebar',
       granularity: 'turn',
       mode: 'delta',
+      toolSort: 'name',
       fileSort: 'path',
       writable: true,
     })
@@ -168,8 +208,10 @@ describe('attach', () => {
       s.attach(new TestSettingsScope({ status: 'ready', value, writable: false }))
       assert.deepEqual(s.store.getSnapshot(), {
         status: 'ready',
+        placement: 'all',
         granularity: 'step',
         mode: 'total',
+        toolSort: 'count',
         fileSort: 'count',
         writable: false,
       })
@@ -180,31 +222,50 @@ describe('attach', () => {
     const s = createContextSettings()
     s.attach(new TestSettingsScope({
       status: 'ready',
-      value: { defaultGranularity: 'bogus', defaultTrendMode: 7, defaultFileSort: 'alpha' },
+      value: { defaultPlacement: 'window', defaultGranularity: 'bogus', defaultTrendMode: 7, defaultToolSort: 'alpha', defaultFileSort: 'alpha' },
       writable: false,
     }))
+    assert.equal(s.defaultPlacement(), 'all')
     assert.equal(s.defaultGranularity(), 'step')
     assert.equal(s.defaultTrendMode(), 'total')
+    assert.equal(s.defaultToolSort(), 'count')
     assert.equal(s.defaultFileSort(), 'count')
+  })
+
+  test('an invalid scope placement degrades to all instead of keeping the current one', () => {
+    // Fail open on the read path too: a value the plugin cannot understand
+    // must not strand a previously chosen placement.
+    const s = createContextSettings()
+    s.set('defaultPlacement', 'tab')
+    assert.equal(s.defaultPlacement(), 'tab')
+    const scope = new TestSettingsScope({ status: 'ready', value: { defaultPlacement: 42 }, writable: false })
+    s.attach(scope)
+    assert.equal(s.defaultPlacement(), 'all')
   })
 
   test('explicit schema-default values are accepted', () => {
     const s = createContextSettings()
     s.attach(new TestSettingsScope({
       status: 'ready',
-      value: { defaultGranularity: 'step', defaultTrendMode: 'total', defaultFileSort: 'count' },
+      value: { defaultPlacement: 'all', defaultGranularity: 'step', defaultTrendMode: 'total', defaultToolSort: 'count', defaultFileSort: 'count' },
       writable: false,
     }))
+    assert.equal(s.defaultPlacement(), 'all')
     assert.equal(s.defaultGranularity(), 'step')
     assert.equal(s.defaultTrendMode(), 'total')
+    assert.equal(s.defaultToolSort(), 'count')
     assert.equal(s.defaultFileSort(), 'count')
   })
 
   test('missing fields keep the current state', () => {
     const s = createContextSettings()
+    s.set('defaultPlacement', 'tab')
+    s.set('defaultToolSort', 'size')
     s.attach(new TestSettingsScope({ status: 'ready', value: { defaultFileSort: 'latest' }, writable: false }))
+    assert.equal(s.defaultPlacement(), 'tab', 'the in-session choice survives a section without the field')
     assert.equal(s.defaultGranularity(), 'step')
     assert.equal(s.defaultTrendMode(), 'total')
+    assert.equal(s.defaultToolSort(), 'size', 'the in-session tool sort survives a section without the field')
     assert.equal(s.defaultFileSort(), 'latest')
   })
 
@@ -223,8 +284,14 @@ describe('attach', () => {
     scope.emit({ status: 'ready', value: { defaultFileSort: 'path' }, writable: true })
     assert.equal(calls, 3)
     assert.equal(s.defaultFileSort(), 'path')
-    scope.emit({ status: 'ready', value: { defaultFileSort: 'path' }, writable: false })
+    scope.emit({ status: 'ready', value: { defaultPlacement: 'sidebar' }, writable: true })
     assert.equal(calls, 4)
+    assert.equal(s.defaultPlacement(), 'sidebar')
+    scope.emit({ status: 'ready', value: { defaultToolSort: 'name' }, writable: true })
+    assert.equal(calls, 5)
+    assert.equal(s.defaultToolSort(), 'name')
+    scope.emit({ status: 'ready', value: { defaultFileSort: 'path' }, writable: false })
+    assert.equal(calls, 6)
     assert.equal(s.store.getSnapshot().writable, false)
   })
 

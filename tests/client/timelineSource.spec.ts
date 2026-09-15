@@ -23,6 +23,7 @@ import { mount, text } from './helpers/kit'
 afterEach(() => {
   resetTimelineDetailStores()
   vi.restoreAllMocks()
+  vi.unstubAllGlobals()
   vi.useRealTimers()
 })
 
@@ -44,7 +45,7 @@ function slimHead(rev: number, over: Record<string, unknown> = {}): Record<strin
   return {
     ok: true,
     model: 'm',
-    current: { system: 1, tools: 2, user: 3, inject: 0, assistant: 4, tool: 5, total: 15 },
+    current: { system: 1, tools: 2, user: 3, inject: 0, skill: 0, assistant: 4, tool: 5, total: 15 },
     counts: { turns: 1, steps: 1, injects: 1, compactions: 0, prunes: 0 },
     last: { seq: 9, total: 15, prompt: 14 },
     detailRev: rev,
@@ -52,11 +53,18 @@ function slimHead(rev: number, over: Record<string, unknown> = {}): Record<strin
   }
 }
 
-/** A ctx whose connection face serves the given call behavior. */
-function ctxWithCall(call: unknown): ClientCtx {
-  const ctx = new TestClientCtx()
-  if (call !== undefined) ctx.setService('connection', { rpc: { call } })
-  return asClientCtx(ctx)
+/**
+ * Stub the global fetch with a programmable detail reply (the transport the
+ * detail reader POSTs) and return a bare ctx — the reader never touches the
+ * ctx's services for the read itself.
+ */
+function ctxWithCall(behavior: () => { status?: number; body?: unknown }): ClientCtx {
+  vi.stubGlobal('fetch', async () => {
+    const outcome = await behavior()
+    const status = outcome.status ?? 200
+    return { ok: status === 200, status, json: async () => outcome.body }
+  })
+  return asClientCtx(new TestClientCtx())
 }
 
 /** Poll until the predicate holds (real timers ride the store's debounce). */
@@ -106,42 +114,59 @@ describe('detailOf', () => {
     // Absent stays absent (the legacy inline generation's marker).
     assert.equal(detailOf(detail(1))?.fileOps, undefined)
   })
+
+  test('the slim head rides through sanitized; a malformed head drops alone', () => {
+    // A well-formed head passes through (the Agent network's cold-ring fetch).
+    const served = detailOf(detail(2, { head: slimHead(2) }))
+    assert.ok(served?.head !== undefined)
+    assert.equal(served.head.current.total, 15)
+    assert.equal(served.head.model, 'm')
+    // A non-record head drops without rejecting the payload the cards consume.
+    const junkHead = detailOf(detail(2, { head: 'nope' }))
+    assert.ok(junkHead !== null)
+    assert.equal(junkHead.head, undefined)
+    assert.ok(junkHead.requests.length > 0)
+    // Absent stays absent.
+    assert.equal(detailOf(detail(2))?.head, undefined)
+  })
 })
 
 describe('makeDetailFetcher', () => {
-  test('no session id, no connection face, or a hostile read yields no fetcher', () => {
-    assert.equal(makeDetailFetcher(ctxWithCall(async () => ({ ok: true, value: null })), ''), undefined)
-    assert.equal(makeDetailFetcher(asClientCtx(new TestClientCtx()), 's1'), undefined, 'no connection service')
-    assert.equal(makeDetailFetcher(ctxWithCall(undefined), 's1'), undefined)
-    assert.equal(makeDetailFetcher(ctxWithCall('not-a-function'), 's1'), undefined)
-    const hostile = { get: () => { throw new Error('hostile') } }
-    assert.equal(makeDetailFetcher(hostile as unknown as ClientCtx, 's1'), undefined)
+  test('no session id yields no fetcher', () => {
+    assert.equal(makeDetailFetcher(ctxWithCall(() => ({ body: null })), ''), undefined)
   })
 
   test('the envelope contract: not-ok rejects, null value means absent, malformed value rejects', async () => {
-    const failed = makeDetailFetcher(ctxWithCall(async () => ({ ok: false, error: { code: 'x', message: 'm', details: {} } })), 's1')!
-    await assert.rejects(() => failed(), /detail rpc failed/)
+    const failed = makeDetailFetcher(ctxWithCall(() => ({ body: { ok: false, error: { code: 'x', message: 'm', details: {} } } })), 's1')!
+    await assert.rejects(() => failed(), /detail read failed/)
 
-    const absent = makeDetailFetcher(ctxWithCall(async () => ({ ok: true, value: null })), 's1')!
+    const absent = makeDetailFetcher(ctxWithCall(() => ({ body: { ok: true, value: null } })), 's1')!
     assert.equal(await absent(), null)
 
-    const malformed = makeDetailFetcher(ctxWithCall(async () => ({ ok: true, value: { no: 'rev' } })), 's1')!
-    await assert.rejects(() => malformed(), /detail rpc malformed/)
+    const malformed = makeDetailFetcher(ctxWithCall(() => ({ body: { ok: true, value: { no: 'rev' } } })), 's1')!
+    await assert.rejects(() => malformed(), /detail read malformed/)
 
-    const transport = makeDetailFetcher(ctxWithCall(async () => { throw new Error('offline') }), 's1')!
+    const transport = makeDetailFetcher(ctxWithCall(() => {
+      throw new Error('offline')
+    }), 's1')!
     await assert.rejects(() => transport(), /offline/)
+
+    // A non-200 answer (the route absent on an inline-generation host) rejects.
+    const missing = makeDetailFetcher(ctxWithCall(() => ({ status: 404, body: 'not found' })), 's1')!
+    await assert.rejects(() => missing(), /HTTP 404/)
   })
 
-  test('a good read resolves the narrowed detail and rides the declared channel pair', async () => {
-    const seen: string[] = []
-    const fetcher = makeDetailFetcher(ctxWithCall(async (channel: string, endpoint: string, payload: unknown) => {
-      seen.push(channel, endpoint)
-      assert.deepEqual(payload, { sessionId: 's1' })
-      return { ok: true, value: detail(4) }
-    }), 's1')!
-    const d = await fetcher()
+  test('a good read resolves the narrowed detail and POSTs the declared route', async () => {
+    const seen: { url?: unknown; body?: unknown } = {}
+    vi.stubGlobal('fetch', async (url: unknown, init: { body: string }) => {
+      seen.url = url
+      seen.body = JSON.parse(String(init.body))
+      return { ok: true, status: 200, json: async () => ({ ok: true, value: detail(4) }) }
+    })
+    const d = await makeDetailFetcher(asClientCtx(new TestClientCtx()), 's1')!()
     assert.equal(d?.rev, 4)
-    assert.deepEqual(seen, ['/dsh-context', 'detail'])
+    assert.equal(seen.url, '/api/dsh-context/detail')
+    assert.deepEqual(seen.body, { sessionId: 's1' })
   })
 })
 
@@ -308,7 +333,7 @@ describe('DetailStore', () => {
     assert.equal(store.getSnapshot().failed, false)
   })
 
-  test('without a fetcher the store types the failure (the exotic no-connection path)', async () => {
+  test('without a fetcher the store types the failure (the empty-session-id path)', async () => {
     const store = new DetailStore(undefined, 0)
     store.request(1)
     await settle()
@@ -374,9 +399,9 @@ describe('DetailStore', () => {
 
 describe('detailStoreOf', () => {
   test('one store per session, shared by every consumer; reset drops the cache', () => {
-    const ctx = ctxWithCall(async () => ({ ok: true, value: detail(1) }))
+    const ctx = ctxWithCall(() => ({ body: { ok: true, value: detail(1) } }))
     const a = detailStoreOf(ctx, 's1')
-    assert.equal(a, detailStoreOf(ctxWithCall(async () => ({ ok: true, value: null })), 's1'), 'the session key wins, the first fetcher keeps serving')
+    assert.equal(a, detailStoreOf(ctxWithCall(() => ({ body: { ok: true, value: null } })), 's1'), 'the session key wins, the first fetcher keeps serving')
     assert.notEqual(a, detailStoreOf(ctx, 's2'))
     resetTimelineDetailStores()
     assert.notEqual(detailStoreOf(ctx, 's1'), a, 'a reset store is a fresh instance')
@@ -408,14 +433,14 @@ function probeRead(container: HTMLElement, key: string): string {
 describe('useTimelineSource', () => {
   test('the inline generation passes through untouched and never fetches', async () => {
     let calls = 0
-    const ctx = ctxWithCall(async () => {
+    const ctx = ctxWithCall(() => {
       calls++
-      return { ok: true, value: detail(1) }
+      return { body: { ok: true, value: detail(1) } }
     })
     const inline: ContextTimeline = {
       ok: true,
       model: 'inline-m',
-      current: { system: 1, tools: 2, user: 3, inject: 0, assistant: 4, tool: 5, total: 15 },
+      current: { system: 1, tools: 2, user: 3, inject: 0, skill: 0, assistant: 4, tool: 5, total: 15 },
       requests: [{ seq: 1, time: 0, system: 1, tools: 2, user: 3, inject: 0, assistant: 4, tool: 5, total: 15 }],
       events: [],
       nodes: [],
@@ -436,7 +461,7 @@ describe('useTimelineSource', () => {
   })
 
   test('no projection value keeps the loading surface', async () => {
-    const m = await mount(h(SourceProbe, { ctx: ctxWithCall(undefined), sessionId: 's1', value: undefined }))
+    const m = await mount(h(SourceProbe, { ctx: ctxWithCall(() => ({ body: null })), sessionId: 's1', value: undefined }))
     assert.equal(probeRead(m.container, 'state'), 'loading')
     assert.equal(probeRead(m.container, 'steps'), 'null')
     await m.unmount()
@@ -444,16 +469,18 @@ describe('useTimelineSource', () => {
 
   test('the split generation: counters render off the head immediately, the detail lands through the channel', async () => {
     let calls = 0
-    const ctx = ctxWithCall(async () => {
+    const ctx = ctxWithCall(() => {
       calls++
       return {
-        ok: true,
-        value: detail(3, {
-          surfaceFloor: 2,
-          archiveFloor: 5,
-          fileOps: [{ seq: 2, path: 'a.ts', kind: 'read', tool: 'read', err: false, added: 0, removed: 0 }],
-          fileOpsFloor: 4,
-        }),
+        body: {
+          ok: true,
+          value: detail(3, {
+            surfaceFloor: 2,
+            archiveFloor: 5,
+            fileOps: [{ seq: 2, path: 'a.ts', kind: 'read', tool: 'read', err: false, added: 0, removed: 0 }],
+            fileOpsFloor: 4,
+          }),
+        },
       }
     })
     const m = await mount(h(SourceProbe, { ctx, sessionId: 's1', value: slimHead(3) }))
@@ -473,7 +500,7 @@ describe('useTimelineSource', () => {
 
   test('a rev bump on the pushed head refetches the detail', async () => {
     let served = 3
-    const ctx = ctxWithCall(async () => ({ ok: true, value: detail(served) }))
+    const ctx = ctxWithCall(() => ({ body: { ok: true, value: detail(served) } }))
     const m = await mount(h(SourceProbe, { ctx, sessionId: 's1', value: slimHead(3) }))
     await until(() => probeRead(m.container, 'state') === 'ready', 'the first read never landed')
     assert.equal(detailStoreOf(ctx, 's1').getSnapshot().detail?.rev, 3)
@@ -489,10 +516,10 @@ describe('useTimelineSource', () => {
   test('the failed read arms the retry affordance, which refires the read', async () => {
     let online = false
     let calls = 0
-    const ctx = ctxWithCall(async () => {
+    const ctx = ctxWithCall(() => {
       calls++
       if (!online) throw new Error('offline')
-      return { ok: true, value: detail(1) }
+      return { body: { ok: true, value: detail(1) } }
     })
     const m = await mount(h(SourceProbe, { ctx, sessionId: 's1', value: slimHead(1) }))
     await until(() => probeRead(m.container, 'state') === 'failed', 'the failure never surfaced')
@@ -506,7 +533,7 @@ describe('useTimelineSource', () => {
   })
 
   test('an absent answer (the session left the live set) surfaces the failed note', async () => {
-    const ctx = ctxWithCall(async () => ({ ok: true, value: null }))
+    const ctx = ctxWithCall(() => ({ body: { ok: true, value: null } }))
     const m = await mount(h(SourceProbe, { ctx, sessionId: 's1', value: slimHead(1) }))
     await until(() => probeRead(m.container, 'state') === 'failed', 'absence never surfaced')
     await m.unmount()

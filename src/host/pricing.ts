@@ -155,10 +155,10 @@ export interface MessageSource {
  * context provenance (client-runtime context-provenance.ts): workspace
  * instructions name the files they were reconciled from, a plugin source its
  * plugin id, and any other producer its own durable kind. Returns '' when
- * the source carries no readable identity at all.
+ * the source is missing or carries no readable identity at all.
  */
-export function injectionSourceName(source: MessageSource): string {
-  if (source.kind === 'agent-instructions' && Array.isArray(source.changes)) {
+export function injectionSourceName(source: MessageSource | null | undefined): string {
+  if (source?.kind === 'agent-instructions' && Array.isArray(source.changes)) {
     const paths: string[] = []
     for (const change of source.changes) {
       const path = change?.path
@@ -166,8 +166,10 @@ export function injectionSourceName(source: MessageSource): string {
     }
     if (paths.length > 0) return paths.join(', ')
   }
-  if (typeof source.plugin === 'string' && source.plugin !== '') return source.plugin
-  return typeof source.kind === 'string' && source.kind !== '' ? source.kind : ''
+  const plugin = source?.plugin
+  if (typeof plugin === 'string' && plugin !== '') return plugin
+  const kind = source?.kind
+  return typeof kind === 'string' && kind !== '' ? kind : ''
 }
 
 export function isInjection(source: MessageSource | null | undefined): source is MessageSource {

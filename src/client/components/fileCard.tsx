@@ -9,6 +9,9 @@
  * Interaction mirrors the Context browser's element rows: a row click
  * expands the file's own operation log; each operation is itself the click
  * target that jumps to (and reveals) the exact tool result in the browser.
+ * The file name opens the file's right-Sidebar preview where that column
+ * exists (dsh 0.1.5-rc.1+, the shipped files-sidebar idiom), and the system
+ * opener where it does not.
  */
 
 import { memo, useState, type ChangeEvent, type ComponentType, type MouseEvent, type ReactElement } from 'react'
@@ -27,6 +30,12 @@ export interface FileCardProps {
   scope: string
   /** The host workspace root: workspace paths display './'-relative when known. */
   workspace?: string
+  /**
+   * Open a file's right-Sidebar preview; returns whether the column took it, so
+   * a refusal falls through to the system opener. Absent = this harness has no
+   * preview column (the system-open path stays the only affordance).
+   */
+  onPreview?: (entry: FileEntry) => boolean
   /** Open a file on the user's system; absent = the file name renders inert. */
   onOpen?: (absPath: string) => void
   /** Reveal one operation's result node in the Context browser; absent = op lines render inert. */
@@ -133,7 +142,7 @@ export function makeFileCard(kit: ViewKit, settings: ContextSettings): Component
     )
 
     return (
-      <div className="lc-card lc-col">
+      <div className="lc-card lc-col flex-1 min-w-[min(360px,100%)]">
         <div className="lc-card-title">
           <span className="lc-card-title-text">{t('files.title')}</span>
           <span className="lc-card-sub">{props.scope}</span>
@@ -147,7 +156,8 @@ export function makeFileCard(kit: ViewKit, settings: ContextSettings): Component
         ) : (
           <div>
             <div className="lc-fa-ctl">
-              <div className="lc-gran">
+              {/* The five purpose chips (labels + counts) overflow a ~300px card in English — flow the group to two lines. */}
+              <div className="lc-gran @max-[380px]/lc-card:flex-wrap">
                 {chips.map(c => (
                   <button
                     key={c.key}
@@ -164,7 +174,7 @@ export function makeFileCard(kit: ViewKit, settings: ContextSettings): Component
                 ))}
               </div>
               <input
-                className="lc-fa-search"
+                className="lc-fa-search focus:border-(--dsw-alias-label-dimmed)"
                 value={query}
                 placeholder={t('files.search')}
                 onChange={(ev: ChangeEvent<HTMLInputElement>) => { setQuery(ev.target.value) }}
@@ -174,9 +184,9 @@ export function makeFileCard(kit: ViewKit, settings: ContextSettings): Component
               <span>{t('files.files', { n: activity.entries.length })}</span>
               {activity.totals.added + activity.totals.removed > 0 ? (
                 /* The one styled tip of the card: it lives OUTSIDE the scrolling list, so the bubble never clips. */
-                <span className="lc-fa-meta-delta">
+                <span className="lc-fa-meta-delta group/tip">
                   <DeltaPair added={activity.totals.added} removed={activity.totals.removed} />
-                  <span className="lc-tip lc-fa-meta-tip" role="tooltip">{t('files.deltaTip')}</span>
+                  <span className="lc-tip lc-fa-meta-tip group-hover/tip:opacity-100" role="tooltip">{t('files.deltaTip')}</span>
                 </span>
               ) : null}
               <span className="lc-gran lc-fa-sort" role="group" title={t('files.sortTip')}>
@@ -207,11 +217,16 @@ export function makeFileCard(kit: ViewKit, settings: ContextSettings): Component
                   const glyph = glyphOf(e.path, e.form)
                   // The system-open affordance: real paths resolve to absolute; pattern rows are not files.
                   const abs = e.pattern === true ? undefined : absPathOf(e.path, props.workspace)
+                  // The preview affordance leads where the column exists: a real
+                  // file (never a search pattern or directory target) opens its
+                  // Sidebar tab, and a refusal falls through to the system opener.
+                  const previewable = props.onPreview !== undefined && e.pattern !== true && e.form !== 'dir'
+                  const openable = previewable || (abs !== undefined && props.onOpen !== undefined)
                   return (
                     <div key={e.path} className={'lc-fa-item' + (open ? ' lc-fa-item-on' : '')}>
                       <button
                         type="button"
-                        className="lc-fa-row"
+                        className="lc-fa-row hover:bg-(--dsw-alias-interactive-bg-hover) @max-[380px]/lc-card:flex-wrap"
                         title={e.path}
                         onClick={() => { setOpenPath(open ? null : e.path) }}
                       >
@@ -225,14 +240,21 @@ export function makeFileCard(kit: ViewKit, settings: ContextSettings): Component
                             )
                             : glyph.glyph}
                         </span>
-                        <span className="lc-fa-path">
+                        {/* Narrow cards: wrap instead of crushing — the path's near-full-width basis keeps
+                            line 1 to chevron + icon + path, badges/delta/time fold onto line 2. The 46px
+                            reservation is chevron (12) + gaps (2×7) + form icon (20). */}
+                        <span className="lc-fa-path flex-1 @max-[380px]/lc-card:basis-[calc(100%-46px)]">
                           {dir !== '' ? <em>{dir}</em> : null}
-                          {abs !== undefined && props.onOpen !== undefined
+                          {openable
                             ? (
                               <b
-                                className="lc-fa-file"
-                                title={t('files.open')}
-                                onClick={(ev: MouseEvent) => { ev.stopPropagation(); props.onOpen?.(abs) }}
+                                className="lc-fa-file hover:underline"
+                                title={t(previewable ? 'files.preview' : 'files.open')}
+                                onClick={(ev: MouseEvent) => {
+                                  ev.stopPropagation()
+                                  if (previewable && props.onPreview?.(e) === true) return
+                                  if (abs !== undefined) props.onOpen?.(abs)
+                                }}
                               >
                                 {base}
                               </b>
@@ -266,7 +288,7 @@ export function makeFileCard(kit: ViewKit, settings: ContextSettings): Component
                                 <button
                                   key={key}
                                   type="button"
-                                  className="lc-fa-op lc-fa-op-link"
+                                  className="lc-fa-op lc-fa-op-link hover:bg-(--dsw-alias-interactive-bg-hover)"
                                   title={t('files.locate')}
                                   onClick={() => { onLocate(op) }}
                                 >

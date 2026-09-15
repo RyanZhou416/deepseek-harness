@@ -9,18 +9,20 @@ import { afterEach, describe, test, vi } from 'vitest'
 import { makeContextModal } from '../../../src/client/components/contextModal'
 import { modalStoreOf, setPendingConsume, takePendingConsume } from '../../../src/client/modalStore'
 import { watchHistoryFaces } from '../../../src/client/historyPage'
+import { createContextSettings } from '../../../src/client/settings'
 import type { ContextTimeline } from '../../../src/shared/types'
 import { DICT_EN } from '../../../src/client/i18n'
 import { TestClientCtx, TestSessions, asClientCtx } from '../helpers/harness'
 import { click, flush, hover, keydown, makeKit, mount, query, queryAll, text, unhover } from '../helpers/kit'
 
 const kit = makeKit()
+const settings = createContextSettings()
 
 
 function timeline(over: Record<string, unknown> = {}): ContextTimeline {
   return {
     ok: true,
-    current: { system: 1, tools: 2, user: 3, inject: 4, assistant: 5, tool: 6, total: 21 },
+    current: { system: 1, tools: 2, user: 3, inject: 4, skill: 0, assistant: 5, tool: 6, total: 21 },
     requests: [],
     events: [],
     nodes: [],
@@ -41,12 +43,13 @@ const OPEN = (): boolean => true
 
 afterEach(() => {
   vi.restoreAllMocks()
+  vi.unstubAllGlobals()
 })
 
 describe('ContextModal', () => {
   test('renders null without a useContextModal hook or while closed', async () => {
     const ctx = new TestClientCtx({ services: { sessions: new TestSessions() } })
-    const ContextModal = makeContextModal(asClientCtx(ctx), kit)
+    const ContextModal = makeContextModal(asClientCtx(ctx), kit, settings)
 
     const m1 = await mount(h(ContextModal, { sessionId: 'sm-none', useProjection: () => timeline() }))
     assert.equal(m1.container.childElementCount, 0)
@@ -63,7 +66,7 @@ describe('ContextModal', () => {
 
   test('open with no projection hook (or an empty one) shows the loading view', async () => {
     const ctx = new TestClientCtx({ services: { sessions: new TestSessions() } })
-    const ContextModal = makeContextModal(asClientCtx(ctx), kit)
+    const ContextModal = makeContextModal(asClientCtx(ctx), kit, settings)
 
     const m1 = await mount(h(ContextModal, { sessionId: 'sm-load1', useContextModal: OPEN }))
     assert.ok(text(m1.container).includes(DICT_EN.loading))
@@ -81,7 +84,7 @@ describe('ContextModal', () => {
 
   test('a corrupt timeline projection is sanitized and still renders the composition', async () => {
     const ctx = new TestClientCtx({ services: { sessions: new TestSessions() } })
-    const ContextModal = makeContextModal(asClientCtx(ctx), kit)
+    const ContextModal = makeContextModal(asClientCtx(ctx), kit, settings)
     const m = await mount(h(ContextModal, {
       sessionId: 'sm-garbage',
       useContextModal: OPEN,
@@ -97,7 +100,7 @@ describe('ContextModal', () => {
   test('full render: subtitle variants and hover link through the composed browser', async () => {
     const sessions = new TestSessions()
     const ctx = new TestClientCtx({ services: { sessions } })
-    const ContextModal = makeContextModal(asClientCtx(ctx), kit)
+    const ContextModal = makeContextModal(asClientCtx(ctx), kit, settings)
     const projections: Record<string, unknown> = {
       contextTimeline: timeline({
         model: 'deepseek-v4-flash',
@@ -129,7 +132,7 @@ describe('ContextModal', () => {
 
   test('subtitle degrades to the model alone, then to nothing', async () => {
     const ctx = new TestClientCtx({ services: { sessions: new TestSessions() } })
-    const ContextModal = makeContextModal(asClientCtx(ctx), kit)
+    const ContextModal = makeContextModal(asClientCtx(ctx), kit, settings)
 
     const m1 = await mount(h(ContextModal, {
       sessionId: 'sm-sub1',
@@ -153,7 +156,7 @@ describe('ContextModal', () => {
   test('backdrop click without a sessionId is a no-op', async () => {
     const sessions = new TestSessions()
     const ctx = new TestClientCtx({ services: { sessions } })
-    const ContextModal = makeContextModal(asClientCtx(ctx), kit)
+    const ContextModal = makeContextModal(asClientCtx(ctx), kit, settings)
     const m = await mount(h(ContextModal, { useContextModal: OPEN, useProjection: () => undefined }))
     await click(query(m.container, '.lc-modal-backdrop'))
     assert.ok(m.container.querySelector('.lc-modal-backdrop') !== null)
@@ -164,7 +167,7 @@ describe('ContextModal', () => {
   test('clicking the card itself does not close (stopPropagation)', async () => {
     const sessions = new TestSessions()
     const ctx = new TestClientCtx({ services: { sessions } })
-    const ContextModal = makeContextModal(asClientCtx(ctx), kit)
+    const ContextModal = makeContextModal(asClientCtx(ctx), kit, settings)
     const m = await mount(h(ContextModal, { sessionId: 'sm-card', useContextModal: OPEN, useProjection: () => undefined }))
     await click(query(m.container, '.lc-modal-card'))
     assert.ok(m.container.querySelector('.lc-modal-backdrop') !== null)
@@ -175,7 +178,7 @@ describe('ContextModal', () => {
   test('close flips the store and bails a pending consume through the session scope', async () => {
     const sessions = new TestSessions()
     const ctx = new TestClientCtx({ services: { sessions } })
-    const ContextModal = makeContextModal(asClientCtx(ctx), kit)
+    const ContextModal = makeContextModal(asClientCtx(ctx), kit, settings)
     const sid = 'sm-close'
     modalStoreOf(sid).set(true)
     setPendingConsume(sid, { kind: 'bare-token', token: '/context' })
@@ -200,7 +203,7 @@ describe('ContextModal', () => {
   test('close without a pending consume sets the store but bails nothing', async () => {
     const sessions = new TestSessions()
     const ctx = new TestClientCtx({ services: { sessions } })
-    const ContextModal = makeContextModal(asClientCtx(ctx), kit)
+    const ContextModal = makeContextModal(asClientCtx(ctx), kit, settings)
     const sid = 'sm-noguard'
     modalStoreOf(sid).set(true)
     const m = await mount(h(ContextModal, {
@@ -216,7 +219,7 @@ describe('ContextModal', () => {
 
   test('a pending consume without the sessions service closes quietly', async () => {
     const ctx = new TestClientCtx()
-    const ContextModal = makeContextModal(asClientCtx(ctx), kit)
+    const ContextModal = makeContextModal(asClientCtx(ctx), kit, settings)
     const sid = 'sm-nosvc'
     modalStoreOf(sid).set(true)
     setPendingConsume(sid, { kind: 'bare-token', token: '/context' })
@@ -240,7 +243,7 @@ describe('ContextModal', () => {
       },
     }
     const ctx = new TestClientCtx({ services: { sessions } })
-    const ContextModal = makeContextModal(asClientCtx(ctx), kit)
+    const ContextModal = makeContextModal(asClientCtx(ctx), kit, settings)
     const sid = 'sm-noscope'
     modalStoreOf(sid).set(true)
     setPendingConsume(sid, { kind: 'span', span: { start: 0, end: 8, draftRev: 3 } })
@@ -258,7 +261,7 @@ describe('ContextModal', () => {
   test('the mask docks beside the frame ancestor, follows template rewrites, and disconnects on close', async () => {
     const sessions = new TestSessions()
     const ctx = new TestClientCtx({ services: { sessions } })
-    const ContextModal = makeContextModal(asClientCtx(ctx), kit)
+    const ContextModal = makeContextModal(asClientCtx(ctx), kit, settings)
     const sid = 'sm-dock'
     // The shell frame: the plugin matches its INLINE grid template, the one
     // host anchor carried by every supported baseline (dockMeasure.ts).
@@ -299,7 +302,7 @@ describe('ContextModal', () => {
 
   test('without a frame ancestor the mask stays full-viewport', async () => {
     const ctx = new TestClientCtx({ services: { sessions: new TestSessions() } })
-    const ContextModal = makeContextModal(asClientCtx(ctx), kit)
+    const ContextModal = makeContextModal(asClientCtx(ctx), kit, settings)
     const m = await mount(h(ContextModal, {
       sessionId: 'sm-noframe',
       useContextModal: OPEN,
@@ -312,7 +315,7 @@ describe('ContextModal', () => {
   test('Escape closes; other keys do not; the listener is removed on close', async () => {
     const sessions = new TestSessions()
     const ctx = new TestClientCtx({ services: { sessions } })
-    const ContextModal = makeContextModal(asClientCtx(ctx), kit)
+    const ContextModal = makeContextModal(asClientCtx(ctx), kit, settings)
     const sid = 'sm-esc'
     modalStoreOf(sid).set(true)
     const m = await mount(h(ContextModal, {
@@ -338,7 +341,7 @@ describe('ContextModal', () => {
 
   test('closing restores focus to the previously focused element', async () => {
     const ctx = new TestClientCtx({ services: { sessions: new TestSessions() } })
-    const ContextModal = makeContextModal(asClientCtx(ctx), kit)
+    const ContextModal = makeContextModal(asClientCtx(ctx), kit, settings)
     const sid = 'sm-focus'
     const btn = document.createElement('button')
     document.body.appendChild(btn)
@@ -365,7 +368,7 @@ describe('ContextModal', () => {
 
   test('closing skips the focus restore when the previous element left the document', async () => {
     const ctx = new TestClientCtx({ services: { sessions: new TestSessions() } })
-    const ContextModal = makeContextModal(asClientCtx(ctx), kit)
+    const ContextModal = makeContextModal(asClientCtx(ctx), kit, settings)
     const sid = 'sm-focus-gone'
     const btn = document.createElement('button')
     document.body.appendChild(btn)
@@ -388,7 +391,7 @@ describe('ContextModal', () => {
 
   test('no focus bookkeeping when nothing was focused (activeElement not an element)', async () => {
     const ctx = new TestClientCtx({ services: { sessions: new TestSessions() } })
-    const ContextModal = makeContextModal(asClientCtx(ctx), kit)
+    const ContextModal = makeContextModal(asClientCtx(ctx), kit, settings)
     const sid = 'sm-focus-null'
     modalStoreOf(sid).set(true)
     // Environment control (not a plugin fake): jsdom always reports body;
@@ -417,28 +420,24 @@ describe('ContextModal — the split generation', () => {
     assert.fail(message)
   }
 
-  test('the modal shares the detail channel: the browser lands the collections on open', async () => {
-    const ctx = new TestClientCtx({
-      services: {
-        sessions: new TestSessions(),
-        connection: {
-          rpc: {
-            call: async () => ({
-              ok: true,
-              value: {
-                rev: 1,
-                requests: [{ seq: 1, turn: 1, step: 1, time: 1, system: 1, tools: 2, user: 3, inject: 4, assistant: 5, tool: 6, total: 21 }],
-                events: [],
-                nodes: [{ seq: 1, cat: 'assistant', tokens: 5, text: 'modal reply' }],
-                droppedNodes: 0,
-                archive: [],
-              },
-            }),
-          },
+  test('the modal shares the detail route: the browser lands the collections on open', async () => {
+    vi.stubGlobal('fetch', async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        ok: true,
+        value: {
+          rev: 1,
+          requests: [{ seq: 1, turn: 1, step: 1, time: 1, system: 1, tools: 2, user: 3, inject: 4, assistant: 5, tool: 6, total: 21 }],
+          events: [],
+          nodes: [{ seq: 1, cat: 'assistant', tokens: 5, text: 'modal reply' }],
+          droppedNodes: 0,
+          archive: [],
         },
-      },
-    })
-    const ContextModal = makeContextModal(asClientCtx(ctx), kit)
+      }),
+    }))
+    const ctx = new TestClientCtx({ services: { sessions: new TestSessions() } })
+    const ContextModal = makeContextModal(asClientCtx(ctx), kit, settings)
     const head = timeline({
       counts: { turns: 1, steps: 1, injects: 0, compactions: 0, prunes: 0 },
       last: { seq: 1, total: 21, prompt: 20 },
@@ -467,7 +466,7 @@ describe('ContextModal — the split generation', () => {
     const ctx = new TestClientCtx({ services: { sessions: new TestSessions() } })
     // Armed before either service exists: the inject stays pending, the race.
     watchHistoryFaces(asClientCtx(ctx))
-    const ContextModal = makeContextModal(asClientCtx(ctx), kit)
+    const ContextModal = makeContextModal(asClientCtx(ctx), kit, settings)
     const projections: Record<string, unknown> = {
       contextTimeline: timeline(),
       contextHeaders: { headers: [{ seq: 1, time: 0, systemTokens: 5, tools: [] }] },

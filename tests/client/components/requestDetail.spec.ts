@@ -43,19 +43,23 @@ describe('RequestDetail header', () => {
     }))
     const head = text(query(m.container, '.lc-detail-head'))
     assert.ok(head.includes('Turn 1 · Step 1'))
+    assert.ok(head.includes('Turn 1 · Step 1 of 1'), 'no stepsOf getter degrades to a 1-step turn')
     assert.ok(!head.includes('Last Step'), 'single-step request carries no last-step tag')
     assert.ok(!head.includes('Delta'), 'cumulative mode carries no delta tag')
-    assert.ok(head.includes('Actual Prompt 1.0k'))
+    assert.ok(head.includes('Actual 1.0k'))
     assert.ok(head.includes('Output 120'))
     assert.ok(head.includes('Cache 50.00%'), 'real cacheHitPercent: 500/1000 truncated to two decimals')
+    const ms = await mount(h(RequestDetail, { request: req({}), stepsOf: (turn) => (turn === 1 ? 7 : 1) }))
+    assert.ok(text(query(ms.container, '.lc-detail-head')).includes('Turn 1 · Step 1 of 7'))
+    await ms.unmount()
     const rows = queryAll(m.container, '.lc-detail-row')
-    assert.equal(rows.length, 6)
+    assert.equal(rows.length, 7)
     assert.ok(text(rows[0]).includes('System Prompt'))
     assert.ok(text(rows[0]).includes('≈100'))
     const pcts = queryAll(m.container, '.lc-detail-pct').map(el => text(el))
     assert.ok(pcts.some(p => p.endsWith('%')), 'percentages rendered when total > 0')
     const fills = queryAll<HTMLElement>(m.container, '.lc-bar-fill')
-    assert.equal(fills.length, 6, 'one fill per row in cumulative mode')
+    assert.equal(fills.length, 7, 'one fill per row in cumulative mode')
     assert.ok(fills[0].style.width !== '0%', 'non-zero categories fill the track')
     await m.unmount()
   })
@@ -63,7 +67,7 @@ describe('RequestDetail header', () => {
   test('usage chips drop out when the figures are absent; cache falls back to a dash when nothing was billed', async () => {
     const m = await mount(h(RequestDetail, { request: req({}) }))
     const head = text(query(m.container, '.lc-detail-head'))
-    assert.ok(!head.includes('Actual Prompt'))
+    assert.ok(!head.includes('Actual'))
     assert.ok(!head.includes('Output'))
     assert.ok(!head.includes('Cache'))
     await m.unmount()
@@ -149,14 +153,14 @@ describe('RequestDetail delta mode', () => {
     const m = await mount(h(RequestDetail, { request, prev }))
     const head = text(query(m.container, '.lc-detail-head'))
     assert.ok(head.includes('Delta'), 'delta tag shown')
-    assert.ok(!head.includes('Actual Prompt'), 'usage chips drop out in delta mode')
+    assert.ok(!head.includes('Actual'), 'usage chips drop out in delta mode')
     const metric = query(m.container, '.lc-detail-metric')
     // +50 -50 -100 +100 → net 0 → neutral chip.
     assert.ok(text(metric).includes('Δ 0'))
     assert.ok(!metric.className.includes('lc-detail-metric-up'))
     assert.ok(!metric.className.includes('lc-detail-metric-down'))
     const zeros = queryAll(m.container, '.lc-bar-zero')
-    assert.equal(zeros.length, 6, 'every delta row carries the zero line')
+    assert.equal(zeros.length, 7, 'every delta row carries the zero line')
     const upFills = queryAll(m.container, '.lc-bar-fill-up')
     const downFills = queryAll(m.container, '.lc-bar-fill-down')
     assert.equal(upFills.length, 2, 'system +50, tool +100')
@@ -337,8 +341,8 @@ describe('RequestDetail brief section', () => {
 
   test('chipParts cascade: tool/assistant/inject/user kinds and the skill-inject fallback', async () => {
     const inputs: SurfaceNode[] = [
-      // tool: skill tag wins; summary from the join.
-      node({ seq: 30, cat: 'tool', skill: 'code-review', tool: 'bash' }),
+      // skill: a `skill`-tool load — name tag wins, call summary through the join.
+      node({ seq: 30, cat: 'skill', skill: 'code-review', tool: 'skill' }),
       // tool: name tag, no join → no text.
       node({ seq: 31, cat: 'tool', tool: 'read' }),
       // tool: no name, no join → untagged Tool Result placeholder.
@@ -403,33 +407,36 @@ describe('RequestDetail brief section', () => {
     assert.equal(chipText(m4, 1), 'hi')
     await m4.unmount()
 
-    // chipParts fallback (inject carrying a skill): nodeLine drives the text.
-    const m5 = await render([node({ seq: 41, cat: 'inject', skill: 'ponytail' })])
-    assert.equal(chipText(m5, 0), 'Skill · ponytail', 'skill inject falls back to nodeLine')
+    // The skill bucket names itself; an invocation message previews its text.
+    const m5 = await render([node({ seq: 41, cat: 'skill', skill: 'ponytail' })])
+    assert.equal(chipText(m5, 0), 'Skill · ponytail', 'a text-less skill row tags the name')
     await m5.unmount()
-    const m6 = await render([node({ seq: 42, cat: 'inject', skill: 'ponytail', text: 'notes inside' })])
-    assert.equal(chipText(m6, 0), 'notes inside', 'nodeLine prefers the node text over the skill label')
+    const m6 = await render([node({ seq: 42, cat: 'skill', skill: 'ponytail', text: 'notes inside' })])
+    assert.ok(chipText(m6, 0).includes('Skill · ponytail') && chipText(m6, 0).includes('notes inside'))
     await m6.unmount()
 
-    // A category outside the fold's vocabulary (host drift) still renders:
-    // nodeLine labels the calls breadcrumb, else the non-text placeholder.
-    const m7 = await render([node({ seq: 43, cat: 'mystery' as never, calls: ['bash', 'read'] })])
-    assert.equal(chipText(m7, 0), 'bash › read')
+    // A category outside the fold's vocabulary (host drift) degrades into the
+    // user tail — a plain text row, never a throw.
+    const m7 = await render([node({ seq: 43, cat: 'mystery' as never, text: 'survivor' })])
+    assert.equal(chipText(m7, 0), 'survivor', 'hostile cat renders its text plainly')
     await m7.unmount()
-    const m8 = await render([node({ seq: 44, cat: 'mystery' as never, calls: ['write'] })])
-    assert.equal(chipText(m8, 0), 'write · a.ts', 'block summary joins the breadcrumb')
+    const m8 = await render([node({ seq: 44, cat: 'mystery' as never, calls: ['bash', 'read'] })])
+    assert.equal(chipText(m8, 0), '', 'hostile cat with no text renders an inert chip')
     await m8.unmount()
-    const m9 = await render([node({ seq: 45, cat: 'mystery' as never, calls: [] })])
-    assert.equal(chipText(m9, 0), '(non-text message)')
-    await m9.unmount()
-    const m10 = await render([node({ seq: 46, cat: 'mystery' as never })])
-    assert.equal(chipText(m10, 0), '(non-text message)', 'no calls list at all')
-    await m10.unmount()
 
-    // Skill-tagged tool without a join: tag only, no summary text.
-    const m11 = await render([node({ seq: 47, cat: 'tool', skill: 'grilling' })])
+    // A text-less skill row without a join: the name tag carries the chip alone.
+    const m11 = await render([node({ seq: 47, cat: 'skill', skill: 'grilling', tool: 'skill' })])
     assert.equal(chipText(m11, 0), 'Skill · grilling')
     await m11.unmount()
+    // The catalog digest tags its form; a nameless, formless skill row
+    // degrades to the context label.
+    const m11b = await render([
+      node({ seq: 471, cat: 'skill', form: 'catalog' }),
+      node({ seq: 472, cat: 'skill' }),
+    ])
+    assert.equal(chipText(m11b, 0), 'Catalog Update')
+    assert.equal(chipText(m11b, 1), 'Context Injection')
+    await m11b.unmount()
     // Textless injection: the form tag carries the chip alone.
     const m12 = await render([node({ seq: 48, cat: 'inject', form: 'notice' })])
     assert.equal(chipText(m12, 0), 'Notice')

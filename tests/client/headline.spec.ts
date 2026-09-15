@@ -10,7 +10,7 @@ import type { ContextTimeline, RequestRecord } from '../../src/shared/types'
 function timeline(over: Partial<ContextTimeline> = {}): ContextTimeline {
   return {
     ok: true,
-    current: { system: 10, tools: 20, user: 30, inject: 0, assistant: 40, tool: 0, total: 100 },
+    current: { system: 10, tools: 20, user: 30, inject: 0, skill: 0, assistant: 40, tool: 0, total: 100 },
     requests: [],
     events: [],
     nodes: [],
@@ -121,6 +121,7 @@ describe('headlineOf parts', () => {
         ['tools', 40, 20],
         ['user', 60, 30],
         ['inject', 0, 0],
+        ['skill', 0, 0],
         ['assistant', 80, 40],
         ['tool', 0, 0],
       ],
@@ -130,7 +131,7 @@ describe('headlineOf parts', () => {
   test('without an occupancy the parts stay unanchored (value equals raw)', () => {
     const h = headlineOf(timeline(), null)
     assert.deepEqual(h.parts.map(p => [p.value, p.raw]), [
-      [10, 10], [20, 20], [30, 30], [0, 0], [40, 40], [0, 0],
+      [10, 10], [20, 20], [30, 30], [0, 0], [0, 0], [40, 40], [0, 0],
     ])
   })
 
@@ -138,7 +139,7 @@ describe('headlineOf parts', () => {
     const h = headlineOf(timeline(), { projectedTokens: 0 })
     assert.equal(h.tokens, 0)
     assert.deepEqual(h.parts.map(p => [p.value, p.raw]), [
-      [10, 10], [20, 20], [30, 30], [0, 0], [40, 40], [0, 0],
+      [10, 10], [20, 20], [30, 30], [0, 0], [0, 0], [40, 40], [0, 0],
     ])
   })
 })

@@ -109,10 +109,18 @@ describe('applySurface tool/result branch', () => {
 })
 
 describe('applySurface user-message previews', () => {
-  test('skill-invocation sources carry the skill name', () => {
+  test('skill-invocation sources carry the skill name under the skill bucket', () => {
     const { state } = driveTimeline([userMessage(1, text('run it'), { kind: 'skill-invocation', name: 'pdf' })])
     assert.equal(state.surface.at(-1)?.skill, 'pdf')
-    assert.equal(state.surface.at(-1)?.cat, 'inject')
+    assert.equal(state.surface.at(-1)?.cat, 'skill')
+  })
+
+  test('skill-catalog sources join the skill bucket', () => {
+    const { state } = driveTimeline([userMessage(1, text('<available_skills>'), { kind: 'skill-catalog', form: 'catalog' })])
+    const node = state.surface.at(-1)
+    assert.equal(node?.cat, 'skill')
+    assert.equal(node?.skill, undefined)
+    assert.equal(node?.form, 'catalog')
   })
 
   test('a nameless skill-invocation falls back to ?', () => {

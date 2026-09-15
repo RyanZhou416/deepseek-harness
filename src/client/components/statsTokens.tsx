@@ -1,16 +1,21 @@
 /**
- * The Token card: the provider-reported cumulative billing buckets (the
- * official `tokenUsage` projection, whole session). The donut's center is
- * the cache-hit share — the same figure the harness chat stats line shows —
- * and the slice rows carry each bucket's token count: cache reads/writes,
- * uncached input, and output (reasoning included). Zero buckets stay hidden
- * once any usage is reported (DeepSeek sessions never report cache writes);
- * the empty state keeps all four rows.
+ * The Token card: the session's whole billed token usage — the SAME total
+ * the harness chat stats line shows under the composer (uncached input +
+ * cache read + cache write + output off the official `tokenUsage`
+ * projection) — split by WHAT the tokens are, not by how the provider
+ * cached them. The six composition categories share the provider-reported
+ * prompt-side total by the composition card's own estimated ratios
+ * (billedParts), and the provider's exact output count is its own slice, so
+ * the ring and the center figure always equal the chat line's figure by
+ * construction. The estimated category counts carry the ≈ marker (the
+ * composition card's convention); the center total and the output count are
+ * exact. Zero parts stay hidden once any usage is reported; the empty state
+ * (no provider report yet) keeps all seven rows behind a dash center.
  */
 
 import { useState, type ReactElement } from 'react'
-import type { TokenUsage } from '../../shared/types'
-import { cacheHitPercent as cacheHitPercentOf } from '../format'
+import type { ContextBreakdown, Snapshot, TokenUsage } from '../../shared/types'
+import { billedParts } from '../categories'
 import { numOf } from '../services'
 import type { ViewKit } from '../viewkit'
 
@@ -18,47 +23,53 @@ import { makeSliceList } from './sliceList'
 import type { SliceRow } from './sliceList'
 import type { DonutProps } from './donut'
 
+const NO_USAGE: TokenUsage = { uncachedInputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 }
+
 export function makeStatsTokens(kit: ViewKit, Donut: (props: DonutProps) => ReactElement): (props: {
   usage: TokenUsage | null
+  current: Snapshot['current']
+  breakdown: ContextBreakdown | null
 }) => ReactElement {
-  const { t, fmt, fmtShare } = kit
+  const { t, fmt, fmtShare, catLabel } = kit
   const SliceList = makeSliceList(kit)
-  return function StatsTokens(props: { usage: TokenUsage | null }): ReactElement {
+  return function StatsTokens(props: {
+    usage: TokenUsage | null
+    current: Snapshot['current']
+    breakdown: ContextBreakdown | null
+  }): ReactElement {
     // The legend row ↔ donut segment hover link (shared key, set from either side).
     const [hoverKey, setHoverKey] = useState<string | null>(null)
-    const reads = props.usage !== null ? numOf(props.usage.cacheReadTokens) : 0
-    const writes = props.usage !== null ? numOf(props.usage.cacheWriteTokens) : 0
-    const uncached = props.usage !== null ? numOf(props.usage.uncachedInputTokens) : 0
+    const input = props.usage !== null
+      ? numOf(props.usage.uncachedInputTokens) + numOf(props.usage.cacheReadTokens) + numOf(props.usage.cacheWriteTokens)
+      : 0
     const output = props.usage !== null ? numOf(props.usage.outputTokens) : 0
-    const billed = reads + writes + uncached + output
-    // The center keeps the chat line's PROMPT-side cache-hit formula (reads
-    // over uncached + reads + writes, output excluded) — the established
-    // figure the harness stats line shows; the donut/rows normalize over the
-    // whole billed total instead.
-    const hit = props.usage !== null ? cacheHitPercentOf(reads, uncached + reads + writes) : null
-    const buckets: { key: string; color: string; label: string; note?: string; value: number }[] = [
-      { key: 'read', color: '#22c55e', label: t('tokens.cacheRead'), value: reads },
-      { key: 'write', color: '#f59e0b', label: t('tokens.cacheWrite'), value: writes },
-      { key: 'uncached', color: '#a855f7', label: t('tokens.uncached'), value: uncached },
-      { key: 'output', color: '#3b82f6', label: t('tokens.output'), note: t('tokens.outputNote'), value: output },
-    ]
-    const shown = billed > 0 ? buckets.filter(b => b.value > 0) : buckets
-    const rows: SliceRow[] = shown.map(b => ({
-      key: b.key, color: b.color, label: b.label,
-      pct: fmtShare(b.value, billed),
-      count: b.note === undefined ? fmt(b.value) : `${fmt(b.value)} · ${b.note}`,
+    const total = input + output
+    // Null usage (no provider report — the chat line shows no pill either)
+    // takes the same zeroed split billedParts produces for a zero report.
+    const parts = billedParts(props.current, props.breakdown, props.usage ?? NO_USAGE)
+    const shown = total > 0 ? parts.filter(p => p.value > 0) : parts
+    const rows: SliceRow[] = shown.map(p => ({
+      key: p.key,
+      color: p.color,
+      label: p.key === 'output' ? t('tokens.output') : catLabel(p.key),
+      pct: fmtShare(p.value, total),
+      // The six prompt-side shares are ratio estimates (≈, the composition
+      // card's convention); output alone is provider-exact.
+      count: p.key === 'output' ? `${fmt(p.value)} · ${t('tokens.outputNote')}` : '≈' + fmt(p.value),
     }))
     return (
-      <div className="lc-card lc-col-stats lc-col-donut">
+      <div className="lc-card lc-col-stats lc-col-donut flex-1 min-w-[min(360px,100%)]">
         <div className="lc-card-title">
           <span className="lc-card-title-text">{t('tokens.title')}</span>
         </div>
-        <div className="lc-donut-row">
+        {/* donut + legend row: the gap folds at a 320px card, below 240px the row wraps
+            and the ring centers over the full-width legend (all keyed to the lc-card container). */}
+        <div className="lc-donut-row flex items-center justify-start gap-3 min-w-0 @max-[320px]/lc-card:gap-2 @max-[240px]/lc-card:flex-wrap">
           <Donut
-            segments={shown.map(b => ({ key: b.key, color: b.color, value: b.value }))}
+            segments={shown}
             size={96}
-            centerTop={hit === null ? '—' : `${hit}%`}
-            centerSub={t('tokens.cacheHit')}
+            centerTop={props.usage === null ? '—' : fmt(total)}
+            centerSub={t('tokens.total')}
             hoverKey={hoverKey}
             onHoverKey={setHoverKey}
           />

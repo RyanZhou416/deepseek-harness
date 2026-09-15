@@ -7,6 +7,7 @@ import assert from 'node:assert/strict'
 import { describe, test } from 'vitest'
 import { registerContextCommand } from '../../src/client/command'
 import { DICT_EN } from '../../src/client/i18n'
+import { ContextIcon } from '../../src/client/icon'
 import { modalStoreOf, takePendingConsume } from '../../src/client/modalStore'
 import type { InputTriggersFace } from '../../src/client/services'
 import { asClientCtx, TestClientCtx } from './helpers/harness'
@@ -72,7 +73,16 @@ describe('candidates', () => {
   test('an empty query yields the context candidate', async () => {
     const { source } = setup()
     const candidates = await source.candidates({ sessionId: 'cmd-empty' }, { query: '', position: 'leading', signal: SIGNAL })
-    assert.deepEqual(candidates, [{ name: 'context', description: DICT_EN['cmd.desc'] }])
+    // The localized section replaces the menu's raw source-name title row;
+    // the localized label and glyph are display-only (older harness builds
+    // render the bare name).
+    assert.deepEqual(candidates, [{
+      name: 'context',
+      label: DICT_EN['cmd.label'],
+      icon: ContextIcon,
+      section: DICT_EN['cmd.section'],
+      description: DICT_EN['cmd.desc'],
+    }])
   })
 
   test('a matching prefix yields the candidate; a mismatch yields none', async () => {

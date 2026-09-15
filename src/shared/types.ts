@@ -46,7 +46,13 @@ declare module '@deepseek-ai/dsh-session-projection/types' {
   }
 }
 
-export type Category = 'user' | 'inject' | 'assistant' | 'tool'
+/**
+ * The priced surface buckets. `skill` carries every skill-machinery content
+ * the harness injects (issue #66): the `<available_skills>` catalog digest,
+ * a user-explicit `/name` invocation's instructions message, and the content
+ * a `skill`-tool load returns (modeled as a tool result by the harness).
+ */
+export type Category = 'user' | 'inject' | 'skill' | 'assistant' | 'tool'
 
 /**
  * One live system-prompt node (Snapshot.systems) — the harness models the
@@ -103,9 +109,17 @@ export type DefaultTrendMode = 'total' | 'delta'
 /** File Activity row order: most operations first, most-recently-touched first, or path ascending. */
 export type DefaultFileSort = 'count' | 'latest' | 'path'
 
+/** Tool-definition row order: largest schema first, most call hits first, or name ascending. */
+export type DefaultToolSort = 'size' | 'count' | 'name'
+
+/** Where the Context view is offered: the conversation tab, the right Sidebar, or both. */
+export type DefaultPlacement = 'all' | 'tab' | 'sidebar'
+
 export interface PluginSettings {
+  defaultPlacement: DefaultPlacement
   defaultGranularity: DefaultGranularity
   defaultTrendMode: DefaultTrendMode
+  defaultToolSort: DefaultToolSort
   defaultFileSort: DefaultFileSort
 }
 
@@ -133,6 +147,7 @@ export interface Snapshot {
     tools: number
     user: number
     inject: number
+    skill: number
     assistant: number
     tool: number
     total: number
@@ -151,6 +166,14 @@ export interface Snapshot {
    * hosts; clients treat absence as zero.
    */
   toolCalls?: number
+  /**
+   * Whole-session human-input tally: every non-injection `user/message`
+   * (the user's own messages) plus every answered `ask_user_question`
+   * result (one per answer submission). A running total over the COMPLETE
+   * log — turns the retained window no longer holds still count. Absent
+   * from older hosts; clients treat absence as zero.
+   */
+  humanInputs?: number
   /**
    * Split-generation head fields — present exactly when the host serves the
    * SLIM head (the heavy collections moved to the on-demand detail channel,
@@ -171,9 +194,9 @@ export interface Snapshot {
   requests: RequestRecord[]
   events: ContextEventRecord[]
   /**
-   * Cumulative session-cost raw material (per-family, per-period billed
-   * token totals — see SessionCostUsage). Absent until a DeepSeek V4
-   * request reports usage.
+   * Cumulative session-cost raw material (per-provider, per-model billed
+   * token totals — see SessionCostUsage). Absent until a request with a
+   * known model reports usage.
    */
   cost?: SessionCostUsage
   /**
@@ -236,6 +259,17 @@ export interface Snapshot {
  */
 export interface ContextTimelineDetail {
   rev: number
+  /**
+   * The slim wire head at the SAME fold cut as the collections: the
+   * composition scalars (`current`), the window/model envelope, and the
+   * precomputed counts. Sessions listed cold (never attached since the
+   * requesting unit last changed) carry no `contextTimeline` projection row
+   * for the browser's list reads, so the Agent network card fetches this
+   * head per node to render their composition rings. The host always serves
+   * it; optional so a payload missing it still serves the collections (the
+   * detail cards) and only the ring composition degrades.
+   */
+  head?: ContextTimeline
   requests: RequestRecord[]
   events: ContextEventRecord[]
   nodes: SurfaceNode[]
@@ -427,23 +461,27 @@ export interface TimingTotals {
   tools: Record<string, ToolTimingTotals>
 }
 
-/** One model family's totals split by DeepSeek's pricing period (Beijing Time). */
-export interface CostFamilyUsage {
+/**
+ * One billed model's cumulative totals split by pricing period. Providers
+ * without period-based pricing book everything under `peak` (the list-price
+ * period); DeepSeek splits at fold time — peak windows bill at list price,
+ * off-peak (all other hours) at half.
+ */
+export interface CostModelUsage {
   peak?: CostBucketTotals
   off?: CostBucketTotals
 }
 
 /**
  * The session-cost estimate's raw material: cumulative provider-reported
- * token totals per DeepSeek model family (matched on the model NAME,
- * provider-agnostic) and pricing period. The Client prices these with its
- * hardcoded list-price table in the locale's currency. Absent until a
- * deepseek-flash / deepseek-v4.1-flash / deepseek-v4-pro request reports
- * usage.
+ * billed-token totals, keyed by the request envelope's DSH provider id (''
+ * when a log carries none) and then by its model id — the exact (provider,
+ * model) faces the Client's model-price book resolves (the models.dev
+ * registry, client/modelPrices.ts). Running totals per key; absent until a
+ * request with a known model reports usage.
  */
 export interface SessionCostUsage {
-  flash?: CostFamilyUsage
-  pro?: CostFamilyUsage
+  [provider: string]: { [model: string]: CostModelUsage }
 }
 
 /** One model-visible message on the surface, with its heuristic token price. */
@@ -462,6 +500,14 @@ export interface SurfaceNode {
    */
   gone?: number
   form?: string
+  /**
+   * The producer identity the matching inject event names (host pricing.ts
+   * `injectionSourceName`: the plugin id, the reconciled instruction files,
+   * or the durable kind). Stamped on injection nodes alongside the event, so
+   * the browser rows label them the way the events card does; absent when the
+   * source carries no readable identity or the node predates the stamp.
+   */
+  name?: string
   text?: string
   tool?: string
   err?: boolean
@@ -483,6 +529,13 @@ export interface RequestRecord {
   tool: number
   total: number
   prompt?: number
+  /**
+   * Skill-machinery tokens of this request (the `skill` composition
+   * category — catalog digests, invocation instructions, `skill`-tool
+   * loads). Always written by the current fold; absent on rows folded
+   * before the category existed (read as 0).
+   */
+  skill?: number
   /**
    * Billed cache-read (served) prompt tokens of this request — the
    * hit-rate numerator against `prompt` (input + cacheRead + cacheWrite).

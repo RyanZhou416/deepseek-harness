@@ -6,9 +6,13 @@
  *
  * Data rides the harness's existing planes end to end — the session-list
  * snapshot (`ctx.sessions.list`: lineage rows + per-session projection
- * values) and the tab's own projections for the current node — so the card
- * adds no RPC of its own beyond one direct-child catalog refresh per
- * session. A harness without the outward sessions service hides the card.
+ * values) and the tab's own projections for the current node. The list block
+ * serves projection values only from the host's projection cache, so a
+ * relative that never attached since the timeline unit last changed lists
+ * pressure-only (occupancy without composition); those nodes fetch their slim
+ * head from the plugin's `/api` detail route (the one call below) and
+ * re-render composed. A harness without the outward sessions service hides
+ * the card.
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, type KeyboardEvent, type ReactElement } from 'react'
@@ -16,6 +20,7 @@ import { CATS } from '../categories'
 import { containHorizontalOverscroll } from '../overscroll'
 import type { ClientCtx } from '../services'
 import type { ViewKit } from '../viewkit'
+import type { ContextTimeline } from '../../shared/types'
 import type { AgentNode, AgentSelfStats } from '../agentTree'
 import {
   AGENT_NODE_R,
@@ -27,6 +32,7 @@ import {
   ringSegments,
   sessionsFaceOf,
 } from '../agentTree'
+import { makeDetailFetcher } from '../timelineSource'
 
 export interface AgentGraphProps {
   sessionId?: string
@@ -40,9 +46,9 @@ const CAPTION_H = 60
 /** Fallback arc color for pressure-only nodes (no composition data), by fill ratio. */
 export function ringColorOf(pct: number | null): string {
   if (pct === null) return 'var(--dsw-alias-border-l1)'
-  if (pct >= 90) return '#ef4444'
-  if (pct >= 70) return '#f59e0b'
-  return '#22c55e'
+  if (pct >= 90) return 'var(--color-red-500)'
+  if (pct >= 70) return 'var(--color-amber-500)'
+  return 'var(--color-green-500)'
 }
 
 export function makeAgentGraph(
@@ -50,6 +56,12 @@ export function makeAgentGraph(
   kit: ViewKit,
 ): (props: AgentGraphProps) => ReactElement | null {
   const { t, fmt, catLabel } = kit
+
+  /* Cold-relative head fetches: one in-flight-or-settled promise per session
+     id for the factory's lifetime (page scope). A settled null — transport
+     failure, hostile payload, route absent, session left the live set — is
+     sticky, so a broken relative never retries per snapshot tick. */
+  const heads = new Map<string, Promise<ContextTimeline | null>>()
 
   function AgentGraph(props: AgentGraphProps): ReactElement | null {
     // Resolved lazily at mount (not at apply): the outward sessions service
@@ -105,10 +117,45 @@ export function makeAgentGraph(
       face.refreshSubagents(sessionId).catch(() => {})
     }, [face, sessionId])
 
+    // Composition heads fetched for cold relatives (see the effect below):
+    // landed values re-fold the forest with the row's missing `contextTimeline`
+    // injected.
+    const [landed, setLanded] = useState<ReadonlyMap<string, ContextTimeline>>(new Map())
+
     const built = useMemo(() => {
-      const forest = agentForestOf(snapshot, sessionId, props.self)
+      const forest = agentForestOf(snapshot, sessionId, props.self, landed)
       return forest !== null ? { forest, layout: layoutForest(forest, stageWidth) } : null
-    }, [snapshot, sessionId, props.self, stageWidth])
+    }, [snapshot, sessionId, props.self, stageWidth, landed])
+
+    // Nodes with no composition (occupancy-only, or nothing listed at all —
+    // the projection cache holds no timeline row for either) fetch their slim
+    // head off the detail route and re-render composed. The current node is
+    // excluded: the tab's own projections already feed it live. A remount
+    // (tab switch) resets this state but not the factory's promise cache, so
+    // a cached read REPLAYS into the fresh instance — otherwise a fetched
+    // relative would fall back to green on every remount, forever.
+    useEffect(() => {
+      if (built === null) return
+      const attach = (pending: Promise<ContextTimeline | null>, id: string): void => {
+        void pending.then((head) => {
+          // Same value → same state: the identity bail-out keeps a settled
+          // replay on every snapshot tick from looping.
+          if (head !== null) setLanded(prev => prev.get(id) === head ? prev : new Map(prev).set(id, head))
+        }).catch(() => {})
+      }
+      for (const n of built.forest.nodes) {
+        if (n.isCurrent || (n.head !== null && n.head.parts.length > 0)) continue
+        const cached = heads.get(n.id)
+        if (cached !== undefined) {
+          attach(cached, n.id)
+          continue
+        }
+        const fetcher = makeDetailFetcher(ctx, n.id)
+        const pending = fetcher !== undefined ? fetcher().then(d => d?.head ?? null) : Promise.resolve(null)
+        heads.set(n.id, pending)
+        attach(pending, n.id)
+      }
+    }, [built])
 
     if (built === null) return null
     const { forest, layout } = built
@@ -165,12 +212,12 @@ export function makeAgentGraph(
               return (
                 <g key={link.to}>
                   <path
-                    className={'lc-agents-link' + (link.running ? ' lc-agents-link-live' : '')}
+                    className={'lc-agents-link stroke-[1.5px] stroke-opacity-45' + (link.running ? ' lc-agents-link-live' : '')}
                     d={d}
                     stroke={link.color}
                     fill="none"
                   />
-                  {link.running ? <path className="lc-agents-flow" d={d} stroke={link.color} fill="none" /> : null}
+                  {link.running ? <path className="lc-agents-flow animate-lc-agent-flow fill-none stroke-2" d={d} stroke={link.color} /> : null}
                 </g>
               )
             })}
@@ -249,6 +296,9 @@ function AgentNodeView(props: NodeViewProps): ReactElement {
     + (node.completed && !node.running ? ' lc-agent-done' : '')
     + (props.hovered ? ' lc-agent-hover' : '')
     + (node.isCurrent ? '' : ' lc-agent-clickable')
+    // The halo's hover/focus wash rides group variants on the node (the React
+    // hover state only drives the inspector; lc-agent-hover stays as a test anchor).
+    + ' group/agent'
   return (
     <g
       className={cls}
@@ -262,20 +312,30 @@ function AgentNodeView(props: NodeViewProps): ReactElement {
       onMouseLeave={() => { props.onHover(null) }}
     >
       {/* Halo carries the state: wash for self, breathing green while running, faint green for done. */}
-      <circle className="lc-agent-halo" r={AGENT_NODE_R + 9} />
-      <circle className="lc-agent-track" r={AGENT_NODE_R} />
+      <circle
+        className={'lc-agent-halo fill-transparent group-hover/agent:fill-[var(--dsw-alias-interactive-bg-hover,var(--dsw-alias-bg-layer-2))] group-focus-visible/agent:fill-[var(--dsw-alias-interactive-bg-hover,var(--dsw-alias-bg-layer-2))]'
+          + (node.running ? ' animate-lc-agent-glow' : '')}
+        r={AGENT_NODE_R + 9}
+      />
+      <circle
+        className="lc-agent-track fill-(--dsw-alias-bg-layer-1) stroke-(--dsw-alias-border-l1) stroke-[1.5px]"
+        r={AGENT_NODE_R}
+      />
       {segs.map(seg => (
         <circle
           key={seg.key}
-          className={'lc-agent-seg' + (seg.free ? ' lc-agent-free' : '')}
+          className={'lc-agent-seg fill-none stroke-9' + (seg.free ? ' lc-agent-free' : '')}
           r={AGENT_RING_R}
-          stroke={seg.free ? undefined : seg.color}
           strokeDasharray={`${seg.len} ${ring - seg.len}`}
           strokeDashoffset={-seg.offset}
+          // Inline style, not the stroke attribute: segment colors are CSS variables
+          // (var() is unusable in a presentation attribute). Free segments carry no
+          // inline stroke so the .lc-agent-free class rule keeps painting the remainder.
+          style={{ stroke: seg.free ? undefined : seg.color }}
           transform="rotate(-90)"
         />
       ))}
-      <text className="lc-agent-pct" textAnchor="middle" dy="0.32em">
+      <text className="lc-agent-pct fill-(--dsw-alias-label-primary)" textAnchor="middle" dy="0.32em">
         {pct !== null ? `${pct}%` : (node.head !== null ? props.fmt(node.head.tokens) : '—')}
       </text>
       {/* HTML caption (foreignObject): the full label wraps instead of truncating;

@@ -12,10 +12,10 @@
  * empty frame here.
  */
 
-import { act, createElement as h } from 'react'
+import { act, createElement as h, useState } from 'react'
 import assert from 'node:assert/strict'
 import { afterAll, beforeAll, describe, test } from 'vitest'
-import { aggregateByTurn, attachMarkers, jumpTargetOf, makeTrendChart, type TrendChartProps } from '../../../src/client/components/trendChart'
+import { aggregateByTurn, attachMarkers, jumpTargetOf, makeTrendChart, turnStepsOf, type TrendChartProps } from '../../../src/client/components/trendChart'
 import { CATS } from '../../../src/client/categories'
 import type { ContextEventRecord, RequestRecord } from '../../../src/shared/types'
 import { click, flush, hover, makeKit, mount, query, queryAll, unhover, wheel } from '../helpers/kit'
@@ -158,8 +158,8 @@ describe('TrendChart empty history', () => {
 
 describe('TrendChart step granularity, total mode', () => {
   test('stacks per-category segments in CATS order with real colors and proportional px heights', async () => {
-    const r1 = req(1, { turn: 1, step: 0 })
-    const r2 = req(2, { turn: 1, step: 1, system: 200, tools: 100, user: 60, inject: 40, assistant: 80, tool: 120, total: 600 })
+    const r1 = req(1, { turn: 1, step: 0, skill: 40, total: 340 })
+    const r2 = req(2, { turn: 1, step: 1, system: 200, tools: 100, user: 60, inject: 40, skill: 60, assistant: 80, tool: 120, total: 660 })
     const r3 = req(3, { turn: undefined, step: 0, user: 0, total: 280 })
     const m = await mount(h(TrendChart, propsOf([r1, r2, r3])))
 
@@ -167,25 +167,26 @@ describe('TrendChart step granularity, total mode', () => {
     assert.equal(bs.length, 3)
     assert.deepEqual(bs.map(b => b.getAttribute('data-seq')), ['1', '2', '3'])
 
-    // Six priced categories, in CATS order, with the shipped colors; max bar segments scale against maxTotal=600.
+    // Seven priced categories, in CATS order, with the shipped colors; max bar segments scale against maxTotal=660.
     const segs1 = queryAll(bs[0], '.lc-bar-stack > div')
-    assert.equal(segs1.length, 6)
+    assert.equal(segs1.length, 7)
     for (let i = 0; i < CATS.length; i++) assertColor(segs1[i].style.background, CATS[i].color)
-    assert.equal(segs1[0].style.height, `${Math.round(100 / 600 * CHART_H)}px`)
-    assert.equal(segs1[5].style.height, `${Math.round(60 / 600 * CHART_H)}px`)
+    assert.equal(segs1[0].style.height, `${Math.round(100 / 660 * CHART_H)}px`)
+    assert.equal(segs1[4].style.height, `${Math.round(40 / 660 * CHART_H)}px`)
+    assert.equal(segs1[6].style.height, `${Math.round(60 / 660 * CHART_H)}px`)
     const segs2 = queryAll(bs[1], '.lc-bar-stack > div')
-    assert.equal(segs2[0].style.height, `${Math.round(200 / 600 * CHART_H)}px`)
+    assert.equal(segs2[0].style.height, `${Math.round(200 / 660 * CHART_H)}px`)
 
     // Zero-value categories are skipped entirely (r3.user = 0 → five segments, no user-green segment).
     const segs3 = queryAll(bs[2], '.lc-bar-stack > div')
     assert.equal(segs3.length, 5)
-    assert.ok(![...segs3].some(s => s.style.background.includes('34, 197, 94') || s.style.background === '#22c55e'))
+    assert.ok(![...segs3].some(s => s.style.background.includes('var(--color-green-500)')))
 
     // Total-mode axis: full quartile graduation — max, ¾, ½, ¼, 0.
-    assert.equal(query(m.container, '.lc-axis-top').textContent, '600')
-    assert.equal(query(m.container, '.lc-axis-q3').textContent, '450')
-    assert.equal(query(m.container, '.lc-axis-mid').textContent, '300')
-    assert.equal(query(m.container, '.lc-axis-q1').textContent, '150')
+    assert.equal(query(m.container, '.lc-axis-top').textContent, '660')
+    assert.equal(query(m.container, '.lc-axis-q3').textContent, '495')
+    assert.equal(query(m.container, '.lc-axis-mid').textContent, '330')
+    assert.equal(query(m.container, '.lc-axis-q1').textContent, '165')
     assert.equal(query(m.container, '.lc-axis-bot').textContent, '0')
 
     // Turn strip: turn 1 spans two step columns (2*16-2 = 30px), the turnless request lands in group 0 (14px);
@@ -194,8 +195,8 @@ describe('TrendChart step granularity, total mode', () => {
     assert.equal(turns.length, 2)
     assert.equal(turns[0].style.width, '30px')
     assert.equal(turns[1].style.width, '14px')
-    assert.ok(turns[0].style.background.includes('0.12'))
-    assert.ok(turns[1].style.background.includes('0.26'))
+    assert.ok(turns[0].style.background.includes('var(--color-neutral-500) 12%'))
+    assert.ok(turns[1].style.background.includes('var(--color-neutral-500) 26%'))
     assert.deepEqual(turns.map(t => t.textContent), ['1', '0'])
     await m.unmount()
   })
@@ -230,7 +231,7 @@ describe('TrendChart step granularity, total mode', () => {
     // Rows: identity, then the SAME total the bar is drawn against (the heuristic 600, not the prompt 1200).
     assert.deepEqual(
       queryAll(tip, 'span').map(r => r.textContent),
-      [kit.t('tip.step', { t: 1, s: 1 }), kit.t('tip.total', { n: '600' })],
+      [kit.t('tip.step', { t: 1, s: 1, n: 2 }), kit.t('tip.total', { n: '600' })],
     )
     assert.equal(tip.style.transform, 'translate(23px, 0)') // idx 1 * 16 + BAR_W/2, scrollLeft 0
     assert.ok(spies.hover.length === 0, 'hover callback only fires from real mouseover')
@@ -293,7 +294,7 @@ describe('TrendChart delta mode', () => {
     await m.update(h(TrendChart, propsOf([base, grown, shrunk], { mode: 'delta', hoveredSeq: 2 })))
     assert.deepEqual(
       queryAll(query(m.container, '.lc-chart-tip'), 'span').map(r => r.textContent),
-      [kit.t('tip.step', { t: 1, s: 1 }), kit.t('tip.delta', { n: '+60' })],
+      [kit.t('tip.step', { t: 1, s: 1, n: 2 }), kit.t('tip.delta', { n: '+60' })],
     )
     await m.update(h(TrendChart, propsOf([base, grown, shrunk], { mode: 'delta', hoveredSeq: 3 })))
     assert.ok(query(m.container, '.lc-chart-tip').textContent!.includes(kit.t('tip.delta', { n: '-120' })))
@@ -440,7 +441,7 @@ describe('TrendChart selection and hover linking', () => {
 
 describe('TrendChart category hover-link', () => {
   test('segments carry their category key; the container mirrors the shared hover for CSS to light', async () => {
-    const r1 = req(1, { turn: 1, step: 0 })
+    const r1 = req(1, { turn: 1, step: 0, skill: 10 })
     const r2 = req(2, { turn: 1, step: 1, system: 200 })
     const r3 = req(3, { turn: 2, step: 0 })
     const m = await mount(h(TrendChart, propsOf([r1, r2, r3], { hoverCat: 'tools' })))
@@ -458,8 +459,8 @@ describe('TrendChart category hover-link', () => {
     await m.update(h(TrendChart, propsOf([r1, r2, r3], { hoverCat: 'tools' })))
     assert.equal(query(m.container, '.lc-chart').getAttribute('data-catdim'), 'tools')
 
-    // Delta mode: diverging stacks' segments are tagged the same way — an all-shrinking pair hangs all six below the line.
-    const big = req(4, { turn: 3, step: 0, system: 200, tools: 100, user: 60, inject: 40, assistant: 80, tool: 120 })
+    // Delta mode: diverging stacks' segments are tagged the same way — an all-shrinking pair hangs all seven below the line.
+    const big = req(4, { turn: 3, step: 0, system: 200, tools: 100, user: 60, inject: 40, skill: 30, assistant: 80, tool: 120 })
     await m.update(h(TrendChart, propsOf([big, r1], { mode: 'delta', hoverCat: 'user' })))
     const deltaChart = query(m.container, '.lc-chart')
     assert.equal(deltaChart.getAttribute('data-catdim'), 'user')
@@ -483,7 +484,7 @@ describe('TrendChart category focus (the browser open category)', () => {
     const segs1 = queryAll(bs[0], '.lc-bar-stack > div')
     assert.equal(segs1.length, 1)
     assert.equal(segs1[0].getAttribute('data-cat'), 'tool')
-    assertColor(segs1[0].style.background, CATS[5].color)
+    assertColor(segs1[0].style.background, CATS[6].color)
     assert.equal(segs1[0].style.height, `${Math.round(60 / 120 * CHART_H)}px`)
     assert.equal(queryAll(bs[1], '.lc-bar-stack > div')[0].style.height, `${CHART_H}px`)
 
@@ -491,7 +492,7 @@ describe('TrendChart category focus (the browser open category)', () => {
     await m.update(h(TrendChart, propsOf([r1, r2], { focusCat: 'tool', hoveredSeq: 1 })))
     assert.deepEqual(
       queryAll(query(m.container, '.lc-chart-tip'), 'span').map(r => r.textContent),
-      [kit.t('tip.step', { t: 1, s: 0 }), kit.t('tip.cat', { cat: kit.catLabel('tool'), n: '60' })],
+      [kit.t('tip.step', { t: 1, s: 0, n: 2 }), kit.t('tip.cat', { cat: kit.catLabel('tool'), n: '60' })],
     )
     await m.unmount()
   })
@@ -727,7 +728,7 @@ describe('TrendChart tooltips', () => {
     await m.update(h(TrendChart, propsOf(reqs, { ...handlers, hoveredSeq: 1 })))
     assert.deepEqual(
       queryAll(query(m.container, '.lc-chart-tip'), 'span').map(r => r.textContent),
-      [kit.t('tip.step', { t: 1, s: 0 }), kit.t('tip.total', { n: '300' })],
+      [kit.t('tip.step', { t: 1, s: 0, n: 1 }), kit.t('tip.total', { n: '300' })],
     )
     assert.equal(query(m.container, '.lc-chart-tip').style.transform, 'translate(7px, 0)')
 
@@ -735,7 +736,7 @@ describe('TrendChart tooltips', () => {
     await m.update(h(TrendChart, propsOf(reqs, { ...handlers, hoveredSeq: 4 })))
     assert.deepEqual(
       queryAll(query(m.container, '.lc-chart-tip'), 'span').map(r => r.textContent),
-      [kit.t('tip.step', { t: 0, s: 0 }), kit.t('tip.total', { n: '300' })],
+      [kit.t('tip.step', { t: 0, s: 0, n: 1 }), kit.t('tip.total', { n: '300' })],
     )
 
     // A hoveredSeq outside the rendered list floats no tip.
@@ -1071,12 +1072,86 @@ describe('aggregateByTurn', () => {
   })
 })
 
+describe('turnStepsOf', () => {
+  test('tallies per-turn step counts over the raw records; turnless pool under 0', () => {
+    const stepsOf = turnStepsOf([
+      req(1, { turn: 1, step: 0 }),
+      req(2, { turn: 1, step: 1 }),
+      req(3, { turn: 2, step: 0 }),
+      req(4, { turn: undefined, step: undefined }),
+    ])
+    assert.equal(stepsOf(1), 2)
+    assert.equal(stepsOf(2), 1)
+    assert.equal(stepsOf(undefined), 1, 'turnless records read the pooled 0 key')
+  })
+
+  test('a turn outside the list answers 1 instead of missing', () => {
+    assert.equal(turnStepsOf([req(1, { turn: 1 })])(9), 1)
+    assert.equal(turnStepsOf([])(1), 1)
+  })
+})
+
 describe('jumpTargetOf', () => {
   test('matches the exact seq; an aged-out seq clamps to the oldest retained request', () => {
     const reqs = [req(50), req(60), req(70)]
     assert.equal(jumpTargetOf(reqs, 60)?.seq, 60)
     assert.equal(jumpTargetOf(reqs, 10)?.seq, 50, 'below the window → the oldest retained bar')
     assert.equal(jumpTargetOf([], 1), null)
+  })
+})
+
+describe('TrendChart entrance rise', () => {
+  const slot = (el: Element): string => (el as HTMLElement).style.getPropertyValue('--lc-i')
+
+  test('each bar carries its rise stagger slot, capped so a long log settles quickly', async () => {
+    const reqs = Array.from({ length: 25 }, (_, i) => req(i + 1))
+    const m = await mount(h(TrendChart, propsOf(reqs)))
+    const stacks = queryAll(m.container, '.lc-bar-stack')
+    assert.equal(stacks.length, 25)
+    assert.equal(slot(stacks[0]), '0')
+    assert.equal(slot(stacks[1]), '1')
+    assert.equal(slot(stacks[19]), '19')
+    // Past the cap every late bar joins at the same slot.
+    assert.equal(slot(stacks[20]), '20')
+    assert.equal(slot(stacks[24]), '20')
+    await m.unmount()
+  })
+
+  test('delta arms share their bar rise stagger slot', async () => {
+    const r1 = req(1, { turn: 1, step: 0 })
+    const r2 = req(2, { turn: 1, step: 1, system: 50, user: 60 })
+    const m = await mount(h(TrendChart, propsOf([r1, r2], { mode: 'delta' })))
+    const ups = queryAll(m.container, '.lc-bar-up')
+    const downs = queryAll(m.container, '.lc-bar-down')
+    assert.equal(slot(ups[0]), '0')
+    assert.equal(slot(ups[1]), '1')
+    assert.equal(slot(downs[1]), '1')
+    // The first bar diffs against nothing, so it grows no down arm.
+    assert.equal(queryAll(downs[0], 'div').length, 0)
+    await m.unmount()
+  })
+
+  test('switching granularity remounts every bar so the entrance rise replays', async () => {
+    // A turn aggregate IS its last step's record (the same seq): without the granularity-keyed remount,
+    // a turn → step switch would reuse that bar's DOM node and its turn-final step bars would not rise.
+    function GranularityHarness(props: { requests: RequestRecord[] }) {
+      const [granularity, setGranularity] = useState<'step' | 'turn'>('turn')
+      // The parent (ContextView) aggregates for turn granularity; TrendChart renders what it is given.
+      const display = granularity === 'turn' ? aggregateByTurn(props.requests) : props.requests
+      return h('div', null,
+        h('button', { onClick: () => { setGranularity('step') } }, 'to-step'),
+        h(TrendChart, { ...propsOf(display), granularity }))
+    }
+    const reqs = [req(1, { turn: 1, step: 0 }), req(2, { turn: 1, step: 1 }), req(3, { turn: 2, step: 0 })]
+    const m = await mount(h(GranularityHarness, { requests: reqs }))
+    // Turn mode: one aggregate per turn, each keyed by its LAST step's seq.
+    assert.deepEqual(bars(m.container).map(b => b.getAttribute('data-seq')), ['2', '3'])
+    const reusedSeq = query(m.container, '.lc-bar[data-seq="2"]')
+    await click(query(m.container, 'button'))
+    // Step mode renders every step; even the seq the aggregate reused must be a FRESH node.
+    assert.deepEqual(bars(m.container).map(b => b.getAttribute('data-seq')), ['1', '2', '3'])
+    assert.notEqual(query(m.container, '.lc-bar[data-seq="2"]'), reusedSeq)
+    await m.unmount()
   })
 })
 

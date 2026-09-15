@@ -22,6 +22,11 @@ export interface RequestDetailProps {
   brief?: StepBrief | null
   /** Conversation-snapshot join for call-argument enrichment; absent join = names only, never an error. */
   convOf?: (seq: number) => ConversationNodeLike | undefined
+  /**
+   * Per-turn step totals (the parent's `turnStepsOf` over the served requests) behind the head's
+   * step-of-total figure; absent = a 1-step turn.
+   */
+  stepsOf?: (turn: number | undefined) => number
   /** Reveal a brief row's node in the Context browser; absent = rows render inert. */
   onLocate?: (node: SurfaceNode, isResponse: boolean) => void
   /**
@@ -53,9 +58,9 @@ export function makeRequestDetail(
   }): ReactElement {
     const inner = (
       <>
-        <span className="lc-brief-tag">
+        <span className="lc-brief-tag group/tip">
           {props.tag}
-          <span className="lc-tip lc-brief-tip" role="tooltip">{props.tagTip}</span>
+          <span className="lc-tip lc-brief-tip group-hover/tip:opacity-100" role="tooltip">{props.tagTip}</span>
         </span>
         {props.children}
       </>
@@ -65,42 +70,34 @@ export function makeRequestDetail(
     const onLocate = props.onLocate
     const locate = (): void => { onLocate(node, props.isResponse) }
     return (
-      <button type="button" className="lc-brief-row lc-brief-row-link" onClick={locate}>
+      <button type="button" className="lc-brief-row lc-brief-row-link hover:bg-(--dsw-alias-interactive-bg-hover)" onClick={locate}>
         {inner}
       </button>
     )
   }
 
-  /** One-line identity of a surface node: text preview, call breadcrumb, tool name, or a localized placeholder. */
-  function nodeLine(n: SurfaceNode, conv: ConversationNodeLike | undefined): string {
-    /* v8 ignore if -- chipParts returns for tool cats upstream; only
-       inject-with-skill and drift nodes ever reach nodeLine. Defensive. */
-    if (n.cat === 'tool') return callSummaryOf(conv) ?? (n.tool ?? t('node.toolResult'))
-    if (n.text !== undefined && n.text !== '') return n.text
-    if (n.skill !== undefined) return t('node.skillTag', { name: n.skill })
-    if (n.calls !== undefined && n.calls.length > 0) {
-      const summary = blockSummaryOf(conv)
-      return n.calls.join(' › ') + (summary !== null ? ' · ' + summary : '')
-    }
-    /* v8 ignore if -- chipParts returns for assistant cats upstream. Defensive. */
-    if (n.cat === 'assistant') return t('node.empty')
-    /* v8 ignore if -- inject nodes arrive only WITH a skill (the text/skill
-       arms above return first); inject-without-skill never reaches nodeLine. */
-    if (n.cat === 'inject') return t('form.' + (n.form ?? 'context'))
-    return t('node.nonText')
-  }
-
   /**
    * One line's anatomy — a compact FACT tag plus the preview text, mirroring the Context browser's element rows so a
-   * brief line reads exactly like the browser row its click reveals: tool results tag the tool name (skill results the
-   * skill name), assistant replies tag the call breadcrumb, injections tag the form, user messages tag image attachments.
+   * brief line reads exactly like the browser row its click reveals: tool results tag the tool name, skill content
+   * the skill name, assistant replies the call breadcrumb, injections the form, user messages image attachments.
+   * The branches cover the Category union; a hostile cat degrades into the
+   * user tail — a plain text row, never a throw.
    */
   function chipParts(n: SurfaceNode, conv: ConversationNodeLike | undefined): { tag: string | null; text: string } {
     if (n.cat === 'tool') {
       const summary = callSummaryOf(conv)
-      if (n.skill !== undefined) return { tag: t('node.skillTag', { name: n.skill }), text: summary ?? '' }
       if (n.tool !== undefined) return { tag: n.tool, text: summary ?? '' }
       return { tag: null, text: summary ?? t('node.toolResult') }
+    }
+    if (n.cat === 'skill') {
+      // Skill content (issue #66): a load/invocation tags its NAME, the
+      // catalog digest its form label ('目录更新'). A text-less row (the
+      // `skill`-tool load — its content rode the tool result) previews the
+      // call summary, like the tool rows do.
+      return {
+        tag: n.skill !== undefined ? t('node.skillTag', { name: n.skill }) : t('form.' + (n.form ?? 'context')),
+        text: n.text ?? callSummaryOf(conv) ?? '',
+      }
     }
     if (n.cat === 'assistant') {
       // The fold's surface node keeps `calls` only for TEXT-LESS replies; a reply carrying both text and calls recovers
@@ -112,20 +109,18 @@ export function makeRequestDetail(
         text: own !== '' ? own : (names.length > 0 ? '' : t('node.empty')),
       }
     }
-    if (n.cat === 'inject' && n.skill === undefined) {
+    if (n.cat === 'inject') {
       const text = n.text !== undefined && n.text !== ''
         ? (n.form === 'snapshot' ? t('node.snapshot') + n.text : n.text)
         : ''
       return { tag: t('form.' + (n.form ?? 'context')), text }
     }
-    if (n.cat === 'user') {
-      const imgs = n.imgs ?? 0
-      return {
-        tag: imgs > 0 ? t('attach.image') + (imgs > 1 ? ' ×' + String(imgs) : '') : null,
-        text: n.text ?? '',
-      }
+    // The user tail (or a hostile cat): image uploads gain an Image chip.
+    const imgs = n.imgs ?? 0
+    return {
+      tag: imgs > 0 ? t('attach.image') + (imgs > 1 ? ' ×' + String(imgs) : '') : null,
+      text: n.text ?? '',
     }
-    return { tag: null, text: nodeLine(n, conv) }
   }
 
   /** The native-title line for a fact+text pair: 'tag · text', degrading to whichever half exists. */
@@ -160,7 +155,7 @@ export function makeRequestDetail(
       return (
         <span
           key={n.seq}
-          className={'lc-brief-chip' + (grow ? ' lc-brief-chip-grow' : '') + (onClick !== undefined ? ' lc-brief-chip-link' : '')}
+          className={'lc-brief-chip' + (grow ? ' lc-brief-chip-grow' : '') + (onClick !== undefined ? ' lc-brief-chip-link hover:bg-(--dsw-alias-interactive-bg-hover)' : '')}
           title={factTitle(tag, text) + hint}
           onClick={onClick}
         >
@@ -217,7 +212,7 @@ export function makeRequestDetail(
            the fallback is defensive. */
         n: req.stepCount ?? 0,
       })
-      : t('detail.step', { t: req.turn ?? 0, s: req.step ?? 0 })
+      : t('detail.step', { t: req.turn ?? 0, s: req.step ?? 0, n: props.stepsOf?.(req.turn) ?? 1 })
     // When this bar carries a boundary event (compaction/prune), the header
     // also shows WHERE the event happened: the gap between the request
     // before and the request after (e.g. "✂ Turn 49 · Step 2→3").
