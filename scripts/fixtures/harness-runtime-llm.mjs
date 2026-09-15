@@ -1,5 +1,6 @@
 import { LlmAdapter, ToolCallId, LlmError } from '@deepseek-ai/dsh-llm';
-import { appendFileSync } from 'node:fs';
+import { appendFileSync, readFileSync, existsSync } from 'node:fs';
+import { join } from 'node:path';
 import { createHash } from 'node:crypto';
 let seq = 0;
 let memberStarted = false;
@@ -14,20 +15,21 @@ class FixtureAdapter extends LlmAdapter {
     async listModels() { return [model, { ...model, id: 'fixture-failing' }, { ...model, id: 'fixture-fallback' }]; }
     async resolveModel(provider, id) { return { ...model, provider, id }; }
     async *stream(options) {
+        const system = options.system ?? options.messages.filter(message => message.role === 'system').flatMap(message => message.content.filter(block => block.type === 'text').map(block => block.text)).join('\n');
         const blocks = history(options), tools = blocks.filter(b => b.type === 'tool-call'), names = tools.map(b => b.name);
         const userText = options.messages.filter(m => m.role === 'user').flatMap(m => m.content.filter(b => b.type === 'text').map(b => b.text)).join('\n');
         const lastUserText = options.messages.filter(m => m.role === 'user' && m.source?.kind === 'user').map(m => m.content.filter(b => b.type === 'text').map(b => b.text).join('\n')).filter(Boolean).at(-1) ?? '';
         const currentNames = options.messages.slice(options.messages.findLastIndex(m => m.role === 'user' && m.source?.kind === 'user') + 1).flatMap(m => m.content ?? []).filter(b => b.type === 'tool-call').map(b => b.name);
         const toolText = blocks.filter(b => b.type === 'tool-result').flatMap(b => b.content?.filter(t => t.type === 'text').map(t => t.text) ?? []).join('\n');
-        const isMember = options.system?.includes('MEMBER_FIXTURE') === true;
+        const isMember = system?.includes('MEMBER_FIXTURE') === true;
         const teamTools = (options.tools ?? []).filter(t => t.name.startsWith('agent_teams_'));
         const requestKey = JSON.stringify([options.purpose, isMember, teamTools.map(t => t.name)]);
         if (!capturedRequests.has(requestKey)) {
             capturedRequests.add(requestKey);
-            record({ event: 'request-snapshot', purpose: options.purpose, isMember, system: options.system, tools: options.tools, messages: options.messages });
+            record({ event: 'request-snapshot', purpose: options.purpose, isMember, system: system, tools: options.tools, messages: options.messages });
         }
         record({ event: 'request-budget', sessionId: options.sessionId, purpose: options.purpose, isMember,
-            systemBytes: Buffer.byteLength(options.system ?? ''), systemSha256: createHash('sha256').update(options.system ?? '').digest('hex'),
+            systemBytes: Buffer.byteLength(system ?? ''), systemSha256: createHash('sha256').update(system ?? '').digest('hex'),
             toolsSha256: createHash('sha256').update(JSON.stringify(options.tools ?? [])).digest('hex'),
             teamSchemaBytes: Buffer.byteLength(JSON.stringify(teamTools)), teamTools: teamTools.map(t => t.name) });
         record({ event: 'request', sessionId: options.sessionId, purpose: options.purpose, provider: options.provider, model: options.model, reasoningEffort: options.reasoningEffort, isMember, toolNames: (options.tools ?? []).map(t => t.name), called: names, lastToolText: toolText.slice(-12000), userText: userText.slice(-6000), userMessages: options.messages.filter(m => m.role === 'user').map(m => m.content.filter(b => b.type === 'text').map(b => b.text).join('\n')) });
@@ -135,7 +137,15 @@ class FixtureAdapter extends LlmAdapter {
         else if (process.env.LAB_SCENARIO === 'lifecycle' && !tools.some(t => t.name === 'agent_teams_send_message' && t.arguments.includes('FIFO_SECOND')))
             chunks = call('agent_teams_send_message', { to: 'worker', content: 'FIFO_SECOND' });
         else if (!(toolText + userText).includes('MEMBER_REPORT_OK')) {
-            await new Promise(r => setTimeout(r, 150));
+            // Wait inside the scripted response for the actual product task;
+            // repeated timed status calls can trip the host's loop guard.
+            const file = join(process.cwd(), '.agent-teams/runtime-lab/team.json');
+            const deadline = Date.now() + 20000;
+            while (Date.now() < deadline) {
+                options.signal?.throwIfAborted();
+                if (existsSync(file) && JSON.parse(readFileSync(file, 'utf8')).tasks.some(task => ['completed', 'failed'].includes(task.status))) break;
+                await new Promise(resolve => setTimeout(resolve, 10));
+            }
             chunks = call('agent_teams_status', {});
         }
         else if (!tools.some(t => t.name === 'agent_teams_send_message' && t.arguments.includes('SECOND_WAKE_FIXTURE')))

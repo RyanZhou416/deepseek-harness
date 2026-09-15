@@ -41,6 +41,7 @@ class WebApprovalAdapter extends LlmAdapter {
     async listModels() { return [model]; }
     async resolveModel(provider, id) { return { ...model, provider, id }; }
     async *stream(options) {
+        const system = options.system ?? options.messages.filter(message => message.role === 'system').flatMap(message => message.content.filter(block => block.type === 'text').map(block => block.text)).join('\n');
         if (options.purpose) { yield* textChunks('Web approval lab'); return; }
         const blocks = options.messages.flatMap(message => message.content ?? []);
         const calls = blocks.filter(block => block.type === 'tool-call');
@@ -49,8 +50,8 @@ class WebApprovalAdapter extends LlmAdapter {
         const toolText = blocks.filter(block => block.type === 'tool-result').flatMap(block => block.content?.filter(content => content.type === 'text').map(content => content.text) ?? []).join('\n');
         const failed = blocks.find(block => block.type === 'tool-result' && block.isError);
         assert.equal(failed, undefined, 'Real workflow tool failed: ' + JSON.stringify(failed));
-        const isMember = options.system?.includes('WEB_APPROVAL_MEMBER') === true;
-        record({ event: 'web-request', sessionId: options.sessionId, isMember, model: options.model, reasoningEffort: options.reasoningEffort, system: options.system, tools: options.tools, messages: options.messages });
+        const isMember = system?.includes('WEB_APPROVAL_MEMBER') === true;
+        record({ event: 'web-request', sessionId: options.sessionId, isMember, model: options.model, reasoningEffort: options.reasoningEffort, system: system, tools: options.tools, messages: options.messages });
         const pluginMessages = options.messages.filter(message => message.role === 'user' && message.source?.kind === 'plugin' && message.source.plugin === 'dsh-agent-teams');
         const messageText = message => message.content.filter(block => block.type === 'text').map(block => block.text).join('\n');
         const approvals = pluginMessages.filter(message => messageText(message).includes('The user approved the staged AgentTeams plan') && messageText(message).includes('from the pre-run review UI.'));
@@ -177,7 +178,7 @@ export function apply(ctx) {
         await waitFor(() => events.some(event => event.event === 'web-captain-report-wake'), 'A real member report must wake the idle captain');
         for (const agent of ctx.agents.list()) {
             await agent.whenIdle();
-            await ctx.sessions.flush(agent.session);
+            if (ctx.sessions.get(agent.id) === agent.session) await ctx.sessions.flush(agent.session);
         }
         await captain.whenIdle();
         const completed = readTeam();
