@@ -30,9 +30,7 @@ Ask in natural language. The plugin provides the team protocol, 13 coordination 
 
 ## Releases
 
-> **RyanZhou416 fork build:** `0.1.16-dsh015rc1.1` vendors upstream [v0.1.16-rc.3](./release-notes/v0.1.16-rc.3.md) and targets `dsh-v0.1.5-rc.1`. It includes the upstream team-lock cleanup, stable capability presentation, existing-team reuse guidance, and Web approval wakeups while preserving nearest-step member delivery, durable cold-captain mailbox recovery, retired-member delivery guards, and bounded unread-mailbox projection caching. Install the repository artifact instead of an npm tag.
-
-The upstream release candidate remains on npm's `next` channel for its own 0.1.2 compatibility matrix. Check [GitHub Releases](https://github.com/NanmiCoder/dsh-agent-teams/releases) for upstream availability and history.
+[v0.1.17](./release-notes/v0.1.17.md) adds automatic light, dark, and system theme support on the npm `latest` channel. Activity panels, conversation cards, and dialog controls follow Harness semantic colors. Recommended host: DeepSeek Harness `0.1.5-rc.1`; the three older supported host targets are retained.
 
 ## Why AgentTeams?
 
@@ -44,67 +42,46 @@ The upstream release candidate remains on npm's `next` channel for its own 0.1.2
 | **Automatic reuse and safe takeover** | Idle members claim the next ready task; reassignment revokes stale attempts before new work starts, and cold recovery retries stranded open attempts. |
 | **Direct messaging** | Members send durable mailbox messages directly to teammates or the captain—no relay required. |
 | **Live activity panel** | The Web UI combines segmented progress, a collapsible roster, and an interactive task DAG; running tasks show the member's model, and completed archives retain their full member and task history. |
-| **Plan before execution** | Normal `/agent-teams` runs stage an unspawned roster and DAG first. The Web panel uses the host model catalog for member routes. Returning to chat stops the planning turn, asks what should change, and revises the same draft; discarding archives the draft, aborts the turn, and explicitly prevents automatic recreation. Only **Approve & Run** creates members and starts scheduling. |
+| **Plan before execution** | Normal `/agent-teams` runs stage an unspawned roster and DAG first. The Web panel uses the host model catalog for member routes. Returning to chat stops the planning turn, asks what should change, and revises the same draft; discarding archives the draft, aborts the turn, and explicitly prevents automatic recreation. Only **Approve & Run** enables scheduling; each member starts with its first ready task. |
 | **Quality gates** | Opt-in quality tasks support requirements → implementation → verification → review → integration contracts, automatic repair/re-review, and explicit resume. Scope control is a completion-time audit, not host write interception. See [docs/quality-gates.md](./docs/quality-gates.md). |
 
 The conversation card and activity panel use Harness's official locale service. They follow live language changes between English and Simplified Chinese—including status labels, dynamic summaries, controls, archive markers, and accessibility text—without a page reload or a separate plugin setting.
 
 ## Install and choose versions
 
-> [!IMPORTANT]
-> **`0.1.16-dsh015rc1.1` is a private fork build.** It supports only the exact `dsh-v0.1.5-rc.1` host cohort. Install the checked-in tgz through the fork setup workflow; do not substitute npm `latest` or `next`.
+**Recommended pair: DeepSeek Harness `0.1.5-rc.1` + AgentTeams `0.1.17`. Harness remains a prerelease.**
 
 | Use case | DeepSeek Harness | AgentTeams plugin |
 | --- | --- | --- |
-| Fork acceptance target | **`0.1.5-rc.1`** | **`0.1.16-dsh015rc1.1`** |
-| Other versions, source HEAD, embedded Desktop cores | Outside the current matrix | Keep a known working exact pair or complete acceptance before adding a target. |
+| **Recommended installation** | **`0.1.5-rc.1`** | **`0.1.17`** |
+| Retaining an older RC | `0.1.2-rc.1` | `0.1.17` |
+| Developer Alpha testing | `0.1.2-alpha.5` | `0.1.17` |
+| Retaining an older Alpha | `0.1.2-alpha.2` | `0.1.17` |
 
-[compatibility.json](./compatibility.json) is the single source for development and verification. It pins the private `dsh015rc1` channel and the exact host cohort.
+### 1. Install DeepSeek Harness
 
-### Ordinary users: keep a matching host and plugin
+```sh
+npm install --global @deepseek-ai/dsh@0.1.5-rc.1
+dsh --version
+```
 
-Use the fork's [plugin installation workflow](../README.md), which verifies the repository artifact digest before it updates the selected profile.
+Skip this if you already run this version. Alpha is opt-in: select an exact Alpha version from the table and lock all host dependencies as described in the [maintenance guide](./docs/maintenance-workflow.md).
+
+### 2. Install the AgentTeams plugin
+
+Install into the `web` profile. Replace the profile name if needed:
+
+```sh
+dsh plugin --profile web add --save-exact @nanmicoder/dsh-agent-teams@0.1.17
+```
 
 **After installation, stop and restart Harness for that profile, then refresh the browser.**
 
-In a checkout containing this change:
+The default npm `latest` tag points to `0.1.17`, so `dsh plugin --profile web add @nanmicoder/dsh-agent-teams` installs this version on a fresh profile. Use the exact-version command above to pin it. The recommended Harness version is `0.1.5-rc.1`; installing the plugin does not upgrade the host. See the [source installation guide](./docs/maintenance-workflow.md) and [release verification](./docs/releases/v0.1.17/README.md).
 
-```sh
-pnpm install --frozen-lockfile
-pnpm typecheck
-pnpm build
-pnpm verify
-pnpm pack --out ./agent-teams-candidate.tgz
-```
+> Desktop users must check the app's embedded Harness core; upgrading the global CLI does not upgrade it. For older `0.1.0-*` / `0.1.1-*` or unlisted hosts, keep a working pair and follow the [older-version and diagnostic guide](./docs/maintenance-workflow.md).
 
-Inspect the actual host, then install the artifact into a separate test profile:
-
-```sh
-node scripts/doctor.mjs --host-root "/actual/host/package/directory" --json
-dsh plugin --profile agent-teams-preview add --save-exact /absolute/path/agent-teams-candidate.tgz
-node scripts/doctor.mjs --host-root "/actual/host/package/directory" --profile-root "/actual/test/profile/directory" --json
-dsh --profile agent-teams-preview --dump-config
-dsh web --profile agent-teams-preview
-```
-
-The doctor checks the DSH dependency cohort, duplicate runtime identities and the profile's plugin version. It reads package metadata without reading credentials or changing configuration. Passing it does not replace team, task and UI acceptance. Rebuild, repack and restart after source changes.
-
-### Developers: test the exact fork host
-
-Development uses exact `0.1.5-rc.1` packages, cohort-wide `pnpm.overrides`, and a frozen lockfile. The runtime runner creates an isolated installation, profile, and workspace, installs the candidate tgz, and checks the resolved dependency cohort.
-
-```sh
-node scripts/harness-runtime-verify.mjs \
-  --host-version 0.1.5-rc.1 \
-  --artifact ./agent-teams-candidate.tgz \
-  --report-dir /tmp/agent-teams-rc1-check
-```
-
-This developer command downloads the host into temporary directories without modifying existing user profiles. It uses deterministic model responses with the real CLI, plugin, sessions, tools and subagents. See the [maintenance workflow](./docs/maintenance-workflow.md) for coverage and release requirements.
-
-### Retaining an older host / rollback
-
-For the historical Harness `0.1.0-rc.8` + plugin `0.1.14` pair, pin both sides. This is not a compatibility claim for every older RC. Keep another already verified older pair until a complete migration is ready. Historical [Alpha.2 compatibility](./docs/alpha2-compatibility.md) and [acceptance](./docs/alpha2-release-acceptance.md) reports describe those specific releases, not the current matrix.
+See the full [compatibility matrix](./compatibility.json), [source installation and Alpha testing guide](./docs/maintenance-workflow.md), and [verification coverage and platform limits](./docs/maintenance-2026-09-06/release/README.md).
 
 Then ask for a team directly:
 
@@ -147,6 +124,8 @@ same deterministic activation through a gesture boundary: any genuine user
 message starting with `/agent-teams` activates the protocol for the rest of
 the text. Mid-sentence mentions stay ordinary prose.
 
+Historical panels require saved team state or archives. Sessions from early versions that deleted teams without retaining archives do not yet support reconstructing the full panel from logs.
+
 ## Configuration
 
 Defaults work without extra setup. A trusted profile can override member behavior:
@@ -157,9 +136,11 @@ Defaults work without extra setup. A trusted profile can override member behavio
     stateDir: .agent-teams
     memberProvider: spawn
     memberModel: deepseek-v4
-    memberMaxDepth: 1
+    memberMaxDepth: 0
     maxMembers: 8
 ```
+
+`memberMaxDepth` defaults to `0`: team members cannot create nested subagents. Set `1` to explicitly permit one descendant level; the limit also covers runtime/code-tool calls. Default members report through team messages only, avoiding duplicate native parent reports. Idle roster members make no model requests. Task assignments start distinct turns; coordination joins the nearest model step. Acceptance and consumption are tracked separately. Removal/archive drains the selected branch and its pending input before reporting success.
 
 `memberProvider` is the sub-agent runtime backend (`spawn` / `fork`), not an LLM provider. Cross-LLM-provider routing uses the optional `provider` + `model` fields of `agent_teams_add_member`; `memberModel` is only a model default for all members. A member on the captain's current provider/model inherits the captain's reasoning effort, while a changed provider or model automatically uses the target model's default. To request a particular effort, pass the optional `reasoning_effort` field — one of the target model's supported effort ids, or `"default"` to force the model's own default.
 
@@ -227,7 +208,7 @@ profiles:
         dependencies: [requirements]
 ```
 
-Use an explicit profile flag: `/agent-teams --profile demo-delivery implement the feature`. The first ordinary token is never treated as an implicit profile. Normal command runs call `agent_teams_create({ profile, approval: "required" })`: the roster and seed/Captain-designed DAG remain staged, no child session is created, and no task is claimed. Edit the plan in the activity panel using the host model catalog, return to chat so the Captain asks what to revise and then atomically updates the same draft, discard it, or click **Approve & Run**. Return/discard actions cancel any planning turn still running; discard also parks model-facing context that forbids silently creating a replacement team. Approval resolves the final provider/model/reasoning choices, atomically spawns the roster, and starts only ready tasks. A running team is stopped from its own panel header through a confirmation dialog rather than from the composer. Direct tool clients may pass `approval: "automatic"` for the legacy immediate path. Failed review/test tasks do not unlock downstream work; automatic repair/review tasks do not depend on the failed review.
+Use an explicit profile flag: `/agent-teams --profile demo-delivery implement the feature`. The first ordinary token is never treated as an implicit profile. Normal command runs call `agent_teams_create({ profile, approval: "required" })`: the roster and seed/Captain-designed DAG remain staged, no child session is created, and no task is claimed. Edit the plan in the activity panel using the host model catalog, return to chat so the Captain asks what to revise and then atomically updates the same draft, discard it, or click **Approve & Run**. Return/discard actions cancel any planning turn still running; discard also parks model-facing context that forbids silently creating a replacement team. Approval resolves the final provider/model/reasoning choices, commits the roster, and creates each member session only when its first task is ready. A running team is stopped from its own panel header through a confirmation dialog rather than from the composer. Direct tool clients may pass `approval: "automatic"` for the legacy immediate path. Failed review/test tasks do not unlock downstream work; automatic repair/review tasks do not depend on the failed review.
 
 ## License
 

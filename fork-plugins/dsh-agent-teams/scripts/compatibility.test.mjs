@@ -8,8 +8,6 @@ import test from 'node:test'
 import { inspectInstallation } from './doctor.mjs'
 import { policy, requiredHostPeers, validatePolicy, validatePackageCompatibility } from './compatibility.mjs'
 
-const pluginVersion = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version
-
 test('doctor runs through an installed bin symlink and reports success or failure', t => {
   const root = mkdtempSync(join(tmpdir(), 'agent-teams-doctor-bin-'))
   t.after(() => rmSync(root, { recursive: true, force: true }))
@@ -36,20 +34,13 @@ test('doctor runs through an installed bin symlink and reports success or failur
   assert.equal(JSON.parse(unsupported.stdout).ok, false)
 })
 
-test('private policy rejects floating targets, duplicates, and public alpha recommendation', () => {
-  assert.equal(validatePolicy(policy).length, 1)
-  for (const version of ['latest', '^0.1.3-alpha.2', '0.1.3-alpha.2\n']) {
+test('policy rejects floating targets, duplicates, and alpha recommendation', () => {
+  assert.deepEqual(validatePolicy(policy), policy.supportedHosts.map(host => host.version))
+  for (const version of ['latest', '^0.1.2-rc.1', '0.1.2-rc.1\n']) {
     assert.throws(() => validatePolicy({ ...policy, supportedHosts: [{ version, track: 'recommended' }] }))
   }
   assert.throws(() => validatePolicy({ ...policy, supportedHosts: [...policy.supportedHosts, policy.supportedHosts[0]] }))
-  const alphaPolicy = {
-    ...policy,
-    recommendedHost: '0.1.3-alpha.2',
-    previewTag: 'next',
-    supportedHosts: [{ version: '0.1.3-alpha.2', track: 'recommended' }],
-  }
-  assert.throws(() => validatePolicy(alphaPolicy), /Alpha\/beta/)
-  assert.throws(() => validatePackageCompatibility({ devDependencies: { '@deepseek-ai/dsh': '^0.1.3-alpha.2' } }))
+  assert.throws(() => validatePackageCompatibility({ devDependencies: { '@deepseek-ai/dsh': '^0.1.2-rc.1' } }))
 })
 
 test('doctor detects transitive cohort mixing even with an exact CLI version', t => {
@@ -59,14 +50,14 @@ test('doctor detects transitive cohort mixing even with an exact CLI version', t
     mkdirSync(directory, { recursive: true })
     writeFileSync(join(directory, 'package.json'), JSON.stringify({ name, version, dependencies }))
   }
-  pkg(root, '@deepseek-ai/dsh', policy.recommendedHost, { '@deepseek-ai/dsh-agent': policy.recommendedHost })
+  pkg(root, '@deepseek-ai/dsh', '0.1.2-alpha.2', { '@deepseek-ai/dsh-agent': '^0.1.2-alpha.2' })
   const dependency = join(root, 'node_modules/@deepseek-ai/dsh-agent')
   pkg(dependency, '@deepseek-ai/dsh-agent', '0.1.2-rc.1')
   const mixed = inspectInstallation(root)
   assert.equal(mixed.ok, false)
   assert.equal(mixed.checkedPackages, 2)
   assert.match(mixed.problems.join(), /differ from host/)
-  pkg(dependency, '@deepseek-ai/dsh-agent', policy.recommendedHost)
+  pkg(dependency, '@deepseek-ai/dsh-agent', '0.1.2-alpha.2')
   assert.equal(inspectInstallation(root).ok, true)
   pkg(root, '@deepseek-ai/dsh', '0.1.0-rc.8')
   assert.match(inspectInstallation(root).problems.join(), /Unsupported host/)
@@ -79,13 +70,13 @@ test('doctor follows profile peers and rejects duplicate runtime identities', t 
     mkdirSync(path, { recursive: true })
     writeFileSync(join(path, 'package.json'), JSON.stringify(data))
   }
-  write(root, { name: '@deepseek-ai/dsh', version: policy.recommendedHost, dependencies: { '@deepseek-ai/dsh-agent': policy.recommendedHost } })
-  write(join(root, 'node_modules/@deepseek-ai/dsh-agent'), { name: '@deepseek-ai/dsh-agent', version: policy.recommendedHost })
+  write(root, { name: '@deepseek-ai/dsh', version: '0.1.2-rc.1', dependencies: { '@deepseek-ai/dsh-agent': '0.1.2-rc.1' } })
+  write(join(root, 'node_modules/@deepseek-ai/dsh-agent'), { name: '@deepseek-ai/dsh-agent', version: '0.1.2-rc.1' })
   const profile = join(root, 'profile')
   write(join(profile, 'node_modules/@nanmicoder/dsh-agent-teams'), {
-    name: '@nanmicoder/dsh-agent-teams', version: pluginVersion, peerDependencies: { '@deepseek-ai/dsh-agent': policy.recommendedHost },
+    name: '@nanmicoder/dsh-agent-teams', version: '0.1.16-rc.1', peerDependencies: { '@deepseek-ai/dsh-agent': '0.1.2-rc.1' },
   })
-  write(join(profile, 'node_modules/@deepseek-ai/dsh-agent'), { name: '@deepseek-ai/dsh-agent', version: policy.recommendedHost })
+  write(join(profile, 'node_modules/@deepseek-ai/dsh-agent'), { name: '@deepseek-ai/dsh-agent', version: '0.1.2-rc.1' })
   assert.match(inspectInstallation(root, profile).problems.join(), /Multiple resolved identities/)
 })
 
@@ -94,7 +85,7 @@ test('policy rejects missing or mixed development overrides', () => {
   assert.doesNotThrow(() => validatePackageCompatibility(pkg))
   delete pkg.pnpm.overrides['@deepseek-ai/dsh-agent']
   assert.throws(() => validatePackageCompatibility(pkg), /override/)
-  pkg.pnpm.overrides['@deepseek-ai/dsh-agent'] = '0.1.2-rc.1'
+  pkg.pnpm.overrides['@deepseek-ai/dsh-agent'] = '0.1.2-alpha.2'
   assert.throws(() => validatePackageCompatibility(pkg), /override/)
 })
 
@@ -138,13 +129,13 @@ test('doctor detects peer-only drift and a mismatched installed plugin', t => {
     mkdirSync(path, { recursive: true })
     writeFileSync(join(path, 'package.json'), JSON.stringify(data))
   }
-  write(root, { name: '@deepseek-ai/dsh', version: policy.recommendedHost, dependencies: { '@deepseek-ai/dsh-agent': policy.recommendedHost } })
+  write(root, { name: '@deepseek-ai/dsh', version: '0.1.2-rc.1', dependencies: { '@deepseek-ai/dsh-agent': '0.1.2-rc.1' } })
   write(join(root, 'node_modules/@deepseek-ai/dsh-agent'), {
-    name: '@deepseek-ai/dsh-agent', version: policy.recommendedHost, peerDependencies: { '@deepseek-ai/dsh-session': '*' },
+    name: '@deepseek-ai/dsh-agent', version: '0.1.2-rc.1', peerDependencies: { '@deepseek-ai/dsh-session': '*' },
   })
-  write(join(root, 'node_modules/@deepseek-ai/dsh-session'), { name: '@deepseek-ai/dsh-session', version: '0.1.2-rc.1' })
+  write(join(root, 'node_modules/@deepseek-ai/dsh-session'), { name: '@deepseek-ai/dsh-session', version: '0.1.2-alpha.2' })
   assert.match(inspectInstallation(root).problems.join(), /differ from host/)
-  write(join(root, 'node_modules/@deepseek-ai/dsh-session'), { name: '@deepseek-ai/dsh-session', version: policy.recommendedHost })
+  write(join(root, 'node_modules/@deepseek-ai/dsh-session'), { name: '@deepseek-ai/dsh-session', version: '0.1.2-rc.1' })
   assert.equal(inspectInstallation(root).ok, true)
   const profile = join(root, 'profile')
   write(join(profile, 'node_modules/@nanmicoder/dsh-agent-teams'), { name: '@nanmicoder/dsh-agent-teams', version: '0.1.15' })

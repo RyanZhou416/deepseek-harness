@@ -8,18 +8,12 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
 import { SubagentRuntime } from '@deepseek-ai/dsh-subagent'
-import {
-  deliverMemberPrompt,
-  guardSubagentDelivery,
-  installContinuableMemberSetup,
-  queueMemberPrompt,
-  sessionOwnEvents,
-} from '../lib/harness-compat.js'
+import { guardSubagentDelivery, installContinuableMemberSetup, queueMemberPrompt, sessionOwnEvents } from '../lib/harness-compat.js'
 import { installMemberSelectionRuntime, spawnMember } from '../lib/members.js'
 import { createTeamDir } from '../lib/state.js'
 
 const queueKey = Symbol.for('dsh.subagent.queuePrompt')
-const deliveryKey = Symbol.for('dsh.subagent.deliverPrompt')
+const deliverKey = Symbol.for('dsh.subagent.deliverPrompt')
 const signal = new AbortController().signal
 const source = { kind: 'plugin', plugin: 'dsh-agent-teams' }
 const content = [{ type: 'text', text: 'next distinct turn' }]
@@ -44,7 +38,7 @@ function scope(extra = {}) {
 }
 
 function modernRuntime() {
-  return { [queueKey]() {}, sendMessage() {} }
+  return { [deliverKey]() {}, sendMessage() {} }
 }
 
 function child({ workspace = process.cwd(), effort, inherited = false } = {}) {
@@ -57,7 +51,7 @@ function child({ workspace = process.cwd(), effort, inherited = false } = {}) {
     options: { provider: 'primary', model: 'model', reasoningEffort: effort },
     session: { header: { cwd: workspace, parentSession: 'captain' }, ownEvents: () => inherited ? [] : [descriptor] },
   }
-  agent.ctx = scope({ agent })
+  agent.ctx = scope() // Harness 0.1.5 no longer exposes Context.agent.
   return agent
 }
 
@@ -94,12 +88,12 @@ await test('native SubagentRuntime keeps its receiver through FIFO delivery and 
     } })
     t.after(() => caller.dispose())
     await caller.await()
-    const firstChild = scope()
+    const firstChild = scope({ agent: { id: 'first' } })
     runtime.setupRegistry.apply(firstChild).commit()
     assert.deepEqual({ installed, disposed }, { installed: 1, disposed: 0 })
     await caller.dispose()
     assert.deepEqual({ installed, disposed }, { installed: 1, disposed: 1 })
-    const laterChild = scope()
+    const laterChild = scope({ agent: { id: 'later' } })
     runtime.setupRegistry.apply(laterChild).commit()
     assert.equal(installed, 1)
     firstChild.dispose()
@@ -118,11 +112,6 @@ await test('native SubagentRuntime keeps its receiver through FIFO delivery and 
       accepted.push({ path: 'queue', parent, id, body, source: provenance })
       return 'accepted'
     },
-    async steerPrompt(parent, id, body, provenance) {
-      assert.equal(this, manager)
-      accepted.push({ path: 'host-steer', parent, id, body, source: provenance })
-      return 'accepted'
-    },
     async sendMessage(parent, id, body) {
       assert.equal(this, manager)
       accepted.push({ path: 'steer', parent, id, body })
@@ -134,11 +123,7 @@ await test('native SubagentRuntime keeps its receiver through FIFO delivery and 
   runtime.continuations = manager
   const captain = { id: 'captain', session: { header: {} } }
   const ctx = scope({ subagents: runtime })
-  const methodKey = typeof runtime.followup === 'function'
-    ? 'followup'
-    : typeof runtime[queueKey] === 'function'
-      ? queueKey
-      : deliveryKey
+  const methodKey = typeof runtime.followup === 'function' ? 'followup' : typeof runtime[deliverKey] === 'function' ? deliverKey : queueKey
   const before = Object.getOwnPropertyDescriptor(runtime, methodKey)
   guardSubagentDelivery(ctx, async (_sender, id) => id === 'retired')
   assert.equal(await queueMemberPrompt(runtime, captain, 'active', content, signal), 'accepted')
@@ -174,44 +159,11 @@ await test('modern queue and public messaging are both guarded, including nested
   assert.ok(calls.every(([path]) => path === 'queue'))
 })
 
-await test('Alpha.2 delivery steers resident members, queues inactive members, and guards both paths', async () => {
-  const calls = []
-  const runtime = {
-    [deliveryKey](...args) {
-      assert.equal(this, runtime)
-      calls.push(['host', args[1], args[5]])
-      return Promise.resolve('accepted')
-    },
-    sendMessage(...args) {
-      assert.equal(this, runtime)
-      calls.push(['message', args[1]])
-      return Promise.resolve('accepted')
-    },
-  }
-  const captain = { id: 'captain', session: { header: {} } }
-  const resident = { id: 'resident' }
-  const ctx = scope({
-    subagents: runtime,
-    agents: { get(id) { return id === resident.id ? resident : undefined } },
-  })
-  guardSubagentDelivery(ctx, async (_sender, id) => id === 'retired')
-  assert.equal(await deliverMemberPrompt(ctx, captain, 'resident', content, signal), 'accepted')
-  assert.equal(await deliverMemberPrompt(ctx, captain, 'inactive', content, signal), 'accepted')
-  assert.deepEqual(calls, [
-    ['host', 'resident', 'steer'],
-    ['host', 'inactive', 'queue'],
-  ])
-  await assert.rejects(deliverMemberPrompt(ctx, captain, 'retired', content, signal), { code: 'NOT_RESUMABLE' })
-  await assert.rejects(runtime.sendMessage(captain, 'retired', content, { signal }), { code: 'NOT_RESUMABLE' })
-  ctx.dispose()
-  assert.equal(await deliverMemberPrompt(ctx, captain, 'retired', content, signal), 'accepted')
-})
-
 await test('unsupported queue-only or send-only contract fails explicitly', async () => {
   const runtime = { sendMessage() { assert.fail('must never substitute steer') } }
   assert.throws(() => installContinuableMemberSetup(scope({ subagents: runtime }), () => () => {}), /unsupported Harness/)
   assert.throws(() => guardSubagentDelivery(scope({ subagents: runtime }), async () => false), /unsupported Harness/)
-  await assert.rejects(queueMemberPrompt(runtime, {}, 'child', content, signal), /missing Host FIFO/)
+  await assert.rejects(queueMemberPrompt(runtime, {}, 'child', content, signal), /missing host FIFO/)
   assert.throws(() => sessionOwnEvents({ header: {} }), /missing ownEvents/)
 })
 
@@ -330,10 +282,45 @@ await test('spawn explicitly passes reasoning effort, preserving persona and too
   const captain = { id: 'captain' }
   const team = { id: 'team', name: 'Team', captainSessionId: captain.id, members: [], tasks: [], createdAt: 1, taskSeq: 0 }
   const member = { id: '', name: 'worker', role: 'engineer', joinedAt: 1, status: 'idle' }
-  await spawnMember(ctx, { provider: 'spawn' }, { withPending: (_p, _l, _s, run) => run() },
+  await spawnMember(ctx, { provider: 'spawn', maxDepth: 0 }, { withPending: (_p, _l, _s, run) => run() },
     { provider: 'chosen', model: 'model', reasoningEffort: 'high' }, captain, team, member, '.agent-teams', signal)
   assert.deepEqual(received.request.agentOptions, { provider: 'chosen', model: 'model', reasoningEffort: 'high' })
   assert.match(received.request.persona, /engineer/)
   assert.ok(received.request.toolFilter.deny.includes('agent_teams_create'))
+  assert.ok(received.request.toolFilter.deny.includes('send_message'), 'default members have only one parent-report channel')
+  assert.ok(received.request.toolFilter.deny.includes('subagent'))
   assert.equal(member.id, 'child')
+})
+
+await test('0.1.5 delivery queues team jobs and guards both host modes across HMR', async () => {
+  const calls = []
+  const runtime = {
+    [deliverKey](...args) { assert.equal(this, runtime); calls.push(args); return Promise.resolve('accepted') },
+    sendMessage(...args) { assert.equal(this, runtime); return Promise.resolve('steered') },
+  }
+  const original = Object.getOwnPropertyDescriptor(runtime, deliverKey)
+  const captain = { id: 'captain' }
+  const first = scope({ subagents: runtime }), second = scope({ subagents: runtime })
+  guardSubagentDelivery(first, async (_sender, id) => id === 'retired-first')
+  guardSubagentDelivery(second, async (_sender, id) => id === 'retired-second')
+  assert.equal(await queueMemberPrompt(runtime, captain, 'active', content, signal), 'accepted')
+  assert.deepEqual(calls[0], [captain, 'active', content, source, signal, 'queue'])
+  for (const id of ['retired-first', 'retired-second']) {
+    for (const mode of ['queue', 'steer']) {
+      await assert.rejects(runtime[deliverKey](captain, id, content, source, signal, mode), { code: 'NOT_RESUMABLE' })
+    }
+    await assert.rejects(runtime.sendMessage(captain, id, content, { signal }), { code: 'NOT_RESUMABLE' })
+  }
+  first.dispose()
+  assert.equal(await queueMemberPrompt(runtime, captain, 'retired-first', content, signal), 'accepted')
+  await assert.rejects(queueMemberPrompt(runtime, captain, 'retired-second', content, signal), { code: 'NOT_RESUMABLE' })
+  second.dispose()
+  assert.equal(await runtime[deliverKey](captain, 'retired-second', content, source, signal, 'steer'), 'accepted')
+  assert.equal(calls.at(-1).at(-1), 'steer')
+  // The surviving wrapper of an already disposed parent becomes inert.
+  const clean = scope({ subagents: runtime })
+  guardSubagentDelivery(clean, async () => true)
+  clean.dispose()
+  assert.equal(await queueMemberPrompt(runtime, captain, 'active', content, signal), 'accepted')
+  assert.equal(typeof original.value, 'function')
 })

@@ -55,11 +55,10 @@ test('stable tool presentation uses real scoped registry and prompt assembly', a
   await business.await()
   const createAgent = (id, parentSession, events = []) => {
     const agent = { id, status: 'idle', session: { header: { cwd: workspace, parentSession, seedLength: 0 }, events,
-      ownEvents() { return events },
       append(type, data) { const event = { type, data }; events.push(event); return event },
     } }
     const scope = createScope(owned, agent)
-    agent.ctx = scope.ctx.extend({ agent })
+    agent.ctx = scope.ctx
     agents.push(agent)
     scopes.push(scope)
     return agent
@@ -195,7 +194,7 @@ test('stable tool presentation uses real scoped registry and prompt assembly', a
         assert.equal(result.isError, false, JSON.stringify(result))
         assert.match(JSON.stringify(result.content), /STATUS_OUTPUT_DISCARDED/)
         assert.doesNotMatch(JSON.stringify(result.content), /attempt_id|captain protocol/)
-        assert.ok(a.session.ownEvents().some(event => event.type === 'tool/ptc-dispatch' && event.data.name === 'agent_teams_status'))
+        assert.ok(a.session.events.some(event => event.type === 'tool/ptc-dispatch' && event.data.name === 'agent_teams_status'))
         assertCaptainProtocol(renderPrompt(await assemble(a)))
         assert.equal(await header(a), before)
       } finally { restore() }
