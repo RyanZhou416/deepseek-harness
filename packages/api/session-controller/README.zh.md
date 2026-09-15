@@ -51,9 +51,12 @@ Session 对象还承载本地提交回显：`session.beginSubmission` 在调用�
 
 | 字段 | 默认值 | 含义 |
 |---|---:|---|
+| `idleSessionRetentionMs` | `300000` | Controller 自己持有、已持久化、无人 follow 的空闲 Agent 保持驻留的毫秒数；`0` 禁用淘汰 |
 | `nativeOpen` | 平台探测 | 是否能把 Session 工作区路径交给原生桌面打开器 |
 
 生成的[配置目录](../../../docs/config-catalog.zh.md#deepseek-aidsh-api-session-controller)是所有受支持字段及其 JSDoc 的完整来源。
+
+Controller 自己持有的 Agent 只有在空闲且没有 follower、待处理收件箱输入、存活子 Agent 或运行中／停止中的任务时才可被淘汰。到期后，Controller 会刷新 Session、通过持久层确认它，再只释放自己持有的实时句柄；Session 列表项和持久历史仍然保留，下一个会激活 Session 的操作会冷恢复它。没有持久层时，Agent 保持驻留。
 
 -----
 

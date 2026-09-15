@@ -51,9 +51,12 @@ Fork copies history through the selected completed turn, including its `turn/end
 
 | Field | Default | Meaning |
 |---|---:|---|
+| `idleSessionRetentionMs` | `300000` | Milliseconds an owned, durable, unfollowed idle Agent remains resident; `0` disables eviction |
 | `nativeOpen` | platform-detected | Whether Session workspace paths can be handed to a native desktop opener |
 
 The generated [configuration catalog](../../../docs/config-catalog.md#deepseek-aidsh-api-session-controller) is the exhaustive source for accepted fields and their JSDoc.
+
+An owned Agent becomes eligible only when it is idle, has no follower, pending inbox input, live child, or running or stopping job. At expiry, the controller flushes the Session, confirms it through persistence, and disposes only its own live handle; the Session list row and durable history remain, and the next activating operation resumes it cold. Without persistence the Agent stays resident.
 
 -----
 

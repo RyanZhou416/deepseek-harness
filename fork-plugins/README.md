@@ -27,6 +27,10 @@ The setup intentionally omits marketplace plugins, subscriptions, watchdogs, cus
 
 This build adopts v0.1.18 atomic roster creation, dependency-ready member startup, next-step coordination, stale-attempt rejection, retired-member cleanup, and task correction. The private layer adapts awaited `agent/created` startup for DSH 0.1.6, preserves cold Captain mailbox recovery and the bounded unread-mailbox cache, and keeps the on-disk format unchanged.
 
+Each Team message enters the durable Team mailbox before Host delivery. The plugin marks it delivered only after the Host accepts it into the DSH durable inbox; a recipient already inside a non-interruptible tool consumes that queued input after the tool settles rather than being preempted. Failed Host delivery leaves the Team record retryable, while an inactive Captain cold-resumes and replays unacknowledged rows in order.
+
+Members include the current `attempt_id` in every task update. Omitting it produces a retryable error that names the current id without revoking the attempt; supplying a different id is a genuinely stale update and is rejected after takeover or reassignment.
+
 After cloning this fork, setting their own `DSH_HOME`, and stopping any running DSH instance, a colleague can run this command from the repository root:
 
 ```powershell

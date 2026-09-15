@@ -33,7 +33,7 @@ Choose it when jobs should live in the harness process and die with it. Avoid it
 
 ### Minimal configuration
 
-Loading the plugin registers `ctx.jobs`; `maxConcurrentJobsPerOwner` is optional and defaults to `10`.
+Loading the plugin registers `ctx.jobs`; `maxConcurrentJobsPerOwner` defaults to `10`, while both terminal-retention controls are disabled when omitted.
 
 ```yaml
 - name: '@deepseek-ai/dsh-jobs-local'
@@ -42,12 +42,16 @@ Loading the plugin registers `ctx.jobs`; `maxConcurrentJobsPerOwner` is optional
 | Field | Default | Meaning |
 |---|---|---|
 | `maxConcurrentJobsPerOwner` | `10` | Maximum `running` plus `stopping` jobs per exact owner, or in the shared unowned bucket |
+| `terminalJobRetentionMs` | disabled | Milliseconds after settlement before any terminal record is removed |
+| `maxRetainedTerminalJobsPerOwner` | disabled | Target terminal records per exact owner or the shared unowned bucket; count pruning removes only reported records |
 
-The generated [configuration catalog](../../../docs/config-catalog.md#deepseek-aidsh-jobs-local) is the exhaustive source for the accepted field.
+The generated [configuration catalog](../../../docs/config-catalog.md#deepseek-aidsh-jobs-local) is the exhaustive source for accepted fields.
 
 ### What each owner gets
 
 The limit counts the exact owner's `running` and `stopping` records; all unowned jobs share one separate service-level bucket. Terminal history does not occupy capacity, and only a producer's `done` settlement releases a stopping job's place. At capacity, `start()` fails before the producer runs, with an error that names the limit and tells the agent to kill an unneeded job, wait for it to finish, and retry — the registry neither queues nor preempts.
+
+Count retention removes the oldest reported terminal records from each exact-owner bucket; unreported records may exceed the target until they are reported, expire by TTL, or reach teardown. TTL retention removes terminal records whether reported or not. Running and stopping records are never retention candidates, and a pending waiter or its just-settled job remains protected until the immediate result read can finish.
 
 ### Lifecycle
 

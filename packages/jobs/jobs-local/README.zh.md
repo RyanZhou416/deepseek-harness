@@ -33,7 +33,7 @@ kind: "package-reference"
 
 ### 最小配置
 
-加载插件即注册 `ctx.jobs`；`maxConcurrentJobsPerOwner` 可选，默认为 `10`。
+加载插件即注册 `ctx.jobs`；`maxConcurrentJobsPerOwner` 默认为 `10`，两个终态保留控制项在省略时均禁用。
 
 ```yaml
 - name: '@deepseek-ai/dsh-jobs-local'
@@ -42,12 +42,16 @@ kind: "package-reference"
 | 字段 | 默认值 | 含义 |
 |---|---|---|
 | `maxConcurrentJobsPerOwner` | `10` | 每个精确所有者，或共享的无主桶中，`running` 加 `stopping` 任务的最大数量 |
+| `terminalJobRetentionMs` | 禁用 | 任务结算后移除任意终态记录前保留的毫秒数 |
+| `maxRetainedTerminalJobsPerOwner` | 禁用 | 每个精确所有者或共享无主桶的终态记录目标数；按数量裁剪时只移除已报告记录 |
 
-生成的[配置目录](../../../docs/config-catalog.zh.md#deepseek-aidsh-jobs-local)是每个受支持字段的穷尽式真源。
+生成的[配置目录](../../../docs/config-catalog.zh.md#deepseek-aidsh-jobs-local)是所有受支持字段的穷尽式真源。
 
 ### 每个所有者得到什么
 
 上限统计精确所有者的 `running` 与 `stopping` 记录；所有无主任务共享另一个独立的服务级桶。终止历史不占用容量，只有生产方的 `done` 结算才释放一个停止中任务的名额。达到上限时，`start()` 会在生产方运行前失败，错误会指出上限并告诉 agent 终止一个不需要的任务、等它结束后再重试——注册表既不排队也不抢占。
+
+按数量保留会从每个精确所有者桶中移除最早的已报告终态记录；未报告记录可以超过目标数，直到它被报告、因 TTL 到期或进入销毁。TTL 保留无论记录是否报告都会移除终态记录。运行中和停止中的记录永远不参与保留裁剪；存在等待方的任务及其刚结算记录会保持受保护，直到紧随其后的结果读取完成。
 
 ### 生命周期
 
