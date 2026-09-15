@@ -46,20 +46,24 @@ function validInclude(include: string): boolean {
   return true
 }
 
-function searchFiles(value: unknown): readonly SearchFileGroup[] | null {
+function searchFiles(value: unknown): SearchFileGroup[] | null {
   if (!Array.isArray(value)) return null
+  const files: SearchFileGroup[] = []
   for (const file of value) {
     if (typeof file !== 'object' || file === null || Array.isArray(file)) return null
     const { path, matches } = file as Record<string, unknown>
     if (typeof path !== 'string' || !Array.isArray(matches)) return null
+    const narrowed: { lineNumber: number; line: string }[] = []
     for (const match of matches) {
       if (typeof match !== 'object' || match === null || Array.isArray(match)) return null
       const { lineNumber, line } = match as Record<string, unknown>
       if (typeof lineNumber !== 'number' || !Number.isInteger(lineNumber) || lineNumber < 1) return null
       if (typeof line !== 'string') return null
+      narrowed.push({ lineNumber, line })
     }
+    files.push({ path, matches: narrowed })
   }
-  return value as SearchFileGroup[]
+  return files
 }
 
 function flattenContent(content: readonly { type: string; text?: string }[]): string | undefined {
@@ -84,48 +88,13 @@ export function searchCardModel(block: ToolCallBlock): SearchCardModel | null {
   if (typeof meta.truncated !== 'boolean') return null
   if (typeof meta.total !== 'number' || !Number.isInteger(meta.total) || meta.total < 0) return null
   const common = { truncated: meta.truncated, total: meta.total }
-  let recoveryReady = false
-  let recovery: string | undefined
-  const getRecovery = () => {
-    if (!recoveryReady) {
-      recovery = meta.truncated ? flattenContent(block.content) : undefined
-      recoveryReady = true
-    }
-    return recovery
-  }
+  const recovery = meta.truncated ? flattenContent(block.content) : undefined
   if (tool === 'grep') {
     if (meta.shape !== 'matches') return null
     const files = searchFiles(meta.files)
-    if (files === null) return null
-    let copied: SearchFileGroup[] | undefined
-    return {
-      get recovery() { return getRecovery() },
-      card: {
-        kind: 'matches',
-        get files() {
-          copied ??= files.map(file => ({
-            path: file.path,
-            matches: file.matches.map(match => ({ lineNumber: match.lineNumber, line: match.line })),
-          }))
-          return copied
-        },
-        ...common,
-      },
-    }
+    return files === null ? null : { recovery, card: { kind: 'matches', files, ...common } }
   }
   if (meta.shape !== 'paths' || !Array.isArray(meta.paths)) return null
   if (!meta.paths.every((path): path is string => typeof path === 'string')) return null
-  const paths = meta.paths
-  let copied: string[] | undefined
-  return {
-    get recovery() { return getRecovery() },
-    card: {
-      kind: 'paths',
-      get paths() {
-        copied ??= [...paths]
-        return copied
-      },
-      ...common,
-    },
-  }
+  return { recovery, card: { kind: 'paths', paths: [...meta.paths], ...common } }
 }

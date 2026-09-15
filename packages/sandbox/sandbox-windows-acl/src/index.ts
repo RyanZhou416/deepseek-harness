@@ -23,10 +23,9 @@
  * Known boundaries (inherent to restricted tokens, not this port):
  *  - writes are restricted; reads, network, and process visibility are NOT
  *    (WRITE_RESTRICTED intersects only write accesses);
- *  - restricted children cannot create their own console
- *    (CREATE_NO_WINDOW / CREATE_NEW_CONSOLE fail with STATUS_DLL_INIT_FAILED);
- *    the Harness subprocess provider isolates its unrestricted runner first,
- *    while direct AclSandbox callers own their parent-console isolation;
+ *  - console isolation is unavailable — children share the host console
+ *    (CREATE_NO_WINDOW / CREATE_NEW_CONSOLE children die with
+ *    STATUS_DLL_INIT_FAILED under the restriction);
  *  - the private temp directory and every writable directory must be owned by the
  *    caller (owner-implicit WRITE_DAC);
  *  - grants are standing ACE mutations on real directories. WORKSPACE grants
@@ -113,6 +112,8 @@ export interface AclSandboxSpawnOptions {
    * child dies with the caller; stdout/stderr in the result are empty.
    */
   stdio?: 'pipe' | 'inherit'
+  /** Control pipe forwarded to the same payload descriptor in inherited-stdio mode. */
+  controlFileDescriptor?: 7
 }
 
 /** A settled confined child: captured stdio and the exit code. */
@@ -350,11 +351,17 @@ export class AclSandbox {
     const api = this.api
     const token = this.token
     if (api === undefined || token === undefined) throw new Error('AclSandbox is not initialized: call init() first')
+    if (options.controlFileDescriptor !== undefined && options.stdio !== 'inherit') {
+      throw new Error('control pipe requires inherited stdio')
+    }
     const args = options.args ?? []
     const cwd = options.cwd ?? process.cwd()
 
     if (options.stdio === 'inherit') {
-      const native = spawnSandboxedInherited(api, token, { command: options.command, args, cwd })
+      const native = spawnSandboxedInherited(api, token, {
+        command: options.command, args, cwd,
+        ...options.controlFileDescriptor === undefined ? {} : { controlFileDescriptor: options.controlFileDescriptor },
+      })
       let exitCodePromise: Promise<number> | undefined
       return {
         pid: native.pid,

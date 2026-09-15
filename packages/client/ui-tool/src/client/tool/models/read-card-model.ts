@@ -52,6 +52,7 @@ function readMeta(meta: unknown): ReadMeta | null {
   if (typeof path !== 'string' || typeof offset !== 'number' || !Number.isInteger(offset) || offset < 1) return null
   if (typeof totalLines !== 'number' || !Number.isInteger(totalLines) || totalLines < 0 || !Array.isArray(lines)) return null
   if (lang !== undefined && typeof lang !== 'string') return null
+  const narrowed: ReadBlockLine[] = []
   let previous = offset - 1
   for (const line of lines) {
     if (typeof line !== 'object' || line === null || Array.isArray(line)) return null
@@ -59,11 +60,12 @@ function readMeta(meta: unknown): ReadMeta | null {
     if (typeof number !== 'number' || !Number.isInteger(number) || number < 1 || number <= previous) return null
     if (number > totalLines || typeof text !== 'string') return null
     previous = number
+    narrowed.push({ number, text })
   }
   return {
     path,
     offset,
-    lines: lines as ReadBlockLine[],
+    lines: narrowed,
     totalLines,
     ...lang === undefined ? {} : { lang },
   }
@@ -108,13 +110,9 @@ export function readCardModel(
   if (text === undefined) return null
   const body = /^<path>[^\n]*<\/path>\n<type>file<\/type>\n<content>\n([\s\S]*)\n<\/content>$/u.exec(text)?.[1]
   if (body === undefined) return null
-  let lines: ReadBlockLine[] | undefined
   return {
     label: abbreviateHomePath(relativizeToCwd(meta.path, sessionCwd), home),
-    get lines() {
-      lines ??= meta.lines.map(line => ({ number: line.number, text: line.text }))
-      return lines
-    },
+    lines: meta.lines,
     totalLines: meta.totalLines,
     lang: meta.lang,
   }

@@ -47,8 +47,8 @@ export function readFamilyRow(
       icon={<IconBrowseOutline16 size={14} />}
       title={t(model.titleKey)}
       summary={model.summary}
-      details={model}
-      showInput={false}
+      bodyRaw={null}
+      output={model.output}
       errorSummary={model.errorSummary}
       {...card}
       state={model.state}

@@ -4,6 +4,7 @@
  * @module @deepseek-ai/dsh-session-query
  */
 
+import { currentSessionMessageProjections } from '@deepseek-ai/dsh-session-format-catalog/message-projections'
 import { Context, Service } from '@deepseek-ai/cordis'
 import {
   Session,
@@ -70,11 +71,7 @@ export {
 export { readColdSessionLog } from './cold-read.ts'
 export type { ColdSessionLog } from './cold-read.ts'
 export { extractSessionEventText } from './extraction.ts'
-export {
-  buildAppendedSessionEventSearchDocuments,
-  buildSessionEventRecords,
-  buildSessionEventSearchDocuments,
-} from './documents.ts'
+export { buildSessionEventRecords, buildSessionEventSearchDocuments } from './documents.ts'
 export {
   compileSessionTextFilter,
   filterSessionEventDocuments,
@@ -191,6 +188,7 @@ export abstract class SessionQueryEngine extends Service {
       loaded.events,
       loaded.header,
       loaded.inheritedEventCount,
+      currentSessionMessageProjections,
     )
     return {
       session: structuredClone(loaded.header),

@@ -2,6 +2,7 @@
 
 import koffi from 'koffi'
 import * as abi from './abi.ts'
+import { inheritedControlStdio } from './control-stdio.ts'
 import {
   allocProcessInfo,
   allocPtrSlot,
@@ -92,12 +93,16 @@ export interface CurrentTokenStdioFileDescriptors {
   stdin: number
   stdout: number
   stderr: number
+  /** Optional carrier and target descriptor for the inherited control pipe. */
+  control?: 7
 }
 
 /** Restricted-token process creation inputs owned by the Windows ACL sandbox. */
 export interface RestrictedProcessSpawnOptions extends ProcessSpawnOptions {
   /** Restricted primary token supplied by sandbox policy. */
   token: NativePtr
+  /** Optional control pipe inherited at the same descriptor in the payload. */
+  controlFileDescriptor?: 7
 }
 
 /** Piped child resources whose process and read handles remain caller-owned. */
@@ -355,13 +360,14 @@ interface ProcessStandardHandles {
   stdin: NativePtr
   stdout: NativePtr
   stderr: NativePtr
+  control?: { fileDescriptor: 7; handle: NativePtr }
 }
 
 // Koffi exposes PVOID as an unsigned 64-bit bigint on supported Windows hosts.
 const UV_INVALID_OS_FILE_HANDLE = 0xffff_ffff_ffff_ffffn
 const UV_INVALID_FILE_DESCRIPTOR = 0xffff_ffff_ffff_fffen
 
-function inheritedStandardHandles(api: Win32ProcessBindings): ProcessStandardHandles {
+function inheritedStandardHandles(api: Win32ProcessBindings, controlFileDescriptor?: 7): ProcessStandardHandles {
   const get = (selector: number, label: string): NativePtr => {
     const handle = api.getStdHandle(selector)
     if (!isNullPtr(handle)) return handle
@@ -371,28 +377,35 @@ function inheritedStandardHandles(api: Win32ProcessBindings): ProcessStandardHan
     stdin: get(abi.STD_INPUT_HANDLE, 'stdin'),
     stdout: get(abi.STD_OUTPUT_HANDLE, 'stdout'),
     stderr: get(abi.STD_ERROR_HANDLE, 'stderr'),
+    ...controlFileDescriptor === undefined ? {} : {
+      control: { fileDescriptor: controlFileDescriptor, handle: descriptorHandle(api, controlFileDescriptor, 'control') },
+    },
   }
+}
+
+function descriptorHandle(api: Win32ProcessBindings, fileDescriptor: number, label: string): NativePtr {
+  const handle = api.uvGetOsfhandle(fileDescriptor)
+  if (
+    isNullPtr(handle)
+      || handle === UV_INVALID_OS_FILE_HANDLE
+      || handle === UV_INVALID_FILE_DESCRIPTOR
+  ) {
+    throw new Error(`uv_get_osfhandle returned an invalid handle for target ${label} fd ${String(fileDescriptor)}`)
+  }
+  return handle
 }
 
 function targetCarrierHandles(
   api: CurrentTokenProcessBindings,
   descriptors: CurrentTokenStdioFileDescriptors,
 ): ProcessStandardHandles {
-  const get = (fileDescriptor: number, label: string): NativePtr => {
-    const handle = api.uvGetOsfhandle(fileDescriptor)
-    if (
-      isNullPtr(handle)
-      || handle === UV_INVALID_OS_FILE_HANDLE
-      || handle === UV_INVALID_FILE_DESCRIPTOR
-    ) {
-      throw new Error(`uv_get_osfhandle returned an invalid handle for target ${label} fd ${String(fileDescriptor)}`)
-    }
-    return handle
-  }
   return {
-    stdin: get(descriptors.stdin, 'stdin'),
-    stdout: get(descriptors.stdout, 'stdout'),
-    stderr: get(descriptors.stderr, 'stderr'),
+    stdin: descriptorHandle(api, descriptors.stdin, 'stdin'),
+    stdout: descriptorHandle(api, descriptors.stdout, 'stdout'),
+    stderr: descriptorHandle(api, descriptors.stderr, 'stderr'),
+    ...descriptors.control === undefined ? {} : {
+      control: { fileDescriptor: descriptors.control, handle: descriptorHandle(api, descriptors.control, 'control') },
+    },
   }
 }
 
@@ -403,35 +416,46 @@ function spawnJobProcess(
   resolveStdio: () => ProcessStandardHandles,
   createName: 'CreateProcessAsUserW' | 'CreateProcessW',
   create: (startupInfo: NativePtr, processInfo: NativePtr) => number,
-  console: 'inherit' | 'new-hidden',
 ): SpawnedJobProcess {
-  const hideNewConsole = console === 'new-hidden'
   const job = createKillOnCloseJob(api)
   const enabled: NativePtr[] = []
   let startupInfo: NativePtr | undefined
   let processInfo: NativePtr | undefined
+  let controlDescriptorBlock: { pointer: NativePtr; length: number } | undefined
   let created = 0
   let createFailureCode = 0
   try {
     const stdio = resolveStdio()
-    for (const [handle, label] of [
+    const inherited: Array<readonly [NativePtr, string]> = [
       [stdio.stdin, 'stdin'],
       [stdio.stdout, 'stdout'],
       [stdio.stderr, 'stderr'],
-    ] as const) {
+    ]
+    if (stdio.control !== undefined) inherited.push([stdio.control.handle, 'control'])
+    for (const [handle, label] of inherited) {
       if (api.setHandleInformation(handle, abi.HANDLE_FLAG_INHERIT, abi.HANDLE_FLAG_INHERIT) === 0) {
         throwLastError(api, 'SetHandleInformation', `${label} (enable inherit)`)
       }
       enabled.push(handle)
     }
+    const controlBytes = stdio.control === undefined
+      ? undefined
+      : inheritedControlStdio(api, { ...stdio, control: stdio.control })
+    if (controlBytes !== undefined) {
+      controlDescriptorBlock = { pointer: koffi.alloc('uint8', controlBytes.length) as NativePtr, length: controlBytes.length }
+      koffi.encode(controlDescriptorBlock.pointer, 'uint8', controlBytes, controlBytes.length)
+    }
     startupInfo = allocStartupInfo()
     encodeStartupInfo(startupInfo, {
       cb: abi.STARTUPINFOW_SIZE,
-      dwFlags: abi.STARTF_USESTDHANDLES | (hideNewConsole ? abi.STARTF_USESHOWWINDOW : 0),
-      ...hideNewConsole ? { wShowWindow: abi.SW_HIDE } : {},
+      dwFlags: abi.STARTF_USESTDHANDLES,
       hStdInput: stdio.stdin,
       hStdOutput: stdio.stdout,
       hStdError: stdio.stderr,
+      ...controlDescriptorBlock === undefined ? {} : {
+        cbReserved2: controlDescriptorBlock.length,
+        lpReserved2: controlDescriptorBlock.pointer,
+      },
     })
     processInfo = allocProcessInfo()
     created = create(startupInfo, processInfo)
@@ -442,6 +466,7 @@ function spawnJobProcess(
     throw error
   } finally {
     freeNative(startupInfo)
+    freeNative(controlDescriptorBlock?.pointer)
     for (const handle of enabled) {
       // The runner spawns nothing else; cleanup failure must not mask the child.
       api.setHandleInformation(handle, abi.HANDLE_FLAG_INHERIT, 0)
@@ -504,7 +529,7 @@ export function spawnInheritedJobProcess(
   options: RestrictedProcessSpawnOptions,
 ): SpawnedJobProcess {
   const commandLine = buildCommandLine(options.command, options.args)
-  return spawnJobProcess(api, options, () => inheritedStandardHandles(api), 'CreateProcessAsUserW', (startupInfo, processInfo) =>
+  return spawnJobProcess(api, options, () => inheritedStandardHandles(api, options.controlFileDescriptor), 'CreateProcessAsUserW', (startupInfo, processInfo) =>
     createRestrictedProcess(
       api,
       options,
@@ -512,13 +537,11 @@ export function spawnInheritedJobProcess(
       abi.CREATE_SUSPENDED,
       startupInfo,
       processInfo,
-    ), 'inherit')
+    ))
 }
 
 /**
- * Spawn an ordinary process in a separate hidden console, assign its Job while
- * suspended, then resume it. Restricted-token children inherit that console
- * from an ordinary sandbox runner instead of creating their own.
+ * Spawn an ordinary process suspended, assign its Job, then resume it.
  * @param api - active binding table.
  * @param options - command, cwd, argv, and target carrier descriptors.
  * @returns caller-owned process and Job handles after successful resume.
@@ -536,12 +559,12 @@ export function spawnCurrentTokenJobProcess(
       null,
       null,
       1,
-      abi.CREATE_SUSPENDED | abi.CREATE_UNICODE_ENVIRONMENT | abi.CREATE_NEW_CONSOLE,
+      abi.CREATE_SUSPENDED | abi.CREATE_UNICODE_ENVIRONMENT,
       environment,
       options.cwd,
       startupInfo,
       processInfo,
-    ), 'new-hidden')
+    ))
 }
 
 /**

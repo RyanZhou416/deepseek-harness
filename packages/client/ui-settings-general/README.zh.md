@@ -9,7 +9,7 @@ kind: "package-reference"
 
 ## 概述
 
-使用本包可为 dsh Web 客户端提供 Settings 面板、位于侧边栏入口旁与全局 shell overlay 中的连接恢复控件、由功能包贡献的导航，以及依次进行的首次运行引导。用户可以立即重试失败的连接，并在宿主为回环浏览器提供本地配置文件时访问该文件。各功能包提供自己的设置行、分区和引导步骤；本包提供共享的界面展示，但不添加引导文案或「通用」分区的内置行。
+使用本包可为 dsh Web 客户端提供 Settings 面板、连接恢复控件、由功能包贡献的导航，以及依次进行的首次运行引导。用户可以从侧边栏打开面板、立即重试失败的连接，并在宿主为回环浏览器提供本地配置文件时访问该文件。各功能包提供自己的设置行、分区和引导步骤；本包提供共享的界面展示，但不添加引导文案或「通用」分区的内置行。
 
 ## 目录
 
@@ -25,9 +25,7 @@ kind: "package-reference"
 <a id="use-this-package"></a>
 ## 使用本包
 
-用户通过侧边栏底部的 Settings 控件进入外壳；功能插件通过本外壳所投影的 slot 账本贡献自己的页面与引导步骤。在展开侧边栏和收起轨道中，该控件都会把本地化的 Settings 文案作为其可访问名称。Settings 右侧浅黄色的**连接异常**操作表示浏览器离线暂停；自动恢复期间显示**自动重连中**，其后一至三个点每 500ms 前进一次。鼠标悬浮或键盘聚焦任一黄色状态时，只有文案变为**立即重连**，背景保持不变；按压反馈留在黄色色阶内，选中后立即从 retry 1 开始。恢复后该区域变为浅绿色的**连接成功**，驻留 2 秒再消失。所有可见状态的文字都左对齐，且图标、文字起点、高度和宽度保持固定。首次启动与未曾中断的健康连接保持静默。外壳渲染模态面板、由 `settings.section` 条目构建的导航，以及每次只挂载一个的引导步骤。
-
-相同的断线、重试与两秒恢复状态也会出现在 `shell.overlay`，因此侧边栏收起或 Settings 关闭时，恢复操作仍然可见。全局指示器在健康启动时保持静默，并与行内控件使用相同的本地化 label 与 reconnect callback。
+用户通过侧边栏底部的 Settings 控件进入外壳；功能插件通过本外壳所投影的 slot 账本贡献自己的页面与引导步骤。在展开侧边栏和收起轨道中，该控件都会把本地化的 Settings 文案作为其可访问名称。Settings 右侧浅黄色的**连接异常**操作表示浏览器离线暂停；其常驻重试图形与中文文案「连接异常，刷新重试」都指明重试动作。每次恢复尝试都显示 spinner 加**重新连接中**，其后一至三个点每 500ms 前进一次，且每次尝试至少可见 800ms，短暂重试不会闪动。选中任一黄色状态都会立即发起重试；按压反馈留在黄色色阶内。恢复后该区域变为浅绿色的**连接成功**，从绿色药丸可见起驻留 2 秒再消失。药丸出现时淡入、移除时以 150ms 淡出，宽度随当前文案自适应。首次启动与未曾中断的健康连接保持静默。外壳渲染模态面板、由 `settings.section` 条目构建的导航，以及每次只挂载一个的引导步骤。
 
 ### 「通用」分区
 
@@ -57,11 +55,11 @@ kind: "package-reference"
 
 ### 连接恢复
 
-外壳是明确的恢复功能消费方，因此直接注入 Connection，而不把生命周期控制放进 `ctx.remote`。它的私有 hooks compartment 绑定 `ctx.connection.state`，行内控件与全局 overlay 只接收选出的状态和调用 `ctx.connection.reconnect()` 的注入回调。`ConnectionIndicator` 拥有两处展示，并从 `settings` locale namespace 接收全部可见与无障碍文案；每个 owner 各自持有两秒恢复状态计时器。
+外壳是明确的恢复功能消费方，因此直接注入 Connection，而不把生命周期控制放进 `ctx.remote`。它的私有 hooks compartment 绑定 `ctx.connection.state`，组件只接收选出的状态与调用 `ctx.connection.reconnect()` 的注入回调。`ConnectionIndicator` 拥有内联展示并从 `settings` locale namespace 接收全部可见与无障碍文案；连接中状态的 800ms 最短可见驻留与 2 秒恢复确认计时器归外壳所有；恢复计时从驻留结束、恢复药丸实际可见时开始。
 
 ### 文档可用性
 
-在 loopback 页面上，Client 通过 `settings/describe` 加载提供方的 `hasDocument` 能力，且只有在 Host 确认可准备好一份由提供方持有的本地文档时才渲染配置文件操作。该操作调用无路径参数且经浏览器认证的 `settings/openSettingsDocument` Remote；Host 会再次解析提供方路径、在文档缺失时将其创建出来，并交给原生文本编辑器（macOS 上使用 `open -t`，绕过浏览器文件关联；Linux 和 Windows 上使用桌面文件关联；WSL 上经 `wslpath -w` 转换后使用 Windows 文件关联）。打开失败时该操作仍可使用，并渲染本地化错误。临时读取失败或 Host 拓扑变化后，重新打开对话框或重新连接会刷新可用性。非 loopback 页面保留 Client 策略，不提供该原生操作及其 settings 读取。
+在 loopback 页面上，Client 通过 `settings/describe` 加载提供方的 `hasDocument` 能力，且只有在 Host 确认可准备好一份由提供方持有的本地文档时才渲染**打开配置文件**操作。该操作调用无路径参数且经浏览器认证的 `settings/openSettingsDocument` Remote；Host 会再次解析提供方路径、在文档缺失时将其创建出来，并交给原生文本编辑器（macOS 上使用 `open -t`，绕过浏览器文件关联；Linux 和 Windows 上使用桌面文件关联；WSL 上经 `wslpath -w` 转换后使用 Windows 文件关联）。打开失败时该操作仍可使用，并渲染本地化错误。临时读取失败或 Host 拓扑变化后，重新打开对话框或重新连接会刷新可用性。非 loopback 页面保留 Client 策略，不提供该原生操作及其 settings 读取。
 
 ### 宿主端
 

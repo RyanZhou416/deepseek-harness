@@ -1,5 +1,5 @@
 ---
-description: "面向模型的背景任务控制，供选择、配置或排查 job_output、job_list、job_kill 与完成通知的用户与维护者阅读。"
+description: "面向模型的后台任务控制，供选择、配置或排查 job_output、job_list、job_kill 与完成通知的用户与维护者阅读。"
 kind: "package-reference"
 ---
 
@@ -9,7 +9,7 @@ kind: "package-reference"
 
 ## 概述
 
-使用 `dsh-tool-jobs`，可通过 `job_output`、`job_list` 与 `job_kill` 检查和控制后台命令、PTY 工作与 subagent。读取可在配置的超时内等待，列表结果标识各任务的 kind 与状态，而取消只有在工作停止后才结算。归属明确的工作完成时，agent 会收到会话内通知：繁忙的 agent 在下一步收到通知，空闲的 agent 则可能在有界连续链内，或在一次显式阻塞读取返回该 live job 后被唤醒。配置控制等待上限、完成投递与连续唤醒次数。流输出仅供单一读取方消费，待领通知无法在所有者释放后存活。
+使用 `dsh-tool-jobs`，可通过 `job_output`、`job_list` 与 `job_kill` 检查和控制后台命令、PTY 工作与 subagent。读取可在配置的超时内等待，列表结果标识各任务的 kind 与状态，而取消只有在工作停止后才结算。归属明确的工作完成时，agent（智能体）会收到会话内通知：繁忙的 agent 在下一步收到通知，空闲的 agent 则可能由有界的 follow-up 轮次唤醒。配置控制等待上限、完成投递与连续唤醒次数。流输出仅供单一读取方消费，待领通知无法在所有者释放后存活。
 
 ## 目录
 
@@ -29,7 +29,7 @@ kind: "package-reference"
 
 ### 三个工具
 
-- `job_output(job_id, wait?, timeout_ms?)`——读取任务输出。流任务只返回自上次读取以来的输出；最终输出任务在结算后返回其结果。每个响应都以 `[status: ...]` 结尾。除非 `wait: true`，否则读取是非阻塞的；启用 `yieldWaitOnNextStep` 后，next-step input 也会结束等待，但不会取消任务。
+- `job_output(job_id, wait?, timeout_ms?)`——读取任务输出。流任务只返回自上次读取以来的输出；最终输出任务在结算后返回其结果。每个响应都以 `[status: ...]` 结尾。除非 `wait: true`，否则读取是非阻塞的；`wait: true` 最多等待到配置上限，超时时仍让运行中的任务保持存活。
 - `job_list()`——列出你的后台任务及其 id、kind 与状态，每行一个：`<id> [<kind>] <status> — <label>`。
 - `job_kill(job_id, reason?)`——立即请求取消运行中的任务；任务在其工作真正停止后以 `killed` 结算。终止任务返回其当前快照，可选的原因会被记录并转发给任务。
 
@@ -39,7 +39,7 @@ kind: "package-reference"
 
 任务完成时，拥有它的 agent 会收到会话内消息 `background job <id> (<kind>: <label>) finished [status: ...]. Read its output with job_output.`。繁忙的 agent 会在下一步收到注入的通知——inbox 尚有内容时轮次无法结束，因此同时结算的多个任务只花掉一步，而不是各占一轮。空闲的 agent 则被一个 follow-up 轮次唤醒，因为无人领取的通知等于模型永远不会知道的完成。kill 或针对终止任务的 read/wait 会把完成标为已报告并抑制重复通知；排空 owner 或服务的 teardown 取消同样如此。
 
-唤醒是有界的：每个所有者最多可由本插件连续开启 `maxConsecutiveWakes` 个轮次，此后的通知降级为注入。其他来源启动 driver 或领取用户撰写的消息会恢复预算。一次阻塞 `job_output` 若返回仍在运行的 owner 所属 job，就会为该 job 的下一次完成保留唤醒权，即使预算已耗尽；结算、终态读取或 kill 会消费这项保留。该界仍会停止「每次唤醒轮次都启动下一个后台任务」的无人观察自激链。`completionDelivery: quiet` 让空闲所有者也在注入通道上，确定性 transcript 需要的正是这一点。
+唤醒是有界的：每个所有者最多可被唤醒 `maxConsecutiveWakes` 次，此后的通知降级为注入；领取任何用户撰写的消息都会恢复预算。设界是因为这条链会自激——被唤醒的一轮可能启动某个后台任务，而它的完成又会唤醒同一个所有者。`completionDelivery: quiet` 让空闲所有者也在注入通道上，确定性 transcript（文本记录）需要的正是这一点。
 
 ### 最小配置
 
@@ -54,14 +54,13 @@ kind: "package-reference"
 | `waitTimeoutMs` | `30,000` | `wait: true` 省略 `timeout_ms` 时使用的等待时间 |
 | `maxWaitTimeoutMs` | `600,000` | 模型所给等待时间的上限；更大的值向下收敛到它 |
 | `completionDelivery` | `wakeup` | `wakeup` 为空闲所有者开启一轮；`quiet` 让通知继续待领 |
-| `maxConsecutiveWakes` | `3` | 本插件可连续开启的轮数，超出后无保留通知降级为注入 |
-| `yieldWaitOnNextStep` | `false` | next-step input 到达 owner 时结束阻塞中的 `job_output` 等待 |
+| `maxConsecutiveWakes` | `3` | 一个所有者可由唤醒开启的轮数，超出后通知降级为注入 |
 
 生成的[配置目录](../../../docs/config-catalog.zh.md#deepseek-aidsh-tool-jobs)是每个受支持字段及其 JSDoc 的穷尽式真源。
 
 ### 可能出什么问题
 
-组合中未加载 `tool-jobs` 的 agent 无法启动后台工作：本插件的控制器正是生产方 `ctx.jobs.start()` 得以启用所依赖的。模型给出的等待时间超过 `maxWaitTimeoutMs` 时会向下收敛到上限。超时与配置的 next-step 让步都会返回 `[status: running]`，同时保持 live job 不变。待领于空闲所有者的完成通知无法在该所有者释放后存活。
+组合中未加载 `tool-jobs` 的 agent 无法启动后台工作：本插件的控制器正是生产方 `ctx.jobs.start()` 得以启用所依赖的。模型给出的等待时间超过 `maxWaitTimeoutMs` 时会向下收敛到上限，超时的等待返回 `[status: running]` 并让任务保持存活，而不是失败。待领于空闲所有者的完成通知无法在该所有者释放后存活。
 
 -----
 
@@ -84,7 +83,7 @@ kind: "package-reference"
 | 文件 | 职责 |
 |---|---|
 | [`src/index.ts`](src/index.ts) | 插件入口：工具注册、完成监听器、提示词区段、输出上限 |
-| — | 不发布运行时不变式伴生入口；执行关系归能力 seam 所有。 |
+| — | 不发布运行时不变式伴生入口；这个面向模型的适配器没有独立的生命周期流；执行关系归其调用的能力 seam 所有。 |
 
 ### 输出上限
 
@@ -92,7 +91,7 @@ kind: "package-reference"
 
 ### 通知投递通道
 
-`onJobDone` 跳过已报告或无所有者的任务。`wakeup` 投递在连续预算内为空闲所有者开启一轮，按确切 `Agent` 记录在 `WeakMap` 中；不是由本次投递引发的 driver 启动，或领取用户撰写的消息，都会重置该所有者的计数。一次阻塞读取若返回仍在运行的 owner 所属 job，就会记录一项 job-id 保留，使该 job 的完成可以越过计数开启轮次。繁忙的所有者——或超出预算且无保留的通知，以及 `quiet` 投递——改为注入 next-step inbox。teardown 结算抵达时已标记为 `reported`，因此释放永远不会花一次模型请求来宣布无人能读的通知。
+`onJobDone` 跳过已报告或无所有者的任务。`wakeup` 投递在预算内为空闲所有者开启一轮，按确切 `Agent` 记录在 `WeakMap` 中；领取用户撰写的消息（`agent/inbox/claimed`）会重置该所有者的预算。繁忙的所有者——或超出预算的任何通知，以及 `quiet` 投递——改为注入 next-step inbox。teardown 结算抵达时已标记为 `reported`，因此释放永远不会花一次模型请求来宣布无人能读的通知。
 
 </details>
 
@@ -103,7 +102,7 @@ kind: "package-reference"
 
 当包级约定不够用时阅读以下页面。它们从任务类型逐步进入注册表约定与生成 schema。
 
-- [后台任务运行时子系统](../../../docs/subsystems/jobs.zh.md)——任务类型、快照字段与 `ctx.jobs` 的 cordis 接口面。
+- [后台任务运行时子系统](../../../docs/subsystems/jobs.zh.md)——任务类型、快照字段与 `ctx.jobs` 的 Cordis 接口面。
 - [jobs 组映射](../README.zh.md)——同级组页面及其包表格。
 - [注册表约定](../jobs/README.zh.md)——工具背后的抽象 `ctx.jobs` 服务。
 - [进程本地注册表](../jobs-local/README.zh.md)——任务在本进程中的运行位置。
@@ -120,7 +119,7 @@ kind: "package-reference"
 
 #### 模型看到什么
 
-该插件注册 scope 中的每次请求都包含以下指引。按 agent（智能体）scope 过滤工具时，可能会隐藏工具，却不会移除独立注册的提示词区段。
+该插件注册 scope 中的每次请求都包含以下指引。按 agent scope 过滤工具时，可能会隐藏工具，却不会移除独立注册的提示词区段。
 
 ##### 后台任务指引
 
@@ -158,11 +157,11 @@ Track every background job id you start. You are notified in-session when a job 
 
 #### Token 影响
 
-结果与通知在压缩（compaction）前保留于父级历史。流读取不会重复已消费的输出；生产方提供的 `outputLimitBytes` 会限制每次完整读取或通知。在 `wakeup` 下，抵达空闲所有者的通知还会额外买下一次用户并未要求的模型请求。`maxConsecutiveWakes` 限制无保留的连续链；显式阻塞读取若返回 live job，则为该 job 的完成保留唤醒权。抵达繁忙所有者的通知只会给它已经在支付的那一轮加一步。
+结果与通知在压缩（compaction）前保留于父级历史。流读取不会重复已消费的输出；生产方提供的 `outputLimitBytes` 会限制每次完整读取或通知。在 `wakeup` 下，抵达空闲所有者的通知还会额外买下一次用户并未要求的模型请求，其数量按所有者由 `maxConsecutiveWakes` 封顶；抵达繁忙所有者的通知则只是给它已经在支付的那一轮加一步。
 
 #### KV Cache 影响
 
-仅追加；新可见内容位于可复用请求前缀之后，不会使现有 KV-cache 条目失效。
+仅追加；新可见内容位于可复用请求前缀之后，不会使现有 KV Cache 条目失效。
 
 ## 已知限制与延期工作
 
@@ -171,8 +170,8 @@ Track every background job id you start. You are notified in-session when a job 
 
 这些限制说明工具何时不合适。它们是当前包约束，不是任务积压。
 
-- **无人观察的自激链仍会在唤醒预算处停止**——若某个 job 未被阻塞读取返回为 live，本插件连续开启 `maxConsecutiveWakes` 个轮次后，其完成通知会降级为注入。
-- **反复阻塞读取可以维持无人值守链**——每次 `job_output(wait: true)` 返回 owner 所属 live job，都会为该 job 的完成保留唤醒权；需要确定性的部署必须使用 `completionDelivery: quiet` 或外部轮次策略。
+- **落在 driver 退休窗口内的结算仍会让通知搁浅**——在轮次循环最后一次检查 inbox 与 driver 提交 idle 相位之间，所有者读起来仍是繁忙，因此通知走注入且无人唤醒。steering（中途引导）存在同样的问题；修复它属于 `agent-loop`。
+- **已花掉的唤醒预算不会随时间恢复**——只有用户撰写的输入才能补充，因此预算耗尽的无人值守 agent 要等到其他原因开启下一轮时才收走剩余通知。
 - **待领于空闲所有者的通知无法在该所有者释放后存活**——释放时的取消会清空未领取的 inbox，日志保留插入/取消这一对作为记录。
 - **流读取只有单一消费方**——独立观察者需要另一套运行时 API。
 - **无 owner 的任务没有会话隔离**——外部调用方必须提供策略或避开这些任务。

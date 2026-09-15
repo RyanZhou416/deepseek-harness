@@ -524,66 +524,6 @@ describe('JsonlSessionPersistence: default Zstandard encoding', () => {
     await expect(readAll(ctx.sessionPersistence, header.id)).rejects.toThrow(/frame at byte .* failed validation/)
   })
 
-  it('reuses a validated header until the stat-derived log revision changes', async () => {
-    const root = await freshRoot()
-    const ctx = await mount(root)
-    const header = meta('listed-header-cache')
-    await writeLog(ctx.sessionPersistence, header, oneTurnLog())
-    const persistence = ctx.sessionPersistence as unknown as {
-      readFirstZstdLine(path: string, signal?: AbortSignal): Promise<string | undefined>
-    }
-    const readHeader = vi.spyOn(persistence, 'readFirstZstdLine')
-
-    await expect(ctx.sessionPersistence.list()).resolves.toMatchObject([{ header }])
-    await expect(ctx.sessionPersistence.list()).resolves.toMatchObject([{ header }])
-    expect(readHeader).toHaveBeenCalledOnce()
-
-    const handle = await ctx.sessionPersistence.open(header.id, 'write')
-    await handle.append([
-      { type: 'turn/start', seq: SessionSeq(6), time: 7, data: { turn: 2 } },
-      { type: 'turn/end', seq: SessionSeq(7), time: 8, data: { turn: 2, reason: { kind: 'completed' } } },
-    ])
-    await handle.close()
-    await expect(ctx.sessionPersistence.list()).resolves.toMatchObject([{ header }])
-    expect(readHeader).toHaveBeenCalledTimes(2)
-  })
-
-  it('shares one metadata scan while cancellation remains caller-local', async () => {
-    const root = await freshRoot()
-    const ctx = await mount(root)
-    const persistence = ctx.sessionPersistence as unknown as {
-      scanArtifacts(): Promise<unknown[]>
-    }
-    const scanResult = Promise.withResolvers<unknown[]>()
-    const scan = vi.spyOn(persistence, 'scanArtifacts').mockReturnValue(scanResult.promise)
-    const owner = ctx.sessionPersistence.list()
-    const controller = new AbortController()
-    const reason = new Error('JSONL shared listing caller cancelled')
-    const cancelled = ctx.sessionPersistence.list({ signal: controller.signal })
-
-    controller.abort(reason)
-    await expect(cancelled).rejects.toBe(reason)
-    scanResult.resolve([])
-    await expect(owner).resolves.toEqual([])
-    expect(scan).toHaveBeenCalledOnce()
-  })
-
-  it('drops cached headers after their selected generation disappears', async () => {
-    const root = await freshRoot()
-    const ctx = await mount(root)
-    const header = meta('pruned-listed-header')
-    await writeLog(ctx.sessionPersistence, header, oneTurnLog())
-    const persistence = ctx.sessionPersistence as unknown as {
-      listedHeaders: Map<string, unknown>
-    }
-
-    await expect(ctx.sessionPersistence.list()).resolves.toMatchObject([{ header }])
-    expect(persistence.listedHeaders.size).toBe(1)
-    await rm(logPath(root, header.cwd, header.id, 'zstd'))
-    await expect(ctx.sessionPersistence.list()).resolves.toEqual([])
-    expect(persistence.listedHeaders.size).toBe(0)
-  })
-
   it('stops multi-frame inspection when cancellation arrives at a slice deadline', async () => {
     const root = await freshRoot()
     const ctx = await mount(root)
@@ -628,12 +568,6 @@ describe('JsonlSessionPersistence: default Zstandard encoding', () => {
       const header = meta(`cancel-${compression}-header-read`, '/work')
       await writeLog(ctx.sessionPersistence, header, oneTurnLog())
       await ctx.sessionPersistence.list()
-      const handle = await ctx.sessionPersistence.open(header.id, 'write')
-      await handle.append([
-        { type: 'turn/start', seq: SessionSeq(6), time: 7, data: { turn: 2 } },
-        { type: 'turn/end', seq: SessionSeq(7), time: 8, data: { turn: 2, reason: { kind: 'completed' } } },
-      ])
-      await handle.close()
       const path = logPath(root, header.cwd, header.id, compression)
       const probe = await open(path, 'r')
       const prototype = Object.getPrototypeOf(probe) as { read: HeaderRead }

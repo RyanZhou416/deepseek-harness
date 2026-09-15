@@ -19,7 +19,7 @@ import {
 } from '../models/primitive-labels.ts'
 import type { AskQuestionCardModel } from '../models/ask-question-card-model.ts'
 import {
-  type ToolRowDetailsModel, type ToolRowState, type ToolRowVariant,
+  formatToolBody, type ToolRowState, type ToolRowVariant,
 } from '../models/tool-call-model.ts'
 import type { WebCardModelProps } from '../models/web-card-model.ts'
 import { AskQuestionCard } from './AskQuestionCard.tsx'
@@ -41,10 +41,10 @@ export interface ToolRowProps {
    * error row, whose collapsed summary is the failure line instead.
    */
   summarySuffix?: string | null | undefined
-  /** Expanded strings deferred behind getters until this disclosure opens. */
-  details: ToolRowDetailsModel
-  /** Whether a generic row may show its argument-derived Input section. */
-  showInput?: boolean | undefined
+  /** Original argument JSON formatted only while the row is expanded. */
+  bodyRaw?: string | null | undefined
+  /** Flattened result text for the expanded Output section; null/absent = no output section. */
+  output?: string | null | undefined
   /** Ask-user transcript card; card fields are mutually exclusive and replace text sections. */
   askQuestion?: AskQuestionCardModel | null | undefined
   /** Error first line shown as the collapsed summary on an error row; null/absent = keep `summary`. */
@@ -116,8 +116,8 @@ export function ToolRow({
   title,
   summary,
   summarySuffix,
-  details,
-  showInput = true,
+  bodyRaw,
+  output,
   askQuestion,
   errorSummary,
   terminal,
@@ -151,13 +151,15 @@ export function ToolRow({
   const searchBody = search ?? null
   const webBody = web ?? null
   const askQuestionBody = askQuestion ?? null
+  const inputRaw = bodyRaw ?? null
+  const outputText = output ?? null
   const card = askQuestionBody ?? terminalBody ?? diffBody ?? readBody ?? imageBody ?? searchBody ?? webBody
-  const expandable = (showInput && details.hasBody) || details.hasOutput || card !== null
+  const expandable = inputRaw !== null || outputText !== null || card !== null
   const open = expanded && expandable
-  // Pretty args and flattened output can be very large. Read their lazy
-  // getters only for an open row whose structured card does not replace them.
-  const bodyText = open && card === null && showInput ? details.body : null
-  const outputText = open && card === null ? details.output : null
+  const bodyText = useMemo(
+    () => open && card === null && inputRaw !== null ? formatToolBody(variant, inputRaw) : null,
+    [card, inputRaw, open, variant],
+  )
   const status = stateStatus(state, t)
   // A failure must replace, not supplement, the normal summary.
   const failureLine = state === 'error' ? errorSummary ?? null : null
@@ -171,16 +173,16 @@ export function ToolRow({
     return `+${added} -${removed}`
   }, [diffBody])
   const suffix = failureLine === null ? summarySuffix ?? diffStat : null
-  const fileLink = filePath !== undefined && onOpenFile !== undefined && failureLine === null
   const toggleExpand = () => {
     setExpanded(v => !v)
   }
-  const openFile = (event: MouseEvent<HTMLButtonElement>) => {
-    event.stopPropagation()
-    if (filePath === undefined || onOpenFile === undefined) return
-    if (filePathLine === undefined) onOpenFile(filePath)
-    else onOpenFile(filePath, { line: filePathLine })
-  }
+  const openFile = filePath !== undefined && onOpenFile !== undefined && failureLine === null
+    ? (event: MouseEvent<HTMLButtonElement>) => {
+      event.stopPropagation()
+      if (filePathLine === undefined) onOpenFile(filePath)
+      else onOpenFile(filePath, { line: filePathLine })
+    }
+    : undefined
   // Keep Enter/Space on the focused path link from bubbling to the row's
   // keydown handler, which would preventDefault() the key and toggle expand
   // instead of activating the link — the keyboard analogue of openFile's
@@ -211,7 +213,7 @@ export function ToolRow({
              its title shows no trailing dot). */
           <>
             <span className={css.sep} aria-hidden />
-            {fileLink ? (
+            {openFile !== undefined ? (
               <button
                 type="button"
                 className={css.fileLink}

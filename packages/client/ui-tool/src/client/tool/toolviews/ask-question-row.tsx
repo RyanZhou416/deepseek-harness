@@ -186,7 +186,8 @@ export function AskQuestionRow({ toolName, block, inspect, t }: AskQuestionRowPr
       icon={<IconQuestionOutline14 />}
       title={t('ask.rowTitle')}
       summary={summary}
-      details={model}
+      bodyRaw={transcript === null ? model.bodyRaw : null}
+      output={transcript === null ? model.output : null}
       askQuestion={transcript}
       state={state}
       inspect={inspect}

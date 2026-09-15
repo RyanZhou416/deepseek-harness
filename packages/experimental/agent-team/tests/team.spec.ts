@@ -935,15 +935,14 @@ describe('Team Remote API', () => {
 })
 
 describe('Team mailbox and waiting', () => {
-  it('injects a quiet message addressed to the Lead and checkpoints its receipt', async () => {
-    const { ctx, lead } = await setup([])
+  it('steers a message addressed to the Lead and checkpoints its receipt', async () => {
+    const { ctx, lead } = await setup(['hang'])
     const message: TeamMessageSnapshot = {
-      id: TeamMessageId('quiet-lead-message'),
+      id: TeamMessageId('steer-lead-message'),
       senderId: SessionId('team-worker'),
       senderName: 'worker',
       targetId: lead.id,
-      delivery: 'quiet',
-      content: content('quiet report'),
+      content: content('progress report'),
     }
     lead.session.append('team/message/queued', {
       version: 2,
@@ -952,9 +951,12 @@ describe('Team mailbox and waiting', () => {
     })
 
     await expect(teamInternals(ctx).mailbox.tryDispatch(lead, message, SIGNAL)).resolves.toBe(true)
-    expect(lead.inbox.nextStep.some(input => input.source.kind === 'team-message'
-      && input.source.messageId === message.id)).toBe(true)
+    expect(lead.session.snapshotEvents().some(event => event.type === 'agent/inbox/spliced'
+      && event.data.inserted.some(input => input.source.kind === 'team-message'
+        && input.source.messageId === message.id))).toBe(true)
     expect(durable(lead).pendingMessages).toEqual([])
+    lead.cancel({ kind: 'parent' })
+    await lead.whenIdle()
   })
 
   it('acknowledges steered messages persisted by a busy Lead before model claim', async () => {
@@ -1026,7 +1028,6 @@ describe('Team mailbox and waiting', () => {
       senderId: lead.id,
       senderName: 'lead',
       targetId: target.id,
-      delivery: 'wakeup',
       content: content('durable pending receipt'),
     }
     lead.session.append('team/message/queued', {
@@ -1186,7 +1187,6 @@ describe('Team mailbox and waiting', () => {
       senderId: lead.id,
       senderName: 'lead',
       targetId: started.member.id,
-      delivery: 'quiet',
       content: content('earlier steer'),
     }
     lead.session.append('team/message/queued', {
@@ -1225,7 +1225,6 @@ describe('Team mailbox and waiting', () => {
       senderId: lead.id,
       senderName: 'lead',
       targetId: live.id,
-      delivery: 'wakeup',
       content: content('already in live history'),
     }
     lead.session.append('team/message/queued', {
@@ -1320,27 +1319,19 @@ describe('Team mailbox and waiting', () => {
     await waitNoAgent(ctx, live.id)
   })
 
-  it('keeps quiet mail dormant, wakes on follow-up, preserves FIFO, and de-duplicates delivery', async () => {
-    const { ctx, lead } = await setup([
-      'hang',
-      textResponse('beta first'),
-      textResponse('beta resumed'),
-      textResponse('beta follow-up'),
-    ])
+  it('cold-resumes an inactive sibling with sender attribution', async () => {
+    const { ctx, lead } = await setup(['hang', 'hang'])
     const alphaStarted = await spawn(ctx, lead, 'alpha')
     const alpha = await waitRunning(ctx, alphaStarted.member.id)
     const betaStarted = await spawn(ctx, lead, 'beta')
-    await waitNoAgent(ctx, betaStarted.member.id)
+    const beta = await waitRunning(ctx, betaStarted.member.id)
+    ctx.agentTeams.interrupt(lead, 'beta')
+    await waitNoAgent(ctx, beta.id)
 
-    const quiet = await ctx.agentTeams.sendMessage(alpha, {
-      target: 'beta', content: content('quiet info'), delivery: 'quiet', signal: SIGNAL,
+    const first = await ctx.agentTeams.sendMessage(alpha, {
+      target: 'beta', content: content('first update'), signal: SIGNAL,
     })
-    expect(quiet.status).toBe('queued')
-    expect(ctx.agents.get(betaStarted.member.id)).toBeUndefined()
-    const waking = await ctx.agentTeams.sendMessage(alpha, {
-      target: 'beta', content: content('do another turn'), delivery: 'wakeup', signal: SIGNAL,
-    })
-    expect(waking.status).toBe('accepted')
+    expect(first.status).toBe('accepted')
     await waitNoAgent(ctx, betaStarted.member.id)
     await vi.waitFor(() => { expect(durable(lead).pendingMessages).toEqual([]) })
 
@@ -1351,18 +1342,16 @@ describe('Team mailbox and waiting', () => {
       if (event.type !== 'user/message') return undefined
       const block = event.data.content.at(-1)
       return block?.type === 'text' ? block.text : undefined
-    })).toEqual(['quiet info', 'do another turn'])
+    })).toEqual(['first update'])
     expect(peerMessages.map(event => event.type === 'user/message'
       ? event.data.content[0]?.type === 'text' && event.data.content[0].text
       : undefined)).toEqual([
-      expect.stringMatching(/^Team message .* from alpha:$/u),
       expect.stringMatching(/^Team message .* from alpha:$/u),
     ])
     expect(peerMessages.map(event => event.type === 'user/message' && event.data.source.kind === 'team-message'
       ? [event.data.source.messageId, event.data.source.senderName]
       : undefined)).toEqual([
-      [quiet.messageId, 'alpha'],
-      [waking.messageId, 'alpha'],
+      [first.messageId, 'alpha'],
     ])
 
     ctx.agentTeams.interrupt(lead, 'alpha')
@@ -1661,7 +1650,6 @@ describe('Team mailbox and waiting', () => {
       senderId: SessionId('sender'),
       senderName: 'sender',
       targetId: lead.id,
-      delivery: 'wakeup',
       content: content('acknowledge before disposal'),
     }
     lead.session.append('team/message/queued', {
@@ -1747,7 +1735,6 @@ describe('Team mailbox and waiting', () => {
       senderId: lead.id,
       senderName: 'lead',
       targetId: lead.id,
-      delivery: 'wakeup',
       content: content('must not dispatch'),
     }, SIGNAL)).resolves.toBe(false)
   })

@@ -46,14 +46,7 @@ type Phase =
     lastTurn: number
     wakeRequested: boolean
   }
-  | {
-    kind: 'running'
-    abort: AbortController
-    turn: number
-    step: number
-    wakeRequested: boolean
-    retiring: boolean
-  }
+  | { kind: 'running'; abort: AbortController; turn: number; step: number; wakeRequested: boolean }
 
 type StepEndReason = Extract<TurnEndReason, { kind: 'completed' | 'max-tokens' }>
 
@@ -106,7 +99,7 @@ export class ReactLoopAgent implements Agent {
     public readonly options: AgentOptions,
     public readonly session: Session,
   ) {
-    this.requestSurfaceGeneration = session.surface.replaceGeneration
+    this.requestSurfaceGeneration = session.surface.contentGeneration
     this.dispatch = agentEvents(loopCtx, this)
     this.scope = createScope(loopCtx, this)
     this.ctx = this.scope.ctx
@@ -138,9 +131,6 @@ export class ReactLoopAgent implements Agent {
     const wakingAfterAbort = wakeup && this.phase.kind !== 'idle' && this.phase.abort.signal.aborted
     const resolvedTarget = wakingAfterAbort ? 'next-turn' : target
     this.inbox.splice(resolvedTarget, Infinity, 0, [message])
-    // turn() has made its last inbox decision, so only convergence can replay
-    // input admitted before this running phase publishes idle.
-    if (this.phase.kind === 'running' && this.phase.retiring) this.phase.wakeRequested = true
     if (wakeup) this.wakeDriver(wakingAfterAbort)
   }
 
@@ -180,7 +170,8 @@ export class ReactLoopAgent implements Agent {
         return await job(maintenance.abort.signal)
       } finally {
         this.setPhase({ kind: 'idle', lastTurn: maintenance.lastTurn })
-        if (maintenance.wakeRequested && this.inbox.hasPending) this.wakeDriver()
+        const cause = maintenance.abort.signal.reason as AgentCancelCause | undefined
+        if (cause?.kind !== 'disposed' && maintenance.wakeRequested && this.inbox.hasPending) this.wakeDriver()
         done.resolve()
       }
     })()
@@ -213,7 +204,6 @@ export class ReactLoopAgent implements Agent {
       turn: this.phase.lastTurn,
       step: 0,
       wakeRequested: false,
-      retiring: false,
     })
     this.loopCtx.agents.withInitiator(this, () => this.kick()).then(driver.resolve, driver.reject)
   }
@@ -352,10 +342,7 @@ export class ReactLoopAgent implements Agent {
         this.throwError(error)
       }
     }
-    if (!this.inbox.hasPending) {
-      phase.retiring = true
-      return false
-    }
+    if (!this.inbox.hasPending) return false
     phase.abort = new AbortController()
     // A fresh controller makes a latch set on the old one stale: the live driver claims the queue itself.
     phase.wakeRequested = false
@@ -378,7 +365,7 @@ export class ReactLoopAgent implements Agent {
       const commits = this.systemPrompt.project(renderedPrompt, {
         inHistory: preparedCall?.systemPromptUpdate === 'in-history',
         startsSeries: startsRequestSeries
-          || this.requestSurfaceGeneration !== this.session.surface.replaceGeneration
+          || this.requestSurfaceGeneration !== this.session.surface.contentGeneration
           || this.toolsChanged(assembly.tools),
       })
       for (const { message, intent } of commits) {
@@ -572,7 +559,7 @@ export class ReactLoopAgent implements Agent {
     signal: AbortSignal,
   ): GenerateOptions {
     const { session } = this
-    const surfaceGeneration = session.surface.replaceGeneration
+    const surfaceGeneration = session.surface.contentGeneration
     const header = canonicalHeader({
       config,
       ...preparedCall === undefined ? {} : { adapterDefaults: preparedCall.adapterDefaults },

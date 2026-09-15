@@ -46,12 +46,10 @@ export class SessionHistoryController {
   /**
    * @param ctx - Host context carrying Session query and projection services.
    * @param promote - starts ordinary Session activation after snapshot delivery.
-   * @param retain - keeps an addressed Agent resident for the follower lifetime.
    */
   constructor(
     private readonly ctx: Context,
     private readonly promote: (observation: SessionObservation) => void,
-    private readonly retain: (sessionId: SessionId) => () => void = () => () => {},
   ) {
     ctx.on('agent/assistant-stream', ({ agent, frame }) => {
       let stream = this.assistantStreams.get(agent.session.id)
@@ -122,7 +120,6 @@ export class SessionHistoryController {
     validateFollowRequest(request)
     const { address } = request
     const target = addressId(address)
-    const releaseRetention = this.retain(target)
     const buffered = new Deque<
       | { readonly type: 'event'; readonly event: SessionEvent }
       | {
@@ -155,6 +152,7 @@ export class SessionHistoryController {
       // Constructor seed events have no session/event notification. Normally
       // only the end-seed suffix is new; if persistence advanced after the
       // opening observation, replay everything beyond that snapshot cursor.
+      // oxlint-disable-next-line typescript/no-deprecated -- Existing Session history read; migration deferred.
       const suffix = session.snapshotEvents(snapshotCursor === undefined
         ? session.firstLiveSeq
         : SessionLogOffset(snapshotCursor + 1))
@@ -233,7 +231,6 @@ export class SessionHistoryController {
         yield entryFor(item.event)
       }
     } finally {
-      releaseRetention()
       this.closeFollowers.delete(close)
       signal.removeEventListener('abort', onAbort)
       disposeCreated()

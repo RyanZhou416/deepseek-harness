@@ -86,7 +86,7 @@ export class JsonlSessionHandle implements SessionHandle {
   private chain: Promise<unknown> = Promise.resolve()
   private closing: Promise<void> | undefined
   private observedLength = 0
-  /** Routed live events awaiting their batching deadline (shared frozen Session values). */
+  /** Routed live events awaiting their batching deadline (persistence-owned copies). */
   private buffered: SessionEvent[] = []
   private batchTimer: ReturnType<typeof setTimeout> | undefined
   /** Set when a drain failed; the automatic timer stays quiet until the next drain. */
@@ -267,12 +267,12 @@ export class JsonlSessionHandle implements SessionHandle {
   /**
    * Buffer one published live session event and arm the bounded batching
    * window when it is idle. The routing installer is the only caller.
-   * @param event - the live event already detached and deeply frozen by Session.
+   * @param event - the live event, retained as a persistence-owned copy.
    * @param reportBackgroundFailure - observes a deadline-driven drain failure
    *   (the events stay buffered; the next {@link drainLive} retries loudly).
    */
   enqueueLive(event: SessionEvent, reportBackgroundFailure: (error: unknown) => void): void {
-    this.buffered.push(event)
+    this.buffered.push(structuredClone(event))
     if (this.batchTimer !== undefined || this.drainPaused) return
     this.batchTimer = setTimeout(() => {
       this.batchTimer = undefined
@@ -303,10 +303,9 @@ export class JsonlSessionHandle implements SessionHandle {
       await this.enqueueChain(async () => {
         // Only this single-flight drain splices the buffer, so the batch the
         // while-guard saw is still here when the chained turn runs.
-        const batch = this.buffered
-        this.buffered = []
+        const batch = this.buffered.splice(0)
         try {
-          await this.persistContiguous(batch)
+          await this.persistContiguous(materializeAppendBatch(batch))
         } catch (error: unknown) {
           this.buffered = batch.concat(this.buffered)
           this.drainPaused = true

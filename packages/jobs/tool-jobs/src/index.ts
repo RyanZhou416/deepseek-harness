@@ -36,18 +36,12 @@ export interface Config {
   /** Whether a completion opens a turn on an idle owner (default `wakeup`). */
   completionDelivery?: CompletionDelivery
   /**
-   * Consecutive turns one owner may have opened by completion wakes before the
-   * next notice degrades to injection. User input or a driver start outside
-   * this delivery resets the count (default 3).
+   * Turns one owner may have opened by completion wakes before the next
+   * notice degrades to injection, reset by any user-authored input (default 3).
    * Bounds the self-exciting chain where a woken turn starts the job whose
    * completion wakes it again.
    */
   maxConsecutiveWakes?: number
-  /**
-   * Whether pending next-step input ends a blocking `job_output` wait without
-   * cancelling the job (default false).
-   */
-  yieldWaitOnNextStep?: boolean
 }
 
 export const Config: z<Config> = z.object({
@@ -55,7 +49,6 @@ export const Config: z<Config> = z.object({
   maxWaitTimeoutMs: z.number().min(1).default(600_000),
   completionDelivery: z.union(['quiet', 'wakeup'] as const).default('wakeup'),
   maxConsecutiveWakes: z.number().min(1).default(3),
-  yieldWaitOnNextStep: z.boolean().default(false),
 })
 
 /** Task state safe for model-authored programs; ownership/bookkeeping fields are omitted. */
@@ -70,7 +63,7 @@ export interface PublicJobSnapshot {
 }
 
 /** Shared schema for job-control outputs. */
-const PUBLIC_TASK_SCHEMA = {
+const PUBLIC_JOB_SCHEMA = {
   type: 'object',
   additionalProperties: false,
   properties: {
@@ -204,7 +197,7 @@ function validateJobId(value: string): JobId {
 }
 
 /** Pending presentation shared by the three generic job controls. */
-function presentTaskCall(title: string, kind: 'read' | 'execute', rawInput?: string): GenericCallView {
+function presentJobCall(title: string, kind: 'read' | 'execute', rawInput?: string): GenericCallView {
   return { card: 'generic', title, kind, ...rawInput !== undefined ? { rawInput } : {} }
 }
 
@@ -213,47 +206,11 @@ export function apply(ctx: Context, config: Config): void {
   const waitCap = config.maxWaitTimeoutMs ?? 600_000
   const delivery = config.completionDelivery ?? 'wakeup'
   const wakeBudget = config.maxConsecutiveWakes ?? 3
-  const yieldWaitOnNextStep = config.yieldWaitOnNextStep ?? false
-
-  const nextStepWaiters = new WeakMap<Agent, Set<() => void>>()
-  if (yieldWaitOnNextStep) {
-    ctx.on('agent/inbox/inserted', ({ agent, message }) => {
-      if (!agent.inbox.nextStep.some(candidate => candidate.id === message.id)) return
-      const waiters = nextStepWaiters.get(agent)
-      if (waiters === undefined) return
-      nextStepWaiters.delete(agent)
-      for (const resolve of waiters) resolve()
-    })
-  }
-
-  /** Observe the next pending next-step input without consuming it. */
-  const waitForNextStep = (agent: Agent): { promise: Promise<void>; dispose: () => void } => {
-    if (agent.inbox.nextStep.length > 0) {
-      return { promise: Promise.resolve(), dispose: () => {} }
-    }
-    const ready = Promise.withResolvers<void>()
-    let waiters = nextStepWaiters.get(agent)
-    if (waiters === undefined) {
-      waiters = new Set()
-      nextStepWaiters.set(agent, waiters)
-    }
-    const resolve = (): void => { ready.resolve() }
-    waiters.add(resolve)
-    return {
-      promise: ready.promise,
-      dispose: () => {
-        waiters.delete(resolve)
-        if (waiters.size === 0) nextStepWaiters.delete(agent)
-      },
-    }
-  }
 
   // Turns this plugin opened on each owner since that owner last consumed
-  // human input or another source started its driver. Keyed by the exact Agent,
-  // so a same-session replacement starts with a full budget.
+  // human input. Keyed by the exact Agent, so a same-session replacement
+  // starts with a full budget.
   const spentWakes = new WeakMap<Agent, number>()
-  const deliveringWake = new WeakSet<Agent>()
-  const awaitedCompletions = new WeakMap<Agent, Set<JobId>>()
   if (waitDefault > waitCap) {
     throw new Error(`tool-jobs: waitTimeoutMs (${waitDefault}) exceeds maxWaitTimeoutMs (${waitCap})`)
   }
@@ -264,34 +221,11 @@ export function apply(ctx: Context, config: Config): void {
   }
   // Nothing spends the budget under quiet delivery, so nothing needs to refill it.
   if (delivery === 'wakeup') {
-    ctx.on('agent/status', ({ agent, status }) => {
-      if (status !== 'running' || deliveringWake.has(agent)) return
-      const pending = [...agent.inbox.nextStep, ...agent.inbox.nextTurn]
-      if (pending.some(message => message.source.kind !== 'plugin' || message.source.plugin !== 'tool-jobs')) {
-        spentWakes.delete(agent)
-      }
-    })
     ctx.on('agent/inbox/claimed', ({ agent, message }) => {
       // Claiming is the point the human's input actually enters a step; a notice
       // this plugin itself queued must not refill the budget it just spent.
       if (message.source.kind === 'user') spentWakes.delete(agent)
     })
-  }
-
-  const rememberAwaitedCompletion = (agent: Agent, id: JobId): void => {
-    let ids = awaitedCompletions.get(agent)
-    if (ids === undefined) {
-      ids = new Set()
-      awaitedCompletions.set(agent, ids)
-    }
-    ids.add(id)
-  }
-
-  const forgetAwaitedCompletion = (agent: Agent, id: JobId): boolean => {
-    const ids = awaitedCompletions.get(agent)
-    if (ids === undefined || !ids.delete(id)) return false
-    if (ids.size === 0) awaitedCompletions.delete(agent)
-    return true
   }
 
   const outputLimits = new WeakMap<ToolExecution, number>()
@@ -300,7 +234,7 @@ export function apply(ctx: Context, config: Config): void {
     if (maxBytes !== undefined) outputLimits.set(exec, maxBytes)
     return next()
   }, { prepend: true })
-  const finalizeTaskContent: NonNullable<ToolDefinition['finalizeContent']> = (exec, result) => {
+  const finalizeJobContent: NonNullable<ToolDefinition['finalizeContent']> = (exec, result) => {
     const maxBytes = outputLimits.get(exec) ?? visibleOutputLimit(ctx, exec)
     outputLimits.delete(exec)
     if (maxBytes === undefined) return undefined
@@ -342,7 +276,6 @@ export function apply(ctx: Context, config: Config): void {
   // chain reaches, so a mount under one preset never sees another preset's
   // agents; this listener owns delivery, not the choice of whom to deliver to.
   ctx.jobs.onJobDone((snapshot, owner) => {
-    const awaited = owner === undefined ? false : forgetAwaitedCompletion(owner, snapshot.id)
     if (snapshot.reported || owner === undefined) return
     const message = createUserMessage({
       content: [{
@@ -357,14 +290,9 @@ export function apply(ctx: Context, config: Config): void {
       },
     })
     const spent = spentWakes.get(owner) ?? 0
-    if (delivery === 'wakeup' && owner.status === 'idle' && (awaited || spent < wakeBudget)) {
-      spentWakes.set(owner, Math.min(spent + 1, wakeBudget))
-      deliveringWake.add(owner)
-      try {
-        owner.followup(message)
-      } finally {
-        deliveringWake.delete(owner)
-      }
+    if (delivery === 'wakeup' && owner.status === 'idle' && spent < wakeBudget) {
+      spentWakes.set(owner, spent + 1)
+      owner.followup(message)
       return
     }
     owner.inject(message)
@@ -374,28 +302,22 @@ export function apply(ctx: Context, config: Config): void {
     name: 'job_output',
     description: 'Read a background job. Stream jobs return only output since the previous read; '
       + 'final-output jobs return their result after settlement. Every response ends with '
-      + '`[status: ...]`. Reads are non-blocking unless `wait: true`, which waits up to the configured cap.'
-      + (yieldWaitOnNextStep ? ' Pending next-step input ends that wait without cancelling the job.' : ''),
+      + '`[status: ...]`. Reads are non-blocking unless `wait: true`, which waits up to the configured cap.',
     // A timed-out wait returns job state rather than a TOOL_TIMEOUT error, so
     // this tool owns its deadline instead of using ToolDefinition.timeoutMs.
     parameters: {
       job_id: { type: 'string', required: true, description: 'Job id returned by the tool that started the background work.' },
-      wait: {
-        type: 'boolean',
-        description: yieldWaitOnNextStep
-          ? 'Block until the job reaches a terminal status, the timeout expires, or next-step input arrives. A wait that ends while the job is live returns [status: running] and leaves it alive.'
-          : 'Block until the job reaches a terminal status or the timeout expires. A timed-out wait returns [status: running] and leaves the job alive.',
-      },
+      wait: { type: 'boolean', description: 'Block until the job reaches a terminal status or the timeout expires. A timed-out wait returns [status: running] and leaves the job alive.' },
       timeout_ms: { type: 'number', description: 'Max wait in milliseconds (only meaningful with wait: true). Defaults to the configured wait timeout; capped by the configured maximum.' },
     },
-    finalizeContent: finalizeTaskContent,
+    finalizeContent: finalizeJobContent,
     output: {
       schema: {
         type: 'object',
         additionalProperties: false,
         properties: {
           text: { type: 'string', required: true },
-          job: { ...PUBLIC_TASK_SCHEMA, required: true },
+          job: { ...PUBLIC_JOB_SCHEMA, required: true },
         },
       },
       render: (_args, value) => {
@@ -408,39 +330,12 @@ export function apply(ctx: Context, config: Config): void {
       const id = validateJobId(args.job_id)
       if (args.wait === true) {
         const timeout = Math.min(args.timeout_ms ?? waitDefault, waitCap)
-        if (yieldWaitOnNextStep && exec.agent !== undefined) {
-          const nextStep = waitForNextStep(exec.agent)
-          const yieldController = new AbortController()
-          void nextStep.promise.then(() => { yieldController.abort() })
-          try {
-            await ctx.jobs.wait(
-              id,
-              timeout,
-              exec.agent,
-              AbortSignal.any([exec.signal, yieldController.signal]),
-            )
-          } catch (error: unknown) {
-            if (exec.signal.aborted || !yieldController.signal.aborted) throw error
-          } finally {
-            nextStep.dispose()
-          }
-        } else {
-          await ctx.jobs.wait(id, timeout, exec.agent, exec.signal)
-        }
+        await ctx.jobs.wait(id, timeout, exec.agent, exec.signal)
       }
       const read = ctx.jobs.read(id, exec.agent)
-      if (exec.agent !== undefined) {
-        if (args.wait === true
-          && read.snapshot.ownerSession !== undefined
-          && (read.snapshot.status === 'running' || read.snapshot.status === 'stopping')) {
-          rememberAwaitedCompletion(exec.agent, id)
-        } else if (read.snapshot.status !== 'running' && read.snapshot.status !== 'stopping') {
-          forgetAwaitedCompletion(exec.agent, id)
-        }
-      }
       return { text: read.text, job: publicJob(read.snapshot) }
     },
-    presentCall: args => presentTaskCall(`Read output from background job ${args.job_id}`, 'read', args.job_id),
+    presentCall: args => presentJobCall(`Read output from background job ${args.job_id}`, 'read', args.job_id),
   }))
 
   ctx.tools.register(defineTool({
@@ -448,7 +343,7 @@ export function apply(ctx: Context, config: Config): void {
     description: 'List your background jobs (running and finished) with their ids, kinds, and statuses.',
     parameters: {},
     output: {
-      schema: { type: 'array', items: PUBLIC_TASK_SCHEMA },
+      schema: { type: 'array', items: PUBLIC_JOB_SCHEMA },
       render: (_args, jobs) => [{
         type: 'text',
         text: jobs.length === 0
@@ -460,7 +355,7 @@ export function apply(ctx: Context, config: Config): void {
       const jobs = ctx.jobs.list(exec.agent)
       return Promise.resolve(jobs.map(publicJob))
     },
-    presentCall: () => presentTaskCall('List background jobs', 'read'),
+    presentCall: () => presentJobCall('List background jobs', 'read'),
   }))
 
   ctx.tools.register(defineTool({
@@ -470,7 +365,7 @@ export function apply(ctx: Context, config: Config): void {
       job_id: { type: 'string', required: true, description: 'Job id returned by the tool that started the background work.' },
       reason: { type: 'string', description: 'Optional short reason, recorded in the log and forwarded to the job.' },
     },
-    finalizeContent: finalizeTaskContent,
+    finalizeContent: finalizeJobContent,
     output: {
       schema: {
         type: 'object',
@@ -481,7 +376,7 @@ export function apply(ctx: Context, config: Config): void {
             required: true,
             enum: ['cancellation-requested', 'already-finished'],
           },
-          job: { ...PUBLIC_TASK_SCHEMA, required: true },
+          job: { ...PUBLIC_JOB_SCHEMA, required: true },
         },
       },
       render: (_args, value) => [{
@@ -494,7 +389,6 @@ export function apply(ctx: Context, config: Config): void {
     execute(args, exec) {
       const id = validateJobId(args.job_id)
       const result = ctx.jobs.kill(id, exec.agent, args.reason)
-      if (exec.agent !== undefined) forgetAwaitedCompletion(exec.agent, id)
       // A snapshot describes current state without consuming pending output.
       const snapshot = publicJob(ctx.jobs.get(id, exec.agent))
       return Promise.resolve({
@@ -502,6 +396,6 @@ export function apply(ctx: Context, config: Config): void {
         job: snapshot,
       })
     },
-    presentCall: args => presentTaskCall(`Kill background job ${args.job_id}`, 'execute', args.job_id),
+    presentCall: args => presentJobCall(`Kill background job ${args.job_id}`, 'execute', args.job_id),
   }))
 }
