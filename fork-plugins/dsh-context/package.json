@@ -1,6 +1,6 @@
 {
   "name": "dsh-context",
-  "version": "0.49.0-dsh015rc1.1",
+  "version": "0.52.2",
   "description": "A DeepSeek Harness plugin for context insight and management, with context dashboard and context command, for understanding how the context is made of, and how it evolves.",
   "author": "bowenliang123",
   "repository": {
@@ -11,7 +11,6 @@
   "bugs": {
     "url": "https://github.com/bowenliang123/dsh-context/issues"
   },
-  "dshForkNotice": "Modified by RyanZhou416/deepseek-harness; see FORK_MAINTENANCE.md",
   "type": "module",
   "engines": {
     "node": "^22.19.0 || >=24.0.0"
@@ -31,7 +30,6 @@
     "lib/index.js",
     "lib/index.d.ts",
     "cordis.patch.yml",
-    "FORK_MAINTENANCE.md",
     "README.md",
     "LICENSE"
   ],
@@ -47,7 +45,7 @@
     "coverage": "vitest run --coverage",
     "release": "bash scripts/publish.sh",
     "social-preview": "node docs/social-preview/generate.ts",
-    "prepare": "husky"
+    "prepare": "husky && tsdown"
   },
   "dsh": {
     "bundle": {
@@ -109,8 +107,12 @@
     "@deepseek-ai/dsh-session": "0.1.2-rc.1",
     "@deepseek-ai/dsh-session-projection": "0.1.2-rc.1",
     "@deepseek-ai/dsh-settings": "0.1.2-rc.1",
+    "@deepseek-ai/dsh-util-workspace-path": "0.1.5-rc.1",
     "@deepseek-ai/schemastery": "^3.18.2",
+    "@opencode-ai/models": "^0.0.72",
     "@stylistic/eslint-plugin": "^5.10.0",
+    "@tailwindcss/node": "4.3.3",
+    "@tailwindcss/oxide": "4.3.3",
     "@types/node": "^26.2.0",
     "@types/react": "^18.3.31",
     "@types/react-dom": "^18.3.7",
@@ -118,16 +120,16 @@
     "eslint-plugin-sonarjs": "^4.2.0",
     "husky": "^9.1.7",
     "jsdom": "^30.0.1",
-    "lightningcss": "^1.33.0",
-    "oxlint": "1.76.0",
+    "lightningcss": "1.32.0",
+    "oxlint": "1.82.0",
     "oxlint-tsgolint": "7.0.2001",
     "playwright-core": "^1.62.1",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
-    "tsdown": "^0.22.14",
+    "tailwindcss": "4.3.3",
+    "tsdown": "^0.23.0",
     "typescript": "^7.0.2",
     "vitest": "^4.1.11",
     "zod": "^4.4.3"
-  },
-  "packageManager": "pnpm@11.9.0"
+  }
 }

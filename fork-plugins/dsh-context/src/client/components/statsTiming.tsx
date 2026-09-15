@@ -38,12 +38,12 @@ interface Slice {
 }
 
 const COLOR = {
-  ttft: '#3b82f6',
-  reasoning: '#8b5cf6',
-  text: '#ec4899',
-  toolarg: '#f59e0b',
-  tools: '#14b8a6',
-  other: '#94a3b8',
+  ttft: 'var(--color-blue-500)',
+  reasoning: 'var(--color-violet-500)',
+  text: 'var(--color-pink-500)',
+  toolarg: 'var(--color-amber-500)',
+  tools: 'var(--color-teal-500)',
+  other: 'var(--color-slate-400)',
 } as const
 
 export function makeStatsTiming(kit: ViewKit, Donut: (props: DonutProps) => ReactElement): (props: {
@@ -148,14 +148,18 @@ export function makeStatsTiming(kit: ViewKit, Donut: (props: DonutProps) => Reac
       ].filter(row => !row.dim)
     }
     return (
-      <div className="lc-card lc-col-stats lc-col-donut">
+      <div className="lc-card lc-col-stats lc-col-donut flex-1 min-w-[min(360px,100%)]">
         <div className="lc-card-title">
           <span className="lc-card-title-text">{t('timing.title')}</span>
         </div>
         {rows.length === 0
           ? <div className="lc-empty">{t('timing.empty')}</div>
           : (
-            <div className="lc-donut-row">
+            <div
+              className="lc-donut-row flex items-center justify-start gap-3 min-w-0 @max-[320px]/lc-card:gap-2 @max-[240px]/lc-card:flex-wrap"
+            >
+              {/* donut + legend row: the gap folds at a 320px card, below 240px the row wraps
+                  and the ring centers over the full-width legend (keyed to the lc-card container). */}
               <Donut
                 segments={segments}
                 size={96}

@@ -6,7 +6,7 @@
 
 import { act, createElement as h } from 'react'
 import assert from 'node:assert/strict'
-import { describe, test } from 'vitest'
+import { afterEach, describe, test, vi } from 'vitest'
 import { makeAgentGraph, ringColorOf } from '../../../src/client/components/agentGraph'
 import type { AgentSelfStats } from '../../../src/client/agentTree'
 import { TestClientCtx, asClientCtx } from '../helpers/harness'
@@ -198,7 +198,7 @@ describe('AgentGraph — the family tree', () => {
     assert.ok(!text(inspector).includes('click to open'))
 
     // The legend lists all six categories plus the free-window and running-edge keys.
-    assert.equal(queryAll(m.container, '.lc-agents-legend-item').length, 8)
+    assert.equal(queryAll(m.container, '.lc-agents-legend-item').length, 9)
 
     // The stage cancels a horizontal swipe it cannot consume, so the browser never reads it as a history swipe
     // (jsdom reports zero scroll metrics, so a horizontal-dominant gesture always sits at the edge).
@@ -393,8 +393,188 @@ describe('AgentGraph — the family tree', () => {
 describe('ringColorOf', () => {
   test('occupancy thresholds', () => {
     assert.equal(ringColorOf(null), 'var(--dsw-alias-border-l1)')
-    assert.equal(ringColorOf(95), '#ef4444')
-    assert.equal(ringColorOf(70), '#f59e0b')
-    assert.equal(ringColorOf(12), '#22c55e')
+    assert.equal(ringColorOf(95), 'var(--color-red-500)')
+    assert.equal(ringColorOf(70), 'var(--color-amber-500)')
+    assert.equal(ringColorOf(12), 'var(--color-green-500)')
+  })
+})
+
+describe('AgentGraph — cold-relative composition fetch', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  /** A multi-category slim head (the detail payload's cold-node field). */
+  function composedHead(): unknown {
+    return {
+      ok: true,
+      contextWindow: 1000,
+      current: { system: 100, tools: 50, user: 200, inject: 50, skill: 0, assistant: 150, tool: 50, total: 600 },
+      requests: [],
+      events: [],
+      nodes: [],
+      droppedNodes: 0,
+      archive: [],
+    }
+  }
+
+  /** A detail payload without the head (the collections-only shape). */
+  function detailValue(head: unknown): Record<string, unknown> {
+    return {
+      rev: 1,
+      ...(head !== undefined ? { head } : {}),
+      requests: [],
+      events: [],
+      nodes: [],
+      droppedNodes: 0,
+      archive: [],
+    }
+  }
+
+  /**
+   * A programmable global fetch recording its reads: POSTs resolve `value`
+   * (or throw, or hold until released).
+   */
+  function detailFetch(options: { reject?: boolean; head?: unknown; nullValue?: boolean; defer?: boolean } = {}) {
+    const calls: string[] = []
+    let release: ((value: unknown) => void) | undefined
+    vi.stubGlobal('fetch', async (url: unknown, init: { body: string }) => {
+      const sessionId = (JSON.parse(String(init?.body)) as { sessionId?: unknown }).sessionId
+      calls.push(`${String(url)}:${String(sessionId)}`)
+      if (options.reject) throw new Error('transport down')
+      if (options.defer) {
+        return await new Promise((resolve) => { release = resolve })
+      }
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ ok: true, value: options.nullValue ? null : detailValue(options.head) }),
+      }
+    })
+    return { calls, release: (value: unknown) => release?.(value) }
+  }
+
+  function makeFetchingView(): { View: ReturnType<typeof makeView>; face: FakeSessions } {
+    const face = new FakeSessions(family())
+    const ctx = new TestClientCtx({ services: { sessions: face } })
+    return { View: makeAgentGraph(asClientCtx(ctx), kit), face }
+  }
+
+  test('pressure-only relatives fetch their head and re-render composed', async () => {
+    const rpc = detailFetch({ defer: true })
+    const { View, face } = makeFetchingView()
+    const m = await mount(h(View, { sessionId: 'root', self: selfStats() }))
+
+    // The cold relative fetched at mount; until the read lands it wears the
+    // pressure-only fused ring (arc + free outline).
+    assert.deepEqual(rpc.calls, ['/api/dsh-context/detail:done'])
+    assert.equal(query(m.container, 'g[data-agent="done"]').querySelectorAll('circle.lc-agent-seg').length, 2)
+
+    // A snapshot tick while the read is in flight re-attaches the SAME
+    // pending read; its duplicate landing settles on the identity bail-out
+    // instead of re-rendering.
+    await act(async () => {
+      face.setState(family())
+    })
+    await flush()
+
+    await act(async () => {
+      rpc.release({ ok: true, status: 200, json: async () => ({ ok: true, value: detailValue(composedHead()) }) })
+    })
+    await flush()
+    // The head re-folds the ring: six composition arcs + the free remainder.
+    const composed = query(m.container, 'g[data-agent="done"]')
+    assert.equal(composed.querySelectorAll('circle.lc-agent-seg').length, 7)
+    assert.ok(text(composed).includes('95%'), 'the pressure-anchored occupancy never changes')
+
+    // A snapshot tick re-fetches nothing (the promise cache dedups).
+    await act(async () => {
+      face.setState(family())
+    })
+    await flush()
+    assert.deepEqual(rpc.calls, ['/api/dsh-context/detail:done'])
+
+    // A remount (tab switch) resets the instance state but replays the
+    // factory-cached read: the ring recomposes with no new request.
+    await m.unmount()
+    const remounted = await mount(h(View, { sessionId: 'root', self: selfStats() }))
+    await flush()
+    assert.deepEqual(rpc.calls, ['/api/dsh-context/detail:done'], 'the cache never re-fetches')
+    const replayed = query(remounted.container, 'g[data-agent="done"]')
+    assert.equal(replayed.querySelectorAll('circle.lc-agent-seg').length, 7, 'the cached head replays into the fresh instance')
+    await remounted.unmount()
+  })
+
+  test('a failing fetch degrades to the pressure-only ring and never retries', async () => {
+    const rpc = detailFetch({ reject: true })
+    const { View, face } = makeFetchingView()
+    const m = await mount(h(View, { sessionId: 'root', self: selfStats() }))
+    await flush()
+    assert.deepEqual(rpc.calls, ['/api/dsh-context/detail:done'])
+    assert.equal(query(m.container, 'g[data-agent="done"]').querySelectorAll('circle.lc-agent-seg').length, 2)
+    // A later snapshot tick (fresh forest, still pressure-only) re-fetches nothing.
+    await act(async () => {
+      face.setState(family())
+    })
+    await flush()
+    assert.deepEqual(rpc.calls, ['/api/dsh-context/detail:done'], 'the sticky failure never re-fetches')
+    await m.unmount()
+  })
+
+  test('a hostile head drops alone and a null value degrades the same way', async () => {
+    for (const options of [{ head: 'garbage' }, { nullValue: true }]) {
+      const rpc = detailFetch(options)
+      const { View } = makeFetchingView()
+      const m = await mount(h(View, { sessionId: 'root', self: selfStats() }))
+      await flush()
+      assert.deepEqual(rpc.calls, ['/api/dsh-context/detail:done'])
+      assert.equal(query(m.container, 'g[data-agent="done"]').querySelectorAll('circle.lc-agent-seg').length, 2)
+      assert.ok(text(query(m.container, 'g[data-agent="done"]')).includes('95%'))
+      await m.unmount()
+    }
+  })
+
+  test('a hostile empty session id degrades to the pressure-only ring without fetching', async () => {
+    const rpc = detailFetch({ head: composedHead() })
+    const face = new FakeSessions({
+      root: { displayTitle: 'Main', running: false, updatedAt: 10 },
+      '': {
+        parentId: 'root', origin: 'subagent', updatedAt: 2,
+        projectionValues: { contextPressure: { projectedTokens: 400, contextWindow: 1000 } },
+      },
+    })
+    const ctx = new TestClientCtx({ services: { sessions: face } })
+    const View = makeAgentGraph(asClientCtx(ctx), kit)
+    const m = await mount(h(View, { sessionId: 'root', self: selfStats() }))
+    await flush()
+    assert.deepEqual(rpc.calls, [], 'an empty id never opens the detail route')
+    assert.equal(query(m.container, 'g[data-agent=""]').querySelectorAll('circle.lc-agent-seg').length, 2)
+    await m.unmount()
+  })
+
+  test('a head with no occupancy anchor still composes from the fold alone', async () => {
+    // No pressure on the row: the fetched head's fold total and window carry the ring.
+    const rpc = detailFetch({ head: composedHead(), defer: true })
+    const face = new FakeSessions({
+      root: { displayTitle: 'Main', running: false, updatedAt: 10 },
+      cold: {
+        parentId: 'root', origin: 'subagent', updatedAt: 2,
+        projectionValues: { subagent: { mode: 'one-shot', label: 'chill' } },
+      },
+    })
+    const ctx = new TestClientCtx({ services: { sessions: face } })
+    const View = makeAgentGraph(asClientCtx(ctx), kit)
+    const m = await mount(h(View, { sessionId: 'root', self: selfStats() }))
+    assert.equal(query(m.container, 'g[data-agent="cold"]').querySelectorAll('circle.lc-agent-seg').length, 0)
+    assert.deepEqual(rpc.calls, ['/api/dsh-context/detail:cold'])
+
+    await act(async () => {
+      rpc.release({ ok: true, status: 200, json: async () => ({ ok: true, value: detailValue(composedHead()) }) })
+    })
+    await flush()
+    const composed = query(m.container, 'g[data-agent="cold"]')
+    assert.equal(composed.querySelectorAll('circle.lc-agent-seg').length, 7, 'six arcs + the free remainder (no pressure arc)')
+    assert.ok(text(composed).includes('60%'), 'the fold total prices against the head window')
+    await m.unmount()
   })
 })

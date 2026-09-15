@@ -1,9 +1,10 @@
 /**
  * Bespoke per-request history chart — no shared data-viz primitive — styled through the shared `--dsw-alias-*` tokens; helpers
- * aggregateByTurn/attachMarkers are shared with ContextView.
+ * aggregateByTurn/attachMarkers are shared with ContextView. On mount each bar rises from its baseline,
+ * staggered left to right with the cascade capped for long logs (trendChart.css, `--lc-i` slots below).
  */
 
-import { memo, useLayoutEffect, useMemo, useRef, useState, type ReactElement, type UIEvent } from 'react'
+import { memo, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactElement, type UIEvent } from 'react'
 import type { Category, ContextEventRecord, RequestRecord } from '../../shared/types'
 import { CATS } from '../categories'
 import { containHorizontalOverscroll } from '../overscroll'
@@ -60,6 +61,20 @@ export function aggregateByTurn(requests: RequestRecord[]): RequestRecord[] {
 }
 
 /**
+ * The per-turn step tallies the step-granularity labels lean on ("第 s 步 (共 n 步)") — the same count a
+ * turn-mode bar's `stepCount` carries. Records without a turn stamp pool under 0, the key the labels'
+ * `turn ?? 0` fallback reads; the getter answers 1 for a turn outside the list so a caller can never miss.
+ */
+export function turnStepsOf(requests: RequestRecord[]): (turn: number | undefined) => number {
+  const counts = new Map<number, number>()
+  for (const req of requests) {
+    const turn = req.turn ?? 0
+    counts.set(turn, (counts.get(turn) ?? 0) + 1)
+  }
+  return turn => counts.get(turn ?? 0) ?? 1
+}
+
+/**
  * Attach each boundary event (compaction/prune) to the first request logged after it — one entry per index, for the ✂ marker and the detail
  * chip; shared with the detail panel so both show the SAME event.
  */
@@ -101,9 +116,15 @@ export function makeTrendChart(kit: ViewKit): (props: TrendChartProps) => ReactE
   // same column grid.
   const BAR_W = 14
   const BAR_GAP = 2
+  // Entrance stagger cap: long logs render thousands of bars, so the grow-in cascade stops widening after
+  // this many columns and late bars simply join within the cap (trendChart.css delays by `--lc-i`).
+  const STAGGER_CAP = 20
   // Neutral zebra, deliberately DISJOINT from the category palette — the strip must read as a partition layer, not a bottom segment of the
   // composition bars.
-  const TURN_FILLS = ['rgba(128,128,128,0.12)', 'rgba(128,128,128,0.26)']
+  const TURN_FILLS = [
+    'color-mix(in srgb, var(--color-neutral-500) 12%, transparent)',
+    'color-mix(in srgb, var(--color-neutral-500) 26%, transparent)',
+  ]
   // Turn labels render at natural width (a 2-digit "12" is wider than a 14px turn bar) and overflow their block.
   // Every label must stay on the single line, so the strip shrinks ALL labels to one font size — the largest at
   // which the tightest adjacent pair still clears the gap (analytic widths below, no measurement) — and the
@@ -178,6 +199,8 @@ export function makeTrendChart(kit: ViewKit): (props: TrendChartProps) => ReactE
     upPx?: number
     downPx?: number
     deltaScale?: number
+    /** Bar index in the render order: the entrance grow-in stagger slot (capped inside, so a long log's cascade stays snappy). */
+    enterIndex: number
     onSelect: (seq: number | null) => void
     onHover: (seq: number | null) => void
   }
@@ -191,9 +214,11 @@ export function makeTrendChart(kit: ViewKit): (props: TrendChartProps) => ReactE
     // Delta mode: diverging stacks — positive category deltas pile UP from the zero line, negative ones
     // hang DOWN from it, both in category colors (direction carries the sign, color the category).
     const diverge = props.upPx !== undefined && props.downPx !== undefined && props.deltaScale !== undefined
+    // Rise stagger slot, shared by the total stack and both delta arms (trendChart.css scaleY-opens them).
+    const enterStyle = { '--lc-i': Math.min(props.enterIndex, STAGGER_CAP) } as CSSProperties
     return (
       <div
-        className={'lc-bar'
+        className={'lc-bar hover:bg-(--dsw-alias-bg-layer-2)'
           + (props.selected ? ' lc-bar-selected' : '')
           + (props.hovered ? ' lc-bar-hovered' : '')
           + (props.inTurn ? ' lc-bar-in-turn' : '')}
@@ -210,14 +235,14 @@ export function makeTrendChart(kit: ViewKit): (props: TrendChartProps) => ReactE
         ) : null}
         {diverge ? (
           <>
-            <div className="lc-bar-up" style={{ bottom: `${props.downPx}px` }}>
+            <div className="lc-bar-up animate-lc-bar-in motion-reduce:animate-none" style={{ bottom: `${props.downPx}px`, ...enterStyle }}>
               {CATS.map((c) => {
                 const d = req[c.key] || 0
                 if (d <= 0) return null
                 return <div key={c.key} data-cat={c.key} className="lc-cat-seg" style={{ height: `${Math.max(1, Math.round(d * (props.deltaScale as number)))}px`, background: c.color }} />
               })}
             </div>
-            <div className="lc-bar-down" style={{ top: `${props.upPx}px` }}>
+            <div className="lc-bar-down animate-lc-bar-in motion-reduce:animate-none" style={{ top: `${props.upPx}px`, ...enterStyle }}>
               {CATS.map((c) => {
                 const d = req[c.key] || 0
                 if (d >= 0) return null
@@ -226,7 +251,7 @@ export function makeTrendChart(kit: ViewKit): (props: TrendChartProps) => ReactE
             </div>
           </>
         ) : (
-          <div className="lc-bar-stack">
+          <div className="lc-bar-stack animate-lc-bar-in motion-reduce:animate-none" style={enterStyle}>
             {CATS.map((c) => {
               const v = req[c.key] || 0
               if (!v) return null
@@ -506,12 +531,14 @@ export function makeTrendChart(kit: ViewKit): (props: TrendChartProps) => ReactE
     // identity and the bar's total — the SAME value the bar height and axis are scaled against (the fold's
     // heuristic figure, matching every other card). Identity phrasing follows the granularity —
     // turn bars always speak TURN (the aggregate's step count, singular for a 1-step turn; a record missing
-    // stepCount degrades to that too), step bars carry the step index. Delta swaps the metric row for the net.
+    // stepCount degrades to that too), step bars carry the step index plus the turn's step total. Delta swaps
+    // the metric row for the net.
+    const stepsOf = useMemo(() => turnStepsOf(props.requests), [props.requests])
     const tipRowsOf = (req: RequestRecord): [string, string] => {
       const n = req.stepCount ?? 1
       const head = props.granularity === 'turn'
         ? (n > 1 ? t('tip.turn', { t: req.turn ?? 0, n }) : t('tip.turn1', { t: req.turn ?? 0 }))
-        : t('tip.step', { t: req.turn ?? 0, s: req.step ?? 0 })
+        : t('tip.step', { t: req.turn ?? 0, s: req.step ?? 0, n: stepsOf(req.turn) })
       if (delta) {
         /* v8 ignore next 1 -- delta mode only receives records from
            deltaOf, which always assigns net; the fallback is defensive. */
@@ -622,7 +649,10 @@ export function makeTrendChart(kit: ViewKit): (props: TrendChartProps) => ReactE
               <div className="lc-grid lc-grid-zero" style={delta ? { top: `${18 + upPx}px` } : undefined} />
               {requests.map((req, i) => (
                 <ChartBar
-                  key={req.seq}
+                  // Granularity belongs in the key: a turn aggregate IS its last step's record (the same
+                  // seq), so a step ↔ turn switch would otherwise REUSE that bar's DOM node and its finished
+                  // entrance rise would not replay — every turn's last step bar would pop in unanimated.
+                  key={`${req.seq}:${props.granularity}`}
                   req={req}
                   marker={markers[i]}
                   selected={props.selectedSeq === req.seq}
@@ -632,6 +662,7 @@ export function makeTrendChart(kit: ViewKit): (props: TrendChartProps) => ReactE
                   upPx={delta ? upPx : undefined}
                   downPx={delta ? downPx : undefined}
                   deltaScale={delta ? deltaScale : undefined}
+                  enterIndex={i}
                   onSelect={props.onSelect}
                   onHover={props.onHover}
                 />

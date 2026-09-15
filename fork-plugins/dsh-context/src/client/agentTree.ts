@@ -220,8 +220,20 @@ interface AgentChild {
  * no current session, or a snapshot without a `byId` table (older harness).
  * The current session synthesizes a row when the list has not delivered it
  * yet, so the card can still show its live self stats.
+ * @param fetched - detail-channel heads for COLD rows, keyed by session id.
+ *   The host's list block serves projection values only from the projection
+ *   cache, so a relative that never attached since the timeline unit last
+ *   changed lists pressure-only (no composition row) and its ring would
+ *   degrade to the occupancy arc; the card fetches those heads on demand.
+ *   A row's own value always wins — the injection lands only on rows whose
+ *   `contextTimeline` is absent.
  */
-export function agentForestOf(snapshot: unknown, currentId: string | undefined, self?: AgentSelfStats): AgentForest | null {
+export function agentForestOf(
+  snapshot: unknown,
+  currentId: string | undefined,
+  self?: AgentSelfStats,
+  fetched?: ReadonlyMap<string, unknown>,
+): AgentForest | null {
   const byId = asRecord(asRecord(snapshot)?.byId)
   if (byId === null || currentId === undefined || currentId === '') return null
 
@@ -284,7 +296,11 @@ export function agentForestOf(snapshot: unknown, currentId: string | undefined, 
   const visit = (id: string, row: AgentRow, parentId: string | undefined, depth: number, seen: Set<string>, family: number): void => {
     if (seen.has(id) || nodes.length >= AGENT_TREE_LIMIT) return
     seen.add(id)
-    const stats = agentStatsOf(row.projections)
+    const values = row.projections
+    const fetchedHead = fetched !== undefined ? fetched.get(id) : undefined
+    const stats = agentStatsOf(fetchedHead !== undefined && values?.contextTimeline === undefined
+      ? { ...values, contextTimeline: fetchedHead }
+      : values)
     const identity = stats.identity
     const node: AgentNode = {
       ...stats,

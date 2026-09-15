@@ -31,7 +31,7 @@ function timeline(total: number, requests = 0): ContextTimeline {
     ok: true,
     contextWindow: 1000,
     current: {
-      system: 0, tools: 0, user: total, inject: 0, assistant: 0, tool: 0, total,
+      system: 0, tools: 0, user: total, inject: 0, skill: 0, assistant: 0, tool: 0, total,
     },
     requests: Array.from({ length: requests }, (_, i) => ({
       seq: i + 1, time: 0, system: 0, tools: 0, user: 0, inject: 0, assistant: 0, tool: 0, total: 1,
@@ -206,6 +206,70 @@ describe('agentForestOf', () => {
     assert.equal(withRow.nodes[0].requests, 2)
     assert.equal(withRow.nodes[0].billed, 4)
     assert.ok(withRow.nodes[0].head !== null)
+  })
+
+  test('injects fetched cold heads into rows whose own timeline is absent', () => {
+    // A multi-category composition (the detail channel's slim head).
+    const composed: ContextTimeline = {
+      ok: true,
+      contextWindow: 1000,
+      current: { system: 100, tools: 50, user: 200, inject: 50, skill: 0, assistant: 150, tool: 50, total: 600 },
+      requests: [],
+      events: [],
+      nodes: [],
+      droppedNodes: 0,
+      archive: [],
+    }
+    const forest = agentForestOf(snap({
+      root: row({ displayTitle: 'Root' }),
+      cold: row({
+        parentId: 'root', origin: 'subagent', updatedAt: 2,
+        projectionValues: { contextPressure: { projectedTokens: 500, contextWindow: 1000 } },
+      }),
+      warm: row({ parentId: 'root', projectionValues: { contextTimeline: timeline(100, 1) } }),
+    }), 'root', undefined, new Map<string, unknown>([
+      ['cold', composed],
+      ['warm', composed],
+      ['ghost', timeline(5)],
+    ]))
+    assert.ok(forest !== null)
+    // Pressure anchors the occupancy; the fetched head supplies the composition arcs.
+    const cold = forest.nodes.find(n => n.id === 'cold')
+    assert.ok(cold !== undefined && cold.head !== null)
+    assert.equal(cold.head.tokens, 500)
+    assert.equal(cold.head.pct, 50)
+    assert.ok(cold.head.parts.filter(p => p.value > 0).length >= 5, 'composed, not the single occupancy arc')
+    // A row's own timeline outranks the injection; unrelated ids never inject.
+    const warm = forest.nodes.find(n => n.id === 'warm')
+    assert.equal(warm?.head?.tokens, 100)
+    assert.ok(forest.nodes[0].head === null)
+    // A row without projections folds from the fetched head alone.
+    const solo = agentForestOf(snap({
+      s1: row({}),
+    }), 's1', undefined, new Map([['s1', composed]]))
+    assert.ok(solo !== null)
+    const soloHead = solo.nodes[0].head
+    assert.ok(soloHead !== null)
+    assert.equal(soloHead.tokens, 600, 'no pressure anchor: the fold total carries')
+    assert.equal(soloHead.pct, 60)
+  })
+
+  test('a hostile fetched head degrades back to the pressure-only ring', () => {
+    const byId = {
+      root: row({ displayTitle: 'Root' }),
+      cold: row({
+        parentId: 'root', origin: 'subagent', updatedAt: 2,
+        projectionValues: { contextPressure: { projectedTokens: 500, contextWindow: 1000 } },
+      }),
+    }
+    for (const junk of ['garbage', null, 42]) {
+      const forest = agentForestOf(snap(byId), 'root', undefined, new Map([['cold', junk]]))
+      assert.ok(forest !== null)
+      const cold = forest.nodes.find(n => n.id === 'cold')
+      assert.ok(cold !== undefined && cold.head !== null)
+      assert.equal(cold.head.tokens, 500, 'pressure still anchors the ring')
+      assert.equal(cold.head.parts.length, 0, 'no composition invented from junk')
+    }
   })
 
   test('walks the lineage up to the topmost ancestor and DFSes the subtree', () => {

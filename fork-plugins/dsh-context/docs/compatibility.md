@@ -16,6 +16,16 @@ The automated seam matrix runs for every row on every `pnpm test`. The disposabl
 
 Releases older than `0.1.2-rc.1` — the `0.1.1` line and the `0.1.2-alpha.*` previews — were supported and verified through `dsh-context@0.41.x` and are no longer in the support matrix.
 
+## Baseline gate
+
+The declared floor is enforced at runtime, not only documented. At startup the host resolves the running harness's version — first from the module tree the plugin is bound to, then from the `$DSH_HOME/profiles/node_modules` mirror — and compares it against `0.1.2-rc.1` (channel order: release > rc > beta > alpha):
+
+- **Below the floor** — fallback projection units that fold nothing and serve zeroed data: the Context tab keeps its (empty) cards while a modal names both versions and urges the update.
+- **At or above the floor** — the real projection units.
+- **Undetectable or unparseable** — **fails open** into the real units, so a probe misfire never blanks a working deployment.
+
+The mirror reflects whichever installation last booted a CLI profile, which need not be the running one (a packaged desktop client never refreshes it), so it never outranks the running module tree. Implementation: `src/host/version.ts`, `src/host/fallback.ts`, `src/shared/version.ts`.
+
 ## Session-log generations
 
 The supported range spans three durable-log generations, and the plugin folds all of them from one shape-driven code path (`src/host/logShapes.ts`):
@@ -23,11 +33,11 @@ The supported range spans three durable-log generations, and the plugin folds al
 | Seam | V0 (`0.1.2-rc.x`) | V2 (`0.1.3-alpha.x`) | V3 (`0.1.5-alpha.x+`) |
 | --- | --- | --- | --- |
 | System prompt | `request/header.header.system` | same as V0 | `system/message` surface node |
-| First token | `assistant/chunk` events | embedded `data.stream` (also `assistant/attempt`) | same as V2 |
+| First token | `assistant/chunk` events | embedded `assistant/message.data.stream` (also `assistant/attempt.data.stream`) | same as V2 |
 | Replacement endpoints | `{ start, end }` | same as V0 | `{ startSeq, endSeq }` |
 | Nested PTC dispatch | `tool/code-dispatch` | same as V0 | `tool/ptc-dispatch` |
 
-The fold never branches on a detected harness version: a log carries exactly one generation, and the spellings are mutually exclusive. This matters because a deployment's version probe can be wrong — a healed profile mirror may name a different release than the running harness.
+The fold never branches on a detected harness version: a log carries exactly one generation, and the spellings are mutually exclusive. The version probe is best-effort — it reports the module tree the embedding shell resolves plugin imports to, which a packaged client may redirect — so it decides which units register and nothing more.
 
 ## Web client seams
 
@@ -40,9 +50,11 @@ The browser half rides generation-specific seats, each reached through an option
 
 The plugin contributes to whichever face the running line serves: the guide capsule carries `order`, `title`, and `icon` on every generation and adds the `description` thunk, which `0.1.5-alpha.1` required, `0.1.5-alpha.2` ignored, and `0.1.5-rc.1+` renders. The `guideEntry` probe in `tests/baselines.ts` pins the fields of the newest supported generation.
 
+The File Activity card's file-name affordance is the same optional-column story: on a line with the right Sidebar it opens the file's preview tab through `ctx.sidebarRight.openResource` (the built-in Files sidebar's own path), building the `dsh-resource://file/…` address with the harness's browser-safe `fileAddressFor` (inlined by the client bundle, exactly as the Sidebar's own file types inline it). On an older line the preview face is absent (or refuses the address), and the name keeps its original system-open behavior; the `sidebar.nav` probe pins the navigation face's spelling.
+
 ## What each check means
 
-- **Automated seam matrix** — part of this repository's `pnpm test` (the `compat` vitest project). For every baseline tag it stages the harness's REAL sources at that tag, boots the plugin's built host entry into that tag's actual `SessionProjectionRegistry` on the cordis release the line vendors, and probes the tag's client seams (slots, finalized-nodes seat, image loader, history face/envelope, markdown chrome, platform module table, that generation's durable-event vocabulary, the right Sidebar tab seam and its guide-entry contract where the line ships one, settings namespace). Definitions live in `tests/baselines.ts`; the release workflow fetches the pinned baseline tags before testing. Optional seams are asserted BOTH ways: the right Sidebar tab registers only on the generation that serves it, and every older line is proven to have no such service, so the plugin's deferred registration stays inert instead of pending.
+- **Automated seam matrix** — part of this repository's `pnpm test` (the `compat` vitest project). For every baseline tag it stages the harness's REAL sources at that tag, boots the plugin's built host entry into that tag's actual `SessionProjectionRegistry` on the cordis release the line vendors, and probes the tag's client seams (slots, finalized-nodes seat, image loader, history face/envelope, markdown chrome, platform module table, that generation's durable-event vocabulary, the right Sidebar tab seam, its guide-entry contract and its resource-navigation face where the line ships one, settings namespace). Definitions live in `tests/baselines.ts`; the release workflow fetches the pinned baseline tags before testing. Optional seams are asserted BOTH ways: the right Sidebar tab registers only on the generation that serves it, and every older line is proven to have no such service, so the plugin's deferred registration stays inert instead of pending.
 - **Statistics against the harness's own folds** — the plugin's figures are differentially checked against the harness's OWN projection values (`sessionStats`, `contextBreakdown`, `contextPressure`, `tokenUsage`) over real V0 and V3 session logs: system/tools/message tokens, per-request counts, turns/steps, TTFT, generation, tool time, and every billed cost bucket match exactly, and a migrated V0→V3 log reproduces the same figures as its V0 original.
 - **Disposable-profile install / uninstall** — for each release, that exact `dsh` CLI version was installed from npm into a temporary `DSH_HOME` (the real `~/.dsh` is never touched), then:
   1. `dsh plugin --profile <disposable> add dsh-context` — install OK;
@@ -55,9 +67,11 @@ These checks prove source-level seam compatibility, statistical parity with the 
 
 ## Upgrading from an older plugin build
 
-The plugin keeps its projection `stateVersion` unchanged, so cached per-session projection rows stay usable: bumping it would invalidate every row and orphan the `contextTimeline` key for idle sessions, which have no refresh channel until they go live again.
+The skill-injection category (issue #66) bumps the timeline projection's `stateVersion` (18 → 19): skill content — the `<available_skills>` catalog digest, a user-explicit `/name` invocation's instructions message, and the content a `skill`-tool load returns — now folds into its own `skill` composition bucket instead of `inject`/`tool`. The re-bucketing changes the fold's per-category sums, so on upgrade every cached per-session row is invalidated and re-folded from the durable log, which rebuilds them under the new categories. The bump orphans the `contextTimeline` key for idle sessions, which have no refresh channel until they go live again — such a session re-folds when its log receives its next event. New sessions are exact from their first event.
 
-One consequence: a session whose row was folded by an older build keeps serving that older figure set until its log receives a new event (the registry seeds the cached state and replays only the tail). New sessions are exact from their first event. To force a full refold of an existing session, delete its cached projection row — it is a derived cache and is rebuilt from the durable log:
+The Agent network card covers the orphaned relatives without waiting for a visit: a session listed without a `contextTimeline` row (composition absent, occupancy only) fetches its slim head from the plugin's `/api/dsh-context/detail` fetch route (mounted through Connection's exact-route registry, behind the same authenticated `/api` fence), which folds the durable log on demand — the node's ring renders the full composition the first time the card opens. The same backfill serves sessions whose cache predates the plugin's installation entirely. Where the route is unavailable (the baseline gate, a connection service without the exact-route registry), the card degrades to the pressure-only occupancy ring as before.
+
+To force a full refold of an existing session sooner, delete its cached projection row — it is a derived cache and is rebuilt from the durable log:
 
 ```bash
 rm ~/.dsh/storages/session_projcache/sessions/<session-id>.json

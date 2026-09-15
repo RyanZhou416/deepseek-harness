@@ -75,7 +75,7 @@ export function createFallbackTimelineDefinition(current: string) {
   return fallbackDefinition('contextTimeline', contextTimelineSchema, {
     ok: true,
     unsupported: { current, minimum: BASELINE_DSH_VERSION },
-    current: { system: 0, tools: 0, user: 0, inject: 0, assistant: 0, tool: 0, total: 0 },
+    current: { system: 0, tools: 0, user: 0, inject: 0, skill: 0, assistant: 0, tool: 0, total: 0 },
     requests: [],
     events: [],
     nodes: [],

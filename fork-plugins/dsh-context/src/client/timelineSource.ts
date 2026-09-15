@@ -7,10 +7,10 @@
  * - INLINE (older hosts, channel-less deployments, the baseline-gate
  *   fallback): the wire value carries the collections in place. It passes
  *   through untouched — no fetch ever happens.
- * - SPLIT (current host with the detail channel live): the wire value is the
+ * - SPLIT (current host with the detail route live): the wire value is the
  *   slim head (~1KB — every session.list row, control baseline, and push
- *   frame carries it whole). The collections arrive from the host's
- *   `/dsh-context` `detail` endpoint (host/detail.ts): one targeted read
+ *   frame carries it whole). The collections arrive from the plugin's
+ *   `/api/dsh-context/detail` fetch route (host/detail.ts): one targeted read
  *   when the tab/modal first opens, then a debounced refetch whenever the
  *   pushed `detailRev` outruns the served detail. Closed tabs fetch nothing.
  *
@@ -29,12 +29,12 @@
 import { useEffect, useMemo, useSyncExternalStore } from 'react'
 import type { ContextTimeline, ContextTimelineDetail } from '../shared/types'
 import type { ClientCtx, SessionStandardProps } from './services'
-import { asRecord, numOf, objectsOf, projectionOf, rpcCallOf, timelineOf } from './services'
+import { asRecord, numOf, objectsOf, projectionOf, timelineOf } from './services'
 
-// The channel/endpoint pair of host/detail.ts — re-declared here: the client
-// bundle inlines every import, and the host module must never reach it.
-const DETAIL_CHANNEL = '/dsh-context'
-const DETAIL_ENDPOINT = 'detail'
+// The detail route of host/detail.ts — re-declared here: the client bundle
+// inlines every import, and the host module must never reach it. Same-origin
+// POST under the harness's authenticated `/api` fence.
+const DETAIL_ROUTE = '/api/dsh-context/detail'
 
 /**
  * Narrow the detail endpoint's payload to a render-safe value (the same
@@ -46,8 +46,14 @@ export function detailOf(value: unknown): ContextTimelineDetail | null {
   const data = asRecord(value)
   if (data === null) return null
   if (typeof data.rev !== 'number' || !Number.isFinite(data.rev) || data.rev < 0) return null
+  // The slim head rides the payload for the Agent network's cold-node ring
+  // fetch; a missing or malformed head only degrades that composition (the
+  // detail cards never read it), so it drops out instead of rejecting the
+  // payload the cards consume.
+  const head = timelineOf(data.head)
   return {
     rev: data.rev,
+    ...(head !== null ? { head } : {}),
     requests: objectsOf(data.requests),
     events: objectsOf(data.events),
     nodes: objectsOf(data.nodes),
@@ -61,28 +67,30 @@ export function detailOf(value: unknown): ContextTimelineDetail | null {
 }
 
 /**
- * The detail reader over the harness's generic Connection RPC
- * (`ctx.connection.rpc.call`) — resolved through the shared `rpcCallOf`
- * reflect read (the same seam openPathVia/canOpenPathsOf use), so a hostile
- * or absent connection service degrades to `undefined` instead of throwing.
- * The returned thunk resolves the session's current detail, `null` when the
- * session is not live anymore, and rejects on transport failure or a
- * malformed payload (the store turns the two into the retryable state).
+ * The detail reader over the plugin's own `/api` fetch route (host/detail.ts).
+ * Same-origin POST through the harness's authenticated fence; the returned
+ * thunk resolves the session's current detail, `null` when the session is not
+ * live anymore, and rejects on transport failure or a malformed payload (the
+ * store turns the two into the retryable state).
  */
 export function makeDetailFetcher(
   ctx: ClientCtx,
   sessionId: string,
 ): (() => Promise<ContextTimelineDetail | null>) | undefined {
+  void ctx
   if (sessionId === '') return undefined
-  const call = rpcCallOf(ctx)
-  if (call === undefined) return undefined
   return async () => {
-    const result = await call(DETAIL_CHANNEL, DETAIL_ENDPOINT, { sessionId })
-    const r = asRecord(result)
-    if (r === null || r.ok !== true) throw new Error('dsh-context: detail rpc failed')
+    const response = await fetch(DETAIL_ROUTE, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ sessionId }),
+    })
+    if (!response.ok) throw new Error(`dsh-context: detail route HTTP ${response.status}`)
+    const r = asRecord(await response.json())
+    if (r === null || r.ok !== true) throw new Error('dsh-context: detail read failed')
     if (r.value === null) return null
     const detail = detailOf(r.value)
-    if (detail === null) throw new Error('dsh-context: detail rpc malformed')
+    if (detail === null) throw new Error('dsh-context: detail read malformed')
     return detail
   }
 }
@@ -179,9 +187,9 @@ export class DetailStore {
     // read's settle re-arms when the wanted rev still outruns the served one.
     if (this.inFlight) return
     if (this.fetcher === undefined) {
-      // No connection face on this deployment: the typed failure arms the
-      // cards' note. (The slim head is only served when the host channel
-      // went live, so this is the exotic path.)
+      // No session id to read for: the typed failure arms the cards' note.
+      // (The slim head is only served when the host route went live, so this
+      // is the exotic path.)
       this.failed = true
       this.emit()
       return

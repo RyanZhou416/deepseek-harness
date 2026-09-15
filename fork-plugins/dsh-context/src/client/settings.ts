@@ -12,11 +12,11 @@
  * members keeps the dependency graph honest.
  */
 
-import type { DefaultFileSort, DefaultGranularity, DefaultTrendMode, SettingsField } from '../shared/types'
+import type { DefaultFileSort, DefaultGranularity, DefaultPlacement, DefaultToolSort, DefaultTrendMode, SettingsField } from '../shared/types'
 
 // The preference vocabulary is declared once in shared/types.ts; re-exported
 // here so client-side consumers keep their canonical import path.
-export type { DefaultFileSort, DefaultGranularity, DefaultTrendMode, SettingsField } from '../shared/types'
+export type { DefaultFileSort, DefaultGranularity, DefaultPlacement, DefaultToolSort, DefaultTrendMode, SettingsField } from '../shared/types'
 
 /** The bound settings scope (ctx.settingsScope.bind result), as consumed. */
 export interface SettingsScopeLike {
@@ -34,8 +34,10 @@ export interface SettingsScopeBinderFace {
 export interface SettingsState {
   /** Scope sync: loading until the first Host section, unavailable when unserved. */
   status: 'loading' | 'ready' | 'unavailable'
+  placement: DefaultPlacement
   granularity: DefaultGranularity
   mode: DefaultTrendMode
+  toolSort: DefaultToolSort
   fileSort: DefaultFileSort
   writable: boolean
 }
@@ -43,47 +45,69 @@ export interface SettingsState {
 export interface ContextSettings {
   /** Observable snapshot store, bound onto card props as `useContextSettings`. */
   store: { subscribe(listener: () => void): () => void; getSnapshot(): SettingsState }
+  defaultPlacement(): DefaultPlacement
   defaultGranularity(): DefaultGranularity
   defaultTrendMode(): DefaultTrendMode
+  defaultToolSort(): DefaultToolSort
   defaultFileSort(): DefaultFileSort
   attach(scope: SettingsScopeLike): () => void
   /** Persist one preference choice (local echo, then the fenced scope write). */
   set(field: SettingsField, value: string): void
 }
 
-function prefsOf(value: unknown): { granularity?: DefaultGranularity; mode?: DefaultTrendMode; fileSort?: DefaultFileSort } {
+type Prefs = {
+  placement?: DefaultPlacement
+  granularity?: DefaultGranularity
+  mode?: DefaultTrendMode
+  toolSort?: DefaultToolSort
+  fileSort?: DefaultFileSort
+}
+
+function prefsOf(value: unknown): Prefs {
   if (value === null || typeof value !== 'object') return {}
   const v = value as Record<string, unknown>
   return {
+    ...(v.defaultPlacement === 'all' || v.defaultPlacement === 'tab' || v.defaultPlacement === 'sidebar' ? { placement: v.defaultPlacement } : {}),
     ...(v.defaultGranularity === 'step' || v.defaultGranularity === 'turn' ? { granularity: v.defaultGranularity } : {}),
     ...(v.defaultTrendMode === 'total' || v.defaultTrendMode === 'delta' ? { mode: v.defaultTrendMode } : {}),
+    ...(v.defaultToolSort === 'size' || v.defaultToolSort === 'count' || v.defaultToolSort === 'name' ? { toolSort: v.defaultToolSort } : {}),
     ...(v.defaultFileSort === 'count' || v.defaultFileSort === 'latest' || v.defaultFileSort === 'path' ? { fileSort: v.defaultFileSort } : {}),
   }
 }
 
 export function createContextSettings(): ContextSettings {
-  let state: SettingsState = { status: 'loading', granularity: 'step', mode: 'total', fileSort: 'count', writable: false }
+  let state: SettingsState = { status: 'loading', placement: 'all', granularity: 'step', mode: 'total', toolSort: 'count', fileSort: 'count', writable: false }
   let scope: SettingsScopeLike | undefined
   const listeners = new Set<() => void>()
   const publish = (next: SettingsState): void => {
-    if (next.status === state.status && next.granularity === state.granularity
-      && next.mode === state.mode && next.fileSort === state.fileSort && next.writable === state.writable) return
+    if (next.status === state.status && next.placement === state.placement && next.granularity === state.granularity
+      && next.mode === state.mode && next.toolSort === state.toolSort && next.fileSort === state.fileSort
+      && next.writable === state.writable) return
     state = next
     for (const listener of listeners) listener()
   }
   // Republish from the bound scope's current snapshot; the attach sync and
-  // the failed-write rollback share this one read.
-  const sync = (bound: SettingsScopeLike): void => {
+  // the failed-write rollback share this one read. Returns the scope's valid
+  // placement, if it carries one.
+  const sync = (bound: SettingsScopeLike): DefaultPlacement | undefined => {
     const snap = bound.getSnapshot()
     const prefs = prefsOf(snap.value)
+    // Fail open: a config problem must never leave an entry hidden. A valid
+    // value wins; one the plugin cannot understand degrades to `all`; a
+    // section without the field (older Host half) keeps the current state.
+    const rawPlacement = snap.value !== null && typeof snap.value === 'object'
+      ? (snap.value as Record<string, unknown>).defaultPlacement
+      : undefined
     publish({
       status: snap.status === 'ready' || snap.status === 'unavailable' ? snap.status : 'loading',
-      // A section without the field (older Host half) keeps the default.
+      placement: prefs.placement ?? (rawPlacement === undefined ? state.placement : 'all'),
       granularity: prefs.granularity ?? state.granularity,
       mode: prefs.mode ?? state.mode,
+      toolSort: prefs.toolSort ?? state.toolSort,
       fileSort: prefs.fileSort ?? state.fileSort,
       writable: snap.writable,
     })
+    return prefs.placement
   }
   return {
     store: {
@@ -93,8 +117,10 @@ export function createContextSettings(): ContextSettings {
       },
       getSnapshot: () => state,
     },
+    defaultPlacement: () => state.placement,
     defaultGranularity: () => state.granularity,
     defaultTrendMode: () => state.mode,
+    defaultToolSort: () => state.toolSort,
     defaultFileSort: () => state.fileSort,
     attach(bound) {
       scope = bound
@@ -110,7 +136,15 @@ export function createContextSettings(): ContextSettings {
       // scope's own recovery re-reads the Host and republishes via subscribe.
       const bound = scope
       if (bound === undefined) return
-      void bound.set(field, value).catch(() => { sync(bound) })
+      void bound.set(field, value).catch(() => {
+        const truth = sync(bound)
+        // A placement choice that failed to persist must not keep an entry
+        // hidden on an unpersisted echo: with no valid placement in the
+        // scope's truth, degrade to `all`.
+        if (field === 'defaultPlacement' && truth === undefined) {
+          publish({ ...state, placement: 'all' })
+        }
+      })
     },
   }
 }

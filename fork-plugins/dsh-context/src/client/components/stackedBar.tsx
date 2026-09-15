@@ -1,9 +1,11 @@
 /**
  * Composition bar + legend; the shared hover-link tooltip is bespoke — no shared primitive reproduces the cross-segment/legend linkage —
- * styled through the shared `--dsw-alias-*` tokens.
+ * styled through the shared `--dsw-alias-*` tokens. On mount the segments and the free track grow open
+ * left to right (stackedBar.css, staggered by the capped per-piece `--lc-i` slots below, so a long DNA
+ * band list settles fast); the reserve band stays unanimated.
  */
 
-import { useState, type ReactElement } from 'react'
+import { useState, type CSSProperties, type ReactElement } from 'react'
 import type { PartsPart } from '../categories'
 import type { ViewKit } from '../viewkit'
 
@@ -13,6 +15,13 @@ import type { ViewKit } from '../viewkit'
  * `thresholdRatio`/`modelPolicies` should adjust it to match.
  */
 export const AUTO_COMPACT_RATIO = 0.8
+
+/**
+ * Entrance stagger cap: the browser's DNA bands can list dozens of items, so the grow-in cascade stops
+ * widening after this many slots and late bands simply join within the cap (stackedBar.css delays by
+ * `--lc-i`); the composition bar's few category segments never reach it.
+ */
+const STAGGER_CAP = 8
 
 export interface StackedBarProps {
   parts: PartsPart[]
@@ -141,8 +150,10 @@ export function makeStackedBar(kit: ViewKit): (props: StackedBarProps) => ReactE
             return (
               <div
                 key={p.key}
-                className={'lc-stacked-seg' + (on ? ' lc-stacked-seg-on' : '') + (pickKey !== undefined ? ' lc-stacked-seg-pick' : '')}
-                style={{ width: `${widths[i]}%`, backgroundColor: p.color }}
+                className={'lc-stacked-seg animate-lc-stacked-in motion-reduce:animate-none' + (on ? ' lc-stacked-seg-on' : '') + (pickKey !== undefined ? ' lc-stacked-seg-pick' : '')}
+                // Grow-in stagger slot (the animate-lc-stacked-in token's delay): each segment scaleX-opens
+                // from the left edge in turn, capped so a long DNA band list settles fast.
+                style={{ width: `${widths[i]}%`, backgroundColor: p.color, '--lc-i': Math.min(i, STAGGER_CAP) } as CSSProperties}
                 onMouseEnter={() => { if (props.onHoverKey !== undefined) props.onHoverKey(p.key) }}
                 onClick={pickKey !== undefined ? () => { pickKey(p.key) } : undefined}
               />
@@ -151,8 +162,10 @@ export function makeStackedBar(kit: ViewKit): (props: StackedBarProps) => ReactE
           {free > 0 ? (
             <div
               key="free"
-              className={'lc-stacked-free' + (props.hoverKey === 'free' ? ' lc-stacked-free-on' : '')}
-              style={{ width: `${free / scale * 100}%` }}
+              className={'lc-stacked-free animate-lc-stacked-in motion-reduce:animate-none' + (props.hoverKey === 'free' ? ' lc-stacked-free-on' : '')}
+              // The free track opens right after the last occupied segment (past the stagger cap it joins
+              // one slot after the capped segments).
+              style={{ width: `${free / scale * 100}%`, '--lc-i': Math.min(visible.length, STAGGER_CAP + 1) } as CSSProperties}
               onMouseEnter={() => { if (props.onHoverKey !== undefined) props.onHoverKey('free') }}
             />
           ) : null}

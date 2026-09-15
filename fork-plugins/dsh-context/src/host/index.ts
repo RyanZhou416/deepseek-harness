@@ -68,9 +68,9 @@ export function apply(ctx: Context, config: Config): void {
   // load path refuses such events wholesale, permanently bricking the session.
   watchStepIdentity(ctx)
   // The split wire generation (detail.ts): the detail channel arms whenever
-  // the connection/sessions services compose (load order never assumed), and
-  // the unit's view reads the gate per serve — slim while the channel is
-  // live, inline otherwise.
+  // the connection/sessions/webServer services compose (load order never
+  // assumed), and the unit's view reads the gate per serve — slim while the
+  // channel is live, inline otherwise.
   const gate = watchDetailChannel(ctx, resolveBounds(config))
   ctx.sessionProjections.register(createContextTimelineDefinition(config, () => gate.live))
   ctx.sessionProjections.register(createContextHeadersDefinition(name => attribution.ownerOf(name)))

@@ -10,6 +10,7 @@
  * close path consumes the token then (see modalStore.ts).
  */
 
+import { ContextIcon } from './icon'
 import { modalStoreOf, setPendingConsume } from './modalStore'
 import type { ClientCtx, InputTriggersFace } from './services'
 import type { ViewKit } from './viewkit'
@@ -33,7 +34,18 @@ export function registerContextCommand(ctx: ClientCtx, kit: ViewKit): void {
         if (req.position !== 'leading') return Promise.resolve([])
         const query = req.query.trim().toLowerCase()
         if (query !== '' && !COMMAND.startsWith(query)) return Promise.resolve([])
-        return Promise.resolve([{ name: COMMAND, description: kit.t('cmd.desc') }])
+        // A sectioned candidate replaces the menu's source-title row, which
+        // otherwise renders the raw, unlocalizable source name (`context` is
+        // not a key of the harness's own slash.menu dictionary). Label and
+        // glyph are pure display data: builds that predate their rendering
+        // keep showing the bare name.
+        return Promise.resolve([{
+          name: COMMAND,
+          label: kit.t('cmd.label'),
+          icon: ContextIcon,
+          section: kit.t('cmd.section'),
+          description: kit.t('cmd.desc'),
+        }])
       },
       onPick: (pick) => {
         // Open and remember the token span: the modal's close path consumes

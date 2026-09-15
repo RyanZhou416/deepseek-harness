@@ -13,7 +13,7 @@ import { createElement as h } from 'react'
 import assert from 'node:assert/strict'
 import { describe, test, vi } from 'vitest'
 import { BASELINES } from '../../baselines'
-import { conversationNodesOf, imageLoaderOf } from '../../../src/client/services'
+import { conversationNodesOf, imageLoaderOf, openResourceVia } from '../../../src/client/services'
 import type { SessionStandardProps } from '../../../src/client/services'
 import { makeContentFetcher, watchHistoryFaces } from '../../../src/client/historyPage'
 import { makeRichText } from '../../../src/client/components/richText'
@@ -39,9 +39,6 @@ vi.mock('@deepseek-ai/dsh-client-ui-primitives', async () => {
       captured.markdownProps = props
       return React.createElement('div', null, String(props.text ?? ''))
     },
-    // The sidebar guide glyph: present as a stub so the optional registration
-    // path sees the same shape the real primitives module serves.
-    IconContextInjectionOutline16: () => React.createElement('span', null),
     // The rich-text copy control's glyphs and clipboard writer.
     IconCopyOutline16: () => React.createElement('span', null),
     IconCheckOutline16: () => React.createElement('span', null),
@@ -55,7 +52,7 @@ function timeline(): ContextTimeline {
     model: 'deepseek-v4-flash',
     provider: 'deepseek',
     contextWindow: 128000,
-    current: { system: 100, tools: 200, user: 300, inject: 50, assistant: 400, tool: 150, total: 1200 },
+    current: { system: 100, tools: 200, user: 300, inject: 50, skill: 0, assistant: 400, tool: 150, total: 1200 },
     requests: [],
     events: [],
     nodes: [
@@ -157,6 +154,22 @@ for (const baseline of BASELINES) {
         })
         assert.equal(definitions.length, 1, 'the generation with the seam gets the tab')
         assert.equal(ctx.slots.of('sidebar.right.pane.tab').length, 1)
+        assert.equal(ctx.slots.of('sidebar.right.pane.tab.title').length, 1, 'the chip-title seat is registered on this generation')
+      }
+      ctx.dispose()
+    })
+
+    test('the Sidebar preview opener is optional: absent face = no opener, present face = wired', () => {
+      const { ctx } = baselineCtx()
+      // No column on this generation: the file names keep their system-open only.
+      assert.equal(openResourceVia(asClientCtx(ctx)), undefined, 'no navigation face = no preview opener')
+      if (baseline.client.sidebar !== undefined) {
+        const opened: string[] = []
+        ctx.setService('sidebarRight', { openResource: (address: string) => { opened.push(address) } })
+        const open = openResourceVia(asClientCtx(ctx))
+        assert.ok(open !== undefined, 'the generation with the column serves the opener')
+        assert.equal(open('dsh-resource://file/session/s/a.ts'), true)
+        assert.deepEqual(opened, ['dsh-resource://file/session/s/a.ts'])
       }
       ctx.dispose()
     })

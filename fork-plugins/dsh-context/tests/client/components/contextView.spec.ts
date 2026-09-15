@@ -8,12 +8,13 @@
 import { act, createElement as h, type ReactElement } from 'react'
 import assert from 'node:assert/strict'
 import { createRoot } from 'react-dom/client'
-import { afterEach, describe, test, vi } from 'vitest'
+import { afterEach, beforeEach, describe, test, vi } from 'vitest'
 import { makeContextView } from '../../../src/client/components/contextView'
 import { watchHistoryFaces } from '../../../src/client/historyPage'
 import { requestContextFocus, takeContextFocus } from '../../../src/client/viewFocus'
 import { createContextSettings } from '../../../src/client/settings'
 import type { SettingsScopeLike } from '../../../src/client/settings'
+import { resetModelPrices, setModelPricesLoader } from '../../../src/client/modelPrices'
 import type { UseChatLike } from '../../../src/client/services'
 import type { ContextTimeline } from '../../../src/shared/types'
 import { DICT_EN } from '../../../src/client/i18n'
@@ -28,13 +29,14 @@ const kit = makeKit()
 
 afterEach(() => {
   vi.restoreAllMocks()
+  vi.unstubAllGlobals()
 })
 
 
 function timeline(over: Record<string, unknown> = {}): ContextTimeline {
   return {
     ok: true,
-    current: { system: 100, tools: 200, user: 300, inject: 50, assistant: 400, tool: 150, total: 1200 },
+    current: { system: 100, tools: 200, user: 300, inject: 50, skill: 0, assistant: 400, tool: 150, total: 1200 },
     requests: [],
     events: [],
     nodes: [],
@@ -174,7 +176,12 @@ describe('ContextView — projection guards', () => {
     }))
     // Anchored headline: projected 100 of a 128k window.
     assert.ok(text(m.container).includes(DICT_EN['overview.used']))
-    // Cache-hit cell from the official tokenUsage projection (200 / 300).
+    // The Token card's center is the chat stats line's whole-session billed
+    // total off the official tokenUsage projection (100 + 200 + 0 + 50), and
+    // the Context card's cache-hit cell shows the line's own rate two decimals
+    // deep (200 / 300, truncated).
+    const tokensCard = queryAll(m.container, '.lc-head > .lc-col-donut')[0]
+    assert.equal(query(tokensCard, '.lc-donut-center b').textContent, '350')
     assert.ok(text(m.container).includes('66.66%'))
     assert.ok(text(m.container).includes('m-only'))
     await m.unmount()
@@ -288,8 +295,6 @@ describe('ContextView — interactions', () => {
     const bar2 = query(m.container, '.lc-bar[data-seq="2"]')
     await hover(bar2)
     assert.ok(bar2.className.includes('lc-bar-hovered'))
-    // The browser mirrors the hover as a transient preview of that step.
-    assert.ok(text(m.container).includes(DICT_EN['browser.preview']))
     // The hovered bar's turn lights the strip even without strip hover.
     assert.ok(query(m.container, '.lc-chart-scroll').className.includes('lc-chart-dim'))
 
@@ -425,9 +430,10 @@ describe('ContextView — interactions', () => {
     // Five segments on the bar: richTimeline carries no injects, so inject renders none.
     assert.equal(queryAll(m.container, '.lc-bar[data-seq="4"] .lc-bar-stack > .lc-cat-seg').length, 5)
 
-    // Expanding the browser's assistant category focuses every bar on it — one segment per bar, the axis
+    // Expanding the browser's assistant category (row 5 — row 4 is the empty
+    // skill bucket) focuses every bar on it — one segment per bar, the axis
     // rescaled to the category's own max (20/60/80; the first rides its provider-prompt anchor to 21).
-    await click(queryAll(m.container, '.lc-br-cat-row')[4])
+    await click(queryAll(m.container, '.lc-br-cat-row')[5])
     assert.equal(text(query(m.container, '.lc-axis-top')), '80')
     const segs = queryAll(m.container, '.lc-bar .lc-bar-stack > .lc-cat-seg')
     assert.equal(segs.length, 3)
@@ -436,7 +442,7 @@ describe('ContextView — interactions', () => {
       'the card subtitle names the focused category')
 
     // Collapsing the category restores the whole composition and drops the subtitle.
-    await click(queryAll(m.container, '.lc-br-cat-row')[4])
+    await click(queryAll(m.container, '.lc-br-cat-row')[5])
     assert.equal(text(query(m.container, '.lc-axis-top')), '420')
     assert.equal(queryAll(m.container, '.lc-bar[data-seq="4"] .lc-bar-stack > .lc-cat-seg').length, 5)
     const trendCard = queryAll(m.container, '.lc-card').find(c => text(c).includes(DICT_EN['trend.title']))
@@ -487,15 +493,21 @@ describe('ContextView — interactions', () => {
   test('event-kind filter narrows, unions, drops, and resets', async () => {
     const m = await mountRich('sv-kinds')
     const countEvents = () => queryAll(m.container, '.lc-event').length
+    const kindBtn = (k: string) => query(m.container, `.lc-kinds [data-kind="${k}"]`) as HTMLElement
     assert.equal(countEvents(), 2)
+    // The buttons carry their per-kind tallies (richTimeline: 1 inject, 1 compaction, 0 prunes).
+    assert.deepEqual(
+      queryAll(m.container, '.lc-kinds .lc-kind-n').map(el => text(el)),
+      ['1', '1', '0'],
+    )
 
-    await click(buttonByText(m.container, DICT_EN['kind.inject']))
+    await click(kindBtn('inject'))
     assert.equal(countEvents(), 1)
-    await click(buttonByText(m.container, DICT_EN['kind.compaction']))
+    await click(kindBtn('compaction'))
     assert.equal(countEvents(), 2)
-    await click(buttonByText(m.container, DICT_EN['kind.compaction']))
+    await click(kindBtn('compaction'))
     assert.equal(countEvents(), 1)
-    await click(buttonByText(m.container, DICT_EN['kind.inject']))
+    await click(kindBtn('inject'))
     assert.equal(countEvents(), 2)
     await m.unmount()
   })
@@ -699,6 +711,130 @@ describe('ContextView — file activity card', () => {
     await m.unmount()
   })
 
+  test('the Sidebar preview leads the name click; a refusal falls through to the system opener', async () => {
+    const previewed: string[] = []
+    const opened: string[] = []
+    const ctx = new TestClientCtx({
+      services: {
+        sessions: { list: { getSnapshot: () => ({ byId: { 'sv-preview': { cwd: '/repo' } } }) } },
+        connection: {
+          isLoopback: true,
+          rpc: {
+            call: (_channel: string, endpoint: string, payload: unknown) => {
+              if (endpoint === 'session/canOpenWorkspacePath') return Promise.resolve({ ok: true, value: true })
+              opened.push((payload as { args: { request: { path: string } } }).args.request.path)
+              return Promise.resolve({ ok: true, value: { opened: true } })
+            },
+          },
+        },
+        sidebarRight: { openResource: (address: string) => { previewed.push(address) } },
+      },
+    })
+    const conv = [
+      { kind: 'tool', seq: 3, call: { name: 'read', argsRaw: JSON.stringify({ file_path: '/repo/src/a.ts' }) } },
+    ]
+    const View = makeView(ctx)
+    const m = await mount(h(View, {
+      sessionId: 'sv-preview',
+      useProjection: projectionsFor(fileTimeline()),
+      useChat: (sel =>
+        sel({
+          legacy: { nodes: conv } })) as UseChatLike,
+    }))
+    await flush()
+    const card = queryAll(m.container, '.lc-card').find(c => text(c).includes(DICT_EN['files.title']))
+    assert.ok(card !== undefined)
+    const name = query(query(card, '.lc-fa-row'), '.lc-fa-file')
+    // The preview affordance leads where the column exists; the system open
+    // stays unreached.
+    assert.equal(name.getAttribute('title'), DICT_EN['files.preview'])
+    await click(name)
+    assert.deepEqual(previewed, ['dsh-resource://file/session/sv-preview/src/a.ts'])
+    assert.deepEqual(opened, [])
+    await m.unmount()
+  })
+
+  test('a Sidebar that refuses the address falls back to the system opener', async () => {
+    const opened: string[] = []
+    const ctx = new TestClientCtx({
+      services: {
+        sessions: { list: { getSnapshot: () => ({ byId: { 'sv-preview-no': { cwd: '/repo' } } }) } },
+        connection: {
+          isLoopback: true,
+          rpc: {
+            call: (_channel: string, endpoint: string, payload: unknown) => {
+              if (endpoint === 'session/canOpenWorkspacePath') return Promise.resolve({ ok: true, value: true })
+              opened.push((payload as { args: { request: { path: string } } }).args.request.path)
+              return Promise.resolve({ ok: true, value: { opened: true } })
+            },
+          },
+        },
+        // No preview type claims the address (or no surface is mounted): the throw
+        // is the face's own wiring-error report, and the card must fall back.
+        sidebarRight: { openResource: () => { throw new Error('no registered tab type claims it') } },
+      },
+    })
+    const conv = [
+      { kind: 'tool', seq: 3, call: { name: 'read', argsRaw: JSON.stringify({ file_path: '/repo/src/a.ts' }) } },
+    ]
+    const View = makeView(ctx)
+    const m = await mount(h(View, {
+      sessionId: 'sv-preview-no',
+      useProjection: projectionsFor(fileTimeline()),
+      useChat: (sel =>
+        sel({
+          legacy: { nodes: conv } })) as UseChatLike,
+    }))
+    await flush()
+    const card = queryAll(m.container, '.lc-card').find(c => text(c).includes(DICT_EN['files.title']))
+    assert.ok(card !== undefined)
+    await click(query(query(card, '.lc-fa-row'), '.lc-fa-file'))
+    assert.deepEqual(opened, ['/repo/src/a.ts'])
+    await m.unmount()
+  })
+
+  test('an unencodable path skips the preview and still opens on the system', async () => {
+    // Parsing resilience: a lone surrogate in a log path is unrepresentable in a
+    // resource address (the encoder throws), so the preview opener is never
+    // asked for one address and the system opener still takes the resolved path.
+    const opened: string[] = []
+    const previewed: string[] = []
+    const ctx = new TestClientCtx({
+      services: {
+        sessions: { list: { getSnapshot: () => ({ byId: { 'sv-preview-bad': { cwd: '/repo' } } }) } },
+        connection: {
+          isLoopback: true,
+          rpc: {
+            call: (_channel: string, endpoint: string, payload: unknown) => {
+              if (endpoint === 'session/canOpenWorkspacePath') return Promise.resolve({ ok: true, value: true })
+              opened.push((payload as { args: { request: { path: string } } }).args.request.path)
+              return Promise.resolve({ ok: true, value: { opened: true } })
+            },
+          },
+        },
+        sidebarRight: { openResource: (address: string) => { previewed.push(address) } },
+      },
+    })
+    const conv = [
+      { kind: 'tool', seq: 3, call: { name: 'read', argsRaw: JSON.stringify({ file_path: '\uD800' }) } },
+    ]
+    const View = makeView(ctx)
+    const m = await mount(h(View, {
+      sessionId: 'sv-preview-bad',
+      useProjection: projectionsFor(fileTimeline()),
+      useChat: (sel =>
+        sel({
+          legacy: { nodes: conv } })) as UseChatLike,
+    }))
+    await flush()
+    const card = queryAll(m.container, '.lc-card').find(c => text(c).includes(DICT_EN['files.title']))
+    assert.ok(card !== undefined)
+    await click(query(query(card, '.lc-fa-row'), '.lc-fa-file'))
+    assert.deepEqual(previewed, [])
+    assert.deepEqual(opened, ['/repo/\uD800'])
+    await m.unmount()
+  })
+
   test('a capability probe that settles after unmount drops its answer', async () => {
     let resolveProbe!: (value: unknown) => void
     const ctx = new TestClientCtx({
@@ -882,8 +1018,21 @@ describe('ContextView — scroll ledger', () => {
 })
 
 describe('ContextView — locale and settings', () => {
+  // A real-shaped models.dev slice: the cost cell prices against the injected
+  // book (1M uncached input at the $0.15 miss rate → $0.15 / ¥1).
   const costed = timeline({
-    cost: { flash: { off: { uncached: 1000000, output: 500000, cacheRead: 0, cacheWrite: 0 } } },
+    cost: { 'deepseek-official': { 'deepseek-v4-flash': { peak: { uncached: 1000000, output: 500000, cacheRead: 0, cacheWrite: 0 } } } },
+  })
+
+  beforeEach(() => {
+    resetModelPrices()
+    setModelPricesLoader(() => Promise.resolve({
+      deepseek: { models: { 'deepseek-v4-flash': { cost: { input: 0.15, output: 0.6, cache_read: 0.003 } } } },
+    }))
+  })
+
+  afterEach(() => {
+    resetModelPrices()
   })
 
   test('cost prices in USD by default (no locale service), CNY under zh', async () => {
@@ -891,6 +1040,7 @@ describe('ContextView — locale and settings', () => {
       sessionId: 'sv-usd',
       useProjection: projectionsFor(costed),
     }))
+    await flush()
     assert.ok(text(m1.container).includes('$'))
     assert.ok(!text(m1.container).includes('¥'))
     await m1.unmount()
@@ -900,6 +1050,7 @@ describe('ContextView — locale and settings', () => {
       sessionId: 'sv-cny',
       useProjection: projectionsFor(costed),
     }))
+    await flush()
     assert.ok(text(m2.container).includes('¥'))
     await m2.unmount()
 
@@ -909,6 +1060,7 @@ describe('ContextView — locale and settings', () => {
       sessionId: 'sv-bare',
       useProjection: projectionsFor(costed),
     }))
+    await flush()
     assert.ok(text(m3.container).includes('$'))
     await m3.unmount()
   })
@@ -1087,13 +1239,10 @@ describe('ContextView — the split generation (slim head + detail channel)', ()
     }
   }
 
-  /** A ctx whose connection.rpc.call serves (or fails) the detail endpoint. */
+  /** Stub the global fetch to serve (or fail) the plugin's detail route. */
   function slimCtx(serve: () => Promise<unknown>): TestClientCtx {
-    return new TestClientCtx({
-      services: {
-        connection: { rpc: { call: (_channel: string, _endpoint: string, _payload: unknown) => serve() } },
-      },
-    })
+    vi.stubGlobal('fetch', async () => ({ ok: true, status: 200, json: async () => await serve() }))
+    return new TestClientCtx()
   }
 
   async function until(fn: () => boolean, message: string): Promise<void> {
@@ -1165,31 +1314,28 @@ describe('ContextView — the split generation (slim head + detail channel)', ()
 
 describe('ContextView — the op-log generation (fileOps on the detail payload)', () => {
   test('the File Activity card renders the fold-derived ops, no conversation join needed', async () => {
-    const ctx = new TestClientCtx({
-      services: {
-        connection: {
-          rpc: {
-            call: async () => ({
-              ok: true,
-              value: {
-                rev: 1,
-                requests: [{ seq: 2, turn: 1, step: 1, time: T0, system: 1, tools: 2, user: 3, inject: 0, assistant: 4, tool: 5, total: 15 }],
-                events: [],
-                nodes: [],
-                droppedNodes: 0,
-                archive: [],
-                // The op log covers the full session — the conversation window
-                // join plays no role in this card on this generation.
-                fileOps: [
-                  { seq: 1, path: '/ws/README.md', kind: 'read', tool: 'read', err: false, added: 0, removed: 0, read: { start: 1, count: 12 } },
-                  { seq: 2, path: '/ws/src/a.ts', kind: 'write', tool: 'edit', err: false, added: 3, removed: 1 },
-                ],
-              },
-            }),
-          },
+    vi.stubGlobal('fetch', async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        ok: true,
+        value: {
+          rev: 1,
+          requests: [{ seq: 2, turn: 1, step: 1, time: T0, system: 1, tools: 2, user: 3, inject: 0, assistant: 4, tool: 5, total: 15 }],
+          events: [],
+          nodes: [],
+          droppedNodes: 0,
+          archive: [],
+          // The op log covers the full session — the conversation window
+          // join plays no role in this card on this generation.
+          fileOps: [
+            { seq: 1, path: '/ws/README.md', kind: 'read', tool: 'read', err: false, added: 0, removed: 0, read: { start: 1, count: 12 } },
+            { seq: 2, path: '/ws/src/a.ts', kind: 'write', tool: 'edit', err: false, added: 3, removed: 1 },
+          ],
         },
-      },
-    })
+      }),
+    }))
+    const ctx = new TestClientCtx()
     const View = makeView(ctx)
     const m = await mount(h(View, {
       sessionId: 'sv-opslog',

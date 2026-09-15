@@ -32,11 +32,12 @@ import type { TimelineState } from './fold'
 const surfaceNodeSchema = z.object({
   seq: z.number().int().nonnegative(),
   time: z.number().optional(),
-  cat: z.enum(['user', 'inject', 'assistant', 'tool']),
+  cat: z.enum(['user', 'inject', 'skill', 'assistant', 'tool']),
   tokens: z.number().int().nonnegative(),
   imgs: z.number().int().nonnegative().optional(),
   gone: z.number().int().nonnegative().optional(),
   form: z.string().optional(),
+  name: z.string().optional(),
   text: z.string().optional(),
   tool: z.string().optional(),
   err: z.boolean().optional(),
@@ -64,6 +65,11 @@ const requestRecordSchema = z.object({
   tool: z.number().int().nonnegative(),
   total: z.number().int().nonnegative(),
   prompt: z.number().int().nonnegative().optional(),
+  /**
+   * Skill-machinery tokens (issue #66). The fold writes it on every record;
+   * optional so rows folded before the category existed still parse.
+   */
+  skill: z.number().int().nonnegative().optional(),
   cacheRead: z.number().int().nonnegative().optional(),
   output: z.number().int().nonnegative().optional(),
   stepCount: z.number().int().positive().optional(),
@@ -114,6 +120,7 @@ const currentSchema = z.object({
   tools: z.number().int().nonnegative(),
   user: z.number().int().nonnegative(),
   inject: z.number().int().nonnegative(),
+  skill: z.number().int().nonnegative(),
   assistant: z.number().int().nonnegative(),
   tool: z.number().int().nonnegative(),
   total: z.number().int().nonnegative(),
@@ -126,10 +133,14 @@ const costBucketsSchema = z.object({
   output: z.number().int().nonnegative(),
 }).strict()
 
-const costFamilySchema = z.object({
+const costModelSchema = z.object({
   peak: costBucketsSchema.optional(),
   off: costBucketsSchema.optional(),
 }).strict()
+
+const costModelsSchema = z.record(z.string(), costModelSchema)
+
+const costUsageSchema = z.record(z.string(), costModelsSchema)
 
 const toolTimingSchema = z.object({
   calls: z.number().int().nonnegative(),
@@ -190,12 +201,13 @@ export const contextTimelineSchema = z.object({
   current: currentSchema,
   images: z.number().int().nonnegative().optional(),
   toolCalls: z.number().int().nonnegative().optional(),
+  humanInputs: z.number().int().nonnegative().optional(),
   counts: countsSchema.optional(),
   last: lastSchema.optional(),
   detailRev: z.number().int().nonnegative().optional(),
   requests: z.array(requestRecordSchema).optional(),
   events: z.array(contextEventSchema).optional(),
-  cost: z.object({ flash: costFamilySchema.optional(), pro: costFamilySchema.optional() }).strict().optional(),
+  cost: costUsageSchema.optional(),
   timing: timingTotalsSchema.optional(),
   systems: z.array(systemPromptNodeSchema).optional(),
   nodes: z.array(surfaceNodeSchema).optional(),
@@ -218,6 +230,7 @@ const timelineStateSchema = z.object({
   sums: z.object({
     user: z.number().int().nonnegative(),
     inject: z.number().int().nonnegative(),
+    skill: z.number().int().nonnegative(),
     assistant: z.number().int().nonnegative(),
     tool: z.number().int().nonnegative(),
   }).strict(),
@@ -232,9 +245,10 @@ const timelineStateSchema = z.object({
   requests: z.array(requestRecordSchema),
   events: z.array(contextEventSchema),
   archived: z.array(surfaceNodeSchema),
-  cost: z.object({ flash: costFamilySchema.optional(), pro: costFamilySchema.optional() }).strict().optional(),
+  cost: costUsageSchema.optional(),
   archiveFloor: z.number().optional(),
   timing: timingTotalsSchema.optional(),
+  humanInputs: z.number().int().nonnegative().optional(),
   stepStart: z.object({
     time: z.number(),
     firstToken: z.number().optional(),
@@ -343,7 +357,32 @@ export function createContextTimelineDefinition(config: Config, slim: () => bool
     // until they go live again (the #37 regression) — strictly worse than a
     // pre-fix session showing its corrected figures from the next folded
     // event onward.
-    stateVersion: 15,
+    //
+    // 16: the whole-session human-input tally (`humanInputs`) joined the
+    // state — a running total that later events cannot backfill, so unlike
+    // the 0.47 additive fields a pre-tally cached row would undercount
+    // forever; cached rows refold from the log, which rebuilds the tally
+    // (the `timing`/`fileOps` precedent).
+    //
+    // 17: the session-cost totals (`cost`) rekeyed from the DeepSeek
+    // family × peak/off-period buckets to per-(provider, model) totals,
+    // priced client-side from the models.dev registry (client/modelPrices.ts)
+    // instead of the hardcoded rate table. The old shape cannot be
+    // reinterpreted, so cached rows refold from the log, which rebuilds the
+    // new keys.
+    //
+    // 18: the per-model totals gained the pricing-period split (peak /
+    // half-price off-peak — DeepSeek's period-based list; every other
+    // provider books everything under `peak`). The old shape cannot be
+    // reinterpreted, so cached rows refold from the log, which rebuilds the
+    // periods.
+    //
+    // 19: the skill-machinery composition bucket (`skill`) joined the state —
+    // skill-catalog digests and `/name` invocation messages left `inject`, and
+    // `skill`-tool loads left `tool` (issue #66). The re-bucketing changes
+    // the fold's per-category sums, so cached rows refold from the log, which
+    // rebuilds them under the new categories.
+    stateVersion: 19,
   }
   return definition
 }

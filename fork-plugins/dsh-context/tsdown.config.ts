@@ -2,6 +2,8 @@ import { readFileSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
 import { isBuiltin } from 'node:module'
 import { basename, dirname, join, resolve as resolvePath } from 'node:path'
+import { compile as compileTailwind } from '@tailwindcss/node'
+import { Scanner } from '@tailwindcss/oxide'
 import { transform } from 'lightningcss'
 import { defineConfig } from 'tsdown'
 
@@ -25,8 +27,10 @@ const PLATFORM_MODULES = [
 // Mirrors the purity-gate allowances in packages/client/tsdown.client.ts:
 // wire/type layers with no shared runtime identity may inline; every other
 // @deepseek-ai/* value import is a build error (cross-plugin collaboration
-// goes through cordis services).
-const INLINE_SAFE = /^@deepseek-ai\/dsh-(host-apiproxy|file-reference|session|llm|tools|brand)(\/|$)/
+// goes through cordis services). `util-workspace-path` is the browser-safe
+// file-address layer (`fileAddressFor`) the right Sidebar's own file types
+// inline too, so the preview addresses this plugin builds are the harness's.
+const INLINE_SAFE = /^@deepseek-ai\/dsh-(host-apiproxy|file-reference|session|llm|tools|brand|util-workspace-path)(\/|$)/
 const VENDORED_LIBRARY = /^@deepseek-ai\/(cosmokit|schemastery)(\/|$)/
 const GENERATED_REMOTE = /^@deepseek-ai\/dsh-[a-z0-9]+(?:-[a-z0-9]+)*\/remote$/
 
@@ -85,6 +89,28 @@ function sourceAssetPath(source: string, importer: string): string {
   return resolvePath(dirname(importer), source)
 }
 
+// The one sheet whose Tailwind utilities are compiled (src/client/styles/tailwind.css):
+// its @source directives name the scanned client sources, and the resolved sources
+// drive the oxide scanner here. Every other sheet stays plain CSS.
+const TAILWIND_ENTRY = 'tailwind.css'
+
+interface WatchCapable {
+  addWatchFile(file: string): void
+}
+
+async function compileTailwindSheet(loader: WatchCapable, fileId: string, source: string): Promise<string> {
+  const compiler = await compileTailwind(source, {
+    base: dirname(fileId),
+    onDependency: (file) => { loader.addWatchFile(file) },
+  })
+  const scanner = new Scanner({ sources: compiler.sources })
+  const candidates = scanner.scan()
+  // Scanned sources feed the candidates, so a watch rebuild must also fire when
+  // a component's class list changes, not just when a stylesheet does.
+  for (const file of scanner.files) loader.addWatchFile(file)
+  return compiler.build(candidates)
+}
+
 function cssChannels(id: string) {
   return [{
     name: 'dsh-css-modules-inline',
@@ -138,9 +164,15 @@ function cssChannels(id: string) {
       if (!virtualId.startsWith(GLOBAL_CSS_VIRTUAL_PREFIX)) return null
       const fileId = virtualId.slice(GLOBAL_CSS_VIRTUAL_PREFIX.length, -CSS_VIRTUAL_SUFFIX.length)
       this.addWatchFile(fileId)
-      const source = await readFile(fileId)
-      const { code } = transform({ filename: fileId, code: source, minify: true })
-      return styleInjectionModule(id, fileId, code.toString())
+      const raw = await readFile(fileId)
+      // The Tailwind entry compiles to a CSS string first; every other sheet
+      // hands its Buffer straight to lightningcss. Either way the binding
+      // reads the TypedArray, so the code must never arrive as a string.
+      const code = basename(fileId) === TAILWIND_ENTRY
+        ? Buffer.from(await compileTailwindSheet(this, fileId, raw.toString()))
+        : raw
+      const { code: css } = transform({ filename: fileId, code, minify: true })
+      return styleInjectionModule(id, fileId, css.toString())
     },
   }]
 }

@@ -186,13 +186,13 @@ describe('dsh-context host plugin', () => {
     assert.equal(snapshot.values.contextHeaders, undefined)
   })
 
-  test('the split generation with the detail channel live: slim wire head + the endpoint serves the collections', async () => {
+  test('the split generation with the detail route live: slim wire head + the endpoint serves the collections', async () => {
     const ctx = new Context()
-    let handler: ((endpoint: string, payload: unknown) => Promise<unknown>) | undefined
+    let route: { path?: string; fetch?: (request: Request) => Promise<Response> } | undefined
     ctx.provide('connection', {
-      rpc: {
-        handle: (_channel: string, h: never) => {
-          handler = h
+      fetch: {
+        register: (r: never) => {
+          route = r
           return () => {}
         },
       },
@@ -216,8 +216,14 @@ describe('dsh-context host plugin', () => {
     assert.equal(timeline.nodes.length, 0, 'the collections stay off the wire value')
     assert.equal(timeline.requests.length, 0)
 
-    assert.ok(handler !== undefined, 'the detail channel registered')
-    const result = await handler('detail', { sessionId: session.header.id }) as {
+    assert.ok(route !== undefined && route.fetch !== undefined, 'the detail route registered')
+    assert.equal(route.path, '/api/dsh-context/detail')
+    const response = await route.fetch(new Request('http://dsh.test/api/dsh-context/detail', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ sessionId: session.header.id }),
+    }))
+    const result = await response.json() as {
       ok: boolean
       value: { rev: number; nodes: unknown[]; requests: unknown[] } | null
     }

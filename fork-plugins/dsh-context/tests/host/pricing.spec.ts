@@ -223,6 +223,11 @@ describe('injectionSourceName', () => {
     assert.equal(injectionSourceName({ kind: '' }), '')
     assert.equal(injectionSourceName({}), '')
   })
+
+  test('a missing source degrades to empty instead of throwing (issue #69)', () => {
+    assert.equal(injectionSourceName(undefined), '')
+    assert.equal(injectionSourceName(null), '')
+  })
 })
 
 describe('isInjection', () => {

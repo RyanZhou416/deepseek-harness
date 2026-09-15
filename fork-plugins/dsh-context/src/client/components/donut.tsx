@@ -1,14 +1,24 @@
 /**
  * The stats cards' ring chart: proportional SVG segments (stroke-dasharray
  * over a 100-unit circumference, the same trick as the agent graph's rings)
- * around an HTML center label. Segments with no value are skipped; an
- * all-zero ring renders as one neutral track so the card never draws a
- * misleading "100% of nothing" pie. The center type scales with the ring's
- * size, so the label always fits inside the hole the thin stroke leaves.
+ * around an HTML center label. Neighbouring segments part on a hairline of the
+ * card's own background (each arc gives up a half gap at both ends); segments
+ * with no value are skipped; an all-zero ring renders as one neutral track so
+ * the card never draws a misleading "100% of nothing" pie. The center type
+ * scales with the ring's size, so the label always fits inside the hole the
+ * thin stroke leaves. On mount the slices sweep in one after another, growing
+ * their dasharcs clockwise from 12 o'clock (stats.css, staggered by the
+ * per-slice `--lc-i` slot below).
  */
 
-import { type ReactElement, type ReactNode } from 'react'
+import { type CSSProperties, type ReactElement, type ReactNode } from 'react'
 import type { ViewKit } from '../viewkit'
+
+/**
+ * The hairline divider between two slices, in dasharray units (1 unit ≈ 1% of
+ * the circumference ≈ 2.3px on the 96px card ring, so this reads as ~1px).
+ */
+const SEG_GAP = 0.5
 
 export interface DonutSegment {
   key: string
@@ -41,15 +51,27 @@ export function makeDonut(kit: ViewKit): (props: DonutProps) => ReactElement {
     // One dasharray unit = 1% of the circumference (r = 15.9155 → C ≈ 100);
     // each segment starts where the previous one ends, the +25 offset pins
     // the first segment to 12 o'clock.
-    const arcs: { key: string; color: string; pct: number; offset: number }[] = []
+    const arcs: { key: string; color: string; len: number; offset: number }[] = []
     let acc = 0
     if (total > 0) {
       for (const s of props.segments) {
         const v = Number.isFinite(s.value) && s.value > 0 ? s.value : 0
         if (v === 0) continue
         const pct = v / total * 100
-        arcs.push({ key: s.key, color: s.color, pct, offset: 100 - acc + 25 })
+        arcs.push({ key: s.key, color: s.color, len: pct, offset: 100 - acc + 25 })
         acc += pct
+      }
+    }
+    // The divider: with a neighbour on each side a slice gives up half a gap at
+    // BOTH ends, so the card's own background parts the colours. A lone painted
+    // slice keeps its full ring (a gap there reads as a nick), and the cut never
+    // takes more than half a sliver — the 0.2% overhead wedge would otherwise
+    // vanish whole.
+    if (arcs.length > 1) {
+      for (const a of arcs) {
+        const cut = Math.min(SEG_GAP / 2, a.len / 4)
+        a.len -= cut * 2
+        a.offset -= cut
       }
     }
     // The ring dims only for a hover that lands on a painted arc — a legend
@@ -58,25 +80,27 @@ export function makeDonut(kit: ViewKit): (props: DonutProps) => ReactElement {
       && arcs.some(a => a.key === props.hoverKey)
     return (
       <div
-        className={'lc-donut' + (hovering ? ' lc-donut-dim' : '')}
+        className={'lc-donut @max-[240px]/lc-card:mx-auto' + (hovering ? ' lc-donut-dim' : '')}
         style={{ width: size, height: size }}
         onMouseLeave={() => { if (props.onHoverKey !== undefined) props.onHoverKey(null) }}
       >
         <svg viewBox="0 0 42 42" width={size} height={size} aria-hidden="true">
           {arcs.length === 0
-            ? <circle className="lc-donut-track" cx="21" cy="21" r="15.9155" fill="none" strokeWidth="4" />
-            : arcs.map(a => (
+            ? <circle className="lc-donut-track fill-none stroke-4" cx="21" cy="21" r="15.9155" />
+            : arcs.map((a, i) => (
               <circle
                 key={a.key}
-                className={'lc-donut-seg' + (props.hoverKey === a.key ? ' lc-donut-seg-on' : '')}
+                className={'lc-donut-seg fill-none stroke-4 animate-lc-donut-in motion-reduce:animate-none' + (props.hoverKey === a.key ? ' lc-donut-seg-on' : '')}
                 cx="21"
                 cy="21"
                 r="15.9155"
-                fill="none"
-                stroke={a.color}
-                strokeWidth="4"
-                strokeDasharray={`${a.pct} ${100 - a.pct}`}
+                strokeDasharray={`${a.len} ${100 - a.len}`}
                 strokeDashoffset={a.offset}
+                // Sweep-in stagger slot (stats.css animates stroke-dasharray from 0 100 up to these attribute
+                // values, so the slices build clockwise from 12 o'clock, one after another).
+                // The stroke rides inline because the colors are CSS variables and SVG
+                // presentation attributes cannot carry var().
+                style={{ '--lc-i': i, stroke: a.color } as CSSProperties}
                 onMouseEnter={() => { if (props.onHoverKey !== undefined) props.onHoverKey(a.key) }}
               />
             ))}

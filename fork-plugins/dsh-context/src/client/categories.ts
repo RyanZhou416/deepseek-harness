@@ -1,6 +1,6 @@
 /**
- * Category presentation config: the six priced buckets (system, tool
- * schemas, and the four surface categories) with their chart colors, plus
+ * Category presentation config: the seven priced buckets (system, tool
+ * schemas, and the five surface categories) with their chart colors, plus
  * the part builders behind the composition card.
  *
  * Two figures ride on every part, mirroring the official chat context
@@ -11,7 +11,7 @@
  * heuristic ratios). Without a provider anchor the two are equal.
  */
 
-import type { Category, ContextBreakdown, RequestRecord, Snapshot } from '../shared/types'
+import type { Category, ContextBreakdown, RequestRecord, Snapshot, TokenUsage } from '../shared/types'
 
 export interface PartsPart {
   key: string
@@ -27,18 +27,19 @@ export interface PartsPart {
 }
 
 export const CATS: { key: Category | 'system' | 'tools'; color: string }[] = [
-  { key: 'system', color: '#6366f1' },
-  { key: 'tools', color: '#f59e0b' },
-  { key: 'user', color: '#22c55e' },
-  { key: 'inject', color: '#a855f7' },
-  { key: 'assistant', color: '#3b82f6' },
-  { key: 'tool', color: '#14b8a6' },
+  { key: 'system', color: 'var(--color-indigo-500)' },
+  { key: 'tools', color: 'var(--color-amber-500)' },
+  { key: 'user', color: 'var(--color-green-500)' },
+  { key: 'inject', color: 'var(--color-purple-500)' },
+  { key: 'skill', color: 'var(--color-orange-500)' },
+  { key: 'assistant', color: 'var(--color-blue-500)' },
+  { key: 'tool', color: 'var(--color-teal-500)' },
 ]
 
 /** Category key → bar color, for per-item bands (the browser's DNA mode) that bypass the CATS-order part builders. */
 export const CAT_COLOR = Object.fromEntries(CATS.map(c => [c.key, c.color])) as Record<Category | 'system' | 'tools', string>
 
-const MESSAGE_CATS: readonly (Category | 'system' | 'tools')[] = ['user', 'inject', 'assistant', 'tool']
+const MESSAGE_CATS: readonly (Category | 'system' | 'tools')[] = ['user', 'inject', 'skill', 'assistant', 'tool']
 
 export function partsOf(breakdown: Snapshot['current'] | RequestRecord): PartsPart[] {
   return CATS.map((c) => {
@@ -59,7 +60,7 @@ export function officialParts(
   current: Snapshot['current'],
   breakdown: ContextBreakdown | null,
 ): PartsPart[] {
-  const foldSurface = current.user + current.inject + current.assistant + current.tool
+  const foldSurface = current.user + current.inject + current.skill + current.assistant + current.tool
   const system = breakdown?.systemTokens ?? current.system
   const tools = breakdown?.toolsTokens ?? current.tools
   const messages = breakdown?.messageTokens ?? foldSurface
@@ -106,4 +107,29 @@ export function anchoredParts(parts: PartsPart[], target: number | null): PartsP
   if (total === target) return sourced.map(p => ({ ...p, value: p.raw }))
   const scale = target / total
   return sourced.map(p => ({ ...p, value: Math.round(p.raw * scale) }))
+}
+
+/**
+ * The Token card's billed split, by WHAT the tokens are rather than by how
+ * the provider cached them: the six composition categories share the
+ * provider-reported prompt-side total (uncached + cache read + cache write —
+ * the chat stats line's billed input) by the composition card's own
+ * estimated ratios, and the provider's exact output count closes the ring as
+ * the seventh part. Only the per-category split is estimated — every
+ * category's sum and the output figure are provider-reported, so the parts
+ * total equals the chat line's whole-session token count by construction. A
+ * zero/negative prompt total (or a hostile negative output) never invents a
+ * split: the prompt parts zero out / the output clamps at 0.
+ */
+export function billedParts(
+  current: Snapshot['current'],
+  breakdown: ContextBreakdown | null,
+  usage: TokenUsage,
+): PartsPart[] {
+  const input = usage.uncachedInputTokens + usage.cacheReadTokens + usage.cacheWriteTokens
+  const estimated = officialParts(current, breakdown)
+  const prompt = input > 0
+    ? anchoredParts(estimated, input)
+    : estimated.map(p => ({ ...p, value: 0 }))
+  return [...prompt, { key: 'output', color: 'var(--color-pink-500)', value: Math.max(0, usage.outputTokens) }]
 }

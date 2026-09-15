@@ -19,6 +19,19 @@
  */
 [data-sidebar-right-open] .lc-root,
 [data-sidebar-right-float-host] .lc-root { height: auto; overflow: visible; padding: 12px; }
+/* The Context tab chip's emblem: held at its drawn size in the title's flex
+   line (dockkit's `.tabTitle`; the files chip's own titleIcon idiom). */
+.lc-title-icon { flex: none; }
+/*
+ The chip's close control is OUT of flow over the title's last 14px, and an
+ active/hovered chip fades the 16px before it (dockkit `.tabTitle`'s mask) so
+ the text dies away under the close. The shipped files chip stays readable
+ only because its short label ends before that zone; our icon plus a longer
+ label runs into it. This gutter makes the fade land past the text: 30px is
+ the mask's own lead-in (`calc(100% - 30px)`), the one dockkit chrome
+ constant this touches — re-check it if that mask ever moves.
+ */
+.lc-title-label { padding-right: 30px; }
 /*
  Border roles: l2 (0.1 black ≈ #E5E5E5 on white) draws the VISIBLE edges —
  cards and controls, matching dsh's own Button/Input chrome; l1 stays for
@@ -40,9 +53,12 @@
  sidebar state. Inline-size containment is safe: every card's width comes
  from its flex row, never from its contents; the one fixed-position overlay
  (the image lightbox) portals to <body>, so the layout-containment fixed-CB
- trap cannot catch it.
+ trap cannot catch it. Border-box is load-bearing on the narrow pane: cards
+ carry the `min-w-[min(360px,100%)]` floor while riding this sheet's padding,
+ and the plugin ships no preflight reset — a content-box card reads the floor
+ as its content width and overflows its row by its own chrome (issue #65).
  */
-.lc-root .lc-card { padding: 7px 8px; margin-bottom: 7px; container: lc-card / inline-size; }
+.lc-root .lc-card { box-sizing: border-box; padding: 7px 8px; margin-bottom: 7px; container: lc-card / inline-size; }
 .lc-root .lc-cols { gap: 7px; margin-bottom: 7px; }
 /* Wraps under width pressure: toggle groups/kind chips in a header drop to
    their own line instead of spilling past the card edge. */
@@ -58,11 +74,17 @@
 .lc-gran-btn { border: 0; background: transparent; color: var(--dsw-alias-label-secondary); font-size: 11px; line-height: 1; padding: 3px 8px; border-radius: 5px; cursor: pointer; font-family: inherit; transition: color var(--ds-transition-duration, 0.2s) var(--ds-ease-in-out, ease-in-out); }
 .lc-gran-btn:hover { color: var(--dsw-alias-label-primary); }
 .lc-gran-on, .lc-gran-on:hover { background: var(--dsw-alias-button-primary-fill); color: var(--dsw-alias-label-primary-foreground); }
+/* The events card's kind filters carry their per-kind event tally: a tabular
+   count set off from the label, dimmed while the chip is off and inherited
+   (slightly translucent) on the lit chip. */
+.lc-kind-n { margin-left: 4px; font-variant-numeric: tabular-nums; opacity: 0.65; }
+.lc-gran-on .lc-kind-n { opacity: 0.85; }
 /*
  Shared tooltip-bubble chrome: pair `.lc-tip` with the owner's own tip class,
- then position locally (top/bottom anchor, width cap, whitespace, reveal rule).
- The component sheets carry the four shippers (.lc-stat-tip / .lc-brief-tip /
- .lc-fa-meta-tip / .lc-bar-tip); a new tip never re-declares this chrome.
+ then position locally (top/bottom anchor, width cap, whitespace); the reveal
+ rides a `group-hover/tip` variant on the owner. The component sheets carry
+ the four shippers (.lc-stat-tip / .lc-brief-tip / .lc-fa-meta-tip / .lc-bar-tip);
+ a new tip never re-declares this chrome.
  */
 .lc-tip { position: absolute; z-index: 6; width: max-content; background: var(--dsw-alias-bg-layer-2); border: 1px solid var(--dsw-alias-border-l1); border-radius: 6px; padding: 6px 10px; font-size: 12px; color: var(--dsw-alias-label-primary); box-shadow: var(--dsw-shadow-lv3, 0 2px 8px rgba(0, 0, 0, 0.18)); pointer-events: none; opacity: 0; transition: opacity var(--ds-transition-duration, 0.2s) var(--ds-ease-in-out, ease-in-out); }
 .lc-events, .lc-fa-list { display: flex; flex-direction: column; gap: 2px; height: 320px; overflow-y: auto; }
@@ -70,48 +92,34 @@
  The row owns the 14px vertical rhythm (lc-cols gap); cards drop their own bottom margin (incl. the last in a column) so every section boundary measures exactly one 14px whichever way the flex wraps.
  */
 .lc-cols { display: flex; gap: 14px; flex-wrap: wrap; margin-bottom: 14px; }
-/* Columns fold at 360px: the cards that pair up — the main row's composition/trend
-   against the browser, and the events card against file activity — read cramped at a
-   quarter-share of a narrow pane, so the main row needs 2 x 360px + the 7px gap to stay
-   side by side. min() caps the floor at the row's own width: on a sub-360px pane the
-   column narrows instead of overflowing. */
-.lc-col { flex: 1; min-width: min(360px, 100%); }
 .lc-cols > .lc-card { margin-bottom: 0; }
 .lc-col > .lc-card:last-child { margin-bottom: 0; }
 .lc-col-browser { display: flex; flex-direction: column; }
 .lc-col-browser > .lc-card { flex: 1; }
 /*
- Head row: four EQUAL-width cards (context / token / timing / plugin). Wide
- panes keep them on one line — `flex-basis: 0` + equal grow quarters the row
- exactly, and `min-width: 0` lets the split ignore content. The row is the
- `lc-head-row` query container, so the split folds instead of crushing the
- cards (issue #48): below 1045px (a quarter under ~256px — where the donut
- cards would leave their side-by-side anatomy) the row wraps to 2×2, and
- below 480px (phone panes) it stacks single-column. Engines without
- container queries keep the wide four-across layout. The right Sidebar's panel
- renders TWO of the four (it drops the context stats and plugin info cards —
- see contextView.tsx); the same rules then split the pair into halves.
+ Head band: TWO rows of two EQUAL-width cards — the session's shape beside
+ the plugin card (context / plugin), then the two donut cards together
+ (token / timing). The rows are `.lc-cols` flex-wrap rows and the cards ride
+ the shared column idiom (`flex-1 min-w-[min(360px,100%)]` in the
+ components): equal `flex: 1` halves each row exactly and the min-width
+ floor is the fold — below 2 x 360px + gap of row width (a half under
+ ~360px, where the donut cards' ring+legend single-line and the count grid
+ both start to cramp, issue #48) the pair wraps onto full-width lines. Cards
+ under that end of the band sit under their own lc-card reflows (stats.css:
+ the ring stacks over its legend, the cell grid folds), so the two-card
+ line is the trade this floor buys. Engines without container queries keep
+ the wide two-across layout. The right Sidebar's panel renders only the
+ donut row (it drops the context stats / plugin info row — see
+ contextView.tsx); the same wrap then stacks the pair in the narrow pane.
  */
-.lc-head { container: lc-head-row / inline-size; }
-.lc-head > .lc-card { flex: 1 1 0; min-width: 0; }
-@container lc-head-row (max-width: 1045px) {
-  /* 40% keeps three cards from ever fitting one line; grow evens the pair
-     to halves. Plain percentage only — a calc(% - gap) basis mis-resolves
-     against a size-container row (each card balloons to full width). */
-  .lc-head > .lc-card { flex-basis: 40%; }
-}
-@container lc-head-row (max-width: 480px) {
-  .lc-head > .lc-card { flex-basis: 100%; }
-}
-/* The context card's cell grid stretches to the donut cards' height, so the four-equal row reads as one level band. */
-.lc-head > .lc-card:first-child { display: flex; flex-direction: column; }
-.lc-head > .lc-card:first-child .lc-stats { flex: 1; align-content: stretch; }
-.lc-head > .lc-card:first-child .lc-stat { justify-content: center; }
+/* The context card's cell grid stretches to the plugin card's height, so the row reads as one level band. */
+.lc-head > .lc-card:has(.lc-stats) { display: flex; flex-direction: column; }
+.lc-head .lc-stats { flex: 1; align-content: stretch; }
+.lc-head .lc-stat { justify-content: center; }
 .lc-empty { color: var(--dsw-alias-label-secondary); padding: 18px 0; text-align: center; }
 .lc-error { display: flex; flex-direction: column; align-items: center; gap: 8px; padding: 40px 16px; }
 .lc-error-msg { font-family: var(--ds-font-family-code, ui-monospace, SFMono-Regular, Menlo, monospace); font-size: 12px; color: var(--dsw-alias-state-error-primary); background: var(--dsw-alias-bg-layer-2); border: 1px solid var(--dsw-alias-border-l1); border-radius: 6px; padding: 4px 8px; max-width: 100%; overflow-wrap: anywhere; }
 .lc-error-retry { border: 1px solid var(--dsw-alias-border-l2); background: var(--dsw-alias-bg-layer-2); color: var(--dsw-alias-label-primary); font: inherit; font-size: 12px; padding: 4px 14px; border-radius: 6px; cursor: pointer; transition: border-color var(--ds-transition-duration, 0.2s) var(--ds-ease-in-out, ease-in-out); }
-.lc-error-retry:hover { border-color: var(--dsw-alias-label-primary); }
 .lc-foot { color: var(--dsw-alias-label-secondary); font-size: 12px; margin-top: 4px; }
 [data-conversation-scroll]:has(.lc-root) > [data-composer-seat]:not(:has([data-approval-key], [data-question-key], [data-plan-review-key])) { display: none; }
 /*
