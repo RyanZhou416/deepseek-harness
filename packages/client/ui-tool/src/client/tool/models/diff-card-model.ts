@@ -25,18 +25,16 @@ export interface DiffCardModel {
  * @param diffs - the metadata field to validate.
  * @returns the validated hunks, or null when the payload is not usable.
  */
-function narrowDiffs(diffs: unknown): DiffHunk[] | null {
+function narrowDiffs(diffs: unknown): readonly DiffHunk[] | null {
   if (!Array.isArray(diffs) || diffs.length === 0) return null
-  const out: DiffHunk[] = []
   for (const hunk of diffs) {
     if (typeof hunk !== 'object' || hunk === null) return null
     const { path, oldText, newText } = hunk as Record<string, unknown>
     if (typeof path !== 'string') return null
     if (oldText !== null && typeof oldText !== 'string') return null
     if (typeof newText !== 'string') return null
-    out.push({ path, oldText, newText })
   }
-  return out
+  return diffs as DiffHunk[]
 }
 
 type IntendedDiff = { tool: 'write' | 'edit' | 'str_replace_editor'; diff: DiffHunk }
@@ -80,12 +78,25 @@ function intendedDiff(block: ToolCallBlock): IntendedDiff | null {
   return { tool: 'edit', diff: { path, oldText: oldText || null, newText } }
 }
 
-function appliedDiffs(meta: unknown): DiffHunk[] | 'empty' | null {
+function appliedDiffs(meta: unknown): readonly DiffHunk[] | 'empty' | null {
   if (typeof meta !== 'object' || meta === null || Array.isArray(meta)) return null
   const diffs = (meta as Record<string, unknown>).diffs
   if (!Array.isArray(diffs)) return null
   if (diffs.length === 0) return 'empty'
   return narrowDiffs(diffs)
+}
+
+/** Keep the validated wire array cheap until an expanded DiffBlock reads it. */
+function lazyDiffCard(diffs: readonly DiffHunk[]): DiffCardModel {
+  let copied: DiffHunk[] | undefined
+  return {
+    card: {
+      get diffs() {
+        copied ??= diffs.map(({ path, oldText, newText }) => ({ path, oldText, newText }))
+        return copied
+      },
+    },
+  }
 }
 
 /**
@@ -101,12 +112,12 @@ export function diffCardModel(block: ToolCallBlock): DiffCardModel | null {
   if (block.parentCallId !== undefined) return null
   const intended = intendedDiff(block)
   if (intended === null) return null
-  if (!('kind' in block)) return { card: { diffs: [intended.diff] } }
+  if (!('kind' in block)) return lazyDiffCard([intended.diff])
   if (intended.tool === 'str_replace_editor') return null
   if (block.isError) return null
   const applied = appliedDiffs(block.meta)
   if (applied === null || applied === 'empty') {
-    return intended.tool === 'write' ? { card: { diffs: [intended.diff] } } : null
+    return intended.tool === 'write' ? lazyDiffCard([intended.diff]) : null
   }
-  return { card: { diffs: applied } }
+  return lazyDiffCard(applied)
 }

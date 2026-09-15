@@ -2,5 +2,5 @@
 # side as of the last confirmed-consistent state. Both languages carry equal authority;
 # after editing either side, bring the other along and re-record with:
 #   pnpm run verify-translation-pairing --write .agents/notes/implemented/feature/2026-08-30-steer-responsive-agent-team-work.md
-2026-08-30-steer-responsive-agent-team-work.md: 4b108f6e2173ed37df5c14f1a7ceb7d7af3cf953
-2026-08-30-steer-responsive-agent-team-work.zh.md: fc1ed7ca56d25bce01c34de4a5dcfcf54e9084cc
+2026-08-30-steer-responsive-agent-team-work.md: fc03d249fdc9bd928ccacd67114f099972269f5d
+2026-08-30-steer-responsive-agent-team-work.zh.md: a949a2401e0b5fc6290b3f5bb2ce7ab2b39ca4a5

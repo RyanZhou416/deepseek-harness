@@ -16,7 +16,7 @@
  */
 
 /** The supported dsh tags, in lockstep with the BASELINES entries below. */
-export type BaselineId = 'v0.1.2-rc.1' | 'v0.1.3-alpha.2' | 'v0.1.5-rc.1'
+export type BaselineId = 'v0.1.2-rc.1' | 'v0.1.3-alpha.2' | 'v0.1.5-rc.1' | 'v0.1.6-alpha.1'
 
 /** The harness web half's client faces, as far as the compat probes consume them. */
 export interface ClientSeam {
@@ -126,7 +126,7 @@ export interface Baseline {
   }
 }
 
-export const BASELINES: readonly Baseline[] = [
+const LEGACY_BASELINES: readonly Baseline[] = [
   {
     // Session format V0 — the oldest supported line (the plugin's original target).
     id: 'v0.1.2-rc.1',
@@ -264,5 +264,19 @@ export const BASELINES: readonly Baseline[] = [
       loopNeedles: ["'agent/pre-step'", "append('user/message'"],
       prependProofFile: 'packages/context/time-context/src/index.ts',
     },
+  },
+]
+
+const previousV3 = LEGACY_BASELINES[2]
+if (previousV3 === undefined) throw new Error('missing V3 compatibility baseline')
+
+/** Supported DSH releases, including the current V3 host generation. */
+export const BASELINES: readonly Baseline[] = [
+  ...LEGACY_BASELINES,
+  {
+    ...previousV3,
+    id: 'v0.1.6-alpha.1',
+    tag: 'dsh-v0.1.6-alpha.1',
+    session: '0.1.6-alpha.1',
   },
 ]

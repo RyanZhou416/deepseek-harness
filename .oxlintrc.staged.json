@@ -13,6 +13,8 @@
     "**/.node-next-types-*/**",
     "website/.generated/**",
     "vendor/**",
+    "fork-plugins/dsh-agent-teams/**",
+    "fork-plugins/dsh-context/**",
     "native/**",
     "**/*.js",
     "**/*.mjs",

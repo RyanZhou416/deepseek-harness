@@ -12,7 +12,7 @@ Status: implemented
 
 ## 决策
 
-本 fork 将上游 `dsh-context` `v0.49.0` 的 `40bb97c5633eabbdf1c22c77a3a0f1e10c6d8108` vendored 到 [`fork-plugins/dsh-context`](../../../../fork-plugins/dsh-context/FORK_MAINTENANCE.md)，并发布私有包版本 `0.49.0-dsh015rc1.1`。部署配置使用 `maxRequestSteps: 300`、`maxKeptTurns: 60`、`maxEvents: 100`、`maxNodes: 400`、`maxArchiveNodes: 100` 与 `maxFileOps: 100`。
+本 fork 将上游 `dsh-context` tag `v0.52.2` vendored 到 [`fork-plugins/dsh-context`](../../../../fork-plugins/dsh-context/FORK_MAINTENANCE.md)，并发布私有包版本 `0.52.2-dsh016alpha1.1`。部署配置使用 `maxRequestSteps: 300`、`maxKeptTurns: 60`、`maxEvents: 100`、`maxNodes: 400`、`maxArchiveNodes: 100` 与 `maxFileOps: 100`。导入的源码树保留上游文档政策；本记录与双语 fork 插件指南负责 DSH 整合声明。
 
 本 fork 采用上游的 V0/V2/V3 日志 fold、Host 侧 File Activity 账本、右侧 Sidebar 面板与拆分式 timeline 传输。projection value 携带精简 head，打开的 Context 标签页或 modal 通过 detail channel 取得大型集合。导入的 `TimelineState` schema 使用 `stateVersion: 15`；不兼容的插件检查点会从不可变 Session 日志重新派生，而不是原地迁移。
 
@@ -22,9 +22,11 @@ projection 定义会在可见状态输入保持引用相等的 transition 之间
 
 `/context` overlay 将 modal-store gate 与数据 body 分开。关闭的 gate 只订阅打开标志。打开时会挂载 projection、detail、history 与 conversation 钩子以及键盘和布局生命周期；关闭时会释放该子树。
 
+`contextHeaders` fold 会把有界的 V3 `system/message` 节点保留到随后的 `request/header`，并在该 epoch 上记录有效 system token 计价。它的可选 state 扩展 version-1 schema，因此现有检查点仍可读取。
+
 ## 备选方案
 
-**直接使用不带 fork 代码的上游 `v0.49.0`。** 拒绝，因为上游 fold 会在每个有变化的事件上复制全部已保留集合，关闭的 modal 仍挂载数据钩子，并且恢复的检查点不会在提供首个 value 前执行 bounds clamp。
+**直接使用不带 fork 代码的上游 `v0.52.2`。** 拒绝，因为上游 fold 会在每个有变化的事件上复制全部已保留集合，关闭的 modal 仍挂载数据钩子，恢复的检查点不会在提供首个 value 前执行 bounds clamp，并且 V3 header epoch 缺少 system token 计价。
 
 **只降低 retention bounds。** 拒绝，因为 Host-only 事件仍会复制已保留集合，关闭的 modal 仍会收到 projection 与 detail 活动，而空闲的已恢复检查点仍可能提供按旧 bounds 保留的数据。
 

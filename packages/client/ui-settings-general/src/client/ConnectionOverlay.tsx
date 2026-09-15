@@ -57,7 +57,6 @@ export function ConnectionOverlay({ useConnectionState, reconnect, t }: Connecti
       <ConnectionIndicator
         state={indicator}
         disconnectedLabel={t('connection.error' satisfies SettingsKey)}
-        reconnectLabel={t('connection.retry' satisfies SettingsKey)}
         connectingLabel={t('connection.connecting' satisfies SettingsKey)}
         recoveredLabel={t('connection.connected' satisfies SettingsKey)}
         reconnectActionLabel={t('connection.reconnect' satisfies SettingsKey)}

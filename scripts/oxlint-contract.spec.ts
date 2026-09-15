@@ -213,18 +213,30 @@ export const longProbe = 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 +
       throw new Error('package.json must contain scripts and devDependencies objects')
     }
 
-    expect(packageJson.scripts['lint:contracts-ready']).toBe('tsx scripts/run-oxlint.ts .')
+    expect(packageJson.scripts['lint:contracts-ready']).toBe('tsx scripts/run-oxlint.ts --disable-nested-config .')
     expect(packageJson.scripts['lint:fix:contracts-ready']).toBe(
-      'tsx scripts/run-oxlint.ts --config .oxlintrc.staged.json packages/typert/generator/tests/fixtures/type-model --fix && tsx scripts/run-oxlint.ts . --fix',
+      'tsx scripts/run-oxlint.ts --config .oxlintrc.staged.json packages/typert/generator/tests/fixtures/type-model --fix && tsx scripts/run-oxlint.ts --disable-nested-config . --fix',
     )
     expect(packageJson.devDependencies).not.toHaveProperty('eslint')
     expect(packageJson.devDependencies).not.toHaveProperty('@typescript-eslint/parser')
     expect(existsSync(join(repositoryRoot, 'eslint.format.config.mjs'))).toBe(false)
 
     const lefthook = await readFile(join(repositoryRoot, 'lefthook.yml'), 'utf8')
-    expect(lefthook).toContain('scripts/run-oxlint.ts --config .oxlintrc.staged.json --fix')
+    expect(lefthook).toContain('scripts/run-oxlint.ts --disable-nested-config --config .oxlintrc.staged.json --fix')
     expect(lefthook).not.toContain('node_modules/.bin/eslint')
     expect(lefthook).not.toContain('eslint.format.config.mjs')
+  })
+
+  it('leaves imported plugin source to each plugin lint configuration', async () => {
+    for (const configName of ['.oxlintrc.json', '.oxlintrc.staged.json']) {
+      const parsed = parseConfigFileTextToJson(configName, await readFile(join(repositoryRoot, configName), 'utf8'))
+      expect(parsed.error).toBeUndefined()
+      const config = parsed.config as { ignorePatterns?: string[] }
+      expect(config.ignorePatterns).toEqual(expect.arrayContaining([
+        'fork-plugins/dsh-agent-teams/**',
+        'fork-plugins/dsh-context/**',
+      ]))
+    }
   })
 
   it('reports an unused suppression', async () => {

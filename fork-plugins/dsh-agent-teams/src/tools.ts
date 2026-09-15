@@ -483,10 +483,11 @@ export function registerAgentTeamsTools(ctx: Context, config: ToolsConfig): Agen
   const memberSelections = installMemberSelectionRuntime(ctx, config.stateDir, (workspace, teamId, memberName) => (
     scheduler.kickMember(workspace, teamId, memberName)
   ))
-  ctx.on('agent/session-start', ({ agent }) => {
-    void redeliverCaptainMailbox(ctx, config, agent).catch((error: unknown) => {
+  ctx.on('agent/created', async ({ agent }) => {
+    await redeliverCaptainMailbox(ctx, config, agent).catch((error: unknown) => {
       ctx.logger.warn(`agent-teams: captain mailbox redelivery failed for ${agent.id}: ${String(error)}`)
     })
+    return undefined
   })
 
   async function dispatchMember(captain: Agent, teamId: string, memberName: string, text: string, signal: AbortSignal, mode: 'queue' | 'steer', attemptId?: string): Promise<boolean> {

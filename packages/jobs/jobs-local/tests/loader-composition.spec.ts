@@ -19,13 +19,15 @@ afterEach(async () => {
 })
 
 describe('jobs-local through a real Loader composition', () => {
-  it('applies the provider-owned admission config from a Cordis row', async () => {
+  it('applies provider-owned admission and terminal retention config from a Cordis row', async () => {
     root = await mkdtemp(join(tmpdir(), 'dsh-jobs-local-loader-'))
     const configPath = join(root, 'cordis.yml')
     await writeFile(configPath, [
       "- name: '@deepseek-ai/dsh-jobs-local'",
       '  config:',
       '    maxConcurrentJobsPerOwner: 1',
+      '    terminalJobRetentionMs: 60000',
+      '    maxRetainedTerminalJobsPerOwner: 1',
       '',
     ].join('\n'))
 
@@ -49,7 +51,7 @@ describe('jobs-local through a real Loader composition', () => {
     expect(context.jobs).toBeInstanceOf(LocalJobRegistry)
     context.jobs.attachController('loader-test')
     let settle!: (outcome: { status: 'killed' }) => void
-    context.jobs.start({
+    const firstId = context.jobs.start({
       kind: 'bash',
       label: 'hold loader slot',
       run: () => ({
@@ -62,5 +64,17 @@ describe('jobs-local through a real Loader composition', () => {
       label: 'blocked loader job',
       run: () => ({ cancel: () => {}, done: Promise.resolve({ status: 'completed' }) }),
     })).toThrow('(limit: 1)')
+
+    settle({ status: 'killed' })
+    await Promise.resolve()
+    context.jobs.read(firstId)
+    const secondId = context.jobs.start({
+      kind: 'bash',
+      label: 'replacement loader job',
+      run: () => ({ cancel: () => {}, done: Promise.resolve({ status: 'completed' }) }),
+    })
+    await Promise.resolve()
+    expect(() => context!.jobs.get(firstId)).toThrow(`unknown job ${firstId}`)
+    expect(context.jobs.get(secondId).status).toBe('completed')
   })
 })

@@ -18,7 +18,10 @@ int wmain()
   P(offsetof(PROCESS_INFORMATION, hThread));
   P(offsetof(PROCESS_INFORMATION, dwProcessId));
   P(CREATE_SUSPENDED);
+  P(CREATE_NEW_CONSOLE);
   P(CREATE_UNICODE_ENVIRONMENT);
+  P(STARTF_USESHOWWINDOW);
+  P(SW_HIDE);
   P(STARTF_USESTDHANDLES);
   P(HANDLE_FLAG_INHERIT);
   P(INFINITE);
@@ -43,7 +46,10 @@ int wmain()
   static_assert(sizeof(PROCESS_INFORMATION) == 24, "PROCESS_INFORMATION size");
   static_assert(sizeof(HANDLE) == 8, "HANDLE size");
   static_assert(CREATE_SUSPENDED == 0x4, "suspended process flag");
+  static_assert(CREATE_NEW_CONSOLE == 0x10, "new console flag");
   static_assert(CREATE_UNICODE_ENVIRONMENT == 0x400, "Unicode environment flag");
+  static_assert(STARTF_USESHOWWINDOW == 0x1, "show-window flag");
+  static_assert(SW_HIDE == 0, "hidden window state");
   static_assert(STARTF_USESTDHANDLES == 0x100, "std handles flag");
   static_assert(HANDLE_FLAG_INHERIT == 0x1, "inherit flag");
   static_assert(WAIT_TIMEOUT == 258, "zero-time wait timeout");

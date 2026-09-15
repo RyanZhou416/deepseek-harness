@@ -10,7 +10,12 @@ const root = resolve(import.meta.dirname, '..')
 const organization = ['deepseek', 'harness'].join('-')
 const organizationUrl = new RegExp(`\\bgithub\\.com/${organization}(?![a-z0-9-])`)
 const commitCandidate = /(?<![a-z0-9])[\da-f]{7,40}(?![a-z0-9])/gi
-const excludedPrefixes = ['vendor/', '.agents/notes/archived/']
+const excludedPrefixes = [
+  'vendor/',
+  'fork-plugins/dsh-agent-teams/',
+  'fork-plugins/dsh-context/',
+  '.agents/notes/archived/',
+]
 const gitOutputLimit = 64 * 1024 * 1024
 
 /** One prohibited reference in a maintained source file. */

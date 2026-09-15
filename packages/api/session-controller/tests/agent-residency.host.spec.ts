@@ -82,7 +82,7 @@ async function harness(
   ctx.sessions.announce(session)
   const agent = fakeAgent(ctx, session)
   const detachAgent = ctx.agents.enter(agent, undefined)
-  ctx.agents.announce(agent)
+  await ctx.agents.announce(agent, 'startup')
   const disposeHandle = vi.fn<AgentHandle['dispose']>(async () => {
     if (disposeBarrier !== undefined) await disposeBarrier
     detachAgent()
@@ -131,7 +131,7 @@ describe('Session Controller idle Agent residency', () => {
       ctx.sessions.announce(session)
       replacement = fakeAgent(ctx, session)
       const detachAgent = ctx.agents.enter(replacement, undefined)
-      ctx.agents.announce(replacement)
+      await ctx.agents.announce(replacement, 'resume')
       return {
         agent: replacement,
         dispose: async () => {
@@ -188,7 +188,7 @@ describe('Session Controller idle Agent residency', () => {
     ctx.sessions.announce(session)
     const agent = fakeAgent(ctx, session)
     const detachAgent = ctx.agents.enter(agent, undefined)
-    ctx.agents.announce(agent)
+    await ctx.agents.announce(agent, 'startup')
     const dispose = vi.fn(async () => {
       detachAgent()
       detachSession()
@@ -214,7 +214,7 @@ describe('Session Controller idle Agent residency', () => {
     ctx.sessions.announce(childSession)
     const child = fakeAgent(ctx, childSession)
     const detachChild = ctx.agents.enter(child, agent)
-    ctx.agents.announce(child)
+    await ctx.agents.announce(child, 'startup')
 
     await vi.advanceTimersByTimeAsync(1_000)
     expect(disposeHandle).not.toHaveBeenCalled()

@@ -52,8 +52,10 @@ describe('concrete terminology policy', () => {
     )).toEqual([])
   })
 
-  it('excludes vendored sources and frozen Agent Notes', () => {
+  it('excludes vendored sources, imported plugin sources, and frozen Agent Notes', () => {
     expect(findConcreteTermViolations(`vendor/example/${blockedTerm}.ts`, blockedTerm)).toEqual([])
+    expect(findConcreteTermViolations(`fork-plugins/dsh-agent-teams/docs/${blockedTerm}.md`, blockedTerm)).toEqual([])
+    expect(findConcreteTermViolations(`fork-plugins/dsh-context/src/${blockedTerm}.ts`, blockedTerm)).toEqual([])
     expect(findConcreteTermViolations(
       `.agents/notes/archived/process/${blockedTerm}.md`,
       blockedTerm,

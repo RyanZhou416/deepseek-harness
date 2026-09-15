@@ -10,12 +10,13 @@
 
 import { spawnSync } from 'node:child_process'
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { homedir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import type { Baseline } from '../baselines'
 
 export const REPO = resolve(dirname(fileURLToPath(import.meta.url)), '../..')
-export const DSH_REPO = process.env.DSH_REPO || join(process.env.HOME, 'dev', 'deepseek-harness')
+export const DSH_REPO = process.env.DSH_REPO || join(homedir(), 'dev', 'deepseek-harness')
 export const STAGE = join(REPO, '.tmp', 'compat')
 
 /** Whether the dsh checkout with the baseline tags is available. */
@@ -81,8 +82,16 @@ export function ensureHostDeps(baseline: Baseline): void {
   }, null, 2))
   const missing = Object.keys(deps).filter(name => !existsSync(join(dir, 'node_modules', ...name.split('/'))))
   if (missing.length === 0) return
-  const run = spawnSync('npm', ['install', '--no-audit', '--no-fund', '--loglevel=error'], { cwd: dir, encoding: 'utf8' })
-  if (run.status !== 0) throw new Error(`npm install ${JSON.stringify(deps)} failed: ${(run.stderr ?? '').trim().slice(0, 300)}`)
+  const npmArgs = ['install', '--no-audit', '--no-fund', '--loglevel=error']
+  const command = process.platform === 'win32' ? process.execPath : 'npm'
+  const args = process.platform === 'win32'
+    ? [join(dirname(process.execPath), 'node_modules', 'npm', 'bin', 'npm-cli.js'), ...npmArgs]
+    : npmArgs
+  const run = spawnSync(command, args, { cwd: dir, encoding: 'utf8' })
+  if (run.status !== 0) {
+    const detail = run.error?.message ?? (run.stderr ?? '').trim()
+    throw new Error(`npm install ${JSON.stringify(deps)} failed: ${detail.slice(0, 300)}`)
+  }
 }
 
 /** The namespace pattern the tag's settings module enforces (module-private on every baseline). */

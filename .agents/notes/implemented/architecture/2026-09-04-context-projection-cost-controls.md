@@ -12,7 +12,7 @@ The closed `/context` overlay can retain timeline, detail, history, token-meter,
 
 ## Decision
 
-The fork vendors upstream `dsh-context` `v0.49.0` at `40bb97c5633eabbdf1c22c77a3a0f1e10c6d8108` under [`fork-plugins/dsh-context`](../../../../fork-plugins/dsh-context/FORK_MAINTENANCE.md) and publishes the private package version `0.49.0-dsh015rc1.1`. The deployment config uses `maxRequestSteps: 300`, `maxKeptTurns: 60`, `maxEvents: 100`, `maxNodes: 400`, `maxArchiveNodes: 100`, and `maxFileOps: 100`.
+The fork vendors upstream `dsh-context` tag `v0.52.2` under [`fork-plugins/dsh-context`](../../../../fork-plugins/dsh-context/FORK_MAINTENANCE.md) and publishes the private package version `0.52.2-dsh016alpha1.1`. The deployment config uses `maxRequestSteps: 300`, `maxKeptTurns: 60`, `maxEvents: 100`, `maxNodes: 400`, `maxArchiveNodes: 100`, and `maxFileOps: 100`. The imported source tree retains upstream documentation policy; this note and the paired fork-plugin guide own DSH integration claims.
 
 The fork adopts upstream's V0/V2/V3 log fold, host-side File Activity ledger, right-Sidebar panel, and split timeline delivery. The projection value carries a slim head while the open Context tab or modal fetches the heavy collections through the detail channel. The imported `TimelineState` schema uses `stateVersion: 15`; incompatible plugin checkpoints are derived again from immutable Session logs instead of being migrated in place.
 
@@ -22,9 +22,11 @@ The projection definition propagates a weak identity token across transitions wh
 
 The `/context` overlay separates its modal-store gate from its data body. The closed gate subscribes only to the open flag. Opening mounts projection, detail, history, and conversation hooks plus keyboard and layout lifecycles; closing disposes that subtree.
 
+The `contextHeaders` fold retains bounded V3 `system/message` nodes until the following `request/header` and records the effective system-token price on that epoch. Its optional state extends the version-1 schema so existing checkpoints remain readable.
+
 ## Alternatives considered
 
-**Use upstream `v0.49.0` without fork code.** Rejected because the upstream fold clones every retained collection on each changed event, closed modals keep their data hooks mounted, and restored checkpoints are not clamped before their first value is served.
+**Use upstream `v0.52.2` without fork code.** Rejected because the upstream fold clones every retained collection on each changed event, closed modals keep their data hooks mounted, restored checkpoints are not clamped before their first value is served, and V3 header epochs omit system-token pricing.
 
 **Reduce retention bounds only.** Rejected because Host-only events would still copy the retained collections, the closed modal would still receive projection and detail activity, and an idle restored checkpoint could serve data retained under older bounds.
 

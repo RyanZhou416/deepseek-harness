@@ -208,7 +208,7 @@ const ctx = {
       child.ctx = childContext(child)
       if (deliveryHarness) delete child.ctx.agent
       if (modernHarness) {
-        for (const listener of listeners.get('agent/session-start') ?? []) listener({ agent: child, source: 'startup' })
+        for (const listener of listeners.get('agent/created') ?? []) listener({ agent: child, source: 'startup' })
       } else {
         for (const setup of continuableSetups) setup(child.ctx)
       }

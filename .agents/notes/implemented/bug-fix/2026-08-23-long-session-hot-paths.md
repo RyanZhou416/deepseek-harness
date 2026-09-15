@@ -38,7 +38,7 @@ The incident-scale history contained 256,008 logical events in one message-align
 
 ## Alternatives considered
 
-**Delete or rewrite stored chunks.** Rejected because chunks remain durable replay and diagnostic evidence, and their sequence, timestamp, provenance, fork, and crash-recovery semantics are observable.
+**Delete or rewrite stored chunks.** Rejected because chunks remain durable replay and diagnostic evidence, and their sequence, timestamp, source identity, fork, and crash-recovery semantics are observable.
 
 **Start with Chat DOM virtualization.** Rejected as the first repair because oversized history parsing, validation, Conversation folding, and retained model construction precede React rendering. Virtualization can still reduce mounted DOM after scroll, selection, find-in-page, accessibility, and variable-height anchor behavior are specified.
 

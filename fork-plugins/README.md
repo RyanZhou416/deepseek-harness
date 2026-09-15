@@ -19,18 +19,18 @@ The setup intentionally omits marketplace plugins, subscriptions, watchdogs, cus
 ## Agent Teams
 
 - Source: `fork-plugins/dsh-agent-teams`
-- Current private version: `0.1.16-dsh015rc1.1`
-- Upstream base: `NanmiCoder/dsh-agent-teams v0.1.16-rc.3@bf17f93d35`
-- Private host target: `dsh-v0.1.5-rc.1`
-- Distribution artifact: `fork-plugins/releases/nanmicoder-dsh-agent-teams-0.1.16-dsh015rc1.1.tgz`
-- Artifact SHA256: `EAD7426C8BA4D3A72D4054E817CE2E19A4CB60A57F1CA49A9F2ABB7107E9F351`
+- Current private version: `0.1.18-dsh016alpha1.1`
+- Upstream base: `NanmiCoder/dsh-agent-teams v0.1.18`
+- Private host target: `dsh-v0.1.6-alpha.1`
+- Distribution artifact: `fork-plugins/releases/nanmicoder-dsh-agent-teams-0.1.18-dsh016alpha1.1.tgz`
+- Artifact SHA256: `575A45F50A9A7D12DE34567102C6C1D4EF9A1F70242A682C76EBC14FA4021DA4`
 
-This build adds the upstream rc.3 stable capability presentation, existing-team reuse guidance, Web approval wakeup, and settled team-lock cleanup. It preserves live-Steer/inactive-Queue delivery, cold Captain mailbox recovery, all retired-member entry-point guards, the bounded unread-only LRU, fallback persistence, and parked-attempt recovery. The on-disk format remains unchanged.
+This build adopts v0.1.18 atomic roster creation, dependency-ready member startup, next-step coordination, stale-attempt rejection, retired-member cleanup, and task correction. The private layer adapts awaited `agent/created` startup for DSH 0.1.6, preserves cold Captain mailbox recovery and the bounded unread-mailbox cache, and keeps the on-disk format unchanged.
 
 After cloning this fork, setting their own `DSH_HOME`, and stopping any running DSH instance, a colleague can run this command from the repository root:
 
 ```powershell
-$artifact = (Resolve-Path .\fork-plugins\releases\nanmicoder-dsh-agent-teams-0.1.16-dsh015rc1.1.tgz).Path
+$artifact = (Resolve-Path .\fork-plugins\releases\nanmicoder-dsh-agent-teams-0.1.18-dsh016alpha1.1.tgz).Path
 node --import tsx/esm apps/cli/src/bin.ts plugin --profile web add $artifact
 ```
 
@@ -60,11 +60,11 @@ Agent Teams durable data belongs to each workspace's `.agent-teams/` directory; 
 ## Context
 
 - Source: `fork-plugins/dsh-context`
-- Current private version: `0.49.0-dsh015rc1.1`
-- Upstream base: `bowenliang123/dsh-context v0.49.0@40bb97c563`
-- Distribution artifact: `fork-plugins/releases/dsh-context-0.49.0-dsh015rc1.1.tgz`
-- Artifact SHA256: `13966640E7CF22452A02843C5663105A4857E5BDDE484917953817140D41D081`
+- Current private version: `0.52.2-dsh016alpha1.1`
+- Upstream base: `bowenliang123/dsh-context v0.52.2`
+- Distribution artifact: `fork-plugins/releases/dsh-context-0.52.2-dsh016alpha1.1.tgz`
+- Artifact SHA256: `064D91DEB012D6D183F164CD3053FAAE6EDB31FF893C416F036BF0EA47B5319D`
 
-This build adopts upstream V0/V2/V3 folding, slim-head plus on-demand-detail delivery, host-side File Activity, and the right-Sidebar panel. Field-level copy-on-write, dirty retention trimming, first-view restored-state bounds, and reference-stable inline/slim caches reduce Host allocation and publication costs. A closed `/context` modal retains only its open-state subscription. See `fork-plugins/dsh-context/FORK_MAINTENANCE.md` for maintenance and rollback rules.
+This build adopts the v0.52.2 Context board, pricing, injection labels, and agent-network improvements. Field-level copy-on-write, dirty retention trimming, first-view restored-state bounds, reference-stable inline/slim caches, closed-modal subscription release, and V3 system-node header pricing remain private performance and compatibility fixes. See `fork-plugins/dsh-context/FORK_MAINTENANCE.md` for maintenance and rollback rules.
 
 The low-overhead deployment values are `maxRequestSteps: 300`, `maxKeptTurns: 60`, `maxEvents: 100`, `maxNodes: 400`, `maxArchiveNodes: 100`, and `maxFileOps: 100`. Confirm that DSH has stopped before changing a profile. Never read, migrate, or delete Session, attachment, credential, or projection-cache data during a plugin update.

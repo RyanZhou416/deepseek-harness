@@ -1,11 +1,10 @@
 /**
- * The audited Harness 0.1.2 / 0.1.5 subagent boundary. Keep version-specific shapes
+ * The audited Harness subagent boundary. Keep version-specific shapes
  * here: API presence alone is not a promise of support for future versions.
  *
- * Alpha.2 owns followup/registerContinuableSetup; Alpha.5 and rc.1 own a
- * host-only FIFO queue; 0.1.5 uses a queue/steer deliverer. Both emit
- * synchronous agent/session-start with the explicit Agent. Their public
- * sendMessage instead steers a running Agent and must never carry team jobs.
+ * Harness 0.1.6 uses an awaited `agent/created` initialization event and a
+ * host-only queue/steer deliverer. Public `sendMessage` remains reserved for
+ * model-authored adjacent-Agent messages.
  */
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
@@ -77,19 +76,13 @@ export function installContinuableMemberSetup(ctx: Context, setup: Setup): void 
   const installed = new WeakSet<Agent>()
   const active = new Set<() => void>()
   ctx.effect(() => {
-    const stop = ctx.on('agent/session-start', ({ agent }) => {
-      if (installed.has(agent)) return
-      // Deliberately synchronous: awaiting here loses the first-request race.
+    const stop = ctx.on('agent/created', ({ agent }) => {
+      if (installed.has(agent)) return undefined
       let teardown: () => void
       try {
         teardown = setup(agent.ctx, agent)
       } catch (error: unknown) {
-        // session-start is a notification: Harness logs a thrown listener and
-        // still admits the first prompt. Reject request assembly explicitly so
-        // a malformed saved route cannot silently execute on a default model.
-        const failure = new Error(`agent-teams: member initialization failed: ${String(error)}`, { cause: error })
-        ctx.logger.warn(failure.message)
-        teardown = agent.ctx.on('agent/request', () => { throw failure })
+        throw new Error(`agent-teams: member initialization failed: ${String(error)}`, { cause: error })
       }
       installed.add(agent)
       let disposed = false
@@ -109,6 +102,7 @@ export function installContinuableMemberSetup(ctx: Context, setup: Setup): void 
         dispose()
         throw error
       }
+      return undefined
     })
     return () => {
       stop()

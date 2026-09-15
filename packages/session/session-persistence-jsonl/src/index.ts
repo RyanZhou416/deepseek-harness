@@ -12,7 +12,7 @@ import {
   SessionFormatUnsupportedMigrationError,
   sessionFormatCatalog,
 } from '@deepseek-ai/dsh-session-format-catalog'
-import { readdirSync, type Dirent } from 'node:fs'
+import { readdirSync, type BigIntStats, type Dirent } from 'node:fs'
 import { open, mkdir, readdir, realpath, link, rm, stat, truncate } from 'node:fs/promises'
 import { dirname, join, resolve } from 'node:path'
 import { performance } from 'node:perf_hooks'
@@ -170,6 +170,20 @@ interface MigrationPreparation {
   waiters: number
 }
 
+/** One header retained against the exact stat-derived generation revision. */
+interface CachedListedHeader {
+  readonly revision: PersistenceRevision
+  readonly header: SessionHeader
+}
+
+/** One detached metadata row produced by a shared filesystem scan. */
+interface ListedArtifact {
+  readonly header: SessionHeader
+  readonly path: string
+  readonly revision: PersistenceRevision
+  readonly sizeBytes: number
+}
+
 /** Build the stat-derived best-effort change token shared by full and lightweight reads. */
 function fileRevision(identity: JsonlPhysicalIdentity): PersistenceRevision {
   return SessionPersistenceRevision([
@@ -192,23 +206,23 @@ function isErrnoException(error: unknown): error is NodeJS.ErrnoException {
 }
 
 /** Preserve an Error abort reason and normalize hostile non-Error reasons. */
-function abortError(signal: AbortSignal): Error {
+function abortError(signal: AbortSignal, operation = 'session migration preparation'): Error {
   return signal.reason instanceof Error
     ? signal.reason
-    : new Error('session migration preparation aborted', { cause: signal.reason })
+    : new Error(`${operation} aborted`, { cause: signal.reason })
 }
 
 /** Let one caller stop waiting without transferring cancellation ownership to shared work. */
-function waitWithAbort<T>(operation: Promise<T>, signal?: AbortSignal): Promise<T> {
-  if (signal === undefined) return operation
+function waitWithAbort<T>(promise: Promise<T>, signal?: AbortSignal, operation = 'session migration preparation'): Promise<T> {
+  if (signal === undefined) return promise
   /* v8 ignore next -- requireStoredLog synchronously rechecks the signal immediately before waiting. */
-  if (signal.aborted) return Promise.reject(abortError(signal))
+  if (signal.aborted) return Promise.reject(abortError(signal, operation))
   return new Promise<T>((resolve, reject) => {
     const stopWaiting = (): void => {
-      reject(abortError(signal))
+      reject(abortError(signal, operation))
     }
     signal.addEventListener('abort', stopWaiting, { once: true })
-    void operation.then(
+    void promise.then(
       (value) => {
         signal.removeEventListener('abort', stopWaiting)
         resolve(value)
@@ -219,7 +233,7 @@ function waitWithAbort<T>(operation: Promise<T>, signal?: AbortSignal): Promise<
         if (error instanceof Error) {
           reject(error)
         } else {
-          reject(new Error('session migration preparation failed', { cause: error }))
+          reject(new Error(`${operation} failed`, { cause: error }))
         }
       },
     )
@@ -256,6 +270,10 @@ class JsonlSessionPersistence extends SessionPersistence {
   private readonly coldLogMemo = new Map<SessionId, StoredLog>()
   /** One joinable decode/migration operation per selected historical Session file revision. */
   private readonly migrationPreparations = new Map<SessionId, MigrationPreparation>()
+  /** Validated headers retained against the exact stat-derived generation revision. */
+  private readonly listedHeaders = new Map<string, CachedListedHeader>()
+  /** One filesystem discovery shared by concurrent metadata callers. */
+  private listing: Promise<ListedArtifact[]> | undefined
 
   constructor(ctx: Context, public config: Config) {
     super(ctx)
@@ -435,14 +453,15 @@ class JsonlSessionPersistence extends SessionPersistence {
     }
     const selected = await this.findLog(id, options?.signal)
     if (selected === undefined) return undefined
-    const header = await this.readGenerationHeader(selected, id, options?.signal)
-    if (header === undefined) return undefined
     try {
       const identity = await stat(selected.sourcePath, { bigint: true })
       options?.signal?.throwIfAborted()
+      const revision = fileRevision(identity)
+      const header = await this.readListedHeader(selected, id, revision, options?.signal)
+      if (header === undefined) return undefined
       return {
-        header,
-        revision: fileRevision(identity),
+        header: { ...header },
+        revision,
         sizeBytes: Number(identity.size),
       }
     } catch (error: unknown) {
@@ -972,21 +991,45 @@ class JsonlSessionPersistence extends SessionPersistence {
     }
   }
 
-  private async listArtifacts(signal?: AbortSignal): Promise<Array<{ header: SessionHeader; path: string }>> {
+  /** Share one metadata scan while keeping cancellation local to each caller. */
+  private async listArtifacts(signal?: AbortSignal): Promise<ListedArtifact[]> {
     signal?.throwIfAborted()
+    const active = this.listing
+    if (active !== undefined) return this.cloneListed(await waitWithAbort(active, signal, 'session listing'))
+    const scan = this.scanArtifacts()
+    this.listing = scan
+    void scan.finally(() => {
+      if (this.listing === scan) this.listing = undefined
+    }).catch(() => undefined)
+    return this.cloneListed(await waitWithAbort(scan, signal, 'session listing'))
+  }
+
+  /** Clone retained headers so each listing caller owns its returned objects. */
+  private cloneListed(artifacts: readonly ListedArtifact[]): ListedArtifact[] {
+    return artifacts.map(artifact => ({ ...artifact, header: { ...artifact.header } }))
+  }
+
+  /** Discover one metadata snapshot independently of any caller's cancellation. */
+  private async scanArtifacts(): Promise<ListedArtifact[]> {
     await this.ensureRootEncoding()
-    signal?.throwIfAborted()
-    const artifacts: Array<{ header: SessionHeader; path: string }> = []
+    const artifacts: ListedArtifact[] = []
     const ids = new Set<SessionId>()
-    for (const project of await this.listProjectDirs(signal)) {
-      signal?.throwIfAborted()
-      for (const dir of await this.listSessionDirs(project, signal)) {
-        signal?.throwIfAborted()
-        const selected = await this.resolveGenerationInDirectory(dir, signal)
+    const listedPaths = new Set<string>()
+    for (const project of await this.listProjectDirs()) {
+      for (const dir of await this.listSessionDirs(project)) {
+        const selected = await this.resolveGenerationInDirectory(dir)
         if (selected === undefined) continue
+        let identity: BigIntStats
+        try {
+          identity = await stat(selected.sourcePath, { bigint: true })
+        } catch (error: unknown) {
+          if (isENOENT(error)) continue
+          throw error
+        }
+        const revision = fileRevision(identity)
         let header: SessionHeader | undefined
         try {
-          header = await this.readGenerationHeader(selected, undefined, signal)
+          header = await this.readListedHeader(selected, undefined, revision)
         } catch (error: unknown) {
           // Listing skips a foreign format while opening its id still refuses
           // with the selected physical location.
@@ -994,15 +1037,40 @@ class JsonlSessionPersistence extends SessionPersistence {
           throw error
         }
         if (header === undefined) continue
+        listedPaths.add(selected.sourcePath)
         if (ids.has(header.id)) {
           throw new Error(`duplicate JSONL session id "${header.id}" appears in multiple project directories`)
         }
         ids.add(header.id)
-        artifacts.push({ header, path: selected.sourcePath })
+        artifacts.push({
+          header,
+          path: selected.sourcePath,
+          revision,
+          sizeBytes: Number(identity.size),
+        })
       }
     }
-    signal?.throwIfAborted()
+    for (const cachedPath of this.listedHeaders.keys()) {
+      if (!listedPaths.has(cachedPath)) this.listedHeaders.delete(cachedPath)
+    }
     return artifacts
+  }
+
+  /** Read one generation header or reuse the value validated for its exact revision. */
+  private async readListedHeader(
+    selected: ResolvedJsonlGeneration,
+    expectedId: SessionId | undefined,
+    revision: PersistenceRevision,
+    signal?: AbortSignal,
+  ): Promise<SessionHeader | undefined> {
+    const cached = this.listedHeaders.get(selected.sourcePath)
+    if (cached?.revision === revision) {
+      if (expectedId !== undefined) assertStoredId(expectedId, cached.header)
+      return cached.header
+    }
+    const header = await this.readGenerationHeader(selected, expectedId, signal)
+    if (header !== undefined) this.listedHeaders.set(selected.sourcePath, { revision, header })
+    return header
   }
 
   /** Read and translate one selected generation header without inspecting its body. */

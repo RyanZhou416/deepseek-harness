@@ -43,7 +43,7 @@
 
 ## 范围与排除
 
-**范围**：根目录 `CONTRIBUTING.md`、`BRAND_GUIDELINES.md` 与 `SAFETY.md` 文档、除 vendor 源码外的全部 README，以及 `.agents/notes/**`、`docs/**` 与 `python/**` 下的全部活跃文档。匹配 README 时只看文件名且不区分大小写，因此今后新增的目录无需再修改 manifest。依赖目录、被忽略的构建产物目录以及冻结的 `.agents/notes/archived/` 目录树只在发现阶段排除，不属于持续演进的翻译源文档。
+**范围**：根目录 `CONTRIBUTING.md`、`BRAND_GUIDELINES.md` 与 `SAFETY.md` 文档、全部由 DSH 维护的 README，以及 `.agents/notes/**`、`docs/**` 与 `python/**` 下的全部活跃文档。匹配 README 时只看文件名且不区分大小写，因此今后新增的目录无需再修改 manifest。依赖目录、被忽略的构建产物目录以及冻结的 `.agents/notes/archived/` 目录树只在发现阶段排除，不属于持续演进的翻译源文档。
 
 有经评审的中文对侧的生成英文参考文档和图文档遵循配对规则。生成器只负责英文时，它仍是该语言的真源；重新生成导致英文变化后，配对会保持失去同步状态，直至经评审的中文对侧完成更新并重新记录。新鲜度门禁与配对门禁各自独立强制其约束。
 
@@ -58,6 +58,7 @@
 - `docs/i18n/terminology.md` 与 [style-samples.md](style-samples.md)：二者本身即为中英对照文档。
 - [translation-prompt.md](translation-prompt.md)：自动翻译流水线的提示词模板；正文逐字进入模型请求，配对翻译会改变流水线行为。
 - [review-ownership/README.md](../../.github/review-ownership/README.md)：仓库内部审批策略，只以英文维护。
+- `fork-plugins/dsh-agent-teams/` 与 `fork-plugins/dsh-context/`：精确导入的外部源码保留上游文档、发行证据与原生语言政策；由 DSH 维护的整合说明仍位于双语配对的 [`fork-plugins/README.md`](../../fork-plugins/README.zh.md) 和活跃 Agent Note 中。
 - `.agents/notes/archived/`：冻结的历史三文件配对。[`verify-archived-agent-notes`](../../scripts/verify-archived-agent-notes.ts) 校验其完整性和内容封存记录；翻译维护绝不能重写这些文件。
 
 **统一要求**：当前及今后纳入范围的每篇文档，合并时都必须构成完整的双语配对。[scripts/translation-pairing.manifest.json](../../scripts/translation-pairing.manifest.json) 只包含显式排除项；不存在逐文件推进清单、日期分界或 README 专用政策类别。

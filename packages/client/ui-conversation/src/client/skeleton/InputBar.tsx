@@ -41,6 +41,11 @@ import css from './InputBar.module.css'
 
 export type InputBarProps = ComposerBarProps
 
+/** Whether navigation focus would summon a touch-first device's software keyboard. */
+function hasCoarsePrimaryPointer(): boolean {
+  return typeof window.matchMedia === 'function' && window.matchMedia('(pointer: coarse)').matches
+}
+
 export const InputBar = memo(function InputBar({
   useSession, useInput, inputActions, keyboard, addFiles, removeAttachment, resolveDraftAttachments,
   retryFileUpload,
@@ -163,7 +168,7 @@ export const InputBar = memo(function InputBar({
   // is ours to perform — switching to a longer draft otherwise leaves the
   // caret (restored at the draft's end) off screen.
   useEffect(() => {
-    if (locked || editor === null) return
+    if (locked || editor === null || hasCoarsePrimaryPointer()) return
     focusDraftEditor(editor, revealSelection)
   }, [locked, sessionId, editor])
 

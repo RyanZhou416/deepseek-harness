@@ -50,6 +50,7 @@ async function fakeAgent(ctx: Context, sessionId: string, delivery: FakeDelivery
     inject: delivery.inject ?? (() => {}),
     followup: delivery.followup ?? (() => {}),
     status: delivery.status ?? 'running',
+    inbox: { nextTurn: [], nextStep: [] },
     session: { id, header: { version: 0, id, createdAt: 0 } },
   } as unknown as Agent
   agentRegistryDisposers.set(agent, await ctx.agents.register(agent))
@@ -339,6 +340,24 @@ describe('job_output', () => {
     expect(text(result)).toBe('(no new output)\n[status: running]')
   })
 
+  it('reserves one completion wake when a blocking read times out on a live owned job', async () => {
+    const { ctx } = await setup({ waitTimeoutMs: 10, maxWaitTimeoutMs: 20, maxConsecutiveWakes: 1 })
+    const inject = vi.fn()
+    const followup = vi.fn()
+    const owner = await fakeAgent(ctx, 'sess-wait-entitlement', { inject, followup, status: 'idle' })
+
+    await settleTasks(ctx, owner, 1)
+    const waiting = producer({ owner })
+    ctx.jobs.start(waiting.spec)
+    const result = await call(ctx, 'job_output', { job_id: 'bash-2', wait: true }, owner)
+    expect(text(result)).toBe('(no new output)\n[status: running]')
+
+    waiting.settle({ status: 'completed' })
+    await tick()
+    expect(followup).toHaveBeenCalledTimes(2)
+    expect(inject).not.toHaveBeenCalled()
+  })
+
   it('rejects an empty or unknown job id as an errored result', async () => {
     const { ctx } = await setup()
     expect((await call(ctx, 'job_output', { job_id: '' })).isError).toBe(true)
@@ -585,7 +604,9 @@ describe('completion notice delivery', () => {
   it('degrades to injection once the consecutive wake budget is spent', async () => {
     const { ctx } = await setup({ maxConsecutiveWakes: 2 })
     const inject = vi.fn()
-    const followup = vi.fn()
+    const followup = vi.fn(() => {
+      emitAgentEvent(ctx, owner, 'agent/status', { status: 'running' })
+    })
     const owner = await fakeAgent(ctx, 'sess-1', { inject, followup, status: 'idle' })
 
     await settleTasks(ctx, owner, 3)
@@ -610,6 +631,24 @@ describe('completion notice delivery', () => {
     })
     await settleTasks(ctx, owner, 1)
     expect(followup).toHaveBeenCalledTimes(2)
+  })
+
+  it('restores the wake budget when another source starts the driver', async () => {
+    const { ctx } = await setup({ maxConsecutiveWakes: 1 })
+    const inject = vi.fn()
+    const followup = vi.fn()
+    const owner = await fakeAgent(ctx, 'sess-external-wake', { inject, followup, status: 'idle' })
+
+    await settleTasks(ctx, owner, 1)
+    ;(owner.inbox.nextTurn as unknown as ReturnType<typeof createUserMessage>[]).push(createUserMessage({
+      content: [{ type: 'text', text: 'outside wake' }],
+      source: { kind: 'plugin', plugin: 'other-waker' },
+    }))
+    emitAgentEvent(ctx, owner, 'agent/status', { status: 'running' })
+    await settleTasks(ctx, owner, 1)
+
+    expect(followup).toHaveBeenCalledTimes(2)
+    expect(inject).not.toHaveBeenCalled()
   })
 
   it('neither wakes nor injects into an owner its own teardown is draining', async () => {
@@ -663,17 +702,20 @@ describe('completion notice delivery', () => {
     expect(inject).not.toHaveBeenCalled()
   })
 
-  it('keeps the budget spent when the owner only claims plugin notices', async () => {
+  it('keeps the budget spent when a driver only carries tool-jobs notices', async () => {
     const { ctx } = await setup({ maxConsecutiveWakes: 1 })
     const followup = vi.fn()
     const owner = await fakeAgent(ctx, 'sess-1', { followup, status: 'idle' })
 
     await settleTasks(ctx, owner, 1)
+    const notice = createUserMessage({
+      content: [{ type: 'text', text: 'background job bash-1 finished' }],
+      source: { kind: 'plugin', plugin: 'tool-jobs', form: 'notice', summary: 'bash' },
+    })
+    ;(owner.inbox.nextStep as unknown as ReturnType<typeof createUserMessage>[]).push(notice)
+    emitAgentEvent(ctx, owner, 'agent/status', { status: 'running' })
     emitAgentEvent(ctx, owner, 'agent/inbox/claimed', {
-      message: createUserMessage({
-        content: [{ type: 'text', text: 'background job bash-1 finished' }],
-        source: { kind: 'plugin', plugin: 'tool-jobs', form: 'notice', summary: 'bash' },
-      }),
+      message: notice,
       turn: 1,
     })
     await settleTasks(ctx, owner, 1)

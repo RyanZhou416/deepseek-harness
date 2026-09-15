@@ -87,6 +87,8 @@ Source events must be dense from zero. Each original event receives its target p
 
 There is no recursive numeric-field rewrite. Delivery `throughSeq` and `sessionFormatVersion`, session-reference `capturedThroughSeq` and `capturedFormatVersion`, workflow-local `seq`, stream block indices, turn/step numbers, inbox indices, token/byte counts, and all ids keep their source values. Embedded assistant streams, model replay state, tool arguments/results, title-request input text and `data.system` retain their recorded meaning. Compaction payload endpoints keep the names `start/end`; only envelope replacement endpoints are renamed.
 
+One released V2 lifecycle pattern receives a bounded structural completion. When a turn has no open step, a nonempty `next-step` inbox insertion immediately precedes the next numbered `turn/start`, and no `turn/end` was recorded, the edge inserts `turn/end` with reason `interrupted` after that insertion and before the replacement turn. The inserted event uses the replacement turn's timestamp. An empty insertion, a `next-turn` insertion, an open step, an intervening event, or a nonconsecutive turn number is refused rather than repaired.
+
 For a seeded Session, the last `session/end-seed` with `data.inherited: true` identifies the source cut. Its source sequence is the inherited event count, excluding that marker; its mapped target sequence is the target cut. Synthetic events before it are inherited, and later ones are local. An untagged marker does not establish the cut. A supplied `sourceInheritedEventCount` must agree; a seeded log without a marker and an unseeded log with one are refused. Unseeded stages expose `headerInheritedEventCount: 0`; seeded stages leave it unknown until `finish()` derives the exact cut. This also supports V0/V1 chains whose preceding stage changes event count and cannot supply the cut before EOF.
 
 <a id="ptc-vocabulary"></a>
@@ -118,6 +120,8 @@ A V2 `session-log-deepseek/delivery-accepted` with `data.sessionFormatVersion ==
 ### Source audit and refusal
 
 Migration classifies the [released V2 event inventory](../session-format-v1-to-v2/src/dispositions.ts), including log-only `assistant/attempt`, plus `feedback/message-put` and `feedback/message-delete`. The [payload validator](src/payload.ts) applies exact admitted envelope and payload members and released nested validation. Unknown events, even ignorable ones, and unaudited members at checked records are refused. Message-source classification covers the five Message slots below: unknown source kinds are refused, while agent relay attribution is admitted without interpreting ids as Session references.
+
+The fork-published V2 `agent-teams-command` source is admitted with exactly `kind` and optional nonempty string `goal` and `profile` fields. The source object is preserved verbatim. This static rule covers logs the fork already wrote; an installed plugin cannot widen migration admission, and other external source kinds remain refused.
 
 The content audit admits exactly `text`, `reasoning`, `image`, `file`, `tool-call`, and `tool-result`. It validates owned block fields and recursively audits every nested `tool-result.content` in this finite set of positions:
 

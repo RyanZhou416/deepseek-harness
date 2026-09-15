@@ -208,12 +208,14 @@ Requires: `agentDefaultModel` · `agents` · `attachments` · `fileUploads` · `
 ```ts config-catalog
 /** Session Controller deployment policy. */
 export interface Config {
+  /** Milliseconds an owned, durable, unfollowed idle Session remains live; zero disables eviction. */
+  readonly idleSessionRetentionMs?: number
   /** Override platform desktop-opener detection. */
   readonly nativeOpen?: boolean
 }
 ```
 
-Source: [`packages/api/session-controller/src/index.ts:71`](../packages/api/session-controller/src/index.ts)
+Source: [`packages/api/session-controller/src/index.ts:73`](../packages/api/session-controller/src/index.ts)
 
 <a id="deepseek-aidsh-api-settings-controller"></a>
 
@@ -1087,6 +1089,19 @@ export interface Config {
    * omission defaults to 10.
    */
   maxConcurrentJobsPerOwner?: number
+  /**
+   * Milliseconds to retain a terminal job before removing it, whether or not
+   * its result was reported. Omission preserves terminal jobs until owner or
+   * service disposal.
+   */
+  terminalJobRetentionMs?: number
+  /**
+   * Target maximum terminal jobs retained per exact owner or in the shared
+   * unowned bucket. Count pruning removes only reported records; unreported
+   * records remain until {@link terminalJobRetentionMs} expires or teardown.
+   * Omission disables count pruning.
+   */
+  maxRetainedTerminalJobsPerOwner?: number
 }
 ```
 
@@ -2147,7 +2162,7 @@ export type JournalMode = 'wal' | 'delete' | 'truncate' | 'persist'
 
 Depends on: [`SessionQueryConfig`](../packages/session-query/session-query/src/index.ts)
 
-Source: [`packages/session-query/session-query-sqlite/src/index.ts:92`](../packages/session-query/session-query-sqlite/src/index.ts)
+Source: [`packages/session-query/session-query-sqlite/src/index.ts:93`](../packages/session-query/session-query-sqlite/src/index.ts)
 
 <a id="deepseek-aidsh-session-reference"></a>
 
@@ -2984,8 +2999,9 @@ export interface Config {
   /** Whether a completion opens a turn on an idle owner (default `wakeup`). */
   completionDelivery?: CompletionDelivery
   /**
-   * Turns one owner may have opened by completion wakes before the next
-   * notice degrades to injection, reset by any user-authored input (default 3).
+   * Consecutive turns one owner may have opened by completion wakes before the
+   * next notice degrades to injection. User input or a driver start outside
+   * this delivery resets the count (default 3).
    * Bounds the self-exciting chain where a woken turn starts the job whose
    * completion wakes it again.
    */

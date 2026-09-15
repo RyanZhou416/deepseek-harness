@@ -71,7 +71,11 @@ export {
 export { readColdSessionLog } from './cold-read.ts'
 export type { ColdSessionLog } from './cold-read.ts'
 export { extractSessionEventText } from './extraction.ts'
-export { buildSessionEventRecords, buildSessionEventSearchDocuments } from './documents.ts'
+export {
+  buildAppendedSessionEventSearchDocuments,
+  buildSessionEventRecords,
+  buildSessionEventSearchDocuments,
+} from './documents.ts'
 export {
   compileSessionTextFilter,
   filterSessionEventDocuments,

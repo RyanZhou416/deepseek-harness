@@ -182,9 +182,9 @@ await test('synchronous modern setup selects the first request, deduplicates eve
   await bridge.withPending('captain', 'agent-teams:team:worker', {
     provider: 'selected', model: 'selected-model', reasoningEffort: 'high',
   }, async () => {
-    ctx.emit('agent/session-start', { agent, source: 'startup' })
+    ctx.emit('agent/created', { agent, source: 'startup' })
     assert.equal(agent.ctx.listeners.get('agent/request').size, 1)
-    ctx.emit('agent/session-start', { agent, source: 'compact' })
+    ctx.emit('agent/created', { agent, source: 'compact' })
     assert.equal(agent.ctx.listeners.get('agent/request').size, 1)
     assert.deepEqual(await selection(agent), { provider: 'selected', model: 'selected-model', reasoningEffort: 'high' })
   })
@@ -200,11 +200,11 @@ await test('child disposal releases lifecycle contributions and permits a same-i
   let disposals = 0
   installContinuableMemberSetup(ctx, () => { setups++; return () => { disposals++ } })
   const first = child()
-  ctx.emit('agent/session-start', { agent: first })
+  ctx.emit('agent/created', { agent: first })
   first.ctx.dispose()
   assert.equal(disposals, 1)
   const second = child()
-  ctx.emit('agent/session-start', { agent: second, source: 'resume' })
+  ctx.emit('agent/created', { agent: second, source: 'resume' })
   assert.equal(setups, 2)
   ctx.dispose()
   assert.equal(disposals, 2)
@@ -212,28 +212,30 @@ await test('child disposal releases lifecycle contributions and permits a same-i
   assert.equal(disposals, 2)
 })
 
-await test('setup exception blocks request instead of being swallowed by session-start dispatch', async () => {
+await test('setup exception vetoes the awaited agent/created transaction', () => {
   const ctx = scope({ subagents: modernRuntime() })
   installContinuableMemberSetup(ctx, () => { throw new Error('damaged durable model route') })
   const agent = child()
-  ctx.emit('agent/session-start', { agent })
-  await assert.rejects(selection(agent), /member initialization failed.*damaged durable model route/)
+  assert.throws(
+    () => { ctx.emit('agent/created', { agent }) },
+    /member initialization failed.*damaged durable model route/,
+  )
   ctx.dispose()
-  assert.equal(agent.ctx.listeners.get('agent/request').size, 0)
+  assert.equal(agent.ctx.listeners.has('agent/request'), false)
 })
 
 await test('a child inheriting another member descriptor does not acquire member selection or failure hooks', () => {
   const ctx = scope({ subagents: modernRuntime() })
   installMemberSelectionRuntime(ctx, '.agent-teams')
   const agent = child({ inherited: true })
-  ctx.emit('agent/session-start', { agent })
+  ctx.emit('agent/created', { agent })
   assert.equal(agent.ctx.listeners.size, 0)
   const foreign = child()
   foreign.session.ownEvents = () => [{ type: 'subagent/descriptor', data: {
     version: 3, mode: 'continuable', provider: 'spawn', label: 'external-research-worker',
     agentProvider: 'primary', agentModel: 'model',
   } }]
-  ctx.emit('agent/session-start', { agent: foreign })
+  ctx.emit('agent/created', { agent: foreign })
   assert.equal(foreign.ctx.listeners.size, 0)
   ctx.dispose()
 })
@@ -254,7 +256,7 @@ for (const fallbackActive of [false, true]) {
     t.after(() => ctx.dispose())
     installMemberSelectionRuntime(ctx, '.agent-teams')
     const agent = child({ workspace })
-    ctx.emit('agent/session-start', { agent, source: 'resume' })
+    ctx.emit('agent/created', { agent, source: 'resume' })
     assert.deepEqual(await selection(agent), fallbackActive
       ? { provider: 'backup', model: 'backup-model' }
       : { provider: 'primary', model: 'model', reasoningEffort: 'high' })

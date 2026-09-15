@@ -26,7 +26,7 @@ async function boot() {
 
 function appendAnything(session: Session): void {
   session.append('request/header', {
-    header: { config: { model: 'deepseek-v4-flash', provider: 'deepseek' }, system: 'sys', tools: [] },
+    header: { config: { model: 'deepseek-v4-flash', provider: 'deepseek' } },
     reason: 'initial',
   })
   session.append('user/message', {

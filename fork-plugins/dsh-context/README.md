@@ -156,7 +156,7 @@ In **Settings → Plugins → Plugin configuration**, the **Context** card holds
 
 ## DeepSeek Harness fork build
 
-The vendored `0.49.0-dsh015rc1.1` build keeps upstream V0/V2/V3 Session-log support, slim-head plus on-demand-detail delivery, host-side File Activity, and the right-Sidebar panel. Fork code reduces Host allocations with field-level copy-on-write state, skips retention scans for unchanged collections, clamps restored projection values to the active bounds, reuses inline and slim wire values across Host-only state changes, and leaves the `/context` data subscriptions unmounted while its dialog is closed. Maintenance and rollback details live in [FORK_MAINTENANCE.md](FORK_MAINTENANCE.md).
+The vendored `0.52.2-dsh016alpha1.1` build keeps upstream V0/V2/V3 Session-log support, Context board improvements, live pricing, injection labels, slim-head plus on-demand-detail delivery, host-side File Activity, and the right-Sidebar panel. Fork code reduces Host allocations with field-level copy-on-write state, skips retention scans for unchanged collections, clamps restored projection values to the active bounds, reuses inline and slim wire values across Host-only state changes, leaves `/context` data subscriptions unmounted while its dialog is closed, and prices V3 system nodes into header epochs. Maintenance and rollback details live in [FORK_MAINTENANCE.md](FORK_MAINTENANCE.md).
 
 The fork's low-overhead profile uses these existing configuration fields:
 

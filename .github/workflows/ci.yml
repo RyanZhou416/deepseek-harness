@@ -657,6 +657,7 @@ jobs:
           packages/workflow/workflow-ptc/tests/workflow-ptc.spec.ts
           packages/workflow/tool-ralph/tests/integration.spec.ts
           packages/subprocess/subprocess-local/tests/process-exit.spec.ts
+          packages/subprocess/subprocess-local/tests/native-windows.spec.ts
 
   windows-observational:
     if: github.event_name == 'pull_request'

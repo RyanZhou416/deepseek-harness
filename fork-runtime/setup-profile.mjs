@@ -17,11 +17,11 @@ import process from 'node:process'
 
 const AGENT_TEAMS = {
   name: '@nanmicoder/dsh-agent-teams',
-  version: '0.1.16-dsh015rc1.1',
+  version: '0.1.18-dsh016alpha1.1',
 }
 const CONTEXT = {
   name: 'dsh-context',
-  version: '0.49.0-dsh015rc1.1',
+  version: '0.52.2-dsh016alpha1.1',
   bounds: {
     maxRequestSteps: 300,
     maxKeptTurns: 60,

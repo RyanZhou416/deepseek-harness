@@ -30,6 +30,8 @@ class ReleasedV2ToV3Stage implements SessionFormatMigrationStage {
   private sourceCut: number | undefined
   private targetCut: number | undefined
   private lastForeignDeliverySeq: number | undefined
+  private openTurn: number | undefined
+  private previous: SessionFormatEvent | undefined
   private step: { turn: number; step: number } | undefined
   private head: number | undefined
   private prompt = ''
@@ -45,6 +47,7 @@ class ReleasedV2ToV3Stage implements SessionFormatMigrationStage {
     if (event.seq !== this.mapping.length) throw new SessionFormatError('format v2 source events must be dense')
     assertEvent(event, 2)
     this.observeMessageIds(event)
+    this.emitInterruptedTurn(event, context)
     let source = event
     const data = record(event.data, event.type)
     if (event.type === 'request/header') {
@@ -74,6 +77,9 @@ class ReleasedV2ToV3Stage implements SessionFormatMigrationStage {
     } else if (event.type === 'step/end' || event.type === 'turn/end') {
       this.step = undefined
     }
+    if (event.type === 'turn/start') this.openTurn = data['turn'] as number
+    if (event.type === 'turn/end') this.openTurn = undefined
+    this.previous = event
   }
 
   transformRun(run: SessionFormatEventRun, context: SessionFormatMigrationContext): void {
@@ -104,6 +110,22 @@ class ReleasedV2ToV3Stage implements SessionFormatMigrationStage {
       if (this.generatedIds.has(id)) throw new SessionFormatUnsupportedMigrationError('source message id collides with a generated system message id')
       this.originalIds.add(id)
     }
+  }
+
+  /** Close the released V2 next-step wake pattern that started a replacement turn before recording its predecessor's end. */
+  private emitInterruptedTurn(event: SessionFormatEvent, context: SessionFormatMigrationContext): void {
+    if (event.type !== 'turn/start' || this.openTurn === undefined || this.step !== undefined
+      || (event.data as SessionFormatJsonObject)['turn'] !== this.openTurn + 1
+      || this.previous?.type !== 'agent/inbox/spliced') return
+    const splice = this.previous.data as SessionFormatJsonObject
+    if (splice['target'] !== 'next-step' || !Array.isArray(splice['inserted']) || splice['inserted'].length === 0) return
+    context.emitEvent({
+      type: 'turn/end',
+      seq: this.targetSeq++,
+      time: event.time,
+      data: { turn: this.openTurn, reason: { kind: 'interrupted' } },
+    })
+    this.openTurn = undefined
   }
 
   private emitSystem(prompt: string, anchor: SessionFormatEvent, context: SessionFormatMigrationContext): void {

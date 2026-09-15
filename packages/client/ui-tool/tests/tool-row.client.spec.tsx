@@ -6,10 +6,9 @@ import type { RunningToolCall, ToolResultNode } from '@deepseek-ai/dsh-client-ui
 import { makeTranslate } from '@deepseek-ai/dsh-client-test-runtime'
 import { zh as commonZh } from '@deepseek-ai/dsh-client-locale/src/locales/zh.ts'
 import { localizeAutoReviewDenial, normalizeAutoReviewReason } from '../src/client/tool/models/auto-review-denial.ts'
-import {
-  classifyTool, formatToolBody, resultText, toolRowModel,
-} from '../src/client/tool/models/tool-call-model.ts'
+import { classifyTool, resultText, toolRowModel } from '../src/client/tool/models/tool-call-model.ts'
 import { ToolRow } from '../src/client/tool/components/ToolRow.tsx'
+import type { ToolRowDetailsModel } from '../src/client/tool/models/tool-call-model.ts'
 import { GenericToolCard, type GenericToolCardProps } from '../src/client/tool/toolviews/GenericToolCard.tsx'
 import { zh } from '@deepseek-ai/dsh-client-ui-conversation/src/client/locales.ts'
 
@@ -167,17 +166,37 @@ describe('tool-call-model', () => {
   })
 
   it('body pretty-prints JSON args, keeps raw non-JSON, null when empty', () => {
-    expect(formatToolBody('bash', toolRowModel('bash', running({ argsRaw: '{"a":1}' })).bodyRaw ?? ''))
-      .toBe('{\n  "a": 1\n}')
-    expect(formatToolBody('bash', toolRowModel('bash', running({ argsRaw: 'raw' })).bodyRaw ?? ''))
-      .toBe('raw')
-    expect(toolRowModel('bash', running({ argsRaw: '' })).bodyRaw).toBeNull()
-    expect(toolRowModel('bash', result({ call: null })).bodyRaw).toBeNull()
+    expect(toolRowModel('bash', running({ argsRaw: '{"a":1}' })).body).toBe('{\n  "a": 1\n}')
+    expect(toolRowModel('bash', running({ argsRaw: 'raw' })).body).toBe('raw')
+    expect(toolRowModel('bash', running({ argsRaw: '' })).body).toBeNull()
+    expect(toolRowModel('bash', result({ call: null })).body).toBeNull()
+  })
+
+  it('defers large args and output string material until details are read', () => {
+    const stringify = vi.spyOn(JSON, 'stringify')
+    const model = toolRowModel('bash', result({
+      content: [{ type: 'image', data: 'payload' } as never],
+    }))
+    stringify.mockClear()
+
+    expect(model.hasBody).toBe(true)
+    expect(model.hasOutput).toBe(true)
+    expect(stringify).not.toHaveBeenCalled()
+
+    expect(model.body).toContain('"command"')
+    expect(stringify).toHaveBeenCalledTimes(1)
+    expect(model.body).toContain('"command"')
+    expect(stringify).toHaveBeenCalledTimes(1)
+
+    expect(model.output).toContain('"data": "payload"')
+    expect(stringify).toHaveBeenCalledTimes(2)
+    expect(model.output).toContain('"data": "payload"')
+    expect(stringify).toHaveBeenCalledTimes(2)
+    stringify.mockRestore()
   })
 
   it('a code row with an empty program falls back to the args JSON envelope', () => {
-    const model = toolRowModel('run_code', running({ name: 'run_code', argsRaw: '{"code":""}' }))
-    expect(formatToolBody(model.variant, model.bodyRaw ?? ''))
+    expect(toolRowModel('run_code', running({ name: 'run_code', argsRaw: '{"code":""}' })).body)
       .toBe('{\n  "code": ""\n}')
   })
 
@@ -272,10 +291,16 @@ describe('tool-call-model', () => {
 })
 
 describe('ToolRow', () => {
+  const details = (body: string | null, output: string | null = null): ToolRowDetailsModel => ({
+    hasBody: body !== null,
+    hasOutput: output !== null,
+    body,
+    output,
+  })
   const rowProps = {
     t,
     variant: 'bash' as const, icon: <i data-testid="tool-icon" />, title: 'Bash',
-    summary: 'List files', bodyRaw: '{"a":1}', state: 'ok' as const,
+    summary: 'List files', details: details('{\n  "a": 1\n}'), state: 'ok' as const,
   }
 
   it('renders leading icon, title and summary while collapsed', () => {
@@ -317,29 +342,6 @@ describe('ToolRow', () => {
     expect(view.getByText('new', { exact: true })).toBeTruthy()
     expect(view.queryByRole('button', { name: /展开其余/ })).toBeNull()
   })
-
-  it('formats the argument body only while expanding it', () => {
-    const stringify = vi.spyOn(JSON, 'stringify')
-    const bodyFormatCalls = () => stringify.mock.calls.filter(
-      ([value, replacer, space]) => typeof value === 'object'
-        && value !== null
-        && 'a' in value
-        && (value as { a?: unknown }).a === 1
-        && replacer === null
-        && space === 2,
-    ).length
-    const view = render(<ToolRow {...rowProps} />)
-    expect(bodyFormatCalls()).toBe(0)
-
-    fireEvent.click(view.getByRole('button'))
-    expect(bodyFormatCalls()).toBe(1)
-    expect(view.getByText(/"a": 1/)).toBeTruthy()
-
-    fireEvent.click(view.getByRole('button'))
-    expect(bodyFormatCalls()).toBe(1)
-    expect(view.queryByText(/"a": 1/)).toBeNull()
-  })
-
   it('running keeps the icon (row sweep carries the signal); error swaps in a StateDot', () => {
     const runningView = render(<ToolRow {...rowProps} state="running" />)
     expect(runningView.queryByTestId('tool-icon')).not.toBeNull()
@@ -352,7 +354,7 @@ describe('ToolRow', () => {
   })
 
   it('non-expandable rows render a passive leading slot and no row button', () => {
-    const view = render(<ToolRow {...rowProps} bodyRaw={null} />)
+    const view = render(<ToolRow {...rowProps} details={details(null)} />)
     expect(view.queryByRole('button')).toBeNull()
     expect(view.container.querySelector('[aria-expanded]')).toBeNull()
     expect(view.queryByTestId('tool-icon')).not.toBeNull()
@@ -410,7 +412,7 @@ describe('ToolRow', () => {
 
   it('an error row shows the failure first line in the collapsed summary and the full text expanded', () => {
     const view = render(
-      <ToolRow {...rowProps} state="error" errorSummary="boom" output={'boom\ndetail'} />,
+      <ToolRow {...rowProps} state="error" errorSummary="boom" details={details(rowProps.details.body, 'boom\ndetail')} />,
     )
     expect(view.getByText('boom')).toBeTruthy()
     expect(view.queryByText('List files')).toBeNull()
@@ -473,7 +475,7 @@ describe('ToolRow', () => {
   })
 
   it('the expanded card gutter-labels each section it carries (IN / OUT)', () => {
-    const both = render(<ToolRow {...rowProps} output="result text" />)
+    const both = render(<ToolRow {...rowProps} details={details(rowProps.details.body, 'result text')} />)
     fireEvent.click(both.getByRole('button'))
     expect(both.getByText('输入')).toBeTruthy()
     expect(both.getByText('输出')).toBeTruthy()
@@ -484,7 +486,7 @@ describe('ToolRow', () => {
     expect(inputOnly.getByText('输入')).toBeTruthy()
     expect(inputOnly.queryByText('输出')).toBeNull()
     cleanup()
-    const outputOnly = render(<ToolRow {...rowProps} bodyRaw={null} output="only out" />)
+    const outputOnly = render(<ToolRow {...rowProps} details={details(null, 'only out')} />)
     fireEvent.click(outputOnly.getByRole('button'))
     expect(outputOnly.queryByText('输入')).toBeNull()
     expect(outputOnly.getByText('输出')).toBeTruthy()

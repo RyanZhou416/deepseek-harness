@@ -10,8 +10,14 @@ export const INFINITE = 0xFFFFFFFF
 export const WAIT_TIMEOUT = 258
 /** CreateProcess flag that prevents user code from running before resume. */
 export const CREATE_SUSPENDED = 0x4
+/** CreateProcess flag that separates a console child from the caller's console. */
+export const CREATE_NEW_CONSOLE = 0x10
 /** CreateProcess flag selecting a UTF-16 environment block. */
 export const CREATE_UNICODE_ENVIRONMENT = 0x400
+/** STARTUPINFOW flag that applies wShowWindow. */
+export const STARTF_USESHOWWINDOW = 0x1
+/** Show state for a console window that must not take focus. */
+export const SW_HIDE = 0
 /** GetStdHandle selector for standard input. */
 export const STD_INPUT_HANDLE = -10
 /** GetStdHandle selector for standard output. */

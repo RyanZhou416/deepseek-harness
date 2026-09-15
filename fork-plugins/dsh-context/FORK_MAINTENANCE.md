@@ -5,11 +5,10 @@ This subtree carries the DeepSeek Harness fork build of `dsh-context`. It retain
 ## Provenance
 
 - Upstream repository: `https://github.com/bowenliang123/dsh-context.git`
-- Upstream tag: `v0.49.0`
-- Upstream commit: `40bb97c5633eabbdf1c22c77a3a0f1e10c6d8108`
-- Fork package version: `0.49.0-dsh015rc1.1`
+- Upstream tag: `v0.52.2`
+- Fork package version: `0.52.2-dsh016alpha1.1`
 - Subtree path: `fork-plugins/dsh-context`
-- Distribution artifact: `fork-plugins/releases/dsh-context-0.49.0-dsh015rc1.1.tgz`
+- Distribution artifact: `fork-plugins/releases/dsh-context-0.52.2-dsh016alpha1.1.tgz`
 
 ## Fork behavior
 
@@ -22,6 +21,8 @@ The timeline fold uses field-level copy-on-write state. An event clones only the
 Each projection definition retains independent weak reference caches for the inline and slim wire generations. Host-only changes such as a pending tool-call name, open step timing slot, or buffered Code-Mode operation reuse the prior raw wire value, so the projection registry's `Object.is` check suppresses schema validation and `session/projection` publication. Any visible input change receives a fresh identity.
 
 The `/context` overlay keeps only its modal-store gate mounted while closed. Projection, detail, history, and conversation hooks, the browser tree, keyboard handling, and layout observation mount with the open body and dispose when it closes.
+
+The `contextHeaders` projection tracks V3 `system/message` nodes until the following `request/header`, preserving per-epoch system-token pricing after the prompt left the request envelope. The optional system-node state remains compatible with existing version-1 header checkpoints.
 
 The low-overhead deployment bounds are `maxRequestSteps: 300`, `maxKeptTurns: 60`, `maxEvents: 100`, `maxNodes: 400`, `maxArchiveNodes: 100`, and `maxFileOps: 100`. Bounds remain ordinary Cordis plugin configuration and do not change stored or wire fields.
 
@@ -37,7 +38,7 @@ corepack pnpm@11.9.0 run lint:fix && corepack pnpm@11.9.0 run test && corepack p
 corepack pnpm@11.9.0 pack --pack-destination ..\releases
 ```
 
-Store the artifact's uppercase SHA-256 beside it as `dsh-context-0.49.0-dsh015rc1.1.tgz.sha256`. Inspect the tarball manifest and its embedded `package.json` version before installation.
+Store the artifact's uppercase SHA-256 beside it as `dsh-context-0.52.2-dsh016alpha1.1.tgz.sha256`. Inspect the tarball manifest and its embedded `package.json` version before installation.
 
 ## Updating upstream
 

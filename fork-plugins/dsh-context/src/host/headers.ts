@@ -36,12 +36,14 @@
 import { z } from 'zod'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import type { ProjectionDefinition } from './compat'
-import type { ContextHeaders, HeaderRecord, HeaderTool } from '../shared/types'
+import type { ContextHeaders, HeaderRecord, HeaderTool, SystemPromptNode } from '../shared/types'
 import { estimateToolSchema } from './pricing'
-import { estimateSystemTokens } from '../shared/estimate'
+import { estimateSystemContent, estimateSystemTokens } from '../shared/estimate'
+import { replaceRangeOf } from './logShapes'
 
 /** Retention cap on header epochs (metadata only; changes are rare; 50 is generous). */
 const HEADERS_MAX = 50
+const SYSTEM_NODES_MAX = 8
 
 /**
  * One stored tool: the v1 row shape carried the producer description and the
@@ -66,6 +68,8 @@ export interface StoredHeaderRecord {
 
 export interface HeadersState {
   headers: StoredHeaderRecord[]
+  /** V3 system-prompt nodes retained until the next request-header epoch. */
+  systems?: SystemPromptNode[]
 }
 
 /**
@@ -90,6 +94,11 @@ const storedEpochSchema = z.object({
 
 const contextHeadersStateSchema = z.object({
   headers: z.array(storedEpochSchema),
+  systems: z.array(z.object({
+    seq: z.number(),
+    time: z.number(),
+    tokens: z.number().int().nonnegative(),
+  }).strict()).optional(),
 }).strict() as unknown as z.ZodType<HeadersState>
 
 /** The wire schema: strict metadata — the shape every delivery channel carries. */
@@ -111,7 +120,7 @@ export const contextHeadersSchema = z.object({
   }).strict()),
 }).strict() as unknown as z.ZodType<ContextHeaders>
 
-function recordOf(event: SessionEvent): StoredHeaderRecord | null {
+function recordOf(event: SessionEvent, systemTokens?: number): StoredHeaderRecord | null {
   if (event.type !== 'request/header') return null
   const rawHeader = (event.data as { header?: unknown }).header
   if (rawHeader === null || rawHeader === undefined || typeof rawHeader !== 'object') return null
@@ -142,8 +151,34 @@ function recordOf(event: SessionEvent): StoredHeaderRecord | null {
   }
   if (typeof header.system === 'string' && header.system.length > 0) {
     record.systemTokens = estimateSystemTokens(header.system)
+  } else if (systemTokens !== undefined) {
+    record.systemTokens = systemTokens
   }
   return record
+}
+
+function effectiveSystemTokens(systems: readonly SystemPromptNode[]): number {
+  for (let index = systems.length - 1; index >= 0; index -= 1) {
+    const tokens = systems[index].tokens
+    if (tokens > 0) return tokens
+  }
+  return 0
+}
+
+function applySystemMessage(state: HeadersState, event: SessionEvent): HeadersState {
+  const data = event.data as { message?: { content?: unknown } }
+  let systems = state.systems ?? []
+  const replacement = replaceRangeOf(event.surfaceOp)
+  if (replacement !== null) {
+    systems = systems.filter(node => node.seq < replacement.start || node.seq > replacement.end)
+  }
+  systems = [...systems, {
+    seq: event.seq,
+    time: event.time,
+    tokens: estimateSystemContent(data.message?.content),
+  }]
+  if (systems.length > SYSTEM_NODES_MAX) systems = systems.slice(-SYSTEM_NODES_MAX)
+  return { ...state, systems }
 }
 
 /**
@@ -184,14 +219,16 @@ export function createContextHeadersDefinition(
     wire: { viewSchema: contextHeadersSchema, view },
     init: (): HeadersState => ({ headers: [] }),
     apply: (state: HeadersState, event: SessionEvent): HeadersState => {
-      const record = recordOf(event)
+      if (event.type === 'system/message') return applySystemMessage(state, event)
+      const systemTokens = state.systems === undefined ? undefined : effectiveSystemTokens(state.systems)
+      const record = recordOf(event, systemTokens)
       if (record === null) return state
       // The agent loop already suppresses unchanged headers; a cheap guard
       // against the same epoch arriving twice in a row (e.g. resume replays).
       const last = state.headers.at(-1)
       if (last !== undefined && last.seq === record.seq) return state
       const headers = [...state.headers, record]
-      return { headers: headers.length > HEADERS_MAX ? headers.slice(-HEADERS_MAX) : headers }
+      return { ...state, headers: headers.length > HEADERS_MAX ? headers.slice(-HEADERS_MAX) : headers }
     },
     // Pinned at 1 on purpose (see the read-compat note above): a bump would
     // invalidate every cached row and orphan the key for idle cold sessions,

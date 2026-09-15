@@ -38,7 +38,7 @@ Gateway Ping/Pong 保持严格的 WebSocket 控制帧协议。每次 Ping 都把
 
 ## Alternatives considered
 
-**删除或重写已存储 chunk。** 拒绝，因为 chunk 仍是持久 replay 和诊断证据，其 sequence、timestamp、provenance、fork 与崩溃恢复语义均可观察。
+**删除或重写已存储 chunk。** 拒绝，因为 chunk 仍是持久 replay 和诊断证据，其 sequence、timestamp、source identity、fork 与崩溃恢复语义均可观察。
 
 **先实现 Chat DOM virtualization。** 不作为第一项修复，因为超大 history 的解析、校验、Conversation fold 和 model 驻留都发生在 React render 之前。等 scroll、selection、find-in-page、accessibility 与 variable-height anchor 行为明确后，virtualization 仍可减少 mounted DOM。
 

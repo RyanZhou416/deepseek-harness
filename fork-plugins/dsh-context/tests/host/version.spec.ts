@@ -167,10 +167,10 @@ describe('detectHarnessVersion — running anchor', () => {
   })
 
   test('never probes the CLI package from the running anchor', () => {
-    // The fixture pins the CLI at 0.0.1 but the library at the baseline: only
-    // the library answer may come back.
+    // The fixture pins the CLI at 0.0.1 while the running library resolves from
+    // this private build's exact DSH cohort: only the library answer may return.
     const ctx = ctxWithHome(scratchResolver('empty'))
-    assert.equal(detectHarnessVersion(ctx, runningResolver('module-skips-cli'), ELSEWHERE), '0.1.2-rc.1')
+    assert.equal(detectHarnessVersion(ctx, runningResolver('module-skips-cli'), ELSEWHERE), '0.1.6-alpha.1')
   })
 
   test('a resolving witness with no readable version falls through to home', () => {

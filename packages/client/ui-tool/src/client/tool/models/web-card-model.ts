@@ -30,9 +30,8 @@ interface WebSource {
   publishedAt?: string
 }
 
-function webSources(value: unknown): WebSource[] | null {
+function webSources(value: unknown): readonly WebSource[] | null {
   if (!Array.isArray(value)) return null
-  const sources: WebSource[] = []
   for (const source of value) {
     if (typeof source !== 'object' || source === null || Array.isArray(source)) return null
     const { url, title, snippet, publishedAt } = source as Record<string, unknown>
@@ -40,14 +39,8 @@ function webSources(value: unknown): WebSource[] | null {
     if (title !== undefined && typeof title !== 'string') return null
     if (snippet !== undefined && typeof snippet !== 'string') return null
     if (publishedAt !== undefined && typeof publishedAt !== 'string') return null
-    sources.push({
-      url,
-      ...title === undefined ? {} : { title },
-      ...snippet === undefined ? {} : { snippet },
-      ...publishedAt === undefined ? {} : { publishedAt },
-    })
   }
-  return sources
+  return value as WebSource[]
 }
 
 /**
@@ -64,10 +57,14 @@ export function webCardModel(block: ToolCallBlock): WebCardModelProps | null {
   if (tool === 'web_search') {
     const sources = webSources(meta.sources)
     if (sources === null || (meta.answer !== undefined && typeof meta.answer !== 'string')) return null
+    let copied: WebSource[] | undefined
     return {
       kind: 'search',
       answer: meta.answer,
-      sources,
+      get sources() {
+        copied ??= sources.map(source => ({ ...source }))
+        return copied
+      },
       truncated: meta.truncated,
     }
   }

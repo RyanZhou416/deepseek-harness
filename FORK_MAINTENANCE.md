@@ -28,21 +28,14 @@
 |---|---|---|
 | Fork remote | `origin = https://github.com/RyanZhou416/deepseek-harness.git` | 唯一常规推送目标 |
 | Official remote | `upstream = https://github.com/deepseek-ai/deepseek-harness.git` | 只用于 fetch 和合并官方 release tag |
-| Published fork | `master` after local integration | `dsh-v0.1.5-rc.1` 官方结构、16 GiB Windows Host、长任务保护与 fork-maintained plugin 基线；精确 SHA 用 Git 查询，避免文档自引用失真 |
-| Pre-Queue behavior anchor | `7b86d0a01b` | Queue 仅支持 steer 时的历史定位点，不是当前发布基线 |
-| Alpha.2 integration history | `133c48c733` | 长任务、AgentTeams 和 transient retention 的已合并历史锚点；集成分支已删除 |
-| Alpha.2 official merge | `e481d7cb31` | 合并 `dsh-v0.1.2-alpha.2` (`0a53fb55be`) |
-| Older backup history | `595cd48136` | alpha.1 前的已合并恢复锚点；本地分支已删除 |
-| Pre-RC.1 backup history | `eb0cbabe39` | RC.1 整合前的已合并恢复锚点；远程分支已删除 |
-| RC.1 integration history | `646dffed9f` / `a19e092544` / `42aec50270` | 官方 merge、fork 行为移植与生成物修正已进入 `master`；集成分支和 worktree 已删除 |
-| Alpha.2 integration | `6481bd2cbb` plus the following fork port | 官方结构 merge 位于该提交；fork 行为重做位于其后的 `master` 提交 |
-| Current official target | `dsh-v0.1.5-rc.1 = 183f08e9c6` on 2026-09-10 | 精确不可变 tag；不要改合并已越过该 tag 的 rolling `upstream/master` |
-| AgentTeams subtree | `fork-plugins/dsh-agent-teams` | 上游 `v0.1.16-rc.3@bf17f93d35` + 本 fork 0.1.5 RC.1 私有适配；subtree merge 记录精确 split |
-| Context subtree | `fork-plugins/dsh-context` | 上游 `v0.49.0@40bb97c563` + 本 fork 字段级投影和关闭 modal 性能优化 |
+| Published fork | `master` after local integration | `dsh-v0.1.6-alpha.1` 官方结构、16 GiB Windows Host、长任务保护与 fork-maintained plugin 基线；精确 SHA 用 Git 查询，避免文档自引用失真 |
+| Current official target | `dsh-v0.1.6-alpha.1` on 2026-09-15 | 精确不可变 tag；不要改合并已越过该 tag 的 rolling `upstream/master` |
+| AgentTeams subtree | `fork-plugins/dsh-agent-teams` | 上游 `v0.1.18` + 本 fork 0.1.6 Alpha.1 私有适配；subtree merge 记录精确 split |
+| Context subtree | `fork-plugins/dsh-context` | 上游 `v0.52.2` + 本 fork 字段级投影、V3 header 计价和关闭 modal 性能优化 |
 
-当前维护的源码兼容基线是 `dsh-v0.1.5-rc.1`。整合采用官方 handle-based Session persistence、Session format v3、通用 `session.updateQueue`、cursorless Assistant frame、长会话恢复和连接容错，再按本文的行为与测试补回仍缺失部分；后续合并禁止整体恢复旧版文件。
+当前维护的源码兼容基线是 `dsh-v0.1.6-alpha.1`。整合采用官方异步 Agent 创建、handle-based Session persistence、Session format v3、通用 `session.updateQueue`、cursorless Assistant frame、Web Terminal、SSH、MCP resources、Browser/Computer Use 和连接容错，再按本文的行为与测试补回仍缺失部分；后续合并禁止整体恢复旧版文件。
 
-0.1.5 RC.1 的 `SESSION_FORMAT_VERSION` 为 `3`；只读 open 可以准备受支持的历史 generation，写 open 在验证后发布 v3 successor。逻辑 `SessionHeader` 使用 `isSeeded`，精确 inherited cut 由 handle metadata 与 `session/end-seed` 表示。第三方插件和本地 AgentTeams 包即使磁盘数据可读，也必须重新构建并在隔离 profile 验证逻辑 API。
+0.1.6 Alpha.1 的 `SESSION_FORMAT_VERSION` 仍为 `3`；只读 open 可以准备受支持的历史 generation，写 open 在验证后发布 v3 successor。逻辑 `SessionHeader` 使用 `isSeeded`，精确 inherited cut 由 handle metadata 与 `session/end-seed` 表示。第三方插件和本地 AgentTeams 包即使磁盘数据可读，也必须重新构建并在隔离 profile 验证逻辑 API。
 
 ### Local paths
 
@@ -143,21 +136,17 @@ Alpha.2 已延迟 generic Tool input formatting；fork 只补回仍缺失的 out
 
 #### Continuable child steer
 
-Alpha.2 官方 `SubagentRuntime.sendMessage(sender,target,...)` 统一 direct parent/child messaging 并支持 image；fork 未恢复旧公开 `.steer()` / `.followup()`。Team mailbox 只使用官方 symbol-keyed Host queue/steer adapter，以保留 Team message provenance。
+Alpha.2 官方 `SubagentRuntime.sendMessage(sender,target,...)` 统一 direct parent/child messaging 并支持 image；fork 未恢复旧公开 `.steer()` / `.followup()`。Team mailbox 只使用官方 symbol-keyed Host queue/steer adapter，以保留 Team message source。
 
-#### Lead-to-teammate mailbox delivery
+#### External AgentTeams mailbox delivery
 
-`packages/experimental/agent-team/src/mailbox.ts` 根据 exact membership 与 sender identity，把发往 live teammate 的 Lead 指令作为 nearest-step steer；inactive child 通过 Host queue 冷恢复。Teammate-origin quiet 只注入 live target，wakeup 进入 queue；后续 wakeup 会按 mailbox 顺序先准入较早 quiet mail。
+外置 AgentTeams v0.1.18 拥有 live member 的 next-step delivery、inactive member 的 Queue、稳定 message id、accept/ack、target-local serialization、crash recovery、cold replay 与退休成员拒绝。Fork 不再修改 DSH 官方实验性 Team mailbox。
 
-官方 generic adjacent steer 不能单独替代 durable Team mailbox。替代实现还必须保留 stable message id、Team message source、accept/ack、target-local serialization、crash recovery 和 cold replay。
+Fork 仍让 inactive Captain 通过 Session Controller cold resume，并在 awaited `agent/created` 阶段按 durable mailbox 顺序重投；成功逐条 ack，失败释放当前记录和未处理后缀。未读 projection 使用 256-entry / 8 MiB LRU，磁盘 JSONL 格式不变。
 
-#### Forced background shell and yielding job wait
+#### Retired official Team scheduling patches
 
-`packages/shell/tool-bash` 与 `tool-pwsh` 提供默认 `false` 的 `forceRunInBackground`；`packages/jobs/tool-jobs` 提供默认 `false` 的 `yieldWaitOnNextStep`。普通 profile 因默认值不改变行为。
-
-Private AgentTeams profile 显式强制 Bash/PowerShell 命令作为 owner-scoped job 启动，并让 `job_output(wait:true)` 在 next-step input 到达时只结束 registry wait、返回当前 output/status；底层 job 继续运行，普通 next-turn FIFO input 不触发让步。
-
-不得用通用 `Promise.race` 丢弃任意 tool call。上游替代必须保持 job ownership、kill/dispose、next-step 与 next-turn 区分，以及 jobs service 并发激活时的安全注册。
+`forceRunInBackground` 与 `yieldWaitOnNextStep` 没有进入 0.1.6 移植。真实 profile 使用外置 AgentTeams，不挂载官方实验性 Team profile；保留两个仅由未启用 profile 消费的公共配置会扩大每次上游合并的冲突面。普通 jobs completion wake、Windows 控制台隔离和 AgentTeams 自己的 next-step delivery 独立保留。
 
 #### Browser Queue Dock
 
@@ -196,10 +185,10 @@ Web profile 插入 `memory-watchdog.cjs`：250 ms 采样、60 s 日志、heap ra
 | Package | Installed | Runtime state | Preserve rule |
 |---|---:|---|---|
 | `dshmarket` | `1.41.0` | Enabled | RC.1 隔离启动与首屏通过；profile 固定 `allowRestart:false`，禁止插件静默重启 Host |
-| `@nanmicoder/dsh-agent-teams` | `0.1.16-dsh015rc1.1` | Enabled | `setup.command` 固定 RC.1 artifact；禁止被 npm latest/next 直接覆盖 |
+| `@nanmicoder/dsh-agent-teams` | `0.1.18-dsh016alpha1.1` prepared artifact | Existing instance unchanged | `setup.command` 固定 Alpha.1 artifact；停止 Host 后安装，禁止被 npm latest/next 直接覆盖 |
 | `dsh-plugin-subscriptions` | `0.6.0` | Installed, disabled | RC.1 隔离启动通过；profile 固定 `rateLimit.wait:false`，后续单独启用验证真实账户 |
 | `@vlln/dsh-task-status` | Removed | Not installed | 2026-09-04 已从依赖、bundle、patch、lockfile 和 `node_modules` 删除；RC.1 profile 不得恢复 |
-| `dsh-context` | `0.49.0-dsh015rc1.1` | Enabled | 保留 `300/60/100/400/100/100` bounds；源码与回滚规则见 `fork-plugins/dsh-context/FORK_MAINTENANCE.md` |
+| `dsh-context` | `0.52.2-dsh016alpha1.1` prepared artifact | Existing instance unchanged | 停止 Host 后安装并保留 `300/60/100/400/100/100` bounds；源码与回滚规则见 `fork-plugins/dsh-context/FORK_MAINTENANCE.md` |
 | `dsh-shell-command` | Removed | No package or configuration | 2026-09-04 已删除残留注释；RC.1 profile 不安装 |
 | `@deepseek-ai/dsh-subagent-dsh-sdk` | Link to source checkout | Enabled for process provider | 跟随源码构建，worker 数据与主 sessions 隔离 |
 
@@ -207,30 +196,29 @@ Web profile 插入 `memory-watchdog.cjs`：250 ms 采样、60 s 日志、heap ra
 
 ### Local AgentTeams package
 
-维护真源位于 `fork-plugins\dsh-agent-teams`，完整保留上游源码、测试、构建脚本和资产。仓库安装器使用 `fork-plugins\releases\nanmicoder-dsh-agent-teams-0.1.16-dsh015rc1.1.tgz`，SHA256 为 `EAD7426C8BA4D3A72D4054E817CE2E19A4CB60A57F1CA49A9F2ABB7107E9F351`。该 package 标记为 private，禁止用上游 npm scope 发布；旧 artifact 留作回滚。
+维护真源位于 `fork-plugins\dsh-agent-teams`，完整保留上游运行源码、测试、构建脚本和资产。仓库安装器使用 `fork-plugins\releases\nanmicoder-dsh-agent-teams-0.1.18-dsh016alpha1.1.tgz`，SHA256 为 `575A45F50A9A7D12DE34567102C6C1D4EF9A1F70242A682C76EBC14FA4021DA4`。该 package 标记为 private，禁止用上游 npm scope 发布；旧制品从工作树移除并仍可从 Git 历史恢复。
 
-旧 `.1`–`.4` tarballs 与 `dsh-agent-teams-0.1.14-dsh012.1.bundle` 继续保留为 rollback evidence；其中 `.bundle` 是包含 `.1` 完整历史的 Git bundle，不得随意清理。当前 fork artifact 已随 Git 提交，同事不再依赖这台机器的外置 `.local-plugins-src`。
+当前 fork artifact 随 Git 提交，同事不依赖这台机器的外置 `.local-plugins-src`。工作树只保留当前 AgentTeams 与 Context 安装包及校验值；历史制品由 Git 历史承担回滚证据。
 
 必须保留的 fork 行为：
 
-1. 保留上游 v0.1.16-rc.3 的 authenticated Web routes、bounded request bodies、fallback 持久化、parked-attempt 单次恢复、安全 captain reassignment、reasoning-effort 透传、稳定 capability 展示、Web 批准唤醒和 team-lock queue 清理。
-2. 0.1.5 RC.1 发行路径使用创建期显式 Agent 参数、`agent/session-start`、`Session.ownEvents()` 与统一 Host delivery adapter；legacy setup、session event 和 Host Queue 形态只保留为兼容性回归 fixture，不构成发行兼容声明。
-3. Team 内部队长指令、scheduler assignment、peer delivery 和 mailbox recovery 对 live member 使用 Host Steer 在最近 step boundary 进入，对 inactive member 使用 Host Queue 创建可冷恢复的独立 turn。
-4. Queue、Steer 与公开 `sendMessage()` 都拒绝向已退休 Team member 投递；人类在成员会话发送的普通消息仍走 Session FIFO。
-5. Client 使用 `uiConversation` 和 `[data-composer-input]`；Host capability 层保持 13 个 Captain 工具和 4 个成员工具稳定。package peer、development dependency、完整 DSH override cohort 与 lockfile 固定为 `0.1.5-rc.1`。
-6. 普通 captain 不驻留时，成员报告先通过 Host Session Controller cold resume captain；Captain Session start 会重投 durable mailbox，成功逐条 ack，失败记录及后缀释放 delivery lease。
-7. Windows directory rename 使用独立的 5 次重试预算；构建清理目标用跨平台 `basename()` 校验。
-8. `readUnreadMailbox()` 使用只保留 pending 消息的 256-entry / 8 MiB 有界 LRU，并以 `dev/ino/size/mtimeNs/ctimeNs` 检测文件替换；lease 每次按当前时间重算，append/claim/release/ack/archive/remove 成功后精确失效。完整历史读取和磁盘 JSONL 字节格式不变。
+1. 保留上游 v0.1.18 的原子 roster/DAG 创建、仅启动 ready member、next-step 协调、陈旧消息抑制、attempt 校验、退休成员清理、安全 reassignment 与任务纠正。
+2. 0.1.6 Alpha.1 发行路径使用 awaited `agent/created`、`Session.ownEvents()` 与统一 Host delivery adapter；legacy setup 和旧 Host Queue 形态只保留为回归 fixture，不构成发行兼容声明。
+3. Team 内部队长指令、scheduler assignment、peer delivery 和 mailbox recovery 使用 v0.1.18 的 Host Queue/Steer 规则；fork 不再重复维护最近-step 或退休成员策略。
+4. Client 使用 `uiConversation` 和 `[data-composer-input]`；Host capability 层保持 13 个 Captain 工具和 4 个成员工具稳定。package peer、development dependency、完整 DSH override cohort 与 lockfile 固定为 `0.1.6-alpha.1`。
+5. 普通 captain 不驻留时，成员报告先通过 Host Session Controller cold resume captain；Captain Session start 会重投 durable mailbox，成功逐条 ack，失败记录及后缀释放 delivery lease。
+6. Windows directory rename 使用独立的 5 次重试预算；构建清理目标用跨平台 `basename()` 校验。
+7. `readUnreadMailbox()` 使用只保留 pending 消息的 256-entry / 8 MiB 有界 LRU，并以 `dev/ino/size/mtimeNs/ctimeNs` 检测文件替换；lease 每次按当前时间重算，append/claim/release/ack/archive/remove 成功后精确失效。完整历史读取和磁盘 JSONL 字节格式不变。
 
 `.local-plugins-src\...dsh012.2/.3/.4` 只是历史解包产物，不能再当维护源。以后用 `git subtree pull --prefix=fork-plugins/dsh-agent-teams https://github.com/NanmiCoder/dsh-agent-teams.git <tag> --squash` 获取精确官方发布，再在 fork 内重放和验证上述行为；不得用 npm install 覆盖 subtree。
 
-本 fork 以 `v0.1.16-rc.3@bf17f93d35` 生成 `0.1.16-dsh015rc1.1`。上游 release candidate 提供固定协议、Web 批准唤醒和 team-lock queue 清理；fork adapter 继续覆盖 0.1.5 RC.1 的统一 Host delivery，封住公开 `sendMessage()` 与 Host Queue/Steer 对 retired member 的冷恢复旁路，并消除活动面板每秒重读永久 mailbox 历史的热点。后续上游发布先按行为测试去重，再提升 subtree 基线和私有版本；profile 始终安装 fork artifact。
+本 fork 以 `v0.1.18` 生成 `0.1.18-dsh016alpha1.1`。上游拥有 scheduling、next-step delivery、retired-member cleanup 与 task correction；fork adapter 只补 awaited `agent/created` 兼容、冷 Captain mailbox 恢复和有界 unread mailbox projection。后续上游发布先按行为测试去重，再提升 subtree 基线和私有版本；profile 始终安装 fork artifact。
 
 ### Local Context package
 
-维护真源位于 `fork-plugins\dsh-context`，仓库安装器使用 `fork-plugins\releases\dsh-context-0.49.0-dsh015rc1.1.tgz`，SHA256 为 `13966640E7CF22452A02843C5663105A4857E5BDDE484917953817140D41D081`。该版本采用上游 V0/V2/V3 fold、Host 侧 File Activity、右侧 Sidebar 面板与 slim-head/on-demand-detail 传输，并保持 `contextTimeline` / `contextHeaders` key 和 Session event vocabulary 不变。上游 `stateVersion: 15` 使不兼容的旧 projection checkpoint 从不可变 Session 日志重新派生；安装流程不删除 cache，也不转换 Session artifact。
+维护真源位于 `fork-plugins\dsh-context`，仓库安装器使用 `fork-plugins\releases\dsh-context-0.52.2-dsh016alpha1.1.tgz`，SHA256 为 `064D91DEB012D6D183F164CD3053FAAE6EDB31FF893C416F036BF0EA47B5319D`。该版本采用上游 v0.52.2 的 V0/V2/V3 fold、Context board、live pricing、注入标签、Host File Activity、右侧 Sidebar 与 slim-head/on-demand-detail 传输，并保持 `contextTimeline` / `contextHeaders` key 和 Session event vocabulary 不变。
 
-本地优化包含 timeline fold 字段级 copy-on-write、request/event/archive/file-op dirty retention trim、恢复态首个 slim/inline/detail value 的 bounds clamp、Host-only 状态的引用稳定 inline/slim cache，以及关闭 `/context` modal 时的 projection/detail/history/conversation 订阅释放。真实 profile 使用 `maxRequestSteps: 300`、`maxKeptTurns: 60`、`maxEvents: 100`、`maxNodes: 400`、`maxArchiveNodes: 100` 和 `maxFileOps: 100`。这些上限只缩小 Context 派生展示，不修改 Session 历史。
+本地优化包含 timeline fold 字段级 copy-on-write、request/event/archive/file-op dirty retention trim、恢复态首个 slim/inline/detail value 的 bounds clamp、Host-only 状态的引用稳定 inline/slim cache、关闭 `/context` modal 时释放 projection/detail/history/conversation 订阅，以及用 V3 `system/message` 为后续 header epoch 计价。真实 profile 停机升级后使用 `maxRequestSteps: 300`、`maxKeptTurns: 60`、`maxEvents: 100`、`maxNodes: 400`、`maxArchiveNodes: 100` 和 `maxFileOps: 100`。这些上限只缩小 Context 派生展示，不修改 Session 历史。
 
 更新时使用 `git subtree pull --prefix=fork-plugins/dsh-context https://github.com/bowenliang123/dsh-context.git <tag> --squash`，再逐项重放 `fork-plugins/dsh-context/FORK_MAINTENANCE.md` 所列行为。不得用 npm latest 直接覆盖真实 profile。
 
@@ -272,11 +260,11 @@ Profile 注册 `dsh-sdk-process-raw` 和 `subagent_process`：SDK profile、独�
 | Fixed Agent/model-step admission | Retired | Never restore `memory-admission` |
 | Generic parent/child messaging | Replaced by alpha.2 official `sendMessage()` | Never restore the old public `.steer()` API |
 | Queue edit/remove/steer | Replaced by alpha.2 `session.updateQueue` | Do not restore `subagents.updateQueuedByParent` |
-| Durable Team Lead mailbox steer | Preserve separately | Generic adjacent steer alone is insufficient |
-| Forced Team shell background / yielding wait | Preserve | Require explicit opt-in and job ownership semantics |
+| Official experimental Team mailbox fork | Retired | Real profile uses external AgentTeams v0.1.18; keep official 0.1.6 implementation unchanged |
+| Forced Team shell background / yielding wait | Retired | Its only Consumer was the unused official Team profile |
 | Global disconnect overlay | Preserve | Official replacement must remain visible with collapsed sidebar |
 | Windows/macOS launch/build scripts | Preserve | Official launcher must cover local heap/report/path needs before removal |
-| Fork-vendored AgentTeams behavior | Preserve and revalidate for alpha.2 | Pull upstream through subtree, retain the private version/artifact, and never install npm latest over the live profile |
+| Fork-vendored AgentTeams behavior | Preserve and revalidate for 0.1.6 | Pull upstream through subtree, retain the private version/artifact, and never install npm latest over the live profile |
 | AgentTeams unread mailbox projection LRU | Preserve | Require unchanged JSONL format, dynamic lease expiry, exact mutation invalidation, caller isolation and bounded retention |
 | Dormant fixed-concurrency wrapper | Do not preserve as active behavior | It may remain evidence, but must not be mounted |
 

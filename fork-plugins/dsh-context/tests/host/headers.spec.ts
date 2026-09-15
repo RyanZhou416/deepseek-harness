@@ -5,7 +5,7 @@
 
 import assert from 'node:assert/strict'
 import { describe, test } from 'vitest'
-import { estimateSystemTokens } from '../../src/shared/estimate'
+import { estimateSystemContent, estimateSystemTokens } from '../../src/shared/estimate'
 import { createContextHeadersDefinition } from '../../src/host/headers'
 import type { HeadersState } from '../../src/host/headers'
 import { header, foreign } from './helpers/events'
@@ -15,6 +15,20 @@ import type { TimelineEvent } from '../../src/host/fold'
 /** A raw request/header envelope with full control over the header payload. */
 function headerEvent(seq: number, rawHeader: unknown): TimelineEvent {
   return { type: 'request/header', seq, time: seq * 1000, data: { header: rawHeader, reason: 'initial' } }
+}
+
+function systemEvent(
+  seq: number,
+  text: string,
+  surfaceOp: TimelineEvent['surfaceOp'] = 'append',
+): TimelineEvent {
+  return {
+    type: 'system/message',
+    seq,
+    time: seq * 1000,
+    data: { message: { content: text === '' ? [] : [{ type: 'text', text }] } },
+    surfaceOp,
+  }
 }
 
 /** Fold events through the unit, pinning the plain-JSON state precondition on every result. */
@@ -106,6 +120,23 @@ describe('createContextHeadersDefinition', () => {
     assert.ok(!('systemTokens' in view.headers[0]))
     assert.ok(!('systemTokens' in view.headers[1]))
     assert.equal(view.headers[2].systemTokens, estimateSystemTokens('sys'))
+  })
+
+  test('V3 system nodes price the following header and honor replacement', () => {
+    const def = createContextHeadersDefinition()
+    const state = fold(def, [
+      systemEvent(1, 'first'),
+      headerEvent(2, {}),
+      systemEvent(3, '', { op: 'replace', startSeq: 1, endSeq: 1 }),
+      headerEvent(4, {}),
+      ...Array.from({ length: 9 }, (_, index) => systemEvent(5 + index, `system-${index}`)),
+      headerEvent(14, {}),
+    ])
+    const view = def.wire.view(state)
+    assert.equal(view.headers[0].systemTokens, estimateSystemContent([{ type: 'text', text: 'first' }]))
+    assert.equal(view.headers[1].systemTokens, 0)
+    assert.equal(view.headers[2].systemTokens, estimateSystemContent([{ type: 'text', text: 'system-8' }]))
+    assert.equal(state.systems?.length, 8)
   })
 
   test('the same epoch seq twice in a row returns the same state reference', () => {

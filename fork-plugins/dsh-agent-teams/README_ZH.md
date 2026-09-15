@@ -24,6 +24,8 @@
 
 你只需用自然语言提出目标。插件会提供精简的固定团队协议、13 个业务工具、持久化状态、自动共享任务调度和实时 Web UI，不需要额外的 Workflow 引擎。
 
+> 本 fork 为 DSH `0.1.6-alpha.1` 打包 `0.1.18-dsh016alpha1.1`。请安装 [`../README.zh.md`](../README.zh.md) 记录的仓库内产物；下方公开 npm 指令描述的是上游发布渠道。
+
 <p align="center">
   <img src="./assets/ui.png" width="100%" alt="DeepSeek Harness 对话与 AgentTeams 实时活动面板，展示成员、任务依赖和回报">
 </p>

@@ -25,6 +25,7 @@ import {
   findTeamByCaptain,
   findTeamByParticipant,
   readMailbox,
+  readPendingMailbox,
   readUnreadMailbox,
   readTeam,
   releaseMailboxDelivery,
@@ -723,16 +724,16 @@ try {
 
   const leaseBase = Date.now()
   await claimMailboxDelivery(stateRoot, team.id, cacheAgent, [cacheMessage.id])
-  const leasedProjection = await readUnreadMailbox(stateRoot, team.id, cacheAgent)
+  const leasedProjection = await readPendingMailbox(stateRoot, team.id, cacheAgent)
   const originalDateNow = Date.now
   let expiredProjection
   Date.now = () => leaseBase + 61_000
   try {
-    expiredProjection = await readUnreadMailbox(stateRoot, team.id, cacheAgent)
+    expiredProjection = await readPendingMailbox(stateRoot, team.id, cacheAgent)
   } finally {
     Date.now = originalDateNow
   }
-  check('an unchanged cached lease naturally becomes unread after expiry',
+  check('an unchanged cached lease naturally becomes pending after expiry',
     leasedProjection.length === 0 && expiredProjection.length === 1)
   await releaseMailboxDelivery(stateRoot, team.id, cacheAgent, [cacheMessage.id])
   check('release invalidates and restores the exact unread record',

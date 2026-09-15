@@ -416,7 +416,9 @@ function spawnJobProcess(
   resolveStdio: () => ProcessStandardHandles,
   createName: 'CreateProcessAsUserW' | 'CreateProcessW',
   create: (startupInfo: NativePtr, processInfo: NativePtr) => number,
+  console: 'inherit' | 'new-hidden',
 ): SpawnedJobProcess {
+  const hideNewConsole = console === 'new-hidden'
   const job = createKillOnCloseJob(api)
   const enabled: NativePtr[] = []
   let startupInfo: NativePtr | undefined
@@ -448,7 +450,8 @@ function spawnJobProcess(
     startupInfo = allocStartupInfo()
     encodeStartupInfo(startupInfo, {
       cb: abi.STARTUPINFOW_SIZE,
-      dwFlags: abi.STARTF_USESTDHANDLES,
+      dwFlags: abi.STARTF_USESTDHANDLES | (hideNewConsole ? abi.STARTF_USESHOWWINDOW : 0),
+      ...hideNewConsole ? { wShowWindow: abi.SW_HIDE } : {},
       hStdInput: stdio.stdin,
       hStdOutput: stdio.stdout,
       hStdError: stdio.stderr,
@@ -537,11 +540,13 @@ export function spawnInheritedJobProcess(
       abi.CREATE_SUSPENDED,
       startupInfo,
       processInfo,
-    ))
+    ), 'inherit')
 }
 
 /**
- * Spawn an ordinary process suspended, assign its Job, then resume it.
+ * Spawn an ordinary process in a separate hidden console, assign its Job while
+ * suspended, then resume it. Restricted-token children inherit that console
+ * from an ordinary sandbox runner instead of creating their own.
  * @param api - active binding table.
  * @param options - command, cwd, argv, and target carrier descriptors.
  * @returns caller-owned process and Job handles after successful resume.
@@ -559,12 +564,12 @@ export function spawnCurrentTokenJobProcess(
       null,
       null,
       1,
-      abi.CREATE_SUSPENDED | abi.CREATE_UNICODE_ENVIRONMENT,
+      abi.CREATE_SUSPENDED | abi.CREATE_UNICODE_ENVIRONMENT | abi.CREATE_NEW_CONSOLE,
       environment,
       options.cwd,
       startupInfo,
       processInfo,
-    ))
+    ), 'new-hidden')
 }
 
 /**

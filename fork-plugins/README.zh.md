@@ -19,18 +19,18 @@
 ## Agent Teams
 
 - 源码：`fork-plugins/dsh-agent-teams`
-- 当前私有版本：`0.1.16-dsh015rc1.1`
-- 上游底座：`NanmiCoder/dsh-agent-teams v0.1.16-rc.3@bf17f93d35`
-- 私有宿主目标：`dsh-v0.1.5-rc.1`
-- 安装产物：`fork-plugins/releases/nanmicoder-dsh-agent-teams-0.1.16-dsh015rc1.1.tgz`
-- 产物 SHA256：`EAD7426C8BA4D3A72D4054E817CE2E19A4CB60A57F1CA49A9F2ABB7107E9F351`
+- 当前私有版本：`0.1.18-dsh016alpha1.1`
+- 上游底座：`NanmiCoder/dsh-agent-teams v0.1.18`
+- 私有宿主目标：`dsh-v0.1.6-alpha.1`
+- 安装产物：`fork-plugins/releases/nanmicoder-dsh-agent-teams-0.1.18-dsh016alpha1.1.tgz`
+- 产物 SHA256：`575A45F50A9A7D12DE34567102C6C1D4EF9A1F70242A682C76EBC14FA4021DA4`
 
-该构建加入上游 rc.3 的稳定 capability 展示、已有团队复用指引、Web 批准唤醒和已结束团队锁清理，同时保留 live-Steer/inactive-Queue 投递、冷 Captain 邮箱恢复、全部退休成员入口守卫、有界 unread-only LRU、fallback 持久化和 parked-attempt 恢复。磁盘格式保持不变。
+该构建采用 v0.1.18 的原子 roster 创建、仅启动依赖就绪成员、next-step 协调、陈旧 attempt 拒绝、退休成员清理与任务纠正。私有层适配 DSH 0.1.6 的 awaited `agent/created` 启动，保留冷 Captain 邮箱恢复和有界未读邮箱缓存，磁盘格式不变。
 
 同事 clone 本 fork、设置好自己的 `DSH_HOME` 并关闭正在运行的 DSH 后，可在仓库根目录执行：
 
 ```powershell
-$artifact = (Resolve-Path .\fork-plugins\releases\nanmicoder-dsh-agent-teams-0.1.16-dsh015rc1.1.tgz).Path
+$artifact = (Resolve-Path .\fork-plugins\releases\nanmicoder-dsh-agent-teams-0.1.18-dsh016alpha1.1.tgz).Path
 node --import tsx/esm apps/cli/src/bin.ts plugin --profile web add $artifact
 ```
 
@@ -60,11 +60,11 @@ Agent Teams 的持久数据属于各工作区 `.agent-teams/` 目录；本目录
 ## Context
 
 - 源码：`fork-plugins/dsh-context`
-- 当前私有版本：`0.49.0-dsh015rc1.1`
-- 上游底座：`bowenliang123/dsh-context v0.49.0@40bb97c563`
-- 安装产物：`fork-plugins/releases/dsh-context-0.49.0-dsh015rc1.1.tgz`
-- 产物 SHA256：`13966640E7CF22452A02843C5663105A4857E5BDDE484917953817140D41D081`
+- 当前私有版本：`0.52.2-dsh016alpha1.1`
+- 上游底座：`bowenliang123/dsh-context v0.52.2`
+- 安装产物：`fork-plugins/releases/dsh-context-0.52.2-dsh016alpha1.1.tgz`
+- 产物 SHA256：`064D91DEB012D6D183F164CD3053FAAE6EDB31FF893C416F036BF0EA47B5319D`
 
-该版本采用上游 V0/V2/V3 fold、精简 head 加按需 detail 传输、Host 侧 File Activity 与右侧 Sidebar 面板。它使用字段级 copy-on-write、dirty retention trim、恢复态首个 view bounds 和引用稳定的 inline/slim cache 来降低 Host 分配与发布开销；关闭的 `/context` modal 只保留打开状态订阅。维护与回滚规则见 `fork-plugins/dsh-context/FORK_MAINTENANCE.md`。
+该构建采用 v0.52.2 的 Context board、价格、注入标签和 Agent 网络改进。字段级 copy-on-write、dirty retention trim、恢复态首个 view bounds、引用稳定的 inline/slim cache、关闭 modal 后释放订阅，以及 V3 system node 的 header 计价仍由私有层维护。维护与回滚规则见 `fork-plugins/dsh-context/FORK_MAINTENANCE.md`。
 
 低开销部署值为 `maxRequestSteps: 300`、`maxKeptTurns: 60`、`maxEvents: 100`、`maxNodes: 400`、`maxArchiveNodes: 100` 和 `maxFileOps: 100`。修改 profile 前必须确认 DSH 已停止；插件更新过程不得读取、迁移或删除 Session、附件、凭据或 projection cache 数据。

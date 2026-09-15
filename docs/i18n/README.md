@@ -41,7 +41,7 @@ The gate's limit, stated plainly: **a green gate means the pair was confirmed co
 
 ## Scope and exclusions
 
-**Scope**: the root `CONTRIBUTING.md`, `BRAND_GUIDELINES.md`, and `SAFETY.md` documents, every non-vendor README, and every active document under `.agents/notes/**`, `docs/**`, and `python/**`. README matching is case-insensitive on the basename and covers future directories without another manifest edit. Dependency and ignored build-output trees and the frozen `.agents/notes/archived/` tree are discovery exclusions, not evolving translation source.
+**Scope**: the root `CONTRIBUTING.md`, `BRAND_GUIDELINES.md`, and `SAFETY.md` documents, every DSH-owned README, and every active document under `.agents/notes/**`, `docs/**`, and `python/**`. README matching is case-insensitive on the basename and covers future directories without another manifest edit. Dependency and ignored build-output trees and the frozen `.agents/notes/archived/` tree are discovery exclusions, not evolving translation source.
 
 Generated English references and graphs participate in pairing when a reviewed Chinese counterpart is available. When a generator owns only English, it remains that source of truth; regeneration that changes English leaves the pair out of sync until the reviewed Chinese counterpart is updated and re-recorded. Freshness and pairing gates enforce their respective invariants independently.
 
@@ -56,6 +56,7 @@ Generated English sources omit the language switcher that ordinary authored sour
 - `docs/i18n/terminology.md` and [style-samples.md](style-samples.md) — both are bilingual by construction.
 - [translation-prompt.md](translation-prompt.md) — the automated pipeline's prompt template; its body is machine-consumed verbatim, so a paired translation would change pipeline behavior.
 - [review-ownership/README.md](../../.github/review-ownership/README.md) — repository-internal approval policy maintained in English only.
+- `fork-plugins/dsh-agent-teams/` and `fork-plugins/dsh-context/` — exact external source imports retain their upstream documentation, release evidence, and native language policy; DSH-owned integration guidance remains in the paired [`fork-plugins/README.md`](../../fork-plugins/README.md) and active Agent Notes.
 - `.agents/notes/archived/` — frozen historical triplets. [`verify-archived-agent-notes`](../../scripts/verify-archived-agent-notes.ts) validates their completeness and content seals; translation maintenance must never rewrite them.
 
 **Universal requirement**: every current or future document in scope must merge as a complete bilingual pair. [scripts/translation-pairing.manifest.json](../../scripts/translation-pairing.manifest.json) contains only explicit exclusions; there is no per-file rollout list, date cutoff, or README-specific policy class.

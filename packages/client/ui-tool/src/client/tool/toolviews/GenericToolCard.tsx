@@ -8,7 +8,7 @@ import { diffCardModel } from '../models/diff-card-model.ts'
 import { searchCardModel } from '../models/search-card-model.ts'
 import { terminalCardModel, terminalFailed } from '../models/terminal-card-model.ts'
 import { webCardModel } from '../models/web-card-model.ts'
-import { toolRowModel, type ToolRowVariant } from '../models/tool-call-model.ts'
+import { toolRowModel, type ToolRowDetailsModel, type ToolRowVariant } from '../models/tool-call-model.ts'
 import { localizeAutoReviewDenial } from '../models/auto-review-denial.ts'
 import { ToolRow } from '../components/ToolRow.tsx'
 
@@ -44,6 +44,14 @@ export function GenericToolCard({ toolName, block, cwd, home, openFile, inspect,
     ? 'error'
     : model.state
   const singleFile = model.filePath !== undefined
+  const details: ToolRowDetailsModel = autoReview === null
+    ? model
+    : {
+      hasBody: false,
+      hasOutput: true,
+      body: null,
+      output: autoReview.output,
+    }
   return (
     <ToolRow
       t={t}
@@ -55,8 +63,8 @@ export function GenericToolCard({ toolName, block, cwd, home, openFile, inspect,
       // Single-file tools never expose an args body — the path link is the only
       // args interaction. A card is not an args body: a read/write/edit row is
       // single-file AND carries a card, so the card expands under the path link.
-      bodyRaw={singleFile || autoReview !== null ? null : model.bodyRaw}
-      output={autoReview?.output ?? model.output}
+      details={details}
+      showInput={!singleFile && autoReview === null}
       errorSummary={autoReview?.summary ?? model.errorSummary}
       terminal={terminal}
       diff={diff}

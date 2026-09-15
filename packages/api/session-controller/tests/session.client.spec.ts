@@ -71,6 +71,33 @@ describe('Session open', () => {
     expect(mock.log.requests(PAGE)).toEqual([])
   })
 
+  it('suspends an open history stream and reopens it from durable history', async ({ mock, start }) => {
+    const session = await sessionBench(mock, start, SID)
+    await session.open()
+    expect(mock.log.streams(FOLLOW).filter(stream => stream.state === 'open')).toHaveLength(1)
+
+    await session.suspendHistory()
+    expect(session.getSnapshot().openState).toBe('cold')
+    expect(mock.log.streams(FOLLOW).filter(stream => stream.state === 'open')).toHaveLength(0)
+
+    await session.open()
+    expect(mock.log.requests(FOLLOW)).toHaveLength(2)
+    expect(mock.log.streams(FOLLOW).filter(stream => stream.state === 'open')).toHaveLength(1)
+  })
+
+  it('invalidates an in-flight open before suspension waits for transport disposal', async ({ mock, start }) => {
+    const session = await sessionBench(mock, start, SID)
+    const gate = Promise.withResolvers<RemoteResult<SessionPage>>()
+    mock.stream(FOLLOW, followScript(() => gate.promise))
+    const opening = session.open()
+    await vi.waitFor(() => { expect(mock.log.requests(FOLLOW)).toHaveLength(1) })
+    const suspended = session.suspendHistory()
+    gate.resolve(history([]))
+    await Promise.all([opening, suspended])
+    expect(session.getSnapshot().openState).toBe('cold')
+    expect(mock.log.streams(FOLLOW).filter(stream => stream.state === 'open')).toHaveLength(0)
+  })
+
   it('lands an error result in openState=error with the Remote failure kept', async ({ mock, start }) => {
     const session = await sessionBench(mock, start, SID)
     mock.stream(FOLLOW, followScript(err(new RemoteError('session/not-found', 'gone', { sessionId: SID }))))

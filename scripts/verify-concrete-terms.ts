@@ -7,7 +7,12 @@ import { pathToFileURL } from 'node:url'
 
 const root = resolve(import.meta.dirname, '..')
 const blockedTerm = 'prove' + 'nance'
-const excludedPrefixes = ['vendor/', '.agents/notes/archived/'] as const
+const excludedPrefixes = [
+  'vendor/',
+  'fork-plugins/dsh-agent-teams/',
+  'fork-plugins/dsh-context/',
+  '.agents/notes/archived/',
+] as const
 
 /** One blocked term occurrence in a tracked path or text line. */
 export interface ConcreteTermViolation {

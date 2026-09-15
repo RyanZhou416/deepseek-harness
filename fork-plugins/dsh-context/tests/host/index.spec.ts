@@ -47,11 +47,19 @@ async function until<T>(read: () => T | undefined, message: string): Promise<T> 
 
 /** The minimal real envelope trio: header epoch, user message, metered assistant reply. */
 function appendRealEnvelopes(session: Session): void {
+  session.append('system/message', {
+    turn: 1,
+    step: 1,
+    message: {
+      id: 'system-fixture',
+      role: 'system',
+      source: { kind: 'plugin', plugin: 'dsh-context-test' },
+      content: [{ type: 'text', text: 'sys' }],
+    },
+  } as never, { surfaceOp: 'append' })
   session.append('request/header', {
     header: {
       config: { model: 'deepseek-v4-flash', provider: 'deepseek' },
-      system: 'sys',
-      tools: [],
     },
     reason: 'initial',
   })

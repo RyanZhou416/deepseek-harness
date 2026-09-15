@@ -19,7 +19,12 @@ const requireTools = createRequire(import.meta.resolve('@deepseek-ai/dsh-tools')
 const requireDsh = createRequire(import.meta.resolve('@deepseek-ai/dsh/package.json'))
 const requireBase = createRequire(requireDsh.resolve('@deepseek-ai/dsh-base/package.json'))
 const { ToolResultPruner } = await import(pathToFileURL(requireBase.resolve('@deepseek-ai/dsh-compaction-tool-result-pruner')).href)
-const { WorkerThreadCodeRuntime } = await import(pathToFileURL(requireBase.resolve('@deepseek-ai/dsh-code-runtime-worker-thread')).href)
+const { default: SessionProjections } = await import(pathToFileURL(requireBase.resolve('@deepseek-ai/dsh-session-projection')).href)
+const { default: FileSystem } = await import(pathToFileURL(requireBase.resolve('@deepseek-ai/dsh-fs-local')).href)
+const { default: Subprocess } = await import(pathToFileURL(requireBase.resolve('@deepseek-ai/dsh-subprocess-local')).href)
+const { default: Sandbox } = await import(pathToFileURL(requireBase.resolve('@deepseek-ai/dsh-sandbox-local')).href)
+const { default: SandboxPolicy } = await import(pathToFileURL(requireBase.resolve('@deepseek-ai/dsh-sandbox-policy')).href)
+const { default: NodePtcRuntime } = await import(pathToFileURL(requireBase.resolve('@deepseek-ai/dsh-ptc-runtime-node')).href)
 const { createScope } = await import(pathToFileURL(requireTools.resolve('@deepseek-ai/dsh-scope')).href)
 
 function assertCaptainProtocol(system) {
@@ -32,10 +37,21 @@ test('stable tool presentation uses real scoped registry and prompt assembly', a
   const host = new Context()
   const prompt = host.plugin(SystemPrompt, { includeHarnessIdentity: false })
   await prompt.await()
+  const runtimeFibers = []
+  for (const [runtimePlugin, config] of [
+    [SessionProjections, {}],
+    [FileSystem, { cwd: workspace }],
+    [Subprocess, {}],
+    [Sandbox, {}],
+    [SandboxPolicy, { mode: 'danger-full-access', workspaceRoot: workspace }],
+    [NodePtcRuntime, { graceMs: 50 }],
+  ]) {
+    const runtimeFiber = host.plugin(runtimePlugin, config)
+    await runtimeFiber.await()
+    runtimeFibers.push(runtimeFiber)
+  }
   const tools = host.plugin(ToolRuntime, { mode: 'native' })
   await tools.await()
-  const worker = host.plugin(WorkerThreadCodeRuntime, { computeMs: 3000, maxWallMs: 10000, maxOutputBytes: 1048576, maxOldGenerationSizeMb: 128 })
-  await worker.await()
   const agents = []
   const scopes = []
   const noop = () => {}
@@ -54,8 +70,13 @@ test('stable tool presentation uses real scoped registry and prompt assembly', a
   } })
   await business.await()
   const createAgent = (id, parentSession, events = []) => {
-    const agent = { id, status: 'idle', session: { header: { cwd: workspace, parentSession, seedLength: 0 }, events,
-      append(type, data) { const event = { type, data }; events.push(event); return event },
+    const sessionEvents = events.map((event, seq) => ({ ...event, seq, time: seq + 1 }))
+    const agent = { id, status: 'idle', session: { header: { cwd: workspace, parentSession, seedLength: 0 }, events: sessionEvents,
+      inheritedEventCount: 0,
+      get seq() { return sessionEvents.length },
+      append(type, data) { const event = { type, data, seq: sessionEvents.length, time: Date.now() }; sessionEvents.push(event); return event },
+      eventAt(seq) { return sessionEvents[seq] },
+      snapshotEvents() { return [...sessionEvents] },
     } }
     const scope = createScope(owned, agent)
     agent.ctx = scope.ctx
@@ -109,7 +130,7 @@ test('stable tool presentation uses real scoped registry and prompt assembly', a
     })
     await t.test('the original thirteen-tool allowlist can directly create and archive', async () => {
       const legacy = createAgent('legacy-captain')
-      host.emit('agent/session-start', { agent: legacy, source: 'startup' })
+      host.emit('agent/created', { agent: legacy, source: 'startup' })
       const restore = legacy.ctx.tools.restrict({ allow: [...TEAM_TOOL_NAMES] })
       try {
         assert.deepEqual((await names(legacy)).sort(), [...TEAM_TOOL_NAMES].sort())
@@ -150,7 +171,7 @@ test('stable tool presentation uses real scoped registry and prompt assembly', a
       const member = createAgent('child', a.id, [{ type: 'subagent/descriptor', data: {
         version: 3, mode: 'continuable', provider: 'spawn', label: 'agent-teams:saved:worker', agentProvider: 'fake', agentModel: 'fake',
       } }])
-      host.emit('agent/session-start', { agent: member, source: 'startup' })
+      host.emit('agent/created', { agent: member, source: 'startup' })
       pendingMembers.delete('child')
       assert.deepEqual((await names(member)).sort(), [...MEMBER_TOOL_NAMES].sort())
       assert.equal(renderPrompt(await assemble(member)), TEAM_MEMBER_PROMPT)
@@ -163,13 +184,13 @@ test('stable tool presentation uses real scoped registry and prompt assembly', a
       const child = createAgent('ordinary-child', a.id, [{ type: 'subagent/descriptor', data: {
         version: 3, mode: 'continuable', provider: 'spawn', label: 'agent-teams:saved:worker', agentProvider: 'fake', agentModel: 'fake',
       } }])
-      host.emit('agent/session-start', { agent: child, source: 'startup' })
+      host.emit('agent/created', { agent: child, source: 'startup' })
       assert.deepEqual(await names(child), captainNames)
     })
     await t.test('a retired member remains restricted to member operations on cold resume', async () => {
       await recordRetiredMemberIds(stateRoot, ['retired-child'])
       const child = createAgent('retired-child', a.id)
-      host.emit('agent/session-start', { agent: child, source: 'resume' })
+      host.emit('agent/created', { agent: child, source: 'resume' })
       assert.deepEqual((await names(child)).sort(), [...MEMBER_TOOL_NAMES].sort())
     })
     await t.test('PTC and both modes keep the thirteen-operation SDK stable after status', async () => {
@@ -216,7 +237,7 @@ test('stable tool presentation uses real scoped registry and prompt assembly', a
     })
     await t.test('a cold captain loads its durable role before its first request', async () => {
       const cold = createAgent(a.id)
-      host.emit('agent/session-start', { agent: cold, source: 'resume' })
+      host.emit('agent/created', { agent: cold, source: 'resume' })
       assert.equal((await names(cold)).length, 13)
       assert.equal(await header(cold), initialHeader)
       // This new Agent has no historical tool calls. Persisted work is
@@ -266,7 +287,9 @@ test('stable tool presentation uses real scoped registry and prompt assembly', a
   } finally {
     await fiber.dispose()
     for (const scope of scopes.reverse()) await scope.dispose()
-    await business.dispose(); await tools.dispose(); await worker.dispose(); await prompt.dispose()
+    await business.dispose(); await tools.dispose()
+    for (const runtimeFiber of runtimeFibers.reverse()) await runtimeFiber.dispose()
+    await prompt.dispose()
     await rm(workspace, { recursive: true, force: true })
   }
 })
