@@ -1,0 +1,6 @@
+node_modules/
+lib/
+lib-test/
+*.tgz
+overlay.yml
+.DS_Store
