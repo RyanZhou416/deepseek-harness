@@ -14,12 +14,14 @@ The child-only tool and system-prompt section also preceded every inherited fork
 
 ## Decision
 
-`SubagentRuntime.sendMessage(sender, targetId, content, { signal })` is the only public model-authored message operation. The continuation manager accepts only the exact live sender and a target on one adjacent edge:
+`SubagentRuntime.sendMessage(sender, targetId, content, { signal })` is the only public model-authored adjacent-Agent message operation. The continuation manager accepts only the exact live sender and a target on one adjacent edge:
 
 - parent to direct continuable child, authorized by the child's durable `SessionHeader.parentSession`;
 - resident continuable child to its exact live direct parent, authorized by the child's Activation.
 
 Siblings, self-targets, ancestors beyond one edge, stale Agent objects, unknown targets, and one-shot children are not alternate routes. The operation has no caller-supplied source, delivery mode, offline parent mailbox, or provider dispatch.
+
+The separate [`session_send_message` decision](../feature/2026-09-18-session-addressed-agent-messages.md) permits unrestricted exact-id FIFO delivery across unrelated Sessions without weakening this subagent operation's adjacency authorization or Steer lifecycle.
 
 Every accepted message uses `Agent.steer()`. A running target receives it at the nearest step boundary; an idle target starts a turn. An absent direct child is cold-resumed through the existing continuation lifecycle before the same Steer delivery. The manager retains waking-send accounting so a continuation-managed target cannot settle between synchronous inbox insertion and driver admission.
 
@@ -78,5 +80,6 @@ The standalone `@deepseek-ai/dsh-tool-subagent-report` package, `report` schema,
 - Caller cancellation owns work only until inbox acceptance and does not retract an accepted message or dispose the target.
 - The initial task carries JSON-encoded dynamic parent addressing after a fork prefix, while the request-head system prompt and tool ordering remain reusable.
 - Human prompts, settlement notices, QueueDock, and the base bundle's one-shot fork policy remain separate decisions.
+- Unrelated Session messaging uses a separately named tool and Session Controller activation; it does not make a sibling or deeper descendant a valid `SubagentRuntime.sendMessage()` target.
 
 This decision consolidates and removes the fully superseded report-tool and child-report-obligation records. It supersedes the `followup` naming choice in [Intent-named subagent continuation operations](../../archived/simplification/2026-07-27-intent-named-subagent-continuation-operations.md) and retains the accepted-order guarantee in [Child Agent messages precede their settlement notices](../bug-fix/2026-08-17-subagent-message-settlement-ordering.md).

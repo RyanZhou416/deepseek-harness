@@ -58,6 +58,7 @@ async function roster(config: Partial<Config> = {}): Promise<Context> {
 
 interface ShippedEntry {
   id?: unknown
+  name?: unknown
   disabled?: unknown
   config?: unknown
 }
@@ -139,6 +140,15 @@ describe('the shipped preset root', () => {
       }
       expect(toolWeb.config.fetch, id).toBe(true)
     }
+  })
+
+  it('scopes Session-addressed messaging to every full shipped preset', async () => {
+    for (const id of ['cordis', 'ptc', 'standard']) {
+      expect(findEntry(await shippedEntries(id), 'tool-session-message'), id).toMatchObject({
+        name: '@deepseek-ai/dsh-tool-session-message',
+      })
+    }
+    expect(findEntry(await shippedEntries('minimal'), 'tool-session-message')).toBeUndefined()
   })
 
   it('omits the general workflow tool and its unused engine only from PTC', async () => {

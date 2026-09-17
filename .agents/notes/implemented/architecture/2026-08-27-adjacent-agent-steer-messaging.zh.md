@@ -14,12 +14,14 @@ child 专属工具与系统提示词 section 还位于每个继承 fork 轮次�
 
 ## 决策
 
-`SubagentRuntime.sendMessage(sender, targetId, content, { signal })` 是唯一公开的模型编写消息操作。继续执行管理器只接受确切在线 sender 与一条相邻边上的目标：
+`SubagentRuntime.sendMessage(sender, targetId, content, { signal })` 是唯一公开的模型编写相邻 Agent 消息操作。继续执行管理器只接受确切在线 sender 与一条相邻边上的目标：
 
 - parent 到直接可继续 child，由 child 的持久化 `SessionHeader.parentSession` 授权；
 - 驻留的可继续 child 到其确切在线直接 parent，由 child 的 Activation 授权。
 
 sibling、自身目标、超过一条边的 ancestor、陈旧 Agent 对象、未知目标与一次性 child 都不是替代路由。该操作没有调用方提供的 source、投递模式、离线 parent mailbox 或提供方分发。
+
+独立的 [`session_send_message` 决策](../feature/2026-09-18-session-addressed-agent-messages.zh.md)允许跨无关 Session 的无限制确切 id FIFO 投递，但不会削弱此 subagent 操作的相邻授权或 Steer 生命周期。
 
 每条被接受的消息都使用 `Agent.steer()`。运行中目标在最近 step 边界接收消息；空闲目标启动轮次。缺失的直接 child 会先通过现有继续执行生命周期冷恢复，再接受同一 Steer 投递。管理器保留唤醒发送记账，因此受继续执行管理的目标不会在同步 inbox 插入与 driver 准入之间结算。
 
@@ -78,5 +80,6 @@ parent 与 child 以相同注册表顺序继承相同定义。标准定义携带
 - 调用方取消只在 inbox 接受前掌管工作，不会撤回已接受消息或 dispose（资源释放）目标。
 - 初始任务在 fork 前缀之后携带经过 JSON 编码的动态 parent 地址，而请求头系统提示词与工具顺序保持可复用。
 - 人类提示、结算通知、QueueDock 与 base bundle 的一次性 fork 策略仍是独立决策。
+- 无关 Session 消息使用独立命名的工具与 Session Controller 激活；它不会让 sibling 或更深后代成为有效的 `SubagentRuntime.sendMessage()` 目标。
 
 本决策合并并删除了已完全被取代的 report 工具与 child report 义务记录。它取代[按意图命名的 subagent 继续执行操作](../../archived/simplification/2026-07-27-intent-named-subagent-continuation-operations.md)中的 `followup` 命名选择，并保留[Child Agent 消息先于其结算通知](../bug-fix/2026-08-17-subagent-message-settlement-ordering.zh.md)中的接受顺序保证。

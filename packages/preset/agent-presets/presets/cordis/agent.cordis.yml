@@ -230,6 +230,9 @@
 
 # ── remaining model-facing rows ─────────────────────────────────────────────
 
+- id: tool-session-message
+  name: '@deepseek-ai/dsh-tool-session-message'
+
 - id: tool-ask-user
   name: '@deepseek-ai/dsh-tool-ask-user'
 
