@@ -74,17 +74,22 @@ describe('macOS fork launchers', () => {
   it('source the shared helper and keep the Corepack fallback pinned', () => {
     const helper = readFileSync(helperPath, 'utf8')
     const buildLauncher = readFileSync(join(repositoryRoot, 'build.command'), 'utf8')
+    const cleanLauncher = readFileSync(join(repositoryRoot, 'clean.command'), 'utf8')
     const runLauncher = readFileSync(join(repositoryRoot, 'run.command'), 'utf8')
 
     expect(helper).toContain('DSH_COREPACK_FALLBACK_VERSION=0.34.5')
     expect(helper).toContain('"corepack@$DSH_COREPACK_FALLBACK_VERSION"')
     expect(helper).not.toContain('corepack@latest')
     expect(buildLauncher).toContain('. "$DSH_MACOS_RUNTIME_HELPER"\ndsh_prepare_macos_toolchain "$SCRIPT_DIR"')
+    expect(cleanLauncher).toContain('. "$DSH_MACOS_RUNTIME_HELPER"\ndsh_prepare_macos_toolchain "$SCRIPT_DIR"')
+    expect(cleanLauncher).toContain('\npnpm run clean\n')
+    expect(cleanLauncher).not.toMatch(/\brm\b/)
     expect(runLauncher).toContain('dsh_prepare_macos_toolchain "$SCRIPT_DIR"\ndsh_prepare_macos_web_runtime')
     expect(runLauncher).toContain('\npnpm dsh web\n')
 
     if (process.platform !== 'win32') {
       expect(statSync(join(repositoryRoot, 'build.command')).mode & 0o111).not.toBe(0)
+      expect(statSync(join(repositoryRoot, 'clean.command')).mode & 0o111).not.toBe(0)
       expect(statSync(join(repositoryRoot, 'run.command')).mode & 0o111).not.toBe(0)
       expect(statSync(helperPath).mode & 0o111).not.toBe(0)
     }
