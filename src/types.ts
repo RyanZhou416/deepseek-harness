@@ -86,6 +86,20 @@ export interface ReviewPolicy {
   requiredReviewers?: string[]
 }
 
+/** One captain-only contract amendment recorded on a quality task. */
+export interface TaskRevision {
+  /** Epoch ms when the amendment was applied. */
+  at: number
+  /** Identity that applied it (`captain`). */
+  by: string
+  /** Why the previous contract was wrong; kept for the audit trail. */
+  reason: string
+  /** Amended contract field names (`objective`, `acceptance`, …). */
+  fields: string[]
+  /** Previous values of the amended fields; fields absent before are omitted. */
+  previous: Record<string, unknown>
+}
+
 /** One task of a team's task list. */
 export interface TeamTask {
   /** Stable task id from the profile template; absent for ad-hoc tasks. */
@@ -136,6 +150,8 @@ export interface TeamTask {
   sourceFindingIds?: string[]
   /** User-constraint / goal items this task claims to cover. */
   coverageOf?: string[]
+  /** Captain-only contract amendments, oldest first (see amendTaskContract). */
+  revisions?: TaskRevision[]
   createdAt: number
   updatedAt: number
 }
@@ -170,6 +186,12 @@ export interface TeamMember {
   status: MemberStatus
   /** Execution admission is closed while a failed/pending handoff is drained. */
   stopping?: boolean
+  /**
+   * Last member-start failure, recorded so the captain can see why a member
+   * never acquired a session instead of observing an unexplained `unspawned`
+   * member. Cleared by the next successful start.
+   */
+  spawnError?: string
 }
 
 /** One mailbox message. */

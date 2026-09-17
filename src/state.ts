@@ -21,6 +21,7 @@ import { TERMINAL_TASK_STATUSES, type TaskStatus, type TeamMember, type TeamMess
 import { hasValidQualityTaskFields, isReviewPolicy, normalizeBlankOptionalTaskFields } from './quality-gates.ts'
 
 export {
+  amendTaskContract,
   buildCoverageMatrix,
   canDeclareDelivery,
   classifyChangedPath,
@@ -30,6 +31,7 @@ export {
   evaluateQualityCompletion,
   hasValidQualityTaskFields,
   isQualityKind,
+  isTaskRevision,
   normalizeBlankOptionalTaskFields,
   pathMatchesScope,
   planQualityFollowUp,
@@ -40,6 +42,7 @@ export {
   taskKindOf,
   validateCreateTask,
 } from './quality-gates.ts'
+export type { ContractAmendmentInput } from './quality-gates.ts'
 
 /** Mailbox key of the captain. */
 export const CAPTAIN_KEY = 'captain'
@@ -718,6 +721,7 @@ function isTeamMember(value: unknown): value is TeamMember {
     && isOptionalString(value['reasoningEffort'])
     && isOptionalString(value['activeProvider'])
     && isOptionalString(value['activeModel'])
+    && isOptionalString(value['spawnError'])
     && (value['executionPrompt'] === undefined || typeof value['executionPrompt'] === 'string')
     && (value['fallback'] === undefined || (isRecord(value['fallback']) && typeof value['fallback']['provider'] === 'string' && typeof value['fallback']['model'] === 'string'))
     && (value['fallbackActive'] === undefined || typeof value['fallbackActive'] === 'boolean')

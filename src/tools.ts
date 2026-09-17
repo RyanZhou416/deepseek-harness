@@ -19,6 +19,7 @@ import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 import { join } from 'node:path'
 import { appendTeamEvent, captainSessionOf } from './events.ts'
 import {
+  amendTaskContract,
   acknowledgeMailbox,
   markMailboxDelivered,
   discardMailboxMessages,
@@ -53,6 +54,7 @@ import {
   normalizeBlankOptionalTaskFields,
   taskKindOf,
 } from './state.ts'
+import type { ContractAmendmentInput } from './state.ts'
 import type { AcceptanceResult, CommandResult, ReviewFinding, ReviewVerdict, TaskKind } from './types.ts'
 import {
   deliverToMember,
@@ -433,6 +435,22 @@ export function registerAgentTeamsTools(ctx: Context, config: ToolsConfig): Agen
 
   async function dispatchMember(captain: Agent, teamId: string, memberName: string, text: string, signal: AbortSignal, mode: 'queue' | 'steer', attemptId?: string): Promise<boolean> {
     const root = stateRootOf(workspaceOf(captain), config)
+    // Record why a member never started. The scheduler treats a failed dispatch as
+    // "not now" and retries, so without this the captain only ever sees an
+    // unexplained `unspawned` member and no diagnostic reaches any surface.
+    const recordSpawnError = async (reason: string): Promise<void> => {
+      try {
+        await withTeamLock(teamLockKey(root, teamId), async () => {
+          const fresh = await requireFreshCaptainTeam(root, teamId, captain.id)
+          const failed = fresh.members.find(item => item.name === memberName && item.status !== 'removed')
+          if (failed === undefined || failed.id !== '') return
+          failed.spawnError = reason
+          await writeTeam(root, fresh)
+        })
+      } catch (error: unknown) {
+        ctx.logger.warn(`agent-teams: could not record the member start failure for ${memberName}: ${String(error)}`)
+      }
+    }
     let orphan: TeamMember | undefined
     try {
       return await withTeamLock(teamLockKey(root, teamId), async () => {
@@ -447,6 +465,7 @@ export function registerAgentTeamsTools(ctx: Context, config: ToolsConfig): Agen
         }, signal)
         await spawnMember(ctx, memberRuntime(config), memberSelections, selection, captain, team, member, config.stateDir, signal, text)
         orphan = { ...member }
+        delete member.spawnError
         await writeTeam(root, team)
         orphan = undefined
         return true
@@ -456,7 +475,11 @@ export function registerAgentTeamsTools(ctx: Context, config: ToolsConfig): Agen
         await recordRetiredMemberIds(root, [orphan.id])
         await stopTeamMemberActivations(ctx, captain, [orphan])
       }
+      // The stack carries the failing frame; the message alone rarely does.
+      let reason = String(error)
+      if (error instanceof Error && typeof error.stack === 'string' && error.stack !== '') reason = error.stack
       ctx.logger.warn(`agent-teams: member dispatch failed for ${memberName}: ${String(error)}`)
+      await recordSpawnError(reason)
       return false
     }
   }
@@ -1758,6 +1781,87 @@ export function registerAgentTeamsTools(ctx: Context, config: ToolsConfig): Agen
   }))
 
   ctx.tools.register(defineTool({
+    name: 'agent_teams_amend_task',
+    description: 'Captain-only controlled contract amendment for one non-terminal quality task: replace a wrong objective/acceptance/verify/inScope/outOfScope when the original contract makes honest completion impossible (for example a verify command that cannot pass, or an inScope that forbids the file the objective names). The amendment is appended to the task\'s revisions ledger with previous values and the reason, and is rejected once a review/requirements task has passed judgment on this task. Members cannot amend contracts; the implementer re-reads the amended contract before its next quality gate. Lists are full replacements, not deltas.',
+    parameters: {
+      task_id: { type: 'string', required: true, description: 'Task whose contract is being amended.' },
+      reason: { type: 'string', required: true, description: 'Why the current contract is wrong; recorded in the revisions ledger.' },
+      objective: { type: 'string', description: 'Replacement objective.' },
+      acceptance: { type: 'array', items: { type: 'string' }, description: 'Replacement acceptance criteria (full list, not a delta).' },
+      verify: { type: 'array', items: { type: 'string' }, description: 'Replacement verification commands (full list, not a delta).' },
+      inScope: { type: 'array', items: { type: 'string' }, description: 'Replacement workspace-relative inScope paths (full list).' },
+      outOfScope: { type: 'array', items: { type: 'string' }, description: 'Replacement workspace-relative outOfScope paths (full list).' },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          task_id: { type: 'string', required: true },
+          status: { type: 'string', required: true },
+          revised_fields: { type: 'string', required: true },
+          revision_count: { type: 'number', required: true },
+          contract: { type: 'string', required: true },
+        },
+      },
+      render: (_args, value) => [{
+        type: 'text',
+        text: `Task ${value.task_id} contract amended (${value.revised_fields}); ${value.revision_count} revision(s) on record, status ${value.status}. New contract: ${value.contract}`,
+      }],
+    },
+    async execute(args, exec) {
+      const captain = requireCaptain(exec)
+      const workspace = workspaceOf(captain)
+      const stateRoot = stateRootOf(workspace, config)
+      const team = await requireCaptainTeam(workspace, config, captain)
+      const amended = await withTeamLock(teamLockKey(stateRoot, team.id), async () => {
+        const fresh = await requireFreshCaptainTeam(stateRoot, team.id, captain.id)
+        const task = requireTask(fresh, args.task_id)
+        const input: ContractAmendmentInput = {
+          ...args.objective === undefined ? {} : { objective: args.objective },
+          ...args.acceptance === undefined ? {} : { acceptance: args.acceptance },
+          ...args.verify === undefined ? {} : { verify: args.verify },
+          ...args.inScope === undefined ? {} : { inScope: args.inScope },
+          ...args.outOfScope === undefined ? {} : { outOfScope: args.outOfScope },
+        }
+        const result = amendTaskContract(fresh, task, normalizeBlankOptionalTaskFields(input), CAPTAIN_KEY, args.reason)
+        if (!result.ok || result.task === undefined) {
+          throw new Error(result.error ?? 'amend_task rejected by quality gates')
+        }
+        Object.assign(task, result.task)
+        task.updatedAt = Date.now()
+        await writeTeam(stateRoot, fresh)
+        return {
+          taskId: task.id,
+          status: task.status,
+          fields: result.revision?.fields ?? [],
+          revisionCount: task.revisions?.length ?? 0,
+          contract: {
+            ...task.objective === undefined ? {} : { objective: task.objective },
+            ...task.acceptance === undefined ? {} : { acceptance: task.acceptance },
+            ...task.verify === undefined ? {} : { verify: task.verify },
+            ...task.inScope === undefined ? {} : { inScope: task.inScope },
+            ...task.outOfScope === undefined ? {} : { outOfScope: task.outOfScope },
+          },
+        }
+      })
+      appendTeamEvent(ctx, captainSessionOf(ctx, team.captainSessionId, captain.session), 'agent-teams/task-amended', {
+        teamId: team.id,
+        taskId: amended.taskId,
+        fields: amended.fields,
+        reason: args.reason,
+      })
+      return {
+        task_id: amended.taskId,
+        status: amended.status,
+        revised_fields: amended.fields.join(', '),
+        revision_count: amended.revisionCount,
+        contract: JSON.stringify(amended.contract),
+      }
+    },
+  }))
+
+  ctx.tools.register(defineTool({
     name: 'agent_teams_send_message',
     description: 'Send coordination or current-task guidance directly to the captain or a teammate. A running recipient receives it at the next model step; an idle recipient wakes. Messages are durably retained until read. Use task creation/reassignment for a new unit of work, not repeated status nudges.',
     parameters: {
@@ -1903,6 +2007,7 @@ export function registerAgentTeamsTools(ctx: Context, config: ToolsConfig): Agen
           reasoning_effort: member.reasoningEffort ?? '',
           status: member.status,
           activity: member.id !== '' ? (activity.get(member.id) ?? 'unknown') : 'unspawned',
+          ...member.spawnError === undefined ? {} : { spawn_error: member.spawnError },
         }))
       const tasks = team.tasks.map((task) => ({
         id: task.id,
@@ -2352,6 +2457,7 @@ function renderStatus(value: JsonValue): string {
       reasoning_effort: string
       status: string
       activity: string
+      spawn_error?: string
     }[]
     tasks: { id: string; subject: string; status: string; assignee: string; dependencies: string[]; attempt: number; attempt_id: string; reassigning: boolean; seed_id?: string; output?: string; kind?: string; round?: number; verdict?: string; findings_open?: number }[]
     captain_inbox: { from: string; content: string }[]
@@ -2384,7 +2490,8 @@ function renderStatus(value: JsonValue): string {
     ...team.members.map((member) => {
       const route = member.provider && member.model ? ` · ${member.provider}/${member.model}` : ''
       const effort = member.reasoning_effort ? ` · reasoning ${member.reasoning_effort}` : ''
-      return `  - ${member.name} [${member.role}] ${member.status}/${member.activity}${route}${effort}`
+      const failure = member.spawn_error === undefined ? '' : `\n      start failed: ${member.spawn_error.slice(0, 400)}`
+      return `  - ${member.name} [${member.role}] ${member.status}/${member.activity}${route}${effort}${failure}`
     }),
     `Tasks (${team.tasks.length}):`,
     ...team.tasks.map((task) => {
