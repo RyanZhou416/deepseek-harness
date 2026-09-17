@@ -18,7 +18,7 @@ import {
 } from '../../src/client/timelineSource'
 import type { ContextTimeline, ContextTimelineDetail } from '../../src/shared/types'
 import { TestClientCtx, asClientCtx } from './helpers/harness'
-import { mount, text } from './helpers/kit'
+import { mount, text, until } from './helpers/kit'
 
 afterEach(() => {
   resetTimelineDetailStores()
@@ -65,15 +65,6 @@ function ctxWithCall(behavior: () => { status?: number; body?: unknown }): Clien
     return { ok: status === 200, status, json: async () => outcome.body }
   })
   return asClientCtx(new TestClientCtx())
-}
-
-/** Poll until the predicate holds (real timers ride the store's debounce). */
-async function until(fn: () => boolean, message: string): Promise<void> {
-  for (let i = 0; i < 400; i++) {
-    if (fn()) return
-    await new Promise(resolve => setTimeout(resolve, 5))
-  }
-  assert.fail(message)
 }
 
 describe('detailOf', () => {

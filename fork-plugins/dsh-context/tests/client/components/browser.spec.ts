@@ -5,7 +5,7 @@
 
 import { act, createElement as h, useState } from 'react'
 import assert from 'node:assert/strict'
-import { describe, test } from 'vitest'
+import { afterEach, describe, test, vi } from 'vitest'
 import { makeContextBrowser, type ContextBrowserProps } from '../../../src/client/components/browser'
 import { makeStackedBar } from '../../../src/client/components/stackedBar'
 import { DICT_EN } from '../../../src/client/i18n'
@@ -17,6 +17,17 @@ import { click, flush, hover, makeKit, mount, query, queryAll, text, unhover, ty
 const kit = makeKit()
 const settings = createContextSettings()
 const Browser = makeContextBrowser(kit, makeStackedBar(kit), settings)
+
+// Tests that arm the fetch-on-miss retry with a deliberately failing fetcher
+// silence the production `console.warn` the failure legitimately emits.
+afterEach(() => {
+  vi.restoreAllMocks()
+})
+
+/** Swallow the fetch-on-miss warning one deliberately failing test would print. */
+function silenceFetchWarn(): void {
+  vi.spyOn(console, 'warn').mockImplementation(() => {})
+}
 
 // Category row order is CATS: system, tools, user, inject, assistant, tool.
 const ROW = { system: 0, tools: 1, user: 2, inject: 3, skill: 4, assistant: 5, tool: 6 } as const
@@ -373,6 +384,7 @@ describe('ContextBrowser header epochs', () => {
   })
 
   test('a failed epoch fetch arms the retry button; retrying succeeds', async () => {
+    silenceFetchWarn()
     const data = tl({ current: { system: 30, tools: 9, user: 0, inject: 0, skill: 0, assistant: 0, tool: 0, total: 39 } })
     const pendings: Array<{ resolve: (v: HeaderEpochContent | null) => void; reject: (e: unknown) => void }> = []
     const deferred: () => Promise<HeaderEpochContent | null> = () =>
@@ -394,6 +406,7 @@ describe('ContextBrowser header epochs', () => {
   })
 
   test('a stale epoch fetch resolves and rejects ignored once another epoch takes over', async () => {
+    silenceFetchWarn()
     const data = tl({
       current: { system: 30, tools: 9, user: 0, inject: 0, skill: 0, assistant: 0, tool: 0, total: 39 },
       requests: [req({ seq: 20, turn: 1, step: 0 }), req({ seq: 40, turn: 1, step: 1 })],
@@ -1557,6 +1570,7 @@ describe('ContextBrowser targeted content fetch', () => {
   })
 
   test('a failed read arms the retry button; retrying succeeds', async () => {
+    silenceFetchWarn()
     let calls = 0
     const fetchContent = async (seq: number) => {
       calls += 1
@@ -1584,6 +1598,7 @@ describe('ContextBrowser targeted content fetch', () => {
   })
 
   test('a late fetch for an abandoned row never lands; the next row fetches its own seq', async () => {
+    silenceFetchWarn()
     const deferreds: { resolve: (node: ConversationNodeLike | null) => void; reject: (reason: Error) => void }[] = []
     const fetchedFor: number[] = []
     const fetchContent = (seq: number): Promise<ConversationNodeLike | null> => {

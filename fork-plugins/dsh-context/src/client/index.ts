@@ -26,6 +26,8 @@ import { createElement as h } from 'react'
 import { DICT_EN, DICT_ZH } from './i18n'
 import { registerContextCommand } from './command'
 import { makeContextModal } from './components/contextModal'
+import { makeOverviewButton } from './components/overviewButton'
+import { makeOverviewPanel } from './components/overviewPanel'
 import { makeSettingsCard } from './components/settingsCard'
 import { modalStoreOf } from './modalStore'
 import type { ClientCtx } from './services'
@@ -58,6 +60,7 @@ import './styles/browser.css'
 import './styles/detailSections.css'
 import './styles/attachments.css'
 import './styles/agentGraph.css'
+import './styles/overview.css'
 
 const NS = 'dsh-context'
 
@@ -121,6 +124,28 @@ function apply(ctx: ClientCtx): void {
       { name: 'conversation.input.overlay', id: 'context-modal', order: 10, locale: NS,
         inject: (sessionId = '') => ({ hooks: { contextModal: modalStoreOf(sessionId) } }) },
       props => h(ContextModal, props),
+    )
+  })
+
+  // The Context Dashboard (see components/overviewPanel.tsx): the cross-session
+  // insight surface. The entry is a footer action — the harness stacks those
+  // directly above Settings on the sidebar foot; the overlay it opens renders
+  // from the frame-wide shell.overlay seat, and the module store
+  // (overviewStore.ts) carries the open flag between the two registrations.
+  // Both seats are root-scope list slots present since the supported baseline.
+  const OverviewButton = makeOverviewButton(kit, settings)
+  ctx.slots.inject('sidebar.footer.action', () => {
+    return ctx.slots.register(
+      { name: 'sidebar.footer.action', id: 'context-overview', order: 10, locale: NS },
+      // Root-scope seats: the owner props (wide, the standard kit) arrive untyped.
+      props => h(OverviewButton, props as unknown as Parameters<typeof OverviewButton>[0]),
+    )
+  })
+  const OverviewPanel = makeOverviewPanel(ctx, kit)
+  ctx.slots.inject('shell.overlay', () => {
+    return ctx.slots.register(
+      { name: 'shell.overlay', id: 'context-overview', order: 10, locale: NS },
+      props => h(OverviewPanel, props as unknown as Parameters<typeof OverviewPanel>[0]),
     )
   })
 

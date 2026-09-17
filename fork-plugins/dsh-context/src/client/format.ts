@@ -1,9 +1,10 @@
-/** `fmt`: the k/M suffix style shared by bars/details/stats; `fmtTime`: local HH:MM:SS. */
+/** `fmt`: the k/M/B suffix style shared by bars/details/stats; `fmtTime`: local HH:MM:SS. */
 
 export function fmt(n: number | null | undefined): string {
   if (n === undefined || n === null || isNaN(n)) return '—'
   const sign = n < 0 ? '-' : ''
   const a = Math.abs(n)
+  if (a >= 1e9) return sign + (a / 1e9).toFixed(1) + 'B'
   if (a >= 1e6) return sign + (a / 1e6).toFixed(1) + 'M'
   if (a >= 1000) return sign + (a / 1000).toFixed(1) + 'k'
   return sign + String(Math.round(a))

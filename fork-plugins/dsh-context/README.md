@@ -9,6 +9,7 @@
 **The best [DeepSeek Harness plugin](https://www.deepseek.com/harness/) for Agent's context insights and management.**
 
 [`dsh-context`](https://www.npmjs.com/package/dsh-context) provides full context lifecycle management features.
+- **Context Dashboard** — the cross-session overview above Settings on the sidebar foot: KPI band, activity heatmap, aggregate composition ring, and filterable session cards that jump straight into any session.
 - **Context tab** — an UI context dashboard for DeepSeek Harness's context stats, composition, trend, events, and messages.
 - **Context panel** — the same dashboard as a right-sidebar tab (dsh 0.1.5-rc.1+): pick **Context** on the sidebar's guide page and the panel opens beside the chat.
 - **`/context` command** — the slash command shows the context model for current context composition and recent context evolution.
@@ -31,13 +32,28 @@ Then start the web UI with `dsh web`. No build step, no restart.
 
 ## Use it
 
-Three surfaces, one story — what your agent is carrying, how it got there, and what it did with it:
+Four surfaces, one story — what your agent is carrying, how it got there, and what it did with it:
 
 | Where | What you get |
 | --- | --- |
+| **Context Dashboard** | Every session at a glance: usage, cost, cache hit, daily activity, and per-session context profiles — filtered by range, day, group, or search, one click to jump in. |
 | **Context tab** | The full dashboard: stats, composition, per-request trend, events, file activity, and the agent network — in every session. |
 | **`/context` command** | A centered modal with the same composition and context browser, without leaving the chat. |
 | **Settings → Plugin configuration** | Per-user defaults: trend granularity & mode, File Activity sort. |
+
+## 🗂️ The Context Dashboard
+
+Click **Context Dashboard / 上下文仪表盘** at the bottom-left of the sidebar, right above **Settings**:
+
+![Context Dashboard](https://raw.githubusercontent.com/bowenliang123/dsh-context/main/docs/context-dashboard.png)
+
+| Section | The question it answers |
+| --- | --- |
+| **KPI band** | How much am I using — sessions, billed tokens, estimated cost, and cache-hit rate over the picked range (7d / 30d / all). |
+| **Activity heatmap** | When do I actually work — the last 8 weeks of daily billed tokens; click a day to filter the sessions that were active on it. |
+| **Context Composition** | Where the context windows went, summed over the range's sessions. |
+| **Session cards** | Each session's profile: composition ring, billed tokens, turns, cost, and its workspace-group / project breadcrumb — sorted by recency, tokens, or context size, searchable, grouped by workspace. A card click opens the session. |
+
 
 ## 📊 The Context tab
 

@@ -1,11 +1,12 @@
 // Session-cost estimate (src/client/cost.ts): the model-price-book lookup
 // (exact, case-insensitive, and the unambiguous cross-provider fallback), the
 // USD→CNY conversion at the fixed 1 CNY = 0.15 USD, the null degradations,
-// the numOf coercion of garbage bucket fields, and the money/rate formatting.
+// the numOf coercion of garbage bucket fields, the money/rate formatting, and
+// the deep merge behind the stats board's family-scope cost cells.
 
 import assert from 'node:assert/strict'
 import { describe, test } from 'vitest'
-import { estimateSessionCost, formatCost, formatPriceRate, offPeakOf, priceOf, toCurrency } from '../../src/client/cost'
+import { estimateSessionCost, formatCost, formatPriceRate, mergeCostUsage, offPeakOf, priceOf, toCurrency } from '../../src/client/cost'
 import type { ModelPrices } from '../../src/client/cost'
 import type { CostBucketTotals } from '../../src/shared/types'
 
@@ -143,6 +144,63 @@ describe('estimateSessionCost', () => {
       'deepseek-official': { 'deepseek-v4-flash': { peak: bucket(0, M, 0, 0) } },
     } as unknown as { [provider: string]: Record<string, Record<string, CostBucketTotals>> }
     close(estimateSessionCost(usage, BOOK, 'usd'), 0.15 + 0.95)
+  })
+})
+
+describe('mergeCostUsage', () => {
+  test('sums every bucket across usages, keyed by provider, model, and period', () => {
+    const merged = mergeCostUsage(
+      { 'deepseek-official': { 'deepseek-v4-flash': { peak: bucket(M, 0, 0, 0) } } },
+      {
+        'deepseek-official': {
+          'deepseek-v4-flash': { peak: bucket(2 * M, 0, 0, 0), off: bucket(0, M, 0, 0) },
+          'deepseek-v4-pro': { peak: bucket(0, 0, 0, M) },
+        },
+        'kimi-coding': { 'kimi-k2.7-code': { peak: bucket(0, 3 * M, 0, 0) } },
+      },
+    )
+    assert.deepEqual(merged, {
+      'deepseek-official': {
+        'deepseek-v4-flash': { peak: bucket(3 * M, 0, 0, 0), off: bucket(0, M, 0, 0) },
+        'deepseek-v4-pro': { peak: bucket(0, 0, 0, M) },
+      },
+      'kimi-coding': { 'kimi-k2.7-code': { peak: bucket(0, 3 * M, 0, 0) } },
+    })
+  })
+
+  test('the merged estimate equals the sum of the sides priced apart', () => {
+    const a = { 'deepseek-official': { 'deepseek-v4-flash': { peak: bucket(M, M, 0, 0) } } }
+    const b = { 'kimi-coding': { 'kimi-k2.7-code': { peak: bucket(0, 2 * M, 0, 0) } } }
+    const total = estimateSessionCost(mergeCostUsage(a, b), BOOK, 'usd')
+    close(total ?? 0, (estimateSessionCost(a, BOOK, 'usd') ?? 0) + (estimateSessionCost(b, BOOK, 'usd') ?? 0))
+  })
+
+  test('null and absent sides drop out; nothing usable merges to null', () => {
+    const usage = { 'deepseek-official': { 'deepseek-v4-flash': { peak: bucket(M, 0, 0, 0) } } }
+    assert.deepEqual(mergeCostUsage(null, usage, undefined), usage)
+    assert.equal(mergeCostUsage(null, undefined, null), null)
+    assert.equal(mergeCostUsage(), null)
+  })
+
+  test('a bucket that merged with only zeros still counts (the estimator prices $0, not a dash)', () => {
+    const zero = { 'deepseek-official': { 'deepseek-v4-flash': { peak: bucket(0, 0, 0, 0) } } }
+    assert.deepEqual(mergeCostUsage(zero), zero)
+    assert.equal(estimateSessionCost(mergeCostUsage(zero), BOOK, 'usd'), 0)
+  })
+
+  test('hostile branches are skipped, not fatal, and the inputs never mutate', () => {
+    const a = { 'deepseek-official': { 'deepseek-v4-flash': { peak: bucket(M, 0, 0, 0) } } }
+    const hostile = {
+      junk: 5,
+      arr: [{ peak: bucket(M, 0, 0, 0) }],
+      'kimi-coding': { broken: null, 'kimi-k2.7-code': { peak: 'junk', off: bucket(0, M, 0, 0) } },
+    } as unknown as Record<string, never>
+    const merged = mergeCostUsage(a, hostile)
+    assert.deepEqual(merged, {
+      'deepseek-official': { 'deepseek-v4-flash': { peak: bucket(M, 0, 0, 0) } },
+      'kimi-coding': { 'kimi-k2.7-code': { off: bucket(0, M, 0, 0) } },
+    })
+    assert.deepEqual(a, { 'deepseek-official': { 'deepseek-v4-flash': { peak: bucket(M, 0, 0, 0) } } }, 'the source usage stays untouched')
   })
 })
 

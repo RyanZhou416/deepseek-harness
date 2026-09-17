@@ -13,7 +13,7 @@ import { createContextSettings } from '../../../src/client/settings'
 import type { ContextTimeline } from '../../../src/shared/types'
 import { DICT_EN } from '../../../src/client/i18n'
 import { TestClientCtx, TestSessions, asClientCtx } from '../helpers/harness'
-import { click, flush, hover, keydown, makeKit, mount, query, queryAll, text, unhover } from '../helpers/kit'
+import { click, flush, hover, keydown, makeKit, mount, query, queryAll, text, unhover, until } from '../helpers/kit'
 
 const kit = makeKit()
 const settings = createContextSettings()
@@ -411,15 +411,6 @@ describe('ContextModal', () => {
 })
 
 describe('ContextModal — the split generation', () => {
-  /** Poll until the predicate holds (the detail store's debounce rides real timers). */
-  async function until(fn: () => boolean, message: string): Promise<void> {
-    for (let i = 0; i < 400; i++) {
-      if (fn()) return
-      await new Promise(resolve => setTimeout(resolve, 5))
-    }
-    assert.fail(message)
-  }
-
   test('the modal shares the detail route: the browser lands the collections on open', async () => {
     vi.stubGlobal('fetch', async () => ({
       ok: true,

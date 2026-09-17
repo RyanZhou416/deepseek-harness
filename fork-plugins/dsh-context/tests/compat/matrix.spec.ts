@@ -64,8 +64,8 @@ describe.skipIf(reasons.length > 0)('compat matrix — real dsh sources per base
       assert.equal(report.registered, true)
     })
 
-    test('host: both projection values served through the wire', () => {
-      assert.deepEqual(report.keys, ['contextHeaders', 'contextTimeline'])
+    test('host: all three projection values served through the wire', () => {
+      assert.deepEqual(report.keys, ['contextActivity', 'contextHeaders', 'contextTimeline'])
     })
 
     test('host: checkpoint rows pass the tag\'s lossless-JSON cache-write gate', () => {

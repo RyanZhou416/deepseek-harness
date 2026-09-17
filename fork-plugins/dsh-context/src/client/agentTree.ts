@@ -19,6 +19,8 @@
  */
 
 import type { PartsPart } from './categories'
+import type { ContextTimeline, SessionCostUsage } from '../shared/types'
+import { mergeCostUsage } from './cost'
 import { headlineOf, type Headline } from './headline'
 import { asRecord, contextBreakdownOf, contextPressureOf, numOf, timelineOf, tokenUsageOf } from './services'
 
@@ -331,6 +333,65 @@ export function agentForestOf(
   visit(root, rootRow, undefined, 0, new Set(), -1)
 
   return { nodes, edges, overflow: Math.max(0, total - nodes.length), solo: nodes.length === 1 }
+}
+
+/** The current session's subagent-subtree cost fold (see {@link subagentCostFoldOf}). */
+export interface SubagentCostFold {
+  /** Merged billed-token usage across the whole subtree (null = nothing reported yet). */
+  usage: SessionCostUsage | null
+  /** Descendants with no timeline row and no landed head — the slim-head fetch targets. */
+  cold: string[]
+}
+
+/**
+ * Merge the current session's SUBAGENT subtree cost: every descendant
+ * session's own cumulative billed-token usage, warm rows' `contextTimeline`
+ * cost first, fetched slim heads (the `landed` map, keyed by session id)
+ * standing in for rows that carry no timeline value. Blank placeholder rows
+ * are not agents (the family forest's rule); a lineage cycle cannot loop the
+ * walk (seen-set). The current session itself is never counted — the caller
+ * already holds its own usage.
+ */
+export function subagentCostFoldOf(
+  snapshot: unknown,
+  currentId: string | undefined,
+  landed?: ReadonlyMap<string, ContextTimeline>,
+): SubagentCostFold {
+  const byId = asRecord(asRecord(snapshot)?.byId)
+  if (byId === null || currentId === undefined || currentId === '') return { usage: null, cold: [] }
+  const childrenOf = new Map<string, string[]>()
+  for (const key of Object.keys(byId)) {
+    const row = agentRowOf(byId[key])
+    if (row === null || row.blank || row.parentId === undefined) continue
+    const list = childrenOf.get(row.parentId) ?? []
+    list.push(key)
+    childrenOf.set(row.parentId, list)
+  }
+  const parts: SessionCostUsage[] = []
+  const cold: string[] = []
+  const seen = new Set<string>([currentId])
+  const queue = [currentId]
+  for (let i = 0; i < queue.length; i++) {
+    const id = queue[i]
+    for (const kid of childrenOf.get(id) ?? []) {
+      if (seen.has(kid)) continue
+      seen.add(kid)
+      const head = landed?.get(kid)
+      const values = agentRowOf(byId[kid])?.projections
+      if (values?.contextTimeline === undefined) {
+        // A cold relative's usage rides its fetched slim head; until one
+        // lands the id stays a fetch target (the cache dedups re-attaches).
+        // A landed head is final — costless or not, it is no fetch target.
+        if (head === undefined) cold.push(kid)
+        else if (head.cost !== undefined) parts.push(head.cost)
+      } else {
+        const cost = timelineOf(values.contextTimeline)?.cost
+        if (cost !== undefined) parts.push(cost)
+      }
+      queue.push(kid)
+    }
+  }
+  return { usage: parts.length > 0 ? mergeCostUsage(...parts) : null, cold }
 }
 
 export interface AgentPoint {

@@ -5,6 +5,7 @@
   * from here ever reaches the runtime bundles.
  */
 
+import type { ActivityState } from '../host/activity'
 import type { HeadersState } from '../host/headers'
 import type { TimelineState } from '../host/fold'
 // The registry package ROOT carries the `@deepseek-ai/cordis` Context
@@ -39,10 +40,21 @@ declare module '@deepseek-ai/dsh-session-projection/types' {
      * content of a picked step (key absence = older host: tokens only).
      */
     contextHeaders: ContextHeaders
+    /**
+     * The per-day activity ledger (billed tokens + completed requests keyed
+     * by local day) behind the Context Dashboard's heatmap — the timeline's
+     * "current snapshot" cannot draw a per-day chart, so the overview reads
+     * this off every session-list row's projection column. Tiny (one small
+     * record per day, retention-capped), so riding every list row costs
+     * nothing next to the timeline head. Key absence = older host: the
+     * heatmap degrades to its empty note.
+     */
+    contextActivity: ContextActivity
   }
   interface SessionProjectionStateMap {
     contextTimeline: TimelineState
     contextHeaders: HeadersState
+    contextActivity: ActivityState
   }
 }
 
@@ -95,6 +107,28 @@ export interface TimelineLast {
   prompt?: number
 }
 
+/** One day's ledger entry in the `contextActivity` projection. */
+export interface ActivityDay {
+  /**
+   * Billed tokens folded from provider-reported usage that day (prompt-side
+   * input + cache read/write + output). Requests without a usage settlement
+   * count only toward `requests` — a fabricated 0 never understates the day.
+   */
+  tokens: number
+  /** Completed model calls (assistant settlements) that day. */
+  requests: number
+}
+
+/**
+ * The per-session daily activity ledger (`contextActivity` wire value):
+ * day key (`YYYY-MM-DD`, host-local — see shared/days.ts) → that day's
+ * billed volume, retention-capped by the fold. The Context Dashboard merges
+ * every listed session's ledger into its activity heatmap.
+ */
+export interface ContextActivity {
+  days: Record<string, ActivityDay>
+}
+
 /**
  * The per-user display-preference vocabulary of the `dsh-context` settings
  * namespace — the ONE declaration both halves share: the Host registers the
@@ -115,12 +149,16 @@ export type DefaultToolSort = 'size' | 'count' | 'name'
 /** Where the Context view is offered: the conversation tab, the right Sidebar, or both. */
 export type DefaultPlacement = 'all' | 'tab' | 'sidebar'
 
+/** Whether the Context Insights panel's sidebar entry is offered at all. */
+export type InsightsEntry = 'show' | 'hide'
+
 export interface PluginSettings {
   defaultPlacement: DefaultPlacement
   defaultGranularity: DefaultGranularity
   defaultTrendMode: DefaultTrendMode
   defaultToolSort: DefaultToolSort
   defaultFileSort: DefaultFileSort
+  insightsEntry: InsightsEntry
 }
 
 /** The section fields the settings card edits, as the Host schema names them. */
@@ -174,6 +212,13 @@ export interface Snapshot {
    * from older hosts; clients treat absence as zero.
    */
   humanInputs?: number
+  /**
+   * The user's newest own message as a one-line bounded preview (first text
+   * block, whitespace collapsed, ~80 chars): the session cards' footer line.
+   * Additive-optional — absent from rows folded before the field existed
+   * (older hosts, idle sessions' cached rows); clients hide the line then.
+   */
+  lastUser?: string
   /**
    * Split-generation head fields — present exactly when the host serves the
    * SLIM head (the heavy collections moved to the on-demand detail channel,

@@ -36,11 +36,13 @@ A DeepSeek Harness plugin for context insight, actions, and management.
   - MUST Run `pnpm run lint:fix && pnpm run test && pnpm run build` in single command and capture FULL output, to ensure:
     - passing all the linting and test
     - the per-file code coverage MUST BE literally 100%.
-      - Example output:
-        - -------------------------|---------|----------|---------|---------|-------------------
-          File                     | % Stmts | % Branch | % Funcs | % Lines | Uncovered Line #s
-          -------------------------|---------|----------|---------|---------|-------------------
-          All files                |     100 |      100 |     100 |     100 |
+      - The coverage table lists ONLY the files below 100% (`coverage.skipFull` in `vitest.config.ts`): a passing run prints an empty table (headers only, no `All files` row), and the run also fails the `coverage.thresholds` gate when any file drops below 100 — the offending files then appear in the table.
+      - Example passing output (nothing below 100%):
+        - % Coverage report from v8
+          -------------------|---------|----------|---------|---------|-------------------
+          File               | % Stmts | % Branch | % Funcs | % Lines | Uncovered Line #s
+          -------------------|---------|----------|---------|---------|-------------------
+          -------------------|---------|----------|---------|---------|-------------------
 
 ## Parsing resilience (log data must never crash or hang a view)
 

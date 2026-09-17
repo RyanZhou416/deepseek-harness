@@ -100,6 +100,8 @@ describe('buildTimelineHead', () => {
     // The whole-session tally rides the head too: the canonical log's one
     // user message (injections excluded).
     assert.equal(head.humanInputs, 1)
+    // The card preview rides the head: the canonical log's own user message.
+    assert.equal(head.lastUser, 'hello there')
     // The headline anchor is the newest retained request's billing summary.
     const lastReq = state.requests.at(-1)!
     assert.deepEqual(head.last, { seq: lastReq.seq, total: lastReq.total, prompt: 20 })
@@ -127,6 +129,8 @@ describe('buildTimelineHead', () => {
     const head = buildTimelineHead(timelineDef().init())
     assert.deepEqual(head.counts, { turns: 0, steps: 0, injects: 0, compactions: 0, prunes: 0 })
     assert.equal(head.humanInputs, 0, 'the tally defaults to zero on the wire')
+    assert.equal(head.lastUser, undefined, 'no user message yet — the preview stays absent')
+    assert.ok(!('lastUser' in head), 'no own key on the wire')
     assert.equal(head.last, undefined, 'no request yet — the anchor stays absent')
     assert.equal(head.detailRev, 0)
     assert.equal(head.current.total, 0)

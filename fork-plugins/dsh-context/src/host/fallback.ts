@@ -31,6 +31,7 @@ import { z } from 'zod'
 import type { SessionProjectionMap } from '@deepseek-ai/dsh-session-projection/types'
 import type { ProjectionDefinition } from './compat'
 import { BASELINE_DSH_VERSION } from '../shared/version'
+import { contextActivitySchema } from './activity'
 import { contextHeadersSchema } from './headers'
 import { contextTimelineSchema } from './timeline'
 
@@ -49,7 +50,7 @@ interface LegacyDefinitionShape<V> {
 }
 
 /** One gate unit: identity fold over the opaque state, constant view, both contract generations. */
-function fallbackDefinition<K extends 'contextTimeline' | 'contextHeaders'>(
+function fallbackDefinition<K extends 'contextTimeline' | 'contextHeaders' | 'contextActivity'>(
   key: K,
   wireSchema: z.ZodType<SessionProjectionMap[K]>,
   value: SessionProjectionMap[K],
@@ -90,4 +91,13 @@ export function createFallbackTimelineDefinition(current: string) {
  */
 export function createFallbackHeadersDefinition() {
   return fallbackDefinition('contextHeaders', contextHeadersSchema, { headers: [] })
+}
+
+/**
+ * The fallback `contextActivity` unit: an empty ledger — the overview's
+ * heatmap renders its empty note instead of waiting on a key that the gate
+ * would never deliver.
+ */
+export function createFallbackActivityDefinition() {
+  return fallbackDefinition('contextActivity', contextActivitySchema, { days: {} })
 }

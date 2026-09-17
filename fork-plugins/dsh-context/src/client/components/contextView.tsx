@@ -20,6 +20,7 @@ import { activityOf, activityOfOps, locateStepOf, previewAddressOf } from '../fi
 import type { FileEntry, FileOp } from '../fileActivity'
 import type { ContextSettings } from '../settings'
 import type { ViewKit } from '../viewkit'
+import { makeAgentHeads } from '../agentHeads'
 import { makeContextBrowser } from './browser'
 import { makeAgentGraph } from './agentGraph'
 import { makeDonut } from './donut'
@@ -29,7 +30,7 @@ import { makeFileCard } from './fileCard'
 import { makePluginInfo } from './pluginInfo'
 import { makeUpgradeGate } from './upgradeGate'
 import { makeRequestDetail } from './requestDetail'
-import { countsOfRecords, makeStatsContext } from './statsContext'
+import { countsOfRecords, makeStatsContext, makeSubagentCost } from './statsContext'
 import { makeStatsTiming } from './statsTiming'
 import { makeStatsTokens } from './statsTokens'
 import { makeLegend, makeStackedBar } from './stackedBar'
@@ -59,14 +60,18 @@ export function makeContextView(
   const EventList = makeEventList(kit)
   const FileCard = makeFileCard(kit, settings)
   const Donut = makeDonut(kit)
-  const StatsContext = makeStatsContext(kit)
+  // One page-scope cold-head cache serves both subagent-data readers: the
+  // Agent network card's composition rings and the stats board's
+  // subagent-cost cell fetch each relative once.
+  const heads = makeAgentHeads(ctx)
+  const StatsContext = makeStatsContext(kit, makeSubagentCost(ctx, heads))
   const StatsTiming = makeStatsTiming(kit, Donut)
   const StatsTokens = makeStatsTokens(kit, Donut)
   const PluginInfo = makePluginInfo(kit)
   const UpgradeGate = makeUpgradeGate(kit)
   const DetailNote = makeDetailNote(kit)
   const ContextBrowser = makeContextBrowser(kit, StackedBar, settings)
-  const AgentGraph = makeAgentGraph(ctx, kit)
+  const AgentGraph = makeAgentGraph(ctx, kit, heads)
   const ErrorBoundary = makeErrorBoundary(t)
 
   // The body renders under the error boundary: a corrupt projection value (past the timelineOf shape guard) degrades to a styled error
@@ -518,7 +523,7 @@ export function makeContextView(
         {inSidebar ? null : (
           <div className="lc-cols lc-head">
             <StatsContext counts={counts} humanInputs={data.humanInputs} toolCalls={data.toolCalls} usage={usage}
-              cost={data.cost} locale={activeLocale} />
+              cost={data.cost} locale={activeLocale} sessionId={typeof sessionId === 'string' ? sessionId : undefined} />
             <PluginInfo />
           </div>
         )}

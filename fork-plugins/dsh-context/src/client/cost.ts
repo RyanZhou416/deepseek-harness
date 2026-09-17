@@ -144,6 +144,55 @@ export function estimateSessionCost(
   return any ? toCurrency(total, currency) : null
 }
 
+/**
+ * Accumulate one usage's buckets into `out`, summing per (provider, model,
+ * period). Hostile branches skip (the same re-proving the estimator applies
+ * — the merge is a boundary too); true when any bucket record merged, even
+ * an all-zero one (the estimator prices it as $0, never a dash).
+ */
+function mergeInto(out: SessionCostUsage, usage: SessionCostUsage | null | undefined): boolean {
+  if (usage === null || usage === undefined) return false
+  let any = false
+  for (const provider of Object.keys(usage)) {
+    const models = asRecord(usage[provider])
+    if (models === null || Array.isArray(models)) continue
+    const branch = out[provider] ?? (out[provider] = {})
+    for (const model of Object.keys(models)) {
+      const periods = asRecord(models[model])
+      if (periods === null || Array.isArray(periods)) continue
+      const target = branch[model] ?? (branch[model] = {})
+      for (const period of ['peak', 'off'] as const) {
+        const bucket = asRecord(periods[period])
+        if (bucket === null || Array.isArray(bucket)) continue
+        const prev = target[period] ?? { uncached: 0, cacheRead: 0, cacheWrite: 0, output: 0 }
+        target[period] = {
+          uncached: prev.uncached + numOf(bucket.uncached),
+          cacheRead: prev.cacheRead + numOf(bucket.cacheRead),
+          cacheWrite: prev.cacheWrite + numOf(bucket.cacheWrite),
+          output: prev.output + numOf(bucket.output),
+        }
+        any = true
+      }
+    }
+  }
+  return any
+}
+
+/**
+ * Deep-merge session-cost usages into one — the stats board's total-cost
+ * scope (the current agent's usage plus every subagent session's) and the
+ * subagent fold's accumulation. Null when NO side carried a bucket record,
+ * so the caller keeps its dash.
+ */
+export function mergeCostUsage(...usages: (SessionCostUsage | null | undefined)[]): SessionCostUsage | null {
+  const out: SessionCostUsage = {}
+  let any = false
+  for (const usage of usages) {
+    if (mergeInto(out, usage)) any = true
+  }
+  return any ? out : null
+}
+
 export function formatCost(amount: number, currency: CostCurrency): string {
   const symbol = currency === 'cny' ? '¥' : '$'
   return symbol + (amount >= 1 ? amount.toFixed(2) : amount.toPrecision(2))

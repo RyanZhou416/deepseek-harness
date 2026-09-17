@@ -198,6 +198,53 @@ describe('client entry: conversation.input.overlay slot', () => {
   })
 })
 
+describe('client entry: Context Dashboard seats', () => {
+  test('registers the sidebar-foot entry and the frame overlay, both rendering', async () => {
+    const ctx = new TestClientCtx()
+    applyTo(ctx)
+
+    const actions = ctx.slots.of('sidebar.footer.action')
+    assert.equal(actions.length, 1)
+    assert.equal(actions[0].registration.name, 'sidebar.footer.action')
+    assert.equal(actions[0].registration.id, 'context-overview')
+    assert.equal(actions[0].registration.locale, 'dsh-context')
+    const actionEl = actions[0].component({ wide: true }) as ReactElement
+    assert.equal((actionEl.type as { name: string }).name, 'OverviewButton')
+    const actionMount = await mount(actionEl)
+    assert.equal(query(actionMount.container, '.lc-ov-entry-label').textContent, 'Context Insights')
+    await actionMount.unmount()
+
+    const overlays = ctx.slots.of('shell.overlay')
+    assert.equal(overlays.length, 1)
+    assert.equal(overlays[0].registration.name, 'shell.overlay')
+    assert.equal(overlays[0].registration.id, 'context-overview')
+    assert.equal(overlays[0].registration.locale, 'dsh-context')
+    const overlayEl = overlays[0].component({}) as ReactElement
+    assert.equal((overlayEl.type as { name: string }).name, 'OverviewPanel')
+    const overlayMount = await mount(overlayEl)
+    assert.equal(overlayMount.container.textContent, '', 'closed by default')
+    await overlayMount.unmount()
+    ctx.dispose()
+  })
+
+  test('the entry opens the overlay through the shared store', async () => {
+    const ctx = new TestClientCtx()
+    applyTo(ctx)
+    const actionEl = ctx.slots.of('sidebar.footer.action')[0].component({ wide: true }) as ReactElement
+    const actionMount = await mount(actionEl)
+    await click(query(actionMount.container, 'button.lc-ov-entry'))
+    const overlayEl = ctx.slots.of('shell.overlay')[0].component({}) as ReactElement
+    const overlayMount = await mount(overlayEl)
+    assert.ok(overlayMount.container.textContent!.includes('The session list is unavailable'))
+    await actionMount.unmount()
+    await overlayMount.unmount()
+    // Reset for other specs sharing the module store.
+    const { overviewStore } = await import('../../src/client/overviewStore')
+    overviewStore.set(false)
+    ctx.dispose()
+  })
+})
+
 describe('client entry: settingsScope inject', () => {
   test('absent at apply time: the inject stays pending — no settings.plugin.item slot', () => {
     const ctx = new TestClientCtx()
@@ -313,7 +360,7 @@ describe('client entry: settings card slot', () => {
     assert.ok(query(m.container, '.lc-settings-card'))
     await click(query(m.container, '.lc-settings-head'))
     const selects = queryAll(m.container, '.lc-settings-select')
-    assert.equal(selects.length, 5)
+    assert.equal(selects.length, 6)
     for (const s of selects) assert.ok((s as HTMLButtonElement).disabled)
     await m.unmount()
     ctx.dispose()
