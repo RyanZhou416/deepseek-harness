@@ -128,9 +128,9 @@ describe.skipIf(staging.artifactsMissing())('bundle smoke — the built lib/clie
     assert.ok(!css.includes('120ms ease'), 'lightningcss minified the sheet')
   })
 
-  test('registrations: bilingual dictionaries, three slots, the /context trigger source', () => {
+  test('registrations: bilingual dictionaries, five slots, the /context trigger source', () => {
     assert.ok(state.dicts.get('dsh-context')?.zh && state.dicts.get('dsh-context')?.en, 'bilingual dictionaries registered')
-    assert.equal(state.slots.length, 3, 'view tab + assistant action + input overlay slots')
+    assert.equal(state.slots.length, 5, 'view tab + assistant action + input overlay + dashboard entry and overlay slots')
     assert.equal(state.slots[0]?.[0], 'conversation.view')
     assert.equal(state.slots[0]?.[1].order, 20)
     assert.equal(state.slots[0]?.[1].label?.(), '上下文', 'tab label localized')
@@ -140,6 +140,10 @@ describe.skipIf(staging.artifactsMissing())('bundle smoke — the built lib/clie
     const overlayInject = state.slots[2]?.[1].inject
     const overlayHooks = overlayInject?.('s1') as { hooks: { contextModal: { getSnapshot: unknown } } } | undefined
     assert.equal(typeof overlayHooks?.hooks.contextModal.getSnapshot, 'function', 'overlay hooks carry the modal store')
+    assert.equal(state.slots[3]?.[0], 'sidebar.footer.action', 'the dashboard entry above Settings')
+    assert.equal(state.slots[3]?.[1].id, 'context-overview')
+    assert.equal(state.slots[4]?.[0], 'shell.overlay', 'the dashboard panel rides the frame-wide overlay seat')
+    assert.equal(state.slots[4]?.[1].id, 'context-overview')
     assert.equal(state.sources.length, 1, '/context trigger source registered')
     assert.equal(state.sources[0]?.trigger, '/', 'trigger is the slash')
   })

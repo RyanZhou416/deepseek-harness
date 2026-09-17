@@ -21,10 +21,12 @@
  */
 
 import type { Context } from '@deepseek-ai/cordis'
+import { createContextActivityDefinition } from './activity'
 import { createToolAttribution } from './attribution'
+import { watchActivityBackfill } from './backfill'
 import { Config, resolveBounds } from './config'
 import { watchDetailChannel } from './detail'
-import { createFallbackHeadersDefinition, createFallbackTimelineDefinition } from './fallback'
+import { createFallbackActivityDefinition, createFallbackHeadersDefinition, createFallbackTimelineDefinition } from './fallback'
 import { createContextHeadersDefinition } from './headers'
 import { installSettings } from './settings'
 import { watchStepIdentity } from './stepIdentity'
@@ -56,6 +58,7 @@ export function apply(ctx: Context, config: Config): void {
     // deliberately neither (nothing is folded) — cast through.
     ctx.sessionProjections.register(createFallbackTimelineDefinition(harnessVersion) as never)
     ctx.sessionProjections.register(createFallbackHeadersDefinition() as never)
+    ctx.sessionProjections.register(createFallbackActivityDefinition() as never)
     return
   }
   // Tool-to-plugin attribution (see attribution.ts): the static chain from
@@ -74,12 +77,19 @@ export function apply(ctx: Context, config: Config): void {
   const gate = watchDetailChannel(ctx, resolveBounds(config))
   ctx.sessionProjections.register(createContextTimelineDefinition(config, () => gate.live))
   ctx.sessionProjections.register(createContextHeadersDefinition(name => attribution.ownerOf(name)))
+  ctx.sessionProjections.register(createContextActivityDefinition())
+  // The overview's cold-history warm-up (backfill.ts): sessions folded before
+  // a unit existed get their rows from one background cold read each, run on
+  // demand — the dashboard (the rows' only reader) summons the pass through
+  // the plugin's fetch route the first time it opens.
+  watchActivityBackfill(ctx)
   installSettings(ctx)
 }
 
 // ---- public type surface (stable for downstream consumers) -------------------
 
 export type { Category, ContextEventRecord, RequestRecord, Snapshot, ContextTimeline, SurfaceNode } from '../shared/types'
-export type { ContextHeaders, HeaderRecord, HeaderTool, ContextTimelineDetail, TimelineCounts, TimelineLast } from '../shared/types'
+export type { ActivityDay, ContextActivity, ContextHeaders, HeaderRecord, HeaderTool, ContextTimelineDetail, TimelineCounts, TimelineLast } from '../shared/types'
+export type { ActivityState } from './activity'
 export type { TimelineState } from './fold'
 export type { HeadersState } from './headers'

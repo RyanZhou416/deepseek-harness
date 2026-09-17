@@ -66,6 +66,24 @@ export async function flush(): Promise<void> {
 }
 
 /**
+ * Poll until the predicate holds, one short act() scope per tick: timers and
+ * promise chains only get to run while a scope's sleep is awaiting, so the
+ * state updates they land are act-attributed (no React act() warnings) and
+ * committed when the scope exits — the check between ticks sees them. Real
+ * timers ride the store's own debounce; `message` labels the give-up failure.
+ */
+export async function until(fn: () => boolean, message: string): Promise<void> {
+  for (let i = 0; i < 400; i++) {
+    await act(async () => {
+      if (fn()) return
+      await new Promise(resolve => setTimeout(resolve, 5))
+    })
+    if (fn()) return
+  }
+  throw new Error(message)
+}
+
+/**
  * Silence a deliberately-thrown render error: React 18 dev replays a failed
  * render through a fake DOM event, which jsdom reports as an uncaught window
  * error and vitest forwards to an uncaughtException — a user error listener

@@ -200,6 +200,7 @@ export const contextTimelineSchema = z.object({
   images: z.number().int().nonnegative().optional(),
   toolCalls: z.number().int().nonnegative().optional(),
   humanInputs: z.number().int().nonnegative().optional(),
+  lastUser: z.string().optional(),
   counts: countsSchema.optional(),
   last: lastSchema.optional(),
   detailRev: z.number().int().nonnegative().optional(),
@@ -247,6 +248,7 @@ const timelineStateSchema = z.object({
   archiveFloor: z.number().optional(),
   timing: timingTotalsSchema.optional(),
   humanInputs: z.number().int().nonnegative().optional(),
+  lastUser: z.string().optional(),
   stepStart: z.object({
     time: z.number(),
     firstToken: z.number().optional(),
@@ -381,7 +383,14 @@ export function createContextTimelineDefinition(config: Config, slim: () => bool
     // `skill`-tool loads left `tool` (issue #66). The re-bucketing changes
     // the fold's per-category sums, so cached rows refold from the log, which
     // rebuilds them under the new categories.
-    stateVersion: 19,
+    //
+    // 20: the session cards' last-user-message preview (`lastUser`) joined
+    // the state and head. A stale row can never gain the field while its
+    // session is idle (it only lands when a user message folds), so cached
+    // rows refold from the log; the startup warm-up (backfill.ts) now probes
+    // the `contextTimeline` row too, rebuilding idle sessions' rows instead
+    // of orphaning the key.
+    stateVersion: 20,
   }
   return definition
 }

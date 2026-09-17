@@ -109,6 +109,16 @@ export function makeSettingsCard(kit: ViewKit): (props: SettingsCardProps) => Re
                 onPick={(id) => { props.set?.('defaultPlacement', id) }}
               />
               <PrefRow
+                label={t('settings.insightsEntry')}
+                value={state.insightsEntry}
+                disabled={disabled}
+                options={[
+                  { id: 'show', label: t('insightsEntry.show') },
+                  { id: 'hide', label: t('insightsEntry.hide') },
+                ]}
+                onPick={(id) => { props.set?.('insightsEntry', id) }}
+              />
+              <PrefRow
                 label={t('settings.gran')}
                 value={state.granularity}
                 disabled={disabled}

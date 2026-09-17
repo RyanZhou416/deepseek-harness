@@ -19,7 +19,7 @@ import type { UseChatLike } from '../../../src/client/services'
 import type { ContextTimeline } from '../../../src/shared/types'
 import { DICT_EN } from '../../../src/client/i18n'
 import { TestClientCtx, TestLocale, asClientCtx } from '../helpers/harness'
-import { click, flush, hover, makeKit, mount, query, queryAll, silenceWindowErrors, text, unhover } from '../helpers/kit'
+import { click, flush, hover, makeKit, mount, query, queryAll, silenceWindowErrors, text, unhover, until } from '../helpers/kit'
 
 // pluginInfo's npm-registry probe stays inert (and '0.0.0-dev' short-circuits
 // it anyway).
@@ -1245,14 +1245,6 @@ describe('ContextView — the split generation (slim head + detail channel)', ()
     return new TestClientCtx()
   }
 
-  async function until(fn: () => boolean, message: string): Promise<void> {
-    for (let i = 0; i < 400; i++) {
-      if (fn()) return
-      await new Promise(resolve => setTimeout(resolve, 5))
-    }
-    assert.fail(message)
-  }
-
   test('the head paints the counters immediately; the detail collections land through the channel', async () => {
     const ctx = slimCtx(async () => ({ ok: true, value: slimDetail() }))
     const View = makeView(ctx)
@@ -1344,14 +1336,7 @@ describe('ContextView — the op-log generation (fileOps on the detail payload)'
         detailRev: 1,
       })),
     }))
-    const until2 = async (fn: () => boolean): Promise<void> => {
-      for (let i = 0; i < 400; i++) {
-        if (fn()) return
-        await new Promise(r => setTimeout(r, 5))
-      }
-      assert.fail('the detail never landed')
-    }
-    await until2(() => text(m.container).includes('README.md'))
+    await until(() => text(m.container).includes('README.md'), 'the detail never landed')
     assert.ok(text(m.container).includes('a.ts'), 'both served ops row')
     assert.ok(text(m.container).includes('+3'), 'the edit delta shows')
     assert.ok(!text(m.container).includes('No file reads'), 'not the empty state')

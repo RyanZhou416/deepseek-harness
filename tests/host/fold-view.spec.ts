@@ -114,6 +114,44 @@ describe('buildTimelineView counters', () => {
   })
 })
 
+describe('buildTimelineView lastUser preview', () => {
+  test('the newest own message rides the view, whitespace collapsed; injections and text-less inputs leave it alone', () => {
+    const { view } = driveTimeline([
+      userMessage(1, [{ type: 'text', text: '  hello   world  ' }]),
+      userMessage(2, [{ type: 'text', text: 'AGENTS.md' }], { kind: 'plugin', form: 'context', plugin: 'dsh-test' }),
+      userMessage(3, [{ type: 'text', text: '/skill' }], { kind: 'skill-invocation', name: 's' }),
+      userMessage(4, [{ type: 'image', attachment: { width: 8, height: 8 } }]),
+    ])
+    assert.equal(view.lastUser, 'hello world')
+  })
+
+  test('a newer textual message replaces the preview, on the state and the view', () => {
+    const { state, view } = driveTimeline([
+      userMessage(1, [{ type: 'text', text: 'first' }]),
+      userMessage(2, [{ type: 'text', text: 'second' }]),
+    ])
+    assert.equal(state.lastUser, 'second')
+    assert.equal(view.lastUser, 'second')
+    assertPlainJson(state)
+  })
+
+  test('stays ABSENT before any textual user message — never undefined-valued', () => {
+    const { state, view } = driveTimeline([
+      toolCall(1, { callId: 'b1', name: 'bash' }),
+      userMessage(2, [{ type: 'image', attachment: { width: 8, height: 8 } }]),
+    ])
+    assert.equal(view.lastUser, undefined)
+    assert.ok(!('lastUser' in view), 'no own key on the view')
+    assert.ok(!('lastUser' in state), 'no own key on the persisted state')
+    assertPlainJson(view)
+  })
+
+  test('a long message truncates to the bounded preview line', () => {
+    const { view } = driveTimeline([userMessage(1, [{ type: 'text', text: 'x'.repeat(500) }])])
+    assert.equal(view.lastUser?.length, 80)
+  })
+})
+
 describe('buildTimelineView copies', () => {
   test('requests, events, and archive entries are copies, never state aliases', () => {
     const { state, view } = driveTimeline([

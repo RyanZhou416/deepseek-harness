@@ -10,13 +10,16 @@
  * serves projection values only from the host's projection cache, so a
  * relative that never attached since the timeline unit last changed lists
  * pressure-only (occupancy without composition); those nodes fetch their slim
- * head from the plugin's `/api` detail route (the one call below) and
+ * head from the plugin's `/api` detail route (agentHeads.ts — the same
+ * page-scope cache the stats board's subagent-cost cell reads) and
  * re-render composed. A harness without the outward sessions service hides
  * the card.
  */
 
-import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, type KeyboardEvent, type ReactElement } from 'react'
+import { useEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactElement } from 'react'
 import { CATS } from '../categories'
+import type { AgentHeads } from '../agentHeads'
+import { makeAgentHeads, useSessionsSnapshot } from '../agentHeads'
 import { containHorizontalOverscroll } from '../overscroll'
 import type { ClientCtx } from '../services'
 import type { ViewKit } from '../viewkit'
@@ -32,7 +35,6 @@ import {
   ringSegments,
   sessionsFaceOf,
 } from '../agentTree'
-import { makeDetailFetcher } from '../timelineSource'
 
 export interface AgentGraphProps {
   sessionId?: string
@@ -54,33 +56,17 @@ export function ringColorOf(pct: number | null): string {
 export function makeAgentGraph(
   ctx: ClientCtx,
   kit: ViewKit,
+  /** The shared page-scope cold-head cache — the stats board's subagent-cost cell reads the same fetches. */
+  heads: AgentHeads = makeAgentHeads(ctx),
 ): (props: AgentGraphProps) => ReactElement | null {
   const { t, fmt, catLabel } = kit
-
-  /* Cold-relative head fetches: one in-flight-or-settled promise per session
-     id for the factory's lifetime (page scope). A settled null — transport
-     failure, hostile payload, route absent, session left the live set — is
-     sticky, so a broken relative never retries per snapshot tick. */
-  const heads = new Map<string, Promise<ContextTimeline | null>>()
 
   function AgentGraph(props: AgentGraphProps): ReactElement | null {
     // Resolved lazily at mount (not at apply): the outward sessions service
     // belongs to the client runtime's composition, and a deployment without
     // it simply keeps the card hidden.
     const face = useMemo(() => sessionsFaceOf(ctx), [])
-    const subscribe = useCallback((fn: () => void) => {
-      if (face === null) return () => {}
-      /* v8 ignore next 2 -- sessionsFaceOf returns a face only after proving list.subscribe. */
-      if (face.list === undefined) return () => {}
-      return face.list.subscribe(fn)
-    }, [face])
-    const getSnapshot = useCallback(() => {
-      if (face === null) return null
-      /* v8 ignore next 2 -- sessionsFaceOf proves list before returning the face. */
-      if (face.list === undefined) return null
-      return face.list.getSnapshot()
-    }, [face])
-    const snapshot = useSyncExternalStore(subscribe, getSnapshot)
+    const snapshot = useSessionsSnapshot(face)
     const sessionId = props.sessionId
     const [hoverId, setHoverId] = useState<string | null>(null)
 
@@ -129,11 +115,12 @@ export function makeAgentGraph(
 
     // Nodes with no composition (occupancy-only, or nothing listed at all —
     // the projection cache holds no timeline row for either) fetch their slim
-    // head off the detail route and re-render composed. The current node is
-    // excluded: the tab's own projections already feed it live. A remount
-    // (tab switch) resets this state but not the factory's promise cache, so
-    // a cached read REPLAYS into the fresh instance — otherwise a fetched
-    // relative would fall back to green on every remount, forever.
+    // head off the detail route (the shared page-scope cache) and re-render
+    // composed. The current node is excluded: the tab's own projections
+    // already feed it live. A remount (tab switch) resets this state but not
+    // the cache, so a cached read REPLAYS into the fresh instance —
+    // otherwise a fetched relative would fall back to green on every
+    // remount, forever.
     useEffect(() => {
       if (built === null) return
       const attach = (pending: Promise<ContextTimeline | null>, id: string): void => {
@@ -145,17 +132,9 @@ export function makeAgentGraph(
       }
       for (const n of built.forest.nodes) {
         if (n.isCurrent || (n.head !== null && n.head.parts.length > 0)) continue
-        const cached = heads.get(n.id)
-        if (cached !== undefined) {
-          attach(cached, n.id)
-          continue
-        }
-        const fetcher = makeDetailFetcher(ctx, n.id)
-        const pending = fetcher !== undefined ? fetcher().then(d => d?.head ?? null) : Promise.resolve(null)
-        heads.set(n.id, pending)
-        attach(pending, n.id)
+        attach(heads.headOf(n.id), n.id)
       }
-    }, [built])
+    }, [built, heads])
 
     if (built === null) return null
     const { forest, layout } = built

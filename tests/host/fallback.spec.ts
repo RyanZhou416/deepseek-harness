@@ -10,7 +10,7 @@ import { Context } from '@deepseek-ai/cordis'
 import SessionStore from '@deepseek-ai/dsh-session'
 import type { Session } from '@deepseek-ai/dsh-session'
 import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
-import { createFallbackHeadersDefinition, createFallbackTimelineDefinition } from '../../src/host/fallback'
+import { createFallbackActivityDefinition, createFallbackHeadersDefinition, createFallbackTimelineDefinition } from '../../src/host/fallback'
 import { BASELINE_DSH_VERSION } from '../../src/shared/version'
 
 const CURRENT = '0.1.1-rc.2'
@@ -91,5 +91,17 @@ describe('fallback units over the real registry', () => {
     const headers = createFallbackHeadersDefinition()
     assert.equal(headers.schema.safeParse(headers.view({})).success, true)
     assert.deepEqual(headers.view({}), { headers: [] })
+  })
+
+  test('the activity gate serves an empty ledger through both contract generations', () => {
+    const activity = createFallbackActivityDefinition()
+    assert.equal(activity.key, 'contextActivity')
+    assert.equal(activity.stateVersion, 1)
+    assert.deepEqual(activity.init(), {})
+    const state = activity.init()
+    assert.ok(activity.apply(state, { type: 'assistant/message', seq: 1, time: 0, data: {} } as never) === state)
+    assert.equal(activity.wire.viewSchema.safeParse(activity.wire.view({})).success, true)
+    assert.equal(activity.schema.safeParse(activity.view({})).success, true)
+    assert.deepEqual(activity.view({}), { days: {} })
   })
 })

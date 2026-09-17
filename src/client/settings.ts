@@ -12,11 +12,11 @@
  * members keeps the dependency graph honest.
  */
 
-import type { DefaultFileSort, DefaultGranularity, DefaultPlacement, DefaultToolSort, DefaultTrendMode, SettingsField } from '../shared/types'
+import type { DefaultFileSort, DefaultGranularity, DefaultPlacement, DefaultToolSort, DefaultTrendMode, InsightsEntry, SettingsField } from '../shared/types'
 
 // The preference vocabulary is declared once in shared/types.ts; re-exported
 // here so client-side consumers keep their canonical import path.
-export type { DefaultFileSort, DefaultGranularity, DefaultPlacement, DefaultToolSort, DefaultTrendMode, SettingsField } from '../shared/types'
+export type { DefaultFileSort, DefaultGranularity, DefaultPlacement, DefaultToolSort, DefaultTrendMode, InsightsEntry, SettingsField } from '../shared/types'
 
 /** The bound settings scope (ctx.settingsScope.bind result), as consumed. */
 export interface SettingsScopeLike {
@@ -39,6 +39,7 @@ export interface SettingsState {
   mode: DefaultTrendMode
   toolSort: DefaultToolSort
   fileSort: DefaultFileSort
+  insightsEntry: InsightsEntry
   writable: boolean
 }
 
@@ -50,6 +51,7 @@ export interface ContextSettings {
   defaultTrendMode(): DefaultTrendMode
   defaultToolSort(): DefaultToolSort
   defaultFileSort(): DefaultFileSort
+  insightsEntry(): InsightsEntry
   attach(scope: SettingsScopeLike): () => void
   /** Persist one preference choice (local echo, then the fenced scope write). */
   set(field: SettingsField, value: string): void
@@ -61,6 +63,7 @@ type Prefs = {
   mode?: DefaultTrendMode
   toolSort?: DefaultToolSort
   fileSort?: DefaultFileSort
+  insightsEntry?: InsightsEntry
 }
 
 function prefsOf(value: unknown): Prefs {
@@ -72,42 +75,45 @@ function prefsOf(value: unknown): Prefs {
     ...(v.defaultTrendMode === 'total' || v.defaultTrendMode === 'delta' ? { mode: v.defaultTrendMode } : {}),
     ...(v.defaultToolSort === 'size' || v.defaultToolSort === 'count' || v.defaultToolSort === 'name' ? { toolSort: v.defaultToolSort } : {}),
     ...(v.defaultFileSort === 'count' || v.defaultFileSort === 'latest' || v.defaultFileSort === 'path' ? { fileSort: v.defaultFileSort } : {}),
+    ...(v.insightsEntry === 'show' || v.insightsEntry === 'hide' ? { insightsEntry: v.insightsEntry } : {}),
   }
 }
 
 export function createContextSettings(): ContextSettings {
-  let state: SettingsState = { status: 'loading', placement: 'all', granularity: 'step', mode: 'total', toolSort: 'count', fileSort: 'count', writable: false }
+  let state: SettingsState = { status: 'loading', placement: 'all', granularity: 'step', mode: 'total', toolSort: 'count', fileSort: 'count', insightsEntry: 'show', writable: false }
   let scope: SettingsScopeLike | undefined
   const listeners = new Set<() => void>()
   const publish = (next: SettingsState): void => {
     if (next.status === state.status && next.placement === state.placement && next.granularity === state.granularity
       && next.mode === state.mode && next.toolSort === state.toolSort && next.fileSort === state.fileSort
-      && next.writable === state.writable) return
+      && next.insightsEntry === state.insightsEntry && next.writable === state.writable) return
     state = next
     for (const listener of listeners) listener()
   }
   // Republish from the bound scope's current snapshot; the attach sync and
   // the failed-write rollback share this one read. Returns the scope's valid
-  // placement, if it carries one.
-  const sync = (bound: SettingsScopeLike): DefaultPlacement | undefined => {
+  // placement and insights entry, if it carries them.
+  const sync = (bound: SettingsScopeLike): { placement?: DefaultPlacement; insightsEntry?: InsightsEntry } => {
     const snap = bound.getSnapshot()
     const prefs = prefsOf(snap.value)
     // Fail open: a config problem must never leave an entry hidden. A valid
-    // value wins; one the plugin cannot understand degrades to `all`; a
-    // section without the field (older Host half) keeps the current state.
-    const rawPlacement = snap.value !== null && typeof snap.value === 'object'
-      ? (snap.value as Record<string, unknown>).defaultPlacement
+    // value wins; one the plugin cannot understand degrades to the field's
+    // default; a section without the field (older Host half) keeps the
+    // current state.
+    const raw = snap.value !== null && typeof snap.value === 'object'
+      ? snap.value as Record<string, unknown>
       : undefined
     publish({
       status: snap.status === 'ready' || snap.status === 'unavailable' ? snap.status : 'loading',
-      placement: prefs.placement ?? (rawPlacement === undefined ? state.placement : 'all'),
+      placement: prefs.placement ?? (raw?.defaultPlacement === undefined ? state.placement : 'all'),
       granularity: prefs.granularity ?? state.granularity,
       mode: prefs.mode ?? state.mode,
       toolSort: prefs.toolSort ?? state.toolSort,
       fileSort: prefs.fileSort ?? state.fileSort,
+      insightsEntry: prefs.insightsEntry ?? (raw?.insightsEntry === undefined ? state.insightsEntry : 'show'),
       writable: snap.writable,
     })
-    return prefs.placement
+    return { placement: prefs.placement, insightsEntry: prefs.insightsEntry }
   }
   return {
     store: {
@@ -122,6 +128,7 @@ export function createContextSettings(): ContextSettings {
     defaultTrendMode: () => state.mode,
     defaultToolSort: () => state.toolSort,
     defaultFileSort: () => state.fileSort,
+    insightsEntry: () => state.insightsEntry,
     attach(bound) {
       scope = bound
       sync(bound)
@@ -138,11 +145,14 @@ export function createContextSettings(): ContextSettings {
       if (bound === undefined) return
       void bound.set(field, value).catch(() => {
         const truth = sync(bound)
-        // A placement choice that failed to persist must not keep an entry
-        // hidden on an unpersisted echo: with no valid placement in the
-        // scope's truth, degrade to `all`.
-        if (field === 'defaultPlacement' && truth === undefined) {
+        // A visibility gate that failed to persist must not keep an entry
+        // hidden on an unpersisted echo: with no valid value in the scope's
+        // truth, degrade each gate to its default.
+        if (field === 'defaultPlacement' && truth.placement === undefined) {
           publish({ ...state, placement: 'all' })
+        }
+        if (field === 'insightsEntry' && truth.insightsEntry === undefined) {
+          publish({ ...state, insightsEntry: 'show' })
         }
       })
     },

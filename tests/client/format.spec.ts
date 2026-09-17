@@ -1,4 +1,4 @@
-// Display formatting (src/client/format.ts): the k/M suffix style, byte
+// Display formatting (src/client/format.ts): the k/M/B suffix style, byte
 // sizes, the cache-hit truncation, locale-safe time, locale-unit durations,
 // and leading slice shares.
 
@@ -18,16 +18,19 @@ describe('fmt', () => {
     assert.equal(fmt(999.4), '999')
   })
 
-  test('thousands and millions take suffixes with one decimal', () => {
+  test('thousands, millions, and billions take suffixes with one decimal', () => {
     assert.equal(fmt(1000), '1.0k')
     assert.equal(fmt(1534), '1.5k')
     assert.equal(fmt(1_000_000), '1.0M')
     assert.equal(fmt(128_000), '128.0k')
+    assert.equal(fmt(1_000_000_000), '1.0B')
+    assert.equal(fmt(1_055_900_000), '1.1B')
   })
 
   test('negatives keep their sign', () => {
     assert.equal(fmt(-1500), '-1.5k')
     assert.equal(fmt(-12), '-12')
+    assert.equal(fmt(-2_000_000_000), '-2.0B')
   })
 })
 

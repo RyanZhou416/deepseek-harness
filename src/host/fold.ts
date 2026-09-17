@@ -132,6 +132,14 @@ export interface TimelineState {
    * the first human input folds.
    */
   humanInputs?: number
+  /**
+   * The user's newest own message as a bounded one-line preview (the surface
+   * node's first-text line). Last-wins — a newer human input replaces it, a
+   * text-less one (images only) keeps the previous line. Additive-optional
+   * like the 0.47 fields: cached rows folded before the field existed read
+   * without it and the card just hides its preview line.
+   */
+  lastUser?: string
   archiveFloor?: number
   /**
    * The detail collections' revision marker (see ContextTimelineDetail):
@@ -614,7 +622,7 @@ function applySurface(
 }
 
 /** The durable usage object, as far as the fold reads it — every bucket is re-proved by `tokenCountOf`, never trusted. */
-interface UsageLike {
+export interface UsageLike {
   inputTokens?: unknown
   cacheReadTokens?: unknown
   cacheWriteTokens?: unknown
@@ -639,8 +647,12 @@ interface BilledUsage {
  * schemas' `.int().nonnegative()` gates on EVERY later delivery, permanently
  * freezing the projection feed for the session (issue #44). NaN, infinities,
  * and non-numeric values read as absent.
+ *
+ * Exported for the activity unit (host/activity.ts): the daily ledger re-proves
+ * the same durable usage buckets with the same sanitizer, so one raw figure
+ * can never enter either fold's state.
  */
-function tokenCountOf(value: unknown): number | null {
+export function tokenCountOf(value: unknown): number | null {
   if (typeof value === 'number') {
     return Number.isFinite(value) ? Math.max(0, Math.round(value)) : null
   }
@@ -1051,6 +1063,10 @@ export function applyTimeline(state: TimelineState, event: TimelineEvent, bounds
           // The user's own message (the exact set the surface's `user`
           // category holds): one human input, whole-session tally.
           s.humanInputs = (s.humanInputs ?? 0) + 1
+          // The session card's last-user-message preview: the surface node's
+          // bounded first-text line (applySurface derived it). Last-wins; a
+          // text-less message (images only) keeps the previous line.
+          if (node.text !== undefined && node.text !== '') s.lastUser = node.text
         }
         break
       }
@@ -1320,6 +1336,9 @@ function headFieldsOf(state: TimelineState): Snapshot {
     // The whole-session human-input tally (see TimelineState.humanInputs) —
     // a running total, so unlike turns/steps it covers the COMPLETE log.
     humanInputs: state.humanInputs ?? 0,
+    // The last-user-message preview (see TimelineState.lastUser) — a plain
+    // string copies by value; absent until the first textual human input.
+    ...(state.lastUser !== undefined ? { lastUser: state.lastUser } : {}),
     requests: [],
     events: [],
     nodes: [],
