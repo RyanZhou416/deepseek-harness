@@ -144,6 +144,14 @@ for (const scenario of (flags.has('--scenario') ? [flags.get('--scenario')] : sc
     json(join(profile, 'package.json'), { name: 'runtime-test-profile', version: '0.0.0', private: true, type: 'module', dsh: { profile: { bundles: ['@deepseek-ai/dsh-base', '@deepseek-ai/dsh-headless', '@nanmicoder/dsh-agent-teams'], patchReload: 'startup' } } });
     copyFileSync(join(dirname(fileURLToPath(import.meta.url)), 'fixtures/harness-runtime-llm.mjs'), join(profile, 'fixture-llm.mjs'));
     writeFileSync(join(profile, 'cordis.patch.yml'), `- id: llm-deepseek\n  disabled: true\n- id: llm-pi-ai\n  disabled: true\n- id: agent-default-model\n  config:\n    provider: runtime-lab\n    model: fixture-model\n- insert:\n    - id: runtime-lab-fixture\n      name: './fixture-llm.mjs'\n`);
+    if (scenario === 'lifecycle')
+        // Regression for #163/#164: rename the delegation tool so no global
+        // tool named `subagent` exists, mirroring compositions where the
+        // host configured a different toolName. The default-depth member
+        // spawn must still succeed instead of dying in tools.restrict().
+        // Patch entries replace a same-id entry wholesale, so repeat the
+        // full dsh-base configuration and change only the tool name.
+        writeFileSync(join(profile, 'cordis.patch.yml'), readFileSync(join(profile, 'cordis.patch.yml'), 'utf8') + '- id: tool-subagent\n  name: \'@deepseek-ai/dsh-tool-subagent\'\n  config:\n    provider: spawn\n    toolName: subagent_legacy\n    backgroundMode: continuable\n');
     if (scenario === 'fallback')
         writeFileSync(join(profile, 'cordis.patch.yml'), readFileSync(join(profile, 'cordis.patch.yml'), 'utf8') + '- id: agent-teams\n  config:\n    stateDir: .agent-teams\n    memberProvider: spawn\n    fallback:\n      provider: runtime-lab\n      model: fixture-fallback\n');
     if (scenario === 'captain-idle-wakeup') {

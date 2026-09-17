@@ -12,6 +12,7 @@ import type { ContentBlock, MessageId, MessageSource } from '@deepseek-ai/dsh-ll
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import type { Session, SessionEvent, SessionId } from '@deepseek-ai/dsh-session'
 import { SubagentError } from '@deepseek-ai/dsh-subagent'
+import { CAPTAIN_TOOL_NAMES } from './tool-names.ts'
 
 /**
  * Exact protocol exported by dsh-subagent/internal in Alpha.5 and rc.1.
@@ -211,4 +212,94 @@ export function guardSubagentDelivery(
       if (typeof send === 'function') restore('sendMessage', guardedSend)
     }
   }, 'agent-teams: retired member guard')
+}
+
+/** Structural shape of the host tool registry view (dsh-tools `view()`). */
+interface ToolsRegistryView {
+  restrictableNames?: ReadonlySet<string>
+}
+
+/**
+ * Names the host's `tools.restrict()` would admit for this agent's layer
+ * chain, or undefined when the host does not expose its registry view.
+ * restrict() rejects unknown names with a hard error, so the spawn path must
+ * check entries against this view before forwarding them. Source:
+ * dsh-tools view()/restrict() in 0.1.5-rc.1; older Harness generations lack
+ * the surface and keep the verbatim list.
+ */
+export function restrictableToolNames(agent: Agent): ReadonlySet<string> | undefined {
+  const tools = (agent?.ctx as unknown as { tools?: { view?: (scope?: unknown) => ToolsRegistryView } })?.tools
+  if (typeof tools?.view !== 'function') return undefined
+  try {
+    const names = tools.view.call(tools, agent.ctx)?.restrictableNames
+    return names instanceof Set ? names : undefined
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * Member `toolFilter` for one spawn. Captain-only names are registered by
+ * this plugin itself and always resolvable; the depth-related entries name
+ * HOST tools and are only known under some compositions, so they must be
+ * resolved against the running host's registry: the delegation tool name is
+ * host configuration (dsh-tool-subagent `toolName`, default `subagent`,
+ * renamed per composition, e.g. `subagent_fork` in web-style profiles), and
+ * forwarding a name the host dropped aborts every member spawn (#163, #164).
+ * Depth enforcement itself does not depend on these names —
+ * installMemberDelegationGuard bounds descendant creation by parent chain.
+ */
+export function memberToolFilter(maxDepth: number | undefined, knownTools: ReadonlySet<string> | undefined): { deny: string[] } {
+  const depthDeny = maxDepth === 0 ? ['subagent', 'send_message'] : []
+  return {
+    deny: [
+      ...CAPTAIN_TOOL_NAMES,
+      ...(knownTools === undefined ? depthDeny : depthDeny.filter(name => knownTools.has(name))),
+    ],
+  }
+}
+
+/**
+ * Names a `tools.restrict()` rejection reported as unknown, or an empty list
+ * for every other failure. The host names the offenders verbatim
+ * (`tools.restrict() names unknown global tool "x"; known global tools: …`);
+ * only that report may relax a filter (#164, #166).
+ */
+function unknownToolNames(error: unknown): string[] {
+  const message = error instanceof Error ? error.message : String(error)
+  if (!message.includes('unknown global tool')) return []
+  return [...message.matchAll(/"([^"]+)"/g)].map(match => match[1] as string)
+}
+
+/**
+ * Start one member, dropping any filter name the host reports as unknown and
+ * retrying.
+ *
+ * Resolving the filter against the registry view ({@link memberToolFilter})
+ * only covers hosts that expose one. A rejected filter still leaves the member
+ * without a session for the lifetime of the team, so the start must survive the
+ * cases that resolution cannot see — no registry view, a name that is known but
+ * not restrictable, a composition that mounted differently than expected. The
+ * host names the offenders in its rejection, so they are removed and the start
+ * retried; the retry only runs while the deny list strictly shrinks, and any
+ * failure that is not an unknown-name report propagates untouched.
+ * @param start - performs one start attempt for the given `toolFilter`.
+ * @param filter - the filter to attempt first.
+ * @returns the started member.
+ */
+export async function startMemberWithLenientFilter<T>(
+  start: (filter: { deny: string[] }) => Promise<T>,
+  filter: { deny: string[] },
+): Promise<T> {
+  let deny = [...filter.deny]
+  for (;;) {
+    try {
+      return await start({ deny })
+    } catch (error: unknown) {
+      const unknown = unknownToolNames(error)
+      const remaining = deny.filter(name => !unknown.includes(name))
+      if (unknown.length === 0 || remaining.length === deny.length) throw error
+      deny = remaining
+    }
+  }
 }

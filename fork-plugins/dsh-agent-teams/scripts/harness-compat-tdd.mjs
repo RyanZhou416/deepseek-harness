@@ -8,9 +8,10 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
 import { SubagentRuntime } from '@deepseek-ai/dsh-subagent'
-import { guardSubagentDelivery, installContinuableMemberSetup, queueMemberPrompt, sessionOwnEvents } from '../lib/harness-compat.js'
+import { guardSubagentDelivery, installContinuableMemberSetup, memberToolFilter, queueMemberPrompt, restrictableToolNames, sessionOwnEvents } from '../lib/harness-compat.js'
 import { installMemberSelectionRuntime, spawnMember } from '../lib/members.js'
 import { createTeamDir } from '../lib/state.js'
+import { CAPTAIN_TOOL_NAMES } from '../lib/tool-names.js'
 
 const queueKey = Symbol.for('dsh.subagent.queuePrompt')
 const deliverKey = Symbol.for('dsh.subagent.deliverPrompt')
@@ -291,6 +292,45 @@ await test('spawn explicitly passes reasoning effort, preserving persona and too
   assert.ok(received.request.toolFilter.deny.includes('agent_teams_create'))
   assert.ok(received.request.toolFilter.deny.includes('send_message'), 'default members have only one parent-report channel')
   assert.ok(received.request.toolFilter.deny.includes('subagent'))
+  assert.equal(member.id, 'child')
+})
+
+await test('depth deny entries resolve against the host tool registry (#163, #164)', async () => {
+  // Host compositions register the delegation tool under a configurable
+  // name (dsh-tool-subagent `toolName`, default `subagent`; the dsh-base
+  // web-style composition ships `subagent_fork`). tools.restrict() rejects
+  // unknown names and aborts the whole spawn, so the deny list may only
+  // forward names the running host actually registered.
+  const hostNames = new Set(['subagent_fork', 'send_message', 'skill', 'todo_write', ...CAPTAIN_TOOL_NAMES])
+  const modern = { ctx: { tools: { view: () => ({ restrictableNames: hostNames }) } } }
+
+  const resolved = memberToolFilter(0, restrictableToolNames(modern))
+  assert.ok(resolved.deny.includes('send_message'), 'parent-report channel stays denied')
+  assert.ok(CAPTAIN_TOOL_NAMES.every(name => resolved.deny.includes(name)), 'captain tools stay denied')
+  assert.ok(!resolved.deny.includes('subagent'), 'the renamed delegation tool is dropped instead of killing the spawn')
+
+  assert.equal(restrictableToolNames({ ctx: {} }), undefined, 'hosts without a registry view keep the verbatim list')
+  assert.deepEqual(
+    memberToolFilter(0, restrictableToolNames({ ctx: {} })).deny,
+    [...CAPTAIN_TOOL_NAMES, 'subagent', 'send_message'],
+    'unknown host shape: entries pass through unchanged',
+  )
+  assert.equal(restrictableToolNames({ ctx: { tools: { view: () => { throw new Error('older host shape') } } } }), undefined)
+  assert.deepEqual(memberToolFilter(1, undefined).deny, [...CAPTAIN_TOOL_NAMES], 'delegation-allowed members carry no depth entries')
+
+  // End to end through spawnMember on a host whose registry lacks `subagent`.
+  let received
+  const ctx = { subagents: {
+    getProvider: () => ({ prepareContinuable() {}, capabilities: { persona: true, toolFilter: true } }),
+    startContinuable: async spec => { received = spec; return { childId: 'child' } },
+  } }
+  const captain = { id: 'captain', ctx: { tools: { view: () => ({ restrictableNames: hostNames }) } } }
+  const team = { id: 'team', name: 'Team', captainSessionId: captain.id, members: [], tasks: [], createdAt: 1, taskSeq: 0 }
+  const member = { id: '', name: 'worker', role: 'engineer', joinedAt: 1, status: 'idle' }
+  await spawnMember(ctx, { provider: 'spawn', maxDepth: 0 }, { withPending: (_p, _l, _s, run) => run() },
+    { provider: 'chosen', model: 'model', reasoningEffort: 'high' }, captain, team, member, '.agent-teams', signal)
+  assert.ok(received.request.toolFilter.deny.includes('send_message'))
+  assert.ok(!received.request.toolFilter.deny.includes('subagent'), 'spawn survives hosts that renamed the delegation tool')
   assert.equal(member.id, 'child')
 })
 
