@@ -1622,7 +1622,7 @@ lsp 工具将提供方选择和语言服务器子进程置于 ctx.lsp 之后，�
 
 ### `session_send_message`
 
-向确切 id 指定的现有 Session 发送一条自包含消息。目标可以无关、位于另一工作区，或就是发送 Session 自身，但直接可继续 parent 或 child 应使用 send_message，teammate 应使用 AgentTeams 消息。只有独立 Session 的确切 id 由用户提供、传入 Session 消息标识、用户创建 Session reference 暴露，或 `session_find` 为用户点名目标返回无歧义匹配时，才使用本工具；绝不只为发送而猜测或枚举目标。绝不用于确认、仅状态更新、轮询、自动回复、转发已收到的消息或维持对话。收到一条 Session 消息并不授权回复。投递会把带来源上下文注入目标的下一个 step，而不会唤醒空闲目标或创建用户轮次。接受不代表已读或已回复。
+向确切 id 指定的现有 Session 发送一条自包含消息。目标可以无关、位于另一工作区，或就是发送 Session 自身，但直接可继续 parent 或 child 应使用 send_message，teammate 应使用 AgentTeams 消息。只有独立 Session 的确切 id 由用户提供、传入 Session 消息标识、用户创建 Session reference 暴露，或 `session_find` 为用户点名目标返回无歧义匹配时，才使用本工具；绝不只为发送而猜测或枚举目标。绝不用于确认、仅状态更新、轮询、自动回复、转发已收到的消息或维持对话。收到一条 Session 消息并不授权回复。投递会把带来源上下文写入目标的 next-step inbox，并唤醒空闲目标；它不使用普通 next-turn 用户队列。接受不代表已读或已回复。
 
 ```json
 {

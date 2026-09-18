@@ -102,13 +102,13 @@ describe('tool-session-message through a real Loader composition', () => {
     const senderSession = context.sessions.create(SessionId('loader-sender'), { meta: { cwd: '/sender' } })
     const targetSession = context.sessions.create(SessionId('loader-target'), { meta: { cwd: '/target' } })
     const sender = { id: senderSession.id, session: senderSession, status: 'idle', ctx: context } as Agent
-    const inject = vi.fn<Agent['inject']>()
+    const send = vi.fn<Agent['send']>()
     const target = {
       id: targetSession.id,
       session: targetSession,
       status: 'idle',
       ctx: context,
-      inject,
+      send,
     } as unknown as Agent
     await context.agents.register(sender)
     await context.agents.register(target)
@@ -122,8 +122,10 @@ describe('tool-session-message through a real Loader composition', () => {
     })
 
     expect(result.isError).toBe(false)
-    expect(inject).toHaveBeenCalledOnce()
-    const message = inject.mock.calls[0]![0]
+    expect(send).toHaveBeenCalledOnce()
+    expect(send.mock.calls[0]![1]).toBe('next-step')
+    expect(send.mock.calls[0]![2]).toBe(true)
+    const message = send.mock.calls[0]![0]
     expect(message.source).toEqual({
       kind: 'agent-message',
       form: 'relay',

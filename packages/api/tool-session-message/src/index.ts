@@ -38,8 +38,8 @@ const TOOL_DESCRIPTION =
   + 'match for a user-named target; never guess or enumerate targets merely to send. Never use it for acknowledgements, '
   + 'status-only updates, polling, automatic replies, '
   + 'forwarding a received message, or maintaining a conversation. Receiving a Session message does not authorize a '
-  + 'reply. Delivery injects attributed context into the target\'s next step without waking an idle target or creating '
-  + 'a user turn. Acceptance is not reading or a response.'
+  + 'reply. Delivery inserts attributed context into the target\'s next-step inbox and wakes an idle target without using '
+  + 'the ordinary next-turn user queue. Acceptance is not reading or a response.'
 
 const STATUS_DESCRIPTION =
   'Inspect one previously accepted Session message without waking the target. Use this when the user needs delivery '
@@ -202,7 +202,7 @@ export function apply(ctx: Context): void {
       }
 
       const message = createSessionMessage(sender, args.message)
-      target.inject(message)
+      target.send(message, 'next-step', true)
       return {
         messageId: message.id,
         senderSessionId: sender.id,

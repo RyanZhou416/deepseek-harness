@@ -19,7 +19,7 @@ import * as tool from '../src/index.ts'
 
 let context: Context | undefined
 let nextCall = 0
-const injections = new WeakMap<Agent, ReturnType<typeof vi.fn<Agent['inject']>>>()
+const sends = new WeakMap<Agent, ReturnType<typeof vi.fn<Agent['send']>>>()
 
 afterEach(async () => {
   await context?.fiber.dispose()
@@ -33,22 +33,22 @@ function makeAgent(ctx: Context, id: string, cwd: string, origin?: 'subagent'): 
       ...(origin === undefined ? {} : { origin, parentSession: SessionId('unrelated-parent') }),
     },
   })
-  const inject = vi.fn<Agent['inject']>()
+  const send = vi.fn<Agent['send']>()
   const agent = {
     id: session.id,
     session,
     ctx,
     status: 'idle',
-    inject,
+    send,
   } as unknown as Agent
-  injections.set(agent, inject)
+  sends.set(agent, send)
   return agent
 }
 
-function injectionOf(agent: Agent): ReturnType<typeof vi.fn<Agent['inject']>> {
-  const inject = injections.get(agent)
-  if (inject === undefined) throw new Error(`missing inject spy for ${agent.id}`)
-  return inject
+function sendOf(agent: Agent): ReturnType<typeof vi.fn<Agent['send']>> {
+  const send = sends.get(agent)
+  if (send === undefined) throw new Error(`missing send spy for ${agent.id}`)
+  return send
 }
 
 async function setup() {
@@ -97,8 +97,8 @@ describe('dsh-tool-session-message', () => {
     expect(schema.description).toContain('never guess or enumerate')
     expect(schema.description).toContain('Never use it for acknowledgements')
     expect(schema.description).toContain('does not authorize a reply')
-    expect(schema.description).toContain('without waking an idle target')
-    expect(schema.description).toContain('creating a user turn')
+    expect(schema.description).toContain('wakes an idle target')
+    expect(schema.description).toContain('ordinary next-turn user queue')
     const sessionIdParameter = properties.session_id as { description?: unknown }
     expect(sessionIdParameter.description).toContain('Do not use a subagent or teammate id here.')
     const status = ctx.tools.schemas().find(candidate => candidate.name === 'session_message_status')
@@ -227,8 +227,10 @@ describe('dsh-tool-session-message', () => {
     expect(result.isError).toBe(false)
     expect(resolveAgent).not.toHaveBeenCalled()
     expect(resultText(result)).toContain(`accepted by ${target.id}`)
-    expect(injectionOf(target)).toHaveBeenCalledOnce()
-    const delivered = injectionOf(target).mock.calls[0]![0]
+    expect(sendOf(target)).toHaveBeenCalledOnce()
+    expect(sendOf(target).mock.calls[0]![1]).toBe('next-step')
+    expect(sendOf(target).mock.calls[0]![2]).toBe(true)
+    const delivered = sendOf(target).mock.calls[0]![0]
     expect(delivered.source).toEqual({
       kind: 'agent-message',
       form: 'relay',
@@ -243,7 +245,7 @@ describe('dsh-tool-session-message', () => {
     ])
   })
 
-  it('uses the production inject lane without opening a target turn', async () => {
+  it('uses the production next-step wake lane without opening a next-turn queue', async () => {
     const ctx = new Context()
     context = ctx
     await mountAgentLoopTestDependencies(ctx)
@@ -260,6 +262,13 @@ describe('dsh-tool-session-message', () => {
     const harness = await mountAgentLoopTestHarness(ctx)
     const sender = await harness.create(SessionId('real-sender'))
     const target = await harness.create(SessionId('real-target'))
+    const turnStarted = new Promise<void>((resolve) => {
+      const dispose = ctx.on('session/event', (session, event) => {
+        if (session !== target.session || event.type !== 'turn/start') return
+        dispose()
+        resolve()
+      })
+    })
 
     const result = await execute(ctx, {
       session_id: target.id,
@@ -267,14 +276,12 @@ describe('dsh-tool-session-message', () => {
     }, sender)
 
     expect(result.isError).toBe(false)
+    await turnStarted
+    await target.whenIdle()
     expect(target.status).toBe('idle')
     expect(target.inbox.nextTurn).toEqual([])
-    expect(target.inbox.nextStep).toHaveLength(1)
-    expect(target.inbox.nextStep[0]?.source).toMatchObject({
-      kind: 'agent-message',
-      senderSessionId: sender.id,
-    })
-    expect(target.session.snapshotEvents().at(-1)).toMatchObject({
+    expect(target.inbox.nextStep).toEqual([])
+    expect(target.session.snapshotEvents().findLast(event => event.type === 'agent/inbox/spliced')).toMatchObject({
       type: 'agent/inbox/spliced',
       data: { target: 'next-step' },
     })
@@ -292,7 +299,7 @@ describe('dsh-tool-session-message', () => {
     }, sender)
 
     expect(result.isError).toBe(false)
-    expect(injectionOf(sender)).toHaveBeenCalledOnce()
+    expect(sendOf(sender)).toHaveBeenCalledOnce()
   })
 
   it('cold-resumes an ordinary Session before durable context injection', async () => {
@@ -312,7 +319,7 @@ describe('dsh-tool-session-message', () => {
 
     expect(result.isError).toBe(false)
     expect(resolveAgent).toHaveBeenCalledExactlyOnceWith(target.id)
-    expect(injectionOf(target)).toHaveBeenCalledOnce()
+    expect(sendOf(target)).toHaveBeenCalledOnce()
   })
 
   it('reports a Session Controller resolution failure without delivery', async () => {
@@ -352,7 +359,7 @@ describe('dsh-tool-session-message', () => {
 
     expect(result.isError).toBe(true)
     expect(resultText(result)).toContain('stopped before delivery')
-    expect(injectionOf(target)).not.toHaveBeenCalled()
+    expect(sendOf(target)).not.toHaveBeenCalled()
   })
 
   it('rejects delivery when the resolved target stops before insertion', async () => {
@@ -373,7 +380,7 @@ describe('dsh-tool-session-message', () => {
 
     expect(result.isError).toBe(true)
     expect(resultText(result)).toContain('stopped before delivery')
-    expect(injectionOf(target)).not.toHaveBeenCalled()
+    expect(sendOf(target)).not.toHaveBeenCalled()
   })
 
   it('fails before delivery for missing identity, blank input, cancellation, or stale sender', async () => {
@@ -439,7 +446,7 @@ describe('dsh-tool-session-message', () => {
 
     expect(result.isError).toBe(false)
     expect(resultText(result)).toContain('pending-context; target running; blocking terminal (terminal_send)')
-    expect(injectionOf(target)).not.toHaveBeenCalled()
+    expect(sendOf(target)).not.toHaveBeenCalled()
   })
 
   it('validates status identity and reports an offline unknown pair', async () => {

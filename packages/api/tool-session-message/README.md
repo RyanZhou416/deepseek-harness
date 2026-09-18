@@ -9,7 +9,7 @@ English | [中文](README.zh.md)
 
 ## Summary
 
-`dsh-tool-session-message` lets a model find independent Sessions by title, inject self-contained information into an exact id while the target retains the real sending Session id, then inspect whether that context is pending, claimed, in model context, waiting on a foreground tool, completed, rejected, or discarded. It accepts unrelated workspaces, lineages, and self-targets without runtime policy, does not create or wake a user turn, and cold-resumes ordinary persisted Sessions. Prompt guidance preserves subagent and Team messaging and prevents polling or automatic replies.
+`dsh-tool-session-message` lets a model find independent Sessions by title, send self-contained information to an exact id while the target retains the real sending Session id, then inspect whether that context is pending, claimed, in model context, waiting on a foreground tool, completed, rejected, or discarded. It accepts unrelated workspaces, lineages, and self-targets without runtime policy, wakes idle targets through the next-step inbox instead of the ordinary next-turn user queue, and cold-resumes ordinary persisted Sessions. Prompt guidance preserves subagent and Team messaging and prevents polling or automatic replies.
 
 ## Table of Contents
 
@@ -47,7 +47,7 @@ The package has no configuration. Target policy and frequency limits are deliber
 
 ### Delivery
 
-`session_send_message` requires a live calling Agent and derives `senderSessionId` from that exact registry identity. A live target is accepted regardless of workspace, lineage, origin, or equality with the sender. An absent ordinary target is cold-resumed through `ctx.sessionController.resolveAgent()`. The tool then calls `inject()`, which appends durable next-step context without waking an idle target or creating an Agent-authored user turn. A running target may claim it at a later step boundary; an idle target leaves it pending until other waking input arrives. The tool returns the accepted `messageId`, sender id, and target id without waiting for target work.
+`session_send_message` requires a live calling Agent and derives `senderSessionId` from that exact registry identity. A live target is accepted regardless of workspace, lineage, origin, or equality with the sender. An absent ordinary target is cold-resumed through `ctx.sessionController.resolveAgent()`. The tool then sends the attributed message to the target's `next-step` inbox with wakeup enabled. This bypasses the ordinary `next-turn` user queue while waking an idle target; a running target claims it at a later step boundary. The tool returns the accepted `messageId`, sender id, and target id without waiting for target work.
 
 ### Status inspection
 
@@ -55,7 +55,7 @@ The package has no configuration. Target policy and frequency limits are deliber
 
 ### Failure and cancellation
 
-An empty id, blank message, missing or stale caller, unknown Session, failed cold resume, or target disposal before insertion produces an errored tool result and no accepted message. Caller cancellation is checked before activation and again immediately before insertion. Once `inject()` accepts the message, cancellation cannot retract it.
+An empty id, blank message, missing or stale caller, unknown Session, failed cold resume, or target disposal before insertion produces an errored tool result and no accepted message. Caller cancellation is checked before activation and again immediately before insertion. Once `send()` accepts the message, cancellation cannot retract it.
 
 -----
 
@@ -190,7 +190,7 @@ These limits are deliberate parts of the current unrestricted design.
 - **Status is observational** — the result can become stale immediately, has no subscription or automatic sender notification, and reports an unresolved `terminal_send` as terminal blocking without claiming that the process is deadlocked.
 - **Each status read folds the complete target log** — inspection is linear in retained target events; the model guidance forbids polling, and a future indexed projection is required before high-frequency monitoring.
 - **No response collection** — status exposes no target output, completion wait, recall, or delete operation.
-- **Idle injected context retains its Agent** — injection deliberately does not wake an idle target, and pending inbox context prevents ordinary Agent eviction until other waking input claims it, queue control discards it, or the Controller stops.
+- **Wakeup starts a target turn** — a Session message wakes an idle target through the next-step inbox. It does not use the ordinary next-turn queue, but it can still retain a cold-resumed Agent until the target turn settles or the Controller stops.
 - **Cold activation outlives caller cancellation** — cancellation during a deduplicated Session Controller resume can leave the target resident even though the post-resume check prevents message insertion.
 - **Discovery depends on projected titles** — a cold Session without a usable title projection falls back to its id and cannot match a title until the projection becomes available; duplicate or similar titles require user selection.
 
