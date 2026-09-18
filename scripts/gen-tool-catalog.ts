@@ -527,7 +527,7 @@ const TOOL_PACKAGES: ToolPackage[] = [
       await ctx.plugin(ToolSessionMessage)
     },
     note:
-      'The Web bundle exposes title-guided root-Session discovery, unrestricted exact-id FIFO delivery, and '
+      'The Web bundle exposes title-guided root-Session discovery, unrestricted exact-id context injection, and '
       + 'read-only status inspection. Sender attribution comes from the exact calling Agent; prompt guidance, rather '
       + 'than a runtime target or frequency policy, preserves specialized messaging and discourages loops and polling.',
   },

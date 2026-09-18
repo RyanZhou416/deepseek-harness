@@ -7,6 +7,7 @@ import type { SessionEvent } from '@deepseek-ai/dsh-session'
 /** One durable delivery phase derived from the target Session log. */
 export type SessionMessageState =
   | 'queued'
+  | 'pending-context'
   | 'claimed'
   | 'model-context'
   | 'processing-tool'
@@ -15,7 +16,7 @@ export type SessionMessageState =
   | 'discarded'
   | 'unknown'
 
-/** Current target activity that may delay a queued or admitted message. */
+/** Current target activity that may delay pending or admitted context. */
 export type SessionMessageBlocking = 'none' | 'model' | 'tool' | 'terminal'
 
 /** Durable message phase plus current open-turn tool activity. */
@@ -67,7 +68,7 @@ export function deriveSessionMessageStatus(
           ...event.data.inserted,
         )
         if (event.data.inserted.some(message => message.id === messageId)) {
-          state = 'queued'
+          state = event.data.target === 'next-step' ? 'pending-context' : 'queued'
           turnEndReason = undefined
         }
         break

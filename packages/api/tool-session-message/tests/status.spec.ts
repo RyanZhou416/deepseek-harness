@@ -21,17 +21,17 @@ function fixture() {
     id: MessageId('tracked-message'),
   }
   const insert = sessionEvent('agent/inbox/spliced', {
-    target: 'next-turn', start: 0, inserted: [message],
+    target: 'next-step', start: 0, inserted: [message],
   })
   const start = sessionEvent('turn/start', { turn: 1 })
   const claim = sessionEvent('agent/inbox/spliced', {
-    target: 'next-turn', start: 0, removedCount: 1, inserted: [],
+    target: 'next-step', start: 0, removedCount: 1, inserted: [],
   })
   return { message, insert, start, claim }
 }
 
 describe('deriveSessionMessageStatus', () => {
-  it('reports a queued message behind a foreground terminal call', () => {
+  it('reports pending injected context behind a foreground terminal call', () => {
     const { message, insert } = fixture()
     const events = [
       sessionEvent('turn/start', { turn: 8 }),
@@ -49,9 +49,20 @@ describe('deriveSessionMessageStatus', () => {
     ]
 
     expect(deriveSessionMessageStatus(events, message.id, true)).toEqual({
-      state: 'queued',
+      state: 'pending-context',
       blocking: 'terminal',
       activeTools: ['run_code', 'terminal_send'],
+    })
+  })
+
+  it('retains the queued state for messages written by the previous next-turn transport', () => {
+    const { message } = fixture()
+    const insert = sessionEvent('agent/inbox/spliced', {
+      target: 'next-turn', start: 0, inserted: [message],
+    })
+
+    expect(deriveSessionMessageStatus([insert], message.id, false)).toEqual({
+      state: 'queued', blocking: 'none', activeTools: [],
     })
   })
 
@@ -132,7 +143,7 @@ describe('deriveSessionMessageStatus', () => {
       discarded.insert,
       discarded.start,
       sessionEvent('agent/inbox/spliced', {
-        target: 'next-turn', start: 0, removedCount: 1, inserted: [], outcome: 'canceled',
+        target: 'next-step', start: 0, removedCount: 1, inserted: [], outcome: 'canceled',
       }),
       sessionEvent('turn/end', { turn: 1, reason: { kind: 'completed' } }),
     ], discarded.message.id, false)).toEqual({
@@ -159,7 +170,7 @@ describe('deriveSessionMessageStatus', () => {
       }),
       insert,
       sessionEvent('agent/inbox/spliced', {
-        target: 'next-turn', start: 0, removedCount: 1, inserted: [replacement], outcome: 'canceled',
+        target: 'next-step', start: 0, removedCount: 1, inserted: [replacement], outcome: 'canceled',
       }),
       sessionEvent('tool/call', {
         turn: 99, step: 1, callId: ToolCallId('unrelated'), name: 'bash', arguments: '{}',
@@ -167,7 +178,7 @@ describe('deriveSessionMessageStatus', () => {
       sessionEvent('turn/end', { turn: 99, reason: { kind: 'completed' } }),
     ]
     expect(deriveSessionMessageStatus(events, message.id, false)).toEqual({
-      state: 'queued', blocking: 'none', activeTools: [],
+      state: 'pending-context', blocking: 'none', activeTools: [],
     })
     expect(deriveSessionMessageStatus(events, MessageId('unknown-message'), false)).toEqual({
       state: 'unknown', blocking: 'none', activeTools: [],

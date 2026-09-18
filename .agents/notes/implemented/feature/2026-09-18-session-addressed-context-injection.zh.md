@@ -1,8 +1,8 @@
-# Agent Note: 按 Session 寻址的 Agent 消息使用带来源的 FIFO 投递
+# Agent Note: 按 Session 寻址的 Agent 消息使用带来源的上下文注入
 
 Status: implemented
 
-[English](2026-09-18-session-addressed-agent-messages.md) | 中文
+[English](2026-09-18-session-addressed-context-injection.md) | 中文
 
 ## 问题
 
@@ -16,9 +16,9 @@ Web bundle 的 `standard`、`ptc` 与 `cordis` Agent preset 会在各自 Agent �
 
 `session_send_message({ session_id, message })` 只从确切在线的 `exec.agent` 取得发送方；模型输入不能提供或覆盖 `senderSessionId`。它接受 `ctx.agents` 中任何确切在线目标，不考虑工作区、lineage、origin 或是否等于发送方。不存在在线目标时，它委托给 `ctx.sessionController.resolveAgent()`，使普通持久 Session 在 Controller 现有单写入者与驻留所有权下冷恢复。
 
-目标收到一条 `followup()` 消息。Queue 投递给消息一个独立 FIFO 轮次，而不修改正在运行目标的最近 step。Agent loop 的持久 inbox splice 会在目标领取前记录接受；现有 retirement wake latch 会防止最终收件箱决定后准入的输入一直休眠，直到另一次外部唤醒。插入成功后，工具结果返回消息、发送方与目标 id；它不是已读回执或回复 future。
+目标在 next-step inbox 中收到一条 `inject()` 消息。Agent loop 的持久 inbox splice 会在目标领取前记录接受。运行中的目标可以在后续 step 边界准入该上下文；空闲目标会保持空闲，直到其他唤醒输入到达，因此 peer 消息不会创建 Agent 编写的用户轮次。插入成功后，工具结果返回消息、发送方与目标 id；它不是已读回执或回复 future。
 
-同一个包还注册 `session_message_status({ session_id, message_id })`。它在不激活目标的情况下检查完整已校验目标日志，并重放持久 inbox 坐标，以区分待处理 Queue 状态、纯领取、模型历史准入、轮次完成、pre-step 拒绝、持久取消与未知目标／消息对。它还折叠未被 `tool/result` 结算的顶层 `tool/call` 集合，以及未被 `tool/ptc-dispatch` 结算的嵌套 `tool/ptc-dispatch-start` 集合。原生或嵌套的未结算 `terminal_send` 报告 terminal blocking；其他调用报告 tool blocking；没有未结算调用的运行中目标报告 model blocking。结果是时间点观察，而不是订阅或自动唤醒发送方。
+同一个包还注册 `session_message_status({ session_id, message_id })`。它在不激活目标的情况下检查完整已校验目标日志，并重放持久 inbox 坐标，以区分待处理注入上下文、旧版排队轮次、纯领取、模型历史准入、轮次完成、pre-step 拒绝、持久取消与未知目标／消息对。它还折叠未被 `tool/result` 结算的顶层 `tool/call` 集合，以及未被 `tool/ptc-dispatch` 结算的嵌套 `tool/ptc-dispatch-start` 集合。原生或嵌套的未结算 `terminal_send` 报告 terminal blocking；其他调用报告 tool blocking；没有未结算调用的运行中目标报告 model blocking。结果是时间点观察，而不是订阅或自动唤醒发送方。
 
 每条消息复用现有 `agent-message` relay 来源：
 
@@ -40,11 +40,11 @@ interface AgentMessageSource {
 
 无限制规则约束的是授权，而不是目标能否被正确物化。任何在线 Agent id 都可投递，包括在线 subagent。通用 Session Controller 恢复会刻意拒绝生命周期属于 subagent 子系统的冷 Session，因此冷 subagent 在其 parent 或 Team 路径激活前仍不可用。未知、损坏、并发不可用或已经不在线的身份会在收件箱接受前失败。
 
-调用方取消会在目标解析前检查一次，并在插入前立即再检查一次。Session Controller 恢复是共享且去重的，并不归本次工具调用所有，因此冷激活期间取消可能使普通目标保持驻留，但会阻止消息插入。`followup()` 接受消息后，调用方无法撤回它。
+调用方取消会在目标解析前检查一次，并在插入前立即再检查一次。Session Controller 恢复是共享且去重的，并不归本次工具调用所有，因此冷激活期间取消可能使普通目标保持驻留，但会阻止消息插入。`inject()` 接受消息后，调用方无法撤回它。待处理注入上下文会阻止普通 idle Agent 淘汰，直到唤醒输入领取它、队列控制将它丢弃，或 Controller 停止。
 
 ## 验证
 
-聚焦单元覆盖发现时排除委派 child、无限制在线投递、自身寻址、确切发送者来源、冷普通 Session 解析、校验、取消、陈旧发送方拒绝、HMR 清理、每种持久状态阶段、并发工具投影与 terminal blocking。真实 Loader 组合验证 Cordis 条目注册模型工具并交付带来源内容。Web bundle 组合、生成工具目录、成对包文档与无密钥记录 Web schema 快照共同负责发行展示。
+聚焦单元覆盖发现时排除委派 child、无限制在线投递、自身寻址、确切发送者来源、冷普通 Session 解析、校验、取消、陈旧发送方拒绝、HMR 清理、每种持久状态阶段、并发工具投影与 terminal blocking。生产 Agent-loop fixture 验证投递使用非唤醒 next-step 注入通道，并保持普通 next-turn inbox 为空。真实 Loader 组合验证 Cordis 条目注册模型工具并交付带来源内容。Web bundle 组合、生成工具目录、成对包文档与无密钥记录 Web schema 快照共同负责发行展示。
 
 ## 考虑过的替代方案
 
@@ -58,19 +58,20 @@ interface AgentMessageSource {
 
 **另建标题索引。** Session-reference 发现已经为 Web `@` 选择器拥有投影标题回退、cwd 亲和排序、取消与候选上限。第二份索引会在冷标题上发生漂移，并重复其性能策略；模型工具改为委托给该所有者，只用 Session-query header 移除 child Session。
 
-**提供 Steer 或 quiet 投递。** Steer 可能改变正在进行的工作；quiet 注入可能让空闲目标永远不读。固定 FIFO follow-up 提供一种确定含义：接受后会唤醒的独立排队目标轮次。
+**使用 FIFO follow-up 或 Steer 投递。** 两者都会唤醒空闲目标，并可能在没有人类轮次时创建 Agent 编写的工作。Follow-up 还会把 peer 内容放入普通 next-turn 通道，Steer 则会改变正在运行的工作。静默 next-step 注入保留来源且不冒充用户调度；它明确接受空闲上下文可能无限期待处理的代价。
 
 **把每次状态转换推送回发送方。** 自动通知会增加发送方上下文，并可能唤醒另一轮回复循环，而这正是本功能的提示框架要避免的失败。显式只读状态检查会报告当前持久证据，但不产生跨会话流量。
 
 ## 后果
 
-- Web Agent 可以按确切 id 向无关在线 Agent 与冷普通 Session 交付带来源文本，而无需创建 subagent 或 Team 关系。
+- Web Agent 可以按确切 id 向无关在线 Agent 与冷普通 Session 注入带来源文本，而无需创建 subagent 或 Team 关系。
 - 用户可以说出独立 Session 名称而无需复制 id；标题查找复用 Web reference 目录，在不激活候选项的情况下过滤委派 child，并让歧义保持可见。
 - 来源归因持久且由服务端推导，但不会向收到的内容授予权限。
 - 该机制刻意允许自身消息、跨工作区消息与无界消息图；忽略指导的模型可能创建昂贵循环。
 - 冷 subagent 仍归其现有生命周期所有者，而在线 subagent 是无限制目标。
-- 发送方可以在不唤醒目标的情况下检查持久处理进度与当前前台工具阻塞；`model-context` 刻意不被描述为人类理解。
+- 发送方可以在不唤醒目标的情况下检查持久处理进度与当前前台工具阻塞；`pending-context` 明确区分静默注入与普通用户队列，`model-context` 不被描述为人类理解。
+- peer 消息不会唤醒空闲目标。待处理上下文可以留存冷恢复的普通 Agent，直到另一条输入唤醒它、队列操作将它丢弃，或 Controller 停止。
 - 该功能为每次 Web Agent 请求增加固定工具 schema 成本，并为每条目标消息增加带来源 peer framing 成本。
 - 实现增加一个工具包和 Agent-preset 条目，但不改变 Agent Loop、Session 格式、SDK 协议、Host 全局工具层或相邻 Agent 消息服务。
 
-本决策保留[相邻 Agent 共享一个 Steer send_message 操作](../architecture/2026-08-27-adjacent-agent-steer-messaging.zh.md)中的相邻保证，并为更广泛场景添加独立的按 Session 寻址操作。
+本决策保留[相邻 Agent 共享一个 Steer send_message 操作](../architecture/2026-08-27-adjacent-agent-steer-messaging.zh.md)中的相邻保证，并为更广泛场景添加独立的按 Session 寻址上下文操作。

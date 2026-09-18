@@ -21,7 +21,7 @@ The child-only tool and system-prompt section also preceded every inherited fork
 
 Siblings, self-targets, ancestors beyond one edge, stale Agent objects, unknown targets, and one-shot children are not alternate routes. The operation has no caller-supplied source, delivery mode, offline parent mailbox, or provider dispatch.
 
-The separate [`session_send_message` decision](../feature/2026-09-18-session-addressed-agent-messages.md) permits unrestricted exact-id FIFO delivery across unrelated Sessions without weakening this subagent operation's adjacency authorization or Steer lifecycle.
+The separate [`session_send_message` decision](../feature/2026-09-18-session-addressed-context-injection.md) permits unrestricted exact-id context injection across unrelated Sessions without weakening this subagent operation's adjacency authorization or Steer lifecycle.
 
 Every accepted message uses `Agent.steer()`. A running target receives it at the nearest step boundary; an idle target starts a turn. An absent direct child is cold-resumed through the existing continuation lifecycle before the same Steer delivery. The manager retains waking-send accounting so a continuation-managed target cannot settle between synchronous inbox insertion and driver admission.
 

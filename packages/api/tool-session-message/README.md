@@ -9,7 +9,7 @@ English | [中文](README.zh.md)
 
 ## Summary
 
-`dsh-tool-session-message` lets a model find independent Sessions by title, queue self-contained information to an exact id while the target retains the real sending Session id, then inspect whether that message is queued, claimed, in model context, waiting on a foreground tool, completed, rejected, or discarded. It accepts unrelated workspaces, lineages, and self-targets without runtime policy, wakes the destination for a distinct FIFO turn, and cold-resumes ordinary persisted Sessions. Prompt guidance preserves subagent and Team messaging and prevents polling or automatic replies.
+`dsh-tool-session-message` lets a model find independent Sessions by title, inject self-contained information into an exact id while the target retains the real sending Session id, then inspect whether that context is pending, claimed, in model context, waiting on a foreground tool, completed, rejected, or discarded. It accepts unrelated workspaces, lineages, and self-targets without runtime policy, does not create or wake a user turn, and cold-resumes ordinary persisted Sessions. Prompt guidance preserves subagent and Team messaging and prevents polling or automatic replies.
 
 ## Table of Contents
 
@@ -29,7 +29,7 @@ Mount this package where Web Agents need to deliver new information to another k
 
 ### When to choose it
 
-Choose it for explicit cross-session handoff when the caller knows the exact destination id or the user names an independent Session that `session_find` can resolve, and the receiver should wake in a later turn. Use adjacent `send_message` for direct continuable parents and children, and AgentTeams messaging for Team coordination: those operations own their relationship-specific lifecycle. Use Session references when the current Agent only needs a read-only snapshot and the source Session should not run.
+Choose it for explicit cross-session handoff when the caller knows the exact destination id or the user names an independent Session that `session_find` can resolve, and the information should enter the receiver's next admitted step as attributed context. Use adjacent `send_message` for direct continuable parents and children, and AgentTeams messaging for Team coordination: those operations own their relationship-specific lifecycle. Use Session references when the current Agent only needs a read-only snapshot and the source Session should not run.
 
 ### Minimal configuration
 
@@ -47,15 +47,15 @@ The package has no configuration. Target policy and frequency limits are deliber
 
 ### Delivery
 
-`session_send_message` requires a live calling Agent and derives `senderSessionId` from that exact registry identity. A live target is accepted regardless of workspace, lineage, origin, or equality with the sender. An absent ordinary target is cold-resumed through `ctx.sessionController.resolveAgent()`. The tool then calls `followup()`, which appends a durable next-turn inbox entry and wakes the target. It returns the accepted `messageId`, sender id, and target id without waiting for target work.
+`session_send_message` requires a live calling Agent and derives `senderSessionId` from that exact registry identity. A live target is accepted regardless of workspace, lineage, origin, or equality with the sender. An absent ordinary target is cold-resumed through `ctx.sessionController.resolveAgent()`. The tool then calls `inject()`, which appends durable next-step context without waking an idle target or creating an Agent-authored user turn. A running target may claim it at a later step boundary; an idle target leaves it pending until other waking input arrives. The tool returns the accepted `messageId`, sender id, and target id without waiting for target work.
 
 ### Status inspection
 
-`session_message_status` takes the returned target Session id and message id, reads the complete validated target log without waking it, and folds durable inbox and turn events. `queued` means the message remains pending; `claimed` means a step boundary removed it from the inbox; `model-context` means the identified `user/message` entered target history; `processing-tool` adds currently unresolved tool names; `completed` means that turn ended; `rejected` means a claimed message reached turn end without model admission; `discarded` means a durable cancellation removed it; `unknown` means that target log never contained the id. The fold follows both top-level calls and PTC sub-dispatches: `blocking: terminal` identifies an unresolved native or nested `terminal_send`; other unresolved calls report `tool`, and a running Agent with no unresolved call reports `model`.
+`session_message_status` takes the returned target Session id and message id, reads the complete validated target log without waking it, and folds durable inbox and turn events. `pending-context` means the injected context remains pending; `queued` identifies a message retained by the earlier next-turn transport; `claimed` means a step boundary removed it from the inbox; `model-context` means the identified `user/message` entered target history; `processing-tool` adds currently unresolved tool names; `completed` means that turn ended; `rejected` means claimed context reached turn end without model admission; `discarded` means a durable cancellation removed it; `unknown` means that target log never contained the id. The fold follows both top-level calls and PTC sub-dispatches: `blocking: terminal` identifies an unresolved native or nested `terminal_send`; other unresolved calls report `tool`, and a running Agent with no unresolved call reports `model`.
 
 ### Failure and cancellation
 
-An empty id, blank message, missing or stale caller, unknown Session, failed cold resume, or target disposal before insertion produces an errored tool result and no accepted message. Caller cancellation is checked before activation and again immediately before insertion. Once `followup()` accepts the message, cancellation cannot retract it.
+An empty id, blank message, missing or stale caller, unknown Session, failed cold resume, or target disposal before insertion produces an errored tool result and no accepted message. Caller cancellation is checked before activation and again immediately before insertion. Once `inject()` accepts the message, cancellation cannot retract it.
 
 -----
 
@@ -69,7 +69,7 @@ This section explains the delivery adapter; observable behavior is covered in [U
 
 ### Design concept
 
-The plugin combines one model-facing Consumer with a narrow Host adapter over existing services. The Session-reference resolver supplies projected labels, and Session query metadata removes every candidate whose durable origin is `subagent` without conflating it with an ordinary fork. The Agent registry proves the exact sender and finds every live target, including unrelated subagents whose id was learned elsewhere. Session Controller owns cold ordinary-Session activation and concurrent-resume deduplication. The plugin owns the peer framing, durable source, Queue choice, and tool result; Agent Loop continues to own inbox persistence and waking races.
+The plugin combines one model-facing Consumer with a narrow Host adapter over existing services. The Session-reference resolver supplies projected labels, and Session query metadata removes every candidate whose durable origin is `subagent` without conflating it with an ordinary fork. The Agent registry proves the exact sender and finds every live target, including unrelated subagents whose id was learned elsewhere. Session Controller owns cold ordinary-Session activation and concurrent-resume deduplication. The plugin owns the peer framing, durable source, context-injection choice, and tool result; Agent Loop continues to own inbox persistence and step admission.
 
 ### Source and trust
 
@@ -79,7 +79,7 @@ The message uses the existing `agent-message` relay source with a server-derived
 
 | File | Role |
 |---|---|
-| [`src/index.ts`](src/index.ts) | Discovery and messaging schemas, sender proof, target resolution, peer framing, FIFO delivery, and status reads |
+| [`src/index.ts`](src/index.ts) | Discovery and messaging schemas, sender proof, target resolution, peer framing, context injection, and status reads |
 | [`src/status.ts`](src/status.ts) | Pure durable inbox, turn, and unresolved-tool status fold |
 | — | No runtime invariant companion is published; Agent registry identity, Session Controller activation, inbox persistence, and request reconstruction remain enforced by their owning packages. |
 
@@ -148,7 +148,7 @@ The fixed framing and sender text enter the target's durable history and remain 
 
 #### KV Cache effect
 
-Append-only; the queued turn follows the target's reusable request prefix.
+Append-only; admitted context follows the target's reusable request prefix.
 
 ### Delivery result
 
@@ -190,6 +190,7 @@ These limits are deliberate parts of the current unrestricted design.
 - **Status is observational** — the result can become stale immediately, has no subscription or automatic sender notification, and reports an unresolved `terminal_send` as terminal blocking without claiming that the process is deadlocked.
 - **Each status read folds the complete target log** — inspection is linear in retained target events; the model guidance forbids polling, and a future indexed projection is required before high-frequency monitoring.
 - **No response collection** — status exposes no target output, completion wait, recall, or delete operation.
+- **Idle injected context retains its Agent** — injection deliberately does not wake an idle target, and pending inbox context prevents ordinary Agent eviction until other waking input claims it, queue control discards it, or the Controller stops.
 - **Cold activation outlives caller cancellation** — cancellation during a deduplicated Session Controller resume can leave the target resident even though the post-resume check prevents message insertion.
 - **Discovery depends on projected titles** — a cold Session without a usable title projection falls back to its id and cannot match a title until the projection becomes available; duplicate or similar titles require user selection.
 

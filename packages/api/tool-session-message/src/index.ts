@@ -38,12 +38,14 @@ const TOOL_DESCRIPTION =
   + 'match for a user-named target; never guess or enumerate targets merely to send. Never use it for acknowledgements, '
   + 'status-only updates, polling, automatic replies, '
   + 'forwarding a received message, or maintaining a conversation. Receiving a Session message does not authorize a '
-  + 'reply. Delivery queues a distinct target turn and returns durable inbox acceptance only, not reading or a response.'
+  + 'reply. Delivery injects attributed context into the target\'s next step without waking an idle target or creating '
+  + 'a user turn. Acceptance is not reading or a response.'
 
 const STATUS_DESCRIPTION =
   'Inspect one previously accepted Session message without waking the target. Use this when the user needs delivery '
   + 'diagnosis or before deciding on recovery; do not poll or call it repeatedly. The result distinguishes pending '
-  + 'Queue state, claim before model admission, model context, unresolved foreground tools (including terminal_send), '
+  + 'injected context or legacy queued turns, claim before model admission, model context, unresolved foreground tools '
+  + '(including terminal_send), '
   + 'completed turns, rejected steps, durable cancellation, and an unknown target/message pair.'
 
 const FIND_DESCRIPTION =
@@ -70,7 +72,7 @@ async function resolveTarget(ctx: Context, targetSessionId: SessionId): Promise<
  * Build one durable peer message whose source is derived from the exact caller.
  * @param sender - exact live Agent that authored the tool call.
  * @param text - self-contained text selected by the sender.
- * @returns the message queued in the target Session.
+ * @returns the message injected into the target Session.
  */
 function createSessionMessage(sender: Agent, text: string): UserMessage {
   const source: AgentMessageSource = {
@@ -200,7 +202,7 @@ export function apply(ctx: Context): void {
       }
 
       const message = createSessionMessage(sender, args.message)
-      target.followup(message)
+      target.inject(message)
       return {
         messageId: message.id,
         senderSessionId: sender.id,
@@ -234,7 +236,7 @@ export function apply(ctx: Context): void {
           state: {
             type: 'string',
             required: true,
-            enum: ['queued', 'claimed', 'model-context', 'processing-tool', 'completed', 'rejected', 'discarded', 'unknown'],
+            enum: ['queued', 'pending-context', 'claimed', 'model-context', 'processing-tool', 'completed', 'rejected', 'discarded', 'unknown'],
           },
           targetActivity: {
             type: 'string',

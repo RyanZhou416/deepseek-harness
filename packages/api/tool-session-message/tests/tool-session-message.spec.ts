@@ -7,6 +7,10 @@ import SessionStore, { SessionId, SessionLogOffset, SessionSeq } from '@deepseek
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime from '@deepseek-ai/dsh-tools'
+import {
+  mountAgentLoopTestDependencies,
+  mountAgentLoopTestHarness,
+} from '@deepseek-ai/dsh-agent-loop-testkit'
 import type { SessionController } from '@deepseek-ai/dsh-api-session-controller'
 import type SessionReferenceResolver from '@deepseek-ai/dsh-session-reference'
 import type { SessionQueryEngine } from '@deepseek-ai/dsh-session-query'
@@ -15,7 +19,7 @@ import * as tool from '../src/index.ts'
 
 let context: Context | undefined
 let nextCall = 0
-const followups = new WeakMap<Agent, ReturnType<typeof vi.fn<Agent['followup']>>>()
+const injections = new WeakMap<Agent, ReturnType<typeof vi.fn<Agent['inject']>>>()
 
 afterEach(async () => {
   await context?.fiber.dispose()
@@ -29,22 +33,22 @@ function makeAgent(ctx: Context, id: string, cwd: string, origin?: 'subagent'): 
       ...(origin === undefined ? {} : { origin, parentSession: SessionId('unrelated-parent') }),
     },
   })
-  const followup = vi.fn<Agent['followup']>()
+  const inject = vi.fn<Agent['inject']>()
   const agent = {
     id: session.id,
     session,
     ctx,
     status: 'idle',
-    followup,
+    inject,
   } as unknown as Agent
-  followups.set(agent, followup)
+  injections.set(agent, inject)
   return agent
 }
 
-function followupOf(agent: Agent): ReturnType<typeof vi.fn<Agent['followup']>> {
-  const followup = followups.get(agent)
-  if (followup === undefined) throw new Error(`missing followup spy for ${agent.id}`)
-  return followup
+function injectionOf(agent: Agent): ReturnType<typeof vi.fn<Agent['inject']>> {
+  const inject = injections.get(agent)
+  if (inject === undefined) throw new Error(`missing inject spy for ${agent.id}`)
+  return inject
 }
 
 async function setup() {
@@ -80,7 +84,7 @@ function resultText(result: Awaited<ReturnType<typeof execute>>): string {
 }
 
 describe('dsh-tool-session-message', () => {
-  it('registers an exact-id Queue tool with prompt-only loop guidance', async () => {
+  it('registers an exact-id context-injection tool with prompt-only loop guidance', async () => {
     const { ctx } = await setup()
     const schemas = ctx.tools.schemas().filter(schema => schema.name === 'session_send_message')
     expect(schemas).toHaveLength(1)
@@ -93,7 +97,8 @@ describe('dsh-tool-session-message', () => {
     expect(schema.description).toContain('never guess or enumerate')
     expect(schema.description).toContain('Never use it for acknowledgements')
     expect(schema.description).toContain('does not authorize a reply')
-    expect(schema.description).toContain('distinct target turn')
+    expect(schema.description).toContain('without waking an idle target')
+    expect(schema.description).toContain('creating a user turn')
     const sessionIdParameter = properties.session_id as { description?: unknown }
     expect(sessionIdParameter.description).toContain('Do not use a subagent or teammate id here.')
     const status = ctx.tools.schemas().find(candidate => candidate.name === 'session_message_status')
@@ -222,8 +227,8 @@ describe('dsh-tool-session-message', () => {
     expect(result.isError).toBe(false)
     expect(resolveAgent).not.toHaveBeenCalled()
     expect(resultText(result)).toContain(`accepted by ${target.id}`)
-    expect(followupOf(target)).toHaveBeenCalledOnce()
-    const delivered = followupOf(target).mock.calls[0]![0]
+    expect(injectionOf(target)).toHaveBeenCalledOnce()
+    const delivered = injectionOf(target).mock.calls[0]![0]
     expect(delivered.source).toEqual({
       kind: 'agent-message',
       form: 'relay',
@@ -238,6 +243,44 @@ describe('dsh-tool-session-message', () => {
     ])
   })
 
+  it('uses the production inject lane without opening a target turn', async () => {
+    const ctx = new Context()
+    context = ctx
+    await mountAgentLoopTestDependencies(ctx)
+    const resolveAgent = vi.fn<SessionController['resolveAgent']>()
+    const inspect = vi.fn<SessionController['inspect']>()
+    ctx.provide('sessionController', { inspect, resolveAgent } as unknown as SessionController)
+    ctx.provide('sessionReferenceResolver', {
+      listCandidates: vi.fn<SessionReferenceResolver['listCandidates']>(),
+    } as unknown as SessionReferenceResolver)
+    ctx.provide('sessionQuery', {
+      listSessions: vi.fn<SessionQueryEngine['listSessions']>().mockResolvedValue([]),
+    } as unknown as SessionQueryEngine)
+    await ctx.plugin(tool)
+    const harness = await mountAgentLoopTestHarness(ctx)
+    const sender = await harness.create(SessionId('real-sender'))
+    const target = await harness.create(SessionId('real-target'))
+
+    const result = await execute(ctx, {
+      session_id: target.id,
+      message: 'Injected peer context.',
+    }, sender)
+
+    expect(result.isError).toBe(false)
+    expect(target.status).toBe('idle')
+    expect(target.inbox.nextTurn).toEqual([])
+    expect(target.inbox.nextStep).toHaveLength(1)
+    expect(target.inbox.nextStep[0]?.source).toMatchObject({
+      kind: 'agent-message',
+      senderSessionId: sender.id,
+    })
+    expect(target.session.snapshotEvents().at(-1)).toMatchObject({
+      type: 'agent/inbox/spliced',
+      data: { target: 'next-step' },
+    })
+    expect(resolveAgent).not.toHaveBeenCalled()
+  })
+
   it('allows self-addressing without a policy exception', async () => {
     const { ctx } = await setup()
     const sender = makeAgent(ctx, 'self-session', '/workspace')
@@ -245,14 +288,14 @@ describe('dsh-tool-session-message', () => {
 
     const result = await execute(ctx, {
       session_id: sender.id,
-      message: 'Remember this in a distinct later turn.',
+      message: 'Remember this as attributed context.',
     }, sender)
 
     expect(result.isError).toBe(false)
-    expect(followupOf(sender)).toHaveBeenCalledOnce()
+    expect(injectionOf(sender)).toHaveBeenCalledOnce()
   })
 
-  it('cold-resumes an ordinary Session before durable inbox acceptance', async () => {
+  it('cold-resumes an ordinary Session before durable context injection', async () => {
     const { ctx, resolveAgent } = await setup()
     const sender = makeAgent(ctx, 'cold-sender', '/workspace-a')
     const target = makeAgent(ctx, 'cold-target', '/workspace-b')
@@ -264,12 +307,12 @@ describe('dsh-tool-session-message', () => {
 
     const result = await execute(ctx, {
       session_id: target.id,
-      message: 'Wake for this queued message.',
+      message: 'Retain this context until the Session next runs.',
     }, sender)
 
     expect(result.isError).toBe(false)
     expect(resolveAgent).toHaveBeenCalledExactlyOnceWith(target.id)
-    expect(followupOf(target)).toHaveBeenCalledOnce()
+    expect(injectionOf(target)).toHaveBeenCalledOnce()
   })
 
   it('reports a Session Controller resolution failure without delivery', async () => {
@@ -309,7 +352,7 @@ describe('dsh-tool-session-message', () => {
 
     expect(result.isError).toBe(true)
     expect(resultText(result)).toContain('stopped before delivery')
-    expect(followupOf(target)).not.toHaveBeenCalled()
+    expect(injectionOf(target)).not.toHaveBeenCalled()
   })
 
   it('rejects delivery when the resolved target stops before insertion', async () => {
@@ -330,7 +373,7 @@ describe('dsh-tool-session-message', () => {
 
     expect(result.isError).toBe(true)
     expect(resultText(result)).toContain('stopped before delivery')
-    expect(followupOf(target)).not.toHaveBeenCalled()
+    expect(injectionOf(target)).not.toHaveBeenCalled()
   })
 
   it('fails before delivery for missing identity, blank input, cancellation, or stale sender', async () => {
@@ -355,7 +398,7 @@ describe('dsh-tool-session-message', () => {
       .resolves.toMatchObject({ isError: true })
   })
 
-  it('reports queued terminal blocking without waking the target', async () => {
+  it('reports pending-context terminal blocking without waking the target', async () => {
     const { ctx, inspect } = await setup()
     const caller = makeAgent(ctx, 'status-caller', '/caller')
     const target = makeAgent(ctx, 'status-target', '/target')
@@ -377,7 +420,7 @@ describe('dsh-tool-session-message', () => {
       },
       {
         type: 'agent/inbox/spliced', seq: SessionSeq(2), time: 2,
-        data: { target: 'next-turn', start: 0, inserted: [tracked] },
+        data: { target: 'next-step', start: 0, inserted: [tracked] },
       },
     ] as SessionEvent[]
     inspect.mockResolvedValueOnce({
@@ -395,8 +438,8 @@ describe('dsh-tool-session-message', () => {
     })
 
     expect(result.isError).toBe(false)
-    expect(resultText(result)).toContain('queued; target running; blocking terminal (terminal_send)')
-    expect(followupOf(target)).not.toHaveBeenCalled()
+    expect(resultText(result)).toContain('pending-context; target running; blocking terminal (terminal_send)')
+    expect(injectionOf(target)).not.toHaveBeenCalled()
   })
 
   it('validates status identity and reports an offline unknown pair', async () => {

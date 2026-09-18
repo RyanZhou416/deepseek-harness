@@ -21,7 +21,7 @@ child 专属工具与系统提示词 section 还位于每个继承 fork 轮次�
 
 sibling、自身目标、超过一条边的 ancestor、陈旧 Agent 对象、未知目标与一次性 child 都不是替代路由。该操作没有调用方提供的 source、投递模式、离线 parent mailbox 或提供方分发。
 
-独立的 [`session_send_message` 决策](../feature/2026-09-18-session-addressed-agent-messages.zh.md)允许跨无关 Session 的无限制确切 id FIFO 投递，但不会削弱此 subagent 操作的相邻授权或 Steer 生命周期。
+独立的 [`session_send_message` 决策](../feature/2026-09-18-session-addressed-context-injection.zh.md)允许跨无关 Session 的无限制确切 id 上下文注入，但不会削弱此 subagent 操作的相邻授权或 Steer 生命周期。
 
 每条被接受的消息都使用 `Agent.steer()`。运行中目标在最近 step 边界接收消息；空闲目标启动轮次。缺失的直接 child 会先通过现有继续执行生命周期冷恢复，再接受同一 Steer 投递。管理器保留唤醒发送记账，因此受继续执行管理的目标不会在同步 inbox 插入与 driver 准入之间结算。
 

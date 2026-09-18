@@ -2,5 +2,5 @@
 # side as of the last confirmed-consistent state. Both languages carry equal authority;
 # after editing either side, bring the other along and re-record with:
 #   pnpm run verify-translation-pairing --write .agents/notes/implemented/architecture/2026-08-27-adjacent-agent-steer-messaging.md
-2026-08-27-adjacent-agent-steer-messaging.md: 343318e7311bfc624b81faf7d97ee9804491a94a
-2026-08-27-adjacent-agent-steer-messaging.zh.md: 207d66227c9a517818e4e1d1936627b5ad14101a
+2026-08-27-adjacent-agent-steer-messaging.md: 532d7e0c3149fccb1964946d63e8a60e6f0952a0
+2026-08-27-adjacent-agent-steer-messaging.zh.md: 4cf6da52c423f4453ecda37a989c2b2047432c10

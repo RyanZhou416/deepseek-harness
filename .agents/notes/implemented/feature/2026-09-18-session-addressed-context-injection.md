@@ -1,8 +1,8 @@
-# Agent Note: Session-addressed Agent messages use attributed FIFO delivery
+# Agent Note: Session-addressed Agent messages use attributed context injection
 
 Status: implemented
 
-English | [中文](2026-09-18-session-addressed-agent-messages.zh.md)
+English | [中文](2026-09-18-session-addressed-context-injection.zh.md)
 
 ## Problem
 
@@ -16,9 +16,9 @@ The Web bundle's `standard`, `ptc`, and `cordis` Agent presets mount `@deepseek-
 
 `session_send_message({ session_id, message })` takes its sender only from the exact live `exec.agent`; model input cannot supply or override `senderSessionId`. It accepts any exact live target in `ctx.agents`, regardless of workspace, lineage, origin, or equality with the sender. When no live target exists, it delegates to `ctx.sessionController.resolveAgent()` so an ordinary persisted Session can cold-resume under the controller's existing single-writer and residency ownership.
 
-The target receives one `followup()` message. Queue delivery gives the message a distinct FIFO turn instead of modifying a running target's nearest step. The Agent loop's durable inbox splice records acceptance before the target claims it, and the existing retirement wake latch prevents input admitted after a final inbox decision from sleeping until another external wake. The tool result returns the message, sender, and target ids once insertion succeeds; it is not a read receipt or response future.
+The target receives one `inject()` message in its next-step inbox. The Agent loop's durable inbox splice records acceptance before the target claims it. A running target can admit the context at a later step boundary; an idle target remains idle until other waking input arrives, so a peer message does not create an Agent-authored user turn. The tool result returns the message, sender, and target ids once insertion succeeds; it is not a read receipt or response future.
 
-The same package registers `session_message_status({ session_id, message_id })`. It inspects the complete validated target log without activating the target and replays durable inbox coordinates to distinguish pending Queue state, a pure claim, model-history admission, turn completion, pre-step rejection, durable cancellation, and an unknown target/message pair. It also folds unresolved top-level `tool/call` minus `tool/result` and nested `tool/ptc-dispatch-start` minus `tool/ptc-dispatch` sets. An unresolved native or nested `terminal_send` reports terminal blocking; other calls report tool blocking; a running target without an unresolved call reports model blocking. The result is a point-in-time observation, not a subscription or automatic sender wake.
+The same package registers `session_message_status({ session_id, message_id })`. It inspects the complete validated target log without activating the target and replays durable inbox coordinates to distinguish pending injected context, a legacy queued turn, a pure claim, model-history admission, turn completion, pre-step rejection, durable cancellation, and an unknown target/message pair. It also folds unresolved top-level `tool/call` minus `tool/result` and nested `tool/ptc-dispatch-start` minus `tool/ptc-dispatch` sets. An unresolved native or nested `terminal_send` reports terminal blocking; other calls report tool blocking; a running target without an unresolved call reports model blocking. The result is a point-in-time observation, not a subscription or automatic sender wake.
 
 Every message reuses the existing `agent-message` relay source:
 
@@ -40,11 +40,11 @@ The tool description also preserves specialized routing without enforcing it in 
 
 The unrestricted rule governs authorization, not whether a target can be materialized correctly. Any live Agent id is deliverable, including a live subagent. Generic Session Controller resume deliberately refuses a cold Session whose lifecycle belongs to the subagent subsystem, so a cold subagent remains unavailable until its parent or Team path activates it. Unknown, corrupt, concurrently unavailable, or no-longer-live identities fail before inbox acceptance.
 
-Caller cancellation is checked before target resolution and again immediately before insertion. Session Controller resume is shared and deduplicated rather than owned by this tool call, so cancellation during cold activation may leave an ordinary target resident while preventing the message from being inserted. After `followup()` accepts the message, the caller cannot retract it.
+Caller cancellation is checked before target resolution and again immediately before insertion. Session Controller resume is shared and deduplicated rather than owned by this tool call, so cancellation during cold activation may leave an ordinary target resident while preventing the message from being inserted. After `inject()` accepts the message, the caller cannot retract it. Pending injected context prevents ordinary idle-Agent eviction until waking input claims it, queue control discards it, or the Controller stops.
 
 ## Verification
 
-Focused unit coverage pins delegated-child exclusion during discovery, unrestricted live delivery, self-addressing, exact sender attribution, cold ordinary-Session resolution, validation, cancellation, stale-sender rejection, HMR cleanup, every durable status phase, concurrent-tool projection, and terminal blocking. A real Loader composition verifies that the Cordis row registers the model tools and delivers the attributed content. The Web bundle composition, generated tool catalog, paired package documentation, and a keyless recorded Web schema snapshot own the shipped presentation.
+Focused unit coverage pins delegated-child exclusion during discovery, unrestricted live delivery, self-addressing, exact sender attribution, cold ordinary-Session resolution, validation, cancellation, stale-sender rejection, HMR cleanup, every durable status phase, concurrent-tool projection, and terminal blocking. A production Agent-loop fixture verifies that delivery uses the non-waking next-step injection lane and leaves the ordinary next-turn inbox empty. A real Loader composition verifies that the Cordis row registers the model tools and delivers the attributed content. The Web bundle composition, generated tool catalog, paired package documentation, and a keyless recorded Web schema snapshot own the shipped presentation.
 
 ## Alternatives considered
 
@@ -58,19 +58,20 @@ Focused unit coverage pins delegated-child exclusion during discovery, unrestric
 
 **Build another title index.** Session-reference discovery already owns projection-backed title fallback, cwd affinity, cancellation, and candidate limits for the Web `@` picker. A second index would drift on cold titles and duplicate its performance policy; the model tool delegates to that owner, then uses Session-query headers only to remove child Sessions.
 
-**Offer Steer or quiet delivery.** Steer can alter work already in progress, while quiet injection can leave an idle target unread indefinitely. Fixed FIFO follow-up gives one deterministic meaning: a separately queued target turn that wakes when accepted.
+**Use FIFO follow-up or Steer delivery.** Both wake an idle target and can create Agent-authored work without a human turn. Follow-up also places the peer content in the ordinary next-turn lane, while Steer changes work already in progress. Quiet next-step injection preserves attribution without impersonating user scheduling; it knowingly allows idle context to remain pending indefinitely.
 
 **Push every transition back to the sender.** Automatic notifications would create extra sender context and could wake another reply cycle, the failure this feature's prompt framing avoids. Explicit read-only status inspection reports current durable evidence without producing cross-session traffic.
 
 ## Consequences
 
-- Web Agents can deliver attributed text to unrelated live Agents and cold ordinary Sessions by exact id without creating a subagent or Team relation.
+- Web Agents can inject attributed text into unrelated live Agents and cold ordinary Sessions by exact id without creating a subagent or Team relation.
 - A user can name an independent Session instead of copying its id; title lookup reuses the Web reference directory, filters delegated children without activating candidates, and makes ambiguity visible.
 - Source attribution is durable and server-derived, but it grants no authority to the received content.
 - The mechanism intentionally permits self-messages, cross-workspace messages, and unbounded message graphs; models that ignore guidance can create costly loops.
 - A cold subagent remains under its existing lifecycle owner, while a live subagent is an unrestricted target.
-- A sender can inspect durable processing progress and current foreground tool blocking without waking the target; `model-context` is intentionally not described as human comprehension.
+- A sender can inspect durable processing progress and current foreground tool blocking without waking the target; `pending-context` explicitly distinguishes quiet injection from an ordinary user queue, and `model-context` is not described as human comprehension.
+- A peer message does not wake an idle target. Pending context can retain a cold-resumed ordinary Agent until another input wakes it, a queue action discards it, or the Controller stops.
 - The feature adds a fixed tool-schema cost to every Web Agent request and an attributed peer-framing cost to every target message.
 - The implementation adds a tool package and Agent-preset rows without changing Agent Loop, Session format, SDK protocols, the Host global tool layer, or the adjacent-Agent messaging service.
 
-This decision leaves the adjacency guarantees in [Adjacent Agents share one Steer send_message operation](../architecture/2026-08-27-adjacent-agent-steer-messaging.md) intact and adds a separate Session-addressed operation for the broader case.
+This decision leaves the adjacency guarantees in [Adjacent Agents share one Steer send_message operation](../architecture/2026-08-27-adjacent-agent-steer-messaging.md) intact and adds a separate Session-addressed context operation for the broader case.
