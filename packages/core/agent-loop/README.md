@@ -124,7 +124,7 @@ Prompt admission uses the actual `prepareCall()` result, not the preceding `requ
 
 ### Failure and cancellation
 
-Final adapter selection, dispatch, and iteration failures arrive as terminal finishes and enter `agent/request-error`; a handling listener returns `{ kind: 'retry' }` without calling `next()`, while an unhandled failure is terminal. Middleware, result-processing, tool, and other extension failures remain thrown and close the turn directly — plugin failure ends the turn, not the loop. Undispatched model tool calls after cancellation receive synthetic `tool/call` plus `ABORTED_BEFORE_DISPATCH` result pairs. The [explicit-cancellation decision](../../../.agents/notes/implemented/architecture/2026-07-16-explicit-turn-cancellation.md) owns the signal lifecycle.
+Final adapter selection, dispatch, and iteration failures arrive as terminal finishes and enter `agent/request-error`; a handling listener returns `{ kind: 'retry' }` without calling `next()`, while an unhandled failure is terminal. Middleware, result-processing, tool, and other extension failures remain thrown and close the turn directly — plugin failure ends the turn, not the loop. Undispatched model tool calls after cancellation receive synthetic `tool/call` plus `ABORTED_BEFORE_DISPATCH` result pairs. A terminal scheduler failure first drains in-flight dispatches, then closes every remaining model call with `TOOL_OUTCOME_UNKNOWN` when its body may have started or `TOOL_NOT_STARTED` otherwise; the original failure still ends the turn. The [explicit-cancellation decision](../../../.agents/notes/implemented/architecture/2026-07-16-explicit-turn-cancellation.md) owns the signal lifecycle, while [scheduler failure settlement](../../../.agents/notes/implemented/bug-fix/2026-09-18-tool-scheduler-failure-settlement.md) owns provider-valid pairing.
 
 </details>
 
@@ -175,15 +175,15 @@ Input grows with every surface message until a compaction replacement shadows ol
 
 Ordinary history growth is append-only and preserves reusable entries. A surface replacement or compaction invalidates reuse from the first shadowed history token.
 
-### Undispatched calls after cancellation
+### Calls closed after cancellation or scheduler failure
 
 #### What the model sees
 
-If a later request replays an aborted step, each tool call that cancellation prevented from dispatching has error code `ABORTED_BEFORE_DISPATCH` and result text `Error: tool call aborted before dispatch`.
+If a later request replays an aborted step, each tool call that cancellation prevented from dispatching has error code `ABORTED_BEFORE_DISPATCH` and result text `Error: tool call aborted before dispatch`. A scheduler failure instead uses `TOOL_NOT_STARTED` for a call known not to have entered dispatch and `TOOL_OUTCOME_UNKNOWN` with retry-safety guidance when its body may have started.
 
 #### Token effect
 
-One fixed error result per skipped call remains in history until compaction shadows it.
+One fixed error result per affected call remains in history until compaction shadows it.
 
 #### KV Cache effect
 

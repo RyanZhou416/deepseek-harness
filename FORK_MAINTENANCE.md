@@ -168,11 +168,11 @@ Fork 不再维护独立 subagent Queue Remote 或错误码。后续上游合并�
 
 ### Local launch and build scripts
 
-仓库包含 [clean.cmd](clean.cmd)、[build.cmd](build.cmd)、[run.cmd](run.cmd)、[clean.command](clean.command)、[build.command](build.command)、[run.command](run.command) 与 [setup.command](setup.command)。Windows 脚本准备 Corepack/pnpm 和镜像 registry；`clean.cmd` 只调用仓库拥有的 `pnpm run clean`，在依赖缺失时先安装依赖，不删除 `node_modules`、profile 或 Session 数据；`build.cmd` 执行 install + build，`run.cmd` 默认 `DSH_HOME=C:\Project\deepseek-harness-data`，创建 diagnostics，并追加 `--max-old-space-size=16384` 与 Node fatal/uncaught reports 后运行 Web profile。
+仓库包含 [clean.cmd](clean.cmd)、[build.cmd](build.cmd)、[run.cmd](run.cmd)、[clean.command](clean.command)、[build.command](build.command)、[run.command](run.command) 与 [setup.command](setup.command)。Windows 脚本准备 Corepack/pnpm 和镜像 registry；`clean.cmd` 只调用仓库拥有的 `pnpm run clean`，在依赖缺失时先安装依赖，不删除 `node_modules`、profile 或 Session 数据；`build.cmd` 执行 install + build，`run.cmd` 默认 `DSH_HOME=C:\Project\deepseek-harness-data`，创建 diagnostics，并追加 `--max-old-space-size=16384` 与 Node fatal/uncaught reports 后运行 Web profile。源码 CLI 为 profile 选择 link resolution，使配置的 workspace provider 与其内部 consumer 都解析到 `src/`；构建后入口仍使用 Alpha.2 runtime resolution。真实源码入口工具往返测试负责防止 `src/lib` 模块身份再次分裂。
 
 macOS 的 `clean.command`、`build.command` 和 `run.command` 共用 `scripts/fork-macos-runtime.sh`。`clean.command` 与 Windows 入口使用同一个仓库 cleaner，保留依赖与用户数据。该 helper 从 `PATH`、Apple Silicon Homebrew 和 Intel Homebrew 路径查找 Node，拒绝不受支持的 Node 23，仅在私有临时目录安装固定 Corepack fallback，并使用仓库锁定的 pnpm。`run.command` 默认 `DSH_HOME=~/.dsh`，创建权限 `0700` 的 diagnostics，启用 Node fatal/uncaught reports，并把 V8 old-space 设为物理内存的一半且限制在 4–16 GiB；`DSH_MAX_OLD_SPACE_MIB` 可显式覆盖。它不会静默重启 Host。
 
-macOS 的 `setup.command` 是一次性显式 profile 安装入口。它校验并安装仓内 Agent Teams 和 Context tgz，为 Context 应用低开销 bounds，且只备份它可能改动的 profile 配置四文件。它不导入或修改另一台机器的 Session、附件、DSH credential store、projection cache 或 `.agent-teams`；`--dry-run` 不创建 Harness home 或 package-manager 目录。
+macOS 的 `setup.command` 是一次性显式 profile 安装入口。它校验并安装仓内 Agent Teams、Context 与 Subscriptions tgz，移除 dshmarket，为 Context 应用低开销 bounds，且只备份它可能改动的 profile 配置四文件。它不导入或修改另一台机器的 Session、附件、DSH credential store、projection cache 或 `.agent-teams`；`--dry-run` 不创建 Harness home 或 package-manager 目录。
 
 ### Derived files
 
@@ -282,9 +282,10 @@ Profile 注册 `dsh-sdk-process-raw` 和 `subagent_process`：SDK profile、独�
 | Forced Team shell background / yielding wait | Retired | Its only Consumer was the unused official Team profile |
 | Global disconnect overlay | Preserve | Official replacement must remain visible with collapsed sidebar |
 | Windows/macOS launch/build scripts | Preserve | Official launcher must cover local heap/report/path needs before removal |
+| Source CLI module identity and scheduler failure pairing | Preserve | Source profiles use link resolution; every scheduler failure drains work and records result pairs before Turn error |
 | Fork-vendored AgentTeams behavior | Preserve and revalidate for 0.1.6 | Pull upstream through subtree, retain the private version/artifact, and never install npm latest over the live profile |
 | AgentTeams unread mailbox projection LRU | Preserve | Require unchanged JSONL format, dynamic lease expiry, exact mutation invalidation, caller isolation and bounded retention |
-| Unrestricted Session-id Agent messages | Preserve | Keep server-derived sender attribution, FIFO waking delivery and prompt-only loop guidance; do not fold it into human `session.prompt` or widen subagent adjacency |
+| Unrestricted Session-id Agent messages | Preserve | Keep server-derived sender attribution, quiet next-step injection and prompt-only loop guidance; do not fold it into human `session.prompt` or widen subagent adjacency |
 | Legacy fixed-concurrency wrapper | Retired | Alpha.2 `maxActiveSubagents` owns the active policy; do not mount the duplicate wrapper |
 
 -----

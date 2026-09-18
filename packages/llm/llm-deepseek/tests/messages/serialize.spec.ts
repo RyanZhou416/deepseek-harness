@@ -62,7 +62,36 @@ describe('Messages request conversion', () => {
     expect(nativeBody([user(), update]).system).toBeUndefined()
     expect(() => nativeBody([user(), assistant([{ type: 'text', text: 'done' }]), update])).toThrow(/preceding user/)
     expect(() => nativeBody([user(), createSystemMessage('', 'test')])).toThrow(/empty in-history/)
-    expect(() => nativeBody([user(), assistant([call(), call('b')]), update, result()])).toThrow(/immediate results/)
+    expect(nativeBody([user(), assistant([call(), call('b')]), update, result()]).messages.slice(-2)).toEqual([
+      { role: 'user', content: [
+        { type: 'tool_result', tool_use_id: 'a', content: [{ type: 'text', text: 'result' }], is_error: false },
+        { type: 'tool_result', tool_use_id: 'b', content: [], is_error: true },
+      ] },
+      { role: 'system', content: [{ type: 'text', text: 'update' }] },
+    ])
+  })
+
+  it('closes missing historical tool results before user text or request end', () => {
+    const followed = [user(), assistant([call(), call('b')]), user('continue')]
+    const saved = JSON.stringify(followed)
+    expect(body(followed).messages.at(-1)).toEqual({ role: 'user', content: [
+      { type: 'tool_result', tool_use_id: 'a', content: [], is_error: true },
+      { type: 'tool_result', tool_use_id: 'b', content: [], is_error: true },
+      { type: 'text', text: 'continue' },
+    ] })
+    expect(body([user(), assistant([call()])]).messages.at(-1)).toEqual({ role: 'user', content: [
+      { type: 'tool_result', tool_use_id: 'a', content: [], is_error: true },
+    ] })
+    expect(nativeBody([
+      user(), assistant([call()]), createSystemMessage('update', 'test'), assistant([{ type: 'text', text: 'next' }]),
+    ]).messages.slice(-3)).toEqual([
+      { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'a', content: [], is_error: true }] },
+      { role: 'system', content: [{ type: 'text', text: 'update' }] },
+      { role: 'assistant', content: [{ type: 'text', text: 'next' }] },
+    ])
+    expect(JSON.stringify(followed)).toBe(saved)
+    expect(() => body([result('orphan')])).toThrow(/no matching call/)
+    expect(() => body([assistant([call(), call()])])).toThrow(/duplicate tool call id/)
   })
 
   it('groups parallel results before ordinary text and keeps tool failure content', () => {
@@ -142,8 +171,7 @@ describe('Messages request conversion', () => {
   })
 
   it.each([
-    [result()], [assistant([call()])], [assistant([call()]), user()],
-    [assistant([call(), call()]), result()],
+    [result()], [assistant([call(), call()]), result()],
     [assistant([call()]), result(), result()],
   ])('rejects unmatched or duplicated tool history %#', (...messages) => {
     expect(() => body(messages)).toThrow(/tool/)

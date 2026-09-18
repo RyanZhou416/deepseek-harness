@@ -17,6 +17,12 @@ export const TOOL_NOT_STARTED = 'TOOL_NOT_STARTED'
 /** Recovery code for a recorded tool call whose completed outcome was not durably recorded. */
 export const TOOL_OUTCOME_UNKNOWN = 'TOOL_OUTCOME_UNKNOWN'
 
+/** Model-facing recovery text for a tool call known not to have reached dispatch. */
+export const TOOL_NOT_STARTED_TEXT = 'The tool call was interrupted before the Harness recorded it as started. Retry it if it is still needed.'
+
+/** Model-facing recovery text for a tool call whose side effects may have occurred. */
+export const TOOL_OUTCOME_UNKNOWN_TEXT = 'The tool call was interrupted after it was recorded, but no result was durably recorded. Its outcome is unknown. Decide whether to retry from the tool semantics: retry only if the operation is read-only or idempotent; if it may have side effects, first verify external state or ask the user. Do not retry blindly.'
+
 /**
  * Return deterministic synthetic events that close an open tail turn. Unmatched
  * calls receive error results first, followed by an open `step/end` and an
@@ -102,9 +108,7 @@ export function interruptedTurnClosers(events: readonly SessionEvent[]): Session
         isError: true,
         content: [{
           type: 'text',
-          text: started
-            ? 'The tool call was interrupted after it was recorded, but no result was durably recorded. Its outcome is unknown. Decide whether to retry from the tool semantics: retry only if the operation is read-only or idempotent; if it may have side effects, first verify external state or ask the user. Do not retry blindly.'
-            : 'The tool call was interrupted before the Harness recorded it as started. Retry it if it is still needed.',
+          text: started ? TOOL_OUTCOME_UNKNOWN_TEXT : TOOL_NOT_STARTED_TEXT,
         }],
       }],
     })

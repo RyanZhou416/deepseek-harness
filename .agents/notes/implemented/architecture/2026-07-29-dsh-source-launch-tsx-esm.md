@@ -16,9 +16,11 @@ Startup latency also mattered: the off-thread `module.register()` hooks worker s
 
 The `dsh` TUI, Web, and headless source launches run `node --import tsx/esm`: tsx's ESM-only hook owns both TypeScript transformation and tsconfig `paths` projection. The root `dsh` script uses that vector directly from the repository root; artifact generation is a separate operation under the [source-launch/build separation decision](../../archived/simplification/2026-08-12-separate-source-launch-from-build.md). The CJS hook stays off because the CLI source graph is ESM-only; measured runtime launch to the TUI banner is ~0.7s versus ~1.1s under the full tsx default and ~0.75s under the removed native chain.
 
+The source entry selects the profile `link` resolution backend. Configured workspace packages and their internal imports therefore pass through the same tsconfig `paths` projection to `src/`; the runtime profile resolver remains the built and packaged launch backend. A source process must not load a service provider from `lib/` while a built consumer's bare workspace import resolves back to `src/`: module-local symbols and classes would have distinct identities even at the same package version.
+
 `scripts/tspath-loader.ts` and `apps/cli/src/tsconfig-paths-loader.ts` are deleted. With them went the loader's runtime rule of mapping a workspace import only for declared runtime dependencies — tsx applies the `paths` map unconditionally. Declaration completeness now rests on the static gates alone: `verify-cordis-config` for configured bare plugins, and workspace constraints for manifests. (That runtime rule found real bugs: `dsh-plan-mode` and `dsh-tool-jobs` imported `@deepseek-ai/dsh-llm` while declaring it only in devDependencies; since fixed.)
 
-The node-compat CI matrix (Node 22.19 and 26) gains `dsh-source-launch-smoke` (`apps/cli/tests/source-launch.compat.spec.ts`): a keyless piped-stdio launch of the exact production runtime vector asserting the non-zero-exit TTY refusal. Any future Node change to module hooks or TypeScript handling turns this gate red instead of breaking developers' `pnpm dsh`.
+The node-compat CI matrix (Node 22.19 and 26) runs `dsh-source-launch-smoke` (`apps/cli/tests/source-launch.compat.spec.ts`): one keyless piped-stdio launch asserts the non-zero-exit profile requirement, and another boots the shipped headless profile through the exact source vector and completes a real shell-tool round trip. Node hook, TypeScript transformation, profile resolution, and cross-package module identity regressions turn this gate red instead of breaking developers' `pnpm dsh`.
 
 ## Alternatives considered
 
@@ -30,9 +32,12 @@ The node-compat CI matrix (Node 22.19 and 26) gains `dsh-source-launch-smoke` (`
 
 **Run built `lib/` for Node 26 and keep native for 24.** Rejected: loses the zero-build development loop on the newest Node line and mixes source and artifact planes.
 
+**Use runtime profile resolution from the source CLI.** Rejected: configured workspace entrypoints resolve from package exports to `lib/`, while their internal bare imports still pass through tsx paths to `src/`. A package-local symbol then differs across provider and consumer even though both files come from one checkout. Runtime resolution remains correct when the application itself runs built artifacts.
+
 ## Consequences
 
 - One launch vector across the whole engines range, including future Node lines that change native TypeScript support; the smoke gate enforces it per matrix line.
+- Source profiles materialize the link fallback before startup so configured workspace plugins and their dependencies remain in the source plane; built and packaged profiles keep in-memory runtime resolution.
 - TypeScript transformation is delegated to tsx/esbuild again, reversing the prior note's goal of proving Node-native transformation; that goal is unreachable while vendored sources use non-erasable syntax and Node ships no transform mode.
 - The runtime declared-dependency enforcement in source launches is gone; undeclared workspace imports now surface only through static gates or built-mode resolution failures.
 - Runtime launch improves ~0.4s over the full tsx default; ACP keeps `--import tsx` because its graph was not audited for CJS-hook dependence and its launch latency is not on the interactive path.

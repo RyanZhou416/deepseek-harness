@@ -6,7 +6,14 @@
 import { describe, expect, it } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import { createUserMessage, ToolCallId, StreamChunk  } from '@deepseek-ai/dsh-llm'
-import SessionStore, { SessionEvent, SessionId } from '@deepseek-ai/dsh-session'
+import SessionStore, {
+  SessionEvent,
+  SessionId,
+  TOOL_NOT_STARTED,
+  TOOL_NOT_STARTED_TEXT,
+  TOOL_OUTCOME_UNKNOWN,
+  TOOL_OUTCOME_UNKNOWN_TEXT,
+} from '@deepseek-ai/dsh-session'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import LlmRuntime from '@deepseek-ai/dsh-llm'
 import ToolRuntime, { defineContentToolFixture, TOOL_ABORTED_BEFORE_DISPATCH, TOOL_RUNTIME_SCHEDULER, type PostToolDecision, type PreToolDecision } from '@deepseek-ai/dsh-tools'
@@ -646,6 +653,40 @@ describe('tool-call scheduler: abort handling', () => {
 })
 
 describe('tool-call scheduler: failure quiescence', () => {
+  it('balances every call when the scheduler module identity is unavailable', async () => {
+    const adapter = new MockAdapter([
+      multiCall([
+        { id: 'c1', name: 'exclusive', args: { id: '1' } },
+        { id: 'c2', name: 'exclusive', args: { id: '2' } },
+      ]),
+    ])
+    const ctx = await harness(adapter)
+    ctx.tools.register(defineContentToolFixture({
+      name: 'exclusive',
+      description: 'exclusive',
+      parameters: { id: { type: 'string', required: true } },
+      async execute() { return [{ type: 'text', text: 'unexpected' }] },
+    }))
+    expect(Reflect.deleteProperty(ctx.tools, TOOL_RUNTIME_SCHEDULER)).toBe(true)
+    const agent = await ctx.agentLoop.create(SessionId('scheduler-missing'), { provider: 'mock', model: 'mock' })
+
+    agent.followup(createUserMessage({ content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } }))
+    await waitForIdle(ctx, agent)
+
+    expect(events(agent).filter(event => event.type === 'tool/result').map(event => ({
+      callId: event.data.message.source.callId,
+      code: event.data.error?.code,
+    }))).toEqual([
+      { callId: ToolCallId('c1'), code: TOOL_NOT_STARTED },
+      { callId: ToolCallId('c2'), code: TOOL_NOT_STARTED },
+    ])
+    const turnEnd = events(agent).findLast(event => event.type === 'turn/end')
+    if (turnEnd?.type !== 'turn/end' || turnEnd.data.reason.kind !== 'error') {
+      throw new Error('scheduler-missing turn did not end with an error')
+    }
+    expect(turnEnd.data.reason.error.message).toContain('tool scheduler is unavailable')
+  })
+
   it('stops new dispatches and drains started bodies before surfacing the first failure', async () => {
     const adapter = new MockAdapter([
       multiCall([
@@ -702,6 +743,16 @@ describe('tool-call scheduler: failure quiescence', () => {
     expect(events(agent).findLast(event => event.type === 'turn/end')).toMatchObject({
       data: { reason: { kind: 'error', error: { message: schedulerError.message, code: 'UNKNOWN' } } },
     })
+    const results = events(agent).filter(event => event.type === 'tool/result')
+    expect(results.map(event => ({
+      callId: event.data.message.source.callId,
+      code: event.data.error?.code,
+      text: event.data.message.content[0].content[0],
+    }))).toEqual([
+      { callId: ToolCallId('c1'), code: TOOL_OUTCOME_UNKNOWN, text: { type: 'text', text: TOOL_OUTCOME_UNKNOWN_TEXT } },
+      { callId: ToolCallId('c2'), code: TOOL_OUTCOME_UNKNOWN, text: { type: 'text', text: TOOL_OUTCOME_UNKNOWN_TEXT } },
+      { callId: ToolCallId('c3'), code: TOOL_NOT_STARTED, text: { type: 'text', text: TOOL_NOT_STARTED_TEXT } },
+    ])
   })
 })
 

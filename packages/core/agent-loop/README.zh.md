@@ -124,7 +124,7 @@ const handle = await ctx.agents.create({
 
 ### 失败与取消
 
-最终适配器选择、分发与迭代失败以终止结束的形式到达并进入 `agent/request-error`；处理该失败的监听器返回 `{ kind: 'retry' }` 且不调用 `next()`，未被处理的失败则是终态。Middleware、结果处理、工具及其他扩展失败仍会抛出并直接关闭轮次——插件失败结束的是轮次，不是循环。取消后未分发的模型工具调用会收到合成的 `tool/call` 加 `ABORTED_BEFORE_DISPATCH` 结果对。[显式取消决策](../../../.agents/notes/implemented/architecture/2026-07-16-explicit-turn-cancellation.zh.md)拥有信号生命周期。
+最终适配器选择、分发与迭代失败以终止结束的形式到达并进入 `agent/request-error`；处理该失败的监听器返回 `{ kind: 'retry' }` 且不调用 `next()`，未被处理的失败则是终态。Middleware、结果处理、工具及其他扩展失败仍会抛出并直接关闭轮次——插件失败结束的是轮次，不是循环。取消后未分发的模型工具调用会收到合成的 `tool/call` 加 `ABORTED_BEFORE_DISPATCH` 结果对。终态调度器故障会先排空在途派发，再用 `TOOL_OUTCOME_UNKNOWN` 关闭工具主体可能已启动的调用，用 `TOOL_NOT_STARTED` 关闭其余调用；原始故障仍会结束轮次。[显式取消决策](../../../.agents/notes/implemented/architecture/2026-07-16-explicit-turn-cancellation.zh.md)拥有信号生命周期，[调度器故障结算](../../../.agents/notes/implemented/bug-fix/2026-09-18-tool-scheduler-failure-settlement.zh.md)规定提供方有效配对。
 
 </details>
 
@@ -175,15 +175,15 @@ const handle = await ctx.agents.create({
 
 普通历史增长仅追加，并保留可复用条目。表层替换或压缩会从第一个被遮蔽的历史 token 起使复用失效。
 
-### 取消后未分发的调用
+### 取消或调度器故障后关闭的调用
 
 #### 模型看到什么
 
-如果后续请求回放一个中止的步骤，取消所阻止分发的每个工具调用都有错误码 `ABORTED_BEFORE_DISPATCH`，结果文本为 `Error: tool call aborted before dispatch`。
+如果后续请求回放一个中止的步骤，取消所阻止分发的每个工具调用都有错误码 `ABORTED_BEFORE_DISPATCH`，结果文本为 `Error: tool call aborted before dispatch`。调度器故障则为确定未进入派发的调用使用 `TOOL_NOT_STARTED`，为工具主体可能已启动的调用使用带安全重试提示的 `TOOL_OUTCOME_UNKNOWN`。
 
 #### Token 影响
 
-每个跳过的调用都会在历史中保留一个固定错误结果，直到压缩将其遮蔽。
+每项受影响调用都会在历史中保留一个固定错误结果，直到压缩将其遮蔽。
 
 #### KV Cache 影响
 
