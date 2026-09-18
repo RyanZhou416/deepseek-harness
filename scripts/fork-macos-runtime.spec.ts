@@ -174,6 +174,42 @@ ${checks}
     expect(result.stdout.trim().split('\n')).toEqual(cases.map(([name, , expected]) => `${name}=${expected}`))
   })
 
+  it('removes an incomplete pinned pnpm cache before Corepack starts it', () => {
+    const root = fixture()
+    const cache = join(root, 'cache')
+    const packageCache = join(cache, 'v1', 'pnpm', '11.7.0')
+    mkdirSync(join(packageCache, 'bin'), { recursive: true })
+    writeFileSync(join(packageCache, 'partial-download'), '')
+    const result = runShell(`
+. ${quoteForShell(pathForShell(helperPath))}
+COREPACK_HOME=${quoteForShell(pathForShell(cache))}
+DSH_EXPECTED_PNPM_VERSION=11.7.0
+export COREPACK_HOME DSH_EXPECTED_PNPM_VERSION
+dsh_repair_macos_pnpm_cache
+if [ -e ${quoteForShell(pathForShell(packageCache))} ]; then
+  printf 'incomplete=present\\n'
+else
+  printf 'incomplete=removed\\n'
+fi
+mkdir -p ${quoteForShell(pathForShell(join(packageCache, 'bin')))}
+: > ${quoteForShell(pathForShell(join(packageCache, 'package.json')))}
+: > ${quoteForShell(pathForShell(join(packageCache, 'bin', 'pnpm.mjs')))}
+dsh_repair_macos_pnpm_cache
+if [ -f ${quoteForShell(pathForShell(join(packageCache, 'bin', 'pnpm.mjs')))} ]; then
+  printf 'complete=preserved\\n'
+else
+  printf 'complete=removed\\n'
+fi
+`)
+
+    expectSuccess(result)
+    expect(result.stdout.trim().split('\n')).toEqual([
+      `Removing incomplete pnpm 11.7.0 cache at ${pathForShell(packageCache)} before retrying.`,
+      'incomplete=removed',
+      'complete=preserved',
+    ])
+  })
+
   it.skipIf(process.platform === 'win32')('starts pinned pnpm without a hidden Corepack prompt', () => {
     const root = fixture()
     const bin = join(root, 'bin')

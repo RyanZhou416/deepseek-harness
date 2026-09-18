@@ -210,11 +210,39 @@ dsh_prepare_macos_corepack() {
   export PATH
 }
 
+dsh_repair_macos_pnpm_cache() {
+  DSH_PNPM_CACHE_ENTRY=$COREPACK_HOME/v1/pnpm/$DSH_EXPECTED_PNPM_VERSION
+  if [ ! -e "$DSH_PNPM_CACHE_ENTRY" ] && [ ! -L "$DSH_PNPM_CACHE_ENTRY" ]; then
+    return 0
+  fi
+  if [ -f "$DSH_PNPM_CACHE_ENTRY/package.json" ] \
+    && [ -f "$DSH_PNPM_CACHE_ENTRY/bin/pnpm.mjs" ]; then
+    return 0
+  fi
+
+  printf '%s\n' \
+    "Removing incomplete pnpm $DSH_EXPECTED_PNPM_VERSION cache at $DSH_PNPM_CACHE_ENTRY before retrying."
+  if [ -L "$DSH_PNPM_CACHE_ENTRY" ]; then
+    if ! rm "$DSH_PNPM_CACHE_ENTRY"; then
+      dsh_macos_runtime_error \
+        "Failed to remove the incomplete pnpm cache at $DSH_PNPM_CACHE_ENTRY."
+      return 1
+    fi
+  else
+    if ! rm -rf "$DSH_PNPM_CACHE_ENTRY"; then
+      dsh_macos_runtime_error \
+        "Failed to remove the incomplete pnpm cache at $DSH_PNPM_CACHE_ENTRY."
+      return 1
+    fi
+  fi
+}
+
 dsh_prepare_macos_toolchain() {
   DSH_MACOS_TOOLCHAIN_ROOT=$1
   dsh_prepare_macos_node || return 1
   dsh_read_expected_pnpm_version "$DSH_MACOS_TOOLCHAIN_ROOT" || return 1
   dsh_prepare_macos_corepack || return 1
+  dsh_repair_macos_pnpm_cache || return 1
 
   printf '%s\n' "Preparing pnpm $DSH_EXPECTED_PNPM_VERSION through Corepack..."
   if ! DSH_ACTUAL_PNPM_VERSION=$(pnpm --version); then
