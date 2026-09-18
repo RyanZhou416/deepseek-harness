@@ -40,7 +40,13 @@ async function composed(workspaces: readonly Workspace[] = []): Promise<Context>
       })
       const agent = {} as Agent
       const agentCtx = ownerCtx
-      Object.assign(agent, { id: session.id, session, status: 'idle', ctx: agentCtx })
+      Object.assign(agent, {
+        id: session.id,
+        session,
+        status: 'idle',
+        ctx: agentCtx,
+        inbox: { nextTurn: [], nextStep: [] },
+      })
       await options.setup?.(agentCtx, agent)
       await ctx.agents.register(agent)
       return { agent, dispose: () => Promise.resolve() }
@@ -80,7 +86,13 @@ async function liveAgent(
       reason: { kind: 'aborted', reason: { kind: 'user' } },
     })
   }
-  await ctx.agents.register({ id: session.id, session, status: 'idle', ctx } as Agent)
+  await ctx.agents.register({
+    id: session.id,
+    session,
+    status: 'idle',
+    ctx,
+    inbox: { nextTurn: [], nextStep: [] },
+  } as unknown as Agent)
   return session
 }
 

@@ -5,16 +5,16 @@ This subtree carries the DeepSeek Harness fork build of `dsh-context`. It retain
 ## Provenance
 
 - Upstream repository: `https://github.com/bowenliang123/dsh-context.git`
-- Upstream tag: `v0.52.2`
-- Fork package version: `0.52.2-dsh016alpha1.1`
+- Upstream tag: `v0.53.3`
+- Fork package version: `0.53.3-dsh016alpha2.1`
 - Subtree path: `fork-plugins/dsh-context`
-- Distribution artifact: `fork-plugins/releases/dsh-context-0.52.2-dsh016alpha1.1.tgz`
+- Distribution artifact: `fork-plugins/releases/dsh-context-0.53.3-dsh016alpha2.1.tgz`
 
 ## Fork behavior
 
-The fork preserves the package name, Cordis ids, `contextTimeline` and `contextHeaders` projection keys, and session event vocabulary. It adopts the upstream V0/V2/V3 Session-log fold, host-side File Activity ledger, right-Sidebar panel, and split `contextTimeline` delivery: a slim head rides projection traffic while an open Context view fetches heavy detail on demand.
+The fork preserves the package name, Cordis ids, `contextTimeline`, `contextHeaders`, and `contextActivity` projection keys, and Session event vocabulary. It adopts the upstream V0/V2/V3 Session-log fold, host-side File Activity ledger, right-Sidebar views, Context Insights dashboard, activity heatmap, last-user-message cards, and split `contextTimeline` delivery: a slim head rides projection traffic while an open Context view fetches heavy detail on demand. Alpha.2 uses the authenticated on-demand backfill route; opening Context Insights arms at most one corpus pass per Host instead of scanning every Session during startup.
 
-The imported projection state uses upstream `stateVersion: 15`. A version mismatch discards the older derived checkpoint and refolds it from the immutable Session log; the plugin does not transform Session artifacts. The wire schema accepts both the inline fallback value and the slim-head generation with on-demand detail.
+The imported timeline projection uses upstream `stateVersion: 20`, while header and activity projections use their declared version `1`. A version mismatch discards the older derived checkpoint and refolds it from the immutable Session log; the plugin does not transform Session artifacts. The wire schema accepts both the inline fallback value and the slim-head generation with on-demand detail.
 
 The timeline fold uses field-level copy-on-write state. An event clones only the arrays or records it mutates, and a normalized state checks retention only for request, event, archive, or file-operation collections changed by that event. Restored checkpoint state is clamped through the same whole-turn, hard-step, event-tail, archive-floor, and file-operation-floor rules before the first wire or detail value is built; this view-time clamp does not modify the checkpoint.
 
@@ -38,7 +38,7 @@ corepack pnpm@11.9.0 run lint:fix && corepack pnpm@11.9.0 run test && corepack p
 corepack pnpm@11.9.0 pack --pack-destination ..\releases
 ```
 
-Store the artifact's uppercase SHA-256 beside it as `dsh-context-0.52.2-dsh016alpha1.1.tgz.sha256`. Inspect the tarball manifest and its embedded `package.json` version before installation.
+Store the artifact's uppercase SHA-256 beside it as `dsh-context-0.53.3-dsh016alpha2.1.tgz.sha256`. Inspect the tarball manifest and its embedded `package.json` version before installation.
 
 ## Updating upstream
 

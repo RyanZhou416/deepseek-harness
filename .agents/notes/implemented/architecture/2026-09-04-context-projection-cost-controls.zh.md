@@ -12,9 +12,9 @@ Status: implemented
 
 ## 决策
 
-本 fork 将上游 `dsh-context` tag `v0.52.2` vendored 到 [`fork-plugins/dsh-context`](../../../../fork-plugins/dsh-context/FORK_MAINTENANCE.md)，并发布私有包版本 `0.52.2-dsh016alpha1.1`。部署配置使用 `maxRequestSteps: 300`、`maxKeptTurns: 60`、`maxEvents: 100`、`maxNodes: 400`、`maxArchiveNodes: 100` 与 `maxFileOps: 100`。导入的源码树保留上游文档政策；本记录与双语 fork 插件指南负责 DSH 整合声明。
+本 fork 将上游 `dsh-context` tag `v0.53.3` vendored 到 [`fork-plugins/dsh-context`](../../../../fork-plugins/dsh-context/FORK_MAINTENANCE.md)，并分发私有包版本 `0.53.3-dsh016alpha2.1`。部署配置使用 `maxRequestSteps: 300`、`maxKeptTurns: 60`、`maxEvents: 100`、`maxNodes: 400`、`maxArchiveNodes: 100` 与 `maxFileOps: 100`。导入的源码树保留上游文档政策；本记录与双语 fork 插件指南负责 DSH 整合声明。
 
-本 fork 采用上游的 V0/V2/V3 日志 fold、Host 侧 File Activity 账本、右侧 Sidebar 面板与拆分式 timeline 传输。projection value 携带精简 head，打开的 Context 标签页或 modal 通过 detail channel 取得大型集合。导入的 `TimelineState` schema 使用 `stateVersion: 15`；不兼容的插件检查点会从不可变 Session 日志重新派生，而不是原地迁移。
+本 fork 采用上游的 V0/V2/V3 日志 fold、Host 侧 File Activity 账本、右侧 Sidebar 面板、Context Insights dashboard、activity projection 与拆分式 timeline 传输。projection value 携带精简 head，打开的 Context 标签页或 modal 通过经过认证的 detail channel 取得大型集合。打开 Context Insights 时，每个 Host 最多按需启动一次语料 backfill，而不会在启动期间扫描全部 Session。导入的 `TimelineState` schema 使用 `stateVersion: 20`，header 与 activity projection 使用 version 1；不兼容的插件检查点会从不可变 Session 日志重新派生，而不是原地迁移。
 
 timeline fold 使用字段级 copy-on-write 状态，并标记事件改变了哪些保留集合。已归一的状态仅对 dirty 集合运行 whole-turn、event、archive 与文件操作裁剪。未识别的检查点会执行一次强制归一，而它的首个精简 head、inline value 或 detail response 会把相同 bounds 应用到私有瞬态副本。原始检查点保持不变，空闲会话无法发布尺寸过大的恢复集合。
 
@@ -26,11 +26,11 @@ projection 定义会在可见状态输入保持引用相等的 transition 之间
 
 ## 备选方案
 
-**直接使用不带 fork 代码的上游 `v0.52.2`。** 拒绝，因为上游 fold 会在每个有变化的事件上复制全部已保留集合，关闭的 modal 仍挂载数据钩子，恢复的检查点不会在提供首个 value 前执行 bounds clamp，并且 V3 header epoch 缺少 system token 计价。
+**直接使用不带 fork 代码的上游 `v0.53.3`。** 拒绝，因为上游 fold 会在每个有变化的事件上复制全部已保留集合，关闭的 modal 仍挂载数据钩子，恢复的检查点不会在提供首个 value 前执行 bounds clamp，并且 V3 header epoch 缺少 system token 计价。
 
 **只降低 retention bounds。** 拒绝，因为 Host-only 事件仍会复制已保留集合，关闭的 modal 仍会收到 projection 与 detail 活动，而空闲的已恢复检查点仍可能提供按旧 bounds 保留的数据。
 
-**在安装时删除 projection cache。** 拒绝，因为删除 cache 是没有必要的破坏性运维操作。registry 会处理导入的上游 `stateVersion: 15`，view-time clamp 会在不改变存储数据的情况下限制首个 value，后续相关事件会持久化有界状态。
+**在安装时删除 projection cache。** 拒绝，因为删除 cache 是没有必要的破坏性运维操作。registry 会处理导入的上游 `stateVersion: 20`，view-time clamp 会在不改变存储数据的情况下限制首个 value，后续相关事件会持久化有界状态。
 
 **深度比较连续 wire value。** 拒绝，因为比较本身会随已保留 payload 增长。copy-on-write 所有权使未改变字段保持引用稳定后，字段 identity 能以常量时间证明相同条件。
 
@@ -38,7 +38,7 @@ projection 定义会在可见状态输入保持引用相等的 transition 之间
 
 ## 影响
 
-`contextTimeline`、`contextHeaders` key 与 Session event vocabulary 保持不变。插件采用上游 version-15 projection state 与兼容的 inline/slim wire schema；插件检查点可能重新 fold，但 Session artifact 不会被转换或覆盖。较低的部署 bounds 会保留较少的历史细节，而当前组成、whole-turn 裁剪、hard step 限制、event tail、archive coverage floor 与文件操作 floor 保持既有含义。
+`contextTimeline`、`contextHeaders`、`contextActivity` key 与 Session event vocabulary 保持不变。插件采用上游 version-20 timeline state、version-1 header 与 activity state，以及兼容的 inline/slim wire schema；插件检查点可能重新 fold，但 Session artifact 不会被转换或覆盖。较低的部署 bounds 会保留较少的历史细节，而当前组成、whole-turn 裁剪、hard step 限制、event tail、archive coverage floor 与文件操作 floor 保持既有含义。
 
 关闭 `/context` 会释放其数据订阅与本地 browser 组件状态；重新打开会从当前 projection 重建这些瞬态 UI。Context 标签页不受影响。框架释放相关对象后，WeakMap 不会继续留存 Session 或 projection 状态。
 

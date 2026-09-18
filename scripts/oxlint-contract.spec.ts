@@ -235,6 +235,7 @@ export const longProbe = 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 +
       expect(config.ignorePatterns).toEqual(expect.arrayContaining([
         'fork-plugins/dsh-agent-teams/**',
         'fork-plugins/dsh-context/**',
+        'fork-plugins/dsh-plugin-subscriptions/**',
       ]))
     }
   })

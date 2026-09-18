@@ -35,7 +35,7 @@ for (const suffix of ['alpha', 'beta', 'rc']) {
 }
 
 test('fork compatibility releases use their explicit private channel', () => {
-  for (const channel of ['dsh012rc1', 'dsh013alpha2', 'dsh015alpha2', 'dsh015rc1']) {
+  for (const channel of ['dsh012rc1', 'dsh013alpha2', 'dsh015alpha2', 'dsh015rc1', 'dsh016alpha2']) {
     const version = `0.1.16-${channel}.1`
     assert.deepEqual(releaseMetadata(fixture(version, channel)), {
       value: version,

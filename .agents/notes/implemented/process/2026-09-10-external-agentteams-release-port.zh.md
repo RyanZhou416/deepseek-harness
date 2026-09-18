@@ -8,13 +8,13 @@ Status: implemented
 
 外置 AgentTeams 插件若不由最后一个持有者删除已结束的队列项，就会为每个团队锁 key 保留一条 Promise chain。长期运行且创建许多团队的 profile 会因此在团队结束后继续累积进程内存。该插件还使用预稳定的 DSH Agent setup、Session 读取、Host 投递、Web client 和 profile 组合 API，因此直接安装上游 npm candidate 可能丢失 fork 行为或混用不兼容的 DSH 包。
 
-本 fork 还依赖冷 Captain 邮箱恢复和有界未读邮箱投影。上游 v0.1.18 已拥有最近 step 成员投递、退休成员清理、fallback 持久化、parked-attempt 恢复和 task-attempt 纠正，因此替换源码时必须把这些上游保证与更小的私有层分开。
+本 fork 还依赖冷 Captain 邮箱恢复和有界未读邮箱投影。上游 v0.1.19 已拥有最近 step 成员投递、退休成员清理、fallback 持久化、parked-attempt 恢复、task-attempt 纠正、成员启动恢复和仅 Captain 可用的任务修订，因此替换源码时必须把这些上游保证与更小的私有层分开。
 
 ## 决策
 
-本 fork 在 [`fork-plugins/dsh-agent-teams`](../../../../fork-plugins/dsh-agent-teams) 中引入精确的外置 tag `v0.1.18`，并且只为 DSH `0.1.6-alpha.1` 分发私有产物 `0.1.18-dsh016alpha1.1`。manifest、peer 声明、开发依赖、pnpm overrides、lockfile、兼容策略、setup 脚本和仓库内 SHA-256 全部指向这一精确组合。
+本 fork 在 [`fork-plugins/dsh-agent-teams`](../../../../fork-plugins/dsh-agent-teams) 中引入精确的外置 tag `v0.1.19`，并且只为 DSH `0.1.6-alpha.2` 分发私有产物 `0.1.19-dsh016alpha2.1`。manifest、peer 声明、开发依赖、pnpm overrides、lockfile、兼容策略、setup 脚本和仓库内 SHA-256 全部指向这一精确组合。
 
-运行时保留 v0.1.18 的 scheduling、next-step delivery、retirement、task correction 和 `withTeamLock()` 末尾删除。DSH 0.1.6 适配通过 awaited `agent/created` 初始化成员，通过 `ownEvents()` 读取当前 Session 事件，使用统一 Host Queue/Steer adapter，冷恢复 inactive Captain 以投递 durable mailbox，并保留 [`FORK_MAINTENANCE.md`](../../../../FORK_MAINTENANCE.md#local-agentteams-package) 所列有界未读邮箱缓存。
+运行时保留 v0.1.19 的 scheduling、next-step delivery、retirement、task correction 和 `withTeamLock()` 末尾删除。DSH 0.1.6 适配通过 awaited `agent/created` 初始化成员，通过 `ownEvents()` 读取当前 Session 事件，使用统一 Host Queue/Steer adapter，冷恢复 inactive Captain 以投递 durable mailbox，并保留 [`FORK_MAINTENANCE.md`](../../../../FORK_MAINTENANCE.md#local-agentteams-package) 所列有界未读邮箱缓存。其 Web client 从 `mainView` retention 推导已选择的 Session，并通过 `uiWorkspace` 使用持久 subagent 地址打开成员 transcript。
 
 Profile 安装使用仓库内产物，不使用 npm `latest` 或 `next`。安装只更换可执行插件代码；工作区 `.agent-teams` 记录、Session、附件和凭据均不修改。新代码必须在 profile 重启后才会生效。
 
@@ -22,9 +22,9 @@ Profile 安装使用仓库内产物，不使用 npm `latest` 或 `next`。安装
 
 ## 备选方案
 
-**直接安装上游 `v0.1.18`。** 拒绝，因为其发布兼容矩阵止于 DSH `0.1.5-rc.1`，且该包不包含本 fork 的 awaited creation adapter、冷 Captain 投递或未读缓存保证。
+**直接安装上游 `v0.1.19`。** 拒绝，因为其已发布包没有面向精确的 DSH Alpha.2 依赖组，也不包含本 fork 的 awaited creation adapter、冷 Captain 投递、未读缓存保证和 Alpha.2 Web 导航适配。
 
-**保留 v0.1.16 fork，只修 DSH 兼容。** 拒绝，因为 v0.1.18 拥有任务纠正、依赖就绪启动、陈旧消息过滤和更强的退休清理。保留旧 scheduler 会留下缺陷并扩大后续源码比较。
+**保留 v0.1.18 fork，只修 DSH 兼容。** 拒绝，因为 v0.1.19 拥有成员启动恢复、repair scope 纠正和仅 Captain 可用的任务修订。保留旧 scheduler 会留下缺陷并扩大后续源码比较。
 
 **用 DSH 实验性 Agent Teams 替换外置插件。** 拒绝，因为两种实现具有不同的工具、持久状态、Web 展示和操作行为。官方实验包不会迁移或保留外置插件的团队。
 

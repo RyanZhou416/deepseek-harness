@@ -521,7 +521,7 @@ function spawnJobProcess(
 }
 
 /**
- * Spawn a restricted-token process suspended with hidden initial windows, assign its Job, then resume it.
+ * Spawn a restricted-token process suspended in its runner's inherited console, assign its Job, then resume it.
  * @param api - active binding table.
  * @param options - command, cwd, args, and restricted primary token.
  * @returns caller-owned process and Job handles after successful resume.

@@ -2,5 +2,5 @@
 # side as of the last confirmed-consistent state. Both languages carry equal authority;
 # after editing either side, bring the other along and re-record with:
 #   pnpm run verify-translation-pairing --write .agents/notes/implemented/architecture/2026-09-04-context-projection-cost-controls.md
-2026-09-04-context-projection-cost-controls.md: c68d4b54f0e415b72e80003aee8288c98d139900
-2026-09-04-context-projection-cost-controls.zh.md: fca8643e547f1d0be63908fd4bfaec6e59e6811e
+2026-09-04-context-projection-cost-controls.md: 763330aef22cae9ead4d62a703608f8cca7e0d76
+2026-09-04-context-projection-cost-controls.zh.md: 1cc74f4ddaf74b202c2d7815e102e3b016d64b0a

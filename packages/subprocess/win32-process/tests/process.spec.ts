@@ -6,7 +6,7 @@ import {
   spawnInheritedJobProcess,
   spawnPipedProcess,
 } from '../src/index.ts'
-import { CREATE_SUSPENDED } from '../src/abi.ts'
+import { CREATE_SUSPENDED, STARTF_USESTDHANDLES } from '../src/abi.ts'
 import { processInformationType, startupInfoType } from '../src/ffi.ts'
 import type { NativePtr, Win32ProcessBindings } from '../src/index.ts'
 
@@ -23,7 +23,9 @@ function inheritedApi(overrides: Partial<Win32ProcessBindings> = {}): {
   const createProcessAsUserWImpl: Win32ProcessBindings['createProcessAsUserW'] =
     overrides.createProcessAsUserW
     ?? ((_token, _app, _line, _pa, _ta, _inherit, _flags, _env, _cwd, _startup, info) => {
-      expect(koffi.decode(_startup, startupInfoType())).toMatchObject({ dwFlags: 0x101, wShowWindow: 0 })
+      expect(koffi.decode(_startup, startupInfoType())).toMatchObject({
+        dwFlags: STARTF_USESTDHANDLES,
+      })
       events.push('create')
       koffi.encode(info, processInformationType(), {
         hProcess: 60n,

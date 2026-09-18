@@ -6,7 +6,7 @@ English | [中文](2026-09-04-portable-macos-fork-launchers.zh.md)
 
 ## Problem
 
-The fork's macOS launchers required `node` and `corepack` specifically under `/usr/local/bin`, which excluded ordinary Apple Silicon Homebrew and version-manager installations. The run launcher also omitted the bounded heap and diagnostic report policy used by the Windows launcher, while the fork-maintained Agent Teams and Context artifacts remained present in Git but absent from every new machine's profile.
+The fork's macOS launchers required `node` and `corepack` specifically under `/usr/local/bin`, which excluded ordinary Apple Silicon Homebrew and version-manager installations. The run launcher also omitted the bounded heap and diagnostic report policy used by the Windows launcher, while the fork-maintained Agent Teams, Context, and Subscriptions artifacts remained present in Git but absent from every new machine's profile.
 
 Copying the Windows Harness home is not a deployment mechanism. Its profile contains machine paths, and the same home owns credentials, Sessions, attachments, derived caches, and other user data that a source checkout must never distribute or rewrite.
 
@@ -16,9 +16,9 @@ Copying the Windows Harness home is not a deployment mechanism. Its profile cont
 
 `build.command` remains an install-and-build operation. `run.command` resolves blank, tilde-prefixed, relative, and absolute `DSH_HOME` values with the Harness path rules, creates a non-symlink diagnostics directory with mode `0700`, and adds fatal and uncaught Node reports without supervising or restarting the Host. Its default V8 old-space budget is half of physical memory, clamped from 4 GiB through 16 GiB; `DSH_MAX_OLD_SPACE_MIB` is an explicit validated override.
 
-`setup.command` is the separate, explicit profile mutation. It verifies the committed Agent Teams and Context artifacts by SHA-256 and package identity, backs up only an existing web profile's `package.json`, `pnpm-lock.yaml`, `pnpm-workspace.yaml`, and `cordis.patch.yml`, initializes a missing web profile, pins that profile to the repository pnpm version, installs both local artifacts, merges the Context low-overhead bounds while retaining unrelated patch rows, and validates installed versions, bundle membership, lock references, and the composed config. Repeating a converged setup performs no package or patch mutation; `--dry-run` creates neither the Harness home nor package-manager directories.
+`setup.command` is the separate, explicit profile mutation. It verifies the committed Agent Teams, Context, and Subscriptions artifacts by SHA-256 and package identity, backs up only an existing web profile's `package.json`, `pnpm-lock.yaml`, `pnpm-workspace.yaml`, and `cordis.patch.yml`, initializes a missing web profile, pins that profile to the repository pnpm version, removes `dshmarket`, installs all three local artifacts, merges the Context low-overhead bounds while retaining unrelated patch rows, and validates installed versions, bundle membership, lock references, `dshmarket` absence, and the composed config. Repeating a converged setup performs no package or patch mutation; `--dry-run` creates neither the Harness home nor package-manager directories.
 
-The setup excludes credentials, settings, Sessions, attachments, projection caches, diagnostics, workspace `.agent-teams` data, marketplace plugins, subscriptions, watchdogs, custom presets, and process-worker profiles. Those remain machine-owned and require separate explicit configuration.
+The setup excludes credentials, settings, Sessions, attachments, projection caches, diagnostics, workspace `.agent-teams` data, other marketplace plugins, watchdogs, custom presets, and process-worker profiles. Those remain machine-owned and require separate explicit configuration.
 
 ## Alternatives considered
 
@@ -32,6 +32,6 @@ The setup excludes credentials, settings, Sessions, attachments, projection cach
 
 ## Consequences
 
-A fresh Mac receives reproducible source tooling and both fork plugin artifacts without receiving another machine's runtime data. Build, profile setup, and Host launch are separate visible actions, so each operation has one mutation scope and failure surface.
+A fresh Mac receives reproducible source tooling and all three fork plugin artifacts without receiving another machine's runtime data. Build, profile setup, and Host launch are separate visible actions, so each operation has one mutation scope and failure surface.
 
-The profile's local artifact references remain tied to the checkout path; moving the checkout requires rerunning `setup.command`. The setup does not reproduce the Windows watchdog, ChatGPT preset, marketplace inventory, or process workers. POSIX behavior and an isolated real profile installation are covered on the Windows development host, but a physical macOS cold start remains required before claiming host qualification.
+The profile's local artifact references remain tied to the checkout path; moving the checkout requires rerunning `setup.command`. The setup does not reproduce the Windows watchdog, ChatGPT preset, unrelated marketplace inventory, or process workers. POSIX behavior and an isolated real profile installation are covered on the Windows development host, but a physical macOS cold start remains required before claiming host qualification.

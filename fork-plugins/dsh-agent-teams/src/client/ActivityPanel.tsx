@@ -786,10 +786,12 @@ export function ActivityPanel({ sessionsList, modelDirectories, openMember, t, c
   const gestureRef = useRef<PanelGesture | null>(null)
   const frameRef = useRef<number | null>(null)
   const pendingLayoutRef = useRef<PanelLayout | null>(null)
-  const current = useSyncExternalStore(
+  const sessionsSnapshot = useSyncExternalStore(
     sessionsList.subscribe,
     sessionsList.getSnapshot,
-  ).current
+  )
+  const current = Object.values(sessionsSnapshot.byId)
+    .find(session => (session.retainedBy.mainView ?? 0) > 0)?.id
   const autoOpenTrackerRef = useRef<{
     sessionId: SessionId | undefined
     restoreComplete: boolean

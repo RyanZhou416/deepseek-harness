@@ -2,5 +2,5 @@
 # side as of the last confirmed-consistent state. Both languages carry equal authority;
 # after editing either side, bring the other along and re-record with:
 #   pnpm run verify-translation-pairing --write .agents/notes/implemented/simplification/2026-09-15-retire-unused-official-team-scheduling-fork.md
-2026-09-15-retire-unused-official-team-scheduling-fork.md: cf16aeb6320a8a63cb10ac0e607071d2e58a3b29
-2026-09-15-retire-unused-official-team-scheduling-fork.zh.md: 25ae403f938d8553d287f7ffa38750f73ac18762
+2026-09-15-retire-unused-official-team-scheduling-fork.md: bf812c2077d6b1083e45e0154416301b61816d32
+2026-09-15-retire-unused-official-team-scheduling-fork.zh.md: 1c8d3b62c5c34aaa28e1f6b51068af28ba49acad

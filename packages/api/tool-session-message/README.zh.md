@@ -73,7 +73,7 @@ Web bundle 提供 Agent 注册表、Session Controller、Session-reference resol
 
 ### 来源与信任
 
-消息使用现有 `agent-message` relay 来源，并携带由服务端推导的 `senderSessionId`。来源归因只表示 provenance（出处），不授予权限。第一个内容块标识发送方并陈述禁止自动回复的规则；第二个块是发送方选择的文本。目标日志先在收件箱 splice 中记录同一个带身份 `UserMessage`，后续又把它记录为已准入模型历史。
+消息使用现有 `agent-message` relay 来源，并携带由服务端推导的 `senderSessionId`。来源归因只记录身份，不授予权限。第一个内容块标识发送方并陈述禁止自动回复的规则；第二个块是发送方选择的文本。目标日志先在收件箱 splice 中记录同一个带身份 `UserMessage`，后续又把它记录为已准入模型历史。
 
 ### 源码地图
 

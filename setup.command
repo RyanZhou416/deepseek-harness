@@ -4,7 +4,7 @@ set -eu
 
 usage() {
   printf '%s\n' 'Usage: ./setup.command [--dry-run]'
-  printf '%s\n' 'Installs the fork-pinned Agent Teams and Context bundles into the web profile.'
+  printf '%s\n' 'Installs the fork-pinned Agent Teams, Context, and Subscriptions bundles into the web profile and removes dshmarket.'
 }
 
 DSH_SETUP_DRY_RUN=false
@@ -39,17 +39,20 @@ fi
 DSH_RUNTIME_HELPER=$SCRIPT_DIR/scripts/fork-macos-runtime.sh
 DSH_SETUP_HELPER=$SCRIPT_DIR/fork-runtime/setup-profile.mjs
 DSH_CONTEXT_PATCH=$SCRIPT_DIR/fork-runtime/web/cordis.patch.yml
-DSH_AGENT_TEAMS_ARTIFACT=$SCRIPT_DIR/fork-plugins/releases/nanmicoder-dsh-agent-teams-0.1.18-dsh016alpha1.1.tgz
-DSH_CONTEXT_ARTIFACT=$SCRIPT_DIR/fork-plugins/releases/dsh-context-0.52.2-dsh016alpha1.1.tgz
-DSH_AGENT_TEAMS_SHA256=575A45F50A9A7D12DE34567102C6C1D4EF9A1F70242A682C76EBC14FA4021DA4
-DSH_CONTEXT_SHA256=064D91DEB012D6D183F164CD3053FAAE6EDB31FF893C416F036BF0EA47B5319D
+DSH_AGENT_TEAMS_ARTIFACT=$SCRIPT_DIR/fork-plugins/releases/nanmicoder-dsh-agent-teams-0.1.19-dsh016alpha2.1.tgz
+DSH_CONTEXT_ARTIFACT=$SCRIPT_DIR/fork-plugins/releases/dsh-context-0.53.3-dsh016alpha2.1.tgz
+DSH_SUBSCRIPTIONS_ARTIFACT=$SCRIPT_DIR/fork-plugins/releases/dsh-plugin-subscriptions-0.9.2-dsh016alpha2.1.tgz
+DSH_AGENT_TEAMS_SHA256=1C93655EE5162987ECBA1BBCD6C084E84DE87A486EF8ED4AF2E33D957EEBE9B9
+DSH_CONTEXT_SHA256=8C84B018DE10CF181A77AD151D069A00133D7AF8537EE766F2A46C8154DD5843
+DSH_SUBSCRIPTIONS_SHA256=5B6AC96A2E22946BAC53339F4D2A307AD29DAC5195851BF55606BA946CD37177
 
 for DSH_REQUIRED_FILE in \
   "$DSH_RUNTIME_HELPER" \
   "$DSH_SETUP_HELPER" \
   "$DSH_CONTEXT_PATCH" \
   "$DSH_AGENT_TEAMS_ARTIFACT" \
-  "$DSH_CONTEXT_ARTIFACT"
+  "$DSH_CONTEXT_ARTIFACT" \
+  "$DSH_SUBSCRIPTIONS_ARTIFACT"
 do
   if [ ! -r "$DSH_REQUIRED_FILE" ]; then
     printf '%s\n' "ERROR: Missing required fork file $DSH_REQUIRED_FILE." >&2
@@ -84,12 +87,17 @@ node "$DSH_SETUP_HELPER" verify-sha256 \
   "$DSH_AGENT_TEAMS_ARTIFACT" "$DSH_AGENT_TEAMS_SHA256"
 node "$DSH_SETUP_HELPER" verify-sha256 \
   "$DSH_CONTEXT_ARTIFACT" "$DSH_CONTEXT_SHA256"
+node "$DSH_SETUP_HELPER" verify-sha256 \
+  "$DSH_SUBSCRIPTIONS_ARTIFACT" "$DSH_SUBSCRIPTIONS_SHA256"
 tar -xOzf "$DSH_AGENT_TEAMS_ARTIFACT" package/package.json \
   | node "$DSH_SETUP_HELPER" verify-manifest \
-    '@nanmicoder/dsh-agent-teams' '0.1.18-dsh016alpha1.1'
+    '@nanmicoder/dsh-agent-teams' '0.1.19-dsh016alpha2.1'
 tar -xOzf "$DSH_CONTEXT_ARTIFACT" package/package.json \
   | node "$DSH_SETUP_HELPER" verify-manifest \
-    'dsh-context' '0.52.2-dsh016alpha1.1'
+    'dsh-context' '0.53.3-dsh016alpha2.1'
+tar -xOzf "$DSH_SUBSCRIPTIONS_ARTIFACT" package/package.json \
+  | node "$DSH_SETUP_HELPER" verify-manifest \
+    'dsh-plugin-subscriptions' '0.9.2-dsh016alpha2.1'
 
 # Reject an ambiguous user patch before package installation changes anything.
 node "$DSH_SETUP_HELPER" merge-patch \
@@ -98,6 +106,7 @@ node "$DSH_SETUP_HELPER" merge-patch \
 DSH_PROFILE_CURRENT=false
 if node "$DSH_SETUP_HELPER" verify-profile \
   "$DSH_PROFILE_DIR" "$DSH_AGENT_TEAMS_ARTIFACT" "$DSH_CONTEXT_ARTIFACT" \
+  "$DSH_SUBSCRIPTIONS_ARTIFACT" \
   "$DSH_PACKAGE_MANAGER" \
   >/dev/null 2>&1
 then
@@ -118,7 +127,7 @@ if [ "$DSH_SETUP_DRY_RUN" = true ]; then
     if [ ! -f "$DSH_PROFILE_DIR/package.json" ]; then
       printf '%s\n' 'Would initialize the base web profile with a config dump.'
     fi
-    printf '%s\n' "Would pin the profile to $DSH_PACKAGE_MANAGER and install both verified tgz files."
+    printf '%s\n' "Would pin the profile to $DSH_PACKAGE_MANAGER, remove dshmarket if present, and install all three verified tgz files."
   fi
   if [ "$DSH_PATCH_CURRENT" = true ]; then
     printf '%s\n' 'The managed dsh-context profile patch is already current.'
@@ -187,8 +196,14 @@ if [ "$DSH_PROFILE_CURRENT" = false ]; then
     exit 1
   fi
   printf '%s\n' "Verified web-profile pnpm $DSH_PROFILE_PNPM_VERSION."
+  if node "$DSH_SETUP_HELPER" has-package "$DSH_PROFILE_DIR/package.json" dshmarket
+  then
+    node --import tsx/esm "$SCRIPT_DIR/apps/cli/src/bin.ts" \
+      plugin --profile web remove dshmarket
+  fi
   node --import tsx/esm "$SCRIPT_DIR/apps/cli/src/bin.ts" \
-    plugin --profile web add "$DSH_AGENT_TEAMS_ARTIFACT" "$DSH_CONTEXT_ARTIFACT"
+    plugin --profile web add \
+      "$DSH_AGENT_TEAMS_ARTIFACT" "$DSH_CONTEXT_ARTIFACT" "$DSH_SUBSCRIPTIONS_ARTIFACT"
 else
   printf '%s\n' 'Profile package installation is already current.'
 fi
@@ -201,6 +216,7 @@ fi
 
 node "$DSH_SETUP_HELPER" verify-profile \
   "$DSH_PROFILE_DIR" "$DSH_AGENT_TEAMS_ARTIFACT" "$DSH_CONTEXT_ARTIFACT" \
+  "$DSH_SUBSCRIPTIONS_ARTIFACT" \
   "$DSH_PACKAGE_MANAGER"
 node "$DSH_SETUP_HELPER" verify-patch "$DSH_PROFILE_PATCH" "$DSH_CONTEXT_PATCH"
 DSH_COMPOSED_CONFIG=$(node --import tsx/esm "$SCRIPT_DIR/apps/cli/src/bin.ts" \
@@ -208,5 +224,5 @@ DSH_COMPOSED_CONFIG=$(node --import tsx/esm "$SCRIPT_DIR/apps/cli/src/bin.ts" \
 printf '%s\n' "$DSH_COMPOSED_CONFIG" | node "$DSH_SETUP_HELPER" verify-dump -
 
 printf '%s\n' 'macOS fork profile setup completed successfully.'
-printf '%s\n' 'Not installed: dshmarket, subscriptions, watchdogs, custom presets, or process-worker profiles.'
+printf '%s\n' 'Removed or left absent: dshmarket. Not installed: watchdogs, custom presets, or process-worker profiles.'
 printf '%s\n' 'No Session, attachment, DSH credential-store, projection-cache, or .agent-teams path was imported or modified.'

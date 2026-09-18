@@ -6,7 +6,7 @@ English | [中文](2026-09-18-session-addressed-agent-messages.zh.md)
 
 ## Problem
 
-DSH exposes three narrower cross-Session mechanisms: direct continuable parent/child messages, Team mailboxes, and read-only Session references. An ordinary Agent that knows another Session id cannot deliver new information to it without creating one of those relationships. Host `session.prompt` accepts an arbitrary Session id and can resume cold work, but it records the input as a human user prompt and carries no sending Session provenance. Exposing that Remote method as a model tool would make Agent-authored content indistinguishable from user authority in durable history.
+DSH exposes three narrower cross-Session mechanisms: direct continuable parent/child messages, Team mailboxes, and read-only Session references. An ordinary Agent that knows another Session id cannot deliver new information to it without creating one of those relationships. Host `session.prompt` accepts an arbitrary Session id and can resume cold work, but it records the input as a human user prompt and carries no sending Session identity. Exposing that Remote method as a model tool would make Agent-authored content indistinguishable from user authority in durable history.
 
 The desired deployment permits messages across workspace, lineage, and Session-role boundaries, including self-addressing. Runtime target policy, approval, rate limits, and relay-depth limits would therefore contradict the intended capability. The recipient still needs durable sender identity and guidance that receipt alone does not authorize an automatic reply, acknowledgement, forward, or polling exchange.
 
@@ -50,7 +50,7 @@ Focused unit coverage pins delegated-child exclusion during discovery, unrestric
 
 **Widen `SubagentRuntime.sendMessage()`.** That operation owns adjacency authorization, continuable Activation residency, and Steer semantics. Removing its relationship check would erase the parent/child lifecycle guarantee and make unrelated Session communication depend on a subagent manager. The Session-addressed tool remains a separate Consumer over the Agent registry and Session Controller.
 
-**Expose `session.prompt` directly.** This would reuse cold resume and Queue/Steer selection with little code, but it persists Agent-authored text as a human user source without sender provenance. A wrapper cannot repair that attribution after inbox acceptance.
+**Expose `session.prompt` directly.** This would reuse cold resume and Queue/Steer selection with little code, but it persists Agent-authored text as a human user source without durable sender attribution. A wrapper cannot repair that attribution after inbox acceptance.
 
 **Add a separate mailbox file and queued/delivered event protocol.** A sidecar mailbox could accept messages without materializing the target, but it would duplicate the durable Agent inbox, require recovery and acknowledgement state, and introduce another source of ordering beside the Session log. Existing ordinary-Session cold resume and bounded residency make direct durable inbox insertion sufficient.
 
@@ -66,7 +66,7 @@ Focused unit coverage pins delegated-child exclusion during discovery, unrestric
 
 - Web Agents can deliver attributed text to unrelated live Agents and cold ordinary Sessions by exact id without creating a subagent or Team relation.
 - A user can name an independent Session instead of copying its id; title lookup reuses the Web reference directory, filters delegated children without activating candidates, and makes ambiguity visible.
-- Source provenance is durable and server-derived, but it grants no authority to the received content.
+- Source attribution is durable and server-derived, but it grants no authority to the received content.
 - The mechanism intentionally permits self-messages, cross-workspace messages, and unbounded message graphs; models that ignore guidance can create costly loops.
 - A cold subagent remains under its existing lifecycle owner, while a live subagent is an unrestricted target.
 - A sender can inspect durable processing progress and current foreground tool blocking without waking the target; `model-context` is intentionally not described as human comprehension.

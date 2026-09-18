@@ -11,6 +11,10 @@ describe('rescope file selection', () => {
     expect(isRescopeExcluded('scripts/dependency-catalog/package-lock.json')).toBe(true)
   })
 
+  it('preserves exact external plugin imports', () => {
+    expect(isRescopeExcluded('fork-plugins/dsh-context/package.json')).toBe(true)
+  })
+
   it.each([
     'scripts/dependency-catalog/package.json',
     'scripts/dependency-catalog/source.ts',

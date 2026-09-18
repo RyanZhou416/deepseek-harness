@@ -6,7 +6,7 @@
 
 ## macOS profile setup
 
-`build.command` 成功后，`setup.command` 会校验并把当前 Agent Teams 与 Context 产物安装到接收 Mac 的 `web` profile，并应用 Context 低开销 bounds。它不会导入其他机器的运行数据，且只备份可能被改动的四个本机 profile 配置文件；可以先在零写入情况下查看精确动作：
+`build.command` 成功后，`setup.command` 会校验并把当前 Agent Teams、Context 与 Subscriptions 产物安装到接收 Mac 的 `web` profile，移除 `dshmarket`，并应用 Context 低开销 bounds。它不会导入其他机器的运行数据，且只备份可能被改动的四个本机 profile 配置文件；可以先在零写入情况下查看精确动作：
 
 ```sh
 ./setup.command --dry-run
@@ -14,18 +14,18 @@
 ./run.command
 ```
 
-该 setup 会刻意省略 marketplace 插件、subscriptions、watchdog、自定义 preset 和 process-worker profile。这些可选运行时选择由每台机器单独管理。
+该 setup 会刻意省略 marketplace 插件、watchdog、自定义 preset 和 process-worker profile。这些可选运行时选择由每台机器单独管理。
 
 ## Agent Teams
 
 - 源码：`fork-plugins/dsh-agent-teams`
-- 当前私有版本：`0.1.18-dsh016alpha1.1`
-- 上游底座：`NanmiCoder/dsh-agent-teams v0.1.18`
-- 私有宿主目标：`dsh-v0.1.6-alpha.1`
-- 安装产物：`fork-plugins/releases/nanmicoder-dsh-agent-teams-0.1.18-dsh016alpha1.1.tgz`
-- 产物 SHA256：`575A45F50A9A7D12DE34567102C6C1D4EF9A1F70242A682C76EBC14FA4021DA4`
+- 当前私有版本：`0.1.19-dsh016alpha2.1`
+- 上游底座：`NanmiCoder/dsh-agent-teams v0.1.19`
+- 私有宿主目标：`dsh-v0.1.6-alpha.2`
+- 安装产物：`fork-plugins/releases/nanmicoder-dsh-agent-teams-0.1.19-dsh016alpha2.1.tgz`
+- 产物 SHA256：`1C93655EE5162987ECBA1BBCD6C084E84DE87A486EF8ED4AF2E33D957EEBE9B9`
 
-该构建采用 v0.1.18 的原子 roster 创建、仅启动依赖就绪成员、next-step 协调、陈旧 attempt 拒绝、退休成员清理与任务纠正。私有层适配 DSH 0.1.6 的 awaited `agent/created` 启动，保留冷 Captain 邮箱恢复和有界未读邮箱缓存，磁盘格式不变。
+该构建采用 v0.1.19 的改名工具成员启动恢复、repair scope 纠正、Captain 任务修订、原子 roster 创建、next-step 协调、陈旧 attempt 拒绝、退休成员清理与任务纠正。私有层适配 awaited `agent/created` 启动和 Alpha.2 `uiWorkspace` 导航，保留冷 Captain 邮箱恢复和有界未读邮箱缓存，磁盘格式不变。
 
 每条 Team 消息都会先进入持久 Team 邮箱，再尝试 Host 投递。只有 Host 把消息接纳到 DSH 持久收件箱后，插件才会把它标记为已投递；已进入不可中断工具的接收方会在工具结算后消费这条排队输入，而不会被抢占。Host 投递失败会让 Team 记录保持可重试；不活跃的 Captain 会冷恢复并按顺序重投未确认记录。
 
@@ -34,7 +34,7 @@
 同事 clone 本 fork、设置好自己的 `DSH_HOME` 并关闭正在运行的 DSH 后，可在仓库根目录执行：
 
 ```powershell
-$artifact = (Resolve-Path .\fork-plugins\releases\nanmicoder-dsh-agent-teams-0.1.18-dsh016alpha1.1.tgz).Path
+$artifact = (Resolve-Path .\fork-plugins\releases\nanmicoder-dsh-agent-teams-0.1.19-dsh016alpha2.1.tgz).Path
 node --import tsx/esm apps/cli/src/bin.ts plugin --profile web add $artifact
 ```
 
@@ -64,11 +64,22 @@ Agent Teams 的持久数据属于各工作区 `.agent-teams/` 目录；本目录
 ## Context
 
 - 源码：`fork-plugins/dsh-context`
-- 当前私有版本：`0.52.2-dsh016alpha1.1`
-- 上游底座：`bowenliang123/dsh-context v0.52.2`
-- 安装产物：`fork-plugins/releases/dsh-context-0.52.2-dsh016alpha1.1.tgz`
-- 产物 SHA256：`064D91DEB012D6D183F164CD3053FAAE6EDB31FF893C416F036BF0EA47B5319D`
+- 当前私有版本：`0.53.3-dsh016alpha2.1`
+- 上游底座：`bowenliang123/dsh-context v0.53.3`
+- 安装产物：`fork-plugins/releases/dsh-context-0.53.3-dsh016alpha2.1.tgz`
+- 产物 SHA256：`8C84B018DE10CF181A77AD151D069A00133D7AF8537EE766F2A46C8154DD5843`
 
-该构建采用 v0.52.2 的 Context board、价格、注入标签和 Agent 网络改进。字段级 copy-on-write、dirty retention trim、恢复态首个 view bounds、引用稳定的 inline/slim cache、关闭 modal 后释放订阅，以及 V3 system node 的 header 计价仍由私有层维护。维护与回滚规则见 `fork-plugins/dsh-context/FORK_MAINTENANCE.md`。
+该构建采用 v0.53.3 的 Context Insights、activity projection、最后消息卡片和按需语料回填。字段级 copy-on-write、dirty retention trim、恢复态首个 view bounds、引用稳定的 inline/slim cache、关闭 modal 后释放订阅，以及 V3 system node 的 header 计价仍由私有层维护。维护与回滚规则见 `fork-plugins/dsh-context/FORK_MAINTENANCE.md`。
 
 低开销部署值为 `maxRequestSteps: 300`、`maxKeptTurns: 60`、`maxEvents: 100`、`maxNodes: 400`、`maxArchiveNodes: 100` 和 `maxFileOps: 100`。修改 profile 前必须确认 DSH 已停止；插件更新过程不得读取、迁移或删除 Session、附件、凭据或 projection cache 数据。
+
+## Subscriptions
+
+- 源码：`fork-plugins/dsh-plugin-subscriptions`
+- 当前私有版本：`0.9.2-dsh016alpha2.1`
+- 上游底座：`V1ki/dsh-plugin-subscriptions v0.9.2`
+- 私有宿主目标：`dsh-v0.1.6-alpha.2`
+- 安装产物：`fork-plugins/releases/dsh-plugin-subscriptions-0.9.2-dsh016alpha2.1.tgz`
+- 产物 SHA256：`5B6AC96A2E22946BAC53339F4D2A307AD29DAC5195851BF55606BA946CD37177`
+
+该私有构建保留上游多账号 provider、用量 UI、请求转换、图片与视频工具和凭据格式。Alpha.2 适配使用 awaited `agent/created` payload 与精确 DSH 依赖 cohort，不引入 Session 或凭据迁移。验证与回滚规则见 `fork-plugins/dsh-plugin-subscriptions/FORK_MAINTENANCE.md`。

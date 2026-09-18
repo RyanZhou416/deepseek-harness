@@ -16,7 +16,7 @@
  */
 
 /** The supported dsh tags, in lockstep with the BASELINES entries below. */
-export type BaselineId = 'v0.1.2-rc.1' | 'v0.1.3-alpha.2' | 'v0.1.5-rc.1' | 'v0.1.6-alpha.1'
+export type BaselineId = 'v0.1.2-rc.1' | 'v0.1.3-alpha.2' | 'v0.1.5-rc.1' | 'v0.1.6-alpha.2'
 
 /** The harness web half's client faces, as far as the compat probes consume them. */
 export interface ClientSeam {
@@ -275,8 +275,8 @@ export const BASELINES: readonly Baseline[] = [
   ...LEGACY_BASELINES,
   {
     ...previousV3,
-    id: 'v0.1.6-alpha.1',
-    tag: 'dsh-v0.1.6-alpha.1',
-    session: '0.1.6-alpha.1',
+    id: 'v0.1.6-alpha.2',
+    tag: 'dsh-v0.1.6-alpha.2',
+    session: '0.1.6-alpha.2',
   },
 ]

@@ -4,6 +4,7 @@ import type { Context as ClientContext } from '@deepseek-ai/cordis'
 import type { SessionId } from '@deepseek-ai/dsh-session/types'
 import type {} from '@deepseek-ai/dsh-api-session-controller/client'
 import type {} from '@deepseek-ai/dsh-client-ui-session/client'
+import type {} from '@deepseek-ai/dsh-client-ui-workspace/client'
 import type {} from '@deepseek-ai/dsh-client-ui-chat/client'
 import type {} from '@deepseek-ai/dsh-client-ui-renderer/client'
 import type { PropsLocale } from '@deepseek-ai/dsh-client-ui-slots'
@@ -34,7 +35,7 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
 }
 
 /** Required services: conversation nodes, slots, sessions navigation, and locale. */
-export const inject = ['uiConversation', 'slots', 'sessions', 'locale', 'modelDirectories', 'layout']
+export const inject = ['uiConversation', 'slots', 'sessions', 'uiWorkspace', 'locale', 'modelDirectories', 'layout']
 
 /** The host supplies this hook for the lifetime of a 0.1.5 root slot. */
 interface PanelNavigationProps {
@@ -58,7 +59,13 @@ export function apply(ctx: ClientContext): void {
     'agent-teams: dictionaries',
   )
   const openMember = (parentId: SessionId, childId: SessionId): void => {
-    void openAgentTeamMember(ctx.sessions, parentId, childId, ctx.layout as AgentTeamsLayoutNavigator).catch((error: unknown) => {
+    void openAgentTeamMember(
+      ctx.sessions,
+      ctx.uiWorkspace,
+      parentId,
+      childId,
+      ctx.layout as AgentTeamsLayoutNavigator,
+    ).catch((error: unknown) => {
       console.warn(`agent-teams: failed to open member transcript ${childId}: ${String(error)}`)
     })
   }

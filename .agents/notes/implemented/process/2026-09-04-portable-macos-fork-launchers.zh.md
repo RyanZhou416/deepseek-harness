@@ -6,7 +6,7 @@ Status: implemented
 
 ## 问题
 
-本 fork 的 macOS 启动器要求 `node` 和 `corepack` 必须位于 `/usr/local/bin`，因此无法使用常见的 Apple Silicon Homebrew 与版本管理器安装。运行启动器也没有 Windows 启动器使用的有界 heap 和诊断报告策略，而 Git 中已有的 fork 维护 Agent Teams 与 Context 产物不会进入新机器的 profile。
+本 fork 的 macOS 启动器要求 `node` 和 `corepack` 必须位于 `/usr/local/bin`，因此无法使用常见的 Apple Silicon Homebrew 与版本管理器安装。运行启动器也没有 Windows 启动器使用的有界 heap 和诊断报告策略，而 Git 中已有的 fork 维护 Agent Teams、Context 与 Subscriptions 产物不会进入新机器的 profile。
 
 复制 Windows Harness home 不是部署机制。其 profile 包含机器路径，同一 home 还存放凭据、Session、附件、派生缓存和其他用户数据；源码 checkout 绝不能分发或改写这些内容。
 
@@ -16,9 +16,9 @@ Status: implemented
 
 `build.command` 仍然只执行安装和构建。`run.command` 按 Harness 路径规则解析空白、带 tilde 前缀、相对和绝对 `DSH_HOME` 值，创建模式为 `0700` 的非符号链接 diagnostics 目录，并加入 fatal 和 uncaught Node 报告，但不监督或重启 Host。其默认 V8 old-space 预算为物理内存的一半，并限制在 4 GiB 至 16 GiB；`DSH_MAX_OLD_SPACE_MIB` 是显式且会被校验的覆盖值。
 
-`setup.command` 是独立、显式的 profile 修改操作。它会通过 SHA-256 和 package identity 校验已提交的 Agent Teams 与 Context 产物，仅备份现有 web profile 的 `package.json`、`pnpm-lock.yaml`、`pnpm-workspace.yaml` 和 `cordis.patch.yml`，初始化缺失的 web profile，把该 profile 固定到仓库 pnpm 版本，安装两个本地产物，在保留其他 patch 行的同时合并 Context 低开销 bounds，并校验已安装版本、bundle 成员、lock 引用与组合配置。重复执行已收敛的 setup 不会修改 package 或 patch；`--dry-run` 既不创建 Harness home，也不创建 package-manager 目录。
+`setup.command` 是独立、显式的 profile 修改操作。它会通过 SHA-256 和 package identity 校验已提交的 Agent Teams、Context 与 Subscriptions 产物，仅备份现有 web profile 的 `package.json`、`pnpm-lock.yaml`、`pnpm-workspace.yaml` 和 `cordis.patch.yml`，初始化缺失的 web profile，把该 profile 固定到仓库 pnpm 版本，移除 `dshmarket`，安装三个本地产物，在保留其他 patch 行的同时合并 Context 低开销 bounds，并校验已安装版本、bundle 成员、lock 引用、`dshmarket` 不存在与组合配置。重复执行已收敛的 setup 不会修改 package 或 patch；`--dry-run` 既不创建 Harness home，也不创建 package-manager 目录。
 
-该 setup 不处理凭据、settings、Session、附件、projection cache、diagnostics、工作区 `.agent-teams` 数据、marketplace 插件、subscriptions、watchdog、自定义 preset 或 process-worker profile。它们仍属于各机器，必须单独显式配置。
+该 setup 不处理凭据、settings、Session、附件、projection cache、diagnostics、工作区 `.agent-teams` 数据、其他 marketplace 插件、watchdog、自定义 preset 或 process-worker profile。它们仍属于各机器，必须单独显式配置。
 
 ## 备选方案
 
@@ -32,6 +32,6 @@ Status: implemented
 
 ## 影响
 
-新 Mac 可以获得可复现的源码工具链和两个 fork 插件产物，不会获得另一台机器的运行数据。构建、profile setup 和 Host 启动是三个分离且可见的操作，因此每个操作只有一个修改范围和失败面。
+新 Mac 可以获得可复现的源码工具链和三个 fork 插件产物，不会获得另一台机器的运行数据。构建、profile setup 和 Host 启动是三个分离且可见的操作，因此每个操作只有一个修改范围和失败面。
 
-profile 中的本地产物引用仍与 checkout 路径绑定；移动 checkout 后需要重新运行 `setup.command`。该 setup 不会复制 Windows watchdog、ChatGPT preset、marketplace inventory 或 process worker。POSIX 行为和隔离的真实 profile 安装已在 Windows 开发主机上覆盖，但在宣称主机验证前仍需要一次物理 macOS 冷启动。
+profile 中的本地产物引用仍与 checkout 路径绑定；移动 checkout 后需要重新运行 `setup.command`。该 setup 不会复制 Windows watchdog、ChatGPT preset、无关 marketplace inventory 或 process worker。POSIX 行为和隔离的真实 profile 安装已在 Windows 开发主机上覆盖，但在宣称主机验证前仍需要一次物理 macOS 冷启动。

@@ -12,9 +12,9 @@ The closed `/context` overlay can retain timeline, detail, history, token-meter,
 
 ## Decision
 
-The fork vendors upstream `dsh-context` tag `v0.52.2` under [`fork-plugins/dsh-context`](../../../../fork-plugins/dsh-context/FORK_MAINTENANCE.md) and publishes the private package version `0.52.2-dsh016alpha1.1`. The deployment config uses `maxRequestSteps: 300`, `maxKeptTurns: 60`, `maxEvents: 100`, `maxNodes: 400`, `maxArchiveNodes: 100`, and `maxFileOps: 100`. The imported source tree retains upstream documentation policy; this note and the paired fork-plugin guide own DSH integration claims.
+The fork vendors upstream `dsh-context` tag `v0.53.3` under [`fork-plugins/dsh-context`](../../../../fork-plugins/dsh-context/FORK_MAINTENANCE.md) and distributes the private package version `0.53.3-dsh016alpha2.1`. The deployment config uses `maxRequestSteps: 300`, `maxKeptTurns: 60`, `maxEvents: 100`, `maxNodes: 400`, `maxArchiveNodes: 100`, and `maxFileOps: 100`. The imported source tree retains upstream documentation policy; this note and the paired fork-plugin guide own DSH integration claims.
 
-The fork adopts upstream's V0/V2/V3 log fold, host-side File Activity ledger, right-Sidebar panel, and split timeline delivery. The projection value carries a slim head while the open Context tab or modal fetches the heavy collections through the detail channel. The imported `TimelineState` schema uses `stateVersion: 15`; incompatible plugin checkpoints are derived again from immutable Session logs instead of being migrated in place.
+The fork adopts upstream's V0/V2/V3 log fold, host-side File Activity ledger, right-Sidebar panel, Context Insights dashboard, activity projection, and split timeline delivery. The projection value carries a slim head while the open Context tab or modal fetches the heavy collections through the authenticated detail channel. Opening Context Insights arms at most one on-demand corpus backfill per Host instead of scanning every Session during startup. The imported `TimelineState` schema uses `stateVersion: 20`; the header and activity projections use version 1. Incompatible plugin checkpoints are derived again from immutable Session logs instead of being migrated in place.
 
 The timeline fold uses field-level copy-on-write state and marks which retained collections an event changes. Normalized states run whole-turn, event, archive, and file-operation trimming only for dirty collections. An unrecognized checkpoint receives one forced normalization, while its first slim head, inline value, or detail response applies the same bounds to a private transient copy. The raw checkpoint remains untouched and idle sessions cannot publish oversized restored collections.
 
@@ -26,11 +26,11 @@ The `contextHeaders` fold retains bounded V3 `system/message` nodes until the fo
 
 ## Alternatives considered
 
-**Use upstream `v0.52.2` without fork code.** Rejected because the upstream fold clones every retained collection on each changed event, closed modals keep their data hooks mounted, restored checkpoints are not clamped before their first value is served, and V3 header epochs omit system-token pricing.
+**Use upstream `v0.53.3` without fork code.** Rejected because the upstream fold clones every retained collection on each changed event, closed modals keep their data hooks mounted, restored checkpoints are not clamped before their first value is served, and V3 header epochs omit system-token pricing.
 
 **Reduce retention bounds only.** Rejected because Host-only events would still copy the retained collections, the closed modal would still receive projection and detail activity, and an idle restored checkpoint could serve data retained under older bounds.
 
-**Delete projection caches during installation.** Rejected because cache deletion is unnecessary destructive operational work. The registry handles the imported upstream `stateVersion: 15`, the view-time clamp bounds the first value without changing stored data, and the next relevant event persists a bounded state.
+**Delete projection caches during installation.** Rejected because cache deletion is unnecessary destructive operational work. The registry handles the imported upstream `stateVersion: 20`, the view-time clamp bounds the first value without changing stored data, and the next relevant event persists a bounded state.
 
 **Deep-compare consecutive wire values.** Rejected because the comparison itself scales with the retained payload. Field identity proves the same condition in constant time after copy-on-write ownership makes unchanged fields reference-stable.
 
@@ -38,7 +38,7 @@ The `contextHeaders` fold retains bounded V3 `system/message` nodes until the fo
 
 ## Consequences
 
-The `contextTimeline` and `contextHeaders` keys and Session event vocabulary remain unchanged. The plugin adopts upstream's version-15 projection state and compatible inline/slim wire schema; plugin checkpoints may refold, but Session artifacts are neither transformed nor overwritten. The lower deployment bounds retain less historical detail, while current composition, whole-turn trimming, hard step limits, event tails, archive coverage floors, and file-operation floors keep their meanings.
+The `contextTimeline`, `contextHeaders`, and `contextActivity` keys and Session event vocabulary remain unchanged. The plugin adopts upstream's version-20 timeline state, version-1 header and activity states, and compatible inline/slim wire schema; plugin checkpoints may refold, but Session artifacts are neither transformed nor overwritten. The lower deployment bounds retain less historical detail, while current composition, whole-turn trimming, hard step limits, event tails, archive coverage floors, and file-operation floors keep their meanings.
 
 Closing `/context` releases its data subscriptions and local browser component state; reopening reconstructs that transient UI from the current projections. The Context tab is unaffected. Weak maps retain no Session or projection state after the framework releases those objects.
 

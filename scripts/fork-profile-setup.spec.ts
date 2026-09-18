@@ -90,10 +90,12 @@ it('preserves unrelated context patch rows and handles idempotence, dry-run, and
 it('rejects drift in artifacts, profile pins, patches, and composed config', () => {
   const root = mkdtempSync(join(tmpdir(), 'dsh setup verify with spaces '))
   try {
-    const agentArtifact = join(root, 'nanmicoder-dsh-agent-teams-0.1.18-dsh016alpha1.1.tgz')
-    const contextArtifact = join(root, 'dsh-context-0.52.2-dsh016alpha1.1.tgz')
+    const agentArtifact = join(root, 'nanmicoder-dsh-agent-teams-0.1.19-dsh016alpha2.1.tgz')
+    const contextArtifact = join(root, 'dsh-context-0.53.3-dsh016alpha2.1.tgz')
+    const subscriptionsArtifact = join(root, 'dsh-plugin-subscriptions-0.9.2-dsh016alpha2.1.tgz')
     writeFileSync(agentArtifact, 'agent artifact')
     writeFileSync(contextArtifact, 'context artifact')
+    writeFileSync(subscriptionsArtifact, 'subscriptions artifact')
     const digest = createHash('sha256').update('agent artifact').digest('hex')
     expect(run('verify-sha256', agentArtifact, digest).status).toBe(0)
     expect(run('verify-sha256', agentArtifact, '0'.repeat(64)).status).not.toBe(0)
@@ -102,15 +104,21 @@ it('rejects drift in artifacts, profile pins, patches, and composed config', () 
     const profile = join(root, 'profile')
     const agentInstall = join(profile, 'node_modules', '@nanmicoder', 'dsh-agent-teams')
     const contextInstall = join(profile, 'node_modules', 'dsh-context')
+    const subscriptionsInstall = join(profile, 'node_modules', 'dsh-plugin-subscriptions')
     mkdirSync(agentInstall, { recursive: true })
     mkdirSync(contextInstall, { recursive: true })
+    mkdirSync(subscriptionsInstall, { recursive: true })
     writeFileSync(join(agentInstall, 'package.json'), JSON.stringify({
       name: '@nanmicoder/dsh-agent-teams',
-      version: '0.1.18-dsh016alpha1.1',
+      version: '0.1.19-dsh016alpha2.1',
     }))
     writeFileSync(join(contextInstall, 'package.json'), JSON.stringify({
       name: 'dsh-context',
-      version: '0.52.2-dsh016alpha1.1',
+      version: '0.53.3-dsh016alpha2.1',
+    }))
+    writeFileSync(join(subscriptionsInstall, 'package.json'), JSON.stringify({
+      name: 'dsh-plugin-subscriptions',
+      version: '0.9.2-dsh016alpha2.1',
     }))
     const profileManifest = join(profile, 'package.json')
     writeFileSync(profileManifest, JSON.stringify({
@@ -119,10 +127,16 @@ it('rejects drift in artifacts, profile pins, patches, and composed config', () 
       dependencies: {
         '@nanmicoder/dsh-agent-teams': `file:${relative(profile, agentArtifact)}`,
         'dsh-context': `file:${relative(profile, contextArtifact)}`,
+        'dsh-plugin-subscriptions': `file:${relative(profile, subscriptionsArtifact)}`,
       },
       dsh: {
         profile: {
-          bundles: ['@deepseek-ai/dsh-base', '@nanmicoder/dsh-agent-teams', 'dsh-context'],
+          bundles: [
+            '@deepseek-ai/dsh-base',
+            '@nanmicoder/dsh-agent-teams',
+            'dsh-context',
+            'dsh-plugin-subscriptions',
+          ],
         },
       },
     }))
@@ -138,16 +152,32 @@ it('rejects drift in artifacts, profile pins, patches, and composed config', () 
     expect(secondPin.stdout).toMatch(/^unchanged packageManager pnpm@11\.7\.0/u)
     expect(readFileSync(profileManifest, 'utf8')).toBe(pinned)
     writeFileSync(join(profile, 'pnpm-lock.yaml'), [
-      'nanmicoder-dsh-agent-teams-0.1.18-dsh016alpha1.1.tgz',
-      '0.1.18-dsh016alpha1.1',
-      'dsh-context-0.52.2-dsh016alpha1.1.tgz',
-      '0.52.2-dsh016alpha1.1',
+      'nanmicoder-dsh-agent-teams-0.1.19-dsh016alpha2.1.tgz',
+      '0.1.19-dsh016alpha2.1',
+      'dsh-context-0.53.3-dsh016alpha2.1.tgz',
+      '0.53.3-dsh016alpha2.1',
+      'dsh-plugin-subscriptions-0.9.2-dsh016alpha2.1.tgz',
+      '0.9.2-dsh016alpha2.1',
     ].join('\n'))
     writeFileSync(join(profile, 'cordis.patch.yml'), readFileSync(template, 'utf8'))
 
-    const verified = run('verify-profile', profile, agentArtifact, contextArtifact, 'pnpm@11.7.0')
+    const verified = run(
+      'verify-profile',
+      profile,
+      agentArtifact,
+      contextArtifact,
+      subscriptionsArtifact,
+      'pnpm@11.7.0',
+    )
     expect(verified.status, verified.stderr).toBe(0)
-    expect(run('verify-profile', profile, agentArtifact, contextArtifact, 'pnpm@11.25.0').status).not.toBe(0)
+    expect(run(
+      'verify-profile',
+      profile,
+      agentArtifact,
+      contextArtifact,
+      subscriptionsArtifact,
+      'pnpm@11.25.0',
+    ).status).not.toBe(0)
     expect(run('verify-patch', join(profile, 'cordis.patch.yml'), template).status).toBe(0)
 
     const dump = runWithInput(['verify-dump', '-'], readFileSync(template, 'utf8'))
@@ -163,7 +193,47 @@ it('rejects drift in artifacts, profile pins, patches, and composed config', () 
     }
     manifest.dsh.profile.bundles.push('dsh-context')
     writeFileSync(profileManifest, JSON.stringify(manifest))
-    expect(run('verify-profile', profile, agentArtifact, contextArtifact, 'pnpm@11.7.0').status).not.toBe(0)
+    expect(run(
+      'verify-profile',
+      profile,
+      agentArtifact,
+      contextArtifact,
+      subscriptionsArtifact,
+      'pnpm@11.7.0',
+    ).status).not.toBe(0)
+
+    manifest.dsh.profile.bundles = [
+      '@deepseek-ai/dsh-base',
+      '@nanmicoder/dsh-agent-teams',
+      'dsh-context',
+      'dsh-plugin-subscriptions',
+      'dshmarket',
+    ]
+    writeFileSync(profileManifest, JSON.stringify(manifest))
+    expect(run(
+      'verify-profile',
+      profile,
+      agentArtifact,
+      contextArtifact,
+      subscriptionsArtifact,
+      'pnpm@11.7.0',
+    ).status).not.toBe(0)
+
+    expect(run('has-package', profileManifest, 'dshmarket').status).toBe(1)
+    const withLegacyDependency = JSON.parse(readFileSync(profileManifest, 'utf8')) as {
+      dependencies: Record<string, string>
+    }
+    withLegacyDependency.dependencies.dshmarket = '1.47.0'
+    writeFileSync(profileManifest, JSON.stringify(withLegacyDependency))
+    expect(run('has-package', profileManifest, 'dshmarket').status).toBe(0)
+    expect(run(
+      'verify-profile',
+      profile,
+      agentArtifact,
+      contextArtifact,
+      subscriptionsArtifact,
+      'pnpm@11.7.0',
+    ).status).not.toBe(0)
   } finally {
     rmSync(root, { recursive: true, force: true })
   }

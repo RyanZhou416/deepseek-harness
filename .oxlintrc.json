@@ -25,6 +25,7 @@
     "vendor/**", // Vendored source keeps upstream style and idioms.
     "fork-plugins/dsh-agent-teams/**", // Imported plugin source keeps its upstream lint configuration.
     "fork-plugins/dsh-context/**", // Imported plugin source keeps its upstream lint configuration.
+    "fork-plugins/dsh-plugin-subscriptions/**", // Imported plugin source keeps its upstream lint configuration.
     "native/**", // The imported landlock-run subtree has its own gates; see native/README.md.
     "**/*.js",
     "**/*.mjs",

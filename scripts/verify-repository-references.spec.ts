@@ -170,6 +170,7 @@ describe('maintained repository reference policy', () => {
     expect(findRepositoryReferences('vendor/project/source.md', organizationUrl, new Set())).toEqual([])
     expect(findRepositoryReferences('fork-plugins/dsh-agent-teams/docs/source.md', organizationUrl, new Set())).toEqual([])
     expect(findRepositoryReferences('fork-plugins/dsh-context/README.md', organizationUrl, new Set())).toEqual([])
+    expect(findRepositoryReferences('fork-plugins/dsh-plugin-subscriptions/README.md', organizationUrl, new Set())).toEqual([])
     expect(findRepositoryReferences('.agents/notes/archived/process/frozen.md', organizationUrl, new Set())).toEqual([])
     expect(findRepositoryReferences('.agents/notes/implemented/process/current.md', organizationUrl, new Set()))
       .toEqual([{ file: '.agents/notes/implemented/process/current.md', line: 1, kind: 'organization-url' }])

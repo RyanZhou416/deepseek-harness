@@ -24,7 +24,7 @@
 
 Ask in natural language. The plugin provides the team protocol, 14 coordination tools, persistent state, an automatic shared-task scheduler, and a live Web UI—without requiring a separate workflow engine.
 
-> This fork packages `0.1.18-dsh016alpha1.1` for DSH `0.1.6-alpha.1`. Install the checked-in artifact documented in [`../README.md`](../README.md); the public npm instructions below describe the upstream release channel.
+> This fork packages `0.1.19-dsh016alpha2.1` for DSH `0.1.6-alpha.2`. Install the checked-in artifact documented in [`../README.md`](../README.md); the public npm instructions below describe the upstream release channel.
 
 <p align="center">
   <img src="./assets/ui.png" width="100%" alt="DeepSeek Harness conversation with the AgentTeams live activity panel, members, tasks, dependencies, and reports">

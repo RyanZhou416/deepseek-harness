@@ -18,13 +18,13 @@ Alpha.2 将 `SubagentRuntime.sendMessage(sender, target, content, options)` 作�
 
 Agent Teams 通过 Host Steer 把 Lead 指令投递给 live teammate，并通过 Host Queue 唤醒 inactive teammate。两种 adapter 都保留持久 Team message source，而不是冒充 Agent sender。teammate 发起的 peer 消息保留 [Agent Teams 决策](2026-08-05-agent-teams.zh.md)中的持久 quiet 与 next-turn 模式；后续 wakeup 会在自身之前准入更早的 quiet mail。Team service 根据确切 membership 与 sender identity 推导该策略；提示词和工具参数不负责强制执行。
 
-仓内维护的 `@nanmicoder/dsh-agent-teams` 构建通过 `harness-compat` adapter 识别测试覆盖的精确 Harness contract 中的 lifecycle setup、FIFO Queue、统一 Queue/Steer 和公开相邻 Agent 消息操作。其发行兼容策略只接受 `dsh-v0.1.3-alpha.2`；legacy adapter 只作为回归 fixture，不构成 package 兼容声明。退休成员守卫包装运行宿主实际提供的全部操作，并在所属 Cordis scope 结束时恢复原生 property descriptor。
+仓内维护的 `@nanmicoder/dsh-agent-teams` 构建通过 `harness-compat` adapter 识别测试覆盖的精确 Harness contract 中的 lifecycle setup、FIFO Queue、统一 Queue/Steer 和公开相邻 Agent 消息操作。其发行兼容策略只接受 `dsh-v0.1.6-alpha.2`；legacy adapter 只作为回归 fixture，不构成 package 兼容声明。退休成员守卫包装运行宿主实际提供的全部操作，并在所属 Cordis scope 结束时恢复原生 property descriptor。
 
 全局面向模型的 `send_message` control 使用 alpha.2 的公开 `sendMessage()`，因此 Agent Teams 之外的普通 coordinator-to-child 指令同样使用最近 step 行为。host-user 与浏览器 prompt 路径保留 FIFO 投递；Host-only Team adapter 不会重新分类人类输入。
 
 Alpha.2 通过按 Session 寻址的 `session.updateQueue` Remote 路由 Queue Dock 的编辑、移除与 Steer action。它只修改一个 pending occurrence，编辑会保留身份与 source，移除会持久记录，并以 Session domain failure 报告 stale occurrence 或不可用 Steer。Continuable child 与普通 Session 使用同一操作；fork 不再携带独立 subagent Queue Remote 或错误词汇。
 
-外置 AgentTeams v0.1.18 通过 Host Queue/Steer adapter 拥有成员 next-step 投递。官方实验性 Team profile 与通用 shell/job 工具保持 DSH 0.1.6 上游实现；原有强制后台与让步等待 fork 已由[退役未使用的官方 Team 调度补丁](../simplification/2026-09-15-retire-unused-official-team-scheduling-fork.zh.md)取代。
+外置 AgentTeams v0.1.19 通过 Host Queue/Steer adapter 拥有成员 next-step 投递。官方实验性 Team profile 与通用 shell/job 工具保持 DSH 0.1.6 上游实现；原有强制后台与让步等待 fork 已由[退役未使用的官方 Team 调度补丁](../simplification/2026-09-15-retire-unused-official-team-scheduling-fork.zh.md)取代。
 
 ## Alternatives considered
 

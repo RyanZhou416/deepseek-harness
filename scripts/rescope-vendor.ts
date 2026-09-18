@@ -428,6 +428,7 @@ const VENDORED_LIBRARY = /^@deepseek-ai\\/(cosmokit|schemastery)(\\/|$)/
 export function isRescopeExcluded(file: string): boolean {
   if (file === 'scripts/rescope-vendor.ts') return true // the mapping itself
   if (file.startsWith('.agents/notes/')) return true // notes record what was true when written
+  if (file.startsWith('fork-plugins/')) return true // exact external imports keep their upstream package vocabulary
   // Recorded model payloads quote documentation verbatim, so they must mirror the
   // sources on disk — including the notes this rescope leaves alone.
   if (file.startsWith('scripts/snapshots/')) return true

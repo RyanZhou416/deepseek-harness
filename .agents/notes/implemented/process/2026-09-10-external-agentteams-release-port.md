@@ -8,13 +8,13 @@ English | [中文](2026-09-10-external-agentteams-release-port.zh.md)
 
 The external AgentTeams plugin retains one Promise chain per team lock key unless the final owner deletes its settled queue entry. Long-running profiles that create many teams therefore accumulate process memory even after those teams finish. The plugin also consumes pre-stable DSH Agent setup, Session access, Host delivery, Web client, and profile composition APIs, so installing its upstream npm candidate directly can lose fork behavior or combine incompatible DSH packages.
 
-The fork additionally relies on cold Captain mailbox recovery and bounded unread-mailbox projections. Upstream v0.1.18 owns nearest-step member delivery, retired-member cleanup, fallback persistence, parked-attempt recovery, and task-attempt correction, so a source replacement must distinguish those upstream guarantees from the smaller private layer.
+The fork additionally relies on cold Captain mailbox recovery and bounded unread-mailbox projections. Upstream v0.1.19 owns nearest-step member delivery, retired-member cleanup, fallback persistence, parked-attempt recovery, task-attempt correction, member-start recovery, and captain-only task amendment, so a source replacement must distinguish those upstream guarantees from the smaller private layer.
 
 ## Decision
 
-The fork vendors the exact external tag `v0.1.18` under [`fork-plugins/dsh-agent-teams`](../../../../fork-plugins/dsh-agent-teams) and distributes the private `0.1.18-dsh016alpha1.1` artifact only for DSH `0.1.6-alpha.1`. Its manifest, peer declarations, development dependencies, pnpm overrides, lockfile, compatibility policy, setup scripts, and checked-in SHA-256 all identify that exact pair.
+The fork vendors the exact external tag `v0.1.19` under [`fork-plugins/dsh-agent-teams`](../../../../fork-plugins/dsh-agent-teams) and distributes the private `0.1.19-dsh016alpha2.1` artifact only for DSH `0.1.6-alpha.2`. Its manifest, peer declarations, development dependencies, pnpm overrides, lockfile, compatibility policy, setup scripts, and checked-in SHA-256 all identify that exact pair.
 
-The runtime keeps v0.1.18 scheduling, next-step delivery, retirement, task correction, and final-tail deletion in `withTeamLock()`. The DSH 0.1.6 port initializes members through the awaited `agent/created` event, reads current Session events through `ownEvents()`, uses the unified Host Queue/Steer adapter, cold-resumes an inactive Captain for durable mailbox delivery, and retains the bounded unread-mailbox cache listed in [`FORK_MAINTENANCE.md`](../../../../FORK_MAINTENANCE.md#local-agentteams-package).
+The runtime keeps v0.1.19 scheduling, next-step delivery, retirement, task correction, and final-tail deletion in `withTeamLock()`. The DSH 0.1.6 port initializes members through the awaited `agent/created` event, reads current Session events through `ownEvents()`, uses the unified Host Queue/Steer adapter, cold-resumes an inactive Captain for durable mailbox delivery, and retains the bounded unread-mailbox cache listed in [`FORK_MAINTENANCE.md`](../../../../FORK_MAINTENANCE.md#local-agentteams-package). Its Web client derives the selected Session from `mainView` retention and opens member transcripts through `uiWorkspace` with a durable subagent address.
 
 Profile installation uses the checked-in artifact rather than npm `latest` or `next`. It changes executable plugin code only; workspace `.agent-teams` records, Sessions, attachments, and credentials remain untouched. A profile restart is required before the new code is active.
 
@@ -22,9 +22,9 @@ The imported plugin source tree retains upstream documentation, release evidence
 
 ## Alternatives considered
 
-**Install upstream `v0.1.18` directly.** Rejected because its published compatibility matrix stops at DSH `0.1.5-rc.1`, and its package does not carry this fork's awaited creation adapter, cold Captain delivery, or unread-cache guarantee.
+**Install upstream `v0.1.19` directly.** Rejected because its published package does not target the exact DSH Alpha.2 cohort or carry this fork's awaited creation adapter, cold Captain delivery, unread-cache guarantee, and Alpha.2 Web navigation port.
 
-**Keep the v0.1.16 fork and patch only DSH compatibility.** Rejected because v0.1.18 owns task correction, dependency-ready startup, stale-message filtering, and stronger retirement cleanup. Keeping the older scheduler would retain defects and enlarge later source comparison.
+**Keep the v0.1.18 fork and patch only DSH compatibility.** Rejected because v0.1.19 owns member-start recovery, repair-scope correction, and captain-only task amendment. Keeping the older scheduler would retain defects and enlarge later source comparison.
 
 **Replace the external plugin with DSH experimental Agent Teams.** Rejected because the two implementations have different tools, persisted state, Web presentation, and operational behavior. The official experimental packages do not migrate or preserve the external plugin's teams.
 

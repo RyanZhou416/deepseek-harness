@@ -11,6 +11,7 @@ const excludedPrefixes = [
   'vendor/',
   'fork-plugins/dsh-agent-teams/',
   'fork-plugins/dsh-context/',
+  'fork-plugins/dsh-plugin-subscriptions/',
   '.agents/notes/archived/',
 ] as const
 

@@ -10,9 +10,9 @@ Status: implemented
 
 ## 决策
 
-DSH 实验性 Agent Teams、其 profile、Bash、PowerShell 与 `tool-jobs` 保持 `dsh-v0.1.6-alpha.1` 的精确上游实现。Fork 不暴露 `forceRunInBackground` 或 `yieldWaitOnNextStep`，也不修改官方 Team mailbox。
+DSH 实验性 Agent Teams、其 profile、Bash、PowerShell 与 `tool-jobs` 保持 `dsh-v0.1.6-alpha.2` 的精确上游实现。Fork 不暴露 `forceRunInBackground` 或 `yieldWaitOnNextStep`，也不修改官方 Team mailbox。
 
-外置 AgentTeams v0.1.18 拥有成员 next-step delivery、inactive Queue delivery、退休清理和 task-attempt 调度。私有插件层只保留 DSH 0.1.6 awaited-creation 兼容、冷 Captain mailbox 恢复、有界未读 mailbox projection 和 Windows directory rename 预算。通用后台任务完成唤醒与 Windows 子进程控制台隔离仍是独立 fork 行为，因为实际 profile 会使用它们。
+外置 AgentTeams v0.1.19 拥有成员 next-step delivery、inactive Queue delivery、退休清理和 task-attempt 调度。私有插件层只保留 DSH 0.1.6 awaited-creation 兼容、冷 Captain mailbox 恢复、有界未读 mailbox projection、Alpha.2 Web 导航和 Windows directory rename 预算。通用后台任务完成唤醒与 Windows 子进程控制台隔离仍是独立 fork 行为，因为实际 profile 会使用它们。
 
 ## 备选方案
 
@@ -20,7 +20,7 @@ DSH 实验性 Agent Teams、其 profile、Bash、PowerShell 与 `tool-jobs` 保�
 
 **在外置插件旁启用官方 Team profile。** 拒绝，因为两种实现使用不同的工具、状态目录、UI 和生命周期策略；同时挂载只会重复协调能力，不能替换外置插件。
 
-**删除全部 Team 相关 fork 行为。** 拒绝，因为冷 Captain 恢复和有界未读 mailbox 读取仍有外置插件的生产 Consumer，v0.1.18 并未提供它们。
+**删除全部 Team 相关 fork 行为。** 拒绝，因为冷 Captain 恢复、有界未读 mailbox 读取和 Alpha.2 Web 导航 adapter 仍有外置插件的生产 Consumer，v0.1.19 并未提供它们。
 
 ## 影响
 

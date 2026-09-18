@@ -17,11 +17,11 @@ import process from 'node:process'
 
 const AGENT_TEAMS = {
   name: '@nanmicoder/dsh-agent-teams',
-  version: '0.1.18-dsh016alpha1.1',
+  version: '0.1.19-dsh016alpha2.1',
 }
 const CONTEXT = {
   name: 'dsh-context',
-  version: '0.52.2-dsh016alpha1.1',
+  version: '0.53.3-dsh016alpha2.1',
   bounds: {
     maxRequestSteps: 300,
     maxKeptTurns: 60,
@@ -31,6 +31,11 @@ const CONTEXT = {
     maxFileOps: 100,
   },
 }
+const SUBSCRIPTIONS = {
+  name: 'dsh-plugin-subscriptions',
+  version: '0.9.2-dsh016alpha2.1',
+}
+const RETIRED_PACKAGES = ['dshmarket']
 
 /** Exit with one concise setup diagnostic. */
 function fail(message) {
@@ -210,6 +215,15 @@ function pinPackageManagerCommand(args) {
   process.stdout.write(`pinned packageManager ${expected}\n`)
 }
 
+function hasPackageCommand(args) {
+  if (args.length !== 2) fail('usage: setup-profile.mjs has-package <profile-package.json> <package>')
+  const [profilePath, name] = args
+  const manifest = readJsonObject(profilePath)
+  const sections = ['dependencies', 'devDependencies', 'optionalDependencies']
+  const installed = sections.some(section => Object.hasOwn(manifest[section] ?? {}, name))
+  process.exit(installed ? 0 : 1)
+}
+
 async function verifyManifestCommand(args) {
   if (args.length !== 2) fail('usage: setup-profile.mjs verify-manifest <name> <version>')
   let source = ''
@@ -230,10 +244,10 @@ async function verifyManifestCommand(args) {
 }
 
 function verifyProfileCommand(args) {
-  if (args.length !== 4) {
-    fail('usage: setup-profile.mjs verify-profile <profile-dir> <agent-teams-tgz> <context-tgz> <package-manager>')
+  if (args.length !== 5) {
+    fail('usage: setup-profile.mjs verify-profile <profile-dir> <agent-teams-tgz> <context-tgz> <subscriptions-tgz> <package-manager>')
   }
-  const [profileDir, agentArtifact, contextArtifact, packageManager] = args
+  const [profileDir, agentArtifact, contextArtifact, subscriptionsArtifact, packageManager] = args
   const manifest = readJson(resolve(profileDir, 'package.json'))
   if (manifest.packageManager !== packageManager) {
     fail(`profile packageManager is ${String(manifest.packageManager)}, expected ${packageManager}`)
@@ -241,7 +255,16 @@ function verifyProfileCommand(args) {
   const expected = [
     { ...AGENT_TEAMS, artifact: agentArtifact },
     { ...CONTEXT, artifact: contextArtifact },
+    { ...SUBSCRIPTIONS, artifact: subscriptionsArtifact },
   ]
+  for (const name of RETIRED_PACKAGES) {
+    for (const section of ['dependencies', 'devDependencies', 'optionalDependencies']) {
+      if (Object.hasOwn(manifest[section] ?? {}, name)) fail(`${name} remains in profile ${section}`)
+    }
+    if ((manifest.dsh?.profile?.bundles ?? []).includes(name)) {
+      fail(`${name} remains in dsh.profile.bundles`)
+    }
+  }
   for (const item of expected) {
     const specifier = manifest.dependencies?.[item.name]
     if (typeof specifier !== 'string' || !specifier.startsWith('file:')) {
@@ -319,6 +342,9 @@ switch (command) {
   case 'pin-package-manager':
     pinPackageManagerCommand(args)
     break
+  case 'has-package':
+    hasPackageCommand(args)
+    break
   case 'verify-manifest':
     await verifyManifestCommand(args)
     break
@@ -332,5 +358,5 @@ switch (command) {
     await verifyDumpCommand(args)
     break
   default:
-    fail('expected resolve-home, resolve-path, verify-sha256, merge-patch, pin-package-manager, verify-manifest, verify-profile, verify-patch, or verify-dump')
+    fail('expected resolve-home, resolve-path, verify-sha256, merge-patch, pin-package-manager, has-package, verify-manifest, verify-profile, verify-patch, or verify-dump')
 }

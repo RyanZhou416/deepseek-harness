@@ -358,7 +358,13 @@ describe('Remote Agent and Session lookup policy', () => {
       inspect,
     })
     const resumedSession = { id: sessionId, header: meta, events: [] } as unknown as import('@deepseek-ai/dsh-session').Session
-    const resumedAgent = { id: sessionId, session: resumedSession, status: 'idle', ctx } as Agent
+    const resumedAgent = {
+      id: sessionId,
+      session: resumedSession,
+      status: 'idle',
+      ctx,
+      inbox: { nextTurn: [], nextStep: [] },
+    } as unknown as Agent
     const release = Promise.withResolvers<undefined>()
     const resume = vi.spyOn(ctx.agents, 'resume').mockImplementation(async () => {
       await release.promise

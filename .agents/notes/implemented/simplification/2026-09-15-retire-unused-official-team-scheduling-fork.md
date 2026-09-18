@@ -10,9 +10,9 @@ The fork added `forceRunInBackground` to Bash and PowerShell, `yieldWaitOnNextSt
 
 ## Decision
 
-DSH experimental Agent Teams, its profile, Bash, PowerShell, and `tool-jobs` retain the exact `dsh-v0.1.6-alpha.1` implementations. The fork does not expose `forceRunInBackground` or `yieldWaitOnNextStep` and does not modify the official Team mailbox.
+DSH experimental Agent Teams, its profile, Bash, PowerShell, and `tool-jobs` retain the exact `dsh-v0.1.6-alpha.2` implementations. The fork does not expose `forceRunInBackground` or `yieldWaitOnNextStep` and does not modify the official Team mailbox.
 
-External AgentTeams v0.1.18 owns member next-step delivery, inactive Queue delivery, retirement cleanup, and task-attempt scheduling. The private plugin layer retains only DSH 0.1.6 awaited-creation compatibility, cold Captain mailbox recovery, bounded unread-mailbox projection, and the Windows directory-rename budget. Generic background-job completion wakeups and Windows subprocess console isolation remain independent fork behavior because the deployed profile consumes them.
+External AgentTeams v0.1.19 owns member next-step delivery, inactive Queue delivery, retirement cleanup, and task-attempt scheduling. The private plugin layer retains only DSH 0.1.6 awaited-creation compatibility, cold Captain mailbox recovery, bounded unread-mailbox projection, Alpha.2 Web navigation, and the Windows directory-rename budget. Generic background-job completion wakeups and Windows subprocess console isolation remain independent fork behavior because the deployed profile consumes them.
 
 ## Alternatives considered
 
@@ -20,7 +20,7 @@ External AgentTeams v0.1.18 owns member next-step delivery, inactive Queue deliv
 
 **Enable the official Team profile beside the external plugin.** Rejected because the implementations use different tools, state directories, UI, and lifecycle policy; mounting both would duplicate coordination rather than replace the external plugin.
 
-**Remove all Team-related fork behavior.** Rejected because cold Captain recovery and bounded unread mailbox reads remain production Consumers in the external plugin and are not provided by v0.1.18.
+**Remove all Team-related fork behavior.** Rejected because cold Captain recovery, bounded unread mailbox reads, and the Alpha.2 Web navigation adapter remain production Consumers in the external plugin and are not provided by v0.1.19.
 
 ## Consequences
 

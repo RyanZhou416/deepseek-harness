@@ -73,7 +73,7 @@ The plugin combines one model-facing Consumer with a narrow Host adapter over ex
 
 ### Source and trust
 
-The message uses the existing `agent-message` relay source with a server-derived `senderSessionId`. Source attribution is provenance, not authority. The first content block identifies the sender and states the no-automatic-reply rule; the second block is the sender-selected text. The target log records the same identified `UserMessage` first in its inbox splice and later as admitted model history.
+The message uses the existing `agent-message` relay source with a server-derived `senderSessionId`. Source attribution records identity; it grants no authority. The first content block identifies the sender and states the no-automatic-reply rule; the second block is the sender-selected text. The target log records the same identified `UserMessage` first in its inbox splice and later as admitted model history.
 
 ### Source map
 

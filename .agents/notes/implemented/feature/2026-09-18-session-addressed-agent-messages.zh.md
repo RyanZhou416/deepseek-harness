@@ -6,7 +6,7 @@ Status: implemented
 
 ## 问题
 
-DSH 提供三种更窄的跨 Session 机制：直接可继续 parent/child 消息、Team mailbox 和只读 Session reference。知道另一 Session id 的普通 Agent 无法在不创建这些关系的情况下向它交付新信息。Host `session.prompt` 接受任意 Session id，也能恢复冷工作，但它把输入记录为人类用户提示词，且不携带发送 Session provenance。把该 Remote 方法直接暴露为模型工具，会让 Agent 编写的内容在持久历史中无法与用户权限区分。
+DSH 提供三种更窄的跨 Session 机制：直接可继续 parent/child 消息、Team mailbox 和只读 Session reference。知道另一 Session id 的普通 Agent 无法在不创建这些关系的情况下向它交付新信息。Host `session.prompt` 接受任意 Session id，也能恢复冷工作，但它把输入记录为人类用户提示词，且不携带发送 Session 身份。把该 Remote 方法直接暴露为模型工具，会让 Agent 编写的内容在持久历史中无法与用户权限区分。
 
 目标部署允许跨工作区、lineage 与 Session 角色边界发送消息，包括向自身发送。runtime 目标策略、审批、频率限制和 relay depth 限制因此会违背预期能力。接收方仍需要持久发送者身份，以及一条指导：仅仅收到消息并不授权自动回复、确认、转发或轮询交换。
 
@@ -66,7 +66,7 @@ interface AgentMessageSource {
 
 - Web Agent 可以按确切 id 向无关在线 Agent 与冷普通 Session 交付带来源文本，而无需创建 subagent 或 Team 关系。
 - 用户可以说出独立 Session 名称而无需复制 id；标题查找复用 Web reference 目录，在不激活候选项的情况下过滤委派 child，并让歧义保持可见。
-- 来源 provenance 持久且由服务端推导，但不会向收到的内容授予权限。
+- 来源归因持久且由服务端推导，但不会向收到的内容授予权限。
 - 该机制刻意允许自身消息、跨工作区消息与无界消息图；忽略指导的模型可能创建昂贵循环。
 - 冷 subagent 仍归其现有生命周期所有者，而在线 subagent 是无限制目标。
 - 发送方可以在不唤醒目标的情况下检查持久处理进度与当前前台工具阻塞；`model-context` 刻意不被描述为人类理解。
