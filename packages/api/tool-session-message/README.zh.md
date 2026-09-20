@@ -43,7 +43,7 @@ Web bundle 提供 Agent 注册表、Session Controller、Session-reference resol
 
 ### 查找独立 Session
 
-`session_find` 在官方 Session-reference candidate 目录上执行不区分大小写的子串匹配：最新投影标题、Session id 或工作区路径。它排除调用 Session 及每个持久标记为 `origin: subagent` 的 Session（包括 AgentTeams teammate），但保留普通用户创建的 fork。它不激活冷候选项，并返回其余候选项的确切 id、标题标签、可选 cwd、同工作区标记与创建时间。标题以不可信 JSON 数据渲染。工具会告诉模型把歧义匹配交给用户选择，而不是猜测；subagent 与 teammate 只通过其关系专属工具发现。
+`session_find` 在官方 Session-reference candidate 目录上执行不区分大小写的子串匹配：最新投影标题、Session id 或工作区路径。它排除调用 Session 及每个持久标记为 `origin: subagent` 的 Session（包括 AgentTeams teammate），但保留普通用户创建的 fork。它不激活冷候选项，并返回其余候选项的确切 id、标题标签、可选显示标题、可选 cwd、同工作区标记与创建时间。标题以不可信 JSON 数据渲染。工具会告诉模型把歧义匹配交给用户选择，而不是猜测；subagent 与 teammate 只通过其关系专属工具发现。
 
 ### 投递
 

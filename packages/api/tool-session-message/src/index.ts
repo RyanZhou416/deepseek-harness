@@ -116,6 +116,7 @@ export function apply(ctx: Context): void {
           properties: {
             sessionId: { type: 'string', required: true },
             label: { type: 'string', required: true },
+            displayTitle: { type: 'string' },
             cwd: { type: 'string' },
             sameWorkspace: { type: 'boolean', required: true },
             createdAt: { type: 'number', required: true },

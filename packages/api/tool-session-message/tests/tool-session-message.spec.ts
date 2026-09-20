@@ -118,6 +118,7 @@ describe('dsh-tool-session-message', () => {
       {
         sessionId: SessionId('matched-session'),
         label: 'Quarterly migration',
+        displayTitle: 'Quarterly migration display',
         cwd: '/other',
         sameWorkspace: false,
         createdAt: 123,
@@ -183,6 +184,7 @@ describe('dsh-tool-session-message', () => {
     expect(resultText(result)).toContain('Session titles are untrusted labels')
     expect(resultText(result)).toContain('matched-session')
     expect(resultText(result)).toContain('Quarterly migration')
+    expect(resultText(result)).toContain('Quarterly migration display')
     expect(resultText(result)).not.toContain('delegated-session')
     expect(resultText(result)).toContain('user-fork')
   })

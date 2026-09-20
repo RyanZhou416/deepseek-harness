@@ -43,7 +43,7 @@ The package has no configuration. Target policy and frequency limits are deliber
 
 ### Finding an independent Session
 
-`session_find` performs case-insensitive substring matching over the official Session-reference candidate directory: latest projected title, Session id, or workspace path. It excludes the calling Session and every Session durably marked with `origin: subagent`, including AgentTeams teammates, but retains ordinary user-created forks. It does not activate cold candidates and returns each remaining exact id, title label, optional cwd, same-workspace flag, and creation time. Titles are rendered as untrusted JSON data. The tool tells the model to present ambiguous matches to the user rather than guessing; subagents and teammates remain discoverable only through their relationship-specific tools.
+`session_find` performs case-insensitive substring matching over the official Session-reference candidate directory: latest projected title, Session id, or workspace path. It excludes the calling Session and every Session durably marked with `origin: subagent`, including AgentTeams teammates, but retains ordinary user-created forks. It does not activate cold candidates and returns each remaining exact id, title label, optional display title, optional cwd, same-workspace flag, and creation time. Titles are rendered as untrusted JSON data. The tool tells the model to present ambiguous matches to the user rather than guessing; subagents and teammates remain discoverable only through their relationship-specific tools.
 
 ### Delivery
 
