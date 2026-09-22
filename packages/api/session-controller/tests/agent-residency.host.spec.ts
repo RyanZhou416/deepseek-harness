@@ -6,7 +6,9 @@ import { SessionPersistenceRevision } from '@deepseek-ai/dsh-session-persistence
 import TypertRegistry from '@deepseek-ai/dsh-typert-registry'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { ApiSessionAgentController } from '../src/agent.ts'
+import { SessionHistoryController } from '../src/history.ts'
 import SessionController from '../src/index.ts'
+import { installSessionReadTestServices } from './test-remote.ts'
 
 const roots: Context[] = []
 const sessionId = SessionId('resident-session')
@@ -201,6 +203,38 @@ describe('Session Controller idle Agent residency', () => {
     release()
     await vi.advanceTimersByTimeAsync(100)
     expect(dispose).toHaveBeenCalledOnce()
+  })
+
+  it('unloads an idle Agent behind an open follow and delivers events after reattachment', async () => {
+    vi.useFakeTimers()
+    const { ctx, controller, agent, disposeHandle } = await harness(100)
+    installSessionReadTestServices(ctx)
+    const history = new SessionHistoryController(ctx, (observation) => { observation[Symbol.dispose]() },
+      sessionId => controller.retainForFollower(sessionId))
+    const abort = new AbortController()
+    const iterator = history.follow({ address: { kind: 'session', sessionId } }, abort.signal)[Symbol.asyncIterator]()
+    try {
+      await expect(iterator.next()).resolves.toMatchObject({ done: false, value: { type: 'snapshot' } })
+      const waiting = iterator.next()
+      await vi.advanceTimersByTimeAsync(100)
+      expect(disposeHandle).toHaveBeenCalledOnce()
+      expect(ctx.sessions.get(sessionId)).toBeUndefined()
+
+      const replacement = ctx.sessions.prepare(sessionId, {
+        seed: agent.session.snapshotEvents(),
+        meta: header,
+      })
+      const detach = ctx.sessions.enter(replacement)
+      ctx.sessions.announce(replacement)
+      await expect(waiting).resolves.toMatchObject({ done: false, value: { type: 'event', event: { type: 'session/end-seed', seq: 0 } } })
+      const next = iterator.next()
+      const event = replacement.append('turn/start', { turn: 1 })
+      await expect(next).resolves.toEqual({ done: false, value: { type: 'event', event } })
+      detach()
+    } finally {
+      abort.abort()
+      await iterator.return?.()
+    }
   })
 
   it('reschedules the parent when its last owned child leaves', async () => {

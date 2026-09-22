@@ -88,6 +88,18 @@ Alpha.2 官方 `packages/llm/token-meter/src/index.ts` 保存精确 consumed off
 
 该优化不改变 JSONL/Zstd 文件格式。上游替代必须能识别 append、replace、delete，并且不能让一个 caller 的取消终止所有并发 caller。
 
+#### Decoded cold-log retention
+
+`packages/session/session-persistence-jsonl/src/index.ts` 的 revision-keyed `coldLogMemo` 最多保留两份已解码日志，默认 `coldLogMemoRetentionMs=10000`；命中会重置空闲计时，过期、写入失效、LRU 淘汰和插件卸载都会释放引用及 timer。`0` 禁用 completed-result memo，当前格式的单个 read handle 因而可能重复解码。read-only 历史迁移仍复用 in-flight preparation，紧接着的 observe-to-resume 交接仍可共享一次解码；超过空闲窗口后重新解码。
+
+上游替代必须同时保持 revision 校验、交接期复用、空闲时间与条目数上限、失效和卸载清理；仅限制条目数会让两份数百 MiB 的历史无限期驻留。此项只改变内存留存，不改变 Session 文件或 migration 发布规则。
+
+#### Cold Session observation retention
+
+`packages/session-query/session-query/src/observation.ts` 与 `packages/session-query/session-query-sqlite/src/index.ts` 在既有五条目 LRU 上增加 `preparedSessionCacheMaxArtifactBytes=4194304`：first-party persistence 报告的物理文件超过门槛时照常读取，但最后一个观察租约释放后不再缓存完整 prepared Session。Session 转为 live 时立即撤掉同 id 的冷缓存引用；已经发出的观察租约仍持有自己的精确 cut。未报告文件大小的 provider 仍由条目数限制。
+
+上游替代必须保留完整读取、revision/实例匹配、活跃租约独立性、live 切换失效和大文件不长期缓存；物理文件门槛不等于解码后 heap 上限。
+
 #### SQLite live search and bounded pages
 
 `packages/session-query/session-query/src/documents.ts` 与 `packages/session-query/session-query-sqlite/src/index.ts` 用 live Session object identity、event count 和 canonical surface replacement generation 区分 append-only suffix 与 replacement。安全 append 只索引新增 documents；replacement 或 lifecycle 变化执行完整 fold。
@@ -98,11 +110,17 @@ Session search 和 event search 使用 exact-generation/request/cursor key 的 i
 
 #### Idle Web Agent eviction
 
-`packages/api/session-controller/src/agent.ts`、`index.ts`、`history.ts` 和 `commands.ts` 让 Session Controller 持有其 create/resume/fork 的 `AgentHandle`。默认 `idleSessionRetentionMs=300000`；只有 durable、unfollowed、idle、无 pending inbox、无 live child、无 running/stopping job 的 owned Agent 才进入计时。
+`packages/api/session-controller/src/agent.ts`、`index.ts`、`history.ts` 和 `commands.ts` 让 Session Controller 持有其 create/resume/fork 的 `AgentHandle`。默认 `idleSessionRetentionMs=300000`；只有 durable、idle、无 pending inbox、无 live child、无 running/stopping job 的 owned Agent 才进入计时。history follower 仅在开场帧交付期间暂时阻止计时，不再使已打开的空闲 Session 永久驻留。
 
 到期路径先 `sessions.flush()`，再验证 persistence snapshot，最后只 dispose Controller 自己持有的 handle；Session list row 与磁盘日志保留，下次操作 cold resume。无 persistence 时不淘汰，配置 `0` 可禁用。它是 residency 回收，不是 Agent 并发限制。
 
-上游替代必须包含 follower/child/inbox/job exclusions、flush、持久化证明、list row 保留和 cold resume；简单 LRU 或无证明的 timer dispose 不等价。
+上游替代必须保持 opening-only follower pin、child/inbox/job exclusions、flush、持久化证明、list row 保留和 cold resume；简单 LRU 或无证明的 timer dispose 不等价。
+
+#### History follow opening ownership
+
+`packages/api/session-controller/src/history.ts` 在交付首帧前完成完整历史观察与 message-aligned page，首帧只携带所需页面、header 和 projection baseline。完整观察在 generator 长期等待事件前释放；prepared Session 的独立 promotion 租约只保留到首帧交付并转交后台激活，取消或同步激活失败会释放该租约。首帧交付后 follower 放开 Agent residency pin，仍监听 `session/event`、`session/created` 与可选的 Assistant frame，因此空闲 Agent 淘汰及之后冷恢复不会截断历史流。
+
+上游替代必须验证首帧 cut、帧 ordinal、后续事件连续性、开场取消和 promotion 失败的单次释放；把 `using` 观察留在 async generator 的长期循环中会重新持有整份历史。
 
 #### Reference-owned Client Sessions
 
@@ -269,8 +287,11 @@ Profile 注册 `dsh-sdk-process-raw` 和 `subagent_process`：SDK profile、独�
 | Token meter direct-event fast path | Replaced by alpha.2 indexed reads | Do not restore whole-log fallback |
 | Frozen persistence enqueue and O(1) batch | Preserve | Require identical ownership and failed-write ordering |
 | JSONL metadata revision cache/shared scan | Preserve | Require append/replace/delete and caller-cancellation equivalence |
+| Decoded cold-log idle expiry | Preserve | Require two-entry and idle-time bounds, revision-safe handoff reuse, mutation invalidation and timer cleanup |
+| Cold Session large-artifact cache bypass | Preserve | Require physical-size limit, exact revision/lease ownership and live-transition invalidation |
 | SQLite suffix indexing/bounded page LRU | Preserve | Require canonical replacement detection and bounded detached cache |
-| Five-minute idle Agent eviction | Preserve | Require flush + persistence proof + exclusions + cold resume |
+| Five-minute idle Agent eviction | Preserve | Require opening-only follower pin, child/inbox/job exclusions, flush + persistence proof and cold resume |
+| History follow opening release | Preserve | Require bounded opening output, full-observation release, promotion ownership and gap-free delivery across eviction |
 | Reference-owned Client Session generations | Replaced by alpha.2 | Keep official final-release withdrawal and projection-store retention; do not restore `suspendHistory()` |
 | 20k final-message packed rebase | Replaced by alpha.2 cursorless Assistant frames | Keep official transient-stream settlement; do not restore scalar chunk accumulation |
 | Tool output/card lazy calculation | Ported onto alpha.2 | Retain only output/card laziness not supplied by official input-body deferral |
@@ -329,13 +350,19 @@ corepack pnpm@11.7.0 install --frozen-lockfile
 
 pnpm exec vitest run packages/session/session-persistence-jsonl/tests/jsonl.spec.ts packages/session/session-persistence-jsonl/tests/zstd.spec.ts packages/session-query/session-query/tests/search-helpers.spec.ts packages/session-query/session-query-sqlite/tests/sqlite.spec.ts
 
+pnpm exec vitest run packages/session/session-persistence-jsonl/tests/multi-edge-publication.spec.ts packages/session-query/session-query/tests/observation.spec.ts packages/session-query/session-query/tests/session-query.spec.ts
+
 pnpm exec vitest run packages/api/session-controller/tests/agent-residency.host.spec.ts packages/api/session-controller/tests/session.client.spec.ts packages/api/session-controller/tests/sessions-service.client.spec.ts packages/client/ui-tool/tests/tool-row.client.spec.tsx packages/client/ui-tool/tests/tool-row-lazy.client.spec.tsx packages/client/ui-settings-general/tests/connection-overlay.client.spec.tsx
+
+pnpm exec vitest run packages/api/session-controller/tests/session-history-journal.host.spec.ts packages/api/session-controller/tests/transport.host.spec.ts packages/api/session-controller/tests/session-cold.host.spec.ts
 
 pnpm exec vitest run packages/jobs/jobs-local/tests/jobs.spec.ts packages/jobs/jobs-local/tests/loader-composition.spec.ts packages/jobs/tool-jobs/tests/tool-jobs.spec.ts packages/subagent/subagent/tests/continuation.spec.ts packages/subagent/subagent/tests/control.spec.ts packages/subagent/tool-subagent-control/tests/tool-subagent-control.spec.ts packages/experimental/agent-team/tests/team.spec.ts packages/experimental/agent-team-profile/tests/profile.spec.ts packages/shell/tool-pwsh/tests/tools.spec.ts
 
 pnpm exec vitest run packages/api/session-controller/tests/queue-store.client.spec.ts packages/api/session-controller/tests/transport.client.spec.ts packages/client/ui-conversation/tests/queue-dock.client.spec.tsx
 
 pnpm exec vitest run --config vitest.web.config.ts apps/web/tests/subagent-interrupt.e2e.ts
+
+pnpm exec vitest run --config vitest.web.config.ts apps/web/tests/seeded-history.e2e.ts -t 'serves the projections baseline|lists the seeded session cold'
 ```
 
 Windows 的 Bash suite 被官方 Vitest 配置排除；它需要 Linux/macOS lane 或专门的 POSIX shell 环境，不能以 PowerShell mirror 结果冒充 Bash 实测。
@@ -379,7 +406,7 @@ corepack pnpm@11.7.0 verify
 
 ## Known limitations
 
-- 活跃 Agent 的 Host `Session.log` 仍完整常驻；一个持续输出的单会话仍可能线性增长。当前改动不是 active-log paging。
+- 运行中的 Agent 仍完整持有 Host `Session.log`；一个持续输出的单会话仍可能线性增长。`SessionHandle.read(offset, length)` 目前也先解码整份 JSONL/Zstd 再切片，同步历史消费者尚未完成迁移；以上留存修复不是运行中 Agent 的 event-level paging。后续实现须先满足[同步事件读取弃用约束](.agents/notes/implemented/architecture/2026-09-09-deprecate-synchronous-session-event-reads.md)，不能只给 `read()` 增加分页参数。
 - Alpha.2 已显著降低长会话初始化、流式更新、代码高亮、布局与导航预览成本，但仍不等价于完整 variable-height Chat virtualization；Tool lazy 也不能替代它。
 - Host 的普通 Agent loop 仍主要运行在一个 Node event loop；process worker 是显式 one-shot 旁路，不是透明的全局多核调度。
 - 第一次不同的 broad SQLite query 仍可能同步占用一个 Host thread。

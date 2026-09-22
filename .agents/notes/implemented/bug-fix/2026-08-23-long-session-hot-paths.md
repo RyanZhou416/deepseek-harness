@@ -24,7 +24,7 @@ The SQLite session-query provider identifies each live Session object weakly and
 
 JSONL persistence caches each validated header against the exact stat-derived selected-generation revision. Concurrent `list()` requests share one metadata scan, while cancellation abandons only the caller's wait. A changed artifact revision forces validation and successful discovery prunes absent entries.
 
-Session Controller owns every Agent handle it creates or resumes. A durable idle Agent remains resident while a history follower, pending inbox item, owned child, active job, or running state needs it. After the configured five-minute retention, the controller flushes the Session, verifies a persistence snapshot, and disposes only its owned handle; the list row and log remain available for normal cold resume.
+Session Controller owns every Agent handle it creates or resumes. A durable idle Agent remains resident while pending inbox input, an owned child, an active job, or running state needs it. A history follower holds the Agent through opening delivery, then releases the complete observation and keeps receiving live events across idle Agent eviction and cold resume. After the configured five-minute retention, the controller flushes the Session, verifies a persistence snapshot, and disposes only its owned handle; the list row and log remain available for normal cold resume.
 
 Collapsed Tool rows derive only their lightweight title, summary, state, and presence flags. The expanded body owns cached getters for formatted arguments, flattened results, recovery text, and specialized card models, so hidden detail cost is paid at most once and only after expansion.
 

@@ -48,6 +48,7 @@ interface StoredEntry {
   header: SessionHeader
   events: SessionEvent[]
   revision: string
+  sizeBytes?: number
 }
 
 interface StubCounters {
@@ -92,6 +93,7 @@ function stubPersistence(
     return Promise.resolve({
       header: structuredClone(entry.header),
       revision: SessionPersistenceRevision(entry.revision),
+      ...entry.sizeBytes === undefined ? {} : { sizeBytes: entry.sizeBytes },
     })
   }
   const open = (id: SessionIdType, access: SessionAccess): Promise<SessionHandle> => {
@@ -281,6 +283,66 @@ describe('SessionObservationReader cold path', () => {
 
     expect(counters).toEqual({ stat: 2, open: 1, read: 1 })
     expect(second.events).toBe(first.events)
+    await ctx.fiber.dispose()
+  })
+
+  it('keeps a source at the artifact-byte limit and evicts a source that grows oversized', async () => {
+    const ctx = await readerContext()
+    const small = header('cache-small')
+    const large = header('cache-large')
+    const store = new Map([
+      [small.id, { header: small, events: [messageEvent(0, 'small')], revision: 'r1', sizeBytes: 100 }],
+      [large.id, { header: large, events: [messageEvent(0, 'large')], revision: 'r1', sizeBytes: 101 }],
+    ])
+    const counters = { stat: 0, open: 0, read: 0 }
+    ctx.provide('sessionPersistence', stubPersistence(store, counters))
+    const reader = new SessionObservationReader(ctx, 5, 100)
+
+    {
+      using first = await reader.read(small.id, { projectionMode: 'none' })
+      using second = await reader.read(small.id, { projectionMode: 'none' })
+      expect(second.events).toBe(first.events)
+    }
+    {
+      using first = await reader.read(large.id, { projectionMode: 'none' })
+      using second = await reader.read(large.id, { projectionMode: 'none' })
+      expect(second.events).not.toBe(first.events)
+    }
+    const grown = store.get(small.id)
+    if (grown === undefined) throw new Error('missing stored test session')
+    grown.sizeBytes = 101
+    grown.revision = 'r2'
+    {
+      using first = await reader.read(small.id, { projectionMode: 'none' })
+      using second = await reader.read(small.id, { projectionMode: 'none' })
+      expect(second.events).not.toBe(first.events)
+    }
+    expect(counters.read).toBe(5)
+    await ctx.fiber.dispose()
+  })
+
+  it('drops a prepared cache entry when its Session becomes live', async () => {
+    const ctx = await readerContext()
+    const meta = header('cache-promoted')
+    const store = new Map([[meta.id, { header: meta, events: [messageEvent(0, 'cold')], revision: 'r1' }]])
+    const counters = { stat: 0, open: 0, read: 0 }
+    ctx.provide('sessionPersistence', stubPersistence(store, counters))
+    const reader = new SessionObservationReader(ctx)
+    using cold = await reader.read(meta.id, { projectionMode: 'none' })
+    expect(cold.source).toBe('prepared')
+    const oldEvents = cold.events
+
+    let ownerCtx!: Context
+    const scope = await ctx.plugin(Object.assign((inner: Context) => { ownerCtx = inner }, { inject: ['sessions'] }))
+    ownerCtx.sessions.create(meta.id, { meta: { createdAt: meta.createdAt, cwd: '/workspace' } })
+    using pinned = cold.retain()
+    expect(pinned.events).toBe(oldEvents)
+    await scope.dispose()
+    {
+      using coldAgain = await reader.read(meta.id, { projectionMode: 'none' })
+      expect(coldAgain.source).toBe('prepared')
+    }
+    expect(counters.read).toBe(2)
     await ctx.fiber.dispose()
   })
 

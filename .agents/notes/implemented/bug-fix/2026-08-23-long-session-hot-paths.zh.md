@@ -24,7 +24,7 @@ SQLite session-query provider 通过弱引用身份区分实时 Session，并使
 
 JSONL persistence 按精确 stat 派生的 selected-generation revision 缓存每个已验证 header。并发 `list()` 请求共享一次 metadata scan，调用方取消只放弃自己的等待。artifact revision 变化会强制重新验证，成功的 discovery 会清理已经不存在的条目。
 
-Session Controller 拥有其创建或恢复的每个 Agent handle。只要 history follower、待处理 inbox、owned child、活跃 job 或 running 状态仍需要它，已经持久化的空闲 Agent 就继续驻留。达到配置的五分钟保留时间后，controller flush Session、确认 persistence snapshot，并且只 dispose 自己持有的 handle；列表行与日志继续保留，之后可正常冷恢复。
+Session Controller 拥有其创建或恢复的每个 Agent handle。只要待处理 inbox 输入、owned child、活跃 job 或 running 状态仍需要它，已经持久化的空闲 Agent 就继续驻留。历史 follower 仅在开场帧交付前保留 Agent，随后释放完整观察，并在空闲 Agent 淘汰和冷恢复期间继续接收实时事件。达到配置的五分钟保留时间后，controller flush Session、确认 persistence snapshot，并且只 dispose 自己持有的 handle；列表行与日志继续保留，之后可正常冷恢复。
 
 折叠的 Tool 行只派生轻量 title、summary、state 与 presence flag。展开 body 拥有 formatted arguments、flattened results、recovery text 和专用 card model 的缓存 getter，因此隐藏细节只会在展开后支付一次成本。
 

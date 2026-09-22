@@ -1228,6 +1228,8 @@ describe('session-query exact reads', () => {
       { persistedReadConcurrency: Number.MAX_SAFE_INTEGER + 1 },
       { preparedSessionCacheSize: 0 },
       { preparedSessionCacheSize: Number.MAX_SAFE_INTEGER + 1 },
+      { preparedSessionCacheMaxArtifactBytes: -1 },
+      { preparedSessionCacheMaxArtifactBytes: Number.MAX_SAFE_INTEGER + 1 },
     ]) {
       const invalid = new Context()
       await invalid.plugin(SessionStore)

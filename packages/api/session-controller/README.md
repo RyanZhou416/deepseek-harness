@@ -63,12 +63,12 @@ References keep local Session data, scoped Contexts, and history streams alive, 
 
 | Field | Default | Meaning |
 |---|---:|---|
-| `idleSessionRetentionMs` | `300000` | Milliseconds an owned, durable, unfollowed idle Agent remains resident; `0` disables eviction |
+| `idleSessionRetentionMs` | `300000` | Milliseconds an owned, durable idle Agent remains resident; `0` disables eviction |
 | `nativeOpen` | platform-detected | Whether Session workspace paths can be handed to a native desktop opener |
 
 The generated [configuration catalog](../../../docs/config-catalog.md#deepseek-aidsh-api-session-controller) is the exhaustive source for accepted fields and their JSDoc.
 
-An owned Agent becomes eligible only when it is idle, has no follower, pending inbox input, live child, or running or stopping job. At expiry, the controller flushes the Session, confirms it through persistence, and disposes only its own live handle; the Session list row and durable history remain, and the next activating operation resumes it cold. Without persistence the Agent stays resident.
+An owned Agent becomes eligible when it is idle and has no pending inbox input, live child, or running or stopping job. A history follower holds the Agent only through delivery of its opening frame; it releases the complete Session observation and keeps its event listeners active. At expiry, the controller flushes the Session, confirms it through persistence, and disposes only its own live handle; the Session list row, open follow, and durable history remain, and the next activating operation resumes it cold. Without persistence the Agent stays resident.
 
 -----
 

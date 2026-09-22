@@ -95,6 +95,55 @@ function pageEvents(page: SessionPage): SessionWireEvent[] {
 }
 
 describe('Session history raw journal', () => {
+  it('releases the complete opening observation while its follow remains active', async () => {
+    const { ctx } = await harness()
+    const session = ctx.sessions.create(undefined, { meta: { cwd: '/workspace' } })
+    const originalObserve = ctx.sessionQuery.observeSession.bind(ctx.sessionQuery)
+    const disposed = vi.fn()
+    vi.spyOn(ctx.sessionQuery, 'observeSession').mockImplementation(async (...args) => {
+      const observed = await originalObserve(...args)
+      return new Proxy(observed, {
+        get(target, key, receiver) {
+          if (key === Symbol.dispose) return () => { disposed(); target[Symbol.dispose]() }
+          return Reflect.get(target, key, receiver) as unknown
+        },
+      })
+    })
+    const history = new SessionHistoryController(ctx, (observation) => { observation[Symbol.dispose]() })
+    const abort = new AbortController()
+    const iterator = history.follow({ address: { kind: 'session', sessionId: session.id } }, abort.signal)[Symbol.asyncIterator]()
+    try {
+      await expect(iterator.next()).resolves.toMatchObject({ done: false, value: { type: 'snapshot' } })
+      expect(disposed).toHaveBeenCalledOnce()
+      const next = iterator.next()
+      const event = session.append('turn/start', { turn: 1 })
+      await expect(next).resolves.toEqual({ done: false, value: { type: 'event', event } })
+    } finally {
+      await disposeFollow(ctx, iterator, abort)
+    }
+  })
+
+  it('releases Agent opening retention after delivering the first follow frame', async () => {
+    const { ctx } = await harness()
+    const session = ctx.sessions.create(undefined, { meta: { cwd: '/workspace' } })
+    const release = vi.fn()
+    const retain = vi.fn(() => release)
+    const history = new SessionHistoryController(ctx, (observation) => { observation[Symbol.dispose]() }, retain)
+    const abort = new AbortController()
+    const iterator = history.follow({ address: { kind: 'session', sessionId: session.id } }, abort.signal)[Symbol.asyncIterator]()
+    try {
+      await expect(iterator.next()).resolves.toMatchObject({ done: false, value: { type: 'snapshot' } })
+      expect(retain).toHaveBeenCalledOnce()
+      expect(release).not.toHaveBeenCalled()
+      const next = iterator.next()
+      const event = session.append('turn/start', { turn: 1 })
+      await expect(next).resolves.toEqual({ done: false, value: { type: 'event', event } })
+      expect(release).toHaveBeenCalledOnce()
+    } finally {
+      await disposeFollow(ctx, iterator, abort)
+    }
+  })
+
   it('opens an empty opted-in Assistant baseline before any live attempt exists', async () => {
     const { ctx } = await harness()
     const session = ctx.sessions.create(undefined, { meta: { cwd: '/workspace' } })

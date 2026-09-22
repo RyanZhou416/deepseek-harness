@@ -59,6 +59,7 @@ kind: "package-reference"
 | `readWindowMax` | `50` | `readEvent` 接受的 `before`/`after` 原始事件数上限 |
 | `persistedReadConcurrency` | `4` | 一次批量标题读取中的并发持久化日志读取数 |
 | `preparedSessionCacheSize` | `5` | 为跨 `observeSession` 读取复用而保留的冷 prepared-Session 观察数 |
+| `preparedSessionCacheMaxArtifactBytes` | `4194304` | 冷观察缓存保留的最大 Session 物理文件字节数；更大的日志仍可读取 |
 
 ### 失败与恢复
 
@@ -108,7 +109,7 @@ kind: "package-reference"
 
 ### 观察缓存
 
-`observeSession` 不经过列表预检直接构建定点观察。实时观察以当前日志长度固定 cut，并在首次读取时才物化 `events`，因此只需要 header、cursor 或 projection 的消费者永远不会复制日志；日志只会追加，所以延后的首次读取得到的仍然正好是该前缀。冷路径先对存储会话执行 `stat`，再查询自有的有界缓存，缓存键为持久化实例加 `stat` 修订：修订未变则复用已恢复的未发布 Session，不再重读日志；修订变化或持久化实例被替换则经句柄 seam 重新加载并替换条目。缓存保留 `preparedSessionCacheSize` 个条目并按最久未用淘汰，被活跃观察租约钉住的条目从不被淘汰；读取中途转为实时的会话会重试实时路径。
+`observeSession` 不经过列表预检直接构建定点观察。实时观察以当前日志长度固定 cut，并在首次读取时才物化 `events`，因此只需要 header、cursor 或 projection 的消费者永远不会复制日志；日志只会追加，所以延后的首次读取得到的仍然正好是该前缀。冷路径先对存储会话执行 `stat`，再查询自有缓存，缓存键为持久化实例加 `stat` 修订：修订未变则复用已恢复的未发布 Session，不再重读日志；修订变化或持久化实例被替换则经句柄 seam 重新加载并替换条目。缓存至多保留 `preparedSessionCacheSize` 个未被租约钉住、且报告的物理文件大小不超过 `preparedSessionCacheMaxArtifactBytes` 的条目；未报告大小的后端仅受条目数限制。活跃观察租约保留精确 cut，直到释放；Session 转为实时状态时删除其冷缓存条目。物理文件大小限制的是复用，并非解码后的堆字节数；压缩日志在被活跃观察期间可能占用更多内存。
 
 ### 读取与追踪
 

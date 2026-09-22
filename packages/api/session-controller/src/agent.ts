@@ -235,8 +235,8 @@ export class ApiSessionAgentController {
   }
 
   /**
-   * Keep one addressed Agent resident while a live history follower is attached.
-   * @param sessionId - ordinary Session identity whose follower is active.
+   * Keep one addressed Agent resident until a history follower receives its opening frame.
+   * @param sessionId - ordinary Session identity whose follower is opening.
    * @returns an idempotent release callback.
    */
   retainForFollower(sessionId: SessionId): () => void {

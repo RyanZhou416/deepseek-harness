@@ -210,7 +210,7 @@ export interface Config {
 ```ts config-catalog
 /** Session Controller deployment policy. */
 export interface Config {
-  /** Milliseconds an owned, durable, unfollowed idle Session remains live; zero disables eviction. */
+  /** Milliseconds an owned, durable idle Session remains live after activity; zero disables eviction. */
   readonly idleSessionRetentionMs?: number
   /** Override platform desktop-opener detection. */
   readonly nativeOpen?: boolean
@@ -2209,13 +2209,15 @@ export interface Config {
   root: string
   /** Physical encoding; defaults to checksummed Zstandard frames. */
   compression?: JsonlCompression
+  /** Idle milliseconds a decoded cold log remains available for immediate reuse; zero disables the memo. Defaults to 10000. */
+  coldLogMemoRetentionMs?: number
 }
 
 /** Physical encoding selected for JSONL session artifacts. */
 export type JsonlCompression = 'zstd' | 'none'
 ```
 
-来源：[`packages/session/session-persistence-jsonl/src/index.ts:88`](../packages/session/session-persistence-jsonl/src/index.ts)
+来源：[`packages/session/session-persistence-jsonl/src/index.ts:89`](../packages/session/session-persistence-jsonl/src/index.ts)
 
 <a id="deepseek-aidsh-session-projection-cache"></a>
 
@@ -2276,6 +2278,8 @@ export interface Config extends SessionQueryConfig {
   persistedReadConcurrency?: number
   /** Maximum cold prepared-Session observations the inherited reader retains for reuse. Defaults to 5. */
   preparedSessionCacheSize?: number
+  /** Maximum physical artifact size retained by the inherited cold reader. Defaults to 4 MiB. */
+  preparedSessionCacheMaxArtifactBytes?: number
 }
 
 /** SQLite module/handle opening phase; `never` disables full-text search entirely. */
@@ -2287,7 +2291,7 @@ export type JournalMode = 'wal' | 'delete' | 'truncate' | 'persist'
 
 Depends on: [`SessionQueryConfig`](../packages/session-query/session-query/src/index.ts)
 
-来源：[`packages/session-query/session-query-sqlite/src/index.ts:93`](../packages/session-query/session-query-sqlite/src/index.ts)
+来源：[`packages/session-query/session-query-sqlite/src/index.ts:94`](../packages/session-query/session-query-sqlite/src/index.ts)
 
 <a id="deepseek-aidsh-session-reference"></a>
 

@@ -11,6 +11,9 @@ export const SESSION_QUERY_DEFAULT_PERSISTED_INSPECT_CONCURRENCY = 4
 /** Default maximum number of cold prepared-Session observations retained for reuse. */
 export const SESSION_QUERY_DEFAULT_PREPARED_SESSION_CACHE_SIZE = 5
 
+/** Largest physical Session artifact cached after a cold observation by default. */
+export const SESSION_QUERY_DEFAULT_PREPARED_SESSION_CACHE_MAX_ARTIFACT_BYTES = 4 * 1024 * 1024
+
 /** Backend-independent configuration inherited by every session-query implementation. */
 export interface Config {
   /** Maximum accepted raw read context on either side. Defaults to 50. */
@@ -23,6 +26,13 @@ export interface Config {
    * against this bound until released. Defaults to 5.
    */
   preparedSessionCacheSize?: number
+  /**
+   * Maximum physical artifact size retained after a cold observation.
+   * Larger artifacts remain readable but release their prepared Session with
+   * the last observation lease. Backends without a size report use the entry
+   * count only. Defaults to 4 MiB; zero disables reuse for sized artifacts.
+   */
+  preparedSessionCacheMaxArtifactBytes?: number
 }
 
 /** Stable machine-routable failure taxonomy for session reads, traces, and search. */

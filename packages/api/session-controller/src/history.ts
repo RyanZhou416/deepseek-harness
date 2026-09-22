@@ -38,6 +38,13 @@ import { SessionAssistantStreamAccumulator } from './assistant-stream.ts'
 const DEFAULT_MAX_MESSAGES = 50
 const MESSAGE_TYPES = new Set(['user/message', 'assistant/message'])
 
+interface FollowOpening {
+  readonly frame: Extract<SessionFollowFrame, { readonly type: 'snapshot' }>
+  readonly cursor: SessionSeqCursor
+  readonly assistantStreamOrdinalCut: number
+  readonly promotion?: SessionObservation
+}
+
 /** Implements cold-safe history operations delegated by the Session Controller. */
 export class SessionHistoryController {
   private readonly closeFollowers = new Set<() => void>()
@@ -46,7 +53,7 @@ export class SessionHistoryController {
   /**
    * @param ctx - Host context carrying Session query and projection services.
    * @param promote - starts ordinary Session activation after snapshot delivery.
-   * @param retain - keeps an addressed Agent resident for the follower lifetime.
+   * @param retain - keeps an addressed Agent resident through opening delivery.
    */
   constructor(
     private readonly ctx: Context,
@@ -177,39 +184,21 @@ export class SessionHistoryController {
       }, { global: true })
     const onAbort = (): void => { notify() }
     signal.addEventListener('abort', onAbort, { once: true })
+    let pendingPromotion: SessionObservation | undefined
     try {
-      using source = await this.sourceFor(address, signal, true)
-      const events = source.events
-      signal.throwIfAborted()
-      const cursor = source.cursor
+      let opening: FollowOpening | undefined = await this.openFollow(request, signal, () => assistantStreamOrdinal)
+      const cursor = opening.cursor
       snapshotCursor = cursor
-      const page = paginate(events, undefined, request.maxMessages ?? DEFAULT_MAX_MESSAGES)
-      const assistantStream = request.assistantStream === true
-        ? this.assistantStreams.get(target)?.snapshot() ?? { revision: 0 }
-        : undefined
-      // The accumulator snapshot and this watermark are synchronous. Frames
-      // through the cut are represented or superseded by that baseline,
-      // including larger revisions from a retired Agent; later revision
-      // resets reach Client continuity validation.
-      const assistantStreamOrdinalCut = assistantStreamOrdinal
-      yield {
-        type: 'snapshot',
-        header: wireHeader(source.header),
-        cursor,
-        records: pageRecords(page.events),
-        hasMore: page.hasMore,
-        projections: source.projections === undefined
-          ? { asOfSeq: cursor, values: {} }
-          : projectionBlock(source.projections),
-        ...assistantStream === undefined ? {} : { assistantStream },
-      }
-      if (address.kind === 'session' && source.source === 'prepared') {
-        const promotion = source.retain()
+      const assistantStreamOrdinalCut = opening.assistantStreamOrdinalCut
+      pendingPromotion = opening.promotion
+      yield opening.frame
+      opening = undefined
+      releaseRetention()
+      if (pendingPromotion !== undefined) {
         try {
-          this.promote(promotion)
-        } catch (error: unknown) {
-          promotion[Symbol.dispose]()
-          throw error
+          this.promoteOpening(pendingPromotion)
+        } finally {
+          pendingPromotion = undefined
         }
       }
       let nextOffset = SessionLogOffset(cursor + 1)
@@ -234,12 +223,60 @@ export class SessionHistoryController {
         yield entryFor(item.event)
       }
     } finally {
+      pendingPromotion?.[Symbol.dispose]()
       releaseRetention()
       this.closeFollowers.delete(close)
       signal.removeEventListener('abort', onAbort)
       disposeCreated()
       disposeEvent()
       disposeAssistantStream?.()
+    }
+  }
+
+  /** Transfer one prepared observation after the opening frame reaches its consumer. */
+  private promoteOpening(observation: SessionObservation): void {
+    try {
+      this.promote(observation)
+    } catch (error: unknown) {
+      observation[Symbol.dispose]()
+      throw error
+    }
+  }
+
+  /** Materialize one bounded opening frame and release its complete history before delivery. */
+  private async openFollow(
+    request: SessionFollowRequest,
+    signal: AbortSignal,
+    ordinal: () => number,
+  ): Promise<FollowOpening> {
+    using source = await this.sourceFor(request.address, signal, true)
+    const events = source.events
+    signal.throwIfAborted()
+    const cursor = source.cursor
+    const page = paginate(events, undefined, request.maxMessages ?? DEFAULT_MAX_MESSAGES)
+    const assistantStream = request.assistantStream === true
+      ? this.assistantStreams.get(addressId(request.address))?.snapshot() ?? { revision: 0 }
+      : undefined
+    // The accumulator snapshot and this watermark are synchronous. Frames
+    // through the cut are represented or superseded by that baseline.
+    const assistantStreamOrdinalCut = ordinal()
+    return {
+      frame: {
+        type: 'snapshot',
+        header: wireHeader(source.header),
+        cursor,
+        records: pageRecords(page.events),
+        hasMore: page.hasMore,
+        projections: source.projections === undefined
+          ? { asOfSeq: cursor, values: {} }
+          : projectionBlock(source.projections),
+        ...assistantStream === undefined ? {} : { assistantStream },
+      },
+      cursor,
+      assistantStreamOrdinalCut,
+      ...request.address.kind === 'session' && source.source === 'prepared'
+        ? { promotion: source.retain() }
+        : {},
     }
   }
 

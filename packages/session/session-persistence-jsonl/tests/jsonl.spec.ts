@@ -1501,6 +1501,86 @@ describe('JsonlSessionPersistence: durability and crash semantics', () => {
     expect(readTally.bySuffix.get(rawLogPath(root, '/work', third.id))).toBe(1)
   })
 
+  it('expires a completed cold-log memo after its idle reuse window', async () => {
+    const ttlRoot = await freshRoot()
+    const ttlCtx = new Context()
+    await ttlCtx.plugin(JsonlSessionPersistence, {
+      root: ttlRoot,
+      compression: 'none',
+      coldLogMemoRetentionMs: 10,
+    })
+    try {
+      const m = meta('memo-idle-expiry', '/work')
+      await writeLog(ttlCtx.sessionPersistence, m, oneTurnLog())
+      const path = rawLogPath(ttlRoot, '/work', m.id)
+      readTally.enabled = true
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+      try {
+        await readAll(ttlCtx.sessionPersistence, m.id)
+        await vi.advanceTimersByTimeAsync(5)
+        await readAll(ttlCtx.sessionPersistence, m.id)
+        expect(readTally.bySuffix.get(path)).toBe(1)
+        await vi.advanceTimersByTimeAsync(5)
+        const memo = (ttlCtx.sessionPersistence as unknown as { coldLogMemo: Map<SessionId, unknown> }).coldLogMemo
+        expect(memo.has(m.id)).toBe(true)
+        await vi.advanceTimersByTimeAsync(5)
+        expect(memo.has(m.id)).toBe(false)
+        await readAll(ttlCtx.sessionPersistence, m.id)
+        expect(readTally.bySuffix.get(path)).toBe(2)
+      } finally {
+        vi.useRealTimers()
+      }
+    } finally {
+      await ttlCtx.fiber.dispose()
+    }
+  })
+
+  it('can disable completed cold-log retention without changing read results', async () => {
+    const disabledRoot = await freshRoot()
+    const disabledCtx = new Context()
+    await disabledCtx.plugin(JsonlSessionPersistence, {
+      root: disabledRoot,
+      compression: 'none',
+      coldLogMemoRetentionMs: 0,
+    })
+    try {
+      const m = meta('memo-disabled', '/work')
+      await writeLog(disabledCtx.sessionPersistence, m, oneTurnLog())
+      readTally.enabled = true
+      const first = await readAll(disabledCtx.sessionPersistence, m.id)
+      const second = await readAll(disabledCtx.sessionPersistence, m.id)
+      expect(second.events).toEqual(first.events)
+      expect(readTally.bySuffix.get(rawLogPath(disabledRoot, '/work', m.id))).toBe(4)
+    } finally {
+      await disabledCtx.fiber.dispose()
+    }
+  })
+
+  it('releases completed cold logs and timers when the backend unloads', async () => {
+    const unloadRoot = await freshRoot()
+    const unloadCtx = new Context()
+    await unloadCtx.plugin(JsonlSessionPersistence, {
+      root: unloadRoot,
+      compression: 'none',
+      coldLogMemoRetentionMs: 60_000,
+    })
+    const internals = unloadCtx.sessionPersistence as unknown as {
+      coldLogMemo: Map<SessionId, unknown>
+      coldLogMemoTimers: Map<SessionId, unknown>
+    }
+    try {
+      const m = meta('memo-unload', '/work')
+      await writeLog(unloadCtx.sessionPersistence, m, oneTurnLog())
+      await readAll(unloadCtx.sessionPersistence, m.id)
+      expect(internals.coldLogMemo.has(m.id)).toBe(true)
+      expect(internals.coldLogMemoTimers.has(m.id)).toBe(true)
+    } finally {
+      await unloadCtx.fiber.dispose()
+    }
+    expect(internals.coldLogMemo.size).toBe(0)
+    expect(internals.coldLogMemoTimers.size).toBe(0)
+  })
+
   it('a handle read retries once when the file revision changes during the read', async () => {
     const m = meta('read-revision-race', '/work')
     await writeLog(ctx.sessionPersistence, m, oneTurnLog())

@@ -18,6 +18,7 @@ import type {
 import SessionQueryEngine, {
   SESSION_QUERY_DEFAULT_PERSISTED_INSPECT_CONCURRENCY,
   SESSION_QUERY_DEFAULT_PREPARED_SESSION_CACHE_SIZE,
+  SESSION_QUERY_DEFAULT_PREPARED_SESSION_CACHE_MAX_ARTIFACT_BYTES,
   SESSION_QUERY_READ_WINDOW_MAX,
   SessionQueryError,
   SessionSearchCursor,
@@ -117,6 +118,8 @@ export interface Config extends SessionQueryConfig {
   persistedReadConcurrency?: number
   /** Maximum cold prepared-Session observations the inherited reader retains for reuse. Defaults to 5. */
   preparedSessionCacheSize?: number
+  /** Maximum physical artifact size retained by the inherited cold reader. Defaults to 4 MiB. */
+  preparedSessionCacheMaxArtifactBytes?: number
 }
 
 interface ResolvedConfig {
@@ -129,6 +132,7 @@ interface ResolvedConfig {
   readWindowMax: number
   persistedReadConcurrency: number
   preparedSessionCacheSize: number
+  preparedSessionCacheMaxArtifactBytes: number
 }
 
 interface ObservedSession {
@@ -274,6 +278,11 @@ export class SqliteSessionQueryEngine extends SessionQueryEngine {
       .min(1)
       .max(Number.MAX_SAFE_INTEGER)
       .default(SESSION_QUERY_DEFAULT_PREPARED_SESSION_CACHE_SIZE),
+    preparedSessionCacheMaxArtifactBytes: z.number()
+      .step(1)
+      .min(0)
+      .max(Number.MAX_SAFE_INTEGER)
+      .default(SESSION_QUERY_DEFAULT_PREPARED_SESSION_CACHE_MAX_ARTIFACT_BYTES),
   })
 
   /** Validated and defaulted backend configuration. */
@@ -1229,6 +1238,8 @@ function resolveConfig(config: Config): ResolvedConfig {
       ?? SESSION_QUERY_DEFAULT_PERSISTED_INSPECT_CONCURRENCY,
     preparedSessionCacheSize: config.preparedSessionCacheSize
       ?? SESSION_QUERY_DEFAULT_PREPARED_SESSION_CACHE_SIZE,
+    preparedSessionCacheMaxArtifactBytes: config.preparedSessionCacheMaxArtifactBytes
+      ?? SESSION_QUERY_DEFAULT_PREPARED_SESSION_CACHE_MAX_ARTIFACT_BYTES,
   }
   if (typeof resolved.path !== 'string' || resolved.path.trim().length === 0) {
     throw invalidConfig('path must not be blank')
@@ -1252,6 +1263,10 @@ function resolveConfig(config: Config): ResolvedConfig {
     || resolved.preparedSessionCacheSize < 1
   ) {
     throw invalidConfig('preparedSessionCacheSize must be a positive safe integer')
+  }
+  if (!Number.isSafeInteger(resolved.preparedSessionCacheMaxArtifactBytes)
+    || resolved.preparedSessionCacheMaxArtifactBytes < 0) {
+    throw invalidConfig('preparedSessionCacheMaxArtifactBytes must be a non-negative safe integer')
   }
   if (resolved.defaultLimit > resolved.maxLimit) {
     throw invalidConfig('defaultLimit must be less than or equal to maxLimit')

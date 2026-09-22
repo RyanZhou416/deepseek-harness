@@ -10,7 +10,11 @@ import type {
 } from '@deepseek-ai/dsh-session-persistence'
 import type { ProjectionSnapshot } from '@deepseek-ai/dsh-session-projection'
 import type {} from '@deepseek-ai/dsh-session-projection-cache'
-import { SESSION_QUERY_DEFAULT_PREPARED_SESSION_CACHE_SIZE, SessionQueryError } from './config.ts'
+import {
+  SESSION_QUERY_DEFAULT_PREPARED_SESSION_CACHE_MAX_ARTIFACT_BYTES,
+  SESSION_QUERY_DEFAULT_PREPARED_SESSION_CACHE_SIZE,
+  SessionQueryError,
+} from './config.ts'
 import { readColdSessionLog, type ColdSessionLog } from './cold-read.ts'
 
 /** One exact immutable Session cut retained for the caller's read lifetime. */
@@ -72,9 +76,10 @@ interface PreparedEntry {
  * Cold reads are cached per session id, keyed by the persistence instance and
  * the `stat` revision observed before the log read: an unchanged revision
  * reuses the restored Session without re-reading the log. The cache is bounded
- * (least-recently-used unpinned entries are evicted past the capacity), and
- * entries pinned by active leases survive eviction and replacement — a lease's
- * cut stays valid for the lease lifetime even after a newer revision lands.
+ * (least-recently-used unpinned entries are evicted past the capacity); sized
+ * artifacts above the configured limit are not cached. A live Session removes
+ * its prepared cache entry. Entries pinned by active leases survive eviction
+ * and replacement — a lease's cut stays valid for its lifetime.
  */
 export class SessionObservationReader {
   private readonly cache = new Map<SessionId, PreparedEntry>()
@@ -82,11 +87,15 @@ export class SessionObservationReader {
   /**
    * @param ctx - context carrying Session and optional persistence/projection services.
    * @param cacheCapacity - maximum unpinned cold observations retained for reuse.
+   * @param cacheMaxArtifactBytes - largest sized physical artifact retained for reuse.
    */
   constructor(
     private readonly ctx: Context,
     private readonly cacheCapacity: number = SESSION_QUERY_DEFAULT_PREPARED_SESSION_CACHE_SIZE,
-  ) {}
+    private readonly cacheMaxArtifactBytes: number = SESSION_QUERY_DEFAULT_PREPARED_SESSION_CACHE_MAX_ARTIFACT_BYTES,
+  ) {
+    ctx.on('session/created', (session) => { this.cache.delete(session.id) })
+  }
 
   /**
    * Observe one live-preferred Session and retain a cold preparation until disposal.
@@ -107,9 +116,11 @@ export class SessionObservationReader {
       if (persistence === undefined) throw notFound(sessionId)
 
       const snapshot = await this.statSource(persistence, sessionId, signal)
+      const cacheable = snapshot.sizeBytes === undefined || snapshot.sizeBytes <= this.cacheMaxArtifactBytes
       const attachedDuringStat = this.ctx.sessions.get(sessionId)
       if (attachedDuringStat !== undefined) return this.live(attachedDuringStat, projectionMode)
-      let entry = this.cachedEntry(persistence, sessionId, snapshot.revision)
+      if (!cacheable) this.cache.delete(sessionId)
+      let entry = cacheable ? this.cachedEntry(persistence, sessionId, snapshot.revision) : undefined
       if (entry === undefined) {
         const loaded = await this.loadSource(persistence, sessionId, signal)
         throwIfObservationAborted(signal)
@@ -144,7 +155,7 @@ export class SessionObservationReader {
           events: Object.freeze(seed),
           refs: 0,
         }
-        this.store(sessionId, entry)
+        if (cacheable) this.store(sessionId, entry)
       }
 
       let projections: ProjectionSnapshot | undefined

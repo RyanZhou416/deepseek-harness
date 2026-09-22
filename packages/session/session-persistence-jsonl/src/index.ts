@@ -62,6 +62,7 @@ export type { JsonlCompression } from './format.ts'
  * log, so the memo only needs the sessions in flight between those steps.
  */
 const COLD_LOG_MEMO_MAX_ENTRIES = 2
+const DEFAULT_COLD_LOG_MEMO_RETENTION_MS = 10_000
 
 const DEFAULT_COMPRESSION: JsonlCompression = 'zstd'
 /**
@@ -96,6 +97,8 @@ export interface Config {
   root: string
   /** Physical encoding; defaults to checksummed Zstandard frames. */
   compression?: JsonlCompression
+  /** Idle milliseconds a decoded cold log remains available for immediate reuse; zero disables the memo. Defaults to 10000. */
+  coldLogMemoRetentionMs?: number
 }
 
 /** One stored event graph whose producer has established immutable sharing. */
@@ -250,6 +253,7 @@ class JsonlSessionPersistence extends SessionPersistence {
   static Config: z<Config> = z.object({
     root: z.string().required(),
     compression: JsonlCompressionSchema,
+    coldLogMemoRetentionMs: z.natural().max(2_147_483_647).default(DEFAULT_COLD_LOG_MEMO_RETENTION_MS),
   })
 
   /** Backend label for diagnostics and effects; shadows `Service.name` without changing the service key. */
@@ -268,6 +272,7 @@ class JsonlSessionPersistence extends SessionPersistence {
    * revision guard.
    */
   private readonly coldLogMemo = new Map<SessionId, StoredLog>()
+  private readonly coldLogMemoTimers = new Map<SessionId, ReturnType<typeof setTimeout>>()
   /** One joinable decode/migration operation per selected historical Session file revision. */
   private readonly migrationPreparations = new Map<SessionId, MigrationPreparation>()
   /** Validated headers retained against the exact stat-derived generation revision. */
@@ -301,6 +306,11 @@ class JsonlSessionPersistence extends SessionPersistence {
     }
     this.assertUsableRoot()
     this.tracker.install(ctx)
+    ctx.effect(() => () => {
+      for (const timer of this.coldLogMemoTimers.values()) clearTimeout(timer)
+      this.coldLogMemoTimers.clear()
+      this.coldLogMemo.clear()
+    }, 'session-persistence-jsonl.coldLogMemo')
   }
 
   /**
@@ -562,8 +572,7 @@ class JsonlSessionPersistence extends SessionPersistence {
     const probe = fileRevision(await stat(selected.sourcePath, { bigint: true }))
     const memoized = this.coldLogMemo.get(id)
     if (memoized?.status === 'current' && memoized.revision === probe) {
-      this.coldLogMemo.delete(id)
-      this.coldLogMemo.set(id, memoized)
+      this.memoizeStoredLog(id, memoized)
       return memoized
     }
     const current = await readStableJsonlFile(selected.sourcePath, signal)
@@ -586,8 +595,7 @@ class JsonlSessionPersistence extends SessionPersistence {
     signal.throwIfAborted()
     const memoized = this.coldLogMemo.get(id)
     if (memoized?.status === 'prepared' && memoized.revision === sourceRevision) {
-      this.coldLogMemo.delete(id)
-      this.coldLogMemo.set(id, memoized)
+      this.memoizeStoredLog(id, memoized)
       return memoized
     }
     return this.prepareStoredMigration(id, selected, signal)
@@ -666,7 +674,7 @@ class JsonlSessionPersistence extends SessionPersistence {
       identity = await migration.value.publish()
     } catch (error: unknown) {
       /* v8 ignore else -- a newer preparation may have replaced this stale cache entry. */
-      if (this.coldLogMemo.get(id) === stored) this.coldLogMemo.delete(id)
+      if (this.coldLogMemo.get(id) === stored) this.forgetStoredLog(id)
       throw this.generationFailure(id, migration.source, error)
     }
     const published: CurrentStoredLog = {
@@ -718,8 +726,7 @@ class JsonlSessionPersistence extends SessionPersistence {
     const probe = fileRevision(await stat(path, { bigint: true }))
     const memoized = this.coldLogMemo.get(expectedId)
     if (memoized?.status === 'current' && memoized.revision === probe) {
-      this.coldLogMemo.delete(expectedId)
-      this.coldLogMemo.set(expectedId, memoized)
+      this.memoizeStoredLog(expectedId, memoized)
       return memoized
     }
     const { bytes, identity } = await readStableJsonlFile(path, signal)
@@ -788,12 +795,28 @@ class JsonlSessionPersistence extends SessionPersistence {
 
   /** Insert one parsed log into the bounded handoff cache. */
   private memoizeStoredLog(id: SessionId, stored: StoredLog): void {
-    this.coldLogMemo.delete(id)
+    this.forgetStoredLog(id)
+    const retentionMs = this.config.coldLogMemoRetentionMs ?? DEFAULT_COLD_LOG_MEMO_RETENTION_MS
+    if (retentionMs === 0) return
     this.coldLogMemo.set(id, stored)
+    const timer = setTimeout(() => {
+      this.coldLogMemoTimers.delete(id)
+      this.coldLogMemo.delete(id)
+    }, retentionMs)
+    timer.unref()
+    this.coldLogMemoTimers.set(id, timer)
     for (const oldest of this.coldLogMemo.keys()) {
       if (this.coldLogMemo.size <= COLD_LOG_MEMO_MAX_ENTRIES) break
-      this.coldLogMemo.delete(oldest)
+      this.forgetStoredLog(oldest)
     }
+  }
+
+  /** Release a memo reference and its idle timer without affecting callers that already hold the log. */
+  private forgetStoredLog(id: SessionId): void {
+    const timer = this.coldLogMemoTimers.get(id)
+    if (timer !== undefined) clearTimeout(timer)
+    this.coldLogMemoTimers.delete(id)
+    this.coldLogMemo.delete(id)
   }
 
   /**
@@ -829,7 +852,7 @@ class JsonlSessionPersistence extends SessionPersistence {
     isMaterialized: boolean,
     inheritedEventCount: SessionLogOffsetType,
   ): Promise<void> {
-    this.coldLogMemo.delete(header.id)
+    this.forgetStoredLog(header.id)
     await this.ensureRootEncoding()
     if (isMaterialized) {
       await this.appendLines(header, events)
@@ -845,7 +868,7 @@ class JsonlSessionPersistence extends SessionPersistence {
    * @param inheritedEventCount - the exact fork-inherited prefix length written into the header line.
    */
   async persistHeader(header: SessionHeader, inheritedEventCount: SessionLogOffsetType): Promise<void> {
-    this.coldLogMemo.delete(header.id)
+    this.forgetStoredLog(header.id)
     await this.ensureRootEncoding()
     await this.materialize(header, inheritedEventCount, [])
     this.tracker.materialized(header.id)
@@ -857,7 +880,7 @@ class JsonlSessionPersistence extends SessionPersistence {
    * @param truncateTo - the byte offset the artifact is truncated to.
    */
   async truncateTornTail(header: SessionHeader, truncateTo: number): Promise<void> {
-    this.coldLogMemo.delete(header.id)
+    this.forgetStoredLog(header.id)
     await this.repair(header, truncateTo)
     this.ctx.logger.warn(`${this.name}: session "${header.id}" recovered from a torn tail; incomplete tail bytes were discarded`)
   }

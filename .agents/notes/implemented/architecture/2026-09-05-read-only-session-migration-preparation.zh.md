@@ -61,7 +61,7 @@ interface MigrationPreparation {
 
 新的 read/write open 只有在 source path 与 revision 仍匹配时才加入已有 entry。`waitWithAbort()` 让每个 caller 的 AbortSignal 与 shared Promise 竞争，但不会把 caller signal 传给共享工作。只有最后一个 waiter 在 preparation 仍运行时离开，backend-owned controller 才会 abort。取消测试暂停物理读取，并在取消一个 caller 前观察到两个已注册的 waiter；仅让出一次事件循环不能证明异步路径与 revision 查找后的加入已经完成。
 
-完成结果进入既有 bounded `coldLogMemo`。`StoredLog` 判别字段把已发布 current state 与 `PreparedStoredLog` 分开，后者的 `publication` 字段把 current logical events 与匹配的 publication operation 绑定，使 query 后紧接的 Agent resume 复用同一次 Decode 与 migration。In-flight map 只拥有运行中的工作，不是第二个 completed-result cache。
+完成结果进入按修订值索引的 `coldLogMemo`，它在配置的空闲时间内最多保留两份日志。`StoredLog` 判别字段把已发布 current state 与 `PreparedStoredLog` 分开，后者的 `publication` 字段把 current logical events 与匹配的 publication operation 绑定，使 query 后及时进行的 Agent resume 复用同一次 Decode 与 migration；过期结果会重新解码。In-flight map 只拥有运行中的工作，不是第二个 completed-result cache。
 
 `SessionHandle.read()` 会报告 event value 是 detached 还是 shared-frozen。JSONL backend 在 memo 化前只对每个已解码 event graph 深度冻结一次，并在该处构造 `shared-frozen` 结果；后续读取和 slice 即使为空也会保留生产者建立的状态。`readColdSessionLog()` 将这些 event 与本地独占的 interrupted-turn closer 组合，并通过 `SessionObservationReader` 继续传递 `eventState`；`Session.fromRestore()` 只校验和接管 seed，不再复制或冻结。普通 create 与 fork seed 继续使用 defensive snapshot 路径。
 

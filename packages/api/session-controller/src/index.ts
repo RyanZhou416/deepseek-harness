@@ -71,7 +71,7 @@ declare module '@deepseek-ai/cordis' {
 
 /** Session Controller deployment policy. */
 export interface Config {
-  /** Milliseconds an owned, durable, unfollowed idle Session remains live; zero disables eviction. */
+  /** Milliseconds an owned, durable idle Session remains live after activity; zero disables eviction. */
   readonly idleSessionRetentionMs?: number
   /** Override platform desktop-opener detection. */
   readonly nativeOpen?: boolean

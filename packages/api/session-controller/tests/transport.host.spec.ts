@@ -425,6 +425,36 @@ describe('SessionHistoryController', () => {
     await ctx.fiber.dispose()
   })
 
+  it('releases a prepared opening when follow ends before activation begins', async () => {
+    const ctx = new Context()
+    await ctx.plugin(SessionStore)
+    const sessionId = SessionId('promotion-abandoned')
+    const meta = { version: SESSION_FORMAT_VERSION, id: sessionId, createdAt: 1, cwd: '/workspace' }
+    const disposeOpening = vi.fn()
+    const disposePromotion = vi.fn()
+    const promotion = {
+      source: 'prepared', header: meta, events: [], cursor: -1,
+      projections: { asOfSeq: -1, values: {} },
+      retain: vi.fn(), [Symbol.dispose]: disposePromotion,
+    } as unknown as SessionObservation
+    const source = {
+      ...promotion,
+      retain: () => promotion,
+      [Symbol.dispose]: disposeOpening,
+    } as SessionObservation
+    ctx.provide('sessionQuery', { observeSession: () => Promise.resolve(source) } as never)
+    const activate = vi.fn()
+    const history = new SessionHistoryController(ctx, activate)
+    const iterator = history.follow({ address: { kind: 'session', sessionId } }, signal())[Symbol.asyncIterator]()
+
+    await expect(iterator.next()).resolves.toMatchObject({ value: { type: 'snapshot' } })
+    expect(disposeOpening).toHaveBeenCalledOnce()
+    await iterator.return?.()
+    expect(disposePromotion).toHaveBeenCalledOnce()
+    expect(activate).not.toHaveBeenCalled()
+    await ctx.fiber.dispose()
+  })
+
   it('requires the durable parent and mode for a direct subagent address', async () => {
     const { ctx, transport } = await setup()
     const parentSessionId = SessionId('parent')
