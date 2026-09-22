@@ -484,8 +484,9 @@ declare class Session {
    */
   readonly firstLiveSeq: SessionLogOffset;
   /**
-   * Create a detached session by validating and snapshotting borrowed seed
-   * events and storage metadata.
+   * Create a detached session by validating seed events and storage metadata.
+   * Borrowed values are snapshotted; event identities previously accepted by
+   * this module reuse their already immutable object graphs.
    * @param id - session identity.
    * @param seed - optional borrowed replay or fork events.
    * @param header - optional borrowed storage metadata.

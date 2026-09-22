@@ -58,6 +58,20 @@ function inherited(session: Session): readonly SessionEvent[] {
 }
 
 describe('SessionStore.fork', () => {
+  it('keeps caller-owned creation seeds detached from their source values', () => {
+    const event = {
+      type: 'test/log-only',
+      seq: SessionSeq(0),
+      time: 1,
+      data: { value: 'borrowed' },
+    } satisfies SessionEvent<'test/log-only'>
+
+    const session = Session.create(SessionId('borrowed-seed'), [event])
+
+    expect(session.eventAt(SessionSeq(0))).not.toBe(event)
+    expect(session.eventAt(SessionSeq(0))?.data).not.toBe(event.data)
+  })
+
   it('forks an empty live session as an empty child with lineage metadata', async () => {
     const { ctx, sessions } = await setup()
     const source = ctx.sessions.create(SessionId('empty-parent'), { meta: { cwd: '/workspace' } })
@@ -74,7 +88,7 @@ describe('SessionStore.fork', () => {
     expect(child.inheritedEventCount).toBe(0)
   })
 
-  it('forks the latest completed boundary by default into detached frozen seed events', async () => {
+  it('forks the latest completed boundary by sharing Session-owned frozen seed events', async () => {
     const { ctx, sessions } = await setup()
     const source = ctx.sessions.create(SessionId('parent'), { meta: { cwd: '/workspace' } })
     appendClosedTurn(source, 1, 'hello')
@@ -83,7 +97,7 @@ describe('SessionStore.fork', () => {
 
     expect(inherited(child)).toEqual(source.snapshotEvents())
     expect(child.snapshotEvents()).not.toBe(source.snapshotEvents())
-    expect(child.snapshotEvents()[1]).not.toBe(source.snapshotEvents()[1])
+    expect(child.snapshotEvents()[1]).toBe(source.snapshotEvents()[1])
     expect(() => {
       firstUserMessage(child.snapshotEvents()).data.content[0] = { type: 'text', text: 'child mutation' }
     }).toThrow(TypeError)

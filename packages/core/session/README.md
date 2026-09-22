@@ -63,7 +63,7 @@ Session log positions use two numeric types. `SessionSeq` identifies an existing
 
 ### Fork a session
 
-`ctx.sessions.fork(source, boundary?, childSessionId?)` selects source events through an inclusive `boundary` seq (default: the current last event), requires the prefix to end outside an open turn, and creates a live child session with lineage metadata. A tool-time delegation that must branch mid-turn clips to a completed prefix instead.
+`ctx.sessions.fork(source, boundary?, childSessionId?)` selects source events through an inclusive `boundary` seq (default: the current last event), requires the prefix to end outside an open turn, and creates a live child session with lineage metadata. A tool-time delegation that must branch mid-turn clips to a completed prefix instead. The child reuses the source Session's deeply frozen event objects under separate parent and child log arrays; caller-owned creation seeds still pass through the defensive snapshot boundary.
 
 The logical `SessionHeader.isSeeded` field reports whether fork history exists without exposing a positional integer. `Session.inheritedEventCount` retains the exact checked `SessionLogOffset`; `ownEvents()` returns events at and after that cut, and `isOwnSeq(seq)` accepts only an existing child-owned position. A low-level seeded constructor must supply an explicit `seed` and `inheritedEventCount` because the constructor seed can contain child-owned setup events after the inherited prefix.
 

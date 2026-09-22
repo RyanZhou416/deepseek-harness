@@ -440,6 +440,8 @@ interface SessionEntry {
 
 /** Store attachment for the append path; module-private to keep Session store-agnostic publicly. */
 const attachments = new WeakMap<Session, SessionEntry>()
+/** Event identities whose complete object graphs already satisfy Session's immutable ownership rule. */
+const shareableSessionEvents = new WeakSet<SessionEvent>()
 
 /**
  * An event-sourced session: an append-only log of {@link SessionEvent}s.
@@ -503,8 +505,9 @@ export class Session {
   readonly firstLiveSeq: SessionLogOffset
 
   /**
-   * Create a detached session by validating and snapshotting borrowed seed
-   * events and storage metadata.
+   * Create a detached session by validating seed events and storage metadata.
+   * Borrowed values are snapshotted; event identities previously accepted by
+   * this module reuse their already immutable object graphs.
    * @param id - session identity.
    * @param seed - optional borrowed replay or fork events.
    * @param header - optional borrowed storage metadata.
@@ -575,9 +578,11 @@ export class Session {
       // a bad seed would surface only later as a backend rejection or a silent
       // divergence between the live log and disk.
       for (const [index, source] of seed.entries()) {
-        // The seed is a persistence/replay boundary: validate and detach the
-        // complete event in one lossless-JSON pass.
-        const snapshot = mode === 'snapshot' ? snapshotJsonValue(source) : source
+        // The seed is a persistence/replay boundary. Only event identities
+        // already owned and frozen by this module may cross it without another
+        // lossless-JSON snapshot.
+        const shared = mode === 'snapshot' && shareableSessionEvents.has(source)
+        const snapshot = mode === 'snapshot' && !shared ? snapshotJsonValue(source) : source
         if (snapshot === undefined) {
           throw new Error(`seed event at index ${index} is not losslessly JSON-serializable`)
         }
@@ -593,7 +598,11 @@ export class Session {
         } catch (error: unknown) {
           throw new Error(`invalid seed event at index ${index}: ${error instanceof Error ? error.message : 'invalid surface metadata'}`)
         }
-        this.log.push(mode === 'snapshot' ? deepFreeze(snapshot) : snapshot)
+        const accepted = mode === 'snapshot' && !shared ? deepFreeze(snapshot) : snapshot
+        if (mode === 'snapshot' || (mode === 'shared-frozen' && Object.isFrozen(accepted))) {
+          shareableSessionEvents.add(accepted)
+        }
+        this.log.push(accepted)
       }
     }
     this.firstLiveSeq = SessionLogOffset(this.log.length)
@@ -753,6 +762,7 @@ export class Session {
     } as unknown as SessionEvent<T>)
     validateSessionEventData(event, `session event "${type}" at seq ${event.seq}`)
     this.surfaceManager.validateNext(event as SessionEvent)
+    shareableSessionEvents.add(event as SessionEvent)
 
     if (entry !== undefined) entry.appending = true
     try {

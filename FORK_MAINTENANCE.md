@@ -100,6 +100,12 @@ Alpha.2 官方 `packages/llm/token-meter/src/index.ts` 保存精确 consumed off
 
 上游替代必须保留同修订单次读取、跨修订隔离、独立取消与最后等待者取消；该共享只降低并发完整解码的峰值，不等于分页读取，也不释放运行中 Agent 的完整 Session 历史。聚焦验证为 `pnpm exec vitest run packages/session/session-persistence-jsonl/tests/jsonl.spec.ts -t 'current-generation decode|current-generation reader'`。
 
+#### Session-owned fork prefix sharing
+
+`packages/core/session/src/index.ts` 用模块私有 `WeakSet` 标记 Session 已经拥有并深度冻结的 event 标识。普通调用方 seed 仍执行无损 JSON 快照与深度冻结；来自 live Session 的 fork 前缀则在独立的父级与子级日志数组中共享这些不可变 event 对象，后续 append 只增长各自数组。生产 `shared-frozen` restore 的已冻结 event 也进入该可信集合，`detached` restore 不会被推断为可共享。
+
+上游替代必须保留外部 seed 的引用隔离、共享 event 的深度不可变性、父子数组独立增长和 restore aliasing 语义。只用 `Object.isFrozen()` 接受任意外部 shallow-frozen event 不等价。44,600-event 本地 corpus 中，父 Session 约 339 MiB；两个 fork 从原来的约 488/638 MiB 降至约 341/341 MiB。聚焦验证为 `pnpm exec vitest run packages/core/session/tests/fork.spec.ts packages/core/session/tests/session.spec.ts`。
+
 #### Cold Session observation retention
 
 `packages/session-query/session-query/src/observation.ts` 与 `packages/session-query/session-query-sqlite/src/index.ts` 在既有五条目 LRU 上增加 `preparedSessionCacheMaxArtifactBytes=4194304`：first-party persistence 报告的物理文件超过门槛时照常读取，但最后一个观察租约释放后不再缓存完整 prepared Session。Session 转为 live 时立即撤掉同 id 的冷缓存引用；已经发出的观察租约仍持有自己的精确 cut。未报告文件大小的 provider 仍由条目数限制。
@@ -295,6 +301,7 @@ Profile 注册 `dsh-sdk-process-raw` 和 `subagent_process`：SDK profile、独�
 | JSONL metadata revision cache/shared scan | Preserve | Require append/replace/delete and caller-cancellation equivalence |
 | Decoded cold-log idle expiry | Preserve | Require two-entry and idle-time bounds, revision-safe handoff reuse, mutation invalidation and timer cleanup |
 | Current-generation decode sharing | Preserve | Require same-revision join, revision isolation and independent caller cancellation |
+| Session-owned fork prefix sharing | Preserve | Require trusted immutable identities, external-seed detachment and independent append arrays |
 | Cold Session large-artifact cache bypass | Preserve | Require physical-size limit, exact revision/lease ownership and live-transition invalidation |
 | SQLite suffix indexing/bounded page LRU | Preserve | Require canonical replacement detection and bounded detached cache |
 | Five-minute idle Agent eviction | Preserve | Require opening-only follower pin, child/inbox/job exclusions, flush + persistence proof and cold resume |

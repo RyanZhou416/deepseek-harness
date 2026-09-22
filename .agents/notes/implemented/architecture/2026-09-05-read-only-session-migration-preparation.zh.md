@@ -63,7 +63,7 @@ interface MigrationPreparation {
 
 完成结果进入按修订值索引的 `coldLogMemo`，它在配置的空闲时间内最多保留两份日志。`StoredLog` 判别字段把已发布 current state 与 `PreparedStoredLog` 分开，后者的 `publication` 字段把 current logical events 与匹配的 publication operation 绑定，使 query 后及时进行的 Agent resume 复用同一次 Decode 与 migration；过期结果会重新解码。In-flight map 只拥有运行中的工作，不是第二个 completed-result cache。
 
-`SessionHandle.read()` 会报告 event value 是 detached 还是 shared-frozen。JSONL backend 在 memo 化前只对每个已解码 event graph 深度冻结一次，并在该处构造 `shared-frozen` 结果；后续读取和 slice 即使为空也会保留生产者建立的状态。`readColdSessionLog()` 将这些 event 与本地独占的 interrupted-turn closer 组合，并通过 `SessionObservationReader` 继续传递 `eventState`；`Session.fromRestore()` 只校验和接管 seed，不再复制或冻结。普通 create 与 fork seed 继续使用 defensive snapshot 路径。
+`SessionHandle.read()` 会报告 event value 是 detached 还是 shared-frozen。JSONL backend 在 memo 化前只对每个已解码 event graph 深度冻结一次，并在该处构造 `shared-frozen` 结果；后续读取和 slice 即使为空也会保留生产者建立的状态。`readColdSessionLog()` 将这些 event 与本地独占的 interrupted-turn closer 组合，并通过 `SessionObservationReader` 继续传递 `eventState`；`Session.fromRestore()` 只校验和接管 seed，不再复制或冻结。普通调用方拥有的 create seed 继续使用 defensive snapshot 路径；fork seed 可以复用 Session 模块已经拥有并深度冻结的 event 标识。
 
 Read-only restoration 会校验 Session runtime 直接依赖的 event 与 settlement 字段，但不会展开每一段嵌入式 Assistant stream。Publication Worker 继续执行完整 stream replay，并在提交 migrated successor 前校验 content、usage 与 replay state 一致性。已有当前格式文件信任其 writer；需要展开 compact stream 的 consumer 会在读取时校验 record。
 
