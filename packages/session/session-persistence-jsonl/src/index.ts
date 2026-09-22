@@ -163,14 +163,24 @@ interface ResolvedJsonlGeneration {
   readonly currentPath: string
 }
 
-/** One backend-owned historical preparation shared by its current callers. */
-interface MigrationPreparation {
-  readonly sourcePath: string
-  readonly sourceRevision: PersistenceRevision
+/** One backend-owned decode shared by its current callers. */
+interface SharedRead<T> {
   readonly controller: AbortController
-  readonly promise: Promise<PreparedStoredLog>
+  readonly promise: Promise<T>
   settled: boolean
   waiters: number
+}
+
+/** One backend-owned historical preparation shared by its current callers. */
+interface MigrationPreparation extends SharedRead<PreparedStoredLog> {
+  readonly sourcePath: string
+  readonly sourceRevision: PersistenceRevision
+}
+
+/** One current-generation decode shared by callers that selected the same file revision. */
+interface CurrentRead extends SharedRead<CurrentStoredLog> {
+  readonly sourcePath: string
+  readonly sourceRevision: PersistenceRevision
 }
 
 /** One header retained against the exact stat-derived generation revision. */
@@ -275,6 +285,8 @@ class JsonlSessionPersistence extends SessionPersistence {
   private readonly coldLogMemoTimers = new Map<SessionId, ReturnType<typeof setTimeout>>()
   /** One joinable decode/migration operation per selected historical Session file revision. */
   private readonly migrationPreparations = new Map<SessionId, MigrationPreparation>()
+  /** One joinable current-generation decode per selected Session file revision. */
+  private readonly currentReads = new Map<SessionId, CurrentRead>()
   /** Validated headers retained against the exact stat-derived generation revision. */
   private readonly listedHeaders = new Map<string, CachedListedHeader>()
   /** One filesystem discovery shared by concurrent metadata callers. */
@@ -552,7 +564,9 @@ class JsonlSessionPersistence extends SessionPersistence {
         void promise.then(release, release)
       }
       signal?.throwIfAborted()
-      return this.waitForPreparation(id, preparation, signal)
+      return this.waitForPreparation(preparation, signal, () => {
+        if (this.migrationPreparations.get(id) === preparation) this.migrationPreparations.delete(id)
+      })
     }
     if (selected.sourceVersion > SESSION_FORMAT_VERSION) {
       const header = await this.readGenerationHeader(selected, id, signal)
@@ -575,14 +589,7 @@ class JsonlSessionPersistence extends SessionPersistence {
       this.memoizeStoredLog(id, memoized)
       return memoized
     }
-    const current = await readStableJsonlFile(selected.sourcePath, signal)
-    return this.decodeStoredLog(
-      selected.sourcePath,
-      id,
-      current.bytes,
-      fileRevision(current.identity),
-      signal,
-    )
+    return this.readCurrentGeneration(selected.sourcePath, id, probe, signal)
   }
 
   /** Probe the memo and otherwise decode one historical generation under backend cancellation. */
@@ -601,25 +608,53 @@ class JsonlSessionPersistence extends SessionPersistence {
     return this.prepareStoredMigration(id, selected, signal)
   }
 
-  /** Await shared preparation for one caller and abort it only after its last waiter leaves. */
-  private async waitForPreparation(
-    id: SessionId,
-    preparation: MigrationPreparation,
-    signal?: AbortSignal,
-  ): Promise<PreparedStoredLog> {
+  /** Await one shared decode and abort it only after its last waiter leaves. */
+  private async waitForPreparation<T>(
+    preparation: SharedRead<T>,
+    signal: AbortSignal | undefined,
+    forget: () => void,
+    operation = 'session migration preparation',
+  ): Promise<T> {
     preparation.waiters += 1
     try {
-      return await waitWithAbort(preparation.promise, signal)
+      return await waitWithAbort(preparation.promise, signal, operation)
     } finally {
       preparation.waiters -= 1
       if (preparation.waiters === 0 && !preparation.settled) {
-        /* v8 ignore else -- a newer selected source may already own this id's preparation slot. */
-        if (this.migrationPreparations.get(id) === preparation) {
-          this.migrationPreparations.delete(id)
-        }
+        forget()
         preparation.controller.abort()
       }
     }
+  }
+
+  /** Share one current-generation decode while callers observe the same physical revision. */
+  private readCurrentGeneration(
+    path: string,
+    id: SessionId,
+    revision: PersistenceRevision,
+    signal?: AbortSignal,
+  ): Promise<CurrentStoredLog> {
+    signal?.throwIfAborted()
+    let read = this.currentReads.get(id)
+    if (read === undefined || read.sourcePath !== path || read.sourceRevision !== revision) {
+      const controller = new AbortController()
+      const promise = (async () => {
+        const current = await readStableJsonlFile(path, controller.signal)
+        return this.decodeStoredLog(path, id, current.bytes, fileRevision(current.identity), controller.signal)
+      })()
+      read = { sourcePath: path, sourceRevision: revision, controller, promise, settled: false, waiters: 0 }
+      this.currentReads.set(id, read)
+      const created = read
+      const release = (): void => {
+        created.settled = true
+        if (this.currentReads.get(id) === created) this.currentReads.delete(id)
+      }
+      void promise.then(release, release)
+    }
+    const selected = read
+    return this.waitForPreparation(selected, signal, () => {
+      if (this.currentReads.get(id) === selected) this.currentReads.delete(id)
+    }, 'session current log read')
   }
 
   /** Decode one historical generation without publishing a successor. */
@@ -729,8 +764,7 @@ class JsonlSessionPersistence extends SessionPersistence {
       this.memoizeStoredLog(expectedId, memoized)
       return memoized
     }
-    const { bytes, identity } = await readStableJsonlFile(path, signal)
-    return this.decodeStoredLog(path, expectedId, bytes, fileRevision(identity), signal)
+    return this.readCurrentGeneration(path, expectedId, probe, signal)
   }
 
   /** Decode and memoize one already-stable current physical snapshot. */
@@ -782,6 +816,7 @@ class JsonlSessionPersistence extends SessionPersistence {
     assertStoredId(expectedId, parsed.meta)
     const location = this.locate(parsed.meta)
     validateStoredEvents(parsed.meta, parsed.events, location)
+    signal?.throwIfAborted()
     const { events, ...rest } = parsed
     const stored: CurrentStoredLog = {
       status: 'current',

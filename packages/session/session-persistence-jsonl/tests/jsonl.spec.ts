@@ -796,27 +796,34 @@ describe('JsonlSessionPersistence: immutable format generations', () => {
     await writeFile(sourcePath, `${JSON.stringify(releasedV0Header(header))}\n`)
     const pause = pausePhysicalRead(sourcePath)
     readTally.enabled = true
+    const controller = new AbortController()
+    const reason = new Error('older historical revision cancelled')
 
-    const firstOpening = ctx.sessionPersistence.open(header.id, 'read')
+    const firstOpening = ctx.sessionPersistence.open(header.id, 'read', { signal: controller.signal })
     await pause.entered
     await appendFile(sourcePath, `${migrationOneTurnLog().map(event => JSON.stringify(event)).join('\n')}\n`)
     const secondOpening = ctx.sessionPersistence.open(header.id, 'read')
+    const settled = Promise.allSettled([firstOpening, secondOpening])
     let tallyFailure: unknown
     try {
       await vi.waitFor(() => { expect(readTally.bySuffix.get(sourcePath)).toBe(2) })
+      controller.abort(reason)
+      await expect(firstOpening).rejects.toBe(reason)
     } catch (error: unknown) {
       tallyFailure = error
     } finally {
       pause.release()
     }
 
-    const [first, second] = await Promise.all([firstOpening, secondOpening])
     try {
       if (tallyFailure !== undefined) throw tallyFailure
-      expect((await first.read()).events).toEqual(migratedOneTurnLog())
+      const second = await secondOpening
       expect((await second.read()).events).toEqual(migratedOneTurnLog())
     } finally {
-      await Promise.all([first.close(), second.close()])
+      controller.abort(reason)
+      for (const result of await settled) {
+        if (result.status === 'fulfilled') await result.value.close()
+      }
     }
   })
 
@@ -1461,6 +1468,160 @@ describe('JsonlSessionPersistence: durability and crash semantics', () => {
     await writer.close()
     expect((await readAll(ctx.sessionPersistence, m.id)).events.map(e => e.seq)).toEqual([0, 1, 2, 3, 4, 5, 6, 7])
     expect(readTally.bySuffix.get(path)).toBe(2)
+  })
+
+  it('shares a current-generation decode between concurrent opens', async () => {
+    const m = meta('current-shared-decode', '/work')
+    await writeLog(ctx.sessionPersistence, m, oneTurnLog())
+    const path = rawLogPath(root, '/work', m.id)
+    const pause = pausePhysicalRead(path)
+    readTally.enabled = true
+    const internals = ctx.sessionPersistence as unknown as {
+      currentReads: Map<SessionId, { waiters: number }>
+    }
+    const first = ctx.sessionPersistence.open(m.id, 'read')
+    await pause.entered
+    const second = ctx.sessionPersistence.open(m.id, 'read')
+    const settled = Promise.allSettled([first, second])
+    try {
+      await expect.poll(() => internals.currentReads.get(m.id)?.waiters).toBe(2)
+      expect(readTally.bySuffix.get(path)).toBe(1)
+      pause.release()
+      const handles = await Promise.all([first, second])
+      for (const handle of handles) expect((await handle.read()).events).toEqual(oneTurnLog())
+      expect(readTally.bySuffix.get(path)).toBe(1)
+    } finally {
+      pause.release()
+      for (const result of await settled) {
+        if (result.status === 'fulfilled') await result.value.close()
+      }
+    }
+  })
+
+  it('shares a current-generation decode between concurrent handle reads', async () => {
+    const localRoot = await freshRoot()
+    const local = new Context()
+    await local.plugin(JsonlSessionPersistence, { root: localRoot, compression: 'none', coldLogMemoRetentionMs: 0 })
+    const m = meta('current-shared-handle-reads', '/work')
+    try {
+      await writeLog(local.sessionPersistence, m, oneTurnLog())
+      const handles = await Promise.all([
+        local.sessionPersistence.open(m.id, 'read'),
+        local.sessionPersistence.open(m.id, 'read'),
+      ])
+      const path = rawLogPath(localRoot, '/work', m.id)
+      const pause = pausePhysicalRead(path)
+      readTally.enabled = true
+      const first = handles[0]!.read(0, 2)
+      await pause.entered
+      const second = handles[1]!.read(2, 2)
+      try {
+        await expect.poll(() => (local.sessionPersistence as unknown as {
+          currentReads: Map<SessionId, { waiters: number }>
+        }).currentReads.get(m.id)?.waiters).toBe(2)
+        expect(readTally.bySuffix.get(path)).toBe(1)
+        pause.release()
+        expect((await first).events.map(event => event.seq)).toEqual([0, 1])
+        expect((await second).events.map(event => event.seq)).toEqual([2, 3])
+      } finally {
+        pause.release()
+        await Promise.allSettled([first, second])
+        await Promise.all(handles.map(handle => handle.close()))
+      }
+    } finally {
+      await local.fiber.dispose()
+    }
+  })
+
+  it('lets one current-generation reader abort without cancelling a second reader', async () => {
+    const m = meta('current-shared-abort', '/work')
+    await writeLog(ctx.sessionPersistence, m, oneTurnLog())
+    const path = rawLogPath(root, '/work', m.id)
+    const pause = pausePhysicalRead(path)
+    readTally.enabled = true
+    const controller = new AbortController()
+    const reason = new Error('first current reader cancelled')
+    const internals = ctx.sessionPersistence as unknown as {
+      currentReads: Map<SessionId, { waiters: number }>
+    }
+    const first = ctx.sessionPersistence.open(m.id, 'read', { signal: controller.signal })
+    await pause.entered
+    const second = ctx.sessionPersistence.open(m.id, 'read')
+    const settled = Promise.allSettled([first, second])
+    try {
+      await expect.poll(() => internals.currentReads.get(m.id)?.waiters).toBe(2)
+      controller.abort(reason)
+      await expect(first).rejects.toBe(reason)
+      pause.release()
+      const handle = await second
+      expect((await handle.read()).events).toEqual(oneTurnLog())
+      expect(readTally.bySuffix.get(path)).toBe(1)
+    } finally {
+      controller.abort(reason)
+      pause.release()
+      for (const result of await settled) {
+        if (result.status === 'fulfilled') await result.value.close()
+      }
+    }
+  })
+
+  it('does not join a current-generation decode selected before a file revision change', async () => {
+    const m = meta('current-revision-decode', '/work')
+    await writeLog(ctx.sessionPersistence, m, oneTurnLog())
+    const path = rawLogPath(root, '/work', m.id)
+    const pause = pausePhysicalRead(path)
+    readTally.enabled = true
+    const controller = new AbortController()
+    const reason = new Error('older current revision cancelled')
+    const first = ctx.sessionPersistence.open(m.id, 'read', { signal: controller.signal })
+    await pause.entered
+    await appendFile(path, [
+      { type: 'turn/start', seq: 6, time: 9, data: { turn: 2 } },
+      { type: 'turn/end', seq: 7, time: 10, data: { turn: 2, reason: { kind: 'completed' } } },
+    ].map(event => `${JSON.stringify(event)}\n`).join(''))
+    const second = ctx.sessionPersistence.open(m.id, 'read')
+    const settled = Promise.allSettled([first, second])
+    try {
+      await expect.poll(() => readTally.bySuffix.get(path)).toBe(2)
+      controller.abort(reason)
+      await expect(first).rejects.toBe(reason)
+      pause.release()
+      const handle = await second
+      expect((await handle.read()).events.map(event => event.seq)).toEqual([0, 1, 2, 3, 4, 5, 6, 7])
+    } finally {
+      controller.abort(reason)
+      pause.release()
+      for (const result of await settled) {
+        if (result.status === 'fulfilled') await result.value.close()
+      }
+    }
+  })
+
+  it('cancels a current-generation decode after its last waiter leaves', async () => {
+    const m = meta('current-last-waiter', '/work')
+    await writeLog(ctx.sessionPersistence, m, oneTurnLog())
+    const path = rawLogPath(root, '/work', m.id)
+    const pause = pausePhysicalRead(path)
+    readTally.enabled = true
+    const controller = new AbortController()
+    const reason = new Error('last current reader cancelled')
+    const opening = ctx.sessionPersistence.open(m.id, 'read', { signal: controller.signal })
+    await pause.entered
+    try {
+      controller.abort(reason)
+      await expect(opening).rejects.toBe(reason)
+    } finally {
+      pause.release()
+    }
+    await pause.finished
+    await scheduler.yield()
+    const retried = await ctx.sessionPersistence.open(m.id, 'read')
+    try {
+      expect((await retried.read()).events).toEqual(oneTurnLog())
+      expect(readTally.bySuffix.get(path)).toBe(2)
+    } finally {
+      await retried.close()
+    }
   })
 
   it('a foreign write misses the memo through the revision guard', async () => {

@@ -94,6 +94,12 @@ Alpha.2 官方 `packages/llm/token-meter/src/index.ts` 保存精确 consumed off
 
 上游替代必须同时保持 revision 校验、交接期复用、空闲时间与条目数上限、失效和卸载清理；仅限制条目数会让两份数百 MiB 的历史无限期驻留。此项只改变内存留存，不改变 Session 文件或 migration 发布规则。
 
+#### Current-generation decode sharing
+
+`packages/session/session-persistence-jsonl/src/index.ts` 在当前代际缓存未命中时，按 Session id、物理路径和 stat 修订合并同时进行的 `open`/`read` 解码。各调用者独立取消等待；最后一个等待者离开才取消底层读取，文件修订变化会启动独立解码。完成后仍由既有短时 memo 负责 observe-to-resume 交接，不延长已完成日志的保留时间。
+
+上游替代必须保留同修订单次读取、跨修订隔离、独立取消与最后等待者取消；该共享只降低并发完整解码的峰值，不等于分页读取，也不释放运行中 Agent 的完整 Session 历史。聚焦验证为 `pnpm exec vitest run packages/session/session-persistence-jsonl/tests/jsonl.spec.ts -t 'current-generation decode|current-generation reader'`。
+
 #### Cold Session observation retention
 
 `packages/session-query/session-query/src/observation.ts` 与 `packages/session-query/session-query-sqlite/src/index.ts` 在既有五条目 LRU 上增加 `preparedSessionCacheMaxArtifactBytes=4194304`：first-party persistence 报告的物理文件超过门槛时照常读取，但最后一个观察租约释放后不再缓存完整 prepared Session。Session 转为 live 时立即撤掉同 id 的冷缓存引用；已经发出的观察租约仍持有自己的精确 cut。未报告文件大小的 provider 仍由条目数限制。
@@ -288,6 +294,7 @@ Profile 注册 `dsh-sdk-process-raw` 和 `subagent_process`：SDK profile、独�
 | Frozen persistence enqueue and O(1) batch | Preserve | Require identical ownership and failed-write ordering |
 | JSONL metadata revision cache/shared scan | Preserve | Require append/replace/delete and caller-cancellation equivalence |
 | Decoded cold-log idle expiry | Preserve | Require two-entry and idle-time bounds, revision-safe handoff reuse, mutation invalidation and timer cleanup |
+| Current-generation decode sharing | Preserve | Require same-revision join, revision isolation and independent caller cancellation |
 | Cold Session large-artifact cache bypass | Preserve | Require physical-size limit, exact revision/lease ownership and live-transition invalidation |
 | SQLite suffix indexing/bounded page LRU | Preserve | Require canonical replacement detection and bounded detached cache |
 | Five-minute idle Agent eviction | Preserve | Require opening-only follower pin, child/inbox/job exclusions, flush + persistence proof and cold resume |
