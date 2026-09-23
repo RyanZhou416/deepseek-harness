@@ -97,6 +97,33 @@ test('concurrent refreshes of one account coalesce; accounts refresh independent
   assert.deepEqual(refreshes.sort(), ['a1', 'a2'])
 })
 
+test('legacy and canonical keys share one in-flight refresh', async () => {
+  const expired = session('old', 1000)
+  const stored = new Map<string, TestSession>([['canonical', expired]])
+  let calls = 0
+  const tokens = new AccountTokenManager<TestSession>({
+    provider: 'codex', displayName: 'Test',
+    makeOptions: () => ({ preemptMs: 60_000, refresh: async current => {
+      calls += 1
+      await new Promise(resolve => setTimeout(resolve, 10))
+      return { ...current, accessToken: 'new', expiresAt: Date.now() + 3_600_000 }
+    }, isPermanent: () => true }),
+    io: {
+      list: () => Promise.resolve([{ key: 'canonical', session: stored.get('canonical')! }]),
+      get: key => Promise.resolve(stored.get(key === 'legacy' ? 'canonical' : key ?? 'canonical')),
+      save: (_key, value) => { stored.set('canonical', value); return Promise.resolve() },
+      remove: () => { stored.delete('canonical'); return Promise.resolve() },
+      resolve: key => Promise.resolve(key === 'legacy' ? 'canonical' : key),
+    },
+  })
+  const [legacy, canonical, defaultSession] = await Promise.all([
+    tokens.session('legacy'), tokens.session('canonical'), tokens.session(),
+  ])
+  assert.equal(calls, 1)
+  assert.deepEqual([legacy.accessToken, canonical.accessToken, defaultSession.accessToken], ['new', 'new', 'new'])
+  assert.equal(stored.has('canonical'), true)
+})
+
 test('a permanent refresh failure removes only that account and notifies once', async () => {
   const { tokens, stored, removed, notified } = harness({
     accounts: { a1: session('at-1', 1000), a2: session('at-2') },
@@ -149,4 +176,34 @@ test('peek and hasSession read without refreshing', async () => {
   assert.equal(await tokens.hasSession('a1'), true)
   assert.equal(await tokens.hasSession('nobody'), false)
   assert.deepEqual(refreshes, [])
+})
+
+test('a permanent refresh failure keeps a session that a concurrent re-login just saved', async () => {
+  let reject!: (error: Error) => void
+  const gate = new Promise<TestSession>((_, fail) => { reject = fail })
+  const { tokens, stored, removed, notified } = harness({
+    accounts: { a1: session('stale', -1) },
+    refresh: () => gate,
+    permanent: (_account, error) => error instanceof Error && error.message === 'invalid_grant',
+  })
+  const pending = tokens.session('a1')
+  await new Promise(resolve => setTimeout(resolve, 10))
+  stored.set('a1', session('fresh-login'))
+  reject(new Error('invalid_grant'))
+  assert.equal((await pending).accessToken, 'fresh-login', 'the re-login is served, not deleted')
+  assert.deepEqual(removed, [])
+  assert.deepEqual(notified, [])
+  assert.equal(stored.get('a1')?.accessToken, 'fresh-login')
+})
+
+test('a permanent refresh failure still removes the account when nothing replaced it', async () => {
+  const { tokens, stored, removed, notified } = harness({
+    accounts: { a1: session('stale', -1) },
+    refresh: () => Promise.reject(new Error('invalid_grant')),
+    permanent: (_account, error) => error instanceof Error && error.message === 'invalid_grant',
+  })
+  await assert.rejects(tokens.session('a1'), (error: unknown) => error instanceof LlmError && error.code === 'INVALID_CREDENTIAL')
+  assert.deepEqual(removed, ['a1'])
+  assert.deepEqual(notified, ['a1'])
+  assert.equal(stored.has('a1'), false)
 })

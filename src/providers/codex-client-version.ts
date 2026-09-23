@@ -14,7 +14,7 @@ export class CodexClientVersionCache {
   constructor(
     private readonly fetchFn: FetchFn = proxiedFetch,
     private readonly now: () => number = Date.now,
-    private readonly timeoutMs = 1500,
+    private readonly timeoutMs = 5000,
   ) {}
 
   /** A manual catalog refresh also checks for a newly released CLI. */

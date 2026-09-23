@@ -12,7 +12,7 @@ import { MessageId, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import type { Message } from '@deepseek-ai/dsh-llm'
 import { CodexAdapter, codexRequestBody, fetchCodexModels } from '../src/providers/codex.js'
 import { GrokAdapter } from '../src/providers/grok.js'
-import { ClaudeAdapter, claudeRequestBody } from '../src/providers/claude.js'
+import { ClaudeAdapter, claudeRequestBody, fetchClaudeModels } from '../src/providers/claude.js'
 import { CopilotAdapter, fetchCopilotModels } from '../src/providers/copilot.js'
 import { ModelCatalogCache } from '../src/providers/common.js'
 import { AccountTokenManager } from '../src/providers/accounts.js'
@@ -403,6 +403,67 @@ test('claude logged in returns the static catalog', async () => {
   })
   const models = await claude.listModels('claude')
   assert.deepEqual(models.map(model => model.id), ['claude-opus-4-5'])
+})
+
+// The subscription endpoint advertises each model's limits (#101).
+const CLAUDE_MODELS_PAYLOAD = {
+  data: [
+    { type: 'model', id: 'claude-opus-5-5', display_name: 'Claude Opus 5.5', max_input_tokens: 1_000_000, max_tokens: 128_000 },
+    { type: 'model', id: 'claude-opus-4-5', display_name: 'Claude Opus 4.5', max_input_tokens: 200_000, max_tokens: 64_000 },
+    { type: 'model', id: 'claude-bare', display_name: 'Bare' },
+    { type: 'model', id: 'claude-odd', display_name: 'Odd', max_input_tokens: '1e6', max_tokens: -5 },
+  ],
+}
+
+test('fetchClaudeModels carries the advertised context window and output cap', async () => {
+  const models = await fetchClaudeModels(claudeSession, fakeFetch(CLAUDE_MODELS_PAYLOAD).fetchFn)
+  assert.deepEqual(models, [
+    { id: 'claude-opus-5-5', name: 'Claude Opus 5.5', contextWindow: 1_000_000, maxOutputTokens: 128_000 },
+    { id: 'claude-opus-4-5', name: 'Claude Opus 4.5', contextWindow: 200_000, maxOutputTokens: 64_000 },
+    { id: 'claude-bare', name: 'Bare' },
+    // Malformed limits are dropped rather than poisoning the catalog.
+    { id: 'claude-odd', name: 'Odd' },
+  ])
+})
+
+test('claude resolveModel serves discovered limits for models newer than the bundled catalog', async () => {
+  const claude = new ClaudeAdapter({
+    models: STATIC_CLAUDE,
+    streamIdleTimeoutMs: 1000,
+    tokens: memoryTokens(claudeSession),
+    discovery: true,
+    fetchFn: fakeFetch(CLAUDE_MODELS_PAYLOAD).fetchFn,
+  })
+  // Not in the configured catalog: the endpoint's numbers win over the 200k/32k fallbacks.
+  const fresh = await claude.resolveModel('claude', 'claude-opus-5-5')
+  assert.equal(fresh.context?.contextWindow, 1_000_000)
+  assert.equal(fresh.defaultMaxTokens, 128_000)
+  // Discovered but silent on limits: the fallbacks still apply.
+  const bare = await claude.resolveModel('claude', 'claude-bare')
+  assert.equal(bare.context?.contextWindow, 200_000)
+  assert.equal(bare.defaultMaxTokens, 32_000)
+  // Unknown to discovery and configuration alike: unchanged behaviour.
+  const unknown = await claude.resolveModel('claude', 'claude-unknown')
+  assert.equal(unknown.context?.contextWindow, 200_000)
+  assert.equal(unknown.defaultMaxTokens, 32_000)
+})
+
+test('claude configured output cap may lower but never exceed the discovered ceiling', async () => {
+  const configured = [
+    { id: 'claude-opus-4-5', name: 'Claude Opus 4.5', maxTokens: 16_000 },
+    { id: 'claude-opus-5-5', name: 'Claude Opus 5.5', maxTokens: 256_000, contextWindow: 400_000 },
+  ]
+  const claude = new ClaudeAdapter({
+    models: configured,
+    streamIdleTimeoutMs: 1000,
+    tokens: memoryTokens(claudeSession),
+    discovery: true,
+    fetchFn: fakeFetch(CLAUDE_MODELS_PAYLOAD).fetchFn,
+  })
+  assert.equal((await claude.resolveModel('claude', 'claude-opus-4-5')).defaultMaxTokens, 16_000)
+  const capped = await claude.resolveModel('claude', 'claude-opus-5-5')
+  assert.equal(capped.defaultMaxTokens, 128_000)
+  assert.equal(capped.context?.contextWindow, 1_000_000, 'discovery outranks a stale configured window')
 })
 
 test('fetchCodexModels tolerates entries without visibility or priority', async () => {
@@ -1482,6 +1543,8 @@ test('resolveModel and Speed use a non-default account catalog for a model only 
     'max',
   ])
   assert.equal(await adapter.supportsFastTier('gpt-5.6-sol'), true)
+  assert.equal(await adapter.supportsFastTier('gpt-5.6-sol', 'pro'), true)
+  assert.equal(await adapter.supportsFastTier('gpt-5.6-sol', 'plus'), false)
   assert.deepEqual(await adapter.fastCapableModels(), ['gpt-5.6-sol'])
 })
 
