@@ -7,7 +7,7 @@ import type { SessionTarget } from '@deepseek-ai/dsh-api-session-controller/clie
 /** Narrow sessions-service face used by the activity panel and team card. */
 export interface AgentTeamsSessionNavigator {
   /** Refresh the exact parent's durable direct-child catalog. */
-  refreshSubagents(parentSessionId: SessionId): Promise<void>
+  refreshProjections(parentSessionId: SessionId): Promise<void>
   /** Reuse an address already retained by the client runtime when available. */
   subagentAddress(id: SessionId): SubagentAddress | undefined
 }
@@ -38,7 +38,7 @@ export async function openAgentTeamMember(
   layout?: AgentTeamsLayoutNavigator,
 ): Promise<'subagent' | 'cancelled'> {
   const navigation = layout?.beginNavigation?.()
-  await sessions.refreshSubagents(parentSessionId)
+  await sessions.refreshProjections(parentSessionId)
   if (navigation?.aborted) return 'cancelled'
   const retained = sessions.subagentAddress(childSessionId)
   workspace.openSession(retained?.parentSessionId === parentSessionId

@@ -1292,7 +1292,7 @@ check(
 )
 const navigationCalls = []
 const addressedNavigation = await openAgentTeamMember({
-  refreshSubagents: async (id) => { navigationCalls.push(['refresh', id]) },
+  refreshProjections: async (id) => { navigationCalls.push(['refresh', id]) },
   subagentAddress: () => undefined,
 }, {
   openSession: (address) => { navigationCalls.push(['openSession', address]) },
@@ -1308,7 +1308,7 @@ check(
 )
 const panelNavigationCalls = []
 await openAgentTeamMember({
-  refreshSubagents: async () => {},
+  refreshProjections: async () => {},
   subagentAddress: () => undefined,
 }, {
   openSession: () => panelNavigationCalls.push('member'),
@@ -1319,7 +1319,7 @@ check('alpha.2 member navigation delegates main-panel selection to uiWorkspace',
   JSON.stringify(panelNavigationCalls) === JSON.stringify(['member']))
 const supersededNavigation = new AbortController()
 const cancelledNavigation = await openAgentTeamMember({
-  refreshSubagents: async () => { supersededNavigation.abort() },
+  refreshProjections: async () => { supersededNavigation.abort() },
   subagentAddress() { throw new Error('cancelled refresh must not resolve an address') },
 }, {
   openSession() { throw new Error('cancelled refresh must not steal the current Session') },

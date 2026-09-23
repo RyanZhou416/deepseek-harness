@@ -10,6 +10,7 @@ const PROFILE_COMMAND_PREFIX = `${AGENT_TEAMS_COMMAND}-`
 declare module '@deepseek-ai/dsh-llm' {
   interface MessageSourceMap {
     'agent-teams-command': { readonly kind: 'agent-teams-command'; readonly goal?: string; readonly profile?: string }
+    'agent-teams-host': { readonly kind: 'agent-teams-host'; readonly plugin: 'dsh-agent-teams' }
   }
 }
 

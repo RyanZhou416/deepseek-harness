@@ -1,10 +1,10 @@
 {
   "schemaVersion": 1,
-  "recommendedHost": "0.1.6-alpha.2",
-  "previewTag": "dsh016alpha2",
+  "recommendedHost": "0.1.7-rc.1",
+  "previewTag": "dsh017rc1",
   "supportedHosts": [
     {
-      "version": "0.1.6-alpha.2",
+      "version": "0.1.7-rc.1",
       "track": "recommended"
     }
   ]

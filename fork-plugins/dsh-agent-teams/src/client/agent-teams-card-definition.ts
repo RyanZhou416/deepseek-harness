@@ -90,8 +90,7 @@ export const agentTeamsCardDefinition: ConversationNodeDefinition<AgentTeamsNode
   },
   update: (context, match) => {
     if (match.event.type !== 'tool/result') return context.state
-    const failed = match.event.data.error !== undefined
-      || match.event.data.message.content.some((block) => block.type === 'tool-result' && block.isError === true)
+    const failed = match.event.data.error !== undefined || match.event.data.message.isError === true
     if (failed) return context.state
     return { ...context.state, accepted: true }
   },
