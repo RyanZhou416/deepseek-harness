@@ -23,6 +23,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { createContextActivityDefinition } from './activity'
 import { createToolAttribution } from './attribution'
+import { watchBalanceChannel } from './balance'
 import { watchActivityBackfill } from './backfill'
 import { Config, resolveBounds } from './config'
 import { watchDetailChannel } from './detail'
@@ -45,6 +46,11 @@ export const inject = ['sessionProjections']
 export { Config } from './config'
 
 export function apply(ctx: Context, config: Config): void {
+  // The DeepSeek platform balance route (balance.ts): independent of the
+  // projection generations, so it arms on either side of the baseline gate —
+  // every face it reads is runtime-proved, and an unarmed route just means
+  // the dashboard's capsule never appears.
+  watchBalanceChannel(ctx)
   // The baseline gate: a harness BELOW the supported baseline (detected at
   // apply time — see version.ts) never gets the real folds, since its log
   // shapes and seam faces are outside the compat matrix. Fallback units
@@ -90,6 +96,7 @@ export function apply(ctx: Context, config: Config): void {
 
 export type { Category, ContextEventRecord, RequestRecord, Snapshot, ContextTimeline, SurfaceNode } from '../shared/types'
 export type { ActivityDay, ContextActivity, ContextHeaders, HeaderRecord, HeaderTool, ContextTimelineDetail, TimelineCounts, TimelineLast } from '../shared/types'
+export type { PlatformBalance, PlatformBalanceEntry } from '../shared/types'
 export type { ActivityState } from './activity'
 export type { TimelineState } from './fold'
 export type { HeadersState } from './headers'

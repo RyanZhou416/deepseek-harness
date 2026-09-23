@@ -1,3 +1,4 @@
+// DeepSeek Harness fork modification: retain the 0.1.6 baseline and pin 0.1.7-rc.1.
 /**
  * The supported harness compatibility matrix — the ONE source of truth for
  * which dsh baselines this plugin must work on, and how their seams differ.
@@ -16,7 +17,7 @@
  */
 
 /** The supported dsh tags, in lockstep with the BASELINES entries below. */
-export type BaselineId = 'v0.1.2-rc.1' | 'v0.1.3-alpha.2' | 'v0.1.5-rc.1' | 'v0.1.6-alpha.2'
+export type BaselineId = 'v0.1.2-rc.1' | 'v0.1.3-alpha.2' | 'v0.1.5-rc.1' | 'v0.1.6-alpha.2' | 'v0.1.7-alpha.2' | 'v0.1.7-rc.1'
 
 /** The harness web half's client faces, as far as the compat probes consume them. */
 export interface ClientSeam {
@@ -124,6 +125,34 @@ export interface Baseline {
     loopNeedles: readonly string[]
     prependProofFile: string
   }
+  /**
+   * The tag's settings-namespace surface. Through V3 the settings service
+   * carries the `register(ns, schema)` face the plugin's host half calls
+   * (feature-detected), optionally behind a namespace pattern that must
+   * accept the plugin literal, the browser half binds the `settingsScope`
+   * service and registers its card on the `settings.plugin.item` slot. V4+
+   * derives configuration forms from each loader entry's own Config schema —
+   * the register face is gone (the plugin stays inert there) and the browser
+   * half rides the `configForms` service and the Plugins page's keyed
+   * `plugins.bundle.config` seat instead.
+   */
+  settings: {
+    /** The settings service source carrying (or missing) the register face. */
+    serviceFile: string
+    /** Whether this generation serves `settings.register`. */
+    register: boolean
+    /** The NAMESPACE_PATTERN source, where the generation enforces one. */
+    patternFile?: string
+    /** The browser slot the preferences card registers on this generation. */
+    cardSlot: string
+    /** The sources declaring (or missing) the card slot. */
+    cardSlotFiles: readonly string[]
+    /** The browser settings-transport service this generation composes. */
+    transport: 'settingsScope' | 'configForms'
+    /** The transport's declaring source, plus whether it exists. */
+    transportFile: string
+    transportPresent: boolean
+  }
 }
 
 const LEGACY_BASELINES: readonly Baseline[] = [
@@ -156,6 +185,16 @@ const LEGACY_BASELINES: readonly Baseline[] = [
         registryFile: 'packages/session/session-projection/src/index.ts',
         registryNeedle: 'stateOf<',
       },
+    },
+    settings: {
+      serviceFile: 'packages/settings/settings/src/index.ts',
+      register: true,
+      patternFile: 'packages/settings/settings/src/index.ts',
+      cardSlot: 'settings.plugin.item',
+      cardSlotFiles: ['packages/client/ui-settings-plugins/src/**'],
+      transport: 'settingsScope',
+      transportFile: 'packages/client/ui-settings/src/client/settings-scope.ts',
+      transportPresent: true,
     },
     stepGuard: {
       loopFile: 'packages/core/agent-loop/src/agent.ts',
@@ -195,6 +234,16 @@ const LEGACY_BASELINES: readonly Baseline[] = [
         registryFile: 'packages/session/session-projection/src/index.ts',
         registryNeedle: 'stateOf<',
       },
+    },
+    settings: {
+      serviceFile: 'packages/settings/settings/src/index.ts',
+      register: true,
+      patternFile: 'packages/settings/settings/src/index.ts',
+      cardSlot: 'settings.plugin.item',
+      cardSlotFiles: ['packages/client/ui-settings-plugins/src/**'],
+      transport: 'settingsScope',
+      transportFile: 'packages/client/ui-settings/src/client/settings-scope.ts',
+      transportPresent: true,
     },
     stepGuard: {
       loopFile: 'packages/core/agent-loop/src/agent.ts',
@@ -259,6 +308,87 @@ const LEGACY_BASELINES: readonly Baseline[] = [
         },
       },
     },
+    settings: {
+      serviceFile: 'packages/settings/settings/src/index.ts',
+      register: true,
+      patternFile: 'packages/settings/settings/src/index.ts',
+      cardSlot: 'settings.plugin.item',
+      cardSlotFiles: ['packages/client/ui-settings-plugins/src/**'],
+      transport: 'settingsScope',
+      transportFile: 'packages/client/ui-settings/src/client/settings-scope.ts',
+      transportPresent: true,
+    },
+    stepGuard: {
+      loopFile: 'packages/core/agent-loop/src/agent.ts',
+      loopNeedles: ["'agent/pre-step'", "append('user/message'"],
+      prependProofFile: 'packages/context/time-context/src/index.ts',
+    },
+  },
+  {
+    // Session format V4: the fold's switched families are unchanged (the
+    // system prompt still rides `system/message`), but the line retires the
+    // `settings.plugin.item` slot — the plugin's preferences card registers on
+    // the Plugins page's keyed `plugins.bundle.config` slot there, keeping the
+    // old registration for the V0–V3 lines (each slot exists on exactly one
+    // side, so the deferred injects pick their generation and never pend).
+    id: 'v0.1.7-alpha.2',
+    tag: 'dsh-v0.1.7-alpha.2',
+    cordis: '4.0.4',
+    session: '0.1.7-alpha.2',
+    foldEventTypes: [
+      'request/header', 'request/context', 'step/start', 'step/end',
+      'user/message', 'tool/call', 'tool/result', 'assistant/message', 'assistant/attempt',
+      'tool/ptc-dispatch',
+      'plan/mode', 'compaction/summary', 'compaction/prune', 'system/message',
+    ],
+    client: {
+      imageFaceMethod: 'imageUrl',
+      markdownChrome: 'labels',
+      platformModules: [
+        'react', 'react/jsx-runtime', 'react-dom', 'react-dom/client', '@deepseek-ai/cordis',
+        '@deepseek-ai/dsh-client-store',
+        '@deepseek-ai/dsh-client-ui-slots',
+        '@deepseek-ai/dsh-client-ui-primitives',
+        '@deepseek-ai/dsh-client-ui-dockkit',
+      ],
+      detailChannel: {
+        hostRpcFile: 'packages/client/connection/src/rpc.ts',
+        hostRpcNeedle: 'HostConnectionRpc',
+        clientRpcFile: 'packages/client/connection/src/client/rpc.ts',
+        clientRpcNeedle: 'call(channel, endpoint, payload',
+        registryFile: 'packages/session/session-projection/src/index.ts',
+        registryNeedle: 'stateOf<',
+      },
+      sidebar: {
+        serviceFile: 'packages/client/ui-sidebar-right/src/client/index.ts',
+        serviceNeedle: 'sidebarRightTabs',
+        slotFile: 'packages/client/ui-sidebar-right/src/client/contract/slots.ts',
+        slotNeedle: 'sidebar.right.pane.tab',
+        titleSlotNeedle: 'sidebar.right.pane.tab.title',
+        nav: {
+          file: 'packages/client/ui-sidebar-right/src/client/service.ts',
+          needle: 'openResource(address',
+        },
+        guideEntry: {
+          file: 'packages/client/ui-sidebar-right/src/client/tab-registry.ts',
+          fields: [
+            'readonly order: number',
+            'readonly title: () => string',
+            'readonly description?: () => string',
+            'readonly icon?: ComponentType<IconProps>',
+          ],
+        },
+      },
+    },
+    settings: {
+      serviceFile: 'packages/settings/settings/src/index.ts',
+      register: false,
+      cardSlot: 'plugins.bundle.config',
+      cardSlotFiles: ['packages/client/ui-plugin-manager/src/**'],
+      transport: 'configForms',
+      transportFile: 'packages/client/ui-settings/src/client/config-form.ts',
+      transportPresent: true,
+    },
     stepGuard: {
       loopFile: 'packages/core/agent-loop/src/agent.ts',
       loopNeedles: ["'agent/pre-step'", "append('user/message'"],
@@ -269,8 +399,10 @@ const LEGACY_BASELINES: readonly Baseline[] = [
 
 const previousV3 = LEGACY_BASELINES[2]
 if (previousV3 === undefined) throw new Error('missing V3 compatibility baseline')
+const previousV4 = LEGACY_BASELINES[3]
+if (previousV4 === undefined) throw new Error('missing V4 compatibility baseline')
 
-/** Supported DSH releases, including the current V3 host generation. */
+/** Supported DSH releases, including the fork's previous and current host generations. */
 export const BASELINES: readonly Baseline[] = [
   ...LEGACY_BASELINES,
   {
@@ -278,5 +410,16 @@ export const BASELINES: readonly Baseline[] = [
     id: 'v0.1.6-alpha.2',
     tag: 'dsh-v0.1.6-alpha.2',
     session: '0.1.6-alpha.2',
+    settings: {
+      ...previousV3.settings,
+      cardSlot: 'plugins.bundle.config',
+      cardSlotFiles: ['packages/client/ui-plugin-manager/src/**'],
+    },
+  },
+  {
+    ...previousV4,
+    id: 'v0.1.7-rc.1',
+    tag: 'dsh-v0.1.7-rc.1',
+    session: '0.1.7-rc.1',
   },
 ]

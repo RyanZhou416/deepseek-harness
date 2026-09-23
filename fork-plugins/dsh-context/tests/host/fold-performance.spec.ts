@@ -173,6 +173,7 @@ describe('timeline allocation bounds', () => {
         return Reflect.get(target, property, receiver) as unknown
       },
     })
+    delete state.turnRuns
     const normalized = def.apply(state, toolCall(1, { callId: 'c1', name: 'bash' }))
     assert.ok(iteratorReads > 0, 'the first relevant event validates restored retention')
 

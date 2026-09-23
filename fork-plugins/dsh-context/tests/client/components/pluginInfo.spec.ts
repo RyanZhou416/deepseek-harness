@@ -44,6 +44,8 @@ describe('PluginInfo', () => {
     assert.ok(text(m.container).includes('Plugin Info'))
     const rows = queryAll(m.container, '.lc-pi-row')
     assert.equal(rows.length, 3)
+    // Every row's label leads with its site mark (DeepSeek / GitHub / the settings gear).
+    for (const row of rows) assert.equal(queryAll(row, '.lc-pi-label .lc-pi-labelicon').length, 1)
     assert.equal(query(rows[0], '.lc-pi-label').textContent, 'Plugin')
     assert.equal(query(rows[0], '.lc-pi-value').textContent, 'dsh-context (v0.0.0-dev)')
     assert.equal(rows[0].getAttribute('href'), 'https://github.com/bowenliang123/dsh-context')
@@ -54,7 +56,7 @@ describe('PluginInfo', () => {
     // The settings entry: a button (no href) below GitHub — the guarded jump runs on click.
     assert.equal(rows[2].getAttribute('href'), null)
     assert.equal(query(rows[2], '.lc-pi-label').textContent, 'Settings')
-    assert.equal(query(rows[2], '.lc-pi-value').textContent, 'Open in Settings')
+    assert.equal(query(rows[2], '.lc-pi-value').textContent, 'Open preferences')
     // The tagline is the repo link too: hover underlines it, a click opens GitHub.
     const hint = query(m.container, '.lc-pi-hint')
     assert.ok(text(hint).includes('The best DSH context plugin'))

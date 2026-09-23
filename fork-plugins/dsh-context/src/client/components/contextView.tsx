@@ -36,7 +36,8 @@ import { makeStatsTokens } from './statsTokens'
 import { makeLegend, makeStackedBar } from './stackedBar'
 import { aggregateByTurn, attachMarkers, jumpTargetOf, makeTrendChart, turnStepsOf } from './trendChart'
 
-import { takeContextFocus } from '../viewFocus'
+import { subscribeContextFocus, takeContextFocus } from '../viewFocus'
+import { revealInScrollParent } from '../revealScroll'
 import { makeErrorBoundary } from './errorBoundary'
 
 // The context page scrolls inside the conversation's shared `[data-conversation-scroll]` container, which the chat bottom-anchors — mirror
@@ -220,16 +221,23 @@ export function makeContextView(
     const stepsOf = useMemo(() => turnStepsOf(requests), [requests])
     const markers = useMemo(() => attachMarkers(displayRequests, events), [displayRequests, events])
 
-    // Chat → Context jump, leg 1: pick up the assistant-action relay's request for this session (once per mount).
+    // Chat → Context jump, leg 1: pick up the assistant-action relay's request for this session —
+    // once per mount, and again on every later record (the sidebar landing keeps this view mounted
+    // while the user jumps between replies).
     useEffect(() => {
       if (typeof sessionId !== 'string' || sessionId === '') return
-      const seq = takeContextFocus(sessionId)
-      if (seq !== null) setJumpSeq(seq)
+      const take = (): void => {
+        const seq = takeContextFocus(sessionId)
+        if (seq !== null) setJumpSeq(seq)
+      }
+      take()
+      return subscribeContextFocus(take)
     }, [sessionId])
 
     // Leg 2: the action row belongs to the reply that CLOSED a turn, so the jump is turn-level — flip the chart to turn bars, pin that
     // turn's aggregate (the relayed seq is the turn's last request, exactly the aggregate's record), and center it: the same flow as a
-    // turn-strip click. An aged-out turn clamps to the oldest retained bar. No page-scroller anchor → the reset degrades quietly.
+    // turn-strip click. An aged-out turn clamps to the oldest retained bar. The landing then reveals the Current Composition card, so
+    // the card and the pinned turn's trend chart share the scrollport (revealScroll.ts; no scrollable ancestor → a quiet no-op).
     // The split generation waits for the detail read first: the relayed seq resolves against the served request records, so the
     // one-shot request must not be consumed while the collections are still pending (it re-fires when they land).
     const detailReady = source.detailState === 'ready' || source.detailState === 'legacy'
@@ -241,8 +249,12 @@ export function makeContextView(
       setGranularity('turn')
       setSelectedSeq(target.seq)
       setFocusTurn(target.turn ?? 0)
-      // The restore layout effect resolved the shared scroller on this same data render (layout effects precede this one).
-      if (scrollerRef.current !== null) scrollerRef.current.scrollTop = 0
+      // The restore layout effect already applied the saved position on this same data render
+      // (layout effects precede this one); the reveal overrides it wherever it landed.
+      /* v8 ignore next 2 -- the effect only fires while mounted, and both render paths attach
+         rootRef and render the composition card. */
+      const anchor = rootRef.current?.querySelector('[data-lc-current]') ?? null
+      if (anchor !== null) revealInScrollParent(anchor)
     }, [jumpSeq, data, requests, detailReady])
 
     // Step-brief raw material: every served node seq-sorted (live tail + archive), and the conversation-snapshot
@@ -516,10 +528,10 @@ export function makeContextView(
       <div className="lc-root" ref={rootRef}>
 
         {/* The head band splits into two rows: the session's shape beside the
-            plugin card, then the two donut cards together. The sidebar panel
-            drops the first row (context stats / plugin info pay off only on
-            the full-width tab); the rows' own flex-wrap stacks the pair in a
-            narrow pane at the shared 360px card floor. */}
+            plugin card at a 3:1 split, then the two donut cards together. The
+            sidebar panel drops the first row (context stats / plugin info pay
+            off only on the full-width tab); the rows' own flex-wrap stacks the
+            pair in a narrow pane at the cards' min-width floors. */}
         {inSidebar ? null : (
           <div className="lc-cols lc-head">
             <StatsContext counts={counts} humanInputs={data.humanInputs} toolCalls={data.toolCalls} usage={usage}

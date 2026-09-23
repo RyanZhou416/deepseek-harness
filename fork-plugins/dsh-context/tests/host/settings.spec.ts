@@ -1,13 +1,14 @@
+// DeepSeek Harness fork modification: test the old settings provider through a pinned alias.
 // Integration tests for the plugin settings namespace (src/host/settings.ts)
 // against the REAL cordis context and the REAL dsh-settings provider base —
 // the dsh-canonical harness pattern: an in-memory SettingsProvider subclass,
 // mounted as a plugin, with installSettings layering the namespace on top.
 
 import assert from 'node:assert/strict'
-import { describe, test } from 'vitest'
+import { describe, onTestFinished, test } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
-import { SettingsProvider } from '@deepseek-ai/dsh-settings'
-import type { SettingsNamespace } from '@deepseek-ai/dsh-settings'
+import { SettingsProvider } from '@deepseek-ai/dsh-settings-legacy'
+import type { SettingsNamespace } from '@deepseek-ai/dsh-settings-legacy'
 import { installSettings, SETTINGS_NAMESPACE } from '../../src/host/settings'
 import type { PluginSettings } from '../../src/host/settings'
 
@@ -38,11 +39,12 @@ class MemorySettings extends SettingsProvider {
 // branded cast satisfies the SettingsNamespace type face (see
 // src/host/settings.ts).
 const ns = SETTINGS_NAMESPACE as SettingsNamespace
+const legacySettings = (ctx: Context): MemorySettings => ctx.get('settings') as unknown as MemorySettings
 
 /** Poll until the inject callback inside installSettings has registered the namespace. */
 async function untilRegistered(ctx: Context): Promise<void> {
   for (let i = 0; i < 200; i++) {
-    if (ctx.settings.get(ns) !== undefined) return
+    if (legacySettings(ctx).get(ns) !== undefined) return
     await new Promise(resolve => setTimeout(resolve, 1))
   }
   assert.fail('the dsh-context settings namespace was never registered')
@@ -50,10 +52,11 @@ async function untilRegistered(ctx: Context): Promise<void> {
 
 async function boot(doc?: Record<string, unknown>) {
   const ctx = new Context()
+  onTestFinished(async () => { await ctx.fiber.dispose() })
   await ctx.plugin(MemorySettings, doc === undefined ? undefined : { doc })
   installSettings(ctx)
   await untilRegistered(ctx)
-  return { ctx, provider: ctx.get('settings') as MemorySettings }
+  return { ctx, provider: legacySettings(ctx) }
 }
 
 describe('installSettings', () => {
@@ -63,9 +66,9 @@ describe('installSettings', () => {
 
   test('registers the dsh-context namespace with schema defaults', async () => {
     const { ctx } = await boot()
-    const descriptors = ctx.settings.describe()
+    const descriptors = legacySettings(ctx).describe()
     assert.ok(descriptors.some(d => String(d.ns) === 'dsh-context'), 'the namespace is registered')
-    assert.deepEqual(ctx.settings.get(ns), {
+    assert.deepEqual(legacySettings(ctx).get(ns), {
       defaultPlacement: 'all',
       defaultGranularity: 'step',
       defaultTrendMode: 'total',
@@ -77,8 +80,8 @@ describe('installSettings', () => {
 
   test('updates flow through the real scope; invalid values reject', async () => {
     const { ctx, provider } = await boot()
-    await ctx.settings.update(ns, { defaultGranularity: 'turn' })
-    assert.deepEqual(ctx.settings.get(ns), {
+    await legacySettings(ctx).update(ns, { defaultGranularity: 'turn' })
+    assert.deepEqual(legacySettings(ctx).get(ns), {
       defaultPlacement: 'all',
       defaultGranularity: 'turn',
       defaultTrendMode: 'total',
@@ -88,8 +91,8 @@ describe('installSettings', () => {
     }, 'the update resolves over the schema defaults')
     assert.deepEqual(provider.doc['dsh-context'], { defaultGranularity: 'turn' }, 'the provider persisted the section')
 
-    await ctx.settings.update(ns, { defaultPlacement: 'sidebar', defaultTrendMode: 'delta', defaultFileSort: 'path', insightsEntry: 'hide' })
-    assert.deepEqual(ctx.settings.get(ns), {
+    await legacySettings(ctx).update(ns, { defaultPlacement: 'sidebar', defaultTrendMode: 'delta', defaultFileSort: 'path', insightsEntry: 'hide' })
+    assert.deepEqual(legacySettings(ctx).get(ns), {
       defaultPlacement: 'sidebar',
       defaultGranularity: 'turn',
       defaultTrendMode: 'delta',
@@ -99,13 +102,13 @@ describe('installSettings', () => {
     }, 'every preference field resolves independently')
 
     await assert.rejects(
-      ctx.settings.update(ns, { defaultGranularity: 'week' }),
+      legacySettings(ctx).update(ns, { defaultGranularity: 'week' }),
       'an unknown granularity fails validation before anything persists',
     )
     // The loose fields degrade instead of rejecting: a stale file sort,
     // placement, tool sort, or insights entry resolves to the default.
-    await ctx.settings.update(ns, { defaultFileSort: 'net', defaultPlacement: 'window', defaultToolSort: 'net', insightsEntry: 'gone' })
-    assert.deepEqual(ctx.settings.get(ns), {
+    await legacySettings(ctx).update(ns, { defaultFileSort: 'net', defaultPlacement: 'window', defaultToolSort: 'net', insightsEntry: 'gone' })
+    assert.deepEqual(legacySettings(ctx).get(ns), {
       defaultPlacement: 'all',
       defaultGranularity: 'turn',
       defaultTrendMode: 'delta',
@@ -122,7 +125,7 @@ describe('installSettings', () => {
 
   test('a stale persisted preference degrades to the default (loose)', async () => {
     const { ctx } = await boot({ 'dsh-context': { defaultPlacement: 'window', defaultTrendMode: 'net', defaultToolSort: 'alpha', defaultFileSort: 'alpha', insightsEntry: 'gone' } })
-    const value = ctx.settings.get(ns) as PluginSettings
+    const value = legacySettings(ctx).get(ns) as PluginSettings
     assert.equal(value.defaultPlacement, 'all', 'the stale placement falls back instead of breaking the section')
     assert.equal(value.defaultTrendMode, 'total', 'the stale value falls back instead of breaking the section')
     assert.equal(value.defaultToolSort, 'count', 'the stale tool sort falls back instead of breaking the section')
@@ -133,7 +136,21 @@ describe('installSettings', () => {
 
   test('without a settings provider the install is inert', () => {
     const ctx = new Context()
+    onTestFinished(async () => { await ctx.fiber.dispose() })
     assert.doesNotThrow(() => installSettings(ctx))
     assert.equal(ctx.get('settings'), undefined, 'no provider composed, nothing registered')
+  })
+
+  test('a settings service without the register face (dsh V4+) stays inert', async () => {
+    // The V4+ settings service derives forms from the entry's own Config
+    // schema and no longer carries `settings.register`; the install must
+    // feature-detect the face instead of throwing inside the inject fiber.
+    const ctx = new Context()
+    onTestFinished(async () => { await ctx.fiber.dispose() })
+    ctx.provide('settings', { describe: () => [] })
+    assert.doesNotThrow(() => installSettings(ctx))
+    // Let the inject callback run; a mis-spelled call would fail the fiber.
+    await new Promise(resolve => setTimeout(resolve, 20))
+    assert.ok(ctx.get('settings') !== undefined, 'the foreign service stays composed')
   })
 })

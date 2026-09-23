@@ -1,3 +1,4 @@
+// DeepSeek Harness fork modification: verify the absent ResizeObserver fallback under RC.1 fixtures.
 /**
  * TrendChart (src/client/components/trendChart.tsx) rendered with the REAL React 18 tree in jsdom: stacked step bars,
  * turn aggregation, total/delta geometry, compaction/prune markers, hover tooltips, scroll anchoring, and turn-label
@@ -665,6 +666,23 @@ describe('TrendChart adaptive scale (the title-adjacent toggle)', () => {
       await act(async () => { callbacks[0]() })
       assert.equal(query(m.container, '.lc-axis-top').textContent, '900')
       await m.unmount()
+    } finally {
+      holder.ResizeObserver = saved
+    }
+  })
+
+  test('without ResizeObserver the initial visible window still measures', async () => {
+    const holder = globalThis as { ResizeObserver?: unknown }
+    const saved = holder.ResizeObserver
+    holder.ResizeObserver = undefined
+    try {
+      const m = await mount(h(TrendChart, propsOf(spikedSteps(), { adaptive: true })))
+      try {
+        await flush()
+        assert.equal(query(m.container, '.lc-axis-top').textContent, '100')
+      } finally {
+        await m.unmount()
+      }
     } finally {
       holder.ResizeObserver = saved
     }

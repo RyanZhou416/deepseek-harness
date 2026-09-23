@@ -93,8 +93,15 @@ interface ConnectionHostFace {
  */
 const YIELD_MS = 100
 
-/** The `name` dsh raises for a durable log its migration surface refuses. */
-const UNSUPPORTED_MIGRATION = 'SessionFormatUnsupportedMigrationError'
+/**
+ * The `name` family dsh raises for a durable log it cannot interpret. The
+ * format edge throws `SessionFormatUnsupportedMigrationError`, but the
+ * persistence seam translates it — together with every other "intact yet not
+ * interpretable" refusal — into `SessionFormatUnsupportedError` before the
+ * error escapes (issue #75): classify by the family prefix, since either
+ * exact name may be the one that arrives.
+ */
+const UNSUPPORTED_FORMAT = 'SessionFormatUnsupported'
 
 function asRecord(value: unknown): Record<string, unknown> | null {
   return value !== null && typeof value === 'object' ? value as Record<string, unknown> : null
@@ -170,15 +177,15 @@ function isLive(sessions: Record<string, unknown> | null, id: string): boolean {
 }
 
 /**
- * Whether the cold read failed because the running harness refuses to
- * migrate this log — a permanent, source-side refusal (the artifact is left
- * unchanged, so retrying cannot succeed). Matched by the error's documented
- * `name`, so no dsh symbol needs importing and every supported baseline
- * classifies alike: an unknown error shape just falls to the warn path.
+ * Whether the cold read failed because the running harness refuses this log's
+ * format — a permanent, source-side refusal (the artifact is left unchanged,
+ * so retrying cannot succeed). Matched by the error's documented `name`, so no
+ * dsh symbol needs importing and every supported baseline classifies alike: an
+ * unknown error shape just falls to the warn path.
  */
-function isUnsupportedMigration(error: unknown): boolean {
+function isUnsupportedFormat(error: unknown): boolean {
   try {
-    return asRecord(error)?.name === UNSUPPORTED_MIGRATION
+    return String(asRecord(error)?.name).startsWith(UNSUPPORTED_FORMAT)
   } catch {
     return false
   }
@@ -271,7 +278,7 @@ export function watchActivityBackfill(ctx: Context): () => void {
           ;(cache as unknown as ProjectionCacheLike).coldSnapshot(log.header, log.inheritedEventCount, log.events)
           folded++
         } catch (error: unknown) {
-          if (isUnsupportedMigration(error)) {
+          if (isUnsupportedFormat(error)) {
             // Permanent and source-side: the per-session detail drops to
             // debug; the summary below is the pass's only above-debug word.
             refused++

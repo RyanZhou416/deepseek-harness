@@ -190,6 +190,7 @@ describe('billedOf / turnsOf', () => {
 describe('rangeStartOf', () => {
   test('each window’s start instant; all is unbounded', () => {
     const now = 31 * 86_400_000
+    assert.equal(rangeStartOf('24h', now), now - 86_400_000)
     assert.equal(rangeStartOf('7d', now), now - 7 * 86_400_000)
     assert.equal(rangeStartOf('30d', now), now - 30 * 86_400_000)
     assert.equal(rangeStartOf('all', now), null)
@@ -210,8 +211,15 @@ describe('filterRows', () => {
   const now = 11 * 86_400_000
 
   test('the range window filters by last activity', () => {
+    assert.deepEqual(filterRows(rows, { range: '24h', day: null, query: '' }, now).map(r => r.id), ['new', 'active'])
     assert.deepEqual(filterRows(rows, { range: '7d', day: null, query: '' }, now).map(r => r.id), ['new', 'active'])
     assert.deepEqual(filterRows(rows, { range: 'all', day: null, query: '' }, now).map(r => r.id), ['old', 'new', 'active'])
+    // The 24h window's own boundary: inside by minutes, outside by an hour.
+    const hRows = [
+      rowOf({ id: 'fresh', title: 'just now', updatedAt: now - 2 * 3_600_000 }),
+      rowOf({ id: 'yesterday', title: 'a day ago', updatedAt: now - 25 * 3_600_000 }),
+    ]
+    assert.deepEqual(filterRows(hRows, { range: '24h', day: null, query: '' }, now).map(r => r.id), ['fresh'])
   })
 
   test('the day pin keeps only sessions contributing to that day', () => {
@@ -332,7 +340,7 @@ describe('kpisOf', () => {
     assert.equal(kpi.listed, 5)
     assert.equal(kpi.tokens, 200)
     assert.equal(kpi.turns, 5)
-    assert.ok(kpi.cost !== null && Math.abs(kpi.cost - 195e-6) < 1e-12, '50×0.1 + 100×1 + 10×1 + 40×2 per 1M')
+    assert.ok(kpi.cost !== null && Math.abs(kpi.cost - 390e-6) < 1e-12, 'the DeepSeek peak bucket doubles: 2 × (50×0.1 + 100×1 + 10×1 + 40×2) per 1M')
     assert.equal(kpi.cacheHit, '31.25', '50 reads of 160 billed input, truncated')
     assert.equal(kpi.costSessions, 1, 'only the priced session counts toward the cost cell')
     assert.equal(kpi.usageSessions, 1, 'only the billed session feeds the cache-hit rate')
@@ -356,7 +364,7 @@ describe('kpisOf', () => {
     const kpi = kpisOf(rows, 3, prices, 'usd')
     assert.equal(kpi.costSessions, 1, 'only the priced session counts toward the cost cell')
     assert.equal(kpi.usageSessions, 2, 'both billed sessions feed the cache-hit rate')
-    assert.ok(kpi.cost !== null && Math.abs(kpi.cost - 195e-6) < 1e-12, 'the unpriced session adds nothing to the estimate')
+    assert.ok(kpi.cost !== null && Math.abs(kpi.cost - 390e-6) < 1e-12, 'the unpriced session adds nothing to the estimate')
   })
 
   test('an unbilled set zeroes and dashes', () => {

@@ -6,7 +6,7 @@
 
 import { useCallback, useEffect, useRef, useState, type ReactElement } from 'react'
 import { createPortal } from 'react-dom'
-import { IconCloseOutline16 } from '@deepseek-ai/dsh-client-ui-primitives'
+import { IconClose } from '../primitives'
 import { fmtBytes } from '../format'
 import type { ImageLoader, ImageRefLike } from '../services'
 import { estimateImageTokens } from '../../shared/imageTokens'
@@ -81,7 +81,7 @@ function AttachmentLightbox(props: {
       <div className="lc-att-lightbox-mask" aria-hidden="true" onMouseDown={onClose} />
       <img className="lc-att-lightbox-img" src={src} alt={alt} />
       <button ref={closeRef} type="button" className="lc-att-lightbox-close" aria-label={labels.close} onClick={onClose}>
-        <IconCloseOutline16 size={16} />
+        <IconClose size={16} />
       </button>
     </div>,
     document.body,

@@ -115,8 +115,11 @@ beforeEach(() => {
   resetModelPrices()
   setModelPricesLoader(() => Promise.resolve(PROVIDERS))
   backfillPosts.length = 0
+  // The header's balance capsule POSTs its own route on open (client/balance.ts);
+  // only the warm-up trigger is this spec's subject.
   vi.stubGlobal('fetch', async (url: string | URL) => {
-    backfillPosts.push(String(url))
+    const route = String(url)
+    if (route.endsWith('/backfill')) backfillPosts.push(route)
     return { ok: true, json: async () => ({}) }
   })
 })
@@ -181,13 +184,15 @@ describe('OverviewPanel', () => {
     const ctx = makeCtx()
     const { m } = await openPanel(ctx)
     const rangeButtons = queryAll<HTMLButtonElement>(m.container, '.lc-ov-range .lc-gran-btn')
-    assert.equal(rangeButtons.length, 3)
-    await click(rangeButtons[2]) // All
+    assert.equal(rangeButtons.length, 4)
+    await click(rangeButtons[3]) // All
     assert.equal(queryAll(m.container, '.lc-ov-grid > .lc-ov-session').length, 3, 'the stale session joins')
     assert.equal(queryAll(m.container, '.lc-stat-value')[0].textContent, '3')
-    await click(rangeButtons[0]) // Last 7 days
+    await click(rangeButtons[0]) // Last 24 hours
+    assert.equal(queryAll(m.container, '.lc-ov-grid > .lc-ov-session').length, 1, 'only the hour-fresh session stays')
+    await click(rangeButtons[1]) // Last 7 days
     assert.equal(queryAll(m.container, '.lc-ov-grid > .lc-ov-session').length, 1, 'only the freshest stays')
-    await click(rangeButtons[1]) // back to 30d
+    await click(rangeButtons[2]) // back to 30d
     assert.equal(queryAll(m.container, '.lc-ov-grid > .lc-ov-session').length, 2)
     await m.unmount()
   })

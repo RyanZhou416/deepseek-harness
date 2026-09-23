@@ -30,7 +30,7 @@ export function makeCurrentComposition(
       ? { ratio: AUTO_COMPACT_RATIO, label: t('overview.compactReserve', { pct: Math.round(AUTO_COMPACT_RATIO * 100) }) }
       : undefined
     return (
-      <div className="lc-card">
+      <div className="lc-card" data-lc-current>
         <div className="lc-card-title">
           <span className="lc-card-title-text">{t('overview.title')}</span>
           {props.subtitle !== undefined && props.subtitle !== ''

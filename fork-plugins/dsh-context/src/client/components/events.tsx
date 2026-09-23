@@ -5,7 +5,7 @@
 
 import { useEffect, useLayoutEffect, useRef, type ReactElement } from 'react'
 import type { ContextEventRecord } from '../../shared/types'
-import { IconBranchOutline16, IconPlusOutline16 } from '@deepseek-ai/dsh-client-ui-primitives'
+import { IconBranch, IconPlus } from '../primitives'
 import type { Translate } from '../i18n'
 import type { DetailState } from '../timelineSource'
 import type { ViewKit } from '../viewkit'
@@ -114,8 +114,8 @@ export function makeEventList(kit: ViewKit): (props: EventListProps) => ReactEle
         {sorted.map((ev) => {
           const label = eventLabel(ev)
           const at = eventAt(ev)
-          const glyph = ev.kind === 'inject' ? <IconPlusOutline16 />
-            : ev.kind === 'model' ? <IconBranchOutline16 />
+          const glyph = ev.kind === 'inject' ? <IconPlus />
+            : ev.kind === 'model' ? <IconBranch />
               : EVENT_ICONS[ev.kind] || '•'
           // Key on the durable seq alone: the list renders newest-first, so a fresh event lands at index 0
           // and an index-bearing key would shift EVERY existing row's key — a full-list remount on every push.

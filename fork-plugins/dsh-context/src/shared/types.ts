@@ -492,10 +492,33 @@ export interface TimingTotals {
   genMs: number
   /** Reasoning-decode slice of `genMs` (the model's thinking). */
   reasoningMs?: number
+  /** Counted reasoning-decode blocks (the Thinking slice's tally). */
+  reasoningBlocks?: number
   /** Answer-text decode slice of `genMs`. */
   textMs?: number
+  /** Counted answer-text decode blocks (the Answer slice's tally). */
+  textBlocks?: number
   /** Tool-call-argument decode slice of `genMs`. */
   toolArgMs?: number
+  /**
+   * Counted tool-call-argument decode blocks — one per tool call whose
+   * arguments the stream decoded (the Tool args slice's tally). The counts are
+   * ADDITIVE-OPTIONAL like their spans: a row cached before they existed (or a
+   * call whose stream framed no blocks) carries none, and the card qualifies
+   * only what was actually counted.
+   */
+  toolArgBlocks?: number
+  /**
+   * The decode-throughput seat, paired exactly as the harness's own
+   * session-stats fold pairs them: `speedTokens` sums provider-reported
+   * output tokens and `speedMs` the first-token → assistant-message
+   * windows, over the calls that carried BOTH a first-token stamp and a
+   * usage report — a subset of `genMs`, which counts every token-stamped
+   * call regardless of usage. Additive-optional: cached rows written before
+   * the seat existed lack them, and the card falls back to no chip.
+   */
+  speedTokens?: number
+  speedMs?: number
   /** Completed model calls (assistant messages folded). */
   calls: number
   /** Summed per-call durations of completed tool calls. */
@@ -685,4 +708,31 @@ export interface HeaderEpochContent {
     /** The raw JSON schema object the model received (plain JSON). */
     schema?: unknown
   }>
+}
+
+/** One currency's DeepSeek open-platform balance figures. */
+export interface PlatformBalanceEntry {
+  /** The ISO code the platform reported (`CNY` / `USD`). */
+  currency: string
+  /** Total available funds: `granted` + `toppedUp`. Derived here rather than read
+   * from the platform's own `total_balance`, which rounds independently of its
+   * parts and can land a cent away from what the breakdown beside it shows. */
+  total: number
+  /** The not-expired granted (gift) balance. */
+  granted: number
+  /** The topped-up balance. */
+  toppedUp: number
+}
+
+/**
+ * The DeepSeek open-platform balance, served by the plugin's
+ * `/api/dsh-context/balance` fetch route (host/balance.ts). `null` on the
+ * wire — and nothing rendered client-side — whenever the platform is not
+ * configured or the read fails: the capsule only ever shows a live figure.
+ */
+export interface PlatformBalance {
+  /** Whether the platform reports the balance sufficient for API calls. */
+  isAvailable: boolean
+  /** One entry per currency the account holds; at least one. */
+  balances: PlatformBalanceEntry[]
 }

@@ -1,15 +1,21 @@
+// DeepSeek Harness fork modification: one Plugins card serves both 0.1.6 and V4 settings transports.
 /**
-   * The dsh-context card in Settings → Plugins → Plugin configuration, registered on the framework's `settings.plugin.item` slot keyed on
-   * the
-   * Host-served `dsh-context` settings namespace — the section itself supplies nothing; it renders nothing while the namespace is
-   * unavailable
-  * (a deployment without the Host half, or a remote browser, shows no trace).
-  * Mounts expanded when the Plugin Info card's "Open in Settings" jump left a
-  * fresh expand request (settingsJump.ts), scrolling itself into view.
-*/
+ * The dsh-context preference cards — two seats over the same six rows. The
+ * settings-section card (`settings.plugin.item`, the older harness lines)
+ * renders a collapsible list item in Settings → Plugins → Plugin
+ * configuration; the Plugins-page card (`plugins.bundle.config`, the
+ * 0.1.6+ generations) renders the rows flat inside the section chrome the
+ * Plugins page draws for the bundle. Both are keyed on the Host-served
+ * `dsh-context` namespace and render nothing while it is unavailable (a
+ * deployment without the Host half, or a remote browser, shows no trace).
+ * The settings-section card mounts expanded when the Plugin Info card's
+ * "Open preferences" jump left a fresh expand request (settingsJump.ts),
+ * scrolling itself into view.
+ */
 
 import { useEffect, useRef, useState, type ReactElement } from 'react'
-import { IconChevronDownOutline14, Menu } from '@deepseek-ai/dsh-client-ui-primitives'
+import { Menu } from '@deepseek-ai/dsh-client-ui-primitives'
+import { IconChevronDown } from '../primitives'
 import { consumeCardExpand } from '../settingsJump'
 import type { SettingsField, SettingsState } from '../settings'
 import type { ViewKit } from '../viewkit'
@@ -51,11 +57,87 @@ function PrefRow(props: PrefRowProps): ReactElement {
             onClick={() => { setOpen(v => !v) }}
           >
             {active}
-            <IconChevronDownOutline14 />
+            <IconChevronDown />
           </button>
         )}
       />
     </div>
+  )
+}
+
+/** Translate over the plugin's dictionary, as the view kit binds it. */
+type Translate = ViewKit['t']
+
+/** The six preference rows shared by both seats. */
+function PreferenceRows(props: { t: Translate; state: SettingsState; set?: SettingsCardProps['set'] }): ReactElement {
+  const { t, state, set } = props
+  const disabled = state.status !== 'ready' || !state.writable
+  return (
+    <>
+      <PrefRow
+        label={t('settings.placement')}
+        value={state.placement}
+        disabled={disabled}
+        options={[
+          { id: 'all', label: t('placement.all') },
+          { id: 'tab', label: t('placement.tab') },
+          { id: 'sidebar', label: t('placement.sidebar') },
+        ]}
+        onPick={(id) => { set?.('defaultPlacement', id) }}
+      />
+      <PrefRow
+        label={t('settings.insightsEntry')}
+        value={state.insightsEntry}
+        disabled={disabled}
+        options={[
+          { id: 'show', label: t('insightsEntry.show') },
+          { id: 'hide', label: t('insightsEntry.hide') },
+        ]}
+        onPick={(id) => { set?.('insightsEntry', id) }}
+      />
+      <PrefRow
+        label={t('settings.gran')}
+        value={state.granularity}
+        disabled={disabled}
+        options={[
+          { id: 'step', label: t('gran.step') },
+          { id: 'turn', label: t('gran.turn') },
+        ]}
+        onPick={(id) => { set?.('defaultGranularity', id) }}
+      />
+      <PrefRow
+        label={t('settings.mode')}
+        value={state.mode}
+        disabled={disabled}
+        options={[
+          { id: 'total', label: t('gran.total') },
+          { id: 'delta', label: t('gran.delta') },
+        ]}
+        onPick={(id) => { set?.('defaultTrendMode', id) }}
+      />
+      <PrefRow
+        label={t('settings.toolSort')}
+        value={state.toolSort}
+        disabled={disabled}
+        options={[
+          { id: 'size', label: t('tool.sort.size') },
+          { id: 'count', label: t('tool.sort.count') },
+          { id: 'name', label: t('tool.sort.name') },
+        ]}
+        onPick={(id) => { set?.('defaultToolSort', id) }}
+      />
+      <PrefRow
+        label={t('settings.fileSort')}
+        value={state.fileSort}
+        disabled={disabled}
+        options={[
+          { id: 'count', label: t('files.sort.count') },
+          { id: 'latest', label: t('files.sort.latest') },
+          { id: 'path', label: t('files.sort.path') },
+        ]}
+        onPick={(id) => { set?.('defaultFileSort', id) }}
+      />
+    </>
   )
 }
 
@@ -64,7 +146,7 @@ export function makeSettingsCard(kit: ViewKit): (props: SettingsCardProps) => Re
   return function SettingsCard(props: SettingsCardProps): ReactElement | null {
     const [open, setOpen] = useState(false)
     const itemRef = useRef<HTMLLIElement | null>(null)
-    // "Open in Settings" jump: consume its fresh expand request once on mount
+    // "Open preferences" jump: consume its fresh expand request once on mount
     // and land open; every guard stays local so no host quirk can surface.
     useEffect(() => {
       if (!consumeCardExpand()) return
@@ -75,7 +157,6 @@ export function makeSettingsCard(kit: ViewKit): (props: SettingsCardProps) => Re
     }, [])
     const state = typeof props.useContextSettings === 'function' ? props.useContextSettings(s => s) : undefined
     if (state === undefined || state.status === 'unavailable') return null
-    const disabled = state.status !== 'ready' || !state.writable
     return (
       <li ref={itemRef} className={'lc-settings-card' + (open ? ' lc-settings-open' : '')}>
         <button
@@ -89,7 +170,7 @@ export function makeSettingsCard(kit: ViewKit): (props: SettingsCardProps) => Re
             <span className="lc-settings-name">{t('settings.title')}</span>
             <span className="lc-settings-desc">{t('settings.desc')}</span>
           </span>
-          <IconChevronDownOutline14 className="lc-settings-chevron" />
+          <IconChevronDown className="lc-settings-chevron" />
         </button>
         {open
           ? (
@@ -97,73 +178,33 @@ export function makeSettingsCard(kit: ViewKit): (props: SettingsCardProps) => Re
               {!state.writable && state.status === 'ready'
                 ? <p className="lc-settings-note" role="status">{t('settings.readOnly')}</p>
                 : null}
-              <PrefRow
-                label={t('settings.placement')}
-                value={state.placement}
-                disabled={disabled}
-                options={[
-                  { id: 'all', label: t('placement.all') },
-                  { id: 'tab', label: t('placement.tab') },
-                  { id: 'sidebar', label: t('placement.sidebar') },
-                ]}
-                onPick={(id) => { props.set?.('defaultPlacement', id) }}
-              />
-              <PrefRow
-                label={t('settings.insightsEntry')}
-                value={state.insightsEntry}
-                disabled={disabled}
-                options={[
-                  { id: 'show', label: t('insightsEntry.show') },
-                  { id: 'hide', label: t('insightsEntry.hide') },
-                ]}
-                onPick={(id) => { props.set?.('insightsEntry', id) }}
-              />
-              <PrefRow
-                label={t('settings.gran')}
-                value={state.granularity}
-                disabled={disabled}
-                options={[
-                  { id: 'step', label: t('gran.step') },
-                  { id: 'turn', label: t('gran.turn') },
-                ]}
-                onPick={(id) => { props.set?.('defaultGranularity', id) }}
-              />
-              <PrefRow
-                label={t('settings.mode')}
-                value={state.mode}
-                disabled={disabled}
-                options={[
-                  { id: 'total', label: t('gran.total') },
-                  { id: 'delta', label: t('gran.delta') },
-                ]}
-                onPick={(id) => { props.set?.('defaultTrendMode', id) }}
-              />
-              <PrefRow
-                label={t('settings.toolSort')}
-                value={state.toolSort}
-                disabled={disabled}
-                options={[
-                  { id: 'size', label: t('tool.sort.size') },
-                  { id: 'count', label: t('tool.sort.count') },
-                  { id: 'name', label: t('tool.sort.name') },
-                ]}
-                onPick={(id) => { props.set?.('defaultToolSort', id) }}
-              />
-              <PrefRow
-                label={t('settings.fileSort')}
-                value={state.fileSort}
-                disabled={disabled}
-                options={[
-                  { id: 'count', label: t('files.sort.count') },
-                  { id: 'latest', label: t('files.sort.latest') },
-                  { id: 'path', label: t('files.sort.path') },
-                ]}
-                onPick={(id) => { props.set?.('defaultFileSort', id) }}
-              />
+              <PreferenceRows t={t} state={state} set={props.set} />
             </div>
           )
           : null}
       </li>
+    )
+  }
+}
+
+/**
+ * The Plugins-page card (`plugins.bundle.config` on 0.1.6+)
+ * seat, `view: 'page'`): the page owns the bundle's page and section chrome,
+ * so the rows render flat. Same unserved/absent degradation as the
+ * settings-section card.
+ */
+export function makePluginConfigCard(kit: ViewKit): (props: SettingsCardProps) => ReactElement | null {
+  const { t } = kit
+  return function PluginConfigCard(props: SettingsCardProps): ReactElement | null {
+    const state = typeof props.useContextSettings === 'function' ? props.useContextSettings(s => s) : undefined
+    if (state === undefined || state.status === 'unavailable') return null
+    return (
+      <div className="lc-settings-prefs">
+        {!state.writable && state.status === 'ready'
+          ? <p className="lc-settings-note" role="status">{t('settings.readOnly')}</p>
+          : null}
+        <PreferenceRows t={t} state={state} set={props.set} />
+      </div>
     )
   }
 }

@@ -17,3 +17,10 @@ declare module '*.module.css' {
   const classes: Record<string, string>
   export default classes
 }
+
+// The package emblem's static file (../icon.svg) rides the same build-time
+// channel idea: `?raw` inlines the file's markup as the default export.
+declare module '*.svg?raw' {
+  const markup: string
+  export default markup
+}

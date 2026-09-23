@@ -94,9 +94,9 @@ export function ensureHostDeps(baseline: Baseline): void {
   }
 }
 
-/** The namespace pattern the tag's settings module enforces (module-private on every baseline). */
-export function namespacePatternOf(baseline: Baseline): RegExp | null {
-  const source = dshShow(baseline.tag, 'packages/settings/settings/src/index.ts')
+/** The tag's settings namespace pattern, read off the file the baseline names (null when absent). */
+export function namespacePatternOf(baseline: Baseline, file: string): RegExp | null {
+  const source = dshShow(baseline.tag, file)
   const match = /^const NAMESPACE_PATTERN = \/(.+)\/([gimsuy]*)$/m.exec(source)
   return match === null ? null : new RegExp(match[1], match[2])
 }
@@ -269,12 +269,36 @@ export function bundleRequires(): string[] {
   return [...new Set([...source.matchAll(/require\("([^"]+)"\)/g)].map(m => m[1]))]
 }
 
-/** The slot registrations the client half mounts (identical on every baseline). */
+/**
+ * The slot registrations the client half mounts on EVERY baseline (identical
+ * spellings in each generation's sources). The preferences card seat and the
+ * settings transport are asserted separately, per generation — the matrix
+ * spec pins them to the baseline's `settings` seam (`settings.plugin.item` +
+ * `settingsScope` through V3, the Plugins page's `plugins.bundle.config` +
+ * `configForms` from the Config-form generation on).
+ */
 export const SLOT_SEAMS = [
   'conversation.view',
   'conversation.chat.assistant-actions',
   'conversation.input.overlay',
-  'settings.plugin.item',
+] as const
+
+/**
+ * The ui-primitives icon seams the client bundle renders, as [modern, legacy]
+ * name pairs: the vocabulary renamed across the range (`…Outline16`/`…14`
+ * through 0.1.5, `…OutlineRegular`/`…OutlineMedium` from 0.1.6), and a
+ * missing name is `undefined` at the browser's runtime — React error #130.
+ * `src/client/primitives.ts` resolves whichever spelling the running
+ * generation serves; each pair must exist in at least one spelling per tag.
+ */
+export const ICON_SEAMS = [
+  ['IconBranchOutlineRegular', 'IconBranchOutline16'],
+  ['IconPlusOutlineRegular', 'IconPlusOutline16'],
+  ['IconCheckOutlineRegular', 'IconCheckOutline16'],
+  ['IconCopyOutlineRegular', 'IconCopyOutline16'],
+  ['IconCloseOutlineRegular', 'IconCloseOutline16'],
+  ['IconSettingsOutlineMedium', 'IconSettingsOutline14'],
+  ['IconChevronDownOutlineMedium', 'IconChevronDownOutline14'],
 ] as const
 
 /**

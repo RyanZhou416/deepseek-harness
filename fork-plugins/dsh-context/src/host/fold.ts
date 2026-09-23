@@ -36,9 +36,9 @@ import {
 } from './pricing'
 import type { ContentBlock, MessageSource } from './pricing'
 import { deriveEventMessage } from '@deepseek-ai/dsh-session'
-import { decodeKindOfBlock, decodeSpansOfStream, firstTokenTimeOfStream, isTokenChunk, replaceRangeOf } from './logShapes'
-import type { DecodeKind } from './logShapes'
-import { opsOfCall, parseCallArgs } from '../shared/fileOps'
+import { decodeKindOfBlock, decodeTallyOfStream, firstTokenTimeOfStream, isTokenChunk, replaceRangeOf } from './logShapes'
+import type { DecodeCounts, DecodeKind } from './logShapes'
+import { opBearingTool, opsOfCall, parseCallArgs, rawArgsNeeded } from '../shared/fileOps'
 
 /**
  * The runtime event envelope this fold consumes. The core
@@ -109,6 +109,16 @@ export interface TimelineState {
   lastModel?: string
   contextWindow?: number
   requests: RequestRecord[]
+  /**
+   * The number of turn runs in `requests` (a run = consecutive records
+   * sharing one `turn`). Maintained incrementally at the single append site
+   * and recomputed when a trim replaces the array, so the retention trim's
+   * cap check stays O(1) per event instead of walking every retained
+   * request. Absent on rows folded before the field existed — the first
+   * post-restore event recomputes it once (the same additive-optional shape
+   * as `detailRev`).
+   */
+  turnRuns?: number
   events: ContextEventRecord[]
   /**
    * Recently removed surface nodes (stamped COPIES carrying `gone`), in
@@ -170,13 +180,21 @@ export interface TimelineState {
    * durations, never to unbounded state. Same arm/remove lifecycle as
    * `pendingShadowedSeqs`.
    *
-   * `decode` and `block` carry the generation split (reasoning / answer text /
-   * tool arguments — see TimingTotals): a V0 log's `assistant/chunk`
-   * `block-start` markers open `block` and close the previous one into
-   * `decode`; a V2+ log carries no such events, so `decode` stays absent and
-   * `assistant/message` reads the spans off its embedded stream instead.
+   * `decode`, `blocks` and `block` carry the generation split (reasoning /
+   * answer text / tool arguments — see TimingTotals): a V0 log's
+   * `assistant/chunk` `block-start` markers open `block`, close the previous
+   * one into `decode`, and count the opened bucket into `blocks` (the card's
+   * per-slice tally); a V2+ log carries no such events, so `decode` stays
+   * absent and `assistant/message` reads the spans and counts off its embedded
+   * stream instead.
    */
-  stepStart?: { time: number; firstToken?: number; decode?: Record<DecodeKind, number>; block?: { kind: DecodeKind; since: number } }
+  stepStart?: {
+    time: number
+    firstToken?: number
+    decode?: Record<DecodeKind, number>
+    blocks?: DecodeCounts
+    block?: { kind: DecodeKind; since: number }
+  }
   /**
    * Tool callId → the call's name, start instant, and raw arguments, armed by
    * `tool/call` and DELETED when its `tool/result` folds in (one result per
@@ -420,16 +438,21 @@ function trimState(draft: TimelineDraft, bounds: FoldBounds, force: boolean): vo
   // not only when the raw step count does — so the state stays
   // deterministically at the newest ~maxKeptTurns turns (a threshold-only
   // policy would oscillate: trim to 1200, regrow to 1500, trim again).
-  if (force || draft.isDirty(DirtyField.Requests)) {
+  if (force || draft.isDirty(DirtyField.Requests) || draft.current.turnRuns === undefined) {
     let requests = draft.current.requests
-    if (countTurnRuns(requests) > bounds.maxKeptTurns) {
+    let turnRuns = draft.current.turnRuns ?? countTurnRuns(requests)
+    if (turnRuns > bounds.maxKeptTurns) {
       requests = trimToLastTurns(requests, bounds.maxKeptTurns)
       draft.replaceRequests(requests)
+      turnRuns = countTurnRuns(requests)
     }
     // Pathological many-step turns: hard step backstop after the turn trim.
     if (requests.length > bounds.maxRequestSteps) {
-      draft.replaceRequests(requests.slice(-bounds.maxRequestSteps))
+      requests = requests.slice(-bounds.maxRequestSteps)
+      draft.replaceRequests(requests)
+      turnRuns = countTurnRuns(requests)
     }
+    draft.state().turnRuns = turnRuns
   }
   if (force || draft.isDirty(DirtyField.Events)) {
     const events = draft.current.events
@@ -487,6 +510,7 @@ export function createTimelineState(): TimelineState {
     systemTokens: 0,
     toolsTokens: 0,
     requests: [],
+    turnRuns: 0,
     events: [],
     archived: [],
     callNames: {},
@@ -624,6 +648,13 @@ interface MessageLike {
   content?: ContentBlock[]
   source?: MessageSource
   error?: boolean
+  /**
+   * The V4 tool-result error mark (`tool/result.message.isError`): V3 carried
+   * it inside the `tool-result` content wrapper block, V4 lifted it onto the
+   * message and made the event-level `data.error` identity optional — so the
+   * flag is read from BOTH spellings.
+   */
+  isError?: unknown
 }
 
 /**
@@ -739,7 +770,7 @@ function applySurface(
       }
       draft.replaceCallNames(kept)
     }
-    if (data?.error) node.err = true
+    if (data?.error || message?.isError === true) node.err = true
   } else if (source?.kind === 'skill-invocation') {
     node.skill = typeof source.name === 'string' ? source.name : '?'
   } else if (source?.kind === 'plugin') {
@@ -929,17 +960,18 @@ function durOf(from: number, to: number): number {
   return Math.max(0, to - from)
 }
 
-/**
- * Fold one block's decode span into the totals' generation split (see
- * TimingTotals). A zero span stays ABSENT — the field then carries the
- * "no time was decoded in this bucket" fact without adding dead properties to
- * every pre-split-shaped state, and the card reads absence as 0.
- */
-function addDecode(timing: TimingTotals, kind: DecodeKind, ms: number): void {
-  if (!(ms > 0)) return
-  if (kind === 'reasoning') timing.reasoningMs = (timing.reasoningMs ?? 0) + ms
-  else if (kind === 'text') timing.textMs = (timing.textMs ?? 0) + ms
-  else timing.toolArgMs = (timing.toolArgMs ?? 0) + ms
+/** The timing fields for each decode bucket. */
+const DECODE_FIELDS: Record<DecodeKind, { ms: 'reasoningMs' | 'textMs' | 'toolArgMs'; n: 'reasoningBlocks' | 'textBlocks' | 'toolArgBlocks' }> = {
+  reasoning: { ms: 'reasoningMs', n: 'reasoningBlocks' },
+  text: { ms: 'textMs', n: 'textBlocks' },
+  toolarg: { ms: 'toolArgMs', n: 'toolArgBlocks' },
+}
+
+/** Add one decoded duration and block count to the matching timing bucket. */
+function addDecode(timing: TimingTotals, kind: DecodeKind, ms: number, blocks: number): void {
+  const field = DECODE_FIELDS[kind]
+  if (ms > 0) timing[field.ms] = (timing[field.ms] ?? 0) + ms
+  if (blocks > 0) timing[field.n] = (timing[field.n] ?? 0) + blocks
 }
 
 /**
@@ -1078,8 +1110,8 @@ export function applyTimeline(state: TimelineState, event: TimelineEvent, bounds
       }
       case 'tool/call': {
         if (data && typeof data.callId === 'string' && typeof data.name === 'string') {
-          // The raw arguments ride along for the result-time file-op derivation (shared/fileOps.ts).
-          const argsRaw = argsRawOf(data.arguments)
+          // Only file-op tools and run_code need arguments after the call event.
+          const argsRaw = rawArgsNeeded(data.name) ? argsRawOf(data.arguments) : undefined
           edit().callNames()[data.callId] = {
             name: data.name,
             start: event.time,
@@ -1101,11 +1133,15 @@ export function applyTimeline(state: TimelineState, event: TimelineEvent, bounds
         const rootCallId = data?.rootCallId
         const name = data?.name
         if (typeof rootCallId === 'string' && typeof name === 'string') {
+          // Same gating as tool/call, minus the run_code arm: a dispatch's
+          // arguments only ever feed its own op derivation, so anything that
+          // cannot row an op is never serialized.
+          const argsRaw = opBearingTool(name) ? argsRawOf(data?.arguments) : undefined
           const ops = opsOfCall({
             seq: event.seq,
             time: event.time,
             tool: name,
-            argsRaw: argsRawOf(data?.arguments),
+            argsRaw,
             err: data?.isError === true,
           })
           if (ops.length > 0) {
@@ -1135,12 +1171,17 @@ export function applyTimeline(state: TimelineState, event: TimelineEvent, bounds
           const s = edit().state()
           const decode = { ...(start.decode ?? { reasoning: 0, text: 0, toolarg: 0 }) }
           if (start.block !== undefined) decode[start.block.kind] += durOf(start.block.since, event.time)
+          // A known-kind marker is one counted decode block (the card's
+          // per-slice tally); the unknown one counted nothing.
+          const blocks = { ...(start.blocks ?? { reasoning: 0, text: 0, toolarg: 0 }) }
+          if (kind !== undefined) blocks[kind] += 1
           // The next block is ABSENT (not undefined-valued) when unknown — the
           // plain-JSON persisted-state precondition (see TimelineState).
           s.stepStart = {
             time: start.time,
             ...(start.firstToken !== undefined ? { firstToken: start.firstToken } : {}),
             decode,
+            blocks,
             ...(kind !== undefined ? { block: { kind, since: event.time } } : {}),
           }
           break
@@ -1264,7 +1305,7 @@ export function applyTimeline(state: TimelineState, event: TimelineEvent, bounds
             tool: pendingEntry.name,
             argsRaw: pendingEntry.argsRaw,
             meta: data?.meta,
-            err: Boolean(data?.error) || firstBlock?.isError === true,
+            err: Boolean(data?.error) || toolMsg?.isError === true || firstBlock?.isError === true,
           })
           pushFileOps(d, ops)
         }
@@ -1335,6 +1376,11 @@ export function applyTimeline(state: TimelineState, event: TimelineEvent, bounds
         // materialize an `undefined` property (plain-JSON precondition, the trap that broke the projection cache here).
         if (data && typeof data.turn === 'number') record.turn = data.turn
         if (data && typeof data.step === 'number') record.step = data.step
+        // The provider-reported output tokens, hoisted for the timing seat
+        // below: the throughput pairing needs this exact figure, and `null`
+        // must mean "the message carried no readable output bucket" — the
+        // harness's usageOutputTokens null, not a fabricated 0.
+        let output: number | null = null
         if (usage !== null && typeof usage === 'object') {
         // Official TokenUsage semantics (dsh-llm): the buckets are disjoint —
         // inputTokens is uncached input only, cache read/write are separate,
@@ -1346,7 +1392,7 @@ export function applyTimeline(state: TimelineState, event: TimelineEvent, bounds
           const input = tokenCountOf(usage.inputTokens)
           const cacheRead = tokenCountOf(usage.cacheReadTokens)
           const cacheWrite = tokenCountOf(usage.cacheWriteTokens)
-          const output = tokenCountOf(usage.outputTokens)
+          output = tokenCountOf(usage.outputTokens)
           // Any readable bucket is a billing sample (the official meter folds
           // every reported usage object; an output-only sample bills prompt 0
           // there too). A fully unreadable object is treated as absent, so a
@@ -1365,7 +1411,12 @@ export function applyTimeline(state: TimelineState, event: TimelineEvent, bounds
             })
           }
         }
+        const previous = state.requests.at(-1)
         d.requests().push(record)
+        s.turnRuns = (state.turnRuns ?? countTurnRuns(state.requests))
+          + (previous === undefined
+            ? (record.turn !== undefined ? 1 : 0)
+            : (record.turn === previous.turn ? 0 : 1))
         // Timing: one completed model call; its wait/generation split prices
         // off the slot's first-token stamp. That stamp comes from a V0
         // `assistant/chunk` delta or, when the log carries none, from the
@@ -1382,12 +1433,22 @@ export function applyTimeline(state: TimelineState, event: TimelineEvent, bounds
           if (firstToken !== undefined) {
             timing.ttftMs += durOf(stepStart.time, firstToken)
             timing.genMs += durOf(firstToken, event.time)
+            // The throughput seat, paired exactly as the harness's session-stats
+            // fold pairs them: a call counts ONLY when both its decode window
+            // (this branch) and its provider-reported output tokens (the usage
+            // above) are known — a token-stamped call without usage prices the
+            // genMs slice but not this, and usage without a decode window
+            // (never stamped) counts nowhere.
+            if (output !== null) {
+              timing.speedMs = (timing.speedMs ?? 0) + durOf(firstToken, event.time)
+              timing.speedTokens = (timing.speedTokens ?? 0) + output
+            }
             // Generation split: a V0 log's chunk stream accumulated the block
-            // spans in the slot (its last block closes HERE, at the message);
-            // a V2+ log has no chunk events, so the spans come off the embedded
-            // stream. Either way the three buckets tile the generation window
-            // and only the settlement tail stays unattributed. The split is
-            // priced ONLY when the window was: an unstamped call's model time
+            // spans and counts in the slot (its last block closes HERE, at the
+            // message); a V2+ log has no chunk events, so both come off the
+            // embedded stream. Either way the three buckets tile the generation
+            // window and only the settlement tail stays unattributed. The split
+            // is priced ONLY when the window was: an unstamped call's model time
             // is unattributed wholesale, so its spans must not reappear as
             // generation time the caller never charged.
             if (stepStart.decode !== undefined) {
@@ -1395,10 +1456,10 @@ export function applyTimeline(state: TimelineState, event: TimelineEvent, bounds
               if (stepStart.block !== undefined) {
                 decode[stepStart.block.kind] += durOf(stepStart.block.since, event.time)
               }
-              for (const kind of DECODE_KINDS) addDecode(timing, kind, decode[kind])
+              for (const kind of DECODE_KINDS) addDecode(timing, kind, decode[kind], stepStart.blocks?.[kind] ?? 0)
             } else {
-              const spans = decodeSpansOfStream(data?.stream, event.time)
-              for (const kind of DECODE_KINDS) addDecode(timing, kind, spans[kind])
+              const tally = decodeTallyOfStream(data?.stream, event.time)
+              for (const kind of DECODE_KINDS) addDecode(timing, kind, tally.spans[kind], tally.blocks[kind])
             }
           }
         }

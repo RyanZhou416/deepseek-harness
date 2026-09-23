@@ -58,6 +58,23 @@ describe('the file-op log — call/result pairing', () => {
     assert.deepEqual(state.fileOps, [])
   })
 
+  test('a non-file call saves no raw arguments; str_replace_editor keeps and kinds them', () => {
+    const def = timelineDef()
+    let state = def.apply(def.init(), toolCall(1, { callId: 'b1', name: 'bash', arguments: JSON.stringify({ command: 'ls' }) }))
+    state = def.apply(state, toolCall(2, {
+      callId: 's1', name: 'str_replace_editor', arguments: JSON.stringify({ command: 'view', path: 'a.ts', view_range: [1, 3] }),
+    }))
+    // The args serialization is gated on tools that can row an op: bash never
+    // does, str_replace_editor's op derives from the arguments.
+    assert.equal(state.callNames.b1?.name, 'bash')
+    assert.ok(!('argsRaw' in (state.callNames.b1 ?? {})), 'a non-file call saves no raw arguments')
+    assert.equal(state.callNames.s1?.argsRaw, JSON.stringify({ command: 'view', path: 'a.ts', view_range: [1, 3] }))
+    state = def.apply(state, toolResult(3, { callId: 'b1', content: [{ type: 'text', text: 'ok' }] }))
+    state = def.apply(state, toolResult(4, { callId: 's1', content: [{ type: 'text', text: 'ok' }] }))
+    // A `view` command reads; the op rows off the parsed arguments.
+    assert.deepEqual(state.fileOps.map(o => [o.kind, o.path, o.tool]), [['read', 'a.ts', 'str_replace_editor']])
+  })
+
   test('a call without raw arguments pairs for the surface label but books no op', () => {
     const { state } = driveTimeline([
       { type: 'tool/call', seq: 1, time: 1, data: { callId: 'c1', name: 'read' } } as unknown as TimelineEvent,
@@ -67,7 +84,7 @@ describe('the file-op log — call/result pairing', () => {
     assert.equal(state.callNames.c1, undefined, 'the pending entry consumed at the result')
   })
 
-  test('the error flag reads the envelope error object or the block isError', () => {
+  test('the error flag reads the envelope error object, the block isError, or the V4 message isError', () => {
     const { state } = driveTimeline([
       toolCall(1, { callId: 'c1', name: 'read', arguments: JSON.stringify({ file_path: 'a.ts' }) }),
       toolResult(2, { callId: 'c1', content: [{ type: 'text', text: 'no' }], error: true }),
@@ -80,8 +97,11 @@ describe('the file-op log — call/result pairing', () => {
           message: { content: [{ type: 'tool-result', toolCallId: 'c2', isError: true, content: [] }], source: { kind: 'tool', callId: 'c2' } },
         },
       } as unknown as TimelineEvent,
+      toolCall(5, { callId: 'c3', name: 'read', arguments: JSON.stringify({ file_path: 'c.ts' }) }),
+      // The V4 spelling: the mark lifted onto the message, no envelope error.
+      toolResult(6, { callId: 'c3', content: [{ type: 'text', text: 'v4' }], error: true, v4: true }),
     ])
-    assert.deepEqual(state.fileOps.map(o => o.err), [true, true])
+    assert.deepEqual(state.fileOps.map(o => o.err), [true, true, true])
   })
 
   test('a call whose raw arguments are not a string still pairs by name (ops degrade to nothing)', () => {
@@ -153,6 +173,15 @@ describe('the file-op log — Code Mode (PTC) sub-dispatches', () => {
       toolResult(6, { callId: 'rc2', content: [{ type: 'text', text: 'ok' }] }),
     ])
     assert.deepEqual(state.fileOps.map(o => [o.path, o.parent ?? 0]), [['a.ts', 5], ['b.ts', 6]])
+  })
+
+  test('a str_replace_editor dispatch keeps its arguments and kinds by command', () => {
+    const { state } = driveTimeline([
+      toolCall(1, { callId: 'rc1', name: 'run_code', arguments: '{}' }),
+      codeDispatch(2, { rootCallId: 'rc1', name: 'str_replace_editor', arguments: { command: 'view', path: 'a.ts', view_range: [1, 3] } }),
+      toolResult(3, { callId: 'rc1', content: [{ type: 'text', text: 'ok' }] }),
+    ])
+    assert.deepEqual(state.fileOps.map(o => [o.kind, o.path, o.parent ?? 0]), [['read', 'a.ts', 3]])
   })
 })
 
