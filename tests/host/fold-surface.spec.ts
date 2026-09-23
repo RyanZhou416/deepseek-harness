@@ -106,6 +106,16 @@ describe('applySurface tool/result branch', () => {
     ])
     assert.equal(state.surface.at(-1)?.err, true)
   })
+
+  test('the V4 message isError flags the node (no envelope error object)', () => {
+    const { state } = driveTimeline([
+      toolCall(1, { callId: 'c1', name: 'bash' }),
+      toolResult(2, { callId: 'c1', content: text('boom'), error: true, v4: true }),
+    ])
+    const node = state.surface.at(-1)
+    assert.equal(node?.err, true)
+    assert.equal(node?.tool, 'bash', 'the V4 source callId still pairs the node')
+  })
 })
 
 describe('applySurface user-message previews', () => {

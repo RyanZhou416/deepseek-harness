@@ -34,9 +34,9 @@ import {
 } from './pricing'
 import type { ContentBlock, MessageSource } from './pricing'
 import { deriveEventMessage } from '@deepseek-ai/dsh-session'
-import { decodeKindOfBlock, decodeSpansOfStream, firstTokenTimeOfStream, isTokenChunk, replaceRangeOf } from './logShapes'
-import type { DecodeKind } from './logShapes'
-import { opsOfCall, parseCallArgs } from '../shared/fileOps'
+import { decodeKindOfBlock, decodeTallyOfStream, firstTokenTimeOfStream, isTokenChunk, replaceRangeOf } from './logShapes'
+import type { DecodeCounts, DecodeKind } from './logShapes'
+import { opBearingTool, opsOfCall, parseCallArgs, rawArgsNeeded } from '../shared/fileOps'
 
 /**
  * The runtime event envelope this fold consumes. The core
@@ -107,6 +107,16 @@ export interface TimelineState {
   lastModel?: string
   contextWindow?: number
   requests: RequestRecord[]
+  /**
+   * The number of turn runs in `requests` (a run = consecutive records
+   * sharing one `turn`). Maintained incrementally at the single append site
+   * and recomputed when a trim replaces the array, so the retention trim's
+   * cap check stays O(1) per event instead of walking every retained
+   * request. Absent on rows folded before the field existed — the first
+   * post-restore event recomputes it once (the same additive-optional shape
+   * as `detailRev`).
+   */
+  turnRuns?: number
   events: ContextEventRecord[]
   /**
    * Recently removed surface nodes (stamped COPIES carrying `gone`), in
@@ -168,13 +178,21 @@ export interface TimelineState {
    * durations, never to unbounded state. Same arm/remove lifecycle as
    * `pendingShadowedSeqs`.
    *
-   * `decode` and `block` carry the generation split (reasoning / answer text /
-   * tool arguments — see TimingTotals): a V0 log's `assistant/chunk`
-   * `block-start` markers open `block` and close the previous one into
-   * `decode`; a V2+ log carries no such events, so `decode` stays absent and
-   * `assistant/message` reads the spans off its embedded stream instead.
+   * `decode`, `blocks` and `block` carry the generation split (reasoning /
+   * answer text / tool arguments — see TimingTotals): a V0 log's
+   * `assistant/chunk` `block-start` markers open `block`, close the previous
+   * one into `decode`, and count the opened bucket into `blocks` (the card's
+   * per-slice tally); a V2+ log carries no such events, so `decode` stays
+   * absent and `assistant/message` reads the spans and counts off its embedded
+   * stream instead.
    */
-  stepStart?: { time: number; firstToken?: number; decode?: Record<DecodeKind, number>; block?: { kind: DecodeKind; since: number } }
+  stepStart?: {
+    time: number
+    firstToken?: number
+    decode?: Record<DecodeKind, number>
+    blocks?: DecodeCounts
+    block?: { kind: DecodeKind; since: number }
+  }
   /**
    * Tool callId → the call's name, start instant, and raw arguments, armed by
    * `tool/call` and DELETED when its `tool/result` folds in (one result per
@@ -257,13 +275,18 @@ function trimState(st: TimelineState, bounds: FoldBounds): void {
   // Trim by WHOLE turn-runs as soon as the run count crosses the cap —
   // not only when the raw step count does — so the state stays
   // deterministically at the newest ~maxKeptTurns turns (a threshold-only
-  // policy would oscillate: trim to 1200, regrow to 1500, trim again).
-  if (countTurnRuns(st.requests) > bounds.maxKeptTurns) {
+  // policy would oscillate: trim to 1200, regrow to 1500, trim again). The
+  // run count is the incremental `turnRuns` ledger; a row restored from
+  // cache before the field existed recomputes it once here.
+  st.turnRuns = st.turnRuns ?? countTurnRuns(st.requests)
+  if (st.turnRuns > bounds.maxKeptTurns) {
     st.requests = trimToLastTurns(st.requests, bounds.maxKeptTurns)
+    st.turnRuns = countTurnRuns(st.requests)
   }
   // Pathological many-step turns: hard step backstop after the turn trim.
   if (st.requests.length > bounds.maxRequestSteps) {
     st.requests = st.requests.slice(-bounds.maxRequestSteps)
+    st.turnRuns = countTurnRuns(st.requests)
   }
   if (st.events.length > bounds.maxEvents) st.events = st.events.slice(-bounds.maxEvents)
   // The file-op log: newest tail; the newest dropped op's seq rides
@@ -304,6 +327,7 @@ export function createTimelineState(): TimelineState {
     systemTokens: 0,
     toolsTokens: 0,
     requests: [],
+    turnRuns: 0,
     events: [],
     archived: [],
     callNames: {},
@@ -437,6 +461,13 @@ interface MessageLike {
   content?: ContentBlock[]
   source?: MessageSource
   error?: boolean
+  /**
+   * The V4 tool-result error mark (`tool/result.message.isError`): V3 carried
+   * it inside the `tool-result` content wrapper block, V4 lifted it onto the
+   * message and made the event-level `data.error` identity optional — so the
+   * flag is read from BOTH spellings.
+   */
+  isError?: unknown
 }
 
 /**
@@ -551,7 +582,7 @@ function applySurface(
       }
       st.callNames = kept
     }
-    if (data?.error) node.err = true
+    if (data?.error || message?.isError === true) node.err = true
   } else if (source?.kind === 'skill-invocation') {
     node.skill = typeof source.name === 'string' ? source.name : '?'
   } else if (source?.kind === 'plugin') {
@@ -750,17 +781,24 @@ function ensureTiming(st: TimelineState): TimingTotals {
   return st.timing
 }
 
+/** The TimingTotals fields each decode bucket's span and count land in. */
+const DECODE_FIELDS: Record<DecodeKind, { ms: 'reasoningMs' | 'textMs' | 'toolArgMs'; n: 'reasoningBlocks' | 'textBlocks' | 'toolArgBlocks' }> = {
+  reasoning: { ms: 'reasoningMs', n: 'reasoningBlocks' },
+  text: { ms: 'textMs', n: 'textBlocks' },
+  toolarg: { ms: 'toolArgMs', n: 'toolArgBlocks' },
+}
+
 /**
- * Fold one block's decode span into the totals' generation split (see
- * TimingTotals). A zero span stays ABSENT — the field then carries the
- * "no time was decoded in this bucket" fact without adding dead properties to
- * every pre-split-shaped state, and the card reads absence as 0.
+ * Fold one block's decode span and count into the totals' generation split
+ * (see TimingTotals). A zero span or count stays ABSENT — the field then
+ * carries the "nothing was decoded/counted in this bucket" fact without adding
+ * dead properties to every pre-split-shaped state, and the card reads absence
+ * as 0.
  */
-function addDecode(timing: TimingTotals, kind: DecodeKind, ms: number): void {
-  if (!(ms > 0)) return
-  if (kind === 'reasoning') timing.reasoningMs = (timing.reasoningMs ?? 0) + ms
-  else if (kind === 'text') timing.textMs = (timing.textMs ?? 0) + ms
-  else timing.toolArgMs = (timing.toolArgMs ?? 0) + ms
+function addDecode(timing: TimingTotals, kind: DecodeKind, ms: number, blocks: number): void {
+  const field = DECODE_FIELDS[kind]
+  if (ms > 0) timing[field.ms] = (timing[field.ms] ?? 0) + ms
+  if (blocks > 0) timing[field.n] = (timing[field.n] ?? 0) + blocks
 }
 
 /**
@@ -797,28 +835,47 @@ function bumpToolTotals(timing: TimingTotals, name: string, ms: number): void {
   timing.tools[name] = { calls: cur.calls + 1, ms: cur.ms + ms }
 }
 
+/**
+ * The collections a fold branch may mutate IN PLACE (`push`/splice/element
+ * or property writes). A branch names exactly its own mutations in `ensure`;
+ * the unlisted containers (`systems`, `pendingCodeOps`, `cost`, `stepStart`,
+ * `signature of pendingShadowedSeqs`) are never written in place — every
+ * touch REPLACES the property with a fresh array/record — so they stay
+ * shared with the persisted previous state without a clone.
+ */
+type CloneKey = 'surface' | 'sums' | 'requests' | 'events' | 'archived' | 'callNames' | 'fileOps' | 'timing'
+
+const CLONE_ALL: readonly CloneKey[] = ['surface', 'sums', 'requests', 'events', 'archived', 'callNames', 'fileOps', 'timing']
+
 export function applyTimeline(state: TimelineState, event: TimelineEvent, bounds: FoldBounds): TimelineState {
   let st: TimelineState | undefined
-  const ensure = (): TimelineState => st ??= {
-    ...state,
-    surface: [...state.surface],
-    sums: { ...state.sums },
-    requests: [...state.requests],
-    events: [...state.events],
-    archived: [...state.archived],
-    callNames: { ...state.callNames },
-    fileOps: [...state.fileOps],
-    // The pending-ops MAP is cloned here; each key's array is rebuilt on
-    // touch (bufferCodeOps/flush), never mutated in place — same rule.
-    ...(state.pendingCodeOps !== undefined
-      ? { pendingCodeOps: { ...state.pendingCodeOps } }
-      : {}),
-    // The timing totals are shared with the persisted previous state —
-    // private working copies for this event's accumulations (per-name rows
-    // are replaced, never mutated, so a one-level copy suffices for them).
-    ...(state.timing !== undefined
-      ? { timing: { ...state.timing, tools: { ...state.timing.tools } } }
-      : {}),
+  /**
+   * The event's private working state: a shallow object clone up front, with
+   * only the named collections cloned into private copies. Everything else
+   * stays shared with the persisted previous state — the apply contract is
+   * "never mutate the previous state in place". Called EXACTLY ONCE per event
+   * (each case names the collections its own path may write into; helpers
+   * never call it), so building afresh per call is safe. The default is the
+   * full clone — a future branch that omits its list degrades to the old
+   * behavior instead of sharing a collection it mutates.
+   */
+  const ensure = (keys: readonly CloneKey[] = CLONE_ALL): TimelineState => {
+    st = { ...state }
+    for (const key of keys) {
+      if (key === 'surface') st.surface = [...state.surface]
+      else if (key === 'sums') st.sums = { ...state.sums }
+      else if (key === 'requests') st.requests = [...state.requests]
+      else if (key === 'events') st.events = [...state.events]
+      else if (key === 'archived') st.archived = [...state.archived]
+      else if (key === 'callNames') st.callNames = { ...state.callNames }
+      else if (key === 'fileOps') st.fileOps = [...state.fileOps]
+      // An ABSENT `timing` stays absent: a branch may name the key without
+      // ever reaching `ensureTiming` (an unpaired tool/result prices no call),
+      // and an own `undefined`-valued property fails EVERY projection-cache
+      // write for the session (the plain-JSON precondition, see TimelineState).
+      else if (state.timing !== undefined) st.timing = { ...state.timing, tools: { ...state.timing.tools } }
+    }
+    return st
   }
 
   const data = event.data
@@ -837,7 +894,7 @@ export function applyTimeline(state: TimelineState, event: TimelineEvent, bounds
           config?: { model?: unknown; provider?: unknown }
         }
         const tools = Array.isArray(header.tools) ? header.tools : []
-        const s = ensure()
+        const s = ensure(['events'])
         // Tools TOTAL = dsh's whole-array price (one JSON string of every schema).
         s.toolsTokens = estimateToolsTotal(tools)
         // The V0/V2 system prompt rides this ENVELOPE; V3 rejects it outright
@@ -884,7 +941,7 @@ export function applyTimeline(state: TimelineState, event: TimelineEvent, bounds
         // categories — it is the envelope figure's source, never a
         // user/inject/assistant/tool node, so it must not enter `surface` or
         // `sums` (that would double-count it against `systemTokens`).
-        const s = ensure()
+        const s = ensure(['surface', 'sums', 'archived'])
         // Consume the armed shadow claim (the shadow-price protocol expires it
         // on the next surface event) — a system node never carries one.
         delete s.pendingShadowedSeqs
@@ -907,7 +964,7 @@ export function applyTimeline(state: TimelineState, event: TimelineEvent, bounds
         break
       }
       case 'request/context': {
-        const s = ensure()
+        const s = ensure([])
         // Route/capacity metadata: request/context is logged only when the route or capacity changes (after request/header), so it updates
         // the current route display — never firing a model-switch event on its own.
         if (data && typeof data.contextWindow === 'number') s.contextWindow = data.contextWindow
@@ -917,9 +974,13 @@ export function applyTimeline(state: TimelineState, event: TimelineEvent, bounds
       }
       case 'tool/call': {
         if (data && typeof data.callId === 'string' && typeof data.name === 'string') {
-          const s = ensure()
-          // The raw arguments ride along for the result-time file-op derivation (shared/fileOps.ts).
-          const argsRaw = argsRawOf(data.arguments)
+          const s = ensure(['callNames'])
+          // The raw arguments ride along for the result-time file-op derivation
+          // (shared/fileOps.ts) — ONLY where they can be read: an op-bearing
+          // tool, or the run_code root whose description the flush reads.
+          // Skipping the stringify for the rest keeps a large bash/pwsh call's
+          // arguments out of the persisted state.
+          const argsRaw = rawArgsNeeded(data.name) ? argsRawOf(data.arguments) : undefined
           s.callNames[data.callId] = {
             name: data.name,
             start: event.time,
@@ -941,15 +1002,19 @@ export function applyTimeline(state: TimelineState, event: TimelineEvent, bounds
         const rootCallId = data?.rootCallId
         const name = data?.name
         if (typeof rootCallId === 'string' && typeof name === 'string') {
+          // Same gating as tool/call, minus the run_code arm: a dispatch's
+          // arguments only ever feed its own op derivation, so anything that
+          // cannot row an op is never serialized.
+          const argsRaw = opBearingTool(name) ? argsRawOf(data?.arguments) : undefined
           const ops = opsOfCall({
             seq: event.seq,
             time: event.time,
             tool: name,
-            argsRaw: argsRawOf(data?.arguments),
+            argsRaw,
             err: data?.isError === true,
           })
           if (ops.length > 0) {
-            const s = ensure()
+            const s = ensure([])
             bufferCodeOps(s, rootCallId, ops)
           }
         }
@@ -973,22 +1038,27 @@ export function applyTimeline(state: TimelineState, event: TimelineEvent, bounds
           // An unknown marker still CLOSES the open block (its end is real);
           // only the interval it would open stays unattributed.
           if (start.block === undefined && kind === undefined) return state
-          const s = ensure()
+          const s = ensure([])
           const decode = { ...(start.decode ?? { reasoning: 0, text: 0, toolarg: 0 }) }
           if (start.block !== undefined) decode[start.block.kind] += durOf(start.block.since, event.time)
+          // A known-kind marker is one counted decode block (the card's
+          // per-slice tally); the unknown one counted nothing.
+          const blocks = { ...(start.blocks ?? { reasoning: 0, text: 0, toolarg: 0 }) }
+          if (kind !== undefined) blocks[kind] += 1
           // The next block is ABSENT (not undefined-valued) when unknown — the
           // plain-JSON persisted-state precondition (see TimelineState).
           s.stepStart = {
             time: start.time,
             ...(start.firstToken !== undefined ? { firstToken: start.firstToken } : {}),
             decode,
+            blocks,
             ...(kind !== undefined ? { block: { kind, since: event.time } } : {}),
           }
           break
         }
         if (start.firstToken !== undefined) return state
         if (!isTokenChunk(data?.chunk)) return state
-        const s = ensure()
+        const s = ensure([])
         s.stepStart = { ...start, firstToken: event.time }
         break
       }
@@ -1002,7 +1072,7 @@ export function applyTimeline(state: TimelineState, event: TimelineEvent, bounds
         if (start === undefined || start.firstToken !== undefined) return state
         const first = firstTokenTimeOfStream(data?.stream)
         if (first === undefined) return state
-        const s = ensure()
+        const s = ensure([])
         s.stepStart = { time: start.time, firstToken: first }
         break
       }
@@ -1013,7 +1083,7 @@ export function applyTimeline(state: TimelineState, event: TimelineEvent, bounds
         // the whole step against this instant. Always a state change (a new
         // slot value), even over an un-consumed predecessor — sequential logs
         // never hit that, hostile ones just supersede it.
-        const s = ensure()
+        const s = ensure([])
         s.stepStart = { time: event.time }
         break
       }
@@ -1022,7 +1092,7 @@ export function applyTimeline(state: TimelineState, event: TimelineEvent, bounds
         // refold) — nothing to price, and the state must stay reference-equal.
         const start = state.stepStart
         if (start === undefined) return state
-        const s = ensure()
+        const s = ensure(['timing'])
         ensureTiming(s).wallMs += durOf(start.time, event.time)
         // Consume-once: DELETE the optional field — assigning `undefined`
         // would break the plain-JSON persisted-state precondition.
@@ -1033,7 +1103,7 @@ export function applyTimeline(state: TimelineState, event: TimelineEvent, bounds
       // `deriveEventMessage` is the canonical per-event projection: returns
       // `event.data` for user/message (no `data.message` indirection).
         const msg = deriveEventMessage(event as never) as MessageLike | null
-        const s = ensure()
+        const s = ensure(['surface', 'sums', 'archived', 'events'])
         bumpDetailRev(s)
         const node = applySurface(s, event, event.type, data, msg)
         const source = msg?.source
@@ -1086,7 +1156,7 @@ export function applyTimeline(state: TimelineState, event: TimelineEvent, bounds
           ?? (typeof blockId === 'string' ? state.callNames[blockId] : undefined)
         const buffered = (typeof srcId === 'string' ? state.pendingCodeOps?.[srcId] : undefined)
           ?? (typeof blockId === 'string' ? state.pendingCodeOps?.[blockId] : undefined)
-        const s = ensure()
+        const s = ensure(['surface', 'sums', 'archived', 'events', 'fileOps', 'timing'])
         bumpDetailRev(s)
         const node = applySurface(s, event, event.type, data, toolMsg)
         // An answered question prompt is a human input too (whole-session
@@ -1103,7 +1173,7 @@ export function applyTimeline(state: TimelineState, event: TimelineEvent, bounds
             tool: pendingEntry.name,
             argsRaw: pendingEntry.argsRaw,
             meta: data?.meta,
-            err: Boolean(data?.error) || firstBlock?.isError === true,
+            err: Boolean(data?.error) || toolMsg?.isError === true || firstBlock?.isError === true,
           })
           pushFileOps(s, ops)
         }
@@ -1154,7 +1224,7 @@ export function applyTimeline(state: TimelineState, event: TimelineEvent, bounds
       // Snapshot the request exactly as dispatched: current surface + header,
       // before this response joins the surface.
         const usage = data?.usage as UsageLike | null | undefined
-        const s = ensure()
+        const s = ensure(['surface', 'sums', 'archived', 'events', 'requests', 'timing'])
         bumpDetailRev(s)
         const total = s.systemTokens + s.toolsTokens + s.sums.user + s.sums.inject + s.sums.skill + s.sums.assistant + s.sums.tool
         const record: RequestRecord = {
@@ -1172,6 +1242,11 @@ export function applyTimeline(state: TimelineState, event: TimelineEvent, bounds
         // materialize an `undefined` property (plain-JSON precondition, the trap that broke the projection cache here).
         if (data && typeof data.turn === 'number') record.turn = data.turn
         if (data && typeof data.step === 'number') record.step = data.step
+        // The provider-reported output tokens, hoisted for the timing seat
+        // below: the throughput pairing needs this exact figure, and `null`
+        // must mean "the message carried no readable output bucket" — the
+        // harness's usageOutputTokens null, not a fabricated 0.
+        let output: number | null = null
         if (usage !== null && typeof usage === 'object') {
         // Official TokenUsage semantics (dsh-llm): the buckets are disjoint —
         // inputTokens is uncached input only, cache read/write are separate,
@@ -1183,7 +1258,7 @@ export function applyTimeline(state: TimelineState, event: TimelineEvent, bounds
           const input = tokenCountOf(usage.inputTokens)
           const cacheRead = tokenCountOf(usage.cacheReadTokens)
           const cacheWrite = tokenCountOf(usage.cacheWriteTokens)
-          const output = tokenCountOf(usage.outputTokens)
+          output = tokenCountOf(usage.outputTokens)
           // Any readable bucket is a billing sample (the official meter folds
           // every reported usage object; an output-only sample bills prompt 0
           // there too). A fully unreadable object is treated as absent, so a
@@ -1203,6 +1278,15 @@ export function applyTimeline(state: TimelineState, event: TimelineEvent, bounds
           }
         }
         s.requests.push(record)
+        // The `turnRuns` ledger (see TimelineState): one turn run per change
+        // of the `turn` value, exactly `countTurnRuns`'s rule — the last
+        // retained request decides the delta, and a restored row without the
+        // field recomputes its base once.
+        const prevLast = state.requests.at(-1)
+        s.turnRuns = (state.turnRuns ?? countTurnRuns(state.requests))
+          + (prevLast === undefined
+            ? (record.turn !== undefined ? 1 : 0)
+            : (record.turn === prevLast.turn ? 0 : 1))
         // Timing: one completed model call; its wait/generation split prices
         // off the slot's first-token stamp. That stamp comes from a V0
         // `assistant/chunk` delta or, when the log carries none, from the
@@ -1219,12 +1303,22 @@ export function applyTimeline(state: TimelineState, event: TimelineEvent, bounds
           if (firstToken !== undefined) {
             timing.ttftMs += durOf(stepStart.time, firstToken)
             timing.genMs += durOf(firstToken, event.time)
+            // The throughput seat, paired exactly as the harness's session-stats
+            // fold pairs them: a call counts ONLY when both its decode window
+            // (this branch) and its provider-reported output tokens (the usage
+            // above) are known — a token-stamped call without usage prices the
+            // genMs slice but not this, and usage without a decode window
+            // (never stamped) counts nowhere.
+            if (output !== null) {
+              timing.speedMs = (timing.speedMs ?? 0) + durOf(firstToken, event.time)
+              timing.speedTokens = (timing.speedTokens ?? 0) + output
+            }
             // Generation split: a V0 log's chunk stream accumulated the block
-            // spans in the slot (its last block closes HERE, at the message);
-            // a V2+ log has no chunk events, so the spans come off the embedded
-            // stream. Either way the three buckets tile the generation window
-            // and only the settlement tail stays unattributed. The split is
-            // priced ONLY when the window was: an unstamped call's model time
+            // spans and counts in the slot (its last block closes HERE, at the
+            // message); a V2+ log has no chunk events, so both come off the
+            // embedded stream. Either way the three buckets tile the generation
+            // window and only the settlement tail stays unattributed. The split
+            // is priced ONLY when the window was: an unstamped call's model time
             // is unattributed wholesale, so its spans must not reappear as
             // generation time the caller never charged.
             if (stepStart.decode !== undefined) {
@@ -1232,10 +1326,10 @@ export function applyTimeline(state: TimelineState, event: TimelineEvent, bounds
               if (stepStart.block !== undefined) {
                 decode[stepStart.block.kind] += durOf(stepStart.block.since, event.time)
               }
-              for (const kind of DECODE_KINDS) addDecode(timing, kind, decode[kind])
+              for (const kind of DECODE_KINDS) addDecode(timing, kind, decode[kind], stepStart.blocks?.[kind] ?? 0)
             } else {
-              const spans = decodeSpansOfStream(data?.stream, event.time)
-              for (const kind of DECODE_KINDS) addDecode(timing, kind, spans[kind])
+              const tally = decodeTallyOfStream(data?.stream, event.time)
+              for (const kind of DECODE_KINDS) addDecode(timing, kind, tally.spans[kind], tally.blocks[kind])
             }
           }
         }
@@ -1250,7 +1344,7 @@ export function applyTimeline(state: TimelineState, event: TimelineEvent, bounds
       // Plan mode adds a guidance section to every model request while
       // active — a real context-composition change, so it earns an event.
         if (data && typeof data.active === 'boolean') {
-          const s = ensure()
+          const s = ensure(['events'])
           s.events.push({ seq: event.seq, time: event.time, kind: 'mode', name: data.active ? 'plan.on' : 'plan.off' })
           bumpDetailRev(s)
         }
@@ -1258,7 +1352,7 @@ export function applyTimeline(state: TimelineState, event: TimelineEvent, bounds
       }
       case 'compaction/summary':
       case 'compaction/prune': {
-        const s = ensure()
+        const s = ensure(['events'])
         bumpDetailRev(s)
         // Arm the shadow-price claim: the replacement that follows this
         // event synchronously shadows exactly these node seqs.

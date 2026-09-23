@@ -1188,7 +1188,18 @@ describe('ContextView — chat→Context jump', () => {
     await m.unmount()
   })
 
-  test('the jump resets the shared scroller even when a saved position was about to be restored', async () => {
+  test('a record landing after mount re-pins the mounted view (the sidebar repeat jump)', async () => {
+    const m = await mountRich('sv-rejump')
+    assert.ok(!query(m.container, '.lc-bar[data-seq="4"]').className.includes('lc-bar-selected'), 'nothing pinned at mount')
+    // The sidebar landing keeps this view mounted; a later jump must re-pin it.
+    await act(async () => { requestContextFocus('sv-rejump', 4) })
+    assert.ok(query(m.container, '.lc-bar[data-seq="4"]').className.includes('lc-bar-selected'), 'the later record re-pins')
+    assert.equal(query<HTMLSelectElement>(m.container, 'select.lc-br-pick').value, '4')
+    assert.equal(takeContextFocus('sv-rejump'), null, 'the record was consumed')
+    await m.unmount()
+  })
+
+  test('the jump reveals the Current Composition card even over a restored position', async () => {
     const View = makeView(new TestClientCtx())
     const props = { sessionId: 'sv-jumpscroll', useProjection: projectionsFor(richTimeline()) }
 
@@ -1199,14 +1210,25 @@ describe('ContextView — chat→Context jump', () => {
     scroller1.scrollTop = 42
     await m1.unmount()
 
-    // The jump remount: restore applies 42, then the jump resolves and resets to top.
+    // jsdom lays out nothing: give the scroller and the composition card fixed
+    // viewport tops so the reveal's rect delta is deterministic (450 − 100).
+    const gBCR = vi.spyOn(Element.prototype, 'getBoundingClientRect').mockImplementation(function (this: Element) {
+      const top = this.hasAttribute('data-conversation-scroll') ? 100
+        : this.hasAttribute('data-lc-current') ? 450 : 0
+      return { top } as DOMRect
+    })
+
+    // The jump remount: restore applies 42, then the jump resolves and the
+    // reveal scrolls the composition card to the scrollport's top (42 + 350).
     requestContextFocus('sv-jumpscroll', 4)
     const scroller2 = document.createElement('div')
     scroller2.setAttribute('data-conversation-scroll', '')
+    scroller2.style.overflowY = 'auto'
     const m2 = await mountInScroller(h(View, props), scroller2)
-    assert.equal(scroller2.scrollTop, 0, 'the jump lands at the top of the tab')
+    assert.equal(scroller2.scrollTop, 392, 'restore(42) overridden by the card reveal delta(350)')
     assert.ok(query(m2.container, '.lc-bar[data-seq="4"]').className.includes('lc-bar-selected'))
     await m2.unmount()
+    gBCR.mockRestore()
   })
 })
 

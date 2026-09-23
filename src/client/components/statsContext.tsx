@@ -27,7 +27,7 @@
 
 import { useEffect, useMemo, useState, type ReactElement, type ReactNode } from 'react'
 import type { ContextEventRecord, ContextTimeline, RequestRecord, SessionCostUsage, TimelineCounts, TokenUsage } from '../../shared/types'
-import { estimateSessionCost, formatCost, formatPriceRate, mergeCostUsage, offPeakOf, priceOf, toCurrency } from '../cost'
+import { estimateSessionCost, formatCost, formatPriceRate, mergeCostUsage, peakOf, priceOf, toCurrency } from '../cost'
 import type { CostCurrency, ModelPrices, PriceTriple } from '../cost'
 import { sessionsFaceOf, subagentCostFoldOf } from '../agentTree'
 import type { AgentHeads } from '../agentHeads'
@@ -63,16 +63,17 @@ function priceRowsOf(usage: SessionCostUsage | undefined, prices: ModelPrices | 
       const rate = priceOf(prices, provider, model)
       if (rate === null) continue
       const periods = asRecord(models[model])
-      // The peak | off-peak pair is DeepSeek's alone (shared/providers):
-      // other providers bill everything at list price.
-      const off = isDeepSeekProvider(provider) && periods !== null && periods.off !== undefined
-        ? offPeakOf(rate)
-        : undefined
+      // The peak | off-peak pair is DeepSeek's alone (shared/providers): the
+      // book lists its off-peak rates, so the peak column always doubles it
+      // (the estimator prices the peak bucket at the same doubled rate) —
+      // other providers bill everything at book price.
+      const deepseek = isDeepSeekProvider(provider)
+      const billedOff = deepseek && periods !== null && periods.off !== undefined
       rows.push({
         key: provider + '/' + model,
         label: multi && provider !== '' ? `${model} · ${provider}` : model,
-        rate,
-        ...(off !== undefined ? { offRate: off } : {}),
+        rate: deepseek ? peakOf(rate) : rate,
+        ...(billedOff ? { offRate: rate } : {}),
       })
     }
   }
@@ -237,13 +238,13 @@ export function makeStatsContext(
       </div>
     )
     return (
-      <div className="lc-card lc-col-stats flex-1 min-w-[min(360px,100%)]">
+      <div className="lc-card lc-col-stats flex-[3] min-w-[min(360px,100%)]">
         <div className="lc-card-title">
           <span className="lc-card-title-text">{t('stats.title')}</span>
         </div>
         {/* The count grid: auto-fit keeps every cell ≥108px (the floor where the longest
-            English label still fits), so cells fill the card — 3 across at the default
-            half-card, 7 across on a wide card, 2 on a phone-width one. */}
+            English label still fits), so cells fill the card — 6 across at the card's
+            three-quarter head-row share, 2 on a phone-width one. */}
         <div className="lc-stats grid grid-cols-[repeat(auto-fit,minmax(108px,1fr))] gap-1.5">
           {cell(t('stats.turns'), props.counts.turns)}
           {cell(t('stats.steps'), props.counts.steps)}

@@ -56,21 +56,32 @@ export function decodeKindOfBlock(blockType: unknown): DecodeKind | undefined {
   return undefined
 }
 
-/** Per-kind decode spans (see {@link decodeSpansOfStream}). */
+/** Per-kind decode spans (see {@link decodeTallyOfStream}). */
 export type DecodeSpans = Record<DecodeKind, number>
 
+/** Per-kind count of opened decode blocks (see {@link decodeTallyOfStream}). */
+export type DecodeCounts = Record<DecodeKind, number>
+
+/** Both decode tallies of one stream: the spans that price the split and the marker counts that qualify its rows. */
+export interface DecodeTally {
+  spans: DecodeSpans
+  blocks: DecodeCounts
+}
+
 /**
- * Per-kind decode spans inside one embedded assistant stream, tiling
- * [first block-start, endTime]: each `block-start` record owns the interval up
- * to the next one, the last one up to `endTime`. This is the V2+ shape, whose
- * timed stream rides the settlement (`assistant/message.data.stream`) instead
- * of separate `assistant/chunk` events. Total over untrusted input — a
- * malformed record is skipped, a non-finite boundary yields zero, and a stream
- * with no marker (or not an array) yields all zeros.
+ * Per-kind decode spans AND counted `block-start` markers inside one embedded
+ * assistant stream, tiling [first block-start, endTime]: each `block-start`
+ * record owns the interval up to the next one, the last one up to `endTime`.
+ * This is the V2+ shape, whose timed stream rides the settlement
+ * (`assistant/message.data.stream`) instead of separate `assistant/chunk`
+ * events. Total over untrusted input — a malformed record is skipped whole (a
+ * marker with an unusable time anchors no span and counts nothing), a
+ * non-finite boundary yields zero, and a stream with no marker (or not an
+ * array) yields all zeros.
  */
-export function decodeSpansOfStream(stream: unknown, endTime: number): DecodeSpans {
-  const spans: DecodeSpans = { reasoning: 0, text: 0, toolarg: 0 }
-  if (!Array.isArray(stream) || !Number.isFinite(endTime)) return spans
+export function decodeTallyOfStream(stream: unknown, endTime: number): DecodeTally {
+  const tally: DecodeTally = { spans: { reasoning: 0, text: 0, toolarg: 0 }, blocks: { reasoning: 0, text: 0, toolarg: 0 } }
+  if (!Array.isArray(stream) || !Number.isFinite(endTime)) return tally
   let kind: DecodeKind | undefined
   let since = 0
   for (const record of stream) {
@@ -81,12 +92,13 @@ export function decodeSpansOfStream(stream: unknown, endTime: number): DecodeSpa
     if (chunk.type !== 'block-start') continue
     const time = r.time
     if (typeof time !== 'number' || !Number.isFinite(time)) continue
-    if (kind !== undefined) spans[kind] += Math.max(0, time - since)
+    if (kind !== undefined) tally.spans[kind] += Math.max(0, time - since)
     kind = decodeKindOfBlock(chunk.blockType)
+    if (kind !== undefined) tally.blocks[kind] += 1
     since = time
   }
-  if (kind !== undefined) spans[kind] += Math.max(0, endTime - since)
-  return spans
+  if (kind !== undefined) tally.spans[kind] += Math.max(0, endTime - since)
+  return tally
 }
 
 /**

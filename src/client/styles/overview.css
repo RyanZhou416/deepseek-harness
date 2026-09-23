@@ -35,6 +35,14 @@
 .lc-ov-head { flex: none; display: flex; align-items: center; gap: 10px; margin-bottom: 14px; flex-wrap: wrap; }
 .lc-ov-head-icon { flex: none; }
 .lc-ov-title { font-weight: 600; font-size: 15px; white-space: nowrap; }
+/* The DeepSeek balance pill (balanceCapsule.tsx): a quiet chip between the
+   title and the range group, one link to the platform's usage console —
+   flex: none keeps the figure intact and the head's own wrap carries it to
+   the next row under pressure. */
+.lc-ov-balance { flex: none; display: inline-flex; align-items: center; gap: 6px; max-width: 100%; padding: 2px 10px; border-radius: 999px; background: var(--dsw-alias-bg-layer-2); border: 1px solid var(--dsw-alias-border-l2); font-size: 12px; line-height: 18px; text-decoration: none; color: inherit; }
+.lc-ov-balance:hover .lc-ov-balance-value { text-decoration: underline; }
+.lc-ov-balance-label { color: var(--dsw-alias-label-secondary); white-space: nowrap; }
+.lc-ov-balance-value { font-variant-numeric: tabular-nums; font-weight: 600; white-space: nowrap; }
 .lc-ov-head .lc-modal-close { margin-left: 0; flex: none; }
 
 /* ---- the body: a 3:7 column pair — the insight column (KPI 2×3 over the

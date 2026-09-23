@@ -59,10 +59,19 @@ function captureLogs(ctx: Context): LogLine[] {
   return lines
 }
 
-/** The migration-refusal error dsh raises for a legacy log it cannot migrate. */
-function unsupportedMigrationError(): Error {
-  const error = new Error('subagent/descriptor 0 uses unsupported descriptor version 2; source v0 artifact remains unchanged')
-  error.name = 'SessionFormatUnsupportedMigrationError'
+/**
+ * One format-refusal face of the persistence seam. The format edge throws
+ * `SessionFormatUnsupportedMigrationError`, but the seam translates it — with
+ * the "source vN artifact remains unchanged (raw log: …)" suffix — into
+ * `SessionFormatUnsupportedError` before the error escapes (issue #75): the
+ * pass must classify BOTH faces as the same refusal.
+ */
+function unsupportedFormatError(name: string): Error {
+  const error = new Error(
+    'subagent/descriptor 0 uses unsupported descriptor version 2'
+    + '; source v0 artifact remains unchanged (raw log: C:\\Users\\u\\.dsh\\sessions\\log.jsonl.zstd)',
+  )
+  error.name = name
   return error
 }
 
@@ -435,8 +444,11 @@ describe('watchActivityBackfill', () => {
       { header: { id: 'legacy-2', cwd: '/repo/legacy-2' } },
       { header: { id: 'good', cwd: '/repo/good' } },
     ])
-    state.failReads.set('legacy-1', unsupportedMigrationError())
-    state.failReads.set('legacy-2', unsupportedMigrationError())
+    // One refusal per face of the seam's translation: the translated name a
+    // real dsh delivers, and the untranslated format-edge name (either may
+    // arrive) — both classify alike, one summary for the pair.
+    state.failReads.set('legacy-1', unsupportedFormatError('SessionFormatUnsupportedError'))
+    state.failReads.set('legacy-2', unsupportedFormatError('SessionFormatUnsupportedMigrationError'))
     const route = arm(ctx, state)
     const lines = captureLogs(ctx)
     const dispose = watchActivityBackfill(ctx)

@@ -6,13 +6,13 @@
 
 import assert from 'node:assert/strict'
 import { describe, test } from 'vitest'
-import { estimateSessionCost, formatCost, formatPriceRate, mergeCostUsage, offPeakOf, priceOf, toCurrency } from '../../src/client/cost'
+import { estimateSessionCost, formatCost, formatPriceRate, mergeCostUsage, peakOf, priceOf, toCurrency } from '../../src/client/cost'
 import type { ModelPrices } from '../../src/client/cost'
 import type { CostBucketTotals } from '../../src/shared/types'
 
 const M = 1_000_000
 
-/** Real-shaped rates (deepseek-v4-flash on models.dev, no cache_write published). */
+/** Real-shaped rates (deepseek-v4-flash on models.dev — the official off-peak list; no cache_write published). */
 const FLASH = { hit: 0.003, miss: 0.15, write: 0.15, out: 0.6 }
 const PRO = { hit: 0.003625, miss: 0.435, write: 0.435, out: 0.87 }
 const KIMI = { hit: 0.19, miss: 0.95, write: 0.95, out: 4 }
@@ -99,21 +99,21 @@ describe('estimateSessionCost', () => {
   test('prices every period bucket at its own rate (hit / miss / write / out)', () => {
     const usage = {
       'deepseek-official': {
-        'deepseek-v4-flash': { peak: bucket(M, M, M, M) },
-        'deepseek-v4-pro': { peak: bucket(M, M, M, M) },
+        'deepseek-v4-flash': { off: bucket(M, M, M, M) },
+        'deepseek-v4-pro': { off: bucket(M, M, M, M) },
       },
       'kimi-coding': { 'kimi-k2.7-code': { peak: bucket(0, M, 0, M) } },
     }
     close(estimateSessionCost(usage, BOOK, 'usd'), 0.903 + (0.003625 + 0.435 + 0.435 + 0.87) + 0.95 + 4)
   })
 
-  test('off-peak buckets price at half the book rate for DeepSeek only', () => {
+  test('peak buckets price at twice the book rate for DeepSeek only', () => {
     const split = { peak: bucket(0, M, 0, 0), off: bucket(0, M, 0, 0) }
-    close(estimateSessionCost({ 'deepseek-official': { 'deepseek-v4-flash': split } }, BOOK, 'usd'), 0.15 + 0.075)
+    close(estimateSessionCost({ 'deepseek-official': { 'deepseek-v4-flash': split } }, BOOK, 'usd'), 0.3 + 0.15)
     close(
       estimateSessionCost({ 'kimi-coding': { 'kimi-k2.7-code': split } }, BOOK, 'usd'),
       0.95 + 0.95,
-      'a flat-rate provider bills an off bucket at list price, never half',
+      'a flat-rate provider bills a peak bucket at book price, never doubled',
     )
   })
 
@@ -124,7 +124,8 @@ describe('estimateSessionCost', () => {
 
   test('the CNY currency converts the USD total at 1 CNY = 0.15 USD', () => {
     const usage = { 'deepseek-official': { 'deepseek-v4-flash': { peak: bucket(0, M, 0, 0) } } }
-    close(estimateSessionCost(usage, BOOK, 'cny'), 1)
+    // 1M peak-window miss bills the official CNY peak price: ¥2.
+    close(estimateSessionCost(usage, BOOK, 'cny'), 2)
   })
 
   test('non-number bucket fields are coerced to zero by numOf', () => {
@@ -134,7 +135,7 @@ describe('estimateSessionCost', () => {
 
   test('garbage fields degrade while real fields still price', () => {
     const mixed = { cacheRead: M, uncached: NaN, cacheWrite: M / 2, output: 'junk' } as unknown as CostBucketTotals
-    close(estimateSessionCost({ 'deepseek-official': { 'deepseek-v4-flash': { peak: mixed } } }, BOOK, 'usd'), 0.003 + 0.5 * 0.15)
+    close(estimateSessionCost({ 'deepseek-official': { 'deepseek-v4-flash': { peak: mixed } } }, BOOK, 'usd'), 2 * (0.003 + 0.5 * 0.15))
   })
 
   test('hostile provider branches, periods, and buckets are skipped, not fatal', () => {
@@ -143,7 +144,7 @@ describe('estimateSessionCost', () => {
       'kimi-coding': { broken: null, 'kimi-k2.7-code': { peak: 'junk', off: bucket(0, M, 0, 0) } },
       'deepseek-official': { 'deepseek-v4-flash': { peak: bucket(0, M, 0, 0) } },
     } as unknown as { [provider: string]: Record<string, Record<string, CostBucketTotals>> }
-    close(estimateSessionCost(usage, BOOK, 'usd'), 0.15 + 0.95)
+    close(estimateSessionCost(usage, BOOK, 'usd'), 0.3 + 0.95)
   })
 })
 
@@ -204,9 +205,12 @@ describe('mergeCostUsage', () => {
   })
 })
 
-describe('offPeakOf', () => {
-  test('halves every rate component', () => {
-    assert.deepEqual(offPeakOf(FLASH), { hit: 0.0015, miss: 0.075, write: 0.075, out: 0.3 })
+describe('peakOf', () => {
+  test('doubles every rate component onto the official peak list', () => {
+    // The book's deepseek figures ARE the official off-peak rates; doubled
+    // they must reproduce the official peak list (api-docs.deepseek.com):
+    // flash peak per 1M — hit $0.006, miss $0.3, output $1.2.
+    assert.deepEqual(peakOf(FLASH), { hit: 0.006, miss: 0.3, write: 0.3, out: 1.2 })
   })
 })
 

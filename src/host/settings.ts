@@ -3,11 +3,16 @@
  * browsers through the harness settings seam (`ctx.settings`).
  *
  * Distinct from the cordis `config:` block (config.ts), which is
- * deployment-level: the settings document is per-user and GUI-editable
- * (Settings → Plugins → Plugin configuration, the `settings.plugin.item`
- * card keyed by this namespace). The Host half only REGISTERS the namespace
- * — every field is a client-side display preference, so nothing here is
- * consumed on the Host.
+ * deployment-level: the settings document is per-user and GUI-editable (the
+ * Plugin configuration card the browser half registers, keyed by this
+ * namespace). The Host half only REGISTERS the namespace — every field is a
+ * client-side display preference, so nothing here is consumed on the Host.
+ *
+ * The register face is generation-specific: dsh V4+ removed
+ * `settings.register` (configuration forms derive from each loader entry's
+ * own Config schema there, a surface this plugin does not publish its
+ * preferences through yet), so the callback feature-detects the method and
+ * stays inert on a generation without it.
  *
  * Optional composition: a deployment without a settings provider never runs
  * the inject callback and browsers simply see no card (schema defaults win).
@@ -38,12 +43,14 @@ export const SettingsSchema: z<PluginSettings> = z.object({
   insightsEntry: z.union(['show', 'hide']).default('show').loose(),
 })
 
-/** Serve the namespace while a settings provider is composed; inert otherwise. */
+/** Serve the namespace while a settings provider with the register face is composed; inert otherwise. */
 export function installSettings(ctx: Context): void {
   ctx.inject(['settings'], (sctx) => {
+    const service = sctx.settings as typeof sctx.settings & { register?: (ns: SettingsNamespace, schema: unknown) => unknown }
+    if (typeof service.register !== 'function') return
     // The settings packages register the raw namespace string (the
     // `settingsNamespace()` brand helper is long gone); the branded cast
     // only satisfies the dsh-settings type face.
-    sctx.settings.register(SETTINGS_NAMESPACE as SettingsNamespace, SettingsSchema)
+    service.register(SETTINGS_NAMESPACE as SettingsNamespace, SettingsSchema)
   })
 }

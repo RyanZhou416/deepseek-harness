@@ -136,4 +136,16 @@ describe('installSettings', () => {
     assert.doesNotThrow(() => installSettings(ctx))
     assert.equal(ctx.get('settings'), undefined, 'no provider composed, nothing registered')
   })
+
+  test('a settings service without the register face (dsh V4+) stays inert', async () => {
+    // The V4+ settings service derives forms from the entry's own Config
+    // schema and no longer carries `settings.register`; the install must
+    // feature-detect the face instead of throwing inside the inject fiber.
+    const ctx = new Context()
+    ctx.provide('settings', { describe: () => [] })
+    assert.doesNotThrow(() => installSettings(ctx))
+    // Let the inject callback run; a mis-spelled call would fail the fiber.
+    await new Promise(resolve => setTimeout(resolve, 20))
+    assert.ok(ctx.get('settings') !== undefined, 'the foreign service stays composed')
+  })
 })

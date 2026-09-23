@@ -226,7 +226,22 @@ export default defineConfig([
       ),
     },
     plugins: [{
-      name: 'dsh-client-bundle-purity',      resolveId(source: string) {
+      name: 'dsh-svg-raw',
+      // `*.svg?raw` inlines a file's markup as its default export — the
+      // emblem (icon.svg) is the package's single graphic source, shared
+      // with the Host's package-meta reader through package.json `icon`.
+      resolveId(source: string, importer: string | undefined) {
+        if (!source.endsWith('.svg?raw')) return null
+        const target = source.slice(0, -'?raw'.length)
+        return importer === undefined ? target : resolvePath(dirname(importer), target) + '?raw'
+      },
+      load(id: string) {
+        if (!id.endsWith('.svg?raw')) return null
+        return `export default ${JSON.stringify(readFileSync(id.slice(0, -'?raw'.length), 'utf8'))}`
+      },
+    }, {
+      name: 'dsh-client-bundle-purity',
+      resolveId(source: string) {
         if (!source.startsWith('@deepseek-ai/')) return null
         if (isRequested(source)) return null
         if (VENDORED_LIBRARY.test(source)) return null

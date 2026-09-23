@@ -79,14 +79,21 @@ export function toolResult(seq: number, opts: {
   /** The bounded presentation meta (search matches / read window) on the durable event. */
   meta?: unknown
   time?: number
+  /**
+   * The V4 spelling: `role: 'tool'`, the lifted message `toolCallId`/`isError`,
+   * direct content (no wrapper block), and no envelope `error` object — the
+   * mark rides the message alone.
+   */
+  v4?: boolean
 }): TimelineEvent {
-  const message: Record<string, unknown> = {
-    content: [{ type: 'tool-result', toolCallId: opts.callId, content: opts.content }],
-  }
+  const message: Record<string, unknown> = opts.v4 === true
+    ? { role: 'tool', toolCallId: opts.callId, content: opts.content }
+    : { content: [{ type: 'tool-result', toolCallId: opts.callId, content: opts.content }] }
   if (opts.noSource !== true) message.source = { kind: 'tool', callId: opts.callId }
+  if (opts.v4 === true && opts.error === true) message.isError = true
   const data: Record<string, unknown> = { message }
   if (opts.noEnvelopeId !== true) data.callId = opts.callId
-  if (opts.error === true) data.error = true
+  if (opts.v4 !== true && opts.error === true) data.error = true
   if (opts.meta !== undefined) data.meta = opts.meta
   return { type: 'tool/result', seq, time: at(opts.time), data, surfaceOp: 'append' }
 }

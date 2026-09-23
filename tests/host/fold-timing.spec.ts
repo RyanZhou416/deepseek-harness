@@ -218,9 +218,13 @@ describe('timing — tool call durations', () => {
     assert.deepEqual(state.timing?.tools, { bash: { calls: 2, ms: 6_000 } })
   })
 
-  test('an unpaired result carries no duration and no tally', () => {
-    const { state } = driveTimeline([toolResult(1, { callId: 'ghost', content: text('ok') })])
-    assert.equal(state.timing, undefined)
+  test('an unpaired result carries no duration, no tally, and no `timing` slot at all', () => {
+    const drive = driveTimeline([toolResult(1, { callId: 'ghost', content: text('ok') })])
+    assert.equal(drive.state.timing, undefined)
+    // ABSENT, never materialized as an `undefined`-valued property: the fold
+    // priced no call, so the slot stays untouched — one such property fails
+    // every projection-cache write for the session (the plain-JSON contract).
+    assert.equal(Object.hasOwn(drive.state, 'timing'), false)
   })
 
   test('result before call (out-of-order log) prices nothing', () => {
@@ -285,6 +289,10 @@ describe('timing — the generation split (reasoning / text / tool args)', () =>
     assert.equal(state.timing?.reasoningMs, 500, 'reasoning owns 200→700')
     assert.equal(state.timing?.textMs, 500, 'text owns 700→1200')
     assert.equal(state.timing?.toolArgMs, 800, 'tool args own 1200→message')
+    // Each marker is one counted block — the card's per-slice tally.
+    assert.equal(state.timing?.reasoningBlocks, 1)
+    assert.equal(state.timing?.textBlocks, 1)
+    assert.equal(state.timing?.toolArgBlocks, 1)
   })
 
   test('V0: the buckets tile the marker span (they account for the generation window)', () => {
@@ -303,7 +311,8 @@ describe('timing — the generation split (reasoning / text / tool args)', () =>
 
   test('an unstamped call carries no split (its model time is unattributed wholesale)', () => {
     // Block markers but no token delta: the call prices no generation time,
-    // so its spans must not reappear as generation the caller never charged.
+    // so its spans must not reappear as generation the caller never charged —
+    // and its blocks count nothing either (the tally rides the same gate).
     const { state } = driveTimeline([
       stepStart(1, { time: 0 }),
       blockStart(2, 'reasoning', 100),
@@ -313,6 +322,8 @@ describe('timing — the generation split (reasoning / text / tool args)', () =>
     assert.equal(state.timing?.genMs, 0)
     assert.equal(state.timing?.reasoningMs, undefined)
     assert.equal(state.timing?.textMs, undefined)
+    assert.equal(state.timing?.reasoningBlocks, undefined)
+    assert.equal(state.timing?.textBlocks, undefined)
   })
 
   test('V0: an unknown block marker closes the open block but opens nothing', () => {
@@ -326,6 +337,8 @@ describe('timing — the generation split (reasoning / text / tool args)', () =>
     assert.equal(state.timing?.reasoningMs, 400, 'the reasoning span ends at the unknown marker')
     assert.equal(state.timing?.textMs, undefined)
     assert.equal(state.timing?.toolArgMs, undefined)
+    assert.equal(state.timing?.reasoningBlocks, 1, 'the unknown marker itself counted nothing')
+    assert.equal(state.timing?.textBlocks, undefined)
   })
 
   test('V0: a marker before any open block starts a span; hostile times clamp', () => {
@@ -337,11 +350,31 @@ describe('timing — the generation split (reasoning / text / tool args)', () =>
       // A non-finite marker time poisons only its OWN span: the reasoning
       // block closes to a zero span and the text block it opens can never be
       // priced — both stay absent rather than reporting a bogus duration.
+      // No token delta ever stamps the call, so the split (spans AND counts)
+      // stays unattributed wholesale.
       assistantChunk(4, { type: 'block-start', index: 0, blockType: 'text' }, { time: Number.NaN }),
       assistantMessage(5, { time: 900 }),
     ])
     assert.equal(state.timing?.reasoningMs, undefined)
     assert.equal(state.timing?.textMs, undefined)
+    assert.equal(state.timing?.reasoningBlocks, undefined)
+    assert.equal(state.timing?.textBlocks, undefined)
+  })
+
+  test('V0: a zero-span block still counts its marker (the tally needs no time)', () => {
+    const { state } = driveTimeline([
+      stepStart(1, { time: 0 }),
+      assistantChunk(2, { type: 'text-delta', text: 'x' }, { time: 100 }),
+      blockStart(3, 'reasoning', 200),
+      // The text marker's unusable time prices no span, but the block opened.
+      assistantChunk(4, { type: 'block-start', index: 0, blockType: 'text' }, { time: Number.NaN }),
+      assistantMessage(5, { time: 900 }),
+    ])
+    assert.equal(state.timing?.genMs, 800)
+    assert.equal(state.timing?.reasoningMs, undefined)
+    assert.equal(state.timing?.textMs, undefined)
+    assert.equal(state.timing?.reasoningBlocks, 1)
+    assert.equal(state.timing?.textBlocks, 1)
   })
 
   test('a chunk with no open step stays uninteresting for the split too', () => {
@@ -370,6 +403,10 @@ describe('timing — the generation split (reasoning / text / tool args)', () =>
     assert.equal(state.timing?.reasoningMs, 500)
     assert.equal(state.timing?.textMs, 500)
     assert.equal(state.timing?.toolArgMs, 800)
+    // The embedded stream's markers count too — one block per bucket here.
+    assert.equal(state.timing?.reasoningBlocks, 1)
+    assert.equal(state.timing?.textBlocks, 1)
+    assert.equal(state.timing?.toolArgBlocks, 1)
   })
 
   test('a stream with no block marker contributes no split (the card keeps the un-split shape)', () => {
@@ -384,6 +421,7 @@ describe('timing — the generation split (reasoning / text / tool args)', () =>
     assert.equal(state.timing?.reasoningMs, undefined)
     assert.equal(state.timing?.textMs, undefined)
     assert.equal(state.timing?.toolArgMs, undefined)
+    assert.equal(state.timing?.textBlocks, undefined)
   })
 
   test('split totals accumulate across steps and stay plain JSON', () => {
@@ -402,7 +440,25 @@ describe('timing — the generation split (reasoning / text / tool args)', () =>
     ])
     assert.equal(drive.state.timing?.reasoningMs, 200 + 300)
     assert.equal(drive.state.timing?.textMs, 200)
+    assert.equal(drive.state.timing?.reasoningBlocks, 2)
+    assert.equal(drive.state.timing?.textBlocks, 1)
     assertPlainJson(drive.state)
+  })
+
+  test('a slot cached before the block tally existed merges its spans without counts', () => {
+    // Rows cached by the previous build can hold a stamped slot with decode
+    // spans but no `blocks` record (additive-optional, see TimelineState):
+    // the merge reads it as no tallies.
+    const { def, state } = driveTimeline([
+      stepStart(1, { time: 0 }),
+      assistantChunk(2, { type: 'reasoning-delta', text: 'x' }, { time: 100 }),
+      assistantChunk(3, { type: 'block-start', blockType: 'reasoning' }, { time: 100 }),
+    ])
+    const stale = structuredClone(state)
+    if (stale.stepStart !== undefined) delete stale.stepStart.blocks
+    const merged = def.apply(stale, assistantMessage(4, { time: 400 }))
+    assert.equal(merged.timing?.reasoningMs, 300)
+    assert.equal(merged.timing?.reasoningBlocks, undefined)
   })
 
   test('the generation split rides the wire view as plain values', () => {
@@ -413,6 +469,7 @@ describe('timing — the generation split (reasoning / text / tool args)', () =>
       assistantMessage(4, { time: 400 }),
     ])
     assert.equal(drive.view.timing?.reasoningMs, 300)
+    assert.equal(drive.view.timing?.reasoningBlocks, 1)
   })
 })
 
@@ -439,9 +496,56 @@ describe('timing — served wire view', () => {
     const drive = driveTimeline([...step(1, 0, 1_000, { tokenMs: 300 }),
       toolCall(5, { callId: 'c1', name: 'bash' }),
       toolResult(6, { callId: 'c1', content: text('ok') }),
-      stepEnd(7, { time: 30_000 })])
+      stepEnd(7, { time: 30_000 }),
+      // A step left OPEN with counted block markers in the slot: the final
+      // state carries stepStart.{decode,blocks,block} for the gate.
+      stepStart(8, { time: 40_000 }),
+      assistantChunk(9, { type: 'reasoning-delta', text: 'x' }, { time: 40_100 }),
+      assistantChunk(10, { type: 'block-start', blockType: 'reasoning' }, { time: 40_100 }),
+      assistantChunk(11, { type: 'block-start', blockType: 'text' }, { time: 40_300 })])
     // The 0.1.1+ contract validates persisted state through stateSchema.
     const c = def as unknown as { stateSchema: { parse(s: unknown): unknown } }
     for (const state of drive.states) c.stateSchema.parse(structuredClone(state)) // throws on drift
+    assert.ok(drive.state.stepStart?.blocks !== undefined, 'the open slot carried the counted markers')
+  })
+})
+
+describe('timing — the throughput seat', () => {
+  test('a call with usage pairs its decode window and output tokens; a usage-less call stays out', () => {
+    const { state } = driveTimeline([
+      ...step(1, 10_000, 2_000, { tokenMs: 600, usage: { outputTokens: 500 } }),
+      ...step(4, 20_000, 3_000, { tokenMs: 1_500 }),
+    ])
+    assert.equal(state.timing?.speedMs, 1_400, 'only the usage-carrying call pairs')
+    assert.equal(state.timing?.speedTokens, 500)
+    assert.equal(state.timing?.genMs, 2_900, 'genMs still counts every stamped call')
+  })
+
+  test('multiple paired calls sum both sides', () => {
+    const { state } = driveTimeline([
+      ...step(1, 10_000, 2_000, { tokenMs: 600, usage: { outputTokens: 500 } }),
+      ...step(4, 20_000, 3_000, { tokenMs: 1_500, usage: { outputTokens: 700 } }),
+    ])
+    assert.equal(state.timing?.speedMs, 2_900)
+    assert.equal(state.timing?.speedTokens, 1_200)
+  })
+
+  test('usage without a token stamp prices nothing (the harness pairing)', () => {
+    const { state } = driveTimeline([
+      { type: 'step/start', seq: 1, time: 0 },
+      assistantMessage(2, { time: 1_000, usage: { outputTokens: 500 } }),
+      { type: 'step/end', seq: 3, time: 2_000 },
+    ])
+    assert.equal(state.timing?.speedMs, undefined)
+    assert.equal(state.timing?.speedTokens, undefined)
+  })
+
+  test('usage without a readable output bucket pairs nothing', () => {
+    const { state } = driveTimeline([
+      ...step(1, 10_000, 2_000, { tokenMs: 600, usage: { inputTokens: 5 } }),
+    ])
+    assert.equal(state.timing?.speedMs, undefined)
+    assert.equal(state.timing?.speedTokens, undefined)
+    assert.equal(state.timing?.genMs, 1_400)
   })
 })

@@ -1,8 +1,10 @@
 /**
  * The /context modal's dock inset: the width of the shell's sidebar track, so the fixed backdrop can start at the sidebar's right edge and
  * center the dialog over the main column instead of the whole viewport. The only host anchor is the app frame's inline grid template
- * (`<sidebar>px minmax(0, 1fr) <details>px` — identical on every supported baseline and the sole inline gridTemplateColumns in the dsh
- * client), found by walking up from the backdrop. Anything unresolved — no frame, unparsable template, a hostile node in the chain —
+ * (`<sidebar>px …` — the sidebar-leading px track is the one contract every
+ * supported baseline shares; the center/right tracks' spellings differ per
+ * generation) found by walking up from the backdrop. Anything unresolved — no
+ * frame, unparsable template, a hostile node in the chain —
  * degrades to a 0 inset, the full-viewport mask.
  */
 

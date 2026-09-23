@@ -116,7 +116,7 @@ describe('client entry: assistant-actions seat', () => {
 
     const el = component({ messageId: 'm1' }) as ReactElement
     const m = await mount(el)
-    assert.equal(query(m.container, 'button.lc-jump').getAttribute('aria-label'), 'View this turn in the Context tab')
+    assert.equal(query(m.container, 'button.lc-jump').getAttribute('aria-label'), 'View this turn in the Context view')
     await m.unmount()
 
     // Interruption-frozen partials address no durable message: nothing renders.
@@ -275,6 +275,99 @@ describe('client entry: settingsScope inject', () => {
     ctx.setService('settingsScope', undefined)
     applyTo(ctx)
     assert.equal(ctx.slots.of('settings.plugin.item').length, 0)
+    ctx.dispose()
+  })
+})
+
+describe('client entry: configForms inject (the Config-form generation)', () => {
+  /** A configForms stand-in capturing the whileServed registration. */
+  function fakeConfigForms(form: SettingsScopeLike): {
+    gets: string[]
+    whileServedCalls: string[][]
+    register: () => () => void
+    whileServed(namespaces: readonly string[], register: () => () => void): () => void
+  } {
+    const rec = {
+      gets: [] as string[],
+      whileServedCalls: [] as string[][],
+      register: (): (() => void) => () => {},
+      get(namespace: string): SettingsScopeLike {
+        rec.gets.push(namespace)
+        return form
+      },
+      whileServed(namespaces: string[], register: () => () => void): () => void {
+        rec.whileServedCalls.push(namespaces)
+        rec.register = register
+        return () => {}
+      },
+    }
+    return rec
+  }
+
+  test('absent at apply time: the inject stays pending — no plugins.bundle.config slot', () => {
+    const ctx = new TestClientCtx()
+    applyTo(ctx)
+    assert.equal(ctx.slots.of('plugins.bundle.config').length, 0)
+    ctx.dispose()
+  })
+
+  test('defensive arm: a service without the consumed faces — early return, no slot, no throw', () => {
+    const ctx = new TestClientCtx()
+    ctx.setService('configForms', { get: () => makeScope({ status: 'ready', value: {}, writable: true }) })
+    applyTo(ctx)
+    assert.equal(ctx.slots.of('plugins.bundle.config').length, 0)
+    ctx.dispose()
+    const ctx2 = new TestClientCtx()
+    ctx2.setService('configForms', undefined)
+    applyTo(ctx2)
+    assert.equal(ctx2.slots.of('plugins.bundle.config').length, 0)
+    ctx2.dispose()
+  })
+
+  test('armed later: the form binds the namespace and the served registration claims the Plugins-page seat', async () => {
+    const ctx = new TestClientCtx()
+    applyTo(ctx)
+    const scope = makeScope({ status: 'ready', value: { defaultTrendMode: 'delta' }, writable: true })
+    const forms = fakeConfigForms(scope)
+    ctx.setService('configForms', forms)
+    // The namespace follows the settingsScope generation's join key.
+    assert.deepEqual(forms.gets, ['dsh-context'])
+    assert.equal(scope.subscribes, 1, 'the settings store attached to the form')
+    assert.deepEqual(forms.whileServedCalls, [['dsh-context']])
+    // Nothing registers until the Host serves the namespace.
+    assert.equal(ctx.slots.of('plugins.bundle.config').length, 0)
+    // The Host serves: the register claims the keyed seat.
+    const disposeRegistration = forms.register()
+    const entries = ctx.slots.of('plugins.bundle.config')
+    assert.equal(entries.length, 1)
+    const registration = entries[0].registration as never as {
+      name: string
+      key?: string
+      locale?: string
+      inject?: () => unknown
+    }
+    assert.equal(registration.name, 'plugins.bundle.config')
+    assert.equal(registration.key, 'dsh-context')
+    assert.equal(registration.locale, 'dsh-context')
+    const face = registration.inject?.() as {
+      hooks: { contextSettings: { getSnapshot(): SettingsState } }
+      set: (field: SettingsField, value: string) => void
+    }
+    assert.equal(face.hooks.contextSettings.getSnapshot().mode, 'delta', 'the card reads the form snapshot')
+    face.set('defaultToolSort', 'name')
+    assert.deepEqual(scope.sets, [{ field: 'defaultToolSort', value: 'name' }])
+    // The seat's component renders the flat Plugins-page card.
+    const el = entries[0].component({}) as ReactElement
+    assert.equal((el.type as { name: string }).name, 'PluginConfigCard')
+    const store = face.hooks.contextSettings
+    const m = await mount(h(el.type as never, {
+      useContextSettings: <T,>(sel: (state: SettingsState) => T): T => sel(store.getSnapshot()),
+    }))
+    assert.equal(queryAll(m.container, '.lc-settings-select').length, 6)
+    assert.equal(m.container.querySelector('.lc-settings-head'), null, 'no settings-section chrome on this seat')
+    await m.unmount()
+    disposeRegistration()
+    assert.deepEqual(ctx.slots.of('plugins.bundle.config'), [], 'the registration disposer withdraws the seat')
     ctx.dispose()
   })
 })

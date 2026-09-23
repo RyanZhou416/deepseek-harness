@@ -569,11 +569,12 @@ function msNumOf(value: unknown): number {
 }
 
 /**
- * The OPTIONAL timing scalars (the generation split): a real non-negative
- * number passes, anything else — including absence — reads as undefined so the
- * field stays absent on the narrowed value (see `timingOf`).
+ * The OPTIONAL timing scalars (the generation split's spans and block counts):
+ * a real non-negative number passes, anything else — including absence — reads
+ * as undefined so the field stays absent on the narrowed value (see
+ * `timingOf`).
  */
-function optMsNumOf(value: unknown): number | undefined {
+function optNumOf(value: unknown): number | undefined {
   return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : undefined
 }
 
@@ -590,10 +591,10 @@ function timingFastOk(value: unknown): boolean {
   for (const k of ['wallMs', 'ttftMs', 'genMs', 'calls', 'toolsMs', 'toolCalls']) {
     if (typeof t[k] !== 'number') return false
   }
-  // The generation split is optional but, when present, must be a finite
-  // non-negative number — the same gate the slow path applies, so a hostile
-  // bucket cannot slip through the fast path (see `timingOf`).
-  for (const k of ['reasoningMs', 'textMs', 'toolArgMs']) {
+  // The generation split and the block counts are optional but, when present,
+  // must be finite non-negative numbers — the same gate the slow path applies,
+  // so a hostile bucket cannot slip through the fast path (see `timingOf`).
+  for (const k of ['reasoningMs', 'textMs', 'toolArgMs', 'reasoningBlocks', 'textBlocks', 'toolArgBlocks']) {
     const v = t[k]
     if (v !== undefined && (typeof v !== 'number' || !Number.isFinite(v) || v < 0)) return false
   }
@@ -642,15 +643,21 @@ export function timingOf(value: unknown): TimingTotals | null {
     toolCalls: msNumOf(data.toolCalls),
     tools,
   }
-  // The generation split stays ABSENT when the host did not serve it (a row
-  // cached before the split) or served a non-number: the card then renders the
-  // un-split shape instead of three meaningless zero rows.
-  const reasoning = optMsNumOf(data.reasoningMs)
+  // The optional scalars stay ABSENT when the host did not serve them (a row
+  // cached before the split / the counts) or served a non-number: the card
+  // renders the un-split shape / no qualifier instead of meaningless zeros.
+  const reasoning = optNumOf(data.reasoningMs)
   if (reasoning !== undefined) totals.reasoningMs = reasoning
-  const textMs = optMsNumOf(data.textMs)
+  const reasoningBlocks = optNumOf(data.reasoningBlocks)
+  if (reasoningBlocks !== undefined) totals.reasoningBlocks = reasoningBlocks
+  const textMs = optNumOf(data.textMs)
   if (textMs !== undefined) totals.textMs = textMs
-  const toolArgMs = optMsNumOf(data.toolArgMs)
+  const textBlocks = optNumOf(data.textBlocks)
+  if (textBlocks !== undefined) totals.textBlocks = textBlocks
+  const toolArgMs = optNumOf(data.toolArgMs)
   if (toolArgMs !== undefined) totals.toolArgMs = toolArgMs
+  const toolArgBlocks = optNumOf(data.toolArgBlocks)
+  if (toolArgBlocks !== undefined) totals.toolArgBlocks = toolArgBlocks
   return totals
 }
 

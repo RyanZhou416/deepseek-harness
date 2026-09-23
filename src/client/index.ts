@@ -28,10 +28,10 @@ import { registerContextCommand } from './command'
 import { makeContextModal } from './components/contextModal'
 import { makeOverviewButton } from './components/overviewButton'
 import { makeOverviewPanel } from './components/overviewPanel'
-import { makeSettingsCard } from './components/settingsCard'
+import { makeSettingsCard, makePluginConfigCard } from './components/settingsCard'
 import { modalStoreOf } from './modalStore'
 import type { ClientCtx } from './services'
-import { createContextSettings, type SettingsField, type SettingsScopeBinderFace } from './settings'
+import { createContextSettings, type ConfigFormsFace, type SettingsField, type SettingsScopeBinderFace } from './settings'
 import { makeContextView } from './components/contextView'
 import { makeContextJumpButton } from './components/contextJump'
 import { watchHistoryFaces } from './historyPage'
@@ -103,9 +103,10 @@ function apply(ctx: ClientCtx): void {
   }), 'dsh-context: placement')
 
   // Chat → Context jump: an icon in each finalized reply's action row that
-  // opens this tab pinned to that reply's turn (see contextJump.tsx; the
-  // relay and tab activation live in viewFocus.ts).
-  const ContextJump = makeContextJumpButton(kit)
+  // opens the Context tab on the right Sidebar pinned to that reply's turn —
+  // falling back to the conversation tab wherever the sidebar serves no tab
+  // (see contextJump.tsx; the relay and view activation live in viewFocus.ts).
+  const ContextJump = makeContextJumpButton(ctx, kit)
   ctx.slots.inject('conversation.chat.assistant-actions', () => {
     return ctx.slots.register(
       // After the shipped feedback entry (10), still inside the icon row.
@@ -149,10 +150,26 @@ function apply(ctx: ClientCtx): void {
     )
   })
 
-  // Per-user display preferences: bind the Host-served `dsh-context`
-  // namespace and claim its Plugin configuration card. Optional composition
-  // — a deployment without the settings surface keeps the schema defaults
-  // and shows no card.
+  /** The injected face both preference cards ride: the settings store as the
+   *  framework's hooks-compartment `useContextSettings` seat, plus the set verb. */
+  const cardFace = (): {
+    hooks: { contextSettings: typeof settings.store }
+    set: (field: SettingsField, value: string) => void
+  } => ({
+    hooks: { contextSettings: settings.store },
+    set: (field, value) => { settings.set(field, value) },
+  })
+
+  // Per-user display preferences. Two generations, two transports and seats,
+  // switched by SERVICE PRESENCE (each deferred inject fires on exactly one
+  // side; a host without its service never runs the callback):
+  //   - the settingsScope generation registers the card on the keyed
+  //     `settings.plugin.item` slot (Settings → Plugins → Plugin
+  //     configuration), binding the Host-served `dsh-context` namespace;
+  //   - the Config-form generation (dsh 0.1.7+) retired that pair — there the
+  //     card rides the configForms transport and the Plugins page's keyed
+  //     `plugins.bundle.config` seat, alive only while the Host serves the
+  //     namespace (the entry Config's volatile preference fields).
   ctx.inject(['settingsScope'], (raw) => {
     const c = raw as ClientCtx & { settingsScope?: SettingsScopeBinderFace }
     const binder = c.settingsScope
@@ -161,16 +178,29 @@ function apply(ctx: ClientCtx): void {
     const SettingsCard = makeSettingsCard(kit)
     c.slots.inject('settings.plugin.item', () => {
       return c.slots.register(
-        { name: 'settings.plugin.item', key: NS, locale: NS,
-          inject: () => ({
-            hooks: { contextSettings: settings.store },
-            set: (field: SettingsField, value: string) => { settings.set(field, value) },
-          }) },
+        { name: 'settings.plugin.item', key: NS, locale: NS, inject: cardFace },
         // Root-scope keyed slot: no sessionId on these props — the face
         // (hooks + set) arrives through the registration's inject.
         props => h(SettingsCard, props as unknown as Parameters<typeof SettingsCard>[0]),
       )
     })
+  })
+  ctx.inject(['configForms'], (raw) => {
+    const c = raw as ClientCtx & { configForms?: ConfigFormsFace }
+    const forms = c.configForms
+    if (forms === undefined || typeof forms.get !== 'function' || typeof forms.whileServed !== 'function') return
+    c.effect(() => settings.attach(forms.get(NS)), 'dsh-context: config forms')
+    const PluginConfigCard = makePluginConfigCard(kit)
+    c.effect(() => forms.whileServed([NS], () => {
+      // slots.inject's disposer is the registration's disposer (the typed
+      // local face reads unknown; the harness contract returns a disposer).
+      return c.slots.inject('plugins.bundle.config', () => {
+        return c.slots.register(
+          { name: 'plugins.bundle.config', key: NS, locale: NS, inject: cardFace },
+          props => h(PluginConfigCard, props as unknown as Parameters<typeof PluginConfigCard>[0]),
+        )
+      }) as () => void
+    }), 'dsh-context: plugins-page card')
   })
 }
 

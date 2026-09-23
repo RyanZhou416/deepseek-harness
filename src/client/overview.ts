@@ -227,10 +227,11 @@ export function rowsOfSnapshot(snapshot: unknown, workspaces?: unknown): Overvie
 
 // ---- range / filter / sort -------------------------------------------------
 
-export type OverviewRange = '7d' | '30d' | 'all'
+export type OverviewRange = '24h' | '7d' | '30d' | 'all'
 
 /** The range window's start instant (epoch ms), or null for "all". */
 export function rangeStartOf(range: OverviewRange, now: number): number | null {
+  if (range === '24h') return now - 86_400_000
   if (range === '7d') return now - 7 * 86_400_000
   if (range === '30d') return now - 30 * 86_400_000
   return null

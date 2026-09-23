@@ -1,8 +1,11 @@
 // The Context emblem (src/client/icon.tsx): the bundled polychrome document
 // sheet that fills the right-Sidebar tab type's two glyph seats — the guide
 // capsule and the chip title. Bundled rather than read off the harness
-// primitives, so these specs render the real component.
+// primitives, so these specs render the real component. The same sheet is
+// exported statically as the package-root icon.svg the Host's package-meta
+// reader serves to the Plugins page; a spec pins the two in lockstep.
 
+import { readFile } from 'node:fs/promises'
 import { createElement as h } from 'react'
 import assert from 'node:assert/strict'
 import { describe, test } from 'vitest'
@@ -34,6 +37,23 @@ describe('ContextIcon', () => {
     assert.equal(svg.getAttribute('height'), '20')
     assert.equal(svg.getAttribute('class'), null)
     await m.unmount()
+  })
+
+  test('the package-root icon.svg stays in lockstep with the component', async () => {
+    // The static file is what the Host's package-meta reader serves to the
+    // Plugins page (package.json `icon`), so a component edit that skips the
+    // file — or a manual file edit that skips the component — fails here.
+    const raw = await readFile('icon.svg', 'utf8')
+    const svgPaths = [...raw.matchAll(/<path d="([^"]+)" fill="([^"]+)"\/>/g)].map(([, d, fill]) => ({ d, fill }))
+    const m = await mount(h(ContextIcon, {}))
+    const componentPaths = queryAll<SVGPathElement>(m.container, 'path').map(p => ({
+      d: p.getAttribute('d'),
+      fill: p.getAttribute('fill'),
+    }))
+    await m.unmount()
+    assert.ok(svgPaths.length >= 10)
+    assert.deepEqual(svgPaths, componentPaths)
+    assert.match(raw, /^<svg xmlns="http:\/\/www\.w3\.org\/2000\/svg" viewBox="0 0 1024 1024">/)
   })
 })
 

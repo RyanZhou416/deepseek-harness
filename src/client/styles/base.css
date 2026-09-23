@@ -97,20 +97,22 @@
 .lc-col-browser { display: flex; flex-direction: column; }
 .lc-col-browser > .lc-card { flex: 1; }
 /*
- Head band: TWO rows of two EQUAL-width cards — the session's shape beside
- the plugin card (context / plugin), then the two donut cards together
- (token / timing). The rows are `.lc-cols` flex-wrap rows and the cards ride
- the shared column idiom (`flex-1 min-w-[min(360px,100%)]` in the
- components): equal `flex: 1` halves each row exactly and the min-width
- floor is the fold — below 2 x 360px + gap of row width (a half under
- ~360px, where the donut cards' ring+legend single-line and the count grid
- both start to cramp, issue #48) the pair wraps onto full-width lines. Cards
+ Head band: TWO rows — the session's shape at a 3:1 split beside the plugin
+ card (context / plugin), then the two donut cards together (token /
+ timing). The rows are `.lc-cols` flex-wrap rows and the cards ride the
+ shared column idiom (`min-w-[min(360px,100%)]` in the components): the
+ stats card's `flex-[3]` against the plugin card's `flex-1` thirds the row,
+ and the min-width floor is the fold — below (360 + 240)px + gap of row
+ width the 3:1 pair wraps onto full-width lines, below 2 x 360px + gap the
+ equal donut pair does (~360px being where the donut cards' ring+legend
+ single-line and the count grid both start to cramp, issue #48; the plugin
+ card's 240px floor leans on its rows' ellipsis + hover recovery). Cards
  under that end of the band sit under their own lc-card reflows (stats.css:
  the ring stacks over its legend, the cell grid folds), so the two-card
  line is the trade this floor buys. Engines without container queries keep
- the wide two-across layout. The right Sidebar's panel renders only the
- donut row (it drops the context stats / plugin info row — see
- contextView.tsx); the same wrap then stacks the pair in the narrow pane.
+ the wide layout. The right Sidebar's panel renders only the donut row (it
+ drops the context stats / plugin info row — see contextView.tsx); the same
+ wrap then stacks the pair in the narrow pane.
  */
 /* The context card's cell grid stretches to the plugin card's height, so the row reads as one level band. */
 .lc-head > .lc-card:has(.lc-stats) { display: flex; flex-direction: column; }

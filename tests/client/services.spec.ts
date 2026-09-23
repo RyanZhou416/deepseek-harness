@@ -516,6 +516,26 @@ describe('timingOf', () => {
     assert.equal(out?.reasoningMs, undefined)
     assert.equal(out?.wallMs, wellFormed.wallMs)
   })
+
+  test('the block counts pass through when well-formed and stay absent otherwise', () => {
+    const out = timingOf({ ...wellFormed, reasoningBlocks: 3, textBlocks: 1, toolArgBlocks: 9 })
+    assert.deepEqual(out, { ...wellFormed, reasoningBlocks: 3, textBlocks: 1, toolArgBlocks: 9 })
+    const bare = timingOf(wellFormed)
+    assert.ok(bare !== null)
+    for (const k of ['reasoningBlocks', 'textBlocks', 'toolArgBlocks']) {
+      assert.equal(Object.hasOwn(bare, k), false, `${k} stays absent`)
+    }
+  })
+
+  test('a wrong-typed or negative count drops alone; a non-finite one cannot slip through', () => {
+    const out = timingOf({ ...wellFormed, reasoningBlocks: 'x', textBlocks: -1, toolArgBlocks: 4 })
+    assert.equal(out?.reasoningBlocks, undefined)
+    assert.equal(out?.textBlocks, undefined)
+    assert.equal(out?.toolArgBlocks, 4)
+    const out2 = timingOf({ ...wellFormed, textBlocks: Number.NaN })
+    assert.equal(out2?.textBlocks, undefined)
+    assert.equal(out2?.wallMs, wellFormed.wallMs)
+  })
 })
 
 describe('timelineOf — the live system-prompt nodes', () => {

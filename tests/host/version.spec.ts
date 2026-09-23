@@ -14,6 +14,17 @@
 //    running-tree witness inside the repo would read as this package's own
 //    dependency closure.
 //
+//  Walk-up cleanliness alone is not hermetic, though: CJS resolution consults
+//  NODE_PATH after the walk-up fails, and a pnpm-managed environment (a
+//  `pnpm` binary from a sibling checkout) injects that checkout's virtual
+//  store into NODE_PATH — an AMBIENT harness install every absent probe
+//  package would otherwise resolve to. Every home therefore SHADOWS each
+//  package its failing probes could reach (see `shadow` in beforeAll): the
+//  resolution answers at the fixture level with an entry that names the
+//  package but carries no version, so both probe paths (manifest subpath via
+//  the exports gate, entry ascend via the versionless own manifest) yield
+//  undefined and the degradation arms stay machine-independent.
+//
 // The running anchor is injected as a URL resolver, and the plugin root as a
 // path, so both the trusted and the own-closure arms are exercised hermetically
 // (the repo's real defaults are covered by the last case of the degradation
@@ -94,12 +105,27 @@ function writeScratchHome(
 
 const scratchResolver = (home: string): (...segments: string[]) => string => resolverIn(join(scratch, home))
 
+/**
+ * A probe-package shadow: the package RESOLVES at the fixture level (so the
+ * walk-up — and the NODE_PATH ambient installs behind it — are never
+ * consulted) but answers NO version. The manifest subpath probe dies on the
+ * exports gate (no './package.json' export), and the entry ascend reads the
+ * package's own versionless manifest to undefined.
+ */
+function shadow(home: string, packageName: string): void {
+  writeScratchHome(home, packageName,
+    JSON.stringify({ name: packageName, exports: { '.': './lib/index.js' } }),
+    { path: 'lib/index.js' })
+}
+
 beforeAll(() => {
   scratch = mkdtempSync(join(tmpdir(), 'dsh-context-version-'))
   // The CLI-row-absent fall-through lives in scratch: inside the repo tree a
   // missing CLI package could resolve to an ambient install above the repo
   // (e.g. a global copy under ~/node_modules), making the answer machine-
-  // dependent; outside it the walk-up is provably clean.
+  // dependent; outside it the walk-up is provably clean. The shadows close
+  // the remaining NODE_PATH route (see the header note).
+  shadow('library-only', '@deepseek-ai/dsh')
   writeScratchHome('library-only', '@deepseek-ai/dsh-session-projection',
     JSON.stringify({ name: '@deepseek-ai/dsh-session-projection', version: '0.1.1-rc.2' }))
   writeScratchHome('entry-only', '@deepseek-ai/dsh',
@@ -120,12 +146,34 @@ beforeAll(() => {
   writeScratchHome('entry-primitive', '@deepseek-ai/dsh',
     JSON.stringify({ name: '@deepseek-ai/dsh', version: '0.1.1-rc.7', exports: { '.': './a/index.js' } }),
     { path: 'a/index.js', decoyManifest: '"oops"' })
+  // The exports map names an entry the package does not ship: the entry
+  // resolve fails AT the fixture level (no ascend, no NODE_PATH fall-through).
+  writeScratchHome('entry-gone', '@deepseek-ai/dsh',
+    JSON.stringify({ name: '@deepseek-ai/dsh', version: '0.1.1-rc.8', exports: { '.': './lib/gone.js' } }))
+  shadow('entry-gone', '@deepseek-ai/dsh-session-projection')
+  shadow('entry-gone', '@deepseek-ai/dsh-session')
   writeScratchHome('entry-orphan', '@deepseek-ai/dsh-session',
     JSON.stringify({ name: '@deepseek-ai/dsh-orphan', version: '1.0.0', exports: { '.': './lib/index.js' } }),
     { path: 'lib/index.js' })
-  writeScratchHome('nonstring-version', '@deepseek-ai/dsh', JSON.stringify({ name: '@deepseek-ai/dsh', version: 42 }))
-  writeScratchHome('empty-version', '@deepseek-ai/dsh', JSON.stringify({ name: '@deepseek-ai/dsh', version: '' }))
+  shadow('entry-orphan', '@deepseek-ai/dsh')
+  shadow('entry-orphan', '@deepseek-ai/dsh-session-projection')
+  // The invalid-version homes: the manifest subpath probe reads the odd
+  // version and rejects it; the entry ascend resolves the shadowed entry and
+  // rejects the own manifest again — nothing may fall through to NODE_PATH.
+  writeScratchHome('nonstring-version', '@deepseek-ai/dsh',
+    JSON.stringify({ name: '@deepseek-ai/dsh', version: 42, exports: { '.': './lib/index.js' } }),
+    { path: 'lib/index.js' })
+  shadow('nonstring-version', '@deepseek-ai/dsh-session-projection')
+  shadow('nonstring-version', '@deepseek-ai/dsh-session')
+  writeScratchHome('empty-version', '@deepseek-ai/dsh',
+    JSON.stringify({ name: '@deepseek-ai/dsh', version: '', exports: { '.': './lib/index.js' } }),
+    { path: 'lib/index.js' })
+  shadow('empty-version', '@deepseek-ai/dsh-session-projection')
+  shadow('empty-version', '@deepseek-ai/dsh-session')
   mkdirSync(join(scratch, 'empty', 'profiles'), { recursive: true })
+  shadow('empty', '@deepseek-ai/dsh')
+  shadow('empty', '@deepseek-ai/dsh-session-projection')
+  shadow('empty', '@deepseek-ai/dsh-session')
   // Running-anchor trees: a supported release (the Desktop fix), a below-
   // baseline release (the gate must still trip from the running anchor), and
   // a resolving-but-unreadable library (the trusted witness with no answer).
@@ -138,6 +186,9 @@ beforeAll(() => {
   writeScratchHome('running-decoy', '@deepseek-ai/dsh-session',
     JSON.stringify({ name: '@deepseek-ai/dsh-decoy', version: '9.9.9', exports: { '.': './lib/index.js' } }),
     { path: 'lib/index.js' })
+  // The decoy home's witness must resolve to NOTHING trusted: shadow the
+  // other spelling too, or an ambient install would answer in its place.
+  shadow('running-decoy', '@deepseek-ai/dsh-session-projection')
 })
 
 afterAll(() => {
@@ -221,6 +272,12 @@ describe('detectHarnessVersion — home anchor', () => {
     assert.equal(detectHarnessVersion(ctxWithHome(scratchResolver('entry-badjson')), NO_RUNNING), '0.1.1-rc.5')
     assert.equal(detectHarnessVersion(ctxWithHome(scratchResolver('entry-null')), NO_RUNNING), '0.1.1-rc.6')
     assert.equal(detectHarnessVersion(ctxWithHome(scratchResolver('entry-primitive')), NO_RUNNING), '0.1.1-rc.7')
+  })
+
+  test('an entry the exports map names but the package does not ship → undefined', () => {
+    // The entry resolve fails AT the fixture level (the promised file is
+    // absent): no ascend, no answer, no NODE_PATH fall-through.
+    assert.equal(detectHarnessVersion(ctxWithHome(scratchResolver('entry-gone')), NO_RUNNING), undefined)
   })
 })
 

@@ -30,6 +30,17 @@ export interface SettingsScopeBinderFace {
   bind(spec: { namespace: string }): SettingsScopeLike
 }
 
+/**
+ * The ctx.configForms service face (the Config-form generation's settings
+ * transport), as consumed: forms bind per namespace, and `whileServed` keeps
+ * a registration alive while the Host serves any of them. The bound form
+ * satisfies {@link SettingsScopeLike} (same snapshot/subscribe/set shape).
+ */
+export interface ConfigFormsFace {
+  get(namespace: string): SettingsScopeLike
+  whileServed(namespaces: readonly string[], register: () => () => void): () => void
+}
+
 /** The preference snapshot the card renders and the view reads at mount. */
 export interface SettingsState {
   /** Scope sync: loading until the first Host section, unavailable when unserved. */

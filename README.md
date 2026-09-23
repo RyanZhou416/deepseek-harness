@@ -39,7 +39,7 @@ Four surfaces, one story — what your agent is carrying, how it got there, and 
 | **Context Dashboard** | Every session at a glance: usage, cost, cache hit, daily activity, and per-session context profiles — filtered by range, day, group, or search, one click to jump in. |
 | **Context tab** | The full dashboard: stats, composition, per-request trend, events, file activity, and the agent network — in every session. |
 | **`/context` command** | A centered modal with the same composition and context browser, without leaving the chat. |
-| **Settings → Plugin configuration** | Per-user defaults: trend granularity & mode, File Activity sort. |
+| **Preferences card** | Per-user defaults: view placement, trend granularity & mode, File Activity sort, and more. |
 
 ## 🗂️ The Context Dashboard
 
@@ -160,14 +160,19 @@ A centered dialog opens with the **Current Composition** card and the **Context 
 
 ## ⚙️ Settings
 
-In **Settings → Plugins → Plugin configuration**, the **Context** card holds this plugin's per-user preferences — default trend granularity (Step/Turn), default trend mode (Total/Delta), and the File Activity default sort. In-chart and in-card toggles stay per-view and never overwrite the stored preference.
+The **Context** preferences card holds this plugin's per-user settings — default placement, trend granularity (Step/Turn), trend mode (Total/Delta), tool and File Activity sort, and the sidebar insights entry. Where it lives depends on your dsh release:
+
+- **dsh 0.1.7+** — the sidebar **Plugins** entry → the **dsh-context** bundle's page → its **Configuration** section (the card is served by the entry's live Config form).
+- **older releases** — **Settings → Plugins → Plugin configuration** → the **Context** card.
+
+In-chart and in-card toggles stay per-view and never overwrite the stored preference.
 
 ![The Context settings card](https://raw.githubusercontent.com/bowenliang123/dsh-context/main/docs/settings.png)
 
 ## Good to know
 
 - **Estimates vs actuals** — category figures use dsh's own fixed-density heuristic (the same one as its built-in token meter); the pinned trend details show provider-reported actuals next to them, and the Token card pairs its ≈-estimated composition shares with the provider-exact billed total.
-- **Compatibility** — works on `@deepseek-ai/dsh` **0.1.2-rc1+**, across the V0 (0.1.2-rc.x), V2 (0.1.3-alpha.x), and V3 (0.1.5-alpha.x+) session-log generations. The per-release matrix and how it is verified: [docs/compatibility.md](docs/compatibility.md).
+- **Compatibility** — works on `@deepseek-ai/dsh` **0.1.2-rc1+**, across the V0 (0.1.2-rc.x), V2 (0.1.3-alpha.x), V3 (0.1.5-alpha.x+), and V4 (0.1.6/0.1.7+) session-log generations. The per-release matrix and how it is verified: [docs/compatibility.md](docs/compatibility.md).
 - **I18n** — UI in English and 简体中文.
 
 ## Like it?

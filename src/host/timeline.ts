@@ -150,10 +150,17 @@ const timingTotalsSchema = z.object({
   ttftMs: z.number().nonnegative(),
   genMs: z.number().nonnegative(),
   // Additive-optional (see TimingTotals): rows cached before the generation
-  // split carry `genMs` without these, and must keep parsing.
+  // split carry `genMs` without these, and must keep parsing. The block counts
+  // are additive-optional the same way (rows cached before they existed).
   reasoningMs: z.number().nonnegative().optional(),
+  reasoningBlocks: z.number().int().nonnegative().optional(),
   textMs: z.number().nonnegative().optional(),
+  textBlocks: z.number().int().nonnegative().optional(),
   toolArgMs: z.number().nonnegative().optional(),
+  toolArgBlocks: z.number().int().nonnegative().optional(),
+  // The throughput seat, additive-optional for the same reason.
+  speedTokens: z.number().nonnegative().optional(),
+  speedMs: z.number().nonnegative().optional(),
   calls: z.number().int().nonnegative(),
   toolsMs: z.number().nonnegative(),
   toolCalls: z.number().int().nonnegative(),
@@ -242,6 +249,7 @@ const timelineStateSchema = z.object({
   lastModel: z.string().optional(),
   contextWindow: z.number().optional(),
   requests: z.array(requestRecordSchema),
+  turnRuns: z.number().int().nonnegative().optional(),
   events: z.array(contextEventSchema),
   archived: z.array(surfaceNodeSchema),
   cost: costUsageSchema.optional(),
@@ -252,8 +260,10 @@ const timelineStateSchema = z.object({
   stepStart: z.object({
     time: z.number(),
     firstToken: z.number().optional(),
-    // The generation split's in-flight accumulator (see TimelineState.stepStart).
+    // The generation split's in-flight accumulator (see TimelineState.stepStart),
+    // with the opened blocks counted per bucket.
     decode: z.object({ reasoning: z.number(), text: z.number(), toolarg: z.number() }).strict().optional(),
+    blocks: z.object({ reasoning: z.number().int(), text: z.number().int(), toolarg: z.number().int() }).strict().optional(),
     block: z.object({ kind: z.enum(['reasoning', 'text', 'toolarg']), since: z.number() }).strict().optional(),
   }).strict().optional(),
   callNames: z.record(z.string(), z.object({ name: z.string(), start: z.number(), argsRaw: z.string().optional() }).strict()),

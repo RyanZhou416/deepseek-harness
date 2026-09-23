@@ -5,9 +5,10 @@
  * @opencode-ai/models. Book rates are USD per 1M tokens; the CNY display
  * converts at the fixed 1 CNY = 0.15 USD, and the total and the tooltip's
  * rates both go through `toCurrency`, so the printed figures can never
- * drift from the math that prices the session. DeepSeek's period-based list
- * prices off-peak at half: the Host already split those buckets (peak =
- * list price), so DeepSeek's `off` buckets simply price at half here —
+ * drift from the math that prices the session. DeepSeek bills a period-based
+ * list whose models.dev figures ARE the official off-peak rates: the Host
+ * already split those buckets at fold time, so DeepSeek's `peak` buckets
+ * price at twice the book rate here (the `off` buckets stay at book) —
  * never any other provider's.
  */
 
@@ -21,8 +22,8 @@ export type CostCurrency = 'usd' | 'cny'
 /** 1 CNY = 0.15 USD — the fixed CNY-display conversion rate. */
 const USD_PER_CNY = 0.15
 
-/** Off-peak DeepSeek rates are half the peak rates (the official list). */
-const OFF_PEAK_FACTOR = 0.5
+/** DeepSeek's peak rates are twice the off-peak rates (the official list). */
+const PEAK_FACTOR = 2
 
 /**
  * Per-1M-token rates (USD): cache-hit input, cache-miss input, cache
@@ -45,13 +46,13 @@ export function toCurrency(usd: number, currency: CostCurrency): number {
   return currency === 'cny' ? usd / USD_PER_CNY : usd
 }
 
-/** One rate triple at the half-price off-peak rate (the tooltip's `peak | off` pair). */
-export function offPeakOf(rate: PriceTriple): PriceTriple {
+/** One rate triple at the doubled peak rate (the tooltip's `peak | off` pair). */
+export function peakOf(rate: PriceTriple): PriceTriple {
   return {
-    hit: rate.hit * OFF_PEAK_FACTOR,
-    miss: rate.miss * OFF_PEAK_FACTOR,
-    write: rate.write * OFF_PEAK_FACTOR,
-    out: rate.out * OFF_PEAK_FACTOR,
+    hit: rate.hit * PEAK_FACTOR,
+    miss: rate.miss * PEAK_FACTOR,
+    write: rate.write * PEAK_FACTOR,
+    out: rate.out * PEAK_FACTOR,
   }
 }
 
@@ -108,8 +109,9 @@ export function priceOf(prices: ModelPrices | null | undefined, provider: string
 /**
  * Price the session's cumulative billed-token totals. Cache reads bill at
  * the hit rate, uncached input at the miss rate, cache writes at the write
- * rate, output (reasoning included) at the out rate; `off` buckets (the
- * Host splits DeepSeek's period-based list at fold time) price at half.
+ * rate, output (reasoning included) at the out rate; `peak` buckets price
+ * at twice the book rate for DeepSeek (the book lists that provider's
+ * off-peak rates — the Host splits the period-based list at fold time).
  * Null when nothing was priced (no usage folded, no book yet, or no model
  * the book prices), so the cell can show a dash.
  */
@@ -124,9 +126,10 @@ export function estimateSessionCost(
   for (const provider of Object.keys(usage)) {
     const models = asRecord(usage[provider])
     if (models === null) continue
-    // The half-price off-peak period is DeepSeek's alone (shared/providers):
-    // every other provider bills every bucket at list price.
-    const offPeak = isDeepSeekProvider(provider)
+    // The doubled peak period is DeepSeek's alone (shared/providers): the
+    // book lists its off-peak rates, so only the peak bucket multiplies —
+    // every other provider bills every bucket at book price.
+    const deepseek = isDeepSeekProvider(provider)
     for (const model of Object.keys(models)) {
       const rate = priceOf(prices, provider, model)
       const periods = asRecord(models[model])
@@ -136,7 +139,7 @@ export function estimateSessionCost(
         if (bucket === null) continue
         const price = (numOf(bucket.cacheRead) * rate.hit + numOf(bucket.uncached) * rate.miss
           + numOf(bucket.cacheWrite) * rate.write + numOf(bucket.output) * rate.out) / 1e6
-        total += offPeak && period === 'off' ? price * OFF_PEAK_FACTOR : price
+        total += deepseek && period === 'peak' ? price * PEAK_FACTOR : price
         any = true
       }
     }
