@@ -2,13 +2,15 @@
  * Fake host `connection` service for the RPC specs. The node half mounts its
  * endpoints as exact POST Fetch routes under `/api`
  * (`/api/subscriptions-auth.<endpoint>`); this fake records those routes and
- * exposes a ConnectionRpcHandler-shaped caller that drives them the way the
+ * exposes a three-argument caller that drives them the way the
  * browser does — `client-request` envelope in, `server-response` envelope
  * out — so the specs keep asserting on plain RpcResult values.
  */
 
-import type { ConnectionRpcHandler } from '@deepseek-ai/dsh-client-connection'
 import type { RpcResult } from '../src/compat.js'
+
+/** Three-argument caller for this plugin's exact Fetch routes. */
+export type FakeRpcHandler = (endpoint: string, payload: unknown, signal: AbortSignal) => Promise<RpcResult<unknown>>
 
 interface FakeRoute {
   path: string
@@ -22,7 +24,7 @@ export interface FakeConnection {
   /** Whether the plugin registered at least one `subscriptions-auth` route. */
   registered: () => boolean
   /** Call one endpoint through its registered route and unwrap the RPC result. */
-  handler: ConnectionRpcHandler
+  handler: FakeRpcHandler
 }
 
 /** Build a fresh fake connection; one per mounted plugin. */
@@ -37,7 +39,7 @@ export function createFakeConnection(): FakeConnection {
       },
     },
   }
-  const handler: ConnectionRpcHandler = async (endpoint, payload, signal) => {
+  const handler: FakeRpcHandler = async (endpoint, payload, signal) => {
     const method = `subscriptions-auth.${endpoint}`
     const path = `/api/${method}`
     const route = routes.get(path)

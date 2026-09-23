@@ -620,7 +620,7 @@ export interface GrokAdapterOptions {
   discovery: boolean
   /** Warning sink for discovery failures that fall back to the static catalog. */
   onWarn?: (message: string) => void
-  /** Fetch implementation for discovery (defaults to global fetch). */
+  /** Fetch implementation for discovery and streaming requests; defaults to the configured proxy route. */
   fetchFn?: FetchFn
   /** Resolve the attachment service per request; absent means image requests fail loudly. */
   resolveAttachments?: () => AttachmentStore | undefined
@@ -862,7 +862,7 @@ export class GrokAdapter extends LlmAdapter {
   private async request(options: GenerateOptions, session: GrokSession, signal: AbortSignal): Promise<Response> {
     const messages = await resolveImages(options.messages, this.options.resolveAttachments?.(), signal)
     const body = grokRequestBody(options, toResponsesInput(messages, options.system))
-    return proxiedFetch(GROK_API_URL, {
+    return (this.options.fetchFn ?? proxiedFetch)(GROK_API_URL, {
       method: 'POST',
       headers: {
         'authorization': `Bearer ${session.accessToken}`,

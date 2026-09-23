@@ -12,7 +12,7 @@ import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
-import type { ConnectionRpcHandler } from '@deepseek-ai/dsh-client-connection'
+import type { FakeRpcHandler } from './fake-connection.js'
 import type { RpcResult } from '../src/compat.js'
 import { createFakeConnection } from './fake-connection.js'
 
@@ -26,7 +26,7 @@ interface FakeStore {
 }
 
 /** Mount the plugin with fake llm/connection (and optional attachments); return the RPC handler. */
-async function mount(attachments?: FakeStore): Promise<ConnectionRpcHandler> {
+async function mount(attachments?: FakeStore): Promise<FakeRpcHandler> {
   const ctx = new Context()
   ctx.provide('llm', { registerAdapter: () => Object.assign(() => {}, { replace: () => {} }) })
   const fake = createFakeConnection()
@@ -41,7 +41,7 @@ async function mount(attachments?: FakeStore): Promise<ConnectionRpcHandler> {
 const REF = { attachmentId: 'att-1', mediaType: 'image/png', bytes: 2, width: 1, height: 1 }
 
 async function call(
-  handler: ConnectionRpcHandler,
+  handler: FakeRpcHandler,
   payload: unknown,
 ): Promise<RpcResult<unknown>> {
   return handler('image', payload, new AbortController().signal)

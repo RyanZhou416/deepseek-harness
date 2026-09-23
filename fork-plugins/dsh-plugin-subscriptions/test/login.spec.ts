@@ -18,7 +18,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
-import type { ConnectionRpcHandler } from '@deepseek-ai/dsh-client-connection'
+import type { FakeRpcHandler } from './fake-connection.js'
 import type { RpcResult } from '../src/compat.js'
 import { createFakeConnection } from './fake-connection.js'
 
@@ -496,7 +496,7 @@ test('claude: an import and a logout fired together settle in call order', async
 // ---------------------------------------------------------------------------
 
 /** Mount the plugin with a fake llm/connection host; return the RPC handler. */
-async function mountPlugin(): Promise<ConnectionRpcHandler> {
+async function mountPlugin(): Promise<FakeRpcHandler> {
   const ctx = new Context()
   ctx.provide('llm', { registerAdapter: () => Object.assign(() => {}, { replace: () => {} }) })
   const fake = createFakeConnection()

@@ -26,7 +26,7 @@ import type { CSSProperties } from 'react'
 import { createPortal } from 'react-dom'
 import type { PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import type { ConnectionHandle } from '@deepseek-ai/dsh-api-remotes/client'
-import { IconDataOutline16, useAnchoredPosition, useDismissOnOutsidePointer } from '@deepseek-ai/dsh-client-ui-primitives'
+import { IconDataOutlineRegular, useAnchoredPosition, useDismissOnOutsidePointer } from '@deepseek-ai/dsh-client-ui-primitives'
 import { callSubscriptionsAuth, usageBarColor } from './SubscriptionsSection.js'
 import type { AccountStatus, ProviderStatus, ProviderUsage, SubscriptionProvider, UsageWindow } from './SubscriptionsSection.js'
 import type { ModelDirectoriesLike } from './SpeedSelect.js'
@@ -420,7 +420,7 @@ export function SubscriptionUsageBadge({ rpc, currentModel, t }: SubscriptionUsa
         onMouseLeave={() => { setHover(false) }}
         onClick={toggle}
       >
-        <IconDataOutline16 />
+        <IconDataOutlineRegular />
         <span style={styles.label}>{label}</span>
       </button>
       {open && createPortal(
@@ -432,7 +432,7 @@ export function SubscriptionUsageBadge({ rpc, currentModel, t }: SubscriptionUsa
         >
           <div style={styles.title}>
             <span style={styles.titleLabel}>
-              <IconDataOutline16 />
+              <IconDataOutlineRegular />
               {title}
             </span>
           </div>

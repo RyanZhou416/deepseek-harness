@@ -8,7 +8,7 @@
  */
 
 import type { Context } from '@deepseek-ai/cordis'
-import type { ConnectionRpcHandler, HostConnectionHandle } from '@deepseek-ai/dsh-client-connection'
+import type { HostConnectionHandle } from '@deepseek-ai/dsh-client-connection'
 import type { RpcResult } from '../compat.js'
 import { AttachmentId } from '@deepseek-ai/dsh-attachment'
 import type { ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
@@ -130,7 +130,16 @@ export interface ModelDefaultsCatalog {
   models: ModelDefaultView[]
 }
 
-/** Default-effort picker operations behind the `modelDefaults/setModelDefault` endpoints. */
+/** Per-account catalog returned by providerSettings, including providers without usage APIs. */
+export interface ProviderAccountCatalog {
+  key: string
+  /** Original identity; the editable alias lives in settings.accounts[key].alias. */
+  label: string
+  models: { id: string; name: string }[]
+  unavailable?: boolean
+}
+
+/** Provider and account preference operations behind providerSettings/setProviderSettings. */
 export interface ProviderSettingsController {
   get(provider: ProviderId, force: boolean): Promise<unknown>
   set(provider: ProviderId, settings: unknown): Promise<void>
@@ -216,6 +225,7 @@ interface FetchRouteCompat {
 }
 
 type FetchRegisterCompat = (route: FetchRouteCompat) => () => Promise<void>
+type FetchRpcHandler = (endpoint: string, payload: unknown, signal: AbortSignal) => Promise<RpcResult<unknown>>
 
 /** Connection `client-request` envelope, as the browser rpc caller sends it. */
 interface ClientRequestEnvelope {
@@ -244,7 +254,7 @@ function serverResponse(rpcId: string, result: RpcResult<unknown>): Response {
  * `rpc.call('/api', 'subscriptions-auth.<endpoint>', payload)` keeps working
  * unchanged on the browser side.
  */
-function fetchRouteFor(endpoint: string, handler: ConnectionRpcHandler): FetchRouteCompat {
+function fetchRouteFor(endpoint: string, handler: FetchRpcHandler): FetchRouteCompat {
   const method = `${SUBSCRIPTIONS_AUTH_PREFIX}${endpoint}`
   return {
     path: `/api/${method}`,
@@ -614,7 +624,7 @@ export function registerAuthRpc(
   // routes below it work on both dsh lines.
   ctx.inject(['connection'], (ctx) => {
     const connection = ctx.get('connection') as HostConnectionHandle
-    const handler: ConnectionRpcHandler = async (endpoint, payload, signal) => {
+    const handler: FetchRpcHandler = async (endpoint, payload, signal) => {
       try {
         return await dispatch(controller, speed, proxy, modelDefaults, endpoint, payload, signal, providerSettings)
       } catch (error) {

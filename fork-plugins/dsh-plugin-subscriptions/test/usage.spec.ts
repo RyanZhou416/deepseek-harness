@@ -11,8 +11,8 @@ import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
-import type { ConnectionRpcHandler } from '@deepseek-ai/dsh-client-connection'
 import { createFakeConnection } from './fake-connection.js'
+import type { FakeRpcHandler } from './fake-connection.js'
 
 process.env.DSH_HOME ??= mkdtempSync(join(tmpdir(), 'router-usage-test-'))
 
@@ -292,7 +292,7 @@ test('fetchGrokUsage extracts reset window when creditUsagePercent is absent but
 })
 
 /** Mount the plugin with fake llm/connection; return the RPC handler. */
-async function mount(): Promise<ConnectionRpcHandler> {
+async function mount(): Promise<FakeRpcHandler> {
   const ctx = new Context()
   ctx.provide('llm', { registerAdapter: () => Object.assign(() => {}, { replace: () => {} }) })
   const fake = createFakeConnection()

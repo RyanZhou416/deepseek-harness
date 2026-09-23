@@ -7,9 +7,9 @@
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { LlmError, MessageId } from '@deepseek-ai/dsh-llm'
+import { LlmError } from '@deepseek-ai/dsh-llm'
 import { ToolCallId } from '../src/compat.js'
-import type { ContentBlock, Message, MessageSource, StreamChunk } from '@deepseek-ai/dsh-llm'
+import type { MessageSource, StreamChunk } from '@deepseek-ai/dsh-llm'
 import {
   ChatCompletionsStreamTranslator,
   mapChatCompletionsUsage,
@@ -18,27 +18,25 @@ import {
   toChatTools,
 } from '../src/translate/chat-completions.js'
 import type { ChatCompletionsStreamEvent } from '../src/translate/chat-completions.js'
-import type { TranslatableMessage } from '../src/translate/resolved.js'
-
-let messageCounter = 0
+import type { TranslatableBlock, TranslatableMessage } from '../src/translate/resolved.js'
 
 /** Build a bare message without touching the frozen constructors. */
 function message(
-  role: Message['role'],
-  content: ContentBlock[],
+  role: TranslatableMessage['role'],
+  content: TranslatableBlock[],
   source?: MessageSource,
-): Message {
+): TranslatableMessage {
   const resolvedSource = source ?? (role === 'assistant'
     ? { kind: 'model' as const, provider: 'copilot', model: 'gpt-4.1' }
     : { kind: 'user' as const })
-  return { id: MessageId(`m-${++messageCounter}`), role, content, source: resolvedSource }
+  return { role, content, source: resolvedSource }
 }
 
-function toolCall(id: string, name: string, args: string): ContentBlock {
+function toolCall(id: string, name: string, args: string): TranslatableBlock {
   return { type: 'tool-call', id: ToolCallId(id), name, arguments: args }
 }
 
-function toolResult(callId: string, text: string): ContentBlock {
+function toolResult(callId: string, text: string): TranslatableBlock {
   return {
     type: 'tool-result',
     toolCallId: ToolCallId(callId),

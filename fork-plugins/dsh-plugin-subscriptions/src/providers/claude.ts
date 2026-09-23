@@ -62,6 +62,7 @@ export const CLAUDE_PROFILE_URL = 'https://api.anthropic.com/api/oauth/profile'
 export const CLAUDE_MODELS_URL = 'https://api.anthropic.com/v1/models?beta=true'
 export const CLAUDE_SCOPE = 'org:create_api_key user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload'
 export const CLAUDE_CALLBACK_PATH = '/callback'
+// Fallbacks only when discovery is unavailable or the model omits its limits.
 const CLAUDE_CONTEXT_WINDOW = 200_000
 const CLAUDE_DEFAULT_MAX_TOKENS = 32_000
 /** Refresh when the access token has less than this much life left. */
@@ -433,6 +434,22 @@ function claudeReasoning(capabilities: ClaudeModelCapabilities | undefined): Dis
   return efforts.length > 0 ? { efforts } : undefined
 }
 
+/** One entry of the `/v1/models` response; only the fields the plugin reads. */
+interface ClaudeWireModel {
+  id?: string
+  display_name?: string
+  capabilities?: ClaudeModelCapabilities
+  /** Advertised input context size in tokens. */
+  max_input_tokens?: number
+  /** Advertised per-request output ceiling in tokens. */
+  max_tokens?: number
+}
+
+/** A token limit the endpoint disclosed, or undefined when absent or malformed. */
+function positiveTokenCount(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value > 0 ? value : undefined
+}
+
 /** Fetch the live model catalog from the subscription endpoint. `signal` cancels the request. */
 export async function fetchClaudeModels(
   session: ClaudeSession,
@@ -450,20 +467,24 @@ export async function fetchClaudeModels(
     ...signal === undefined ? {} : { signal },
   })
   if (!response.ok) throw await httpLlmError(response, 'claude models API')
-  const payload = await response.json() as {
-    data?: Array<{ id?: string; display_name?: string; capabilities?: ClaudeModelCapabilities }>
-  }
+  const payload = await response.json() as { data?: ClaudeWireModel[] }
   if (!Array.isArray(payload.data)) {
     throw new Error('claude models API returned an invalid catalog')
   }
   const models: DiscoveredModel[] = payload.data
-    .filter((m): m is { id: string; display_name?: string; capabilities?: ClaudeModelCapabilities } => typeof m.id === 'string')
+    .filter((m): m is ClaudeWireModel & { id: string } => typeof m.id === 'string')
     .map((m) => {
       const thinkingType = claudeThinkingType(m.capabilities)
       const reasoning = claudeReasoning(m.capabilities)
+      // The endpoint advertises each model's limits; carrying them through keeps
+      // the route current for models newer than the bundled catalog (#101).
+      const contextWindow = positiveTokenCount(m.max_input_tokens)
+      const maxOutputTokens = positiveTokenCount(m.max_tokens)
       return {
         id: m.id,
         name: m.display_name ?? m.id,
+        ...contextWindow === undefined ? {} : { contextWindow },
+        ...maxOutputTokens === undefined ? {} : { maxOutputTokens },
         ...thinkingType === undefined ? {} : { thinkingType },
         ...reasoning === undefined ? {} : { reasoning },
       }
@@ -472,6 +493,16 @@ export async function fetchClaudeModels(
     throw new Error('claude models API returned an empty catalog')
   }
   return models
+}
+
+/**
+ * The output cap for one model: configuration may lower the default, but never
+ * exceeds a server-advertised ceiling; the built-in constant is the last resort.
+ */
+function claudeMaxTokens(configured: ModelEntry | undefined, disc: DiscoveredModel | undefined): number {
+  const outputLimit = disc?.maxOutputTokens
+  const preferred = configured?.maxTokens ?? outputLimit ?? CLAUDE_DEFAULT_MAX_TOKENS
+  return outputLimit === undefined ? preferred : Math.min(preferred, outputLimit)
 }
 
 /** Constructor dependencies for {@link ClaudeAdapter}. */
@@ -687,7 +718,7 @@ export class ClaudeAdapter extends LlmAdapter {
       context: {
         contextWindow: disc?.contextWindow ?? configured?.contextWindow ?? CLAUDE_CONTEXT_WINDOW,
       },
-      defaultMaxTokens: configured?.maxTokens ?? CLAUDE_DEFAULT_MAX_TOKENS,
+      defaultMaxTokens: claudeMaxTokens(configured, disc),
       ...(reasoning === undefined ? {} : { reasoning }),
     }
   }
@@ -751,10 +782,9 @@ export class ClaudeAdapter extends LlmAdapter {
 
   private async request(options: GenerateOptions, session: ClaudeSession, signal: AbortSignal): Promise<Response> {
     const messages = await resolveImages(options.messages, this.options.resolveAttachments?.(), signal)
-    const maxTokens = options.maxTokens
-      ?? this.options.models.find(entry => entry.id === options.model)?.maxTokens
-      ?? CLAUDE_DEFAULT_MAX_TOKENS
     const disc = await this.discovered(options.model)
+    const maxTokens = options.maxTokens
+      ?? claudeMaxTokens(this.options.models.find(entry => entry.id === options.model), disc)
     const thinking = this.thinkingParam(disc?.thinkingType, maxTokens)
     const effort = options.reasoningEffort !== undefined && disc?.reasoning !== undefined
       ? String(options.reasoningEffort)

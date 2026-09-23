@@ -115,7 +115,7 @@ test('codex: tool controls and orphan-call repair coexist for every tools shape'
 })
 
 for (const provider of ['codex', 'grok'] as const) {
-  test(`${provider}: stream dispatches all three tool shapes and preserves non-tool fields`, async (t) => {
+  test(`${provider}: stream dispatches all three tool shapes and preserves non-tool fields`, async () => {
     const session = {
       accessToken: 'synthetic-access', refreshToken: 'synthetic-refresh',
       expiresAt: Date.now() + 3_600_000, accountId: 'synthetic-account',
@@ -129,13 +129,13 @@ for (const provider of ['codex', 'grok'] as const) {
         save: async () => {}, remove: async () => {},
       },
     })
-    const settings = { models: [{ id: 'test-model', name: 'Test' }], tokens, discovery: false, streamIdleTimeoutMs: 1000 }
-    const adapter = provider === 'codex' ? new CodexAdapter(settings) : new GrokAdapter(settings)
     const requests: { url: string; body: Record<string, unknown> }[] = []
-    t.mock.method(globalThis, 'fetch', async (url: RequestInfo | URL, init?: RequestInit) => {
+    const fetchFn = async (url: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
       requests.push({ url: String(url), body: JSON.parse(String(init?.body)) as Record<string, unknown> })
       return new Response('data: {"type":"response.completed","response":{"usage":{"input_tokens":1,"output_tokens":1}}}\n\ndata: [DONE]\n\n')
-    })
+    }
+    const settings = { models: [{ id: 'test-model', name: 'Test' }], tokens, discovery: false, streamIdleTimeoutMs: 1000, fetchFn }
+    const adapter = provider === 'codex' ? new CodexAdapter(settings) : new GrokAdapter(settings)
     for (const tools of [undefined, [], [TOOL]]) {
       const request: GenerateOptions = {
         ...options(tools), provider, model: 'test-model', maxTokens: 32,

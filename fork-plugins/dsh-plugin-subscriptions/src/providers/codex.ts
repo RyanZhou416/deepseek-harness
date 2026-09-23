@@ -523,7 +523,7 @@ export interface CodexAdapterOptions {
   discovery: boolean
   /** Warning sink for discovery failures that fall back to the static catalog. */
   onWarn?: (message: string) => void
-  /** Fetch implementation for discovery (defaults to global fetch). */
+  /** Fetch implementation for discovery and streaming requests; defaults to the configured proxy route. */
   fetchFn?: FetchFn
   /** Resolve the attachment service per request; absent means image requests fail loudly. */
   resolveAttachments?: () => AttachmentStore | undefined
@@ -813,8 +813,8 @@ export class CodexAdapter extends LlmAdapter {
   }
 
   /** Whether the discovered catalog advertises a fast tier for this model. */
-  async supportsFastTier(model: string): Promise<boolean> {
-    return (await this.discovered(model))?.fastTier === true
+  async supportsFastTier(model: string, account?: string): Promise<boolean> {
+    return (await this.discovered(model, account))?.fastTier === true
   }
 
   /** Ids of every discovered model with a fast tier (the Speed toggle's visibility list). */
@@ -938,7 +938,7 @@ export class CodexAdapter extends LlmAdapter {
     const fast = this.options.speedFor !== undefined
       && await this.options.speedFor(options.sessionId, options.model)
     const body = codexRequestBody(options, toResponsesInput(messages, options.system), fast)
-    return proxiedFetch(CODEX_API_URL, {
+    return (this.options.fetchFn ?? proxiedFetch)(CODEX_API_URL, {
       method: 'POST',
       headers: {
         'authorization': `Bearer ${session.accessToken}`,

@@ -6,9 +6,9 @@
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { LlmError, MessageId } from '@deepseek-ai/dsh-llm'
+import { LlmError, createAssistantMessage, createDeveloperMessage, createToolResultMessage } from '@deepseek-ai/dsh-llm'
 import { ToolCallId } from '../src/compat.js'
-import type { ContentBlock, Message, MessageSource, StreamChunk } from '@deepseek-ai/dsh-llm'
+import type { MessageSource, RequestMessage, StreamChunk } from '@deepseek-ai/dsh-llm'
 import {
   ResponsesStreamTranslator,
   toResponsesInput,
@@ -24,28 +24,26 @@ import {
   toAnthropicTools,
 } from '../src/translate/anthropic.js'
 import type { AnthropicMessage, AnthropicStreamEvent } from '../src/translate/anthropic.js'
-import { resolveImages, type TranslatableMessage } from '../src/translate/resolved.js'
+import { resolveImages, type TranslatableBlock, type TranslatableMessage } from '../src/translate/resolved.js'
 import { toChatMessages } from '../src/translate/chat-completions.js'
-
-let messageCounter = 0
 
 /** Build a bare message without touching the frozen constructors. */
 function message(
-  role: Message['role'],
-  content: ContentBlock[],
+  role: TranslatableMessage['role'],
+  content: TranslatableBlock[],
   source?: MessageSource,
-): Message {
+): TranslatableMessage {
   const resolvedSource = source ?? (role === 'assistant'
     ? { kind: 'model' as const, provider: 'codex', model: 'gpt-5.1-codex' }
     : { kind: 'user' as const })
-  return { id: MessageId(`m-${++messageCounter}`), role, content, source: resolvedSource }
+  return { role, content, source: resolvedSource }
 }
 
-function toolCall(id: string, name: string, args: string): ContentBlock {
+function toolCall(id: string, name: string, args: string): TranslatableBlock {
   return { type: 'tool-call', id: ToolCallId(id), name, arguments: args }
 }
 
-function toolResult(callId: string, text: string, isError?: boolean): ContentBlock {
+function toolResult(callId: string, text: string, isError?: boolean): TranslatableBlock {
   return {
     type: 'tool-result',
     toolCallId: ToolCallId(callId),
@@ -180,13 +178,14 @@ test('toResponsesInput: resolved image parts become input_image data URLs', () =
 })
 
 test('resolveImages: passthrough, loud failure without attachments, and resolution', async () => {
-  const plain = [message('user', [{ type: 'text', text: 'hi' }])]
-  assert.equal(await resolveImages(plain, undefined), plain, 'no images → same array, no service needed')
+  const plain: RequestMessage[] = [{ role: 'user', content: [{ type: 'text', text: 'hi' }] }]
+  const unchanged = await resolveImages(plain, undefined)
+  assert.equal(unchanged[0], plain[0], 'no images preserve ordinary message identity')
 
-  const withImage = [message('user', [{
+  const withImage: RequestMessage[] = [{ role: 'user', content: [{
     type: 'image',
     attachment: { attachmentId: 'a1', mediaType: 'image/png', bytes: 3, width: 1, height: 1 },
-  } as never])]
+  } as never] }]
   await assert.rejects(
     () => resolveImages(withImage, undefined),
     (error: unknown) => error instanceof LlmError && error.code === 'UNSUPPORTED',
@@ -201,21 +200,46 @@ test('resolveImages: passthrough, loud failure without attachments, and resoluti
   assert.match((resolved[0].content[1] as { text: string }).text, /"attachmentId":"a1"/)
 })
 
+test('V4 tool messages keep their call identity, error flag and request-only user input', async () => {
+  const callId = ToolCallId('v4-call')
+  const input: RequestMessage[] = [
+    { role: 'user', content: [{ type: 'text', text: 'start' }] },
+    createToolResultMessage({ callId, isError: true, content: [{ type: 'text', text: 'failed' }] }),
+  ]
+  const resolved = await resolveImages(input, undefined)
+  assert.equal(resolved[0], input[0])
+  assert.deepEqual(resolved[1], {
+    role: 'user', source: { kind: 'tool', callId },
+    content: [{ type: 'tool-result', toolCallId: callId, isError: true, content: [{ type: 'text', text: 'failed' }] }],
+  })
+  assert.deepEqual(toChatMessages(resolved), [
+    { role: 'user', content: 'start' },
+    { role: 'tool', tool_call_id: 'v4-call', content: 'failed' },
+  ])
+  await assert.rejects(
+    () => resolveImages([createDeveloperMessage({ content: [{ type: 'text', text: 'new tool' }], source: { kind: 'user' } })], undefined),
+    (error: unknown) => error instanceof LlmError && error.code === 'UNSUPPORTED_CONTENT',
+  )
+})
+
 test('tool-result images: resolve attachments and retain parallel results before image follow-up', async () => {
   const ref = { attachmentId: 'tool-image', mediaType: 'image/png', bytes: 2, width: 1, height: 1 }
   const messages = [
-    message('assistant', ['a', 'b'].map(id => ({ type: 'tool-call', id: ToolCallId(id), name: 'read_image', arguments: '{}' }))),
-    ...['a', 'b'].map(id => message('user', [{
-      type: 'tool-result', toolCallId: ToolCallId(id), isError: false,
+    createAssistantMessage({
+      content: ['a', 'b'].map(id => ({ type: 'tool-call', id: ToolCallId(id), name: 'read_image', arguments: '{}' })),
+      source: { provider: 'codex', model: 'test' },
+    }),
+    ...['a', 'b'].map(id => createToolResultMessage({
+      callId: ToolCallId(id), isError: false,
       content: [{ type: 'text', text: id }, { type: 'image', attachment: ref } as never],
-    }])),
+    })),
   ]
   const before = structuredClone(messages)
   const signal = new AbortController().signal
   let reads = 0
   const resolved = await resolveImages(messages, {
     readImage: async (attachment: unknown, actualSignal: unknown) => {
-      assert.equal(attachment, ref)
+      assert.deepEqual(attachment, ref)
       assert.equal(actualSignal, signal)
       reads++
       return { ref, data: new Uint8Array([104, 105]) }

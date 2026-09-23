@@ -31,7 +31,7 @@ test('missing and empty session IDs receive independent random UUIDs', () => {
 })
 
 for (const provider of ['codex', 'grok'] as const) {
-  test(`${provider}: dispatch preserves the intended session and cache-key behavior`, async (t) => {
+  test(`${provider}: dispatch preserves the intended session and cache-key behavior`, async () => {
     const session = {
       accessToken: 'synthetic-access', refreshToken: 'synthetic-refresh',
       expiresAt: Date.now() + 3_600_000, accountId: 'synthetic-account',
@@ -45,13 +45,13 @@ for (const provider of ['codex', 'grok'] as const) {
         save: async () => {}, remove: async () => {},
       },
     })
-    const settings = { models: [{ id: 'test-model', name: 'Test' }], tokens, discovery: false, streamIdleTimeoutMs: 1000 }
-    const adapter = provider === 'codex' ? new CodexAdapter(settings) : new GrokAdapter(settings)
     const calls: { url: string; headers: Headers; body: Record<string, unknown> }[] = []
-    t.mock.method(globalThis, 'fetch', async (url: RequestInfo | URL, init?: RequestInit) => {
+    const fetchFn = async (url: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
       calls.push({ url: String(url), headers: new Headers(init?.headers), body: JSON.parse(String(init?.body)) as Record<string, unknown> })
       return new Response('data: {"type":"response.completed","response":{"usage":{"input_tokens":1,"output_tokens":1}}}\n\ndata: [DONE]\n\n')
-    })
+    }
+    const settings = { models: [{ id: 'test-model', name: 'Test' }], tokens, discovery: false, streamIdleTimeoutMs: 1000, fetchFn }
+    const adapter = provider === 'codex' ? new CodexAdapter(settings) : new GrokAdapter(settings)
     const ids = ['session-a', 'session-a', 'session-b', undefined, undefined, '', '']
     for (const id of ids) {
       const options: GenerateOptions = {

@@ -681,8 +681,9 @@ function toolRoundTripHistory(callId = 'call_A'): GenerateOptions['messages'] {
     },
     {
       id: MessageId('m-b'),
-      role: 'user',
-      content: [{ type: 'tool-result', toolCallId: ToolCallId(callId), content: [{ type: 'text', text: 'file-a' }] }],
+      role: 'tool',
+      toolCallId: ToolCallId(callId),
+      content: [{ type: 'text', text: 'file-a' }],
       source: { kind: 'tool', callId: ToolCallId(callId) },
     },
   ]
@@ -703,8 +704,9 @@ function twoRoundHistory(): GenerateOptions['messages'] {
     },
     {
       id: MessageId('m-d'),
-      role: 'user',
-      content: [{ type: 'tool-result', toolCallId: ToolCallId('call_B'), content: [{ type: 'text', text: 'match' }] }],
+      role: 'tool',
+      toolCallId: ToolCallId('call_B'),
+      content: [{ type: 'text', text: 'match' }],
       source: { kind: 'tool', callId: ToolCallId('call_B') },
     },
   ]

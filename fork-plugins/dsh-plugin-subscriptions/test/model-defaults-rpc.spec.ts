@@ -13,9 +13,11 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
 import { ReasoningEffortId } from '@deepseek-ai/dsh-llm'
-import type { ConnectionRpcHandler } from '@deepseek-ai/dsh-client-connection'
+import type { FakeRpcHandler } from './fake-connection.js'
 import type { RpcResult } from '../src/compat.js'
 import { createFakeConnection } from './fake-connection.js'
+import { CodexAdapter } from '../src/providers/codex.js'
+const clearCodexCatalog = CodexAdapter.prototype.clearAccountCatalog
 
 const HOME = mkdtempSync(join(tmpdir(), 'model-defaults-rpc-test-'))
 
@@ -37,12 +39,13 @@ interface FakeLlm {
  * of them. Each mount also resets the store and deletes the file, so the cases
  * below are independent — they used to pass only in their written order.
  */
-async function mount(options: { tier?: string } = {}): Promise<{ handler: ConnectionRpcHandler; fake: FakeLlm }> {
+async function mount(options: { tier?: string } = {}): Promise<{ handler: FakeRpcHandler; fake: FakeLlm }> {
   process.env.DSH_HOME = HOME
   assert.ok(modelDefaultsFilePath().startsWith(HOME), 'the store resolves inside this spec\'s temp home')
   await resetModelDefaultsForTests()
   rmSync(modelDefaultsFilePath(), { force: true })
   const fake: FakeLlm = { registered: [], replaced: [], catalogClears: 0 }
+  CodexAdapter.prototype.clearAccountCatalog = function (account?: string) { fake.catalogClears++; clearCodexCatalog.call(this, account) }
   const ctx = new Context()
   const listed = [{ id: 'gpt-5.6-sol', name: 'GPT-5.6-Sol' }]
   // A configured tier appears in the picker catalog the same way the pool
@@ -63,9 +66,7 @@ async function mount(options: { tier?: string } = {}): Promise<{ handler: Connec
         defaultEffort: ReasoningEffortId('low'),
       },
     }),
-    registerAdapter: (providers: string[], adapter: { clearAccountCatalog(): void }) => {
-      const clear = adapter.clearAccountCatalog.bind(adapter)
-      adapter.clearAccountCatalog = () => { fake.catalogClears++; clear() }
+    registerAdapter: (providers: string[]) => {
       fake.registered.push(...providers)
       return Object.assign(() => {}, {
         replace: (next: string[]) => { fake.replaced.push(...next) },
@@ -87,7 +88,7 @@ async function mount(options: { tier?: string } = {}): Promise<{ handler: Connec
 }
 
 async function call(
-  handler: ConnectionRpcHandler,
+  handler: FakeRpcHandler,
   endpoint: string,
   payload: unknown,
 ): Promise<RpcResult<unknown>> {

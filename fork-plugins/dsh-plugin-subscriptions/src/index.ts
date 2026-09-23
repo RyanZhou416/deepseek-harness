@@ -18,6 +18,8 @@ import type {
 } from '@deepseek-ai/dsh-llm'
 // Type-only: activates the `ctx.tools` Context merge for the inject block.
 import type {} from '@deepseek-ai/dsh-tools'
+// Type-only: activates the `ctx.web` Context merge for optional registration.
+import type {} from '@deepseek-ai/dsh-web'
 import type { AttachmentStore, ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
 import { OAuthFlowManager, type OAuthAttempt } from './auth/oauth-flow.js'
 import { DeviceFlowManager, type DeviceAttempt } from './auth/device-flow.js'
@@ -67,7 +69,10 @@ import { DEFAULT_RATE_LIMIT_MAX_WAIT_MS, resolveRateLimitWait } from './provider
 import type { RateLimitConfig } from './providers/rate-limit.js'
 import { catalogStore } from './providers/catalog-store.js'
 import { CodexClientVersionCache } from './providers/codex-client-version.js'
+import { CodexWebSearchProvider } from './providers/codex-search.js'
 import { PoolAdapter } from './providers/pool.js'
+import { AccountPreferencesAdapter, accountAllowsPool, accountModelId, parseAccountModelId } from './providers/account-preferences.js'
+export type { AccountPreferences, ProviderPreferences } from './provider-settings.js'
 import { ImageAccountPool } from './providers/image-pool.js'
 import { registerWithAlias } from './tools/registration.js'
 import { buildAccountPools, poolKey } from './providers/pool-family.js'
@@ -124,7 +129,7 @@ import type { AntigravityRuntimeConfig } from './providers/antigravity.js'
 import { createXSearchTool } from './tools/x-search.js'
 import { createImageGenerateTool } from './tools/image-generate.js'
 import { createVideoGenerateTool, videosDirectory } from './tools/video-generate.js'
-import { proxiedFetch, proxyGetConfig, proxySetConfig, proxyTestConnection } from './http.js'
+import { ensureConnectAttemptTimeout, proxiedFetch, proxyGetConfig, proxySetConfig, proxyTestConnection, restoreConnectAttemptTimeout } from './http.js'
 import { ProviderSettingsStore, PROVIDER_TOOLS, validatePreferences } from './provider-settings.js'
 
 export type { ModelEntry, ProviderUsage, UsageWindow } from './providers/common.js'
@@ -243,6 +248,7 @@ const DEFAULT_MODELS: Record<ProviderId, ModelEntry[]> = {
     { id: 'gpt-5.1', name: 'GPT-5.1' },
   ],
   claude: [
+    { id: 'claude-opus-5-5', name: 'Claude Opus 5.5', maxTokens: 128_000, contextWindow: 1_000_000 },
     { id: 'claude-opus-5', name: 'Claude Opus 5', maxTokens: 128_000, contextWindow: 1_000_000 },
     { id: 'claude-sonnet-5', name: 'Claude Sonnet 5', maxTokens: 128_000, contextWindow: 1_000_000 },
     { id: 'claude-fable-5', name: 'Claude Fable 5', maxTokens: 128_000, contextWindow: 1_000_000 },
@@ -615,6 +621,11 @@ export class SubscriptionsAuthController implements AuthController {
 }
 
 export function apply(ctx: Context, config: Config): void {
+  // Outbound requests (catalog discovery, the npm version lookup, token
+  // refresh) must survive links where one TCP handshake exceeds Node's 250ms
+  // Happy Eyeballs attempt budget; see MIN_CONNECT_ATTEMPT_TIMEOUT_MS.
+  const previousAttemptTimeout = ensureConnectAttemptTimeout()
+  ctx.effect(() => () => { restoreConnectAttemptTimeout(previousAttemptTimeout) }, 'dsh-plugin-subscriptions: connect attempt timeout')
   const preferences = new ProviderSettingsStore()
   const codexVersion = new CodexClientVersionCache()
   const providers = [...new Set(config.providers ?? [...PROVIDER_IDS])]
@@ -693,6 +704,15 @@ export function apply(ctx: Context, config: Config): void {
   // Dropped on every copilot auth transition so replay state (captured
   // reasoning) never survives an account switch in memory.
   let copilotAdapter: CopilotAdapter | undefined
+  const memberAdapters = new Map<ProviderId, AccountAwareAdapter>()
+  const register = (provider: ProviderId, adapter: AccountAwareAdapter): AdapterRegistrationHandle => {
+    const route = new AccountPreferencesAdapter({
+      provider, adapter, settings: preferences, pool: () => poolAdapter,
+      accounts: async () => (await accountTokens.get(provider)?.list() ?? []).map(({ key, session }) => ({ key, label: accountOf(provider, session) ?? key })),
+    })
+    memberAdapters.set(provider, route.poolMember())
+    return ctx.llm.registerAdapter([provider], route)
+  }
   for (const provider of providers) {
     switch (provider) {
       case 'codex': {
@@ -734,7 +754,7 @@ export function apply(ctx: Context, config: Config): void {
         })
         codexAdapter = adapter
         adapters.set('codex', adapter)
-        handles.set('codex', ctx.llm.registerAdapter(['codex'], adapter))
+        handles.set('codex', register('codex', adapter))
         break
       }
       case 'claude': {
@@ -769,7 +789,7 @@ export function apply(ctx: Context, config: Config): void {
           pool: () => poolAdapter,
         })
         adapters.set('claude', adapter)
-        handles.set('claude', ctx.llm.registerAdapter(['claude'], adapter))
+        handles.set('claude', register('claude', adapter))
         break
       }
       case 'grok': {
@@ -802,7 +822,7 @@ export function apply(ctx: Context, config: Config): void {
           pool: () => poolAdapter,
         })
         adapters.set('grok', adapter)
-        handles.set('grok', ctx.llm.registerAdapter(['grok'], adapter))
+        handles.set('grok', register('grok', adapter))
         break
       }
       case 'copilot': {
@@ -832,7 +852,7 @@ export function apply(ctx: Context, config: Config): void {
           pool: () => poolAdapter,
         })
         adapters.set('copilot', copilotAdapter)
-        handles.set('copilot', ctx.llm.registerAdapter(['copilot'], copilotAdapter))
+        handles.set('copilot', register('copilot', copilotAdapter))
         break
       }
       case 'antigravity': {
@@ -864,7 +884,7 @@ export function apply(ctx: Context, config: Config): void {
           pool: () => poolAdapter,
         })
         adapters.set('antigravity', adapter)
-        handles.set('antigravity', ctx.llm.registerAdapter(['antigravity'], adapter))
+        handles.set('antigravity', register('antigravity', adapter))
         break
       }
     }
@@ -922,15 +942,17 @@ export function apply(ctx: Context, config: Config): void {
         await Promise.all([...adapters].map(async ([provider, adapter]) => {
           try {
             const accounts = (await accountTokens.get(provider)?.list() ?? []).map(entry => entry.key)
-            if (accounts.length < 2) return
+            if (accounts.length === 0) return
             const catalogs = (await Promise.all(accounts.map(async account => {
               const models = await withTimeout(
                 signal => adapter.listOwnModels(provider, account, signal),
                 POOL_USAGE_TIMEOUT_MS,
               )
-              return models === undefined ? undefined : { account, models }
+              const settings = preferences.get(provider).accounts
+              const policy = settings && Object.hasOwn(settings, account) ? settings[account] : undefined
+              return models === undefined ? undefined : { account, models: models.filter(model => accountAllowsPool(policy, model.id)) }
             }))).filter(entry => entry !== undefined)
-            if (catalogs.length >= 2) sources[provider] = { catalogs }
+            if (catalogs.length > 0) sources[provider] = { catalogs }
           } catch {
             // Discovery failures are already reported by the owning adapter.
           }
@@ -949,12 +971,13 @@ export function apply(ctx: Context, config: Config): void {
       return pools
     }
     poolAdapter = new PoolAdapter({
-      adapters: Object.fromEntries(adapters),
+      adapters: Object.fromEntries(memberAdapters),
       health: poolHealth,
       usage: poolUsage,
       strategy: poolConfig?.strategy ?? 'quota_aware',
       switchMargin: poolConfig?.switchMargin ?? 2,
       defaultAccount: provider => accountTokens.get(provider)?.defaultAccount() ?? Promise.resolve(undefined),
+      resolveAccount: (provider, account) => accountTokens.get(provider)?.resolveAccount(account) ?? Promise.resolve(account),
       families,
       tiers: poolConfig?.tiers ?? {},
       onWarn,
@@ -971,9 +994,18 @@ export function apply(ctx: Context, config: Config): void {
 
   const speed: SpeedController = {
     async speed(sessionId) {
+      const fastModels = await codexAdapter?.fastCapableModels() ?? []
+      const accountPreferences = preferences.get('codex').accounts
+      for (const { key } of await codexTokens?.list() ?? []) {
+        if (!accountPreferences || !Object.hasOwn(accountPreferences, key) || accountPreferences[key].independentEntry !== true) continue
+        for (const model of [...fastModels]) {
+          if (parseAccountModelId(model)) continue
+          if (await codexAdapter?.supportsFastTier(model, key)) fastModels.push(accountModelId(key, model))
+        }
+      }
       return {
         tier: speedBySession.get(sessionId) ?? 'standard',
-        fastModels: await codexAdapter?.fastCapableModels() ?? [],
+        fastModels,
       }
     },
     async setSpeed(sessionId, tier) {
@@ -1019,7 +1051,7 @@ export function apply(ctx: Context, config: Config): void {
         }
         const views: ModelDefaultView[] = []
         for (const model of models) {
-          if (tierIds.has(model.id)) continue
+          if (tierIds.has(model.id) || parseAccountModelId(model.id)) continue
           let info: LlmResolvedModelInfo | undefined
           try {
             info = await ctx.llm.resolveModelInfo(provider, model.id)
@@ -1085,7 +1117,7 @@ export function apply(ctx: Context, config: Config): void {
       }
       const models = await fullCatalogs.get(provider)!(provider)
       // Enumerate each account once, with the same bounds used by pool discovery.
-      const accounts = provider === 'codex' ? await codexTokens!.list() : []
+      const accounts = await accountTokens.get(provider)?.list() ?? []
       const accountCatalogs = await Promise.all(accounts.map(async account => ({
         account: account.key,
         models: await withTimeout(signal => adapter.listOwnModels(provider, account.key, signal), DISCOVERY_TIMEOUT_MS).catch(() => undefined),
@@ -1114,7 +1146,13 @@ export function apply(ctx: Context, config: Config): void {
           } : {}),
         }
       }))
-      return { provider, settings: preferences.get(provider), models: rows, tools: PROVIDER_TOOLS[provider] }
+      return {
+        provider, settings: preferences.get(provider), models: rows, tools: PROVIDER_TOOLS[provider],
+        accounts: accounts.map(({ key, session }) => {
+          const catalog = accountCatalogs.find(entry => entry.account === key)?.models
+          return { key, label: accountOf(provider, session) ?? key, models: (catalog ?? []).map(({ id, name }) => ({ id, name })), ...(catalog === undefined ? { unavailable: true } : {}) }
+        }),
+      }
     },
     async set(provider, settings) {
       if (!adapters.has(provider)) throw new BadRequest(`provider ${provider} is not configured`)
@@ -1123,7 +1161,8 @@ export function apply(ctx: Context, config: Config): void {
         throw new BadRequest(error instanceof Error ? error.message : String(error))
       }
       await preferences.set(provider, validated)
-      handles.get(provider)?.replace([provider])
+      poolAdapter?.invalidate()
+      for (const [route, handle] of handles) handle.replace([route])
     },
   })
 
@@ -1145,6 +1184,26 @@ export function apply(ctx: Context, config: Config): void {
       }, () => undefined)
     }, 5 * 60_000)
     ctx.effect(() => () => { clearInterval(syncTimer) }, 'dsh-plugin-subscriptions: claude background sync timer')
+  }
+
+  // `web` is optional on headless/minimal compositions. Register Codex behind
+  // DSH's native web_search tool when the capability seam is mounted.
+  //
+  // `web_search` is the host's tool, not one this plugin registers, so the
+  // Codex switch gates this provider's `available()` rather than the tool
+  // itself: turned off, the seam auto-selects another registered provider, or
+  // reports WEB_PROVIDER_UNAVAILABLE the way dsh-tool-web expects. Denying the
+  // tool per agent would instead take web_search away from every other
+  // provider in the composition.
+  if (codexTokens !== undefined) {
+    const tokens = codexTokens
+    ctx.inject(['web'], webCtx => {
+      webCtx.web.registerSearchProvider(new CodexWebSearchProvider({
+        tokens,
+        enabled: () => preferences.toolEnabled('codex', 'web_search'),
+        fetchFn: proxiedFetch,
+      }))
+    })
   }
 
   // `tools` is optional (headless/minimal compositions may not mount it), so

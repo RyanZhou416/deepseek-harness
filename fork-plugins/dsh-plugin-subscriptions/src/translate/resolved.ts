@@ -7,7 +7,7 @@
  */
 
 import { LlmError } from '@deepseek-ai/dsh-llm'
-import type { ContentBlock, Message, ToolResultBlock } from '@deepseek-ai/dsh-llm'
+import type { ContentBlock, Message, RequestMessage, ToolResultMessage } from '@deepseek-ai/dsh-llm'
 import type { AttachmentStore } from '@deepseek-ai/dsh-attachment'
 
 /** An image block with its bytes resolved to inline base64 for the wire. */
@@ -19,11 +19,14 @@ export interface ResolvedImagePart {
   dataBase64: string
 }
 
-/** Translator input block: a harness block, with images pre-resolved. */
-export type TranslatableBlock = Exclude<ContentBlock, ToolResultBlock> | ResolvedImagePart | ResolvedToolResultBlock
+/** Translator input: a harness block, resolved image, or internal tool-result wrapper. */
+export type TranslatableBlock = ContentBlock | ResolvedImagePart | ResolvedToolResultBlock
 
 /** Tool results may themselves carry attachment-backed images. */
-export interface ResolvedToolResultBlock extends Omit<ToolResultBlock, 'content'> {
+export interface ResolvedToolResultBlock {
+  type: 'tool-result'
+  toolCallId: ToolResultMessage['toolCallId']
+  isError?: boolean
   content: readonly TranslatableBlock[]
 }
 
@@ -63,26 +66,39 @@ export interface TranslatableMessage {
   source?: Message['source']
 }
 
+/** Adapt V4 tool-role messages to the translators' internal result block. */
+function translatable(message: RequestMessage, content: readonly TranslatableBlock[]): TranslatableMessage {
+  if (message.role === 'developer') {
+    throw new LlmError('dsh-plugin-subscriptions: developer messages are not supported by this provider', 'UNSUPPORTED_CONTENT')
+  }
+  if (message.role === 'tool') return {
+    role: 'user',
+    source: message.source,
+    content: [{ type: 'tool-result', toolCallId: message.toolCallId,
+      ...message.isError === undefined ? {} : { isError: message.isError }, content }],
+  }
+  if (content === message.content) return message
+  return { role: message.role, content, ...message.source === undefined ? {} : { source: message.source } }
+}
+
 /**
  * Resolve every ImageBlock's attachment reference to inline base64 bytes.
- * Messages without images pass through unchanged. A request carrying an image
- * with no attachment service available fails loudly rather than silently
- * dropping the image.
- * @param messages - the request's conversation messages.
+ * Ordinary image-free messages keep their identity; V4 tool-role messages
+ * become internal result blocks. A request carrying an image without an
+ * attachment service fails; unsupported developer messages also fail rather
+ * than being silently omitted.
+ * @param messages - durable conversation messages and request-only user input.
  * @param attachments - the deployment's attachment service, when mounted.
  * @param signal - cancellation for the storage reads.
- * @returns the same messages with image blocks resolved for the translators.
+ * @returns ordered translator messages with tool results and images resolved.
  */
 export async function resolveImages(
-  messages: readonly Message[],
+  messages: readonly RequestMessage[],
   attachments: AttachmentStore | undefined,
   signal?: AbortSignal,
 ): Promise<readonly TranslatableMessage[]> {
-  const hasImage = (block: ContentBlock): boolean => block.type === 'image'
-    || (block.type === 'tool-result' && block.content.some(hasImage))
-  if (!messages.some(message => message.content.some(hasImage))) {
-    return messages
-  }
+  const hasImage = messages.some(message => message.content.some(block => block.type === 'image'))
+  if (!hasImage) return messages.map(message => translatable(message, message.content))
   if (attachments === undefined) {
     throw new LlmError(
       'dsh-plugin-subscriptions: the request carries an image but no attachments service is mounted; '
@@ -91,9 +107,6 @@ export async function resolveImages(
     )
   }
   const resolveBlock = async (block: ContentBlock): Promise<TranslatableBlock[]> => {
-    if (block.type === 'tool-result') {
-      return [{ ...block, content: (await Promise.all(block.content.map(resolveBlock))).flat() }]
-    }
     if (block.type !== 'image') return [block]
     const stored = await attachments.readImage(block.attachment, signal)
     const { attachmentId, mediaType, bytes, width, height, name } = stored.ref
@@ -108,9 +121,8 @@ export async function resolveImages(
       })}`,
     }]
   }
-  return Promise.all(messages.map(async (message): Promise<TranslatableMessage> => ({
-    role: message.role,
-    source: message.source,
-    content: (await Promise.all(message.content.map(resolveBlock))).flat(),
-  })))
+  return Promise.all(messages.map(async message => translatable(
+    message,
+    (await Promise.all(message.content.map(resolveBlock))).flat(),
+  )))
 }
