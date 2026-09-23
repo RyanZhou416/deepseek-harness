@@ -5,9 +5,6 @@
  * error material from the settled result node. A supported terminal call gets
  * its expanded body from `terminalCardModel` instead.
  */
-// The block union's defining home is runtime (fold-product types); this
-// contract only forwards it (type-definition authority stays with the layer
-// that produces the values).
 import type { ToolCallBlock, ToolResultNode } from '@deepseek-ai/dsh-client-ui-chat/client'
 import type { LocaleKeysOf } from '@deepseek-ai/dsh-client-ui-slots'
 import { abbreviateHomePath, relativizeToCwd } from '@deepseek-ai/dsh-util-workspace-path'
@@ -17,8 +14,8 @@ export type { ToolCallBlock } from '@deepseek-ai/dsh-client-ui-chat/client'
 /** Tool-call row variants selected by the generic atomic renderer. */
 export type ToolRowVariant = 'search' | 'read' | 'bash' | 'write' | 'edit' | 'code' | 'others'
 
-/** Row state semantic; colors self-supplied via StateDot (design gives none). */
-export type ToolRowState = 'running' | 'ok' | 'error' | 'stopped'
+/** Row lifecycle state used by summary styling and accessible status text. */
+export type ToolRowState = 'preparing' | 'running' | 'ok' | 'error' | 'stopped'
 
 /** Locale-neutral structured fact consumed only by the user-facing Tool row. */
 export interface AutoReviewDenial {
@@ -26,7 +23,7 @@ export interface AutoReviewDenial {
   reason: string | null
 }
 
-type ToolTitleKey = Extract<LocaleKeysOf<'conversation'>, `tool.title.${string}`>
+type ToolTitleKey = Extract<LocaleKeysOf<'conversation'>, `tool.title.${string}` | 'ask.rowTitle' | 'todo.rowTitle'>
 
 /** Locale key per generic row variant. */
 export const VARIANT_TITLE_KEYS = {
@@ -82,6 +79,44 @@ const TOOL_TITLE_KEYS: Record<string, ToolTitleKey> = {
   cordis_undefine: 'tool.title.removeCordis',
   pwsh: 'tool.title.pwsh',
   read_image: 'tool.title.readImage',
+  todo_write: 'todo.rowTitle',
+  ask_user_question: 'ask.rowTitle',
+  create_goal: 'tool.title.createGoal',
+  get_goal: 'tool.title.getGoal',
+  update_goal: 'tool.title.updateGoal',
+  schedule_create: 'tool.title.createSchedule',
+  schedule_list: 'tool.title.listSchedules',
+  schedule_delete: 'tool.title.deleteSchedule',
+  cordis_inspect_list: 'tool.title.inspectProviders',
+  cordis_inspect_query: 'tool.title.queryRuntime',
+  cordis_inspect_self: 'tool.title.inspectPlugins',
+  workflow: 'tool.title.workflow',
+  ralph: 'tool.title.ralph',
+  session_event_read: 'tool.title.readEvent',
+  session_event_search: 'tool.title.searchEvents',
+  session_event_trace: 'tool.title.traceEvent',
+  session_search: 'tool.title.searchSessions',
+  session_trace: 'tool.title.traceSession',
+  list_subagent_models: 'tool.title.listModels',
+  subagent: 'tool.title.subagent',
+  list_agents: 'tool.title.listAgents',
+  send_message: 'tool.title.sendMessage',
+  interrupt_agent: 'tool.title.interruptAgent',
+  job_list: 'tool.title.listJobs',
+  job_output: 'tool.title.readJob',
+  job_kill: 'tool.title.killJob',
+  terminal_open: 'tool.title.openTerminal',
+  terminal_read: 'tool.title.readTerminal',
+  terminal_list: 'tool.title.listTerminals',
+  terminal_signal: 'tool.title.signalTerminal',
+  terminal_close: 'tool.title.closeTerminal',
+  lsp: 'tool.title.lsp',
+  spawn_teammate: 'tool.title.spawnTeammate',
+  team_task_create: 'tool.title.createTeamTask',
+  team_task_get: 'tool.title.getTeamTask',
+  team_task_update: 'tool.title.updateTeamTask',
+  team_task_list: 'tool.title.listTeamTasks',
+  wait_agent: 'tool.title.waitAgent',
 }
 
 /**
@@ -93,22 +128,20 @@ export function classifyTool(toolName: string): ToolRowVariant {
   return TOOL_VARIANTS[toolName] ?? 'others'
 }
 
-/** Expanded text material derived only after a Tool row opens. */
-export interface ToolRowDetailsModel {
-  /** Whether reading `body` can produce an Input section. */
-  hasBody: boolean
-  /** Whether reading `output` can produce an Output section. */
-  hasOutput: boolean
-  /** Expanded-body input text (pretty args); null = no input section. */
-  readonly body: string | null
-  /** Flattened result text ({@link resultText}); null while running or when the result carries no text. */
-  readonly output: string | null
+/**
+ * Select a tool-owned or generic title without reading arguments.
+ * @param toolName - wire tool name.
+ * @returns the localized title key.
+ */
+export function toolTitleKey(toolName: string): ToolTitleKey {
+  return TOOL_TITLE_KEYS[toolName] ?? VARIANT_TITLE_KEYS[classifyTool(toolName)]
 }
 
-/** Everything ToolRow needs, with expanded strings deferred behind getters. */
-export interface ToolRowModel extends ToolRowDetailsModel {
+/** Everything ToolRow needs, derived once from the frozen slice. */
+export interface ToolRowModel {
   variant: ToolRowVariant
   titleKey: ToolTitleKey
+  /** Generic rows retain the wire tool name; available arguments append their summary. */
   summary: string
   /**
    * Filesystem path from args (`path` / `file_path`) when the row is a file
@@ -116,6 +149,10 @@ export interface ToolRowModel extends ToolRowDetailsModel {
    * relative values against the session cwd before opening.
    */
   filePath: string | undefined
+  /** Original argument JSON retained for expansion-time body formatting. */
+  bodyRaw: string | null
+  /** Flattened result text; null while running or when the result carries no text. */
+  output: string | null
   /** First line of the result text on an error row; null for every other state. */
   errorSummary: string | null
   /** Structured Auto-review denial identity; null for every ordinary result. */
@@ -163,27 +200,6 @@ function parseArgs(argsRaw: string): unknown {
 function firstLine(text: string): string {
   const nl = text.indexOf('\n')
   return nl === -1 ? text : text.slice(0, nl)
-}
-
-/** Whether flattening a settled result would produce a non-empty string. */
-function hasResultText(node: ToolResultNode): boolean {
-  if (node.content.length === 0) return node.error !== undefined
-  if (node.content.length > 1) return true
-  return node.content.some(block => block.type !== 'text' || block.text !== '')
-}
-
-/** First flattened output line without materializing the complete result. */
-function resultFirstLine(node: ToolResultNode): string | null {
-  if (node.content.length === 0) {
-    return node.error === undefined ? null : `${node.error.name}: ${node.error.code}`
-  }
-  // A durable result's content is a JSON array, so a non-empty array has a
-  // concrete first element (it cannot carry a sparse slot across the wire).
-  const first = node.content[0] as ToolResultNode['content'][number]
-  const text = first.type === 'text' ? first.text : '{'
-  if (text !== '') return firstLine(text)
-  // Two empty blocks flatten to a newline: output exists, but its first line is empty.
-  return node.content.length > 1 ? '' : null
 }
 
 function pickString(args: Record<string, unknown>, keys: readonly string[]): string | undefined {
@@ -236,7 +252,8 @@ function deriveFilePath(variant: ToolRowVariant, argsRaw: string): string | unde
   return picked === undefined ? undefined : firstLine(picked)
 }
 
-function deriveBody(variant: ToolRowVariant, argsRaw: string): string | null {
+/** Format arguments only when a generic Tool row expands. */
+export function formatToolBody(variant: ToolRowVariant, argsRaw: string): string | null {
   if (argsRaw === '') return null
   const parsed = parseArgs(argsRaw)
   if (parsed === undefined) return argsRaw
@@ -252,47 +269,36 @@ function deriveBody(variant: ToolRowVariant, argsRaw: string): string | null {
 /**
  * Derive the full row model from a frozen call slice.
  * @param toolName - wire tool name (dispatch-supplied; survives windowless results).
- * @param block - RunningToolCall or ToolResultNode off the snapshot caches.
+ * @param block - preparing call, dispatched call, or result from the snapshot.
  * @param cwd - session workspace root; workspace-rooted path summaries display relative to it.
  * @param home - host account home; a leftover POSIX home path displays as `~`.
  * @returns the row model.
  */
 export function toolRowModel(toolName: string, block: ToolCallBlock, cwd?: string, home?: string): ToolRowModel {
   const variant = classifyTool(toolName)
+  const titleKey = toolTitleKey(toolName)
   const done = 'kind' in block
-  const argsRaw = (done ? block.call?.argsRaw : block.argsRaw) ?? ''
-  const state: ToolRowState = !done ? 'running'
+  const argsRaw = done ? block.call?.argsRaw ?? '' : block.phase === 'start' ? block.argsRaw : null
+  const state: ToolRowState = !done ? block.phase === 'preparing' ? 'preparing' : 'running'
     : block.error?.code === 'interrupted' ? 'stopped'
       : block.isError ? 'error' : 'ok'
-  const base = argsRaw === ''
-    ? block.callId
-    : abbreviateHomePath(relativizeToCwd(deriveSummary(variant, argsRaw), cwd), home)
-  const toolTitleKey = TOOL_TITLE_KEYS[toolName]
-  // Others keeps the static "Tool call" title (figma literal); the real tool
-  // name rides the mutable summary slot unless the tool owns a specific title.
-  const summary = variant === 'others' && toolName !== '' && toolTitleKey === undefined
-    ? `${toolName} · ${base}`
-    : base
-  const hasBody = argsRaw !== ''
-  const hasOutput = done && hasResultText(block)
-  const errorSummary = state === 'error' && done ? resultFirstLine(block) : null
-  let body: string | null | undefined
-  let output: string | null | undefined
+  const base = argsRaw === null ? ''
+    : argsRaw === '' ? block.callId
+      : abbreviateHomePath(relativizeToCwd(deriveSummary(variant, argsRaw), cwd), home)
+  const summary = [titleKey === 'tool.title.generic' ? toolName : '', base].filter(Boolean).join(' · ')
+  // The empty string is "no text" for both derived result fields: a settled
+  // call with blank content has nothing to expand, and a blank first line
+  // would erase the collapsed error row's summary slot.
+  const output = done ? (resultText(block) || null) : null
+  const errorSummary = state === 'error' && output !== null ? firstLine(output) : null
+  const bodyRaw = argsRaw === '' ? null : argsRaw
   return {
     variant,
-    titleKey: toolTitleKey ?? VARIANT_TITLE_KEYS[variant],
+    titleKey,
     summary,
-    filePath: deriveFilePath(variant, argsRaw),
-    hasBody,
-    hasOutput,
-    get body() {
-      if (body === undefined) body = deriveBody(variant, argsRaw)
-      return body
-    },
-    get output() {
-      if (output === undefined) output = done ? (resultText(block) || null) : null
-      return output
-    },
+    filePath: argsRaw === null ? undefined : deriveFilePath(variant, argsRaw),
+    bodyRaw,
+    output,
     errorSummary,
     autoReviewDenial: deriveAutoReviewDenial(block),
     state,

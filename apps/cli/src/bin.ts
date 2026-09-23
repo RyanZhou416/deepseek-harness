@@ -6,34 +6,17 @@
 
 /* v8 ignore file -- built-bin acceptance exercises this self-executing dispatch. */
 
-import { readFileSync } from 'node:fs'
-import { fileURLToPath } from 'node:url'
-import { loadLayeredEnv, StartupError } from '@deepseek-ai/dsh-app-boot'
+import { getDshRuntimeVersion, loadLayeredEnv, StartupError } from '@deepseek-ai/dsh-app-boot'
 import { resolveDshHome } from '@deepseek-ai/dsh-home-paths'
 import { parseDshArgs } from './args.ts'
 import { reportStartupFailure } from './startup-diagnostics.ts'
-
-// The tsx source launcher projects workspace imports to src/. Its profile
-// fallback must use the same link backend so configured workspace plugins do
-// not load lib/ while their internal imports resolve back to src/.
-const SOURCE_PROFILE_RESOLUTION = import.meta.url.endsWith('/src/bin.ts') ? 'link' : undefined
-
-// Both the source tree (apps/cli/src) and the bundled bin (apps/cli/lib) sit
-// one directory under apps/cli, so the checked-in manifest resolves with the
-// same relative hop from either artifact.
-function readVersion(): string {
-  const manifest = JSON.parse(
-    readFileSync(fileURLToPath(new URL('../package.json', import.meta.url)), 'utf8'),
-  ) as { version?: unknown }
-  return typeof manifest.version === 'string' ? manifest.version : '0.0.0'
-}
 
 /**
  * Run the public dsh command-line interface.
  * @returns a promise that settles when the selected command mode finishes.
  */
 export async function runCli(): Promise<void> {
-  const version = readVersion()
+  const version = getDshRuntimeVersion()
   const invocation = parseDshArgs(process.argv.slice(2), version)
 
   switch (invocation.mode) {
@@ -46,7 +29,6 @@ export async function runCli(): Promise<void> {
           fromDefaultProfile: invocation.fromDefaultProfile,
           patchFiles: invocation.patches,
           args: invocation.args,
-          ...SOURCE_PROFILE_RESOLUTION === undefined ? {} : { resolutionMode: SOURCE_PROFILE_RESOLUTION },
         })
       } catch (error) {
         if (!(error instanceof StartupError)) throw error
@@ -68,6 +50,11 @@ export async function runCli(): Promise<void> {
         invocation.patches,
         invocation.fromDefaultProfile,
       )
+      break
+    }
+    case 'dump-config-schema': {
+      const { runDumpConfigSchema } = await import('./dump-config-schema.ts')
+      await runDumpConfigSchema(invocation.profile, invocation.patches, invocation.fromDefaultProfile)
       break
     }
     default:

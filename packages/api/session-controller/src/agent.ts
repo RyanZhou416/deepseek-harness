@@ -7,8 +7,7 @@ import type {
   Agent, AgentHandle, AgentOptions, AgentSetup, ModelSelection as AgentModelSelection, ModelSelectionRef,
 } from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-agent-default-model'
-import type {} from '@deepseek-ai/dsh-agent-presets'
-import type {} from '@deepseek-ai/dsh-jobs'
+import type {} from '@deepseek-ai/dsh-agent-preset-registry'
 import { ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import type { Session, SessionId } from '@deepseek-ai/dsh-session'
 import type { SessionInspection } from '@deepseek-ai/dsh-session-persistence'
@@ -195,9 +194,12 @@ export class ApiSessionAgentController {
       if (this.ownedHandles.get(agent.id)?.agent === agent) this.ownedHandles.delete(agent.id)
     })
     ctx.inject(['jobs'], (jobsCtx) => {
-      jobsCtx.jobs.onJobsChanged((owner) => {
-        if (owner !== undefined) {
-          if (this.ownedHandles.get(owner.id)?.agent === owner) this.scheduleIdleEviction(owner)
+      jobsCtx.jobs.events.subscribe({ owners: 'all' }, (event) => {
+        if (event.type === 'output' || event.type === 'progress') return
+        const ownerId = event.job.owner
+        if (ownerId !== undefined) {
+          const owner = this.ownedHandles.get(ownerId)?.agent
+          if (owner !== undefined) this.scheduleIdleEviction(owner)
           return
         }
         for (const { agent } of this.ownedHandles.values()) this.scheduleIdleEviction(agent)
@@ -533,7 +535,7 @@ export class ApiSessionAgentController {
     if (agent.status !== 'idle' || agent.inbox.nextTurn.length > 0 || agent.inbox.nextStep.length > 0) return true
     if (this.ctx.agents.list().some(candidate => this.ctx.agents.isOwnedBy(candidate.id, agent))) return true
     const jobs = this.ctx.get('jobs')
-    return jobs?.list(agent).some(job => job.status === 'running' || job.status === 'stopping') ?? false
+    return jobs?.list(agent.id).some(job => job.status === 'running' || job.status === 'stopping') ?? false
   }
 
   private scheduleIdleEviction(agent: Agent): void {

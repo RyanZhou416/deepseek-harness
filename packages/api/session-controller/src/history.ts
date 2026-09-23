@@ -111,6 +111,7 @@ export class SessionHistoryController {
       beforeSeq,
       request.maxMessages ?? DEFAULT_MAX_MESSAGES,
       throughSeq,
+      request.turnWindow,
     )
     const records = pageRecords(page.events)
     return {
@@ -126,7 +127,7 @@ export class SessionHistoryController {
    * @returns a complete opening snapshot followed by gap-free durable events and opted-in assistant frames.
    */
   async *follow(request: SessionFollowRequest, signal: AbortSignal): AsyncIterable<SessionFollowFrame> {
-    validateFollowRequest(request)
+    validateHistoryWindow(request)
     const { address } = request
     const target = addressId(address)
     const releaseRetention = this.retain(target)
@@ -186,14 +187,12 @@ export class SessionHistoryController {
     signal.addEventListener('abort', onAbort, { once: true })
     let pendingPromotion: SessionObservation | undefined
     try {
-      let opening: FollowOpening | undefined = await this.openFollow(request, signal, () => assistantStreamOrdinal)
+      const opening: FollowOpening | undefined = await this.openFollow(request, signal, () => assistantStreamOrdinal)
       const cursor = opening.cursor
       snapshotCursor = cursor
       const assistantStreamOrdinalCut = opening.assistantStreamOrdinalCut
       pendingPromotion = opening.promotion
       yield opening.frame
-      opening = undefined
-      releaseRetention()
       if (pendingPromotion !== undefined) {
         try {
           this.promoteOpening(pendingPromotion)
@@ -253,7 +252,7 @@ export class SessionHistoryController {
     const events = source.events
     signal.throwIfAborted()
     const cursor = source.cursor
-    const page = paginate(events, undefined, request.maxMessages ?? DEFAULT_MAX_MESSAGES)
+    const page = paginate(events, undefined, request.maxMessages ?? DEFAULT_MAX_MESSAGES, cursor, request.turnWindow)
     const assistantStream = request.assistantStream === true
       ? this.assistantStreams.get(addressId(request.address))?.snapshot() ?? { revision: 0 }
       : undefined
@@ -354,16 +353,23 @@ function validatePageRequest(request: SessionPageRequest): void {
       || Object.is(request.beforeSeq, -0))) {
     throw new RemoteError('gateway/bad-request', 'beforeSeq must be a non-negative safe integer', {})
   }
+  validateHistoryWindow(request)
+}
+
+function validateHistoryWindow(request: Pick<SessionPageRequest, 'maxMessages' | 'turnWindow'>): void {
   if (request.maxMessages !== undefined
     && (!Number.isSafeInteger(request.maxMessages) || request.maxMessages <= 0)) {
     throw new RemoteError('gateway/bad-request', 'maxMessages must be a positive safe integer', {})
   }
-}
-
-function validateFollowRequest(request: SessionFollowRequest): void {
-  if (request.maxMessages !== undefined
-    && (!Number.isSafeInteger(request.maxMessages) || request.maxMessages <= 0)) {
-    throw new RemoteError('gateway/bad-request', 'maxMessages must be a positive safe integer', {})
+  const window = request.turnWindow
+  if (window !== undefined) {
+    if (!Number.isSafeInteger(window.minMessages) || window.minMessages <= 0
+      || window.minMessages > (request.maxMessages ?? DEFAULT_MAX_MESSAGES)) {
+      throw new RemoteError('gateway/bad-request', 'turnWindow.minMessages must be a positive safe integer no greater than maxMessages', {})
+    }
+    if (!Number.isSafeInteger(window.minTurns) || window.minTurns <= 0) {
+      throw new RemoteError('gateway/bad-request', 'turnWindow.minTurns must be a positive safe integer', {})
+    }
   }
 }
 
@@ -405,7 +411,7 @@ function validateAddress(
       reason: 'unsupported',
     })
   }
-  if (identity.mode !== address.mode) {
+  if (address.mode !== 'unknown' && identity.mode !== address.mode) {
     throw new RemoteError('subagent/unauthorized', 'subagent mode does not match the supplied address', {
       childSessionId: address.childSessionId,
     })
@@ -426,13 +432,22 @@ function paginate(
   events: readonly SessionEvent[],
   beforeSeq: SessionLogOffsetType | undefined,
   maxMessages: number,
-  throughSeq: SessionSeqCursor = events.at(-1)?.seq ?? -1,
+  throughSeq: SessionSeqCursor,
+  turnWindow?: SessionPageRequest['turnWindow'],
 ): { readonly events: SessionEvent[]; readonly hasMore: boolean } {
   const end = SessionLogOffset(Math.min(throughSeq + 1, beforeSeq ?? throughSeq + 1))
   let count = 0
+  let turns = 0
   let cut = SessionLogOffset(0)
   for (let index = end - 1; index >= 0; index--) {
     const event = events[index] as SessionEvent
+    if (turnWindow !== undefined && event.type === 'turn/start') {
+      turns++
+      if (count >= turnWindow.minMessages && turns >= turnWindow.minTurns) {
+        cut = SessionLogOffset(index)
+        break
+      }
+    }
     if (!MESSAGE_TYPES.has(event.type) || !isAppendSurfaceEvent(event)) continue
     count++
     const sources = event.sourceEventSeqs

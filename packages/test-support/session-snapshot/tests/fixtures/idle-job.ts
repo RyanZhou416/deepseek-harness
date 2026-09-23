@@ -39,19 +39,24 @@ export function apply(ctx: Context): void {
       const id = ctx.jobs.start({
         kind: 'bash',
         label: args.label,
-        owner,
-        run: () => ({
-          cancel: () => { settle({ status: 'killed' }) },
-          done: done.promise,
-        }),
-      })
-      let jobs = pending.get(owner)
-      if (jobs === undefined) {
-        jobs = []
-        pending.set(owner, jobs)
-      }
-      jobs.push({
-        complete: () => { settle({ status: 'completed', output: `finished ${args.label}` }) },
+        owner: owner.id,
+        run: (job) => {
+          let jobs = pending.get(owner)
+          if (jobs === undefined) {
+            jobs = []
+            pending.set(owner, jobs)
+          }
+          jobs.push({
+            complete: () => {
+              job.append(`finished ${args.label}`)
+              settle({ status: 'completed' })
+            },
+          })
+          return {
+            cancel: () => { settle({ status: 'killed' }) },
+            done: done.promise,
+          }
+        },
       })
       return Promise.resolve([{ type: 'text', text: `started snapshot job ${id}` }])
     },

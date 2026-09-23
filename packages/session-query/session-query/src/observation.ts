@@ -58,8 +58,8 @@ export interface SessionObservationOptions {
  * instance still reports the same revision.
  */
 interface PreparedEntry {
-  /** The persistence instance whose `stat` produced {@link revision}; revisions from another instance are incomparable. */
-  readonly persistence: SessionPersistence
+  /** Stable service identity whose `stat` produced this revision; proxy references are not instance identities. */
+  readonly persistenceIdentity: symbol
   /** Durable revision observed by `stat` immediately before the log read. */
   readonly revision: SessionPersistenceRevision
   /** Unpublished Session restored from the balanced log; never entered into the store. */
@@ -119,8 +119,7 @@ export class SessionObservationReader {
       const cacheable = snapshot.sizeBytes === undefined || snapshot.sizeBytes <= this.cacheMaxArtifactBytes
       const attachedDuringStat = this.ctx.sessions.get(sessionId)
       if (attachedDuringStat !== undefined) return this.live(attachedDuringStat, projectionMode)
-      if (!cacheable) this.cache.delete(sessionId)
-      let entry = cacheable ? this.cachedEntry(persistence, sessionId, snapshot.revision) : undefined
+      let entry = this.cachedEntry(persistence.identity, sessionId, snapshot.revision)
       if (entry === undefined) {
         const loaded = await this.loadSource(persistence, sessionId, signal)
         throwIfObservationAborted(signal)
@@ -149,7 +148,7 @@ export class SessionObservationReader {
           )
         }
         entry = {
-          persistence,
+          persistenceIdentity: persistence.identity,
           revision: snapshot.revision,
           session,
           events: Object.freeze(seed),
@@ -212,12 +211,12 @@ export class SessionObservationReader {
 
   /** Return a still-valid cached entry and mark it most recently used. */
   private cachedEntry(
-    persistence: SessionPersistence,
+    persistenceIdentity: symbol,
     sessionId: SessionId,
     revision: SessionPersistenceRevision,
   ): PreparedEntry | undefined {
     const cached = this.cache.get(sessionId)
-    if (cached === undefined || cached.persistence !== persistence || cached.revision !== revision) {
+    if (cached === undefined || cached.persistenceIdentity !== persistenceIdentity || cached.revision !== revision) {
       return undefined
     }
     this.cache.delete(sessionId)

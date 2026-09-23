@@ -21,7 +21,7 @@ import {
   type SessionSeq,
   type UserMessage,
 } from '@deepseek-ai/dsh-session'
-import { TOOL_ABORTED_BEFORE_DISPATCH, TOOL_RUNTIME_SCHEDULER, type ToolExecutionInput, type ToolExecutionMode, type ToolExecutionResult, type ToolRuntimeScheduler, type ToolRunContext } from '@deepseek-ai/dsh-tools'
+import { TOOL_ABORTED_BEFORE_DISPATCH, TOOL_RUNTIME_SCHEDULER, type ToolExecutionInput, type ToolExecutionMode, type ToolExecutionResult, type ToolRunContext } from '@deepseek-ai/dsh-tools'
 import { assertNever } from '@deepseek-ai/dsh-util-values'
 
 /** One tool call after argument parsing, ready to schedule. */
@@ -148,12 +148,7 @@ async function runGroup(
   acceptContext: (context: UserMessage) => void,
 ): Promise<GroupOutcome> {
   const { session } = ctx.agents.requireInitiator()
-  const { maxParallelToolCalls } = ctx.agentLoop.config
-  const scheduler = ctx.tools[TOOL_RUNTIME_SCHEDULER] as ToolRuntimeScheduler | undefined
-  if (scheduler === undefined) {
-    for (const call of group) appendSchedulerFailureCall(session, turn, step, call.block, false)
-    throw new Error('dsh-agent-loop: tool scheduler is unavailable; the tool runtime and agent loop must share one module instance')
-  }
+  const maxParallelToolCalls = ctx.agentLoop.config.maxParallelToolCalls.get()
   const slots: (Slot | undefined)[] = group.map(() => undefined)
   // Started slots retain their `tool/call` seq so the result can cite it.
   const callSeqs: Array<SessionSeq | undefined> = group.map(() => undefined)
@@ -175,8 +170,8 @@ async function runGroup(
       if (slot === undefined) break
       const call = group[committed]
       const result = slot.needsPost
-        ? await scheduler.finalize(slot.exec, slot.result)
-        : scheduler.finish(slot.exec, slot.result)
+        ? await ctx.tools[TOOL_RUNTIME_SCHEDULER].finalize(slot.exec, slot.result)
+        : ctx.tools[TOOL_RUNTIME_SCHEDULER].finish(slot.exec, slot.result)
       // oxlint-disable-next-line typescript/no-non-null-assertion -- bounded index
       appendToolResult(session, turn, step, call!.block, result, callSeqs[committed]!)
       for (const context of result.additionalContexts ?? []) acceptContext(context)
@@ -192,12 +187,12 @@ async function runGroup(
     const call = group[index]!
     callSeqs[index] = appendToolCall(session, turn, step, call.block)
     started++
-    const prepared = await scheduler.prepare(call.exec)
+    const prepared = await ctx.tools[TOOL_RUNTIME_SCHEDULER].prepare(call.exec)
     throwSchedulerFailure()
     switch (prepared.kind) {
       case 'dispatch': {
         bodyMayHaveStarted[index] = true
-        const promise = scheduler.dispatch(prepared.exec).then(
+        const promise = ctx.tools[TOOL_RUNTIME_SCHEDULER].dispatch(prepared.exec).then(
           (outcome) => {
             slots[index] = { exec: prepared.exec, result: outcome.result, needsPost: outcome.kind === 'post-result' }
             return index
