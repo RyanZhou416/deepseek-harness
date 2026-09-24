@@ -240,7 +240,9 @@ Web profile 插入 `memory-watchdog.cjs`：250 ms 采样、60 s 日志、heap ra
 
 AgentTeams、Context 与 Subscriptions 均使用本地 `file:` tgz，不依赖 release-age 例外。profile 不再安装 dshmarket；禁止 wildcard 和未经审计的 `pnpm update --latest`。
 
-2026-09-24 的 Windows profile 升级先将四个配置文件备份到 `C:\Project\deepseek-harness-data\diagnostics\profile-backups\pre-017rc1-20260924-1900`，再用 DSH Plugin Manager 安装三个固定 tgz。`verify-profile`、`verify-patch` 与组合后的 `verify-dump` 均通过；没有修改 Session、附件或凭据。Mac 以独立工作树和临时 DSH_HOME 完成 `build.command`、`setup.command`、205 个真实 symlink Cordis 配置检查及 Web HTTP 200 smoke；运行中的旧实例及其 checkout 未切换。
+2026-09-24 的 Windows profile 升级先将四个配置文件备份到 `C:\Project\deepseek-harness-data\diagnostics\profile-backups\pre-017rc1-20260924-1900`，再用 DSH Plugin Manager 安装三个固定 tgz。`verify-profile`、`verify-patch` 与组合后的 `verify-dump` 均通过；没有修改 Session、附件或凭据。
+
+Mac 主 checkout 已快进至同一 fork master；`clean.command`、`build.command` 和 `setup.command` 均通过。`setup.command` 将原 profile 的四个配置文件备份到 `/Users/zhouxiran/.dsh/profile-backups/web-20260924T122912Z-84951`，真实 Web profile 已安装上表的三个固定版本。Mac 的 205 个 Cordis 配置检查通过，`run.command` 启动验收时的 Web 响应为 HTTP 200。
 
 ### Local AgentTeams package
 

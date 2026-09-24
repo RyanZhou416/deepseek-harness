@@ -1576,9 +1576,9 @@ describe('JsonlSessionPersistence: durability and crash semantics', () => {
       const path = rawLogPath(localRoot, '/work', m.id)
       const pause = pausePhysicalRead(path)
       readTally.enabled = true
-      const first = handles[0]!.read(0, 2)
+      const first = handles[0].read(0, 2)
       await pause.entered
-      const second = handles[1]!.read(2, 2)
+      const second = handles[1].read(2, 2)
       try {
         await expect.poll(() => (local.sessionPersistence as unknown as {
           currentReads: Map<SessionId, { waiters: number }>
@@ -2253,10 +2253,15 @@ describe('JsonlSessionPersistence: durability and crash semantics', () => {
     const persistence = ctx.sessionPersistence as unknown as {
       listArtifacts(): Promise<Array<{ header: SessionHeader; path: string }>>
     }
-    const discovery = vi.spyOn(persistence, 'listArtifacts').mockResolvedValue([{
+    const path = `${root}\0snapshot-stat-failure`
+    const artifact = {
       header: meta('snapshot-stat-failure'),
-      path: `${root}\0snapshot-stat-failure`,
-    }])
+      path,
+      selected: { sourcePath: path },
+      sourceVersion: SESSION_FORMAT_VERSION,
+      revision: 'test-revision',
+    }
+    const discovery = vi.spyOn(persistence, 'listArtifacts').mockResolvedValue([artifact])
 
     await expect(ctx.sessionPersistence.list()).rejects.toThrow(/null bytes/)
     discovery.mockRestore()
@@ -2298,10 +2303,15 @@ describe('JsonlSessionPersistence: durability and crash semantics', () => {
     const persistence = ctx.sessionPersistence as unknown as {
       listArtifacts(signal?: AbortSignal): Promise<Array<{ header: SessionHeader; path: string }>>
     }
-    const discovery = vi.spyOn(persistence, 'listArtifacts').mockResolvedValue([{
+    const path = rawLogPath(root, m.cwd, m.id)
+    const artifact = {
       header: m,
-      path: rawLogPath(root, m.cwd, m.id),
-    }])
+      path,
+      selected: { sourcePath: path },
+      sourceVersion: SESSION_FORMAT_VERSION,
+      revision: 'test-revision',
+    }
+    const discovery = vi.spyOn(persistence, 'listArtifacts').mockResolvedValue([artifact])
     const reason = new Error('JSONL list stat cancelled')
     const controller = new AbortController()
     const pending = ctx.sessionPersistence.list({ signal: controller.signal })
