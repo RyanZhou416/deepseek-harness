@@ -45,6 +45,8 @@ Loading the plugin registers `ctx.jobs`; every field is optional.
 | `retainBytes` | `262144` | Live ring retention per job, in UTF-8 bytes |
 | `settledRetainBytes` | `16384` | Ring retention kept after a job settles, in UTF-8 bytes; bytes the model has not read stay until its first terminal read |
 | `pumpPollMs` | `150` | Poll interval for a job's pull sources, in milliseconds |
+| `terminalJobRetentionMs` | omitted | Milliseconds to retain a terminal record, whether read or unread; omission keeps it until owner or service disposal |
+| `maxRetainedTerminalJobsPerOwner` | omitted | Target terminal records per exact owner or unowned bucket; only model-read records are count-pruned |
 
 The generated [configuration catalog](../../../docs/config-catalog.md#deepseek-aidsh-jobs-local) is the exhaustive source for the accepted fields.
 
@@ -76,6 +78,7 @@ This section explains the design decisions behind the registry and points at the
 
 - **In-memory records, fresh projections.** `LocalJobRegistry` keeps one `TrackedJob` per job — lifecycle state, the output ring, and the model cursor — and projects a new read-only view or chunk copy per call; callers never receive live state.
 - **Retention is bounded per ring.** Appends past the live cap drop the oldest retained chunks (a single oversized chunk keeps its UTF-8-safe tail); a reader below the retained window gets a lossy read, never an error. Settlement trims to the settled cap but never below the bytes the model cursor has not consumed, so a job that finishes before its first `job_output` hands over everything the live cap retained; that terminal read then trims to the settled cap.
+- **Terminal records have separate optional bounds.** One unref timer expires records, and per-owner reported heaps choose the oldest read result for count pruning. Removed jobs leave only lightweight heap references until bounded compaction; an unread record remains available until TTL or teardown.
 - **Owner-relative layers, one process-wide registry.** Controllers and `{ owners: 'scope' }` subscriptions are filed into the scope that registered them (`ScopedLayers`), and reads union the global layer with the owner's scope chain — so one preset's job controls never hold `start()` open for an agent whose own composition loads none, and a scoped settlement reaches only the listeners its owner's composition registered.
 - **Preflight before start.** `start()` checks controller service, spec validity, live ownership, and capacity before invoking the producer, so a rejection leaves no job id or execution resource; registration commits without a later failable step.
 - **First-wins settlement, event last.** The earliest terminal outcome records once, waits for the pump's final drain, trims the ring, releases waiters, and then delivers one `settled` event with per-listener containment, followed by the ring's final `output` signal.
@@ -89,6 +92,7 @@ This section explains the design decisions behind the registry and points at the
 | [`src/events.ts`](src/events.ts) | Scope-layered event routing: `{ owner }`, `{ owners: 'all' }`, and `{ owners: 'scope' }` subscriptions |
 | [`src/ring.ts`](src/ring.ts) | The bounded per-job output ring: append, retention trim, offset reads |
 | [`src/pump.ts`](src/pump.ts) | The registry-owned pull pump: one timer per job, final drain before settlement |
+| [`src/retention.ts`](src/retention.ts) | Optional terminal TTL/count indexes and their single expiry timer |
 | — | No runtime invariant companion is published; `@deepseek-ai/dsh-jobs/invariant` owns the event-protocol and event-versus-read checks. This provider's admission decision uses private configuration and must fail before a backend starter runs; `LocalJobRegistry.start()` enforces it synchronously for current producers. Repeating an aggregate after publication would expose private configuration solely to this companion and would not verify the fail-closed pre-start guarantee. |
 
 ### Scope layers

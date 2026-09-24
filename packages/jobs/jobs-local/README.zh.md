@@ -45,6 +45,8 @@ kind: "package-reference"
 | `retainBytes` | `262144` | 每个任务输出环的运行期保留量，UTF-8 字节 |
 | `settledRetainBytes` | `16384` | 任务结算后保留的环容量，UTF-8 字节；模型尚未读取的字节保留到它的首次终态读取 |
 | `pumpPollMs` | `150` | 任务拉取源的轮询间隔，毫秒 |
+| `terminalJobRetentionMs` | 省略 | 已读或未读终态记录的保留毫秒数；省略则保留到所有者或服务释放 |
+| `maxRetainedTerminalJobsPerOwner` | 省略 | 每个精确所有者或无主桶的终态记录目标数；按数量仅裁剪模型已读取的记录 |
 
 生成的[配置目录](../../../docs/config-catalog.zh.md#deepseek-aidsh-jobs-local)是所有受支持字段的穷尽式真源。
 
@@ -76,6 +78,7 @@ kind: "package-reference"
 
 - **内存记录、全新投影。** `LocalJobRegistry` 为每个任务保存一份 `TrackedJob`——生命周期状态、输出环与模型游标——每次调用都投影新的只读视图或块副本；调用方永远拿不到实时状态。
 - **环的保留量有界。** 追加超出运行期上限时丢弃最老的保留块（单个超限块保留其 UTF-8 安全尾部）；低于保留窗口的读取得到 lossy 结果而非错误。结算时裁剪到结算上限，但绝不低于模型游标尚未消费的字节数，因此在首次 `job_output` 之前结束的任务会交出运行期上限保留的全部输出；那次终态读取之后才裁剪到结算上限。
+- **终态记录另有可选上限。** 一个 `unref` 定时器使记录过期，每个所有者的已报告最小堆为数量裁剪选择最早读取的结果。已删除任务在有界压缩前只留下轻量堆引用；未读记录保留到 TTL 到期或销毁。
 - **按所有者分层，一个进程级注册表。** 控制器与 `{ owners: 'scope' }` 订阅归档到注册方所在的 scope（`ScopedLayers`），读取把全局层与所有者的 scope 链求并集——因此某个 preset 的任务控制绝不会为自身组合未加载任何控制器的 agent 保持 `start()` 可用，一次带 scope 的结算也只会抵达其所有者所属组合注册的监听器。
 - **启动前先预检。** `start()` 在调用生产方之前检查控制器服务、spec 有效性、仍存活的所有权与容量，因此拒绝不会留下 job id 或执行资源；注册一旦提交，后续不再有可失败步骤。
 - **结算首次优先，事件最后。** 最早的终止结果只记录一次，等待泵的最后一次排干，裁剪环，释放等待方，然后投递一次带逐监听器隔离的 `settled` 事件，再跟上环的最终 `output` 信号。
@@ -89,6 +92,7 @@ kind: "package-reference"
 | [`src/events.ts`](src/events.ts) | 按 scope 分层的事件路由：`{ owner }`、`{ owners: 'all' }` 与 `{ owners: 'scope' }` 订阅 |
 | [`src/ring.ts`](src/ring.ts) | 每个任务的有界输出环：追加、保留裁剪、按偏移读取 |
 | [`src/pump.ts`](src/pump.ts) | 注册表拥有的拉取泵：每个任务一个定时器，结算前最后一次排干 |
+| [`src/retention.ts`](src/retention.ts) | 可选的终态 TTL/数量索引及单个到期定时器 |
 | — | 不发布运行时不变式伴生入口；事件协议与事件对读取的检查位于 `@deepseek-ai/dsh-jobs/invariant`。此提供方的准入决策使用私有配置，并且必须在后端启动器运行前失败；当前生产方由 `LocalJobRegistry.start()` 同步执行该决策。发布后再重复聚合只会向 companion 暴露私有配置，也无法验证失败发生在启动前。 |
 
 ### scope 分层

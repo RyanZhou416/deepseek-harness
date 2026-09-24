@@ -69,9 +69,11 @@ async function harness(
   if (jobs !== undefined) {
     ctx.provide('jobs', {
       list: () => [{ status: jobs.status }],
-      onJobsChanged: (listener: (owner: Agent | undefined) => void) => {
-        jobs.notify = listener
-        return () => { jobs.notify = undefined }
+      events: {
+        subscribe: (_filter: unknown, listener: (event: unknown) => void) => {
+          jobs.notify = (owner) => { listener({ type: 'settled', job: { owner: owner?.id } }) }
+          return () => { jobs.notify = undefined }
+        },
       },
     } as never)
   }

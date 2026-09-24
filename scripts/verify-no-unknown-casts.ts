@@ -2,12 +2,13 @@
 
 import { execFileSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { lstatSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, lstatSync, readFileSync, writeFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import ts from 'typescript'
 
 const root = resolve(import.meta.dirname, '..')
 const baselinePath = 'scripts/no-unknown-casts.baseline.json'
+const importedBaselinePath = 'scripts/no-unknown-casts.imported-baseline.json'
 
 /** Existing assertion counts, keyed by repository path and syntax fingerprint. */
 export type UnknownCastBaseline = Record<string, Record<string, number>>
@@ -100,8 +101,8 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
-function readBaseline(repoRoot: string): UnknownCastBaseline {
-  const value: unknown = JSON.parse(readFileSync(resolve(repoRoot, baselinePath), 'utf8'))
+function readBaseline(repoRoot: string, path: string): UnknownCastBaseline {
+  const value: unknown = JSON.parse(readFileSync(resolve(repoRoot, path), 'utf8'))
   if (!isRecord(value)) throw new Error('verify-no-unknown-casts: baseline must be a file-to-counts object')
   const baseline: UnknownCastBaseline = {}
   for (const [file, counts] of Object.entries(value)) {
@@ -144,7 +145,16 @@ export function countUnknownCasts(casts: readonly UnknownCast[]): UnknownCastBas
  * @throws for new assertions, malformed inventories, or stale entries without pruning.
  */
 export function verifyNoUnknownCasts(repoRoot: string, prune = false): number {
-  const baseline = readBaseline(repoRoot)
+  const official = readBaseline(repoRoot, baselinePath)
+  const imported = existsSync(resolve(repoRoot, importedBaselinePath))
+    ? readBaseline(repoRoot, importedBaselinePath) : {}
+  const baseline: UnknownCastBaseline = structuredClone(official)
+  for (const [file, counts] of Object.entries(imported)) {
+    const target = baseline[file] ??= {}
+    for (const [fingerprint, count] of Object.entries(counts)) {
+      target[fingerprint] = (target[fingerprint] ?? 0) + count
+    }
+  }
   const casts = scanUnknownCasts(repoRoot)
   const current = countUnknownCasts(casts)
   const remaining = structuredClone(baseline)
@@ -166,7 +176,20 @@ export function verifyNoUnknownCasts(repoRoot: string, prune = false): number {
       throw new Error('verify-no-unknown-casts: remove retired baseline entries with pnpm run verify-no-unknown-casts --prune.\n'
         + stale.join('\n'))
     }
-    writeFileSync(resolve(repoRoot, baselinePath), `${JSON.stringify(current, null, 2)}\n`)
+    const keptOfficial: UnknownCastBaseline = {}
+    const keptImported: UnknownCastBaseline = {}
+    for (const [file, counts] of Object.entries(current)) {
+      for (const [fingerprint, count] of Object.entries(counts)) {
+        const officialCount = Math.min(count, official[file]?.[fingerprint] ?? 0)
+        if (officialCount > 0) (keptOfficial[file] ??= {})[fingerprint] = officialCount
+        const importedCount = count - officialCount
+        if (importedCount > 0) (keptImported[file] ??= {})[fingerprint] = importedCount
+      }
+    }
+    writeFileSync(resolve(repoRoot, baselinePath), `${JSON.stringify(keptOfficial, null, 2)}\n`)
+    if (existsSync(resolve(repoRoot, importedBaselinePath))) {
+      writeFileSync(resolve(repoRoot, importedBaselinePath), `${JSON.stringify(keptImported, null, 2)}\n`)
+    }
   }
   return casts.length
 }

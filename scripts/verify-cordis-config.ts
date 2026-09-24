@@ -10,8 +10,9 @@
  * Loader fixtures resolve from their package manifest.
  */
 
-import { globSync, readFileSync } from 'node:fs'
-import { dirname, relative, resolve } from 'node:path'
+import { globSync, lstatSync, readFileSync } from 'node:fs'
+import { execFileSync } from 'node:child_process'
+import { dirname, isAbsolute, relative, resolve, sep } from 'node:path'
 import { Script } from 'node:vm'
 import ts from 'typescript'
 import type { DshBundleManifest } from '../packages/util/package-manifest/src/types.ts'
@@ -61,9 +62,17 @@ const pluginReferences: PluginReference[] = []
 
 if (import.meta.main) {
   const files = cordisConfigFiles(root)
+  const trackedSymlinks = new Set(execFileSync('git', ['ls-files', '-s', '-z'], {
+    cwd: root, encoding: 'utf8', maxBuffer: 16 * 1024 * 1024,
+  })
+    .split('\0').flatMap((entry) => {
+      const match = /^120000 [a-f0-9]+ 0\t(.+)$/u.exec(entry)
+      const trackedPath = match?.[1]
+      return trackedPath === undefined ? [] : [trackedPath.replaceAll('\\', '/')]
+    }))
 
   for (const file of files) {
-    const document = loadCordisYaml(readFileSync(resolve(root, file), 'utf8'))
+    const document = readCordisConfigFile(root, file, trackedSymlinks)
     if (!isUnknownArray(document)) {
       errors.push(`${file}: root must be a Loader entry array`)
       continue
@@ -87,6 +96,28 @@ if (import.meta.main) {
   } else {
     console.log(`verify-cordis-config: ${files.length} config files passed.`)
   }
+}
+
+/** Read a tracked YAML symlink even when Windows Git materialized its target path as text.
+ * @param repoRoot - checkout root that must contain both link and target.
+ * @param file - repository-relative tracked YAML path.
+ * @param trackedSymlinks - paths whose Git index mode is 120000.
+ * @returns parsed Loader YAML document.
+ */
+export function readCordisConfigFile(repoRoot: string, file: string, trackedSymlinks: ReadonlySet<string>): unknown {
+  const path = resolve(repoRoot, file)
+  const source = readFileSync(path, 'utf8')
+  if (!trackedSymlinks.has(file.replaceAll('\\', '/')) || lstatSync(path).isSymbolicLink()) return loadCordisYaml(source)
+  const pointer = source.trim()
+  if (pointer === '' || pointer.includes('\n') || pointer.includes('\r')) {
+    throw new Error(`${file}: materialized symlink must contain one relative target path`)
+  }
+  const target = resolve(dirname(path), pointer)
+  const within = relative(repoRoot, target)
+  if (within === '' || within === '..' || within.startsWith(`..${sep}`) || isAbsolute(within)) {
+    throw new Error(`${file}: symlink target escapes the repository`)
+  }
+  return loadCordisYaml(readFileSync(target, 'utf8'))
 }
 
 /**

@@ -19,13 +19,13 @@
 ## Agent Teams
 
 - 源码：`fork-plugins/dsh-agent-teams`
-- 当前私有版本：`0.1.19-dsh016alpha2.1`
-- 上游底座：`NanmiCoder/dsh-agent-teams v0.1.19`
-- 私有宿主目标：`dsh-v0.1.6-alpha.2`
-- 安装产物：`fork-plugins/releases/nanmicoder-dsh-agent-teams-0.1.19-dsh016alpha2.1.tgz`
-- 产物 SHA256：`1C93655EE5162987ECBA1BBCD6C084E84DE87A486EF8ED4AF2E33D957EEBE9B9`
+- 当前私有版本：`0.1.20-dsh017rc1.1`
+- 上游底座：`NanmiCoder/dsh-agent-teams v0.1.20`
+- 私有宿主目标：`dsh-v0.1.7-rc.1`
+- 安装产物：`fork-plugins/releases/nanmicoder-dsh-agent-teams-0.1.20-dsh017rc1.1.tgz`
+- 产物 SHA256：`17CDEA664A3EC8764CB8763FEC32A8CAE54F5F6429C89958DBE141A26253FF4B`
 
-该构建采用 v0.1.19 的改名工具成员启动恢复、repair scope 纠正、Captain 任务修订、原子 roster 创建、next-step 协调、陈旧 attempt 拒绝、退休成员清理与任务纠正。私有层适配 awaited `agent/created` 启动和 Alpha.2 `uiWorkspace` 导航，保留冷 Captain 邮箱恢复和有界未读邮箱缓存，磁盘格式不变。
+上游 v0.1.20 更新了文档，运行时代码沿用 v0.1.19 的成员启动恢复、repair scope 纠正、原子 roster 创建、next-step 协调、陈旧 attempt 拒绝与任务纠正。私有 RC.1 层保留 awaited `agent/created` 启动，使用 projection 刷新打开冷成员会话，并采用带类型的 `agent-teams-host` 消息来源；冷 Captain 邮箱恢复和有界未读邮箱缓存继续生效，磁盘格式不变。
 
 每条 Team 消息都会先进入持久 Team 邮箱，再尝试 Host 投递。只有 Host 把消息接纳到 DSH 持久收件箱后，插件才会把它标记为已投递；已进入不可中断工具的接收方会在工具结算后消费这条排队输入，而不会被抢占。Host 投递失败会让 Team 记录保持可重试；不活跃的 Captain 会冷恢复并按顺序重投未确认记录。
 
@@ -34,7 +34,7 @@
 同事 clone 本 fork、设置好自己的 `DSH_HOME` 并关闭正在运行的 DSH 后，可在仓库根目录执行：
 
 ```powershell
-$artifact = (Resolve-Path .\fork-plugins\releases\nanmicoder-dsh-agent-teams-0.1.19-dsh016alpha2.1.tgz).Path
+$artifact = (Resolve-Path .\fork-plugins\releases\nanmicoder-dsh-agent-teams-0.1.20-dsh017rc1.1.tgz).Path
 node --import tsx/esm apps/cli/src/bin.ts plugin --profile web add $artifact
 ```
 
@@ -64,22 +64,22 @@ Agent Teams 的持久数据属于各工作区 `.agent-teams/` 目录；本目录
 ## Context
 
 - 源码：`fork-plugins/dsh-context`
-- 当前私有版本：`0.53.3-dsh016alpha2.1`
-- 上游底座：`bowenliang123/dsh-context v0.53.3`
-- 安装产物：`fork-plugins/releases/dsh-context-0.53.3-dsh016alpha2.1.tgz`
-- 产物 SHA256：`8C84B018DE10CF181A77AD151D069A00133D7AF8537EE766F2A46C8154DD5843`
+- 当前私有版本：`0.55.0-dsh017rc1.1`
+- 上游底座：`bowenliang123/dsh-context v0.55.0`
+- 安装产物：`fork-plugins/releases/dsh-context-0.55.0-dsh017rc1.1.tgz`
+- 产物 SHA256：`F75D2CB582BF21813D883644600B866EC84800ED6E8D0E835187C1D7F48CA714`
 
-该构建采用 v0.53.3 的 Context Insights、activity projection、最后消息卡片和按需语料回填。字段级 copy-on-write、dirty retention trim、恢复态首个 view bounds、引用稳定的 inline/slim cache、关闭 modal 后释放订阅，以及 V3 system node 的 header 计价仍由私有层维护。维护与回滚规则见 `fork-plugins/dsh-context/FORK_MAINTENANCE.md`。
+该构建采用 v0.55.0 的 V4 折叠、Context Insights、余额展示、增量 turn 计数、选择性工具参数保留与按需语料回填。字段级 copy-on-write、dirty retention trim、恢复态首个 view bounds、引用稳定的 inline/slim cache、关闭 modal 后释放订阅，以及 V3/V4 system node 的 header 计价仍由私有层维护。维护与回滚规则见 `fork-plugins/dsh-context/FORK_MAINTENANCE.md`。
 
 低开销部署值为 `maxRequestSteps: 300`、`maxKeptTurns: 60`、`maxEvents: 100`、`maxNodes: 400`、`maxArchiveNodes: 100` 和 `maxFileOps: 100`。修改 profile 前必须确认 DSH 已停止；插件更新过程不得读取、迁移或删除 Session、附件、凭据或 projection cache 数据。
 
 ## Subscriptions
 
 - 源码：`fork-plugins/dsh-plugin-subscriptions`
-- 当前私有版本：`0.9.2-dsh016alpha2.1`
-- 上游底座：`V1ki/dsh-plugin-subscriptions v0.9.2`
-- 私有宿主目标：`dsh-v0.1.6-alpha.2`
-- 安装产物：`fork-plugins/releases/dsh-plugin-subscriptions-0.9.2-dsh016alpha2.1.tgz`
-- 产物 SHA256：`5B6AC96A2E22946BAC53339F4D2A307AD29DAC5195851BF55606BA946CD37177`
+- 当前私有版本：`0.9.4-dsh017rc1.1`
+- 上游底座：`V1ki/dsh-plugin-subscriptions v0.9.4`
+- 私有宿主目标：`dsh-v0.1.7-rc.1`
+- 安装产物：`fork-plugins/releases/dsh-plugin-subscriptions-0.9.4-dsh017rc1.1.tgz`
+- 产物 SHA256：`4F2A6D5D86C7AB0D342C3F7C4FACC3D16C49C3628D6EAD41B9964C426DCDFD88`
 
-该私有构建保留上游多账号 provider、用量 UI、请求转换、图片与视频工具和凭据格式。Alpha.2 适配使用 awaited `agent/created` payload 与精确 DSH 依赖 cohort，不引入 Session 或凭据迁移。验证与回滚规则见 `fork-plugins/dsh-plugin-subscriptions/FORK_MAINTENANCE.md`。
+该私有构建保留上游多账号 provider、用量 UI、Codex 搜索、图片／视频工具与凭据格式。RC.1 适配转换 V4 工具角色消息，同时保留调用身份和图片结果，并固定精确的 DSH 依赖版本组合；不会迁移 Session 或凭据。验证与回滚规则见 `fork-plugins/dsh-plugin-subscriptions/FORK_MAINTENANCE.md`。

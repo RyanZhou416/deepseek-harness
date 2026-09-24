@@ -65,6 +65,8 @@ When you launch `dsh --profile web` over SSH, the URL line still prints but the 
 
 Each browser session selects a shipped preset (`standard` by default). The Agent presets settings page changes the default and edits preset child plugins; saves persist in `$DSH_HOME/profiles/web/cordis.patch.yml`. Creator's plugin-management tool is enabled only when the Host provides an editable profile.
 
+This fork's `standard`, `ptc`, and `cordis` presets include `session_find`, `session_send_message`, and `session_message_status` for separately owned Sessions; `minimal` does not. Their sender attribution comes from the live Agent, and subagent/teammate coordination keeps its own tools.
+
 -----
 
 <a id="understand-the-implementation"></a>

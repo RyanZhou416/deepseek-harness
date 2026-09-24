@@ -39,12 +39,12 @@ fi
 DSH_RUNTIME_HELPER=$SCRIPT_DIR/scripts/fork-macos-runtime.sh
 DSH_SETUP_HELPER=$SCRIPT_DIR/fork-runtime/setup-profile.mjs
 DSH_CONTEXT_PATCH=$SCRIPT_DIR/fork-runtime/web/cordis.patch.yml
-DSH_AGENT_TEAMS_ARTIFACT=$SCRIPT_DIR/fork-plugins/releases/nanmicoder-dsh-agent-teams-0.1.19-dsh016alpha2.1.tgz
-DSH_CONTEXT_ARTIFACT=$SCRIPT_DIR/fork-plugins/releases/dsh-context-0.53.3-dsh016alpha2.1.tgz
-DSH_SUBSCRIPTIONS_ARTIFACT=$SCRIPT_DIR/fork-plugins/releases/dsh-plugin-subscriptions-0.9.2-dsh016alpha2.1.tgz
-DSH_AGENT_TEAMS_SHA256=1C93655EE5162987ECBA1BBCD6C084E84DE87A486EF8ED4AF2E33D957EEBE9B9
-DSH_CONTEXT_SHA256=8C84B018DE10CF181A77AD151D069A00133D7AF8537EE766F2A46C8154DD5843
-DSH_SUBSCRIPTIONS_SHA256=5B6AC96A2E22946BAC53339F4D2A307AD29DAC5195851BF55606BA946CD37177
+DSH_AGENT_TEAMS_ARTIFACT=$SCRIPT_DIR/fork-plugins/releases/nanmicoder-dsh-agent-teams-0.1.20-dsh017rc1.1.tgz
+DSH_CONTEXT_ARTIFACT=$SCRIPT_DIR/fork-plugins/releases/dsh-context-0.55.0-dsh017rc1.1.tgz
+DSH_SUBSCRIPTIONS_ARTIFACT=$SCRIPT_DIR/fork-plugins/releases/dsh-plugin-subscriptions-0.9.4-dsh017rc1.1.tgz
+DSH_AGENT_TEAMS_SHA256=17CDEA664A3EC8764CB8763FEC32A8CAE54F5F6429C89958DBE141A26253FF4B
+DSH_CONTEXT_SHA256=F75D2CB582BF21813D883644600B866EC84800ED6E8D0E835187C1D7F48CA714
+DSH_SUBSCRIPTIONS_SHA256=4F2A6D5D86C7AB0D342C3F7C4FACC3D16C49C3628D6EAD41B9964C426DCDFD88
 
 for DSH_REQUIRED_FILE in \
   "$DSH_RUNTIME_HELPER" \
@@ -91,13 +91,13 @@ node "$DSH_SETUP_HELPER" verify-sha256 \
   "$DSH_SUBSCRIPTIONS_ARTIFACT" "$DSH_SUBSCRIPTIONS_SHA256"
 tar -xOzf "$DSH_AGENT_TEAMS_ARTIFACT" package/package.json \
   | node "$DSH_SETUP_HELPER" verify-manifest \
-    '@nanmicoder/dsh-agent-teams' '0.1.19-dsh016alpha2.1'
+    '@nanmicoder/dsh-agent-teams' '0.1.20-dsh017rc1.1'
 tar -xOzf "$DSH_CONTEXT_ARTIFACT" package/package.json \
   | node "$DSH_SETUP_HELPER" verify-manifest \
-    'dsh-context' '0.53.3-dsh016alpha2.1'
+    'dsh-context' '0.55.0-dsh017rc1.1'
 tar -xOzf "$DSH_SUBSCRIPTIONS_ARTIFACT" package/package.json \
   | node "$DSH_SETUP_HELPER" verify-manifest \
-    'dsh-plugin-subscriptions' '0.9.2-dsh016alpha2.1'
+    'dsh-plugin-subscriptions' '0.9.4-dsh017rc1.1'
 
 # Reject an ambiguous user patch before package installation changes anything.
 node "$DSH_SETUP_HELPER" merge-patch \

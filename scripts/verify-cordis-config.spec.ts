@@ -14,7 +14,27 @@ import {
   metadataExpressionErrors,
   packageTestFixtureDependencyErrors,
   packageTestPluginDependencyErrors,
+  readCordisConfigFile,
 } from './verify-cordis-config.ts'
+
+it('reads a Git-tracked YAML symlink materialized as a path on Windows', () => {
+  const root = mkdtempSync(join(tmpdir(), 'dsh-cordis-link-'))
+  try {
+    mkdirSync(join(root, 'snapshot'), { recursive: true })
+    mkdirSync(join(root, 'fixture'), { recursive: true })
+    writeFileSync(join(root, 'snapshot', 'cordis.yml'), '- id: probe\n  name: probe\n')
+    writeFileSync(join(root, 'fixture', 'cordis.yml'), '../snapshot/cordis.yml\n')
+    expect(readCordisConfigFile(root, 'fixture/cordis.yml', new Set(['fixture/cordis.yml'])))
+      .toEqual([{ id: 'probe', name: 'probe' }])
+    expect(() => readCordisConfigFile(root, 'fixture/cordis.yml', new Set()))
+      .not.toThrow()
+    writeFileSync(join(root, 'fixture', 'cordis.yml'), '../../outside/cordis.yml\n')
+    expect(() => readCordisConfigFile(root, 'fixture/cordis.yml', new Set(['fixture/cordis.yml'])))
+      .toThrow('escapes the repository')
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
 
 describe('verify-cordis-config metadata expressions', () => {
   it('accepts a disabled !!js expression', () => {

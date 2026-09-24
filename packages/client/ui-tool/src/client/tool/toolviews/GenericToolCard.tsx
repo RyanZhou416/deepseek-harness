@@ -59,7 +59,8 @@ export function GenericToolCard({ toolName, block, cwd, home, openFile, inspect,
       // args interaction. A card is not an args body: a read/write/edit row is
       // single-file AND carries a card, so the card expands under the path link.
       bodyRaw={singleFile || autoReview !== null ? null : model.bodyRaw}
-      output={autoReview?.output ?? model.output}
+      output={autoReview?.output}
+      outputNode={'kind' in block ? block : undefined}
       errorSummary={autoReview?.summary ?? model.errorSummary}
       terminal={terminal}
       diff={diff}

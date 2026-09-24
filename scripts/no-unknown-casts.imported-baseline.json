@@ -1,0 +1,252 @@
+{
+  "fork-plugins/dsh-agent-teams/src/events.ts": {
+    "5765288679b53dfcca60d9fbc6552e0753fca888d94b39afa3bbd59417fb9df2": 1
+  },
+  "fork-plugins/dsh-agent-teams/src/harness-compat.ts": {
+    "7cc3515757f90d116400e03effb79e609dcd4e07d9f807e9449864d8203e0565": 1,
+    "89b33a57a7c77261a02116dd015c08d9e6a5b1efb5ba0ebf49bc68a21e7f120a": 1,
+    "e1afcf3bd21c4348c25c31b75c3d96e12710fc3bb3165da6a77a48731cb7e737": 2
+  },
+  "fork-plugins/dsh-context/src/client/index.ts": {
+    "53f1197af19938d444b06ebf666a8751240d0b5e5ea13edf6100316d1bc5ede2": 5
+  },
+  "fork-plugins/dsh-context/src/client/primitives.ts": {
+    "a9e03757c1aad2c5537980f7b46cae01d54f3556cda75742c9711bf4605667c6": 1
+  },
+  "fork-plugins/dsh-context/src/client/services.ts": {
+    "5049cfd2e2aa64e1f383a3fd512c90b7fbf3451e89882e18fb400be614a92619": 2,
+    "6b8b0a920c558092d20bc17623b7050e0f7403f896fde7da17bb45677899b910": 1,
+    "71fdca982b61d60d652c8b032a5b7bd4964898e3fa4ddb2a62fd5bfe308d7778": 1,
+    "f585546794ee3300485132116a976045522f370de3b5d810cfb2e05956933f43": 1
+  },
+  "fork-plugins/dsh-context/src/client/sidebar.ts": {
+    "750789a30e84b9761ea2ebbeb8c75d8e0588312d46b89e738e30eda86e778d9a": 1
+  },
+  "fork-plugins/dsh-context/src/host/activity.ts": {
+    "5f8ea505a73be14b7ca6491000d0f5d619e1a4f580a49fccdaf0cefcff8acc40": 1,
+    "d081ff742c63cef29d931ffd15c70b7669245f9303041dad2eda32e575c272b3": 1
+  },
+  "fork-plugins/dsh-context/src/host/attribution.ts": {
+    "df8a4ebfe74b7a5cc4e24adfef67a7d47c337184b62f7fafa2d37cfbbf2ff49e": 2
+  },
+  "fork-plugins/dsh-context/src/host/backfill.ts": {
+    "750789a30e84b9761ea2ebbeb8c75d8e0588312d46b89e738e30eda86e778d9a": 1,
+    "78513aa5d7c79ad177457f8902a0d30bd6929ea63fb912944db22a2a7a538b88": 1,
+    "91328c8e9ad7eaa0bbc53ca6157ce451f6ea84721cf200a4ae08673b858b821a": 2,
+    "aca72c9c675ac6aab8379d5d137eac122eb59803238c3e652bbea6e3e26da35b": 1,
+    "e9ef04f24e4f432920600d84a87227c0f3ced973067097b13421626f2554ab95": 1
+  },
+  "fork-plugins/dsh-context/src/host/config.ts": {
+    "5e1854214618f556d28d237f1ccd11bdd48bb56d12e6082733b31245575e72f8": 1
+  },
+  "fork-plugins/dsh-context/src/host/headers.ts": {
+    "04b76c7eeb95378dd813dfeac32a3734e80c081e27b52bf98c76a075888981fb": 1,
+    "a9bd7afad29d444ccecdd05e0f9da3318060f6c40ebdf7f10386da4210e9f4de": 1
+  },
+  "fork-plugins/dsh-context/src/host/timeline.ts": {
+    "47c16efb89a958ee5075999284516b7495f37c4d3fe6f56d7e5fc05bb307109b": 1,
+    "5db746e17dfcd08bd36aee832fb2265e9956a36f3d18fcf0eb17935bba4af33b": 1
+  },
+  "fork-plugins/dsh-context/src/host/version.ts": {
+    "5d3b6291d2cb66623c6386efddad7303c772fa7a139880dc59069ad2ab94b472": 1
+  },
+  "fork-plugins/dsh-context/tests/client/callSummary.spec.ts": {
+    "4177c38c0d0eae2e5af52f22216b15f8e096024708aba4be32167c52706af5ec": 2
+  },
+  "fork-plugins/dsh-context/tests/client/categories.spec.ts": {
+    "7579ea3ceac4741dce3ced1d05aa65a028b5deeb6ece97877121b2eb998d406f": 1,
+    "a63d8f81f89b7bc86ab006ae5917eb1de4819fc28be101c3d9f155d1a0bef7f3": 1
+  },
+  "fork-plugins/dsh-context/tests/client/components/browser.spec.ts": {
+    "f54ae48033296aaa769109e9c456b60a850de7a8ecaf637cbdc4ad27cd505cc0": 1
+  },
+  "fork-plugins/dsh-context/tests/client/components/contextView.spec.ts": {
+    "4777453719b1a12ac03d7405a7cc1662ac1873b8eb0016a08ccd11f27076e803": 1
+  },
+  "fork-plugins/dsh-context/tests/client/components/overviewCard.spec.ts": {
+    "28a1ecd172a5e949b854254a3c7e3d532749c629f561aded34b1c9f4329a91d1": 1,
+    "3bb84bfcad06c6f4f9b4f589dd39c503bc2f0fdcc39ab16f3fbb623eded11655": 1,
+    "6cf7b2724e7cd66fe861fa96f81fc1f6ee9469d3343a5eeae3b7d28c25c25b5c": 1
+  },
+  "fork-plugins/dsh-context/tests/client/components/settingsCard.spec.ts": {
+    "cd8cab6a860f543cc633df268cffd6404ad7b1838800a66e18aed9a1a0c3add7": 1
+  },
+  "fork-plugins/dsh-context/tests/client/components/statsContext.spec.ts": {
+    "a6259b299eb48422518c252ac5087b0f14a25fbc0e93d635cfd29a5b063333ff": 1
+  },
+  "fork-plugins/dsh-context/tests/client/components/trendChart.spec.ts": {
+    "e89d870a02eeb4d3a052118ecf8a77cb5695c9d3f0e4b0e12771685e2b5b0338": 1
+  },
+  "fork-plugins/dsh-context/tests/client/cost.spec.ts": {
+    "2a8853315e385ac5e68fb4acd08df66da129f497087b0b2f4f602da0737eed59": 1,
+    "59fa4fc259c3b4b8753e62da0937bee26eab488166011731bed0fe8d755d137e": 1,
+    "f2127064a3805d4c0e183e469981475a3aede8ec93adf14b914a81320c72558d": 1,
+    "f6e89a0188e5738b0a0c1a5e6b7dc16f607ae5420bdbe4118997da916ec631e1": 1
+  },
+  "fork-plugins/dsh-context/tests/client/headline.spec.ts": {
+    "4177c38c0d0eae2e5af52f22216b15f8e096024708aba4be32167c52706af5ec": 2
+  },
+  "fork-plugins/dsh-context/tests/client/helpers/harness.ts": {
+    "38a7cf3dfd5da2f739390f5b233b97731f3bfa1ac3a51fdb8e1594735764bb80": 1
+  },
+  "fork-plugins/dsh-context/tests/client/index.spec.ts": {
+    "a66b089a2ab41409a248bfd6dc72d44f5460d08247441ede64de8e4cc01991ac": 1
+  },
+  "fork-plugins/dsh-context/tests/client/overview.spec.ts": {
+    "01647f0ed8a86a529703f6367f0b7c73d7ef181b34a0a69bb6fb44a3c35e88b3": 1,
+    "0299ad3964571fc634709f0c14da6ab0fb0bb1da544aa4139e999254afb1371a": 1,
+    "033bce4d1c31e723411d8552247ef52a85f7ea20daa7a46c82ed1924c1cfe203": 1,
+    "1abb0564e9fb7c8d5b145449e4c53a3fc0390572409c0c9c2fb144103ed9c03e": 2,
+    "2648bdcc9ccd5ae772af2f9b7ef26e9f536bf875822cff90306692dac24ea4db": 1,
+    "404cc369a3526d84979eac723c2e1e42f316f03648bfa72cddacf567d5a9725a": 1,
+    "a62b4aa8258f996e32bd7c6012a22d0a11fd617d32f70621148ac43ac1aa70fb": 1,
+    "b5a89d6e2815c644562f651d8359f69924e0d14434fb8da6b7c475cc9278bdc7": 1,
+    "f4ab0a32a9a8e50ff8dd9de270643233c9e14ea8e544f39e1027533919b3805a": 1
+  },
+  "fork-plugins/dsh-context/tests/client/revealScroll.spec.ts": {
+    "70c0aedc48105ad0cda2e4f04b52b714c87eebd19591c610b5ac8063f1c487bd": 1
+  },
+  "fork-plugins/dsh-context/tests/client/services.spec.ts": {
+    "1abb0564e9fb7c8d5b145449e4c53a3fc0390572409c0c9c2fb144103ed9c03e": 1,
+    "68c841d74c03c7730445d77dff4b15e0772b2a6a9624ed331fd4b0cdec7eee00": 1,
+    "774b83d805bb0e28a9dafbe9dc2b5a4f4ae8129f952bb4f96dedf66cb85aee5a": 4,
+    "c4da100dd055e3bc2c0d8a0961a2aa1c4a97fb08c95891f92f672a4f47b373d6": 2,
+    "f21e25ec26a979c74a80da18c913b0a0efe9e556e4d4eb31de7d445edf69bc0e": 3
+  },
+  "fork-plugins/dsh-context/tests/client/sidebar.spec.ts": {
+    "38a7cf3dfd5da2f739390f5b233b97731f3bfa1ac3a51fdb8e1594735764bb80": 2
+  },
+  "fork-plugins/dsh-context/tests/client/viewFocus.spec.ts": {
+    "66106322bf5786b9348081f3dabafd283bacde02e29381781180af96dcd95b20": 1
+  },
+  "fork-plugins/dsh-context/tests/host/balance.spec.ts": {
+    "386aba1b3be789d9816b7b5d5b1f622dd2f2686a054863735f71f482025eaa25": 1,
+    "38a7cf3dfd5da2f739390f5b233b97731f3bfa1ac3a51fdb8e1594735764bb80": 1,
+    "6c97837cca536e5c41c97990fe44f705b83e115a6fda66daefeeb75419cdf226": 1,
+    "8d34177265bea0eb17f05a070052737db0c83c986dd956e6a02c741cbdf4528d": 2,
+    "f3a6133d8e37473b2c804ac261199b55024f002975db625086dd1e5df2c50346": 1
+  },
+  "fork-plugins/dsh-context/tests/host/compat/registry.spec.ts": {
+    "0066a32835d88376e9e7361badabf6e19e73943f68f09b12c752bf7746f3a449": 1,
+    "78f22ae8cd2a890dad86509b2c563c4862d90990491e23274a5afc3760d476d3": 1,
+    "c8364828959406d41887ce3e80983185f5523329f51fbed1f26679fbf2880c83": 1
+  },
+  "fork-plugins/dsh-context/tests/host/compat/registryDriver.ts": {
+    "5b856792f6a67324868cf30751f726e7a30d654f8007923a965356c6bb625331": 1
+  },
+  "fork-plugins/dsh-context/tests/host/config.spec.ts": {
+    "26381770cc3ba8047280dffd80e6a98938393e4ed9ec5c161b9e60db2b1bd67e": 1,
+    "97b31eaed0cbb2a55a78d1973c319b6e3d4deb56ca267d76925199d0c60be1e3": 1,
+    "ea1923460690447df91e6afd02735e2c187b01dedbe944e4ff3a43319fb49415": 1,
+    "ed77d909bb6375cb16e12e7f92f019a480932b788f122bb97157e381d7771853": 1
+  },
+  "fork-plugins/dsh-context/tests/host/detail.spec.ts": {
+    "38a7cf3dfd5da2f739390f5b233b97731f3bfa1ac3a51fdb8e1594735764bb80": 2
+  },
+  "fork-plugins/dsh-context/tests/host/fold-ops.spec.ts": {
+    "14ae82a948d7ed74a38c686c82af979d441a374de5f7c986ff4d245fc9f661c4": 1,
+    "57ad13d9b66371013cc535bef46f1fcc7c64d8ee3daa9cf71f16ddcf42fbcfe1": 1,
+    "883106054a4b46a27c4eaf35b971db091019b2992db8212aa43159eb02e8dded": 1,
+    "9bed5a0db02d8ba8a7c7da98d294e70f280eb60b14f844683f6bae12a2d16330": 1
+  },
+  "fork-plugins/dsh-context/tests/host/fold-performance.spec.ts": {
+    "e9268866f334d91a368f51e3098654a280b0eb2dc2b5a072aa198eb3ddd7424c": 1
+  },
+  "fork-plugins/dsh-context/tests/host/fold-timing.spec.ts": {
+    "7e8e038b74a45e8f38967c9be5da06a5c500aa235fdafb4e8634fd32bff40acf": 1
+  },
+  "fork-plugins/dsh-context/tests/host/helpers/projection.ts": {
+    "2068c6be4fd9a84aa262f4c73c8698684f62864a4c369b9a79de4be1188ea984": 1,
+    "a478dd1a25732ad339c9bf9a23e7b86f5dceedaa0ae7f87d9da4d89a57d3eb67": 1
+  },
+  "fork-plugins/dsh-context/tests/host/index.spec.ts": {
+    "0a3513f913a4da892c91a3a8fe6b01de673cba1deb252801d7ad995bc9de9c65": 1
+  },
+  "fork-plugins/dsh-context/tests/host/pricing.spec.ts": {
+    "48b0a567fdff072a2c09eea8be1d587d7a2b19346b5785e1dfed5eb8304136d8": 1
+  },
+  "fork-plugins/dsh-context/tests/host/timeline.spec.ts": {
+    "1c4e31f621f48031c7ed7528dbd9dbe926d2776d93b3fa883ead2c8e654ab7f1": 1
+  },
+  "fork-plugins/dsh-context/tests/host/version.spec.ts": {
+    "d55c4ced46bec95be914984052c622ee5d5100477e2dd95794b1d9b20b144789": 1
+  },
+  "fork-plugins/dsh-plugin-subscriptions/src/auth/rpc.ts": {
+    "c550706d4f740e06adea1343a55b4167d5248edda089f58675e80169908db00d": 1
+  },
+  "fork-plugins/dsh-plugin-subscriptions/src/auth/store.ts": {
+    "187723a16840226eac25de7faa6573cb0a2397121765035e736642519c89ac4f": 1,
+    "487a58a6269113d4cbfd31915a9abdbf016e672be9a2af2c6d5d57b087d0b011": 1,
+    "a838174ce19ca84a80f7ec559db75f3b506211ddce7391eefa54f5281a2719cf": 1,
+    "e1afcf3bd21c4348c25c31b75c3d96e12710fc3bb3165da6a77a48731cb7e737": 2
+  },
+  "fork-plugins/dsh-plugin-subscriptions/src/client/index.ts": {
+    "7fedb21312a9c9efcaa4f269ad32fb590191f31e6ca49b000abcda55e9dac795": 1
+  },
+  "fork-plugins/dsh-plugin-subscriptions/src/http.ts": {
+    "e9b1cf443d54de96b4e3dea1f8709f68eb7a28477824e9102d1833948673da6e": 1
+  },
+  "fork-plugins/dsh-plugin-subscriptions/src/providers/codex-search.ts": {
+    "b121cee14635b00f7891217013e4682493cf96f676710be60722fdf8b862aea3": 1
+  },
+  "fork-plugins/dsh-plugin-subscriptions/src/providers/rate-limit.ts": {
+    "e941ee9320fe4d2fc699606b2b7d7d93900fc398eb12a6413476fc0cb2202a8c": 1
+  },
+  "fork-plugins/dsh-plugin-subscriptions/src/translate/antigravity.ts": {
+    "b121cee14635b00f7891217013e4682493cf96f676710be60722fdf8b862aea3": 1,
+    "ef4fc6d4782ef8a0ad3ad66f758984c986d4ce1555068e86c5853d3801186049": 1
+  },
+  "fork-plugins/dsh-plugin-subscriptions/test/tool-registration.spec.ts": {
+    "94bbd3b3baceeadff26be2967f98f06204882264e8b7ddab8c7ad29c43664fe7": 1
+  },
+  "fork-plugins/dsh-plugin-subscriptions/test/tools.spec.ts": {
+    "cfbdda932db325147373016157170faed3e5c988aacd64887a5bdbe5f8f2f359": 1,
+    "d022f3c83ccd16c130388e4cfb5b50bddd40f3ebfe42ee6371a8a21c4cbaad8d": 1
+  },
+  "fork-plugins/dsh-plugin-subscriptions/test/translate/antigravity.spec.ts": {
+    "6085bfdcafb3d9cc96d59d9cb3a9f6669822157382e5839d3f79a17d25771893": 1,
+    "a4dc613ee3924ec10356fc773f3f39a4380138f2746dfc227b56b9844ed31fb3": 1
+  },
+  "packages/api/session-controller/tests/commands-create-fork.host.spec.ts": {
+    "29652a2e645144cf251bd7cd7e0a16fdfdf08b498fc812292ea34ef0c9558240": 1
+  },
+  "packages/api/session-controller/tests/session-cold.host.spec.ts": {
+    "f3c3b09e93ee52677981d0d1b12a303dac0c02b9c6f18a286084dd2b142ac696": 1
+  },
+  "packages/api/session-controller/tests/session-fork.host.spec.ts": {
+    "aacb462361718716b23e84aa15064aaecd4c7010e92a7386cd9f1b713dea815c": 1
+  },
+  "packages/api/session-controller/tests/session-history-journal.host.spec.ts": {
+    "7a4d1a6f4490862bd6091d3fcbc1212107b03dbfc40b6682c1318b432c01c28d": 1
+  },
+  "packages/api/session-controller/tests/transport.host.spec.ts": {
+    "dc2f3b946d1994a23ad82426c87326a6c50a477719f9ae1b4687087522d9571b": 1
+  },
+  "packages/api/tool-session-message/tests/loader-composition.spec.ts": {
+    "2cfd165f10654030b0b5ee78dac67d7186e97c62b72a5db77921980a372cb2f4": 1,
+    "4a0ba2cb3145b4d83e04573aa5fe433cffd50b1595b8050ed642ee0883ac0e1b": 1,
+    "4cf8f57662cb2bbd3910a7dd5107cb3398cf7b83ab0479bf55beb5e2216b61b7": 1,
+    "5922ba06bd17efae251a20a07be266f5de38a9e6ecb029a0feaab7f671e5808e": 1,
+    "d31d492f1942d1bda9fa14f02d759322da056de26c30f3a6e6972cabc1d179e2": 1
+  },
+  "packages/api/tool-session-message/tests/tool-session-message.spec.ts": {
+    "13acc837267f28c69a8f74e9d1beaf1cda35e980585603dacfc9abe62b6bb055": 1,
+    "3ce61d91854074d6fac89126535ce42390f9ced123336f194592a17c833d5ca4": 1,
+    "665fb1c3cf4e1adb2ed8262d8e9e5ad82a426d116603a95b4de587d77ed5435d": 2,
+    "79435ee04d94797021947c057e61430e251f4cfc71d0ed74544943d48b2dc50c": 1,
+    "904e279d903e1a656fa9f1cfa6e26e1a7ff8260b6c71dfd0f70ed16818da4e0a": 1,
+    "bc3deb3040492f391e3303560ab2b671870ffd56b64037afb28a4d53089bb215": 1
+  },
+  "packages/session-query/session-query-sqlite/tests/sqlite.spec.ts": {
+    "1f84088d7aeba66199cd1a5147242cbe12e8a0580f04993a2ac27514f1e95b2e": 3
+  },
+  "packages/session/session-persistence-jsonl/tests/jsonl.spec.ts": {
+    "502bfa35e9b663010db178709bb79bc53c4f604fd034920df68de6045a547b35": 1,
+    "aef8c03b087e3488929119026dfffc405ce926cd0007469f4c84cd80350a8f53": 1,
+    "b40f3bbda2adba664b54271ea4b552ffb2c78a239d39d8b1e882cca164d21c4f": 3,
+    "c9025045b38f72a77656f5c78c6d49c1dd8b5c7a5a837d41c6075066adb43e94": 1
+  },
+  "packages/session/session-persistence-jsonl/tests/zstd.spec.ts": {
+    "b40f3bbda2adba664b54271ea4b552ffb2c78a239d39d8b1e882cca164d21c4f": 3
+  }
+}

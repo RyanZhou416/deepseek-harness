@@ -66,14 +66,14 @@ describe('jobs-local through a real Loader composition', () => {
     })).toThrow('(limit: 1)')
 
     settle({ status: 'killed' })
-    await Promise.resolve()
+    await context.jobs.wait(firstId, 1000)
     context.jobs.read(firstId)
     const secondId = context.jobs.start({
       kind: 'bash',
       label: 'replacement loader job',
       run: () => ({ cancel: () => {}, done: Promise.resolve({ status: 'completed' }) }),
     })
-    await Promise.resolve()
+    await context.jobs.wait(secondId, 1000)
     expect(() => context!.jobs.get(firstId)).toThrow(`unknown job ${firstId}`)
     expect(context.jobs.get(secondId).status).toBe('completed')
   })

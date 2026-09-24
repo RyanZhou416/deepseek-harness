@@ -39,7 +39,11 @@ class MemorySettings extends SettingsProvider {
 // branded cast satisfies the SettingsNamespace type face (see
 // src/host/settings.ts).
 const ns = SETTINGS_NAMESPACE as SettingsNamespace
-const legacySettings = (ctx: Context): MemorySettings => ctx.get('settings') as unknown as MemorySettings
+const legacySettings = (ctx: Context): MemorySettings => {
+  const service = ctx.get('settings')
+  if (!(service instanceof MemorySettings)) throw new Error('legacy settings provider is not mounted')
+  return service
+}
 
 /** Poll until the inject callback inside installSettings has registered the namespace. */
 async function untilRegistered(ctx: Context): Promise<void> {

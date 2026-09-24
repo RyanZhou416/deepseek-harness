@@ -17,11 +17,11 @@ import process from 'node:process'
 
 const AGENT_TEAMS = {
   name: '@nanmicoder/dsh-agent-teams',
-  version: '0.1.19-dsh016alpha2.1',
+  version: '0.1.20-dsh017rc1.1',
 }
 const CONTEXT = {
   name: 'dsh-context',
-  version: '0.53.3-dsh016alpha2.1',
+  version: '0.55.0-dsh017rc1.1',
   bounds: {
     maxRequestSteps: 300,
     maxKeptTurns: 60,
@@ -33,7 +33,7 @@ const CONTEXT = {
 }
 const SUBSCRIPTIONS = {
   name: 'dsh-plugin-subscriptions',
-  version: '0.9.2-dsh016alpha2.1',
+  version: '0.9.4-dsh017rc1.1',
 }
 const RETIRED_PACKAGES = ['dshmarket']
 

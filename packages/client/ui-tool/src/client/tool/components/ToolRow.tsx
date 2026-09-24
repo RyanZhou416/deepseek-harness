@@ -6,7 +6,7 @@ import {
   diffTotals,
 } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { PropsRenderSlots, TranslateNS } from '@deepseek-ai/dsh-client-ui-slots'
-import type { OpenFileOptions, UseDisclosure } from '@deepseek-ai/dsh-client-ui-chat/client'
+import type { OpenFileOptions, ToolResultNode, UseDisclosure } from '@deepseek-ai/dsh-client-ui-chat/client'
 import type { MessageImageLoader } from '@deepseek-ai/dsh-client-ui-conversation/client'
 import { CHAT_DIFF_MAX_LINES, type DiffCardModel } from '../models/diff-card-model.ts'
 import { CHAT_READ_MAX_LINES, type ReadCardModel } from '../models/read-card-model.ts'
@@ -20,7 +20,7 @@ import {
 } from '../models/primitive-labels.ts'
 import type { AskQuestionCardModel } from '../models/ask-question-card-model.ts'
 import {
-  formatToolBody, type ToolRowState, type ToolRowVariant,
+  formatToolBody, hasResultText, resultText, type ToolRowState, type ToolRowVariant,
 } from '../models/tool-call-model.ts'
 import type { WebCardModelProps } from '../models/web-card-model.ts'
 import { AskQuestionCard } from './AskQuestionCard.tsx'
@@ -49,6 +49,8 @@ export interface ToolRowProps {
   bodyRaw?: string | null | undefined
   /** Flattened result text for the expanded Output section; null/absent = no output section. */
   output?: string | null | undefined
+  /** Settled generic result flattened only when its Output section opens. */
+  outputNode?: ToolResultNode | null | undefined
   /** Ask-user transcript card; card fields are mutually exclusive and replace text sections. */
   askQuestion?: AskQuestionCardModel | null | undefined
   /** Error first line shown as the collapsed summary on an error row; null/absent = keep `summary`. */
@@ -120,6 +122,7 @@ export const ToolRow = memo(function ToolRow({
   summarySuffix,
   bodyRaw,
   output,
+  outputNode,
   askQuestion,
   errorSummary,
   terminal,
@@ -157,10 +160,16 @@ export const ToolRow = memo(function ToolRow({
   const askQuestionBody = askQuestion ?? null
   const detailsBody = details ?? null
   const inputRaw = bodyRaw ?? null
-  const outputText = output ?? null
   const card = askQuestionBody ?? terminalBody ?? diffBody ?? readBody ?? imageBody ?? searchBody ?? webBody ?? detailsBody
-  const expandable = state !== 'preparing' && (inputRaw !== null || outputText !== null || card !== null)
+  const hasOutput = output !== undefined && output !== null
+    || outputNode !== undefined && outputNode !== null && hasResultText(outputNode)
+  const expandable = state !== 'preparing' && (inputRaw !== null || hasOutput || card !== null)
   const open = expanded && expandable
+  const outputText = useMemo(() => {
+    if (!open || card !== null) return null
+    if (output !== undefined) return output
+    return outputNode === undefined || outputNode === null ? null : resultText(outputNode) || null
+  }, [card, open, output, outputNode])
   const bodyText = useMemo(
     () => open && card === null && inputRaw !== null ? formatToolBody(variant, inputRaw) : null,
     [card, inputRaw, open, variant],

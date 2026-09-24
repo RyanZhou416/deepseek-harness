@@ -188,6 +188,17 @@ export function resultText(node: ToolResultNode): string {
   return parts.join('\n')
 }
 
+/** Whether a result would produce an expanded output section without flattening it.
+ * @param node - settled result to inspect.
+ * @returns whether its displayed output would be nonempty.
+ */
+export function hasResultText(node: ToolResultNode): boolean {
+  if (node.content.length === 0) return node.error !== undefined
+  if (node.content.length > 1) return true
+  const first = node.content[0]
+  return first !== undefined && (first.type !== 'text' || first.text !== '')
+}
+
 function parseArgs(argsRaw: string): unknown {
   try {
     return JSON.parse(argsRaw)
@@ -200,6 +211,15 @@ function parseArgs(argsRaw: string): unknown {
 function firstLine(text: string): string {
   const nl = text.indexOf('\n')
   return nl === -1 ? text : text.slice(0, nl)
+}
+
+/** Read a collapsed error line without serializing every result block. */
+function resultFirstLine(node: ToolResultNode): string | null {
+  const first = node.content[0]
+  if (first === undefined) return node.error === undefined ? null : `${node.error.name}: ${node.error.code}`
+  if (first.type !== 'text') return '{'
+  if (first.text !== '') return firstLine(first.text)
+  return node.content.length > 1 ? '' : null
 }
 
 function pickString(args: Record<string, unknown>, keys: readonly string[]): string | undefined {
@@ -252,7 +272,11 @@ function deriveFilePath(variant: ToolRowVariant, argsRaw: string): string | unde
   return picked === undefined ? undefined : firstLine(picked)
 }
 
-/** Format arguments only when a generic Tool row expands. */
+/** Format arguments only when a generic Tool row expands.
+ * @param variant - selected Tool presentation.
+ * @param argsRaw - original Tool arguments.
+ * @returns expanded input text, or null for empty input.
+ */
 export function formatToolBody(variant: ToolRowVariant, argsRaw: string): string | null {
   if (argsRaw === '') return null
   const parsed = parseArgs(argsRaw)
@@ -289,8 +313,8 @@ export function toolRowModel(toolName: string, block: ToolCallBlock, cwd?: strin
   // The empty string is "no text" for both derived result fields: a settled
   // call with blank content has nothing to expand, and a blank first line
   // would erase the collapsed error row's summary slot.
-  const output = done ? (resultText(block) || null) : null
-  const errorSummary = state === 'error' && output !== null ? firstLine(output) : null
+  let cachedOutput: string | null | undefined
+  const errorSummary = state === 'error' && done ? resultFirstLine(block) : null
   const bodyRaw = argsRaw === '' ? null : argsRaw
   return {
     variant,
@@ -298,7 +322,10 @@ export function toolRowModel(toolName: string, block: ToolCallBlock, cwd?: strin
     summary,
     filePath: argsRaw === null ? undefined : deriveFilePath(variant, argsRaw),
     bodyRaw,
-    output,
+    get output() {
+      if (cachedOutput === undefined) cachedOutput = done ? resultText(block) || null : null
+      return cachedOutput
+    },
     errorSummary,
     autoReviewDenial: deriveAutoReviewDenial(block),
     state,

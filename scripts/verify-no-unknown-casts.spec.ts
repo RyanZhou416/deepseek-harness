@@ -7,6 +7,7 @@ import { countUnknownCasts, findUnknownCasts, scanUnknownCasts, verifyNoUnknownC
 
 const roots: string[] = []
 const baselinePath = 'scripts/no-unknown-casts.baseline.json'
+const importedBaselinePath = 'scripts/no-unknown-casts.imported-baseline.json'
 const sourcePath = 'packages/example/src/index.ts'
 const assertion = 'const result = value as unknown\n'
 
@@ -114,6 +115,21 @@ describe('unknown assertion syntax', () => {
 })
 
 describe('unknown assertion inventory', () => {
+  it('grandfathers only exact imported syntax and still rejects a new occurrence', () => {
+    const root = fixture()
+    write(root, sourcePath, assertion)
+    const imported = `${JSON.stringify(countUnknownCasts(findUnknownCasts(sourcePath, assertion)), null, 2)}\n`
+    write(root, importedBaselinePath, imported)
+    expect(verifyNoUnknownCasts(root)).toBe(1)
+    write(root, sourcePath, `${assertion}${assertion}`)
+    expect(() => verifyNoUnknownCasts(root)).toThrow(/new assertions to unknown/u)
+    write(root, sourcePath, 'export {}\n')
+    expect(() => verifyNoUnknownCasts(root)).toThrow(/remove retired baseline entries/u)
+    expect(verifyNoUnknownCasts(root, true)).toBe(0)
+    expect(readFileSync(join(root, importedBaselinePath), 'utf8')).toBe('{}\n')
+    expect(readFileSync(join(root, baselinePath), 'utf8')).toBe('{}\n')
+  })
+
   it('accepts recorded assertions after formatting without rewriting the baseline', () => {
     const root = fixture()
     write(root, sourcePath, assertion)

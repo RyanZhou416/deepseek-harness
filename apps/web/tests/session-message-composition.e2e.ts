@@ -17,20 +17,21 @@ it('scopes Session-addressed tools to full Web Agent presets', async () => {
   scaffold = await launchWebScaffold()
   expect(scaffold.ctx.tools.schemas()).toEqual([])
 
-  const standardId = SessionId('session-message-standard')
-  await scaffold.ctx.sessionController.create({
-    sessionId: standardId,
-    cwd: scaffold.workspaceCwd,
-    agentPreset: 'standard',
-  })
-  const standard = scaffold.ctx.agents.get(standardId)
-  if (standard === undefined) throw new Error('standard Agent was not created')
-  const standardTools = scaffold.ctx.tools.schemas(standard).map(schema => schema.name)
-  expect(standardTools).toEqual(expect.arrayContaining([
-    'session_find',
-    'session_message_status',
-    'session_send_message',
-  ]))
+  for (const preset of ['standard', 'ptc', 'cordis'] as const) {
+    const id = SessionId(`session-message-${preset}`)
+    await scaffold.ctx.sessionController.create({
+      sessionId: id,
+      cwd: scaffold.workspaceCwd,
+      agentPreset: preset,
+    })
+    const agent = scaffold.ctx.agents.get(id)
+    if (agent === undefined) throw new Error(`${preset} Agent was not created`)
+    expect(scaffold.ctx.tools.schemas(agent).map(schema => schema.name)).toEqual(expect.arrayContaining([
+      'session_find',
+      'session_message_status',
+      'session_send_message',
+    ]))
+  }
 
   const minimalId = SessionId('session-message-minimal')
   await scaffold.ctx.sessionController.create({

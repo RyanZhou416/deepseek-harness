@@ -548,6 +548,21 @@ describe('JsonlSessionPersistence: default Zstandard encoding', () => {
     expect(readHeader).toHaveBeenCalledTimes(2)
   })
 
+  it('revalidates a replaced generation header instead of pairing old metadata with a new revision', async () => {
+    const root = await freshRoot()
+    const ctx = await mount(root)
+    const original = meta('replaced-listed-header')
+    await writeLog(ctx.sessionPersistence, original, oneTurnLog())
+    await expect(ctx.sessionPersistence.list()).resolves.toMatchObject([{ header: original }])
+
+    const replacement = { ...original, createdAt: original.createdAt + 1 }
+    await writeFile(
+      logPath(root, original.cwd, original.id, 'zstd'),
+      await compressZstdFrame(`${JSON.stringify(toHeaderLine(replacement))}\n`),
+    )
+    await expect(ctx.sessionPersistence.list()).resolves.toMatchObject([{ header: replacement }])
+  })
+
   it('shares one metadata scan while cancellation remains caller-local', async () => {
     const root = await freshRoot()
     const ctx = await mount(root)

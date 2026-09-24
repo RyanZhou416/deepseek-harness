@@ -199,6 +199,15 @@ interface CachedListedHeader {
   readonly header: SessionHeader
 }
 
+/** One selected artifact whose header was validated against its physical revision. */
+interface ListedArtifact {
+  readonly header: SessionHeader
+  readonly path: string
+  readonly selected: ResolvedJsonlGeneration
+  readonly revision: PersistenceRevision
+  readonly sourceVersion: number
+}
+
 /** Build the stat-derived best-effort change token shared by full and lightweight reads. */
 function fileRevision(identity: JsonlPhysicalIdentity): PersistenceRevision {
   return SessionPersistenceRevision([
@@ -291,6 +300,8 @@ class JsonlSessionPersistence extends SessionPersistence {
   private readonly currentReads = new Map<SessionId, CurrentRead>()
   /** Validated headers retained against the exact stat-derived generation revision. */
   private readonly listedHeaders = new Map<string, CachedListedHeader>()
+  /** Concurrent metadata readers share one scan without sharing caller cancellation. */
+  private listing: Promise<ListedArtifact[]> | undefined
 
   constructor(ctx: Context, public config: Config) {
     super(ctx)
@@ -318,6 +329,7 @@ class JsonlSessionPersistence extends SessionPersistence {
       for (const timer of this.coldLogMemoTimers.values()) clearTimeout(timer)
       this.coldLogMemoTimers.clear()
       this.coldLogMemo.clear()
+      this.listedHeaders.clear()
     }, 'session-persistence-jsonl.coldLogMemo')
   }
 
@@ -484,7 +496,7 @@ class JsonlSessionPersistence extends SessionPersistence {
       const header = await this.readListedHeader(selected, id, revision, options?.signal)
       if (header === undefined) return undefined
       return {
-        header,
+        header: structuredClone(header),
         revision: selected.sourceVersion < SESSION_FORMAT_VERSION
           ? SessionPersistenceRevision(`${fileRevision(identity)}:${await this.historicalCorpusRevision(options?.signal)}`)
           : fileRevision(identity),
@@ -517,14 +529,19 @@ class JsonlSessionPersistence extends SessionPersistence {
     for (const artifact of artifacts) {
       signal?.throwIfAborted()
       try {
-        const identity = await stat(artifact.path, { bigint: true })
+        const identity = await stat(artifact.selected.sourcePath, { bigint: true })
         signal?.throwIfAborted()
-        listed.add(artifact.header.id)
+        const revision = fileRevision(identity)
+        const header = artifact.revision === revision
+          ? artifact.header
+          : await this.readListedHeader(artifact.selected, undefined, revision, signal)
+        if (header === undefined) continue
+        listed.add(header.id)
         snapshots.push({
-          header: artifact.header,
+          header: structuredClone(header),
           revision: artifact.sourceVersion < SESSION_FORMAT_VERSION
-            ? SessionPersistenceRevision(`${fileRevision(identity)}:${corpusRevision}`)
-            : fileRevision(identity),
+            ? SessionPersistenceRevision(`${revision}:${corpusRevision}`)
+            : revision,
           sizeBytes: Number(identity.size),
         })
       } catch (error: unknown) {
@@ -1121,21 +1138,41 @@ class JsonlSessionPersistence extends SessionPersistence {
     return hash.digest('hex')
   }
 
-  private async listArtifacts(
-    signal?: AbortSignal,
-  ): Promise<Array<{ header: SessionHeader; path: string; sourceVersion: number }>> {
+  private async listArtifacts(signal?: AbortSignal): Promise<ListedArtifact[]> {
     signal?.throwIfAborted()
     await this.ensureRootEncoding()
     signal?.throwIfAborted()
-    const artifacts: Array<{ header: SessionHeader; path: string; sourceVersion: number }> = []
+    if (this.listing === undefined) {
+      const scan = this.scanArtifacts()
+      this.listing = scan
+      void scan.finally(() => {
+        if (this.listing === scan) this.listing = undefined
+      }).catch(() => undefined)
+    }
+    return waitWithAbort(this.listing, signal, 'session metadata scan')
+  }
+
+  /** Select and validate one header per physical Session directory. */
+  private async scanArtifacts(): Promise<ListedArtifact[]> {
+    const artifacts: ListedArtifact[] = []
     const ids = new Set<SessionId>()
-    for (const selected of await this.listGenerations(signal)) {
-      signal?.throwIfAborted()
+    const selectedGenerations = await this.listGenerations()
+    const selectedPaths = new Set(selectedGenerations.map(selected => selected.sourcePath))
+    for (const path of this.listedHeaders.keys()) {
+      if (!selectedPaths.has(path)) this.listedHeaders.delete(path)
+    }
+    for (const selected of selectedGenerations) {
       let header: SessionHeader | undefined
+      let revision: PersistenceRevision
       try {
-        header = await this.readGenerationHeader(selected, undefined, signal)
+        const identity = await stat(selected.sourcePath, { bigint: true })
+        revision = fileRevision(identity)
+        header = await this.readListedHeader(selected, undefined, revision)
       } catch (error: unknown) {
-        if (error instanceof SessionFormatUnsupportedError || error instanceof SessionPersistenceCorruptionError) continue
+        if (isENOENT(error) || error instanceof SessionFormatUnsupportedError || error instanceof SessionPersistenceCorruptionError) {
+          this.listedHeaders.delete(selected.sourcePath)
+          continue
+        }
         throw error
       }
       if (header === undefined) {
@@ -1145,9 +1182,8 @@ class JsonlSessionPersistence extends SessionPersistence {
         throw new Error(`duplicate JSONL session id "${header.id}" appears in multiple project directories`)
       }
       ids.add(header.id)
-      artifacts.push({ header, path: selected.sourcePath, sourceVersion: selected.sourceVersion })
+      artifacts.push({ header, path: selected.sourcePath, selected, revision, sourceVersion: selected.sourceVersion })
     }
-    signal?.throwIfAborted()
     return artifacts
   }
 

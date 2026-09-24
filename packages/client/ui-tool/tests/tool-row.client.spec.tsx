@@ -4,6 +4,7 @@ import { useDisclosure } from '@deepseek-ai/dsh-client-ui-chat/src/client/chat/u
 import { cleanup, fireEvent, render } from '@testing-library/react'
 
 import type { StartedToolCall, ToolResultNode } from '@deepseek-ai/dsh-client-ui-chat/client'
+import { AttachmentId } from '@deepseek-ai/dsh-attachment'
 import { makeTranslate } from '@deepseek-ai/dsh-client-test-runtime'
 import { zh as commonZh } from '@deepseek-ai/dsh-client-locale/src/locales/zh.ts'
 import { localizeAutoReviewDenial, normalizeAutoReviewReason } from '../src/client/tool/models/auto-review-denial.ts'
@@ -497,6 +498,30 @@ describe('GenericToolCard', () => {
   const props = (toolName: string, block: StartedToolCall | ToolResultNode): GenericToolCardProps => ({
     loadImage: vi.fn(() => Promise.reject(new Error('not used'))),
     useDisclosure, callId: 'c1', toolName, ...('kind' in block ? { phase: 'result' as const, block: block } : { phase: block.phase, block: block }), openFile: vi.fn(), t,
+  })
+
+  it('keeps generic result serialization off the collapsed path', () => {
+    let serializations = 0
+    const file = { type: 'file' as const, attachment: {
+      attachmentId: AttachmentId('sha256:report'), name: 'report.txt', bytes: 1,
+    }, toJSON: () => {
+      serializations++
+      return { type: 'file', name: 'report.txt' }
+    } }
+    const settled = result({ call: { name: 'mystery', argsRaw: '{"note":"x"}' }, content: [file] })
+    const model = toolRowModel('mystery', settled)
+    expect(serializations).toBe(0)
+    expect(model.output).toContain('report.txt')
+    expect(model.output).toContain('report.txt')
+    expect(serializations, 'the row model memoizes an explicitly requested output').toBe(1)
+
+    serializations = 0
+    const view = render(<GenericToolCard {...props('mystery', settled)} />)
+    expect(serializations).toBe(0)
+    expect(view.queryByText(/report\.txt/)).toBeNull()
+    fireEvent.click(view.getByRole('button'))
+    expect(serializations).toBe(1)
+    expect(view.getByText(/report\.txt/)).toBeTruthy()
   })
 
   it('renders the classified variant row from the frozen slice', () => {
