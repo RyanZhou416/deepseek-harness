@@ -4054,6 +4054,14 @@ export const EVENT_API: readonly EventApiEntry[] = [
     parameters: [],
   },
   {
+    name: 'subagent/child-preset',
+    mode: 'waterfall',
+    signature: '\'subagent/child-preset\'(payload: { parent: Agent; child: Agent }, next: () => Promise<string | undefined>): Promise<string | undefined>',
+    summary: 'Select a fresh in-process child\'s preset before its scoped plugins mount.',
+    description: 'Select a fresh in-process child\'s preset before its scoped plugins mount. A listener may return an id or call `next()` to delegate. An unavailable choice leaves the child on its parent\'s preset.',
+    parameters: [{ name: 'payload', description: '.child - unpublished child Agent with resolved model options.' }],
+  },
+  {
     name: 'subagent/end',
     mode: 'emit',
     signature: '\'subagent/end\'(this: Scoped<SubagentRuntime>, info: SubagentRunEndInfo): void',

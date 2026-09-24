@@ -650,6 +650,33 @@ describe('SubagentRuntime.startContinuable', () => {
     })
   })
 
+  it('rolls back an unpublished child cancelled during preset selection', async () => {
+    const { ctx, parent } = await setup([textResponse('unused')])
+    const controller = new AbortController()
+    const selection = Promise.withResolvers<string | undefined>()
+    let entered = false
+    ctx.provide('agentPresets', {
+      composedPreset: () => 'standard',
+      composeFrom: () => 'standard',
+      mount: async (_scope: Context, id: string) => ({ id }),
+    } as never)
+    ctx.on('subagent/child-preset', () => {
+      entered = true
+      return selection.promise
+    })
+    const pending = ctx.subagents.startContinuable(startSpec(parent, 'spawn', controller.signal))
+    try {
+      await vi.waitFor(() => { expect(entered).toBe(true) }, { timeout: 5_000 })
+      controller.abort(new Error('cancel during preset selection'))
+      selection.resolve('special')
+      await expect(pending).rejects.toThrow()
+      await vi.waitFor(() => { expect(ctx.agents.list().map(agent => agent.id)).toEqual([parent.id]) })
+    } finally {
+      selection.resolve(undefined)
+      await pending.catch(() => {})
+    }
+  })
+
   it('rolls the child back when the signal aborts between publication and acceptance', async () => {
     const { ctx, parent } = await setup([textResponse('unused')])
     const controller = new AbortController()

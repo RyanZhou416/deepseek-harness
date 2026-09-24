@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto'
 import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { readFileSync } from 'node:fs'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import { dirname, join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
 import {
@@ -46,7 +46,14 @@ const CLAUDE_CODE_PACKAGE_DIR = join(REPO_ROOT, 'packages/subagent/subagent-clau
 /** The installation anchor whose dependency surface the runtime resolution mirrors. */
 const INSTALL_ANCHOR = join(REPO_ROOT, 'apps/cli/package.json')
 const MINIMAL_PROMPT = 'You are a helpful software engineer assistant.'
-const MINIMAL_BASH_DESCRIPTION = `Run commands in a bash shell
+const SHELL_TOOL = process.platform === 'win32' ? 'pwsh' : 'bash'
+const MINIMAL_SHELL_DESCRIPTION = process.platform === 'win32' ? `Run commands in a PowerShell shell
+* When invoking this tool, the contents of the "command" parameter does NOT need to be XML-escaped.
+* You don't have access to the internet via this tool.
+* State is persistent across command calls and discussions with the user.
+* Use native Windows paths (C:\\...) and $env:NAME variables; this is PowerShell, not bash.
+* Please avoid commands that may produce a very large amount of output.
+* Please run long lived commands in the background, e.g. 'Start-Job' or start a server with Start-Process.` : `Run commands in a bash shell
 * When invoking this tool, the contents of the "command" parameter does NOT need to be XML-escaped.
 * Network access depends on the task environment. Prefer configured mirrors/proxies when they are available.
 * State is persistent across command calls and discussions with the user.
@@ -262,11 +269,12 @@ describe('the shipped Web composition', () => {
       // excluded for the reason the TUI composition e2e excludes them — they
       // depend on ripgrep being present on the machine.
       expect(toolNames(ctx, handle.agent).filter(name => name !== 'glob' && name !== 'grep')).toEqual([
-        'ask_user_question', 'bash', 'create_goal', 'edit', 'exit_plan_mode',
-        'get_goal', 'interrupt_agent', 'job_kill', 'job_list', 'job_output', 'list_agents', 'present', 'read', 'read_image', 'send_message', 'skill',
+        'ask_user_question', SHELL_TOOL, 'create_goal', 'edit', 'exit_plan_mode',
+        'get_goal', 'interrupt_agent', 'job_kill', 'job_list', 'job_output', 'list_agents', 'present', 'read', 'read_image', 'send_message',
+        'session_find', 'session_message_status', 'session_send_message', 'skill',
         'subagent', 'subagent_fork', 'todo_write', 'update_goal', 'web_fetch', 'web_search',
         'workflow', 'write',
-      ])
+      ].sort())
       expect(ctx.commands.find(handle.agent, 'goal')).toBeDefined()
     } finally {
       await handle.dispose()
@@ -317,8 +325,8 @@ describe('the shipped Web composition', () => {
       expect(assembly.sections).toEqual([
         { name: 'deployment:persona-prefix', text: MINIMAL_PROMPT },
       ])
-      expect(assembly.tools.map(tool => tool.name)).toEqual(['bash'])
-      expect(assembly.tools.find(tool => tool.name === 'bash')?.description).toBe(MINIMAL_BASH_DESCRIPTION)
+      expect(assembly.tools.map(tool => tool.name)).toEqual([SHELL_TOOL])
+      expect(assembly.tools.find(tool => tool.name === SHELL_TOOL)?.description).toBe(MINIMAL_SHELL_DESCRIPTION)
       expect(ctx.commands.find(handle.agent, 'goal')).toBeUndefined()
       // serviceFor reports preset-owned providers; unisolated consumers inherit the host fs.
       expect(ctx.agentPresets.serviceFor(handle.agent, 'fs')).toBeUndefined()
@@ -341,7 +349,7 @@ describe('the shipped Web composition', () => {
       setup: agentCtx => ctx.agentPresets.mount(agentCtx, 'minimal').then(() => undefined),
     })
     try {
-      expect(toolNames(ctx, minimal.agent)).toEqual(['bash'])
+      expect(toolNames(ctx, minimal.agent)).toEqual([SHELL_TOOL])
       expect(toolNames(ctx, full.agent).length).toBeGreaterThan(10)
 
       await minimal.dispose()
@@ -367,7 +375,7 @@ describe('the shipped Web composition', () => {
       for (const removed of ['cordis_define', 'cordis_run', 'cordis_stop', 'cordis_undefine', 'cordis_inspect_self']) {
         expect(tools).not.toContain(removed)
       }
-      expect(tools).toEqual(expect.arrayContaining(['bash', 'read', 'edit', 'skill']))
+      expect(tools).toEqual(expect.arrayContaining([SHELL_TOOL, 'read', 'edit', 'skill']))
       expect(tools).not.toContain('str_replace_editor')
       expect(ctx.commands.find(handle.agent, 'goal')).toBeDefined()
 
@@ -422,7 +430,7 @@ describe('the shipped Web composition', () => {
       // The presentation is this agent's alone: the deployment default is
       // native, and the session composed from `standard` still sees it.
       const nativeAssembly = await ctx.systemPrompt.assemble({ scope: native.agent })
-      expect(nativeAssembly.tools.map(tool => tool.name)).toContain('bash')
+      expect(nativeAssembly.tools.map(tool => tool.name)).toContain(SHELL_TOOL)
       expect(nativeAssembly.tools.map(tool => tool.name)).not.toContain('run_code')
       expect(nativeAssembly.sections.some(section => section.name === 'tools:sdk')).toBe(false)
     } finally {
@@ -507,7 +515,7 @@ describe('the shipped Web composition', () => {
       // stays the preset's choice — minimal mounts no `tool-skill`, so its
       // tool table has no loader even though the global layer is readable.
       expect((await ctx.skills.list({ scope: handle.agent })).map(skill => skill.name)).toContain('dsh-badge')
-      expect(toolNames(ctx, handle.agent)).toEqual(['bash'])
+      expect(toolNames(ctx, handle.agent)).toEqual([SHELL_TOOL])
     } finally {
       await handle.dispose()
     }
@@ -683,7 +691,7 @@ describe('a user preset declared from the shipped cordis rows', () => {
         expect(queried.isError).toBe(false)
         const tools = (JSON.parse(resultText(queried)) as { data: { tools: Array<{ name: string }> } }).data.tools
         expect(tools.map(tool => tool.name)).toEqual(expect.arrayContaining([
-          'bash', 'cordis_inspect_list', 'cordis_inspect_query', 'plugin_manager',
+          SHELL_TOOL, 'cordis_inspect_list', 'cordis_inspect_query', 'plugin_manager',
         ]))
 
         // The `Config` provider reads the booted profile tree: the shipped `tools` row declares a Config,
@@ -801,15 +809,13 @@ describe('a delegated child', () => {
     const child = await parent.agent.ctx.agents.create({
       sessionId: SessionId('preset-child'),
       meta: childSessionMeta(parent.agent, 1, false),
-      setup: (agentCtx) => {
-        applyChildComposition(agentCtx, parent.agent, {})
-      },
+      setup: (agentCtx, agent) => applyChildComposition(agentCtx, parent.agent, agent, {}),
     })
     try {
       expect(toolNames(ctx, child.agent)).toEqual(toolNames(ctx, parent.agent))
       // The shipped `standard` preset is the whole coding agent; an empty
       // child here is the defect, and equality alone would not catch it.
-      expect(toolNames(ctx, child.agent)).toContain('bash')
+      expect(toolNames(ctx, child.agent)).toContain(SHELL_TOOL)
       expect(child.agent.session.header.agentPreset).toBe('standard')
     } finally {
       await child.dispose()
@@ -827,9 +833,7 @@ describe('a delegated child', () => {
     const child = await parent.agent.ctx.agents.create({
       sessionId: SessionId('preset-child-switch'),
       meta: childSessionMeta(parent.agent, 1, false),
-      setup: (agentCtx) => {
-        applyChildComposition(agentCtx, parent.agent, {})
-      },
+      setup: (agentCtx, agent) => applyChildComposition(agentCtx, parent.agent, agent, {}),
     })
     try {
       // The live scope chain is the authority, not the parent's creation
@@ -841,6 +845,96 @@ describe('a delegated child', () => {
       await parent.dispose()
     }
   })
+})
+
+describe('the fork ChatGPT child preset row', () => {
+  it('selects before child creation resolves and logs the selection through the shipped Web composition', async () => {
+    const home = await mkdtemp(join(tmpdir(), 'dsh-chatgpt-child-preset-'))
+    const script = pathToFileURL(join(REPO_ROOT, 'fork-runtime/web/chatgpt-subagent-preset.cjs')).href
+    let forkCtx: Context | undefined
+    let parent: Awaited<ReturnType<Context['agents']['create']>> | undefined
+    let child: Awaited<ReturnType<Context['agents']['create']>> | undefined
+    try {
+      const live = await bootWeb(home, [{ insert: [{
+        id: 'chatgpt-subagent-preset', name: script,
+        config: { preset: 'minimal', providers: ['codex'], modelPattern: '^gpt-' },
+      }] }])
+      forkCtx = live
+      parent = await live.agents.create({
+        sessionId: SessionId('fork-chatgpt-parent'),
+        meta: { agentPreset: 'standard' },
+        setup: agentCtx => live.agentPresets.mount(agentCtx, 'standard').then(() => undefined),
+      })
+      const parentAgent = parent.agent
+      child = await parentAgent.ctx.agents.create({
+        sessionId: SessionId('fork-chatgpt-child'),
+        meta: childSessionMeta(parentAgent, 1, false),
+        agentOptions: { provider: 'codex', model: 'gpt-6' },
+        setup: (agentCtx, agent) => applyChildComposition(agentCtx, parentAgent, agent, {}),
+      })
+      expect(live.agentPresets.composedPreset(parentAgent.ctx)).toBe('standard')
+      expect(live.agentPresets.composedPreset(child.agent.ctx)).toBe('minimal')
+      {
+        using observation = await live.sessionQuery.observeSession(child.agent.id, { projectionMode: 'none' })
+        expect(observation.events).toContainEqual(expect.objectContaining({
+          type: 'agent-preset/selected', data: { agentPreset: 'minimal' },
+        }))
+      }
+      await child.dispose()
+      child = undefined
+      child = await parentAgent.ctx.agents.resume({
+        resumeSessionId: SessionId('fork-chatgpt-child'),
+        parentAgent,
+        agentOptions: { provider: 'codex', model: 'gpt-6' },
+        setup: (agentCtx, agent) => applyChildComposition(agentCtx, parentAgent, agent, {}, 'resume'),
+      })
+      expect(live.agentPresets.composedPreset(child.agent.ctx)).toBe('minimal')
+      using resumed = await live.sessionQuery.observeSession(child.agent.id, { projectionMode: 'none' })
+      expect(resumed.events.filter(event => event.type === 'agent-preset/selected')).toHaveLength(1)
+    } finally {
+      if (child !== undefined) await child.dispose()
+      if (parent !== undefined) await parent.dispose()
+      if (forkCtx !== undefined) await forkCtx.fiber.dispose()
+      await rm(home, { recursive: true, force: true })
+    }
+  }, 120_000)
+
+  it('keeps the parent preset when the configured target is unavailable', async () => {
+    const home = await mkdtemp(join(tmpdir(), 'dsh-chatgpt-child-fallback-'))
+    const script = pathToFileURL(join(REPO_ROOT, 'fork-runtime/web/chatgpt-subagent-preset.cjs')).href
+    let forkCtx: Context | undefined
+    let parent: Awaited<ReturnType<Context['agents']['create']>> | undefined
+    let child: Awaited<ReturnType<Context['agents']['create']>> | undefined
+    try {
+      const live = await bootWeb(home, [{ insert: [{
+        id: 'chatgpt-subagent-preset', name: script,
+        config: { preset: 'missing-chatgpt-preset', providers: ['codex'], modelPattern: '^gpt-' },
+      }] }])
+      forkCtx = live
+      parent = await live.agents.create({
+        sessionId: SessionId('fork-chatgpt-fallback-parent'),
+        meta: { agentPreset: 'standard' },
+        setup: agentCtx => live.agentPresets.mount(agentCtx, 'standard').then(() => undefined),
+      })
+      const parentAgent = parent.agent
+      child = await parentAgent.ctx.agents.create({
+        sessionId: SessionId('fork-chatgpt-fallback-child'),
+        meta: childSessionMeta(parentAgent, 1, false),
+        agentOptions: { provider: 'codex', model: 'gpt-6' },
+        setup: (agentCtx, agent) => applyChildComposition(agentCtx, parentAgent, agent, {}),
+      })
+      expect(live.agentPresets.composedPreset(child.agent.ctx)).toBe('standard')
+      {
+        using observation = await live.sessionQuery.observeSession(child.agent.id, { projectionMode: 'none' })
+        expect(observation.events.some(event => event.type === 'agent-preset/selected')).toBe(false)
+      }
+    } finally {
+      if (child !== undefined) await child.dispose()
+      if (parent !== undefined) await parent.dispose()
+      if (forkCtx !== undefined) await forkCtx.fiber.dispose()
+      await rm(home, { recursive: true, force: true })
+    }
+  }, 120_000)
 })
 
 describe('the default preset as a user setting', () => {
@@ -859,7 +953,7 @@ describe('the default preset as a user setting', () => {
       try {
         // `mount()` with no id resolves the effective default. One tool, not
         // `standard`'s catalog: the setting decided the composition.
-        expect(toolNames(ctx, handle.agent)).toEqual(['bash'])
+        expect(toolNames(ctx, handle.agent)).toEqual([SHELL_TOOL])
       } finally {
         await handle.dispose()
       }

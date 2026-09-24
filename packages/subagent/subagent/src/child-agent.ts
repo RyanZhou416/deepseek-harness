@@ -27,6 +27,7 @@ import type {} from '@deepseek-ai/dsh-permission-presets'
 // keeps its model-facing rows on the host plane, where the child already sees
 // them through the tool registry's global layer.
 import type {} from '@deepseek-ai/dsh-agent-preset-registry'
+import type {} from '@deepseek-ai/dsh-session-projection'
 import { delegationDepthOf } from './depth.ts'
 
 /** Thrown when starting a child would exceed the requested depth cap. */
@@ -195,14 +196,38 @@ export const SUBAGENT_DELEGATION_CONTEXT
  * unrepresentable at the call sites.
  * @param childCtx - the child agent's scoped creation context.
  * @param parent - the delegating parent whose composition the child joins.
+ * @param child - unpublished child Agent with its resolved route.
  * @param composition - the per-child persona and tool filter to install.
+ * @param mode - fresh creation may choose a preset; resume uses the logged selection.
+ * @returns settlement after the selected preset and child registrations mount.
  */
-export function applyChildComposition(
+export async function applyChildComposition(
   childCtx: Context,
   parent: Agent,
+  child: Agent,
   composition: ChildComposition,
-): void {
-  childCtx.get('agentPresets')?.composeFrom(childCtx, parent.ctx)
+  mode: 'create' | 'resume' = 'create',
+): Promise<void> {
+  const presets = childCtx.get('agentPresets')
+  if (presets !== undefined) {
+    const inherited = presets.composedPreset(parent.ctx)
+    const requested = (mode === 'create'
+      ? await childCtx.waterfall(childCtx, 'subagent/child-preset', { parent, child }, () => Promise.resolve(undefined))
+      : childCtx.get('sessionProjections')?.stateOf(child.session, 'agentPreset')) ?? undefined
+    if (requested === undefined || requested === inherited) presets.composeFrom(childCtx, parent.ctx)
+    else if (mode === 'resume') await presets.mount(childCtx, requested)
+    else {
+      try {
+        await presets.mount(childCtx, requested)
+        child.session.append('agent-preset/selected', { agentPreset: requested })
+      } catch (error: unknown) {
+        const code = typeof error === 'object' && error !== null && 'code' in error ? error.code : undefined
+        if (code !== 'agent-preset/not-found' && code !== 'agent-preset/invalid') throw error
+        childCtx.logger.warn(`subagent: preset "${requested}" unavailable for child "${child.id}": ${String(error)}`)
+        presets.composeFrom(childCtx, parent.ctx)
+      }
+    }
+  }
   childCtx.systemPrompt.context({
     name: 'subagent:delegation',
     order: childCtx.systemPrompt.getContextOrder('SUBAGENT_DELEGATION'),

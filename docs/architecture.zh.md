@@ -151,6 +151,7 @@ seam 正是替换一个提供方就能改变整个产品的原因。文件系统
 | 添加持久化终端执行 | 注册 `ctx.terminals` 后端和 `dsh-tool-terminal` |
 | 添加用户命令 | 在 `ctx.commands` 上注册；它无需模型轮次即可分派 |
 | 管理后台任务 | 在 `ctx.jobs` 上注册；`job_*` 工具读取或停止任务 |
+| 子级预设 | 响应 `subagent/child-preset`（[subagent](../packages/subagent/subagent/README.zh.md)） |
 | 从外部 webhook 启动 Session | 在 `ctx.webhookRuntime` 上注册可信规则，并挂载提供方适配器 |
 | 添加文件系统访问或策略 | 注册 `ctx.fs` 提供方，或监听 `fs/*` 事件 |
 | 限制所启动的进程 | 使用 `ctx.sandbox` 后端；消费方在启动进程前包装 argv |

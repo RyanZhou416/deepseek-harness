@@ -682,6 +682,28 @@ Source: [`packages/subagent/subagent/src/index.ts`](../../packages/subagent/suba
 
 ### `subagent/*` events
 
+<a id="subagentchild-preset--waterfall"></a>
+
+#### `subagent/child-preset` — waterfall
+
+Select a fresh in-process child's preset before its scoped plugins mount. A listener may return an id or call `next()` to delegate. An unavailable choice leaves the child on its parent's preset.
+
+```ts cordis-catalog
+/**
+ * Select a fresh in-process child's preset before its scoped plugins mount.
+ * A listener may return an id or call `next()` to delegate. An unavailable
+ * choice leaves the child on its parent's preset.
+ * @param payload.parent - delegating Agent.
+ * @param payload.child - unpublished child Agent with resolved model options.
+ * @mode waterfall
+ */
+'subagent/child-preset'(payload: { parent: Agent; child: Agent }, next: () => Promise<string | undefined>): Promise<string | undefined>
+```
+
+Types: [Agent](core.md)
+
+Source: [`packages/subagent/subagent/src/index.ts`](../../packages/subagent/subagent/src/index.ts)
+
 <a id="subagentend--emit"></a>
 
 #### `subagent/end` — emit

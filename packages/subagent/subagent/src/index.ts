@@ -153,6 +153,15 @@ declare module '@deepseek-ai/cordis' {
      */
     'subagent/provider-removed'(name: string): void
     /**
+     * Select a fresh in-process child's preset before its scoped plugins mount.
+     * A listener may return an id or call `next()` to delegate. An unavailable
+     * choice leaves the child on its parent's preset.
+     * @param payload.parent - delegating Agent.
+     * @param payload.child - unpublished child Agent with resolved model options.
+     * @mode waterfall
+     */
+    'subagent/child-preset'(payload: { parent: Agent; child: Agent }, next: () => Promise<string | undefined>): Promise<string | undefined>
+    /**
      * A provider established a published child. For in-process providers,
      * `ctx.agents.get(info.id)` resolves during this notification.
      * Scope-filtered dispatch keys the carrier by the delegating parent, so a
