@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url'
 import { afterEach, describe, expect, it } from 'vitest'
 
 const repositoryRoot = resolve(fileURLToPath(new URL('..', import.meta.url)))
+const buildLauncher = join(repositoryRoot, 'build.cmd')
 const cleanLauncher = join(repositoryRoot, 'clean.cmd')
 const temporaryRoots: string[] = []
 
@@ -20,6 +21,14 @@ describe('Windows fork launchers', () => {
     expect(source).toContain('if exist "node_modules\\tsx\\package.json" goto :clean')
     expect(source).not.toMatch(/\b(?:del|erase|rd|rmdir)\b/i)
     expect(source).not.toContain('DSH_HOME')
+  })
+
+  it('bounds pnpm install workers in both Windows entry points', () => {
+    for (const launcher of [buildLauncher, cleanLauncher]) {
+      const source = readFileSync(launcher, 'utf8')
+      expect(source).toContain('if not defined DSH_PNPM_CHILD_CONCURRENCY set "DSH_PNPM_CHILD_CONCURRENCY=4"')
+      expect(source).toContain('call pnpm install --child-concurrency=%DSH_PNPM_CHILD_CONCURRENCY%')
+    }
   })
 
   it.skipIf(process.platform !== 'win32')('prepares the pinned pnpm shim and runs only the clean script', () => {

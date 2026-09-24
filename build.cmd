@@ -36,7 +36,8 @@ if errorlevel 1 goto :failed
 set "PATH=%DSH_COREPACK_SHIMS%;%PATH%"
 
 set "DSH_STEP=installing project dependencies"
-call pnpm install
+if not defined DSH_PNPM_CHILD_CONCURRENCY set "DSH_PNPM_CHILD_CONCURRENCY=4"
+call pnpm install --child-concurrency=%DSH_PNPM_CHILD_CONCURRENCY%
 if errorlevel 1 goto :failed
 
 set "DSH_STEP=building the project"

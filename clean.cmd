@@ -38,7 +38,8 @@ set "PATH=%DSH_COREPACK_SHIMS%;%PATH%"
 if exist "node_modules\tsx\package.json" goto :clean
 set "DSH_STEP=installing project dependencies"
 echo Project dependencies are missing. Installing them before cleanup...
-call pnpm install
+if not defined DSH_PNPM_CHILD_CONCURRENCY set "DSH_PNPM_CHILD_CONCURRENCY=4"
+call pnpm install --child-concurrency=%DSH_PNPM_CHILD_CONCURRENCY%
 if errorlevel 1 goto :failed
 
 :clean

@@ -198,7 +198,7 @@ Fork 不再维护独立 subagent Queue Remote 或错误码。后续上游合并�
 
 ### Local launch and build scripts
 
-仓库包含 [clean.cmd](clean.cmd)、[build.cmd](build.cmd)、[run.cmd](run.cmd)、[clean.command](clean.command)、[build.command](build.command)、[run.command](run.command) 与 [setup.command](setup.command)。Windows 脚本准备 Corepack/pnpm 和镜像 registry；`clean.cmd` 只调用仓库拥有的 `pnpm run clean`，在依赖缺失时先安装依赖，不删除 `node_modules`、profile 或 Session 数据；`build.cmd` 执行 install + build，`run.cmd` 默认 `DSH_HOME=C:\Project\deepseek-harness-data`，创建 diagnostics，并追加 `--max-old-space-size=16384` 与 Node fatal/uncaught reports 后运行 Web profile。源码 CLI 为 profile 选择 link resolution，使配置的 workspace provider 与其内部 consumer 都解析到 `src/`；构建后入口仍使用 built runtime resolution。真实源码入口工具往返测试负责防止 `src/lib` 模块身份再次分裂。
+仓库包含 [clean.cmd](clean.cmd)、[build.cmd](build.cmd)、[run.cmd](run.cmd)、[clean.command](clean.command)、[build.command](build.command)、[run.command](run.command) 与 [setup.command](setup.command)。Windows 脚本准备 Corepack/pnpm 和镜像 registry；`clean.cmd` 只调用仓库拥有的 `pnpm run clean`，在依赖缺失时先安装依赖，不删除 `node_modules`、profile 或 Session 数据；`build.cmd` 执行 install + build。两者安装依赖时默认限制 pnpm child concurrency 为 4，可用 `DSH_PNPM_CHILD_CONCURRENCY` 覆盖，避免大型升级后同时启动过多 worker；聚焦验证为 `scripts/fork-windows-launchers.spec.ts`。`run.cmd` 默认 `DSH_HOME=C:\Project\deepseek-harness-data`，创建 diagnostics，并追加 `--max-old-space-size=16384` 与 Node fatal/uncaught reports 后运行 Web profile。源码 CLI 为 profile 选择 link resolution，使配置的 workspace provider 与其内部 consumer 都解析到 `src/`；构建后入口仍使用 built runtime resolution。真实源码入口工具往返测试负责防止 `src/lib` 模块身份再次分裂。
 
 macOS 的 `clean.command`、`build.command` 和 `run.command` 共用 `scripts/fork-macos-runtime.sh`。`clean.command` 与 Windows 入口使用同一个仓库 cleaner，保留依赖与用户数据。该 helper 从 `PATH`、Apple Silicon Homebrew 和 Intel Homebrew 路径查找 Node，拒绝不受支持的 Node 23，仅在私有临时目录安装固定 Corepack fallback，并使用仓库锁定的 pnpm；如果更新或中断留下不完整的固定版本缓存，它会在启动 pnpm 前删除该版本目录并重新下载，不需要手动清理。`run.command` 默认 `DSH_HOME=~/.dsh`，创建权限 `0700` 的 diagnostics，启用 Node fatal/uncaught reports，并把 V8 old-space 设为物理内存的一半且限制在 4–16 GiB；`DSH_MAX_OLD_SPACE_MIB` 可显式覆盖。它不会静默重启 Host。
 
@@ -230,15 +230,17 @@ Web profile 插入 `memory-watchdog.cjs`：250 ms 采样、60 s 日志、heap ra
 
 | Package | Installed | Runtime state | Preserve rule |
 |---|---:|---|---|
-| `dshmarket` | — | Removed | Alpha.2 官方 Plugin Manager 接管安装、配置与运行时启停；profile 升级时移除 package 与 bundle |
-| `@nanmicoder/dsh-agent-teams` | `0.1.19-dsh016alpha2.1` | Installed, enabled | 真实 profile 使用仓内固定 artifact；停止 Host 后更新，禁止被 npm latest/next 直接覆盖 |
-| `dsh-plugin-subscriptions` | `0.9.2-dsh016alpha2.1` | Installed | 仓内固定 artifact；凭据文件原地保留，profile 是否启用沿用显式插件配置 |
+| `dshmarket` | — | Removed | 官方 Plugin Manager 接管安装、配置与运行时启停；profile 不恢复旧 package 或 bundle |
+| `@nanmicoder/dsh-agent-teams` | `0.1.20-dsh017rc1.1` | Installed, enabled | 真实 profile 使用仓内固定 artifact；停止 Host 后更新，禁止被 npm latest/next 直接覆盖 |
+| `dsh-plugin-subscriptions` | `0.9.4-dsh017rc1.1` | Installed | 仓内固定 artifact；凭据文件原地保留，profile 是否启用沿用显式插件配置 |
 | `@vlln/dsh-task-status` | Removed | Not installed | 已从依赖、bundle、patch、lockfile 和 `node_modules` 删除；profile 不得恢复 |
-| `dsh-context` | `0.53.3-dsh016alpha2.1` | Installed, enabled | 真实 profile 保留 `300/60/100/400/100/100` bounds；源码与回滚规则见 `fork-plugins/dsh-context/FORK_MAINTENANCE.md` |
+| `dsh-context` | `0.55.0-dsh017rc1.1` | Installed, enabled | 真实 profile 保留 `300/60/100/400/100/100` bounds；源码与回滚规则见 `fork-plugins/dsh-context/FORK_MAINTENANCE.md` |
 | `dsh-shell-command` | Removed | No package or configuration | profile 不安装 |
 | `@deepseek-ai/dsh-subagent-dsh-sdk` | Link to source checkout | Enabled for process provider | 跟随源码构建，worker 数据与主 sessions 隔离 |
 
 AgentTeams、Context 与 Subscriptions 均使用本地 `file:` tgz，不依赖 release-age 例外。profile 不再安装 dshmarket；禁止 wildcard 和未经审计的 `pnpm update --latest`。
+
+2026-09-24 的 Windows profile 升级先将四个配置文件备份到 `C:\Project\deepseek-harness-data\diagnostics\profile-backups\pre-017rc1-20260924-1900`，再用 DSH Plugin Manager 安装三个固定 tgz。`verify-profile`、`verify-patch` 与组合后的 `verify-dump` 均通过；没有修改 Session、附件或凭据。Mac 以独立工作树和临时 DSH_HOME 完成 `build.command`、`setup.command`、205 个真实 symlink Cordis 配置检查及 Web HTTP 200 smoke；运行中的旧实例及其 checkout 未切换。
 
 ### Local AgentTeams package
 
