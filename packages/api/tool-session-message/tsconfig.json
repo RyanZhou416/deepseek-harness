@@ -21,10 +21,16 @@
       "path": "../../core/agent"
     },
     {
+      "path": "../../preset/agent-preset-registry"
+    },
+    {
       "path": "../../llm/llm"
     },
     {
       "path": "../../core/session"
+    },
+    {
+      "path": "../../interaction/permission-presets"
     },
     {
       "path": "../../context/session-reference"
@@ -40,6 +46,9 @@
     },
     {
       "path": "../../subagent/subagent"
+    },
+    {
+      "path": "../../workspace/workspace"
     }
   ]
 }

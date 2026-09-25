@@ -65,7 +65,7 @@ dsh --profile web --no-open --port 8080
 
 每个浏览器会话选择一个随发行版交付的 preset（默认 `standard`）。Agent 预设设置页可更改默认项并编辑预设的子插件；保存结果持久化到 `$DSH_HOME/profiles/web/cordis.patch.yml`。只有 Host 提供可编辑的 profile 时，Creator 的插件管理工具才会启用。
 
-本 fork 的 `standard`、`ptc` 与 `cordis` 预设包含 `session_find`、`session_send_message` 和 `session_message_status`，供彼此独立的 Session 使用；`minimal` 不包含。发送方身份由存活 Agent 提供，subagent／teammate 协调仍使用各自的工具。
+本 fork 的 `standard`、`ptc` 与 `cordis` 预设包含 `session_create`、`session_find`、`session_send_message` 和 `session_message_status`，供彼此独立的 Session 使用；`minimal` 不包含。创建会立即启动独立任务。发送方身份由存活 Agent 提供，subagent／teammate 协调仍使用各自的工具。
 
 -----
 

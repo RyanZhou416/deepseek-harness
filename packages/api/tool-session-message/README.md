@@ -1,5 +1,5 @@
 ---
-description: "Exact-Session-id Agent messaging for users and maintainers enabling or debugging attributed cross-session delivery without route policy."
+description: "Agent-created Sessions and exact-id messaging for users and maintainers working with attributed cross-session tasks."
 kind: "package-reference"
 ---
 
@@ -9,7 +9,7 @@ English | [中文](README.zh.md)
 
 ## Summary
 
-`dsh-tool-session-message` lets a model find independent Sessions by title, send self-contained information to an exact id while the target retains the real sending Session id, then inspect whether that context is pending, claimed, in model context, waiting on a foreground tool, completed, rejected, or discarded. It accepts unrelated workspaces, lineages, and self-targets without runtime policy, wakes idle targets through the next-step inbox instead of the ordinary next-turn user queue, and cold-resumes ordinary persisted Sessions. Prompt guidance preserves subagent and Team messaging and prevents polling or automatic replies.
+`dsh-tool-session-message` lets a model create and start an independent Session, find existing Sessions by title, send information to an exact id with sender attribution, and inspect delivery status. Messages wake idle targets through the next-step inbox instead of the ordinary next-turn user queue. Prompt guidance preserves subagent and Team messaging and prevents polling or automatic replies.
 
 ## Table of Contents
 
@@ -25,21 +25,27 @@ English | [中文](README.zh.md)
 <a id="use-this-package"></a>
 ## Use this package
 
-Mount this package where Web Agents need to deliver new information to another known Session without creating a subagent or Team relationship.
+Mount this package where Web Agents need to create an independent Session or deliver information to another known Session without a subagent or Team relationship.
 
 ### When to choose it
 
-Choose it for explicit cross-session handoff when the caller knows the exact destination id or the user names an independent Session that `session_find` can resolve, and the information should enter the receiver's next admitted step as attributed context. Use adjacent `send_message` for direct continuable parents and children, and AgentTeams messaging for Team coordination: those operations own their relationship-specific lifecycle. Use Session references when the current Agent only needs a read-only snapshot and the source Session should not run.
+Choose `session_create` when the user explicitly wants a separate conversation to start a task. Choose `session_send_message` for explicit cross-session handoff when the caller knows the exact destination id or the user names an independent Session that `session_find` can resolve. Use adjacent `send_message` for direct continuable parents and children, and AgentTeams messaging for Team coordination: those operations own their relationship-specific lifecycle. Use Session references when the current Agent only needs a read-only snapshot and the source Session should not run.
 
 ### Minimal configuration
 
-The Web bundle provides the Agent registry, Session Controller, Session-reference resolver, Session query service, and tool registry; its full Agent presets mount this package inside the Agent tool scope. After a custom composition provides those five services, its Agent-plane composition adds this row:
+The Web bundle provides the Agent registry, Session Controller, Session-reference resolver, Session query service, Workspace registry, permission presets, Agent presets, and tool registry; its full Agent presets mount this package inside the Agent tool scope. A custom composition provides these services before its Agent-plane composition adds this row:
 
 ```yaml
 - name: '@deepseek-ai/dsh-tool-session-message'
 ```
 
 The package has no configuration. Target policy and frequency limits are deliberately absent; ordinary tool policy plugins may still deny or approve the call through the shared tool pipeline.
+
+### Creating and starting an independent Session
+
+`session_create` accepts one non-blank, self-contained `task`. The live calling ordinary Agent creates a new ordinary Session in its current workspace and immediately delivers that task through the wake-enabled `next-step` inbox. The task is logged with `agent-message` source and the caller's Session id, never as a human prompt. The new Session inherits the caller's Agent preset and named permission preset; it uses the profile's default model rather than copying a per-Session model choice. The result returns the new Session id and accepted message id without waiting for completion. The creator should give the Session id to the user, who can inspect the work there. Neither the new Session nor the tool automatically reports the answer back to the creator.
+
+Creation requires a calling workspace and a configured permission preset; a delegated subagent and a caller with custom or current-session-only Auto permissions are rejected before creation. If setup or delivery fails after creation, the error includes the created Session id; the empty or partially configured Session may remain for inspection. No initial task is accepted in that case.
 
 ### Finding an independent Session
 
@@ -69,7 +75,7 @@ This section explains the delivery adapter; observable behavior is covered in [U
 
 ### Design concept
 
-The plugin combines one model-facing Consumer with a narrow Host adapter over existing services. The Session-reference resolver supplies projected labels, and Session query metadata removes every candidate whose durable origin is `subagent` without conflating it with an ordinary fork. The Agent registry proves the exact sender and finds every live target, including unrelated subagents whose id was learned elsewhere. Session Controller owns cold ordinary-Session activation and concurrent-resume deduplication. The plugin owns the peer framing, durable source, context-injection choice, and tool result; Agent Loop continues to own inbox persistence and step admission.
+The plugin combines model-facing Consumers with a narrow Host adapter over existing services. The Session-reference resolver supplies projected labels, and Session query metadata removes every candidate whose durable origin is `subagent` without conflating it with an ordinary fork. The Agent registry proves the exact sender and finds every live target, including unrelated subagents whose id was learned elsewhere. Session Controller owns ordinary-Session creation, cold activation, and concurrent-resume deduplication. Workspace and permission-preset services preserve the caller's workspace and named access before the initial task enters the inbox. The plugin owns the peer framing, durable source, context-injection choice, and tool result; Agent Loop continues to own inbox persistence and step admission.
 
 ### Source and trust
 
@@ -79,7 +85,7 @@ The message uses the existing `agent-message` relay source with a server-derived
 
 | File | Role |
 |---|---|
-| [`src/index.ts`](src/index.ts) | Discovery and messaging schemas, sender proof, target resolution, peer framing, context injection, and status reads |
+| [`src/index.ts`](src/index.ts) | Creation, discovery, and messaging schemas, sender proof, target resolution, peer framing, context injection, and status reads |
 | [`src/status.ts`](src/status.ts) | Pure durable inbox, turn, and unresolved-tool status fold |
 | — | No runtime invariant companion is published; Agent registry identity, Session Controller activation, inbox persistence, and request reconstruction remain enforced by their owning packages. |
 
@@ -106,7 +112,7 @@ Read these pages when the tool-level behavior is not enough.
 
 #### What the model sees
 
-The generated [`session_send_message` schema](../../../docs/tool-catalog.md#deepseek-aidsh-tool-session-message) accepts `session_id` and `message`. Its description permits unrelated and self targets at runtime, but directs parent/child traffic to `send_message`, teammate traffic to AgentTeams, and this tool only to an independent id supplied by the user, an incoming Session message, a user-created Session reference, or an unambiguous `session_find` match for a user-named target. It forbids guessing or enumerating targets, acknowledgements, status-only updates, polling, automatic replies, forwarding received messages, and conversational use.
+The generated [`session_send_message` schema](../../../docs/tool-catalog.md#deepseek-aidsh-tool-session-message) accepts `session_id` and `message`. Its description permits unrelated and self targets at runtime, but directs parent/child traffic to `send_message`, teammate traffic to AgentTeams, and this tool only to an independent id supplied by the user, an incoming Session message, a `session_create` result, a user-created Session reference, or an unambiguous `session_find` match for a user-named target. It forbids guessing or enumerating targets, acknowledgements, status-only updates, polling, automatic replies, forwarding received messages, and conversational use.
 
 #### Token effect
 
@@ -115,6 +121,20 @@ Every request pays the fixed tool schema while this plugin is visible.
 #### KV Cache effect
 
 Prefix-stable; the schema and guidance do not change at runtime.
+
+### Session creation result
+
+#### What the model sees
+
+The generated [`session_create` schema](../../../docs/tool-catalog.md#deepseek-aidsh-tool-session-message) accepts one initial `task` only when the user requested a separate conversation. The sender sees `Independent Session <targetSessionId> created; initial task <messageId> accepted` and receives both ids plus its own id as structured output. The new Session receives an attributed Agent-authored task and starts work without becoming a child Agent or teammate.
+
+#### Token effect
+
+The fixed tool schema is present while the plugin is mounted; each creation adds one short result to the sender and the task framing to the target's history.
+
+#### KV Cache effect
+
+Prefix-stable tool schema; each result and initial task is append-only in its own Session.
 
 ### Session discovery result
 
@@ -184,6 +204,9 @@ Append-only; the result follows the sender's reusable request prefix.
 
 These limits are deliberate parts of the current unrestricted design.
 
+- **New Session titles are not synthesized** — automatic title generation accepts human prompts, while this initial task is Agent-authored. The user can identify the new Session by its returned id and rename it in the UI.
+- **Creation is not atomic with task acceptance** — if setup or insertion fails after Session creation, the reported id may refer to an empty Session; the tool never claims that such a task was accepted.
+- **No inherited per-Session model, custom permissions, or Auto review grant** — creation uses the profile's default model and refuses custom or current-session-only Auto permissions rather than silently broadening access.
 - **Loop prevention is prompt-only** — the runtime imposes no target, frequency, relay-depth, or self-message limit; a model that ignores the schema and received-message guidance can create costly message cycles.
 - **Cold subagents keep their lifecycle owner** — any live Agent id is accepted, but a cold Session with subagent ownership cannot be resumed through generic Session Controller routing; its relationship-specific parent or Team path must activate it first.
 - **Model context is not a human read receipt** — `model-context` proves the message entered durable target history before request execution, while `completed` proves the owning turn ended; neither proves comprehension or a reply.

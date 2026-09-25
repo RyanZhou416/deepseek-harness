@@ -23,7 +23,7 @@ Every package below exports a Cordis plugin that a bundle patch can name in a Lo
 | `@deepseek-ai/dsh-api-terminal-controller` | yes | Session-owned interactive terminals with shell discovery, screen recovery and typed Remote control |
 | `@deepseek-ai/dsh-api-workspace-controller` | yes | Workspace Remote commands and reconnect-safe state transport |
 | `@deepseek-ai/dsh-api-workspace-files` | yes | Workspace file service and Client resource provider: bounded reads, directory listing, and live metadata over the workspaceFiles Remote namespace |
-| `@deepseek-ai/dsh-tool-session-message` | no | Model-facing Session-title discovery, attributed Session-id delivery, and durable status inspection |
+| `@deepseek-ai/dsh-tool-session-message` | no | Model-facing independent Session creation, discovery, attributed delivery, and durable status inspection |
 
 ## attachment
 

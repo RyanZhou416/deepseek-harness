@@ -488,6 +488,7 @@ const EXPECTED_TOOLS = [
   'read',
   'read_image',
   'send_message',
+  'session_create',
   'session_find',
   'session_message_status',
   'session_send_message',

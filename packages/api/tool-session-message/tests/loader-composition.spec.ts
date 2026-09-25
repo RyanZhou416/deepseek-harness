@@ -39,6 +39,7 @@ describe('tool-session-message through a real Loader composition', () => {
       '- name: fixture-session-controller',
       '- name: fixture-session-reference',
       '- name: fixture-session-query',
+      '- name: fixture-permission-presets',
       "- name: '@deepseek-ai/dsh-tool-session-message'",
       '',
     ].join('\n'))
@@ -47,7 +48,7 @@ describe('tool-session-message through a real Loader composition', () => {
     context.baseUrl = pathToFileURL(root).href + '/'
     await context.plugin(Loader)
     context.loader.builtins.include = Include
-    context.loader.internal = {
+    context.loader.internal = Object.assign(Object.create(null) as NonNullable<typeof context.loader.internal>, {
       version: 'v2',
       async import(specifier: string) {
         switch (specifier) {
@@ -83,10 +84,15 @@ describe('tool-session-message through a real Loader composition', () => {
                 } as unknown as SessionQueryEngine)
               },
             }
+          case 'fixture-permission-presets':
+            return {
+              name: 'fixture-permission-presets',
+              apply(ctx: Context) { ctx.provide('permissionPresets', {} as never) },
+            }
           default: throw new Error(`unexpected Loader import: ${specifier}`)
         }
       },
-    } as unknown as NonNullable<typeof context.loader.internal>
+    })
     await context.loader.create({
       name: 'cordis:include',
       config: { path: pathToFileURL(configPath).href },
@@ -94,6 +100,7 @@ describe('tool-session-message through a real Loader composition', () => {
     await context.loader.await()
 
     expect(context.tools.schemas().map(schema => schema.name).toSorted()).toEqual([
+      'session_create',
       'session_find',
       'session_message_status',
       'session_send_message',

@@ -517,8 +517,8 @@ const TOOL_PACKAGES: ToolPackage[] = [
     pkg: '@deepseek-ai/dsh-tool-session-message',
     dir: 'tool-session-message',
     source: 'packages/api/tool-session-message/src/index.ts',
-    requires: ['ctx.tools', 'ctx.agents', 'ctx.sessionController', 'ctx.sessionReferenceResolver', 'ctx.sessionQuery', 'an exact live calling Agent'],
-    writes: ['tool/call', 'tool/result', 'Session-reference candidate and Session-header reads (find only)', 'target agent/inbox/spliced and user/message (send only)', 'target Session log read (status only)'],
+    requires: ['ctx.tools', 'ctx.agents', 'ctx.sessionController', 'ctx.sessionReferenceResolver', 'ctx.sessionQuery', 'ctx.workspaceRegistry and ctx.permissionPresets (create only)', 'an exact live calling Agent'],
+    writes: ['tool/call', 'tool/result', 'ordinary Session creation and initial inbox message (create only)', 'Session-reference candidate and Session-header reads (find only)', 'target agent/inbox/spliced and user/message (send only)', 'target Session log read (status only)'],
     async mount(ctx) {
       await ctx.plugin(AgentRegistry)
       ctx.provide('sessionController', {
@@ -530,11 +530,13 @@ const TOOL_PACKAGES: ToolPackage[] = [
       ctx.provide('sessionQuery', {
         listSessions: () => Promise.resolve([]),
       } as never)
+      ctx.provide('permissionPresets', {} as never)
       await ctx.plugin(ToolSessionMessage)
     },
     note:
-      'The Web bundle exposes title-guided root-Session discovery, unrestricted exact-id context injection, and '
-      + 'read-only status inspection. Sender attribution comes from the exact calling Agent; prompt guidance, rather '
+      'The Web bundle exposes ordinary Session creation with an immediate attributed task, title-guided root-Session '
+      + 'discovery, unrestricted exact-id context injection, and read-only status inspection. Sender attribution comes '
+      + 'from the exact calling Agent; prompt guidance, rather '
       + 'than a runtime target or frequency policy, preserves specialized messaging and discourages loops and polling.',
   },
   {

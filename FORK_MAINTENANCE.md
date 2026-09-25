@@ -180,9 +180,11 @@ Team 消息先写入 durable mailbox，再尝试 Host delivery；Host 接纳后�
 
 Web bundle 的 `standard`、`ptc` 与 `cordis` preset 在 Agent 工具作用域内挂载 `@deepseek-ai/dsh-tool-session-message`；Host 全局工具层与 `minimal` preset 不挂载。其 `session_send_message` 把确切在线调用 Agent 的 Session id 记录为 `agent-message` relay 来源，再以 wakeup 方式写入目标 next-step 上下文。它不使用普通 next-turn 用户队列；空闲目标会被唤醒，运行中目标在后续 step 准入。在线目标不受工作区、lineage、origin 或自身目标限制；冷普通 Session 通过 Session Controller 恢复，冷 subagent 仍由其 parent 或 Team 生命周期负责。
 
+同包的 `session_create` 仅允许在线普通 Agent 在用户要求单独对话时创建普通 Session，并在同次调用以 wake-enabled next-step 消息启动自包含任务。它复制调用方工作区、Agent preset 与已配置的权限 preset，采用 profile 默认模型；任务来源保留调用方 Session id，不冒充用户输入，也不自动向创建者回报。自定义权限、仅限当前 Session 的 Auto 权限与委派 subagent 在创建前拒绝；创建后投递失败会报告已创建 id，不谎称任务已接受。上游合并须保留这一创建／投递分离的真实状态及权限预设先于任务投递的顺序。
+
 同包的 `session_find` 复用 `dsh-session-reference` 的 candidate 目录，按用户提供的非空标题／id／工作区子串查找独立 Session，再用 Session-query header 排除所有持久 `origin: subagent`（包括 AgentTeams teammate），同时保留普通用户 fork，且不激活冷候选项；重复标题必须交给用户选择，不能静默猜测。
 
-发送工具没有 runtime 目标策略、频率限制、relay depth 或自身消息限制。工具描述把直接 parent/child 路由到 `send_message`、把 teammate 路由到 AgentTeams，并只允许使用用户提供、传入 Session 消息标识、用户创建 reference 暴露，或 `session_find` 为用户点名目标返回的无歧义独立 id；接收消息框架要求模型不要确认、轮询、自动回复或转发。这些提示词是唯一的消息风暴控制。接受只表示目标 durable inbox 已插入带来源上下文，不表示已读或已回复；空闲目标会被 next-step wakeup 启动，普通 next-turn 队列不参与。
+发送工具没有 runtime 目标策略、频率限制、relay depth 或自身消息限制。工具描述把直接 parent/child 路由到 `send_message`、把 teammate 路由到 AgentTeams，并只允许使用用户提供、传入 Session 消息标识、`session_create` 返回、用户创建 reference 暴露，或 `session_find` 为用户点名目标返回的无歧义独立 id；接收消息框架要求模型不要确认、轮询、自动回复或转发。这些提示词是唯一的消息风暴控制。接受只表示目标 durable inbox 已插入带来源上下文，不表示已读或已回复；空闲目标会被 next-step wakeup 启动，普通 next-turn 队列不参与。
 
 同包的 `session_message_status` 用目标 Session id 与已接受 `messageId` 只读折叠目标完整日志，不唤醒目标。它区分 pending-context、claimed、model-context、processing-tool、completed、rejected、discarded 与 unknown，并从顶层工具事件和 PTC sub-dispatch 同时识别未结算 `terminal_send` 的 terminal blocking；状态是时间点观察，不自动推送给发送方。
 
@@ -332,7 +334,7 @@ Profile 注册 `dsh-sdk-process-raw` 和 `subagent_process`：SDK profile、独�
 | Source CLI module identity and scheduler failure pairing | Preserve | Source profiles use link resolution; every scheduler failure drains work and records result pairs before Turn error |
 | Fork-vendored AgentTeams behavior | Preserve and verified for RC.1 | Pull upstream through subtree, retain the private version/artifact, and never install npm latest over the live profile |
 | AgentTeams unread mailbox projection LRU | Preserve | Require unchanged JSONL format, dynamic lease expiry, exact mutation invalidation, caller isolation and bounded retention |
-| Unrestricted Session-id Agent messages | Preserve | Keep server-derived sender attribution, wake-enabled next-step delivery and prompt-only loop guidance; do not fold it into human `session.prompt` or widen subagent adjacency |
+| Independent Session creation and unrestricted Session-id Agent messages | Preserve | Keep same-call create-and-start, configured permission inheritance before delivery (never custom or current-session-only Auto), server-derived sender attribution, wake-enabled next-step delivery and prompt-only loop guidance; do not fold it into human `session.prompt` or widen subagent adjacency |
 | Context field-level COW and bounded views | Preserve | v0.55.0 adds turn ledger and selective arguments, but not dirty retention, view identity reuse or closed-modal subscription release |
 | Subscriptions V4 message translation | Ported onto v0.9.4 | Keep tool-call identity, result error/image handling and explicit developer-message refusal |
 | Legacy fixed-concurrency wrapper | Retired | Official `maxActiveSubagents` owns the active policy; do not mount the duplicate wrapper |
@@ -393,6 +395,10 @@ pnpm exec vitest run packages/api/session-controller/tests/queue-store.client.sp
 pnpm exec vitest run --config vitest.web.config.ts apps/web/tests/subagent-interrupt.e2e.ts
 
 pnpm exec vitest run --config vitest.web.config.ts apps/web/tests/seeded-history.e2e.ts -t 'serves the projections baseline|lists the seeded session cold'
+
+pnpm exec vitest run packages/api/tool-session-message/tests/tool-session-message.spec.ts packages/api/tool-session-message/tests/loader-composition.spec.ts packages/core/tools/tests/gen-tool-catalog.spec.ts
+
+pnpm exec vitest run --config vitest.web.config.ts apps/web/tests/session-message-composition.e2e.ts
 ```
 
 Windows 的 Bash suite 被官方 Vitest 配置排除；它需要 Linux/macOS lane 或专门的 POSIX shell 环境，不能以 PowerShell mirror 结果冒充 Bash 实测。

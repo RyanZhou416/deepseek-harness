@@ -11,7 +11,8 @@ import {
   mountAgentLoopTestDependencies,
   mountAgentLoopTestHarness,
 } from '@deepseek-ai/dsh-agent-loop-testkit'
-import type { SessionController } from '@deepseek-ai/dsh-api-session-controller'
+import { SessionController } from '@deepseek-ai/dsh-api-session-controller'
+import PermissionPresetService from '@deepseek-ai/dsh-permission-presets'
 import type SessionReferenceResolver from '@deepseek-ai/dsh-session-reference'
 import type { SessionQueryEngine } from '@deepseek-ai/dsh-session-query'
 import { RemoteError } from '@deepseek-ai/dsh-typert-protocol'
@@ -26,10 +27,10 @@ afterEach(async () => {
   context = undefined
 })
 
-function makeAgent(ctx: Context, id: string, cwd: string, origin?: 'subagent'): Agent {
+function makeAgent(ctx: Context, id: string, cwd?: string, origin?: 'subagent'): Agent {
   const session = ctx.sessions.create(SessionId(id), {
     meta: {
-      cwd,
+      ...(cwd === undefined ? {} : { cwd }),
       ...(origin === undefined ? {} : { origin, parentSession: SessionId('unrelated-parent') }),
     },
   })
@@ -60,13 +61,26 @@ async function setup() {
   await ctx.plugin(ToolRuntime)
   const resolveAgent = vi.fn<SessionController['resolveAgent']>()
   const inspect = vi.fn<SessionController['inspect']>()
-  ctx.provide('sessionController', { inspect, resolveAgent } as unknown as SessionController)
+  const create = vi.fn<SessionController['create']>()
+  const sessionController = Object.assign(Object.create(SessionController.prototype) as SessionController, {
+    inspect, resolveAgent, create,
+  })
+  ctx.provide('sessionController', sessionController)
+  const current = vi.fn<PermissionPresetService['current']>().mockReturnValue('workspace-write')
+  const resolve = vi.fn<PermissionPresetService['resolve']>().mockReturnValue({
+    sandbox: 'workspace-write', approval: 'ask',
+  })
+  const set = vi.fn<PermissionPresetService['set']>()
+  const permissionService = Object.assign(Object.create(PermissionPresetService.prototype) as PermissionPresetService, {
+    current, resolve, set,
+  })
+  ctx.provide('permissionPresets', permissionService)
   const listCandidates = vi.fn<SessionReferenceResolver['listCandidates']>()
   ctx.provide('sessionReferenceResolver', { listCandidates } as unknown as SessionReferenceResolver)
   const listSessions = vi.fn<SessionQueryEngine['listSessions']>().mockResolvedValue([])
   ctx.provide('sessionQuery', { listSessions } as unknown as SessionQueryEngine)
   const fiber = await ctx.plugin(tool)
-  return { ctx, fiber, inspect, listCandidates, listSessions, resolveAgent }
+  return { ctx, fiber, inspect, listCandidates, listSessions, resolveAgent, create, permissions: { current, resolve, set } }
 }
 
 function execute(ctx: Context, args: unknown, agent?: Agent, signal = new AbortController().signal) {
@@ -74,6 +88,16 @@ function execute(ctx: Context, args: unknown, agent?: Agent, signal = new AbortC
     signal,
     callId: ToolCallId(`session-message-${String(++nextCall)}`),
     name: 'session_send_message',
+    arguments: args,
+    ...(agent === undefined ? {} : { agent }),
+  })
+}
+
+function createSession(ctx: Context, args: unknown, agent?: Agent, signal = new AbortController().signal) {
+  return ctx.tools.execute({
+    signal,
+    callId: ToolCallId(`session-create-${String(++nextCall)}`),
+    name: 'session_create',
     arguments: args,
     ...(agent === undefined ? {} : { agent }),
   })
@@ -101,6 +125,11 @@ describe('dsh-tool-session-message', () => {
     expect(schema.description).toContain('ordinary next-turn user queue')
     const sessionIdParameter = properties.session_id as { description?: unknown }
     expect(sessionIdParameter.description).toContain('Do not use a subagent or teammate id here.')
+    expect(sessionIdParameter.description).toContain('session_create result')
+    const create = ctx.tools.schemas().find(candidate => candidate.name === 'session_create')
+    expect(create?.description).toContain('user explicitly asks for a separate conversation')
+    expect(create?.description).toContain('profile\'s default model')
+    expect(Object.keys((create?.parameters as { properties?: Record<string, unknown> }).properties ?? {})).toEqual(['task'])
     const status = ctx.tools.schemas().find(candidate => candidate.name === 'session_message_status')
     expect(status?.description).toContain('do not poll')
     expect(status?.description).toContain('terminal_send')
@@ -108,6 +137,96 @@ describe('dsh-tool-session-message', () => {
     expect(find?.description).toContain('case-insensitive title')
     expect(find?.description).toContain('Delegated child Sessions')
     expect(find?.description).toContain('instead of guessing')
+  })
+
+  it('creates an independent Session and wakes its initial attributed task after copying permissions', async () => {
+    const { ctx, create, permissions, resolveAgent } = await setup()
+    const sender = makeAgent(ctx, 'creator-session', '/workspace')
+    const target = makeAgent(ctx, 'new-independent-session', '/workspace')
+    await ctx.agents.register(sender)
+    await ctx.agents.register(target)
+    create.mockResolvedValueOnce({ sessionId: target.id })
+
+    const result = await createSession(ctx, { task: 'Investigate the new work independently.' }, sender)
+
+    expect(result.isError).toBe(false)
+    expect(resultText(result)).toContain(`Independent Session ${target.id} created`)
+    expect(create).toHaveBeenCalledExactlyOnceWith({ cwd: '/workspace' })
+    expect(permissions.current).toHaveBeenCalledWith(sender.session)
+    expect(permissions.resolve).toHaveBeenCalledExactlyOnceWith('workspace-write')
+    expect(permissions.set).toHaveBeenCalledExactlyOnceWith(target.session, 'workspace-write')
+    expect(resolveAgent).not.toHaveBeenCalled()
+    expect(sendOf(target)).toHaveBeenCalledOnce()
+    expect(permissions.set.mock.invocationCallOrder[0]).toBeLessThan(sendOf(target).mock.invocationCallOrder[0]!)
+    expect(sendOf(target).mock.calls[0]![1]).toBe('next-step')
+    expect(sendOf(target).mock.calls[0]![2]).toBe(true)
+    const message = sendOf(target).mock.calls[0]![0]
+    expect(message.source).toEqual({
+      kind: 'agent-message', form: 'relay', senderSessionId: sender.id,
+    })
+    const initialFrame = message.content[0]
+    if (initialFrame?.type !== 'text') throw new Error('initial task frame is not text')
+    expect(initialFrame.text).toContain('initial task')
+    expect(message.content[1]).toEqual({ type: 'text', text: 'Investigate the new work independently.' })
+    expect(target.session.header.parentSession).toBeUndefined()
+    expect(target.session.header.origin).toBeUndefined()
+  })
+
+  it('rejects delegated creators, missing workspaces, blank tasks, custom permissions, and cancellation before creation', async () => {
+    const { ctx, create, permissions } = await setup()
+    const delegated = makeAgent(ctx, 'delegated-creator', '/workspace', 'subagent')
+    const noCwd = makeAgent(ctx, 'missing-cwd')
+    const root = makeAgent(ctx, 'valid-creator', '/workspace')
+    await ctx.agents.register(delegated)
+    await ctx.agents.register(noCwd)
+    await ctx.agents.register(root)
+
+    expect((await createSession(ctx, { task: 'task' }, delegated)).isError).toBe(true)
+    expect((await createSession(ctx, { task: 'task' }, noCwd)).isError).toBe(true)
+    expect((await createSession(ctx, { task: ' ' }, root)).isError).toBe(true)
+    permissions.current.mockReturnValueOnce('custom')
+    expect(resultText(await createSession(ctx, { task: 'task' }, root))).toContain('select a configured permission preset')
+    permissions.current.mockReturnValueOnce('auto')
+    expect(resultText(await createSession(ctx, { task: 'task' }, root))).toContain('current-session-only Auto permissions')
+    const aborted = new AbortController()
+    aborted.abort()
+    expect((await createSession(ctx, { task: 'task' }, root, aborted.signal)).isError).toBe(true)
+    expect(create).not.toHaveBeenCalled()
+  })
+
+  it('reports the created id but never starts work when the caller stops before admission', async () => {
+    const { ctx, create } = await setup()
+    const sender = makeAgent(ctx, 'creator-stopping', '/workspace')
+    const target = makeAgent(ctx, 'created-but-unstarted', '/workspace')
+    const unregister = await ctx.agents.register(sender)
+    await ctx.agents.register(target)
+    create.mockImplementationOnce(async () => {
+      await unregister()
+      return { sessionId: target.id }
+    })
+
+    const result = await createSession(ctx, { task: 'Do not start after caller disposal.' }, sender)
+
+    expect(result.isError).toBe(true)
+    expect(resultText(result)).toContain(`created Session "${target.id}" but did not accept its initial task`)
+    expect(sendOf(target)).not.toHaveBeenCalled()
+  })
+
+  it('does not deliver if the caller changes permissions during creation', async () => {
+    const { ctx, create, permissions } = await setup()
+    const sender = makeAgent(ctx, 'creator-changing-permissions', '/workspace')
+    const target = makeAgent(ctx, 'unstarted-after-permission-change', '/workspace')
+    await ctx.agents.register(sender)
+    await ctx.agents.register(target)
+    permissions.current.mockReturnValueOnce('workspace-write').mockReturnValueOnce('custom')
+    create.mockResolvedValueOnce({ sessionId: target.id })
+
+    const result = await createSession(ctx, { task: 'Do not run with changed access.' }, sender)
+
+    expect(result.isError).toBe(true)
+    expect(resultText(result)).toContain(`created Session "${target.id}" but did not accept its initial task`)
+    expect(permissions.set).not.toHaveBeenCalled()
+    expect(sendOf(target)).not.toHaveBeenCalled()
   })
 
   it('finds independent Session ids by untrusted title without activating delegated children', async () => {
@@ -260,6 +379,7 @@ describe('dsh-tool-session-message', () => {
     ctx.provide('sessionQuery', {
       listSessions: vi.fn<SessionQueryEngine['listSessions']>().mockResolvedValue([]),
     } as unknown as SessionQueryEngine)
+    ctx.provide('permissionPresets', {} as never)
     await ctx.plugin(tool)
     const harness = await mountAgentLoopTestHarness(ctx)
     const sender = await harness.create(SessionId('real-sender'))
@@ -487,10 +607,12 @@ describe('dsh-tool-session-message', () => {
   it('unregisters the tool with its plugin fiber', async () => {
     const { ctx, fiber } = await setup()
     expect(ctx.tools.schemas().some(schema => schema.name === 'session_find')).toBe(true)
+    expect(ctx.tools.schemas().some(schema => schema.name === 'session_create')).toBe(true)
     expect(ctx.tools.schemas().some(schema => schema.name === 'session_send_message')).toBe(true)
     expect(ctx.tools.schemas().some(schema => schema.name === 'session_message_status')).toBe(true)
     await fiber.dispose()
     expect(ctx.tools.schemas().some(schema => schema.name === 'session_find')).toBe(false)
+    expect(ctx.tools.schemas().some(schema => schema.name === 'session_create')).toBe(false)
     expect(ctx.tools.schemas().some(schema => schema.name === 'session_send_message')).toBe(false)
     expect(ctx.tools.schemas().some(schema => schema.name === 'session_message_status')).toBe(false)
   })
@@ -498,7 +620,9 @@ describe('dsh-tool-session-message', () => {
   it('has the namespace-plugin export shape', () => {
     expect('default' in tool).toBe(false)
     expect(tool.name).toBe('tool-session-message')
-    expect(tool.inject).toEqual(['tools', 'agents', 'sessionController', 'sessionReferenceResolver', 'sessionQuery'])
+    expect(tool.inject).toEqual([
+      'tools', 'agents', 'sessionController', 'sessionReferenceResolver', 'sessionQuery', 'permissionPresets',
+    ])
     expect(typeof tool.apply).toBe('function')
   })
 })
