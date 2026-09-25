@@ -9,6 +9,7 @@ if not defined npm_config_registry set "npm_config_registry=https://registry.npm
 if not defined npm_config_cache set "npm_config_cache=%TEMP%\dsh-npm-cache"
 set "DSH_PNPM_HOME=%TEMP%\dsh-pnpm-%DSH_PNPM_VERSION%"
 set "DSH_PNPM_ENTRY=%DSH_PNPM_HOME%\node_modules\pnpm\bin\pnpm.mjs"
+set "DSH_PNPM_SHIM=%DSH_PNPM_HOME%\node_modules\.bin\pnpm.cmd"
 call :verify
 if not errorlevel 1 goto :run
 
@@ -30,12 +31,17 @@ if errorlevel 1 (
 )
 
 :run
+set "PATH=%DSH_PNPM_HOME%\node_modules\.bin;%PATH%"
 node "%DSH_PNPM_ENTRY%" %*
 exit /b %errorlevel%
 
 :verify
 if not exist "%DSH_PNPM_ENTRY%" exit /b 1
+if not exist "%DSH_PNPM_SHIM%" exit /b 1
 set "DSH_ACTUAL_PNPM_VERSION="
 for /f "delims=" %%V in ('node "%DSH_PNPM_ENTRY%" --version 2^>nul') do set "DSH_ACTUAL_PNPM_VERSION=%%V"
 if not "%DSH_ACTUAL_PNPM_VERSION%"=="%DSH_PNPM_VERSION%" exit /b 1
+set "DSH_ACTUAL_PNPM_SHIM_VERSION="
+for /f "delims=" %%V in ('call "%DSH_PNPM_SHIM%" --version 2^>nul') do set "DSH_ACTUAL_PNPM_SHIM_VERSION=%%V"
+if not "%DSH_ACTUAL_PNPM_SHIM_VERSION%"=="%DSH_PNPM_VERSION%" exit /b 1
 exit /b 0

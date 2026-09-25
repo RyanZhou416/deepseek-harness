@@ -49,8 +49,17 @@ describe('Windows fork launchers', () => {
     const bin = join(root, 'bin')
     const log = join(root, 'launcher.log')
     const entry = join(root, `dsh-pnpm-${pnpmVersion}`, 'node_modules', 'pnpm', 'bin', 'pnpm.mjs')
+    const privateBin = join(root, `dsh-pnpm-${pnpmVersion}`, 'node_modules', '.bin')
     const stub = join(root, 'pnpm-stub.mjs')
     mkdirSync(bin)
+    mkdirSync(privateBin, { recursive: true })
+    writeFileSync(join(privateBin, 'pnpm.cmd'), '@echo off\r\nnode "%~dp0..\\pnpm\\bin\\pnpm.mjs" %*\r\n')
+    writeFileSync(join(bin, 'pnpm.cmd'), [
+      '@echo off',
+      'echo broken-corepack-shim>>"%DSH_TEST_LOG%"',
+      'exit /b 33',
+      '',
+    ].join('\r\n'))
     writeFileSync(stub, [
       "import { appendFileSync } from 'node:fs'",
       `if (process.argv[2] === '--version') console.log(${JSON.stringify(pnpmVersion)})`,
@@ -119,6 +128,32 @@ describe('Windows fork launchers', () => {
       'pnpm run build',
       'pnpm dsh web',
     ])
+  })
+
+  it.skipIf(process.platform !== 'win32')('keeps pnpm started by installation work off the broken Corepack shim', () => {
+    const { root, bin, log } = fixture(false)
+    writeFileSync(join(root, 'pnpm-stub.mjs'), [
+      "import { appendFileSync } from 'node:fs'",
+      "import { spawnSync } from 'node:child_process'",
+      `if (process.argv[2] === '--version') console.log(${JSON.stringify(pnpmVersion)})`,
+      'else {',
+      "  appendFileSync(process.env.DSH_TEST_LOG, `pnpm ${process.argv.slice(2).join(' ')}\\n`)",
+      "  if (process.argv[2] === 'install') {",
+      "    const child = spawnSync(process.env.ComSpec, ['/d', '/c', 'pnpm --version'], { encoding: 'utf8' })",
+      '    appendFileSync(process.env.DSH_TEST_LOG, `nested ${child.stdout.trim()}\\n`)',
+      '    if (child.status !== 0) process.exit(child.status ?? 1)',
+      '  }',
+      '}',
+      '',
+    ].join('\n'))
+
+    const result = launch(buildLauncher, root, bin, log)
+
+    expect(result.signal).toBeNull()
+    expect(result.status, result.stderr || result.stdout).toBe(0)
+    const calls = readFileSync(log, 'utf8')
+    expect(calls).toContain(`nested ${pnpmVersion}`)
+    expect(calls).not.toContain('broken-corepack-shim')
   })
 
   it.skipIf(process.platform !== 'win32')('reports an incomplete npm install before invoking pnpm', () => {
