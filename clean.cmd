@@ -6,45 +6,20 @@ set "DSH_STEP=checking Node.js"
 where node >nul 2>&1
 if errorlevel 1 goto :missing_node
 
-set "DSH_COREPACK_HOME=%TEMP%\dsh-corepack"
-set "DSH_COREPACK_SHIMS=%TEMP%\dsh-corepack-shims"
-if not defined COREPACK_HOME set "COREPACK_HOME=%TEMP%\dsh-corepack-cache"
-if not defined COREPACK_NPM_REGISTRY set "COREPACK_NPM_REGISTRY=https://registry.npmmirror.com"
-if not defined npm_config_registry set "npm_config_registry=%COREPACK_NPM_REGISTRY%"
-if not defined npm_config_cache set "npm_config_cache=%TEMP%\dsh-npm-cache"
-
-if not exist "%DSH_COREPACK_SHIMS%" mkdir "%DSH_COREPACK_SHIMS%"
-if errorlevel 1 goto :failed
-
-where corepack >nul 2>&1
-if not errorlevel 1 goto :corepack_ready
-if exist "%DSH_COREPACK_HOME%\node_modules\.bin\corepack.cmd" (
-  set "PATH=%DSH_COREPACK_HOME%\node_modules\.bin;%PATH%"
-  goto :corepack_ready
-)
-
-set "DSH_STEP=installing Corepack"
-echo Corepack was not found. Installing it automatically...
-call npm install --prefix "%DSH_COREPACK_HOME%" --no-save --no-audit --no-fund corepack@latest
-if errorlevel 1 goto :failed
-set "PATH=%DSH_COREPACK_HOME%\node_modules\.bin;%PATH%"
-
-:corepack_ready
 set "DSH_STEP=preparing pnpm"
-call corepack enable pnpm --install-directory "%DSH_COREPACK_SHIMS%"
+call "%~dp0scripts\fork-windows-pnpm.cmd" --version
 if errorlevel 1 goto :failed
-set "PATH=%DSH_COREPACK_SHIMS%;%PATH%"
 
 if exist "node_modules\tsx\package.json" goto :clean
 set "DSH_STEP=installing project dependencies"
 echo Project dependencies are missing. Installing them before cleanup...
 if not defined DSH_PNPM_CHILD_CONCURRENCY set "DSH_PNPM_CHILD_CONCURRENCY=4"
-call pnpm install --child-concurrency=%DSH_PNPM_CHILD_CONCURRENCY%
+call "%~dp0scripts\fork-windows-pnpm.cmd" install --child-concurrency=%DSH_PNPM_CHILD_CONCURRENCY%
 if errorlevel 1 goto :failed
 
 :clean
 set "DSH_STEP=cleaning repository build outputs"
-call pnpm run clean
+call "%~dp0scripts\fork-windows-pnpm.cmd" run clean
 if errorlevel 1 goto :failed
 
 echo.

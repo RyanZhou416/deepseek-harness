@@ -11,7 +11,7 @@
 ### 前置条件
 
 - Node.js 支持 22.19+ 与 24+。CI 覆盖 22.19、24 和 26；见 [Node 引擎下限 Agent Note](../.agents/notes/implemented/process/2026-07-06-node-engine-floor.zh.md)。
-- 启用了 Corepack 的 pnpm。仓库在 `package.json` 中固定使用 `pnpm@11.7.0`；如果 `pnpm --version` 无法通过 Corepack 解析，请先运行 `corepack enable`。
+- 仓库在 `package.json` 中固定使用 `pnpm@11.7.0`。直接调用 `pnpm` 时需启用 Corepack；Windows 原生启动脚本可通过 npm 准备固定版本的 pnpm，无需 Corepack。
 - Git 2.26 或更高版本；钩子设置会启用 Git 的 worktree 专属配置扩展。
 - 可选：一个 DeepSeek API key，用于 Web、headless 和 ACP（Agent Client Protocol）自动化 agent（智能体）演示以及真实 API 的 e2e 测试。
 
@@ -22,6 +22,8 @@
 将检出目录、已安装的依赖和工具链放在同一操作系统环境中。使用 WSL 2 时，将检出目录放在 Linux 文件系统中；使用 Windows 原生工具时，则使用 Windows 文件系统。跨两种文件系统访问会给 Git、依赖安装和构建等 I/O 密集型操作增加开销。参见微软的[文件存储与性能指南](https://learn.microsoft.com/en-us/windows/wsl/filesystems#file-storage-and-performance-across-file-systems)。
 
 在每种环境中分别安装依赖，因为不同操作系统使用的原生二进制和链接可能不同。测试结果适用于执行测试的环境；Windows 特有行为仍需在原生 Windows 上验证。
+
+在 Windows 原生环境中，`build.cmd` 会把固定版本的 pnpm 安装到私有临时目录，再安装依赖并构建检出目录。它不使用 Corepack 的 pnpm 缓存。helper 默认使用 `registry.npmmirror.com`；如果该源不可用，请在启动前设置 `npm_config_registry`。
 
 ### 首次搭建
 

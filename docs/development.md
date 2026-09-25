@@ -9,7 +9,7 @@ The setup tutorial takes a new contributor from prerequisites to a checked check
 ### Prerequisites
 
 - Node.js supports 22.19+ and 24+. CI covers 22.19, 24, and 26; see the [Node engine floor Agent Note](../.agents/notes/implemented/process/2026-07-06-node-engine-floor.md).
-- Corepack-enabled pnpm. The repo pins `pnpm@11.7.0` in `package.json`; run `corepack enable` if `pnpm --version` does not resolve through Corepack.
+- The repo pins `pnpm@11.7.0` in `package.json`. Enable Corepack for direct `pnpm` commands; native Windows launchers can provision the pinned pnpm through npm without Corepack.
 - Git 2.26 or newer; hook setup enables Git's worktree-specific configuration extension.
 - Optional: a DeepSeek API key for the Web, headless, and ACP automation demos and real-API e2e tests.
 
@@ -20,6 +20,8 @@ On Windows, you can develop with native tools or use WSL 2 for a Linux environme
 Keep the checkout, installed dependencies, and toolchain in the same operating system environment. For WSL 2, store the checkout in the Linux filesystem; for native Windows tools, use the Windows filesystem. Accessing files across the two filesystems adds overhead to I/O-intensive operations such as Git, dependency installation, and builds. See Microsoft's [file storage and performance guidance](https://learn.microsoft.com/en-us/windows/wsl/filesystems#file-storage-and-performance-across-file-systems).
 
 Install dependencies separately in each environment because native binaries and links can differ between operating systems. Test results apply to the environment where the tests ran; Windows-specific behavior still needs native Windows validation.
+
+On native Windows, `build.cmd` installs the pinned pnpm in a private temporary directory, then installs dependencies and builds the checkout. It does not use Corepack's pnpm cache. The helper defaults to `registry.npmmirror.com`; set `npm_config_registry` before launching if that registry is unavailable.
 
 ### First-time setup
 
