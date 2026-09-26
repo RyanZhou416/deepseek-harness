@@ -577,7 +577,7 @@ test('markMessageCache marks the tail and one block every stride backwards', () 
   const messages: AnthropicMessage[] = [{ role: 'user', content }]
   markMessageCache(messages)
   const marked = content.flatMap((block, index) => ('cache_control' in block ? [index] : []))
-  assert.deepEqual(marked, [9, 24, 39], 'three marks, 15 blocks apart, anchored at the tail')
+  assert.deepEqual(marked, [1, 20, 39], 'three marks, 19 positions apart, anchored at the tail')
 })
 
 test('markMessageCache marks across messages and stops at the start of a short one', () => {
@@ -700,6 +700,20 @@ test('markMessageCache does not put cache_control on a thinking block', () => {
   markMessageCache(messages)
   assert.equal('cache_control' in thinking, false)
   assert.deepEqual(text.cache_control, { type: 'ephemeral' })
+})
+
+test('markMessageCache treats a parallel tool run as one position', () => {
+  const calls: Record<string, unknown>[] = Array.from({ length: 20 }, (_, index) => ({ type: 'tool_use', id: `c${index}`, name: 'bash', input: {} }))
+  const results: Record<string, unknown>[] = Array.from({ length: 20 }, (_, index) => ({ type: 'tool_result', tool_use_id: `c${index}`, content: 'ok' }))
+  const messages: AnthropicMessage[] = [
+    { role: 'assistant', content: calls },
+    { role: 'user', content: results },
+  ]
+  markMessageCache(messages)
+  assert.equal('cache_control' in calls[0], false)
+  assert.equal('cache_control' in calls[19], false)
+  assert.equal('cache_control' in results[0], false)
+  assert.deepEqual(results[19].cache_control, { type: 'ephemeral' })
 })
 
 test('markMessageCache marks a tool_result block when the turn ends on one', () => {

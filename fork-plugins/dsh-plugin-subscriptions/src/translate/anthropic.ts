@@ -33,20 +33,19 @@ export const SYSTEM_REMINDER_OPEN = '<system-reminder>'
 export const SYSTEM_REMINDER_CLOSE = '</system-reminder>'
 
 /**
- * How far apart consecutive message breakpoints sit, in content blocks.
+ * Positions between message breakpoints.
  *
- * A breakpoint looks back at most 20 blocks for an entry an earlier request
- * wrote, so marks must stay closer than that: one agentic turn can append a
- * dozen tool_use/tool_result blocks at once, and a single trailing mark would
- * silently fall out of range and rebuild the whole prefix.
+ * A breakpoint looks back at most 20 positions, counting itself as the first,
+ * so a write more than 19 positions earlier is invisible. Consecutive
+ * `tool_use` blocks count as one position, and so do consecutive
+ * `tool_result` blocks. Stepping the full 19 keeps a later turn's lookback
+ * on this write for as long as three breakpoints allow.
  */
-export const CACHE_BLOCK_STRIDE = 15
+export const CACHE_POSITION_STRIDE = 19
 
 /**
  * Message breakpoints per request. Anthropic allows four in total and the
- * last `system` block takes the fourth, so three are left for the history —
- * enough to tolerate a turn appending roughly {@link CACHE_BLOCK_STRIDE} × 3
- * blocks before a read is lost.
+ * last `system` block takes the fourth, so three are left for the history.
  */
 export const MESSAGE_CACHE_BREAKPOINTS = 3
 
@@ -273,16 +272,12 @@ export function toAnthropicMessages(messages: readonly TranslatableMessage[], mo
 }
 
 /**
- * Mark the conversation's cache breakpoints in place: the last content block,
- * then one every {@link CACHE_BLOCK_STRIDE} blocks backwards, {@link
- * MESSAGE_CACHE_BREAKPOINTS} in total.
+ * Mark the conversation's cache breakpoints in place.
  *
- * The history is append-only, so the block one request marks last is
- * byte-identical in the next — that entry is what the next request reads.
- * Marks are counted across the flattened block sequence, not per message,
- * because the lookback window Anthropic walks counts blocks the same way.
- * Thinking blocks reject `cache_control` (`Extra inputs are not permitted`),
- * so a mark that would land on `thinking` or `redacted_thinking` moves to the
+ * The newest mark is the last block whose prefix the next request can reuse.
+ * The other marks sit {@link CACHE_POSITION_STRIDE} positions earlier, so a
+ * turn that appends more than the lookback can still see a write this request
+ * left behind. Thinking blocks reject `cache_control`, so a mark moves to the
  * nearest earlier block that accepts it.
  * @param messages - assembled Anthropic messages, marked in place.
  */
@@ -290,14 +285,39 @@ function acceptsMessageCache(block: Record<string, unknown>): boolean {
   return block.type !== 'thinking' && block.type !== 'redacted_thinking'
 }
 
+/** One lookback position. A run of the same tool block type shares one slot, and the mark goes on its last block. */
+interface CachePosition {
+  block: Record<string, unknown>
+  cacheable: boolean
+}
+
+function cachePositions(blocks: readonly Record<string, unknown>[]): CachePosition[] {
+  const positions: CachePosition[] = []
+  for (const block of blocks) {
+    const type = block.type
+    const previous = positions.at(-1)
+    const collapses = previous !== undefined && (
+      (type === 'tool_use' && previous.block.type === 'tool_use')
+      || (type === 'tool_result' && previous.block.type === 'tool_result')
+    )
+    if (collapses && previous !== undefined) {
+      previous.block = block
+      if (acceptsMessageCache(block)) previous.cacheable = true
+      continue
+    }
+    positions.push({ block, cacheable: acceptsMessageCache(block) })
+  }
+  return positions
+}
+
 export function markMessageCache(messages: readonly AnthropicMessage[]): void {
-  const blocks = messages.flatMap(message => message.content)
-  let cursor = blocks.length - 1
+  const positions = cachePositions(messages.flatMap(message => message.content))
+  let cursor = positions.length - 1
   for (let mark = 0; mark < MESSAGE_CACHE_BREAKPOINTS && cursor >= 0; mark++) {
-    while (cursor >= 0 && !acceptsMessageCache(blocks[cursor])) cursor--
+    while (cursor >= 0 && !positions[cursor].cacheable) cursor--
     if (cursor < 0) return
-    blocks[cursor].cache_control = { type: 'ephemeral' }
-    cursor -= CACHE_BLOCK_STRIDE
+    positions[cursor].block.cache_control = { type: 'ephemeral' }
+    cursor -= CACHE_POSITION_STRIDE
   }
 }
 

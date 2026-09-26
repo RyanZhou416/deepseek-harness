@@ -663,7 +663,7 @@ function claudeMessage(id: string, role: BasicMessage['role'], text: string): Ba
 
 test('claudeRequestBody ships the cache breakpoints and never exceeds four', () => {
   const history: BasicMessage[] = [claudeMessage('s0', 'system', 'opening')]
-  for (let turn = 0; turn < 16; turn++) {
+  for (let turn = 0; turn < 20; turn++) {
     history.push(claudeMessage(`u${turn}`, 'user', `q${turn}`))
     history.push(claudeMessage(`a${turn}`, 'assistant', `r${turn}`))
   }
