@@ -28,6 +28,7 @@ import type { PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots
 import type { ConnectionHandle } from '@deepseek-ai/dsh-api-remotes/client'
 import { IconDataOutlineRegular, useAnchoredPosition, useDismissOnOutsidePointer } from '@deepseek-ai/dsh-client-ui-primitives'
 import { callSubscriptionsAuth, usageBarColor } from './SubscriptionsSection.js'
+import { ResetCredits } from './ResetCredits.js'
 import type { AccountStatus, ProviderStatus, ProviderUsage, SubscriptionProvider, UsageWindow } from './SubscriptionsSection.js'
 import type { ModelDirectoriesLike } from './SpeedSelect.js'
 import { en } from './locales.js'
@@ -68,6 +69,8 @@ export interface AccountUsageDisplay {
   /** The account direct routes serve; the collapsed pill reads this one. */
   isDefault: boolean
   windows: UsageWindow[]
+  /** ChatGPT banked reset credits, when the usage payload disclosed a count. */
+  resetCredits?: number
 }
 
 /** One provider's usage snapshot: every logged-in account that reports windows. */
@@ -90,6 +93,7 @@ const PROVIDER_NAMES: Record<SubscriptionProvider, string> = {
   grok: 'Grok',
   copilot: 'Copilot',
   antigravity: 'Antigravity',
+  cursor: 'Cursor',
 }
 
 /**
@@ -234,6 +238,15 @@ export function SubscriptionUsageBadge({ rpc, currentModel, t }: SubscriptionUsa
   const [selection, setSelection] = useState<{ provider: string; model: string } | undefined>(undefined)
   const current = selection?.provider
   const [open, setOpen] = useState(false)
+  const confirmLock = useRef(false)
+  const setConfirmLock = useCallback((locked: boolean) => { confirmLock.current = locked }, [])
+  const setPanelOpen = (value: boolean | ((prev: boolean) => boolean)): void => {
+    setOpen((prev) => {
+      const next = typeof value === 'function' ? value(prev) : value
+      if (!next && confirmLock.current) return prev
+      return next
+    })
+  }
   const [hover, setHover] = useState(false)
   const inflightRef = useRef(false)
   const mountedRef = useRef(true)
@@ -252,9 +265,17 @@ export function SubscriptionUsageBadge({ rpc, currentModel, t }: SubscriptionUsa
   // account actually logs out or a fetch succeeds but reports the window as
   // unsupported.
   const lastKnownRef = useRef(new Map<string, UsageWindow[]>())
+  const resetCountsRef = useRef(new Map<string, number>())
+  const refreshAgainRef = useRef(false)
+  const refreshRef = useRef<() => void>(() => {})
 
   const refresh = useCallback(async (): Promise<void> => {
-    if (rpc === undefined || inflightRef.current) return
+    if (rpc === undefined) return
+    if (inflightRef.current) {
+      refreshAgainRef.current = true
+      return
+    }
+    refreshAgainRef.current = false
     inflightRef.current = true
     try {
       const statusResp = await callSubscriptionsAuth<{
@@ -272,11 +293,15 @@ export function SubscriptionUsageBadge({ rpc, currentModel, t }: SubscriptionUsa
       const keyOf = (provider: SubscriptionProvider, account: AccountStatus): string => `${provider}:${account.key}`
 
       const lastKnown = lastKnownRef.current
+      const resetCounts = resetCountsRef.current
       // Drop last-known state for anything no longer logged in — that is a
       // real signal, unlike a fetch failure.
       const live = new Set(roster.map(({ provider, account }) => keyOf(provider, account)))
       for (const key of lastKnown.keys()) {
-        if (!live.has(key)) lastKnown.delete(key)
+        if (!live.has(key)) {
+          lastKnown.delete(key)
+          resetCounts.delete(key)
+        }
       }
 
       if (roster.length === 0) {
@@ -300,9 +325,15 @@ export function SubscriptionUsageBadge({ rpc, currentModel, t }: SubscriptionUsa
         if (usage.plan !== undefined) plans.set(key, usage.plan)
         if (!usage.supported || !usage.windows || usage.windows.length === 0) {
           lastKnown.delete(key)
+          resetCountsRef.current.delete(key)
           continue
         }
         lastKnown.set(key, usage.windows)
+        if (provider === 'codex' && usage.resetCredits !== undefined) {
+          resetCountsRef.current.set(key, usage.resetCredits.availableCount)
+        } else {
+          resetCountsRef.current.delete(key)
+        }
       }
 
       const byProvider = new Map<SubscriptionProvider, ProviderUsageDisplay>()
@@ -311,12 +342,14 @@ export function SubscriptionUsageBadge({ rpc, currentModel, t }: SubscriptionUsa
         const windows = lastKnown.get(key)
         if (windows === undefined) continue
         const plan = plans.get(key) ?? account.plan
+        const resetCredits = provider === 'codex' ? resetCountsRef.current.get(key) : undefined
         const row: AccountUsageDisplay = {
           key: account.key,
           isDefault: account.isDefault,
           ...account.account === undefined ? {} : { account: account.account },
           ...plan === undefined ? {} : { plan },
           windows,
+          ...resetCredits === undefined ? {} : { resetCredits },
         }
         const display = byProvider.get(provider)
         if (display === undefined) byProvider.set(provider, { provider, name: PROVIDER_NAMES[provider], accounts: [row] })
@@ -327,8 +360,13 @@ export function SubscriptionUsageBadge({ rpc, currentModel, t }: SubscriptionUsa
       // A failed poll must not crash the badge; keep last known state.
     } finally {
       inflightRef.current = false
+      if (refreshAgainRef.current && mountedRef.current) {
+        refreshAgainRef.current = false
+        refreshRef.current()
+      }
     }
   }, [rpc])
+  refreshRef.current = () => { void refresh() }
 
   useEffect(() => {
     mountedRef.current = true
@@ -362,11 +400,14 @@ export function SubscriptionUsageBadge({ rpc, currentModel, t }: SubscriptionUsa
   }, [])
 
   const pos = useAnchoredPosition({ open, anchorRef: rootRef, panelRef, side: 'top', gap: PANEL_GAP, margin: PANEL_MARGIN })
-  useDismissOnOutsidePointer(rootRef, open, setOpen, panelRef)
+  useDismissOnOutsidePointer(rootRef, open, setPanelOpen, panelRef)
   useEffect(() => {
     if (!open) return
     const onKeyDown = (event: KeyboardEvent): void => {
-      if (event.key === 'Escape') setOpen(false)
+      if (event.key === 'Escape') {
+      if (confirmLock.current) return
+      setOpen(false)
+    }
     }
     document.addEventListener('keydown', onKeyDown)
     return () => { document.removeEventListener('keydown', onKeyDown) }
@@ -459,6 +500,17 @@ export function SubscriptionUsageBadge({ rpc, currentModel, t }: SubscriptionUsa
                     model={d.provider === current ? selection?.model : undefined}
                     translate={translate}
                   />
+                  {d.provider === 'codex' && account.resetCredits !== undefined && rpc !== undefined && (
+                    <ResetCredits
+                      rpc={rpc}
+                      t={translate}
+                      accountKey={account.key}
+                      accountLabel={account.account ?? account.key}
+                      availableCount={account.resetCredits}
+                      onChanged={() => { void refresh() }}
+                      onDialogChange={setConfirmLock}
+                    />
+                  )}
                 </div>
               ))}
             </section>
@@ -569,16 +621,19 @@ const styles: Record<string, CSSProperties> = {
     color: 'var(--dsw-alias-label-secondary)',
   },
   label: { textOverflow: 'ellipsis', minWidth: 0, overflow: 'hidden' },
-  // Mirrors the host stat-dialog panel.
+  // Same skin as the host stat-dialog / context-meter panel: the menu fill is
+  // translucent, and the blur is what keeps the chat from showing through.
   panel: {
     position: 'fixed', zIndex: 1100, boxSizing: 'border-box',
     background: 'var(--dsw-specific-menu)',
+    backdropFilter: 'var(--dsw-menu-backdrop-filter)',
     width: 'max-content', minWidth: 'min(300px, 100vw - 24px)', maxWidth: 'min(440px, 100vw - 24px)',
     maxHeight: 'min(560px, 100dvh - 24px)', overflowY: 'auto', overscrollBehavior: 'contain',
     boxShadow: 'var(--dsw-elevation-prominent)',
+    '--dsw-elevation-stroke-color': 'var(--dsw-alias-border-l1)',
     color: 'var(--dsw-alias-label-secondary)', cursor: 'default',
     border: 0, borderRadius: 12, padding: 16, fontSize: 12, lineHeight: '18px',
-  },
+  } as CSSProperties,
   title: {
     color: 'var(--dsw-alias-label-primary)', display: 'flex',
     justifyContent: 'space-between', gap: 16, marginBottom: 8, fontWeight: 500,

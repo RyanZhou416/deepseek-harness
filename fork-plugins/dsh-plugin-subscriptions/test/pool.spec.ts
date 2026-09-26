@@ -437,17 +437,130 @@ test('quota_aware: the most urgent window (soon reset, plenty left) wins', async
   assert.equal((chunks[0] as { text: string }).text, 'a2')
 })
 
-test('quota_aware: a window past the full mark gates its account out', async () => {
+test('quota_aware: a ChatGPT window at 100% gates its account out', async () => {
   const codex = new FakeAdapter((_options, account) => serveOk(account))
   const { pool } = makePool({ codex }, {
     strategy: 'quota_aware',
     usage: usageFetchers({
       'codex/a1': windowUsage(50, 5 * 60 * 60_000),
-      'codex/a2': windowUsage(96, 30 * 60_000),
+      'codex/a2': windowUsage(100, 30 * 60_000),
     }),
   })
   await collect(pool.stream(OPTIONS))
   assert.deepEqual(codex.accounts, ['a1'])
+})
+
+test('quota_aware: ChatGPT stays selectable at 99%', async () => {
+  const codex = new FakeAdapter((_options, account) => serveOk(account))
+  const { pool } = makePool({ codex }, {
+    strategy: 'quota_aware',
+    usage: usageFetchers({
+      'codex/a1': windowUsage(50, 5 * 60 * 60_000),
+      'codex/a2': windowUsage(99, 60_000),
+    }),
+  })
+  await collect(pool.stream(OPTIONS))
+  assert.deepEqual(codex.accounts, ['a2'])
+})
+
+const WEEK_MS = 7 * 24 * 60 * 60 * 1000
+const DAY_MS = 24 * 60 * 60 * 1000
+
+/** One weekly window, optionally with the earliest available reset-credit expiry. */
+function weeklyUsage(usedPercent: number, remainingMs: number, expiresInMs?: number): ProviderUsage {
+  return {
+    supported: true,
+    windows: [{ kind: 'weekly', usedPercent, resetsAt: Date.now() + remainingMs }],
+    ...expiresInMs === undefined ? {} : {
+      resetCredits: { availableCount: 1, soonestExpiresAt: Date.now() + expiresInMs },
+    },
+  }
+}
+
+test('quota_aware: a just-refreshed ChatGPT account with an expiring credit leads a new session', async () => {
+  const codex = new FakeAdapter((_options, account) => serveOk(account))
+  const { pool } = makePool({ codex }, {
+    strategy: 'quota_aware',
+    usage: usageFetchers({
+      // Near its own weekly reset, and more urgent, but the credit is not a reason to pick it.
+      'codex/a1': weeklyUsage(20, 12 * 60 * 60 * 1000, 2 * DAY_MS),
+      'codex/a2': weeklyUsage(5, WEEK_MS - 12 * 60 * 60 * 1000, 2 * DAY_MS),
+    }),
+  })
+  await collect(pool.stream(OPTIONS))
+  assert.deepEqual(codex.accounts, ['a2'])
+})
+
+test('quota_aware: sticky holds against a fresh-credit account inside the margin', async () => {
+  const data: Record<string, ProviderUsage> = {
+    'codex/a1': weeklyUsage(10, 2 * 60 * 60 * 1000),
+    'codex/a2': weeklyUsage(10, 3 * DAY_MS),
+  }
+  const usage = usageFetchers(data)
+  const codex = new FakeAdapter((_options, account) => serveOk(account))
+  const { pool, usage: tracker } = makePool({ codex }, { strategy: 'quota_aware', switchMargin: 2, usage })
+  const options = { ...OPTIONS, sessionId: SessionId('fresh-credit') }
+  await collect(pool.stream(options))
+  assert.deepEqual(codex.accounts, ['a1'])
+  data['codex/a2'] = weeklyUsage(5, WEEK_MS - 12 * 60 * 60 * 1000, DAY_MS)
+  tracker.invalidate('codex')
+  await collect(pool.stream(options))
+  assert.deepEqual(codex.accounts, ['a1', 'a1'])
+})
+
+test('quota_aware: remaining quota outranks a full account that holds an expiring credit', async () => {
+  const codex = new FakeAdapter((_options, account) => serveOk(account))
+  const { pool } = makePool({ codex }, {
+    strategy: 'quota_aware',
+    usage: usageFetchers({
+      'codex/a1': weeklyUsage(40, 2 * DAY_MS),
+      'codex/a2': {
+        supported: true,
+        windows: [
+          { kind: 'weekly', usedPercent: 10, resetsAt: Date.now() + WEEK_MS - 12 * 60 * 60 * 1000 },
+          { kind: 'session', usedPercent: 100, resetsAt: Date.now() + 60 * 60 * 1000 },
+        ],
+        resetCredits: { availableCount: 1, soonestExpiresAt: Date.now() + DAY_MS },
+      },
+    }),
+  })
+  await collect(pool.stream(OPTIONS))
+  assert.deepEqual(codex.accounts, ['a1'])
+})
+
+test('quota_aware: a full fresh-credit account leads the last-resort tail', async () => {
+  const codex = new FakeAdapter((_options, account) => serveOk(account))
+  const { pool } = makePool({ codex }, {
+    strategy: 'quota_aware',
+    usage: usageFetchers({
+      'codex/a1': weeklyUsage(100, 12 * 60 * 60 * 1000, DAY_MS),
+      'codex/a2': weeklyUsage(100, WEEK_MS - 12 * 60 * 60 * 1000, DAY_MS),
+    }),
+  })
+  await collect(pool.stream(OPTIONS))
+  assert.deepEqual(codex.accounts, ['a2'])
+})
+
+test('quota_aware: Claude still treats 96% as full', async () => {
+  const claude = new FakeAdapter((_options, account) => serveOk(account))
+  const family = new Map<string, PoolDefinition>([
+    [poolKey('claude', 'm'), {
+      members: [
+        { provider: 'claude', account: 'a1', model: 'm' },
+        { provider: 'claude', account: 'a2', model: 'm' },
+      ],
+    }],
+  ])
+  const { pool } = makePool({ claude }, {
+    strategy: 'quota_aware',
+    families: family,
+    usage: usageFetchers({
+      'claude/a1': windowUsage(96, 30 * 60_000),
+      'claude/a2': windowUsage(20, 5 * 60 * 60_000),
+    }),
+  })
+  await collect(pool.stream({ ...OPTIONS, provider: 'claude' }))
+  assert.deepEqual(claude.accounts, ['a2'])
 })
 
 test('quota_aware: an account without telemetry sinks behind a measured one', async () => {

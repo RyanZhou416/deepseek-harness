@@ -19,4 +19,5 @@ export default defineConfig([{
   fixedExtension: false,
   dts: false,
   clean: false,
+  external: ['@cursor/sdk'],
 }, clientConfig])

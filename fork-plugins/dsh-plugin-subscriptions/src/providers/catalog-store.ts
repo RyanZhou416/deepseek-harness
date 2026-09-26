@@ -90,6 +90,14 @@ function sanitizeModel(value: unknown): DiscoveredModel | undefined {
   if (inputModalities !== undefined
     && (!Array.isArray(inputModalities) || inputModalities.length === 0
       || inputModalities.some(modality => modality !== 'text' && modality !== 'image'))) return undefined
+  const cursorParameters = raw.cursorParameters === undefined
+    ? undefined
+    : sanitizeCursorParameters(raw.cursorParameters)
+  if (raw.cursorParameters !== undefined && cursorParameters === undefined) return undefined
+  const cursorDefaults = raw.cursorDefaults === undefined
+    ? undefined
+    : sanitizeCursorDefaults(raw.cursorDefaults)
+  if (raw.cursorDefaults !== undefined && cursorDefaults === undefined) return undefined
   return {
     id: raw.id,
     name: raw.name,
@@ -104,7 +112,49 @@ function sanitizeModel(value: unknown): DiscoveredModel | undefined {
     ...copilotWire === undefined ? {} : { copilotWire: copilotWire as 'chat-completions' | 'responses' },
     ...copilotResponses === undefined ? {} : { copilotResponses },
     ...inputModalities === undefined ? {} : { inputModalities: [...inputModalities] as ('text' | 'image')[] },
+    ...cursorParameters === undefined ? {} : { cursorParameters },
+    ...cursorDefaults === undefined ? {} : { cursorDefaults },
   }
+}
+
+function sanitizeCursorParameters(value: unknown): DiscoveredModel['cursorParameters'] | undefined {
+  if (value === undefined) return undefined
+  if (!Array.isArray(value) || value.length === 0) return undefined
+  const parameters: NonNullable<DiscoveredModel['cursorParameters']> = []
+  for (const entry of value) {
+    if (typeof entry !== 'object' || entry === null) return undefined
+    const raw = entry as Record<string, unknown>
+    if (typeof raw.id !== 'string' || raw.id.length === 0 || !Array.isArray(raw.values) || raw.values.length === 0) {
+      return undefined
+    }
+    const values: NonNullable<DiscoveredModel['cursorParameters']>[number]['values'] = []
+    for (const item of raw.values) {
+      if (typeof item !== 'object' || item === null) return undefined
+      const valueRaw = item as Record<string, unknown>
+      if (typeof valueRaw.value !== 'string' || valueRaw.value.length === 0) return undefined
+      if (valueRaw.name !== undefined && typeof valueRaw.name !== 'string') return undefined
+      values.push({
+        value: valueRaw.value,
+        ...typeof valueRaw.name === 'string' && valueRaw.name.length > 0 ? { name: valueRaw.name } : {},
+      })
+    }
+    parameters.push({ id: raw.id, values })
+  }
+  return parameters
+}
+
+function sanitizeCursorDefaults(value: unknown): DiscoveredModel['cursorDefaults'] | undefined {
+  if (value === undefined) return undefined
+  if (!Array.isArray(value) || value.length === 0) return undefined
+  const defaults: NonNullable<DiscoveredModel['cursorDefaults']> = []
+  for (const entry of value) {
+    if (typeof entry !== 'object' || entry === null) return undefined
+    const raw = entry as Record<string, unknown>
+    if (typeof raw.id !== 'string' || raw.id.length === 0
+      || typeof raw.value !== 'string' || raw.value.length === 0) return undefined
+    defaults.push({ id: raw.id, value: raw.value })
+  }
+  return defaults
 }
 
 /**

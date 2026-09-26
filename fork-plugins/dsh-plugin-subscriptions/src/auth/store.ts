@@ -20,10 +20,10 @@ import { dirname } from 'node:path'
 import { dshHomePath } from '@deepseek-ai/dsh-home-paths'
 
 /** Provider routes this plugin can serve. */
-export type ProviderId = 'codex' | 'claude' | 'grok' | 'copilot' | 'antigravity'
+export type ProviderId = 'codex' | 'claude' | 'grok' | 'copilot' | 'antigravity' | 'cursor'
 
 /** Every provider route, in display order. */
-export const PROVIDER_IDS: readonly ProviderId[] = ['codex', 'claude', 'grok', 'copilot', 'antigravity']
+export const PROVIDER_IDS: readonly ProviderId[] = ['codex', 'claude', 'grok', 'copilot', 'antigravity', 'cursor']
 
 /** Stored ChatGPT/Codex subscription session. */
 export interface CodexSession {
@@ -88,6 +88,27 @@ export interface CopilotSession {
   account?: string
 }
 
+/**
+ * Stored Cursor account. `accessToken` is the user API key used for chat.
+ * `refreshToken` repeats that key so the shared session shape stays valid.
+ * Dashboard usage uses the separate session tokens captured at login; accounts
+ * stored before that capture have neither and must log in again.
+ */
+export interface CursorSession {
+  /** User API key for agent requests. */
+  accessToken: string
+  /** Copy of the API key. Cursor chat has no refresh grant. */
+  refreshToken: string
+  /** Epoch milliseconds at which the user API key expires. */
+  expiresAt: number
+  /** Account email, when login reported one. */
+  email?: string
+  /** Short-lived dashboard access token for usage queries. */
+  dashboardAccessToken?: string
+  /** Dashboard refresh token. Renewed only when a usage query needs it. */
+  dashboardRefreshToken?: string
+}
+
 /** Stored Google OAuth session for the Antigravity v1internal API. */
 export interface AntigravitySession {
   accessToken: string
@@ -120,10 +141,11 @@ export interface SessionMap {
   grok?: ProviderAccounts<GrokSession>
   copilot?: ProviderAccounts<CopilotSession>
   antigravity?: ProviderAccounts<AntigravitySession>
+  cursor?: ProviderAccounts<CursorSession>
 }
 
 /** Any stored session, for provider-agnostic plumbing. */
-export type StoredSession = CodexSession | ClaudeSession | GrokSession | CopilotSession | AntigravitySession
+export type StoredSession = CodexSession | ClaudeSession | GrokSession | CopilotSession | AntigravitySession | CursorSession
 
 /** The session type one provider stores. */
 export type SessionOf<K extends ProviderId> = NonNullable<SessionMap[K]>['accounts'][string]
@@ -169,6 +191,8 @@ export function accountKeyOf(provider: ProviderId, session: StoredSession): stri
       return (session as AntigravitySession).account ?? tokenHash(session.refreshToken)
     case 'copilot':
       return (session as CopilotSession).account ?? tokenHash(session.refreshToken)
+    case 'cursor':
+      return (session as CursorSession).email ?? tokenHash(session.refreshToken)
   }
 }
 

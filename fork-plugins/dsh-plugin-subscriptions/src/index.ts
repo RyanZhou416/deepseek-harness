@@ -1,6 +1,6 @@
 /**
  * dsh-plugin-subscriptions: register OAuth-subscription LLM providers
- * (ChatGPT/Codex, Claude, Grok, GitHub Copilot, Google Antigravity) on `ctx.llm`, and expose the `/subscriptions-auth`
+ * (ChatGPT/Codex, Claude, Grok, GitHub Copilot, Google Antigravity, Cursor) on `ctx.llm`, and expose the `/subscriptions-auth`
  * RPC channel the web Settings page uses to run the logins. The token store
  * lives at `~/.dsh/plugins/subscriptions/auth.json`; the channel registers only when
  * a host `connection` service exists, so headless compositions load fine.
@@ -57,12 +57,13 @@ import type {
   CodexSession,
   CopilotSession,
   AntigravitySession,
+  CursorSession,
   GrokSession,
   ProviderId,
   StoredSession,
 } from './auth/store.js'
-import { DISCOVERY_TIMEOUT_MS, validateModels, withTimeout } from './providers/common.js'
-import type { ModelEntry, ProviderUsage } from './providers/common.js'
+import { DISCOVERY_TIMEOUT_MS, isMissingOrInvalidCredential, OAuthEndpointError, validateModels, withTimeout } from './providers/common.js'
+import type { ModelEntry, ProviderUsage, ResetCreditConsumeResult, ResetCreditList } from './providers/common.js'
 import { AccountTokenManager } from './providers/accounts.js'
 import type { AccountAwareAdapter } from './providers/accounts.js'
 import { DEFAULT_RATE_LIMIT_MAX_WAIT_MS, resolveRateLimitWait } from './providers/rate-limit.js'
@@ -78,13 +79,16 @@ import { registerWithAlias } from './tools/registration.js'
 import { buildAccountPools, poolKey } from './providers/pool-family.js'
 import type { PoolDefinition, PoolMemberRef } from './providers/pool-family.js'
 import { PoolHealthRegistry } from './providers/pool-health.js'
-import { PoolUsageTracker } from './providers/pool-usage.js'
+import { PoolUsageTracker, USAGE_TTL_MS } from './providers/pool-usage.js'
 import {
   CodexAdapter,
   codexFlow,
   CODEX_PREEMPT_MS,
   codexProfileClaims,
   exchangeCodexCode,
+  consumeCodexResetCredit,
+  fetchCodexResetCredits,
+  fetchCodexPoolUsage,
   fetchCodexUsage,
   isCodexPermanentRefreshError,
   refreshCodex,
@@ -126,6 +130,15 @@ import {
   resolveAntigravityOAuthConfig,
 } from './providers/antigravity.js'
 import type { AntigravityRuntimeConfig } from './providers/antigravity.js'
+import {
+  CursorAdapter,
+  CURSOR_PREEMPT_MS,
+  beginCursorLogin,
+  isCursorPermanentRefreshError,
+  loadCursorAccountUsage,
+  refreshCursor,
+} from './providers/cursor.js'
+import type { CursorLoginHandle } from './providers/cursor.js'
 import { createXSearchTool } from './tools/x-search.js'
 import { createImageGenerateTool } from './tools/image-generate.js'
 import { createVideoGenerateTool, videosDirectory } from './tools/video-generate.js'
@@ -135,7 +148,7 @@ import { ProviderSettingsStore, PROVIDER_TOOLS, validatePreferences } from './pr
 export type { ModelEntry, ProviderUsage, UsageWindow } from './providers/common.js'
 export type { RateLimitConfig, RateLimitWait } from './providers/rate-limit.js'
 export type { ProviderStatus } from './auth/rpc.js'
-export type { AntigravitySession, ClaudeSession, CodexSession, CopilotSession, GrokSession, ProviderId } from './auth/store.js'
+export type { AntigravitySession, ClaudeSession, CodexSession, CopilotSession, CursorSession, GrokSession, ProviderId } from './auth/store.js'
 
 export const name = 'dsh-plugin-subscriptions'
 export const inject = ['llm']
@@ -164,6 +177,7 @@ export interface Config {
     grok?: ModelEntry[]
     copilot?: ModelEntry[]
     antigravity?: ModelEntry[]
+    cursor?: ModelEntry[]
   }
   /** Antigravity-specific OAuth and endpoint configuration. */
   antigravity?: AntigravityRuntimeConfig & {
@@ -191,7 +205,7 @@ export interface Config {
   }
 }
 
-const providerIdSchema = z.union(['codex', 'claude', 'grok', 'copilot', 'antigravity'])
+const providerIdSchema = z.union(['codex', 'claude', 'grok', 'copilot', 'antigravity', 'cursor'])
 const modelEntrySchema: z<ModelEntry> = z.object({
   id: z.string().required(),
   name: z.string(),
@@ -208,7 +222,7 @@ const poolMemberSchema: z<PoolMemberRef> = z.object({
 })
 
 export const Config: z<Config> = z.object({
-  providers: z.array(providerIdSchema).default(['codex', 'claude', 'grok', 'copilot', 'antigravity']),
+  providers: z.array(providerIdSchema).default(['codex', 'claude', 'grok', 'copilot', 'antigravity', 'cursor']),
   codexClientVersion: z.string(),
   streamIdleTimeoutMs: z.number().min(1).default(DEFAULT_STREAM_IDLE_TIMEOUT_MS),
   rateLimit: z.object({
@@ -221,6 +235,7 @@ export const Config: z<Config> = z.object({
     grok: z.array(modelEntrySchema),
     copilot: z.array(modelEntrySchema),
     antigravity: z.array(modelEntrySchema),
+    cursor: z.array(modelEntrySchema),
   }),
   antigravity: z.object({
     clientId: z.string(),
@@ -274,6 +289,10 @@ const DEFAULT_MODELS: Record<ProviderId, ModelEntry[]> = {
     { id: 'claude-sonnet-4-6', name: 'Claude Sonnet 4.6', inputModalities: ['text', 'image'] },
     { id: 'claude-opus-4-6-thinking', name: 'Claude Opus 4.6 Thinking', inputModalities: ['text', 'image'] },
   ],
+  // Static fallback only. `Cursor.models.list` replaces it after login.
+  cursor: [
+    { id: 'composer-2.5', name: 'Composer 2.5' },
+  ],
 }
 
 /** Validate and detach the model catalog for every provider. */
@@ -290,6 +309,7 @@ function resolveCatalog(models: Config['models']): Record<ProviderId, ModelEntry
     grok: resolve('grok'),
     copilot: resolve('copilot'),
     antigravity: resolve('antigravity'),
+    cursor: resolve('cursor'),
   }
 }
 
@@ -307,6 +327,7 @@ function accountOf(provider: ProviderId, session: StoredSession | undefined): st
     case 'grok': return (session as GrokSession).account
     case 'copilot': return (session as CopilotSession).account
     case 'antigravity': return (session as AntigravitySession).account
+    case 'cursor': return (session as CursorSession).email
   }
 }
 
@@ -317,11 +338,43 @@ function planOf(provider: ProviderId, session: StoredSession): string | undefine
     case 'claude': return (session as ClaudeSession).subscriptionType
     case 'grok': return undefined
     case 'copilot': return undefined
+    case 'antigravity': return undefined
+    case 'cursor': return undefined
   }
 }
 
 /** Per-provider per-account usage lookup; providers without a usage endpoint are absent. */
 type UsageFetchers = Partial<Record<ProviderId, (account: string, signal: AbortSignal) => Promise<ProviderUsage>>>
+
+/** ChatGPT reset-credit reads and spends. Absent when the Codex provider is not registered. */
+interface CodexResetCreditOps {
+  list(account: string, signal: AbortSignal): Promise<ResetCreditList>
+  consume(account: string, creditId: string, redeemRequestId: string, signal: AbortSignal): Promise<ResetCreditConsumeResult>
+}
+
+/** A cached credit list, or a failure held through its cooldown. */
+interface CreditCacheHit {
+  at: number
+  value: ResetCreditList
+  error?: undefined
+  cooldownMs?: undefined
+}
+
+interface CreditCacheMiss {
+  at: number
+  value?: undefined
+  error: unknown
+  cooldownMs: number
+}
+
+type CreditCacheEntry = CreditCacheHit | CreditCacheMiss
+
+/** Failures worth holding. A missing login or a cancelled call must stay retryable. */
+function cacheableCreditError(error: unknown, signal: AbortSignal): boolean {
+  if (signal.aborted) return false
+  if (isMissingOrInvalidCredential(error)) return false
+  return !(error instanceof Error && (error.name === 'AbortError' || error.name === 'TimeoutError'))
+}
 
 /**
  * Auth operations behind the `/subscriptions-auth` RPC channel: start/complete
@@ -345,6 +398,9 @@ export class SubscriptionsAuthController implements AuthController {
   /** In-flight OAuth completions, one per provider at most. */
   private completions = new Map<ProviderId, Promise<void>>()
 
+  /** Cursor browser logins, keyed by the claim that started them. */
+  private cursorLogins = new Map<number, CursorLoginHandle>()
+
   /**
    * Per-provider claim counter. Everything that takes ownership of a
    * provider's session — starting a login, importing Claude Code credentials,
@@ -358,6 +414,15 @@ export class SubscriptionsAuthController implements AuthController {
    * cannot be read off the flow manager.
    */
   private claims = new Map<ProviderId, number>()
+
+  /** Cached reset-credit lists, keyed `provider/account`. Not consulted by pool selection. */
+  private readonly creditCache = new Map<string, CreditCacheEntry>()
+
+  /** One in-flight list per account generation, so a spend cannot join a stale read. */
+  private readonly creditInflight = new Map<string, { epoch: number; promise: Promise<ResetCreditList> }>()
+
+  /** Bumped when a list must not be written back (logout, or a successful spend). */
+  private readonly creditEpoch = new Map<string, number>()
 
   constructor(
     private readonly flows: OAuthFlowManager,
@@ -385,6 +450,8 @@ export class SubscriptionsAuthController implements AuthController {
     private readonly poolUsage: PoolUsageTracker | undefined = undefined,
     /** Antigravity OAuth/runtime configuration. */
     private readonly antigravityConfig: Config['antigravity'] = {},
+    /** ChatGPT reset-credit operations. Other providers never call them. */
+    private readonly resetCreditOps: CodexResetCreditOps | undefined = undefined,
   ) {}
 
   usage(provider: ProviderId, account: string, signal: AbortSignal, force = false): Promise<ProviderUsage> {
@@ -392,6 +459,85 @@ export class SubscriptionsAuthController implements AuthController {
     if (fetcher === undefined) return Promise.resolve({ supported: false })
     if (this.poolUsage === undefined) return fetcher(account, signal)
     return this.poolUsage.snapshotFor(provider, account, force)
+  }
+
+  listResetCredits(provider: ProviderId, account: string, signal: AbortSignal, force = false): Promise<ResetCreditList> {
+    const ops = this.resetCreditOps
+    if (provider !== 'codex' || ops === undefined) return Promise.resolve({ supported: false })
+    const key = `${provider}/${account}`
+    const cached = this.creditCache.get(key)
+    if (cached !== undefined && Date.now() - cached.at < (cached.cooldownMs ?? USAGE_TTL_MS)) {
+      if (cached.value === undefined) return Promise.reject(cached.error)
+      if (!force) return Promise.resolve(cached.value)
+    }
+    return this.fetchCreditList(ops, key, account, signal)
+  }
+
+  async consumeResetCredit(
+    provider: ProviderId,
+    account: string,
+    creditId: string,
+    redeemRequestId: string,
+    signal: AbortSignal,
+  ): Promise<ResetCreditConsumeResult> {
+    const ops = this.resetCreditOps
+    if (provider !== 'codex' || ops === undefined) throw new Error('ChatGPT reset credits are unavailable')
+    const result = await ops.consume(account, creditId, redeemRequestId, signal)
+    this.forgetResetCredits(provider, account)
+    this.poolUsage?.invalidate(provider, account)
+    return result
+  }
+
+  /** Drop cached credit lists for one account, or every account of a provider. */
+  forgetResetCredits(provider: ProviderId, account?: string): void {
+    const bump = (key: string): void => {
+      this.creditEpoch.set(key, (this.creditEpoch.get(key) ?? 0) + 1)
+      this.creditCache.delete(key)
+    }
+    if (account !== undefined) {
+      bump(`${provider}/${account}`)
+      return
+    }
+    const prefix = `${provider}/`
+    const keys = new Set([...this.creditCache.keys(), ...this.creditEpoch.keys(), ...this.creditInflight.keys()])
+    for (const key of keys) {
+      if (key.startsWith(prefix)) bump(key)
+    }
+  }
+
+  /** Join the in-flight list for this generation, or start one. Failures cool down like usage. */
+  private fetchCreditList(
+    ops: CodexResetCreditOps,
+    key: string,
+    account: string,
+    signal: AbortSignal,
+  ): Promise<ResetCreditList> {
+    const epoch = this.creditEpoch.get(key) ?? 0
+    const pending = this.creditInflight.get(key)
+    if (pending !== undefined && pending.epoch === epoch) return pending.promise
+    const request = ops.list(account, signal).then(
+      (value) => {
+        if ((this.creditEpoch.get(key) ?? 0) === epoch) {
+          this.creditCache.set(key, { at: Date.now(), value })
+        }
+        return value
+      },
+      (error: unknown) => {
+        if ((this.creditEpoch.get(key) ?? 0) === epoch && cacheableCreditError(error, signal)) {
+          const retryAfterMs = error instanceof OAuthEndpointError ? error.retryAfterMs : undefined
+          this.creditCache.set(key, {
+            at: Date.now(),
+            error,
+            cooldownMs: retryAfterMs ?? USAGE_TTL_MS,
+          })
+        }
+        throw error
+      },
+    ).finally(() => {
+      if (this.creditInflight.get(key)?.promise === request) this.creditInflight.delete(key)
+    })
+    this.creditInflight.set(key, { epoch, promise: request })
+    return request
   }
 
   async readImage(ref: ImageAttachmentRef, signal: AbortSignal): Promise<ImageBytesResult> {
@@ -471,6 +617,23 @@ export class SubscriptionsAuthController implements AuthController {
       this.finalizing.add(provider)
       void this.completeDevice(provider, attempt)
       return { authorizeUrl: attempt.verificationUrl, userCode: attempt.userCode }
+    }
+    if (provider === 'cursor') {
+      // Browser login stays inside the SDK. The Settings page only opens the
+      // URL; the key is stored when `done` resolves. `store: null` keeps the
+      // key out of `~/.cursor/sdk/auth.json`.
+      this.cancelCursorLogins()
+      const claim = this.claim('cursor')
+      const handle = beginCursorLogin()
+      this.cursorLogins.set(claim, handle)
+      this.finalizing.add('cursor')
+      this.completions.set('cursor', this.finishCursorLogin(claim, handle.done))
+      try {
+        return { authorizeUrl: await handle.authorizeUrl }
+      } catch (error) {
+        handle.cancel()
+        throw error
+      }
     }
     const spec = provider === 'grok'
       ? await grokFlow()
@@ -567,7 +730,33 @@ export class SubscriptionsAuthController implements AuthController {
           resolveAntigravityOAuthConfig(this.antigravityConfig),
           this.antigravityConfig,
         )
+      case 'cursor':
+        return Promise.reject(new Error('Cursor login finishes in the browser; there is no authorization code to exchange'))
     }
+  }
+
+  /** Store one Cursor login if this claim still owns the provider. */
+  private async finishCursorLogin(claim: number, done: Promise<CursorSession>): Promise<void> {
+    try {
+      const session = await done
+      if (this.claims.get('cursor') !== claim) return
+      await this.persist('cursor', session)
+      this.lastError.delete('cursor')
+      this.onAuthChanged('cursor', accountKeyOf('cursor', session))
+    } catch (error) {
+      if (this.claims.get('cursor') !== claim) return
+      if (!(error instanceof Error && error.message === 'login cancelled')) {
+        this.lastError.set('cursor', errorChain(error))
+      }
+    } finally {
+      this.finalizing.delete('cursor')
+      this.cursorLogins.delete(claim)
+    }
+  }
+
+  /** Abort every Cursor login this controller started. */
+  private cancelCursorLogins(): void {
+    for (const handle of this.cursorLogins.values()) handle.cancel()
   }
 
   private persist(provider: ProviderId, session: StoredSession): Promise<void> {
@@ -588,6 +777,9 @@ export class SubscriptionsAuthController implements AuthController {
   }
 
   manual(provider: ProviderId, input: string): Promise<void> {
+    if (provider === 'cursor') {
+      return Promise.reject(new Error('Cursor login finishes in the browser; there is no code to paste'))
+    }
     const attempt = this.flows.pending(provider)
     if (attempt === undefined) {
       return Promise.reject(new Error(`no ${provider} login attempt is in progress`))
@@ -602,6 +794,7 @@ export class SubscriptionsAuthController implements AuthController {
     this.claim(provider)
     this.flows.pending(provider)?.cancel()
     this.deviceFlows.pending(provider)?.cancel()
+    if (provider === 'cursor') this.cancelCursorLogins()
     return Promise.resolve()
   }
 
@@ -609,6 +802,7 @@ export class SubscriptionsAuthController implements AuthController {
     this.claim(provider)
     this.flows.pending(provider)?.cancel()
     this.deviceFlows.pending(provider)?.cancel()
+    if (provider === 'cursor') this.cancelCursorLogins()
     await deleteAccountSession(provider, account)
     this.lastError.delete(provider)
     this.onAuthChanged(provider, account)
@@ -666,11 +860,13 @@ export function apply(ctx: Context, config: Config): void {
   let poolHealth: PoolHealthRegistry | undefined
   let poolUsage: PoolUsageTracker | undefined
   let poolAdapter: PoolAdapter | undefined
+  let subscriptionsAuth: SubscriptionsAuthController | undefined
   const imagePool = new ImageAccountPool({
     enabled: config.pool?.enabled !== false && (config.pool?.autoAccounts ?? config.pool?.autoFamilies ?? true),
     onWarn,
   })
   const authChanged = (provider: ProviderId, account?: string): void => {
+    subscriptionsAuth?.forgetResetCredits(provider, account)
     if (provider === 'codex' || provider === 'grok') imagePool.clear(provider, account)
     // Login, logout, and credential death all pass through here; a copilot
     // auth transition also drops the adapter's captured reasoning replay
@@ -691,6 +887,7 @@ export function apply(ctx: Context, config: Config): void {
   // Token managers double as the tools' credential source, so they are
   // captured beside the registrations for the inject block below.
   let codexTokens: AccountTokenManager<CodexSession> | undefined
+  let codexResetCredits: CodexResetCreditOps | undefined
   let claudeTokens: AccountTokenManager<ClaudeSession> | undefined
   let grokTokens: AccountTokenManager<GrokSession> | undefined
   // Usage lookups resolve the session through the refresh-aware path, so an
@@ -704,6 +901,7 @@ export function apply(ctx: Context, config: Config): void {
   // Dropped on every copilot auth transition so replay state (captured
   // reasoning) never survives an account switch in memory.
   let copilotAdapter: CopilotAdapter | undefined
+  let cursorAdapter: CursorAdapter | undefined
   const memberAdapters = new Map<ProviderId, AccountAwareAdapter>()
   const register = (provider: ProviderId, adapter: AccountAwareAdapter): AdapterRegistrationHandle => {
     const route = new AccountPreferencesAdapter({
@@ -730,6 +928,16 @@ export function apply(ctx: Context, config: Config): void {
         accountTokens.set('codex', tokens as AccountTokenManager<StoredSession>)
         usageFetchers.codex = async (account, signal) =>
           fetchCodexUsage(await tokens.session(account), proxiedFetch, signal)
+        codexResetCredits = {
+          list: async (account, signal) => fetchCodexResetCredits(await tokens.session(account), proxiedFetch, signal),
+          consume: async (account, creditId, redeemRequestId, signal) => consumeCodexResetCredit(
+            await tokens.session(account),
+            creditId,
+            redeemRequestId,
+            proxiedFetch,
+            signal,
+          ),
+        }
         let adapter!: CodexAdapter
         adapter = new CodexAdapter({
           ...config.codexClientVersion === undefined ? {} : { clientVersion: config.codexClientVersion },
@@ -745,7 +953,7 @@ export function apply(ctx: Context, config: Config): void {
           // restarts, so a resumed session's selected effort keeps resolving.
           catalogStore: catalogStore('codex'),
           defaultEffortOf: (model: string) => defaultEffortOf('codex', model),
-          contextWindowOf: model => preferences.contextWindow(model),
+          contextWindowOf: model => preferences.contextWindow('codex', model),
           pool: () => poolAdapter,
           speedFor: (sessionId: string | undefined, model: string): boolean | Promise<boolean> =>
             sessionId !== undefined
@@ -887,6 +1095,47 @@ export function apply(ctx: Context, config: Config): void {
         handles.set('antigravity', register('antigravity', adapter))
         break
       }
+      case 'cursor': {
+        const tokens = new AccountTokenManager<CursorSession>({
+          provider: 'cursor',
+          displayName: 'Cursor',
+          makeOptions: () => ({
+            preemptMs: CURSOR_PREEMPT_MS,
+            refresh: refreshCursor,
+            isPermanent: isCursorPermanentRefreshError,
+          }),
+          onAccountRemoved: account => { authChanged('cursor', account) },
+        })
+        accountTokens.set('cursor', tokens as AccountTokenManager<StoredSession>)
+        let adapter!: CursorAdapter
+        adapter = new CursorAdapter({
+          models: catalog.cursor,
+          streamIdleTimeoutMs,
+          rateLimit,
+          tokens,
+          discovery: !overridden.has('cursor'),
+          onWarn,
+          resolveAttachments,
+          catalogStore: catalogStore('cursor'),
+          defaultEffortOf: model => defaultEffortOf('cursor', model),
+          pool: () => poolAdapter,
+          speedFor: (sessionId, model) =>
+            sessionId !== undefined
+            && speedBySession.get(sessionId) === 'fast'
+            && adapter.supportsFastTier(model),
+          contextWindowOf: model => preferences.contextWindow('cursor', model),
+        })
+        cursorAdapter = adapter
+        usageFetchers.cursor = async (account, signal) => loadCursorAccountUsage(
+          await tokens.session(account),
+          proxiedFetch,
+          signal,
+          next => saveAccountSession('cursor', account, next),
+        )
+        adapters.set('cursor', adapter)
+        handles.set('cursor', register('cursor', adapter))
+        break
+      }
     }
   }
 
@@ -907,7 +1156,7 @@ export function apply(ctx: Context, config: Config): void {
         case 'codex': {
           const tokens = codexTokens
           return tokens === undefined ? undefined : async () =>
-            fetchCodexUsage(await tokens.session(account), proxiedFetch, AbortSignal.timeout(POOL_USAGE_TIMEOUT_MS))
+            fetchCodexPoolUsage(await tokens.session(account), proxiedFetch, AbortSignal.timeout(POOL_USAGE_TIMEOUT_MS))
         }
         case 'claude': {
           const tokens = claudeTokens
@@ -928,6 +1177,11 @@ export function apply(ctx: Context, config: Config): void {
         }
         case 'copilot':
           return undefined
+        case 'cursor': {
+          const fetchUsage = usageFetchers.cursor
+          return fetchUsage === undefined ? undefined : async () =>
+            fetchUsage(account, AbortSignal.timeout(POOL_USAGE_TIMEOUT_MS))
+        }
       }
     }
     poolHealth = new PoolHealthRegistry()
@@ -1003,6 +1257,7 @@ export function apply(ctx: Context, config: Config): void {
           if (await codexAdapter?.supportsFastTier(model, key)) fastModels.push(accountModelId(key, model))
         }
       }
+      fastModels.push(...await cursorAdapter?.fastCapableModels() ?? [])
       return {
         tier: speedBySession.get(sessionId) ?? 'standard',
         fastModels,
@@ -1098,9 +1353,11 @@ export function apply(ctx: Context, config: Config): void {
       handles.get(provider)?.replace([provider])
     },
   }
-  registerAuthRpc(ctx, new SubscriptionsAuthController(
+  subscriptionsAuth = new SubscriptionsAuthController(
     flows, deviceFlows, authChanged, resolveAttachments, usageFetchers, undefined, poolUsage, config.antigravity,
-  ), speed, {
+    codexResetCredits,
+  )
+  registerAuthRpc(ctx, subscriptionsAuth, speed, {
     get: () => proxyGetConfig(),
     set: input => proxySetConfig(input),
     test: payload => proxyTestConnection(payload.url, payload.proxy),
@@ -1125,12 +1382,14 @@ export function apply(ctx: Context, config: Config): void {
       const tierIds = new Set((await poolAdapter?.modelsForProvider(provider).catch(() => []) ?? []).map(model => model.id))
       const rows = await Promise.all(models.map(async model => {
         const contexts: { default: number; max: number }[] = []
-        if (provider === 'codex' && codexAdapter) {
-          for (const account of accountCatalogs) {
-            if (account.models?.some(entry => entry.id === model.id)) {
-              const limits = await codexAdapter.contextLimits(model.id, account.account).catch(() => undefined)
-              if (limits) contexts.push(limits)
-            }
+        if (provider === 'codex' || provider === 'cursor') {
+          const listed = accountCatalogs.filter(account => account.models?.some(entry => entry.id === model.id))
+          const targets = listed.length > 0 ? listed.map(account => account.account) : [undefined]
+          for (const account of targets) {
+            const limits = provider === 'codex'
+              ? await codexAdapter?.contextLimits(model.id, account).catch(() => undefined)
+              : await cursorAdapter?.contextLimits(model.id, account).catch(() => undefined)
+            if (limits) contexts.push(limits)
           }
         }
         // A model with unavailable capabilities can still be hidden or restored.

@@ -451,6 +451,39 @@ export interface UsageWindow {
   resetsAt?: number
 }
 
+/** One banked ChatGPT rate-limit reset credit, as listed by the credits endpoint. */
+export interface ResetCredit {
+  /** Provider credit id. Sent back unchanged on consume. */
+  id: string
+  /** `available` credits can be spent; anything else is display-only. */
+  status: 'available' | 'redeemed' | 'expired' | 'other'
+  title?: string
+  description?: string
+  /** ISO timestamp from the provider, when present. */
+  grantedAt?: string
+  /** ISO timestamp from the provider, when present. */
+  expiresAt?: string
+  /** Provider reset type, such as `codex_rate_limits`. */
+  resetType?: string
+}
+
+/** `resetCredits` endpoint value. `supported: false` when the provider has no credits. */
+export interface ResetCreditList {
+  supported: boolean
+  /** Credits that can still be spent, when the provider disclosed a count. */
+  availableCount?: number
+  credits?: ResetCredit[]
+}
+
+/**
+ * `consumeResetCredit` endpoint value. A resolved result means the provider
+ * accepted the spend (HTTP 200); callers refetch usage for the new windows.
+ */
+export interface ResetCreditConsumeResult {
+  code?: string
+  windowsReset?: number
+}
+
 /** Subscription usage of one provider, as served by the `usage` RPC endpoint. */
 export interface ProviderUsage {
   /** False when the provider has no usage endpoint (grok); windows are absent then. */
@@ -459,6 +492,15 @@ export interface ProviderUsage {
   windows?: UsageWindow[]
   /** Plan name the usage endpoint reported, when present. */
   plan?: string
+  /**
+   * Banked rate-limit reset credits, when this usage payload disclosed a count.
+   * Absent means the provider did not report the field — not "zero credits".
+   */
+  resetCredits?: {
+    availableCount: number
+    /** Earliest expiry among available credits, epoch ms. Pool selection only. */
+    soonestExpiresAt?: number
+  }
 }
 
 /** One model discovered from a provider's live model-list endpoint. */
@@ -485,8 +527,18 @@ export interface DiscoveredModel {
   inputModalities?: ('text' | 'image')[]
   /** Claude-specific: which extended-thinking wire shape this model accepts. */
   thinkingType?: 'enabled' | 'adaptive'
-  /** Codex-specific: the catalog advertises a fast (priority) service tier. */
+  /** The catalog advertises a fast tier (Codex priority service, or Cursor's `fast` parameter). */
   fastTier?: boolean
+  /**
+   * Cursor `models.list` parameters. Sent back as `model.params`.
+   * Other providers leave this unset.
+   */
+  cursorParameters?: {
+    id: string
+    values: { value: string; name?: string }[]
+  }[]
+  /** Cursor default variant parameter values. */
+  cursorDefaults?: { id: string; value: string }[]
   /** Copilot-specific: which upstream protocol the model's endpoints speak. */
   copilotWire?: 'chat-completions' | 'responses'
   /**

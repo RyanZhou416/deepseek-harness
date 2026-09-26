@@ -13,7 +13,7 @@ import type { RpcResult } from '../compat.js'
 import { AttachmentId } from '@deepseek-ai/dsh-attachment'
 import type { ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
 import { PROVIDER_IDS, type ProviderId } from './store.js'
-import type { ProviderUsage } from '../providers/common.js'
+import type { ProviderUsage, ResetCreditConsumeResult, ResetCreditList } from '../providers/common.js'
 import type { ProxyConfigView, ProxyDraft, ProxyInput, ProxyTestResult } from '../http.js'
 
 /**
@@ -30,6 +30,7 @@ export const SUBSCRIPTIONS_AUTH_PREFIX = 'subscriptions-auth.'
 export const SUBSCRIPTIONS_AUTH_ENDPOINTS = [
   'providerSettings', 'setProviderSettings',
   'status', 'login', 'manual', 'cancel', 'logout', 'setDefault', 'usage',
+  'resetCredits', 'consumeResetCredit',
   'image', 'video',
   'speed', 'setSpeed',
   'proxyGet', 'proxySet', 'proxyTest',
@@ -187,6 +188,23 @@ export interface AuthController {
    * @throws when logged out or the usage lookup fails.
    */
   usage(provider: ProviderId, account: string, signal: AbortSignal, force?: boolean): Promise<ProviderUsage>
+  /**
+   * Banked ChatGPT reset credits for one account. Other providers answer
+   * `{ supported: false }` and make no network call.
+   * @param force - bypass a fresh cached list. A live failure cooldown still applies.
+   */
+  listResetCredits(provider: ProviderId, account: string, signal: AbortSignal, force?: boolean): Promise<ResetCreditList>
+  /**
+   * Spend one ChatGPT reset credit. The request id is the caller's idempotency
+   * key and is forwarded unchanged.
+   */
+  consumeResetCredit(
+    provider: ProviderId,
+    account: string,
+    creditId: string,
+    redeemRequestId: string,
+    signal: AbortSignal,
+  ): Promise<ResetCreditConsumeResult>
   /**
    * Read one image attachment's bytes for inline display.
    * @param ref - the full durable reference (`readImage` verifies against it).
@@ -408,6 +426,27 @@ function readVideoName(payload: unknown): string {
   return name
 }
 
+/** Same shape as {@link isCodexResetCreditId}. Checked before the provider is contacted. */
+const RESET_CREDIT_ID = /^[\x21-\x7E]{1,256}$/
+/** Same shape as {@link isCodexRedeemRequestId}. */
+const REDEEM_REQUEST_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+
+/** Validate a consume call. A bad id fails here, before any credit is spent. */
+function readConsumeResetCredit(payload: unknown): {
+  provider: ProviderId
+  account: string
+  creditId: string
+  redeemRequestId: string
+} {
+  const provider = readProvider(payload)
+  const account = readString(payload, 'account')
+  const creditId = readString(payload, 'creditId')
+  const redeemRequestId = readString(payload, 'redeemRequestId')
+  if (!RESET_CREDIT_ID.test(creditId)) throw new BadRequest('payload.creditId is not a reset credit id')
+  if (!REDEEM_REQUEST_ID.test(redeemRequestId)) throw new BadRequest('payload.redeemRequestId must be a UUID')
+  return { provider, account, creditId, redeemRequestId }
+}
+
 /** Validate the usage/model catalog endpoints' optional force flag. */
 function readForce(payload: unknown): boolean {
   if (typeof payload !== 'object' || payload === null) return false
@@ -559,6 +598,20 @@ async function dispatch(
     case 'usage': {
       const provider = readProvider(payload)
       return ok(await controller.usage(provider, readString(payload, 'account'), signal, readForce(payload)))
+    }
+    case 'resetCredits': {
+      const provider = readProvider(payload)
+      return ok(await controller.listResetCredits(provider, readString(payload, 'account'), signal, readForce(payload)))
+    }
+    case 'consumeResetCredit': {
+      const input = readConsumeResetCredit(payload)
+      return ok(await controller.consumeResetCredit(
+        input.provider,
+        input.account,
+        input.creditId,
+        input.redeemRequestId,
+        signal,
+      ))
     }
     case 'image':
       return ok(await controller.readImage(readImageRef(payload), signal))

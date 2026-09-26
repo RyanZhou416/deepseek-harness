@@ -1,11 +1,10 @@
 /**
- * Codex Speed toggle: one small control in the composer's right tool row
+ * Speed toggle: one small control in the composer's right tool row
  * (`conversation.input.right`), switching the session between standard routing
- * and the fast (priority) service tier — the Codex desktop app's Speed menu.
- * The choice is per session and lives in the node half (in-memory); this
- * component holds only viewing state. The control renders nothing until the
- * first load proves the session's current model is a codex model whose catalog
- * advertises the fast tier.
+ * and the fast tier. Codex uses its priority service tier; Cursor sends the
+ * catalog `fast` parameter. The choice is per session and lives in the node
+ * half (in-memory); this component holds only viewing state. The control
+ * renders nothing until the current model advertises a fast tier.
  *
  * Every color resolves through a `--dsw-alias-*` design token and every
  * user-visible string goes through the locale `t` of the
@@ -89,7 +88,8 @@ export function createSpeedLoader(
     const directories = models()
     if (directories === undefined) return { visible: false, tier: state.tier }
     const { current } = await directories.directoryFor(sessionId).load()
-    const visible = current !== null && current.provider === 'codex'
+    const visible = current !== null
+      && (current.provider === 'codex' || current.provider === 'cursor')
       && state.fastModels.includes(current.model)
     return { visible, tier: state.tier }
   }

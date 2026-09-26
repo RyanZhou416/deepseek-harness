@@ -10,6 +10,7 @@ export const PROVIDER_TOOLS = {
   grok: ['image_generate', 'video_generate', 'x_search'],
   copilot: [],
   antigravity: [],
+  cursor: [],
 } as const
 export type SubscriptionTool = 'image_generate' | 'video_generate' | 'x_search' | 'web_search'
 export interface AccountPreferences {
@@ -73,7 +74,9 @@ export function validatePreferences(provider: ProviderId, input: unknown): Provi
     result.visibleModels = [...new Set(raw.visibleModels as string[])]
   }
   if (raw.contextWindows !== undefined) {
-    if (provider !== 'codex') throw new Error('context window overrides are currently supported only for Codex')
+    if (provider !== 'codex' && provider !== 'cursor') {
+      throw new Error('context window overrides are currently supported only for ChatGPT and Cursor')
+    }
     if (!raw.contextWindows || typeof raw.contextWindows !== 'object' || Array.isArray(raw.contextWindows)) {
       throw new Error('contextWindows must be a model-to-token map')
     }
@@ -130,8 +133,8 @@ export class ProviderSettingsStore {
     return this.current.providers[provider]?.visibleModels?.includes(model) ?? true
   }
 
-  contextWindow(model: string): number | undefined {
-    const windows = this.current.providers.codex?.contextWindows
+  contextWindow(provider: ProviderId, model: string): number | undefined {
+    const windows = this.current.providers[provider]?.contextWindows
     return windows && Object.hasOwn(windows, model) ? windows[model] : undefined
   }
 

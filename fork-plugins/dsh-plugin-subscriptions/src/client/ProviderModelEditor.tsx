@@ -112,7 +112,10 @@ export const ProviderModelEditor = forwardRef<ProviderModelEditorHandle, Props>(
         windows[model] = value
       }
       setError('')
-      const { accounts: _accounts, ...settings } = { ...draft, ...(provider === 'codex' ? { contextWindows: windows } : {}) }
+      const { accounts: _accounts, ...settings } = {
+        ...draft,
+        ...(provider === 'codex' || provider === 'cursor' ? { contextWindows: windows } : {}),
+      }
       return {
         settings,
         efforts: catalog.models.flatMap(model => {
@@ -169,7 +172,7 @@ export const ProviderModelEditor = forwardRef<ProviderModelEditorHandle, Props>(
                 {model.efforts?.map(effort => <option key={effort.id} value={effort.id}>{effort.name}</option>)}
               </select>
             </label>}
-            {provider === 'codex' && model.maxContextWindow !== undefined && <div style={actions}>
+            {(provider === 'codex' || provider === 'cursor') && model.maxContextWindow !== undefined && <div style={actions}>
               <label style={actions}>{t('modelsContext')}
                 <input style={{ ...control, width: 140 }} inputMode="numeric" value={contexts[model.id] ?? ''}
                   aria-label={`${model.name} ${t('modelsContext')}`} placeholder={String(model.defaultContextWindow)}
@@ -181,7 +184,7 @@ export const ProviderModelEditor = forwardRef<ProviderModelEditorHandle, Props>(
           </div>)}
           {models.length === 0 && <span>{t('modelDefaultsFilterEmpty', { query })}</span>}
         </div>
-        {provider === 'codex' && <small>{t('modelsContextHint')}</small>}
+        {(provider === 'codex' || provider === 'cursor') && <small>{t('modelsContextHint')}</small>}
         {catalog.tools.length > 0 && <div style={{ display: 'grid', gap: 8 }}>
           <strong>{t('modelsTools')}</strong>
           <small>{t('modelsToolsHint')}</small>

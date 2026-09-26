@@ -18,6 +18,14 @@ import type { ConcretePoolMember } from './pool-family.js'
 
 /** A member is taken out of rotation once any window crosses this fill level. */
 export const QUOTA_FULL_PERCENT = 95
+/** ChatGPT accounts stay in the quota band until a window reaches 100%. */
+export const CODEX_QUOTA_FULL_PERCENT = 100
+/** Length of the Codex weekly window used to tell a fresh window from an old one. */
+const CODEX_WEEKLY_WINDOW_MS = 7 * 24 * 60 * 60 * 1000
+/** A weekly window that opened within this long counts as just refreshed. */
+const CODEX_WEEKLY_FRESH_MS = 24 * 60 * 60 * 1000
+/** An available reset credit expiring within this long counts as near expiry. */
+const CODEX_CREDIT_EXPIRING_MS = 3 * 24 * 60 * 60 * 1000
 /** How long a usage snapshot is trusted before a background refresh. */
 export const USAGE_TTL_MS = 5 * 60_000
 
@@ -36,6 +44,13 @@ export interface MemberQuota {
   urgency: number
   /** Epoch ms of the snapshot this was computed from; 0 when none. */
   fetchedAt: number
+  /**
+   * ChatGPT: the weekly window opened within the last day and an available
+   * reset credit expires within three days. Selection ranks these accounts
+   * first inside the not-full band, and first in the full tail. The pool
+   * does not spend the credit.
+   */
+  preferFreshCredit?: boolean
 }
 
 /** A successful snapshot, cached until `ttlMs` (or the entry's own `cooldownMs`) elapses. */
@@ -81,7 +96,9 @@ type CacheEntry = SnapshotEntry | FailureEntry
  */
 export class PoolUsageTracker {
   private readonly entries = new Map<string, CacheEntry>()
-  private readonly inflight = new Map<string, Promise<ProviderUsage>>()
+  private readonly inflight = new Map<string, { epoch: number; promise: Promise<ProviderUsage> }>()
+  /** Bumped by {@link invalidate} so an older in-flight response cannot restore a dropped snapshot. */
+  private readonly epochs = new Map<string, number>()
 
   constructor(
     private readonly fetcherFor: (provider: ProviderId, account: string) => (() => Promise<ProviderUsage>) | undefined,
@@ -170,12 +187,18 @@ export class PoolUsageTracker {
 
   /** Drop cached snapshots: one account, or a whole provider when `account` is omitted. */
   invalidate(provider: ProviderId, account?: string): void {
+    const bump = (key: string): void => {
+      this.entries.delete(key)
+      this.epochs.set(key, (this.epochs.get(key) ?? 0) + 1)
+    }
     if (account !== undefined) {
-      this.entries.delete(`${provider}/${account}`)
+      bump(`${provider}/${account}`)
       return
     }
-    for (const key of [...this.entries.keys()]) {
-      if (key.startsWith(`${provider}/`)) this.entries.delete(key)
+    const prefix = `${provider}/`
+    const keys = new Set([...this.entries.keys(), ...this.epochs.keys(), ...this.inflight.keys()])
+    for (const key of keys) {
+      if (key.startsWith(prefix)) bump(key)
     }
   }
 
@@ -188,49 +211,56 @@ export class PoolUsageTracker {
    * waiting out a stale cooldown.
    */
   private refresh(key: string, fetcher: () => Promise<ProviderUsage>): Promise<ProviderUsage> {
-    let pending = this.inflight.get(key)
-    if (pending === undefined) {
-      // Captured before the fetch starts: whichever real snapshot is on
-      // record right now is what a failure below should fall back to. A
-      // failure entry's own `lastSnapshot` counts too — otherwise the stale
-      // snapshot would survive exactly one cooldown and vanish on the next
-      // consecutive failure, even though nothing newer ever replaced it.
-      const prior = this.entries.get(key)
-      const lastSnapshot = prior?.snapshot ?? prior?.lastSnapshot
-      pending = fetcher().then(
-        (snapshot) => {
-          this.entries.set(key, { snapshot, at: Date.now() })
-          return snapshot
-        },
-        (error: unknown) => {
-          if (!isMissingOrInvalidCredential(error)) {
-            this.entries.set(key, {
-              error,
-              at: Date.now(),
-              cooldownMs: cooldownFor(error, this.ttlMs),
-              ...lastSnapshot === undefined ? {} : { lastSnapshot },
-            })
-          }
-          throw error
-        },
-      ).finally(() => {
-        this.inflight.delete(key)
-      })
-      this.inflight.set(key, pending)
-    }
-    return pending
+    const epoch = this.epochs.get(key) ?? 0
+    const pending = this.inflight.get(key)
+    if (pending !== undefined && pending.epoch === epoch) return pending.promise
+    // Captured before the fetch starts: whichever real snapshot is on
+    // record right now is what a failure below should fall back to. A
+    // failure entry's own `lastSnapshot` counts too — otherwise the stale
+    // snapshot would survive exactly one cooldown and vanish on the next
+    // consecutive failure, even though nothing newer ever replaced it.
+    const prior = this.entries.get(key)
+    const lastSnapshot = prior?.snapshot ?? prior?.lastSnapshot
+    const request = fetcher().then(
+      (snapshot) => {
+        if ((this.epochs.get(key) ?? 0) === epoch) this.entries.set(key, { snapshot, at: Date.now() })
+        return snapshot
+      },
+      (error: unknown) => {
+        if ((this.epochs.get(key) ?? 0) === epoch && !isMissingOrInvalidCredential(error)) {
+          this.entries.set(key, {
+            error,
+            at: Date.now(),
+            cooldownMs: cooldownFor(error, this.ttlMs),
+            ...lastSnapshot === undefined ? {} : { lastSnapshot },
+          })
+        }
+        throw error
+      },
+    ).finally(() => {
+      if (this.inflight.get(key)?.promise === request) this.inflight.delete(key)
+    })
+    this.inflight.set(key, { epoch, promise: request })
+    return request
   }
 
   /** Score one member against a snapshot's windows. */
   private score(member: ConcretePoolMember, entry: SnapshotEntry): MemberQuota {
     const windows = (entry.snapshot.windows ?? []).filter(window => windowApplies(window, member.model))
+    const fullAt = member.provider === 'codex' ? CODEX_QUOTA_FULL_PERCENT : QUOTA_FULL_PERCENT
     let available = true
     let urgency = 0
     for (const window of windows) {
-      if (window.usedPercent >= QUOTA_FULL_PERCENT) available = false
+      if (window.usedPercent >= fullAt) available = false
       urgency = Math.max(urgency, windowUrgency(window))
     }
-    return { available, urgency, fetchedAt: entry.at }
+    const preferFreshCredit = member.provider === 'codex' && codexPreferFreshCredit(entry.snapshot)
+    return {
+      available,
+      urgency,
+      fetchedAt: entry.at,
+      ...preferFreshCredit ? { preferFreshCredit: true } : {},
+    }
   }
 }
 
@@ -259,6 +289,24 @@ function cooldownFor(error: unknown, defaultTtlMs: number): number {
 function windowApplies(window: UsageWindow, model: string): boolean {
   if (window.scope === undefined) return true
   return model.toLowerCase().includes(window.scope.toLowerCase())
+}
+
+/**
+ * Whether a ChatGPT account should be preferred because its weekly window
+ * just opened and it holds a reset credit that expires soon. A credit alone,
+ * or a window that is about to reset on its own, does not qualify.
+ */
+function codexPreferFreshCredit(snapshot: ProviderUsage, now = Date.now()): boolean {
+  const weekly = (snapshot.windows ?? []).find(window => window.kind === 'weekly' && window.resetsAt !== undefined)
+  const resetsAt = weekly?.resetsAt
+  if (resetsAt === undefined) return false
+  const remaining = resetsAt - now
+  const elapsed = CODEX_WEEKLY_WINDOW_MS - remaining
+  if (remaining <= 0 || elapsed < 0 || elapsed > CODEX_WEEKLY_FRESH_MS) return false
+  const expiresAt = snapshot.resetCredits?.soonestExpiresAt
+  if (expiresAt === undefined) return false
+  const untilExpiry = expiresAt - now
+  return untilExpiry > 0 && untilExpiry <= CODEX_CREDIT_EXPIRING_MS
 }
 
 /** The required burn rate of one window (fraction per ms). */

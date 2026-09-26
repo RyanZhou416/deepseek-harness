@@ -17,6 +17,7 @@ import type { CSSProperties } from 'react'
 import type { ConnectionHandle } from '@deepseek-ai/dsh-api-remotes/client'
 import { en } from './locales.js'
 import { ProviderAccountManager } from './ProviderAccountManager.js'
+import { ResetCredits } from './ResetCredits.js'
 import type { SubscriptionsKey } from './locales.js'
 
 import { callSubscriptionsAuth, SubscriptionsAuthError } from './subscriptions-rpc.js'
@@ -32,7 +33,7 @@ const POLL_INTERVAL_MS = 2000
 const MODEL_FILTER_THRESHOLD = 8
 
 /** Subscription provider ids, fixed by the node half's OAuth adapters. */
-export type SubscriptionProvider = 'codex' | 'claude' | 'grok' | 'copilot' | 'antigravity'
+export type SubscriptionProvider = 'codex' | 'claude' | 'grok' | 'copilot' | 'antigravity' | 'cursor'
 
 /** One logged-in account as answered by the `status` endpoint. */
 export interface AccountStatus {
@@ -68,6 +69,8 @@ export interface ProviderUsage {
   supported: boolean
   windows?: UsageWindow[]
   plan?: string
+  /** Present only when the usage payload disclosed a reset-credit count. */
+  resetCredits?: { availableCount: number }
 }
 
 /** One model's default-effort picker state as answered by `modelDefaults`. */
@@ -133,6 +136,7 @@ const PROVIDERS: readonly { id: SubscriptionProvider; name: string }[] = [
   { id: 'grok', name: 'Grok (X Premium)' },
   { id: 'copilot', name: 'GitHub Copilot' },
   { id: 'antigravity', name: 'Google Antigravity' },
+  { id: 'cursor', name: 'Cursor' },
 ]
 
 /** Human text of an action failure, SubscriptionsAuthError or not. */
@@ -442,7 +446,7 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
   const [statuses, setStatuses] = useState<Partial<Record<SubscriptionProvider, ProviderStatus>>>({})
   const [errors, setErrors] = useState<Partial<Record<SubscriptionProvider, string>>>({})
   const [manualDrafts, setManualDrafts] = useState<Record<SubscriptionProvider, string>>({
-    codex: '', claude: '', grok: '', copilot: '', antigravity: '',
+    codex: '', claude: '', grok: '', copilot: '', antigravity: '', cursor: '',
   })
   /** Pending device-flow codes (copilot), shown while the attempt polls. */
   const [deviceCodes, setDeviceCodes] = useState<Partial<Record<SubscriptionProvider, { userCode: string; verificationUrl: string }>>>({})
@@ -455,6 +459,9 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
   const pollersRef = useRef(new Map<SubscriptionProvider, ReturnType<typeof setInterval>>())
   /** Accounts with a `usage` call in flight; guards the auto-fetch effect against re-entry. */
   const usageInflightRef = useRef(new Set<string>())
+  /** Forced refreshes that arrived while a lookup was already running. */
+  const usageForceRef = useRef(new Set<string>())
+  const loadUsageRef = useRef<(provider: SubscriptionProvider, account: string, force?: boolean) => void>(() => {})
   /** Proxy config as last answered by `proxyGet`/`proxySet`. */
   const [proxy, setProxy] = useState<ProxyConfigView | undefined>(undefined)
   const [proxyLoadError, setProxyLoadError] = useState<string | undefined>(undefined)
@@ -549,7 +556,11 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
 
   const loadUsage = useCallback(async (provider: SubscriptionProvider, account: string, force = false): Promise<void> => {
     const key = `${provider}:${account}`
-    if (rpc === undefined || usageInflightRef.current.has(key)) return
+    if (rpc === undefined) return
+    if (usageInflightRef.current.has(key)) {
+      if (force) usageForceRef.current.add(key)
+      return
+    }
     usageInflightRef.current.add(key)
     setUsageLoading(prev => ({ ...prev, [key]: true }))
     try {
@@ -566,8 +577,10 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
     } finally {
       usageInflightRef.current.delete(key)
       if (mountedRef.current) setUsageLoading(prev => ({ ...prev, [key]: false }))
+      if (usageForceRef.current.delete(key)) loadUsageRef.current(provider, account, true)
     }
   }, [rpc])
+  loadUsageRef.current = (provider, account, force) => { void loadUsage(provider, account, force ?? false) }
 
   // Fetch usage once an account is logged in; drop the snapshots of accounts
   // that vanished so a re-login refetches. A failed lookup does not auto-retry
@@ -884,6 +897,16 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
                           </div>
                         )
                       })}
+                      {id === 'codex' && usage?.resetCredits !== undefined && (
+                        <ResetCredits
+                          rpc={rpc}
+                          t={t}
+                          accountKey={account.key}
+                          accountLabel={display}
+                          availableCount={usage.resetCredits.availableCount}
+                          onChanged={() => { void loadUsage(id, account.key, true) }}
+                        />
+                      )}
                     </div>
                   )}
                 </div>

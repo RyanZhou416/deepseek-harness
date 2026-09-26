@@ -19,10 +19,12 @@ test('provider selections survive refresh-independent reloads and concurrent pro
     assert.equal(reload.visible('codex', 'gpt-6-astra'), true)
     assert.equal(reload.visible('codex', 'future-model'), false)
     assert.equal(reload.visible('grok', 'grok-4'), false)
-    assert.equal(reload.contextWindow('gpt-6-astra'), 512000)
+    assert.equal(reload.contextWindow('codex', 'gpt-6-astra'), 512000)
+    await reload.set('cursor', { contextWindows: { 'claude-opus-5-5': 300000 } })
+    assert.equal(reload.contextWindow('cursor', 'claude-opus-5-5'), 300000)
     await reload.set('codex', {})
     assert.equal(reload.visible('codex', 'future-model'), true)
-    assert.equal(reload.contextWindow('gpt-6-astra'), undefined)
+    assert.equal(reload.contextWindow('codex', 'gpt-6-astra'), undefined)
   } finally { await rm(dir, { recursive: true, force: true }) }
 })
 
@@ -53,6 +55,8 @@ test('provider settings reject invalid contexts and unsupported tools; ids are s
   for (const value of [0, -1, 1.2, Infinity, NaN, '500000']) {
     assert.throws(() => validatePreferences('codex', { contextWindows: { model: value } }))
   }
+  assert.throws(() => validatePreferences('claude', { contextWindows: { model: 1000 } }))
+  assert.equal(validatePreferences('cursor', { contextWindows: { 'composer-2.5': 200000 } }).contextWindows?.['composer-2.5'], 200000)
   assert.throws(() => validatePreferences('claude', { tools: { image_generate: false } }))
   assert.throws(() => validatePreferences('codex', { tools: { video_generate: true } }))
   assert.throws(() => validatePreferences('codex', { visibleModels: [null] }))

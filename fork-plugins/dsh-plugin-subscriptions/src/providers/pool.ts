@@ -312,10 +312,12 @@ export class PoolAdapter extends LlmAdapter {
   /**
    * Order the candidates for one request. Health filters both strategies;
    * `quota_aware` then ranks by urgency (members without telemetry, e.g.
-   * copilot, score zero and sink to the bottom of their class), while
-   * quota-exhausted members stay as a last-resort tail in pool order. The
-   * sticky member keeps its lead unless a challenger out-scores it by
-   * `switchMargin`.
+   * copilot, score zero and sink to the bottom of their class). A ChatGPT
+   * account whose weekly window just opened and which holds an expiring
+   * reset credit leads that band; the credit is never spent here. Quota-full
+   * members stay as a last-resort tail, with that same ChatGPT account first
+   * in the tail. The sticky member keeps its lead unless a challenger
+   * out-scores it by `switchMargin`.
    */
   private async select(
     poolId: string,
@@ -340,7 +342,13 @@ export class PoolAdapter extends LlmAdapter {
     )
     const scored = usable.filter(member => quotas.get(member)?.available === true)
     const quotaFull = usable.filter(member => quotas.get(member)?.available === false)
-    scored.sort((a, b) => (quotas.get(b)?.urgency ?? 0) - (quotas.get(a)?.urgency ?? 0))
+    const byQuota = (a: ConcretePoolMember, b: ConcretePoolMember): number => {
+      const preferA = quotas.get(a)?.preferFreshCredit === true
+      const preferB = quotas.get(b)?.preferFreshCredit === true
+      if (preferA !== preferB) return preferA ? -1 : 1
+      return (quotas.get(b)?.urgency ?? 0) - (quotas.get(a)?.urgency ?? 0)
+    }
+    scored.sort(byQuota)
     if (stickyMember !== undefined && scored.includes(stickyMember)) {
       const best = scored[0]
       const stickyUrgency = quotas.get(stickyMember)?.urgency ?? 0
@@ -351,7 +359,9 @@ export class PoolAdapter extends LlmAdapter {
         scored.unshift(stickyMember)
       }
     }
-    return [...scored, ...quotaFull]
+    const preferredFull = quotaFull.filter(member => quotas.get(member)?.preferFreshCredit === true)
+    const otherFull = quotaFull.filter(member => quotas.get(member)?.preferFreshCredit !== true)
+    return [...scored, ...preferredFull, ...otherFull]
   }
 
   /** Pin the serving member to the session (with bounded memory). */
@@ -379,8 +389,11 @@ export class PoolAdapter extends LlmAdapter {
     }
     const recovery = this.options.health.earliestRecovery(keys)
     const retryAfterMs = recovery === undefined ? undefined : Math.max(recovery - Date.now(), 1)
+    const detail = cause instanceof Error && cause.message.length > 0 ? cause.message : undefined
     return new LlmError(
-      `pool "${model}" exhausted: every member is unavailable or failed`,
+      detail === undefined
+        ? `pool "${model}" exhausted: every member is unavailable or failed`
+        : `pool "${model}" exhausted: ${detail}`,
       'RATE_LIMIT',
       {
         ...retryAfterMs === undefined ? {} : { providerRetryAfterMs: retryAfterMs },

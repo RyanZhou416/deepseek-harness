@@ -44,6 +44,9 @@ import type {
   FetchFn,
   ModelEntry,
   ProviderUsage,
+  ResetCredit,
+  ResetCreditConsumeResult,
+  ResetCreditList,
   UsageWindow,
 } from './common.js'
 import { proxiedFetch } from '../http.js'
@@ -286,6 +289,87 @@ export function isCodexPermanentRefreshError(error: unknown): boolean {
 }
 
 export const CODEX_USAGE_URL = 'https://chatgpt.com/backend-api/wham/usage'
+export const CODEX_RESET_CREDITS_URL = 'https://chatgpt.com/backend-api/wham/rate-limit-reset-credits'
+export const CODEX_RESET_CREDITS_CONSUME_URL = `${CODEX_RESET_CREDITS_URL}/consume`
+
+/** Auth headers shared by the ChatGPT backend JSON reads (usage and reset credits). */
+function codexJsonHeaders(session: CodexSession): Record<string, string> {
+  return {
+    'authorization': `Bearer ${session.accessToken}`,
+    'chatgpt-account-id': session.accountId,
+    'originator': 'codex_cli_rs',
+    'accept': 'application/json',
+    ...attributionHeaders(),
+  }
+}
+
+/**
+ * Non-negative integer `available_count` on a usage or credits object.
+ * @returns undefined when the field is absent or not a usable count, so callers
+ *   can omit the row instead of showing a fabricated zero.
+ */
+export function codexResetCreditCount(value: unknown): number | undefined {
+  if (typeof value !== 'object' || value === null) return undefined
+  const count = (value as { available_count?: unknown }).available_count
+  if (typeof count !== 'number' || !Number.isInteger(count) || count < 0) return undefined
+  return count
+}
+
+const RESET_CREDIT_STATUSES = new Set(['available', 'redeemed', 'expired'])
+
+function resetCreditStatus(value: unknown): ResetCredit['status'] {
+  return typeof value === 'string' && RESET_CREDIT_STATUSES.has(value)
+    ? value as ResetCredit['status']
+    : 'other'
+}
+
+function optionalCreditText(value: unknown): string | undefined {
+  return typeof value === 'string' && value.length > 0 ? value : undefined
+}
+
+/** Map one credits-list payload. Rows without an id are dropped. */
+export function mapCodexResetCreditList(payload: unknown): ResetCreditList {
+  if (typeof payload !== 'object' || payload === null) {
+    throw new Error('codex reset credits returned no object')
+  }
+  const body = payload as { credits?: unknown }
+  const credits: ResetCredit[] = []
+  if (Array.isArray(body.credits)) {
+    for (const entry of body.credits) {
+      if (typeof entry !== 'object' || entry === null) continue
+      const row = entry as Record<string, unknown>
+      const id = optionalCreditText(row.id)
+      if (id === undefined) continue
+      const title = optionalCreditText(row.title)
+      const description = optionalCreditText(row.description)
+      const grantedAt = optionalCreditText(row.granted_at)
+      const expiresAt = optionalCreditText(row.expires_at)
+      const resetType = optionalCreditText(row.reset_type)
+      credits.push({
+        id,
+        status: resetCreditStatus(row.status),
+        ...title === undefined ? {} : { title },
+        ...description === undefined ? {} : { description },
+        ...grantedAt === undefined ? {} : { grantedAt },
+        ...expiresAt === undefined ? {} : { expiresAt },
+        ...resetType === undefined ? {} : { resetType },
+      })
+    }
+  }
+  const availableCount = codexResetCreditCount(payload)
+    ?? credits.filter(credit => credit.status === 'available').length
+  return { supported: true, availableCount, credits }
+}
+
+/** Printable credit ids only. Rejecting here happens before any consume request. */
+export function isCodexResetCreditId(value: string): boolean {
+  return value.length > 0 && value.length <= 256 && /^[\x21-\x7E]+$/.test(value)
+}
+
+/** Caller-generated idempotency key. The consume call never mints a replacement. */
+export function isCodexRedeemRequestId(value: string): boolean {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value)
+}
 
 /** One `rate_limit.*_window` object of the wham/usage payload (subset). */
 interface CodexUsageWindow {
@@ -346,7 +430,9 @@ function codexUsageWindow(value: unknown, fallbackKind: UsageWindow['kind']): Us
  * rather than by slot, since the backend has been observed to report the
  * weekly lane as `primary_window` without a secondary window; slot order is
  * kept only as a fallback when the duration is absent. The lookup itself
- * consumes no rate-limit budget.
+ * consumes no rate-limit budget and does not spend a reset credit. A disclosed
+ * `rate_limit_reset_credits.available_count` is copied through; a missing or
+ * unusable count is omitted rather than reported as zero.
  * @param session - the stored session (used as-is; never refreshed here).
  * @param fetchFn - fetch implementation (injectable for tests).
  * @param signal - caller cancellation from the RPC transport.
@@ -358,32 +444,139 @@ export async function fetchCodexUsage(
   signal?: AbortSignal,
 ): Promise<ProviderUsage> {
   const response = await fetchFn(CODEX_USAGE_URL, {
-    headers: {
-      'authorization': `Bearer ${session.accessToken}`,
-      'chatgpt-account-id': session.accountId,
-      'originator': 'codex_cli_rs',
-      'accept': 'application/json',
-      ...attributionHeaders(),
-    },
+    headers: codexJsonHeaders(session),
     ...signal === undefined ? {} : { signal },
   })
   if (!response.ok) throw await oauthEndpointError(response, 'codex usage')
   const payload = await response.json() as {
     plan_type?: string
     rate_limit?: { primary_window?: unknown; secondary_window?: unknown }
+    rate_limit_reset_credits?: unknown
   }
   const windows: UsageWindow[] = []
   const primary = codexUsageWindow(payload.rate_limit?.primary_window, 'session')
   const secondary = codexUsageWindow(payload.rate_limit?.secondary_window, 'weekly')
   if (primary !== undefined) windows.push(primary)
   if (secondary !== undefined) windows.push(secondary)
+  const availableCount = codexResetCreditCount(payload.rate_limit_reset_credits)
   return {
     supported: true,
     windows,
     ...typeof payload.plan_type === 'string' && payload.plan_type.length > 0
       ? { plan: payload.plan_type }
       : {},
+    ...availableCount === undefined ? {} : { resetCredits: { availableCount } },
   }
+}
+
+/**
+ * List banked rate-limit reset credits. This is a read. Tests must pass
+ * `fetchFn`; the default transport is only for a real account lookup.
+ * @param session - the stored session (used as-is; never refreshed here).
+ * @param fetchFn - fetch implementation (injectable for tests).
+ * @param signal - caller cancellation from the RPC transport.
+ * @returns the mapped credit list.
+ */
+export async function fetchCodexResetCredits(
+  session: CodexSession,
+  fetchFn: FetchFn = proxiedFetch,
+  signal?: AbortSignal,
+): Promise<ResetCreditList> {
+  const response = await fetchFn(CODEX_RESET_CREDITS_URL, {
+    headers: codexJsonHeaders(session),
+    ...signal === undefined ? {} : { signal },
+  })
+  if (!response.ok) throw await oauthEndpointError(response, 'codex reset credits')
+  return mapCodexResetCreditList(await response.json() as unknown)
+}
+
+/**
+ * Spend one banked reset credit. HTTP 200 spends it even when the body is
+ * partial, so this function returns as soon as the response is OK and never
+ * replaces the caller's idempotency key. A non-OK response throws before
+ * returning. Tests must inject `fetchFn` and must not point it at a live account.
+ * @param session - the stored session (used as-is; never refreshed here).
+ * @param creditId - the credit to spend.
+ * @param redeemRequestId - caller-generated UUID, reused on retry of this spend.
+ * @param fetchFn - fetch implementation (injectable for tests).
+ * @param signal - caller cancellation from the RPC transport.
+ * @returns the provider's consume outcome.
+ */
+export async function consumeCodexResetCredit(
+  session: CodexSession,
+  creditId: string,
+  redeemRequestId: string,
+  fetchFn: FetchFn = proxiedFetch,
+  signal?: AbortSignal,
+): Promise<ResetCreditConsumeResult> {
+  if (!isCodexResetCreditId(creditId)) throw new Error('codex reset credit id is not usable')
+  if (!isCodexRedeemRequestId(redeemRequestId)) throw new Error('codex redeem request id must be a UUID')
+  const response = await fetchFn(CODEX_RESET_CREDITS_CONSUME_URL, {
+    method: 'POST',
+    headers: {
+      ...codexJsonHeaders(session),
+      'content-type': 'application/json',
+    },
+    body: JSON.stringify({ credit_id: creditId, redeem_request_id: redeemRequestId }),
+    ...signal === undefined ? {} : { signal },
+  })
+  if (!response.ok) throw await oauthEndpointError(response, 'codex reset credit')
+  let payload: unknown = {}
+  try {
+    payload = await response.json() as unknown
+  } catch {
+    payload = {}
+  }
+  if (typeof payload !== 'object' || payload === null) return {}
+  const body = payload as { code?: unknown; windows_reset?: unknown }
+  const code = typeof body.code === 'string' && body.code.length > 0 ? body.code : undefined
+  const windowsReset = typeof body.windows_reset === 'number' && Number.isInteger(body.windows_reset)
+    ? body.windows_reset
+    : undefined
+  return {
+    ...code === undefined ? {} : { code },
+    ...windowsReset === undefined ? {} : { windowsReset },
+  }
+}
+
+/**
+ * Usage snapshot for pool selection. When the usage payload reports at least
+ * one reset credit, also read the credit list and keep the earliest available
+ * expiry. A list failure leaves the usage snapshot unchanged. This does not
+ * spend a credit.
+ */
+export async function fetchCodexPoolUsage(
+  session: CodexSession,
+  fetchFn: FetchFn = proxiedFetch,
+  signal?: AbortSignal,
+): Promise<ProviderUsage> {
+  const usage = await fetchCodexUsage(session, fetchFn, signal)
+  const availableCount = usage.resetCredits?.availableCount
+  if (availableCount === undefined || availableCount <= 0) return usage
+  let list: ResetCreditList
+  try {
+    list = await fetchCodexResetCredits(session, fetchFn, signal)
+  } catch {
+    return usage
+  }
+  const soonestExpiresAt = soonestAvailableCreditExpiry(list)
+  if (soonestExpiresAt === undefined) return usage
+  return {
+    ...usage,
+    resetCredits: { availableCount, soonestExpiresAt },
+  }
+}
+
+/** Earliest future expiry among available credits, epoch ms. */
+function soonestAvailableCreditExpiry(list: ResetCreditList, now = Date.now()): number | undefined {
+  let soonest: number | undefined
+  for (const credit of list.credits ?? []) {
+    if (credit.status !== 'available' || credit.expiresAt === undefined) continue
+    const expiresAt = Date.parse(credit.expiresAt)
+    if (!Number.isFinite(expiresAt) || expiresAt <= now) continue
+    if (soonest === undefined || expiresAt < soonest) soonest = expiresAt
+  }
+  return soonest
 }
 
 export const CODEX_MODELS_URL = 'https://chatgpt.com/backend-api/codex/models'
