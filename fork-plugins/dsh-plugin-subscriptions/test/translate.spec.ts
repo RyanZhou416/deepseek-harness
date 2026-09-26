@@ -502,6 +502,51 @@ test('toAnthropicSystem hoists only the system messages that precede the convers
   ], 'a later system message must not move in front of the cached history')
 })
 
+test('toAnthropicMessages keeps a later system message as role system on Opus 5', () => {
+  const messages = toAnthropicMessages([
+    message('user', [{ type: 'text', text: 'hi' }]),
+    message('system', [{ type: 'text', text: 'terse mode' }]),
+  ], 'claude-opus-5')
+  assert.deepEqual(messages[1], {
+    role: 'system',
+    content: [{ type: 'text', text: 'terse mode' }],
+  })
+})
+
+test('toAnthropicMessages keeps Sonnet 5 mid-conversation system text as a reminder', () => {
+  const messages = toAnthropicMessages([
+    message('user', [{ type: 'text', text: 'hi' }]),
+    message('assistant', [{ type: 'text', text: 'hello' }]),
+    message('system', [{ type: 'text', text: 'terse mode' }]),
+  ], 'claude-sonnet-5')
+  assert.deepEqual(messages[2], {
+    role: 'user',
+    content: [{ type: 'text', text: '<system-reminder>terse mode</system-reminder>' }],
+  })
+})
+
+test('toAnthropicMessages sends a Files API image by file_id', () => {
+  const messages = toAnthropicMessages([
+    message('user', [{ type: 'image', mediaType: 'image/png', dataBase64: 'aGk=', fileId: 'file_011' }]),
+  ])
+  assert.deepEqual(messages[0].content, [
+    { type: 'image', source: { type: 'file', file_id: 'file_011' } },
+  ])
+})
+
+test('toAnthropicTools adds the regex tool search tool only for deferred tools', () => {
+  const deferred = toAnthropicTools([
+    { name: 'bash', description: 'run', parameters: { type: 'object' }, deferLoading: true },
+  ])
+  assert.deepEqual(deferred[0], { type: 'tool_search_tool_regex_20251119', name: 'tool_search_tool_regex' })
+  assert.deepEqual(deferred[1], {
+    name: 'bash',
+    description: 'run',
+    input_schema: { type: 'object' },
+    defer_loading: true,
+  })
+})
+
 test('toAnthropicMessages: a mid-conversation system message rides in place as a reminder', () => {
   const messages = toAnthropicMessages([
     message('system', [{ type: 'text', text: 'opening' }]),
@@ -577,6 +622,71 @@ test('an all-system history hoists everything and leaves no messages', () => {
   assert.deepEqual(toAnthropicMessages(history), [])
 })
 
+test('toAnthropicMessages replays a signed thinking block for the same Claude model', () => {
+  const messages = toAnthropicMessages([
+    message('assistant', [
+      { type: 'reasoning', text: 'plan' },
+      { type: 'text', text: 'done' },
+    ], {
+      kind: 'model',
+      provider: 'claude',
+      model: 'claude-opus-5-5',
+      replayState: {
+        response: { kind: 'claude', version: 1 },
+        blocks: [{ signature: 'sig-1' }, {}],
+      },
+    }),
+  ], 'claude-opus-5-5')
+  assert.deepEqual(messages[0].content, [
+    { type: 'thinking', thinking: 'plan', signature: 'sig-1' },
+    { type: 'text', text: 'done' },
+  ])
+})
+
+test('toAnthropicMessages drops unsigned reasoning and a signature from another model', () => {
+  const content = [
+    { type: 'reasoning' as const, text: 'plan' },
+    { type: 'text' as const, text: 'done' },
+  ]
+  const unsigned = toAnthropicMessages([
+    message('assistant', content, { kind: 'model', provider: 'claude', model: 'claude-opus-5-5' }),
+  ], 'claude-opus-5-5')
+  assert.deepEqual(unsigned[0].content, [{ type: 'text', text: 'done' }])
+  const otherModel = toAnthropicMessages([
+    message('assistant', content, {
+      kind: 'model',
+      provider: 'claude',
+      model: 'claude-opus-5',
+      replayState: {
+        response: { kind: 'claude', version: 1 },
+        blocks: [{ signature: 'sig-old' }, {}],
+      },
+    }),
+  ], 'claude-opus-5-5')
+  assert.deepEqual(otherModel[0].content, [{ type: 'text', text: 'done' }])
+})
+
+test('toAnthropicMessages replays redacted thinking ahead of the tool call', () => {
+  const messages = toAnthropicMessages([
+    message('assistant', [
+      { type: 'reasoning', text: '' },
+      toolCall('c1', 'bash', '{}'),
+    ], {
+      kind: 'model',
+      provider: 'claude',
+      model: 'claude-opus-5-5',
+      replayState: {
+        response: { kind: 'claude', version: 1 },
+        blocks: [{ redacted: 'opaque' }, {}],
+      },
+    }),
+  ], 'claude-opus-5-5')
+  assert.deepEqual(messages[0].content, [
+    { type: 'redacted_thinking', data: 'opaque' },
+    { type: 'tool_use', id: 'c1', name: 'bash', input: {} },
+  ])
+})
+
 test('toAnthropicSystem marks the identity block when it is the only one', () => {
   assert.deepEqual(toAnthropicSystem(), [
     { type: 'text', text: CLAUDE_CODE_IDENTITY, cache_control: { type: 'ephemeral' } },
@@ -643,6 +753,67 @@ test('Anthropic translator: text + tool_use stream with usage before finish', ()
     { type: 'usage', usage: { inputTokens: 50, outputTokens: 7, cacheReadTokens: 10 } },
     { type: 'finish', reason: { kind: 'tool-calls' } },
   ])
+})
+
+test('Anthropic translator records output_tokens_details.thinking_tokens', () => {
+  const chunks = drain(new AnthropicStreamTranslator(), [
+    { type: 'message_start', message: { usage: { input_tokens: 4, output_tokens: 1 } } },
+    { type: 'content_block_start', index: 0, content_block: { type: 'text' } },
+    { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'ok' } },
+    { type: 'content_block_stop', index: 0 },
+    {
+      type: 'message_delta',
+      delta: { stop_reason: 'end_turn' },
+      usage: { output_tokens: 9, output_tokens_details: { thinking_tokens: 6 } },
+    },
+    { type: 'message_stop' },
+  ])
+  const usage = chunks.find(chunk => chunk.type === 'usage')
+  assert.ok(usage?.type === 'usage')
+  assert.equal(usage.usage.reasoningTokens, 6)
+  assert.equal(usage.usage.outputTokens, 9)
+})
+
+test('Anthropic translator keeps a thinking signature on the finish envelope', () => {
+  const chunks = drain(new AnthropicStreamTranslator(), [
+    { type: 'message_start', message: { usage: { input_tokens: 3 } } },
+    { type: 'content_block_start', index: 0, content_block: { type: 'thinking' } },
+    { type: 'content_block_delta', index: 0, delta: { type: 'thinking_delta', thinking: 'plan' } },
+    { type: 'content_block_delta', index: 0, delta: { type: 'signature_delta', signature: 'sig' } },
+    { type: 'content_block_stop', index: 0 },
+    { type: 'content_block_start', index: 1, content_block: { type: 'text' } },
+    { type: 'content_block_delta', index: 1, delta: { type: 'text_delta', text: 'ok' } },
+    { type: 'content_block_stop', index: 1 },
+    { type: 'message_delta', delta: { stop_reason: 'end_turn' }, usage: { output_tokens: 2 } },
+    { type: 'message_stop' },
+  ])
+  const finish = chunks.at(-1)
+  assert.equal(finish?.type, 'finish')
+  if (finish?.type !== 'finish') return
+  assert.deepEqual(finish.replayState, {
+    response: { kind: 'claude', version: 1 },
+    blocks: [{ signature: 'sig' }, {}],
+  })
+  const reasoning = chunks.find(chunk => chunk.type === 'block-end')
+  assert.ok(reasoning?.type === 'block-end')
+  assert.deepEqual(reasoning.block, { type: 'reasoning', text: 'plan' })
+})
+
+test('Anthropic translator keeps redacted thinking data on the finish envelope', () => {
+  const chunks = drain(new AnthropicStreamTranslator(), [
+    { type: 'message_start', message: { usage: { input_tokens: 3 } } },
+    { type: 'content_block_start', index: 0, content_block: { type: 'redacted_thinking', data: 'opaque' } },
+    { type: 'content_block_stop', index: 0 },
+    { type: 'message_delta', delta: { stop_reason: 'tool_use' }, usage: { output_tokens: 1 } },
+    { type: 'message_stop' },
+  ])
+  const finish = chunks.at(-1)
+  assert.equal(finish?.type, 'finish')
+  if (finish?.type !== 'finish') return
+  assert.deepEqual(finish.replayState, {
+    response: { kind: 'claude', version: 1 },
+    blocks: [{ redacted: 'opaque' }],
+  })
 })
 
 test('Anthropic translator: stop reasons and empty completion', () => {

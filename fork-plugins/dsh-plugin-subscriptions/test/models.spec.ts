@@ -12,7 +12,7 @@ import { MessageId, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import type { Message } from '@deepseek-ai/dsh-llm'
 import { CodexAdapter, codexRequestBody, fetchCodexModels } from '../src/providers/codex.js'
 import { GrokAdapter } from '../src/providers/grok.js'
-import { ClaudeAdapter, claudeRequestBody, fetchClaudeModels } from '../src/providers/claude.js'
+import { ClaudeAdapter, claudeRequestBody, claudeThinkingBody, fetchClaudeModels } from '../src/providers/claude.js'
 import { CopilotAdapter, fetchCopilotModels } from '../src/providers/copilot.js'
 import { ModelCatalogCache } from '../src/providers/common.js'
 import { AccountTokenManager } from '../src/providers/accounts.js'
@@ -414,6 +414,41 @@ const CLAUDE_MODELS_PAYLOAD = {
     { type: 'model', id: 'claude-odd', display_name: 'Odd', max_input_tokens: '1e6', max_tokens: -5 },
   ],
 }
+
+test('fetchClaudeModels prefers adaptive thinking when a model advertises both modes', async () => {
+  const models = await fetchClaudeModels(claudeSession, fakeFetch({
+    data: [
+      {
+        id: 'both',
+        display_name: 'Both',
+        capabilities: { thinking: { types: { enabled: { supported: true }, adaptive: { supported: true } } } },
+      },
+      {
+        id: 'budget',
+        display_name: 'Budget',
+        capabilities: { thinking: { types: { enabled: { supported: true } } } },
+      },
+    ],
+  }).fetchFn)
+  assert.equal(models[0]?.thinkingType, 'adaptive')
+  assert.equal(models[1]?.thinkingType, 'enabled')
+})
+
+test('claudeThinkingBody refuses a manual budget on Opus 5.5', () => {
+  assert.deepEqual(
+    claudeThinkingBody('claude-opus-5-5', 'enabled', 32_000),
+    { type: 'adaptive', display: 'summarized' },
+  )
+  assert.deepEqual(
+    claudeThinkingBody('claude-opus-5-5', undefined, 32_000),
+    { type: 'adaptive', display: 'summarized' },
+  )
+  assert.deepEqual(
+    claudeThinkingBody('claude-opus-4-5', 'enabled', 32_000),
+    { type: 'enabled', budget_tokens: 16_000, display: 'summarized' },
+  )
+  assert.equal(claudeThinkingBody('claude-opus-4-5', undefined, 32_000), undefined)
+})
 
 test('fetchClaudeModels carries the advertised context window and output cap', async () => {
   const models = await fetchClaudeModels(claudeSession, fakeFetch(CLAUDE_MODELS_PAYLOAD).fetchFn)

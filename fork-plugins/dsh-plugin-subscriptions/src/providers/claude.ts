@@ -5,6 +5,7 @@
  */
 
 import { execFileSync } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import { EMPTY_RESPONSE_CODE, errorChain, LlmAdapter, LlmError, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import type {
   GenerateOptions,
@@ -19,7 +20,7 @@ import type { ProviderId } from '../auth/store.js'
 import type { PoolAdapter } from './pool.js'
 import type { AttachmentStore } from '@deepseek-ai/dsh-attachment'
 import { resolveImages } from '../translate/resolved.js'
-import type { TranslatableMessage } from '../translate/resolved.js'
+import type { ResolvedImagePart, TranslatableBlock, TranslatableMessage } from '../translate/resolved.js'
 import {
   markMessageCache,
   streamAnthropic,
@@ -101,7 +102,7 @@ export const claudeRateLimitReset: RateLimitResetReader = (response, body, now) 
  * so these headers impersonate the CLI; the harness attribution user-agent
  * cannot be sent here (one user-agent slot, and the CLI's wins).
  */
-export const CLAUDE_CLI_FALLBACK_VERSION = '2.1.263'
+export const CLAUDE_CLI_FALLBACK_VERSION = '2.1.280'
 
 /**
  * Candidate invocations, in order of preference. Windows npm installs expose
@@ -157,9 +158,147 @@ export const CLAUDE_BETA_FALLBACK = [
   'effort-2025-11-24',
   'compact-2026-01-12',
   'files-api-2025-04-14',
+  // Official beta enum. Usage then reports `output_tokens_details.thinking_tokens`.
+  'thinking-token-count-2026-05-13',
 ].join(',')
 
-const CLAUDE_BETA_FLAGS = CLAUDE_BETA_FALLBACK
+/** Present only when a request actually defers a tool. Official beta enum name from the tool-search announcement. */
+export const CLAUDE_ADVANCED_TOOL_USE_BETA = 'advanced-tool-use-2025-11-20'
+
+/**
+ * Beta header for one request. The advanced-tool-use flag is added only when
+ * a tool sets `deferLoading`, because that flag's body is the tool-search tool.
+ */
+export function claudeBetaHeader(tools: readonly { deferLoading?: true }[] | undefined): string {
+  if (!tools?.some(tool => tool.deferLoading === true)) return CLAUDE_BETA_FALLBACK
+  return `${CLAUDE_BETA_FALLBACK},${CLAUDE_ADVANCED_TOOL_USE_BETA}`
+}
+
+/**
+ * Models the prompt-caching guide allows to take a later `{"role":"system"}`
+ * message: Fable 5, Fable 5.1, Mythos 5, Mythos 5.1, Opus 4.8, and Opus 5.
+ * Sonnet 5 and Opus 5.5 are not in that list.
+ */
+export function supportsMidConversationSystem(model: string): boolean {
+  if (model.startsWith('claude-fable-5') || model.startsWith('claude-mythos-5') || model.startsWith('claude-opus-4-8')) {
+    return true
+  }
+  return model === 'claude-opus-5' || (model.startsWith('claude-opus-5-') && !model.startsWith('claude-opus-5-5'))
+}
+
+/** Files API upload. Official path from the Files HTTP reference. */
+export const CLAUDE_FILES_URL = 'https://api.anthropic.com/v1/files'
+/**
+ * Vision: images on the Claude API may be at most 10 MB once base64-encoded.
+ * Larger images go through the Files API as `{ type: "file", file_id }`.
+ */
+export const CLAUDE_MAX_BASE64_IMAGE_CHARS = 10_000_000
+
+const uploadedFileIds = new Map<string, string>()
+
+function imageFilename(mediaType: string): string {
+  switch (mediaType) {
+    case 'image/jpeg': return 'image.jpg'
+    case 'image/png': return 'image.png'
+    case 'image/gif': return 'image.gif'
+    case 'image/webp': return 'image.webp'
+    default: return 'image.bin'
+  }
+}
+
+/** Upload one image. The response `id` is the Messages `file_id`. */
+export async function uploadClaudeFile(
+  accessToken: string,
+  part: ResolvedImagePart,
+  fetchFn: FetchFn = proxiedFetch,
+  signal?: AbortSignal,
+): Promise<string> {
+  const form = new FormData()
+  form.append('file', new Blob([Buffer.from(part.dataBase64, 'base64')], { type: part.mediaType }), imageFilename(part.mediaType))
+  const response = await fetchFn(CLAUDE_FILES_URL, {
+    method: 'POST',
+    headers: {
+      'authorization': `Bearer ${accessToken}`,
+      'anthropic-version': '2023-06-01',
+      'anthropic-beta': 'files-api-2025-04-14',
+      'user-agent': getClaudeCliUserAgent(),
+    },
+    body: form,
+    ...signal === undefined ? {} : { signal },
+  })
+  if (!response.ok) throw await httpLlmError(response, 'claude files API')
+  const payload = await response.json() as { id?: unknown; type?: unknown }
+  if (typeof payload.id !== 'string' || payload.id.length === 0 || (payload.type !== undefined && payload.type !== 'file')) {
+    throw new LlmError('claude files API returned no file id', 'SERVER')
+  }
+  return payload.id
+}
+
+async function fileIdForImage(
+  part: ResolvedImagePart,
+  accessToken: string,
+  fetchFn: FetchFn,
+  signal?: AbortSignal,
+): Promise<string | undefined> {
+  if (part.fileId !== undefined || part.dataBase64.length <= CLAUDE_MAX_BASE64_IMAGE_CHARS) return part.fileId
+  const key = createHash('sha256').update(part.dataBase64).digest('hex')
+  const cached = uploadedFileIds.get(key)
+  if (cached !== undefined) return cached
+  const id = await uploadClaudeFile(accessToken, part, fetchFn, signal)
+  uploadedFileIds.set(key, id)
+  return id
+}
+
+async function withFileIds(
+  blocks: readonly TranslatableBlock[],
+  accessToken: string,
+  fetchFn: FetchFn,
+  signal?: AbortSignal,
+): Promise<readonly TranslatableBlock[]> {
+  let changed = false
+  const next: TranslatableBlock[] = []
+  for (const block of blocks) {
+    if (block.type === 'image' && 'dataBase64' in block) {
+      const fileId = await fileIdForImage(block, accessToken, fetchFn, signal)
+      if (fileId !== undefined && fileId !== block.fileId) {
+        changed = true
+        next.push({ ...block, fileId })
+        continue
+      }
+    }
+    if (block.type === 'tool-result') {
+      const content = await withFileIds(block.content, accessToken, fetchFn, signal)
+      if (content !== block.content) {
+        changed = true
+        next.push({ ...block, content })
+        continue
+      }
+    }
+    next.push(block)
+  }
+  return changed ? next : blocks
+}
+
+/** Replace oversized inline images with a Files API `file_id`. Smaller images stay base64. */
+export async function bindClaudeFileIds(
+  messages: readonly TranslatableMessage[],
+  accessToken: string,
+  fetchFn: FetchFn = proxiedFetch,
+  signal?: AbortSignal,
+): Promise<readonly TranslatableMessage[]> {
+  let changed = false
+  const next: TranslatableMessage[] = []
+  for (const message of messages) {
+    const content = await withFileIds(message.content, accessToken, fetchFn, signal)
+    if (content !== message.content) {
+      changed = true
+      next.push({ ...message, content })
+    } else {
+      next.push(message)
+    }
+  }
+  return changed ? next : messages
+}
 
 /** Static claude flow facts for the OAuth flow engine. */
 export const claudeFlow: FlowSpec = {
@@ -417,8 +556,44 @@ interface ClaudeModelCapabilities {
 
 function claudeThinkingType(capabilities: ClaudeModelCapabilities | undefined): 'enabled' | 'adaptive' | undefined {
   const types = capabilities?.thinking?.types
-  if (types?.enabled?.supported === true) return 'enabled'
+  // Adaptive wins when a model advertises both. Opus 5.5 rejects
+  // `thinking.type: enabled` and `budget_tokens` with HTTP 400.
   if (types?.adaptive?.supported === true) return 'adaptive'
+  if (types?.enabled?.supported === true) return 'enabled'
+  return undefined
+}
+
+/**
+ * Opus 5.5 accepts only omitted thinking or `type: adaptive`. A manual budget
+ * is a 400 even when an older catalog snapshot still marks `enabled`.
+ */
+function rejectsBudgetThinking(model: string): boolean {
+  return model === 'claude-opus-5-5' || model.startsWith('claude-opus-5-5-')
+}
+
+/**
+ * The `thinking` object for one request.
+ *
+ * `display: 'summarized'` is set on both shapes: adaptive models default to
+ * `display: 'omitted'`, which returns thinking blocks with an empty `thinking`
+ * field. Without this override the Think panel stays empty.
+ * @param model - the requested model id.
+ * @param thinkingType - the type discovery advertised, when it advertised one.
+ * @param maxTokens - the resolved output cap; the manual budget is derived from it.
+ * @returns the wire `thinking` object, or undefined when the model takes none.
+ */
+export function claudeThinkingBody(
+  model: string,
+  thinkingType: 'enabled' | 'adaptive' | undefined,
+  maxTokens: number,
+): Record<string, unknown> | undefined {
+  const mode = thinkingType === 'adaptive' || rejectsBudgetThinking(model) ? 'adaptive' : thinkingType
+  if (mode === 'adaptive') return { type: 'adaptive', display: 'summarized' }
+  if (mode === 'enabled') {
+    const budget = Math.min(Math.max(1_024, Math.floor(maxTokens * 0.5)), maxTokens - 100)
+    if (budget < 1_024) return undefined
+    return { type: 'enabled', budget_tokens: budget, display: 'summarized' }
+  }
   return undefined
 }
 
@@ -555,7 +730,7 @@ export function claudeRequestBody(
   thinking?: Record<string, unknown>,
   effort?: string,
 ): Record<string, unknown> {
-  const anthropicMessages = toAnthropicMessages(messages)
+  const anthropicMessages = toAnthropicMessages(messages, options.model)
   markMessageCache(anthropicMessages)
   return {
     model: options.model,
@@ -720,6 +895,7 @@ export class ClaudeAdapter extends LlmAdapter {
       },
       defaultMaxTokens: claudeMaxTokens(configured, disc),
       ...(reasoning === undefined ? {} : { reasoning }),
+      ...(supportsMidConversationSystem(model) ? { systemPromptUpdate: 'in-history' as const } : {}),
     }
   }
 
@@ -763,29 +939,17 @@ export class ClaudeAdapter extends LlmAdapter {
     }
   }
 
-  /**
-   * `display: 'summarized'` is set explicitly on both shapes: `adaptive`-type
-   * models default to `display: 'omitted'`, which returns thinking blocks with
-   * an empty `thinking` field — without this override the "Think" panel would
-   * always render empty even though real reasoning (and billed thinking_tokens)
-   * ran.
-   */
-  private thinkingParam(thinkingType: 'enabled' | 'adaptive' | undefined, maxTokens: number): Record<string, unknown> | undefined {
-    if (thinkingType === 'adaptive') return { type: 'adaptive', display: 'summarized' }
-    if (thinkingType === 'enabled') {
-      const budget = Math.min(Math.max(1_024, Math.floor(maxTokens * 0.5)), maxTokens - 100)
-      if (budget < 1_024) return undefined
-      return { type: 'enabled', budget_tokens: budget, display: 'summarized' }
-    }
-    return undefined
+  private thinkingParam(model: string, thinkingType: 'enabled' | 'adaptive' | undefined, maxTokens: number): Record<string, unknown> | undefined {
+    return claudeThinkingBody(model, thinkingType, maxTokens)
   }
 
   private async request(options: GenerateOptions, session: ClaudeSession, signal: AbortSignal): Promise<Response> {
-    const messages = await resolveImages(options.messages, this.options.resolveAttachments?.(), signal)
+    const resolved = await resolveImages(options.messages, this.options.resolveAttachments?.(), signal)
+    const messages = await bindClaudeFileIds(resolved, session.accessToken, this.options.fetchFn, signal)
     const disc = await this.discovered(options.model)
     const maxTokens = options.maxTokens
       ?? claudeMaxTokens(this.options.models.find(entry => entry.id === options.model), disc)
-    const thinking = this.thinkingParam(disc?.thinkingType, maxTokens)
+    const thinking = this.thinkingParam(options.model, disc?.thinkingType, maxTokens)
     const effort = options.reasoningEffort !== undefined && disc?.reasoning !== undefined
       ? String(options.reasoningEffort)
       : undefined
@@ -795,7 +959,7 @@ export class ClaudeAdapter extends LlmAdapter {
       headers: {
         'authorization': `Bearer ${session.accessToken}`,
         'anthropic-version': '2023-06-01',
-        'anthropic-beta': CLAUDE_BETA_FLAGS,
+        'anthropic-beta': claudeBetaHeader(options.tools),
         'user-agent': getClaudeCliUserAgent(),
         'x-app': 'cli',
         'anthropic-dangerous-direct-browser-access': 'true',

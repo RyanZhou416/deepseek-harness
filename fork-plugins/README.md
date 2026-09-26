@@ -80,6 +80,6 @@ The low-overhead deployment values are `maxRequestSteps: 300`, `maxKeptTurns: 60
 - Upstream base: `V1ki/dsh-plugin-subscriptions v0.9.4`
 - Private host target: `dsh-v0.1.7-rc.1`
 - Distribution artifact: `fork-plugins/releases/dsh-plugin-subscriptions-0.9.4-dsh017rc1.1.tgz`
-- Artifact SHA256: `4F2A6D5D86C7AB0D342C3F7C4FACC3D16C49C3628D6EAD41B9964C426DCDFD88`
+- Artifact SHA256: `4BEA799D70AED1D0FD992EAEB74C6AA5DB9C350D0B45F2BBB2245DEAC1B7D15C`
 
 The private build keeps upstream multi-account providers, usage UI, Codex search, image/video tools, and credential format. Its RC.1 adaptation translates V4 tool-role messages without losing call identity or image results and pins the exact DSH dependency cohort; no Session or credential migration is introduced. See `fork-plugins/dsh-plugin-subscriptions/FORK_MAINTENANCE.md` for verification and rollback rules.

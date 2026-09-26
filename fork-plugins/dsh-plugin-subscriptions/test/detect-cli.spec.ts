@@ -60,7 +60,7 @@ test('detectClaudeVersion reads a resolvable CLI rather than the fallback', () =
 /** The fallback must remain above the currently documented model floor. */
 test('detectClaudeVersion fallback is new enough for currently gated models', () => {
   const [major, minor, patch] = CLAUDE_CLI_FALLBACK_VERSION.split('.').map(Number)
-  assert.ok(major > 2 || (major === 2 && (minor > 1 || (minor === 1 && patch >= 251))))
+  assert.ok(major > 2 || (major === 2 && (minor > 1 || (minor === 1 && patch >= 280))))
 })
 
 // ---------------------------------------------------------------------------
@@ -75,6 +75,7 @@ const EXPECTED_FLAGS = [
   'effort-2025-11-24',
   'compact-2026-01-12',
   'files-api-2025-04-14',
+  'thinking-token-count-2026-05-13',
 ]
 
 test('CLAUDE_BETA_FALLBACK is a well-formed comma-separated flag list', () => {

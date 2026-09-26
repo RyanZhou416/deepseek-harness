@@ -13,6 +13,7 @@ import {
 import { ToolCallId } from '../compat.js'
 import type {
   ContentBlock,
+  ReplayEnvelope,
   StreamChunk,
   TokenUsage,
   ToolSchema,
@@ -51,8 +52,24 @@ export const MESSAGE_CACHE_BREAKPOINTS = 3
 
 /** One Anthropic request message. */
 export interface AnthropicMessage {
-  role: 'user' | 'assistant'
+  role: 'user' | 'assistant' | 'system'
   content: Record<string, unknown>[]
+}
+
+/**
+ * Image source. Under the vision limit this is base64; a Files API upload
+ * uses the documented `{ type: "file", file_id }` source.
+ */
+export function anthropicImageSource(part: { mediaType: string; dataBase64: string; fileId?: string }): Record<string, unknown> {
+  if (part.fileId !== undefined && part.fileId.length > 0) return { type: 'file', file_id: part.fileId }
+  return { type: 'base64', media_type: part.mediaType, data: part.dataBase64 }
+}
+
+/** Prompt-caching guide: Fable 5/5.1, Mythos 5/5.1, Opus 4.8, and Opus 5. Not Sonnet 5 or Opus 5.5. */
+function midConversationSystem(model: string | undefined): boolean {
+  if (model === undefined) return false
+  if (model.startsWith('claude-fable-5') || model.startsWith('claude-mythos-5') || model.startsWith('claude-opus-4-8')) return true
+  return model === 'claude-opus-5' || (model.startsWith('claude-opus-5-') && !model.startsWith('claude-opus-5-5'))
 }
 
 /** Preserve native image blocks, retaining the existing text-only wire shape. */
@@ -64,7 +81,7 @@ function toolResultContent(block: ResolvedToolResultBlock): string | Record<stri
   for (const part of block.content) {
     if (part.type === 'text' && part.text.length > 0) content.push({ type: 'text', text: part.text })
     if (part.type === 'image' && 'dataBase64' in part) {
-      content.push({ type: 'image', source: { type: 'base64', media_type: part.mediaType, data: part.dataBase64 } })
+      content.push({ type: 'image', source: anthropicImageSource(part) })
     }
   }
   return content
@@ -124,6 +141,39 @@ function conversationStart(messages: readonly TranslatableMessage[]): number {
   return index === -1 ? messages.length : index
 }
 
+/** Per-block Claude replay metadata stored on the assistant message. */
+interface ClaudeThinkingReplay {
+  signature?: string
+  redacted?: string
+}
+
+/**
+ * Read thinking signatures captured from an earlier Claude response.
+ *
+ * The envelope is this adapter's own: another provider's replay state, or a
+ * signature minted for a different model, is ignored. Thinking blocks are
+ * bound to the model that produced them.
+ */
+function claudeReplayBlocks(message: TranslatableMessage, model: string | undefined): readonly ClaudeThinkingReplay[] {
+  const source = message.source
+  if (source?.kind !== 'model' || source.provider !== 'claude') return []
+  if (model !== undefined && source.model !== model) return []
+  const envelope = source.replayState
+  if (typeof envelope !== 'object' || envelope === null) return []
+  const record = envelope as { response?: { kind?: unknown; version?: unknown }; blocks?: unknown }
+  if (record.response?.kind !== 'claude' || record.response.version !== 1 || !Array.isArray(record.blocks)) return []
+  return record.blocks.map((entry): ClaudeThinkingReplay => {
+    if (typeof entry !== 'object' || entry === null) return {}
+    const raw = entry as Record<string, unknown>
+    const signature = typeof raw.signature === 'string' && raw.signature.length > 0 ? raw.signature : undefined
+    const redacted = typeof raw.redacted === 'string' && raw.redacted.length > 0 ? raw.redacted : undefined
+    return {
+      ...signature === undefined ? {} : { signature },
+      ...redacted === undefined ? {} : { redacted },
+    }
+  })
+}
+
 /**
  * Convert harness messages into Anthropic messages. Consecutive same-role
  * messages merge into one message with multiple content blocks; tool results
@@ -132,13 +182,16 @@ function conversationStart(messages: readonly TranslatableMessage[]): number {
  * messages before the conversation starts are handled by
  * {@link toAnthropicSystem} and skipped here, while a later one rides in
  * place as a user-role `<system-reminder>` block.
- * Reasoning blocks are not replayed (v1). Images must arrive pre-resolved
- * ({@link TranslatableMessage}); an unresolved ImageBlock is skipped because
- * its bytes are unreachable here.
+ * Signed thinking blocks are replayed for the same Claude model; unsigned
+ * reasoning is omitted because the API rejects a thinking block with no
+ * signature. Images must arrive pre-resolved ({@link TranslatableMessage});
+ * an unresolved ImageBlock is skipped because its bytes are unreachable here.
  * @param messages - ordered conversation messages with resolved images.
+ * @param model - the model this request targets. Thinking signatures are
+ *   model-bound, so a signature from another model is not replayed.
  * @returns Anthropic messages in conversation order.
  */
-export function toAnthropicMessages(messages: readonly TranslatableMessage[]): AnthropicMessage[] {
+export function toAnthropicMessages(messages: readonly TranslatableMessage[], model?: string): AnthropicMessage[] {
   const out: AnthropicMessage[] = []
   const start = conversationStart(messages)
   for (const [index, message] of messages.entries()) {
@@ -146,14 +199,16 @@ export function toAnthropicMessages(messages: readonly TranslatableMessage[]): A
     // owns those. A later one rides here so the cached prefix ahead of it
     // stays byte-identical.
     if (message.role === 'system' && index < start) continue
-    const role = message.role === 'system' ? 'user' : message.role
+    const inHistory = message.role === 'system' && midConversationSystem(model)
+    const role = message.role === 'system' && !inHistory ? 'user' : message.role
+    const replay = claudeReplayBlocks(message, model)
     const blocks: Record<string, unknown>[] = []
-    for (const block of message.content) {
+    for (const [blockIndex, block] of message.content.entries()) {
       switch (block.type) {
         case 'text':
           blocks.push({
             type: 'text',
-            text: message.role === 'system'
+            text: message.role === 'system' && !inHistory
               ? `${SYSTEM_REMINDER_OPEN}${block.text}${SYSTEM_REMINDER_CLOSE}`
               : block.text,
           })
@@ -184,16 +239,25 @@ export function toAnthropicMessages(messages: readonly TranslatableMessage[]): A
           break
         case 'image':
           if ('dataBase64' in block) {
-            blocks.push({
-              type: 'image',
-              source: { type: 'base64', media_type: block.mediaType, data: block.dataBase64 },
-            })
+            blocks.push({ type: 'image', source: anthropicImageSource(block) })
           }
           // An unresolved ImageBlock carries only an attachment reference; the
           // adapter resolves images before translation, so this is skipped.
           break
+        case 'reasoning': {
+          const prior = replay[blockIndex]
+          if (prior?.redacted !== undefined) {
+            blocks.push({ type: 'redacted_thinking', data: prior.redacted })
+            break
+          }
+          if (prior?.signature !== undefined) {
+            blocks.push({ type: 'thinking', thinking: block.text, signature: prior.signature })
+          }
+          // Unsigned reasoning cannot be replayed: the API rejects a thinking
+          // block that has no signature.
+          break
+        }
         default:
-          // reasoning (not replayed), unknown blocks.
           break
       }
     }
@@ -248,6 +312,7 @@ export function toAnthropicSystem(system?: string, messages?: readonly Translata
   // `tools` renders ahead of `system`, so this one marker caches both. It is
   // deliberately separate from the message marks: a tool_choice or thinking
   // change invalidates the messages tier only, and this entry survives it.
+  // `ttl` is omitted, so the breakpoint uses the documented 5-minute default.
   blocks[blocks.length - 1].cache_control = { type: 'ephemeral' }
   return blocks
 }
@@ -263,14 +328,37 @@ export function toAnthropicSystem(system?: string, messages?: readonly Translata
  * @param tools - tool schemas from the request.
  * @returns Anthropic `tools` array entries, ordered by tool name.
  */
+/** Official tool-search tool. Included only when some tool sets `defer_loading`. */
+export const CLAUDE_TOOL_SEARCH = {
+  type: 'tool_search_tool_regex_20251119',
+  name: 'tool_search_tool_regex',
+} as const
+
 export function toAnthropicTools(tools: readonly ToolSchema[]): Record<string, unknown>[] {
-  return [...tools]
+  const mapped = [...tools]
     .sort((left, right) => (left.name < right.name ? -1 : left.name > right.name ? 1 : 0))
     .map(tool => ({
       name: tool.name,
       description: tool.description,
       input_schema: tool.parameters,
+      ...tool.deferLoading === true ? { defer_loading: true } : {},
     }))
+  if (!tools.some(tool => tool.deferLoading === true)) return mapped
+  return [CLAUDE_TOOL_SEARCH, ...mapped]
+}
+
+function thinkingTokens(usage: AnthropicUsage | undefined): number | undefined {
+  const value = usage?.output_tokens_details?.thinking_tokens
+  return typeof value === 'number' && Number.isFinite(value) ? value : undefined
+}
+
+/** Usage fields this translator reads. `thinking_tokens` requires beta `thinking-token-count-2026-05-13`. */
+interface AnthropicUsage {
+  input_tokens?: number
+  output_tokens?: number
+  cache_read_input_tokens?: number
+  cache_creation_input_tokens?: number
+  output_tokens_details?: { thinking_tokens?: number }
 }
 
 /** The subset of Anthropic SSE event shapes this translator reads. */
@@ -278,26 +366,25 @@ export interface AnthropicStreamEvent {
   type: string
   index?: number
   message?: {
-    usage?: {
-      input_tokens?: number
-      output_tokens?: number
-      cache_read_input_tokens?: number
-      cache_creation_input_tokens?: number
-    }
+    usage?: AnthropicUsage
   }
   content_block?: {
     type?: string
     id?: string
     name?: string
+    /** Opaque payload of a `redacted_thinking` block. Must be replayed verbatim. */
+    data?: string
   }
   delta?: {
     type?: string
     text?: string
     thinking?: string
+    /** Cryptographic signature the next request must send back unchanged. */
+    signature?: string
     partial_json?: string
     stop_reason?: string
   }
-  usage?: { output_tokens?: number }
+  usage?: AnthropicUsage
   error?: { type?: string; message?: string }
 }
 
@@ -308,6 +395,10 @@ interface OpenBlock {
   text: string
   callId: string
   name?: string
+  /** Concatenated `signature_delta` payload for a thinking block. */
+  signature: string
+  /** `redacted_thinking.data`, when this block is a redacted thinking block. */
+  redacted?: string
 }
 
 /** Assemble the final ContentBlock for one open block. */
@@ -352,9 +443,11 @@ export function anthropicFailure(error: { type?: string; message?: string } | un
  */
 export class AnthropicStreamTranslator {
   private blocks = new Map<number, OpenBlock>()
+  /** Replay entries aligned with harness block indexes. */
+  private replay: ClaudeThinkingReplay[] = []
   private nextIndex = 0
   private sawAnyBlock = false
-  private pendingUsage: { inputTokens: number; cacheReadTokens?: number; cacheWriteTokens?: number } | undefined
+  private pendingUsage: { inputTokens: number; cacheReadTokens?: number; cacheWriteTokens?: number; reasoningTokens?: number } | undefined
   private outputTokens: number | undefined
   private stopReason: 'stop' | 'tool-calls' | 'max-tokens' = 'stop'
   private usageEmitted = false
@@ -367,12 +460,40 @@ export class AnthropicStreamTranslator {
       kind,
       text: '',
       callId,
+      signature: '',
       ...name === undefined ? {} : { name },
     }
     this.blocks.set(wireIndex, block)
     this.sawAnyBlock = true
     chunks.push({ type: 'block-start', index: block.index, blockType: kind })
     return block
+  }
+
+  /** Remember the signature or redacted payload for one closed block. */
+  private remember(block: OpenBlock): void {
+    const signature = block.signature.length > 0 ? block.signature : undefined
+    const redacted = block.redacted !== undefined && block.redacted.length > 0 ? block.redacted : undefined
+    this.replay[block.index] = {
+      ...signature === undefined ? {} : { signature },
+      ...redacted === undefined ? {} : { redacted },
+    }
+  }
+
+  /**
+   * Replay envelope for a successful response that carried thinking the next
+   * turn must echo. Omitted when nothing was signed or redacted, so a plain
+   * text response stays free of adapter metadata.
+   */
+  private replayEnvelope(): ReplayEnvelope | undefined {
+    let useful = false
+    const blocks: ClaudeThinkingReplay[] = []
+    for (let index = 0; index < this.nextIndex; index++) {
+      const entry = this.replay[index] ?? {}
+      if (entry.signature !== undefined || entry.redacted !== undefined) useful = true
+      blocks.push(entry)
+    }
+    if (!useful) return undefined
+    return { response: { kind: 'claude', version: 1 }, blocks }
   }
 
   private emitUsage(chunks: StreamChunk[]): void {
@@ -386,6 +507,9 @@ export class AnthropicStreamTranslator {
         : {},
       ...this.pendingUsage?.cacheWriteTokens !== undefined
         ? { cacheWriteTokens: this.pendingUsage.cacheWriteTokens }
+        : {},
+      ...this.pendingUsage?.reasoningTokens !== undefined
+        ? { reasoningTokens: this.pendingUsage.reasoningTokens }
         : {},
     }
     chunks.push({ type: 'usage', usage })
@@ -403,6 +527,7 @@ export class AnthropicStreamTranslator {
       case 'message_start': {
         const usage = event.message?.usage
         if (usage !== undefined) {
+          const reasoning = thinkingTokens(usage)
           this.pendingUsage = {
             inputTokens: usage.input_tokens ?? 0,
             ...usage.cache_read_input_tokens !== undefined
@@ -411,6 +536,7 @@ export class AnthropicStreamTranslator {
             ...usage.cache_creation_input_tokens !== undefined
               ? { cacheWriteTokens: usage.cache_creation_input_tokens }
               : {},
+            ...reasoning === undefined ? {} : { reasoningTokens: reasoning },
           }
           this.outputTokens = usage.output_tokens ?? this.outputTokens
         }
@@ -426,6 +552,11 @@ export class AnthropicStreamTranslator {
           case 'thinking':
             this.open(wireIndex, 'reasoning', chunks)
             break
+          case 'redacted_thinking': {
+            const opened = this.open(wireIndex, 'reasoning', chunks)
+            if (typeof block.data === 'string' && block.data.length > 0) opened.redacted = block.data
+            break
+          }
           case 'tool_use': {
             const opened = this.open(wireIndex, 'tool-call', chunks, block.id ?? '', block.name)
             chunks.push({
@@ -456,6 +587,9 @@ export class AnthropicStreamTranslator {
             block.text += delta.thinking ?? ''
             chunks.push({ type: 'reasoning-delta', index: block.index, text: delta.thinking ?? '' })
             break
+          case 'signature_delta':
+            block.signature += delta.signature ?? ''
+            break
           case 'input_json_delta':
             block.text += delta.partial_json ?? ''
             chunks.push({
@@ -467,7 +601,6 @@ export class AnthropicStreamTranslator {
             })
             break
           default:
-            // signature_delta and future deltas carry no harness content.
             break
         }
         return chunks
@@ -477,11 +610,20 @@ export class AnthropicStreamTranslator {
         const block = this.blocks.get(wireIndex)
         if (block === undefined) return chunks
         this.blocks.delete(wireIndex)
+        this.remember(block)
         chunks.push({ type: 'block-end', index: block.index, block: closeBlock(block) })
         return chunks
       }
       case 'message_delta': {
         if (event.usage?.output_tokens !== undefined) this.outputTokens = event.usage.output_tokens
+        const reasoning = thinkingTokens(event.usage)
+        if (reasoning !== undefined) {
+          this.pendingUsage = {
+            inputTokens: this.pendingUsage?.inputTokens ?? 0,
+            ...this.pendingUsage,
+            reasoningTokens: reasoning,
+          }
+        }
         switch (event.delta?.stop_reason) {
           case 'end_turn':
           case 'stop_sequence':
@@ -502,6 +644,7 @@ export class AnthropicStreamTranslator {
         this.terminated = true
         for (const [wireIndex, block] of [...this.blocks]) {
           this.blocks.delete(wireIndex)
+          this.remember(block)
           chunks.push({ type: 'block-end', index: block.index, block: closeBlock(block) })
         }
         this.emitUsage(chunks)
@@ -514,7 +657,12 @@ export class AnthropicStreamTranslator {
             },
           })
         } else {
-          chunks.push({ type: 'finish', reason: { kind: this.stopReason } })
+          const replayState = this.replayEnvelope()
+          chunks.push({
+            type: 'finish',
+            reason: { kind: this.stopReason },
+            ...replayState === undefined ? {} : { replayState },
+          })
         }
         return chunks
       }

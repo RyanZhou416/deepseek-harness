@@ -17,6 +17,8 @@ export interface ResolvedImagePart {
   mediaType: string
   /** Base64-encoded image bytes. */
   dataBase64: string
+  /** Files API `id`, sent as `source.file_id` when the base64 image exceeds the vision limit. */
+  fileId?: string
 }
 
 /** Translator input: a harness block, resolved image, or internal tool-result wrapper. */
