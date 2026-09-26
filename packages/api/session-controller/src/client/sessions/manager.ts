@@ -7,6 +7,7 @@ import type { WorkspaceId } from '@deepseek-ai/dsh-workspace/types'
 import type {
   SessionControlBaseline,
   SessionControlFrame,
+  SessionForkRequest,
   SessionProjectionHints,
   SessionRenameValue,
   SessionSummary,
@@ -526,23 +527,25 @@ export class SessionManager {
    * preserve it or lower it after an exact cut before the first `turn/start`;
    * lineage rides parentSessionId. A child published before Workspace
    * attachment fails is also reconciled into the list.
-   * @param opts - source session and the optional exact inclusive boundary seq.
+   * @param opts - source session and either an inclusive boundary or an idempotent last-message edit.
    * @returns the fork result (the child session id).
    */
   async fork(
-    opts: { sessionId: SessionId; atSeq?: SessionSeq },
+    opts: SessionForkRequest,
   ): Promise<RemoteResult<{ sessionId: SessionId }>> {
     const source = this.summaries.find(s => s.sessionId === opts.sessionId)
     const result = await this.remote.session.fork({
       sessionId: opts.sessionId,
       ...opts.atSeq === undefined ? {} : { atSeq: opts.atSeq },
+      ...opts.editLastMessage === undefined ? {} : { editLastMessage: opts.editLastMessage },
     })
     const childId = result.ok
       ? result.value.sessionId
       : workspaceAttachSessionId(result.error)
     if (childId !== undefined) {
+      if (result.ok && opts.editLastMessage !== undefined) this.engagedSessions.add(childId)
       this.recordMutation({ kind: 'placeholder', summary: { agentAvailable: true,
-        sessionId: childId, updatedAt: Date.now(), running: false, blank: true,
+        sessionId: childId, updatedAt: Date.now(), running: false, blank: opts.editLastMessage === undefined,
         parentSessionId: opts.sessionId,
         ...(source?.cwd !== undefined ? { cwd: source.cwd } : {}),
       } })

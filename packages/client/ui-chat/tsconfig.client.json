@@ -16,6 +16,9 @@
       "path": "../../util/values"
     },
     {
+      "path": "../../util/crypto"
+    },
+    {
       "path": "../../../vendor/cordis"
     },
     {

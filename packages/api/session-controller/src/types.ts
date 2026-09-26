@@ -320,6 +320,15 @@ export interface SessionForkRequest {
   readonly sessionId: SessionId
   /** Exact inclusive source event seq; omission selects the latest completed-turn prefix. */
   readonly atSeq?: number
+  /** Redo the latest human prompt from its preceding history; mutually exclusive with atSeq. */
+  readonly editLastMessage?: {
+    /** Exact original user/message sequence, checked against the complete source log. */
+    readonly seq: number
+    /** Replacement text; the first version accepts text-only original prompts. */
+    readonly text: string
+    /** Stable identity for retries of this edit submission. */
+    readonly requestId: SessionRequestId
+  }
 }
 
 /** Identity of a newly forked Session. */

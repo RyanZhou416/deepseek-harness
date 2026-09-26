@@ -5,6 +5,7 @@ import { SessionSeq, type SessionId } from '@deepseek-ai/dsh-session/types'
 import { workspaceTitleOf } from '@deepseek-ai/dsh-util-workspace-path'
 import type { WorkspaceId } from '@deepseek-ai/dsh-workspace/types'
 import { SESSION_SEARCH_RESULT_LIMIT } from '../../types.ts'
+import type { SessionForkRequest } from '../../types.ts'
 import type { SessionProjectionMap } from '@deepseek-ai/dsh-session-projection/types'
 import {
   createSnapshotStore, notifySubscribers, type ObservableSnapshot, type SnapshotStore,
@@ -443,7 +444,8 @@ export class ClientSessions implements ISessions {
    *   seq (a real event seq the caller already knows; a cut inside an open
    *   turn is balanced Host-side with synthetic closers, and omission selects
    *   the latest completed-turn prefix), and whether to increment an
-   *   inherited durable title before resolving.
+   *   inherited durable title before resolving. editLastMessage selects the
+   *   prefix before the latest prompt and submits its replacement exactly once.
    * @returns the child session id.
    * @throws {SessionForkError} with the source id.
    * @throws {Error} when a requested child-title rename fails after creation.
@@ -452,6 +454,7 @@ export class ClientSessions implements ISessions {
     sessionId: SessionId
     atSeq?: number
     increaseTitle?: boolean
+    editLastMessage?: SessionForkRequest['editLastMessage']
   }): Promise<SessionId> {
     const sourceTitle = opts.increaseTitle
       ? this.list.getSnapshot().byId[opts.sessionId]?.title
@@ -459,6 +462,7 @@ export class ClientSessions implements ISessions {
     const result = await this.manager.fork({
       sessionId: opts.sessionId,
       ...(opts.atSeq === undefined ? {} : { atSeq: SessionSeq(opts.atSeq) }),
+      ...(opts.editLastMessage === undefined ? {} : { editLastMessage: opts.editLastMessage }),
     })
     if (!result.ok) throw new SessionForkError(result.error, opts.sessionId)
     this.projectList()

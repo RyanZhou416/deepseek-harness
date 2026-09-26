@@ -220,6 +220,12 @@ export function apply(ctx: Context): void {
                 // Fork or child-title failure leaves the source view unchanged.
               })
           },
+          editLastMessage: async (seq, text, requestId) => {
+            const childId = await ctx.sessions.fork({
+              sessionId, increaseTitle: true, editLastMessage: { seq, text, requestId },
+            })
+            ctx.uiWorkspace.openSession(childId)
+          },
         }
       },
     }, ChatView)

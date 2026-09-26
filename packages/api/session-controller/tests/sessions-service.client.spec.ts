@@ -12,7 +12,7 @@ import { createClientTest, webApp } from '@deepseek-ai/dsh-client-test-runtime/s
 import { ClientSessions, SessionCreateError, SessionForkError } from '../src/client/sessions/service.ts'
 import { scopeOf } from '../src/client/scope.ts'
 import type {
-  SessionAssistantStreamBaseline, SessionFollowFrame, SessionFollowRequest,
+  SessionAssistantStreamBaseline, SessionFollowFrame, SessionFollowRequest, SessionRequestId,
 } from '../src/types.ts'
 import { FOLLOW, err, followScript, sessionWorld } from './remote/session.client.ts'
 
@@ -960,6 +960,18 @@ describe('fork', () => {
     await expect(b.svc.fork({ sessionId: sid('source'), atSeq: 41 })).resolves.toBe('child')
 
     expect(b.mock.remote.session.fork).toHaveBeenCalledExactlyOnceWith({ sessionId: 'source', atSeq: 41 })
+  })
+
+  it('forwards a last-message revision through the manager and retains its accepted display state', async ({ bench }) => {
+    const b = bench()
+    await feedList(b, [{ id: 'source', cwd: '/work' }])
+    b.mock.remote.session.fork.mockResolvedValue(ok({ sessionId: sid('child') }))
+    const editLastMessage = { seq: 41, text: 'Revised request', requestId: 'edit-1' as SessionRequestId }
+    await expect(b.svc.fork({ sessionId: sid('source'), editLastMessage })).resolves.toBe('child')
+    expect(b.mock.remote.session.fork).toHaveBeenCalledExactlyOnceWith({ sessionId: 'source', editLastMessage })
+    expect(b.svc.list.getSnapshot().byId[sid('child')]?.blank).toBe(false)
+    await feedList(b, [{ id: 'source', cwd: '/work' }, { id: 'child', cwd: '/work', blank: true }])
+    expect(b.svc.list.getSnapshot().byId[sid('child')]?.blank).toBe(false)
   })
 
   it('does not rename without the title policy or a durable source title', async ({ bench }) => {

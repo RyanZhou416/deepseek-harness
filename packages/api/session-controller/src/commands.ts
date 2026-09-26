@@ -1,6 +1,6 @@
 /** Session commands whose activation policy is explicit at each Remote method. */
 
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import type { Context } from '@deepseek-ai/cordis'
 import { brandString } from '@deepseek-ai/dsh-brand'
 import type { Agent, ModelSelection as AgentModelSelection } from '@deepseek-ai/dsh-agent'
@@ -85,6 +85,7 @@ function latestCompletedPrefixBoundary(events: readonly SessionEvent[]): Session
 
 /** Implements Session business commands delegated by the Session Controller Remote service. */
 export class SessionCommandController {
+  private readonly pendingEdits = new Map<SessionId, Promise<SessionForkValue>>()
   /**
    * @param ctx - Host context carrying Agent, model, attachment, title, and Workspace services.
    * @param agents - sole owner of create, resume, and Session-local model selection.
@@ -215,10 +216,13 @@ export class SessionCommandController {
    * Create a new ordinary Session from an exact event prefix. An explicit
    * `atSeq` is the inclusive cut; an omitted value selects the latest
    * completed-turn prefix. An open cut receives synthetic fork closers.
-   * @param request - source Session and optional exact event boundary.
-   * @returns the new Session identity.
+   * An editLastMessage submission instead excludes the latest human prompt
+   * and its response, then admits revised text into an idempotent child.
+   * @param request - source Session and either a fork boundary or latest-message revision.
+   * @returns the child Session identity after optional revised-prompt acceptance.
    */
   async fork(request: SessionForkRequest): Promise<SessionForkValue> {
+    if (request.editLastMessage !== undefined) return this.editLastMessage(request)
     let atSeq: ReturnType<typeof SessionSeq> | undefined
     try {
       atSeq = request.atSeq === undefined ? undefined : SessionSeq(request.atSeq)
@@ -252,25 +256,33 @@ export class SessionCommandController {
         { sessionId: request.sessionId },
       )
     }
-    const seed = buildForkSeed(source.events, boundary)
+    return await this.createFork(source, boundary, brandString<SessionId>(`session-${randomUUID()}`))
+  }
+
+  /** Create and attach a child whose model history ends at the supplied boundary. */
+  private async createFork(
+    source: SessionObservation,
+    boundary: ReturnType<typeof SessionSeq> | undefined,
+    childId: SessionId,
+  ): Promise<SessionForkValue> {
+    const seed = boundary === undefined ? [] : buildForkSeed(source.events, boundary)
     let workspace: Workspace | undefined
     try {
       workspace = await this.forkWorkspace(source.header)
     } catch (error) {
       throw new RemoteError(
         'gateway/internal',
-        `failed to resolve fork workspace for session "${request.sessionId}": ${String(error)}`,
+        `failed to resolve fork workspace for session "${source.header.id}": ${String(error)}`,
         {},
       )
     }
-    const childId = brandString<SessionId>(`session-${randomUUID()}`)
     const composition = await this.agents.composeAgent(this.agents.presetForObservation(source))
     try {
       const { provider, model } = this.ctx.agentDefaultModel.currentSelection()
       this.agents.adoptHandle(await this.ctx.agents.create({
         sessionId: childId,
         seed,
-        inheritedEventCount: SessionLogOffset(boundary + 1),
+        inheritedEventCount: SessionLogOffset(boundary === undefined ? 0 : boundary + 1),
         meta: {
           ...(source.header.cwd === undefined ? {} : { cwd: source.header.cwd }),
           parentSession: source.header.id,
@@ -285,7 +297,7 @@ export class SessionCommandController {
     } catch (error) {
       throw new RemoteError(
         'gateway/internal',
-        `failed to fork session "${request.sessionId}": ${String(error)}`,
+        `failed to fork session "${source.header.id}": ${String(error)}`,
         {},
       )
     }
@@ -301,6 +313,74 @@ export class SessionCommandController {
       }
     }
     return { sessionId: childId }
+  }
+
+  /** Coalesce retries while an edit creates its deterministically addressed child. */
+  private editLastMessage(request: SessionForkRequest): Promise<SessionForkValue> {
+    const edit = request.editLastMessage
+    if (edit === undefined || request.atSeq !== undefined
+      || !Number.isSafeInteger(edit.seq) || edit.seq < 0 || Object.is(edit.seq, -0)
+      || typeof edit.text !== 'string' || edit.text.trim() === ''
+      || typeof edit.requestId !== 'string' || edit.requestId.length === 0) {
+      return Promise.reject(new RemoteError('gateway/bad-request', 'invalid last-message edit', {}))
+    }
+    const digest = createHash('sha256').update(JSON.stringify([request.sessionId, edit.requestId])).digest('hex')
+    const childId = brandString<SessionId>(`session-edit-${digest}`)
+    const pending = this.pendingEdits.get(childId)
+    if (pending !== undefined) return pending
+    const operation = this.redoLastMessage(request.sessionId, edit, childId).finally(() => {
+      this.pendingEdits.delete(childId)
+    })
+    this.pendingEdits.set(childId, operation)
+    return operation
+  }
+
+  /** Preserve the original log and submit the replacement only to its earlier-history child. */
+  private async redoLastMessage(
+    sourceId: SessionId,
+    edit: NonNullable<SessionForkRequest['editLastMessage']>,
+    childId: SessionId,
+  ): Promise<SessionForkValue> {
+    try {
+      using existing = await this.ctx.sessionQuery.observeSession(childId)
+      if (existing.header.parentSession !== sourceId) {
+        throw new RemoteError('session/fork-unavailable', 'edit child belongs to another source', { sessionId: sourceId })
+      }
+      await this.prompt({ sessionId: childId, requestId: edit.requestId, mode: 'queue', content: [{ type: 'text', text: edit.text }] })
+      return { sessionId: childId }
+    } catch (error) {
+      if (!(error instanceof SessionQueryError) || error.code !== 'SESSION_QUERY_SESSION_NOT_FOUND') throw error
+    }
+    const agent = await this.resolveAgent(sourceId)
+    const redo = async (signal: AbortSignal): Promise<SessionForkValue> => {
+      signal.throwIfAborted()
+      if (agent.inbox.nextTurn.length > 0 || agent.inbox.nextStep.length > 0) {
+        throw new RemoteError('session/agent-busy', 'finish or remove pending messages before editing', { reason: 'pending input' })
+      }
+      using source = await this.ctx.sessionQuery.observeSession(sourceId)
+      const latest = source.events.findLast(event => event.type === 'user/message'
+        && event.surfaceOp === 'append' && event.data.source.kind === 'user')
+      if (latest?.type !== 'user/message' || latest.seq !== edit.seq) {
+        throw new RemoteError('session/fork-unavailable', 'only the latest user message can be edited', { sessionId: sourceId })
+      }
+      if (!latest.data.content.every(block => block.type === 'text')) {
+        throw new RemoteError('session/fork-unavailable', 'message editing currently requires a text-only prompt', { sessionId: sourceId })
+      }
+      signal.throwIfAborted()
+      await this.createFork(source, edit.seq === 0 ? undefined : SessionSeq(edit.seq - 1), childId)
+      signal.throwIfAborted()
+      const child = await this.resolveAgent(childId)
+      this.agents.selectForNextRequest(child, this.agents.selectionFor(agent).current)
+      await this.prompt({ sessionId: childId, requestId: edit.requestId, mode: 'queue', content: [{ type: 'text', text: edit.text }] })
+      return { sessionId: childId }
+    }
+    let operation: Promise<SessionForkValue>
+    try {
+      operation = agent.runMaintenance(redo)
+    } catch (error) {
+      throw new RemoteError('session/agent-busy', 'stop the current turn before editing', { reason: String(error) })
+    }
+    return operation
   }
 
   /**

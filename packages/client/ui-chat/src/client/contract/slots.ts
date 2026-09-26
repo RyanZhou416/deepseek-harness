@@ -1,5 +1,6 @@
 /** Chat-owned Slot declarations and composed component props. */
 import type { MessageId } from '@deepseek-ai/dsh-llm/brand'
+import type { SessionRequestId } from '@deepseek-ai/dsh-api-session-controller/types'
 import type { SessionId, SessionSeq } from '@deepseek-ai/dsh-session/types'
 import type {
   CommandNode, CompactionSummaryNode, ConversationLocationDataStore, ConversationTurnDataMap,
@@ -116,6 +117,10 @@ export interface ChatNodeOwnerProps {
   openFile: (path: string, options?: OpenFileOptions) => void
   inspectCall: ((callId: ToolCallId) => void) | undefined
   forkAt: (seq: number) => void
+  /** Latest eligible user message; absent while the session cannot accept an edit. */
+  editableMessageSeq?: number | undefined
+  /** Create and open a revised continuation without the original prompt and reply. */
+  editLastMessage?: ((seq: number, text: string, requestId: SessionRequestId) => Promise<void>) | undefined
   /**
    * Session-authorized image loader, down-threaded from the Chat view so a
    * chat-node renderer can render the attachment presentation slot directly
@@ -206,6 +211,8 @@ export interface ChatViewInjected {
     read: () => ChatScrollPosition | null
   }
   forkAt: (seq: number) => void
+  /** Submit a revised latest prompt and open the accepted continuation. */
+  editLastMessage?: ((seq: number, text: string, requestId: SessionRequestId) => Promise<void>) | undefined
   fileMentions: (owner: TurnTailOwnerProps) => MarkdownFileMentions | undefined
 }
 

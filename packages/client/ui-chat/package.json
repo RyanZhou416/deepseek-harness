@@ -85,6 +85,7 @@
     "@deepseek-ai/dsh-subagent": "workspace:*",
     "@deepseek-ai/dsh-token-meter": "workspace:*",
     "@deepseek-ai/dsh-tools": "workspace:*",
+    "@deepseek-ai/dsh-util-crypto": "workspace:*",
     "@deepseek-ai/dsh-util-workspace-path": "workspace:*",
     "@deepseek-ai/dsh-util-values": "workspace:*",
     "@tanstack/react-virtual": "^3.14.9",

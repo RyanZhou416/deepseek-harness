@@ -1,0 +1,4 @@
+- textbox "Revised message": A revised final request. Keep the earlier context.
+- paragraph: Regenerate from this message and keep the original conversation. Existing file changes remain.
+- button "Cancel"
+- button "Save and regenerate"

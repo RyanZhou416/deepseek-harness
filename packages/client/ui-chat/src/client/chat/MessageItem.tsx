@@ -8,6 +8,7 @@ import type { ModelRetryNode, TurnErrorNode, UserMessageNode } from '../contract
 import { CompactionItem } from './CompactionItem.tsx'
 import { ContextInjectionRow } from './ContextInjectionRow.tsx'
 import { MessageIconActions } from './MessageIconActions.tsx'
+import { LastMessageEditor } from './LastMessageEditor.tsx'
 import css from './MessageItem.module.css'
 
 type UserImage = Extract<UserMessageNode['content'][number], { type: 'image' }>
@@ -313,9 +314,21 @@ export function PendingSubmissionBubble({ submission, renderMessageImages, t }: 
 
 /** User and admitted-steering keyed Chat renderer. */
 export const UserMessageNodeView = memo(function UserMessageNodeView({
-  node, renderMessageImages, openFile, openSkill, t,
+  node, renderMessageImages, openFile, openSkill, editableMessageSeq, editLastMessage, t,
 }: ChatNodeViewProps<'user' | 'steering'>) {
   const data = node.data
+  const [editing, setEditing] = useState(false)
+  const canEdit = node.kind === 'user' && editableMessageSeq === data.seq
+    && editLastMessage !== undefined && data.content.every(block => block.type === 'text')
+  if (editing && editLastMessage !== undefined) {
+    return <LastMessageEditor
+      initialText={contentParts(data.content).text}
+      available={canEdit}
+      onSave={(text, requestId) => editLastMessage(data.seq, text, requestId)}
+      onCancel={() => { setEditing(false) }}
+      t={t}
+    />
+  }
   return (
     <UserStyleBubble
       content={data.content}
@@ -330,6 +343,7 @@ export const UserMessageNodeView = memo(function UserMessageNodeView({
           time={data.time}
           clock="start"
           className={css.actions}
+          onEdit={canEdit ? () => { setEditing(true) } : undefined}
           t={t}
         />
       )}

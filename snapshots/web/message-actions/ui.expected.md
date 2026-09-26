@@ -32,6 +32,7 @@
 - button "Branch into a new conversation"
 - text: {{clock}} Keep this later input in the original conversation. {{clock}}
 - button "Copy"
+- button "Edit last message"
 - status: Worked
 - button "Took {{duration}}" [disabled]
 - paragraph: ORIGINAL ONLY

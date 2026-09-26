@@ -10,6 +10,7 @@ import type { Browser, Page } from 'playwright'
 import { chromium } from 'playwright'
 import { afterAll, beforeAll, describe, expect, it, onTestFailed } from 'vitest'
 import { SessionId } from '@deepseek-ai/dsh-session'
+import { MockAdapter, textResponse } from '../../../packages/core/agent-loop/tests/mock-adapter.ts'
 import {
   acknowledgeReloadConnectionLoss, assertFixtureInventory, captureStableAria, compareOrRefreshGolden, fixtureUserPrompts,
   launchWebScaffold, parseSeedFixture, renderSeedFixture, seedSession, watchConsole, webSnapshotMode, type WebScaffold,
@@ -245,8 +246,37 @@ describe('web e2e: message IconActions and clocks on settled history', () => {
     await page.keyboard.press('Tab')
     await expect.poll(() => page.getByRole('tooltip').allTextContents(), { timeout: 5_000 })
       .toEqual(['Available only on the last message of a completed turn'])
-    await expect.poll(() => page.getByRole('button', { name: 'Edit' }).count(), { timeout: 5_000 }).toBe(0)
+    await expect.poll(() => page.getByRole('button', { name: 'Edit last message', exact: true }).count(), { timeout: 5_000 }).toBe(1)
   }, 60_000)
+
+  it.skipIf(MODE === 'record')('opens the last-message draft and cancels without altering history', async () => {
+    onTestFailed(() => saveFailureShot(page, 'last-message-editor'))
+    await page.getByRole('button', { name: 'Edit last message', exact: true }).click()
+    const editor = page.getByRole('textbox', { name: 'Revised message', exact: true })
+    expect(await editor.inputValue()).toBe(NEXT_PROMPT)
+    await editor.fill('A revised final request.\nKeep the earlier context.')
+    await compareOrRefreshGolden(join(SNAPSHOT_DIR, 'edit.expected.md'),
+      await captureStableAria(page, 'form:has(textarea[aria-label="Revised message"])', scaffold.workspaceCwd), MODE)
+    const viewport = page.viewportSize()!
+    try {
+      for (const colorScheme of ['light', 'dark'] as const) {
+        await page.emulateMedia({ colorScheme })
+        await page.setViewportSize({ width: 390, height: 844 })
+        await expect.poll(async () => (await editor.boundingBox())?.width ?? 0).toBeGreaterThan(100)
+        const bounds = await editor.boundingBox()
+        expect(bounds).not.toBeNull()
+        expect(bounds!.width).toBeGreaterThan(100)
+        expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(390)
+        if (MODE === 'refresh') await saveFailureShot(page, `last-message-editor-${colorScheme}`)
+      }
+    } finally {
+      await page.emulateMedia({ colorScheme: 'light' })
+      await page.setViewportSize(viewport)
+    }
+    await page.getByRole('button', { name: 'Cancel', exact: true }).click()
+    expect(await page.getByText(NEXT_PROMPT, { exact: true }).count()).toBe(1)
+    expect(await page.getByText('ORIGINAL ONLY', { exact: true }).count()).toBe(1)
+  })
 
   it.skipIf(MODE === 'record')('keeps an action tooltip above the sticky composer', async () => {
     onTestFailed(() => saveFailureShot(page, 'web-e2e-message-action-tooltip-layer'))
@@ -313,6 +343,8 @@ describe('web e2e: message IconActions and clocks on settled history', () => {
     // Keep a footer focused so opacity-hidden actions stay in the a11y tree
     // as an active/focused control during the capture.
     await page.getByRole('button', { name: 'Copy' }).first().focus()
+    await page.getByRole('button', { name: 'Copy' }).first().hover()
+    await page.getByRole('tooltip', { name: 'Copy', exact: true }).waitFor({ timeout: 5_000 })
     const snapshot = (await captureStableAria(page, '[class*="centerCol"]', scaffold.workspaceCwd))
       .split(SEED_ID).join('{{seededId}}')
     await compareOrRefreshGolden(UI_EXPECTED, snapshot, MODE)
@@ -412,9 +444,45 @@ describe('web e2e: message IconActions and clocks on settled history', () => {
     await compareOrRefreshGolden(FORK_EXPECTED, tree, MODE)
   })
 
-  it.skipIf(MODE === 'record')('issued zero model calls and kept a closed inventory', async () => {
+  it.skipIf(MODE === 'record')('regenerates from the revised last prompt through the loaded application', async () => {
+    onTestFailed(() => saveFailureShot(page, 'last-message-regenerate'))
+    const adapter = new MockAdapter([textResponse('REVISED ANSWER')])
+    adapter.listModels = async provider => [{ provider, id: 'test-model', name: 'Edit test model' }]
+    const dispose = scaffold.ctx.effect(() => scaffold.ctx.llm.registerAdapter(['message-edit-test'], adapter))
+    try {
+      const result = await scaffold.ctx.sessionController.selectModel({
+        sessionId: SessionId(SEED_ID), provider: 'message-edit-test', model: 'test-model',
+      })
+      expect(result.selected.provider).toBe('message-edit-test')
+      await page.getByText('Use the read tool twice', { exact: true }).click()
+      await page.getByRole('button', { name: 'Edit last message', exact: true }).click()
+      await page.getByRole('textbox', { name: 'Revised message', exact: true }).fill('REVISED QUESTION')
+      const response = page.waitForResponse(response => new URL(response.url()).pathname === '/api/session/fork')
+      await page.getByRole('button', { name: 'Save and regenerate', exact: true }).click()
+      const body = await (await response).json() as { result: { ok: boolean } }
+      expect(body.result.ok, JSON.stringify(body)).toBe(true)
+      await page.getByText('REVISED ANSWER', { exact: true }).waitFor({ timeout: 15_000 })
+      expect(adapter.requests).toHaveLength(1)
+      const request = JSON.stringify(adapter.requests[0]!.messages)
+      expect(request).toContain('REVISED QUESTION')
+      expect(request).toContain(SECOND_PROMPT)
+      expect(request).not.toContain(NEXT_PROMPT)
+      expect(request).not.toContain('ORIGINAL ONLY')
+      expect(await page.getByText(NEXT_PROMPT, { exact: true }).count()).toBe(0)
+      expect(await page.getByText('ORIGINAL ONLY', { exact: true }).count()).toBe(0)
+      const warningStart = tripwire.warnings.length
+      await page.reload()
+      await page.getByText('REVISED ANSWER', { exact: true }).waitFor({ timeout: 15_000 })
+      acknowledgeReloadConnectionLoss(tripwire, warningStart)
+      expect(await page.getByText(NEXT_PROMPT, { exact: true }).count()).toBe(0)
+    } finally {
+      await dispose()
+    }
+  }, 60_000)
+
+  it.skipIf(MODE === 'record')('keeps the fixture inventory closed', async () => {
     expect(tripwire.pageErrors).toEqual([])
     expect(tripwire.warnings).toEqual([])
-    await assertFixtureInventory(SNAPSHOT_DIR, ['compact.expected.md', 'fork.expected.md', 'ui.expected.md'])
+    await assertFixtureInventory(SNAPSHOT_DIR, ['compact.expected.md', 'edit.expected.md', 'fork.expected.md', 'ui.expected.md'])
   })
 })
