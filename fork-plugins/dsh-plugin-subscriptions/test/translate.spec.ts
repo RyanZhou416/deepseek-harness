@@ -693,6 +693,15 @@ test('toAnthropicSystem marks the identity block when it is the only one', () =>
   ])
 })
 
+test('markMessageCache does not put cache_control on a thinking block', () => {
+  const thinking: Record<string, unknown> = { type: 'thinking', thinking: 'plan', signature: 'sig' }
+  const text: Record<string, unknown> = { type: 'text', text: 'done' }
+  const messages: AnthropicMessage[] = [{ role: 'assistant', content: [thinking, text] }]
+  markMessageCache(messages)
+  assert.equal('cache_control' in thinking, false)
+  assert.deepEqual(text.cache_control, { type: 'ephemeral' })
+})
+
 test('markMessageCache marks a tool_result block when the turn ends on one', () => {
   const content: Record<string, unknown>[] = [
     { type: 'tool_result', tool_use_id: 'c1', content: 'ok' },

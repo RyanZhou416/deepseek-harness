@@ -281,14 +281,23 @@ export function toAnthropicMessages(messages: readonly TranslatableMessage[], mo
  * byte-identical in the next — that entry is what the next request reads.
  * Marks are counted across the flattened block sequence, not per message,
  * because the lookback window Anthropic walks counts blocks the same way.
+ * Thinking blocks reject `cache_control` (`Extra inputs are not permitted`),
+ * so a mark that would land on `thinking` or `redacted_thinking` moves to the
+ * nearest earlier block that accepts it.
  * @param messages - assembled Anthropic messages, marked in place.
  */
+function acceptsMessageCache(block: Record<string, unknown>): boolean {
+  return block.type !== 'thinking' && block.type !== 'redacted_thinking'
+}
+
 export function markMessageCache(messages: readonly AnthropicMessage[]): void {
   const blocks = messages.flatMap(message => message.content)
-  for (let mark = 0; mark < MESSAGE_CACHE_BREAKPOINTS; mark++) {
-    const at = blocks.length - 1 - mark * CACHE_BLOCK_STRIDE
-    if (at < 0) return
-    blocks[at].cache_control = { type: 'ephemeral' }
+  let cursor = blocks.length - 1
+  for (let mark = 0; mark < MESSAGE_CACHE_BREAKPOINTS && cursor >= 0; mark++) {
+    while (cursor >= 0 && !acceptsMessageCache(blocks[cursor])) cursor--
+    if (cursor < 0) return
+    blocks[cursor].cache_control = { type: 'ephemeral' }
+    cursor -= CACHE_BLOCK_STRIDE
   }
 }
 
