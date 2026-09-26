@@ -1064,7 +1064,7 @@ The read-before-write/edit policy is added by `@deepseek-ai/dsh-fs-observation-p
 
 ### `glob`
 
-Find files whose paths match a glob pattern. Returns matching file paths — never directories — including hidden and ignored files (VCS metadata directories are excluded). Up to 100 paths come back in modification-time order; a larger result instead returns 100 paths sampled across top-level entries, says so, and reports where the complete sorted list was saved. This tool does not enumerate directory entries.
+Find files whose paths match a glob pattern. Set path to the narrowest known directory; a directory prefix in pattern does not narrow the search root. Returns matching file paths — never directories — including hidden and ignored files (VCS metadata directories are excluded). Up to 100 paths come back in modification-time order; a larger result instead returns 100 paths sampled across top-level entries, says so, and reports where the complete sorted list was saved. This tool does not enumerate directory entries.
 
 ```json
 {
@@ -1072,11 +1072,11 @@ Find files whose paths match a glob pattern. Returns matching file paths — nev
   "properties": {
     "pattern": {
       "type": "string",
-      "description": "Glob pattern to match file paths against (e.g. \"**/*.ts\", \"src/**/*.test.js\"). A pattern with no \"/\" matches the basename at any depth, so \"*\" and \"*.ts\" both search the whole tree; include a separator to anchor the depth."
+      "description": "Glob pattern to filter file paths (e.g. \"**/*.ts\", \"**/*.test.js\"). A pattern with no \"/\" matches basenames at any depth. A directory prefix filters matches but does not narrow the search root; set path to the directory to search."
     },
     "path": {
       "type": "string",
-      "description": "Directory to search in. Defaults to the session workspace; a relative path resolves against it."
+      "description": "Directory tree to search; use the narrowest known directory. Defaults to the session workspace; a relative path resolves against it."
     }
   },
   "required": [

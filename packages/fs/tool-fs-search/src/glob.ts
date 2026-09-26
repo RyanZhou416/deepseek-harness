@@ -302,7 +302,11 @@ export function applyGlobTool(ctx: Context, caps: GlobToolCaps): void {
     order: ctx.systemPrompt.getSectionOrder('TOOL_GLOB'),
     text: ({ scope }) => ctx.tools.get('glob', scope) === undefined
       ? ''
-      : 'Use the glob tool — not shell find — to discover files by path pattern. A pattern with no "/" matches basenames at any depth, so "*" matches every file in the tree rather than its top level. '
+      : 'Use the glob tool — not shell find — to discover files by path pattern. '
+      + 'When the target directory is known, set path to that directory and use a pattern within it (e.g. path="src", pattern="**/*.ts"). '
+      + 'A directory prefix in pattern only filters matches; it does not narrow the directory tree searched. '
+      + 'After a timeout, narrow path instead of repeating the same workspace-wide search. '
+      + 'A pattern with no "/" matches basenames at any depth, so "*" matches every file in the tree rather than its top level. '
       + `Results are files only, never directories, and include hidden and ignored files: a result that fits comes back in modification-time order, ${overCapGuidance}`,
   })
 
@@ -311,7 +315,9 @@ export function applyGlobTool(ctx: Context, caps: GlobToolCaps): void {
     : `a larger result returns the first ${caps.maxResults} paths in modification-time order`
   const tool = defineTool({
     name: 'glob',
-    description: 'Find files whose paths match a glob pattern. Returns matching file paths — never directories — '
+    description: 'Find files whose paths match a glob pattern. '
+      + 'Set path to the narrowest known directory; a directory prefix in pattern does not narrow the search root. '
+      + 'Returns matching file paths — never directories — '
       + 'including hidden and ignored files (VCS metadata directories are excluded). '
       + `Up to ${caps.maxResults} paths come back in modification-time order; ${overCapDescription}, `
       + 'says so, and reports where the complete sorted list was saved. This tool does not enumerate directory entries.',
@@ -319,10 +325,15 @@ export function applyGlobTool(ctx: Context, caps: GlobToolCaps): void {
       pattern: {
         type: 'string',
         required: true,
-        description: 'Glob pattern to match file paths against (e.g. "**/*.ts", "src/**/*.test.js"). '
-          + 'A pattern with no "/" matches the basename at any depth, so "*" and "*.ts" both search the whole tree; include a separator to anchor the depth.',
+        description: 'Glob pattern to filter file paths (e.g. "**/*.ts", "**/*.test.js"). '
+          + 'A pattern with no "/" matches basenames at any depth. '
+          + 'A directory prefix filters matches but does not narrow the search root; set path to the directory to search.',
       },
-      path: { type: 'string', description: 'Directory to search in. Defaults to the session workspace; a relative path resolves against it.' },
+      path: {
+        type: 'string',
+        description: 'Directory tree to search; use the narrowest known directory. '
+          + 'Defaults to the session workspace; a relative path resolves against it.',
+      },
     },
     timeoutMs: caps.timeoutMs,
     output: {

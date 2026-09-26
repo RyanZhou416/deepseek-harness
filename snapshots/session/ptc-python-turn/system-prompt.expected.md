@@ -15,7 +15,7 @@ Use the write tool to create files or completely replace file contents. Existing
 
 Use the edit tool for targeted changes to existing UTF-8 text files. It replaces literal old_string with new_string; by default old_string must appear exactly once. If old_string appears multiple times, provide a more specific old_string or set replace_all to true. Read the file first (the default fs-observation-policy requires it), unless you just created or edited it in this session.
 
-Use the glob tool — not shell find — to discover files by path pattern. A pattern with no "/" matches basenames at any depth, so "*" matches every file in the tree rather than its top level. Results are files only, never directories, and include hidden and ignored files: a result that fits comes back in modification-time order, while a larger one keeps the modification-time-ordered head.
+Use the glob tool — not shell find — to discover files by path pattern. When the target directory is known, set path to that directory and use a pattern within it (e.g. path="src", pattern="**/*.ts"). A directory prefix in pattern only filters matches; it does not narrow the directory tree searched. After a timeout, narrow path instead of repeating the same workspace-wide search. A pattern with no "/" matches basenames at any depth, so "*" matches every file in the tree rather than its top level. Results are files only, never directories, and include hidden and ignored files: a result that fits comes back in modification-time order, while a larger one keeps the modification-time-ordered head.
 
 Use the grep tool — not shell grep or rg — to search file contents. Use read on a matched file when you need surrounding context.
 
@@ -177,9 +177,9 @@ class GetGoalOutput2(TypedDict):
     activation: Literal["armed", "disarmed"]
 
 class GlobArgs(TypedDict):
-    # Glob pattern to match file paths against (e.g. "**/*.ts", "src/**/*.test.js"). A pattern with no "/" matches the basename at any depth, so "*" and "*.ts" both search the whole tree; include a separator to anchor the depth.
+    # Glob pattern to filter file paths (e.g. "**/*.ts", "**/*.test.js"). A pattern with no "/" matches basenames at any depth. A directory prefix filters matches but does not narrow the search root; set path to the directory to search.
     pattern: str
-    # Directory to search in. Defaults to the session workspace; a relative path resolves against it.
+    # Directory tree to search; use the narrowest known directory. Defaults to the session workspace; a relative path resolves against it.
     path: NotRequired[str]
     # Additional keys beyond those declared are allowed.
 
@@ -522,7 +522,7 @@ class Tools(Protocol):
     async def get_goal(self, args: dict[str, Any]) -> GetGoalOutput1 | GetGoalOutput2:
         """Read the current same-session goal, including its exact id/revision, objective, phase, completed continuation rounds, round limit, blocker reason when present, and whether another continuation is armed. Call this before updating a goal."""
     async def glob(self, args: GlobArgs) -> GlobOutput:
-        """Find files whose paths match a glob pattern. Returns matching file paths — never directories — including hidden and ignored files (VCS metadata directories are excluded). Up to 100 paths come back in modification-time order; a larger result returns the first 100 paths in modification-time order, says so, and reports where the complete sorted list was saved. This tool does not enumerate directory entries."""
+        """Find files whose paths match a glob pattern. Set path to the narrowest known directory; a directory prefix in pattern does not narrow the search root. Returns matching file paths — never directories — including hidden and ignored files (VCS metadata directories are excluded). Up to 100 paths come back in modification-time order; a larger result returns the first 100 paths in modification-time order, says so, and reports where the complete sorted list was saved. This tool does not enumerate directory entries."""
     async def grep(self, args: GrepArgs) -> GrepOutput:
         """Search file contents with a ripgrep regular expression. Returns matching lines with line numbers, grouped by file. Returns the first 250 matches inline; a capped result reports where the complete match list was saved. Use read on a matched file for surrounding context."""
     async def interrupt_agent(self, args: InterruptAgentArgs) -> InterruptAgentOutput:

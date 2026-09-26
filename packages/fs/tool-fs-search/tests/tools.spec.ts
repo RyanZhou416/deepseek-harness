@@ -256,6 +256,20 @@ describe('registration', () => {
     expect(glob?.description).toContain('sampled across top-level entries')
   })
 
+  it('guides known-directory discovery through path and narrowing after a timeout', async () => {
+    const { ctx } = await setup()
+    const prompt = renderPrompt(await ctx.systemPrompt.assemble())
+    expect(prompt).toContain('path="src", pattern="**/*.ts"')
+    expect(prompt).toContain('does not narrow the directory tree searched')
+    expect(prompt).toContain('After a timeout, narrow path')
+    const glob = ctx.tools.schemas().find(schema => schema.name === 'glob')!
+    expect(glob.description).toContain('Set path to the narrowest known directory')
+    const parameters = JSON.stringify(glob.parameters)
+    expect(parameters).toContain('does not narrow the search root; set path to the directory to search')
+    expect(parameters).not.toContain('anchor the depth')
+    expect(parameters).toContain('Directory tree to search; use the narrowest known directory')
+  })
+
   it('stays pending until ctx.subprocess exists (inject)', async () => {
     const ctx = new Context()
     await ctx.plugin(SystemPrompt)
@@ -1228,7 +1242,11 @@ async function guidanceScope(ctx: Context) {
 }
 
 const originalSearchGuidance = {
-  glob: 'Use the glob tool — not shell find — to discover files by path pattern. A pattern with no "/" matches basenames at any depth, so "*" matches every file in the tree rather than its top level. '
+  glob: 'Use the glob tool — not shell find — to discover files by path pattern. '
+      + 'When the target directory is known, set path to that directory and use a pattern within it (e.g. path="src", pattern="**/*.ts"). '
+      + 'A directory prefix in pattern only filters matches; it does not narrow the directory tree searched. '
+      + 'After a timeout, narrow path instead of repeating the same workspace-wide search. '
+      + 'A pattern with no "/" matches basenames at any depth, so "*" matches every file in the tree rather than its top level. '
       + 'Results are files only, never directories, and include hidden and ignored files: a result that fits comes back in modification-time order, while a larger one is sampled across top-level entries, so it spans the tree instead of one subtree.',
   grep: 'Use the grep tool — not shell grep or rg — to search file contents. Use read on a matched file when you need surrounding context.',
 }
