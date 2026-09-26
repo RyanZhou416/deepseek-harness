@@ -12,7 +12,7 @@ if errorlevel 1 goto :failed
 
 set "DSH_STEP=installing project dependencies"
 if not defined DSH_PNPM_CHILD_CONCURRENCY set "DSH_PNPM_CHILD_CONCURRENCY=4"
-call "%~dp0scripts\fork-windows-pnpm.cmd" install --child-concurrency=%DSH_PNPM_CHILD_CONCURRENCY%
+call "%~dp0scripts\fork-windows-pnpm.cmd" install --child-concurrency=%DSH_PNPM_CHILD_CONCURRENCY% --optimistic-repeat-install=false
 if errorlevel 1 goto :failed
 
 set "DSH_STEP=building the project"

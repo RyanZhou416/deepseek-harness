@@ -124,7 +124,7 @@ describe('Windows fork launchers', () => {
     expect(build.status, build.stderr || build.stdout).toBe(0)
     expect(run.status, run.stderr || run.stdout).toBe(0)
     expect(readFileSync(log, 'utf8').trim().split(/\r?\n/)).toEqual([
-      'pnpm install --child-concurrency=4',
+      'pnpm install --child-concurrency=4 --optimistic-repeat-install=false',
       'pnpm run build',
       'pnpm dsh web',
     ])
