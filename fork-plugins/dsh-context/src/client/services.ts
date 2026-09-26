@@ -1,3 +1,4 @@
+// DeepSeek Harness fork modification: subscription API reference prices and context tiers.
 /**
  * Client-side harness boundary — the exact API surface this plugin consumes
  * from the harness web half, plus the sanitizers that re-prove every
@@ -17,6 +18,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type { ComponentType } from 'react'
 import { estimateSystemTokens } from '../shared/estimate'
+import { COST_PERIODS } from '../shared/modelPricing'
 import type { ActivityDay, ContextActivity, ContextBreakdown, ContextHeaders, ContextPressure, ContextTimeline, CostModelUsage, HeaderEpochContent, SystemPromptNode, TimingTotals, TokenUsage, ToolTimingTotals } from '../shared/types'
 
 export interface LocaleService {
@@ -322,7 +324,7 @@ function costOf(value: unknown): ContextTimeline['cost'] | undefined {
       const periods = asRecord(models[model])
       if (periods === null || Array.isArray(periods)) continue
       const copy: CostModelUsage = {}
-      for (const period of ['peak', 'off'] as const) {
+      for (const period of COST_PERIODS) {
         const b = asRecord(periods[period])
         if (b === null || Array.isArray(b)) continue
         copy[period] = {

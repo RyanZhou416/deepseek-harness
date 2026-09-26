@@ -1,3 +1,4 @@
+// DeepSeek Harness fork modification: subscription API reference prices and context tiers.
 /**
  * The provider-id seam between dsh request envelopes and the models.dev
  * registry: client/cost.ts resolves price-book branches through it, and
@@ -7,6 +8,9 @@
  */
 
 const MODELS_DEV_PROVIDER_IDS: Record<string, string> = {
+  codex: 'openai',
+  claude: 'anthropic',
+  grok: 'xai',
   'deepseek-official': 'deepseek',
   'kimi-coding': 'moonshotai',
   'minimax-cn': 'minimax',

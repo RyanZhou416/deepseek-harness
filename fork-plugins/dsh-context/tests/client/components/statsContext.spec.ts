@@ -1,3 +1,4 @@
+// DeepSeek Harness fork modification: subscription API reference prices and context tiers.
 // StatsContext (src/client/components/statsContext.tsx) rendered with real
 // React: the seven-cell grid — session shape with the whole-session
 // human-input tally, the chat-line cache-hit cell with its whole-session
@@ -11,7 +12,7 @@
 
 import { act, createElement as h } from 'react'
 import assert from 'node:assert/strict'
-import { afterEach, describe, test, vi, beforeEach } from 'vitest'
+import { afterEach, describe, test, vi, beforeEach, expect } from 'vitest'
 import { countsOfRecords, makeStatsContext, makeSubagentCost } from '../../../src/client/components/statsContext'
 import { makeAgentHeads } from '../../../src/client/agentHeads'
 import { resetModelPrices, setModelPricesLoader } from '../../../src/client/modelPrices'
@@ -82,6 +83,35 @@ describe('countsOfRecords (the inline generation derivation)', () => {
 })
 
 describe('StatsContext', () => {
+  test('prices the five subscription models and subagents while the online registry is unavailable', async () => {
+    setModelPricesLoader(() => Promise.reject(new Error('offline')))
+    const million = { uncached: 1_000_000, cacheRead: 0, cacheWrite: 0, output: 0 }
+    const children: SessionCostUsage = {
+      claude: { 'claude-opus-5-5': { peak: million }, 'claude-fable-5-1': { peak: million } },
+      cursor: { 'grok-4.7': { long: million } },
+    }
+    const Family = makeStatsContext(kit, () => children)
+    const m = await mount(h(Family, {
+      counts: { turns: 1, steps: 1, injects: 0, compactions: 0, prunes: 0 },
+      usage: null,
+      cost: { codex: { 'gpt-6-astra': { peak: million }, 'gpt-6-sol': { peak: million } } },
+      locale: 'en',
+    }))
+    await flush()
+    assert.deepEqual(cells(m.container).values.slice(5), ['$30.00', '$18.00'])
+    const costTip = text(queryAll(m.container, '.lc-stat-tip')[2])
+    assert.ok(costTip.includes('2026-09-27'))
+    assert.ok(costTip.includes('standard speed'))
+    assert.ok(costTip.includes('Long context'))
+    assert.ok(!costTip.includes('unavailable'))
+    expect({
+      costs: cells(m.container).values.slice(5),
+      rates: queryAll(m.container, '.lc-stat-tip-row').map(el => text(el)),
+      explanation: costTip,
+    }).toMatchSnapshot()
+    await m.unmount()
+  })
+
   test('folds the seven-cell grid: shape stats, the cache-hit cell, and the two cost cells', async () => {
     const m = await mount(h(StatsContext, {
       counts: { turns: 3, steps: 4, injects: 3, compactions: 2, prunes: 1 },

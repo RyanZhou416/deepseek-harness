@@ -1,3 +1,4 @@
+// DeepSeek Harness fork modification: subscription API reference prices and context tiers.
 /**
  * The Context card: what the session's context IS and how it evolved — a
  * seven-cell grid of the session's shape (turns / steps / human inputs /
@@ -16,8 +17,8 @@
  * in the locale's currency; their hover bubbles (a '?' marker + styled DOM
  * tip) explain each scope and list the per-1M-token rates of the models the
  * family actually billed, straight from the same book (cost.ts), so printed
- * rates can never drift from the math. A book that has not loaded (or
- * failed) dashes the cells and notes the outage.
+ * rates can never drift from the math. Verified subscription models remain
+ * priced offline; other models need a usable live registry entry.
  *
  * The counts arrive precomputed: the split-generation wire head carries them
  * (shared/types.ts `TimelineCounts` — computed over the retained records),
@@ -36,10 +37,11 @@ import { cacheHitPercent } from '../format'
 import { useModelPrices } from '../modelPrices'
 import { asRecord, numOf, type ClientCtx } from '../services'
 import { isDeepSeekProvider } from '../../shared/providers'
+import { REFERENCE_PRICE_DATE, referenceModelPriceOf } from '../../shared/modelPricing'
 import type { ViewKit } from '../viewkit'
 
 /** One billed model's tooltip row: its display label and USD rates (`offRate` present only when the model billed off-peak). */
-interface PriceRow { key: string; label: string; rate: PriceTriple; offRate?: PriceTriple }
+interface PriceRow { key: string; label: string; rate: PriceTriple; offRate?: PriceTriple; longContext?: boolean; reference?: boolean }
 
 /**
  * The rate rows for the models this session actually billed — the usage
@@ -50,7 +52,7 @@ interface PriceRow { key: string; label: string; rate: PriceTriple; offRate?: Pr
  * peak | off-peak pair.
  */
 function priceRowsOf(usage: SessionCostUsage | undefined, prices: ModelPrices | null): PriceRow[] {
-  if (usage === undefined || prices === null) return []
+  if (usage === undefined) return []
   const rows: PriceRow[] = []
   const multi = Object.keys(usage).length > 1
   for (const provider of Object.keys(usage)) {
@@ -69,12 +71,17 @@ function priceRowsOf(usage: SessionCostUsage | undefined, prices: ModelPrices | 
       // other providers bill everything at book price.
       const deepseek = isDeepSeekProvider(provider)
       const billedOff = deepseek && periods !== null && periods.off !== undefined
+      const reference = referenceModelPriceOf(provider, model) !== undefined
+      const label = multi && provider !== '' ? `${model} · ${provider}` : model
       rows.push({
         key: provider + '/' + model,
-        label: multi && provider !== '' ? `${model} · ${provider}` : model,
+        label,
         rate: deepseek ? peakOf(rate) : rate,
+        reference,
         ...(billedOff ? { offRate: rate } : {}),
       })
+      const longRate = periods?.long === undefined ? null : priceOf(prices, provider, model, true)
+      if (longRate !== null) rows.push({ key: provider + '/' + model + '/long', label, rate: longRate, longContext: true, reference })
     }
   }
   return rows
@@ -202,7 +209,7 @@ export function makeStatsContext(
             ]
             return (
               <span key={r.key} className="lc-stat-tip-row">
-                <b className="lc-stat-tip-model">{r.label}</b>
+                <b className="lc-stat-tip-model">{r.label}{r.longContext ? ` · ${t('stats.costLongContext')}` : ''}</b>
                 {cells.map(([name, peak, off]) => (
                   <span key={name}>{' · '}{name} {off === undefined ? fmtRate(peak) : `${fmtRate(peak)}|${fmtRate(off)}`}</span>
                 ))}
@@ -211,6 +218,7 @@ export function makeStatsContext(
           })}
         </span>
       ) : null,
+      rows.some(r => r.reference) ? <span key="reference">{t('stats.costReference', { date: REFERENCE_PRICE_DATE })}</span> : null,
       unpriced ? <span key="unavailable">{t('stats.costUnavailable')}</span> : null,
     ]
     // The subagents' own share: scope explanation first, then the same

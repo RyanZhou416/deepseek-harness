@@ -1,3 +1,4 @@
+// DeepSeek Harness fork modification: subscription API reference prices and context tiers.
 /**
  * The Context Dashboard's data layer: everything the panel renders is derived
  * here, off the root-scope `useSessions` standard prop. Each session-list
@@ -15,6 +16,7 @@
  */
 
 import { workspaceTitleOf } from '@deepseek-ai/dsh-util-workspace-path'
+import { COST_PERIODS } from '../shared/modelPricing'
 import { cacheHitPercent } from './format'
 import type { CostCurrency } from './cost'
 import { estimateSessionCost, mergeCostUsage } from './cost'
@@ -347,7 +349,7 @@ export function usageTotalsOf(usage: SessionCostUsage | null | undefined): Usage
     const models = usage[provider]
     for (const model of Object.keys(models)) {
       const periods = models[model]
-      for (const period of ['peak', 'off'] as const) {
+      for (const period of COST_PERIODS) {
         const bucket = periods[period]
         if (bucket === undefined) continue
         totals.input += bucket.uncached

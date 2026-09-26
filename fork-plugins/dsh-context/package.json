@@ -1,6 +1,6 @@
 {
   "name": "dsh-context",
-  "version": "0.55.0-dsh017rc1.1",
+  "version": "0.55.0-dsh017rc1.2",
   "description": "A DeepSeek Harness plugin for context insight and management, with context dashboard and context command, for understanding how the context is made of, and how it evolves.",
   "icon": "icon.svg",
   "author": "bowenliang123",
@@ -35,6 +35,7 @@
     "lib/index.d.ts",
     "cordis.patch.yml",
     "README.md",
+    "docs/model-pricing.md",
     "LICENSE"
   ],
   "scripts": {

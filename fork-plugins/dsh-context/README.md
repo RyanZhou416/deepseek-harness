@@ -63,7 +63,7 @@ Open any session and click the **Context / 上下文** tab:
 
 | Card | The question it answers |
 | --- | --- |
-| **Context Stats** | Turns, steps, human inputs, live tool calls, the session's cache-hit rate — plus a cost estimated from the models.dev list prices (hover the `?` for per-1M rates; DeepSeek peak/off-peak aware). |
+| **Context Stats** | Turns, steps, human inputs, live tool calls, the session's cache-hit rate — plus API-equivalent cost from verified subscription-model rates and models.dev (hover the `?` for per-1M rates; context tiers and DeepSeek peak/off-peak aware). |
 | **Token Stats** | Where the billed tokens went — the same total as the chat stats line under the composer, split by composition (system, tools, messages…) with the provider-exact output closing the ring. |
 | **Timing Stats** | How active time split across model calls, tool runs, and overhead. |
 | **Current Context** | What's in the window *right now*. |
@@ -74,6 +74,8 @@ Open any session and click the **Context / 上下文** tab:
 | **Agent Network** | The whole agent family, live. |
 
 The headline occupancy and composition read the **same official token-meter projections as the chat composer's context ring** (`contextPressure` / `contextBreakdown`), so the figures always match what the ring tells you.
+
+The fork includes offline reference prices for GPT-6 Astra, GPT-6 Sol, Claude Opus 5.5, Claude Fable 5.1, and Grok 4.7 through Cursor. [Model pricing](docs/model-pricing.md) lists the verified rates, long-context thresholds, and subscription-estimate limits.
 
 ### Context Stats
 
@@ -177,7 +179,7 @@ In-chart and in-card toggles stay per-view and never overwrite the stored prefer
 
 ## DeepSeek Harness fork build
 
-The vendored `0.53.3-dsh016alpha2.1` build keeps upstream V0/V2/V3 Session-log support, Context Insights, on-demand projection backfill, live pricing, injection labels, slim-head plus on-demand-detail delivery, host-side File Activity, and right-Sidebar views. Fork code reduces Host allocations with field-level copy-on-write state, skips retention scans for unchanged collections, clamps restored projection values to the active bounds, reuses inline and slim wire values across Host-only state changes, leaves `/context` data subscriptions unmounted while its dialog is closed, and prices V3 system nodes into header epochs. Maintenance and rollback details live in [FORK_MAINTENANCE.md](FORK_MAINTENANCE.md).
+The vendored `0.55.0-dsh017rc1.2` build keeps upstream V0/V2/V3/V4 Session-log support, Context Insights, on-demand projection backfill, injection labels, slim-head plus on-demand-detail delivery, host-side File Activity, and right-Sidebar views. Fork code adds verified subscription-model pricing and request-level context tiers, reduces Host allocations with field-level copy-on-write state, skips retention scans for unchanged collections, clamps restored projection values to the active bounds, reuses inline and slim wire values across Host-only state changes, leaves `/context` data subscriptions unmounted while its dialog is closed, and prices V3/V4 system nodes into header epochs. Maintenance and rollback details live in [FORK_MAINTENANCE.md](FORK_MAINTENANCE.md).
 
 The fork's low-overhead profile uses these existing configuration fields:
 

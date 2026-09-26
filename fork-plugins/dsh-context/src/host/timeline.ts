@@ -136,6 +136,7 @@ const costBucketsSchema = z.object({
 const costModelSchema = z.object({
   peak: costBucketsSchema.optional(),
   off: costBucketsSchema.optional(),
+  long: costBucketsSchema.optional(),
 }).strict()
 
 const costModelsSchema = z.record(z.string(), costModelSchema)
@@ -401,7 +402,8 @@ export function createContextTimelineDefinition(config: Config, slim: () => bool
     // rows refold from the log; the startup warm-up (backfill.ts) now probes
     // the `contextTimeline` row too, rebuilding idle sessions' rows instead
     // of orphaning the key.
-    stateVersion: 20,
+    // 21: rebuild per-request long-context cost buckets from the unchanged Session log.
+    stateVersion: 21,
   }
   return definition
 }

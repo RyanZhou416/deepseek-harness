@@ -250,7 +250,7 @@ Web profile 插入 `memory-watchdog.cjs`：250 ms 采样、60 s 日志、heap ra
 | `@nanmicoder/dsh-agent-teams` | `0.1.20-dsh017rc1.1` | Installed, enabled | 真实 profile 使用仓内固定 artifact；停止 Host 后更新，禁止被 npm latest/next 直接覆盖 |
 | `dsh-plugin-subscriptions` | `0.9.4-dsh017rc1.1` | Installed; Windows Web enabled | 仓内固定 artifact；凭据文件原地保留，其他 profile 是否启用沿用显式插件配置 |
 | `@vlln/dsh-task-status` | Removed | Not installed | 已从依赖、bundle、patch、lockfile 和 `node_modules` 删除；profile 不得恢复 |
-| `dsh-context` | `0.55.0-dsh017rc1.1` | Installed, enabled | 真实 profile 保留 `300/60/100/400/100/100` bounds；源码与回滚规则见 `fork-plugins/dsh-context/FORK_MAINTENANCE.md` |
+| `dsh-context` | Windows: `0.55.0-dsh017rc1.2`; Mac: `0.55.0-dsh017rc1.1` | Installed, enabled | 真实 profile 保留 `300/60/100/400/100/100` bounds；源码与回滚规则见 `fork-plugins/dsh-context/FORK_MAINTENANCE.md` |
 | `dsh-shell-command` | Removed | No package or configuration | profile 不安装 |
 | `@deepseek-ai/dsh-subagent-dsh-sdk` | Link to source checkout | Enabled for process provider | 跟随源码构建，worker 数据与主 sessions 隔离 |
 
@@ -282,7 +282,11 @@ Mac 主 checkout 已快进至同一 fork master；`clean.command`、`build.comma
 
 ### Local Context package
 
-维护真源位于 `fork-plugins\dsh-context`，仓库安装器使用 `fork-plugins\releases\dsh-context-0.55.0-dsh017rc1.1.tgz`，SHA256 为 `F75D2CB582BF21813D883644600B866EC84800ED6E8D0E835187C1D7F48CA714`。该版本采用上游 v0.55.0 的 V0/V2/V3/V4 fold、Context Insights、余额展示、增量 turn 账本、按需 backfill 与 slim-head/on-demand-detail 传输，并保持既有 projection key 和 Session event vocabulary 不变。
+维护真源位于 `fork-plugins\dsh-context`，仓库安装器使用 `fork-plugins\releases\dsh-context-0.55.0-dsh017rc1.2.tgz`，SHA256 为 `5636EDC455E1AA26933424FD76B548EEA989DDAF3B657AED1A62471C4C15152E`。该版本采用上游 v0.55.0 的 V0/V2/V3/V4 fold、Context Insights、余额展示、增量 turn 账本、按需 backfill 与 slim-head/on-demand-detail 传输，并保持既有 projection key 和 Session event vocabulary 不变。
+
+私有构建保留经官方文档核对的 GPT-6 Astra/Sol、Claude Opus 5.5/Fable 5.1 与 Cursor Grok 4.7 标准速度 API 等值价格。价格匹配识别订阅 provider 别名；投影版本 21 按单次请求区分长上下文费率，必须保留 `long` 费用分组在 wire、Client sanitizer、Agent 合并和总 token 统计中的传递。费用不是订阅账单，定价日期、缓存写入假设和来源见 `fork-plugins/dsh-context/docs/model-pricing.md`。定向价格与界面测试、投影兼容测试、构建包 smoke，以及四个价格/费用模块的 100% 覆盖率是维护检查；升级真实 profile 前仍须确认 DSH 已停止。
+
+Windows Web profile 的 Context 配置备份位于 `C:\Project\deepseek-harness-data\profile-backups\context-pricing-20260927-063430`，安装版本为 `0.55.0-dsh017rc1.2`；其他 provider 依赖、workspace policy 和 profile patch 保持原值。
 
 ### Local Subscriptions package
 

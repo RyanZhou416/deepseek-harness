@@ -1,8 +1,9 @@
+// DeepSeek Harness fork modification: subscription API reference prices and context tiers.
 /**
  * Session-cost estimate — prices the host-folded cumulative billed-token
  * totals (SessionCostUsage) from the client's model-price book
- * (client/modelPrices.ts): the models.dev registry, fetched through
- * @opencode-ai/models. Book rates are USD per 1M tokens; the CNY display
+ * (client/modelPrices.ts), with verified subscription-model reference prices
+ * from shared/modelPricing.ts. Rates are USD per 1M tokens; the CNY display
  * converts at the fixed 1 CNY = 0.15 USD, and the total and the tooltip's
  * rates both go through `toCurrency`, so the printed figures can never
  * drift from the math that prices the session. DeepSeek bills a period-based
@@ -15,6 +16,8 @@
 import type { SessionCostUsage } from '../shared/types'
 import { isDeepSeekProvider, modelsDevProviderOf } from '../shared/providers'
 import { asRecord, numOf } from './services'
+import { COST_PERIODS, referenceModelPriceOf } from '../shared/modelPricing'
+import type { TokenPrices } from '../shared/modelPricing'
 
 /** The display currencies the stats board ships; the locale picks one. */
 export type CostCurrency = 'usd' | 'cny'
@@ -31,7 +34,7 @@ const PEAK_FACTOR = 2
  * the input rate (a provider that publishes no cache prices bills those
  * buckets as plain input).
  */
-export interface PriceTriple { hit: number; miss: number; write: number; out: number }
+export type PriceTriple = TokenPrices
 
 /**
  * The client's price book: models.dev provider id → model id → USD rates,
@@ -90,9 +93,18 @@ function lookup(models: Record<string, PriceTriple>, model: string): PriceTriple
  * modelsDevProviderOf (unmapped ids pass through) and prices by model id —
  * exact, case-insensitive, or suffix; a provider the book does not carry
  * falls back to a cross-provider scan, priced only when exactly one branch
- * carries the model id.
+ * carries the model id. Verified subscription models use the dated local
+ * standard-speed reference, even when the registry is unavailable.
+ * @param prices - Optional live registry price book.
+ * @param provider - Recorded provider route.
+ * @param model - Recorded model id.
+ * @param longContext - Whether the request used a verified long-context tier.
+ * @returns The selected per-million-token prices, or null when unknown.
  */
-export function priceOf(prices: ModelPrices | null | undefined, provider: string, model: string): PriceTriple | null {
+export function priceOf(prices: ModelPrices | null | undefined, provider: string, model: string, longContext = false): PriceTriple | null {
+  const reference = referenceModelPriceOf(provider, model)
+  if (longContext) return reference?.longContext?.price ?? null
+  if (reference !== undefined) return reference.standard
   if (prices === null || prices === undefined) return null
   const direct = branchOf(prices, modelsDevProviderOf(provider))
   if (direct !== null) return lookup(direct, model)
@@ -112,15 +124,15 @@ export function priceOf(prices: ModelPrices | null | undefined, provider: string
  * rate, output (reasoning included) at the out rate; `peak` buckets price
  * at twice the book rate for DeepSeek (the book lists that provider's
  * off-peak rates — the Host splits the period-based list at fold time).
- * Null when nothing was priced (no usage folded, no book yet, or no model
- * the book prices), so the cell can show a dash.
+ * Null when nothing was priced, so the cell can show a dash. Long-context
+ * buckets retain their own per-request rates after Session aggregation.
  */
 export function estimateSessionCost(
   usage: SessionCostUsage | null | undefined,
   prices: ModelPrices | null | undefined,
   currency: CostCurrency,
 ): number | null {
-  if (usage === null || usage === undefined || prices === null || prices === undefined) return null
+  if (usage === null || usage === undefined) return null
   let total = 0
   let any = false
   for (const provider of Object.keys(usage)) {
@@ -131,10 +143,11 @@ export function estimateSessionCost(
     // every other provider bills every bucket at book price.
     const deepseek = isDeepSeekProvider(provider)
     for (const model of Object.keys(models)) {
-      const rate = priceOf(prices, provider, model)
       const periods = asRecord(models[model])
-      if (rate === null || periods === null) continue
-      for (const period of ['peak', 'off'] as const) {
+      if (periods === null) continue
+      for (const period of COST_PERIODS) {
+        const rate = priceOf(prices, provider, model, period === 'long')
+        if (rate === null) continue
         const bucket = asRecord(periods[period])
         if (bucket === null) continue
         const price = (numOf(bucket.cacheRead) * rate.hit + numOf(bucket.uncached) * rate.miss
@@ -164,7 +177,7 @@ function mergeInto(out: SessionCostUsage, usage: SessionCostUsage | null | undef
       const periods = asRecord(models[model])
       if (periods === null || Array.isArray(periods)) continue
       const target = branch[model] ?? (branch[model] = {})
-      for (const period of ['peak', 'off'] as const) {
+      for (const period of COST_PERIODS) {
         const bucket = asRecord(periods[period])
         if (bucket === null || Array.isArray(bucket)) continue
         const prev = target[period] ?? { uncached: 0, cacheRead: 0, cacheWrite: 0, output: 0 }

@@ -23,6 +23,7 @@
 
 import type { Category, ContextEventRecord, ContextTimelineDetail, CostModelUsage, FileOpRecord, RequestRecord, SessionCostUsage, Snapshot, SurfaceNode, SystemPromptNode, TimingTotals, ToolTimingTotals } from '../shared/types'
 import { isDeepSeekProvider } from '../shared/providers'
+import { usesLongContextPrice } from '../shared/modelPricing'
 import { estimateSystemContent, estimateSystemTokens } from '../shared/estimate'
 import type { FoldBounds } from './config'
 import {
@@ -908,15 +909,16 @@ function isPeakUtc(time: number): boolean {
  * lookup the Client's model-price book resolves (models.dev). A request
  * without a provider still accumulates (under the '' key) and the Client
  * prices it when the model id is unambiguous; without a model there is
- * nothing to price. DeepSeek's period-based list splits the buckets
- * (peak windows at list price, all other hours half price); every other
- * provider books everything under the list-price period.
+ * nothing to price. DeepSeek splits by pricing period; verified context-tiered
+ * models split by this request's complete prompt size. Other routes use the
+ * list-price period.
  */
 function accumulateCost(st: TimelineState, time: number, usage: BilledUsage): void {
   const model = st.model
   if (model === undefined) return
   const provider = st.provider ?? ''
-  const period = isDeepSeekProvider(provider) && !isPeakUtc(time) ? 'off' : 'peak'
+  const period = usesLongContextPrice(provider, model, usage.input + usage.cacheRead + usage.cacheWrite)
+    ? 'long' : isDeepSeekProvider(provider) && !isPeakUtc(time) ? 'off' : 'peak'
   const models = st.cost?.[provider] ?? {}
   const periods = models[model] ?? {}
   const b = periods[period] ?? { uncached: 0, cacheRead: 0, cacheWrite: 0, output: 0 }
@@ -1601,6 +1603,7 @@ function headFieldsOf(state: TimelineState): Snapshot {
         const copy: CostModelUsage = {}
         if (periods.peak !== undefined) copy.peak = { ...periods.peak }
         if (periods.off !== undefined) copy.off = { ...periods.off }
+        if (periods.long !== undefined) copy.long = { ...periods.long }
         models[model] = copy
       }
       cost[provider] = models

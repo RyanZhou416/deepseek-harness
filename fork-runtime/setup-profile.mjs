@@ -21,7 +21,7 @@ const AGENT_TEAMS = {
 }
 const CONTEXT = {
   name: 'dsh-context',
-  version: '0.55.0-dsh017rc1.1',
+  version: '0.55.0-dsh017rc1.2',
   bounds: {
     maxRequestSteps: 300,
     maxKeptTurns: 60,

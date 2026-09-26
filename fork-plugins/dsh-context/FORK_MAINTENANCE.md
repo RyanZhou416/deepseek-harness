@@ -6,15 +6,15 @@ This subtree carries the DeepSeek Harness fork build of `dsh-context`. It retain
 
 - Upstream repository: `https://github.com/bowenliang123/dsh-context.git`
 - Upstream tag: `v0.55.0`
-- Fork package version: `0.55.0-dsh017rc1.1`
+- Fork package version: `0.55.0-dsh017rc1.2`
 - Subtree path: `fork-plugins/dsh-context`
-- Distribution artifact: `fork-plugins/releases/dsh-context-0.55.0-dsh017rc1.1.tgz`
+- Distribution artifact: `fork-plugins/releases/dsh-context-0.55.0-dsh017rc1.2.tgz`
 
 ## Fork behavior
 
 The fork preserves the package name, Cordis ids, `contextTimeline`, `contextHeaders`, and `contextActivity` projection keys. It adopts the upstream V0/V2/V3/V4 Session-log fold, File Activity ledger, right-Sidebar views, Context Insights dashboard, DeepSeek balance capsule, last-user-message cards, and split `contextTimeline` delivery: a slim head rides projection traffic while an open Context view fetches heavy detail on demand. The authenticated on-demand backfill route arms at most one corpus pass per Host when Context Insights opens, rather than scanning every Session during startup.
 
-The imported timeline projection uses upstream `stateVersion: 20`, while header and activity projections use their declared version `1`. A version mismatch discards the older derived checkpoint and refolds it from the immutable Session log; the plugin does not transform Session artifacts. The wire schema accepts both the inline fallback value and the slim-head generation with on-demand detail.
+The timeline projection uses fork `stateVersion: 21` to retain per-request long-context cost buckets; header and activity projections keep version `1`. A version mismatch discards the older derived checkpoint and refolds it from the immutable Session log; the plugin does not transform Session artifacts. The wire schema accepts both the inline fallback value and the slim-head generation with on-demand detail.
 
 The timeline fold keeps the fork's `TimelineDraft` field-level copy-on-write state and dirty-field retention trim. An event clones only the arrays or records it mutates; a normalized state checks retention only for changed collections. The upstream `turnRuns` ledger makes turn-count checks incremental, and raw tool arguments are retained only for file operations and Code Mode. Restored checkpoints missing `turnRuns` recompute it on the first changed event. Restored state is clamped through the same whole-turn, hard-step, event-tail, archive-floor, and file-operation-floor rules before the first wire or detail value is built; this view-time clamp does not modify the checkpoint.
 
@@ -25,6 +25,8 @@ The `/context` overlay keeps only its modal-store gate mounted while closed. Pro
 The `contextHeaders` projection tracks V3/V4 `system/message` nodes until the following `request/header`, preserving per-epoch system-token pricing after the prompt left the request envelope. The optional system-node state remains compatible with existing version-1 header checkpoints.
 
 The low-overhead deployment bounds are `maxRequestSteps: 300`, `maxKeptTurns: 60`, `maxEvents: 100`, `maxNodes: 400`, `maxArchiveNodes: 100`, and `maxFileOps: 100`. Bounds remain ordinary Cordis plugin configuration and do not change stored or wire fields.
+
+Verified standard-speed API reference prices cover the five routes in [model pricing](docs/model-pricing.md), independently of models.dev availability. Codex and Claude provider aliases resolve to their model vendors; Cursor's Grok 4.7 uses xAI prices. Preserve request-level long-context classification, the extra cost bucket in copies, sanitizers and family totals, and the dated pricing disclosure. Token volume is never inferred from a price or subscription quota.
 
 ## Verification and packaging
 
@@ -39,7 +41,7 @@ corepack pnpm@11.9.0 run lint:fix && corepack pnpm@11.9.0 run test && corepack p
 corepack pnpm@11.9.0 pack --pack-destination ..\releases
 ```
 
-Store the artifact's uppercase SHA-256 beside it as `dsh-context-0.55.0-dsh017rc1.1.tgz.sha256`. Inspect the tarball manifest and its embedded `package.json` version before installation.
+Store the artifact's uppercase SHA-256 beside it as `dsh-context-0.55.0-dsh017rc1.2.tgz.sha256`. Inspect the tarball manifest and its embedded `package.json` version before installation.
 
 ## Updating upstream
 

@@ -1,3 +1,4 @@
+// DeepSeek Harness fork modification: subscription API reference prices and context tiers.
 // Unit tests for the contextTimeline projection unit (src/host/timeline.ts) —
 // the projection-definition contract surface (stateSchema + required wire),
 // its wire/state schemas, and the config-resolved retention bounds. Fold
@@ -49,7 +50,7 @@ describe('createContextTimelineDefinition', () => {
   test('carries the supported projection contract on one unit', () => {
     const def = createContextTimelineDefinition({}, () => false)
     assert.equal(def.key, 'contextTimeline')
-    assert.equal(def.stateVersion, 20)
+    assert.equal(def.stateVersion, 21)
     assert.equal(typeof def.init, 'function')
     assert.equal(typeof def.apply, 'function')
     // The supported registry contract: stateSchema + a REQUIRED wire block.

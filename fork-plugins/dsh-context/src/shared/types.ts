@@ -1,3 +1,4 @@
+// DeepSeek Harness fork modification: subscription API reference prices and context tiers.
 /**
   * Shared wire contract — the snapshot model exchanged between the Host and Client halves. Delivered as the `view()` payload of the
   * `contextTimeline`/`contextHeaders` session projections (registered on `ctx.sessionProjections`; the registry pushes finished views as
@@ -533,11 +534,14 @@ export interface TimingTotals {
  * One billed model's cumulative totals split by pricing period. Providers
  * without period-based pricing book everything under `peak` (the list-price
  * period); DeepSeek splits at fold time — peak windows bill at list price,
- * off-peak (all other hours) at half.
+ * off-peak (all other hours) at half. Verified context-tiered models retain
+ * their whole long-context requests separately under `long`.
  */
 export interface CostModelUsage {
   peak?: CostBucketTotals
   off?: CostBucketTotals
+  /** Whole requests above a verified model's prompt-token pricing threshold. */
+  long?: CostBucketTotals
 }
 
 /**

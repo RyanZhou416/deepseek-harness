@@ -1,3 +1,4 @@
+// DeepSeek Harness fork modification: subscription API reference prices and context tiers.
 /**
  * Bilingual dictionaries (zh/en) for every UI string; missing keys resolve
  * through the harness locale service (active → en → common → the key itself).
@@ -24,7 +25,9 @@ export const DICT_ZH: Record<string, string> = {
   'stats.cacheHit': '缓存命中',
   'stats.cacheHitTip': '整个会话累计的缓存读取占计费输入的比例。',
   'stats.cost': '费用',
-  'stats.costTip': '估算当前 Agent 与其所有子 Agent 的累计费用：单价取自 models.dev 刊例价，人民币按 1 元 = 0.15 美元换算，仅供参考。',
+  'stats.costTip': '估算当前 Agent 与其所有子 Agent 的累计 API 等值费用：采用 models.dev 或已核对的本地单价，人民币按 1 元 = 0.15 美元换算，不代表订阅账单。',
+  'stats.costLongContext': '长上下文',
+  'stats.costReference': '本地单价核对日期：{date}。按标准速度、Claude 5 分钟缓存写入计价，不含快速模式及区域附加费。',
   'stats.costTipDeepseek': 'DeepSeek 高峰时段（北京时间工作日 9:00–12:00、14:00–18:00）按挂牌价计费，其余时段半价。',
   'stats.subCost': '子 Agent 费用',
   'stats.subCostTip': '所有子 Agent 会话各自累计费用（同口径估算）的合计，不含当前 Agent 自身。',
@@ -313,7 +316,9 @@ export const DICT_EN: Record<string, string> = {
   'stats.cacheHit': 'Cache Hit',
   'stats.cacheHitTip': 'Cumulative cache-read share of billed input across the session.',
   'stats.cost': 'Cost',
-  'stats.costTip': 'Estimates the cumulative cost of this agent and all its subagents: rates come from the models.dev list prices; the CNY display converts at 1 CNY = 0.15 USD. Prices are for reference only.',
+  'stats.costTip': 'Estimates the API-equivalent cost of this agent and all its subagents using models.dev or verified local prices. CNY converts at 1 CNY = 0.15 USD. This is not a subscription bill.',
+  'stats.costLongContext': 'Long context',
+  'stats.costReference': 'Local prices verified {date}: standard speed and Claude 5-minute cache writes, excluding fast-mode and regional surcharges.',
   'stats.costTipDeepseek': 'DeepSeek bills peak windows (Beijing Time weekdays 09:00–12:00, 14:00–18:00) at list price; all other hours are half price.',
   'stats.subCost': 'Subagent Cost',
   'stats.subCostTip': 'Summed estimates of every subagent session’s own cumulative cost (same basis); the current agent is not included.',
