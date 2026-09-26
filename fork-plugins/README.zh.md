@@ -64,10 +64,12 @@ Agent Teams 的持久数据属于各工作区 `.agent-teams/` 目录；本目录
 ## Context
 
 - 源码：`fork-plugins/dsh-context`
-- 当前私有版本：`0.55.0-dsh017rc1.1`
+- 当前私有版本：`0.55.0-dsh017rc1.2`
 - 上游底座：`bowenliang123/dsh-context v0.55.0`
-- 安装产物：`fork-plugins/releases/dsh-context-0.55.0-dsh017rc1.1.tgz`
-- 产物 SHA256：`F75D2CB582BF21813D883644600B866EC84800ED6E8D0E835187C1D7F48CA714`
+- 安装产物：`fork-plugins/releases/dsh-context-0.55.0-dsh017rc1.2.tgz`
+- 产物 SHA256：`5636EDC455E1AA26933424FD76B548EEA989DDAF3B657AED1A62471C4C15152E`
+
+私有价格表覆盖 GPT-6 Astra/Sol、Claude Opus 5.5/Fable 5.1，以及 Cursor 下的 Grok 4.7。Agent 汇总按标准速度的 API 等值价格和单次请求的长上下文阶梯估算；投影版本 21 从已有日志重新折叠，不修改 Session 数据。详见[价格与估算条件](dsh-context/docs/model-pricing.md)。
 
 该构建采用 v0.55.0 的 V4 折叠、Context Insights、余额展示、增量 turn 计数、选择性工具参数保留与按需语料回填。字段级 copy-on-write、dirty retention trim、恢复态首个 view bounds、引用稳定的 inline/slim cache、关闭 modal 后释放订阅，以及 V3/V4 system node 的 header 计价仍由私有层维护。维护与回滚规则见 `fork-plugins/dsh-context/FORK_MAINTENANCE.md`。
 

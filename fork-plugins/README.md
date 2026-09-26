@@ -64,10 +64,12 @@ Agent Teams durable data belongs to each workspace's `.agent-teams/` directory; 
 ## Context
 
 - Source: `fork-plugins/dsh-context`
-- Current private version: `0.55.0-dsh017rc1.1`
+- Current private version: `0.55.0-dsh017rc1.2`
 - Upstream base: `bowenliang123/dsh-context v0.55.0`
-- Distribution artifact: `fork-plugins/releases/dsh-context-0.55.0-dsh017rc1.1.tgz`
-- Artifact SHA256: `F75D2CB582BF21813D883644600B866EC84800ED6E8D0E835187C1D7F48CA714`
+- Distribution artifact: `fork-plugins/releases/dsh-context-0.55.0-dsh017rc1.2.tgz`
+- Artifact SHA256: `5636EDC455E1AA26933424FD76B548EEA989DDAF3B657AED1A62471C4C15152E`
+
+The private pricing catalog covers GPT-6 Astra/Sol, Claude Opus 5.5/Fable 5.1, and Grok 4.7 through Cursor. Agent totals include standard-speed API-equivalent prices and per-request long-context tiers; projection version 21 refolds existing logs without changing Session data. See [prices and assumptions](dsh-context/docs/model-pricing.md).
 
 This build adopts v0.55.0 V4 folding, Context Insights, balance display, incremental turn counting, selective tool-argument retention, and on-demand corpus backfill. Field-level copy-on-write, dirty retention trimming, first-view restored-state bounds, reference-stable inline/slim caches, closed-modal subscription release, and V3/V4 system-node header pricing remain private performance and compatibility fixes. See `fork-plugins/dsh-context/FORK_MAINTENANCE.md` for maintenance and rollback rules.
 
