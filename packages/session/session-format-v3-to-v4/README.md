@@ -9,7 +9,7 @@ English | [中文](README.zh.md)
 
 ## Summary
 
-Restore supported released V3 Sessions as V4 without rewriting their stored generation. This page specifies the edge's transformations, preservation, prerequisites, and refusal, then separates native V4 admission. The conversion lifts tool results, renames message sources, closes evidenced interrupted turns, and appends missing parent catalog facts. Persistence owns file reads and successor publication; this library owns conversion and target rules.
+Restore supported released V3 Sessions as V4 without rewriting their stored generation. This page specifies the edge's transformations, preservation, prerequisites, and refusal, then separates native V4 admission. The conversion lifts tool results, records unknown outcomes for started calls in error turns, renames message sources, closes evidenced interrupted turns, and appends missing parent catalog facts. Persistence owns file reads and successor publication; this library owns conversion and target rules.
 
 ## Table of Contents
 
@@ -66,7 +66,7 @@ Every restore creates independent Stage state. Compact runs expand as iterables 
 <a id="v3-to-v4-specification"></a>
 ## V3-to-V4 specification
 
-This edge changes only the named representations below, closes evidenced interrupted turns, and appends available missing catalog facts. It namespaces unknown ignorable event types and retains each admitted source event's time, message identities, and all fields outside those conversions and the coordinate remapping below. It creates no system prompt, developer event, tool execution, or replacement message. Earlier V0–V2 inputs first pass through their existing edges to V3; those edges retain their own transformations and refusal policies.
+This edge changes only the named representations below, records unknown outcomes for started calls in error turns, closes evidenced interrupted turns, and appends available missing catalog facts. It namespaces unknown ignorable event types and retains each admitted source event's time, message identities, and all fields outside those conversions and the coordinate remapping below. It creates no system prompt, developer event, tool execution, or replacement message. Earlier V0–V2 inputs first pass through their existing edges to V3; those edges retain their own transformations and refusal policies.
 
 <a id="header-and-framing"></a>
 ### Header and physical framing
@@ -96,6 +96,8 @@ No preset id, PTC dispatch event tag, file attachment, or physical filename is r
 The wrapper alone supplies the interpreted call id, content, and optional error flag. Other wrapper fields become `plugin:result:<original-field>`; outer message fields other than `id`, `role`, `source`, and `content` become `plugin:message:<original-field>`. Complete original names remain in the suffix, including existing prefixes. Distinct owners and colliding names retain separate values; own `__proto__` and `constructor` data stays intact. No metadata container or new content type is added.
 
 A malformed canonical wrapper raises a format error. Nested results are unsupported by this converter and refuse without publishing a successor. The transformation does not repair contradictory `data.error`; native target validation requires it to accompany the wrapper's `isError: true`. Converter support may expand later while preserving the established native V4 representation.
+
+If a V3 step records `tool/call` without an appended result and that turn ends with `reason.kind: 'error'`, the stage inserts a `TOOL_OUTCOME_UNKNOWN` tool-role error result before `step/end` for each such started call. Each result cites its remapped `tool/call` sequence, takes the step-end time, and receives a deterministic message id; the recorded call and error ending remain unchanged. A later step, a non-error turn ending, or EOF without the matching error ending refuses the conversion. Target validation still rejects calls that were not advertised. The synthetic result reports no durable outcome; it does not establish whether the tool had side effects.
 
 <a id="extension-data"></a>
 ### Extension data
@@ -159,7 +161,7 @@ Storage supplies recognizable direct-child evidence and rechecks membership and 
 <a id="sequence-references"></a>
 ### Sequence references and inheritance
 
-An open turn with no open step can be closed when the next numbered `turn/start` immediately follows a nonempty `agent/inbox/spliced` for `next-turn`. The stage inserts `turn/end` with reason `interrupted` immediately before that start, using its timestamp. Open tails remain open. Other turn-order violations, unresolved tools, and active compactions still fail target validation. Native V4 never applies this repair.
+An open turn with no open step can be closed when the next numbered `turn/start` immediately follows a nonempty `agent/inbox/spliced` for `next-turn`. The stage inserts `turn/end` with reason `interrupted` immediately before that start, using its timestamp. Open tails remain open. Other turn-order violations, unresolved tools outside the error-turn repair above, and active compactions still fail target validation. Native V4 never applies either repair.
 
 Insertion renumbers subsequent envelopes densely and remaps audited same-artifact references: `sourceEventSeqs`, replacement `startSeq/endSeq`, command completion `sourceEventSeq`, title `messageSeqs`, compaction `shadowedRange` and `shadowedSeqs`, and image-offload target `seq`. Captured Session references, generation-qualified delivery coordinates, turn/step numbers, stream and image indexes, ids, and arbitrary JSON retain their values. Unknown ignorable events retain opaque payload and surface metadata; only their envelope sequence is renumbered. Without insertion, source event coordinates remain unchanged; appended catalog records only extend the suffix.
 
@@ -292,7 +294,7 @@ Unknown required events are refused by vocabulary-aware restoration. Unknown ign
 <details>
 <summary>Implementation internals — click to expand</summary>
 
-The migration declaration creates independent streaming stages. Compact runs expand as iterables without an intermediate event array. The V3-to-V4 stage rewrites historical message sources, lifts historical tool-result wrappers, and inserts evidenced interrupted turn endings while emitting V4 events. It retains one source-to-target sequence entry per source event for local reference remapping. The V4 codec uses the released V2 codec only for physical header and source-range framing, and validates native tool-role rows directly; it does not invoke the released V3 validator or source-conversion views. JSONL scanners call `assertV4RowAdmission` before suppressing recoverable rows and the shared mandatory relationship validator before returning the completed logical prefix.
+The migration declaration creates independent streaming stages. Compact runs expand as iterables without an intermediate event array. The V3-to-V4 stage rewrites historical message sources, lifts historical tool-result wrappers, and inserts evidenced unknown-outcome results and interrupted turn endings while emitting V4 events. It retains one source-to-target sequence entry per source event for local reference remapping. The V4 codec uses the released V2 codec only for physical header and source-range framing, and validates native tool-role rows directly; it does not invoke the released V3 validator or source-conversion views. JSONL scanners call `assertV4RowAdmission` before suppressing recoverable rows and the shared mandatory relationship validator before returning the completed logical prefix.
 
 The target restorer validates native fields and mandatory cross-event relationships, then returns the original artifact. Unknown ignorable events remain opaque, and unfinished inherited compactions expire at the end-seed marker. No runtime invariant companion is published because this pure library owns no independently maintained runtime observations.
 
@@ -316,21 +318,28 @@ The target restorer validates native fields and mandatory cross-event relationsh
 
 #### What the model sees
 
-Historical requests retain their recorded messages and model configuration. The [migration stage](src/migration.ts) represents `tool/result` payloads as tool-role messages without adding model-visible content; catalog records do not enter model messages directly, though later subagent listing can discover the historical children.
+Historical requests retain their recorded messages and model configuration. The [migration stage](src/migration.ts) lifts recorded `tool/result` payloads without changing their content. An error-turn repair adds one tool-role error message per started call whose result was not recorded. Its text tells the model to verify possible side effects rather than retry blindly. Catalog records do not enter model messages directly, though later subagent listing can discover the historical children.
+
+##### Unknown-outcome repair text
+
+```markdown
+The tool call was interrupted after it was recorded, but no result was durably recorded. Its outcome is unknown. Decide whether to retry from the tool semantics: retry only if the operation is read-only or idempotent; if it may have side effects, first verify external state or ask the user. Do not retry blindly.
+```
 
 #### Token effect
 
-The conversion changes no request text or token-bearing data.
+Recorded request text and token-bearing data remain unchanged. Each repaired call adds one error result to the restored history.
 
 #### KV Cache effect
 
-The edge preserves the recorded request prefix. Provider cache availability and eviction remain outside this library.
+The edge preserves the recorded request prefix before a repair; the inserted result changes later request history. Provider cache availability and eviction remain outside this library.
 
 ## Known Limitations and Deferred Work
 
 <a id="known-limitations-and-deferred-work"></a>
 
 - **Historical converter coverage** — Unsupported source forms may fail without publishing a successor or changing the source. First-party recordings do not enumerate third-party extensions. Later converter fixes may add support after V4 publication if their V4 output remains compatible. Interpreting extra stream-start fields and preparing future delivery generations require a concrete format change.
+- **Unknown tool outcomes** — Only recorded starts in V3 error turns gain a synthetic result. A completed turn, a later step, or an unclosed tail with an unresolved call remains unsupported; the result never proves whether the tool changed external state.
 - **Accepted V4 transition** — the [checkpoint](../../../docs/session-format-status.md#finalization-record) protects the accepted history. Backward-compatible additions can remain V4 through new acknowledgements; breaking changes require a successor. Already-written V4 files do not rerun this incoming edge, and historical inputs remain intact.
 - **V5 prerequisite readers** — V4 child evidence currently goes through the installed catalog. A future writer must bind fixed-generation V4 prerequisite reading before changing that catalog. The exported V4 restorer supplies generation-owned checks; full common message admission additionally uses installed Session validation.
 - **Nested historical tool results** — migration currently refuses results containing another tool-result wrapper. The original generation remains intact and no V4 successor is published. A later converter may support evidenced source cases without changing the established V4 format; the [migration cookbook](../../../docs/cookbook/adding-a-session-format-version.md#stages-and-validation) defines that distinction.

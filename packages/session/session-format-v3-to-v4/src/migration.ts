@@ -11,6 +11,9 @@ import { assertReleasedV4Header, validateDeliveryAccepted } from './validation.t
 import { catalogFact, childCatalogSource, childCatalogFact, childCatalogSubject } from './facts.ts'
 import { remapV3References } from './references.ts'
 
+/** Frozen released repair wording; historical conversion does not depend on the current Session runtime. */
+const OUTCOME_UNKNOWN_TEXT = 'The tool call was interrupted after it was recorded, but no result was durably recorded. Its outcome is unknown. Decide whether to retry from the tool semantics: retry only if the operation is read-only or idempotent; if it may have side effects, first verify external state or ask the user. Do not retry blindly.'
+
 /** Header-only migration declaration; body restoration requires explicit child evidence. */
 export const sessionFormatV3ToV4 = defineSessionFormatMigration({
   name: '@deepseek-ai/dsh-session-format-v3-to-v4',
@@ -51,6 +54,8 @@ class ReleasedV3ToV4Stage implements SessionFormatMigrationStage {
   private nextSeq = 0
   private time: number
   private foreignDeliverySeq: number | undefined
+  private readonly startedTools = new Map<string, number>()
+  private pendingErrorTurn: number | undefined
 
   constructor(private readonly input: SessionFormatMigrationStageInput, children: readonly SessionFormatJsonValue[]) {
     this.candidates = children.map(childCatalogSource).sort((left, right) =>
@@ -64,11 +69,13 @@ class ReleasedV3ToV4Stage implements SessionFormatMigrationStage {
 
   transformEvent(event: SessionFormatEvent, context: SessionFormatMigrationContext): void {
     if (event.seq !== this.mapping.length) throw new SessionFormatError('V3 source events must be dense')
+    this.validateRepairedTurn(event)
     const interrupted = this.observeRestart(event)
     if (interrupted !== undefined) {
       context.emitEvent({ type: 'turn/end', seq: this.nextSeq++, time: event.time,
         data: { turn: interrupted, reason: { kind: 'interrupted' } } })
     }
+    if (event.type === 'step/end') this.repairStartedTools(event, context)
     const targetSeq = this.nextSeq++
     this.time = event.time
     if (event.type === 'session/end-seed' && isSessionFormatJsonObject(event.data) && event.data['inherited'] === true) {
@@ -108,6 +115,68 @@ class ReleasedV3ToV4Stage implements SessionFormatMigrationStage {
       return converted === source ? message : { ...message, source: converted }
     })
     context.emitEvent(migrateV3EventContent(liftToolResult(rewritten)))
+    this.observeStartedTools(event, targetSeq)
+  }
+
+  /** A repaired closed step requires the V3 turn's recorded error outcome. */
+  private validateRepairedTurn(event: SessionFormatEvent): void {
+    const turn = this.pendingErrorTurn
+    if (turn === undefined) return
+    if (event.type === 'turn/end') {
+      const data = event.data
+      const reason = isSessionFormatJsonObject(data) ? data['reason'] : undefined
+      if (!isSessionFormatJsonObject(data) || data['turn'] !== turn
+        || !isSessionFormatJsonObject(reason) || reason['kind'] !== 'error') {
+        throw new SessionFormatUnsupportedMigrationError('V3 tool result repair requires an error turn/end for the same turn')
+      }
+      this.pendingErrorTurn = undefined
+    } else if (event.type === 'step/start' || event.type === 'turn/start') {
+      throw new SessionFormatUnsupportedMigrationError('V3 tool result repair requires an error turn/end before another step or turn')
+    }
+  }
+
+  /** Only a recorded start can justify an outcome-unknown result. */
+  private repairStartedTools(event: SessionFormatEvent, context: SessionFormatMigrationContext): void {
+    if (this.startedTools.size === 0) return
+    const data = event.data
+    if (!isSessionFormatJsonObject(data)) throw new SessionFormatError('V3 step/end data must be an object')
+    const turn = sessionFormatCount(data['turn'], 'V3 repaired step turn')
+    const step = sessionFormatCount(data['step'], 'V3 repaired step')
+    for (const [callId, callSeq] of this.startedTools) {
+      const seq = this.nextSeq++
+      context.emitEvent({
+        type: 'tool/result', seq, time: event.time, surfaceOp: 'append', sourceEventSeqs: [callSeq],
+        data: {
+          turn, step,
+          message: {
+            id: `interrupted-tool-result-${callId}-${seq}`, role: 'tool', toolCallId: callId,
+            source: { kind: 'tool', callId }, isError: true,
+            content: [{ type: 'text', text: OUTCOME_UNKNOWN_TEXT }],
+          },
+          error: { name: 'ToolOutcomeUnknownError', code: 'TOOL_OUTCOME_UNKNOWN' },
+        },
+      })
+    }
+    this.startedTools.clear()
+    this.pendingErrorTurn = turn
+  }
+
+  /** Track the V3 starts that lack a recorded append result in this step. */
+  private observeStartedTools(event: SessionFormatEvent, targetSeq: number): void {
+    if (event.type === 'tool/call' && isSessionFormatJsonObject(event.data)
+      && typeof event.data['callId'] === 'string') {
+      this.startedTools.set(event.data['callId'], targetSeq)
+    } else if (event.type === 'tool/result' && event.surfaceOp === 'append'
+      && isSessionFormatJsonObject(event.data)) {
+      // The message walker has already required a tool/result message object.
+      const message = event.data['message'] as SessionFormatJsonObject
+      const source = message['source']
+      if (isSessionFormatJsonObject(source) && typeof source['callId'] === 'string') {
+        this.startedTools.delete(source['callId'])
+      }
+    } else if (event.type === 'step/end' || event.type === 'turn/end') {
+      this.startedTools.clear()
+    }
   }
 
   transformRun(run: SessionFormatEventRun, context: SessionFormatMigrationContext): void {
@@ -135,6 +204,9 @@ class ReleasedV3ToV4Stage implements SessionFormatMigrationStage {
   }
 
   finish(context: SessionFormatMigrationContext): number {
+    if (this.pendingErrorTurn !== undefined) {
+      throw new SessionFormatUnsupportedMigrationError('V3 tool result repair requires a recorded error turn/end')
+    }
     const cut = sessionFormatCount(this.cut, 'V3 inherited event count')
     const sourceCut = sessionFormatCount(this.sourceCut, 'V3 source inherited event count')
     // Catalog payloads belong to this Session only after the final inherited cut.

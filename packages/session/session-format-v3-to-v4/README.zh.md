@@ -9,7 +9,7 @@ kind: "package-library"
 
 ## 概述
 
-在不改写已存储代际的前提下，将受支持的已发布 V3 Session 恢复为 V4。本页完整说明迁移边的转换、保留、前置证据与拒绝规则，再单独说明原生 V4 接纳。转换提升工具结果、重命名消息来源、补齐有明确证据的中断回合，并追加缺失的父目录事实。持久化层负责文件读取和后继代际发布；本库负责转换与目标规则。
+在不改写已存储代际的前提下，将受支持的已发布 V3 Session 恢复为 V4。本页完整说明迁移边的转换、保留、前置证据与拒绝规则，再单独说明原生 V4 接纳。转换提升工具结果、为错误轮次中已开始的调用记录结果未知、重命名消息来源、补齐有明确证据的中断回合，并追加缺失的父目录事实。持久化层负责文件读取和后继代际发布；本库负责转换与目标规则。
 
 ## 目录
 
@@ -66,7 +66,7 @@ const artifact = restore.finish()
 <a id="v3-to-v4-specification"></a>
 ## V3 到 V4 规范
 
-本边只改变下列明确命名的表示，补齐有明确证据的中断回合，并追加证据完整的缺失目录事实。未知可忽略事件的类型获得命名空间；每个获准源事件的 time、消息身份以及这些转换和下述坐标重映射之外的字段均保留。它不创建 system prompt、developer 事件、工具执行或替换消息。更早的 V0–V2 输入先经过各自现有迁移边到达 V3；那些边保留自身的转换与拒绝策略。
+本边只改变下列明确命名的表示，为错误轮次中已开始的调用记录结果未知，补齐有明确证据的中断回合，并追加证据完整的缺失目录事实。未知可忽略事件的类型获得命名空间；每个获准源事件的 time、消息身份以及这些转换和下述坐标重映射之外的字段均保留。它不创建 system prompt、developer 事件、工具执行或替换消息。更早的 V0–V2 输入先经过各自现有迁移边到达 V3；那些边保留自身的转换与拒绝策略。
 
 <a id="header-and-framing"></a>
 ### Header 与物理分帧
@@ -96,6 +96,8 @@ const artifact = restore.finish()
 只有 wrapper 提供具有解释语义的调用 id、content 和可选错误标志。Wrapper 的其他字段变为 `plugin:result:<原字段名>`；外层消息除 `id`、`role`、`source` 和 `content` 外的字段变为 `plugin:message:<原字段名>`。后缀保留完整原名称，包括已有前缀。不同 owner 与重名字段分别保留值；`__proto__` 和 `constructor` 的自有数据保持完整。不添加 metadata 容器或新的内容类型。
 
 格式错误的 canonical wrapper 引发格式错误。当前转换器不支持嵌套结果，遇到时拒绝且不发布 successor。转换不会修复矛盾的 `data.error`；原生目标校验要求它与 wrapper 的 `isError: true` 同时出现。后续可以扩展转换器支持范围，同时保持既定的原生 V4 表示。
+
+如果 V3 step 记录了 `tool/call` 却没有追加的结果，且该 turn 以 `reason.kind: 'error'` 结束，Stage 会在 `step/end` 前为每个此类已开始调用插入一个 `TOOL_OUTCOME_UNKNOWN` 的 tool 角色错误结果。结果引用重映射后的 `tool/call` 序号，采用 step-end 的时间，并获得确定性的消息 id；已记录的调用和错误结束保持不变。如果之后出现新 step、非错误的 turn 结束，或直到 EOF 都没有匹配的错误结束，转换就会拒绝。目标校验仍拒绝未经 assistant 声明的调用。合成结果只表示没有持久结果，不能证明工具是否产生副作用。
 
 <a id="extension-data"></a>
 ### 扩展数据
@@ -159,7 +161,7 @@ Stage 只把最终继承截点之后的父目录记录作为候选。每个 inhe
 <a id="sequence-references"></a>
 ### 序号引用与继承
 
-当回合仍打开但没有打开的 step，且下一个连续编号的 `turn/start` 紧跟非空的 `next-turn` 类型 `agent/inbox/spliced` 时，Stage 可补齐该回合。它紧挨新 start 之前插入原因是 `interrupted` 的 `turn/end`，时间戳取该 start。开放尾部仍保持开放。其他回合顺序错误、未结算工具和进行中的 compaction 仍被目标校验拒绝。原生 V4 不执行此修复。
+当回合仍打开但没有打开的 step，且下一个连续编号的 `turn/start` 紧跟非空的 `next-turn` 类型 `agent/inbox/spliced` 时，Stage 可补齐该回合。它紧挨新 start 之前插入原因是 `interrupted` 的 `turn/end`，时间戳取该 start。开放尾部仍保持开放。其他回合顺序错误、不符合上述错误轮次修复的未结算工具，以及进行中的 compaction 仍被目标校验拒绝。原生 V4 不执行这两种修复。
 
 插入后，后续信封重新连续编号，并重映射已审计的同日志引用：`sourceEventSeqs`、替换端点 `startSeq/endSeq`、命令完成的 `sourceEventSeq`、标题的 `messageSeqs`、compaction 的 `shadowedRange` 与 `shadowedSeqs`，以及图片 offload 目标的 `seq`。捕获的 Session 引用、带代际的 delivery 坐标、turn／step 编号、stream 与图片索引、id 和任意 JSON 保持原值。未知可忽略事件的载荷和表面元数据保持不透明，只重排其信封序号。没有插入时，源事件坐标不变；追加的目录记录只扩展后缀。
 
@@ -292,7 +294,7 @@ Fork 种子构造归核心 Session 所有，不属于此迁移。原生 V4 接�
 <details>
 <summary>实现内部机制 — 点击展开</summary>
 
-迁移声明创建相互独立的流式 Stage。紧凑事件段通过迭代器展开，不生成中间事件数组。V3 到 V4 Stage 在发出 V4 事件时重写历史消息来源、提升历史工具结果包装，并插入有明确证据的中断回合结束事件。它为每个源事件保留一个源到目标的序号映射项，用于本地引用重映射。V4 编解码器只为物理头部和源范围分帧使用已发布 V2 编解码器，并直接校验原生工具角色行；它不会调用已发布 V3 校验器或源转换视图。JSONL 扫描器在抑制可恢复行之前调用 `assertV4RowAdmission`，并在返回完整逻辑前缀之前调用共用的强制关系校验器。
+迁移声明创建相互独立的流式 Stage。紧凑事件段通过迭代器展开，不生成中间事件数组。V3 到 V4 Stage 在发出 V4 事件时重写历史消息来源、提升历史工具结果包装，并插入有明确证据的结果未知事件和中断回合结束事件。它为每个源事件保留一个源到目标的序号映射项，用于本地引用重映射。V4 编解码器只为物理头部和源范围分帧使用已发布 V2 编解码器，并直接校验原生工具角色行；它不会调用已发布 V3 校验器或源转换视图。JSONL 扫描器在抑制可恢复行之前调用 `assertV4RowAdmission`，并在返回完整逻辑前缀之前调用共用的强制关系校验器。
 
 目标恢复器校验原生字段和强制跨事件关系，然后返回原始产物。未知的可忽略事件保持不透明，未完成的继承压缩事务在 end-seed 标记处结束。本包不发布运行时不变量伴随插件，因为这个纯函数库不拥有独立维护的运行时观测。
 
@@ -316,21 +318,28 @@ Fork 种子构造归核心 Session 所有，不属于此迁移。原生 V4 接�
 
 #### 模型看到什么
 
-历史请求保留记录的消息与模型配置。[迁移 Stage](src/migration.ts)将 `tool/result` 载荷表示为工具角色消息，不添加模型可见内容；目录记录不会直接进入模型消息，后续子代理列举可以发现历史子 Session。
+历史请求保留记录的消息与模型配置。[迁移 Stage](src/migration.ts)提升已记录的 `tool/result` 载荷，不改变其内容。错误轮次修复会为每个已开始但未记录结果的调用添加一条 tool 角色错误消息。该文本要求模型先核对可能的副作用，不能盲目重试。目录记录不会直接进入模型消息，但后续 subagent 列举可以发现历史子 Session。
+
+##### 结果未知修复文本
+
+```markdown
+The tool call was interrupted after it was recorded, but no result was durably recorded. Its outcome is unknown. Decide whether to retry from the tool semantics: retry only if the operation is read-only or idempotent; if it may have side effects, first verify external state or ask the user. Do not retry blindly.
+```
 
 #### Token 影响
 
-转换不改变请求文本或承载 token 的数据。
+已记录的请求文本与承载 token 的数据保持不变。每个修复的调用在恢复历史中增加一条错误结果。
 
 #### KV Cache 影响
 
-该迁移边保留记录的请求前缀。提供方缓存的可用性和淘汰策略不属于本库职责。
+迁移边保留修复前已记录的请求前缀；插入的结果会改变后续请求历史。提供方缓存的可用性和淘汰策略不属于本库职责。
 
 ## 已知限制与待办工作
 
 <a id="known-limitations-and-deferred-work"></a>
 
 - **历史转换器覆盖范围** — 未支持的源表示可能拒绝迁移，不发布后继文件，也不修改源文件。一方录制不等于第三方扩展全集。V4 发布后，只要输出仍兼容 V4，后续转换器修复就可以增加支持。解释流起始块的额外字段或处理未来投递代际，应以具体格式变更为依据。
+- **未知工具结果** — 只有 V3 错误轮次中有启动记录的调用会得到合成结果。带未结算调用的正常完成轮次、后续新 step 或未关闭尾部仍不受支持；该结果不能证明工具是否改变外部状态。
 - **已接受 V4 转换**——[检查点](../../../docs/session-format-status.zh.md#finalization-record)保护已接受历史。向后兼容的新增可以通过新的确认记录保留 V4；破坏性变更要求后继版本。已写入的 V4 文件不会重跑此入边，历史输入保持不变。
 - **V5 前置读取器**——V4 子日志证据目前经过已安装目录。后续写入器在改变该目录前，须绑定固定代际的 V4 前置读取。导出的 V4 恢复器提供代际自有检查；完整的通用消息接纳还使用已安装的 Session 校验。
 - **历史嵌套工具结果**——当前迁移拒绝包含另一个 tool-result wrapper 的结果。原始代际保持完整，且不发布 V4 successor。后续转换器可以支持有证据的源数据场景，而不改变既定 V4 格式；[迁移 cookbook](../../../docs/cookbook/adding-a-session-format-version.zh.md#stages-and-validation) 定义了这一区别。
