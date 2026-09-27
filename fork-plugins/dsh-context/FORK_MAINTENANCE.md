@@ -6,9 +6,9 @@ This subtree carries the DeepSeek Harness fork build of `dsh-context`. It retain
 
 - Upstream repository: `https://github.com/bowenliang123/dsh-context.git`
 - Upstream tag: `v0.55.0`
-- Fork package version: `0.55.0-dsh017rc1.2`
+- Fork package version: `0.55.0-dsh017rc1.3`
 - Subtree path: `fork-plugins/dsh-context`
-- Distribution artifact: `fork-plugins/releases/dsh-context-0.55.0-dsh017rc1.2.tgz`
+- Distribution artifact: `fork-plugins/releases/dsh-context-0.55.0-dsh017rc1.3.tgz`
 
 ## Fork behavior
 
@@ -30,7 +30,19 @@ Verified standard-speed API reference prices cover the five routes in [model pri
 
 ## Verification and packaging
 
-Run commands from this directory. Keep each test invocation below the repository's 20-second task limit.
+### Tool attribution lifetime
+
+`src/host/attribution.ts` unwraps `cordis.original` before identifying or patching a tool service and keeps only the reader's plugin name. Cordis creates a fresh caller-bound proxy on service reads; retaining a restore closure for each proxy retains its Agent context and Session after disposal. The wrapper still invokes the original method with the call-site receiver, preserving effect ownership. Plugin unload restores the original method without removing a newer attribution wrapper.
+
+Preserve raw-service identity deduplication and the scalar reader label across upstream imports. The focused `tests/host/attribution.spec.ts` regression performs 300 traced reads through three caller fibers, checks wrapper identity, attributed names, caller-owned cleanup, and hook unload. It fails on the unpatched implementation. An isolated Node GC experiment over 100 disposed scopes with 50 reads each retained all 100 scopes and 28.42 MiB before the fix, versus zero scopes and 0.65 MiB afterwards. The tested attribution source has 100% statement, branch, function, and line coverage. The `0.55.0-dsh017rc1.3` artifact contains this repair and is installed in the Windows Web profile. Its Host bundle hash matches the tested local build; the profile patch and other direct dependencies are unchanged.
+
+The 2026-09-27 Host snapshot contained 257 disposed and 12 live Agents. An offline reference-graph experiment, including conditional WeakMap reachability, disconnected 248 disposed Agent/Session pairs and 10,265.24 MiB after removing the attribution restore-array and reader-context references. This accounts for about 86% of reachable shallow object bytes; it estimates ownership in that snapshot, not post-fix production RSS. Raw snapshots and their numeric indexes remain private diagnostics outside Git.
+
+The following diagnostic run lasted approximately 3 hours 40 minutes: sampled JS heap peaked at 2.50 GiB and ended at 1.49 GiB, while the disposed-Agent count peaked at 15 and ended at 4. The growth snapshot contained one attribution restore entry, compared with 82,602 in the earlier incident. This is observed workload evidence, not a fixed-input benchmark or a guarantee that every retention issue is resolved. The fork-wide [memory record](../../FORK_MAINTENANCE.md#memory-ownership-verification) owns the diagnostic policy and explicitly deferred findings.
+
+### Commands
+
+Run commands from this directory.
 
 ```powershell
 corepack pnpm@11.9.0 install --frozen-lockfile --ignore-scripts
@@ -41,7 +53,7 @@ corepack pnpm@11.9.0 run lint:fix && corepack pnpm@11.9.0 run test && corepack p
 corepack pnpm@11.9.0 pack --pack-destination ..\releases
 ```
 
-Store the artifact's uppercase SHA-256 beside it as `dsh-context-0.55.0-dsh017rc1.2.tgz.sha256`. Inspect the tarball manifest and its embedded `package.json` version before installation.
+Store the artifact's uppercase SHA-256 beside it as `dsh-context-0.55.0-dsh017rc1.3.tgz.sha256`. Inspect the tarball manifest and its embedded `package.json` version before installation.
 
 ## Updating upstream
 

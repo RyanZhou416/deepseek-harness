@@ -1,3 +1,4 @@
+// DeepSeek Harness fork modification: bound tool attribution to raw service identities.
 // Unit tests for the runtime register() attribution hook (src/host/attribution.ts)
 // against a REAL cordis Context: plugin fibers read `ctx.tools` (firing the
 // internal/get waterfall) and call `register()` on a fake tools service.
@@ -6,7 +7,7 @@ import assert from 'node:assert/strict'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { describe, test } from 'vitest'
-import { Context } from '@deepseek-ai/cordis'
+import { Context, Service } from '@deepseek-ai/cordis'
 import { UNKNOWN_TOOL_SOURCE } from '../../src/shared/types'
 import { callerPackageFrom, createToolAttribution, packageNameFrom, type ToolAttribution } from '../../src/host/attribution'
 
@@ -17,6 +18,49 @@ const fileUrl = (file: string) => 'file:///' + file.replace(/\\/g, '/')
 const specFile = path.normalize(fileURLToPath(import.meta.url))
 
 describe('createToolAttribution', () => {
+  test('repeated traced service reads reuse one wrapper and preserve the caller lifetime', async () => {
+    const app = new Context()
+    const released: string[] = []
+    class TracedTools extends Service {
+      constructor(ctx: Context) { super(ctx, 'tools') }
+      register(definition: { name: string }): () => void {
+        const name = definition.name
+        return this.ctx.effect(() => () => { released.push(name) })
+      }
+    }
+    const raw = new TracedTools(app)
+    const original = raw.register
+    let attribution!: ToolAttribution
+    const hook = app.plugin({ name: 'dsh-context', apply(ctx) { attribution = createToolAttribution(ctx) } })
+    await hook
+    const wrapped = raw.register
+    try {
+      for (let index = 0; index < 3; index++) {
+        const caller = app.plugin({
+          name: `provider-${index}`,
+          inject: ['tools'],
+          apply(ctx) {
+            for (let read = 0; read < 100; read++) {
+              const service = Reflect.get(ctx, 'tools') as TracedTools
+              assert.notEqual(service, raw)
+              assert.equal(raw.register, wrapped, 'reading a service must not retain another context-bound wrapper')
+            }
+            const service = Reflect.get(ctx, 'tools') as TracedTools
+            service.register({ name: `probe-${index}` })
+          },
+        })
+        await caller
+        assert.equal(attribution.ownerOf(`probe-${index}`), `provider-${index}`)
+        await caller.dispose()
+        assert.ok(released.includes(`probe-${index}`), 'the real register keeps the caller effect scope')
+      }
+      await hook.dispose()
+      assert.equal(raw.register, original)
+    } finally {
+      await app.fiber.dispose()
+    }
+  })
+
   test('falls back to the static chain when nothing was registered at runtime', () => {
     const app = new Context()
     const attribution = createToolAttribution(app)

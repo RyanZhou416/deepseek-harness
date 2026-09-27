@@ -40,10 +40,10 @@ DSH_RUNTIME_HELPER=$SCRIPT_DIR/scripts/fork-macos-runtime.sh
 DSH_SETUP_HELPER=$SCRIPT_DIR/fork-runtime/setup-profile.mjs
 DSH_CONTEXT_PATCH=$SCRIPT_DIR/fork-runtime/web/cordis.patch.yml
 DSH_AGENT_TEAMS_ARTIFACT=$SCRIPT_DIR/fork-plugins/releases/nanmicoder-dsh-agent-teams-0.1.20-dsh017rc1.1.tgz
-DSH_CONTEXT_ARTIFACT=$SCRIPT_DIR/fork-plugins/releases/dsh-context-0.55.0-dsh017rc1.2.tgz
+DSH_CONTEXT_ARTIFACT=$SCRIPT_DIR/fork-plugins/releases/dsh-context-0.55.0-dsh017rc1.3.tgz
 DSH_SUBSCRIPTIONS_ARTIFACT=$SCRIPT_DIR/fork-plugins/releases/dsh-plugin-subscriptions-0.9.4-dsh017rc1.1.tgz
 DSH_AGENT_TEAMS_SHA256=17CDEA664A3EC8764CB8763FEC32A8CAE54F5F6429C89958DBE141A26253FF4B
-DSH_CONTEXT_SHA256=5636EDC455E1AA26933424FD76B548EEA989DDAF3B657AED1A62471C4C15152E
+DSH_CONTEXT_SHA256=255BA7AA6B84DA2F1301CD7786A2DDBC39AEE0A69BC731547B464B5D32B7B27D
 DSH_SUBSCRIPTIONS_SHA256=24235FA11077076370F8DB27D3019C6ED6292D8E6C45E6C0E0BE58DB07C2D5B8
 
 for DSH_REQUIRED_FILE in \
@@ -94,7 +94,7 @@ tar -xOzf "$DSH_AGENT_TEAMS_ARTIFACT" package/package.json \
     '@nanmicoder/dsh-agent-teams' '0.1.20-dsh017rc1.1'
 tar -xOzf "$DSH_CONTEXT_ARTIFACT" package/package.json \
   | node "$DSH_SETUP_HELPER" verify-manifest \
-    'dsh-context' '0.55.0-dsh017rc1.2'
+    'dsh-context' '0.55.0-dsh017rc1.3'
 tar -xOzf "$DSH_SUBSCRIPTIONS_ARTIFACT" package/package.json \
   | node "$DSH_SETUP_HELPER" verify-manifest \
     'dsh-plugin-subscriptions' '0.9.4-dsh017rc1.1'

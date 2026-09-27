@@ -1,4 +1,5 @@
 /// <reference types="node" />
+// DeepSeek Harness fork modification: deduplicate raw tool services without retaining reader contexts.
 /**
  * Live tool→plugin attribution layered on the static recovery in
  * toolSources.ts.
@@ -12,14 +13,15 @@
  * first argument, so `reader.fiber.name` identifies the plugin that is about
  * to call `register()`.
  *
- * - The `internal/get` handler records who last read the `tools` service and
- *   wraps that instance's `register` (once — an earlier wrapper of a previous
+ * - The `internal/get` handler records the last reader's plugin name and
+ *   wraps the raw service's `register` (once — an earlier wrapper of a previous
  *   hook incarnation is peeled back to the original, so a plugin reload
  *   re-wraps without stacking) to capture the reader at registration time
  *   into a live map. Every wrapper is undone when the plugin unloads: the
  *   original `register` goes back on the instance, unless a newer hook
  *   incarnation re-wrapped it first (that incarnation's own cleanup then
- *   owns the restore).
+ *   owns the restore). Context-bound service proxies and reader contexts are
+ *   not retained by this hook.
  * - When the reader slot is missing, root-named, or this plugin's own (e.g.
  *   LOCAL-LINK plugins — dev installs via `dsh plugin add <path>` or
  *   npm/pnpm link — whose anonymous entrypoints make cordis fall back to the
@@ -167,25 +169,29 @@ export function createToolAttribution(ctx: Context): ToolAttribution {
   const live = new Map<string, string>()
   const wrapped = new WeakSet()
   const self = ctx.fiber.name
-  let lastReader: Context | undefined
-  // Restore closures for every instance this incarnation patched, run by the
+  let lastReaderName: string | undefined
+  // Restore closures for every raw service this incarnation patched, run by the
   // unload effect below.
   const patched: (() => void)[] = []
 
   const wrapInstance = (tools: unknown) => {
-    if (!tools || typeof tools !== 'object' || wrapped.has(tools)) return
-    const register = (tools as { register?: unknown }).register
+    if (!tools || typeof tools !== 'object') return
+    // Cordis returns a fresh context-bound proxy on each read. Restoring through
+    // those proxies would keep their Agent scopes alive until this plugin unloads.
+    const target: unknown = Reflect.get(tools, Symbol.for('cordis.original')) ?? tools
+    if (!target || typeof target !== 'object' || wrapped.has(target)) return
+    const register = (target as { register?: unknown }).register
     if (typeof register !== 'function') return
-    wrapped.add(tools)
+    wrapped.add(target)
     // A reload of this plugin re-installs the hook on a still-wrapped
     // instance: peel the previous incarnation's wrapper back to the original
     // (marked below) so wrappers never stack across reloads.
     const original = (register as { attributedOriginal?: unknown }).attributedOriginal ?? register
     if (typeof original !== 'function') return
-    const instance = tools as { register: (this: unknown, definition?: { name?: unknown }) => unknown }
+    const instance = target as { register: (this: unknown, definition?: { name?: unknown }) => unknown }
     const wrappedRegister = function (this: unknown, definition?: { name?: unknown }) {
       const toolName = definition?.name
-      let owner = lastReader?.fiber.name
+      let owner = lastReaderName
       if (!owner || owner === 'root' || owner === self) {
         owner = callerPackageFrom(new Error().stack)
       }
@@ -212,9 +218,9 @@ export function createToolAttribution(ctx: Context): ToolAttribution {
   }
 
   ctx.on('internal/get', (reader, name, _error, next) => {
-    if (name !== 'tools') return next() as unknown
-    const tools = next() as unknown
-    lastReader = reader
+    const tools: unknown = next()
+    if (name !== 'tools') return tools
+    lastReaderName = reader.fiber.name
     wrapInstance(tools)
     return tools
   })

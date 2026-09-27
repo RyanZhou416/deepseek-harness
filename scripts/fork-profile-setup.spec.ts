@@ -91,7 +91,7 @@ it('rejects drift in artifacts, profile pins, patches, and composed config', () 
   const root = mkdtempSync(join(tmpdir(), 'dsh setup verify with spaces '))
   try {
     const agentArtifact = join(root, 'nanmicoder-dsh-agent-teams-0.1.20-dsh017rc1.1.tgz')
-    const contextArtifact = join(root, 'dsh-context-0.55.0-dsh017rc1.2.tgz')
+    const contextArtifact = join(root, 'dsh-context-0.55.0-dsh017rc1.3.tgz')
     const subscriptionsArtifact = join(root, 'dsh-plugin-subscriptions-0.9.4-dsh017rc1.1.tgz')
     writeFileSync(agentArtifact, 'agent artifact')
     writeFileSync(contextArtifact, 'context artifact')
@@ -114,7 +114,7 @@ it('rejects drift in artifacts, profile pins, patches, and composed config', () 
     }))
     writeFileSync(join(contextInstall, 'package.json'), JSON.stringify({
       name: 'dsh-context',
-      version: '0.55.0-dsh017rc1.2',
+      version: '0.55.0-dsh017rc1.3',
     }))
     writeFileSync(join(subscriptionsInstall, 'package.json'), JSON.stringify({
       name: 'dsh-plugin-subscriptions',
@@ -154,8 +154,8 @@ it('rejects drift in artifacts, profile pins, patches, and composed config', () 
     writeFileSync(join(profile, 'pnpm-lock.yaml'), [
       'nanmicoder-dsh-agent-teams-0.1.20-dsh017rc1.1.tgz',
       '0.1.20-dsh017rc1.1',
-      'dsh-context-0.55.0-dsh017rc1.2.tgz',
-      '0.55.0-dsh017rc1.2',
+      'dsh-context-0.55.0-dsh017rc1.3.tgz',
+      '0.55.0-dsh017rc1.3',
       'dsh-plugin-subscriptions-0.9.4-dsh017rc1.1.tgz',
       '0.9.4-dsh017rc1.1',
     ].join('\n'))

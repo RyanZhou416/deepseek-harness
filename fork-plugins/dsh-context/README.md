@@ -1,3 +1,4 @@
+<!-- DeepSeek Harness fork modification: document tool attribution lifetime. -->
 ![Social preview](https://raw.githubusercontent.com/bowenliang123/dsh-context/main/docs/social-preview.png)
 
 # dsh-context
@@ -180,6 +181,8 @@ In-chart and in-card toggles stay per-view and never overwrite the stored prefer
 ## DeepSeek Harness fork build
 
 The vendored `0.55.0-dsh017rc1.2` build keeps upstream V0/V2/V3/V4 Session-log support, Context Insights, on-demand projection backfill, injection labels, slim-head plus on-demand-detail delivery, host-side File Activity, and right-Sidebar views. Fork code adds verified subscription-model pricing and request-level context tiers, reduces Host allocations with field-level copy-on-write state, skips retention scans for unchanged collections, clamps restored projection values to the active bounds, reuses inline and slim wire values across Host-only state changes, leaves `/context` data subscriptions unmounted while its dialog is closed, and prices V3/V4 system nodes into header epochs. Maintenance and rollback details live in [FORK_MAINTENANCE.md](FORK_MAINTENANCE.md).
+
+Runtime tool attribution wraps each raw Cordis tool service once and retains the reader's plugin name. It does not keep the temporary service proxies or their Agent contexts; attribution cleanup restores the original registration method when the plugin unloads.
 
 The fork's low-overhead profile uses these existing configuration fields:
 
