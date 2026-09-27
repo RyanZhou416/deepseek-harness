@@ -150,6 +150,8 @@ Alpha.2 的 `packages/api/session-controller/src/client/sessions/service.ts` 通
 
 Count pruning 只删除模型已通过 `job_output` 读取的最旧 completed/killed/failed records；仅等待状态或列出任务不算读取，unreported 记录保留到 TTL 或 teardown，running/stopping 永不参与。`src/retention.ts` 用 exact-owner bucket、只含 id/时间的轻量最小堆、一个 `unref()` 到期 timer 和一个合并的延期裁剪 timer，避免每次全表 scan/sort；刚结算的 id 不在其结算信号内被数量裁剪，空索引会清理 timer。
 
+共享的到期与延期裁剪 timer 必须在不携带 Agent initiator 的异步上下文中创建和续建。`LocalJobRegistry` 在初始化时通过 `agents.withoutInitiator()` 捕获调度上下文，避免首个结算任务的已销毁 Agent 随共享 timer 长期驻留，也避免 teardown 期间再次开启 initiator scope。保留 `jobs.spec.ts` 对实际 Node Timeout 上下文、owner 删除后的续建、零目标延期裁剪的回归；2026-09-27 事故快照和隔离复现均确认旧路径可在 owner 条目删除后继续持有其 Session。
+
 官方 `maxConcurrentJobsPerOwner=10` 管理 live jobs，`maxActiveSubagents=8` 管理 continuable child activation；两者都独立于 terminal Job 留存。上游替代必须有 terminal TTL/count、unreported protection、active exclusion 和有界维护算法。
 
 ### Client rendering and connection state
@@ -250,7 +252,7 @@ Web profile 插入 `memory-watchdog.cjs`：250 ms 采样、60 s 日志、heap ra
 | `@nanmicoder/dsh-agent-teams` | `0.1.20-dsh017rc1.1` | Installed, enabled | 真实 profile 使用仓内固定 artifact；停止 Host 后更新，禁止被 npm latest/next 直接覆盖 |
 | `dsh-plugin-subscriptions` | `0.9.4-dsh017rc1.1` | Installed; Windows Web enabled | 仓内固定 artifact；凭据文件原地保留，其他 profile 是否启用沿用显式插件配置 |
 | `@vlln/dsh-task-status` | Removed | Not installed | 已从依赖、bundle、patch、lockfile 和 `node_modules` 删除；profile 不得恢复 |
-| `dsh-context` | Windows: `0.55.0-dsh017rc1.2`; Mac: `0.55.0-dsh017rc1.1` | Installed, enabled | 真实 profile 保留 `300/60/100/400/100/100` bounds；源码与回滚规则见 `fork-plugins/dsh-context/FORK_MAINTENANCE.md` |
+| `dsh-context` | Windows: `0.55.0-dsh017rc1.3`; Mac: `0.55.0-dsh017rc1.1` | Installed, enabled | 真实 profile 保留 `300/60/100/400/100/100` bounds；源码与回滚规则见 `fork-plugins/dsh-context/FORK_MAINTENANCE.md` |
 | `dsh-shell-command` | Removed | No package or configuration | profile 不安装 |
 | `@deepseek-ai/dsh-subagent-dsh-sdk` | Link to source checkout | Enabled for process provider | 跟随源码构建，worker 数据与主 sessions 隔离 |
 
@@ -282,11 +284,13 @@ Mac 主 checkout 已快进至同一 fork master；`clean.command`、`build.comma
 
 ### Local Context package
 
-维护真源位于 `fork-plugins\dsh-context`，仓库安装器使用 `fork-plugins\releases\dsh-context-0.55.0-dsh017rc1.2.tgz`，SHA256 为 `5636EDC455E1AA26933424FD76B548EEA989DDAF3B657AED1A62471C4C15152E`。该版本采用上游 v0.55.0 的 V0/V2/V3/V4 fold、Context Insights、余额展示、增量 turn 账本、按需 backfill 与 slim-head/on-demand-detail 传输，并保持既有 projection key 和 Session event vocabulary 不变。
+维护真源位于 `fork-plugins\dsh-context`，仓库安装器使用 `fork-plugins\releases\dsh-context-0.55.0-dsh017rc1.3.tgz`，SHA256 为 `255BA7AA6B84DA2F1301CD7786A2DDBC39AEE0A69BC731547B464B5D32B7B27D`。该版本采用上游 v0.55.0 的 V0/V2/V3/V4 fold、Context Insights、余额展示、增量 turn 账本、按需 backfill 与 slim-head/on-demand-detail 传输，并保持既有 projection key 和 Session event vocabulary 不变。
 
 私有构建保留经官方文档核对的 GPT-6 Astra/Sol、Claude Opus 5.5/Fable 5.1 与 Cursor Grok 4.7 标准速度 API 等值价格。价格匹配识别订阅 provider 别名；投影版本 21 按单次请求区分长上下文费率，必须保留 `long` 费用分组在 wire、Client sanitizer、Agent 合并和总 token 统计中的传递。费用不是订阅账单，定价日期、缓存写入假设和来源见 `fork-plugins/dsh-context/docs/model-pricing.md`。定向价格与界面测试、投影兼容测试、构建包 smoke，以及四个价格/费用模块的 100% 覆盖率是维护检查；升级真实 profile 前仍须确认 DSH 已停止。
 
-Windows Web profile 的 Context 配置备份位于 `C:\Project\deepseek-harness-data\profile-backups\context-pricing-20260927-063430`，安装版本为 `0.55.0-dsh017rc1.2`；其他 provider 依赖、workspace policy 和 profile patch 保持原值。
+Windows Web profile 的 Context 内存修复升级备份位于 `C:\Project\deepseek-harness-data\profile-backups\context-memory-20260927-200916`，安装版本为 `0.55.0-dsh017rc1.3`；已核对安装后的 Host bundle 与构建输出 SHA256 相同，其他直接依赖、bundle 列表和 profile patch 保持原值。定价升级的旧备份 `context-pricing-20260927-063430` 继续保留。
+
+Context 源码的工具归属追踪按 `cordis.original` 解包后的服务身份去重，只保存读取者的插件名，避免恢复回调数组长期持有 Agent 专属代理及其 Session。引用链、隔离内存实验和回归检查见[插件维护记录](fork-plugins/dsh-context/FORK_MAINTENANCE.md#tool-attribution-lifetime)。此修复包含在 `0.55.0-dsh017rc1.3` artifact 中；Windows 已在 Host 停止时完成切换并以诊断模式重启，认证 Web 页面返回 HTTP 200。Mac 的 `setup.command` 与安装校验版本也指向该 artifact，但尚未在 Mac 安装验证。后续插件升级仍须停止 Host 后操作。
 
 ### Local Subscriptions package
 
@@ -324,6 +328,29 @@ Profile 注册 `dsh-sdk-process-raw` 和 `subagent_process`：SDK profile、独�
 
 `diagnostics\deleted-*-artifacts-*` 与 `validation-web-full-partial-node-modules-*` 是上游删除包的可恢复构建残留，不是 Session。清理前仍需解析绝对路径并与 sessions/attachments/storages 分离。
 
+#### Memory ownership verification
+
+2026-09-27 的完整堆引用分析将主要累积归因于 Context 工具归属恢复回调：248 个已销毁 Agent/Session 被长期持有，条件 WeakMap 图模型中约占 10,265 MiB。`0.55.0-dsh017rc1.3` 的真实服务去重与 jobs-local 的中性调度上下文分别修复该引用链和共享任务到期 timer 的旧 Agent 留存；合并上游必须保留下面矩阵中的行为与回归，或验证上游提供等价实现后再移除 fork 补丁。
+
+修复后的诊断实例运行约 3 小时 40 分钟：记录到的 JS 堆最高 2.50 GiB、最后 1.49 GiB，RSS 最高 5.81 GiB、最后 4.29 GiB；已销毁但仍存活 Agent 最多 15 个、最后 4 个，中间曾回到 0。增长快照中的 Context 恢复数组从旧事故的 82,602 项降至 1 项，jobs-local 到期 timer 不携带 Agent 异步上下文。两轮负载并非固定输入基准，引用图字节估算也不等于 RSS 回收量。
+
+外置 `diagnostics\start-dsh-memory-debug.ps1` 使用原 Web profile，启用仅回环的 Inspector、连续 1 MiB 分配采样、30 秒所有权/GC 汇总和 Node reports。完整基线与一次 2 GiB 增长快照只在明确授权后采集；增长快照要求实际堆不超过 3 GiB 且 RAM、磁盘满足预算。高堆快照会暂停 Host 并大幅增加 RSS，不能在接近 watchdog 阈值时自动重复。该诊断工具不属于普通 `run.cmd` 或 Mac 安装器，也不是后台自动重启机制。
+
+本机证据位于 DSH_HOME 下的 `diagnostics\incident-47176-2026-09-26T23-57-57-126Z` 和 `diagnostics\run-10072-20260927-analysis`。原始快照、数字索引与分配剖面包含私有运行内容，只保留在本机，不提交到 Git；维护文档仅记录汇总、机制和验证规则。
+
+#### Deferred memory findings
+
+本轮为降低后续上游合并成本，暂缓以下两项源码修改；它们不是本 fork 已实施的补丁，不得在合并时按“保留修复”重新添加。只在新证据显示其成为主要占用，或上游提供可验证修复时重新评估。
+
+| Finding | Measured scope | Maintenance decision |
+|---|---|---|
+| Node 内置与 profile 依赖中的两份 Undici 共享 timer 保留请求异步上下文 | 增长快照中合计约 83.63 MiB、两个已销毁 Agent | 暂缓依赖和 transport 补丁；上游替代须覆盖两份实现，并保持认证、订阅账户选择和 Agent 归属，不能清空整个 fetch 调用链的上下文 |
+| `DomainFacility.open()` 的 `onClosed` 共享闭包保留启动 `loadAll()` 快照 | 当时额外约 11.42 MiB；当前表与旧快照合计约 224.12 MiB，其中约 196.96 MiB 为共享 payload | 暂缓源码补丁；覆盖、删除记录后的 WeakRef/GC 复现已保留，不能将共享数据按双份计量 |
+
+全库投影缓存仍在启动时加载，活跃 Session 仍完整持有历史；按需缓存与历史读取尚未实现。本轮没有改动 Session 格式、迁移规则或模型可见内容。
+
+补充测试发现一个尚未归因到事故占用的源码路径：若 `settled` 监听器同步调用 `jobs.remove()`，之后的 `terminalRetention.track()` 仍可能暂存该记录的索引与 owner，直到 TTL 到期；仅启用数量上限且记录未被读取时可能保留至服务销毁。对外删除通知的回归已覆盖，本轮未扩展修复此路径。
+
 -----
 
 ## Preservation matrix
@@ -344,6 +371,7 @@ Profile 注册 `dsh-sdk-process-raw` 和 `subagent_process`：SDK profile、独�
 | 20k final-message packed rebase | Replaced by cursorless Assistant frames | Keep official transient-stream settlement; do not restore scalar chunk accumulation |
 | Tool output/card lazy calculation | Ported onto RC.1 | Preserve generic output-on-expand and card-array laziness; official already defers input formatting |
 | Jobs one-hour TTL / 100 terminal target | Ported onto RC.1 | Official ring caps do not bound terminal-record count or lifetime; preserve unread protection and lightweight heap indexes |
+| Jobs shared timer initiator isolation | Preserve | Create initial, renewed and deferred-prune timers without an Agent initiator; preserve owner cleanup, expiry behavior and scheduling during teardown |
 | Legacy `memory-admission` package | Retired | Use official `dsh-subagent.maxActiveSubagents` and `maxDepth` settings |
 | Generic parent/child messaging | Replaced by official `sendMessage()` | Never restore the old public `.steer()` API |
 | Queue edit/remove/steer | Replaced by official `session.updateQueue` | Do not restore `subagents.updateQueuedByParent` |
@@ -356,6 +384,7 @@ Profile 注册 `dsh-sdk-process-raw` 和 `subagent_process`：SDK profile、独�
 | AgentTeams unread mailbox projection LRU | Preserve | Require unchanged JSONL format, dynamic lease expiry, exact mutation invalidation, caller isolation and bounded retention |
 | Independent Session creation and unrestricted Session-id Agent messages | Preserve | Keep same-call create-and-start, configured permission inheritance before delivery (never custom or current-session-only Auto), server-derived sender attribution, wake-enabled next-step delivery and prompt-only loop guidance; do not fold it into human `session.prompt` or widen subagent adjacency |
 | Context field-level COW and bounded views | Preserve | v0.55.0 adds turn ledger and selective arguments, but not dirty retention, view identity reuse or closed-modal subscription release |
+| Context tool attribution ownership | Preserve | Deduplicate the raw `cordis.original` service, retain only the reader name, preserve the call-site receiver and restore ownership on unload |
 | Subscriptions V4 message translation | Ported onto v0.9.4 | Keep tool-call identity, result error/image handling and explicit developer-message refusal |
 | Legacy fixed-concurrency wrapper | Retired | Official `maxActiveSubagents` owns the active policy; do not mount the duplicate wrapper |
 
