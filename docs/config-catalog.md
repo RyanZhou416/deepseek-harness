@@ -1438,7 +1438,7 @@ export interface Config {
 }
 ```
 
-Source: [`packages/jobs/jobs-local/src/index.ts:46`](../packages/jobs/jobs-local/src/index.ts)
+Source: [`packages/jobs/jobs-local/src/index.ts:47`](../packages/jobs/jobs-local/src/index.ts)
 
 <a id="deepseek-aidsh-llm-deepseek"></a>
 

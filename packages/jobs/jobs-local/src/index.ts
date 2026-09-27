@@ -10,6 +10,7 @@
  * @module @deepseek-ai/dsh-jobs-local
  */
 
+import { AsyncLocalStorage } from 'node:async_hooks'
 import { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import type { Agent } from '@deepseek-ai/dsh-agent'
@@ -198,6 +199,11 @@ export class LocalJobRegistry extends JobRegistry {
     this.settledRetainBytes = resolved.settledRetainBytes
     this.pumpPollMs = resolved.pumpPollMs
     this.selfCtx = ctx
+    const agents = ctx.get('agents')
+    // Retention timers outlive individual Agents and may run during registry teardown.
+    const runRetention = agents === undefined
+      ? AsyncLocalStorage.snapshot()
+      : agents.withoutInitiator(() => AsyncLocalStorage.snapshot())
     this.terminalRetention = new TerminalRetention(
       config.terminalJobRetentionMs,
       config.maxRetainedTerminalJobsPerOwner,
@@ -205,6 +211,7 @@ export class LocalJobRegistry extends JobRegistry {
         const job = this.store.get(id)
         if (job !== undefined) this.drop([job])
       },
+      (callback, delay) => runRetention(setTimeout, callback, delay),
     )
     this.hub = new JobEventHub(this.layers, (message) => { ctx.logger.warn(message) })
     ctx.effect(() => () => this.disposeAll(), 'jobs teardown')

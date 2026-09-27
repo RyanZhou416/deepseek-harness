@@ -1,4 +1,5 @@
 import { describe, expect, expectTypeOf, it, vi } from 'vitest'
+import { AsyncLocalStorage, createHook } from 'node:async_hooks'
 import { Context } from '@deepseek-ai/cordis'
 import { Session, SessionId } from '@deepseek-ai/dsh-session'
 import AgentRegistry from '@deepseek-ai/dsh-agent'
@@ -1415,6 +1416,182 @@ describe('LocalJobRegistry output ring', () => {
     p.job().append('grow')
     expect(before.output.total).toBe(0)
     expect(ctx.jobs.get(id).output.total).toBe(4)
+  })
+})
+
+describe('LocalJobRegistry shared retention timers', () => {
+  it('does not announce a second removal when a settlement listener removed the job before expiry', async () => {
+    const ctx = await harness({ terminalJobRetentionMs: 50 })
+    vi.useFakeTimers()
+    const settled = Promise.withResolvers<undefined>()
+    const removed: JobId[] = []
+    try {
+      ctx.jobs.events.subscribe({ owners: 'all' }, (event) => {
+        if (event.type === 'settled') {
+          ctx.jobs.remove(event.job.id)
+          settled.resolve(undefined)
+        }
+        if (event.type === 'removed') removed.push(event.job.id)
+      })
+      const id = ctx.jobs.start({
+        kind: 'bash', label: 'remove at settlement',
+        run: () => ({ cancel() {}, done: Promise.resolve({ status: 'completed' }) }),
+      })
+      await settled.promise
+      expect(removed).toEqual([id])
+      expect(ctx.jobs.list()).toEqual([])
+      await vi.advanceTimersByTimeAsync(50)
+      expect(removed).toEqual([id])
+      expect(ctx.jobs.list()).toEqual([])
+    } finally {
+      try {
+        await ctx.fiber.dispose()
+      } finally {
+        vi.useRealTimers()
+      }
+    }
+  })
+
+  it('announces each owner-teardown removal once when a listener removes another captured job', async () => {
+    const ctx = await harness()
+    const owner = await liveAgent(ctx, 'reentrant-removal-owner')
+    const ready = Promise.withResolvers<undefined>()
+    const removed: JobId[] = []
+    const ids: JobId[] = []
+    let settled = 0
+    try {
+      ctx.jobs.events.subscribe({ owner: owner.id }, (event) => {
+        if (event.type === 'settled' && ++settled === 2) ready.resolve(undefined)
+        if (event.type !== 'removed') return
+        removed.push(event.job.id)
+        const remaining = ctx.jobs.list(owner.id)[0]
+        if (remaining !== undefined) ctx.jobs.remove(remaining.id, owner.id)
+      })
+      for (let index = 0; index < 2; index++) {
+        ids.push(ctx.jobs.start({
+          kind: 'bash', label: `teardown ${index}`, owner: owner.id,
+          run: () => ({ cancel() {}, done: Promise.resolve({ status: 'completed' }) }),
+        }))
+      }
+      await ready.promise
+      await disposeAgentScope(owner)
+      expect(removed).toEqual(ids)
+      expect(ctx.jobs.list(owner.id)).toEqual([])
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('expires another owner after removal without retaining the first initiator in either timer', async () => {
+    const ctx = new Context()
+    await ctx.plugin(AgentRegistry)
+    const firstOwner = await liveAgent(ctx, 'first-timer-owner')
+    const secondOwner = await liveAgent(ctx, 'second-timer-owner')
+    await ctx.agents.withInitiator(firstOwner, async () => {
+      await ctx.plugin(LocalJobRegistry, { terminalJobRetentionMs: 20 })
+    })
+    ctx.jobs.attachController('retention-test')
+    // Initialize real Timeout resources; invoke callbacks in their captured context at controlled wall times.
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(1_000)
+    const timers: { run: () => void; delay: number | undefined }[] = []
+    const nativeSetTimeout = globalThis.setTimeout
+    const schedule = vi.spyOn(globalThis, 'setTimeout').mockImplementation((callback, delay, ...args) => {
+      const run = AsyncLocalStorage.snapshot()
+      const timer = nativeSetTimeout(callback, delay, ...args)
+      clearTimeout(timer)
+      timers.push({ run: () => { run(callback, ...args) }, delay })
+      return timer
+    })
+    const timerInitiators: (SessionId | undefined)[] = []
+    const removalInitiators: (SessionId | undefined)[] = []
+    const hook = createHook({
+      init(_id, type) {
+        if (type !== 'Timeout') return
+        timerInitiators.push(ctx.agents.currentInitiator()?.id)
+      },
+    })
+    try {
+      ctx.jobs.events.subscribe({ owners: 'all' }, (event) => {
+        if (event.type !== 'removed' || event.job.owner !== secondOwner.id) return
+        removalInitiators.push(ctx.agents.currentInitiator()?.id)
+      })
+      hook.enable()
+      const start = async (owner: Agent): Promise<JobId> => {
+        const settled = Promise.withResolvers<undefined>()
+        const detach = ctx.jobs.events.subscribe({ owner: owner.id }, (event) => {
+          if (event.type === 'settled') settled.resolve(undefined)
+        })
+        try {
+          const id = ctx.agents.withInitiator(owner, () => ctx.jobs.start({
+            kind: 'bash', label: 'timer ownership', owner: owner.id,
+            run: () => ({ cancel() {}, done: Promise.resolve({ status: 'completed' }) }),
+          }))
+          await settled.promise
+          return id
+        } finally {
+          detach()
+        }
+      }
+      const firstId = await start(firstOwner)
+      vi.setSystemTime(1_010)
+      const secondId = await start(secondOwner)
+      await disposeAgentScope(firstOwner)
+      expect(() => ctx.jobs.get(firstId, firstOwner.id)).toThrow(/unknown job/)
+      expect(ctx.jobs.get(secondId, secondOwner.id).status).toBe('completed')
+      expect(timers).toHaveLength(1)
+      expect(timers[0]?.delay).toBe(20)
+      vi.setSystemTime(1_020)
+      timers[0]?.run()
+      expect(timers).toHaveLength(2)
+      expect(timers[1]?.delay).toBe(10)
+      expect(timerInitiators).toEqual([undefined, undefined])
+      expect(ctx.jobs.get(secondId, secondOwner.id).status).toBe('completed')
+      vi.setSystemTime(1_030)
+      timers[1]?.run()
+      expect(removalInitiators).toEqual([undefined])
+      expect(() => ctx.jobs.get(secondId, secondOwner.id)).toThrow(/unknown job/)
+      expect(timers).toHaveLength(2)
+    } finally {
+      hook.disable()
+      schedule.mockRestore()
+      vi.useRealTimers()
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('defers zero-target pruning without inheriting the settling initiator', async () => {
+    const ctx = await harness({ maxRetainedTerminalJobsPerOwner: 0 })
+    const owner = await liveAgent(ctx, 'prune-timer-owner')
+    const removed = Promise.withResolvers<undefined>()
+    const timerInitiators: (SessionId | undefined)[] = []
+    const removalInitiators: (SessionId | undefined)[] = []
+    const hook = createHook({
+      init(_id, type) {
+        if (type === 'Timeout') timerInitiators.push(ctx.agents.currentInitiator()?.id)
+      },
+    })
+    try {
+      ctx.jobs.events.subscribe({ owner: owner.id }, (event) => {
+        if (event.type === 'settled') ctx.jobs.read(event.job.id, owner.id)
+        if (event.type === 'removed') {
+          removalInitiators.push(ctx.agents.currentInitiator()?.id)
+          removed.resolve(undefined)
+        }
+      })
+      hook.enable()
+      const id = ctx.agents.withInitiator(owner, () => ctx.jobs.start({
+        kind: 'bash', label: 'deferred prune ownership', owner: owner.id,
+        run: () => ({ cancel() {}, done: Promise.resolve({ status: 'completed' }) }),
+      }))
+      await removed.promise
+      expect(timerInitiators).toEqual([undefined])
+      expect(removalInitiators).toEqual([undefined])
+      expect(() => ctx.jobs.get(id, owner.id)).toThrow(/unknown job/)
+    } finally {
+      hook.disable()
+      await ctx.fiber.dispose()
+    }
   })
 })
 

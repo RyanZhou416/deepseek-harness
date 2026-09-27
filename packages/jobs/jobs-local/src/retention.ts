@@ -80,7 +80,7 @@ function compareExpiry(left: ExpiryRef, right: ExpiryRef): number {
   return left.expiresAt - right.expiresAt || compareTerminal(left, right)
 }
 
-/** Configured terminal retention. Omission of both options retains upstream behavior. */
+/** Configured terminal retention with shared timers scheduled outside Agent initiator scope. */
 export class TerminalRetention {
   private readonly entries = new Map<JobId, Entry>()
   private readonly buckets = new Map<Agent | undefined, Bucket>()
@@ -91,10 +91,17 @@ export class TerminalRetention {
   private pruneTimer: ReturnType<typeof setTimeout> | undefined
   private readonly pendingPrunes = new Set<Agent | undefined>()
 
+  /**
+   * @param retentionMs - terminal lifetime, or no expiry when omitted.
+   * @param maxPerOwner - reported-record target, or no count pruning when omitted.
+   * @param remove - remove one terminal record from the owning registry.
+   * @param schedule - create a timer without an Agent initiator, including during service teardown.
+   */
   constructor(
     private readonly retentionMs: number | undefined,
     private readonly maxPerOwner: number | undefined,
     private readonly remove: (id: JobId) => void,
+    private readonly schedule: (callback: () => void, delay: number) => ReturnType<typeof setTimeout>,
   ) {}
 
   /** Index one settled record after its final output signal; protect it from this settlement's count prune.
@@ -203,7 +210,7 @@ export class TerminalRetention {
   private deferPrune(owner: Agent | undefined): void {
     this.pendingPrunes.add(owner)
     if (this.pruneTimer !== undefined) return
-    this.pruneTimer = setTimeout(() => {
+    this.pruneTimer = this.schedule(() => {
       this.pruneTimer = undefined
       const owners = [...this.pendingPrunes]
       this.pendingPrunes.clear()
@@ -221,7 +228,6 @@ export class TerminalRetention {
   }
 
   private armExpiry(): void {
-    if (this.retentionMs === undefined) return
     let next = this.expiry.peek()
     while (next !== undefined && this.entries.get(next.id)?.order !== next.order) {
       this.expiry.pop()
@@ -231,7 +237,7 @@ export class TerminalRetention {
     if (this.timer !== undefined && this.scheduledFor !== undefined && this.scheduledFor <= next.expiresAt) return
     if (this.timer !== undefined) clearTimeout(this.timer)
     this.scheduledFor = next.expiresAt
-    this.timer = setTimeout(() => {
+    this.timer = this.schedule(() => {
       this.timer = undefined
       this.scheduledFor = undefined
       this.expire()
