@@ -15,8 +15,9 @@
 
 import { createHash } from 'node:crypto'
 import { decodeJwtPayload } from './jwt.js'
-import { chmod, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
+import { chmod, copyFile, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import { dirname } from 'node:path'
+import { setTimeout as delay } from 'node:timers/promises'
 import { dshHomePath } from '@deepseek-ai/dsh-home-paths'
 
 /** Provider routes this plugin can serve. */
@@ -447,6 +448,38 @@ function isValidSessionShape(value: unknown): boolean {
     && typeof entry.expiresAt === 'number' && Number.isFinite(entry.expiresAt)
 }
 
+/** How many times to retry a Windows replace before falling back to a copy. */
+const STORE_REPLACE_ATTEMPTS = 8
+
+/** Windows denies rename-over when a reader still has the destination open. */
+function isRetryableReplaceError(error: unknown): boolean {
+  if (process.platform !== 'win32') return false
+  const code = typeof error === 'object' && error !== null && 'code' in error ? String(error.code) : ''
+  return code === 'EPERM' || code === 'EBUSY' || code === 'EACCES'
+}
+
+/**
+ * Swap a finished temp file onto `path`. POSIX rename replaces an existing
+ * file. Windows often returns EPERM for that replace while Defender, the
+ * indexer, or a reader holds `auth.json`, so retry, then copy over it.
+ */
+async function replaceStoreFile(tmp: string, path: string): Promise<void> {
+  let last: unknown
+  for (let attempt = 0; attempt < STORE_REPLACE_ATTEMPTS; attempt++) {
+    try {
+      await rename(tmp, path)
+      return
+    } catch (error) {
+      last = error
+      if (!isRetryableReplaceError(error) || attempt === STORE_REPLACE_ATTEMPTS - 1) break
+      await delay(50 * (attempt + 1))
+    }
+  }
+  if (!isRetryableReplaceError(last)) throw last
+  await copyFile(tmp, path)
+  await rm(tmp, { force: true })
+}
+
 /** Persist the whole store atomically with owner-only permissions. */
 async function writeStore(store: SessionMap, path: string): Promise<void> {
   await mkdir(dirname(path), { recursive: true })
@@ -456,7 +489,7 @@ async function writeStore(store: SessionMap, path: string): Promise<void> {
     // An existing destination keeps its old mode through rename on some
     // filesystems; enforce 0600 on the source before the swap.
     await chmod(tmp, 0o600)
-    await rename(tmp, path)
+    await replaceStoreFile(tmp, path)
   } catch (error) {
     await rm(tmp, { force: true })
     throw error

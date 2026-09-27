@@ -59,6 +59,10 @@ Files: `src/providers/pool.ts`, `src/providers/pool-usage.ts`, `src/providers/co
 
 ChatGPT prompt caching has no `cache_control` field. The plugin already sends `prompt_cache_key` from the session id. Do not expect Claude's explicit breakpoint hit rate from this route.
 
+### Windows credential store
+
+`writeStore` in `src/auth/store.ts` writes `auth.json` to a temp file and renames it into place. On Windows that rename returns `EPERM` when the destination is briefly locked. Retry the rename, then copy the finished temp file over `auth.json`. A failed replace drops the login that just completed, including a new Cursor account.
+
 ## Verification and packaging
 
 Run from this directory:
