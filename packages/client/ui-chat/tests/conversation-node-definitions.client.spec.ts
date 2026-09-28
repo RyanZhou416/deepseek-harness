@@ -2315,6 +2315,54 @@ describe('built-in conversation node Definitions', () => {
     expect(after?.data).toMatchObject({ skillNames: ['demo-skill'] })
   })
 
+  it('replaces the last prompt and response in live Chat and after reloading history', () => {
+    const old = [
+      at(1, 'turn/start', { turn: 1 }),
+      at(2, 'step/start', { turn: 1, step: 1 }),
+      at(3, 'user/message', textMessage('old-user', 'old question'), { surfaceOp: 'append' }),
+      at(4, 'assistant/message', { turn: 1, step: 1, message: assistantMessage('old-assistant', 'old answer') }, { surfaceOp: 'append' }),
+      at(5, 'step/end', { turn: 1, step: 1 }),
+      at(6, 'turn/end', { turn: 1, reason: { kind: 'completed' } }),
+    ]
+    const revision = [
+      at(7, 'turn/start', { turn: 2 }),
+      at(8, 'user/message', { ...textMessage('draft-user', 'new question'), source: { kind: 'user', rpcId: 'edit-1', replacesUserMessage: 3, pendingRevision: true } },
+        { surfaceOp: { op: 'replace', startSeq: 3, endSeq: 4 }, sourceEventSeqs: [3, 4] }),
+      at(9, 'step/start', { turn: 2, step: 1 }),
+      at(10, 'user/message', { ...textMessage('new-user', 'new question'), source: { kind: 'user', rpcId: 'edit-1', replacesUserMessage: 3 } },
+        { surfaceOp: { op: 'replace', startSeq: 8, endSeq: 8 }, sourceEventSeqs: [8] }),
+      at(11, 'assistant/message', { turn: 2, step: 1, message: assistantMessage('new-assistant', 'new answer') }, { surfaceOp: 'append' }),
+      at(12, 'step/end', { turn: 2, step: 1 }),
+      at(13, 'turn/end', { turn: 2, reason: { kind: 'completed' } }),
+    ]
+    const value = assembler(old)
+    for (const entry of revision) value.append(entry)
+    value.flush()
+    const visible = (state: ChatSnapshot) => state.order.map(key => state.nodes.get(key))
+    const current = visible(snapshot(value))
+    expect(current.filter(row => row?.kind === 'user').map(row => row?.data)).toMatchObject([{ content: [{ type: 'text', text: 'new question' }] }])
+    expect(JSON.stringify(current)).not.toContain('old question')
+    expect(JSON.stringify(current)).not.toContain('old answer')
+    expect(current.some(row => row?.anchorSeq !== undefined && row.anchorSeq < 7)).toBe(false)
+    expect(JSON.stringify(visible(snapshot(assembler([...old, ...revision]))))).toBe(JSON.stringify(current))
+    const repeated = [
+      at(14, 'turn/start', { turn: 3 }),
+      at(15, 'user/message', { ...textMessage('second-draft', 'final question'), source: { kind: 'user', replacesUserMessage: 10, pendingRevision: true } },
+        { surfaceOp: { op: 'replace', startSeq: 10, endSeq: 11 }, sourceEventSeqs: [10, 11] }),
+      at(16, 'step/start', { turn: 3, step: 1 }),
+      at(17, 'user/message', { ...textMessage('final-user', 'final question'), source: { kind: 'user', replacesUserMessage: 10 } },
+        { surfaceOp: { op: 'replace', startSeq: 15, endSeq: 15 }, sourceEventSeqs: [15] }),
+    ]
+    for (const entry of repeated) value.append(entry)
+    value.flush()
+    const final = visible(snapshot(value))
+    expect(final.filter(row => row?.kind === 'user').map(row => row?.data))
+      .toMatchObject([{ content: [{ type: 'text', text: 'final question' }] }])
+    expect(JSON.stringify(final)).not.toContain('new question')
+    expect(JSON.stringify(final)).not.toContain('new answer')
+    expect(JSON.stringify(visible(snapshot(assembler([...old, ...revision, ...repeated]))))).toBe(JSON.stringify(final))
+  })
+
   it('keeps replacement copies out of Chat business nodes', () => {
     const value = assembler([
       at(1, 'turn/start', { turn: 1 }),

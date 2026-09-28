@@ -1876,6 +1876,12 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
         returns: 'the new Session identity.',
       },
       {
+        signature: '@Remote(\'editLastMessage\') editLastMessage(request: SessionEditLastMessageRequest): Promise<SessionPromptValue>',
+        description: 'Revise the latest prompt and regenerate inside the same Session.',
+        parameters: [{ name: 'request', description: 'target prompt, revised text, and stable submission identity.' }],
+        returns: 'acknowledgement that the revision entered the inbox.',
+      },
+      {
         signature: '@Remote(\'prompt\') prompt(request: SessionPromptRequest, signal: AbortSignal): Promise<SessionPromptValue>',
         description: 'Admit one prompt after explicitly resuming its Session.',
         parameters: [{ name: 'request', description: 'Session identity, prompt content, source metadata, and delivery mode.' }, { name: 'signal', description: 'caller cancellation before prompt admission begins.' }],
@@ -3686,12 +3692,28 @@ export const EVENT_API: readonly EventApiEntry[] = [
     parameters: [{ name: 'payload', description: '.message - the inserted message. Scope-filtered dispatch (`@deepseek-ai/dsh-scope`): agent-scoped listeners receive only that agent.' }],
   },
   {
+    name: 'agent/message-surface',
+    mode: 'waterfall',
+    signature: '\'agent/message-surface\'(this: Scoped<Agent>, payload: { agent: Agent; message: UserMessage }, next: () => SurfaceIntent<\'user/message\'>): SurfaceIntent<\'user/message\'>',
+    summary: 'Resolve a user\'s surface placement synchronously at durable admission.',
+    description: 'Resolve a user\'s surface placement synchronously at durable admission. The default appends. Replacements cite the current nodes they shadow.',
+    parameters: [{ name: 'payload', description: '.message - accepted message after pre-step processing.' }, { name: 'next', description: 'remaining placement listeners; the default appends. Scope-filtered dispatch (`@deepseek-ai/dsh-scope`): agent-scoped listeners receive only that agent.' }],
+  },
+  {
     name: 'agent/pre-step',
     mode: 'waterfall',
     signature: '\'agent/pre-step\'(this: Scoped<Agent>, payload: { agent: Agent; messages: UserMessage[]; turn: number; step: number; signal: AbortSignal }, next: () => Promise<PreStepDecision>): Promise<PreStepDecision>',
     summary: 'Reject a proposed step or replace the messages that enter it.',
     description: 'Reject a proposed step or replace the messages that enter it. Calling `next()` preserves the current messages.',
     parameters: [{ name: 'payload', description: '.signal - the current turn\'s cancellation signal. Scope-filtered dispatch (`@deepseek-ai/dsh-scope`): agent-scoped listeners receive only that agent.' }],
+  },
+  {
+    name: 'agent/prepare-input',
+    mode: 'waterfall',
+    signature: '\'agent/prepare-input\'(this: Scoped<Agent>, payload: { agent: Agent; messages: UserMessage[] }, next: () => void): void',
+    summary: 'Prepare claimed input synchronously before prompt assembly and pre-step processors.',
+    description: 'Prepare claimed input synchronously before prompt assembly and pre-step processors.',
+    parameters: [{ name: 'payload', description: '.messages - messages claimed for the proposed step.' }, { name: 'next', description: 'remaining input preparation listeners; the default does nothing. Scope-filtered dispatch (@deepseek-ai/dsh-scope): agent-scoped listeners receive only that agent.' }],
   },
   {
     name: 'agent/request',
@@ -5539,7 +5561,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'MessageSourceMap',
-    declaration: 'export interface MessageSourceMap {\n    user: {\n        kind: \'user\';\n    };\n    model: ModelMessageSource;\n    tool: ToolMessageSource;\n    \'system-prompt\': SystemPromptMessageSource;\n}',
+    declaration: 'export interface MessageSourceMap {\n    user: UserMessageSource;\n    model: ModelMessageSource;\n    tool: ToolMessageSource;\n    \'system-prompt\': SystemPromptMessageSource;\n}',
   },
   {
     name: 'ModelCatalog',
@@ -6150,6 +6172,10 @@ export const TYPE_API: readonly TypeApiEntry[] = [
     declaration: 'export interface SessionCreateValue {\n    readonly sessionId: SessionId;\n    readonly agentPreset?: string;\n}',
   },
   {
+    name: 'SessionEditLastMessageRequest',
+    declaration: 'export interface SessionEditLastMessageRequest {\n    readonly sessionId: SessionId;\n    readonly seq: number;\n    readonly text: string;\n    readonly requestId: SessionRequestId;\n}',
+  },
+  {
     name: 'SessionEvent',
     declaration: 'export type SessionEvent<T extends SessionEventType = SessionEventType> = {\n    [K in SessionEventType]: {\n        type: K;\n        seq: SessionSeq;\n        time: number;\n        data: SessionEventMap[K];\n        ignorable?: true;\n    } & (K extends SurfaceEventType ? SurfaceIntent<K> : {\n        surfaceOp?: never;\n        sourceEventSeqs?: never;\n    });\n}[T];',
   },
@@ -6243,7 +6269,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'SessionForkRequest',
-    declaration: 'export interface SessionForkRequest {\n    readonly sessionId: SessionId;\n    readonly atSeq?: number;\n    readonly editLastMessage?: {\n        readonly seq: number;\n        readonly text: string;\n        readonly requestId: SessionRequestId;\n    };\n}',
+    declaration: 'export interface SessionForkRequest {\n    readonly sessionId: SessionId;\n    readonly atSeq?: number;\n}',
   },
   {
     name: 'SessionForkSource',
@@ -7456,6 +7482,10 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   {
     name: 'UserMessage',
     declaration: 'export interface UserMessage extends MessageBase {\n    readonly role: \'user\';\n}',
+  },
+  {
+    name: 'UserMessageSource',
+    declaration: 'export interface UserMessageSource {\n    readonly kind: \'user\';\n}',
   },
   {
     name: 'VerifiedWebhookDelivery',

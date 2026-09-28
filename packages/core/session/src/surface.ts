@@ -108,7 +108,7 @@ export function isReplacementSurfaceEvent(
 /**
  * Project a single event into the LLM message it derives to, or null when it
  * produces none — a non-surface event (attempt, boundary, log-only record) or an
- * empty-content system, developer, or assistant message. A caller
+ * empty-content system, developer, or assistant message, or a pending human revision. A caller
  * reconstructing model input supplies the same prefix's `projectedMessages`
  * from {@link foldSurface}; without that map this function reads original
  * event content. Session instance methods apply the live projection. Messages
@@ -121,6 +121,7 @@ export function deriveEventMessage(
   event: SessionEvent,
   projectedMessages?: ReadonlyMap<SessionSeq, Message>,
 ): Message | null {
+  if (event.type === 'user/message' && event.data.source.kind === 'user' && 'pendingRevision' in event.data.source) return null
   const projected = projectedMessages?.get(event.seq)
   if (projected !== undefined) return projected
   // Intentionally non-exhaustive: only message-producing events derive
@@ -174,6 +175,11 @@ export function validateSessionEventData(
   subject: string,
 ): void {
   const data: unknown = event.data
+  if (event.type === 'user/message' && isRecord(data) && isRecord(data['source'])
+    && data['source']['kind'] === 'user' && Object.hasOwn(data['source'], 'pendingRevision')
+    && data['source']['pendingRevision'] !== true) {
+    throw new Error(subject + ' pendingRevision must be true when present')
+  }
   if (SURFACE_EVENT_TYPES.has(event.type) && isRecord(data)) {
     const message = event.type === 'user/message' ? data : data['message']
     if (isRecord(message)) {
@@ -412,6 +418,13 @@ export function validateSurfaceMetadata(event: SessionEvent): SurfaceOp | undefi
   if (op !== undefined && op !== 'append'
     && (op.startSeq >= event.seq || op.endSeq >= event.seq)) {
     throw new Error(`surface replace at seq ${event.seq}: startSeq and endSeq must reference earlier events`)
+  }
+  if (event.type === 'user/message' && event.data.source.kind === 'user'
+    && 'pendingRevision' in event.data.source) {
+    if (op === undefined || op === 'append' || !('replacesUserMessage' in event.data.source)
+      || event.data.source.replacesUserMessage !== op.startSeq) {
+      throw new Error('a pending user revision must replace its declared original prompt')
+    }
   }
   if (op !== undefined) assertSourceEventReferences(event, [])
   return op

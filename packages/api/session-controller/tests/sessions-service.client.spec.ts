@@ -962,16 +962,15 @@ describe('fork', () => {
     expect(b.mock.remote.session.fork).toHaveBeenCalledExactlyOnceWith({ sessionId: 'source', atSeq: 41 })
   })
 
-  it('forwards a last-message revision through the manager and retains its accepted display state', async ({ bench }) => {
+  it('forwards a last-message revision without creating another catalog entry', async ({ bench }) => {
     const b = bench()
     await feedList(b, [{ id: 'source', cwd: '/work' }])
-    b.mock.remote.session.fork.mockResolvedValue(ok({ sessionId: sid('child') }))
-    const editLastMessage = { seq: 41, text: 'Revised request', requestId: 'edit-1' as SessionRequestId }
-    await expect(b.svc.fork({ sessionId: sid('source'), editLastMessage })).resolves.toBe('child')
-    expect(b.mock.remote.session.fork).toHaveBeenCalledExactlyOnceWith({ sessionId: 'source', editLastMessage })
-    expect(b.svc.list.getSnapshot().byId[sid('child')]?.blank).toBe(false)
-    await feedList(b, [{ id: 'source', cwd: '/work' }, { id: 'child', cwd: '/work', blank: true }])
-    expect(b.svc.list.getSnapshot().byId[sid('child')]?.blank).toBe(false)
+    b.mock.remote.session.editLastMessage.mockResolvedValue(ok({ accepted: true }))
+    const request = { sessionId: sid('source'), seq: 41, text: 'Revised request', requestId: 'edit-1' as SessionRequestId }
+    await expect(b.svc.editLastMessage(request)).resolves.toBeUndefined()
+    expect(b.mock.remote.session.editLastMessage).toHaveBeenCalledExactlyOnceWith(request)
+    expect(b.mock.remote.session.fork).not.toHaveBeenCalled()
+    expect(Object.keys(b.svc.list.getSnapshot().byId)).toEqual(['source'])
   })
 
   it('does not rename without the title policy or a durable source title', async ({ bench }) => {

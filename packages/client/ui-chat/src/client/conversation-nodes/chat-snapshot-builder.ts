@@ -7,6 +7,7 @@ import type {
 import type { ChatConversationViewNode, ChatNode, ChatNodeDataMap, ChatNodeKind } from '../contract/chat-nodes.ts'
 import { isRunningTool } from '../contract/chat-nodes.ts'
 import { isVisibleChatNode } from '../contract/chat-visibility.ts'
+import { MessageRevisionProjector } from './message-revisions.ts'
 import type {
   ChatLocationNodeIndex, ChatNodeProcessSource, ChatNodeSource, ChatNodeStore, ChatSnapshot,
   ChatTurnNavigationIndex, ChatTurnProcessPresentation, LegacyConversationSlice, TurnNavigationItem,
@@ -1058,6 +1059,7 @@ export class ChatSnapshotBuilder implements ConversationViewBuilder<ChatConversa
   private readonly locations = new MutableChatLocationIndex()
   private readonly navigation = new MutableTurnNavigationIndex()
   private readonly legacy = new LegacySliceBuilder()
+  private readonly messageRevisions = new MessageRevisionProjector()
   private readonly referenceLabels = new ReferenceLabelProjector()
   private readonly skillNames = new SkillNameProjector()
   private order: readonly string[] = EMPTY_KEYS
@@ -1085,7 +1087,7 @@ export class ChatSnapshotBuilder implements ConversationViewBuilder<ChatConversa
     readonly nodes: readonly ChatConversationViewNode[]
     readonly timeline: ConversationTimelineSnapshot
   }): ChatSnapshot {
-    const nodes = this.skillNames.replace(this.referenceLabels.replace(input.nodes))
+    const nodes = this.messageRevisions.replace(this.skillNames.replace(this.referenceLabels.replace(input.nodes)))
     this.store.replace(nodes)
     this.order = orderedVisibleChatNodes(nodes).map(node => node.key)
     this.locations.rebuild(this.order, this.store)
@@ -1109,7 +1111,8 @@ export class ChatSnapshotBuilder implements ConversationViewBuilder<ChatConversa
     readonly timeline: ConversationTimelineSnapshot
     readonly changedTurns?: readonly number[]
   }): ChatSnapshot {
-    const upserts = this.skillNames.apply(this.referenceLabels.apply(input.upserts, this.store), this.store)
+    const decorated = this.skillNames.apply(this.referenceLabels.apply(input.upserts, this.store), this.store)
+    const upserts = this.messageRevisions.apply(decorated, this.store)
     const processTurns = new Set<number>()
     let structural = false
     const contentOnly: ChatConversationViewNode[] = []

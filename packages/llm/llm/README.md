@@ -58,6 +58,8 @@ After a successful mount, `ctx.llm.listProviders()` reports the registered route
 
 `GenerateOptions.messages` accepts durable `Message` values and request-only `RequestUserInput` values. Request-only inputs carry user-role content with no `id` or `source`; Session writes and Agent delivery still require durable messages. Callers keep auxiliary inputs unchanged until the stream settles. A caller that records its exact request, such as session-title generation, must use durable messages.
 
+`UserMessageSource` is the merge-extensible origin type for human input. Runtime owners may add durable admission metadata; provider adapters continue to translate the message content rather than forwarding Harness source metadata.
+
 ### What you can do
 
 - **Stream one model call** — `ctx.llm.stream(options)` yields raw chunks (token-level deltas) for any registered provider and model; consumers assemble them with `BlockAssembler`.

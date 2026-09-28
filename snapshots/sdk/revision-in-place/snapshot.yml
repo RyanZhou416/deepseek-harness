@@ -1,0 +1,8 @@
+version: 1
+scenario: revision-in-place
+profile: sdk
+composition: sdk-upload
+recording: authored
+header:
+  class: revision-in-place
+  pin: true

@@ -6,7 +6,7 @@ import type {
 } from '@deepseek-ai/dsh-attachment'
 import type { Branded } from '@deepseek-ai/dsh-brand'
 import type { LlmAttemptId, MessageId } from '@deepseek-ai/dsh-llm/brand'
-import type { TextBlock } from '@deepseek-ai/dsh-llm'
+import type { TextBlock, UserMessageSource as LlmUserMessageSource } from '@deepseek-ai/dsh-llm'
 import type { SessionId, SessionSeqCursor } from '@deepseek-ai/dsh-session/types'
 import type { SessionProjectionMap } from '@deepseek-ai/dsh-session-projection/types'
 import type { JsonValue } from '@deepseek-ai/dsh-util-values'
@@ -320,20 +320,22 @@ export interface SessionForkRequest {
   readonly sessionId: SessionId
   /** Exact inclusive source event seq; omission selects the latest completed-turn prefix. */
   readonly atSeq?: number
-  /** Redo the latest human prompt from its preceding history; mutually exclusive with atSeq. */
-  readonly editLastMessage?: {
-    /** Exact original user/message sequence, checked against the complete source log. */
-    readonly seq: number
-    /** Replacement text; the first version accepts text-only original prompts. */
-    readonly text: string
-    /** Stable identity for retries of this edit submission. */
-    readonly requestId: SessionRequestId
-  }
+
 }
 
 /** Identity of a newly forked Session. */
 export interface SessionForkValue {
   readonly sessionId: SessionId
+}
+
+/** Revision of the latest text prompt within its existing Session. */
+export interface SessionEditLastMessageRequest {
+  readonly sessionId: SessionId
+  /** Current user/message sequence; stale targets are rejected. */
+  readonly seq: number
+  readonly text: string
+  /** Stable identity for retries of this revision. */
+  readonly requestId: SessionRequestId
 }
 
 /** Session prompt request. */
@@ -407,7 +409,10 @@ export type SessionRequestId = Branded<'session-request-id'>
 declare module '@deepseek-ai/dsh-llm' {
   interface MessageSourceMap {
     /** Browser prompt correlation and optional Host-validated time zone. */
-    'user-rpc': { kind: 'user'; rpcId: SessionRequestId; clientTimeZone?: string }
+    'user-rpc': LlmUserMessageSource & {
+      rpcId: SessionRequestId
+      clientTimeZone?: string
+    }
   }
 }
 

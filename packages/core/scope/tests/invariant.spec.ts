@@ -52,6 +52,8 @@ describe('scoped-dispatch invariants', () => {
       'agent/inbox/claimed': [{ agent, message, turn: 1 }],
       'agent/inbox/discarded': [{ agent, message }],
       'agent/pre-step': [{ agent, messages: [message], turn: 1, step: 1, signal }, () => Promise.resolve({ kind: 'enter', messages: [message] })],
+      'agent/message-surface': [{ agent, message }, () => ({ surfaceOp: 'append' })],
+      'agent/prepare-input': [{ agent, messages: [message] }, () => {}],
       'agent/request': [{ agent, turn: 1, step: 1, signal }, () => Promise.resolve(config)],
       'agent/assistant-stream': [{
         agent,

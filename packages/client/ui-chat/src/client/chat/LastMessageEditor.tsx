@@ -11,9 +11,10 @@ import css from './LastMessageEditor.module.css'
  * @param props - Original text, current eligibility, submission, cancellation, and localized copy.
  * @returns An inline draft with explicit cancel and regenerate actions.
  */
-export function LastMessageEditor({ initialText, available, onSave, onCancel, t }: {
+export function LastMessageEditor({ initialText, available, allowUnchanged = false, onSave, onCancel, t }: {
   initialText: string
   available: boolean
+  allowUnchanged?: boolean
   onSave: (text: string, requestId: SessionRequestId) => Promise<void>
   onCancel: () => void
   t: ChatViewSlotProps['t']
@@ -24,7 +25,7 @@ export function LastMessageEditor({ initialText, available, onSave, onCancel, t 
   const sending = useRef(false)
   const submitted = useRef<{ text: string; id: SessionRequestId } | undefined>(undefined)
   const save = async (): Promise<void> => {
-    if (sending.current || !available || text.trim() === '' || text === initialText) return
+    if (sending.current || !available || text.trim() === '' || (!allowUnchanged && text === initialText)) return
     if (submitted.current?.text !== text) submitted.current = { text, id: randomUUID() as SessionRequestId }
     sending.current = true
     setPending(true)
@@ -60,7 +61,7 @@ export function LastMessageEditor({ initialText, available, onSave, onCancel, t 
       </p>}
       <div className={css.actions}>
         <Button disabled={pending} onClick={onCancel}>{t('message.edit.cancel')}</Button>
-        <Button type="submit" variant="primary" disabled={pending || !available || text.trim() === '' || text === initialText}>
+        <Button type="submit" variant="primary" disabled={pending || !available || text.trim() === '' || (!allowUnchanged && text === initialText)}>
           {t('message.edit.save')}
         </Button>
       </div>

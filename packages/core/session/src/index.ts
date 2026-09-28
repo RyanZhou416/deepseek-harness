@@ -866,8 +866,8 @@ export class Session {
       // oxlint-disable-next-line typescript/no-non-null-assertion
       const msg = this.deriveEventMessage(this.log[seq]!)
       // A surface node is one of the five message-producing types, but an
-      // empty-content assistant/message (a max-tokens step that hosts only
-      // usage) derives to null and must not enter the transcript.
+      // empty Assistant content and pending human revisions derive to null
+      // and must not enter model input.
       if (msg) this.derived.push(msg)
     }
     this.derivedNodes = nodes.length

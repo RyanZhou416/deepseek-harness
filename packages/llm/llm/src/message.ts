@@ -100,6 +100,11 @@ export type ContextFormed =
   | { readonly form: 'relay' }
   | { readonly form: 'recall' }
 
+/** Human input origin; runtime owners extend this interface with durable admission metadata. */
+export interface UserMessageSource {
+  readonly kind: 'user'
+}
+
 /**
  * Where a message (or injected content) came from, in the harness's own
  * vocabulary. Merge-extensible sum type — each producer declares its own
@@ -108,7 +113,7 @@ export type ContextFormed =
  * producer's kind, and consumers fall through unknown kinds.
  */
 export interface MessageSourceMap {
-  user: { kind: 'user' }
+  user: UserMessageSource
   model: ModelMessageSource
   tool: ToolMessageSource
   'system-prompt': SystemPromptMessageSource

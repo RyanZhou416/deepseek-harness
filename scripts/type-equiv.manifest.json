@@ -23,6 +23,11 @@
     },
     {
       "doc": "docs/subsystems/llm-streaming.md",
+      "symbol": "UserMessageSource",
+      "source": "packages/llm/llm/src/message.ts"
+    },
+    {
+      "doc": "docs/subsystems/llm-streaming.md",
       "symbol": "MessageSourceMap",
       "source": "packages/llm/llm/src/message.ts"
     },

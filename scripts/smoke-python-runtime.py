@@ -29,6 +29,8 @@ if TYPE_CHECKING:
 
 
 EXPECTED_TEXT = "runtime smoke ok"
+REVISION_ORIGINAL_PROMPT = "ORIGINAL_QUESTION"
+REVISION_PROMPT = "REVISED_QUESTION"
 LIVE_API_SENTINEL = "PYTHON_SDK_LIVE_OK"
 CODE_PROMPT = "Use run_code to compute the packaged worker smoke value."
 CODE_WORKER_TEXT = "code worker smoke ok"
@@ -362,6 +364,8 @@ def completion_chunks(body: dict[str, object]) -> list[dict[str, object]]:
             {"command": MINIMAL_SHELL_COMMAND},
         )
     scenario_prompts = {
+        REVISION_ORIGINAL_PROMPT,
+        REVISION_PROMPT,
         SNAPSHOT_DIRECT_CHILD_PROMPT,
         SNAPSHOT_WORKFLOW_CHILD_PROMPT,
         SNAPSHOT_PROMPT,
@@ -379,6 +383,13 @@ def completion_chunks(body: dict[str, object]) -> list[dict[str, object]]:
         (candidate for candidate in user_prompts if candidate in scenario_prompts),
         message_text(latest.get("content")),
     )
+    if prompt == REVISION_ORIGINAL_PROMPT:
+        return text_chunks("ORIGINAL_REPLY")
+    if prompt == REVISION_PROMPT:
+        encoded = json.dumps(messages)
+        if REVISION_ORIGINAL_PROMPT in encoded or "ORIGINAL_REPLY" in encoded:
+            raise AssertionError("same-session revision leaked obsolete model context")
+        return text_chunks("REVISED_REPLY")
     if prompt == SNAPSHOT_DIRECT_CHILD_PROMPT:
         return text_chunks("DIRECT_CHILD_OK")
     if prompt == AUTHORING_PROMPT:
@@ -720,7 +731,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--scenario",
-        choices=("all", "sdk-default", "sdk-custom", "sdk-minimal", "sdk-minimal-in-history", "sdk-fs-search", "sdk-spawn-node", "sdk-mcp", "sdk-snapshot", "sdk-restart", "sdk-profile-plugin", "sdk-office", "sdk-authoring", "sdk-live", "runner", "direct"),
+        choices=("all", "sdk-default", "sdk-custom", "sdk-minimal", "sdk-minimal-in-history", "sdk-fs-search", "sdk-spawn-node", "sdk-mcp", "sdk-snapshot", "sdk-revision", "sdk-restart", "sdk-profile-plugin", "sdk-office", "sdk-authoring", "sdk-live", "runner", "direct"),
         default="all",
     )
     parser.add_argument("--exe", type=Path)
@@ -739,10 +750,10 @@ def main() -> None:
         parser.error("--scenario sdk-profile-plugin requires --installed-wheel")
     if args.installed_wheel:
         args.exe = assert_installed_wheel_environment()
-    if args.scenario in {"all", "sdk-custom", "sdk-minimal", "sdk-minimal-in-history", "sdk-fs-search", "sdk-spawn-node", "sdk-snapshot", "sdk-restart", "sdk-office", "sdk-authoring", "runner", "direct"} and args.exe is None:
-        parser.error("--exe is required for custom, minimal, fs-search, spawn-node, snapshot, restart, office, runner, and direct scenarios")
-    if args.update_snapshots and args.scenario not in {"all", "sdk-minimal", "sdk-minimal-in-history", "sdk-snapshot", "sdk-restart", "sdk-authoring"}:
-        parser.error("--update-snapshots requires --scenario sdk-minimal, sdk-minimal-in-history, sdk-snapshot, sdk-restart, sdk-authoring, or all")
+    if args.scenario in {"all", "sdk-custom", "sdk-minimal", "sdk-minimal-in-history", "sdk-fs-search", "sdk-spawn-node", "sdk-snapshot", "sdk-revision", "sdk-restart", "sdk-office", "sdk-authoring", "runner", "direct"} and args.exe is None:
+        parser.error("--exe is required for custom, minimal, fs-search, spawn-node, snapshot, revision, restart, office, runner, and direct scenarios")
+    if args.update_snapshots and args.scenario not in {"all", "sdk-minimal", "sdk-minimal-in-history", "sdk-snapshot", "sdk-revision", "sdk-restart", "sdk-authoring"}:
+        parser.error("--update-snapshots requires --scenario sdk-minimal, sdk-minimal-in-history, sdk-snapshot, sdk-revision, sdk-restart, sdk-authoring, or all")
     if args.exe is not None and not args.exe.is_file():
         parser.error(f"runtime executable does not exist: {args.exe}")
 
@@ -791,6 +802,9 @@ def main() -> None:
         if args.scenario in {"all", "sdk-snapshot"}:
             assert args.exe is not None
             smoke_sdk_snapshot(model.url, args.exe.resolve(), args.update_snapshots)
+        if args.scenario in {"all", "sdk-revision"}:
+            assert args.exe is not None
+            smoke_sdk_revision(model.url, args.exe.resolve(), args.update_snapshots)
         if args.scenario in {"all", "sdk-restart"}:
             assert args.exe is not None
             smoke_sdk_restart_snapshot(model.url, args.exe.resolve(), args.update_snapshots)
@@ -1503,6 +1517,55 @@ def smoke_sdk_snapshot(base_url: str, executable: Path, update_snapshots: bool) 
         compare_snapshot_files(
             files, update_snapshots, ADVANCED_SNAPSHOT_DIRECTORY, ADVANCED_SNAPSHOT_FILENAMES,
             native_writer_output=True,
+        )
+
+
+def smoke_sdk_revision(base_url: str, executable: Path, update_snapshots: bool) -> None:
+    """Pin Python SDK visibility of a saved draft and its final same-session admission."""
+    from deepseek_harness import DeepSeekHarness
+
+    first_request = len(MockModelHandler.requests)
+    with tempfile.TemporaryDirectory(prefix="dsh-sdk-revision-") as temporary:
+        root = Path(temporary).resolve()
+        home = root / "home"
+        patch = root / "revision.patch.yml"
+        fixture = Path(__file__).resolve().parent.parent / "snapshots/sdk/revision-in-place/revise.mjs"
+        patch.write_text(json.dumps([{"insert": [{"id": "sdk-revision-fixture", "name": fixture.as_uri()}]}]), encoding="utf-8")
+        with DeepSeekHarness(
+            provider="deepseek-official", model="smoke-model", profile="sdk-minimal",
+            cwd=str(root), dsh_bin=str(executable), dsh_home=str(home), patches=(str(patch),),
+            env={"DSH_TELEMETRY_DISABLED": "1", "DSH_AGENTS_HOME": str(root / ".agents")},
+            api_key="sk-keyless-smoke", base_url=base_url, request_timeout_seconds=60,
+        ) as harness:
+            original = harness.run(REVISION_ORIGINAL_PROMPT, session_id="revision-smoke")
+            revised = harness.run(REVISION_PROMPT, session_id="revision-smoke")
+        logs = read_session_logs(home / "sessions")
+        assert len(logs) == 1, logs.keys()
+        assert original.session_id == revised.session_id
+        assert (original.final_response, revised.final_response) == ("ORIGINAL_REPLY", "REVISED_REPLY")
+        events = [event for event in [*original.events, *revised.events]
+                  if event.get("type") == "user/message" and event["data"]["source"]["kind"] == "user"]
+        operations = [event["surfaceOp"] if isinstance(event["surfaceOp"], str) else event["surfaceOp"]["op"]
+                      for event in events]
+        pending = [event["data"]["source"].get("pendingRevision", False) for event in events]
+        requests = MockModelHandler.requests[first_request:]
+        prompts = [[message_text(message.get("content")) for message in request["messages"]
+                    if message.get("role") == "user" and message_text(message.get("content"))
+                    in {REVISION_ORIGINAL_PROMPT, REVISION_PROMPT}] for request in requests]
+        observed = {
+            "same_session": True,
+            "session_count": len(logs),
+            "replies": [original.final_response, revised.final_response],
+            "user_operations": operations,
+            "pending_revisions": pending,
+            "model_prompts": prompts,
+        }
+        assert operations == ["append", "replace", "replace"], observed
+        assert pending == [False, True, False], observed
+        assert prompts == [[REVISION_ORIGINAL_PROMPT], [REVISION_PROMPT]], observed
+        compare_snapshot_files(
+            {"result.json": json.dumps(observed, indent=2) + "\n"}, update_snapshots,
+            Path(__file__).resolve().parent / "snapshots/python-sdk-single-exe/revision", ("result.json",),
         )
 
 

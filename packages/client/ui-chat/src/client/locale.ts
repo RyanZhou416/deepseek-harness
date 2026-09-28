@@ -7,7 +7,7 @@ export const NS = 'chat'
 export const zh = {
   'message.edit.open': '编辑最后一条消息',
   'message.edit.label': '修改消息',
-  'message.edit.hint': '将从这条消息重新生成，并保留原对话。已有的文件修改不会撤销',
+  'message.edit.hint': '将在当前会话替换这条消息和之后的回答，并重新生成。已有的文件修改不会撤销',
   'message.edit.save': '保存并重新生成',
   'message.edit.cancel': '取消',
   'message.edit.unavailable': '消息或运行状态已变化，请取消编辑后重试',
@@ -195,7 +195,7 @@ export type ChatKey = keyof typeof zh
 export const en = {
   'message.edit.open': 'Edit last message',
   'message.edit.label': 'Revised message',
-  'message.edit.hint': 'Regenerate from this message and keep the original conversation. Existing file changes remain.',
+  'message.edit.hint': 'Replace this message and its response in this conversation, then regenerate. Existing file changes remain.',
   'message.edit.save': 'Save and regenerate',
   'message.edit.cancel': 'Cancel',
   'message.edit.unavailable': 'The message or session state changed. Cancel editing and try again.',

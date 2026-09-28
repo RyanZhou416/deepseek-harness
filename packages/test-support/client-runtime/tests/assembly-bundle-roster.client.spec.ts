@@ -74,19 +74,19 @@ describe('bundleRoster on a scratch installation', () => {
   const scratch = new Scratch()
   afterAll(() => { rmSync(scratch.root, { recursive: true, force: true }) })
 
-  it('resolves a linked bundle dependency before an unrelated ancestor package', () => {
+  it('resolves a linked bundle itself and its dependency before unrelated ancestor packages', () => {
     const linked = new Scratch()
     onTestFinished(() => { rmSync(linked.root, { recursive: true, force: true }) })
     const bundle = join(linked.root, 'workspace', 'bundle')
     const dependency = join(bundle, 'node_modules', '@t', 'theme')
     mkdirSync(dependency, { recursive: true })
-    writeFileSync(join(bundle, 'package.json'), JSON.stringify({ name: '@t/linked', dsh: { bundle: { patch: './cordis.patch.yml' } } }))
-    writeFileSync(join(bundle, 'cordis.patch.yml'), "- insert:\n    - id: theme\n      name: '@t/theme'\n")
+    writeFileSync(join(bundle, 'package.json'), JSON.stringify({ name: '@t/linked', dsh: { bundle: { patch: './cordis.patch.yml' }, client: { platform: 'web' } } }))
+    writeFileSync(join(bundle, 'cordis.patch.yml'), "- insert:\n    - id: self\n      name: '@t/linked'\n    - id: theme\n      name: '@t/theme'\n")
     writeFileSync(join(dependency, 'package.json'), JSON.stringify({ name: '@t/theme', dsh: { client: { platform: 'web' } } }))
     linked.pkg('@t/theme', {})
     symlinkSync(bundle, join(linked.root, 'app', 'node_modules', '@t', 'linked'), 'junction')
     linked.bundle('@t/base', '- insert: []\n')
-    expect(linked.roster(['@t/base', '@t/linked'])).toEqual(['@t/theme'])
+    expect(linked.roster(['@t/base', '@t/linked'])).toEqual(['@t/linked', '@t/theme'])
   })
 
   it('applies the layers in order and keeps enabled browser rows once, with their dsh.client declaration', () => {

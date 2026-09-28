@@ -446,7 +446,7 @@ describe('web e2e: message IconActions and clocks on settled history', () => {
 
   it.skipIf(MODE === 'record')('regenerates from the revised last prompt through the loaded application', async () => {
     onTestFailed(() => saveFailureShot(page, 'last-message-regenerate'))
-    const adapter = new MockAdapter([textResponse('REVISED ANSWER')])
+    const adapter = new MockAdapter([textResponse('REVISED ANSWER'), textResponse('SECOND REVISED ANSWER')])
     adapter.listModels = async provider => [{ provider, id: 'test-model', name: 'Edit test model' }]
     const dispose = scaffold.ctx.effect(() => scaffold.ctx.llm.registerAdapter(['message-edit-test'], adapter))
     try {
@@ -457,12 +457,16 @@ describe('web e2e: message IconActions and clocks on settled history', () => {
       await page.getByText('Use the read tool twice', { exact: true }).click()
       await page.getByRole('button', { name: 'Edit last message', exact: true }).click()
       await page.getByRole('textbox', { name: 'Revised message', exact: true }).fill('REVISED QUESTION')
-      const response = page.waitForResponse(response => new URL(response.url()).pathname === '/api/session/fork')
+      const existingAgents = scaffold.ctx.agents.list().map(agent => agent.id).sort()
+      const selectedUrl = page.url()
+      const response = page.waitForResponse(response => new URL(response.url()).pathname === '/api/session/editLastMessage')
       await page.getByRole('button', { name: 'Save and regenerate', exact: true }).click()
       const body = await (await response).json() as { result: { ok: boolean } }
       expect(body.result.ok, JSON.stringify(body)).toBe(true)
       await page.getByText('REVISED ANSWER', { exact: true }).waitFor({ timeout: 15_000 })
       expect(adapter.requests).toHaveLength(1)
+      expect(scaffold.ctx.agents.list().map(agent => agent.id).sort()).toEqual(existingAgents)
+      expect(page.url()).toBe(selectedUrl)
       const request = JSON.stringify(adapter.requests[0]!.messages)
       expect(request).toContain('REVISED QUESTION')
       expect(request).toContain(SECOND_PROMPT)
@@ -475,6 +479,22 @@ describe('web e2e: message IconActions and clocks on settled history', () => {
       await page.getByText('REVISED ANSWER', { exact: true }).waitFor({ timeout: 15_000 })
       acknowledgeReloadConnectionLoss(tripwire, warningStart)
       expect(await page.getByText(NEXT_PROMPT, { exact: true }).count()).toBe(0)
+      await page.getByRole('button', { name: 'Edit last message', exact: true }).click()
+      const revisedEditor = page.getByRole('textbox', { name: 'Revised message', exact: true })
+      expect(await revisedEditor.inputValue()).toBe('REVISED QUESTION')
+      await revisedEditor.fill('SECOND REVISED QUESTION')
+      await page.getByRole('button', { name: 'Save and regenerate', exact: true }).click()
+      await page.getByText('SECOND REVISED ANSWER', { exact: true }).waitFor({ timeout: 15_000 })
+      expect(adapter.requests).toHaveLength(2)
+      expect(scaffold.ctx.agents.list().map(agent => agent.id).sort()).toEqual(existingAgents)
+      expect(page.url()).toBe(selectedUrl)
+      const currentRequest = adapter.requests[1]!.messages.flatMap(message => message.content)
+        .flatMap(block => block.type === 'text' ? [block.text] : [])
+      expect(currentRequest).toContain('SECOND REVISED QUESTION')
+      expect(currentRequest).not.toContain('REVISED QUESTION')
+      expect(currentRequest).not.toContain('REVISED ANSWER')
+      expect(await page.getByText('REVISED QUESTION', { exact: true }).count()).toBe(0)
+      expect(await page.getByText('REVISED ANSWER', { exact: true }).count()).toBe(0)
     } finally {
       await dispose()
     }

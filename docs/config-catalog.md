@@ -115,7 +115,7 @@ export interface Config {
 
 Depends on: [`AgentOptions`](subsystems/core.md) · [`SessionId`](subsystems/core.md) · `Volatile` (`@deepseek-ai/cosmokit`)
 
-Source: [`packages/core/agent-loop/src/index.ts:292`](../packages/core/agent-loop/src/index.ts)
+Source: [`packages/core/agent-loop/src/index.ts:293`](../packages/core/agent-loop/src/index.ts)
 
 <a id="deepseek-aidsh-agent-preset"></a>
 
@@ -230,7 +230,7 @@ export interface Config {
 }
 ```
 
-Source: [`packages/api/session-controller/src/index.ts:81`](../packages/api/session-controller/src/index.ts)
+Source: [`packages/api/session-controller/src/index.ts:82`](../packages/api/session-controller/src/index.ts)
 
 <a id="deepseek-aidsh-api-settings-controller"></a>
 

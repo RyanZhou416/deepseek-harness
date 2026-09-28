@@ -323,6 +323,8 @@ export const UserMessageNodeView = memo(function UserMessageNodeView({
   if (editing && editLastMessage !== undefined) {
     return <LastMessageEditor
       initialText={contentParts(data.content).text}
+      allowUnchanged={typeof data.source === 'object' && data.source !== null
+        && 'pendingRevision' in data.source && data.source.pendingRevision === true}
       available={canEdit}
       onSave={(text, requestId) => editLastMessage(data.seq, text, requestId)}
       onCancel={() => { setEditing(false) }}

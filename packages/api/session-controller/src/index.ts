@@ -42,6 +42,7 @@ import type {
   SessionFollowRequest,
   SessionForkRequest,
   SessionForkValue,
+  SessionEditLastMessageRequest,
   SessionListRequest,
   SessionListValue,
   SessionOpenWorkspacePathRequest,
@@ -409,6 +410,16 @@ export class SessionController extends TypertRemoteService {
   @Remote('fork')
   fork(request: SessionForkRequest): Promise<SessionForkValue> {
     return this.commands.fork(request)
+  }
+
+  /**
+   * Revise the latest prompt and regenerate inside the same Session.
+   * @param request - target prompt, revised text, and stable submission identity.
+   * @returns acknowledgement that the revision entered the inbox.
+   */
+  @Remote('editLastMessage')
+  editLastMessage(request: SessionEditLastMessageRequest): Promise<SessionPromptValue> {
+    return this.commands.editLastMessage(request)
   }
 
   /**

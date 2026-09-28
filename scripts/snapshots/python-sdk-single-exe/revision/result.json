@@ -1,0 +1,26 @@
+{
+  "same_session": true,
+  "session_count": 1,
+  "replies": [
+    "ORIGINAL_REPLY",
+    "REVISED_REPLY"
+  ],
+  "user_operations": [
+    "append",
+    "replace",
+    "replace"
+  ],
+  "pending_revisions": [
+    false,
+    true,
+    false
+  ],
+  "model_prompts": [
+    [
+      "ORIGINAL_QUESTION"
+    ],
+    [
+      "REVISED_QUESTION"
+    ]
+  ]
+}

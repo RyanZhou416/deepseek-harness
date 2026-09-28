@@ -58,6 +58,8 @@ for await (const chunk of ctx.llm.stream({
 
 `GenerateOptions.messages` 接受持久 `Message` 值和仅供请求使用的 `RequestUserInput` 值。仅供请求使用的输入包含 user-role 内容，不含 `id` 或 `source`；Session 写入和 Agent 投递仍然要求持久消息。调用方必须在流结束前保持辅助输入不变。会记录完整请求的调用方（例如会话标题生成）必须使用持久消息。
 
+`UserMessageSource` 是人工输入来源的可合并扩展类型。运行时所有者可以添加持久化准入元数据；提供方适配器仍转换消息内容，不会将 Harness 来源元数据转发给模型。
+
 ### 你可以做什么
 
 - **流式发起一次模型调用**——`ctx.llm.stream(options)` 为任何已注册提供方与模型产出原始分片（token 级增量）；消费方用 `BlockAssembler` 组装。

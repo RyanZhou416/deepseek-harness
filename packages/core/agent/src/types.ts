@@ -17,6 +17,13 @@ export interface Agent {
   readonly id: SessionId
 }
 
+declare module '@deepseek-ai/dsh-llm' {
+  interface UserMessageSource {
+    /** Replace the latest current human prompt and its response when this input is admitted. */
+    readonly replacesUserMessage?: SessionSeq
+  }
+}
+
 declare module '@deepseek-ai/dsh-workspace/types' {
   interface SessionActivityKindMap {
     /** The session's own Agent is inside a turn, including one waiting for an approval or an answer. */
@@ -37,6 +44,12 @@ declare module '@deepseek-ai/dsh-typert-protocol' {
 
 /** One of the two ordered pending-message lists owned by an agent. */
 export type InboxTarget = 'next-turn' | 'next-step'
+
+/** Small Host state for the most recent human input and a revision awaiting final admission. */
+export interface UserInputProjection {
+  readonly latest: { readonly seq: SessionSeq; readonly textOnly: boolean } | null
+  readonly pending: { readonly seq: SessionSeq; readonly replaces: SessionSeq } | null
+}
 
 /** Complete pending Inbox value reconstructed from durable splices. */
 export interface InboxState {
@@ -59,6 +72,8 @@ declare module '@deepseek-ai/dsh-session-projection/types' {
   interface SessionProjectionStateMap {
     /** Pending agent input reconstructed from durable inbox splices. */
     inbox: InboxState
+    /** Latest human input and pending revision coordinates, without historical message bodies. */
+    userInput: UserInputProjection
   }
   interface SessionProjectionMap {
     /** Pending agent input reconstructed from durable inbox splices. */

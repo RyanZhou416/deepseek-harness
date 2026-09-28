@@ -25,7 +25,7 @@ kind: "package-reference"
 <a id="use-this-package"></a>
 ## 使用本包
 
-`session.fork` 可用 `editLastMessage: { seq, text, requestId }` 替代 `atSeq`，重做最后一条纯文本人工输入。Host 为没有待处理输入的空闲源会话保留执行权，根据完整日志验证目标，严格在该消息之前分叉，并使用源会话当前选择的模型在子会话提交修改。原问题和原回答不会进入重新生成的请求。稳定的编辑请求 ID 使重试返回同一个子会话；编辑操作本身保留原始历史和文件系统状态。
+`session.editLastMessage({ sessionId, seq, text, requestId })` 在同一个空闲且无待处理输入的 Session 内修改当前最后一条纯文本人工提示词。持久化 inbox 凭证使重试保持幂等，包括请求准备尚未完成时。修改后的文本仍经过普通 pre-step 处理器。在上下文组装前，待处理修改替换旧提示词及其上下文后缀；处理后的输入在请求准入时替换草稿，后续模型请求只包含此前历史和修改后的消息。原事件仍保留在仅追加日志中，用于回放和费用统计。不会复制 Session 或 Agent，也不会撤销文件系统副作用。
 
 历史页与 follow opening 快照为每个持久 Session 事件携带一条 `{ type: 'event', event: SessionWireEvent }` record。Client 把每条已接受 record 保留为一个持久 `SessionEventLikeEntry`；Assistant token 边界保留在 `assistant/message` 或 `assistant/attempt` 的紧凑流内。工具参数、结果内容、失败信息和 `tool/result.data.meta` 原样通过；控制器不解析工具定义、不运行展示转换器，也不附加 UI 数据。
 

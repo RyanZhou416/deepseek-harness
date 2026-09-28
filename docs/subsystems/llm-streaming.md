@@ -76,6 +76,13 @@ type Message = MessageRoleMap[keyof MessageRoleMap]
 Where a message came from is itself a merge-extensible sum type:
 
 ```ts type-equiv
+/** Human input origin; runtime owners extend this interface with durable admission metadata. */
+interface UserMessageSource {
+  readonly kind: 'user'
+}
+```
+
+```ts type-equiv
 /**
  * Where a message (or injected content) came from, in the harness's own
  * vocabulary. Merge-extensible sum type — each producer declares its own
@@ -84,7 +91,7 @@ Where a message came from is itself a merge-extensible sum type:
  * producer's kind, and consumers fall through unknown kinds.
  */
 interface MessageSourceMap {
-  user: { kind: 'user' }
+  user: UserMessageSource
   model: ModelMessageSource
   tool: ToolMessageSource
   'system-prompt': SystemPromptMessageSource

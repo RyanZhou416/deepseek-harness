@@ -1,0 +1,5 @@
+- insert:
+    - id: sdk-revision-fixture
+      name: './revise.mjs'
+      config:
+        isolatePrompt: true

@@ -279,6 +279,7 @@ export class ReactLoopAgent implements Agent {
     if (this.phase.kind !== 'running') throw new Error(`agent "${this.id}": pre-step outside running phase`)
     const signal = this.phase.abort.signal
     const claimed = this.inbox.claim(target, position.turn)
+    this.dispatch.waterfall('agent/prepare-input', { messages: claimed }, () => {})
     const assembly = await this.loopCtx.systemPrompt.assemble(assembleContextFor(this, signal))
     signal.throwIfAborted()
     const sections = renderContextSections(assembly)
@@ -414,7 +415,8 @@ export class ReactLoopAgent implements Agent {
       }
       if (firstAttempt) {
         for (const message of decision.messages) {
-          this.session.append('user/message', message, { surfaceOp: 'append' })
+          const intent = this.dispatch.waterfall('agent/message-surface', { message }, () => ({ surfaceOp: 'append' }))
+          this.session.append('user/message', message, intent)
         }
       }
       firstAttempt = false

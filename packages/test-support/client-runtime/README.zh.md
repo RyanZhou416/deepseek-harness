@@ -48,6 +48,8 @@ await runtime.dispose()
 
 Session fixture 从显式提供的地址或已加载的父级投影解析子代理地址，不会保留 Session generation。
 
+Sessions fixture 记录 `editLastMessage` 准入而不创建另一个 Session，调用方负责发布产生的事件窗口。Bundle roster 发现会从链接 bundle 自身的 manifest 解析其同名行，即使仓库根目录未提升该包也能工作。
+
 ### 局部 DOM 快照
 
 注册的快照序列化器把 CSS-module 哈希类名折回语义名（`_frame_a1b2c3` → `frame`），使 `.snap` 文件只含结构，并把 `<svg>` 内部折叠为 `data-content` 指纹。需要自定义页面 frame 的套件改用 `root.declare(children, Frame)` 而非自动 frame；`dispose()` 沿单一轴拆除视图、功能 fiber、已铸 scope 与持久化存储状态，且幂等。

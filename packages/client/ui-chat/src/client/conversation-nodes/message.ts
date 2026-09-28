@@ -12,6 +12,8 @@ interface ReferencedUserMessageNode extends UserMessageNode {
   readonly referenceLabels?: readonly string[]
   /** Skill names the same step's `skill-invocation` injections loaded. */
   readonly skillNames?: readonly string[]
+  /** Original conversation rows superseded by this committed revision. */
+  readonly editedRange?: { readonly start: number; readonly before: number }
 }
 
 interface ReferencedSteeringMessageNode extends SteeringMessageNode {
@@ -48,8 +50,9 @@ export const messageDefinition: ConversationNodeDefinition<MessageNode> = {
   target: 'chat',
   match: (event) => {
     if (event.type === 'user/message') {
-      return isAppendSurfaceEvent(event) && !isCompactionCheckpoint(event)
-        ? { id: String(event.data.id), role: 'start' }
+      return (isAppendSurfaceEvent(event) || isHumanRevision(event)) && !isCompactionCheckpoint(event)
+        ? { id: isHumanRevision(event) && 'replacesUserMessage' in event.data.source
+          ? `revision:${String(event.data.source.replacesUserMessage)}` : String(event.data.id), role: 'start' }
         : null
     }
     // Developer history is persisted for V4; presentation is intentionally deferred.
@@ -95,19 +98,33 @@ export const messageDefinition: ConversationNodeDefinition<MessageNode> = {
       }
       : {
         kind: 'user',
+        ...(isHumanRevision(event) && event.surfaceOp !== 'append' ? {
+          editedRange: {
+            start: event.surfaceOp.startSeq,
+            before: match.location.kind === 'step' || match.location.kind === 'turn' ? match.location.turn.start?.seq ?? event.seq : event.seq,
+          },
+        } : {}),
         seq: event.seq,
         time: event.time,
         content: event.data.content,
         source: event.data.source,
       }
   },
-  update: context => context.state,
+  update: (context, match) => {
+    if (context.state.kind !== 'user' || match.event.type !== 'user/message' || !isHumanRevision(match.event)) return context.state
+    return { ...context.state, seq: match.event.seq, time: match.event.time,
+      content: match.event.data.content, source: match.event.data.source }
+  },
   buildViewNode: (context) => {
     if (context.state === undefined) return null
     const waking = context.state.kind === 'context'
       && context.start?.event.type === 'user/message'
       && context.state.waking === true
-    return chatNode(context, waking ? 'turn-trigger' : context.state.kind, context.state.seq, context.state)
+    const revision = context.state.kind === 'user' && context.state.editedRange !== undefined
+    const anchorSeq = revision ? context.start?.event.seq ?? context.state.seq : context.state.seq
+    return chatNode(context, waking ? 'turn-trigger' : context.state.kind, anchorSeq, context.state,
+      revision
+        ? { location: context.matches.at(-1)?.location ?? context.start?.location ?? { kind: 'unresolved' } } : {})
   },
 }
 
@@ -117,4 +134,10 @@ export const messageDefinition: ConversationNodeDefinition<MessageNode> = {
  */
 export function registerMessageConversationNode(ctx: Context): void {
   ctx.uiConversation.events.register(messageDefinition)
+}
+
+/** Human revisions are visible prompts; other surface replacements remain model-only. */
+function isHumanRevision(event: Parameters<ConversationNodeDefinition['match']>[0]): boolean {
+  return event.type === 'user/message' && isReplacementSurfaceEvent(event)
+    && event.data.source.kind === 'user' && 'replacesUserMessage' in event.data.source
 }

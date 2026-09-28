@@ -125,6 +125,10 @@ interface SdkAssertions {
 }
 
 const SDK_ASSERTIONS: Readonly<Record<string, SdkAssertions>> = {
+  'revision-in-place': {
+    patches: [fileURLToPath(new URL('./revision-in-place/runtime.cordis.yml', import.meta.url))],
+    expectedFinalResponse: 'REVISED_REPLY',
+  },
   'tool-error-details': {
     patches: [fileURLToPath(new URL('./tool-error-details/runtime.cordis.yml', import.meta.url))],
     expectedFinalResponse: 'ERROR_DETAILS_OK',
@@ -346,7 +350,7 @@ async function hydrateReplayFixtures(scenario: CorpusScenario, cwd: string): Pro
   await mkdir(root, { recursive: true })
   return Promise.all((await fixtureFiles(scenario)).map(async (source) => {
     const destination = join(root, basename(source))
-    await writeFile(destination, (await readFile(source, 'utf8')).replaceAll('{{cwd}}', cwd))
+    await writeFile(destination, (await readFile(source, 'utf8')).replaceAll('{{cwd}}', cwd.replaceAll('\\', '/')))
     return destination
   }))
 }
@@ -849,6 +853,16 @@ describe('TypeScript SDK snapshots over the jsonrpc runtime', () => {
         expect(denied).toMatchObject({ data: {
           message: { content: [{ type: 'text', text: expect.stringContaining('subagent limit reached (active child limit: 1)') }], isError: true },
         } })
+      }
+      if (scenario.name === 'revision-in-place') {
+        expect(ordered).toHaveLength(1)
+        const endings = results.map(result => result.events.filter(event => event.type === 'turn/end'))
+        expect(results.map(result => result.finalResponse), JSON.stringify(endings)).toEqual(['ORIGINAL_REPLY', 'REVISED_REPLY'])
+        const rows = records(ordered[0]!.content).filter(row => row.type === 'user/message')
+          .filter(row => (row.data as JsonObject).source !== undefined && ((row.data as JsonObject).source as JsonObject).kind === 'user')
+        expect(rows).toHaveLength(3)
+        expect(rows[1]).toMatchObject({ data: { source: { pendingRevision: true } }, surfaceOp: { op: 'replace' } })
+        expect(rows[2]).toMatchObject({ surfaceOp: { op: 'replace' } })
       }
       if (scenario.name === 'tool-error-details') {
         const events = results.flatMap(result => result.events)

@@ -48,6 +48,8 @@ The optional render options select a keyed entry with `entryKey` or a list item 
 
 The Session fixture resolves subagent addresses from explicitly supplied addresses or loaded parent projections without retaining a Session generation.
 
+The Sessions fixture records `editLastMessage` admission without creating another Session; callers publish the resulting event window. Bundle roster discovery resolves a linked bundle’s own rows from its manifest even when the repository root does not hoist that package.
+
 ### Local DOM snapshots
 
 A registered snapshot serializer folds CSS-module class hashes (`_frame_a1b2c3` → `frame`) so `.snap` files stay structural, and collapses `<svg>` internals to a `data-content` fingerprint. Suites needing a custom page frame use `root.declare(children, Frame)` instead of the auto frame; `dispose()` tears down views, feature fibers, minted scopes, and persisted store state on one axis and is idempotent.

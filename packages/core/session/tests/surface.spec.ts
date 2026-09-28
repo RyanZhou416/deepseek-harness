@@ -6,6 +6,7 @@ import {
   SessionLogOffset,
   SessionSeq,
   foldSurface,
+  deriveEventMessage,
   snapshotSessionEvent,
   isAppendSurfaceEvent,
   isReplacementSurfaceEvent,
@@ -1020,5 +1021,34 @@ describe('developer message history', () => {
     expect(isSurfaceEligibleType('developer/message')).toBe(true)
     const restored = Session.fromRestore(session.id, session.snapshotEvents(), session.header, SessionLogOffset(0), 'shared-frozen')
     expect(restored.deriveMessages()).toEqual([replacement])
+  })
+})
+
+describe('pending human revisions', () => {
+  it('keeps a saved draft out of model history until processed input replaces it', () => {
+    const session = Session.create(SessionId('pending-revision'))
+    const original = session.append('user/message', createUserMessage({ content: [{ type: 'text', text: 'original' }], source: { kind: 'user' } }), { surfaceOp: 'append' })
+    const draft = session.append('user/message', createUserMessage({ content: [{ type: 'text', text: 'draft' }], source: { kind: 'user', replacesUserMessage: original.seq, pendingRevision: true } }),
+      { surfaceOp: { op: 'replace', startSeq: original.seq, endSeq: original.seq }, sourceEventSeqs: [original.seq] })
+    expect(session.deriveMessages()).toEqual([])
+    expect(deriveEventMessage(draft, new Map([[draft.seq, createUserMessage({ content: [{ type: 'text', text: 'projected' }], source: { kind: 'user' } })]]))).toBeNull()
+    expect(session.eventAt(draft.seq)?.data).toMatchObject({ content: [{ type: 'text', text: 'draft' }] })
+    session.append('user/message', createUserMessage({ content: [{ type: 'text', text: 'processed' }], source: { kind: 'user', replacesUserMessage: original.seq } }),
+      { surfaceOp: { op: 'replace', startSeq: draft.seq, endSeq: draft.seq }, sourceEventSeqs: [draft.seq] })
+    expect(session.deriveMessages().flatMap(message => message.content)).toEqual([{ type: 'text', text: 'processed' }])
+    expect(Session.create(session.id, session.snapshotEvents(), session.header).deriveMessages()).toEqual(session.deriveMessages())
+  })
+
+  it('rejects pending revisions that append or name a different original node', () => {
+    const session = Session.create(SessionId('invalid-pending-revision'))
+    const original = session.append('user/message', createUserMessage({ content: [{ type: 'text', text: 'original' }], source: { kind: 'user' } }), { surfaceOp: 'append' })
+    const pending = createUserMessage({ content: [{ type: 'text', text: 'draft' }], source: { kind: 'user', replacesUserMessage: SessionSeq(99), pendingRevision: true } })
+    expect(() => session.append('user/message', pending, { surfaceOp: 'append' })).toThrow('pending user revision')
+    expect(() => session.append('user/message', pending, {
+      surfaceOp: { op: 'replace', startSeq: original.seq, endSeq: original.seq }, sourceEventSeqs: [original.seq],
+    })).toThrow('pending user revision')
+    expect(session.deriveMessages()).toHaveLength(1)
+    const invalid = JSON.stringify([{ ...original, data: { ...original.data, source: { kind: 'user', pendingRevision: false } } }])
+    expect(() => Session.create(session.id, JSON.parse(invalid) as SessionEvent[])).toThrow('pendingRevision must be true')
   })
 })

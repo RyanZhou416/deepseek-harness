@@ -8,6 +8,7 @@ import type {
   SessionControlBaseline,
   SessionControlFrame,
   SessionForkRequest,
+  SessionEditLastMessageRequest,
   SessionProjectionHints,
   SessionRenameValue,
   SessionSummary,
@@ -527,7 +528,7 @@ export class SessionManager {
    * preserve it or lower it after an exact cut before the first `turn/start`;
    * lineage rides parentSessionId. A child published before Workspace
    * attachment fails is also reconciled into the list.
-   * @param opts - source session and either an inclusive boundary or an idempotent last-message edit.
+   * @param opts - source session and optional inclusive boundary.
    * @returns the fork result (the child session id).
    */
   async fork(
@@ -537,20 +538,27 @@ export class SessionManager {
     const result = await this.remote.session.fork({
       sessionId: opts.sessionId,
       ...opts.atSeq === undefined ? {} : { atSeq: opts.atSeq },
-      ...opts.editLastMessage === undefined ? {} : { editLastMessage: opts.editLastMessage },
     })
     const childId = result.ok
       ? result.value.sessionId
       : workspaceAttachSessionId(result.error)
     if (childId !== undefined) {
-      if (result.ok && opts.editLastMessage !== undefined) this.engagedSessions.add(childId)
       this.recordMutation({ kind: 'placeholder', summary: { agentAvailable: true,
-        sessionId: childId, updatedAt: Date.now(), running: false, blank: opts.editLastMessage === undefined,
+        sessionId: childId, updatedAt: Date.now(), running: false, blank: true,
         parentSessionId: opts.sessionId,
         ...(source?.cwd !== undefined ? { cwd: source.cwd } : {}),
       } })
     }
     return result
+  }
+
+  /**
+   * Submit a revision without changing catalog or selection identity.
+   * @param request - same-session prompt revision.
+   * @returns durable admission receipt or the Host refusal.
+   */
+  editLastMessage(request: SessionEditLastMessageRequest): Promise<RemoteResult<{ accepted: true }>> {
+    return this.remote.session.editLastMessage(request)
   }
 
   /**

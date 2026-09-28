@@ -65,7 +65,7 @@ Preference menus restore focus to their trigger without scrolling before publish
 <a id="completed-turn-footer"></a>
 ## Completed-turn footer
 
-The latest ordinary text-only user message offers **Edit last message** while the Session is idle and has no pending input. **Save and regenerate** opens a continuation containing only the history before that prompt and the revised text; the original prompt and its response remain in the original Session. Cancelling or a failed submission preserves the original conversation, and a failure keeps the edit draft. Editing does not undo file changes or other tool effects. This operation creates a new Session identity, so provider cache affinity may change.
+The latest ordinary text-only user message offers **Edit last message** while the Session is idle and has no pending input. **Save and regenerate** replaces that prompt and its following response in the current conversation; its Session identity, title, and selection remain unchanged. The model receives the earlier history plus the revised text. Chat hides the superseded rows on live updates and history reload, while the raw log and spent-token accounting retain them. Cancelling or failed admission keeps the original conversation and draft. Editing does not undo file changes or other tool effects.
 
 Artifact extensions can subscribe to one Turn and Node kind through `ChatNodeStore.turnDataSource`. The source includes hidden Nodes and exposes their business data in anchor order. Membership updates incrementally; only observed collections materialize ordered arrays, and unrelated Turns or kinds do not notify them.
 

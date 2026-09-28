@@ -311,7 +311,7 @@ export class TestSessions implements ISessions {
 
   /** Calls observed on the service-level face, newest last. */
   readonly calls: {
-    method: 'create' | 'refreshProjections' | 'refresh' | 'search' | 'fork'
+    method: 'create' | 'refreshProjections' | 'refresh' | 'search' | 'fork' | 'editLastMessage'
     args: unknown[]
   }[] = []
 
@@ -680,6 +680,16 @@ export class TestSessions implements ISessions {
   fork(opts: { sessionId: SessionId; atSeq?: number; increaseTitle?: boolean }): Promise<SessionId> {
     this.calls.push({ method: 'fork', args: [opts] })
     return Promise.resolve(opts.sessionId)
+  }
+
+  /**
+   * Record revision admission; fixture callers publish the resulting event window.
+   * @param request - exact production edit request.
+   * @returns completed fixture admission.
+   */
+  editLastMessage(request: Parameters<ISessions['editLastMessage']>[0]): Promise<void> {
+    this.calls.push({ method: 'editLastMessage', args: [request] })
+    return Promise.resolve()
   }
 
   /**

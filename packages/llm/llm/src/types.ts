@@ -35,6 +35,7 @@ export type {
   ToolMessageSource,
   ToolResultMessage,
   UserMessage,
+  UserMessageSource,
 } from './message.ts'
 
 /** Serializable provider or transport failure facts; policy decides whether they are retryable. */

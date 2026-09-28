@@ -10,7 +10,7 @@ import type { Scoped } from '@deepseek-ai/dsh-scope'
 import type {
   LlmAttemptId, LlmCallConfig, LlmFailure, MessageId, ReasoningEffortId, ResolvedRetryPolicy, StreamChunk,
 } from '@deepseek-ai/dsh-llm'
-import type { AgentCancelCause, Session, SessionSeq, UserMessage } from '@deepseek-ai/dsh-session'
+import type { AgentCancelCause, Session, SessionSeq, SurfaceIntent, UserMessage } from '@deepseek-ai/dsh-session'
 export type { AgentCancelCause } from '@deepseek-ai/dsh-session'
 import type { Agent, InboxTarget } from './types.ts'
 export type { Agent } from './types.ts'
@@ -322,6 +322,25 @@ declare module '@deepseek-ai/cordis' {
      * @mode waterfall
      */
     'agent/pre-step'(this: Scoped<Agent>, payload: { agent: Agent; messages: UserMessage[]; turn: number; step: number; signal: AbortSignal }, next: () => Promise<PreStepDecision>): Promise<PreStepDecision>
+    /**
+     * Resolve a user's surface placement synchronously at durable admission.
+     * The default appends. Replacements cite the current nodes they shadow.
+     * @param payload.agent - agent admitting the processed message.
+     * @param payload.message - accepted message after pre-step processing.
+     * @param next - remaining placement listeners; the default appends.
+     * Scope-filtered dispatch (`@deepseek-ai/dsh-scope`): agent-scoped listeners receive only that agent.
+     * @mode waterfall
+     */
+    'agent/message-surface'(this: Scoped<Agent>, payload: { agent: Agent; message: UserMessage }, next: () => SurfaceIntent<'user/message'>): SurfaceIntent<'user/message'>
+    /**
+     * Prepare claimed input synchronously before prompt assembly and pre-step processors.
+     * @param payload.agent - owner of the claimed input and current history.
+     * @param payload.messages - messages claimed for the proposed step.
+     * @param next - remaining input preparation listeners; the default does nothing.
+     * Scope-filtered dispatch (@deepseek-ai/dsh-scope): agent-scoped listeners receive only that agent.
+     * @mode waterfall
+     */
+    'agent/prepare-input'(this: Scoped<Agent>, payload: { agent: Agent; messages: UserMessage[] }, next: () => void): void
     /**
      * Replace the frozen call configuration. `await next()` yields the config
      * the machine would use (agent options on the first request, the logged

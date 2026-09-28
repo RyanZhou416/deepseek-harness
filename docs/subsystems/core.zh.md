@@ -930,6 +930,29 @@ Types: [Scoped](scope.zh.md) · [UserMessage](session.zh.md)
 
 Source: [`packages/core/agent/src/runtime-types.ts`](../../packages/core/agent/src/runtime-types.ts)
 
+<a id="agentmessage-surface--waterfall"></a>
+
+#### `agent/message-surface` — waterfall
+
+Resolve a user's surface placement synchronously at durable admission. The default appends. Replacements cite the current nodes they shadow.
+
+```ts cordis-catalog
+/**
+ * Resolve a user's surface placement synchronously at durable admission.
+ * The default appends. Replacements cite the current nodes they shadow.
+ * @param payload.agent - agent admitting the processed message.
+ * @param payload.message - accepted message after pre-step processing.
+ * @param next - remaining placement listeners; the default appends.
+ * Scope-filtered dispatch (`@deepseek-ai/dsh-scope`): agent-scoped listeners receive only that agent.
+ * @mode waterfall
+ */
+'agent/message-surface'(this: Scoped<Agent>, payload: { agent: Agent; message: UserMessage }, next: () => SurfaceIntent<'user/message'>): SurfaceIntent<'user/message'>
+```
+
+Types: [Scoped](scope.zh.md) · [SurfaceIntent](session.zh.md) · [UserMessage](session.zh.md)
+
+Source: [`packages/core/agent/src/runtime-types.ts`](../../packages/core/agent/src/runtime-types.ts)
+
 <a id="agentpre-step--waterfall"></a>
 
 #### `agent/pre-step` — waterfall
@@ -949,6 +972,28 @@ Reject a proposed step or replace the messages that enter it. Calling `next()` p
  * @mode waterfall
  */
 'agent/pre-step'(this: Scoped<Agent>, payload: { agent: Agent; messages: UserMessage[]; turn: number; step: number; signal: AbortSignal }, next: () => Promise<PreStepDecision>): Promise<PreStepDecision>
+```
+
+Types: [Scoped](scope.zh.md) · [UserMessage](session.zh.md)
+
+Source: [`packages/core/agent/src/runtime-types.ts`](../../packages/core/agent/src/runtime-types.ts)
+
+<a id="agentprepare-input--waterfall"></a>
+
+#### `agent/prepare-input` — waterfall
+
+Prepare claimed input synchronously before prompt assembly and pre-step processors.
+
+```ts cordis-catalog
+/**
+ * Prepare claimed input synchronously before prompt assembly and pre-step processors.
+ * @param payload.agent - owner of the claimed input and current history.
+ * @param payload.messages - messages claimed for the proposed step.
+ * @param next - remaining input preparation listeners; the default does nothing.
+ * Scope-filtered dispatch (@deepseek-ai/dsh-scope): agent-scoped listeners receive only that agent.
+ * @mode waterfall
+ */
+'agent/prepare-input'(this: Scoped<Agent>, payload: { agent: Agent; messages: UserMessage[] }, next: () => void): void
 ```
 
 Types: [Scoped](scope.zh.md) · [UserMessage](session.zh.md)

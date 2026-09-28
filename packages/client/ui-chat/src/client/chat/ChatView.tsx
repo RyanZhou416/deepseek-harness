@@ -12,6 +12,7 @@ import {
 } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { ChatViewSlotProps, OpenFileOptions } from '../contract/slots.ts'
 import type { ChatSnapshot } from '../contract/snapshot.ts'
+import type { ChatNode } from '../contract/chat-nodes.ts'
 import { PendingSteeringBubble, PendingSubmissionBubble } from './MessageItem.tsx'
 import { ChatNodeSeat } from './ChatNodeSeat.tsx'
 import { ChatGroupSeat } from './ChatGroupSeat.tsx'
@@ -137,7 +138,7 @@ export function ChatView({
       return node?.kind === 'user' || node?.kind === 'steering'
     })
     const node = key === undefined ? undefined : snapshot.nodes.get(key)
-    return node?.kind === 'user' ? node.anchorSeq : undefined
+    return node?.kind === 'user' ? (node as ChatNode<'user'>).data.seq : undefined
   })
   const editableMessageSeq = running || editBlocked
     || (inbox?.['next-turn'].length ?? 0) > 0 || (inbox?.['next-step'].length ?? 0) > 0

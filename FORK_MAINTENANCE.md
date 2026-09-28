@@ -72,7 +72,7 @@ Continuable-subagent Queue edit/remove/steer 由 alpha.2 的通用 `session.upda
 
 ### Latest user-message revision
 
-Chat supports editing the latest ordinary text-only user message in an idle Session with no pending input. `session.fork.editLastMessage` validates the complete source log, preserves the original Session, and regenerates from the prefix before the old prompt plus its revised text. Preserve the strict exclusion of both the old prompt and its answer, source model selection, stable edit-request identity, and draft retention on failure. The new Session identity may change provider cache affinity; filesystem effects are not rolled back. Focused verification lives in `packages/api/session-controller/tests/edit-last-message.host.spec.ts`, `packages/client/ui-chat/tests/last-message-editor.client.spec.tsx`, and the Web message-actions scenario.
+Chat edits the latest ordinary text-only user message in its existing idle Session with no pending input. `session.editLastMessage` admits a durable queued revision; `agent/prepare-input` excludes the obsolete suffix before context assembly, and `agent/message-surface` finalizes the normally processed input at request admission. Preserve the Session identity and current model, strict exclusion of the old prompt and response from derived history, retry identity across request preparation, and hidden superseded Chat rows after reload. Original log events and spent-token totals remain; filesystem effects are not rolled back. Focused verification lives in `packages/api/session-controller/tests/edit-last-message.host.spec.ts`, Chat conversation-node tests, and the Web message-actions scenario.
 
 ### Long-session Host allocation
 

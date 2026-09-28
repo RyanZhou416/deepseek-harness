@@ -29,6 +29,14 @@ describe('last-message editor', () => {
     expect(save.mock.calls[0]![0]).toBe('revised\nquestion')
   })
 
+  it('lets a saved pending revision regenerate without changing its text', async () => {
+    const save = vi.fn().mockResolvedValue(undefined)
+    render(<LastMessageEditor initialText="saved draft" available allowUnchanged onSave={save} onCancel={vi.fn()} t={t} />)
+    fireEvent.click(screen.getByRole('button', { name: '保存并重新生成' }))
+    await waitFor(() => { expect(save).toHaveBeenCalledOnce() })
+    expect(save.mock.calls[0]?.[0]).toBe('saved draft')
+  })
+
   it('keeps an unavailable draft and prevents submission', async () => {
     const save = vi.fn()
     const cancel = vi.fn()

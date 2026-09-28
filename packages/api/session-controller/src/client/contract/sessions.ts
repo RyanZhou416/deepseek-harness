@@ -15,7 +15,7 @@ import type { SessionBinding, SessionListState } from '../sessions/service.ts'
 import type { SessionFace } from './session.ts'
 import type { ObservableSnapshot } from '@deepseek-ai/dsh-client-store'
 import type { SessionReferenceSource } from '../index.ts'
-import type { SessionForkRequest } from '../../types.ts'
+import type { SessionEditLastMessageRequest } from '../../types.ts'
 
 export type { AgentContext } from '../scope.ts'
 
@@ -126,13 +126,17 @@ export interface ISessions {
    *   seq (a real event seq the caller already knows; a cut inside an open
    *   turn is balanced Host-side with synthetic closers, and omission selects
    *   the latest completed-turn prefix), and whether to increment an
-   *   inherited durable title before resolving. editLastMessage replaces the
-   *   latest text prompt in a new continuation and excludes its old response;
-   *   its stable request id makes a repeated submission return the same child.
+   *   inherited durable title before resolving.
    * @returns the child session id.
    * @throws when the fork fails, or when a requested child-title rename fails after creation.
    */
-  fork(opts: { sessionId: SessionId; atSeq?: number; increaseTitle?: boolean; editLastMessage?: SessionForkRequest['editLastMessage'] }): Promise<SessionId>
+  fork(opts: { sessionId: SessionId; atSeq?: number; increaseTitle?: boolean }): Promise<SessionId>
+  /**
+   * Replace the latest text prompt and regenerate in the same Session.
+   * @param request - existing Session, current prompt, text, and stable submission identity.
+   * @returns completion of admission; the original Session remains selected.
+   */
+  editLastMessage(request: SessionEditLastMessageRequest): Promise<void>
   /**
    * Borrow an already-retained Agent-scoped Context without extending its lifetime.
    * @param id - session id.

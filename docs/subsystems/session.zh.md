@@ -877,6 +877,13 @@ workspaceDesktop(): { name: string; available: boolean; fileManager: 'finder' | 
 @Remote('fork') fork(request: SessionForkRequest): Promise<SessionForkValue>
 
 /**
+ * Revise the latest prompt and regenerate inside the same Session.
+ * @param request - target prompt, revised text, and stable submission identity.
+ * @returns acknowledgement that the revision entered the inbox.
+ */
+@Remote('editLastMessage') editLastMessage(request: SessionEditLastMessageRequest): Promise<SessionPromptValue>
+
+/**
  * Admit one prompt after explicitly resuming its Session.
  * @param request - Session identity, prompt content, source metadata, and delivery mode.
  * @param signal - caller cancellation before prompt admission begins.

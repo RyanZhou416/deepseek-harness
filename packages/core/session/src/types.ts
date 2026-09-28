@@ -16,6 +16,13 @@ import type {
 } from '@deepseek-ai/dsh-llm'
 import type { JsonValue } from '@deepseek-ai/dsh-util-values'
 
+declare module '@deepseek-ai/dsh-llm' {
+  interface UserMessageSource {
+    /** Saved revision awaiting normal input processing; omitted from model history until finalized. */
+    readonly pendingRevision?: true
+  }
+}
+
 /** Identifies one session in the store (and its persistence artifacts). */
 export type SessionId = Branded<'SessionId'>
 
