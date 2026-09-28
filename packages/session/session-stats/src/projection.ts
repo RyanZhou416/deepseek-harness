@@ -24,6 +24,7 @@
  */
 
 import { z } from 'zod'
+import { isDeepStrictEqual } from 'node:util'
 import { assistantStreamFirstTokenTime } from '@deepseek-ai/dsh-llm'
 import type { ProjectionDefinition } from '@deepseek-ai/dsh-session-projection'
 
@@ -109,6 +110,33 @@ function usageOutputTokens(usage: unknown): number | null {
   return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : null
 }
 
+/** Weak state keys retain only scalar views, without extending Session or fold-state lifetimes. */
+const statsViews = new WeakMap<SessionStatsState, SessionStatsTotals>()
+
+function statsView(state: SessionStatsState): SessionStatsTotals {
+  const previous = statsViews.get(state)
+  if (previous !== undefined) return previous
+  const value = {
+    turns: state.turns,
+    steps: state.steps,
+    llmMs: state.llmMs,
+    toolMs: state.toolMs,
+    ttftMs: state.ttftMs,
+    ttftSteps: state.ttftSteps,
+    decodeMs: state.decodeMs,
+    decodeTokens: state.decodeTokens,
+  }
+  statsViews.set(state, value)
+  return value
+}
+
+/** Preserve the public view across private-boundary changes while retaining the complete next fold state. */
+function nextStatsState(previous: SessionStatsState, next: SessionStatsState): SessionStatsState {
+  const view = statsViews.get(previous)
+  if (view !== undefined && isDeepStrictEqual(view, statsView(next))) statsViews.set(next, view)
+  return next
+}
+
 /** The `sessionStats` unit registered on `ctx.sessionProjections` (exported for the unit spec). */
 export const sessionStatsProjectionDefinition = {
   key: 'sessionStats',
@@ -131,16 +159,16 @@ export const sessionStatsProjectionDefinition = {
     // Every uninteresting event returns the same reference (Object.is gates the change feed).
     switch (event.type) {
       case 'step/start':
-        return {
+        return nextStatsState(state, {
           ...state,
           openStep: { turn: event.data.turn, step: event.data.step, startTime: event.time, firstTokenTime: null },
-        }
+        })
       case 'assistant/attempt': {
         const open = state.openStep
         if (open === null || open.turn !== event.data.turn || open.step !== event.data.step) return state
         const first = assistantStreamFirstTokenTime(event.data.stream) ?? null
         if (open.firstTokenTime !== null || first === null) return state
-        return { ...state, openStep: { ...open, firstTokenTime: first } }
+        return nextStatsState(state, { ...state, openStep: { ...open, firstTokenTime: first } })
       }
       case 'assistant/message': {
         const open = state.openStep
@@ -162,10 +190,10 @@ export const sessionStatsProjectionDefinition = {
             next.decodeTokens += outputTokens
           }
         }
-        return next
+        return nextStatsState(state, next)
       }
       case 'tool/call':
-        return { ...state, pendingCalls: { ...state.pendingCalls, [event.data.callId]: event.time } }
+        return nextStatsState(state, { ...state, pendingCalls: { ...state.pendingCalls, [event.data.callId]: event.time } })
       case 'tool/result': {
         // Own-key check: callId is provider-minted (model/tool JSON boundary),
         // so a prototype property name ('constructor', 'toString') on a result
@@ -177,36 +205,27 @@ export const sessionStatsProjectionDefinition = {
         const pendingCalls = Object.fromEntries(
           Object.entries(state.pendingCalls).filter(([id]) => id !== callId),
         )
-        return { ...state, toolMs: state.toolMs + Math.max(0, event.time - dispatched), pendingCalls }
+        return nextStatsState(state, { ...state, toolMs: state.toolMs + Math.max(0, event.time - dispatched), pendingCalls })
       }
       case 'step/end':
-        return {
+        return nextStatsState(state, {
           ...state,
           turns: state.lastTurn === event.data.turn ? state.turns : state.turns + 1,
           steps: state.steps + 1,
           lastTurn: event.data.turn,
           openStep: null,
-        }
+        })
       case 'turn/end':
         // A call whose result never landed belongs to a cancelled or failed
         // turn; results always land within their turn, so drop the leftovers
         // instead of growing persisted state forever.
-        return Object.keys(state.pendingCalls).length === 0 ? state : { ...state, pendingCalls: {} }
+        return Object.keys(state.pendingCalls).length === 0 ? state : nextStatsState(state, { ...state, pendingCalls: {} })
       default:
         return state
     }
   },
   wire: {
     viewSchema: sessionStatsSchema,
-    view: state => ({
-      turns: state.turns,
-      steps: state.steps,
-      llmMs: state.llmMs,
-      toolMs: state.toolMs,
-      ttftMs: state.ttftMs,
-      ttftSteps: state.ttftSteps,
-      decodeMs: state.decodeMs,
-      decodeTokens: state.decodeTokens,
-    }),
+    view: statsView,
   },
 } satisfies ProjectionDefinition<'sessionStats', SessionStatsState>

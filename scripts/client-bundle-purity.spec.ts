@@ -6,6 +6,7 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:
 import { tmpdir } from 'node:os'
 import { dirname, join, relative } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { runInNewContext } from 'node:vm'
 import { build, type TsdownBundle, type UserConfig } from 'tsdown'
 import { describe, expect, it, onTestFinished, vi } from 'vitest'
 import { clientBundle, requestedExternals, staticLinked } from '../packages/client/tsdown.client.ts'
@@ -53,6 +54,49 @@ describe('client bundle build faces', () => {
 
     expect(development?.entry).toEqual({ client: 'src/client/index.ts' })
     expect(artifact?.entry).toEqual({ client: 'lib/types/client/index.js' })
+  })
+
+  it('preserves static-library environment branches for the consuming shell', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'dsh-static-environment-'))
+    onTestFinished(() => { rmSync(root, { recursive: true, force: true }) })
+    const entry = join(root, 'lib/types/index.js')
+    mkdirSync(dirname(entry), { recursive: true })
+    writeFileSync(join(root, 'package.json'), JSON.stringify({ name: '@deepseek-ai/dsh-client-store', type: 'module' }))
+    writeFileSync(entry, [
+      'const child = { value: 1 };',
+      'if (process.env.NODE_ENV !== "production") Object.freeze(child);',
+      'export const frozen = Object.isFrozen(child);',
+    ].join('\n'))
+    const config = staticLinked('@deepseek-ai/dsh-client-store', ['lib/types/index.js'])(
+      { env: { DSH_BUILD_FACE: 'client' } },
+    )[0]
+    if (config === undefined) throw new Error('static library config missing')
+    const common = { cwd: root, config: false as const, tsconfig: false as const,
+      write: false, clean: false, exports: false, report: false, logLevel: 'silent' as const }
+    const builds: TsdownBundle[] = []
+    try {
+      const library = await build({ ...config, ...common })
+      builds.push(...library)
+      const code = library.flatMap(bundle => bundle.chunks).find(chunk => chunk.type === 'chunk')?.code
+      expect(code).toContain('process.env.NODE_ENV')
+      if (code === undefined) throw new Error('static library output missing')
+      const shellEntry = join(root, 'shell.js')
+      writeFileSync(shellEntry, code)
+      for (const mode of ['production', 'development']) {
+        const shell = await build({
+          ...common, entry: shellEntry, platform: 'browser', format: 'iife', globalName: 'EnvironmentFixture',
+          define: { 'process.env.NODE_ENV': JSON.stringify(mode) },
+        })
+        builds.push(...shell)
+        const output = shell.flatMap(bundle => bundle.chunks).find(chunk => chunk.type === 'chunk')?.code
+        if (output === undefined) throw new Error('shell output missing')
+        const sandbox: { EnvironmentFixture?: { frozen: boolean } } = {}
+        runInNewContext(output, sandbox)
+        expect(sandbox.EnvironmentFixture?.frozen).toBe(mode === 'development')
+      }
+    } finally {
+      for (const bundle of builds) await bundle[Symbol.asyncDispose]()
+    }
   })
 })
 

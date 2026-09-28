@@ -6,6 +6,7 @@ import type {
   SessionListState,
   SessionReference,
   SessionRetainInfo,
+  SessionProjectionSnapshot,
   SessionSnapshot,
 } from '@deepseek-ai/dsh-api-session-controller/client'
 import { MutableSessionEventSource } from '@deepseek-ai/dsh-api-session-controller/client'
@@ -521,6 +522,92 @@ describe('UiSession bindings', () => {
 })
 
 describe('UiSession status', () => {
+  it('publishes one coherent status snapshot for a batch of running changes', () => {
+    const ctx = new Context()
+    const bench = createSessionsBench(ctx)
+    const ids = Array.from({ length: 32 }, (_, index) => sessionId(`batch-${String(index)}`))
+    for (const id of ids) bench.binding(id)
+    const service = createUiSession(ctx, bench)
+    const changed = vi.fn()
+    const off = service.sessionStatus.subscribe(changed)
+
+    bench.list.update((draft) => {
+      for (const id of ids) draft.byId[id]!.running = true
+    })
+
+    expect(changed).toHaveBeenCalledOnce()
+    for (const id of ids) {
+      expect(service.sessionStatus.getSnapshot().get(id)?.running).toBe(true)
+    }
+    off()
+  })
+
+  it('does not rebuild status for a projection-only list refresh', () => {
+    const ctx = new Context()
+    const bench = createSessionsBench(ctx)
+    const ids = Array.from({ length: 32 }, (_, index) => sessionId(`projection-${String(index)}`))
+    for (const id of ids) bench.binding(id)
+    const service = createUiSession(ctx, bench)
+    const projectionsBySession: Record<SessionId, SessionProjectionSnapshot> = {}
+    projectionsBySession[ids[0]!] = { values: {}, state: 'loading', error: null }
+    const nextList = { ...bench.list.getSnapshot(), projectionsBySession }
+    const before = service.sessionStatus.getSnapshot()
+    const changed = vi.fn()
+    const off = service.sessionStatus.subscribe(changed)
+    const reads = vi.spyOn(bench.list, 'getSnapshot')
+    reads.mockClear()
+
+    bench.list.set(nextList)
+
+    expect(reads).toHaveBeenCalledTimes(2)
+    expect(service.sessionStatus.getSnapshot()).toBe(before)
+    expect(changed).not.toHaveBeenCalled()
+    off()
+  })
+
+  it('reconciles catalog-only identity replacement and removal at a fixed row count', () => {
+    const ctx = new Context()
+    const bench = createSessionsBench(ctx)
+    const service = createUiSession(ctx, bench)
+    const first = sessionId('catalog-first')
+    const second = sessionId('catalog-second')
+    const listener = vi.fn()
+    const off = service.sessionStatus.subscribe(listener)
+    const base = bench.list.getSnapshot()
+    const row = (id: SessionId) => ({
+      id, displayTitle: id, running: false, retainedBy: {}, blank: false, updatedAt: 0,
+    })
+
+    bench.list.set({ ...base, byId: { [first]: row(first) } })
+    expect(service.sessionStatus.getSnapshot().get(first)?.running).toBeUndefined()
+    expect(listener).toHaveBeenCalledOnce()
+    listener.mockClear()
+
+    bench.list.set({ ...base, byId: { [second]: row(second) } })
+    expect(service.sessionStatus.getSnapshot().has(first)).toBe(false)
+    expect(service.sessionStatus.getSnapshot().get(second)?.running).toBeUndefined()
+    expect(listener).toHaveBeenCalledOnce()
+    listener.mockClear()
+
+    bench.list.set(base)
+    expect(service.sessionStatus.getSnapshot().size).toBe(0)
+    expect(listener).toHaveBeenCalledOnce()
+    off()
+  })
+
+  it('retires a removed running member without creating a completion reminder', () => {
+    const ctx = new Context()
+    const bench = createSessionsBench(ctx)
+    const id = sessionId('removed-running')
+    bench.binding(id)
+    const service = createUiSession(ctx, bench)
+    bench.emitStatus(id, true)
+
+    bench.list.set({ ...bench.list.getSnapshot(), ids: [], byId: {} })
+
+    expect(service.sessionStatus.getSnapshot().has(id)).toBe(false)
+  })
+
   it('keeps synthetic-row status unknown until an event or Host baseline establishes it', () => {
     const ctx = new Context()
     const bench = createSessionsBench(ctx)

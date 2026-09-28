@@ -95,12 +95,14 @@ export function parentAgentOptionsForDelegation(parent: Agent): AgentOptions {
  * @param parent - the delegating parent whose route the child inherits.
  * @param requested - per-child overrides, if any.
  * @param childDepth - the resolved delegation depth to stamp.
+ * @param inheritReasoningEffort - whether an omitted effort may inherit from the parent; false uses the selected model's default.
  * @returns the resolved options for `ctx.agents.create()`.
  */
 export function resolveChildAgentOptions(
   parent: Agent,
   requested: AgentOptions | undefined,
   childDepth: number,
+  inheritReasoningEffort = true,
 ): AgentOptions {
   const parentOptions = parentAgentOptionsForDelegation(parent)
   const parentProvider = parentOptions.provider
@@ -110,7 +112,7 @@ export function resolveChildAgentOptions(
   const resolved: AgentOptions = {
     ...parentProvider !== undefined ? { provider: parentProvider } : {},
     ...parentModel !== undefined ? { model: parentModel } : {},
-    ...parentReasoningEffort !== undefined ? { reasoningEffort: parentReasoningEffort } : {},
+    ...inheritReasoningEffort && parentReasoningEffort !== undefined ? { reasoningEffort: parentReasoningEffort } : {},
     ...parentMaxTokens !== undefined ? { maxTokens: parentMaxTokens } : {},
     ...requested,
     subagentDepth: childDepth,

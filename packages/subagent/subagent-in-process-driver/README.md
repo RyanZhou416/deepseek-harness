@@ -37,7 +37,7 @@ One call starts and drives one one-shot child. Fulfillment means the child is al
 
 ### What the child gets
 
-The child receives the parent's working-directory/session lineage and inherits the parent provider, model, reasoning effort, and output-token cap unless `request.agentOptions` overrides them. It gets a fresh flat registration scope: parent tool restrictions and authority are not imported. A run carries the parent's explicit sandbox override and `'never'` approval pin into the child and appends a per-run descriptor inside the child's initial turn.
+The child receives the parent's working-directory/session lineage and inherits the parent provider, model, reasoning effort, and output-token cap unless `request.agentOptions` overrides them. `inheritReasoningEffort: false` suppresses parent effort even on the same route, allowing the subagent service's forced model to use its own default. It gets a fresh flat registration scope: parent tool restrictions and authority are not imported. A run carries the parent's explicit sandbox override and `'never'` approval pin into the child and appends a per-run descriptor inside the child's initial turn.
 
 -----
 

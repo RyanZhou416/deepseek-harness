@@ -219,6 +219,7 @@ describe('web e2e: persisted subagent conversation and human continuation', () =
     })
     const pushedCount = page.getByRole('button', { name: '2 subagents', exact: true })
     await pushedCount.waitFor({ timeout: 15_000 })
+    expect(await pushedCount.getAttribute('aria-expanded')).toBe('false')
     expect(apiCalls.filter(path => path === '/api/session/projections')).toHaveLength(catalogReads)
     await compareOrRefreshGolden(CATALOG_PUSH_EXPECTED, await pushedCount.ariaSnapshot(), MODE)
     grandchildId = sessionId('recorded-grandchild')
@@ -362,8 +363,18 @@ describe('web e2e: persisted subagent conversation and human continuation', () =
 
   it('expands a persisted grandchild progressively without activating either level', async () => {
     onTestFailed(() => saveFailureShot(page, 'web-e2e-subagent-tree'))
-    await page.getByRole('button', { name: '2 subagents' }).hover()
+    const trigger = page.getByRole('button', { name: '2 subagents', exact: true })
     const catalogTree = page.getByRole('tree', { name: 'Subagent sessions' })
+    await trigger.focus()
+    await page.keyboard.press('ArrowDown')
+    await catalogTree.waitFor()
+    await expect.poll(() => catalogTree.evaluate(element => element.contains(document.activeElement))).toBe(true)
+    await page.keyboard.press('Escape')
+    await expect.poll(() => catalogTree.count()).toBe(0)
+    expect(await trigger.evaluate(element => element === document.activeElement)).toBe(true)
+    await page.mouse.move(0, 0)
+    await trigger.hover()
+    await catalogTree.waitFor()
     expect(await catalogTree.evaluate((element) => {
       const rect = element.getBoundingClientRect()
       const hit = document.elementFromPoint(rect.left + 8, rect.top + 8)

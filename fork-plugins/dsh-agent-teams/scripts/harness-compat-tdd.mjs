@@ -8,7 +8,19 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
 import { SubagentRuntime } from '@deepseek-ai/dsh-subagent'
-import { guardSubagentDelivery, installContinuableMemberSetup, memberToolFilter, queueMemberPrompt, restrictableToolNames, sessionOwnEvents } from '../lib/harness-compat.js'
+import { guardSubagentDelivery, installContinuableMemberSetup, memberToolFilter, queueMemberPrompt, restrictableToolNames, sessionOwnEvents, startMember } from '../lib/harness-compat.js'
+
+await test('member creation uses the Host-only team policy with the exact receiver and falls back on older Hosts', async () => {
+  const spec = { provider: 'spawn', request: { agentOptions: { provider: 'team', model: 'own' } } }
+  const symbol = Symbol.for('dsh.subagent.startAgentTeamsMember')
+  const runtime = {
+    async [symbol](request) { assert.equal(this, runtime); assert.equal(request, spec); return 'team-member' },
+    async startContinuable() { throw new Error('ordinary policy must not replace team selection') },
+  }
+  assert.equal(await startMember(runtime, spec), 'team-member')
+  const legacy = { async startContinuable(request) { assert.equal(this, legacy); assert.equal(request, spec); return 'legacy-member' } }
+  assert.equal(await startMember(legacy, spec), 'legacy-member')
+})
 import { installMemberSelectionRuntime, spawnMember } from '../lib/members.js'
 import { createTeamDir } from '../lib/state.js'
 import { CAPTAIN_TOOL_NAMES } from '../lib/tool-names.js'

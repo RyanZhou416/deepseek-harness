@@ -11,7 +11,7 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { ContentBlock, MessageId, MessageSource } from '@deepseek-ai/dsh-llm'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import type { Session, SessionEvent, SessionId } from '@deepseek-ai/dsh-session'
-import { SubagentError } from '@deepseek-ai/dsh-subagent'
+import { SubagentError, type ContinuableStart, type ContinuableStartSpec } from '@deepseek-ai/dsh-subagent'
 import { CAPTAIN_TOOL_NAMES } from './tool-names.ts'
 
 /**
@@ -25,6 +25,7 @@ const hostPromptQueue = Symbol.for('dsh.subagent.queuePrompt')
 // 0.1.5 keeps queueHostSubagentPrompt but replaces its symbol with this
 // delivery-mode-aware implementation (packages/subagent/subagent/src/internal.ts).
 const hostPromptDeliver = Symbol.for('dsh.subagent.deliverPrompt')
+const hostMemberStart = Symbol.for('dsh.subagent.startAgentTeamsMember')
 type Setup = (childCtx: Context, child: Agent) => () => void
 type LegacySetup = (childCtx: Context & { agent?: Agent }) => () => void
 type Followup = (parent: Agent, childId: SessionId, content: ContentBlock[], options: {
@@ -34,11 +35,23 @@ type Queue = (parent: Agent, childId: SessionId, content: ContentBlock[], source
 type Deliver = (parent: Agent, childId: SessionId, content: ContentBlock[], source: MessageSource, signal: AbortSignal, delivery: 'queue' | 'steer') => Promise<MessageId>
 type Send = (sender: Agent, targetId: SessionId, content: ContentBlock[], options: { signal: AbortSignal }) => Promise<MessageId>
 interface RuntimeBoundary {
+  [hostMemberStart]?: (spec: ContinuableStartSpec) => Promise<ContinuableStart>
   followup?: Followup
   registerContinuableSetup?: (setup: LegacySetup) => () => void
   sendMessage?: Send
   [hostPromptQueue]?: Queue
   [hostPromptDeliver]?: Deliver
+}
+
+/**
+ * Use the fork's Host-only member policy when available; older Hosts have no global override.
+ * @param runtime - Host continuation service.
+ * @param spec - member request with its AgentTeams model selection.
+ * @returns the created member and initial prompt identity.
+ */
+export function startMember(runtime: Context['subagents'], spec: ContinuableStartSpec): Promise<ContinuableStart> {
+  const start = boundary(runtime)[hostMemberStart]
+  return start === undefined ? runtime.startContinuable(spec) : start.call(runtime, spec)
 }
 
 function boundary(runtime: Context['subagents']): RuntimeBoundary {

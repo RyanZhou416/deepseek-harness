@@ -5,10 +5,10 @@
  */
 import { RemoteStreamCarrierError } from '@deepseek-ai/dsh-api-gateway/client'
 import { ok, type RemoteMock } from '@deepseek-ai/dsh-remote-mock'
-import { createClientTest, type TestClient, webApp } from '@deepseek-ai/dsh-client-test-runtime/src/assembly/index.ts'
+import { createClientTest, TestClient, webApp } from '@deepseek-ai/dsh-client-test-runtime/src/assembly/index.ts'
 import type { SessionId } from '@deepseek-ai/dsh-session/types'
 import type { RemoteResult } from '@deepseek-ai/dsh-typert-protocol'
-import { isTypertOwnedValue } from '@deepseek-ai/dsh-typert-protocol'
+import { isTypertOwnedValue, RemoteError } from '@deepseek-ai/dsh-typert-protocol'
 import { afterEach, describe, expect, vi, type MockInstance } from 'vitest'
 import { ClientSessions } from '../src/client/sessions/service.ts'
 import type { SessionListValue } from '../src/types.ts'
@@ -44,6 +44,135 @@ function baselines(accept: MockInstance): number {
 }
 
 describe('Session Controller Client apply', () => {
+  it('keeps one pending carrier-recovery opening when the next Host generation becomes ready', async ({ mock, start }) => {
+    const nextHost = Promise.withResolvers<undefined>()
+    const nextBaseline = Promise.withResolvers<undefined>()
+    const sessionId = sid('pending-control-recovery')
+    let hosts = 0
+    let controls = 0
+    mock.remote.session.list.mockResolvedValue(ok({ items: [{
+      sessionId, updatedAt: 1, running: false, blank: false, agentAvailable: true,
+    }] }))
+    mock.stream(EVENTS, (_args, stream) => {
+      const ready = { type: 'ready', clientId: `synthetic-host-${String(++hosts)}`, host: { home: '/home/mock' } }
+      if (hosts === 1) stream.push(ready)
+      else void nextHost.promise.then(() => { stream.push(ready) })
+    })
+    mock.stream(CONTROL, (_args, stream) => {
+      const first = ++controls === 1
+      const baseline = { type: 'baseline', value: { projections: {
+        [sessionId]: { asOfSeq: first ? 20 : 1, values: { title: first ? 'old Host' : 'new Host' } },
+      } } }
+      if (first) stream.push(baseline)
+      else void nextBaseline.promise.then(() => { stream.push(baseline) })
+    })
+    const { client, sessions } = await bench(start)
+    try {
+      await vi.waitFor(() => { expect(sessions.list.getSnapshot().byId[sessionId]?.title).toBe('old Host') })
+      mock.streams.fail(CONTROL, new RemoteStreamCarrierError('synthetic carrier replacement'))
+      await mock.streams.opened(CONTROL, 2)
+      client.connection.reconnect()
+      await mock.streams.opened(EVENTS, 2)
+      expect(client.connection.generation.getSnapshot()).toBeUndefined()
+      nextHost.resolve(undefined)
+      await vi.waitFor(() => { expect(client.connection.generation.getSnapshot()?.id).toBe(2) })
+      await client.flush()
+      expect(mock.log.streams(CONTROL)).toHaveLength(2)
+      nextBaseline.resolve(undefined)
+      await vi.waitFor(() => { expect(sessions.list.getSnapshot().byId[sessionId]?.title).toBe('new Host') })
+      expect(mock.log.streams(CONTROL)).toHaveLength(2)
+    } finally {
+      nextHost.resolve(undefined)
+      nextBaseline.resolve(undefined)
+    }
+  })
+
+  it('restarts an already-accepted recovery baseline after the Host generation changes', async ({ mock, start }) => {
+    const sessionId = sid('accepted-control-recovery')
+    let controls = 0
+    mock.remote.session.list.mockResolvedValue(ok({ items: [{
+      sessionId, updatedAt: 1, running: false, blank: false, agentAvailable: true,
+    }] }))
+    mock.stream(CONTROL, (_args, stream) => {
+      controls++
+      const title = controls === 1 ? 'initial' : controls === 2 ? 'before ready' : 'after ready'
+      stream.push({ type: 'baseline', value: { projections: {
+        [sessionId]: { asOfSeq: controls < 3 ? 20 + controls : 1, values: { title } },
+      } } })
+    })
+    const { client, sessions } = await bench(start)
+    await vi.waitFor(() => { expect(sessions.list.getSnapshot().byId[sessionId]?.title).toBe('initial') })
+    mock.streams.fail(CONTROL, new RemoteStreamCarrierError('synthetic early recovery'))
+    await vi.waitFor(() => { expect(sessions.list.getSnapshot().byId[sessionId]?.title).toBe('before ready') })
+    expect(mock.log.streams(CONTROL)).toHaveLength(2)
+    client.connection.reconnect()
+    await vi.waitFor(() => { expect(sessions.list.getSnapshot().byId[sessionId]?.title).toBe('after ready') })
+    expect(mock.log.streams(CONTROL)).toHaveLength(3)
+  })
+
+  it('opens a fresh control reader after a terminal failure and a later Host generation', async ({ mock, start }) => {
+    const logged = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const sessionId = sid('terminal-control-recovery')
+    mock.remote.session.list.mockResolvedValue(ok({ items: [{
+      sessionId, updatedAt: 1, running: false, blank: false, agentAvailable: true,
+    }] }))
+    let controls = 0
+    mock.stream(CONTROL, (_args, stream) => {
+      if (++controls === 1) stream.push(BASELINE)
+      if (controls === 3) stream.push({ type: 'baseline', value: { projections: {
+        [sessionId]: { asOfSeq: 1, values: { title: 'Restored after terminal failure' } },
+      } } })
+    })
+    const client = await start()
+    await mock.streams.opened(CONTROL, 1)
+    mock.streams.fail(CONTROL, new RemoteStreamCarrierError('synthetic recovery'))
+    await mock.streams.opened(CONTROL, 2)
+    mock.streams.fail(CONTROL, new RemoteError('gateway/internal', 'synthetic terminal failure', {}))
+    await vi.waitFor(() => {
+      expect(logged).toHaveBeenCalledWith('[session-controller] control stream failed:',
+        expect.objectContaining({ message: 'synthetic terminal failure' }))
+    })
+    await client.flush()
+    expect(mock.log.streams(CONTROL)).toHaveLength(2)
+    client.connection.reconnect()
+    await vi.waitFor(() => { expect(client.connection.generation.getSnapshot()?.id).toBe(2) })
+    await vi.waitFor(() => { expect(mock.log.streams(CONTROL)).toHaveLength(3) })
+    await vi.waitFor(() => {
+      expect(client.ctx.sessions.list.getSnapshot().byId[sessionId]?.title).toBe('Restored after terminal failure')
+    })
+    mock.streams.push(CONTROL, { type: 'projection', sessionId, key: 'title', value: 'Live again', seq: 2 })
+    await vi.waitFor(() => { expect(client.ctx.sessions.list.getSnapshot().byId[sessionId]?.title).toBe('Live again') })
+    await client.unload(SELF)
+    expect(mock.log.streams(CONTROL).at(-1)?.state).toBe('cancelled')
+    client.connection.reconnect()
+    await vi.waitFor(() => { expect(client.connection.generation.getSnapshot()?.id).toBe(3) })
+    expect(mock.log.streams(CONTROL)).toHaveLength(3)
+  })
+
+  it('opens control exactly once after the first Host generation becomes ready', async ({ mock }) => {
+    const ready = Promise.withResolvers<undefined>()
+    mock.stream(EVENTS, (_args, stream) => {
+      void ready.promise.then(() => {
+        stream.push({ type: 'ready', clientId: 'synthetic-first-generation', host: { home: '/home/mock' } })
+      })
+    })
+    const client = await TestClient.start({ roster: ROSTER }, mock, { awaitConnected: false })
+    try {
+      await mock.streams.opened(EVENTS, 1)
+      await client.flush()
+      expect(client.connection.generation.getSnapshot()).toBeUndefined()
+      expect(mock.log.streams(CONTROL)).toHaveLength(0)
+      ready.resolve(undefined)
+      await mock.streams.opened(CONTROL, 1)
+      await client.flush()
+      expect(mock.log.streams(CONTROL)).toHaveLength(1)
+      expect(client.connection.generation.getSnapshot()).toMatchObject({ id: 1 })
+    } finally {
+      ready.resolve(undefined)
+      await client.dispose()
+    }
+  })
+
   it('routes Remote events from the $events stream into the object layer and runs handleConnected once per generation', async ({ mock, start }) => {
     const connected = vi.spyOn(ClientSessions.prototype, 'handleConnected')
     const error = vi.spyOn(ClientSessions.prototype, 'handleSessionError')

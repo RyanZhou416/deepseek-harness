@@ -48,6 +48,26 @@ function makeManager(
 }
 
 describe('SessionManager instances', () => {
+  it('refreshes cached lineage when parents arrive, disappear, and become known', async ({ mock, remote }) => {
+    const manager = makeManager(mock, remote)
+    onTestFinished(() => manager.dispose())
+    const parent = 'lineage-parent' as SessionId
+    const child = 'lineage-child' as SessionId
+    const other = 'lineage-other' as SessionId
+    const rows = () => manager.getListSnapshot().items.map(entry => [entry.sessionId, entry.depth])
+    manager.handleSessionAdded(summary(child, { parentSessionId: parent }))
+    manager.handleSessionAdded(summary(other))
+    expect(rows()).toEqual([[other, 0], [child, 0]])
+    manager.handleSessionAdded(summary(parent))
+    expect(rows()).toEqual([[parent, 0], [child, 1], [other, 0]])
+    manager.handleSessionRemoved(parent)
+    expect(rows()).toEqual([[other, 0], [child, 0]])
+    manager.handleSessionAdded(summary(parent))
+    expect(rows()).toEqual([[parent, 0], [child, 1], [other, 0]])
+    manager.handleSessionAdded(summary(other, { parentSessionId: parent }))
+    expect(rows()).toEqual([[parent, 0], [other, 1], [child, 1]])
+  })
+
   it.for(['event', 'list'] as const)(
     'forgets running when an unretained identity disappears through a %s',
     async (source, { mock, remote }) => {
@@ -394,6 +414,114 @@ describe('SessionManager instances', () => {
 })
 
 describe('SessionManager query lifetime', () => {
+  it('publishes a new empty control baseline once and keeps explicit projection load changes observable', async ({ mock, remote }) => {
+    const manager = makeManager(mock, remote)
+    onTestFinished(() => manager.dispose())
+    const notify = vi.fn()
+    onTestFinished(manager.subscribe(notify))
+    const baseline = { type: 'baseline' as const, value: { projections: {
+      [S1]: { asOfSeq: -1 as const, values: {} },
+      [S2]: { asOfSeq: -1 as const, values: {} },
+    } } }
+    manager.handleControlFrame(baseline)
+    const initial = manager.getListSnapshot()
+    const first = initial.projectionsBySession[S1]
+    const second = initial.projectionsBySession[S2]
+    expect(first).toEqual({ values: {}, state: 'idle', error: null })
+    await Promise.resolve()
+    expect(notify).toHaveBeenCalledOnce()
+    manager.handleControlFrame(baseline)
+    expect(manager.getListSnapshot()).toBe(initial)
+    await Promise.resolve()
+    expect(notify).toHaveBeenCalledOnce()
+
+    const pending = Promise.withResolvers<Awaited<ReturnType<typeof remote.session.projections>>>()
+    remote.session.projections.mockReturnValueOnce(pending.promise)
+    const read = manager.refreshProjections(S1)
+    const loading = manager.getListSnapshot().projectionsBySession[S1]
+    expect(loading).not.toBe(first)
+    expect(loading?.values).toBe(first?.values)
+    expect(loading?.state).toBe('loading')
+    const failure = new RemoteError('gateway/internal', 'synthetic projection failure', {})
+    pending.resolve(err(failure))
+    await read
+    const failed = manager.getListSnapshot().projectionsBySession[S1]
+    expect(failed).not.toBe(loading)
+    expect(failed).toEqual({ values: {}, state: 'error', error: failure })
+    expect(failed?.values).toBe(first?.values)
+    expect(manager.getListSnapshot().projectionsBySession[S2]).toBe(second)
+
+    remote.session.projections.mockResolvedValueOnce(ok({ asOfSeq: 0, values: { title: 'ready' } }))
+    await manager.refreshProjections(S1)
+    expect(manager.getListSnapshot().projectionsBySession[S1]).toEqual({
+      values: { title: 'ready' }, state: 'ready', error: null,
+    })
+    expect(manager.getListSnapshot().projectionsBySession[S2]).toBe(second)
+  })
+
+  it('reuses unchanged projection snapshots across another Session update and catalog-only changes', async ({ mock, remote }) => {
+    const manager = makeManager(mock, remote)
+    onTestFinished(() => manager.dispose())
+    manager.handleSessionAdded(summary(S1))
+    manager.handleSessionAdded(summary(S2))
+    manager.handleControlFrame({ type: 'baseline', value: { projections: {
+      [S1]: { asOfSeq: 1, values: { title: 'first' } },
+      [S2]: { asOfSeq: 1, values: { title: 'second' } },
+    } } })
+    await Promise.resolve()
+    const before = manager.getListSnapshot()
+
+    manager.handleControlFrame({ type: 'projection', sessionId: S1, key: 'title', value: 'changed', seq: 2 })
+    const changed = manager.getListSnapshot()
+    expect(changed.projectionsBySession[S1]?.values.title).toBe('changed')
+    expect(changed.projectionsBySession[S1]).not.toBe(before.projectionsBySession[S1])
+    expect(changed.projectionsBySession[S2]).toBe(before.projectionsBySession[S2])
+    await Promise.resolve()
+    const published = manager.getListSnapshot()
+    manager.handleSessionStatus(S1, true)
+    const status = manager.getListSnapshot()
+    expect(status.items.find(item => item.sessionId === S1)?.running).toBe(true)
+    expect(status.projectionsBySession).toBe(published.projectionsBySession)
+  })
+
+  it('keeps stale control deliveries silent for every subscriber while accepted values remain immediately readable', async ({ mock, remote }) => {
+    const manager = makeManager(mock, remote)
+    onTestFinished(() => manager.dispose())
+    manager.handleControlFrame({ type: 'projection', sessionId: S1, key: 'title', value: 'latest', seq: 9 })
+    await Promise.resolve()
+    const before = manager.getListSnapshot()
+    const first = vi.fn()
+    const second = vi.fn()
+    const stopFirst = manager.subscribe(first)
+    const stopSecond = manager.subscribe(second)
+    onTestFinished(stopFirst)
+    onTestFinished(stopSecond)
+
+    manager.handleControlFrame({ type: 'projection', sessionId: S1, key: 'title', value: 'stale', seq: 8 })
+    manager.handleControlFrame({ type: 'projection', sessionId: S1, key: 'title', value: 'replay', seq: 9 })
+    manager.handleControlFrame({ type: 'baseline', value: { projections: {
+      [S1]: { asOfSeq: 8, values: { title: 'old baseline' } },
+    } } })
+    expect(manager.getListSnapshot()).toBe(before)
+    await Promise.resolve()
+    expect(first).not.toHaveBeenCalled()
+    expect(second).not.toHaveBeenCalled()
+
+    manager.handleControlFrame({ type: 'projection', sessionId: S1, key: 'title', value: 'accepted', seq: 10 })
+    expect(manager.getListSnapshot().projectionsBySession[S1]?.values.title).toBe('accepted')
+    await Promise.resolve()
+    expect(first).toHaveBeenCalledOnce()
+    expect(second).toHaveBeenCalledOnce()
+    stopFirst()
+    manager.handleControlFrame({ type: 'baseline', value: { projections: {
+      [S1]: { asOfSeq: 11, values: {} },
+    } } })
+    expect(manager.getListSnapshot().projectionsBySession[S1]?.values).toEqual({})
+    await Promise.resolve()
+    expect(first).toHaveBeenCalledOnce()
+    expect(second).toHaveBeenCalledTimes(2)
+  })
+
   it.for(['list', 'projection'] as const)('forwards an unexpected %s failure and still completes teardown', async (target, { mock, remote }) => {
     const manager = makeManager(mock, remote)
     const failure = new Error('query implementation failed')
@@ -1206,6 +1334,198 @@ describe('remaining branches', () => {
 })
 
 describe('connected generation', () => {
+  it('retains an old title only for display until a low-sequence control baseline replaces it', async ({ mock, remote }) => {
+    const manager = makeManager(mock, remote)
+    onTestFinished(() => manager.dispose())
+    manager.handleSessionAdded(summary(S1, { cwd: '/workspace/project' }))
+    manager.handleControlFrame({ type: 'baseline', value: { projections: {
+      [S1]: { asOfSeq: 20, values: { title: 'Previous generation' } },
+    } } })
+    const response = Promise.withResolvers<Awaited<ReturnType<typeof remote.session.list>>>()
+    remote.session.list.mockReturnValueOnce(response.promise)
+
+    manager.handleConnected()
+    const refreshing = manager.refreshList()
+    try {
+      expect(manager.getListSnapshot().items[0]?.title).toBe('Previous generation')
+      expect(manager.projectionValues(S1)).toEqual({})
+
+      manager.handleControlFrame({ type: 'baseline', value: { projections: {
+        [S1]: { asOfSeq: 1, values: { title: 'Current generation' } },
+      } } })
+      expect(manager.getListSnapshot().items[0]?.title).toBe('Current generation')
+      expect(manager.projectionValues(S1)).toEqual({ title: 'Current generation' })
+    } finally {
+      response.resolve(ok({ items: [summary(S1, { cwd: '/workspace/project' })] }))
+      await refreshing
+    }
+  })
+
+  it('keeps an omitted control-baseline title cleared through an immediate reconnect', async ({ mock, remote }) => {
+    const manager = makeManager(mock, remote)
+    onTestFinished(() => manager.dispose())
+    manager.handleSessionAdded(summary(S1, { cwd: '/workspace/project' }))
+    manager.handleControlFrame({ type: 'baseline', value: { projections: {
+      [S1]: { asOfSeq: 20, values: { title: 'Previous generation' } },
+    } } })
+    const firstResponse = Promise.withResolvers<Awaited<ReturnType<typeof remote.session.list>>>()
+    const secondResponse = Promise.withResolvers<Awaited<ReturnType<typeof remote.session.list>>>()
+    remote.session.list.mockReturnValueOnce(firstResponse.promise).mockReturnValueOnce(secondResponse.promise)
+
+    manager.handleConnected()
+    const firstRefresh = manager.refreshList()
+    let secondRefresh: Promise<void> | undefined
+    try {
+      expect(manager.getListSnapshot().items[0]?.title).toBe('Previous generation')
+      manager.handleControlFrame({ type: 'baseline', value: { projections: {
+        [S1]: { asOfSeq: 1, values: {} },
+      } } })
+      manager.handleConnected()
+      secondRefresh = manager.refreshList()
+      expect(manager.getListSnapshot().items[0]?.title).toBeUndefined()
+      expect(manager.projectionValues(S1)).toEqual({})
+    } finally {
+      firstResponse.resolve(ok({ items: [summary(S1, { cwd: '/workspace/project' })] }))
+      secondResponse.resolve(ok({ items: [summary(S1, { cwd: '/workspace/project' })] }))
+      await Promise.all([firstRefresh, secondRefresh])
+    }
+  })
+
+  it('keeps the display title after a reconnect list failure without restoring projection authority', async ({ mock, remote }) => {
+    const manager = makeManager(mock, remote)
+    onTestFinished(() => manager.dispose())
+    manager.handleSessionAdded(summary(S1, { cwd: '/workspace/project' }))
+    manager.handleControlFrame({ type: 'baseline', value: { projections: {
+      [S1]: { asOfSeq: 20, values: { title: 'Previous generation' } },
+    } } })
+    remote.session.list.mockResolvedValueOnce(err(new RemoteError('gateway/internal', 'list unavailable', {})))
+
+    manager.handleConnected()
+    await manager.refreshList()
+
+    expect(manager.getListSnapshot()).toMatchObject({ state: 'error' })
+    expect(manager.getListSnapshot().items[0]?.title).toBe('Previous generation')
+    expect(manager.projectionValues(S1)).toEqual({})
+  })
+
+  it.for(['control update', 'cached list hint', 'follow baseline'] as const)(
+    'treats an authoritative null title from a %s as an untitled Session',
+    async (source, { mock, remote }) => {
+      const manager = makeManager(mock, remote)
+      onTestFinished(() => manager.dispose())
+      manager.handleSessionAdded(summary(S1, { cwd: '/workspace/project' }))
+      manager.handleControlFrame({ type: 'baseline', value: { projections: {
+        [S1]: { asOfSeq: 20, values: { title: 'Previous generation' } },
+      } } })
+      const response = Promise.withResolvers<Awaited<ReturnType<typeof remote.session.list>>>()
+      remote.session.list.mockReturnValueOnce(response.promise)
+      manager.handleConnected()
+      const refreshing = manager.refreshList()
+      try {
+        expect(manager.getListSnapshot().items[0]?.title).toBe('Previous generation')
+        if (source === 'control update') {
+          manager.handleControlFrame({
+            type: 'projection', sessionId: S1, key: 'title', value: null, seq: 1,
+          })
+        } else if (source === 'cached list hint') {
+          manager.handleSessionAdded({
+            ...summary(S1, { cwd: '/workspace/project' }),
+            projections: { kind: 'cached', asOfSeq: 1, values: { title: null } },
+          })
+        } else {
+          manager.get(S1).projections.seed({ asOfSeq: SessionSeq(1), values: { title: null } })
+          await Promise.resolve()
+        }
+        expect(manager.getListSnapshot().items[0]?.title).toBeUndefined()
+        expect(manager.projectionValues(S1)).toMatchObject({ title: null })
+      } finally {
+        response.resolve(err(new RemoteError('gateway/internal', 'list unavailable', {})))
+        await refreshing
+      }
+    },
+  )
+
+  it.for([
+    { label: 'clears a missing title', projections: undefined, expected: undefined },
+    {
+      label: 'accepts a current cached title',
+      projections: { kind: 'cached' as const, asOfSeq: 1, values: { title: 'Current cached title' } },
+      expected: 'Current cached title',
+    },
+  ])('$label after a successful reconnect list', async ({ projections, expected }, { mock, remote }) => {
+    const manager = makeManager(mock, remote)
+    onTestFinished(() => manager.dispose())
+    manager.handleSessionAdded(summary(S1, { cwd: '/workspace/project' }))
+    manager.handleControlFrame({ type: 'baseline', value: { projections: {
+      [S1]: { asOfSeq: 20, values: { title: 'Previous generation' } },
+    } } })
+    remote.session.list.mockResolvedValueOnce(ok({ items: [{
+      ...summary(S1, { cwd: '/workspace/project' }),
+      ...(projections === undefined ? {} : { projections }),
+    }] }))
+
+    manager.handleConnected()
+    await manager.refreshList()
+
+    expect(manager.getListSnapshot().items[0]?.title).toBe(expected)
+  })
+
+  it('retains the presentation fallback across consecutive reconnects until current data arrives', async ({ mock, remote }) => {
+    const manager = makeManager(mock, remote)
+    onTestFinished(() => manager.dispose())
+    manager.handleSessionAdded(summary(S1, { cwd: '/workspace/project' }))
+    manager.handleControlFrame({ type: 'baseline', value: { projections: {
+      [S1]: { asOfSeq: 20, values: { title: 'Previous generation' } },
+    } } })
+    const firstResponse = Promise.withResolvers<Awaited<ReturnType<typeof remote.session.list>>>()
+    const secondResponse = Promise.withResolvers<Awaited<ReturnType<typeof remote.session.list>>>()
+    remote.session.list.mockReturnValueOnce(firstResponse.promise).mockReturnValueOnce(secondResponse.promise)
+
+    manager.handleConnected()
+    const firstRefresh = manager.refreshList()
+    manager.handleConnected()
+    const secondRefresh = manager.refreshList()
+    try {
+      firstResponse.resolve(ok({ items: [] }))
+      await firstRefresh
+      expect(manager.getListSnapshot().items[0]?.title).toBe('Previous generation')
+
+      secondResponse.resolve(ok({ items: [{
+        ...summary(S1, { cwd: '/workspace/project' }),
+        projections: { kind: 'cached', asOfSeq: 1, values: { title: 'Current generation' } },
+      }] }))
+      await secondRefresh
+      expect(manager.getListSnapshot().items[0]?.title).toBe('Current generation')
+    } finally {
+      firstResponse.resolve(ok({ items: [] }))
+      secondResponse.resolve(ok({ items: [] }))
+      await Promise.all([firstRefresh, secondRefresh])
+    }
+  })
+
+  it('does not resurrect a removed Session title while reconnect recovery remains incomplete', async ({ mock, remote }) => {
+    const manager = makeManager(mock, remote)
+    onTestFinished(() => manager.dispose())
+    manager.handleSessionAdded(summary(S1, { cwd: '/workspace/project' }))
+    manager.handleControlFrame({ type: 'baseline', value: { projections: {
+      [S1]: { asOfSeq: 20, values: { title: 'Removed title' } },
+    } } })
+    const response = Promise.withResolvers<Awaited<ReturnType<typeof remote.session.list>>>()
+    remote.session.list.mockReturnValueOnce(response.promise)
+
+    manager.handleConnected()
+    const refreshing = manager.refreshList()
+    try {
+      expect(manager.getListSnapshot().items[0]?.title).toBe('Removed title')
+      manager.handleSessionRemoved(S1)
+      manager.handleSessionAdded(summary(S1, { cwd: '/workspace/project' }))
+      expect(manager.getListSnapshot().items[0]?.title).toBeUndefined()
+    } finally {
+      response.resolve(err(new RemoteError('gateway/internal', 'list unavailable', {})))
+      await refreshing
+    }
+  })
+
   it('does not prune running observations from a superseded empty list response', async ({ mock, remote }) => {
     const manager = makeManager(mock, remote)
     onTestFinished(() => manager.dispose())

@@ -1,0 +1,38 @@
+.section {
+  display: grid;
+  gap: 10px;
+  font-size: 13px;
+  color: var(--dsw-alias-label-primary);
+}
+
+.toggle,
+.notice {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.choices {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+.choice {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
+.hint,
+.error {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--dsw-alias-label-secondary);
+}
+
+.error {
+  color: var(--dsw-alias-state-error-primary);
+}

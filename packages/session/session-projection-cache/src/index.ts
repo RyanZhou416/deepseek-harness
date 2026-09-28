@@ -18,7 +18,7 @@
 
 import { Context, Service } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
-import { snapshotJsonValue } from '@deepseek-ai/dsh-util-values'
+import { isJsonValue, snapshotJsonValue } from '@deepseek-ai/dsh-util-values'
 import { SessionLogOffset } from '@deepseek-ai/dsh-session'
 import type {
   Session,
@@ -155,17 +155,19 @@ export class SessionProjectionCache extends Service {
    * connected Session produces supersede it whatever this number says.
    * @param meta - the listed session's header (identity witness; no log read).
    * @param keys - optional projection keys required by the caller's audience.
+   * @param excludeKeys - keys omitted before state validation or viewing; stored rows remain available to other readers.
    * @returns the viewed block, or `undefined` when no usable row exists for
    *   this lifecycle at the current Session format.
    */
   cachedSnapshot(
     meta: SessionHeader,
     keys?: readonly Extract<keyof SessionProjectionMap, string>[],
+    excludeKeys?: ReadonlySet<string>,
   ): ProjectionSnapshot | undefined {
     const expected = lifecycleIdentityOf(meta)
     const record = this.requireTable().get(meta.id)
     if (record === undefined || !currentLifecycleMatches(record.identity, expected)) return undefined
-    return this.viewRecord(record, keys)
+    return this.viewRecord(record, keys, excludeKeys)
   }
 
   /**
@@ -200,8 +202,9 @@ export class SessionProjectionCache extends Service {
   private viewRecord(
     record: CheckpointRecord,
     keys?: readonly Extract<keyof SessionProjectionMap, string>[],
+    excludeKeys?: ReadonlySet<string>,
   ): ProjectionSnapshot | undefined {
-    const values = this.ctx.sessionProjections.viewCheckpoint(record.rows, keys)
+    const values = this.ctx.sessionProjections.viewCheckpoint(record.rows, keys, excludeKeys)
     let asOfSeq: ProjectionSnapshot['asOfSeq'] | undefined
     for (const [key, row] of Object.entries(record.rows)) {
       if (!Object.hasOwn(values, key)) continue
@@ -268,6 +271,7 @@ export class SessionProjectionCache extends Service {
       session.id,
       identityOf(session.header, session.inheritedEventCount),
       rows,
+      'owned',
     )
   }
 
@@ -299,7 +303,7 @@ export class SessionProjectionCache extends Service {
     )
     // Refresh the row so the next cold read seeds from it; fail-soft and
     // fire-and-forget — a failed write-back only costs a longer tail replay.
-    void this.put(meta.id, identity, restored.checkpoint).catch((error: unknown) => {
+    void this.put(meta.id, identity, restored.checkpoint, 'borrowed').catch((error: unknown) => {
       this.ctx.logger.warn(`session projection cache: cold-read write-back for "${meta.id}" failed (cache stays stale): ${String(error)}`)
     })
     return restored.snapshot
@@ -385,10 +389,15 @@ export class SessionProjectionCache extends Service {
     }
   }
 
-  /** Replace one session's stored record with its log identity and a detached snapshot of `rows`. */
-  private async put(id: SessionId, identity: CheckpointIdentity, rows: ProjectionCheckpoint): Promise<void> {
-    const detached = snapshotJsonValue(rows)
-    if (detached === undefined) {
+  /** Registry checkpoints are owned clones; cold restoration can share state with the returned view. */
+  private async put(
+    id: SessionId,
+    identity: CheckpointIdentity,
+    rows: ProjectionCheckpoint,
+    ownership: 'owned' | 'borrowed',
+  ): Promise<void> {
+    const detached = ownership === 'borrowed' ? snapshotJsonValue(rows) : rows
+    if (detached === undefined || ownership === 'owned' && !isJsonValue(detached)) {
       throw new TypeError('projection checkpoint is not losslessly JSON-serializable (a unit state violates the plain-JSON contract)')
     }
     await this.requireTable().put(id, { identity, rows: detached as CheckpointRecord['rows'] })

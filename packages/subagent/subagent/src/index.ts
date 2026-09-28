@@ -36,8 +36,8 @@ import type {} from '@deepseek-ai/dsh-attachment'
 import { scopeTarget } from '@deepseek-ai/dsh-scope'
 import type { Scoped } from '@deepseek-ai/dsh-scope'
 import { assertObjectJsonSchema } from '@deepseek-ai/dsh-tools'
-import type { ContentBlock, MessageId, MessageSource } from '@deepseek-ai/dsh-llm'
-import type { Agent } from '@deepseek-ai/dsh-agent'
+import { ReasoningEffortId, type ContentBlock, type MessageId, type MessageSource } from '@deepseek-ai/dsh-llm'
+import type { Agent, AgentOptions } from '@deepseek-ai/dsh-agent'
 import type { SessionId } from '@deepseek-ai/dsh-session'
 import { canonicalClientTimeZone } from '@deepseek-ai/dsh-util-time'
 import { Remote, RemoteError, TypertRemoteService } from '@deepseek-ai/dsh-typert-protocol'
@@ -56,6 +56,7 @@ import type {
   ContinuableStart,
   ContinuableStartSpec,
   ResolvedSubagentStartRequest,
+  PreparedSubagentModel,
   SubagentCapabilities,
   SubagentInterruptAuthority,
   SubagentProvider,
@@ -77,10 +78,12 @@ import { installSubagentArchiveAdmission } from './archive-admission.ts'
 import { snapshotSubagentDescriptor } from './descriptor.ts'
 import { subagentIdentityProjectionDefinition, subagentTimingProjectionDefinition } from './projection.ts'
 import { establishCatalogChild, subagentCatalogProjectionDefinition } from './catalog.ts'
+import type { SubagentModelOverride } from './model-override-types.ts'
 import type { SubagentCatalogEntry } from './projection-types.ts'
-import { deliverSubagentPrompt } from './internal.ts'
+import { deliverSubagentPrompt, startAgentTeamsMember } from './internal.ts'
 
 export type {} from './catalog.ts'
+export type { SubagentModelOverride } from './model-override-types.ts'
 export * from './out-of-process.ts'
 export { AssistantOutputFold, finalAssistantOutput } from './assistant-output.ts'
 export { SubagentRunId } from './types.ts'
@@ -90,6 +93,7 @@ export type {
   ContinuableStart,
   ContinuableStartSpec,
   ResolvedSubagentStartRequest,
+  PreparedSubagentModel,
   SubagentCapabilities,
   SubagentInterruptAuthority,
   SubagentProvider,
@@ -197,12 +201,14 @@ interface BrowserPromptSource {
   readonly clientTimeZone?: string
 }
 
-/** Host configuration for continuable subagent capacity. */
+/** Host delegation limits and user-selected child model policy. */
 export interface Config {
   /** Maximum live children sharing uninterrupted continuable parent links; defaults to 8. */
   maxActiveSubagents: Volatile<number>
   /** Default delegation depth for tools without an explicit limit; defaults to 1. */
   maxDepth: Volatile<number>
+  /** Forced model for new children except AgentTeams members; false disables it, unsupported backends reject while enabled. */
+  modelOverride: Volatile<SubagentModelOverride | false>
 }
 
 /** Named provider registry with one-shot runs, durable discovery, and continuable-child operations. */
@@ -210,6 +216,14 @@ export class SubagentRuntime extends TypertRemoteService {
   static Config = z.object({
     maxDepth: z.number().step(1).min(0).max(Number.MAX_SAFE_INTEGER).default(1).volatile(),
     maxActiveSubagents: z.number().step(1).min(1).max(Number.MAX_SAFE_INTEGER).default(8).volatile(),
+    modelOverride: z.union([
+      z.const(false),
+      z.object({
+        provider: z.string().min(1).required(),
+        model: z.string().min(1).required(),
+        reasoningEffort: z.string().min(1),
+      }),
+    ]).default(false).volatile(),
   })
   private providers = new Map<string, SubagentProvider>()
   private continuations: SubagentContinuationManager | undefined
@@ -268,7 +282,81 @@ export class SubagentRuntime extends TypertRemoteService {
    * @throws when continuation services are unavailable or materialization fails.
    */
   async startContinuable(spec: ContinuableStartSpec): Promise<ContinuableStart> {
+    const continuations = this.requireContinuations()
+    return this.withModel(spec.provider, spec.request, spec.signal,
+      request => continuations.startContinuable({ ...spec, request }))
+  }
+
+  /**
+   * Create a member with the AgentTeams plugin's own model policy. Host-only;
+   * this exemption is neither a tool argument nor inherited by descendants.
+   * @param spec - member creation owned by the AgentTeams plugin.
+   * @returns the durable member id and accepted initial prompt id.
+   */
+  protected [startAgentTeamsMember](spec: ContinuableStartSpec): Promise<ContinuableStart> {
     return this.requireContinuations().startContinuable(spec)
+  }
+
+  /**
+   * Read effective model options for tool validation. Creation resolves the current policy again.
+   * Providers without Agent-option support reject creation while the override is enabled.
+   * @param name - registered subagent backend.
+   * @param requested - caller-selected options before the user override.
+   * @returns detached effective options and the applied override.
+   */
+  prepareModel(name: string, requested?: AgentOptions): PreparedSubagentModel {
+    const provider = this.expectProvider(name)
+    const configured = this.config.modelOverride.get()
+    if (configured !== false && !provider.capabilities.agentOptions) {
+      throw new SubagentError(`subagent provider "${name}" cannot enforce the configured model override`, 'UNSUPPORTED_CAPABILITY')
+    }
+    const override = configured === false ? null : Object.freeze({ ...configured })
+    let agentOptions = requested === undefined ? undefined : { ...requested }
+    if (override !== null) {
+      const { reasoningEffort: _effort, ...options } = agentOptions ?? {}
+      agentOptions = {
+        ...options,
+        provider: override.provider,
+        model: override.model,
+        ...override.reasoningEffort === undefined ? {} : { reasoningEffort: ReasoningEffortId(override.reasoningEffort) },
+      }
+    }
+    if (agentOptions !== undefined) Object.freeze(agentOptions)
+    return { agentOptions, override }
+  }
+
+  private async withModel<Request extends { agentOptions?: AgentOptions }, Result>(
+    name: string, request: Request, signal: AbortSignal,
+    start: (request: Request) => Promise<Result>,
+  ): Promise<Result> {
+    const provider = this.expectProvider(name)
+    const { override, agentOptions } = this.prepareModel(name, request.agentOptions)
+    if (override !== null) {
+      signal.throwIfAborted()
+      const llm = this.ctx.get('llm')
+      if (llm === undefined) throw new Error('subagent model override requires the llm service')
+      await llm.resolveCallConfig({
+        provider: override.provider,
+        model: override.model,
+        ...override.reasoningEffort === undefined ? {} : { reasoningEffort: ReasoningEffortId(override.reasoningEffort) },
+      }, signal)
+    }
+    if (this.providers.get(name) !== provider) {
+      throw new SubagentError(`subagent provider "${name}" changed after model selection; retry creation`, 'NO_PROVIDER')
+    }
+    const configured = this.config.modelOverride.get()
+    const current = configured === false ? null : configured
+    if ((current === null) !== (override === null)
+      || current?.provider !== override?.provider || current?.model !== override?.model
+      || current?.reasoningEffort !== override?.reasoningEffort) {
+      throw new SubagentError('subagent model override changed before creation; retry creation', 'MODEL_POLICY_CHANGED')
+    }
+    if (override !== null) signal.throwIfAborted()
+    return start({
+      ...request,
+      ...agentOptions === undefined ? {} : { agentOptions },
+      ...override === null ? {} : { inheritReasoningEffort: false },
+    })
   }
 
   /**
@@ -566,6 +654,10 @@ export class SubagentRuntime extends TypertRemoteService {
    * @returns the published holder-owned run.
    */
   async start(name: string, request: SubagentStartRequest): Promise<SubagentRun> {
+    return this.withModel(name, request, request.signal, selected => this.startPrepared(name, selected))
+  }
+
+  private async startPrepared(name: string, request: SubagentStartRequest): Promise<SubagentRun> {
     const provider = this.expectProvider(name)
     this.assertCapabilities(provider, request)
     assertSubagentMaxDepth(request.maxDepth)
@@ -652,7 +744,7 @@ export class SubagentRuntime extends TypertRemoteService {
   /** Reject the first requested capability that the provider lacks. */
   private assertCapabilities(provider: SubagentProvider, request: SubagentStartRequest): void {
     const needs: { when: boolean; cap: keyof SubagentCapabilities }[] = [
-      { when: request.agentOptions !== undefined, cap: 'agentOptions' },
+      { when: request.agentOptions !== undefined || request.inheritReasoningEffort !== undefined, cap: 'agentOptions' },
       { when: request.outputSchema !== undefined, cap: 'outputSchema' },
       { when: request.maxDepth !== undefined, cap: 'depthLimit' },
       { when: request.toolFilter !== undefined, cap: 'toolFilter' },

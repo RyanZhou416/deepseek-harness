@@ -75,7 +75,7 @@ describe('connection lifecycle', () => {
 
       expect(reconnectRequested).toHaveBeenCalledTimes(6)
       expect(warnSpy).toHaveBeenCalledTimes(6)
-      expect(warnSpy).toHaveBeenLastCalledWith('[connection] connection lost, retry #6')
+      expect(warnSpy).toHaveBeenLastCalledWith('[connection] connection lost, retry #6', expect.objectContaining({ message: 'offline' }))
       expect(states).toEqual(['connecting'])
       await vi.advanceTimersByTimeAsync(60_000)
       expect(calls).toBe(19)
@@ -87,6 +87,57 @@ describe('connection lifecycle', () => {
     } finally {
       controller.stop()
       randomSpy.mockRestore()
+      warnSpy.mockRestore()
+      vi.useRealTimers()
+    }
+  })
+
+  it('reports the failed source with its cause once and drops it after recovery', async () => {
+    vi.useFakeTimers()
+    const source = new FakeGenerationSource()
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    const controller = new ConnectionController(source.source, {}, FAST)
+    const failure = new Error('carrier closed', { cause: { code: 1006, wasClean: false } })
+    controller.start()
+    try {
+      await vi.advanceTimersByTimeAsync(0)
+      source.fail(failure)
+      await vi.advanceTimersByTimeAsync(10)
+      expect(warnSpy).toHaveBeenCalledExactlyOnceWith('[connection] connection lost, retry #1', failure)
+      expect(source.activeCount).toBe(1)
+      controller.reconnect()
+      await vi.advanceTimersByTimeAsync(0)
+      expect(warnSpy).toHaveBeenCalledExactlyOnceWith('[connection] connection lost, retry #1', failure)
+    } finally {
+      controller.stop()
+      await vi.advanceTimersByTimeAsync(0)
+      warnSpy.mockRestore()
+      vi.useRealTimers()
+    }
+  })
+
+  it('does not report a cancelled source rejection as a lost connection', async () => {
+    vi.useFakeTimers()
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    const source = vi.fn<ConnectionGenerationSource>((signal, ready) => new Promise((_resolve, reject) => {
+      ready({ home: '/h' })
+      signal.addEventListener('abort', () => { reject(new Error('cancelled source')) }, { once: true })
+    }))
+    const controller = new ConnectionController(source, {}, FAST)
+    controller.start()
+    try {
+      await vi.advanceTimersByTimeAsync(0)
+      controller.reconnect()
+      await vi.advanceTimersByTimeAsync(0)
+      expect(source).toHaveBeenCalledTimes(2)
+      expect(warnSpy).not.toHaveBeenCalled()
+      controller.stop()
+      await vi.advanceTimersByTimeAsync(0)
+      expect(warnSpy).not.toHaveBeenCalled()
+      expect(vi.getTimerCount()).toBe(0)
+    } finally {
+      controller.stop()
+      await vi.advanceTimersByTimeAsync(0)
       warnSpy.mockRestore()
       vi.useRealTimers()
     }
@@ -408,7 +459,6 @@ describe('connection lifecycle', () => {
       expect(warnSpy.mock.calls.map(([message]) => String(message))).toEqual([
         '[connection] connection lost, retry #1',
         '[connection] connection lost, retry #2',
-        '[connection] connection lost, retry #1',
       ])
     } finally {
       controller.stop()

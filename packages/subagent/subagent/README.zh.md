@@ -42,9 +42,12 @@ kind: "package-reference"
 
 调用该工具的 agent 会把子 agent 的最终答案作为工具结果收到。只挂载服务本身不会改变任何行为：在组合出提供方和工具之前，什么都不能委派。
 
+<a id="delegation-settings"></a>
 ### 委派设置
 
 **插件 → Subagent** 页面的限制部分编辑 Host 的 `subagent` 设置分节。用户值覆盖本插件的组合配置；恢复默认会删除用户覆盖。`maxDepth` 默认为 `1`，在委派工具自身未配置深度时提供默认值。工具显式指定的深度（包括 `provider-managed`）优先。深度 `0` 禁止继承此设置的工具委派；深度 `1` 只允许直接子代理。修改在下一次委派时生效。直接调用服务的调用方仍自行提供可选的请求深度。
+
+`modelOverride` 默认为 `false`。在**插件 → Subagent → 强制模型覆盖**中设置 `{ provider, model, reasoningEffort? }`，即可强制所有普通新子代理的模型路由，包括已有会话、工作流和嵌套代理发起的委派。该配置优先于工具参数、工具配置和父级继承；省略推理强度时使用所选模型默认值。运行时在创建前验证路由，开启后会拒绝不支持 `agentOptions` 的后端。已有子代理与冷恢复保留记录中的模型。AgentTeams 成员创建通过仅限 Host 的 symbol 适配器保留团队模型策略；标签与工具参数不能请求此例外，普通后代也不继承例外。此偏好约束委派 API，不约束任意 Host 代码或 profile 编辑。
 
 ### 可续接子代理容量
 
@@ -117,6 +120,8 @@ kind: "package-reference"
 本地子级创建成功时，父 Session 追加一条 `subagent/catalog` 事实。一次性创建在提供方返回后记录；可继续创建在初始 inbox 准入后、返回子级 id 前记录。失败会释放子级，不发布补偿性目录事件。一次性目录追加失败时会处理 run 的结果拒绝，并保留目录错误；资源释放失败会单独记录。`subagentCatalog` projection 排除 fork 继承的事实，通过 Session 观察和客户端快照中的 `projections.values.subagentCatalog` 暴露直接子级列表。每个 child 的 `subagentTiming` projection 会累加 descriptor 之后的耗时，并记录最近一个已结束轮次是否以 `completed` 结束；新轮次打开时会清除该完成状态。无效的自身 catalog payload（包括不支持的版本）会使 projection 恢复失败。projection 状态版本变更会从持久日志重新折叠缓存行。目录视图对 D 条事实以 O(D) 时间保留父目录事件顺序，其不可变存储和检查点校验使用 [`dsh-chunked-list`](../../util/chunked-list/README.zh.md)。[父目录决策](../../../.agents/notes/implemented/architecture/2026-09-01-parent-owned-subagent-catalog.zh.md) 说明排序、持久化成本和替代方案。Catalog 载荷 v0 记录已知模式，v1 还接受未知模式，读取器支持两版。历史迁移在 descriptor 不可用时根据可读子 header 追加 v1 `subagent/catalog`；正常创建保留 v0。其 `mode: 'unknown'` 投影让子会话保持可见，但不表示支持继续执行；已有完整条目仍具有权威性。
 
 ### 所有权与不变式
+
+子级轮次进行期间，记录时间相同的后续事件保留计时状态，不重复发布计时通知。descriptor、轮次开始和轮次结束的转换仍完整执行，每个事件仍推进投影水位。
 
 - **发布即边界**——发布前提供方拥有设置并须在失败时回滚；发布后调用方拥有运行并须 dispose（资源释放）它。
 - **注册受 effect 作用域约束**——移除提供方会阻止新启动，但绝不撤销已接受的运行。

@@ -27,7 +27,12 @@ afterEach(() => {
 })
 
 class BrowserNetworkProbe extends EventTarget {
-  readonly navigator = { onLine: true }
+  readonly navigator: { onLine: boolean }
+
+  constructor(online = true) {
+    super()
+    this.navigator = { onLine: online }
+  }
 
   setOnline(online: boolean): void {
     this.navigator.onLine = online
@@ -62,6 +67,14 @@ function installGeneration(handle: ConnectionHandle): GenerationProbe {
   const probe = new GenerationProbe()
   handle.registerGenerationSource(probe.source)
   return probe
+}
+
+function readyUntilAborted(onStarted: () => void): ConnectionGenerationSource {
+  return (signal, ready) => new Promise<void>((resolve) => {
+    onStarted()
+    ready({ home: '/h' })
+    signal.addEventListener('abort', () => { resolve() }, { once: true })
+  })
 }
 
 async function mount(): Promise<ConnectionHandle> {
@@ -269,14 +282,10 @@ describe('connection client apply', () => {
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
     const browser = new BrowserNetworkProbe()
     vi.stubGlobal('window', browser)
-    ;(globalThis as Win).location = { hostname: 'localhost' }
+    ;(globalThis as Win).location = { hostname: '192.0.2.20' }
     const handle = await mount()
     let calls = 0
-    const source: ConnectionGenerationSource = (signal, ready) => new Promise<void>((resolve) => {
-      calls++
-      ready({ home: '/h' })
-      signal.addEventListener('abort', () => { resolve() }, { once: true })
-    })
+    const source = readyUntilAborted(() => { calls++ })
     handle.registerGenerationSource(source)
     const states: Array<ConnectionState | undefined> = []
     const unsubscribe = handle.state.subscribe(() => { states.push(handle.state.getSnapshot()) })
@@ -306,6 +315,89 @@ describe('connection client apply', () => {
       expect(states).toEqual(['connected', 'disconnected', 'connecting', 'connected'])
     } finally {
       unsubscribe()
+      loop.stop()
+      randomSpy.mockRestore()
+      warnSpy.mockRestore()
+    }
+  })
+
+  it.each([
+    { label: 'IPv4 loopback', hostname: '127.0.0.1', ownsHost: false },
+    { label: 'localhost', hostname: 'localhost', ownsHost: false },
+    { label: 'IPv6 loopback', hostname: '[::1]', ownsHost: false },
+    { label: 'an owned Host carrier', hostname: '192.0.2.20', ownsHost: true },
+  ])('keeps $label connected while the browser reports offline', async ({ hostname, ownsHost }) => {
+    vi.useFakeTimers()
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    const browser = new BrowserNetworkProbe(false)
+    vi.stubGlobal('window', browser)
+    ;(globalThis as Win).location = { hostname }
+    if (ownsHost) (globalThis as Win).__DSH_TRANSPORT__ = { ownsHost: true }
+    const handle = await mount()
+    let calls = 0
+    const source = readyUntilAborted(() => { calls++ })
+    handle.registerGenerationSource(source)
+    const loop = handle.start({})
+    try {
+      await vi.advanceTimersByTimeAsync(0)
+      expect(handle.state.getSnapshot()).toBe('connected')
+      expect(handle.generation.getSnapshot()?.id).toBe(1)
+      expect(calls).toBe(1)
+
+      browser.setOnline(true)
+      browser.setOnline(false)
+      await vi.advanceTimersByTimeAsync(10_000)
+      expect(handle.state.getSnapshot()).toBe('connected')
+      expect(handle.generation.getSnapshot()?.id).toBe(1)
+      expect(calls).toBe(1)
+
+      handle.reconnect()
+      await vi.advanceTimersByTimeAsync(0)
+      expect(handle.state.getSnapshot()).toBe('connected')
+      expect(handle.generation.getSnapshot()?.id).toBe(2)
+      expect(calls).toBe(2)
+
+      loop.stop()
+      expect(handle.generation.getSnapshot()).toBeUndefined()
+      browser.setOnline(true)
+      browser.setOnline(false)
+      await vi.advanceTimersByTimeAsync(10_000)
+      expect(calls).toBe(2)
+    } finally {
+      loop.stop()
+      warnSpy.mockRestore()
+    }
+  })
+
+  it('retries a failed loopback source while the browser reports offline', async () => {
+    vi.useFakeTimers()
+    const randomSpy = vi.spyOn(Math, 'random').mockReturnValue(0)
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    const browser = new BrowserNetworkProbe(false)
+    vi.stubGlobal('window', browser)
+    ;(globalThis as Win).location = { hostname: '127.0.0.1' }
+    const handle = await mount()
+    let calls = 0
+    const source: ConnectionGenerationSource = (signal, ready) => {
+      calls++
+      if (calls === 1) return Promise.reject(new Error('local source failed'))
+      ready({ home: '/h' })
+      return new Promise<void>((resolve) => {
+        signal.addEventListener('abort', () => { resolve() }, { once: true })
+      })
+    }
+    handle.registerGenerationSource(source)
+    const loop = handle.start({}, {
+      backoffBaseMs: 10,
+      backoffFactor: 2,
+      backoffMaxMs: 10,
+      generationReadyTimeoutMs: 500,
+    })
+    try {
+      await vi.advanceTimersByTimeAsync(5)
+      expect(calls).toBe(2)
+      expect(handle.state.getSnapshot()).toBe('connected')
+    } finally {
       loop.stop()
       randomSpy.mockRestore()
       warnSpy.mockRestore()

@@ -56,6 +56,8 @@ kind: "package-reference"
 
 ### 前台与后台模式
 
+Host 的[强制模型设置](../subagent/README.zh.md#delegation-settings)在创建时优先于工具选项和会话模型白名单。前台、后台 Job 和可续接创建均使用同一个运行时强制逻辑；工具不提供豁免参数。
+
 `one-shot` 策略下，省略 `run_in_background` 会在前台等待并返回子 agent 的最终文本；`run_in_background: true` 会启动一个归父级所有的普通后台任务，并返回 `started background subagent job <id>`，可用 `job_output` 收集、用 `job_kill` 停止。
 
 `continuable` 策略下，省略或为 `true` 的 `run_in_background` 会启动一个持久化子 agent，并返回 `started subagent <childId>`，不等待结果；子 agent 的 Activation 结束时，运行时投递一条结算通知，可选的 `send_message` 工具会向它发送更多工作。把 `run_in_background` 设为 `false` 可在前台等待结果。

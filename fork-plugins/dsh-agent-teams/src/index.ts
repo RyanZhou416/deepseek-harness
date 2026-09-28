@@ -38,6 +38,7 @@ import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { collectArchivedTeamsActivity, collectTeamsActivity } from './snapshot.ts'
+import { ActivityQueryError, parseActivityQuery } from './activity-query.ts'
 import { findTeamByCaptain } from './state.ts'
 import { formatProfilesForPrompt, type TeamProfileConfig } from './profiles.ts'
 import { installTeamCapabilities } from './capabilities.ts'
@@ -217,14 +218,25 @@ export function apply(ctx: Context, config: Config): void {
     path: '/plugins/dsh-agent-teams/state',
     handler: async (req, res) => {
       const url = new URL(req.url ?? '/', 'http://x')
+      let query: ReturnType<typeof parseActivityQuery>
+      try {
+        query = parseActivityQuery(url)
+      } catch (error: unknown) {
+        if (!(error instanceof ActivityQueryError)) throw error
+        res.writeHead(400, {
+          'content-type': 'application/json; charset=utf-8',
+          'cache-control': 'no-store',
+        })
+        res.end(JSON.stringify({ error: error.message }))
+        return
+      }
       const roots = workspaceRegistry.list().map((workspace) => ({
         workspace: workspace.title,
         stateRoot: join(workspace.path, resolved.stateDir),
       }))
-      // ?archived=1 serves teams moved to archive/ (post-delete review).
-      const snapshots = url.searchParams.get('archived') === '1'
-        ? await collectArchivedTeamsActivity(ctx, roots)
-        : await collectTeamsActivity(ctx, roots)
+      const snapshots = query.archived
+        ? await collectArchivedTeamsActivity(ctx, roots, query.options)
+        : await collectTeamsActivity(ctx, roots, query.options)
       const body = JSON.stringify({ teams: snapshots })
       res.writeHead(200, {
         'content-type': 'application/json; charset=utf-8',

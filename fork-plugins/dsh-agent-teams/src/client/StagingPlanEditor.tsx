@@ -10,6 +10,7 @@ import { useCallback, useEffect, useId, useState, useSyncExternalStore, type For
 import type { ModelDirectory } from '@deepseek-ai/dsh-client-ui-model-selection/client'
 import { Menu, type MenuEntry } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { ActivityMember, ActivityTask, ActivityTeam } from './activity-monitor.ts'
+import { invalidateActivityTeamDetail } from './activity-monitor.ts'
 import type { AgentTeamsTranslate } from './locales.ts'
 import css from './ActivityPanel.module.css'
 
@@ -46,7 +47,12 @@ async function mutatePlan(payload: Record<string, unknown>): Promise<void> {
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify(payload),
   })
-  if (response.ok) return
+  if (response.ok) {
+    const sessionId = typeof payload.sessionId === 'string' ? payload.sessionId : ''
+    const teamId = typeof payload.teamId === 'string' ? payload.teamId : ''
+    if (sessionId !== '' && teamId !== '') invalidateActivityTeamDetail(sessionId, teamId)
+    return
+  }
   let message = `HTTP ${response.status}`
   try {
     const body = await response.json() as { error?: unknown }

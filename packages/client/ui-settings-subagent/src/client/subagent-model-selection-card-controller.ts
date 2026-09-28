@@ -24,6 +24,8 @@ export interface SubagentModelSelectionSettings {
 
 /** One catalog row joined with a stored route that may no longer be advertised. */
 export interface SubagentModelCandidate extends AllowedSubagentModel {
+  /** Current effort choices used by the forced-model editor. */
+  reasoning?: ModelProviderGroup['models'][number]['reasoning']
   /** Stable opaque identity used only for lookup. */
   key: string
   /** Adapter-owned provider display name. */
@@ -101,6 +103,7 @@ export function subagentModelCandidates(
       modelName: model.name,
       available: true,
       selected: selected.has(key),
+      ...model.reasoning === undefined ? {} : { reasoning: model.reasoning },
     }
   }))
   for (const route of storedByKey.values()) {

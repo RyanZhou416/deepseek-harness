@@ -5,7 +5,7 @@ import type {} from '@deepseek-ai/dsh-agent/types'
 import type { ConnectionHandle } from '@deepseek-ai/dsh-client-connection/client'
 import type {} from '@deepseek-ai/dsh-client-file-upload/client'
 import { typertOwnedValue } from '@deepseek-ai/dsh-typert-protocol'
-import { createSessionControlStream } from './transport.ts'
+import { createSessionControlStream, type SessionControlStream } from './transport.ts'
 import { ClientSessions } from './sessions/service.ts'
 import type { SessionRemotes } from './sessions/remotes.ts'
 import type {} from '../remote-events.ts'
@@ -125,15 +125,32 @@ export function apply(ctx: Context): void {
     sessions.handleSessionError(sessionId, message)
   })
 
-  const control = createSessionControlStream(remotes, {
-    accept: (frame) => { sessions.handleControlFrame(frame) },
-    failed: (error) => { console.error('[session-controller] control stream failed:', error) },
+  let recoveringControl = false
+  let controlFailed = false
+  const createControl = (): SessionControlStream => createSessionControlStream(remotes, {
+    accept: (frame) => {
+      sessions.handleControlFrame(frame)
+      if (frame.type === 'baseline') recoveringControl = false
+    },
+    carrierFailed: () => { recoveringControl = true },
+    failed: (error) => {
+      recoveringControl = false
+      controlFailed = true
+      console.error('[session-controller] control stream failed:', error)
+    },
   })
+  let control = createControl()
   const connected = (): void => {
     if (connection.generation.getSnapshot() === undefined) return
+    // A terminal consumer has already closed its iterator; a new Host gets a fresh reader.
+    if (controlFailed) {
+      control = createControl()
+      controlFailed = false
+    }
     // A ready control baseline may arrive before Cordis delivers connection/reset.
     sessions.handleConnected()
-    control.restart()
+    // A carrier recovery already owes a baseline; an accepted baseline predating this reset must be replaced.
+    if (!recoveringControl) control.restart()
     control.start()
   }
   ctx.effect(() => connection.generation.subscribe(connected), 'session-controller.client.generation')

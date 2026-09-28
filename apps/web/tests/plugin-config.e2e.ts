@@ -2,14 +2,16 @@
 // pages a deployment's exposed host-plane namespaces produce, one field edited
 // through the real wire down to `$DSH_HOME/cordis.patch.yml`, the override badge
 // and reset that layering produces, and a community bundle's row configuration
-// registered by its own browser half. Zero model calls: everything is client
-// state plus the settings document and the profile on a blank frame, so there
-// is no fixture and a stray stream would fail loud on the open llm seam.
+// registered by its own browser half. The forced-model case uses one scoped
+// scripted adapter; all other model routes fail if an unexpected stream occurs.
 import { readFile } from 'node:fs/promises'
 import { fileURLToPath } from 'node:url'
 import type { Browser, Locator, Page } from 'playwright'
 import { chromium } from 'playwright'
-import { afterAll, beforeAll, describe, expect, it, onTestFailed } from 'vitest'
+import { afterAll, beforeAll, describe, expect, it, onTestFailed, onTestFinished } from 'vitest'
+import { ReasoningEffortId } from '@deepseek-ai/dsh-llm'
+import { SessionId } from '@deepseek-ai/dsh-session'
+import { MockAdapter, textResponse } from '../../../packages/core/agent-loop/tests/mock-adapter.ts'
 import { join } from 'node:path'
 import {
   assertFixtureInventory, captureStableAria, compareOrRefreshGolden,
@@ -23,6 +25,13 @@ const ROW_EXPECTED = join(SNAPSHOT_DIR, 'row.expected.md')
 const BUNDLE_EXPECTED = join(SNAPSHOT_DIR, 'bundle.expected.md')
 const FIXTURE_PLUGINS = fileURLToPath(new URL('./fixtures/plugins', import.meta.url))
 const MODE = webSnapshotMode()
+const SHELL_ENTRY = process.platform === 'win32' ? 'pwsh-sandbox' : 'bash-sandbox'
+const SHELL_DEFAULT_TIMEOUT = process.platform === 'win32' ? '120000' : '60000'
+
+class ForcedModelAdapter extends MockAdapter {
+  override providerInfo(provider: string) { return { id: provider, name: 'Override Test' } }
+  override async listModels(provider: string) { return [await this.resolveModel(provider, 'override-model')] }
+}
 
 describe('web e2e: plugin configuration pages', () => {
   let scaffold: WebScaffold
@@ -138,6 +147,64 @@ describe('web e2e: plugin configuration pages', () => {
     await panel.getByRole('button', { name: '返回插件列表', exact: true }).click()
   })
 
+  it('saves a forced child model through the UI and restores ordinary selection', async () => {
+    onTestFailed(() => saveFailureShot(page, 'web-e2e-subagent-model-override'))
+    const adapter = new ForcedModelAdapter([textResponse('forced child answer')], {
+      efforts: [{ id: ReasoningEffortId('high'), name: 'High' }], defaultEffort: ReasoningEffortId('high'),
+    })
+    const unregister = scaffold.ctx.llm.registerAdapter(['override-test'], adapter)
+    onTestFinished(unregister)
+    const panel = await openPlugins()
+    await openPage(panel, 'Subagent')
+    const section = panel.getByRole('region', { name: '强制模型覆盖', exact: true })
+    await section.getByRole('switch', { name: '为新建 Subagent 强制指定模型' }).click()
+    const save = panel.getByRole('button', { name: '保存', exact: true })
+    expect(await save.isDisabled()).toBe(true)
+    await section.getByRole('button', { name: '提供方', exact: true }).click()
+    await page.getByRole('menu').getByText('Override Test', { exact: true }).click()
+    await section.getByRole('button', { name: '模型', exact: true }).click()
+    await page.getByRole('menu').getByText('override-model', { exact: true }).click()
+    await section.getByRole('button', { name: '推理强度', exact: true }).click()
+    await page.keyboard.press('Escape')
+    await expect.poll(() => page.getByRole('menu').count()).toBe(0)
+    await section.getByRole('button', { name: '推理强度', exact: true }).click()
+    await page.getByRole('menu').getByText('High', { exact: true }).click()
+    await save.click()
+    await expect.poll(() => save.isDisabled()).toBe(true)
+    await expect.poll(settingsDocument).toContain('modelOverride:')
+    await expect.poll(() => scaffold.ctx.subagents.prepareModel('spawn', { provider: 'missing', model: 'wrong' }).agentOptions)
+      .toEqual({ provider: 'override-test', model: 'override-model', reasoningEffort: 'high' })
+    const parent = await scaffold.ctx.agents.create({
+      sessionId: SessionId('override-ui-parent'), meta: { cwd: scaffold.workspaceCwd },
+      agentOptions: { provider: 'deepseek-official', model: 'deepseek-v4-flash' },
+    })
+    onTestFinished(() => parent.dispose())
+    const child = await scaffold.ctx.subagents.start('spawn', {
+      parent: parent.agent, prompt: [{ type: 'text', text: 'test forced route' }], signal: new AbortController().signal,
+      agentOptions: { provider: 'missing', model: 'wrong', reasoningEffort: ReasoningEffortId('max') },
+    })
+    onTestFinished(() => child.dispose())
+    expect((await child.result).stopReason).toBe('completed')
+    expect(adapter.requests).toHaveLength(1)
+    expect(adapter.requests[0]).toMatchObject({ provider: 'override-test', model: 'override-model', reasoningEffort: 'high' })
+    await child.dispose()
+    await parent.dispose()
+    await openPlugins()
+    await openPage(panel, 'Subagent')
+    expect(await section.getByRole('switch').getAttribute('aria-checked')).toBe('true')
+    await compareOrRefreshGolden(join(SNAPSHOT_DIR, 'subagent-override.expected.md'),
+      await captureStableAria(page, '[data-plugin-panel]', scaffold.workspaceCwd), MODE)
+    await page.screenshot({ path: fileURLToPath(new URL('../../../tmp/subagent-override-ui.png', import.meta.url)) })
+    await page.emulateMedia({ colorScheme: 'dark' })
+    await page.screenshot({ path: fileURLToPath(new URL('../../../tmp/subagent-override-ui-dark.png', import.meta.url)) })
+    await page.emulateMedia({ colorScheme: 'light' })
+    await section.getByRole('button', { name: '恢复默认', exact: true }).click()
+    await save.click()
+    await expect.poll(() => save.isDisabled()).toBe(true)
+    expect(scaffold.ctx.subagents.prepareModel('spawn').override).toBeNull()
+    expect(tripwire.pageErrors).toEqual([])
+  })
+
   it('opens field explanations with the keyboard and retains unsaved edits', async () => {
     const panel = await openPlugins()
     await openPage(panel, 'Subagent')
@@ -202,13 +269,14 @@ describe('web e2e: plugin configuration pages', () => {
     onTestFailed(() => saveFailureShot(page, 'web-e2e-plugin-config-write'))
     const panel = await openPlugins()
     await openPage(panel, '终端')
-    const entry = [...scaffold.ctx.loader.entries()].find(row => row.options.id === 'bash-sandbox')!
+    const entry = [...scaffold.ctx.loader.entries()].find(row => row.options.id === SHELL_ENTRY)!
     const fiber = entry.fiber
+    expect(fiber).toBeDefined()
 
     const timeout = panel.getByLabel('命令超时（毫秒）')
     await timeout.waitFor({ timeout: 10_000 })
     // The composed default this deployment ships, before any user layer.
-    expect(await timeout.inputValue()).toBe('60000')
+    expect(await timeout.inputValue()).toBe(SHELL_DEFAULT_TIMEOUT)
     await timeout.fill('12000')
     await timeout.blur()
 
@@ -275,14 +343,14 @@ describe('web e2e: plugin configuration pages', () => {
     // The reset stages the composed default; the document still carries the
     // override until the save lands.
     await panel.getByRole('button', { name: '恢复默认' }).click()
-    await expect.poll(() => timeout.inputValue(), { timeout: 5_000 }).toBe('60000')
+    await expect.poll(() => timeout.inputValue(), { timeout: 5_000 }).toBe(SHELL_DEFAULT_TIMEOUT)
     expect(await settingsDocument()).toContain('timeoutMs: 12000')
 
     await panel.getByRole('button', { name: '保存', exact: true }).click()
 
     await expect.poll(async () => (await settingsDocument()).includes('timeoutMs'), { timeout: 10_000 })
       .toBe(false)
-    expect(await timeout.inputValue()).toBe('60000')
+    expect(await timeout.inputValue()).toBe(SHELL_DEFAULT_TIMEOUT)
     expect(await panel.getByText('已覆盖').count()).toBe(0)
     expect(tripwire.pageErrors).toEqual([])
   }, 60_000)
@@ -348,7 +416,7 @@ describe('web e2e: plugin configuration pages', () => {
 
   it.skipIf(MODE === 'record')('keeps the fixture inventory closed', async () => {
     expect(tripwire.warnings).toEqual([])
-    await assertFixtureInventory(SNAPSHOT_DIR, ['bundle.expected.md', 'official.expected.md', 'row.expected.md', 'subagent.expected.md'])
+    await assertFixtureInventory(SNAPSHOT_DIR, ['bundle.expected.md', 'official.expected.md', 'row.expected.md', 'subagent.expected.md', 'subagent-override.expected.md'])
   })
 
 

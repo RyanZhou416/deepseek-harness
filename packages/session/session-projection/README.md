@@ -64,6 +64,8 @@ const { asOfSeq, values } = ctx.sessionProjections.snapshot(session)
 
 A domain that requires projected state declares `sessionProjections` as a Cordis service dependency; optional contributors may register under `ctx.inject(['sessionProjections'], …)`. Carriers use `ctx.get('sessionProjections')` and omit their block or frames when the registry is absent.
 
+Cached-hint readers can pass an optional `excludeKeys` set after the selected keys to `cachedSnapshot` or `viewCheckpoint`. Excluded keys incur no wire-view construction or cached-state validation; the returned watermark covers only served values. Exclusions do not remove cells or checkpoint rows, and complete snapshot and restore reads remain unchanged.
+
 ### Persisted checkpoints
 
 Every unit's state is checkpointed — client-visible and host-only alike — through `checkpoint(session)`, and the sibling [session-projection-cache](../session-projection-cache/README.md) persists those checkpoints so cold reads skip full log loads. Checkpoint watermarks use `SessionSeqCursor` (`-1` for an empty log), while replay starts use `SessionLogOffset`; `restoreFloor` and `restore` implement the read recipe without conflating an existing event with a log gap.

@@ -81,6 +81,7 @@ The fold state holds the eight totals plus in-flight boundaries: `lastTurn` (tur
 ### Fold rules
 
 - Uninteresting events return the same state reference; the registry's `Object.is` gate keeps the change feed quiet.
+- Private step and tool boundaries retain the public view while all eight totals remain equal. Weak state-keyed view entries preserve that identity without retaining obsolete fold states; persisted state and timing calculations remain complete.
 - First-token latency records the first non-empty delta chunk and survives an in-step `llm/retry`.
 - Decode time and tokens accrue only over steps carrying both a first token and a valid provider usage report; malformed usage is ignored like the window fold guards node usage.
 - Tool time pairs `tool/call` → `tool/result` by callId; unresolved calls are dropped at `turn/end` because results land within their turn, and a callId colliding with an `Object` prototype name reads as unmatched.

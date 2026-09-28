@@ -84,6 +84,8 @@ export interface Config {
   readonly idleSessionRetentionMs?: number
   /** Override platform desktop-opener detection. */
   readonly nativeOpen?: boolean
+  /** Catalog hint exclusions; default empty keeps all wire values. The required `sessionListMetadata` key cannot be excluded. */
+  readonly listProjectionExcludeKeys?: string[]
 }
 
 /** Host integrations replaceable by direct unit tests. */
@@ -119,6 +121,7 @@ export class SessionController extends TypertRemoteService {
   static Config: z<Config> = z.object({
     idleSessionRetentionMs: z.natural().default(DEFAULT_IDLE_SESSION_RETENTION_MS),
     nativeOpen: z.boolean(),
+    listProjectionExcludeKeys: z.array(z.string().min(1).pattern(/^(?!sessionListMetadata$)/u).required()).default([]),
   })
 
   private readonly agents: ApiSessionAgentController
@@ -135,7 +138,7 @@ export class SessionController extends TypertRemoteService {
 
   /**
    * @param ctx - Host context containing the Session capability assembly.
-   * @param config - Agent residency and native-opener deployment policy.
+   * @param config - Agent residency, catalog projection, and native-opener deployment policy.
    * @param internals - host integrations replaceable by direct unit tests.
    */
   constructor(ctx: Context, config: Config, internals: SessionControllerInternals = {}) {
@@ -162,7 +165,7 @@ export class SessionController extends TypertRemoteService {
       (observation) => { this.promote(observation) },
       sessionId => this.agents.retainForFollower(sessionId),
     )
-    this.listState = new ApiSessionList(ctx)
+    this.listState = new ApiSessionList(ctx, new Set(config.listProjectionExcludeKeys))
     this.fileApplications = internals.fileApplications ?? nativeFileApplications
     this.openFileApplication = internals.openFileApplication ?? openNativeFileApplication
     this.openPath = internals.openPath ?? openNativeAssociatedPath

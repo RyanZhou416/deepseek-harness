@@ -34,12 +34,6 @@ export interface ActivityTask {
   readonly verdict?: string
 }
 
-/** One captain-inbox preview row. */
-export interface ActivityMessage {
-  readonly from: string
-  readonly content: string
-}
-
 /** One team snapshot (mirrors the host TeamActivitySnapshot). */
 export interface ActivityTeam {
   readonly workspace: string
@@ -50,10 +44,12 @@ export interface ActivityTeam {
   readonly phase: 'staged' | 'running'
   readonly planReviewState?: 'awaiting_review' | 'awaiting_feedback'
   readonly halted?: boolean
+  readonly detail?: 'summary' | 'full'
+  readonly detailRevision?: string
   readonly members: readonly ActivityMember[]
   readonly tasks: readonly ActivityTask[]
   readonly messageCount: number
-  readonly captainInbox: readonly ActivityMessage[]
+  readonly captainInbox?: readonly { readonly from: string; readonly content: string }[]
 }
 
 /** A successfully-created conversation card that currently needs updates. */
@@ -61,6 +57,8 @@ export interface ActivityMonitorTarget {
   readonly key: string
   readonly sessionId: string
   readonly teamId: string
+  /** Whether this mounted card still requires live/archive lookup. */
+  readonly active: boolean
 }
 
 /** Latest shared response data for both the floater and conversation cards. */
@@ -86,18 +84,17 @@ function targetKey(sessionId: string, teamId: string): string {
 
 function publishTargets(): void {
   targetSnapshot = [...targets.values()]
-    .filter((target) => target.active)
-    .map(({ key, sessionId, teamId }) => ({ key, sessionId, teamId }))
+    .map(({ key, sessionId, teamId, active }) => ({ key, sessionId, teamId, active }))
   for (const listener of targetListeners) listener()
 }
 
-/** Subscribe to the active monitor-target list (React external-store shape). */
+/** Subscribe to the mounted monitor-target list (React external-store shape). */
 export function subscribeActivityMonitorTargets(listener: () => void): () => void {
   targetListeners.add(listener)
   return () => { targetListeners.delete(listener) }
 }
 
-/** Read the stable active-target snapshot. */
+/** Read mounted targets, including settled targets retained by visible cards. */
 export function getActivityMonitorTargetsSnapshot(): readonly ActivityMonitorTarget[] {
   return targetSnapshot
 }
@@ -133,7 +130,7 @@ export function monitorAgentTeam(sessionId: string, teamId: string): () => void 
     current.refs -= 1
     if (current.refs <= 0) {
       targets.delete(key)
-      if (current.active) publishTargets()
+      publishTargets()
     }
   }
 }
@@ -192,12 +189,10 @@ interface ActivityFetchResponse {
 
 /** Injectable browser primitives used by the poll controller and its tests. */
 export interface ActivityPollingRuntime {
-  /**
-   * Current captain session to discover after a cold client/host restart.
-   * This one-time scope restores teams whose older conversation log has no
-   * AgentTeams card capable of registering an explicit monitor target.
-   */
+  /** Current captain used for cold discovery and Host-side response filtering. */
   readonly discoverySessionId?: string
+  /** Captain whose staged plan may load long editor detail. Defaults to discoverySessionId. */
+  readonly detailCaptainSessionId?: string
   readonly fetchState?: (
     url: string,
     init: { readonly cache: 'no-store'; readonly signal: AbortSignal },
@@ -205,89 +200,356 @@ export interface ActivityPollingRuntime {
   readonly schedule?: (callback: () => void, intervalMs: number) => unknown
   readonly cancel?: (timer: unknown) => void
   readonly publishSnapshots?: (update: Partial<ActivitySnapshots>) => void
+  /** Read the latest snapshots when scoped responses must be merged. */
+  readonly readSnapshots?: () => ActivitySnapshots
   readonly settleTargets?: (keys: ReadonlySet<string>) => void
+  /** Browser visibility; hidden pages perform no activity request. */
+  readonly visible?: () => boolean
+  /** Subscribe to browser visibility changes. */
+  readonly subscribeVisibility?: (listener: () => void) => () => void
 }
 
 /** Handle returned by one current-session polling loop. */
 export interface ActivityPollingController {
-  /** The immediate first pass, exposed so offline verification can await it. */
+  /** The first visible pass, exposed so offline verification can await it. */
   readonly firstTick: Promise<void>
   /** Idempotently stop the timer and abort the current request. */
   stop(): void
 }
 
+interface ActivityStateUrlOptions {
+  readonly archived?: boolean
+  readonly detail?: boolean
+}
+
+interface ActivityStateTarget {
+  readonly captainSessionId: string
+  readonly teamId: string
+}
+
+/**
+ * Build one scoped state URL for the current captain and explicit card targets.
+ * @param captainSessionId - current captain session used for team discovery.
+ * @param targets - explicit durable teams retained by conversation cards.
+ * @param options - archive and long-detail response switches.
+ * @returns the state endpoint and encoded selection query.
+ */
+function activityStateUrl(
+  captainSessionId: string | undefined,
+  targets: readonly ActivityStateTarget[],
+  options: ActivityStateUrlOptions = {},
+): string {
+  const params = new URLSearchParams()
+  const captain = captainSessionId?.trim() ?? ''
+  if (captain !== '') params.set('captainSessionId', captain)
+  const uniqueTargets = new Map(targets.map(target => [
+    activityTeamKey(target.captainSessionId.trim(), target.teamId.trim()),
+    { captainSessionId: target.captainSessionId.trim(), teamId: target.teamId.trim() },
+  ]))
+  for (const target of uniqueTargets.values()) {
+    if (target.captainSessionId === '' || target.teamId === '') continue
+    params.append('teamCaptainSessionId', target.captainSessionId)
+    params.append('teamId', target.teamId)
+  }
+  if (options.archived === true) params.set('archived', '1')
+  if (options.detail === true) params.set('detail', '1')
+  const query = params.toString()
+  return query === '' ? ACTIVITY_STATE_URL : `${ACTIVITY_STATE_URL}?${query}`
+}
+
+interface CachedTeamDetail {
+  detail: ActivityTeam
+  presentation: ActivityTeam
+  revision: string
+  generation: number
+  stale: boolean
+}
+
+const detailCaches = new Set<Map<string, CachedTeamDetail>>()
+
+function activityTeamKey(captainSessionId: string, teamId: string): string {
+  return `${captainSessionId}\u0000${teamId}`
+}
+
+/**
+ * Mark one staged plan's authoring fields for explicit refresh after a mutation.
+ * @param captainSessionId - owning captain session id.
+ * @param teamId - durable team id.
+ */
+export function invalidateActivityTeamDetail(captainSessionId: string, teamId: string): void {
+  const key = activityTeamKey(captainSessionId, teamId)
+  for (const cache of detailCaches) {
+    const cached = cache.get(key)
+    if (cached === undefined) continue
+    cached.generation += 1
+    cached.stale = true
+  }
+}
+
+function hasFullActivityTeamDetail(team: ActivityTeam): boolean {
+  if (team.detail === 'full') return true
+  if (team.detail === 'summary') return false
+  return team.members.every(member => member.executionPrompt !== undefined)
+    && team.tasks.every(task => task.description !== undefined)
+}
+
+function asFullActivityTeam(team: ActivityTeam): ActivityTeam {
+  return team.detail === 'full' ? team : { ...team, detail: 'full' }
+}
+
+function mergeActivityTeamDetail(summary: ActivityTeam, detail: ActivityTeam): ActivityTeam {
+  const members = new Map(detail.members.map(member => [member.name, member]))
+  const tasks = new Map(detail.tasks.map(task => [task.id, task]))
+  return {
+    ...detail,
+    ...summary,
+    detail: 'full',
+    members: summary.members.map(member => ({ ...members.get(member.name), ...member })),
+    tasks: summary.tasks.map(task => ({ ...tasks.get(task.id), ...task })),
+  }
+}
+
+async function hydrateStagedTeamDetails(
+  summaries: readonly ActivityTeam[],
+  teamDetails: Map<string, CachedTeamDetail>,
+  initialGenerations: ReadonlyMap<string, number>,
+  detailCaptainSessionId: string | undefined,
+  fetchState: NonNullable<ActivityPollingRuntime['fetchState']>,
+  signal: AbortSignal,
+): Promise<readonly ActivityTeam[]> {
+  const staged = summaries.filter(team => team.phase === 'staged'
+    && detailCaptainSessionId !== undefined
+    && team.captainSessionId === detailCaptainSessionId)
+  for (const team of staged) {
+    if (!hasFullActivityTeamDetail(team)) continue
+    const key = activityTeamKey(team.captainSessionId, team.teamId)
+    const current = teamDetails.get(key)
+    const initialGeneration = initialGenerations.get(key) ?? 0
+    if ((current?.generation ?? 0) !== initialGeneration) continue
+    const fullTeam = asFullActivityTeam(team)
+    teamDetails.set(key, {
+      detail: fullTeam,
+      presentation: fullTeam,
+      revision: team.detailRevision ?? '',
+      generation: initialGeneration,
+      stale: false,
+    })
+  }
+  const activeRevisions = new Map(staged.map(team => [
+    activityTeamKey(team.captainSessionId, team.teamId),
+    team.detailRevision ?? '',
+  ]))
+  const activeKeys = new Set(activeRevisions.keys())
+  for (const key of teamDetails.keys()) {
+    if (!activeKeys.has(key)) teamDetails.delete(key)
+  }
+  const missing = staged.filter(team => {
+    const cached = teamDetails.get(activityTeamKey(team.captainSessionId, team.teamId))
+    if (cached === undefined) return true
+    return cached.stale || cached.revision !== (team.detailRevision ?? '')
+  })
+  if (missing.length > 0) {
+    const requestGenerations = new Map(missing.map(team => {
+      const key = activityTeamKey(team.captainSessionId, team.teamId)
+      return [key, teamDetails.get(key)?.generation ?? 0] as const
+    }))
+    if (signal.aborted) return summaries
+    const response = await fetchState(activityStateUrl(undefined, missing.map(team => ({
+      captainSessionId: team.captainSessionId,
+      teamId: team.teamId,
+    })), {
+      detail: true,
+    }), { cache: 'no-store', signal })
+    if (signal.aborted) return summaries
+    if (response.ok) {
+      const body = (await response.json()) as { teams?: unknown }
+      if (signal.aborted) return summaries
+      if (Array.isArray(body.teams)) {
+        for (const team of body.teams as readonly ActivityTeam[]) {
+          if (team.detail !== 'full') continue
+          const key = activityTeamKey(team.captainSessionId, team.teamId)
+          const revision = team.detailRevision ?? ''
+          const generation = requestGenerations.get(key) ?? 0
+          if (activeRevisions.get(key) === revision
+            && (teamDetails.get(key)?.generation ?? 0) === generation) {
+            teamDetails.set(key, {
+              detail: team,
+              presentation: team,
+              revision,
+              generation,
+              stale: false,
+            })
+          }
+        }
+      }
+    }
+  }
+  return summaries.flatMap((summary) => {
+    if (summary.phase !== 'staged') return [summary]
+    const cached = teamDetails.get(activityTeamKey(summary.captainSessionId, summary.teamId))
+    if (cached === undefined) return [summary]
+    if (cached.stale || cached.revision !== (summary.detailRevision ?? '')) return [cached.presentation]
+    cached.presentation = mergeActivityTeamDetail(summary, cached.detail)
+    return [cached.presentation]
+  })
+}
+
+function browserVisible(): boolean {
+  return typeof document === 'undefined' || document.visibilityState !== 'hidden'
+}
+
+function subscribeBrowserVisibility(listener: () => void): () => void {
+  if (typeof document === 'undefined') return () => {}
+  document.addEventListener('visibilitychange', listener)
+  return () => { document.removeEventListener('visibilitychange', listener) }
+}
+
 /**
  * Start the single polling loop for the current session's requested targets.
  *
- * With neither targets nor a discovery session this is deliberately inert.
- * Explicit card targets poll at the live cadence from the start. A discovery
- * session performs an immediate live+archive restore pass, then — while it
- * still owns no team — probes on a low-frequency cadence, so a team created
- * later in that session (e.g. a run_code-wrapped agent_teams_create) is
- * discovered without a manual reload, without turning every ordinary session
- * into a one-second filesystem scan. The moment a team for the discovery
- * session appears, the controller upgrades to the live one-second cadence for
- * the rest of its lifetime. The caller — the session view, which stops the
- * controller when the session is no longer current — bounds the lifetime, and
- * archive state is refreshed when a target or a previously discovered live
- * team disappears.
+ * The Host receives the current captain and explicit team ids, so it filters
+ * before mailbox/activity assembly. Hidden browser pages abort active work and
+ * resume with an immediate pass. Staged-plan authoring fields use a separate
+ * explicit detail request and remain cached until a successful plan mutation
+ * invalidates them.
  */
 export function startActivityPolling(
   monitorTargets: readonly ActivityMonitorTarget[],
   runtime: ActivityPollingRuntime = {},
 ): ActivityPollingController {
   const discoverySessionId = runtime.discoverySessionId?.trim()
-  if (monitorTargets.length === 0 && (discoverySessionId === undefined || discoverySessionId === '')) {
+  const detailCaptainSessionId = (runtime.detailCaptainSessionId ?? discoverySessionId)?.trim()
+  const activeTargets = monitorTargets.filter(target => target.active !== false)
+  const allTargetKeys = new Set(monitorTargets.map(target => targetKey(target.sessionId, target.teamId)))
+  const activeTargetKeys = new Set(activeTargets.map(target => targetKey(target.sessionId, target.teamId)))
+  const discoveryOwns = (team: ActivityTeam): boolean => discoverySessionId !== undefined
+    && discoverySessionId !== ''
+    && team.captainSessionId === discoverySessionId
+  const activeTargetOwns = (team: ActivityTeam): boolean => activeTargetKeys.has(
+    targetKey(team.captainSessionId, team.teamId),
+  )
+  const mountedTargetOwns = (team: ActivityTeam): boolean => allTargetKeys.has(
+    targetKey(team.captainSessionId, team.teamId),
+  )
+  const responseOwns = (team: ActivityTeam): boolean => discoveryOwns(team) || activeTargetOwns(team)
+  const retainLive = (team: ActivityTeam): boolean => responseOwns(team)
+  const retainArchive = (team: ActivityTeam): boolean => discoveryOwns(team) || mountedTargetOwns(team)
+  const publishSnapshots = runtime.publishSnapshots ?? updateActivitySnapshots
+  const readSnapshots = runtime.readSnapshots
+    ?? (runtime.publishSnapshots === undefined
+      ? getActivitySnapshotsSnapshot
+      : () => ({ teams: [], archivedTeams: [] }))
+  const pruneSnapshots = (): void => {
+    const current = readSnapshots()
+    const teams = current.teams.filter(retainLive)
+    const archivedTeams = current.archivedTeams.filter(retainArchive)
+    if (teams.length !== current.teams.length || archivedTeams.length !== current.archivedTeams.length) {
+      publishSnapshots({ teams, archivedTeams })
+    }
+  }
+  const publishLive = (incoming: readonly ActivityTeam[]): void => {
+    const current = readSnapshots()
+    publishSnapshots({
+      teams: [
+        ...current.teams.filter(team => retainLive(team) && !responseOwns(team)),
+        ...incoming.filter(retainLive),
+      ],
+    })
+  }
+  const publishArchive = (incoming: readonly ActivityTeam[]): void => {
+    const current = readSnapshots()
+    publishSnapshots({
+      archivedTeams: [
+        ...current.archivedTeams.filter(team => retainArchive(team) && !responseOwns(team)),
+        ...incoming.filter(retainArchive),
+      ],
+    })
+  }
+  pruneSnapshots()
+  if (activeTargets.length === 0 && (discoverySessionId === undefined || discoverySessionId === '')) {
     return { firstTick: Promise.resolve(), stop: () => {} }
   }
+  const teamDetails = new Map<string, CachedTeamDetail>()
+  detailCaches.add(teamDetails)
   const fetchState = runtime.fetchState ?? ((url, init) => fetch(url, init))
   const schedule = runtime.schedule ?? ((callback, intervalMs) => setInterval(callback, intervalMs))
   const cancel = runtime.cancel ?? ((timer) => { clearInterval(timer as ReturnType<typeof setInterval>) })
-  const publishSnapshots = runtime.publishSnapshots ?? updateActivitySnapshots
   const settleTargets = runtime.settleTargets ?? settleActivityMonitorTargets
+  const visibleNow = runtime.visible ?? browserVisible
+  const observeVisibility = runtime.subscribeVisibility ?? subscribeBrowserVisibility
+  const explicitTargets = activeTargets.map(target => ({
+    captainSessionId: target.sessionId,
+    teamId: target.teamId,
+  }))
   let cancelled = false
+  let visible = visibleNow()
   let inFlight = false
-  // Explicit card targets are demanded work: start at the live cadence. A
-  // discovery session starts probing low-frequency and upgrades on detection.
-  let hot = monitorTargets.length > 0
+  let resumeAfterFlight = false
+  let hot = activeTargets.length > 0
   let discoveryComplete = false
   let discoveredLiveKeys = new Set<string>()
-  let controller: AbortController | undefined
+  let activeController: AbortController | undefined
   let timer: unknown
+  let firstSettled = false
+  let settleFirst!: () => void
+  const firstTick = new Promise<void>((resolve) => { settleFirst = resolve })
   const intervalMs = (): number => (hot ? ACTIVITY_POLL_MS : ACTIVITY_PROBE_MS)
-  const reschedule = (): void => {
+  const clearTimer = (): void => {
+    if (timer === undefined) return
     cancel(timer)
-    timer = schedule(() => { void tick() }, intervalMs())
+    timer = undefined
+  }
+  const armTimer = (): void => {
+    clearTimer()
+    if (!cancelled && visible) timer = schedule(() => { void tick() }, intervalMs())
+  }
+  const finishFirst = (): void => {
+    if (firstSettled) return
+    firstSettled = true
+    settleFirst()
   }
   const tick = async (): Promise<void> => {
-    if (inFlight || cancelled) return
+    if (inFlight || cancelled || !visible) return
     inFlight = true
-    controller = new AbortController()
+    const requestController = new AbortController()
+    activeController = requestController
+    const initialDetailGenerations = new Map([...teamDetails].map(([key, value]) => [
+      key, value.generation,
+    ] as const))
     try {
-      const liveResponse = await fetchState(ACTIVITY_STATE_URL, {
+      const liveResponse = await fetchState(activityStateUrl(
+        discoverySessionId,
+        explicitTargets,
+      ), {
         cache: 'no-store',
-        signal: controller.signal,
+        signal: requestController.signal,
       })
-      if (!liveResponse.ok) return
+      if (requestController.signal.aborted || cancelled || !visible || !liveResponse.ok) return
       const body = (await liveResponse.json()) as { teams?: unknown }
-      if (cancelled || !Array.isArray(body.teams)) return
-      const liveTeams = body.teams as readonly ActivityTeam[]
-      publishSnapshots({ teams: liveTeams })
+      if (requestController.signal.aborted || cancelled || !visible || !Array.isArray(body.teams)) return
+      const liveTeams = await hydrateStagedTeamDetails(
+        body.teams as readonly ActivityTeam[],
+        teamDetails,
+        initialDetailGenerations,
+        detailCaptainSessionId,
+        fetchState,
+        requestController.signal,
+      )
+      if (requestController.signal.aborted || cancelled || !visible) return
+      publishLive(liveTeams)
       const previousDiscoveredKeys = discoveredLiveKeys
       discoveredLiveKeys = new Set(discoverySessionId === undefined || discoverySessionId === ''
         ? []
         : liveTeams
-          .filter((team) => team.captainSessionId === discoverySessionId)
-          .map((team) => team.teamId))
-      // A discovery session found its first team: upgrade from the low-frequency
-      // probe to the live cadence for the rest of the controller lifetime.
+          .filter(team => team.captainSessionId === discoverySessionId)
+          .map(team => team.teamId))
       if (!hot && discoveredLiveKeys.size > 0) {
         hot = true
-        reschedule()
+        armTimer()
       }
       const discoveredTeamArchived = [...previousDiscoveredKeys]
-        .some((teamId) => !discoveredLiveKeys.has(teamId))
-      const missing = monitorTargets.filter((target) => !liveTeams.some((team) =>
+        .some(teamId => !discoveredLiveKeys.has(teamId))
+      const missing = activeTargets.filter(target => !liveTeams.some(team =>
         team.captainSessionId === target.sessionId && team.teamId === target.teamId,
       ))
       const needsDiscoveryArchive = discoverySessionId !== undefined
@@ -295,37 +557,64 @@ export function startActivityPolling(
         && !discoveryComplete
       if (missing.length === 0 && !needsDiscoveryArchive && !discoveredTeamArchived) return
 
-      // Archives are immutable per team generation. A successful fallback
-      // retires every missing explicit target, including legacy cards whose
-      // host archive no longer exists; a discovery session that already
-      // upgraded keeps polling, and a still-probing one keeps probing, so a
-      // team created later in the same session stays discoverable.
-      const archivedResponse = await fetchState(`${ACTIVITY_STATE_URL}?archived=1`, {
+      const archivedResponse = await fetchState(activityStateUrl(
+        discoverySessionId,
+        explicitTargets,
+        { archived: true },
+      ), {
         cache: 'no-store',
-        signal: controller.signal,
+        signal: requestController.signal,
       })
-      if (!archivedResponse.ok) return
+      if (requestController.signal.aborted || cancelled || !visible || !archivedResponse.ok) return
       const archivedBody = (await archivedResponse.json()) as { teams?: unknown }
-      if (cancelled || !Array.isArray(archivedBody.teams)) return
-      publishSnapshots({ archivedTeams: archivedBody.teams as readonly ActivityTeam[] })
+      if (requestController.signal.aborted || cancelled || !visible || !Array.isArray(archivedBody.teams)) return
+      publishArchive(archivedBody.teams as readonly ActivityTeam[])
       discoveryComplete = true
-      settleTargets(new Set(missing.map((target) => target.key)))
+      settleTargets(new Set(missing.map(target => target.key)))
     } catch (error: unknown) {
       if ((error as { name?: unknown })?.name === 'AbortError') return
-      // Host restarting; keep the last snapshot and retry on the next tick.
+      // Keep the last snapshot while the Host is unavailable; the timer retries.
     } finally {
+      if (activeController === requestController) activeController = undefined
       inFlight = false
+      if (!requestController.signal.aborted) finishFirst()
+      const shouldResume = resumeAfterFlight
+      resumeAfterFlight = false
+      if (shouldResume && visible && !cancelled) queueMicrotask(() => { void tick() })
     }
   }
-  const firstTick = tick()
-  if (timer === undefined) timer = schedule(() => { void tick() }, intervalMs())
+  const stopVisibility = observeVisibility(() => {
+    const next = visibleNow()
+    if (next === visible || cancelled) return
+    visible = next
+    if (!visible) {
+      clearTimer()
+      resumeAfterFlight = false
+      activeController?.abort()
+      return
+    }
+    armTimer()
+    if (inFlight) resumeAfterFlight = true
+    else {
+      resumeAfterFlight = false
+      void tick()
+    }
+  })
+  if (visible) {
+    void tick()
+    armTimer()
+  }
   return {
     firstTick,
     stop: () => {
       if (cancelled) return
       cancelled = true
-      controller?.abort()
-      cancel(timer)
+      clearTimer()
+      stopVisibility()
+      activeController?.abort()
+      detailCaches.delete(teamDetails)
+      teamDetails.clear()
+      finishFirst()
     },
   }
 }

@@ -155,14 +155,16 @@ export class ProjectionValueStore {
    * @param key - projection key.
    * @param value - whole value computed by the host unit.
    * @param seq - the unit's watermark at emission.
+   * @returns whether this write replaced the row; stale and replayed sequenced writes return false.
    */
-  apply(key: string, value: unknown, seq: SessionSeqCursor): void {
+  apply(key: string, value: unknown, seq: SessionSeqCursor): boolean {
     const row = this.rows.get(key)
     // higher seq wins among sequenced rows; replays and stale frames drop. A
     // cached row has no comparable seq and always yields.
-    if (row?.kind === 'sequenced' && seq <= row.seq) return
+    if (row?.kind === 'sequenced' && seq <= row.seq) return false
     this.rows.set(key, { kind: 'sequenced', value, seq })
     this.changed(key)
+    return true
   }
 
   /**
@@ -190,17 +192,22 @@ export class ProjectionValueStore {
    * unless a newer frame already superseded the cut (a stale baseline can
    * neither overwrite nor clear newer sequenced values).
    * @param baseline - the response's projections block.
+   * @returns whether any row was replaced or removed.
    */
-  seed(baseline: ProjectionsBaseline): void {
+  seed(baseline: ProjectionsBaseline): boolean {
+    let changed = false
     for (const [key, row] of this.rows) {
       if (row.kind !== 'cached') continue
       this.rows.delete(key)
       this.changed(key)
+      changed = true
     }
     // Erased walk: the framework crosses the open key space; per-key typing
     // is re-established at the consumer (useProjection's map lookup).
     const values = baseline.values as Record<string, unknown>
-    for (const key of Object.keys(values)) this.apply(key, values[key], baseline.asOfSeq)
+    for (const key of Object.keys(values)) {
+      if (this.apply(key, values[key], baseline.asOfSeq)) changed = true
+    }
     for (const [key, row] of this.rows) {
       if (Object.hasOwn(values, key)) continue
       // Every cached row was deleted above; the kind test only narrows the
@@ -208,7 +215,9 @@ export class ProjectionValueStore {
       if (row.kind === 'sequenced' && row.seq > baseline.asOfSeq) continue
       this.rows.delete(key)
       this.changed(key)
+      changed = true
     }
+    return changed
   }
 
   /** Discard one Host generation's values and watermarks while preserving subscribed faces. */

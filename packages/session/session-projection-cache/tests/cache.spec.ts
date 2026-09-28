@@ -45,6 +45,7 @@ declare module '@deepseek-ai/dsh-session-projection/types' {
     'cache-test/count': number
     'cache-test/secret': string
     'cache-test/marks3': MarksState
+    'cache-test/mutable': { marks: string[] }
     title: string | null
   }
   interface SessionProjectionMap {
@@ -310,6 +311,84 @@ describe('SessionProjectionCache write policy', () => {
     await expect(ctx.sessionProjectionCache.write(clean)).rejects.toThrow('not losslessly JSON-serializable')
   })
 
+  it('keeps the captured live cut detached while waiting for log durability', async () => {
+    const { ctx, root, cache } = await harness()
+    const state = { marks: [] as string[] }
+    ctx.sessionProjections.register({
+      key: 'cache-test/mutable',
+      stateSchema: z.object({ marks: z.array(z.string()) }),
+      init: () => state,
+      apply(current, event) {
+        if (event.type === 'cache-test/mark') current.marks.push(...event.data.marks)
+        return current
+      },
+      stateVersion: 1,
+    })
+    const id = SessionId('captured-before-flush')
+    const created = whenWritten(ctx, id)
+    const session = ctx.sessions.create(id)
+    await created
+    mark(session, ['captured'])
+    const capturedSeq = session.seq - 1
+    const entered = Promise.withResolvers<undefined>()
+    const release = Promise.withResolvers<undefined>()
+    const flush = vi.spyOn(ctx.sessions, 'flush').mockImplementationOnce(async () => {
+      entered.resolve(undefined)
+      await release.promise
+      return true
+    })
+    const writing = cache.write(session)
+    try {
+      await entered.promise
+      mark(session, ['later'])
+      expect(state.marks).toEqual(['captured', 'later'])
+      expect((await storedRows(root, id))?.['cache-test/mutable']?.val).toEqual({ marks: [] })
+      release.resolve(undefined)
+      await writing
+      expect((await storedRows(root, id))?.['cache-test/mutable']).toEqual({
+        ver: 1, seq: capturedSeq, val: { marks: ['captured'] },
+      })
+    } finally {
+      release.resolve(undefined)
+      await writing
+      flush.mockRestore()
+    }
+  })
+
+  it('detaches cold write-back before returning control to the log owner', async () => {
+    const { ctx, root, cache } = await harness()
+    const header = headerOf(SessionId('cold-owned-input'), 20)
+    const marks = ['captured']
+    const events: SessionEvent[] = [{
+      type: 'cache-test/mark', seq: SessionSeq(0), time: 20, data: { marks },
+    }]
+    const written = whenWritten(ctx, header.id)
+    cache.coldSnapshot(header, SessionLogOffset(0), events)
+    marks.push('caller-change')
+    await written
+    expect((await storedRows(root, header.id))?.['cache-test/marks']).toEqual({
+      ver: 1, seq: 0, val: { marks: ['captured'] },
+    })
+  })
+
+  it('rejects a non-JSON cold checkpoint without failing the synchronous cold read', async () => {
+    const { ctx, root, cache } = await harness()
+    ctx.sessionProjections.register({
+      key: 'cache-test/marks2',
+      stateSchema: z.custom<Map<string, string>>(() => true),
+      init: () => new Map<string, string>(),
+      apply: state => state,
+      stateVersion: 1,
+    })
+    const warn = vi.spyOn(ctx.logger, 'warn').mockImplementation(() => {})
+    const header = headerOf(SessionId('invalid-cold-checkpoint'), 30)
+    expect(cache.coldSnapshot(header, SessionLogOffset(0), [])).toBeDefined()
+    await vi.waitFor(() => {
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining('not losslessly JSON-serializable'))
+    })
+    expect(await storedRecord(root, header.id)).toBeUndefined()
+  })
+
   it('plugin disposal clears armed interval timers and leaves cleaned sessions alone', async () => {
     vi.useFakeTimers()
     const { ctx, root, fiber } = await harness({ config: { writeEveryEvents: 100, writeIntervalMs: 5000 } })
@@ -553,6 +632,26 @@ describe('SessionProjectionCache listing read', () => {
       'cache-test/marks3': { marks: ['b'] },
     })
     expect(block?.asOfSeq).toBe(4)
+  })
+
+  it('excludes cached detail keys without losing their persisted values', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-projcache-'))
+    roots.push(root)
+    await seedRecord(root, 'filtered-hints', {
+      'cache-test/marks': { ver: 1, seq: SessionSeq(2), val: { marks: ['detail'] } },
+      'cache-test/marks3': { ver: 1, seq: SessionSeq(7), val: { marks: ['summary'] } },
+    })
+    const { ctx, cache } = await harness({ root })
+    ctx.sessionProjections.register(marks3Unit)
+    const header = headerOf(SessionId('filtered-hints'))
+    const excluded = new Set(['cache-test/marks'])
+    expect(cache.cachedSnapshot(header, undefined, excluded)).toEqual({
+      asOfSeq: 7, values: { 'cache-test/marks3': { marks: ['summary'] } },
+    })
+    expect(cache.cachedSnapshot(header, ['cache-test/marks'], excluded)).toBeUndefined()
+    expect(cache.cachedSnapshot(header, ['cache-test/marks'])).toEqual({
+      asOfSeq: 2, values: { 'cache-test/marks': { marks: ['detail'] } },
+    })
   })
 
   it('returns undefined when the stored record version is not accepted', async () => {

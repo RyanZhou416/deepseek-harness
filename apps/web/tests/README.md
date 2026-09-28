@@ -14,7 +14,17 @@ On Linux, `--with-deps` installs dependencies through the system package manager
 
 Ordinary scenarios begin with no registered Workspace or Session and a durable marker recording a removed default Workspace, so explicit folder-selection scenarios retain control of their cwd. `launchWebScaffold({ firstUse: true })` leaves initialization eligible for startup scenarios.
 
+## Manual load diagnostics
+
+`complex-history.perf.ts` runs under `vitest.web.perf.config.ts` and reports large workspace/history costs, eight continued turns, and a 100-turn browser soak. Synthetic history reserves the current format's system head before user messages. The workspace case checks all stored Sessions and the five-row preview plus hidden count; Trajectory measurements use logical row counts because the table virtualizes mounted rows. Live tool turns execute the platform's shipped shell (`pwsh` on Windows, `bash` elsewhere) and assert the returned marker. Its GC checkpoints measure browser heap, DOM nodes, and listeners; the test retains observed Session events, so the test Host's RSS is not a product-retention measurement.
+
+`../stress-tests/subagent-reconnect.stress.ts` runs under `vitest.web-stress.config.ts`: eight real continuable children produce paced synthetic output while a real WebSocket is closed and reconnected. It checks retained draft/title, complete durable child output, unique lifecycle events, and child release, and reports trusted keyboard-input and recovery times without a new timing budget. Both diagnostics use private temporary data, a source-resolved Host, and built Client assets; they exclude remote model latency.
+
+Set `DSH_PERF_CAPTURE=1` for a separate diagnostic run of the default-window or fully expanded continuation cases. The first turn writes browser CPU profiles, a Chrome timeline, a Host CPU profile, and available source maps under `tmp/runtime-profiles/`. Capture uses an in-process Node inspector session without opening a listening port. It resolves the Send control before recording and checks only the recent message nodes during recording; profile-enabled timings include instrumentation and must stay separate from ordinary benchmark samples.
+
 ## Completion observations
+
+Plugin configuration tests select the active platform shell and assert its shipped timeout default, saved override, and restored default. The inactive shell's Loader row is not evidence of live configuration updates.
 
 State-sensitive cases use Workspace, admission, attachment, and model-stream barriers to separate visible intermediate states from completed operations. Details close waits for frame transitions; archive verification assigns an explicit title to the seeded Session and follows that identity across reload. See the [CI fixture synchronization decision](../../../.agents/notes/implemented/testing/2026-09-08-ci-completion-observations.md).
 

@@ -1,6 +1,6 @@
 /**
  * The Subagent settings page, browser half: the delegation limits over the
- * `subagent` namespace and the models agents may choose over the
+ * `subagent` namespace, its forced child model, and the models agents may choose over the
  * `subagent-model-selection` namespace, on one page with one save. The page
  * registers into the Plugins page's `plugins.item` slot while the Host serves
  * either namespace and shows the sections it serves.

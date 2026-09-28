@@ -7,6 +7,7 @@ import { SettingsForm } from '@deepseek-ai/dsh-client-ui-primitives'
 import { formLabels } from './locales.ts'
 import { SubagentLimitsFields } from './SubagentLimitsFields.tsx'
 import { SubagentModelSelectionFields } from './SubagentModelSelectionFields.tsx'
+import { SubagentModelOverrideFields } from './SubagentModelOverrideFields.tsx'
 import { subagentCardShell, type SubagentCardFace } from './subagent-card-controller.ts'
 import css from './SubagentCard.module.css'
 
@@ -29,6 +30,13 @@ export function SubagentCard(props: SubagentCardProps) {
   return (
     <SettingsForm labels={formLabels(t)}
       state={state} onSave={props.save} onDiscard={props.discard}>
+      {limits.available && limits.overrideAvailable
+        ? <section className={css.section} aria-labelledby={`${headingId}-override`}>
+          <h3 className={css.heading} id={`${headingId}-override`}>{t('subagentOverrideTitle')}</h3>
+          <SubagentModelOverrideFields t={t} state={{ ...limits, saving: state.saving }} catalog={models}
+            edit={props.editLimit} resetField={props.resetLimit} retryCatalog={props.retryCatalog} />
+        </section>
+        : null}
       {limits.available
         ? (
           <section className={css.section} aria-labelledby={`${headingId}-limits`}>

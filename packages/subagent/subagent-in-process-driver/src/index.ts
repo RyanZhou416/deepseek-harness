@@ -138,7 +138,7 @@ export async function startInProcessRun(
     meta: childSessionMeta(parent, childDepth, seed !== undefined),
     ...seed !== undefined ? { seed } : {},
     ...seed === undefined ? {} : { inheritedEventCount: activationBoundary },
-    agentOptions: resolveChildAgentOptions(parent, request.agentOptions, childDepth),
+    agentOptions: resolveChildAgentOptions(parent, request.agentOptions, childDepth, request.inheritReasoningEffort),
     signal: request.signal,
     setup,
   })

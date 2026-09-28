@@ -87,10 +87,104 @@ it('preserves unrelated context patch rows and handles idempotence, dry-run, and
   }
 })
 
+it('updates only the managed Session catalog field while preserving user config, metadata, and CRLF bytes', () => {
+  const root = mkdtempSync(join(tmpdir(), 'dsh catalog patch '))
+  try {
+    const patch = join(root, 'cordis.patch.yml')
+    const context = readFileSync(template, 'utf8').split('- id: session-controller')[0]!.trimEnd().replace(/\r?\n/gu, '\r\n')
+    const controller = [
+      "- id: 'session-controller' # operator row",
+      "  name: '@deepseek-ai/dsh-api-session-controller'",
+      '  disabled: false',
+      '  config: # keep this comment',
+      '    nativeOpen: !!js Boolean(ctx.native)',
+      '    idleSessionRetentionMs: 7777',
+      '    operatorExpression: !!js |',
+      '      ({ enabled: true, value: ctx.value })',
+      '  isolate: [sessions]',
+      '# independent plugin',
+      '- id: keep-after',
+      '  config: !!js ctx.userConfig',
+      '',
+    ].join('\r\n')
+    const original = context + '\r\n' + controller
+    writeFileSync(patch, original)
+    const result = run('merge-patch', patch, template)
+    expect(result.status, result.stderr).toBe(0)
+    const once = readFileSync(patch, 'utf8')
+    const managedField = '    listProjectionExcludeKeys:\r\n      - contextHeaders\r\n      - turnOutline\r\n'
+    expect(once.replace(managedField, '')).toBe(original)
+    expect(once).not.toContain('\r\r\n')
+    expect(run('merge-patch', patch, template).stdout).toMatch(/^unchanged /u)
+    expect(readFileSync(patch, 'utf8')).toBe(once)
+    expect(run('verify-patch', patch, template).status).toBe(0)
+
+    writeFileSync(patch, once.replace(managedField, '    listProjectionExcludeKeys: [outdated]\r\n'))
+    expect(run('merge-patch', patch, template).status).toBe(0)
+    expect(readFileSync(patch, 'utf8')).toBe(once)
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+it('adds catalog config to an existing controller without replacing its metadata', () => {
+  const root = mkdtempSync(join(tmpdir(), 'dsh catalog config '))
+  try {
+    const patch = join(root, 'cordis.patch.yml')
+    writeFileSync(patch, '- id: session-controller\n  disabled: true\n  isolate: [sessions]\n')
+    const result = run('merge-patch', patch, template)
+    expect(result.status, result.stderr).toBe(0)
+    const current = readFileSync(patch, 'utf8')
+    expect(current).toContain('- id: session-controller\n  config:\n    listProjectionExcludeKeys:\n')
+    expect(current).toContain('  disabled: true\n  isolate: [sessions]\n')
+    expect(current.match(/^- id: session-controller$/gmu)).toHaveLength(1)
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+it.each([
+  '- id: session-controller\n- id: session-controller\n',
+  '- { id: session-controller, config: { nativeOpen: false } }\n',
+  '- id: session-controller\n  config: { nativeOpen: false }\n',
+  '- id: session-controller\n  config: *operatorSettings\n',
+  '- id: session-controller\n  config: !!js ctx.operatorSettings\n',
+  '- *operatorController\n',
+  '- name: custom-controller\n  id: session-controller\n',
+  '- id: session-controller\n  config:\n    nativeOpen: false\n  config:\n    nativeOpen: true\n',
+  '- id: session-controller\n  config:\n    listProjectionExcludeKeys: []\n    listProjectionExcludeKeys: []\n',
+  '- id: session-controller\n  config:\n    <<: *operatorSettings\n',
+  '- id: session-controller\n  config:\n    !!js ctx.operatorSettings\n',
+])('rejects ambiguous controller configuration without writing the patch (%s)', (source) => {
+  const root = mkdtempSync(join(tmpdir(), 'dsh ambiguous catalog '))
+  try {
+    const patch = join(root, 'cordis.patch.yml')
+    writeFileSync(patch, source)
+    const result = run('merge-patch', patch, template)
+    expect(result.status).not.toBe(0)
+    expect(result.stderr).toMatch(/session-controller/u)
+    expect(readFileSync(patch, 'utf8')).toBe(source)
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+it('checks the effective catalog exclusions in composed config rather than unrelated mentions', () => {
+  const source = readFileSync(template, 'utf8')
+  expect(runWithInput(['verify-dump', '-'], source).status).toBe(0)
+  const absent = source.split('- id: session-controller')[0]!
+  expect(runWithInput(['verify-dump', '-'], absent).status).not.toBe(0)
+  const overridden = source.replace('      - turnOutline', '      - somethingElse')
+    + '# turnOutline is mentioned only in a comment\n'
+  expect(runWithInput(['verify-dump', '-'], overridden).status).not.toBe(0)
+  const extra = source.replace('      - turnOutline', "      - 'turnOutline'\n      - operatorDetail")
+  expect(runWithInput(['verify-dump', '-'], extra).status).toBe(0)
+})
+
 it('rejects drift in artifacts, profile pins, patches, and composed config', () => {
   const root = mkdtempSync(join(tmpdir(), 'dsh setup verify with spaces '))
   try {
-    const agentArtifact = join(root, 'nanmicoder-dsh-agent-teams-0.1.20-dsh017rc1.1.tgz')
+    const agentArtifact = join(root, 'nanmicoder-dsh-agent-teams-0.1.20-dsh017rc1.2.tgz')
     const contextArtifact = join(root, 'dsh-context-0.55.0-dsh017rc1.3.tgz')
     const subscriptionsArtifact = join(root, 'dsh-plugin-subscriptions-0.9.4-dsh017rc1.1.tgz')
     writeFileSync(agentArtifact, 'agent artifact')
@@ -110,7 +204,7 @@ it('rejects drift in artifacts, profile pins, patches, and composed config', () 
     mkdirSync(subscriptionsInstall, { recursive: true })
     writeFileSync(join(agentInstall, 'package.json'), JSON.stringify({
       name: '@nanmicoder/dsh-agent-teams',
-      version: '0.1.20-dsh017rc1.1',
+      version: '0.1.20-dsh017rc1.2',
     }))
     writeFileSync(join(contextInstall, 'package.json'), JSON.stringify({
       name: 'dsh-context',
@@ -152,8 +246,8 @@ it('rejects drift in artifacts, profile pins, patches, and composed config', () 
     expect(secondPin.stdout).toMatch(/^unchanged packageManager pnpm@11\.7\.0/u)
     expect(readFileSync(profileManifest, 'utf8')).toBe(pinned)
     writeFileSync(join(profile, 'pnpm-lock.yaml'), [
-      'nanmicoder-dsh-agent-teams-0.1.20-dsh017rc1.1.tgz',
-      '0.1.20-dsh017rc1.1',
+      'nanmicoder-dsh-agent-teams-0.1.20-dsh017rc1.2.tgz',
+      '0.1.20-dsh017rc1.2',
       'dsh-context-0.55.0-dsh017rc1.3.tgz',
       '0.55.0-dsh017rc1.3',
       'dsh-plugin-subscriptions-0.9.4-dsh017rc1.1.tgz',

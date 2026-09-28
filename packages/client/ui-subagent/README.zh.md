@@ -55,7 +55,7 @@ kind: "package-reference"
 
 ### 目录派生
 
-页头谱系 renderer 通过标准 `useSessions` 钩子读取 `projectionsBySession`。renderer 从每个 Session 的共享值中选择 `subagentCatalog`，用于成员关系、展开控件与数量；活动状态优先使用统一 UI status，缺少时使用 Session 摘要；摘要提供标题与用量。展开行会按需加载初始目录。实时 projection 帧更新所有已加载层级，无需菜单订阅或重复成员查询。行在目录缺席、加载中或失败时保持可展开，并在目录就绪且为空后成为已知叶子。
+关闭的页头控件只订阅自身根 `subagentCatalog` 与直接 child 的活动状态。打开菜单时，菜单挂载读取 `projectionsBySession`、Session 摘要与统一 UI status 的完整目录树 reader；关闭菜单会释放这些宽范围订阅。展开行会按需加载初始目录。实时 projection 帧会更新每个已加载且可见的层级，无需重复成员查询。行在目录缺席、加载中或失败时保持可展开，并在目录就绪且为空后成为已知叶子。
 
 打开目录下拉菜单不会请求其根目录。展开子节点目录或重试失败读取时调用 `refreshProjection`；共享投影值的变化会自动更新显示。
 

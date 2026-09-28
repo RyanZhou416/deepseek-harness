@@ -35,8 +35,11 @@ import {
   type WebScaffold,
 } from './scaffold.ts'
 import { connectFreshWorkspace, newEnglishPage } from './support.ts'
+import { captureRuntimeProfile } from './runtime-profile.ts'
 
 const SIDEBAR_SESSION_COUNT = 1_000
+// WorkspaceBrowser displays five idle rows before its explicit overflow action.
+const SIDEBAR_VISIBLE_SESSIONS = 5
 const LONG_SESSION_ID = 'perf-long-history'
 const LONG_SESSION_TITLE = 'LONG_PERF_SENTINEL 500-turn session'
 const LONG_HISTORY_TURNS = 500
@@ -56,6 +59,7 @@ const POST_SOAK_RENDER_TURN = SOAK_TURNS + 1
 const SOAK_DELTA_COUNT = 8
 const SOAK_TOOL_INTERVAL = 10
 const SOAK_CHECKPOINT_INTERVAL = 10
+const PERF_SHELL = process.platform === 'win32' ? 'pwsh' : 'bash'
 const LONG_CONTINUATION_USER_PREFIX = 'LONG_CONTINUATION_USER'
 const LONG_CONTINUATION_FIRST_PREFIX = 'LONG_CONTINUATION_FIRST'
 const LONG_CONTINUATION_DONE_PREFIX = 'LONG_CONTINUATION_DONE'
@@ -336,13 +340,13 @@ function smallSidebarFixture(): string {
   session.append('turn/start', {
     turn: 1,
   })
+  session.append('step/start', { turn: 1, step: 1 })
+  appendSystemPrompt(session, 1, 1)
   const user = session.append('user/message', createUserMessage({
     content: text('Inspect this compact synthetic session.'),
     source: { kind: 'user' },
   }), { surfaceOp: 'append' })
   appendTitle(session, 'Synthetic sidebar session', user.seq)
-  session.append('step/start', { turn: 1, step: 1 })
-  appendSystemPrompt(session, 1, 1)
   appendRequestHeader(session, 1, 1)
   appendToolStep(session, 1, 1, 2)
   session.append('step/end', { turn: 1, step: 1 })
@@ -360,6 +364,8 @@ function longHistoryFixture(): string {
     session.append('turn/start', {
       turn,
     })
+    session.append('step/start', { turn, step: 1 })
+    if (turn === 1) appendSystemPrompt(session, turn, 1)
     const user = session.append('user/message', createUserMessage({
       content: text(
         `LONG_PERF_SENTINEL turn ${String(turn)}: analyze payload ${'u'.repeat(200)}`,
@@ -368,8 +374,6 @@ function longHistoryFixture(): string {
     }), { surfaceOp: 'append' })
     if (turn === 1) appendTitle(session, LONG_SESSION_TITLE, user.seq)
 
-    session.append('step/start', { turn, step: 1 })
-    if (turn === 1) appendSystemPrompt(session, turn, 1)
     appendRequestHeader(session, turn, 1)
     if (turn % TOOL_TURN_INTERVAL === 0) {
       appendToolStep(session, turn, 1, TOOLS_PER_TOOL_TURN)
@@ -484,7 +488,7 @@ function soakTurn(index: number): ConversationTurnSpec {
 function toolStream(index: number, marker: string): StreamChunk[] {
   const callId = ToolCallId(`performance-tool-${marker.toLowerCase()}-${String(index)}`)
   const args = JSON.stringify({
-    command: `printf '${marker}\\n'`,
+    command: process.platform === 'win32' ? `[Console]::Out.WriteLine('${marker}')` : `printf '${marker}\\n'`,
     description: `Emit performance marker ${String(index)}`,
   })
   return [
@@ -493,13 +497,13 @@ function toolStream(index: number, marker: string): StreamChunk[] {
       type: 'tool-call-delta',
       index: 0,
       id: callId,
-      name: 'bash',
+      name: PERF_SHELL,
       argumentsDelta: args,
     },
     {
       type: 'block-end',
       index: 0,
-      block: { type: 'tool-call', id: callId, name: 'bash', arguments: args },
+      block: { type: 'tool-call', id: callId, name: PERF_SHELL, arguments: args },
     },
     { type: 'usage', usage: { inputTokens: 256, outputTokens: 32 } },
     { type: 'finish', reason: { kind: 'tool-calls' } },
@@ -922,20 +926,25 @@ async function openPerformancePage(
   world: PerformanceWorld,
   expectedSessions: number,
 ): Promise<Locator> {
+  expect((await world.scaffold.ctx.sessionPersistence.list()).length).toBe(expectedSessions)
   await world.page.goto(world.scaffold.authenticatedUrl, { waitUntil: 'load' })
   await world.page.waitForSelector('[class*="frame"]', { timeout: 30_000 })
   const group = world.page.getByRole('treeitem').first()
-  await expect.poll(() => group.textContent(), { timeout: 30_000 })
-    .toContain(`${String(expectedSessions)} ${expectedSessions === 1 ? 'session' : 'sessions'}`)
+  await expect.poll(() => group.textContent(), { timeout: 30_000 }).toBe('Ungrouped')
   return group
 }
 
-async function openLongHistory(page: Page): Promise<number> {
-  await page.getByRole('textbox', { name: 'Search name, keywords...', exact: true })
-    .fill('LONG_PERF_SENTINEL')
+async function searchHistory(page: Page): Promise<Locator> {
+  const trigger = page.getByRole('button', { name: 'Search sessions', exact: true })
+  if (await trigger.getAttribute('aria-expanded') !== 'true') await trigger.click()
+  await page.getByRole('textbox', { name: 'Search session names', exact: true }).fill('LONG_PERF_SENTINEL')
   const results = page.getByRole('tree', { name: 'Search results' }).getByRole('treeitem')
   await expect.poll(() => results.count(), { timeout: 60_000 }).toBe(1)
-  await results.first().click()
+  return results.first()
+}
+
+async function openLongHistory(page: Page): Promise<number> {
+  await (await searchHistory(page)).click()
   await page.getByRole('tab', { name: 'Chat', exact: true }).waitFor({ timeout: 30_000 })
   return conversationTurns(page)
 }
@@ -960,99 +969,131 @@ async function continueConversation(
 
   for (let index = 1; index <= options.turnCount; index += 1) {
     const spec = options.turnSpec(index)
-    const composerFill = await measure(cdp, async () => {
-      await composer.fill(spec.prompt)
-      await expect.poll(() => composer.textContent()).toBe(spec.prompt)
-      return ((await composer.textContent()) ?? '').length
-    })
-    expect(composerFill.value).toBe(spec.prompt.length)
+    const capturing = index === 1 && process.env['DSH_PERF_CAPTURE'] === '1'
+    // Resolve the accessible action before profiling; repeated ARIA scans are test work.
+    const sendButton = capturing
+      ? await world.page.getByRole('button', { name: 'Send message', exact: true }).elementHandle()
+      : undefined
+    const profile = capturing
+      ? await captureRuntimeProfile(world.page, cdp, `${String(options.startingTurns)}-turns-direct`)
+      : undefined
+    try {
+      const composerFill = await measure(cdp, async () => {
+        await composer.fill(spec.prompt)
+        await expect.poll(() => composer.textContent()).toBe(spec.prompt)
+        return ((await composer.textContent()) ?? '').length
+      })
+      expect(composerFill.value).toBe(spec.prompt.length)
 
-    const eventStart = world.sessionEvents.length
-    await startMutationProbe(world.page)
-    const streamBefore = await chromiumMetrics(cdp)
-    const streamStarted = performance.now()
-    const settled = world.scaffold.whenTurnSettled(60_000)
-    await world.page.getByRole('button', { name: 'Send message', exact: true }).click()
-    await world.page.getByText(spec.userMarker, { exact: false }).last().waitFor({ timeout: 15_000 })
-    const clickToUserEchoMs = performance.now() - streamStarted
-    await world.page.getByText(spec.firstMarker, { exact: false }).last().waitFor({ timeout: 15_000 })
-    const clickToFirstChunkMs = performance.now() - streamStarted
-    const settledSessionId = await settled
-    if (liveSessionId === undefined) {
-      liveSessionId = settledSessionId
-    } else {
-      expect(settledSessionId).toBe(liveSessionId)
-    }
-    await expect.poll(
-      () => world.page.locator('[data-streaming="true"]').count(),
-      { timeout: 15_000 },
-    ).toBe(0)
-    await world.page.getByText(spec.doneMarker, { exact: false }).last().waitFor({ timeout: 15_000 })
-    const clickToSettledMs = performance.now() - streamStarted
-    const streamAfter = await chromiumMetrics(cdp)
-    const mutations = await stopMutationProbe(world.page)
-    const turnEvents = world.sessionEvents.slice(eventStart)
-    const chunks = turnEvents.flatMap(event => (
-      event.type === 'assistant/message' || event.type === 'assistant/attempt'
-        ? expandAssistantStream(event.data.stream)
-        : []
-    ))
-    const toolCalls = turnEvents.filter(event => event.type === 'tool/call')
-    const toolResults = turnEvents.filter(event => event.type === 'tool/result')
-    const toolTurn = spec.toolResultMarker !== undefined
-    expect(chunks).toHaveLength(spec.deltas.length + (toolTurn ? 9 : 4))
-    expect(toolCalls).toHaveLength(toolTurn ? 1 : 0)
-    expect(toolResults).toHaveLength(toolTurn ? 1 : 0)
-    if (spec.toolResultMarker !== undefined) {
-      expect(toolCalls[0]?.data.name).toBe('bash')
-      const toolResult = toolResults[0]
-      if (toolResult?.type !== 'tool/result') {
-        throw new Error(`continued turn ${String(index)} did not log its tool result`)
+      const eventStart = world.sessionEvents.length
+      await startMutationProbe(world.page)
+      const streamBefore = await chromiumMetrics(cdp)
+      const streamStarted = performance.now()
+      const settled = world.scaffold.whenTurnSettled(60_000)
+      if (sendButton !== undefined) {
+        if (sendButton === null) throw new Error('Profiled send button is unavailable')
+        await sendButton.click()
+      } else {
+        await world.page.getByRole('button', { name: 'Send message', exact: true }).click()
       }
-      const message = toolResult.data.message
-      expect(message.isError).toBe(false)
-      expect(message.content
+      const waitMarker = async (marker: string): Promise<void> => {
+        if (!capturing) {
+          await world.page.getByText(marker, { exact: false }).last().waitFor({ timeout: 15_000 })
+          return
+        }
+        await world.page.waitForFunction((expected) => {
+          const entries = document.querySelectorAll('[data-chat-flow-kind="user"], [data-chat-flow-kind="assistant-step"]')
+          for (let position = entries.length - 1; position >= Math.max(0, entries.length - 3); position--) {
+            if (entries[position]?.textContent?.includes(expected)) return true
+          }
+          return false
+        }, marker, { polling: 'raf', timeout: 15_000 })
+      }
+      await waitMarker(spec.userMarker)
+      const clickToUserEchoMs = performance.now() - streamStarted
+      await waitMarker(spec.firstMarker)
+      const clickToFirstChunkMs = performance.now() - streamStarted
+      const settledSessionId = await settled
+      if (liveSessionId === undefined) {
+        liveSessionId = settledSessionId
+      } else {
+        expect(settledSessionId).toBe(liveSessionId)
+      }
+      await expect.poll(
+        () => world.page.locator('[data-streaming="true"]').count(),
+        { timeout: 15_000 },
+      ).toBe(0)
+      await waitMarker(spec.doneMarker)
+      await profile?.stop()
+      const clickToSettledMs = performance.now() - streamStarted
+      const streamAfter = await chromiumMetrics(cdp)
+      const mutations = await stopMutationProbe(world.page)
+      const turnEvents = world.sessionEvents.slice(eventStart)
+      const chunks = turnEvents.flatMap(event => (
+        event.type === 'assistant/message' || event.type === 'assistant/attempt'
+          ? expandAssistantStream(event.data.stream)
+          : []
+      ))
+      const toolCalls = turnEvents.filter(event => event.type === 'tool/call')
+      const toolResults = turnEvents.filter(event => event.type === 'tool/result')
+      const toolTurn = spec.toolResultMarker !== undefined
+      expect(chunks).toHaveLength(spec.deltas.length + (toolTurn ? 9 : 4))
+      expect(toolCalls).toHaveLength(toolTurn ? 1 : 0)
+      expect(toolResults).toHaveLength(toolTurn ? 1 : 0)
+      if (spec.toolResultMarker !== undefined) {
+        expect(toolCalls[0]?.data.name).toBe(PERF_SHELL)
+        const toolResult = toolResults[0]
+        if (toolResult?.type !== 'tool/result') {
+          throw new Error(`continued turn ${String(index)} did not log its tool result`)
+        }
+        const message = toolResult.data.message
+        expect(message.isError).toBe(false)
+        expect(message.content
+          .filter(block => block.type === 'text')
+          .map(block => block.text)
+          .join('')).toContain(spec.toolResultMarker)
+      }
+      const user = turnEvents.find(
+        event => event.type === 'user/message' && event.data.source.kind === 'user',
+      )
+      if (user?.type !== 'user/message') {
+        throw new Error(`continued turn ${String(index)} did not log its user message`)
+      }
+      expect(user.data.content
         .filter(block => block.type === 'text')
         .map(block => block.text)
-        .join('')).toContain(spec.toolResultMarker)
-    }
-    const user = turnEvents.find(
-      event => event.type === 'user/message' && event.data.source.kind === 'user',
-    )
-    if (user?.type !== 'user/message') {
-      throw new Error(`continued turn ${String(index)} did not log its user message`)
-    }
-    expect(user.data.content
-      .filter(block => block.type === 'text')
-      .map(block => block.text)
-      .join('')).toBe(spec.prompt)
-    const resultingTurns = await conversationTurns(world.page)
-    expect(resultingTurns).toBe(options.startingTurns + index)
-    turns.push({
-      ordinal: index,
-      resultingTurns,
-      kind: toolTurn ? 'tool' : 'text',
-      promptChars: spec.prompt.length,
-      composerFill: composerFill.measurement,
-      stream: {
-        paceMs: STREAM_PACE_MS,
-        deltaChunks: spec.deltas.length,
-        persistedChunks: chunks.length,
-        toolCalls: toolCalls.length,
-        toolResults: toolResults.length,
-        clickToUserEchoMs: rounded(clickToUserEchoMs),
-        clickToFirstChunkMs: rounded(clickToFirstChunkMs),
-        firstChunkToSettledMs: rounded(clickToSettledMs - clickToFirstChunkMs),
-        ...mutations,
-        ...metricDelta(streamBefore, streamAfter, clickToSettledMs),
-      },
-    })
-
-    if (options.checkpointInterval !== undefined && index % options.checkpointInterval === 0) {
-      checkpoints.push({
-        turns: options.startingTurns + index,
-        state: await retainedBrowserState(cdp, world.page),
+        .join('')).toBe(spec.prompt)
+      const resultingTurns = await conversationTurns(world.page)
+      expect(resultingTurns).toBe(options.startingTurns + index)
+      turns.push({
+        ordinal: index,
+        resultingTurns,
+        kind: toolTurn ? 'tool' : 'text',
+        promptChars: spec.prompt.length,
+        composerFill: composerFill.measurement,
+        stream: {
+          paceMs: STREAM_PACE_MS,
+          deltaChunks: spec.deltas.length,
+          persistedChunks: chunks.length,
+          toolCalls: toolCalls.length,
+          toolResults: toolResults.length,
+          clickToUserEchoMs: rounded(clickToUserEchoMs),
+          clickToFirstChunkMs: rounded(clickToFirstChunkMs),
+          firstChunkToSettledMs: rounded(clickToSettledMs - clickToFirstChunkMs),
+          ...mutations,
+          ...metricDelta(streamBefore, streamAfter, clickToSettledMs),
+        },
       })
+
+      if (options.checkpointInterval !== undefined && index % options.checkpointInterval === 0) {
+        checkpoints.push({
+          turns: options.startingTurns + index,
+          state: await retainedBrowserState(cdp, world.page),
+        })
+      }
+    } finally {
+      await profile?.stop()
+      await sendButton?.dispose()
     }
   }
 
@@ -1227,21 +1268,16 @@ describe('manual web performance: complex workspace and history', () => {
         await group.click()
         return stableCount(
           page.getByRole('treeitem'),
-          count => count === SIDEBAR_SESSION_COUNT + 2,
+          count => count === SIDEBAR_VISIBLE_SESSIONS + 1,
         )
       })
-      expect(sidebar.value).toBe(SIDEBAR_SESSION_COUNT + 2)
+      expect(sidebar.value).toBe(SIDEBAR_VISIBLE_SESSIONS + 1)
+      await expect.poll(() => page.locator('[data-row-key^="overflow:"]').textContent())
+        .toContain(String(SIDEBAR_SESSION_COUNT + 1 - SIDEBAR_VISIBLE_SESSIONS))
       await group.click()
       await expect.poll(() => page.getByRole('treeitem').count()).toBe(1)
 
-      const contentSearch = await measure(cdp, async () => {
-        await page.getByRole('textbox', { name: 'Search name, keywords...', exact: true })
-          .fill('LONG_PERF_SENTINEL')
-        const results = page.getByRole('tree', { name: 'Search results' }).getByRole('treeitem')
-        await expect.poll(() => results.count(), { timeout: 60_000 }).toBe(1)
-        await results.first().waitFor({ timeout: 60_000 })
-        return results.first()
-      })
+      const contentSearch = await measure(cdp, () => searchHistory(page))
       const opened = await measure(cdp, async () => {
         await contentSearch.value.click()
         await page.getByRole('tab', { name: 'Trajectory', exact: true }).waitFor({ timeout: 30_000 })
@@ -1249,23 +1285,35 @@ describe('manual web performance: complex workspace and history', () => {
       })
       expect(opened.value).toBe(DEFAULT_HISTORY_TURNS)
 
-      const trajectoryRows = page.getByRole('row')
+      const trajectoryTable = page.locator('[data-trajectory-scroll] table')
+      const logicalRows = async (): Promise<number> => Number(await trajectoryTable.getAttribute('aria-rowcount'))
       const coldTrajectory = await measure(cdp, async () => {
         await page.getByRole('tab', { name: 'Trajectory', exact: true }).click()
-        return stableCount(trajectoryRows, count => count === EXPECTED_TRAJECTORY_ROWS)
+        await page.locator('[data-trajectory-scroll] table[data-scroll-ready="true"]').waitFor()
+        await expect.poll(logicalRows).toBeGreaterThan(0)
+        return logicalRows()
       })
-      expect(coldTrajectory.value).toBe(EXPECTED_TRAJECTORY_ROWS)
+      expect(coldTrajectory.value).toBeLessThan(EXPECTED_TRAJECTORY_ROWS)
 
       const collapseTurns = await measure(cdp, async () => {
         await page.getByRole('button', { name: 'Collapse turns', exact: true }).click()
-        return stableCount(trajectoryRows, count => count > 0 && count < EXPECTED_TRAJECTORY_ROWS)
+        await expect.poll(logicalRows).toBeLessThan(coldTrajectory.value)
+        return logicalRows()
       })
       expect(collapseTurns.value).toBeLessThan(EXPECTED_TRAJECTORY_ROWS)
       const trajectorySearch = await measure(cdp, async () => {
         await page.getByRole('searchbox', { name: 'Search trajectory', exact: true }).fill('turn 499')
-        return stableCount(trajectoryRows, count => count > 0 && count < 20)
+        await expect.poll(logicalRows).toBeGreaterThan(0)
+        await expect.poll(logicalRows).toBeLessThan(20)
+        return logicalRows()
       })
       expect(trajectorySearch.value).toBeLessThan(20)
+      await page.getByRole('searchbox', { name: 'Search trajectory', exact: true }).fill('')
+      // Search can load older turns that were not present when Collapse was pressed.
+      if (await page.getByRole('button', { name: 'Expand turns', exact: true }).count() === 0) {
+        await page.getByRole('button', { name: 'Collapse turns', exact: true }).click()
+      }
+      await page.getByRole('button', { name: 'Expand turns', exact: true }).click()
 
       await page.getByRole('tab', { name: 'Chat', exact: true }).click()
       const historyPages: { turns: number; measurement: Measurement }[] = []
@@ -1284,9 +1332,11 @@ describe('manual web performance: complex workspace and history', () => {
 
       const warmTrajectory = await measure(cdp, async () => {
         await page.getByRole('tab', { name: 'Trajectory', exact: true }).click()
-        return stableCount(trajectoryRows, count => count === EXPECTED_TRAJECTORY_ROWS)
+        // Each view owns its history window; expanding Chat does not expand Trajectory.
+        await expect.poll(logicalRows).toBe(coldTrajectory.value)
+        return logicalRows()
       })
-      expect(warmTrajectory.value).toBe(EXPECTED_TRAJECTORY_ROWS)
+      expect(warmTrajectory.value).toBe(coldTrajectory.value)
       const warmConversation = await measure(cdp, async () => {
         await page.getByRole('tab', { name: 'Chat', exact: true }).click()
         return conversationTurns(page)
@@ -1297,6 +1347,7 @@ describe('manual web performance: complex workspace and history', () => {
         scenario: 'workspace-history-trajectory',
         fixture: {
           sidebarSessions: SIDEBAR_SESSION_COUNT,
+          visibleSidebarSessions: SIDEBAR_VISIBLE_SESSIONS,
           totalSessions: SIDEBAR_SESSION_COUNT + 1,
           longHistoryTurns: LONG_HISTORY_TURNS,
           toolCalls: EXPECTED_TOOL_CALLS,
@@ -1326,7 +1377,7 @@ describe('manual web performance: complex workspace and history', () => {
     }
   })
 
-  it('reports default 24-turn history plus eight continued turns', async () => {
+  it('reports the default history window plus eight continued turns', async () => {
     const world = await launchPerformanceWorld({
       browser,
       replay: performanceReplayOverride(COMPARISON_TURNS, comparisonTurn),
@@ -1339,14 +1390,14 @@ describe('manual web performance: complex workspace and history', () => {
       const opened = await measure(cdp, () => openLongHistory(world.page))
       expect(opened.value).toBe(DEFAULT_HISTORY_TURNS)
       const conversation = await continueConversation(world, cdp, {
-        startingTurns: DEFAULT_HISTORY_TURNS,
+        startingTurns: opened.value,
         turnCount: COMPARISON_TURNS,
         turnSpec: comparisonTurn,
         expectedSessionId: SessionId(LONG_SESSION_ID),
       })
       expect(conversation.toolTurns).toBe(2)
       console.info(`WEB_PERF_RESULT ${JSON.stringify({
-        scenario: 'default-resume-24-plus-8',
+        scenario: 'default-window-plus-8',
         setupMs: rounded(world.setupMs),
         replayContextWindow: PERF_REPLAY_CONTEXT_WINDOW,
         openLongHistory: { turns: opened.value, ...opened.measurement },
@@ -1369,9 +1420,10 @@ describe('manual web performance: complex workspace and history', () => {
       await openPerformancePage(world, 1)
       const cdp = await world.page.context().newCDPSession(world.page)
       await cdp.send('Performance.enable')
-      expect(await openLongHistory(world.page)).toBe(DEFAULT_HISTORY_TURNS)
+      const opened = await openLongHistory(world.page)
+      expect(opened).toBe(DEFAULT_HISTORY_TURNS)
       const historyPages: { turns: number; measurement: Measurement }[] = []
-      let turns = DEFAULT_HISTORY_TURNS
+      let turns = opened
       while (turns < LONG_HISTORY_TURNS) {
         const previousTurns = turns
         const older = await measure(cdp, async () => {

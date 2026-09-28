@@ -10,15 +10,19 @@ kind: "package-reference"
 
 使用本包可通过标准 Slot 钩子公开 Session catalog、retain 信息与统一 UI 状态。它按 `SessionBinding` 物化钩子和 prop，而 `SessionProvider` 可以继承外围 binding 或绑定显式 `SessionReference`。它拥有进程本地的 pending-interaction 与完成提醒策略，但不拥有 Controller transport、历史或 reference。
 
-运行状态来自 Host 列表基线或状态事件。Subagent 目录行和已保留子会话的 fallback 行不会建立运行状态；主视图引用仍会确认完成提醒。
-
 ## 目录
 
+- [会话状态](#session-status)
 - [模型体验](#model-experience)
 - [已知限制与暂缓事项](#known-limitations-and-deferred-work)
 - [开发备注](#dev-note)
 
 -----
+
+<a id="session-status"></a>
+## 会话状态
+
+运行状态来自 Host 列表基线或状态事件。Remote 状态事件同步发布，并且可以先于首个 baseline 到达。每份列表快照会先协调全部运行状态、成员关系与完成提醒变化，再同步发布一次状态；若仅 projection 变化且这些事实均未改变，则不会重建状态。Subagent 目录行和已保留子会话的 fallback 行不会建立运行状态；主视图引用仍会确认完成提醒。
 
 <a id="model-experience"></a>
 ## 模型体验

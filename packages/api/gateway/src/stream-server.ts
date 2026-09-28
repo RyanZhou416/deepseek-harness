@@ -39,11 +39,17 @@ export type RemoteStreamFailureMapper = (error: unknown) => RemoteStreamFailure
 
 const MAX_MISSED_HEARTBEATS = 2
 
+interface HeartbeatProbe {
+  phase: 'writing' | 'awaitingPong'
+  missed: number
+  bufferedAmount: number
+}
+
 /** Own the no-server WebSocket acceptor and every active logical stream. */
 export class RemoteStreamMuxServer {
   private readonly server = new WebSocketServer({ noServer: true })
   private readonly connections = new Set<Promise<void>>()
-  private readonly missedHeartbeats = new WeakMap<WebSocket, number>()
+  private readonly heartbeatProbes = new WeakMap<WebSocket, HeartbeatProbe>()
   private heartbeatTimer: NodeJS.Timeout | undefined
 
   /**
@@ -72,8 +78,7 @@ export class RemoteStreamMuxServer {
     this.server.handleUpgrade(req, socket, head, (websocket) => {
       const release = bindPeer(websocket, peer)
       if (release === undefined) return
-      this.missedHeartbeats.set(websocket, 0)
-      websocket.on('pong', () => { this.missedHeartbeats.set(websocket, 0) })
+      websocket.on('pong', () => { this.heartbeatProbes.delete(websocket) })
       this.startHeartbeat()
       const bound: BoundStreamOpener = (endpoint, payload, uplink, control) =>
         this.open(endpoint, payload, uplink, peer, control)
@@ -107,20 +112,59 @@ export class RemoteStreamMuxServer {
     this.heartbeatTimer = setInterval(() => {
       for (const socket of this.server.clients) {
         if (socket.readyState !== WebSocket.OPEN) continue
-        const missed = this.missedHeartbeats.get(socket) as number
-        if (missed >= MAX_MISSED_HEARTBEATS) {
-          setImmediate(() => {
-            if ((this.missedHeartbeats.get(socket) as number) >= MAX_MISSED_HEARTBEATS) {
-              socket.terminate()
-            }
-          })
+        const probe = this.heartbeatProbes.get(socket)
+        if (probe === undefined) {
+          this.sendHeartbeat(socket)
           continue
         }
-        this.missedHeartbeats.set(socket, missed + 1)
-        socket.ping()
+        if (probe.phase === 'writing' && this.madeWriteProgress(socket, probe)) continue
+        probe.missed += 1
+        if (probe.missed >= MAX_MISSED_HEARTBEATS) {
+          setImmediate(() => {
+            if (socket.readyState !== WebSocket.OPEN
+              || this.heartbeatProbes.get(socket) !== probe
+              || probe.missed < MAX_MISSED_HEARTBEATS) return
+            if (probe.phase === 'writing' && this.madeWriteProgress(socket, probe)) return
+            this.terminateHeartbeat(socket, probe, 'timeout')
+          })
+        }
       }
     }, this.heartbeatIntervalMs)
     this.heartbeatTimer.unref()
+  }
+
+  /** One pending Ping owns its write completion; a Pong may arrive before that callback. */
+  private sendHeartbeat(socket: WebSocket): void {
+    const probe: HeartbeatProbe = { phase: 'writing', missed: 0, bufferedAmount: 0 }
+    this.heartbeatProbes.set(socket, probe)
+    socket.ping(undefined, undefined, (error?: Error) => {
+      if (this.heartbeatProbes.get(socket) !== probe || socket.readyState !== WebSocket.OPEN) return
+      if (error) {
+        this.terminateHeartbeat(socket, probe, 'write-error')
+        return
+      }
+      probe.phase = 'awaitingPong'
+      probe.missed = 0
+    })
+    probe.bufferedAmount = socket.bufferedAmount
+  }
+
+  /** A draining write queue resets the stall window without starting the Pong deadline. */
+  private madeWriteProgress(socket: WebSocket, probe: HeartbeatProbe): boolean {
+    const bufferedAmount = socket.bufferedAmount
+    const progressed = bufferedAmount < probe.bufferedAmount
+    probe.bufferedAmount = bufferedAmount
+    if (progressed) probe.missed = 0
+    return progressed
+  }
+
+  private terminateHeartbeat(socket: WebSocket, probe: HeartbeatProbe, reason: 'timeout' | 'write-error'): void {
+    console.warn('[api-gateway] WebSocket heartbeat failed', {
+      reason,
+      phase: probe.phase,
+      bufferedBytes: socket.bufferedAmount,
+    })
+    socket.terminate()
   }
 }
 

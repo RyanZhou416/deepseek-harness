@@ -10,6 +10,8 @@ Service Definition：[dsh-subagent](../../packages/subagent/subagent)（`ctx.sub
 
 `subagentCatalog` projection 通过 Session 观察和客户端快照暴露按父会话事件排序的 `SubagentCatalogEntry[]`。每个条目包含子级 id、创建时间、模式和依模式确定的标签；fork 继承的目录事实不在其中。[subagent 包](../../packages/subagent/subagent/README.zh.md) 定义目录创建和持久化语义。历史子会话的 descriptor 不可用时使用 `mode: 'unknown'`，保留 header 身份供发现，但不授予继续执行能力。
 
+`SubagentModelOverride` 包含精确提供方、模型与可选推理强度。`PreparedSubagentModel` 提供独立的有效 `agentOptions` 和已应用的覆盖（或 `null`）；`prepareModel()` 为工具校验读取策略，创建时再次解析当前策略。[运行时设置约定](../../packages/subagent/subagent/README.zh.md#delegation-settings)定义优先级与 AgentTeams 例外。
+
 ## 两类能力，两种发现方式
 
 提供方通过一个静态描述符公布其**启动时**功能，服务会在单次 run 存在之前即行检查；如果请求依赖提供方不具备的功能，会被明确拒绝（`SubagentError('UNSUPPORTED_CAPABILITY')`），绝不会被接受后静默忽略。这些 flag 仅描述单次 [`start()`](#the-provider-contract-subagentprovider) 路径，即由提供方组合子 agent 的路径。**可继续**子 agent 由继续执行管理器自行组合，因此它们由唯一一个可选方法把关，方法存在即为能力，并以 TypeScript 的类型收窄作为发现机制：[`SubagentProvider.prepareContinuable`](#the-provider-contract-subagentprovider)。
@@ -74,6 +76,8 @@ interface SubagentStartRequest {
    * before initializing the separate child runtime.
    */
   readonly agentOptions?: AgentOptions
+  /** Whether an omitted reasoning effort may inherit from the parent; defaults to true. Requires agentOptions capability. */
+  readonly inheritReasoningEffort?: boolean
   /**
    * Object-rooted JSON Schema within `assertObjectJsonSchema`'s enforced subset. Start rejects
    * unsupported schemas or providers without the capability. Data must be plain host-realm JSON;
@@ -521,6 +525,15 @@ resolveMaxDepth(configured?: number | 'provider-managed'): number | undefined
 async startContinuable(spec: ContinuableStartSpec): Promise<ContinuableStart>
 
 /**
+ * Read effective model options for tool validation. Creation resolves the current policy again.
+ * Providers without Agent-option support reject creation while the override is enabled.
+ * @param name - registered subagent backend.
+ * @param requested - caller-selected options before the user override.
+ * @returns detached effective options and the applied override.
+ */
+prepareModel(name: string, requested?: AgentOptions): PreparedSubagentModel
+
+/**
  * Steer one model-authored message to the sender's direct parent or direct
  * continuable child. A running target admits it at the nearest step boundary;
  * an idle target starts a turn, and an absent direct child cold-resumes from
@@ -678,7 +691,7 @@ list(): string[]
 async start(name: string, request: SubagentStartRequest): Promise<SubagentRun>
 ```
 
-Types: [Agent](core.zh.md) · [ContentBlock](llm-streaming.zh.md) · [MessageId](llm-streaming.zh.md) · [SessionId](core.zh.md)
+Types: [Agent](core.zh.md) · [AgentOptions](core.zh.md) · [ContentBlock](llm-streaming.zh.md) · [MessageId](llm-streaming.zh.md) · [SessionId](core.zh.md)
 
 Source: [`packages/subagent/subagent/src/index.ts`](../../packages/subagent/subagent/src/index.ts)
 

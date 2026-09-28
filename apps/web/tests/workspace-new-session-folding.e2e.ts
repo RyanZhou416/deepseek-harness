@@ -76,7 +76,9 @@ describe('web e2e: blank New Session folding quota', () => {
     await showMore.waitFor({ timeout: 15_000 })
     await compareOrRefreshGolden(
       SIDEBAR_EXPECTED,
-      await captureStableAria(page, '[role="tree"][aria-label="Sessions"]', scaffold.workspaceCwd),
+      await captureStableAria(page, '[role="tree"][aria-label="Sessions"]', scaffold.workspaceCwd, {
+        replacements: [[basename(scaffold.workspaceCwd), '{{workspace}}']],
+      }),
       MODE,
     )
 
@@ -85,7 +87,9 @@ describe('web e2e: blank New Session folding quota', () => {
     expect(await sidebar.getByText(basename(scaffold.workspaceCwd), { exact: true }).count()).toBe(11)
     await compareOrRefreshGolden(
       join(EXPECTED_DIR, 'first-batch.expected.md'),
-      await captureStableAria(page, '[role="tree"][aria-label="Sessions"]', scaffold.workspaceCwd),
+      await captureStableAria(page, '[role="tree"][aria-label="Sessions"]', scaffold.workspaceCwd, {
+        replacements: [[basename(scaffold.workspaceCwd), '{{workspace}}']],
+      }),
       MODE,
     )
     await sidebar.getByRole('button', { name: 'Show 6 more sessions' }).click()

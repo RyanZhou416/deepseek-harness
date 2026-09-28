@@ -2,6 +2,8 @@
   <a href="./README.md">English</a> · <strong>简体中文</strong>
 </p>
 
+在 DSH fork 中，普通 Subagent 开启强制模型覆盖后，成员仍保留 AgentTeams 自己的提供方、模型与推理强度。只有插件在 Host 内部创建成员时使用此例外；成员发起的普通委派仍遵守全局覆盖。
+
 <p align="center">
   <img src="./assets/readme/hero.svg" width="100%" alt="dsh-agent-teams 把一个 DeepSeek Harness 会话变成可协作的多智能体团队">
 </p>
@@ -24,7 +26,7 @@
 
 你只需用自然语言提出目标。插件会提供精简的固定团队协议、14 个业务工具、持久化状态、自动共享任务调度和实时 Web UI，不需要额外的 Workflow 引擎。
 
-> 本 fork 把上游 `v0.1.20` 打包为适配 DSH `0.1.7-rc.1` 的 `0.1.20-dsh017rc1.1`。请安装 [`../README.zh.md`](../README.zh.md) 记录的仓库内产物；下方公开 npm 指令描述的是上游发布渠道。
+> 本 fork 把上游 `v0.1.20` 打包为适配 DSH `0.1.7-rc.1` 的 `0.1.20-dsh017rc1.2`。请安装 [`../README.zh.md`](../README.zh.md) 记录的仓库内产物；下方公开 npm 指令描述的是上游发布渠道。
 
 <p align="center">
   <img src="./assets/ui.png" width="100%" alt="DeepSeek Harness 对话与 AgentTeams 实时活动面板，展示成员、任务依赖和回报">
@@ -101,6 +103,10 @@ npm 默认标签 `latest` 现指向 `0.1.20`，因此新 profile 使用 `dsh plu
 
 团队状态保存在 `<workspace>/.agent-teams/`；Web 面板读取这份磁盘真相，并与实时子 Agent 活动合并展示。
 
+当前浏览器请求主队长 Session 所属团队，并为每张已挂载会话卡片发送精确目标，包含并排显示的会话。限定范围的轮询响应保留所有任务和状态字段。只有主 Session 的 staged 计划读取较长的任务说明与成员执行提示词，在修订版本变化前复用，并在计划修改成功后重新读取。页面隐藏时暂停轮询，重新可见后立即刷新。旁侧卡片的团队归档后会保留到最后一张卡片卸载；归档响应始终只读。兼容期间，旧浏览器发出的无范围请求仍获得完整旧响应。
+
+轮询只有显式卡片目标时，Host 枚举目录名，只读取匹配的团队记录，并在每个 workspace 中重新核对队长。目录顺序、目录访问失败与旧 id 保持原有行为。按队长限定的轮询仍读取全部团队记录，保证没有卡片的团队也能被发现。Host 快照与面板每次更新只分组一次任务归属，同时保持持久化任务顺序和成员进度语义；缺少 assignee 与显式空 assignee 保持不同。
+
 成员创建默认零交互：成员沿用队长当前 LLM 路由时会快照该 provider、model 与思考强度；用户要求改用其他路由时，则快照目标模型的默认强度，成员后续续跑仍使用最终解析出的快照。只有当用户明确提出异构分工（例如“后端用 provider A/model X，前端用 provider B/model Y”）时，队长才会把对应的 `provider` + `model` 传给该成员；不会逐个弹出模型或思考强度选择。
 
 ## Slash 命令
@@ -172,6 +178,7 @@ npx skills add NanmiCoder/dsh-agent-teams --skill dsh-plugin-development
 pnpm install
 pnpm build
 pnpm verify
+pnpm diagnose:activity-state # 纯合成的 1,500/2,600 任务响应与装配报告
 ```
 
 ## 命名多角色团队配置

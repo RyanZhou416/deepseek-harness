@@ -161,6 +161,39 @@ function sequenceName(sequence: readonly number[], prefix: string): string {
 }
 
 describe('SessionProjectionRegistry drive', () => {
+  it('excludes cached hint keys before viewing or validating their state', async () => {
+    const { ctx, session } = await harness()
+    try {
+      const unit = marksUnit()
+      const view = vi.spyOn(unit.wire, 'view')
+      const stateParse = vi.spyOn(unit.stateSchema, 'parse')
+      ctx.sessionProjections.register(unit)
+      ctx.sessionProjections.register(stableViewUnit(state => state.value))
+      ctx.sessionProjections.register(countUnit())
+      expect(ctx.sessionProjections.cachedSnapshot(session)).toBeUndefined()
+      const complete = ctx.sessionProjections.snapshot(session)
+      const rows = ctx.sessionProjections.checkpoint(session)
+      view.mockClear()
+      stateParse.mockClear()
+      const excluded = new Set(['test/marks'])
+
+      expect(ctx.sessionProjections.cachedSnapshot(session, undefined, excluded)).toEqual({
+        asOfSeq: -1, values: { 'test/stable-view': { marks: [] } },
+      })
+      expect(ctx.sessionProjections.cachedSnapshot(session, ['test/marks'], excluded)).toBeUndefined()
+      expect(ctx.sessionProjections.viewCheckpoint(rows, undefined, excluded)).toEqual({
+        'test/stable-view': { marks: [] },
+      })
+      expect(ctx.sessionProjections.viewCheckpoint(rows, ['test/marks'], excluded)).toEqual({})
+      expect(view).not.toHaveBeenCalled()
+      expect(stateParse).not.toHaveBeenCalled()
+      expect(ctx.sessionProjections.cachedSnapshot(session, undefined, new Set(['unregistered']))).toEqual(complete)
+      expect(ctx.sessionProjections.snapshot(session)).toEqual(complete)
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
   it('supplies the exact inherited cut to live, restored, and hydrated projection initialization', async () => {
     const ctx = new Context()
     await ctx.plugin(SessionStore)

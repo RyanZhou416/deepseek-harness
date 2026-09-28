@@ -62,6 +62,8 @@ Three mandatory points always write: session creation persists the seed-derived 
 
 ### What the cache guarantees
 
+An optional third `excludeKeys` argument to `cachedSnapshot` skips unwanted rows before the registry validates their state or constructs their wire values. Exclusion takes precedence over selected keys, affects only that read, and leaves the full stored checkpoint available for explicit reads and hydration. The returned watermark still covers only the served rows.
+
 The log leads and the cache follows: a live checkpoint flushes the session's buffered events durably before the cache row lands, so a crash can leave the cache behind the log but never ahead of it. Reads and writes share the storage domain's coherent in-memory state; the per-unit write chain mutates memory only after durability. Each version-stamped record must match the live unit schema and the lifecycle identity (`formatVersion`, `createdAt`, `cwd`, `isSeeded`); the fold faces (`hydratePrepared`, `coldSnapshot`, and checkpoint writes) also require the exact `inheritedEventCount`, so a row folded from another Session format generation or fork cut cannot seed the caller. The JSON backend stores each record at `<root>/session_projcache/sessions/<id>.json` in an owner-only directory tree. Domain read validation preserves every own JSON key in checkpoint values, including `__proto__` and `constructor` inside opaque metadata. It rejects values that cannot survive a lossless JSON round trip, using the same rules as checkpoint writes. Each projection then validates its hydration state with its own `stateSchema`; fields carrying opaque JSON need a validator that preserves their keys.
 
 Upgrades never block startup or expose an unproven fold. Records stamped with a version in the spec's `compatibleVersions` remain structurally readable for a current checkpoint rewrite, but a missing or older `formatVersion` never matches a current Session and therefore cannot seed hydration. A lifecycle-matching predecessor title remains available only through the listing hint above because title text is invariant across the adjacent Session-format edges and its row still passes the current projection `stateVersion` and schema. Once the format matches, absent lineage fields decode as the unseeded lineage — exact for unseeded sessions, while a seeded caller fails the identity match and refolds cold. A stored record that still fails schema validation is moved aside as `<id>.json.bak.<stamp>` under the domain's `invalidRecords: 'backup-and-skip'` policy, logged with its cause, and rebuilt by the next checkpoint.
@@ -83,6 +85,8 @@ The cache is a fold shortcut over the projection registry's checkpoint face, sto
 ### Read and write ownership
 
 The cache stores one version-stamped document per session in the `session_projcache` domain. It does not depend on a session-persistence backend, call `locate`, or inspect per-session directories. A malformed or stale record reads as absent, and consumers that require a cold value own any log refold.
+
+Live writes validate and transfer the registry's already-detached checkpoint rows without making a second deep copy. The cut is still captured before awaiting log durability, so later live-state changes cannot alter the pending checkpoint. Cold-fold write-back keeps its own detached JSON snapshot because restored state can also appear in the returned view. Both paths enforce the same lossless-JSON rules and publish through the unchanged durable domain write chain.
 
 ### Source map
 

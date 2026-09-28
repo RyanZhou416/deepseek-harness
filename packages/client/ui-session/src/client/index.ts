@@ -481,45 +481,82 @@ export class UiSession extends Service {
   }
 
   private observeRunning(sessionId: SessionId, running: boolean): void {
-    const previous = this.running.get(sessionId)
-    const beforeBaseline = this.sessions.list.getSnapshot().phase === 'pending'
-    this.running.set(sessionId, running)
-    if (running) this.completionUnread.delete(sessionId)
-    else if ((previous === true || (previous === undefined && beforeBaseline))
-      && !this.isMain(sessionId)) this.completionUnread.add(sessionId)
-    this.publishStatus()
+    const list = this.sessions.list.getSnapshot()
+    const main = (list.byId[sessionId]?.retainedBy.mainView ?? 0) > 0
+    if (this.updateRunning(sessionId, running, list.phase === 'pending', main)) {
+      this.publishStatus(list)
+    }
   }
 
   private reconcileStatus(): void {
     const list = this.sessions.list.getSnapshot()
     const present = new Set(Object.keys(list.byId) as SessionId[])
+    let changed = false
     // Subagent catalog rows and retained subagent fallback rows do not establish Host running state.
     for (const id of list.ids) {
       const row = list.byId[id] as SessionSummary
       const previous = this.running.get(id)
-      if (previous === undefined) this.running.set(id, row.running)
-      else if (previous !== row.running) this.observeRunning(id, row.running)
+      if (previous === undefined) {
+        this.running.set(id, row.running)
+        changed = true
+      } else if (previous !== row.running) {
+        this.updateRunning(
+          id,
+          row.running,
+          false,
+          (row.retainedBy.mainView ?? 0) > 0,
+        )
+        changed = true
+      }
     }
     for (const id of present) {
-      if (this.isMain(id)) this.completionUnread.delete(id)
+      if ((list.byId[id]?.retainedBy.mainView ?? 0) > 0) {
+        changed = this.completionUnread.delete(id) || changed
+      }
     }
     if (list.phase === 'ready') {
       for (const id of this.running.keys()) {
         if (present.has(id)) continue
         this.running.delete(id)
         this.completionUnread.delete(id)
+        changed = true
       }
     }
-    this.publishStatus()
+    if (!changed && !this.statusMembershipChanged(present)) return
+    this.publishStatus(list)
   }
 
-  private isMain(sessionId: SessionId): boolean {
-    return (this.sessions.list.getSnapshot().byId[sessionId]?.retainedBy.mainView ?? 0) > 0
+  private updateRunning(
+    sessionId: SessionId,
+    running: boolean,
+    beforeBaseline: boolean,
+    main: boolean,
+  ): boolean {
+    const previous = this.running.get(sessionId)
+    const changed = previous !== running
+    if (changed) this.running.set(sessionId, running)
+    if (running) return this.completionUnread.delete(sessionId) || changed
+    if ((previous === true || (previous === undefined && beforeBaseline)) && !main) {
+      this.completionUnread.add(sessionId)
+      return true
+    }
+    return changed
   }
 
-  private publishStatus(): void {
+  private statusMembershipChanged(present: ReadonlySet<SessionId>): boolean {
+    for (const id of present) {
+      if (!this.statusSnapshot.has(id)) return true
+    }
+    for (const id of this.statusSnapshot.keys()) {
+      if (!present.has(id) && !this.running.has(id)
+        && !this.pendingSnapshot.has(id) && !this.completionUnread.has(id)) return true
+    }
+    return false
+  }
+
+  private publishStatus(list: SessionListState = this.sessions.list.getSnapshot()): void {
     const ids = new Set<SessionId>([
-      ...(Object.keys(this.sessions.list.getSnapshot().byId) as SessionId[]),
+      ...(Object.keys(list.byId) as SessionId[]),
       ...this.running.keys(),
       ...this.pendingSnapshot.keys(),
       ...this.completionUnread,
@@ -532,7 +569,6 @@ export class UiSession extends Service {
         completionUnread: this.completionUnread.has(id),
       })
     }
-    if (sameSessionStatus(this.statusSnapshot, next)) return
     this.statusSnapshot = next
     notifySubscribers(this.statusListeners, '[ui-session] Session status')
   }
@@ -679,18 +715,6 @@ export function apply(ctx: Context): void {
     },
   } satisfies RootStandardSourceContribution)
   ctx.slots.installScope('session', service.adapter)
-}
-
-function sameSessionStatus(left: SessionStatusSnapshot, right: SessionStatusSnapshot): boolean {
-  if (left.size !== right.size) return false
-  for (const [id, status] of left) {
-    const candidate = right.get(id)
-    if (candidate === undefined
-      || candidate.running !== status.running
-      || candidate.pendingInteraction !== status.pendingInteraction
-      || candidate.completionUnread !== status.completionUnread) return false
-  }
-  return true
 }
 
 function samePendingInteractions(

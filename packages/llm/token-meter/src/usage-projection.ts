@@ -3,6 +3,7 @@
  */
 
 import { z } from 'zod'
+import { isDeepStrictEqual } from 'node:util'
 import { lastAssistantStreamChunk, type TokenUsage } from '@deepseek-ai/dsh-llm'
 import type {} from '@deepseek-ai/dsh-llm-retry/types'
 import { SessionSeq } from '@deepseek-ai/dsh-session'
@@ -107,6 +108,31 @@ const contextPressureStateSchema = z.object({
 
 type ContextPressureState = z.infer<typeof contextPressureStateSchema>
 
+/** Scalar views use weak state keys so obsolete surface accounting remains collectible. */
+const pressureViews = new WeakMap<ContextPressureState, ContextPressureProjection>()
+
+function pressureView(state: ContextPressureState): ContextPressureProjection {
+  const cached = pressureViews.get(state)
+  if (cached !== undefined) return cached
+  const { contextWindow, pressureTokens, surfaceTokens, sampledSurfaceTokens } = state
+  const value = {
+    ...contextWindow === undefined ? {} : { contextWindow },
+    ...pressureTokens === undefined ? {} : { pressureTokens },
+    ...pressureTokens === undefined || sampledSurfaceTokens === undefined
+      ? {}
+      : { projectedTokens: Math.max(0, pressureTokens + surfaceTokens - sampledSurfaceTokens) },
+  }
+  pressureViews.set(state, value)
+  return value
+}
+
+function nextPressureState(previous: ContextPressureState, next: ContextPressureState): ContextPressureState {
+  if (previous === next) return next
+  const view = pressureViews.get(previous)
+  if (view !== undefined && isDeepStrictEqual(view, pressureView(next))) pressureViews.set(next, view)
+  return next
+}
+
 /**
  * Token-meter's session projection unit.
  *
@@ -201,18 +227,12 @@ export const contextPressureProjectionDefinition = {
     }
     // A defined fold.claim is always freshly built, so presence decides claim
     // bookkeeping: no claim before or after this event leaves `next` as is.
-    if (state.claim === undefined && fold.claim === undefined) return next
+    if (state.claim === undefined && fold.claim === undefined) return nextPressureState(state, next)
     const { claim: _expired, ...withoutClaim } = next
-    return fold.claim === undefined ? withoutClaim : { ...withoutClaim, claim: fold.claim }
+    return nextPressureState(state, fold.claim === undefined ? withoutClaim : { ...withoutClaim, claim: fold.claim })
   },
   wire: {
     viewSchema: pressureSchema,
-    view: ({ contextWindow, pressureTokens, surfaceTokens, sampledSurfaceTokens }) => ({
-      ...contextWindow === undefined ? {} : { contextWindow },
-      ...pressureTokens === undefined ? {} : { pressureTokens },
-      ...pressureTokens === undefined || sampledSurfaceTokens === undefined
-        ? {}
-        : { projectedTokens: Math.max(0, pressureTokens + surfaceTokens - sampledSurfaceTokens) },
-    }),
+    view: pressureView,
   },
 } satisfies ProjectionDefinition<'contextPressure', ContextPressureState>

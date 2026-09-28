@@ -493,6 +493,37 @@ describe('SubagentModelSelectionCardController', () => {
 })
 
 describe('SubagentLimitsCardController', () => {
+  it('saves the forced model and limits in one mutation and can disable or reset the override', async () => {
+    const host = stubConfigForm<SubagentLimitsSettings>()
+    const controller = new SubagentLimitsCardController(host.scope)
+    const face = controller.inject()
+    const state = () => face.hooks.subagentLimitsCard.getSnapshot()
+    host.publish({ status: 'ready', writable: true, revision: 4,
+      value: { maxDepth: 1, maxActiveSubagents: 8, modelOverride: false },
+      base: { maxDepth: 1, maxActiveSubagents: 8, modelOverride: false }, user: {} })
+    acceptWrites(host)
+    face.edit('modelOverride', JSON.stringify({ provider: 'alpha', model: '' }))
+    expect(state().invalid).toBe(true)
+    face.save()
+    expect(host.mutate).not.toHaveBeenCalled()
+    const choice = { provider: 'alpha', model: 'fast', reasoningEffort: 'high' }
+    face.edit('modelOverride', JSON.stringify(choice))
+    face.edit('maxDepth', '2')
+    face.save()
+    await vi.waitFor(() => { expect(state().saving).toBe(false) })
+    expect(host.mutate).toHaveBeenCalledOnce()
+    expect(host.scope.getSnapshot().value).toEqual({ maxDepth: 2, maxActiveSubagents: 8, modelOverride: choice })
+    face.edit('modelOverride', 'false')
+    face.save()
+    await vi.waitFor(() => { expect(state().saving).toBe(false) })
+    expect(state().overrideValue).toBeNull()
+    face.resetField('modelOverride')
+    face.save()
+    await vi.waitFor(() => { expect(state().saving).toBe(false) })
+    expect(host.scope.getSnapshot().user).not.toHaveProperty('modelOverride')
+    controller.dispose()
+  })
+
   it('validates staged limits, saves them, and restores composed defaults', async () => {
     const host = stubConfigForm<SubagentLimitsSettings>()
     const face = new SubagentLimitsCardController(host.scope).inject()

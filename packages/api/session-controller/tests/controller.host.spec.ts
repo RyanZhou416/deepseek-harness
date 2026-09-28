@@ -1,4 +1,5 @@
 import { Context } from '@deepseek-ai/cordis'
+import Schema from '@deepseek-ai/schemastery'
 import AgentRegistry from '@deepseek-ai/dsh-agent'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
@@ -16,6 +17,21 @@ const defaults = {
 }
 
 describe('SessionController facade', () => {
+  it('defaults catalog projection exclusions to empty and rejects invalid key lists', () => {
+    expect(SessionController.Config({}).listProjectionExcludeKeys).toEqual([])
+    expect(Schema.resolve({ listProjectionExcludeKeys: null }, SessionController.Config, {})[0])
+      .toMatchObject({ listProjectionExcludeKeys: [] })
+    expect(SessionController.Config({ listProjectionExcludeKeys: ['contextHeaders', 'turnOutline'] }).listProjectionExcludeKeys)
+      .toEqual(['contextHeaders', 'turnOutline'])
+    expect(SessionController.Config({ listProjectionExcludeKeys: ['third-party/detail'] }).listProjectionExcludeKeys)
+      .toEqual(['third-party/detail'])
+    expect(() => SessionController.Config({ listProjectionExcludeKeys: ['sessionListMetadata'] }))
+      .toThrow(/sessionListMetadata/u)
+    for (const value of ['title', [42], [''], [null], [undefined]]) {
+      expect(() => Schema.resolve({ listProjectionExcludeKeys: value }, SessionController.Config, {})).toThrow()
+    }
+  })
+
   it('does not require the Tools service', () => {
     expect(SessionController.inject).not.toContain('tools')
   })

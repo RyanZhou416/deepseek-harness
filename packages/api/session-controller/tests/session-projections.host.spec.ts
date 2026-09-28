@@ -45,9 +45,11 @@ declare module '@deepseek-ai/dsh-session-projection/types' {
     'test/last-user': LastUserState
     'test/internal-count': number
     'test/private-prompt': string | null
+    'test/third-party': LastUserState
   }
   interface SessionProjectionMap {
     'test/last-user': { text: string } | null
+    'test/third-party': { text: string } | null
   }
 }
 
@@ -160,7 +162,10 @@ function seedMessages(session: Session, count: number): void {
   }
 }
 
-const remote = (ctx: Context) => createSessionTestRemote(ctx, { defaultModelSelection: () => ({ provider: 'p', model: 'm' }), cwd: '/tmp' })
+const remote = (ctx: Context, listProjectionExcludeKeys?: readonly string[]) => createSessionTestRemote(ctx, {
+  defaultModelSelection: () => ({ provider: 'p', model: 'm' }), cwd: '/tmp',
+  ...(listProjectionExcludeKeys === undefined ? {} : { listProjectionExcludeKeys }),
+})
 
 describe('session.history projections block', () => {
   it('keeps the v0 numeric seed cut on the wire while logical headers expose only lineage', async () => {
@@ -473,6 +478,140 @@ describe('session.history projections block', () => {
 })
 
 describe('session.list projections column', () => {
+  it('skips excluded cold checkpoint views while preserving the cached title and third-party values', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-catalog-exclusions-'))
+    const ctx = new Context()
+    try {
+      await ctx.plugin(Storage)
+      await ctx.plugin(StorageJson, { root })
+      await ctx.plugin(StorageDomain, { backend: 'json' })
+      await ctx.plugin(SessionStore)
+      await ctx.plugin(AgentRegistry)
+      await ctx.plugin(SessionProjectionRegistry)
+      ctx.sessionProjections.register(titleProjectionDefinition)
+      const unit = lastUserUnit()
+      const detailView = vi.fn(unit.wire.view)
+      ctx.sessionProjections.register({ ...unit, wire: { ...unit.wire, view: detailView } })
+      ctx.sessionProjections.register({ ...lastUserUnit(), key: 'test/third-party' })
+      await ctx.plugin(SessionProjectionCache, { writeEveryEvents: 100, writeIntervalMs: 60_000 })
+      const gateway = remote(ctx, ['test/last-user'])
+      const id = SessionId('cold-catalog-exclusions')
+      let session: Session | undefined
+      const owner = await ctx.plugin(Object.assign((sessionCtx: Context) => {
+        session = sessionCtx.sessions.create(id, { meta: { createdAt: 5, cwd: '/workspace' } })
+      }, { inject: ['sessions'] }))
+      if (session === undefined) throw new Error('Session was not created')
+      session.append('turn/start', { turn: 1 })
+      seedMessages(session, 1)
+      session.append('session/title', { title: 'Cold title', messageSeqs: [], source: { kind: 'user' } })
+      await ctx.sessionProjectionCache.write(session)
+      const header = session.header
+      await owner.dispose()
+      expect(ctx.sessions.get(id)).toBeUndefined()
+      const open = vi.fn(() => { throw new Error('catalog must not open a cold event log') })
+      ctx.provide('sessionPersistence', testSessionPersistence(ctx, {
+        list: async () => [header], inspect: open, open,
+      }) as never)
+      detailView.mockClear()
+      const response = await gateway.list({})
+      if (!response.ok) throw new Error('listing failed')
+      const row = response.value.items.find(item => item.sessionId === id)
+      expect(row?.projections?.values).toMatchObject({
+        title: 'Cold title', 'test/third-party': { text: 'm0' }, sessionListMetadata: { blank: false },
+      })
+      expect(row?.projections?.values).not.toHaveProperty('test/last-user')
+      expect(detailView).not.toHaveBeenCalled()
+      expect(open).not.toHaveBeenCalled()
+    } finally {
+      await ctx.fiber.dispose()
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('preserves cold catalog schedule, child, usage, and Context overview hints under a detail-only exclusion policy', async () => {
+    const { ctx } = await harness(true)
+    const id = SessionId('cold-catalog-consumers')
+    const header: SessionHeader = { version: SESSION_FORMAT_VERSION, id, createdAt: 5, isSeeded: false, cwd: '/workspace' }
+    const values = {
+      title: 'Catalog title',
+      sessionListMetadata: { blank: false, lastPromptAt: 6 },
+      schedule: [{ id: 'synthetic-reminder', kind: 'at', prompt: 'Synthetic reminder', scheduledAt: '2030-01-01T00:00:00Z' }],
+      subagentCatalog: [{ id: 'synthetic-child', createdAt: 1, mode: 'continuable', label: 'Child' }],
+      tokenUsage: { uncachedInputTokens: 10, outputTokens: 5, cacheReadTokens: 2, cacheWriteTokens: 0 },
+      contextTimeline: {
+        ok: true, current: { system: 1, tools: 1, user: 1, inject: 0, skill: 0, assistant: 1, tool: 0, total: 4 },
+        counts: { turns: 1, steps: 1, injects: 0, compactions: 0, prunes: 0 }, detailRev: 1,
+      },
+      contextActivity: { days: { '2030-01-01': { requests: 1, tokens: 17 } } },
+      'third-party/catalog': { visible: true },
+    }
+    const cachedSnapshot = vi.fn(() => ({ asOfSeq: SessionSeq(7), values }))
+    ctx.provide('sessionPersistence', testSessionPersistence(ctx, { list: async () => [header] }) as never)
+    ctx.provide('sessionProjectionCache', { cachedSnapshot } as never)
+    const response = await remote(ctx, ['contextHeaders', 'turnOutline']).list({})
+    if (!response.ok) throw new Error('listing failed')
+    const row = response.value.items.find(item => item.sessionId === id)
+    expect(row?.projections?.values).toEqual(values)
+    expect(row).toMatchObject({ blank: false, updatedAt: 6 })
+    expect(cachedSnapshot).toHaveBeenCalledWith(expect.objectContaining({ id }), undefined,
+      new Set(['contextHeaders', 'turnOutline']))
+  })
+
+  it.for([false, true])('respects catalog title exclusion for a predecessor-cache fallback (%s)', async (excluded) => {
+    const { ctx } = await harness(true)
+    const id = SessionId('predecessor-title-exclusion')
+    ctx.provide('sessionPersistence', testSessionPersistence(ctx, {
+      list: async () => [{ version: SESSION_FORMAT_VERSION, id, createdAt: 5, isSeeded: false, cwd: '/workspace' }],
+    }) as never)
+    const cachedPredecessorTitle = vi.fn(() => ({ asOfSeq: SessionSeq(1), values: { title: 'Predecessor title' } }))
+    ctx.provide('sessionProjectionCache', { cachedSnapshot: () => undefined, cachedPredecessorTitle } as never)
+    const response = await remote(ctx, excluded ? ['title'] : []).list({})
+    if (!response.ok) throw new Error('listing failed')
+    const row = response.value.items.find(item => item.sessionId === id)
+    expect(row?.projections?.values.title).toBe(excluded ? undefined : 'Predecessor title')
+    expect(cachedPredecessorTitle).toHaveBeenCalledTimes(excluded ? 0 : 1)
+  })
+
+  it('omits configured catalog projections before viewing while explicit and follow baselines stay complete', async () => {
+    const { ctx, session } = await harness(true)
+    const unit = lastUserUnit()
+    const detailView = vi.fn(unit.wire.view)
+    ctx.sessionProjections.register({ ...unit, wire: { ...unit.wire, view: detailView } })
+    ctx.sessionProjections.register({ ...lastUserUnit(), key: 'test/third-party' })
+    const gateway = remote(ctx, ['test/last-user'])
+    session.append('turn/start', { turn: 1 })
+    seedMessages(session, 1)
+    detailView.mockClear()
+
+    const listing = await gateway.list({})
+    if (!listing.ok) throw new Error('listing failed')
+    const row = listing.value.items.find(item => item.sessionId === session.id)
+    expect(row?.projections?.values).not.toHaveProperty('test/last-user')
+    expect(row?.projections?.values['test/third-party']).toEqual({ text: 'm0' })
+    expect(row?.projections?.values.sessionListMetadata).toMatchObject({ blank: false })
+    expect(detailView).not.toHaveBeenCalled()
+
+    const explicit = await gateway.projections({ sessionId: session.id })
+    if (!explicit.ok || explicit.value === null) throw new Error('projection read failed')
+    expect(explicit.value.values['test/last-user']).toEqual({ text: 'm0' })
+    const snapshot = await opening(gateway, session.id)
+    expect(snapshot.projections.values['test/last-user']).toEqual({ text: 'm0' })
+    expect(detailView).toHaveBeenCalled()
+  })
+
+  it('keeps every registered catalog hint when the exclusion list is explicitly empty', async () => {
+    const { ctx, session } = await harness(true)
+    ctx.sessionProjections.register(lastUserUnit())
+    ctx.sessionProjections.register({ ...lastUserUnit(), key: 'test/third-party' })
+    const gateway = remote(ctx, [])
+    seedMessages(session, 1)
+    const response = await gateway.list({})
+    if (!response.ok) throw new Error('listing failed')
+    const row = response.value.items.find(item => item.sessionId === session.id)
+    expect(row?.projections?.values['test/last-user']).toEqual({ text: 'm0' })
+    expect(row?.projections?.values['test/third-party']).toEqual({ text: 'm0' })
+  })
+
   it('serves every already-materialized wire value from the live registry without folding', async () => {
     const { ctx, session } = await harness(true)
     ctx.sessionProjections.register(lastUserUnit())

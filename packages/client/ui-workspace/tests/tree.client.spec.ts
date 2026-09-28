@@ -72,6 +72,69 @@ const schedule = (id: string, scheduledAt: string): ScheduleRecord => ({
   scheduledAt,
 })
 
+/** Slow reference for the established manual-order behavior. */
+function referenceManualOrder(
+  memberIds: readonly SessionId[],
+  savedOrder: readonly string[] | undefined,
+  summaries: SessionListState['byId'],
+  state?: { pinnedSessionIds: readonly SessionId[]; archivedSessionIds: readonly SessionId[] },
+): SessionId[] {
+  const members = new Map(memberIds.map(id => [id as string, id]))
+  const included = new Set<string>()
+  const ordered: SessionId[] = []
+  for (const key of savedOrder ?? []) {
+    const id = members.get(key)
+    if (id === undefined || included.has(key)) continue
+    ordered.push(id)
+    included.add(key)
+  }
+  const archived = new Set(state?.archivedSessionIds)
+  const pins: SessionId[] = []
+  for (const sessionId of state?.pinnedSessionIds ?? []) {
+    const id = members.get(sessionId)
+    if (id === undefined || included.has(id) || archived.has(id) || summaries[id] === undefined) continue
+    pins.push(id)
+    included.add(id)
+  }
+  const ordinary: SessionId[] = []
+  const archives: SessionId[] = []
+  for (const id of orderByRecency([...members.values()].filter(id => !included.has(id)), summaries)) {
+    if (archived.has(id)) archives.push(id)
+    else ordinary.push(id)
+  }
+  const result = [...pins, ...ordered, ...ordinary, ...archives]
+  const pending = new Set(ordinary)
+  const placeFork = (id: SessionId): void => {
+    if (!pending.delete(id)) return
+    const parentId = summaries[id]?.parentId
+    if (parentId === undefined || parentId === id || !result.includes(parentId)) return
+    placeFork(parentId)
+    result.splice(result.indexOf(id), 1)
+    result.splice(result.indexOf(parentId), 0, id)
+  }
+  for (const id of [...ordinary].reverse()) placeFork(id)
+  return result
+}
+
+function seededRandom(seed: number): () => number {
+  let state = seed >>> 0
+  return () => {
+    state = (Math.imul(state, 1_664_525) + 1_013_904_223) >>> 0
+    return state / 0x1_0000_0000
+  }
+}
+
+function shuffled<T>(values: readonly T[], random: () => number): T[] {
+  const result = [...values]
+  for (let index = result.length - 1; index > 0; index--) {
+    const other = Math.floor(random() * (index + 1))
+    const value = result[index]
+    result[index] = result[other] as T
+    result[other] = value as T
+  }
+  return result
+}
+
 describe('owningGroupKey', () => {
   it('returns the owning Workspace id or the Ungrouped key', () => {
     const workspaces = [workspace('first', ['owned'])]
@@ -168,6 +231,11 @@ describe('Session ordering', () => {
       .toEqual(['source', 'other', 'older-fork', 'newer-fork'])
   })
 
+  it('keeps a leading new fork ahead of its unsaved source', () => {
+    const sessions = list({ ...summary('child', 2), parentId: sid('parent') }, summary('parent', 1))
+    expect(reconcileManualOrder(sessions.ids, undefined, sessions.byId)).toEqual(['child', 'parent'])
+  })
+
   it('places nested new forks before their parents even when catalog recency differs', () => {
     const sessions = list(
       summary('source', 1), summary('other', 2),
@@ -186,6 +254,77 @@ describe('Session ordering', () => {
     )
     expect(reconcileManualOrder(sessions.ids, ['source'], sessions.byId))
       .toEqual(['source', 'orphan', 'self'])
+  })
+
+  it('matches the established order across fixed-seed parent graphs and row states', () => {
+    const random = seededRandom(0x5E55104D)
+    for (let caseIndex = 0; caseIndex < 128; caseIndex++) {
+      const count = 8 + Math.floor(random() * 40)
+      const ids = Array.from({ length: count }, (_, index) => sid(`case-${caseIndex}-${index}`))
+      const summaries: SessionListState['byId'] = {}
+      for (const id of ids) {
+        const parentChoice = Math.floor(random() * (count + 4))
+        const parentId = parentChoice < count
+          ? ids[parentChoice]
+          : parentChoice === count
+            ? id
+            : parentChoice === count + 1
+              ? sid(`missing-${caseIndex}`)
+              : undefined
+        summaries[id] = {
+          ...summary(id, Math.floor(random() * 12)),
+          ...(parentId === undefined ? {} : { parentId }),
+        }
+      }
+      const pendingId = sid(`pending-${caseIndex}`)
+      const members = shuffled([...ids, pendingId], random)
+      const saved = shuffled([...ids, pendingId, sid(`departed-${caseIndex}`)], random)
+        .filter(() => random() < 0.38)
+      if (saved[0] !== undefined) saved.push(saved[0])
+      const state = rowState({
+        pinned: shuffled(ids, random).filter(() => random() < 0.22),
+        archived: shuffled(ids, random).filter(() => random() < 0.2),
+      })
+      expect(reconcileManualOrder(members, saved, summaries, state))
+        .toEqual(referenceManualOrder(members, saved, summaries, state))
+    }
+  })
+
+  it('reconciles a deep fork chain without recursive stack growth', () => {
+    const depth = 12_000
+    const ids = Array.from({ length: depth }, (_, index) => sid(`deep-${index}`))
+    const summaries: SessionListState['byId'] = Object.fromEntries(ids.map((id, index) => [id, {
+      ...summary(id, depth - index),
+      ...(index === 0 ? {} : { parentId: sid(`deep-${index - 1}`) }),
+    }]))
+    const order = reconcileManualOrder(ids, ['deep-0'], summaries)
+    expect(order).toHaveLength(depth)
+    expect(order[0]).toBe(ids.at(-1))
+    expect(order.at(-1)).toBe(ids[0])
+  })
+
+  it('terminates a multi-Session parent cycle with the established post-order moves', () => {
+    const sessions = list(
+      { ...summary('cycle-a', 3), parentId: sid('cycle-b') },
+      { ...summary('cycle-b', 2), parentId: sid('cycle-c') },
+      { ...summary('cycle-c', 1), parentId: sid('cycle-a') },
+      summary('anchor', 0),
+    )
+    expect(reconcileManualOrder(sessions.ids, ['anchor'], sessions.byId))
+      .toEqual(['anchor', 'cycle-c', 'cycle-a', 'cycle-b'])
+  })
+
+  it('uses one caller-selected main Session across membership and row derivation', () => {
+    const first = { ...summary('first-blank', 2), blank: true }
+    const second = { ...summary('second-blank', 1), blank: true }
+    const sessions = withMain(list(first, second), first.id)
+    const selected = { id: second.id }
+    expect(sessionMemberIds(sessions, selected)).toEqual([second.id])
+    expect(deriveFlat(sessions, [first.id, second.id], noRows, noAttention, selected).map(row => row.id))
+      .toEqual([second.id])
+    expect(deriveGroups(
+      sessions, [], noRows, noAttention, view([UNGROUPED_KEY]), selected,
+    )[0]?.sessions.map(row => row.id)).toEqual([second.id])
   })
 
   it.each(['workspace', 'ungrouped', 'flat'] as const)('keeps forks of pinned sources in the ordinary %s section', (mode) => {

@@ -2,7 +2,9 @@ import { describe, expect, expectTypeOf, it, onTestFinished, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import { type Agent } from '@deepseek-ai/dsh-agent'
 
-import { HarnessError, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
+import LlmRuntime, { HarnessError, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
+import { liveConfig } from '../../../settings/settings/tests/live-config.ts'
+import { MockAdapter } from '../../../core/agent-loop/tests/mock-adapter.ts'
 import { carrierKeyOf } from '@deepseek-ai/dsh-scope'
 import SubagentRuntime, {
   foldSubagentDescriptor,
@@ -73,6 +75,78 @@ async function service(): Promise<{ ctx: Context; subagents: SubagentRuntime }> 
 }
 
 describe('SubagentRuntime', () => {
+  async function overrideService(value: object | false = { provider: 'forced', model: 'chosen', reasoningEffort: 'low' }) {
+    const ctx = new Context()
+    onTestFinished(() => ctx.fiber.dispose())
+    await ctx.plugin(LlmRuntime)
+    await ctx.plugin(SessionProjectionRegistry)
+    const config = await liveConfig(ctx, SubagentRuntime, { modelOverride: value })
+    ctx.llm.registerAdapter(['forced'], new MockAdapter([], {
+      efforts: [{ id: ReasoningEffortId('low'), name: 'Low' }], defaultEffort: ReasoningEffortId('low'),
+    }))
+    const provider = new StubProvider('ordinary')
+    ctx.subagents.registerProvider(provider)
+    return { ctx, config, provider, subagents: ctx.subagents }
+  }
+
+  it.each(['ordinary task', 'agent-teams:pretend:member'])('forces route and effort regardless of caller options or label: %s', async (label) => {
+    const { provider, subagents } = await overrideService()
+    const agentOptions = { provider: 'missing', model: 'expensive', reasoningEffort: ReasoningEffortId('max'), maxTokens: 17 }
+    await subagents.start('ordinary', baseRequest({ label, agentOptions, inheritReasoningEffort: true }))
+    expect(provider.lastRequest).toMatchObject({
+      agentOptions: { provider: 'forced', model: 'chosen', reasoningEffort: 'low', maxTokens: 17 },
+      inheritReasoningEffort: false,
+    })
+    expect(agentOptions.provider).toBe('missing')
+  })
+
+  it('rejects backends that cannot honor an active override, and permits them again when disabled', async () => {
+    const { subagents, config } = await overrideService()
+    const external = new StubProvider('external', NO_CAPS)
+    subagents.registerProvider(external)
+    await expect(subagents.start('external', baseRequest())).rejects.toMatchObject({ code: 'UNSUPPORTED_CAPABILITY' })
+    expect(external.startCount).toBe(0)
+    await config.update({ modelOverride: false })
+    await subagents.start('external', baseRequest())
+    expect(external.startCount).toBe(1)
+  })
+
+  it('uses model defaults without retaining caller effort and rejects invalid forced routes before starting', async () => {
+    const { subagents, provider, config } = await overrideService({ provider: 'forced', model: 'chosen' })
+    await subagents.start('ordinary', baseRequest({ agentOptions: { reasoningEffort: ReasoningEffortId('max') } }))
+    expect(provider.lastRequest?.agentOptions).toEqual({ provider: 'forced', model: 'chosen' })
+    expect(provider.lastRequest?.inheritReasoningEffort).toBe(false)
+    await config.update({ modelOverride: { provider: 'missing', model: 'chosen' } })
+    await expect(subagents.start('ordinary', baseRequest())).rejects.toThrow()
+    expect(provider.startCount).toBe(1)
+  })
+
+  it('rejects policy changes during model validation before the provider can start', async () => {
+    const { ctx, subagents, provider, config } = await overrideService()
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => { release = resolve })
+    const resolve = ctx.llm.resolveCallConfig.bind(ctx.llm)
+    const validation = vi.spyOn(ctx.llm, 'resolveCallConfig').mockImplementationOnce(async (...args) => {
+      await gate
+      return resolve(...args)
+    })
+    const pending = subagents.start('ordinary', baseRequest())
+    const rejected = expect(pending).rejects.toMatchObject({ code: 'MODEL_POLICY_CHANGED' })
+    await config.update({ modelOverride: { model: 'new-choice' } })
+    release()
+    await rejected
+    validation.mockRestore()
+    expect(provider.startCount).toBe(0)
+  })
+
+  it('reapplies current policy even when a caller passes an older prepared selection', async () => {
+    const { subagents, provider, config } = await overrideService(false)
+    const prepared = subagents.prepareModel('ordinary', { provider: 'missing', model: 'other' })
+    await config.update({ modelOverride: { provider: 'forced', model: 'chosen', reasoningEffort: 'low' } })
+    await subagents.start('ordinary', baseRequest({ agentOptions: prepared.agentOptions! }))
+    expect(provider.lastRequest?.agentOptions).toMatchObject({ provider: 'forced', model: 'chosen', reasoningEffort: 'low' })
+  })
+
   it('releases its catalog projection binding with the service fiber', async () => {
     const ctx = new Context()
     await ctx.plugin(SessionProjectionRegistry)
