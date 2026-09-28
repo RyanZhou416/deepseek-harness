@@ -357,11 +357,13 @@ export class SessionProjectionRegistry extends Service {
    * baseline. Missing cells are omitted.
    * @param session - attached Session whose cached cells are inspected.
    * @param keys - optional wire keys to view.
+   * @param excludeKeys - keys omitted before viewing; exclusions also apply to explicitly selected keys.
    * @returns the lowest common cached cut, or `undefined` when no wire cell exists.
    */
   cachedSnapshot(
     session: Session,
     keys?: readonly Extract<keyof SessionProjectionMap, string>[],
+    excludeKeys?: ReadonlySet<string>,
   ): ProjectionSnapshot | undefined {
     const values: Record<string, unknown> = {}
     let asOfSeq: SessionSeqCursor | undefined
@@ -369,6 +371,7 @@ export class SessionProjectionRegistry extends Service {
     for (const registration of this.registrations.values()) {
       if (registration.def.wire === undefined) continue
       if (selected !== undefined && !selected.has(registration.def.key)) continue
+      if (excludeKeys?.has(registration.def.key)) continue
       const cell = registration.cells.get(session)
       if (cell === undefined) continue
       values[registration.def.key] = this.viewCell(registration, cell)
@@ -443,11 +446,13 @@ export class SessionProjectionRegistry extends Service {
    * values are as stale as their rows, never wrong.
    * @param checkpoint - persisted rows for one session (possibly stale or empty).
    * @param keys - optional wire keys to view.
+   * @param excludeKeys - keys omitted before state validation or viewing, including explicitly selected keys.
    * @returns whole values per key with a usable row; empty when none.
    */
   viewCheckpoint(
     checkpoint: ProjectionCheckpoint,
     keys?: readonly Extract<keyof SessionProjectionMap, string>[],
+    excludeKeys?: ReadonlySet<string>,
   ): Partial<SessionProjectionMap> {
     const values: Record<string, unknown> = {}
     const selected = keys === undefined ? undefined : new Set<string>(keys)
@@ -455,6 +460,7 @@ export class SessionProjectionRegistry extends Service {
       const def = registration.def
       if (def.wire === undefined) continue
       if (selected !== undefined && !selected.has(def.key)) continue
+      if (excludeKeys?.has(def.key)) continue
       const row = checkpoint[def.key]
       if (row === undefined || row.ver !== def.stateVersion) continue
       let state: unknown

@@ -1,5 +1,6 @@
 import { once } from 'node:events'
 import { createServer, type Server } from 'node:http'
+import { Duplex } from 'node:stream'
 import { Context } from '@deepseek-ai/cordis'
 import { remoteErrorOf, type PeerId, type PeerScope } from '@deepseek-ai/dsh-typert-protocol'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -19,14 +20,60 @@ interface RunningMux {
 const running = new Set<RunningMux>()
 
 afterEach(async () => {
-  await Promise.all([...running].map(async (entry) => {
-    running.delete(entry)
-    await entry.mux.close().catch(() => undefined)
-    await closeHttp(entry.http)
-  }))
+  try {
+    await Promise.all([...running].map(async (entry) => {
+      running.delete(entry)
+      await entry.mux.close().catch(() => undefined)
+      await closeHttp(entry.http)
+    }))
+  } finally {
+    vi.restoreAllMocks()
+    vi.useRealTimers()
+  }
 })
 
 describe('Remote stream mux server carrier lifecycle', () => {
+  it('keeps one pending Ping while the transport makes write progress', async () => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval', 'setImmediate', 'clearImmediate'] })
+    let transport: GatedDuplex | undefined
+    const entry = await startMux(
+      async (_endpoint, _payload, _uplink, _peer, control) => waitForAbort(control.signal),
+      100,
+      262_144,
+      undefined,
+      (socket) => {
+        transport = new GatedDuplex(socket)
+        return transport
+      },
+    )
+    const client = await connect(entry.url, false)
+    if (transport === undefined) throw new Error('fixture transport has not upgraded')
+    const serverSocket = acceptedSocket(entry.mux)
+    const ping = vi.spyOn(serverSocket, 'ping')
+    const receivedPing = vi.fn()
+    client.on('ping', receivedPing)
+    transport.hold = true
+    serverSocket.send('synthetic payload', () => {})
+
+    await vi.advanceTimersByTimeAsync(100)
+    await transport.flushOne()
+    await vi.advanceTimersByTimeAsync(100)
+    await transport.flushOne()
+    await vi.advanceTimersByTimeAsync(101)
+
+    expect(receivedPing).not.toHaveBeenCalled()
+    expect(serverSocket.readyState).toBe(WebSocket.OPEN)
+    expect(ping).toHaveBeenCalledOnce()
+    const received = once(client, 'ping')
+    await transport.release()
+    await received
+    const pong = once(serverSocket, 'pong')
+    client.pong()
+    await pong
+    await vi.advanceTimersByTimeAsync(100)
+    expect(ping).toHaveBeenCalledTimes(2)
+  })
+
   it('sends WebSocket Ping control frames without application messages', async () => {
     const entry = await startMux(async (_endpoint, _payload, _uplink, _peer, control) => waitForAbort(control.signal), 20)
     const client = await connect(entry.url)
@@ -52,45 +99,124 @@ describe('Remote stream mux server carrier lifecycle', () => {
     await closed
   })
 
-  it('requires two missed heartbeats before terminating an unresponsive socket', async () => {
-    const entry = await startMux(async (_endpoint, _payload, _uplink, _peer, control) => waitForAbort(control.signal), 20)
-    const client = await connect(entry.url)
-    const serverSocket = acceptedSocket(entry.mux)
-    serverSocket.removeAllListeners('pong')
-    const terminated = vi.spyOn(serverSocket, 'terminate')
-    const closed = once(client, 'close')
-
-    await once(client, 'ping')
-    await once(client, 'ping')
-    expect(terminated).not.toHaveBeenCalled()
-    await vi.waitFor(() => { expect(terminated).toHaveBeenCalledOnce() })
+  it('requires two missed intervals after a completed Ping before terminating an unresponsive socket', async () => {
+    const fixture = await heartbeatFixture()
+    await fixture.tick()
+    fixture.complete(0)
+    await fixture.tick()
+    fixture.check()
+    expect(fixture.socket.readyState).toBe(WebSocket.OPEN)
+    await fixture.tick()
+    const closed = once(fixture.client, 'close')
+    fixture.check()
     await closed
+    expect(fixture.ping).toHaveBeenCalledOnce()
+    expect(fixture.terminated).toHaveBeenCalledOnce()
+    expect(fixture.warning).toHaveBeenCalledExactlyOnceWith('[api-gateway] WebSocket heartbeat failed', {
+      reason: 'timeout', phase: 'awaitingPong', bufferedBytes: 100,
+    })
   })
 
-  it('keeps the socket when a delayed Pong arrives before the final check', async () => {
-    const entry = await startMux(async (_endpoint, _payload, _uplink, _peer, control) => waitForAbort(control.signal), 20)
-    const client = await connect(entry.url, false)
-    const serverSocket = acceptedSocket(entry.mux)
-    const terminated = vi.spyOn(serverSocket, 'terminate')
-    let finalCheck: (() => void) | undefined
-    const immediate = vi.spyOn(globalThis, 'setImmediate').mockImplementation((callback) => {
-      finalCheck = callback
-      return 0 as unknown as NodeJS.Immediate
+  it('terminates a Ping write that makes no progress for two intervals', async () => {
+    const fixture = await heartbeatFixture()
+    await fixture.tick()
+    await fixture.tick()
+    fixture.check()
+    expect(fixture.socket.readyState).toBe(WebSocket.OPEN)
+    await fixture.tick()
+    const closed = once(fixture.client, 'close')
+    fixture.check()
+    await closed
+    expect(fixture.ping).toHaveBeenCalledOnce()
+    expect(fixture.terminated).toHaveBeenCalledOnce()
+    expect(fixture.warning).toHaveBeenCalledExactlyOnceWith('[api-gateway] WebSocket heartbeat failed', {
+      reason: 'timeout', phase: 'writing', bufferedBytes: 100,
     })
+  })
 
-    try {
-      await once(client, 'ping')
-      await once(client, 'ping')
-      await vi.waitFor(() => { expect(finalCheck).toBeDefined() })
-      serverSocket.emit('pong', Buffer.alloc(0))
-      finalCheck?.()
-      expect(terminated).not.toHaveBeenCalled()
-    } finally {
-      immediate.mockRestore()
-      const closed = once(client, 'close')
-      client.close()
-      await closed
-    }
+  it('requires two newly stalled intervals after observed write progress', async () => {
+    const fixture = await heartbeatFixture()
+    await fixture.tick()
+    await fixture.tick()
+    fixture.buffered.mockReturnValue(80)
+    await fixture.tick()
+    fixture.check()
+    expect(fixture.socket.readyState).toBe(WebSocket.OPEN)
+    fixture.buffered.mockReturnValue(100)
+    await fixture.tick()
+    fixture.check()
+    expect(fixture.socket.readyState).toBe(WebSocket.OPEN)
+    await fixture.tick()
+    const closed = once(fixture.client, 'close')
+    fixture.check()
+    await closed
+    expect(fixture.terminated).toHaveBeenCalledOnce()
+  })
+
+  it.each(['progress', 'flush', 'pong'] as const)('keeps the socket when %s arrives before the final check', async (event) => {
+    const fixture = await heartbeatFixture()
+    await fixture.tick()
+    await fixture.tick()
+    await fixture.tick()
+    expect(fixture.checks).toHaveLength(1)
+    if (event === 'progress') fixture.buffered.mockReturnValue(80)
+    else if (event === 'flush') fixture.complete(0)
+    else fixture.socket.emit('pong', Buffer.alloc(0))
+    fixture.check()
+    expect(fixture.terminated).not.toHaveBeenCalled()
+    expect(fixture.warning).not.toHaveBeenCalled()
+    await fixture.tick()
+    fixture.check()
+    expect(fixture.socket.readyState).toBe(WebSocket.OPEN)
+  })
+
+  it.each([undefined, new Error('old Ping write failed')])('ignores an old write callback after Pong and a new probe: %s', async (error) => {
+    const fixture = await heartbeatFixture()
+    await fixture.tick()
+    fixture.socket.emit('pong', Buffer.alloc(0))
+    await fixture.tick()
+    expect(fixture.ping).toHaveBeenCalledTimes(2)
+    await fixture.tick()
+    fixture.complete(0, error)
+    expect(fixture.terminated).not.toHaveBeenCalled()
+    await fixture.tick()
+    const closed = once(fixture.client, 'close')
+    fixture.check()
+    await closed
+    expect(fixture.terminated).toHaveBeenCalledOnce()
+    expect(fixture.warning).toHaveBeenCalledExactlyOnceWith('[api-gateway] WebSocket heartbeat failed', {
+      reason: 'timeout', phase: 'writing', bufferedBytes: 100,
+    })
+  })
+
+  it('terminates the current Ping write error without throwing', async () => {
+    const fixture = await heartbeatFixture()
+    await fixture.tick()
+    const closed = once(fixture.client, 'close')
+    expect(() => { fixture.complete(0, new Error('fixture Ping write failed')) }).not.toThrow()
+    await closed
+    expect(fixture.terminated).toHaveBeenCalledOnce()
+    expect(fixture.warning).toHaveBeenCalledExactlyOnceWith('[api-gateway] WebSocket heartbeat failed', {
+      reason: 'write-error', phase: 'writing', bufferedBytes: 100,
+    })
+  })
+
+  it('ignores a pending check and write callback after socket disposal', async () => {
+    const fixture = await heartbeatFixture()
+    await fixture.tick()
+    await fixture.tick()
+    await fixture.tick()
+    expect(fixture.checks).toHaveLength(1)
+    const closed = once(fixture.client, 'close')
+    await fixture.entry.mux.close()
+    running.delete(fixture.entry)
+    await closed
+    fixture.complete(0, new Error('late write error'))
+    fixture.check()
+    await fixture.tick()
+    expect(fixture.terminated).toHaveBeenCalledOnce()
+    expect(fixture.ping).toHaveBeenCalledOnce()
+    await closeHttp(fixture.entry.http)
   })
 
   it('rejects binary, malformed, and duplicate logical-stream messages', async () => {
@@ -495,16 +621,52 @@ const mapFailure: RemoteStreamFailureMapper = (error) => {
   }
 }
 
+/** Control public ws callbacks and timer phases without altering mux-owned heartbeat state. */
+async function heartbeatFixture() {
+  vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] })
+  const entry = await startMux(async (_endpoint, _payload, _uplink, _peer, control) => waitForAbort(control.signal), 100)
+  const client = await connect(entry.url, false)
+  const socket = acceptedSocket(entry.mux)
+  const completions: ((error?: Error) => void)[] = []
+  const ping = vi.spyOn(socket, 'ping').mockImplementation((_data, _mask, callback) => {
+    if (callback === undefined) throw new Error('fixture expected a Ping completion callback')
+    // ws types require an Error, but successful writes call back without one.
+    completions.push((error) => { Reflect.apply(callback, undefined, error === undefined ? [] : [error]) })
+  })
+  const buffered = vi.spyOn(socket, 'bufferedAmount', 'get').mockReturnValue(100)
+  const terminated = vi.spyOn(socket, 'terminate')
+  const warning = vi.spyOn(console, 'warn').mockImplementation(() => {})
+  const checks: (() => void)[] = []
+  const immediate = globalThis.setImmediate
+  vi.spyOn(globalThis, 'setImmediate').mockImplementation((callback) => {
+    checks.push(callback)
+    return immediate(() => {})
+  })
+  return {
+    entry, client, socket, ping, buffered, terminated, warning, checks,
+    tick: () => vi.advanceTimersByTimeAsync(100),
+    complete: (index: number, error?: Error): void => {
+      const callback = completions[index]
+      if (callback === undefined) throw new Error('fixture has no Ping completion at that index')
+      callback(error)
+    },
+    check: (): void => {
+      for (const callback of checks.splice(0)) callback()
+    },
+  }
+}
+
 async function startMux(
   open: RemoteStreamOpener,
   heartbeatIntervalMs = 2_000,
   streamInboxBytes = 262_144,
   peer?: PeerScope,
+  wrapSocket: (socket: Duplex) => Duplex = socket => socket,
 ): Promise<RunningMux> {
   const admitted = peer ?? await fixturePeer()
   const mux = new RemoteStreamMuxServer(open, mapFailure, heartbeatIntervalMs, streamInboxBytes)
   const http = createServer()
-  http.on('upgrade', (request, socket, head) => { mux.handleUpgrade(request, socket, head, admitted) })
+  http.on('upgrade', (request, socket, head) => { mux.handleUpgrade(request, wrapSocket(socket), head, admitted) })
   await new Promise<void>((resolve, reject) => {
     http.once('error', reject)
     http.listen(0, '127.0.0.1', () => {
@@ -517,6 +679,55 @@ async function startMux(
   const entry = { http, mux, url: `ws://127.0.0.1:${String(address.port)}` }
   running.add(entry)
   return entry
+}
+
+/** A real ws transport whose write completions advance only through the fixture's gate. */
+class GatedDuplex extends Duplex {
+  hold = false
+  private pending: { readonly chunk: Buffer; readonly callback: (error?: Error | null) => void } | undefined
+
+  constructor(private readonly socket: Duplex) {
+    super({ highWaterMark: 1 })
+    socket.on('data', (data: Buffer) => { if (!this.push(data)) socket.pause() })
+    socket.on('end', () => { this.push(null) })
+    socket.on('error', (error: Error) => { this.destroy(error) })
+    socket.on('close', () => { this.destroy() })
+  }
+
+  override _read(): void { this.socket.resume() }
+
+  override _write(chunk: Buffer, _encoding: BufferEncoding, callback: (error?: Error | null) => void): void {
+    if (this.hold) this.pending = { chunk, callback }
+    else this.socket.write(chunk, callback)
+  }
+
+  async flushOne(): Promise<void> {
+    const pending = this.pending
+    if (pending === undefined) throw new Error('fixture has no held write')
+    this.pending = undefined
+    await new Promise<void>((resolve, reject) => {
+      this.socket.write(pending.chunk, (error) => {
+        pending.callback(error)
+        if (error) reject(error)
+        else resolve()
+      })
+    })
+  }
+
+  async release(): Promise<void> {
+    this.hold = false
+    await this.flushOne()
+  }
+
+  override _final(callback: () => void): void { this.socket.end(callback) }
+
+  override _destroy(error: Error | null, callback: (error?: Error | null) => void): void {
+    const pending = this.pending
+    this.pending = undefined
+    pending?.callback(error ?? new Error('fixture gated transport destroyed'))
+    this.socket.destroy()
+    callback(error)
+  }
 }
 
 /** A Peer whose scope is a plain Cordis fiber, so `peer.ctx.effect` and `dispose()` behave as the registry's do. */

@@ -1,0 +1,33 @@
+- button "返回插件列表": 插件列表
+- heading "Subagent" [level=3]
+- paragraph: 设置 Subagent 的递归层级、数量和模型。
+- region "强制模型覆盖":
+  - heading "强制模型覆盖" [level=3]
+  - text: 为新建 Subagent 强制指定模型
+  - switch "为新建 Subagent 强制指定模型" [checked]
+  - paragraph: 优先于 Agent 的模型选择，也适用于已有会话新建的 Subagent。AgentTeams 成员使用自己的设置；已有 Subagent 保留已保存的模型。不支持应用覆盖的后端会拒绝新的创建请求
+  - text: 提供方
+  - button "提供方": Override Test
+  - text: 模型
+  - button "模型": override-model
+  - text: 推理强度
+  - button "推理强度": High
+  - button "恢复默认"
+- region "运行限制":
+  - heading "运行限制" [level=3]
+  - text: 最大递归深度
+  - button "最大递归深度说明"
+  - textbox "最大递归深度":
+    - /placeholder: ""
+    - text: "1"
+  - text: Subagent 并行数量上限
+  - button "Subagent 并行数量上限说明"
+  - textbox "Subagent 并行数量上限":
+    - /placeholder: ""
+    - text: "8"
+- region "模型选择":
+  - heading "模型选择" [level=3]
+  - text: 允许 Agent 为 Subagent 选择模型
+  - switch "允许 Agent 为 Subagent 选择模型"
+  - paragraph: 未启用强制覆盖时，Subagent 使用配置的默认模型或继承父 Agent 的模型；已选模型会保留。
+- button "保存" [disabled]

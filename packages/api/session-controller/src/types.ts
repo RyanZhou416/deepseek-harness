@@ -50,8 +50,8 @@ export interface SessionListMetadata {
 }
 
 /**
- * Every available wire value a Session-list row carries as partial, possibly
- * stale hints. `kind` and `asOfSeq` are independent facts: `kind` says which
+ * Available wire values selected by the Session Controller catalog policy as
+ * partial, possibly stale hints. `kind` and `asOfSeq` are independent facts: `kind` says which
  * sequence space `asOfSeq` belongs to, and therefore how a client may merge
  * the block; `asOfSeq` is the producer's watermark in that space.
  */

@@ -10,6 +10,8 @@ Sources: [`packages/subagent/subagent/src/types.ts`](../../packages/subagent/sub
 
 The `subagentCatalog` projection exposes `SubagentCatalogEntry[]` in parent event order through Session observations and client snapshots. Each entry contains the child id, creation time, mode, and mode-dependent label; fork-inherited catalog facts are excluded. [The subagent package](../../packages/subagent/subagent/README.md) owns catalog creation and persistence semantics. Historical children with unavailable descriptors have `mode: 'unknown'`; their header identity remains discoverable without granting continuation capabilities.
 
+`SubagentModelOverride` contains the exact provider/model and an optional reasoning effort. `PreparedSubagentModel` exposes detached effective `agentOptions` and the applied override (or `null`); `prepareModel()` reads policy for tool validation, while creation resolves policy again. The [runtime settings contract](../../packages/subagent/subagent/README.md#delegation-settings) defines precedence and the AgentTeams exception.
+
 ## Two kinds of capability, discovered two ways
 
 A provider advertises its **start-time** features on a static descriptor the service checks BEFORE a one-shot run exists; a request that needs one the provider lacks is rejected loud (`SubagentError('UNSUPPORTED_CAPABILITY')`), never accepted-then-ignored. Those flags describe only the one-shot [`start()`](#the-provider-contract-subagentprovider) path, where the provider composes the child. **Continuable** children are composed by the continuation manager itself, so they are gated by one optional method whose presence IS the capability, with TS narrowing as the discovery mechanism: [`SubagentProvider.prepareContinuable`](#the-provider-contract-subagentprovider).
@@ -74,6 +76,8 @@ interface SubagentStartRequest {
    * before initializing the separate child runtime.
    */
   readonly agentOptions?: AgentOptions
+  /** Whether an omitted reasoning effort may inherit from the parent; defaults to true. Requires agentOptions capability. */
+  readonly inheritReasoningEffort?: boolean
   /**
    * Object-rooted JSON Schema within `assertObjectJsonSchema`'s enforced subset. Start rejects
    * unsupported schemas or providers without the capability. Data must be plain host-realm JSON;
@@ -517,6 +521,15 @@ resolveMaxDepth(configured?: number | 'provider-managed'): number | undefined
 async startContinuable(spec: ContinuableStartSpec): Promise<ContinuableStart>
 
 /**
+ * Read effective model options for tool validation. Creation resolves the current policy again.
+ * Providers without Agent-option support reject creation while the override is enabled.
+ * @param name - registered subagent backend.
+ * @param requested - caller-selected options before the user override.
+ * @returns detached effective options and the applied override.
+ */
+prepareModel(name: string, requested?: AgentOptions): PreparedSubagentModel
+
+/**
  * Steer one model-authored message to the sender's direct parent or direct
  * continuable child. A running target admits it at the nearest step boundary;
  * an idle target starts a turn, and an absent direct child cold-resumes from
@@ -674,7 +687,7 @@ list(): string[]
 async start(name: string, request: SubagentStartRequest): Promise<SubagentRun>
 ```
 
-Types: [Agent](core.md) · [ContentBlock](llm-streaming.md) · [MessageId](llm-streaming.md) · [SessionId](core.md)
+Types: [Agent](core.md) · [AgentOptions](core.md) · [ContentBlock](llm-streaming.md) · [MessageId](llm-streaming.md) · [SessionId](core.md)
 
 Source: [`packages/subagent/subagent/src/index.ts`](../../packages/subagent/subagent/src/index.ts)
 

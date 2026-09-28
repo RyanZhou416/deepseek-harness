@@ -10,6 +10,8 @@ English | [中文](README.zh.md)
 
 React-free observable and snapshot-store primitives shared by Client controllers and renderer adapters. The package owns synchronous and animation-frame publication, Immer-backed updates, shallow equality, and optional browser persistence; React hook construction remains in `@deepseek-ai/dsh-client-ui-renderer`. Use it when Client state must publish stable snapshots without depending on React.
 
+Wholesale `set()` deep-freezes draftable state outside production. Static library artifacts preserve the environment condition for the consuming shell, so production Web builds skip this traversal while development builds retain it.
+
 ## Table of Contents
 
 - [Model Experience](#model-experience)

@@ -100,7 +100,7 @@ export const subagentTimingProjectionDefinition = {
         lastTurnCompleted: event.data.reason.kind === 'completed',
       }
     }
-    if (state.active === undefined) return state
+    if (state.active === undefined || state.active.through === event.time) return state
     return { ...state, active: { ...state.active, through: event.time } }
   },
   wire: {

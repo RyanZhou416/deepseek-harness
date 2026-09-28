@@ -29,6 +29,8 @@ Open **Plugins** in the sidebar and select **Subagent** in the Official group to
 
 **Model selection** stages its permission switch and the exact adapter routes together. Enabling requires at least one selected route; disabling keeps the selected routes for later. Routes the Host stored but no adapter advertises stay listed under **Saved but currently unavailable** and remain removable; a provider that failed to load is reported without hiding the others, and a failed load offers **Retry**.
 
+**Forced model** selects a provider, model, and reasoning effort for new ordinary children; AgentTeams members keep their own policy. **Model default** clears inherited effort. This setting takes priority over the model-selection allowlist and agent choices; [the runtime](../../subagent/subagent/README.md#delegation-settings) owns enforcement and unsupported-backend failures. Limits and the forced model save in one `subagent` namespace mutation. Missing catalog entries retain their saved ids, failed loads offer retry, and reset restores the composed default. Existing children keep their recorded models.
+
 One **Save** writes both sections through their own namespaces, each fenced by the revision its draft read. The writes are independent: a section the Host refuses keeps its draft with the failure reported while the other lands, and a model draft a newer Host revision superseded is reported as a conflict to discard rather than overwriting the newer routes. Leaving the page drops every draft.
 
 -----

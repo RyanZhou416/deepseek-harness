@@ -206,6 +206,9 @@ export function installConnection(ctx: Context, options: ConnectionInstallOption
   const pageLocation = options.location
   const transport = options.transport
   const recovery = options.recovery ?? {}
+  const isLoopback = transport?.ownsHost === true
+    || pageLocation === undefined
+    || isLoopbackHostname(pageLocation.hostname)
   const rpc = transport?.rpc ?? createWebConnectionRpc(transport?.fetch, transport?.openStream)
   let generationSource: ConnectionGenerationSource | undefined
   let owner: ConnectionOwner | undefined
@@ -245,7 +248,7 @@ export function installConnection(ctx: Context, options: ConnectionInstallOption
     publishState(undefined)
   }
   const handle: ConnectionHandle = {
-    isLoopback: transport?.ownsHost === true || pageLocation === undefined || isLoopbackHostname(pageLocation.hostname),
+    isLoopback,
     generation: {
       getSnapshot: () => generation,
       subscribe: (listener) => {
@@ -299,7 +302,12 @@ export function installConnection(ctx: Context, options: ConnectionInstallOption
           sinks.onStateChange?.(state)
         },
       }, { ...recovery, ...config })
-      const current = { token, source, controller, stopNetworkWatch: watchBrowserNetwork(controller) }
+      const current = {
+        token,
+        source,
+        controller,
+        stopNetworkWatch: isLoopback ? () => {} : watchBrowserNetwork(controller),
+      }
       owner = current
       controller.start()
       return {

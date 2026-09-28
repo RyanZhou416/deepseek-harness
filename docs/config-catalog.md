@@ -227,6 +227,8 @@ export interface Config {
   readonly idleSessionRetentionMs?: number
   /** Override platform desktop-opener detection. */
   readonly nativeOpen?: boolean
+  /** Catalog hint exclusions; default empty keeps all wire values. The required `sessionListMetadata` key cannot be excluded. */
+  readonly listProjectionExcludeKeys?: string[]
 }
 ```
 
@@ -2953,18 +2955,30 @@ Source: [`packages/storage/storage-sqlite/src/index.ts:24`](../packages/storage/
 ## `@deepseek-ai/dsh-subagent`
 
 ```ts config-catalog
-/** Host configuration for continuable subagent capacity. */
+/** Host delegation limits and user-selected child model policy. */
 export interface Config {
   /** Maximum live children sharing uninterrupted continuable parent links; defaults to 8. */
   maxActiveSubagents: Volatile<number>
   /** Default delegation depth for tools without an explicit limit; defaults to 1. */
   maxDepth: Volatile<number>
+  /** Forced model for new children except AgentTeams members; false disables it, unsupported backends reject while enabled. */
+  modelOverride: Volatile<SubagentModelOverride | false>
+}
+
+/** User-selected model configuration for newly created Harness-managed children. */
+export interface SubagentModelOverride {
+  /** Registered LLM provider id. */
+  readonly provider: string
+  /** Exact model id owned by that provider. */
+  readonly model: string
+  /** Explicit reasoning effort; omission selects this model's default without parent inheritance. */
+  readonly reasoningEffort?: string
 }
 ```
 
 Depends on: `Volatile` (`@deepseek-ai/cordis`)
 
-Source: [`packages/subagent/subagent/src/index.ts:201`](../packages/subagent/subagent/src/index.ts)
+Source: [`packages/subagent/subagent/src/index.ts:205`](../packages/subagent/subagent/src/index.ts)
 
 <a id="deepseek-aidsh-subagent-acp"></a>
 

@@ -12,7 +12,7 @@ import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, relative } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import SubagentRuntime from '@deepseek-ai/dsh-subagent'
+import SubagentRuntime, { type SubagentModelOverride } from '@deepseek-ai/dsh-subagent'
 import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import type { Agent, AgentOptions } from '@deepseek-ai/dsh-agent'
 import {
@@ -24,7 +24,8 @@ import {
 import { createProcessDeepSeekHarness } from '../../../sdk/client/src/api.ts'
 import type { RuntimeProcessOptions } from '../../../sdk/client/src/launch.ts'
 import type { DeepSeekHarnessOptions } from '@deepseek-ai/dsh-sdk-client'
-import { ReasoningEffortId } from '@deepseek-ai/dsh-llm'
+import LlmRuntime, { ReasoningEffortId } from '@deepseek-ai/dsh-llm'
+import { MockAdapter } from '../../../core/agent-loop/tests/mock-adapter.ts'
 import * as sdk from '../src/index.ts'
 import {
   DEFAULT_DISPOSE_EOF_GRACE_MS,
@@ -82,10 +83,12 @@ function request(text = 'p', signal = new AbortController().signal, agentOptions
 }
 
 /** Mount the SDK backend pointed at the fake runtime, scripted by `fakeEnv`. */
-async function setup(fakeEnv: Record<string, string> = {}, config: Partial<sdk.Config> = {}) {
+async function setup(
+  fakeEnv: Record<string, string> = {}, config: Partial<sdk.Config> = {}, modelOverride: SubagentModelOverride | false = false,
+) {
   const ctx = new Context()
   await ctx.plugin(SessionProjectionRegistry)
-  await ctx.plugin(SubagentRuntime)
+  await ctx.plugin(SubagentRuntime, { modelOverride })
   // The Config type models the post-validation shape, so the default registry
   // name is stated here; the Loader-composition fixture omits providerName and
   // exercises the schemastery default end to end.
@@ -153,6 +156,21 @@ describe('sdkChildOutcome', () => {
 })
 
 describe('dsh-subagent-dsh-sdk provider', () => {
+  it('forwards the forced model through the child process initialization instead of caller options', async () => {
+    const ctx = await setup({}, {}, { provider: 'forced', model: 'chosen', reasoningEffort: 'low' })
+    onTestFinished(() => ctx.fiber.dispose())
+    await ctx.plugin(LlmRuntime)
+    ctx.llm.registerAdapter(['forced'], new MockAdapter([], {
+      efforts: [{ id: ReasoningEffortId('low'), name: 'Low' }], defaultEffort: ReasoningEffortId('low'),
+    }))
+    const run = await ctx.subagents.start('dsh-sdk', request('child', new AbortController().signal, {
+      provider: 'missing', model: 'wrong', reasoningEffort: ReasoningEffortId('max'),
+    }))
+    await run.result
+    await run.dispose()
+    expect(createdHarnessOptions[0]).toMatchObject({ provider: 'forced', model: 'chosen', reasoningEffort: 'low' })
+  })
+
   it('constructs the production dsh-backed harness lazily', async () => {
     const harness = defaultCreateHarness({})
     expect(harness).toBeInstanceOf((await import('@deepseek-ai/dsh-sdk-client')).DeepSeekHarness)

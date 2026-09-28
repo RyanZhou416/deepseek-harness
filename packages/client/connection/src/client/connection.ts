@@ -163,6 +163,7 @@ export class ConnectionController {
 
   private async loop(): Promise<void> {
     let retry = false
+    let previousFailure: Error | undefined
     while (this.running) {
       if (!this.networkAvailable && !this.immediateRetry) {
         const retryDelay = new AbortController()
@@ -193,7 +194,10 @@ export class ConnectionController {
           if (!this.isRunning()) return
           if (retryDelay.signal.aborted) continue
         }
-        console.warn(`[connection] connection lost, retry #${String(attempt)}`)
+        const message = `[connection] connection lost, retry #${String(attempt)}`
+        if (previousFailure !== undefined) console.warn(message, previousFailure)
+        else if (!manualAttempt) console.warn(message)
+        previousFailure = undefined
         this.callSink(() => { this.sinks.onReconnectRequested?.() })
         if (!this.isRunning()) return
       }
@@ -229,6 +233,7 @@ export class ConnectionController {
           .then(
             () => {
               const error = new Error('connection generation ended')
+              if (!ac.signal.aborted) previousFailure = error
               if (!sourceReady) rejectReady(error)
               rejectSourceLost(error)
               settle()
@@ -237,6 +242,7 @@ export class ConnectionController {
               const failure = error instanceof Error
                 ? error
                 : new Error('connection generation failed', { cause: error })
+              if (!ac.signal.aborted) previousFailure = failure
               if (!sourceReady) rejectReady(failure)
               rejectSourceLost(failure)
               settle()

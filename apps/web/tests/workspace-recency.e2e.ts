@@ -92,7 +92,9 @@ describe('web e2e: workspace recency', () => {
     const captureSidebar = async (): Promise<string> => {
       await page.getByRole('button', { name: 'View options' }).hover()
       await expect.poll(() => page.getByRole('button', { name: /^Session actions for / }).count()).toBe(0)
-      return captureStableAria(page, '[role="tree"][aria-label="Sessions"]', scaffold.workspaceCwd)
+      return captureStableAria(page, '[role="tree"][aria-label="Sessions"]', scaffold.workspaceCwd, {
+        replacements: [[basename(scaffold.workspaceCwd), '{{workspace}}']],
+      })
     }
     await expect.poll(titles).toEqual(TITLES)
     await compareOrRefreshGolden(

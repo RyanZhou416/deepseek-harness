@@ -36,9 +36,23 @@ export function owningGroupKey(
 export type SessionPendingInteractionStatus = 'approval' | 'plan-review' | 'question'
 type SessionStatuses = SessionStatusSnapshot
 
-function mainSessionId(list: SessionListState): SessionId | undefined {
-  return Object.values(list.byId)
-    .find(session => (session.retainedBy.mainView ?? 0) > 0)?.id
+/**
+ * Resolved Session retained by the main conversation view.
+ */
+export interface MainSessionSelection {
+  readonly id: SessionId | undefined
+}
+
+/**
+ * Resolve the Session retained by the main conversation view.
+ * @param summaries - current Session summaries by id.
+ * @returns the first main-view Session in catalog order, including resolved absence.
+ */
+export function mainSessionSelection(summaries: SessionListState['byId']): MainSessionSelection {
+  return {
+    id: Object.values(summaries)
+      .find(session => (session.retainedBy.mainView ?? 0) > 0)?.id,
+  }
 }
 
 /** One top-level session row in a group or the flat list. */
@@ -127,6 +141,8 @@ interface Group {
   sessions: SessionSummary[]
 }
 
+type SessionMembership = Pick<SessionListState, 'ids' | 'byId'>
+
 /**
  * Directory display label: basename of the path (both separators accepted).
  * Ungrouped-bucket fallback for surfaces without a workspace title.
@@ -201,16 +217,56 @@ export function reconcileManualOrder(
   }
   const result = [...pins, ...ordered, ...ordinary, ...archives]
   const pending = new Set(ordinary)
-  const placeFork = (id: SessionId): void => {
-    if (!pending.delete(id)) return
-    const parentId = summaries[id]?.parentId
-    if (parentId === undefined || parentId === id || !result.includes(parentId)) return
-    placeFork(parentId)
-    result.splice(result.indexOf(id), 1)
-    result.splice(result.indexOf(parentId), 0, id)
+
+  // Index the mutable order once so each post-order fork move is constant-time.
+  interface OrderNode {
+    readonly id: SessionId
+    previous: OrderNode | undefined
+    next: OrderNode | undefined
   }
-  for (const id of [...ordinary].reverse()) placeFork(id)
-  return result
+  const nodes = new Map<SessionId, OrderNode>()
+  let head: OrderNode | undefined
+  let tail: OrderNode | undefined
+  for (const id of result) {
+    const node: OrderNode = { id, previous: tail, next: undefined }
+    if (tail === undefined) head = node
+    else tail.next = node
+    tail = node
+    nodes.set(id, node)
+  }
+  const moveBefore = (id: SessionId, parentId: SessionId): void => {
+    const node = nodes.get(id) as OrderNode
+    const parent = nodes.get(parentId) as OrderNode
+    if (node.previous === undefined) head = node.next
+    else node.previous.next = node.next
+    if (node.next === undefined) tail = node.previous
+    else node.next.previous = node.previous
+    node.previous = parent.previous
+    node.next = parent
+    if (parent.previous === undefined) head = node
+    else parent.previous.next = node
+    parent.previous = node
+  }
+  type Placement =
+    | { readonly kind: 'enter'; readonly id: SessionId }
+    | { readonly kind: 'move'; readonly id: SessionId; readonly parentId: SessionId }
+  for (const id of [...ordinary].reverse()) {
+    const stack: Placement[] = [{ kind: 'enter', id }]
+    for (let placement = stack.pop(); placement !== undefined; placement = stack.pop()) {
+      if (placement.kind === 'move') {
+        moveBefore(placement.id, placement.parentId)
+        continue
+      }
+      if (!pending.delete(placement.id)) continue
+      const parentId = summaries[placement.id]?.parentId
+      if (parentId === undefined || parentId === placement.id || !nodes.has(parentId)) continue
+      stack.push({ kind: 'move', id: placement.id, parentId })
+      stack.push({ kind: 'enter', id: parentId })
+    }
+  }
+  const reconciled: SessionId[] = []
+  for (let node = head; node !== undefined; node = node.next) reconciled.push(node.id)
+  return reconciled
 }
 
 /**
@@ -324,6 +380,16 @@ function orderedUngrouped(
   summaries: SessionListState['byId'],
 ): SessionSummary[] {
   const byId = new Map(members.map(session => [session.id as string, session]))
+  if (stored !== undefined) {
+    const included = new Set<string>()
+    const complete = stored.flatMap((id) => {
+      const session = byId.get(id)
+      if (session === undefined || included.has(id)) return []
+      included.add(id)
+      return [session]
+    })
+    if (complete.length === members.length) return complete
+  }
   const ids = stored === undefined
     ? orderByRecency(members.map(session => session.id), summaries)
     : reconcileManualOrder(members.map(session => session.id), stored, summaries)
@@ -346,8 +412,8 @@ function groupByWorkspace(
   archived: ReadonlySet<SessionId>,
   archivedFilter: ArchivedFilter,
   ungroupedOrder: readonly string[] | undefined,
+  current: SessionId | undefined,
 ): Group[] {
-  const current = mainSessionId(list)
   const groups: Group[] = []
   const accounted = new Set<SessionId>()
   for (const workspace of workspaces) {
@@ -437,6 +503,7 @@ function sessionNode(
  * @param rowState - registry-global pin and archive sets plus the archived filter.
  * @param statuses - unified UI status by Session.
  * @param view - local expansion arrays.
+ * @param mainSession - main-view Session already resolved by the caller.
  * @returns group sections in render order.
  */
 export function deriveGroups(
@@ -445,16 +512,18 @@ export function deriveGroups(
   rowState: SessionRowState,
   statuses: SessionStatuses,
   view: TreeView,
+  mainSession: MainSessionSelection = mainSessionSelection(list.byId),
 ): GroupNode[] {
   const archived = new Set(rowState.archivedSessionIds)
   const pinned = new Set(rowState.pinnedSessionIds)
   const expandedGroups = new Set(view.expandedGroups)
-  const current = mainSessionId(list)
-  const currentGroup = current === undefined
+  const currentGroup = mainSession.id === undefined
     ? undefined
-    : owningGroupKey(workspaces, current)
+    : owningGroupKey(workspaces, mainSession.id)
   const groups: GroupNode[] = []
-  for (const g of groupByWorkspace(list, workspaces, archived, rowState.archivedFilter, view.ungroupedOrder)) {
+  for (const g of groupByWorkspace(
+    list, workspaces, archived, rowState.archivedFilter, view.ungroupedOrder, mainSession.id,
+  )) {
     const expanded = expandedGroups.has(g.key)
     groups.push({
       key: g.key,
@@ -477,10 +546,14 @@ export function deriveGroups(
 /**
  * Select complete flat-list membership, independently of archive visibility.
  * @param list - sessions list snapshot.
+ * @param mainSession - main-view Session already resolved by the caller.
  * @returns known ordinary Session ids, including archives and only the current blank.
  */
-export function sessionMemberIds(list: SessionListState): SessionId[] {
-  return visibleSessionIds(list, [], 'show')
+export function sessionMemberIds(
+  list: SessionMembership,
+  mainSession: MainSessionSelection = mainSessionSelection(list.byId),
+): SessionId[] {
+  return visibleSessionIds(list, [], 'show', mainSession)
 }
 
 /**
@@ -488,18 +561,19 @@ export function sessionMemberIds(list: SessionListState): SessionId[] {
  * @param list - sessions list snapshot.
  * @param archivedSessionIds - registry-global archive set.
  * @param archivedFilter - archived-row visibility choice.
+ * @param mainSession - main-view Session already resolved by the caller.
  * @returns known visible Session ids in list order, including ordinary forks and only the current blank.
  */
 export function visibleSessionIds(
-  list: SessionListState,
+  list: SessionMembership,
   archivedSessionIds: readonly SessionId[],
   archivedFilter: ArchivedFilter,
+  mainSession: MainSessionSelection = mainSessionSelection(list.byId),
 ): SessionId[] {
   const archived = new Set(archivedSessionIds)
-  const current = mainSessionId(list)
   return list.ids.filter((id) => {
     const s = list.byId[id]
-    return s !== undefined && sessionVisible(s, current, archived, archivedFilter)
+    return s !== undefined && sessionVisible(s, mainSession.id, archived, archivedFilter)
   })
 }
 
@@ -510,6 +584,7 @@ export function visibleSessionIds(
  * @param sessionIds - complete account members in the selected order, including hidden archives.
  * @param rowState - registry-global pin and archive sets plus the archived filter.
  * @param statuses - unified UI status by Session.
+ * @param mainSession - main-view Session already resolved by the caller.
  * @returns flat rows in sectioned order with current status indicators.
  */
 export function deriveFlat(
@@ -517,13 +592,13 @@ export function deriveFlat(
   sessionIds: readonly SessionId[],
   rowState: SessionRowState,
   statuses: SessionStatuses,
+  mainSession: MainSessionSelection = mainSessionSelection(list.byId),
 ): SessionNode[] {
   const archived = new Set(rowState.archivedSessionIds)
   const pinned = new Set(rowState.pinnedSessionIds)
-  const current = mainSessionId(list)
   const members = sessionIds.flatMap((id) => {
     const session = list.byId[id]
-    return session !== undefined && sessionVisible(session, current, archived, rowState.archivedFilter)
+    return session !== undefined && sessionVisible(session, mainSession.id, archived, rowState.archivedFilter)
       ? [session]
       : []
   })
@@ -543,6 +618,7 @@ export function deriveFlat(
  * @param statuses - unified UI status by Session.
  * @param content - ranked Host content-search page.
  * @param limit - protocol-owned maximum merged row count.
+ * @param mainSession - main-view Session already resolved by the caller.
  * @returns bounded deduplicated flat rows and a refine-query hint bit.
  */
 export function deriveSearchResults(
@@ -554,11 +630,11 @@ export function deriveSearchResults(
   statuses: SessionStatuses,
   content: { items: readonly SessionSearchResultItem[]; hasMore: boolean },
   limit: number,
+  mainSession: MainSessionSelection = mainSessionSelection(list.byId),
 ): SearchResultSet {
   const q = query.trim().toLowerCase()
   if (q === '') return { items: [], hasMore: false }
   const archived = new Set(archivedSessionIds)
-  const current = mainSessionId(list)
 
   const workspaceBySession = new Map<SessionId, string>()
   for (const workspace of workspaces) {
@@ -578,7 +654,8 @@ export function deriveSearchResults(
     const summary = list.byId[id]
     // Blank placeholders never match a query (their canonical title displays
     // localized, so matching it would tie search to one language).
-    if (summary === undefined || summary.blank || !sessionVisible(summary, current, archived, archivedFilter)) continue
+    if (summary === undefined || summary.blank
+      || !sessionVisible(summary, mainSession.id, archived, archivedFilter)) continue
     if (
       sessionTitle(summary).toLowerCase().includes(q)
       || labelOf(summary).toLowerCase().includes(q)
@@ -600,7 +677,8 @@ export function deriveSearchResults(
   for (const summary of orderedLocal) include(summary)
   for (const item of content.items) {
     const summary = list.byId[item.sessionId]
-    if (summary !== undefined && !summary.blank && sessionVisible(summary, current, archived, archivedFilter)) include(summary)
+    if (summary !== undefined && !summary.blank
+      && sessionVisible(summary, mainSession.id, archived, archivedFilter)) include(summary)
   }
 
   return {

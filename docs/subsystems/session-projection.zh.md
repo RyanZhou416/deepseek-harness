@@ -136,10 +136,11 @@ The persisted projection cache service. Opens the `session_projcache` domain at 
  * connected Session produces supersede it whatever this number says.
  * @param meta - the listed session's header (identity witness; no log read).
  * @param keys - optional projection keys required by the caller's audience.
+ * @param excludeKeys - keys omitted before state validation or viewing; stored rows remain available to other readers.
  * @returns the viewed block, or `undefined` when no usable row exists for
  *   this lifecycle at the current Session format.
  */
-cachedSnapshot( meta: SessionHeader, keys?: readonly Extract<keyof SessionProjectionMap, string>[], ): ProjectionSnapshot | undefined
+cachedSnapshot( meta: SessionHeader, keys?: readonly Extract<keyof SessionProjectionMap, string>[], excludeKeys?: ReadonlySet<string>, ): ProjectionSnapshot | undefined
 
 /**
  * Read only a predecessor checkpoint's title as a zero-I/O listing hint.
@@ -260,9 +261,10 @@ snapshot( session: Session, keys?: readonly Extract<keyof SessionProjectionMap, 
  * baseline. Missing cells are omitted.
  * @param session - attached Session whose cached cells are inspected.
  * @param keys - optional wire keys to view.
+ * @param excludeKeys - keys omitted before viewing; exclusions also apply to explicitly selected keys.
  * @returns the lowest common cached cut, or `undefined` when no wire cell exists.
  */
-cachedSnapshot( session: Session, keys?: readonly Extract<keyof SessionProjectionMap, string>[], ): ProjectionSnapshot | undefined
+cachedSnapshot( session: Session, keys?: readonly Extract<keyof SessionProjectionMap, string>[], excludeKeys?: ReadonlySet<string>, ): ProjectionSnapshot | undefined
 
 /**
  * State-level checkpoint of every persisted unit for one session, read
@@ -307,9 +309,10 @@ restoreFloor(checkpoint: ProjectionCheckpoint): SessionLogOffset | undefined
  * values are as stale as their rows, never wrong.
  * @param checkpoint - persisted rows for one session (possibly stale or empty).
  * @param keys - optional wire keys to view.
+ * @param excludeKeys - keys omitted before state validation or viewing, including explicitly selected keys.
  * @returns whole values per key with a usable row; empty when none.
  */
-viewCheckpoint( checkpoint: ProjectionCheckpoint, keys?: readonly Extract<keyof SessionProjectionMap, string>[], ): Partial<SessionProjectionMap>
+viewCheckpoint( checkpoint: ProjectionCheckpoint, keys?: readonly Extract<keyof SessionProjectionMap, string>[], excludeKeys?: ReadonlySet<string>, ): Partial<SessionProjectionMap>
 
 /**
  * Cold read: fold every persisted unit over a stored log suffix, seeding

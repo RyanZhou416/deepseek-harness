@@ -59,11 +59,15 @@ import {
   ACTIVITY_POLL_MS,
   ACTIVITY_PROBE_MS,
   getActivityMonitorTargetsSnapshot,
+  invalidateActivityTeamDetail,
   monitorAgentTeam,
   settleActivityMonitorTargets,
   startActivityPolling,
   subscribeActivityMonitorTargets,
 } from '../lib/client/activity-monitor.js'
+import { collectArchivedTeamsActivity, collectTeamsActivity } from '../lib/snapshot.js'
+import { indexTasksByAssignee } from '../lib/task-index.js'
+import { ActivityQueryError, parseActivityQuery } from '../lib/activity-query.js'
 import {
   DEFAULT_PANEL_LAYOUT,
   compactPanelForBounds,
@@ -198,6 +202,7 @@ check(
 )
 const activityPanelCss = await readFile(new URL('../src/client/ActivityPanel.module.css', import.meta.url), 'utf8')
 const activityPanelSource = await readFile(new URL('../src/client/ActivityPanel.tsx', import.meta.url), 'utf8')
+const snapshotSource = await readFile(new URL('../src/snapshot.ts', import.meta.url), 'utf8')
 const stagingPlanSource = await readFile(new URL('../src/client/StagingPlanEditor.tsx', import.meta.url), 'utf8')
 const clientIndexSource = await readFile(new URL('../src/client/index.tsx', import.meta.url), 'utf8')
 const agentTeamsCardCss = await readFile(new URL('../src/client/AgentTeamsCard.module.css', import.meta.url), 'utf8')
@@ -467,6 +472,13 @@ check(
   'the badge must be a noninteractive role=img span inside memberLine after role and before member state, carrying the full route in title/aria-label/data-member-model',
 )
 check(
+  'Host and panel consumers use one task ownership index instead of per-member full scans',
+  snapshotSource.includes('const tasksByAssignee = indexTasksByAssignee(tasks)')
+    && activityPanelSource.includes('const byAssignee = indexTasksByAssignee(team.tasks)')
+    && memberBadgeSection.includes('const owned = taskIndex.byAssignee.get(member.name)?.tasks ?? []')
+    && !memberBadgeSection.includes('team.tasks.filter('),
+)
+check(
   'the old separate third-line member model span and locale key are removed',
   !activityPanelSource.includes("t('member.model'")
     && !localesSource.includes("'member.model'"),
@@ -492,7 +504,7 @@ check(
 check(
   'activity polling combines card demand with current-session cold discovery',
   activityPanelSource.includes('if (current === undefined) return')
-    && activityPanelSource.includes('startActivityPolling(currentTargets, { discoverySessionId: current })')
+    && activityPanelSource.includes('startActivityPolling(monitorTargets, { discoverySessionId: current })')
     && agentTeamsCardSource.includes('monitorAgentTeam(owner, data.teamId)')
     && !agentTeamsCardSource.includes('setInterval(')
     && !agentTeamsCardSource.includes('fetch('),
@@ -533,6 +545,26 @@ check('in_progress -> completed allowed', transitionError('in_progress', 'comple
 check('completed -> in_progress denied', transitionError('completed', 'in_progress') !== undefined)
 check('same status is a no-op', transitionError('failed', 'failed') === undefined)
 
+const ownershipRows = [
+  { id: 'first-running', status: 'in_progress', assignee: 'alice' },
+  { id: 'completed', status: 'completed', assignee: 'alice' },
+  { id: 'later-running', status: 'in_progress', assignee: 'alice' },
+  { id: 'unknown-owner', status: 'pending', assignee: 'nobody' },
+  { id: 'explicit-empty', status: 'pending', assignee: '' },
+  { id: 'missing-assignee', status: 'pending' },
+]
+const ownershipIndex = indexTasksByAssignee(ownershipRows)
+check(
+  'task ownership index preserves order, completion totals, first running task, and unknown/empty assignees',
+  JSON.stringify(ownershipIndex.get('alice')?.tasks.map(task => task.id))
+      === JSON.stringify(['first-running', 'completed', 'later-running'])
+    && ownershipIndex.get('alice')?.completed === 1
+    && ownershipIndex.get('alice')?.currentTask === 'first-running'
+    && ownershipIndex.get('nobody')?.tasks[0]?.id === 'unknown-owner'
+    && ownershipIndex.get('')?.tasks[0]?.id === 'explicit-empty'
+    && ownershipIndex.get(undefined)?.tasks[0]?.id === 'missing-assignee',
+)
+
 console.log('3/8 dependency gating')
 const tasks = [
   { id: 't1', status: 'completed' },
@@ -544,6 +576,44 @@ check('pending dep blocks', unsatisfiedDependencies(tasks, ['t2']).length === 1)
 check('failed dep blocks too', unsatisfiedDependencies(tasks, ['t3']).length === 1)
 
 console.log('4/8 on-disk team flow (temp dir)')
+const legacyActivityQuery = parseActivityQuery(new URL('http://verify/plugins/dsh-agent-teams/state'))
+const legacyArchiveQuery = parseActivityQuery(new URL('http://verify/plugins/dsh-agent-teams/state?archived=1'))
+check(
+  'unscoped legacy live and archive requests retain full detail and inbox previews',
+  legacyActivityQuery.options.includeDetails === true
+    && legacyActivityQuery.options.includeCaptainInbox === true
+    && legacyArchiveQuery.archived
+    && legacyArchiveQuery.options.includeDetails === true
+    && legacyArchiveQuery.options.includeCaptainInbox === true,
+)
+const scopedActivityQuery = parseActivityQuery(new URL(
+  'http://verify/plugins/dsh-agent-teams/state?captainSessionId=captain&teamCaptainSessionId=captain&teamId=team&detail=1',
+))
+check(
+  'a valid scoped detail query retains its captain and paired team target',
+  scopedActivityQuery.options.captainSessionId === 'captain'
+    && scopedActivityQuery.options.targets?.[0]?.captainSessionId === 'captain'
+    && scopedActivityQuery.options.targets?.[0]?.teamId === 'team'
+    && scopedActivityQuery.options.includeDetails === true
+    && scopedActivityQuery.options.includeCaptainInbox === false,
+)
+for (const query of [
+  '?captainSessionId=',
+  '?teamId=team',
+  '?teamCaptainSessionId=captain',
+  '?teamCaptainSessionId=&teamId=team',
+  '?detail=1',
+  '?captainSessionId=captain&detail=0',
+  '?captainSessionId=one&captainSessionId=two',
+]) {
+  let rejected = false
+  try {
+    parseActivityQuery(new URL(`http://verify/plugins/dsh-agent-teams/state${query}`))
+  } catch (error) {
+    rejected = error instanceof ActivityQueryError
+  }
+  check(`malformed activity query is rejected: ${query}`, rejected)
+}
 const stateRoot = await mkdtemp(join(tmpdir(), 'dsh-agent-teams-verify-'))
 try {
   const team = {
@@ -560,6 +630,236 @@ try {
     taskSeq: 0,
   }
   await createTeamDir(stateRoot, team)
+
+  const otherTeam = {
+    ...team,
+    name: 'Other Team',
+    id: sanitizeKey('Other Team'),
+    description: 'DETAIL_TEAM_DESCRIPTION',
+    captainSessionId: 'sess-other',
+    phase: 'staged',
+    planReviewState: 'awaiting_review',
+    members: [{
+      id: 'sess-other-member',
+      name: 'bob',
+      role: 'reviewer',
+      provider: 'provider',
+      model: 'model',
+      reasoningEffort: 'high',
+      executionPrompt: 'DETAIL_PROMPT',
+      joinedAt: Date.now(),
+      status: 'idle',
+    }, {
+      id: '',
+      name: 'empty-id',
+      role: 'planner',
+      joinedAt: Date.now(),
+      status: 'idle',
+    }],
+    tasks: [{
+      id: 'other-task',
+      subject: 'Other task',
+      description: 'DETAIL_DESCRIPTION',
+      status: 'pending',
+      assignee: 'bob',
+      dependencies: [],
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    }, {
+      id: 'running-first', subject: 'Running first', status: 'in_progress', assignee: 'bob', dependencies: [], createdAt: 1, updatedAt: 1,
+    }, {
+      id: 'running-later', subject: 'Running later', status: 'in_progress', assignee: 'bob', dependencies: [], createdAt: 2, updatedAt: 2,
+    }, {
+      id: 'completed-owned', subject: 'Completed', status: 'completed', assignee: 'bob', dependencies: [], createdAt: 3, updatedAt: 3,
+    }, {
+      id: 'empty-id-running', subject: 'Empty id', status: 'in_progress', assignee: 'empty-id', dependencies: [], createdAt: 4, updatedAt: 4,
+    }, {
+      id: 'unknown-owner', subject: 'Unknown', status: 'pending', assignee: 'unknown', dependencies: [], createdAt: 5, updatedAt: 5,
+    }],
+    taskSeq: 6,
+  }
+  await createTeamDir(stateRoot, otherTeam)
+  let snapshotAgentLookups = 0
+  const snapshotContext = {
+    agents: { get: () => { snapshotAgentLookups += 1; return undefined } },
+    logger: { warn: () => {} },
+  }
+  const scopedSummary = await collectTeamsActivity(snapshotContext, [{ workspace: 'verify', stateRoot }], {
+    captainSessionId: otherTeam.captainSessionId,
+  })
+  check(
+    'activity collection filters before assembly and omits long authoring fields by default',
+    scopedSummary.length === 1
+      && snapshotAgentLookups === 1
+      && scopedSummary[0]?.teamId === otherTeam.id
+      && scopedSummary[0]?.detail === 'summary'
+      && typeof scopedSummary[0]?.detailRevision === 'string'
+      && scopedSummary[0]?.description === undefined
+      && scopedSummary[0]?.tasks[0]?.description === undefined
+      && scopedSummary[0]?.members[0]?.executionPrompt === undefined
+      && scopedSummary[0]?.members[0]?.total === 4
+      && scopedSummary[0]?.members[0]?.done === 1
+      && scopedSummary[0]?.members[0]?.currentTask === 'running-first'
+      && scopedSummary[0]?.members[1]?.id === ''
+      && scopedSummary[0]?.members[1]?.currentTask === 'empty-id-running'
+      && scopedSummary[0]?.tasks.find(task => task.id === 'unknown-owner')?.model === '',
+  )
+  snapshotAgentLookups = 0
+  const scopedDetail = await collectTeamsActivity(snapshotContext, [{ workspace: 'verify', stateRoot }], {
+    targets: [{ captainSessionId: otherTeam.captainSessionId, teamId: otherTeam.id }],
+    includeDetails: true,
+  })
+  check(
+    'an explicit activity detail read restores staged authoring fields',
+    scopedDetail.length === 1
+      && snapshotAgentLookups === 1
+      && scopedDetail[0]?.teamId === otherTeam.id
+      && scopedDetail[0]?.detail === 'full'
+      && scopedDetail[0]?.detailRevision === scopedSummary[0]?.detailRevision
+      && scopedDetail[0]?.description === 'DETAIL_TEAM_DESCRIPTION'
+      && scopedDetail[0]?.tasks[0]?.description === 'DETAIL_DESCRIPTION'
+      && scopedDetail[0]?.members[0]?.executionPrompt === 'DETAIL_PROMPT',
+  )
+  const legacySnapshots = await collectTeamsActivity(
+    snapshotContext,
+    [{ workspace: 'verify', stateRoot }],
+    legacyActivityQuery.options,
+  )
+  const legacyOther = legacySnapshots.find(snapshot => snapshot.teamId === otherTeam.id)
+  check(
+    'legacy activity collection keeps descriptions, prompts, and captain inbox previews',
+    legacySnapshots.length === 2
+      && legacyOther?.description === 'DETAIL_TEAM_DESCRIPTION'
+      && legacyOther.tasks[0]?.description === 'DETAIL_DESCRIPTION'
+      && legacyOther.members[0]?.executionPrompt === 'DETAIL_PROMPT'
+      && Array.isArray(legacyOther.captainInbox),
+  )
+  const directRootA = await mkdtemp(join(tmpdir(), 'dsh-agent-teams-direct-a-'))
+  const directRootB = await mkdtemp(join(tmpdir(), 'dsh-agent-teams-direct-b-'))
+  try {
+    const directA = {
+      ...team,
+      id: 'direct-a',
+      name: 'Direct A',
+      captainSessionId: 'direct-captain',
+      members: [],
+      tasks: [],
+    }
+    const directB = { ...directA, id: 'direct-b', name: 'Direct B' }
+    await createTeamDir(directRootA, directA)
+    await createTeamDir(directRootA, directB)
+    await createTeamDir(directRootB, { ...directA, captainSessionId: 'other-captain', name: 'Wrong Captain' })
+    for (const malformedId of ['malformed-one', 'malformed-two']) {
+      await mkdir(join(directRootA, malformedId), { recursive: true })
+      await writeFile(join(directRootA, malformedId, 'team.json'), '{}', 'utf8')
+    }
+    let directWarnings = 0
+    const directContext = {
+      agents: { get: () => undefined },
+      logger: { warn: () => { directWarnings += 1 } },
+    }
+    const directTargets = [
+      { captainSessionId: directB.captainSessionId, teamId: directB.id },
+      { captainSessionId: directA.captainSessionId, teamId: directA.id },
+    ]
+    const directLive = await collectTeamsActivity(directContext, [
+      { workspace: 'A', stateRoot: directRootA },
+      { workspace: 'B', stateRoot: directRootB },
+    ], { targets: directTargets })
+    check(
+      'explicit live targets read only named directories in workspace/team order',
+      directWarnings === 0
+        && JSON.stringify(directLive.map(snapshot => `${snapshot.workspace}:${snapshot.teamId}`))
+          === JSON.stringify(['A:direct-a', 'A:direct-b']),
+    )
+
+    await writeFile(join(directRootA, directA.id, 'team.json'), JSON.stringify({
+      ...directA,
+      name: 'Externally Updated',
+    }), 'utf8')
+    const externallyUpdated = await collectTeamsActivity(directContext, [
+      { workspace: 'A', stateRoot: directRootA },
+    ], { targets: [directTargets[1]] })
+    check('explicit target reads observe external team.json changes without a cache',
+      externallyUpdated[0]?.name === 'Externally Updated')
+
+    await writeFile(join(directRootB, directA.id, 'team.json'), JSON.stringify({
+      ...directA,
+      name: 'Matching Second Workspace',
+    }), 'utf8')
+    const crossWorkspace = await collectTeamsActivity(directContext, [
+      { workspace: 'A', stateRoot: directRootA },
+      { workspace: 'B', stateRoot: directRootB },
+    ], { targets: [directTargets[1]] })
+    check('explicit target captain checks remain isolated per workspace',
+      JSON.stringify(crossWorkspace.map(snapshot => `${snapshot.workspace}:${snapshot.name}`))
+        === JSON.stringify(['A:Externally Updated', 'B:Matching Second Workspace']))
+
+    directWarnings = 0
+    const malformedTarget = await collectTeamsActivity(directContext, [
+      { workspace: 'A', stateRoot: directRootA },
+    ], { targets: [{ captainSessionId: 'direct-captain', teamId: 'malformed-one' }] })
+    check('an explicitly targeted malformed live record is still rejected and reported',
+      malformedTarget.length === 0 && directWarnings === 1)
+
+
+    directWarnings = 0
+    const discovered = await collectTeamsActivity(directContext, [
+      { workspace: 'A', stateRoot: directRootA },
+      { workspace: 'B', stateRoot: directRootB },
+    ], { captainSessionId: 'direct-captain' })
+    check('captain discovery still scans all directories and reports malformed records',
+      discovered.length === 3 && directWarnings === 2)
+
+    await createTeamDir(join(directRootA, 'archive'), { ...directA, name: 'Archived Direct A' })
+    await createTeamDir(join(directRootB, 'archive'), {
+      ...directA,
+      name: 'Archived Wrong Captain',
+      captainSessionId: 'other-captain',
+    })
+    await mkdir(join(directRootA, 'archive', 'malformed-archive'), { recursive: true })
+    await writeFile(join(directRootA, 'archive', 'malformed-archive', 'team.json'), '{}', 'utf8')
+    directWarnings = 0
+    const directArchive = await collectArchivedTeamsActivity(directContext, [
+      { workspace: 'A', stateRoot: directRootA },
+      { workspace: 'B', stateRoot: directRootB },
+    ], { targets: [directTargets[1]] })
+    check('explicit archive targets bypass unrelated archive records and keep captain isolation',
+      directWarnings === 0
+        && directArchive.length === 1
+        && directArchive[0]?.name === 'Archived Direct A')
+    directWarnings = 0
+    await collectArchivedTeamsActivity(directContext, [
+      { workspace: 'A', stateRoot: directRootA },
+    ], { captainSessionId: 'direct-captain' })
+    check('archive captain discovery still validates every archived directory', directWarnings === 1)
+
+    const notDirectory = join(directRootA, 'not-a-directory')
+    await writeFile(notDirectory, 'synthetic', 'utf8')
+    let directoryFailure
+    try {
+      await collectTeamsActivity(directContext, [{ workspace: 'file', stateRoot: notDirectory }], { targets: directTargets })
+    } catch (error) {
+      directoryFailure = error
+    }
+    check('explicit target reads preserve directory access failures', directoryFailure instanceof Error)
+
+    for (const id of ['équipe', 'zulu', '团队']) {
+      await createTeamDir(directRootA, { ...directA, id, captainSessionId: 'unicode-captain' })
+    }
+    const unicodeRoots = [{ workspace: 'A', stateRoot: directRootA }]
+    const discoveredOrder = await collectTeamsActivity(directContext, unicodeRoots, { captainSessionId: 'unicode-captain' })
+    const selectedOrder = await collectTeamsActivity(directContext, unicodeRoots, {
+      targets: discoveredOrder.toReversed().map(snapshot => ({ captainSessionId: snapshot.captainSessionId, teamId: snapshot.teamId })),
+    })
+    check('explicit target reads preserve the directory discovery order for Unicode ids',
+      JSON.stringify(selectedOrder.map(snapshot => snapshot.teamId)) === JSON.stringify(discoveredOrder.map(snapshot => snapshot.teamId)))
+  } finally {
+    await rm(directRootA, { recursive: true, force: true })
+    await rm(directRootB, { recursive: true, force: true })
+  }
+
+  await removeTeamDir(stateRoot, otherTeam.id)
 
   const reread = await readTeam(stateRoot, team.id)
   check('team.json round-trips', reread?.id === team.id && reread.captainSessionId === 'sess-captain')
@@ -1090,15 +1390,19 @@ check(
   'activity monitor coalesces duplicate cards into one shared target',
   getActivityMonitorTargetsSnapshot().length === 1
     && registeredMonitor?.sessionId === 'verify-session'
-    && registeredMonitor.teamId === 'verify-team',
+    && registeredMonitor.teamId === 'verify-team'
+    && registeredMonitor.active,
 )
 releaseMonitorOne()
 check('one card cleanup keeps another card monitoring', getActivityMonitorTargetsSnapshot().length === 1)
 if (registeredMonitor !== undefined) settleActivityMonitorTargets(new Set([registeredMonitor.key]))
-check('archived targets retire from polling', getActivityMonitorTargetsSnapshot().length === 0)
+check('settled targets stop polling but remain retained by mounted cards',
+  getActivityMonitorTargetsSnapshot().length === 1
+    && getActivityMonitorTargetsSnapshot()[0]?.active === false)
 releaseMonitorTwo()
 unsubscribeMonitor()
-check('activity monitor publishes lifecycle changes without duplicate-card churn', monitorNotifications === 2)
+check('final card cleanup releases the retained target', getActivityMonitorTargetsSnapshot().length === 0)
+check('activity monitor publishes lifecycle changes without duplicate-card churn', monitorNotifications === 3)
 
 let dormantFetches = 0
 let dormantSchedules = 0
@@ -1143,9 +1447,9 @@ discoveryPoller.stop()
 check(
   'a cardless cold session restores live and archive once, then probes at the discovery cadence',
   discoveryUrls.length === 3
-    && discoveryUrls[0] === '/plugins/dsh-agent-teams/state'
-    && discoveryUrls[1]?.endsWith('?archived=1')
-    && discoveryUrls[2] === '/plugins/dsh-agent-teams/state'
+    && discoveryUrls[0] === '/plugins/dsh-agent-teams/state?captainSessionId=cold-captain'
+    && discoveryUrls[1] === '/plugins/dsh-agent-teams/state?captainSessionId=cold-captain&archived=1'
+    && discoveryUrls[2] === '/plugins/dsh-agent-teams/state?captainSessionId=cold-captain'
     && discoveryIntervals.length === 1
     && discoveryIntervals[0] === ACTIVITY_PROBE_MS,
 )
@@ -1164,7 +1468,7 @@ const latePoller = startActivityPolling([], {
   discoverySessionId: 'cold-captain',
   fetchState: async (url) => {
     lateUrls.push(url)
-    if (url === '/plugins/dsh-agent-teams/state') {
+    if (url === '/plugins/dsh-agent-teams/state?captainSessionId=cold-captain') {
       return { ok: true, json: async () => ({ teams: lateLiveTeams }) }
     }
     return { ok: true, json: async () => ({ teams: [] }) }
@@ -1191,10 +1495,11 @@ lateLiveTeams = [{
   teamId: 'post-discovery-team',
   name: 'Post Discovery Team',
   captainSessionId: 'cold-captain',
+  phase: 'running',
+  detail: 'summary',
   members: [],
   tasks: [],
   messageCount: 0,
-  captainInbox: [],
 }]
 lateTick()
 await new Promise((resolve) => setImmediate(resolve))
@@ -1229,6 +1534,476 @@ check(
   'explicit card targets poll at the live cadence from the start',
   cardIntervals.length === 1 && cardIntervals[0] === ACTIVITY_POLL_MS,
 )
+
+const stagedSummary = {
+  workspace: 'verify',
+  teamId: 'staged-team',
+  name: 'Staged Team',
+  captainSessionId: 'staged-captain',
+  phase: 'staged',
+  planReviewState: 'awaiting_review',
+  detail: 'summary',
+  detailRevision: 'staged-revision-1',
+  members: [{
+    id: '',
+    name: 'builder',
+    role: 'builder',
+    provider: 'provider',
+    model: 'model',
+    reasoningEffort: 'high',
+    status: 'idle',
+    activity: 'idle',
+    progress: 0,
+    done: 0,
+    total: 1,
+    currentTask: '',
+    unread: 0,
+  }],
+  tasks: [{
+    id: 'task-1',
+    subject: 'Build',
+    status: 'pending',
+    state: 'open',
+    assignee: 'builder',
+    model: 'provider/model',
+    dependencies: [],
+    depth: 0,
+  }],
+  messageCount: 0,
+}
+const stagedDetail = {
+  ...stagedSummary,
+  description: 'STAGED_TEAM_DETAIL',
+  detail: 'full',
+  members: [{ ...stagedSummary.members[0], executionPrompt: 'STAGED_MEMBER_DETAIL' }],
+  tasks: [{ ...stagedSummary.tasks[0], description: 'STAGED_TASK_DETAIL' }],
+}
+const sideStagedSummary = {
+  ...stagedSummary,
+  teamId: 'side-team',
+  name: 'Side Team',
+  captainSessionId: 'side-captain',
+  detailRevision: 'side-revision-1',
+}
+const twoCaptainUrls = []
+const twoCaptainPublications = []
+const twoCaptainPoller = startActivityPolling([
+  { key: 'main-card', sessionId: 'staged-captain', teamId: 'staged-team', active: true },
+  { key: 'side-card', sessionId: 'side-captain', teamId: 'side-team', active: true },
+], {
+  discoverySessionId: 'staged-captain',
+  fetchState: async url => {
+    twoCaptainUrls.push(url)
+    if (url.includes('detail=1')) return { ok: true, json: async () => ({ teams: [stagedDetail] }) }
+    if (url.includes('archived=1')) return { ok: true, json: async () => ({ teams: [] }) }
+    return { ok: true, json: async () => ({ teams: [stagedSummary, sideStagedSummary] }) }
+  },
+  schedule: () => 'two-captain-timer',
+  cancel: () => {},
+  publishSnapshots: update => { twoCaptainPublications.push(update) },
+})
+await twoCaptainPoller.firstTick
+twoCaptainPoller.stop()
+const twoCaptainLiveUrl = new URL(`http://verify${twoCaptainUrls[0]}`)
+const twoCaptainDetailUrl = new URL(`http://verify${twoCaptainUrls[1]}`)
+const twoCaptainTeams = twoCaptainPublications[0]?.teams ?? []
+check(
+  'one poller covers main and side by side captains while loading detail only for main',
+  twoCaptainUrls.length === 3
+    && twoCaptainLiveUrl.searchParams.get('captainSessionId') === 'staged-captain'
+    && JSON.stringify(twoCaptainLiveUrl.searchParams.getAll('teamId')) === JSON.stringify(['staged-team', 'side-team'])
+    && JSON.stringify(twoCaptainDetailUrl.searchParams.getAll('teamId')) === JSON.stringify(['staged-team'])
+    && twoCaptainTeams.find(team => team.teamId === 'staged-team')?.detail === 'full'
+    && twoCaptainTeams.find(team => team.teamId === 'side-team')?.detail === 'summary'
+    && twoCaptainTeams.find(team => team.teamId === 'side-team')?.name === 'Side Team'
+    && twoCaptainTeams.find(team => team.teamId === 'side-team')?.members[0]?.name === 'builder'
+    && twoCaptainTeams.find(team => team.teamId === 'side-team')?.members[0]?.executionPrompt === undefined,
+)
+
+const stagedUrls = []
+const stagedPublications = []
+let stagedResponseSummary = stagedSummary
+let stagedResponseDetail = stagedDetail
+let stagedDetailMode = 'current'
+let resolveStagedDetail
+let stagedTick = () => {}
+const stagedPoller = startActivityPolling([{
+  key: 'staged-target',
+  sessionId: 'staged-captain',
+  teamId: 'staged-team',
+}], {
+  detailCaptainSessionId: 'staged-captain',
+  fetchState: async (url) => {
+    stagedUrls.push(url)
+    if (!url.endsWith('&detail=1')) {
+      return { ok: true, json: async () => ({ teams: [stagedResponseSummary] }) }
+    }
+    if (stagedDetailMode === 'failure') return { ok: false, json: async () => ({ teams: [] }) }
+    if (stagedDetailMode === 'deferred') {
+      return new Promise(resolve => { resolveStagedDetail = resolve })
+    }
+    return { ok: true, json: async () => ({ teams: [stagedResponseDetail] }) }
+  },
+  schedule: callback => {
+    stagedTick = callback
+    return 'staged-timer'
+  },
+  cancel: () => {},
+  publishSnapshots: update => { stagedPublications.push(update) },
+})
+await stagedPoller.firstTick
+const hydratedStaged = stagedPublications[0]?.teams?.[0]
+check(
+  'staged plans load long authoring text through one explicit scoped detail read',
+  stagedUrls.length === 2
+    && stagedUrls[0] === '/plugins/dsh-agent-teams/state?teamCaptainSessionId=staged-captain&teamId=staged-team'
+    && stagedUrls[1] === '/plugins/dsh-agent-teams/state?teamCaptainSessionId=staged-captain&teamId=staged-team&detail=1'
+    && hydratedStaged?.detail === 'full'
+    && hydratedStaged.description === 'STAGED_TEAM_DETAIL'
+    && hydratedStaged.members[0]?.executionPrompt === 'STAGED_MEMBER_DETAIL'
+    && hydratedStaged.tasks[0]?.description === 'STAGED_TASK_DETAIL',
+)
+stagedTick()
+await new Promise(resolve => setImmediate(resolve))
+check(
+  'unchanged staged revisions reuse loaded authoring detail',
+  stagedUrls.length === 3
+    && stagedUrls[2] === '/plugins/dsh-agent-teams/state?teamCaptainSessionId=staged-captain&teamId=staged-team'
+    && stagedPublications.at(-1)?.teams?.[0]?.tasks[0]?.description === 'STAGED_TASK_DETAIL',
+)
+let retainedStaged = stagedPublications.at(-1)?.teams?.[0]
+const noOpRefreshStart = stagedUrls.length
+invalidateActivityTeamDetail('staged-captain', 'staged-team')
+stagedResponseSummary = {
+  ...stagedSummary,
+  members: [{ ...stagedSummary.members[0], activity: 'working' }],
+}
+stagedDetailMode = 'failure'
+stagedTick()
+await new Promise(resolve => setImmediate(resolve))
+check(
+  'a failed same-revision detail refresh retains the existing full presentation',
+  stagedUrls.length === noOpRefreshStart + 2
+    && stagedPublications.at(-1)?.teams?.[0] === retainedStaged
+    && stagedPublications.at(-1)?.teams?.[0]?.members[0]?.activity === 'idle',
+)
+stagedDetailMode = 'current'
+stagedTick()
+await new Promise(resolve => setImmediate(resolve))
+check(
+  'a successful same-revision detail refresh clears stale and resumes activity updates',
+  stagedUrls.length === noOpRefreshStart + 4
+    && stagedPublications.at(-1)?.teams?.[0]?.members[0]?.activity === 'working',
+)
+retainedStaged = stagedPublications.at(-1)?.teams?.[0]
+const revisionRefreshStart = stagedUrls.length
+invalidateActivityTeamDetail('staged-captain', 'staged-team')
+stagedResponseSummary = { ...stagedSummary, detailRevision: 'staged-revision-2' }
+stagedResponseDetail = {
+  ...stagedDetail,
+  detailRevision: 'staged-revision-2',
+  members: [{ ...stagedDetail.members[0], executionPrompt: 'REVISED_MEMBER_DETAIL' }],
+  tasks: [{ ...stagedDetail.tasks[0], description: 'REVISED_TASK_DETAIL' }],
+}
+stagedDetailMode = 'failure'
+stagedTick()
+await new Promise(resolve => setImmediate(resolve))
+check(
+  'a failed changed-revision detail refresh retains the existing full staged presentation',
+  stagedUrls.length === revisionRefreshStart + 2
+    && stagedPublications.at(-1)?.teams?.[0] === retainedStaged,
+)
+stagedDetailMode = 'deferred'
+stagedTick()
+await new Promise(resolve => setImmediate(resolve))
+invalidateActivityTeamDetail('staged-captain', 'staged-team')
+resolveStagedDetail?.({ ok: true, json: async () => ({ teams: [stagedResponseDetail] }) })
+await new Promise(resolve => setImmediate(resolve))
+check(
+  'an interleaved mutation prevents an older detail response from replacing form props',
+  stagedUrls.length === revisionRefreshStart + 4
+    && stagedPublications.at(-1)?.teams?.[0] === retainedStaged,
+)
+stagedResponseSummary = { ...stagedSummary, detailRevision: 'staged-revision-3' }
+stagedResponseDetail = {
+  ...stagedDetail,
+  detailRevision: 'staged-revision-3',
+  members: [{ ...stagedDetail.members[0], executionPrompt: 'LATEST_MEMBER_DETAIL' }],
+  tasks: [{ ...stagedDetail.tasks[0], description: 'LATEST_TASK_DETAIL' }],
+}
+stagedDetailMode = 'current'
+stagedTick()
+await new Promise(resolve => setImmediate(resolve))
+stagedPoller.stop()
+const revisedStaged = stagedPublications.at(-1)?.teams?.[0]
+check(
+  'a later matching detail revision atomically refreshes the staged presentation',
+  stagedUrls.length === revisionRefreshStart + 6
+    && stagedUrls[revisionRefreshStart + 4] === '/plugins/dsh-agent-teams/state?teamCaptainSessionId=staged-captain&teamId=staged-team'
+    && stagedUrls[revisionRefreshStart + 5] === '/plugins/dsh-agent-teams/state?teamCaptainSessionId=staged-captain&teamId=staged-team&detail=1'
+    && revisedStaged?.members[0]?.executionPrompt === 'LATEST_MEMBER_DETAIL'
+    && revisedStaged?.tasks[0]?.description === 'LATEST_TASK_DETAIL',
+)
+
+const legacyStaged = { ...stagedDetail }
+delete legacyStaged.detail
+delete legacyStaged.detailRevision
+legacyStaged.captainInbox = []
+const legacyUrls = []
+const legacyPublications = []
+const legacyPoller = startActivityPolling([{
+  key: 'legacy-staged-target',
+  sessionId: 'staged-captain',
+  teamId: 'staged-team',
+}], {
+  detailCaptainSessionId: 'staged-captain',
+  fetchState: async url => {
+    legacyUrls.push(url)
+    return { ok: true, json: async () => ({ teams: [legacyStaged] }) }
+  },
+  schedule: () => 'legacy-staged-timer',
+  cancel: () => {},
+  publishSnapshots: update => { legacyPublications.push(update) },
+})
+await legacyPoller.firstTick
+legacyPoller.stop()
+check(
+  'a new client recognizes an old Host full staged response without a detail marker',
+  legacyUrls.length === 1
+    && legacyPublications[0]?.teams?.[0]?.detail === 'full'
+    && legacyPublications[0]?.teams?.[0]?.tasks[0]?.description === 'STAGED_TASK_DETAIL',
+)
+
+const parallelUrls = [[], []]
+let parallelSecondTick = () => {}
+const parallelPollers = [0, 1].map(index => startActivityPolling([{
+  key: 'parallel-target-' + index,
+  sessionId: 'staged-captain',
+  teamId: 'staged-team',
+}], {
+  detailCaptainSessionId: 'staged-captain',
+  fetchState: async url => {
+    parallelUrls[index].push(url)
+    return { ok: true, json: async () => ({ teams: url.endsWith('&detail=1') ? [stagedDetail] : [stagedSummary] }) }
+  },
+  schedule: callback => {
+    if (index === 1) parallelSecondTick = callback
+    return `parallel-timer-${index}`
+  },
+  cancel: () => {},
+  publishSnapshots: () => {},
+}))
+await Promise.all(parallelPollers.map(poller => poller.firstTick))
+parallelPollers[0].stop()
+parallelSecondTick()
+await new Promise(resolve => setImmediate(resolve))
+parallelPollers[1].stop()
+check(
+  'stopping one poller does not clear another poller detail cache',
+  parallelUrls[0].length === 2 && parallelUrls[1].length === 3,
+)
+
+let scopedSnapshots = { teams: [], archivedTeams: [] }
+const publishScopedSnapshots = update => {
+  scopedSnapshots = {
+    teams: update.teams ?? scopedSnapshots.teams,
+    archivedTeams: update.archivedTeams ?? scopedSnapshots.archivedTeams,
+  }
+}
+const scopedRuntime = archiveTeams => ({
+  discoverySessionId: 'main-captain',
+  fetchState: async url => ({
+    ok: true,
+    json: async () => ({ teams: url.includes('archived=1') ? archiveTeams : [] }),
+  }),
+  schedule: () => 'scoped-retention-timer',
+  cancel: () => {},
+  publishSnapshots: publishScopedSnapshots,
+  readSnapshots: () => scopedSnapshots,
+})
+const releaseSideArchive = monitorAgentTeam('side-captain', 'side-team')
+const sideArchiveTarget = getActivityMonitorTargetsSnapshot().find(target => target.teamId === 'side-team')
+const sideArchivePoller = startActivityPolling(
+  getActivityMonitorTargetsSnapshot(),
+  scopedRuntime([sideStagedSummary]),
+)
+await sideArchivePoller.firstTick
+sideArchivePoller.stop()
+check(
+  'a settled side-card archive remains retained while its card stays mounted',
+  scopedSnapshots.archivedTeams[0]?.teamId === 'side-team'
+    && sideArchiveTarget !== undefined
+    && getActivityMonitorTargetsSnapshot().find(target => target.key === sideArchiveTarget.key)?.active === false,
+)
+const retainedArchivePoller = startActivityPolling(
+  getActivityMonitorTargetsSnapshot(),
+  scopedRuntime([]),
+)
+await retainedArchivePoller.firstTick
+retainedArchivePoller.stop()
+check(
+  'current-captain archive refresh does not replace a mounted side-card archive',
+  scopedSnapshots.archivedTeams[0]?.teamId === 'side-team',
+)
+releaseSideArchive()
+const releasedArchivePoller = startActivityPolling(
+  getActivityMonitorTargetsSnapshot(),
+  scopedRuntime([]),
+)
+await releasedArchivePoller.firstTick
+releasedArchivePoller.stop()
+check(
+  'unmounting the final side card releases its retained archive snapshot',
+  getActivityMonitorTargetsSnapshot().every(target => target.teamId !== 'side-team')
+    && scopedSnapshots.archivedTeams.length === 0,
+)
+
+let pageVisible = false
+let visibilityListener
+let visibilityUnsubscribed = false
+let hiddenFetchCount = 0
+let hiddenScheduleCount = 0
+let hiddenScheduledTick = () => {}
+let hiddenTimerCancelled = false
+let hiddenPublications = 0
+let resolveLateVisibilityJson
+const visibilitySignals = []
+const visibleTeam = {
+  ...stagedSummary,
+  teamId: 'visible-team',
+  name: 'Visible Team',
+  captainSessionId: 'visible-captain',
+  phase: 'running',
+}
+const hiddenPoller = startActivityPolling([{
+  key: 'visible-target',
+  sessionId: 'visible-captain',
+  teamId: 'visible-team',
+}], {
+  fetchState: async (_url, init) => {
+    hiddenFetchCount += 1
+    visibilitySignals.push(init.signal)
+    if (hiddenFetchCount === 2) {
+      return {
+        ok: true,
+        json: () => new Promise(resolve => { resolveLateVisibilityJson = resolve }),
+      }
+    }
+    return { ok: true, json: async () => ({ teams: [visibleTeam] }) }
+  },
+  schedule: (callback) => {
+    hiddenScheduleCount += 1
+    hiddenScheduledTick = callback
+    return 'hidden-timer'
+  },
+  cancel: timer => { hiddenTimerCancelled ||= timer === 'hidden-timer' },
+  publishSnapshots: () => { hiddenPublications += 1 },
+  visible: () => pageVisible,
+  subscribeVisibility: listener => {
+    visibilityListener = listener
+    return () => { visibilityUnsubscribed = true }
+  },
+})
+let hiddenFirstSettled = false
+void hiddenPoller.firstTick.then(() => { hiddenFirstSettled = true })
+await Promise.resolve()
+check(
+  'a hidden page starts with no activity request or timer',
+  hiddenFetchCount === 0 && hiddenScheduleCount === 0 && !hiddenFirstSettled,
+)
+pageVisible = true
+visibilityListener?.()
+await hiddenPoller.firstTick
+check(
+  'becoming visible refreshes immediately and starts the normal cadence',
+  hiddenFetchCount === 1 && hiddenScheduleCount === 1 && hiddenFirstSettled,
+)
+hiddenScheduledTick()
+await new Promise(resolve => setImmediate(resolve))
+pageVisible = false
+visibilityListener?.()
+pageVisible = true
+visibilityListener?.()
+pageVisible = false
+visibilityListener?.()
+resolveLateVisibilityJson?.({ teams: [visibleTeam] })
+await new Promise(resolve => setImmediate(resolve))
+check(
+  'hide-show-hide drops an aborted late JSON result and clears the queued resume',
+  hiddenTimerCancelled
+    && visibilitySignals[1]?.aborted === true
+    && hiddenFetchCount === 2
+    && hiddenPublications === 1,
+)
+pageVisible = true
+visibilityListener?.()
+await new Promise(resolve => setImmediate(resolve))
+await new Promise(resolve => setImmediate(resolve))
+check(
+  'the next visible transition starts exactly one fresh request',
+  hiddenFetchCount === 3 && hiddenScheduleCount === 3 && hiddenPublications === 2,
+)
+hiddenPoller.stop()
+check('stopping a visible poller removes its visibility listener', visibilityUnsubscribed)
+
+let restoreVisible = true
+let restoreVisibilityListener
+let resolveAbortedRestoreJson
+let restoreFetchCount = 0
+const restorePublications = []
+const restorePoller = startActivityPolling([{
+  key: 'restore-target',
+  sessionId: 'visible-captain',
+  teamId: 'visible-team',
+}], {
+  fetchState: async (_url, _init) => {
+    restoreFetchCount += 1
+    if (restoreFetchCount === 1) {
+      return {
+        ok: true,
+        json: () => new Promise(resolve => { resolveAbortedRestoreJson = resolve }),
+      }
+    }
+    return { ok: true, json: async () => ({ teams: [visibleTeam] }) }
+  },
+  schedule: () => 'restore-timer',
+  cancel: () => {},
+  publishSnapshots: update => { restorePublications.push(update) },
+  visible: () => restoreVisible,
+  subscribeVisibility: listener => {
+    restoreVisibilityListener = listener
+    return () => {}
+  },
+})
+let restoreFirstSettled = false
+void restorePoller.firstTick.then(() => { restoreFirstSettled = true })
+await new Promise(resolve => setImmediate(resolve))
+restoreVisible = false
+restoreVisibilityListener?.()
+resolveAbortedRestoreJson?.({ teams: [visibleTeam] })
+await new Promise(resolve => setImmediate(resolve))
+check(
+  'a visibility-aborted initial restore keeps firstTick pending',
+  !restoreFirstSettled && restorePublications.length === 0,
+)
+restoreVisible = true
+restoreVisibilityListener?.()
+await restorePoller.firstTick
+const restoredTeamIds = restorePublications.at(-1)?.teams?.map(team => team.teamId) ?? []
+check(
+  'the next visible restore settles after publishing its baseline without auto-opening old teams',
+  restoreFetchCount === 2
+    && restoreFirstSettled
+    && restoredTeamIds.length === 1
+    && !activityPanelShouldAutoExpand({
+      alreadyAutoOpened: false,
+      pageSettled: true,
+      restoreComplete: true,
+      previousLiveTeamIds: new Set(restoredTeamIds),
+      currentLiveTeamIds: restoredTeamIds,
+    }),
+)
+restorePoller.stop()
 
 const pollTarget = { key: 'poll-target', sessionId: 'poll-session', teamId: 'poll-team' }
 let resolveSlowLive
@@ -1265,11 +2040,17 @@ await slowPoller.firstTick
 check('a late response after stop cannot publish snapshots', latePublications === 0)
 
 const fallbackUrls = []
+const fallbackPublications = []
 const settledFallbackKeys = []
 let fallbackResponseIndex = 0
+const archivedStagedSummary = {
+  ...stagedSummary,
+  teamId: 'poll-team',
+  captainSessionId: 'poll-session',
+}
 const fallbackResponses = [
   { ok: true, json: async () => ({ teams: [] }) },
-  { ok: true, json: async () => ({ teams: [] }) },
+  { ok: true, json: async () => ({ teams: [archivedStagedSummary] }) },
 ]
 const fallbackPoller = startActivityPolling([pollTarget], {
   fetchState: async (url) => {
@@ -1278,7 +2059,7 @@ const fallbackPoller = startActivityPolling([pollTarget], {
   },
   schedule: () => 'fallback-timer',
   cancel: () => {},
-  publishSnapshots: () => {},
+  publishSnapshots: update => { fallbackPublications.push(update) },
   settleTargets: (keys) => { settledFallbackKeys.push(...keys) },
 })
 await fallbackPoller.firstTick
@@ -1286,7 +2067,10 @@ fallbackPoller.stop()
 check(
   'a live miss checks archive once and retires even an orphaned legacy card',
   fallbackUrls.length === 2
-    && fallbackUrls[1]?.endsWith('?archived=1')
+    && fallbackUrls[0] === '/plugins/dsh-agent-teams/state?teamCaptainSessionId=poll-session&teamId=poll-team'
+    && fallbackUrls[1] === '/plugins/dsh-agent-teams/state?teamCaptainSessionId=poll-session&teamId=poll-team&archived=1'
+    && !fallbackUrls.some(url => url.includes('detail=1'))
+    && fallbackPublications[1]?.archivedTeams?.[0]?.teamId === 'poll-team'
     && settledFallbackKeys.length === 1
     && settledFallbackKeys[0] === pollTarget.key,
 )

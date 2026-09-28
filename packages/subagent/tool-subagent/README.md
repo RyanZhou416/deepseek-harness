@@ -56,6 +56,8 @@ The generated [configuration catalog](../../../docs/config-catalog.md#deepseek-a
 
 ### Foreground and background modes
 
+The Host's [forced model setting](../subagent/README.md#delegation-settings) takes priority over tool options and the Session model allowlist at creation. Foreground, background job, and continuable creation all use the same runtime enforcement; the tool exposes no exemption argument.
+
 Under `one-shot` policy, an omitted `run_in_background` waits in the foreground and returns the child's final text; `run_in_background: true` starts a plain parent-owned background job and returns `started background subagent job <id>`, collected with `job_output` and stopped with `job_kill`.
 
 Under `continuable` policy, an omitted or `true` `run_in_background` starts a durable child and returns `started subagent <childId>` without waiting for a result; the runtime delivers one settlement notice when the child's Activation ends, and the optional `send_message` tool sends it more work. Set `run_in_background: false` to wait for the result in the foreground.

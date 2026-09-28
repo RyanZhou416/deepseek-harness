@@ -52,6 +52,10 @@ function parentAgent(): Agent {
 }
 
 describe('child Agent options', () => {
+  it('uses the model default when forced selection disables effort inheritance on the same route', () => {
+    expect(resolveChildAgentOptions(parentAgent(), { provider: 'parent-provider', model: 'parent-model' }, 1, false))
+      .toEqual({ provider: 'parent-provider', model: 'parent-model', maxTokens: 512, subagentDepth: 1 })
+  })
   it('inherits the parent effort while the exact route is unchanged', () => {
     expect(resolveChildAgentOptions(parentAgent(), undefined, 1)).toEqual({
       provider: 'parent-provider',

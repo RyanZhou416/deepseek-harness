@@ -17,7 +17,7 @@ import process from 'node:process'
 
 const AGENT_TEAMS = {
   name: '@nanmicoder/dsh-agent-teams',
-  version: '0.1.20-dsh017rc1.1',
+  version: '0.1.20-dsh017rc1.2',
 }
 const CONTEXT = {
   name: 'dsh-context',
@@ -55,11 +55,11 @@ function linesOf(text) {
   return lines
 }
 
-/** Locate top-level `dsh-context` sequence items without parsing unrelated custom YAML tags. */
-function contextRanges(text) {
+/** Locate canonical top-level rows without evaluating custom YAML tags. */
+function rowRanges(text, rowId, keepComments = false) {
   const lines = linesOf(text)
   const starts = []
-  const id = /^- id:\s*(?:dsh-context|['"]dsh-context['"])\s*(?:#.*)?$/u
+  const id = new RegExp(`^- id:\\s*(?:${rowId}|'${rowId}'|"${rowId}")\\s*(?:#.*)?$`, 'u')
   for (let index = 0; index < lines.length; index += 1) {
     if (id.test(lines[index].content)) starts.push(index)
   }
@@ -67,6 +67,7 @@ function contextRanges(text) {
     let end = text.length
     for (let index = startIndex + 1; index < lines.length; index += 1) {
       const line = lines[index].content
+      if (keepComments && /^#/u.test(line)) continue
       if (line !== '' && !/^[ \t]/u.test(line)) {
         end = lines[index].start
         break
@@ -74,6 +75,11 @@ function contextRanges(text) {
     }
     return { start: lines[startIndex].start, end }
   })
+}
+
+/** Locate the context row managed as one complete config item. */
+function contextRanges(text) {
+  return rowRanges(text, 'dsh-context')
 }
 
 /** Extract the one managed context row from the repository template. */
@@ -90,7 +96,7 @@ function mergePatch(current, managed) {
   const ranges = contextRanges(current)
   if (ranges.length > 1) fail('the profile patch contains multiple top-level dsh-context rows; resolve the ambiguity manually')
   const newline = current.includes('\r\n') ? '\r\n' : '\n'
-  const block = managed.replace(/\n/gu, newline)
+  const block = managed.replace(/\r?\n/gu, newline)
   if (ranges.length === 1) {
     const range = ranges[0]
     const suffix = current.slice(range.end)
@@ -112,6 +118,103 @@ function mergePatch(current, managed) {
   }
   const prefix = current === '' || /(?:\r\n|\n)$/u.test(current) ? current : current + newline
   return prefix + block + newline
+}
+
+/** Locate one unambiguous Session Controller row; aliases and flow rows require manual editing. */
+function controllerRange(text) {
+  const ranges = rowRanges(text, 'session-controller', true)
+  if (ranges.length > 1) fail('the profile patch contains multiple top-level session-controller rows')
+  const mentions = linesOf(text).filter(line => !/^\s*#/u.test(line.content)
+    && /(?:^|[ {])(?:id|'id'|"id"):\s*(?:session-controller|'session-controller'|"session-controller")(?=\s|[,}\]]|$)/u.test(line.content))
+  const alias = linesOf(text).some(line => /^-\s+[*&]/u.test(line.content)
+    || /^-\s+(?:id|'id'|"id"):\s*[*&!{\[]/u.test(line.content))
+  if (alias || mentions.length !== ranges.length) {
+    fail('session-controller patch ownership is ambiguous; use a canonical top-level block row without id aliases')
+  }
+  return ranges[0]
+}
+
+/** Locate a direct mapping field and its indented value without absorbing following comments. */
+function mappingField(text, range, key, indent) {
+  const lines = linesOf(text).filter(line => line.start >= range.start && line.start < range.end)
+  const pattern = new RegExp(`^${' '.repeat(indent)}(?:${key}|'${key}'|"${key}")\\s*:`, 'u')
+  const matches = lines.filter(line => pattern.test(line.content))
+  if (matches.length > 1) fail(`session-controller contains multiple ${key} fields`)
+  const first = matches[0]
+  if (first === undefined) return undefined
+  let end = first.end
+  for (const line of lines) {
+    if (line.start <= first.start) continue
+    if (line.content.trim() === '' || /^\s*#/u.test(line.content)) continue
+    const depth = line.content.length - line.content.trimStart().length
+    if (depth <= indent) break
+    end = line.end
+  }
+  return { start: first.start, end, headerEnd: first.end, suffix: first.content.slice(first.content.indexOf(':') + 1).trim() }
+}
+
+/** Require an explicit config mapping so other user fields cannot be lost through replacement. */
+function controllerConfig(text, range) {
+  const config = mappingField(text, range, 'config', 2)
+  if (config !== undefined && config.suffix !== '' && !config.suffix.startsWith('#')) {
+    fail('session-controller config must be a block mapping; flow maps, aliases, and whole-config !!js need manual editing')
+  }
+  if (config !== undefined && linesOf(text).some(line => line.start > config.start && line.start < config.end
+    && /^ {4}<<\s*:/u.test(line.content))) {
+    fail('session-controller config merge aliases need manual editing')
+  }
+  if (config !== undefined && linesOf(text).some((line) => {
+    if (line.start <= config.start || line.start >= config.end || /^\s*(?:#|$)/u.test(line.content)) return false
+    const depth = line.content.length - line.content.trimStart().length
+    const value = line.content.trimStart()
+    return depth === 4 && (value.startsWith('- ') || ['[', ']', '{', '}', '*', '&', '!'].includes(value[0])
+      || !/:\s|:$/u.test(value))
+  })) {
+    fail('session-controller config must contain block mapping fields, not tagged scalars or aliases')
+  }
+  return config
+}
+
+/** Extract the only Session Controller field owned by the fork template. */
+function managedController(template) {
+  const range = controllerRange(template)
+  if (range === undefined) fail('the managed template must contain one top-level session-controller row')
+  const config = controllerConfig(template, range)
+  if (config === undefined) fail('the managed session-controller template needs a config mapping')
+  const field = mappingField(template, config, 'listProjectionExcludeKeys', 4)
+  if (field === undefined) fail('the managed session-controller template needs listProjectionExcludeKeys')
+  return { row: template.slice(range.start, range.end).trimEnd(), field: template.slice(field.start, field.end).trimEnd() }
+}
+
+/** Change only the owned exclusion field, preserving other controller config and metadata bytes. */
+function mergeControllerPatch(current, managed) {
+  const range = controllerRange(current)
+  const newline = current.includes('\r\n') ? '\r\n' : '\n'
+  const field = managed.field.replace(/\r?\n/gu, newline) + newline
+  if (range === undefined) {
+    const prefix = current === '' || /(?:\r\n|\n)$/u.test(current) ? current : current + newline
+    return prefix + managed.row.replace(/\r?\n/gu, newline) + newline
+  }
+  const config = controllerConfig(current, range)
+  if (config === undefined) {
+    const header = linesOf(current).find(line => line.start === range.start)
+    const prefix = current.slice(0, header.end)
+    return prefix + (/(?:\r\n|\n)$/u.test(prefix) ? '' : newline)
+      + `  config:${newline}` + field + current.slice(header.end)
+  }
+  const existing = mappingField(current, config, 'listProjectionExcludeKeys', 4)
+  if (existing !== undefined) {
+    return current.slice(0, existing.start) + field + current.slice(existing.end)
+  }
+  const prefix = current.slice(0, config.headerEnd)
+  return prefix + (/(?:\r\n|\n)$/u.test(prefix) ? '' : newline) + field + current.slice(config.headerEnd)
+}
+
+/** Apply both managed policies before any file write. */
+function mergeManagedPatch(current, template) {
+  const controller = managedController(template)
+  const merged = mergePatch(current, managedBlock(template))
+  return mergeControllerPatch(merged, controller)
 }
 
 /** Atomically replace one profile patch in its existing directory. */
@@ -184,7 +287,7 @@ function mergeCommand(args) {
   const [target, templatePath] = positional
   const existed = existsSync(target)
   const current = existed ? readFileSync(target, 'utf8') : '[]\n'
-  const next = mergePatch(current, managedBlock(readFileSync(templatePath, 'utf8')))
+  const next = mergeManagedPatch(current, readFileSync(templatePath, 'utf8'))
   if (next === current) {
     process.stdout.write(`unchanged ${target}\n`)
     return
@@ -301,9 +404,9 @@ function verifyPatchCommand(args) {
   const [target, templatePath] = args
   if (!existsSync(target)) fail(`profile patch is missing at ${target}`)
   const current = readFileSync(target, 'utf8')
-  const next = mergePatch(current, managedBlock(readFileSync(templatePath, 'utf8')))
-  if (next !== current) fail('profile patch does not contain the managed dsh-context row')
-  process.stdout.write('verified profile dsh-context patch\n')
+  const next = mergeManagedPatch(current, readFileSync(templatePath, 'utf8'))
+  if (next !== current) fail('profile patch does not contain the managed context and Session catalog policies')
+  process.stdout.write('verified profile context and Session catalog patch\n')
 }
 
 async function verifyDumpCommand(args) {
@@ -321,7 +424,17 @@ async function verifyDumpCommand(args) {
     const pattern = new RegExp(`^\\s*${field}:\\s*${String(value)}\\s*$`, 'mu')
     if (!pattern.test(block)) fail(`dump-config does not contain ${field}: ${String(value)}`)
   }
-  process.stdout.write('verified dump-config dsh-context low-overhead bounds\n')
+  const controller = controllerRange(source)
+  if (controller === undefined) fail('dump-config has no top-level session-controller row')
+  const config = controllerConfig(source, controller)
+  const exclusions = config === undefined ? undefined : mappingField(source, config, 'listProjectionExcludeKeys', 4)
+  if (exclusions === undefined) fail('dump-config has no Session catalog projection exclusions')
+  const value = source.slice(exclusions.start, exclusions.end)
+  for (const key of ['contextHeaders', 'turnOutline']) {
+    const pattern = new RegExp(`^ {6}-\\s*(?:${key}|'${key}'|"${key}")\\s*(?:#.*)?$`, 'mu')
+    if (!pattern.test(value)) fail(`dump-config does not exclude ${key} from Session catalog hints`)
+  }
+  process.stdout.write('verified dump-config context bounds and Session catalog exclusions\n')
 }
 
 const [command, ...args] = process.argv.slice(2)

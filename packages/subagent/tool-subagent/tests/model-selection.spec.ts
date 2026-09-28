@@ -1,4 +1,6 @@
-import { describe, expect, it, vi } from 'vitest'
+import { describe, expect, it, onTestFinished, vi } from 'vitest'
+import LocalJobRegistry from '@deepseek-ai/dsh-jobs-local'
+import * as ToolJobs from '@deepseek-ai/dsh-tool-jobs'
 import { Context } from '@deepseek-ai/cordis'
 import { ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
@@ -38,6 +40,24 @@ function parentWithRoute(
 }
 
 describe('dsh-tool-subagent model selection', () => {
+  it.each([false, true])('applies the forced route over conflicting tool arguments in background=%s', async (background) => {
+    const requests: SubagentStartRequest[] = []
+    const ctx = await setup({
+      provider: 'mock', withModelSelection: true,
+      modelOverride: { provider: 'forced', model: 'selected', reasoningEffort: 'low' },
+    }, { onStart: (request) => { requests.push(request) } })
+    onTestFinished(() => ctx.fiber.dispose())
+    await ctx.plugin(LocalJobRegistry)
+    await ctx.plugin(ToolJobs, {})
+    ctx.llm.registerAdapter(['forced'], new MockAdapter([], REASONING))
+    const result = await callSubagent(ctx, { description: 'agent-teams:fake:member', prompt: 'do work',
+      provider: 'missing', model: 'not-authorized', reasoning_effort: 'impossible', run_in_background: background })
+    expect(result.isError, text(result)).toBe(false)
+    await vi.waitFor(() => { expect(requests).toHaveLength(1) })
+    expect(requests[0]).toMatchObject({ agentOptions: { provider: 'forced', model: 'selected', reasoningEffort: 'low' },
+      inheritReasoningEffort: false })
+  })
+
   it('rejects empty route ids at the configuration boundary', () => {
     expect(() => { assertAllowedModelRoutes([{ provider: '', model: 'model' }]) })
       .toThrow('requires non-empty provider and model ids')

@@ -20,11 +20,13 @@
 
 ## One prompt. A working team.
 
+In the DSH fork, members keep their AgentTeams provider/model/effort even when ordinary Subagents have a forced model. Only the plugin's Host-owned member creation uses that exception; ordinary delegation from members still follows the global override.
+
 `dsh-agent-teams` turns the current DeepSeek Harness session into a captain that can assemble durable sub-agents, split a goal into dependency-aware tasks, and coordinate work through direct messages.
 
 Ask in natural language. The plugin provides the team protocol, 14 coordination tools, persistent state, an automatic shared-task scheduler, and a live Web UI—without requiring a separate workflow engine.
 
-> This fork packages upstream `v0.1.20` as `0.1.20-dsh017rc1.1` for DSH `0.1.7-rc.1`. Install the checked-in artifact documented in [`../README.md`](../README.md); the public npm instructions below describe the upstream release channel.
+> This fork packages upstream `v0.1.20` as `0.1.20-dsh017rc1.2` for DSH `0.1.7-rc.1`. Install the checked-in artifact documented in [`../README.md`](../README.md); the public npm instructions below describe the upstream release channel.
 
 <p align="center">
   <img src="./assets/ui.png" width="100%" alt="DeepSeek Harness conversation with the AgentTeams live activity panel, members, tasks, dependencies, and reports">
@@ -99,6 +101,10 @@ Then ask for a team directly:
 6. The captain presents the combined result, then archives the complete team record.
 
 Team state is stored under `<workspace>/.agent-teams/`; the Web panel reads that disk truth and combines it with live sub-agent activity.
+
+The current browser requests teams owned by the main captain Session plus precise targets for every mounted conversation card, including side by side conversations. Scoped polling responses keep every task and status field. Only the main Session staged plan loads long task descriptions and member execution prompts; it reuses them until its revision changes and refreshes them after a successful edit. Polling pauses while the page is hidden and refreshes immediately when it becomes visible. A settled side-card archive stays available until its final card unmounts, while archived responses remain read-only. Unscoped requests from older browser bundles retain the complete legacy response during compatibility.
+
+When a poll has only explicit card targets, the Host enumerates directory names and reads only matching team records, then rechecks the captain in every workspace. Directory order, directory-access failures and legacy ids retain their existing behavior. A captain-scoped poll still reads every team record so cardless teams remain discoverable. Host snapshots and the panel group task ownership once per update, preserving durable task order and member progress semantics; a missing assignee remains distinct from an explicit empty assignee.
 
 Member creation is zero-interaction by default: a member on the captain's current LLM route snapshots that provider, model, and reasoning effort, while a member on a requested alternative route snapshots the target model's default effort; later continuations restore the resolved snapshot. Only an explicit heterogeneous-team request (for example, “backend on provider A/model X, frontend on provider B/model Y”) supplies a member-specific `provider` + `model`; there is no per-member model or reasoning prompt.
 
@@ -182,6 +188,7 @@ npx skills add NanmiCoder/dsh-agent-teams --skill dsh-plugin-development
 pnpm install
 pnpm build
 pnpm verify
+pnpm diagnose:activity-state # synthetic 1,500/2,600-task response and assembly report
 ```
 
 ## Named multi-role profiles

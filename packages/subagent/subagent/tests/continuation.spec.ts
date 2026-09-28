@@ -25,6 +25,7 @@ import SubagentRuntime, {
 import type { SubagentRunEndInfo, SubagentRunInfo } from '../src/index.ts'
 import type { SubagentPromptRequestId } from '../src/control-types.ts'
 import * as SubagentInvariant from '../src/invariant.ts'
+import { startHostAgentTeamsMember } from '../src/internal.ts'
 import { TestSessionQuery } from './test-session-query.ts'
 import { loadStoredSession } from './persistence-helpers.ts'
 import {
@@ -632,6 +633,32 @@ describe('SubagentRuntime.startContinuable', () => {
     await queuePrompt(ctx, parent, started.childId, message('resume selected reasoning'))
     await waitNoActivation(ctx, started.childId)
     expect(childEfforts).toEqual(['max', 'max'])
+  })
+
+  it.each(['spawn', 'fork'])('forces %s children, retains saved models on resume, and exempts only Host-created AgentTeams members', async (provider) => {
+    const adapter = new MockAdapter(Array.from({ length: 4 }, () => textResponse('done')))
+    const { ctx, parent } = await setupWith(adapter)
+    parkParent(ctx, parent)
+    const config = subagentConfigs.get(ctx)!
+    await config.update({ modelOverride: { provider: 'mock', model: 'forced-model' } })
+    const spec = { ...startSpec(parent, provider), label: 'agent-teams:fake:member', request: {
+      parent, prompt: message('force this child'), agentOptions: { provider: 'missing', model: 'other' },
+    } }
+    const started = await ctx.subagents.startContinuable(spec)
+    await waitNoActivation(ctx, started.childId)
+    const loaded = await loadStoredSession(ctx.sessionPersistence, started.childId)
+    expect(loaded.events.find(event => event.type === 'subagent/descriptor')?.data)
+      .toMatchObject({ agentProvider: 'mock', agentModel: 'forced-model' })
+    await config.update({ modelOverride: { model: 'next-model' } })
+    await queuePrompt(ctx, parent, started.childId, message('keep saved model'))
+    await waitNoActivation(ctx, started.childId)
+    const member = await startHostAgentTeamsMember(ctx.subagents, {
+      ...spec, request: { ...spec.request, agentOptions: { provider: 'mock', model: 'team-model' } },
+    })
+    await waitNoActivation(ctx, member.childId)
+    const ordinary = await ctx.subagents.startContinuable(startSpec(parent, provider))
+    await waitNoActivation(ctx, ordinary.childId)
+    expect(adapter.requests.map(request => request.model)).toEqual(['forced-model', 'forced-model', 'team-model', 'next-model'])
   })
 
   it('rolls the child back completely when the caller signal aborts before acceptance', async () => {

@@ -8,7 +8,7 @@ import { SESSION_SEARCH_RESULT_LIMIT } from '../../types.ts'
 import type { SessionForkRequest } from '../../types.ts'
 import type { SessionProjectionMap } from '@deepseek-ai/dsh-session-projection/types'
 import {
-  createSnapshotStore, notifySubscribers, type ObservableSnapshot, type SnapshotStore,
+  createSnapshotStore, notifySubscribers, shallowEqual, type ObservableSnapshot, type SnapshotStore,
 } from '@deepseek-ai/dsh-client-store'
 import type { RemoteFailure, RemoteResult } from '@deepseek-ai/dsh-typert-protocol'
 import type { SessionEventSource } from '../contract/events.ts'
@@ -22,6 +22,7 @@ import { SessionManager } from './manager.ts'
 import type { SessionRemotes } from './remotes.ts'
 import type { SessionListPhase, SessionSearchResultItem, SessionProjectionSnapshot } from './manager.ts'
 import type { Session } from './session.ts'
+import type { SessionListEntry } from './lineage.ts'
 
 /** Session list row projected from the host list RPC plus live stream increments. */
 export interface SessionSummary {
@@ -245,6 +246,8 @@ export class ClientSessions implements ISessions {
   /** Stable per-id sources retained for the Client root lifetime, including across generation replacement. */
   private readonly retainObservers = new Map<SessionId, RetentionObserver>()
   private readonly scopeDrops = new Set<Promise<void>>()
+  /** Base catalog rows exclude child-label overrides and are retained only with their manager entry. */
+  private readonly catalogRows = new WeakMap<SessionListEntry, SessionSummary>()
   private closed = false
 
   /**
@@ -609,7 +612,8 @@ export class ClientSessions implements ISessions {
 
   /** Project the manager's list snapshot into the store (title derivation is display-only). */
   private projectList(): void {
-    const previousById = this.list.getSnapshot().byId
+    const previousSnapshot = this.list.getSnapshot()
+    const previousById = previousSnapshot.byId
     const {
       items, phase, projectionsBySession,
     } = this.manager.getListSnapshot()
@@ -617,11 +621,17 @@ export class ClientSessions implements ISessions {
     const byId: Record<SessionId, SessionSummary> = {}
     for (const entry of items) {
       ids.push(entry.sessionId)
-      byId[entry.sessionId] = {
+      const retainedBy = this.retentionSnapshot(entry.sessionId).retainedBy
+      const cached = this.catalogRows.get(entry)
+      if (cached !== undefined && cached.retainedBy === retainedBy) {
+        byId[entry.sessionId] = cached
+        continue
+      }
+      const row: SessionSummary = {
         id: entry.sessionId,
         displayTitle: displayTitleOf(entry.title, entry.cwd, entry.sessionId),
         running: entry.running,
-        retainedBy: this.retentionSnapshot(entry.sessionId).retainedBy,
+        retainedBy,
         blank: entry.blank,
         updatedAt: entry.updatedAt,
         ...(entry.projectionValues === undefined
@@ -632,6 +642,8 @@ export class ClientSessions implements ISessions {
         ...(entry.parentSessionId !== undefined ? { parentId: entry.parentSessionId } : {}),
         ...(entry.origin !== undefined ? { origin: entry.origin } : {}),
       }
+      this.catalogRows.set(entry, row)
+      byId[entry.sessionId] = row
     }
     for (const [parentId, projection] of Object.entries(projectionsBySession)) {
       for (const child of projection.values.subagentCatalog ?? []) {
@@ -678,7 +690,17 @@ export class ClientSessions implements ISessions {
         ...(title === undefined ? {} : { title, displayTitle: title }),
       }
     }
-    this.list.set({ ids, byId, phase, projectionsBySession })
+    for (const id of Object.keys(byId) as SessionId[]) {
+      const old = previousById[id]
+      if (old !== undefined && shallowEqual(old, byId[id])) byId[id] = old
+    }
+    const next = {
+      ids: shallowEqual(previousSnapshot.ids, ids) ? previousSnapshot.ids : ids,
+      byId: shallowEqual(previousById, byId) ? previousById : byId,
+      phase,
+      projectionsBySession,
+    }
+    if (!shallowEqual(previousSnapshot, next)) this.list.set(next)
   }
 
   private startScopeDrop(

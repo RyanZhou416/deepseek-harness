@@ -64,6 +64,8 @@ const { asOfSeq, values } = ctx.sessionProjections.snapshot(session)
 
 必须使用投影状态的领域把 `sessionProjections` 声明为 Cordis 服务依赖；可选贡献方可以在 `ctx.inject(['sessionProjections'], …)` 下注册。载体使用 `ctx.get('sessionProjections')`，注册表缺席时省略自己的块或帧。
 
+缓存提示的读取方可以在 `cachedSnapshot` 或 `viewCheckpoint` 的所选 key 参数之后传入可选的 `excludeKeys` 集合。被排除的 key 不执行 wire 视图构造或缓存状态校验；返回的水位只覆盖实际提供的值。排除不会删除 cell 或检查点行，完整快照与恢复读取保持不变。
+
 ### 持久检查点
 
 系统通过 `checkpoint(session)` 为每个单元的状态创建检查点，client-visible 与 host-only 一视同仁；同级包 [session-projection-cache](../session-projection-cache/README.zh.md) 持久化这些检查点，使冷读跳过全量日志加载。检查点水位使用 `SessionSeqCursor`（空日志为 `-1`），回放起点使用 `SessionLogOffset`；`restoreFloor` 与 `restore` 实现读取流程，且不会混淆已有事件与日志间隙。

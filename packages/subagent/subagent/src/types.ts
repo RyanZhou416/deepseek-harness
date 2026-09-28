@@ -15,6 +15,7 @@ import type { ContentBlock, MessageId } from '@deepseek-ai/dsh-llm'
 import type { SessionEvent, SessionId } from '@deepseek-ai/dsh-session'
 import type { ObjectJsonSchema, ToolRestriction } from '@deepseek-ai/dsh-tools'
 import type { SubagentDescriptorData } from './descriptor.ts'
+import type { SubagentModelOverride } from './model-override-types.ts'
 
 /** Identifies one accepted subagent run across its lifecycle event pair. */
 export type SubagentRunId = Branded<'SubagentRunId'>
@@ -55,6 +56,14 @@ export interface ContinuableStart {
   readonly childId: SessionId
   /** The accepted initial prompt's inbox message id. */
   readonly messageId: MessageId
+}
+
+/** Detached model selection for tool validation; creation always resolves the current policy again. */
+export interface PreparedSubagentModel {
+  /** Effective explicit options; ordinary inheritance still supplies omitted values. */
+  readonly agentOptions: AgentOptions | undefined
+  /** Applied user override, or null for ordinary selection. */
+  readonly override: SubagentModelOverride | null
 }
 
 /**
@@ -169,6 +178,8 @@ export interface SubagentStartRequest {
    * before initializing the separate child runtime.
    */
   readonly agentOptions?: AgentOptions
+  /** Whether an omitted reasoning effort may inherit from the parent; defaults to true. Requires agentOptions capability. */
+  readonly inheritReasoningEffort?: boolean
   /**
    * Object-rooted JSON Schema within `assertObjectJsonSchema`'s enforced subset. Start rejects
    * unsupported schemas or providers without the capability. Data must be plain host-realm JSON;

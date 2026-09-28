@@ -1,13 +1,14 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react'
-import { makeTranslate, RemoteError, sessionSnapshot } from '@deepseek-ai/dsh-client-test-runtime'
+import { bindSnapshotSelector, makeTranslate, RemoteError, sessionSnapshot } from '@deepseek-ai/dsh-client-test-runtime'
 import type {
   SessionListState, SessionSummary, SessionSnapshot,
 } from '@deepseek-ai/dsh-api-session-controller/client'
 import type { SubagentAddress, SubagentCatalogRow } from '@deepseek-ai/dsh-subagent/client'
 import type { SessionId } from '@deepseek-ai/dsh-session/types'
 import type { SessionStatusSnapshot } from '@deepseek-ai/dsh-client-ui-session/client'
+import { createSnapshotStore } from '@deepseek-ai/dsh-client-store'
 import {
   SubagentCatalogAction, SubagentHeaderLineage,
   type SubagentCatalogActionProps, type SubagentHeaderLineageProps,
@@ -218,6 +219,143 @@ describe('SubagentHeaderLineage', () => {
     })} />)
     const inactiveTrigger = screen.getByRole('button', { name: '2 个子智能体' })
     expect(inactiveTrigger.querySelector('[data-state="ongoing"]')).toBeNull()
+  })
+
+  it('does not re-render a closed trigger for unrelated projection changes', () => {
+    const input = props(catalog())
+    const initial = input.useSessions(state => state)
+    const sessions = createSnapshotStore(initial)
+    const statuses = createSnapshotStore<SessionStatusSnapshot>(new Map())
+    const translate = vi.fn(input.t)
+    render(<SubagentCatalogAction
+      {...input}
+      useSessions={bindSnapshotSelector(sessions)}
+      useSessionStatus={bindSnapshotSelector(statuses)}
+      t={translate}
+    />)
+    const calls = translate.mock.calls.length
+
+    const unrelated = 'unrelated' as SessionId
+    act(() => {
+      sessions.set({
+        ...sessions.getSnapshot(),
+        projectionsBySession: {
+          ...sessions.getSnapshot().projectionsBySession,
+          [unrelated]: {
+            state: 'ready',
+            error: null,
+            values: { subagentCatalog: [] },
+          },
+        },
+      })
+    })
+
+    expect(screen.getByRole('button', { name: input.t('count.running.one', { count: 1 }) })).toBeTruthy()
+    expect(translate).toHaveBeenCalledTimes(calls)
+  })
+
+  it('updates closed root summaries from relevant store changes and opens the latest tree', () => {
+    const writer = 'writer' as SessionId
+    const address: SubagentAddress = {
+      parentSessionId: PARENT,
+      childSessionId: CHILD,
+      mode: 'continuable',
+    }
+    const input = props(catalog(), {}, undefined, address)
+    const initial = input.useSessions(state => state)
+    const sessions = createSnapshotStore(initial)
+    const statuses = createSnapshotStore<SessionStatusSnapshot>(new Map())
+    const useSessions = bindSnapshotSelector(sessions)
+    const useSessionStatus = bindSnapshotSelector(statuses)
+    render(<>
+      <SubagentCatalogAction
+        {...input}
+        useSessions={useSessions}
+        useSessionStatus={useSessionStatus}
+      />
+      <SubagentHeaderLineage
+        {...input}
+        lineageSessionId={CHILD}
+        displayTitle="fallback"
+        openTitle={vi.fn()}
+        useSessions={useSessions}
+        useSessionStatus={useSessionStatus}
+      />
+    </>)
+
+    expect(screen.getByRole('button', {
+      name: input.t('switcher.aria', { title: 'worker' }),
+    })).toBeTruthy()
+    const root = initial.projectionsBySession[PARENT]!
+    const entries = root.values.subagentCatalog!
+    act(() => {
+      sessions.set({
+        ...sessions.getSnapshot(),
+        byId: {
+          ...sessions.getSnapshot().byId,
+          [writer]: {
+            ...summary(writer, 2),
+            parentId: PARENT,
+            origin: 'subagent',
+          },
+        },
+        projectionsBySession: {
+          ...sessions.getSnapshot().projectionsBySession,
+          [PARENT]: {
+            ...root,
+            values: {
+              ...root.values,
+              subagentCatalog: [
+                { ...entries[0]!, label: 'renamed' },
+                entries[1]!,
+                { id: writer, createdAt: 2, mode: 'one-shot', label: 'writer' },
+              ],
+            },
+          },
+          [CHILD]: {
+            state: 'ready',
+            error: null,
+            values: {
+              subagentCatalog: [{
+                id: GRANDCHILD,
+                createdAt: 3,
+                mode: 'continuable',
+                label: 'indexer',
+              }],
+            },
+          },
+        },
+      })
+    })
+
+    expect(screen.getByRole('button', {
+      name: input.t('switcher.aria', { title: 'renamed' }),
+    })).toBeTruthy()
+    const runningTrigger = screen.getByRole('button', {
+      name: input.t('count.running.one', { count: 1 }),
+    })
+    expect(within(runningTrigger).getByText(input.t('count.total.other', { count: 3 }))).toBeTruthy()
+
+    act(() => {
+      statuses.set(new Map([[CHILD, {
+        running: false,
+        completionUnread: false,
+        pendingInteraction: undefined,
+      }]]))
+    })
+    const inactiveTrigger = screen.getByRole('button', {
+      name: input.t('count.total.other', { count: 3 }),
+    })
+    expect(inactiveTrigger.querySelector('[data-state="ongoing"]')).toBeNull()
+
+    fireEvent.click(inactiveTrigger)
+    expect(screen.getByRole('treeitem', { name: /renamed/ })).toBeTruthy()
+    expect(screen.getByRole('treeitem', { name: /writer/ })).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', {
+      name: input.t('branch.expand', { label: 'renamed' }),
+    }))
+    expect(input.refreshProjection).toHaveBeenCalledWith(CHILD)
+    expect(screen.getByRole('treeitem', { name: /indexer/ })).toBeTruthy()
   })
 
   it('does not count Sessions outside projected membership', () => {
@@ -995,7 +1133,37 @@ describe('SubagentHeaderLineage', () => {
     render(<HeaderCatalog {...input} />)
 
     expect(screen.getByRole('button', { name: '切换子智能体：正在扫描项目文件' })).toBeTruthy()
+    const switcher = screen.getByRole('button', {
+      name: input.t('switcher.aria', { title: input.displayTitle }),
+    })
+    hoverCatalog(switcher)
+    expect(screen.getByText(input.t('loading.label'))).toBeTruthy()
     expect(input.refreshProjection).not.toHaveBeenCalled()
+  })
+
+  it('opens an idle switcher projection without catalog membership as loading', () => {
+    const input = {
+      ...props(undefined, {}, {
+        [CHILD]: {
+          ...summary(CHILD, 1), parentId: PARENT, origin: 'subagent' as const,
+        },
+      }, { parentSessionId: PARENT, childSessionId: CHILD, mode: 'continuable' }),
+      lineageSessionId: CHILD,
+      displayTitle: 'fallback',
+    }
+    const initial = input.useSessions(state => state)
+    const pending: SessionListState = {
+      ...initial,
+      projectionsBySession: {
+        [PARENT]: { state: 'idle', error: null, values: {} },
+      },
+    }
+    render(<HeaderCatalog {...input} useSessions={select => select(pending)} />)
+
+    hoverCatalog(screen.getByRole('button', {
+      name: input.t('switcher.aria', { title: input.displayTitle }),
+    }))
+    expect(screen.getByText(input.t('loading.label'))).toBeTruthy()
   })
 
   it('keeps a nested title switcher scoped to its direct-parent catalog', () => {

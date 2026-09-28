@@ -42,9 +42,12 @@ Mount the service with a provider and the delegation tool. The provider register
 
 An agent that calls the tool gets the child's final answer as the tool result. Mounting the service alone changes nothing: nothing can delegate until a provider and a tool are composed.
 
+<a id="delegation-settings"></a>
 ### Delegation settings
 
 The limits section on the **Plugins → Subagent** page edits the Host’s `subagent` settings section. User values override this plugin's composition; reset removes the user override. `maxDepth` defaults to `1` and supplies the delegation tools' depth when their own configuration omits it. An explicit tool depth, including `provider-managed`, takes precedence. Depth `0` disables delegation through tools inheriting this setting; depth `1` permits direct children only. Changes apply on the next delegation attempt. Direct service callers continue to supply their own optional request depth.
+
+`modelOverride` defaults to `false`. Set `{ provider, model, reasoningEffort? }` in **Plugins → Subagent → Forced model** to force the route for every new ordinary child, including delegation from existing Sessions, workflows, and nested agents. It takes precedence over tool arguments, tool configuration, and parent inheritance; omitted effort uses the selected model's default. The runtime validates the route before creating the child and rejects backends without `agentOptions` support while enabled. Existing children and cold resume retain their recorded models. AgentTeams member creation uses a Host-only symbol adapter and keeps the team's own model policy; labels and tool arguments cannot request this exception, and ordinary descendants do not inherit it. This preference governs delegation APIs, not arbitrary Host code or profile edits.
 
 ### Continuable capacity
 
@@ -117,6 +120,8 @@ The manager reserves a child identity, resolves the durable descriptor, creates 
 Successful local child creation appends a `subagent/catalog` fact to the parent Session. One-shot creation records it after the provider returns; continuable creation records it after initial inbox admission and before returning the child id. Failure releases the child without publishing a compensating catalog event. A one-shot catalog append failure handles the run’s result rejection and preserves the catalog error; disposal failures are logged separately. The `subagentCatalog` projection excludes fork-inherited facts and exposes a direct-child list through `projections.values.subagentCatalog` in Session observations and client snapshots. Each child's `subagentTiming` projection accumulates post-descriptor duration and records whether its latest closed turn ended with `completed`, clearing that completion when another turn opens. Invalid own catalog payloads, including unsupported versions, reject projection restoration. Projection state-version changes refold cached rows from the durable log. The catalog view preserves parent event order in O(D) time for D facts, and its immutable storage and checkpoint validation use [`dsh-chunked-list`](../../util/chunked-list/README.md). [The parent-catalog decision](../../../.agents/notes/implemented/architecture/2026-09-01-parent-owned-subagent-catalog.md) owns ordering, persistence costs, and alternatives. Catalog payload v0 records known modes; v1 also accepts unknown mode. Readers support both versions. Historical migration appends a v1 `subagent/catalog` from a readable child header when its descriptor is unavailable; normal creation retains v0. Its `mode: 'unknown'` projection keeps the child visible without claiming continuation support; an existing complete entry remains authoritative.
 
 ### Ownership and invariants
+
+During an active child turn, additional events with the same recorded time retain the timing state and produce no duplicate timing notification. Descriptor, turn-start, and turn-end transitions still apply in full, and every event advances the projection watermark.
 
 - **Publication is the boundary** — before it the provider owns the setup and must roll back on failure; after it the caller owns the run and must dispose it.
 - **Registration is effect-scoped** — removing a provider blocks new starts but never revokes accepted runs.

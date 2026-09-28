@@ -305,10 +305,10 @@ class FakeWebSocket extends EventTarget {
     this.drop()
   }
 
-  drop(): void {
+  drop(code = 1006, reason = '', wasClean = false): void {
     if (this.readyState === FakeWebSocket.CLOSED) return
     this.readyState = FakeWebSocket.CLOSED
-    this.dispatchEvent(new Event('close'))
+    this.dispatchEvent(Object.assign(new Event('close'), { code, reason, wasClean }))
   }
 
   receive(value: unknown): void {
@@ -3126,6 +3126,32 @@ describe('Remote stream client carrier lifecycle', () => {
       await expect(aborted).rejects.toBe('cancelled while connecting')
       await abortedClient.close()
       expect(FakeWebSocket.sockets[3]?.url).toBe('ws://harness.example/api/remote.mux')
+    })
+  })
+
+  it.each([false, true])('preserves socket close diagnostics after opening=%s', async (opened) => {
+    await withFakeWebSocket('https://harness.example', async () => {
+      FakeWebSocket.autoOpen = false
+      const client = new RemoteStreamMuxClient()
+      client.start()
+      try {
+        const pending = client.open('feed/follow', {}, new AbortController().signal)
+          [Symbol.asyncIterator]().next()
+        const failure = expect(pending).rejects.toMatchObject({
+          name: 'RemoteStreamCarrierError',
+          message: `api gateway: Remote stream WebSocket closed${opened ? '' : ' before opening'} (code 1001, clean true)`,
+          cause: { code: 1001, reason: 'peer left', wasClean: true },
+        })
+        const socket = FakeWebSocket.sockets[0]!
+        if (opened) {
+          socket.open()
+          await vi.waitFor(() => { expect(socket.sent).toHaveLength(1) })
+        }
+        socket.drop(1001, 'peer left', true)
+        await failure
+      } finally {
+        await client.close()
+      }
     })
   })
 

@@ -138,7 +138,7 @@ export function clientBundle(
  * the statically linked copy and a provider's bytes would sit unused in its
  * bundle.
  *
- * Four artifact contracts:
+ * Five artifact contracts:
  * 1. every bare specifier stays an import. The shell attributes chunk bytes by
  *    `node_modules/<pkg>`, so a dependency inlined into a workspace file is
  *    attributed to no npm package and its bytes fall into the index chunk,
@@ -148,6 +148,7 @@ export function clientBundle(
  * 4. stylesheets ship with the package: a relative `.css` import survives as a
  *    relative external and the sheet is emitted under `lib/` at its
  *    `src`-relative path, so vite stays the only owner of class hashing.
+ * 5. NODE_ENV-dependent branches remain available for the consuming shell to compile.
  * @param id - package name, used in tsdown diagnostics.
  * @param libEntry - emitted JavaScript entries consumed from `lib/types`, one
  * bundle each: a multi-entry build would emit a hash-named shared chunk that
@@ -271,6 +272,8 @@ function staticLinkedConfig(id: string, entry: string, outputName = basename(ent
     fixedExtension: false,
     dts: false,
     clean: false,
+    // Static libraries defer environment-dependent behavior to their consuming shell.
+    define: { 'process.env.NODE_ENV': 'process.env.NODE_ENV' },
     // The shell compiles this artifact, so its map is the only path from a
     // browser stack frame back to the TSX (tsc emits the lib/types half).
     sourcemap: true,

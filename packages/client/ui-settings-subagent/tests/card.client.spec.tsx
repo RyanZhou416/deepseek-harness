@@ -40,6 +40,9 @@ function renderSubagent(
     ...settled,
     maxDepth: field('3'),
     maxActiveSubagents: field('8'),
+    modelOverride: field('null'),
+    overrideAvailable: false,
+    overrideValue: null,
     ...limitState,
   })
   const models = createSnapshotStore<SubagentModelSelectionCardState>({
@@ -76,6 +79,20 @@ function renderSubagentModelSelection(state: Partial<SubagentModelSelectionCardS
 }
 
 describe('Subagent model selection fields', () => {
+  it('shows forced selection separately, retains missing routes, and offers model default effort', () => {
+    const { actions } = renderSubagent({ overrideAvailable: true, overrideValue: {
+      provider: 'gone', model: 'saved-model', reasoningEffort: 'saved-effort',
+    }, modelOverride: field('{"provider":"gone","model":"saved-model"}', { overridden: true }) }, { catalogStatus: 'ready' })
+    expect(screen.getByText(en.subagentOverrideScope)).toBeTruthy()
+    expect(screen.getByText(en.subagentOverrideUnavailable)).toBeTruthy()
+    expect(screen.getByRole('button', { name: en.subagentOverrideModel }).textContent).toBe('saved-model')
+    fireEvent.click(screen.getByRole('button', { name: en.subagentOverrideEffort }))
+    fireEvent.click(screen.getByText(en.subagentOverrideDefaultEffort))
+    expect(actions.editLimit).toHaveBeenCalledWith('modelOverride', '{"provider":"gone","model":"saved-model"}')
+    fireEvent.click(screen.getByRole('switch', { name: en.subagentOverrideToggle }))
+    expect(actions.editLimit).toHaveBeenCalledWith('modelOverride', 'false')
+  })
+
   it('renders the default-off preference in its staged plugin card', () => {
     const actions = renderSubagentModelSelection()
 

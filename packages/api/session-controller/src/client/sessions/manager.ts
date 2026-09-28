@@ -4,6 +4,7 @@ import type { SubagentAddress } from '@deepseek-ai/dsh-subagent/client'
 import { SessionSeq, type SessionId, type SessionSeqCursor } from '@deepseek-ai/dsh-session/types'
 import type { SessionProjectionMap } from '@deepseek-ai/dsh-session-projection/types'
 import type { WorkspaceId } from '@deepseek-ai/dsh-workspace/types'
+import { shallowEqual } from '@deepseek-ai/dsh-client-store'
 import type {
   SessionControlBaseline,
   SessionControlFrame,
@@ -16,7 +17,7 @@ import { mergeOrderedBaseline } from '../ordered-baseline.ts'
 import { isRemoteFailure } from '@deepseek-ai/dsh-api-gateway/client'
 import { assertNever } from '@deepseek-ai/dsh-util-values'
 import type { RemoteFailure, RemoteResult } from '@deepseek-ai/dsh-typert-protocol'
-import type { SessionListEntry, TitledSessionSummary } from './lineage.ts'
+import type { SessionListEntry } from './lineage.ts'
 import { flattenLineage } from './lineage.ts'
 // Type-only merge edge: the title domain's client-namespace outlet declares
 // the 'title' projection key this manager projects into list rows (and any
@@ -59,7 +60,7 @@ export interface SessionListSnapshot {
 
 }
 
-/** Shared projection values and the lifecycle of their explicit baseline read. */
+/** Shared projection values and read lifecycle; identity remains stable while these fields are unchanged. */
 export interface SessionProjectionSnapshot {
   readonly values: Readonly<Partial<SessionProjectionMap>>
   readonly state: 'idle' | 'loading' | 'ready' | 'error'
@@ -72,6 +73,14 @@ interface ProjectionInflight {
 }
 
 type ProjectionLoad = Omit<SessionProjectionSnapshot, 'values'>
+
+interface ListEntryCache {
+  readonly summary: SessionSummary
+  readonly values: Readonly<Partial<SessionProjectionMap>> | undefined
+  readonly blank: boolean
+  readonly fallbackTitle: string | undefined
+  readonly entry: SessionListEntry
+}
 
 type SessionListMutation =
   | { kind: 'upsert' | 'placeholder'; summary: SessionSummary }
@@ -114,18 +123,20 @@ export class SessionManager {
 
 
   private listSnapshotCache: SessionListSnapshot
-  /** Entry-identity cache (reference stability): list rebuilds reuse the previous entry
-   *  object when every field matches — wire refreshes mint all-new summary objects, so identity
-   *  must be recovered by value or every SessionListItem memo misses on every refresh. */
-  private entryCache = new Map<SessionId, SessionListEntry>()
+  /** Reuse derived rows for unchanged inputs, and preserve output identity across equal Host refreshes. */
+  private readonly entryCache = new Map<SessionId, ListEntryCache>()
+  private lineageSummaries: readonly SessionSummary[] = []
+  private lineageOrder: readonly { readonly index: number; readonly depth: number }[] = []
+  /** Previous-generation titles retained only while the current Host has not answered for a row. */
+  private readonly titlePresentationFallbacks = new Map<SessionId, string>()
   private itemsCache: readonly SessionListEntry[] = []
   private readonly notifier = new Notifier(() => {
-    this.listSnapshotCache = this.buildListSnapshot()
+    this.listSnapshotCache = this.buildListSnapshot(this.listSnapshotCache.projectionsBySession)
   })
 
   /** @param remote - generated Remote namespaces used by catalog and history readers. */
   constructor(private readonly remote: SessionRemotes) {
-    this.listSnapshotCache = this.buildListSnapshot()
+    this.listSnapshotCache = this.buildListSnapshot({})
   }
 
   /**
@@ -200,6 +211,7 @@ export class SessionManager {
     this.listMutations = null
     this.listInflight = null
     this.engagedSessions.clear()
+    this.titlePresentationFallbacks.clear()
     const reads = [...this.projectionInflight.values()]
     for (const { controller } of reads) controller.abort()
     this.projectionInflight.clear()
@@ -321,6 +333,9 @@ export class SessionManager {
       store = new ProjectionValueStore()
       const projections = store
       store.subscribeAny(() => {
+        if (projections.values().title !== undefined) {
+          this.titlePresentationFallbacks.delete(sessionId)
+        }
         // Newer history or control metadata corrects a resident Session's stale list hint.
         if (projections.values().sessionListMetadata?.blank === false) {
           this.sessions.get(sessionId)?.handleBlank(false)
@@ -351,6 +366,7 @@ export class SessionManager {
         const result = await this.remote.session.projections({ sessionId }, controller.signal)
         if (controller.signal.aborted) return
         if (result.ok) {
+          this.titlePresentationFallbacks.delete(sessionId)
           if (result.value !== null) {
             store.seed({ ...result.value, asOfSeq: sessionSeqCursor(result.value.asOfSeq) })
           } else if (store.values() === initialValues) {
@@ -437,6 +453,7 @@ export class SessionManager {
           for (const s of result.value.items) {
             if (s.projections !== undefined) this.applyListBlock(s.sessionId, s.projections)
           }
+          this.titlePresentationFallbacks.clear()
         } else {
           this.listState = 'error'
           this.listError = result.error
@@ -624,18 +641,21 @@ export class SessionManager {
       this.replaceControlBaseline(frame.value)
       return
     }
-    this.projectionStore(frame.sessionId).apply(frame.key, frame.value, SessionSeq(frame.seq))
-    this.notifier.markDirty()
+    if (this.projectionStore(frame.sessionId).apply(frame.key, frame.value, SessionSeq(frame.seq))) {
+      this.notifier.markDirty()
+    }
   }
 
   private replaceControlBaseline(baseline: SessionControlBaseline): void {
-
+    const previousSize = this.projectionStores.size
+    let changed = false
     for (const [sessionId, block] of Object.entries(baseline.projections)) {
+      if (this.titlePresentationFallbacks.delete(sessionId as SessionId)) changed = true
       const store = this.projectionStore(sessionId as SessionId)
       const asOfSeq = sessionSeqCursor(block.asOfSeq)
-      store.seed({ ...block, asOfSeq })
+      if (store.seed({ ...block, asOfSeq })) changed = true
     }
-    this.notifier.markDirty()
+    if (changed || this.projectionStores.size !== previousSize) this.notifier.markDirty()
   }
 
   /**
@@ -678,6 +698,7 @@ export class SessionManager {
    * @param sessionId - removed Session identity.
    */
   handleSessionRemoved(sessionId: SessionId): void {
+    this.titlePresentationFallbacks.delete(sessionId)
     const durableSubagent = this.subagentAddress(sessionId) !== undefined
       || this.summaries.some(summary => summary.sessionId === sessionId && summary.origin === 'subagent')
     this.recordMutation(durableSubagent
@@ -737,6 +758,7 @@ export class SessionManager {
    * Opened Session follow streams resume independently through API Gateway.
    */
   handleConnected(): void {
+    this.captureTitlePresentationFallbacks()
     for (const store of this.projectionStores.values()) store.clear()
     this.listMutations = null
     this.listInflight = null
@@ -752,34 +774,54 @@ export class SessionManager {
     for (const parentSessionId of parents) void this.refreshProjections(parentSessionId)
   }
 
-  private buildListSnapshot(): SessionListSnapshot {
-    const merged: TitledSessionSummary[] = this.summaries.map((summary) => {
-      // List rows read the generic 'title' projection key (host-computed unit
-      // value; there is no dedicated title frame).
-      const projectionStore = this.projectionStores.get(summary.sessionId)
-      const title = projectionStore?.get('title')
-      const projectionValues = projectionStore?.values()
+  /** Retain current titles as display text while the replacement generation is unresolved. */
+  private captureTitlePresentationFallbacks(): void {
+    const next = new Map<SessionId, string>()
+    for (const summary of this.summaries) {
+      const projected = this.projectionStores.get(summary.sessionId)?.values().title
+      const title = projected !== undefined
+        ? projected
+        : this.titlePresentationFallbacks.get(summary.sessionId)
+      if (typeof title === 'string' && title !== '') next.set(summary.sessionId, title)
+    }
+    this.titlePresentationFallbacks.clear()
+    for (const [sessionId, title] of next) this.titlePresentationFallbacks.set(sessionId, title)
+  }
+
+  private buildListSnapshot(previousProjections: SessionListSnapshot['projectionsBySession']): SessionListSnapshot {
+    this.refreshLineageOrder()
+    const items = this.lineageOrder.map(({ index, depth }) => {
+      const summary = this.summaries[index] as SessionSummary
+      const projectionValues = this.projectionStores.get(summary.sessionId)?.values()
+      const blank = this.effectiveBlank(summary)
+      const fallbackTitle = this.titlePresentationFallbacks.get(summary.sessionId)
+      const cached = this.entryCache.get(summary.sessionId)
+      if (cached?.summary === summary && cached.values === projectionValues
+        && cached.blank === blank && cached.fallbackTitle === fallbackTitle && cached.entry.depth === depth) {
+        return cached.entry
+      }
+      const projectedTitle = projectionValues?.title
+      const title = projectedTitle !== undefined
+        ? projectedTitle
+        : fallbackTitle
       const metadata = projectionValues?.sessionListMetadata
-      return {
-        ...summary,
+      const { agentAvailable: _agentAvailable, ...row } = summary
+      const next: SessionListEntry = {
+        ...row,
+        depth,
         // Cached list hints can precede a history opening or control update.
-        blank: this.effectiveBlank(summary) && metadata?.blank !== false,
+        blank: blank && metadata?.blank !== false,
         updatedAt: Math.max(summary.updatedAt, metadata?.lastPromptAt ?? 0),
         ...(typeof title === 'string' && title !== '' ? { title } : {}),
         ...(projectionValues === undefined ? {} : { projectionValues }),
       }
-    })
-    const fresh = flattenLineage(merged)
-    const items = fresh.map((entry) => {
-      const prev = this.entryCache.get(entry.sessionId)
-      if (
-        prev !== undefined && prev.updatedAt === entry.updatedAt && prev.running === entry.running
-        && prev.blank === entry.blank
-        && prev.parentSessionId === entry.parentSessionId && prev.cwd === entry.cwd
-        && prev.origin === entry.origin && prev.title === entry.title && prev.depth === entry.depth
-        && prev.projectionValues === entry.projectionValues
-      ) return prev
-      this.entryCache.set(entry.sessionId, entry)
+      const prev = cached?.entry
+      const entry = prev !== undefined && prev.updatedAt === next.updatedAt && prev.running === next.running
+        && prev.blank === next.blank && prev.parentSessionId === next.parentSessionId && prev.cwd === next.cwd
+        && prev.origin === next.origin && prev.title === next.title && prev.depth === next.depth
+        && prev.projectionValues === next.projectionValues
+        ? prev : next
+      this.entryCache.set(summary.sessionId, { summary, values: projectionValues, blank, fallbackTitle, entry })
       return entry
     })
     const itemIds = new Set(items.map(entry => entry.sessionId))
@@ -788,16 +830,43 @@ export class SessionManager {
     }
     const sameOrder = items.length === this.itemsCache.length && items.every((e, i) => e === this.itemsCache[i])
     if (!sameOrder) this.itemsCache = items
+    const projectionEntries = [...this.projectionStores].map(([sessionId, store]): [SessionId, SessionProjectionSnapshot] => {
+      const values = store.values()
+      const load = this.projectionLoads.get(sessionId)
+      const state = load?.state ?? 'idle'
+      const error = load?.error ?? null
+      const previous = previousProjections[sessionId]
+      return [sessionId, previous !== undefined && previous.values === values && previous.state === state && previous.error === error
+        ? previous
+        : { values, state, error }]
+    })
+    const projectionsBySession = Object.fromEntries(projectionEntries)
     return {
       items: this.itemsCache,
       state: this.listState,
       phase: this.listPhase,
       error: this.listError,
-      projectionsBySession: Object.fromEntries([...this.projectionStores].map(([sessionId, store]) => [
-        sessionId,
-        { values: store.values(), state: 'idle', error: null, ...this.projectionLoads.get(sessionId) },
-      ])),
+      projectionsBySession: shallowEqual(previousProjections, projectionsBySession)
+        ? previousProjections
+        : projectionsBySession,
     }
+  }
+
+  /** Host order, membership and parent links determine lineage independently of live projection values. */
+  private refreshLineageOrder(): void {
+    if (this.lineageSummaries === this.summaries) return
+    const changed = this.lineageSummaries.length !== this.summaries.length
+      || this.summaries.some((summary, index) => {
+        const previous = this.lineageSummaries[index] as SessionSummary
+        return previous.sessionId !== summary.sessionId || previous.parentSessionId !== summary.parentSessionId
+      })
+    this.lineageSummaries = this.summaries
+    if (!changed) return
+    const indexes = new Map(this.summaries.map((summary, index) => [summary.sessionId, index]))
+    this.lineageOrder = flattenLineage(this.summaries).map(entry => ({
+      index: indexes.get(entry.sessionId) as number,
+      depth: entry.depth,
+    }))
   }
 }
 

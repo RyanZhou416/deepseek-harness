@@ -489,13 +489,11 @@ export function apply(ctx: Context, config: Config, session?: Session): void {
             modelRequest,
             modelSelectionEnabled,
           )
-          assertAllowedModelSelection(
-            modelSelectionPolicy,
-            parentOptions,
-            requestedChildAgentOptions,
-            modelRequest,
-          )
-          if (requiresRoutePreflight) {
+          const preparedModel = runtimeCtx.subagents.prepareModel(config.provider, requestedChildAgentOptions)
+          if (preparedModel.override === null) {
+            assertAllowedModelSelection(modelSelectionPolicy, parentOptions, requestedChildAgentOptions, modelRequest)
+          }
+          if (requiresRoutePreflight && preparedModel.override === null) {
             const llm = runtimeCtx.get('llm')
             if (llm === undefined) {
               throw new Error('cannot resolve the selected child LLM route because the `llm` service is unavailable')

@@ -7,3 +7,8 @@
     maxNodes: 400
     maxArchiveNodes: 100
     maxFileOps: 100
+- id: session-controller
+  config:
+    listProjectionExcludeKeys:
+      - contextHeaders
+      - turnOutline

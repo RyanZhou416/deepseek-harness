@@ -58,6 +58,48 @@ function totals(overrides: Partial<SessionStatsProjection> = {}): SessionStatsPr
 }
 
 describe('sessionStats projection unit (registry drive)', () => {
+  it('publishes a cold initial view once and retains it across later private boundaries', async () => {
+    const { ctx, session } = await harness(true)
+    try {
+      const values: unknown[] = []
+      ctx.sessionProjections.onChanged((_session, key, value) => { if (key === 'sessionStats') values.push(value) })
+      session.append('step/start', { turn: 1, step: 1 })
+      expect(values).toEqual([totals()])
+      session.append('tool/call', { turn: 1, step: 1, callId: ToolCallId('cold-call'), name: 'synthetic', arguments: '{}' })
+      expect(values).toEqual([totals()])
+      session.append('step/end', { turn: 1, step: 1 })
+      expect(values).toEqual([totals(), totals({ turns: 1, steps: 1 })])
+      expect(ctx.sessionProjections.checkpoint(session).sessionStats?.seq).toBe(session.seq - 1)
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('keeps the wire view stable while private step and tool boundaries advance', () => {
+    const unit = sessionStatsProjectionDefinition
+    const initial = unit.init()
+    const initialView = unit.wire.view(initial)
+    const started = unit.apply(initial, at(10, 'step/start', { turn: 1, step: 1 }))
+    expect(started).not.toBe(initial)
+    expect(unit.wire.view(started)).toBe(initialView)
+    const firstToken = unit.apply(started, attemptAt(20, [{ time: 15, chunk: { type: 'text-delta', index: 0, text: 'synthetic' } }]))
+    expect(firstToken.openStep?.firstTokenTime).toBe(15)
+    expect(unit.wire.view(firstToken)).toBe(initialView)
+    const pending = unit.apply(firstToken, at(25, 'tool/call', {
+      turn: 1, step: 1, callId: ToolCallId('synthetic-call'), name: 'synthetic', arguments: '{}',
+    }))
+    expect(unit.wire.view(pending)).toBe(initialView)
+    const pruned = unit.apply(pending, at(30, 'turn/end', { turn: 1, reason: { kind: 'completed' } }))
+    expect(pruned.pendingCalls).toEqual({})
+    expect(unit.wire.view(pruned)).toBe(initialView)
+    const ended = unit.apply(firstToken, at(35, 'step/end', { turn: 1, step: 1 }))
+    expect(unit.wire.view(ended)).toEqual(totals({ turns: 1, steps: 1 }))
+    expect(unit.wire.view(ended)).not.toBe(initialView)
+    expect(unit.wire.view(ended)).toBe(unit.wire.view(ended))
+    expect(unit.wire.view(initial)).toBe(initialView)
+    expect(unit.wire.view(unit.init())).not.toBe(initialView)
+  })
+
   it('serves zero figures on the empty log', async () => {
     const { ctx, session } = await harness(true)
     expect(ctx.sessionProjections.snapshot(session).values.sessionStats).toEqual(totals())
@@ -76,10 +118,6 @@ describe('sessionStats projection unit (registry drive)', () => {
     session.append('turn/start', { turn: 2 })
     const thirdSeq = closeStep(session, 2, 1)
     session.append('turn/end', { turn: 2, reason: { kind: 'completed' } })
-    // Boundary events that carry no figure change (turn/start, empty-prune
-    // turn/end, user input) fold to the same reference and stay silent;
-    // step/start opens a boundary (internal state) and step/end commits the
-    // counts, so each closed step notifies twice with the step/end value last.
     const counted = changes.filter(change => (change.value as SessionStatsProjection).steps > 0
       || change.seq === firstSeq)
     expect(changes.every(change => change.key === 'sessionStats')).toBe(true)
@@ -91,6 +129,7 @@ describe('sessionStats projection unit (registry drive)', () => {
     expect(snapshot.values.sessionStats).toEqual(totals({ turns: 2, steps: 3 }))
     expect(snapshot.asOfSeq).toBe(session.seq - 1)
     expect(changes.map(change => change.seq)).toContain(secondSeq)
+    expect(counted.map(change => change.seq)).toEqual([firstSeq, secondSeq, thirdSeq])
   })
 
   it('does not count a rejected or empty turn that closes with no step', async () => {

@@ -156,17 +156,71 @@ Count pruning 只删除模型已通过 `job_output` 读取的最旧 completed/ki
 
 ### Client rendering and connection state
 
+#### Projection update work
+
+`ui-subagent` 的关闭目录触发器只订阅所属 root 的目录与直接子项运行状态；完整树的订阅、映射和展开状态由打开时才挂载的菜单持有。保留关闭态数量、名称、运行状态的即时更新，以及悬停、固定展开、键盘、焦点恢复、逐级加载和导航。合并上游时不能把完整 `projectionsBySession`、`byId` 和 status Map 的订阅重新放回关闭态组件；相关状态变化与无关状态不触发重渲染都有真实 store 回归。
+
+`SessionManager` 与 `ClientSessions` 复用未变的投影包装对象、目录行、成员数组和映射。旧序号、相同序号以及未改变任何数据的 baseline 不再触发全局目录刷新；首次出现的空 baseline 仍发布新成员。所有有效更新仍立即可读，微任务通知、连接代际、冷缓存优先级和引用生命周期保持原语义，没有丢弃 Host 控制帧或改成按帧延迟通知。后续增加可观察字段时，必须同时更新包装与等值比较。
+
+`session-projection-cache` 的实时写入接管注册表已经深拷贝的 checkpoint，只继续执行无损 JSON 校验；冷恢复的状态可能与返回视图共享引用，因此仍执行分离复制。检查点仍在日志 flush 前截取，并在日志持久化后才写入缓存；创建、轮次结束、销毁以及 count/interval 写入时机不变。合并时保留这两条所有权路径的区分，以及等待 flush 期间修改实时状态、冷读取返回后修改输入、非法 JSON、写入失败和退出清理回归。若上游取消注册表 checkpoint 的深拷贝保证，实时缓存路径必须同步恢复复制。
+
+2026-09-28 的合成对照中，256 个 Session、24 个更新源、96 次有效更新和 96 次重放，通知由 192 次降为 96 次，目录行与投影包装的引用变化均由 49,152 次降为 96 次，成员数组变化由 192 次降为 0；这些是确定性传播计数，不是浏览器帧率。真实构建产物的 checkpoint 诊断使用 18 个 Session、8 个投影、每投影 256 个嵌套条目，每组运行三个新 Node 进程：CPU 中位数由 421 ms 降到 265 ms，重新引入原实现为 375 ms；wall 中位数分别为 322、283、385 ms。所有样本写出的 18 份缓存文件内容摘要和总字节数完全相同。诊断包含真实 JSON 存储，但排除准备、验证和清理；GC 后内存为端点读数，不代表瞬时峰值。传播计数由 [sessions-service.client.spec.ts](packages/api/session-controller/tests/sessions-service.client.spec.ts) 的 `limits catalog invalidation to sessions with accepted control updates` 用例调用 [projection-update-work.perf.client.ts](packages/api/session-controller/tests/projection-update-work.perf.client.ts)；持久化诊断入口为 [checkpoint-write.perf.ts](packages/session/session-projection-cache/tests/checkpoint-write.perf.ts)。
+
+#### Status and catalog derivation
+
+`ui-session` 在一次 list cut 内集中协调 running、成员与完成未读状态，最多同步发布一次；独立 Remote status 事件仍立即发布。没有状态变化的 projection-only 更新跳过状态 Map 重建。保留首次 baseline 前 idle 事件、未知子代理 running、主视图完成确认、人工交互优先级及卸载清理；32 个 Session 同批变化的确定性回归将状态通知从 32 次降为 1 次，32 行无关投影刷新中的 list 读取从 35 次降为 2 次。上述是工作次数，不是整页耗时。
+
+Session Manager 的行缓存同时核对当前 summary、投影值、有效 blank、展示标题兜底与 depth；Host 成员、顺序和 parent link 未变时复用 lineage 结果。Client 主目录行用 manager entry 弱键与当前 retainedBy 复用，子目录标签覆盖和保留子项仍随后处理，不能直接复用 previousById 中已覆盖的行。缓存只保留当前输入，删除行时修剪，WeakMap 不独立保活旧 entry；公共不可变映射仍是线性构造。
+
+聚焦回归位于 `ui-session/tests/ui-session.client.spec.ts`、`status-controller.client.spec.ts` 与 `session-controller/tests/manager.client.spec.ts`、`sessions-service.client.spec.ts`。256 个合成 Session、24 个更新源、96 次有效更新的对照中，lineage 遍历从 96 次降为 0 次，未命名会话的工作区标题派生从 24,576 次降为 96 次；保留原有有效更新通知和引用变化计数。父节点到达/移除/补全、子目录标签撤销、retain/release 后无关更新、旧快照不变及重连低序号/空标题均有行为验证。
+
+#### Bounded catalog and sidebar work
+
+静态 Client library 保留 `process.env.NODE_ENV` 表达式，由最终 Web shell 决定开发或生产分支；不能让中间 tsdown 构建提前固化为开发模式。生产 `set()` 跳过额外 deep freeze，开发构建仍执行检查；Immer 的 `update()` 语义不变。`scripts/client-bundle-purity.spec.ts` 用真实两段构建固定两种行为，旧 preset 会在该负对照失败。
+
+Workspace 手动排序使用按 id 索引的双向节点和显式后序栈放置新 fork，放置阶段为 O(N)，前置的 recency 排序仍为 O(N log N)。保留 saved 相对顺序、pin/archive 分区、父子与兄弟顺序、缺失或成环 parent 和深链；完整 Ungrouped 顺序使用线性检查。当前 main Session 按 `byId` identity 计算一次并传给目录、flat/search 和行高亮；不能把 `mainView` 引用与 panel 高亮合并，也不能删除非当前显示模式仍需维护的 `activeSessionOrders`。回归位于 `ui-workspace/tests/tree.client.spec.ts` 和 `workspace-browser.client.spec.tsx`。构建产物的 1k/4k 合成对照中，三个新 Node 进程的 wall 中位数分别由 1.229/17.392 ms 降到 0.793/3.060 ms，顺序摘要相同；这是排序组件测量，不是整页帧率。
+
+Session Controller 的 `listProjectionExcludeKeys` 默认 `[]`，保持上游和未知插件的完整提示值；fork Web 模板只排除已确认详情专用的 `contextHeaders` 与 `turnOutline`。注册表和 checkpoint cache 在 state 校验与 wire view 前执行可选排除，水位仅计实际服务的行；完整 follow、显式 projection、restore/hydrate 与持久行不受影响。`sessionListMetadata` 是 blank/recency 计算的必需输入，配置加载时禁止排除。合并上游时重查 Context Overview、schedule、subagent discovery、usage 和第三方提示消费者；详情键若新增目录消费者，需要同步改其按需读取。`fork-runtime/setup-profile.mjs` 只管理 controller 的该字段，保留其它配置与 `!!js` 原文；对无法安全定点更新的 flow/alias/重复配置报错并保持文件不动。
+
+`sessionStats` 与 `contextPressure` 用弱状态键保留仅含标量的公开视图，私有计时/表面记账变化仍完整折叠；值不变时复用 raw view，避免无效全局帧。WeakMap value 不得反向持有 state、Session、Agent 或事件。未读取 cell 的首次已知值仍发布，随后仅私有变化才静默；registry 的双槽比较、日志水位及持久格式不变。`subagentTiming` 对同一记录时间的普通活跃事件复用状态，descriptor/turn 边界仍完整处理。
+
+control carrier 已开始恢复且仍等待 baseline 时，新的 Host generation ready 复用该 opening；若 baseline 已先到或旧流仍健康，则继续 restart，确保清水位后有新 baseline。保留 delayed initial ready、两种 baseline/ready 顺序、terminal failure 和 dispose 回归；旧代码在 pending-recovery 负对照中开三条流，候选仅开两条。
+
 #### Tool detail lazy materialization
 
 `packages/client/ui-tool` 沿用官方 `ToolRow` 输入延迟格式化接口，并让通用结果通过 `outputNode` 保持原始 block 引用，折叠时只检查是否有输出、错误时只取首行；展开后才压平整个输出。`toolRowModel.output` 的按需 getter 缓存专门工具行明确读取的文本；专门 card model 仍按需复制大型数组。
 
 RC.1 已延迟 generic Tool input formatting；fork 只补回仍缺失的 output flatten 与大型 card array lazy materialization。聚焦验证为 `packages/client/ui-tool/tests/tool-row.client.spec.tsx`。
 
+#### Connection recovery under load
+
+Loopback 页面与声明 `ownsHost` 的载体不按浏览器外网 `offline` 状态中断连接或暂停重试；远程页面仍保留原离线抑制策略。真正的载体失败、手动重连和销毁继续走原 Connection 生命周期。重试告警保留本次失败及其 cause；WebSocket 关闭错误附带关闭码、原因和 clean 标志，恢复后的下一次重试不复用旧错误。
+
+Session control reader 遇到终止性协议或业务错误后仍报告失败，并且不在当前健康 generation 内无限重试；新的 Connection generation 创建新 reader。恢复期间的列表标题使用仅供展示的旧字符串，既有投影值与序号仍清空。当前 control baseline（包括缺 title）、成功显式投影读取或成功完整列表会结束对应兜底；连续重连、列表失败、删除与销毁有独立回归，不能把旧显示重新写成权威投影。
+
+Gateway 每个 socket 只保留一枚待确认 Ping。未完成写入时，`bufferedAmount` 的实际下降重置连续停滞计数；写入完成后才开始等待 Pong。连续两个检查周期既无写入进展、或已发送 Ping 连续两个周期无 Pong，仍终止该 socket；Pong、关闭或旧写回调不能影响后续 probe。终止前保留 I/O poll 机会。合并上游时保留慢速排空与完全停滞的区分，不得通过无限等待或单纯加长超时替代。
+
+单个大 write 的部分 TCP 传输不一定让 `bufferedAmount` 下降，仍可能达到有界停滞期限；不能把该修复描述为覆盖所有慢网络。Host 仅在心跳终止时记录 phase、reason 与 bufferedBytes，Client 的关闭码和原因由对应重试告警保留。
+
+聚焦验证为 `packages/client/connection/tests/client-apply.client.spec.ts`、`connection.client.spec.ts`、`packages/api/gateway/tests/stream-server.host.spec.ts`、`gateway.client.spec.ts`、`packages/api/session-controller/tests/manager.client.spec.ts`、`client-apply.client.spec.ts` 和 `apps/web/tests/connection-recovery.e2e.ts`。浏览器验证使用测试私有 Host、已录制的合成 Session、受控列表/基线屏障和页面内网络事件，不操作用户网络或运行实例。
+
 #### Global backend-disconnect overlay
 
 `packages/client/ui-settings-general/src/client/ConnectionOverlay.tsx` 复用官方 `ctx.connection.state`、`reconnect()` 和 `ConnectionIndicator`，在 `shell.overlay` 顶部居中显示 disconnected/connecting/recovered。Sidebar 收起时仍可见，健康初始状态不渲染，恢复绿态保留两秒。
 
 该组件只控制 WebSocket reconnect，不启动 Host。上游只有提供全局、sidebar-independent、actionable 状态且不引入 silent Host restart 时，才能替代它。
+
+### Isolated integrated validation
+
+`DSH_PERF_CAPTURE=1` 为合成 Web 续接场景保存同时段的 Node/浏览器 CPU profile、Chrome timeline 和源码映射（`tmp/runtime-profiles/`）。测量脚本预先定位控件并只检查尾部消息，避免全页可访问性查询污染剖面；普通无剖面基准与剖面归因结果分开。未来替换诊断时保留两侧录制、源码定位和对测试观察开销的检查，不能以单个 API 响应耗时代替卡顿归因。
+
+保留 `apps/web/stress-tests/subagent-reconnect.stress.ts` 的八个真实 continuable child + paced stream + WebSocket 重连组合断言：完整持久化输出、每个孩子恰好一次 start/end、最终释放、父会话标题及未发送草稿保留。该场景报告真实键盘输入与恢复耗时，但不以测试 Host RSS 宣称产品内存稳定；独立临时目录和随机端口不接触用户数据。长历史手动诊断 `apps/web/tests/complex-history.perf.ts` 使用当前 V4 system head、当前五行侧栏预览和 Trajectory 逻辑行数，工具轮次按 Windows `pwsh` / POSIX `bash` 调用并验证真实输出，禁止用旧界面文案或跳过工具错误代替负载。
+
+### Forced ordinary Subagent models
+
+`subagent.modelOverride` 默认为 `false`；设置页 **插件 → Subagent → 强制模型覆盖** 可选择 provider、model、reasoning effort，和深度/容量一起按同一 namespace revision 保存。Host `SubagentRuntime.start/startContinuable` 在创建前覆盖调用者模型参数并验证最终路由；省略 effort 时清除父级继承，采用模型默认值。开启时不支持 `agentOptions` 的普通后端明确拒绝，工作流、Ralph、普通工具与嵌套委派统一受约束，已有子代理/冷恢复保留持久化的模型。该设置不构成对 shell、任意 Host 代码或配置编辑的安全隔离。
+
+AgentTeams 成员是用户指定的例外；核心 `startAgentTeamsMember` symbol 与插件 `harness-compat.startMember` 配对，保留 Team 成员自己的模型选择，普通后代仍走受覆盖的入口。不得改成按标签前缀豁免、model-visible 跳过参数或仅前端默认值。保留现有 `start/startContinuable` 调用路径上的插件生命周期/委派限制。合并上游时验证 `subagent/tests/{service,child-agent,continuation}.spec.ts`、`tool-subagent/tests/model-selection.spec.ts`、设置页 controller/component tests 与 `apps/web/tests/plugin-config.e2e.ts` 的 override 保存快照；同时保留 AgentTeams 内部适配器与对应私有包。
 
 ### Subagent and AgentTeams responsiveness
 
@@ -264,9 +318,9 @@ Mac 主 checkout 已快进至同一 fork master；`clean.command`、`build.comma
 
 ### Local AgentTeams package
 
-维护真源位于 `fork-plugins\dsh-agent-teams`，完整保留上游运行源码、测试、构建脚本和资产。仓库安装器使用 `fork-plugins\releases\nanmicoder-dsh-agent-teams-0.1.20-dsh017rc1.1.tgz`，SHA256 为 `17CDEA664A3EC8764CB8763FEC32A8CAE54F5F6429C89958DBE141A26253FF4B`。该 package 标记为 private，禁止用上游 npm scope 发布；旧制品仍可从 Git 历史恢复。
+维护真源位于 `fork-plugins\dsh-agent-teams`，完整保留上游运行源码、测试、构建脚本和资产。仓库安装器使用 `fork-plugins\releases\nanmicoder-dsh-agent-teams-0.1.20-dsh017rc1.2.tgz`，SHA256 为 `9454629203F5C9BC9500DD377E8DD432CBBF603EDCA9C1D890734955A2524BC8`。该 package 标记为 private，禁止用上游 npm scope 发布；正在运行的 Windows profile 仍使用 `.1`，本轮未切换实例。
 
-当前 fork artifact 随 Git 提交，同事不依赖这台机器的外置 `.local-plugins-src`。工作树只保留当前 AgentTeams 与 Context 安装包及校验值；历史制品由 Git 历史承担回滚证据。
+fork artifact 随 Git 提交，同事不依赖这台机器的外置 `.local-plugins-src`。保留当前与仍被已安装 profile 引用的制品及校验值，历史制品也可从 Git 历史恢复。
 
 必须保留的 fork 行为：
 
@@ -277,10 +331,15 @@ Mac 主 checkout 已快进至同一 fork master；`clean.command`、`build.comma
 5. 普通 captain 不驻留时，成员报告先通过 Host Session Controller cold resume captain；Captain Session start 会重投 durable mailbox，成功逐条 ack，失败记录及后缀释放 delivery lease。
 6. Windows directory rename 使用独立的 5 次重试预算；构建清理目标用跨平台 `basename()` 校验。
 7. `readUnreadMailbox()` 使用只保留 pending 消息的 256-entry / 8 MiB 有界 LRU，并以 `dev/ino/size/mtimeNs/ctimeNs` 检测文件替换；lease 每次按当前时间重算，append/claim/release/ack/archive/remove 成功后精确失效。完整历史读取和磁盘 JSONL 字节格式不变。
+8. 活动轮询把当前 captain 和所有已挂载卡片的 active captain/team 对传给 Host，包括右侧并排会话，在 activity/mailbox 装配前过滤；摘要保留全部任务结构，主会话 staged 计划的长说明与 execution prompt 通过详情读取并按 revision 复用。旧无范围请求保留完整字段和 captainInbox，新 Client 兼容旧 Host；畸形 scope/detail 查询在扫描前返回 400。详情 cache 由各 poller 持有，stop 释放；mutation 代际、同 revision 失效、失败期间 presentation identity 和每次请求自己的 AbortSignal 均须保留，避免旧响应覆盖表单。hidden 暂停，visible 立即刷新，隐藏中止的首次恢复不能提前完成 firstTick。归档旁侧卡数据保留到最后一个卡引用卸载，inactive target 不维持热轮询；归档只读，旁侧卡不获取编辑器长详情。
+
+9. 只有明确 captain/team 对且不含 Captain 发现请求时，在原有 live/archive 目录枚举后先按 team id 过滤，再读取 `team.json` 并重新校验记录 id 与 captain。保留目录顺序、目录错误传播、目录类型过滤和旧 id；Captain 发现仍读取全部团队。Host 与面板复用按 assignee 精确值分组的任务索引，保留任务顺序、首个运行任务、完成数、removed roster、模型选择和详情；缺失 assignee 与显式空值不同。索引只跟随当前输入，不引入跨请求状态缓存。
+
+AgentTeams 的 `scripts/activity-state.perf.mjs` 使用 27/58 个合成团队、1,500/2,600 个任务。请求一个团队摘要时，live 响应由约 2.865 MB 的全量结果降至 10,416 字节，归档由约 5.003 MB 降至 8,458 字节；所选团队的 56/45 项任务完整保留，详情仍可单独读取。明确目标预筛选的构建产物对照每版各启动三个 Node 进程，按相同 case 顺序温热文件/邮箱缓存：live target-summary 为 `[20.27, 19.20, 20.16]` → `[1.12, 1.37, 1.38]` ms，中位数 20.16 → 1.37 ms；archive 为 `[37.28, 37.88, 39.56]` → `[1.45, 1.38, 1.30]` ms，中位数 37.88 → 1.38 ms。结果字节数及任务数相同，Captain 发现仍承担扫描成本。该测量覆盖命名目标的组件读取，不代表整页或模型延迟。成员分组另用 3×12 与 8×256 的合成单团队验证；参考算法访问次数只作复杂度对照，不作旧产品计时，包含邮箱 I/O 的单团队装配未显示稳定耗时收益。离线 verify、类型检查、兼容/HTTP/生命周期验证及旧 consumer 负对照构成后续合并的验证入口。
 
 `.local-plugins-src\...dsh012.2/.3/.4` 只是历史解包产物，不能再当维护源。以后用 `git subtree pull --prefix=fork-plugins/dsh-agent-teams https://github.com/NanmiCoder/dsh-agent-teams.git <tag> --squash` 获取精确官方发布，再在 fork 内重放和验证上述行为；不得用 npm install 覆盖 subtree。
 
-本 fork 以 `v0.1.20` 生成 `0.1.20-dsh017rc1.1`。上游拥有 scheduling、next-step delivery、retired-member cleanup、repair scope 与 task correction；fork adapter 只补 RC.1 source/导航适配、冷 Captain mailbox 恢复和有界 unread mailbox projection。后续上游发布先按行为测试去重，再提升 subtree 基线和私有版本；profile 始终安装 fork artifact。
+本 fork 以 `v0.1.20` 生成 `0.1.20-dsh017rc1.2`。上游拥有 scheduling、next-step delivery、retired-member cleanup、repair scope 与 task correction；fork 保留 RC.1 source/导航适配、冷 Captain mailbox 恢复、有界 unread mailbox projection，以及上述活动状态读取策略。后续上游发布先按行为测试去重，再提升 subtree 基线和私有版本；profile 始终安装 fork artifact。
 
 ### Local Context package
 
@@ -294,7 +353,7 @@ Context 源码的工具归属追踪按 `cordis.original` 解包后的服务身�
 
 ### Local Subscriptions package
 
-维护真源位于 `fork-plugins\dsh-plugin-subscriptions`，仓库安装器使用 `fork-plugins\releases\dsh-plugin-subscriptions-0.9.4-dsh017rc1.1.tgz`，SHA256 为 `A226E7D73A80249752BA926DF20274FBB2A2F0C9E974EB4BD2091C2088DCEAFC`。该版本采用上游 v0.9.4 的多账号 provider、usage UI、Codex 搜索、图片结果、Antigravity 与 provider failover，并增加 RC.1 的 V4 工具角色转换；凭据格式与工具输出不变。
+维护真源位于 `fork-plugins\dsh-plugin-subscriptions`，仓库安装器使用 `fork-plugins\releases\dsh-plugin-subscriptions-0.9.4-dsh017rc1.1.tgz`，SHA256 为 `1A05CEA2811E4B62116AC2EE599BD885D5CAB559C35347DAF189976E16B6A877`。该摘要与 Git 已提交制品及其 `.sha256` 文件一致。该版本采用上游 v0.9.4 的多账号 provider、usage UI、Codex 搜索、图片结果、Antigravity 与 provider failover，并增加 RC.1 的 V4 工具角色转换；凭据格式与工具输出不变。
 
 Windows Web profile 启用 `llm-subscriptions`，保留 `rateLimit.wait: false`。2026-09-26，固定源码包的 506 项无密钥测试通过；隔离 Web profile 与真实 Web profile 均在随机本地端口启动，认证页面返回 HTTP 200，页面包含 Subscriptions 客户端资源。真实 Profile 的 Codex 状态接口识别到两个已存账号，默认账号的用量查询通过并刷新过期访问令牌；另一个账号及真实模型请求尚未验证。旧 profile patch 备份位于 `C:\Project\deepseek-harness-data\diagnostics\profile-backups\pre-subscriptions-enable-20260926`。
 
@@ -370,6 +429,18 @@ Profile 注册 `dsh-sdk-process-raw` 和 `subagent_process`：SDK profile、独�
 | Reference-owned Client Session generations | Replaced by official references | Keep final-release withdrawal and projection-store retention; do not restore `suspendHistory()` |
 | 20k final-message packed rebase | Replaced by cursorless Assistant frames | Keep official transient-stream settlement; do not restore scalar chunk accumulation |
 | Tool output/card lazy calculation | Ported onto RC.1 | Preserve generic output-on-expand and card-array laziness; official already defers input formatting |
+| Closed subagent catalog subscriptions | Preserve | Keep closed selectors root/direct-child-only and mount complete catalog work with the open menu; preserve visible summaries and all interactions |
+| Client projection snapshot identity | Preserve | Reuse unchanged observable values and suppress rejected-frame invalidation without delaying accepted values or changing generation/retention semantics |
+| Live checkpoint ownership transfer | Preserve | Validate already-detached live rows without recopying; keep cold-row detachment and log-before-cache durability |
+| Production static-library environment | Preserve | Keep NODE_ENV branches until the final shell build; development freezes and production bypass both need built checks |
+| Workspace ordering work | Preserve | Keep indexed fork moves, shared current-session derivation, saved/pin/archive semantics and deep/cyclic parent cases |
+| Optional catalog hint exclusions | Preserve | Default to all keys, protect sessionListMetadata, filter before view/parse, retain explicit reads and unknown plugins |
+| Connection recovery under load | Preserve | Keep loopback independent of external offline hints, one progress-aware bounded Ping, fresh control readers after terminal failures, display-only title retention and close diagnostics |
+| Status and catalog derivation | Preserve | Publish one list-cut status result, skip unchanged state work, reuse lineage and row inputs, preserve synchronous Remote status and exact retention/label invalidation |
+| AgentTeams target reads and task ownership | Preserve | Filter explicit targets before JSON reads, retain directory enumeration and errors, captain discovery, workspace/captain checks and exact ordered assignee groups |
+| Stable public projection views | Preserve | Keep full private fold state and watermarks; weak scalar-view entries must not retain Session or Agent owners |
+| Pending control recovery | Preserve | Reuse a recovery opening before its baseline; restart after an accepted baseline or terminal failure |
+| Scoped AgentTeams activity | Preserve | Keep paired targets, legacy full compatibility, complete task structure, staged detail revision/abort ownership and visibility recovery |
 | Jobs one-hour TTL / 100 terminal target | Ported onto RC.1 | Official ring caps do not bound terminal-record count or lifetime; preserve unread protection and lightweight heap indexes |
 | Jobs shared timer initiator isolation | Preserve | Create initial, renewed and deferred-prune timers without an Agent initiator; preserve owner cleanup, expiry behavior and scheduling during teardown |
 | Legacy `memory-admission` package | Retired | Use official `dsh-subagent.maxActiveSubagents` and `maxDepth` settings |

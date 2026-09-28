@@ -59,6 +59,7 @@ import { ACTION_ART, LEAD_ART, memberArtUrl } from './artwork.ts'
 import { OPEN_PANEL_EVENT } from './AgentTeamsCard.tsx'
 import { StagingPlanEditor } from './StagingPlanEditor.tsx'
 import type { AgentTeamsCardData } from './agent-teams-card-definition.ts'
+import { indexTasksByAssignee } from '../task-index.ts'
 import type { AgentTeamsLocaleKey, AgentTeamsTranslate } from './locales.ts'
 import {
   DEFAULT_PANEL_LAYOUT,
@@ -211,11 +212,10 @@ function CollapsedBadge({ count, busy, onClick, t }: {
 
 function memberStateLabel(
   member: ActivityMember,
-  tasks: readonly ActivityTask[],
+  owned: readonly ActivityTask[],
   historic: boolean,
   t: AgentTeamsTranslate,
 ): string {
-  const owned = tasks.filter((task) => task.assignee === member.name)
   if (member.activity === 'working') return t('member.state.working')
   if (owned.some((task) => task.status === 'failed')) return t('member.state.failed')
   if (owned.some((task) => task.state === 'blocked')) return t('member.state.waiting')
@@ -227,10 +227,10 @@ function memberStateLabel(
 
 function memberStatusText(
   member: ActivityMember,
+  owned: readonly ActivityTask[],
   tasks: readonly ActivityTask[],
   t: AgentTeamsTranslate,
 ): string {
-  const owned = tasks.filter((task) => task.assignee === member.name)
   const current = owned.find((task) => task.id === member.currentTask)
   const blocked = owned.find((task) => task.state === 'blocked')
   if (member.activity === 'working' && current !== undefined) {
@@ -488,19 +488,26 @@ function TeamSection({ team, modelDirectory, onContinuePlanning, onDiscarded, on
   const discarded = historic && team.phase === 'staged'
   const stopped = !historic && team.halted === true
   const busyCount = team.members.filter((member) => member.activity === 'working').length
-  const assignedCount = team.tasks.filter((task) => task.assignee !== '' && task.assignee !== CAPTAIN_ASSIGNEE).length
-  const captainOwned = team.tasks.filter((task) => task.assignee === CAPTAIN_ASSIGNEE
-    && task.status !== 'completed' && task.status !== 'failed' && task.status !== 'cancelled')
+  const taskIndex = useMemo(() => {
+    const byAssignee = indexTasksByAssignee(team.tasks)
+    const captainOwned: ActivityTask[] = []
+    let assignedCount = 0
+    let completedCount = 0
+    let unfinishedCount = 0
+    for (const task of team.tasks) {
+      const terminal = task.status === 'completed' || task.status === 'failed' || task.status === 'cancelled'
+      if (task.assignee !== '' && task.assignee !== CAPTAIN_ASSIGNEE) assignedCount += 1
+      if (task.status === 'completed') completedCount += 1
+      if (!terminal) unfinishedCount += 1
+      if (task.assignee === CAPTAIN_ASSIGNEE && !terminal) captainOwned.push(task)
+    }
+    return { byAssignee, captainOwned, assignedCount, completedCount, unfinishedCount }
+  }, [team.tasks])
+  const { captainOwned, assignedCount, completedCount, unfinishedCount } = taskIndex
   const captainBusy = captainOwned.length > 0
   const captainTaskIds = formatTaskIds(captainOwned.map((task) => task.id), t)
-  const completedCount = team.tasks.filter((task) => task.status === 'completed').length
   const allCompleted = team.tasks.length > 0 && completedCount === team.tasks.length
-  const allSettled = team.tasks.length > 0 && team.tasks.every((task) => (
-    task.status === 'completed' || task.status === 'failed' || task.status === 'cancelled'
-  ))
-  const unfinishedCount = team.tasks.filter((task) => (
-    task.status !== 'completed' && task.status !== 'failed' && task.status !== 'cancelled'
-  )).length
+  const allSettled = team.tasks.length > 0 && unfinishedCount === 0
   const canStop = !historic && team.phase === 'running' && team.halted !== true && teamIsActive(team)
   const stopTeam = async (): Promise<void> => {
     if (stopping) return
@@ -553,7 +560,7 @@ function TeamSection({ team, modelDirectory, onContinuePlanning, onDiscarded, on
           )}
         </header>
 
-        {team.phase === 'staged' && !historic && modelDirectory !== undefined && onContinuePlanning !== undefined && onDiscarded !== undefined && (
+        {team.phase === 'staged' && team.detail === 'full' && !historic && modelDirectory !== undefined && onContinuePlanning !== undefined && onDiscarded !== undefined && (
           <StagingPlanEditor
             team={team}
             modelDirectory={modelDirectory}
@@ -613,7 +620,7 @@ function TeamSection({ team, modelDirectory, onContinuePlanning, onDiscarded, on
         {membersOpen && <div className={css.delegationTree}>
           {team.members.length === 0 && <span className={css.emptyHint}>{t('members.empty')}</span>}
           {team.members.map((member) => {
-            const owned = team.tasks.filter((task) => task.assignee === member.name)
+            const owned = taskIndex.byAssignee.get(member.name)?.tasks ?? []
             const memberModel = memberRouteLabel(member)
             return (
               <div key={member.id || member.name} className={css.memberBlock} data-activity={member.activity}>
@@ -656,7 +663,7 @@ function TeamSection({ team, modelDirectory, onContinuePlanning, onDiscarded, on
                             ? t('member.state.stopped')
                             : team.phase === 'staged'
                               ? t('member.state.staged')
-                              : memberStateLabel(member, team.tasks, historic, t)}
+                              : memberStateLabel(member, owned, historic, t)}
                       </span>
                     </span>
                     <span className={css.memberStatusLine}>{discarded
@@ -669,7 +676,7 @@ function TeamSection({ team, modelDirectory, onContinuePlanning, onDiscarded, on
                         task.status === 'completed' || task.status === 'failed' || task.status === 'cancelled'
                       ))
                         ? t('member.status.settled')
-                      : memberStatusText(member, team.tasks, t)}</span>
+                      : memberStatusText(member, owned, team.tasks, t)}</span>
                   </span>
                   <span className={css.memberCount}>{member.done}/{member.total}</span>
                 </button>
@@ -738,6 +745,7 @@ function historicCardTeam(data: AgentTeamsCardData, owner: string): ActivityTeam
     name: data.teamName,
     captainSessionId: data.captainSessionId || owner,
     phase: 'running',
+    detail: 'summary',
     members: data.members.map((member) => ({
       ...member,
       status: 'removed',
@@ -750,7 +758,6 @@ function historicCardTeam(data: AgentTeamsCardData, owner: string): ActivityTeam
     })),
     tasks: [],
     messageCount: 0,
-    captainInbox: [],
   }
 }
 
@@ -813,10 +820,6 @@ export function ActivityPanel({ sessionsList, modelDirectories, openMember, t, c
   const { teams, archivedTeams } = useSyncExternalStore(
     subscribeActivitySnapshots,
     getActivitySnapshotsSnapshot,
-  )
-  const currentTargets = useMemo(
-    () => current === undefined ? [] : monitorTargets.filter((target) => target.sessionId === current),
-    [current, monitorTargets],
   )
   const currentRef = useRef(current)
   useEffect(() => { currentRef.current = current }, [current])
@@ -914,10 +917,10 @@ export function ActivityPanel({ sessionsList, modelDirectories, openMember, t, c
 
   useEffect(() => {
     if (current === undefined) return
-    // Cards keep live teams on the normal cadence. The current-session scope
+    // Mounted cards keep their teams on the normal cadence. The current-session scope
     // also performs one cold-start discovery pass so archived/cardless teams
     // survive a browser or `dsh web` restart.
-    const controller = startActivityPolling(currentTargets, { discoverySessionId: current })
+    const controller = startActivityPolling(monitorTargets, { discoverySessionId: current })
     let active = true
     const tracker = autoOpenTrackerRef.current
     if (tracker.sessionId === current && !tracker.restoreComplete) {
@@ -934,7 +937,7 @@ export function ActivityPanel({ sessionsList, modelDirectories, openMember, t, c
       active = false
       controller.stop()
     }
-  }, [current, currentTargets])
+  }, [current, monitorTargets])
 
   useEffect(() => {
     const onOpenPanel = (event: Event): void => {

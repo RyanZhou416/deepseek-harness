@@ -359,6 +359,44 @@ function appendAssistant(
 }
 
 describe('contextPressure session projection', () => {
+  it('publishes a cold pressure view once while private surface accounting keeps advancing', async () => {
+    const { ctx, session } = await harness()
+    try {
+      const values: unknown[] = []
+      ctx.sessionProjections.onChanged((_session, key, value) => { if (key === 'contextPressure') values.push(value) })
+      appendUser(session, 'Synthetic first input')
+      const firstState = ctx.sessionProjections.stateOf(session, 'contextPressure')
+      if (firstState === undefined) throw new Error('context pressure state missing after the first input')
+      const firstSurface = firstState.surfaceTokens
+      expect(values).toEqual([{}])
+      appendUser(session, 'Synthetic second input')
+      expect(ctx.sessionProjections.stateOf(session, 'contextPressure')?.surfaceTokens).toBeGreaterThan(firstSurface)
+      expect(values).toEqual([{}])
+      expect(ctx.sessionProjections.checkpoint(session).contextPressure?.seq).toBe(session.seq - 1)
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('keeps private surface accounting without republishing an unchanged pressure view', async () => {
+    const { ctx, session } = await harness()
+    try {
+      const changed: string[] = []
+      ctx.sessionProjections.onChanged((_session, key) => { changed.push(key) })
+      recordContext(session, 'synthetic', 64_000)
+      changed.length = 0
+      appendUser(session, 'Synthetic pending usage sample')
+      expect(ctx.sessionProjections.stateOf(session, 'contextPressure')?.surfaceTokens).toBeGreaterThan(0)
+      expect(pressure(ctx, session)).toEqual({ contextWindow: 64_000 })
+      expect(changed).not.toContain('contextPressure')
+      usageChunk(session, { inputTokens: 100, outputTokens: 1 }, 1, 1)
+      expect(changed).toContain('contextPressure')
+      expect(pressure(ctx, session)).toEqual({ contextWindow: 64_000, pressureTokens: 100, projectedTokens: 100 })
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
   it('serves no pressure or capacity for an empty log', async () => {
     const { ctx, session } = await harness()
     expect(pressure(ctx, session)).toEqual({})

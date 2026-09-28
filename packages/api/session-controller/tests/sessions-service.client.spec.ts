@@ -15,6 +15,9 @@ import type {
   SessionAssistantStreamBaseline, SessionFollowFrame, SessionFollowRequest, SessionRequestId,
 } from '../src/types.ts'
 import { FOLLOW, err, followScript, sessionWorld } from './remote/session.client.ts'
+import { measureProjectionUpdateWork, PROJECTION_WORKLOAD } from './projection-update-work.perf.client.ts'
+import * as lineage from '../src/client/sessions/lineage.ts'
+import * as workspacePath from '@deepseek-ai/dsh-util-workspace-path'
 
 const sid = (s: string): SessionId => s as SessionId
 /** ClientSessions uses the Gateway client for stream supervision and the native Remote mocks for responses. */
@@ -79,6 +82,122 @@ async function feedList(b: Bench, rows: FeedRow[]): Promise<void> {
 }
 
 describe('list store projection', () => {
+  it('restores the cached base row when a parent catalog withdraws its label override', async ({ bench }) => {
+    const b = bench()
+    await feedList(b, [{ id: 'parent' }, { id: 'child', cwd: '/synthetic/project' }])
+    b.svc.handleControlFrame({ type: 'projection', sessionId: sid('parent'), key: 'subagentCatalog', seq: 1,
+      value: [{ id: 'child', label: 'Delegated label', createdAt: 1, mode: 'continuable' }] })
+    await Promise.resolve()
+    await Promise.resolve()
+    const before = b.svc.list.getSnapshot()
+    expect(before.byId[sid('child')]?.displayTitle).toBe('Delegated label')
+    b.svc.handleControlFrame({ type: 'projection', sessionId: sid('parent'), key: 'subagentCatalog', seq: 2, value: [] })
+    await Promise.resolve()
+    await Promise.resolve()
+    expect(b.svc.list.getSnapshot().byId[sid('child')]?.displayTitle).toBe('project')
+    expect(before.byId[sid('child')]?.displayTitle).toBe('Delegated label')
+  })
+
+  it('keeps current retention counts through unrelated projection updates without changing old snapshots', async ({ bench }) => {
+    const b = bench()
+    await feedList(b, [{ id: 's1' }, { id: 's2' }])
+    using reference = b.svc.retain(sid('s1'), { source: 'mainView' })
+    await reference.ready
+    await Promise.resolve()
+    const held = b.svc.list.getSnapshot()
+    expect(held.byId[sid('s1')]?.retainedBy).toEqual({ mainView: 1 })
+    b.svc.handleControlFrame({ type: 'projection', sessionId: sid('s2'), key: 'title', seq: 1, value: 'Other title' })
+    await Promise.resolve()
+    await Promise.resolve()
+    expect(b.svc.list.getSnapshot().byId[sid('s1')]?.retainedBy).toEqual({ mainView: 1 })
+    reference.release()
+    b.svc.handleControlFrame({ type: 'projection', sessionId: sid('s2'), key: 'title', seq: 2, value: 'Another title' })
+    await Promise.resolve()
+    await Promise.resolve()
+    expect(b.svc.list.getSnapshot().byId[sid('s1')]?.retainedBy).toEqual({})
+    expect(held.byId[sid('s1')]?.retainedBy).toEqual({ mainView: 1 })
+  })
+
+  it('keeps lineage traversal out of projection-only catalog updates', async ({ bench }) => {
+    const traversal = vi.spyOn(lineage, 'flattenLineage')
+    try {
+      const work = await measureProjectionUpdateWork(bench().svc, () => { traversal.mockClear() })
+      console.info('catalog lineage work', JSON.stringify({ ...PROJECTION_WORKLOAD, traversals: traversal.mock.calls.length, ...work }))
+      expect(traversal.mock.calls.length).toBe(0)
+      expect(work).toEqual({ notifications: 96, projectionChanges: 96, rowChanges: 96, membershipChanges: 0 })
+    } finally {
+      traversal.mockRestore()
+    }
+  })
+
+  it('derives workspace titles only for changed catalog rows', async ({ bench }) => {
+    const b = bench()
+    const rows = Array.from({ length: 256 }, (_, index) => ({ id: `work-${index}`, cwd: `/synthetic/workspace-${index}` }))
+    await feedList(b, rows)
+    const names = vi.spyOn(workspacePath, 'workspaceTitleOf')
+    const before = b.svc.list.getSnapshot()
+    try {
+      for (let index = 0; index < 96; index++) {
+        b.svc.handleControlFrame({ type: 'projection', sessionId: sid(`work-${index % 24}`), key: 'tokenUsage',
+          seq: index + 1, value: { uncachedInputTokens: 100, outputTokens: index + 1, cacheReadTokens: 0, cacheWriteTokens: 0 } })
+        await Promise.resolve()
+        await Promise.resolve()
+      }
+      console.info('catalog title derivations', JSON.stringify({ sessions: 256, updates: 96, derivations: names.mock.calls.length }))
+      expect(names).toHaveBeenCalledTimes(96)
+      const after = b.svc.list.getSnapshot()
+      expect(after.ids).toBe(before.ids)
+      expect(after.byId[sid('work-255')]).toBe(before.byId[sid('work-255')])
+      expect(after.byId[sid('work-0')]?.displayTitle).toBe('workspace-0')
+      expect(before.byId[sid('work-0')]?.projectionValues).toBeUndefined()
+      expect(after.byId[sid('work-0')]?.projectionValues?.tokenUsage?.outputTokens).toBe(73)
+    } finally {
+      names.mockRestore()
+    }
+  })
+
+  it('limits catalog invalidation to sessions with accepted control updates', async ({ bench }) => {
+    const work = await measureProjectionUpdateWork(bench().svc)
+    console.info('projection update work', JSON.stringify({ ...PROJECTION_WORKLOAD, ...work }))
+    expect(work).toEqual({
+      notifications: PROJECTION_WORKLOAD.acceptedUpdates,
+      projectionChanges: PROJECTION_WORKLOAD.acceptedUpdates,
+      rowChanges: PROJECTION_WORKLOAD.acceptedUpdates,
+      membershipChanges: 0,
+    })
+  })
+
+  it('preserves unchanged catalog and projection references and skips stale-control notifications', async ({ bench }) => {
+    const b = bench()
+    await feedList(b, [
+      { id: 'active', projections: { title: 'active' } },
+      { id: 'idle', projections: { title: 'idle' } },
+    ])
+    const before = b.svc.list.getSnapshot()
+    const notify = vi.fn()
+    const stop = b.svc.list.subscribe(notify)
+    try {
+      b.svc.handleControlFrame({
+        type: 'projection', sessionId: sid('active'), key: 'title', value: 'changed', seq: 1,
+      })
+      await Promise.resolve()
+      const changed = b.svc.list.getSnapshot()
+      expect(changed.byId[sid('active')]?.title).toBe('changed')
+      expect(changed.byId[sid('idle')]).toBe(before.byId[sid('idle')])
+      expect(changed.ids).toBe(before.ids)
+      expect(changed.projectionsBySession[sid('idle')]).toBe(before.projectionsBySession[sid('idle')])
+      expect(notify).toHaveBeenCalledOnce()
+      b.svc.handleControlFrame({
+        type: 'projection', sessionId: sid('active'), key: 'title', value: 'stale', seq: 0,
+      })
+      await Promise.resolve()
+      expect(b.svc.list.getSnapshot()).toBe(changed)
+      expect(notify).toHaveBeenCalledOnce()
+    } finally {
+      stop()
+    }
+  })
+
   it('projects durable titles separately from cwd/id display fallbacks and parent links', async ({ bench }) => {
     const b = bench()
     b.svc.handleControlFrame({
