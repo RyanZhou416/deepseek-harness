@@ -111,9 +111,9 @@ describe('ui-settings-subagent apply', () => {
     await vi.waitFor(() => { expect(slots.entries('settings.general.item')).toHaveLength(1) })
     const row = slots.entries('settings.general.item')[0]!
     expect(row.options).toMatchObject({ id: 'subagent-model-override', order: 16 })
-    const face = (row.inject as () => SubagentOverrideRowInjected)()
+    const face = (row.inject as () => Pick<SubagentOverrideRowInjected, 'selectOverride'>)()
     const page = slots.entries('plugins.item')[0]!
-    const pageFace = (page.inject as () => SubagentCardFace)()
+    const pageFace = (page.inject as () => Pick<SubagentCardFace, 'editLimit' | 'hooks'>)()
     pageFace.editLimit('maxDepth', '3')
     const scope = ctx.configForms.get('subagent')
     const mutate = vi.spyOn(scope, 'mutate').mockResolvedValue(true)
