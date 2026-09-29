@@ -3663,13 +3663,16 @@ export interface Config {
    */
   modelSelectionSettings?: boolean
   /**
-   * Expose `run_in_background` (default true). Disabled instances omit the
-   * parameter and reject forced background calls.
+   * Allow background delegation (default true). The scheduling parameter is
+   * exposed only when foreground is also enabled. Disabled instances reject
+   * forced background calls.
    */
   enableRunInBackground?: boolean
+  /** Allow foreground result collection (default true); false makes every accepted call return a background id. */
+  enableRunInForeground?: boolean
   /**
-   * Background execution policy (default `one-shot`). `one-shot` defaults calls
-   * to foreground; `continuable` defaults them to background, requires a provider
+   * Background execution policy (default `one-shot`). When foreground is enabled,
+   * `one-shot` defaults calls to foreground; `continuable` defaults to background and requires a provider
    * with the `prepareContinuable` capability, and returns the durable child id.
    * Follow-up adapters remain independently optional.
    */

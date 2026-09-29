@@ -70,6 +70,12 @@ Continuable-subagent Queue edit/remove/steer 由 alpha.2 的通用 `session.upda
 
 ## Source deltas
 
+### Goal disabled by default
+
+所有内置 base-backed profile 关闭 Goal 服务、自动续跑、模型工具与命令；Web 预设和目标栏也关闭。`goal-disabled` 准入插件阻止已排队的 Goal 轮次和收尾通知进入新模型请求，混合输入保留普通消息，旧 Goal 日志不改写。Goal 实现和历史格式仍保留，专用测试以显式 opt-in 组合继续覆盖它。
+
+部署前须在 Host 停止后同步外置 `chatgpt-dsh` 预设，禁用其 `command-goal` 与 `tool-goal` 两行。不得清空既有 Goal、会话或缓存来完成禁用。保留 `goal-round-driver/tests/disabled.spec.ts`、`apps/web/tests/goal-disabled.e2e.ts`、Web 预设组合测试和 `goal-disabled` 记录会话；合并上游时不得只关闭模型工具而恢复自动驱动。
+
 ### Latest user-message revision
 
 Chat edits the latest ordinary text-only user message in its existing idle Session with no pending input. `session.editLastMessage` admits a durable queued revision; `agent/prepare-input` excludes the obsolete suffix before context assembly, and `agent/message-surface` finalizes the normally processed input at request admission. Preserve the Session identity and current model, strict exclusion of the old prompt and response from derived history, retry identity across request preparation, and hidden superseded Chat rows after reload. Original log events and spent-token totals remain; filesystem effects are not rolled back. Focused verification lives in `packages/api/session-controller/tests/edit-last-message.host.spec.ts`, Chat conversation-node tests, and the Web message-actions scenario.
@@ -216,7 +222,17 @@ Gateway 每个 socket 只保留一枚待确认 Ping。未完成写入时，`buff
 
 保留 `apps/web/stress-tests/subagent-reconnect.stress.ts` 的八个真实 continuable child + paced stream + WebSocket 重连组合断言：完整持久化输出、每个孩子恰好一次 start/end、最终释放、父会话标题及未发送草稿保留。该场景报告真实键盘输入与恢复耗时，但不以测试 Host RSS 宣称产品内存稳定；独立临时目录和随机端口不接触用户数据。长历史手动诊断 `apps/web/tests/complex-history.perf.ts` 使用当前 V4 system head、当前五行侧栏预览和 Trajectory 逻辑行数，工具轮次按 Windows `pwsh` / POSIX `bash` 调用并验证真实输出，禁止用旧界面文案或跳过工具错误代替负载。
 
+### Background-only delegation
+
+Shipped base and Web preset delegation tools set `enableRunInForeground: false`. The tool omits the scheduling parameter and foreground output variant, defaults one-shot providers to background Jobs, and rejects explicit `run_in_background: false` before model validation or child creation. Continuable children retain their durable ids, messages and settlement notices. Preserve execution-time rejection, cancellation and Job collection; prompt-only guidance is insufficient. Workflow and Ralph keep their separate orchestration policies.
+
+The package default remains `true` for custom compositions. Deploying this policy to the existing Windows profile also requires `enableRunInForeground: false` on the external `chatgpt-dsh` preset's delegation rows. The optional [process-worker overlay](fork-runtime/web/subagent-process-background.patch.yml) changes the existing `subagent_process` row to a background Job. Apply runtime configuration only after the running Host has stopped; source changes do not update an already loaded tool. These changes do not modify Session formats or stored data.
+
+Focused verification: `packages/subagent/tool-subagent/tests/tool-subagent.spec.ts`, model-selection tests, and the keyless `subagent-background-only` recorded-session scenario.
+
 ### Forced ordinary Subagent models
+
+通用设置的 **Subagent 模型覆盖** 行与插件页共用 `subagent.modelOverride`。模型和推理强度选择即时保存，仅修改该字段并携带当前修订；不提交插件页的未保存草稿。保留“不覆盖”、模型默认强度、切换模型清除旧强度、只读与旧 Host 隐藏、失效模型标识保留和失败时维持已接受值。验证入口为 `ui-settings-subagent` 的组件与注册测试，以及 `apps/web/tests/plugin-config.e2e.ts` 的 General Settings 场景。
 
 `subagent.modelOverride` 默认为 `false`；设置页 **插件 → Subagent → 强制模型覆盖** 可选择 provider、model、reasoning effort，和深度/容量一起按同一 namespace revision 保存。Host `SubagentRuntime.start/startContinuable` 在创建前覆盖调用者模型参数并验证最终路由；省略 effort 时清除父级继承，采用模型默认值。开启时不支持 `agentOptions` 的普通后端明确拒绝，工作流、Ralph、普通工具与嵌套委派统一受约束，已有子代理/冷恢复保留持久化的模型。该设置不构成对 shell、任意 Host 代码或配置编辑的安全隔离。
 

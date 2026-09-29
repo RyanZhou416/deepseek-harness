@@ -24,6 +24,9 @@
   - button "详细"
   - text: 开发者工具 显示用于调试和排查问题的工具与信息
   - switch "开发者工具"
+  - text: Subagent 模型覆盖 仅影响新建的普通 Subagent
+  - button "Subagent 覆盖模型": 不覆盖
+  - button "Subagent 推理强度" [disabled]: 模型默认值
   - text: 繁忙时的发送行为 智能体运行时 Enter 键和发送按钮的行为；Cmd/Ctrl+Enter 使用另一行为
   - button "排队发送"
   - text: 当前版本：{{version}}

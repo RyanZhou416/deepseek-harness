@@ -111,7 +111,7 @@ describe('web e2e: Goal keeps one assistant action row per completed turn', () =
   async function launch(): Promise<void> {
     sessionEvents = []
     scaffold = await launchWebScaffold(
-      MODE === 'record' ? {} : { replayFixture: FIXTURE, replayOverride: OVERRIDE },
+      { enableGoals: true, ...(MODE === 'record' ? {} : { replayFixture: FIXTURE, replayOverride: OVERRIDE }) },
     )
     await seedPackageInventory(scaffold.workspaceCwd)
     scaffold.ctx.on('session/event', (_session, event: SessionEvent) => { sessionEvents.push(event) })

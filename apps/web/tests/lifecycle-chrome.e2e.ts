@@ -54,9 +54,9 @@ describe('web e2e: lifecycle & chrome (workspace flow / reload / dark mode)', ()
   const sessionEvents: SessionEvent[] = []
 
   beforeAll(async () => {
-    scaffold = await launchWebScaffold(MODE === 'record'
+    scaffold = await launchWebScaffold({ enableGoals: true, ...(MODE === 'record'
       ? {}
-      : { replayFixture: FIXTURE, replayOverride: REPLAY_OVERRIDE, paceMs: REPLAY_PACE_MS })
+      : { replayFixture: FIXTURE, replayOverride: REPLAY_OVERRIDE, paceMs: REPLAY_PACE_MS }) })
     scaffold.ctx.on('session/event', (_session, event: SessionEvent) => { sessionEvents.push(event) })
     browser = await chromium.launch()
     page = await newEnglishPage(browser)
@@ -198,7 +198,7 @@ describe('web e2e: lifecycle & chrome (workspace flow / reload / dark mode)', ()
   })
 
   it.skipIf(MODE === 'record')('shows active Plan as the business-state status action', async () => {
-    const activeScaffold = await launchWebScaffold()
+    const activeScaffold = await launchWebScaffold({ enableGoals: true })
     const activePage = await newEnglishPage(browser)
     const activeTripwire = watchConsole(activePage)
     try {
@@ -267,7 +267,7 @@ describe('web e2e: lifecycle & chrome (workspace flow / reload / dark mode)', ()
   })
 
   it.skipIf(MODE === 'record')('shows the active Plan chip with the Chinese copy', async () => {
-    const zhScaffold = await launchWebScaffold()
+    const zhScaffold = await launchWebScaffold({ enableGoals: true })
     const zhPage = await browser.newPage({ viewport: { width: 1680, height: 1000 }, locale: ZH_BROWSER_LOCALE })
     const zhTripwire = watchConsole(zhPage)
     try {

@@ -3,6 +3,9 @@
 # User profile, home, and invocation patches still apply above it.
 
 - insert:
+    - id: goal-disabled
+      name: '@deepseek-ai/dsh-goal-round-driver/disabled'
+
     - id: sdk-app-startup
       name: '@deepseek-ai/dsh-sdk-app'
       config:

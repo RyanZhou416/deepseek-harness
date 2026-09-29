@@ -1,0 +1,11 @@
+# Goal is disabled across the deployment, including restored Goal input.
+- id: goal-disabled
+  disabled: false
+- id: goal
+  disabled: true
+- id: goal-round-driver
+  disabled: true
+- id: command-goal
+  disabled: true
+- id: tool-goal
+  disabled: true

@@ -1,0 +1,9 @@
+# Apply on a stopped Windows profile that already owns tool-subagent-process.
+- id: tool-subagent-process
+  config:
+    provider: dsh-sdk-process-raw
+    toolName: subagent_process
+    enableRunInBackground: true
+    enableRunInForeground: false
+    backgroundMode: one-shot
+    maxDepth: provider-managed

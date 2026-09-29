@@ -9,7 +9,7 @@ English | [中文](README.zh.md)
 
 ## Summary
 
-`ralph` runs a foreground sequence of fresh child agents against one immutable objective, with each round receiving only the previous bounded report and shared workspace state. It returns when a worker reports completion or a concrete blocker, or when the configured round limit is reached; those reports are not independently verified. Parent conversation and prior child sessions are never copied into a new round. Use it only when the direct human explicitly requests Ralph-style fresh-agent iteration; use goal tools for ordinary long-running work and subagents or workflows for bounded delegation.
+`ralph` runs a foreground sequence of fresh child agents against one immutable objective, with each round receiving only the previous bounded report and shared workspace state. It returns when a worker reports completion or a concrete blocker, or when the configured round limit is reached; those reports are not independently verified. Parent conversation and prior child sessions are never copied into a new round. Use it only when the direct human explicitly requests Ralph-style fresh-agent iteration; use subagents or workflows for bounded delegation.
 
 ## Table of Contents
 
@@ -25,7 +25,7 @@ English | [中文](README.zh.md)
 <a id="use-this-package"></a>
 ## Use this package
 
-The `ralph` tool runs a fixed foreground loop: one fresh child per round works on the immutable objective in the shared workspace, and only a bounded structured report crosses rounds. Use it only when the direct human explicitly asks for a Ralph loop or fresh-agent iterative execution. For ordinary long-running same-session work, use goal tools; for bounded delegation and fan-out, use plain subagents or the `workflow` tool.
+The `ralph` tool runs a fixed foreground loop: one fresh child per round works on the immutable objective in the shared workspace, and only a bounded structured report crosses rounds. Use it only when the direct human explicitly asks for a Ralph loop or fresh-agent iterative execution. For bounded delegation and fan-out, use plain subagents or the `workflow` tool.
 
 ### Calling the tool
 
@@ -113,7 +113,7 @@ Every parent request in this plugin's registration scope receives the fixed rout
 ##### Ralph guidance
 
 ```markdown
-Use the ralph tool ONLY when the direct human explicitly asks for a Ralph loop or fresh-agent iterative execution. Each Ralph round starts a fresh child with no conversation seed and uses the shared workspace as durable memory. Completion and blockers are worker reports, not independent evaluation. Use same-session goal tools for ordinary long-running objectives, and plain subagents or workflows for bounded delegation and fan-out.
+Use the ralph tool ONLY when the direct human explicitly asks for a Ralph loop or fresh-agent iterative execution. Each Ralph round starts a fresh child with no conversation seed and uses the shared workspace as durable memory. Completion and blockers are worker reports, not independent evaluation. Use plain subagents or workflows for bounded delegation and fan-out.
 ```
 
 #### Token effect

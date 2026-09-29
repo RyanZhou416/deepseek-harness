@@ -25,6 +25,8 @@ Run `dsh --profile web` to open an interactive browser GUI with chat, model and 
 <a id="use-this-package"></a>
 ## Use this package
 
+The Standard, PTC, and Creator presets configure delegation tools to return background ids and reject foreground requests; see the [subagent tool](../../subagent/tool-subagent/README.md#foreground-and-background-modes).
+
 Start the GUI, open your browser, and start talking to the agent. The flags fine-tune the invocation.
 
 ### Starting the Web GUI

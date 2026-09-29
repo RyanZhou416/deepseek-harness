@@ -28,7 +28,7 @@ describe('web e2e: /goal human transcript presentation', () => {
   const events: SessionEvent[] = []
 
   beforeAll(async () => {
-    scaffold = await launchWebScaffold()
+    scaffold = await launchWebScaffold({ enableGoals: true })
     scaffold.ctx.on('session/event', (_session, event: SessionEvent) => { events.push(event) })
     browser = await chromium.launch()
     page = await newEnglishPage(browser)

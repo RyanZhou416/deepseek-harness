@@ -29,17 +29,23 @@ Mount `dsh-goal-round-driver` when an active goal should keep making progress wi
 
 ### Compose it
 
-Mount the driver beside the goal service and the goal tools; the driver itself takes no configuration.
+For a base-backed profile, enable the Goal service, driver, and tools and disable the input blocker:
 
 ```yaml
+- id: goal-disabled
+  disabled: true
+
 - id: goal
   name: '@deepseek-ai/dsh-goal'
+  disabled: false
 
 - id: tool-goal
   name: '@deepseek-ai/dsh-tool-goal'
+  disabled: false
 
 - id: goal-round-driver
   name: '@deepseek-ai/dsh-goal-round-driver'
+  disabled: false
 ```
 
 `maxGoalRounds` belongs to the goal definition, while the model-facing blocked threshold belongs to `dsh-tool-goal`; duplicating either value in the driver could produce divergent policy.
@@ -55,6 +61,12 @@ A round starts only at whole-agent idle, and completion, pause, and blocking sup
 ### After resume, fork, or unload
 
 Mounting the driver over an existing agent never arms a goal, and after session resume or fork an active goal stays disarmed until an explicit human-authorized resume — the driver never revives work on its own. Unloading the plugin cancels any in-flight round and ensures no later round starts.
+
+<a id="disabled-deployments"></a>
+### Disabled deployments
+
+`@deepseek-ai/dsh-goal-round-driver/disabled` is a separate admission plugin requiring only `agents`. It rejects Goal-only input and removes Goal rounds and closing notices from mixed input while preserving ordinary messages and downstream decisions. It changes no stored Goal events and owns no separate invariant state. The fork base enables it as `goal-disabled`; an explicit Goal-enabled composition disables that row before enabling the Goal service, driver, tools, and commands.
+
 
 -----
 

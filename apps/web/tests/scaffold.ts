@@ -316,6 +316,8 @@ export interface LaunchOptions {
    * ordering.
    */
   extraOverlayPath?: string | readonly string[]
+  /** Explicit opt-in for fixtures exercising the otherwise disabled Goal stack. */
+  enableGoals?: boolean
   /**
    * Additional package manifests whose dependency closures supply experimental
    * profile layers named by {@link extraOverlayPath}.
@@ -557,7 +559,21 @@ export async function launchWebScaffold(options: LaunchOptions = {}): Promise<We
     ? []
     : (typeof options.extraOverlayPath === 'string' ? [options.extraOverlayPath] : options.extraOverlayPath)
       .flatMap(path => loadOverlayPatches('web e2e scaffold', path))
-  const composedRows = composeEntries([basePatches, surfacePatches, extraOverlayPatches])
+  const goalPatches: PatchOptions[] = options.enableGoals === true ? [
+    { id: 'goal-disabled', disabled: true },
+    { id: 'goal', disabled: false },
+    { id: 'goal-round-driver', disabled: false },
+    { id: 'ui-goal', disabled: false },
+    ...composeEntries([basePatches, surfacePatches]).flatMap((row) => {
+      if (row.name !== '@deepseek-ai/dsh-agent-preset') return []
+      const config = row.config as import('@deepseek-ai/dsh-agent-preset-registry').PresetDefinition
+      return [{ id: row.id, config: { ...config, plugins: config.plugins.map(plugin => (
+        plugin.name === '@deepseek-ai/dsh-command-goal' || plugin.name === '@deepseek-ai/dsh-tool-goal'
+          ? { ...plugin, disabled: false } : plugin
+      )) } }]
+    }),
+  ] : []
+  const composedRows = composeEntries([basePatches, surfacePatches, goalPatches, extraOverlayPatches])
   const webRuntimeConfig = composedRows.find(row => row.id === 'web-runtime')?.config as {
     surfaceContext?: boolean
   } | undefined
@@ -571,6 +587,7 @@ export async function launchWebScaffold(options: LaunchOptions = {}): Promise<We
     ...mode === 'record' || options.deepSeekMissingCredential === true
       ? []
       : [{ id: 'agent-default-model', config: { provider: 'deepseek-official', model: 'deepseek-v4-flash' } }],
+    ...goalPatches,
     ...extraOverlayPatches,
     { id: 'agent-preset-registry', config: { default: 'standard' } },
     { id: 'session-persistence-jsonl', config: { root: persistenceRoot } },

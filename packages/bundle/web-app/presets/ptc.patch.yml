@@ -39,8 +39,10 @@
             name: '@deepseek-ai/dsh-tool-skill'
           - id: command-goal
             name: '@deepseek-ai/dsh-command-goal'
+            disabled: true
           - id: tool-goal
             name: '@deepseek-ai/dsh-tool-goal'
+            disabled: true
           - id: planning
             name: cordis:group
             group: true
@@ -94,6 +96,7 @@
                 config:
                   provider: spawn
                   toolName: subagent
+                  enableRunInForeground: false
                   modelSelectionSettings: true
                   backgroundMode: continuable
               - id: tool-subagent-fork
@@ -101,6 +104,7 @@
                 config:
                   provider: fork
                   toolName: subagent_fork
+                  enableRunInForeground: false
                   backgroundMode: continuable
               - id: tool-subagent-codex
                 name: '@deepseek-ai/dsh-tool-subagent'
@@ -108,6 +112,7 @@
                 config:
                   provider: codex
                   toolName: subagent_codex
+                  enableRunInForeground: false
                   backgroundMode: one-shot
                   maxDepth: provider-managed
               - id: tool-subagent-claude-code
@@ -116,6 +121,7 @@
                 config:
                   provider: claude-code
                   toolName: subagent_claude_code
+                  enableRunInForeground: false
                   backgroundMode: one-shot
                   maxDepth: provider-managed
               - id: workflow-ptc

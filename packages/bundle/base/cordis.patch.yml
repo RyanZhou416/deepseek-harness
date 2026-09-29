@@ -313,14 +313,20 @@
     - id: command-feedback
       name: '@deepseek-ai/dsh-command-feedback'
 
+    - id: goal-disabled
+      name: '@deepseek-ai/dsh-goal-round-driver/disabled'
+
     - id: goal
       name: '@deepseek-ai/dsh-goal'
+      disabled: true
 
     - id: goal-round-driver
       name: '@deepseek-ai/dsh-goal-round-driver'
+      disabled: true
 
     - id: command-goal
       name: '@deepseek-ai/dsh-command-goal'
+      disabled: true
 
     - id: plan-mode
       name: '@deepseek-ai/dsh-plan-mode'
@@ -375,6 +381,7 @@
       config:
         provider: spawn
         toolName: subagent
+        enableRunInForeground: false
         backgroundMode: continuable
 
     # Fork omits model selection so provider/model stay equal to the parent and
@@ -388,6 +395,7 @@
       config:
         provider: fork
         toolName: subagent_fork
+        enableRunInForeground: false
         backgroundMode: one-shot
 
     - id: ptc-runtime
@@ -435,10 +443,11 @@
       config:
         allowParallelInProgress: true
 
-    # Persisted same-session goals reach the model and the slash menu here; the
-    # domain, driver, and `/goal` command are above.
+    # Goal controls and automatic continuation are disabled in the fork defaults.
+    # Explicit profile overlays can activate the retained Goal stack.
     - id: tool-goal
       name: '@deepseek-ai/dsh-tool-goal'
+      disabled: true
 
     # Fresh-agent Ralph iteration over a build-time-fixed script. Off by
     # default: the tool description restricts `ralph` to runs the human

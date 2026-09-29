@@ -9,7 +9,7 @@ kind: "package-reference"
 
 ## 概述
 
-`ralph` 针对一个不可变目标运行由多个全新子 agent 组成的前台序列，每个 Round 只接收上一份有界报告与共享工作区状态。它会在 worker 报告完成或具体阻塞，或达到配置的 Round 上限时返回；这些报告不会得到独立验证。父级对话与先前子 agent 会话绝不会复制到新的 Round。仅当直接用户明确要求 Ralph 式全新 agent 迭代时使用它；普通的长期工作请使用 goal 工具，有界委派请使用 subagent 或工作流。
+`ralph` 针对一个不可变目标运行由多个全新子 agent 组成的前台序列，每个 Round 只接收上一份有界报告与共享工作区状态。它会在 worker 报告完成或具体阻塞，或达到配置的 Round 上限时返回；这些报告不会得到独立验证。父级对话与先前子 agent 会话绝不会复制到新的 Round。仅当直接用户明确要求 Ralph 式全新 agent 迭代时使用它；有界委派请使用 subagent 或工作流。
 
 ## 目录
 
@@ -25,7 +25,7 @@ kind: "package-reference"
 <a id="use-this-package"></a>
 ## 使用本包
 
-`ralph` 工具运行固定的前台循环：每个 Round 一个全新子 agent 在共享工作区中处理不可变目标，只有一份有界的结构化报告跨越 Round。仅当直接用户明确要求 Ralph 循环或全新 agent 迭代执行时使用它。普通的长期同会话工作请使用 goal 工具；有界委派与扇出请使用普通 subagent 或 `workflow` 工具。
+`ralph` 工具运行固定的前台循环：每个 Round 一个全新子 agent 在共享工作区中处理不可变目标，只有一份有界的结构化报告跨越 Round。仅当直接用户明确要求 Ralph 循环或全新 agent 迭代执行时使用它。有界委派与扇出请使用普通 subagent 或 `workflow` 工具。
 
 ### 调用工具
 
@@ -113,7 +113,7 @@ kind: "package-reference"
 ##### Ralph 指导
 
 ```markdown
-Use the ralph tool ONLY when the direct human explicitly asks for a Ralph loop or fresh-agent iterative execution. Each Ralph round starts a fresh child with no conversation seed and uses the shared workspace as durable memory. Completion and blockers are worker reports, not independent evaluation. Use same-session goal tools for ordinary long-running objectives, and plain subagents or workflows for bounded delegation and fan-out.
+Use the ralph tool ONLY when the direct human explicitly asks for a Ralph loop or fresh-agent iterative execution. Each Ralph round starts a fresh child with no conversation seed and uses the shared workspace as durable memory. Completion and blockers are worker reports, not independent evaluation. Use plain subagents or workflows for bounded delegation and fan-out.
 ```
 
 #### Token 影响

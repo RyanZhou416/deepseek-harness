@@ -1,9 +1,7 @@
 /**
- * The Subagent settings page, browser half: the delegation limits over the
- * `subagent` namespace, its forced child model, and the models agents may choose over the
- * `subagent-model-selection` namespace, on one page with one save. The page
- * registers into the Plugins page's `plugins.item` slot while the Host serves
- * either namespace and shows the sections it serves.
+ * Subagent settings, browser half. General writes the accepted model override;
+ * the plugin page stages delegation limits, the override, and model authorization.
+ * Both entries use the shared Host settings mirror and model directory.
  */
 
 // Type-only: pulls the locale plugin's Context merge (ctx.locale).
@@ -18,6 +16,8 @@ import type {} from '@deepseek-ai/dsh-client-ui-renderer/client'
 import type {} from '@deepseek-ai/dsh-api-remotes/client'
 import type { Context as ClientContext } from '@deepseek-ai/cordis'
 import { SubagentCard } from './SubagentCard.tsx'
+import { SubagentOverrideRow, type SubagentOverrideRowInjected } from './SubagentOverrideRow.tsx'
+import type { SubagentLimitsSettings } from './subagent-limits-card-controller.ts'
 import { subagentCardFace } from './subagent-card-controller.ts'
 import { SubagentLimitsCardController } from './subagent-limits-card-controller.ts'
 import {
@@ -44,7 +44,7 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
 export const NS = 'settings.subagent'
 
 /**
- * Namespace of the delegation limits. Spelled here rather than imported: a
+ * Namespace of delegation limits and the forced child model. Spelled here rather than imported: a
  * client package must not depend on a Host package.
  */
 export const SUBAGENT_NS = 'subagent'
@@ -59,7 +59,8 @@ export const inject = ['slots', 'locale', 'remote', 'remote.session', 'configFor
 export function apply(ctx: ClientContext): void {
   const t = ctx.locale.bind(NS)
   ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'ui-settings-subagent: dictionaries')
-  const limits = new SubagentLimitsCardController(ctx.configForms.get(SUBAGENT_NS))
+  const overrideScope = ctx.configForms.get<SubagentLimitsSettings>(SUBAGENT_NS)
+  const limits = new SubagentLimitsCardController(overrideScope)
   ctx.effect(() => () => { limits.dispose() }, 'ui-settings-subagent: limits form subscription')
   const models = new SubagentModelSelectionCardController(
     ctx.configForms.get(SUBAGENT_MODEL_SELECTION_NS),
@@ -67,6 +68,18 @@ export function apply(ctx: ClientContext): void {
   )
   const limitsFace = limits.inject()
   const modelsFace = models.inject()
+  ctx.effect(() => ctx.configForms.whileServed([SUBAGENT_NS], () => ctx.slots.inject('settings.general.item', () => ctx.slots.register({
+    name: 'settings.general.item', id: 'subagent-model-override', order: 16, locale: NS,
+    inject: (): SubagentOverrideRowInjected => ({
+      hooks: { subagentOverride: overrideScope, ...modelsFace.hooks },
+      retryCatalog: modelsFace.retryCatalog,
+      selectOverride: (value, revision) => {
+        const snapshot = overrideScope.getSnapshot()
+        if (snapshot.status !== 'ready' || !snapshot.writable || snapshot.value?.modelOverride === undefined) return Promise.resolve(false)
+        return overrideScope.mutate([{ op: 'set', path: ['modelOverride'], value: value === false ? false : { ...value } }], revision)
+      },
+    }),
+  }, SubagentOverrideRow))), 'ui-settings-subagent: General model override')
   // The model catalogue is not part of any settings section: adapters come and
   // go, and a document commit elsewhere can change which routes are stored.
   ctx.effect(

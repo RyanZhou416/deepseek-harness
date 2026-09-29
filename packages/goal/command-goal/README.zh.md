@@ -61,7 +61,7 @@ kind: "package-reference"
   name: '@deepseek-ai/dsh-command-goal'
 ```
 
-随附的 `dsh` 基础配置启用持久 goal 栈与此命令。Web bundle 把 goal 服务与 driver 保留在 Host，禁用基础命令 producer，并在 `standard`、`code` 和 `cordis` agent preset 中挂载 producer；`minimal` 会省略它。ACP（Agent Client Protocol）自动化应用启用领域与模型工具，但不挂载命令适配器。独立的 `sdk-minimal` profile 省略完整 goal 栈，因此其结果 API 仍在一个关联的物理轮次后结束。
+本 fork 的 [base 默认配置](../../bundle/base/README.zh.md#use-this-package)禁用 Goal。显式启用 Goal 的 Web 组合把服务和驱动器放在 Host，把命令 producer 放在所选 Agent 预设中；`minimal` 省略其命令 producer。Headless、SDK 与 ACP 消费方也须显式启用 Goal。独立的 `sdk-minimal` profile 省略完整 Goal 栈。
 
 -----
 

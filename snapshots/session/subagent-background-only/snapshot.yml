@@ -1,0 +1,10 @@
+version: 1
+scenario: subagent-background-only
+profile: headless
+composition: subagent-background-only
+recording: authored
+header:
+  class: subagent-background-only
+  pin: true
+replay:
+  override: true

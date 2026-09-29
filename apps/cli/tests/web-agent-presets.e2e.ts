@@ -240,7 +240,7 @@ describe('the shipped Web composition', () => {
       setup: agentCtx => ctx.agentPresets.mount(agentCtx, 'minimal').then(() => undefined),
     })
     try {
-      // A subset assertion: `tasks`, `goal`, and the rest register into the
+      // A subset assertion: `tasks` and other enabled features register into the
       // same process-wide table, and this is about the meter's three units.
       expect(Object.keys(projections.snapshot(handle.agent.session).values))
         .toEqual(expect.arrayContaining(['contextBreakdown', 'contextPressure', 'tokenUsage']))
@@ -257,6 +257,18 @@ describe('the shipped Web composition', () => {
     expect(ctx.agentPresets.defaultId).toBe('standard')
   })
 
+  it.each(['standard', 'ptc', 'cordis', 'minimal'])('disables Goal services and controls in %s', async (preset) => {
+    expect(ctx.get('goals')).toBeUndefined()
+    const handle = await ctx.agents.create({
+      sessionId: SessionId('no-goals-' + preset),
+      setup: agentCtx => ctx.agentPresets.mount(agentCtx, preset).then(() => undefined),
+    })
+    try {
+      for (const name of ['create_goal', 'get_goal', 'update_goal']) expect(ctx.tools.get(name, handle.agent)).toBeUndefined()
+      expect(ctx.commands.find(handle.agent, 'goal')).toBeUndefined()
+    } finally { await handle.dispose() }
+  })
+
   it('composes the full agent from `standard`', async () => {
     const handle = await ctx.agents.create({
       sessionId: SessionId('preset-standard'),
@@ -269,13 +281,13 @@ describe('the shipped Web composition', () => {
       // excluded for the reason the TUI composition e2e excludes them — they
       // depend on ripgrep being present on the machine.
       expect(toolNames(ctx, handle.agent).filter(name => name !== 'glob' && name !== 'grep')).toEqual([
-        'ask_user_question', SHELL_TOOL, 'create_goal', 'edit', 'exit_plan_mode',
-        'get_goal', 'interrupt_agent', 'job_kill', 'job_list', 'job_output', 'list_agents', 'present', 'read', 'read_image', 'send_message',
+        'ask_user_question', SHELL_TOOL, 'edit', 'exit_plan_mode',
+        'interrupt_agent', 'job_kill', 'job_list', 'job_output', 'list_agents', 'present', 'read', 'read_image', 'send_message',
         'session_create', 'session_find', 'session_message_status', 'session_send_message', 'skill',
-        'subagent', 'subagent_fork', 'todo_write', 'update_goal', 'web_fetch', 'web_search',
+        'subagent', 'subagent_fork', 'todo_write', 'web_fetch', 'web_search',
         'workflow', 'write',
       ].sort())
-      expect(ctx.commands.find(handle.agent, 'goal')).toBeDefined()
+      expect(ctx.commands.find(handle.agent, 'goal')).toBeUndefined()
     } finally {
       await handle.dispose()
     }
@@ -377,7 +389,7 @@ describe('the shipped Web composition', () => {
       }
       expect(tools).toEqual(expect.arrayContaining([SHELL_TOOL, 'read', 'edit', 'skill']))
       expect(tools).not.toContain('str_replace_editor')
-      expect(ctx.commands.find(handle.agent, 'goal')).toBeDefined()
+      expect(ctx.commands.find(handle.agent, 'goal')).toBeUndefined()
 
       // The preset's own authoring skill registers into ITS layer of the host
       // registry: the cordis agent's view carries it, the global view does not.
@@ -422,7 +434,7 @@ describe('the shipped Web composition', () => {
       const assembly = await ctx.systemPrompt.assemble({ scope: coded.agent })
       expect(assembly.tools.map(tool => tool.name)).toEqual(['run_code'])
       expect(toolNames(ctx, coded.agent)).not.toContain('str_replace_editor')
-      expect(ctx.commands.find(coded.agent, 'goal')).toBeDefined()
+      expect(ctx.commands.find(coded.agent, 'goal')).toBeUndefined()
       const sdk = assembly.sections.find(section => section.name === 'tools:sdk')?.text ?? ''
       expect(sdk).not.toContain('str_replace_editor')
       expect(sdk).toContain('web_search')
@@ -617,7 +629,7 @@ describe('product Bundle and user-preset intersection', () => {
             expect(tools).toEqual(expect.arrayContaining(['job_kill', 'job_list', 'job_output']))
             for (const productTool of productTools) {
               expect(toolParameterNames(productCtx, handle.agent, productTool)).toEqual([
-                'description', 'prompt', 'run_in_background',
+                'description', 'prompt',
               ])
             }
           } finally {
@@ -751,10 +763,10 @@ describe('a switch survives the session', () => {
     })
     try {
       // The api-proxy's select does exactly this pair while the session is blank.
-      expect(ctx.commands.find(handle.agent, 'goal')).toBeDefined()
+      expect(ctx.commands.find(handle.agent, 'compact')).toBeDefined()
       await ctx.agentPresets.recompose(handle.agent.ctx, 'minimal')
       handle.agent.session.append('agent-preset/selected', { agentPreset: 'minimal' })
-      expect(ctx.commands.find(handle.agent, 'goal')).toBeUndefined()
+      expect(ctx.commands.find(handle.agent, 'compact')).toBeUndefined()
 
       // The header keeps the creation fact; the log carries what it runs.
       expect(handle.agent.session.header.agentPreset).toBe('standard')

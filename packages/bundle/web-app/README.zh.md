@@ -25,6 +25,8 @@ kind: "package-bundle"
 <a id="use-this-package"></a>
 ## 使用本包
 
+Standard、PTC 和 Creator 预设将委派工具配置为返回后台 id 并拒绝前台请求；参见 [subagent 工具](../../subagent/tool-subagent/README.zh.md#foreground-and-background-modes)。
+
 启动 GUI、打开浏览器，然后开始与 agent（智能体）对话。flag 用于微调本次调用。
 
 ### 启动 Web GUI

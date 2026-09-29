@@ -1,0 +1,10 @@
+version: 1
+scenario: goal-disabled
+profile: headless
+composition: goal-disabled
+recording: authored
+header:
+  class: goal-disabled
+  pin: true
+replay:
+  override: true

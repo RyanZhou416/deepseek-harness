@@ -9,7 +9,7 @@ English | [中文](README.zh.md)
 
 ## Summary
 
-Open **Plugins** in the sidebar and select **Subagent** in the Official group to set how deep and how wide delegation may go, and which models agents may choose for their subagents. The page groups the two Host namespaces, `subagent` and `subagent-model-selection`, under one save; it exists while the Host serves either and shows the sections it serves.
+Use **Settings → General → Subagent model override** to choose a forced child model and reasoning effort. **Plugins → Subagent** also controls delegation depth, capacity, and which models agents may choose. Both entrances share the Host's override setting: the General row saves its field immediately, while the plugin page stages edits behind **Save**.
 
 ## Table of Contents
 
@@ -24,6 +24,8 @@ Open **Plugins** in the sidebar and select **Subagent** in the Official group to
 
 <a id="use-this-package"></a>
 ## Use this package
+
+**General Settings → Subagent model override** provides model and reasoning selectors for the same Host preference. Choosing a model saves immediately, **No override** disables it, and **Model default** clears explicit effort. A model change also clears the previous effort. This row writes only `modelOverride`, leaves unsaved plugin-page drafts untouched, and retains accepted values if saving fails. The model directory loads when a selector opens; saved routes remain visible even when absent from that directory. Read-only Hosts disable the controls, and Hosts without this field omit the row.
 
 **Limits** holds **Maximum recursion depth** and **Subagent parallelism limit** side by side, stacking on narrow screens; the information button beside each label discloses its rule — a two-row depth example, and the count that capacity bounds — and a draft that is not a whole number in range blocks the save and says so under the field. Depth yields to a tool's own maximum; capacity counts every live subagent under one main agent across all levels, the main agent excluded.
 

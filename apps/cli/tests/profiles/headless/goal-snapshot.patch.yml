@@ -28,3 +28,15 @@
 - id: session-log-deepseek
   config:
     enabled: false
+
+# This recorded compatibility composition explicitly enables the optional Goal stack.
+- id: goal-disabled
+  disabled: true
+- id: goal
+  disabled: false
+- id: goal-round-driver
+  disabled: false
+- id: command-goal
+  disabled: false
+- id: tool-goal
+  disabled: false

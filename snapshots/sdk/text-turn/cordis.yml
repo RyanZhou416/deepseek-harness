@@ -37,3 +37,15 @@
     - id: snapshot-feedback-producer
       name: './feedback-producer.mjs'
       disabled: !!js "process.env.DSH_SNAPSHOT_FEEDBACK !== '1'"
+
+# This recorded compatibility composition explicitly enables the optional Goal stack.
+- id: goal-disabled
+  disabled: true
+- id: goal
+  disabled: false
+- id: goal-round-driver
+  disabled: false
+- id: command-goal
+  disabled: false
+- id: tool-goal
+  disabled: false

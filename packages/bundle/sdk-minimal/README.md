@@ -25,6 +25,8 @@ Use `dsh --profile sdk-minimal` when an SDK client needs a small, explicit codin
 <a id="use-this-package"></a>
 ## Use this package
 
+Goal services and tools remain absent. The [disabled-input plugin](../../goal/goal-round-driver/README.md#disabled-deployments) also suppresses queued Goal rounds and closing notices when an existing session is resumed, without deleting its history.
+
 Launch the profile directly or select it from the Python SDK. Supply an explicit `DSH_HOME`, use a disposable workspace, and provide the model credential through `DEEPSEEK_API_KEY`.
 
 ```sh

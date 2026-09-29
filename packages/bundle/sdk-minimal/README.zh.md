@@ -25,6 +25,8 @@ kind: "package-bundle"
 <a id="use-this-package"></a>
 ## 使用本包
 
+此 profile 不提供 Goal 服务或工具。[禁用输入插件](../../goal/goal-round-driver/README.zh.md#disabled-deployments)还会在恢复既有会话时拦截排队的 Goal 轮次与收尾通知，不删除其历史。
+
 直接启动该 profile，或从 Python SDK 选择它。提供显式 `DSH_HOME`、使用一次性 workspace，并通过 `DEEPSEEK_API_KEY` 提供模型凭据。
 
 ```sh

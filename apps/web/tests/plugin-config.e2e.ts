@@ -205,6 +205,85 @@ describe('web e2e: plugin configuration pages', () => {
     expect(tripwire.pageErrors).toEqual([])
   })
 
+  it('sets the same child model override from General Settings and the plugin page', async () => {
+    onTestFailed(() => saveFailureShot(page, 'web-e2e-general-subagent-override'))
+    const adapter = new ForcedModelAdapter([textResponse('general override answer')], {
+      efforts: [{ id: ReasoningEffortId('high'), name: 'High' }], defaultEffort: ReasoningEffortId('high'),
+    })
+    const unregister = scaffold.ctx.llm.registerAdapter(['general-override-test'], adapter)
+    onTestFinished(unregister)
+    await page.getByRole('button', { name: '设置', exact: true }).click()
+    const dialog = page.getByRole('dialog', { name: '设置' })
+    await dialog.getByRole('button', { name: '通用设置', exact: true }).click()
+    const row = dialog.locator('[data-subagent-override-row]')
+    const model = row.getByRole('button', { name: 'Subagent 覆盖模型', exact: true })
+    const effort = row.getByRole('button', { name: 'Subagent 推理强度', exact: true })
+    await model.click()
+    await page.getByRole('menuitem', { name: 'override-model', exact: true }).click()
+    await expect.poll(() => scaffold.ctx.subagents.prepareModel('spawn').override)
+      .toEqual({ provider: 'general-override-test', model: 'override-model' })
+    await effort.click()
+    await page.getByRole('menuitem', { name: 'High', exact: true }).click()
+    await expect.poll(() => scaffold.ctx.subagents.prepareModel('spawn').override)
+      .toEqual({ provider: 'general-override-test', model: 'override-model', reasoningEffort: 'high' })
+    await expect.poll(() => row.getAttribute('aria-busy')).toBe('false')
+    await compareOrRefreshGolden(join(SNAPSHOT_DIR, 'general-subagent-override.expected.md'),
+      await captureStableAria(page, '[data-subagent-override-row]', scaffold.workspaceCwd), MODE)
+    await row.screenshot({ path: fileURLToPath(new URL('../../../tmp/general-subagent-override-row.png', import.meta.url)) })
+    await dialog.screenshot({ path: fileURLToPath(new URL('../../../tmp/general-subagent-override-light.png', import.meta.url)) })
+    await page.emulateMedia({ colorScheme: 'dark' })
+    await dialog.screenshot({ path: fileURLToPath(new URL('../../../tmp/general-subagent-override-dark.png', import.meta.url)) })
+    await page.emulateMedia({ colorScheme: 'light' })
+
+    await page.setViewportSize({ width: 640, height: 600 })
+    await model.click()
+    const menu = page.getByRole('menu')
+    const box = await menu.boundingBox()
+    expect(box).not.toBeNull()
+    expect(box!.x).toBeGreaterThanOrEqual(0)
+    expect(box!.y).toBeGreaterThanOrEqual(0)
+    expect(box!.x + box!.width).toBeLessThanOrEqual(640)
+    expect(box!.y + box!.height).toBeLessThanOrEqual(600)
+    await page.keyboard.press('Escape')
+    await expect.poll(() => menu.count()).toBe(0)
+    await expect.poll(() => model.evaluate(element => document.activeElement === element)).toBe(true)
+    await model.click()
+    await dialog.getByText('Subagent 模型覆盖', { exact: true }).click()
+    await expect.poll(() => menu.count()).toBe(0)
+    await page.setViewportSize({ width: 1680, height: 1000 })
+
+    const panel = await openPlugins()
+    await openPage(panel, 'Subagent')
+    const section = panel.getByRole('region', { name: '强制模型覆盖', exact: true })
+    expect(await section.getByRole('button', { name: '模型', exact: true }).textContent()).toBe('override-model')
+    expect(await section.getByRole('button', { name: '推理强度', exact: true }).textContent()).toBe('High')
+    const parent = await scaffold.ctx.agents.create({
+      sessionId: SessionId('general-override-parent'), meta: { cwd: scaffold.workspaceCwd },
+      agentOptions: { provider: 'deepseek-official', model: 'deepseek-v4-flash' },
+    })
+    onTestFinished(() => parent.dispose())
+    const child = await scaffold.ctx.subagents.start('spawn', {
+      parent: parent.agent, prompt: [{ type: 'text', text: 'test General Settings override' }], signal: new AbortController().signal,
+      agentOptions: { provider: 'missing', model: 'wrong' },
+    })
+    onTestFinished(() => child.dispose())
+    expect((await child.result).stopReason).toBe('completed')
+    expect(adapter.requests).toHaveLength(1)
+    expect(adapter.requests[0]).toMatchObject({ provider: 'general-override-test', model: 'override-model', reasoningEffort: 'high' })
+
+    await page.getByRole('button', { name: '设置', exact: true }).click()
+    await dialog.getByRole('button', { name: '通用设置', exact: true }).click()
+    await effort.click()
+    await page.getByRole('menuitem', { name: '模型默认值', exact: true }).click()
+    await expect.poll(() => scaffold.ctx.subagents.prepareModel('spawn').override)
+      .toEqual({ provider: 'general-override-test', model: 'override-model' })
+    await model.click()
+    await page.getByRole('menuitem', { name: '不覆盖', exact: true }).click()
+    await expect.poll(() => scaffold.ctx.subagents.prepareModel('spawn').override).toBeNull()
+    expect(tripwire.pageErrors).toEqual([])
+    await page.keyboard.press('Escape')
+  })
+
   it('opens field explanations with the keyboard and retains unsaved edits', async () => {
     const panel = await openPlugins()
     await openPage(panel, 'Subagent')

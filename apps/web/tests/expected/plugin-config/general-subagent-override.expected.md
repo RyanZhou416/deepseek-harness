@@ -1,0 +1,3 @@
+- text: Subagent 模型覆盖 仅影响新建的普通 Subagent
+- button "Subagent 覆盖模型": override-model
+- button "Subagent 推理强度": High

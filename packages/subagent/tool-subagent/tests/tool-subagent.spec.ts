@@ -50,6 +50,31 @@ async function projectedContext(): Promise<Context> {
 
 
 describe('dsh-tool-subagent', () => {
+  it('rejects a composition with neither foreground nor background delegation enabled', async () => {
+    const ctx = await projectedContext()
+    try {
+      expect(() => { tool.apply(ctx, {
+        provider: 'unused', enableRunInForeground: false, enableRunInBackground: false,
+      }) }).toThrow('enableRunInBackground and enableRunInForeground cannot both be false')
+    } finally { await ctx.fiber.dispose() }
+  })
+
+  it('rejects an explicit foreground request before model validation or child creation', async () => {
+    const start = vi.fn()
+    const ctx = await setup({ provider: 'mock', enableRunInForeground: false }, { onStart: start })
+    const prepare = vi.spyOn(ctx.subagents, 'prepareModel')
+    try {
+      const schema = ctx.tools.schemas().find(candidate => candidate.name === 'subagent')!
+      expect(schema.parameters.properties).not.toHaveProperty('run_in_background')
+      expect(schema.description).toContain('Foreground calls are disabled')
+      const result = await callSubagent(ctx, { description: 'work', prompt: 'task', run_in_background: false })
+      expect(prepare).not.toHaveBeenCalled()
+      expect(start).not.toHaveBeenCalled()
+      expect(result.isError).toBe(true)
+      expect(text(result)).toContain('foreground subagent calls are disabled')
+    } finally { await ctx.fiber.dispose() }
+  })
+
   it('rejects continuable background policy when the provider cannot prepare continuable children', async () => {
     let failure: unknown
     try {
@@ -823,6 +848,33 @@ describe('dsh-tool-subagent background mode', () => {
     return ctx
   }
 
+  it.each([undefined, true])('returns a background job before its child finishes when foreground is disabled (argument=%s)', async (requested) => {
+    const started = Promise.withResolvers<undefined>()
+    const release = Promise.withResolvers<undefined>()
+    const ctx = await backgroundSetup({ provider: 'mock', enableRunInForeground: false }, {
+      reply: 'background-only answer',
+      onStart: () => { started.resolve(undefined); return release.promise },
+    })
+    try {
+      const parent = await ownerAgent(ctx, 'background-only-parent')
+      const result = await callSubagent(ctx, {
+        description: 'independent work', prompt: 'task',
+        ...requested === undefined ? {} : { run_in_background: requested },
+      }, { agent: parent })
+      expect(result.isError).toBe(false)
+      expect(result.value).toMatchObject({ kind: 'background', jobId: 'subagent-1' })
+      await started.promise
+      expect(ctx.jobs.list(parent.id)).toMatchObject([{ status: 'running' }])
+      release.resolve(undefined)
+      const output = await ctx.tools.execute({
+        signal: testToolSignal, callId: ToolCallId('background-only-output'), name: 'job_output',
+        arguments: { job_id: 'subagent-1', wait: true }, agent: parent,
+      })
+      expect(text(output)).toContain('background-only answer')
+      expect(text(output)).toContain('completed')
+    } finally { release.resolve(undefined); await ctx.fiber.dispose() }
+  })
+
   it('keeps a continuable-capable provider one-shot when backgroundMode selects one-shot', async () => {
     const ctx = await backgroundSetup({ provider: 'mock' })
     const parent = await ownerAgent(ctx, 'sess-parent')
@@ -1182,7 +1234,7 @@ describe('dsh-tool-subagent continuable background mode', () => {
   })
 
   /** Boot the real continuable stack without any model-facing follow-up adapter. */
-  async function continuableSetup() {
+  async function continuableSetup(enableRunInForeground = true) {
     const ctx = new Context()
     await mountAgentLoopTestDependencies(ctx)
     const root = mkdtempSync(path.join(tmpdir(), 'dsh-tool-subagent-continuable-'))
@@ -1193,7 +1245,7 @@ describe('dsh-tool-subagent continuable background mode', () => {
     await ctx.plugin(SubagentSpawn, { providerName: 'spawn' })
     await ctx.plugin(LocalJobRegistry)
     await ctx.plugin(ToolJobs, {})
-    await ctx.plugin(tool, { provider: 'spawn', backgroundMode: 'continuable' })
+    await ctx.plugin(tool, { provider: 'spawn', backgroundMode: 'continuable', enableRunInForeground })
     ctx.llm.registerAdapter(['mock'], new MockAdapter([
       textResponse('continuable answer'),
     ]))
@@ -1209,6 +1261,27 @@ describe('dsh-tool-subagent continuable background mode', () => {
       name: 'subagent',
       arguments: { description: 'do work', prompt: 'Reply OK' },
     })).toEqual({ kind: 'parallel' })
+  })
+
+  it('keeps continuable delegation available while rejecting foreground calls and omitting their guidance', async () => {
+    const { ctx, parent } = await continuableSetup(false)
+    try {
+      const foreground = vi.spyOn(ctx.subagents, 'start')
+      const rejected = await callSubagent(ctx, {
+        description: 'blocked wait', prompt: 'task', run_in_background: false,
+      }, { agent: parent })
+      expect(rejected.isError).toBe(true)
+      expect(foreground).not.toHaveBeenCalled()
+      const schema = ctx.tools.schemas().find(candidate => candidate.name === 'subagent')!
+      expect(schema.parameters.properties).not.toHaveProperty('run_in_background')
+      expect(schema.description).toContain('always runs in the background')
+      const assembly = await ctx.systemPrompt.assemble(assembleContextFor(parent))
+      expect(assembly.sections.find(section => section.name === 'tool:subagent')?.text).toContain('Foreground calls are disabled')
+      const started = await callSubagent(ctx, { description: 'work', prompt: 'task' }, { agent: parent })
+      expect(started.isError).toBe(false)
+      expect(started.value).toMatchObject({ kind: 'continuable' })
+      expect(ctx.jobs.list(parent.id)).toEqual([])
+    } finally { await ctx.fiber.dispose() }
   })
 
   it('defaults continuable delegation to background and returns only its durable id', async () => {

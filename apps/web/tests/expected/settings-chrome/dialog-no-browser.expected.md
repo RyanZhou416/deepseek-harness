@@ -24,6 +24,9 @@
   - button "Detailed"
   - text: Developer tools Show tools and information for debugging and troubleshooting
   - switch "Developer tools"
+  - text: Subagent model override Applies to new ordinary Subagents
+  - button "Subagent override model": No override
+  - button "Subagent reasoning effort" [disabled]: Model default
   - text: Send behavior while busy What Enter and the Send button do while the agent is running; Cmd/Ctrl+Enter uses the other behavior
   - button "Queue"
   - text: "Current version: {{version}}"

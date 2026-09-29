@@ -8,13 +8,14 @@ import { RemoteError, TestRemote } from '@deepseek-ai/dsh-client-test-runtime'
 import { LocaleRuntime } from '@deepseek-ai/dsh-client-locale/client'
 import { apply as settingsApply, inject as settingsInject } from '@deepseek-ai/dsh-client-ui-settings/client'
 import { apply, inject, NS } from '../src/client/index.ts'
+import type { SubagentOverrideRowInjected } from '../src/client/SubagentOverrideRow.tsx'
 import type { SubagentCardFace } from '../src/client/index.ts'
 import { SubagentModelSelectionCardController } from '../src/client/subagent-model-selection-card-controller.ts'
 import { apply as hostApply } from '../src/index.ts'
 
 /** One Host view of a served namespace. */
 function view(ns: string, revision = 0) {
-  return { ns, schema: {}, value: {}, applies: 'live', secrets: [], revision }
+  return { ns, schema: { type: 'object', dict: {}, meta: {} }, value: ns === 'subagent' ? { maxDepth: 1, maxActiveSubagents: 8, modelOverride: false } : { enabled: false, allowedModels: [] }, applies: 'live', secrets: [], revision }
 }
 
 /** @param served - namespaces the Host describes; omitted answers a failed read. */
@@ -40,7 +41,7 @@ async function bench(served?: string[]) {
 function declareRoot(slots: SlotRegistry): () => void {
   return slots.register({
     name: 'root',
-    children: { 'plugins.item': { kind: 'list', scope: 'root' } },
+    children: { 'plugins.item': { kind: 'list', scope: 'root' }, 'settings.general.item': { kind: 'list', scope: 'root' } },
   } as never, () => null)
 }
 
@@ -103,6 +104,38 @@ describe('ui-settings-subagent apply', () => {
     reset.mockRestore()
   })
 
+  it('saves only the General override field without committing staged limits', async () => {
+    const { ctx, slots } = await bench(['subagent'])
+    declareRoot(slots)
+    await ctx.plugin({ inject: [...inject], apply }).await()
+    await vi.waitFor(() => { expect(slots.entries('settings.general.item')).toHaveLength(1) })
+    const row = slots.entries('settings.general.item')[0]!
+    expect(row.options).toMatchObject({ id: 'subagent-model-override', order: 16 })
+    const face = (row.inject as () => SubagentOverrideRowInjected)()
+    const page = slots.entries('plugins.item')[0]!
+    const pageFace = (page.inject as () => SubagentCardFace)()
+    pageFace.editLimit('maxDepth', '3')
+    const scope = ctx.configForms.get('subagent')
+    const mutate = vi.spyOn(scope, 'mutate').mockResolvedValue(true)
+    await face.selectOverride({ provider: 'alpha', model: 'fast', reasoningEffort: 'high' }, 0)
+    expect(mutate).toHaveBeenCalledExactlyOnceWith([
+      { op: 'set', path: ['modelOverride'], value: { provider: 'alpha', model: 'fast', reasoningEffort: 'high' } },
+    ], 0)
+    expect(pageFace.hooks.subagentLimitsCard.getSnapshot().maxDepth.text).toBe('3')
+    await face.selectOverride(false, 0)
+    expect(mutate).toHaveBeenLastCalledWith([{ op: 'set', path: ['modelOverride'], value: false }], 0)
+    const snapshot = scope.getSnapshot()
+    const current = vi.spyOn(scope, 'getSnapshot').mockReturnValue({ ...snapshot, writable: false })
+    mutate.mockClear()
+    expect(await face.selectOverride(false, 0)).toBe(false)
+    expect(mutate).not.toHaveBeenCalled()
+    current.mockReturnValue({ ...snapshot, status: 'unavailable' })
+    expect(await face.selectOverride(false, 0)).toBe(false)
+    current.mockReturnValue({ ...snapshot, value: {} })
+    expect(await face.selectOverride(false, 0)).toBe(false)
+    await ctx.fiber.dispose()
+  })
+
   it('collapses the page on teardown', async () => {
     const { ctx, slots } = await bench(['subagent'])
     declareRoot(slots)
@@ -113,5 +146,6 @@ describe('ui-settings-subagent apply', () => {
     await fiber.dispose()
 
     expect(slots.entries('plugins.item')).toHaveLength(0)
+    expect(slots.entries('settings.general.item')).toHaveLength(0)
   })
 })

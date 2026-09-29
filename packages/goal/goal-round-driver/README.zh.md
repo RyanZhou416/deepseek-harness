@@ -29,17 +29,23 @@ kind: "package-reference"
 
 ### 组合方式
 
-把驱动器挂载在 goal 服务与 goal 工具旁边；驱动器本身不需要任何配置。
+对于基于 base 的 profile，启用 Goal 服务、驱动器与工具，并关闭输入拦截器：
 
 ```yaml
+- id: goal-disabled
+  disabled: true
+
 - id: goal
   name: '@deepseek-ai/dsh-goal'
+  disabled: false
 
 - id: tool-goal
   name: '@deepseek-ai/dsh-tool-goal'
+  disabled: false
 
 - id: goal-round-driver
   name: '@deepseek-ai/dsh-goal-round-driver'
+  disabled: false
 ```
 
 `maxGoalRounds` 属于 goal 定义，面向模型的阻塞阈值属于 `dsh-tool-goal`；在驱动器中重复任一数值都可能产生分歧策略。
@@ -55,6 +61,12 @@ Round 只在整个 agent 进入 idle 时启动；完成、暂停和阻塞会阻�
 ### resume、fork 或卸载之后
 
 把驱动器挂载到现有 agent 上绝不会启用任何 goal 的续行；会话 resume 或 fork 后，active 的 goal 会保持停用续行，直到用户明确授权 resume——驱动器绝不会自行复活工作。卸载插件会取消进行中的 Round，并确保不再启动后续 Round。
+
+<a id="disabled-deployments"></a>
+### 禁用部署
+
+`@deepseek-ai/dsh-goal-round-driver/disabled` 是只依赖 `agents` 的独立输入准入插件。它拒绝仅含 Goal 的输入，并从混合输入中移除 Goal 轮次与收尾通知，保留普通消息和下游决策。它不修改已保存的 Goal 事件，也不拥有独立的不变量状态。本 fork 的 base 以 `goal-disabled` 启用该插件；显式启用 Goal 的组合须先禁用此行，再启用 Goal 服务、驱动器、工具和命令。
+
 
 -----
 
