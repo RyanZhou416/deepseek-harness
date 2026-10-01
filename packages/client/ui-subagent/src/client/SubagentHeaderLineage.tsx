@@ -197,11 +197,12 @@ function isKnownLeaf(catalog: SubagentCatalogSnapshot | undefined): boolean {
   return catalog?.state === 'ready' && catalog.entries.length === 0
 }
 
-/** Render one catalog level and recurse only through explicitly expanded rows. */
+/** Render siblings newest-first and recurse only through explicitly expanded rows. */
 function CatalogRows({
   parentSessionId, currentSessionId, catalog, catalogs, summaries, expanded, level,
   openChild, openChildAside, refreshProjection, toggleBranch, closeCatalog, t,
 }: CatalogRowsProps & { t: TranslateNS<typeof NS> }) {
+  const entries = useMemo(() => [...catalog.entries].sort((left, right) => right.createdAt - left.createdAt), [catalog.entries])
   const [now, setNow] = useState(() => Date.now())
   const running = catalog.entries.some(entry => entry.activity === 'running')
   useEffect(() => {
@@ -229,7 +230,7 @@ function CatalogRows({
           </button>
         </div>
       )}
-      {catalog.entries.map((entry) => {
+      {entries.map((entry) => {
         const childCatalog = catalogs[entry.id]
         const isCurrent = entry.id === currentSessionId
         const isExpanded = expanded.has(entry.id)

@@ -351,6 +351,9 @@ describe('SubagentHeaderLineage', () => {
     fireEvent.click(inactiveTrigger)
     expect(screen.getByRole('treeitem', { name: /renamed/ })).toBeTruthy()
     expect(screen.getByRole('treeitem', { name: /writer/ })).toBeTruthy()
+    expect(screen.getAllByRole('treeitem')[0]).toBe(screen.getByRole('treeitem', { name: /writer/ }))
+    expect(sessions.getSnapshot().projectionsBySession[PARENT]?.values.subagentCatalog?.map(entry => entry.label))
+      .toEqual(['renamed', 'reviewer', 'writer'])
     fireEvent.click(screen.getByRole('button', {
       name: input.t('branch.expand', { label: 'renamed' }),
     }))
