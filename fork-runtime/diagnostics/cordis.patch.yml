@@ -1,0 +1,22 @@
+- insert:
+    - id: fork-memory-recorder
+      name: './index.mjs'
+      config:
+        intervalMs: 30000
+        profileIntervalMs: 120000
+        samplingIntervalBytes: 1048576
+        maxTracked: 10000
+        maxDetails: 64
+        minDisposedAgeMs: 60000
+        logFileMiB: 16
+        logFiles: 4
+        profileFileMiB: 32
+        profileFiles: 4
+        snapshots: true
+        snapshotDelayMs: 30000
+        snapshotGrowthMiB: 768
+        snapshotMaxHeapMiB: 1536
+        snapshotMaxHeapTotalMiB: 2048
+        reserveMiB: 2048
+        reserveHeapMultiplier: 4
+        captureBudgetMiB: 8192

@@ -24,7 +24,7 @@ call "%~dp0scripts\fork-windows-pnpm.cmd" --version
 if errorlevel 1 goto :failed
 
 set "DSH_STEP=starting DeepSeek Harness"
-call "%~dp0scripts\fork-windows-pnpm.cmd" dsh web
+call "%~dp0scripts\fork-windows-pnpm.cmd" dsh web --patch "%~dp0fork-runtime\diagnostics\cordis.patch.yml"
 if errorlevel 1 goto :failed
 exit /b 0
 

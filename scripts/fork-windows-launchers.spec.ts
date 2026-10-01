@@ -126,7 +126,7 @@ describe('Windows fork launchers', () => {
     expect(readFileSync(log, 'utf8').trim().split(/\r?\n/)).toEqual([
       'pnpm install --child-concurrency=4 --optimistic-repeat-install=false',
       'pnpm run build',
-      'pnpm dsh web',
+      `pnpm dsh web --patch ${join(repositoryRoot, 'fork-runtime', 'diagnostics', 'cordis.patch.yml')}`,
     ])
   })
 

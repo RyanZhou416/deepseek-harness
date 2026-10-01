@@ -405,6 +405,8 @@ Profile 注册 `dsh-sdk-process-raw` 和 `subagent_process`：SDK profile、独�
 
 #### Memory ownership verification
 
+普通 Windows `run.cmd` 通过 `fork-runtime/diagnostics/cordis.patch.yml` 自动插入内存探针；保留内部 Inspector 采样、匿名 WeakRef 生命周期与 GC 年龄、活跃历史规模、退出解绑，以及低堆时最多两次快照和资源准入限制。配置、输出上限与解读以[诊断 README](fork-runtime/diagnostics/README.zh.md)为准。合并上游不得恢复只有内存数量、没有分配调用栈与 GC 证据的启动方式。聚焦验证为 `scripts/fork-memory-lifetime.spec.ts`、`scripts/fork-memory-recorder.spec.ts`、Windows 启动器测试及独立数据目录下的真实 Web 启动。此探针不修改 Session 格式、不开放 Inspector TCP 端口、不替代 watchdog，也不自动重启。
+
 2026-09-27 的完整堆引用分析将主要累积归因于 Context 工具归属恢复回调：248 个已销毁 Agent/Session 被长期持有，条件 WeakMap 图模型中约占 10,265 MiB。`0.55.0-dsh017rc1.3` 的真实服务去重与 jobs-local 的中性调度上下文分别修复该引用链和共享任务到期 timer 的旧 Agent 留存；合并上游必须保留下面矩阵中的行为与回归，或验证上游提供等价实现后再移除 fork 补丁。
 
 修复后的诊断实例运行约 3 小时 40 分钟：记录到的 JS 堆最高 2.50 GiB、最后 1.49 GiB，RSS 最高 5.81 GiB、最后 4.29 GiB；已销毁但仍存活 Agent 最多 15 个、最后 4 个，中间曾回到 0。增长快照中的 Context 恢复数组从旧事故的 82,602 项降至 1 项，jobs-local 到期 timer 不携带 Agent 异步上下文。两轮负载并非固定输入基准，引用图字节估算也不等于 RSS 回收量。
