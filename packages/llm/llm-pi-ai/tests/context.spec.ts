@@ -84,6 +84,24 @@ function history(role: 'system' | 'assistant', content: ContentBlock[]): Message
 }
 
 describe('pi-ai request context conversion', () => {
+  it('caps long narrow images by the route limit after applying its pixel budget', async () => {
+    const source = { ...ref, width: 8192, height: 16 }
+    const readImageRequest = vi.fn((value: ImageAttachmentRef, target: ImageRequestTarget) =>
+      Promise.resolve({ ...requestImage(value, Uint8Array.of(1)), width: target.width, height: target.height }))
+    const context = await toPiContext(request([user(Array.from({ length: 21 }, () => ({ type: 'image' as const, attachment: source })))]),
+      imageContext(projectionStore(readImageRequest), {
+        requestImagePolicy: { maxPixels: 640_000, maxBytes: 100, maxDimension: count => count > 20 ? 2000 : 8000 },
+      }))
+    expect(readImageRequest).toHaveBeenCalledExactlyOnceWith(source, { width: 2000, height: 4, maxBytes: 100 }, undefined)
+    expect(JSON.stringify(context)).toContain('request preview 2000x4px')
+  })
+
+  it('enforces the image count without requiring a byte budget', async () => {
+    await expect(toPiContext(request([user(Array.from({ length: 2 }, () => ({ type: 'image' as const, attachment: ref })))]),
+      imageContext(attachments, { maxRequestImages: 1 })))
+      .rejects.toMatchObject({ code: 'IMAGE_OFFLOAD_REQUIRED', failure: { offloadImages: 1 } })
+  })
+
   it.each(['user', 'system', 'assistant', 'tool'] as const)('rejects tool-change blocks in %s history', (role) => {
     for (const type of ['tool-addition', 'tool-removal'] as const) {
       const message = { id: 'invalid', role, source: { kind: 'test' }, content: [{ type, toolName: 'search' }] } as unknown as Message

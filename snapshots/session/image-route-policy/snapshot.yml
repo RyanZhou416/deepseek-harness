@@ -1,0 +1,10 @@
+version: 1
+scenario: image-route-policy
+profile: headless
+composition: image-route-policy
+recording: authored
+header:
+  class: image-route-policy
+  pin: true
+replay:
+  override: true

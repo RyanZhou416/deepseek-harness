@@ -1,6 +1,6 @@
 {
   "name": "dsh-plugin-subscriptions",
-  "version": "0.9.4-dsh017rc1.1",
+  "version": "0.9.4-dsh017rc1.3",
   "private": true,
   "description": "Use ChatGPT (Codex), Claude, Grok (X Premium), GitHub Copilot, Google Antigravity, and Cursor subscriptions as DeepSeek Harness LLM providers, with login from the web Settings page",
   "license": "MIT",
@@ -54,7 +54,7 @@
   },
   "scripts": {
     "build": "tsc && tsdown",
-    "test": "tsc -p tsconfig.test.json && node --import ./test/isolate-home.mjs --test \"lib-test/test/**/*.spec.js\"",
+    "test": "tsc -p tsconfig.test.json && node --import ./test/isolate-home.mjs --import tsx/esm --test \"lib-test/test/**/*.spec.js\"",
     "prepare": "tsdown -c tsdown.prepare.config.ts",
     "prepublishOnly": "pnpm build && pnpm test"
   },
@@ -72,9 +72,10 @@
     "@deepseek-ai/dsh-agent": "0.1.7-rc.1",
     "@deepseek-ai/dsh-api-remotes": "0.1.7-rc.1",
     "@deepseek-ai/dsh-attachment": "0.1.7-rc.1",
+    "@deepseek-ai/dsh-attachment-local": "0.1.7-rc.1",
     "@deepseek-ai/dsh-client-connection": "0.1.7-rc.1",
-    "@deepseek-ai/dsh-client-store": "0.1.7-rc.1",
     "@deepseek-ai/dsh-client-locale": "0.1.7-rc.1",
+    "@deepseek-ai/dsh-client-store": "0.1.7-rc.1",
     "@deepseek-ai/dsh-client-ui-commands": "0.1.7-rc.1",
     "@deepseek-ai/dsh-client-ui-conversation": "0.1.7-rc.1",
     "@deepseek-ai/dsh-client-ui-primitives": "0.1.7-rc.1",
@@ -115,11 +116,13 @@
     "micromark-util-types": "^2.0.2",
     "react": "^18.2.0",
     "react-dom": "^18.3.1",
+    "sharp": "0.35.3",
     "shiki": "^4.3.1",
     "simple-icons": "16.31.0",
     "tsdown": "^0.15.0",
     "typescript": "^5.8.0",
-    "zustand": "~4.4.7"
+    "zustand": "~4.4.7",
+    "tsx": "^4.22.4"
   },
   "dependencies": {
     "undici": "^7.0.0"

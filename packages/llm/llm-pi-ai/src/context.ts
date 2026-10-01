@@ -5,7 +5,7 @@
  */
 
 import { brandString } from '@deepseek-ai/dsh-brand'
-import { contentHasImage, IMAGE_OFFLOAD_REQUIRED_CODE, LlmError, offloadedImageText, projectOffloadedImages, requestImageHandleText, requiredImageOffload } from '@deepseek-ai/dsh-llm'
+import { contentHasImage, IMAGE_OFFLOAD_REQUIRED_CODE, LlmError, offloadedImageText, prepareRequestImages, projectOffloadedImages, requestImageHandleText, requiredImageOffload } from '@deepseek-ai/dsh-llm'
 import type { ContentBlock, GenerateOptions, ImageAttachmentAccessResolver, Message, RequestMessage, ToolCallId } from '@deepseek-ai/dsh-llm'
 import type {
   AttachmentId,
@@ -16,7 +16,7 @@ import type {
 } from '@deepseek-ai/dsh-attachment'
 import type { Context as PiContext, ImageContent, Message as PiMessage, TextContent, Tool as PiTool } from '@earendil-works/pi-ai'
 import { toPiAssistant } from './replay.ts'
-import { requestImageDimensions } from '@deepseek-ai/dsh-attachment'
+import { longEdgeDimensions, requestImageDimensions } from '@deepseek-ai/dsh-attachment'
 import { DEFAULT_REQUEST_IMAGE_MAX_BYTES, DEFAULT_REQUEST_IMAGE_PIXEL_BUDGET } from './config.ts'
 
 /** Join the text blocks of a harness message. */
@@ -94,36 +94,6 @@ function userContent(
   }
   if (content.every(block => block.type === 'text')) return content.map(block => block.text).join('')
   return content
-}
-
-function collectImageRefs(
-  blocks: readonly ContentBlock[],
-  refs: Map<AttachmentId, ImageAttachmentRef>,
-): void {
-  for (const block of blocks) {
-    if (block.type === 'image') {
-      if (block.offloaded !== true) refs.set(block.attachment.attachmentId, block.attachment)
-    }
-  }
-}
-
-async function prepareRequestImages(
-  messages: readonly RequestMessage[],
-  attachments: AttachmentStore,
-  budget: PiImageRequestBudget,
-  signal?: AbortSignal,
-): Promise<Map<AttachmentId, RequestImageAttachment>> {
-  const refs = new Map<AttachmentId, ImageAttachmentRef>()
-  for (const message of messages) collectImageRefs(message.content, refs)
-  const orderedRefs = [...refs.values()]
-  const prepared = await Promise.all(orderedRefs.map(
-    ref => attachments.readImageRequest(ref, requestImageTarget(ref, budget), signal),
-  ))
-  const versions = new Map<AttachmentId, RequestImageAttachment>()
-  for (const [index, ref] of orderedRefs.entries()) {
-    versions.set(ref.attachmentId, prepared[index] as RequestImageAttachment)
-  }
-  return versions
 }
 
 function toolsOf(options: GenerateOptions): PiTool[] | undefined {
@@ -233,6 +203,8 @@ export interface PiImageRequestContext {
   resolveImageAccess: ImageAttachmentAccessResolver
   /** Request-level bound on the base64-encoded payload of retained images; omission leaves the bound unchecked. */
   maxRequestImageBytes?: number
+  /** Protocol image-count ceiling for the resolved model. */
+  maxRequestImages?: number
   /** Route pixel and raw encoded-byte budgets. */
   requestImagePolicy?: PiImageRequestBudget
 }
@@ -243,11 +215,18 @@ export interface PiImageRequestBudget {
   maxPixels: number
   /** Encoded-byte target for one request image. */
   maxBytes: number
+  /** Protocol long-edge limit, resolved against the retained occurrence count. */
+  maxDimension?: (imageCount: number) => number
 }
 
 /** Deterministic request target for one source under the route budgets. */
-function requestImageTarget(ref: ImageAttachmentRef, budget: PiImageRequestBudget): ImageRequestTarget {
-  return { ...requestImageDimensions(ref.width, ref.height, budget.maxPixels), maxBytes: budget.maxBytes }
+function requestImageTarget(ref: ImageAttachmentRef, budget: PiImageRequestBudget, imageCount: number): ImageRequestTarget {
+  const dimensions = requestImageDimensions(ref.width, ref.height, budget.maxPixels)
+  const limit = budget.maxDimension?.(imageCount)
+  const capped = limit !== undefined && Math.max(dimensions.width, dimensions.height) > limit
+    ? longEdgeDimensions(ref.width, ref.height, limit)
+    : dimensions
+  return { ...capped, maxBytes: budget.maxBytes }
 }
 
 /**
@@ -303,16 +282,19 @@ async function toPiContextWithImages(
   }
   assertSupportedHistory(options.messages)
   const split = splitSystemPrompt(options)
-  const requestImages = await prepareRequestImages(split.messages, attachments, requestImagePolicy, options.signal)
-  if (maxRequestImageBytes !== undefined) {
+  const requestImages = await prepareRequestImages(split.messages, attachments,
+    (ref, count) => requestImageTarget(ref, requestImagePolicy, count), options.signal)
+  if (maxRequestImageBytes !== undefined || images.maxRequestImages !== undefined) {
     const offloadImages = requiredImageOffload(
       split.messages,
-      { representation: 'base64', maxBytes: maxRequestImageBytes },
+      { representation: 'base64',
+        ...maxRequestImageBytes === undefined ? {} : { maxBytes: maxRequestImageBytes },
+        ...images.maxRequestImages === undefined ? {} : { maxImages: images.maxRequestImages } },
       block => (requestImages.get(block.attachment.attachmentId) as RequestImageAttachment).bytes,
     )
     if (offloadImages > 0) {
       throw new LlmError(
-        `pi-ai request images exceed the ${maxRequestImageBytes}-byte base64 bound; ${offloadImages} more oldest occurrence(s) must be offloaded.`,
+        `pi-ai request images exceed the route's byte or image-count bound; ${offloadImages} more oldest occurrence(s) must be offloaded.`,
         IMAGE_OFFLOAD_REQUIRED_CODE,
         { offloadImages },
       )

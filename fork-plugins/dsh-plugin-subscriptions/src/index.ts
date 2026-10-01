@@ -70,8 +70,11 @@ import { DEFAULT_RATE_LIMIT_MAX_WAIT_MS, resolveRateLimitWait } from './provider
 import type { RateLimitConfig } from './providers/rate-limit.js'
 import { catalogStore } from './providers/catalog-store.js'
 import { CodexClientVersionCache } from './providers/codex-client-version.js'
+import { CodexAutoReset } from './providers/codex-auto-reset.js'
 import { CodexWebSearchProvider } from './providers/codex-search.js'
 import { PoolAdapter } from './providers/pool.js'
+import { PoolSchedulingSchema, resolvePoolScheduling } from './providers/pool-scheduling.js'
+import type { PoolSchedulingPolicy } from './providers/pool-scheduling.js'
 import { AccountPreferencesAdapter, accountAllowsPool, accountModelId, parseAccountModelId } from './providers/account-preferences.js'
 export type { AccountPreferences, ProviderPreferences } from './provider-settings.js'
 import { ImageAccountPool } from './providers/image-pool.js'
@@ -194,6 +197,8 @@ export interface Config {
     strategy?: 'priority' | 'quota_aware'
     /** A challenger must out-score the sticky member by this factor to take over (default 2). */
     switchMargin?: number
+    /** Bounded reset/finishing preferences and per-account concurrency penalty. */
+    scheduling?: Partial<PoolSchedulingPolicy>
     /** Auto-pool every catalog model across a provider's logged-in accounts (default true). */
     autoAccounts?: boolean
     /** @deprecated Use {@link autoAccounts}. */
@@ -248,6 +253,7 @@ export const Config: z<Config> = z.object({
     enabled: z.boolean().default(true),
     strategy: z.union(['priority', 'quota_aware']).default('quota_aware'),
     switchMargin: z.number().min(1).default(2),
+    scheduling: PoolSchedulingSchema,
     autoAccounts: z.boolean().default(true),
     autoFamilies: z.boolean(),
     families: z.dict(z.array(poolMemberSchema)),
@@ -815,6 +821,7 @@ export class SubscriptionsAuthController implements AuthController {
 }
 
 export function apply(ctx: Context, config: Config): void {
+  const scheduling = resolvePoolScheduling(config.pool?.scheduling)
   // Outbound requests (catalog discovery, the npm version lookup, token
   // refresh) must survive links where one TCP handshake exceeds Node's 250ms
   // Happy Eyeballs attempt budget; see MIN_CONNECT_ATTEMPT_TIMEOUT_MS.
@@ -888,6 +895,13 @@ export function apply(ctx: Context, config: Config): void {
   // captured beside the registrations for the inject block below.
   let codexTokens: AccountTokenManager<CodexSession> | undefined
   let codexResetCredits: CodexResetCreditOps | undefined
+  let codexAutoReset: CodexAutoReset | undefined
+  const recoverCodexQuota = async (account: string, signal?: AbortSignal): Promise<boolean> => {
+    if (codexAutoReset === undefined || preferences.get('codex').autoResetCredits !== true) return false
+    const key = await codexTokens!.resolveAccount(account)
+    return await withTimeout(deadline => codexAutoReset!.recover(key,
+      signal === undefined ? deadline : AbortSignal.any([signal, deadline])), streamIdleTimeoutMs) ?? false
+  }
   let claudeTokens: AccountTokenManager<ClaudeSession> | undefined
   let grokTokens: AccountTokenManager<GrokSession> | undefined
   // Usage lookups resolve the session through the refresh-aware path, so an
@@ -926,9 +940,15 @@ export function apply(ctx: Context, config: Config): void {
         })
         codexTokens = tokens
         accountTokens.set('codex', tokens as AccountTokenManager<StoredSession>)
-        usageFetchers.codex = async (account, signal) =>
+        const fetchUsage = async (account: string, signal: AbortSignal): Promise<ProviderUsage> =>
           fetchCodexUsage(await tokens.session(account), proxiedFetch, signal)
-        codexResetCredits = {
+        usageFetchers.codex = async (account, signal) => {
+          const startedAt = Date.now()
+          const snapshot = await fetchUsage(account, signal)
+          await codexAutoReset?.observeUsage(await tokens.resolveAccount(account), snapshot, startedAt)
+          return snapshot
+        }
+        const creditOps: CodexResetCreditOps = {
           list: async (account, signal) => fetchCodexResetCredits(await tokens.session(account), proxiedFetch, signal),
           consume: async (account, creditId, redeemRequestId, signal) => consumeCodexResetCredit(
             await tokens.session(account),
@@ -938,6 +958,24 @@ export function apply(ctx: Context, config: Config): void {
             signal,
           ),
         }
+        codexAutoReset = new CodexAutoReset({
+          confirmationTimeoutMs: streamIdleTimeoutMs,
+          enabled: () => preferences.get('codex').autoResetCredits === true,
+          accounts: async () => (await tokens.list()).map(account => account.key),
+          usage: fetchUsage,
+          ...creditOps,
+          changed: account => {
+            subscriptionsAuth?.forgetResetCredits('codex', account)
+            poolUsage?.invalidate('codex', account)
+            poolHealth?.clear('codex', account)
+          },
+          onWarn,
+        })
+        codexResetCredits = {
+          list: creditOps.list,
+          consume: async (account, credit, requestId, signal) =>
+            codexAutoReset!.manual(await tokens.resolveAccount(account), credit, requestId, signal),
+        }
         let adapter!: CodexAdapter
         adapter = new CodexAdapter({
           ...config.codexClientVersion === undefined ? {} : { clientVersion: config.codexClientVersion },
@@ -946,6 +984,7 @@ export function apply(ctx: Context, config: Config): void {
           streamIdleTimeoutMs,
           rateLimit,
           tokens,
+          recoverQuota: recoverCodexQuota,
           discovery: !overridden.has('codex'),
           onWarn,
           resolveAttachments,
@@ -1155,8 +1194,12 @@ export function apply(ctx: Context, config: Config): void {
       switch (provider) {
         case 'codex': {
           const tokens = codexTokens
-          return tokens === undefined ? undefined : async () =>
-            fetchCodexPoolUsage(await tokens.session(account), proxiedFetch, AbortSignal.timeout(POOL_USAGE_TIMEOUT_MS))
+          return tokens === undefined ? undefined : async () => {
+            const startedAt = Date.now()
+            const snapshot = await fetchCodexPoolUsage(await tokens.session(account), proxiedFetch, AbortSignal.timeout(POOL_USAGE_TIMEOUT_MS))
+            await codexAutoReset?.observeUsage(await tokens.resolveAccount(account), snapshot, startedAt)
+            return snapshot
+          }
         }
         case 'claude': {
           const tokens = claudeTokens
@@ -1230,10 +1273,13 @@ export function apply(ctx: Context, config: Config): void {
       usage: poolUsage,
       strategy: poolConfig?.strategy ?? 'quota_aware',
       switchMargin: poolConfig?.switchMargin ?? 2,
+      scheduling,
       defaultAccount: provider => accountTokens.get(provider)?.defaultAccount() ?? Promise.resolve(undefined),
       resolveAccount: (provider, account) => accountTokens.get(provider)?.resolveAccount(account) ?? Promise.resolve(account),
       families,
       tiers: poolConfig?.tiers ?? {},
+      recoverQuota: (member, signal) => member.provider === 'codex'
+        ? recoverCodexQuota(member.account, signal) : Promise.resolve(false),
       onWarn,
     })
   }

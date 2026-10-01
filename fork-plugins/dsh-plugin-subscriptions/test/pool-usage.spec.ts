@@ -19,6 +19,51 @@ const MEMBER = { provider: 'claude' as const, account: 'a1', model: 'claude-opus
 
 const OK_USAGE: ProviderUsage = { supported: true, windows: [{ kind: 'session', usedPercent: 10 }] }
 
+test('quotaFor: crossing a reset refreshes once and excludes elapsed quota from routing', async (t) => {
+  const now = Date.UTC(2026, 8, 30)
+  t.mock.timers.enable({ apis: ['Date'], now })
+  const next = Promise.withResolvers<ProviderUsage>()
+  let requests = 0
+  const { tracker } = trackerOf(() => ++requests === 1
+    ? Promise.resolve({ supported: true, windows: [{ kind: 'session', usedPercent: 100, resetsAt: now + 1000 }] })
+    : next.promise)
+  assert.equal((await tracker.quotaFor(MEMBER)).available, false)
+  t.mock.timers.tick(1001)
+  const stale = await tracker.quotaFor(MEMBER)
+  assert.equal(stale.urgency, 0)
+  assert.deepEqual(stale.windows, [])
+  assert.equal(requests, 2)
+  const settled = tracker.snapshotFor('claude', 'a1', true)
+  next.resolve({ supported: true, windows: [{ kind: 'session', usedPercent: 2, resetsAt: now + 5 * 60 * 60_000 }] })
+  await settled
+  assert.equal((await tracker.quotaFor(MEMBER)).windows?.[0].usedPercent, 2)
+  assert.equal(requests, 2)
+})
+
+test('quotaFor: an endpoint returning an elapsed reset cannot trigger a refresh loop', async (t) => {
+  const now = Date.UTC(2026, 8, 30)
+  t.mock.timers.enable({ apis: ['Date'], now })
+  const { tracker, calls } = trackerOf(async () => ({ supported: true,
+    windows: [{ kind: 'weekly', usedPercent: 50, resetsAt: now - 1 }] }))
+  for (let index = 0; index < 5; index++) {
+    const result = await tracker.quotaFor(MEMBER)
+    assert.equal(result.urgency, 0)
+    assert.deepEqual(result.windows, [])
+  }
+  assert.equal(calls.count, 1)
+})
+
+test('quotaFor: another Claude model family does not affect availability or reset preferences', async () => {
+  const { tracker } = trackerOf(async () => ({ supported: true, windows: [
+    { kind: 'weekly', scope: 'Sonnet', usedPercent: 100, resetsAt: Date.now() + 1000 },
+    { kind: 'weekly', scope: 'Opus', usedPercent: 50, resetsAt: Date.now() + 86_400_000 },
+  ] }))
+  const result = await tracker.quotaFor(MEMBER)
+  assert.equal(result.available, true)
+  assert.equal(result.windows?.length, 1)
+  assert.equal(result.windows?.[0].scope, 'Opus')
+})
+
 /** A tracker whose sole fetcher counts calls and answers from a script. */
 function trackerOf(
   fetcher: () => Promise<ProviderUsage>,

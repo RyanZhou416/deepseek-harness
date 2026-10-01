@@ -1,0 +1,3 @@
+- insert:
+    - id: pool-routing-probe
+      name: ../../../fork-plugins/dsh-plugin-subscriptions/test/fixtures/pool-routing-probe.mjs

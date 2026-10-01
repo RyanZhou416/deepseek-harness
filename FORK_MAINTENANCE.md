@@ -70,6 +70,18 @@ Continuable-subagent Queue edit/remove/steer 由 alpha.2 的通用 `session.upda
 
 ## Source deltas
 
+### Subscription pool scheduling
+
+订阅插件的源码调度策略由 `pool.scheduling` 控制：Claude 与 ChatGPT 的临近重置、ChatGPT 的余额收尾及重置卡条件均采用有限加权，并用当前账号的活跃池请求数惩罚拥挤。保留按会话、提供方与模型池区分的粘性，统一按调整后评分应用切换门槛，首个输出后不切账号。并发预约覆盖首字节等待并在每条退出路径释放；已过期窗口不按无限紧迫度计分。保留 `pool.spec.ts` 的并发屏障和 `snapshots/session/subscription-pool-routing`。该策略包含在已安装的 `.3` 制品中；后续部署仍须在 Host 停止后升级插件制品及版本固定记录。
+
+ChatGPT 源码提供默认关闭的 `autoResetCredits` 开关，入口为订阅账号管理。当前账号额度耗尽且其可用卡在所有已登录 ChatGPT 账号中最早到期时才自动用卡，不要求其他账号也耗尽。保留全账号最新卡列表比较、使用前最新额度复核、手动/自动串行与落盘防重复记录；开关不能被模型编辑器的旧副本覆盖。验证入口为 `codex-auto-reset.spec.ts`、设置/RPC 与池测试、`account-manager-browser.mjs` 和上述无密钥会话回放。已安装的 `.3` 包含该功能，默认关闭，禁止在 Host 运行时替换安装目录；具体规则以[插件 README](fork-plugins/dsh-plugin-subscriptions/README.md)为准。
+
+订阅网络重试修复保留原始提供方策略穿过 `AccountPreferencesAdapter`，使十次重试、指数退避与抖动到达 Host。账号池中仍可请求的成员发生网络故障时，必须保留该成员的错误，不得把其他成员的额度或认证冷却附在它上面，造成超出等待上限而终止。保留账号尝试顺序的双向回归、策略透传测试，以及 `subscription-network-retry` 无密钥会话回放。该修复已随 `.3` 在 Host 停止后构建并安装。
+
+### Model-specific request images
+
+`dsh-llm.prepareRequestImages` shares retained-occurrence counting and per-attachment preparation across DeepSeek, pi-ai and subscription routes. Preserve immutable normalized attachments, count repeated user/tool images separately, exclude logged offloads, and derive each request from its current model route. Anthropic Messages and the Claude subscription adapter apply the 20/21-image dimension boundary; Claude also checks model image-count limits and exact JSON request bytes before dispatch. Compatible variants remain cached; changing models does not enlarge a previous preview or revive offloaded history. Focused checks: `llm/tests/request-images.spec.ts`, pi-ai context/routing tests, and `fork-plugins/dsh-plugin-subscriptions/test/image-policy.spec.ts`. Deployment requires rebuilding the matching Harness and pinned subscription artifact after the Host stops; source edits do not update the installed tarball.
+
 ### Goal disabled by default
 
 所有内置 base-backed profile 关闭 Goal 服务、自动续跑、模型工具与命令；Web 预设和目标栏也关闭。`goal-disabled` 准入插件阻止已排队的 Goal 轮次和收尾通知进入新模型请求，混合输入保留普通消息，旧 Goal 日志不改写。Goal 实现和历史格式仍保留，专用测试以显式 opt-in 组合继续覆盖它。
@@ -222,6 +234,10 @@ Gateway 每个 socket 只保留一枚待确认 Ping。未完成写入时，`buff
 
 保留 `apps/web/stress-tests/subagent-reconnect.stress.ts` 的八个真实 continuable child + paced stream + WebSocket 重连组合断言：完整持久化输出、每个孩子恰好一次 start/end、最终释放、父会话标题及未发送草稿保留。该场景报告真实键盘输入与恢复耗时，但不以测试 Host RSS 宣称产品内存稳定；独立临时目录和随机端口不接触用户数据。长历史手动诊断 `apps/web/tests/complex-history.perf.ts` 使用当前 V4 system head、当前五行侧栏预览和 Trajectory 逻辑行数，工具轮次按 Windows `pwsh` / POSIX `bash` 调用并验证真实输出，禁止用旧界面文案或跳过工具错误代替负载。
 
+### Subagent catalog ordering
+
+The conversation-header subagent menu sorts each sibling level by creation time descending, keeping catalog order for equal timestamps. Preserve the original projection arrays and stable row positions during activity updates; `ui-subagent/tests/conversation-ui.client.spec.tsx` covers newest-first display without mutating catalog membership.
+
 ### Background-only delegation
 
 Shipped base and Web preset delegation tools set `enableRunInForeground: false`. The tool omits the scheduling parameter and foreground output variant, defaults one-shot providers to background Jobs, and rejects explicit `run_in_background: false` before model validation or child creation. Continuable children retain their durable ids, messages and settlement notices. Preserve execution-time rejection, cancellation and Job collection; prompt-only guidance is insufficient. Workflow and Ralph keep their separate orchestration policies.
@@ -320,7 +336,7 @@ Web profile 插入 `memory-watchdog.cjs`：250 ms 采样、60 s 日志、heap ra
 |---|---:|---|---|
 | `dshmarket` | — | Removed | 官方 Plugin Manager 接管安装、配置与运行时启停；profile 不恢复旧 package 或 bundle |
 | `@nanmicoder/dsh-agent-teams` | `0.1.20-dsh017rc1.1` | Installed, enabled | 真实 profile 使用仓内固定 artifact；停止 Host 后更新，禁止被 npm latest/next 直接覆盖 |
-| `dsh-plugin-subscriptions` | `0.9.4-dsh017rc1.1` | Installed; Windows Web enabled | 仓内固定 artifact；凭据文件原地保留，其他 profile 是否启用沿用显式插件配置 |
+| `dsh-plugin-subscriptions` | `0.9.4-dsh017rc1.3` | Installed; Windows Web enabled | 仓内固定 artifact；凭据文件原地保留，其他 profile 是否启用沿用显式插件配置 |
 | `@vlln/dsh-task-status` | Removed | Not installed | 已从依赖、bundle、patch、lockfile 和 `node_modules` 删除；profile 不得恢复 |
 | `dsh-context` | Windows: `0.55.0-dsh017rc1.3`; Mac: `0.55.0-dsh017rc1.1` | Installed, enabled | 真实 profile 保留 `300/60/100/400/100/100` bounds；源码与回滚规则见 `fork-plugins/dsh-context/FORK_MAINTENANCE.md` |
 | `dsh-shell-command` | Removed | No package or configuration | profile 不安装 |
@@ -369,9 +385,9 @@ Context 源码的工具归属追踪按 `cordis.original` 解包后的服务身�
 
 ### Local Subscriptions package
 
-维护真源位于 `fork-plugins\dsh-plugin-subscriptions`，仓库安装器使用 `fork-plugins\releases\dsh-plugin-subscriptions-0.9.4-dsh017rc1.1.tgz`，SHA256 为 `1A05CEA2811E4B62116AC2EE599BD885D5CAB559C35347DAF189976E16B6A877`。该摘要与 Git 已提交制品及其 `.sha256` 文件一致。该版本采用上游 v0.9.4 的多账号 provider、usage UI、Codex 搜索、图片结果、Antigravity 与 provider failover，并增加 RC.1 的 V4 工具角色转换；凭据格式与工具输出不变。
+维护真源位于 `fork-plugins\dsh-plugin-subscriptions`，仓库安装器使用 `fork-plugins\releases\dsh-plugin-subscriptions-0.9.4-dsh017rc1.3.tgz`，SHA256 为 `CAA901F20E3A66D9F7CBC86FE15E0A57A1D2CD59740C096BEBB9EFE7F9E503F3`。该摘要与仓内制品及其 `.sha256` 文件一致。该版本采用上游 v0.9.4 的多账号 provider、usage UI、Codex 搜索、图片结果、Antigravity 与 provider failover，并增加 RC.1 的 V4 工具角色转换；凭据格式与工具输出不变。
 
-Windows Web profile 启用 `llm-subscriptions`，保留 `rateLimit.wait: false`。2026-09-26，固定源码包的 506 项无密钥测试通过；隔离 Web profile 与真实 Web profile 均在随机本地端口启动，认证页面返回 HTTP 200，页面包含 Subscriptions 客户端资源。真实 Profile 的 Codex 状态接口识别到两个已存账号，默认账号的用量查询通过并刷新过期访问令牌；另一个账号及真实模型请求尚未验证。旧 profile patch 备份位于 `C:\Project\deepseek-harness-data\diagnostics\profile-backups\pre-subscriptions-enable-20260926`。
+Windows Web profile 启用 `llm-subscriptions`，保留 `rateLimit.wait: false`。 当前 `.3` 已通过 603 项插件测试、实际安装目录的接口与 UI 开关检查，且保留已验证的图片处理：21 张历史图片中原有 16 张超出多图尺寸上限，请求版本的长边均不超过 2,000 像素，原 Session 和附件摘要保持不变。2026-09-26，固定源码包的 506 项无密钥测试通过；隔离 Web profile 与真实 Web profile 均在随机本地端口启动，认证页面返回 HTTP 200，页面包含 Subscriptions 客户端资源。真实 Profile 的 Codex 状态接口识别到两个已存账号，默认账号的用量查询通过并刷新过期访问令牌；另一个账号及真实模型请求尚未验证。旧 profile patch 备份位于 `C:\Project\deepseek-harness-data\diagnostics\profile-backups\pre-subscriptions-enable-20260926`。
 
 更新时使用 `git subtree pull --prefix=fork-plugins/dsh-plugin-subscriptions https://github.com/V1ki/dsh-plugin-subscriptions.git <tag> --squash`，再重放 `fork-plugins/dsh-plugin-subscriptions/FORK_MAINTENANCE.md`。真实 profile 始终安装仓内固定 artifact，禁止 npm latest 直接覆盖。
 

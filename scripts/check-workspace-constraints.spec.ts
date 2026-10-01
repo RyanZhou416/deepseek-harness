@@ -375,3 +375,11 @@ it('requires the local speech worker and locked runtime in the published payload
       .toEqual([expect.stringContaining('package.json files must be')])
   }
 })
+
+it('requires the Goal-disabled entry in the published round-driver payload', () => {
+  const dir = 'packages/goal/goal-round-driver'
+  const manifest = JSON.parse(readFileSync(new URL(`../${dir}/package.json`, import.meta.url), 'utf8')) as WorkspaceManifest['manifest']
+  expect(checkWorkspaceManifest({ dir, manifest })).toEqual([])
+  expect(checkWorkspaceManifest({ dir, manifest: { ...manifest, files: manifest.files!.filter(file => file !== 'lib/disabled.js') } }))
+    .toEqual([expect.stringContaining('package.json files must be')])
+})

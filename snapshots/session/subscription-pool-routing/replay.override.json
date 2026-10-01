@@ -1,0 +1,183 @@
+[
+  {
+    "kind": "chunks",
+    "chunks": [
+      {
+        "type": "block-start",
+        "index": 0,
+        "blockType": "tool-call"
+      },
+      {
+        "type": "tool-call-delta",
+        "index": 0,
+        "id": "pool-policy-0",
+        "name": "pool_route_probe",
+        "argumentsDelta": "{\"scenario\":\"claude-reset\"}"
+      },
+      {
+        "type": "block-end",
+        "index": 0,
+        "block": {
+          "type": "tool-call",
+          "id": "pool-policy-0",
+          "name": "pool_route_probe",
+          "arguments": "{\"scenario\":\"claude-reset\"}"
+        }
+      },
+      {
+        "type": "block-start",
+        "index": 1,
+        "blockType": "tool-call"
+      },
+      {
+        "type": "tool-call-delta",
+        "index": 1,
+        "id": "pool-policy-1",
+        "name": "pool_route_probe",
+        "argumentsDelta": "{\"scenario\":\"codex-reset\"}"
+      },
+      {
+        "type": "block-end",
+        "index": 1,
+        "block": {
+          "type": "tool-call",
+          "id": "pool-policy-1",
+          "name": "pool_route_probe",
+          "arguments": "{\"scenario\":\"codex-reset\"}"
+        }
+      },
+      {
+        "type": "block-start",
+        "index": 2,
+        "blockType": "tool-call"
+      },
+      {
+        "type": "tool-call-delta",
+        "index": 2,
+        "id": "pool-policy-2",
+        "name": "pool_route_probe",
+        "argumentsDelta": "{\"scenario\":\"codex-finish\"}"
+      },
+      {
+        "type": "block-end",
+        "index": 2,
+        "block": {
+          "type": "tool-call",
+          "id": "pool-policy-2",
+          "name": "pool_route_probe",
+          "arguments": "{\"scenario\":\"codex-finish\"}"
+        }
+      },
+      {
+        "type": "block-start",
+        "index": 3,
+        "blockType": "tool-call"
+      },
+      {
+        "type": "tool-call-delta",
+        "index": 3,
+        "id": "pool-policy-3",
+        "name": "pool_route_probe",
+        "argumentsDelta": "{\"scenario\":\"auto-earliest\"}"
+      },
+      {
+        "type": "block-end",
+        "index": 3,
+        "block": {
+          "type": "tool-call",
+          "id": "pool-policy-3",
+          "name": "pool_route_probe",
+          "arguments": "{\"scenario\":\"auto-earliest\"}"
+        }
+      },
+      {
+        "type": "block-start",
+        "index": 4,
+        "blockType": "tool-call"
+      },
+      {
+        "type": "tool-call-delta",
+        "index": 4,
+        "id": "pool-policy-4",
+        "name": "pool_route_probe",
+        "argumentsDelta": "{\"scenario\":\"auto-later\"}"
+      },
+      {
+        "type": "block-end",
+        "index": 4,
+        "block": {
+          "type": "tool-call",
+          "id": "pool-policy-4",
+          "name": "pool_route_probe",
+          "arguments": "{\"scenario\":\"auto-later\"}"
+        }
+      },
+      {
+        "type": "block-start",
+        "index": 5,
+        "blockType": "tool-call"
+      },
+      {
+        "type": "tool-call-delta",
+        "index": 5,
+        "id": "pool-policy-5",
+        "name": "pool_route_probe",
+        "argumentsDelta": "{\"scenario\":\"auto-disabled\"}"
+      },
+      {
+        "type": "block-end",
+        "index": 5,
+        "block": {
+          "type": "tool-call",
+          "id": "pool-policy-5",
+          "name": "pool_route_probe",
+          "arguments": "{\"scenario\":\"auto-disabled\"}"
+        }
+      },
+      {
+        "type": "usage",
+        "usage": {
+          "inputTokens": 10,
+          "outputTokens": 5
+        }
+      },
+      {
+        "type": "finish",
+        "reason": {
+          "kind": "tool-calls"
+        }
+      }
+    ]
+  },
+  {
+    "kind": "chunks",
+    "chunks": [
+      {
+        "type": "block-start",
+        "index": 0,
+        "blockType": "text"
+      },
+      {
+        "type": "block-end",
+        "index": 0,
+        "block": {
+          "type": "text",
+          "text": "Account routing respects reset priority, quota finishing, and the optional earliest-expiring reset credit rule."
+        }
+      },
+      {
+        "type": "usage",
+        "usage": {
+          "inputTokens": 10,
+          "outputTokens": 5
+        }
+      },
+      {
+        "type": "finish",
+        "reason": {
+          "kind": "stop"
+        }
+      }
+    ]
+  }
+]

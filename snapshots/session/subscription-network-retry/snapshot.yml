@@ -1,0 +1,10 @@
+version: 1
+scenario: subscription-network-retry
+profile: headless
+composition: subscription-network-retry
+recording: authored
+header:
+  class: subscription-network-retry
+  pin: true
+replay:
+  override: true

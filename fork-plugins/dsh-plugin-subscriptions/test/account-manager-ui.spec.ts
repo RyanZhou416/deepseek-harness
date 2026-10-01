@@ -30,6 +30,13 @@ test('account manager preserves latest other settings and untouched accounts', (
   })
   assert.equal(latest.accounts.personal.alias, 'Old')
 })
+
+test('a model draft cannot overwrite a newer automatic-credit setting', () => {
+  assert.deepEqual(mergeLatestAccounts({ autoResetCredits: false, visibleModels: ['a'] }, { autoResetCredits: true }), {
+    autoResetCredits: true, visibleModels: ['a'],
+  })
+  assert.deepEqual(mergeLatestAccounts({ autoResetCredits: true, visibleModels: ['a'] }, {}), { visibleModels: ['a'] })
+})
 test('account manager has bilingual copy and explicitly limits isolation claims', () => {
   for (const key of Object.keys(en).filter(key => key.startsWith('accounts')) as (keyof typeof en)[]) {
     assert.ok(en[key].length)

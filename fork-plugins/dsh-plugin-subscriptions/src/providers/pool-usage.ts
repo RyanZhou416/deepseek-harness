@@ -3,12 +3,10 @@
  * (the same normalized `ProviderUsage` shape the Settings page consumes) and
  * turns the windows into a scheduling score.
  *
- * The score is a REQUIRED BURN RATE: the fraction of the window that must be
- * consumed per millisecond for the quota to be exactly used up at reset time
- * (`remaining / timeUntilReset`). Subscription quota does not roll over, so a
- * window about to reset with plenty left is the most urgent to spend — the
- * `quota_aware` strategy therefore prefers the highest-urgency member, which
- * over time converges on every window hitting zero right at its reset.
+ * The baseline is the remaining quota fraction divided by time until reset.
+ * Model-scoped live windows accompany that rate so the pool can add bounded
+ * reset and finishing preferences. An elapsed window supplies no score or
+ * quota-full assertion until the provider reports a replacement.
  */
 
 import { isMissingOrInvalidCredential, OAuthEndpointError } from './common.js'
@@ -16,10 +14,10 @@ import type { ProviderUsage, UsageWindow } from './common.js'
 import type { ProviderId } from '../auth/store.js'
 import type { ConcretePoolMember } from './pool-family.js'
 
-/** A member is taken out of rotation once any window crosses this fill level. */
+/** Other providers enter the quota-full fallback band at this reported usage. */
 export const QUOTA_FULL_PERCENT = 95
-/** ChatGPT accounts stay in the quota band until a window reaches 100%. */
-export const CODEX_QUOTA_FULL_PERCENT = 100
+/** Claude and ChatGPT can consume their remaining quota until a window reaches 100%. */
+export const CONSUMABLE_QUOTA_FULL_PERCENT = 100
 /** Length of the Codex weekly window used to tell a fresh window from an old one. */
 const CODEX_WEEKLY_WINDOW_MS = 7 * 24 * 60 * 60 * 1000
 /** A weekly window that opened within this long counts as just refreshed. */
@@ -44,11 +42,13 @@ export interface MemberQuota {
   urgency: number
   /** Epoch ms of the snapshot this was computed from; 0 when none. */
   fetchedAt: number
+  /** Applicable windows whose recorded reset has not elapsed; absent when usage is unknown. */
+  windows?: readonly UsageWindow[]
   /**
    * ChatGPT: the weekly window opened within the last day and an available
    * reset credit expires within three days. Selection ranks these accounts
-   * first inside the not-full band, and first in the full tail. The pool
-   * does not spend the credit.
+   * with a bounded bonus inside its availability band. The pool never
+   * spends the credit.
    */
   preferFreshCredit?: boolean
 }
@@ -127,7 +127,10 @@ export class PoolUsageTracker {
     if (fetcher === undefined) return { available: true, urgency: 0, fetchedAt: 0 }
     const entry = this.entries.get(key)
     if (entry !== undefined) {
-      const fresh = Date.now() - entry.at < (entry.cooldownMs ?? this.ttlMs)
+      const now = Date.now()
+      const resetElapsed = entry.snapshot?.windows?.some(window =>
+        window.resetsAt !== undefined && entry.at < window.resetsAt && window.resetsAt <= now) === true
+      const fresh = now - entry.at < (entry.cooldownMs ?? this.ttlMs) && !resetElapsed
       if (entry.snapshot !== undefined) {
         if (!fresh) void this.refresh(key, fetcher).catch(() => undefined)
         return this.score(member, entry)
@@ -246,19 +249,23 @@ export class PoolUsageTracker {
 
   /** Score one member against a snapshot's windows. */
   private score(member: ConcretePoolMember, entry: SnapshotEntry): MemberQuota {
-    const windows = (entry.snapshot.windows ?? []).filter(window => windowApplies(window, member.model))
-    const fullAt = member.provider === 'codex' ? CODEX_QUOTA_FULL_PERCENT : QUOTA_FULL_PERCENT
+    const now = Date.now()
+    const windows = (entry.snapshot.windows ?? []).filter(window => windowApplies(window, member.model)
+      && (window.resetsAt === undefined || window.resetsAt > now))
+    const fullAt = member.provider === 'codex' || member.provider === 'claude'
+      ? CONSUMABLE_QUOTA_FULL_PERCENT : QUOTA_FULL_PERCENT
     let available = true
     let urgency = 0
     for (const window of windows) {
       if (window.usedPercent >= fullAt) available = false
-      urgency = Math.max(urgency, windowUrgency(window))
+      urgency = Math.max(urgency, windowUrgency(window, now))
     }
     const preferFreshCredit = member.provider === 'codex' && codexPreferFreshCredit(entry.snapshot)
     return {
       available,
       urgency,
       fetchedAt: entry.at,
+      windows,
       ...preferFreshCredit ? { preferFreshCredit: true } : {},
     }
   }

@@ -184,7 +184,7 @@ async function defaultLoadCursorSdk(): Promise<CursorSdkModule> {
 export function setCursorSdkLoader(loader: (() => Promise<unknown>) | undefined): void {
   loadCursorSdk = loader === undefined
     ? defaultLoadCursorSdk
-    : async () => await loader() as unknown as CursorSdkModule
+    : async () => await loader() as CursorSdkModule
 }
 
 /**

@@ -41,6 +41,7 @@ export function ProviderAccountManager({ provider, name, rpc, t, onClose }: Prop
   const [saveError, setSaveError] = useState('')
   const [attempt, setAttempt] = useState(0)
   const [modelsDirty, setModelsDirty] = useState(false)
+  const [autoResetCredits, setAutoResetCredits] = useState<boolean>()
   const alive = useRef(true)
   const saveLock = useRef(false)
   const editor = useRef<ProviderModelEditorHandle>(null)
@@ -96,7 +97,9 @@ export function ProviderAccountManager({ provider, name, rpc, t, onClose }: Prop
       const latest = await callSubscriptionsAuth<Catalog>(rpc, 'providerSettings', { provider })
       if (!alive.current) return
       const base = models.settings === undefined ? latest.settings : mergeLatestAccounts(models.settings, latest.settings)
-      await callSubscriptionsAuth(rpc, 'setProviderSettings', { provider, settings: mergeAccountChanges(base, changes) })
+      const settings = mergeAccountChanges(base, changes)
+      if (autoResetCredits !== undefined) settings.autoResetCredits = autoResetCredits
+      await callSubscriptionsAuth(rpc, 'setProviderSettings', { provider, settings })
       if (alive.current) onClose()
     } catch (error) {
       if (alive.current) {
@@ -123,6 +126,14 @@ export function ProviderAccountManager({ provider, name, rpc, t, onClose }: Prop
       {loading && <p role="status" style={hint}>{t('accountsLoading')}</p>}
       {!loading && !catalog && <button type="button" style={button} onClick={() => setAttempt(value => value + 1)}>{t('modelDefaultsRetry')}</button>}
       {catalog && <fieldset disabled={saving || loading} style={{ ...stack, border: 0, margin: 0, padding: 0 }}>
+        {provider === 'codex' && <div style={{ ...stack, gap: 6, border, borderRadius: 12, padding: 14 }}>
+          <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontWeight: 500 }}>
+            <input type="checkbox" checked={autoResetCredits ?? catalog.settings.autoResetCredits ?? false}
+              onChange={event => setAutoResetCredits(event.target.checked)} />
+            {t('accountsAutoResetCredits')}
+          </label>
+          <p style={hint}>{t('accountsAutoResetCreditsHint')}</p>
+        </div>}
         {catalog.accounts.length === 0 && <p style={hint}>{t('accountsEmpty')}</p>}
         {catalog.accounts.map(account => {
           const preferences = changes[account.key] ?? catalog.settings.accounts?.[account.key] ?? {}
@@ -182,7 +193,7 @@ export function ProviderAccountManager({ provider, name, rpc, t, onClose }: Prop
         {saveError && <p role="alert" style={{ ...hint, color: 'var(--dsw-alias-state-error-primary)' }}>{saveError}</p>}
         <div style={{ ...actions, justifyContent: 'flex-end' }}>
           <button type="button" style={button} disabled={saving} onClick={onClose}>{t('cancel')}</button>
-          <button type="button" style={{ ...button, fontWeight: 600 }} disabled={loading || saving || (!Object.keys(changes).length && !modelsDirty)}
+          <button type="button" style={{ ...button, fontWeight: 600 }} disabled={loading || saving || (!Object.keys(changes).length && !modelsDirty && autoResetCredits === undefined)}
             onClick={() => { void save() }}>{saving ? t('modelDefaultsSaving') : t('modelsSave')}</button>
         </div>
       </footer>

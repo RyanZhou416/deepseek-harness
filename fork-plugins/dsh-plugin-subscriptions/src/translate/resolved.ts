@@ -6,9 +6,20 @@
  * base64 data.
  */
 
-import { LlmError } from '@deepseek-ai/dsh-llm'
-import type { ContentBlock, Message, RequestMessage, ToolResultMessage } from '@deepseek-ai/dsh-llm'
-import type { AttachmentStore } from '@deepseek-ai/dsh-attachment'
+import { IMAGE_OFFLOAD_REQUIRED_CODE, LlmError, offloadedImageText, prepareRequestImages, projectOffloadedImages, requiredImageOffload } from '@deepseek-ai/dsh-llm'
+import type { ContentBlock, LlmImageRequestBudget, Message, RequestImageTargetResolver, RequestMessage, ToolResultMessage } from '@deepseek-ai/dsh-llm'
+import type { AttachmentStore, RequestImageAttachment } from '@deepseek-ai/dsh-attachment'
+
+/** Request-local policy supplied by the resolved provider/model route. */
+export interface SubscriptionImagePolicy {
+  /** Dimensions and byte target for each immutable source at this request's image count. */
+  target: RequestImageTargetResolver
+  /** Aggregate represented bytes and occurrence limit, enforced through logged offload. */
+  budget?: LlmImageRequestBudget
+}
+
+/** Preserve normalized resolution when the route has no tighter protocol policy. */
+const normalizedTarget: RequestImageTargetResolver = ref => ({ width: ref.width, height: ref.height, maxBytes: ref.bytes })
 
 /** An image block with its bytes resolved to inline base64 for the wire. */
 export interface ResolvedImagePart {
@@ -92,15 +103,18 @@ function translatable(message: RequestMessage, content: readonly TranslatableBlo
  * @param messages - durable conversation messages and request-only user input.
  * @param attachments - the deployment's attachment service, when mounted.
  * @param signal - cancellation for the storage reads.
+ * @param policy - exact route's request limits; omission preserves normalized image dimensions.
  * @returns ordered translator messages with tool results and images resolved.
  */
 export async function resolveImages(
   messages: readonly RequestMessage[],
   attachments: AttachmentStore | undefined,
   signal?: AbortSignal,
+  policy?: SubscriptionImagePolicy,
 ): Promise<readonly TranslatableMessage[]> {
-  const hasImage = messages.some(message => message.content.some(block => block.type === 'image'))
-  if (!hasImage) return messages.map(message => translatable(message, message.content))
+  const projected = projectOffloadedImages(messages, ref => offloadedImageText(ref))
+  const hasImage = projected.some(message => message.content.some(block => block.type === 'image'))
+  if (!hasImage) return projected.map(message => translatable(message, message.content))
   if (attachments === undefined) {
     throw new LlmError(
       'dsh-plugin-subscriptions: the request carries an image but no attachments service is mounted; '
@@ -108,23 +122,31 @@ export async function resolveImages(
       'UNSUPPORTED',
     )
   }
-  const resolveBlock = async (block: ContentBlock): Promise<TranslatableBlock[]> => {
+  const versions = await prepareRequestImages(projected, attachments, policy?.target ?? normalizedTarget, signal)
+  if (policy?.budget !== undefined) {
+    const offloadImages = requiredImageOffload(projected, policy.budget,
+      block => (versions.get(block.attachment.attachmentId) as RequestImageAttachment).bytes)
+    if (offloadImages > 0) {
+      throw new LlmError('Subscription request images exceed the route image budget.', IMAGE_OFFLOAD_REQUIRED_CODE, { offloadImages })
+    }
+  }
+  const resolveBlock = (block: ContentBlock): TranslatableBlock[] => {
     if (block.type !== 'image') return [block]
-    const stored = await attachments.readImage(block.attachment, signal)
-    const { attachmentId, mediaType, bytes, width, height, name } = stored.ref
+    const version = versions.get(block.attachment.attachmentId) as RequestImageAttachment
+    const { attachmentId, mediaType, bytes, width, height, name } = block.attachment
     return [{
       type: 'image',
-      mediaType: stored.ref.mediaType,
-      dataBase64: Buffer.from(stored.data).toString('base64'),
+      mediaType: version.mediaType,
+      dataBase64: Buffer.from(version.data).toString('base64'),
     }, {
       type: 'text',
       text: `Image reference (for image_generate.referenceImages): ${JSON.stringify({
         attachmentId, mediaType, bytes, width, height, ...name === undefined ? {} : { name },
-      })}`,
+      })}; request preview ${version.width}x${version.height}px.`,
     }]
   }
-  return Promise.all(messages.map(async message => translatable(
+  return projected.map(message => translatable(
     message,
-    (await Promise.all(message.content.map(resolveBlock))).flat(),
-  )))
+    message.content.flatMap(resolveBlock),
+  ))
 }

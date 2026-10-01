@@ -3,11 +3,12 @@ import assert from 'node:assert/strict'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { LlmAdapter, LlmError } from '@deepseek-ai/dsh-llm'
+import { LlmAdapter, LlmError, resolveRetryPolicy } from '@deepseek-ai/dsh-llm'
 import type { GenerateOptions, StreamChunk } from '@deepseek-ai/dsh-llm'
 import { AccountPreferencesAdapter, accountModelId, parseAccountModelId, accountAllowsPool } from '../src/providers/account-preferences.js'
 import { ProviderSettingsStore, validatePreferences } from '../src/provider-settings.js'
 import { PoolAdapter } from '../src/providers/pool.js'
+import { resolvePoolScheduling } from '../src/providers/pool-scheduling.js'
 import { PoolHealthRegistry } from '../src/providers/pool-health.js'
 import { PoolUsageTracker } from '../src/providers/pool-usage.js'
 
@@ -22,6 +23,20 @@ class Raw extends LlmAdapter {
 }
 const options = (model: string) => ({ provider: 'codex', model } as GenerateOptions)
 async function consume(route: LlmAdapter, id: string) { for await (const _ of route.stream(options(id))) { /* collect */ } }
+
+test('registered account routes preserve the provider retry budget and backoff', async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'account-retry-policy-'))
+  t.after(() => rm(dir, { recursive: true, force: true }))
+  const raw = new Raw()
+  const expected = resolveRetryPolicy({ mode: 'normal', maxRetries: 10,
+    backoff: { initialDelayMs: 1000, maxDelayMs: 60000, jitterRatio: 0.2 } }, 'test')
+  const seen: string[] = []
+  raw.providerRetryPolicy = provider => { seen.push(provider); return expected }
+  const route = new AccountPreferencesAdapter({ provider: 'codex', adapter: raw,
+    settings: new ProviderSettingsStore(join(dir, 'settings.json')), accounts: async () => [], pool: () => undefined })
+  assert.deepEqual(route.providerRetryPolicy('codex'), expected)
+  assert.deepEqual(seen, ['codex'])
+})
 
 test('account preferences validate, persist and distinguish absent and empty allowlists', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'account-preferences-'))
@@ -80,7 +95,7 @@ test('singleton and explicit families/tiers enforce account and model exclusion 
     const route = new AccountPreferencesAdapter({ provider: 'codex', adapter: raw, settings, accounts: async () => accounts, pool: () => pool })
     await settings.set('codex', { accounts: { a: { poolModels: [] } } })
     await assert.rejects(consume(route, 'm:/模型'), /No eligible/)
-    pool = new PoolAdapter({ adapters: { codex: route.poolMember() }, health: new PoolHealthRegistry(), usage: new PoolUsageTracker(() => undefined), strategy: 'priority', switchMargin: 2, defaultAccount: async () => 'a', families: async () => new Map([['codex/m:/模型', { members: [{ provider: 'codex', account: 'a', model: 'm:/模型' }] }]]), tiers: { tier: [{ provider: 'codex', model: 'm:/模型' }] }, onWarn: () => {} })
+    pool = new PoolAdapter({ scheduling: resolvePoolScheduling(), adapters: { codex: route.poolMember() }, health: new PoolHealthRegistry(), usage: new PoolUsageTracker(() => undefined), strategy: 'priority', switchMargin: 2, defaultAccount: async () => 'a', families: async () => new Map([['codex/m:/模型', { members: [{ provider: 'codex', account: 'a', model: 'm:/模型' }] }]]), tiers: { tier: [{ provider: 'codex', model: 'm:/模型' }] }, onWarn: () => {} })
     for (const id of ['m:/模型', 'tier']) {
       await assert.rejects(consume(route, id))
       await assert.rejects(route.resolveModel('codex', id), /no usable member/)
@@ -92,7 +107,7 @@ test('singleton and explicit families/tiers enforce account and model exclusion 
     assert.ok(raw.calls.includes('stream:a:m:/模型'))
     accounts = [...accounts, { key: 'b', label: 'B' }]
     await settings.set('codex', { accounts: { a: { poolEnabled: false } } })
-    pool = new PoolAdapter({ adapters: { codex: route.poolMember() }, health: new PoolHealthRegistry(), usage: new PoolUsageTracker(() => undefined), strategy: 'priority', switchMargin: 2, defaultAccount: async () => 'a', families: async () => new Map(), tiers: { mixed: [{ provider: 'codex', account: 'a', model: 'm:/模型' }, { provider: 'codex', account: 'b', model: 'm:/模型' }] }, onWarn: () => {} })
+    pool = new PoolAdapter({ scheduling: resolvePoolScheduling(), adapters: { codex: route.poolMember() }, health: new PoolHealthRegistry(), usage: new PoolUsageTracker(() => undefined), strategy: 'priority', switchMargin: 2, defaultAccount: async () => 'a', families: async () => new Map(), tiers: { mixed: [{ provider: 'codex', account: 'a', model: 'm:/模型' }, { provider: 'codex', account: 'b', model: 'm:/模型' }] }, onWarn: () => {} })
     assert.equal((await route.resolveModel('codex', 'mixed')).context?.contextWindow, 200)
     await consume(route, 'mixed')
     assert.ok(raw.calls.includes('stream:b:m:/模型'))

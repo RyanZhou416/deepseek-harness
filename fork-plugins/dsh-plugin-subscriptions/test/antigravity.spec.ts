@@ -1,6 +1,7 @@
 /** Antigravity OAuth, catalog/quota, request conversion, and stream tests. */
 
 import { test } from 'node:test'
+import { resolvePoolScheduling } from '../src/providers/pool-scheduling.js'
 import { ToolCallId } from '../src/compat.js'
 import { AccountTokenManager } from '../src/providers/accounts.js'
 import assert from 'node:assert/strict'
@@ -497,7 +498,7 @@ test('Antigravity fails over between accounts through the shared pool before emi
       return new Response(byteStream(`data: ${JSON.stringify({ response: { candidates: [{ content: { parts: [{ text: 'ok' }] }, finishReason: 'STOP' }] } })}\n\n`))
     },
   })
-  pool = new PoolAdapter({
+  pool = new PoolAdapter({ scheduling: resolvePoolScheduling(),
     adapters: { antigravity: adapter }, health: new PoolHealthRegistry(),
     usage: new PoolUsageTracker(() => undefined), strategy: 'priority', switchMargin: 2,
     defaultAccount: () => tokens.defaultAccount(), onWarn: () => {}, tiers: {},

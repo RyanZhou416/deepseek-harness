@@ -1,0 +1,117 @@
+[
+  {
+    "kind": "chunks",
+    "chunks": [
+      {
+        "type": "block-start",
+        "index": 0,
+        "blockType": "tool-call"
+      },
+      {
+        "type": "tool-call-delta",
+        "index": 0,
+        "id": "image-policy-0",
+        "name": "image_route_probe",
+        "argumentsDelta": "{\"route\":\"claude\",\"count\":20}"
+      },
+      {
+        "type": "block-end",
+        "index": 0,
+        "block": {
+          "type": "tool-call",
+          "id": "image-policy-0",
+          "name": "image_route_probe",
+          "arguments": "{\"route\":\"claude\",\"count\":20}"
+        }
+      },
+      {
+        "type": "block-start",
+        "index": 1,
+        "blockType": "tool-call"
+      },
+      {
+        "type": "tool-call-delta",
+        "index": 1,
+        "id": "image-policy-1",
+        "name": "image_route_probe",
+        "argumentsDelta": "{\"route\":\"claude\",\"count\":21}"
+      },
+      {
+        "type": "block-end",
+        "index": 1,
+        "block": {
+          "type": "tool-call",
+          "id": "image-policy-1",
+          "name": "image_route_probe",
+          "arguments": "{\"route\":\"claude\",\"count\":21}"
+        }
+      },
+      {
+        "type": "block-start",
+        "index": 2,
+        "blockType": "tool-call"
+      },
+      {
+        "type": "tool-call-delta",
+        "index": 2,
+        "id": "image-policy-2",
+        "name": "image_route_probe",
+        "argumentsDelta": "{\"route\":\"other\",\"count\":21}"
+      },
+      {
+        "type": "block-end",
+        "index": 2,
+        "block": {
+          "type": "tool-call",
+          "id": "image-policy-2",
+          "name": "image_route_probe",
+          "arguments": "{\"route\":\"other\",\"count\":21}"
+        }
+      },
+      {
+        "type": "usage",
+        "usage": {
+          "inputTokens": 10,
+          "outputTokens": 5
+        }
+      },
+      {
+        "type": "finish",
+        "reason": {
+          "kind": "tool-calls"
+        }
+      }
+    ]
+  },
+  {
+    "kind": "chunks",
+    "chunks": [
+      {
+        "type": "block-start",
+        "index": 0,
+        "blockType": "text"
+      },
+      {
+        "type": "block-end",
+        "index": 0,
+        "block": {
+          "type": "text",
+          "text": "Image previews follow the current route; saved attachments are unchanged."
+        }
+      },
+      {
+        "type": "usage",
+        "usage": {
+          "inputTokens": 10,
+          "outputTokens": 5
+        }
+      },
+      {
+        "type": "finish",
+        "reason": {
+          "kind": "stop"
+        }
+      }
+    ]
+  }
+]

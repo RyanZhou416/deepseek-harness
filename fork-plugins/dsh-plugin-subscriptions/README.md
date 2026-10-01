@@ -46,6 +46,8 @@ The `video_generate` tool plays the generated clip inline:
 
 ![video_generate plays the clip inline](https://raw.githubusercontent.com/V1ki/dsh-plugin-subscriptions/main/docs/images/video-generate-inline.png)
 
+Requests derive image versions from saved normalized attachments without replacing them. Claude applies an 8,000-pixel long-edge cap, reduced to 2,000 when retained user and tool-result images exceed 20 occurrences; repeated attachments count separately. The model’s context tier controls its 100/600-image ceiling. The exact JSON body is checked against the 32 MB Messages limit before submission. Excess image count or body bytes request logged history offload; text and tools that cannot fit fail explicitly. Switching routes can recover the saved resolution, and offloaded images stay omitted until explicitly read again. Image reference metadata still identifies the saved attachment; the adjacent request-preview dimensions describe what the model receives.
+
 ## Providers
 
 | Route    | Subscription      | Models |
@@ -59,6 +61,10 @@ The `video_generate` tool plays the generated clip inline:
 Only logged-in providers appear in the session model picker; the lists above refresh on login/logout. Vision-capable models declare `['text', 'image']` input modalities, and image content is translated to each provider's wire format.
 
 Logged-in cards also show **subscription usage** — per rate-limit window (5-hour session, weekly, and per-model weekly where the plan has one) with the used percentage, a progress bar, and the reset time, plus a Refresh button. Codex usage comes from `chatgpt.com/backend-api/wham/usage` (also reports the plan), Claude usage from `api.anthropic.com/api/oauth/usage`, and Grok usage from the Grok Build CLI proxy's `cli-chat-proxy.grok.com/v1/billing` (the source of the CLI's `/usage` panel; reports the shared weekly pool and the subscription tier). Antigravity reports plan, credits, and per-model quotas from `loadCodeAssist` and `fetchAvailableModels` when those fields are present. Copilot exposes no usage endpoint, so its card shows no usage section.
+
+Under **Subscriptions → ChatGPT → Manage**, **Automatically use reset credits when quota is exhausted** is off by default and takes effect after **Save changes**. It applies to Codex LLM requests, including independent account entries. When the current account exhausts a session or weekly window, its earliest-expiring available `codex_rate_limits` credit can be spent only if no available credit on any connected ChatGPT account expires sooner. Accounts excluded from routing still participate in this comparison; another account having quota does not prevent spending, and equal expiry times qualify. Tool-only image and search requests do not trigger this feature.
+
+Automatic recovery uses fresh usage and credit lists. Missing expiry, incomplete lists, discovery failures, and unrecognized reset types preserve the card and normal failover. A quota-full sticky account checks recovery before routing chooses a replacement; a rejected Codex request can retry the same account once before output. Manual and automatic spending serialize within one Host. Durable claims under `plugins/subscriptions/auto-reset-claims/` prevent spending the same card twice and prevent another automatic spend for an account until fresh usage confirms recovery after an uncertain result. Tests use injected operations and never spend real credits; manual use retains its confirmation dialog.
 
 Also included, registered when the matching provider is enabled:
 
@@ -208,7 +214,28 @@ When a provider has **two or more logged-in accounts**, the picker shows the **u
   `account` is the stable account key shown by the `status` endpoint — an email for Claude, a login for Grok / Copilot / Antigravity. Codex keys are per workspace **and** user (`["<workspace-id>","user","<user-id>"]`), so for Codex you may instead pin the login email, or the bare workspace ID when only one user of that workspace is logged in; an ambiguous reference resolves to nothing rather than to the wrong user.
 - **Tier extras (`tiers`, optional).** Extra picker rows with heterogeneous fallbacks, listed under the first member's provider. Not created automatically.
 
-Selection is sticky per session (prompt caches survive) with two strategies: `priority` (first healthy member wins) and `quota_aware` (the default — each member is scored by its required burn rate, `remaining quota / time until window reset`, so a window about to reset with plenty left gets spent instead of wasted; the sticky member holds until a challenger out-scores it by `switchMargin`). Members past 95% on any usage window are gated out; failures fail over before the first stream chunk with cooldowns (`retry-after`, or the window's own disclosed reset when the provider sends one) — quota and rate-limit failures cool the whole account down (its quota is account-level; Claude's model-scoped lanes cool per member), transient server failures cool only the failing member. Copilot exposes no usage telemetry, so it scores zero and naturally serves as the fallback of last resort.
+Selection is sticky per session, provider, and model pool. `priority` keeps its configured healthy-member order and session affinity. The default `quota_aware` strategy normalizes the existing `remaining quota / time until reset` scores within each availability band, then adds bounded preferences for Claude and ChatGPT resets and for finishing small ChatGPT remainders. A ChatGPT weekly window opened within 24 hours with an available reset card expiring within three days receives a finite bonus rather than an absolute priority. Automatic credit spending requires the separate opt-in setting described above.
+
+Claude and ChatGPT remain in the primary quota band below 100% used; other providers keep the 95% threshold. Any applicable full window puts a member in the last-resort band. Model-scoped windows affect only matching models. When a cached reset passes, the expired window stops contributing urgency or a full-quota assertion and requests a background refresh; an endpoint that continues returning that expired time does not cause a polling loop.
+
+Inside the ChatGPT finishing range, the ample-quota baseline fades in proportion to the remaining fraction and the finishing bonus grows. This also prefers a smaller remainder when every account has only a few percent left. Reset preference grows toward the reset deadline but stays bounded; each window kind has a configurable lookahead.
+
+The combined score is divided by `1 + loadPenalty * active requests`. An attempt reserves its account before waiting for the first chunk and releases it after completion, failure, cancellation, or iterator teardown. This balances simultaneous pool requests across models of the same provider/account without serializing them. A healthy sticky member stays unless another member exceeds its adjusted score by `switchMargin` (default 2). There is no account switch after the first stream chunk.
+
+Load accounting covers this Host’s automatic pools and configured tiers. Independent account entries, other Harness processes, and external clients are outside that counter. Accounts without usage telemetry remain fallbacks behind measured accounts; when a band has no usable urgency, equal baseline scores can still be distributed by load. Existing health cooldowns and pre-output failover remain in effect.
+
+Optional `pool.scheduling` fields are resolved and validated at plugin load. Zero weights disable their additional preference or load penalty; zero `codexDrainBelowPercent` disables finishing. Horizons must be positive integer milliseconds, percentages must be between 0 and 100, and weights must be finite and nonnegative.
+
+| Field | Default | Purpose |
+|---|---|---|
+| `sessionResetHorizonMs` | `3600000` | Last hour of a short window |
+| `weeklyResetHorizonMs` | `86400000` | Last day of a weekly window |
+| `otherResetHorizonMs` | `86400000` | Last day of other windows |
+| `resetWeight` | `2` | Maximum additional reset preference |
+| `codexDrainBelowPercent` | `10` | ChatGPT remainder range for finishing |
+| `codexDrainWeight` | `2` | Maximum additional finishing preference |
+| `freshCreditWeight` | `0.5` | Maximum fresh-week/expiring-card bonus |
+| `loadPenalty` | `1` | Penalty per active pool request on the account |
 
 ```yaml
 - id: llm-subscriptions
@@ -259,6 +286,8 @@ A reset further out than `maxWaitMs` — a weekly window days away, or a whole p
 All five routes share Claude Code's own retry shape: ten retries after the first attempt, backing off from 1 s with 20% jitter under a 60 s cap. These are consumer subscription endpoints that shed load in bursts, and the dsh-llm defaults (five retries from 500 ms to 10 s) give up after about fifteen seconds, which is short for that. A 429 that discloses no reset is now retried locally for roughly 17 minutes before the turn fails — about 5 minutes with `wait: false`, where the 60 s cap actually binds. Copilot currently uses the generic `retry-after` signal; unrecognized GitHub rate-limit headers are surfaced through the plugin warning sink for a future provider-specific reader.
 
 One trade-off worth knowing: the delay ceiling is shared with that local backoff, so raising `maxWaitMs` also raises how long an unrelated transient failure (`TRANSPORT`, `SERVER`, `TIMEOUT`) can back off for before the finite retry budget runs out — up to 512 s on the last of the ten retries instead of the 60 s cap.
+
+Account-management routes preserve the underlying provider's retry policy for pooled and independent accounts. A transport failure leaves its account eligible for another attempt; when every attempted account fails, an eligible account's original error reaches the retry executor without another account's quota or authentication cooldown. Only a fully cooling pool reports its next recovery time. With `rateLimit.wait: false`, transient failures still retry up to ten times with exponential backoff from 1 second to 60 seconds and 20% jitter; the setting prevents long quota-reset waits, not network retries. The agent loop retries the failed model step, including interrupted output, without repeating completed tools; user cancellation stops the wait.
 
 ## Proxy
 

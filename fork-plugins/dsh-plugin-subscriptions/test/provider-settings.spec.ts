@@ -5,6 +5,20 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { ProviderSettingsStore, validatePreferences } from '../src/provider-settings.js'
 
+test('automatic reset credits default off, persist on/off, and reject other providers or non-boolean input', async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'auto-credit-settings-'))
+  t.after(() => rm(dir, { recursive: true, force: true }))
+  const path = join(dir, 'settings.json')
+  const store = new ProviderSettingsStore(path)
+  assert.equal(store.get('codex').autoResetCredits, undefined)
+  await store.set('codex', { autoResetCredits: true })
+  assert.equal(new ProviderSettingsStore(path).get('codex').autoResetCredits, true)
+  await store.set('codex', { autoResetCredits: false })
+  assert.equal(new ProviderSettingsStore(path).get('codex').autoResetCredits, false)
+  assert.throws(() => validatePreferences('claude', { autoResetCredits: true }))
+  assert.throws(() => validatePreferences('codex', { autoResetCredits: 'true' }))
+})
+
 test('provider selections survive refresh-independent reloads and concurrent provider saves', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'provider-settings-'))
   try {

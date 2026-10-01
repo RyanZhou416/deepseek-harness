@@ -36,6 +36,8 @@ interface ContentBlockMap {
 
 图片访问方式属于请求序列化，不属于持久附件或确定性请求图片版本。`resolveImageAttachmentAccess()` 把附件提供方可选的宿主对象路径，与消费方为当前工具执行文件系统提供的映射组合起来。结果只适用于本次请求，不参与 `variantId`。
 
+`prepareRequestImages(messages, attachments, target, signal)` 为当前请求准备图片版本映射。其 `RequestImageTargetResolver` 接收不可变附件及保留图片的总出现次数，包括工具结果和重复图片。每个唯一附件只变换一次，读取存储前排除已卸载的图片。提供方适配器拥有模型和端点限制，附件提供方拥有确定性版本缓存。
+
 源码：[`packages/llm/llm/src/content.ts`](../../packages/llm/llm/src/content.ts)
 
 ```ts type-equiv

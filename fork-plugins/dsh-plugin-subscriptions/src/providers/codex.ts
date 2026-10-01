@@ -487,7 +487,7 @@ export async function fetchCodexResetCredits(
     ...signal === undefined ? {} : { signal },
   })
   if (!response.ok) throw await oauthEndpointError(response, 'codex reset credits')
-  return mapCodexResetCreditList(await response.json() as unknown)
+  return mapCodexResetCreditList(await response.json())
 }
 
 /**
@@ -523,7 +523,7 @@ export async function consumeCodexResetCredit(
   if (!response.ok) throw await oauthEndpointError(response, 'codex reset credit')
   let payload: unknown = {}
   try {
-    payload = await response.json() as unknown
+    payload = await response.json()
   } catch {
     payload = {}
   }
@@ -710,6 +710,8 @@ export interface CodexAdapterOptions {
   models: readonly ModelEntry[]
   streamIdleTimeoutMs: number
   tokens: AccountTokenManager<CodexSession>
+  /** Optional, user-enabled recovery before output; returns whether to retry once. */
+  recoverQuota?: (account: string, signal: AbortSignal) => Promise<boolean>
   /** Late-bound pool facade (wired after adapter construction); pools list under their first member's provider. */
   pool?: () => PoolAdapter | undefined
   /** Whether to fetch the live catalog when logged in (false when config `models` overrides). */
@@ -1102,12 +1104,20 @@ export class CodexAdapter extends LlmAdapter {
   private async *streamCore(options: GenerateOptions, account?: string): AsyncIterable<StreamChunk> {
     const watchdog = idleWatchdog(options.signal, this.options.streamIdleTimeoutMs)
     try {
-      let session = await this.options.tokens.session(account)
+      const key = account ?? await this.options.tokens.defaultAccount()
+      let session = await this.options.tokens.session(key)
       let response = await this.request(options, session, watchdog.signal)
       if (response.status === 401) {
         // One forced refresh + retry on an unexpired-but-rejected token.
-        session = await this.options.tokens.session(account, true)
+        session = await this.options.tokens.session(key, true)
         response = await this.request(options, session, watchdog.signal)
+      }
+      if (response.status === 429 && this.options.recoverQuota !== undefined) {
+        if (key !== undefined && await this.options.recoverQuota(key, watchdog.signal)) {
+          await response.body?.cancel()
+          session = await this.options.tokens.session(key)
+          response = await this.request(options, session, watchdog.signal)
+        }
       }
       if (!response.ok) {
         throw await httpLlmError(response, 'codex API', {

@@ -40,12 +40,13 @@ test('provider settings RPC edits picker visibility without losing the editor ca
     assert.ok(connection.registered())
     await saveAccountSession('codex', 'account', { accessToken: 'token', refreshToken: 'refresh', expiresAt: Date.now() + 3600_000, accountId: 'account', idToken: '' })
     const call = (endpoint: string, payload: unknown) => connection.handler(endpoint, payload, new AbortController().signal)
-    assert.equal((await call('setProviderSettings', { provider: 'codex', settings: { visibleModels: ['m1'], tools: { image_generate: false, web_search: false } } })).ok, true)
+    assert.equal((await call('setProviderSettings', { provider: 'codex', settings: { autoResetCredits: true, visibleModels: ['m1'], tools: { image_generate: false, web_search: false } } })).ok, true)
     assert.deepEqual((await adapters.get('codex')!.listModels('codex')).map(model => model.id), ['m1'])
     assert.equal((await adapters.get('codex')!.resolveModel('codex', 'm2')).id, 'm2')
     unavailable = true
     const catalog = await call('providerSettings', { provider: 'codex', force: true })
     assert.ok(catalog.ok)
+    assert.equal((catalog.value as { settings: { autoResetCredits: boolean } }).settings.autoResetCredits, true)
     assert.deepEqual((catalog.value as { models: { id: string }[] }).models.map(model => model.id), ['m1', 'm2'])
     const rows = (catalog.value as { models: { id: string; efforts: { id: string }[]; configured?: string }[] }).models
     assert.deepEqual(rows[0].efforts.map(effort => effort.id), ['high'])

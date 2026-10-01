@@ -1,0 +1,10 @@
+version: 1
+scenario: subscription-pool-routing
+profile: headless
+composition: subscription-pool-routing
+recording: authored
+header:
+  class: subscription-pool-routing
+  pin: true
+replay:
+  override: true

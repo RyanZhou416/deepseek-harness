@@ -285,7 +285,7 @@ test('a Cursor turn disables built-in tools and hands the first custom tool back
     list: async () => [{ key: 'a@example.com', session }],
     hasSession: async () => true,
     defaultAccount: async () => 'a@example.com',
-  } as unknown as AccountTokenManager<CursorSession>
+  } as AccountTokenManager<CursorSession>
   const adapter = new CursorAdapter({
     models: [{ id: 'composer-2.5', name: 'Composer 2.5' }],
     streamIdleTimeoutMs: 5_000,

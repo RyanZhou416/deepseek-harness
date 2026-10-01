@@ -23,6 +23,8 @@ export interface AccountPreferences {
   poolModels?: string[]
 }
 export interface ProviderPreferences {
+  /** ChatGPT only; absent disables automatic spending of the globally earliest-expiring credit. */
+  autoResetCredits?: boolean
   accounts?: Record<string, AccountPreferences>
   /** Absent follows discovery; an explicit selection hides newly discovered models. */
   visibleModels?: string[]
@@ -43,6 +45,12 @@ export function validatePreferences(provider: ProviderId, input: unknown): Provi
   if (!input || typeof input !== 'object' || Array.isArray(input)) throw new Error('settings must be an object')
   const raw = input as Record<string, unknown>
   const result: ProviderPreferences = {}
+  if (raw.autoResetCredits !== undefined) {
+    if (provider !== 'codex' || typeof raw.autoResetCredits !== 'boolean') {
+      throw new Error('autoResetCredits must be a boolean and is supported only for ChatGPT')
+    }
+    result.autoResetCredits = raw.autoResetCredits
+  }
   if (raw.accounts !== undefined) {
     if (!raw.accounts || typeof raw.accounts !== 'object' || Array.isArray(raw.accounts)) throw new Error('accounts must be an account-to-preferences map')
     result.accounts = Object.create(null) as Record<string, AccountPreferences>

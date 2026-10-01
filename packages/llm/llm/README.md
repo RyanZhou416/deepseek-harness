@@ -109,6 +109,8 @@ A request is validated against its exact model's capability — context window, 
 
 File detection reads current content, including tool-role result content, on every request without caching message identities or freeze state. The [file-scan decision](../../../.agents/notes/implemented/simplification/2026-09-07-file-content-scan.md) records the measured traversal cost.
 
+`prepareRequestImages()` counts retained image occurrences across the complete request, including tool results and repeated attachments, then prepares each distinct normalized attachment once. The adapter supplies a request-local target resolver for the captured model and endpoint. Offloaded occurrences neither count nor read storage. Switching routes regenerates from the immutable normalized attachment, while the attachment provider reuses compatible cached variants; it never enlarges a previous compressed preview.
+
 ### Invariants
 
 - **Model-visible ⟺ logged** — callers must keep every provider request's model-visible input reconstructable from the session log; loop-built requests arrive deep-frozen and cannot be rewritten.

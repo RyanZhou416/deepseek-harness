@@ -1,7 +1,7 @@
 /** Deterministic Messages image preparation for Files references and bounded inline fallback. */
 
 import type { AttachmentStore, ImageAttachmentRef, RequestImageAttachment } from '@deepseek-ai/dsh-attachment'
-import { contentHasImage, IMAGE_OFFLOAD_REQUIRED_CODE, LlmError, offloadedImageText, projectOffloadedImages, requiredImageOffload } from '@deepseek-ai/dsh-llm'
+import { contentHasImage, IMAGE_OFFLOAD_REQUIRED_CODE, LlmError, offloadedImageText, prepareRequestImages, projectOffloadedImages, requiredImageOffload } from '@deepseek-ai/dsh-llm'
 import type { ContentBlock, ImageAttachmentAccessResolver, RequestMessage } from '@deepseek-ai/dsh-llm'
 import type { DeepSeekConnectionOptions as Connection } from './types.ts'
 import { resolveRequestImageTarget } from './request-pricing.ts'
@@ -39,9 +39,8 @@ export async function prepareImages(
   history: readonly RequestMessage[], connection: Connection, modelId: string,
   attachments: AttachmentStore | undefined, access: ImageAttachmentAccessResolver, signal: AbortSignal,
 ): Promise<{ messages: readonly RequestMessage[]; versions: Map<ImageAttachmentRef['attachmentId'], RequestImageAttachment> }> {
-  const versions = new Map<ImageAttachmentRef['attachmentId'], RequestImageAttachment>()
   const messages = projectOffloadedImages(history, ref => offloadedImageText(ref, access(ref)))
-  if (!messages.some(message => contentHasImage(message.content))) return { messages, versions }
+  if (!messages.some(message => contentHasImage(message.content))) return { messages, versions: new Map() }
   const model = connection.models.find(entry => entry.id === modelId)
   if (model?.inputModalities?.includes('image') !== true || attachments === undefined) {
     throw new LlmError('DeepSeek Messages image input requires a vision model and attachment service', 'UNSUPPORTED_CONTENT')
@@ -49,13 +48,7 @@ export async function prepareImages(
   if (messages.some(message => message.role !== 'user' && message.role !== 'tool' && contentHasImage(message.content))) {
     throw new LlmError('DeepSeek Messages supports images only in user messages and tool results', 'UNSUPPORTED_CONTENT')
   }
-  for (const message of messages) {
-    for (const ref of imageRefs(message.content)) {
-      if (!versions.has(ref.attachmentId)) {
-        versions.set(ref.attachmentId, await attachments.readImageRequest(ref, resolveRequestImageTarget(model, ref), signal))
-      }
-    }
-  }
+  const versions = await prepareRequestImages(messages, attachments, ref => resolveRequestImageTarget(model, ref), signal)
   assertImagesFit(messages, versions, connection, 'raw')
   return { messages, versions }
 }

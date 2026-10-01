@@ -186,7 +186,7 @@ it('rejects drift in artifacts, profile pins, patches, and composed config', () 
   try {
     const agentArtifact = join(root, 'nanmicoder-dsh-agent-teams-0.1.20-dsh017rc1.2.tgz')
     const contextArtifact = join(root, 'dsh-context-0.55.0-dsh017rc1.3.tgz')
-    const subscriptionsArtifact = join(root, 'dsh-plugin-subscriptions-0.9.4-dsh017rc1.1.tgz')
+    const subscriptionsArtifact = join(root, 'dsh-plugin-subscriptions-0.9.4-dsh017rc1.3.tgz')
     writeFileSync(agentArtifact, 'agent artifact')
     writeFileSync(contextArtifact, 'context artifact')
     writeFileSync(subscriptionsArtifact, 'subscriptions artifact')
@@ -212,7 +212,7 @@ it('rejects drift in artifacts, profile pins, patches, and composed config', () 
     }))
     writeFileSync(join(subscriptionsInstall, 'package.json'), JSON.stringify({
       name: 'dsh-plugin-subscriptions',
-      version: '0.9.4-dsh017rc1.1',
+      version: '0.9.4-dsh017rc1.3',
     }))
     const profileManifest = join(profile, 'package.json')
     writeFileSync(profileManifest, JSON.stringify({
@@ -250,8 +250,8 @@ it('rejects drift in artifacts, profile pins, patches, and composed config', () 
       '0.1.20-dsh017rc1.2',
       'dsh-context-0.55.0-dsh017rc1.3.tgz',
       '0.55.0-dsh017rc1.3',
-      'dsh-plugin-subscriptions-0.9.4-dsh017rc1.1.tgz',
-      '0.9.4-dsh017rc1.1',
+      'dsh-plugin-subscriptions-0.9.4-dsh017rc1.3.tgz',
+      '0.9.4-dsh017rc1.3',
     ].join('\n'))
     writeFileSync(join(profile, 'cordis.patch.yml'), readFileSync(template, 'utf8'))
 

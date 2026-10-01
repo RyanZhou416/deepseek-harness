@@ -372,9 +372,15 @@ export class PiAiAdapter extends LlmAdapter {
           attachments,
           resolveImageAccess: ref => this.config.resolveImageAccess?.(attachments, ref),
           maxRequestImageBytes: profile.maxRequestImageBytes,
+          ...model.api === 'anthropic-messages'
+            ? { maxRequestImages: model.contextWindow <= 200_000 ? 100 : 600 }
+            : {},
           requestImagePolicy: {
             maxPixels: profile.requestImagePixelBudget,
             maxBytes: profile.requestImageMaxBytes,
+            ...model.api === 'anthropic-messages'
+              ? { maxDimension: (count: number) => count > 20 ? 2000 : 8000 }
+              : {},
           },
         }, onReplayDegrade)
       const events = snapshot.models.streamSimple(model, context, {

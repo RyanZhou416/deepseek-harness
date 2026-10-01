@@ -9,6 +9,7 @@ import assert from 'node:assert/strict'
 import { LlmError, createAssistantMessage, createDeveloperMessage, createToolResultMessage } from '@deepseek-ai/dsh-llm'
 import { ToolCallId } from '../src/compat.js'
 import type { MessageSource, RequestMessage, StreamChunk } from '@deepseek-ai/dsh-llm'
+import type { ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
 import {
   ResponsesStreamTranslator,
   toResponsesInput,
@@ -192,7 +193,7 @@ test('resolveImages: passthrough, loud failure without attachments, and resoluti
   )
 
   const attachments = {
-    readImage: (ref: unknown) => Promise.resolve({ ref, data: new Uint8Array([104, 105]) }),
+    readImageRequest: (ref: ImageAttachmentRef) => Promise.resolve({ ...ref, attachment: ref, data: new Uint8Array([104, 105]) }),
   } as never
   const resolved = await resolveImages(withImage, attachments)
   assert.deepEqual(resolved[0].content[0], { type: 'image', mediaType: 'image/png', dataBase64: 'aGk=' })
@@ -238,14 +239,14 @@ test('tool-result images: resolve attachments and retain parallel results before
   const signal = new AbortController().signal
   let reads = 0
   const resolved = await resolveImages(messages, {
-    readImage: async (attachment: unknown, actualSignal: unknown) => {
+    readImageRequest: async (attachment: unknown, _target: unknown, actualSignal: unknown) => {
       assert.deepEqual(attachment, ref)
       assert.equal(actualSignal, signal)
       reads++
-      return { ref, data: new Uint8Array([104, 105]) }
+      return { ...ref, attachment: ref, data: new Uint8Array([104, 105]) }
     },
   } as never, signal)
-  assert.equal(reads, 2)
+  assert.equal(reads, 1)
   assert.deepEqual(messages, before, 'must not mutate stored history')
   const anthropic = toAnthropicMessages(resolved)
   for (const result of anthropic[1].content) {
@@ -263,7 +264,7 @@ test('tool-result images: resolve attachments and retain parallel results before
   assert.deepEqual(chat.map(item => item.role), ['assistant', 'tool', 'tool', 'user'])
   assert.equal((chat[3].content as Record<string, unknown>[]).filter(part => part.type === 'image_url').length, 2)
   await assert.rejects(() => resolveImages(messages, undefined), (error: unknown) => error instanceof LlmError && error.code === 'UNSUPPORTED')
-  await assert.rejects(() => resolveImages(messages, { readImage: async () => { throw new Error('read failed') } } as never), /read failed/)
+  await assert.rejects(() => resolveImages(messages, { readImageRequest: async () => { throw new Error('read failed') } } as never), /read failed/)
 })
 
 test('tool-result images: image-only errors, multiple images and separate turns retain their content', () => {

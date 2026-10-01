@@ -2,6 +2,8 @@
 
 /** English strings (the key-set source of truth for this pair). */
 export const en = {
+  accountsAutoResetCredits: 'Automatically use reset credits when quota is exhausted',
+  accountsAutoResetCreditsHint: 'Off by default. Spends this account’s earliest-expiring credit only if no available credit on any connected ChatGPT account expires sooner, even if other accounts still have quota. Equal expiry times qualify. If expiry checks fail, keeps the credit. Save changes to apply.',
   accountsManage: 'Manage',
   accountsTitle: 'Manage {provider} accounts',
   accountsHint: 'Choose which accounts serve pooled LLM requests. Pool exclusion applies only to LLM routing, not tools or session-wide isolation.',
@@ -168,6 +170,8 @@ export const en = {
 
 /** zh strings, one per {@link en} key. */
 export const zh = {
+  accountsAutoResetCredits: '额度耗尽时自动使用重置卡',
+  accountsAutoResetCreditsHint: '默认关闭。仅当当前账号的卡在所有已登录 ChatGPT 账号中最早到期时使用，即使其他账号还有额度；并列最早也可使用。无法确认到期顺序时保留卡，保存更改后生效',
   accountsManage: '管理',
   accountsTitle: '管理 {provider} 账号',
   accountsHint: '选择参与账号池 LLM 请求的账号。退出账号池仅影响 LLM 路由，不影响工具，也不代表整个会话隔离。',

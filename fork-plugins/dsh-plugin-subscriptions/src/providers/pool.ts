@@ -26,6 +26,8 @@ import type { ConcretePoolMember, PoolDefinition, PoolMemberRef } from './pool-f
 import { poolKey } from './pool-family.js'
 import { accountKey, classifyPoolFailure, memberKey, PoolHealthRegistry } from './pool-health.js'
 import type { MemberQuota, PoolUsageTracker } from './pool-usage.js'
+import { poolSchedulingScore } from './pool-scheduling.js'
+import type { PoolSchedulingPolicy } from './pool-scheduling.js'
 
 /** Member-selection strategy: plain priority failover or quota-aware scheduling. */
 export type PoolStrategy = 'priority' | 'quota_aware'
@@ -38,6 +40,8 @@ export interface PoolAdapterOptions {
   strategy: PoolStrategy
   /** A challenger must out-urgency the sticky member by this factor to take over. */
   switchMargin: number
+  /** Complete bounded preference and account-load policy, resolved at plugin load. */
+  scheduling: PoolSchedulingPolicy
   /** The default account of one provider (for config members omitting `account`). */
   defaultAccount: (provider: ProviderId) => Promise<string | undefined>
   /** Resolve legacy account aliases before pool deduplication and cache identity. */
@@ -46,6 +50,8 @@ export interface PoolAdapterOptions {
   families: () => Promise<Map<string, PoolDefinition>>
   /** User-configured extra picker entries (heterogeneous fallbacks), by pool id. */
   tiers: Record<string, PoolMemberRef[]>
+  /** Optional quota recovery for a depleted sticky account before choosing a replacement. */
+  recoverQuota?: (member: ConcretePoolMember, signal?: AbortSignal) => Promise<boolean>
   onWarn: (message: string) => void
 }
 
@@ -65,6 +71,8 @@ const POOLS_CACHE_TTL_MS = 5_000
 export class PoolAdapter extends LlmAdapter {
   /** sessionId|poolId → member key of the last member that served a chunk. */
   private readonly sticky = new Map<string, string>()
+  /** Outstanding pool attempts, including first-byte waits, shared across models of each account. */
+  private readonly active = new Map<string, number>()
   /** Messages already warned about — configuration diagnostics repeat every request otherwise. */
   private readonly warned = new Set<string>()
   /**
@@ -241,89 +249,98 @@ export class PoolAdapter extends LlmAdapter {
   }
 
   async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
-    const definition = (await this.pools()).get(poolKey(options.provider, options.model))
+    const identity = poolKey(options.provider, options.model)
+    const definition = (await this.pools()).get(identity)
     if (definition === undefined) throw new LlmError(`unknown pool model "${options.model}"`, 'NO_ADAPTER')
     const members = await this.concrete(definition.members)
-    const candidates = await this.select(options.model, members, options.sessionId)
-    if (candidates.length === 0) throw this.exhausted(options.model, members)
-    let lastError: unknown
-    for (const member of candidates) {
+    const quotas = new Map<ConcretePoolMember, MemberQuota>(this.options.strategy === 'priority' ? []
+      : await Promise.all(members.filter(member => this.options.health.isMemberAvailable(member.provider, member.account, member.model))
+        .map(async member => [member, await this.options.usage.quotaFor(member)] as const)))
+    const sessionId = options.sessionId
+    const sticky = sessionId === undefined ? undefined : members.find(member =>
+      memberKey(member.provider, member.account, member.model) === this.sticky.get(stickyKey(identity, sessionId)))
+    if (sticky !== undefined && quotas.get(sticky)?.available === false
+      && await this.options.recoverQuota?.(sticky, options.signal)) {
+      this.options.usage.invalidate(sticky.provider, sticky.account)
+      quotas.set(sticky, await this.options.usage.quotaFor(sticky))
+    }
+    let remaining = members
+    const failures = new Map<ConcretePoolMember, unknown>()
+    while (remaining.length > 0) {
+      options.signal?.throwIfAborted()
+      // Ranking and reservation are synchronous after shared quota reads settle.
+      // Concurrent requests therefore see earlier reservations before choosing.
+      const member = this.select(remaining, quotas, identity, options.sessionId)[0]
+      if (member === undefined) break
+      remaining = remaining.filter(candidate => candidate !== member)
       const adapter = this.options.adapters[member.provider]
       if (adapter === undefined) continue
-      const iterator = adapter.streamAccount(
-        { ...options, provider: member.provider, model: member.model },
-        member.account,
-      )[Symbol.asyncIterator]()
-      let first: IteratorResult<StreamChunk>
+      const release = this.reserve(member)
+      let iterator: AsyncIterator<StreamChunk> | undefined
       try {
-        first = await iterator.next()
-        if (first.done === true) {
-          throw new LlmError(`${memberLabel(member)} returned an empty stream`, EMPTY_RESPONSE_CODE)
-        }
-      } catch (error: unknown) {
-        const classification = classifyPoolFailure(error, member.provider)
-        if (classification.action === 'throw') throw error
-        if ('cooldownMs' in classification) {
-          this.options.health.markUnavailable(
-            classification.scope === 'account'
-              ? accountKey(member.provider, member.account)
-              : memberKey(member.provider, member.account, member.model),
-            classification.cooldownMs,
-            classification.reason,
-          )
-          // A quota failure invalidates the cached usage snapshot so the NEXT
-          // selection re-polls instead of trusting minutes-old percentages.
-          // Transient/auth failures say nothing about quota — keep the cache.
-          if (classification.reason === QUOTA_EXCEEDED_CODE || classification.reason === 'RATE_LIMIT') {
-            this.options.usage.invalidate(member.provider, member.account)
+        let first: IteratorResult<StreamChunk>
+        try {
+          iterator = adapter.streamAccount(
+            { ...options, provider: member.provider, model: member.model }, member.account,
+          )[Symbol.asyncIterator]()
+          first = await iterator.next()
+          if (first.done === true) {
+            throw new LlmError(`${memberLabel(member)} returned an empty stream`, EMPTY_RESPONSE_CODE)
           }
+        } catch (error: unknown) {
+          const classification = classifyPoolFailure(error, member.provider)
+          if (classification.action === 'throw') throw error
+          if ('cooldownMs' in classification) {
+            this.options.health.markUnavailable(
+              classification.scope === 'account'
+                ? accountKey(member.provider, member.account)
+                : memberKey(member.provider, member.account, member.model),
+              classification.cooldownMs,
+              classification.reason,
+            )
+            if (classification.reason === QUOTA_EXCEEDED_CODE || classification.reason === 'RATE_LIMIT') {
+              this.options.usage.invalidate(member.provider, member.account)
+            }
+          }
+          this.options.onWarn(
+            `pool "${options.model}": ${memberLabel(member)} failed before any output`
+            + ` (${error instanceof Error ? error.message : String(error)}); trying the next member`,
+          )
+          failures.set(member, error)
+          continue
         }
-        this.options.onWarn(
-          `pool "${options.model}": ${memberLabel(member)} failed before any output`
-          + ` (${error instanceof Error ? error.message : String(error)}); trying the next member`,
-        )
-        lastError = error
-        continue
-      }
-      this.remember(options.model, options.sessionId, member)
-      // Past the first chunk there is no clean attempt boundary: whatever
-      // the member does next (including failing) reaches the caller as-is.
-      // The finally closes the member stream when the CALLER walks away
-      // early (break / .return()) — manual iteration does not propagate
-      // closure the way `yield*` would, and a half-consumed member stream
-      // must not linger holding its connection.
-      try {
+        this.remember(identity, options.sessionId, member)
+        // A visible stream stays on one account even if quota or load changes.
         yield first.value
         for (let next = await iterator.next(); next.done !== true; next = await iterator.next()) {
           yield next.value
         }
+        return
       } finally {
         try {
-          await iterator.return?.()
-        } catch {
-          // Closing a half-consumed member stream must not mask the outcome.
+          await iterator?.return?.()
+        } catch (_closeFailure) {
+          // Stream teardown must not replace the request's outcome.
+        } finally {
+          release()
         }
       }
-      return
     }
-    throw this.exhausted(options.model, members, lastError)
+    throw this.exhausted(options.model, members, failures)
   }
 
   /**
    * Order the candidates for one request. Health filters both strategies;
-   * `quota_aware` then ranks by urgency (members without telemetry, e.g.
-   * copilot, score zero and sink to the bottom of their class). A ChatGPT
-   * account whose weekly window just opened and which holds an expiring
-   * reset credit leads that band; the credit is never spent here. Quota-full
-   * members stay as a last-resort tail, with that same ChatGPT account first
-   * in the tail. The sticky member keeps its lead unless a challenger
-   * out-scores it by `switchMargin`.
+   * `quota_aware` combines normalized urgency, bounded preferences, and
+   * account load. Quota-full members stay in a last-resort band. A healthy
+   * sticky member leads unless the same adjusted score beats its margin.
    */
-  private async select(
-    poolId: string,
+  private select(
     members: ConcretePoolMember[],
+    quotas: ReadonlyMap<ConcretePoolMember, MemberQuota>,
+    poolId: string,
     sessionId: GenerateOptions['sessionId'],
-  ): Promise<ConcretePoolMember[]> {
+  ): ConcretePoolMember[] {
     const usable = members.filter(member =>
       this.options.adapters[member.provider] !== undefined
       && this.options.health.isMemberAvailable(member.provider, member.account, member.model))
@@ -337,31 +354,44 @@ export class PoolAdapter extends LlmAdapter {
         ? usable
         : [stickyMember, ...usable.filter(member => member !== stickyMember)]
     }
-    const quotas = new Map<ConcretePoolMember, MemberQuota>(
-      await Promise.all(usable.map(async member => [member, await this.options.usage.quotaFor(member)] as const)),
-    )
     const scored = usable.filter(member => quotas.get(member)?.available === true)
     const quotaFull = usable.filter(member => quotas.get(member)?.available === false)
+    const now = Date.now()
+    const scores = new Map<ConcretePoolMember, number>()
+    for (const band of [scored, quotaFull]) {
+      const maxUrgency = band.reduce((max, member) => Math.max(max, quotas.get(member)!.urgency), 0)
+      for (const member of band) {
+        scores.set(member, poolSchedulingScore(member, quotas.get(member)!, maxUrgency,
+          this.active.get(accountKey(member.provider, member.account)) ?? 0, this.options.scheduling, now))
+      }
+    }
     const byQuota = (a: ConcretePoolMember, b: ConcretePoolMember): number => {
-      const preferA = quotas.get(a)?.preferFreshCredit === true
-      const preferB = quotas.get(b)?.preferFreshCredit === true
-      if (preferA !== preferB) return preferA ? -1 : 1
-      return (quotas.get(b)?.urgency ?? 0) - (quotas.get(a)?.urgency ?? 0)
+      const scoreOrder = scores.get(b)! - scores.get(a)!
+      if (scoreOrder !== 0 || this.options.scheduling.loadPenalty === 0) return scoreOrder
+      return (this.active.get(accountKey(a.provider, a.account)) ?? 0) - (this.active.get(accountKey(b.provider, b.account)) ?? 0)
     }
     scored.sort(byQuota)
     if (stickyMember !== undefined && scored.includes(stickyMember)) {
       const best = scored[0]
-      const stickyUrgency = quotas.get(stickyMember)?.urgency ?? 0
-      const bestUrgency = quotas.get(best)?.urgency ?? 0
-      if (best === stickyMember || bestUrgency <= stickyUrgency * this.options.switchMargin) {
-        // Sticky holds (no challenger beats it by the margin): lead with it.
+      const stickyScore = scores.get(stickyMember)!
+      const bestScore = scores.get(best)!
+      if (best === stickyMember || bestScore <= stickyScore * this.options.switchMargin) {
         scored.splice(scored.indexOf(stickyMember), 1)
         scored.unshift(stickyMember)
       }
     }
-    const preferredFull = quotaFull.filter(member => quotas.get(member)?.preferFreshCredit === true)
-    const otherFull = quotaFull.filter(member => quotas.get(member)?.preferFreshCredit !== true)
-    return [...scored, ...preferredFull, ...otherFull]
+    return [...scored, ...quotaFull.sort(byQuota)]
+  }
+
+  /** Hold account load through first-byte wait, streaming, and iterator teardown. */
+  private reserve(member: ConcretePoolMember): () => void {
+    const key = accountKey(member.provider, member.account)
+    this.active.set(key, (this.active.get(key) ?? 0) + 1)
+    return () => {
+      const next = this.active.get(key)! - 1
+      if (next === 0) this.active.delete(key)
+      else this.active.set(key, next)
+    }
   }
 
   /** Pin the serving member to the session (with bounded memory). */
@@ -377,11 +407,14 @@ export class PoolAdapter extends LlmAdapter {
   }
 
   /**
-   * The error for an exhausted pool, carrying the earliest recovery hint of
-   * THIS pool's members (the health registry is shared across pools, so the
-   * hint is scoped to the keys this pool can actually recover through).
+   * A still-available member's failure keeps its own retry facts. Only a fully
+   * cooling pool carries a recovery hint from this pool's health records.
    */
-  private exhausted(model: string, pool: ConcretePoolMember[], cause?: unknown): LlmError {
+  private exhausted(model: string, pool: ConcretePoolMember[], failures: ReadonlyMap<ConcretePoolMember, unknown>): LlmError {
+    for (const [member, error] of failures) {
+      if (error instanceof LlmError && this.options.health.isMemberAvailable(member.provider, member.account, member.model)) return error
+    }
+    const cause = [...failures.values()].at(-1)
     const keys = new Set<string>()
     for (const member of pool) {
       keys.add(memberKey(member.provider, member.account, member.model))

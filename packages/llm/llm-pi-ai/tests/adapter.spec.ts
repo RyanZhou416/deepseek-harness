@@ -73,6 +73,42 @@ beforeEach(() => {
 })
 
 describe('PiAiAdapter provider routing', () => {
+  it('uses the current protocol and retained occurrence count after switching image routes', async () => {
+    const rejection = { status: 400, body: JSON.stringify({ error: { message: 'test request captured' } }) }
+    const server = await mockServer([rejection, rejection, rejection])
+    const common = {
+      baseURL: server.url, requestImagePixelBudget: 8_000_000,
+      models: [{ id: 'vision', contextWindow: 200_000, input: ['text', 'image'] as ('text' | 'image')[] }],
+    }
+    const profiles = resolveProfiles({
+      claude: { ...common, api: 'anthropic-messages' }, other: { ...common, api: 'openai-completions' },
+    })
+    const readImageRequest = vi.fn(async (ref: ImageAttachmentRef, target: ImageRequestTarget): Promise<RequestImageAttachment> => ({
+      attachment: ref, variantId: ImageVariantId(`sha256:${'b'.repeat(64)}`), data: Uint8Array.of(1),
+      mediaType: ref.mediaType, bytes: 1, width: target.width, height: target.height, depth: 'uchar', space: 'srgb', hasAlpha: false,
+    }))
+    const store: Pick<AttachmentStore, 'readImageRequest'> = { readImageRequest }
+    const adapter = new PiAiAdapter({
+      profiles: () => profiles, auth: memoryAuth(), resolveApiKey: async () => 'test-only', resolveAttachments: () => store as AttachmentStore,
+    })
+    for (const [provider, count] of [['claude', 21], ['other', 21], ['claude', 20]] as const) {
+      for await (const chunk of adapter.stream({ provider, model: 'vision', messages: [{ role: 'user', content:
+        Array.from({ length: count }, () => ({ type: 'image', attachment: { ...IMAGE_REF, width: 2800, height: 1400 } })),
+      }] })) void chunk
+    }
+    const bodies = server.requests.map(body => JSON.stringify(body))
+    expect(bodies).toHaveLength(3)
+    expect(bodies[0]).toContain('request preview 2000x1000px')
+    expect(bodies[1]).toContain('request preview 2800x1400px')
+    expect(bodies[2]).toContain('request preview 2800x1400px')
+    await expect(async () => {
+      for await (const chunk of adapter.stream({ provider: 'claude', model: 'vision', messages: [{ role: 'user', content:
+        Array.from({ length: 101 }, () => ({ type: 'image', attachment: IMAGE_REF })),
+      }] })) void chunk
+    }).rejects.toMatchObject({ code: 'IMAGE_OFFLOAD_REQUIRED' })
+    expect(server.requests).toHaveLength(3)
+  })
+
   it('resolves a catalog model dynamically and uses a private endpoint', async () => {
     const server = await mockServer([{ events: textEvents }])
     const ctx = await harness(server.url)

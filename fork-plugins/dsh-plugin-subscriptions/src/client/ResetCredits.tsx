@@ -1,7 +1,7 @@
 /**
  * ChatGPT banked reset credits. The count comes from the usage payload the
  * parent already loaded. The per-credit list loads only when the row is
- * expanded, and spending one credit always goes through the confirm dialog.
+ * expanded; manual spending goes through the confirm dialog.
  * The collapsed composer pill does not render this row.
  */
 import { useEffect, useId, useRef, useState } from 'react'

@@ -1,0 +1,12 @@
+[
+  { "kind": "throw", "chunks": [], "message": "claude API request failed", "code": "TRANSPORT" },
+  { "kind": "throw", "chunks": [
+    { "type": "block-start", "index": 0, "blockType": "text" },
+    { "type": "text-delta", "index": 0, "text": "Interrupted draft." }
+  ], "message": "claude API request failed", "code": "TRANSPORT" },
+  { "kind": "chunks", "chunks": [
+    { "type": "block-start", "index": 0, "blockType": "text" },
+    { "type": "block-end", "index": 0, "block": { "type": "text", "text": "The network recovered and this turn continued automatically." } },
+    { "type": "finish", "reason": { "kind": "stop" } }
+  ] }
+]

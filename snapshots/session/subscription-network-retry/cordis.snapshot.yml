@@ -1,0 +1,17 @@
+- id: llm-deepseek
+  disabled: true
+- id: plugin-package-inventory-deepseek
+  disabled: true
+- id: session-title-llm
+  disabled: true
+- id: agent-default-model
+  config:
+    provider: claude
+    model: claude-opus-5-5
+- id: session-persistence-jsonl
+  config:
+    root: !!js dshHomePath('sessions')
+    compression: none
+- insert:
+    - id: subscription-network-retry
+      name: ../../../fork-plugins/dsh-plugin-subscriptions/test/fixtures/network-retry.mjs

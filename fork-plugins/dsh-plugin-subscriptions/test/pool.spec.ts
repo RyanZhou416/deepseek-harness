@@ -11,6 +11,9 @@ import './keep-alive.js'
 import { LlmAdapter, LlmError, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import type { GenerateOptions, LlmModelInfo, LlmResolvedModelInfo, StreamChunk } from '@deepseek-ai/dsh-llm'
 import { PoolAdapter } from '../src/providers/pool.js'
+import type { PoolAdapterOptions } from '../src/providers/pool.js'
+import { resolvePoolScheduling } from '../src/providers/pool-scheduling.js'
+import type { PoolSchedulingPolicy } from '../src/providers/pool-scheduling.js'
 import { unionAccountCatalogs } from '../src/providers/accounts.js'
 import { buildAccountPools, poolKey } from '../src/providers/pool-family.js'
 import type { PoolDefinition, PoolMemberRef, ProviderPoolSource } from '../src/providers/pool-family.js'
@@ -29,7 +32,7 @@ const OPTIONS: GenerateOptions = { provider: 'codex', model: 'm', messages: [] }
 
 test('pool canonicalizes legacy aliases before deduplication', async () => {
   const adapter = new FakeAdapter(() => serveOk())
-  const pool = new PoolAdapter({
+  const pool = new PoolAdapter({ scheduling: resolvePoolScheduling(),
     adapters: { codex: adapter }, health: new PoolHealthRegistry(),
     usage: new PoolUsageTracker(() => undefined), strategy: 'priority', switchMargin: 2,
     defaultAccount: async () => 'canonical',
@@ -43,6 +46,23 @@ test('pool canonicalizes legacy aliases before deduplication', async () => {
   assert.deepEqual(adapter.accounts, ['canonical'])
 })
 
+test('network failures remain retryable without borrowing a different account cooldown in either attempt order', async () => {
+  for (const transportAccount of ['a1', 'a2']) {
+    const network = new LlmError('claude API request failed', 'TRANSPORT')
+    const adapter = new FakeAdapter((_options, account) => serveFail(account === transportAccount ? network
+      : new LlmError('quota exhausted', 'RATE_LIMIT', { providerRetryAfterMs: 32 * 3_600_000 })))
+    const { pool, health } = makePool({ codex: adapter })
+    await assert.rejects(collect(pool.stream(OPTIONS)), error => {
+      assert.equal(error, network)
+      assert.equal(network.failure.providerRetryAfterMs, undefined)
+      return true
+    })
+    assert.equal(health.isMemberAvailable('codex', transportAccount, 'm'), true)
+    // The next request can still try the network-failed account while its sibling is cooling.
+    await assert.rejects(collect(pool.stream(OPTIONS)), error => error === network)
+  }
+})
+
 test('pool context intersects each account and each model, including same-provider tiers', async () => {
   const adapter = new FakeAdapter(() => serveOk())
   const visited: string[] = []
@@ -50,7 +70,7 @@ test('pool context intersects each account and each model, including same-provid
     visited.push(`${model}/${account}`)
     return { provider, id: model, name: model, context: { contextWindow: account === 'small' ? 300000 : 872000 } }
   }
-  const pool = new PoolAdapter({
+  const pool = new PoolAdapter({ scheduling: resolvePoolScheduling(),
     adapters: { codex: adapter }, health: new PoolHealthRegistry(),
     usage: new PoolUsageTracker(() => undefined), strategy: 'priority', switchMargin: 2,
     defaultAccount: async () => 'large', onWarn: () => {},
@@ -153,17 +173,19 @@ function makePool(
   options: {
     strategy?: 'priority' | 'quota_aware'
     switchMargin?: number
+    scheduling?: Partial<PoolSchedulingPolicy>
     usage?: (provider: ProviderId, account: string) => (() => Promise<ProviderUsage>) | undefined
     families?: Map<string, PoolDefinition>
     tiers?: Record<string, PoolMemberRef[]>
     defaultAccount?: string
     familiesFn?: () => Promise<Map<string, PoolDefinition>>
+    recoverQuota?: PoolAdapterOptions['recoverQuota']
   } = {},
 ): PoolHarness {
   const health = new PoolHealthRegistry()
   const usage = new PoolUsageTracker(options.usage ?? (() => undefined))
   const warnings: string[] = []
-  const pool = new PoolAdapter({
+  const pool = new PoolAdapter({ scheduling: resolvePoolScheduling(options.scheduling),
     adapters,
     health,
     usage,
@@ -173,9 +195,30 @@ function makePool(
     families: options.familiesFn ?? (() => Promise.resolve(options.families ?? freshAccounts())),
     tiers: options.tiers ?? {},
     onWarn: message => { warnings.push(message) },
+    ...(options.recoverQuota === undefined ? {} : { recoverQuota: options.recoverQuota }),
   })
   return { pool, health, usage, warnings }
 }
+
+test('a depleted sticky account checks reset recovery before switching to an account with quota', async () => {
+  for (const recover of [true, false]) {
+    const adapter = new FakeAdapter(() => serveOk())
+    let used = 90
+    const checked: string[] = []
+    const { pool, usage: tracker } = makePool({ codex: adapter }, {
+      strategy: 'quota_aware',
+      usage: (_provider, account) => async () => ({ supported: true, windows: [{ kind: 'weekly', usedPercent: account === 'a1' ? used : 90 }] }),
+      recoverQuota: async member => { checked.push(member.account); if (recover) used = 0; return recover },
+    })
+    const options = { ...OPTIONS, sessionId: SessionId('auto-reset') }
+    await collect(pool.stream(options))
+    used = 100
+    tracker.invalidate('codex', 'a1')
+    await collect(pool.stream(options))
+    assert.deepEqual(checked, ['a1'])
+    assert.deepEqual(adapter.accounts, ['a1', recover ? 'a1' : 'a2'])
+  }
+})
 
 /** A one-or-more-account pool source (every account sees the same catalog). */
 function source(provider: ProviderId, ids: string[], accounts: readonly string[] = ['a1']): ProviderPoolSource {
@@ -477,18 +520,18 @@ function weeklyUsage(usedPercent: number, remainingMs: number, expiresInMs?: num
   }
 }
 
-test('quota_aware: a just-refreshed ChatGPT account with an expiring credit leads a new session', async () => {
+test('quota_aware: an approaching ChatGPT reset can outweigh a fresh expiring credit', async () => {
   const codex = new FakeAdapter((_options, account) => serveOk(account))
   const { pool } = makePool({ codex }, {
     strategy: 'quota_aware',
     usage: usageFetchers({
-      // Near its own weekly reset, and more urgent, but the credit is not a reason to pick it.
+      // The card preference is bounded, so it cannot force traffic away from a near reset.
       'codex/a1': weeklyUsage(20, 12 * 60 * 60 * 1000, 2 * DAY_MS),
       'codex/a2': weeklyUsage(5, WEEK_MS - 12 * 60 * 60 * 1000, 2 * DAY_MS),
     }),
   })
   await collect(pool.stream(OPTIONS))
-  assert.deepEqual(codex.accounts, ['a2'])
+  assert.deepEqual(codex.accounts, ['a1'])
 })
 
 test('quota_aware: sticky holds against a fresh-credit account inside the margin', async () => {
@@ -541,7 +584,7 @@ test('quota_aware: a full fresh-credit account leads the last-resort tail', asyn
   assert.deepEqual(codex.accounts, ['a2'])
 })
 
-test('quota_aware: Claude still treats 96% as full', async () => {
+test('quota_aware: Claude can consume the last 4% before its reset', async () => {
   const claude = new FakeAdapter((_options, account) => serveOk(account))
   const family = new Map<string, PoolDefinition>([
     [poolKey('claude', 'm'), {
@@ -560,7 +603,7 @@ test('quota_aware: Claude still treats 96% as full', async () => {
     }),
   })
   await collect(pool.stream({ ...OPTIONS, provider: 'claude' }))
-  assert.deepEqual(claude.accounts, ['a2'])
+  assert.deepEqual(claude.accounts, ['a1'])
 })
 
 test('quota_aware: an account without telemetry sinks behind a measured one', async () => {
@@ -889,4 +932,205 @@ test('resolveModel: a pool id equal to the catalog wire id cannot recurse', asyn
   const resolved = await pool.resolveModel('codex', 'm')
   assert.equal(resolved.context?.contextWindow, 100_000)
   assert.equal(codex.directResolves, 0, 'member resolution went through resolveOwnModel')
+})
+
+for (const provider of ['claude', 'codex'] as const) {
+  test(`quota_aware: ${provider} gives a bounded preference to its approaching weekly reset`, async (t) => {
+    t.mock.timers.enable({ apis: ['Date'], now: Date.UTC(2026, 8, 30) })
+    const adapter = new FakeAdapter((_options, account) => serveOk(account))
+    const families = new Map([[poolKey(provider, 'm'), { members: [
+      { provider, account: 'a1', model: 'm' }, { provider, account: 'a2', model: 'm' },
+    ] }]])
+    const { pool } = makePool({ [provider]: adapter }, { strategy: 'quota_aware', families, usage: usageFetchers({
+      [`${provider}/a1`]: weeklyUsage(20, 2 * DAY_MS),
+      [`${provider}/a2`]: weeklyUsage(50, 2 * 60 * 60_000),
+    }) })
+    await collect(pool.stream({ ...OPTIONS, provider }))
+    assert.deepEqual(adapter.accounts, ['a2'])
+  })
+}
+
+test('quota_aware: finishes a small ChatGPT remainder without overriding a healthy sticky session', async (t) => {
+  t.mock.timers.enable({ apis: ['Date'], now: Date.UTC(2026, 8, 30) })
+  const data = { 'codex/a1': weeklyUsage(80, 2 * DAY_MS), 'codex/a2': weeklyUsage(70, 2 * DAY_MS) }
+  const adapter = new FakeAdapter((_options, account) => serveOk(account))
+  const { pool, usage } = makePool({ codex: adapter }, { strategy: 'quota_aware', usage: usageFetchers(data) })
+  const existing = { ...OPTIONS, sessionId: SessionId('established') }
+  await collect(pool.stream(existing))
+  assert.deepEqual(adapter.accounts, ['a2'])
+  data['codex/a1'] = weeklyUsage(97, 2 * DAY_MS)
+  usage.invalidate('codex')
+  await collect(pool.stream({ ...OPTIONS, sessionId: SessionId('new') }))
+  await collect(pool.stream(existing))
+  assert.deepEqual(adapter.accounts, ['a2', 'a1', 'a2'])
+  data['codex/a2'] = weeklyUsage(100, 2 * DAY_MS)
+  usage.invalidate('codex')
+  await collect(pool.stream(existing))
+  assert.deepEqual(adapter.accounts, ['a2', 'a1', 'a2', 'a1'])
+})
+
+test('quota_aware: reset urgency and finishing compete using the same bounded score', async (t) => {
+  t.mock.timers.enable({ apis: ['Date'], now: Date.UTC(2026, 8, 30) })
+  const adapter = new FakeAdapter((_options, account) => serveOk(account))
+  const { pool } = makePool({ codex: adapter }, { strategy: 'quota_aware', usage: usageFetchers({
+    'codex/a1': weeklyUsage(97, 5 * DAY_MS),
+    'codex/a2': weeklyUsage(50, 30 * 60_000),
+  }) })
+  await collect(pool.stream(OPTIONS))
+  assert.deepEqual(adapter.accounts, ['a2'])
+})
+
+test('quota_aware: drains one ChatGPT remainder when every account has only a few percent left', async (t) => {
+  t.mock.timers.enable({ apis: ['Date'], now: Date.UTC(2026, 8, 30) })
+  const adapter = new FakeAdapter((_options, account) => serveOk(account))
+  const data = {
+    'codex/a1': weeklyUsage(98, 2 * DAY_MS),
+    'codex/a2': weeklyUsage(97, 2 * DAY_MS),
+    'codex/a3': weeklyUsage(96, 2 * DAY_MS),
+  }
+  const families = new Map([[poolKey('codex', 'm'), { members: ['a3', 'a2', 'a1'].map(account => ({
+    provider: 'codex' as const, account, model: 'm',
+  })) }]])
+  const { pool, usage } = makePool({ codex: adapter }, { strategy: 'quota_aware', families, usage: usageFetchers(data) })
+  await collect(pool.stream(OPTIONS))
+  data['codex/a1'] = weeklyUsage(99.9, 2 * DAY_MS)
+  usage.invalidate('codex')
+  await collect(pool.stream(OPTIONS))
+  data['codex/a1'] = weeklyUsage(100, 2 * DAY_MS)
+  usage.invalidate('codex')
+  await collect(pool.stream(OPTIONS))
+  assert.deepEqual(adapter.accounts, ['a1', 'a1', 'a2'])
+})
+
+test('quota_aware: simultaneous cold selections distribute first-byte waits across accounts and model pools', async (t) => {
+  t.mock.timers.enable({ apis: ['Date'], now: Date.UTC(2026, 8, 30) })
+  const gate = Promise.withResolvers<void>()
+  const started = Promise.withResolvers<void>()
+  let count = 0
+  const adapter = new FakeAdapter(async function* (_options, account) {
+    if (++count === 4) started.resolve()
+    await gate.promise
+    yield* serveOk(account)
+  })
+  const families = new Map(['m', 'm2'].map(model => [poolKey('codex', model), { members: [
+    { provider: 'codex' as const, account: 'a1', model }, { provider: 'codex' as const, account: 'a2', model },
+  ] }]))
+  const { pool } = makePool({ codex: adapter }, { strategy: 'quota_aware', families,
+    usage: usageFetchers({ codex: windowUsage(50, 5 * 60 * 60_000) }) })
+  const iterators = ['m', 'm2', 'm', 'm2'].map(model => pool.stream({ ...OPTIONS, model })[Symbol.asyncIterator]())
+  const reads = iterators.map(iterator => iterator.next())
+  try {
+    await Promise.race([started.promise, Promise.all(reads)])
+    assert.deepEqual(adapter.accounts, ['a1', 'a2', 'a1', 'a2'])
+    gate.resolve()
+    await Promise.all(reads)
+    await iterators[1].return?.()
+    await collect(pool.stream(OPTIONS))
+    assert.equal(adapter.accounts.at(-1), 'a2', 'released capacity is visible while the other streams remain active')
+  } finally {
+    gate.resolve()
+    await Promise.allSettled(reads)
+    await Promise.all(iterators.map(iterator => iterator.return?.()))
+  }
+  await collect(pool.stream(OPTIONS))
+  assert.equal(adapter.accounts.at(-1), 'a1', 'completed and abandoned streams released every reservation')
+})
+
+test('quota_aware: load can divert a new request away from an account with a finishing bonus', async (t) => {
+  t.mock.timers.enable({ apis: ['Date'], now: Date.UTC(2026, 8, 30) })
+  const adapter = new FakeAdapter((_options, account) => serveOk(account))
+  const { pool } = makePool({ codex: adapter }, { strategy: 'quota_aware', usage: usageFetchers({
+    'codex/a1': weeklyUsage(97, 2 * DAY_MS), 'codex/a2': weeklyUsage(70, 2 * DAY_MS),
+  }) })
+  const first = pool.stream({ ...OPTIONS, sessionId: SessionId('first') })[Symbol.asyncIterator]()
+  try {
+    await first.next()
+    await collect(pool.stream({ ...OPTIONS, sessionId: SessionId('second') }))
+    await collect(pool.stream({ ...OPTIONS, sessionId: SessionId('third') }))
+    assert.deepEqual(adapter.accounts, ['a1', 'a2', 'a2'])
+  } finally {
+    await first.return?.()
+  }
+  await collect(pool.stream(OPTIONS))
+  assert.equal(adapter.accounts.at(-1), 'a1')
+})
+
+test('quota_aware: scoped or full windows cannot be bypassed by a reset or finishing bonus', async (t) => {
+  t.mock.timers.enable({ apis: ['Date'], now: Date.UTC(2026, 8, 30) })
+  const adapter = new FakeAdapter((_options, account) => serveOk(account))
+  const data: Record<string, ProviderUsage> = {
+    'codex/a1': { supported: true, windows: [
+      { kind: 'session', usedPercent: 100, resetsAt: Date.now() + 60_000 },
+      { kind: 'weekly', usedPercent: 97, resetsAt: Date.now() + 2 * DAY_MS },
+    ] },
+    'codex/a2': weeklyUsage(20, 2 * DAY_MS),
+  }
+  const { pool } = makePool({ codex: adapter }, { strategy: 'quota_aware', usage: usageFetchers(data) })
+  await collect(pool.stream(OPTIONS))
+  assert.deepEqual(adapter.accounts, ['a2'])
+})
+
+for (const phase of ['before', 'after', 'abort'] as const) {
+  test(`quota_aware: releases account load after ${phase}-output failure`, async () => {
+    let failing = true
+    const adapter = new FakeAdapter(() => !failing ? serveOk()
+      : phase === 'after' ? servePartial(new LlmError('failed', 'SERVER'))
+        : serveFail(new LlmError('failed', phase === 'abort' ? 'ABORTED' : 'SERVER')))
+    const { pool, health } = makePool({ codex: adapter }, { strategy: 'quota_aware' })
+    await assert.rejects(collect(pool.stream(OPTIONS)))
+    failing = false
+    health.clear('codex')
+    await collect(pool.stream(OPTIONS))
+    assert.equal(adapter.accounts.at(-1), 'a1')
+  })
+}
+
+test('quota_aware: cancellation after a shared quota fetch starts no account request', async () => {
+  const ready = Promise.withResolvers<void>()
+  const fetched = Promise.withResolvers<ProviderUsage>()
+  const adapter = new FakeAdapter(() => serveOk())
+  const { pool } = makePool({ codex: adapter }, { strategy: 'quota_aware', usage: () => async () => {
+    ready.resolve()
+    return fetched.promise
+  } })
+  const controller = new AbortController()
+  const result = collect(pool.stream({ ...OPTIONS, signal: controller.signal }))
+  await ready.promise
+  controller.abort(new Error('cancelled selection'))
+  fetched.resolve({ supported: false })
+  await assert.rejects(result, /cancelled selection/)
+  assert.deepEqual(adapter.accounts, [])
+  await collect(pool.stream(OPTIONS))
+  assert.deepEqual(adapter.accounts, ['a1'])
+})
+
+test('pool affinity stays separate when providers share the same model id', async () => {
+  let failClaude = true
+  const claude = new FakeAdapter((_options, account) => failClaude && account === 'a1'
+    ? serveFail(new LlmError('unavailable', 'SERVER')) : serveOk(account))
+  const codex = new FakeAdapter((_options, account) => serveOk(account))
+  const families = new Map((['claude', 'codex'] as const).map(provider => [poolKey(provider, 'm'), { members:
+    ['a1', 'a2'].map(account => ({ provider, account, model: 'm' })),
+  }]))
+  const { pool, health } = makePool({ claude, codex }, { families })
+  const options = { ...OPTIONS, sessionId: SessionId('shared-model-name') }
+  await collect(pool.stream({ ...options, provider: 'claude' }))
+  await collect(pool.stream(options))
+  failClaude = false
+  health.clear('claude')
+  await collect(pool.stream({ ...options, provider: 'claude' }))
+  assert.deepEqual(claude.accounts, ['a1', 'a2', 'a2'])
+  assert.deepEqual(codex.accounts, ['a1'])
+})
+
+test('quota_aware: a zero load weight preserves configured order for equal scores', async () => {
+  const adapter = new FakeAdapter((_options, account) => serveOk(account))
+  const { pool } = makePool({ codex: adapter }, { strategy: 'quota_aware', scheduling: { loadPenalty: 0 } })
+  const streams = [pool.stream(OPTIONS)[Symbol.asyncIterator](), pool.stream(OPTIONS)[Symbol.asyncIterator]()]
+  try {
+    await Promise.all(streams.map(stream => stream.next()))
+    assert.deepEqual(adapter.accounts, ['a1', 'a1'])
+  } finally {
+    await Promise.all(streams.map(stream => stream.return?.()))
+  }
 })

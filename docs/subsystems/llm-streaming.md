@@ -36,6 +36,8 @@ The block interfaces (full fields in source): `TextBlock` (`text`), `ReasoningBl
 
 Image access belongs to request serialization rather than the durable attachment or deterministic request-image version. `resolveImageAttachmentAccess()` combines the attachment provider's optional host object path with a mapping supplied by the consumer for the current tool execution filesystem. The result is available only for that request and does not participate in `variantId`.
 
+`prepareRequestImages(messages, attachments, target, signal)` prepares a request-local map of image variants. Its `RequestImageTargetResolver` receives the immutable attachment and the total retained occurrence count, including tool results and duplicates. Each unique attachment is transformed once; offloaded occurrences are excluded before storage reads. Provider adapters own model and endpoint limits; the attachment provider owns deterministic variant caching.
+
 Source: [`packages/llm/llm/src/content.ts`](../../packages/llm/llm/src/content.ts)
 
 ```ts type-equiv

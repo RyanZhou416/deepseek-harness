@@ -20,6 +20,7 @@ import type { ProviderId } from '../auth/store.js'
 import type { PoolAdapter } from './pool.js'
 import type { AttachmentStore } from '@deepseek-ai/dsh-attachment'
 import { resolveImages } from '../translate/resolved.js'
+import { assertClaudeRequestBytes, claudeImagePolicy } from './claude-images.js'
 import type { ResolvedImagePart, TranslatableBlock, TranslatableMessage } from '../translate/resolved.js'
 import {
   markMessageCache,
@@ -944,9 +945,11 @@ export class ClaudeAdapter extends LlmAdapter {
   }
 
   private async request(options: GenerateOptions, session: ClaudeSession, signal: AbortSignal): Promise<Response> {
-    const resolved = await resolveImages(options.messages, this.options.resolveAttachments?.(), signal)
-    const messages = await bindClaudeFileIds(resolved, session.accessToken, this.options.fetchFn, signal)
     const disc = await this.discovered(options.model)
+    const contextWindow = disc?.contextWindow
+      ?? this.options.models.find(entry => entry.id === options.model)?.contextWindow ?? CLAUDE_CONTEXT_WINDOW
+    const resolved = await resolveImages(options.messages, this.options.resolveAttachments?.(), signal, claudeImagePolicy(contextWindow))
+    const messages = await bindClaudeFileIds(resolved, session.accessToken, this.options.fetchFn, signal)
     const maxTokens = options.maxTokens
       ?? claudeMaxTokens(this.options.models.find(entry => entry.id === options.model), disc)
     const thinking = this.thinkingParam(options.model, disc?.thinkingType, maxTokens)
@@ -954,7 +957,9 @@ export class ClaudeAdapter extends LlmAdapter {
       ? String(options.reasoningEffort)
       : undefined
     const body = claudeRequestBody(options, messages, maxTokens, thinking, effort)
-    return proxiedFetch(CLAUDE_API_URL, {
+    const serialized = JSON.stringify(body)
+    assertClaudeRequestBytes(serialized, messages)
+    return (this.options.fetchFn ?? proxiedFetch)(CLAUDE_API_URL, {
       method: 'POST',
       headers: {
         'authorization': `Bearer ${session.accessToken}`,
@@ -966,7 +971,7 @@ export class ClaudeAdapter extends LlmAdapter {
         'accept': 'text/event-stream',
         'content-type': 'application/json',
       },
-      body: JSON.stringify(body),
+      body: serialized,
       signal,
     })
   }

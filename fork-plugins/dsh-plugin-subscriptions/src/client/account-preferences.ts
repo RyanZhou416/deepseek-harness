@@ -21,10 +21,11 @@ export function accountModelRows(account: AccountCatalogRow, preferences: Accoun
   ]
 }
 
-/** The model editor owns everything except the separately managed accounts. */
+/** Preserve the latest account and automatic credit settings when saving the model editor. */
 export function mergeLatestAccounts(draft: ProviderPreferences, latest: ProviderPreferences): ProviderPreferences {
-  const { accounts: _stale, ...settings } = draft
-  return { ...settings, ...(latest.accounts === undefined ? {} : { accounts: latest.accounts }) }
+  const { accounts: _stale, autoResetCredits: _staleAutoReset, ...settings } = draft
+  return { ...settings, ...(latest.accounts === undefined ? {} : { accounts: latest.accounts }),
+    ...(latest.autoResetCredits === undefined ? {} : { autoResetCredits: latest.autoResetCredits }) }
 }
 
 /** Only touched accounts replace their latest preferences; other settings survive. */
