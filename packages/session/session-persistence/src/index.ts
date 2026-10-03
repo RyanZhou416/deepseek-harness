@@ -35,7 +35,9 @@ export {
 } from './errors.ts'
 export type { SessionLocation } from './errors.ts'
 export {
+  adoptStoredEvent,
   assertContiguous,
+  assertStoredEventTypes,
   assertStoredId,
   assertVersion,
   materializeAppendBatch,

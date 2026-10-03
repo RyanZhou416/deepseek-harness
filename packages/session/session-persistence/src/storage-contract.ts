@@ -71,6 +71,25 @@ export function validateStoredEvents(
   events: SessionEvent[],
   location?: SessionLocation,
 ): SessionEvent[] {
+  assertStoredEventTypes(meta, events, location)
+  for (const [index, event] of events.entries()) events[index] = adoptStoredEvent(meta, event)
+  return events
+}
+
+/**
+ * Refuse unknown required event types and retired pre-release shapes across a
+ * whole stored log. Run it over every event before {@link adoptStoredEvent} so
+ * a log from a newer harness refuses as unsupported rather than corrupt.
+ * @param meta - the stored header the events belong to.
+ * @param events - decoded events of one stored log.
+ * @param location - the backend's artifact location for refusals, when one exists.
+ * @throws {SessionFormatUnsupportedError} for unknown or retired event shapes.
+ */
+export function assertStoredEventTypes(
+  meta: SessionHeader,
+  events: readonly SessionEvent[],
+  location?: SessionLocation,
+): void {
   for (const event of events) {
     if (!KNOWN_SESSION_EVENT_TYPES.has(event.type) && event.ignorable !== true) {
       throw unsupported(
@@ -91,8 +110,19 @@ export function validateStoredEvents(
       }
     }
   }
+}
+
+/**
+ * Adopt one exclusively owned stored event after {@link assertStoredEventTypes}
+ * accepted its log: validate it and deeply freeze its identified message.
+ * @param meta - the stored header the event belongs to.
+ * @param event - exclusively owned decoded event.
+ * @returns the same event object, validated.
+ * @throws {SessionPersistenceCorruptionError} for a record that fails validation.
+ */
+export function adoptStoredEvent(meta: SessionHeader, event: SessionEvent): SessionEvent {
   try {
-    for (const [index, event] of events.entries()) events[index] = adoptSessionEvent(event)
+    return adoptSessionEvent(event)
   } catch (error: unknown) {
     if (error instanceof SessionFormatUnsupportedError) throw error
     throw new SessionPersistenceCorruptionError(
@@ -100,7 +130,6 @@ export function validateStoredEvents(
       { cause: error },
     )
   }
-  return events
 }
 
 /**

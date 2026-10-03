@@ -23,6 +23,7 @@ import {
   SessionPersistence, SessionPersistenceRevision, SessionFormatUnsupportedError,
   SessionPersistenceCorruptionError,
   SessionAlreadyExistsError, SessionPersistenceNotFoundError,
+  adoptStoredEvent, assertStoredEventTypes,
   assertStoredId, materializeCreateHeader, sessionFormatVersionRefusal, validateStoredEvents,
   type SessionAccess, type SessionHandle,
   type SessionHandleReadResult,
@@ -69,10 +70,13 @@ const DEFAULT_COLD_LOG_MEMO_RETENTION_MS = 10_000
 const DEFAULT_COMPRESSION: JsonlCompression = 'zstd'
 /**
  * Internal scheduling constant, not deployment configuration: balance
- * frame-boundary event-loop yields against `setImmediate` overhead. One frame
- * remains an indivisible synchronous decode.
+ * event-loop yields against `setImmediate` overhead. A cold read yields at
+ * Zstandard frame boundaries and between stored-event adoptions; a long
+ * Session takes over a second of that work while other Sessions stream on
+ * the same event loop, so each slice stays short. One frame or one event
+ * remains indivisible synchronous work.
  */
-const ZSTD_DECODE_YIELD_INTERVAL_MS = 500
+const ZSTD_DECODE_YIELD_INTERVAL_MS = 50
 
 /** Assert that the independently decodable first frame contains only the header record. */
 function assertZstdHeaderFrame(plaintext: Buffer): void {
@@ -162,6 +166,37 @@ function freezeStoredEvent(event: SessionEvent): void {
 /** Establish immutable sharing for one decoded event graph and report that state. */
 function freezeStoredEvents(events: SessionEvent[]): FrozenStoredEvents {
   for (const event of events) freezeStoredEvent(event)
+  Object.freeze(events)
+  return { eventState: 'shared-frozen', events }
+}
+
+/**
+ * Validate one exclusively owned decoded log, then adopt and deep-freeze its
+ * events in event-loop slices and freeze the array.
+ * @param meta - the stored header the events belong to.
+ * @param events - exclusively owned decoded events; adopted in place.
+ * @param location - the artifact named by refusals.
+ * @param signal - cancellation observed after each yield.
+ * @returns the frozen events and their sharing state.
+ */
+async function adoptStoredEventsCooperatively(
+  meta: SessionHeader,
+  events: SessionEvent[],
+  location: SessionLocation,
+  signal?: AbortSignal,
+): Promise<FrozenStoredEvents> {
+  assertStoredEventTypes(meta, events, location)
+  let yieldDeadline = performance.now() + ZSTD_DECODE_YIELD_INTERVAL_MS
+  for (const [index, event] of events.entries()) {
+    const adopted = adoptStoredEvent(meta, event)
+    freezeStoredEvent(adopted)
+    events[index] = adopted
+    if (index + 1 < events.length && performance.now() >= yieldDeadline) {
+      await scheduler.yield()
+      signal?.throwIfAborted()
+      yieldDeadline = performance.now() + ZSTD_DECODE_YIELD_INTERVAL_MS
+    }
+  }
   Object.freeze(events)
   return { eventState: 'shared-frozen', events }
 }
@@ -872,13 +907,13 @@ class JsonlSessionPersistence extends SessionPersistence {
     signal?.throwIfAborted()
     assertStoredId(expectedId, parsed.meta)
     const location = this.locate(parsed.meta)
-    validateStoredEvents(parsed.meta, parsed.events, location)
-    signal?.throwIfAborted()
     const { events, ...rest } = parsed
+    const frozen = await adoptStoredEventsCooperatively(parsed.meta, events, location, signal)
+    signal?.throwIfAborted()
     const stored: CurrentStoredLog = {
       status: 'current',
       ...rest,
-      ...freezeStoredEvents(events),
+      ...frozen,
       revision,
     }
     this.memoizeStoredLog(expectedId, stored)

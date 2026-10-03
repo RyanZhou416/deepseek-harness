@@ -138,6 +138,15 @@ describe('validateStoredEvents', () => {
     expect((refusal as SessionFormatUnsupportedError).location).toBe(LOCATION)
   })
 
+  it('refuses a later unknown event type ahead of an earlier damaged record', () => {
+    const m = meta('newer-writer')
+    const events = [
+      { type: 'user/message', seq: 0, time: 1, data: { role: 'user', content: [], source: { kind: 'user' } }, surfaceOp: 'append' },
+      { type: 'mystery/event', seq: 1, time: 2, data: {} },
+    ] as unknown as SessionEvent[]
+    expect(() => validateStoredEvents(m, events)).toThrow(SessionFormatUnsupportedError)
+  })
+
   it('retains an unknown event type its writer marked ignorable', () => {
     const m = meta('ignorable-unknown')
     const events = [

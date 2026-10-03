@@ -1389,6 +1389,43 @@ describe('JsonlSessionPersistence: durability and crash semantics', () => {
     await reader.close()
   })
 
+  it('adopts a cold log in event-loop slices', async () => {
+    const m = meta('sliced-adoption', '/work')
+    await writeLog(ctx.sessionPersistence, m, oneTurnLog())
+    const cold = new Context()
+    await cold.plugin(JsonlSessionPersistence, { root, compression: 'none' })
+    let now = 0
+    vi.spyOn(performance, 'now').mockImplementation(() => (now += 100))
+    const yieldSpy = vi.spyOn(scheduler, 'yield')
+    try {
+      const read = await readAll(cold.sessionPersistence, m.id)
+      expect(read.events).toEqual(oneTurnLog())
+      expect(read.events.every(event => Object.isFrozen(event))).toBe(true)
+      expect(yieldSpy).toHaveBeenCalledTimes(oneTurnLog().length - 1)
+    } finally {
+      await cold.fiber.dispose()
+    }
+  })
+
+  it('stops cold-log adoption when its last reader cancels', async () => {
+    const m = meta('cancelled-adoption', '/work')
+    await writeLog(ctx.sessionPersistence, m, oneTurnLog())
+    const cold = new Context()
+    await cold.plugin(JsonlSessionPersistence, { root, compression: 'none' })
+    let now = 0
+    vi.spyOn(performance, 'now').mockImplementation(() => (now += 100))
+    const controller = new AbortController()
+    const reason = new Error('reader left during adoption')
+    const yieldSpy = vi.spyOn(scheduler, 'yield').mockImplementationOnce(async () => { controller.abort(reason) })
+    try {
+      await expect(cold.sessionPersistence.open(m.id, 'read', { signal: controller.signal })).rejects.toBe(reason)
+      await expect(readAll(cold.sessionPersistence, m.id)).resolves.toMatchObject({ events: oneTurnLog() })
+      expect(yieldSpy.mock.calls.length).toBeGreaterThan(oneTurnLog().length - 1)
+    } finally {
+      await cold.fiber.dispose()
+    }
+  })
+
   it('close drains a routed event that arrives while it waits for an in-flight append', async () => {
     const m = meta('late-closer', '/work')
     const handle = await ctx.sessionPersistence.create(m) as JsonlSessionHandle
