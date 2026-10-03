@@ -1,5 +1,6 @@
 import { ToolCallId, createMessage, createUserMessage } from '@deepseek-ai/dsh-llm'
 import { afterEach, describe, expect, it, vi, type MockInstance } from 'vitest'
+import { z } from 'zod'
 import { Context } from '@deepseek-ai/cordis'
 import { appendFile, mkdtemp, readdir, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -21,6 +22,12 @@ import { MockAdapter, textResponse } from './mock-adapter.ts'
 declare module '@deepseek-ai/dsh-llm' {
   interface MessageSourceMap {
     'tool-bash': { kind: 'tool-bash' } & ContextFormed
+  }
+}
+
+declare module '@deepseek-ai/dsh-session-projection/types' {
+  interface SessionProjectionStateMap {
+    'resume-test/folded': number
   }
 }
 
@@ -1337,5 +1344,39 @@ describe('configured-start failure edges', () => {
     // Ownership deactivated before the failure landed: the report is dropped.
     expect(failures).toEqual([])
     await configured.fiber.dispose()
+  })
+})
+
+describe('resume projection checkpoints', () => {
+  it('seeds projection cells from the projection cache instead of folding the stored log', async () => {
+    const sessionId = SessionId('projection-cache-resume')
+    const root = await persistSession(sessionId)
+    const ctx = await mountPersistentHarness(root, new MockAdapter([]))
+    const folded: SessionSeq[] = []
+    ctx.sessionProjections.register({
+      key: 'resume-test/folded',
+      stateSchema: z.number(),
+      init: () => 0,
+      apply: (state, event) => {
+        folded.push(event.seq)
+        return state + 1
+      },
+      stateVersion: 1,
+    })
+    const hydratePrepared = vi.fn((session: Session, events: readonly SessionEvent[]) => ctx.sessionProjections.hydrate(
+      session, { 'resume-test/folded': { ver: 1, seq: SessionSeq(1), val: 2 } }, events, SessionLogOffset(0)))
+    ctx.provide('sessionProjectionCache', { hydratePrepared } as never)
+
+    const handle = await ctx.agents.resume({ resumeSessionId: sessionId })
+
+    expect(hydratePrepared).toHaveBeenCalledOnce()
+    const [session, events] = hydratePrepared.mock.calls[0]!
+    expect(session).toBe(handle.agent.session)
+    expect(events.map(event => event.seq)).toEqual([0, 1])
+    // Only events appended after the stored log reach the unit.
+    expect(folded.every(seq => seq > 1)).toBe(true)
+    expect(ctx.sessionProjections.stateOf(handle.agent.session, 'resume-test/folded')).toBe(2 + folded.length)
+    await handle.dispose()
+    await ctx.fiber.dispose()
   })
 })
