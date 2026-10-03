@@ -716,9 +716,13 @@ export async function launchWebScaffold(options: LaunchOptions = {}): Promise<We
   const ctx = new Context()
   if (options.openInAppEnvironment !== undefined) ctx.provide(DSH_LAUNCH_ENVIRONMENT_KEY, options.openInAppEnvironment)
   const observedSessions = new Map<SessionId, Session>()
-  const stopObservingSessions = ctx.on('session/created', (session) => {
-    observedSessions.set(session.id, session)
-  })
+  // Only the replay comparison reads these; retaining every Session otherwise
+  // makes lifetime scenarios report the scaffold as their retainer.
+  const stopObservingSessions = replayFixture === undefined || !compareReplaySession
+    ? () => {}
+    : ctx.on('session/created', (session) => {
+      observedSessions.set(session.id, session)
+    })
   let port = 0
   let baseUrl = ''
   let authenticatedUrl = ''
@@ -1416,7 +1420,11 @@ export async function seedSession(
   fixtureText: string,
   id: string,
   agentPreset?: string,
-  options: { readonly createdAt?: number } = {},
+  options: {
+    readonly createdAt?: number
+    /** Events per persistence append, each one physical log frame; all events in one append when omitted. */
+    readonly appendBatch?: number
+  } = {},
 ): Promise<SessionId> {
   const decoded = parseSeedFixture(realizeSeedFixture(scaffold, fixtureText, id))
   const events = decoded.events
@@ -1466,7 +1474,7 @@ export async function seedSession(
     nextTime = time + 1
     return { ...event, time }
   })
-  await persistSeedSession(scaffold, meta, materializedEvents)
+  await persistSeedSession(scaffold, meta, materializedEvents, options.appendBatch ?? materializedEvents.length)
   return meta.id
 }
 
@@ -1475,6 +1483,7 @@ async function persistSeedSession(
   scaffold: WebScaffold,
   meta: SessionHeader,
   events: readonly SessionEvent[],
+  appendBatch: number,
 ): Promise<void> {
   const seeder = new Context()
   try {
@@ -1482,7 +1491,7 @@ async function persistSeedSession(
     // so the host's directory-scan list() sees one consistent encoding.
     await seeder.plugin(JsonlSessionPersistence, { root: scaffold.persistenceRoot })
     const handle = await seeder.sessionPersistence.create(meta)
-    await handle.append(events)
+    for (let start = 0; start < events.length; start += appendBatch) await handle.append(events.slice(start, start + appendBatch))
     await handle.close()
   } finally {
     await seeder.fiber.dispose()
