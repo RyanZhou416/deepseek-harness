@@ -18,6 +18,8 @@
 
 使用 Chrome DevTools 的 Memory 面板打开 `allocations-*.heapprofile`，以及可用的 `baseline.heapsnapshot` / `growth.heapsnapshot`。比较存活分配和强引用保留路径，再将快照中的弱引用追踪记录与生命周期 ID、GC 年龄关联。分配剖面提供采样调用栈，堆快照提供引用图。采样元数据与 JSON 序列化的开销不受输出文件大小限制。仅靠弱引用观测和分配调用栈不能识别全部持有者。在早期快照窗口之后才发生的泄漏，可能仍需专门复现。
 
+DevTools 打不开的大快照可用 `node retainers.mjs <file.heapsnapshot> --class ReactLoopAgent`（或 `--id N`、`--max-groups N`、`--json`）离线输出分组后的最短强引用链。它从不跟随弱边，只有键和表都可达时才计入 WeakMap 值，因此不在任何链上的选中对象可以回收。Web `agent-lifetime` 压测场景通过 `retainers.d.mts` 类型复用同一模块。
+
 快照和剖面可能包含私有运行内容与路径，应留在本机，禁止提交。删除原始快照会永久丢失其完整引用图；清理旧证据时应保留报告和删除清单。探针不会重启 Host。
 
 ## 验证

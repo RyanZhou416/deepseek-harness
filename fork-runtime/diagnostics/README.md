@@ -18,6 +18,8 @@ Full snapshots pause the Host and temporarily increase memory use. The recorder 
 
 Open `allocations-*.heapprofile` and available `baseline.heapsnapshot` / `growth.heapsnapshot` with Chrome DevTools' Memory panel. Compare surviving allocations and strong retaining paths, then correlate the snapshot's weak tracking records with lifetime IDs and GC ages. Profiling shows sampled allocation stacks; a heap snapshot supplies the retaining graph. Sampling metadata and JSON serialization have overhead beyond the output file limit. Weak observations and profile stacks alone cannot identify every owner. Leaks beginning after the early snapshot window may require a focused reproduction.
 
+For snapshots too large for DevTools, `node retainers.mjs <file.heapsnapshot> --class ReactLoopAgent` (or `--id N`, `--max-groups N`, `--json`) prints grouped shortest strong retainer chains offline. It never follows weak edges and admits a WeakMap value only when both key and table are reachable, so a selected object absent from every chain is collectable. The Web `agent-lifetime` stress scenario uses the same module through `retainers.d.mts` types.
+
 Snapshots and profiles can contain private runtime content and paths. Keep them local and never commit them. Removing a raw snapshot permanently removes its full retaining graph; keep reports and a deletion manifest when cleaning old evidence. The recorder never restarts the Host.
 
 ## Verification
