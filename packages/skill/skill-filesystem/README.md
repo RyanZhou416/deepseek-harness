@@ -111,7 +111,7 @@ Discovery resolves the root list for the lookup cwd, asks the watch manager to a
 
 ### Watching and invalidation
 
-Existing roots are watched by Chokidar at depth 1; a root that does not exist is followed from its nearest existing ancestor one missing segment at a time using `fs.watchFile`. Relevant events — direct bundle add/remove, flat `.md` add/remove, and direct `SKILL.md` add/remove/change — coalesce into one provider invalidation per microtask batch, while resource-subtree changes are ignored. The watch manager is bounded by `watchMaxProjects`, logs and retries failed startup, and closes every handle at teardown. First-party `write`/`edit` mutations invalidate synchronously through the `fs/observed` event.
+Existing roots are watched by Chokidar at depth 1; a root that does not exist is followed from its nearest existing ancestor one missing segment at a time using `fs.watchFile`. Relevant events — direct bundle add/remove, flat `.md` add/remove, and direct `SKILL.md` add/remove/change — coalesce into one provider invalidation per microtask batch, while resource-subtree changes are ignored. The watch manager is bounded by `watchMaxProjects`, logs and retries failed startup, and closes every handle at teardown. It opens every Chokidar watcher and `fs.watchFile` poll in an async context captured without an Agent initiator, because a native watch handle retains the context that created it and would otherwise keep the discovering Agent and its Session alive. First-party `write`/`edit` mutations invalidate synchronously through the `fs/observed` event.
 
 </details>
 

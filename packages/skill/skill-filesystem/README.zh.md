@@ -111,7 +111,7 @@ skill 可以是被扫描根目录顶层的目录 bundle `<name>/SKILL.md`，也�
 
 ### 监视与失效
 
-现有根目录由 Chokidar 以深度 1 监视；不存在的根会从最近的现有祖先开始，借助 `fs.watchFile` 每次沿一个缺失路径段跟踪。相关事件——直属 bundle 添加/移除、平铺 `.md` 添加/移除、直接 `SKILL.md` 添加/移除/变更——会在每个微任务批次合并为一次提供方失效，资源子树下的变更则被忽略。监视管理器受 `watchMaxProjects` 限制，会记录启动失败并重试，并在释放时关闭所有句柄。第一方 `write`/`edit` 变更通过 `fs/observed` 事件同步失效。
+现有根目录由 Chokidar 以深度 1 监视；不存在的根会从最近的现有祖先开始，借助 `fs.watchFile` 每次沿一个缺失路径段跟踪。相关事件——直属 bundle 添加/移除、平铺 `.md` 添加/移除、直接 `SKILL.md` 添加/移除/变更——会在每个微任务批次合并为一次提供方失效，资源子树下的变更则被忽略。监视管理器受 `watchMaxProjects` 限制，会记录启动失败并重试，并在释放时关闭所有句柄。它在不带 Agent initiator 的异步上下文中创建每个 Chokidar 监视器与 `fs.watchFile` 轮询，因为原生监视句柄会持有创建它的上下文，否则触发发现的 Agent 及其 Session 会一直驻留。第一方 `write`/`edit` 变更通过 `fs/observed` 事件同步失效。
 
 </details>
 

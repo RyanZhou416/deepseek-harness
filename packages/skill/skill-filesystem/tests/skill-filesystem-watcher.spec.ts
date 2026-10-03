@@ -5,6 +5,8 @@ import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
+import AgentRegistry from '@deepseek-ai/dsh-agent'
+import type { Agent } from '@deepseek-ai/dsh-agent'
 import SkillRegistry from '@deepseek-ai/dsh-skill'
 
 interface FakeWatcherControl {
@@ -31,6 +33,9 @@ const watcherHarness = vi.hoisted(() => ({
   deferredReady: 0,
   watchFiles: [] as FakeWatchFileControl[],
   statGates: [] as FakeStatGate[],
+  /** Reads the initiating Agent visible where a watcher is opened. */
+  initiator: undefined as (() => unknown) | undefined,
+  openedUnder: [] as unknown[],
 }))
 
 vi.mock('node:fs', async (importOriginal) => {
@@ -38,6 +43,7 @@ vi.mock('node:fs', async (importOriginal) => {
   return {
     ...actual,
     watchFile(path: string, _options: unknown, listener: FakeWatchFileControl['listener']) {
+      if (watcherHarness.initiator !== undefined) watcherHarness.openedUnder.push(watcherHarness.initiator())
       watcherHarness.watchFiles.push({ path, listener })
     },
     unwatchFile(path: string, listener: FakeWatchFileControl['listener']) {
@@ -65,6 +71,7 @@ vi.mock('node:fs/promises', async (importOriginal) => {
 vi.mock('chokidar', () => ({
   default: {
     watch(path: unknown, options: Record<string, unknown>) {
+      if (watcherHarness.initiator !== undefined) watcherHarness.openedUnder.push(watcherHarness.initiator())
       const emitter = new EventEmitter() as EventEmitter & { close(): Promise<void> }
       const control: FakeWatcherControl = { emitter, closeCalls: 0, options, path: String(path) }
       emitter.close = async () => {
@@ -120,9 +127,35 @@ beforeEach(() => {
   watcherHarness.deferredReady = 0
   watcherHarness.watchFiles.length = 0
   watcherHarness.statGates.length = 0
+  watcherHarness.initiator = undefined
+  watcherHarness.openedUnder.length = 0
 })
 
 describe('skill-filesystem watcher failures', () => {
+  it('opens shared watchers outside the Agent whose discovery requested them', async () => {
+    const home = await tempDir('skill-watch-initiator')
+    await writeSkill(join(home, '.dsh/skills'), 'detached-skill')
+    const ctx = new Context()
+    await ctx.plugin(AgentRegistry)
+    await ctx.plugin(SkillRegistry)
+    const fiber = await ctx.plugin(SkillFileSystem, {
+      dshHome: join(home, '.dsh'),
+      agentsHome: join(home, '.agents'),
+      watch: true,
+    })
+    watcherHarness.initiator = () => ctx.agents.currentInitiator()
+    // The registry scopes the initiator without reading the Agent.
+    const discoverer = {} as Agent
+
+    const skills = await ctx.agents.withInitiator(discoverer, () => ctx.skills.list())
+
+    expect(skills.map(skill => skill.name)).toEqual(['detached-skill'])
+    expect(watcherHarness.watchers).toHaveLength(1)
+    expect(watcherHarness.watchFiles).toHaveLength(1)
+    expect(watcherHarness.openedUnder).toEqual([undefined, undefined])
+    await fiber.dispose()
+  })
+
   it('canonicalizes an existing root before opening its native watcher', async () => {
     const target = await tempDir('skill-watch-canonical-target')
     const aliasParent = await tempDir('skill-watch-canonical-alias')

@@ -9,11 +9,13 @@
  * @module @deepseek-ai/dsh-skill-filesystem
  */
 
+import { AsyncLocalStorage } from 'node:async_hooks'
 import { access, lstat, readdir, readFile, realpath, stat } from 'node:fs/promises'
 import { unwatchFile, watchFile, type Stats } from 'node:fs'
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { homedir } from 'node:os'
 import type { Context } from '@deepseek-ai/cordis'
+import type {} from '@deepseek-ai/dsh-agent'
 import chokidar from 'chokidar'
 import z from '@deepseek-ai/schemastery'
 import type Schema from '@deepseek-ai/schemastery'
@@ -291,12 +293,19 @@ class SkillWatchManager {
   private readonly lifecycle = new AbortController()
   private closing = false
   private invalidationQueued = false
+  /** Native watch handles retain the async context that created them, so they open outside the discovering Agent. */
+  private readonly detached: <R>(operation: () => R) => R
 
   constructor(
     private readonly ctx: Context,
     private readonly invalidate: () => void,
     private readonly config: ResolvedWatchConfig,
-  ) {}
+  ) {
+    const agents = ctx.get('agents')
+    this.detached = agents === undefined
+      ? AsyncLocalStorage.snapshot()
+      : agents.withoutInitiator(() => AsyncLocalStorage.snapshot())
+  }
 
   async observeRoots(roots: readonly SkillRoot[]): Promise<void> {
     if (this.closing) return
@@ -457,10 +466,10 @@ class SkillWatchManager {
     const listener = (_current: Stats, _previous: Stats): void => {
       void this.handleAncestorWatchEvent(state, mode)
     }
-    watchFile(mode.nextPath, {
+    this.detached(() => watchFile(mode.nextPath, {
       persistent: false,
       interval: this.config.pollIntervalMs,
-    }, listener)
+    }, listener))
     return {
       mode,
       close() {
@@ -489,7 +498,7 @@ class SkillWatchManager {
   }
 
   private async openRootWatcher(state: RootWatchState, mode: Extract<RootWatchMode, { kind: 'root' }>): Promise<WatchHandle> {
-    const watcher = chokidar.watch(mode.anchor, {
+    const watcher = this.detached(() => chokidar.watch(mode.anchor, {
       // Chokidar owns late native fs.watch errors only for persistent watchers;
       // this provider's effect explicitly closes every handle at teardown.
       persistent: true,
@@ -503,7 +512,7 @@ class SkillWatchManager {
       },
       usePolling: this.config.usePolling,
       interval: this.config.pollIntervalMs,
-    })
+    }))
     const handle: WatchHandle = {
       mode,
       close: () => watcher.close(),
