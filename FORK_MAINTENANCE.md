@@ -134,6 +134,18 @@ Chat edits the latest ordinary text-only user message in its existing idle Sessi
 
 上游替代必须保留完整读取、revision/实例匹配、活跃租约独立性、live 切换失效和大文件不长期缓存；物理文件门槛不等于解码后 heap 上限。
 
+#### Resume projection checkpoint seeding
+
+`packages/core/agent-loop` 的 `resume` 在 `sessions.prepare()` 之后调用可选的 `ctx.sessionProjectionCache.hydratePrepared(session, seed)`，与 session-query 冷观察的预置方式相同；包对 `dsh-session-projection-cache` 是可选 peer。旧路径中 resume 不读取检查点，`ReactLoopAgent` 构造时首次 `stateOf()` 会在事件循环上把全部投影单元从 seq 0 同步折叠整份日志，token meter 与 `dsh-context` 占其大部分。缓存行身份不符、版本不符或超出日志末尾时只有对应单元从头折叠，代价与旧路径相同。
+
+`session-switch.stress.ts`（6 万事件目标、16 个 root 持续流式、fork 插件）中，经侧栏切换到已驱逐长 Session 时 Host 事件循环最长阻塞由 6.4–7.1 s 降为 0.30–0.54 s，页面显示耗时不变；修复前剖面 54% 在 resume 构造的全量折叠，修复后剩余主要为日志解码。真实最大 Session 的压缩日志约为该测试目标的 8 倍。回归为 `resume.spec.ts` 的 `seeds projection cells from the projection cache instead of folding the stored log`，旧实现失败。合并上游时保留 resume 的检查点预置；上游若把预置移入投影注册表或 Session 准备阶段，须覆盖 resume 与冷观察两条路径。
+
+#### Cold-read event-loop slices
+
+`packages/session/session-persistence-jsonl/src/index.ts` 的 `ZSTD_DECODE_YIELD_INTERVAL_MS` 由上游 500 改为 50：冷读取在 Zstandard 帧边界让出事件循环的间隔。解码之后，`decodeStoredLog()` 不再一次同步运行 `validateStoredEvents()` 与 `freezeStoredEvents()`，而由 `adoptStoredEventsCooperatively()` 先对整份日志运行 `assertStoredEventTypes()`，再逐条 `adoptStoredEvent()` 并深冻结，按同一间隔让出并在让出后检查取消。`packages/session/session-persistence` 为此把 `validateStoredEvents()` 拆成这两个导出函数，原函数行为不变；类型检查先覆盖整份日志，所以较新版本写入的日志仍按 unsupported 而非 corruption 拒绝。旧格式一次性迁移路径与 `MIGRATION_DECODE_YIELD_INTERVAL_MS` 保持上游行为。
+
+真实最大三份 Session（6.3–8.7 万事件、69–75 MiB zstd）单独解码各需 1.06–1.41 s、单帧最长 8–13 ms，解码后的采纳与冻结另需 154–218 ms；500 ms 间隔下其他 Session 的流式输出与输入回显会连续停顿两到三次约 0.5 s，随后再停顿约 0.2 s。改后解码与采纳切片均不超过约 50 ms，类型检查 2–4 ms。同一 `session-switch.stress.ts`（fork 插件）中，冷切换的 Host 事件循环最长阻塞由 382–492 ms 降为仅改间隔时的 138–204 ms，再降为 110–158 ms，解码总 CPU 时间与页面显示耗时不变。剩余阻塞主要来自核心 `sessions.prepare()`（真实 Session 64–116 ms）、投影检查点预置与首帧构建。回归为 `jsonl.spec.ts` 的 `adopts a cold log in event-loop slices` 与 `stops cold-log adoption when its last reader cancels`，以及 `storage-contract.spec.ts` 的 `refuses a later unknown event type ahead of an earlier damaged record`；去掉采纳让出时前两者失败。合并上游时保留 50 ms 切片与类型检查先于逐条采纳的顺序，除非上游给出覆盖长 Session 冷读取的同等或更短切片。
+
 #### SQLite live search and bounded pages
 
 `packages/session-query/session-query/src/documents.ts` 与 `packages/session-query/session-query-sqlite/src/index.ts` 用 live Session object identity、event count 和 canonical surface replacement generation 区分 append-only suffix 与 replacement。安全 append 只索引新增 documents；replacement 或 lifecycle 变化执行完整 fold。
@@ -172,13 +184,25 @@ Count pruning 只删除模型已通过 `job_output` 读取的最旧 completed/ki
 
 官方 `maxConcurrentJobsPerOwner=10` 管理 live jobs，`maxActiveSubagents=8` 管理 continuable child activation；两者都独立于 terminal Job 留存。上游替代必须有 terminal TTL/count、unreported protection、active exclusion 和有界维护算法。
 
+#### Skill watcher initiator isolation
+
+`packages/skill/skill-filesystem` 的 `SkillWatchManager` 在构造时通过 `agents.withoutInitiator()` 捕获不带 Agent initiator 的异步上下文（没有 `agents` 服务时使用构造时快照），并在该上下文中创建 chokidar 根监听和 `watchFile` 祖先轮询，重建监听同样经过这两处。Node 原生监听句柄持有创建时的 AsyncContextFrame；旧路径让首个触发技能发现的 Agent 连同整份 Session 日志随共享监听器驻留，每个被监听的根最多钉住一个已销毁 Agent。
+
+隔离 Web 复现（shipped 组合、4 个 root、2 轮、1,500 事件种子）中，修复前两次各残留 1 个 Agent 及其 Session，持有链为 Global handles → AsyncContextFrame → ReactLoopAgent；修复后两次均为 0。加入冷恢复子 Agent 的 `send_message`、`session_send_message` 与 `workflow` 后，在隔离监听器的条件下 140 个 Agent 全部回收，没有发现其他留存路径。真实实例 2026-09-30 至 10-01 的 37 小时记录中，已销毁仍存活 Agent 从 7 个增至 48 个，其事件从 11.7 万条增至 152 万条，JS 堆从约 4 GiB 增至 14 GiB；这些留存与本修复的对应程度须用修复后 `memory-ownership.ndjson` 的 `agentsDisposedRetainedOver60s` 复核。回归为 `skill-filesystem-watcher.spec.ts` 的 `opens shared watchers outside the Agent whose discovery requested them`。合并上游时保留监听器创建与重建的中性上下文，以及包对 `@deepseek-ai/dsh-agent` 的 peer/dev 依赖。
+
+#### Agent initiator weak reference
+
+`packages/core/agent` 的 `AgentRegistry.initiators` 在 `AsyncLocalStorage` 中保存 `WeakRef<Agent>`，`currentInitiator()` 读取时解引用；live Agent 仍由注册表强持有，所以运行期间的归属不变，只有已被注册表移除且无其他引用的 Agent 才会读成 `undefined`。Node 24 的每个原生句柄（socket、Timeout、FSEvent）都持有创建时的 AsyncContextFrame，此 ALS 是该 frame 到 Agent 的唯一强边；按句柄逐一改用中性上下文（如上面的 jobs 与 skill watcher）无法覆盖依赖内部创建的句柄。
+
+2026-10-03 只读检查运行约 24 小时的实例：149 个指向本机代理端口的 Undici CONNECT 隧道 socket 停在 CLOSE_WAIT 且从未销毁，其出现时段与长期留存 Agent 从 3 个升至 14 个相符；Undici 的进程级 `fastNowTimeout` 也会续用首个请求的上下文。隧道未关闭的根因尚未定位，本补丁只切断 Agent 留存，不回收 socket 本身。隔离 lifetime 压测加 `DSH_LIFETIME_LEAK_HANDLES=1`（每次模型调用开一个永不关闭的 timer，4 root × 2 轮、3 子 Agent）中，旧实现残留 24 个 Agent 与 24 个 Session，持有链为 Timeout → AsyncContextFrame → ReactLoopAgent；弱引用后为 0。回归为 `agent-initiator.spec.ts` 的 `lets an Agent be collected while a handle opened under it stays active`，旧实现失败。合并上游时保留 ALS 中的弱引用和注册表对 live Agent 的强持有；上游若改为在 ALS 中保存其他持有 Agent 的对象，也须保持弱引用。
+
 ### Client rendering and connection state
 
 #### Projection update work
 
 `ui-subagent` 的关闭目录触发器只订阅所属 root 的目录与直接子项运行状态；完整树的订阅、映射和展开状态由打开时才挂载的菜单持有。保留关闭态数量、名称、运行状态的即时更新，以及悬停、固定展开、键盘、焦点恢复、逐级加载和导航。合并上游时不能把完整 `projectionsBySession`、`byId` 和 status Map 的订阅重新放回关闭态组件；相关状态变化与无关状态不触发重渲染都有真实 store 回归。
 
-`SessionManager` 与 `ClientSessions` 复用未变的投影包装对象、目录行、成员数组和映射。旧序号、相同序号以及未改变任何数据的 baseline 不再触发全局目录刷新；首次出现的空 baseline 仍发布新成员。所有有效更新仍立即可读，微任务通知、连接代际、冷缓存优先级和引用生命周期保持原语义，没有丢弃 Host 控制帧或改成按帧延迟通知。后续增加可观察字段时，必须同时更新包装与等值比较。
+`SessionManager` 与 `ClientSessions` 复用未变的投影包装对象、目录行、成员数组和映射。旧序号、相同序号以及未改变任何数据的 baseline 不再触发全局目录刷新；首次出现的空 baseline 仍发布新成员。单个 Session 的键级投影仍在微任务内发布并立即可读；全局目录的投影刷新按[目录按帧合并](#catalog-frame-coalescing)发布。连接代际、冷缓存优先级和引用生命周期保持原语义，没有丢弃 Host 控制帧。后续增加可观察字段时，必须同时更新包装与等值比较。
 
 `session-projection-cache` 的实时写入接管注册表已经深拷贝的 checkpoint，只继续执行无损 JSON 校验；冷恢复的状态可能与返回视图共享引用，因此仍执行分离复制。检查点仍在日志 flush 前截取，并在日志持久化后才写入缓存；创建、轮次结束、销毁以及 count/interval 写入时机不变。合并时保留这两条所有权路径的区分，以及等待 flush 期间修改实时状态、冷读取返回后修改输入、非法 JSON、写入失败和退出清理回归。若上游取消注册表 checkpoint 的深拷贝保证，实时缓存路径必须同步恢复复制。
 
@@ -203,6 +227,12 @@ Session Controller 的 `listProjectionExcludeKeys` 默认 `[]`，保持上游和
 `sessionStats` 与 `contextPressure` 用弱状态键保留仅含标量的公开视图，私有计时/表面记账变化仍完整折叠；值不变时复用 raw view，避免无效全局帧。WeakMap value 不得反向持有 state、Session、Agent 或事件。未读取 cell 的首次已知值仍发布，随后仅私有变化才静默；registry 的双槽比较、日志水位及持久格式不变。`subagentTiming` 对同一记录时间的普通活跃事件复用状态，descriptor/turn 边界仍完整处理。
 
 control carrier 已开始恢复且仍等待 baseline 时，新的 Host generation ready 复用该 opening；若 baseline 已先到或旧流仍健康，则继续 restart，确保清水位后有新 baseline。保留 delayed initial ready、两种 baseline/ready 顺序、terminal failure 和 dispose 回归；旧代码在 pending-recovery 负对照中开三条流，候选仅开两条。
+
+#### Catalog frame coalescing
+
+`SessionManager.handleControlFrame()` 与每个投影存储的任意键回调通过 `Notifier.markFrameDirty()` 标记全局目录：同一动画帧内的实时控制帧只重建一次 manager 列表快照，也只运行一次 `ClientSessions.projectList()`。每条 WebSocket 消息都是独立任务，原微任务批处理在高并发下等于每收到一帧就遍历一次完整目录；150 个运行 Agent 的合成浏览器剖面中，`Notifier.publish` 约每秒 1,700 次，占主线程约 46%。
+
+键级投影面（包括决定输入框提交状态的 `inbox`）、`recordMutation()` 的结构性列表变化以及无 `requestAnimationFrame` 的环境仍按微任务发布；结构性变化会同时发布已累积的投影。后台标签页暂停动画帧时，目录中的投影显示延后到下一次结构性变化或回到前台。合并上游时保留按帧目录与微任务键级通道的区分，不得把 `inbox` 或输入框相关通道改为按帧。回归为 `sessions-service.client.spec.ts` 的 `publishes consecutive live control frames as one catalog rebuild per animation frame`：旧实现对 8 个连续控制帧发布 8 次，候选只发布 1 次。
 
 #### Tool detail lazy materialization
 
@@ -233,6 +263,8 @@ Gateway 每个 socket 只保留一枚待确认 Ping。未完成写入时，`buff
 `DSH_PERF_CAPTURE=1` 为合成 Web 续接场景保存同时段的 Node/浏览器 CPU profile、Chrome timeline 和源码映射（`tmp/runtime-profiles/`）。测量脚本预先定位控件并只检查尾部消息，避免全页可访问性查询污染剖面；普通无剖面基准与剖面归因结果分开。未来替换诊断时保留两侧录制、源码定位和对测试观察开销的检查，不能以单个 API 响应耗时代替卡顿归因。
 
 保留 `apps/web/stress-tests/subagent-reconnect.stress.ts` 的八个真实 continuable child + paced stream + WebSocket 重连组合断言：完整持久化输出、每个孩子恰好一次 start/end、最终释放、父会话标题及未发送草稿保留。该场景报告真实键盘输入与恢复耗时，但不以测试 Host RSS 宣称产品内存稳定；独立临时目录和随机端口不接触用户数据。长历史手动诊断 `apps/web/tests/complex-history.perf.ts` 使用当前 V4 system head、当前五行侧栏预览和 Trajectory 逻辑行数，工具轮次按 Windows `pwsh` / POSIX `bash` 调用并验证真实输出，禁止用旧界面文案或跳过工具错误代替负载。
+
+`apps/web/stress-tests/workload.ts` 是多 Agent 压测共享的合成模型，其工具比例按真实部署的只读聚合计数校准；`agent-lifetime.stress.ts` 检查已销毁 Agent/Session 能否回收，`multi-agent-typing.stress.ts` 在数十至上百个运行 Agent 下检查输入框丢字、插入位置和只读窗口，`session-switch.stress.ts` 测量空闲与数十个运行 Agent 下经侧栏切换到冷、热长 Session 的显示耗时和 Host 事件循环阻塞。lifetime 的卸载等待窗口覆盖 `jobs` 长任务，因为有运行中后台任务的 Agent 按设计不卸载；switch 按真实日志约每帧两个事件写入种子，并先让目标经历一次驱逐以生成投影检查点。三者都使用测试私有 DSH_HOME 和随机端口，以 `pnpm exec vitest run --config vitest.web-stress.config.ts <file>` 运行，`DSH_STRESS_*` 与 `DSH_LIFETIME_*` 旋钮以各文件头为准，其中 `DSH_LIFETIME_LEAK_HANDLES=1` 模拟比请求活得更久的传输句柄。lifetime 发现残留时在 `tmp/agent-lifetime/` 写出堆快照，并用 `fork-runtime/diagnostics/retainers.mjs` 输出最短强引用链；typing 的 `stall` 与 `reconnect` 模式在页面内包装 WebSocket，以模拟 Host 卡顿后的积压与断线，并让积压帧逐条作为独立任务派发。Playwright 的 WebSocket 路由与测试 Host 同进程，会拖慢 Host 并制造假超时，因此不得用它替代页面内注入。`launchWebScaffold()` 只在 replay 对比时记录 `session/created`，以免 scaffold 本身成为留存者。快照可能包含路径，留在本机，禁止提交。
 
 ### Subagent catalog ordering
 
@@ -437,7 +469,7 @@ Profile 注册 `dsh-sdk-process-raw` 和 `subagent_process`：SDK profile、独�
 
 | Finding | Measured scope | Maintenance decision |
 |---|---|---|
-| Node 内置与 profile 依赖中的两份 Undici 共享 timer 保留请求异步上下文 | 增长快照中合计约 83.63 MiB、两个已销毁 Agent | 暂缓依赖和 transport 补丁；上游替代须覆盖两份实现，并保持认证、订阅账户选择和 Agent 归属，不能清空整个 fetch 调用链的上下文 |
+| Node 内置与 profile 依赖中的两份 Undici 共享 timer 保留请求异步上下文 | 增长快照中合计约 83.63 MiB、两个已销毁 Agent | Agent 留存已由 [Agent initiator 弱引用](#agent-initiator-weak-reference)切断，timer 仍保留其 frame；暂缓依赖和 transport 补丁，上游替代须覆盖两份实现，并保持认证、订阅账户选择和 Agent 归属，不能清空整个 fetch 调用链的上下文 |
 | `DomainFacility.open()` 的 `onClosed` 共享闭包保留启动 `loadAll()` 快照 | 当时额外约 11.42 MiB；当前表与旧快照合计约 224.12 MiB，其中约 196.96 MiB 为共享 payload | 暂缓源码补丁；覆盖、删除记录后的 WeakRef/GC 复现已保留，不能将共享数据按双份计量 |
 
 全库投影缓存仍在启动时加载，活跃 Session 仍完整持有历史；按需缓存与历史读取尚未实现。本轮没有改动 Session 格式、迁移规则或模型可见内容。
@@ -458,13 +490,16 @@ Profile 注册 `dsh-sdk-process-raw` 和 `subagent_process`：SDK profile、独�
 | Session-owned fork prefix sharing | Preserve | Require trusted immutable identities, external-seed detachment and independent append arrays |
 | Cold Session large-artifact cache bypass | Preserve | Require physical-size limit, exact revision/lease ownership and live-transition invalidation |
 | SQLite suffix indexing/bounded page LRU | Preserve | Require canonical replacement detection and bounded detached cache |
+| Resume projection checkpoint seeding | Preserve | Hydrate a resumed prepared Session through the optional projection cache before the Agent reads projections; cover both resume and cold observation |
+| Cold-read event-loop slices | Preserve | Keep cold-read decode and stored-event adoption slices at 50 ms with the whole-log type check before per-event adoption, unless upstream bounds them equally or tighter |
 | Five-minute idle Agent eviction | Preserve | Require opening-only follower pin, child/inbox/job exclusions, flush + persistence proof and cold resume |
 | History follow opening release | Preserve | Require bounded opening output, full-observation release, promotion ownership and gap-free delivery across eviction |
 | Reference-owned Client Session generations | Replaced by official references | Keep final-release withdrawal and projection-store retention; do not restore `suspendHistory()` |
 | 20k final-message packed rebase | Replaced by cursorless Assistant frames | Keep official transient-stream settlement; do not restore scalar chunk accumulation |
 | Tool output/card lazy calculation | Ported onto RC.1 | Preserve generic output-on-expand and card-array laziness; official already defers input formatting |
 | Closed subagent catalog subscriptions | Preserve | Keep closed selectors root/direct-child-only and mount complete catalog work with the open menu; preserve visible summaries and all interactions |
-| Client projection snapshot identity | Preserve | Reuse unchanged observable values and suppress rejected-frame invalidation without delaying accepted values or changing generation/retention semantics |
+| Client projection snapshot identity | Preserve | Reuse unchanged observable values and suppress rejected-frame invalidation without delaying accepted key-face values or changing generation/retention semantics |
+| Catalog frame coalescing | Preserve | Publish manager catalog rebuilds for live control frames at most once per animation frame; keep key faces, `inbox`, structural mutations and the no-rAF fallback microtask-batched |
 | Live checkpoint ownership transfer | Preserve | Validate already-detached live rows without recopying; keep cold-row detachment and log-before-cache durability |
 | Production static-library environment | Preserve | Keep NODE_ENV branches until the final shell build; development freezes and production bypass both need built checks |
 | Workspace ordering work | Preserve | Keep indexed fork moves, shared current-session derivation, saved/pin/archive semantics and deep/cyclic parent cases |
@@ -477,6 +512,8 @@ Profile 注册 `dsh-sdk-process-raw` 和 `subagent_process`：SDK profile、独�
 | Scoped AgentTeams activity | Preserve | Keep paired targets, legacy full compatibility, complete task structure, staged detail revision/abort ownership and visibility recovery |
 | Jobs one-hour TTL / 100 terminal target | Ported onto RC.1 | Official ring caps do not bound terminal-record count or lifetime; preserve unread protection and lightweight heap indexes |
 | Jobs shared timer initiator isolation | Preserve | Create initial, renewed and deferred-prune timers without an Agent initiator; preserve owner cleanup, expiry behavior and scheduling during teardown |
+| Skill watcher initiator isolation | Preserve | Open chokidar root watchers and `watchFile` ancestor polls, including rewatches, without an Agent initiator; keep the `dsh-agent` peer |
+| Agent initiator weak reference | Preserve | Store only `WeakRef<Agent>` in the initiator ALS and keep the registry's strong hold on live Agents; any object stored in that ALS must not strongly reach an Agent |
 | Legacy `memory-admission` package | Retired | Use official `dsh-subagent.maxActiveSubagents` and `maxDepth` settings |
 | Generic parent/child messaging | Replaced by official `sendMessage()` | Never restore the old public `.steer()` API |
 | Queue edit/remove/steer | Replaced by official `session.updateQueue` | Do not restore `subagents.updateQueuedByParent` |
@@ -534,7 +571,7 @@ corepack pnpm@11.7.0 install --frozen-lockfile
 
 pnpm exec vitest run packages/session/session-persistence-jsonl/tests/jsonl.spec.ts packages/session/session-persistence-jsonl/tests/zstd.spec.ts packages/session-query/session-query/tests/search-helpers.spec.ts packages/session-query/session-query-sqlite/tests/sqlite.spec.ts
 
-pnpm exec vitest run packages/session/session-persistence-jsonl/tests/multi-edge-publication.spec.ts packages/session-query/session-query/tests/observation.spec.ts packages/session-query/session-query/tests/session-query.spec.ts
+pnpm exec vitest run packages/session/session-persistence-jsonl/tests/multi-edge-publication.spec.ts packages/session-query/session-query/tests/observation.spec.ts packages/session-query/session-query/tests/session-query.spec.ts packages/core/agent-loop/tests/resume.spec.ts packages/session/session-persistence-jsonl/tests/zstd.spec.ts packages/session/session-persistence/tests/storage-contract.spec.ts
 
 pnpm exec vitest run packages/api/session-controller/tests/agent-residency.host.spec.ts packages/api/session-controller/tests/session.client.spec.ts packages/api/session-controller/tests/sessions-service.client.spec.ts packages/client/ui-tool/tests/tool-row.client.spec.tsx packages/client/ui-settings-general/tests/connection-overlay.client.spec.tsx
 
@@ -542,7 +579,7 @@ pnpm exec vitest run packages/api/session-controller/tests/session-history-journ
 
 pnpm exec vitest run packages/jobs/jobs-local/tests/retention.spec.ts packages/jobs/jobs-local/tests/jobs.spec.ts packages/jobs/jobs-local/tests/loader-composition.spec.ts packages/jobs/tool-jobs/tests/tool-jobs.spec.ts packages/subagent/subagent/tests/continuation.spec.ts packages/subagent/subagent/tests/control.spec.ts packages/subagent/tool-subagent-control/tests/tool-subagent-control.spec.ts packages/experimental/agent-team/tests/team.spec.ts packages/shell/tool-pwsh/tests/tools.spec.ts
 
-pnpm exec vitest run scripts/fork-profile-setup.spec.ts
+pnpm exec vitest run scripts/fork-profile-setup.spec.ts packages/skill/skill-filesystem/tests/skill-filesystem-watcher.spec.ts packages/core/agent/tests/agent-initiator.spec.ts
 
 pnpm exec vitest run packages/api/session-controller/tests/queue-store.client.spec.ts packages/api/session-controller/tests/transport.client.spec.ts packages/client/ui-conversation/tests/queue-dock.client.spec.tsx
 
