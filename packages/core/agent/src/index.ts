@@ -246,7 +246,8 @@ interface FactorySlot {
 export class AgentRegistry extends Service {
   private store = new Map<SessionId, AgentEntry>()
   private factory: FactorySlot | undefined
-  private readonly initiators = new AsyncLocalStorage<Agent | undefined>()
+  /** Weak because every native handle (socket, timer, watcher) retains the async context that opened it. */
+  private readonly initiators = new AsyncLocalStorage<WeakRef<Agent> | undefined>()
   private readonly initiatorRuns = new AsyncLocalStorage<InitiatorRun>()
   private initiatorState: 'active' | 'closing' | 'disposed' = 'active'
   private activeInitiatorRuns = 0
@@ -290,13 +291,15 @@ export class AgentRegistry extends Service {
    * that also supports agentless calls. When a parent creates a child, setup
    * reports the causal parent while the setup callback's Agent parameter
    * identifies the child.
-   * @returns the inherited Agent, or `undefined` outside an initiator boundary
-   *   and inside an explicit clearing boundary.
+   * The boundary holds its Agent weakly, so a continuation that outlives every
+   * other reference to that Agent reads `undefined`.
+   * @returns the inherited Agent, or `undefined` outside an initiator boundary,
+   *   inside an explicit clearing boundary, and after the inherited Agent was collected.
    * @throws when this service instance has been disposed.
    */
   currentInitiator(): Agent | undefined {
     this.assertInitiatorsReadable()
-    return this.initiators.getStore()
+    return this.initiators.getStore()?.deref()
   }
 
   /**
@@ -631,7 +634,8 @@ export class AgentRegistry extends Service {
     this.activeInitiatorRuns += 1
     let result: T
     try {
-      result = this.initiatorRuns.run(run, () => this.initiators.run(agent, operation))
+      const initiator = agent === undefined ? undefined : new WeakRef(agent)
+      result = this.initiatorRuns.run(run, () => this.initiators.run(initiator, operation))
     } catch (error: unknown) {
       this.releaseInitiatorRun(run)
       throw error

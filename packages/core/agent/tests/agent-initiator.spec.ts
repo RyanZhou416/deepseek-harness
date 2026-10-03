@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
+import { setFlagsFromString } from 'node:v8'
 import { runInNewContext } from 'node:vm'
 import AgentRegistry from '@deepseek-ai/dsh-agent'
 import type { Agent } from '@deepseek-ai/dsh-agent'
@@ -32,6 +33,17 @@ async function promptly<T>(task: Promise<T>): Promise<T> {
   } finally {
     clearTimeout(timer)
   }
+}
+
+/** Collect garbage until `done` holds; finalization callbacks run between collections. */
+async function collectUntil(done: () => boolean): Promise<boolean> {
+  setFlagsFromString('--expose-gc')
+  const gc = runInNewContext('gc') as () => void
+  for (let attempt = 0; attempt < 20 && !done(); attempt++) {
+    gc()
+    await new Promise(resolve => setImmediate(resolve))
+  }
+  return done()
 }
 
 describe('AgentRegistry initiator scope', () => {
@@ -122,6 +134,29 @@ describe('AgentRegistry initiator scope', () => {
     release.resolve(true)
     await Promise.all(pending)
     await dispose()
+  })
+
+  it('lets an Agent be collected while a handle opened under it stays active', async () => {
+    const { service, dispose } = await harness()
+    let collected = false
+    const finalizer = new FinalizationRegistry(() => { collected = true })
+    let observed: 'agent' | 'none' | undefined
+    const timer = (() => {
+      const initiator = agent('handle-opener')
+      finalizer.register(initiator, undefined)
+      return service.withInitiator(initiator, () => setInterval(() => {
+        observed = service.currentInitiator() === undefined ? 'none' : 'agent'
+      }, 5))
+    })()
+    try {
+      expect(await collectUntil(() => collected)).toBe(true)
+      observed = undefined
+      await new Promise(resolve => setTimeout(resolve, 20))
+      expect(observed).toBe('none')
+    } finally {
+      clearInterval(timer)
+      await dispose()
+    }
   })
 
   it('restores nested and explicitly cleared boundaries', async () => {
