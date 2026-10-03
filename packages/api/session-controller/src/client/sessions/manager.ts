@@ -341,7 +341,7 @@ export class SessionManager {
         if (projections.values().sessionListMetadata?.blank === false) {
           this.sessions.get(sessionId)?.handleBlank(false)
         }
-        this.notifier.markDirty()
+        this.notifier.markFrameDirty()
       })
       this.projectionStores.set(sessionId, store)
     }
@@ -649,8 +649,9 @@ export class SessionManager {
       this.replaceControlBaseline(frame.value)
       return
     }
+    // Each live control frame is its own task, so microtask batching would rebuild the whole list once per frame received.
     if (this.projectionStore(frame.sessionId).apply(frame.key, frame.value, SessionSeq(frame.seq))) {
-      this.notifier.markDirty()
+      this.notifier.markFrameDirty()
     }
   }
 

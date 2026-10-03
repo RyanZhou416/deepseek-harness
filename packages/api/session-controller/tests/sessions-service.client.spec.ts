@@ -156,6 +156,33 @@ describe('list store projection', () => {
     }
   })
 
+  it('publishes consecutive live control frames as one catalog rebuild per animation frame', async ({ bench }) => {
+    const b = bench()
+    await feedList(b, [{ id: 's1' }, { id: 's2' }])
+    const frames: FrameRequestCallback[] = []
+    vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => frames.push(callback))
+    try {
+      const published = vi.fn()
+      const stop = b.svc.list.subscribe(published)
+      const before = b.svc.list.getSnapshot()
+      for (let seq = 1; seq <= 8; seq++) {
+        b.svc.handleControlFrame({ type: 'projection', sessionId: sid(seq % 2 === 0 ? 's1' : 's2'), key: 'title', seq, value: `title ${String(seq)}` })
+        await Promise.resolve()
+        await Promise.resolve()
+      }
+      expect(published).not.toHaveBeenCalled()
+      expect(b.svc.list.getSnapshot()).toBe(before)
+      expect(frames).toHaveLength(1)
+      frames[0]?.(0)
+      expect(published).toHaveBeenCalledTimes(1)
+      expect(b.svc.list.getSnapshot().byId[sid('s1')]?.title).toBe('title 8')
+      expect(b.svc.list.getSnapshot().byId[sid('s2')]?.title).toBe('title 7')
+      stop()
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+
   it('limits catalog invalidation to sessions with accepted control updates', async ({ bench }) => {
     const work = await measureProjectionUpdateWork(bench().svc)
     console.info('projection update work', JSON.stringify({ ...PROJECTION_WORKLOAD, ...work }))

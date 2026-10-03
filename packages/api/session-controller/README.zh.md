@@ -39,7 +39,7 @@ Client 列表行和驻留 Session 使用当前 `sessionListMetadata` 投影纠�
 
 显式 ID 的 `session.create` 会收养活动 Session，或恢复持久化 Session 并持续持有其写锁。写锁争用返回 `session/writer-held`；调用方可以尝试其他空白会话，同时保留其他失败。`session.list` 根据缓存元数据列出持久化空白会话，不打开冷日志正文。
 
-Client 列表刷新保留未变化的 manager 条目和 Client 目录行，并在顺序相同时复用成员数组。每个 `projectionsBySession` 条目在值、加载状态和错误均未变化时保持引用；仅元数据变化时也复用投影映射。未改变任何行的过期 control 帧和 baseline 不安排目录通知。已接受的投影值仍可同步读取，结构通知仍在微任务中批处理。每行的 `retainedBy` 包含正数的本地引用来源计数，Host 元数据刷新不能覆盖它们。缓存成员检查使用每次刷新构建的 ID 集合，因此对账成本随当前列表和保留缓存的规模线性增长。Host 摘要更新会替换运行状态与 Agent 可用性；本地 create/fork 响应只补充已有行缺失的元数据。普通 Session 被移除后，仅在目录仍有子项时保留其投影 store。
+Client 列表刷新保留未变化的 manager 条目和 Client 目录行，并在顺序相同时复用成员数组。每个 `projectionsBySession` 条目在值、加载状态和错误均未变化时保持引用；仅元数据变化时也复用投影映射。未改变任何行的过期 control 帧和 baseline 不安排目录通知。已接受的投影值仍可通过键级投影面同步读取，键级投影面与结构通知仍在微任务中批处理。由于每个收到的帧都是独立任务，实时 control 帧驱动的目录刷新每个动画帧最多发布一次；没有 `requestAnimationFrame` 时退回微任务。每行的 `retainedBy` 包含正数的本地引用来源计数，Host 元数据刷新不能覆盖它们。缓存成员检查使用每次刷新构建的 ID 集合，因此对账成本随当前列表和保留缓存的规模线性增长。Host 摘要更新会替换运行状态与 Agent 可用性；本地 create/fork 响应只补充已有行缺失的元数据。普通 Session 被移除后，仅在目录仍有子项时保留其投影 store。
 
 目录行派生复用每行当前的摘要、投影、空白状态和展示标题输入。只有 Host 成员、输入顺序或父节点关系变化时，才重新计算 lineage 顺序和深度。Client 基础行根据 manager entry 与本地引用计数复用，然后再应用子目录覆盖；撤销覆盖会恢复基础行。输入缓存不保留历史版本，基础行的弱键也不会保活已移除的 manager entry。不可变目录映射仍需线性构造索引。
 
