@@ -39,6 +39,13 @@ import type { UnitState } from './format.ts'
 const SAFE_KEY_RE = /^[a-zA-Z0-9_-]+$/
 
 /**
+ * Record documents one table load keeps open at once. Unbounded fan-out over a
+ * large table exhausts the process descriptor table (EMFILE near 8192 on
+ * Windows) and fails unrelated file opens elsewhere in the process.
+ */
+const RECORD_LOAD_CONCURRENCY = 64
+
+/**
  * Open one `per-record`-layout unit under `root`: the unit directory is
  * `<root>/<name>/`. Loads lazily on the first `loadAll` — this unit holds no
  * state, so opening touches nothing on the medium.
@@ -164,17 +171,37 @@ async function bootstrapLegacyUnit(descriptor: KvUnitDescriptor, dir: string, st
 async function loadTableRecords(records: Map<string, unknown>, versions: readonly number[], dir: string): Promise<boolean> {
   const files = await readdir(dir, { withFileTypes: true })
   const hasDocuments = files.some(file => file.name.endsWith('.json'))
-  const loaded = await Promise.all(files.map(async (file) => {
+  const loaded = await mapBounded(files, RECORD_LOAD_CONCURRENCY, async (file) => {
     if (!file.name.endsWith('.json')) return
     const key = file.name.slice(0, -'.json'.length)
     if (!SAFE_KEY_RE.test(key)) return
     const record = await readRecord(join(dir, file.name), versions)
     if (record !== undefined) return [key, record] as const
-  }))
+  })
   for (const record of loaded) {
     if (record !== undefined) records.set(...record)
   }
   return hasDocuments
+}
+
+/**
+ * Map `items` through `fn` with at most `limit` calls in flight.
+ * @param items - inputs, mapped in order.
+ * @param limit - maximum concurrent calls.
+ * @param fn - async mapper.
+ * @returns the results in input order.
+ */
+async function mapBounded<T, R>(items: readonly T[], limit: number, fn: (item: T) => Promise<R>): Promise<R[]> {
+  const results = new Array<R>(items.length)
+  let next = 0
+  const worker = async (): Promise<void> => {
+    while (next < items.length) {
+      const index = next++
+      results[index] = await fn(items[index] as T)
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker))
+  return results
 }
 
 /** Read one record document; a foreign (unreadable or stale) one reads as absent. */

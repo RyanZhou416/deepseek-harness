@@ -202,6 +202,10 @@ Count pruning 只删除模型已通过 `job_output` 读取的最旧 completed/ki
 
 运行 28.6 小时的真实实例（37 个 live Session、141 万事件、堆 9.2 GiB）退出前的存活分配采样中，`fs-local` `readWholeText` 解码的文本仍存活约 968 MiB，占堆 10.3%。回归为 `read-render.spec.ts` 的 `keeps returned lines without retaining the decoded file they came from`；旧实现在 20 份约 4 MB 文本各取 20 行后留存约 77 MiB 并失败。合并上游时保留窗口行与输入 chunk 的存储分离；复制方式须逐字保留孤立代理项，`Buffer` UTF-8 往返不等价。
 
+### Per-record storage load concurrency
+
+`packages/storage/storage-json/src/per-record-unit.ts` 的 `loadTableRecords` 以 `RECORD_LOAD_CONCURRENCY`（64）为上限读取记录文档。上游的并发加载对整张表无界 `Promise.all`；真实 `session_projcache` 约 1 万条记录时，Windows 进程在约 8192 个描述符处 EMFILE，同期启动的 `connection` 打开 `.credentials.yaml.lock` 失败，Web 启动中止。Windows 上 `wx` 创建在描述符分配失败前已落盘，会留下 0 字节孤儿锁；`withFileLock` 不回收孤儿锁，确认无 DSH 进程后由操作者删除。被 EMFILE 打断的记录按 per-record 契约读作缺失，只退化为从日志重折叠。回归为 `per-record-load-concurrency.spec.ts`；旧实现同时打开全部 300 个文档并失败。合并上游时保留有界读取，除非上游已以等价方式限制并发。
+
 ### Client rendering and connection state
 
 #### Projection update work
@@ -521,6 +525,7 @@ Profile 注册 `dsh-sdk-process-raw` 和 `subagent_process`：SDK profile、独�
 | Skill watcher initiator isolation | Preserve | Open chokidar root watchers and `watchFile` ancestor polls, including rewatches, without an Agent initiator; keep the `dsh-agent` peer |
 | Agent initiator weak reference | Preserve | Store only `WeakRef<Agent>` in the initiator ALS and keep the registry's strong hold on live Agents; any object stored in that ALS must not strongly reach an Agent |
 | Read window line detachment | Preserve | Kept `read` window lines must not share storage with the decoded file; use a lossless copy |
+| Per-record storage load concurrency | Preserve | Per-record table loads keep a bounded number of record files open; drop only if upstream bounds them equivalently |
 | Legacy `memory-admission` package | Retired | Use official `dsh-subagent.maxActiveSubagents` and `maxDepth` settings |
 | Generic parent/child messaging | Replaced by official `sendMessage()` | Never restore the old public `.steer()` API |
 | Queue edit/remove/steer | Replaced by official `session.updateQueue` | Do not restore `subagents.updateQueuedByParent` |
@@ -586,7 +591,7 @@ pnpm exec vitest run packages/api/session-controller/tests/session-history-journ
 
 pnpm exec vitest run packages/jobs/jobs-local/tests/retention.spec.ts packages/jobs/jobs-local/tests/jobs.spec.ts packages/jobs/jobs-local/tests/loader-composition.spec.ts packages/jobs/tool-jobs/tests/tool-jobs.spec.ts packages/subagent/subagent/tests/continuation.spec.ts packages/subagent/subagent/tests/control.spec.ts packages/subagent/tool-subagent-control/tests/tool-subagent-control.spec.ts packages/experimental/agent-team/tests/team.spec.ts packages/shell/tool-pwsh/tests/tools.spec.ts
 
-pnpm exec vitest run scripts/fork-profile-setup.spec.ts packages/skill/skill-filesystem/tests/skill-filesystem-watcher.spec.ts packages/core/agent/tests/agent-initiator.spec.ts packages/fs/tool-fs/tests/read-render.spec.ts
+pnpm exec vitest run scripts/fork-profile-setup.spec.ts packages/skill/skill-filesystem/tests/skill-filesystem-watcher.spec.ts packages/core/agent/tests/agent-initiator.spec.ts packages/fs/tool-fs/tests/read-render.spec.ts packages/storage/storage-json/tests/per-record-load-concurrency.spec.ts
 
 pnpm exec vitest run packages/api/session-controller/tests/queue-store.client.spec.ts packages/api/session-controller/tests/transport.client.spec.ts packages/client/ui-conversation/tests/queue-dock.client.spec.tsx
 
