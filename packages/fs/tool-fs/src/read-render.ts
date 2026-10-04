@@ -35,7 +35,7 @@ export interface FileTextLine {
 
 /** The windowed result {@link buildWindow} produces from a file's decoded text. */
 export interface WindowResult {
-  /** Returned lines, already numbered. */
+  /** Returned lines, already numbered; each text is an independent copy that retains no input chunk. */
   lines: FileTextLine[]
   /** Exact total line count in the file. */
   totalLines: number
@@ -85,7 +85,8 @@ function consumeLine(acc: WindowAccumulator, rawLine: string, request: ReadWindo
     return
   }
   acc.outputBytes += bytes
-  acc.lines.push({ number: acc.totalLines, text })
+  // V8 substrings share their parent's storage, so a kept line would pin the whole decoded file.
+  acc.lines.push({ number: acc.totalLines, text: structuredClone(text) })
 }
 
 function stripCarriageReturn(line: string): string {

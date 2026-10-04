@@ -5,9 +5,11 @@
  * of decoded text chunks (so one code path serves whole-file and streamed reads).
  */
 
+import { setFlagsFromString } from 'node:v8'
+import { runInNewContext } from 'node:vm'
 import { describe, expect, it } from 'vitest'
 import { buildWindow, langFromPath, readMetaFromMeta, READ_MAX_BYTES, READ_MAX_LINE_LENGTH } from '../src/read-render.ts'
-import type { ReadWindow } from '../src/read-render.ts'
+import type { FileTextLine, ReadWindow } from '../src/read-render.ts'
 
 const DEFAULT_CAPS = { maxLineLength: READ_MAX_LINE_LENGTH, maxBytes: READ_MAX_BYTES }
 const READ_ALL: ReadWindow = { offset: 1, limit: 2000, ...DEFAULT_CAPS }
@@ -114,6 +116,26 @@ describe('buildWindow', () => {
       const result = await buildWindow(chunked('one\ntwo\n', 3), READ_ALL, 'f')
       expect(result.lines.map(l => l.text)).toEqual(['one', 'two'])
     })
+  })
+
+  it('keeps returned lines without retaining the decoded file they came from', async () => {
+    setFlagsFromString('--expose-gc')
+    const gc = runInNewContext('gc') as () => void
+    const heapAfterGc = (): number => {
+      gc()
+      gc()
+      return process.memoryUsage().heapUsed
+    }
+    const fileLines = Array.from({ length: 16_000 }, (_, n) => `line ${n} ${'x'.repeat(240)}`)
+    const kept: FileTextLine[][] = []
+    const before = heapAfterGc()
+    for (let file = 0; file < 20; file++) {
+      const result = await buildWindow(whole(`${fileLines.join('\n')}\n${file}`), { offset: 1, limit: 20, ...DEFAULT_CAPS }, 'f')
+      kept.push(result.lines)
+    }
+    const retainedMiB = (heapAfterGc() - before) / 2 ** 20
+    expect(kept.flat()).toHaveLength(400)
+    expect(retainedMiB).toBeLessThan(16)
   })
 })
 

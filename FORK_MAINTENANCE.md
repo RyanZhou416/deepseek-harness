@@ -196,6 +196,12 @@ Count pruning 只删除模型已通过 `job_output` 读取的最旧 completed/ki
 
 2026-10-03 只读检查运行约 24 小时的实例：149 个指向本机代理端口的 Undici CONNECT 隧道 socket 停在 CLOSE_WAIT 且从未销毁，其出现时段与长期留存 Agent 从 3 个升至 14 个相符；Undici 的进程级 `fastNowTimeout` 也会续用首个请求的上下文。隧道未关闭的根因尚未定位，本补丁只切断 Agent 留存，不回收 socket 本身。隔离 lifetime 压测加 `DSH_LIFETIME_LEAK_HANDLES=1`（每次模型调用开一个永不关闭的 timer，4 root × 2 轮、3 子 Agent）中，旧实现残留 24 个 Agent 与 24 个 Session，持有链为 Timeout → AsyncContextFrame → ReactLoopAgent；弱引用后为 0。回归为 `agent-initiator.spec.ts` 的 `lets an Agent be collected while a handle opened under it stays active`，旧实现失败。合并上游时保留 ALS 中的弱引用和注册表对 live Agent 的强持有；上游若改为在 ALS 中保存其他持有 Agent 的对象，也须保持弱引用。
 
+#### Read window line detachment
+
+`packages/fs/tool-fs/src/read-render.ts` 的 `buildWindow` 用 `structuredClone` 复制每条保留的窗口行。V8 子串与父串共享存储，旧路径中 `read` 结果的 `meta.lines` 随 live Session 事件常驻，返回的少量行会钉住整份解码后的文件文本；`snapshotJsonValue` 不复制字符串，因此结果快照不会切断这条引用。模型可见文本、展示元数据和会话日志不变。
+
+运行 28.6 小时的真实实例（37 个 live Session、141 万事件、堆 9.2 GiB）退出前的存活分配采样中，`fs-local` `readWholeText` 解码的文本仍存活约 968 MiB，占堆 10.3%。回归为 `read-render.spec.ts` 的 `keeps returned lines without retaining the decoded file they came from`；旧实现在 20 份约 4 MB 文本各取 20 行后留存约 77 MiB 并失败。合并上游时保留窗口行与输入 chunk 的存储分离；复制方式须逐字保留孤立代理项，`Buffer` UTF-8 往返不等价。
+
 ### Client rendering and connection state
 
 #### Projection update work
@@ -514,6 +520,7 @@ Profile 注册 `dsh-sdk-process-raw` 和 `subagent_process`：SDK profile、独�
 | Jobs shared timer initiator isolation | Preserve | Create initial, renewed and deferred-prune timers without an Agent initiator; preserve owner cleanup, expiry behavior and scheduling during teardown |
 | Skill watcher initiator isolation | Preserve | Open chokidar root watchers and `watchFile` ancestor polls, including rewatches, without an Agent initiator; keep the `dsh-agent` peer |
 | Agent initiator weak reference | Preserve | Store only `WeakRef<Agent>` in the initiator ALS and keep the registry's strong hold on live Agents; any object stored in that ALS must not strongly reach an Agent |
+| Read window line detachment | Preserve | Kept `read` window lines must not share storage with the decoded file; use a lossless copy |
 | Legacy `memory-admission` package | Retired | Use official `dsh-subagent.maxActiveSubagents` and `maxDepth` settings |
 | Generic parent/child messaging | Replaced by official `sendMessage()` | Never restore the old public `.steer()` API |
 | Queue edit/remove/steer | Replaced by official `session.updateQueue` | Do not restore `subagents.updateQueuedByParent` |
@@ -579,7 +586,7 @@ pnpm exec vitest run packages/api/session-controller/tests/session-history-journ
 
 pnpm exec vitest run packages/jobs/jobs-local/tests/retention.spec.ts packages/jobs/jobs-local/tests/jobs.spec.ts packages/jobs/jobs-local/tests/loader-composition.spec.ts packages/jobs/tool-jobs/tests/tool-jobs.spec.ts packages/subagent/subagent/tests/continuation.spec.ts packages/subagent/subagent/tests/control.spec.ts packages/subagent/tool-subagent-control/tests/tool-subagent-control.spec.ts packages/experimental/agent-team/tests/team.spec.ts packages/shell/tool-pwsh/tests/tools.spec.ts
 
-pnpm exec vitest run scripts/fork-profile-setup.spec.ts packages/skill/skill-filesystem/tests/skill-filesystem-watcher.spec.ts packages/core/agent/tests/agent-initiator.spec.ts
+pnpm exec vitest run scripts/fork-profile-setup.spec.ts packages/skill/skill-filesystem/tests/skill-filesystem-watcher.spec.ts packages/core/agent/tests/agent-initiator.spec.ts packages/fs/tool-fs/tests/read-render.spec.ts
 
 pnpm exec vitest run packages/api/session-controller/tests/queue-store.client.spec.ts packages/api/session-controller/tests/transport.client.spec.ts packages/client/ui-conversation/tests/queue-dock.client.spec.tsx
 
