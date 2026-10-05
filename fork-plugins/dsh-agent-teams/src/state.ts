@@ -15,7 +15,7 @@
 
 import { createHash, randomUUID } from 'node:crypto'
 import { readFileSync } from 'node:fs'
-import { mkdir, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises'
+import { mkdir, open, readFile, readdir, rename, rm, stat } from 'node:fs/promises'
 import { join, sep } from 'node:path'
 import { TERMINAL_TASK_STATUSES, type TaskStatus, type TeamMember, type TeamMessage, type TeamProfileSnapshot, type TeamState, type TeamTask } from './types.ts'
 import { hasValidQualityTaskFields, isReviewPolicy, normalizeBlankOptionalTaskFields } from './quality-gates.ts'
@@ -403,6 +403,51 @@ export function readTeamSync(stateRoot: string, teamId: string): TeamState | und
 }
 
 /**
+ * Whether a team read failed on the contents of `team.json` (truncated,
+ * crash zero-filled, or schema-invalid) rather than on I/O.
+ * @param error - the error thrown by {@link readTeam} or {@link readTeamSync}.
+ * @returns true for JSON and team-shape failures.
+ */
+export function isUnreadableTeamState(error: unknown): boolean {
+  return error instanceof SyntaxError
+    || (error instanceof Error && error.message.startsWith('invalid AgentTeams state'))
+}
+
+const reportedUnreadableTeams = new Set<string>()
+
+/**
+ * Warn once per team directory and failure that a workspace-wide scan skipped
+ * an unreadable team. Scans skip such teams so one damaged team cannot fail
+ * team lookups for every other session in the workspace; reads that name the
+ * team directly still throw.
+ * @param stateRoot - resolved absolute state root directory.
+ * @param teamId - the skipped team's directory name.
+ * @param error - the content failure.
+ */
+export function reportUnreadableTeam(stateRoot: string, teamId: string, error: unknown): void {
+  // Crash zero-fill puts NULs into the JSON error text.
+  const reason = String(error).replace(/[\u0000-\u001f]/gu, '?')
+  const key = `${join(stateRoot, teamId)}\n${reason}`
+  if (reportedUnreadableTeams.has(key)) return
+  if (reportedUnreadableTeams.size >= 256) reportedUnreadableTeams.clear()
+  reportedUnreadableTeams.add(key)
+  process.emitWarning(`agent-teams: skipped unreadable team state "${teamId}" under "${stateRoot}": ${reason}`, {
+    code: 'DSH_AGENT_TEAMS_UNREADABLE_TEAM',
+  })
+}
+
+/** {@link readTeam} for workspace-wide scans: an unreadable team reads as absent after one warning. */
+async function readTeamForScan(stateRoot: string, teamId: string): Promise<TeamState | undefined> {
+  try {
+    return await readTeam(stateRoot, teamId)
+  } catch (error: unknown) {
+    if (!isUnreadableTeamState(error)) throw error
+    reportUnreadableTeam(stateRoot, teamId, error)
+    return undefined
+  }
+}
+
+/**
  * Persist one team record (inside the caller's lock).
  * @param stateRoot - resolved absolute state root directory.
  * @param state - the record to persist.
@@ -476,7 +521,7 @@ export async function findTeamByCaptain(
   let found: TeamState | undefined
   for (const entry of entries) {
     if (!entry.isDirectory()) continue
-    const team = await readTeam(stateRoot, entry.name)
+    const team = await readTeamForScan(stateRoot, entry.name)
     if (team?.captainSessionId === captainSessionId) {
       if (found !== undefined && found.id !== team.id) {
         throw new Error(`captain session leads multiple active teams ("${found.id}", "${team.id}"); archive one before continuing`)
@@ -511,7 +556,7 @@ export async function findTeamByParticipant(
   let found: TeamState | undefined
   for (const entry of entries) {
     if (!entry.isDirectory()) continue
-    const team = await readTeam(stateRoot, entry.name)
+    const team = await readTeamForScan(stateRoot, entry.name)
     const participates = team?.captainSessionId === agentSessionId
       || team?.members.some((member) => member.id === agentSessionId && member.status !== 'removed') === true
     if (participates && team !== undefined) {
@@ -853,16 +898,31 @@ export async function replaceFileAtomicOrDirect(
 async function atomicWriteText(file: string, content: string): Promise<void> {
   const temporary = `${file}.${process.pid}.${randomUUID()}.tmp`
   try {
-    await writeFile(temporary, content, { encoding: 'utf8', flag: 'wx' })
+    await writeDurableText(temporary, content, 'wx')
   } catch (error: unknown) {
     await rm(temporary, { force: true }).catch(() => undefined)
     throw error
   }
   await replaceFileAtomicOrDirect(temporary, file, content, {
     rename: (from, to) => rename(from, to),
-    writeFile: (target, payload) => writeFile(target, payload, 'utf8'),
+    writeFile: (target, payload) => writeDurableText(target, payload, 'w'),
     remove: (path) => rm(path, { force: true }),
   })
+}
+
+/**
+ * Write UTF-8 text and flush it to stable storage before returning. Without
+ * the flush, a power loss after the rename can leave the target at its new
+ * length with never-written (zero-filled) contents.
+ */
+async function writeDurableText(file: string, content: string, flag: 'w' | 'wx'): Promise<void> {
+  const handle = await open(file, flag)
+  try {
+    await handle.writeFile(content, 'utf8')
+    await handle.sync()
+  } finally {
+    await handle.close()
+  }
 }
 
 /** Whether a parsed JSON value is a plain record. */

@@ -278,10 +278,14 @@ test('stable tool presentation uses real scoped registry and prompt assembly', a
       assertCaptainProtocol(renderPrompt(await assemble(b)))
       assert.equal(await header(b), initialHeader)
     })
-    await t.test('read failure leaves the fixed header intact', async () => {
+    await t.test('an unrelated unreadable team neither fails lookups nor changes the fixed header', async () => {
       await mkdir(join(stateRoot, 'broken'))
       await writeFile(join(stateRoot, 'broken/team.json'), '{broken')
-      assert.equal((await execute(b, 'agent_teams_status')).isError, true)
+      await mkdir(join(stateRoot, 'zero-filled'))
+      await writeFile(join(stateRoot, 'zero-filled/team.json'), Buffer.alloc(4096))
+      const status = await execute(b, 'agent_teams_status')
+      assert.equal(status.isError, true)
+      assert.match(status.error.message, /do not lead or belong to any active team/)
       assert.deepEqual(await names(b), captainNames)
     })
   } finally {

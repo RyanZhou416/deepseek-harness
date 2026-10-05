@@ -3,7 +3,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { readdirSync } from 'node:fs'
 import { join } from 'node:path'
-import { readTeamSync, readRetiredMemberIdsSync } from './state.ts'
+import { isUnreadableTeamState, readTeamSync, readRetiredMemberIdsSync, reportUnreadableTeam } from './state.ts'
 import type { TeamState } from './types.ts'
 import { MEMBER_TOOL_NAMES, TEAM_TOOL_NAMES } from './tool-names.ts'
 
@@ -37,7 +37,14 @@ function currentTeam(agent: Agent, config: CapabilityConfig): TeamState | undefi
   let found: TeamState | undefined
   for (const entry of entries) {
     if (!entry.isDirectory() || entry.name === 'archive') continue
-    const team = readTeamSync(root, entry.name)
+    let team: TeamState | undefined
+    try {
+      team = readTeamSync(root, entry.name)
+    } catch (error) {
+      if (!isUnreadableTeamState(error)) throw error
+      reportUnreadableTeam(root, entry.name, error)
+      continue
+    }
     if (team === undefined || (team.captainSessionId !== agent.id
       && !team.members.some(member => member.id === agent.id))) continue
     if (found !== undefined) throw new Error('ambiguous AgentTeams membership')

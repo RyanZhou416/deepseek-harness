@@ -1126,6 +1126,22 @@ try {
   check('multiple teams for one member fail as ambiguous', duplicateMemberRejected)
   await removeTeamDir(stateRoot, duplicateMember.id)
 
+  const zeroFilledId = 'zero-filled'
+  await mkdir(join(stateRoot, zeroFilledId), { recursive: true })
+  await writeFile(join(stateRoot, zeroFilledId, 'team.json'), Buffer.alloc(4096))
+  check('captain lookup skips a crash zero-filled team.json',
+    (await findTeamByCaptain(stateRoot, 'sess-captain'))?.id === team.id)
+  check('participant lookup skips a crash zero-filled team.json',
+    (await findTeamByParticipant(stateRoot, 'sess-member'))?.id === team.id)
+  let zeroFilledDirectReadRejected = false
+  try {
+    await readTeam(stateRoot, zeroFilledId)
+  } catch {
+    zeroFilledDirectReadRejected = true
+  }
+  check('a direct read of a crash zero-filled team.json still fails', zeroFilledDirectReadRejected)
+  await removeTeamDir(stateRoot, zeroFilledId)
+
   const invalidId = 'invalid-shape'
   await mkdir(join(stateRoot, invalidId), { recursive: true })
   await writeFile(join(stateRoot, invalidId, 'team.json'), '{}', 'utf8')
