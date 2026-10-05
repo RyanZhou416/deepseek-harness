@@ -184,7 +184,7 @@ it('checks the effective catalog exclusions in composed config rather than unrel
 it('rejects drift in artifacts, profile pins, patches, and composed config', () => {
   const root = mkdtempSync(join(tmpdir(), 'dsh setup verify with spaces '))
   try {
-    const agentArtifact = join(root, 'nanmicoder-dsh-agent-teams-0.1.20-dsh017rc1.2.tgz')
+    const agentArtifact = join(root, 'nanmicoder-dsh-agent-teams-0.1.20-dsh017rc1.3.tgz')
     const contextArtifact = join(root, 'dsh-context-0.55.0-dsh017rc1.3.tgz')
     const subscriptionsArtifact = join(root, 'dsh-plugin-subscriptions-0.9.4-dsh017rc1.3.tgz')
     writeFileSync(agentArtifact, 'agent artifact')
@@ -204,7 +204,7 @@ it('rejects drift in artifacts, profile pins, patches, and composed config', () 
     mkdirSync(subscriptionsInstall, { recursive: true })
     writeFileSync(join(agentInstall, 'package.json'), JSON.stringify({
       name: '@nanmicoder/dsh-agent-teams',
-      version: '0.1.20-dsh017rc1.2',
+      version: '0.1.20-dsh017rc1.3',
     }))
     writeFileSync(join(contextInstall, 'package.json'), JSON.stringify({
       name: 'dsh-context',
@@ -246,8 +246,8 @@ it('rejects drift in artifacts, profile pins, patches, and composed config', () 
     expect(secondPin.stdout).toMatch(/^unchanged packageManager pnpm@11\.7\.0/u)
     expect(readFileSync(profileManifest, 'utf8')).toBe(pinned)
     writeFileSync(join(profile, 'pnpm-lock.yaml'), [
-      'nanmicoder-dsh-agent-teams-0.1.20-dsh017rc1.2.tgz',
-      '0.1.20-dsh017rc1.2',
+      'nanmicoder-dsh-agent-teams-0.1.20-dsh017rc1.3.tgz',
+      '0.1.20-dsh017rc1.3',
       'dsh-context-0.55.0-dsh017rc1.3.tgz',
       '0.55.0-dsh017rc1.3',
       'dsh-plugin-subscriptions-0.9.4-dsh017rc1.3.tgz',

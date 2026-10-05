@@ -19,11 +19,11 @@ The setup intentionally omits marketplace plugins, watchdogs, custom presets, an
 ## Agent Teams
 
 - Source: `fork-plugins/dsh-agent-teams`
-- Current private version: `0.1.20-dsh017rc1.1`
+- Current private version: `0.1.20-dsh017rc1.3`
 - Upstream base: `NanmiCoder/dsh-agent-teams v0.1.20`
 - Private host target: `dsh-v0.1.7-rc.1`
-- Distribution artifact: `fork-plugins/releases/nanmicoder-dsh-agent-teams-0.1.20-dsh017rc1.1.tgz`
-- Artifact SHA256: `17CDEA664A3EC8764CB8763FEC32A8CAE54F5F6429C89958DBE141A26253FF4B`
+- Distribution artifact: `fork-plugins/releases/nanmicoder-dsh-agent-teams-0.1.20-dsh017rc1.3.tgz`
+- Artifact SHA256: `8CCAA66D5E026DBED6363CA569B25BB8D4869E931BD92DC495458175C151980A`
 
 Upstream v0.1.20 updates documentation; its runtime retains v0.1.19 member-start recovery, repair-scope correction, atomic roster creation, next-step coordination, stale-attempt rejection, and task correction. The private RC.1 layer keeps awaited `agent/created` startup, uses projection refresh for cold member navigation and a typed `agent-teams-host` message source, and preserves Captain mailbox recovery plus the bounded unread-mailbox cache without changing the on-disk format.
 
@@ -34,7 +34,7 @@ Members include the current `attempt_id` in every task update. Omitting it produ
 After cloning this fork, setting their own `DSH_HOME`, and stopping any running DSH instance, a colleague can run this command from the repository root:
 
 ```powershell
-$artifact = (Resolve-Path .\fork-plugins\releases\nanmicoder-dsh-agent-teams-0.1.20-dsh017rc1.1.tgz).Path
+$artifact = (Resolve-Path .\fork-plugins\releases\nanmicoder-dsh-agent-teams-0.1.20-dsh017rc1.3.tgz).Path
 node --import tsx/esm apps/cli/src/bin.ts plugin --profile web add $artifact
 ```
 

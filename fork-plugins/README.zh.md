@@ -19,11 +19,11 @@
 ## Agent Teams
 
 - 源码：`fork-plugins/dsh-agent-teams`
-- 当前私有版本：`0.1.20-dsh017rc1.1`
+- 当前私有版本：`0.1.20-dsh017rc1.3`
 - 上游底座：`NanmiCoder/dsh-agent-teams v0.1.20`
 - 私有宿主目标：`dsh-v0.1.7-rc.1`
-- 安装产物：`fork-plugins/releases/nanmicoder-dsh-agent-teams-0.1.20-dsh017rc1.1.tgz`
-- 产物 SHA256：`17CDEA664A3EC8764CB8763FEC32A8CAE54F5F6429C89958DBE141A26253FF4B`
+- 安装产物：`fork-plugins/releases/nanmicoder-dsh-agent-teams-0.1.20-dsh017rc1.3.tgz`
+- 产物 SHA256：`8CCAA66D5E026DBED6363CA569B25BB8D4869E931BD92DC495458175C151980A`
 
 上游 v0.1.20 更新了文档，运行时代码沿用 v0.1.19 的成员启动恢复、repair scope 纠正、原子 roster 创建、next-step 协调、陈旧 attempt 拒绝与任务纠正。私有 RC.1 层保留 awaited `agent/created` 启动，使用 projection 刷新打开冷成员会话，并采用带类型的 `agent-teams-host` 消息来源；冷 Captain 邮箱恢复和有界未读邮箱缓存继续生效，磁盘格式不变。
 
@@ -34,7 +34,7 @@
 同事 clone 本 fork、设置好自己的 `DSH_HOME` 并关闭正在运行的 DSH 后，可在仓库根目录执行：
 
 ```powershell
-$artifact = (Resolve-Path .\fork-plugins\releases\nanmicoder-dsh-agent-teams-0.1.20-dsh017rc1.1.tgz).Path
+$artifact = (Resolve-Path .\fork-plugins\releases\nanmicoder-dsh-agent-teams-0.1.20-dsh017rc1.3.tgz).Path
 node --import tsx/esm apps/cli/src/bin.ts plugin --profile web add $artifact
 ```
 
