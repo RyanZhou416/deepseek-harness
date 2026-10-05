@@ -268,7 +268,7 @@ export function proxyEnvironmentForChild(): Readonly<Record<string, string | und
     const resolved = policy[field as keyof typeof POLICY_ENV_NAMES]
     // Naming a scheme in either casing claims that scheme: the child then gets exactly what the
     // user wrote, in the casing they wrote it, rather than a value derived for this process.
-    const named = field !== 'noProxy' && names.some(name => inherited[name] !== undefined)
+    const named = field !== 'noProxy' && field !== 'claudeProxy' && names.some(name => inherited[name] !== undefined)
     for (const name of names) overlay[name] = named ? inherited[name] : resolved
   }
   const parsedByNode = [...POLICY_ENV_NAMES.httpProxy, ...POLICY_ENV_NAMES.httpsProxy]

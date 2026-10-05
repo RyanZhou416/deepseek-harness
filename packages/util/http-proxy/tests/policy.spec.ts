@@ -14,6 +14,42 @@ const FOLDS_ENV_CASE = process.platform === 'win32'
 const PROXY = 'http://127.0.0.1:7897'
 const OTHER = 'http://127.0.0.1:8080'
 
+describe('mandatory Claude proxy', () => {
+  const suffixes = ['anthropic.com', 'claude.ai', 'claude.com', 'claudeusercontent.com', 'clau.de',
+    'growthbook.io', 'datadoghq.com', 'claudemcpclient.com', 'claudemcpcontent.com']
+  it.each(suffixes)('keeps %s and its subdomains proxied despite a global bypass', (suffix) => {
+    const { policy } = resolveProxyPolicy(env({ DSH_CLAUDE_PROXY_URL: PROXY, HTTPS_PROXY: OTHER, NO_PROXY: '*' }))
+    for (const host of [suffix, `api.${suffix}`, `API.${suffix.toUpperCase()}.`]) {
+      expect(proxyForUrl(policy, new URL(`https://${host}/`))).toBe(PROXY)
+      expect(proxyForUrl(policy, new URL(`http://${host}:8080/`))).toBe(PROXY)
+    }
+    expect(proxyForUrl(policy, new URL(`https://not${suffix}/`))).toBeUndefined()
+    expect(proxyForUrl(policy, new URL(`https://${suffix}.example/`))).toBeUndefined()
+  })
+
+  it.each(['servd-anthropic-website.b-cdn.net', 'cdn.usefathom.com'])('matches only the exact CDN host %s', (host) => {
+    const { policy } = resolveProxyPolicy(env({ DSH_CLAUDE_PROXY_URL: PROXY }))
+    expect(proxyForUrl(policy, new URL(`https://${host}./`))).toBe(PROXY)
+    expect(proxyForUrl(policy, new URL(`https://other.${host}/`))).toBeUndefined()
+  })
+
+  it('installs a protected route without changing other destinations or loopback', () => {
+    const { policy } = resolveProxyPolicy(env({ DSH_CLAUDE_PROXY_URL: PROXY }))
+    expect(policy.source).toBe('env')
+    expect(proxyForUrl(policy, new URL('https://example.com/'))).toBeUndefined()
+    expect(proxyForUrl(policy, new URL('http://127.0.0.1:7897/'))).toBeUndefined()
+    expect(proxyForUrl(policy, new URL('ws://api.anthropic.com/'))).toBeUndefined()
+  })
+
+  it.each(['not-a-url', 'socks5://user:secret@localhost:1080', 'ftp://localhost',
+    'http://localhost/proxy', 'http://localhost/?query', 'http://localhost/#fragment', 'https://api.anthropic.com'])
+  ('rejects unusable protected proxy configuration without a direct fallback: %s', (value) => {
+    expect(() => resolveProxyPolicy(env({ DSH_CLAUDE_PROXY_URL: value }))).toThrow(/DSH_CLAUDE_PROXY_URL.*direct fallback is disabled/i)
+    try { resolveProxyPolicy(env({ DSH_CLAUDE_PROXY_URL: value })) }
+    catch (error) { expect(String(error)).not.toContain('user:secret') }
+  })
+})
+
 /**
  * The environment resolution reads. Windows folds names case-insensitively, and the launcher's own
  * snapshot does the same, so this stand-in folds too — otherwise a case-distinction case would

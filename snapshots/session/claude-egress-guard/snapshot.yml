@@ -1,0 +1,10 @@
+version: 1
+scenario: claude-egress-guard
+profile: headless
+composition: claude-egress-guard
+recording: authored
+header:
+  class: claude-egress-guard
+  pin: true
+replay:
+  override: true

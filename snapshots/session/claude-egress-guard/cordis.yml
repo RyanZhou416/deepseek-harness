@@ -1,0 +1,3 @@
+- insert:
+    - id: claude-egress-probe
+      name: ../../../packages/util/http-proxy/tests/fixtures/claude-egress-probe.mjs

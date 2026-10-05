@@ -33,13 +33,14 @@ export interface EnvLookup {
 export const LOOPBACK_NO_PROXY: readonly string[] = ['localhost', '127.0.0.1', '::1', '[::1]']
 
 /**
- * The environment names each policy field owns, lowercase first — undici reads the lowercase name
- * first, so both casings are always written or cleared together.
+ * The environment names each policy field owns, lowercase first. Both casings
+ * are always written or cleared together.
  */
 export const POLICY_ENV_NAMES = {
   httpProxy: ['http_proxy', 'HTTP_PROXY'],
   httpsProxy: ['https_proxy', 'HTTPS_PROXY'],
   noProxy: ['no_proxy', 'NO_PROXY'],
+  claudeProxy: ['dsh_claude_proxy_url', 'DSH_CLAUDE_PROXY_URL'],
 } as const
 
 /**
@@ -59,19 +60,34 @@ const SUPPORTED_PROTOCOLS = new Set(['http:', 'https:'])
 /** Schemes recognised well enough to name in a diagnostic instead of calling them malformed. */
 const SOCKS_PROTOCOLS = new Set(['socks:', 'socks4:', 'socks4a:', 'socks5:', 'socks5h:'])
 
+/** Claude destinations covered by the opt-in mandatory proxy route. */
+const CLAUDE_SUFFIXES = [
+  'anthropic.com', 'claude.ai', 'claude.com', 'claudeusercontent.com', 'clau.de',
+  'growthbook.io', 'datadoghq.com', 'claudemcpclient.com', 'claudemcpcontent.com',
+]
+const CLAUDE_EXACT_HOSTS = new Set(['servd-anthropic-website.b-cdn.net', 'cdn.usefathom.com'])
+
+/** Match DNS labels, including a terminal root dot, without admitting lookalike suffixes. */
+function isClaudeDestination(hostname: string): boolean {
+  const host = hostname.toLowerCase().replace(/\.+$/u, '')
+  return CLAUDE_EXACT_HOSTS.has(host) || CLAUDE_SUFFIXES.some(suffix => host === suffix || host.endsWith(`.${suffix}`))
+}
+
 /**
  * One resolved outbound proxy policy. Plain data with no methods: worker threads receive it through
  * `workerData`'s structured clone, so both sides run the identical policy rather than each re-reading
  * an environment they may not share.
  */
 export interface ProxyPolicy {
+  /** Required proxy for protected Claude domains; bypass entries never disable this route. */
+  readonly claudeProxy?: string
   /** Proxy for `http:` origins, or absent for a direct connection. Always a validated `http(s):` URL. */
   readonly httpProxy?: string
   /** Proxy for `https:` origins, or absent for a direct connection. Always a validated `http(s):` URL. */
   readonly httpsProxy?: string
   /** The bypass list, already merged with {@link LOOPBACK_NO_PROXY}. Empty when nothing is bypassed. */
   readonly noProxy: string
-  /** Which layer supplied the winning proxy URL; `env` when either field came from the environment. */
+  /** Which layer supplied the winning proxy URLs; `env` when any proxy came from the environment. */
   readonly source: 'env' | 'none'
 }
 
@@ -302,9 +318,18 @@ export function bypassesProxy(noProxy: string, url: URL): boolean {
  *
  * @param env - the launch environment, whose own layering already prefers real variables over `.env` files.
  * @returns the policy to install plus every rejected candidate.
+ * @throws when the protected Claude proxy is invalid; this route never defaults to direct traffic.
  */
 export function resolveProxyPolicy(env: EnvLookup): ProxyResolution {
   const diagnostics: ProxyDiagnostic[] = []
+  const claude = readEnv(env, 'dsh_claude_proxy_url')
+  if (claude !== undefined) {
+    const url = URL.parse(claude.value)
+    if (url === null || !SUPPORTED_PROTOCOLS.has(url.protocol) || url.pathname !== '/' || url.search || url.hash
+      || isClaudeDestination(url.hostname)) {
+      throw new Error(`${claude.name} must name an HTTP(S) proxy outside the protected Claude domains; direct fallback is disabled`)
+    }
+  }
   const all = acceptProxyUrl(readEnv(env, 'all_proxy'), diagnostics)
   const allValue = all.kind === 'accepted' ? all.value : undefined
   const envHttp = acceptProxyUrl(readEnv(env, 'http_proxy'), diagnostics)
@@ -313,11 +338,12 @@ export function resolveProxyPolicy(env: EnvLookup): ProxyResolution {
   // HTTPS falls back to the HTTP proxy last, matching undici — but never past a value the user named
   // for HTTPS and this package refused.
   const httpsProxy = resolveScheme(envHttps, allValue, httpProxy)
-  if (httpProxy === undefined && httpsProxy === undefined) return { policy: DIRECT_POLICY, diagnostics }
+  if (httpProxy === undefined && httpsProxy === undefined && claude === undefined) return { policy: DIRECT_POLICY, diagnostics }
   return {
     policy: {
       ...httpProxy === undefined ? {} : { httpProxy },
       ...httpsProxy === undefined ? {} : { httpsProxy },
+      ...claude === undefined ? {} : { claudeProxy: claude.value },
       noProxy: withLoopback(readEnv(env, 'no_proxy')?.value),
       source: 'env',
     },
@@ -336,7 +362,9 @@ export function resolveProxyPolicy(env: EnvLookup): ProxyResolution {
  * @returns the proxy URL to tunnel through, or `undefined` for a direct connection.
  */
 export function proxyForUrl(policy: ProxyPolicy, url: URL): string | undefined {
-  const proxy = url.protocol === 'https:' ? policy.httpsProxy : url.protocol === 'http:' ? policy.httpProxy : undefined
+  if (url.protocol !== 'https:' && url.protocol !== 'http:') return undefined
+  if (policy.claudeProxy !== undefined && isClaudeDestination(url.hostname)) return policy.claudeProxy
+  const proxy = url.protocol === 'https:' ? policy.httpsProxy : policy.httpProxy
   if (proxy === undefined) return undefined
   if (isLoopbackHost(url.hostname)) return undefined
   return bypassesProxy(policy.noProxy, url) ? undefined : proxy

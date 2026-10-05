@@ -25,7 +25,7 @@ kind: "package-reference"
 <a id="use-this-package"></a>
 ## 使用本包
 
-无需挂载，也无需配置。`dsh` 启动器会在第一个插件加载之前，为每个 profile 解析并安装策略，因此导出了 `HTTPS_PROXY` 的用户在所有位置都会走代理。本包是库而非插件，因为传输策略每个进程只有一个答案：没有第二个实现可替换，也没有比进程更窄的作用域可赋予。
+无需挂载插件。`dsh` 启动器会在第一个插件加载之前，为每个 profile 解析并安装环境变量配置的策略，使用共享传输的请求会遵循该策略。本包是库而非插件，因为传输策略每个进程只有一个答案：没有第二个实现可替换，也没有比进程更窄的作用域可赋予。
 
 ### 编写新的出站调用
 
@@ -50,6 +50,15 @@ kind: "package-reference"
 `http_proxy`、`https_proxy`、`no_proxy` 与 `all_proxy`，小写优先、大写兜底，空值视为未设置。`ALL_PROXY` 为两种协议兜底，HTTPS 最后回退到 HTTP 代理——其中第一条 Node 与 undici 都不会自行推导。取值来自启动器的快照：先看导出的环境变量，再看 `$DSH_HOME/.env`。项目自己的 `.env` 不能携带这些名字——那个文件随 clone 一起到来，启动器宁可拒绝启动，也不让一个仓库决定 Harness 把流量发往何处。
 
 loopback 始终被绕过——`localhost`、整个 `127.0.0.0/8` 段、`::1`、`0.0.0.0`，以及它们的 IPv4 映射写法。否则 Harness 自己的 Web UI、Connection 传输以及每一个本地测试服务器都会经由代理并形成回环。发布出去的绕过列表只包含读取环境的消费者能匹配的四个字面量条目；`proxyForUrl` 自行识别整个网段，因为列表条目无法表达一个范围。
+
+<a id="protected-claude-destinations"></a>
+### Claude 目标域名保护
+
+在启动环境或 `$DSH_HOME/.env` 中设置 `DSH_CLAUDE_PROXY_URL=http://127.0.0.1:7897`，即可要求 Claude 流量经过专用 HTTP(S) 代理。请将地址替换为代理实际监听地址，也支持小写变量名。未设置时不启用此保护；URL 无效、协议不支持、包含代理路径或查询参数，或代理本身位于受保护域名时，会拒绝启动。项目 `.env` 不能设置此变量。
+
+受保护的域名后缀包括 `anthropic.com`、`claude.ai`、`claude.com`、`claudeusercontent.com`、`clau.de`、`growthbook.io`、`datadoghq.com`、`claudemcpclient.com` 和 `claudemcpcontent.com`，覆盖主域名及其子域名。`servd-anthropic-website.b-cdn.net` 和 `cdn.usefathom.com` 仅精确匹配。匹配忽略大小写和末尾 DNS 根点。`NO_PROXY` 即使设为 `*` 也不能绕过此路由；重定向到这些目标时同样使用它。代理拒绝或传输失败会使请求失败，不回退直连。其他目标保留普通路由，DSH 子进程会收到专用设置。
+
+该保护控制使用已安装 dispatcher 或 `proxyRouteFor` 的请求，不检查 TUN 路由、不验证最终公网 IP、不控制外部浏览器，也不约束模型编写的任意子进程。提供自有 dispatcher 的调用方须执行自己的代理策略；订阅插件的显式代理会使用其配置的代理，不回退直连。Clash 须将受保护域名发往代理节点，且不能回退 `DIRECT`：将连接交给 Clash 并不能证明 Clash 随后如何转发。此保护不会运行直连或公网 IP 探针。
 
 ### 失败处理
 

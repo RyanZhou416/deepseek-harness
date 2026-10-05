@@ -25,7 +25,7 @@ Use this package to apply one outbound HTTP proxy policy to Harness requests tha
 <a id="use-this-package"></a>
 ## Use this package
 
-Nothing to mount, and nothing to configure. The `dsh` launcher resolves and installs the policy for every profile before the first plugin loads, so a user who exports `HTTPS_PROXY` is proxied everywhere. This is a library rather than a plugin because transport policy has one answer per process: there is no second implementation to swap and no scope narrower than the process to give one.
+No plugin needs to be mounted. The `dsh` launcher resolves and installs the environment-configured policy for every profile before the first plugin loads, so requests using the shared transport follow it. This is a library rather than a plugin because transport policy has one answer per process: there is no second implementation to swap and no scope narrower than the process to give one.
 
 ### Writing a new outbound call
 
@@ -50,6 +50,15 @@ That gate cannot see inside an SDK, so each outbound call site carries an `egres
 `http_proxy`, `https_proxy`, `no_proxy`, and `all_proxy`, lowercase first and uppercase as the fallback, with a blank value treated as unset. `ALL_PROXY` backs both schemes, and HTTPS falls back to the HTTP proxy last — neither Node nor undici derives the first of these on its own. Values come from the launcher's snapshot: an exported variable first, then `$DSH_HOME/.env`. A project's own `.env` cannot carry these names — that file arrives with a clone, and the launcher refuses to start rather than let a repository choose where the harness sends its traffic.
 
 Loopback is always bypassed — `localhost`, the whole `127.0.0.0/8` range, `::1`, `0.0.0.0`, and the IPv4-mapped spellings of those. The harness's own Web UI, Connection transport, and every local test server would otherwise route through the proxy and loop. The published bypass list names only the four literal entries an environment reader can match; `proxyForUrl` recognises the range itself, because a list entry cannot express one.
+
+<a id="protected-claude-destinations"></a>
+### Protected Claude destinations
+
+Set `DSH_CLAUDE_PROXY_URL=http://127.0.0.1:7897` in the launch environment or `$DSH_HOME/.env` to require a dedicated HTTP(S) proxy for Claude traffic. Replace the address with your proxy's actual listening address. The lowercase spelling is also accepted. An unset value leaves this protection disabled; an invalid URL, unsupported protocol, proxy path/query, or proxy hosted on a protected domain rejects startup. A project `.env` cannot set it.
+
+The protected suffixes are `anthropic.com`, `claude.ai`, `claude.com`, `claudeusercontent.com`, `clau.de`, `growthbook.io`, `datadoghq.com`, `claudemcpclient.com`, and `claudemcpcontent.com`. Their apex names and subdomains are covered. `servd-anthropic-website.b-cdn.net` and `cdn.usefathom.com` are exact-host matches. Matching ignores case and terminal DNS root dots. `NO_PROXY`, even `*`, cannot bypass this route; redirects into these destinations use it as well. Proxy refusal or transport failure fails the request without a direct fallback. Other destinations retain their ordinary routing, and DSH children receive the dedicated setting.
+
+This protection controls requests using the installed dispatcher or `proxyRouteFor`. It does not inspect TUN routes, verify the final public IP, control an external browser, or constrain arbitrary model-authored subprocesses. A caller supplying its own dispatcher must enforce its own proxy policy; the subscription plugin's explicit proxy uses its configured proxy without a direct fallback. Configure Clash to send the protected destinations through a proxy node, with no `DIRECT` fallback: handing a connection to Clash alone does not establish how Clash forwards it. No direct-connect or public-IP probe runs as part of this protection.
 
 ### Failures
 

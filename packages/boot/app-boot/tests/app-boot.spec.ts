@@ -159,7 +159,7 @@ describe('loadLayeredEnv', () => {
     }
   })
 
-  const PROXY = ['HTTP_PROXY', 'http_proxy', 'HTTPS_PROXY', 'https_proxy', 'NO_PROXY', 'no_proxy'] as const
+  const PROXY = ['HTTP_PROXY', 'http_proxy', 'HTTPS_PROXY', 'https_proxy', 'NO_PROXY', 'no_proxy', 'DSH_CLAUDE_PROXY_URL', 'dsh_claude_proxy_url'] as const
   function clearProxy(): void {
     for (const name of PROXY) Reflect.deleteProperty(process.env, name)
   }
@@ -171,7 +171,7 @@ describe('loadLayeredEnv', () => {
     // spelling gets its own name here: Windows folds `https_proxy` and `HTTPS_PROXY` into one
     // variable, so which spelling a value lands under is the platform's to decide — that the file
     // supplies it, and that the launching shell outranks the file, is not.
-    writeFileSync(join(home, '.env'), 'HTTP_PROXY=http://from-home:8080\nno_proxy=example.com\nHTTPS_PROXY=http://from-home:8443\n')
+    writeFileSync(join(home, '.env'), 'HTTP_PROXY=http://from-home:8080\nno_proxy=example.com\nHTTPS_PROXY=http://from-home:8443\nDSH_CLAUDE_PROXY_URL=http://from-home:7897\n')
     clear(); clearProxy()
     vi.stubEnv('DSH_HOME', home)
     vi.stubEnv('HTTPS_PROXY', 'http://exported:8080')
@@ -183,6 +183,7 @@ describe('loadLayeredEnv', () => {
       expect(snapshot.get('HTTPS_PROXY')).toEqual({ value: 'http://exported:8080', source: 'process' })
       expect(process.env.HTTP_PROXY).toBe('http://from-home:8080')
       expect(process.env.HTTPS_PROXY).toBe('http://exported:8080')
+      expect(snapshot.get('DSH_CLAUDE_PROXY_URL')?.value).toBe('http://from-home:7897')
     } finally {
       clear(); clearProxy()
       vi.unstubAllEnvs()
@@ -205,16 +206,16 @@ describe('loadLayeredEnv', () => {
     }
   })
 
-  it('names the Harness-home file as the way out when a project .env sets a proxy', () => {
+  it.each(['HTTP_PROXY', 'DSH_CLAUDE_PROXY_URL', 'dsh_claude_proxy_url'])('refuses project-owned proxy routing through %s', (name) => {
     const home = tmp()
     const project = tmp()
-    writeFileSync(join(project, '.env'), 'HTTP_PROXY=http://attacker.example\n')
+    writeFileSync(join(project, '.env'), `${name}=http://attacker.example\n`)
     clear(); clearProxy()
     vi.stubEnv('DSH_HOME', home)
     try {
       expect(() => loadLayeredEnv(NAME, project, vi.fn()))
-        .toThrow(`export HTTP_PROXY, or put it in ${join(home, '.env')}, which does not travel with a repository`)
-      expect(process.env.HTTP_PROXY).toBeUndefined()
+        .toThrow(`export ${name}, or put it in ${join(home, '.env')}, which does not travel with a repository`)
+      expect(process.env[name]).toBeUndefined()
     } finally {
       clear(); clearProxy()
       vi.unstubAllEnvs()
