@@ -18,65 +18,58 @@ import type {
   TokenUsage,
   ToolSchema,
 } from '@deepseek-ai/dsh-llm'
+import type {
+  JsonValue,
+  MessageContent,
+  TextBlock,
+  ToolDefinition as ClaudeToolDefinition,
+  ToolResultBlock,
+} from '@tormentalabs/claude-code-wire-compat'
+
+/**
+ * Block types the public package surface derives but does not name directly.
+ * Each alias extracts from an exported union so the shapes cannot drift.
+ */
+type WireBlock = Exclude<MessageContent, string>[number]
+type WireImageBlock = Extract<WireBlock, { type: 'image' }>
+type WireResultBlock = Extract<NonNullable<ToolResultBlock['content']>, readonly unknown[]>[number]
+type WireSchemaTool = Extract<ClaudeToolDefinition, { input_schema: unknown }>
+type WireBase64MediaType = Extract<WireImageBlock['source'], { type: 'base64' }>['media_type']
 import { parseSse } from './sse.js'
 import type { ResolvedToolResultBlock, TranslatableMessage } from './resolved.js'
 
 /**
- * The Claude Code identity block. The subscription endpoint rejects requests
- * that do not present as Claude Code, so this block is REQUIRED as the first
- * system entry on every request.
+ * Tags wrapping a mid-conversation system message where it sits in the history.
  */
-export const CLAUDE_CODE_IDENTITY = 'You are Claude Code, Anthropic\'s official CLI for Claude.'
-
-/** Tags wrapping a mid-conversation system message where it sits in the history. */
 export const SYSTEM_REMINDER_OPEN = '<system-reminder>'
 export const SYSTEM_REMINDER_CLOSE = '</system-reminder>'
 
 /**
- * Positions between message breakpoints.
- *
- * A breakpoint looks back at most 20 positions, counting itself as the first,
- * so a write more than 19 positions earlier is invisible. Consecutive
- * `tool_use` blocks count as one position, and so do consecutive
- * `tool_result` blocks. Stepping the full 19 keeps a later turn's lookback
- * on this write for as long as three breakpoints allow.
+ * One Anthropic request message. The Claude Code identity and billing blocks
+ * are emitted by the wire builder, never here.
  */
-export const CACHE_POSITION_STRIDE = 19
-
-/**
- * Message breakpoints per request. Anthropic allows four in total and the
- * last `system` block takes the fourth, so three are left for the history.
- */
-export const MESSAGE_CACHE_BREAKPOINTS = 3
-
-/** One Anthropic request message. */
 export interface AnthropicMessage {
-  role: 'user' | 'assistant' | 'system'
-  content: Record<string, unknown>[]
+  role: 'user' | 'assistant'
+  content: WireBlock[]
 }
 
 /**
  * Image source. Under the vision limit this is base64; a Files API upload
  * uses the documented `{ type: "file", file_id }` source.
  */
-export function anthropicImageSource(part: { mediaType: string; dataBase64: string; fileId?: string }): Record<string, unknown> {
+export function anthropicImageSource(part: { mediaType: string; dataBase64: string; fileId?: string }): WireImageBlock['source'] {
   if (part.fileId !== undefined && part.fileId.length > 0) return { type: 'file', file_id: part.fileId }
-  return { type: 'base64', media_type: part.mediaType, data: part.dataBase64 }
-}
-
-/** Prompt-caching guide: Fable 5/5.1, Mythos 5/5.1, Opus 4.8, and Opus 5. Not Sonnet 5 or Opus 5.5. */
-function midConversationSystem(model: string | undefined): boolean {
-  if (model === undefined) return false
-  if (model.startsWith('claude-fable-5') || model.startsWith('claude-mythos-5') || model.startsWith('claude-opus-4-8')) return true
-  return model === 'claude-opus-5' || (model.startsWith('claude-opus-5-') && !model.startsWith('claude-opus-5-5'))
+  // The attachment service verifies the MIME type; the wire validator narrows
+  // it to the four image media types the API accepts.
+  return { type: 'base64', media_type: part.mediaType as WireBase64MediaType, data: part.dataBase64 }
 }
 
 /** Preserve native image blocks, retaining the existing text-only wire shape. */
-function toolResultContent(block: ResolvedToolResultBlock): string | Record<string, unknown>[] {
+function toolResultContent(block: ResolvedToolResultBlock): string | WireResultBlock[] {
   if (!block.content.some(part => part.type === 'image' && 'dataBase64' in part)) {
     return block.content.map(part => (part.type === 'text' ? part.text : '')).join('')
   }
-  const content: Record<string, unknown>[] = []
+  const content: WireResultBlock[] = []
   for (const part of block.content) {
     if (part.type === 'text' && part.text.length > 0) content.push({ type: 'text', text: part.text })
     if (part.type === 'image' && 'dataBase64' in part) {
@@ -87,11 +80,12 @@ function toolResultContent(block: ResolvedToolResultBlock): string | Record<stri
 }
 
 /** Parse a tool call's raw JSON arguments into Anthropic's object-shaped `input`. */
-function parseToolInput(raw: string): Record<string, unknown> {
+function parseToolInput(raw: string): JsonValue {
   try {
     const parsed: unknown = JSON.parse(raw)
     if (typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)) {
-      return parsed as Record<string, unknown>
+      // JSON.parse yields JSON by construction; the cast narrows the parse boundary.
+      return parsed as JsonValue
     }
     return {}
   } catch {
@@ -180,11 +174,15 @@ function claudeReplayBlocks(message: TranslatableMessage, model: string | undefi
  * message keeps in one leading run ({@link leadWithToolResults}); system-role
  * messages before the conversation starts are handled by
  * {@link toAnthropicSystem} and skipped here, while a later one rides in
- * place as a user-role `<system-reminder>` block.
+ * place as a user-role `<system-reminder>` block (the wire contract models no
+ * system-role message).
  * Signed thinking blocks are replayed for the same Claude model; unsigned
  * reasoning is omitted because the API rejects a thinking block with no
  * signature. Images must arrive pre-resolved ({@link TranslatableMessage});
  * an unresolved ImageBlock is skipped because its bytes are unreachable here.
+ * A tool result whose `tool_use` was narrated away (a settled subagent's
+ * closing message) is narrated the same way, because the wire validator
+ * rejects any `tool_result` whose call id is not in the request.
  * @param messages - ordered conversation messages with resolved images.
  * @param model - the model this request targets. Thinking signatures are
  *   model-bound, so a signature from another model is not replayed.
@@ -198,16 +196,15 @@ export function toAnthropicMessages(messages: readonly TranslatableMessage[], mo
     // owns those. A later one rides here so the cached prefix ahead of it
     // stays byte-identical.
     if (message.role === 'system' && index < start) continue
-    const inHistory = message.role === 'system' && midConversationSystem(model)
-    const role = message.role === 'system' && !inHistory ? 'user' : message.role
+    const role = message.role === 'system' ? 'user' : message.role
     const replay = claudeReplayBlocks(message, model)
-    const blocks: Record<string, unknown>[] = []
+    const blocks: WireBlock[] = []
     for (const [blockIndex, block] of message.content.entries()) {
       switch (block.type) {
         case 'text':
           blocks.push({
             type: 'text',
-            text: message.role === 'system' && !inHistory
+            text: message.role === 'system'
               ? `${SYSTEM_REMINDER_OPEN}${block.text}${SYSTEM_REMINDER_CLOSE}`
               : block.text,
           })
@@ -268,69 +265,41 @@ export function toAnthropicMessages(messages: readonly TranslatableMessage[], mo
   for (const message of out) {
     if (message.role === 'user') leadWithToolResults(message)
   }
+  narrateOrphanToolResults(out)
   return out
 }
 
-/**
- * Mark the conversation's cache breakpoints in place.
- *
- * The newest mark is the last block whose prefix the next request can reuse.
- * The other marks sit {@link CACHE_POSITION_STRIDE} positions earlier, so a
- * turn that appends more than the lookback can still see a write this request
- * left behind. Thinking blocks reject `cache_control`, so a mark moves to the
- * nearest earlier block that accepts it.
- * @param messages - assembled Anthropic messages, marked in place.
- */
-function acceptsMessageCache(block: Record<string, unknown>): boolean {
-  return block.type !== 'thinking' && block.type !== 'redacted_thinking'
-}
-
-/** One lookback position. A run of the same tool block type shares one slot, and the mark goes on its last block. */
-interface CachePosition {
-  block: Record<string, unknown>
-  cacheable: boolean
-}
-
-function cachePositions(blocks: readonly Record<string, unknown>[]): CachePosition[] {
-  const positions: CachePosition[] = []
-  for (const block of blocks) {
-    const type = block.type
-    const previous = positions.at(-1)
-    const collapses = previous !== undefined && (
-      (type === 'tool_use' && previous.block.type === 'tool_use')
-      || (type === 'tool_result' && previous.block.type === 'tool_result')
-    )
-    if (collapses && previous !== undefined) {
-      previous.block = block
-      if (acceptsMessageCache(block)) previous.cacheable = true
-      continue
+/** Narrate tool results whose `tool_use` block did not make it into the request. */
+function narrateOrphanToolResults(messages: readonly AnthropicMessage[]): void {
+  const calls = new Set<string>()
+  for (const message of messages) {
+    for (const block of message.content) {
+      if (block.type === 'tool_use') calls.add(String(block.id))
     }
-    positions.push({ block, cacheable: acceptsMessageCache(block) })
   }
-  return positions
-}
-
-export function markMessageCache(messages: readonly AnthropicMessage[]): void {
-  const positions = cachePositions(messages.flatMap(message => message.content))
-  let cursor = positions.length - 1
-  for (let mark = 0; mark < MESSAGE_CACHE_BREAKPOINTS && cursor >= 0; mark++) {
-    while (cursor >= 0 && !positions[cursor].cacheable) cursor--
-    if (cursor < 0) return
-    positions[cursor].block.cache_control = { type: 'ephemeral' }
-    cursor -= CACHE_POSITION_STRIDE
+  for (const message of messages) {
+    for (const [index, block] of message.content.entries()) {
+      if (block.type !== 'tool_result' || calls.has(String(block.tool_use_id))) continue
+      const text = typeof block.content === 'string'
+        ? block.content
+        : (block.content ?? []).map(part => part.type === 'text' ? part.text : '').join('')
+      message.content[index] = { type: 'text', text: `[tool result ${String(block.tool_use_id)}: ${text}]` }
+    }
   }
 }
 
 /**
- * Build the Anthropic `system` array: the mandatory Claude Code identity
- * block, then the explicit system prompt, then any system-role messages.
+ * Build the Anthropic `system` array: the explicit system prompt, then any
+ * system-role messages preceding the conversation. The wire builder places
+ * the Claude Code billing and identity blocks ahead of these and owns cache
+ * breakpoint placement.
  * @param system - explicit system prompt, when set.
  * @param messages - conversation messages; the system-role text preceding the
- * conversation is appended, and a later one is left to {@link toAnthropicMessages}.
- * @returns the system content blocks.
+ *   conversation is appended, and a later one is left to {@link toAnthropicMessages}.
+ * @returns the caller system content blocks.
  */
-export function toAnthropicSystem(system?: string, messages?: readonly TranslatableMessage[]): Record<string, unknown>[] {
-  const blocks: Record<string, unknown>[] = [{ type: 'text', text: CLAUDE_CODE_IDENTITY }]
+export function toAnthropicSystem(system?: string, messages?: readonly TranslatableMessage[]): TextBlock[] {
+  const blocks: TextBlock[] = []
   if (system !== undefined && system.length > 0) blocks.push({ type: 'text', text: system })
   const history = messages ?? []
   for (const message of history.slice(0, conversationStart(history))) {
@@ -338,11 +307,6 @@ export function toAnthropicSystem(system?: string, messages?: readonly Translata
       if (block.type === 'text') blocks.push({ type: 'text', text: block.text })
     }
   }
-  // `tools` renders ahead of `system`, so this one marker caches both. It is
-  // deliberately separate from the message marks: a tool_choice or thinking
-  // change invalidates the messages tier only, and this entry survives it.
-  // `ttl` is omitted, so the breakpoint uses the documented 5-minute default.
-  blocks[blocks.length - 1].cache_control = { type: 'ephemeral' }
   return blocks
 }
 
@@ -363,13 +327,15 @@ export const CLAUDE_TOOL_SEARCH = {
   name: 'tool_search_tool_regex',
 } as const
 
-export function toAnthropicTools(tools: readonly ToolSchema[]): Record<string, unknown>[] {
-  const mapped = [...tools]
+export function toAnthropicTools(tools: readonly ToolSchema[]): ClaudeToolDefinition[] {
+  const mapped: ClaudeToolDefinition[] = [...tools]
     .sort((left, right) => (left.name < right.name ? -1 : left.name > right.name ? 1 : 0))
     .map(tool => ({
       name: tool.name,
-      description: tool.description,
-      input_schema: tool.parameters,
+      ...tool.description === undefined ? {} : { description: tool.description },
+      // Harness schemas are JSON by construction; the wire validator re-checks
+      // the shape the endpoint accepts.
+      input_schema: tool.parameters as WireSchemaTool['input_schema'],
       ...tool.deferLoading === true ? { defer_loading: true } : {},
     }))
   if (!tools.some(tool => tool.deferLoading === true)) return mapped

@@ -8,6 +8,9 @@ importers:
 
   .:
     dependencies:
+      '@tormentalabs/claude-code-wire-compat':
+        specifier: 0.7.1
+        version: 0.7.1
       undici:
         specifier: ^7.0.0
         version: 7.29.0
@@ -990,6 +993,10 @@ packages:
 
   '@statsig/js-client@3.31.0':
     resolution: {integrity: sha512-LFa5E0LjT6sTfZv3sNGoyRLSZ1078+agdgOA+Vm1ecjG+KbSOfBLTW7hMwimrJ29slRwbYDzbtKaPJo/R37N2g==}
+
+  '@tormentalabs/claude-code-wire-compat@0.7.1':
+    resolution: {integrity: sha512-eeK2wDnKySKoDbPKS4AFNdUuYM5X/OTuglcls1PUZ7nVF2mewzakkK2NqHsNHyU54SOGpSWW2S7iQPFvqY1gjg==}
+    engines: {node: '>=20'}
 
   '@tybys/wasm-util@0.10.3':
     resolution: {integrity: sha512-F3fo1MYrRJYL3zER0OUOmkutjr1Vp23m7OsSgp7nq4SP6OqX6C/56XFIPAl5bt3zaBRjmW7SGz3u/6LwFpYcOg==}
@@ -2190,6 +2197,8 @@ snapshots:
     dependencies:
       '@statsig/client-core': 3.31.0
     optional: true
+
+  '@tormentalabs/claude-code-wire-compat@0.7.1': {}
 
   '@tybys/wasm-util@0.10.3':
     dependencies:

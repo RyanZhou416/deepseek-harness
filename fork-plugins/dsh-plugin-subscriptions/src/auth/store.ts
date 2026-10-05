@@ -52,6 +52,17 @@ export interface ClaudeSession {
   emailAddress?: string
   subscriptionType?: string
   /**
+   * Account UUID from the OAuth profile; fills the `metadata.user_id`
+   * correlation triple the Claude Code wire contract requires. Sessions
+   * stored before the wire upgrade lack it and are backfilled on first use.
+   */
+  accountUuid?: string
+  /**
+   * Stable per-account device id minted at login; the second member of the
+   * correlation triple. Backfilled on first use for pre-upgrade sessions.
+   */
+  deviceId?: string
+  /**
    * True when this account was imported from Claude Code's own credential
    * store (Keychain/file): only bound accounts sync refreshes back to it.
    */

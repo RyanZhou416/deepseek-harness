@@ -53,3 +53,23 @@ export function assertClaudeRequestBytes(body: string, messages: readonly Transl
   }
   throw new LlmError('Claude request text and tools exceed its 32 MB body limit; compact the conversation or reduce the tools.', 'INVALID_REQUEST')
 }
+
+/**
+ * Map the wire builder's own size rejection onto the logged-offload path.
+ *
+ * The builder raises before serializing, so the exact excess is unknown here;
+ * the offload count therefore covers every inline image in wire order. After
+ * the agent offloads them the next request rebuilds smaller or fails as a
+ * text/tools-only oversize.
+ * @param messages - resolved images in wire order.
+ * @returns the offload or invalid-request error to throw.
+ */
+export function oversizeWireError(messages: readonly TranslatableMessage[]): LlmError {
+  const inlineCount = messages
+    .flatMap(message => imageLengths(message.content))
+    .filter(length => length > 0).length
+  if (inlineCount > 0) {
+    return new LlmError('Claude request exceeds its 32 MB body limit.', IMAGE_OFFLOAD_REQUIRED_CODE, { offloadImages: inlineCount })
+  }
+  return new LlmError('Claude request text and tools exceed its 32 MB body limit; compact the conversation or reduce the tools.', 'INVALID_REQUEST')
+}

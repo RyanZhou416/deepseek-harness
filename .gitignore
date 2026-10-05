@@ -1,5 +1,6 @@
 CLAUDE.local.md
 .env
+fork-plugins/releases/backup-web-profile-*/
 apps/desktop/.env.windows
 apps/desktop/.env.macos
 apps/desktop/*.p12

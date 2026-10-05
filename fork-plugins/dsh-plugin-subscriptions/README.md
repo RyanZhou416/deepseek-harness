@@ -84,7 +84,7 @@ Image generation and editing share same-provider account scheduling: try the def
 
 ### DSH compatibility
 
-This fork artifact, `0.9.4-dsh017rc1.1`, is pinned to DSH `0.1.7-rc.1` and Cordis `4.0.4`. Its V4 tool-role translation and UI were built and tested against that exact cohort; do not install it on an older DSH profile. The upstream public `0.9.4` package declares a broader peer range, which does not apply to this private artifact.
+This fork artifact, `0.9.4-dsh017rc1.8`, is pinned to DSH `0.1.7-rc.1` and Cordis `4.0.4`. Its V4 tool-role translation, pinned Claude Code 2.1.280 wire, and UI were built and tested against that exact cohort; do not install it on an older DSH profile. The upstream public `0.9.4` package declares a broader peer range, which does not apply to this private artifact.
 
 ### Managing accounts and pool models
 

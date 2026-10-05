@@ -32,7 +32,7 @@
 | Current official target | `dsh-v0.1.7-rc.1` on 2026-09-24 | 精确不可变 tag；不要改合并已越过该 tag 的 rolling `upstream/master` |
 | AgentTeams subtree | `fork-plugins/dsh-agent-teams` | 上游 `v0.1.20` + 本 fork RC.1 私有适配与有界未读邮箱缓存 |
 | Context subtree | `fork-plugins/dsh-context` | 上游 `v0.55.0` + 本 fork 字段级投影、V4 header 计价和关闭 modal 性能优化 |
-| Subscriptions subtree | `fork-plugins/dsh-plugin-subscriptions` | 上游 `v0.9.4` + 本 fork RC.1/V4 私有适配；凭据与 Session 格式不变 |
+| Subscriptions subtree | `fork-plugins/dsh-plugin-subscriptions` | 上游 `v0.9.4` + 本 fork RC.1/V4 私有适配与 pinned Claude Code 2.1.280 wire；凭据与 Session 格式不变 |
 
 当前维护的源码兼容基线是 `dsh-v0.1.7-rc.1`。整合采用官方 Agent 创建、handle-based Session persistence、Session format V4、通用 `session.updateQueue`、引用拥有的 Client Session、Plugin Manager、Subagent activation limits、cursorless Assistant frame、Web Terminal、SSH、MCP resources、Browser/Computer Use 和连接容错，再按本文的行为与测试补回仍缺失部分；后续合并禁止整体恢复旧版文件。
 
@@ -85,6 +85,12 @@ ChatGPT 源码提供默认关闭的 `autoResetCredits` 开关，入口为订阅�
 ### Model-specific request images
 
 `dsh-llm.prepareRequestImages` shares retained-occurrence counting and per-attachment preparation across DeepSeek, pi-ai and subscription routes. Preserve immutable normalized attachments, count repeated user/tool images separately, exclude logged offloads, and derive each request from its current model route. Anthropic Messages and the Claude subscription adapter apply the 20/21-image dimension boundary; Claude also checks model image-count limits and exact JSON request bytes before dispatch. Compatible variants remain cached; changing models does not enlarge a previous preview or revive offloaded history. Focused checks: `llm/tests/request-images.spec.ts`, pi-ai context/routing tests, and `fork-plugins/dsh-plugin-subscriptions/test/image-policy.spec.ts`. Deployment requires rebuilding the matching Harness and pinned subscription artifact after the Host stops; source edits do not update the installed tarball.
+
+### Pinned Claude Code wire (subscriptions)
+
+订阅插件的 Claude 聊天请求全部经 `@tormentalabs/claude-code-wire-compat`(fork 精确固定 `0.7.1`,GPL-3.0-or-later,私有制品不对外分发)按 pinned `CLAUDE_CODE_2_1_280_PROFILE`(CLI 2.1.280 / SDK 0.112.1)构建:billing 指纹块与 identity system 块、beta 组合、`metadata.user_id` 关联三元组、cache breakpoint 与完整头部计划均由构建器拥有,不得再手写 `anthropic-beta`/`x-app`/缓存标记。保留 `cacheControl` 四开关并带 `ttl: '1h'`(真实客户端出厂值),thinking 的 `display: 'summarized'`、effort 与 `output_config` 同发;构建器按 pinned 目录校验两者。不发 `accept` 头(真实客户端不发)。
+
+身份:`sessionId` 取 harness 会话 id(缺失时每请求 UUID),`deviceId`/`accountUuid` 存于 `ClaudeSession`(登录时铸造/发现,刷新保留,旧会话首用懒回填;回填失败以 `INVALID_REQUEST` 明确失败,不发送伪造三元组);`deviceId` 按真实客户端格式铸造为 64 位十六进制(32 随机字节),绝非 UUID。`previousRequestId` 把响应 `request-id` 头链入下一请求 billing 块的 `cc_prev_req`,按(规范账号, wire 会话)分键,池在同一会话内切换账号绝不会把另一账号的 request-id 链进来(共 256 条上限);响应缺头时清除链路。`cc_prompt_id` 为每个新用户轮次铸造的 UUIDv4,该轮工具续步复用,与真实客户端一致;probe/标题辅助请求的抑制未建模。池切换还会滚动 wire 会话 id(`claudeWireSessionId`,共 256 条上限):harness 会话的第一个账号段沿用 harness 会话 id 逐字不变(单账号会话字节不变),之后的每个账号段铸新 UUID,使一段对话不会横跨两个账号身份;切回原账号恢复原 id 与原链。构建器 `INPUT_TOO_LARGE` 经 `oversizeWireError` 映射回已记录的图片 offload 错误,精确 32 MB 检查保留在 `assertClaudeRequestBytes`;其余构建器拒绝码经 `mapClaudeWireError` 映射为带 wire 码与解释的 `INVALID_REQUEST`(`INVALID_EFFORT`/`INVALID_THINKING`/`UNSUPPORTED_CAPABILITY`/`CRYPTO_UNAVAILABLE`/`INVALID_IDENTITY`/`INVALID_UNICODE`,其余走默认),不得以通用 transport 失败示人。中途 system 消息在所有模型上以 user 角色 `<system-reminder>` 形式随历史就位(新 wire 无 system 角色消息),DSH 侧 `systemPromptUpdate: 'in-history'` 分辨率不变。usage/models/Files 端点改用 pinned profile 的 CLI user-agent;本地 `claude --version` 探测已删除。聚焦验证:`test/claude-wire.spec.ts`、更新后的 `test/translate.spec.ts` 与 `test/models.spec.ts`(全部注入 fetch、零凭据)。已随 `0.9.4-dsh017rc1.8` 构建;部署走 `fork-plugins/deploy-subscriptions-web.ps1`:停 Host 后在普通 PowerShell 运行,脚本校验 sha256、Host 监听护栏、自动备份已装副本与 `package.json`/`pnpm-lock.yaml`,并用 `pnpm add` 更新 profile 的 file 固定引用(避免后续 `pnpm install` 降级),不触碰 `DSH_HOME\plugins\subscriptions` 凭据目录;回滚用旧 tgz 走同样的 `pnpm add` 形式。
 
 ### Goal disabled by default
 

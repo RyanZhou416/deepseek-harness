@@ -183,6 +183,20 @@ export class AccountTokenManager<S extends TimedSession> {
     return this.io.get(account === undefined ? undefined : await this.resolveAccount(account))
   }
 
+  /**
+   * Persist a caller-updated session for one account (default when omitted).
+   * Identity backfill uses this; the next {@link session} read returns the
+   * updated copy.
+   * @param account - the account key; the default account when undefined.
+   * @param session - the updated session to store.
+   */
+  async persist(account: string | undefined, session: S): Promise<void> {
+    const requested = account ?? await this.defaultAccount()
+    if (requested === undefined) return
+    const key = await this.resolveAccount(requested)
+    await this.tokensFor(key).replace(session)
+  }
+
   /** Whether a session is stored for the account (cheap; never refreshes). */
   async hasSession(account?: string): Promise<boolean> {
     return (await this.peek(account)) !== undefined

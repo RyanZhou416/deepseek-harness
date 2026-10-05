@@ -1,11 +1,11 @@
 /**
  * Claude Pro/Max subscription provider: OAuth against claude.ai /
  * platform.claude.com with the Claude Code client id, and streaming against
- * the Anthropic Messages API with the Claude Code identity headers.
+ * the Anthropic Messages API through the pinned Claude Code 2.1.280 wire
+ * contract built by `@tormentalabs/claude-code-wire-compat`.
  */
 
-import { execFileSync } from 'node:child_process'
-import { createHash } from 'node:crypto'
+import { createHash, randomBytes, randomUUID } from 'node:crypto'
 import { EMPTY_RESPONSE_CODE, errorChain, LlmAdapter, LlmError, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import type {
   GenerateOptions,
@@ -14,6 +14,7 @@ import type {
   LlmResolvedModelInfo,
   StreamChunk,
 } from '@deepseek-ai/dsh-llm'
+import type { BuiltClaudeCodeRequest } from '@tormentalabs/claude-code-wire-compat'
 import type { FlowSpec } from '../auth/oauth-flow.js'
 import type { ClaudeSession } from '../auth/store.js'
 import type { ProviderId } from '../auth/store.js'
@@ -23,12 +24,16 @@ import { resolveImages } from '../translate/resolved.js'
 import { assertClaudeRequestBytes, claudeImagePolicy } from './claude-images.js'
 import type { ResolvedImagePart, TranslatableBlock, TranslatableMessage } from '../translate/resolved.js'
 import {
-  markMessageCache,
   streamAnthropic,
-  toAnthropicMessages,
-  toAnthropicSystem,
-  toAnthropicTools,
 } from '../translate/anthropic.js'
+import {
+  buildClaudeWireRequest,
+  CLAUDE_USER_AGENT,
+  claudeWireSessionId,
+  mapClaudeWireError,
+  rememberClaudeRequestId,
+} from './claude-wire.js'
+import type { ClaudeWireThinking } from './claude-wire.js'
 import {
   httpLlmError,
   idleWatchdog,
@@ -59,7 +64,6 @@ import type { RateLimitResetReader, RateLimitWait } from './rate-limit.js'
 export const CLAUDE_CLIENT_ID = '9d1c250a-e61b-44d9-88ed-5944d1962f5e'
 export const CLAUDE_AUTHORIZE_URL = 'https://claude.ai/oauth/authorize'
 export const CLAUDE_TOKEN_URL = 'https://claude.ai/v1/oauth/token'
-export const CLAUDE_API_URL = 'https://api.anthropic.com/v1/messages?beta=true'
 export const CLAUDE_PROFILE_URL = 'https://api.anthropic.com/api/oauth/profile'
 export const CLAUDE_MODELS_URL = 'https://api.anthropic.com/v1/models?beta=true'
 export const CLAUDE_SCOPE = 'org:create_api_key user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload'
@@ -100,80 +104,9 @@ export const claudeRateLimitReset: RateLimitResetReader = (response, body, now) 
 
 /**
  * The subscription endpoint only serves requests presenting as Claude Code,
- * so these headers impersonate the CLI; the harness attribution user-agent
- * cannot be sent here (one user-agent slot, and the CLI's wins).
+ * so the usage and models endpoints reuse the pinned wire profile's CLI
+ * user-agent; the harness attribution user-agent cannot be sent here.
  */
-export const CLAUDE_CLI_FALLBACK_VERSION = '2.1.280'
-
-/**
- * Candidate invocations, in order of preference. Windows npm installs expose
- * Claude Code as a `.cmd` shim, which must run through a shell.
- */
-const CLAUDE_VERSION_PROBES: readonly (readonly [string, readonly string[], { shell?: boolean }])[] =
-  process.platform === 'win32'
-    ? [
-        ['claude --version', [], { shell: true }],
-        ['claude.cmd --version', [], { shell: true }],
-      ]
-    : [['claude', ['--version'], {}]]
-
-export function detectClaudeVersion(): string {
-  let lastError: unknown
-  for (const [command, args, options] of CLAUDE_VERSION_PROBES) {
-    try {
-      const raw = execFileSync(command, [...args], {
-        timeout: 10_000,
-        encoding: 'utf8',
-        stdio: ['ignore', 'pipe', 'ignore'],
-        ...options,
-      })
-      const match = raw.match(/(\d+\.\d+\.\d+)/)
-      if (match) return match[1]
-    } catch (error) {
-      lastError = error
-    }
-  }
-  // This is debug-only: the fallback is expected when Claude Code is absent.
-  if (lastError !== undefined) {
-    console.debug('dsh-plugin-subscriptions: Claude CLI version detection fell back', lastError)
-  }
-  return CLAUDE_CLI_FALLBACK_VERSION
-}
-
-// Lazy + memoized: detectClaudeVersion() shells out to `claude --version`,
-// so this must not run at module-evaluation time (it would fire for every
-// consumer of this module regardless of whether Claude is a configured
-// provider). Computed on first use of getClaudeCliUserAgent() instead.
-let claudeCliUserAgent: string | undefined
-function getClaudeCliUserAgent(): string {
-  if (claudeCliUserAgent === undefined) {
-    claudeCliUserAgent = `claude-cli/${detectClaudeVersion()} (external, cli)`
-  }
-  return claudeCliUserAgent
-}
-export const CLAUDE_BETA_FALLBACK = [
-  'claude-code-20250219',
-  'oauth-2025-04-20',
-  'interleaved-thinking-2025-05-14',
-  'context-management-2025-06-27',
-  'effort-2025-11-24',
-  'compact-2026-01-12',
-  'files-api-2025-04-14',
-  // Official beta enum. Usage then reports `output_tokens_details.thinking_tokens`.
-  'thinking-token-count-2026-05-13',
-].join(',')
-
-/** Present only when a request actually defers a tool. Official beta enum name from the tool-search announcement. */
-export const CLAUDE_ADVANCED_TOOL_USE_BETA = 'advanced-tool-use-2025-11-20'
-
-/**
- * Beta header for one request. The advanced-tool-use flag is added only when
- * a tool sets `deferLoading`, because that flag's body is the tool-search tool.
- */
-export function claudeBetaHeader(tools: readonly { deferLoading?: true }[] | undefined): string {
-  if (!tools?.some(tool => tool.deferLoading === true)) return CLAUDE_BETA_FALLBACK
-  return `${CLAUDE_BETA_FALLBACK},${CLAUDE_ADVANCED_TOOL_USE_BETA}`
-}
 
 /**
  * Models the prompt-caching guide allows to take a later `{"role":"system"}`
@@ -222,7 +155,7 @@ export async function uploadClaudeFile(
       'authorization': `Bearer ${accessToken}`,
       'anthropic-version': '2023-06-01',
       'anthropic-beta': 'files-api-2025-04-14',
-      'user-agent': getClaudeCliUserAgent(),
+      'user-agent': CLAUDE_USER_AGENT,
     },
     body: form,
     ...signal === undefined ? {} : { signal },
@@ -329,11 +262,24 @@ interface ClaudeTokenResponse {
   scope?: string
 }
 
-/** Best-effort account profile; login must not fail when this does. */
-async function fetchClaudeProfile(accessToken: string): Promise<Pick<ClaudeSession, 'emailAddress' | 'subscriptionType'>> {
+/**
+ * Best-effort account profile; login must not fail when this does. The
+ * account UUID is the one field the wire identity needs, so callers that
+ * require it check the result instead of the failure.
+ * @param accessToken - the session's current access token.
+ * @param fetchFn - fetch implementation (injectable for tests).
+ * @param signal - caller cancellation.
+ * @returns the fields the profile disclosed (possibly empty).
+ */
+async function fetchClaudeProfile(
+  accessToken: string,
+  fetchFn: FetchFn = proxiedFetch,
+  signal?: AbortSignal,
+): Promise<Pick<ClaudeSession, 'emailAddress' | 'subscriptionType' | 'accountUuid'>> {
   try {
-    const response = await proxiedFetch(CLAUDE_PROFILE_URL, {
+    const response = await fetchFn(CLAUDE_PROFILE_URL, {
       headers: { authorization: `Bearer ${accessToken}` },
+      ...signal === undefined ? {} : { signal },
     })
     if (!response.ok) return {}
     const profile = await response.json() as Record<string, unknown>
@@ -342,12 +288,15 @@ async function fetchClaudeProfile(accessToken: string): Promise<Pick<ClaudeSessi
       : {}
     const email = profile.emailAddress ?? profile.email ?? account.email_address ?? account.email
     const subscription = profile.subscriptionType ?? profile.subscription_type ?? account.subscription_type
+    const accountUuid = account.uuid ?? profile.accountUuid
     return {
       ...typeof email === 'string' && email.length > 0 ? { emailAddress: email } : {},
       ...typeof subscription === 'string' && subscription.length > 0 ? { subscriptionType: subscription } : {},
+      ...typeof accountUuid === 'string' && accountUuid.length > 0 ? { accountUuid } : {},
     }
   } catch {
-    // Profile lookup is decorative; only the token exchange owns login success.
+    // Profile lookup is decorative for login; only the token exchange owns
+    // login success. Wire-identity backfill checks the returned fields.
     return {}
   }
 }
@@ -372,6 +321,9 @@ async function claudeSession(
     refreshToken,
     expiresAt: Date.now() + tokens.expires_in * 1000,
     scopes: tokens.scope ?? CLAUDE_SCOPE,
+    // The wire correlation triple mints its device id once per account. The
+    // genuine client uses a 64-hex string (32 random bytes), not a UUID.
+    deviceId: randomBytes(32).toString('hex'),
     ...profile,
   }
 }
@@ -428,6 +380,9 @@ export async function refreshClaude(session: ClaudeSession): Promise<ClaudeSessi
     ...next,
     ...session.emailAddress === undefined ? {} : { emailAddress: session.emailAddress },
     ...session.subscriptionType === undefined ? {} : { subscriptionType: session.subscriptionType },
+    // Wire identity survives refreshes; it is minted once per account.
+    ...session.accountUuid === undefined ? {} : { accountUuid: session.accountUuid },
+    ...session.deviceId === undefined ? {} : { deviceId: session.deviceId },
   }
 }
 
@@ -516,7 +471,7 @@ export async function fetchClaudeUsage(
       'anthropic-beta': 'oauth-2025-04-20',
       // Unrecognized clients are aggressively rate-limited on this endpoint,
       // so it presents as the CLI like every other subscription request.
-      'user-agent': getClaudeCliUserAgent(),
+      'user-agent': CLAUDE_USER_AGENT,
       'accept': 'application/json',
     },
     ...signal === undefined ? {} : { signal },
@@ -575,25 +530,25 @@ function rejectsBudgetThinking(model: string): boolean {
 /**
  * The `thinking` object for one request.
  *
- * `display: 'summarized'` is set on both shapes: adaptive models default to
- * `display: 'omitted'`, which returns thinking blocks with an empty `thinking`
- * field. Without this override the Think panel stays empty.
+ * `display: 'summarized'` is fixed by the wire module on both shapes: adaptive
+ * models default to `display: 'omitted'`, which returns thinking blocks with
+ * an empty `thinking` field. Without this override the Think panel stays empty.
  * @param model - the requested model id.
  * @param thinkingType - the type discovery advertised, when it advertised one.
  * @param maxTokens - the resolved output cap; the manual budget is derived from it.
- * @returns the wire `thinking` object, or undefined when the model takes none.
+ * @returns the wire `thinking` request, or undefined when the model takes none.
  */
 export function claudeThinkingBody(
   model: string,
   thinkingType: 'enabled' | 'adaptive' | undefined,
   maxTokens: number,
-): Record<string, unknown> | undefined {
+): ClaudeWireThinking | undefined {
   const mode = thinkingType === 'adaptive' || rejectsBudgetThinking(model) ? 'adaptive' : thinkingType
-  if (mode === 'adaptive') return { type: 'adaptive', display: 'summarized' }
+  if (mode === 'adaptive') return { type: 'adaptive' }
   if (mode === 'enabled') {
     const budget = Math.min(Math.max(1_024, Math.floor(maxTokens * 0.5)), maxTokens - 100)
     if (budget < 1_024) return undefined
-    return { type: 'enabled', budget_tokens: budget, display: 'summarized' }
+    return { type: 'enabled', budgetTokens: budget }
   }
   return undefined
 }
@@ -636,7 +591,7 @@ export async function fetchClaudeModels(
     headers: {
       'authorization': `Bearer ${session.accessToken}`,
       'anthropic-version': '2023-06-01',
-      'user-agent': getClaudeCliUserAgent(),
+      'user-agent': CLAUDE_USER_AGENT,
       'anthropic-dangerous-direct-browser-access': 'true',
       'accept': 'application/json',
     },
@@ -708,45 +663,6 @@ export interface ClaudeAdapterOptions {
 
 /** The Claude 4.5 family accepts image input. */
 const CLAUDE_MODALITIES: readonly ('text' | 'image')[] = ['text', 'image']
-
-/**
- * Assemble the Anthropic request body.
- *
- * Extracted from the adapter so the wire shape — cache breakpoints above all —
- * is testable without a network round trip. The message array is marked before
- * it is placed so the breakpoints land on the blocks the body ships: one on the
- * last `system` block (covering `tools` + `system`, which render ahead of it)
- * and up to three across the history, Anthropic's four-slot maximum.
- * @param options - the generate request.
- * @param messages - conversation messages with images already resolved.
- * @param maxTokens - the resolved output cap.
- * @param thinking - the thinking parameter, when the model takes one.
- * @param effort - the reasoning effort, when the model advertises efforts.
- * @returns the JSON body to POST.
- */
-export function claudeRequestBody(
-  options: GenerateOptions,
-  messages: readonly TranslatableMessage[],
-  maxTokens: number,
-  thinking?: Record<string, unknown>,
-  effort?: string,
-): Record<string, unknown> {
-  const anthropicMessages = toAnthropicMessages(messages, options.model)
-  markMessageCache(anthropicMessages)
-  return {
-    model: options.model,
-    max_tokens: maxTokens,
-    system: toAnthropicSystem(options.system, messages),
-    messages: anthropicMessages,
-    ...options.tools !== undefined && options.tools.length > 0
-      ? { tools: toAnthropicTools(options.tools) }
-      : {},
-    ...thinking === undefined ? {} : { thinking },
-    ...effort === undefined ? {} : { output_config: { effort } },
-    stream: true,
-    ...options.sessionId !== undefined ? { metadata: { user_id: String(options.sessionId) } } : {},
-  }
-}
 
 /** Claude wire adapter: one instance serves the `claude` provider route. */
 export class ClaudeAdapter extends LlmAdapter {
@@ -914,14 +830,29 @@ export class ClaudeAdapter extends LlmAdapter {
     return this.streamCore(options, account)
   }
 
+  /** The canonical account key that owns this session's conversation chain. */
+  private async chainAccount(account: string | undefined): Promise<string> {
+    const requested = account ?? await this.options.tokens.defaultAccount()
+    if (requested === undefined) return ''
+    return this.options.tokens.resolveAccount(requested)
+  }
+
   private async *streamCore(options: GenerateOptions, account?: string): AsyncIterable<StreamChunk> {
     const watchdog = idleWatchdog(options.signal, this.options.streamIdleTimeoutMs)
+    // The billing block chains responses through the request-id header, so the
+    // chain key must be stable across the 401-retry pair, and per-account so a
+    // pool failover never chains another account's request id. The wire
+    // session id additionally rolls when a second account serves the same
+    // harness session, so no conversation spans two account identities.
+    const harnessSessionId = options.sessionId !== undefined ? String(options.sessionId) : randomUUID()
+    const chainAccount = await this.chainAccount(account)
+    const sessionId = claudeWireSessionId(chainAccount, harnessSessionId)
     try {
       let session = await this.options.tokens.session(account)
-      let response = await this.request(options, session, watchdog.signal)
+      let response = await this.request(options, account, session, sessionId, chainAccount, watchdog.signal)
       if (response.status === 401) {
         session = await this.options.tokens.session(account, true)
-        response = await this.request(options, session, watchdog.signal)
+        response = await this.request(options, account, session, sessionId, chainAccount, watchdog.signal)
       }
       if (!response.ok) {
         throw await httpLlmError(response, 'claude API', {
@@ -929,6 +860,7 @@ export class ClaudeAdapter extends LlmAdapter {
           ...this.options.onWarn === undefined ? {} : { onWarn: this.options.onWarn },
         })
       }
+      rememberClaudeRequestId(chainAccount, sessionId, response.headers.get('request-id'))
       if (response.body === null) {
         throw new LlmError('claude API returned no response body', EMPTY_RESPONSE_CODE)
       }
@@ -940,38 +872,80 @@ export class ClaudeAdapter extends LlmAdapter {
     }
   }
 
-  private thinkingParam(model: string, thinkingType: 'enabled' | 'adaptive' | undefined, maxTokens: number): Record<string, unknown> | undefined {
+  private thinkingParam(model: string, thinkingType: 'enabled' | 'adaptive' | undefined, maxTokens: number): ClaudeWireThinking | undefined {
     return claudeThinkingBody(model, thinkingType, maxTokens)
   }
 
-  private async request(options: GenerateOptions, session: ClaudeSession, signal: AbortSignal): Promise<Response> {
+  /**
+   * Backfill the wire-identity fields a pre-upgrade stored session lacks:
+   * the device id is minted once, the account uuid comes from the OAuth
+   * profile. The updated session is persisted so the next request skips the
+   * lookup. A missing account uuid after the lookup fails the request loudly
+   * instead of sending a bogus correlation triple.
+   */
+  private async identitySession(
+    session: ClaudeSession,
+    account: string | undefined,
+    fetchFn: FetchFn,
+    signal: AbortSignal,
+  ): Promise<ClaudeSession> {
+    if (session.deviceId !== undefined && session.accountUuid !== undefined) return session
+    const profile = session.accountUuid === undefined
+      ? await fetchClaudeProfile(session.accessToken, fetchFn, signal)
+      : {}
+    const next: ClaudeSession = {
+      ...session,
+      ...session.deviceId === undefined ? { deviceId: randomBytes(32).toString('hex') } : {},
+      ...session.accountUuid === undefined && profile.accountUuid !== undefined
+        ? { accountUuid: profile.accountUuid }
+        : {},
+    }
+    if (next.accountUuid === undefined) {
+      throw new LlmError(
+        'claude account identity is unavailable (profile lookup failed); log in again via Settings → Subscriptions',
+        'INVALID_REQUEST',
+      )
+    }
+    if (next.deviceId !== session.deviceId || next.accountUuid !== session.accountUuid) {
+      await this.options.tokens.persist(account, next)
+    }
+    return next
+  }
+
+  private async request(
+    options: GenerateOptions,
+    account: string | undefined,
+    session: ClaudeSession,
+    sessionId: string,
+    chainAccount: string,
+    signal: AbortSignal,
+  ): Promise<Response> {
+    const fetchFn = this.options.fetchFn ?? proxiedFetch
     const disc = await this.discovered(options.model)
     const contextWindow = disc?.contextWindow
       ?? this.options.models.find(entry => entry.id === options.model)?.contextWindow ?? CLAUDE_CONTEXT_WINDOW
     const resolved = await resolveImages(options.messages, this.options.resolveAttachments?.(), signal, claudeImagePolicy(contextWindow))
-    const messages = await bindClaudeFileIds(resolved, session.accessToken, this.options.fetchFn, signal)
+    const messages = await bindClaudeFileIds(resolved, session.accessToken, fetchFn, signal)
     const maxTokens = options.maxTokens
       ?? claudeMaxTokens(this.options.models.find(entry => entry.id === options.model), disc)
     const thinking = this.thinkingParam(options.model, disc?.thinkingType, maxTokens)
     const effort = options.reasoningEffort !== undefined && disc?.reasoning !== undefined
       ? String(options.reasoningEffort)
       : undefined
-    const body = claudeRequestBody(options, messages, maxTokens, thinking, effort)
-    const serialized = JSON.stringify(body)
-    assertClaudeRequestBytes(serialized, messages)
-    return (this.options.fetchFn ?? proxiedFetch)(CLAUDE_API_URL, {
-      method: 'POST',
-      headers: {
-        'authorization': `Bearer ${session.accessToken}`,
-        'anthropic-version': '2023-06-01',
-        'anthropic-beta': claudeBetaHeader(options.tools),
-        'user-agent': getClaudeCliUserAgent(),
-        'x-app': 'cli',
-        'anthropic-dangerous-direct-browser-access': 'true',
-        'accept': 'text/event-stream',
-        'content-type': 'application/json',
-      },
-      body: serialized,
+    const identitySession = await this.identitySession(session, account, fetchFn, signal)
+    let built: BuiltClaudeCodeRequest
+    try {
+      built = await buildClaudeWireRequest(options, identitySession, messages, maxTokens, thinking, effort, sessionId, chainAccount)
+    } catch (error: unknown) {
+      const mapped = mapClaudeWireError(error, messages)
+      if (mapped !== undefined) throw mapped
+      throw error
+    }
+    assertClaudeRequestBytes(built.body, messages)
+    return fetchFn(built.url, {
+      method: built.method,
+      headers: Object.fromEntries(built.headers),
+      body: built.body,
       signal,
     })
   }

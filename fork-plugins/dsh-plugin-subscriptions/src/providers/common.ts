@@ -406,6 +406,16 @@ export class TokenManager<S extends TimedSession> {
     await this.options.save(next)
     return next
   }
+
+  /**
+   * Persist a caller-updated session without touching refresh state. Identity
+   * backfill (minted device id, discovered account uuid) uses this; the next
+   * {@link session} read loads the updated copy from the store.
+   * @param session - the updated session to store.
+   */
+  async replace(session: S): Promise<void> {
+    await this.options.save(session)
+  }
 }
 
 /** Fetch signature adapters accept for discovery calls (injectable for tests). */

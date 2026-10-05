@@ -7,7 +7,7 @@ import sharp from 'sharp'
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import LocalAttachmentStore from '@deepseek-ai/dsh-attachment-local'
-import { createToolResultMessage, IMAGE_OFFLOAD_REQUIRED_CODE, projectImagesForTextModel, ToolCallId } from '@deepseek-ai/dsh-llm'
+import { createAssistantMessage, createToolResultMessage, IMAGE_OFFLOAD_REQUIRED_CODE, projectImagesForTextModel, ToolCallId } from '@deepseek-ai/dsh-llm'
 import { AttachmentId } from '@deepseek-ai/dsh-attachment'
 import type { ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
 import type { ImageBlock, RequestMessage } from '@deepseek-ai/dsh-llm'
@@ -37,15 +37,23 @@ async function withImageStore(run: (store: LocalAttachmentStore, ref: ImageAttac
 function history(ref: ImageAttachmentRef, count: number): RequestMessage[] {
   const image: ImageBlock = { type: 'image', attachment: ref }
   return [
+    // The wire validator pairs every tool_result with a tool_use, so the
+    // synthetic history carries the call the result answers.
+    createAssistantMessage({
+      content: [{ type: 'tool-call', id: ToolCallId('screenshot'), name: 'read_image', arguments: '{}' }],
+      source: { provider: 'claude', model: 'claude-test' },
+    }),
     { role: 'user', content: Array<ImageBlock>(count - 1).fill(image) },
     createToolResultMessage({ callId: ToolCallId('screenshot'), isError: false, content: [image] }),
   ]
 }
 
 function firstImage(messages: readonly TranslatableMessage[]): ResolvedImagePart {
-  const block = messages[0]?.content.find(part => part.type === 'image' && 'dataBase64' in part)
-  if (block?.type !== 'image' || !('dataBase64' in block)) throw new Error('request has no image')
-  return block
+  for (const message of messages) {
+    const block = message.content.find(part => part.type === 'image' && 'dataBase64' in part)
+    if (block?.type === 'image' && 'dataBase64' in block) return block
+  }
+  throw new Error('request has no image')
 }
 
 async function dimensions(messages: readonly TranslatableMessage[]) {
@@ -125,7 +133,14 @@ describe('subscription request images', () => {
 
   it('sends the resized bytes through the real Claude adapter before any provider fetch', async () => {
     await withImageStore(async (store, ref) => {
-      const session: ClaudeSession = { accessToken: 'test-only', refreshToken: 'test-only', expiresAt: Number.MAX_SAFE_INTEGER, scopes: '' }
+      const session: ClaudeSession = {
+        accessToken: 'test-only',
+        refreshToken: 'test-only',
+        expiresAt: Number.MAX_SAFE_INTEGER,
+        scopes: '',
+        accountUuid: 'uuid-test',
+        deviceId: 'dev-test',
+      }
       const tokens = new AccountTokenManager<ClaudeSession>({
         provider: 'claude', displayName: 'Test',
         makeOptions: () => ({ preemptMs: 0, refresh: async () => session, isPermanent: () => false }),
