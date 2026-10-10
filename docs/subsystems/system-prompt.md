@@ -68,6 +68,19 @@ interface PromptSection {
    * More than one effective complete section makes assembly fail.
    */
   readonly complete?: boolean
+  /**
+   * Whether this section's text is fixed for every assembly of this build — either a string
+   * compiled into the package or empty — so a provider may treat it as shareable prompt
+   * prefix.
+   *
+   * The contributing plugin states this about its own text; nothing infers it, and the
+   * default is false. Text that varies by session, deployment, machine, or an external
+   * source is not eligible: a shared cache entry asserts that its content is the same for
+   * every reader, so a local path or a configured persona does not qualify. Whether the
+   * section is present in a given assembly may still vary — a tool's documentation is
+   * absent where the tool is not registered — because only the text is claimed.
+   */
+  readonly stable?: boolean
 }
 ```
 

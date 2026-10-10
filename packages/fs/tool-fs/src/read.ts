@@ -68,6 +68,7 @@ export function parseReadArgs(args: { file_path: string; offset?: number; limit?
 export function applyReadTool(ctx: Context, caps: ReadToolCaps): void {
   ctx.systemPrompt.section({
     name: 'tool:read',
+    stable: true,
     order: ctx.systemPrompt.getSectionOrder('TOOL_READ'),
     text: ({ scope }) => ctx.tools.get('read', scope) === undefined
       ? ''

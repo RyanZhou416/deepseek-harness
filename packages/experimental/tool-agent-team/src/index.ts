@@ -168,6 +168,7 @@ function install(agent: Agent, ctx: Context, config: Required<Config>): () => vo
   try {
     register(scoped.systemPrompt.section({
       name: 'team:policy',
+      stable: true,
       order: scoped.systemPrompt.getSectionOrder('TEAM_POLICY'),
       text: POLICY,
     }))

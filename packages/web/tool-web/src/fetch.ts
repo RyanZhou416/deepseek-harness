@@ -447,6 +447,7 @@ export function presentFetchResult(args: { url: string }, result: ToolResult): W
 export function applyWebFetchTool(ctx: Context, timeoutMs: number, maxOutputChars: number): void {
   ctx.systemPrompt.section({
     name: 'tool:web_fetch',
+    stable: true,
     order: ctx.systemPrompt.getSectionOrder('TOOL_WEB_FETCH'),
     text: ({ scope }) => ctx.tools.get('web_fetch', scope) === undefined
       ? ''

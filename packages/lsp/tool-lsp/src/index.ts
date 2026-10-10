@@ -102,6 +102,7 @@ export function apply(ctx: Context, config: Config): void {
 
   ctx.systemPrompt.section({
     name: 'tool:lsp',
+    stable: true,
     order: ctx.systemPrompt.getSectionOrder('TOOL_LSP'),
     text: LSP_PROMPT_TEXT,
   })

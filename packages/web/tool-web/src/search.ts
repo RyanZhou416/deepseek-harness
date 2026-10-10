@@ -314,6 +314,7 @@ export function applyWebSearchTool(
 ): void {
   ctx.systemPrompt.section({
     name: 'tool:web_search',
+    stable: true,
     order: ctx.systemPrompt.getSectionOrder('TOOL_WEB_SEARCH'),
     text: ({ scope }) => ctx.tools.get('web_search', scope) === undefined
       ? ''

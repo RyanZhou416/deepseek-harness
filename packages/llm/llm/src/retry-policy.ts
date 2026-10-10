@@ -27,8 +27,19 @@ const DEFAULT_RETRYABLE_CODES = Object.freeze([
 export interface BackoffConfig {
   /** Initial local exponential-backoff delay in milliseconds (default 500). */
   initialDelayMs?: number
-  /** Maximum locally scheduled or accepted provider delay in milliseconds (default 10000). */
+  /** Maximum locally scheduled delay in milliseconds (default 10000). */
   maxDelayMs?: number
+  /**
+   * Maximum provider-disclosed wait in milliseconds that this route will sit out
+   * (defaults to {@link maxDelayMs}).
+   *
+   * Separate from `maxDelayMs` because the two answer different questions: how long the
+   * route's own exponential backoff may grow, and how long a provider-requested reset may
+   * be honoured. A client that waits hours for a rate limit but backs off seconds apart
+   * needs both, and one field cannot express them. A disclosed wait beyond this ceiling
+   * fails the turn instead of retrying.
+   */
+  providerWaitMaxMs?: number
   /** Symmetric random multiplier range around one (default 0.1). */
   jitterRatio?: number
 }
@@ -59,7 +70,10 @@ export type RetryPolicyConfig = NormalRetryPolicyConfig | AlwaysRetryPolicyConfi
 /** Fully resolved backoff shared by both retry modes. */
 export interface ResolvedRetryBackoff {
   readonly initialDelayMs: number
+  /** Ceiling on the route's own exponential backoff. */
   readonly maxDelayMs: number
+  /** Ceiling on a provider-disclosed wait; equals {@link maxDelayMs} unless configured. */
+  readonly providerWaitMaxMs: number
   readonly jitterRatio: number
 }
 
@@ -110,7 +124,7 @@ const NORMAL_POLICY_KEYS: ReadonlySet<string> = new Set([
 const ALWAYS_POLICY_KEYS: ReadonlySet<string> = new Set([
   'mode', 'maxRetries', 'retryableCodes', 'backoff',
 ])
-const BACKOFF_KEYS: ReadonlySet<string> = new Set(['initialDelayMs', 'maxDelayMs', 'jitterRatio'])
+const BACKOFF_KEYS: ReadonlySet<string> = new Set(['initialDelayMs', 'maxDelayMs', 'jitterRatio', 'providerWaitMaxMs'])
 
 function validateKeys(value: object, allowed: ReadonlySet<string>, path: string): void {
   for (const key of Object.keys(value)) {
@@ -123,6 +137,10 @@ function resolveBackoff(config: BackoffConfig | undefined, path: string): Resolv
   const initialDelayMs = config?.initialDelayMs ?? DEFAULT_INITIAL_DELAY_MS
   const maxDelayMs = config?.maxDelayMs ?? DEFAULT_MAX_DELAY_MS
   const jitterRatio = config?.jitterRatio ?? DEFAULT_JITTER_RATIO
+  // Absent means the provider ceiling equals the local one: whatever the local ceiling
+  // accepts, the provider ceiling accepts too. A route that waits longer than it backs off
+  // sets both.
+  const providerWaitMaxMs = config?.providerWaitMaxMs ?? maxDelayMs
 
   if (!Number.isFinite(initialDelayMs) || initialDelayMs <= 0 || initialDelayMs > MAX_TIMER_DELAY_MS) {
     throw new Error(`${path}.initialDelayMs must be a positive finite number no greater than ${MAX_TIMER_DELAY_MS}`)
@@ -133,11 +151,14 @@ function resolveBackoff(config: BackoffConfig | undefined, path: string): Resolv
   if (initialDelayMs > maxDelayMs) {
     throw new Error(`${path}.initialDelayMs must be less than or equal to maxDelayMs`)
   }
+  if (!Number.isFinite(providerWaitMaxMs) || providerWaitMaxMs <= 0 || providerWaitMaxMs > MAX_TIMER_DELAY_MS) {
+    throw new Error(`${path}.providerWaitMaxMs must be a positive finite number no greater than ${MAX_TIMER_DELAY_MS}`)
+  }
   if (!Number.isFinite(jitterRatio) || jitterRatio < 0 || jitterRatio > 1) {
     throw new Error(`${path}.jitterRatio must be between 0 and 1`)
   }
 
-  return Object.freeze({ initialDelayMs, maxDelayMs, jitterRatio })
+  return Object.freeze({ initialDelayMs, maxDelayMs, providerWaitMaxMs, jitterRatio })
 }
 
 /**

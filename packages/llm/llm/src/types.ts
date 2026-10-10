@@ -483,6 +483,16 @@ export interface RequestUserInput {
 /** A durable conversation message or a user input used only for one request. */
 export type RequestMessage = Message | RequestUserInput
 
+/** One rendered system-prompt section, in assembly order. */
+export interface SystemPromptSection {
+  /** The contributing section's unique name. */
+  readonly name: string
+  /** The section's interpolated text. */
+  readonly text: string
+  /** Whether the contributing section declared its text stable across assemblies. */
+  readonly stable: boolean
+}
+
 /** A single model request, fully assembled. */
 export interface GenerateOptions {
   /** Registered provider route selecting the adapter instance. */
@@ -502,6 +512,17 @@ export interface GenerateOptions {
    * system slot ahead of `messages`. Loop-built requests leave it undefined.
    */
   system?: string
+  /**
+   * The rendered system prompt as its assembled sections, when the loop built the prompt
+   * from an assembly. Joining the texts with blank lines in this order reproduces the
+   * prompt exactly.
+   *
+   * Present so an adapter can group the text differently: text whose contributing section
+   * declared itself stable across assemblies of this build may be placed ahead of
+   * session-specific text, which lets more of a request be a shareable cache prefix. An
+   * adapter that does not regroup sends the sections in this order, unchanged.
+   */
+  systemSections?: readonly SystemPromptSection[]
   /** Tool schemas (adapters map to the provider's `tools` field). */
   tools?: ToolSchema[]
   temperature?: number

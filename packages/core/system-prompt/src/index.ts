@@ -73,6 +73,19 @@ export interface PromptSection {
    * More than one effective complete section makes assembly fail.
    */
   readonly complete?: boolean
+  /**
+   * Whether this section's text is fixed for every assembly of this build — either a string
+   * compiled into the package or empty — so a provider may treat it as shareable prompt
+   * prefix.
+   *
+   * The contributing plugin states this about its own text; nothing infers it, and the
+   * default is false. Text that varies by session, deployment, machine, or an external
+   * source is not eligible: a shared cache entry asserts that its content is the same for
+   * every reader, so a local path or a configured persona does not qualify. Whether the
+   * section is present in a given assembly may still vary — a tool's documentation is
+   * absent where the tool is not registered — because only the text is claimed.
+   */
+  readonly stable?: boolean
 }
 
 /** Dynamic model context materialized as a durable user-role snapshot. */
@@ -93,6 +106,8 @@ export interface AssembledSection {
   text: string
   /** Whether to interpolate prompt variables. Defaults to true; false preserves literal text. */
   interpolate?: boolean
+  /** Whether the contributing section declared its text stable across assemblies. */
+  stable?: boolean
 }
 
 /** One resolved dynamic context contribution. */
@@ -283,6 +298,39 @@ export function renderPrompt(assembly: PromptAssembly): string {
     .join('\n\n')
 }
 
+/** One rendered system-prompt section, in assembly order. */
+export interface RenderedPromptSection {
+  /** The contributing section's unique name. */
+  name: string
+  /** The section's interpolated text, exactly as {@link renderPrompt} emits it. */
+  text: string
+  /** Whether the contributing section declared its text stable across assemblies. */
+  stable: boolean
+}
+
+/**
+ * Render each section's text, keeping the section identity and the stability declaration.
+ *
+ * The interpolation and dropping rules match {@link renderPrompt}; joining the returned
+ * texts with blank lines in the returned order reproduces that function's result exactly.
+ * A caller that needs to group sections differently — placing shared text ahead of
+ * session-specific text so more of a prompt can be a cache prefix — has the pieces here
+ * instead of re-deriving them from joined prose.
+ * @param assembly - the assembly whose sections and variables to render.
+ * @returns one entry per non-empty section, in assembly order.
+ */
+export function renderPromptSections(assembly: PromptAssembly): RenderedPromptSection[] {
+  const sections: RenderedPromptSection[] = []
+  for (const section of assembly.sections) {
+    const text = section.interpolate === false
+      ? section.text
+      : interpolate(section, assembly.variables, 'section')
+    if (text.length > 0) sections.push({ name: section.name, text, stable: section.stable === true })
+  }
+  return sections
+}
+
+
 /**
  * Render the complete dynamic context snapshot.
  * @param assembly - the assembly whose contexts and variables to render.
@@ -427,6 +475,9 @@ export class SystemPrompt extends Service {
         name: 'harness:identity',
         order: this.getSectionOrder('HARNESS_IDENTITY'),
         text: 'You are an AI agent powered by DeepSeek Harness.',
+        // Constant text with no variable reference, and it opens every assembly, so the
+        // leading run of stable sections starts here.
+        stable: true,
       })
     }
     this.section({
@@ -605,6 +656,7 @@ export class SystemPrompt extends Service {
           name: section.name,
           text: typeof section.text === 'function' ? section.text(context) : section.text,
           ...section.interpolate !== undefined ? { interpolate: section.interpolate } : {},
+          ...section.stable === true ? { stable: true } : {},
         }
         if (section.complete === true) completeSection = { ...assembled }
         return assembled

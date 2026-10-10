@@ -58,6 +58,7 @@ export function apply(ctx: Context, config: Config): void {
   const resolved = resolveConfig(config)
   ctx.systemPrompt.section({
     name: 'tool:session-query',
+    stable: true,
     order: ctx.systemPrompt.getSectionOrder('TOOL_SESSION_QUERY'),
     text: PROMPT_TEXT,
   })

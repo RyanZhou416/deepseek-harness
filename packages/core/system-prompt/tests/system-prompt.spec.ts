@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import SystemPrompt, {
-  AssembleContext, PromptAssembly, renderContextSnapshot, renderPrompt,
+  AssembleContext, PromptAssembly, renderContextSnapshot, renderPrompt, renderPromptSections,
 } from '@deepseek-ai/dsh-system-prompt'
 import type { PromptContextOrderName, PromptSectionOrderName } from '@deepseek-ai/dsh-system-prompt'
 
@@ -691,5 +691,36 @@ describe('SystemPrompt', () => {
       })
       expect(text).toBe('v = literal {{sneaky}} inside!')
     })
+  })
+})
+
+describe('stable prompt sections', () => {
+  it('keeps each section identity and its stability, matching the joined render', () => {
+    const assembly = {
+      sections: [
+        { name: 'a', text: 'shared opener', stable: true },
+        { name: 'b', text: 'session text' },
+        { name: 'c', text: 'later shared', stable: true },
+        { name: 'd', text: '' },
+      ],
+      contexts: [],
+      tools: [],
+      variables: {},
+    }
+    const sections = renderPromptSections(assembly)
+    expect(sections).toEqual([
+      { name: 'a', text: 'shared opener', stable: true },
+      { name: 'b', text: 'session text', stable: false },
+      { name: 'c', text: 'later shared', stable: true },
+    ])
+    // A caller that reorders these must reproduce the prompt by joining their texts.
+    expect(sections.map(section => section.text).join('\n\n')).toBe(renderPrompt(assembly))
+  })
+
+  it('declares the built-in identity stable, so every assembly has shared text', async () => {
+    const ctx = new Context()
+    await ctx.plugin(SystemPrompt)
+    const sections = renderPromptSections(await ctx.systemPrompt.assemble())
+    expect(sections[0]).toEqual({ name: 'harness:identity', text: IDENTITY, stable: true })
   })
 })

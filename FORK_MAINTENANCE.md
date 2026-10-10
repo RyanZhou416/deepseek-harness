@@ -70,6 +70,74 @@ Continuable-subagent Queue edit/remove/steer 由 alpha.2 的通用 `session.upda
 
 ## Source deltas
 
+### Stable prompt boundary for the subscription wire
+
+`@deepseek-ai/dsh-system-prompt` gained an opt-in `stable` flag on section registrations and
+`renderPromptSections`, and `GenerateOptions` gained `systemSections`, the rendered prompt
+kept as its assembled sections. The fork's Claude subscription plugin groups the sections the
+way the genuine client's prompt is shaped — shared text ahead of session-specific text — and
+emits the client's cache layout: an unmarked identity block, a `scope: "global"` marker on the
+shared side and a plain marker on the session side. The grouping lives in the plugin; the loop
+renders and logs the prompt unchanged.
+
+**Preservation rule.** Keep the addition additive. `renderPrompt`'s bytes, `system`,
+`messages`, and every existing session event must stay exactly as upstream has them; a
+provider must receive a byte-identical request whenever `systemStable` is absent, which is
+every request that does not start with a stable section. Renaming or restructuring `system`
+would change what every other provider sends.
+
+**Focused verification.** `npx vitest run packages/core/system-prompt/tests/system-prompt.spec.ts`
+covers the prefix invariant and the empty-stable case; the subscription plugin's own suite
+covers the layout it derives from the split.
+
+### Split backoff ceiling from accepted provider wait
+
+`BackoffConfig` and `ResolvedRetryBackoff` in `@deepseek-ai/dsh-llm` gained an optional
+`providerWaitMaxMs`, and `@deepseek-ai/dsh-llm-retry` bounds a provider-disclosed `Retry-After`
+by it rather than by `maxDelayMs`. `maxDelayMs` bounds only the route's own exponential
+backoff, and `providerWaitMaxMs` resolves to `maxDelayMs` when a policy omits it, so every
+policy that omits the field behaves exactly as it does upstream. The subscription plugin sets
+both: its Claude route backs off inside the client's 32-second ceiling while still sitting out
+a provider-disclosed reset for the configured hours, and one field could not express both.
+
+**Preservation rule.** Keep the addition optional and default-equal. A policy that omits
+`providerWaitMaxMs` must resolve, retry, and serialize its policy key exactly as upstream does,
+so no other provider's behavior, session events, or retry numbering change. Retain the
+separation through merges: collapsing the two ceilings restores either a local backoff that can
+grow into hours or a rate-limit wait that fails a turn the genuine client would sit out.
+
+**Focused verification.** `npx vitest run packages/llm/llm/tests/retry-policy.spec.ts
+packages/llm/llm-retry/tests` covers resolution, validation, policy-key serialization, and the
+waited disclosed reset. The subscription plugin's `test/rate-limit.spec.ts` covers both
+ceilings per route.
+
+### Tool-search block round-trip (subscriptions)
+
+The Claude subscription route can request Anthropic's tool-search tool when a tool declares
+`deferLoading`, and the response then carries `server_tool_use` (assistant) and
+`tool_search_tool_result` (user) blocks. A request that drops them is missing blocks the API
+expects, so the plugin's Anthropic translator captures both while streaming, records them on
+the assistant message's replay envelope as `response.serverBlocks` entries of
+`{ index, block }`, and splices each block back verbatim ahead of the visible harness block at
+its recorded index when the next request is built. `@tormentalabs/claude-code-wire-compat` —
+the fork's own wire library, outside this repository — accepts both block types in its message
+whitelist and enforces the same pairing invariant it applies to `tool_use`/`tool_result`: a
+result whose call id has no `server_tool_use` in the same request is invalid input. The
+envelope keeps `kind: 'claude'` and `version: 1`, and a message whose envelope carries no
+`serverBlocks` produces output identical to one built before this feature.
+
+**Preservation rule.** Keep the library's block whitelist and the plugin's capture and replay
+in step: the plugin's request building reaches these blocks only when the installed library
+knows them, so an upstream merge that rewrites either side must keep both. Envelope entries are
+optional and index-based; do not renumber or reorder the existing per-index entries, and do not
+emplace a placeholder block in the visible message to hold a position — the message builder
+drops an empty text block.
+
+**Focused verification.** `npx vitest run test/validation/content-blocks.test.ts` in the wire
+library covers the verbatim round trip, preserved extra keys, and the unpaired-rejection
+invariant. The plugin's `test/translate.spec.ts` covers streaming capture with insertion
+positions, the chained stream-to-rebuild replay, and the no-capture case.
+
 ### Claude proxy-only egress
 
 `DSH_CLAUDE_PROXY_URL` 为 `dsh-http-proxy` 的 Claude 域名提供不允许 `NO_PROXY` 绕过的专用代理路由，非法配置拒绝启动，代理连接失败不回退直连。域名范围和保护边界以[包说明](packages/util/http-proxy/README.md#protected-claude-destinations)为准；这是显式代理保护，不检查 TUN 或最终公网出口。该变量只允许启动环境和 DSH_HOME 的 `.env` 提供，项目 `.env` 不能改写它。保留 `policy.spec.ts`、`claude-egress.spec.ts` 和 app-boot 的来源校验测试。运行中 Host 的配置尚未启用该源码功能；须停机后构建并在本机配置代理地址，不能仅凭 TUN 网卡存在就放行。
@@ -525,6 +593,8 @@ Profile 注册 `dsh-sdk-process-raw` 和 `subagent_process`：SDK profile、独�
 | Live checkpoint ownership transfer | Preserve | Validate already-detached live rows without recopying; keep cold-row detachment and log-before-cache durability |
 | Production static-library environment | Preserve | Keep NODE_ENV branches until the final shell build; development freezes and production bypass both need built checks |
 | Workspace ordering work | Preserve | Keep indexed fork moves, shared current-session derivation, saved/pin/archive semantics and deep/cyclic parent cases |
+| Tool-search block round trip | Preserve | Keep the library's block whitelist and the plugin's capture/replay in step, and keep envelope entries optional and index-based |
+| Separate disclosed-wait ceiling | Preserve | Keep `providerWaitMaxMs` optional and default-equal to `maxDelayMs`; a policy that omits it must resolve, retry, and serialize its policy key exactly as upstream |
 | Optional catalog hint exclusions | Preserve | Default to all keys, protect sessionListMetadata, filter before view/parse, retain explicit reads and unknown plugins |
 | Connection recovery under load | Preserve | Keep loopback independent of external offline hints, one progress-aware bounded Ping, fresh control readers after terminal failures, display-only title retention and close diagnostics |
 | Status and catalog derivation | Preserve | Publish one list-cut status result, skip unchanged state work, reuse lineage and row inputs, preserve synchronous Remote status and exact retention/label invalidation |
@@ -673,3 +743,17 @@ corepack pnpm@10.30.2 verify
 ## Dev Note
 
 本文是 fork-local 维护参考，不属于 DeepSeek 官方文档网站，也不承诺当前 `upstream/master` 的版本号长期不变。每次上游合并、插件替换、默认值变化、外置 profile 变化或 Queue API 行为变化后，维护者必须在同一提交中更新本文；若某项被官方等价替代，应记录替代 owner 与验证，然后删除本 fork 的重复实现。
+
+## Local reverse-engineering workbench (`.cc-carve/`)
+
+**Behavior.** `.cc-carve/` holds the Claude Code reverse-engineering assets used to keep
+the subscription plugin's Claude path faithful: segmented carves of client builds, the
+desktop application's restored source tree, and the verified client binaries.
+
+**Preservation rule.** The directory is local-only and git-ignored; an upstream merge
+must not delete the `.cc-carve/` ignore entry in `.gitignore`. The assets are rebuilt
+from public release artifacts (checksums in the desktop app's manifest) rather than
+committed, so nothing here needs to survive a merge.
+
+**Verification.** `git check-ignore -v .cc-carve` reports the ignore rule, and
+`git status --porcelain` lists no path under `.cc-carve/`.

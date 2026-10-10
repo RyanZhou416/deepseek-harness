@@ -7,6 +7,26 @@ import type { RetryPolicyConfig } from '@deepseek-ai/dsh-llm'
 import { MAX_TIMER_DELAY_MS } from '@deepseek-ai/dsh-timeout'
 
 describe('provider retry policy', () => {
+  it('separates the disclosed-wait ceiling from the local backoff ceiling', () => {
+    const policy = resolveRetryPolicy({
+      mode: 'normal',
+      backoff: { initialDelayMs: 500, maxDelayMs: 32_000, providerWaitMaxMs: 6 * 3_600_000, jitterRatio: 0.25 },
+    }, 'provider.retryPolicy')
+
+    // A provider may ask for hours while the route's own backoff stays seconds apart.
+    expect(policy.maxDelayMs).toBe(32_000)
+    expect(policy.providerWaitMaxMs).toBe(6 * 3_600_000)
+  })
+
+  it('rejects a disclosed-wait ceiling that is not a usable delay', () => {
+    for (const providerWaitMaxMs of [0, -1, Number.NaN, MAX_TIMER_DELAY_MS + 1]) {
+      expect(() => resolveRetryPolicy({
+        mode: 'normal',
+        backoff: { providerWaitMaxMs },
+      }, 'provider.retryPolicy')).toThrow(/providerWaitMaxMs/)
+    }
+  })
+
   it('resolves immutable normal defaults', () => {
     const policy = resolveRetryPolicy(undefined, 'provider.retryPolicy')
 
@@ -16,6 +36,7 @@ describe('provider retry policy', () => {
       retryableCodes: ['EMPTY_RESPONSE', 'RATE_LIMIT', 'SERVER', 'TIMEOUT', 'TRANSPORT'],
       initialDelayMs: 500,
       maxDelayMs: 10_000,
+      providerWaitMaxMs: 10_000,
       jitterRatio: 0.1,
     })
     expect(Object.isFrozen(policy)).toBe(true)
@@ -45,6 +66,7 @@ describe('provider retry policy', () => {
       retryableCodes: ['BUSY'],
       initialDelayMs: 25,
       maxDelayMs: 100,
+      providerWaitMaxMs: 100,
       jitterRatio: 0,
     })
   })
@@ -54,6 +76,7 @@ describe('provider retry policy', () => {
       mode: 'always',
       initialDelayMs: 500,
       maxDelayMs: 10_000,
+      providerWaitMaxMs: 10_000,
       jitterRatio: 0.1,
     })
     expect(RetryPolicySchema).toBeDefined()
@@ -70,6 +93,7 @@ describe('provider retry policy', () => {
       mode: 'always',
       initialDelayMs: 500,
       maxDelayMs: 10_000,
+      providerWaitMaxMs: 10_000,
       jitterRatio: 0.1,
     })
   })

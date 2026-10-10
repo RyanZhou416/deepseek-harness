@@ -28,8 +28,9 @@ import type { Scope } from '@deepseek-ai/dsh-scope'
 import { createScope } from '@deepseek-ai/dsh-scope'
 import type { EpochHeader, RequestContext, Session, SessionId, TurnEndReason, UserMessage } from '@deepseek-ai/dsh-session'
 import { canonicalHeader, headerEquals } from '@deepseek-ai/dsh-session'
-import { joinContextSections, renderContextSections, renderPrompt } from '@deepseek-ai/dsh-system-prompt'
+import { joinContextSections, renderContextSections, renderPrompt, renderPromptSections } from '@deepseek-ai/dsh-system-prompt'
 import type { PromptAssembly } from '@deepseek-ai/dsh-system-prompt'
+import type { SystemPromptSection } from '@deepseek-ai/dsh-llm'
 import type {} from '@deepseek-ai/dsh-session-projection'
 import type { Context } from '@deepseek-ai/cordis'
 import { ReactLoopInbox } from './inbox.ts'
@@ -400,6 +401,12 @@ export class ReactLoopAgent implements Agent {
 
     const { assembly } = decision
     const renderedPrompt = renderPrompt(assembly)
+    // The same sections the render joined, kept identifiable so an adapter can group shared
+    // text ahead of session-specific text without re-deriving the grouping from prose. The
+    // request is frozen at dispatch, and these are its only mutable members.
+    const promptSections = Object.freeze(
+      renderPromptSections(assembly).map(section => Object.freeze({ ...section })),
+    )
     let firstAttempt = true
     while (true) {
       const { config, preparedCall } = await this.prepareRequest(turn, step, signal)
@@ -420,7 +427,7 @@ export class ReactLoopAgent implements Agent {
         }
       }
       firstAttempt = false
-      const request = this.buildRequest(config, preparedCall, assembly.tools, startsRequestSeries, signal)
+      const request = this.buildRequest(config, preparedCall, assembly.tools, startsRequestSeries, signal, promptSections)
       const live = new AssistantStreamAttempt(
         this.session.id,
         ++this.assistantAttemptCounter,
@@ -600,6 +607,7 @@ export class ReactLoopAgent implements Agent {
     tools: GenerateOptions['tools'] & object,
     startsRequestSeries: boolean,
     signal: AbortSignal,
+    promptSections: readonly SystemPromptSection[],
   ): GenerateOptions {
     const { session } = this
     const surfaceGeneration = session.surface.contentGeneration
@@ -655,6 +663,7 @@ export class ReactLoopAgent implements Agent {
       ...header.config,
       messages: boundaryMessages,
       ...header.tools !== undefined ? { tools: header.tools } : {},
+      ...promptSections.length > 0 ? { systemSections: promptSections } : {},
       sessionId: this.session.id,
       signal,
     }))

@@ -131,6 +131,7 @@ export async function apply(ctx: Context): Promise<void> {
     })
     inner.systemPrompt.section({
       name: 'computer-use:cua-driver-native',
+      stable: true,
       order: inner.systemPrompt.getSectionOrder('TOOL_COMPUTER_USE'),
       text: GUIDANCE,
     })

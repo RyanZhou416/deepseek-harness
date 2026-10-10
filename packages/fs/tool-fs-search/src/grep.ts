@@ -274,6 +274,7 @@ export function presentGrepResult(
 export function applyGrepTool(ctx: Context, caps: GrepToolCaps): void {
   ctx.systemPrompt.section({
     name: 'tool:grep',
+    stable: true,
     order: ctx.systemPrompt.getSectionOrder('TOOL_GREP'),
     text: ({ scope }) => ctx.tools.get('grep', scope) === undefined
       ? ''

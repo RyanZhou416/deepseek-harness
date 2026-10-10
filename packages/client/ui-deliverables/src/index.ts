@@ -30,6 +30,7 @@ export function apply(ctx: Context): void {
   registerPresentOpen(ctx)
   ctx.systemPrompt.section({
     name: 'ui:deliverable-file-references',
+    stable: true,
     order: ctx.systemPrompt.getSectionOrder('DELIVERABLE_FILE_REFERENCES'),
     text: FILE_REFERENCE_PROMPT,
   })

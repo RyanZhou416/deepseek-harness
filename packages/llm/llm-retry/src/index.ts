@@ -65,13 +65,14 @@ function localDelay(config: ResolvedRetryPolicy, retry: number, random: () => nu
 
 function retryPolicyKey(policy: ResolvedRetryPolicy): string {
   return policy.mode === 'always'
-    ? JSON.stringify([policy.mode, policy.initialDelayMs, policy.maxDelayMs, policy.jitterRatio])
+    ? JSON.stringify([policy.mode, policy.initialDelayMs, policy.maxDelayMs, policy.providerWaitMaxMs, policy.jitterRatio])
     : JSON.stringify([
       policy.mode,
       policy.maxRetries,
       [...policy.retryableCodes].sort(),
       policy.initialDelayMs,
       policy.maxDelayMs,
+      policy.providerWaitMaxMs,
       policy.jitterRatio,
     ])
 }
@@ -227,7 +228,7 @@ export function apply(ctx: Context, config: Config = {}, internals: RetryInterna
     if (failure.providerRetryAfterMs !== undefined
       && Number.isFinite(failure.providerRetryAfterMs)
       && failure.providerRetryAfterMs > 0) {
-      if (failure.providerRetryAfterMs > policy.maxDelayMs) {
+      if (failure.providerRetryAfterMs > policy.providerWaitMaxMs) {
         if (policy.mode === 'normal') return next()
         delayMs = localDelay(policy, retry, random)
       } else {

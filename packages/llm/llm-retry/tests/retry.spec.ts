@@ -200,7 +200,7 @@ describe('provider-routed retry policy', () => {
       step: 1,
       provider: 'mock',
       mode: 'normal',
-      policyKey: '["normal",2,["RATE_LIMIT","SERVER"],500,10000,0]',
+      policyKey: '["normal",2,["RATE_LIMIT","SERVER"],500,10000,10000,0]',
       retry: 1,
       maxRetries: 2,
       delayMs: 500,

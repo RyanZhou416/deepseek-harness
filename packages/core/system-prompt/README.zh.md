@@ -14,6 +14,7 @@ kind: "package-reference"
 ## 目录
 
 - [使用本包](#use-this-package)
+  - [识别共享提示词段](#identify-shared-prompt-sections)
 - [理解实现](#understand-the-implementation)
 - [进一步探索](#further-exploration)
 - [模型体验](#model-experience)
@@ -51,19 +52,14 @@ kind: "package-reference"
 
 生成的[配置目录](../../../docs/config-catalog.zh.md#deepseek-aidsh-system-prompt)是每个受支持字段的穷尽式真源。没有恰好一个其余项或存在重复项的 `toolOrder` 列表会在加载时失败；已列名称没有对应已注册工具会使每次 `assemble()` 被拒绝。
 
-### 贡献提示词段
+<a id="identify-shared-prompt-sections"></a>
+### 识别共享提示词段
 
-段携带静态或按上下文解析的文本与 `order`；它们先按顺序值升序拼接，顺序值相同时再按名称的代码单元顺序排列。仓库自带贡献方通过 `ctx.systemPrompt.getSectionOrder(name)` 解析集中分配的位置；runtime-context 贡献方使用 `getContextOrder(name)`。外部贡献可以使用任意有限的顺序值。`complete: true` 段会在组装后成为精确的完整提示词；有效的 complete 段超过一个时，组装会失败。
+`renderPromptSections(assembly)` 按组装顺序为每个非空段返回一个条目，包含它的 `name`、插值后的 `text` 与 `stable` 声明。它执行与 `renderPrompt` 相同的插值与丢弃规则，因此用空行连接这些文本即可精确复现该函数的结果。
 
-```text
-ctx.systemPrompt.section({
-  name: 'tool:bash',
-  order: 100,
-  text: 'Prefer bash for file and process operations.',
-})
-```
+段对自身文本声明 `stable: true`。没有任何机制会推断它，默认值为 false。该声明覆盖本次构建中每次组装都固定不变的文本，即编译进包中的字符串，或空文本。随会话、部署、机器或外部来源变化的文本不符合条件，因为共享缓存条目断言其内容对每个读取方都相同。段是否出现仍可能因组装而异：某个工具未注册时，它的文档段就不存在。
 
-在段上设置 `interpolate: false` 可原样保留文本，包括生成的工具文档中的 `{{…}}` 组。其他段默认执行变量插值。
+提供方正是靠它把文本放到会话特定内容之前：缓存按前缀匹配，因此只有位于提示词前部的文本才能共享。
 
 ### 贡献提示词变量
 

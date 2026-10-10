@@ -222,9 +222,9 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
     methods: [
       {
         signature: 'currentInitiator(): Agent | undefined',
-        description: 'Read the Agent that initiated the inherited asynchronous driver chain. Use this optional form for logging, tracing, metrics, or host attribution that also supports agentless calls. When a parent creates a child, setup reports the causal parent while the setup callback\'s Agent parameter identifies the child.',
+        description: 'Read the Agent that initiated the inherited asynchronous driver chain. Use this optional form for logging, tracing, metrics, or host attribution that also supports agentless calls. When a parent creates a child, setup reports the causal parent while the setup callback\'s Agent parameter identifies the child. The boundary holds its Agent weakly, so a continuation that outlives every other reference to that Agent reads `undefined`.',
         parameters: [],
-        returns: 'the inherited Agent, or `undefined` outside an initiator boundary and inside an explicit clearing boundary.',
+        returns: 'the inherited Agent, or `undefined` outside an initiator boundary, inside an explicit clearing boundary, and after the inherited Agent was collected.',
         throws: ['when this service instance has been disposed.'],
       },
       {
@@ -4427,7 +4427,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'AssembledSection',
-    declaration: 'export interface AssembledSection {\n    name: string;\n    text: string;\n    interpolate?: boolean;\n}',
+    declaration: 'export interface AssembledSection {\n    name: string;\n    text: string;\n    interpolate?: boolean;\n    stable?: boolean;\n}',
   },
   {
     name: 'AssistantMessage',
@@ -5059,7 +5059,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'GenerateOptions',
-    declaration: 'export interface GenerateOptions {\n    provider: string;\n    model: string;\n    reasoningEffort?: ReasoningEffortId;\n    messages: RequestMessage[];\n    system?: string;\n    tools?: ToolSchema[];\n    temperature?: number;\n    maxTokens?: number;\n    stop?: string[];\n    signal?: AbortSignal;\n    sessionId?: Branded<\'SessionId\'>;\n    purpose?: \'compaction\' | \'session-title\';\n}',
+    declaration: 'export interface GenerateOptions {\n    provider: string;\n    model: string;\n    reasoningEffort?: ReasoningEffortId;\n    messages: RequestMessage[];\n    system?: string;\n    systemSections?: readonly SystemPromptSection[];\n    tools?: ToolSchema[];\n    temperature?: number;\n    maxTokens?: number;\n    stop?: string[];\n    signal?: AbortSignal;\n    sessionId?: Branded<\'SessionId\'>;\n    purpose?: \'compaction\' | \'session-title\';\n}',
   },
   {
     name: 'GenericCallView',
@@ -5831,7 +5831,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'PromptSection',
-    declaration: 'export interface PromptSection {\n    readonly name: string;\n    readonly order: number;\n    readonly text: string | ((context: AssembleContext) => string);\n    readonly interpolate?: boolean;\n    readonly complete?: boolean;\n}',
+    declaration: 'export interface PromptSection {\n    readonly name: string;\n    readonly order: number;\n    readonly text: string | ((context: AssembleContext) => string);\n    readonly interpolate?: boolean;\n    readonly complete?: boolean;\n    readonly stable?: boolean;\n}',
   },
   {
     name: 'PromptSectionOrderName',
@@ -5991,7 +5991,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'ResolvedRetryBackoff',
-    declaration: 'export interface ResolvedRetryBackoff {\n    readonly initialDelayMs: number;\n    readonly maxDelayMs: number;\n    readonly jitterRatio: number;\n}',
+    declaration: 'export interface ResolvedRetryBackoff {\n    readonly initialDelayMs: number;\n    readonly maxDelayMs: number;\n    readonly providerWaitMaxMs: number;\n    readonly jitterRatio: number;\n}',
   },
   {
     name: 'ResolvedRetryPolicy',
@@ -7076,6 +7076,10 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   {
     name: 'SystemPromptMessageSource',
     declaration: 'export interface SystemPromptMessageSource {\n    kind: \'system-prompt\';\n}',
+  },
+  {
+    name: 'SystemPromptSection',
+    declaration: 'export interface SystemPromptSection {\n    readonly name: string;\n    readonly text: string;\n    readonly stable: boolean;\n}',
   },
   {
     name: 'SystemPromptUpdate',

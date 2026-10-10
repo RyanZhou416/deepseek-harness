@@ -403,6 +403,7 @@ export function apply(ctx: Context, config: Config): void {
   const resolved = resolveConfig(config)
   ctx.systemPrompt.section({
     name: 'tool:ralph',
+    stable: true,
     order: ctx.systemPrompt.getSectionOrder('TOOL_RALPH'),
     text: 'Use the ralph tool ONLY when the direct human explicitly asks for a Ralph loop or fresh-agent iterative execution. Each Ralph round starts a fresh child with no conversation seed and uses the shared workspace as durable memory. Completion and blockers are worker reports, not independent evaluation. Use plain subagents or workflows for bounded delegation and fan-out.',
   })

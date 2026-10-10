@@ -188,7 +188,7 @@ function mountTools(ctx: Context, resources: SessionResources<BrowserResource>):
       },
     }))
   }
-  ctx.systemPrompt.section({ name: 'browser-use:stagehand-native', text: GUIDANCE, order: ctx.systemPrompt.getSectionOrder('TOOL_COMPUTER_USE') })
+  ctx.systemPrompt.section({ name: 'browser-use:stagehand-native', stable: true, text: GUIDANCE, order: ctx.systemPrompt.getSectionOrder('TOOL_COMPUTER_USE') })
   ctx.on('tools/execute', async (exec, next) => {
     if (!names.has(exec.name)) return next()
     const agent = exec.agent

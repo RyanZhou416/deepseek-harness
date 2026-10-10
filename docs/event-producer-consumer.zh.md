@@ -9,7 +9,7 @@
 
 | Event | Mode | Declared in | Dispatchers | Listeners |
 | --- | --- | --- | --- | --- |
-| `agent-loop/config-start-failed` | `emit` | [`packages/core/agent-loop/src/index.ts:239`](../packages/core/agent-loop/src/index.ts) | [`agent-loop`](../packages/core/agent-loop) (`events.dispatch`) | - |
+| `agent-loop/config-start-failed` | `emit` | [`packages/core/agent-loop/src/index.ts:240`](../packages/core/agent-loop/src/index.ts) | [`agent-loop`](../packages/core/agent-loop) (`events.dispatch`) | - |
 | `agent-preset/selected` | `emit` | [`packages/preset/agent-preset-registry/src/types.ts:71`](../packages/preset/agent-preset-registry/src/types.ts) | [`agent-preset-registry`](../packages/preset/agent-preset-registry) (`emit`) | `remotes` |
 | `agent/assistant-stream` | `emit` | [`packages/core/agent/src/runtime-types.ts:386`](../packages/core/agent/src/runtime-types.ts) | [`agent-loop`](../packages/core/agent-loop) (`emit`) | [`headless`](../packages/bundle/headless), `session-controller` |
 | `agent/created` | `serial` | [`packages/core/agent/src/runtime-types.ts:265`](../packages/core/agent/src/runtime-types.ts) | [`agent`](../packages/core/agent) (`serial`) | `agent-team`, `browser-use-runtime`, [`file-reference-local`](../packages/context/file-reference-local), [`goal`](../packages/goal/goal), [`goal-round-driver`](../packages/goal/goal-round-driver), [`hooks-claude-code`](../packages/hooks/hooks-claude-code), [`hooks-codex`](../packages/hooks/hooks-codex), [`loader-smoke`](../packages/test-support/loader-smoke), [`schedule`](../packages/schedule/schedule), `session-controller`, `tool-agent-team`, [`tool-subagent`](../packages/subagent/tool-subagent) |

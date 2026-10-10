@@ -299,6 +299,7 @@ export function applyGlobTool(ctx: Context, caps: GlobToolCaps): void {
     : 'while a larger one keeps the modification-time-ordered head.'
   ctx.systemPrompt.section({
     name: 'tool:glob',
+    stable: true,
     order: ctx.systemPrompt.getSectionOrder('TOOL_GLOB'),
     text: ({ scope }) => ctx.tools.get('glob', scope) === undefined
       ? ''

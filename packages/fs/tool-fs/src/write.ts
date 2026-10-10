@@ -61,6 +61,7 @@ interface WriteToolArgs {
 export function applyWriteTool(ctx: Context, sandbox: FsSandboxController): void {
   ctx.systemPrompt.section({
     name: 'tool:write',
+    stable: true,
     order: ctx.systemPrompt.getSectionOrder('TOOL_WRITE'),
     text: ({ scope }) => ctx.tools.get('write', scope) === undefined
       ? ''

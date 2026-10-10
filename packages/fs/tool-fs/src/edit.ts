@@ -75,6 +75,7 @@ export function formatEditOutput(displayPath: string, replaceAll: boolean): stri
 export function applyEditTool(ctx: Context, sandbox: FsSandboxController): void {
   ctx.systemPrompt.section({
     name: 'tool:edit',
+    stable: true,
     order: ctx.systemPrompt.getSectionOrder('TOOL_EDIT'),
     text: ({ scope }) => ctx.tools.get('edit', scope) === undefined
       ? ''

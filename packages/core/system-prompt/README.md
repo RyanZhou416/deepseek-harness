@@ -14,6 +14,7 @@ English | [中文](README.zh.md)
 ## Table of Contents
 
 - [Use this package](#use-this-package)
+  - [Identify shared prompt sections](#identify-shared-prompt-sections)
 - [Understand the implementation](#understand-the-implementation)
 - [Further Exploration](#further-exploration)
 - [Model Experience](#model-experience)
@@ -51,19 +52,14 @@ The config owns the fixed opener, runtime context, deployment persona prefix and
 
 The generated [configuration catalog](../../../docs/config-catalog.md#deepseek-aidsh-system-prompt) is the exhaustive source for every accepted field. A `toolOrder` list without exactly one rest entry or with duplicates fails at load; a listed name with no registered tool rejects every `assemble()`.
 
-### Contribute a prompt section
+### Identify shared prompt sections
 
-Sections carry static or context-resolved text with an `order`; they are concatenated in ascending order and equal orders use code-unit name order. Repository-owned contributors resolve centrally allocated positions through `ctx.systemPrompt.getSectionOrder(name)`; runtime-context contributors use `getContextOrder(name)`. External contributions may use any finite order. A `complete: true` section becomes the exact complete prompt after assembly; more than one effective complete section makes assembly fail.
+`renderPromptSections(assembly)` returns one entry per non-empty section — its `name`, its interpolated `text`, and its `stable` declaration — in assembly order. It applies the same interpolation and dropping rules as `renderPrompt`, so joining the texts with blank lines reproduces that function's result exactly.
 
-```text
-ctx.systemPrompt.section({
-  name: 'tool:bash',
-  order: 100,
-  text: 'Prefer bash for file and process operations.',
-})
-```
+A section declares `stable: true` about its own text. Nothing infers it, and the default is false. The declaration covers text fixed for every assembly of this build — a string compiled into the package, or empty. Text that varies by session, deployment, machine, or an external source is not eligible, because a shared cache entry asserts that its content is the same for every reader. Presence may still vary between assemblies: a tool's documentation is absent where that tool is not registered.
 
-Set `interpolate: false` on a section to preserve its text literally, including `{{…}}` groups in generated tool documentation. Other sections interpolate variables by default.
+This is what a provider needs to place text ahead of session-specific content, since a cache is matched along a prefix, so only text at the front of a prompt can be shared.
+
 
 ### Contribute a prompt variable
 
