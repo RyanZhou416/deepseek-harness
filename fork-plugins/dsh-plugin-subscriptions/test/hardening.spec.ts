@@ -1,5 +1,6 @@
 /**
- * Contracts at the provider boundary: the OAuth endpoint override stays on https, a provider
+ * Contracts at the provider boundary: the OAuth endpoint override accepts only the origins the
+ * client approves, a provider
  * error message carries the provider's own structured fields instead of raw body text, the
  * Codex search provider claims the shared web_search seam only with an account behind it, and
  * the transport child runs with a curated environment rather than the host's.
@@ -18,7 +19,7 @@ import { childEnvironment } from '../src/transport/bridge.js'
 const HERE = dirname(fileURLToPath(import.meta.url))
 const PLUGIN_ROOT = join(HERE, '..', '..')
 
-test('the OAuth endpoint override refuses anything but https', () => {
+test('the OAuth endpoint override refuses an origin the client does not approve', () => {
   // Importing the module is what reads the variable, so this runs in a child process.
   const program = "import('./src/providers/claude.js').then(() => process.exit(0), (error) => { console.error(error.message); process.exit(3) })"
   let failed = false
@@ -31,9 +32,9 @@ test('the OAuth endpoint override refuses anything but https', () => {
   } catch (error) {
     failed = true
     const stderr = String((error as { stderr?: Buffer }).stderr ?? '')
-    assert.match(stderr, /must use https/, 'the refusal names the reason')
+    assert.match(stderr, /not an approved endpoint/, 'the refusal names the reason')
   }
-  assert.equal(failed, true, 'an http endpoint is refused at load')
+  assert.equal(failed, true, 'an unapproved endpoint is refused at load')
   assert.match(CLAUDE_TOKEN_URL, /^https:\/\//)
   assert.match(CLAUDE_AUTHORIZE_URL, /^https:\/\//)
 })

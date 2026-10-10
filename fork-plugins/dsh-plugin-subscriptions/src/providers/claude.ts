@@ -40,6 +40,8 @@ import {
 } from './claude-wire.js'
 import { STALE_TOOL_RESULT_IDLE_MS, planContextManagement } from './context-management.js'
 import type { ClaudeWireThinking } from './claude-wire.js'
+import { claudeBuiltInCatalogue, mergeClaudeCatalogue } from './claude-catalogue.js'
+import type { ClaudeCatalogueOption } from './claude-catalogue.js'
 import {
   httpLlmError,
   idleWatchdog,
@@ -70,29 +72,35 @@ import { parseUnifiedRateLimit, rememberUnifiedRateLimit } from './unified-rate-
 
 export const CLAUDE_CLIENT_ID = '9d1c250a-e61b-44d9-88ed-5944d1962f5e'
 /**
+ * The OAuth endpoints CLAUDE_CODE_CUSTOM_OAUTH_URL may name, as the client pins them.
+ *
+ * The client strips one trailing slash from the value and accepts only these three
+ * origins; any other value aborts startup with "is not an approved endpoint". The
+ * token endpoint receives this account's tokens, so no arriving `.env` file may
+ * choose it.
+ */
+const CLAUDE_APPROVED_OAUTH_ORIGINS: readonly string[] = [
+  'https://beacon.claude-ai.staging.ant.dev',
+  'https://claude.fedstart.com',
+  'https://claude-staging.fedstart.com',
+]
+/**
  * OAuth hosts, as the client pins them.
  *
  * The authorize page for a claude.ai account lives on claude.com; the console variant
  * lives on platform.claude.com, which is also the token host; this plugin takes the
- * claude.ai path only. The client additionally
- * honours CLAUDE_CODE_CUSTOM_OAUTH_URL, restricting it to a list of approved endpoints
- * that is not reproduced here: an operator setting it is choosing the endpoint, and a
- * weaker host check would only mislead. It is accepted over https only.
+ * claude.ai path only. Setting CLAUDE_CODE_CUSTOM_OAUTH_URL moves both to that origin,
+ * which must be one of {@link CLAUDE_APPROVED_OAUTH_ORIGINS}.
  */
 const CLAUDE_OAUTH_ORIGIN = ((): string | undefined => {
   const raw = process.env.CLAUDE_CODE_CUSTOM_OAUTH_URL
   if (raw === undefined || raw.trim() === '') return undefined
-  const trimmed = raw.trim().replace(/\/+$/, '')
-  let parsed: URL
-  try {
-    parsed = new URL(trimmed)
-  } catch {
+  const trimmed = raw.trim().replace(/\/$/, '')
+  if (!CLAUDE_APPROVED_OAUTH_ORIGINS.includes(trimmed)) {
     throw new Error(
-      'CLAUDE_CODE_CUSTOM_OAUTH_URL must be an absolute https URL, e.g. https://gateway.example/oauth',
+      'CLAUDE_CODE_CUSTOM_OAUTH_URL is not an approved endpoint: set it to '
+      + `${CLAUDE_APPROVED_OAUTH_ORIGINS.join(', ')}, because the token endpoint receives this account's tokens`,
     )
-  }
-  if (parsed.protocol !== 'https:') {
-    throw new Error('CLAUDE_CODE_CUSTOM_OAUTH_URL must use https: the token endpoint receives this account\'s tokens')
   }
   return trimmed
 })()
@@ -936,29 +944,25 @@ function claudeReasoning(capabilities: ClaudeModelCapabilities | undefined): Dis
 }
 
 /**
- * One entry of the bootstrap response. The endpoint carries display text only: model
- * limits and capabilities belong to the pinned profile, which mirrors the client's own
- * built-in catalogue.
+ * The bootstrap document's shape; anything else is discarded.
  */
-interface ClaudeBootstrapOption {
-  model?: string
-  name?: string
-  description?: string
-  disabled_reason?: string | null
-}
-
-/** The bootstrap document's shape; anything else is discarded. */
 interface ClaudeBootstrapDocument {
   client_data?: unknown
-  additional_model_options?: ClaudeBootstrapOption[]
+  additional_model_options?: ClaudeCatalogueOption[]
 }
 
 /**
- * Read the model options the service supplements the built-in catalogue with.
+ * Read the account's Claude catalogue: the client's own built-in table with the model
+ * options this account adds to it.
  *
- * A response that does not match the document's shape yields no options, which is what the
- * client does with one: the catalogue it already carries stays authoritative, and this call
- * adds entries it does not know. A model the service marks disabled is left out.
+ * The endpoint carries additions, not a catalogue — its own field is named
+ * `additional_model_options` beside `additional_model_costs` — so the built-in table is
+ * what the rows are built from and the response is merged onto it. A response that does
+ * not match the document's shape, or one the endpoint refuses, leaves the built-in table
+ * standing, which is what the client does with one: the catalogue it already carries
+ * stays authoritative, and this call only adds to it. An option the service marks
+ * disabled is listed as a disabled row rather than dropped, so the account sees that the
+ * model exists and cannot use it.
  *
  * @param session - the account whose token authenticates the read.
  * @param extraHeaders - the desktop client headers, which this request carries like every
@@ -969,9 +973,9 @@ interface ClaudeBootstrapDocument {
  *   one, because it asks while a session is running; a listing has none, so the profile's own
  *   first catalogue entry stands in for it rather than sending a request the client's shape
  *   has no counterpart for.
- * @returns the additional options, or none when the endpoint answered with something else.
+ * @returns the catalogue rows for this account.
  */
-export async function fetchClaudeModelOptions(
+export async function fetchClaudeCatalogue(
   session: ClaudeSession,
   extraHeaders: readonly (readonly [string, string])[] = [],
   fetchFn: FetchFn = proxiedFetch,
@@ -998,8 +1002,8 @@ export async function fetchClaudeModelOptions(
     },
     signal: signal === undefined ? timeout : AbortSignal.any([signal, timeout]),
   })
-  // An endpoint that refuses the read is not an error: the catalogue stands on its own.
-  if (!response.ok) return []
+  // An endpoint that refuses the read is not an error: the built-in catalogue stands on its own.
+  if (!response.ok) return claudeBuiltInCatalogue()
   const payload = await response.json() as ClaudeBootstrapDocument
   // The same document that supplements the catalogue carries the client data the request
   // header is drawn from, so one read serves both.
@@ -1008,17 +1012,8 @@ export async function fetchClaudeModelOptions(
     if (typeof atis === 'string' && atis.length > 0) clientAtis.set(account, atis)
   }
   const options = payload.additional_model_options
-  if (!Array.isArray(options)) return []
-  const models: DiscoveredModel[] = []
-  for (const option of options) {
-    if (typeof option?.model !== 'string' || option.model.length === 0) continue
-    if (option.disabled_reason != null) continue
-    models.push({
-      id: option.model,
-      name: typeof option.name === 'string' && option.name.length > 0 ? option.name : option.model,
-    })
-  }
-  return models
+  if (!Array.isArray(options)) return claudeBuiltInCatalogue()
+  return mergeClaudeCatalogue(claudeBuiltInCatalogue(), options)
 }
 
 /**
@@ -1102,7 +1097,7 @@ export class ClaudeAdapter extends LlmAdapter {
     // other request this adapter sends. A session reaching the wire always carries a device
     // id; the account fields are the fallback for a listing taken before it is backfilled.
     const seed = session.deviceId ?? account ?? session.accountUuid ?? 'claude'
-    return fetchClaudeModelOptions(
+    return fetchClaudeCatalogue(
       session,
       Object.entries(desktopClientHeaders()),
       this.options.fetchFn,
@@ -1141,9 +1136,12 @@ export class ClaudeAdapter extends LlmAdapter {
     }))
   }
 
-  /** One discovered entry as a picker row; the Claude catalog carries no description. */
+  /** One discovered entry as a picker row, keeping the display text the account's options added. */
   private listed(provider: string, model: DiscoveredModel): LlmModelInfo {
-    return catalogRow(provider, model, CLAUDE_MODALITIES)
+    return catalogRow(provider, model, CLAUDE_MODALITIES, {
+      ...model.description === undefined ? {} : { description: model.description },
+      ...model.disabledReason === undefined ? {} : { disabledReason: model.disabledReason },
+    })
   }
 
   override providerInfo(provider: string): LlmProviderInfo {

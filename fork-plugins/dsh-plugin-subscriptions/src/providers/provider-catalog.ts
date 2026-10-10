@@ -181,12 +181,14 @@ export class ProviderCatalog {
 
 /**
  * Picker-row fields only some providers discover: the catalog description, the
- * Codex sort priority, and Cursor's advertised context size.
+ * Codex sort priority, the provider's own context size, and an entry the account
+ * cannot select.
  */
 export interface CatalogRowExtras {
   description?: string
   priority?: number
   contextWindow?: number
+  disabledReason?: string
 }
 
 /**

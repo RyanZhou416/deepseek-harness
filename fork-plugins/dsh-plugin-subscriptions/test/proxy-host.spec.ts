@@ -29,13 +29,16 @@ test('disabled and bypassed plugin proxy preserve the host global dispatcher, in
   setGlobalDispatcher(host)
   try {
     const target = 'https://subscriptions.example'
+    // The probe reaches only the destinations this plugin's providers use.
+    const probeTarget = 'https://api.x.ai/v1/models'
     const pool = host.get(target)
-    for (const bypass of [false, true]) {
-      await proxySetConfig({ enabled: bypass, url: 'http://127.0.0.1:1', bypass: ['subscriptions.example'] })
+    const probePool = host.get('https://api.x.ai')
+    for (const enabled of [false, true]) {
+      await proxySetConfig({ enabled, url: 'http://127.0.0.1:1', bypass: ['subscriptions.example', 'api.x.ai'] })
       pool.intercept({ path: '/', method: 'GET' }).reply(200, 'host-routed')
       assert.equal(await (await proxiedFetch(target)).text(), 'host-routed')
-      pool.intercept({ path: '/', method: 'GET' }).reply(204)
-      const probe = await proxyTestConnection(target)
+      probePool.intercept({ path: '/v1/models', method: 'GET' }).reply(204)
+      const probe = await proxyTestConnection(probeTarget)
       assert.equal(probe.ok, true)
       assert.equal(probe.status, 204)
       assert.equal(probe.viaProxy, false, 'means no plugin override, not direct transport')
@@ -189,5 +192,34 @@ test('an enabled plugin proxy stays authoritative when the host published nothin
     // fetch is never reached; the closed proxy port makes the attempt reject.
     await assert.rejects(proxiedFetch('https://other-provider.example/v1/models'))
     assert.deepEqual(dispatchers, [], 'the plugin route, not the process dispatcher')
+  })
+})
+
+test('the probe refuses a target the host\'s mandatory Claude route covers', async () => {
+  await withHostRoute(async (dispatchers) => {
+    // The plugin proxy would carry the probe itself, around the route the host published
+    // for this destination, so the probe refuses instead of testing another transport.
+    const probe = await proxyTestConnection('https://api.anthropic.com/v1/messages')
+    assert.equal(probe.ok, false)
+    assert.match(probe.error ?? '', /DSH_CLAUDE_PROXY_URL/)
+    assert.deepEqual(dispatchers, [], 'the probe issues no request')
+  })
+})
+
+test('the probe refuses a destination the host published a proxy for', async () => {
+  await withHostProxyEnv(true, { HTTPS_PROXY: 'http://127.0.0.1:9' }, async (dispatchers) => {
+    const probe = await proxyTestConnection('https://api.x.ai/v1/models')
+    assert.equal(probe.ok, false)
+    assert.match(probe.error ?? '', /HTTPS_PROXY/)
+    assert.deepEqual(dispatchers, [], 'the probe issues no request')
+  })
+})
+
+test('the probe refuses a destination outside the ones this plugin\'s providers use', async () => {
+  await withHostProxyEnv(true, {}, async (dispatchers) => {
+    const probe = await proxyTestConnection('https://internal.example/secret')
+    assert.equal(probe.ok, false)
+    assert.match(probe.error ?? '', /not a destination this plugin's providers use/)
+    assert.deepEqual(dispatchers, [], 'the probe is not a request proxy for this host')
   })
 })

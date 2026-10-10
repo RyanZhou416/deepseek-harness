@@ -254,7 +254,10 @@ test('Codex retries the same account once before output after recovery, but neve
     const adapter = new CodexAdapter({
       tokens, models: [], discovery: false, streamIdleTimeoutMs: 10_000,
       recoverQuota: async account => { recovered.push(account); return true },
-      fetchFn: async () => ++requests === 1 || rejectAgain ? new Response('{"error":{"message":"quota"}}', { status })
+      // The exhausted-window 429 this route recovers from discloses the seconds
+      // it reopens in; a 429 stating no window at all is a refusal, not a window.
+      fetchFn: async () => ++requests === 1 || rejectAgain
+        ? new Response('{"error":{"message":"quota"},"resets_in_seconds":60}', { status })
         : new Response('data: {"type":"response.completed","response":{"usage":{"input_tokens":1,"output_tokens":1}}}\n\ndata: [DONE]\n\n'),
     })
     const run = async () => { for await (const _chunk of adapter.streamAccount({ provider: 'codex', model: 'm', messages: [] }, 'current')) { /* drain */ } }

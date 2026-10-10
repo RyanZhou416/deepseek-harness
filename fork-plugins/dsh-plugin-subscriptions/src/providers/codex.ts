@@ -29,6 +29,7 @@ import {
   effortDisplayName,
   httpLlmError,
   idleWatchdog,
+  isEnforcementRefusal,
   mapFetchFailure,
   mergeReasoning,
   discoverAcrossAccounts,
@@ -54,6 +55,7 @@ import {
   DEFAULT_RETRY,
   jsonBody,
   resetFromFields,
+  retryAfterInstant,
   subscriptionRetryPolicy,
 } from './rate-limit.js'
 import type { RateLimitResetReader, RateLimitWait } from './rate-limit.js'
@@ -88,6 +90,23 @@ const CODEX_RESET_FIELDS = ['resets_in_seconds', 'reset_after_seconds', 'resets_
  */
 export const codexRateLimitReset: RateLimitResetReader = (_response, body, now) =>
   resetFromFields(jsonBody(body), CODEX_RESET_FIELDS, now)
+
+/**
+ * Whether a failed response states a refusal the provider will not accept a
+ * retry for, read from the same signals {@link httpLlmError} classifies with.
+ *
+ * The body is read from a copy: the error built from this response reads the
+ * response itself, and a body consumed here would leave that error without the
+ * provider's own message.
+ * @param response - the failed response.
+ * @returns true when the response's own signals state a final refusal.
+ */
+async function statesFinalRefusal(response: Response): Promise<boolean> {
+  const body = await response.clone().text().catch(() => '')
+  const now = Date.now()
+  const reset = codexRateLimitReset(response, body, now) ?? retryAfterInstant(response, now)
+  return isEnforcementRefusal(response, body, reset, now)
+}
 
 /** Default instruction when the request carries no system prompt. */
 const DEFAULT_CODEX_INSTRUCTIONS = 'You are Codex, a coding agent based on GPT-5. '
@@ -1043,7 +1062,13 @@ export class CodexAdapter extends LlmAdapter {
         session = await this.options.tokens.session(key, true)
         response = await this.request(options, session, watchdog.signal, scope)
       }
-      if (response.status === 429 && this.options.recoverQuota !== undefined) {
+      // Recovery spends a banked reset credit and resends the request, so it is
+      // only for a window the provider says reopens. A 429 that states a refusal
+      // the provider is final about has no window to reopen, and asking for one
+      // spends a credit on an account the provider just declined to serve.
+      if (response.status === 429
+        && this.options.recoverQuota !== undefined
+        && !await statesFinalRefusal(response)) {
         if (key !== undefined && await this.options.recoverQuota(key, watchdog.signal)) {
           await response.body?.cancel()
           session = await this.options.tokens.session(key)

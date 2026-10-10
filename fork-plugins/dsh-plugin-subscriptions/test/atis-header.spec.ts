@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
-import { clientAtisFor, fetchClaudeModelOptions } from '../src/providers/claude.js'
+import { clientAtisFor, fetchClaudeCatalogue } from '../src/providers/claude.js'
 import { buildClaudeWireRequest } from '../src/providers/claude-wire.js'
 import type { FetchFn } from '../src/providers/common.js'
 import type { ClaudeSession } from '../src/auth/store.js'
@@ -32,7 +32,7 @@ test('a bootstrap read hands the account the ATIS token it disclosed', async () 
   const account = 'atis-account-a'
   assert.equal(clientAtisFor(account), undefined, 'nothing is known before a read')
 
-  await fetchClaudeModelOptions(
+  await fetchClaudeCatalogue(
     SESSION, [], respondWith({ client_data: { atis: 'v1.pin.a.b.c' }, additional_model_options: [] }),
     undefined, account,
   )
@@ -41,7 +41,7 @@ test('a bootstrap read hands the account the ATIS token it disclosed', async () 
 
 test('a read that discloses no token leaves the account without one', async () => {
   const account = 'atis-account-b'
-  await fetchClaudeModelOptions(
+  await fetchClaudeCatalogue(
     SESSION, [], respondWith({ client_data: null, additional_model_options: [] }),
     undefined, account,
   )
@@ -64,7 +64,7 @@ test('the request carries the header once a read has disclosed a token', async (
     'no token, no header',
   )
 
-  await fetchClaudeModelOptions(
+  await fetchClaudeCatalogue(
     SESSION, [], respondWith({ client_data: { atis: 'v1.pin.a.b.c' }, additional_model_options: [] }),
     undefined, account,
   )

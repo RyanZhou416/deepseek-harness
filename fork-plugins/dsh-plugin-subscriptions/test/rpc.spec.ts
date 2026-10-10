@@ -8,7 +8,8 @@
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
+import { createHash } from 'node:crypto'
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
@@ -195,4 +196,44 @@ test('status endpoint: one corrupt provider entry degrades alone, others still r
   const providers = (result.value as { providers: Record<string, { accounts: unknown[]; detail?: string }> }).providers
   assert.equal(providers.codex.accounts.length, 1, 'codex still reports its account')
   assert.equal(providers.claude.accounts.length, 0, 'the corrupt claude entry is skipped')
+})
+
+/** The claude accounts one `status` call reports. */
+async function claudeAccounts(handler: FakeRpcHandler): Promise<{ key: string }[]> {
+  const result = await handler('status', {}, new AbortController().signal)
+  assert.ok(result.ok, 'the status call must succeed')
+  if (!result.ok) return []
+  const providers = (result.value as { providers: Record<string, { accounts: { key: string }[] }> }).providers
+  return providers.claude.accounts
+}
+
+test('status endpoint: an account key holds no function of the refresh token', async () => {
+  const home = process.env.DSH_HOME as string
+  const storePath = join(home, 'plugins', 'subscriptions', 'auth.json')
+  const refreshToken = 'refresh-token-value'
+  // A stored key that names nothing but the session's refresh token. Reading the store
+  // must replace it, because this key reaches the client.
+  const derivedKey = `token-${createHash('sha256').update(refreshToken).digest('hex').slice(0, 16)}`
+  writeFileSync(storePath, JSON.stringify({
+    claude: {
+      default: derivedKey,
+      accounts: {
+        [derivedKey]: {
+          accessToken: 'at', refreshToken, expiresAt: Date.now() + 3_600_000, scopes: 'user:profile',
+        },
+      },
+    },
+  }, null, 2), { mode: 0o600 })
+
+  const reported = await claudeAccounts(await mount())
+  assert.equal(reported.length, 1)
+  const key = reported[0].key
+  assert.match(key, /^account-[0-9a-f]{16}$/)
+  assert.notEqual(key, derivedKey)
+  assert.equal(key.includes(refreshToken), false)
+
+  // The replacement is durable: a fresh plugin instance reports the same key.
+  assert.equal((await claudeAccounts(await mount()))[0].key, key)
+  const stored = JSON.parse(readFileSync(storePath, 'utf8')) as { claude: { accounts: Record<string, unknown> } }
+  assert.deepEqual(Object.keys(stored.claude.accounts), [key], 'the store now holds the minted key')
 })

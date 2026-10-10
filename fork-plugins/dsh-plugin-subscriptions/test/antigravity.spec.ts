@@ -138,6 +138,26 @@ test('refreshAntigravity preserves a rotating-token omission and account metadat
   assert.equal(form.get('refresh_token'), session.refreshToken)
 })
 
+test('Antigravity token requests refuse redirects, so credentials stay on the token host', async () => {
+  const exchangeCalls: RecordedCall[] = []
+  await exchangeAntigravityCode(
+    'code-1', 'verifier-1', 'http://localhost:51121/oauth-callback', oauth, runtime, routed({
+      [ANTIGRAVITY_TOKEN_URL]: { access_token: 'fresh-access', refresh_token: 'fresh-refresh', expires_in: 3600 },
+      [`${runtime.baseURL}/v1internal:loadCodeAssist`]: { cloudaicompanionProject: 'project-live' },
+      [ANTIGRAVITY_USERINFO_URL]: { email: 'person@example.invalid' },
+    }, exchangeCalls),
+  )
+  assert.equal(exchangeCalls[0].url, ANTIGRAVITY_TOKEN_URL)
+  assert.equal(exchangeCalls[0].init?.redirect, 'error')
+
+  const refreshCalls: RecordedCall[] = []
+  await refreshAntigravity(session, oauth, routed({
+    [ANTIGRAVITY_TOKEN_URL]: { access_token: 'renewed', expires_in: 1800 },
+  }, refreshCalls))
+  assert.equal(refreshCalls[0].url, ANTIGRAVITY_TOKEN_URL)
+  assert.equal(refreshCalls[0].init?.redirect, 'error')
+})
+
 test('model discovery and quota display map fetchAvailableModels data', async () => {
   const modelsURL = `${runtime.baseURL}/v1internal:fetchAvailableModels`
   const loadURL = `${runtime.baseURL}/v1internal:loadCodeAssist`

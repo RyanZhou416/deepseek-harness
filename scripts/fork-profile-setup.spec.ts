@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto'
 import { spawnSync } from 'node:child_process'
 import {
   chmodSync,
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -9,7 +10,7 @@ import {
   writeFileSync,
 } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { delimiter, dirname, join, relative, resolve } from 'node:path'
+import { basename, delimiter, dirname, join, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { expect, it } from 'vitest'
 
@@ -18,8 +19,64 @@ const repository = resolve(here, '..')
 const helper = resolve(repository, 'fork-runtime', 'setup-profile.mjs')
 const template = resolve(repository, 'fork-runtime', 'web', 'cordis.patch.yml')
 const setup = resolve(repository, 'setup.command')
+const releases = resolve(repository, 'fork-plugins', 'releases')
 const shell = process.platform === 'win32' ? 'sh.exe' : 'sh'
 const shellAvailable = spawnSync(shell, ['-c', 'exit 0']).status === 0
+
+/** The three fork packages `setup.command` installs, with their sources and artifact pins. */
+const BUNDLES = [
+  {
+    directory: 'dsh-agent-teams',
+    name: '@nanmicoder/dsh-agent-teams',
+    artifactName: 'nanmicoder-dsh-agent-teams',
+    variable: 'DSH_AGENT_TEAMS_ARTIFACT',
+  },
+  {
+    directory: 'dsh-context',
+    name: 'dsh-context',
+    artifactName: 'dsh-context',
+    variable: 'DSH_CONTEXT_ARTIFACT',
+  },
+  {
+    directory: 'dsh-plugin-subscriptions',
+    name: 'dsh-plugin-subscriptions',
+    artifactName: 'dsh-plugin-subscriptions',
+    variable: 'DSH_SUBSCRIPTIONS_ARTIFACT',
+  },
+] as const
+
+const setupScript = readFileSync(setup, 'utf8')
+
+/** The artifact basename `setup.command` installs for one fork package. */
+function pinnedArtifact(variable: string): string {
+  const match = new RegExp(`^${variable}=\\$SCRIPT_DIR/(\\S+)$`, 'mu').exec(setupScript)
+  if (match === null) throw new Error(`setup.command does not pin ${variable}`)
+  return basename(match[1]!)
+}
+
+/** The version one release artifact basename encodes for `name`. */
+function artifactVersion(artifact: string, name: string): string {
+  const prefix = `${name}-`
+  const suffix = '.tgz'
+  if (!artifact.startsWith(prefix) || !artifact.endsWith(suffix)) {
+    throw new Error(`release artifact ${artifact} does not name ${name}`)
+  }
+  return artifact.slice(prefix.length, -suffix.length)
+}
+
+/** One fork plugin's source manifest. */
+function forkManifest(directory: string): Record<string, unknown> {
+  return JSON.parse(
+    readFileSync(resolve(repository, 'fork-plugins', directory, 'package.json'), 'utf8'),
+  ) as Record<string, unknown>
+}
+
+/** The version one fork plugin's source manifest declares. */
+function sourceVersion(directory: string): string {
+  const version = forkManifest(directory).version
+  if (typeof version !== 'string') throw new Error(`fork-plugins/${directory} declares no version`)
+  return version
+}
 
 /** Run the setup helper and retain its diagnostics for assertions. */
 function run(...args: string[]) {
@@ -181,12 +238,38 @@ it('checks the effective catalog exclusions in composed config rather than unrel
   expect(runWithInput(['verify-dump', '-'], extra).status).toBe(0)
 })
 
+it('keeps each pinned release artifact present at the version its source manifest declares', () => {
+  for (const bundle of BUNDLES) {
+    const artifact = pinnedArtifact(bundle.variable)
+    expect(existsSync(join(releases, artifact)), `${bundle.name} artifact`).toBe(true)
+    expect(artifactVersion(artifact, bundle.artifactName), `${bundle.name} artifact version`)
+      .toBe(sourceVersion(bundle.directory))
+  }
+})
+
+it('resolves the shipped wire compatibility pin from the plugin directory', () => {
+  const directory = 'dsh-plugin-subscriptions'
+  const dependencies = forkManifest(directory).dependencies as Record<string, string> | undefined
+  const spec = dependencies?.['@tormentalabs/claude-code-wire-compat']
+  if (spec === undefined) throw new Error(`${directory} does not pin @tormentalabs/claude-code-wire-compat`)
+  // pnpm reads a drive-letter `file:` spec as an absolute path on every
+  // platform, so an absolute pin names a path the macOS install cannot open.
+  expect(spec).toMatch(/^file:\.\.\/releases\/[\w.-]+\.tgz$/u)
+  expect(existsSync(resolve(repository, 'fork-plugins', directory, spec.slice('file:'.length)))).toBe(true)
+})
+
 it('rejects drift in artifacts, profile pins, patches, and composed config', () => {
   const root = mkdtempSync(join(tmpdir(), 'dsh setup verify with spaces '))
   try {
-    const agentArtifact = join(root, 'nanmicoder-dsh-agent-teams-0.1.20-dsh017rc1.3.tgz')
-    const contextArtifact = join(root, 'dsh-context-0.55.0-dsh017rc1.3.tgz')
-    const subscriptionsArtifact = join(root, 'dsh-plugin-subscriptions-0.9.4-dsh017rc1.3.tgz')
+    // The fixtures carry the versions the fork actually ships, so a helper
+    // constant left behind by a version bump fails the verify-profile call
+    // below instead of agreeing with a stale synthetic version.
+    const agentArtifact = join(root, pinnedArtifact('DSH_AGENT_TEAMS_ARTIFACT'))
+    const contextArtifact = join(root, pinnedArtifact('DSH_CONTEXT_ARTIFACT'))
+    const subscriptionsArtifact = join(root, pinnedArtifact('DSH_SUBSCRIPTIONS_ARTIFACT'))
+    const agentVersion = sourceVersion('dsh-agent-teams')
+    const contextVersion = sourceVersion('dsh-context')
+    const subscriptionsVersion = sourceVersion('dsh-plugin-subscriptions')
     writeFileSync(agentArtifact, 'agent artifact')
     writeFileSync(contextArtifact, 'context artifact')
     writeFileSync(subscriptionsArtifact, 'subscriptions artifact')
@@ -204,15 +287,15 @@ it('rejects drift in artifacts, profile pins, patches, and composed config', () 
     mkdirSync(subscriptionsInstall, { recursive: true })
     writeFileSync(join(agentInstall, 'package.json'), JSON.stringify({
       name: '@nanmicoder/dsh-agent-teams',
-      version: '0.1.20-dsh017rc1.3',
+      version: agentVersion,
     }))
     writeFileSync(join(contextInstall, 'package.json'), JSON.stringify({
       name: 'dsh-context',
-      version: '0.55.0-dsh017rc1.3',
+      version: contextVersion,
     }))
     writeFileSync(join(subscriptionsInstall, 'package.json'), JSON.stringify({
       name: 'dsh-plugin-subscriptions',
-      version: '0.9.4-dsh017rc1.3',
+      version: subscriptionsVersion,
     }))
     const profileManifest = join(profile, 'package.json')
     writeFileSync(profileManifest, JSON.stringify({
@@ -246,12 +329,12 @@ it('rejects drift in artifacts, profile pins, patches, and composed config', () 
     expect(secondPin.stdout).toMatch(/^unchanged packageManager pnpm@11\.7\.0/u)
     expect(readFileSync(profileManifest, 'utf8')).toBe(pinned)
     writeFileSync(join(profile, 'pnpm-lock.yaml'), [
-      'nanmicoder-dsh-agent-teams-0.1.20-dsh017rc1.3.tgz',
-      '0.1.20-dsh017rc1.3',
-      'dsh-context-0.55.0-dsh017rc1.3.tgz',
-      '0.55.0-dsh017rc1.3',
-      'dsh-plugin-subscriptions-0.9.4-dsh017rc1.3.tgz',
-      '0.9.4-dsh017rc1.3',
+      pinnedArtifact('DSH_AGENT_TEAMS_ARTIFACT'),
+      agentVersion,
+      pinnedArtifact('DSH_CONTEXT_ARTIFACT'),
+      contextVersion,
+      pinnedArtifact('DSH_SUBSCRIPTIONS_ARTIFACT'),
+      subscriptionsVersion,
     ].join('\n'))
     writeFileSync(join(profile, 'cordis.patch.yml'), readFileSync(template, 'utf8'))
 

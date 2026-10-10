@@ -60,8 +60,12 @@ const CLAUDE: ClaudeSession = {
 test('accountKeyOf keys on the stable identity', () => {
   assert.equal(accountKeyOf('codex', CODEX), 'acct-1')
   assert.equal(accountKeyOf('claude', CLAUDE), 'alice@example.com')
-  // Sessions without an identity field fall back to a refresh-token hash.
-  assert.match(accountKeyOf('claude', { ...CLAUDE, emailAddress: undefined }), /^token-[0-9a-f]{16}$/)
+  // A session with no identity is keyed by the random id it carries, never by its token.
+  const identityless = { ...CLAUDE, emailAddress: undefined }
+  const key = accountKeyOf('claude', identityless)
+  assert.match(key, /^account-[0-9a-f]{16}$/)
+  assert.equal(accountKeyOf('claude', identityless), key, 'the session carries its id')
+  assert.equal(key.includes(CLAUDE.refreshToken), false)
 })
 
 function codexUser(user: string, field = 'chatgpt_user_id'): CodexSession {

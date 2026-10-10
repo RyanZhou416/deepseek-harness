@@ -6,9 +6,9 @@ This subtree carries the private `dsh-plugin-subscriptions` build shipped with t
 
 - Upstream repository: `https://github.com/V1ki/dsh-plugin-subscriptions.git`
 - Upstream tag: `v0.9.4`
-- Fork package version: `0.9.4-dsh017rc1.14`
+- Fork package version: `0.9.4-dsh017rc1.15`
 - Subtree path: `fork-plugins/dsh-plugin-subscriptions`
-- Distribution artifact: `fork-plugins/releases/dsh-plugin-subscriptions-0.9.4-dsh017rc1.14.tgz`
+- Distribution artifact: `fork-plugins/releases/dsh-plugin-subscriptions-0.9.4-dsh017rc1.15.tgz`
 
 ## Fork behavior
 
@@ -85,7 +85,7 @@ import; each was proven to add nothing before it was deleted.
 
 ### Claude wire (pinned Claude Code 2.1.288)
 
-Files: `src/providers/claude-wire.ts`, `src/providers/claude.ts`, `src/providers/claude-images.ts`, `src/translate/anthropic.ts`, `src/transport/bridge.ts`, `src/transport/bun-child.ts`, `src/auth/store.ts`, `src/providers/accounts.ts`, `src/providers/common.ts`, `test/claude-wire.spec.ts`, `test/claude-request-id.spec.ts`, `test/translate.spec.ts`, `test/transport-bridge.spec.ts`, `test/atis-header.spec.ts`, `test/models.spec.ts`, `package.json` (`@tormentalabs/claude-code-wire-compat` exact pin).
+Files: `src/providers/claude-wire.ts`, `src/providers/claude.ts`, `src/providers/claude-catalogue.ts`, `src/providers/claude-images.ts`, `src/translate/anthropic.ts`, `src/transport/bridge.ts`, `src/transport/bun-child.ts`, `src/auth/store.ts`, `src/providers/accounts.ts`, `src/providers/common.ts`, `test/claude-wire.spec.ts`, `test/claude-request-id.spec.ts`, `test/translate.spec.ts`, `test/transport-bridge.spec.ts`, `test/atis-header.spec.ts`, `test/models.spec.ts`, `package.json` (`@tormentalabs/claude-code-wire-compat` exact pin).
 
 - All chat requests build through `buildClaudeCodeRequest` with the pinned `CLAUDE_CODE_2_1_288_PROFILE` (CLI 2.1.288, SDK 0.128.0). The builder owns the billing fingerprint block, the identity system block, beta composition, the `metadata.user_id` correlation triple, cache-breakpoint placement, and the header plan. Do not hand-roll `anthropic-beta`, the billing block, `x-app`, or cache markers again.
 - Keep `cacheControl: { enabled, systemBreakpoint, toolBreakpoint, messageBreakpoint, ttl: '1h' }` (the genuine client ships 1h cache markers), `stream: true`, `display: 'summarized'` on the thinking request, and `effort` plus `outputConfig: { effort }` when the model advertises efforts. The builder validates both against the pinned catalogue.
@@ -98,8 +98,9 @@ Files: `src/providers/claude-wire.ts`, `src/providers/claude.ts`, `src/providers
 - Oversize: the builder's `INPUT_TOO_LARGE` maps through `oversizeWireError` to the logged image-offload error; the exact-body 32 MB check stays in `assertClaudeRequestBytes`.
 - Mid-conversation system messages ride as user-role `<system-reminder>` blocks on every model — the wire contract models no system-role message, so the old Opus 5 system-role form is gone.
 - The usage/models/Files endpoints present the pinned profile's user-agent (`CLAUDE_USER_AGENT`); the local `claude --version` probe is deleted.
+- The model catalogue is the client's baked-in table plus the account's own options. `claudeBuiltInCatalogue` takes membership from the pinned profile's `supportedModels` and supplies the display text the wire library deliberately omits; `fetchClaudeCatalogue` merges the bootstrap document's `additional_model_options` onto that table — an option naming a built-in id rewrites that row in place, a new id is appended, and a `disabled_reason` marks the row unavailable instead of dropping it. The endpoint carries additions only, so it must never be the sole source: a refused or malformed response leaves the built-in table standing. A configured non-empty `models.claude` list still overrides discovery.
 - The npm dependency is GPL-3.0-or-later. The plugin is `private: true` and its artifact is not redistributed; keep the exact version pin and this note if the artifact is ever published.
-- Tests: `test/claude-wire.spec.ts` (pin, billing/correlation, header plan and casing, breakpoints, chaining, the single system-prompt carrier, the wire-session rule, oversize), plus `test/claude-request-id.spec.ts` (the wire session identity end to end) and the updated `translate.spec.ts`, `test/transport-bridge.spec.ts`, `test/atis-header.spec.ts` and `models.spec.ts`. All injected, no credentials.
+- Tests: `test/claude-wire.spec.ts` (pin, billing/correlation, header plan and casing, breakpoints, chaining, the single system-prompt carrier, the wire-session rule, oversize), plus `test/claude-request-id.spec.ts` (the wire session identity end to end), `models.spec.ts` (the built-in catalogue with no request, the account's options merged onto it rather than replacing it, and a disabled option surfacing as a disabled row), and the updated `translate.spec.ts`, `test/transport-bridge.spec.ts` and `test/atis-header.spec.ts`. All injected, no credentials.
 
 ### Rate-limit state on the usage cards
 
@@ -194,6 +195,8 @@ ChatGPT prompt caching has no `cache_control` field. The plugin already sends `p
 
 `writeStore` in `src/auth/store.ts` writes `auth.json` to a temp file and renames it into place. On Windows that rename returns `EPERM` when the destination is briefly locked. Retry the rename, then copy the finished temp file over `auth.json`. A failed replace drops the login that just completed, including a new Cursor account.
 
+The 0600 write mode is the owner-only guarantee on POSIX only. Windows keeps the mode byte without turning it into an ACL, so the store inherits the ACL of the directory holding it, and a harness home under a path that grants `Authenticated Users` Modify leaves the bearer tokens readable by every authenticated user of the machine. Node cannot narrow that: the fix is an ACL on the home directory (`icacls`), not a code change.
+
 ### Host-published proxy policy
 
 Files: `src/transport/host-egress.ts`, `src/http.ts` (`proxiedFetch`), `src/transport/claude-fetch.ts`, `test/proxy-host.spec.ts`, `test/transport-wiring.spec.ts`.
@@ -208,6 +211,19 @@ A launcher that configures a proxy publishes its resolved policy into the proces
 **Preservation rule.** An upstream import restores none of this. Keep `host-egress.ts`, the three decision points above, and the refusal ahead of `startBridge`. Importing the host's own seam (`proxyRouteFor` / `proxyEnvironmentForChild`) is deliberately not taken: the package is not resolvable from this plugin's directory, and declaring it would mean making the plugin a workspace member. Bridge proxy support, which would let the bridge carry the route instead of refusing it, stays deferred until Bun's proxy-environment behavior is measured and `Config` gains its switch.
 
 **Verification.** `test/proxy-host.spec.ts` proves the deferral on both Claude hosts and on a published general route, that the plugin route and its own direct agent survive when nothing is published, that a refusal names no proxy credential, and that an enabled plugin proxy still carries other providers; `test/transport-wiring.spec.ts` proves the refusal precedes the child and that the child environment never receives the variable.
+
+### Endpoint and credential guards
+
+Files: `src/providers/claude.ts`, `src/providers/antigravity.ts`, `src/auth/device-flow.ts`, `src/http.ts` (the probe), `src/auth/store.ts` (`accountKeyOf` and the store read), `test/login.spec.ts`, `test/antigravity.spec.ts`, `test/copilot.spec.ts`, `test/proxy-host.spec.ts`, `test/rpc.spec.ts`, `test/store.spec.ts`, `test/cursor.spec.ts`.
+
+- `CLAUDE_CODE_CUSTOM_OAUTH_URL` moves both Claude OAuth URLs to the origin it names, and only the three endpoints the genuine client approves are accepted — `beacon.claude-ai.staging.ant.dev`, `claude.fedstart.com`, `claude-staging.fedstart.com`, after dropping one trailing slash and matching exactly. An unapproved value aborts module load. The launcher's `.env` rules admit this name from the invoking directory, which arrives with a clone, so anything looser lets a repository choose the endpoint that receives the account's tokens.
+- Every token request refuses redirects: the Claude code exchange and refresh, the Antigravity code exchange and refresh, and both GitHub device-flow requests. A followed redirect replays the code, refresh token, or client secret to another origin, and the device-flow poll would store a token another origin returned.
+- The `proxyTest` probe answers only for the API hosts this plugin's providers contact, and refuses a target a host-published route covers (the mandatory Claude route or a published scheme proxy) instead of testing a transport the host never authorized. The refusal lives in `proxyTestConnection`, so no caller can probe around it.
+- An account without a display identity is keyed by a random `account-…` id carried by the session, never by a value derived from its refresh token, because `status` serves that key to the web client. A stored `token-…` key is replaced once while reading the store and written back with the old key kept as an alias.
+
+**Preservation rule.** An upstream import restores the https-only OAuth check, the missing `redirect: 'error'`, the unguarded probe target, and the refresh-token-derived key. Keep the approved-endpoint list beside `CLAUDE_TOKEN_URL` in `claude.ts`, the probe refusals inside `proxyTestConnection` rather than only at the RPC payload, and the account id on the session so a refreshed session is written under the key it already has.
+
+**Focused verification.** `test/login.spec.ts` evaluates a fresh `claude.ts` instance under an unapproved and an approved `CLAUDE_CODE_CUSTOM_OAUTH_URL`; `test/antigravity.spec.ts` and `test/copilot.spec.ts` assert `redirect: 'error'` on every token request; `test/proxy-host.spec.ts` covers both refusals and keeps the disabled/bypassed probe on the host dispatcher; `test/rpc.spec.ts` drives `status` over a store holding a token-derived key and asserts the minted key is stable across a fresh mount and written to disk; `test/store.spec.ts` and `test/cursor.spec.ts` pin the identity-less key contract.
 
 ### Speed write outcomes
 

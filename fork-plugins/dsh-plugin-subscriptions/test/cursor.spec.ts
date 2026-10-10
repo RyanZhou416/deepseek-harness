@@ -91,7 +91,8 @@ test('cursor session keeps the API key and keys accounts by email', () => {
   assert.equal(session.accessToken, 'key-1')
   assert.equal(session.refreshToken, 'key-1')
   assert.equal(accountKeyOf('cursor', session), 'a@example.com')
-  assert.equal(accountKeyOf('cursor', cursorSession('key-2', 1)).startsWith('token-'), true)
+  // Without an email the account takes a random id, not one derived from the API key.
+  assert.match(accountKeyOf('cursor', cursorSession('key-2', 1)), /^account-[0-9a-f]{16}$/)
 })
 
 test('refreshCursor keeps a live key and rejects an expired one', async () => {

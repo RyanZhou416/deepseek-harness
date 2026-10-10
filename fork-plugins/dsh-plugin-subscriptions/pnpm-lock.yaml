@@ -9,7 +9,7 @@ importers:
   .:
     dependencies:
       '@tormentalabs/claude-code-wire-compat':
-        specifier: file:C:/Project/deepseek-harness/fork-plugins/releases/tormentalabs-claude-code-wire-compat-0.7.2-dsh14.tgz
+        specifier: file:../releases/tormentalabs-claude-code-wire-compat-0.7.2-dsh14.tgz
         version: file:../releases/tormentalabs-claude-code-wire-compat-0.7.2-dsh14.tgz
       undici:
         specifier: ^7.0.0

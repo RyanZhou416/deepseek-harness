@@ -9,10 +9,12 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import './keep-alive.js'
 import { MessageId, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
-import type { Message } from '@deepseek-ai/dsh-llm'
+import type { LlmModelInfo, Message } from '@deepseek-ai/dsh-llm'
 import { CodexAdapter, codexRequestBody, fetchCodexModels } from '../src/providers/codex.js'
 import { GrokAdapter } from '../src/providers/grok.js'
-import { ClaudeAdapter, claudeThinkingBody, fetchClaudeModelOptions } from '../src/providers/claude.js'
+import { ClaudeAdapter, claudeThinkingBody, fetchClaudeCatalogue } from '../src/providers/claude.js'
+import { claudeBuiltInCatalogue } from '../src/providers/claude-catalogue.js'
+import { CLAUDE_CODE_2_1_288_PROFILE } from '@tormentalabs/claude-code-wire-compat'
 import { CopilotAdapter, fetchCopilotModels } from '../src/providers/copilot.js'
 import { ModelCatalogCache } from '../src/providers/common.js'
 import { AccountTokenManager } from '../src/providers/accounts.js'
@@ -405,7 +407,8 @@ test('claude logged in returns the static catalog', async () => {
   assert.deepEqual(models.map(model => model.id), ['claude-opus-4-5'])
 })
 
-// The subscription endpoint advertises each model's limits (#101).
+// The endpoint carries additions to the catalogue the client already holds, under the
+// field name `additional_model_options` beside `additional_model_costs`.
 const CLAUDE_BOOTSTRAP_PAYLOAD = {
   client_data: null,
   additional_model_options: [
@@ -432,26 +435,79 @@ test('claudeThinkingBody refuses a manual budget on Opus 5.5', () => {
   assert.equal(claudeThinkingBody('claude-opus-4-5', undefined, 32_000), undefined)
 })
 
-test('model options carry the service additions, and nothing it disables', async () => {
-  const models = await fetchClaudeModelOptions(claudeSession, [], fakeFetch(CLAUDE_BOOTSTRAP_PAYLOAD).fetchFn)
-  // The endpoint carries display text only: limits and capabilities belong to the pinned
-  // profile, which mirrors the client's built-in catalogue.
-  assert.deepEqual(models, [
-    { id: 'claude-opus-5-5', name: 'Claude Opus 5.5' },
-    { id: 'claude-bare', name: 'claude-bare' },
-  ])
+test('the built-in catalogue lists the pinned profile with the client display names and no request', () => {
+  const rows = claudeBuiltInCatalogue()
+  // Membership is the pinned profile's own table, in the catalogue's own order.
+  assert.deepEqual(rows.map(row => row.id), Object.keys(CLAUDE_CODE_2_1_288_PROFILE.supportedModels))
+  assert.ok(rows.length > 0)
+  assert.equal(rows.find(row => row.id === 'claude-sonnet-5')?.name, 'Sonnet 5')
+  assert.equal(rows.find(row => row.id === 'claude-3-5-haiku')?.name, 'Haiku 3.5')
+  // Every id the pinned profile carries has display text of its own; a bare id here means
+  // the transcribed table fell behind the profile.
+  assert.deepEqual(rows.filter(row => row.name === row.id), [])
 })
 
-test('a bootstrap response that is not the document it should be adds nothing', async () => {
-  const malformed = await fetchClaudeModelOptions(
+test('the account options add to the built-in catalogue rather than replacing it', async () => {
+  const rows = await fetchClaudeCatalogue(claudeSession, [], fakeFetch(CLAUDE_BOOTSTRAP_PAYLOAD).fetchFn)
+  const base = claudeBuiltInCatalogue()
+  // Every built-in model survives in its catalogue position, with the account's own addition appended.
+  assert.deepEqual(rows.map(row => row.id), [...base.map(row => row.id), 'claude-bare', 'claude-retired'])
+  assert.deepEqual(rows.slice(base.length), [
+    { id: 'claude-bare', name: 'claude-bare' },
+    { id: 'claude-retired', name: 'Retired', disabledReason: 'no longer offered' },
+  ])
+  // An option naming a built-in model replaces that row's display text in place, once.
+  const opus = rows.filter(row => row.id === 'claude-opus-5-5')
+  assert.deepEqual(opus, [{ id: 'claude-opus-5-5', name: 'Claude Opus 5.5', description: 'newest' }])
+  // An option naming no model is not a row.
+  assert.equal(rows.some(row => row.id === 'nameless'), false)
+})
+
+test('a disabled option surfaces as a disabled row instead of disappearing', async () => {
+  const rows = await fetchClaudeCatalogue(claudeSession, [], fakeFetch(CLAUDE_BOOTSTRAP_PAYLOAD).fetchFn)
+  assert.deepEqual(rows.find(row => row.id === 'claude-retired'), {
+    id: 'claude-retired',
+    name: 'Retired',
+    disabledReason: 'no longer offered',
+  })
+  assert.equal(rows.find(row => row.id === 'claude-bare')?.disabledReason, undefined)
+  // The picker row keeps the state the endpoint declared.
+  const claude = new ClaudeAdapter({
+    models: STATIC_CLAUDE,
+    streamIdleTimeoutMs: 1000,
+    tokens: memoryTokens(claudeSession),
+    discovery: true,
+    fetchFn: fakeFetch(CLAUDE_BOOTSTRAP_PAYLOAD).fetchFn,
+  })
+  const listed = await claude.listModels('claude') as readonly (LlmModelInfo & { disabledReason?: string })[]
+  assert.equal(listed.find(row => row.id === 'claude-retired')?.disabledReason, 'no longer offered')
+  assert.equal(listed.find(row => row.id === 'claude-bare')?.disabledReason, undefined)
+})
+
+test('a response that is not the document leaves the built-in catalogue standing', async () => {
+  const base = claudeBuiltInCatalogue()
+  const malformed = await fetchClaudeCatalogue(
     claudeSession, [], fakeFetch({ unexpected: true }).fetchFn,
   )
-  assert.deepEqual(malformed, [])
-  const refused = await fetchClaudeModelOptions(
+  assert.deepEqual(malformed, base)
+  const refused = await fetchClaudeCatalogue(
     claudeSession, [],
     (async () => new Response('{}', { status: 500 })) as never,
   )
-  assert.deepEqual(refused, [])
+  assert.deepEqual(refused, base)
+})
+
+test('claude discovery lists the built-in catalogue when the options read is refused', async () => {
+  const claude = new ClaudeAdapter({
+    models: STATIC_CLAUDE,
+    streamIdleTimeoutMs: 1000,
+    tokens: memoryTokens(claudeSession),
+    discovery: true,
+    fetchFn: (async () => new Response('{}', { status: 500 })) as never,
+  })
+  const ids = (await claude.listModels('claude')).map(row => row.id)
+  assert.ok(ids.length > 1)
+  assert.equal(ids.includes('claude-sonnet-5'), true)
 })
 
 test('the options read carries the desktop client headers', async () => {
@@ -460,7 +516,7 @@ test('the options read carries the desktop client headers', async () => {
     seen = init?.headers ?? {}
     return new Response(JSON.stringify(CLAUDE_BOOTSTRAP_PAYLOAD), { status: 200 })
   }) as never
-  await fetchClaudeModelOptions(claudeSession, [['anthropic-client-platform', 'desktop_app']], fetchFn)
+  await fetchClaudeCatalogue(claudeSession, [['anthropic-client-platform', 'desktop_app']], fetchFn)
   assert.equal(seen['anthropic-client-platform'], 'desktop_app')
   assert.equal(seen['content-type'], 'application/json')
   assert.equal(seen['anthropic-beta'], 'oauth-2025-04-20')

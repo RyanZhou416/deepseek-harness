@@ -23,6 +23,8 @@ import type { SubscriptionsKey } from './locales.js'
 
 import { callSubscriptionsAuth, SubscriptionsAuthError } from './subscriptions-rpc.js'
 export { callSubscriptionsAuth } from './subscriptions-rpc.js'
+import { errorLine, withActionError, withPollError } from './provider-errors.js'
+import type { ProviderErrorState } from './provider-errors.js'
 
 /** Poll cadence while a provider login attempt is busy. */
 const POLL_INTERVAL_MS = 2000
@@ -635,7 +637,8 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
   const { rpc } = props
   const t = props.t ?? fallbackTranslate
   const [statuses, setStatuses] = useState<Partial<Record<SubscriptionProvider, ProviderStatus>>>({})
-  const [errors, setErrors] = useState<Partial<Record<SubscriptionProvider, string>>>({})
+  /** Error lines per provider: a failed poll and a failed action, kept apart (see provider-errors.ts). */
+  const [errorLines, setErrorLines] = useState<ProviderErrorState>({})
   const [manualDrafts, setManualDrafts] = useState<Record<SubscriptionProvider, string>>({
     codex: '', claude: '', grok: '', copilot: '', antigravity: '', cursor: '',
   })
@@ -674,12 +677,17 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
   const [proxyTestResult, setProxyTestResult] = useState<ProxyTestResult | undefined>(undefined)
   const setProviderError = useCallback((provider: SubscriptionProvider, message: string | undefined): void => {
     if (!mountedRef.current) return
-    setErrors((prev) => {
-      const next = { ...prev }
-      if (message === undefined) delete next[provider]
-      else next[provider] = message
-      return next
-    })
+    setErrorLines(prev => withPollError(prev, provider, message))
+  }, [])
+
+  /**
+   * Report an action's own failure. It is kept in its own line, so the `status`
+   * refresh the action runs afterwards cannot erase the message before the user
+   * reads it; the next action on that provider clears it.
+   */
+  const setActionError = useCallback((provider: SubscriptionProvider, message: string | undefined): void => {
+    if (!mountedRef.current) return
+    setErrorLines(prev => withActionError(prev, provider, message))
   }, [])
 
   const stopPolling = useCallback((provider: SubscriptionProvider): void => {
@@ -791,7 +799,7 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
 
   const login = useCallback(async (provider: SubscriptionProvider, method?: 'oauth' | 'keychain' | 'manual'): Promise<void> => {
     if (rpc === undefined) return
-    setProviderError(provider, undefined)
+    setActionError(provider, undefined)
     try {
       const response = await callSubscriptionsAuth<LoginResponse>(rpc, 'login', {
         provider,
@@ -824,9 +832,9 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
       }
       startPolling(provider)
     } catch (error) {
-      setProviderError(provider, messageOf(error))
+      setActionError(provider, messageOf(error))
     }
-  }, [rpc, t, setProviderError, startPolling])
+  }, [rpc, t, setActionError, startPolling])
 
   const cancel = useCallback(async (provider: SubscriptionProvider): Promise<void> => {
     if (rpc === undefined) return
@@ -834,47 +842,47 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
     try {
       await callSubscriptionsAuth<{ ok: true }>(rpc, 'cancel', { provider })
     } catch (error) {
-      setProviderError(provider, messageOf(error))
+      setActionError(provider, messageOf(error))
     }
     await refresh()
-  }, [rpc, stopPolling, setProviderError, refresh])
+  }, [rpc, stopPolling, setActionError, refresh])
 
   const submitManual = useCallback(async (provider: SubscriptionProvider): Promise<void> => {
     if (rpc === undefined) return
     const input = manualDrafts[provider].trim()
     if (input === '') return
-    setProviderError(provider, undefined)
+    setActionError(provider, undefined)
     try {
       await callSubscriptionsAuth<{ ok: true }>(rpc, 'manual', { provider, input })
       if (mountedRef.current) setManualDrafts(prev => ({ ...prev, [provider]: '' }))
     } catch (error) {
-      setProviderError(provider, messageOf(error))
+      setActionError(provider, messageOf(error))
     }
     await refresh()
-  }, [rpc, manualDrafts, setProviderError, refresh])
+  }, [rpc, manualDrafts, setActionError, refresh])
 
   const logout = useCallback(async (provider: SubscriptionProvider, account: string, display: string, name: string): Promise<void> => {
     if (rpc === undefined) return
     if (!window.confirm(t('logoutAccountConfirm', { provider: name, account: display }))) return
-    setProviderError(provider, undefined)
+    setActionError(provider, undefined)
     try {
       await callSubscriptionsAuth<{ ok: true }>(rpc, 'logout', { provider, account })
     } catch (error) {
-      setProviderError(provider, messageOf(error))
+      setActionError(provider, messageOf(error))
     }
     await refresh()
-  }, [rpc, t, setProviderError, refresh])
+  }, [rpc, t, setActionError, refresh])
 
   const setDefault = useCallback(async (provider: SubscriptionProvider, account: string): Promise<void> => {
     if (rpc === undefined) return
-    setProviderError(provider, undefined)
+    setActionError(provider, undefined)
     try {
       await callSubscriptionsAuth<{ ok: true }>(rpc, 'setDefault', { provider, account })
     } catch (error) {
-      setProviderError(provider, messageOf(error))
+      setActionError(provider, messageOf(error))
     }
     await refresh()
-  }, [rpc, setProviderError, refresh])
+  }, [rpc, setActionError, refresh])
 
   /**
    * Copy one card's code or link and flag that card as copied for 1.5s.
@@ -1011,6 +1019,7 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
         const deviceCode = deviceCodes[id]
         const authorizeUrl = authorizeUrls[id]
         const accounts = status?.accounts ?? []
+        const error = errorLine(errorLines, id)
         return (
           <div key={id} style={styles.card}>
             <div style={styles.cardHeader}>
@@ -1021,7 +1030,7 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
             {status?.detail !== undefined && status.detail !== '' && (
               <p style={styles.statusLine}>{status.detail}</p>
             )}
-            {errors[id] !== undefined && <p style={styles.errorLine}>{errors[id]}</p>}
+            {error !== undefined && <p style={styles.errorLine}>{error}</p>}
             {accounts.map((account) => {
               const usageKey = `${id}:${account.key}`
               const usage = usages[usageKey]

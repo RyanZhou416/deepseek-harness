@@ -106,6 +106,14 @@ export class PoolUsageTracker {
   private readonly inflight = new Map<string, { epoch: number; promise: Promise<ProviderUsage> }>()
   /** Bumped by {@link invalidate} so an older in-flight response cannot restore a dropped snapshot. */
   private readonly epochs = new Map<string, number>()
+  /**
+   * The last successful snapshot accepted per account, kept outside
+   * {@link entries} so {@link invalidate} cannot erase it. Only the availability
+   * floors read it: an enforcement failure drops the cached snapshot, and the
+   * poll that follows can fail too, which is no evidence that the allowance the
+   * earlier poll reported came back.
+   */
+  private readonly lastWindows = new Map<string, ProviderUsage>()
 
   constructor(
     private readonly fetcherFor: (provider: ProviderId, account: string) => (() => Promise<ProviderUsage>) | undefined,
@@ -143,7 +151,7 @@ export class PoolUsageTracker {
         if (!fresh) void this.refresh(key, fetcher).catch(() => undefined)
         return this.score(member, entry)
       }
-      if (fresh) return degradedQuota(member, entry.error, entry.lastSnapshot)
+      if (fresh) return degradedQuota(member, entry.error, this.lastSuccessful(key))
       // The cooldown expired: fall through to a fresh, blocking attempt.
     }
     try {
@@ -152,7 +160,7 @@ export class PoolUsageTracker {
     } catch (error: unknown) {
       // `refresh` recorded the failure before rethrowing, so the snapshot it
       // carried forward is the one this degraded view keeps for the floors.
-      return degradedQuota(member, error, lastSnapshotOf(this.entries.get(key)))
+      return degradedQuota(member, error, this.lastSuccessful(key))
     }
   }
 
@@ -198,7 +206,11 @@ export class PoolUsageTracker {
     }
   }
 
-  /** Drop cached snapshots: one account, or a whole provider when `account` is omitted. */
+  /**
+   * Drop cached snapshots: one account, or a whole provider when `account` is
+   * omitted. {@link lastWindows} survives, so the availability floors still see
+   * the allowance the endpoint last reported.
+   */
   invalidate(provider: ProviderId, account?: string): void {
     const bump = (key: string): void => {
       this.entries.delete(key)
@@ -235,7 +247,10 @@ export class PoolUsageTracker {
     const lastSnapshot = lastSnapshotOf(this.entries.get(key))
     const request = fetcher().then(
       (snapshot) => {
-        if ((this.epochs.get(key) ?? 0) === epoch) this.entries.set(key, { snapshot, at: Date.now() })
+        if ((this.epochs.get(key) ?? 0) === epoch) {
+          this.entries.set(key, { snapshot, at: Date.now() })
+          this.lastWindows.set(key, snapshot)
+        }
         return snapshot
       },
       (error: unknown) => {
@@ -254,6 +269,17 @@ export class PoolUsageTracker {
     })
     this.inflight.set(key, { epoch, promise: request })
     return request
+  }
+
+  /**
+   * The last successful snapshot this tracker holds for one account: whatever
+   * the cache entry carries, or the account's {@link lastWindows} record once
+   * {@link invalidate} has dropped the entry.
+   * @param key - the `provider/account` cache key.
+   * @returns the last successful snapshot, or undefined when none was ever read.
+   */
+  private lastSuccessful(key: string): ProviderUsage | undefined {
+    return lastSnapshotOf(this.entries.get(key)) ?? this.lastWindows.get(key)
   }
 
   /** Score one member against a snapshot's windows. */
@@ -304,7 +330,7 @@ function applicableWindows(member: ConcretePoolMember, snapshot: ProviderUsage, 
  * past its floor, not silently treat it as unmeasured.
  * @param member - the member the quota view describes.
  * @param error - the failure that degraded this poll.
- * @param last - the last successful snapshot on record, when one exists.
+ * @param last - the last successful snapshot this tracker holds for the account, when one exists.
  * @returns the degraded quota view.
  */
 function degradedQuota(member: ConcretePoolMember, error: unknown, last: ProviderUsage | undefined): MemberQuota {

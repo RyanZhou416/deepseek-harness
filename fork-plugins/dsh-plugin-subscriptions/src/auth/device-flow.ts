@@ -119,6 +119,8 @@ export class DeviceFlowManager {
     }
     const fetchFn = spec.fetchFn ?? proxiedFetch
     const response = await fetchFn(spec.deviceCodeUrl, {
+      // A redirect would send the device-code grant, and the token it returns, to another origin.
+      redirect: 'error',
       method: 'POST',
       headers: {
         'accept': 'application/json',
@@ -173,6 +175,8 @@ export class DeviceFlowManager {
           return
         }
         const pollResponse = await fetchFn(spec.tokenUrl, {
+          // A redirect would hand the poll response — and any access token in it — to another origin.
+          redirect: 'error',
           method: 'POST',
           headers: {
             'accept': 'application/json',

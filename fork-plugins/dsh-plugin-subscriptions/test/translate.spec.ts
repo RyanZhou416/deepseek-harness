@@ -1083,14 +1083,66 @@ test('an in-band rate limit the response states is final raises ENFORCEMENT', ()
   )
 })
 
+test('every error type that can carry a stated-final refusal is routed through the probe', () => {
+  // The provider sends a refusal without a status on the same types it uses for
+  // retryable failures, so each of those types asks the response's own signals
+  // before the retryable default stands.
+  for (const type of ['rate_limit_error', 'overloaded_error', 'api_error']) {
+    const refused = new AnthropicStreamTranslator(undefined, () => true)
+    assert.throws(
+      () => refused.push({ type: 'error', error: { type, message: 'the provider declined' } }),
+      (error: unknown) => error instanceof LlmError && error.code === ENFORCEMENT_CODE,
+      `${type} carries a refusal`,
+    )
+    const ordinary = new AnthropicStreamTranslator(undefined, () => false)
+    assert.throws(
+      () => ordinary.push({ type: 'error', error: { type, message: 'a window or a busy moment' } }),
+      (error: unknown) => error instanceof LlmError
+        && error.code === (type === 'rate_limit_error' ? 'RATE_LIMIT' : 'SERVER'),
+      `${type} keeps its retryable classification when the response states no refusal`,
+    )
+  }
+  // Billing wording names a refusal on its own, so it admits a type the retryable
+  // set does not list.
+  const billed = new AnthropicStreamTranslator(undefined, () => true)
+  assert.throws(
+    () => billed.push({ type: 'error', error: { type: 'billing_error', message: 'usage credits are required' } }),
+    (error: unknown) => error instanceof LlmError && error.code === ENFORCEMENT_CODE,
+  )
+})
+
+test('an error type that carries no stated-final refusal keeps its own classification', () => {
+  // The probe answers for the whole response, so consulting it for a type that is
+  // not about retrying would relabel a policy or permission failure the provider
+  // never stated was final.
+  for (const type of ['policy_blocked', 'permission_error', 'not_found_error']) {
+    const probed = new AnthropicStreamTranslator(undefined, () => true)
+    assert.throws(
+      () => probed.push({ type: 'error', error: { type, message: 'the provider declined' } }),
+      (error: unknown) => error instanceof LlmError && error.code === 'SERVER',
+      `${type} stays SERVER`,
+    )
+  }
+  const auth = new AnthropicStreamTranslator(undefined, () => true)
+  assert.throws(
+    () => auth.push({ type: 'error', error: { type: 'authentication_error', message: 'bad token' } }),
+    (error: unknown) => error instanceof LlmError && error.code === 'AUTH',
+  )
+  const tooLong = new AnthropicStreamTranslator(undefined, () => true)
+  assert.throws(
+    () => tooLong.push({ type: 'error', error: { type: 'invalid_request_error', message: 'prompt is too long: 300000 tokens' } }),
+    (error: unknown) => error instanceof LlmError && error.code === 'CONTEXT_WINDOW_EXCEEDED',
+  )
+})
+
 test('an in-band rate limit with a disclosed window keeps its retryable code', () => {
   const limited = new AnthropicStreamTranslator(undefined, () => false)
   assert.throws(
     () => limited.push({ type: 'error', error: { type: 'rate_limit_error', message: 'slow down' } }),
     (error: unknown) => error instanceof LlmError && error.code === 'RATE_LIMIT',
   )
-  // The probe is consulted for the retryable event type alone: a credential
-  // refusal keeps AUTH whatever the response said.
+  // The probe decides the refusal-bearing types alone: a credential refusal keeps
+  // AUTH whatever the response said.
   const auth = new AnthropicStreamTranslator(undefined, () => true)
   assert.throws(
     () => auth.push({ type: 'error', error: { type: 'authentication_error', message: 'bad token' } }),

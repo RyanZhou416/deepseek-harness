@@ -17,7 +17,7 @@ import { Agent, Dispatcher, ProxyAgent, fetch as undiciFetch, getGlobalDispatche
 import { chmod, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import { dirname } from 'node:path'
 import { dshHomePath } from '@deepseek-ai/dsh-home-paths'
-import { hostClaudeRoute, hostProxyForScheme, isClaudeEgressDestination } from './transport/host-egress.js'
+import { hostClaudeRoute, hostProxyForScheme, isClaudeEgressDestination, describeHostClaudeRoute } from './transport/host-egress.js'
 
 /**
  * undici's own fetch, typed to the DOM fetch signature: its bundled types are
@@ -88,6 +88,46 @@ export interface ProxyDraft {
 export const DEFAULT_PROXY_TEST_URL = 'https://api.x.ai/v1/models'
 /** Probe deadline; a hung proxy must not pin the Settings dialog forever. */
 export const DEFAULT_PROXY_TEST_TIMEOUT_MS = 15_000
+
+/**
+ * Destinations the `proxyTest` probe accepts: the API hosts this plugin's own traffic
+ * uses. The probe answers whether the operator's proxy carries that traffic, and its
+ * target arrives from the web client, so a target outside this set would make the
+ * endpoint a request proxy for whatever this host can reach. Matching covers the exact
+ * host and its subdomains, and ignores case and a terminal DNS root dot.
+ */
+const PROBE_DESTINATIONS: readonly string[] = [
+  'api.x.ai', // Grok chat, models, images, videos
+  'auth.x.ai', // Grok OIDC discovery
+  'cli-chat-proxy.grok.com', // Grok CLI catalog and billing
+  'api.anthropic.com', // Claude Messages, usage, profile, files, bootstrap
+  'platform.claude.com', // Claude OAuth token and manual callback
+  'claude.com', // Claude OAuth authorize
+  'chatgpt.com', // Codex responses, models, usage, search
+  'auth.openai.com', // Codex OAuth
+  'api.github.com', // Copilot token exchange and user lookup
+  'github.com', // Copilot device flow
+  'api.githubcopilot.com', // Copilot chat, models, responses
+  'cloudcode-pa.googleapis.com', // Antigravity production API
+  'daily-cloudcode-pa.googleapis.com', // Antigravity default API
+  'oauth2.googleapis.com', // Antigravity token endpoint
+  'www.googleapis.com', // Antigravity userinfo
+  'accounts.google.com', // Antigravity authorize page
+  'api2.cursor.sh', // Cursor chat
+  'cursor.com', // Cursor session and usage
+  'registry.npmjs.org', // Codex client-version lookup
+  'update.code.visualstudio.com', // Copilot VS Code version lookup
+]
+
+/**
+ * Whether the proxy probe may reach a destination.
+ * @param hostname - The probe target's hostname.
+ * @returns true when the hostname is one of {@link PROBE_DESTINATIONS}.
+ */
+function isProbeDestination(hostname: string): boolean {
+  const host = hostname.toLowerCase().replace(/\.+$/u, '')
+  return PROBE_DESTINATIONS.some(entry => host === entry || host.endsWith(`.${entry}`))
+}
 
 /**
  * Minimum per-address connect attempt budget for Node's Happy Eyeballs
@@ -473,6 +513,9 @@ export async function proxyAppliesTo(hostname: string): Promise<boolean> {
  * Probe a destination through a proxy, answering with the HTTP status or a
  * flattened transport error. The probe uses `draft` when given (the dialog's
  * current inputs, without saving) and the stored config otherwise.
+ *
+ * Only a destination this plugin's providers use is accepted, and a target a
+ * host-published route covers is refused rather than fetched around that route.
  * @param target - `http(s)` URL to fetch; defaults to {@link DEFAULT_PROXY_TEST_URL}.
  * @param draft - unsaved proxy inputs to test; absent means the stored config.
  * @returns the result; any HTTP status counts as a successful connection,
@@ -510,6 +553,34 @@ export async function proxyTestConnection(target = DEFAULT_PROXY_TEST_URL, draft
   } else {
     viaProxy = current.enabled && agent !== undefined && !matchesBypass(parsed.hostname, current.bypass)
     probeAgent = viaProxy ? agent : undefined
+  }
+  if (!isProbeDestination(parsed.hostname)) {
+    return {
+      ok: false,
+      viaProxy: false,
+      error: `test destination ${parsed.hostname} is not a destination this plugin's providers use`,
+    }
+  }
+  // A host-published route is what every other request in this module defers to. A probe
+  // carrying its own dispatcher would leave that route, so it refuses instead of testing a
+  // transport the host never authorized.
+  if (probeAgent !== undefined) {
+    const hostRoute = hostClaudeRoute()
+    if (hostRoute !== undefined && isClaudeEgressDestination(parsed.hostname)) {
+      return {
+        ok: false,
+        viaProxy: false,
+        error: `the host requires Claude traffic to use ${describeHostClaudeRoute(hostRoute)}, and this probe cannot carry that route`,
+      }
+    }
+    if (hostProxyForScheme(parsed) !== undefined) {
+      const variable = parsed.protocol === 'https:' ? 'HTTPS_PROXY' : 'HTTP_PROXY'
+      return {
+        ok: false,
+        viaProxy: false,
+        error: `the host published ${variable} for ${parsed.protocol} destinations, and this probe cannot carry that route`,
+      }
+    }
   }
   const started = Date.now()
   try {

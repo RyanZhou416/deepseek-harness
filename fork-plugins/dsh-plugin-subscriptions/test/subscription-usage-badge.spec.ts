@@ -15,6 +15,7 @@ const { AccountWindows, compactSegment, createCurrentModelReader, previewWindows
 css.deregister()
 import type { ProviderUsageDisplay } from '../src/client/SubscriptionUsageBadge.js'
 import type { UsageWindow } from '../src/client/SubscriptionsSection.js'
+import { errorLine, withActionError, withPollError } from '../src/client/provider-errors.js'
 import { en, zh } from '../src/client/locales.js'
 
 /** Dictionary-bound translator with `{name}` substitution, as the locale seat supplies it. */
@@ -95,6 +96,28 @@ test('provider ordering stays independent from model-window filtering', () => {
   assert.deepEqual(collapsedDisplays(all, 'antigravity'), [all[1]])
   assert.deepEqual(expandedDisplays(all, 'antigravity'), [all[1], all[0]])
   assert.deepEqual(collapsedDisplays(all, undefined), all)
+})
+
+test('an action failure stays readable after the status refresh that follows it', () => {
+  // A failed action refreshes the page immediately, and a successful refresh
+  // clears what a failed poll left; the action's own message must survive that
+  // refresh or the user never sees it. These are the transitions the section
+  // applies, in the order it applies them.
+  let state = withActionError({}, 'claude', 'logout failed')
+  state = withPollError(state, 'claude', undefined)
+  assert.equal(errorLine(state, 'claude'), 'logout failed')
+  // A failed poll for another provider leaves it alone too.
+  state = withPollError(state, 'codex', 'status unavailable')
+  assert.equal(errorLine(state, 'claude'), 'logout failed')
+  assert.equal(errorLine(state, 'codex'), 'status unavailable')
+  // The action's line outranks the poll's, and the next action clears it.
+  state = withPollError(state, 'claude', 'status unavailable')
+  assert.equal(errorLine(state, 'claude'), 'logout failed')
+  state = withActionError(state, 'claude', undefined)
+  assert.equal(errorLine(state, 'claude'), 'status unavailable')
+  state = withPollError(state, 'claude', undefined)
+  assert.equal(errorLine(state, 'claude'), undefined)
+  assert.equal(errorLine(state, 'codex'), 'status unavailable')
 })
 
 test('model reader observes switches within the same provider and handles missing directories', async () => {

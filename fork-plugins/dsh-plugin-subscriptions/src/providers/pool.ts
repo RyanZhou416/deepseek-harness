@@ -79,6 +79,23 @@ function floorWindows(quota: MemberQuota | undefined): readonly UsageWindow[] {
 }
 
 /**
+ * The subset of `windows` that actually breaches its configured floor. These
+ * alone hold an account back, so these alone state when it becomes selectable
+ * again: a window under its floor resets without releasing anything.
+ * @param windows - the windows constraining the member.
+ * @param scheduling - the resolved policy naming both floors.
+ * @returns the breaching windows, in their original order.
+ */
+function breachingWindows(
+  windows: readonly UsageWindow[],
+  scheduling: PoolSchedulingPolicy,
+): UsageWindow[] {
+  return windows.filter(window =>
+    (window.kind === 'session' && window.usedPercent >= scheduling.claudeSessionPercentFloor)
+    || (window.kind === 'weekly' && window.usedPercent >= scheduling.claudeWeeklyPercentFloor))
+}
+
+/**
  * Whether a Claude account has reached the usage floor its route reserves.
  *
  * Left out of selection rather than ranked last: a member ranked last is still chosen once
@@ -99,9 +116,7 @@ function pastClaudeFloor(
   scheduling: PoolSchedulingPolicy,
 ): boolean {
   if (!carriesUsageFloor(member.provider)) return false
-  return floorWindows(quota).some(window =>
-    (window.kind === 'session' && window.usedPercent >= scheduling.claudeSessionPercentFloor)
-    || (window.kind === 'weekly' && window.usedPercent >= scheduling.claudeWeeklyPercentFloor))
+  return breachingWindows(floorWindows(quota), scheduling).length > 0
 }
 
 /**
@@ -338,11 +353,13 @@ export class PoolAdapter extends LlmAdapter {
     const failures = new Map<ConcretePoolMember, unknown>()
     /** Cooldown reasons recorded during this selection, for the terminal error's code. */
     const reasons: string[] = []
-    // A member the floors hold back leaves no health record, so its windows are the only
-    // statement of when it becomes selectable again. The terminal error reports the earliest.
+    // A member the floors hold back leaves no health record, so the windows breaching a floor
+    // are the only statement of when it becomes selectable again. The terminal error reports the
+    // earliest of those; a window still under its floor releases nothing when it resets.
     const floorBlocked = quotaMembers.filter(member =>
       pastClaudeFloor(member, quotas.get(member), this.options.scheduling))
-    const excludedWindows = floorBlocked.flatMap(member => floorWindows(quotas.get(member)))
+    const excludedWindows = floorBlocked.flatMap(member =>
+      breachingWindows(floorWindows(quotas.get(member)), this.options.scheduling))
     while (remaining.length > 0) {
       options.signal?.throwIfAborted()
       // Ranking and reservation are synchronous after shared quota reads settle.
@@ -545,7 +562,7 @@ export class PoolAdapter extends LlmAdapter {
    * @param pool - every member of that pool.
    * @param failures - the failures this selection saw, by member.
    * @param reasons - the cooldown reasons this selection recorded.
-   * @param excludedWindows - windows of members the availability floors held back.
+   * @param excludedWindows - windows that breached an availability floor.
    * @returns the terminal error for the exhausted pool.
    */
   private exhausted(

@@ -313,6 +313,8 @@ export async function exchangeAntigravityCode(
     ...oauth.clientSecret === undefined ? {} : { client_secret: oauth.clientSecret },
   })
   const response = await fetchFn(ANTIGRAVITY_TOKEN_URL, {
+    // A redirect would replay the credential grant to another origin.
+    redirect: 'error',
     method: 'POST',
     headers: { 'content-type': 'application/x-www-form-urlencoded' },
     body: body.toString(),
@@ -337,6 +339,8 @@ export async function refreshAntigravity(
     ...oauth.clientSecret === undefined ? {} : { client_secret: oauth.clientSecret },
   })
   const response = await fetchFn(ANTIGRAVITY_TOKEN_URL, {
+    // A redirect would replay the refresh token and client secret to another origin.
+    redirect: 'error',
     method: 'POST',
     headers: { 'content-type': 'application/x-www-form-urlencoded' },
     body: body.toString(),

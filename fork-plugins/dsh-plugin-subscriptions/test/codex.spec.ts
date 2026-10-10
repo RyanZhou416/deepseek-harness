@@ -9,12 +9,13 @@
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { MessageId } from '@deepseek-ai/dsh-llm'
+import { LlmError, MessageId } from '@deepseek-ai/dsh-llm'
 import type { GenerateOptions } from '@deepseek-ai/dsh-llm'
 import { ToolCallId } from '../src/compat.js'
 import { CodexAdapter, CODEX_API_URL, exchangeCodexCode, refreshCodex } from '../src/providers/codex.js'
 import { AccountTokenManager } from '../src/providers/accounts.js'
 import type { FetchFn } from '../src/providers/common.js'
+import { ENFORCEMENT_CODE } from '../src/providers/common.js'
 import type { CodexSession } from '../src/auth/store.js'
 
 const codexSession: CodexSession = {
@@ -152,6 +153,7 @@ function toolRoundTripHistory(callId = 'call_A'): GenerateOptions['messages'] {
 function codexAdapter(
   fetchFn: FetchFn,
   accounts: Record<string, CodexSession> = { acct: codexSession },
+  recoverQuota?: (account: string, signal: AbortSignal) => Promise<boolean>,
 ): CodexAdapter {
   return new CodexAdapter({
     models: [{ id: 'gpt-5.6-sol' }],
@@ -159,6 +161,7 @@ function codexAdapter(
     tokens: memoryAccounts(accounts),
     discovery: false,
     fetchFn,
+    ...recoverQuota === undefined ? {} : { recoverQuota },
   })
 }
 
@@ -265,6 +268,54 @@ test('clearReplayState drops captured entries (the auth-transition hook)', async
     messages: toolRoundTripHistory(),
   })
   assert.equal(inputOf(calls, 1).some(item => item.type === 'reasoning'), false)
+})
+
+test('codex spends no reset credit and resends nothing after a refusal it stated is final', async () => {
+  for (const [label, headers, body] of [
+    ['the provider said to stop retrying', { 'x-should-retry': 'false' }, '{"error":{"message":"usage_limit_reached"}}'],
+    ['the refusal names credits', undefined, '{"error":{"message":"You have insufficient credits for this request"}}'],
+  ] as const) {
+    const recovered: string[] = []
+    let requests = 0
+    const adapter = codexAdapter(
+      (async () => {
+        requests += 1
+        return new Response(body, { status: 429, ...headers === undefined ? {} : { headers } })
+      }) as FetchFn,
+      { acct: codexSession },
+      async account => { recovered.push(account); return true },
+    )
+    let failure: unknown
+    try {
+      await drain(adapter, STREAM_OPTIONS)
+    } catch (error: unknown) {
+      failure = error
+    }
+    // A refused request has no window to poll for and cannot be answered by
+    // resending it, so recovery never runs and the turn ends on the refusal.
+    assert.deepEqual(recovered, [], `${label}: no reset credit was polled or spent`)
+    assert.equal(requests, 1, `${label}: the refused request was not resent`)
+    assert.ok(failure instanceof LlmError, `${label}: the failure reached the caller`)
+    assert.equal((failure as LlmError).code, ENFORCEMENT_CODE, `${label}: it is terminal`)
+  }
+})
+
+test('codex still recovers an ordinary 429 that disclosed its window', async () => {
+  const recovered: string[] = []
+  let requests = 0
+  const adapter = codexAdapter(
+    (async () => {
+      requests += 1
+      return requests === 1
+        ? new Response('{"error":{"message":"usage_limit_reached"},"resets_in_seconds":30}', { status: 429 })
+        : new Response(COMPLETED_SSE)
+    }) as FetchFn,
+    { acct: codexSession },
+    async account => { recovered.push(account); return true },
+  )
+  await drain(adapter, STREAM_OPTIONS)
+  assert.deepEqual(recovered, ['acct'], 'a spent window is still worth a reset credit')
+  assert.equal(requests, 2, 'the recovered account was asked once more')
 })
 
 /** An unsigned id token carrying the ChatGPT account claim a login needs. */

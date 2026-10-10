@@ -1294,6 +1294,12 @@ test('a usage poll that fails after a real one still applies the floor that poll
   })
   await collect(harness.pool.stream(CLAUDE_OPTIONS))
   assert.deepEqual(adapter.accounts, ['a2', 'a2'], 'an unreachable usage endpoint cannot make a spent allowance selectable')
+  // An enforcement failure drops the cached snapshot before the next poll. The
+  // floor still applies: the earlier poll observed a spent allowance, and a poll
+  // that cannot run is no evidence that the allowance came back.
+  harness.usage.invalidate('claude', 'a1')
+  await collect(harness.pool.stream(CLAUDE_OPTIONS))
+  assert.deepEqual(adapter.accounts, ['a2', 'a2', 'a2'], 'a dropped snapshot must not wash out a spent allowance')
 })
 
 test('a pool held back only by the floors reports the earliest window reset as its wait', async () => {
@@ -1307,6 +1313,21 @@ test('a pool held back only by the floors reports the earliest window reset as i
     assert.equal((error as { code?: string }).code, 'RATE_LIMIT')
     const retryAfter = (error as LlmError).failure.providerRetryAfterMs
     assert.ok(retryAfter !== undefined && retryAfter > 0 && retryAfter <= 90_000, `retry hint ${String(retryAfter)}`)
+    return true
+  })
+
+  // A window under its floor releases nothing when it resets, so it must not
+  // shorten the hint: the session window resetting in a minute leaves the
+  // account blocked by its weekly window for days either way.
+  const fiveDays = 5 * 24 * 60 * 60_000
+  const twoWindow = claudeFloorPool(() => [
+    { kind: 'weekly', usedPercent: 95, resetsAt: now + fiveDays },
+    { kind: 'session', usedPercent: 20, resetsAt: now + 60_000 },
+  ])
+  await assert.rejects(collect(twoWindow.pool.stream(CLAUDE_OPTIONS)), error => {
+    assert.equal((error as { code?: string }).code, 'RATE_LIMIT')
+    const retryAfter = (error as LlmError).failure.providerRetryAfterMs
+    assert.ok(retryAfter !== undefined && retryAfter > 60_000, `retry hint ${String(retryAfter)}`)
     return true
   })
 })

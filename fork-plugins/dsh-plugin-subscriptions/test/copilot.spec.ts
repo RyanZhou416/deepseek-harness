@@ -33,6 +33,7 @@ import {
 } from '../src/providers/copilot.js'
 import { OAuthEndpointError, validateModels } from '../src/providers/common.js'
 import { AccountTokenManager } from '../src/providers/accounts.js'
+import { DeviceFlowManager } from '../src/auth/device-flow.js'
 import type { DiscoveredModel, FetchFn, ModelEntry } from '../src/providers/common.js'
 import type { CopilotSession } from '../src/auth/store.js'
 import { streamResponses } from '../src/translate/responses.js'
@@ -132,6 +133,34 @@ test('completeCopilotLogin tolerates a profile lookup failure', async () => {
   const session = await completeCopilotLogin('gh-token', fetchFn)
   assert.equal(session.account, undefined)
   assert.equal(session.accessToken, 'copilot-token')
+})
+
+test('device flow refuses redirects, so the poll accepts a token only from GitHub', async () => {
+  const inits: RequestInit[] = []
+  const fetchFn = ((input: RequestInfo | URL, init?: RequestInit) => {
+    inits.push(init ?? {})
+    if (String(input).includes('device/code')) {
+      return Promise.resolve(new Response(JSON.stringify({
+        device_code: 'device-code',
+        user_code: 'user-code',
+        verification_uri: 'https://github.com/login/device',
+        // Poll immediately: this suite measures the request, not the wait.
+        interval: 0.001,
+        expires_in: 30,
+      }), { status: 200 }))
+    }
+    return Promise.resolve(new Response(JSON.stringify({ access_token: 'gh-token' }), { status: 200 }))
+  }) as typeof fetch
+  const manager = new DeviceFlowManager()
+  const attempt = await manager.start('copilot', {
+    clientId: 'client-id',
+    scope: 'read:user',
+    deviceCodeUrl: 'https://github.com/login/device/code',
+    tokenUrl: 'https://github.com/login/oauth/access_token',
+    fetchFn,
+  })
+  assert.equal(await attempt.waitToken(), 'gh-token')
+  assert.deepEqual(inits.map(init => init.redirect), ['error', 'error'])
 })
 
 test('refreshCopilot re-exchanges and preserves the account', async () => {

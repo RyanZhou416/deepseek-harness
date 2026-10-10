@@ -118,6 +118,19 @@ const DISABLED_REASON_FIELD = /"?overage[_-]?disabled[_-]?reason"?\s*:\s*"([a-z_
 const BILLING_WORDS = /billing_error|credits?_required|out_of_credits|insufficient[\s_-]+credits?|credit[\s_-]+balance|extra[\s_-]+usage[\s_-]+is[\s_-]+required|usage[\s_-]+credits[\s_-]+are[\s_-]+required/i
 
 /**
+ * Whether provider error text names a billing or credit refusal.
+ *
+ * The same wording decides a response's classification here and an in-band
+ * error event's classification in the stream translators, so a refusal is read
+ * by one rule whichever half of the exchange carries it.
+ * @param text - the provider's error type and message, as the provider wrote them.
+ * @returns true when the text names a billing or credit refusal.
+ */
+export function namesBillingRefusal(text: string): boolean {
+  return BILLING_WORDS.test(text)
+}
+
+/**
  * The disabled reason this response disclosed, from the unified header or the
  * error body.
  * @param body - the complete response body.
@@ -154,7 +167,7 @@ export function isEnforcementRefusal(
   if (unified !== undefined && (unified.status === 'rejected' || unified.overageStatus === 'rejected')) return true
   const disabled = disabledReason(body, unified)
   if (disabled !== undefined && DISABLED_REASONS.has(disabled)) return true
-  if (BILLING_WORDS.test(body)) return true
+  if (namesBillingRefusal(body)) return true
   return response.status === 429 && reset === undefined
 }
 
@@ -699,6 +712,12 @@ export interface DiscoveredModel {
   /** Human-readable display name. */
   name: string
   description?: string
+  /**
+   * The reason the provider's catalogue marks this entry unavailable to the account,
+   * or absent when it is selectable. The row stays listed so the picker can show a
+   * model the account cannot use instead of dropping it silently.
+   */
+  disabledReason?: string
   /** Advertised combined context capacity in tokens. */
   contextWindow?: number
   /** Server-advertised per-request output token ceiling, when disclosed. */

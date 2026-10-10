@@ -4,8 +4,11 @@
  * The file is a JSON object keyed by provider id, each entry holding that
  * provider's ACCOUNTS: a map of account key → session plus the default
  * account's key. Writes are atomic (tmp file + rename) with mode 0600
- * because they carry bearer tokens. Session shapes live here (not in the
- * provider modules) because this file owns the durable format.
+ * because they carry bearer tokens. Mode 0600 is the owner-only guarantee on
+ * POSIX platforms only: Windows ignores it, so there the file keeps the ACL of
+ * the directory holding it, and every principal that ACL admits can read the
+ * tokens. Session shapes live here (not in the provider modules) because this
+ * file owns the durable format.
  *
  * Backward compatibility: entries written by single-account versions hold
  * the session fields directly (no `accounts` wrapper); reads migrate them
@@ -13,18 +16,29 @@
  * survive the upgrade untouched.
  */
 
-import { createHash } from 'node:crypto'
+import { randomBytes } from 'node:crypto'
 import { decodeJwtPayload } from './jwt.js'
 import { chmod, copyFile, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import { dirname } from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
 import { dshHomePath } from '@deepseek-ai/dsh-home-paths'
+import { withStoreLock } from './store-lock.js'
 
 /** Provider routes this plugin can serve. */
 export type ProviderId = 'codex' | 'claude' | 'grok' | 'copilot' | 'antigravity' | 'cursor'
 
 /** Every provider route, in display order. */
 export const PROVIDER_IDS: readonly ProviderId[] = ['codex', 'claude', 'grok', 'copilot', 'antigravity', 'cursor']
+
+/**
+ * A session whose provider can report no display identity. Such a session carries the
+ * random id it is keyed by, so the account key served to the browser derives from no
+ * credential.
+ */
+export interface AccountKeyedSession {
+  /** Random per-login account id, written with the session; absent until one is assigned. */
+  accountKeyId?: string
+}
 
 /** Stored ChatGPT/Codex subscription session. */
 export interface CodexSession {
@@ -42,7 +56,7 @@ export interface CodexSession {
 }
 
 /** Stored Claude Pro/Max subscription session. */
-export interface ClaudeSession {
+export interface ClaudeSession extends AccountKeyedSession {
   accessToken: string
   refreshToken: string
   /** Epoch milliseconds at which the access token expires. */
@@ -70,7 +84,7 @@ export interface ClaudeSession {
 }
 
 /** Stored Grok (X Premium / xAI) subscription session. */
-export interface GrokSession {
+export interface GrokSession extends AccountKeyedSession {
   accessToken: string
   refreshToken: string
   /** Epoch milliseconds at which the access token expires. */
@@ -89,7 +103,7 @@ export interface GrokSession {
  * Copilot API token exchanged from it. A "refresh" is therefore a fresh
  * exchange against `copilot_internal/v2/token`, not an OAuth grant.
  */
-export interface CopilotSession {
+export interface CopilotSession extends AccountKeyedSession {
   /** Copilot API token; sent as the bearer on api.githubcopilot.com. */
   accessToken: string
   /** Long-lived GitHub OAuth token from the device flow. */
@@ -106,7 +120,7 @@ export interface CopilotSession {
  * Dashboard usage uses the separate session tokens captured at login; accounts
  * stored before that capture have neither and must log in again.
  */
-export interface CursorSession {
+export interface CursorSession extends AccountKeyedSession {
   /** User API key for agent requests. */
   accessToken: string
   /** Copy of the API key. Cursor chat has no refresh grant. */
@@ -122,7 +136,7 @@ export interface CursorSession {
 }
 
 /** Stored Google OAuth session for the Antigravity v1internal API. */
-export interface AntigravitySession {
+export interface AntigravitySession extends AccountKeyedSession {
   accessToken: string
   refreshToken: string
   /** Epoch milliseconds at which the Google access token expires. */
@@ -171,18 +185,24 @@ export interface AccountEntry<S> {
 /**
  * The stable identity of one session's account: Codex keys on workspace AND
  * user (email fallback, workspace-only for unidentified legacy sessions),
- * the others on their display identity, falling
- * back to a refresh-token hash for sessions stored before identity fields
- * existed. Logging the same account in again lands on the same key, so a
- * re-login updates in place instead of duplicating. (The hash fallback can
- * miss that dedup once for a legacy session re-logged with a now-known
- * identity — the duplicate is visible on the Settings page and can simply
- * be logged out.)
+ * the others on their display identity, and on the random id carried by a
+ * session that has none. Logging the same account in again lands on the same
+ * key, so a re-login updates in place instead of duplicating. (An identity-less
+ * account re-logged in mints a new id, which reads as a second account on the
+ * Settings page; the earlier entry can simply be logged out.)
+ *
+ * A session without a display identity is assigned its id here, and the caller
+ * that stores the session persists that id with it.
  * @param provider - the provider route.
  * @param session - the session to key.
  * @returns the account map key.
  */
 export function accountKeyOf(provider: ProviderId, session: StoredSession): string {
+  return accountIdentityOf(provider, session) ?? identitylessKey(session as AccountKeyedSession)
+}
+
+/** The display identity a provider reports for a session, when it reports one. */
+function accountIdentityOf(provider: ProviderId, session: StoredSession): string | undefined {
   switch (provider) {
     case 'codex': {
       const codex = session as CodexSession
@@ -196,16 +216,36 @@ export function accountKeyOf(provider: ProviderId, session: StoredSession): stri
       return JSON.stringify([codex.accountId, user === undefined ? 'email' : 'user', user ?? email!.toLowerCase()])
     }
     case 'claude':
-      return (session as ClaudeSession).emailAddress ?? tokenHash(session.refreshToken)
+      return nonEmpty((session as ClaudeSession).emailAddress)
     case 'grok':
-      return (session as GrokSession).account ?? tokenHash(session.refreshToken)
+      return nonEmpty((session as GrokSession).account)
     case 'antigravity':
-      return (session as AntigravitySession).account ?? tokenHash(session.refreshToken)
+      return nonEmpty((session as AntigravitySession).account)
     case 'copilot':
-      return (session as CopilotSession).account ?? tokenHash(session.refreshToken)
+      return nonEmpty((session as CopilotSession).account)
     case 'cursor':
-      return (session as CursorSession).email ?? tokenHash(session.refreshToken)
+      return nonEmpty((session as CursorSession).email)
   }
+}
+
+/** Prefix of every account key this store mints for an identity-less session. */
+const MINTED_ACCOUNT_KEY_PREFIX = 'account-'
+
+/**
+ * Prefix of a stored key that names nothing but the session's refresh token. Reading the
+ * store replaces such a key, because the account key reaches the browser.
+ */
+const TOKEN_DERIVED_KEY_PREFIX = 'token-'
+
+/** A random account key: the only key an identity-less session may be served under. */
+function mintedAccountKey(): string {
+  return `${MINTED_ACCOUNT_KEY_PREFIX}${randomBytes(8).toString('hex')}`
+}
+
+/** The id a session without a display identity is keyed by, minted into it when absent. */
+function identitylessKey(session: AccountKeyedSession): string {
+  session.accountKeyId ??= mintedAccountKey()
+  return session.accountKeyId
 }
 
 function nonEmpty(value: unknown): string | undefined {
@@ -312,11 +352,6 @@ function migrateCodex(entry: ProviderAccounts<CodexSession>): void {
   }
 }
 
-/** Short stable hash for sessions without an identity field. */
-function tokenHash(refreshToken: string): string {
-  return `token-${createHash('sha256').update(refreshToken).digest('hex').slice(0, 16)}`
-}
-
 /**
  * Absolute path of the auth store file.
  * @returns `dshHomePath('plugins', 'subscriptions', 'auth.json')`.
@@ -355,7 +390,9 @@ function assertSessionShape(provider: ProviderId, account: string, value: unknow
  * Read the whole store. A missing file is an empty store; malformed JSON or a
  * malformed entry throws, because silently discarding tokens would strand the
  * user without a diagnosis. Single-account entries are migrated in memory;
- * the next write persists the new shape.
+ * the next write persists the new shape. An account key that names the session's
+ * refresh token is replaced here and written back immediately, so the account
+ * keeps one key across restarts.
  * @param path - store file path; defaults to {@link authFilePath}.
  * @returns the parsed session map.
  */
@@ -374,11 +411,13 @@ export async function loadStore(path = authFilePath()): Promise<SessionMap> {
       throw legacyError
     }
     const migrated = parseStore(text, legacyAuthFilePath())
-    await writeStore(migrated, path)
+    await writeStore(migrated.store, path)
     await rm(legacyAuthFilePath(), { force: true })
-    return migrated
+    return migrated.store
   }
-  return parseStore(text, path)
+  const parsed = parseStore(text, path)
+  if (parsed.rekeyed) await writeStore(parsed.store, path)
+  return parsed.store
 }
 
 /**
@@ -389,8 +428,12 @@ export async function loadStore(path = authFilePath()): Promise<SessionMap> {
  * unusable by definition, so nothing of value is discarded. The next write
  * persists the store without the skipped entry. Structural failures (invalid
  * JSON, a non-object file) still throw — those say the file itself is broken.
+ *
+ * @param text - the file's contents.
+ * @param path - the file the text came from, named in structural errors.
+ * @returns the session map and whether a token-derived account key was replaced.
  */
-function parseStore(text: string, path: string): SessionMap {
+function parseStore(text: string, path: string): { store: SessionMap; rekeyed: boolean } {
   let parsed: unknown
   try {
     parsed = JSON.parse(text)
@@ -402,6 +445,7 @@ function parseStore(text: string, path: string): SessionMap {
   }
   const raw = parsed as Record<string, unknown>
   const store: SessionMap = {}
+  let rekeyed = false
   for (const provider of PROVIDER_IDS) {
     const entry = raw[provider]
     if (entry === undefined) continue
@@ -418,6 +462,9 @@ function parseStore(text: string, path: string): SessionMap {
       }
       const session = record as unknown as StoredSession
       const key = provider === 'codex' ? (session as CodexSession).accountId : accountKeyOf(provider, session)
+      // An identity-less session was just keyed by a minted id; write it so the account
+      // keeps that key rather than taking a new one on the next read.
+      if (accountIdentityOf(provider, session) === undefined) rekeyed = true
       ;(store as Record<string, unknown>)[provider] = { default: key, accounts: { [key]: session } }
       continue
     }
@@ -441,13 +488,36 @@ function parseStore(text: string, path: string): SessionMap {
       }
     }
     if (Object.keys(kept).length === 0) continue
-    const validDefault = record.default === undefined || record.default in kept
+    let validDefault = record.default === undefined || record.default in kept
       ? record.default as string | undefined
       : Object.keys(kept)[0]
-    ;(store as Record<string, unknown>)[provider] = { ...record, default: validDefault, accounts: kept }
+    let aliases = record.aliases as Record<string, string> | undefined
+    const keyed: Record<string, StoredSession> = {}
+    for (const [account, session] of Object.entries(kept)) {
+      if (accountIdentityOf(provider, session) !== undefined || !account.startsWith(TOKEN_DERIVED_KEY_PREFIX)) {
+        keyed[account] = session
+        continue
+      }
+      // The stored key names the refresh token, and this key is served to the browser.
+      const carried = (session as AccountKeyedSession).accountKeyId
+      const minted = carried !== undefined && !carried.startsWith(TOKEN_DERIVED_KEY_PREFIX)
+        ? carried
+        : mintedAccountKey()
+      ;(session as AccountKeyedSession).accountKeyId = minted
+      aliases = { ...aliases, [account]: minted }
+      if (validDefault === account) validDefault = minted
+      keyed[minted] = session
+      rekeyed = true
+    }
+    ;(store as Record<string, unknown>)[provider] = {
+      ...record,
+      ...aliases === undefined ? {} : { aliases },
+      default: validDefault,
+      accounts: keyed,
+    }
   }
   if (store.codex !== undefined) migrateCodex(store.codex)
-  return store
+  return { store, rekeyed }
 }
 
 /** Whether a value carries the fields every stored session needs (non-empty tokens). */
@@ -521,15 +591,34 @@ const writeChains = new Map<string, Promise<unknown>>()
 
 /**
  * Run one read-modify-write of a store path after every write already queued
- * for it. Callers join the chain synchronously, so call order is write order.
+ * for it in this process, and under the lock that keeps another process out of
+ * the same window. Callers join the chain synchronously, so call order is
+ * write order.
+ *
+ * The chain orders this process's writers alone, and the conditional write in
+ * {@link saveAccountSession} cannot close the rest of the window: it compares
+ * only the entry of the account being written, while every writer loads the
+ * whole file and renames a whole file back. A login landing between another
+ * writer's load and rename adds an account key no guard is watching, and the
+ * later rename drops it; {@link deleteAccountSession} and
+ * {@link setDefaultAccount} carry no guard at all. The lock spans the load and
+ * the rename, so two dsh processes sharing one DSH_HOME take turns instead. It
+ * is the protocol store-lock.ts describes, and it degrades to the in-process
+ * chain alone when a foreign holder cannot be waited out.
+ *
+ * A read that rewrites what it read — the migration from the pre-rename store,
+ * and the replacement of a token-derived account key — runs inside
+ * {@link loadStore}, so a mutating caller covers it in the same critical
+ * section; a read-only caller's rewrite stays outside the lock.
  * @param path - the store file being mutated.
  * @param action - the read-modify-write to run.
  * @returns whatever `action` returns.
  */
 async function serialize<T>(path: string, action: () => Promise<T>): Promise<T> {
   const previous = writeChains.get(path) ?? Promise.resolve()
+  const locked = (): Promise<T> => withStoreLock(path, action)
   // Both handlers: a failed write must not strand everything queued behind it.
-  const next = previous.then(action, action)
+  const next = previous.then(locked, locked)
   const tail = next.then(() => undefined, () => undefined)
   writeChains.set(path, tail)
   try {

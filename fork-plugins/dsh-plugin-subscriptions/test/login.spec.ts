@@ -14,7 +14,7 @@
 
 import { test, after } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
@@ -36,7 +36,7 @@ import {
   CLAUDE_TOKEN_URL,
   claudeFlow,
 } from '../src/providers/claude.js'
-import { accountKeyOf, authFilePath, listAccounts } from '../src/auth/store.js'
+import { accountKeyOf, authFilePath, listAccounts, saveAccountSession } from '../src/auth/store.js'
 import type { ClaudeSession } from '../src/auth/store.js'
 
 const TEMP_DIRS: string[] = []
@@ -157,6 +157,37 @@ test('Claude OAuth parameters match what Claude Code sends', () => {
     CLAUDE_SCOPE,
     'org:create_api_key user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload user:plugins',
   )
+})
+
+/**
+ * Import a fresh instance of the Claude provider module, past Node's module cache.
+ *
+ * The OAuth origin is resolved once while that module evaluates, so only a new instance
+ * shows what a launch with `CLAUDE_CODE_CUSTOM_OAUTH_URL` set produces.
+ * @param tag - distinguishes this instance from every other one in the file.
+ * @returns the freshly evaluated module.
+ */
+async function freshClaudeProvider(tag: string): Promise<typeof import('../src/providers/claude.js')> {
+  const specifier = `../src/providers/claude.js?${tag}`
+  return await import(specifier) as typeof import('../src/providers/claude.js')
+}
+
+test('CLAUDE_CODE_CUSTOM_OAUTH_URL may name only the client\'s approved endpoints', async () => {
+  const previous = process.env.CLAUDE_CODE_CUSTOM_OAUTH_URL
+  try {
+    // A repository .env can set this, so an arbitrary origin must not repoint the
+    // endpoint that receives the account's tokens and refresh token.
+    process.env.CLAUDE_CODE_CUSTOM_OAUTH_URL = 'https://attacker.example/oauth'
+    await assert.rejects(freshClaudeProvider('unapproved-origin'), /not an approved endpoint/)
+
+    // The endpoints the client itself approves are honoured, with one trailing slash dropped.
+    process.env.CLAUDE_CODE_CUSTOM_OAUTH_URL = 'https://claude.fedstart.com/'
+    const approved = await freshClaudeProvider('approved-origin')
+    assert.equal(approved.CLAUDE_TOKEN_URL, 'https://claude.fedstart.com/v1/oauth/token')
+    assert.equal(approved.CLAUDE_AUTHORIZE_URL, 'https://claude.fedstart.com/oauth/authorize')
+  } finally {
+    restoreEnv('CLAUDE_CODE_CUSTOM_OAUTH_URL', previous)
+  }
 })
 
 // ---------------------------------------------------------------------------
@@ -497,6 +528,28 @@ test('claude: an import and a logout fired together settle in call order', async
     const loggingOut = controller.logout('claude', accountKeyOf('claude', FAKE_SESSION))
     await Promise.all([importing, loggingOut])
     assert.equal((await listAccounts('claude')).length, 0, 'the logout was the later call, so it wins')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Two dsh processes sharing one home
+// ---------------------------------------------------------------------------
+
+test('a store mutation holds the auth.json lock across its read-modify-write', async () => {
+  await inIsolatedHome(async () => {
+    const path = authFilePath()
+    const lock = `${path}.lock`
+    // Another dsh process holds the lock: each writer loads the whole store and
+    // renames a whole file back, so a mutation that read now would rename over
+    // whatever that holder writes.
+    mkdirSync(lock, { recursive: true })
+    const saving = saveAccountSession('claude', 'acct', FAKE_SESSION)
+    await new Promise((resolve) => { setTimeout(resolve, 200) })
+    assert.equal(existsSync(path), false, 'the mutation waited for the lock instead of writing')
+    rmSync(lock, { recursive: true, force: true })
+    assert.equal(await saving, true, 'the mutation ran once the lock was released')
+    assert.equal(existsSync(lock), false, 'the mutation released the lock')
+    assert.equal((await listAccounts('claude'))[0]?.session.accessToken, FAKE_SESSION.accessToken)
   })
 })
 

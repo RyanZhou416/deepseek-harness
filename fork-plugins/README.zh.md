@@ -78,10 +78,10 @@ Agent Teams 的持久数据属于各工作区 `.agent-teams/` 目录；本目录
 ## Subscriptions
 
 - 源码：`fork-plugins/dsh-plugin-subscriptions`
-- 当前私有版本：`0.9.4-dsh017rc1.14`
+- 当前私有版本：`0.9.4-dsh017rc1.15`
 - 上游底座：`V1ki/dsh-plugin-subscriptions v0.9.4`
 - 私有宿主目标：`dsh-v0.1.7-rc.1`
-- 安装产物：`fork-plugins/releases/dsh-plugin-subscriptions-0.9.4-dsh017rc1.14.tgz`
-- 产物 SHA256：`9C59F35704006FDD071B3C1037120FDA514A358DD972A17103C86D760B122518`
+- 安装产物：`fork-plugins/releases/dsh-plugin-subscriptions-0.9.4-dsh017rc1.15.tgz`
+- 产物 SHA256：`D6F2AAF65C09D72AB8BEF9C3DB099D59352D530A579D586B0FC8B0A3850C1FA1`
 
 该私有构建保留上游多账号 provider、用量 UI、Codex 搜索、图片／视频工具与凭据格式。RC.1 适配转换 V4 工具角色消息，同时保留调用身份和图片结果，并固定精确的 DSH 依赖版本组合；不会迁移 Session 或凭据。Cursor 登录与用量、本地 SDK 的上下文限制、ChatGPT 重置券，以及 ChatGPT 池以 100% 为满，都是私有行为。每次导入上游后，按 `fork-plugins/dsh-plugin-subscriptions/FORK_MAINTENANCE.md` 的「Reapply after an upstream import」逐项补回。

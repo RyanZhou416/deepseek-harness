@@ -11,7 +11,7 @@ import {
   LlmError,
 } from '@deepseek-ai/dsh-llm'
 import { ToolCallId } from '../compat.js'
-import { ENFORCEMENT_CODE } from '../providers/common.js'
+import { ENFORCEMENT_CODE, namesBillingRefusal } from '../providers/common.js'
 
 // The finish-reason map is merge-extensible so an adapter can surface a provider's own
 // reasons. A refusal is one: the model answered, declined, and stopped, which a caller
@@ -687,12 +687,30 @@ export type AnthropicRefusalProbe = (
 ) => boolean
 
 /**
+ * Error-event types that can carry a refusal the provider stated is final.
+ *
+ * These are the events the provider sends for a request it will not serve: the
+ * rate limit that is really an exhausted allowance, and the overload and API
+ * failures it also reports as retryable conditions. Everything else — a policy,
+ * permission, or not-found error — is not a statement about retrying, and a
+ * credential error is classified before this set is consulted at all.
+ */
+const REFUSAL_BEARING_ERROR_TYPES: ReadonlySet<string> = new Set([
+  'rate_limit_error',
+  'overloaded_error',
+  'api_error',
+])
+
+/**
  * Classify an Anthropic `error` event into a thrown LlmError.
  *
- * A rate-limit event is retryable by default, because the usual cause is a
- * window that reopens. A refusal the provider will not accept a retry for
- * arrives on the same event type, so the caller's {@link AnthropicRefusalProbe}
- * decides which of the two this one is; without a probe the default stands.
+ * The retryable event types — a rate limit, and the overload and API failures
+ * the provider states are transient — are classified as retryable by default,
+ * because the usual cause is a window that reopens or a moment of congestion.
+ * A refusal the provider will not accept a retry for arrives on those same
+ * types, or on any type whose message names a billing or credit refusal, so the
+ * caller's {@link AnthropicRefusalProbe} decides which of the two this one is;
+ * without a probe the default stands.
  * @param error - the wire error object.
  * @param isRefusal - the caller's classification of this event against the
  *   response it arrived on.
@@ -707,12 +725,11 @@ export function anthropicFailure(
   if (type === 'invalid_request_error' && /prompt is too long/i.test(message)) {
     return new LlmError(message, CONTEXT_WINDOW_EXCEEDED_CODE)
   }
-  if (type === 'rate_limit_error') {
-    return isRefusal?.(error) === true
-      ? new LlmError(message, ENFORCEMENT_CODE)
-      : new LlmError(message, 'RATE_LIMIT')
-  }
   if (type === 'authentication_error') return new LlmError(message, 'AUTH')
+  if ((REFUSAL_BEARING_ERROR_TYPES.has(type) || namesBillingRefusal(message)) && isRefusal?.(error) === true) {
+    return new LlmError(message, ENFORCEMENT_CODE)
+  }
+  if (type === 'rate_limit_error') return new LlmError(message, 'RATE_LIMIT')
   return new LlmError(message, 'SERVER')
 }
 
