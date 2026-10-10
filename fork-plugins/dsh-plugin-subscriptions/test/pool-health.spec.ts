@@ -14,6 +14,7 @@ import {
   AUTH_COOLDOWN_MS,
   classifyPoolFailure,
   DEFAULT_QUOTA_COOLDOWN_MS,
+  isAuthCooldownReason,
   memberKey,
   PoolHealthRegistry,
   TRANSIENT_COOLDOWN_MS,
@@ -159,4 +160,27 @@ test('PoolHealthRegistry: clear drops one account, or the whole provider when no
   registry.clear('codex')
   assert.equal(registry.isMemberAvailable('codex', 'a2', 'a', 0), true)
   assert.equal(registry.isMemberAvailable('claude', 'a1', 'c', 0), false)
+})
+
+test('PoolHealthRegistry: accountCooling reports the longest unexpired record of one account', () => {
+  const registry = new PoolHealthRegistry()
+  assert.equal(registry.accountCooling('codex', 'a1', 0), undefined)
+  // Another account's record must not answer for this one.
+  registry.markUnavailable(memberKey('codex', 'a2', 'gpt-5.4'), 9000, 'QUOTA', 0)
+  assert.equal(registry.accountCooling('codex', 'a1', 0), undefined)
+  registry.markUnavailable(memberKey('codex', 'a1', 'gpt-5.4'), 4000, 'QUOTA', 0)
+  registry.markUnavailable(accountKey('codex', 'a1'), 9000, 'AUTH', 0)
+  assert.deepEqual(registry.accountCooling('codex', 'a1', 1000), { unavailableUntil: 9000, reason: 'AUTH' })
+  // An expired record is dropped rather than reported.
+  assert.deepEqual(registry.accountCooling('codex', 'a1', 5000), { unavailableUntil: 9000, reason: 'AUTH' })
+  assert.equal(registry.accountCooling('codex', 'a1', 9000), undefined)
+})
+
+test('isAuthCooldownReason separates a dead login from a spent allowance', () => {
+  assert.equal(isAuthCooldownReason('AUTH'), true)
+  assert.equal(isAuthCooldownReason('INVALID_CREDENTIAL'), true)
+  assert.equal(isAuthCooldownReason('MISSING_CREDENTIAL'), true)
+  assert.equal(isAuthCooldownReason('QUOTA'), false)
+  assert.equal(isAuthCooldownReason('RATE_LIMIT'), false)
+  assert.equal(isAuthCooldownReason('SERVER'), false)
 })

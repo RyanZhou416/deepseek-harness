@@ -66,6 +66,7 @@ import {
   subscriptionRetryPolicy,
 } from './rate-limit.js'
 import type { RateLimitResetReader, RateLimitWait } from './rate-limit.js'
+import { parseUnifiedRateLimit, rememberUnifiedRateLimit } from './unified-rate-limit.js'
 
 export const CLAUDE_CLIENT_ID = '9d1c250a-e61b-44d9-88ed-5944d1962f5e'
 /**
@@ -235,9 +236,10 @@ const CLAUDE_RESET_FIELDS = ['resets_at', 'resetsAt', 'reset_at', 'retry_after']
  * `rateLimitDiagnostics` instead.
  */
 export const claudeRateLimitReset: RateLimitResetReader = (response, body, now) => {
+  // Only `-reset` exists on the wire: the client's own reader takes its reset from that header
+  // and from the body's fields, and no `-fallback-reset` header is ever sent.
   const unified = earliestReset(
     resetInstantFromHeader(response, 'anthropic-ratelimit-unified-reset', now),
-    resetInstantFromHeader(response, 'anthropic-ratelimit-unified-fallback-reset', now),
   )
   if (unified !== undefined) return unified
   return resetFromFields(jsonBody(body), CLAUDE_RESET_FIELDS, now)
@@ -1210,6 +1212,14 @@ export class ClaudeAdapter extends LlmAdapter {
       if (response.status === 401) {
         session = await this.options.tokens.session(account, true)
         response = await this.request(options, account, session, sessionId, chainAccount, watchdog.signal)
+      }
+      // The unified rate-limit headers ride every answered Messages response, the
+      // 429 included, and are the provider's own statement of this account's
+      // standing. They are read before the status check so the Settings cards can
+      // report a rejected or warning account without a second request.
+      const rateLimit = parseUnifiedRateLimit(response.headers, Date.now())
+      if (rateLimit !== undefined && chainAccount !== '') {
+        rememberUnifiedRateLimit('claude', chainAccount, rateLimit)
       }
       if (!response.ok) {
         throw await httpLlmError(response, 'claude API', {

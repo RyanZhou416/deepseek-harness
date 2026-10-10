@@ -64,6 +64,36 @@ export interface UsageWindow {
   resetsAt?: number
 }
 
+/** One unified rate-limit window as reported by the `usage` endpoint. */
+export interface RateLimitWindow {
+  window: string
+  utilization?: number
+  resetsAt?: number
+  surpassedThreshold?: number
+}
+
+/** The account's captured `anthropic-ratelimit-unified-*` report. */
+export interface RateLimitReport {
+  status: 'allowed' | 'allowed_warning' | 'rejected' | 'other'
+  resetsAt?: number
+  claim?: string
+  fallbackAvailable?: boolean
+  overageStatus?: 'allowed' | 'allowed_warning' | 'rejected' | 'other'
+  overageResetsAt?: number
+  overageDisabledReason?: string
+  overageInUse?: boolean
+  overageScope?: string
+  windows: RateLimitWindow[]
+  observedAt: number
+}
+
+/** The account pool's view of one account, present only while the pool is enabled. */
+export interface PoolReport {
+  coolingReason?: 'auth' | 'quota'
+  coolingUntil?: number
+  peerAvailable: boolean
+}
+
 /** `usage` endpoint value: the node half owns this shape. */
 export interface ProviderUsage {
   supported: boolean
@@ -71,6 +101,10 @@ export interface ProviderUsage {
   plan?: string
   /** Present only when the usage payload disclosed a reset-credit count. */
   resetCredits?: { availableCount: number }
+  /** The account's last answered request's unified rate-limit report, when captured. */
+  rateLimit?: RateLimitReport
+  /** The account pool's view of this account, when the pool is enabled. */
+  pool?: PoolReport
 }
 
 /** One model's default-effort picker state as answered by `modelDefaults`. */
@@ -352,44 +386,126 @@ export function usageBarColor(usedPercent: number): string {
   return 'var(--dsw-alias-state-success-primary)'
 }
 
-/** The out-of-service state of one account's reported usage. */
+/**
+ * The fact one account's red usage line states.
+ *
+ * `limit` and `near` come from the reported window percentages, `rejected` and
+ * `warning` from the provider's unified rate-limit status, `relogin` from a
+ * stored login the pool found dead, and `cooldown` and `overage` from the
+ * account pool working around this account.
+ */
+export type UsageAlertKind = 'limit' | 'near' | 'rejected' | 'warning' | 'relogin' | 'cooldown' | 'overage'
+
+/** What one account's card states about its usage. */
 export interface UsageAlert {
-  /** `limit`: a window reached 100% used. `near`: a window crossed the provider's 95% full threshold. */
-  level: 'limit' | 'near'
-  /** Latest reset among the full windows that is still ahead of the clock; absent when none is known. */
+  /** The fact the line states. */
+  kind: UsageAlertKind
+  /**
+   * `account` when the fact is about this account alone; `pool` when this
+   * account is out and another pool member is serving in its place. The
+   * distinction is the difference between "you are blocked" and "we routed
+   * around a cooling account".
+   */
+  attribution: 'account' | 'pool'
+  /** Latest disclosed instant still ahead of the clock at which the state clears. */
   resetsAt?: number
+}
+
+/** A disclosed instant, kept only while it is still ahead of the clock. */
+function pendingInstant(at: number | undefined, now: number): { resetsAt?: number } {
+  return at === undefined || at <= now ? {} : { resetsAt: at }
 }
 
 /**
  * Whether an account's reported usage puts it out of service.
  *
- * Contract: a window counts as full at `usedPercent >= 100` for Codex and
- * Claude, which spend a window all the way down, and at `usedPercent >= 95`
- * for every other provider — the per-provider rule the pool's availability
- * check applies (`CONSUMABLE_QUOTA_FULL_PERCENT` / `QUOTA_FULL_PERCENT`).
- * The alert is `limit` when a full window reached 100% and `near` otherwise,
- * and carries the latest reset still ahead of the clock, because the account
- * serves again only once the last of its full windows reopens. Absent or empty
+ * Contract: the header state outranks the percentage state, because the
+ * provider's own `rejected` verdict is more specific than a window percentage
+ * that may have been read minutes earlier. A dead login is always attributed
+ * to the account: no routing decision clears it. Overage is always attributed
+ * to the pool and only reported when a peer can serve, because the account
+ * itself is still answering.
+ *
+ * The percentage rule is unchanged from the reported windows: a window counts
+ * as full at `usedPercent >= 100` for Codex and Claude, which spend a window
+ * all the way down, and at `usedPercent >= 95` for every other provider — the
+ * per-provider rule the pool's availability check applies
+ * (`CONSUMABLE_QUOTA_FULL_PERCENT` / `QUOTA_FULL_PERCENT`). Absent or empty
  * windows, and every window below its threshold, report no alert.
  * @param provider - the provider that reported the windows.
  * @param windows - the account's reported windows, or undefined while unknown.
+ * @param rateLimit - the account's captured unified rate-limit report, when any.
+ * @param pool - the pool's view of this account, when the pool is enabled.
  * @returns the out-of-service state, or undefined while the account can serve.
  */
 export function usageAlert(
   provider: SubscriptionProvider,
   windows: readonly UsageWindow[] | undefined,
+  rateLimit?: RateLimitReport,
+  pool?: PoolReport,
 ): UsageAlert | undefined {
+  const now = Date.now()
+  const routed = pool?.peerAvailable === true
+  if (pool?.coolingReason === 'auth') {
+    return { kind: 'relogin', attribution: 'account', ...pendingInstant(pool.coolingUntil, now) }
+  }
+  if (rateLimit !== undefined) {
+    const rejected = rateLimit.status === 'rejected' || rateLimit.overageStatus === 'rejected'
+    if (rejected) {
+      return {
+        kind: 'rejected',
+        attribution: routed ? 'pool' : 'account',
+        ...pendingInstant(rateLimit.resetsAt ?? rateLimit.overageResetsAt, now),
+      }
+    }
+    if (rateLimit.overageInUse === true) {
+      // Paid overage is a routing observation: with no peer the account serves
+      // fine, so there is nothing to warn about.
+      return routed
+        ? { kind: 'overage', attribution: 'pool', ...pendingInstant(rateLimit.overageResetsAt, now) }
+        : undefined
+    }
+    if (rateLimit.status === 'allowed_warning') {
+      return {
+        kind: 'warning',
+        attribution: routed ? 'pool' : 'account',
+        ...pendingInstant(rateLimit.resetsAt, now),
+      }
+    }
+  }
+  if (pool?.coolingUntil !== undefined && pool.coolingUntil > now) {
+    return { kind: 'cooldown', attribution: routed ? 'pool' : 'account', resetsAt: pool.coolingUntil }
+  }
   if (windows === undefined) return undefined
   const fullAt = provider === 'codex' || provider === 'claude' ? 100 : 95
   const full = windows.filter(window => window.usedPercent >= fullAt)
   if (full.length === 0) return undefined
-  const now = Date.now()
   const resets = full
     .map(window => window.resetsAt)
     .filter((at): at is number => at !== undefined && at > now)
   return {
-    level: full.some(window => window.usedPercent >= 100) ? 'limit' : 'near',
+    kind: full.some(window => window.usedPercent >= 100) ? 'limit' : 'near',
+    attribution: routed ? 'pool' : 'account',
     ...resets.length === 0 ? {} : { resetsAt: Math.max(...resets) },
+  }
+}
+
+/**
+ * The locale key stating one alert. Account-level facts name what is wrong with
+ * this account; pool-level facts name that another account is serving instead.
+ * @param alert - the alert derived by {@link usageAlert}.
+ * @returns the key of the line to render.
+ */
+export function usageAlertKey(alert: UsageAlert): SubscriptionsKey {
+  if (alert.attribution === 'pool') return alert.kind === 'overage' ? 'usagePoolOverage' : 'usagePoolCooling'
+  switch (alert.kind) {
+    case 'relogin': return 'usageAccountRelogin'
+    case 'rejected': return 'usageAccountRejected'
+    case 'near':
+    case 'warning': return 'usageNearlyExhausted'
+    case 'limit':
+    case 'cooldown': return 'usageLimitReached'
+    case 'overage': return 'usagePoolOverage'
   }
 }
 
@@ -909,7 +1025,7 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
               // Providers without a usage endpoint answer supported:false — no block.
               const showUsage = usage?.supported !== false
                 && (usage !== undefined || usageError !== undefined || usageLoading[usageKey] === true)
-              const alert = usageAlert(id, usage?.windows)
+              const alert = usageAlert(id, usage?.windows, usage?.rateLimit, usage?.pool)
               return (
                 <div key={account.key} style={styles.accountRow}>
                   <div style={styles.accountHeader}>
@@ -958,7 +1074,7 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
                       </div>
                       {alert !== undefined && (
                         <p style={styles.errorLine}>
-                          {alert.level === 'limit' ? t('usageLimitReached') : t('usageNearlyExhausted')}
+                          {t(usageAlertKey(alert))}
                           {alert.resetsAt !== undefined
                             && ` · ${t('usageResets', { date: new Date(alert.resetsAt).toLocaleString() })}`}
                         </p>

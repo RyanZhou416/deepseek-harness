@@ -181,6 +181,11 @@ export interface AuthController {
   setDefault(provider: ProviderId, account: string): Promise<void>
   /**
    * Current subscription usage of one account.
+   *
+   * Beyond the reported windows, the payload carries this account's captured
+   * unified rate-limit report (`rateLimit`) when a request it issued since
+   * startup answered with one, and the account pool's view of it (`pool`) when
+   * the pool is enabled. Both are plugin-local state read without a round trip.
    * @param signal - caller cancellation from the RPC transport.
    * @param force - bypass a fresh cached snapshot for an honest re-check
    *   (the manual Refresh button); a live failure cooldown still applies.

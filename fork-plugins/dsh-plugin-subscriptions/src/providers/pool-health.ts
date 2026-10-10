@@ -33,6 +33,15 @@ export const TRANSIENT_COOLDOWN_MS = 60_000
 /** Whether a failure parks one member or the account's whole quota. */
 export type PoolFailureScope = 'member' | 'account'
 
+/**
+ * Whether a cooldown reason records a login that stopped working rather than a
+ * spent allowance. Only a re-login clears these; every other parked account
+ * recovers on its own once its window reopens.
+ */
+export function isAuthCooldownReason(reason: string): boolean {
+  return reason === 'AUTH' || reason === 'INVALID_CREDENTIAL' || reason === 'MISSING_CREDENTIAL'
+}
+
 /** What the pool should do with a member that just failed. */
 export type PoolFailureAction =
   | { action: 'switch'; cooldownMs: number; reason: string; scope: PoolFailureScope }
@@ -100,7 +109,8 @@ export function classifyPoolFailure(error: unknown, provider: ProviderId): PoolF
   }
 }
 
-interface HealthRecord {
+/** One parked account or member: how long it sits out, and the failure code that parked it. */
+export interface HealthRecord {
   unavailableUntil: number
   reason: string
 }
@@ -136,6 +146,30 @@ export class PoolHealthRegistry {
     const existing = this.records.get(key)
     if (existing !== undefined && existing.unavailableUntil > until) return
     this.records.set(key, { unavailableUntil: until, reason })
+  }
+
+  /**
+   * The cooldown parking one account right now, when any: the longest-lived
+   * unexpired record among that account's account key and its member keys,
+   * with the reason that record holds. Expired records are dropped on the way,
+   * the same recovery {@link isAvailable} performs.
+   * @param provider - the account's provider route.
+   * @param account - the account key.
+   * @param now - the current epoch milliseconds.
+   * @returns the parking record, or undefined when the account may serve.
+   */
+  accountCooling(provider: ProviderId, account: string, now = Date.now()): HealthRecord | undefined {
+    const prefix = `${provider}/${account}/`
+    let found: HealthRecord | undefined
+    for (const [key, record] of [...this.records]) {
+      if (!key.startsWith(prefix)) continue
+      if (record.unavailableUntil <= now) {
+        this.records.delete(key)
+        continue
+      }
+      if (found === undefined || record.unavailableUntil > found.unavailableUntil) found = record
+    }
+    return found
   }
 
   /**

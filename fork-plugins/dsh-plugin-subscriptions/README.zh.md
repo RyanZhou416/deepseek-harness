@@ -60,7 +60,7 @@
 
 只有已登录的 provider 才会出现在会话模型选择器里;登录/退出后列表自动刷新。支持视觉的模型会声明 `['text', 'image']` 输入模态,图片内容会被翻译成各 provider 的 wire 格式。
 
-已登录的卡片还会显示**订阅用量**——按限额窗口(5 小时会话窗、每周窗,以及计划包含的按模型每周窗)展示已用百分比、进度条和重置时间,并带刷新按钮。Codex 用量来自 `chatgpt.com/backend-api/wham/usage`(同时报告计划类型),Claude 用量来自 `api.anthropic.com/api/oauth/usage`,Grok 用量来自 Grok Build CLI 代理的 `cli-chat-proxy.grok.com/v1/billing`(即 CLI `/usage` 面板的数据源,报告共享每周额度和订阅档位)。Antigravity 会在上游字段存在时从 `loadCodeAssist` 与 `fetchAvailableModels` 显示订阅档位、积分及按模型限额。Copilot 没有用量接口,其卡片不显示用量区块。
+已登录的卡片还会显示**订阅用量**——按限额窗口(5 小时会话窗、每周窗,以及计划包含的按模型每周窗)展示已用百分比、进度条和重置时间,并带刷新按钮。Codex 用量来自 `chatgpt.com/backend-api/wham/usage`(同时报告计划类型),Claude 用量来自 `api.anthropic.com/api/oauth/usage`,Grok 用量来自 Grok Build CLI 代理的 `cli-chat-proxy.grok.com/v1/billing`(即 CLI `/usage` 面板的数据源,报告共享每周额度和订阅档位)。Antigravity 会在上游字段存在时从 `loadCodeAssist` 与 `fetchAvailableModels` 显示订阅档位、积分及按模型限额。Copilot 没有用量接口,其卡片不显示用量区块。账号无法提供服务时，卡片会显示一条红字提示：数据来自本机发出的 Messages 响应上的 `anthropic-ratelimit-unified-*` 响应头，优先于用量百分比，并分别说明是账号本身超额或需要重新登录，还是账号池已改用其他账号提供服务。
 
 在 **订阅 → ChatGPT → 管理** 中，**额度耗尽时自动使用重置卡** 默认关闭，点击 **保存更改** 后生效。该设置适用于 Codex LLM 请求，包括独立账号入口。当前账号的会话窗或周额度耗尽时，只有所有已登录 ChatGPT 账号中都没有更早到期的可用卡，才会使用当前账号最早到期的可用 `codex_rate_limits` 卡。退出账号池的账号也参加比较；其他账号仍有额度不影响用卡，并列最早到期也符合条件。仅调用图片或搜索工具不会触发该功能。
 

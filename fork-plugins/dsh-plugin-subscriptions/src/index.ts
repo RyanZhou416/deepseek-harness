@@ -64,7 +64,7 @@ import type {
   StoredSession,
 } from './auth/store.js'
 import { DISCOVERY_TIMEOUT_MS, isMissingOrInvalidCredential, OAuthEndpointError, validateModels, withTimeout } from './providers/common.js'
-import type { ModelEntry, ProviderUsage, ResetCreditConsumeResult, ResetCreditList } from './providers/common.js'
+import type { ModelEntry, ProviderUsage, ResetCreditConsumeResult, ResetCreditList, UsagePoolState } from './providers/common.js'
 import { AccountTokenManager } from './providers/accounts.js'
 import type { AccountAwareAdapter } from './providers/accounts.js'
 import { DEFAULT_RATE_LIMIT_MAX_WAIT_MS, resolveRateLimitWait } from './providers/rate-limit.js'
@@ -82,8 +82,9 @@ import { ImageAccountPool } from './providers/image-pool.js'
 import { registerWithAlias } from './tools/registration.js'
 import { buildAccountPools, poolKey } from './providers/pool-family.js'
 import type { PoolDefinition, PoolMemberRef } from './providers/pool-family.js'
-import { PoolHealthRegistry } from './providers/pool-health.js'
+import { PoolHealthRegistry, accountKey, isAuthCooldownReason } from './providers/pool-health.js'
 import { PoolUsageTracker, USAGE_TTL_MS } from './providers/pool-usage.js'
+import { forgetUnifiedRateLimit, unifiedRateLimitFor } from './providers/unified-rate-limit.js'
 import {
   CodexAdapter,
   codexFlow,
@@ -481,13 +482,32 @@ export class SubscriptionsAuthController implements AuthController {
     private readonly preserveClaudeIdentity: (
       session: ClaudeSession,
     ) => Promise<ClaudeSession> = async session => session,
+    /**
+     * The account pool's view of one account, for the `usage` endpoint's
+     * attribution line. Undefined while the pool is disabled, which is also
+     * when nothing routes around a parked account.
+     */
+    private readonly poolState: (
+      provider: ProviderId,
+      account: string,
+    ) => Promise<UsagePoolState | undefined> = () => Promise.resolve(undefined),
   ) {}
 
-  usage(provider: ProviderId, account: string, signal: AbortSignal, force = false): Promise<ProviderUsage> {
+  async usage(provider: ProviderId, account: string, signal: AbortSignal, force = false): Promise<ProviderUsage> {
     const fetcher = this.usageFetchers[provider]
-    if (fetcher === undefined) return Promise.resolve({ supported: false })
-    if (this.poolUsage === undefined) return fetcher(account, signal)
-    return this.poolUsage.snapshotFor(provider, account, force)
+    if (fetcher === undefined) return { supported: false }
+    const usage = this.poolUsage === undefined
+      ? await fetcher(account, signal)
+      : await this.poolUsage.snapshotFor(provider, account, force)
+    // Both additions are plugin-local state read without a round trip, so a
+    // provider or composition without them answers exactly as before.
+    const rateLimit = unifiedRateLimitFor(provider, account)
+    const pool = await this.poolState(provider, account)
+    return {
+      ...usage,
+      ...rateLimit === undefined ? {} : { rateLimit },
+      ...pool === undefined ? {} : { pool },
+    }
   }
 
   listResetCredits(provider: ProviderId, account: string, signal: AbortSignal, force = false): Promise<ResetCreditList> {
@@ -933,6 +953,9 @@ export function apply(ctx: Context, config: Config): void {
     poolHealth?.clear(provider, account)
     poolUsage?.invalidate(provider, account)
     poolAdapter?.invalidate()
+    // A dead login or a removed account must not leave its last captured
+    // rate-limit report on the card.
+    forgetUnifiedRateLimit(provider, account)
     // Pool membership follows the accounts: re-announce every route so the
     // picker re-queries (the changed provider's own catalog may shift too).
     for (const [route, handle] of handles) handle.replace([route])
@@ -1341,6 +1364,27 @@ export function apply(ctx: Context, config: Config): void {
     })
   }
 
+  // The `usage` endpoint's pool attribution: whether THIS account is parked,
+  // and whether another account that may serve this provider's pool is clear.
+  // Membership comes from the account preferences the pool itself obeys rather
+  // than from a pool sweep, so a Settings read never triggers model discovery.
+  const poolStateFor = async (provider: ProviderId, account: string): Promise<UsagePoolState | undefined> => {
+    const health = poolHealth
+    if (health === undefined) return undefined
+    const cooling = health.accountCooling(provider, account)
+    const configured = preferences.get(provider).accounts
+    const pooled = (key: string): boolean =>
+      configured !== undefined && Object.hasOwn(configured, key) ? configured[key].poolEnabled !== false : true
+    const peerAvailable = (await accountTokens.get(provider)?.list() ?? []).some(entry =>
+      entry.key !== account && pooled(entry.key) && health.isAvailable(accountKey(provider, entry.key)))
+    if (cooling === undefined) return { peerAvailable }
+    return {
+      peerAvailable,
+      coolingUntil: cooling.unavailableUntil,
+      coolingReason: isAuthCooldownReason(cooling.reason) ? 'auth' : 'quota',
+    }
+  }
+
   // Keep the full catalog for the editor and routing; filter only picker enumeration.
   const fullCatalogs = new Map<ProviderId, (provider: string) => Promise<readonly LlmModelInfo[]>>()
   for (const [provider, adapter] of adapters) {
@@ -1466,6 +1510,7 @@ export function apply(ctx: Context, config: Config): void {
       session,
       await claudeTokens?.peek(accountKeyOf('claude', session)),
     ) as ClaudeSession,
+    poolStateFor,
   )
   registerAuthRpc(ctx, subscriptionsAuth, speed, {
     get: () => proxyGetConfig(),

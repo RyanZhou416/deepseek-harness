@@ -17,6 +17,7 @@ import {
 } from '@deepseek-ai/dsh-llm'
 import { rateLimitDiagnostics, retryAfterInstant, waitFromReset } from './rate-limit.js'
 import type { RateLimitResetReader } from './rate-limit.js'
+import type { UnifiedRateLimitState } from './unified-rate-limit.js'
 
 /** One configured model catalog entry. */
 export interface ModelEntry {
@@ -564,6 +565,37 @@ export interface ProviderUsage {
     /** Earliest expiry among available credits, epoch ms. Pool selection only. */
     soonestExpiresAt?: number
   }
+  /**
+   * The unified rate-limit report of this account's last answered request, when
+   * one was captured. It states the account's standing more precisely than the
+   * usage windows do — a `rejected` status is the provider refusing requests —
+   * and is absent for accounts that have not issued a request since startup.
+   */
+  rateLimit?: UnifiedRateLimitState
+  /**
+   * The account pool's view of this account, present only while the pool is
+   * enabled. It is what separates a pool condition (another account is serving
+   * instead) from a fact about this account alone.
+   */
+  pool?: UsagePoolState
+}
+
+/** The account pool's view of one account, as the `usage` endpoint reports it. */
+export interface UsagePoolState {
+  /**
+   * Why the pool parked this account: `auth` when the stored login stopped
+   * working (only a re-login clears it), `quota` for a spent allowance or a
+   * rate limit. Read only together with `coolingUntil`.
+   */
+  coolingReason?: 'auth' | 'quota'
+  /** Epoch ms the pool parks this account until; absent when it is not parked. */
+  coolingUntil?: number
+  /**
+   * Whether another account that may serve this provider's pool is clear right
+   * now. False when the pool is disabled, the account is the only member, or
+   * every other member is parked.
+   */
+  peerAvailable: boolean
 }
 
 /** One model discovered from a provider's live model-list endpoint. */

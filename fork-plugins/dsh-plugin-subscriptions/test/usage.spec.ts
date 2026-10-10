@@ -390,3 +390,48 @@ test('usage(): with no pool tracker (pool disabled), every call hits the raw fet
   await controller.usage('codex', 'a1', new AbortController().signal)
   assert.equal(calls, 2, 'unchanged prior behavior when the pool usage cache is unavailable')
 })
+
+// ---------------------------------------------------------------------------
+// SubscriptionsAuthController.usage(): the attribution fields appended to the
+// usage payload — the captured unified rate-limit report and the pool's view
+// of the account. Both are plugin-local state, so the reported fields must be
+// byte-for-byte the ones they were before when neither source has anything.
+// ---------------------------------------------------------------------------
+
+const { forgetUnifiedRateLimit, parseUnifiedRateLimit, rememberUnifiedRateLimit } =
+  await import('../src/providers/unified-rate-limit.js')
+
+test('usage(): appends the captured rate-limit report and the pool view, keeping the reported fields', async () => {
+  forgetUnifiedRateLimit()
+  const state = parseUnifiedRateLimit(new Headers({
+    'anthropic-ratelimit-unified-status': 'rejected',
+    'anthropic-ratelimit-unified-reset': '1786147200',
+  }), 1_000)
+  assert.ok(state !== undefined)
+  rememberUnifiedRateLimit('claude', 'a1', state)
+  const controller = new SubscriptionsAuthController(
+    new OAuthFlowManager(), new DeviceFlowManager(), () => {}, () => undefined,
+    { claude: async () => ({ supported: true, plan: 'max', windows: [{ kind: 'session', usedPercent: 100 }] }) },
+    undefined, undefined, undefined, undefined, undefined,
+    async (provider, account) => provider === 'claude' && account === 'a1'
+      ? { peerAvailable: true, coolingUntil: 2_000, coolingReason: 'quota' }
+      : undefined,
+  )
+  assert.deepEqual(await controller.usage('claude', 'a1', new AbortController().signal), {
+    supported: true,
+    plan: 'max',
+    windows: [{ kind: 'session', usedPercent: 100 }],
+    rateLimit: state,
+    pool: { peerAvailable: true, coolingUntil: 2_000, coolingReason: 'quota' },
+  })
+})
+
+test('usage(): omits both attribution fields when nothing was captured and no pool is wired', async () => {
+  forgetUnifiedRateLimit()
+  const reported: ProviderUsage = { supported: true, windows: [{ kind: 'weekly', usedPercent: 3 }] }
+  const controller = new SubscriptionsAuthController(
+    new OAuthFlowManager(), new DeviceFlowManager(), () => {}, () => undefined,
+    { claude: async () => reported },
+  )
+  assert.deepEqual(await controller.usage('claude', 'a1', new AbortController().signal), reported)
+})

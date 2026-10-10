@@ -53,6 +53,24 @@ Files: `src/providers/claude-wire.ts`, `src/providers/claude.ts`, `src/providers
 - The npm dependency is GPL-3.0-or-later. The plugin is `private: true` and its artifact is not redistributed; keep the exact version pin and this note if the artifact is ever published.
 - Tests: `test/claude-wire.spec.ts` (pin, billing/correlation, header plan, breakpoints, chaining, oversize), plus the updated `translate.spec.ts` and `models.spec.ts`. All injected, no credentials.
 
+### Rate-limit state on the usage cards
+
+Each Claude response's `anthropic-ratelimit-unified-*` headers are captured in
+`ClaudeAdapter.streamCore` before the response is classified, so a refusal's headers are kept
+too, and they reach the Settings usage card through the usage RPC as `rateLimit` alongside the
+pool's own `pool` state. The card renders one red line, preferring the header state over the
+percentage-derived one and saying whether the account is the constraint or the pool is
+(`poolHealth.accountCooling` plus whether a non-cooling peer of the same provider exists).
+State is bounded like the wire chain and dropped on login, logout, and credential death.
+
+**Preservation rule.** Keep the capture before the `response.ok` check — moving it after
+loses the headers of every refusal — and keep the account-versus-pool split: a dead login is an
+account condition even when other accounts could serve.
+
+**Focused verification.** `test/unified-rate-limit.spec.ts` covers parsing and bounding,
+`test/claude-rate-limit-capture.spec.ts` covers capture on a warning and on a refusal, and
+`test/usage-alert.spec.ts` covers the attribution precedence.
+
 ### Request images
 
 `src/translate/resolved.ts` uses the Harness request-variant API for all subscription routes and respects logged image offloads. Claude supplies count-dependent dimensions and model-tier count limits from `src/providers/claude-images.ts`, then checks the exact JSON request-body bytes before dispatch. Preserve each occurrence’s durable reference metadata beside its actual preview dimensions, route changes from the normalized source, and fetch injection for credential-free regression tests. `test/image-policy.spec.ts` uses real temporary attachment stores to cover 20/21 images, model switches, text-only projection, count/body limits, and final Claude request bytes. The source requires the fork Harness export `prepareRequestImages`; package and deploy both together after stopping the Host.
