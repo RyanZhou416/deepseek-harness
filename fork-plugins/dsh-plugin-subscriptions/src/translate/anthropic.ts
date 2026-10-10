@@ -532,10 +532,19 @@ export function toAnthropicSystem(system?: string, messages?: readonly Translata
  * @param tools - tool schemas from the request.
  * @returns Anthropic `tools` array entries, ordered by tool name.
  */
-/** Official tool-search tool. Included only when some tool sets `defer_loading`. */
-export const CLAUDE_TOOL_SEARCH = {
-  type: 'tool_search_tool_regex_20251119',
-  name: 'tool_search_tool_regex',
+/**
+ * The placeholder the client sends to keep deferred tool loading active.
+ *
+ * It is an ordinary custom tool carrying `defer_loading`, not a built-in tool
+ * type: the request carries the same `{name, description, input_schema,
+ * defer_loading}` entry a caller could declare for itself. The description is
+ * the client's own text, and the empty object schema is what it declares.
+ */
+export const DEFERRED_TOOL_PLACEHOLDER = {
+  name: 'DeferredToolPlaceholder',
+  description: 'Reserved placeholder that keeps deferred tool loading active; never call this tool.',
+  input_schema: { type: 'object', properties: {} },
+  defer_loading: true,
 } as const
 
 export function toAnthropicTools(tools: readonly ToolSchema[]): ClaudeToolDefinition[] {
@@ -550,7 +559,11 @@ export function toAnthropicTools(tools: readonly ToolSchema[]): ClaudeToolDefini
       ...tool.deferLoading === true ? { defer_loading: true } : {},
     }))
   if (!tools.some(tool => tool.deferLoading === true)) return mapped
-  return [CLAUDE_TOOL_SEARCH, ...mapped]
+  if (mapped.some(tool => 'name' in tool && tool.name === DEFERRED_TOOL_PLACEHOLDER.name)) return mapped
+  // Second-to-last, which is where the client splices its own placeholder: the
+  // entry position is part of the shape a request is compared against.
+  const at = Math.max(mapped.length - 1, 0)
+  return [...mapped.slice(0, at), DEFERRED_TOOL_PLACEHOLDER, ...mapped.slice(at)]
 }
 
 function thinkingTokens(usage: AnthropicUsage | undefined): number | undefined {

@@ -144,11 +144,11 @@ positions, the chained stream-to-rebuild replay, and the no-capture case.
 
 ### Subscription pool scheduling
 
-订阅插件的源码调度策略由 `pool.scheduling` 控制：Claude 与 ChatGPT 的临近重置、ChatGPT 的余额收尾及重置卡条件均采用有限加权，并用当前账号的活跃池请求数惩罚拥挤。保留按会话、提供方与模型池区分的粘性，统一按调整后评分应用切换门槛，首个输出后不切账号。并发预约覆盖首字节等待并在每条退出路径释放；已过期窗口不按无限紧迫度计分。保留 `pool.spec.ts` 的并发屏障和 `snapshots/session/subscription-pool-routing`。该策略包含在已安装的 `.3` 制品中；后续部署仍须在 Host 停止后升级插件制品及版本固定记录。
+订阅插件的源码调度策略由 `pool.scheduling` 控制：Claude 与 ChatGPT 的临近重置、ChatGPT 的余额收尾及重置卡条件均采用有限加权，并用当前账号的活跃池请求数惩罚拥挤。保留按会话、提供方与模型池区分的粘性，统一按调整后评分应用切换门槛，首个输出后不切账号。并发预约覆盖首字节等待并在每条退出路径释放；已过期窗口不按无限紧迫度计分。保留 `pool.spec.ts` 的并发屏障和 `snapshots/session/subscription-pool-routing`。该策略包含在 `0.9.4-dsh017rc1.14` 制品中；部署须在 Host 停止后升级插件制品及版本固定记录。
 
-ChatGPT 源码提供默认关闭的 `autoResetCredits` 开关，入口为订阅账号管理。当前账号额度耗尽且其可用卡在所有已登录 ChatGPT 账号中最早到期时才自动用卡，不要求其他账号也耗尽。保留全账号最新卡列表比较、使用前最新额度复核、手动/自动串行与落盘防重复记录；开关不能被模型编辑器的旧副本覆盖。验证入口为 `codex-auto-reset.spec.ts`、设置/RPC 与池测试、`account-manager-browser.mjs` 和上述无密钥会话回放。已安装的 `.3` 包含该功能，默认关闭，禁止在 Host 运行时替换安装目录；具体规则以[插件 README](fork-plugins/dsh-plugin-subscriptions/README.md)为准。
+ChatGPT 源码提供默认关闭的 `autoResetCredits` 开关，入口为订阅账号管理。当前账号额度耗尽且其可用卡在所有已登录 ChatGPT 账号中最早到期时才自动用卡，不要求其他账号也耗尽。保留全账号最新卡列表比较、使用前最新额度复核、手动/自动串行与落盘防重复记录；开关不能被模型编辑器的旧副本覆盖。验证入口为 `codex-auto-reset.spec.ts`、设置/RPC 与池测试、`account-manager-browser.mjs` 和上述无密钥会话回放。`0.9.4-dsh017rc1.14` 包含该功能，默认关闭，禁止在 Host 运行时替换安装目录；具体规则以[插件 README](fork-plugins/dsh-plugin-subscriptions/README.md)为准。
 
-订阅网络重试修复保留原始提供方策略穿过 `AccountPreferencesAdapter`，使十次重试、指数退避与抖动到达 Host。账号池中仍可请求的成员发生网络故障时，必须保留该成员的错误，不得把其他成员的额度或认证冷却附在它上面，造成超出等待上限而终止。保留账号尝试顺序的双向回归、策略透传测试，以及 `subscription-network-retry` 无密钥会话回放。该修复已随 `.3` 在 Host 停止后构建并安装。
+订阅网络重试修复保留原始提供方策略穿过 `AccountPreferencesAdapter`，使十次重试、指数退避与抖动到达 Host。账号池中仍可请求的成员发生网络故障时，必须保留该成员的错误，不得把其他成员的额度或认证冷却附在它上面，造成超出等待上限而终止。保留账号尝试顺序的双向回归、策略透传测试，以及 `subscription-network-retry` 无密钥会话回放。该修复随 `0.9.4-dsh017rc1.14` 制品发布；安装须在 Host 停止后进行。
 
 ### Model-specific request images
 
@@ -156,9 +156,9 @@ ChatGPT 源码提供默认关闭的 `autoResetCredits` 开关，入口为订阅�
 
 ### Pinned Claude Code wire (subscriptions)
 
-订阅插件的 Claude 聊天请求全部经 `@tormentalabs/claude-code-wire-compat`(fork 精确固定 `0.7.2-dsh12`,GPL-3.0-or-later,私有制品不对外分发)按 pinned `CLAUDE_CODE_2_1_288_PROFILE`(CLI 2.1.288 / SDK 0.128.0)构建:billing 指纹块与 identity system 块、beta 组合、`metadata.user_id` 关联三元组、cache breakpoint 与完整头部计划均由构建器拥有,不得再手写 `anthropic-beta`/`x-app`/缓存标记。保留 `cacheControl` 四开关并带 `ttl: '1h'`(真实客户端出厂值),thinking 的 `display: 'summarized'`、effort 与 `output_config` 同发;构建器按 pinned 目录校验两者。不发 `accept` 头(真实客户端不发)。
+订阅插件的 Claude 聊天请求全部经 `@tormentalabs/claude-code-wire-compat`(fork 精确固定 `0.7.2-dsh14`,GPL-3.0-or-later,私有制品不对外分发)按 pinned `CLAUDE_CODE_2_1_288_PROFILE`(CLI 2.1.288 / SDK 0.128.0)构建:billing 指纹块与 identity system 块、beta 组合、`metadata.user_id` 关联三元组、cache breakpoint 与完整头部计划均由构建器拥有,不得再手写 `anthropic-beta`/`x-app`/缓存标记。保留 `cacheControl` 四开关并带 `ttl: '1h'`(真实客户端出厂值),thinking 的 `display: 'summarized'`、effort 与 `output_config` 同发;构建器按 pinned 目录校验两者。不发 `accept` 头(真实客户端不发)。
 
-身份:`sessionId` 取 harness 会话 id(缺失时每请求 UUID),`deviceId`/`accountUuid` 存于 `ClaudeSession`(登录时铸造/发现,刷新保留,旧会话首用懒回填;回填失败以 `INVALID_REQUEST` 明确失败,不发送伪造三元组);`deviceId` 按真实客户端格式铸造为 64 位十六进制(32 随机字节),绝非 UUID。`previousRequestId` 把响应 `request-id` 头链入下一请求 billing 块的 `cc_prev_req`,按(规范账号, wire 会话)分键,池在同一会话内切换账号绝不会把另一账号的 request-id 链进来(共 256 条上限);响应缺头时清除链路。`cc_prompt_id` 由(会话, 轮次)确定性派生(`claudePromptId`):同一会话同一轮次必得同一 id、请求字节也相同,另一会话或下一轮则不同 —— 它是**模型可见**的值,DSH 的"模型可见⟺已记录"要求它可重建,随机 UUID 无法重建。该轮的工具续步复用同一 id;probe/标题辅助请求的抑制未建模。响应 `request-id` 头另记入该助手消息的回放信封(`response.requestId`),与 `cc_prev_req` 链路互为可核对的两侧。池切换还会滚动 wire 会话 id(`claudeWireSessionId`,共 256 条上限):harness 会话的第一个账号段沿用 harness 会话 id 逐字不变(单账号会话字节不变),之后的每个账号段铸新 UUID,使一段对话不会横跨两个账号身份;切回原账号恢复原 id 与原链。构建器 `INPUT_TOO_LARGE` 经 `oversizeWireError` 映射回已记录的图片 offload 错误,精确 32 MB 检查保留在 `assertClaudeRequestBytes`;其余构建器拒绝码经 `mapClaudeWireError` 映射为带 wire 码与解释的 `INVALID_REQUEST`(`INVALID_EFFORT`/`INVALID_THINKING`/`UNSUPPORTED_CAPABILITY`/`CRYPTO_UNAVAILABLE`/`INVALID_IDENTITY`/`INVALID_UNICODE`,其余走默认),不得以通用 transport 失败示人。中途 system 消息在所有模型上以 user 角色 `<system-reminder>` 形式随历史就位(新 wire 无 system 角色消息),DSH 侧 `systemPromptUpdate: 'in-history'` 分辨率不变。usage/models/Files 端点改用 pinned profile 的 CLI user-agent;本地 `claude --version` 探测已删除。装配请求时补齐缺失的 `tool_result`:请求内没有任何结果应答的 `tool_use` 才按真实客户端原位合成 `is_error: true` 的 `[Tool result missing due to internal error]`(结果已在请求别处出现则不合成,只改装配请求、不改历史,与 `tool-pairing.ts` 对其它 wire 的全局配对一致);Files API 上传缓存按(规范账号, 内容 sha256)分键并限 256 条,登录/登出随该账号缓存一起清除,池切换绝不复用其它账号的 file id;Claude/Codex/Grok 的 code 与 refresh 授予请求一律 `redirect: 'error'`,不得跟随重定向把 code 或 refresh token 重放到另一来源。聚焦验证:`test/claude-wire.spec.ts`、更新后的 `test/translate.spec.ts` 与 `test/models.spec.ts`(全部注入 fetch、零凭据),授予重定向与上传缓存另见 `test/codex.spec.ts`、`test/grok.spec.ts`。已随 `0.9.4-dsh017rc1.8` 构建;部署走 `fork-plugins/deploy-subscriptions-web.ps1`:停 Host 后在普通 PowerShell 运行,脚本校验 sha256、Host 监听护栏、自动备份已装副本与 `package.json`/`pnpm-lock.yaml`,并用 `pnpm add` 更新 profile 的 file 固定引用(避免后续 `pnpm install` 降级),不触碰 `DSH_HOME\plugins\subscriptions` 凭据目录;回滚用旧 tgz 走同样的 `pnpm add` 形式。
+身份:`sessionId` 取 harness 会话 id(缺失时每请求 UUID),`deviceId`/`accountUuid` 存于 `ClaudeSession`(登录时铸造/发现,刷新保留,旧会话首用懒回填;回填失败以 `INVALID_REQUEST` 明确失败,不发送伪造三元组);`deviceId` 按真实客户端格式铸造为 64 位十六进制(32 随机字节),绝非 UUID。`previousRequestId` 把响应 `request-id` 头链入下一请求 billing 块的 `cc_prev_req`,按(规范账号, wire 会话)分键,池在同一会话内切换账号绝不会把另一账号的 request-id 链进来(共 256 条上限);响应缺头时清除链路。`cc_prompt_id` 由(会话, 轮次)确定性派生(`claudePromptId`):同一会话同一轮次必得同一 id、请求字节也相同,另一会话或下一轮则不同 —— 它是**模型可见**的值,DSH 的"模型可见⟺已记录"要求它可重建,随机 UUID 无法重建。该轮的工具续步复用同一 id;probe/标题辅助请求的抑制未建模。响应 `request-id` 头另记入该助手消息的回放信封(`response.requestId`),与 `cc_prev_req` 链路互为可核对的两侧。池切换还会滚动 wire 会话 id(`claudeWireSessionId`,共 256 条上限):harness 会话的第一个账号段沿用 harness 会话 id 逐字不变(单账号会话字节不变),之后的每个账号段铸新 UUID,使一段对话不会横跨两个账号身份;切回原账号恢复原 id 与原链。构建器 `INPUT_TOO_LARGE` 经 `oversizeWireError` 映射回已记录的图片 offload 错误,精确 32 MB 检查保留在 `assertClaudeRequestBytes`;其余构建器拒绝码经 `mapClaudeWireError` 映射为带 wire 码与解释的 `INVALID_REQUEST`(`INVALID_EFFORT`/`INVALID_THINKING`/`UNSUPPORTED_CAPABILITY`/`CRYPTO_UNAVAILABLE`/`INVALID_IDENTITY`/`INVALID_UNICODE`,其余走默认),不得以通用 transport 失败示人。中途 system 消息在所有模型上以 user 角色 `<system-reminder>` 形式随历史就位(新 wire 无 system 角色消息),DSH 侧 `systemPromptUpdate: 'in-history'` 分辨率不变。usage/models/Files 端点改用 pinned profile 的 CLI user-agent;本地 `claude --version` 探测已删除。装配请求时补齐缺失的 `tool_result`:请求内没有任何结果应答的 `tool_use` 才按真实客户端原位合成 `is_error: true` 的 `[Tool result missing due to internal error]`(结果已在请求别处出现则不合成,只改装配请求、不改历史,与 `tool-pairing.ts` 对其它 wire 的全局配对一致);Files API 上传缓存按(规范账号, 内容 sha256)分键并限 256 条,登录/登出随该账号缓存一起清除,池切换绝不复用其它账号的 file id;Claude/Codex/Grok 的 code 与 refresh 授予请求一律 `redirect: 'error'`,不得跟随重定向把 code 或 refresh token 重放到另一来源。聚焦验证:`test/claude-wire.spec.ts`、更新后的 `test/translate.spec.ts` 与 `test/models.spec.ts`(全部注入 fetch、零凭据),授予重定向与上传缓存另见 `test/codex.spec.ts`、`test/grok.spec.ts`。已随 `0.9.4-dsh017rc1.14` 构建;部署走 `fork-plugins/deploy-subscriptions-web.ps1`:停 Host 后在普通 PowerShell 运行,脚本校验 sha256、Host 监听护栏、自动备份已装副本与 `package.json`/`pnpm-lock.yaml`,并用 `pnpm add` 更新 profile 的 file 固定引用(避免后续 `pnpm install` 降级),不触碰 `DSH_HOME\plugins\subscriptions` 凭据目录;回滚用旧 tgz 走同样的 `pnpm add` 形式。
 
 ### Goal disabled by default
 
@@ -455,8 +455,8 @@ Web profile 插入 `memory-watchdog.cjs`：250 ms 采样、60 s 日志、heap ra
 | Package | Installed | Runtime state | Preserve rule |
 |---|---:|---|---|
 | `dshmarket` | — | Removed | 官方 Plugin Manager 接管安装、配置与运行时启停；profile 不恢复旧 package 或 bundle |
-| `@nanmicoder/dsh-agent-teams` | `0.1.20-dsh017rc1.1` | Installed, enabled | 真实 profile 使用仓内固定 artifact；停止 Host 后更新，禁止被 npm latest/next 直接覆盖 |
-| `dsh-plugin-subscriptions` | `0.9.4-dsh017rc1.3` | Installed; Windows Web enabled | 仓内固定 artifact；凭据文件原地保留，其他 profile 是否启用沿用显式插件配置 |
+| `@nanmicoder/dsh-agent-teams` | `0.1.20-dsh017rc1.3` | Installed, enabled | 真实 profile 使用仓内固定 artifact；停止 Host 后更新，禁止被 npm latest/next 直接覆盖 |
+| `dsh-plugin-subscriptions` | `0.9.4-dsh017rc1.11` | Installed; Windows Web enabled | 仓内固定 artifact；凭据文件原地保留，其他 profile 是否启用沿用显式插件配置 |
 | `@vlln/dsh-task-status` | Removed | Not installed | 已从依赖、bundle、patch、lockfile 和 `node_modules` 删除；profile 不得恢复 |
 | `dsh-context` | Windows: `0.55.0-dsh017rc1.3`; Mac: `0.55.0-dsh017rc1.1` | Installed, enabled | 真实 profile 保留 `300/60/100/400/100/100` bounds；源码与回滚规则见 `fork-plugins/dsh-context/FORK_MAINTENANCE.md` |
 | `dsh-shell-command` | Removed | No package or configuration | profile 不安装 |
@@ -470,7 +470,7 @@ Mac 主 checkout 已快进至同一 fork master；`clean.command`、`build.comma
 
 ### Local AgentTeams package
 
-维护真源位于 `fork-plugins\dsh-agent-teams`，完整保留上游运行源码、测试、构建脚本和资产。仓库安装器使用 `fork-plugins\releases\nanmicoder-dsh-agent-teams-0.1.20-dsh017rc1.3.tgz`，SHA256 为 `8CCAA66D5E026DBED6363CA569B25BB8D4869E931BD92DC495458175C151980A`。该 package 标记为 private，禁止用上游 npm scope 发布；正在运行的 Windows profile 仍使用 `.1`，须在 Host 停止后安装 `.3`。
+维护真源位于 `fork-plugins\dsh-agent-teams`，完整保留上游运行源码、测试、构建脚本和资产。仓库安装器使用 `fork-plugins\releases\nanmicoder-dsh-agent-teams-0.1.20-dsh017rc1.3.tgz`，SHA256 为 `8CCAA66D5E026DBED6363CA569B25BB8D4869E931BD92DC495458175C151980A`。该 package 标记为 private，禁止用上游 npm scope 发布；Windows profile 已安装该 artifact，更新须在 Host 停止后进行。
 
 fork artifact 随 Git 提交，同事不依赖这台机器的外置 `.local-plugins-src`。保留当前与仍被已安装 profile 引用的制品及校验值，历史制品也可从 Git 历史恢复。
 
@@ -493,7 +493,7 @@ AgentTeams 的 `scripts/activity-state.perf.mjs` 使用 27/58 个合成团队、
 
 `.local-plugins-src\...dsh012.2/.3/.4` 只是历史解包产物，不能再当维护源。以后用 `git subtree pull --prefix=fork-plugins/dsh-agent-teams https://github.com/NanmiCoder/dsh-agent-teams.git <tag> --squash` 获取精确官方发布，再在 fork 内重放和验证上述行为；不得用 npm install 覆盖 subtree。
 
-本 fork 以 `v0.1.20` 生成 `0.1.20-dsh017rc1.2`。上游拥有 scheduling、next-step delivery、retired-member cleanup、repair scope 与 task correction；fork 保留 RC.1 source/导航适配、冷 Captain mailbox 恢复、有界 unread mailbox projection，以及上述活动状态读取策略。后续上游发布先按行为测试去重，再提升 subtree 基线和私有版本；profile 始终安装 fork artifact。
+本 fork 以 `v0.1.20` 生成 `0.1.20-dsh017rc1.3`。上游拥有 scheduling、next-step delivery、retired-member cleanup、repair scope 与 task correction；fork 保留 RC.1 source/导航适配、冷 Captain mailbox 恢复、有界 unread mailbox projection，以及上述活动状态读取策略。后续上游发布先按行为测试去重，再提升 subtree 基线和私有版本；profile 始终安装 fork artifact。
 
 ### Local Context package
 
@@ -507,9 +507,9 @@ Context 源码的工具归属追踪按 `cordis.original` 解包后的服务身�
 
 ### Local Subscriptions package
 
-维护真源位于 `fork-plugins\dsh-plugin-subscriptions`，仓库安装器使用 `fork-plugins\releases\dsh-plugin-subscriptions-0.9.4-dsh017rc1.3.tgz`，SHA256 为 `CAA901F20E3A66D9F7CBC86FE15E0A57A1D2CD59740C096BEBB9EFE7F9E503F3`。该摘要与仓内制品及其 `.sha256` 文件一致。该版本采用上游 v0.9.4 的多账号 provider、usage UI、Codex 搜索、图片结果、Antigravity 与 provider failover，并增加 RC.1 的 V4 工具角色转换；凭据格式与工具输出不变。
+维护真源位于 `fork-plugins\dsh-plugin-subscriptions`，仓库安装器使用 `fork-plugins\releases\dsh-plugin-subscriptions-0.9.4-dsh017rc1.14.tgz`，SHA256 为 `9C59F35704006FDD071B3C1037120FDA514A358DD972A17103C86D760B122518`。该摘要与仓内制品及其 `.sha256` 文件一致。该版本采用上游 v0.9.4 的多账号 provider、usage UI、Codex 搜索、图片结果、Antigravity 与 provider failover，并增加 RC.1 的 V4 工具角色转换；凭据格式与工具输出不变。
 
-Windows Web profile 启用 `llm-subscriptions`，保留 `rateLimit.wait: false`。 当前 `.3` 已通过 603 项插件测试、实际安装目录的接口与 UI 开关检查，且保留已验证的图片处理：21 张历史图片中原有 16 张超出多图尺寸上限，请求版本的长边均不超过 2,000 像素，原 Session 和附件摘要保持不变。2026-09-26，固定源码包的 506 项无密钥测试通过；隔离 Web profile 与真实 Web profile 均在随机本地端口启动，认证页面返回 HTTP 200，页面包含 Subscriptions 客户端资源。真实 Profile 的 Codex 状态接口识别到两个已存账号，默认账号的用量查询通过并刷新过期访问令牌；另一个账号及真实模型请求尚未验证。旧 profile patch 备份位于 `C:\Project\deepseek-harness-data\diagnostics\profile-backups\pre-subscriptions-enable-20260926`。
+Windows Web profile 启用 `llm-subscriptions`，保留 `rateLimit.wait: false`。 制品在安装前须通过插件测试套件、实际安装目录的接口与 UI 开关检查；2026-10-10 当前源码的插件测试套件 804 项通过、0 失败、退出码 0。已验证的图片处理保持：21 张历史图片中原有 16 张超出多图尺寸上限，请求版本的长边均不超过 2,000 像素，原 Session 和附件摘要保持不变。2026-09-26，固定源码包的 506 项无密钥测试通过；隔离 Web profile 与真实 Web profile 均在随机本地端口启动，认证页面返回 HTTP 200，页面包含 Subscriptions 客户端资源。真实 Profile 的 Codex 状态接口识别到两个已存账号，默认账号的用量查询通过并刷新过期访问令牌；另一个账号及真实模型请求尚未验证。旧 profile patch 备份位于 `C:\Project\deepseek-harness-data\diagnostics\profile-backups\pre-subscriptions-enable-20260926`。
 
 更新时使用 `git subtree pull --prefix=fork-plugins/dsh-plugin-subscriptions https://github.com/V1ki/dsh-plugin-subscriptions.git <tag> --squash`，再重放 `fork-plugins/dsh-plugin-subscriptions/FORK_MAINTENANCE.md`。真实 profile 始终安装仓内固定 artifact，禁止 npm latest 直接覆盖。
 

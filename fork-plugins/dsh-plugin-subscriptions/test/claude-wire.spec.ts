@@ -22,7 +22,6 @@ import {
   claudeWireSessionId,
   mapClaudeWireError,
   rememberClaudeRequestId,
-  CLAUDE_CLIENT_RUNTIME_VERSION,
 } from '../src/providers/claude-wire.js'
 import { oversizeWireError } from '../src/providers/claude-images.js'
 import {
@@ -154,9 +153,10 @@ test('headers carry the pinned plan and the session identity', async () => {
   assert.ok((headers.get('anthropic-beta') ?? '').length > 0, 'beta header is composed by the builder')
   assert.match(headers.get('x-client-request-id') ?? '', /^[0-9a-f-]{36}$/)
   assert.equal(headers.get('x-stainless-runtime'), 'node')
-  // Pinned rather than read from the host: the anchored identity is a Windows x64
-  // desktop, and a host value would both contradict it and identify the operator.
-  assert.equal(headers.get('x-stainless-runtime-version'), CLAUDE_CLIENT_RUNTIME_VERSION)
+  // The version of the runtime that issues the request, which on this path is the
+  // process building it. A compiled-in value would name a runtime that sent nothing:
+  // the Bun transport replaces this field with its own `process.version`.
+  assert.equal(headers.get('x-stainless-runtime-version'), process.version)
   // The SDK sets this on every request. The plugin asserted the opposite until the carve showed otherwise.
   assert.equal(headers.get('accept'), 'application/json')
 })

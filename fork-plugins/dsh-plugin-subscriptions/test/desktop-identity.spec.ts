@@ -7,7 +7,6 @@ import { readFile } from 'node:fs/promises'
 import {
   CLAUDE_CLIENT_ARCH,
   CLAUDE_CLIENT_OS,
-  CLAUDE_CLIENT_RUNTIME_VERSION,
 } from '../src/providers/claude-wire.js'
 import { deriveClaudeDeviceId } from '../src/providers/claude.js'
 import {
@@ -97,7 +96,17 @@ test('the application headers keep the machine pair described and self-consisten
 test('the request claims the anchored platform rather than this host', () => {
   assert.equal(CLAUDE_CLIENT_OS, 'Windows')
   assert.equal(CLAUDE_CLIENT_ARCH, 'x64')
-  assert.match(CLAUDE_CLIENT_RUNTIME_VERSION, /^\d+\.\d+\.\d+$/)
+})
+
+test('claims no compiled-in runtime version', async () => {
+  // The client reports the version of the runtime that issues the request, so a
+  // constant would name a runtime that issued nothing. `claude-wire.spec.ts`
+  // pins the emitted header to this process's own version.
+  const source = await readFile(
+    new URL('../../src/providers/claude-wire.ts', import.meta.url),
+    'utf8',
+  )
+  assert.match(source, /runtimeVersion: process\.version/u)
 })
 
 test('no host value can reach a request', async () => {

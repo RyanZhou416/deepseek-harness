@@ -83,7 +83,7 @@ Codex 编辑走 `/backend-api/codex/images/edits`，Grok 编辑走 `/v1/images/e
 
 ### DSH 兼容性
 
-本 fork 离线包 `0.9.4-dsh017rc1.13` 固定适配 DSH `0.1.7-rc.1` 和 Cordis `4.0.4`。其 V4 工具消息转换、固定到 Claude Code 2.1.288 的 wire 与界面已针对这一确切版本组合构建、测试；不要安装到旧版 DSH profile。上游公开的 `0.9.4` 包声明了更宽的 peer 范围，但不适用于这个私有离线包。
+本 fork 离线包 `0.9.4-dsh017rc1.14` 固定适配 DSH `0.1.7-rc.1` 和 Cordis `4.0.4`。其 V4 工具消息转换、固定到 Claude Code 2.1.288 的 wire 与界面已针对这一确切版本组合构建、测试；不要安装到旧版 DSH profile。上游公开的 `0.9.4` 包声明了更宽的 peer 范围，但不适用于这个私有离线包。
 
 ### 管理账号与 Pool 模型
 

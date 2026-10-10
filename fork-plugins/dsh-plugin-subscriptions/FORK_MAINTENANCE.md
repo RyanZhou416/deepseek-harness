@@ -6,9 +6,9 @@ This subtree carries the private `dsh-plugin-subscriptions` build shipped with t
 
 - Upstream repository: `https://github.com/V1ki/dsh-plugin-subscriptions.git`
 - Upstream tag: `v0.9.4`
-- Fork package version: `0.9.4-dsh017rc1.13`
+- Fork package version: `0.9.4-dsh017rc1.14`
 - Subtree path: `fork-plugins/dsh-plugin-subscriptions`
-- Distribution artifact: `fork-plugins/releases/dsh-plugin-subscriptions-0.9.4-dsh017rc1.13.tgz`
+- Distribution artifact: `fork-plugins/releases/dsh-plugin-subscriptions-0.9.4-dsh017rc1.14.tgz`
 
 ## Fork behavior
 

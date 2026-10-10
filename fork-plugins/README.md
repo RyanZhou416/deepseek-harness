@@ -64,10 +64,10 @@ Agent Teams durable data belongs to each workspace's `.agent-teams/` directory; 
 ## Context
 
 - Source: `fork-plugins/dsh-context`
-- Current private version: `0.55.0-dsh017rc1.2`
+- Current private version: `0.55.0-dsh017rc1.3`
 - Upstream base: `bowenliang123/dsh-context v0.55.0`
-- Distribution artifact: `fork-plugins/releases/dsh-context-0.55.0-dsh017rc1.2.tgz`
-- Artifact SHA256: `5636EDC455E1AA26933424FD76B548EEA989DDAF3B657AED1A62471C4C15152E`
+- Distribution artifact: `fork-plugins/releases/dsh-context-0.55.0-dsh017rc1.3.tgz`
+- Artifact SHA256: `255BA7AA6B84DA2F1301CD7786A2DDBC39AEE0A69BC731547B464B5D32B7B27D`
 
 The private pricing catalog covers GPT-6 Astra/Sol, Claude Opus 5.5/Fable 5.1, and Grok 4.7 through Cursor. Agent totals include standard-speed API-equivalent prices and per-request long-context tiers; projection version 21 refolds existing logs without changing Session data. See [prices and assumptions](dsh-context/docs/model-pricing.md).
 
@@ -78,10 +78,10 @@ The low-overhead deployment values are `maxRequestSteps: 300`, `maxKeptTurns: 60
 ## Subscriptions
 
 - Source: `fork-plugins/dsh-plugin-subscriptions`
-- Current private version: `0.9.4-dsh017rc1.13`
+- Current private version: `0.9.4-dsh017rc1.14`
 - Upstream base: `V1ki/dsh-plugin-subscriptions v0.9.4`
 - Private host target: `dsh-v0.1.7-rc.1`
-- Distribution artifact: `fork-plugins/releases/dsh-plugin-subscriptions-0.9.4-dsh017rc1.13.tgz`
-- Artifact SHA256: `7EAAC7091460293E127D39448594189A58E26D4B583FE119CEEBD4EC9915F931`
+- Distribution artifact: `fork-plugins/releases/dsh-plugin-subscriptions-0.9.4-dsh017rc1.14.tgz`
+- Artifact SHA256: `9C59F35704006FDD071B3C1037120FDA514A358DD972A17103C86D760B122518`
 
 The private build keeps upstream multi-account providers, usage UI, Codex search, image/video tools, and credential format. Its RC.1 adaptation translates V4 tool-role messages without losing call identity or image results and pins the exact DSH dependency cohort; no Session or credential migration is introduced. Cursor login, usage, and local-SDK limits, ChatGPT reset-credit display, and the ChatGPT pool's 100 percent full mark are private behaviors. Reapply them from `fork-plugins/dsh-plugin-subscriptions/FORK_MAINTENANCE.md` after every upstream import.

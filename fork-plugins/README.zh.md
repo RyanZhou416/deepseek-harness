@@ -64,10 +64,10 @@ Agent Teams 的持久数据属于各工作区 `.agent-teams/` 目录；本目录
 ## Context
 
 - 源码：`fork-plugins/dsh-context`
-- 当前私有版本：`0.55.0-dsh017rc1.2`
+- 当前私有版本：`0.55.0-dsh017rc1.3`
 - 上游底座：`bowenliang123/dsh-context v0.55.0`
-- 安装产物：`fork-plugins/releases/dsh-context-0.55.0-dsh017rc1.2.tgz`
-- 产物 SHA256：`5636EDC455E1AA26933424FD76B548EEA989DDAF3B657AED1A62471C4C15152E`
+- 安装产物：`fork-plugins/releases/dsh-context-0.55.0-dsh017rc1.3.tgz`
+- 产物 SHA256：`255BA7AA6B84DA2F1301CD7786A2DDBC39AEE0A69BC731547B464B5D32B7B27D`
 
 私有价格表覆盖 GPT-6 Astra/Sol、Claude Opus 5.5/Fable 5.1，以及 Cursor 下的 Grok 4.7。Agent 汇总按标准速度的 API 等值价格和单次请求的长上下文阶梯估算；投影版本 21 从已有日志重新折叠，不修改 Session 数据。详见[价格与估算条件](dsh-context/docs/model-pricing.md)。
 
@@ -78,10 +78,10 @@ Agent Teams 的持久数据属于各工作区 `.agent-teams/` 目录；本目录
 ## Subscriptions
 
 - 源码：`fork-plugins/dsh-plugin-subscriptions`
-- 当前私有版本：`0.9.4-dsh017rc1.13`
+- 当前私有版本：`0.9.4-dsh017rc1.14`
 - 上游底座：`V1ki/dsh-plugin-subscriptions v0.9.4`
 - 私有宿主目标：`dsh-v0.1.7-rc.1`
-- 安装产物：`fork-plugins/releases/dsh-plugin-subscriptions-0.9.4-dsh017rc1.13.tgz`
-- 产物 SHA256：`7EAAC7091460293E127D39448594189A58E26D4B583FE119CEEBD4EC9915F931`
+- 安装产物：`fork-plugins/releases/dsh-plugin-subscriptions-0.9.4-dsh017rc1.14.tgz`
+- 产物 SHA256：`9C59F35704006FDD071B3C1037120FDA514A358DD972A17103C86D760B122518`
 
 该私有构建保留上游多账号 provider、用量 UI、Codex 搜索、图片／视频工具与凭据格式。RC.1 适配转换 V4 工具角色消息，同时保留调用身份和图片结果，并固定精确的 DSH 依赖版本组合；不会迁移 Session 或凭据。Cursor 登录与用量、本地 SDK 的上下文限制、ChatGPT 重置券，以及 ChatGPT 池以 100% 为满，都是私有行为。每次导入上游后，按 `fork-plugins/dsh-plugin-subscriptions/FORK_MAINTENANCE.md` 的「Reapply after an upstream import」逐项补回。

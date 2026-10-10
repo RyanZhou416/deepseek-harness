@@ -349,16 +349,17 @@ The tools listed in this request are the complete and authoritative set availabl
  * The pinned profile is the Windows desktop, so these are constants rather than this
  * host's values: a client reporting `claude-desktop` for Windows while sending another
  * platform, or an architecture that application is not built for, contradicts itself, and
- * a host-specific value would also identify the operator. The runtime version is pinned
- * for the same reason, so a request never varies with the machine that sent it.
+ * a host-specific value would also identify the operator.
+ *
+ * The runtime version is deliberately NOT pinned with them. The client reports the
+ * version of the runtime that performs the fetch, so a constant names a runtime that
+ * issued nothing: this route reports `process.version` of whichever runtime sends the
+ * request, and the Bun transport reports its own.
  */
 export const CLAUDE_CLIENT_OS = 'Windows'
 
 /** Architecture the Windows desktop application is built for. */
 export const CLAUDE_CLIENT_ARCH = 'x64'
-
-/** Runtime version reported in place of this host's, so it cannot drift per machine. */
-export const CLAUDE_CLIENT_RUNTIME_VERSION = '24.13.0'
 
 const CLAUDE_EFFORTS = new Set<string>(['low', 'medium', 'high', 'xhigh', 'max'])
 
@@ -523,7 +524,10 @@ export async function buildClaudeWireRequest(
       deviceId: session.deviceId,
       accountUuid: session.accountUuid,
       runtime: 'node',
-      runtimeVersion: CLAUDE_CLIENT_RUNTIME_VERSION,
+      // The runtime that issues the request reports itself, as the genuine client's
+      // SDK does. With the Bun transport active the child replaces this with its own
+      // `process.version`; on the direct path this IS the sending runtime's.
+      runtimeVersion: process.version,
       os: CLAUDE_CLIENT_OS,
       arch: CLAUDE_CLIENT_ARCH,
       // This route is a programmatic client that supplies its own system prompt: the

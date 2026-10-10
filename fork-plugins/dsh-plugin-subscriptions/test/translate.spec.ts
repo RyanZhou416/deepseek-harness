@@ -547,17 +547,38 @@ test('toAnthropicMessages sends a Files API image by file_id', () => {
   ])
 })
 
-test('toAnthropicTools adds the regex tool search tool only for deferred tools', () => {
-  const deferred = toAnthropicTools([
+test('toAnthropicTools keeps deferred loading active with the client placeholder', () => {
+  const mapped = toAnthropicTools([
     { name: 'bash', description: 'run', parameters: { type: 'object' }, deferLoading: true },
+    { name: 'zap', description: 'last', parameters: { type: 'object' } },
   ])
-  assert.deepEqual(deferred[0], { type: 'tool_search_tool_regex_20251119', name: 'tool_search_tool_regex' })
-  assert.deepEqual(deferred[1], {
-    name: 'bash',
-    description: 'run',
-    input_schema: { type: 'object' },
-    defer_loading: true,
-  })
+  // The client sends an ordinary custom tool named `DeferredToolPlaceholder`
+  // carrying `defer_loading`, spliced second-to-last; it never sends a
+  // `tool_search_tool_*` type.
+  assert.deepEqual(mapped, [
+    {
+      name: 'bash',
+      description: 'run',
+      input_schema: { type: 'object' },
+      defer_loading: true,
+    },
+    {
+      name: 'DeferredToolPlaceholder',
+      description: 'Reserved placeholder that keeps deferred tool loading active; never call this tool.',
+      input_schema: { type: 'object', properties: {} },
+      defer_loading: true,
+    },
+    { name: 'zap', description: 'last', input_schema: { type: 'object' } },
+  ])
+})
+
+test('toAnthropicTools injects no placeholder without a deferred tool', () => {
+  const mapped = toAnthropicTools([
+    { name: 'bash', description: 'run', parameters: { type: 'object' } },
+  ])
+  assert.deepEqual(mapped, [
+    { name: 'bash', description: 'run', input_schema: { type: 'object' } },
+  ])
 })
 
 test('toAnthropicMessages: a mid-conversation system message rides in place as a reminder', () => {
