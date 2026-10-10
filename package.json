@@ -49,7 +49,7 @@
     "lint:contracts-ready": "tsx scripts/run-oxlint.ts --disable-nested-config .",
     "lint:fix": "npm run build:lib:host && npm run lint:fix:contracts-ready",
     "lint:fix:contracts-ready": "tsx scripts/run-oxlint.ts --config .oxlintrc.staged.json packages/typert/generator/tests/fixtures/type-model --fix && tsx scripts/run-oxlint.ts --disable-nested-config . --fix",
-    "duplication": "jscpd --config .jscpd.json packages scripts",
+    "duplication": "jscpd --config .jscpd.json packages scripts && jscpd --config .jscpd.json --exit-code 0 --threshold 2.4 fork-plugins/dsh-plugin-subscriptions/src",
     "test": "pnpm run build:native-system && vitest run",
     "test:coverage": "pnpm run build:native-system && vitest run --coverage",
     "build:native-system": "tsx native/system/scripts/build.ts --host-addon-only",

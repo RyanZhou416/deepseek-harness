@@ -18,7 +18,7 @@ import { createHash, randomBytes, randomUUID } from 'node:crypto'
 import { mkdir } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { EMPTY_RESPONSE_CODE, LlmAdapter, LlmError, ReasoningEffortId, errorChain } from '@deepseek-ai/dsh-llm'
+import { EMPTY_RESPONSE_CODE, LlmAdapter, LlmError, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import type {
   GenerateOptions,
   LlmModelInfo,
@@ -34,21 +34,18 @@ import type { CursorSession, ProviderId } from '../auth/store.js'
 import { resolveImages } from '../translate/resolved.js'
 import type { AttachmentStore } from '@deepseek-ai/dsh-attachment'
 import {
-  ModelCatalogCache,
   discoverAcrossAccounts,
-  discoverOrRetryAuth,
   effortDisplayName,
   idleWatchdog,
   mergeReasoning,
   OAuthEndpointError,
   oauthEndpointError,
-  isDiscoveryAborted,
-  isMissingOrInvalidCredential,
   mapFetchFailure,
 } from './common.js'
 import type { CatalogPersistence, DiscoveredModel, FetchFn, ModelEntry, ProviderUsage, UsageWindow } from './common.js'
+import { ProviderCatalog, catalogRow, withPoolTiers } from './provider-catalog.js'
 import { proxiedFetch } from '../http.js'
-import { AccountTokenManager, DISCOVERY_TIMEOUT_MS, unionAccountCatalogs } from './accounts.js'
+import { AccountTokenManager } from './accounts.js'
 import type { PoolAdapter } from './pool.js'
 import { DEFAULT_RATE_LIMIT_WAIT, DEFAULT_RETRY, subscriptionRetryPolicy } from './rate-limit.js'
 import type { RateLimitWait } from './rate-limit.js'
@@ -511,15 +508,17 @@ interface CursorSendAttempt {
 }
 
 export class CursorAdapter extends LlmAdapter {
-  private readonly catalog: ModelCatalogCache
-  private readonly accountCatalogs = new Map<string, ModelCatalogCache>()
-  private catalogOwner: string | undefined
+  private readonly catalogs: ProviderCatalog
   /** Context parameter values the registry rejected, keyed `account|model|value`. */
   private readonly rejectedCursorContext = new Set<string>()
 
   constructor(private readonly options: CursorAdapterOptions) {
     super()
-    this.catalog = new ModelCatalogCache(options.catalogStore)
+    this.catalogs = new ProviderCatalog(options, 'cursor', {
+      staticRows: provider => this.staticModels(provider),
+      fetchCatalog: (account, signal) => this.fetchCatalog(account, signal),
+      row: (provider, model) => this.listed(provider, model),
+    })
   }
 
   override providerInfo(provider: string): LlmProviderInfo {
@@ -534,52 +533,18 @@ export class CursorAdapter extends LlmAdapter {
     )
   }
 
+  /** Drop cached catalogs after login/logout so the next list does not reuse a stale plan. */
   clearAccountCatalog(account?: string): void {
-    if (account === undefined) this.accountCatalogs.clear()
-    else this.accountCatalogs.delete(account)
-    if (account === undefined || this.catalogOwner === account || this.catalogOwner === undefined) {
-      this.catalogOwner = undefined
-      this.catalog.invalidate()
-    }
+    this.catalogs.invalidate(account)
   }
 
   override async listModels(provider: string): Promise<readonly LlmModelInfo[]> {
-    const own = await this.listOwnModels(provider)
-    const pool = this.options.pool?.()
-    if (pool === undefined) return own
-    const extra = await pool.modelsForProvider(provider as ProviderId)
-    const seen = new Set(own.map(model => model.id))
-    return [...own, ...extra.filter(model => !seen.has(model.id))]
+    return withPoolTiers(await this.listOwnModels(provider), this.options.pool?.(), provider)
   }
 
+  /** The provider's own catalog: union of every account, or one account when named. */
   async listOwnModels(provider: string, account?: string, signal?: AbortSignal): Promise<readonly LlmModelInfo[]> {
-    if (account === undefined) {
-      const accounts = (await this.options.tokens.list()).map(entry => entry.key)
-      if (accounts.length === 0) return []
-      return unionAccountCatalogs(
-        accounts,
-        (key, accountSignal) => this.listOwnModels(provider, key, accountSignal),
-        { timeoutMs: DISCOVERY_TIMEOUT_MS, ...signal === undefined ? {} : { signal } },
-      )
-    }
-    if (!await this.options.tokens.hasSession(account)) return []
-    if (!this.options.discovery) return this.staticModels(provider)
-    const catalog = await this.catalogFor(account)
-    try {
-      const discovered = await discoverOrRetryAuth(
-        force => this.options.tokens.session(account, force),
-        catalog,
-        () => catalog.get(() => this.fetchCatalog(account, signal)),
-      )
-      return discovered.map(model => this.listed(provider, model))
-    } catch (error: unknown) {
-      if (isDiscoveryAborted(error, signal)) throw error
-      if (isMissingOrInvalidCredential(error)) return []
-      this.options.onWarn?.(
-        `cursor model discovery failed; using the built-in catalog (${errorChain(error)})`,
-      )
-      return this.staticModels(provider)
-    }
+    return this.catalogs.list(provider, account, signal)
   }
 
   override async resolveModel(provider: string, model: string): Promise<LlmResolvedModelInfo> {
@@ -632,7 +597,7 @@ export class CursorAdapter extends LlmAdapter {
     const ids: string[] = []
     for (const account of accounts) {
       try {
-        const catalog = await this.catalogFor(account)
+        const catalog = await this.catalogs.cache(account)
         const models = await catalog.resolve(() => this.fetchCatalog(account))
         for (const model of models ?? []) {
           if (model.fastTier !== true || seen.has(model.id)) continue
@@ -846,15 +811,12 @@ export class CursorAdapter extends LlmAdapter {
     }))
   }
 
+  /** One discovered entry as a picker row; Cursor catalog models are text-only. */
   private listed(provider: string, model: DiscoveredModel): LlmModelInfo {
-    return {
-      provider,
-      id: model.id,
-      name: model.name,
-      inputModalities: ['text'],
+    return catalogRow(provider, model, ['text'], {
       ...model.description === undefined ? {} : { description: model.description },
       ...model.contextWindow === undefined ? {} : { contextWindow: model.contextWindow },
-    }
+    })
   }
 
   private async fetchCatalog(account?: string, signal?: AbortSignal): Promise<DiscoveredModel[]> {
@@ -878,26 +840,10 @@ export class CursorAdapter extends LlmAdapter {
       ? (await this.options.tokens.list()).map(entry => entry.key)
       : [account]
     return discoverAcrossAccounts(accounts, async account => {
-      const catalog = await this.catalogFor(account)
+      const catalog = await this.catalogs.cache(account)
       const models = await catalog.resolve(() => this.fetchCatalog(account))
       return models?.find(entry => entry.id === model)
     })
-  }
-
-  private async catalogFor(account?: string): Promise<ModelCatalogCache> {
-    const defaultKey = await this.options.tokens.defaultAccount()
-    const key = account ?? defaultKey
-    if (key === undefined || key === defaultKey) {
-      if (this.catalogOwner !== undefined && this.catalogOwner !== defaultKey) this.catalog.invalidate()
-      this.catalogOwner = defaultKey
-      return this.catalog
-    }
-    let cache = this.accountCatalogs.get(key)
-    if (cache === undefined) {
-      cache = new ModelCatalogCache()
-      this.accountCatalogs.set(key, cache)
-    }
-    return cache
   }
 }
 

@@ -6,7 +6,7 @@
  */
 
 import { createHash, randomBytes, randomUUID } from 'node:crypto'
-import { EMPTY_RESPONSE_CODE, errorChain, LlmAdapter, LlmError, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
+import { EMPTY_RESPONSE_CODE, LlmAdapter, LlmError, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import type {
   GenerateOptions,
   LlmModelInfo,
@@ -43,16 +43,13 @@ import {
   idleWatchdog,
   mapFetchFailure,
   mergeReasoning,
-  ModelCatalogCache,
   discoverAcrossAccounts,
-  discoverOrRetryAuth,
-  isDiscoveryAborted,
-  isMissingOrInvalidCredential,
   oauthEndpointError,
   OAuthEndpointError,
 } from './common.js'
-import { AccountTokenManager, DISCOVERY_TIMEOUT_MS, unionAccountCatalogs } from './accounts.js'
+import { AccountTokenManager } from './accounts.js'
 import type { CatalogPersistence, DiscoveredModel, FetchFn, ModelEntry, ProviderUsage, UsageWindow } from './common.js'
+import { ProviderCatalog, catalogRow, withPoolTiers } from './provider-catalog.js'
 import { proxiedFetch } from '../http.js'
 import { claudeApiFetch } from '../transport/claude-fetch.js'
 import {
@@ -1010,15 +1007,15 @@ const CLAUDE_MODALITIES: readonly ('text' | 'image')[] = ['text', 'image']
 const REQUEST_CLOCK_LIMIT = 64
 
 export class ClaudeAdapter extends LlmAdapter {
-  private readonly catalog: ModelCatalogCache
-  /** In-memory catalogs for non-default accounts (the persisted cache is the default's). */
-  private readonly accountCatalogs = new Map<string, ModelCatalogCache>()
-  /** Account whose snapshot currently lives in {@link catalog}; cleared on default change. */
-  private catalogOwner: string | undefined
+  private readonly catalogs: ProviderCatalog
 
   constructor(private readonly options: ClaudeAdapterOptions) {
     super()
-    this.catalog = new ModelCatalogCache(options.catalogStore)
+    this.catalogs = new ProviderCatalog(options, 'claude', {
+      staticRows: provider => this.staticModels(provider),
+      fetchCatalog: (account, signal) => this.fetchCatalog(account, signal),
+      row: (provider, model) => this.listed(provider, model),
+    })
   }
 
   private async fetchCatalog(account?: string, signal?: AbortSignal): Promise<DiscoveredModel[]> {
@@ -1038,38 +1035,14 @@ export class ClaudeAdapter extends LlmAdapter {
 
   /** Drop cached catalogs after login/logout so the next list does not reuse a stale plan. */
   clearAccountCatalog(account?: string): void {
-    if (account === undefined) this.accountCatalogs.clear()
-    else this.accountCatalogs.delete(account)
-    if (account === undefined || this.catalogOwner === account || this.catalogOwner === undefined) {
-      this.catalogOwner = undefined
-      this.catalog.invalidate()
-    }
-  }
-
-  /** Persisted cache for the default account; a throwaway cache for any other. */
-  private async catalogFor(account?: string): Promise<ModelCatalogCache> {
-    const defaultKey = await this.options.tokens.defaultAccount()
-    const key = account ?? defaultKey
-    if (key === undefined || key === defaultKey) {
-      if (this.catalogOwner !== undefined && this.catalogOwner !== defaultKey) {
-        this.catalog.invalidate()
-      }
-      this.catalogOwner = defaultKey
-      return this.catalog
-    }
-    let cache = this.accountCatalogs.get(key)
-    if (cache === undefined) {
-      cache = new ModelCatalogCache()
-      this.accountCatalogs.set(key, cache)
-    }
-    return cache
+    this.catalogs.invalidate(account)
   }
 
   private async discovered(model: string): Promise<DiscoveredModel | undefined> {
     if (!this.options.discovery) return undefined
     const accounts = (await this.options.tokens.list()).map(entry => entry.key)
     return discoverAcrossAccounts(accounts, async account => {
-      const catalog = await this.catalogFor(account)
+      const catalog = await this.catalogs.cache(account)
       const models = await catalog.resolve(() => this.fetchCatalog(account))
       return models?.find(entry => entry.id === model)
     })
@@ -1082,6 +1055,11 @@ export class ClaudeAdapter extends LlmAdapter {
       name: model.name ?? model.id,
       inputModalities: model.inputModalities ?? CLAUDE_MODALITIES,
     }))
+  }
+
+  /** One discovered entry as a picker row; the Claude catalog carries no description. */
+  private listed(provider: string, model: DiscoveredModel): LlmModelInfo {
+    return catalogRow(provider, model, CLAUDE_MODALITIES)
   }
 
   override providerInfo(provider: string): LlmProviderInfo {
@@ -1101,51 +1079,12 @@ export class ClaudeAdapter extends LlmAdapter {
   }
 
   override async listModels(provider: string): Promise<readonly LlmModelInfo[]> {
-    const own = await this.listOwnModels(provider)
-    const pool = this.options.pool?.()
-    if (pool === undefined) return own
-    const extra = await pool.modelsForProvider(provider as ProviderId)
-    const seen = new Set(own.map(model => model.id))
-    // Account pools reuse the catalog row; only configured tiers are extra.
-    return [...own, ...extra.filter(model => !seen.has(model.id))]
+    return withPoolTiers(await this.listOwnModels(provider), this.options.pool?.(), provider)
   }
 
   /** The provider's own catalog: union of every account, or one account when named. */
   async listOwnModels(provider: string, account?: string, signal?: AbortSignal): Promise<readonly LlmModelInfo[]> {
-    if (account === undefined) {
-      const accounts = (await this.options.tokens.list()).map(entry => entry.key)
-      if (accounts.length === 0) return []
-      return unionAccountCatalogs(
-        accounts,
-        (key, accountSignal) => this.listOwnModels(provider, key, accountSignal),
-        { timeoutMs: DISCOVERY_TIMEOUT_MS, ...signal === undefined ? {} : { signal } },
-      )
-    }
-    if (!await this.options.tokens.hasSession(account)) {
-      return []
-    }
-    if (!this.options.discovery) return this.staticModels(provider)
-    const catalog = await this.catalogFor(account)
-    try {
-      const models = await discoverOrRetryAuth(
-        force => this.options.tokens.session(account, force),
-        catalog,
-        () => catalog.get(() => this.fetchCatalog(account, signal)),
-      )
-      return models.map(model => ({
-        provider,
-        id: model.id,
-        name: model.name,
-        inputModalities: CLAUDE_MODALITIES,
-      }))
-    } catch (error: unknown) {
-      if (isDiscoveryAborted(error, signal)) throw error
-      if (isMissingOrInvalidCredential(error)) return []
-      this.options.onWarn?.(
-        `claude model discovery failed; using the built-in catalog (${errorChain(error)})`,
-      )
-      return this.staticModels(provider)
-    }
+    return this.catalogs.list(provider, account, signal)
   }
 
   override async resolveModel(provider: string, model: string): Promise<LlmResolvedModelInfo> {

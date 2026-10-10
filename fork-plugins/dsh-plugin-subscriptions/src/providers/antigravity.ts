@@ -4,7 +4,7 @@
  * the daily-cloudcode-pa v1internal request envelope.
  */
 
-import { errorChain, EMPTY_RESPONSE_CODE, LlmAdapter, LlmError } from '@deepseek-ai/dsh-llm'
+import { EMPTY_RESPONSE_CODE, LlmAdapter, LlmError } from '@deepseek-ai/dsh-llm'
 import type {
   GenerateOptions,
   LlmModelInfo,
@@ -28,13 +28,9 @@ import {
   idleWatchdog,
   mapFetchFailure,
   mergeReasoning,
-  ModelCatalogCache,
-  discoverOrRetryAuth,
-  isMissingOrInvalidCredential,
   oauthEndpointError,
   OAuthEndpointError,
   discoverAcrossAccounts,
-  isDiscoveryAborted,
 } from './common.js'
 import type {
   CatalogPersistence,
@@ -44,8 +40,9 @@ import type {
   ProviderUsage,
   UsageWindow,
 } from './common.js'
+import { ProviderCatalog, catalogRow, withPoolTiers } from './provider-catalog.js'
 import { proxiedFetch } from '../http.js'
-import { AccountTokenManager, DISCOVERY_TIMEOUT_MS, unionAccountCatalogs } from './accounts.js'
+import { AccountTokenManager } from './accounts.js'
 import type { PoolAdapter } from './pool.js'
 import { DEFAULT_RATE_LIMIT_WAIT, DEFAULT_RETRY, subscriptionRetryPolicy } from './rate-limit.js'
 import type { RateLimitWait } from './rate-limit.js'
@@ -501,13 +498,15 @@ export interface AntigravityAdapterOptions {
 
 /** DSH provider adapter for the `antigravity` route. */
 export class AntigravityAdapter extends LlmAdapter {
-  private readonly catalog: ModelCatalogCache
-  private readonly accountCatalogs = new Map<string, ModelCatalogCache>()
-  private catalogOwner: string | undefined
+  private readonly catalogs: ProviderCatalog
 
   constructor(private readonly options: AntigravityAdapterOptions) {
     super()
-    this.catalog = new ModelCatalogCache(options.catalogStore)
+    this.catalogs = new ProviderCatalog(options, 'Antigravity', {
+      staticRows: provider => this.staticModels(provider),
+      fetchCatalog: (account, signal) => this.fetchCatalog(account, signal),
+      row: (provider, model) => this.listed(provider, model),
+    })
   }
 
   override providerInfo(provider: string): LlmProviderInfo {
@@ -516,31 +515,7 @@ export class AntigravityAdapter extends LlmAdapter {
 
   /** Drop cached catalogs after login/logout so the next list does not reuse a stale plan. */
   clearAccountCatalog(account?: string): void {
-    if (account === undefined) this.accountCatalogs.clear()
-    else this.accountCatalogs.delete(account)
-    if (account === undefined || this.catalogOwner === account || this.catalogOwner === undefined) {
-      this.catalogOwner = undefined
-      this.catalog.invalidate()
-    }
-  }
-
-  /** Persisted cache for the default account; a throwaway cache for any other. */
-  private async catalogFor(account?: string): Promise<ModelCatalogCache> {
-    const defaultKey = await this.options.tokens.defaultAccount()
-    const key = account ?? defaultKey
-    if (key === undefined || key === defaultKey) {
-      if (this.catalogOwner !== undefined && this.catalogOwner !== defaultKey) {
-        this.catalog.invalidate()
-      }
-      this.catalogOwner = defaultKey
-      return this.catalog
-    }
-    let cache = this.accountCatalogs.get(key)
-    if (cache === undefined) {
-      cache = new ModelCatalogCache()
-      this.accountCatalogs.set(key, cache)
-    }
-    return cache
+    this.catalogs.invalidate(account)
   }
 
   override providerRetryPolicy(provider: string) {
@@ -557,6 +532,13 @@ export class AntigravityAdapter extends LlmAdapter {
     }))
   }
 
+  /** One discovered entry as a picker row; a model that omits modalities accepts images. */
+  private listed(provider: string, model: DiscoveredModel): LlmModelInfo {
+    return catalogRow(provider, model, model.inputModalities ?? ['text', 'image'], {
+      ...model.description === undefined ? {} : { description: model.description },
+    })
+  }
+
   private fetchCatalog(account?: string, signal?: AbortSignal): Promise<DiscoveredModel[]> {
     return this.options.tokens.session(account).then(session => fetchAntigravityModels(
       session, this.options.runtime, this.options.fetchFn, signal,
@@ -564,55 +546,19 @@ export class AntigravityAdapter extends LlmAdapter {
   }
 
   override async listModels(provider: string): Promise<readonly LlmModelInfo[]> {
-    const own = await this.listOwnModels(provider)
-    const pool = this.options.pool?.()
-    if (pool === undefined) return own
-    const extra = await pool.modelsForProvider(provider as ProviderId)
-    const seen = new Set(own.map(model => model.id))
-    // Account pools reuse the catalog row; only configured tiers are extra.
-    return [...own, ...extra.filter(model => !seen.has(model.id))]
+    return withPoolTiers(await this.listOwnModels(provider), this.options.pool?.(), provider)
   }
 
   /** The provider's own catalog: union of every account, or one account when named. */
   async listOwnModels(provider: string, account?: string, signal?: AbortSignal): Promise<readonly LlmModelInfo[]> {
-    if (account === undefined) {
-      const accounts = (await this.options.tokens.list()).map(entry => entry.key)
-      if (accounts.length === 0) return []
-      return unionAccountCatalogs(
-        accounts,
-        (key, accountSignal) => this.listOwnModels(provider, key, accountSignal),
-        { timeoutMs: DISCOVERY_TIMEOUT_MS, ...signal === undefined ? {} : { signal } },
-      )
-    }
-    if (await this.options.tokens.peek(account) === undefined) return []
-    if (!this.options.discovery) return this.staticModels(provider)
-    const catalog = await this.catalogFor(account)
-    try {
-      const models = await discoverOrRetryAuth(
-        force => this.options.tokens.session(account, force),
-        catalog,
-        () => catalog.get(() => this.fetchCatalog(account, signal)),
-      )
-      return models.map(model => ({
-        provider,
-        id: model.id,
-        name: model.name,
-        ...model.description === undefined ? {} : { description: model.description },
-        inputModalities: model.inputModalities ?? ['text', 'image'],
-      }))
-    } catch (error) {
-      if (isDiscoveryAborted(error, signal)) throw error
-      if (isMissingOrInvalidCredential(error)) return []
-      this.options.onWarn?.(`Antigravity model discovery failed; using the built-in catalog (${errorChain(error)})`)
-      return this.staticModels(provider)
-    }
+    return this.catalogs.list(provider, account, signal)
   }
 
   private async discovered(model: string, account?: string): Promise<DiscoveredModel | undefined> {
     if (!this.options.discovery) return undefined
     const accounts = account === undefined ? (await this.options.tokens.list()).map(entry => entry.key) : [account]
     return discoverAcrossAccounts(accounts, async key => {
-      const catalog = await this.catalogFor(key)
+      const catalog = await this.catalogs.cache(key)
       const models = await catalog.resolve(() => this.fetchCatalog(key))
       return models?.find(entry => entry.id === model)
     })

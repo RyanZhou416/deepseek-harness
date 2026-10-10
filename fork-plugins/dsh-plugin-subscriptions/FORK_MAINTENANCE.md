@@ -22,6 +22,22 @@ No Session event or Session format changes. Existing Codex, Claude, Grok, Copilo
 
 `V1ki/dsh-plugin-subscriptions` v0.9.4 does not contain the behaviors in this section. A subtree import overwrites `src/`, `test/`, and `package.json`. Restore every item here before packaging, then run the package suite and rebuild the tarball. The tests named below fail if the behavior was dropped.
 
+### One owner for the provider catalog plumbing
+
+The six adapters used to carry their own copy of the same catalog code: `clearAccountCatalog`
+was byte-identical in all six, `catalogFor` and `listModels` in five, and `listOwnModels` was
+near-identical with per-provider differences. They now delegate to `provider-catalog.ts`, which
+owns the cache, the listing skeleton (account union, per-account bound, abort and credential
+error mapping), the picker-row shape, and the pool-tier overlay. Per-provider differences stay
+explicit: the discovery timeout hook, each adapter's modality rule and description, the warn
+label's capitalisation, and grok's last-known short-circuit.
+
+**Preservation rule.** Re-apply the delegation after an upstream import, which would otherwise
+restore six copies; keep the adapters' thin `clearAccountCatalog` / `listOwnModels` /
+`listModels` methods as real prototype methods, because a spec patches one of them. Re-measure
+the duplication ratchet after any change here: `package.json`'s `duplication` script holds
+`packages`/`scripts` at zero and the plugin path at a threshold just above what remains.
+
 ### Removed upstream indirection
 
 Four pieces of upstream code were removed here and must not come back through an upstream

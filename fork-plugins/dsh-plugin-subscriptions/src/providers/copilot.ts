@@ -14,7 +14,7 @@
  * unchanged.
  */
 
-import { EMPTY_RESPONSE_CODE, errorChain, LlmAdapter, LlmError, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
+import { EMPTY_RESPONSE_CODE, LlmAdapter, LlmError, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import type {
   GenerateOptions,
   LlmModelInfo,
@@ -40,21 +40,18 @@ import {
   idleWatchdog,
   mapFetchFailure,
   mergeReasoning,
-  ModelCatalogCache,
   discoverAcrossAccounts,
-  discoverOrRetryAuth,
-  isDiscoveryAborted,
-  isMissingOrInvalidCredential,
   oauthEndpointError,
   OAuthEndpointError,
 } from './common.js'
-import { AccountTokenManager, DISCOVERY_TIMEOUT_MS, unionAccountCatalogs } from './accounts.js'
+import { AccountTokenManager } from './accounts.js'
 import type {
   CatalogPersistence,
   DiscoveredModel,
   FetchFn,
   ModelEntry,
 } from './common.js'
+import { ProviderCatalog, catalogRow, withPoolTiers } from './provider-catalog.js'
 import { proxiedFetch } from '../http.js'
 import {
   DEFAULT_RATE_LIMIT_WAIT,
@@ -637,11 +634,7 @@ interface ReasoningReplayEntry {
 
 /** Copilot wire adapter: one instance serves the `copilot` provider route. */
 export class CopilotAdapter extends LlmAdapter {
-  private readonly catalog: ModelCatalogCache
-  /** In-memory catalogs for non-default accounts (the persisted cache is the default's). */
-  private readonly accountCatalogs = new Map<string, ModelCatalogCache>()
-  /** Account whose snapshot currently lives in {@link catalog}; cleared on default change. */
-  private catalogOwner: string | undefined
+  private readonly catalogs: ProviderCatalog
   /**
    * [2026-08-23]-[a reasoning model continuing a tool chain must get its
    * reasoning back or it restarts from scratch every tool round trip; the
@@ -661,7 +654,11 @@ export class CopilotAdapter extends LlmAdapter {
 
   constructor(private readonly options: CopilotAdapterOptions) {
     super()
-    this.catalog = new ModelCatalogCache(options.catalogStore)
+    this.catalogs = new ProviderCatalog(options, 'copilot', {
+      staticRows: provider => this.staticModels(provider),
+      fetchCatalog: (account, signal) => this.fetchCatalog(account, signal),
+      row: (provider, model) => this.listed(provider, model),
+    })
   }
 
   /** Discovery fetcher: resolves the session through the refresh-aware path. */
@@ -671,31 +668,7 @@ export class CopilotAdapter extends LlmAdapter {
 
   /** Drop cached catalogs after login/logout so the next list does not reuse a stale plan. */
   clearAccountCatalog(account?: string): void {
-    if (account === undefined) this.accountCatalogs.clear()
-    else this.accountCatalogs.delete(account)
-    if (account === undefined || this.catalogOwner === account || this.catalogOwner === undefined) {
-      this.catalogOwner = undefined
-      this.catalog.invalidate()
-    }
-  }
-
-  /** Persisted cache for the default account; a throwaway cache for any other. */
-  private async catalogFor(account?: string): Promise<ModelCatalogCache> {
-    const defaultKey = await this.options.tokens.defaultAccount()
-    const key = account ?? defaultKey
-    if (key === undefined || key === defaultKey) {
-      if (this.catalogOwner !== undefined && this.catalogOwner !== defaultKey) {
-        this.catalog.invalidate()
-      }
-      this.catalogOwner = defaultKey
-      return this.catalog
-    }
-    let cache = this.accountCatalogs.get(key)
-    if (cache === undefined) {
-      cache = new ModelCatalogCache()
-      this.accountCatalogs.set(key, cache)
-    }
-    return cache
+    this.catalogs.invalidate(account)
   }
 
   override providerInfo(provider: string): LlmProviderInfo {
@@ -719,58 +692,20 @@ export class CopilotAdapter extends LlmAdapter {
     }))
   }
 
+  /** One discovered entry as a picker row, keeping the modalities the backend advertised. */
+  private listed(provider: string, model: DiscoveredModel): LlmModelInfo {
+    return catalogRow(provider, model, model.inputModalities, {
+      ...model.description === undefined ? {} : { description: model.description },
+    })
+  }
+
   override async listModels(provider: string): Promise<readonly LlmModelInfo[]> {
-    const own = await this.listOwnModels(provider)
-    const pool = this.options.pool?.()
-    if (pool === undefined) return own
-    const extra = await pool.modelsForProvider(provider as ProviderId)
-    const seen = new Set(own.map(model => model.id))
-    // Account pools reuse the catalog row; only configured tiers are extra.
-    return [...own, ...extra.filter(model => !seen.has(model.id))]
+    return withPoolTiers(await this.listOwnModels(provider), this.options.pool?.(), provider)
   }
 
   /** The provider's own catalog: union of every account, or one account when named. */
   async listOwnModels(provider: string, account?: string, signal?: AbortSignal): Promise<readonly LlmModelInfo[]> {
-    if (account === undefined) {
-      const accounts = (await this.options.tokens.list()).map(entry => entry.key)
-      if (accounts.length === 0) return []
-      return unionAccountCatalogs(
-        accounts,
-        (key, accountSignal) => this.listOwnModels(provider, key, accountSignal),
-        { timeoutMs: DISCOVERY_TIMEOUT_MS, ...signal === undefined ? {} : { signal } },
-      )
-    }
-    if (!await this.options.tokens.hasSession(account)) {
-      return []
-    }
-    if (!this.options.discovery) return this.staticModels(provider)
-    const catalog = await this.catalogFor(account)
-    try {
-      // The fetcher runs only on a cache miss, and resolves the session
-      // through the refresh-aware path so an expired access token renews here
-      // instead of failing discovery into the static fallback.
-      const discovered = await discoverOrRetryAuth(
-        force => this.options.tokens.session(account, force),
-        catalog,
-        () => catalog.get(() => this.fetchCatalog(account, signal)),
-      )
-      return discovered.map(model => ({
-        provider,
-        id: model.id,
-        name: model.name,
-        ...model.description === undefined ? {} : { description: model.description },
-        ...model.inputModalities === undefined ? {} : { inputModalities: model.inputModalities },
-      }))
-    } catch (error: unknown) {
-      if (isDiscoveryAborted(error, signal)) throw error
-      // A permanent refresh failure deletes the stored session: the provider
-      // is logged out, so hide it instead of showing a stale static catalog.
-      if (isMissingOrInvalidCredential(error)) return []
-      this.options.onWarn?.(
-        `copilot model discovery failed; using the built-in catalog (${errorChain(error)})`,
-      )
-      return this.staticModels(provider)
-    }
+    return this.catalogs.list(provider, account, signal)
   }
 
   /**
@@ -783,7 +718,7 @@ export class CopilotAdapter extends LlmAdapter {
     if (!this.options.discovery) return undefined
     const accounts = (await this.options.tokens.list()).map(entry => entry.key)
     return discoverAcrossAccounts(accounts, async account => {
-      const catalog = await this.catalogFor(account)
+      const catalog = await this.catalogs.cache(account)
       const models = await catalog.resolve(() => this.fetchCatalog(account))
       return models?.find(entry => entry.id === model)
     })
