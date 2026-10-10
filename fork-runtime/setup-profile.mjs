@@ -33,7 +33,7 @@ const CONTEXT = {
 }
 const SUBSCRIPTIONS = {
   name: 'dsh-plugin-subscriptions',
-  version: '0.9.4-dsh017rc1.15',
+  version: '0.9.4-dsh017rc1.16',
 }
 const RETIRED_PACKAGES = ['dshmarket']
 

@@ -507,7 +507,7 @@ Context 源码的工具归属追踪按 `cordis.original` 解包后的服务身�
 
 ### Local Subscriptions package
 
-维护真源位于 `fork-plugins\dsh-plugin-subscriptions`，仓库安装器使用 `fork-plugins\releases\dsh-plugin-subscriptions-0.9.4-dsh017rc1.15.tgz`，SHA256 为 `D6F2AAF65C09D72AB8BEF9C3DB099D59352D530A579D586B0FC8B0A3850C1FA1`。该摘要与仓内制品及其 `.sha256` 文件一致。该版本采用上游 v0.9.4 的多账号 provider、usage UI、Codex 搜索、图片结果、Antigravity 与 provider failover，并增加 RC.1 的 V4 工具角色转换；凭据格式与工具输出不变。
+维护真源位于 `fork-plugins\dsh-plugin-subscriptions`，仓库安装器使用 `fork-plugins\releases\dsh-plugin-subscriptions-0.9.4-dsh017rc1.16.tgz`，SHA256 为 `D9BF43D642F36622C68ABFC7461845ED3E7D6E5CBB4C0EB35C7E04FFDC061014`。该摘要与仓内制品及其 `.sha256` 文件一致。该版本采用上游 v0.9.4 的多账号 provider、usage UI、Codex 搜索、图片结果、Antigravity 与 provider failover，并增加 RC.1 的 V4 工具角色转换；凭据格式与工具输出不变。
 
 Windows Web profile 启用 `llm-subscriptions`，保留 `rateLimit.wait: false`。 制品在安装前须通过插件测试套件、实际安装目录的接口与 UI 开关检查；2026-10-10 当前源码的插件测试套件 804 项通过、0 失败、退出码 0。已验证的图片处理保持：21 张历史图片中原有 16 张超出多图尺寸上限，请求版本的长边均不超过 2,000 像素，原 Session 和附件摘要保持不变。2026-09-26，固定源码包的 506 项无密钥测试通过；隔离 Web profile 与真实 Web profile 均在随机本地端口启动，认证页面返回 HTTP 200，页面包含 Subscriptions 客户端资源。真实 Profile 的 Codex 状态接口识别到两个已存账号，默认账号的用量查询通过并刷新过期访问令牌；另一个账号及真实模型请求尚未验证。旧 profile patch 备份位于 `C:\Project\deepseek-harness-data\diagnostics\profile-backups\pre-subscriptions-enable-20260926`。
 

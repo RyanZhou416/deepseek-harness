@@ -6,9 +6,9 @@ This subtree carries the private `dsh-plugin-subscriptions` build shipped with t
 
 - Upstream repository: `https://github.com/V1ki/dsh-plugin-subscriptions.git`
 - Upstream tag: `v0.9.4`
-- Fork package version: `0.9.4-dsh017rc1.15`
+- Fork package version: `0.9.4-dsh017rc1.16`
 - Subtree path: `fork-plugins/dsh-plugin-subscriptions`
-- Distribution artifact: `fork-plugins/releases/dsh-plugin-subscriptions-0.9.4-dsh017rc1.15.tgz`
+- Distribution artifact: `fork-plugins/releases/dsh-plugin-subscriptions-0.9.4-dsh017rc1.16.tgz`
 
 ## Fork behavior
 
@@ -256,7 +256,7 @@ Store the artifact's uppercase SHA-256 beside it as `<name>-<version>.tgz.sha256
 
 ## Deployment
 
-The live Web profile pins the plugin through a `file:` reference to the tarball in `fork-plugins/releases/`; the credential store lives separately under `DSH_HOME\plugins\subscriptions\` and must never be touched by a code swap. Deploy by stopping the Host, then running `fork-plugins/deploy-subscriptions-web.ps1` from a plain PowerShell window (defaults to the newest version; sha256-verifies the artifact, refuses while the Host listens on port 3080, backs up the installed copy plus `package.json`/`pnpm-lock.yaml`, and swaps through `pnpm add` so a later `pnpm install` cannot downgrade). Restart the Host with its usual launch command. Rollback is the previous tarball through the same `pnpm add` form.
+The live Web profile pins the plugin through a `file:` reference to the tarball in `fork-plugins/releases/`; the credential store lives separately under `DSH_HOME\plugins\subscriptions\` and must never be touched by a code swap. The plugin's own `@tormentalabs/claude-code-wire-compat` dependency must keep the absolute `file:C:/Project/deepseek-harness/fork-plugins/releases/tormentalabs-claude-code-wire-compat-0.7.2-dsh14.tgz` specifier in the packed `package.json`: pnpm resolves a dependency's nested `file:` specifier relative to the installing profile, not to the plugin directory, so `file:../releases/...` made the artifact fail to install with `ENOENT` on `<profiles>\releases\...`. Deploy by stopping the Host, then running `fork-plugins/deploy-subscriptions-web.ps1` from a plain PowerShell window (defaults to the newest version; sha256-verifies the artifact, refuses while the Host listens on port 3080, backs up the installed copy plus `package.json`/`pnpm-lock.yaml`, and swaps through `pnpm add` so a later `pnpm install` cannot downgrade). Restart the Host with its usual launch command. Rollback is the previous tarball through the same `pnpm add` form.
 
 ## Updating upstream
 
