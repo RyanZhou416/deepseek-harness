@@ -43,6 +43,7 @@ import type {
 import {
   defaultEffortOf,
   loadModelDefaults,
+  modelDefaultsLoadError,
   setDefaultEffort,
 } from './model-defaults.js'
 import {
@@ -963,7 +964,17 @@ export function apply(ctx: Context, config: Config): void {
   // Per-model default effort overrides: start the load so the adapters'
   // synchronous `defaultEffortOf` callbacks see the persisted state as soon
   // as the model picker resolves; a load failure leaves the overrides empty.
-  void loadModelDefaults()
+  // A load failure leaves the overrides empty, which is indistinguishable from
+  // "none configured" unless it is reported here.
+  void loadModelDefaults().then(
+    () => {
+      const failure = modelDefaultsLoadError()
+      if (failure !== undefined) {
+        onWarn(`subscriptions: model default overrides could not be loaded; the picker follows provider defaults (${String(failure)})`)
+      }
+    },
+    () => undefined,
+  )
   // Token managers double as the tools' credential source, so they are
   // captured beside the registrations for the inject block below.
   let codexResetCredits: CodexResetCreditOps | undefined

@@ -142,9 +142,13 @@ export function writeBackClaudeCodeCredentials(next: ClaudeSession, expectedPrio
     if (updated === undefined) return false
     const account = getKeychainAccountName() ?? PRIMARY_SERVICE
     try {
-      execFileSync('/usr/bin/security', ['add-generic-password', '-s', PRIMARY_SERVICE, '-a', account, '-w', updated, '-U'], {
+      // The secret goes over stdin: with no value after `-w`, `security` reads the password
+      // from its input, which keeps it out of the process argument list where any local user
+      // could read it. `-U` stays last so an existing item is replaced.
+      execFileSync('/usr/bin/security', ['add-generic-password', '-s', PRIMARY_SERVICE, '-a', account, '-w', '-U'], {
+        input: updated,
         timeout: 2000,
-        stdio: 'ignore',
+        stdio: ['pipe', 'ignore', 'ignore'],
       })
       return true
     } catch {
