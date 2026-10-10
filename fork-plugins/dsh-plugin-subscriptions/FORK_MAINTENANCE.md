@@ -87,7 +87,7 @@ import; each was proven to add nothing before it was deleted.
 
 Files: `src/providers/claude-wire.ts`, `src/providers/claude.ts`, `src/providers/claude-images.ts`, `src/translate/anthropic.ts`, `src/auth/store.ts`, `src/providers/accounts.ts`, `src/providers/common.ts`, `test/claude-wire.spec.ts`, `test/translate.spec.ts`, `test/models.spec.ts`, `package.json` (`@tormentalabs/claude-code-wire-compat` exact pin).
 
-- All chat requests build through `buildClaudeCodeRequest` with the pinned `CLAUDE_CODE_2_1_288_PROFILE` (CLI 2.1.280, SDK 0.112.1). The builder owns the billing fingerprint block, the identity system block, beta composition, the `metadata.user_id` correlation triple, cache-breakpoint placement, and the header plan. Do not hand-roll `anthropic-beta`, the billing block, `x-app`, or cache markers again.
+- All chat requests build through `buildClaudeCodeRequest` with the pinned `CLAUDE_CODE_2_1_288_PROFILE` (CLI 2.1.288, SDK 0.128.0). The builder owns the billing fingerprint block, the identity system block, beta composition, the `metadata.user_id` correlation triple, cache-breakpoint placement, and the header plan. Do not hand-roll `anthropic-beta`, the billing block, `x-app`, or cache markers again.
 - Keep `cacheControl: { enabled, systemBreakpoint, toolBreakpoint, messageBreakpoint, ttl: '1h' }` (the genuine client ships 1h cache markers), `stream: true`, `display: 'summarized'` on the thinking request, and `effort` plus `outputConfig: { effort }` when the model advertises efforts. The builder validates both against the pinned catalogue. Send no `accept` header — the genuine client sends none.
 - Identity: `sessionId` is the harness session id (a UUID fallback per request when absent), `deviceId` and `accountUuid` come from the stored `ClaudeSession` (minted/discovered at login, preserved across refresh, lazily backfilled for pre-upgrade sessions; a failed backfill fails the request with `INVALID_REQUEST` instead of sending a bogus triple). `deviceId` is minted as a 64-hex string (32 random bytes), the genuine client's format, never a UUID. `previousRequestId` chains the response `request-id` header into the next request's billing block, keyed by (canonical account, wire session) so a pool failover never chains another account's request id (bounded at 256 entries); a response without the header clears the chain. `cc_prompt_id` is derived deterministically from (wire session, prompt turn) by `claudePromptId`: the same session and turn always produce the same id and the same request bytes, while another session or the next turn differs. The value is model-visible, so the harness rule that anything a model sees must be reconstructable from the session log requires the derivation — a random UUID is not reconstructable. The turn's tool-continuation steps reuse it; probe/title-helper suppression is not modelled. The response's `request-id` header is recorded on that assistant message's replay envelope as `response.requestId`, the checkable counterpart of the `cc_prev_req` chain.
 - Pool failovers roll the wire session id: the first account span of a harness session reuses the harness session id verbatim (single-account sessions are unchanged), and every later account span gets a fresh UUID (`claudeWireSessionId`, bounded at 256), so one conversation never spans two account identities; switching back resumes the original id and chain.
@@ -109,8 +109,8 @@ percentage-derived one and saying whether the account is the constraint or the p
 State is bounded like the wire chain and dropped on login, logout, and credential death.
 
 **Preservation rule.** Keep the capture before the `response.ok` check — moving it after
-loses the headers of every refusal — and keep the account-versus-pool split: a dead login is an
-account condition even when other accounts could serve.
+loses the headers of every refusal — and keep the account-versus-pool split: a dead login and an
+`allowed_warning` near-limit verdict are account conditions even when other accounts could serve.
 
 **Focused verification.** `test/unified-rate-limit.spec.ts` covers parsing and bounding,
 `test/claude-rate-limit-capture.spec.ts` covers capture on a warning and on a refusal, and
@@ -171,6 +171,37 @@ ChatGPT prompt caching has no `cache_control` field. The plugin already sends `p
 ### Windows credential store
 
 `writeStore` in `src/auth/store.ts` writes `auth.json` to a temp file and renames it into place. On Windows that rename returns `EPERM` when the destination is briefly locked. Retry the rename, then copy the finished temp file over `auth.json`. A failed replace drops the login that just completed, including a new Cursor account.
+
+### Host-published proxy policy
+
+Files: `src/transport/host-egress.ts`, `src/http.ts` (`proxiedFetch`), `src/transport/claude-fetch.ts`, `test/proxy-host.spec.ts`, `test/transport-wiring.spec.ts`.
+
+A launcher that configures a proxy publishes its resolved policy into the process environment before any plugin mounts — `HTTP_PROXY` / `HTTPS_PROXY`, `NO_PROXY`, and the mandatory Claude route `DSH_CLAUDE_PROXY_URL` — and the dispatcher it installed is what applies that policy to an ordinary `fetch`. This plugin declares no dependency on the host's transport package (it lives outside the workspace, so the seam is not resolvable from its directory, and a bundled copy would read module state that is always empty), so the published environment is the honest seam:
+
+- `proxiedFetch` attaches no dispatcher of its own to a Claude destination (`anthropic.com`, `claude.com`) while `DSH_CLAUDE_PROXY_URL` is published: the installed dispatcher applies the mandated route to Messages, token refresh, usage and profile alike, ahead of the plugin's own proxy.
+- For every other destination it leaves the process dispatcher in charge whenever the host published a proxy for the request's scheme and the plugin's own proxy did not take the request, so this module's direct agent cannot carry it around that proxy. `NO_PROXY` and loopback decisions stay the installed dispatcher's rather than a second matcher here.
+- The plugin's own proxy and its bypass list still decide the requests they cover, and when the host published nothing the plugin's direct agent (which carries the module's connect budget) is attached to the remaining ones as before.
+- The Bun bridge refuses the Messages request with `BridgeUnavailableError` naming the variable and its credential-free origin, before the child is resolved or spawned. The child runs its own runtime and its environment allowlist carries no such variable, so a bridge that took the request would send it outside the route. `DSH_SUBSCRIPTIONS_BRIDGE=off` is the offered remedy and stays inside the route, because the fallback path defers to the host dispatcher as described above.
+
+**Preservation rule.** An upstream import restores none of this. Keep `host-egress.ts`, the three decision points above, and the refusal ahead of `startBridge`. Importing the host's own seam (`proxyRouteFor` / `proxyEnvironmentForChild`) is deliberately not taken: the package is not resolvable from this plugin's directory, and declaring it would mean making the plugin a workspace member. Bridge proxy support, which would let the bridge carry the route instead of refusing it, stays deferred until Bun's proxy-environment behavior is measured and `Config` gains its switch.
+
+**Verification.** `test/proxy-host.spec.ts` proves the deferral on both Claude hosts and on a published general route, that the plugin route and its own direct agent survive when nothing is published, that a refusal names no proxy credential, and that an enabled plugin proxy still carries other providers; `test/transport-wiring.spec.ts` proves the refusal precedes the child and that the child environment never receives the variable.
+
+### Speed write outcomes
+
+The `/fast` popup and the composer Speed control both settle a picked tier through `settleSpeedTier`. A false answer is the setter's failure result and has to reach the user: the composer control shows `speedSaveFailed` in place inside its still-open menu, and the popup rejects the settlement so the shell's own error strip states the same copy — never a silent close.
+
+**Preservation rule.** An upstream import restores the silent discard at both entry points. Keep the failure surfacing without adding a second notice surface beside the shell's strip.
+
+**Focused verification.** `test/fast-command.spec.ts` covers both outcomes in both languages; `test/rpc.spec.ts` covers the `speed`/`setSpeed` endpoints.
+
+### Locale-owned client copy
+
+`src/client/locales.ts` owns every user-visible string of the client half in both languages, including the badge's window abbreviations and remaining-time templates, the tool-row titles, and the absolute-time template behind `src/client/format.ts`. The zh dictionary is typed against the en keys, so a missing translation fails the build.
+
+**Preservation rule.** An upstream import restores hard-coded copy. Route new strings through `locales.ts` and `t`, and format dates through `formatDateTime` rather than `Date#toLocaleString`, which follows the browser language instead of the app locale.
+
+**Focused verification.** `npx pnpm run verify-client-ui-i18n` from the repository root scans this subtree; `test/subscriptions-date-format.spec.ts`, `test/subscription-usage-badge.spec.ts`, and `test/account-manager-ui.spec.ts` cover the localized output. The upstream `dsh-agent-teams` and `dsh-context` subtrees stay outside that gate.
 
 ## Verification and packaging
 

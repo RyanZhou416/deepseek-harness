@@ -117,25 +117,29 @@ export function createCurrentModelReader(
 
 /**
  * Compact time-remaining label derived from the window's `resetsAt` timestamp:
- * "6d18h" (days+hours), "1h58m" (hours+minutes), or "42m" (minutes only).
- * Falls back to the scope/kind abbreviation when no reset time is known.
+ * "6d18h" (days+hours), "1h58m" (hours+minutes), or "42m" (minutes only), shaped
+ * by the dictionary's own unit templates. Falls back to the scope, or to the
+ * localized scope/kind abbreviation when no reset time is known.
+ * @param w - the reported window.
+ * @param t - Subscriptions dictionary translator.
+ * @returns the compact remaining-time or window-kind label.
  */
-export function windowLabel(w: UsageWindow): string {
+export function windowLabel(w: UsageWindow, t: Translate = fallbackTranslate): string {
   if (w.resetsAt === undefined) {
     if (w.scope !== undefined && w.scope !== '') return w.scope
     switch (w.kind) {
-      case 'session': return '5h'
-      case 'weekly': return 'Wk'
-      default: return 'W'
+      case 'session': return t('usageBadgeSessionShort')
+      case 'weekly': return t('usageBadgeWeeklyShort')
+      default: return t('usageBadgeOtherShort')
     }
   }
   const ms = Math.max(0, w.resetsAt - Date.now())
   const minutes = Math.floor(ms / 60_000)
   const hours = Math.floor(minutes / 60)
   const days = Math.floor(hours / 24)
-  if (days > 0) return `${days}d${hours % 24}h`
-  if (hours > 0) return `${hours}h${minutes % 60}m`
-  return `${Math.max(1, minutes)}m`
+  if (days > 0) return t('usageBadgeRemainingDays', { days, hours: hours % 24 })
+  if (hours > 0) return t('usageBadgeRemainingHours', { hours, minutes: minutes % 60 })
+  return t('usageBadgeRemainingMinutes', { minutes: Math.max(1, minutes) })
 }
 
 /** Clamp and round a window's used share for display. */
@@ -171,7 +175,7 @@ export function compactSegment(d: ProviderUsageDisplay, model?: string, t: Trans
     const parts = matching.slice(0, 2).map(w => `${w.kind === 'weekly' ? t('usageWeekly') : t('usageWindow')} ${usedPercent(w)}%`)
     return `${d.name} ${parts.join(' · ')}`
   }
-  const parts = windows.slice(0, 2).map(w => `${windowLabel(w)} ${usedPercent(w)}%`)
+  const parts = windows.slice(0, 2).map(w => `${windowLabel(w, t)} ${usedPercent(w)}%`)
   if (windows.length > 2) parts.push(`+${windows.length - 2}`)
   return `${d.name} ${parts.join(' · ')}`
 }
@@ -553,7 +557,7 @@ function AccountMeta({ account, translate }: { account: AccountUsageDisplay; tra
     .filter((part): part is string => part !== undefined && part !== '')
   return (
     <span style={styles.providerMeta} title={account.account}>
-      {account.isDefault && <span style={styles.defaultStar} aria-label="default">★ </span>}
+      {account.isDefault && <span style={styles.defaultStar} aria-label={translate('defaultBadge')}>★ </span>}
       {parts.join(' · ')}
     </span>
   )
@@ -567,7 +571,7 @@ export function AccountWindows({ windows, model, translate }: {
   const rows = (items: readonly UsageWindow[]) => (
     <dl style={styles.details}>
       {items.map((w, i) => (
-        <WindowRow key={i} label={`${usageWindowLabel(translate, w)}${model !== undefined && w.scope === model ? ` · ${translate('usageBadgeCurrent')}` : ''}`} window={w} />
+        <WindowRow key={i} label={`${usageWindowLabel(translate, w)}${model !== undefined && w.scope === model ? ` · ${translate('usageBadgeCurrent')}` : ''}`} window={w} translate={translate} />
       ))}
     </dl>
   )
@@ -581,14 +585,14 @@ export function AccountWindows({ windows, model, translate }: {
 }
 
 /** One `dt`/`dd` pair: window name → `25% · 6d1h`, with the bar underneath. */
-function WindowRow({ label, window: w }: { label: string; window: UsageWindow }) {
+function WindowRow({ label, window: w, translate }: { label: string; window: UsageWindow; translate: Translate }) {
   const percent = usedPercent(w)
   return (
     <>
       <dt style={styles.dt}>{label}</dt>
       <dd style={styles.dd}>
         {percent}%
-        {w.resetsAt !== undefined && <span style={styles.reset}> · {windowLabel(w)}</span>}
+        {w.resetsAt !== undefined && <span style={styles.reset}> · {windowLabel(w, translate)}</span>}
       </dd>
       <div style={styles.bar} aria-hidden>
         <div style={{ ...styles.barFill, width: `${percent}%`, background: usageBarColor(percent) }} />

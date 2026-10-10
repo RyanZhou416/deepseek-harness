@@ -11,7 +11,7 @@ import assert from 'node:assert/strict'
 import { MessageId } from '@deepseek-ai/dsh-llm'
 import type { GenerateOptions } from '@deepseek-ai/dsh-llm'
 import { ToolCallId } from '../src/compat.js'
-import { GrokAdapter, GROK_API_URL } from '../src/providers/grok.js'
+import { GrokAdapter, GROK_API_URL, exchangeGrokCode, refreshGrok } from '../src/providers/grok.js'
 import { AccountTokenManager } from '../src/providers/accounts.js'
 import type { FetchFn } from '../src/providers/common.js'
 import type { GrokSession } from '../src/auth/store.js'
@@ -158,4 +158,30 @@ test('grok repairs an unanswered tool call before dispatch', async () => {
   assert.equal(input[1]?.type, 'function_call_output')
   assert.match(String(input[1]?.output), /outcome is unknown/)
   assert.equal(history.length, 1, 'request repair must not mutate history')
+})
+
+test('grok token grants refuse redirects', async () => {
+  // A 307/308 would replay the code or refresh token to another origin, so
+  // both grants answer with a redirect error instead of following it.
+  const real = globalThis.fetch
+  const seen: { url: string; init: RequestInit }[] = []
+  globalThis.fetch = ((input: RequestInfo | URL, init?: RequestInit) => {
+    seen.push({ url: String(input), init: init ?? {} })
+    if (init?.method !== 'POST') {
+      return Promise.resolve(Response.json({
+        authorization_endpoint: 'https://auth.x.ai/oauth/authorize',
+        token_endpoint: 'https://auth.x.ai/oauth/token',
+      }))
+    }
+    return Promise.resolve(Response.json({ access_token: 'at', refresh_token: 'rt', expires_in: 3600 }))
+  }) as typeof globalThis.fetch
+  try {
+    await exchangeGrokCode('code', 'verifier', 'http://127.0.0.1:56121/callback', 'challenge')
+    await refreshGrok({ ...grokSession, tokenEndpoint: 'https://auth.x.ai/oauth/token' })
+  } finally {
+    globalThis.fetch = real
+  }
+  const grants = seen.filter(call => call.init.method === 'POST')
+  assert.equal(grants.length, 2)
+  assert.deepEqual(grants.map(call => call.init.redirect), ['error', 'error'])
 })

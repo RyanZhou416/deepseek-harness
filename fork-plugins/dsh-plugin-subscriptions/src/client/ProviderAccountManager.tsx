@@ -119,12 +119,12 @@ export function ProviderAccountManager({ provider, name, rpc, t, onClose }: Prop
     <div style={{ ...stack, padding: 20 }}>
       <header style={{ ...actions, justifyContent: 'space-between' }}>
         <h2 id={title} style={{ margin: 0, fontSize: 18 }}>{t('accountsTitle', { provider: name })}</h2>
-        <button type="button" autoFocus style={button} disabled={saving} onClick={onClose}>{t('imageClose')}</button>
+        <button type="button" autoFocus style={button} disabled={saving} onClick={onClose}>{t('accountsClose')}</button>
       </header>
       <p id={description} style={hint}>{t('accountsHint')}</p>
       {error && <p role="alert" style={{ ...hint, color: 'var(--dsw-alias-state-error-primary)' }}>{error}</p>}
       {loading && <p role="status" style={hint}>{t('accountsLoading')}</p>}
-      {!loading && !catalog && <button type="button" style={button} onClick={() => setAttempt(value => value + 1)}>{t('modelDefaultsRetry')}</button>}
+      {!loading && !catalog && <button type="button" style={button} onClick={() => setAttempt(value => value + 1)}>{t('accountsRetry')}</button>}
       {catalog && <fieldset disabled={saving || loading} style={{ ...stack, border: 0, margin: 0, padding: 0 }}>
         {provider === 'codex' && <div style={{ ...stack, gap: 6, border, borderRadius: 12, padding: 14 }}>
           <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontWeight: 500 }}>

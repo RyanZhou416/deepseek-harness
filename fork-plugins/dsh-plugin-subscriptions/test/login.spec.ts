@@ -629,3 +629,32 @@ test('manual mode is refused for a provider without a code-displaying page', asy
     /no cross-device mode/,
   )
 })
+
+test('a manual attempt accepts the code and state the page shows', async () => {
+  // The provider's code page hands the user `<code>#<state>`; both halves travel in one string.
+  const flows = new OAuthFlowManager()
+  const attempt = await flows.start('claude', claudeFlow, { manual: true })
+  const state = new URL(attempt.authorizeUrl).searchParams.get('state')
+  assert.ok(state, 'the authorize URL carries a state')
+  attempt.manual(`the-authorization-code#${state}`)
+  assert.equal(await attempt.waitCode(), 'the-authorization-code')
+  attempt.cancel()
+})
+
+test('a manual attempt refuses a code carrying another attempt state', async () => {
+  const flows = new OAuthFlowManager()
+  const attempt = await flows.start('claude', claudeFlow, { manual: true })
+  assert.throws(() => attempt.manual('the-authorization-code#some-other-state'), /state mismatch/)
+  // Cancelling settles the attempt the refused paste left pending; the rejection is the point of
+  // the test above, so it is consumed here rather than escaping as unhandled activity.
+  void attempt.waitCode().catch(() => undefined)
+  attempt.cancel()
+})
+
+test('a manual attempt refuses a value missing either half', async () => {
+  const flows = new OAuthFlowManager()
+  const attempt = await flows.start('claude', claudeFlow, { manual: true })
+  assert.throws(() => attempt.manual('the-authorization-code#'), /missing its code or its state half/)
+  void attempt.waitCode().catch(() => undefined)
+  attempt.cancel()
+})

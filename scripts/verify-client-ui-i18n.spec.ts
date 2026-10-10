@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest'
-import { clientSourceRoot, findUiI18nViolations } from './verify-client-ui-i18n.ts'
+import {
+  clientSourceRoot, clientUiSources, findUiI18nViolations, forkPluginOf, scansForkPluginClientCopy,
+} from './verify-client-ui-i18n.ts'
 
 function messages(source: string): string[] {
   return findUiI18nViolations('packages/client/ui-example/src/client/View.tsx', source)
@@ -41,6 +43,33 @@ describe('Client UI i18n source check', () => {
     expect(clientSourceRoot('packages\\extensions\\sample\\src\\client\\View.tsx'))
       .toBe('packages/extensions/sample/src/client')
     expect(clientSourceRoot('packages/extensions/sample/src/server/index.ts')).toBeUndefined()
+  })
+
+  it('scans fork plugin Client copy outside the upstream subtree imports', () => {
+    expect(forkPluginOf('fork-plugins/dsh-plugin-subscriptions/src/client/SubscriptionsSection.tsx'))
+      .toBe('fork-plugins/dsh-plugin-subscriptions')
+    expect(forkPluginOf('fork-plugins\\dsh-context\\src\\client\\components\\nodes.tsx'))
+      .toBe('fork-plugins/dsh-context')
+    expect(forkPluginOf('packages/client/ui-example/src/client/View.tsx')).toBeUndefined()
+    expect(forkPluginOf('fork-plugins/dsh-plugin-subscriptions/src/providers/pool.ts')).toBeUndefined()
+
+    expect(scansForkPluginClientCopy('fork-plugins/dsh-plugin-subscriptions')).toBe(true)
+    expect(scansForkPluginClientCopy('fork-plugins/dsh-agent-teams')).toBe(false)
+    expect(scansForkPluginClientCopy('fork-plugins/dsh-context')).toBe(false)
+  })
+
+  it('discovers the fork plugin Client sources this repository owns', () => {
+    const files = clientUiSources()
+    expect(files.some(file => file.startsWith('fork-plugins/dsh-plugin-subscriptions/src/client/'))).toBe(true)
+    expect(files.some(file => file.startsWith('fork-plugins/dsh-context/'))).toBe(false)
+    expect(files.some(file => file.startsWith('fork-plugins/dsh-agent-teams/'))).toBe(false)
+  })
+
+  it('rejects hard-coded copy in a fork plugin Client source', () => {
+    expect(findUiI18nViolations(
+      'fork-plugins/dsh-plugin-subscriptions/src/client/View.tsx',
+      'export const View = () => <span aria-label="Overview">Hard-coded</span>',
+    ).map(row => row.text)).toEqual(['Overview', 'Hard-coded'])
   })
 
   it('accepts translated copy, dynamic values, structural attributes, and language tokens', () => {

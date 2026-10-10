@@ -4,7 +4,9 @@
  * Locale dictionaries are the only source files allowed to own translated
  * text. Presentation code receives copy through its typed `t` seat or through
  * an already-localized prop. This check covers JSX text and copy-bearing
- * attributes, plus the common data/helper forms that feed them.
+ * attributes, plus the common data/helper forms that feed them, across the
+ * workspace Client packages, the Web and Desktop apps, and the fork plugin
+ * subtrees it owns.
  */
 
 import { globSync, readFileSync } from 'node:fs'
@@ -13,6 +15,18 @@ import ts from 'typescript'
 
 const root = resolve(import.meta.dirname, '..')
 const MINIMUM_CLIENT_UI_SOURCES = 450
+
+/**
+ * Fork plugin subtrees this scan leaves out. Both are upstream `git subtree`
+ * imports with their own translation layers, and their remaining hard-coded
+ * Client copy is theirs to migrate; every other fork plugin's Client sources
+ * are scanned like a workspace package's, so a new fork plugin is covered
+ * without editing this list.
+ */
+const UPSTREAM_FORK_PLUGINS = new Set([
+  'fork-plugins/dsh-agent-teams',
+  'fork-plugins/dsh-context',
+])
 
 const COPY_ATTRIBUTES = new Set([
   'alt',
@@ -316,12 +330,55 @@ export function clientSourceRoot(file: string): string | undefined {
   return index < 0 ? undefined : normalized.slice(0, index + marker.length - 1)
 }
 
-function sourceFiles(): string[] {
+/**
+ * Fork plugin directory owning one Client source path.
+ * @param file - Repository-relative path using native or POSIX separators.
+ * @returns The `fork-plugins/<name>` prefix, or undefined outside those subtrees.
+ */
+export function forkPluginOf(file: string): string | undefined {
+  const clientRoot = clientSourceRoot(file)
+  const marker = '/src/client'
+  if (clientRoot === undefined || !clientRoot.startsWith('fork-plugins/')) return undefined
+  return clientRoot.slice(0, clientRoot.length - marker.length)
+}
+
+/**
+ * Whether this repository scans one fork plugin's Client copy.
+ * @param plugin - `fork-plugins/<name>` directory.
+ * @returns false for the upstream subtrees listed in {@link UPSTREAM_FORK_PLUGINS}.
+ */
+export function scansForkPluginClientCopy(plugin: string): boolean {
+  return !UPSTREAM_FORK_PLUGINS.has(plugin)
+}
+
+function scanForkPluginSources(): string[] {
+  return [...new Set(
+    globSync('fork-plugins/*/src/client/**/*.tsx', { cwd: root })
+      .map(file => file.replaceAll('\\', '/'))
+      .filter(file => scansForkPluginClientCopy(forkPluginOf(file) ?? ''))
+      .map(clientSourceRoot)
+      .filter((clientRoot): clientRoot is string => clientRoot !== undefined)
+      .flatMap(clientRoot => globSync(`${clientRoot}/**/*.{ts,tsx}`, { cwd: root })
+        .map(file => file.replaceAll('\\', '/'))),
+  )]
+}
+
+/**
+ * Every Client source file this check owns.
+ * @returns Repository-relative paths with POSIX separators, sorted.
+ */
+export function clientUiSources(): string[] {
   const clientComponentRoots = new Set(
     globSync('packages/*/*/src/client/**/*.tsx', { cwd: root })
       .map(clientSourceRoot)
       .filter((clientRoot): clientRoot is string => clientRoot !== undefined),
   )
+  const forkPluginSources = scanForkPluginSources()
+  if (forkPluginSources.length === 0) {
+    throw new Error(
+      'verify-client-ui-i18n: no fork plugin Client source discovered; the fork plugin scan covered nothing.',
+    )
+  }
   return [...new Set([
     ...globSync('packages/client/*/src/**/*.tsx', { cwd: root }),
     ...globSync('packages/client/ui-*/src/**/*.{ts,tsx}', { cwd: root }),
@@ -330,6 +387,7 @@ function sourceFiles(): string[] {
     ...globSync('apps/web/src/**/*.{ts,tsx}', { cwd: root }),
     ...globSync('apps/desktop/src/{main,update-coordinator}.{ts,tsx}', { cwd: root }),
     ...globSync('apps/desktop/renderer/*.js', { cwd: root }),
+    ...forkPluginSources,
   ])]
     .map(file => file.replaceAll('\\', '/'))
     .filter(file => !file.endsWith('.d.ts'))
@@ -337,7 +395,7 @@ function sourceFiles(): string[] {
 }
 
 function main(): void {
-  const files = sourceFiles()
+  const files = clientUiSources()
   if (files.length < MINIMUM_CLIENT_UI_SOURCES) {
     throw new Error(
       `verify-client-ui-i18n: discovery narrowed to ${files.length} source file(s); expected at least ${MINIMUM_CLIENT_UI_SOURCES}.`,

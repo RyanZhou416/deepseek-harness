@@ -9,6 +9,7 @@ import type { CSSProperties } from 'react'
 import { createPortal } from 'react-dom'
 import type { ConnectionHandle } from '@deepseek-ai/dsh-api-remotes/client'
 import { callSubscriptionsAuth } from './subscriptions-rpc.js'
+import { formatDateTime } from './format.js'
 import type { SubscriptionsKey } from './locales.js'
 
 type Translate = (key: SubscriptionsKey, params?: Record<string, unknown>) => string
@@ -197,7 +198,7 @@ export function ResetCredits({ rpc, t, accountKey, accountLabel, availableCount,
                 : t('resetCreditsConfirmUnknown', { account: accountLabel })}
             </p>
             {pending.credit.expiresAt !== undefined && (
-              <p style={styles.hint}>{t('resetCreditsExpires', { date: formatWhen(pending.credit.expiresAt) })}</p>
+              <p style={styles.hint}>{t('resetCreditsExpires', { date: formatWhen(pending.credit.expiresAt, t) })}</p>
             )}
             {consumeError !== undefined && <p style={styles.error}>{consumeError}</p>}
             <div style={styles.dialogActions}>
@@ -248,15 +249,16 @@ function statusLabel(status: ResetCreditView['status'], t: Translate): string {
 
 function creditMeta(credit: ResetCreditView, t: Translate): string {
   const parts: string[] = []
-  if (credit.expiresAt !== undefined) parts.push(t('resetCreditsExpires', { date: formatWhen(credit.expiresAt) }))
+  if (credit.expiresAt !== undefined) parts.push(t('resetCreditsExpires', { date: formatWhen(credit.expiresAt, t) }))
   if (credit.description !== undefined && credit.description !== credit.title) parts.push(credit.description)
   return parts.join(' · ')
 }
 
-function formatWhen(value: string): string {
+/** Disclosed expiry through the dictionary's date template; an unparseable value stays verbatim. */
+function formatWhen(value: string, t: Translate): string {
   const parsed = Date.parse(value)
   if (Number.isNaN(parsed)) return value
-  return new Date(parsed).toLocaleString()
+  return formatDateTime(t, parsed)
 }
 
 const button: CSSProperties = {

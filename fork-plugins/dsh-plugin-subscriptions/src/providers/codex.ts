@@ -243,6 +243,8 @@ function codexSession(tokens: CodexTokenResponse, fallback?: CodexSession): Code
  */
 export async function exchangeCodexCode(code: string, verifier: string, redirectUri: string): Promise<CodexSession> {
   const response = await proxiedFetch(CODEX_TOKEN_URL, {
+    // A redirect would replay the authorization code to another origin.
+    redirect: 'error',
     method: 'POST',
     headers: { 'content-type': 'application/x-www-form-urlencoded' },
     body: new URLSearchParams({
@@ -264,6 +266,8 @@ export async function exchangeCodexCode(code: string, verifier: string, redirect
  */
 export async function refreshCodex(session: CodexSession): Promise<CodexSession> {
   const response = await proxiedFetch(CODEX_TOKEN_URL, {
+    // A redirect would replay the refresh token to another origin.
+    redirect: 'error',
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({

@@ -18,6 +18,7 @@ import {
 import type { ReasoningReplayItem, ResponsesStreamEvent } from '../src/translate/responses.js'
 import {
   AnthropicStreamTranslator,
+  MISSING_TOOL_RESULT_TEXT,
   streamAnthropic,
   toAnthropicMessages,
   toAnthropicSystem,
@@ -592,6 +593,68 @@ test('toAnthropicMessages narrates a tool result whose tool_use was narrated awa
     { type: 'text', text: '[tool call bash: {}]' },
   ])
   assert.ok(!JSON.stringify(messages).includes('tool_result'))
+})
+
+test('toAnthropicMessages answers a tool_use whose result is missing', () => {
+  // A call whose result never reached the log (a crash whose tail repair ran
+  // before the closed step) still has to be answered: the wire contract
+  // requires the result in the message following the call. The genuine client
+  // synthesizes it with its own wording and error flag.
+  const history = [
+    message('user', [{ type: 'text', text: 'go' }]),
+    message('assistant', [toolCall('c1', 'bash', '{}')]),
+    message('user', [{ type: 'text', text: 'still here' }]),
+  ]
+  const messages = toAnthropicMessages(history)
+  assert.deepEqual(messages[2].content, [
+    { type: 'tool_result', tool_use_id: 'c1', content: MISSING_TOOL_RESULT_TEXT, is_error: true },
+    { type: 'text', text: 'still here' },
+  ])
+  assert.equal(MISSING_TOOL_RESULT_TEXT, '[Tool result missing due to internal error]', 'the client wording verbatim')
+  assert.deepEqual(history[2].content, [{ type: 'text', text: 'still here' }], 'the durable history is never mutated')
+})
+
+test('toAnthropicMessages appends the synthesized result when no message follows the call', () => {
+  const messages = toAnthropicMessages([
+    message('assistant', [
+      toolCall('c1', 'bash', '{}'),
+      toolCall('c2', 'bash', '{}'),
+    ]),
+  ])
+  assert.deepEqual(messages[1], {
+    role: 'user',
+    content: [
+      { type: 'tool_result', tool_use_id: 'c1', content: MISSING_TOOL_RESULT_TEXT, is_error: true },
+      { type: 'tool_result', tool_use_id: 'c2', content: MISSING_TOOL_RESULT_TEXT, is_error: true },
+    ],
+  })
+})
+
+test('toAnthropicMessages invents no result for a call answered later in the request', () => {
+  // Pairing is request-wide, as in `reconcileResponsesToolCalls`: a call whose
+  // result is present anywhere needs no placeholder, even two turns later.
+  const messages = toAnthropicMessages([
+    message('assistant', [toolCall('c1', 'bash', '{}')]),
+    message('user', [{ type: 'text', text: 'note' }]),
+    message('assistant', [{ type: 'text', text: 'more' }]),
+    message('user', [toolResult('c1', 'late')]),
+  ])
+  assert.equal(JSON.stringify(messages).includes(MISSING_TOOL_RESULT_TEXT), false)
+  assert.equal(messages.length, 4)
+})
+
+test('toAnthropicMessages answers only the calls an existing result leaves open', () => {
+  const messages = toAnthropicMessages([
+    message('assistant', [
+      toolCall('c1', 'bash', '{}'),
+      toolCall('c2', 'bash', '{}'),
+    ]),
+    message('user', [toolResult('c1', 'ok')]),
+  ])
+  assert.deepEqual(messages[1].content, [
+    { type: 'tool_result', tool_use_id: 'c2', content: MISSING_TOOL_RESULT_TEXT, is_error: true },
+    { type: 'tool_result', tool_use_id: 'c1', content: 'ok' },
+  ])
 })
 
 test('toAnthropicMessages: a system reminder merged with tool results stays behind the leading run', () => {

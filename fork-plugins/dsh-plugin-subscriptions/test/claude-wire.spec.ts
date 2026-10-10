@@ -1,9 +1,9 @@
 /**
  * Wire-contract tests for the pinned Claude Code request builder: the profile
  * pin, the mapping from resolved harness requests, the runtime identity, the
- * per-account/per-session conversation chain, the oversize → offload mapping,
- * and the wire-error mapping. No network; the builder is pure and the fetch
- * boundary is not exercised.
+ * per-account/per-session conversation chain, the per-account Files API upload
+ * cache, the oversize → offload mapping, and the wire-error mapping. No
+ * network beyond an injected fetch; the builder is pure.
  */
 
 import { test } from 'node:test'
@@ -15,6 +15,7 @@ import {
 import { IMAGE_OFFLOAD_REQUIRED_CODE, LlmError, ToolCallId } from '@deepseek-ai/dsh-llm'
 import type { GenerateOptions } from '@deepseek-ai/dsh-llm'
 import {
+  boundedTwoLevelMap,
   buildClaudeWireRequest,
   CLAUDE_USER_AGENT,
   claudeWireSessionId,
@@ -23,6 +24,15 @@ import {
   CLAUDE_CLIENT_RUNTIME_VERSION,
 } from '../src/providers/claude-wire.js'
 import { oversizeWireError } from '../src/providers/claude-images.js'
+import {
+  bindClaudeFileIds,
+  CLAUDE_FILE_ID_LIMIT,
+  CLAUDE_MAX_BASE64_IMAGE_CHARS,
+  clearClaudeFileIds,
+  rememberClaudeFileId,
+  uploadedClaudeFileId,
+} from '../src/providers/claude.js'
+import type { FetchFn } from '../src/providers/common.js'
 import type { ClaudeSession } from '../src/auth/store.js'
 import type { TranslatableMessage } from '../src/translate/resolved.js'
 
@@ -433,4 +443,100 @@ test('the identity line is this route own and never names the harness', async ()
   const configured = await build('CONFIGURED-ROUTE-IDENTITY')
   assert.match(configured.body, /CONFIGURED-ROUTE-IDENTITY/)
   assert.equal(configured.body.includes('DeepSeek Harness'), false)
+})
+
+/** The Files API id one oversized image in a request was bound to. */
+function imageFileId(messages: readonly TranslatableMessage[]): string | undefined {
+  for (const block of messages[0]?.content ?? []) {
+    if (block.type === 'image' && 'dataBase64' in block) return block.fileId
+  }
+  return undefined
+}
+
+/** One request message carrying an image over the inline vision limit. */
+function oversizedImage(): TranslatableMessage[] {
+  return [{
+    role: 'user',
+    content: [{ type: 'image', mediaType: 'image/png', dataBase64: 'A'.repeat(CLAUDE_MAX_BASE64_IMAGE_CHARS + 1) }],
+  }]
+}
+
+test('an uploaded file id is cached under the account that uploaded it', async () => {
+  clearClaudeFileIds()
+  const tokens: string[] = []
+  const fetchFn = ((_input: RequestInfo | URL, init?: RequestInit) => {
+    tokens.push(String((init?.headers as Record<string, string>).authorization))
+    return Promise.resolve(Response.json({ id: `file_${tokens.length}`, type: 'file' }))
+  }) as FetchFn
+  const messages = oversizedImage()
+
+  const onA = await bindClaudeFileIds(messages, 'acct-a', 'token-a', fetchFn)
+  const againOnA = await bindClaudeFileIds(messages, 'acct-a', 'token-a', fetchFn)
+  assert.equal(imageFileId(onA), 'file_1')
+  assert.equal(imageFileId(againOnA), 'file_1', 'the same account reuses its own upload')
+
+  // A pooled failover must upload its own copy: a file id belongs to the token
+  // that created it, so another account cannot present it.
+  const onB = await bindClaudeFileIds(messages, 'acct-b', 'token-b', fetchFn)
+  assert.equal(imageFileId(onB), 'file_2')
+  assert.deepEqual(tokens, ['Bearer token-a', 'Bearer token-b'])
+
+  // An auth change drops only that account's entries.
+  clearClaudeFileIds('acct-a')
+  assert.equal(imageFileId(await bindClaudeFileIds(messages, 'acct-a', 'token-a', fetchFn)), 'file_3')
+  assert.equal(imageFileId(await bindClaudeFileIds(messages, 'acct-b', 'token-b', fetchFn)), 'file_2')
+  assert.deepEqual(tokens, ['Bearer token-a', 'Bearer token-b', 'Bearer token-a'])
+})
+
+test('the uploaded file id table is bounded and evicts the oldest entry', () => {
+  clearClaudeFileIds()
+  for (let index = 0; index < CLAUDE_FILE_ID_LIMIT; index += 1) {
+    rememberClaudeFileId('acct-bound', `hash-${index}`, `file-${index}`)
+  }
+  assert.equal(uploadedClaudeFileId('acct-bound', 'hash-0'), 'file-0')
+
+  rememberClaudeFileId('acct-bound', `hash-${CLAUDE_FILE_ID_LIMIT}`, 'file-last')
+  assert.equal(uploadedClaudeFileId('acct-bound', 'hash-0'), undefined, 'the oldest entry makes room')
+  assert.equal(uploadedClaudeFileId('acct-bound', `hash-${CLAUDE_FILE_ID_LIMIT}`), 'file-last')
+  assert.equal(uploadedClaudeFileId('acct-bound', 'hash-1'), 'file-1', 'the rest of the table survives')
+
+  // Re-remembering a known entry replaces its id without growing the table.
+  rememberClaudeFileId('acct-bound', 'hash-1', 'file-1b')
+  assert.equal(uploadedClaudeFileId('acct-bound', 'hash-1'), 'file-1b')
+  assert.equal(uploadedClaudeFileId('acct-bound', 'hash-2'), 'file-2')
+
+  clearClaudeFileIds()
+  assert.equal(uploadedClaudeFileId('acct-bound', 'hash-1'), undefined)
+})
+
+test('the bounded two-level table evicts the oldest leaf across both levels', () => {
+  const table = boundedTwoLevelMap<string>(3)
+  table.set('a', '1', 'a1')
+  table.set('a', '2', 'a2')
+  table.set('b', '1', 'b1')
+  assert.equal(table.get('a', '1'), 'a1')
+  assert.equal(table.isEmpty('a'), false)
+  assert.equal(table.isEmpty('c'), true, 'an absent entry holds no leaf')
+
+  // A new leaf at the limit evicts the oldest leaf: the first leaf of the
+  // first entry that still has one.
+  table.set('b', '2', 'b2')
+  assert.equal(table.get('a', '1'), undefined)
+  assert.equal(table.get('a', '2'), 'a2', 'the rest of the entry survives')
+  assert.equal(table.get('b', '2'), 'b2')
+
+  // Replacing an existing leaf is not growth, so nothing is evicted.
+  table.set('a', '2', 'a2b')
+  assert.equal(table.get('a', '2'), 'a2b')
+  assert.equal(table.get('b', '1'), 'b1')
+
+  // The last leaf of an entry takes the entry with it.
+  table.deleteOuter('a')
+  assert.equal(table.isEmpty('a'), true)
+  table.set('c', '1', 'c1')
+  assert.equal(table.get('c', '1'), 'c1', 'the freed slot is usable')
+
+  table.clear()
+  assert.equal(table.get('c', '1'), undefined)
+  assert.equal(table.isEmpty('c'), true)
 })

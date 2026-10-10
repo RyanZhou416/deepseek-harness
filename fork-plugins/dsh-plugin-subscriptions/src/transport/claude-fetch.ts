@@ -8,15 +8,18 @@
  * never be sent under the bridge's anonymous defaults.
  *
  * The bridge is on by default. `DSH_SUBSCRIPTIONS_BRIDGE=off` restores the previous
- * path explicitly. A bridge that cannot start, a child that has exited, or a proxy
- * the bridge cannot honour is a hard error naming that switch, never a silent
- * fallback: falling back would restore exactly the transport this exists to replace.
+ * path explicitly. A bridge that cannot start, a child that has exited, a proxy
+ * the bridge cannot honour, or a host that requires a Claude route this child cannot
+ * reach is a hard error naming that switch, never a silent fallback: falling back
+ * would restore exactly the transport this exists to replace, and a host-mandated
+ * route bypassed in silence is the failure this refusal exists to prevent.
  */
 
 import { fileURLToPath } from 'node:url'
 import { proxiedFetch, proxyAppliesTo } from '../http.js'
 import { BunBridge, spawnBunChild } from './bridge.js'
 import { resolveBunRuntime } from './bun-runtime.js'
+import { describeHostClaudeRoute, hostClaudeRoute } from './host-egress.js'
 
 /** Environment variable that turns the bridge off. */
 export const BRIDGE_SWITCH_ENV = 'DSH_SUBSCRIPTIONS_BRIDGE'
@@ -98,6 +101,15 @@ export async function claudeApiFetch(
   const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url
   if (!isClaudeMessagesRequest(url) || !bridgeEnabled()) {
     return proxiedFetch(input, init)
+  }
+  // The host's mandatory Claude route is a process-wide decision this child cannot be
+  // given: it runs its own runtime and the plugin's spawn allowlist carries no such
+  // variable. Refuse rather than send Messages outside the route the host required.
+  const hostRoute = hostClaudeRoute()
+  if (hostRoute !== undefined) {
+    throw new BridgeUnavailableError(
+      `the host requires Claude traffic to use ${describeHostClaudeRoute(hostRoute)} and this transport cannot route through it`,
+    )
   }
   if (await proxyAppliesTo(CLAUDE_MESSAGES_HOST)) {
     throw new BridgeUnavailableError(

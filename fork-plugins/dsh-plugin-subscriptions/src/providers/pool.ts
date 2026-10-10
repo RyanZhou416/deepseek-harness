@@ -22,6 +22,7 @@ import type {
 } from '@deepseek-ai/dsh-llm'
 import type { ProviderId } from '../auth/store.js'
 import type { AccountAwareAdapter } from './accounts.js'
+import type { UsageWindow } from './common.js'
 import type { ConcretePoolMember, PoolDefinition, PoolMemberRef } from './pool-family.js'
 import { poolKey } from './pool-family.js'
 import { accountKey, classifyPoolFailure, memberKey, PoolHealthRegistry } from './pool-health.js'
@@ -56,11 +57,34 @@ export interface PoolAdapterOptions {
 }
 
 /**
+ * Whether a provider's routes reserve a usage floor. Only Claude does, so only
+ * Claude's members need a usage read to answer {@link pastClaudeFloor}.
+ * @param provider - the provider route.
+ * @returns true when the provider's floors apply.
+ */
+function carriesUsageFloor(provider: ProviderId): boolean {
+  return provider === 'claude'
+}
+
+/**
+ * The windows an availability floor is decided from: the current poll's, or the
+ * ones a degraded poll carried forward from the last successful one.
+ * @param quota - the member's cached quota, when usage is known at all.
+ * @returns the applicable windows, empty when there are none.
+ */
+function floorWindows(quota: MemberQuota | undefined): readonly UsageWindow[] {
+  return quota?.windows ?? quota?.floorWindows ?? []
+}
+
+/**
  * Whether a Claude account has reached the usage floor its route reserves.
  *
  * Left out of selection rather than ranked last: a member ranked last is still chosen once
  * every other member is cooling down, which is exactly the account this reserve exists to keep
  * a turn away from. Only Claude carries floors; every other route is unaffected.
+ *
+ * A poll that degraded to a failure keeps the last real windows for this test, so an endpoint
+ * that is briefly unreachable cannot make an already-spent allowance selectable.
  *
  * @param member - the candidate member.
  * @param quota - its cached quota, when usage is known.
@@ -72,10 +96,25 @@ function pastClaudeFloor(
   quota: MemberQuota | undefined,
   scheduling: PoolSchedulingPolicy,
 ): boolean {
-  if (member.provider !== 'claude' || quota?.windows === undefined) return false
-  return quota.windows.some(window =>
+  if (!carriesUsageFloor(member.provider)) return false
+  return floorWindows(quota).some(window =>
     (window.kind === 'session' && window.usedPercent >= scheduling.claudeSessionPercentFloor)
     || (window.kind === 'weekly' && window.usedPercent >= scheduling.claudeWeeklyPercentFloor))
+}
+
+/**
+ * Epoch ms of the earliest window reset in `windows` that has not already elapsed.
+ * @param windows - the windows excluded members are waiting on.
+ * @param now - the current epoch milliseconds.
+ * @returns the earliest future reset, or undefined when none is disclosed.
+ */
+function earliestReset(windows: readonly UsageWindow[], now: number): number | undefined {
+  let earliest: number | undefined
+  for (const window of windows) {
+    if (window.resetsAt === undefined || window.resetsAt <= now) continue
+    if (earliest === undefined || window.resetsAt < earliest) earliest = window.resetsAt
+  }
+  return earliest
 }
 
 /** Bound on sticky-session memory; oldest entries evict past it. */
@@ -297,6 +336,11 @@ export class PoolAdapter extends LlmAdapter {
     const failures = new Map<ConcretePoolMember, unknown>()
     /** Cooldown reasons recorded during this selection, for the terminal error's code. */
     const reasons: string[] = []
+    // A member the floors hold back leaves no health record, so its windows are the only
+    // statement of when it becomes selectable again. The terminal error reports the earliest.
+    const floorBlocked = quotaMembers.filter(member =>
+      pastClaudeFloor(member, quotas.get(member), this.options.scheduling))
+    const excludedWindows = floorBlocked.flatMap(member => floorWindows(quotas.get(member)))
     while (remaining.length > 0) {
       options.signal?.throwIfAborted()
       // Ranking and reservation are synchronous after shared quota reads settle.
@@ -358,7 +402,26 @@ export class PoolAdapter extends LlmAdapter {
         }
       }
     }
-    throw this.exhausted(options.model, members, failures, reasons)
+    throw this.exhausted(options.model, members, failures, reasons, excludedWindows)
+  }
+
+  /**
+   * Whether one account may serve one model under the pool's availability rule:
+   * neither the member nor its whole account is cooling down, and a Claude
+   * account has not reached a usage floor. The registered account route consults
+   * this for a model the pool does not own, so that route cannot serve an
+   * account the pool itself would have held back.
+   * @param provider - the provider route.
+   * @param model - the catalog model id.
+   * @param account - the resolved account key.
+   * @returns true when the account may serve now.
+   */
+  async accountAvailable(provider: ProviderId, model: string, account: string): Promise<boolean> {
+    if (!this.options.health.isMemberAvailable(provider, account, model)) return false
+    // Only Claude carries floors, so only Claude needs a usage read here.
+    if (!carriesUsageFloor(provider)) return true
+    const member: ConcretePoolMember = { provider, account, model }
+    return !pastClaudeFloor(member, await this.options.usage.quotaFor(member), this.options.scheduling)
   }
 
   /**
@@ -387,14 +450,19 @@ export class PoolAdapter extends LlmAdapter {
         ? usable
         : [stickyMember, ...usable.filter(member => member !== stickyMember)]
     }
-    const scored = usable.filter(member => quotas.get(member)?.available === true)
-    const quotaFull = usable.filter(member => quotas.get(member)?.available === false)
+    // Usage was read before selection, so a member whose cooldown expired since
+    // has no entry. Unknown usage is not evidence of a spent allowance: leave
+    // such a member in the primary band rather than in neither.
+    const quotaOf = (member: ConcretePoolMember): MemberQuota =>
+      quotas.get(member) ?? { available: true, urgency: 0, fetchedAt: 0 }
+    const scored = usable.filter(member => quotaOf(member).available)
+    const quotaFull = usable.filter(member => !quotaOf(member).available)
     const now = Date.now()
     const scores = new Map<ConcretePoolMember, number>()
     for (const band of [scored, quotaFull]) {
-      const maxUrgency = band.reduce((max, member) => Math.max(max, quotas.get(member)!.urgency), 0)
+      const maxUrgency = band.reduce((max, member) => Math.max(max, quotaOf(member).urgency), 0)
       for (const member of band) {
-        scores.set(member, poolSchedulingScore(member, quotas.get(member)!, maxUrgency,
+        scores.set(member, poolSchedulingScore(member, quotaOf(member), maxUrgency,
           this.active.get(accountKey(member.provider, member.account)) ?? 0, this.options.scheduling, now))
       }
     }
@@ -440,14 +508,23 @@ export class PoolAdapter extends LlmAdapter {
   }
 
   /**
-   * A still-available member's failure keeps its own retry facts. Only a fully
-   * cooling pool carries a recovery hint from this pool's health records.
+   * A still-available member's failure keeps its own retry facts. A fully
+   * unavailable pool reports why it is unavailable and when it may serve again:
+   * the earliest health recovery, or the earliest reset among the windows that
+   * held a member back.
+   * @param model - the pool model being reported.
+   * @param pool - every member of that pool.
+   * @param failures - the failures this selection saw, by member.
+   * @param reasons - the cooldown reasons this selection recorded.
+   * @param excludedWindows - windows of members the availability floors held back.
+   * @returns the terminal error for the exhausted pool.
    */
   private exhausted(
     model: string,
     pool: ConcretePoolMember[],
     failures: ReadonlyMap<ConcretePoolMember, unknown>,
     reasons: readonly string[],
+    excludedWindows: readonly UsageWindow[],
   ): LlmError {
     for (const [member, error] of failures) {
       if (error instanceof LlmError && this.options.health.isMemberAvailable(member.provider, member.account, member.model)) return error
@@ -458,12 +535,24 @@ export class PoolAdapter extends LlmAdapter {
       keys.add(memberKey(member.provider, member.account, member.model))
       keys.add(accountKey(member.provider, member.account))
     }
-    // The terminal code names why nothing served. Every member failing for the same reason
-    // reports that reason; a mixed set reports the cooling-down state they share.
-    const [onlyReason, ...others] = [...new Set(reasons)]
+    // The terminal code names why nothing served. Every member carries one reason — the failure
+    // it just reported, or the health record that parked it before this selection started (a pool
+    // parked by an auth failure says so rather than reporting a rate limit). A mixed set reports
+    // the cooling-down state they share.
+    const codes = new Set<string>(reasons)
+    for (const member of pool) {
+      if (this.options.health.isMemberAvailable(member.provider, member.account, member.model)) continue
+      const cooling = this.options.health.accountCooling(member.provider, member.account)
+      if (cooling !== undefined) codes.add(cooling.reason)
+    }
+    const [onlyReason, ...others] = [...codes]
     const code = onlyReason !== undefined && others.length === 0 ? onlyReason : 'RATE_LIMIT'
-    const recovery = this.options.health.earliestRecovery(keys)
-    const retryAfterMs = recovery === undefined ? undefined : Math.max(recovery - Date.now(), 1)
+    const now = Date.now()
+    const recovery = this.options.health.earliestRecovery(keys, now)
+    const reset = earliestReset(excludedWindows, now)
+    const next = recovery === undefined ? reset
+      : reset === undefined ? recovery : Math.min(recovery, reset)
+    const retryAfterMs = next === undefined ? undefined : Math.max(next - now, 1)
     const detail = cause instanceof Error && cause.message.length > 0 ? cause.message : undefined
     return new LlmError(
       detail === undefined

@@ -56,6 +56,12 @@ const SYSTEM_REMINDER_OPEN = '<system-reminder>'
 export const SYSTEM_REMINDER_CLOSE = '</system-reminder>'
 
 /**
+ * The genuine client's own text for the `tool_result` it synthesizes when a
+ * `tool_use` in the request has no result to answer it.
+ */
+export const MISSING_TOOL_RESULT_TEXT = '[Tool result missing due to internal error]'
+
+/**
  * One Anthropic request message. The Claude Code identity and billing blocks
  * are emitted by the wire builder, never here.
  */
@@ -276,7 +282,10 @@ function serverReplayBlock(entry: ClaudeServerReplay): WireBlock {
  * an unresolved ImageBlock is skipped because its bytes are unreachable here.
  * A tool result whose `tool_use` was narrated away (a settled subagent's
  * closing message) is narrated the same way, because the wire validator
- * rejects any `tool_result` whose call id is not in the request.
+ * rejects any `tool_result` whose call id is not in the request; conversely a
+ * `tool_use` with no result is answered by the synthesized error result the
+ * genuine client adds ({@link MISSING_TOOL_RESULT_TEXT}). Both repairs touch
+ * only the assembled request, never the history.
  * @param messages - ordered conversation messages with resolved images.
  * @param model - the model this request targets. Thinking signatures are
  *   model-bound, so a signature from another model is not replayed.
@@ -411,6 +420,7 @@ export function toAnthropicMessages(
       out.push({ role, content: blocks })
     }
   }
+  synthesizeMissingToolResults(out)
   for (const message of out) {
     if (message.role === 'user' && Array.isArray(message.content)) {
       leadWithToolResults(message)
@@ -418,6 +428,53 @@ export function toAnthropicMessages(
   }
   narrateOrphanToolResults(out)
   return out
+}
+
+/**
+ * Answer every `tool_use` the assembled request carries with a `tool_result`.
+ *
+ * The wire contract requires the result of a call in the message that follows
+ * it, and a history can keep a call without one — a crash whose tail repair ran
+ * before the closed step, a fork seed. The genuine client answers such a call
+ * with a fixed error result; this adds it either ahead of the content of the
+ * message that follows the call, or as the user message that follows it. A call
+ * whose result is present anywhere in the request is left alone, as in
+ * `reconcileResponsesToolCalls`. The repair is local to the assembled request:
+ * the durable history is never written.
+ * @param messages - the assembled messages, repaired in place.
+ */
+function synthesizeMissingToolResults(messages: AnthropicMessage[]): void {
+  const calls = new Set<string>()
+  const answered = new Set<string>()
+  for (const message of messages) {
+    if (!Array.isArray(message.content)) continue
+    for (const block of message.content) {
+      if (block.type === 'tool_use') calls.add(String(block.id))
+      if (block.type === 'tool_result') answered.add(String(block.tool_use_id))
+    }
+  }
+  const missing = new Set([...calls].filter(id => !answered.has(id)))
+  if (missing.size === 0) return
+  for (const [index, message] of messages.entries()) {
+    if (message.role !== 'assistant' || !Array.isArray(message.content)) continue
+    const repair: WireBlock[] = []
+    for (const block of message.content) {
+      if (block.type !== 'tool_use' || !missing.delete(String(block.id))) continue
+      repair.push({
+        type: 'tool_result',
+        tool_use_id: String(block.id),
+        content: MISSING_TOOL_RESULT_TEXT,
+        is_error: true,
+      })
+    }
+    if (repair.length === 0) continue
+    const next = messages[index + 1]
+    if (next?.role === 'user' && Array.isArray(next.content)) {
+      next.content = [...repair, ...next.content]
+      continue
+    }
+    messages.splice(index + 1, 0, { role: 'user', content: repair })
+  }
 }
 
 /** Narrate tool results whose `tool_use` block did not make it into the request. */

@@ -9,8 +9,11 @@ import { AccountPreferencesAdapter, accountModelId, parseAccountModelId, account
 import { ProviderSettingsStore, validatePreferences } from '../src/provider-settings.js'
 import { PoolAdapter } from '../src/providers/pool.js'
 import { resolvePoolScheduling } from '../src/providers/pool-scheduling.js'
-import { PoolHealthRegistry } from '../src/providers/pool-health.js'
+import { accountKey, PoolHealthRegistry } from '../src/providers/pool-health.js'
 import { PoolUsageTracker } from '../src/providers/pool-usage.js'
+import type { AccountAwareAdapter } from '../src/providers/accounts.js'
+import type { ProviderUsage } from '../src/providers/common.js'
+import type { ProviderId } from '../src/auth/store.js'
 
 class Raw extends LlmAdapter {
   calls: string[] = []
@@ -33,7 +36,7 @@ test('registered account routes preserve the provider retry budget and backoff',
   const seen: string[] = []
   raw.providerRetryPolicy = provider => { seen.push(provider); return expected }
   const route = new AccountPreferencesAdapter({ provider: 'codex', adapter: raw,
-    settings: new ProviderSettingsStore(join(dir, 'settings.json')), accounts: async () => [], pool: () => undefined })
+    settings: new ProviderSettingsStore(join(dir, 'settings.json')), accounts: async () => [], pool: () => undefined, onWarn: () => {} })
   assert.deepEqual(route.providerRetryPolicy('codex'), expected)
   assert.deepEqual(seen, ['codex'])
 })
@@ -59,7 +62,7 @@ test('independent entries use stable IDs, raw account capabilities and no defaul
     const settings = new ProviderSettingsStore(join(dir, 'settings.json'))
     const raw = new Raw()
     let accounts = [{ key: 'a:/账户', label: 'Original' }, { key: 'b', label: 'Other' }]
-    const route = new AccountPreferencesAdapter({ provider: 'codex', adapter: raw, settings, accounts: async () => accounts, pool: () => undefined })
+    const route = new AccountPreferencesAdapter({ provider: 'codex', adapter: raw, settings, accounts: async () => accounts, pool: () => undefined, onWarn: () => {} })
     const id = accountModelId('a:/账户', 'm:/模型')
     assert.deepEqual(parseAccountModelId(id), { account: 'a:/账户', model: 'm:/模型' })
     await settings.set('codex', { accounts: { 'a:/账户': { alias: 'Work', independentEntry: true, poolEnabled: false, poolModels: [] } } })
@@ -92,7 +95,7 @@ test('singleton and explicit families/tiers enforce account and model exclusion 
     const raw = new Raw()
     let pool: PoolAdapter | undefined
     let accounts = [{ key: 'a', label: 'A' }]
-    const route = new AccountPreferencesAdapter({ provider: 'codex', adapter: raw, settings, accounts: async () => accounts, pool: () => pool })
+    const route = new AccountPreferencesAdapter({ provider: 'codex', adapter: raw, settings, accounts: async () => accounts, pool: () => pool, onWarn: () => {} })
     await settings.set('codex', { accounts: { a: { poolModels: [] } } })
     await assert.rejects(consume(route, 'm:/模型'), /No eligible/)
     pool = new PoolAdapter({ scheduling: resolvePoolScheduling(), adapters: { codex: route.poolMember() }, health: new PoolHealthRegistry(), usage: new PoolUsageTracker(() => undefined), strategy: 'priority', switchMargin: 2, defaultAccount: async () => 'a', families: async () => new Map([['codex/m:/模型', { members: [{ provider: 'codex', account: 'a', model: 'm:/模型' }] }]]), tiers: { tier: [{ provider: 'codex', model: 'm:/模型' }] }, onWarn: () => {} })
@@ -126,6 +129,57 @@ test('the registered route reports the wrapped adapter\'s display identity', () 
     settings: new ProviderSettingsStore(),
     accounts: async () => [],
     pool: () => undefined,
+    onWarn: () => {},
   })
   assert.deepEqual(adapter.providerInfo('claude'), { id: 'claude', name: 'Claude' })
+})
+
+/**
+ * A registered route whose pool owns no entry at all (the shape of
+ * `pool.autoAccounts: false` with no configured families or tiers), so every
+ * request for a catalog model takes the non-pool fallback. The pool is built
+ * over the route's own member seam, as the plugin wires it.
+ */
+function unownedPool(
+  provider: ProviderId,
+  usage: (provider: ProviderId, account: string) => (() => Promise<ProviderUsage>) | undefined,
+) {
+  const raw = new Raw()
+  const health = new PoolHealthRegistry()
+  const warnings: string[] = []
+  let pool: PoolAdapter | undefined
+  const route = new AccountPreferencesAdapter({
+    provider,
+    adapter: raw,
+    settings: new ProviderSettingsStore(),
+    accounts: async () => [{ key: 'a', label: 'A' }, { key: 'b', label: 'B' }],
+    pool: () => pool,
+    onWarn: message => { warnings.push(message) },
+  })
+  const adapters: Partial<Record<ProviderId, AccountAwareAdapter>> = { [provider]: route.poolMember() }
+  pool = new PoolAdapter({ scheduling: resolvePoolScheduling(), adapters, health,
+    usage: new PoolUsageTracker(usage), strategy: 'priority', switchMargin: 2,
+    defaultAccount: async () => 'a', families: async () => new Map(), tiers: {}, onWarn: () => {} })
+  return { route, raw, health, warnings }
+}
+
+test('an unowned model still refuses the account the pool would have held back', async () => {
+  const { route, raw, health, warnings } = unownedPool('codex', () => undefined)
+  health.markUnavailable(accountKey('codex', 'a'), 60_000, 'RATE_LIMIT')
+  await consume(route, 'm:/模型')
+  assert.deepEqual(raw.calls, ['stream:b:m:/模型'])
+  assert.equal(warnings.length, 1)
+  assert.ok(warnings[0].includes('codex/m:/模型'), warnings[0])
+  // The configuration gap is stated once per model, not once per request.
+  await consume(route, 'm:/模型')
+  assert.equal(warnings.length, 1)
+})
+
+test('an unowned model still refuses a Claude account past a usage floor', async () => {
+  const { route, raw } = unownedPool('claude', (_provider, account) => async () => ({
+    supported: true,
+    windows: [{ kind: 'session' as const, usedPercent: account === 'a' ? 90 : 5 }],
+  }))
+  await consume(route, 'm:/模型')
+  assert.deepEqual(raw.calls, ['stream:b:m:/模型'])
 })

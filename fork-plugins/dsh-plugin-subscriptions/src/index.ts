@@ -1004,7 +1004,7 @@ export function apply(ctx: Context, config: Config): void {
   const memberAdapters = new Map<ProviderId, AccountAwareAdapter>()
   const register = (provider: ProviderId, adapter: AccountAwareAdapter): AdapterRegistrationHandle => {
     const route = new AccountPreferencesAdapter({
-      provider, adapter, settings: preferences, pool: () => poolAdapter,
+      provider, adapter, settings: preferences, pool: () => poolAdapter, onWarn,
       accounts: async () => (await accountTokens.get(provider)?.list() ?? []).map(({ key, session }) => ({ key, label: accountOf(provider, session) ?? key })),
     })
     memberAdapters.set(provider, route.poolMember())

@@ -300,6 +300,17 @@ export class OAuthFlowManager {
           const params = new URLSearchParams(trimmed)
           code = params.get('code') ?? undefined
           pastedState = params.get('state') ?? undefined
+        } else if (trimmed.includes('#')) {
+          // The provider's code page shows `<code>#<state>`, so the state travels with the code.
+          // Only the first separator splits them: a state is never expected to contain one.
+          const separator = trimmed.indexOf('#')
+          const codeHalf = trimmed.slice(0, separator)
+          const stateHalf = trimmed.slice(separator + 1)
+          if (codeHalf.length === 0 || stateHalf.length === 0) {
+            throw new Error('the pasted value is missing its code or its state half')
+          }
+          code = codeHalf
+          pastedState = stateHalf
         } else if (trimmed.length > 0 && !/\s/.test(trimmed)) {
           code = trimmed
         }

@@ -168,7 +168,10 @@ export function ImageGenerateToolview(props: ImageGenerateToolviewProps) {
     const args = JSON.parse(argsRaw)
     if (Array.isArray(args?.referenceImages)) references = args.referenceImages.length
   } catch { /* Arguments may still be streaming. */ }
-  const title = `image_generate${references > 0 ? ` (${references} ref)` : ''}: ${derivePrompt(argsRaw)}`
+  const prompt = derivePrompt(argsRaw)
+  const title = references > 0
+    ? t('imageGenerateTitleReferences', { count: references, prompt })
+    : t('imageGenerateTitle', { prompt })
   const images = resultImages(block)
   const text = settled ? resultText(block) : ''
   const labels: MessageImageLabels = {

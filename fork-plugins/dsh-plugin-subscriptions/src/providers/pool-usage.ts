@@ -45,6 +45,13 @@ export interface MemberQuota {
   /** Applicable windows whose recorded reset has not elapsed; absent when usage is unknown. */
   windows?: readonly UsageWindow[]
   /**
+   * Windows from the last successful poll of this account, retained when the
+   * current poll degraded so an availability floor still sees an allowance that
+   * was already spent. Selection scores read {@link windows} instead: a window
+   * the endpoint is not currently vouching for must not steer routing.
+   */
+  floorWindows?: readonly UsageWindow[]
+  /**
    * ChatGPT: the weekly window opened within the last day and an available
    * reset credit expires within three days. Selection ranks these accounts
    * with a bounded bonus inside its availability band. The pool never
@@ -111,13 +118,14 @@ export class PoolUsageTracker {
    * (member selection must never block on the network mid-conversation). A
    * failure still cooling down degrades immediately with no network call.
    *
-   * Deliberately does NOT fall back to `lastSnapshot` the way
-   * {@link snapshotFor} does: scoring routing decisions off data that is
-   * known to be stale-and-unrefreshable risks steering traffic by a urgency
+   * Deliberately does NOT score from `lastSnapshot` the way
+   * {@link snapshotFor} displays it: ranking routing decisions off data that is
+   * known to be stale-and-unrefreshable risks steering traffic by an urgency
    * number the endpoint itself is no longer vouching for, whereas
    * `snapshotFor`'s stale-display concern (the Settings page, the composer
    * badge) has no such downside — showing an old percentage beats showing
-   * nothing.
+   * nothing. The stale windows still reach {@link MemberQuota.floorWindows},
+   * which feeds the availability floors rather than the scores.
    * @param member - the pool member to score (account resolved).
    * @returns availability plus the urgency score.
    */
@@ -135,14 +143,16 @@ export class PoolUsageTracker {
         if (!fresh) void this.refresh(key, fetcher).catch(() => undefined)
         return this.score(member, entry)
       }
-      if (fresh) return degradedQuota(entry.error)
+      if (fresh) return degradedQuota(member, entry.error, entry.lastSnapshot)
       // The cooldown expired: fall through to a fresh, blocking attempt.
     }
     try {
       const snapshot = await this.refresh(key, fetcher)
       return this.score(member, { snapshot, at: Date.now() })
     } catch (error: unknown) {
-      return degradedQuota(error)
+      // `refresh` recorded the failure before rethrowing, so the snapshot it
+      // carried forward is the one this degraded view keeps for the floors.
+      return degradedQuota(member, error, lastSnapshotOf(this.entries.get(key)))
     }
   }
 
@@ -222,8 +232,7 @@ export class PoolUsageTracker {
     // failure entry's own `lastSnapshot` counts too — otherwise the stale
     // snapshot would survive exactly one cooldown and vanish on the next
     // consecutive failure, even though nothing newer ever replaced it.
-    const prior = this.entries.get(key)
-    const lastSnapshot = prior?.snapshot ?? prior?.lastSnapshot
+    const lastSnapshot = lastSnapshotOf(this.entries.get(key))
     const request = fetcher().then(
       (snapshot) => {
         if ((this.epochs.get(key) ?? 0) === epoch) this.entries.set(key, { snapshot, at: Date.now() })
@@ -250,8 +259,7 @@ export class PoolUsageTracker {
   /** Score one member against a snapshot's windows. */
   private score(member: ConcretePoolMember, entry: SnapshotEntry): MemberQuota {
     const now = Date.now()
-    const windows = (entry.snapshot.windows ?? []).filter(window => windowApplies(window, member.model)
-      && (window.resetsAt === undefined || window.resetsAt > now))
+    const windows = applicableWindows(member, entry.snapshot, now)
     const fullAt = member.provider === 'codex' || member.provider === 'claude'
       ? CONSUMABLE_QUOTA_FULL_PERCENT : QUOTA_FULL_PERCENT
     let available = true
@@ -271,16 +279,42 @@ export class PoolUsageTracker {
   }
 }
 
+/** The most recent successful snapshot a cache entry carries, of either kind. */
+function lastSnapshotOf(entry: CacheEntry | undefined): ProviderUsage | undefined {
+  return entry?.snapshot ?? entry?.lastSnapshot
+}
+
+/**
+ * The windows of one snapshot that constrain this member: a model-scoped window
+ * applies to its family, and an elapsed reset stops constraining anything.
+ */
+function applicableWindows(member: ConcretePoolMember, snapshot: ProviderUsage, now: number): UsageWindow[] {
+  return (snapshot.windows ?? []).filter(window => windowApplies(window, member.model)
+    && (window.resetsAt === undefined || window.resetsAt > now))
+}
+
 /**
  * The routing view of a fetch failure. Logged out: the member cannot serve
  * at all. Any other failure (network, endpoint rate limit) must not block
  * routing — the member stays available with a zero score, degrading the
- * strategy to plain priority order for it.
+ * strategy to plain priority order for it. Whichever the failure, the windows
+ * of the last successful poll ride along for the availability floors, which
+ * decide whether a turn may start at all rather than how it is ranked; a
+ * route whose usage endpoint stays unreachable must keep excluding an account
+ * past its floor, not silently treat it as unmeasured.
+ * @param member - the member the quota view describes.
+ * @param error - the failure that degraded this poll.
+ * @param last - the last successful snapshot on record, when one exists.
+ * @returns the degraded quota view.
  */
-function degradedQuota(error: unknown): MemberQuota {
-  return isMissingOrInvalidCredential(error)
-    ? { available: false, urgency: 0, fetchedAt: 0 }
-    : { available: true, urgency: 0, fetchedAt: 0 }
+function degradedQuota(member: ConcretePoolMember, error: unknown, last: ProviderUsage | undefined): MemberQuota {
+  const floorWindows = last === undefined ? undefined : applicableWindows(member, last, Date.now())
+  return {
+    available: !isMissingOrInvalidCredential(error),
+    urgency: 0,
+    fetchedAt: 0,
+    ...floorWindows === undefined ? {} : { floorWindows },
+  }
 }
 
 /** How long to hold a failure in the negative cache: the endpoint's own `retry-after`, or the default TTL. */

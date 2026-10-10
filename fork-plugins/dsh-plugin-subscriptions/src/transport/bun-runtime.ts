@@ -27,11 +27,15 @@ export class BunRuntimeError extends Error {
   }
 }
 
-/** Platform packages published for the supported targets. */
-const PLATFORM_PACKAGES: Readonly<Record<string, string>> = {
+/**
+ * Platform packages published for the supported targets. Bun publishes the
+ * arm64 targets as `-aarch64`; a `-arm64` package name does not exist, so the
+ * two spellings are not interchangeable.
+ */
+export const BUN_PLATFORM_PACKAGES: Readonly<Record<string, string>> = {
   'win32-x64': '@oven/bun-windows-x64',
-  'win32-arm64': '@oven/bun-windows-arm64',
-  'darwin-arm64': '@oven/bun-darwin-arm64',
+  'win32-arm64': '@oven/bun-windows-aarch64',
+  'darwin-arm64': '@oven/bun-darwin-aarch64',
   'darwin-x64': '@oven/bun-darwin-x64',
   'linux-x64': '@oven/bun-linux-x64',
   'linux-arm64': '@oven/bun-linux-aarch64',
@@ -64,9 +68,9 @@ export function resolveBunRuntime(
   }
 
   const key = `${process.platform}-${process.arch}`
-  const packageName = PLATFORM_PACKAGES[key]
+  const packageName = BUN_PLATFORM_PACKAGES[key]
   if (packageName === undefined) {
-    throw new BunRuntimeError(`no pinned Bun runtime is published for ${key}`)
+    throw new BunRuntimeError(`no pinned Bun runtime package is published for ${key}`)
   }
 
   // The platform packages do not expose `package.json` through `exports`, so the

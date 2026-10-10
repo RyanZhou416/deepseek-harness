@@ -16,6 +16,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import type { CSSProperties, Dispatch, SetStateAction } from 'react'
 import type { ConnectionHandle } from '@deepseek-ai/dsh-api-remotes/client'
 import { en } from './locales.js'
+import { formatDateTime } from './format.js'
 import { ProviderAccountManager } from './ProviderAccountManager.js'
 import { ResetCredits } from './ResetCredits.js'
 import type { SubscriptionsKey } from './locales.js'
@@ -422,9 +423,11 @@ function pendingInstant(at: number | undefined, now: number): { resetsAt?: numbe
  * Contract: the header state outranks the percentage state, because the
  * provider's own `rejected` verdict is more specific than a window percentage
  * that may have been read minutes earlier. A dead login is always attributed
- * to the account: no routing decision clears it. Overage is always attributed
- * to the pool and only reported when a peer can serve, because the account
- * itself is still answering.
+ * to the account: no routing decision clears it. A near-limit `allowed_warning`
+ * status is an account fact too — it proves only that this account is close to
+ * its limit, which routing around it does not change. Overage is always
+ * attributed to the pool and only reported when a peer can serve, because the
+ * account itself is still answering.
  *
  * The percentage rule is unchanged from the reported windows: a window counts
  * as full at `usedPercent >= 100` for Codex and Claude, which spend a window
@@ -466,9 +469,11 @@ export function usageAlert(
         : undefined
     }
     if (rateLimit.status === 'allowed_warning') {
+      // A near-limit warning stays an account fact: the status only says the
+      // account is close to its limit, which routing around it does not change.
       return {
         kind: 'warning',
-        attribution: routed ? 'pool' : 'account',
+        attribution: 'account',
         ...pendingInstant(rateLimit.resetsAt, now),
       }
     }
@@ -1045,7 +1050,7 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
                     )}
                     {account.expiresAt !== undefined && (
                       <span style={styles.statusLine}>
-                        {t('accountExpires', { date: new Date(account.expiresAt).toLocaleString() })}
+                        {t('accountExpires', { date: formatDateTime(t, account.expiresAt) })}
                       </span>
                     )}
                     <button
@@ -1076,7 +1081,7 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
                         <p style={styles.errorLine}>
                           {t(usageAlertKey(alert))}
                           {alert.resetsAt !== undefined
-                            && ` · ${t('usageResets', { date: new Date(alert.resetsAt).toLocaleString() })}`}
+                            && ` · ${t('usageResets', { date: formatDateTime(t, alert.resetsAt) })}`}
                         </p>
                       )}
                       {usage === undefined && usageError === undefined && (
@@ -1097,7 +1102,7 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
                               <span>
                                 {`${String(Math.round(percent))}%`}
                                 {window.resetsAt !== undefined
-                                  && ` · ${t('usageResets', { date: new Date(window.resetsAt).toLocaleString() })}`}
+                                  && ` · ${t('usageResets', { date: formatDateTime(t, window.resetsAt) })}`}
                               </span>
                             </div>
                             <div style={styles.usageTrack}>

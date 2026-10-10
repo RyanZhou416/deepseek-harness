@@ -31,10 +31,14 @@ interface Options {
   settings: ProviderSettingsStore
   accounts: () => Promise<readonly { key: string; label: string }[]>
   pool: () => PoolAdapter | undefined
+  /** Where a pool that owns no entry for a requested model is reported. */
+  onWarn: (message: string) => void
 }
 
 /** Keeps the registered route separate from raw adapters and pool member seams. */
 export class AccountPreferencesAdapter extends LlmAdapter {
+  /** Models already reported as unowned — a per-request diagnostic is stated once otherwise. */
+  private readonly reported = new Set<string>()
   constructor(private readonly options: Options) { super() }
   override providerRetryPolicy(provider: string) {
     return this.options.adapter.providerRetryPolicy(provider)
@@ -63,10 +67,36 @@ export class AccountPreferencesAdapter extends LlmAdapter {
       throw new LlmError(`Account route unavailable: ${this.options.provider}/${account}/${model}`, 'NO_ADAPTER')
     }
   }
+  /**
+   * Report once, per model, that an enabled pool owns no entry for it. The
+   * request still runs, but on one account chosen by the pool's availability
+   * rule rather than through pool failover, and that gap is a configuration
+   * state the operator can act on instead of a silent difference in routing.
+   */
+  private reportUnowned(model: string): void {
+    const key = `${this.options.provider}/${model}`
+    if (this.reported.has(key)) return
+    this.reported.add(key)
+    this.options.onWarn(
+      `pool owns no entry for "${key}"; serving it from a single account instead of pool failover`,
+    )
+  }
+  /**
+   * The account serving a model the pool does not own. The pool's availability
+   * rule still applies: an account that is cooling down, or that is past a
+   * Claude usage floor, is skipped for the next eligible one — the fallback can
+   * never reach an account the pool would have held back.
+   */
   private async fallback(model: string): Promise<string> {
+    const pool = this.options.pool()
+    if (pool !== undefined) this.reportUnowned(model)
     for (const { key } of await this.options.accounts()) {
       if (!accountAllowsPool(this.preference(key), model)) continue
-      try { await this.requireAccount(key, model, false); return key } catch { /* unavailable catalog */ }
+      let listed = false
+      try { await this.requireAccount(key, model, false); listed = true } catch { /* unavailable catalog */ }
+      if (!listed) continue
+      if (pool !== undefined && !await pool.accountAvailable(this.options.provider, model, key)) continue
+      return key
     }
     throw new LlmError(`No eligible account for ${this.options.provider}/${model}`, 'NO_ADAPTER')
   }

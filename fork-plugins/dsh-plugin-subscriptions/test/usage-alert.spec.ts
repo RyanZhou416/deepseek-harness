@@ -53,13 +53,14 @@ test('a dead login is an account fact even while a peer is serving', () => {
   assert.equal(usageAlertKey(alert!), 'usageAccountRelogin')
 })
 
-test('the allowed_warning status reports a near state, pool-attributed when a peer serves', () => {
+test('the allowed_warning status is an account fact even while a peer serves', () => {
   const warning = report({ status: 'allowed_warning', resetsAt: LATER })
   const account = usageAlert('claude', [], warning)
   assert.deepEqual(account, { kind: 'warning', attribution: 'account', resetsAt: LATER })
   assert.equal(usageAlertKey(account!), 'usageNearlyExhausted')
   const pooled = usageAlert('claude', [], warning, { peerAvailable: true })
-  assert.equal(usageAlertKey(pooled!), 'usagePoolCooling')
+  assert.deepEqual(pooled, { kind: 'warning', attribution: 'account', resetsAt: LATER })
+  assert.equal(usageAlertKey(pooled!), 'usageNearlyExhausted')
 })
 
 test('overage is a pool observation only, and only while a peer can serve', () => {

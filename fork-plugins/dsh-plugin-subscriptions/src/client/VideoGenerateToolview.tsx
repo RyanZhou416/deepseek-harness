@@ -201,7 +201,7 @@ export function VideoGenerateToolview(props: VideoGenerateToolviewProps) {
 
   if (block === undefined) return null
   const argsRaw = settled ? block.call?.argsRaw ?? '' : block.phase === 'start' ? block.argsRaw : ''
-  const title = `video_generate: ${derivePrompt(argsRaw)}`
+  const title = t('videoGenerateTitle', { prompt: derivePrompt(argsRaw) })
   const text = settled ? resultText(block) : ''
   return (
     <div style={styles.container}>

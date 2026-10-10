@@ -28,7 +28,7 @@ import { ImageGenerateToolview, createImageLoader } from './ImageGenerateToolvie
 import type { ImageGenerateToolviewInjected } from './ImageGenerateToolview.js'
 import { VideoGenerateToolview, createVideoLoader } from './VideoGenerateToolview.js'
 import type { VideoGenerateToolviewInjected } from './VideoGenerateToolview.js'
-import { SpeedSelect, createSpeedLoader, createSpeedSetter } from './SpeedSelect.js'
+import { SpeedSelect, createSpeedLoader, createSpeedSetter, settleSpeedTier } from './SpeedSelect.js'
 import type { ModelDirectoriesLike, SpeedSelectInjected } from './SpeedSelect.js'
 import { SubscriptionUsageBadge, createCurrentModelReader } from './SubscriptionUsageBadge.js'
 import type { SubscriptionUsageBadgeInjected } from './SubscriptionUsageBadge.js'
@@ -171,9 +171,11 @@ export function apply(ctx: ClientContext): void {
             { id: 'fast', label: t('speedFast'), detail: t('speedFastDescription') },
           ] as const).map(option => ({ ...option, active: option.id === state.tier }))
         },
-        onSelect: async (option, session) => {
-          await createSpeedSetter(connection, session.sessionId)(option.id as 'standard' | 'fast')
-        },
+        // This entry point owns no notice surface of its own, so a false answer
+        // has to fail the selection: the shell states a settlement failure
+        // through its own error strip.
+        onSelect: (option, session) =>
+          settleSpeedTier(createSpeedSetter(connection, session.sessionId), option.id as 'standard' | 'fast', t),
       },
     }), 'dsh-plugin-subscriptions: /fast contribution')
   })

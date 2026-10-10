@@ -60,6 +60,91 @@ export interface ClaudeWireThinking {
   budgetTokens?: number
 }
 
+/** A two-level string-keyed table whose total leaf count is bounded. */
+export interface BoundedTwoLevelMap<V> {
+  /**
+   * @param outer - first-level key.
+   * @param inner - second-level key.
+   * @returns the value stored under both keys, or undefined.
+   */
+  get(outer: string, inner: string): V | undefined
+  /**
+   * @param outer - first-level key.
+   * @returns whether that entry holds any leaf.
+   */
+  isEmpty(outer: string): boolean
+  /**
+   * Store a value under both keys; a leaf that already exists is replaced in
+   * place. A new leaf inserted at the limit evicts the table's oldest leaf.
+   * @param outer - first-level key.
+   * @param inner - second-level key.
+   * @param value - value to store.
+   */
+  set(outer: string, inner: string, value: V): void
+  /**
+   * @param outer - first-level key whose leaves are all dropped.
+   */
+  deleteOuter(outer: string): void
+  /** Drop every leaf. */
+  clear(): void
+}
+
+/**
+ * Delete the oldest leaf of a two-level table, freeing one slot for growth.
+ * @param entries - the table to evict from.
+ */
+function evictOldestLeaf<V>(entries: Map<string, Map<string, V>>): void {
+  for (const [outer, leaves] of entries) {
+    const oldest = leaves.keys().next().value
+    if (oldest !== undefined) {
+      leaves.delete(oldest)
+      if (leaves.size === 0) entries.delete(outer)
+      return
+    }
+  }
+}
+
+/**
+ * Build a bounded two-level table.
+ *
+ * Leaf order is insertion order across the whole table: at the limit the
+ * oldest leaf — the first leaf of the first non-empty first-level entry — is
+ * evicted, and a first-level entry disappears with its last leaf. What the two
+ * key levels mean and what the limit is belong to the caller.
+ * @param limit - maximum number of leaves kept.
+ * @returns a table bounded to that many leaves.
+ */
+export function boundedTwoLevelMap<V>(limit: number): BoundedTwoLevelMap<V> {
+  const entries = new Map<string, Map<string, V>>()
+  let size = 0
+  return {
+    get: (outer, inner) => entries.get(outer)?.get(inner),
+    isEmpty: outer => (entries.get(outer)?.size ?? 0) === 0,
+    set: (outer, inner, value) => {
+      let leaves = entries.get(outer)
+      if (leaves === undefined) {
+        leaves = new Map()
+        entries.set(outer, leaves)
+      }
+      if (!leaves.has(inner)) {
+        if (size >= limit) evictOldestLeaf(entries)
+        size += 1
+      }
+      leaves.set(inner, value)
+    },
+    deleteOuter: (outer) => {
+      const leaves = entries.get(outer)
+      if (leaves === undefined) return
+      size -= leaves.size
+      entries.delete(outer)
+    },
+    clear: () => {
+      entries.clear()
+      size = 0
+    },
+  }
+}
+
 /**
  * Bounded per-account, per-session conversation-chaining state: the last
  * response `request-id`, chained as `cc_prev_req` by the next request of the
@@ -74,36 +159,13 @@ interface ClaudeChainState {
 
 const CHAIN_LIMIT = 256
 /** Account key → session id → chain state. */
-const chains = new Map<string, Map<string, ClaudeChainState>>()
-let chainCount = 0
-
-/** Delete one oldest leaf from a two-level map, freeing one slot for growth. */
-function evictOldest<K, V>(twoLevel: Map<K, Map<string, V>>): void {
-  for (const [outer, inner] of twoLevel) {
-    const oldest = inner.keys().next().value
-    if (oldest !== undefined) {
-      inner.delete(oldest)
-      if (inner.size === 0) twoLevel.delete(outer)
-      return
-    }
-  }
-}
+const chains = boundedTwoLevelMap<ClaudeChainState>(CHAIN_LIMIT)
 
 function chainFor(account: string, sessionId: string): ClaudeChainState {
-  let bySession = chains.get(account)
-  if (bySession === undefined) {
-    bySession = new Map()
-    chains.set(account, bySession)
-  }
-  const existing = bySession.get(sessionId)
+  const existing = chains.get(account, sessionId)
   if (existing !== undefined) return existing
-  if (chainCount >= CHAIN_LIMIT) {
-    evictOldest(chains)
-    chainCount -= 1
-  }
   const state: ClaudeChainState = {}
-  bySession.set(sessionId, state)
-  chainCount += 1
+  chains.set(account, sessionId, state)
   return state
 }
 
@@ -119,8 +181,7 @@ function chainFor(account: string, sessionId: string): ClaudeChainState {
  */
 const WIRE_SESSION_LIMIT = 256
 /** Harness session id → account → stable wire session id. */
-const wireSessions = new Map<string, Map<string, string>>()
-let wireSessionCount = 0
+const wireSessions = boundedTwoLevelMap<string>(WIRE_SESSION_LIMIT)
 
 /**
  * The wire session id for one account span of a harness session.
@@ -129,21 +190,11 @@ let wireSessionCount = 0
  * @returns the stable `x-claude-code-session-id` for this (account, session).
  */
 export function claudeWireSessionId(account: string, harnessSessionId: string): string {
-  let byAccount = wireSessions.get(harnessSessionId)
-  if (byAccount === undefined) {
-    byAccount = new Map()
-    wireSessions.set(harnessSessionId, byAccount)
-  }
-  const existing = byAccount.get(account)
+  const existing = wireSessions.get(harnessSessionId, account)
   if (existing !== undefined) return existing
-  if (wireSessionCount >= WIRE_SESSION_LIMIT) {
-    evictOldest(wireSessions)
-    wireSessionCount -= 1
-  }
   // The first account span keeps the harness id; later spans roll a new one.
-  const wireId = byAccount.size === 0 ? harnessSessionId : randomUUID()
-  byAccount.set(account, wireId)
-  wireSessionCount += 1
+  const wireId = wireSessions.isEmpty(harnessSessionId) ? harnessSessionId : randomUUID()
+  wireSessions.set(harnessSessionId, account, wireId)
   return wireId
 }
 

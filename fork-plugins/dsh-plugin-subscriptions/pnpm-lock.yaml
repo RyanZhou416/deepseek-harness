@@ -9,8 +9,8 @@ importers:
   .:
     dependencies:
       '@tormentalabs/claude-code-wire-compat':
-        specifier: 0.7.1
-        version: 0.7.1
+        specifier: file:C:/Project/deepseek-harness/fork-plugins/releases/tormentalabs-claude-code-wire-compat-0.7.2-dsh12.tgz
+        version: file:../releases/tormentalabs-claude-code-wire-compat-0.7.2-dsh12.tgz
       undici:
         specifier: ^7.0.0
         version: 7.29.0
@@ -184,6 +184,24 @@ importers:
       '@cursor/sdk':
         specifier: 1.0.32
         version: 1.0.32
+      '@oven/bun-darwin-aarch64':
+        specifier: ^1.4.0
+        version: 1.4.3
+      '@oven/bun-darwin-x64':
+        specifier: ^1.4.0
+        version: 1.4.3
+      '@oven/bun-linux-aarch64':
+        specifier: ^1.4.0
+        version: 1.4.2
+      '@oven/bun-linux-x64':
+        specifier: ^1.4.0
+        version: 1.4.3
+      '@oven/bun-windows-aarch64':
+        specifier: ^1.4.0
+        version: 1.4.3
+      '@oven/bun-windows-x64':
+        specifier: ^1.4.0
+        version: 1.4.2
 
 packages:
 
@@ -858,6 +876,38 @@ packages:
       '@emnapi/core': ^1.7.1 || ^2.0.0-alpha.4
       '@emnapi/runtime': ^1.7.1 || ^2.0.0-alpha.4
 
+  '@oven/bun-darwin-aarch64@1.4.3':
+    resolution: {integrity: sha512-u2wAM9RzqyF4baO5oFVhcFUVWO1CCMLG6yC5/aPWCYGZPfL5ULMbeHt+0/3I0h3yaPx1m+PKSANO/61jPtDZcQ==}
+    cpu: [arm64]
+    os: [darwin]
+
+  '@oven/bun-darwin-x64@1.4.3':
+    resolution: {integrity: sha512-wRGeciWOyKyG/BfTHq4CAyqoOfuzj5UJkKA8FlJETW2yhtDh+Ba3EgPnsVclFyzIw7E0HJxpsonoj17g3HPK/Q==}
+    cpu: [x64]
+    os: [darwin]
+
+  '@oven/bun-linux-aarch64@1.4.2':
+    resolution: {integrity: sha512-3BBP9ovJ2RGHFH6Ae1CAtxNtG1+YY6GD6rmYbsUosoAk9+OEl6zeDQ/k4fBkc6dYOJCtWnx8hUxzNzQATSmvYQ==}
+    cpu: [arm64]
+    os: [linux]
+    libc: [glibc]
+
+  '@oven/bun-linux-x64@1.4.3':
+    resolution: {integrity: sha512-RArgnpjeXjaGzjp5h7Rs89cUYJutO8IyqR3itE8OBaBzEt8KNm2jp/YozxBHq4eFovwrQLryeSwTAcmiT+zcoA==}
+    cpu: [x64]
+    os: [linux]
+    libc: [glibc]
+
+  '@oven/bun-windows-aarch64@1.4.3':
+    resolution: {integrity: sha512-a3Vyu9KI0J9vfIS+/LJMmjWI/qsBpph8u0R7d6Tm+YaSOqZeN2LRULfVqz13dgQRTvqg6aWBxOv9jE4Rl0lAAQ==}
+    cpu: [arm64]
+    os: [win32]
+
+  '@oven/bun-windows-x64@1.4.2':
+    resolution: {integrity: sha512-+bN6OuVld/9diT/RLSXSW7JE6CvNE3gL9XsAEjULi1nUsXd6DNO6GuA9jNdNb3r8PdJFnYHr5aypNV1Oj3Rd9g==}
+    cpu: [x64]
+    os: [win32]
+
   '@oxc-project/types@0.95.0':
     resolution: {integrity: sha512-vACy7vhpMPhjEJhULNxrdR0D943TkA/MigMpJCHmBHvMXxRStRi/dPtTlfQ3uDwWSzRpT8z+7ImjZVf8JWBocQ==}
 
@@ -994,8 +1044,9 @@ packages:
   '@statsig/js-client@3.31.0':
     resolution: {integrity: sha512-LFa5E0LjT6sTfZv3sNGoyRLSZ1078+agdgOA+Vm1ecjG+KbSOfBLTW7hMwimrJ29slRwbYDzbtKaPJo/R37N2g==}
 
-  '@tormentalabs/claude-code-wire-compat@0.7.1':
-    resolution: {integrity: sha512-eeK2wDnKySKoDbPKS4AFNdUuYM5X/OTuglcls1PUZ7nVF2mewzakkK2NqHsNHyU54SOGpSWW2S7iQPFvqY1gjg==}
+  '@tormentalabs/claude-code-wire-compat@file:../releases/tormentalabs-claude-code-wire-compat-0.7.2-dsh12.tgz':
+    resolution: {integrity: sha512-+HO2qESj/AXZqUaIdWbadeOPSgOz4zeEhhqcnlPx5P/FokSfZw+VnkcBkSq+4z/XRaz8DGiWF6gOVJyE6ebHCQ==, tarball: file:../releases/tormentalabs-claude-code-wire-compat-0.7.2-dsh12.tgz}
+    version: 0.7.2-dsh12
     engines: {node: '>=20'}
 
   '@tybys/wasm-util@0.10.3':
@@ -2093,6 +2144,24 @@ snapshots:
       '@tybys/wasm-util': 0.10.3
     optional: true
 
+  '@oven/bun-darwin-aarch64@1.4.3':
+    optional: true
+
+  '@oven/bun-darwin-x64@1.4.3':
+    optional: true
+
+  '@oven/bun-linux-aarch64@1.4.2':
+    optional: true
+
+  '@oven/bun-linux-x64@1.4.3':
+    optional: true
+
+  '@oven/bun-windows-aarch64@1.4.3':
+    optional: true
+
+  '@oven/bun-windows-x64@1.4.2':
+    optional: true
+
   '@oxc-project/types@0.95.0': {}
 
   '@quansync/fs@1.0.0':
@@ -2198,7 +2267,7 @@ snapshots:
       '@statsig/client-core': 3.31.0
     optional: true
 
-  '@tormentalabs/claude-code-wire-compat@0.7.1': {}
+  '@tormentalabs/claude-code-wire-compat@file:../releases/tormentalabs-claude-code-wire-compat-0.7.2-dsh12.tgz': {}
 
   '@tybys/wasm-util@0.10.3':
     dependencies:

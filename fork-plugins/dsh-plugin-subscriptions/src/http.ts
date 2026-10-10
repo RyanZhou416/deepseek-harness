@@ -17,6 +17,7 @@ import { Agent, Dispatcher, ProxyAgent, fetch as undiciFetch, getGlobalDispatche
 import { chmod, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import { dirname } from 'node:path'
 import { dshHomePath } from '@deepseek-ai/dsh-home-paths'
+import { hostClaudeRoute, hostProxyForScheme, isClaudeEgressDestination } from './transport/host-egress.js'
 
 /**
  * undici's own fetch, typed to the DOM fetch signature: its bundled types are
@@ -395,6 +396,15 @@ export async function proxySetConfig(input: ProxyInput): Promise<ProxyConfigView
  * proxy unless the host bypasses it. Identity-passthrough otherwise: the host
  * may itself route global fetch through an environment-configured proxy.
  *
+ * A host-mandated Claude route outranks both: for a Claude destination the
+ * plugin attaches no dispatcher at all, leaving the process dispatcher the host
+ * installed to apply its own route to this request and every other Claude call —
+ * Messages, token refresh, usage and profile alike.
+ *
+ * A published host route for the request's scheme is the same rule for every other
+ * destination: this module's own direct agent would send the request around the
+ * proxy the host routes that scheme through, so the installed dispatcher decides.
+ *
  * Proxied requests run on undici's own fetch (not the global one) so the
  * ProxyAgent dispatcher always comes from the same undici build the request
  * is issued with — a mismatched dispatcher can be silently ignored by the
@@ -402,29 +412,45 @@ export async function proxySetConfig(input: ProxyInput): Promise<ProxyConfigView
  */
 export async function proxiedFetch(input: RequestInfo | URL, init: RequestInit = {}): Promise<Response> {
   await ensureReady()
+  const destination = requestUrl(input)
+  if (hostClaudeRoute() !== undefined
+    && destination !== undefined
+    && isClaudeEgressDestination(destination.hostname)) {
+    return fetch(input, init)
+  }
   // A host-installed dispatcher is how the process routes or gates egress, so the plugin
   // defers to it rather than replacing it with its own agent.
   const hostOwns = getGlobalDispatcher() !== INITIAL_DISPATCHER
+  const hostRoutesScheme = hostProxyForScheme(destination) !== undefined
   let dispatcher: Dispatcher | undefined
   if (current.enabled) {
-    let hostname = ''
-    try {
-      const url = typeof input === 'string' ? new URL(input) : input instanceof URL ? input : new URL(input.url)
-      hostname = url.hostname
-    } catch {
-      hostname = ''
-    }
+    const hostname = destination?.hostname ?? ''
     // A bypassed host goes direct, still through this module's own agent when it owns the
     // process; the host's dispatcher already means direct.
     if (agent !== undefined && !matchesBypass(hostname, current.bypass)) dispatcher = agent
   }
-  if (dispatcher === undefined && !hostOwns) dispatcher = DIRECT_AGENT
+  if (dispatcher === undefined && !hostOwns && !hostRoutesScheme) dispatcher = DIRECT_AGENT
   if (dispatcher === undefined) return fetch(input, init)
   const configured = { ...init, dispatcher } as RequestInit
   // A proxied call must go through undici's own fetch to honour the ProxyAgent. A direct
   // call stays on the global fetch, which is what a host or a test may replace to observe
   // or gate egress; the agent still carries this module's connect budget.
   return dispatcher === DIRECT_AGENT ? fetch(input, configured) : dispatchFetch(input, configured)
+}
+
+/**
+ * The request's parsed URL, for the routing decisions above.
+ *
+ * @param input - The fetch input.
+ * @returns The URL, or undefined for a form this module cannot parse.
+ */
+function requestUrl(input: RequestInfo | URL): URL | undefined {
+  try {
+    return typeof input === 'string' ? new URL(input) : input instanceof URL ? input : new URL(input.url)
+  } catch {
+    // A caller that reached fetch with an unparseable target still gets the call attempted.
+    return undefined
+  }
 }
 
 /**

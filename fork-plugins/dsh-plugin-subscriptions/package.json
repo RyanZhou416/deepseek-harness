@@ -130,11 +130,11 @@
   },
   "optionalDependencies": {
     "@cursor/sdk": "1.0.32",
-    "@oven/bun-darwin-arm64": "^1.4.0",
+    "@oven/bun-darwin-aarch64": "^1.4.0",
     "@oven/bun-darwin-x64": "^1.4.0",
     "@oven/bun-linux-aarch64": "^1.4.0",
     "@oven/bun-linux-x64": "^1.4.0",
-    "@oven/bun-windows-arm64": "^1.4.0",
+    "@oven/bun-windows-aarch64": "^1.4.0",
     "@oven/bun-windows-x64": "^1.4.0"
   }
 }

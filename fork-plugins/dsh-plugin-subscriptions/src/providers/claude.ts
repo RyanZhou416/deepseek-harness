@@ -31,6 +31,7 @@ import {
 import {
   CLAUDE_PLAIN_USER_AGENT,
   CLAUDE_USER_AGENT,
+  boundedTwoLevelMap,
   buildClaudeWireRequest,
   claudeWireSessionId,
   mapClaudeWireError,
@@ -268,7 +269,50 @@ export const CLAUDE_FILES_URL = 'https://api.anthropic.com/v1/files'
  */
 export const CLAUDE_MAX_BASE64_IMAGE_CHARS = 10_000_000
 
-const uploadedFileIds = new Map<string, string>()
+/** Uploaded Files API entries kept before the oldest is evicted. */
+export const CLAUDE_FILE_ID_LIMIT = 256
+
+/** Canonical account key → image content hash → Files API file id. */
+const uploadedFileIds = boundedTwoLevelMap<string>(CLAUDE_FILE_ID_LIMIT)
+
+/**
+ * The Files API id one account already uploaded for an image content hash.
+ * @param account - the canonical account key that would own the upload.
+ * @param contentHash - sha256 of the image's base64 payload.
+ * @returns the uploaded id, or undefined when this account has not uploaded it.
+ */
+export function uploadedClaudeFileId(account: string, contentHash: string): string | undefined {
+  return uploadedFileIds.get(account, contentHash)
+}
+
+/**
+ * Remember one account's uploaded Files API id for an image content hash.
+ *
+ * A file id is served only under the token that uploaded it, and the Claude
+ * routes are pooled, so the account key joins the content hash in the key: a
+ * failover uploads its own copy instead of handing another account's request a
+ * file id Anthropic would reject.
+ * @param account - the canonical account key that uploaded the file.
+ * @param contentHash - sha256 of the image's base64 payload.
+ * @param fileId - the Files API id the upload returned.
+ */
+export function rememberClaudeFileId(account: string, contentHash: string, fileId: string): void {
+  uploadedFileIds.set(account, contentHash, fileId)
+}
+
+/**
+ * Drop the Files API ids uploaded under one account, or every account when none
+ * is named. A login replaces the token those ids were minted with, so the
+ * adapter drops them with the account's other cached state.
+ * @param account - the canonical account key whose uploads are dropped.
+ */
+export function clearClaudeFileIds(account?: string): void {
+  if (account === undefined) {
+    uploadedFileIds.clear()
+    return
+  }
+  uploadedFileIds.deleteOuter(account)
+}
 
 function imageFilename(mediaType: string): string {
   switch (mediaType) {
@@ -311,21 +355,23 @@ export async function uploadClaudeFile(
 
 async function fileIdForImage(
   part: ResolvedImagePart,
+  account: string,
   accessToken: string,
   fetchFn: FetchFn,
   signal?: AbortSignal,
 ): Promise<string | undefined> {
   if (part.fileId !== undefined || part.dataBase64.length <= CLAUDE_MAX_BASE64_IMAGE_CHARS) return part.fileId
-  const key = createHash('sha256').update(part.dataBase64).digest('hex')
-  const cached = uploadedFileIds.get(key)
+  const contentHash = createHash('sha256').update(part.dataBase64).digest('hex')
+  const cached = uploadedClaudeFileId(account, contentHash)
   if (cached !== undefined) return cached
   const id = await uploadClaudeFile(accessToken, part, fetchFn, signal)
-  uploadedFileIds.set(key, id)
+  rememberClaudeFileId(account, contentHash, id)
   return id
 }
 
 async function withFileIds(
   blocks: readonly TranslatableBlock[],
+  account: string,
   accessToken: string,
   fetchFn: FetchFn,
   signal?: AbortSignal,
@@ -334,7 +380,7 @@ async function withFileIds(
   const next: TranslatableBlock[] = []
   for (const block of blocks) {
     if (block.type === 'image' && 'dataBase64' in block) {
-      const fileId = await fileIdForImage(block, accessToken, fetchFn, signal)
+      const fileId = await fileIdForImage(block, account, accessToken, fetchFn, signal)
       if (fileId !== undefined && fileId !== block.fileId) {
         changed = true
         next.push({ ...block, fileId })
@@ -342,7 +388,7 @@ async function withFileIds(
       }
     }
     if (block.type === 'tool-result') {
-      const content = await withFileIds(block.content, accessToken, fetchFn, signal)
+      const content = await withFileIds(block.content, account, accessToken, fetchFn, signal)
       if (content !== block.content) {
         changed = true
         next.push({ ...block, content })
@@ -354,9 +400,20 @@ async function withFileIds(
   return changed ? next : blocks
 }
 
-/** Replace oversized inline images with a Files API `file_id`. Smaller images stay base64. */
+/**
+ * Replace oversized inline images with a Files API `file_id`; smaller images
+ * stay base64. The upload is made with the request's own account token, and the
+ * resulting id is cached under that account.
+ * @param messages - resolved request messages.
+ * @param account - the canonical account key serving this request.
+ * @param accessToken - that account's current access token.
+ * @param fetchFn - fetch implementation (injectable for tests).
+ * @param signal - caller cancellation.
+ * @returns the messages, with uploaded images bound to a file id.
+ */
 export async function bindClaudeFileIds(
   messages: readonly TranslatableMessage[],
+  account: string,
   accessToken: string,
   fetchFn: FetchFn = proxiedFetch,
   signal?: AbortSignal,
@@ -364,7 +421,7 @@ export async function bindClaudeFileIds(
   let changed = false
   const next: TranslatableMessage[] = []
   for (const message of messages) {
-    const content = await withFileIds(message.content, accessToken, fetchFn, signal)
+    const content = await withFileIds(message.content, account, accessToken, fetchFn, signal)
     if (content !== message.content) {
       changed = true
       next.push({ ...message, content })
@@ -1033,9 +1090,15 @@ export class ClaudeAdapter extends LlmAdapter {
     )
   }
 
-  /** Drop cached catalogs after login/logout so the next list does not reuse a stale plan. */
+  /**
+   * Drop cached catalogs after login/logout so the next list does not reuse a stale plan,
+   * and the account's uploaded Files API ids with them: those ids belong to the token that
+   * uploaded them, which a login change replaces.
+   * @param account - the account whose cached state is dropped, or every account when omitted.
+   */
   clearAccountCatalog(account?: string): void {
     this.catalogs.invalidate(account)
+    clearClaudeFileIds(account)
   }
 
   private async discovered(model: string): Promise<DiscoveredModel | undefined> {
@@ -1268,7 +1331,7 @@ export class ClaudeAdapter extends LlmAdapter {
     const contextWindow = disc?.contextWindow
       ?? this.options.models.find(entry => entry.id === options.model)?.contextWindow ?? CLAUDE_CONTEXT_WINDOW
     const resolved = await resolveImages(options.messages, this.options.resolveAttachments?.(), signal, claudeImagePolicy(contextWindow))
-    const messages = await bindClaudeFileIds(resolved, session.accessToken, fetchFn, signal)
+    const messages = await bindClaudeFileIds(resolved, chainAccount, session.accessToken, fetchFn, signal)
     const maxTokens = options.maxTokens
       ?? claudeMaxTokens(this.options.models.find(entry => entry.id === options.model), disc)
     const thinking = this.thinkingParam(options.model, disc?.thinkingType, maxTokens)

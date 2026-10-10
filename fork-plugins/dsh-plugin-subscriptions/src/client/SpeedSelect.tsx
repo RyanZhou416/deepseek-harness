@@ -104,6 +104,26 @@ export function createSpeedSetter(
     .then(() => true, () => false)
 }
 
+/**
+ * Settle one picked tier against the session. A false answer fails the call
+ * with the dictionary's failure copy, which is how an entry point that owns no
+ * notice surface of its own states the failure: the `/fast` popup renders
+ * through the shell's error strip, while the composer control shows the same
+ * copy in place.
+ * @param setSpeed - the session's setter.
+ * @param tier - the picked tier.
+ * @param t - Subscriptions dictionary translator.
+ * @returns nothing once the write takes effect.
+ * @throws Error carrying `speedSaveFailed` when the write fails.
+ */
+export async function settleSpeedTier(
+  setSpeed: SpeedSelectInjected['setSpeed'],
+  tier: SpeedTier,
+  t: (key: SubscriptionsKey) => string,
+): Promise<void> {
+  if (!await setSpeed(tier)) throw new Error(t('speedSaveFailed'))
+}
+
 /** English-dictionary fallback for a missing inject `t` (standalone renders). */
 function fallbackTranslate(key: SubscriptionsKey): string {
   return en[key]
@@ -133,6 +153,7 @@ export function SpeedSelect({ loadSpeed, setSpeed, t }: SpeedSelectProps) {
   const [state, setState] = useState<SpeedSelectState | null>(null)
   const [open, setOpen] = useState(false)
   const [busy, setBusy] = useState(false)
+  const [failed, setFailed] = useState(false)
   const rootRef = useRef<HTMLDivElement | null>(null)
   // The inject face may be re-evaluated (new callback identities) on re-render;
   // the poll effect mounts once and reads through this ref, so identity churn
@@ -181,16 +202,22 @@ export function SpeedSelect({ loadSpeed, setSpeed, t }: SpeedSelectProps) {
       return
     }
     setBusy(true)
+    setFailed(false)
     void setSpeed(tier).then((ok) => {
       setBusy(false)
       if (ok) {
         setState({ visible: true, tier })
         setOpen(false)
+        return
       }
+      // The menu stays open with the failure in place, so the tier remains
+      // reachable for a retry without reopening the control.
+      setFailed(true)
     })
   }
 
   const show = (): void => {
+    setFailed(false)
     setOpen(true)
     const load = loadRef.current
     if (load === undefined) return
@@ -216,6 +243,7 @@ export function SpeedSelect({ loadSpeed, setSpeed, t }: SpeedSelectProps) {
     >
       {open && (
         <div style={styles.menu} role="menu" aria-label={translate('speed')}>
+          {failed && <p role="alert" style={styles.error}>{translate('speedSaveFailed')}</p>}
           {TIERS.map(tier => (
             <button
               key={tier}
@@ -279,4 +307,8 @@ const styles: Record<string, CSSProperties> = {
   itemText: { display: 'flex', flexDirection: 'column' },
   itemName: { fontSize: 12, lineHeight: '18px', color: 'var(--dsw-alias-label-primary)' },
   itemDescription: { fontSize: 11, lineHeight: '16px', color: 'var(--dsw-alias-label-tertiary)' },
+  error: {
+    margin: 0, padding: '4px 8px', fontSize: 11, lineHeight: '16px',
+    color: 'var(--dsw-alias-state-error-primary)',
+  },
 }

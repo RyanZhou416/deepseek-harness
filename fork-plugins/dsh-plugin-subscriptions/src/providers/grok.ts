@@ -239,6 +239,8 @@ export async function exchangeGrokCode(
 ): Promise<GrokSession> {
   const discovery = await grokDiscovery()
   const response = await proxiedFetch(discovery.tokenEndpoint, {
+    // A redirect would replay the authorization code to another origin.
+    redirect: 'error',
     method: 'POST',
     headers: { 'content-type': 'application/x-www-form-urlencoded' },
     body: new URLSearchParams({
@@ -269,6 +271,8 @@ export async function exchangeGrokCode(
  */
 export async function refreshGrok(session: GrokSession): Promise<GrokSession> {
   const response = await proxiedFetch(session.tokenEndpoint, {
+    // A redirect would replay the refresh token to another origin.
+    redirect: 'error',
     method: 'POST',
     headers: { 'content-type': 'application/x-www-form-urlencoded' },
     body: new URLSearchParams({

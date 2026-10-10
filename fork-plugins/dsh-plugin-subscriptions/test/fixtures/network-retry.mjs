@@ -44,6 +44,6 @@ export function apply(ctx) {
     tiers: {}, onWarn: () => {},
   })
   const route = new AccountPreferencesAdapter({ provider, adapter, settings: new ProviderSettingsStore(),
-    accounts: async () => ['cooling', 'online'].map(key => ({ key, label: key })), pool: () => pool })
+    accounts: async () => ['cooling', 'online'].map(key => ({ key, label: key })), pool: () => pool, onWarn: () => {} })
   ctx.effect(() => ctx.llm.registerAdapter([provider], route))
 }

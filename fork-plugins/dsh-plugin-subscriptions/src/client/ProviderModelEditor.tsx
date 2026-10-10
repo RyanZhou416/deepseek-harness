@@ -137,7 +137,7 @@ export const ProviderModelEditor = forwardRef<ProviderModelEditorHandle, Props>(
       <p style={{ margin: 0 }}>{t('modelsHint')}</p>
       {error && <p role="alert" style={{ margin: 0, color: 'var(--dsw-alias-state-error-primary, #b42318)' }}>{error}</p>}
       <div style={actions}>
-        <button type="button" style={control} disabled={busy || disabled || dirty} onClick={() => { void load(true) }}>{t('usageRefresh')}</button>
+        <button type="button" style={control} disabled={busy || disabled || dirty} onClick={() => { void load(true) }}>{t('modelsRefresh')}</button>
         {busy && <span role="status">{t('modelDefaultsLoading')}</span>}
       </div>
       {catalog && <fieldset disabled={busy || disabled} style={{ border: 0, padding: 0, margin: 0, minWidth: 0, display: 'grid', gap: 12 }}>

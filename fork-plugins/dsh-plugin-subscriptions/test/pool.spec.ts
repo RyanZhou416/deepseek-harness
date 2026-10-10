@@ -17,7 +17,7 @@ import type { PoolSchedulingPolicy } from '../src/providers/pool-scheduling.js'
 import { unionAccountCatalogs } from '../src/providers/accounts.js'
 import { buildAccountPools, poolKey } from '../src/providers/pool-family.js'
 import type { PoolDefinition, PoolMemberRef, ProviderPoolSource } from '../src/providers/pool-family.js'
-import { memberKey, PoolHealthRegistry } from '../src/providers/pool-health.js'
+import { accountKey, memberKey, PoolHealthRegistry } from '../src/providers/pool-health.js'
 import { PoolUsageTracker } from '../src/providers/pool-usage.js'
 import { OAuthEndpointError } from '../src/providers/common.js'
 import type { ProviderUsage } from '../src/providers/common.js'
@@ -1137,6 +1137,24 @@ test('quota_aware: a zero load weight preserves configured order for equal score
   }
 })
 
+test('quota_aware: a member whose cooldown ends after the quota snapshot is still tried', async () => {
+  const adapter = new FakeAdapter((_options, account) =>
+    account === 'a1' ? serveFail(new LlmError('connection lost', 'TRANSPORT')) : serveOk(account))
+  const { pool, health } = makePool({ codex: adapter }, {
+    strategy: 'quota_aware',
+    usage: (_provider, account) => async () => {
+      if (account === 'a1') await new Promise(resolve => setTimeout(resolve, 300))
+      return { supported: true, windows: [{ kind: 'weekly' as const, usedPercent: 10 }] }
+    },
+  })
+  // a2 is cooling when the quota snapshot is taken, so it reads no quota at
+  // all; by the time a1 fails over, that cooldown is over.
+  health.markUnavailable(accountKey('codex', 'a2'), 150, 'RATE_LIMIT')
+  const chunks = await collect(pool.stream(OPTIONS))
+  assert.deepEqual(adapter.accounts, ['a1', 'a2'])
+  assert.equal((chunks[0] as { text: string }).text, 'a2')
+})
+
 // ---------------------------------------------------------------------------
 // The Claude usage floors: an account past either floor is not selected at all,
 // because an account ranked last is still chosen once its siblings are cooling
@@ -1146,6 +1164,15 @@ test('quota_aware: a zero load weight preserves configured order for equal score
 interface FloorWindow {
   kind: 'session' | 'weekly' | 'other'
   usedPercent: number
+  resetsAt?: number
+}
+
+/** A two-account Claude pool of one catalog model. */
+function claudeFloorFamilies(): Map<string, PoolDefinition> {
+  return new Map([[poolKey('claude', 'm'), { members: [
+    { provider: 'claude' as const, model: 'm', account: 'a1' },
+    { provider: 'claude' as const, model: 'm', account: 'a2' },
+  ] }]])
 }
 
 /** A two-account Claude pool whose per-account windows come from `windowsFor`. */
@@ -1154,16 +1181,13 @@ function claudeFloorPool(
   scheduling?: Partial<PoolSchedulingPolicy>,
 ) {
   const adapter = new FakeAdapter(() => serveOk())
-  const families = new Map([[poolKey('claude', 'm'), { members: [
-    { provider: 'claude' as const, model: 'm', account: 'a1' },
-    { provider: 'claude' as const, model: 'm', account: 'a2' },
-  ] }]])
+  const families = claudeFloorFamilies()
   const harness = makePool({ claude: adapter }, {
     families,
     usage: (_provider, account) => async () => ({ supported: true, windows: windowsFor(account) }),
     ...scheduling === undefined ? {} : { scheduling },
   })
-  return { adapter, pool: harness.pool }
+  return { ...harness, adapter }
 }
 
 const CLAUDE_OPTIONS: GenerateOptions = { ...OPTIONS, provider: 'claude' }
@@ -1217,6 +1241,46 @@ test('a Claude account past every floor leaves the pool with no usable member', 
   })
 })
 
+test('a usage poll that fails after a real one still applies the floor that poll reported', async () => {
+  let reachable = true
+  const adapter = new FakeAdapter(() => serveOk())
+  const harness = makePool({ claude: adapter }, {
+    families: claudeFloorFamilies(),
+    usage: (_provider, account) => async () => {
+      if (!reachable) {
+        throw new OAuthEndpointError('claude usage token endpoint error (HTTP 429)', 429, undefined, 60_000)
+      }
+      return { supported: true, windows: [{ kind: 'session' as const, usedPercent: account === 'a1' ? 60 : 5 }] }
+    },
+  })
+  await collect(harness.pool.stream(CLAUDE_OPTIONS))
+  assert.deepEqual(adapter.accounts, ['a2'], 'a1 is past the session floor')
+  // The display keeps the last real snapshot; the routing view degrades to a
+  // zero-score failure while still holding the floor that snapshot established.
+  reachable = false
+  assert.deepEqual(await harness.usage.snapshotFor('claude', 'a1', true), {
+    supported: true,
+    windows: [{ kind: 'session', usedPercent: 60 }],
+  })
+  await collect(harness.pool.stream(CLAUDE_OPTIONS))
+  assert.deepEqual(adapter.accounts, ['a2', 'a2'], 'an unreachable usage endpoint cannot make a spent allowance selectable')
+})
+
+test('a pool held back only by the floors reports the earliest window reset as its wait', async () => {
+  const now = Date.now()
+  const { pool } = claudeFloorPool(account => [{
+    kind: 'session',
+    usedPercent: 60,
+    resetsAt: account === 'a1' ? now + 90_000 : now + 300_000,
+  }])
+  await assert.rejects(collect(pool.stream(CLAUDE_OPTIONS)), error => {
+    assert.equal((error as { code?: string }).code, 'RATE_LIMIT')
+    const retryAfter = (error as LlmError).failure.providerRetryAfterMs
+    assert.ok(retryAfter !== undefined && retryAfter > 0 && retryAfter <= 90_000, `retry hint ${String(retryAfter)}`)
+    return true
+  })
+})
+
 // ---------------------------------------------------------------------------
 // A pool that ran out says why: every member failing for one reason reports it
 // ---------------------------------------------------------------------------
@@ -1244,4 +1308,15 @@ test('an exhausted pool whose members failed differently reports the shared cool
     assert.equal((error as { code?: string }).code, 'RATE_LIMIT')
     return true
   })
+})
+
+test('an exhausted pool parked entirely by auth failures reports the auth code, not a rate limit', async () => {
+  const adapter = new FakeAdapter(() => serveOk())
+  const { pool, health } = makePool({ codex: adapter })
+  for (const account of ['a1', 'a2']) health.markUnavailable(accountKey('codex', account), 60_000, 'MISSING_CREDENTIAL')
+  await assert.rejects(collect(pool.stream(OPTIONS)), error => {
+    assert.equal((error as { code?: string }).code, 'MISSING_CREDENTIAL')
+    return true
+  })
+  assert.equal(adapter.calls, 0, 'every account is already parked, so none is contacted')
 })

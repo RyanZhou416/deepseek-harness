@@ -3,7 +3,8 @@
  * only because the request asked for it, and a reasoning model continuing a
  * tool chain must get that item back on the next request or it restarts from
  * scratch every round trip. Requests are answered by an injected fetch, so
- * these specs observe the assembled body directly. No network.
+ * these specs observe the assembled body directly; the OAuth grants are driven
+ * the same way and assert their redirect policy. No network.
  */
 
 import { test } from 'node:test'
@@ -11,7 +12,7 @@ import assert from 'node:assert/strict'
 import { MessageId } from '@deepseek-ai/dsh-llm'
 import type { GenerateOptions } from '@deepseek-ai/dsh-llm'
 import { ToolCallId } from '../src/compat.js'
-import { CodexAdapter, CODEX_API_URL } from '../src/providers/codex.js'
+import { CodexAdapter, CODEX_API_URL, exchangeCodexCode, refreshCodex } from '../src/providers/codex.js'
 import { AccountTokenManager } from '../src/providers/accounts.js'
 import type { FetchFn } from '../src/providers/common.js'
 import type { CodexSession } from '../src/auth/store.js'
@@ -264,4 +265,34 @@ test('clearReplayState drops captured entries (the auth-transition hook)', async
     messages: toolRoundTripHistory(),
   })
   assert.equal(inputOf(calls, 1).some(item => item.type === 'reasoning'), false)
+})
+
+/** An unsigned id token carrying the ChatGPT account claim a login needs. */
+function idToken(): string {
+  const payload = { 'https://api.openai.com/auth': { chatgpt_account_id: 'acct-1' } }
+  return `h.${Buffer.from(JSON.stringify(payload)).toString('base64url')}.s`
+}
+
+test('codex token grants refuse redirects', async () => {
+  // A 307/308 would replay the code or refresh token to another origin, so
+  // both grants answer with a redirect error instead of following it.
+  const real = globalThis.fetch
+  const seen: RequestInit[] = []
+  globalThis.fetch = ((_input: RequestInfo | URL, init?: RequestInit) => {
+    seen.push(init ?? {})
+    return Promise.resolve(Response.json({
+      access_token: 'at',
+      refresh_token: 'rt',
+      expires_in: 3600,
+      id_token: idToken(),
+    }))
+  }) as typeof globalThis.fetch
+  try {
+    await exchangeCodexCode('code', 'verifier', 'http://localhost:1455/auth/callback')
+    await refreshCodex(codexSession)
+  } finally {
+    globalThis.fetch = real
+  }
+  assert.equal(seen.length, 2)
+  assert.deepEqual(seen.map(init => init.redirect), ['error', 'error'])
 })
