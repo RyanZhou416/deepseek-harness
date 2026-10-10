@@ -47,3 +47,10 @@ worktrees/
 .agents/worktrees/
 .typert-*/
 native/system/test/bin/
+
+# Local reverse-engineering workbench (Claude Code carves, desktop app source); not part of the product.
+.cc-carve/
+
+# Local test-run logs and Node diagnostics reports; produced by hand, never committed.
+*-run.txt
+report.*.json
