@@ -55,6 +55,29 @@ export interface PoolAdapterOptions {
   onWarn: (message: string) => void
 }
 
+/**
+ * Whether a Claude account has reached the usage floor its route reserves.
+ *
+ * Left out of selection rather than ranked last: a member ranked last is still chosen once
+ * every other member is cooling down, which is exactly the account this reserve exists to keep
+ * a turn away from. Only Claude carries floors; every other route is unaffected.
+ *
+ * @param member - the candidate member.
+ * @param quota - its cached quota, when usage is known.
+ * @param scheduling - the resolved policy naming both floors.
+ * @returns true when the account must not be selected.
+ */
+function pastClaudeFloor(
+  member: ConcretePoolMember,
+  quota: MemberQuota | undefined,
+  scheduling: PoolSchedulingPolicy,
+): boolean {
+  if (member.provider !== 'claude' || quota?.windows === undefined) return false
+  return quota.windows.some(window =>
+    (window.kind === 'session' && window.usedPercent >= scheduling.claudeSessionPercentFloor)
+    || (window.kind === 'weekly' && window.usedPercent >= scheduling.claudeWeeklyPercentFloor))
+}
+
 /** Bound on sticky-session memory; oldest entries evict past it. */
 const STICKY_SESSION_LIMIT = 1000
 
@@ -253,9 +276,15 @@ export class PoolAdapter extends LlmAdapter {
     const definition = (await this.pools()).get(identity)
     if (definition === undefined) throw new LlmError(`unknown pool model "${options.model}"`, 'NO_ADAPTER')
     const members = await this.concrete(definition.members)
-    const quotas = new Map<ConcretePoolMember, MemberQuota>(this.options.strategy === 'priority' ? []
-      : await Promise.all(members.filter(member => this.options.health.isMemberAvailable(member.provider, member.account, member.model))
-        .map(async member => [member, await this.options.usage.quotaFor(member)] as const)))
+    // Priority mode reads no usage, except for Claude: its floors are a usability rule rather
+    // than a ranking preference, so an account past them is excluded whichever strategy runs.
+    // The tracker caches each read, so this costs one lookup per cold member, not per request.
+    const quotaMembers = this.options.strategy === 'priority'
+      ? members.filter(member => member.provider === 'claude')
+      : members
+    const quotas = new Map<ConcretePoolMember, MemberQuota>(await Promise.all(quotaMembers
+      .filter(member => this.options.health.isMemberAvailable(member.provider, member.account, member.model))
+      .map(async member => [member, await this.options.usage.quotaFor(member)] as const)))
     const sessionId = options.sessionId
     const sticky = sessionId === undefined ? undefined : members.find(member =>
       memberKey(member.provider, member.account, member.model) === this.sticky.get(stickyKey(identity, sessionId)))
@@ -343,7 +372,8 @@ export class PoolAdapter extends LlmAdapter {
   ): ConcretePoolMember[] {
     const usable = members.filter(member =>
       this.options.adapters[member.provider] !== undefined
-      && this.options.health.isMemberAvailable(member.provider, member.account, member.model))
+      && this.options.health.isMemberAvailable(member.provider, member.account, member.model)
+      && !pastClaudeFloor(member, quotas.get(member), this.options.scheduling))
     if (usable.length === 0) return []
     const stickyMember = sessionId === undefined
       ? undefined

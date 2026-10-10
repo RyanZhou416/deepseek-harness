@@ -584,7 +584,7 @@ test('quota_aware: a full fresh-credit account leads the last-resort tail', asyn
   assert.deepEqual(codex.accounts, ['a2'])
 })
 
-test('quota_aware: Claude can consume the last 4% before its reset', async () => {
+test('quota_aware: Claude prefers the account whose window resets first', async () => {
   const claude = new FakeAdapter((_options, account) => serveOk(account))
   const family = new Map<string, PoolDefinition>([
     [poolKey('claude', 'm'), {
@@ -598,7 +598,9 @@ test('quota_aware: Claude can consume the last 4% before its reset', async () =>
     strategy: 'quota_aware',
     families: family,
     usage: usageFetchers({
-      'claude/a1': windowUsage(96, 30 * 60_000),
+      // Below the session floor: the reserve is what keeps a turn off a window that is
+      // about to close, and the preference this test proves still holds under it.
+      'claude/a1': windowUsage(45, 30 * 60_000),
       'claude/a2': windowUsage(20, 5 * 60 * 60_000),
     }),
   })
@@ -1133,4 +1135,84 @@ test('quota_aware: a zero load weight preserves configured order for equal score
   } finally {
     await Promise.all(streams.map(stream => stream.return?.()))
   }
+})
+
+// ---------------------------------------------------------------------------
+// The Claude usage floors: an account past either floor is not selected at all,
+// because an account ranked last is still chosen once its siblings are cooling
+// ---------------------------------------------------------------------------
+
+/** One window in the shape the usage tracker reports. */
+interface FloorWindow {
+  kind: 'session' | 'weekly' | 'other'
+  usedPercent: number
+}
+
+/** A two-account Claude pool whose per-account windows come from `windowsFor`. */
+function claudeFloorPool(
+  windowsFor: (account: string) => FloorWindow[],
+  scheduling?: Partial<PoolSchedulingPolicy>,
+) {
+  const adapter = new FakeAdapter(() => serveOk())
+  const families = new Map([[poolKey('claude', 'm'), { members: [
+    { provider: 'claude' as const, model: 'm', account: 'a1' },
+    { provider: 'claude' as const, model: 'm', account: 'a2' },
+  ] }]])
+  const harness = makePool({ claude: adapter }, {
+    families,
+    usage: (_provider, account) => async () => ({ supported: true, windows: windowsFor(account) }),
+    ...scheduling === undefined ? {} : { scheduling },
+  })
+  return { adapter, pool: harness.pool }
+}
+
+const CLAUDE_OPTIONS: GenerateOptions = { ...OPTIONS, provider: 'claude' }
+
+test('a Claude account at or above the session floor is not selected', async () => {
+  for (const [usedPercent, expected] of [[49, ['a1']], [50, ['a2']], [70, ['a2']]] as const) {
+    const { adapter, pool } = claudeFloorPool(account =>
+      account === 'a1' ? [{ kind: 'session', usedPercent }] : [{ kind: 'session', usedPercent: 10 }])
+    await collect(pool.stream(CLAUDE_OPTIONS))
+    assert.deepEqual(adapter.accounts, [...expected], `session ${String(usedPercent)}%`)
+  }
+})
+
+test('a Claude account at or above the weekly floor is not selected', async () => {
+  for (const [usedPercent, expected] of [[88, ['a1']], [89, ['a2']], [95, ['a2']]] as const) {
+    const { adapter, pool } = claudeFloorPool(account =>
+      account === 'a1' ? [{ kind: 'weekly', usedPercent }] : [{ kind: 'weekly', usedPercent: 10 }])
+    await collect(pool.stream(CLAUDE_OPTIONS))
+    assert.deepEqual(adapter.accounts, [...expected], `weekly ${String(usedPercent)}%`)
+  }
+})
+
+test('the floors are configurable, and other providers keep their own rule', async () => {
+  // Raised past the account's own usage, the same account becomes selectable again.
+  const raised = claudeFloorPool(
+    account => account === 'a1' ? [{ kind: 'session', usedPercent: 60 }] : [{ kind: 'session', usedPercent: 10 }],
+    { claudeSessionPercentFloor: 90 },
+  )
+  await collect(raised.pool.stream(CLAUDE_OPTIONS))
+  assert.deepEqual(raised.adapter.accounts, ['a1'])
+
+  // A codex account high in its weekly window is still selected: the floors are Claude's.
+  const codexAdapter = new FakeAdapter(() => serveOk())
+  const codex = makePool({ codex: codexAdapter }, {
+    usage: (_provider, account) => async () => ({
+      supported: true,
+      windows: [{ kind: 'weekly' as const, usedPercent: account === 'a1' ? 95 : 10 }],
+    }),
+  })
+  await collect(codex.pool.stream(OPTIONS))
+  assert.deepEqual(codexAdapter.accounts, ['a1'])
+})
+
+test('a Claude account past every floor leaves the pool with no usable member', async () => {
+  // Every member is past its floor, so the route reports the state that caused it rather than
+  // starting a turn it cannot finish.
+  const { pool } = claudeFloorPool(() => [{ kind: 'session', usedPercent: 60 }])
+  await assert.rejects(collect(pool.stream(CLAUDE_OPTIONS)), error => {
+    assert.equal((error as { code?: string }).code, 'RATE_LIMIT')
+    return true
+  })
 })

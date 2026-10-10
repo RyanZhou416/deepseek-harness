@@ -15,6 +15,15 @@ export interface PoolSchedulingPolicy {
   resetWeight: number
   /** ChatGPT remaining percentage at which gradual quota finishing begins; zero disables it. */
   codexDrainBelowPercent: number
+  /**
+   * Claude session-window percentage at which an account stops being selectable.
+   *
+   * The floor is a reserve, not a report: an account at or above it is left out of selection
+   * entirely, so a turn never starts on a window that is about to close.
+   */
+  claudeSessionPercentFloor: number
+  /** Claude weekly-window percentage at which an account stops being selectable. */
+  claudeWeeklyPercentFloor: number
   /** Maximum additive ChatGPT finishing preference. */
   codexDrainWeight: number
   /** Finite bonus for the existing fresh-week and expiring-reset-credit condition. */
@@ -30,6 +39,8 @@ export const PoolSchedulingSchema = z.object({
   otherResetHorizonMs: z.number().step(1).min(1).default(24 * 60 * 60_000),
   resetWeight: z.number().min(0).default(2),
   codexDrainBelowPercent: z.number().min(0).max(100).default(10),
+  claudeSessionPercentFloor: z.number().min(0).max(100).default(50),
+  claudeWeeklyPercentFloor: z.number().min(0).max(100).default(89),
   codexDrainWeight: z.number().min(0).default(2),
   freshCreditWeight: z.number().min(0).default(0.5),
   loadPenalty: z.number().min(0).default(1),
