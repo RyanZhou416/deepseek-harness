@@ -349,6 +349,25 @@ export function resolveRateLimitWait(config: RateLimitConfig | undefined, path: 
 }
 
 /**
+ * Failure codes every subscription route retries: the harness's transient
+ * defaults plus `MALFORMED_RESPONSE`.
+ *
+ * A stream payload these routes cannot parse is malformed, not fatal — the
+ * genuine client classifies it as malformed and retries the turn without
+ * streaming — so failing the turn on it would be stricter than the client the
+ * routes imitate. The retry-policy module keeps its default set private, so
+ * this route pins its own list.
+ */
+const SUBSCRIPTION_RETRYABLE_CODES: readonly string[] = Object.freeze([
+  'EMPTY_RESPONSE',
+  'RATE_LIMIT',
+  'SERVER',
+  'TIMEOUT',
+  'TRANSPORT',
+  'MALFORMED_RESPONSE',
+])
+
+/**
  * Resolve one route's retry policy, widening the delay ceiling to the
  * configured wait so a disclosed reset hours out is accepted rather than
  * refused.
@@ -376,6 +395,7 @@ export function subscriptionRetryPolicy(
   return resolveRetryPolicy({
     mode: 'normal',
     maxRetries: defaults.maxRetries,
+    retryableCodes: [...SUBSCRIPTION_RETRYABLE_CODES],
     backoff: {
       initialDelayMs: defaults.initialDelayMs,
       maxDelayMs,

@@ -5,6 +5,7 @@ import { resolvePoolScheduling } from '../src/providers/pool-scheduling.js'
 import { ToolCallId } from '../src/compat.js'
 import { AccountTokenManager } from '../src/providers/accounts.js'
 import assert from 'node:assert/strict'
+import { LlmError } from '@deepseek-ai/dsh-llm'
 import type { GenerateOptions, Message, StreamChunk } from '@deepseek-ai/dsh-llm'
 import type { AntigravitySession } from '../src/auth/store.js'
 import {
@@ -282,6 +283,22 @@ test('streamGenerateContent SSE and generateContent URL/forwarding are both supp
   }, calls))
   assert.equal(calls[0].init?.method, 'POST')
   assert.equal(new Headers(calls[0].init?.headers).get('authorization'), 'Bearer access-token')
+})
+
+test('streamAntigravity: a body that ends before a finish chunk fails as a retryable transport truncation', async () => {
+  const frame = { response: { candidates: [{ content: { parts: [{ text: 'hi' }] } }] } }
+  const chunks: StreamChunk[] = []
+  let failure: unknown
+  try {
+    for await (const chunk of streamAntigravity(byteStream(`data: ${JSON.stringify(frame)}\n\n`))) chunks.push(chunk)
+  } catch (error) {
+    failure = error
+  }
+  // What the stream already delivered stays delivered; the missing finish chunk is the
+  // failure, and the client retries it as a dropped connection.
+  assert.deepEqual(chunks.map(chunk => chunk.type), ['block-start', 'text-delta'])
+  assert.ok(failure instanceof LlmError, 'a truncated body throws')
+  assert.equal(failure.code, 'TRANSPORT', 'the retry policy repeats TRANSPORT')
 })
 
 /** Isolated accounts: no disk, OAuth, or real subscription calls. */

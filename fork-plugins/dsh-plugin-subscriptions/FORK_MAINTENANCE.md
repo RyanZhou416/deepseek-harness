@@ -38,6 +38,35 @@ restore six copies; keep the adapters' thin `clearAccountCatalog` / `listOwnMode
 the duplication ratchet after any change here: `package.json`'s `duplication` script holds
 `packages`/`scripts` at zero and the plugin path at a threshold just above what remains.
 
+### Wire fidelity, stream errors, and the store lock
+
+Four contracts the pinned wire and the credential lock depend on:
+
+- **Temperature is forwarded, stop is refused.** A caller-set `temperature` reaches the body
+  (absent leaves the library's own value); a non-empty `stop` rejects with `INVALID_REQUEST`
+  before assembly, because the pinned request shape has no stop-sequence field. The genuine
+  client's main-session body carries a temperature and no stop field at all.
+- **A truncated stream is a transport failure.** A body that ends before its terminal event
+  raises `TRANSPORT`, which the harness retries and the pool treats as a member switch; the
+  genuine client calls the same condition a dropped connection and retries it. `MALFORMED_RESPONSE`
+  is retryable on these routes through `subscriptionRetryPolicy`.
+- **The credential lock renews its lease.** A held lock touches its own directory every half
+  stale interval, and a lock whose lease expired is removed before the waiter retries, so a dead
+  holder never blocks a write and live work is never preempted mid-flight.
+- **The registered route reports the wrapped adapter's identity.** `AccountPreferencesAdapter`
+  delegates `providerInfo`, so each route's display name reaches the model picker instead of the
+  raw route id.
+
+**Preservation rule.** Keep every one of these on the plugin side: the harness's retryable-code
+set, its provider-info contract, and the client's own lock protocol are the references. Do not
+add a fallback that hides a refusal (a replayed reasoning item a gateway rejects must surface),
+and do not reintroduce a lock that never removes an abandoned one.
+
+**Focused verification.** `test/claude-wire.spec.ts` (temperature/stop), `test/translate.spec.ts`
+and `test/chat-completions.spec.ts` (stream classification), `test/store-lock.spec.ts` (lease and
+takeover, run repeatedly because it is concurrent), and `test/account-preferences.spec.ts`
+(identity delegation).
+
 ### Removed upstream indirection
 
 Four pieces of upstream code were removed here and must not come back through an upstream
@@ -103,6 +132,14 @@ Files: `src/providers/cursor.ts`, `src/auth/store.ts` (`CursorSession`), `src/in
 - Grok 4.7 advertises `context=500k`, and the local SDK registry rejects that value with `Invalid parameters for registry model`. The desktop app does not use this local path, so 500k works there. On that error, retry once with the next smaller context (`256k`) and remember the rejected value for the process. Keep the selected effort and fast. Do not switch the user onto the Auto router (`default`).
 - Assistant and thinking events arrive one token at a time. Keep one prose block open across consecutive events of the same kind. Closing a block per token makes the host render one token per line.
 - The usage popover must set `backdrop-filter: var(--dsw-menu-backdrop-filter)` and `--dsw-elevation-stroke-color: var(--dsw-alias-border-l1)` on top of `var(--dsw-specific-menu)`. The fill alone is translucent, so chat text shows through.
+
+### Codex reasoning replay and shared tool-call pairing
+
+Files: `src/providers/reasoning-replay.ts`, `src/translate/tool-pairing.ts`, `src/providers/codex.ts`, `src/providers/copilot.ts`, `src/providers/grok.ts`, `src/index.ts`, `test/codex.spec.ts`, `test/tool-pairing.spec.ts`.
+
+- Codex asks for `reasoning.encrypted_content` on every request, so the completed reasoning items of its response must be captured and replayed on the next request of the same conversation, the way Copilot's already were. `reasoning-replay.ts` owns the capture, the ACCOUNT × CONVERSATION × MODEL scope, the sliding TTL, and the per-scope caps for both adapters; the host drops the store on every codex and copilot auth transition. Keep one copy of that store shared by both adapters.
+- Every Responses route repairs tool-call pairing in its body builder with `reconcileResponsesToolCalls`, and Copilot's chat wire repairs it in `copilotChatRequestBody` with `reconcileChatToolCalls`: a `function_call` without its output, an output without its call, and the chat-wire equivalents are all request errors. The repair is local to the assembled request — the durable history is never mutated.
+- Focused verification: `test/codex.spec.ts` and `test/tool-pairing.spec.ts`, plus the pairing cases in `test/grok.spec.ts` and `test/copilot.spec.ts`.
 
 ### ChatGPT reset credits
 

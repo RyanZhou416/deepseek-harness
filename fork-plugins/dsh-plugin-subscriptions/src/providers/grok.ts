@@ -20,6 +20,7 @@ import type { PoolAdapter } from './pool.js'
 import type { AttachmentStore } from '@deepseek-ai/dsh-attachment'
 import { resolveImages } from '../translate/resolved.js'
 import { streamResponses, toResponsesInput, toResponsesTools } from '../translate/responses.js'
+import { reconcileResponsesToolCalls } from '../translate/tool-pairing.js'
 import type { ResponsesRequestInput } from '../translate/responses.js'
 import {
   httpLlmError,
@@ -578,6 +579,9 @@ export async function fetchGrokModels(
  * A reported xAI 400 invalid-argument on tool-less calls motivated omitting
  * tool controls when no tools are supplied. Keep this endpoint-specific
  * compatibility measure separate from assumptions about other backends.
+ * Tool-call pairing is repaired here, as on every Responses route: the input
+ * schema rejects a `function_call` without its output and an output without
+ * its call.
  */
 export function grokRequestBody(
   options: GenerateOptions,
@@ -586,7 +590,7 @@ export function grokRequestBody(
   return {
     model: options.model,
     ...resolved.instructions === undefined ? {} : { instructions: resolved.instructions },
-    input: resolved.input,
+    input: reconcileResponsesToolCalls(resolved.input),
     ...options.tools !== undefined && options.tools.length > 0
       ? { tools: toResponsesTools(options.tools), tool_choice: 'auto', parallel_tool_calls: true }
       : {},

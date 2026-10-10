@@ -946,10 +946,12 @@ export function apply(ctx: Context, config: Config): void {
     if (provider === 'codex') refreshCodexPresence()
     subscriptionsAuth?.forgetResetCredits(provider, account)
     if (provider === 'codex' || provider === 'grok') imagePool.clear(provider, account)
-    // Login, logout, and credential death all pass through here; a copilot
-    // auth transition also drops the adapter's captured reasoning replay
-    // state (isolation is already account-scoped — this is memory hygiene).
+    // Login, logout, and credential death all pass through here; a codex or
+    // copilot auth transition also drops the adapter's captured reasoning
+    // replay state (isolation is already account-scoped — this is memory
+    // hygiene).
     if (provider === 'copilot') copilotAdapter?.clearReplayState()
+    if (provider === 'codex') codexAdapter?.clearReplayState()
     adapters.get(provider)?.clearAccountCatalog(account)
     poolHealth?.clear(provider, account)
     poolUsage?.invalidate(provider, account)

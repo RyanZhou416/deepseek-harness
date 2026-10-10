@@ -220,6 +220,34 @@ test('copilotResponsesRequestBody maps the Responses wire shape', () => {
   assert.equal(bare.tool_choice, 'auto')
 })
 
+test('copilotResponsesRequestBody repairs an unanswered tool call', () => {
+  // The Responses input schema rejects a function_call without its output and
+  // an output whose call is absent; both are repaired in the request.
+  const body = copilotResponsesRequestBody(BODY_OPTIONS, {
+    input: [
+      { type: 'function_call', call_id: 'call-lost', name: 'bash', arguments: '{}' },
+      { type: 'function_call_output', call_id: 'call-absent', output: 'stale' },
+    ],
+  })
+  const input = body.input as Record<string, unknown>[]
+  assert.deepEqual(input.map(item => item.call_id), ['call-lost', 'call-lost'])
+  assert.equal(input[1]?.type, 'function_call_output')
+  assert.match(String(input[1]?.output), /outcome is unknown/)
+})
+
+test('copilotChatRequestBody repairs tool-call pairing on the chat wire', () => {
+  // The chat message schema requires each assistant tool_calls entry to be
+  // answered by a tool message, and rejects a tool message with no call.
+  const body = copilotChatRequestBody(BODY_OPTIONS, [
+    { role: 'assistant', content: '', tool_calls: [{ id: 'call-lost', type: 'function', function: { name: 'bash', arguments: '{}' } }] },
+    { role: 'tool', tool_call_id: 'call-absent', content: 'stale' },
+  ])
+  const messages = body.messages as Record<string, unknown>[]
+  assert.deepEqual(messages.map(message => message.role), ['assistant', 'tool'])
+  assert.equal(messages[1]?.tool_call_id, 'call-lost')
+  assert.match(String(messages[1]?.content), /outcome is unknown/)
+})
+
 test('copilotWireFor defaults to chat completions unless the catalog says responses', () => {
   assert.equal(copilotWireFor(undefined), 'chat-completions')
   const chat: DiscoveredModel = { id: 'gpt-5-mini', name: 'GPT-5 mini', copilotWire: 'chat-completions' }

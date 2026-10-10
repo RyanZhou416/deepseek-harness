@@ -356,6 +356,21 @@ test('waiting raises the disclosed-wait ceiling, not the backoff ceiling', () =>
   assert.ok(policy.mode === 'normal' && policy.retryableCodes.includes('RATE_LIMIT'))
 })
 
+test('subscription routes retry the harness transient codes plus MALFORMED_RESPONSE', () => {
+  const policy = subscriptionRetryPolicy(
+    DEFAULT_RETRY,
+    { wait: true, maxWaitMs: DEFAULT_RATE_LIMIT_MAX_WAIT_MS },
+    'test: retryPolicy',
+  )
+  // Eligibility is the harness's transient defaults plus MALFORMED_RESPONSE: a route that
+  // reads back a stream payload it cannot parse would otherwise fail a turn the genuine
+  // client retries without streaming.
+  assert.deepEqual(
+    policy.mode === 'normal' ? policy.retryableCodes : undefined,
+    ['EMPTY_RESPONSE', 'RATE_LIMIT', 'SERVER', 'TIMEOUT', 'TRANSPORT', 'MALFORMED_RESPONSE'],
+  )
+})
+
 test('opting out of waiting restores the route defaults exactly', () => {
   const policy = subscriptionRetryPolicy(
     DEFAULT_RETRY,

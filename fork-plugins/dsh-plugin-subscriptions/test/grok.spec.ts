@@ -10,8 +10,10 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { MessageId } from '@deepseek-ai/dsh-llm'
 import type { GenerateOptions } from '@deepseek-ai/dsh-llm'
+import { ToolCallId } from '../src/compat.js'
 import { GrokAdapter, GROK_API_URL } from '../src/providers/grok.js'
 import { AccountTokenManager } from '../src/providers/accounts.js'
+import type { FetchFn } from '../src/providers/common.js'
 import type { GrokSession } from '../src/auth/store.js'
 
 const grokSession: GrokSession = {
@@ -126,4 +128,34 @@ test('the request omits prompt_cache_key entirely when no sessionId is set', asy
   } finally {
     restore()
   }
+})
+
+test('grok repairs an unanswered tool call before dispatch', async () => {
+  // The Responses input schema rejects a function_call without its output;
+  // a history whose durable log kept the call without a result must be
+  // repaired in the request, never in the history.
+  const calls: { body: Record<string, unknown> }[] = []
+  const fetchFn = ((input: RequestInfo | URL, init?: RequestInit) => {
+    calls.push({ body: JSON.parse(String(init?.body ?? '{}')) as Record<string, unknown> })
+    return Promise.resolve(new Response(COMPLETED_SSE))
+  }) as FetchFn
+  const adapter = new GrokAdapter({
+    models: [{ id: 'grok-4', name: 'Grok 4' }],
+    streamIdleTimeoutMs: 1000,
+    tokens: memoryTokens(grokSession),
+    discovery: false,
+    fetchFn,
+  })
+  const history: GenerateOptions['messages'] = [{
+    id: MessageId('m-lost'),
+    role: 'assistant',
+    content: [{ type: 'tool-call', id: ToolCallId('call-lost'), name: 'bash', arguments: '{"cmd":"ls"}' }],
+    source: { kind: 'model', provider: 'grok', model: 'grok-4' },
+  }]
+  await drain(adapter, { ...STREAM_OPTIONS, messages: history })
+  const input = calls[0]?.body.input as Record<string, unknown>[]
+  assert.deepEqual(input.map(item => item.call_id), ['call-lost', 'call-lost'])
+  assert.equal(input[1]?.type, 'function_call_output')
+  assert.match(String(input[1]?.output), /outcome is unknown/)
+  assert.equal(history.length, 1, 'request repair must not mutate history')
 })

@@ -113,3 +113,19 @@ test('singleton and explicit families/tiers enforce account and model exclusion 
     assert.ok(raw.calls.includes('stream:b:m:/模型'))
   } finally { await rm(dir, { recursive: true, force: true }) }
 })
+
+test('the registered route reports the wrapped adapter\'s display identity', () => {
+  // The harness reads providerInfo for every registered route and shows the name in the model
+  // picker; the registered adapter is this wrapper, so it has to pass the name through.
+  const adapter = new AccountPreferencesAdapter({
+    provider: 'claude',
+    adapter: {
+      providerInfo: () => ({ id: 'claude', name: 'Claude' }),
+      providerRetryPolicy: () => undefined,
+    } as never,
+    settings: new ProviderSettingsStore(),
+    accounts: async () => [],
+    pool: () => undefined,
+  })
+  assert.deepEqual(adapter.providerInfo('claude'), { id: 'claude', name: 'Claude' })
+})

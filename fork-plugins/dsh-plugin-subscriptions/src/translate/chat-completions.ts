@@ -415,6 +415,9 @@ export async function* streamChatCompletions(
   }
   yield* translator.flush()
   if (!translator.terminated) {
-    throw new LlmError('chat completions SSE stream ended before a finish chunk', 'STREAM_CLOSED')
+    // The body ended without its terminal event: the wire dropped mid-response, which the
+    // client retries as a dropped connection, so this takes the retryable transport code.
+    // A payload that cannot be parsed is a different failure and keeps MALFORMED_RESPONSE.
+    throw new LlmError('chat completions SSE stream ended before a finish chunk', 'TRANSPORT')
   }
 }

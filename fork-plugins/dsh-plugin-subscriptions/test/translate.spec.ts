@@ -18,6 +18,7 @@ import {
 import type { ReasoningReplayItem, ResponsesStreamEvent } from '../src/translate/responses.js'
 import {
   AnthropicStreamTranslator,
+  streamAnthropic,
   toAnthropicMessages,
   toAnthropicSystem,
   toAnthropicTools,
@@ -1005,4 +1006,52 @@ test('Anthropic translator: a refusal is reported as its own finish reason', () 
   const chunks = drain(new AnthropicStreamTranslator(), events)
   const finish = chunks.find(chunk => chunk.type === 'finish')
   assert.deepEqual(finish, { type: 'finish', reason: { kind: 'refusal' } })
+})
+
+/** One SSE frame carrying a stream event. */
+function anthropicFrame(type: string, payload: unknown): string {
+  return `event: ${type}\ndata: ${JSON.stringify(payload)}\n\n`
+}
+
+/** A response body that carries exactly the given frames and then ends. */
+function anthropicBody(frames: readonly string[]): ReadableStream<Uint8Array> {
+  const encoder = new TextEncoder()
+  return new ReadableStream<Uint8Array>({
+    start(controller) {
+      for (const frame of frames) controller.enqueue(encoder.encode(frame))
+      controller.close()
+    },
+  })
+}
+
+/** A complete text response: message_start through message_stop. */
+const TEXT_RESPONSE: readonly string[] = [
+  anthropicFrame('message_start', { type: 'message_start', message: { usage: { input_tokens: 5 } } }),
+  anthropicFrame('content_block_start', { type: 'content_block_start', index: 0, content_block: { type: 'text' } }),
+  anthropicFrame('content_block_delta', { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'hi' } }),
+  anthropicFrame('content_block_stop', { type: 'content_block_stop', index: 0 }),
+  anthropicFrame('message_delta', { type: 'message_delta', delta: { stop_reason: 'end_turn' }, usage: { output_tokens: 1 } }),
+  anthropicFrame('message_stop', { type: 'message_stop' }),
+]
+
+test('streamAnthropic: a body that ends before message_stop fails as a retryable transport truncation', async () => {
+  const chunks: StreamChunk[] = []
+  let failure: unknown
+  try {
+    for await (const chunk of streamAnthropic(anthropicBody(TEXT_RESPONSE.slice(0, -1)))) chunks.push(chunk)
+  } catch (error) {
+    failure = error
+  }
+  // What the stream already delivered stays delivered; the missing terminal event is the
+  // failure, and the client retries it as a dropped connection.
+  assert.deepEqual(chunks.at(-1), { type: 'block-end', index: 0, block: { type: 'text', text: 'hi' } })
+  assert.ok(failure instanceof LlmError, 'a truncated body throws')
+  assert.equal(failure.code, 'TRANSPORT', 'the retry policy repeats TRANSPORT')
+})
+
+test('streamAnthropic: a body with its terminal event completes without throwing', async () => {
+  const chunks: StreamChunk[] = []
+  for await (const chunk of streamAnthropic(anthropicBody(TEXT_RESPONSE))) chunks.push(chunk)
+  assert.ok(chunks.some(chunk => chunk.type === 'text-delta' && chunk.text === 'hi'))
+  assert.deepEqual(chunks.at(-1), { type: 'finish', reason: { kind: 'stop' } })
 })

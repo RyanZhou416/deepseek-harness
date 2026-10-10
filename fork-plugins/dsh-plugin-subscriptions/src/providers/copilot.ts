@@ -35,6 +35,8 @@ import {
 } from '../translate/chat-completions.js'
 import { streamResponses, toResponsesInput, toResponsesTools } from '../translate/responses.js'
 import type { ReasoningReplayItem, ResponsesRequestInput, ResponsesStreamEvent } from '../translate/responses.js'
+import { reconcileChatToolCalls, reconcileResponsesToolCalls } from '../translate/tool-pairing.js'
+import { ReasoningCapture, ReasoningReplayStore, reasoningReplayScope } from './reasoning-replay.js'
 import {
   httpLlmError,
   idleWatchdog,
@@ -424,6 +426,9 @@ export function copilotRequestWire(
  * `max_completion_tokens` — the newer OpenAI-family models on Copilot reject
  * the legacy `max_tokens` parameter outright (HTTP 400 "Unsupported
  * parameter"), and the rest of the catalog accepts the new spelling.
+ * Tool-call pairing is repaired here, as on the Responses route: the chat
+ * message schema rejects a `tool_calls` entry without its `tool` message and
+ * a `tool` message without its call.
  * @param options - the harness generate options.
  * @param messages - translated wire messages (images pre-resolved).
  * @returns the JSON body.
@@ -434,7 +439,7 @@ export function copilotChatRequestBody(
 ): Record<string, unknown> {
   return {
     model: options.model,
-    messages,
+    messages: reconcileChatToolCalls(messages),
     ...options.tools !== undefined && options.tools.length > 0
       ? { tools: toChatTools(options.tools), tool_choice: 'auto' }
       : {},
@@ -454,6 +459,9 @@ export function copilotChatRequestBody(
 /**
  * The Responses request body for one generation (the wire the `/responses`-
  * only model families speak). Usage arrives on `response.completed`.
+ * Tool-call pairing is repaired here, as on every Responses route: the input
+ * schema rejects a `function_call` without its output and an output without
+ * its call.
  * @param options - the harness generate options.
  * @param resolved - translated instructions + input (images pre-resolved).
  * @returns the JSON body.
@@ -465,7 +473,7 @@ export function copilotResponsesRequestBody(
   return {
     model: options.model,
     ...resolved.instructions !== undefined ? { instructions: resolved.instructions } : {},
-    input: resolved.input,
+    input: reconcileResponsesToolCalls(resolved.input),
     ...options.tools !== undefined && options.tools.length > 0
       ? { tools: toResponsesTools(options.tools, { strict: false }), tool_choice: 'auto' }
       : {},
@@ -480,27 +488,6 @@ export function copilotResponsesRequestBody(
     // asked for; for non-reasoning models the include is a no-op]
     include: ['reasoning.encrypted_content'],
     stream: true,
-  }
-}
-
-/**
- * The replayable form of one completed reasoning item: the COMPLETE item as
- * the gateway delivered it on `response.output_item.done` — its ORIGINAL id
- * (captured before the stable-key rewrite), summary parts, status, and the
- * encrypted payload. A reasoning item's `id` and `summary` are not optional
- * in the Responses input schema, so an item missing its id or its blob is
- * not replayable and degrades to the no-replay path instead of risking an
- * invalid input item.
- */
-function completedReasoningItem(item: NonNullable<ResponsesStreamEvent['item']>): ReasoningReplayItem | undefined {
-  if (typeof item.encrypted_content !== 'string' || item.encrypted_content.length === 0) return undefined
-  if (typeof item.id !== 'string' || item.id.length === 0) return undefined
-  return {
-    type: 'reasoning',
-    id: item.id,
-    ...Array.isArray(item.summary) ? { summary: item.summary } : {},
-    ...typeof item.status === 'string' && item.status.length > 0 ? { status: item.status } : {},
-    encrypted_content: item.encrypted_content,
   }
 }
 
@@ -526,8 +513,7 @@ export class CopilotResponsesItemNormalizer {
   private adds = 0
   private lastKey = 'copilot-item-0'
   /** Call ids and completed reasoning items collected for the open response. */
-  private capturedCallIds: string[] = []
-  private capturedReasoning: ReasoningReplayItem[] = []
+  private readonly capture: ReasoningCapture
 
   /**
    * @param onCaptured - fired at each `response.completed` that produced BOTH
@@ -535,7 +521,9 @@ export class CopilotResponsesItemNormalizer {
    *   call ids and replayable reasoning items so the adapter can replay them
    *   on the next request.
    */
-  constructor(private readonly onCaptured?: (callIds: string[], items: ReasoningReplayItem[]) => void) {}
+  constructor(onCaptured?: (callIds: string[], items: ReasoningReplayItem[]) => void) {
+    this.capture = new ReasoningCapture(onCaptured)
+  }
 
   /**
    * [2026-08-23]-[a single arrival-order ordinal mis-buckets every event after
@@ -551,11 +539,15 @@ export class CopilotResponsesItemNormalizer {
   }
 
   /**
-   * Rewrite one parsed Responses event.
+   * Capture the event's completed reasoning, then rewrite it to carry a
+   * stable item key.
    * @param event - the event as parsed off the wire.
    * @returns the event with a stable item key.
    */
   push(event: ResponsesStreamEvent): ResponsesStreamEvent {
+    // Capture runs on the RAW event, before every rewrite below: a replay
+    // bundle must carry the gateway's own call and item ids.
+    this.capture.push(event)
     if (event.type === 'response.output_item.added') {
       this.adds += 1
       const key = event.output_index !== undefined
@@ -563,35 +555,17 @@ export class CopilotResponsesItemNormalizer {
         : `copilot-item-${String(this.adds)}`
       this.lastKey = key
       const item = event.item
-      if (item?.type === 'function_call' && typeof item.call_id === 'string' && item.call_id.length > 0) {
-        this.capturedCallIds.push(item.call_id)
-      }
       return item === undefined
         ? event
         : { ...event, item: { ...item, id: key } }
     }
     if (event.type === 'response.output_item.done') {
       const item = event.item
-      if (item?.type === 'reasoning') {
-        // Capture runs BEFORE the stable-key rewrite: the replay item must
-        // carry the item's original gateway id, not the translator key.
-        const captured = completedReasoningItem(item)
-        if (captured !== undefined) this.capturedReasoning.push(captured)
-      }
       return item === undefined
         ? event
         : { ...event, item: { ...item, id: this.keyFor(event) } }
     }
-    if (event.type === 'response.completed') {
-      // Both sides present is the only replayable response; clear either way —
-      // one SSE stream may carry multiple responses.
-      if (this.capturedCallIds.length > 0 && this.capturedReasoning.length > 0) {
-        this.onCaptured?.(this.capturedCallIds, this.capturedReasoning)
-      }
-      this.capturedCallIds = []
-      this.capturedReasoning = []
-      return event
-    }
+    if (event.type === 'response.completed') return event
     if (event.item_id === undefined) return event
     return { ...event, item_id: this.keyFor(event) }
   }
@@ -624,33 +598,17 @@ export interface CopilotAdapterOptions {
   defaultEffortOf?: (model: string) => string | undefined
 }
 
-/** One captured replay bundle: a response's completed reasoning items. */
-interface ReasoningReplayEntry {
-  /** Completed reasoning items in output order, replayed ahead of the response's first function call. */
-  items: ReasoningReplayItem[]
-  /** Capture time (epoch ms); entries older than the TTL answer as misses. */
-  at: number
-}
-
 /** Copilot wire adapter: one instance serves the `copilot` provider route. */
 export class CopilotAdapter extends LlmAdapter {
   private readonly catalogs: ProviderCatalog
   /**
-   * [2026-08-23]-[a reasoning model continuing a tool chain must get its
-   * reasoning back or it restarts from scratch every tool round trip; the
-   * items live in ADAPTER memory because dsh-llm's reasoning ContentBlock is
-   * a closed shape that cannot carry them through the harness]-[entries are
-   * namespaced per ACCOUNT × CONVERSATION × MODEL, idle out via a sliding
-   * TTL, and the whole store is dropped on auth transitions, so replay
-   * degrades to the old behavior instead of leaking across contexts]
+   * Completed reasoning captured off the response stream, replayed on the next
+   * request of the same conversation: a reasoning model continuing a tool
+   * chain must get its reasoning back or it restarts from scratch every tool
+   * round trip. The store is namespaced per ACCOUNT × CONVERSATION × MODEL,
+   * idles entries out via a sliding TTL, and is dropped on auth transitions.
    */
-  private readonly replayByScope = new Map<string, Map<string, ReasoningReplayEntry>>()
-  /** Call-id entries kept per scope; see {@link captureReasoning}. */
-  private static readonly REPLAY_CALL_LIMIT = 64
-  /** Conversation scopes kept at once; bounds memory when many sessions interleave. */
-  private static readonly REPLAY_SCOPE_LIMIT = 32
-  /** How long a captured entry stays replayable; tool round trips take minutes, not hours. */
-  private static readonly REPLAY_TTL_MS = 30 * 60_000
+  private readonly replay = new ReasoningReplayStore()
 
   constructor(private readonly options: CopilotAdapterOptions) {
     super()
@@ -739,93 +697,6 @@ export class CopilotAdapter extends LlmAdapter {
   }
 
   /**
-   * The replay scope isolating one ACCOUNT × CONVERSATION × MODEL. The
-   * account identity is the session's long-lived GitHub token (stable across
-   * Copilot-token refreshes, different per GitHub login); the conversation is
-   * the loop-stamped `sessionId`, falling back to the first message's id
-   * when a hand-built request carries no session stamp; the model separates
-   * wire families. A call id captured in one scope is invisible to every
-   * other scope, so reused ids cannot leak reasoning across accounts,
-   * conversations, or models.
-   */
-  private replayScope(tokenKey: string, options: GenerateOptions): string {
-    const conversation = options.sessionId !== undefined
-      ? `session:${String(options.sessionId)}`
-      : options.messages[0] !== undefined
-        ? `anchor:${String(options.messages[0].id)}`
-        : 'conversation:none'
-    return `${tokenKey}\u0000${conversation}\u0000${options.model}`
-  }
-
-  /**
-   * Store one response's completed reasoning items behind every call id it
-   * produced, inside one replay scope. Retention: a CONSUMED entry is kept —
-   * every later round of the same conversation replays ALL its earlier
-   * function_calls — until it idles out of the TTL (see {@link replayFor})
-   * or the per-scope entry cap evicts it oldest-first. All calls of one
-   * response share ONE entry object: toResponsesInput dedupes replays by
-   * array reference, so parallel calls replay the items once instead of once
-   * per call.
-   */
-  private captureReasoning(
-    scope: string,
-    callIds: readonly string[],
-    items: readonly ReasoningReplayItem[],
-  ): void {
-    let entries = this.replayByScope.get(scope)
-    if (entries === undefined) {
-      entries = new Map<string, ReasoningReplayEntry>()
-      this.replayByScope.set(scope, entries)
-    } else {
-      // Refresh the scope's recency so an active conversation is never the
-      // scope-cap eviction victim.
-      this.replayByScope.delete(scope)
-      this.replayByScope.set(scope, entries)
-    }
-    const now = Date.now()
-    for (const [callId, entry] of entries) {
-      if (now - entry.at >= CopilotAdapter.REPLAY_TTL_MS) entries.delete(callId)
-    }
-    const entry: ReasoningReplayEntry = { items: [...items], at: now }
-    for (const callId of callIds) entries.set(callId, entry)
-    // Blobs reach tens of kilobytes; cap the ENTRY count and evict the oldest
-    // by insertion order rather than tracking bytes — eviction merely degrades
-    // ancient calls to the pre-capture behavior.
-    while (entries.size > CopilotAdapter.REPLAY_CALL_LIMIT) {
-      const oldest = entries.keys().next().value
-      if (oldest === undefined) break
-      entries.delete(oldest)
-    }
-    while (this.replayByScope.size > CopilotAdapter.REPLAY_SCOPE_LIMIT) {
-      const oldest = this.replayByScope.keys().next().value
-      if (oldest === undefined) break
-      this.replayByScope.delete(oldest)
-    }
-  }
-
-  /**
-   * The replay items for one call id in one scope, when still fresh. The TTL
-   * bounds IDLE time, not total age: a hit refreshes the entry (and its
-   * eviction recency), so an ongoing conversation keeps its chain alive
-   * while a conversation that stopped asking forgets within the TTL. An
-   * absent or aged-out entry answers `undefined` — the no-replay
-   * degradation, never an error.
-   */
-  private replayFor(scope: string, callId: string): readonly ReasoningReplayItem[] | undefined {
-    const entries = this.replayByScope.get(scope)
-    const entry = entries?.get(callId)
-    if (entries === undefined || entry === undefined) return undefined
-    const now = Date.now()
-    if (now - entry.at >= CopilotAdapter.REPLAY_TTL_MS) return undefined
-    entry.at = now
-    entries.delete(callId)
-    entries.set(callId, entry)
-    this.replayByScope.delete(scope)
-    this.replayByScope.set(scope, entries)
-    return entry.items
-  }
-
-  /**
    * Drop every captured replay entry. Lookup correctness never depends on
    * the call — the scope already carries the account identity — but the host
    * wiring invokes this on every copilot auth transition (login, logout,
@@ -834,7 +705,7 @@ export class CopilotAdapter extends LlmAdapter {
    * bounded by the TTL and the caps.
    */
   clearReplayState(): void {
-    this.replayByScope.clear()
+    this.replay.clear()
   }
 
   override async resolveModel(provider: string, model: string): Promise<LlmResolvedModelInfo> {
@@ -895,10 +766,9 @@ export class CopilotAdapter extends LlmAdapter {
         options,
       )
       let session = await this.options.tokens.session(account)
-      // Replay scope: account identity × conversation × model (see
-      // replayScope); a Copilot-token refresh preserves the GitHub token, so
-      // the 401 retry below reuses it too.
-      const scope = this.replayScope(session.refreshToken, options)
+      // Replay scope: account identity × conversation × model. A Copilot-token
+      // refresh preserves the GitHub token, so the 401 retry below reuses it.
+      const scope = reasoningReplayScope(session.refreshToken, options)
       let response = await this.request(options, session, watchdog.signal, wire, scope)
       if (response.status === 401) {
         // One forced refresh + retry on an unexpired-but-rejected token. The
@@ -924,7 +794,7 @@ export class CopilotAdapter extends LlmAdapter {
       if (wire === 'responses') {
         // The normalizer doubles as the capture point for completed reasoning.
         const normalizer = new CopilotResponsesItemNormalizer((callIds, items) => {
-          this.captureReasoning(scope, callIds, items)
+          this.replay.capture(scope, callIds, items)
         })
         yield* streamResponses(response.body, pulse, event => normalizer.push(event))
       } else {
@@ -951,7 +821,7 @@ export class CopilotAdapter extends LlmAdapter {
         messages,
         options.system,
         // Captured completed reasoning replays ahead of its tool call.
-        callId => this.replayFor(replayScopeKey, callId),
+        callId => this.replay.replayFor(replayScopeKey, callId),
       ))
       : copilotChatRequestBody(options, toChatMessages(messages, options.system))
     return proxiedFetch(wire === 'responses' ? COPILOT_RESPONSES_URL : COPILOT_API_URL, {

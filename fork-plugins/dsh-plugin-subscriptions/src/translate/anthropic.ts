@@ -971,5 +971,8 @@ export async function* streamAnthropic(
     yield* translator.push(event)
     if (translator.terminated) return
   }
-  throw new LlmError('Anthropic SSE stream ended before message_stop', 'STREAM_CLOSED')
+  // The body ended without its terminal event: the wire dropped mid-response, which the
+  // client retries as a dropped connection, so this takes the retryable transport code.
+  // A payload that cannot be parsed is a different failure and keeps MALFORMED_RESPONSE.
+  throw new LlmError('Anthropic SSE stream ended before message_stop', 'TRANSPORT')
 }

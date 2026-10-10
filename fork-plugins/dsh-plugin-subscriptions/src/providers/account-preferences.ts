@@ -39,6 +39,16 @@ export class AccountPreferencesAdapter extends LlmAdapter {
   override providerRetryPolicy(provider: string) {
     return this.options.adapter.providerRetryPolicy(provider)
   }
+  /**
+   * The wrapped adapter's own display identity.
+   *
+   * The harness reads this for every registered route and shows the name in the model picker for
+   * a route that declares no provider directory, which is how these routes appear; without the
+   * delegation each adapter's name would be replaced by the raw route id.
+   */
+  override providerInfo(provider: string) {
+    return this.options.adapter.providerInfo(provider)
+  }
   private preference(account: string): AccountPreferences | undefined {
     const accounts = this.options.settings.get(this.options.provider).accounts
     return accounts && Object.hasOwn(accounts, account) ? accounts[account] : undefined

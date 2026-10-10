@@ -22,6 +22,8 @@ import type { AttachmentStore } from '@deepseek-ai/dsh-attachment'
 import { resolveImages } from '../translate/resolved.js'
 import { streamResponses, toResponsesInput, toResponsesTools } from '../translate/responses.js'
 import type { ResponsesRequestInput } from '../translate/responses.js'
+import { reconcileResponsesToolCalls } from '../translate/tool-pairing.js'
+import { ReasoningCapture, ReasoningReplayStore, reasoningReplayScope } from './reasoning-replay.js'
 import {
   deterministicSessionId,
   effortDisplayName,
@@ -790,41 +792,6 @@ function normalizeCodexCallIds(input: ResponsesRequestInput['input']): Responses
   })
 }
 
-/** Text marking a repaired tool output as an unknown outcome; the model must verify before retrying. */
-export const CODEX_UNKNOWN_TOOL_OUTCOME = 'The tool call has no recorded result. Its outcome is unknown; verify external state before retrying any operation that may have side effects.'
-
-/**
- * Reconcile one Responses input's tool-call pairing after id normalization:
- * every `function_call` gets an output and every `function_call_output`
- * matches a call. Missing outputs become error-style outputs whose text marks
- * the outcome unknown; orphan outputs are dropped. Duplicate calls of one id
- * receive exactly one repair output. The request is local repair only: the
- * durable history stays authoritative and unchanged.
- * @param input - normalized Responses input items.
- * @returns the same array when already balanced, otherwise a repaired array.
- */
-export function reconcileResponsesToolCalls(input: ResponsesRequestInput['input']): ResponsesRequestInput['input'] {
-  const calls = new Set<string>()
-  const outputs = new Set<string>()
-  for (const item of input) {
-    if (item.type === 'function_call' && typeof item.call_id === 'string') calls.add(item.call_id)
-    else if (item.type === 'function_call_output' && typeof item.call_id === 'string') outputs.add(item.call_id)
-  }
-  const missing = new Set([...calls].filter(callId => !outputs.has(callId)))
-  if (missing.size === 0 && [...outputs].every(callId => calls.has(callId))) return input
-  const balanced: ResponsesRequestInput['input'] = []
-  for (const item of input) {
-    if (item.type === 'function_call_output' && (typeof item.call_id !== 'string' || !calls.has(item.call_id))) {
-      continue
-    }
-    balanced.push(item)
-    if (item.type === 'function_call' && typeof item.call_id === 'string' && missing.delete(item.call_id)) {
-      balanced.push({ type: 'function_call_output', call_id: item.call_id, output: CODEX_UNKNOWN_TOOL_OUTCOME })
-    }
-  }
-  return balanced
-}
-
 /**
  * The Responses request body for one generation. A fast-tier request (the
  * composer Speed toggle, the codex CLI's fast mode) carries
@@ -860,6 +827,16 @@ export function codexRequestBody(
 /** Codex wire adapter: one instance serves the `codex` provider route. */
 export class CodexAdapter extends LlmAdapter {
   private readonly catalogs: ProviderCatalog
+  /**
+   * Completed reasoning captured off the response stream, replayed on the next
+   * request of the same conversation: the codex backend returns an encrypted
+   * reasoning item only because the request asked for it, and a reasoning
+   * model continuing a tool chain must get that item back or it restarts from
+   * scratch every tool round trip. The store is namespaced per
+   * ACCOUNT × CONVERSATION × MODEL, idles entries out via a sliding TTL, and
+   * is dropped on auth transitions.
+   */
+  private readonly replay = new ReasoningReplayStore()
 
   constructor(private readonly options: CodexAdapterOptions) {
     super()
@@ -882,6 +859,18 @@ export class CodexAdapter extends LlmAdapter {
   /** Drop cached catalogs after login/logout so the next list does not reuse a stale plan. */
   clearAccountCatalog(account?: string): void {
     this.catalogs.invalidate(account)
+  }
+
+  /**
+   * Drop every captured replay entry. Lookup correctness never depends on the
+   * call — the scope already carries the account identity — but the host
+   * wiring invokes this on every codex auth transition (login, logout,
+   * credential death) so a switched account's memory never holds the previous
+   * account's encrypted reasoning at all; conversation teardown is bounded by
+   * the TTL and the caps.
+   */
+  clearReplayState(): void {
+    this.replay.clear()
   }
 
   override providerInfo(provider: string): LlmProviderInfo {
@@ -1040,17 +1029,21 @@ export class CodexAdapter extends LlmAdapter {
     try {
       const key = account ?? await this.options.tokens.defaultAccount()
       let session = await this.options.tokens.session(key)
-      let response = await this.request(options, session, watchdog.signal)
+      // Replay scope: account identity × conversation × model. The ChatGPT
+      // account id is the session's long-lived identity, so an access-token
+      // refresh (and the 401 retry below) reuses the same scope.
+      const scope = reasoningReplayScope(session.accountId, options)
+      let response = await this.request(options, session, watchdog.signal, scope)
       if (response.status === 401) {
         // One forced refresh + retry on an unexpired-but-rejected token.
         session = await this.options.tokens.session(key, true)
-        response = await this.request(options, session, watchdog.signal)
+        response = await this.request(options, session, watchdog.signal, scope)
       }
       if (response.status === 429 && this.options.recoverQuota !== undefined) {
         if (key !== undefined && await this.options.recoverQuota(key, watchdog.signal)) {
           await response.body?.cancel()
           session = await this.options.tokens.session(key)
-          response = await this.request(options, session, watchdog.signal)
+          response = await this.request(options, session, watchdog.signal, scope)
         }
       }
       if (!response.ok) {
@@ -1062,7 +1055,13 @@ export class CodexAdapter extends LlmAdapter {
       if (response.body === null) {
         throw new LlmError('codex API returned no response body', EMPTY_RESPONSE_CODE)
       }
-      yield* streamResponses(response.body, () => { watchdog.pulse() })
+      // The transform captures each completed reasoning item behind the call
+      // ids of the response that produced it (see ReasoningCapture).
+      const capture = new ReasoningCapture((callIds, items) => { this.replay.capture(scope, callIds, items) })
+      yield* streamResponses(response.body, () => { watchdog.pulse() }, (event) => {
+        capture.push(event)
+        return event
+      })
     } catch (error: unknown) {
       throw mapFetchFailure('codex API', error, watchdog, options.signal)
     } finally {
@@ -1070,11 +1069,21 @@ export class CodexAdapter extends LlmAdapter {
     }
   }
 
-  private async request(options: GenerateOptions, session: CodexSession, signal: AbortSignal): Promise<Response> {
+  private async request(
+    options: GenerateOptions,
+    session: CodexSession,
+    signal: AbortSignal,
+    replayScopeKey: string,
+  ): Promise<Response> {
     const messages = await resolveImages(options.messages, this.options.resolveAttachments?.(), signal)
     const fast = this.options.speedFor !== undefined
       && await this.options.speedFor(options.sessionId, options.model)
-    const body = codexRequestBody(options, toResponsesInput(messages, options.system), fast)
+    const body = codexRequestBody(options, toResponsesInput(
+      messages,
+      options.system,
+      // Captured completed reasoning replays ahead of its tool call.
+      callId => this.replay.replayFor(replayScopeKey, callId),
+    ), fast)
     return (this.options.fetchFn ?? proxiedFetch)(CODEX_API_URL, {
       method: 'POST',
       headers: {

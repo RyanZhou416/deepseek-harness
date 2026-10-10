@@ -185,6 +185,37 @@ test('tool-less, effort-less requests omit tools, thinking and output_config', a
   assert.equal('output_config' in body, false)
 })
 
+test('the caller temperature reaches the models the pinned profile gives it', async () => {
+  // The client sends its caller's own temperature, and its compiled-in 1 when the
+  // caller states none, on the model the profile carries the parameter for. The
+  // pinned builder owns that capability gate; this route only supplies the value.
+  const model = 'claude-sonnet-4-5'
+  const defaulted = await buildClaudeWireRequest(options({ model }), session(), history(), 32_000, undefined, undefined, 'sess-temp', ACCOUNT)
+  assert.equal(parseBody(defaulted).temperature, 1, 'the client default when the caller states none')
+
+  const asked = await buildClaudeWireRequest(options({ model, temperature: 0.2 }), session(), history(), 32_000, undefined, undefined, 'sess-temp', ACCOUNT)
+  assert.equal(parseBody(asked).temperature, 0.2, 'the caller value reaches the wire')
+
+  // A model outside the profile's allowlist carries no temperature at all, whether
+  // or not the caller asked for one, exactly as the client's own gate behaves.
+  const gated = await buildClaudeWireRequest(options({ model: 'claude-opus-5', temperature: 0.2 }), session(), history(), 32_000, undefined, undefined, 'sess-temp', ACCOUNT)
+  assert.equal('temperature' in parseBody(gated), false)
+})
+
+test('a caller stop sequence is refused instead of silently dropped', async () => {
+  await assert.rejects(
+    () => buildClaudeWireRequest(options({ stop: ['</done>'] }), session(), history(), 32_000, undefined, undefined, 'sess-stop', ACCOUNT),
+    (error: unknown) => error instanceof LlmError
+      && error.code === 'INVALID_REQUEST'
+      && error.message.includes('no stop-sequence field'),
+    'a non-empty stop list fails the request',
+  )
+
+  // An empty list states nothing about the option and passes through as absence.
+  const empty = await buildClaudeWireRequest(options({ stop: [] }), session(), history(), 32_000, undefined, undefined, 'sess-stop', ACCOUNT)
+  assert.equal('stop_sequences' in parseBody(empty), false)
+})
+
 test('the previous request id chains into the billing block per session', async () => {
   rememberClaudeRequestId(ACCOUNT, 'sess-2', 'req_abc123')
   const chained = await buildClaudeWireRequest(options(), session(), history(), 32_000, undefined, undefined, 'sess-2', ACCOUNT)

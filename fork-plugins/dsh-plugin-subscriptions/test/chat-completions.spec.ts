@@ -19,6 +19,7 @@ import {
 } from '../src/translate/chat-completions.js'
 import type { ChatCompletionsStreamEvent } from '../src/translate/chat-completions.js'
 import type { TranslatableBlock, TranslatableMessage } from '../src/translate/resolved.js'
+import { DEFAULT_RATE_LIMIT_WAIT, DEFAULT_RETRY, subscriptionRetryPolicy } from '../src/providers/rate-limit.js'
 
 /** Build a bare message without touching the frozen constructors. */
 function message(
@@ -335,11 +336,20 @@ test('streamChatCompletions: a Copilot Gemini SSE stream yields text and termina
   assert.equal(text?.type === 'text-delta' ? text.text : undefined, 'Hello, how are you today?')
 })
 
-test('streamChatCompletions: a stream without a finish chunk throws STREAM_CLOSED', async () => {
+test('streamChatCompletions: a body that ends before a finish chunk fails as a retryable transport truncation', async () => {
   const stream = byteStream([frame({ choices: [{ delta: { content: 'hi' } }] })])
-  await assert.rejects(async () => {
-    for await (const chunk of streamChatCompletions(stream)) void chunk
-  }, (error: unknown) => error instanceof LlmError && error.code === 'STREAM_CLOSED')
+  const chunks: StreamChunk[] = []
+  let failure: unknown
+  try {
+    for await (const chunk of streamChatCompletions(stream)) chunks.push(chunk)
+  } catch (error) {
+    failure = error
+  }
+  // What the stream already delivered stays delivered; the missing finish chunk is the
+  // failure, and the client retries it as a dropped connection.
+  assert.deepEqual(chunks.map(chunk => chunk.type), ['block-start', 'text-delta'])
+  assert.ok(failure instanceof LlmError, 'a truncated body throws')
+  assert.equal(failure.code, 'TRANSPORT', 'the retry policy repeats TRANSPORT')
 })
 
 test('streamChatCompletions: malformed payload throws MALFORMED_RESPONSE', async () => {
@@ -347,4 +357,8 @@ test('streamChatCompletions: malformed payload throws MALFORMED_RESPONSE', async
   await assert.rejects(async () => {
     for await (const chunk of streamChatCompletions(stream)) void chunk
   }, (error: unknown) => error instanceof LlmError && error.code === 'MALFORMED_RESPONSE')
+  // A payload that cannot be parsed is malformed rather than fatal: the genuine client
+  // retries that turn without streaming, so the route policy repeats this code.
+  const policy = subscriptionRetryPolicy(DEFAULT_RETRY, DEFAULT_RATE_LIMIT_WAIT, 'test: chat completions')
+  assert.ok(policy.mode === 'normal' && policy.retryableCodes.includes('MALFORMED_RESPONSE'))
 })

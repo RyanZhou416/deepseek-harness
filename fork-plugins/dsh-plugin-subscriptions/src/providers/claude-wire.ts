@@ -315,6 +315,14 @@ function claudeEffort(value: string | undefined): ClaudeCodeEffort | undefined {
  *
  * The stored session must already carry `deviceId` and `accountUuid`; the
  * adapter backfills both before calling here.
+ *
+ * Two harness sampling options map onto this request shape differently. A
+ * `temperature` is the caller's own value on every request the pinned builder
+ * emits the field for, which is what the client sends: the caller's override, or
+ * its compiled-in 1, on the models whose profile gives them the parameter. Stop
+ * sequences have no field in this shape — the client's main-session request
+ * carries none — so a caller asking for one is refused instead of being sent a
+ * request that cannot halt on it.
  * @param options - the harness generate request.
  * @param session - the account session whose token the request uses.
  * @param messages - conversation messages with images resolved.
@@ -339,6 +347,14 @@ export async function buildClaudeWireRequest(
 ): Promise<BuiltClaudeCodeRequest> {
   if (session.deviceId === undefined || session.accountUuid === undefined) {
     throw new Error('dsh-plugin-subscriptions: claude wire identity is missing; backfill it before building')
+  }
+  // An empty list asks for nothing and is not a caller statement about this
+  // option, so it passes through as absence.
+  if (options.stop !== undefined && options.stop.length > 0) {
+    throw new LlmError(
+      'claude request assembly failed: the pinned request shape has no stop-sequence field, so GenerateOptions.stop cannot take effect on this route',
+      'INVALID_REQUEST',
+    )
   }
   // No reporting block is injected. The carve defines the reporting text once and
   // every consumer of it reads the block out of an array that already contains it;
@@ -399,6 +415,9 @@ export async function buildClaudeWireRequest(
     accessToken: session.accessToken,
     model: options.model,
     maxTokens,
+    // Absent when the caller states none: the pinned builder then supplies the same
+    // compiled-in 1 the client does, under the capability gate the client applies.
+    ...options.temperature === undefined ? {} : { temperature: options.temperature },
     messages: toAnthropicMessages(
       messages,
       options.model,
