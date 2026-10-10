@@ -1,13 +1,14 @@
 /**
  * Rate-limit window handling: the shared value/duration/date parsing, each
  * provider's reset reader against its own 429 shapes, the classification of a
- * 429 as RATE_LIMIT ahead of the quota-wording check, and the retry policy
- * whose delay ceiling decides how long a route may hold a turn open.
+ * 429 as RATE_LIMIT ahead of the quota-wording check, the refusals that
+ * classify as ENFORCEMENT instead, and the retry policy whose delay ceiling
+ * decides how long a route may hold a turn open.
  */
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { httpLlmError } from '../src/providers/common.js'
+import { ENFORCEMENT_CODE, httpLlmError } from '../src/providers/common.js'
 import { AccountTokenManager } from '../src/providers/accounts.js'
 import {
   DEFAULT_RATE_LIMIT_MAX_WAIT_MS,
@@ -222,6 +223,124 @@ test('quota wording still classifies as QUOTA on any other status', async () => 
   assert.equal(error.code, 'QUOTA')
 })
 
+// ---------------------------------------------------------------------------
+// Enforcement-shaped refusals: the provider said this identity will not be
+// served, so the refusal is terminal for the turn and for the pool
+// ---------------------------------------------------------------------------
+
+test('a 429 carrying the server stop-retry header is an enforcement refusal', async () => {
+  const response = failure(429, {
+    'x-should-retry': 'false',
+    'retry-after': '37800',
+    'anthropic-ratelimit-unified-status': 'allowed_warning',
+  }, '{"type":"error","error":{"type":"rate_limit_error","message":"slow down"}}')
+  const error = await httpLlmError(response, 'claude API', { rateLimitReset: claudeRateLimitReset })
+  // Nothing else here says final: the window is disclosed and the status is a warning.
+  assert.equal(error.code, ENFORCEMENT_CODE)
+  // The disclosed reset still rides the error: the pool parks the account for it.
+  assert.ok(error.failure.providerRetryAfterMs !== undefined)
+  assert.ok(error.failure.providerRetryAfterMs > 3_000_000)
+})
+
+test('the server stop-retry header alone is enough, whatever the status', async () => {
+  const error = await httpLlmError(failure(500, { 'x-should-retry': 'false' }, 'boom'), 'copilot API')
+  assert.equal(error.code, ENFORCEMENT_CODE)
+  const retryable = await httpLlmError(failure(500, { 'x-should-retry': 'true' }, 'boom'), 'copilot API')
+  assert.equal(retryable.code, 'SERVER', 'an explicit "true" leaves the ordinary classification')
+})
+
+test('a rejected unified status is an enforcement refusal', async () => {
+  const response = failure(429, {
+    'anthropic-ratelimit-unified-status': 'rejected',
+    'anthropic-ratelimit-unified-reset': String(Math.floor(NOW / 1_000) + 9_000),
+  }, '')
+  const error = await httpLlmError(response, 'claude API', { rateLimitReset: claudeRateLimitReset })
+  assert.equal(error.code, ENFORCEMENT_CODE)
+})
+
+test('a rejected overage status is an enforcement refusal on its own', async () => {
+  const response = failure(429, {
+    'anthropic-ratelimit-unified-status': 'allowed_warning',
+    'anthropic-ratelimit-unified-overage-status': 'rejected',
+    'anthropic-ratelimit-unified-reset': String(Math.floor(NOW / 1_000) + 9_000),
+  }, '')
+  const error = await httpLlmError(response, 'claude API', { rateLimitReset: claudeRateLimitReset })
+  assert.equal(error.code, ENFORCEMENT_CODE)
+})
+
+test('a disabled organisation, seat or member reason is an enforcement refusal', async () => {
+  for (const reason of [
+    'org_spend_cap_reached',
+    'org_level_disabled',
+    'org_level_disabled_until',
+    'org_service_level_disabled',
+    'member_level_disabled',
+    'seat_tier_level_disabled',
+  ]) {
+    const response = failure(429, {
+      'retry-after': '600',
+      'anthropic-ratelimit-unified-overage-disabled-reason': reason,
+    }, '')
+    const error = await httpLlmError(response, 'claude API', { rateLimitReset: claudeRateLimitReset })
+    assert.equal(error.code, ENFORCEMENT_CODE, reason)
+  }
+  // `fetch_error` reports a gateway that could not read its own counter, not a
+  // stated block, so the disclosed window still governs the ordinary reading.
+  const readable = failure(429, {
+    'retry-after': '600',
+    'anthropic-ratelimit-unified-overage-disabled-reason': 'fetch_error',
+  }, '')
+  const error = await httpLlmError(readable, 'claude API', { rateLimitReset: claudeRateLimitReset })
+  assert.equal(error.code, 'RATE_LIMIT')
+})
+
+test('billing and credit wording is an enforcement refusal', async () => {
+  for (const body of [
+    '{"type":"error","error":{"type":"billing_error","message":"spend limit reached"}}',
+    '{"error":{"code":"credits_required"}}',
+    '{"error":"out_of_credits"}',
+    '{"message":"extra usage is required to continue"}',
+  ]) {
+    const error = await httpLlmError(failure(429, { 'retry-after': '600' }, body), 'claude API')
+    assert.equal(error.code, ENFORCEMENT_CODE, body)
+  }
+})
+
+test('a refusal that disclosed no reset is an enforcement refusal', async () => {
+  for (const response of [
+    failure(429, { 'content-type': 'application/json' }, '{"error":"slow down"}'),
+    failure(429, { 'x-codex-primary-reset-after-seconds': '17000' }, '{"detail":"Too many requests"}'),
+  ]) {
+    const error = await httpLlmError(response, 'codex API', { rateLimitReset: codexRateLimitReset })
+    assert.equal(error.code, ENFORCEMENT_CODE)
+  }
+})
+
+test('an ordinary rate limit keeps its code: a disclosed reset with no stop signal', async () => {
+  for (const headers of [
+    { 'retry-after': '30' },
+    { 'retry-after': '30', 'x-should-retry': 'true' },
+    { 'retry-after': '30', 'anthropic-ratelimit-unified-status': 'allowed_warning' },
+    { 'retry-after': '30', 'anthropic-ratelimit-unified-status': 'allowed' },
+  ]) {
+    const error = await httpLlmError(failure(429, headers, '{"error":"slow down"}'), 'grok API', {
+      rateLimitReset: grokRateLimitReset,
+    })
+    assert.equal(error.code, 'RATE_LIMIT', JSON.stringify(headers))
+    assert.ok(error.failure.providerRetryAfterMs !== undefined)
+  }
+})
+
+test('an exhausted window with a disclosed reset stays a rate limit', async () => {
+  // `usage_limit_reached` is how these providers announce a spent window, not a
+  // refusal: the body names the reset, so the turn waits it out as before.
+  const body = '{"detail":{"type":"usage_limit_reached","resets_in_seconds":9000,"plan_type":"plus"}}'
+  const error = await httpLlmError(failure(429, {}, body), 'codex API', {
+    rateLimitReset: codexRateLimitReset,
+  })
+  assert.equal(error.code, 'RATE_LIMIT')
+})
+
 test('a rate-limit reset survives a body longer than the truncated message', async () => {
   const padding = 'x'.repeat(2_000)
   const body = JSON.stringify({ note: padding, detail: { resets_in_seconds: 600 } })
@@ -264,6 +383,10 @@ test('a 429 that disclosed no reset warns with the headers that would have carri
     onWarn: message => warnings.push(message),
   })
   assert.equal(error.failure.providerRetryAfterMs, undefined)
+  // A refusal with no window to wait out is terminal, and the diagnostic still
+  // names the headers that would have carried one — it is read on live traffic,
+  // not waited on.
+  assert.equal(error.code, ENFORCEMENT_CODE)
   assert.equal(warnings.length, 1)
   assert.match(warnings[0], /grok API: 429 disclosed no reset time/)
   assert.match(warnings[0], /x-ratelimit-remaining-requests: 0/)
@@ -310,7 +433,9 @@ test('a 429 whose only signal is a snapshot header warns instead of waiting', as
     rateLimitReset: codexRateLimitReset,
     onWarn: message => warnings.push(message),
   })
-  assert.equal(error.code, 'RATE_LIMIT')
+  // A snapshot header is not a disclosed window for this request, so the refusal
+  // is terminal rather than retried against a reset hours out.
+  assert.equal(error.code, ENFORCEMENT_CODE)
   assert.equal(error.failure.providerRetryAfterMs, undefined)
   assert.equal(warnings.length, 1)
   assert.match(warnings[0], /x-codex-primary-reset-after-seconds: 17000/)
@@ -335,6 +460,9 @@ test('copilot uses generic retry-after and diagnoses unrecognized reset signals'
     onWarn: message => warnings.push(message),
   })
   assert.equal(noRetryAfter.failure.providerRetryAfterMs, undefined)
+  // A date this reader cannot use is not a disclosed window, so the refusal is
+  // terminal rather than retried on local backoff into the same block.
+  assert.equal(noRetryAfter.code, ENFORCEMENT_CODE)
   assert.equal(warnings.length, 1)
   assert.match(warnings[0], /copilot API: 429 disclosed no reset time/)
   assert.match(warnings[0], /x-ratelimit-reset: 2027-01-15T10:30:00Z/)
@@ -364,11 +492,13 @@ test('subscription routes retry the harness transient codes plus MALFORMED_RESPO
   )
   // Eligibility is the harness's transient defaults plus MALFORMED_RESPONSE: a route that
   // reads back a stream payload it cannot parse would otherwise fail a turn the genuine
-  // client retries without streaming.
+  // client retries without streaming. ENFORCEMENT is absent by contract: a refusal the
+  // provider stated is final is not a transient failure to back off from.
   assert.deepEqual(
     policy.mode === 'normal' ? policy.retryableCodes : undefined,
     ['EMPTY_RESPONSE', 'RATE_LIMIT', 'SERVER', 'TIMEOUT', 'TRANSPORT', 'MALFORMED_RESPONSE'],
   )
+  assert.equal(policy.mode === 'normal' && policy.retryableCodes.includes(ENFORCEMENT_CODE), false)
 })
 
 test('opting out of waiting restores the route defaults exactly', () => {

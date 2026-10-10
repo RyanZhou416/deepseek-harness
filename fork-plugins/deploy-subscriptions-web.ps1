@@ -15,7 +15,7 @@
 #         (from C:\Project\deepseek-harness-data\profiles\web; or restore the backup directory printed below)
 
 param(
-  [string]$Version = '0.9.4-dsh017rc1.8',
+  [string]$Version = '0.9.4-dsh017rc1.13',
   [int]$HostPort = 3080,
   [switch]$SkipHostCheck
 )

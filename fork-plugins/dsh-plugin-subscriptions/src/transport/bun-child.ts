@@ -27,8 +27,9 @@ import { FrameDecoder, encodeBody, encodeControl, type Frame } from './frames.js
  * Its value must come from the runtime that performs the fetch: the genuine client
  * reports the version of the runtime issuing the request, so a value computed by
  * the caller on a different runtime would name the wrong runtime on the wire.
+ * The spelling is the SDK's, which is what reaches the peer.
  */
-export const RUNTIME_VERSION_HEADER = 'x-stainless-runtime-version'
+export const RUNTIME_VERSION_HEADER = 'X-Stainless-Runtime-Version'
 
 interface StreamState {
   readonly streamId: string
@@ -77,6 +78,20 @@ function describe(error: unknown): string {
   return error instanceof Error ? `${error.name}: ${error.message}` : String(error)
 }
 
+/**
+ * Reports whether an incoming field name is the one header this child owns.
+ *
+ * HTTP field names are case-insensitive, and the plan arrives with the client's
+ * own mixed casing, so a literal comparison would let a differently-spelled copy
+ * of the runtime-version field through beside the one the child sets.
+ *
+ * @param name - The incoming field name.
+ * @returns Whether the child replaces this field with its own value.
+ */
+function ownHeader(name: string): boolean {
+  return name.toLowerCase() === RUNTIME_VERSION_HEADER.toLowerCase()
+}
+
 /** Reports a failure for one stream. */
 async function fail(state: StreamState, detail: string): Promise<void> {
   await sendControl({ streamId: state.streamId, type: 'error', message: detail })
@@ -101,7 +116,7 @@ async function issue(state: StreamState): Promise<void> {
         Array.isArray(pair) &&
         typeof pair[0] === 'string' &&
         typeof pair[1] === 'string' &&
-        pair[0] !== RUNTIME_VERSION_HEADER
+        !ownHeader(pair[0])
       ) {
         list.push([pair[0], pair[1]])
       }

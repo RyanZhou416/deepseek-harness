@@ -17,6 +17,7 @@ import {
 } from '@deepseek-ai/dsh-llm'
 import { rateLimitDiagnostics, retryAfterInstant, waitFromReset } from './rate-limit.js'
 import type { RateLimitResetReader } from './rate-limit.js'
+import { parseUnifiedRateLimit } from './unified-rate-limit.js'
 import type { UnifiedRateLimitState } from './unified-rate-limit.js'
 
 /** One configured model catalog entry. */
@@ -80,6 +81,83 @@ export function validateModels(models: readonly ModelEntry[], label: string): Mo
   })
 }
 
+/**
+ * Failure code for a refusal the provider stated it will not accept a retry
+ * for. No subscription route lists it among its retryable codes, so the turn
+ * ends on it, and the pool parks the refusing account rather than asking
+ * another one the same question.
+ */
+export const ENFORCEMENT_CODE = 'ENFORCEMENT'
+
+/** The server's own instruction to stop retrying: `x-should-retry: false`. */
+const STOP_RETRY_HEADER = 'x-should-retry'
+
+/**
+ * `anthropic-ratelimit-unified-overage-disabled-reason` values that state the
+ * account cannot serve at all: an organisation, seat, or member turned off, a
+ * spend cap reached, or no credit left. `fetch_error` is deliberately absent —
+ * it says the gateway could not read its own counter, which is a fail-closed
+ * guess rather than a stated block, and a gateway sending it also sends
+ * `x-should-retry: false`.
+ */
+const DISABLED_REASONS: ReadonlySet<string> = new Set([
+  'org_spend_cap_reached',
+  'org_level_disabled',
+  'org_level_disabled_until',
+  'org_service_level_disabled',
+  'member_level_disabled',
+  'member_rows_disabled',
+  'seat_tier_level_disabled',
+  'out_of_credits',
+])
+
+/** A disabled reason named in the error body rather than in the unified headers. */
+const DISABLED_REASON_FIELD = /"?overage[_-]?disabled[_-]?reason"?\s*:\s*"([a-z_]+)"/i
+
+/** Wording that names a billing or credit refusal in the provider's error fields. */
+const BILLING_WORDS = /billing_error|credits?_required|out_of_credits|insufficient[\s_-]+credits?|credit[\s_-]+balance|extra[\s_-]+usage[\s_-]+is[\s_-]+required|usage[\s_-]+credits[\s_-]+are[\s_-]+required/i
+
+/**
+ * The disabled reason this response disclosed, from the unified header or the
+ * error body.
+ * @param body - the complete response body.
+ * @param state - the parsed unified report, when the response carried one.
+ * @returns the reason token, or undefined when the response named none.
+ */
+function disabledReason(body: string, state: UnifiedRateLimitState | undefined): string | undefined {
+  return state?.overageDisabledReason ?? DISABLED_REASON_FIELD.exec(body)?.[1]
+}
+
+/**
+ * Whether a failed response is a refusal the provider stated is final, as
+ * opposed to a rate limit whose window simply reopens.
+ *
+ * The signals are the provider's own, and the genuine client stops retrying on
+ * every one of them: `x-should-retry: false`, a unified status of `rejected`,
+ * a disabled organisation/seat/member reason, billing or credit wording, and a
+ * 429 that disclosed no reset at all — a refusal with no window to wait out
+ * can only be retried blind, straight back into the block.
+ * @param response - the failed response, for its headers.
+ * @param body - the complete response body.
+ * @param reset - the reset instant the caller resolved, when one was disclosed.
+ * @param now - the current epoch milliseconds.
+ * @returns true when the refusal must not be retried or answered from another account.
+ */
+export function isEnforcementRefusal(
+  response: Response,
+  body: string,
+  reset: number | undefined,
+  now: number,
+): boolean {
+  if (response.headers.get(STOP_RETRY_HEADER)?.trim().toLowerCase() === 'false') return true
+  const unified = parseUnifiedRateLimit(response.headers, now)
+  if (unified !== undefined && (unified.status === 'rejected' || unified.overageStatus === 'rejected')) return true
+  const disabled = disabledReason(body, unified)
+  if (disabled !== undefined && DISABLED_REASONS.has(disabled)) return true
+  if (BILLING_WORDS.test(body)) return true
+  return response.status === 429 && reset === undefined
+}
+
 /** Optional per-call hooks {@link httpLlmError} uses to read a rate-limit window. */
 export interface HttpLlmErrorOptions {
   /**
@@ -93,21 +171,6 @@ export interface HttpLlmErrorOptions {
   onWarn?: (message: string) => void
 }
 
-/**
- * Build an LlmError from a non-2xx provider response, mapping the status to a
- * stable code and, for a rate-limited request, the disclosed reset instant to
- * the `providerRetryAfterMs` the retry plugin waits out.
- *
- * A 429 classifies as `RATE_LIMIT` on the strength of the status alone, ahead
- * of the quota-wording check. On these routes there is no terminal quota to
- * distinguish: a subscription has no balance to top up, only a window that
- * reopens, and providers announce an exhausted window with wording
- * (`usage_limit_reached`) the shared classifier reads as permanent.
- * @param response - the failed response.
- * @param label - diagnostic prefix naming the provider API.
- * @param options - the calling provider's rate-limit reader and warning sink.
- * @returns the classified error.
- */
 /**
  * The provider's own error fields, for a message a human can act on.
  *
@@ -154,6 +217,27 @@ function firstString(...values: unknown[]): string | undefined {
   return undefined
 }
 
+/**
+ * Build an LlmError from a non-2xx provider response, mapping the status to a
+ * stable code and, for a rate-limited request, the disclosed reset instant to
+ * the `providerRetryAfterMs` the retry plugin waits out.
+ *
+ * A 429 classifies as `RATE_LIMIT` on the strength of the status alone, ahead
+ * of the quota-wording check. On these routes there is no terminal quota to
+ * distinguish: a subscription has no balance to top up, only a window that
+ * reopens, and providers announce an exhausted window with wording
+ * (`usage_limit_reached`) the shared classifier reads as permanent.
+ *
+ * {@link isEnforcementRefusal} takes precedence over that: a refusal the
+ * provider stated is final — its own stop-retry header, a `rejected` unified
+ * status, a disabled account reason, billing or credit wording, or a 429 that
+ * disclosed no window — classifies as {@link ENFORCEMENT_CODE}, which no route
+ * retries and no pool answers from another account.
+ * @param response - the failed response.
+ * @param label - diagnostic prefix naming the provider API.
+ * @param options - the calling provider's rate-limit reader and warning sink.
+ * @returns the classified error.
+ */
 export async function httpLlmError(
   response: Response,
   label: string,
@@ -172,15 +256,11 @@ export async function httpLlmError(
   const detail = structuredErrorDetail(body)
   const suffix = detail.length > 0 ? `: ${detail}` : ''
   const message = `${label} error (HTTP ${String(response.status)})${suffix}`
-  let code: string
-  if (response.status === 401 || response.status === 403) code = 'AUTH'
-  else if (response.status === 429) code = 'RATE_LIMIT'
-  else if (isQuotaExceededError(shown)) code = QUOTA_EXCEEDED_CODE
-  else if (response.status === 400 && isContextWindowExceededError(shown)) code = CONTEXT_WINDOW_EXCEEDED_CODE
-  else if (response.status === 408 || response.status === 504) code = 'TIMEOUT'
-  else if (response.status >= 500) code = 'SERVER'
-  else code = `HTTP_${String(response.status)}`
   const now = Date.now()
+  // The readers below need the whole body to classify it; the message carries only the
+  // provider's own structured fields, and the raw body rides the error's cause so an
+  // arbitrary upstream echo never becomes durable session text.
+  //
   // The provider's reader runs on a 429 and nowhere else. Providers attach
   // their rate-limit headers to every response, so reading them on a transient
   // 500 would report the current window's rollover — hours out — as the delay
@@ -197,6 +277,18 @@ export async function httpLlmError(
   const reset = rateLimited
     ? options.rateLimitReset?.(response, body, now) ?? retryAfterInstant(response, now)
     : retryAfterInstant(response, now)
+  let code: string
+  // A 401 or 403 is a credential or permission refusal: it keeps its own code,
+  // which the discovery path and the account cards already read, and the pool
+  // treats that code as terminal for the turn.
+  if (response.status === 401 || response.status === 403) code = 'AUTH'
+  else if (isEnforcementRefusal(response, body, reset, now)) code = ENFORCEMENT_CODE
+  else if (rateLimited) code = 'RATE_LIMIT'
+  else if (isQuotaExceededError(shown)) code = QUOTA_EXCEEDED_CODE
+  else if (response.status === 400 && isContextWindowExceededError(shown)) code = CONTEXT_WINDOW_EXCEEDED_CODE
+  else if (response.status === 408 || response.status === 504) code = 'TIMEOUT'
+  else if (response.status >= 500) code = 'SERVER'
+  else code = `HTTP_${String(response.status)}`
   if (reset === undefined && rateLimited) {
     options.onWarn?.(`${label}: ${rateLimitDiagnostics(response, body)}`)
   }

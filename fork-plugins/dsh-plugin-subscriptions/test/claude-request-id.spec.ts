@@ -12,7 +12,7 @@ import assert from 'node:assert/strict'
 import type { GenerateOptions, MessageSource, StreamChunk } from '@deepseek-ai/dsh-llm'
 import { AccountTokenManager } from '../src/providers/accounts.js'
 import { ClaudeAdapter } from '../src/providers/claude.js'
-import { claudePromptId } from '../src/providers/claude-wire.js'
+import { claudePromptId, claudeWireSessionId } from '../src/providers/claude-wire.js'
 import { toAnthropicMessages } from '../src/translate/anthropic.js'
 import type { FetchFn } from '../src/providers/common.js'
 import type { ClaudeSession } from '../src/auth/store.js'
@@ -73,11 +73,17 @@ function tokens(): AccountTokenManager<ClaudeSession> {
   })
 }
 
-/** Drive one generate call through the adapter, capturing the request body it sent. */
-async function streamOnce(requestId?: string): Promise<{ chunks: StreamChunk[]; body: string }> {
+/** Drive one generate call through the adapter, capturing the request it sent. */
+async function streamOnce(requestId?: string): Promise<{
+  chunks: StreamChunk[]
+  body: string
+  headers: Record<string, string>
+}> {
   let body = ''
+  let headers: Record<string, string> = {}
   const fetchFn = (async (_url: string, init?: RequestInit) => {
     body = String(init?.body ?? '')
+    headers = Object.fromEntries(Object.entries(init?.headers ?? {}))
     return new Response(RESPONSE_SSE, {
       headers: {
         'content-type': 'text/event-stream',
@@ -96,7 +102,7 @@ async function streamOnce(requestId?: string): Promise<{ chunks: StreamChunk[]; 
   }
   const chunks: StreamChunk[] = []
   for await (const chunk of adapter.stream(options)) chunks.push(chunk)
-  return { chunks, body }
+  return { chunks, body, headers }
 }
 
 /** The `cc_prompt_id` of a built request body. */
@@ -105,7 +111,7 @@ function promptIdOf(body: string): string {
 }
 
 test('the response request id is recorded on the assistant message replay envelope', async () => {
-  const { chunks, body } = await streamOnce(REQUEST_ID)
+  const { chunks, body, headers } = await streamOnce(REQUEST_ID)
 
   const finish = chunks.at(-1)
   assert.equal(finish?.type, 'finish')
@@ -117,9 +123,22 @@ test('the response request id is recorded on the assistant message replay envelo
   assert.equal(response.version, 1, 'and its version')
   assert.equal(response.requestId, REQUEST_ID, 'the response request id is recorded')
 
+  // The session identity the request declares is a UUID minted for this account span;
+  // the harness session id is the key it is stored under, not a value the client sends.
+  const identity = JSON.parse(JSON.parse(body).metadata.user_id as string) as { session_id: string }
+  assert.equal(headers['X-Claude-Code-Session-Id'], identity.session_id, 'header and correlation triple agree')
+  assert.notEqual(identity.session_id, HARNESS_SESSION_ID, 'the harness session id is not the wire one')
+  assert.equal(identity.session_id, claudeWireSessionId('acct', HARNESS_SESSION_ID), 'nor is it minted fresh per request')
+  assert.match(identity.session_id, /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i)
+
   // The id the request carried and the id the response reported are the two halves the
-  // envelope makes checkable; the request's half is derived, so it is reproducible here.
-  assert.equal(promptIdOf(body), claudePromptId(HARNESS_SESSION_ID, 1), 'the request carries the derived id')
+  // envelope makes checkable; the request's half is derived from the wire session
+  // identity, so it is reproducible here.
+  assert.equal(
+    promptIdOf(body),
+    claudePromptId(identity.session_id, 1),
+    'the request carries the id derived from its wire session identity',
+  )
 
   // The envelope goes back onto the next request as the assistant message's replay state, so
   // the recorded id has to come back out of it without disturbing what the reader already does.

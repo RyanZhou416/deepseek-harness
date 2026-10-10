@@ -1,12 +1,38 @@
 /** Account scheduling shared by image generation and editing, independent of chat catalogs/quota. */
 import { LlmError } from '@deepseek-ai/dsh-llm'
 import type { AccountTokenManager } from './accounts.js'
-import { httpLlmError } from './common.js'
+import { ENFORCEMENT_CODE, httpLlmError } from './common.js'
 import type { RateLimitResetReader } from './rate-limit.js'
-import { AUTH_COOLDOWN_MS, DEFAULT_QUOTA_COOLDOWN_MS, TRANSIENT_COOLDOWN_MS, PoolHealthRegistry, memberKey } from './pool-health.js'
+import {
+  AUTH_COOLDOWN_MS,
+  DEFAULT_QUOTA_COOLDOWN_MS,
+  TRANSIENT_COOLDOWN_MS,
+  exhaustionCode,
+  isRefusalCode,
+  memberKey,
+  PoolHealthRegistry,
+} from './pool-health.js'
 
 type ImageProvider = 'codex' | 'grok'
 interface ImageSession { accessToken: string; refreshToken: string; expiresAt: number }
+
+/**
+ * Failure codes an image account may be parked for on top of the refusals
+ * {@link isRefusalCode} names: the explicit quota and entitlement rejections.
+ * Every other code ends the attempt untouched, because an image may already
+ * have been produced and resending it risks a duplicate.
+ */
+const QUOTA_AND_ENTITLEMENT_CODES: readonly string[] = ['RATE_LIMIT', 'HTTP_402', 'HTTP_404']
+
+/**
+ * Whether an image account may be parked for this failure rather than ending
+ * the attempt where it stands.
+ * @param code - the failure code the image route reported.
+ * @returns true when the account may be parked and another one tried.
+ */
+function isParkable(code: string): boolean {
+  return isRefusalCode(code) || QUOTA_AND_ENTITLEMENT_CODES.includes(code)
+}
 
 export interface ImageAccountRequest<S extends ImageSession> {
   provider: ImageProvider
@@ -76,20 +102,31 @@ export class ImageAccountPool {
         if (![401, 402, 403, 404, 429].includes(response.status)) throw failure
       } catch (error) {
         signal.throwIfAborted()
-        if (!(error instanceof LlmError) || !['AUTH', 'INVALID_CREDENTIAL', 'MISSING_CREDENTIAL', 'RATE_LIMIT', 'HTTP_402', 'HTTP_404'].includes(error.code)) throw error
+        if (!(error instanceof LlmError) || !isParkable(error.code)) throw error
         failure = error
       }
       if (!pooling) throw failure
-      const delay = failure.failure.providerRetryAfterMs ?? (failure.code === 'RATE_LIMIT'
+      const delay = failure.failure.providerRetryAfterMs ?? (failure.code === 'RATE_LIMIT' || failure.code === ENFORCEMENT_CODE
         ? DEFAULT_QUOTA_COOLDOWN_MS
-        : ['AUTH', 'INVALID_CREDENTIAL', 'MISSING_CREDENTIAL'].includes(failure.code) ? AUTH_COOLDOWN_MS : TRANSIENT_COOLDOWN_MS)
+        : isRefusalCode(failure.code) ? AUTH_COOLDOWN_MS : TRANSIENT_COOLDOWN_MS)
       this.health.markUnavailable(key, delay, failure.code)
+      if (isRefusalCode(failure.code)) {
+        // The provider refused this identity. Parking it and asking a sibling would
+        // repeat the refusal under another account, so the attempt ends here.
+        this.options.onWarn?.(`image pool ${provider}: account ${members.indexOf(account) + 1}/${members.length} was refused (${failure.code}); ending the attempt`)
+        throw failure
+      }
       this.options.onWarn?.(`image pool ${provider}: account ${members.indexOf(account) + 1}/${members.length} rejected (${failure.code}); checking remaining accounts`)
       lastError = failure
     }
     if (lastError !== undefined) throw lastError
+    const codes = new Set<string>()
+    for (const account of members) {
+      const cooling = this.health.accountCooling(provider, account)
+      if (cooling !== undefined) codes.add(cooling.reason)
+    }
     const recovery = this.health.earliestRecovery(new Set(members.map(account => memberKey(provider, account, 'images'))))
-    throw new LlmError(`image_generate: all ${provider} image accounts are cooling down`, 'RATE_LIMIT', {
+    throw new LlmError(`image_generate: all ${provider} image accounts are cooling down`, exhaustionCode(codes), {
       ...recovery === undefined ? {} : { providerRetryAfterMs: Math.max(0, recovery - Date.now()) },
     })
   }

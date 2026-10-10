@@ -12,6 +12,7 @@ import { join } from 'node:path'
 import { LlmError } from '@deepseek-ai/dsh-llm'
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 import { codexProfileClaims } from '../src/providers/codex.js'
+import { ENFORCEMENT_CODE } from '../src/providers/common.js'
 import type { FetchFn } from '../src/providers/common.js'
 import { AccountTokenManager } from '../src/providers/accounts.js'
 import type { CodexSession, GrokSession } from '../src/auth/store.js'
@@ -178,7 +179,9 @@ test('x_search execute: success, error status, and logged-out', async () => {
   const failing = createXSearchTool({ tokens: memoryTokens(grokSession), fetchFn: jsonFetch('rate limited', 429).fetchFn })
   await assert.rejects(
     () => failing.execute({ query: 'x' }, fakeExec()),
-    (error: unknown) => error instanceof LlmError && error.code === 'RATE_LIMIT',
+    // A 429 that disclosed no reset names no window to wait out, so the shared
+    // classifier reports a refusal rather than a retryable rate limit.
+    (error: unknown) => error instanceof LlmError && error.code === ENFORCEMENT_CODE,
   )
 
   const loggedOut = createXSearchTool({ tokens: memoryTokens<GrokSession>(undefined), fetchFn })
@@ -639,7 +642,8 @@ test('video_generate execute: failed status, poll timeout, error status, logged-
   })
   await assert.rejects(
     () => rateLimited.execute({ prompt: 'x' }, fakeExec()),
-    (error: unknown) => error instanceof LlmError && error.code === 'RATE_LIMIT',
+    // Same contract as x_search: a reset-less 429 is a refusal, not a window.
+    (error: unknown) => error instanceof LlmError && error.code === ENFORCEMENT_CODE,
   )
 
   const loggedOut = createVideoGenerateTool({

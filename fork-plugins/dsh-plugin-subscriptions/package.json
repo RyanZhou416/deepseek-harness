@@ -1,6 +1,6 @@
 {
   "name": "dsh-plugin-subscriptions",
-  "version": "0.9.4-dsh017rc1.11",
+  "version": "0.9.4-dsh017rc1.13",
   "private": true,
   "description": "Use ChatGPT (Codex), Claude, Grok (X Premium), GitHub Copilot, Google Antigravity, and Cursor subscriptions as DeepSeek Harness LLM providers, with login from the web Settings page",
   "license": "MIT",
@@ -125,7 +125,7 @@
     "zustand": "~4.4.7"
   },
   "dependencies": {
-    "@tormentalabs/claude-code-wire-compat": "file:C:/Project/deepseek-harness/fork-plugins/releases/tormentalabs-claude-code-wire-compat-0.7.2-dsh12.tgz",
+    "@tormentalabs/claude-code-wire-compat": "file:C:/Project/deepseek-harness/fork-plugins/releases/tormentalabs-claude-code-wire-compat-0.7.2-dsh13.tgz",
     "undici": "^7.0.0"
   },
   "optionalDependencies": {

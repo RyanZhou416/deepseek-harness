@@ -1,20 +1,23 @@
 /**
  * Pool health bookkeeping: failure classification (which error codes switch
- * members, with what cooldown, and which rethrow) and the cooldown registry
- * (expiry, longest-cooldown-wins, per-provider and per-account clear).
- * Records are account-granular: one account's cooldown never parks another
- * account of the same provider.
+ * members, which park the account and end the turn, with what cooldown, and
+ * which rethrow) and the cooldown registry (expiry, longest-cooldown-wins,
+ * per-provider and per-account clear). Records are account-granular: one
+ * account's cooldown never parks another account of the same provider.
  */
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { LlmError } from '@deepseek-ai/dsh-llm'
+import { ENFORCEMENT_CODE } from '../src/providers/common.js'
 import {
   accountKey,
   AUTH_COOLDOWN_MS,
   classifyPoolFailure,
   DEFAULT_QUOTA_COOLDOWN_MS,
+  exhaustionCode,
   isAuthCooldownReason,
+  isRefusalCode,
   memberKey,
   PoolHealthRegistry,
   TRANSIENT_COOLDOWN_MS,
@@ -54,15 +57,34 @@ test('classifyPoolFailure: the provider retry-after wins over the default cooldo
   })
 })
 
-test('classifyPoolFailure: auth failures park the account until re-login', () => {
+test('classifyPoolFailure: auth failures park the account instead of switching to a sibling', () => {
+  // A credential refusal is account-level, so another member of the same account would
+  // fail alike; and asking every OTHER account in one turn is the traffic a refusal is
+  // meant to stop. The record still cools the account for the next turn.
   for (const code of ['AUTH', 'INVALID_CREDENTIAL', 'MISSING_CREDENTIAL']) {
     assert.deepEqual(classifyPoolFailure(new LlmError('denied', code), 'claude'), {
-      action: 'switch',
+      action: 'park',
       cooldownMs: AUTH_COOLDOWN_MS,
       reason: code,
       scope: 'account',
     })
   }
+})
+
+test('classifyPoolFailure: an enforcement refusal parks the account for its own reset', () => {
+  assert.deepEqual(classifyPoolFailure(new LlmError('refused', ENFORCEMENT_CODE), 'codex'), {
+    action: 'park',
+    cooldownMs: DEFAULT_QUOTA_COOLDOWN_MS,
+    reason: ENFORCEMENT_CODE,
+    scope: 'account',
+  })
+  const withReset = new LlmError('refused', ENFORCEMENT_CODE, { providerRetryAfterMs: 3_600_000 })
+  assert.deepEqual(classifyPoolFailure(withReset, 'claude'), {
+    action: 'park',
+    cooldownMs: 3_600_000,
+    reason: ENFORCEMENT_CODE,
+    scope: 'account',
+  })
 })
 
 test('classifyPoolFailure: transient server failures cool the member briefly', () => {
@@ -97,6 +119,25 @@ test('classifyPoolFailure: request-fault and unknown failures rethrow', () => {
   }
   assert.deepEqual(classifyPoolFailure(new Error('plain'), 'codex'), { action: 'throw' })
   assert.deepEqual(classifyPoolFailure('string failure', 'codex'), { action: 'throw' })
+})
+
+test('isRefusalCode names the codes a pool must not answer from another account', () => {
+  for (const code of [ENFORCEMENT_CODE, 'AUTH', 'INVALID_CREDENTIAL', 'MISSING_CREDENTIAL']) {
+    assert.equal(isRefusalCode(code), true, code)
+  }
+  for (const code of ['RATE_LIMIT', 'QUOTA', 'SERVER', 'TRANSPORT', 'HTTP_402', 'HTTP_404']) {
+    assert.equal(isRefusalCode(code), false, code)
+  }
+})
+
+test('exhaustionCode reports a refusal over a sibling reason and shares a lone reason', () => {
+  assert.equal(exhaustionCode(new Set([ENFORCEMENT_CODE, 'RATE_LIMIT'])), ENFORCEMENT_CODE)
+  assert.equal(exhaustionCode(new Set(['AUTH', 'RATE_LIMIT'])), 'AUTH')
+  assert.equal(exhaustionCode(new Set(['MISSING_CREDENTIAL', 'SERVER'])), 'MISSING_CREDENTIAL')
+  assert.equal(exhaustionCode(new Set(['SERVER'])), 'SERVER')
+  // Nothing recognizable to name: the cooling-down state they have in common.
+  assert.equal(exhaustionCode(new Set(['SERVER', 'TIMEOUT'])), 'RATE_LIMIT')
+  assert.equal(exhaustionCode(new Set()), 'RATE_LIMIT')
 })
 
 test('PoolHealthRegistry: members cool down and recover on expiry', () => {

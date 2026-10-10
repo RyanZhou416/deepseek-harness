@@ -166,10 +166,7 @@ export class BunBridge {
       }
     })
 
-    const headers: string[][] = []
-    new Headers(init.headers).forEach((value, key) => {
-      headers.push([key, value])
-    })
+    const headers = headerPairs(init.headers)
 
     // Registered before the first write: a duplex may answer synchronously, and a
     // response arriving before the entry existed would be dropped and the request
@@ -337,6 +334,33 @@ export class BunBridge {
     this.#pending.clear()
     this.#byId.clear()
   }
+}
+
+/**
+ * Converts a caller's headers to the ordered pairs the frame protocol carries.
+ *
+ * Field names go out exactly as the caller spelled them, in the caller's order:
+ * the genuine Claude Code request is identified partly by its mixed casing, and
+ * a standard `Headers` folds every name and may combine or reorder fields.
+ *
+ * @param init - The caller's header init.
+ * @returns Field name and value pairs in the caller's order.
+ */
+function headerPairs(init: HeadersInit | undefined): string[][] {
+  if (init === undefined) return []
+  if (init instanceof Headers) {
+    // The caller already folded these through a `Headers`; there is no casing
+    // left here to preserve.
+    const folded: string[][] = []
+    init.forEach((value, key) => {
+      folded.push([key, value])
+    })
+    return folded
+  }
+  if (Array.isArray(init)) {
+    return init.map(([name, value]) => [String(name), String(value)])
+  }
+  return Object.entries(init).map(([name, value]) => [name, String(value)])
 }
 
 /**

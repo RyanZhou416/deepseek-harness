@@ -19,7 +19,7 @@ import { buildAccountPools, poolKey } from '../src/providers/pool-family.js'
 import type { PoolDefinition, PoolMemberRef, ProviderPoolSource } from '../src/providers/pool-family.js'
 import { accountKey, memberKey, PoolHealthRegistry } from '../src/providers/pool-health.js'
 import { PoolUsageTracker } from '../src/providers/pool-usage.js'
-import { OAuthEndpointError } from '../src/providers/common.js'
+import { ENFORCEMENT_CODE, OAuthEndpointError } from '../src/providers/common.js'
 import type { ProviderUsage } from '../src/providers/common.js'
 import type { ProviderId } from '../src/auth/store.js'
 import type { AccountAwareAdapter } from '../src/providers/accounts.js'
@@ -651,6 +651,36 @@ test('quota_aware: hysteresis holds the sticky account until the margin is beate
   tracker.invalidate('codex')
   const switched = await collect(pool.stream(options))
   assert.equal((switched[0] as { text: string }).text, 'a1')
+})
+
+test('stream: a pre-chunk enforcement refusal ends the turn without another account or a usage re-poll', async () => {
+  const refusal = new LlmError('refused', ENFORCEMENT_CODE, { providerRetryAfterMs: 10_800_000 })
+  const codex = new FakeAdapter((_options, account) => account === 'a1' ? serveFail(refusal) : serveOk('a2'))
+  const usageCalls: string[] = []
+  const { pool, health, usage } = makePool({ codex }, {
+    usage: (provider, account) => {
+      if (provider !== 'codex' || account !== 'a1') return undefined
+      return () => { usageCalls.push(account); return Promise.resolve(windowUsage(10, 60 * 60_000)) }
+    },
+  })
+  const member = { provider: 'codex' as const, account: 'a1', model: 'm' }
+  await usage.quotaFor(member)
+  assert.equal(usageCalls.length, 1)
+  await assert.rejects(collect(pool.stream(OPTIONS)), error => error === refusal)
+  assert.deepEqual(codex.accounts, ['a1'], 'the refusal is not repeated on the sibling account')
+  assert.equal(health.isMemberAvailable('codex', 'a1', 'other-model'), false, 'the account is parked')
+  await usage.quotaFor(member)
+  assert.equal(usageCalls.length, 1, 'a refusal does not invalidate the usage snapshot')
+})
+
+test('stream: a 403 permission_error refusal ends the turn instead of walking the pool', async () => {
+  const denied = new LlmError('denied', 'AUTH')
+  const codex = new FakeAdapter((_options, account) => account === 'a1' ? serveFail(denied) : serveOk('a2'))
+  const { pool, health } = makePool({ codex })
+  await assert.rejects(collect(pool.stream(OPTIONS)), error => error === denied)
+  assert.deepEqual(codex.accounts, ['a1'], 'one turn issues one request, not one per pool account')
+  assert.equal(health.isMemberAvailable('codex', 'a1', 'm'), false)
+  assert.equal(health.isMemberAvailable('codex', 'a2', 'm'), true, 'the sibling account is untouched')
 })
 
 test('stream: a pre-chunk quota failure cools the whole account and fails over', async () => {
@@ -1299,15 +1329,30 @@ test('an exhausted pool reports the reason its members failed, not a blanket rat
   }
 })
 
-test('an exhausted pool whose members failed differently reports the shared cooling state', async () => {
+test('a credential refusal from the second member surfaces instead of an exhausted rate limit', async () => {
+  const refused = new LlmError('login expired', 'MISSING_CREDENTIAL')
   const adapter = new FakeAdapter((_options, account) => serveFail(account === 'a1'
-    ? new LlmError('login expired', 'MISSING_CREDENTIAL')
-    : new LlmError('slow down', 'RATE_LIMIT', { providerRetryAfterMs: 60_000 })))
+    ? new LlmError('slow down', 'RATE_LIMIT', { providerRetryAfterMs: 60_000 })
+    : refused))
   const { pool } = makePool({ codex: adapter })
-  await assert.rejects(collect(pool.stream({ ...OPTIONS, sessionId: SessionId('mixed-reasons') })), error => {
-    assert.equal((error as { code?: string }).code, 'RATE_LIMIT')
+  await assert.rejects(collect(pool.stream(OPTIONS)), error => {
+    // The sibling's rate limit must not launder the refusal into a retryable code.
+    assert.equal(error, refused)
     return true
   })
+  assert.deepEqual(adapter.accounts, ['a1', 'a2'])
+})
+
+test('an exhausted pool reports an enforcement refusal over any other member reason', async () => {
+  const adapter = new FakeAdapter(() => serveOk())
+  const { pool, health } = makePool({ codex: adapter })
+  health.markUnavailable(accountKey('codex', 'a2'), 60_000, ENFORCEMENT_CODE)
+  health.markUnavailable(memberKey('codex', 'a1', 'm'), 60_000, 'RATE_LIMIT')
+  await assert.rejects(collect(pool.stream(OPTIONS)), error => {
+    assert.equal((error as { code?: string }).code, ENFORCEMENT_CODE)
+    return true
+  })
+  assert.equal(adapter.calls, 0, 'both members are parked, so neither is contacted')
 })
 
 test('an exhausted pool parked entirely by auth failures reports the auth code, not a rate limit', async () => {

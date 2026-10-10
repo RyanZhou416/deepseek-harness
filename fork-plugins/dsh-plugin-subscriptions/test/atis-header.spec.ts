@@ -8,6 +8,10 @@ import type { ClaudeSession } from '../src/auth/store.js'
 import type { TranslatableMessage } from '../src/translate/resolved.js'
 import { ToolCallId } from '@deepseek-ai/dsh-llm'
 
+/** Wire session ids, the UUIDs the client declares its session as. */
+const ATIS_ATIS_SESSION = '00000000-0000-4000-8000-0000000000a1'
+const ATIS_X_SESSION = '00000000-0000-4000-8000-0000000000a2'
+
 const SESSION: ClaudeSession = {
   accessToken: 'synthetic-access-token-0123456789abcdef0123456789abcdef0123456789abcdef',
   refreshToken: 'refresh-token',
@@ -52,7 +56,7 @@ test('the request carries the header once a read has disclosed a token', async (
   const options = { provider: 'claude', model: 'claude-opus-5', messages, system: 'be terse' }
 
   const before = await buildClaudeWireRequest(
-    options as never, SESSION, messages, 32_000, undefined, undefined, 'sess-atis', account,
+    options as never, SESSION, messages, 32_000, undefined, undefined, ATIS_ATIS_SESSION, account,
   )
   assert.equal(
     before.headers.some(([name]) => name.toLowerCase() === 'x-cc-atis'),
@@ -65,7 +69,7 @@ test('the request carries the header once a read has disclosed a token', async (
     undefined, account,
   )
   const after = await buildClaudeWireRequest(
-    options as never, SESSION, messages, 32_000, undefined, undefined, 'sess-atis', account,
+    options as never, SESSION, messages, 32_000, undefined, undefined, ATIS_ATIS_SESSION, account,
   )
   const header = after.headers.find(([name]) => name.toLowerCase() === 'x-cc-atis')
   assert.deepEqual(header, ['x-cc-atis', 'v1.pin.a.b.c'])
@@ -77,7 +81,7 @@ test('the header belongs to the request, not to the process', async () => {
   ]
   const options = { provider: 'claude', model: 'claude-opus-5', messages, system: 'be terse' }
   const built = await buildClaudeWireRequest(
-    options as never, SESSION, messages, 32_000, undefined, undefined, 'sess-x', 'atis-account-untouched',
+    options as never, SESSION, messages, 32_000, undefined, undefined, ATIS_X_SESSION, 'atis-account-untouched',
   )
   assert.equal(built.headers.some(([name]) => name.toLowerCase() === 'x-cc-atis'), false)
 })

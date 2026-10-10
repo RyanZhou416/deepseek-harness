@@ -11,6 +11,7 @@ import {
   LlmError,
 } from '@deepseek-ai/dsh-llm'
 import { ToolCallId } from '../compat.js'
+import { ENFORCEMENT_CODE } from '../providers/common.js'
 
 // The finish-reason map is merge-extensible so an adapter can surface a provider's own
 // reasons. A refusal is one: the model answered, declined, and stopped, which a caller
@@ -661,17 +662,43 @@ function closeBlock(block: OpenBlock): ContentBlock {
 }
 
 /**
+ * Reports whether an in-band error event is a refusal the provider stated is
+ * final.
+ *
+ * The status and headers that make a failure terminal belong to the response,
+ * and an `error` event can arrive inside a 200, so the caller that owns the
+ * response answers this; the event alone cannot.
+ */
+export type AnthropicRefusalProbe = (
+  error: { type?: string; message?: string } | undefined,
+) => boolean
+
+/**
  * Classify an Anthropic `error` event into a thrown LlmError.
+ *
+ * A rate-limit event is retryable by default, because the usual cause is a
+ * window that reopens. A refusal the provider will not accept a retry for
+ * arrives on the same event type, so the caller's {@link AnthropicRefusalProbe}
+ * decides which of the two this one is; without a probe the default stands.
  * @param error - the wire error object.
+ * @param isRefusal - the caller's classification of this event against the
+ *   response it arrived on.
  * @returns the mapped error.
  */
-export function anthropicFailure(error: { type?: string; message?: string } | undefined): LlmError {
+export function anthropicFailure(
+  error: { type?: string; message?: string } | undefined,
+  isRefusal?: AnthropicRefusalProbe,
+): LlmError {
   const type = error?.type ?? 'unknown_error'
   const message = error?.message ?? `Anthropic reported ${type}`
   if (type === 'invalid_request_error' && /prompt is too long/i.test(message)) {
     return new LlmError(message, CONTEXT_WINDOW_EXCEEDED_CODE)
   }
-  if (type === 'rate_limit_error') return new LlmError(message, 'RATE_LIMIT')
+  if (type === 'rate_limit_error') {
+    return isRefusal?.(error) === true
+      ? new LlmError(message, ENFORCEMENT_CODE)
+      : new LlmError(message, 'RATE_LIMIT')
+  }
   if (type === 'authentication_error') return new LlmError(message, 'AUTH')
   return new LlmError(message, 'SERVER')
 }
@@ -704,8 +731,13 @@ export class AnthropicStreamTranslator {
    * @param requestId - the `request-id` response header this stream answers, recorded on
    *   the finish envelope so the request the model saw and the response it produced stay
    *   checkable from the session log. Omitted when the response carried no such header.
+   * @param isRefusal - classifies an in-band `error` event against the response it
+   *   arrived on. Omitted when the caller has no response to classify against.
    */
-  constructor(private readonly requestId?: string) {}
+  constructor(
+    private readonly requestId?: string,
+    private readonly isRefusal?: AnthropicRefusalProbe,
+  ) {}
 
   private open(wireIndex: number, kind: OpenBlock['kind'], chunks: StreamChunk[], callId = '', name?: string): OpenBlock {
     const block: OpenBlock = {
@@ -997,7 +1029,7 @@ export class AnthropicStreamTranslator {
         return chunks
       }
       case 'error':
-        throw anthropicFailure(event.error)
+        throw anthropicFailure(event.error, this.isRefusal)
       default:
         // ping and future event types carry no harness content.
         return chunks
@@ -1010,14 +1042,17 @@ export class AnthropicStreamTranslator {
  * @param stream - raw response body.
  * @param onActivity - transport-activity callback for the idle watchdog.
  * @param requestId - the response's `request-id` header, when it carried one.
+ * @param isRefusal - classifies an in-band `error` event against the response it
+ *   arrived on, so a refusal stated inside a 200 is not retried as a rate limit.
  * @returns the chunk stream; throws when the stream ends before `message_stop`.
  */
 export async function* streamAnthropic(
   stream: ReadableStream<Uint8Array>,
   onActivity?: () => void,
   requestId?: string,
+  isRefusal?: AnthropicRefusalProbe,
 ): AsyncGenerator<StreamChunk> {
-  const translator = new AnthropicStreamTranslator(requestId)
+  const translator = new AnthropicStreamTranslator(requestId, isRefusal)
   for await (const sseEvent of parseSse(stream, onActivity)) {
     let event: AnthropicStreamEvent
     try {

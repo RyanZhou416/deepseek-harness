@@ -87,6 +87,40 @@ test('a request is framed and its response streams back', async () => {
   assert.equal(new TextDecoder().decode(body.tag === 2 ? body.bytes : new Uint8Array()), '{"model":"x"}')
 })
 
+test("the caller's field names cross the bridge with their own casing", async () => {
+  // The genuine request is identified partly by the casing of its field names,
+  // so the transport carries the caller's spelling rather than a folded one.
+  const harness = memoryDuplex()
+  const bridge = new BunBridge(harness.duplex)
+  const pending = bridge.request('https://api.anthropic.com/v1/messages?beta=true', {
+    method: 'POST',
+    headers: {
+      Accept: 'application/json',
+      Authorization: 'Bearer token',
+      'User-Agent': 'claude-cli/2.1.288 (external, claude-desktop)',
+      'X-Claude-Code-Session-Id': '00000000-0000-4000-8000-000000000001',
+      'X-Stainless-Lang': 'js',
+      'x-app': 'cli',
+    },
+  })
+  const request = decodeSent(harness.sent).find(
+    (frame) => frame.tag === 1 && frame.message['type'] === 'request',
+  )
+  assert.ok(request !== undefined && request.tag === 1)
+  if (request.tag !== 1) return
+  assert.deepEqual(request.message['headers'], [
+    ['Accept', 'application/json'],
+    ['Authorization', 'Bearer token'],
+    ['User-Agent', 'claude-cli/2.1.288 (external, claude-desktop)'],
+    ['X-Claude-Code-Session-Id', '00000000-0000-4000-8000-000000000001'],
+    ['X-Stainless-Lang', 'js'],
+    ['x-app', 'cli'],
+  ])
+  // The duplex never answers, so the request is settled by teardown.
+  bridge.dispose()
+  await assert.rejects(pending, (error: unknown) => error instanceof BridgeError)
+})
+
 test('a child that dies rejects in flight work and refuses later work', async () => {
   const harness = memoryDuplex()
   const bridge = new BunBridge(harness.duplex)

@@ -357,6 +357,11 @@ export function resolveRateLimitWait(config: RateLimitConfig | undefined, path: 
  * streaming — so failing the turn on it would be stricter than the client the
  * routes imitate. The retry-policy module keeps its default set private, so
  * this route pins its own list.
+ *
+ * `ENFORCEMENT` is deliberately absent: a refusal the provider stated is final
+ * is not a transient failure to back off from, and retrying it is the traffic
+ * the refusal was sent to stop. `RATE_LIMIT` stays here for the ordinary case —
+ * a 429 that disclosed the window it reopens.
  */
 const SUBSCRIPTION_RETRYABLE_CODES: readonly string[] = Object.freeze([
   'EMPTY_RESPONSE',

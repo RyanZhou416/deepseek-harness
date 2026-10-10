@@ -28,6 +28,7 @@ import type { ResolvedImagePart, TranslatableBlock, TranslatableMessage } from '
 import {
   streamAnthropic,
 } from '../translate/anthropic.js'
+import type { AnthropicRefusalProbe } from '../translate/anthropic.js'
 import {
   CLAUDE_PLAIN_USER_AGENT,
   CLAUDE_USER_AGENT,
@@ -42,6 +43,7 @@ import type { ClaudeWireThinking } from './claude-wire.js'
 import {
   httpLlmError,
   idleWatchdog,
+  isEnforcementRefusal,
   mapFetchFailure,
   mergeReasoning,
   discoverAcrossAccounts,
@@ -1059,6 +1061,25 @@ export interface ClaudeAdapterOptions {
 /** The Claude 4.5 family accepts image input. */
 const CLAUDE_MODALITIES: readonly ('text' | 'image')[] = ['text', 'image']
 
+/**
+ * Classify an in-band `error` event against the response it arrived on.
+ *
+ * A terminal refusal reaches the harness two ways: as a failed status, which
+ * {@link httpLlmError} already classifies, and inside a 200 as an `error` event.
+ * The second form carries no status or headers of its own, so the response's own
+ * signals are applied here and the event's structured fields stand in for the
+ * body the classifier reads — a refusal that names a billing or credit reason in
+ * its message is one either way.
+ * @param response - the response whose body carried the event.
+ * @returns the probe the stream translator classifies each event with.
+ */
+function claudeStreamRefusalProbe(response: Response): AnthropicRefusalProbe {
+  return (error) => {
+    const body = error === undefined ? '' : JSON.stringify(error)
+    return isEnforcementRefusal(response, body, undefined, Date.now())
+  }
+}
+
 /** Claude wire adapter: one instance serves the `claude` provider route. */
 /** Sessions whose request clock is kept; the client bounds its own table the same way. */
 const REQUEST_CLOCK_LIMIT = 64
@@ -1237,7 +1258,7 @@ export class ClaudeAdapter extends LlmAdapter {
       if (response.body === null) {
         throw new LlmError('claude API returned no response body', EMPTY_RESPONSE_CODE)
       }
-      yield* streamAnthropic(response.body, () => { watchdog.pulse() }, requestId ?? undefined)
+      yield* streamAnthropic(response.body, () => { watchdog.pulse() }, requestId ?? undefined, claudeStreamRefusalProbe(response))
     } catch (error: unknown) {
       throw mapFetchFailure('claude API', error, watchdog, options.signal)
     } finally {

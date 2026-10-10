@@ -4,6 +4,8 @@ import { LlmError } from '@deepseek-ai/dsh-llm'
 import { AccountTokenManager } from '../src/providers/accounts.js'
 import { ImageAccountPool } from '../src/providers/image-pool.js'
 import { codexRateLimitReset } from '../src/providers/codex.js'
+import { ENFORCEMENT_CODE } from '../src/providers/common.js'
+import { DEFAULT_QUOTA_COOLDOWN_MS, TRANSIENT_COOLDOWN_MS } from '../src/providers/pool-health.js'
 
 function fixture() {
   const entries = ['first', 'second'].map(key => ({ key, session: { accessToken: key, refreshToken: key, expiresAt: Date.now() + 3600000 } }))
@@ -50,13 +52,18 @@ test('image pool: all accounts exhausted is bounded and later calls respect prov
   assert.equal(attempts, 2)
 })
 
-test('image pool: a 401 refreshes once, then switches if the account remains unauthorized', async () => {
+test('image pool: a 401 refreshes once, then ends the attempt if the account stays unauthorized', async () => {
   const { tokens, refreshes } = fixture()
   const attempts: string[] = []
   const pool = new ImageAccountPool()
-  await pool.request({ provider: 'codex', tokens, signal, rateLimitReset: codexRateLimitReset,
-    send: async session => { attempts.push(session.accessToken); return new Response('', { status: session.accessToken.startsWith('first') ? 401 : 200 }) } })
-  assert.deepEqual(attempts, ['first', 'first-fresh', 'second'])
+  await assert.rejects(
+    () => pool.request({ provider: 'codex', tokens, signal, rateLimitReset: codexRateLimitReset,
+      send: async session => { attempts.push(session.accessToken); return new Response('', { status: session.accessToken.startsWith('first') ? 401 : 200 }) } }),
+    // An auth refusal is aimed at the account, not at the request: the sibling is
+    // never asked, and the one forced refresh above is the only retry it gets.
+    (error: unknown) => error instanceof LlmError && error.code === 'AUTH',
+  )
+  assert.deepEqual(attempts, ['first', 'first-fresh'])
   assert.equal(refreshes(), 1)
 })
 
@@ -87,6 +94,93 @@ test('image pool: transport failures and cancellation do not switch accounts', a
   await assert.rejects(() => new ImageAccountPool().request(options), /connection lost/)
   await assert.rejects(() => new ImageAccountPool().request({ ...options, signal: AbortSignal.abort() }))
   assert.equal(attempts, 1)
+})
+
+test('image pool: an enforcement refusal parks the account and ends the attempt', async () => {
+  const { tokens } = fixture()
+  const pool = new ImageAccountPool()
+  const attempts: string[] = []
+  const options = { provider: 'codex' as const, tokens, signal, rateLimitReset: codexRateLimitReset,
+    send: async (session: { accessToken: string }) => {
+      attempts.push(session.accessToken)
+      return session.accessToken === 'first'
+        // The window is disclosed; the stop-retry header alone makes it final.
+        ? new Response('{"type":"error","error":{"type":"rate_limit_error"}}', {
+          status: 429,
+          headers: { 'retry-after': '600', 'x-should-retry': 'false' },
+        })
+        : new Response('ok')
+    } }
+  await assert.rejects(
+    () => pool.request(options),
+    (error: unknown) => error instanceof LlmError && error.code === ENFORCEMENT_CODE,
+  )
+  assert.deepEqual(attempts, ['first'], 'the sibling image account is never asked')
+  // The refusal parked the account for its own reset, so the next attempt skips it.
+  assert.equal(await (await pool.request(options)).text(), 'ok')
+  assert.deepEqual(attempts, ['first', 'second'])
+})
+
+test('image pool: a refusal outranks a sibling rate limit when the pool is exhausted', async () => {
+  const { tokens } = fixture()
+  const pool = new ImageAccountPool()
+  const attempts: string[] = []
+  const base = { provider: 'codex' as const, tokens, signal, rateLimitReset: codexRateLimitReset }
+  // The default account is refused, which ends that attempt.
+  await assert.rejects(
+    () => pool.request({ ...base, send: async (session: { accessToken: string }) => {
+      attempts.push(session.accessToken)
+      return new Response('{"type":"error","error":{"type":"permission_error"}}', { status: 403 })
+    } }),
+    (error: unknown) => error instanceof LlmError && error.code === 'AUTH',
+  )
+  assert.deepEqual(attempts, ['first'])
+  // Only the sibling is left, and it rate-limits with a disclosed reset.
+  await assert.rejects(
+    () => pool.request({ ...base, send: async (session: { accessToken: string }) => {
+      attempts.push(session.accessToken)
+      return quota()
+    } }),
+    (error: unknown) => error instanceof LlmError && error.code === 'RATE_LIMIT',
+  )
+  assert.deepEqual(attempts, ['first', 'second'])
+  // Every account is parked now: the pool names the refusal, not the rate limit,
+  // so a refused pool is not handed back to the retry loop.
+  await assert.rejects(
+    () => pool.request({ ...base, send: async () => { throw new Error('unreachable') } }),
+    (error: unknown) => error instanceof LlmError && error.code === 'AUTH',
+  )
+})
+
+test('image pool: a refusal with no disclosed reset parks the account for the quota cooldown', async () => {
+  const { tokens } = fixture()
+  const pool = new ImageAccountPool()
+  const base = { provider: 'codex' as const, tokens, signal, rateLimitReset: codexRateLimitReset }
+  const refuse = () => new Response('{"type":"error","error":{"type":"rate_limit_error"}}', {
+    status: 429,
+    headers: { 'x-should-retry': 'false' },
+  })
+  for (const _ of ['first', 'second']) {
+    await assert.rejects(
+      () => pool.request({ ...base, send: async () => refuse() }),
+      (error: unknown) => error instanceof LlmError && error.code === ENFORCEMENT_CODE,
+    )
+  }
+  await assert.rejects(
+    () => pool.request({ ...base, send: async () => new Response('ok') }),
+    (error: unknown) => {
+      assert.ok(error instanceof LlmError)
+      assert.equal(error.code, ENFORCEMENT_CODE)
+      // No window was disclosed, so the account sits out the quota cooldown: not the
+      // shorter transient one, and not the day-long credential one.
+      const retryAfter = error.failure.providerRetryAfterMs ?? 0
+      assert.ok(
+        retryAfter > TRANSIENT_COOLDOWN_MS && retryAfter <= DEFAULT_QUOTA_COOLDOWN_MS,
+        `retry hint ${String(retryAfter)}`,
+      )
+      return true
+    },
+  )
 })
 
 test('image pool: disabled pooling uses only default; removed sticky accounts are not reused', async () => {

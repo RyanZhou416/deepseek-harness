@@ -160,8 +160,11 @@ export function parseUnifiedRateLimit(headers: Headers, now: number): UnifiedRat
   const overageInUse = textOf(headers, member('overage-in-use'))
   const overageScope = textOf(headers, member('overage-scope'))
   return {
-    // A response with windows but no status member still reports those windows.
-    status: statusOf(status ?? 'allowed'),
+    // A response that carried windows but no status member reports those
+    // windows and leaves the account's standing unstated. Reading the absence
+    // as `allowed` would present a refusal the response did not describe as a
+    // healthy account, so it reads `other` like any unrecognized token.
+    status: statusOf(status),
     ...resetsAt === undefined ? {} : { resetsAt },
     ...claim === undefined ? {} : { claim },
     ...fallback === undefined ? {} : { fallbackAvailable: fallback === 'available' },

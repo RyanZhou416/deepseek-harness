@@ -35,6 +35,7 @@ function blocksOf(message: { content: unknown }): readonly Record<string, unknow
   return Array.isArray(message.content) ? (message.content as Record<string, unknown>[]) : []
 }
 import type { AnthropicStreamEvent } from '../src/translate/anthropic.js'
+import { ENFORCEMENT_CODE } from '../src/providers/common.js'
 import { resolveImages, type TranslatableBlock, type TranslatableMessage } from '../src/translate/resolved.js'
 import { toChatMessages } from '../src/translate/chat-completions.js'
 
@@ -1031,6 +1032,9 @@ test('Anthropic translator: error event mapping', () => {
     () => tooLong.push({ type: 'error', error: { type: 'invalid_request_error', message: 'prompt is too long: 300000 tokens' } }),
     (error: unknown) => error instanceof LlmError && error.code === 'CONTEXT_WINDOW_EXCEEDED',
   )
+  // A rate-limit event is retryable by default: its usual cause is a window that
+  // reopens. What makes one final is a fact about the response it arrived on, so
+  // the caller's probe decides, and without one the default stands.
   const rateLimited = new AnthropicStreamTranslator()
   assert.throws(
     () => rateLimited.push({ type: 'error', error: { type: 'rate_limit_error', message: 'slow down' } }),
@@ -1042,6 +1046,31 @@ test('Anthropic translator: error event mapping', () => {
     (error: unknown) => error instanceof LlmError && error.code === 'SERVER',
   )
   const auth = new AnthropicStreamTranslator()
+  assert.throws(
+    () => auth.push({ type: 'error', error: { type: 'authentication_error', message: 'bad token' } }),
+    (error: unknown) => error instanceof LlmError && error.code === 'AUTH',
+  )
+})
+
+test('an in-band rate limit the response states is final raises ENFORCEMENT', () => {
+  // The refusal reaches the harness inside a 200, so no status classifies it; the
+  // probe reads the response's own signals and the event is terminal.
+  const refused = new AnthropicStreamTranslator(undefined, () => true)
+  assert.throws(
+    () => refused.push({ type: 'error', error: { type: 'rate_limit_error', message: 'usage credits are required' } }),
+    (error: unknown) => error instanceof LlmError && error.code === ENFORCEMENT_CODE,
+  )
+})
+
+test('an in-band rate limit with a disclosed window keeps its retryable code', () => {
+  const limited = new AnthropicStreamTranslator(undefined, () => false)
+  assert.throws(
+    () => limited.push({ type: 'error', error: { type: 'rate_limit_error', message: 'slow down' } }),
+    (error: unknown) => error instanceof LlmError && error.code === 'RATE_LIMIT',
+  )
+  // The probe is consulted for the retryable event type alone: a credential
+  // refusal keeps AUTH whatever the response said.
+  const auth = new AnthropicStreamTranslator(undefined, () => true)
   assert.throws(
     () => auth.push({ type: 'error', error: { type: 'authentication_error', message: 'bad token' } }),
     (error: unknown) => error instanceof LlmError && error.code === 'AUTH',

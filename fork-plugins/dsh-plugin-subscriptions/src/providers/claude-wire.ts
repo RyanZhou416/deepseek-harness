@@ -172,12 +172,14 @@ function chainFor(account: string, sessionId: string): ClaudeChainState {
 /**
  * Wire session ids per account span.
  *
- * A genuine Claude Code conversation runs under one account, so a pool
+ * A genuine Claude Code conversation runs under one account, and its
+ * `X-Claude-Code-Session-Id` is a UUID minted for that conversation. A pool
  * failover mid-session must not continue the first account's wire session
- * under the second account's identity. The first account span reuses the
- * harness session id verbatim (single-account sessions are byte-identical to
- * before), and every later account span gets a fresh UUID; switching back
- * resumes the original id and chain.
+ * under the second account's identity, so each account span of a harness
+ * session gets its own UUID and keeps it: switching back resumes the original
+ * id and chain. The harness session id is the key this table is indexed by, not
+ * a value that reaches the wire — it is `session-<uuid>`, which no genuine
+ * client ever sends.
  */
 const WIRE_SESSION_LIMIT = 256
 /** Harness session id → account → stable wire session id. */
@@ -187,16 +189,21 @@ const wireSessions = boundedTwoLevelMap<string>(WIRE_SESSION_LIMIT)
  * The wire session id for one account span of a harness session.
  * @param account - the canonical account key serving this request.
  * @param harnessSessionId - the harness session the conversation belongs to.
- * @returns the stable `x-claude-code-session-id` for this (account, session).
+ * @returns the stable `X-Claude-Code-Session-Id` for this (account, session).
  */
 export function claudeWireSessionId(account: string, harnessSessionId: string): string {
   const existing = wireSessions.get(harnessSessionId, account)
   if (existing !== undefined) return existing
-  // The first account span keeps the harness id; later spans roll a new one.
-  const wireId = wireSessions.isEmpty(harnessSessionId) ? harnessSessionId : randomUUID()
+  const wireId = randomUUID()
   wireSessions.set(harnessSessionId, account, wireId)
   return wireId
 }
+
+/**
+ * The shape the client gives both the session identity it declares and the
+ * `session_id` its correlation metadata carries.
+ */
+const WIRE_SESSION_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
 /**
  * Record the response `request-id` the billing block of the next request in
@@ -380,7 +387,7 @@ function claudeEffort(value: string | undefined): ClaudeCodeEffort | undefined {
  * @param maxTokens - the resolved output cap.
  * @param thinking - the wire thinking parameter, when the model takes one.
  * @param effort - the reasoning effort, when the model advertises efforts.
- * @param sessionId - the harness session id used as the Claude Code session identity.
+ * @param sessionId - the wire session identity, a UUID minted per account span by {@link claudeWireSessionId}.
  * @param account - the canonical account key owning this conversation's chain state.
  * @returns the built request: pinned URL, header plan, and serialized body.
  */
@@ -398,6 +405,15 @@ export async function buildClaudeWireRequest(
 ): Promise<BuiltClaudeCodeRequest> {
   if (session.deviceId === undefined || session.accountUuid === undefined) {
     throw new Error('dsh-plugin-subscriptions: claude wire identity is missing; backfill it before building')
+  }
+  // The client's session identity is a UUID in both places it appears — the
+  // `X-Claude-Code-Session-Id` header and the `session_id` of its correlation
+  // metadata — so a value of any other shape is a request no client sends.
+  if (!WIRE_SESSION_ID_PATTERN.test(sessionId)) {
+    throw new LlmError(
+      `claude request assembly failed: the wire session id "${sessionId}" is not a UUID, the only shape the client declares its session in`,
+      'INVALID_REQUEST',
+    )
   }
   // An empty list asks for nothing and is not a caller statement about this
   // option, so it passes through as absence.
@@ -446,15 +462,21 @@ export async function buildClaudeWireRequest(
   // The filter and the identity replacement apply whether or not any section is stable, so a
   // deployment whose sections are all session-specific still sends neither the machine-local
   // path nor a second identity.
+  //
+  // When the loop supplied the prompt as sections, those sections are the prompt's ONLY
+  // carrier. The same rendered prompt is also the leading system-role message of the derived
+  // history, so lifting that message into the system array would send the prompt twice — and
+  // that copy is the unfiltered one, still naming the harness and the machine-local checkout
+  // this route exists to keep off the wire. The builder emits the prompt once, from the
+  // sections.
   const system = options.systemSections === undefined
     ? toAnthropicSystem(options.system, messages)
     : shared.length === 0
-      ? [...identitySections.map(section => section.text), ...toAnthropicSystem(undefined, messages)]
+      ? identitySections.map(section => section.text)
       : [
           ...shared.map(section => section.text),
           SYSTEM_PROMPT_DYNAMIC_BOUNDARY,
           ...identitySections.filter(section => !section.stable).map(section => section.text),
-          ...toAnthropicSystem(undefined, messages),
         ]
   const tools = options.tools !== undefined && options.tools.length > 0
     ? toAnthropicTools(options.tools)
@@ -522,6 +544,9 @@ export async function buildClaudeWireRequest(
     stainlessTimeoutSeconds: 900,
     stream: true,
     clientRequestId: randomUUID(),
+    // This route issues the conversation's own Messages request, which is the class the
+    // client reports for a main-thread or SDK query.
+    requestClass: 'main',
     ...chain.previousRequestId === undefined ? {} : { previousRequestId: chain.previousRequestId },
     promptId: claudePromptId(sessionId, promptTurn(messages)),
     // The desktop identity. These names are not canonical for this package, so the

@@ -22,10 +22,12 @@ import type {
 } from '@deepseek-ai/dsh-llm'
 import type { ProviderId } from '../auth/store.js'
 import type { AccountAwareAdapter } from './accounts.js'
+import { ENFORCEMENT_CODE } from './common.js'
 import type { UsageWindow } from './common.js'
 import type { ConcretePoolMember, PoolDefinition, PoolMemberRef } from './pool-family.js'
 import { poolKey } from './pool-family.js'
-import { accountKey, classifyPoolFailure, memberKey, PoolHealthRegistry } from './pool-health.js'
+import { accountKey, classifyPoolFailure, exhaustionCode, memberKey, PoolHealthRegistry } from './pool-health.js'
+import type { PoolFailureScope } from './pool-health.js'
 import type { MemberQuota, PoolUsageTracker } from './pool-usage.js'
 import { poolSchedulingScore } from './pool-scheduling.js'
 import type { PoolSchedulingPolicy } from './pool-scheduling.js'
@@ -365,14 +367,19 @@ export class PoolAdapter extends LlmAdapter {
         } catch (error: unknown) {
           const classification = classifyPoolFailure(error, member.provider)
           if (classification.action === 'throw') throw error
-          if ('cooldownMs' in classification) {
-            this.options.health.markUnavailable(
-              classification.scope === 'account'
-                ? accountKey(member.provider, member.account)
-                : memberKey(member.provider, member.account, member.model),
-              classification.cooldownMs,
-              classification.reason,
+          if (classification.action === 'park') {
+            // A refusal the provider aimed at this account: record it, then end the
+            // turn on it. Asking the next member would repeat the refusal under
+            // another identity, which is the traffic a refusal exists to stop.
+            this.recordCooldown(member, classification.scope, classification.cooldownMs, classification.reason)
+            this.options.onWarn(
+              `pool "${options.model}": ${memberLabel(member)} was refused`
+              + ` (${error instanceof Error ? error.message : String(error)}); ending the turn`,
             )
+            throw error
+          }
+          if ('cooldownMs' in classification) {
+            this.recordCooldown(member, classification.scope, classification.cooldownMs, classification.reason)
             reasons.push(classification.reason)
             if (classification.reason === QUOTA_EXCEEDED_CODE || classification.reason === 'RATE_LIMIT') {
               this.options.usage.invalidate(member.provider, member.account)
@@ -484,6 +491,28 @@ export class PoolAdapter extends LlmAdapter {
     return [...scored, ...quotaFull.sort(byQuota)]
   }
 
+  /**
+   * Mark one member, or its whole account, unavailable for `cooldownMs`.
+   * @param member - the member that failed.
+   * @param scope - whether the record covers the member or its account.
+   * @param cooldownMs - how long the record holds.
+   * @param reason - the failure code the record names.
+   */
+  private recordCooldown(
+    member: ConcretePoolMember,
+    scope: PoolFailureScope,
+    cooldownMs: number,
+    reason: string,
+  ): void {
+    this.options.health.markUnavailable(
+      scope === 'account'
+        ? accountKey(member.provider, member.account)
+        : memberKey(member.provider, member.account, member.model),
+      cooldownMs,
+      reason,
+    )
+  }
+
   /** Hold account load through first-byte wait, streaming, and iterator teardown. */
   private reserve(member: ConcretePoolMember): () => void {
     const key = accountKey(member.provider, member.account)
@@ -537,16 +566,16 @@ export class PoolAdapter extends LlmAdapter {
     }
     // The terminal code names why nothing served. Every member carries one reason — the failure
     // it just reported, or the health record that parked it before this selection started (a pool
-    // parked by an auth failure says so rather than reporting a rate limit). A mixed set reports
-    // the cooling-down state they share.
+    // parked by an auth failure says so rather than reporting a rate limit). A pool that reported
+    // an enforcement-shaped refusal reports that refusal, whatever its other members did: naming a
+    // rate limit instead would hand a refused account's turn back to the retry loop.
     const codes = new Set<string>(reasons)
     for (const member of pool) {
       if (this.options.health.isMemberAvailable(member.provider, member.account, member.model)) continue
       const cooling = this.options.health.accountCooling(member.provider, member.account)
       if (cooling !== undefined) codes.add(cooling.reason)
     }
-    const [onlyReason, ...others] = [...codes]
-    const code = onlyReason !== undefined && others.length === 0 ? onlyReason : 'RATE_LIMIT'
+    const code = exhaustionCode(codes)
     const now = Date.now()
     const recovery = this.options.health.earliestRecovery(keys, now)
     const reset = earliestReset(excludedWindows, now)

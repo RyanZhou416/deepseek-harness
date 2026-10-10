@@ -82,10 +82,21 @@ test('a response outside the family is not a report, and an unknown status stays
   assert.equal(state?.status, 'other', 'an unrecognized token is not read as allowed')
 })
 
-test('an absent status member still reports the windows the response carried', () => {
+test('an absent status member reports the windows but leaves the standing unstated', () => {
   const state = parseUnifiedRateLimit(new Headers({ 'anthropic-ratelimit-unified-5h-reset': '1786100000' }), 0)
-  assert.equal(state?.status, 'allowed')
+  // Reading the absence as `allowed` would present a blocked account as healthy;
+  // the response said nothing about its standing, so the report says `other`.
+  assert.equal(state?.status, 'other')
   assert.deepEqual(state?.windows, [{ window: '5h', resetsAt: 1_786_100_000_000 }])
+})
+
+test('a refusal that carried only a disabled reason is not recorded as allowed', () => {
+  const state = parseUnifiedRateLimit(new Headers({
+    'anthropic-ratelimit-unified-overage-disabled-reason': 'org_spend_cap_reached',
+    'anthropic-ratelimit-unified-overage-reset': '1786147200',
+  }), 0)
+  assert.equal(state?.status, 'other')
+  assert.equal(state?.overageDisabledReason, 'org_spend_cap_reached')
 })
 
 test('captures are per provider and account, replaced by the account\'s next report', () => {
