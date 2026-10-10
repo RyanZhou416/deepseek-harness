@@ -52,6 +52,29 @@ export function fallbackTranslate(key: SubscriptionsKey, params?: Record<string,
 /** Title prompt truncation budget (characters). */
 const PROMPT_MAX_LENGTH = 60
 
+/**
+ * One model row's display text.
+ *
+ * A row the provider refuses, or one a saved selection names without the catalog
+ * listing it any more, states that beside the name instead of reading like any other
+ * row: the model list and the account allowlist both offer these rows, and choosing
+ * one silently is what the markers exist to prevent. The provider's own reason is wire
+ * data and travels verbatim inside the localized template.
+ * @param t - Subscriptions dictionary translator.
+ * @param model - the row's name plus whichever markers its source stated.
+ * @returns the row text.
+ */
+export function modelRowLabel(
+  t: SubscriptionsTranslate,
+  model: { name: string; disabledReason?: string; unavailable?: boolean },
+): string {
+  const disabled = model.disabledReason === undefined
+    ? ''
+    : ` (${t('modelsDisabled', { reason: model.disabledReason })})`
+  const unavailable = model.unavailable === true ? ` (${t('modelsUnavailable')})` : ''
+  return `${model.name}${disabled}${unavailable}`
+}
+
 /** Extract the prompt from the call's raw args JSON; falls back to the first string value, then the raw line. */
 export function derivePrompt(argsRaw: string): string {
   let parsed: unknown

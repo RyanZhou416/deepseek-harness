@@ -10,7 +10,7 @@ import assert from 'node:assert/strict'
 import './keep-alive.js'
 import { LlmAdapter, LlmError, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import type { GenerateOptions, LlmModelInfo, LlmResolvedModelInfo, StreamChunk } from '@deepseek-ai/dsh-llm'
-import { PoolAdapter } from '../src/providers/pool.js'
+import { PoolAdapter, usagePoolState } from '../src/providers/pool.js'
 import type { PoolAdapterOptions } from '../src/providers/pool.js'
 import { resolvePoolScheduling } from '../src/providers/pool-scheduling.js'
 import type { PoolSchedulingPolicy } from '../src/providers/pool-scheduling.js'
@@ -20,7 +20,7 @@ import type { PoolDefinition, PoolMemberRef, ProviderPoolSource } from '../src/p
 import { accountKey, memberKey, PoolHealthRegistry } from '../src/providers/pool-health.js'
 import { PoolUsageTracker } from '../src/providers/pool-usage.js'
 import { ENFORCEMENT_CODE, OAuthEndpointError } from '../src/providers/common.js'
-import type { ProviderUsage } from '../src/providers/common.js'
+import type { ProviderUsage, UsagePoolState } from '../src/providers/common.js'
 import type { ProviderId } from '../src/auth/store.js'
 import type { AccountAwareAdapter } from '../src/providers/accounts.js'
 
@@ -1259,6 +1259,30 @@ test('the floors are configurable, and other providers keep their own rule', asy
   })
   await collect(codex.pool.stream(OPTIONS))
   assert.deepEqual(codexAdapter.accounts, ['a1'])
+})
+
+test('the usage card counts a peer only when the pool would accept it', async () => {
+  // `a1` is parked, so the card must say whether another account can serve in its place.
+  // Health alone is not that answer on a route with usage floors: a peer past its Claude
+  // floor is one the pool would hold back, so no failover exists to report.
+  const run = async (usedPercent: number): Promise<UsagePoolState> => {
+    const harness = claudeFloorPool(account =>
+      account === 'a1' ? [{ kind: 'session', usedPercent: 5 }] : [{ kind: 'session', usedPercent }])
+    harness.health.markUnavailable(accountKey('claude', 'a1'), 60_000, 'RATE_LIMIT')
+    return await usagePoolState(harness.health, harness.pool, 'claude', 'a1', ['a1', 'a2'], () => true)
+  }
+  const served = await run(5)
+  assert.equal(served.peerAvailable, true, 'a peer the pool would select is a peer')
+  assert.equal(served.coolingReason, 'quota')
+  assert.ok(served.coolingUntil !== undefined && served.coolingUntil > Date.now())
+  assert.equal((await run(50)).peerAvailable, false, 'a peer past its session floor cannot serve')
+
+  // A pool that is not wired keeps the health-only answer, and an account outside the
+  // pool (its own preference) is not a peer either.
+  const harness = claudeFloorPool(() => [{ kind: 'session', usedPercent: 5 }])
+  assert.equal((await usagePoolState(harness.health, undefined, 'claude', 'a1', ['a2'], () => true)).peerAvailable, true)
+  assert.equal((await usagePoolState(harness.health, harness.pool, 'claude', 'a1', ['a2'], () => false)).peerAvailable, false)
+  assert.equal((await usagePoolState(harness.health, harness.pool, 'claude', 'a1', ['a1'], () => true)).peerAvailable, false)
 })
 
 test('a Claude account past every floor leaves the pool with no usable member', async () => {

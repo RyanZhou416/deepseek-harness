@@ -3,7 +3,7 @@ import type { AccountPreferences, ProviderPreferences } from '../provider-settin
 export interface AccountCatalogRow {
   key: string
   label: string
-  models: { id: string; name: string }[]
+  models: { id: string; name: string; disabledReason?: string }[]
   unavailable?: boolean
 }
 

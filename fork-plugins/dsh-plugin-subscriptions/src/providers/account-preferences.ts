@@ -4,6 +4,7 @@ import type { ProviderId } from '../auth/store.js'
 import type { ProviderSettingsStore, AccountPreferences } from '../provider-settings.js'
 import type { AccountAwareAdapter } from './accounts.js'
 import { DISCOVERY_TIMEOUT_MS, withTimeout } from './common.js'
+import { exhaustionCode } from './pool-health.js'
 import type { PoolAdapter } from './pool.js'
 
 /** Reserved namespace, recognized even when malformed or no longer enabled. */
@@ -86,19 +87,39 @@ export class AccountPreferencesAdapter extends LlmAdapter {
    * rule still applies: an account that is cooling down, or that is past a
    * Claude usage floor, is skipped for the next eligible one — the fallback can
    * never reach an account the pool would have held back.
+   *
+   * When no account qualifies, the error names why the pool held them back and
+   * when the earliest one may serve again. That is the pool-exhausted error's own
+   * cause and hint: a spent allowance or a parked account is temporary and
+   * retryable, and reporting `NO_ADAPTER` for it would name an unavailable model
+   * and discard the recovery instant the provider already disclosed.
    */
   private async fallback(model: string): Promise<string> {
     const pool = this.options.pool()
     if (pool !== undefined) this.reportUnowned(model)
+    const held: { code: string; retryAfterMs?: number }[] = []
     for (const { key } of await this.options.accounts()) {
       if (!accountAllowsPool(this.preference(key), model)) continue
       let listed = false
       try { await this.requireAccount(key, model, false); listed = true } catch { /* unavailable catalog */ }
       if (!listed) continue
-      if (pool !== undefined && !await pool.accountAvailable(this.options.provider, model, key)) continue
+      const holdback = pool === undefined ? undefined : await pool.accountHoldback(this.options.provider, model, key)
+      if (holdback !== undefined) { held.push(holdback); continue }
       return key
     }
-    throw new LlmError(`No eligible account for ${this.options.provider}/${model}`, 'NO_ADAPTER')
+    if (held.length === 0) {
+      throw new LlmError(`No eligible account for ${this.options.provider}/${model}`, 'NO_ADAPTER')
+    }
+    const retryAfterMs = held.reduce<number | undefined>(
+      (earliest, entry) => entry.retryAfterMs === undefined ? earliest
+        : earliest === undefined ? entry.retryAfterMs : Math.min(earliest, entry.retryAfterMs),
+      undefined,
+    )
+    throw new LlmError(
+      `No eligible account for ${this.options.provider}/${model}: every candidate is cooling down or past its usage floor`,
+      exhaustionCode(new Set(held.map(entry => entry.code))),
+      { ...retryAfterMs === undefined ? {} : { providerRetryAfterMs: retryAfterMs } },
+    )
   }
   /** Pool-only facade: explicit families/tiers must obey the same policy as auto pools. */
   poolMember(): AccountAwareAdapter {

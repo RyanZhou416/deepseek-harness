@@ -192,6 +192,20 @@ interface CatalogRowExtras {
 }
 
 /**
+ * The provider's own disabled marker on one picker row, when the route published one.
+ *
+ * The harness model-info contract has no field for it, so a route that receives a
+ * `disabled_reason` from its catalogue carries the marker as an extension of its own row.
+ * The owning adapters and the settings RPC both read it through here, so the extension
+ * has one spelling.
+ * @param model - one row as a subscription route published it.
+ * @returns the provider's reason for refusing the model, or undefined when it may serve.
+ */
+export function modelDisabledReason(model: LlmModelInfo): string | undefined {
+  return (model as LlmModelInfo & Pick<CatalogRowExtras, 'disabledReason'>).disabledReason
+}
+
+/**
  * One picker row for a discovered catalog entry: the advertised id, name and
  * modalities, plus the provider's own extra fields. A provider that does not
  * surface a catalog description passes no `description` extra.

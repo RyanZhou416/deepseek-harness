@@ -23,10 +23,10 @@ import type {
 import type { ProviderId } from '../auth/store.js'
 import type { AccountAwareAdapter } from './accounts.js'
 import { ENFORCEMENT_CODE } from './common.js'
-import type { UsageWindow } from './common.js'
+import type { UsagePoolState, UsageWindow } from './common.js'
 import type { ConcretePoolMember, PoolDefinition, PoolMemberRef } from './pool-family.js'
 import { poolKey } from './pool-family.js'
-import { accountKey, classifyPoolFailure, exhaustionCode, memberKey, PoolHealthRegistry } from './pool-health.js'
+import { accountKey, classifyPoolFailure, exhaustionCode, isAuthCooldownReason, memberKey, PoolHealthRegistry } from './pool-health.js'
 import type { PoolFailureScope } from './pool-health.js'
 import type { MemberQuota, PoolUsageTracker } from './pool-usage.js'
 import { poolSchedulingScore } from './pool-scheduling.js'
@@ -430,22 +430,54 @@ export class PoolAdapter extends LlmAdapter {
   }
 
   /**
-   * Whether one account may serve one model under the pool's availability rule:
-   * neither the member nor its whole account is cooling down, and a Claude
-   * account has not reached a usage floor. The registered account route consults
-   * this for a model the pool does not own, so that route cannot serve an
-   * account the pool itself would have held back.
+   * Whether one account is past a usage floor for every model it could be asked for.
+   *
+   * The floors are model-independent — the session and weekly windows — so this answers
+   * the `usage` card's question ("could a peer serve instead?") without naming a model and
+   * without the discovery that naming one would trigger. A model-scoped lane below its own
+   * floor cannot make an account selectable when its session window breached.
+   * @param provider - the provider route.
+   * @param account - the resolved account key.
+   * @returns true when only a window reset can make the account selectable again.
+   */
+  async accountAtFloor(provider: ProviderId, account: string): Promise<boolean> {
+    if (!carriesUsageFloor(provider)) return false
+    const quota = await this.options.usage.quotaFor({ provider, account })
+    return breachingWindows(floorWindows(quota), this.options.scheduling).length > 0
+  }
+
+  /**
+   * Why the pool's availability rule holds one account back, in the vocabulary the
+   * pool-exhausted error reports: neither the member nor its whole account may be
+   * cooling down, and a Claude account must not have reached a usage floor. A route
+   * that owns no entry for a model still consults this, so it cannot serve an account
+   * the pool itself would have held back — and it can state the same cause and the
+   * same earliest-recovery hint instead of naming an unavailable model.
    * @param provider - the provider route.
    * @param model - the catalog model id.
    * @param account - the resolved account key.
-   * @returns true when the account may serve now.
+   * @returns the holdback, or undefined when the account may serve now.
    */
-  async accountAvailable(provider: ProviderId, model: string, account: string): Promise<boolean> {
-    if (!this.options.health.isMemberAvailable(provider, account, model)) return false
+  async accountHoldback(
+    provider: ProviderId,
+    model: string,
+    account: string,
+  ): Promise<{ code: string; retryAfterMs?: number } | undefined> {
+    const now = Date.now()
+    const cooling = this.options.health.accountCooling(provider, account, now)
+    if (cooling !== undefined) {
+      return { code: cooling.reason, retryAfterMs: Math.max(cooling.unavailableUntil - now, 1) }
+    }
     // Only Claude carries floors, so only Claude needs a usage read here.
-    if (!carriesUsageFloor(provider)) return true
+    if (!carriesUsageFloor(provider)) return undefined
     const member: ConcretePoolMember = { provider, account, model }
-    return !pastClaudeFloor(member, await this.options.usage.quotaFor(member), this.options.scheduling)
+    const breaching = breachingWindows(floorWindows(await this.options.usage.quotaFor(member)), this.options.scheduling)
+    if (breaching.length === 0) return undefined
+    const reset = earliestReset(breaching, now)
+    // A floor is a spent allowance, not a refusal: `RATE_LIMIT` is what the pool-exhausted
+    // error reports when floors alone held every member back, and it is the code the harness
+    // retries with the disclosed reset as its hint.
+    return { code: 'RATE_LIMIT', ...reset === undefined ? {} : { retryAfterMs: Math.max(reset - now, 1) } }
   }
 
   /**
@@ -610,6 +642,47 @@ export class PoolAdapter extends LlmAdapter {
         ...cause === undefined ? {} : { cause },
       },
     )
+  }
+}
+
+/**
+ * The `usage` endpoint's pool attribution for one account.
+ *
+ * A peer counts only when the pool would actually accept it: its account record is
+ * clear AND, on a route that reserves usage floors, it has not reached one. Health
+ * alone would let the card claim another account is serving while every peer sits
+ * past its floor — a failover that cannot happen — so the floor check is required
+ * before a pool attribution is printed.
+ * @param health - the pool's cooldown registry.
+ * @param pool - the pool whose availability rule applies, or undefined when none is wired.
+ * @param provider - the provider route.
+ * @param account - the account the card describes.
+ * @param peers - every other account of the provider, in the token store's order.
+ * @param pooled - whether one account participates in the pool (the caller's preference rule).
+ * @returns the parking record for this account, and whether a peer may serve in its place.
+ */
+export async function usagePoolState(
+  health: PoolHealthRegistry,
+  pool: PoolAdapter | undefined,
+  provider: ProviderId,
+  account: string,
+  peers: readonly string[],
+  pooled: (account: string) => boolean,
+): Promise<UsagePoolState> {
+  const cooling = health.accountCooling(provider, account)
+  let peerAvailable = false
+  for (const peer of peers) {
+    if (peer === account || !pooled(peer)) continue
+    if (!health.isAvailable(accountKey(provider, peer))) continue
+    if (pool !== undefined && await pool.accountAtFloor(provider, peer)) continue
+    peerAvailable = true
+    break
+  }
+  if (cooling === undefined) return { peerAvailable }
+  return {
+    peerAvailable,
+    coolingUntil: cooling.unavailableUntil,
+    coolingReason: isAuthCooldownReason(cooling.reason) ? 'auth' : 'quota',
   }
 }
 

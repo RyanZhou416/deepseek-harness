@@ -183,3 +183,37 @@ test('an unowned model still refuses a Claude account past a usage floor', async
   await consume(route, 'm:/模型')
   assert.deepEqual(raw.calls, ['stream:b:m:/模型'])
 })
+
+test('an unowned model reports the pool\'s cause and recovery hint when every account is held back', async () => {
+  // Both accounts are unusable for a TEMPORARY reason: `a` is past its Claude session
+  // floor with a disclosed reset, `b` is parked by a rate limit. Naming an unavailable
+  // model (NO_ADAPTER) for that would discard the reset the provider just disclosed.
+  const resetsAt = Date.now() + 600_000
+  const { route, health } = unownedPool('claude', (_provider, account) => async () => ({
+    supported: true,
+    windows: [{ kind: 'session' as const, usedPercent: account === 'a' ? 90 : 5, resetsAt }],
+  }))
+  health.markUnavailable(accountKey('claude', 'b'), 60_000, 'RATE_LIMIT')
+  const held = await consume(route, 'm:/模型').then(() => undefined, (thrown: unknown) => thrown)
+  assert.ok(held instanceof LlmError, String(held))
+  assert.equal(held.code, 'RATE_LIMIT')
+  const retryAfterMs = held.failure.providerRetryAfterMs
+  assert.ok(retryAfterMs !== undefined && retryAfterMs > 59_000 && retryAfterMs <= 60_000, String(retryAfterMs))
+
+  // A refusal outranks the rate limit and reaches the caller: another account must not
+  // be asked, and the code has to say so instead of inviting a retry.
+  health.markUnavailable(accountKey('claude', 'b'), 24 * 60 * 60_000, 'AUTH')
+  const refused = await consume(route, 'm:/模型').then(() => undefined, (thrown: unknown) => thrown)
+  assert.ok(refused instanceof LlmError, String(refused))
+  assert.equal(refused.code, 'AUTH')
+})
+
+test('an unowned model that no account lists still names an unavailable model', async () => {
+  // Held-back accounts alone earn the pool's cause; a model the catalog does not list
+  // anywhere stays NO_ADAPTER, because no retry can make it exist.
+  const { route, raw } = unownedPool('codex', () => undefined)
+  raw.listOwnModels = async () => []
+  const missing = await consume(route, 'm:/模型').then(() => undefined, (thrown: unknown) => thrown)
+  assert.ok(missing instanceof LlmError, String(missing))
+  assert.equal(missing.code, 'NO_ADAPTER')
+})

@@ -114,6 +114,8 @@ export interface ProviderUsage {
 export interface ModelDefaultView {
   id: string
   name: string
+  /** The provider's own reason for refusing the model, or absent when it may serve. */
+  disabledReason?: string
   /** Advertised effort levels, in catalog order (empty when the model has no reasoning). */
   efforts: { id: string; name: string }[]
   /** The user-configured default effort, when set. */

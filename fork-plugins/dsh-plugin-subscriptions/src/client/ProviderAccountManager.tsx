@@ -7,6 +7,7 @@ import type { SubscriptionsKey } from './locales.js'
 import { callSubscriptionsAuth } from './subscriptions-rpc.js'
 import { accountModelRows, accountPoolSelection, mergeAccountChanges, mergeLatestAccounts } from './account-preferences.js'
 import type { AccountCatalogRow } from './account-preferences.js'
+import { modelRowLabel } from './format.js'
 import { ProviderModelEditor } from './ProviderModelEditor.js'
 import type { ProviderModelEditorHandle } from './ProviderModelEditor.js'
 
@@ -178,7 +179,7 @@ export function ProviderAccountManager({ provider, name, rpc, t, onClose }: Prop
                       const next = new Set(selected)
                       if (event.target.checked) next.add(model.id); else next.delete(model.id)
                       edit(account.key, { ...preferences, poolModels: [...next] })
-                    }} /> {model.name}{model.unavailable && ` (${t('modelsUnavailable')})`}
+                    }} /> {modelRowLabel(t, model)}
                   </label>)}
                   {models.length === 0 && <p style={hint}>{t('accountsNoModels')}</p>}
                 </div>

@@ -4,6 +4,7 @@ import { mkdtemp, rm } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { ReasoningEffortId } from '@deepseek-ai/dsh-llm'
+import type { LlmModelInfo } from '@deepseek-ai/dsh-llm'
 import { Context } from '@deepseek-ai/cordis'
 import type { AccountAwareAdapter } from '../src/providers/accounts.js'
 import { CodexAdapter } from '../src/providers/codex.js'
@@ -80,6 +81,54 @@ test('provider settings RPC edits picker visibility without losing the editor ca
   } finally {
     await runtime.dispose()
     CodexAdapter.prototype.resolveOwnModel = originalResolve
+    if (previous === undefined) delete process.env.DSH_HOME; else process.env.DSH_HOME = previous
+    await rm(home, { recursive: true, force: true })
+  }
+})
+
+test('providerSettings reports the provider\'s disabled reason on the account row', async () => {
+  // The account model allowlist offers these rows as ordinary choices; a model the
+  // provider refuses for that account has to arrive with the marker, or the row
+  // reads as selectable and silently never serves.
+  const home = await mkdtemp(join(tmpdir(), 'settings-disabled-'))
+  const previous = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  const ctx = new Context()
+  const adapters = new Map<string, AccountAwareAdapter>()
+  ctx.provide('llm', {
+    registerAdapter: (routes: string[], adapter: AccountAwareAdapter) => {
+      adapters.set(routes[0], adapter)
+      return Object.assign(() => {}, { replace: () => {} })
+    },
+  })
+  const connection = createFakeConnection()
+  ctx.provide('connection', connection.connection)
+  ctx.provide('tools', { register: () => () => {} })
+  const originalListOwnModels = CodexAdapter.prototype.listOwnModels
+  CodexAdapter.prototype.listOwnModels = async function (provider: string) {
+    const rows: (LlmModelInfo & { disabledReason?: string })[] = [
+      { provider, id: 'm1', name: 'Model 1' },
+      { provider, id: 'm2', name: 'Model 2', disabledReason: 'no longer offered' },
+    ]
+    return rows
+  }
+  const runtime = ctx.plugin(plugin, {
+    providers: ['codex'], pool: { enabled: false },
+    models: { codex: [{ id: 'm1', name: 'Model 1', inputModalities: ['text'] }] },
+  })
+  try {
+    await new Promise(resolve => setTimeout(resolve, 50))
+    if (!connection.registered()) await runtime
+    await saveAccountSession('codex', 'account', { accessToken: 'token', refreshToken: 'refresh', expiresAt: Date.now() + 3600_000, accountId: 'account', idToken: '' })
+    const catalog = await connection.handler('providerSettings', { provider: 'codex', force: true }, new AbortController().signal)
+    assert.ok(catalog.ok)
+    assert.deepEqual((catalog.value as { accounts: { models: unknown[] }[] }).accounts[0]?.models, [
+      { id: 'm1', name: 'Model 1' },
+      { id: 'm2', name: 'Model 2', disabledReason: 'no longer offered' },
+    ])
+  } finally {
+    await runtime.dispose()
+    CodexAdapter.prototype.listOwnModels = originalListOwnModels
     if (previous === undefined) delete process.env.DSH_HOME; else process.env.DSH_HOME = previous
     await rm(home, { recursive: true, force: true })
   }

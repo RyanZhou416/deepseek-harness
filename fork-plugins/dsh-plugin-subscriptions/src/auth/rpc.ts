@@ -117,6 +117,12 @@ export interface ModelDefaultView {
   id: string
   /** Human-readable display name. */
   name: string
+  /**
+   * The provider's own reason for refusing this model on the accounts that list it,
+   * or absent when it may serve. The row stays listed so the settings model list
+   * states why the model cannot be used instead of offering it as an ordinary row.
+   */
+  disabledReason?: string
   /** Advertised effort levels, in catalog order (empty when the model has no reasoning). */
   efforts: { id: string; name: string }[]
   /** The user-configured default effort, when set. */

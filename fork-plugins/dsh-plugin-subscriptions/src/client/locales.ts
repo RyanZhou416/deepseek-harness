@@ -43,6 +43,7 @@ export const en = {
   modelsRefresh: "Refresh",
   modelsSave: "Save changes",
   modelsUnavailable: "Currently unavailable",
+  modelsDisabled: "Disabled by the provider: {reason}",
 
   dateTime: '{y}-{m}-{d} {hh}:{mm}',
   nav: 'Subscriptions',
@@ -237,6 +238,7 @@ export const zh = {
   modelsRefresh: "刷新",
   modelsSave: "保存更改",
   modelsUnavailable: "当前不可用",
+  modelsDisabled: "已被服务商禁用：{reason}",
 
   dateTime: '{y}年{m}月{d}日 {hh}:{mm}',
   nav: '订阅',

@@ -4,11 +4,14 @@ import type { ConnectionHandle } from '@deepseek-ai/dsh-api-remotes/client'
 import type { ProviderPreferences, SubscriptionTool } from '../provider-settings.js'
 import type { SubscriptionProvider } from './SubscriptionsSection.js'
 import { callSubscriptionsAuth } from './subscriptions-rpc.js'
+import { modelRowLabel } from './format.js'
 import type { SubscriptionsKey } from './locales.js'
 
 interface ModelRow {
   id: string
   name: string
+  /** The provider's own reason for refusing the model, or absent when it may serve. */
+  disabledReason?: string
   contextWindow?: number
   defaultContextWindow?: number
   efforts?: { id: string; name: string }[]
@@ -159,7 +162,7 @@ export const ProviderModelEditor = forwardRef<ProviderModelEditorHandle, Props>(
               const next = new Set(selected)
               if (event.target.checked) next.add(model.id); else next.delete(model.id)
               edit({ ...draft, visibleModels: [...next] })
-            }} /> {model.name}{!known.has(model.id) && ` (${t('modelsUnavailable')})`}</label>
+            }} /> {modelRowLabel(t, { ...model, unavailable: !known.has(model.id) })}</label>
             <div style={actions}>
             {(model.efforts?.length ?? 0) > 0 && <label style={actions}>{t('modelDefaultsTitle')}
               <select style={control} aria-label={`${model.name} ${t('modelDefaultsTitle')}`}

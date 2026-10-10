@@ -6,9 +6,9 @@ This subtree carries the private `dsh-plugin-subscriptions` build shipped with t
 
 - Upstream repository: `https://github.com/V1ki/dsh-plugin-subscriptions.git`
 - Upstream tag: `v0.9.4`
-- Fork package version: `0.9.4-dsh017rc1.17`
+- Fork package version: `0.9.4-dsh017rc1.18`
 - Subtree path: `fork-plugins/dsh-plugin-subscriptions`
-- Distribution artifact: `fork-plugins/releases/dsh-plugin-subscriptions-0.9.4-dsh017rc1.17.tgz`
+- Distribution artifact: `fork-plugins/releases/dsh-plugin-subscriptions-0.9.4-dsh017rc1.18.tgz`
 
 ## Fork behavior
 
@@ -39,15 +39,30 @@ catalogue data, its model-field assembly (`resolveOwnModel`) and its wire path (
 `clearAccountCatalog` stays per adapter because claude's also drops the account's uploaded File
 ids.
 
+A catalogue entry the provider marks disabled stays listed, and its reason travels all the way to
+the surfaces that offer the row: `modelDisabledReason` in `provider-catalog.ts` reads the extension
+the adapters put on their rows, `index.ts` carries it into the `modelDefaults` rows and the
+`providerSettings` account rows, and the settings model list and the account allowlist print it
+through `modelRowLabel` with the localized `modelsDisabled` copy. The harness `LlmModelInfo`
+contract has no such field, so the plugin owns the extension and must route every reader through
+`modelDisabledReason` rather than re-casting.
+
+The session model picker is not one of those surfaces. It belongs to the harness client, reads the
+model catalog RPC, and its `LlmModelInfo` / `ModelCatalogModel` carry no disabled marker, so a
+provider-disabled model still appears there as an ordinary selectable row. Making that picker state
+the condition is a harness-side change — the model-info contract, the catalog projection, the
+picker component, and its locale dictionaries — and is not made from this subtree.
+
 **Preservation rule.** Re-apply the delegation after an upstream import, which would otherwise
 restore six copies; keep `clearAccountCatalog` and `resolveOwnModel` as real prototype methods
 on the adapters, because `test/model-defaults-rpc.spec.ts` and
 `test/provider-settings-rpc.spec.ts` patch `CodexAdapter.prototype.clearAccountCatalog` and
-`CodexAdapter.prototype.resolveOwnModel`. Re-measure the duplication ratchet after any change
-here: `package.json`'s `duplication` script holds `packages`/`scripts` at zero and the plugin
-path at a threshold just above what remains. Measured on this jscpd build with this config, the
-duplicated-lines percentage in the report is the signal: `--threshold` alone does not change the
-exit code (any clone exits with the config's `exitCode: 1`, a clone-free run exits 0), so the
+`CodexAdapter.prototype.resolveOwnModel`; and keep `disabledReason` on both RPC payloads, because a
+row that loses it reads as an ordinary selectable model. Re-measure the duplication ratchet after
+any change here: `package.json`'s `duplication` script holds `packages`/`scripts` at zero and the
+plugin path at a threshold just above what remains. Measured on this jscpd build with this config,
+the duplicated-lines percentage in the report is the signal: `--threshold` alone does not change
+the exit code (any clone exits with the config's `exitCode: 1`, a clone-free run exits 0), so the
 script's `--exit-code 0` is what keeps the documented run green.
 
 ### Wire fidelity, stream errors, and the store lock
@@ -115,8 +130,15 @@ Files: `src/providers/claude-wire.ts`, `src/providers/claude.ts`, `src/providers
   **Preservation rule.** An upstream import restores a universal 200K/32K fallback and reports the beta-gated million. Keep the documented table ahead of the catalogue, and keep `documentedWindowReachable` withholding a window no request on this route can use.
 - `x-claude-code-request-class` follows the call's purpose as the genuine client derives it from its query source: `compaction` for a compact call, `auxiliary` for the session-title helper, `main` for everything else. The `context_management` body field is asserted to travel with the `context-management-2025-06-27` beta, because the builder decides the beta from the model's capability while the adapter decides the field from its planned edits.
   **Preservation rule.** An upstream import restores a hard-coded `main` and drops the coupling assertion. Keep `claudeRequestClass` fed from `GenerateOptions.purpose` and `assertContextManagementBeta` on the builder's result.
+- The context edits themselves are planned in `src/providers/context-management.ts`, and two of its decisions deliberately differ from the genuine client:
+  - **It clears by default.** `planContextManagement` states an edit from its own thresholds alone, while the client reaches the same two edits only when its `tengu_zany_pike` gate is on, and that gate defaults off. Thinking is cleared whenever a request carries thinking (`keep: 'all'`), and the tool edit fires when the adapter's measured silence reaches 3,900,000 ms and the clearable result count — text results of at least 64 characters, any image or file result, estimated at four characters per token — minus three exceeds both the five kept and the minimum trigger of twenty, stating `keep: 5` and `clear_at_least: 20,000` input tokens.
+    **Preservation rule.** Keep the plan unconditional. Reproducing the client's default-off gate would silently stop clearing in every deployment, which is the opposite of what this route wants; keep the numbers as the client's own and keep them in this module rather than inline in `claude.ts`.
+  - **The idle interval comes from this plugin, not from the transcript.** The client measures the gap between consecutive transcript messages; the harness transcript carries no timestamps. `ClaudeAdapter` therefore keeps a per-session request clock — bounded at 64 sessions, evicting the oldest — and reads the gap between a session's consecutive requests as the same silence, remembering a break it already acted on so one long gap keeps clearing until a request follows it.
+    **Preservation rule.** Keep the clock in `claude.ts` and keep returning the threshold for a break already acted on. There are no transcript timestamps to read instead, and deriving the gap anywhere but the adapter's own request path would measure a different quantity.
+- The tool-clearing edit states its trigger, keep count and `clear_at_least` and never `exclude_tools`, although the pinned `ClearToolUses20250919Edit` carries that field. The condition the field exists for — a tool whose results must survive clearing — never occurs on this route, because the harness registers no such tool.
+  **Preservation rule.** Leave `exclude_tools` off rather than restoring it from the client's request shape; an empty or invented exclusion list changes nothing the API does and would only look like fidelity.
 - The npm dependency is GPL-3.0-or-later. The plugin is `private: true` and its artifact is not redistributed; keep the exact version pin and this note if the artifact is ever published.
-- Tests: `test/claude-wire.spec.ts` (pin, billing/correlation, header plan and casing, breakpoints, chaining, the single system-prompt carrier, the wire-session rule, oversize, the request class per call kind, and the context-management field with its beta), plus `test/claude-request-id.spec.ts` (the wire session identity end to end), `models.spec.ts` (the built-in catalogue with no request, the account's options merged onto it rather than replacing it, a disabled option surfacing as a disabled row, and the per-model reported capacity across documented, catalogue, and beta-gated windows), and the updated `translate.spec.ts`, `test/transport-bridge.spec.ts` and `test/atis-header.spec.ts`. All injected, no credentials.
+- Tests: `test/claude-wire.spec.ts` (pin, billing/correlation, header plan and casing, breakpoints, chaining, the single system-prompt carrier, the wire-session rule, oversize, the request class per call kind, and the context-management field with its beta), plus `test/context-management.spec.ts` (the two edits, their thresholds, and the requests that state neither), `test/claude-request-id.spec.ts` (the wire session identity end to end), `models.spec.ts` (the built-in catalogue with no request, the account's options merged onto it rather than replacing it, a disabled option surfacing as a disabled row, and the per-model reported capacity across documented, catalogue, and beta-gated windows), and the updated `translate.spec.ts`, `test/transport-bridge.spec.ts` and `test/atis-header.spec.ts`. All injected, no credentials.
 
 ### Rate-limit state on the usage cards
 
@@ -124,17 +146,24 @@ Each Claude response's `anthropic-ratelimit-unified-*` headers are captured in
 `ClaudeAdapter.streamOwn` before the response is classified, so a refusal's headers are kept
 too, and they reach the Settings usage card through the usage RPC as `rateLimit` alongside the
 pool's own `pool` state. The card renders one red line, preferring the header state over the
-percentage-derived one and saying whether the account is the constraint or the pool is
-(`poolHealth.accountCooling` plus whether a non-cooling peer of the same provider exists).
+percentage-derived one and saying whether the account is the constraint or the pool is.
+`usagePoolState` in `pool.ts` computes that split from the pool's own rule: the account's
+parking record, plus whether a peer exists whose health record is clear AND that is not past a
+Claude usage floor. Health alone would let the card claim a failover that cannot happen. The
+floor test is model-independent (`PoolAdapter.accountAtFloor` reads the session and weekly
+windows through a model-less `quotaFor`), so a Settings read still triggers no model discovery.
 State is bounded like the wire chain and dropped on login, logout, and credential death.
 
 **Preservation rule.** Keep the capture before the `response.ok` check — moving it after
 loses the headers of every refusal — and keep the account-versus-pool split: a dead login and an
 `allowed_warning` near-limit verdict are account conditions even when other accounts could serve.
+A pool attribution is only printed for a peer the pool would itself accept, so keep the floor
+check in the peer test rather than reverting it to `health.isAvailable`.
 
 **Focused verification.** `test/unified-rate-limit.spec.ts` covers parsing and bounding,
-`test/claude-rate-limit-capture.spec.ts` covers capture on a warning and on a refusal, and
-`test/usage-alert.spec.ts` covers the attribution precedence.
+`test/claude-rate-limit-capture.spec.ts` covers capture on a warning and on a refusal,
+`test/usage-alert.spec.ts` covers the attribution precedence, and the peer rule is covered by
+`test/pool.spec.ts` ("the usage card counts a peer only when the pool would accept it").
 
 ### Request images
 
@@ -181,6 +210,14 @@ Selection and reservation are synchronous after quota reads. The account counter
 ### Subscription network retries
 
 `AccountPreferencesAdapter.providerRetryPolicy` must forward the raw adapter policy to the registered Host route, preserving ten retries and the subscription backoff. When an attempted pool member remains available after a transport failure, `PoolAdapter` returns that member's original error; it must not borrow a different account's multi-hour quota or authentication cooldown. Only a fully cooling pool supplies a synthesized recovery delay. Preserve the two attempt-order cases in `test/pool.spec.ts`, the facade policy case in `test/account-preferences.spec.ts`, and `snapshots/session/subscription-network-retry`, which records recovery before and after partial output through the real agent retry executor. Keep `rateLimit.wait: false` independent from network retry eligibility.
+
+### The pool's availability rule outside the pool
+
+A model the pool owns no entry for is served by `AccountPreferencesAdapter.fallback`, which walks the logged-in accounts in the pool's own availability order. It asks `PoolAdapter.accountHoldback` why an account is held back, and when no account qualifies it reports that same cause and hint: the code `exhaustionCode` derives from the collected holdback reasons (a cooling record's own code, `RATE_LIMIT` for a breached usage floor) and the earliest `providerRetryAfterMs` among them. `NO_ADAPTER` is reserved for a model no account's catalog lists, because that is the only case a retry cannot fix.
+
+**Preservation rule.** Keep the fallback's terminal error sourced from `accountHoldback` rather than a boolean availability test: a temporary quota condition reported as `NO_ADAPTER` names an unavailable model, drops the provider's disclosed recovery instant, and takes the turn out of the retry policy. Do not move the holdback decision out of `pool.ts`, and do not let the fallback consult health directly.
+
+**Focused verification.** `test/account-preferences.spec.ts` covers the held-back-by-everything case (cause plus recovery hint), the refusal that outranks a rate limit, and the unlisted model that stays `NO_ADAPTER`; `test/pool.spec.ts` covers the floor-holdback code and reset hint through the pool-exhausted path.
 
 ### Enforcement-shaped refusals
 
@@ -268,7 +305,7 @@ corepack pnpm@10.30.2 test
 corepack pnpm@10.30.2 pack --pack-destination ..\releases
 ```
 
-Store the artifact's uppercase SHA-256 beside it as `<name>-<version>.tgz.sha256`. Inspect the packed manifest before installation.
+Store the artifact's uppercase SHA-256 beside it as `<name>-<version>.tgz.sha256`: one line, the 64 hex digits and nothing else, LF-terminated, no surrounding whitespace and no CR. Inspect the packed manifest before installation.
 
 ## Deployment
 
@@ -282,4 +319,4 @@ Import an exact reviewed tag through the subtree, reapply the RC.1 cohort and li
 
 ## Rollback
 
-Rollback changes only the pinned package and profile configuration after DSH stops. Preserve the plugin credential store and do not rewrite Session, attachment, or provider-account data.
+Rollback changes only the pinned package and profile configuration after DSH stops. Preserve the plugin credential store and do not rewrite Session, attachment, or provider-account data. The artifact a rollback targets today is the retained previous release, `fork-plugins/releases/dsh-plugin-subscriptions-0.9.4-dsh017rc1.17.tgz`, installed through the same `pnpm add "dsh-plugin-subscriptions@file:<path>"` form the deployment step uses; the current release and every earlier tarball stay in `fork-plugins/releases/`. Never repack or delete a released tarball to make room.

@@ -12,7 +12,6 @@
 import { isMissingOrInvalidCredential, OAuthEndpointError } from './common.js'
 import type { ProviderUsage, UsageWindow } from './common.js'
 import type { ProviderId } from '../auth/store.js'
-import type { ConcretePoolMember } from './pool-family.js'
 
 /** Other providers enter the quota-full fallback band at this reported usage. */
 export const QUOTA_FULL_PERCENT = 95
@@ -58,6 +57,17 @@ export interface MemberQuota {
    * spends the credit.
    */
   preferFreshCredit?: boolean
+}
+
+/**
+ * One account's quota read. A named model asks for the windows that constrain it;
+ * an omitted model asks for the account's own session and weekly windows — the ones
+ * every model shares — which is what a model-independent availability floor reads.
+ */
+export interface QuotaQuery {
+  provider: ProviderId
+  account: string
+  model?: string
 }
 
 /** A successful snapshot, cached until `ttlMs` (or the entry's own `cooldownMs`) elapses. */
@@ -134,12 +144,12 @@ export class PoolUsageTracker {
    * badge) has no such downside — showing an old percentage beats showing
    * nothing. The stale windows still reach {@link MemberQuota.floorWindows},
    * which feeds the availability floors rather than the scores.
-   * @param member - the pool member to score (account resolved).
+   * @param query - the account to read, and the model whose lanes apply when one is named.
    * @returns availability plus the urgency score.
    */
-  async quotaFor(member: ConcretePoolMember): Promise<MemberQuota> {
-    const key = `${member.provider}/${member.account}`
-    const fetcher = this.fetcherFor(member.provider, member.account)
+  async quotaFor(query: QuotaQuery): Promise<MemberQuota> {
+    const key = `${query.provider}/${query.account}`
+    const fetcher = this.fetcherFor(query.provider, query.account)
     if (fetcher === undefined) return { available: true, urgency: 0, fetchedAt: 0 }
     const entry = this.entries.get(key)
     if (entry !== undefined) {
@@ -149,18 +159,18 @@ export class PoolUsageTracker {
       const fresh = now - entry.at < (entry.cooldownMs ?? this.ttlMs) && !resetElapsed
       if (entry.snapshot !== undefined) {
         if (!fresh) void this.refresh(key, fetcher).catch(() => undefined)
-        return this.score(member, entry)
+        return this.score(query, entry)
       }
-      if (fresh) return degradedQuota(member, entry.error, this.lastSuccessful(key))
+      if (fresh) return degradedQuota(query, entry.error, this.lastSuccessful(key))
       // The cooldown expired: fall through to a fresh, blocking attempt.
     }
     try {
       const snapshot = await this.refresh(key, fetcher)
-      return this.score(member, { snapshot, at: Date.now() })
+      return this.score(query, { snapshot, at: Date.now() })
     } catch (error: unknown) {
       // `refresh` recorded the failure before rethrowing, so the snapshot it
       // carried forward is the one this degraded view keeps for the floors.
-      return degradedQuota(member, error, this.lastSuccessful(key))
+      return degradedQuota(query, error, this.lastSuccessful(key))
     }
   }
 
@@ -283,7 +293,7 @@ export class PoolUsageTracker {
   }
 
   /** Score one member against a snapshot's windows. */
-  private score(member: ConcretePoolMember, entry: SnapshotEntry): MemberQuota {
+  private score(member: QuotaQuery, entry: SnapshotEntry): MemberQuota {
     const now = Date.now()
     const windows = applicableWindows(member, entry.snapshot, now)
     const fullAt = member.provider === 'codex' || member.provider === 'claude'
@@ -311,10 +321,11 @@ function lastSnapshotOf(entry: CacheEntry | undefined): ProviderUsage | undefine
 }
 
 /**
- * The windows of one snapshot that constrain this member: a model-scoped window
- * applies to its family, and an elapsed reset stops constraining anything.
+ * The windows of one snapshot that constrain this read: a model-scoped window
+ * applies to its family, a read naming no model takes only the windows every model
+ * shares, and an elapsed reset stops constraining anything.
  */
-function applicableWindows(member: ConcretePoolMember, snapshot: ProviderUsage, now: number): UsageWindow[] {
+function applicableWindows(member: QuotaQuery, snapshot: ProviderUsage, now: number): UsageWindow[] {
   return (snapshot.windows ?? []).filter(window => windowApplies(window, member.model)
     && (window.resetsAt === undefined || window.resetsAt > now))
 }
@@ -333,7 +344,7 @@ function applicableWindows(member: ConcretePoolMember, snapshot: ProviderUsage, 
  * @param last - the last successful snapshot this tracker holds for the account, when one exists.
  * @returns the degraded quota view.
  */
-function degradedQuota(member: ConcretePoolMember, error: unknown, last: ProviderUsage | undefined): MemberQuota {
+function degradedQuota(member: QuotaQuery, error: unknown, last: ProviderUsage | undefined): MemberQuota {
   const floorWindows = last === undefined ? undefined : applicableWindows(member, last, Date.now())
   return {
     available: !isMissingOrInvalidCredential(error),
@@ -349,13 +360,13 @@ function cooldownFor(error: unknown, defaultTtlMs: number): number {
 }
 
 /**
- * Whether a window constrains this model: unscoped windows always do; a
- * model-scoped window (Claude's Opus/Sonnet lanes) applies when its scope
- * names the model family.
+ * Whether a window constrains a read: unscoped windows always do; a model-scoped
+ * window (Claude's Opus/Sonnet lanes) applies when its scope names the model, and a
+ * read naming no model is constrained only by the unscoped windows.
  */
-function windowApplies(window: UsageWindow, model: string): boolean {
+function windowApplies(window: UsageWindow, model: string | undefined): boolean {
   if (window.scope === undefined) return true
-  return model.toLowerCase().includes(window.scope.toLowerCase())
+  return model !== undefined && model.toLowerCase().includes(window.scope.toLowerCase())
 }
 
 /**

@@ -74,16 +74,17 @@ import { catalogStore } from './providers/catalog-store.js'
 import { CodexClientVersionCache } from './providers/codex-client-version.js'
 import { CodexAutoReset } from './providers/codex-auto-reset.js'
 import { CodexWebSearchProvider } from './providers/codex-search.js'
-import { PoolAdapter } from './providers/pool.js'
+import { PoolAdapter, usagePoolState } from './providers/pool.js'
 import { PoolSchedulingSchema, resolvePoolScheduling } from './providers/pool-scheduling.js'
 import type { PoolSchedulingPolicy } from './providers/pool-scheduling.js'
 import { AccountPreferencesAdapter, accountAllowsPool, accountModelId, parseAccountModelId } from './providers/account-preferences.js'
+import { modelDisabledReason } from './providers/provider-catalog.js'
 export type { AccountPreferences, ProviderPreferences } from './provider-settings.js'
 import { ImageAccountPool } from './providers/image-pool.js'
 import { registerWithAlias } from './tools/registration.js'
 import { buildAccountPools, poolKey } from './providers/pool-family.js'
 import type { PoolDefinition, PoolMemberRef } from './providers/pool-family.js'
-import { PoolHealthRegistry, accountKey, isAuthCooldownReason } from './providers/pool-health.js'
+import { PoolHealthRegistry } from './providers/pool-health.js'
 import { PoolUsageTracker, USAGE_TTL_MS } from './providers/pool-usage.js'
 import { forgetUnifiedRateLimit, unifiedRateLimitFor } from './providers/unified-rate-limit.js'
 import {
@@ -1380,22 +1381,17 @@ export function apply(ctx: Context, config: Config): void {
   // The `usage` endpoint's pool attribution: whether THIS account is parked,
   // and whether another account that may serve this provider's pool is clear.
   // Membership comes from the account preferences the pool itself obeys rather
-  // than from a pool sweep, so a Settings read never triggers model discovery.
+  // than from a pool sweep, so a Settings read never triggers model discovery;
+  // the peer test is the pool's own rule, floors included, because a peer past
+  // its Claude usage floor cannot serve in this account's place.
   const poolStateFor = async (provider: ProviderId, account: string): Promise<UsagePoolState | undefined> => {
     const health = poolHealth
     if (health === undefined) return undefined
-    const cooling = health.accountCooling(provider, account)
     const configured = preferences.get(provider).accounts
     const pooled = (key: string): boolean =>
       configured !== undefined && Object.hasOwn(configured, key) ? configured[key].poolEnabled !== false : true
-    const peerAvailable = (await accountTokens.get(provider)?.list() ?? []).some(entry =>
-      entry.key !== account && pooled(entry.key) && health.isAvailable(accountKey(provider, entry.key)))
-    if (cooling === undefined) return { peerAvailable }
-    return {
-      peerAvailable,
-      coolingUntil: cooling.unavailableUntil,
-      coolingReason: isAuthCooldownReason(cooling.reason) ? 'auth' : 'quota',
-    }
+    const peers = (await accountTokens.get(provider)?.list() ?? []).map(entry => entry.key)
+    return await usagePoolState(health, poolAdapter, provider, account, peers, pooled)
   }
 
   // Keep the full catalog for the editor and routing; filter only picker enumeration.
@@ -1446,7 +1442,7 @@ export function apply(ctx: Context, config: Config): void {
       const catalog: ModelDefaultsCatalog[] = []
       for (const provider of PROVIDER_IDS) {
         if (!visible.has(provider)) continue
-        let models: readonly { id: string; name: string }[] = []
+        let models: readonly LlmModelInfo[] = []
         try {
           models = await ctx.llm.listModels(provider)
         } catch {
@@ -1477,9 +1473,11 @@ export function apply(ctx: Context, config: Config): void {
           // `defaultEffortOf` rather than a bare index: model ids are catalog
           // data, and an id like `toString` would otherwise inherit a function.
           const override = defaultEffortOf(provider, model.id)
+          const disabledReason = modelDisabledReason(model)
           views.push({
             id: model.id,
             name: model.name,
+            ...disabledReason === undefined ? {} : { disabledReason },
             efforts: info.reasoning?.efforts.map(effort => ({ id: effort.id, name: effort.name })) ?? [],
             ...override === undefined ? {} : { configured: override },
           })
@@ -1577,7 +1575,19 @@ export function apply(ctx: Context, config: Config): void {
         provider, settings: preferences.get(provider), models: rows, tools: PROVIDER_TOOLS[provider],
         accounts: accounts.map(({ key, session }) => {
           const catalog = accountCatalogs.find(entry => entry.account === key)?.models
-          return { key, label: accountOf(provider, session) ?? key, models: (catalog ?? []).map(({ id, name }) => ({ id, name })), ...(catalog === undefined ? { unavailable: true } : {}) }
+          return {
+            key,
+            label: accountOf(provider, session) ?? key,
+            models: (catalog ?? []).map(model => {
+              const disabledReason = modelDisabledReason(model)
+              return {
+                id: model.id,
+                name: model.name,
+                ...disabledReason === undefined ? {} : { disabledReason },
+              }
+            }),
+            ...(catalog === undefined ? { unavailable: true } : {}),
+          }
         }),
       }
     },

@@ -39,7 +39,7 @@ interface FakeLlm {
  * of them. Each mount also resets the store and deletes the file, so the cases
  * below are independent — they used to pass only in their written order.
  */
-async function mount(options: { tier?: string } = {}): Promise<{ handler: FakeRpcHandler; fake: FakeLlm }> {
+async function mount(options: { tier?: string; disabledReason?: string } = {}): Promise<{ handler: FakeRpcHandler; fake: FakeLlm }> {
   process.env.DSH_HOME = HOME
   assert.ok(modelDefaultsFilePath().startsWith(HOME), 'the store resolves inside this spec\'s temp home')
   await resetModelDefaultsForTests()
@@ -47,7 +47,11 @@ async function mount(options: { tier?: string } = {}): Promise<{ handler: FakeRp
   const fake: FakeLlm = { registered: [], replaced: [], catalogClears: 0 }
   CodexAdapter.prototype.clearAccountCatalog = function (account?: string) { fake.catalogClears++; clearCodexCatalog.call(this, account) }
   const ctx = new Context()
-  const listed = [{ id: 'gpt-5.6-sol', name: 'GPT-5.6-Sol' }]
+  const listed = [{
+    id: 'gpt-5.6-sol',
+    name: 'GPT-5.6-Sol',
+    ...options.disabledReason === undefined ? {} : { disabledReason: options.disabledReason },
+  }]
   // A configured tier appears in the picker catalog the same way the pool
   // contributes it, so the settings catalog has to recognise and skip it.
   if (options.tier !== undefined) listed.push({ id: options.tier, name: options.tier })
@@ -108,6 +112,17 @@ test('modelDefaults serves the listed models with their advertised efforts', asy
     name: 'GPT-5.6-Sol',
     efforts: [{ id: 'low', name: 'Low' }, { id: 'high', name: 'High' }],
   })
+})
+
+test('modelDefaults carries the provider\'s disabled reason onto the settings row', async () => {
+  // The settings model list offers these rows as ordinary choices; a model the
+  // provider refuses has to arrive with the marker, or the row reads as selectable.
+  const { handler } = await mount({ disabledReason: 'no longer offered' })
+  const result = await call(handler, 'modelDefaults', {})
+  assert.equal(result.ok, true)
+  if (!result.ok) return
+  const value = result.value as { provider: string; models: { id: string; disabledReason?: string }[] }[]
+  assert.equal(value[0]?.models[0]?.disabledReason, 'no longer offered')
 })
 
 test('modelDefaults refresh validates force and re-announces the picker only on explicit refresh', async () => {

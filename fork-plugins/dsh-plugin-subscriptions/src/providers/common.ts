@@ -698,7 +698,7 @@ export interface UsagePoolState {
   /**
    * Whether another account that may serve this provider's pool is clear right
    * now. False when the pool is disabled, the account is the only member, or
-   * every other member is parked.
+   * every other member is parked or past a usage floor the pool reserves.
    */
   peerAvailable: boolean
 }
@@ -821,20 +821,36 @@ export function mergeReasoning(
 
 /**
  * First account catalog that lists `model` (callers pass default-first).
+ *
  * One failing lookup sits that account out so a sibling's metadata still
  * resolves — the same isolation as the picker catalog union.
+ *
+ * Deliberately unfiltered by the pool health registry. This answers "what does
+ * this model support", not "who serves the next turn": the account list is every
+ * logged-in account, a catalogue read carries no completion request, and the
+ * route that actually serves is chosen by the pool's own selection, which applies
+ * health and the usage floors. Filtering parked accounts here would instead drop
+ * the capability metadata an in-flight session depends on for exactly as long as
+ * its account is cooling. A parked account whose credential no longer resolves
+ * still sits out through the lookup's own failure.
+ * @param accounts - the accounts to ask, default first.
+ * @param lookup - one account's catalog reader.
+ * @returns the first entry found, or undefined when no account lists the model.
  */
 export async function discoverAcrossAccounts(
   accounts: readonly string[],
   lookup: (account: string) => Promise<DiscoveredModel | undefined>,
 ): Promise<DiscoveredModel | undefined> {
   for (const account of accounts) {
+    let found: DiscoveredModel | undefined
     try {
-      const found = await lookup(account)
-      if (found !== undefined) return found
-    } catch {
-      // sit out
+      found = await lookup(account)
+    } catch (_lookupFailure) {
+      // This account's catalog could not be read (an unrefreshable credential, an
+      // unreachable or refused endpoint); the next account may still answer.
+      continue
     }
+    if (found !== undefined) return found
   }
   return undefined
 }
