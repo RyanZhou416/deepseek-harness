@@ -14,7 +14,7 @@
  * unchanged.
  */
 
-import { EMPTY_RESPONSE_CODE, LlmAdapter, LlmError, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
+import { EMPTY_RESPONSE_CODE, LlmError, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import type {
   GenerateOptions,
   LlmModelInfo,
@@ -24,7 +24,6 @@ import type {
 } from '@deepseek-ai/dsh-llm'
 import type { DeviceFlowSpec } from '../auth/device-flow.js'
 import type { CopilotSession } from '../auth/store.js'
-import type { ProviderId } from '../auth/store.js'
 import type { PoolAdapter } from './pool.js'
 import type { AttachmentStore } from '@deepseek-ai/dsh-attachment'
 import { resolveImages } from '../translate/resolved.js'
@@ -53,7 +52,8 @@ import type {
   FetchFn,
   ModelEntry,
 } from './common.js'
-import { ProviderCatalog, catalogRow, withPoolTiers } from './provider-catalog.js'
+import { ProviderCatalog, catalogRow } from './provider-catalog.js'
+import { PoolBackedAdapter } from './pool-delegation.js'
 import { proxiedFetch } from '../http.js'
 import {
   DEFAULT_RATE_LIMIT_WAIT,
@@ -67,12 +67,12 @@ import type { RateLimitWait } from './rate-limit.js'
  * copilot2api-go use the same value): the app is pre-authorized for the
  * Copilot internal token exchange, a self-registered OAuth App is not.
  */
-export const COPILOT_CLIENT_ID = 'Iv1.b507a08c87ecfe98'
-export const COPILOT_DEVICE_CODE_URL = 'https://github.com/login/device/code'
-export const COPILOT_DEVICE_TOKEN_URL = 'https://github.com/login/oauth/access_token'
+const COPILOT_CLIENT_ID = 'Iv1.b507a08c87ecfe98'
+const COPILOT_DEVICE_CODE_URL = 'https://github.com/login/device/code'
+const COPILOT_DEVICE_TOKEN_URL = 'https://github.com/login/oauth/access_token'
 export const COPILOT_TOKEN_URL = 'https://api.github.com/copilot_internal/v2/token'
 export const GITHUB_USER_URL = 'https://api.github.com/user'
-export const COPILOT_API_URL = 'https://api.githubcopilot.com/chat/completions'
+const COPILOT_API_URL = 'https://api.githubcopilot.com/chat/completions'
 /** Responses endpoint for models whose catalog entry only lists `/responses`. */
 export const COPILOT_RESPONSES_URL = 'https://api.githubcopilot.com/responses'
 export const COPILOT_MODELS_URL = 'https://api.githubcopilot.com/models'
@@ -149,7 +149,7 @@ export function copilotDeviceFlow(): DeviceFlowSpec {
  * @param vscodeVersion - Editor-Version value from {@link latestVsCodeVersion}.
  * @returns headers to merge into Copilot API requests.
  */
-export function copilotHeaders(hasVision = false, vscodeVersion = FALLBACK_VSCODE_VERSION): Record<string, string> {
+function copilotHeaders(hasVision = false, vscodeVersion = FALLBACK_VSCODE_VERSION): Record<string, string> {
   return {
     'user-agent': 'GitHubCopilotChat/0.35.0',
     'editor-version': `vscode/${vscodeVersion}`,
@@ -572,7 +572,7 @@ export class CopilotResponsesItemNormalizer {
 }
 
 /** Constructor dependencies for {@link CopilotAdapter}. */
-export interface CopilotAdapterOptions {
+interface CopilotAdapterOptions {
   models: readonly ModelEntry[]
   streamIdleTimeoutMs: number
   tokens: AccountTokenManager<CopilotSession>
@@ -599,8 +599,8 @@ export interface CopilotAdapterOptions {
 }
 
 /** Copilot wire adapter: one instance serves the `copilot` provider route. */
-export class CopilotAdapter extends LlmAdapter {
-  private readonly catalogs: ProviderCatalog
+export class CopilotAdapter extends PoolBackedAdapter {
+  protected readonly catalogs: ProviderCatalog
   /**
    * Completed reasoning captured off the response stream, replayed on the next
    * request of the same conversation: a reasoning model continuing a tool
@@ -611,7 +611,7 @@ export class CopilotAdapter extends LlmAdapter {
   private readonly replay = new ReasoningReplayStore()
 
   constructor(private readonly options: CopilotAdapterOptions) {
-    super()
+    super(options)
     this.catalogs = new ProviderCatalog(options, 'copilot', {
       staticRows: provider => this.staticModels(provider),
       fetchCatalog: (account, signal) => this.fetchCatalog(account, signal),
@@ -657,15 +657,6 @@ export class CopilotAdapter extends LlmAdapter {
     })
   }
 
-  override async listModels(provider: string): Promise<readonly LlmModelInfo[]> {
-    return withPoolTiers(await this.listOwnModels(provider), this.options.pool?.(), provider)
-  }
-
-  /** The provider's own catalog: union of every account, or one account when named. */
-  async listOwnModels(provider: string, account?: string, signal?: AbortSignal): Promise<readonly LlmModelInfo[]> {
-    return this.catalogs.list(provider, account, signal)
-  }
-
   /**
    * The discovered entry for one model. Resolved through the cache's
    * stale-while-revalidate path: capability metadata must stay stable across
@@ -708,14 +699,6 @@ export class CopilotAdapter extends LlmAdapter {
     this.replay.clear()
   }
 
-  override async resolveModel(provider: string, model: string): Promise<LlmResolvedModelInfo> {
-    const pool = this.options.pool?.()
-    if (pool !== undefined && await pool.owns(provider as ProviderId, model)) {
-      return pool.resolveModel(provider, model)
-    }
-    return this.resolveOwnModel(provider, model)
-  }
-
   /** Capability resolution of the provider's own models (the pool resolves members here). */
   async resolveOwnModel(provider: string, model: string): Promise<LlmResolvedModelInfo> {
     const discovered = await this.discovered(model)
@@ -739,21 +722,7 @@ export class CopilotAdapter extends LlmAdapter {
     }
   }
 
-  async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
-    const pool = this.options.pool?.()
-    if (pool !== undefined && await pool.owns(options.provider as ProviderId, options.model)) {
-      yield* pool.stream(options)
-      return
-    }
-    yield* this.streamCore(options)
-  }
-
-  /** Pool seam: stream through one specific account instead of the default. */
-  streamAccount(options: GenerateOptions, account: string): AsyncIterable<StreamChunk> {
-    return this.streamCore(options, account)
-  }
-
-  private async *streamCore(options: GenerateOptions, account?: string): AsyncIterable<StreamChunk> {
+  protected async *streamOwn(options: GenerateOptions, account?: string): AsyncIterable<StreamChunk> {
     const watchdog = idleWatchdog(options.signal, this.options.streamIdleTimeoutMs)
     try {
       // The discovered catalog decides the protocol: `/responses`-only model

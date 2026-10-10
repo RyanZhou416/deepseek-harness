@@ -32,7 +32,7 @@ interface Props {
 }
 
 /** The editor's unsaved edits, collected by the owning dialog's single Save. */
-export interface ModelDraft {
+interface ModelDraft {
   /** Provider settings minus `accounts`; absent when the draft has no edits. */
   settings?: ProviderPreferences
   /** Reasoning-effort overrides that differ from the catalog; '' clears one. */

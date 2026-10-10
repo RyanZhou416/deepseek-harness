@@ -68,7 +68,7 @@ export interface UsageWindow {
 }
 
 /** One unified rate-limit window as reported by the `usage` endpoint. */
-export interface RateLimitWindow {
+interface RateLimitWindow {
   window: string
   utilization?: number
   resetsAt?: number
@@ -397,10 +397,10 @@ export function usageBarColor(usedPercent: number): string {
  * stored login the pool found dead, and `cooldown` and `overage` from the
  * account pool working around this account.
  */
-export type UsageAlertKind = 'limit' | 'near' | 'rejected' | 'warning' | 'relogin' | 'cooldown' | 'overage'
+type UsageAlertKind = 'limit' | 'near' | 'rejected' | 'warning' | 'relogin' | 'cooldown' | 'overage'
 
 /** What one account's card states about its usage. */
-export interface UsageAlert {
+interface UsageAlert {
   /** The fact the line states. */
   kind: UsageAlertKind
   /**
@@ -537,7 +537,7 @@ function messageColor(tone: 'success' | 'error'): string {
 }
 
 /** What one provider's collapsible default-effort section renders. */
-export interface ModelDefaultsView {
+interface ModelDefaultsView {
   /** Models with reasoning levels, after the name filter — one row each. */
   shown: ModelDefaultView[]
   /** Models with reasoning levels before filtering (the header total). */

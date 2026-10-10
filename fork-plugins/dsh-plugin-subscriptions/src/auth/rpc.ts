@@ -27,7 +27,7 @@ export const SUBSCRIPTIONS_AUTH_PREFIX = 'subscriptions-auth.'
  * Every endpoint {@link dispatch} answers; each gets one exact Fetch route.
  * Kept in one place so the route table and the switch cannot drift apart.
  */
-export const SUBSCRIPTIONS_AUTH_ENDPOINTS = [
+const SUBSCRIPTIONS_AUTH_ENDPOINTS = [
   'providerSettings', 'setProviderSettings',
   'status', 'login', 'manual', 'cancel', 'logout', 'setDefault', 'usage',
   'resetCredits', 'consumeResetCredit',
@@ -102,7 +102,7 @@ export interface ProviderStatus {
 export type LoginMethod = 'oauth' | 'keychain' | 'manual'
 
 /** Proxy config operations behind the `proxyGet/proxySet/proxyTest` endpoints. */
-export interface ProxyConfigController {
+interface ProxyConfigController {
   /** Current proxy configuration (secrets omitted). */
   get(): Promise<ProxyConfigView>
   /** Validate, persist, and apply one config. */
@@ -131,17 +131,8 @@ export interface ModelDefaultsCatalog {
   models: ModelDefaultView[]
 }
 
-/** Per-account catalog returned by providerSettings, including providers without usage APIs. */
-export interface ProviderAccountCatalog {
-  key: string
-  /** Original identity; the editable alias lives in settings.accounts[key].alias. */
-  label: string
-  models: { id: string; name: string }[]
-  unavailable?: boolean
-}
-
 /** Provider and account preference operations behind providerSettings/setProviderSettings. */
-export interface ProviderSettingsController {
+interface ProviderSettingsController {
   get(provider: ProviderId, force: boolean): Promise<unknown>
   set(provider: ProviderId, settings: unknown): Promise<void>
 }

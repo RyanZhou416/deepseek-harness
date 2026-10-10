@@ -6,9 +6,9 @@ This subtree carries the private `dsh-plugin-subscriptions` build shipped with t
 
 - Upstream repository: `https://github.com/V1ki/dsh-plugin-subscriptions.git`
 - Upstream tag: `v0.9.4`
-- Fork package version: `0.9.4-dsh017rc1.16`
+- Fork package version: `0.9.4-dsh017rc1.17`
 - Subtree path: `fork-plugins/dsh-plugin-subscriptions`
-- Distribution artifact: `fork-plugins/releases/dsh-plugin-subscriptions-0.9.4-dsh017rc1.16.tgz`
+- Distribution artifact: `fork-plugins/releases/dsh-plugin-subscriptions-0.9.4-dsh017rc1.17.tgz`
 
 ## Fork behavior
 
@@ -22,7 +22,7 @@ No Session event or Session format changes. Existing Codex, Claude, Grok, Copilo
 
 `V1ki/dsh-plugin-subscriptions` v0.9.4 does not contain the behaviors in this section. A subtree import overwrites `src/`, `test/`, and `package.json`. Restore every item here before packaging, then run the package suite and rebuild the tarball. The tests named below fail if the behavior was dropped.
 
-### One owner for the provider catalog plumbing
+### One owner for the provider catalog and pool plumbing
 
 The six adapters used to carry their own copy of the same catalog code: `clearAccountCatalog`
 was byte-identical in all six, `catalogFor` and `listModels` in five, and `listOwnModels` was
@@ -32,11 +32,23 @@ error mapping), the picker-row shape, and the pool-tier overlay. Per-provider di
 explicit: the discovery timeout hook, each adapter's modality rule and description, the warn
 label's capitalisation, and grok's last-known short-circuit.
 
+The account-pool delegation has the same single owner: `PoolBackedAdapter` in
+`pool-delegation.ts` owns `listModels` (own rows plus configured tiers), `listOwnModels`,
+`resolveModel`, the `stream` pool prelude, and `streamAccount`. An adapter keeps only its own
+catalogue data, its model-field assembly (`resolveOwnModel`) and its wire path (`streamOwn`).
+`clearAccountCatalog` stays per adapter because claude's also drops the account's uploaded File
+ids.
+
 **Preservation rule.** Re-apply the delegation after an upstream import, which would otherwise
-restore six copies; keep the adapters' thin `clearAccountCatalog` / `listOwnModels` /
-`listModels` methods as real prototype methods, because a spec patches one of them. Re-measure
-the duplication ratchet after any change here: `package.json`'s `duplication` script holds
-`packages`/`scripts` at zero and the plugin path at a threshold just above what remains.
+restore six copies; keep `clearAccountCatalog` and `resolveOwnModel` as real prototype methods
+on the adapters, because `test/model-defaults-rpc.spec.ts` and
+`test/provider-settings-rpc.spec.ts` patch `CodexAdapter.prototype.clearAccountCatalog` and
+`CodexAdapter.prototype.resolveOwnModel`. Re-measure the duplication ratchet after any change
+here: `package.json`'s `duplication` script holds `packages`/`scripts` at zero and the plugin
+path at a threshold just above what remains. Measured on this jscpd build with this config, the
+duplicated-lines percentage in the report is the signal: `--threshold` alone does not change the
+exit code (any clone exits with the config's `exitCode: 1`, a clone-free run exits 0), so the
+script's `--exit-code 0` is what keeps the documented run green.
 
 ### Wire fidelity, stream errors, and the store lock
 
@@ -99,13 +111,17 @@ Files: `src/providers/claude-wire.ts`, `src/providers/claude.ts`, `src/providers
 - Mid-conversation system messages ride as user-role `<system-reminder>` blocks on every model — the wire contract models no system-role message, so the old Opus 5 system-role form is gone.
 - The usage/models/Files endpoints present the pinned profile's user-agent (`CLAUDE_USER_AGENT`); the local `claude --version` probe is deleted.
 - The model catalogue is the client's baked-in table plus the account's own options. `claudeBuiltInCatalogue` takes membership from the pinned profile's `supportedModels` and supplies the display text the wire library deliberately omits; `fetchClaudeCatalogue` merges the bootstrap document's `additional_model_options` onto that table — an option naming a built-in id rewrites that row in place, a new id is appended, and a `disabled_reason` marks the row unavailable instead of dropping it. The endpoint carries additions only, so it must never be the sole source: a refused or malformed response leaves the built-in table standing. A configured non-empty `models.claude` list still overrides discovery.
+- Reported model capacity comes from `src/providers/claude-model-limits.ts`: the Claude API documentation's per-model limits answer first and the pinned profile's catalogue entry second, and an id neither source names takes a conservative 200K context / 32K output pair. A documented 1M window that only the `context-1m-2025-08-07` beta reaches is reported at the catalogue's own window instead, because this route sends a plain model id and never composes that beta (`claude-sonnet-4-6` and `claude-opus-4-6` today).
+  **Preservation rule.** An upstream import restores a universal 200K/32K fallback and reports the beta-gated million. Keep the documented table ahead of the catalogue, and keep `documentedWindowReachable` withholding a window no request on this route can use.
+- `x-claude-code-request-class` follows the call's purpose as the genuine client derives it from its query source: `compaction` for a compact call, `auxiliary` for the session-title helper, `main` for everything else. The `context_management` body field is asserted to travel with the `context-management-2025-06-27` beta, because the builder decides the beta from the model's capability while the adapter decides the field from its planned edits.
+  **Preservation rule.** An upstream import restores a hard-coded `main` and drops the coupling assertion. Keep `claudeRequestClass` fed from `GenerateOptions.purpose` and `assertContextManagementBeta` on the builder's result.
 - The npm dependency is GPL-3.0-or-later. The plugin is `private: true` and its artifact is not redistributed; keep the exact version pin and this note if the artifact is ever published.
-- Tests: `test/claude-wire.spec.ts` (pin, billing/correlation, header plan and casing, breakpoints, chaining, the single system-prompt carrier, the wire-session rule, oversize), plus `test/claude-request-id.spec.ts` (the wire session identity end to end), `models.spec.ts` (the built-in catalogue with no request, the account's options merged onto it rather than replacing it, and a disabled option surfacing as a disabled row), and the updated `translate.spec.ts`, `test/transport-bridge.spec.ts` and `test/atis-header.spec.ts`. All injected, no credentials.
+- Tests: `test/claude-wire.spec.ts` (pin, billing/correlation, header plan and casing, breakpoints, chaining, the single system-prompt carrier, the wire-session rule, oversize, the request class per call kind, and the context-management field with its beta), plus `test/claude-request-id.spec.ts` (the wire session identity end to end), `models.spec.ts` (the built-in catalogue with no request, the account's options merged onto it rather than replacing it, a disabled option surfacing as a disabled row, and the per-model reported capacity across documented, catalogue, and beta-gated windows), and the updated `translate.spec.ts`, `test/transport-bridge.spec.ts` and `test/atis-header.spec.ts`. All injected, no credentials.
 
 ### Rate-limit state on the usage cards
 
 Each Claude response's `anthropic-ratelimit-unified-*` headers are captured in
-`ClaudeAdapter.streamCore` before the response is classified, so a refusal's headers are kept
+`ClaudeAdapter.streamOwn` before the response is classified, so a refusal's headers are kept
 too, and they reach the Settings usage card through the usage RPC as `rateLimit` alongside the
 pool's own `pool` state. The card renders one red line, preferring the header state over the
 percentage-derived one and saying whether the account is the constraint or the pool is
@@ -178,7 +194,7 @@ An upstream import restores a classifier that reads every 429 as a retryable `RA
 - `exhausted()` and the image pool's all-accounts-cooling error both report through `exhaustionCode`, so a pool that ran out alongside a refusal stays non-retryable.
 - `ImageAccountPool` applies the same split to its own health registry and switch loop: an enforcement or credential refusal parks the account and ends the attempt, an ordinary rate limit with a disclosed reset still fails over to the sibling, and its own duplicate-image rule (transport, timeout, 5xx and invalid requests are never resent) is untouched.
 - `parseUnifiedRateLimit` reports `other`, not `allowed`, when a report carried no status member.
-- The same refusal can arrive inside a 200 as an `error` event. `AnthropicStreamTranslator` takes the caller's `AnthropicRefusalProbe`, and `ClaudeAdapter.streamCore` supplies one that classifies the event against the response it arrived on, so an in-band `rate_limit_error` the response marks final raises `ENFORCEMENT` while an ordinary one with a disclosed reset keeps `RATE_LIMIT`. The probe is consulted for the retryable event type only: `AUTH` and `CONTEXT_WINDOW_EXCEEDED` keep their codes.
+- The same refusal can arrive inside a 200 as an `error` event. `AnthropicStreamTranslator` takes the caller's `AnthropicRefusalProbe`, and `ClaudeAdapter.streamOwn` supplies one that classifies the event against the response it arrived on, so an in-band `rate_limit_error` the response marks final raises `ENFORCEMENT` while an ordinary one with a disclosed reset keeps `RATE_LIMIT`. The probe is consulted for the retryable event type only: `AUTH` and `CONTEXT_WINDOW_EXCEEDED` keep their codes.
 - Only the ordinary disclosed-reset 429 keeps failover, and an `ENFORCEMENT` refusal does not invalidate the usage cache, so a refusal costs no `/api/oauth/usage` poll.
 
 **Preservation rule.** The genuine client is the reference: it stops retrying on `x-should-retry: false`, on the `org_spend_cap_reached` / `org_level_disabled_until` / `org_level_disabled` / `org_service_level_disabled` / `out_of_credits` reasons, and on `credits_required`, "usage credits are required", and "extra usage is required" wording. Do not fold `ENFORCEMENT` back into `RATE_LIMIT` or `AUTH` to shorten the diff, and do not list it among the retryable codes. Keep the refusal rule in `pool-health.ts` rather than in either pool, so the chat pool and the image pool cannot drift apart.
@@ -257,6 +273,8 @@ Store the artifact's uppercase SHA-256 beside it as `<name>-<version>.tgz.sha256
 ## Deployment
 
 The live Web profile pins the plugin through a `file:` reference to the tarball in `fork-plugins/releases/`; the credential store lives separately under `DSH_HOME\plugins\subscriptions\` and must never be touched by a code swap. The plugin's own `@tormentalabs/claude-code-wire-compat` dependency must keep the absolute `file:C:/Project/deepseek-harness/fork-plugins/releases/tormentalabs-claude-code-wire-compat-0.7.2-dsh14.tgz` specifier in the packed `package.json`: pnpm resolves a dependency's nested `file:` specifier relative to the installing profile, not to the plugin directory, so `file:../releases/...` made the artifact fail to install with `ENOENT` on `<profiles>\releases\...`. Deploy by stopping the Host, then running `fork-plugins/deploy-subscriptions-web.ps1` from a plain PowerShell window (defaults to the newest version; sha256-verifies the artifact, refuses while the Host listens on port 3080, backs up the installed copy plus `package.json`/`pnpm-lock.yaml`, and swaps through `pnpm add` so a later `pnpm install` cannot downgrade). Restart the Host with its usual launch command. Rollback is the previous tarball through the same `pnpm add` form.
+
+**macOS install limitation.** That same absolute specifier is what lets the artifact install for the consumer, and it is a Windows drive-letter path. The macOS leg of `setup.command` therefore cannot install this plugin as it stands: the profile's install resolves the nested pin against itself and finds no `C:\...` target. The plugin serves the Windows Web profile; macOS support is out of scope by the owner's decision, and the limitation is recorded here rather than worked around. Making both legs work means shipping the wire package inside the plugin package (`bundledDependencies`) instead of referencing a tarball, which changes the release layout and is not done.
 
 ## Updating upstream
 

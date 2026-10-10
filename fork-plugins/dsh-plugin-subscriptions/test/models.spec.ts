@@ -14,6 +14,7 @@ import { CodexAdapter, codexRequestBody, fetchCodexModels } from '../src/provide
 import { GrokAdapter } from '../src/providers/grok.js'
 import { ClaudeAdapter, claudeThinkingBody, fetchClaudeCatalogue } from '../src/providers/claude.js'
 import { claudeBuiltInCatalogue } from '../src/providers/claude-catalogue.js'
+import { claudeDocumentedLimits, claudeModelLimits, claudeProfileLimits } from '../src/providers/claude-model-limits.js'
 import { CLAUDE_CODE_2_1_288_PROFILE } from '@tormentalabs/claude-code-wire-compat'
 import { CopilotAdapter, fetchCopilotModels } from '../src/providers/copilot.js'
 import { ModelCatalogCache } from '../src/providers/common.js'
@@ -435,6 +436,78 @@ test('claudeThinkingBody refuses a manual budget on Opus 5.5', () => {
   assert.equal(claudeThinkingBody('claude-opus-4-5', undefined, 32_000), undefined)
 })
 
+test('the thinking budget stays strictly under the output cap it is derived from', () => {
+  // `budget_tokens >= max_tokens` is an API error in extended thinking, so the derived budget
+  // has to stay below whatever cap a model now resolves to — including the 128K a flagship
+  // reports, which is four times the pair this route used to report for every model.
+  for (const model of ['claude-opus-4-5', 'claude-haiku-4-5', 'claude-fable-5']) {
+    for (const maxTokens of [8_192, 32_000, 64_000, 128_000]) {
+      const thinking = claudeThinkingBody(model, 'enabled', maxTokens)
+      if (thinking?.budgetTokens === undefined) continue
+      assert.ok(thinking.budgetTokens < maxTokens, `${model} at ${String(maxTokens)} keeps the budget under the cap`)
+    }
+  }
+  assert.deepEqual(claudeThinkingBody('claude-opus-4-5', 'enabled', 128_000), { type: 'enabled', budgetTokens: 64_000 })
+})
+
+test('the documented limit outranks the catalogue window, which outranks the conservative pair', () => {
+  // A native-1M flagship reports the documented window, which is also the catalogue's.
+  assert.deepEqual(claudeModelLimits('claude-opus-5'), { contextWindow: 1_000_000, maxOutputTokens: 128_000 })
+  // Sonnet 4.6's documented 1M needs the long-context beta this route never sends, so the
+  // catalogue's own window is what a request can use and what the picker reports. The output
+  // ceiling is not beta-gated and stays as documented.
+  assert.deepEqual(claudeDocumentedLimits('claude-sonnet-4-6'), { contextWindow: 1_000_000, maxOutputTokens: 128_000 })
+  assert.deepEqual(claudeModelLimits('claude-sonnet-4-6'), { contextWindow: 200_000, maxOutputTokens: 128_000 })
+  assert.deepEqual(claudeModelLimits('claude-opus-4-6'), { contextWindow: 200_000, maxOutputTokens: 128_000 })
+  // Haiku 4.5 is the one model the documentation states below the flagship pair.
+  assert.deepEqual(claudeDocumentedLimits('claude-haiku-4-5'), { contextWindow: 200_000, maxOutputTokens: 64_000 })
+  // A model the documentation does not name takes the pinned catalogue's entry...
+  assert.equal(claudeDocumentedLimits('claude-3-7-sonnet'), undefined)
+  assert.deepEqual(claudeProfileLimits('claude-3-7-sonnet'), { contextWindow: 200_000, maxOutputTokens: 32_000 })
+  // ...and only an id neither source carries takes the conservative pair.
+  assert.equal(claudeProfileLimits('claude-unknown'), undefined)
+  assert.deepEqual(claudeModelLimits('claude-unknown'), { contextWindow: 200_000, maxOutputTokens: 32_000 })
+})
+
+test('a documented window is reported only where a request can reach it without the 1M beta', () => {
+  for (const id of ['claude-sonnet-4-6', 'claude-opus-4-6']) {
+    const context = CLAUDE_CODE_2_1_288_PROFILE.supportedModels[id]?.context
+    // The catalogue marks these two with the 1M beta and a 200000 window, and this route sends
+    // a plain id, so the documented million is withheld from the resolved limit.
+    assert.equal(context?.supports1mBeta, true, id)
+    assert.equal(context?.native1m, undefined, id)
+    assert.equal(claudeModelLimits(id).contextWindow, 200_000, id)
+  }
+  // Every documented window a request can reach is reported as documented, and no other model
+  // loses its documented window to the beta rule.
+  for (const [id, entry] of Object.entries(CLAUDE_CODE_2_1_288_PROFILE.supportedModels)) {
+    const documented = claudeDocumentedLimits(id)
+    if (documented === undefined) continue
+    if (entry.context?.supports1mBeta === true && entry.context.native1m !== true) continue
+    assert.equal(claudeModelLimits(id).contextWindow, documented.contextWindow, id)
+  }
+})
+
+test('the documented limits name catalogue models and never fall below the catalogue entry', () => {
+  const catalogue = CLAUDE_CODE_2_1_288_PROFILE.supportedModels
+  const documented = Object.keys(catalogue).filter(id => claudeDocumentedLimits(id) !== undefined)
+  // The documentation's current-model table: its flagships plus the one Haiku exception.
+  assert.deepEqual(documented, [
+    'claude-haiku-4-5',
+    'claude-sonnet-4-6', 'claude-sonnet-5', 'claude-sonnet-5-5',
+    'claude-opus-4-6', 'claude-opus-4-7', 'claude-opus-4-8', 'claude-opus-5', 'claude-opus-5-5',
+    'claude-fable-5', 'claude-fable-5-1', 'claude-mythos-5', 'claude-mythos-5-1',
+  ])
+  for (const [id, entry] of Object.entries(catalogue)) {
+    const stated = claudeDocumentedLimits(id)
+    if (stated === undefined) continue
+    // The documented figure is the model's limit and the catalogue's is a policy window, so
+    // the documentation can never state less than the catalogue reports.
+    assert.ok(stated.contextWindow >= (entry.context?.window ?? 0), `${id} states at least the catalogue window`)
+    assert.ok(stated.maxOutputTokens >= (entry.maxOutputTokens?.default ?? 0), `${id} states at least the catalogue output`)
+  }
+})
+
 test('the built-in catalogue lists the pinned profile with the client display names and no request', () => {
   const rows = claudeBuiltInCatalogue()
   // Membership is the pinned profile's own table, in the catalogue's own order.
@@ -523,7 +596,7 @@ test('the options read carries the desktop client headers', async () => {
   assert.equal(seen['authorization']?.startsWith('Bearer '), true)
 })
 
-test('claude resolveModel keeps the fallbacks for a model the pinned catalogue does not carry', async () => {
+test('claude reports the documented capacity for each model the documentation names', async () => {
   const claude = new ClaudeAdapter({
     models: STATIC_CLAUDE,
     streamIdleTimeoutMs: 1000,
@@ -531,12 +604,31 @@ test('claude resolveModel keeps the fallbacks for a model the pinned catalogue d
     discovery: true,
     fetchFn: fakeFetch(CLAUDE_BOOTSTRAP_PAYLOAD).fetchFn,
   })
-  // The options endpoint names models; it does not describe them. A model outside the
-  // pinned catalogue therefore gets the documented fallbacks, exactly as it does for the
-  // genuine client, whose catalogue is the same built-in table.
-  const fresh = await claude.resolveModel('claude', 'claude-opus-5-5')
-  assert.equal(fresh.context?.contextWindow, 200_000)
-  assert.equal(fresh.defaultMaxTokens, 32_000)
+  // The options endpoint names models; it does not describe them. The documented per-model
+  // limits therefore answer, and every native-1M flagship the documentation lists is 1M/128K.
+  const flagship = await claude.resolveModel('claude', 'claude-opus-5-5')
+  assert.equal(flagship.context?.contextWindow, 1_000_000)
+  assert.equal(flagship.defaultMaxTokens, 128_000)
+  const fable = await claude.resolveModel('claude', 'claude-fable-5')
+  assert.equal(fable.context?.contextWindow, 1_000_000)
+  assert.equal(fable.defaultMaxTokens, 128_000)
+  // These two are documented at 1M too, but only inside the long-context beta this route never
+  // sends, so the picker reports the window a request is actually served at.
+  const sonnet46 = await claude.resolveModel('claude', 'claude-sonnet-4-6')
+  assert.equal(sonnet46.context?.contextWindow, 200_000)
+  assert.equal(sonnet46.defaultMaxTokens, 128_000)
+  const opus46 = await claude.resolveModel('claude', 'claude-opus-4-6')
+  assert.equal(opus46.context?.contextWindow, 200_000)
+  assert.equal(opus46.defaultMaxTokens, 128_000)
+  // The one model the documentation states at 200K/64K.
+  const haiku = await claude.resolveModel('claude', 'claude-haiku-4-5')
+  assert.equal(haiku.context?.contextWindow, 200_000)
+  assert.equal(haiku.defaultMaxTokens, 64_000)
+  // A model the documentation does not name keeps the pinned catalogue's own entry.
+  const legacy = await claude.resolveModel('claude', 'claude-3-5-haiku')
+  assert.equal(legacy.context?.contextWindow, 200_000)
+  assert.equal(legacy.defaultMaxTokens, 8_192)
+  // An id neither source carries is the only thing the conservative pair answers for.
   const unknown = await claude.resolveModel('claude', 'claude-unknown')
   assert.equal(unknown.context?.contextWindow, 200_000)
   assert.equal(unknown.defaultMaxTokens, 32_000)

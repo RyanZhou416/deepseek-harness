@@ -2,9 +2,14 @@
  * Google Antigravity subscription provider. This is intentionally separate
  * from Gemini CLI: it uses Antigravity OAuth scopes, project discovery, and
  * the daily-cloudcode-pa v1internal request envelope.
+ *
+ * No application client identity is committed: {@link resolveAntigravityOAuthConfig}
+ * takes it from `config.antigravity.clientId`/`clientSecret` or from
+ * `ANTIGRAVITY_CLIENT_ID`/`ANTIGRAVITY_CLIENT_SECRET` and refuses a secret
+ * without its matching id.
  */
 
-import { EMPTY_RESPONSE_CODE, LlmAdapter, LlmError } from '@deepseek-ai/dsh-llm'
+import { EMPTY_RESPONSE_CODE, LlmError } from '@deepseek-ai/dsh-llm'
 import type {
   GenerateOptions,
   LlmModelInfo,
@@ -14,7 +19,7 @@ import type {
 } from '@deepseek-ai/dsh-llm'
 import type { AttachmentStore } from '@deepseek-ai/dsh-attachment'
 import type { FlowSpec } from '../auth/oauth-flow.js'
-import type { AntigravitySession, ProviderId } from '../auth/store.js'
+import type { AntigravitySession } from '../auth/store.js'
 import { resolveImages } from '../translate/resolved.js'
 import { antigravityReasoning } from '../translate/antigravity-thinking.js'
 import {
@@ -40,7 +45,8 @@ import type {
   ProviderUsage,
   UsageWindow,
 } from './common.js'
-import { ProviderCatalog, catalogRow, withPoolTiers } from './provider-catalog.js'
+import { ProviderCatalog, catalogRow } from './provider-catalog.js'
+import { PoolBackedAdapter } from './pool-delegation.js'
 import { proxiedFetch } from '../http.js'
 import { AccountTokenManager } from './accounts.js'
 import type { PoolAdapter } from './pool.js'
@@ -50,9 +56,9 @@ import type { RateLimitWait } from './rate-limit.js'
 export const ANTIGRAVITY_AUTHORIZE_URL = 'https://accounts.google.com/o/oauth2/v2/auth'
 export const ANTIGRAVITY_TOKEN_URL = 'https://oauth2.googleapis.com/token'
 export const ANTIGRAVITY_USERINFO_URL = 'https://www.googleapis.com/oauth2/v2/userinfo'
-export const ANTIGRAVITY_DEFAULT_BASE_URL = 'https://daily-cloudcode-pa.googleapis.com'
-export const ANTIGRAVITY_PROD_BASE_URL = 'https://cloudcode-pa.googleapis.com'
-export const ANTIGRAVITY_DEFAULT_USER_AGENT = 'antigravity/1.104.0 dsh-plugin-subscriptions'
+const ANTIGRAVITY_DEFAULT_BASE_URL = 'https://daily-cloudcode-pa.googleapis.com'
+const ANTIGRAVITY_PROD_BASE_URL = 'https://cloudcode-pa.googleapis.com'
+const ANTIGRAVITY_DEFAULT_USER_AGENT = 'antigravity/1.104.0 dsh-plugin-subscriptions'
 export const ANTIGRAVITY_PREEMPT_MS = 5 * 60_000
 const ANTIGRAVITY_CALLBACK_PATH = '/oauth-callback'
 const ANTIGRAVITY_CONTEXT_WINDOW = 1_024_000
@@ -60,7 +66,7 @@ const ANTIGRAVITY_CONTEXT_WINDOW = 1_024_000
 const ANTIGRAVITY_DEFAULT_MAX_TOKENS = 32_768
 
 /** Antigravity, not Gemini CLI, OAuth scopes from the local reference clients. */
-export const ANTIGRAVITY_SCOPES = [
+const ANTIGRAVITY_SCOPES = [
   'openid',
   'https://www.googleapis.com/auth/cloud-platform',
   'https://www.googleapis.com/auth/userinfo.email',
@@ -70,7 +76,7 @@ export const ANTIGRAVITY_SCOPES = [
 ] as const
 
 /** OAuth client configuration; explicit clients override the bundled desktop identity. */
-export interface AntigravityOAuthConfig {
+interface AntigravityOAuthConfig {
   clientId: string
   clientSecret?: string
 }
@@ -106,7 +112,7 @@ export function resolveAntigravityOAuthConfig(config?: Partial<AntigravityOAuthC
 }
 
 /** Normalize the configured API origin and reject paths/credentials. */
-export function antigravityBaseURL(value?: string): string {
+function antigravityBaseURL(value?: string): string {
   const parsed = new URL(value?.trim() || ANTIGRAVITY_DEFAULT_BASE_URL)
   if (parsed.protocol !== 'https:' || parsed.username.length > 0 || parsed.password.length > 0) {
     throw new Error('config.antigravity.baseURL must be an HTTPS origin without credentials')
@@ -181,7 +187,7 @@ interface AntigravityAccountInfo {
 }
 
 /** Shared Antigravity API headers. */
-export function antigravityHeaders(accessToken: string, userAgent = ANTIGRAVITY_DEFAULT_USER_AGENT): Record<string, string> {
+function antigravityHeaders(accessToken: string, userAgent = ANTIGRAVITY_DEFAULT_USER_AGENT): Record<string, string> {
   return {
     'authorization': `Bearer ${accessToken}`,
     'content-type': 'application/json',
@@ -226,7 +232,7 @@ interface LoadCodeAssistResponse {
 }
 
 /** Read (and, when enabled, initialize) the Antigravity project/account. */
-export async function discoverAntigravityAccount(
+async function discoverAntigravityAccount(
   accessToken: string,
   runtime: AntigravityRuntimeConfig = {},
   fetchFn: FetchFn = proxiedFetch,
@@ -485,7 +491,7 @@ export async function requestAntigravityContent(
   }, runtime, fetchFn)
 }
 
-export interface AntigravityAdapterOptions {
+interface AntigravityAdapterOptions {
   models: readonly ModelEntry[]
   streamIdleTimeoutMs: number
   tokens: AccountTokenManager<AntigravitySession>
@@ -501,11 +507,11 @@ export interface AntigravityAdapterOptions {
 }
 
 /** DSH provider adapter for the `antigravity` route. */
-export class AntigravityAdapter extends LlmAdapter {
-  private readonly catalogs: ProviderCatalog
+export class AntigravityAdapter extends PoolBackedAdapter {
+  protected readonly catalogs: ProviderCatalog
 
   constructor(private readonly options: AntigravityAdapterOptions) {
-    super()
+    super(options)
     this.catalogs = new ProviderCatalog(options, 'Antigravity', {
       staticRows: provider => this.staticModels(provider),
       fetchCatalog: (account, signal) => this.fetchCatalog(account, signal),
@@ -549,15 +555,6 @@ export class AntigravityAdapter extends LlmAdapter {
     ))
   }
 
-  override async listModels(provider: string): Promise<readonly LlmModelInfo[]> {
-    return withPoolTiers(await this.listOwnModels(provider), this.options.pool?.(), provider)
-  }
-
-  /** The provider's own catalog: union of every account, or one account when named. */
-  async listOwnModels(provider: string, account?: string, signal?: AbortSignal): Promise<readonly LlmModelInfo[]> {
-    return this.catalogs.list(provider, account, signal)
-  }
-
   private async discovered(model: string, account?: string): Promise<DiscoveredModel | undefined> {
     if (!this.options.discovery) return undefined
     const accounts = account === undefined ? (await this.options.tokens.list()).map(entry => entry.key) : [account]
@@ -566,14 +563,6 @@ export class AntigravityAdapter extends LlmAdapter {
       const models = await catalog.resolve(() => this.fetchCatalog(key))
       return models?.find(entry => entry.id === model)
     })
-  }
-
-  override async resolveModel(provider: string, model: string): Promise<LlmResolvedModelInfo> {
-    const pool = this.options.pool?.()
-    if (pool !== undefined && await pool.owns(provider as ProviderId, model)) {
-      return pool.resolveModel(provider, model)
-    }
-    return this.resolveOwnModel(provider, model)
   }
 
   /** Capability resolution of the provider's own models (the pool resolves members here). */
@@ -597,21 +586,7 @@ export class AntigravityAdapter extends LlmAdapter {
     }
   }
 
-  async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
-    const pool = this.options.pool?.()
-    if (pool !== undefined && await pool.owns(options.provider as ProviderId, options.model)) {
-      yield* pool.stream(options)
-      return
-    }
-    yield* this.streamCore(options)
-  }
-
-  /** Pool seam: stream through one specific account instead of the default. */
-  streamAccount(options: GenerateOptions, account: string): AsyncIterable<StreamChunk> {
-    return this.streamCore(options, account)
-  }
-
-  private async *streamCore(options: GenerateOptions, account?: string): AsyncIterable<StreamChunk> {
+  protected async *streamOwn(options: GenerateOptions, account?: string): AsyncIterable<StreamChunk> {
     const watchdog = idleWatchdog(options.signal, this.options.streamIdleTimeoutMs)
     try {
       let session = await this.options.tokens.session(account)

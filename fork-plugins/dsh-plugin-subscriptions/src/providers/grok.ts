@@ -4,7 +4,7 @@
  * Responses-style endpoint.
  */
 
-import { attributionHeaders, EMPTY_RESPONSE_CODE, errorChain, LlmAdapter, LlmError, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
+import { attributionHeaders, EMPTY_RESPONSE_CODE, errorChain, LlmError, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import type {
   GenerateOptions,
   LlmModelInfo,
@@ -15,7 +15,6 @@ import type {
 import { decodeJwtPayload } from '../auth/jwt.js'
 import type { FlowSpec } from '../auth/oauth-flow.js'
 import type { GrokSession } from '../auth/store.js'
-import type { ProviderId } from '../auth/store.js'
 import type { PoolAdapter } from './pool.js'
 import type { AttachmentStore } from '@deepseek-ai/dsh-attachment'
 import { resolveImages } from '../translate/resolved.js'
@@ -41,7 +40,8 @@ import type {
   ProviderUsage,
   UsageWindow,
 } from './common.js'
-import { ProviderCatalog, catalogRow, withPoolTiers } from './provider-catalog.js'
+import { ProviderCatalog, catalogRow } from './provider-catalog.js'
+import { PoolBackedAdapter } from './pool-delegation.js'
 import { proxiedFetch } from '../http.js'
 import {
   DEFAULT_RATE_LIMIT_WAIT,
@@ -52,8 +52,8 @@ import {
 } from './rate-limit.js'
 import type { RateLimitResetReader, RateLimitWait } from './rate-limit.js'
 
-export const GROK_CLIENT_ID = 'b1a00492-073a-47ea-816f-4c329264a828'
-export const GROK_DISCOVERY_URL = 'https://auth.x.ai/.well-known/openid-configuration'
+const GROK_CLIENT_ID = 'b1a00492-073a-47ea-816f-4c329264a828'
+const GROK_DISCOVERY_URL = 'https://auth.x.ai/.well-known/openid-configuration'
 export const GROK_API_URL = 'https://api.x.ai/v1/responses'
 const GROK_SCOPE = 'openid profile email offline_access grok-cli:access api:access'
 const GROK_CALLBACK_PATH = '/callback'
@@ -79,7 +79,7 @@ export const grokRateLimitReset: RateLimitResetReader = (_response, body, now) =
   resetFromFields(jsonBody(body), GROK_RESET_FIELDS, now)
 
 /** Discovered OIDC endpoints for the xAI authorization server. */
-export interface GrokDiscovery {
+interface GrokDiscovery {
   authorizationEndpoint: string
   tokenEndpoint: string
 }
@@ -105,7 +105,7 @@ let discoveryCache: GrokDiscovery | undefined
  * Resolve the xAI OIDC endpoints (cached after the first fetch).
  * @returns validated authorization and token endpoints.
  */
-export async function grokDiscovery(): Promise<GrokDiscovery> {
+async function grokDiscovery(): Promise<GrokDiscovery> {
   if (discoveryCache !== undefined) return discoveryCache
   const response = await proxiedFetch(GROK_DISCOVERY_URL)
   if (!response.ok) throw await oauthEndpointError(response, 'grok OIDC discovery')
@@ -304,7 +304,7 @@ export function isGrokPermanentRefreshError(error: unknown): boolean {
  * `/usage` "Usage limit" panel; see xai-org/grok-build
  * `extensions/billing.rs`). Forwards to the backend `GetGrokCreditsConfig`.
  */
-export const GROK_BILLING_URL = 'https://cli-chat-proxy.grok.com/v1/billing?format=credits'
+const GROK_BILLING_URL = 'https://cli-chat-proxy.grok.com/v1/billing?format=credits'
 
 /** RFC3339 timestamp → epoch ms, or undefined when absent/unparsable. */
 function grokResetsAt(value: unknown): number | undefined {
@@ -387,7 +387,7 @@ export async function fetchGrokUsage(
   }
 }
 
-export const GROK_MODELS_URL = 'https://api.x.ai/v1/models'
+const GROK_MODELS_URL = 'https://api.x.ai/v1/models'
 
 /**
  * Input modalities for one grok model: chat models (grok-4 family) accept
@@ -404,7 +404,7 @@ function grokModalities(id: string): readonly ('text' | 'image')[] {
  * effort metadata must come from here (the same source the official CLI's
  * picker uses).
  */
-export const GROK_CLI_MODELS_URL = 'https://cli-chat-proxy.grok.com/v1/models'
+const GROK_CLI_MODELS_URL = 'https://cli-chat-proxy.grok.com/v1/models'
 
 /** The CLI catalog `/v1/models` entry subset this plugin reads. */
 interface GrokCliWireModel {
@@ -450,7 +450,7 @@ function grokCliReasoning(entry: GrokCliWireModel): NonNullable<DiscoveredModel[
  * @param signal - caller cancellation (pool-assembly timeout).
  * @returns model id → contributed metadata.
  */
-export async function fetchGrokCliCatalog(
+async function fetchGrokCliCatalog(
   session: GrokSession,
   fetchFn: FetchFn = proxiedFetch,
   signal?: AbortSignal,
@@ -527,7 +527,7 @@ function grokPriorMeta(prior: DiscoveredModel | undefined): GrokCliModelMeta {
  * @param signal - caller cancellation (pool-assembly timeout).
  * @returns discovered chat models in endpoint order.
  */
-export async function fetchGrokModels(
+async function fetchGrokModels(
   session: GrokSession,
   fetchFn: FetchFn = proxiedFetch,
   onWarn?: (message: string) => void,
@@ -616,7 +616,7 @@ export function grokRequestBody(
 }
 
 /** Constructor dependencies for {@link GrokAdapter}. */
-export interface GrokAdapterOptions {
+interface GrokAdapterOptions {
   models: readonly ModelEntry[]
   streamIdleTimeoutMs: number
   tokens: AccountTokenManager<GrokSession>
@@ -643,11 +643,11 @@ export interface GrokAdapterOptions {
 }
 
 /** Grok wire adapter: one instance serves the `grok` provider route. */
-export class GrokAdapter extends LlmAdapter {
-  private readonly catalogs: ProviderCatalog
+export class GrokAdapter extends PoolBackedAdapter {
+  protected readonly catalogs: ProviderCatalog
 
   constructor(private readonly options: GrokAdapterOptions) {
-    super()
+    super(options)
     this.catalogs = new ProviderCatalog(options, 'grok', {
       staticRows: provider => this.staticModels(provider),
       fetchCatalog: (account, signal) => this.fetchCatalog(account, signal),
@@ -700,15 +700,6 @@ export class GrokAdapter extends LlmAdapter {
     }))
   }
 
-  override async listModels(provider: string): Promise<readonly LlmModelInfo[]> {
-    return withPoolTiers(await this.listOwnModels(provider), this.options.pool?.(), provider)
-  }
-
-  /** The provider's own catalog: union of every account, or one account when named. */
-  async listOwnModels(provider: string, account?: string, signal?: AbortSignal): Promise<readonly LlmModelInfo[]> {
-    return this.catalogs.list(provider, account, signal)
-  }
-
   /**
    * The discovered entry for one model. Resolved through the cache's
    * stale-while-revalidate path: capability metadata must stay stable across
@@ -725,14 +716,6 @@ export class GrokAdapter extends LlmAdapter {
       const models = await catalog.resolve(() => this.fetchCatalog(account))
       return models?.find(entry => entry.id === model)
     })
-  }
-
-  override async resolveModel(provider: string, model: string): Promise<LlmResolvedModelInfo> {
-    const pool = this.options.pool?.()
-    if (pool !== undefined && await pool.owns(provider as ProviderId, model)) {
-      return pool.resolveModel(provider, model)
-    }
-    return this.resolveOwnModel(provider, model)
   }
 
   /** Capability resolution of the provider's own models (the pool resolves members here). */
@@ -757,21 +740,7 @@ export class GrokAdapter extends LlmAdapter {
     }
   }
 
-  async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
-    const pool = this.options.pool?.()
-    if (pool !== undefined && await pool.owns(options.provider as ProviderId, options.model)) {
-      yield* pool.stream(options)
-      return
-    }
-    yield* this.streamCore(options)
-  }
-
-  /** Pool seam: stream through one specific account instead of the default. */
-  streamAccount(options: GenerateOptions, account: string): AsyncIterable<StreamChunk> {
-    return this.streamCore(options, account)
-  }
-
-  private async *streamCore(options: GenerateOptions, account?: string): AsyncIterable<StreamChunk> {
+  protected async *streamOwn(options: GenerateOptions, account?: string): AsyncIterable<StreamChunk> {
     const watchdog = idleWatchdog(options.signal, this.options.streamIdleTimeoutMs)
     try {
       let session = await this.options.tokens.session(account)

@@ -223,7 +223,7 @@ export interface ResponsesStreamEvent {
 }
 
 /** Responses `usage` object shape. */
-export interface ResponsesUsage {
+interface ResponsesUsage {
   input_tokens: number
   output_tokens: number
   input_tokens_details?: { cached_tokens?: number }
@@ -236,7 +236,7 @@ export interface ResponsesUsage {
  * @param usage - wire usage from `response.completed`.
  * @returns harness token usage.
  */
-export function mapResponsesUsage(usage: ResponsesUsage): TokenUsage {
+function mapResponsesUsage(usage: ResponsesUsage): TokenUsage {
   const cached = usage.input_tokens_details?.cached_tokens
   const reasoning = usage.output_tokens_details?.reasoning_tokens
   return {
@@ -253,7 +253,7 @@ export function mapResponsesUsage(usage: ResponsesUsage): TokenUsage {
  * @param message - provider error message, when present.
  * @returns the mapped error (context overflow, quota, otherwise SERVER).
  */
-export function responsesFailure(code: string | undefined, message: string | undefined): LlmError {
+function responsesFailure(code: string | undefined, message: string | undefined): LlmError {
   const text = message ?? code ?? 'the provider reported a failed response'
   const detail = `${code ?? ''} ${message ?? ''}`
   if (code === 'context_window_exceeded' || isContextWindowExceededError(detail)) {

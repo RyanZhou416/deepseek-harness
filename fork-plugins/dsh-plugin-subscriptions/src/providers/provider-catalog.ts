@@ -21,7 +21,7 @@ import {
 import type { CatalogPersistence, DiscoveredModel } from './common.js'
 
 /** The account-store surface catalog listing reads. */
-export interface CatalogAccounts {
+interface CatalogAccounts {
   /** The provider's accounts, default first. */
   list(): Promise<readonly { key: string }[]>
   /** Resolve a usable session for one account, refreshing on demand. */
@@ -33,13 +33,13 @@ export interface CatalogAccounts {
 }
 
 /** The pool seam that contributes picker rows beyond the discovered catalog. */
-export interface CatalogTierSource {
+interface CatalogTierSource {
   /** The provider's configured tier rows. */
   modelsForProvider(provider: ProviderId): Promise<LlmModelInfo[]>
 }
 
 /** The catalog-relevant slice of every subscription adapter's options. */
-export interface CatalogHost {
+interface CatalogHost {
   /** The provider's account store. */
   tokens: CatalogAccounts
   /** Durable half of the default account's cache (the persisted cache is the default's). */
@@ -51,7 +51,7 @@ export interface CatalogHost {
 }
 
 /** The provider-specific pieces of one adapter's catalog listing. */
-export interface CatalogHooks {
+interface CatalogHooks {
   /** The provider's configured rows, served when discovery is off, absent, or failing. */
   staticRows: (provider: string) => LlmModelInfo[]
   /** Fetches one account's catalog from the provider. */
@@ -184,7 +184,7 @@ export class ProviderCatalog {
  * Codex sort priority, the provider's own context size, and an entry the account
  * cannot select.
  */
-export interface CatalogRowExtras {
+interface CatalogRowExtras {
   description?: string
   priority?: number
   contextWindow?: number

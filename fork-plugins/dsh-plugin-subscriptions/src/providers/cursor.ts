@@ -18,7 +18,7 @@ import { createHash, randomBytes, randomUUID } from 'node:crypto'
 import { mkdir } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { EMPTY_RESPONSE_CODE, LlmAdapter, LlmError, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
+import { EMPTY_RESPONSE_CODE, LlmError, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import type {
   GenerateOptions,
   LlmModelInfo,
@@ -30,7 +30,7 @@ import type {
   ToolSchema,
 } from '@deepseek-ai/dsh-llm'
 import { ToolCallId } from '../compat.js'
-import type { CursorSession, ProviderId } from '../auth/store.js'
+import type { CursorSession } from '../auth/store.js'
 import { resolveImages } from '../translate/resolved.js'
 import type { AttachmentStore } from '@deepseek-ai/dsh-attachment'
 import {
@@ -43,7 +43,8 @@ import {
   mapFetchFailure,
 } from './common.js'
 import type { CatalogPersistence, DiscoveredModel, FetchFn, ModelEntry, ProviderUsage, UsageWindow } from './common.js'
-import { ProviderCatalog, catalogRow, withPoolTiers } from './provider-catalog.js'
+import { ProviderCatalog, catalogRow } from './provider-catalog.js'
+import { PoolBackedAdapter } from './pool-delegation.js'
 import { proxiedFetch } from '../http.js'
 import { AccountTokenManager } from './accounts.js'
 import type { PoolAdapter } from './pool.js'
@@ -51,7 +52,7 @@ import { DEFAULT_RATE_LIMIT_WAIT, DEFAULT_RETRY, subscriptionRetryPolicy } from 
 import type { RateLimitWait } from './rate-limit.js'
 
 /** Default lifetime when login does not report `apiKeyExpiresAtMs`. The SDK default is 90 days. */
-export const CURSOR_DEFAULT_TTL_MS = 90 * 24 * 60 * 60 * 1000
+const CURSOR_DEFAULT_TTL_MS = 90 * 24 * 60 * 60 * 1000
 
 /** How long before expiry a request attempts refresh. Cursor chat has no refresh grant. */
 export const CURSOR_PREEMPT_MS = 60_000
@@ -150,7 +151,7 @@ export interface CursorLoginHandle {
 }
 
 /** Transcript handed to one stateless Cursor agent run. */
-export interface CursorTurn {
+interface CursorTurn {
   system?: string
   prompt: string
   images: CursorSendImage[]
@@ -277,7 +278,7 @@ export function beginCursorLogin(): CursorLoginHandle {
  * The chat API key is left unchanged. A failed refresh does not log the
  * account out.
  */
-export async function refreshCursorDashboard(
+async function refreshCursorDashboard(
   session: CursorSession,
   fetchFn: FetchFn = cursorFetch,
   signal?: AbortSignal,
@@ -363,7 +364,7 @@ export async function loadCursorAccountUsage(
   }
 }
 
-export async function cursorUsageSession(
+async function cursorUsageSession(
   session: CursorSession,
   fetchFn: FetchFn = cursorFetch,
   signal?: AbortSignal,
@@ -484,7 +485,7 @@ async function disposeAgent(agent: CursorAgent): Promise<void> {
 }
 
 /** Constructor dependencies for {@link CursorAdapter}. */
-export interface CursorAdapterOptions {
+interface CursorAdapterOptions {
   models: readonly ModelEntry[]
   streamIdleTimeoutMs: number
   tokens: AccountTokenManager<CursorSession>
@@ -507,13 +508,13 @@ interface CursorSendAttempt {
   contextValue?: string
 }
 
-export class CursorAdapter extends LlmAdapter {
-  private readonly catalogs: ProviderCatalog
+export class CursorAdapter extends PoolBackedAdapter {
+  protected readonly catalogs: ProviderCatalog
   /** Context parameter values the registry rejected, keyed `account|model|value`. */
   private readonly rejectedCursorContext = new Set<string>()
 
   constructor(private readonly options: CursorAdapterOptions) {
-    super()
+    super(options)
     this.catalogs = new ProviderCatalog(options, 'cursor', {
       staticRows: provider => this.staticModels(provider),
       fetchCatalog: (account, signal) => this.fetchCatalog(account, signal),
@@ -536,23 +537,6 @@ export class CursorAdapter extends LlmAdapter {
   /** Drop cached catalogs after login/logout so the next list does not reuse a stale plan. */
   clearAccountCatalog(account?: string): void {
     this.catalogs.invalidate(account)
-  }
-
-  override async listModels(provider: string): Promise<readonly LlmModelInfo[]> {
-    return withPoolTiers(await this.listOwnModels(provider), this.options.pool?.(), provider)
-  }
-
-  /** The provider's own catalog: union of every account, or one account when named. */
-  async listOwnModels(provider: string, account?: string, signal?: AbortSignal): Promise<readonly LlmModelInfo[]> {
-    return this.catalogs.list(provider, account, signal)
-  }
-
-  override async resolveModel(provider: string, model: string): Promise<LlmResolvedModelInfo> {
-    const pool = this.options.pool?.()
-    if (pool !== undefined && await pool.owns(provider as ProviderId, model)) {
-      return pool.resolveModel(provider, model)
-    }
-    return this.resolveOwnModel(provider, model)
   }
 
   async resolveOwnModel(provider: string, model: string): Promise<LlmResolvedModelInfo> {
@@ -611,16 +595,7 @@ export class CursorAdapter extends LlmAdapter {
     return ids
   }
 
-  async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
-    const pool = this.options.pool?.()
-    if (pool !== undefined && await pool.owns(options.provider as ProviderId, options.model)) {
-      yield* pool.stream(options)
-      return
-    }
-    yield* this.streamAccount(options)
-  }
-
-  streamAccount(options: GenerateOptions, account?: string): AsyncIterable<StreamChunk> {
+  protected streamOwn(options: GenerateOptions, account?: string): AsyncIterable<StreamChunk> {
     return this.streamWithRetry(options, account)
   }
 
@@ -964,7 +939,7 @@ function usageFromEvent(event: unknown): TokenUsage | undefined {
 }
 
 /** One row from `Cursor.models.list`. Fields match the SDK's `ModelListItem`. */
-export interface CursorListedModel {
+interface CursorListedModel {
   id?: string
   displayName?: string
   description?: string
@@ -982,7 +957,7 @@ export interface CursorListedModel {
 const EFFORT_PARAMETER_IDS = new Set(['reasoning_effort', 'effort', 'reasoning'])
 
 /** Parse a Cursor context parameter such as `300k` or `1m` into tokens. */
-export function cursorContextTokens(value: string): number | undefined {
+function cursorContextTokens(value: string): number | undefined {
   const match = /^(\d+(?:\.\d+)?)([km])$/i.exec(value.trim())
   if (match === null) return undefined
   const amount = Number(match[1])

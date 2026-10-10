@@ -30,7 +30,7 @@ export interface ImageAttachmentRef {
 export type ImageLoader = (attachment: ImageAttachmentRef) => Promise<string>
 
 /** Lightbox strings forwarded to the opened preview. */
-export interface ImageLightboxLabels {
+interface ImageLightboxLabels {
   dialog: string
   close: string
 }
@@ -124,7 +124,7 @@ function ImageLightbox({ src, alt, labels, onClose }: {
  * preview. A lone image renders at its `singleFit` size; an image among
  * several renders as a fixed 64px square tile.
  */
-export function MessageImage({ attachment, load, variant, labels }: {
+function MessageImage({ attachment, load, variant, labels }: {
   attachment: ImageAttachmentRef
   load: ImageLoader
   variant: 'single' | 'tile'

@@ -34,7 +34,7 @@ function isParkable(code: string): boolean {
   return isRefusalCode(code) || QUOTA_AND_ENTITLEMENT_CODES.includes(code)
 }
 
-export interface ImageAccountRequest<S extends ImageSession> {
+interface ImageAccountRequest<S extends ImageSession> {
   provider: ImageProvider
   tokens: AccountTokenManager<S>
   signal: AbortSignal

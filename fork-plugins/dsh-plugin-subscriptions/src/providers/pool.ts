@@ -33,7 +33,7 @@ import { poolSchedulingScore } from './pool-scheduling.js'
 import type { PoolSchedulingPolicy } from './pool-scheduling.js'
 
 /** Member-selection strategy: plain priority failover or quota-aware scheduling. */
-export type PoolStrategy = 'priority' | 'quota_aware'
+type PoolStrategy = 'priority' | 'quota_aware'
 
 export interface PoolAdapterOptions {
   /** The live subscription adapters, by provider route. */

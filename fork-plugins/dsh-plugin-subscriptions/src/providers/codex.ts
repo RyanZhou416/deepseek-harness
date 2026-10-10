@@ -5,7 +5,7 @@
  */
 
 import { createHash, randomUUID } from 'node:crypto'
-import { attributionHeaders, EMPTY_RESPONSE_CODE, LlmAdapter, LlmError, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
+import { attributionHeaders, EMPTY_RESPONSE_CODE, LlmError, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import type {
   GenerateOptions,
   LlmModelInfo,
@@ -16,7 +16,6 @@ import type {
 import { decodeJwtPayload } from '../auth/jwt.js'
 import type { FlowSpec } from '../auth/oauth-flow.js'
 import type { CodexSession } from '../auth/store.js'
-import type { ProviderId } from '../auth/store.js'
 import type { PoolAdapter } from './pool.js'
 import type { AttachmentStore } from '@deepseek-ai/dsh-attachment'
 import { resolveImages } from '../translate/resolved.js'
@@ -48,7 +47,8 @@ import type {
   ResetCreditList,
   UsageWindow,
 } from './common.js'
-import { ProviderCatalog, catalogRow, withPoolTiers } from './provider-catalog.js'
+import { ProviderCatalog, catalogRow } from './provider-catalog.js'
+import { PoolBackedAdapter } from './pool-delegation.js'
 import { proxiedFetch } from '../http.js'
 import {
   DEFAULT_RATE_LIMIT_WAIT,
@@ -60,9 +60,9 @@ import {
 } from './rate-limit.js'
 import type { RateLimitResetReader, RateLimitWait } from './rate-limit.js'
 
-export const CODEX_CLIENT_ID = 'app_EMoamEEZ73f0CkXaXp7hrann'
-export const CODEX_AUTHORIZE_URL = 'https://auth.openai.com/oauth/authorize'
-export const CODEX_TOKEN_URL = 'https://auth.openai.com/oauth/token'
+const CODEX_CLIENT_ID = 'app_EMoamEEZ73f0CkXaXp7hrann'
+const CODEX_AUTHORIZE_URL = 'https://auth.openai.com/oauth/authorize'
+const CODEX_TOKEN_URL = 'https://auth.openai.com/oauth/token'
 export const CODEX_API_URL = 'https://chatgpt.com/backend-api/codex/responses'
 const CODEX_SCOPE = 'openid profile email offline_access api.connectors.read api.connectors.invoke'
 const CODEX_CALLBACK_PATH = '/auth/callback'
@@ -137,11 +137,8 @@ const CODEX_MODALITIES: readonly ('text' | 'image')[] = ['text', 'image']
  * `ServiceTier::Fast.request_value()`. The legacy catalog spelling is the
  * `additional_speed_tiers` entry "fast".
  */
-export const CODEX_FAST_SERVICE_TIER = 'priority'
+const CODEX_FAST_SERVICE_TIER = 'priority'
 const CODEX_FAST_SPEED_TIER = 'fast'
-
-/** One session's speed choice: standard routing or the fast (priority) tier. */
-export type CodexSpeedTier = 'standard' | 'fast'
 
 /** Static codex flow facts for the OAuth flow engine. */
 export const codexFlow: FlowSpec = {
@@ -186,7 +183,7 @@ function accountIdOf(idToken: string | undefined): string {
 }
 
 /** User identity claims decoded from a codex id token. */
-export interface CodexProfileClaims {
+interface CodexProfileClaims {
   emailAddress?: string
   planType?: string
 }
@@ -310,7 +307,7 @@ export function isCodexPermanentRefreshError(error: unknown): boolean {
     && PERMANENT_REFRESH_CODES.has(error.oauthCode)
 }
 
-export const CODEX_USAGE_URL = 'https://chatgpt.com/backend-api/wham/usage'
+const CODEX_USAGE_URL = 'https://chatgpt.com/backend-api/wham/usage'
 export const CODEX_RESET_CREDITS_URL = 'https://chatgpt.com/backend-api/wham/rate-limit-reset-credits'
 export const CODEX_RESET_CREDITS_CONSUME_URL = `${CODEX_RESET_CREDITS_URL}/consume`
 
@@ -330,7 +327,7 @@ function codexJsonHeaders(session: CodexSession): Record<string, string> {
  * @returns undefined when the field is absent or not a usable count, so callers
  *   can omit the row instead of showing a fabricated zero.
  */
-export function codexResetCreditCount(value: unknown): number | undefined {
+function codexResetCreditCount(value: unknown): number | undefined {
   if (typeof value !== 'object' || value === null) return undefined
   const count = (value as { available_count?: unknown }).available_count
   if (typeof count !== 'number' || !Number.isInteger(count) || count < 0) return undefined
@@ -350,7 +347,7 @@ function optionalCreditText(value: unknown): string | undefined {
 }
 
 /** Map one credits-list payload. Rows without an id are dropped. */
-export function mapCodexResetCreditList(payload: unknown): ResetCreditList {
+function mapCodexResetCreditList(payload: unknown): ResetCreditList {
   if (typeof payload !== 'object' || payload === null) {
     throw new Error('codex reset credits returned no object')
   }
@@ -601,7 +598,7 @@ function soonestAvailableCreditExpiry(list: ResetCreditList, now = Date.now()): 
   return soonest
 }
 
-export const CODEX_MODELS_URL = 'https://chatgpt.com/backend-api/codex/models'
+const CODEX_MODELS_URL = 'https://chatgpt.com/backend-api/codex/models'
 
 /**
  * Client version sent on the /models catalog request. The backend gates the
@@ -724,7 +721,7 @@ export async function fetchCodexModels(
 }
 
 /** Constructor dependencies for {@link CodexAdapter}. */
-export interface CodexAdapterOptions {
+interface CodexAdapterOptions {
   /** Catalog compatibility version; defaults to the verified stable CLI version. */
   clientVersion?: string
   /** Automatic lookup used only when no explicit compatibility version is set. */
@@ -848,8 +845,8 @@ export function codexRequestBody(
 }
 
 /** Codex wire adapter: one instance serves the `codex` provider route. */
-export class CodexAdapter extends LlmAdapter {
-  private readonly catalogs: ProviderCatalog
+export class CodexAdapter extends PoolBackedAdapter {
+  protected readonly catalogs: ProviderCatalog
   /**
    * Completed reasoning captured off the response stream, replayed on the next
    * request of the same conversation: the codex backend returns an encrypted
@@ -862,7 +859,7 @@ export class CodexAdapter extends LlmAdapter {
   private readonly replay = new ReasoningReplayStore()
 
   constructor(private readonly options: CodexAdapterOptions) {
-    super()
+    super(options)
     codexClientVersion(options.clientVersion)
     this.catalogs = new ProviderCatalog(options, 'codex', {
       staticRows: provider => this.staticModels(provider),
@@ -925,15 +922,6 @@ export class CodexAdapter extends LlmAdapter {
     })
   }
 
-  override async listModels(provider: string): Promise<readonly LlmModelInfo[]> {
-    return withPoolTiers(await this.listOwnModels(provider), this.options.pool?.(), provider)
-  }
-
-  /** The provider's own catalog: union of every account, or one account when named. */
-  async listOwnModels(provider: string, account?: string, signal?: AbortSignal): Promise<readonly LlmModelInfo[]> {
-    return this.catalogs.list(provider, account, signal)
-  }
-
   /**
    * The discovered entry for one model. Resolved through the cache's
    * stale-while-revalidate path so capability metadata stays stable across a
@@ -984,14 +972,6 @@ export class CodexAdapter extends LlmAdapter {
     return ids
   }
 
-  override async resolveModel(provider: string, model: string): Promise<LlmResolvedModelInfo> {
-    const pool = this.options.pool?.()
-    if (pool !== undefined && await pool.owns(provider as ProviderId, model)) {
-      return pool.resolveModel(provider, model)
-    }
-    return this.resolveOwnModel(provider, model)
-  }
-
   /** Capability resolution of the provider's own models (the pool resolves members here). */
   async resolveOwnModel(provider: string, model: string, account?: string): Promise<LlmResolvedModelInfo> {
     // Discovered metadata (when discovery is on) wins over the static entry;
@@ -1033,21 +1013,7 @@ export class CodexAdapter extends LlmAdapter {
     return Math.min(this.options.contextWindowOf?.(model) ?? limits.default, limits.max)
   }
 
-  async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
-    const pool = this.options.pool?.()
-    if (pool !== undefined && await pool.owns(options.provider as ProviderId, options.model)) {
-      yield* pool.stream(options)
-      return
-    }
-    yield* this.streamCore(options)
-  }
-
-  /** Pool seam: stream through one specific account instead of the default. */
-  streamAccount(options: GenerateOptions, account: string): AsyncIterable<StreamChunk> {
-    return this.streamCore(options, account)
-  }
-
-  private async *streamCore(options: GenerateOptions, account?: string): AsyncIterable<StreamChunk> {
+  protected async *streamOwn(options: GenerateOptions, account?: string): AsyncIterable<StreamChunk> {
     const watchdog = idleWatchdog(options.signal, this.options.streamIdleTimeoutMs)
     try {
       const key = account ?? await this.options.tokens.defaultAccount()

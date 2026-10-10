@@ -23,7 +23,7 @@ import type { CatalogPersistence, CatalogSnapshot, DiscoveredModel } from './com
  * Absolute path of the catalog store file.
  * @returns `dshHomePath('plugins', 'subscriptions', 'models.json')`.
  */
-export function modelsFilePath(): string {
+function modelsFilePath(): string {
   return dshHomePath('plugins', 'subscriptions', 'models.json')
 }
 

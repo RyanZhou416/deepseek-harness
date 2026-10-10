@@ -28,7 +28,7 @@ import { hostClaudeRoute, hostProxyForScheme, isClaudeEgressDestination, describ
 const dispatchFetch = undiciFetch as unknown as typeof fetch
 
 /** Stored proxy configuration (the proxy.json shape). */
-export interface ProxyConfig {
+interface ProxyConfig {
   /** Whether outbound subscription requests route through {@link url}. */
   enabled: boolean
   /** Proxy origin: `http://host:port` or `https://host:port`. */
@@ -85,9 +85,9 @@ export interface ProxyDraft {
 }
 
 /** Destination the `proxyTest` endpoint probes when none is given. */
-export const DEFAULT_PROXY_TEST_URL = 'https://api.x.ai/v1/models'
+const DEFAULT_PROXY_TEST_URL = 'https://api.x.ai/v1/models'
 /** Probe deadline; a hung proxy must not pin the Settings dialog forever. */
-export const DEFAULT_PROXY_TEST_TIMEOUT_MS = 15_000
+const DEFAULT_PROXY_TEST_TIMEOUT_MS = 15_000
 
 /**
  * Destinations the `proxyTest` probe accepts: the API hosts this plugin's own traffic
@@ -152,7 +152,7 @@ let configError: string | undefined
 let ready: Promise<ProxyConfig> | undefined
 
 /** Absolute path of the proxy config file. */
-export function proxyFilePath(): string {
+function proxyFilePath(): string {
   return dshHomePath('plugins', 'subscriptions', 'proxy.json')
 }
 
@@ -168,7 +168,7 @@ function errorMessage(error: unknown): string {
  * 127.0.0.1) fails as an `AggregateError` with an empty message, so its
  * per-address `errors` entries are folded in too.
  */
-export function describeFetchError(error: unknown): string {
+function describeFetchError(error: unknown): string {
   const parts: string[] = []
   let node: unknown = error
   for (let depth = 0; depth < 4 && node !== undefined && node !== null; depth += 1) {
@@ -203,7 +203,7 @@ function withError(error: unknown): void {
  * @param raw - the URL the user configured.
  * @returns the parsed URL (credentials attached by the caller).
  */
-export function parseProxyUrl(raw: string): URL {
+function parseProxyUrl(raw: string): URL {
   let url: URL
   try {
     url = new URL(raw)
@@ -223,7 +223,7 @@ export function parseProxyUrl(raw: string): URL {
  * @param entries - configured bypass entries: exact host, plain suffix
  *   (`example.com` also matches `api.example.com`), or `*.example.com`.
  */
-export function matchesBypass(hostname: string, entries: readonly string[]): boolean {
+function matchesBypass(hostname: string, entries: readonly string[]): boolean {
   const host = hostname.toLowerCase()
   for (const raw of entries) {
     let entry = raw.trim().toLowerCase()

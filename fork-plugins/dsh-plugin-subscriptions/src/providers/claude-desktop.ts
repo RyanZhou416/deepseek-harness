@@ -42,7 +42,7 @@ const CLIENT_APP = 'com.anthropic.claudefordesktop'
 const PLAUSIBLE_MEMORY_GB = [8, 16, 16, 16, 32] as const
 
 /** The machine values the desktop declares, as one self-consistent pair. */
-export interface DesktopMachineProfile {
+interface DesktopMachineProfile {
   /** Total physical memory in gigabytes, as the desktop rounds it. */
   readonly totalMemoryGb: number
   /** Memory bucket that size falls in, computed as the desktop computes it. */

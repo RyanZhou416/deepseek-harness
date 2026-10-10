@@ -12,13 +12,17 @@ import { createHash } from 'node:crypto'
 import {
   CLAUDE_CODE_2_1_288_PROFILE,
   ClaudeCodeWireError,
+  BETA_REGISTRY_2_1_288,
 } from '@tormentalabs/claude-code-wire-compat'
+import type { ContextManagementConfig } from '@tormentalabs/claude-code-wire-compat'
 import { IMAGE_OFFLOAD_REQUIRED_CODE, LlmError, ToolCallId } from '@deepseek-ai/dsh-llm'
 import type { GenerateOptions } from '@deepseek-ai/dsh-llm'
 import {
+  assertContextManagementBeta,
   boundedTwoLevelMap,
   buildClaudeWireRequest,
   CLAUDE_USER_AGENT,
+  claudeRequestClass,
   claudeWireSessionId,
   mapClaudeWireError,
   rememberClaudeRequestId,
@@ -203,6 +207,46 @@ test('the prompt id and request class ride the headers the client sends them on'
   // One value, two carriers: the header and the billing segment agree.
   assert.equal(headers.get('x-claude-code-prompt-id'), promptId)
   assert.equal(headers.get('x-claude-code-request-class'), 'main')
+})
+
+test('the request class follows the call kind the caller stated', async () => {
+  const account = session()
+  const compaction = await buildClaudeWireRequest(
+    { ...options(), purpose: 'compaction' },
+    account, history(), 32_000, undefined, undefined, wireSessionId('sess-class-compaction'), ACCOUNT,
+  )
+  assert.equal(headerMap(compaction).get('x-claude-code-request-class'), 'compaction')
+  const title = await buildClaudeWireRequest(
+    { ...options(), purpose: 'session-title' },
+    account, history(), 32_000, undefined, undefined, wireSessionId('sess-class-title'), ACCOUNT,
+  )
+  assert.equal(headerMap(title).get('x-claude-code-request-class'), 'auxiliary')
+  // An unstated purpose is the conversation's own Messages request.
+  assert.equal(claudeRequestClass(undefined), 'main')
+})
+
+test('the context-management field and the beta that declares it travel together', async () => {
+  const plan: ContextManagementConfig = { edits: [{ type: 'clear_thinking_20251015', keep: 'all' }] }
+  const built = await buildClaudeWireRequest(
+    options({ model: 'claude-opus-5' }),
+    session(), history(), 32_000, { type: 'adaptive' }, undefined,
+    wireSessionId('sess-context-management'), ACCOUNT, undefined, plan,
+  )
+  assert.deepEqual(parseBody(built).context_management, plan)
+  const beta = headerMap(built).get('anthropic-beta') ?? ''
+  assert.ok(
+    beta.split(',').map(value => value.trim()).includes(BETA_REGISTRY_2_1_288.CONTEXT_MANAGEMENT.header),
+    'the field is declared by its beta',
+  )
+  // The assertion is what holds the two together: a built request whose body states the field
+  // and whose header has lost the beta is refused rather than sent.
+  const withoutBeta = { ...built, headers: built.headers.filter(([name]) => name.toLowerCase() !== 'anthropic-beta') }
+  assert.throws(
+    () => { assertContextManagementBeta(withoutBeta, true) },
+    /context_management without the context-management-2025-06-27 beta header/,
+  )
+  // A request that states no edits is not required to carry the beta, so its absence is no fault.
+  assert.doesNotThrow(() => { assertContextManagementBeta(withoutBeta, false) })
 })
 
 test('body carries stream, cache breakpoints, name-ordered tools, thinking and effort', async () => {

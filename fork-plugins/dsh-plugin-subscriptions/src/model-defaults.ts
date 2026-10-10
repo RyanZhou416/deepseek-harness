@@ -22,9 +22,9 @@ import { dshHomePath } from '@deepseek-ai/dsh-home-paths'
 import { PROVIDER_IDS, type ProviderId } from './auth/store.js'
 
 /** One model id → its configured default reasoning effort id. */
-export type ModelDefaultMap = Readonly<Record<string, string>>
+type ModelDefaultMap = Readonly<Record<string, string>>
 /** Provider route → model defaults. */
-export type ModelDefaults = Readonly<Partial<Record<ProviderId, ModelDefaultMap>>>
+type ModelDefaults = Readonly<Partial<Record<ProviderId, ModelDefaultMap>>>
 
 /** Absolute path of the defaults file. */
 export function modelDefaultsFilePath(): string {

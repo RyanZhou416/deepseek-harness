@@ -7,7 +7,7 @@ export const TOOL_ALIASES = {
   image_generate: 'dsh_subscriptions_image_generate',
 } as const
 
-export interface ToolRegistry {
+interface ToolRegistry {
   register(definition: ToolDefinition): () => void
 }
 

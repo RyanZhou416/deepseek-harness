@@ -29,7 +29,7 @@ import { FrameDecoder, encodeBody, encodeControl, type Frame } from './frames.js
  * the caller on a different runtime would name the wrong runtime on the wire.
  * The spelling is the SDK's, which is what reaches the peer.
  */
-export const RUNTIME_VERSION_HEADER = 'X-Stainless-Runtime-Version'
+const RUNTIME_VERSION_HEADER = 'X-Stainless-Runtime-Version'
 
 interface StreamState {
   readonly streamId: string

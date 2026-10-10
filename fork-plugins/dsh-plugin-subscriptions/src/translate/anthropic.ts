@@ -54,7 +54,7 @@ import type { ResolvedToolResultBlock, TranslatableMessage } from './resolved.js
 export // The genuine client substitutes this when stripping blank text leaves a message empty.
 const NO_CONTENT_TEXT = '(no content)'
 const SYSTEM_REMINDER_OPEN = '<system-reminder>'
-export const SYSTEM_REMINDER_CLOSE = '</system-reminder>'
+const SYSTEM_REMINDER_CLOSE = '</system-reminder>'
 
 /**
  * The genuine client's own text for the `tool_result` it synthesizes when a
@@ -66,7 +66,7 @@ export const MISSING_TOOL_RESULT_TEXT = '[Tool result missing due to internal er
  * One Anthropic request message. The Claude Code identity and billing blocks
  * are emitted by the wire builder, never here.
  */
-export interface AnthropicMessage {
+interface AnthropicMessage {
   role: 'user' | 'assistant' | 'system'
   /**
    * A mid-conversation system message carries its text as a plain string, which is what
@@ -81,7 +81,7 @@ export interface AnthropicMessage {
  * Image source. Under the vision limit this is base64; a Files API upload
  * uses the documented `{ type: "file", file_id }` source.
  */
-export function anthropicImageSource(part: { mediaType: string; dataBase64: string; fileId?: string }): WireImageBlock['source'] {
+function anthropicImageSource(part: { mediaType: string; dataBase64: string; fileId?: string }): WireImageBlock['source'] {
   if (part.fileId !== undefined && part.fileId.length > 0) return { type: 'file', file_id: part.fileId }
   // The attachment service verifies the MIME type; the wire validator narrows
   // it to the four image media types the API accepts.
@@ -540,7 +540,7 @@ export function toAnthropicSystem(system?: string, messages?: readonly Translata
  * defer_loading}` entry a caller could declare for itself. The description is
  * the client's own text, and the empty object schema is what it declares.
  */
-export const DEFERRED_TOOL_PLACEHOLDER = {
+const DEFERRED_TOOL_PLACEHOLDER = {
   name: 'DeferredToolPlaceholder',
   description: 'Reserved placeholder that keeps deferred tool loading active; never call this tool.',
   input_schema: { type: 'object', properties: {} },
@@ -587,7 +587,7 @@ interface AnthropicUsage {
  * Present only while the context-management beta is active and only when an edit ran, so an
  * absent field means the server applied nothing.
  */
-export interface AnthropicContextManagement {
+interface AnthropicContextManagement {
   readonly applied_edits?: readonly {
     readonly type?: string
     readonly cleared_tool_uses?: number
@@ -716,7 +716,7 @@ const REFUSAL_BEARING_ERROR_TYPES: ReadonlySet<string> = new Set([
  *   response it arrived on.
  * @returns the mapped error.
  */
-export function anthropicFailure(
+function anthropicFailure(
   error: { type?: string; message?: string } | undefined,
   isRefusal?: AnthropicRefusalProbe,
 ): LlmError {

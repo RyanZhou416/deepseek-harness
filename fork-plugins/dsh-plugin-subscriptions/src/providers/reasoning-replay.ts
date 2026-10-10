@@ -25,7 +25,7 @@ import type { ReasoningReplayItem, ResponsesStreamEvent } from '../translate/res
  * @param item - the `item` payload of one `response.output_item.done` event.
  * @returns the replayable item, or undefined when the payload cannot be replayed.
  */
-export function completedReasoningItem(
+function completedReasoningItem(
   item: NonNullable<ResponsesStreamEvent['item']>,
 ): ReasoningReplayItem | undefined {
   if (typeof item.encrypted_content !== 'string' || item.encrypted_content.length === 0) return undefined

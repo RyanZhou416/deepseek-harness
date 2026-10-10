@@ -7,7 +7,7 @@
  */
 
 /** One parsed SSE event. */
-export interface SseEvent {
+interface SseEvent {
   /** Joined `data:` lines of the event. */
   data: string
   /** The `event:` field, when present. */

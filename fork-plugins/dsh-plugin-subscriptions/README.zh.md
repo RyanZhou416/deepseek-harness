@@ -83,7 +83,7 @@ Codex 编辑走 `/backend-api/codex/images/edits`，Grok 编辑走 `/v1/images/e
 
 ### DSH 兼容性
 
-本 fork 离线包 `0.9.4-dsh017rc1.16` 固定适配 DSH `0.1.7-rc.1` 和 Cordis `4.0.4`。其 V4 工具消息转换、固定到 Claude Code 2.1.288 的 wire 与界面已针对这一确切版本组合构建、测试；不要安装到旧版 DSH profile。上游公开的 `0.9.4` 包声明了更宽的 peer 范围，但不适用于这个私有离线包。
+本 fork 离线包 `0.9.4-dsh017rc1.17` 固定适配 DSH `0.1.7-rc.1` 和 Cordis `4.0.4`。其 V4 工具消息转换、固定到 Claude Code 2.1.288 的 wire 与界面已针对这一确切版本组合构建、测试；不要安装到旧版 DSH profile。上游公开的 `0.9.4` 包声明了更宽的 peer 范围，但不适用于这个私有离线包。
 
 ### 管理账号与 Pool 模型
 
@@ -163,6 +163,8 @@ GitHub 安装的:重新执行一遍 `add github:V1ki/dsh-plugin-subscriptions` �
 
 Codex 模型还可填写上下文 token 数，留空跟随服务商。插件读取每个账号的 `context_window` 与 `max_context_window`，实际使用 `min(配置值, 账号最大值)`；未返回最大值时，保守地以上下文默认值为上限。账号池按实际成员分别解析并取最小窗口。这只调整 DSH 的本地上下文预算与压缩时机，不向 API 发送扩大容量的参数。更长的上下文可能增加响应延迟。
 
+Claude 模型没有上下文预算字段：模型选择器直接报告模型自身的容量 —— 文档点名的模型取自 Claude API 文档（当前为 1M 上下文 / 128K 输出，`claude-haiku-4-5` 是唯一的 200K / 64K 条目），其余模型取自锁定的 Claude Code 目录。文档中的 1M 窗口若无法用普通模型 ID 触达，则不予报告：`claude-sonnet-4-6` 与 `claude-opus-4-6` 只有在 `context-1m-2025-08-07` beta 下才接受一百万 token，而本路由从不组合该 beta，因此两者报告目录的 200K 窗口。目录窗口即 Claude Code 客户端自身压缩所用的窗口，可能小于模型上限；两个来源都未点名的模型回退为保守的 200K 上下文与 32K 输出上限。
+
 同一区块可开关 Codex 的图片生成，以及 Grok 的图片生成、视频生成和 X 搜索。工具策略只影响保存后新建的会话；已有会话及其重启后的恢复保留创建时的策略。图片生成是共享工具，只有 Codex 与 Grok 均关闭或未配置时才完全隐藏；调用时也不会回退到该会话已禁用的 provider。Claude 和 Copilot 当前没有本插件提供的独立工具开关。
 
 设置和工具策略历史独立存于 `~/.dsh/plugins/subscriptions/provider-settings.json`（权限 0600），不受五分钟模型发现缓存过期影响。原有非空 `models.<provider>` 配置仍决定基础目录；界面显示选择在该目录上生效。
@@ -196,7 +198,7 @@ Codex 模型还可填写上下文 token 数，留空跟随服务商。插件读�
 responses-only 系列（gpt-5.5/5.6 等）会拒绝该端点。固定为 `chat-completions` 也会退出上文所述
 tools+effort 的自动改道。
 
-Antigravity 已内置 [pi-antigravity 使用的公开桌面 OAuth 客户端配置](https://github.com/Rahularya01/pi-antigravity/blob/697858cafcf1faddf2ae898d2f053b2ff26c05e6/SECURITY.md#oauth-client-credentials)，无需额外配置客户端即可点击「登录」进入 Google 授权。使用自定义客户端时，可配置 `antigravity.clientId` 及其可选的 `antigravity.clientSecret`，或设置 `ANTIGRAVITY_CLIENT_ID` 及其可选的 `ANTIGRAVITY_CLIENT_SECRET`。优先级为插件配置、环境变量、内置默认值；ID 和 secret 按同一来源成对读取，自定义 ID 不会继承默认 secret，单独提供 secret 会报错。可选的 `antigravity.baseURL`、`antigravity.userAgent` 和 `antigravity.onboard` 分别控制 API 地址、客户端标识和账号初始化。此路由使用 Antigravity OAuth 与 v1internal 项目封装，独立于 Gemini CLI。
+Antigravity 未内置 OAuth 客户端身份：需先设置 `antigravity.clientId` 及其可选的 `antigravity.clientSecret`，或 `ANTIGRAVITY_CLIENT_ID` 及其可选的 `ANTIGRAVITY_CLIENT_SECRET`，然后点击「登录」才能进入 Google 授权。插件配置优先于环境变量。ID 与 secret 必须来自同一来源：自定义 ID 不会继承其他来源的 secret，单独提供 secret 会报错。可选的 `antigravity.baseURL`、`antigravity.userAgent` 和 `antigravity.onboard` 分别控制 API 地址、客户端标识和账号初始化。此路由使用 Antigravity OAuth 与 v1internal 项目封装，独立于 Gemini CLI。
 
 Antigravity 为 Gemini 使用 `parametersJsonSchema`，为 Claude/GPT-OSS 使用兼容的 `parameters` 子集；本地 schema 引用会先展开，不修改 DSH 工具注册表。无法解析、循环引用及无法表达的自定义工具联合类型会在发送前报错。已识别的模型系列会在模型设置中提供推理等级，并转换为对应的推理预算；文本、推理和工具调用签名仅回放给相同 provider/model。兼容映射参考 [pi-antigravity](https://github.com/Rahularya01/pi-antigravity/tree/697858cafcf1faddf2ae898d2f053b2ff26c05e6)，离线测试不代表账号资格或在线 API 验收通过。
 

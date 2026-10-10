@@ -21,23 +21,23 @@ import type { FetchFn } from '../providers/common.js'
 import { proxiedFetch } from '../http.js'
 
 /** Endpoint the generation request is posted to. */
-export const VIDEO_GENERATE_URL = 'https://api.x.ai/v1/videos/generations'
+const VIDEO_GENERATE_URL = 'https://api.x.ai/v1/videos/generations'
 /** The video model the grok subscription endpoint serves. */
-export const VIDEO_GENERATE_MODEL = 'grok-imagine-video-1.5'
+const VIDEO_GENERATE_MODEL = 'grok-imagine-video-1.5'
 /** Polling endpoint for one generation request. */
-export function videoStatusUrl(requestId: string): string {
+function videoStatusUrl(requestId: string): string {
   return `https://api.x.ai/v1/videos/${encodeURIComponent(requestId)}`
 }
 
 /** Default delay between two status polls. */
-export const DEFAULT_POLL_INTERVAL_MS = 3_000
+const DEFAULT_POLL_INTERVAL_MS = 3_000
 /** Default overall deadline for one generation (submit → done). */
-export const DEFAULT_MAX_WAIT_MS = 10 * 60_000
+const DEFAULT_MAX_WAIT_MS = 10 * 60_000
 /** xAI's supported clip length range in seconds. */
 const DURATION_RANGE = { min: 1, max: 15 } as const
 
 /** Dependencies of the `video_generate` tool. */
-export interface VideoGenerateToolOptions {
+interface VideoGenerateToolOptions {
   /** Grok session source; a missing session throws the log-in hint. */
   tokens: AccountTokenManager<GrokSession>
   /** Fetch implementation (injectable for tests). */
@@ -51,7 +51,7 @@ export interface VideoGenerateToolOptions {
 }
 
 /** The wire request body for one generation call. */
-export interface VideoGenerateRequestBody {
+interface VideoGenerateRequestBody {
   prompt: string
   model: string
   duration?: number
@@ -107,7 +107,7 @@ export function parseVideoStartResponse(payload: unknown): string {
 }
 
 /** One decoded poll response. */
-export type VideoStatus =
+type VideoStatus =
   | { status: 'pending' }
   | { status: 'done'; url: string; duration?: number }
   | { status: 'failed' | 'expired'; detail?: string }

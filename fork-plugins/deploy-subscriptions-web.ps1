@@ -9,13 +9,13 @@
 # store under DSH_HOME\plugins\subscriptions.
 #
 # Usage:  powershell -ExecutionPolicy Bypass -File .\deploy-subscriptions-web.ps1
-#         powershell -ExecutionPolicy Bypass -File .\deploy-subscriptions-web.ps1 -Version 0.9.4-dsh017rc1.16
+#         powershell -ExecutionPolicy Bypass -File .\deploy-subscriptions-web.ps1 -Version 0.9.4-dsh017rc1.17
 # Rollback (after stopping the Host again):
-#         corepack pnpm@11.7.0 add "dsh-plugin-subscriptions@file:C:/Project/deepseek-harness/fork-plugins/releases/dsh-plugin-subscriptions-0.9.4-dsh017rc1.14.tgz"
+#         corepack pnpm@11.7.0 add "dsh-plugin-subscriptions@file:C:/Project/deepseek-harness/fork-plugins/releases/dsh-plugin-subscriptions-0.9.4-dsh017rc1.16.tgz"
 #         (from C:\Project\deepseek-harness-data\profiles\web; or restore the backup directory printed below)
 
 param(
-  [string]$Version = '0.9.4-dsh017rc1.16',
+  [string]$Version = '0.9.4-dsh017rc1.17',
   [int]$HostPort = 3080,
   [switch]$SkipHostCheck
 )

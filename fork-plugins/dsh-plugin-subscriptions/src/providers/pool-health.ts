@@ -87,7 +87,7 @@ export function isAuthCooldownReason(reason: string): boolean {
 }
 
 /** What the pool should do with a member that just failed. */
-export type PoolFailureAction =
+type PoolFailureAction =
   /** Park the failing member or account, then try the next one. */
   | { action: 'switch'; cooldownMs: number; reason: string; scope: PoolFailureScope }
   /** Try the next member without recording anything about this one. */
@@ -176,7 +176,7 @@ export function classifyPoolFailure(error: unknown, provider: ProviderId): PoolF
 }
 
 /** One parked account or member: how long it sits out, and the failure code that parked it. */
-export interface HealthRecord {
+interface HealthRecord {
   unavailableUntil: number
   reason: string
 }

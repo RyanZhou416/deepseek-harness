@@ -54,7 +54,7 @@ export interface AccountAwareAdapter extends LlmAdapter {
 }
 
 /** Options for {@link unionAccountCatalogs}. */
-export interface UnionAccountCatalogsOptions {
+interface UnionAccountCatalogsOptions {
   /** Per-account bound; a hang sits that account out instead of blocking the picker. */
   timeoutMs?: number
   /** Caller cancellation; aborting drops the whole union. */
@@ -112,7 +112,7 @@ export async function unionAccountCatalogs(
 }
 
 /** Store I/O behind {@link AccountTokenManager} (injectable for tests). */
-export interface AccountStoreIo<S> {
+interface AccountStoreIo<S> {
   list(): Promise<AccountEntry<S>[]>
   get(account?: string): Promise<S | undefined>
   save(account: string, session: S, expectedPrior?: S): Promise<void>
@@ -121,7 +121,7 @@ export interface AccountStoreIo<S> {
   resolve?(account: string): Promise<string>
 }
 
-export interface AccountTokenManagerOptions<S extends TimedSession> {
+interface AccountTokenManagerOptions<S extends TimedSession> {
   provider: ProviderId
   /** Human-readable provider name for error messages. */
   displayName: string

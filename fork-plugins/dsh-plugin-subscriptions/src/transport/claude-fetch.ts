@@ -22,7 +22,7 @@ import { resolveBunRuntime } from './bun-runtime.js'
 import { describeHostClaudeRoute, hostClaudeRoute } from './host-egress.js'
 
 /** Environment variable that turns the bridge off. */
-export const BRIDGE_SWITCH_ENV = 'DSH_SUBSCRIPTIONS_BRIDGE'
+const BRIDGE_SWITCH_ENV = 'DSH_SUBSCRIPTIONS_BRIDGE'
 
 /** Host and path whose traffic the bridge carries, and nothing else. */
 const CLAUDE_MESSAGES_HOST = 'api.anthropic.com'

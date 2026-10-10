@@ -28,7 +28,7 @@ export interface SpeedState {
 }
 
 /** What {@link SpeedSelect} renders from: visibility plus the current tier. */
-export interface SpeedSelectState {
+interface SpeedSelectState {
   visible: boolean
   tier: SpeedTier
 }

@@ -10,31 +10,18 @@
  *
  * The 'tool.call.toolview' slot contract is owned by ui-tool
  * (packages/client/ui-tool/src/client/contract/slots.ts), which this package
- * does not resolve; the SlotMap merge and ToolCallOwnerProps below mirror it
- * structurally (same discipline as platform-modules.d.ts).
+ * does not resolve; the SlotMap merge here and the shared ToolCallOwnerProps
+ * in format.ts mirror it structurally (same discipline as
+ * platform-modules.d.ts).
  */
-import type { CSSProperties } from 'react'
 import type { ConnectionHandle } from '@deepseek-ai/dsh-api-remotes/client'
 import type { ToolCallBlock } from '@deepseek-ai/dsh-client-ui-conversation/client'
 import { IconSparkleRegular } from '@deepseek-ai/dsh-client-ui-primitives'
 import { ImageGallery } from './ImageGallery.js'
 import type { ImageAttachmentRef, ImageLoader, MessageImageLabels } from './ImageGallery.js'
 import { callSubscriptionsAuth } from './subscriptions-rpc.js'
-import { en } from './locales.js'
-import type { SubscriptionsKey } from './locales.js'
-
-/** Title prompt truncation budget (characters). */
-const PROMPT_MAX_LENGTH = 60
-
-/** Mirror of ui-tool's ToolCallOwnerProps (see the module header). */
-interface ToolCallOwnerProps {
-  callId: string
-  toolName: string
-  block: ToolCallBlock
-  cwd?: string | undefined
-  openFile: (path: string) => void
-  inspect?: (() => void) | undefined
-}
+import { derivePrompt, fallbackTranslate, resultText, toolviewStyles } from './format.js'
+import type { SubscriptionsTranslate, ToolCallOwnerProps } from './format.js'
 
 declare module '@deepseek-ai/dsh-client-ui-slots' {
   interface SlotMap {
@@ -56,7 +43,7 @@ export interface ImageGenerateToolviewInjected {
 export type ImageGenerateToolviewProps =
   Partial<ToolCallOwnerProps>
   & Partial<ImageGenerateToolviewInjected>
-  & { t?: ((key: SubscriptionsKey, params?: Record<string, unknown>) => string) | undefined }
+  & { t?: SubscriptionsTranslate | undefined }
 
 /** `image` endpoint result: the node half owns this shape. */
 interface ImageEndpointResult {
@@ -77,55 +64,6 @@ export function createImageLoader(rpc: ConnectionHandle['rpc']): ImageLoader {
       .then(result => `data:${result.mediaType};base64,${result.dataBase64}`)
 }
 
-/**
- * English-dictionary fallback for a missing locale seat (standalone renders);
- * the framework always supplies the namespace-bound one.
- * @param key - dictionary key.
- * @param params - `{name}` template params.
- * @returns the template with params substituted.
- */
-function fallbackTranslate(key: SubscriptionsKey, params?: Record<string, unknown>): string {
-  let text: string = en[key]
-  for (const [name, value] of Object.entries(params ?? {})) {
-    text = text.replaceAll(`{${name}}`, String(value))
-  }
-  return text
-}
-
-/** Extract the prompt from the call's raw args JSON; falls back to the first string value, then the raw line. */
-function derivePrompt(argsRaw: string): string {
-  let parsed: unknown
-  try {
-    parsed = JSON.parse(argsRaw)
-  } catch {
-    // Non-JSON args (mid-stream truncation): fall back to the raw string below.
-    parsed = undefined
-  }
-  let prompt: string | undefined
-  if (typeof parsed === 'object' && parsed !== null) {
-    const args = parsed as Record<string, unknown>
-    if (typeof args.prompt === 'string' && args.prompt !== '') prompt = args.prompt
-    else {
-      for (const value of Object.values(args)) {
-        if (typeof value === 'string' && value !== '') { prompt = value; break }
-      }
-    }
-  }
-  const line = (prompt ?? argsRaw).split('\n', 1)[0] ?? ''
-  return line.length > PROMPT_MAX_LENGTH ? `${line.slice(0, PROMPT_MAX_LENGTH)}…` : line
-}
-
-/** Flatten a settled result's text blocks (the degraded text-only route and the error line). */
-function resultText(block: ToolCallBlock): string {
-  if (!('kind' in block)) return ''
-  const parts: string[] = []
-  for (const part of block.content) {
-    if (part.type === 'text') parts.push(part.text)
-  }
-  if (parts.length === 0 && block.error !== undefined) parts.push(`${block.error.name}: ${block.error.code}`)
-  return parts.join('\n')
-}
-
 /** Image attachments of a settled result; empty while running or on the text-only route. */
 function resultImages(block: ToolCallBlock): { attachment: ImageAttachmentRef }[] {
   if (!('kind' in block)) return []
@@ -134,22 +72,6 @@ function resultImages(block: ToolCallBlock): { attachment: ImageAttachmentRef }[
     if (part.type === 'image') images.push({ attachment: part.attachment as ImageAttachmentRef })
   }
   return images
-}
-
-const styles: Record<string, CSSProperties> = {
-  container: { display: 'flex', flexDirection: 'column', gap: 6, padding: '4px 0' },
-  row: { display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 },
-  icon: { display: 'inline-flex', flexShrink: 0, color: 'var(--dsw-alias-label-tertiary)' },
-  title: {
-    fontSize: 13, lineHeight: '20px', color: 'var(--dsw-alias-label-primary)',
-    overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
-  },
-  subtle: { margin: 0, fontSize: 12, lineHeight: '18px', color: 'var(--dsw-alias-label-tertiary)' },
-  output: {
-    margin: 0, fontSize: 12, lineHeight: '18px', color: 'var(--dsw-alias-label-secondary)',
-    whiteSpace: 'pre-wrap', overflowWrap: 'anywhere',
-  },
-  error: { margin: 0, fontSize: 12, lineHeight: '18px', color: 'var(--dsw-alias-state-error-primary)' },
 }
 
 /**
@@ -183,20 +105,20 @@ export function ImageGenerateToolview(props: ImageGenerateToolviewProps) {
     lightbox: { dialog: t('imagePreview'), close: t('imageClose') },
   }
   return (
-    <div style={styles.container}>
-      <div style={styles.row}>
-        <span style={styles.icon}><IconSparkleRegular size={14} /></span>
-        <span style={styles.title}>{title}</span>
+    <div style={toolviewStyles.container}>
+      <div style={toolviewStyles.row}>
+        <span style={toolviewStyles.icon}><IconSparkleRegular size={14} /></span>
+        <span style={toolviewStyles.title}>{title}</span>
       </div>
-      {!settled && <p style={styles.subtle}>{t('generating')}</p>}
+      {!settled && <p style={toolviewStyles.subtle}>{t('generating')}</p>}
       {settled && block.isError && text !== '' && (
-        <p style={styles.error}>{text.split('\n', 1)[0]}</p>
+        <p style={toolviewStyles.error}>{text.split('\n', 1)[0]}</p>
       )}
       {settled && !block.isError && images.length > 0 && load !== undefined && (
         <ImageGallery images={images} load={load} labels={labels} />
       )}
       {settled && !block.isError && images.length === 0 && text !== '' && (
-        <p style={styles.output}>{text}</p>
+        <p style={toolviewStyles.output}>{text}</p>
       )}
     </div>
   )

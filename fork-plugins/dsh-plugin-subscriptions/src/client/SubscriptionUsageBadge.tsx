@@ -60,7 +60,7 @@ export type SubscriptionUsageBadgeProps = PropsRuntime<'conversation.composer.do
   & Partial<PropsLocale<'settings.subscriptions'>>
 
 /** One logged-in account's usage windows, as listed in the expanded dialog. */
-export interface AccountUsageDisplay {
+interface AccountUsageDisplay {
   /** Account key (the `usage` endpoint's `account` argument). */
   key: string
   /** Display handle (email / login), when the provider reports one. */
@@ -82,7 +82,7 @@ export interface ProviderUsageDisplay {
 }
 
 /** The account the collapsed pill reads: the default one, else the first listed. */
-export function pillAccountOf(d: ProviderUsageDisplay): AccountUsageDisplay {
+function pillAccountOf(d: ProviderUsageDisplay): AccountUsageDisplay {
   return d.accounts.find(a => a.isDefault) ?? d.accounts[0]!
 }
 
@@ -148,7 +148,7 @@ function usedPercent(w: UsageWindow): number {
 }
 
 /** Keep model quotas separate: matching percentages do not imply a shared pool. */
-export function prioritizeWindows(windows: readonly UsageWindow[], model?: string): UsageWindow[] {
+function prioritizeWindows(windows: readonly UsageWindow[], model?: string): UsageWindow[] {
   return model === undefined ? [...windows] : [
     ...windows.filter(w => w.scope === model),
     ...windows.filter(w => w.scope !== model),
@@ -156,7 +156,7 @@ export function prioritizeWindows(windows: readonly UsageWindow[], model?: strin
 }
 
 /** Small previews keep a live model catalog from taking over the dialog. */
-export const WINDOW_PREVIEW_LIMIT = 4
+const WINDOW_PREVIEW_LIMIT = 4
 export function previewWindows(windows: readonly UsageWindow[], model?: string) {
   const ordered = prioritizeWindows(windows, model)
   return { shown: ordered.slice(0, WINDOW_PREVIEW_LIMIT), hidden: ordered.slice(WINDOW_PREVIEW_LIMIT) }

@@ -134,7 +134,7 @@ function mergeIntoBlob(existingRaw: string, next: ClaudeSession): string | undef
  * @param expectedPriorAccessToken - the access token this refresh started from.
  * @returns whether the write-back succeeded.
  */
-export function writeBackClaudeCodeCredentials(next: ClaudeSession, expectedPriorAccessToken: string): boolean {
+function writeBackClaudeCodeCredentials(next: ClaudeSession, expectedPriorAccessToken: string): boolean {
   if (process.platform === 'darwin') {
     const raw = readKeychainRaw()
     if (raw === undefined || !blobMatches(raw, expectedPriorAccessToken)) return false

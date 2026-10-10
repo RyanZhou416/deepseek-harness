@@ -7,7 +7,7 @@ import { DISCOVERY_TIMEOUT_MS, withTimeout } from './common.js'
 import type { PoolAdapter } from './pool.js'
 
 /** Reserved namespace, recognized even when malformed or no longer enabled. */
-export const ACCOUNT_MODEL_PREFIX = '~account:'
+const ACCOUNT_MODEL_PREFIX = '~account:'
 export function accountModelId(account: string, model: string): string {
   return `${ACCOUNT_MODEL_PREFIX}${encodeURIComponent(account)}:${encodeURIComponent(model)}`
 }

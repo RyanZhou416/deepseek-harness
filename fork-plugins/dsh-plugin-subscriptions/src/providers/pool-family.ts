@@ -35,7 +35,7 @@ export interface PoolDefinition {
 }
 
 /** One account's catalog as seen through that account's credentials. */
-export interface AccountCatalog {
+interface AccountCatalog {
   account: string
   models: readonly LlmModelInfo[]
 }

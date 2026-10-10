@@ -7,14 +7,14 @@ import type { WebSearchProvider, WebSearchRequest, WebSearchResult, WebSearchSou
 import type { CodexSession } from '../auth/store.js'
 import type { AccountTokenManager } from '../providers/accounts.js'
 
-export const CODEX_SEARCH_PROVIDER_ID = 'codex'
+const CODEX_SEARCH_PROVIDER_ID = 'codex'
 export const CODEX_SEARCH_URL = 'https://chatgpt.com/backend-api/codex/alpha/search'
 export const CODEX_SEARCH_MODEL = 'gpt-5.6-terra'
 const MAX_ATTEMPTS = 5
 const MAX_RESPONSE_BYTES = 2 * 1024 * 1024
 const RETRY_BASE_MS = 100
 
-export interface CodexWebSearchOptions {
+interface CodexWebSearchOptions {
   tokens: Pick<AccountTokenManager<CodexSession>, 'session'>
   /**
    * Current state of the Codex `web_search` tool switch. Absent counts as

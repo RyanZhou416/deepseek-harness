@@ -162,7 +162,7 @@ export interface ChatCompletionsStreamEvent {
 }
 
 /** Chat completions `usage` object shape. */
-export interface ChatCompletionsUsage {
+interface ChatCompletionsUsage {
   prompt_tokens: number
   completion_tokens: number
   prompt_tokens_details?: { cached_tokens?: number }

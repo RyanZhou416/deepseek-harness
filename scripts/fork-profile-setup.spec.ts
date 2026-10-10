@@ -247,15 +247,30 @@ it('keeps each pinned release artifact present at the version its source manifes
   }
 })
 
-it('resolves the shipped wire compatibility pin from the plugin directory', () => {
+it('keeps the shipped wire compatibility pin resolvable from the installing consumer', () => {
   const directory = 'dsh-plugin-subscriptions'
   const dependencies = forkManifest(directory).dependencies as Record<string, string> | undefined
   const spec = dependencies?.['@tormentalabs/claude-code-wire-compat']
   if (spec === undefined) throw new Error(`${directory} does not pin @tormentalabs/claude-code-wire-compat`)
-  // pnpm reads a drive-letter `file:` spec as an absolute path on every
-  // platform, so an absolute pin names a path the macOS install cannot open.
-  expect(spec).toMatch(/^file:\.\.\/releases\/[\w.-]+\.tgz$/u)
-  expect(existsSync(resolve(repository, 'fork-plugins', directory, spec.slice('file:'.length)))).toBe(true)
+  // The pinned package is a dependency of the *packed* plugin, so pnpm resolves
+  // this specifier against the directory that installs the artifact — the
+  // consumer profile — and never against this checkout. A relative
+  // `file:../releases/...` therefore named a path beside the installing profile
+  // and made the artifact uninstallable, so the contract is an absolute `file:`
+  // reference to a tarball that exists here. The macOS install reaches this same
+  // artifact through `setup.command`, which cannot resolve a Windows absolute
+  // path; see fork-plugins/dsh-plugin-subscriptions/FORK_MAINTENANCE.md.
+  expect(spec).toMatch(/^file:.+\.tgz$/u)
+  const target = spec.slice('file:'.length)
+  expect(target, 'a pin relative to the installing profile cannot resolve').not.toMatch(/^\.\.?[\\/]/u)
+  expect(target, 'the pin must be absolute for the host that installs it')
+    .toMatch(/^(?:[A-Za-z]:[\\/]|[\\/])/u)
+  const shipped = basename(target)
+  expect(shipped).toMatch(/^tormentalabs-claude-code-wire-compat-[\w.-]+\.tgz$/u)
+  expect(existsSync(join(releases, shipped)), `releases/${shipped} is missing`).toBe(true)
+  if (process.platform === 'win32') {
+    expect(existsSync(target), `the absolute pin ${target} does not resolve on this host`).toBe(true)
+  }
 })
 
 it('rejects drift in artifacts, profile pins, patches, and composed config', () => {

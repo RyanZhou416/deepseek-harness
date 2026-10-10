@@ -13,7 +13,7 @@
 import type { SubscriptionProvider } from './SubscriptionsSection.js'
 
 /** The error lines recorded for one provider card. */
-export interface ProviderErrorLines {
+interface ProviderErrorLines {
   /** The status poll's line: set for every provider by a failed poll, cleared by a successful one. */
   poll?: string
   /** The action's line: set by the action that failed, cleared by the next action on that provider. */

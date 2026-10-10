@@ -161,10 +161,10 @@ export const name = 'dsh-plugin-subscriptions'
 export const inject = ['llm']
 
 /** Default maximum provider idle time while one stream read is outstanding. */
-export const DEFAULT_STREAM_IDLE_TIMEOUT_MS = 300_000
+const DEFAULT_STREAM_IDLE_TIMEOUT_MS = 300_000
 
 /** Bound on one pool quota poll — member selection must not hang on a usage endpoint. */
-export const POOL_USAGE_TIMEOUT_MS = DISCOVERY_TIMEOUT_MS
+const POOL_USAGE_TIMEOUT_MS = DISCOVERY_TIMEOUT_MS
 export { withTimeout } from './providers/common.js'
 
 /** Plugin config, validated by the same-named schemastery schema. */

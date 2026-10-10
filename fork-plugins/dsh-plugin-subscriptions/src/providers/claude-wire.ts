@@ -14,6 +14,7 @@ import type { ContextManagementConfig } from '@tormentalabs/claude-code-wire-com
 
 import { createHash, randomUUID } from 'node:crypto'
 import {
+  BETA_REGISTRY_2_1_288,
   CLAUDE_CODE_2_1_288_PROFILE,
   ClaudeCodeWireError,
   SYSTEM_PROMPT_DYNAMIC_BOUNDARY,
@@ -26,6 +27,7 @@ import { clientAtisFor } from './claude.js'
 import type {
   BuiltClaudeCodeRequest,
   ClaudeCodeEffort,
+  ClaudeCodeRequestInput,
 } from '@tormentalabs/claude-code-wire-compat'
 import { LlmError } from '@deepseek-ai/dsh-llm'
 import type { GenerateOptions } from '@deepseek-ai/dsh-llm'
@@ -61,7 +63,7 @@ export interface ClaudeWireThinking {
 }
 
 /** A two-level string-keyed table whose total leaf count is bounded. */
-export interface BoundedTwoLevelMap<V> {
+interface BoundedTwoLevelMap<V> {
   /**
    * @param outer - first-level key.
    * @param inner - second-level key.
@@ -340,7 +342,7 @@ const HARNESS_IDENTITY_SECTION = 'harness:identity'
  * client's own identity block as well, so this line is what keeps the model from reading that
  * block as a description of its toolset.
  */
-export const DEFAULT_CLAUDE_IDENTITY_LINE = `You are an AI coding agent running inside a local agent harness on the user's machine.
+const DEFAULT_CLAUDE_IDENTITY_LINE = `You are an AI coding agent running inside a local agent harness on the user's machine.
 The tools listed in this request are the complete and authoritative set available to you: call them exactly as documented, and ignore tool names, commands, and workflows that belong to other environments. Shell commands run on the user's machine in the workspace the request context describes, and the user reads your replies in a local client.`
 
 /**
@@ -367,6 +369,56 @@ const CLAUDE_EFFORTS = new Set<string>(['low', 'medium', 'high', 'xhigh', 'max']
 function claudeEffort(value: string | undefined): ClaudeCodeEffort | undefined {
   if (value === undefined || !CLAUDE_EFFORTS.has(value)) return undefined
   return value as ClaudeCodeEffort
+}
+
+/**
+ * The request class the client reports for the call kind this route is issuing.
+ *
+ * The client derives the header from the query source that spawned the request: a compact query
+ * reports `compaction`, and its own session-title generator runs under the
+ * `generate_session_title` source, which reports `auxiliary`. Every other request this route
+ * issues is the conversation's own Messages call, which reports `main`.
+ *
+ * Two things the carve does not settle. The client gates emission of the header itself on an
+ * internal predicate — an environment override, a host check, and a feature flag this package
+ * cannot model — so this route always sends the header while the client may omit it; and
+ * `subagent` and `workflow` name agent and workflow-run query sources that no call reaching
+ * this adapter has, so neither class is reachable here.
+ *
+ * @param purpose - the provider-neutral classification the caller set on the request.
+ * @returns the class the genuine client would report for that call kind.
+ */
+export function claudeRequestClass(
+  purpose: GenerateOptions['purpose'],
+): NonNullable<ClaudeCodeRequestInput['requestClass']> {
+  if (purpose === 'compaction') return 'compaction'
+  if (purpose === 'session-title') return 'auxiliary'
+  return 'main'
+}
+
+/**
+ * Refuse a request whose body states `context_management` without the beta that declares it.
+ *
+ * The client emits the field only from the same composed beta list that carries
+ * `context-management-2025-06-27`, so the two never travel apart. The builder decides the beta
+ * from the model's capability while this route decides the field from its planned edits, so the
+ * relationship is asserted here rather than left to two independent gates agreeing.
+ *
+ * @param built - the request the builder returned.
+ * @param statesContextManagement - whether this route asked for the body field.
+ */
+export function assertContextManagementBeta(
+  built: BuiltClaudeCodeRequest,
+  statesContextManagement: boolean,
+): void {
+  if (!statesContextManagement) return
+  const header = built.headers.find(([name]) => name.toLowerCase() === 'anthropic-beta')?.[1] ?? ''
+  const identifier = BETA_REGISTRY_2_1_288.CONTEXT_MANAGEMENT.header
+  if (header.split(',').some(value => value.trim() === identifier)) return
+  throw new LlmError(
+    `claude request assembly failed: the body states context_management without the ${identifier} beta header`,
+    'INVALID_REQUEST',
+  )
 }
 
 /**
@@ -485,7 +537,8 @@ export async function buildClaudeWireRequest(
   const resolvedEffort = claudeEffort(effort)
   const atis = clientAtisFor(account)
   const chain = chainFor(account, sessionId)
-  return buildClaudeCodeRequest({
+  const statesContextManagement = contextManagement !== undefined && supportsContextManagement(options.model)
+  const built = await buildClaudeCodeRequest({
     accessToken: session.accessToken,
     model: options.model,
     maxTokens,
@@ -503,9 +556,7 @@ export async function buildClaudeWireRequest(
     // The edits go out only where the catalogue gives the model context management, so the
     // request never states a policy the API would reject and the beta header follows the same
     // fact. Absent, the body is byte-identical to one built without this parameter.
-    ...contextManagement === undefined || !supportsContextManagement(options.model)
-      ? {}
-      : { contextManagement },
+    ...statesContextManagement ? { contextManagement } : {},
     ...tools === undefined ? {} : { tools },
     // Caching on, with a marker on the system block and on the newest message. No tool
     // marker: the client's only tool-marker seam is an option its main-loop tool builder
@@ -548,9 +599,10 @@ export async function buildClaudeWireRequest(
     stainlessTimeoutSeconds: 900,
     stream: true,
     clientRequestId: randomUUID(),
-    // This route issues the conversation's own Messages request, which is the class the
-    // client reports for a main-thread or SDK query.
-    requestClass: 'main',
+    // The class follows the call's purpose: the harness states whether this request is a
+    // compaction or a session-title helper, and the client reports those two as `compaction`
+    // and `auxiliary`. Everything else here is the conversation's own Messages request.
+    requestClass: claudeRequestClass(options.purpose),
     ...chain.previousRequestId === undefined ? {} : { previousRequestId: chain.previousRequestId },
     promptId: claudePromptId(sessionId, promptTurn(messages)),
     // The desktop identity. These names are not canonical for this package, so the
@@ -565,4 +617,6 @@ export async function buildClaudeWireRequest(
       ...atis === undefined ? [] : [['x-cc-atis', atis] as [string, string]],
     ],
   }, CLAUDE_CODE_2_1_288_PROFILE)
+  assertContextManagementBeta(built, statesContextManagement)
+  return built
 }

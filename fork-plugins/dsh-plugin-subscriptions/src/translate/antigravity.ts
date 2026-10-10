@@ -32,7 +32,7 @@ interface AntigravityReplayResponse {
 }
 
 /** Minimal Gemini part shape used by v1internal. */
-export interface AntigravityPart {
+interface AntigravityPart {
   text?: string
   thought?: boolean
   thoughtSignature?: string
@@ -98,7 +98,7 @@ function replayBlocks(message: TranslatableMessage, model?: string): readonly An
 }
 
 /** Map harness tool schemas to Gemini function declarations. */
-export function toAntigravityTools(tools: readonly ToolSchema[], model = 'gemini'): { functionDeclarations: Record<string, unknown>[] }[] {
+function toAntigravityTools(tools: readonly ToolSchema[], model = 'gemini'): { functionDeclarations: Record<string, unknown>[] }[] {
   if (tools.length === 0) return []
   const legacy = /^(claude-|gpt-oss-)/.test(model)
   return [{
@@ -264,7 +264,7 @@ export interface AntigravityResponseEvent {
 }
 
 /** Map Gemini usage metadata to the harness's disjoint counters. */
-export function mapAntigravityUsage(metadata: NonNullable<NonNullable<AntigravityResponseEvent['response']>['usageMetadata']>): TokenUsage {
+function mapAntigravityUsage(metadata: NonNullable<NonNullable<AntigravityResponseEvent['response']>['usageMetadata']>): TokenUsage {
   const cached = metadata.cachedContentTokenCount ?? 0
   return {
     inputTokens: Math.max(0, (metadata.promptTokenCount ?? 0) - cached),

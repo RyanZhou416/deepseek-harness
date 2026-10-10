@@ -14,14 +14,14 @@ import type { FetchFn } from '../providers/common.js'
 import { proxiedFetch } from '../http.js'
 
 /** Endpoint the search request is posted to. */
-export const X_SEARCH_URL = 'https://api.x.ai/v1/responses'
+const X_SEARCH_URL = 'https://api.x.ai/v1/responses'
 /** Grok model the search runs on (a catalog model of the grok provider). */
-export const X_SEARCH_MODEL = 'grok-4'
+const X_SEARCH_MODEL = 'grok-4'
 /** xAI caps each handle filter list at ten entries. */
 const MAX_HANDLES = 10
 
 /** Dependencies of the `x_search` tool. */
-export interface XSearchToolOptions {
+interface XSearchToolOptions {
   /** Grok session source; a missing session throws the log-in hint. */
   tokens: AccountTokenManager<GrokSession>
   /** Fetch implementation (injectable for tests). */

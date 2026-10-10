@@ -30,18 +30,18 @@ import type { FetchFn } from '../providers/common.js'
 import { proxiedFetch } from '../http.js'
 
 /** Endpoint the codex generation request is posted to. */
-export const IMAGE_GENERATE_URL = 'https://chatgpt.com/backend-api/codex/images/generations'
+const IMAGE_GENERATE_URL = 'https://chatgpt.com/backend-api/codex/images/generations'
 export const IMAGE_EDIT_URL = 'https://chatgpt.com/backend-api/codex/images/edits'
 /** The image model the codex subscription endpoint serves. */
-export const IMAGE_GENERATE_MODEL = 'gpt-image-2'
+const IMAGE_GENERATE_MODEL = 'gpt-image-2'
 /** Endpoint the grok generation request is posted to. */
-export const GROK_IMAGE_GENERATE_URL = 'https://api.x.ai/v1/images/generations'
+const GROK_IMAGE_GENERATE_URL = 'https://api.x.ai/v1/images/generations'
 export const GROK_IMAGE_EDIT_URL = 'https://api.x.ai/v1/images/edits'
 /** The image model the grok subscription endpoint serves. */
-export const GROK_IMAGE_GENERATE_MODEL = 'grok-imagine-image-2.0'
+const GROK_IMAGE_GENERATE_MODEL = 'grok-imagine-image-2.0'
 
 /** Dependencies of the `image_generate` tool. */
-export interface ImageGenerateToolOptions {
+interface ImageGenerateToolOptions {
   /** Shared generation/edit account scheduling; standalone tools get a private pool. */
   imagePool?: ImageAccountPool
   /** Creation-time provider policy; existing sessions retain their original tools. */
@@ -61,7 +61,7 @@ export interface ImageGenerateToolOptions {
 }
 
 /** The wire request body for one generation call. */
-export interface ImageGenerateRequestBody {
+interface ImageGenerateRequestBody {
   prompt: string
   model: string
   size?: string
@@ -69,7 +69,7 @@ export interface ImageGenerateRequestBody {
 }
 
 /** The tool's own argument shape, shared by both provider body builders. */
-export interface ImageGenerateArgs {
+interface ImageGenerateArgs {
   prompt: string
   size?: '1024x1024' | '1024x1536' | '1536x1024' | 'auto'
   quality?: 'low' | 'medium' | 'high' | 'auto'
@@ -142,7 +142,7 @@ const GROK_ASPECT_RATIOS: Record<NonNullable<ImageGenerateArgs['size']>, string>
 }
 
 /** The wire request body for one grok generation call. */
-export interface GrokImageGenerateRequestBody {
+interface GrokImageGenerateRequestBody {
   prompt: string
   model: string
   response_format: 'b64_json'
@@ -171,7 +171,7 @@ export function buildGrokImageGenerateBody(args: ImageGenerateArgs): GrokImageGe
 }
 
 /** One generated image decoded from the response. */
-export interface GeneratedImage {
+interface GeneratedImage {
   /** PNG bytes. */
   data: Buffer
   /** Provider-revised prompt, when the response carries one. */
@@ -202,12 +202,12 @@ export function parseImageGenerateResponse(payload: unknown): GeneratedImage[] {
 }
 
 /** Directory the generated image files are written to. */
-export function imagesDirectory(): string {
+function imagesDirectory(): string {
   return dshHomePath('plugins', 'subscriptions', 'images')
 }
 
 /** Media types the attachment store accepts and this tool can produce. */
-export type GeneratedImageMediaType = 'image/png' | 'image/jpeg' | 'image/webp'
+type GeneratedImageMediaType = 'image/png' | 'image/jpeg' | 'image/webp'
 
 /**
  * Sniff a generated image's media type from its magic bytes (codex serves

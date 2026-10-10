@@ -172,7 +172,7 @@ export function isEnforcementRefusal(
 }
 
 /** Optional per-call hooks {@link httpLlmError} uses to read a rate-limit window. */
-export interface HttpLlmErrorOptions {
+interface HttpLlmErrorOptions {
   /**
    * The calling provider's reader for the instant its rate-limit window
    * reopens. Consulted on a 429 only, and there ahead of the generic
@@ -325,7 +325,7 @@ function parseRetryAfterMs(response: Response): number | undefined {
 }
 
 /** An idle watchdog: aborts its signal when no SSE activity arrives within the timeout. */
-export interface IdleWatchdog {
+interface IdleWatchdog {
   /** Signal to pass to fetch and body reads; aborts on caller cancel or idle expiry. */
   readonly signal: AbortSignal
   /** Reset the idle timer (call on every received SSE event). */
@@ -761,7 +761,7 @@ export function effortDisplayName(effort: string): string {
 }
 
 /** The reasoning-block shape every caller passes to {@link mergeReasoning}. */
-export interface ReasoningBlock {
+interface ReasoningBlock {
   efforts: readonly { id: ReasoningEffortId; name: string; description?: string }[]
   defaultEffort?: ReasoningEffortId
 }
@@ -840,7 +840,7 @@ export async function discoverAcrossAccounts(
 }
 
 /** How long a discovered catalog is trusted before re-fetching. */
-export const DISCOVERY_TTL_MS = 5 * 60_000
+const DISCOVERY_TTL_MS = 5 * 60_000
 
 /** A durable snapshot of one provider's discovered catalog. */
 export interface CatalogSnapshot {

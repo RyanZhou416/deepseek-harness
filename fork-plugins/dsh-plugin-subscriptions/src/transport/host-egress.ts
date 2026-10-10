@@ -15,7 +15,7 @@
  */
 
 /** Environment name the host publishes a mandatory Claude route under; both casings are published together. */
-export const HOST_CLAUDE_ROUTE_ENV = 'DSH_CLAUDE_PROXY_URL'
+const HOST_CLAUDE_ROUTE_ENV = 'DSH_CLAUDE_PROXY_URL'
 
 /** Environment names carrying the host's resolved proxy for `https:` and `http:` destinations, lowercase first. */
 const HOST_HTTPS_PROXY_ENV: readonly string[] = ['https_proxy', 'HTTPS_PROXY']

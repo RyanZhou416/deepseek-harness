@@ -29,7 +29,7 @@ const UNIFIED_PREFIX = 'anthropic-ratelimit-unified-'
  * The status member's accepted values; anything else is reported as `other` so
  * an unrecognized token is visible rather than silently read as `allowed`.
  */
-export type UnifiedRateLimitStatus = 'allowed' | 'allowed_warning' | 'rejected' | 'other'
+type UnifiedRateLimitStatus = 'allowed' | 'allowed_warning' | 'rejected' | 'other'
 
 /** Standalone members naming the account's standing and its overage route. */
 const MEMBER_SUFFIXES = [
@@ -51,7 +51,7 @@ const WINDOW_PREFIXES = ['5h', '7d', '7d_oi', 'overage'] as const
 const WINDOW_SUFFIXES = ['utilization', 'reset', 'surpassed-threshold'] as const
 
 /** One window's reading, from that window's three unified members. */
-export interface UnifiedWindowReading {
+interface UnifiedWindowReading {
   /** Window token: `5h`, `7d`, `7d_oi` or `overage`. */
   window: string
   /** Fraction of the window consumed (0–1), as the provider reported it. */

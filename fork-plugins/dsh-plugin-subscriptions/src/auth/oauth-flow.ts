@@ -11,17 +11,17 @@ import type { AddressInfo } from 'node:net'
 import { createPkce, randomHex, randomToken, type PkcePair } from './pkce.js'
 
 /** Default attempt lifetime: three minutes for the user to complete login. */
-export const DEFAULT_FLOW_TIMEOUT_MS = 180_000
+const DEFAULT_FLOW_TIMEOUT_MS = 180_000
 
 /** Where the temporary callback server listens; port 0 asks the OS for an ephemeral port. */
-export interface ListenSpec {
+interface ListenSpec {
   host: string
   /** Tried in order; the first free port wins (covers the codex 1455→1457 fallback). */
   ports: readonly number[]
 }
 
 /** Inputs an authorize-URL builder may need for one attempt. */
-export interface AuthorizeInput {
+interface AuthorizeInput {
   /** Loopback redirect URI pointing at the temporary server. */
   redirectUri: string
   state: string

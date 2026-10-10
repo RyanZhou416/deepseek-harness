@@ -6,7 +6,7 @@
  */
 
 import { createHash, randomBytes, randomUUID } from 'node:crypto'
-import { EMPTY_RESPONSE_CODE, LlmAdapter, LlmError, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
+import { EMPTY_RESPONSE_CODE, LlmError, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import type {
   GenerateOptions,
   LlmModelInfo,
@@ -18,7 +18,6 @@ import { CLAUDE_CODE_2_1_288_PROFILE } from '@tormentalabs/claude-code-wire-comp
 import type { BuiltClaudeCodeRequest } from '@tormentalabs/claude-code-wire-compat'
 import type { FlowSpec } from '../auth/oauth-flow.js'
 import type { ClaudeSession } from '../auth/store.js'
-import type { ProviderId } from '../auth/store.js'
 import type { PoolAdapter } from './pool.js'
 import type { AttachmentStore } from '@deepseek-ai/dsh-attachment'
 import { resolveImages } from '../translate/resolved.js'
@@ -42,6 +41,7 @@ import { STALE_TOOL_RESULT_IDLE_MS, planContextManagement } from './context-mana
 import type { ClaudeWireThinking } from './claude-wire.js'
 import { claudeBuiltInCatalogue, mergeClaudeCatalogue } from './claude-catalogue.js'
 import type { ClaudeCatalogueOption } from './claude-catalogue.js'
+import { claudeModelLimits } from './claude-model-limits.js'
 import {
   httpLlmError,
   idleWatchdog,
@@ -54,7 +54,8 @@ import {
 } from './common.js'
 import { AccountTokenManager } from './accounts.js'
 import type { CatalogPersistence, DiscoveredModel, FetchFn, ModelEntry, ProviderUsage, UsageWindow } from './common.js'
-import { ProviderCatalog, catalogRow, withPoolTiers } from './provider-catalog.js'
+import { ProviderCatalog, catalogRow } from './provider-catalog.js'
+import { PoolBackedAdapter } from './pool-delegation.js'
 import { proxiedFetch } from '../http.js'
 import { claudeApiFetch } from '../transport/claude-fetch.js'
 import {
@@ -132,9 +133,9 @@ const USAGE_TIMEOUT_MS = 5_000
  * token that expired between the last refresh and the request costs one retry rather
  * than the whole poll.
  */
-export type ClaudeReauthorize = () => Promise<string>
+type ClaudeReauthorize = () => Promise<string>
 
-export const CLAUDE_PROFILE_URL = 'https://api.anthropic.com/api/oauth/profile'
+const CLAUDE_PROFILE_URL = 'https://api.anthropic.com/api/oauth/profile'
 /**
  * The model-options endpoint the client uses on the first-party path.
  *
@@ -143,7 +144,7 @@ export const CLAUDE_PROFILE_URL = 'https://api.anthropic.com/api/oauth/profile'
  * never sends. This one supplements a catalogue the client already carries, and a response
  * that fails its shape is discarded rather than treated as a failure.
  */
-export const CLAUDE_BOOTSTRAP_URL = 'https://api.anthropic.com/api/claude_cli/bootstrap'
+const CLAUDE_BOOTSTRAP_URL = 'https://api.anthropic.com/api/claude_cli/bootstrap'
 
 /**
  * The ATIS token each account's bootstrap read carried, keyed by account.
@@ -218,9 +219,6 @@ export const CLAUDE_SCOPE = 'org:create_api_key user:profile user:inference user
 // `user:plugins` is appended last by the client's own scope assembly when the plugin
 // scope is registered, which it is in production.
 export const CLAUDE_CALLBACK_PATH = '/callback'
-// Fallbacks only when discovery is unavailable or the model omits its limits.
-const CLAUDE_CONTEXT_WINDOW = 200_000
-const CLAUDE_DEFAULT_MAX_TOKENS = 32_000
 /** Refresh when the access token has less than this much life left. */
 export const CLAUDE_PREEMPT_MS = 5 * 60_000
 
@@ -272,7 +270,7 @@ export function supportsMidConversationSystem(model: string): boolean {
 }
 
 /** Files API upload. Official path from the Files HTTP reference. */
-export const CLAUDE_FILES_URL = 'https://api.anthropic.com/v1/files'
+const CLAUDE_FILES_URL = 'https://api.anthropic.com/v1/files'
 /**
  * Vision: images on the Claude API may be at most 10 MB once base64-encoded.
  * Larger images go through the Files API as `{ type: "file", file_id }`.
@@ -335,7 +333,7 @@ function imageFilename(mediaType: string): string {
 }
 
 /** Upload one image. The response `id` is the Messages `file_id`. */
-export async function uploadClaudeFile(
+async function uploadClaudeFile(
   accessToken: string,
   part: ResolvedImagePart,
   fetchFn: FetchFn = proxiedFetch,
@@ -733,7 +731,7 @@ export function isClaudePermanentRefreshError(error: unknown): boolean {
     && (error.oauthCode === 'invalid_grant' || error.oauthCode === 'invalid_token')
 }
 
-export const CLAUDE_USAGE_URL = 'https://api.anthropic.com/api/oauth/usage'
+const CLAUDE_USAGE_URL = 'https://api.anthropic.com/api/oauth/usage'
 
 /** RFC3339 `resets_at` value → epoch ms, or undefined when absent/unparsable. */
 function claudeResetsAt(value: unknown): number | undefined {
@@ -1018,16 +1016,21 @@ export async function fetchClaudeCatalogue(
 
 /**
  * The output cap for one model: configuration may lower the default, but never
- * exceeds a server-advertised ceiling; the built-in constant is the last resort.
+ * exceeds a server-advertised ceiling; without one the model's documented, then
+ * catalogued, capacity answers.
  */
-function claudeMaxTokens(configured: ModelEntry | undefined, disc: DiscoveredModel | undefined): number {
+function claudeMaxTokens(
+  configured: ModelEntry | undefined,
+  disc: DiscoveredModel | undefined,
+  model: string,
+): number {
   const outputLimit = disc?.maxOutputTokens
-  const preferred = configured?.maxTokens ?? outputLimit ?? CLAUDE_DEFAULT_MAX_TOKENS
+  const preferred = configured?.maxTokens ?? outputLimit ?? claudeModelLimits(model).maxOutputTokens
   return outputLimit === undefined ? preferred : Math.min(preferred, outputLimit)
 }
 
 /** Constructor dependencies for {@link ClaudeAdapter}. */
-export interface ClaudeAdapterOptions {
+interface ClaudeAdapterOptions {
   /** Identity line a Claude request carries in place of the harness identity section. */
   identityLine?: string
   models: readonly ModelEntry[]
@@ -1079,11 +1082,11 @@ function claudeStreamRefusalProbe(response: Response): AnthropicRefusalProbe {
 /** Sessions whose request clock is kept; the client bounds its own table the same way. */
 const REQUEST_CLOCK_LIMIT = 64
 
-export class ClaudeAdapter extends LlmAdapter {
-  private readonly catalogs: ProviderCatalog
+export class ClaudeAdapter extends PoolBackedAdapter {
+  protected readonly catalogs: ProviderCatalog
 
   constructor(private readonly options: ClaudeAdapterOptions) {
-    super()
+    super(options)
     this.catalogs = new ProviderCatalog(options, 'claude', {
       staticRows: provider => this.staticModels(provider),
       fetchCatalog: (account, signal) => this.fetchCatalog(account, signal),
@@ -1160,23 +1163,6 @@ export class ClaudeAdapter extends LlmAdapter {
     )
   }
 
-  override async listModels(provider: string): Promise<readonly LlmModelInfo[]> {
-    return withPoolTiers(await this.listOwnModels(provider), this.options.pool?.(), provider)
-  }
-
-  /** The provider's own catalog: union of every account, or one account when named. */
-  async listOwnModels(provider: string, account?: string, signal?: AbortSignal): Promise<readonly LlmModelInfo[]> {
-    return this.catalogs.list(provider, account, signal)
-  }
-
-  override async resolveModel(provider: string, model: string): Promise<LlmResolvedModelInfo> {
-    const pool = this.options.pool?.()
-    if (pool !== undefined && await pool.owns(provider as ProviderId, model)) {
-      return pool.resolveModel(provider, model)
-    }
-    return this.resolveOwnModel(provider, model)
-  }
-
   /** Capability resolution of the provider's own models (the pool resolves members here). */
   async resolveOwnModel(provider: string, model: string): Promise<LlmResolvedModelInfo> {
     const disc = await this.discovered(model)
@@ -1188,26 +1174,12 @@ export class ClaudeAdapter extends LlmAdapter {
       name: disc?.name ?? configured?.name ?? model,
       inputModalities: configured?.inputModalities ?? CLAUDE_MODALITIES,
       context: {
-        contextWindow: disc?.contextWindow ?? configured?.contextWindow ?? CLAUDE_CONTEXT_WINDOW,
+        contextWindow: disc?.contextWindow ?? configured?.contextWindow ?? claudeModelLimits(model).contextWindow,
       },
-      defaultMaxTokens: claudeMaxTokens(configured, disc),
+      defaultMaxTokens: claudeMaxTokens(configured, disc, model),
       ...(reasoning === undefined ? {} : { reasoning }),
       ...(supportsMidConversationSystem(model) ? { systemPromptUpdate: 'in-history' as const } : {}),
     }
-  }
-
-  async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
-    const pool = this.options.pool?.()
-    if (pool !== undefined && await pool.owns(options.provider as ProviderId, options.model)) {
-      yield* pool.stream(options)
-      return
-    }
-    yield* this.streamCore(options)
-  }
-
-  /** Pool seam: stream through one specific account instead of the default. */
-  streamAccount(options: GenerateOptions, account: string): AsyncIterable<StreamChunk> {
-    return this.streamCore(options, account)
   }
 
   /** The canonical account key that owns this session's conversation chain. */
@@ -1217,7 +1189,7 @@ export class ClaudeAdapter extends LlmAdapter {
     return this.options.tokens.resolveAccount(requested)
   }
 
-  private async *streamCore(options: GenerateOptions, account?: string): AsyncIterable<StreamChunk> {
+  protected async *streamOwn(options: GenerateOptions, account?: string): AsyncIterable<StreamChunk> {
     const watchdog = idleWatchdog(options.signal, this.options.streamIdleTimeoutMs)
     // The billing block chains responses through the request-id header, so the
     // chain key must be stable across the 401-retry pair, and per-account so a
@@ -1348,11 +1320,12 @@ export class ClaudeAdapter extends LlmAdapter {
     const fetchFn = this.options.fetchFn ?? claudeApiFetch
     const disc = await this.discovered(options.model)
     const contextWindow = disc?.contextWindow
-      ?? this.options.models.find(entry => entry.id === options.model)?.contextWindow ?? CLAUDE_CONTEXT_WINDOW
+      ?? this.options.models.find(entry => entry.id === options.model)?.contextWindow
+      ?? claudeModelLimits(options.model).contextWindow
     const resolved = await resolveImages(options.messages, this.options.resolveAttachments?.(), signal, claudeImagePolicy(contextWindow))
     const messages = await bindClaudeFileIds(resolved, chainAccount, session.accessToken, fetchFn, signal)
     const maxTokens = options.maxTokens
-      ?? claudeMaxTokens(this.options.models.find(entry => entry.id === options.model), disc)
+      ?? claudeMaxTokens(this.options.models.find(entry => entry.id === options.model), disc, options.model)
     const thinking = this.thinkingParam(options.model, disc?.thinkingType, maxTokens)
     const effort = options.reasoningEffort !== undefined && disc?.reasoning !== undefined
       ? String(options.reasoningEffort)

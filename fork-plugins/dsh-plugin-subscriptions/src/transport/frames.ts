@@ -36,14 +36,14 @@ export const TAG_BODY = 0x02;
 export const MAX_FRAME_BYTES = 64 * 1024 * 1024;
 
 /** A decoded control frame. */
-export interface ControlFrame {
+interface ControlFrame {
   readonly tag: typeof TAG_CONTROL;
   /** Parsed JSON payload. The `streamId` member is required by the protocol. */
   readonly message: Record<string, unknown>;
 }
 
 /** A decoded body frame. */
-export interface BodyFrame {
+interface BodyFrame {
   readonly tag: typeof TAG_BODY;
   /** Stream index assigned by the control frame that opened the stream. */
   readonly streamIndex: number;

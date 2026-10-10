@@ -35,7 +35,7 @@ export const PROVIDER_IDS: readonly ProviderId[] = ['codex', 'claude', 'grok', '
  * random id it is keyed by, so the account key served to the browser derives from no
  * credential.
  */
-export interface AccountKeyedSession {
+interface AccountKeyedSession {
   /** Random per-login account id, written with the session; absent until one is assigned. */
   accountKeyId?: string
 }
@@ -152,7 +152,7 @@ export interface AntigravitySession extends AccountKeyedSession {
 }
 
 /** One provider's accounts: account key → session, plus the default account. */
-export interface ProviderAccounts<S> {
+interface ProviderAccounts<S> {
   /** Key of the account direct (non-pool) routes serve; the first login wins. */
   default?: string
   accounts: Record<string, S>
@@ -161,7 +161,7 @@ export interface ProviderAccounts<S> {
 }
 
 /** The durable store shape: per provider, its accounts. */
-export interface SessionMap {
+interface SessionMap {
   codex?: ProviderAccounts<CodexSession>
   claude?: ProviderAccounts<ClaudeSession>
   grok?: ProviderAccounts<GrokSession>
@@ -174,7 +174,7 @@ export interface SessionMap {
 export type StoredSession = CodexSession | ClaudeSession | GrokSession | CopilotSession | AntigravitySession | CursorSession
 
 /** The session type one provider stores. */
-export type SessionOf<K extends ProviderId> = NonNullable<SessionMap[K]>['accounts'][string]
+type SessionOf<K extends ProviderId> = NonNullable<SessionMap[K]>['accounts'][string]
 
 /** One account entry as returned by {@link listAccounts} (default first). */
 export interface AccountEntry<S> {
