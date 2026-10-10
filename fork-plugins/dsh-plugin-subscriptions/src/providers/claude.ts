@@ -1217,11 +1217,15 @@ export class ClaudeAdapter extends LlmAdapter {
           ...this.options.onWarn === undefined ? {} : { onWarn: this.options.onWarn },
         })
       }
-      rememberClaudeRequestId(chainAccount, sessionId, response.headers.get('request-id'))
+      // The response's own request id is both the value the next request chains and the
+      // value the assistant message records, so it is read once and passed to the
+      // translator with the body it belongs to.
+      const requestId = response.headers.get('request-id')
+      rememberClaudeRequestId(chainAccount, sessionId, requestId)
       if (response.body === null) {
         throw new LlmError('claude API returned no response body', EMPTY_RESPONSE_CODE)
       }
-      yield* streamAnthropic(response.body, () => { watchdog.pulse() })
+      yield* streamAnthropic(response.body, () => { watchdog.pulse() }, requestId ?? undefined)
     } catch (error: unknown) {
       throw mapFetchFailure('claude API', error, watchdog, options.signal)
     } finally {

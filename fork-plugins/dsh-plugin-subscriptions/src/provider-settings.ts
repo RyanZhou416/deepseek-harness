@@ -133,8 +133,13 @@ export class ProviderSettingsStore {
     }
   }
 
+  /**
+   * The provider's stored preferences; callers must treat the result as read-only.
+   * @param provider - provider whose preferences are read.
+   * @returns the stored preferences, or an empty object when the provider has none.
+   */
   get(provider: ProviderId): ProviderPreferences {
-    return structuredClone(this.current.providers[provider] ?? {})
+    return this.current.providers[provider] ?? {}
   }
 
   visible(provider: ProviderId, model: string): boolean {

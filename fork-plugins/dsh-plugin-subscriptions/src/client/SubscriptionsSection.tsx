@@ -352,6 +352,47 @@ export function usageBarColor(usedPercent: number): string {
   return 'var(--dsw-alias-state-success-primary)'
 }
 
+/** The out-of-service state of one account's reported usage. */
+export interface UsageAlert {
+  /** `limit`: a window reached 100% used. `near`: a window crossed the provider's 95% full threshold. */
+  level: 'limit' | 'near'
+  /** Latest reset among the full windows that is still ahead of the clock; absent when none is known. */
+  resetsAt?: number
+}
+
+/**
+ * Whether an account's reported usage puts it out of service.
+ *
+ * Contract: a window counts as full at `usedPercent >= 100` for Codex and
+ * Claude, which spend a window all the way down, and at `usedPercent >= 95`
+ * for every other provider — the per-provider rule the pool's availability
+ * check applies (`CONSUMABLE_QUOTA_FULL_PERCENT` / `QUOTA_FULL_PERCENT`).
+ * The alert is `limit` when a full window reached 100% and `near` otherwise,
+ * and carries the latest reset still ahead of the clock, because the account
+ * serves again only once the last of its full windows reopens. Absent or empty
+ * windows, and every window below its threshold, report no alert.
+ * @param provider - the provider that reported the windows.
+ * @param windows - the account's reported windows, or undefined while unknown.
+ * @returns the out-of-service state, or undefined while the account can serve.
+ */
+export function usageAlert(
+  provider: SubscriptionProvider,
+  windows: readonly UsageWindow[] | undefined,
+): UsageAlert | undefined {
+  if (windows === undefined) return undefined
+  const fullAt = provider === 'codex' || provider === 'claude' ? 100 : 95
+  const full = windows.filter(window => window.usedPercent >= fullAt)
+  if (full.length === 0) return undefined
+  const now = Date.now()
+  const resets = full
+    .map(window => window.resetsAt)
+    .filter((at): at is number => at !== undefined && at > now)
+  return {
+    level: full.some(window => window.usedPercent >= 100) ? 'limit' : 'near',
+    ...resets.length === 0 ? {} : { resetsAt: Math.max(...resets) },
+  }
+}
+
 /** One-line status text of the proxy config card. */
 function proxyStatusText(
   t: SubscriptionsSectionInjected['t'],
@@ -868,6 +909,7 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
               // Providers without a usage endpoint answer supported:false — no block.
               const showUsage = usage?.supported !== false
                 && (usage !== undefined || usageError !== undefined || usageLoading[usageKey] === true)
+              const alert = usageAlert(id, usage?.windows)
               return (
                 <div key={account.key} style={styles.accountRow}>
                   <div style={styles.accountHeader}>
@@ -914,6 +956,13 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
                           {t('usageRefresh')}
                         </button>
                       </div>
+                      {alert !== undefined && (
+                        <p style={styles.errorLine}>
+                          {alert.level === 'limit' ? t('usageLimitReached') : t('usageNearlyExhausted')}
+                          {alert.resetsAt !== undefined
+                            && ` · ${t('usageResets', { date: new Date(alert.resetsAt).toLocaleString() })}`}
+                        </p>
+                      )}
                       {usage === undefined && usageError === undefined && (
                         <p style={styles.statusLine}>{t('usageLoading')}</p>
                       )}

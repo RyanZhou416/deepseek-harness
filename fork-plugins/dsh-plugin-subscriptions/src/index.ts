@@ -216,8 +216,6 @@ export interface Config {
     scheduling?: Partial<PoolSchedulingPolicy>
     /** Auto-pool every catalog model across a provider's logged-in accounts (default true). */
     autoAccounts?: boolean
-    /** @deprecated Use {@link autoAccounts}. */
-    autoFamilies?: boolean
     /** Explicit account lists for one catalog model (same provider); replaces the auto pool. */
     families?: Record<string, PoolMemberRef[]>
     /** Extra picker entries with heterogeneous fallbacks, listed under the first member's provider. */
@@ -272,7 +270,6 @@ export const Config: z<Config> = z.object({
     switchMargin: z.number().min(1).default(2),
     scheduling: PoolSchedulingSchema,
     autoAccounts: z.boolean().default(true),
-    autoFamilies: z.boolean(),
     families: z.dict(z.array(poolMemberSchema)),
     tiers: z.dict(z.array(poolMemberSchema)),
   }),
@@ -911,7 +908,7 @@ export function apply(ctx: Context, config: Config): void {
   let poolAdapter: PoolAdapter | undefined
   let subscriptionsAuth: SubscriptionsAuthController | undefined
   const imagePool = new ImageAccountPool({
-    enabled: config.pool?.enabled !== false && (config.pool?.autoAccounts ?? config.pool?.autoFamilies ?? true),
+    enabled: config.pool?.enabled !== false && (config.pool?.autoAccounts ?? true),
     onWarn,
   })
   let codexTokens: AccountTokenManager<CodexSession> | undefined
@@ -1241,7 +1238,7 @@ export function apply(ctx: Context, config: Config): void {
   // Configured tiers are extra picker rows. Built whenever enabled; a
   // provider with fewer than two accounts simply has nothing to pool.
   const poolConfig = config.pool
-  const autoAccounts = poolConfig?.autoAccounts ?? poolConfig?.autoFamilies ?? true
+  const autoAccounts = poolConfig?.autoAccounts ?? true
   if (poolConfig?.enabled !== false && adapters.size >= 1) {
     // Every poll gets a hard timeout: a cold usage cache AWAITS the first
     // fetch during member selection, and a hanging usage endpoint must
@@ -1592,12 +1589,12 @@ export function apply(ctx: Context, config: Config): void {
         createXSearchTool({ tokens: grokTokens }),
         createVideoGenerateTool({ tokens: grokTokens }),
       ]) {
-        const result = registerWithAlias(toolsCtx.tools, definition)
-        if (result !== undefined) registeredNames.set(definition.name, result.name)
+        const registered = registerWithAlias(toolsCtx.tools, definition)
+        if (registered !== undefined) registeredNames.set(definition.name, registered)
       }
     }
     if (codexTokens !== undefined || grokTokens !== undefined) {
-      const result = registerWithAlias(toolsCtx.tools, createImageGenerateTool({
+      const registered = registerWithAlias(toolsCtx.tools, createImageGenerateTool({
         imagePool,
         ...codexTokens === undefined ? {} : { codexTokens },
         ...grokTokens === undefined ? {} : { grokTokens },
@@ -1605,7 +1602,7 @@ export function apply(ctx: Context, config: Config): void {
         resolveLlm: () => ctx.get('llm'),
         providerEnabled: (provider, createdAt) => preferences.toolEnabled(provider, 'image_generate', createdAt),
       }))
-      if (result !== undefined) registeredNames.set('image_generate', result.name)
+      if (registered !== undefined) registeredNames.set('image_generate', registered)
     }
     // Restrictions are scoped to each agent. Keep global definitions registered
     // so already-open sessions retain both their schemas and execution path.

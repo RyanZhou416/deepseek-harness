@@ -34,7 +34,6 @@ import { SubscriptionUsageBadge, createCurrentModelReader } from './Subscription
 import type { SubscriptionUsageBadgeInjected } from './SubscriptionUsageBadge.js'
 import { en, zh } from './locales.js'
 import type { SubscriptionsKey } from './locales.js'
-import { fastCommandDescription } from './fast-command.js'
 
 export type { SubscriptionsSectionInjected, SubscriptionsSectionProps } from './SubscriptionsSection.js'
 export type { ImageGenerateToolviewInjected, ImageGenerateToolviewProps } from './ImageGenerateToolview.js'
@@ -157,14 +156,10 @@ export function apply(ctx: ClientContext): void {
     const command = scope.get('commandUi') as CommandUiContract
     scope.effect(() => command.register({
       name: 'fast',
-      // dsh 0.1.5-alpha made `description` a locale resolver evaluated per
-      // candidate pass (commit 5d9603b76, "feat(web): localize slash command
-      // descriptions"); earlier lines read the value as a plain string. The
-      // bare string threw `contribution.description is not a function` inside
-      // the registry's candidate pass on 0.1.5, aborting the whole `/` source
-      // and hiding every host command — /plan, /model, /goal, ... — not just
-      // /fast. Older lines render a function child as empty copy, no crash.
-      description: fastCommandDescription(() => t('commandFast')),
+      // The command registry evaluates `description` per candidate pass as a
+      // locale resolver; a bare string throws inside that pass and takes the
+      // whole `/` source down with it.
+      description: () => t('commandFast'),
       available: () => true,
       ui: {
         kind: 'popupSelect',

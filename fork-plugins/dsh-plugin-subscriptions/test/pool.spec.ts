@@ -1216,3 +1216,32 @@ test('a Claude account past every floor leaves the pool with no usable member', 
     return true
   })
 })
+
+// ---------------------------------------------------------------------------
+// A pool that ran out says why: every member failing for one reason reports it
+// ---------------------------------------------------------------------------
+
+test('an exhausted pool reports the reason its members failed, not a blanket rate limit', async () => {
+  for (const [failure, expected] of [
+    [new LlmError('login expired', 'MISSING_CREDENTIAL'), 'MISSING_CREDENTIAL'],
+    [new LlmError('upstream exploded', 'SERVER'), 'SERVER'],
+  ] as const) {
+    const adapter = new FakeAdapter(() => serveFail(failure))
+    const { pool } = makePool({ codex: adapter })
+    await assert.rejects(collect(pool.stream({ ...OPTIONS, sessionId: SessionId(`reason-${expected}`) })), error => {
+      assert.equal((error as { code?: string }).code, expected)
+      return true
+    })
+  }
+})
+
+test('an exhausted pool whose members failed differently reports the shared cooling state', async () => {
+  const adapter = new FakeAdapter((_options, account) => serveFail(account === 'a1'
+    ? new LlmError('login expired', 'MISSING_CREDENTIAL')
+    : new LlmError('slow down', 'RATE_LIMIT', { providerRetryAfterMs: 60_000 })))
+  const { pool } = makePool({ codex: adapter })
+  await assert.rejects(collect(pool.stream({ ...OPTIONS, sessionId: SessionId('mixed-reasons') })), error => {
+    assert.equal((error as { code?: string }).code, 'RATE_LIMIT')
+    return true
+  })
+})

@@ -643,6 +643,13 @@ export class AnthropicStreamTranslator {
   /** Set once `message_stop` produced the terminal finish chunk. */
   terminated = false
 
+  /**
+   * @param requestId - the `request-id` response header this stream answers, recorded on
+   *   the finish envelope so the request the model saw and the response it produced stay
+   *   checkable from the session log. Omitted when the response carried no such header.
+   */
+  constructor(private readonly requestId?: string) {}
+
   private open(wireIndex: number, kind: OpenBlock['kind'], chunks: StreamChunk[], callId = '', name?: string): OpenBlock {
     const block: OpenBlock = {
       index: this.nextIndex++,
@@ -686,16 +693,17 @@ export class AnthropicStreamTranslator {
     this.serverBlocks.push({ index: open.index, block })
   }
 
-  /**
-   * Replay envelope for a successful response that carried something the adapter
-   * must remember: thinking the next turn has to echo, the context edits the
-   * server reported applying, or a server-tool block the request has to carry
-   * back. Omitted when the response carried none of them, so a plain text
-   * response stays free of adapter metadata.
-   */
   /** The edits the server reported applying to this response, when it reported any. */
   private appliedEdits: AnthropicContextManagement | undefined
 
+  /**
+   * Replay envelope for a successful response that carried something the adapter
+   * must remember: thinking the next turn has to echo, the context edits the
+   * server reported applying, a server-tool block the request has to carry back,
+   * or the response's own request id. Omitted when the response carried none of
+   * them, so a plain text response with no request id stays free of adapter
+   * metadata.
+   */
   private replayEnvelope(): ReplayEnvelope | undefined {
     let useful = false
     const blocks: ClaudeThinkingReplay[] = []
@@ -704,7 +712,14 @@ export class AnthropicStreamTranslator {
       if (entry.signature !== undefined || entry.redacted !== undefined) useful = true
       blocks.push(entry)
     }
-    if (!useful && this.appliedEdits === undefined && this.serverBlocks.length === 0) return undefined
+    if (
+      !useful &&
+      this.appliedEdits === undefined &&
+      this.serverBlocks.length === 0 &&
+      this.requestId === undefined
+    ) {
+      return undefined
+    }
     // The recorded edits ride the same envelope as the thinking signatures: both are what the
     // adapter must remember from a response, and both are opaque to the harness. The field is
     // optional, so an envelope written before it existed still reads as itself.
@@ -717,6 +732,9 @@ export class AnthropicStreamTranslator {
         // of, beside the per-block entries that stay aligned with the harness blocks. The
         // field is optional too, so an older envelope still reads as itself.
         ...this.serverBlocks.length === 0 ? {} : { serverBlocks: this.serverBlocks },
+        // The response's own request id, beside the rest of the response-level metadata.
+        // Optional on the same terms: an envelope written before it existed still reads.
+        ...this.requestId === undefined ? {} : { requestId: this.requestId },
       },
       blocks,
     }
@@ -934,13 +952,15 @@ export class AnthropicStreamTranslator {
  * Consume an Anthropic SSE byte stream and yield harness StreamChunks.
  * @param stream - raw response body.
  * @param onActivity - transport-activity callback for the idle watchdog.
+ * @param requestId - the response's `request-id` header, when it carried one.
  * @returns the chunk stream; throws when the stream ends before `message_stop`.
  */
 export async function* streamAnthropic(
   stream: ReadableStream<Uint8Array>,
   onActivity?: () => void,
+  requestId?: string,
 ): AsyncGenerator<StreamChunk> {
-  const translator = new AnthropicStreamTranslator()
+  const translator = new AnthropicStreamTranslator(requestId)
   for await (const sseEvent of parseSse(stream, onActivity)) {
     let event: AnthropicStreamEvent
     try {

@@ -22,14 +22,14 @@ function registry(occupied: string[]) {
 test('registerWithAlias uses the canonical name when available', () => {
   const tools = registry([])
   const result = registerWithAlias(tools, definition('x_search'))
-  assert.equal(result?.name, 'x_search')
+  assert.equal(result, 'x_search')
   assert.deepEqual([...tools.names], ['x_search'])
 })
 
 test('registerWithAlias falls back to the plugin namespace on collision', () => {
   const tools = registry(['x_search'])
   const result = registerWithAlias(tools, definition('x_search'))
-  assert.equal(result?.name, TOOL_ALIASES.x_search)
+  assert.equal(result, TOOL_ALIASES.x_search)
   assert.deepEqual([...tools.names].sort(), ['dsh_subscriptions_x_search', 'x_search'])
 })
 

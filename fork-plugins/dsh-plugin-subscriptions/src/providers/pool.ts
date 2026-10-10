@@ -295,6 +295,8 @@ export class PoolAdapter extends LlmAdapter {
     }
     let remaining = members
     const failures = new Map<ConcretePoolMember, unknown>()
+    /** Cooldown reasons recorded during this selection, for the terminal error's code. */
+    const reasons: string[] = []
     while (remaining.length > 0) {
       options.signal?.throwIfAborted()
       // Ranking and reservation are synchronous after shared quota reads settle.
@@ -327,6 +329,7 @@ export class PoolAdapter extends LlmAdapter {
               classification.cooldownMs,
               classification.reason,
             )
+            reasons.push(classification.reason)
             if (classification.reason === QUOTA_EXCEEDED_CODE || classification.reason === 'RATE_LIMIT') {
               this.options.usage.invalidate(member.provider, member.account)
             }
@@ -355,7 +358,7 @@ export class PoolAdapter extends LlmAdapter {
         }
       }
     }
-    throw this.exhausted(options.model, members, failures)
+    throw this.exhausted(options.model, members, failures, reasons)
   }
 
   /**
@@ -440,7 +443,12 @@ export class PoolAdapter extends LlmAdapter {
    * A still-available member's failure keeps its own retry facts. Only a fully
    * cooling pool carries a recovery hint from this pool's health records.
    */
-  private exhausted(model: string, pool: ConcretePoolMember[], failures: ReadonlyMap<ConcretePoolMember, unknown>): LlmError {
+  private exhausted(
+    model: string,
+    pool: ConcretePoolMember[],
+    failures: ReadonlyMap<ConcretePoolMember, unknown>,
+    reasons: readonly string[],
+  ): LlmError {
     for (const [member, error] of failures) {
       if (error instanceof LlmError && this.options.health.isMemberAvailable(member.provider, member.account, member.model)) return error
     }
@@ -450,6 +458,10 @@ export class PoolAdapter extends LlmAdapter {
       keys.add(memberKey(member.provider, member.account, member.model))
       keys.add(accountKey(member.provider, member.account))
     }
+    // The terminal code names why nothing served. Every member failing for the same reason
+    // reports that reason; a mixed set reports the cooling-down state they share.
+    const [onlyReason, ...others] = [...new Set(reasons)]
+    const code = onlyReason !== undefined && others.length === 0 ? onlyReason : 'RATE_LIMIT'
     const recovery = this.options.health.earliestRecovery(keys)
     const retryAfterMs = recovery === undefined ? undefined : Math.max(recovery - Date.now(), 1)
     const detail = cause instanceof Error && cause.message.length > 0 ? cause.message : undefined
@@ -457,7 +469,7 @@ export class PoolAdapter extends LlmAdapter {
       detail === undefined
         ? `pool "${model}" exhausted: every member is unavailable or failed`
         : `pool "${model}" exhausted: ${detail}`,
-      'RATE_LIMIT',
+      code,
       {
         ...retryAfterMs === undefined ? {} : { providerRetryAfterMs: retryAfterMs },
         ...cause === undefined ? {} : { cause },

@@ -12,7 +12,7 @@ import type { ContextManagementConfig } from '@tormentalabs/claude-code-wire-com
  * identity impersonated on the wire.
  */
 
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import {
   CLAUDE_CODE_2_1_288_PROFILE,
   ClaudeCodeWireError,
@@ -62,16 +62,14 @@ export interface ClaudeWireThinking {
 
 /**
  * Bounded per-account, per-session conversation-chaining state: the last
- * response `request-id` (chained as `cc_prev_req`) and the current user
- * turn's `cc_prompt_id`. Keyed by the canonical account key first, so a pool
+ * response `request-id`, chained as `cc_prev_req` by the next request of the
+ * same conversation. Keyed by the canonical account key first, so a pool
  * switching accounts mid-session never chains one account's request id into
- * another account's requests. Upstream semantics: the prompt id is a UUIDv4
- * minted on each new user prompt turn and reused across that turn's tool
- * continuations, and a response without a request-id clears the chained id.
+ * another account's requests. Upstream semantics: a response without a
+ * request-id clears the chained id.
  */
 interface ClaudeChainState {
   previousRequestId?: string
-  promptId?: string
 }
 
 const CHAIN_LIMIT = 256
@@ -167,20 +165,45 @@ export function rememberClaudeRequestId(account: string, sessionId: string, requ
   state.previousRequestId = requestId
 }
 
-/** Whether the last message starts a new user prompt turn rather than continuing a tool step. */
-function isNewPromptTurn(messages: readonly TranslatableMessage[]): boolean {
-  const last = messages.at(-1)
-  if (last === undefined || last.role !== 'user') return false
-  return !last.content.some(block => block.type === 'tool-result')
+/**
+ * The ordinal of the user prompt turn a request belongs to: one per user message
+ * that carries no tool result.
+ *
+ * A turn's tool-continuation steps repeat the same history prefix and so count the
+ * same turn; the next user prompt adds one. The count comes from the request's own
+ * history rather than from process state, so rebuilding a request renders the same
+ * id it rendered the first time.
+ */
+function promptTurn(messages: readonly TranslatableMessage[]): number {
+  let turn = 0
+  for (const message of messages) {
+    if (message.role !== 'user') continue
+    if (message.content.some(block => block.type === 'tool-result')) continue
+    turn += 1
+  }
+  return turn
 }
 
-/** The `cc_prompt_id` for this request: a new UUIDv4 per user turn, reused across tool continuations. */
-function claudePromptId(account: string, sessionId: string, messages: readonly TranslatableMessage[]): string {
-  const state = chainFor(account, sessionId)
-  if (isNewPromptTurn(messages) || state.promptId === undefined) {
-    state.promptId = randomUUID()
-  }
-  return state.promptId
+/**
+ * The `cc_prompt_id` segment of the billing block: the request id for this turn.
+ *
+ * The genuine client mints a fresh UUIDv4 per user prompt turn and reuses it across
+ * that turn's tool continuations. A random id there would be model-visible text that
+ * no session event records, so this route derives it from the session identity and
+ * the turn instead: the same session and turn always render the same bytes, and two
+ * sessions never render the same id.
+ *
+ * @param sessionId - the wire session identity the request declares.
+ * @param turn - the prompt turn ordinal within that session.
+ * @returns a UUID-shaped id, the only form in which the block emits the segment; the
+ *   digest carries a UUIDv4's version and variant nibbles.
+ */
+export function claudePromptId(sessionId: string, turn: number): string {
+  const bytes = Buffer.from(createHash('sha256').update(`claude-prompt-id:${sessionId}:${turn}`).digest().subarray(0, 16))
+  bytes[6] = (bytes[6] & 0x0f) | 0x40
+  bytes[8] = (bytes[8] & 0x3f) | 0x80
+  const hex = bytes.toString('hex')
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`
 }
 
 /**
@@ -430,7 +453,7 @@ export async function buildClaudeWireRequest(
     stream: true,
     clientRequestId: randomUUID(),
     ...chain.previousRequestId === undefined ? {} : { previousRequestId: chain.previousRequestId },
-    promptId: claudePromptId(account, sessionId, messages),
+    promptId: claudePromptId(sessionId, promptTurn(messages)),
     // The desktop identity. These names are not canonical for this package, so the
     // default strict policy accepts them; they are non-cacheable request headers and
     // do not disturb the body's own construction. The machine values are derived from

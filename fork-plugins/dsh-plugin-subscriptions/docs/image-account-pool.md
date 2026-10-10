@@ -6,7 +6,7 @@ The first request tries accounts in default-first order. Successful requests est
 
 Parameter errors, transport failures, timeouts, 5xx, and response decoding/storage failures do not automatically resend an image request. An upstream request may already have produced an image in those cases. Exhaustion never changes providers. The existing fallback to another provider when the preferred provider has no login remains unchanged.
 
-`pool.enabled: false` or `pool.autoAccounts: false` disables automatic image account scheduling (`autoFamilies` is accepted as the legacy alias). Chat `strategy`, `families`, and `tiers` do not control image requests.
+`pool.enabled: false` or `pool.autoAccounts: false` disables automatic image account scheduling. Chat `strategy`, `families`, and `tiers` do not control image requests.
 
 ## Validation — 2026-09-07
 

@@ -58,6 +58,15 @@ function toolStep(): TranslatableMessage[] {
   ]
 }
 
+/** The same conversation one user prompt later: the first request of a second prompt turn. */
+function secondTurn(): TranslatableMessage[] {
+  return [
+    ...history(),
+    { role: 'assistant', content: [{ type: 'text', text: 'hi' }] },
+    { role: 'user', content: [{ type: 'text', text: 'next turn' }] },
+  ]
+}
+
 function promptIdOf(built: { body: string }): string {
   return /cc_prompt_id=([0-9a-f-]{36});/.exec(JSON.parse(built.body).system[0].text)?.[1] ?? ''
 }
@@ -234,17 +243,25 @@ test('the wire session id rolls when a second account serves the same harness se
   assert.equal(claudeWireSessionId('acct-a', 'ds-2'), 'ds-2')
 })
 
-test('cc_prompt_id is a UUIDv4 minted per user turn and reused across tool continuations', async () => {
+test('cc_prompt_id is derived from the session and the turn, and reused across tool continuations', async () => {
   const first = await buildClaudeWireRequest(options(), session(), history(), 32_000, undefined, undefined, 'sess-9', ACCOUNT)
   const firstId = promptIdOf(first)
-  assert.match(firstId, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i, 'a UUIDv4 per turn')
+  assert.match(firstId, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i, 'a UUIDv4-shaped id')
+
+  const rebuilt = await buildClaudeWireRequest(options(), session(), history(), 32_000, undefined, undefined, 'sess-9', ACCOUNT)
+  assert.equal(promptIdOf(rebuilt), firstId, 'the same session and turn render the same id')
+  assert.equal(rebuilt.body, first.body, 'and the same request bytes')
 
   const continuation = await buildClaudeWireRequest(options(), session(), toolStep(), 32_000, undefined, undefined, 'sess-9', ACCOUNT)
   assert.equal(promptIdOf(continuation), firstId, 'tool continuations reuse the turn prompt id')
 
-  const nextTurn = await buildClaudeWireRequest(options(), session(), [{ role: 'user', content: [{ type: 'text', text: 'next turn' }] }], 32_000, undefined, undefined, 'sess-9', ACCOUNT)
-  assert.notEqual(promptIdOf(nextTurn), firstId, 'a new user turn mints a fresh prompt id')
+  const nextTurn = await buildClaudeWireRequest(options(), session(), secondTurn(), 32_000, undefined, undefined, 'sess-9', ACCOUNT)
+  assert.notEqual(promptIdOf(nextTurn), firstId, 'a new user turn renders its own id')
   assert.match(promptIdOf(nextTurn), /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i)
+
+  const otherSession = await buildClaudeWireRequest(options(), session(), history(), 32_000, undefined, undefined, 'sess-10', ACCOUNT)
+  assert.notEqual(promptIdOf(otherSession), firstId, 'another session never renders the same id')
+  assert.notEqual(otherSession.body, first.body, 'so the request bytes differ with it')
 })
 
 test('the wire builder fails without a backfilled identity', async () => {

@@ -6,9 +6,9 @@ This subtree carries the private `dsh-plugin-subscriptions` build shipped with t
 
 - Upstream repository: `https://github.com/V1ki/dsh-plugin-subscriptions.git`
 - Upstream tag: `v0.9.4`
-- Fork package version: `0.9.4-dsh017rc1.3`
+- Fork package version: `0.9.4-dsh017rc1.11`
 - Subtree path: `fork-plugins/dsh-plugin-subscriptions`
-- Distribution artifact: `fork-plugins/releases/dsh-plugin-subscriptions-0.9.4-dsh017rc1.3.tgz`
+- Distribution artifact: `fork-plugins/releases/dsh-plugin-subscriptions-0.9.4-dsh017rc1.11.tgz`
 
 ## Fork behavior
 
@@ -22,13 +22,29 @@ No Session event or Session format changes. Existing Codex, Claude, Grok, Copilo
 
 `V1ki/dsh-plugin-subscriptions` v0.9.4 does not contain the behaviors in this section. A subtree import overwrites `src/`, `test/`, and `package.json`. Restore every item here before packaging, then run the package suite and rebuild the tarball. The tests named below fail if the behavior was dropped.
 
-### Claude wire (pinned Claude Code 2.1.280)
+### Removed upstream indirection
+
+Four pieces of upstream code were removed here and must not come back through an upstream
+import; each was proven to add nothing before it was deleted.
+
+- The Claude `/fast` description wrapper (a module whose body only called the locale getter it
+  was handed). The command's description is now the locale call itself.
+- The unused disposer `registerWithAlias` returned. Registration is still an effect through the
+  tool registry; only the field nobody read is gone, and the function returns the resolved name
+  its callers use for the per-agent deny list.
+- The defensive `structuredClone` in `provider-settings.get()`. `set()` already writes a fresh
+  tree, and every caller only reads; the contract is now stated in the accessor's JSDoc.
+- The `pool.autoFamilies` alias, its schema entry, and the two fallbacks that read it. The
+  fallbacks were unreachable (the sibling field defaults to true), so removing them preserves
+  behaviour even for a configuration that set the alias.
+
+### Claude wire (pinned Claude Code 2.1.288)
 
 Files: `src/providers/claude-wire.ts`, `src/providers/claude.ts`, `src/providers/claude-images.ts`, `src/translate/anthropic.ts`, `src/auth/store.ts`, `src/providers/accounts.ts`, `src/providers/common.ts`, `test/claude-wire.spec.ts`, `test/translate.spec.ts`, `test/models.spec.ts`, `package.json` (`@tormentalabs/claude-code-wire-compat` exact pin).
 
-- All chat requests build through `buildClaudeCodeRequest` with the pinned `CLAUDE_CODE_2_1_280_PROFILE` (CLI 2.1.280, SDK 0.112.1). The builder owns the billing fingerprint block, the identity system block, beta composition, the `metadata.user_id` correlation triple, cache-breakpoint placement, and the header plan. Do not hand-roll `anthropic-beta`, the billing block, `x-app`, or cache markers again.
+- All chat requests build through `buildClaudeCodeRequest` with the pinned `CLAUDE_CODE_2_1_288_PROFILE` (CLI 2.1.280, SDK 0.112.1). The builder owns the billing fingerprint block, the identity system block, beta composition, the `metadata.user_id` correlation triple, cache-breakpoint placement, and the header plan. Do not hand-roll `anthropic-beta`, the billing block, `x-app`, or cache markers again.
 - Keep `cacheControl: { enabled, systemBreakpoint, toolBreakpoint, messageBreakpoint, ttl: '1h' }` (the genuine client ships 1h cache markers), `stream: true`, `display: 'summarized'` on the thinking request, and `effort` plus `outputConfig: { effort }` when the model advertises efforts. The builder validates both against the pinned catalogue. Send no `accept` header — the genuine client sends none.
-- Identity: `sessionId` is the harness session id (a UUID fallback per request when absent), `deviceId` and `accountUuid` come from the stored `ClaudeSession` (minted/discovered at login, preserved across refresh, lazily backfilled for pre-upgrade sessions; a failed backfill fails the request with `INVALID_REQUEST` instead of sending a bogus triple). `deviceId` is minted as a 64-hex string (32 random bytes), the genuine client's format, never a UUID. `previousRequestId` chains the response `request-id` header into the next request's billing block, keyed by (canonical account, wire session) so a pool failover never chains another account's request id (bounded at 256 entries); a response without the header clears the chain. `cc_prompt_id` is a UUIDv4 minted on each new user prompt turn and reused across that turn's tool-continuation steps, matching the genuine client; probe/title-helper suppression is not modelled.
+- Identity: `sessionId` is the harness session id (a UUID fallback per request when absent), `deviceId` and `accountUuid` come from the stored `ClaudeSession` (minted/discovered at login, preserved across refresh, lazily backfilled for pre-upgrade sessions; a failed backfill fails the request with `INVALID_REQUEST` instead of sending a bogus triple). `deviceId` is minted as a 64-hex string (32 random bytes), the genuine client's format, never a UUID. `previousRequestId` chains the response `request-id` header into the next request's billing block, keyed by (canonical account, wire session) so a pool failover never chains another account's request id (bounded at 256 entries); a response without the header clears the chain. `cc_prompt_id` is derived deterministically from (wire session, prompt turn) by `claudePromptId`: the same session and turn always produce the same id and the same request bytes, while another session or the next turn differs. The value is model-visible, so the harness rule that anything a model sees must be reconstructable from the session log requires the derivation — a random UUID is not reconstructable. The turn's tool-continuation steps reuse it; probe/title-helper suppression is not modelled. The response's `request-id` header is recorded on that assistant message's replay envelope as `response.requestId`, the checkable counterpart of the `cc_prev_req` chain.
 - Pool failovers roll the wire session id: the first account span of a harness session reuses the harness session id verbatim (single-account sessions are unchanged), and every later account span gets a fresh UUID (`claudeWireSessionId`, bounded at 256), so one conversation never spans two account identities; switching back resumes the original id and chain.
 - Wire-builder rejections map through `mapClaudeWireError` to `INVALID_REQUEST` errors naming the wire code (`INVALID_EFFORT`, `INVALID_THINKING`, `UNSUPPORTED_CAPABILITY`, `CRYPTO_UNAVAILABLE`, `INVALID_IDENTITY`, `INVALID_UNICODE`, and the rest by default); `INPUT_TOO_LARGE` alone goes through the offload path. Do not let a `ClaudeCodeWireError` surface as a generic transport failure.
 - Oversize: the builder's `INPUT_TOO_LARGE` maps through `oversizeWireError` to the logged image-offload error; the exact-body 32 MB check stays in `assertClaudeRequestBytes`.
