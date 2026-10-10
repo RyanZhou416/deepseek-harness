@@ -115,7 +115,7 @@ export async function unionAccountCatalogs(
 export interface AccountStoreIo<S> {
   list(): Promise<AccountEntry<S>[]>
   get(account?: string): Promise<S | undefined>
-  save(account: string, session: S): Promise<void>
+  save(account: string, session: S, expectedPrior?: S): Promise<void>
   remove(account: string): Promise<void>
   /** Resolve a legacy alias to the canonical account key. */
   resolve?(account: string): Promise<string>
@@ -142,7 +142,13 @@ export class AccountTokenManager<S extends TimedSession> {
     this.io = options.io ?? {
       list: () => listAccounts(provider) as Promise<AccountEntry<S>[]>,
       get: account => getAccountSession(provider, account) as Promise<S | undefined>,
-      save: (account, session) => saveAccountSession(provider, account, session as never),
+      save: async (account, session, expectedPrior) => {
+        // The refusal is internal: a caller that named its prior only needs the write
+        // to have been considered, and the store stays the authority either way.
+        await saveAccountSession(provider, account, session as never, undefined, expectedPrior === undefined
+          ? {}
+          : { expectedPrior: expectedPrior as never })
+      },
       remove: account => deleteAccountSession(provider, account),
       resolve: account => resolveAccountKey(provider, account),
     }
@@ -212,8 +218,8 @@ export class AccountTokenManager<S extends TimedSession> {
         displayName: this.options.displayName,
         ...this.options.makeOptions(account),
         load: () => io.get(boundAccount),
-        save: async session => {
-          await io.save(boundAccount, session)
+        save: async (session, expectedPrior) => {
+          await io.save(boundAccount, session, expectedPrior)
           const canonical = await this.resolveAccount(boundAccount)
           if (canonical !== boundAccount) {
             // Move the binding as well as the cache entry: logout can delete

@@ -1,5 +1,6 @@
 import { execFileSync } from 'node:child_process'
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { withStoreLock } from './store-lock.js'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import type { ClaudeSession } from './store.js'
@@ -184,10 +185,14 @@ export async function refreshClaudeSynced(
   session: ClaudeSession,
   doRefresh: (session: ClaudeSession) => Promise<ClaudeSession>,
 ): Promise<ClaudeSession> {
-  const fromSource = readClaudeCodeCredentials()
-  const base = fromSource !== undefined && fromSource.accessToken !== session.accessToken ? fromSource : session
-  if (base.expiresAt > Date.now() + 60_000) return base
-  const next = await doRefresh(base)
-  writeBackClaudeCodeCredentials(next, base.accessToken)
-  return next
+  // Held across read-refresh-write so two processes sharing the account cannot both rotate
+  // its refresh token, which would invalidate whichever side lost the race.
+  return withStoreLock(credentialsFilePath(), async () => {
+    const fromSource = readClaudeCodeCredentials()
+    const base = fromSource !== undefined && fromSource.accessToken !== session.accessToken ? fromSource : session
+    if (base.expiresAt > Date.now() + 60_000) return base
+    const next = await doRefresh(base)
+    writeBackClaudeCodeCredentials(next, base.accessToken)
+    return next
+  })
 }

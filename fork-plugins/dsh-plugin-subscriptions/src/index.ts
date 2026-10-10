@@ -21,6 +21,7 @@ import type {} from '@deepseek-ai/dsh-tools'
 // Type-only: activates the `ctx.web` Context merge for optional registration.
 import type {} from '@deepseek-ai/dsh-web'
 import type { AttachmentStore, ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
+import { stopBridge } from './transport/claude-fetch.js'
 import { OAuthFlowManager, type OAuthAttempt } from './auth/oauth-flow.js'
 import { DeviceFlowManager, type DeviceAttempt } from './auth/device-flow.js'
 import { readFile } from 'node:fs/promises'
@@ -104,6 +105,7 @@ import {
   fetchClaudeUsage,
   isClaudePermanentRefreshError,
   refreshClaude,
+  carryClaudeIdentity,
 } from './providers/claude.js'
 import {
   GrokAdapter,
@@ -145,7 +147,7 @@ import type { CursorLoginHandle } from './providers/cursor.js'
 import { createXSearchTool } from './tools/x-search.js'
 import { createImageGenerateTool } from './tools/image-generate.js'
 import { createVideoGenerateTool, videosDirectory } from './tools/video-generate.js'
-import { ensureConnectAttemptTimeout, proxiedFetch, proxyGetConfig, proxySetConfig, proxyTestConnection, restoreConnectAttemptTimeout } from './http.js'
+import { proxiedFetch, proxyGetConfig, proxySetConfig, proxyTestConnection } from './http.js'
 import { ProviderSettingsStore, PROVIDER_TOOLS, validatePreferences } from './provider-settings.js'
 
 export type { ModelEntry, ProviderUsage, UsageWindow } from './providers/common.js'
@@ -171,6 +173,19 @@ export interface Config {
   providers?: ProviderId[]
   /** Maximum provider idle time while one stream read is outstanding (default five minutes). */
   streamIdleTimeoutMs?: number
+  /**
+   * What a Claude request tells the model about its own environment, in place of the harness
+   * identity section. Clamped to this route: the harness identity stays in force everywhere
+   * else. Empty omits the identity entirely.
+   */
+  claudeIdentityLine?: string
+  /**
+   * Whether a refresh of a keychain-imported Claude account is written back into Claude
+   * Code's own credential store. Off by default: that store belongs to another application,
+   * and a browser-authorized account never touches it. Turning it on keeps an installed
+   * `claude` CLI in sync with a rotation this plugin performs.
+   */
+  syncClaudeCodeCredentials?: boolean
   /** Whether and how long a route waits out a closed rate-limit window. */
   rateLimit?: RateLimitConfig
   /** Advisory model catalogs overriding the built-in defaults, per provider. */
@@ -230,6 +245,8 @@ export const Config: z<Config> = z.object({
   providers: z.array(providerIdSchema).default(['codex', 'claude', 'grok', 'copilot', 'antigravity', 'cursor']),
   codexClientVersion: z.string(),
   streamIdleTimeoutMs: z.number().min(1).default(DEFAULT_STREAM_IDLE_TIMEOUT_MS),
+  claudeIdentityLine: z.string(),
+  syncClaudeCodeCredentials: z.boolean(),
   rateLimit: z.object({
     wait: z.boolean().default(true),
     maxWaitMs: z.number().min(1).default(DEFAULT_RATE_LIMIT_MAX_WAIT_MS),
@@ -458,6 +475,15 @@ export class SubscriptionsAuthController implements AuthController {
     private readonly antigravityConfig: Config['antigravity'] = {},
     /** ChatGPT reset-credit operations. Other providers never call them. */
     private readonly resetCreditOps: CodexResetCreditOps | undefined = undefined,
+    /**
+     * Carries an account's frozen device identity onto a session a fresh authorization
+     * produced. Injected so both login paths can be driven without a token store; the
+     * plugin itself reads the stored session for that account, because re-authorizing
+     * must not change the device the account presents.
+     */
+    private readonly preserveClaudeIdentity: (
+      session: ClaudeSession,
+    ) => Promise<ClaudeSession> = async session => session,
   ) {}
 
   usage(provider: ProviderId, account: string, signal: AbortSignal, force = false): Promise<ProviderUsage> {
@@ -584,6 +610,13 @@ export class SubscriptionsAuthController implements AuthController {
   }
 
   async login(provider: ProviderId, method?: LoginMethod): Promise<{ authorizeUrl: string; userCode?: string }> {
+    if (provider === 'claude' && method === 'manual') {
+      // Cross-device: the browser authorizes elsewhere and shows the code, so this attempt
+      // opens no loopback listener and the code arrives through the paste path.
+      const attempt = await this.flows.start('claude', claudeFlow, { manual: true })
+      this.completions.set('claude', this.complete('claude', attempt, this.claim('claude')))
+      return { authorizeUrl: attempt.authorizeUrl }
+    }
     if (provider === 'claude' && method !== 'oauth') {
       const imported = this.readClaudeCreds()
       if (imported !== undefined) {
@@ -673,7 +706,12 @@ export class SubscriptionsAuthController implements AuthController {
   private async complete(provider: ProviderId, attempt: OAuthAttempt, claim: number): Promise<void> {
     try {
       const code = await attempt.waitCode()
-      const session = await this.exchange(provider, code, attempt)
+      const exchanged = await this.exchange(provider, code, attempt)
+      // Re-authorizing an account must not change the device it presents, so the earlier
+      // identity is carried onto the fresh session before it is stored.
+      const session = provider !== 'claude'
+        ? exchanged
+        : await this.preserveClaudeIdentity(exchanged as ClaudeSession) as StoredSession
       // Whoever claimed the session while the exchange ran owns it now, and
       // this result is stale. The check and the store call sit in one
       // synchronous stretch, and the store queues a write the moment it is
@@ -769,6 +807,7 @@ export class SubscriptionsAuthController implements AuthController {
     // Keyed by the account's stable identity: re-logging the same account
     // updates in place, a different account appends.
     return saveAccountSession(provider, accountKeyOf(provider, session), session as never)
+      .then(() => undefined)
   }
 
   /**
@@ -824,13 +863,16 @@ export function apply(ctx: Context, config: Config): void {
   const scheduling = resolvePoolScheduling(config.pool?.scheduling)
   // Outbound requests (catalog discovery, the npm version lookup, token
   // refresh) must survive links where one TCP handshake exceeds Node's 250ms
-  // Happy Eyeballs attempt budget; see MIN_CONNECT_ATTEMPT_TIMEOUT_MS.
-  const previousAttemptTimeout = ensureConnectAttemptTimeout()
-  ctx.effect(() => () => { restoreConnectAttemptTimeout(previousAttemptTimeout) }, 'dsh-plugin-subscriptions: connect attempt timeout')
+  // The Bun transport child is a process. Disabling or reloading the plugin has to
+  // take it down, or a reload leaves a live child holding a stdio pipe behind.
+  ctx.effect(() => () => { void stopBridge() }, 'dsh-plugin-subscriptions: bun transport child')
   const preferences = new ProviderSettingsStore()
   const codexVersion = new CodexClientVersionCache()
   const providers = [...new Set(config.providers ?? [...PROVIDER_IDS])]
   const streamIdleTimeoutMs = config.streamIdleTimeoutMs ?? DEFAULT_STREAM_IDLE_TIMEOUT_MS
+  // Claude Code's credential store belongs to another application; writing a rotation
+  // into it is opt-in, because a browser-authorized account never needs it.
+  const syncClaudeCodeCredentials = config.syncClaudeCodeCredentials === true
   if (!Number.isFinite(streamIdleTimeoutMs) || streamIdleTimeoutMs <= 0) {
     throw new Error(`${name}: streamIdleTimeoutMs must be a positive finite number`)
   }
@@ -872,7 +914,18 @@ export function apply(ctx: Context, config: Config): void {
     enabled: config.pool?.enabled !== false && (config.pool?.autoAccounts ?? config.pool?.autoFamilies ?? true),
     onWarn,
   })
+  let codexTokens: AccountTokenManager<CodexSession> | undefined
+  // DSH's search-provider probe is synchronous, so the Codex gate reads a cached flag
+  // that every login, logout and credential death refreshes.
+  let codexAccountPresent = false
+  const refreshCodexPresence = (): void => {
+    void codexTokens?.list().then(
+      (accounts) => { codexAccountPresent = accounts.length > 0 },
+      () => undefined,
+    )
+  }
   const authChanged = (provider: ProviderId, account?: string): void => {
+    if (provider === 'codex') refreshCodexPresence()
     subscriptionsAuth?.forgetResetCredits(provider, account)
     if (provider === 'codex' || provider === 'grok') imagePool.clear(provider, account)
     // Login, logout, and credential death all pass through here; a copilot
@@ -893,7 +946,6 @@ export function apply(ctx: Context, config: Config): void {
   void loadModelDefaults()
   // Token managers double as the tools' credential source, so they are
   // captured beside the registrations for the inject block below.
-  let codexTokens: AccountTokenManager<CodexSession> | undefined
   let codexResetCredits: CodexResetCreditOps | undefined
   let codexAutoReset: CodexAutoReset | undefined
   const recoverCodexQuota = async (account: string, signal?: AbortSignal): Promise<boolean> => {
@@ -939,6 +991,7 @@ export function apply(ctx: Context, config: Config): void {
           onAccountRemoved: account => { authChanged('codex', account) },
         })
         codexTokens = tokens
+        refreshCodexPresence()
         accountTokens.set('codex', tokens as AccountTokenManager<StoredSession>)
         const fetchUsage = async (account: string, signal: AbortSignal): Promise<ProviderUsage> =>
           fetchCodexUsage(await tokens.session(account), proxiedFetch, signal)
@@ -1014,7 +1067,9 @@ export function apply(ctx: Context, config: Config): void {
             // credential store; OAuth accounts refresh standalone so several
             // accounts never fight over the Keychain entry.
             refresh: session =>
-              session.keychainBound === true ? refreshClaudeSynced(session, refreshClaude) : refreshClaude(session),
+              session.keychainBound === true && syncClaudeCodeCredentials
+                ? refreshClaudeSynced(session, refreshClaude)
+                : refreshClaude(session),
             isPermanent: isClaudePermanentRefreshError,
           }),
           onAccountRemoved: account => { authChanged('claude', account) },
@@ -1022,9 +1077,12 @@ export function apply(ctx: Context, config: Config): void {
         claudeTokens = tokens
         accountTokens.set('claude', tokens as AccountTokenManager<StoredSession>)
         usageFetchers.claude = async (account, signal) =>
-          fetchClaudeUsage(await tokens.session(account), proxiedFetch, signal)
+          // Refresh-and-replay on rejection, as the client issues this request.
+          fetchClaudeUsage(await tokens.session(account), proxiedFetch, signal,
+            async () => (await tokens.session(account, true)).accessToken)
         const adapter = new ClaudeAdapter({
           models: catalog.claude,
+          ...config.claudeIdentityLine === undefined ? {} : { identityLine: config.claudeIdentityLine },
           streamIdleTimeoutMs,
           rateLimit,
           tokens,
@@ -1169,7 +1227,7 @@ export function apply(ctx: Context, config: Config): void {
           await tokens.session(account),
           proxiedFetch,
           signal,
-          next => saveAccountSession('cursor', account, next),
+          async next => { await saveAccountSession('cursor', account, next) },
         )
         adapters.set('cursor', adapter)
         handles.set('cursor', register('cursor', adapter))
@@ -1204,7 +1262,9 @@ export function apply(ctx: Context, config: Config): void {
         case 'claude': {
           const tokens = claudeTokens
           return tokens === undefined ? undefined : async () =>
-            fetchClaudeUsage(await tokens.session(account), proxiedFetch, AbortSignal.timeout(POOL_USAGE_TIMEOUT_MS))
+            fetchClaudeUsage(await tokens.session(account), proxiedFetch,
+              AbortSignal.timeout(POOL_USAGE_TIMEOUT_MS),
+              async () => (await tokens.session(account, true)).accessToken)
         }
         case 'grok': {
           const tokens = grokTokens
@@ -1402,6 +1462,13 @@ export function apply(ctx: Context, config: Config): void {
   subscriptionsAuth = new SubscriptionsAuthController(
     flows, deviceFlows, authChanged, resolveAttachments, usageFetchers, undefined, poolUsage, config.antigravity,
     codexResetCredits,
+    // A re-authorization keeps the device the account already presented, read from the
+    // session store. Without this, signing in again would mint a new device id and the
+    // machine values derived from it, silently changing the device the service sees.
+    async session => carryClaudeIdentity(
+      session,
+      await claudeTokens?.peek(accountKeyOf('claude', session)),
+    ) as ClaudeSession,
   )
   registerAuthRpc(ctx, subscriptionsAuth, speed, {
     get: () => proxyGetConfig(),
@@ -1476,7 +1543,7 @@ export function apply(ctx: Context, config: Config): void {
   // requests does not go stale from a token rotation that happened outside
   // this plugin (the `claude` CLI refreshing on its own, or another
   // consumer). OAuth-only accounts refresh on demand and are not touched.
-  if (claudeTokens !== undefined) {
+  if (claudeTokens !== undefined && syncClaudeCodeCredentials) {
     const tokens = claudeTokens
     const syncTimer = setInterval(() => {
       void tokens.list().then((accounts) => {
@@ -1506,8 +1573,11 @@ export function apply(ctx: Context, config: Config): void {
       webCtx.web.registerSearchProvider(new CodexWebSearchProvider({
         tokens,
         enabled: () => preferences.toolEnabled('codex', 'web_search'),
+        hasAccount: () => codexAccountPresent,
         fetchFn: proxiedFetch,
       }))
+      // Seed the flag: registration happens after the accounts are known.
+      refreshCodexPresence()
     })
   }
 

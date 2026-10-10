@@ -22,6 +22,16 @@ import {
   toAnthropicSystem,
   toAnthropicTools,
 } from '../src/translate/anthropic.js'
+
+/**
+ * One message's content as blocks. A mid-conversation system message carries its text as a
+ * plain string, which is what the genuine client sends, so the union is narrowed here.
+ * @param message - an assembled wire message.
+ * @returns its content blocks, or none for a string-carrying message.
+ */
+function blocksOf(message: { content: unknown }): readonly Record<string, unknown>[] {
+  return Array.isArray(message.content) ? (message.content as Record<string, unknown>[]) : []
+}
 import type { AnthropicStreamEvent } from '../src/translate/anthropic.js'
 import { resolveImages, type TranslatableBlock, type TranslatableMessage } from '../src/translate/resolved.js'
 import { toChatMessages } from '../src/translate/chat-completions.js'
@@ -247,7 +257,7 @@ test('tool-result images: resolve attachments and retain parallel results before
   assert.equal(reads, 1)
   assert.deepEqual(messages, before, 'must not mutate stored history')
   const anthropic = toAnthropicMessages(resolved)
-  for (const result of anthropic[1].content) {
+  for (const result of blocksOf(anthropic[1])) {
     assert.equal(result.type, 'tool_result')
     assert.deepEqual((result.content as unknown[])[1], {
       type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'aGk=' },
@@ -274,8 +284,8 @@ test('tool-result images: image-only errors, multiple images and separate turns 
     { role: 'user', content: [{ type: 'tool-result', toolCallId: ToolCallId('second'), content: [{ type: 'text', text: 'caption' }, image] }] },
   ]
   const anthropic = toAnthropicMessages(messages)
-  assert.deepEqual(anthropic[0].content.map(block => block.type), ['tool_use', 'tool_use'], 'parallel calls stay one assistant turn')
-  assert.equal(anthropic[2].content[0].type, 'text', 'the interleaved assistant text keeps its own turn')
+  assert.deepEqual(blocksOf(anthropic[0]).map(block => block.type), ['tool_use', 'tool_use'], 'parallel calls stay one assistant turn')
+  assert.equal(blocksOf(anthropic[2])[0]?.type, 'text', 'the interleaved assistant text keeps its own turn')
   const first = anthropic[1].content[0] as { is_error?: boolean; content?: unknown[] }
   assert.equal(first.is_error, true)
   assert.equal((first.content as unknown[]).length, 2, 'an image-only result keeps both images')
@@ -790,6 +800,140 @@ test('Anthropic translator keeps redacted thinking data on the finish envelope',
   })
 })
 
+test('Anthropic translator captures server tool blocks with their insertion positions', () => {
+  const chunks = drain(new AnthropicStreamTranslator(), [
+    { type: 'message_start', message: { usage: { input_tokens: 3 } } },
+    { type: 'content_block_start', index: 0, content_block: { type: 'text' } },
+    { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'searching' } },
+    { type: 'content_block_stop', index: 0 },
+    {
+      type: 'content_block_start',
+      index: 1,
+      content_block: { type: 'server_tool_use', id: 'srvtoolu-1', name: 'tool_search_tool_regex', input: {} },
+    },
+    { type: 'content_block_delta', index: 1, delta: { type: 'input_json_delta', partial_json: '{"query":' } },
+    { type: 'content_block_delta', index: 1, delta: { type: 'input_json_delta', partial_json: '"lint"}' } },
+    { type: 'content_block_stop', index: 1 },
+    {
+      type: 'content_block_start',
+      index: 2,
+      content_block: {
+        type: 'tool_search_tool_result',
+        tool_use_id: 'srvtoolu-1',
+        content: { type: 'tool_search_tool_search_result', tool_references: [{ type: 'tool_reference', tool_name: 'lint' }] },
+      },
+    },
+    { type: 'content_block_stop', index: 2 },
+    { type: 'content_block_start', index: 3, content_block: { type: 'text' } },
+    { type: 'content_block_delta', index: 3, delta: { type: 'text_delta', text: 'found it' } },
+    { type: 'content_block_stop', index: 3 },
+    { type: 'message_delta', delta: { stop_reason: 'end_turn' }, usage: { output_tokens: 6 } },
+    { type: 'message_stop' },
+  ])
+
+  const finish = chunks.at(-1)
+  assert.equal(finish?.type, 'finish')
+  if (finish?.type !== 'finish') return
+  // The server blocks occupy no harness block, so both sit ahead of the second text block
+  // and the per-block entries stay aligned with the harness blocks the model streamed.
+  assert.deepEqual(finish.replayState, {
+    response: {
+      kind: 'claude',
+      version: 1,
+      serverBlocks: [
+        {
+          index: 1,
+          block: { type: 'server_tool_use', id: 'srvtoolu-1', name: 'tool_search_tool_regex', input: { query: 'lint' } },
+        },
+        {
+          index: 1,
+          block: {
+            type: 'tool_search_tool_result',
+            tool_use_id: 'srvtoolu-1',
+            content: { type: 'tool_search_tool_search_result', tool_references: [{ type: 'tool_reference', tool_name: 'lint' }] },
+          },
+        },
+      ],
+    },
+    blocks: [{}, {}],
+  })
+  const ends = chunks.filter(chunk => chunk.type === 'block-end')
+  assert.deepEqual(
+    ends.map(chunk => (chunk.type === 'block-end' ? chunk.block.type : '')),
+    ['text', 'text'],
+  )
+})
+
+test('toAnthropicMessages splices captured server blocks back in verbatim', () => {
+  const chunks = drain(new AnthropicStreamTranslator(), [
+    { type: 'message_start', message: { usage: { input_tokens: 3 } } },
+    { type: 'content_block_start', index: 0, content_block: { type: 'text' } },
+    { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'searching' } },
+    { type: 'content_block_stop', index: 0 },
+    {
+      type: 'content_block_start',
+      index: 1,
+      content_block: { type: 'server_tool_use', id: 'srvtoolu-1', name: 'tool_search_tool_regex', input: {} },
+    },
+    { type: 'content_block_delta', index: 1, delta: { type: 'input_json_delta', partial_json: '{"query":"lint"}' } },
+    { type: 'content_block_stop', index: 1 },
+    {
+      type: 'content_block_start',
+      index: 2,
+      content_block: {
+        type: 'tool_search_tool_result',
+        tool_use_id: 'srvtoolu-1',
+        content: { type: 'tool_search_tool_search_result', tool_references: [{ type: 'tool_reference', tool_name: 'lint' }] },
+      },
+    },
+    { type: 'content_block_stop', index: 2 },
+    { type: 'content_block_start', index: 3, content_block: { type: 'text' } },
+    { type: 'content_block_delta', index: 3, delta: { type: 'text_delta', text: 'found it' } },
+    { type: 'content_block_stop', index: 3 },
+    { type: 'message_delta', delta: { stop_reason: 'end_turn' }, usage: { output_tokens: 6 } },
+    { type: 'message_stop' },
+  ])
+  const finish = chunks.at(-1)
+  assert.ok(finish?.type === 'finish' && finish.replayState !== undefined)
+
+  const messages = toAnthropicMessages([
+    message('user', [{ type: 'text', text: 'find a tool' }]),
+    message('assistant', [
+      { type: 'text', text: 'searching' },
+      { type: 'text', text: 'found it' },
+    ], {
+      kind: 'model',
+      provider: 'claude',
+      model: 'claude-opus-5-5',
+      replayState: finish.replayState,
+    }),
+  ], 'claude-opus-5-5')
+
+  assert.deepEqual(blocksOf(messages[0]), [{ type: 'text', text: 'find a tool' }])
+  assert.deepEqual(blocksOf(messages[1]), [
+    { type: 'text', text: 'searching' },
+    { type: 'server_tool_use', id: 'srvtoolu-1', name: 'tool_search_tool_regex', input: { query: 'lint' } },
+    {
+      type: 'tool_search_tool_result',
+      tool_use_id: 'srvtoolu-1',
+      content: { type: 'tool_search_tool_search_result', tool_references: [{ type: 'tool_reference', tool_name: 'lint' }] },
+    },
+    { type: 'text', text: 'found it' },
+  ])
+})
+
+test('Anthropic translator records nothing for a response with no replayable block', () => {
+  const chunks = drain(new AnthropicStreamTranslator(), [
+    { type: 'message_start', message: { usage: { input_tokens: 2 } } },
+    { type: 'content_block_start', index: 0, content_block: { type: 'text' } },
+    { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'ok' } },
+    { type: 'content_block_stop', index: 0 },
+    { type: 'message_delta', delta: { stop_reason: 'end_turn' }, usage: { output_tokens: 1 } },
+    { type: 'message_stop' },
+  ])
+  assert.deepEqual(chunks.at(-1), { type: 'finish', reason: { kind: 'stop' } })
+})
+
 test('Anthropic translator: stop reasons and empty completion', () => {
   const maxed = drain(new AnthropicStreamTranslator(), [
     { type: 'message_start', message: { usage: { input_tokens: 5 } } },
@@ -838,4 +982,27 @@ test('Anthropic translator: error event mapping', () => {
     () => auth.push({ type: 'error', error: { type: 'authentication_error', message: 'bad token' } }),
     (error: unknown) => error instanceof LlmError && error.code === 'AUTH',
   )
+})
+
+test('blank text blocks are dropped from a request, and a message left empty gets a placeholder', () => {
+  // The API rejects a text block whose content is whitespace-only, and the genuine
+  // client strips such blocks before sending and substitutes a placeholder when a
+  // message is left with none.
+  const anthropic = toAnthropicMessages([
+    { role: 'user', content: [{ type: 'text', text: '   ' }] },
+    { role: 'assistant', content: [{ type: 'text', text: 'kept' }, { type: 'text', text: '\n\t' }] },
+  ] as never)
+  assert.deepEqual(anthropic[0].content, [{ type: 'text', text: '(no content)' }])
+  assert.deepEqual(anthropic[1].content, [{ type: 'text', text: 'kept' }])
+})
+
+test('Anthropic translator: a refusal is reported as its own finish reason', () => {
+  const events: AnthropicStreamEvent[] = [
+    { type: 'message_start', message: { usage: { input_tokens: 1 } } },
+    { type: 'message_delta', delta: { stop_reason: 'refusal' }, usage: { output_tokens: 0 } },
+    { type: 'message_stop' },
+  ]
+  const chunks = drain(new AnthropicStreamTranslator(), events)
+  const finish = chunks.find(chunk => chunk.type === 'finish')
+  assert.deepEqual(finish, { type: 'finish', reason: { kind: 'refusal' } })
 })

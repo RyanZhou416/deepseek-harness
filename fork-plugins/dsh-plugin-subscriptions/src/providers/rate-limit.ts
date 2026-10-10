@@ -291,7 +291,7 @@ export interface RetryDefaults {
  * numbers — ten retries after the first attempt, exponential backoff from 1s
  * doubling per attempt, capped at 60s, plus 20% jitter.
  *
- * Shared across all four routes rather than kept to claude, because what these
+ * Shared across all six routes rather than kept to claude, because what these
  * numbers are tuned for is the shape of a subscription endpoint — a consumer
  * plan behind a session window, which sheds load in bursts and rewards an
  * attempt that outlasts them — and that is the same on all four. The dsh-llm
@@ -368,15 +368,18 @@ export function subscriptionRetryPolicy(
   rateLimit: RateLimitWait,
   path: string,
 ): ResolvedRetryPolicy {
-  const maxDelayMs = rateLimit.wait
-    ? Math.max(defaults.maxDelayMs, rateLimit.maxWaitMs)
-    : defaults.maxDelayMs
+  // The route's own backoff keeps its own ceiling; the configured wait bounds only what a
+  // provider may ask us to sit out. One field for both would let a local backoff grow into
+  // hours, or make a disclosed reset beyond a minute fail a turn the client would wait out.
+  const maxDelayMs = defaults.maxDelayMs
+  const providerWaitMaxMs = rateLimit.wait ? rateLimit.maxWaitMs : defaults.maxDelayMs
   return resolveRetryPolicy({
     mode: 'normal',
     maxRetries: defaults.maxRetries,
     backoff: {
       initialDelayMs: defaults.initialDelayMs,
       maxDelayMs,
+      providerWaitMaxMs,
       jitterRatio: defaults.jitterRatio,
     },
   }, path)

@@ -8,6 +8,7 @@ import {
   CodexWebSearchProvider,
   normalizeCodexSearchResponse,
 } from '../src/providers/codex-search.js'
+import { LlmError } from '@deepseek-ai/dsh-llm'
 import type { CodexSession } from '../src/auth/store.js'
 
 const session: CodexSession = {
@@ -17,6 +18,9 @@ const session: CodexSession = {
 function provider(fetchFn: typeof fetch, sessionFn = async () => session) {
   return new CodexWebSearchProvider({
     tokens: { session: sessionFn }, fetchFn, requestId: () => 'request-1', retryBaseMs: 0,
+    // DSH's probe is synchronous and the plugin answers it from a cached account flag;
+    // these tests exercise the provider, so a resolvable account is the precondition.
+    hasAccount: () => true,
   })
 }
 
@@ -82,11 +86,24 @@ test('Codex Web Search retries transient failures but not rate limits', async ()
   assert.equal(attempts, 1)
 })
 
-test('Codex Web Search fails before dispatch without authentication', async () => {
+test('Codex Web Search reports a login problem only for credential failures', async () => {
   let fetched = false
-  const search = provider(async () => { fetched = true; return new Response() }, async () => { throw new Error('logged out') })
-  await assert.rejects(search.search({ query: 'q' }),
+  const loggedOut = provider(
+    async () => { fetched = true; return new Response() },
+    async () => { throw new LlmError('not logged in', 'MISSING_CREDENTIAL') },
+  )
+  await assert.rejects(loggedOut.search({ query: 'q' }),
     (error: unknown) => (error as { code?: string }).code === 'CODEX_AUTH_REQUIRED')
+  assert.equal(fetched, false, 'nothing is dispatched without a credential')
+
+  // A transient failure must surface as itself: telling the user to log in again would be
+  // wrong, and would hide the real cause.
+  const blip = provider(
+    async () => { fetched = true; return new Response() },
+    async () => { throw new LlmError('refresh blip', 'AUTH') },
+  )
+  await assert.rejects(blip.search({ query: 'q' }),
+    (error: unknown) => (error as { code?: string }).code === 'AUTH')
   assert.equal(fetched, false)
 })
 
@@ -104,7 +121,7 @@ test('the Codex web_search switch drives provider availability, not the host too
 
   let enabled = true
   const gated = new CodexWebSearchProvider({
-    tokens: { session: async () => session }, fetchFn, enabled: () => enabled,
+    tokens: { session: async () => session }, fetchFn, enabled: () => enabled, hasAccount: () => true,
   })
   assert.equal(gated.available(), true)
   enabled = false
@@ -120,6 +137,7 @@ test('a disabled Codex provider releases the seam instead of holding it', async 
     tokens: { session: async () => session },
     fetchFn: async () => new Response(JSON.stringify({ output: 'codex', results: [] })),
     enabled: () => enabled,
+    hasAccount: () => true,
   }))
   // Sole provider, switched off: the seam reports its own unavailable error
   // rather than running Codex or losing the host's tool.

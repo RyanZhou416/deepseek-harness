@@ -99,7 +99,7 @@ export interface ProviderStatus {
 }
 
 /** How a Claude login should acquire credentials (other providers ignore it). */
-export type LoginMethod = 'oauth' | 'keychain'
+export type LoginMethod = 'oauth' | 'keychain' | 'manual'
 
 /** Proxy config operations behind the `proxyGet/proxySet/proxyTest` endpoints. */
 export interface ProxyConfigController {
@@ -365,8 +365,8 @@ function readLoginMethod(payload: unknown, provider: ProviderId): LoginMethod | 
   const method = (payload as Record<string, unknown>).method
   if (method === undefined) return undefined
   if (provider !== 'claude') throw new BadRequest('payload.method is only valid for claude')
-  if (method !== 'oauth' && method !== 'keychain') {
-    throw new BadRequest('payload.method must be "oauth" or "keychain"')
+  if (method !== 'oauth' && method !== 'keychain' && method !== 'manual') {
+    throw new BadRequest('payload.method must be "oauth", "keychain", or "manual"')
   }
   return method
 }

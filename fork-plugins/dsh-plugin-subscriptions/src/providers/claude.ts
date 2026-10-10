@@ -14,6 +14,7 @@ import type {
   LlmResolvedModelInfo,
   StreamChunk,
 } from '@deepseek-ai/dsh-llm'
+import { CLAUDE_CODE_2_1_288_PROFILE } from '@tormentalabs/claude-code-wire-compat'
 import type { BuiltClaudeCodeRequest } from '@tormentalabs/claude-code-wire-compat'
 import type { FlowSpec } from '../auth/oauth-flow.js'
 import type { ClaudeSession } from '../auth/store.js'
@@ -22,17 +23,20 @@ import type { PoolAdapter } from './pool.js'
 import type { AttachmentStore } from '@deepseek-ai/dsh-attachment'
 import { resolveImages } from '../translate/resolved.js'
 import { assertClaudeRequestBytes, claudeImagePolicy } from './claude-images.js'
+import { desktopClientHeaders, desktopMachineProfile } from './claude-desktop.js'
 import type { ResolvedImagePart, TranslatableBlock, TranslatableMessage } from '../translate/resolved.js'
 import {
   streamAnthropic,
 } from '../translate/anthropic.js'
 import {
-  buildClaudeWireRequest,
+  CLAUDE_PLAIN_USER_AGENT,
   CLAUDE_USER_AGENT,
+  buildClaudeWireRequest,
   claudeWireSessionId,
   mapClaudeWireError,
   rememberClaudeRequestId,
 } from './claude-wire.js'
+import { STALE_TOOL_RESULT_IDLE_MS, planContextManagement } from './context-management.js'
 import type { ClaudeWireThinking } from './claude-wire.js'
 import {
   httpLlmError,
@@ -50,9 +54,11 @@ import {
 import { AccountTokenManager, DISCOVERY_TIMEOUT_MS, unionAccountCatalogs } from './accounts.js'
 import type { CatalogPersistence, DiscoveredModel, FetchFn, ModelEntry, ProviderUsage, UsageWindow } from './common.js'
 import { proxiedFetch } from '../http.js'
+import { claudeApiFetch } from '../transport/claude-fetch.js'
 import {
   DEFAULT_RATE_LIMIT_WAIT,
   DEFAULT_RETRY,
+  type RetryDefaults,
   earliestReset,
   jsonBody,
   resetFromFields,
@@ -62,11 +68,146 @@ import {
 import type { RateLimitResetReader, RateLimitWait } from './rate-limit.js'
 
 export const CLAUDE_CLIENT_ID = '9d1c250a-e61b-44d9-88ed-5944d1962f5e'
-export const CLAUDE_AUTHORIZE_URL = 'https://claude.ai/oauth/authorize'
-export const CLAUDE_TOKEN_URL = 'https://claude.ai/v1/oauth/token'
+/**
+ * OAuth hosts, as the client pins them.
+ *
+ * The authorize page for a claude.ai account lives on claude.com; the console variant
+ * lives on platform.claude.com, which is also the token host; this plugin takes the
+ * claude.ai path only. The client additionally
+ * honours CLAUDE_CODE_CUSTOM_OAUTH_URL, restricting it to a list of approved endpoints
+ * that is not reproduced here: an operator setting it is choosing the endpoint, and a
+ * weaker host check would only mislead. It is accepted over https only.
+ */
+const CLAUDE_OAUTH_ORIGIN = ((): string | undefined => {
+  const raw = process.env.CLAUDE_CODE_CUSTOM_OAUTH_URL
+  if (raw === undefined || raw.trim() === '') return undefined
+  const trimmed = raw.trim().replace(/\/+$/, '')
+  let parsed: URL
+  try {
+    parsed = new URL(trimmed)
+  } catch {
+    throw new Error(
+      'CLAUDE_CODE_CUSTOM_OAUTH_URL must be an absolute https URL, e.g. https://gateway.example/oauth',
+    )
+  }
+  if (parsed.protocol !== 'https:') {
+    throw new Error('CLAUDE_CODE_CUSTOM_OAUTH_URL must use https: the token endpoint receives this account\'s tokens')
+  }
+  return trimmed
+})()
+
+export const CLAUDE_AUTHORIZE_URL = CLAUDE_OAUTH_ORIGIN === undefined
+  ? 'https://claude.com/cai/oauth/authorize'
+  : `${CLAUDE_OAUTH_ORIGIN}/oauth/authorize`
+export const CLAUDE_TOKEN_URL = CLAUDE_OAUTH_ORIGIN === undefined
+  ? 'https://platform.claude.com/v1/oauth/token'
+  : `${CLAUDE_OAUTH_ORIGIN}/v1/oauth/token`
+/**
+ * Usage reads that are already in flight, keyed by the access token they carry.
+ *
+ * The genuine client answers a second caller from the request already running rather than
+ * starting another, and its own request carries a five-second bound with its own abort
+ * controller rather than the caller's. Sharing the read is what keeps several sessions
+ * polling one account from multiplying the load on an endpoint that rate-limits
+ * unrecognised clients aggressively.
+ */
+const usageInFlight = new Map<string, Promise<Record<string, unknown>>>()
+
+/** The bound the client puts on one usage read. */
+const USAGE_TIMEOUT_MS = 5_000
+
+/**
+ * Supplies a fresh access token after the service rejects the current one.
+ *
+ * The genuine client issues its usage request with refresh-and-replay enabled, so a
+ * token that expired between the last refresh and the request costs one retry rather
+ * than the whole poll.
+ */
+export type ClaudeReauthorize = () => Promise<string>
+
 export const CLAUDE_PROFILE_URL = 'https://api.anthropic.com/api/oauth/profile'
-export const CLAUDE_MODELS_URL = 'https://api.anthropic.com/v1/models?beta=true'
-export const CLAUDE_SCOPE = 'org:create_api_key user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload'
+/**
+ * The model-options endpoint the client uses on the first-party path.
+ *
+ * `/v1/models` is not part of that path at all — the client reaches it only under the
+ * gateway's own discovery switch — so calling it here would be a request the genuine client
+ * never sends. This one supplements a catalogue the client already carries, and a response
+ * that fails its shape is discarded rather than treated as a failure.
+ */
+export const CLAUDE_BOOTSTRAP_URL = 'https://api.anthropic.com/api/claude_cli/bootstrap'
+
+/**
+ * The ATIS token each account's bootstrap read carried, keyed by account.
+ *
+ * The client attaches it to the requests it sends through the first-party client, taking it
+ * from the conversation's latch or, before one is set, from the bootstrapped client data.
+ * A read that discloses none leaves the account without one, and no header is sent.
+ */
+const clientAtis = new Map<string, string>()
+
+/**
+ * The ATIS token recorded for an account.
+ *
+ * @param account - the account the request belongs to.
+ * @returns the token, or undefined when no read has disclosed one.
+ */
+export function clientAtisFor(account: string): string | undefined {
+  return clientAtis.get(account)
+}
+
+/** The entrypoint value the desktop's client reports on this endpoint. */
+const CLAUDE_DESKTOP_ENTRYPOINT = 'claude-desktop'
+
+/**
+ * The model a listing stands in with.
+ *
+ * The client asks this endpoint while a session is running and always has a current model to
+ * name. A listing has none, and the request must still carry the parameter, so the pinned
+ * profile's own first catalogue entry is used.
+ *
+ * @returns a catalogue model id.
+ */
+function newestCatalogueModel(): string {
+  // The release this profile pins adds exactly one model, and that is the one a desktop
+  // running it is most likely to be asking about.
+  const models = CLAUDE_CODE_2_1_288_PROFILE.supportedModels
+  if (Object.hasOwn(models, 'claude-sonnet-5-5')) return 'claude-sonnet-5-5'
+  const ids = Object.keys(models)
+  return ids[ids.length - 1] ?? 'claude-opus-5'
+}
+
+/**
+ * The scope string a refresh grant carries.
+ *
+ * @param scopes - the scopes the session was granted.
+ * @returns the same set without the authorize-only scope.
+ */
+function refreshScopes(scopes: string): string {
+  return scopes.split(/\s+/).filter(scope => scope.length > 0 && scope !== 'org:create_api_key').join(' ')
+}
+
+/**
+ * The client's local retry shape.
+ *
+ * A base of 500 ms doubling to a 32 s ceiling, with proportional jitter, which is what the
+ * carve's backoff helper carries. The ceiling the policy resolves also covers a disclosed
+ * wait, which is why it is paired with the one below.
+ */
+const CLAUDE_RETRY: RetryDefaults = Object.freeze({
+  ...DEFAULT_RETRY,
+  initialDelayMs: 500,
+  maxDelayMs: 32_000,
+  jitterRatio: 0.25,
+})
+
+/** The bound the client puts on a profile read. */
+const PROFILE_TIMEOUT_MS = 10_000
+
+/** The bound the client puts on a bootstrap read. */
+const BOOTSTRAP_TIMEOUT_MS = 5_000
+export const CLAUDE_SCOPE = 'org:create_api_key user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload user:plugins'
+// `user:plugins` is appended last by the client's own scope assembly when the plugin
+// scope is registered, which it is in production.
 export const CLAUDE_CALLBACK_PATH = '/callback'
 // Fallbacks only when discovery is unavailable or the model omits its limits.
 const CLAUDE_CONTEXT_WINDOW = 200_000
@@ -154,8 +295,9 @@ export async function uploadClaudeFile(
     headers: {
       'authorization': `Bearer ${accessToken}`,
       'anthropic-version': '2023-06-01',
-      'anthropic-beta': 'files-api-2025-04-14',
-      'user-agent': CLAUDE_USER_AGENT,
+      // The client composes this request's beta list from both registry entries.
+      'anthropic-beta': 'files-api-2025-04-14,oauth-2025-04-20',
+      'user-agent': CLAUDE_PLAIN_USER_AGENT,
     },
     body: form,
     ...signal === undefined ? {} : { signal },
@@ -234,9 +376,18 @@ export async function bindClaudeFileIds(
   return changed ? next : messages
 }
 
+/**
+ * Where claude.com sends a browser that cannot reach this machine.
+ *
+ * The page displays the authorization code for the user to copy back, which is what makes a
+ * login started on one device finish on another.
+ */
+export const CLAUDE_MANUAL_REDIRECT_URL = 'https://platform.claude.com/oauth/code/callback'
+
 /** Static claude flow facts for the OAuth flow engine. */
 export const claudeFlow: FlowSpec = {
   callbackPath: CLAUDE_CALLBACK_PATH,
+  manualRedirectUri: CLAUDE_MANUAL_REDIRECT_URL,
   // The redirect URI embeds the port, so it must be an ephemeral one.
   listen: { host: 'localhost', ports: [0] },
   buildAuthorizeUrl({ redirectUri, state, pkce }) {
@@ -275,12 +426,29 @@ async function fetchClaudeProfile(
   accessToken: string,
   fetchFn: FetchFn = proxiedFetch,
   signal?: AbortSignal,
+  reauthorize?: ClaudeReauthorize,
 ): Promise<Pick<ClaudeSession, 'emailAddress' | 'subscriptionType' | 'accountUuid'>> {
   try {
-    const response = await fetchFn(CLAUDE_PROFILE_URL, {
-      headers: { authorization: `Bearer ${accessToken}` },
-      ...signal === undefined ? {} : { signal },
-    })
+    const request = (token: string): Promise<Response> =>
+      fetchFn(CLAUDE_PROFILE_URL, {
+        headers: {
+          authorization: `Bearer ${token}`,
+          // Matches the client's own profile request: a bodyless JSON GET carrying the
+          // plain user agent, under the ten-second bound the client gives it.
+          'user-agent': CLAUDE_PLAIN_USER_AGENT,
+          'content-type': 'application/json',
+          'cache-control': 'no-cache',
+        },
+        signal: signal === undefined
+          ? AbortSignal.timeout(PROFILE_TIMEOUT_MS)
+          : AbortSignal.any([signal, AbortSignal.timeout(PROFILE_TIMEOUT_MS)]),
+      })
+    // Replayed once after a rejection, then reported as it stands: the client retries
+    // this request after refreshing rather than giving up on the first 401.
+    let response = await request(accessToken)
+    if (response.status === 401 && reauthorize !== undefined) {
+      response = await request(await reauthorize())
+    }
     if (!response.ok) return {}
     const profile = await response.json() as Record<string, unknown>
     const account = typeof profile.account === 'object' && profile.account !== null
@@ -321,9 +489,13 @@ async function claudeSession(
     refreshToken,
     expiresAt: Date.now() + tokens.expires_in * 1000,
     scopes: tokens.scope ?? CLAUDE_SCOPE,
-    // The wire correlation triple mints its device id once per account. The
-    // genuine client uses a 64-hex string (32 random bytes), not a UUID.
-    deviceId: randomBytes(32).toString('hex'),
+    // The wire correlation triple's device id, in the client's 64-hex format. Derived
+    // from the account rather than minted per credential, so signing out and in again
+    // presents the same device.
+    deviceId: claudeDeviceIdFor({
+      ...profile.emailAddress === undefined ? {} : { emailAddress: profile.emailAddress },
+      ...profile.accountUuid === undefined ? {} : { accountUuid: profile.accountUuid },
+    }),
     ...profile,
   }
 }
@@ -336,6 +508,98 @@ async function claudeSession(
  * @param state - the attempt's state (echoed to the token endpoint).
  * @returns the session to store.
  */
+/**
+ * Settle with `pending`, or reject as soon as the caller stops waiting.
+ *
+ * The shared read is deliberately not cancelled: another caller may be waiting on it, and
+ * the client's own request carries its own abort controller for the same reason.
+ *
+ * @param pending - the shared request.
+ * @param signal - the caller's own cancellation.
+ * @returns the shared request's outcome, once it arrives.
+ */
+function raceWithSignal<T>(pending: Promise<T>, signal: AbortSignal): Promise<T> {
+  if (signal.aborted) return Promise.reject(abortError(signal))
+  return new Promise<T>((resolve, reject) => {
+    const stop = (): void => { reject(abortError(signal)) }
+    signal.addEventListener('abort', stop, { once: true })
+    pending.then(
+      (value) => { signal.removeEventListener('abort', stop); resolve(value) },
+      (error: unknown) => { signal.removeEventListener('abort', stop); reject(error) },
+    )
+  })
+}
+
+/**
+ * The reason a caller's cancellation carries.
+ *
+ * @param signal - the aborted signal.
+ * @returns the abort reason, or a fresh abort error.
+ */
+function abortError(signal: AbortSignal): Error {
+  const reason: unknown = signal.reason
+  if (reason instanceof Error) return reason
+  return new Error('claude usage request aborted')
+}
+
+/**
+ * The device id one account presents.
+ *
+ * Derived from the account's own key instead of being minted at random, so it survives
+ * every path that recreates the stored session: signing out and in again, a re-import from
+ * Claude Code's own credential store, or a fresh authorization. The genuine client keeps
+ * its id outside its credentials and therefore survives all of these; an id that died with
+ * the credential would silently present a different device to the service.
+ *
+ * @param accountKey - The account's key, which is the address it signed in with.
+ * @returns A 64-character lowercase hex id, the format the client uses.
+ */
+export function deriveClaudeDeviceId(accountKey: string): string {
+  return createHash('sha256').update(`claude-device-id:${accountKey}`).digest('hex')
+}
+
+/**
+ * The device id for a session, from whichever account field the profile disclosed.
+ *
+ * @param session - The session or profile that carries the account's identity.
+ * @returns The derived id, or a random one when no account field is known yet.
+ */
+function claudeDeviceIdFor(session: {
+  emailAddress?: string
+  accountUuid?: string
+}): string {
+  const key = session.emailAddress ?? session.accountUuid
+  return key === undefined ? randomBytes(32).toString('hex') : deriveClaudeDeviceId(key)
+}
+
+/**
+ * Carry an account's frozen device identity onto a freshly authorized session.
+ *
+ * The device id is minted once per account and must survive re-authorization: every
+ * machine value a request declares is derived from it, so a new id would silently change
+ * the device the service sees. The genuine client behaves the same way, keeping one id for
+ * the life of its installation rather than issuing one per sign-in.
+ *
+ * @param next - The session the authorization just produced.
+ * @param previous - The stored session for the same account, when there is one.
+ * @returns The session to store, with the earlier identity preserved.
+ */
+export function carryClaudeIdentity(
+  next: ClaudeSession,
+  previous: ClaudeSession | undefined,
+): ClaudeSession {
+  if (previous?.deviceId === undefined) return next
+  return {
+    ...next,
+    deviceId: previous.deviceId,
+    // The profile lookup is best-effort, so a re-authorization that could not read it
+    // keeps the value the account already had rather than dropping the correlation.
+    ...next.accountUuid === undefined && previous.accountUuid !== undefined
+      ? { accountUuid: previous.accountUuid }
+      : {},
+  }
+}
+
 export async function exchangeClaudeCode(
   code: string,
   verifier: string,
@@ -343,6 +607,8 @@ export async function exchangeClaudeCode(
   state: string,
 ): Promise<ClaudeSession> {
   const response = await proxiedFetch(CLAUDE_TOKEN_URL, {
+      // A redirect would replay the code or refresh token to another host.
+      redirect: 'error',
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({
@@ -365,13 +631,18 @@ export async function exchangeClaudeCode(
  */
 export async function refreshClaude(session: ClaudeSession): Promise<ClaudeSession> {
   const response = await proxiedFetch(CLAUDE_TOKEN_URL, {
+      // A redirect would replay the code or refresh token to another host.
+      redirect: 'error',
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({
       grant_type: 'refresh_token',
       refresh_token: session.refreshToken,
       client_id: CLAUDE_CLIENT_ID,
-      scope: session.scopes,
+      // The client never asks for `org:create_api_key` when refreshing; that scope belongs to
+      // the authorize request. Everything else the account was granted is echoed back, so a
+      // project scope stays intact.
+      scope: refreshScopes(session.scopes),
     }),
   })
   if (!response.ok) throw await oauthEndpointError(response, 'claude')
@@ -464,20 +735,61 @@ export async function fetchClaudeUsage(
   session: ClaudeSession,
   fetchFn: FetchFn = proxiedFetch,
   signal?: AbortSignal,
+  reauthorize?: ClaudeReauthorize,
+  timeoutMs: number = USAGE_TIMEOUT_MS,
 ): Promise<ProviderUsage> {
-  const response = await fetchFn(CLAUDE_USAGE_URL, {
-    headers: {
-      'authorization': `Bearer ${session.accessToken}`,
-      'anthropic-beta': 'oauth-2025-04-20',
-      // Unrecognized clients are aggressively rate-limited on this endpoint,
-      // so it presents as the CLI like every other subscription request.
-      'user-agent': CLAUDE_USER_AGENT,
-      'accept': 'application/json',
-    },
-    ...signal === undefined ? {} : { signal },
-  })
-  if (!response.ok) throw await oauthEndpointError(response, 'claude usage')
-  const payload = await response.json() as Record<string, unknown>
+  const request = (accessToken: string, requestSignal: AbortSignal): Promise<Response> =>
+    fetchFn(CLAUDE_USAGE_URL, {
+      headers: {
+        'authorization': `Bearer ${accessToken}`,
+        'anthropic-beta': 'oauth-2025-04-20',
+        // Unrecognized clients are aggressively rate-limited on this endpoint,
+        // so it presents as the CLI like every other subscription request.
+        'user-agent': CLAUDE_USER_AGENT,
+        'accept': 'application/json',
+        // The client sends a JSON content type on this request even though it has no body.
+        'content-type': 'application/json',
+      },
+      signal: requestSignal,
+    })
+
+  // The client issues this request with refresh-and-replay enabled, so an access token
+  // that expired since the last refresh costs one retry instead of the poll. The whole
+  // read is shared: a second caller waits on the request already running.
+  const read = (accessToken: string): Promise<Record<string, unknown>> => {
+    const existing = usageInFlight.get(accessToken)
+    if (existing !== undefined) return existing
+    const controller = new AbortController()
+    const timer = setTimeout(() => { controller.abort() }, timeoutMs)
+    timer.unref?.()
+    const pending = (async (): Promise<Record<string, unknown>> => {
+      try {
+        const first = await request(accessToken, controller.signal)
+        const response = first.status === 401 && reauthorize !== undefined
+          ? await request(await reauthorize(), controller.signal)
+          : first
+        if (!response.ok) throw await oauthEndpointError(response, 'claude usage')
+        // The parsed body is what is shared: two callers awaiting one Response would each
+        // read the same body, and the second read fails.
+        return await response.json() as Record<string, unknown>
+      } finally {
+        clearTimeout(timer)
+        usageInFlight.delete(accessToken)
+      }
+    })()
+    usageInFlight.set(accessToken, pending)
+    return pending
+  }
+
+  let payload: Record<string, unknown>
+  try {
+    payload = await (signal === undefined
+      ? read(session.accessToken)
+      : raceWithSignal(read(session.accessToken), signal))
+  } catch (error) {
+    if (signal !== undefined && signal.aborted) throw abortError(signal)
+    throw error
+  }
   const modern = claudeLimitsWindows(payload.limits)
   if (modern.length > 0) return { supported: true, windows: modern }
   const windows: UsageWindow[] = []
@@ -565,63 +877,88 @@ function claudeReasoning(capabilities: ClaudeModelCapabilities | undefined): Dis
   return efforts.length > 0 ? { efforts } : undefined
 }
 
-/** One entry of the `/v1/models` response; only the fields the plugin reads. */
-interface ClaudeWireModel {
-  id?: string
-  display_name?: string
-  capabilities?: ClaudeModelCapabilities
-  /** Advertised input context size in tokens. */
-  max_input_tokens?: number
-  /** Advertised per-request output ceiling in tokens. */
-  max_tokens?: number
+/**
+ * One entry of the bootstrap response. The endpoint carries display text only: model
+ * limits and capabilities belong to the pinned profile, which mirrors the client's own
+ * built-in catalogue.
+ */
+interface ClaudeBootstrapOption {
+  model?: string
+  name?: string
+  description?: string
+  disabled_reason?: string | null
 }
 
-/** A token limit the endpoint disclosed, or undefined when absent or malformed. */
-function positiveTokenCount(value: unknown): number | undefined {
-  return typeof value === 'number' && Number.isSafeInteger(value) && value > 0 ? value : undefined
+/** The bootstrap document's shape; anything else is discarded. */
+interface ClaudeBootstrapDocument {
+  client_data?: unknown
+  additional_model_options?: ClaudeBootstrapOption[]
 }
 
-/** Fetch the live model catalog from the subscription endpoint. `signal` cancels the request. */
-export async function fetchClaudeModels(
+/**
+ * Read the model options the service supplements the built-in catalogue with.
+ *
+ * A response that does not match the document's shape yields no options, which is what the
+ * client does with one: the catalogue it already carries stays authoritative, and this call
+ * adds entries it does not know. A model the service marks disabled is left out.
+ *
+ * @param session - the account whose token authenticates the read.
+ * @param extraHeaders - the desktop client headers, which this request carries like every
+ *   other subscription request.
+ * @param fetchFn - fetch implementation (injectable for tests).
+ * @param signal - caller cancellation.
+ * @param model - the model the client would be asking about. The genuine caller always has
+ *   one, because it asks while a session is running; a listing has none, so the profile's own
+ *   first catalogue entry stands in for it rather than sending a request the client's shape
+ *   has no counterpart for.
+ * @returns the additional options, or none when the endpoint answered with something else.
+ */
+export async function fetchClaudeModelOptions(
   session: ClaudeSession,
+  extraHeaders: readonly (readonly [string, string])[] = [],
   fetchFn: FetchFn = proxiedFetch,
   signal?: AbortSignal,
+  account?: string,
+  model?: string,
 ): Promise<DiscoveredModel[]> {
-  const response = await fetchFn(CLAUDE_MODELS_URL, {
+  const timeout = AbortSignal.timeout(BOOTSTRAP_TIMEOUT_MS)
+  // The client always names the entrypoint and the model on this endpoint, so a request
+  // without them is a shape it never produces.
+  const url = new URL(CLAUDE_BOOTSTRAP_URL)
+  url.searchParams.set('entrypoint', CLAUDE_DESKTOP_ENTRYPOINT)
+  url.searchParams.set('model', model ?? newestCatalogueModel())
+  const response = await fetchFn(url.toString(), {
     headers: {
       'authorization': `Bearer ${session.accessToken}`,
-      'anthropic-version': '2023-06-01',
-      'user-agent': CLAUDE_USER_AGENT,
-      'anthropic-dangerous-direct-browser-access': 'true',
+      'anthropic-beta': 'oauth-2025-04-20',
+      'content-type': 'application/json',
+      // The client uses its plain `claude-code/<version>` agent on this endpoint, not the
+      // transport one.
+      'user-agent': CLAUDE_PLAIN_USER_AGENT,
       'accept': 'application/json',
+      ...Object.fromEntries(extraHeaders),
     },
-    ...signal === undefined ? {} : { signal },
+    signal: signal === undefined ? timeout : AbortSignal.any([signal, timeout]),
   })
-  if (!response.ok) throw await httpLlmError(response, 'claude models API')
-  const payload = await response.json() as { data?: ClaudeWireModel[] }
-  if (!Array.isArray(payload.data)) {
-    throw new Error('claude models API returned an invalid catalog')
+  // An endpoint that refuses the read is not an error: the catalogue stands on its own.
+  if (!response.ok) return []
+  const payload = await response.json() as ClaudeBootstrapDocument
+  // The same document that supplements the catalogue carries the client data the request
+  // header is drawn from, so one read serves both.
+  if (account !== undefined) {
+    const atis = (payload.client_data as { atis?: unknown } | null | undefined)?.atis
+    if (typeof atis === 'string' && atis.length > 0) clientAtis.set(account, atis)
   }
-  const models: DiscoveredModel[] = payload.data
-    .filter((m): m is ClaudeWireModel & { id: string } => typeof m.id === 'string')
-    .map((m) => {
-      const thinkingType = claudeThinkingType(m.capabilities)
-      const reasoning = claudeReasoning(m.capabilities)
-      // The endpoint advertises each model's limits; carrying them through keeps
-      // the route current for models newer than the bundled catalog (#101).
-      const contextWindow = positiveTokenCount(m.max_input_tokens)
-      const maxOutputTokens = positiveTokenCount(m.max_tokens)
-      return {
-        id: m.id,
-        name: m.display_name ?? m.id,
-        ...contextWindow === undefined ? {} : { contextWindow },
-        ...maxOutputTokens === undefined ? {} : { maxOutputTokens },
-        ...thinkingType === undefined ? {} : { thinkingType },
-        ...reasoning === undefined ? {} : { reasoning },
-      }
+  const options = payload.additional_model_options
+  if (!Array.isArray(options)) return []
+  const models: DiscoveredModel[] = []
+  for (const option of options) {
+    if (typeof option?.model !== 'string' || option.model.length === 0) continue
+    if (option.disabled_reason != null) continue
+    models.push({
+      id: option.model,
+      name: typeof option.name === 'string' && option.name.length > 0 ? option.name : option.model,
     })
-  if (models.length === 0) {
-    throw new Error('claude models API returned an empty catalog')
   }
   return models
 }
@@ -638,6 +975,8 @@ function claudeMaxTokens(configured: ModelEntry | undefined, disc: DiscoveredMod
 
 /** Constructor dependencies for {@link ClaudeAdapter}. */
 export interface ClaudeAdapterOptions {
+  /** Identity line a Claude request carries in place of the harness identity section. */
+  identityLine?: string
   models: readonly ModelEntry[]
   streamIdleTimeoutMs: number
   tokens: AccountTokenManager<ClaudeSession>
@@ -665,6 +1004,9 @@ export interface ClaudeAdapterOptions {
 const CLAUDE_MODALITIES: readonly ('text' | 'image')[] = ['text', 'image']
 
 /** Claude wire adapter: one instance serves the `claude` provider route. */
+/** Sessions whose request clock is kept; the client bounds its own table the same way. */
+const REQUEST_CLOCK_LIMIT = 64
+
 export class ClaudeAdapter extends LlmAdapter {
   private readonly catalog: ModelCatalogCache
   /** In-memory catalogs for non-default accounts (the persisted cache is the default's). */
@@ -678,7 +1020,18 @@ export class ClaudeAdapter extends LlmAdapter {
   }
 
   private async fetchCatalog(account?: string, signal?: AbortSignal): Promise<DiscoveredModel[]> {
-    return fetchClaudeModels(await this.options.tokens.session(account), this.options.fetchFn, signal)
+    const session = await this.options.tokens.session(account)
+    // The machine values come from the account, not this host, exactly as they do on every
+    // other request this adapter sends. A session reaching the wire always carries a device
+    // id; the account fields are the fallback for a listing taken before it is backfilled.
+    const seed = session.deviceId ?? account ?? session.accountUuid ?? 'claude'
+    return fetchClaudeModelOptions(
+      session,
+      Object.entries(desktopClientHeaders()),
+      this.options.fetchFn,
+      signal,
+      account,
+    )
   }
 
   /** Drop cached catalogs after login/logout so the next list does not reuse a stale plan. */
@@ -735,7 +1088,11 @@ export class ClaudeAdapter extends LlmAdapter {
 
   override providerRetryPolicy(provider: string) {
     return subscriptionRetryPolicy(
-      DEFAULT_RETRY,
+      // The client's own retry shape: a 500 ms base, a 32 s ceiling and proportional jitter.
+      CLAUDE_RETRY,
+      // The route's own backoff keeps the client's 32 s ceiling, and the configured wait bounds
+      // only a provider-disclosed reset: the client sits out a rate-limit window for hours,
+      // backs off seconds apart, and its own delay never reaches the abandon branch.
       this.options.rateLimit ?? DEFAULT_RATE_LIMIT_WAIT,
       `claude: provider "${provider}" retryPolicy`,
     )
@@ -891,11 +1248,12 @@ export class ClaudeAdapter extends LlmAdapter {
   ): Promise<ClaudeSession> {
     if (session.deviceId !== undefined && session.accountUuid !== undefined) return session
     const profile = session.accountUuid === undefined
-      ? await fetchClaudeProfile(session.accessToken, fetchFn, signal)
+      ? await fetchClaudeProfile(session.accessToken, fetchFn, signal,
+          async () => (await this.options.tokens.session(account, true)).accessToken)
       : {}
     const next: ClaudeSession = {
       ...session,
-      ...session.deviceId === undefined ? { deviceId: randomBytes(32).toString('hex') } : {},
+      ...session.deviceId === undefined ? { deviceId: claudeDeviceIdFor(session) } : {},
       ...session.accountUuid === undefined && profile.accountUuid !== undefined
         ? { accountUuid: profile.accountUuid }
         : {},
@@ -912,6 +1270,36 @@ export class ClaudeAdapter extends LlmAdapter {
     return next
   }
 
+  /**
+   * When each session last issued a request, and whether its latest break was acted on.
+   *
+   * Silence cannot be observed from the request itself: the history carries no timestamps. It
+   * does not need to be, because no request is issued during silence — the gap between a
+   * session's consecutive requests is the gap between its consecutive transcript messages. A
+   * decision is remembered so the same break keeps being acted on, which is what the client
+   * does, and the table is bounded the way the client bounds its own.
+   */
+  private readonly requestClock = new Map<string, { lastRequestAt: number; clearedForIdle: boolean }>()
+
+  /**
+   * Measures the silence before this request, remembering a break that was already acted on.
+   *
+   * @param sessionId - the session issuing the request.
+   * @returns the silence in milliseconds, or the threshold when this break was already acted on.
+   */
+  private idleBeforeRequest(sessionId: string): number | undefined {
+    const now = Date.now()
+    const prior = this.requestClock.get(sessionId)
+    const idle = prior === undefined ? undefined : now - prior.lastRequestAt
+    const clearedForIdle = (idle !== undefined && idle >= STALE_TOOL_RESULT_IDLE_MS) || prior?.clearedForIdle === true
+    if (this.requestClock.size >= REQUEST_CLOCK_LIMIT && prior === undefined) {
+      const oldest = this.requestClock.keys().next().value
+      if (oldest !== undefined) this.requestClock.delete(oldest)
+    }
+    this.requestClock.set(sessionId, { lastRequestAt: now, clearedForIdle })
+    return clearedForIdle ? STALE_TOOL_RESULT_IDLE_MS : idle
+  }
+
   private async request(
     options: GenerateOptions,
     account: string | undefined,
@@ -920,7 +1308,9 @@ export class ClaudeAdapter extends LlmAdapter {
     chainAccount: string,
     signal: AbortSignal,
   ): Promise<Response> {
-    const fetchFn = this.options.fetchFn ?? proxiedFetch
+// The Messages request is the one this transport reproduces; token and usage
+    // calls keep the existing client.
+    const fetchFn = this.options.fetchFn ?? claudeApiFetch
     const disc = await this.discovered(options.model)
     const contextWindow = disc?.contextWindow
       ?? this.options.models.find(entry => entry.id === options.model)?.contextWindow ?? CLAUDE_CONTEXT_WINDOW
@@ -935,7 +1325,15 @@ export class ClaudeAdapter extends LlmAdapter {
     const identitySession = await this.identitySession(session, account, fetchFn, signal)
     let built: BuiltClaudeCodeRequest
     try {
-      built = await buildClaudeWireRequest(options, identitySession, messages, maxTokens, thinking, effort, sessionId, chainAccount)
+      const contextManagement = planContextManagement({
+        hasThinking: thinking !== undefined,
+        idleBeforeRequestMs: this.idleBeforeRequest(sessionId),
+        messages,
+      })
+      built = await buildClaudeWireRequest(
+        options, identitySession, messages, maxTokens, thinking, effort, sessionId, chainAccount,
+        this.options.identityLine, contextManagement,
+      )
     } catch (error: unknown) {
       const mapped = mapClaudeWireError(error, messages)
       if (mapped !== undefined) throw mapped

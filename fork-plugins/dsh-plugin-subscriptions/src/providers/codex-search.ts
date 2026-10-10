@@ -1,6 +1,7 @@
 /** Codex-backed provider for DSH's native web_search capability. */
 import { randomUUID } from 'node:crypto'
 import { attributionHeaders } from '@deepseek-ai/dsh-llm'
+import { LlmError } from '@deepseek-ai/dsh-llm'
 import { WebError } from '@deepseek-ai/dsh-web'
 import type { WebSearchProvider, WebSearchRequest, WebSearchResult, WebSearchSource } from '@deepseek-ai/dsh-web'
 import type { CodexSession } from '../auth/store.js'
@@ -23,6 +24,8 @@ export interface CodexWebSearchOptions {
    */
   enabled?: () => boolean
   fetchFn?: typeof fetch
+  /** Whether a Codex account is resolvable now; DSH's provider probe is synchronous. */
+  hasAccount?: () => boolean
   requestId?: () => string
   retryBaseMs?: number
 }
@@ -33,7 +36,12 @@ export class CodexWebSearchProvider implements WebSearchProvider {
 
   constructor(private readonly options: CodexWebSearchOptions) {}
 
-  available(): boolean { return this.options.enabled?.() ?? true }
+  available(): boolean {
+    // DSH requires exactly one usable provider when none is configured, and its own
+    // providers report false without credentials. Announcing ourselves with no account
+    // would take the shared web_search seam away from a provider that can serve it.
+    return (this.options.enabled?.() ?? true) && this.options.hasAccount?.() === true
+  }
 
   async search(request: WebSearchRequest, signal?: AbortSignal): Promise<WebSearchResult> {
     throwIfAborted(signal)
@@ -41,11 +49,16 @@ export class CodexWebSearchProvider implements WebSearchProvider {
     try {
       session = await this.options.tokens.session()
     } catch (cause) {
-      throw new WebError(
-        'Codex Web Search requires a logged-in Codex account; log in via Settings → Subscriptions',
-        'CODEX_AUTH_REQUIRED',
-        { cause },
-      )
+      // Only a missing or rejected credential is a login problem; a refresh blip has to
+      // surface as itself rather than telling the user to sign in again.
+      if (cause instanceof LlmError && (cause.code === 'MISSING_CREDENTIAL' || cause.code === 'INVALID_CREDENTIAL')) {
+        throw new WebError(
+          'Codex Web Search requires a logged-in Codex account; log in via Settings → Subscriptions',
+          'CODEX_AUTH_REQUIRED',
+          { cause },
+        )
+      }
+      throw cause
     }
     const body = {
       id: this.options.requestId?.() ?? randomUUID(),

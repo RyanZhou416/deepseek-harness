@@ -28,7 +28,13 @@ import { OAuthFlowManager } from '../src/auth/oauth-flow.js'
 import { DeviceFlowManager } from '../src/auth/device-flow.js'
 import { readClaudeCodeCredentials } from '../src/auth/claude-code-creds.js'
 import {
-  CLAUDE_AUTHORIZE_URL, CLAUDE_CALLBACK_PATH, CLAUDE_CLIENT_ID, CLAUDE_SCOPE, CLAUDE_TOKEN_URL,
+  CLAUDE_AUTHORIZE_URL,
+  CLAUDE_CALLBACK_PATH,
+  CLAUDE_CLIENT_ID,
+  CLAUDE_MANUAL_REDIRECT_URL,
+  CLAUDE_SCOPE,
+  CLAUDE_TOKEN_URL,
+  claudeFlow,
 } from '../src/providers/claude.js'
 import { accountKeyOf, authFilePath, listAccounts } from '../src/auth/store.js'
 import type { ClaudeSession } from '../src/auth/store.js'
@@ -140,13 +146,16 @@ test('Claude OAuth parameters match what Claude Code sends', () => {
   // Literals on purpose. Every URL assertion below compares the request
   // against these same constants, so only a literal can catch someone
   // changing one — which is exactly the regression that shipped before.
-  // Captured from Claude Code 2.1.235's own authorize request.
-  assert.equal(CLAUDE_AUTHORIZE_URL, 'https://claude.ai/oauth/authorize')
+  // Read from the client's own OAuth configuration module in the 2.1.296 carve:
+  // the claude.ai authorize page lives on claude.com and the token host is
+  // platform.claude.com. The values replaced here came from a 2.1.235 capture.
+  assert.equal(CLAUDE_AUTHORIZE_URL, 'https://claude.com/cai/oauth/authorize')
+  assert.equal(CLAUDE_TOKEN_URL, 'https://platform.claude.com/v1/oauth/token')
   assert.equal(CLAUDE_CLIENT_ID, '9d1c250a-e61b-44d9-88ed-5944d1962f5e')
   assert.equal(CLAUDE_CALLBACK_PATH, '/callback')
   assert.equal(
     CLAUDE_SCOPE,
-    'org:create_api_key user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload',
+    'org:create_api_key user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload user:plugins',
   )
 })
 
@@ -561,17 +570,62 @@ test('login(antigravity): no client configuration opens the Google PKCE authoriz
   await inIsolatedHome(() => withEnv('ANTIGRAVITY_CLIENT_ID', '', () => withEnv('ANTIGRAVITY_CLIENT_SECRET', '', async () => {
     const controller = makeController(() => undefined)
     try {
-      const { authorizeUrl } = await controller.login('antigravity')
-      const url = new URL(authorizeUrl)
-      assert.equal(url.origin + url.pathname, 'https://accounts.google.com/o/oauth2/v2/auth')
-      assert.match(url.searchParams.get('client_id') ?? '', /\.apps\.googleusercontent\.com$/)
-      assert.equal(url.searchParams.get('code_challenge_method'), 'S256')
-      assert.equal(url.searchParams.get('access_type'), 'offline')
-      assert.ok((url.searchParams.get('state') ?? '').length >= 43)
-      assert.equal(new URL(url.searchParams.get('redirect_uri')!).pathname, '/oauth-callback')
-      assert.equal(url.searchParams.has('client_secret'), false)
+      // No application credential is committed, so an unconfigured environment is refused
+      // instead of falling back to a shared default identity.
+      await assert.rejects(controller.login('antigravity'), /no OAuth client configured/)
     } finally {
       await controller.cancel('antigravity')
     }
   })))
+})
+
+// ---------------------------------------------------------------------------
+// Cross-device login: the browser authorizes elsewhere, so the code has to
+// come back by hand and no loopback listener may be involved
+// ---------------------------------------------------------------------------
+
+test('login(claude, manual) redirects to the code-displaying page, not to loopback', async () => {
+  await inIsolatedHome(async () => {
+    const controller = makeController(() => undefined)
+    try {
+      const { authorizeUrl } = await controller.login('claude', 'manual')
+      const url = new URL(authorizeUrl)
+      assert.equal(
+        url.searchParams.get('redirect_uri'),
+        CLAUDE_MANUAL_REDIRECT_URL,
+        'the redirect must be reachable from the device holding the browser',
+      )
+      assert.equal(
+        /localhost|127\.0\.0\.1|\[::1\]/.test(authorizeUrl),
+        false,
+        'a cross-device request must not name this machine',
+      )
+      assert.equal(url.searchParams.get('code_challenge_method'), 'S256')
+      assert.ok((url.searchParams.get('state') ?? '').length >= 43)
+    } finally {
+      await controller.cancel('claude')
+    }
+  })
+})
+
+test('a manual attempt is completed by the pasted code alone', async () => {
+  const flows = new OAuthFlowManager()
+  const attempt = await flows.start('claude', claudeFlow, { manual: true })
+  assert.equal(attempt.redirectUri, CLAUDE_MANUAL_REDIRECT_URL)
+  attempt.manual('the-authorization-code')
+  assert.equal(await attempt.waitCode(), 'the-authorization-code')
+  attempt.cancel()
+})
+
+test('manual mode is refused for a provider without a code-displaying page', async () => {
+  const flows = new OAuthFlowManager()
+  const loopbackOnly = {
+    callbackPath: '/callback',
+    listen: { host: 'localhost', ports: [0] },
+    buildAuthorizeUrl: () => 'https://example.invalid/authorize',
+  }
+  await assert.rejects(
+    flows.start('example', loopbackOnly, { manual: true }),
+    /no cross-device mode/,
+  )
 })

@@ -593,7 +593,8 @@ export async function saveAccountSession<K extends ProviderId>(
   account: string,
   session: SessionOf<K>,
   path = authFilePath(),
-): Promise<void> {
+  options: { expectedPrior?: SessionOf<K> } = {},
+): Promise<boolean> {
   assertSessionShape(provider, account, session)
   return serialize(path, async () => {
     const store = await loadStore(path)
@@ -607,13 +608,38 @@ export async function saveAccountSession<K extends ProviderId>(
         ) ?? accountKeyOf('codex', session as unknown as CodexSession)
       }
     }
+    // A refresh that started before a logout or a re-login must not put its own
+    // result back: the stored session is the authority, and a caller that names
+    // the session it read only writes while that session is still the one there.
+    // Comparing tokens rather than object identity is what makes this work across
+    // the serialization boundary the store already has.
+    if (options.expectedPrior !== undefined) {
+      const stored = entry?.accounts[account]
+      if (!sameStoredSession(stored, options.expectedPrior)) return false
+    }
     ;(store as Record<string, unknown>)[provider] = {
       ...entry,
       default: entry?.default ?? account,
       accounts: { ...entry?.accounts, [account]: session },
     } satisfies ProviderAccounts<SessionOf<K>>
     await writeStore(store, path)
+    return true
   })
+}
+
+/**
+ * Whether a stored session is the one a caller read: same access and refresh token.
+ *
+ * @param stored - the session currently in the store, when any.
+ * @param expected - the session the caller read before its round trip.
+ * @returns true when the caller may write over it.
+ */
+function sameStoredSession(
+  stored: SessionOf<ProviderId> | undefined,
+  expected: SessionOf<ProviderId>,
+): boolean {
+  if (stored === undefined) return false
+  return stored.accessToken === expected.accessToken && stored.refreshToken === expected.refreshToken
 }
 
 /**

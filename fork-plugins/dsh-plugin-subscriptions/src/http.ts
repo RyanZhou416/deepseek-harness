@@ -13,9 +13,8 @@
  * The OAuth authorize step opens in the user's browser, which uses the
  * browser/system proxy and is outside this module's reach.
  */
-import { ProxyAgent, fetch as undiciFetch } from 'undici'
+import { Agent, Dispatcher, ProxyAgent, fetch as undiciFetch, getGlobalDispatcher } from 'undici'
 import { chmod, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
-import { getDefaultAutoSelectFamilyAttemptTimeout, setDefaultAutoSelectFamilyAttemptTimeout } from 'node:net'
 import { dirname } from 'node:path'
 import { dshHomePath } from '@deepseek-ai/dsh-home-paths'
 
@@ -98,24 +97,6 @@ export const DEFAULT_PROXY_TEST_TIMEOUT_MS = 15_000
  */
 export const MIN_CONNECT_ATTEMPT_TIMEOUT_MS = 1500
 
-/**
- * Raise the process-wide Happy Eyeballs attempt timeout to at least `minMs`.
- * Never lowers a host-configured value. The setting is per process (there is
- * no per-dispatcher knob that survives the host's global dispatcher), so the
- * plugin restores the previous value on dispose.
- * @param minMs - the floor to enforce.
- * @returns the value in effect before the call.
- */
-export function ensureConnectAttemptTimeout(minMs = MIN_CONNECT_ATTEMPT_TIMEOUT_MS): number {
-  const previous = getDefaultAutoSelectFamilyAttemptTimeout()
-  if (previous < minMs) setDefaultAutoSelectFamilyAttemptTimeout(minMs)
-  return previous
-}
-
-/** Restore a value captured by {@link ensureConnectAttemptTimeout}. */
-export function restoreConnectAttemptTimeout(previous: number): void {
-  setDefaultAutoSelectFamilyAttemptTimeout(previous)
-}
 
 /** Disabled configuration: the module state before the first load. */
 const DISABLED: ProxyConfig = { enabled: false, url: '', bypass: [] }
@@ -123,7 +104,7 @@ const DISABLED: ProxyConfig = { enabled: false, url: '', bypass: [] }
 /** Current config; updated by every load/apply/save. */
 let current: ProxyConfig = DISABLED
 /** The live dispatcher, or undefined when proxies are off/errored. */
-let agent: ProxyAgent | undefined
+let agent: Dispatcher | undefined
 /** Last load/apply failure, surfaced by the config view. */
 let configError: string | undefined
 /** One lazy load of the on-disk config (module-import cheap; file read once). */
@@ -244,30 +225,51 @@ function normalizeConfig(input: ProxyInput): ProxyConfig {
 }
 
 /** Build the undici agent for a config (throws on an unusable URL). */
-function buildAgent(cfg: ProxyConfig): ProxyAgent | undefined {
-  if (!cfg.enabled || cfg.url === '') return undefined
+/**
+ * The connect options every request through this module carries.
+ *
+ * They live on the plugin's own agents rather than on the process: raising a
+ * Node default changes dialing for the host and for every other provider, and no
+ * per-caller restoration stays correct while another holder can be live.
+ */
+const CONNECT_OPTIONS = { autoSelectFamilyAttemptTimeout: MIN_CONNECT_ATTEMPT_TIMEOUT_MS } as const
+
+/**
+ * The dispatcher the process had before this module ran.
+ *
+ * A host that installs its own dispatcher is routing or gating egress, and it must keep
+ * winning: the plugin passes its own only while nothing else has claimed the process.
+ */
+const INITIAL_DISPATCHER = getGlobalDispatcher()
+
+/** The agent for direct requests: no proxy, but this module's connect budget. */
+const DIRECT_AGENT = new Agent({ connect: CONNECT_OPTIONS })
+
+function buildAgent(cfg: ProxyConfig): Dispatcher {
+  if (!cfg.enabled || cfg.url === '') return DIRECT_AGENT
   const url = parseProxyUrl(cfg.url)
   if (cfg.username !== undefined) url.username = cfg.username
   if (cfg.password !== undefined) url.password = cfg.password
-  return new ProxyAgent(url.toString())
+  return new ProxyAgent({ uri: url.toString(), connect: CONNECT_OPTIONS })
 }
 
 /** Swap in a config and its agent; a failed agent falls back to host routing. */
 async function applyConfig(cfg: ProxyConfig | undefined): Promise<void> {
-  let next: ProxyAgent | undefined
+  let next: Dispatcher = DIRECT_AGENT
   if (cfg !== undefined) {
     configError = undefined
     try {
       next = buildAgent(cfg)
     } catch (error) {
       withError(error)
-      next = undefined
+      next = DIRECT_AGENT
     }
     current = cfg
   }
   const previous = agent
   agent = next
-  if (previous !== undefined) void previous.close().catch(() => undefined)
+  // The direct agent is shared and outlives every config swap it serves.
+  if (previous !== undefined && previous !== DIRECT_AGENT) void previous.close().catch(() => undefined)
 }
 
 /** Read the on-disk config. A missing file is the disabled default. */
@@ -400,8 +402,11 @@ export async function proxySetConfig(input: ProxyInput): Promise<ProxyConfigView
  */
 export async function proxiedFetch(input: RequestInfo | URL, init: RequestInit = {}): Promise<Response> {
   await ensureReady()
-  let dispatcher: ProxyAgent | undefined
-  if (current.enabled && agent !== undefined) {
+  // A host-installed dispatcher is how the process routes or gates egress, so the plugin
+  // defers to it rather than replacing it with its own agent.
+  const hostOwns = getGlobalDispatcher() !== INITIAL_DISPATCHER
+  let dispatcher: Dispatcher | undefined
+  if (current.enabled) {
     let hostname = ''
     try {
       const url = typeof input === 'string' ? new URL(input) : input instanceof URL ? input : new URL(input.url)
@@ -409,11 +414,33 @@ export async function proxiedFetch(input: RequestInfo | URL, init: RequestInit =
     } catch {
       hostname = ''
     }
-    if (!matchesBypass(hostname, current.bypass)) dispatcher = agent
+    // A bypassed host goes direct, still through this module's own agent when it owns the
+    // process; the host's dispatcher already means direct.
+    if (agent !== undefined && !matchesBypass(hostname, current.bypass)) dispatcher = agent
   }
+  if (dispatcher === undefined && !hostOwns) dispatcher = DIRECT_AGENT
   if (dispatcher === undefined) return fetch(input, init)
-  const proxied = { ...init, dispatcher } as RequestInit
-  return dispatchFetch(input, proxied)
+  const configured = { ...init, dispatcher } as RequestInit
+  // A proxied call must go through undici's own fetch to honour the ProxyAgent. A direct
+  // call stays on the global fetch, which is what a host or a test may replace to observe
+  // or gate egress; the agent still carries this module's connect budget.
+  return dispatcher === DIRECT_AGENT ? fetch(input, configured) : dispatchFetch(input, configured)
+}
+
+/**
+ * Reports whether the configured proxy applies to a host.
+ *
+ * A transport that issues its own requests outside this module cannot apply the
+ * `ProxyAgent`, so it must ask first and refuse rather than send the request
+ * around a proxy the operator configured deliberately.
+ *
+ * @param hostname - Destination host.
+ * @returns true when a request to that host would go through the proxy.
+ */
+export async function proxyAppliesTo(hostname: string): Promise<boolean> {
+  await ensureReady()
+  if (!current.enabled || agent === undefined) return false
+  return !matchesBypass(hostname, current.bypass)
 }
 
 /**

@@ -13,7 +13,7 @@
  * express.
  */
 import { useCallback, useEffect, useRef, useState } from 'react'
-import type { CSSProperties } from 'react'
+import type { CSSProperties, Dispatch, SetStateAction } from 'react'
 import type { ConnectionHandle } from '@deepseek-ai/dsh-api-remotes/client'
 import { en } from './locales.js'
 import { ProviderAccountManager } from './ProviderAccountManager.js'
@@ -154,6 +154,22 @@ function dropStale<T>(map: Record<string, T>, live: ReadonlySet<string>): Record
 }
 
 /**
+ * Copy a per-provider map without one provider's entry.
+ * @param map - the per-provider map, possibly absent for `key`.
+ * @param key - the provider whose entry is dropped.
+ * @returns the same map when it had no entry, otherwise a copy without it.
+ */
+function dropKey<T>(
+  map: Partial<Record<SubscriptionProvider, T>>,
+  key: SubscriptionProvider,
+): Partial<Record<SubscriptionProvider, T>> {
+  if (map[key] === undefined) return map
+  const next = { ...map }
+  delete next[key]
+  return next
+}
+
+/**
  * English-dictionary fallback for a missing inject `t` (standalone renders);
  * the slot inject always supplies the locale-bound one.
  * @param key - dictionary key.
@@ -239,6 +255,19 @@ const styles: Record<string, CSSProperties> = {
   deviceCodeText: {
     fontFamily: 'monospace', fontSize: 18, lineHeight: '24px', letterSpacing: 2,
     color: 'var(--dsw-alias-label-primary)', userSelect: 'all',
+  },
+  manualSteps: { margin: 0, padding: 0, listStylePosition: 'inside' },
+  authorizeUrl: {
+    fontFamily: 'monospace', fontSize: 12, lineHeight: '18px', wordBreak: 'break-all',
+    color: 'var(--dsw-alias-label-primary)', userSelect: 'all',
+  },
+  manual: { marginTop: 4, fontSize: 12, lineHeight: '18px', color: 'var(--dsw-alias-label-secondary)' },
+  manualRow: { display: 'flex', gap: 6, alignItems: 'center', marginTop: 6 },
+  manualInput: {
+    height: 32, flex: 1, minWidth: 0, boxSizing: 'border-box',
+    border: '1px solid var(--dsw-alias-border-l2)', borderRadius: 8,
+    padding: '0 10px', font: 'inherit', fontSize: 14, lineHeight: '22px',
+    background: 'var(--dsw-alias-bg-layer-1)', color: 'var(--dsw-alias-label-primary)',
   },
   proxyField: { display: 'flex', flexDirection: 'column', gap: 4 },
   proxyLabel: { fontSize: 12, lineHeight: '18px', color: 'var(--dsw-alias-label-secondary)' },
@@ -450,7 +479,10 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
   })
   /** Pending device-flow codes (copilot), shown while the attempt polls. */
   const [deviceCodes, setDeviceCodes] = useState<Partial<Record<SubscriptionProvider, { userCode: string; verificationUrl: string }>>>({})
+  /** Pending cross-device authorize links (Claude manual login), shown while the attempt polls. */
+  const [authorizeUrls, setAuthorizeUrls] = useState<Partial<Record<SubscriptionProvider, string>>>({})
   const [copiedCode, setCopiedCode] = useState<SubscriptionProvider | undefined>(undefined)
+  const [copiedUrl, setCopiedUrl] = useState<SubscriptionProvider | undefined>(undefined)
   /** Usage snapshots keyed `${provider}:${accountKey}` — every account tracks its own windows. */
   const [usages, setUsages] = useState<Record<string, ProviderUsage>>({})
   const [usageErrors, setUsageErrors] = useState<Record<string, string>>({})
@@ -518,13 +550,10 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
       const status = response.providers[id]
       if (status.accounts.length > 0 || !status.busy) {
         stopPolling(id)
-        // The attempt settled (success, timeout, or cancel): drop the code card.
-        setDeviceCodes((prev) => {
-          if (prev[id] === undefined) return prev
-          const next = { ...prev }
-          delete next[id]
-          return next
-        })
+        // The attempt settled (success, timeout, or cancel): drop the code and
+        // authorize-link cards.
+        setDeviceCodes(prev => dropKey(prev, id))
+        setAuthorizeUrls(prev => dropKey(prev, id))
       }
     }
   }, [rpc, stopPolling, setProviderError])
@@ -598,7 +627,7 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
     setUsageErrors(prev => dropStale(prev, live))
   }, [statuses, usages, usageErrors, loadUsage])
 
-  const login = useCallback(async (provider: SubscriptionProvider, method?: 'oauth' | 'keychain'): Promise<void> => {
+  const login = useCallback(async (provider: SubscriptionProvider, method?: 'oauth' | 'keychain' | 'manual'): Promise<void> => {
     if (rpc === undefined) return
     setProviderError(provider, undefined)
     try {
@@ -620,7 +649,11 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
         ...prev,
         [provider]: { accounts: prev[provider]?.accounts ?? [], ...prev[provider], busy: true },
       }))
-      if (typeof response.userCode === 'string' && response.userCode.length > 0) {
+      if (method === 'manual') {
+        // Cross-device: no listener waits here and the provider's page shows the
+        // code, so the link is offered for the other device instead of opened.
+        setAuthorizeUrls(prev => ({ ...prev, [provider]: response.authorizeUrl }))
+      } else if (typeof response.userCode === 'string' && response.userCode.length > 0) {
         // Device flow: show the code card instead of opening the page blind —
         // the user copies the code first, then opens the verification page.
         setDeviceCodes(prev => ({ ...prev, [provider]: { userCode: response.userCode as string, verificationUrl: response.authorizeUrl } }))
@@ -681,13 +714,23 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
     await refresh()
   }, [rpc, setProviderError, refresh])
 
-  const copyDeviceCode = useCallback((provider: SubscriptionProvider, userCode: string): void => {
-    void navigator.clipboard?.writeText(userCode).then(() => {
+  /**
+   * Copy one card's code or link and flag that card as copied for 1.5s.
+   * @param provider - the provider card whose copy button was pressed.
+   * @param text - the code or link to place on the clipboard.
+   * @param setFlag - the copied-provider state setter of that button.
+   */
+  const copyForProvider = useCallback((
+    provider: SubscriptionProvider,
+    text: string,
+    setFlag: Dispatch<SetStateAction<SubscriptionProvider | undefined>>,
+  ): void => {
+    void navigator.clipboard?.writeText(text).then(() => {
       if (!mountedRef.current) return
-      setCopiedCode(provider)
+      setFlag(provider)
       setTimeout(() => {
         if (mountedRef.current) {
-          setCopiedCode(current => current === provider ? undefined : current)
+          setFlag(current => current === provider ? undefined : current)
         }
       }, 1500)
     }).catch(() => undefined)
@@ -804,6 +847,7 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
         const status = statuses[id]
         const busy = status?.busy === true
         const deviceCode = deviceCodes[id]
+        const authorizeUrl = authorizeUrls[id]
         const accounts = status?.accounts ?? []
         return (
           <div key={id} style={styles.card}>
@@ -918,10 +962,18 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
                   {t('login')}
                 </button>
               )}
+              {!busy && accounts.length === 0 && id === 'claude' && (
+                <button type="button" style={styles.button} onClick={() => { void login(id, 'manual') }}>
+                  {t('addAccountOtherDevice')}
+                </button>
+              )}
               {!busy && accounts.length > 0 && id === 'claude' && (
                 <>
                   <button type="button" style={styles.button} onClick={() => { void login(id, 'oauth') }}>
                     {t('addAccountOAuth')}
+                  </button>
+                  <button type="button" style={styles.button} onClick={() => { void login(id, 'manual') }}>
+                    {t('addAccountOtherDevice')}
                   </button>
                   <button type="button" style={styles.button} onClick={() => { void login(id, 'keychain') }}>
                     {t('addAccountKeychain')}
@@ -952,7 +1004,7 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
                 <span style={styles.statusLine}>{t('deviceCodePrompt')}</span>
                 <span style={styles.deviceCodeText}>{deviceCode.userCode}</span>
                 <div style={styles.actions}>
-                  <button type="button" style={styles.button} onClick={() => { copyDeviceCode(id, deviceCode.userCode) }}>
+                  <button type="button" style={styles.button} onClick={() => { copyForProvider(id, deviceCode.userCode, setCopiedCode) }}>
                     {copiedCode === id ? t('deviceCodeCopied') : t('deviceCodeCopy')}
                   </button>
                   <button
@@ -961,6 +1013,21 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
                     onClick={() => { window.open(deviceCode.verificationUrl, '_blank', 'noopener') }}
                   >
                     {t('deviceCodeOpenPage')}
+                  </button>
+                </div>
+              </div>
+            )}
+            {busy && authorizeUrl !== undefined && (
+              <div style={styles.deviceCode}>
+                <ol style={styles.manualSteps}>
+                  <li style={styles.statusLine}>{t('otherDeviceStepOpen')}</li>
+                  <li style={styles.statusLine}>{t('otherDeviceStepApprove')}</li>
+                  <li style={styles.statusLine}>{t('otherDeviceStepPaste')}</li>
+                </ol>
+                <span style={styles.authorizeUrl}>{authorizeUrl}</span>
+                <div style={styles.actions}>
+                  <button type="button" style={styles.button} onClick={() => { copyForProvider(id, authorizeUrl, setCopiedUrl) }}>
+                    {copiedUrl === id ? t('otherDeviceLinkCopied') : t('otherDeviceCopyLink')}
                   </button>
                 </div>
               </div>

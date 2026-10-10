@@ -107,6 +107,52 @@ export interface HttpLlmErrorOptions {
  * @param options - the calling provider's rate-limit reader and warning sink.
  * @returns the classified error.
  */
+/**
+ * The provider's own error fields, for a message a human can act on.
+ *
+ * Reads the JSON error object providers return (`error.type` / `error.message`, or
+ * `error` / `error_description` on OAuth endpoints). It never falls back to raw body
+ * text: the body rides the error's cause, because an upstream echo of a request
+ * header must not become durable session text.
+ *
+ * @param body - the response body as text.
+ * @returns a short `type: message` summary, or an empty string when absent.
+ */
+function structuredErrorDetail(body: string): string {
+  if (body.length === 0) return ''
+  let raw: unknown
+  try {
+    raw = JSON.parse(body)
+  } catch {
+    // A gateway that does not return JSON leaves the status as the only fact worth keeping.
+    return ''
+  }
+  if (typeof raw !== 'object' || raw === null) return ''
+  const record = raw as Record<string, unknown>
+  const nested = typeof record['error'] === 'object' && record['error'] !== null
+    ? record['error'] as Record<string, unknown>
+    : undefined
+  const type = firstString(nested?.['type'], record['error'], nested?.['code'], record['code'])
+  const text = firstString(nested?.['message'], record['error_description'], record['message'])
+  return [type, text]
+    .filter((part): part is string => part !== undefined && part.length > 0)
+    .join(': ')
+    .slice(0, 300)
+}
+
+/**
+ * The first argument that is a non-empty string.
+ *
+ * @param values - candidates in priority order.
+ * @returns the first non-empty string, or undefined.
+ */
+function firstString(...values: unknown[]): string | undefined {
+  for (const value of values) {
+    if (typeof value === 'string' && value.length > 0) return value
+  }
+  return undefined
+}
+
 export async function httpLlmError(
   response: Response,
   label: string,
@@ -118,11 +164,13 @@ export async function httpLlmError(
   } catch {
     // Only swallow error-body reading: the HTTP status still identifies the failure.
   }
-  // Truncated for display only; the readers below need the whole body to parse it.
+  // The readers below need the whole body to classify it; the message carries only the
+  // provider's own structured fields, and the raw body rides the error's cause so an
+  // arbitrary upstream echo never becomes durable session text.
   const shown = body.slice(0, 500)
-  const message = shown.length > 0
-    ? `${label} error (HTTP ${String(response.status)}): ${shown}`
-    : `${label} error (HTTP ${String(response.status)})`
+  const detail = structuredErrorDetail(body)
+  const suffix = detail.length > 0 ? `: ${detail}` : ''
+  const message = `${label} error (HTTP ${String(response.status)})${suffix}`
   let code: string
   if (response.status === 401 || response.status === 403) code = 'AUTH'
   else if (response.status === 429) code = 'RATE_LIMIT'
@@ -152,6 +200,7 @@ export async function httpLlmError(
     options.onWarn?.(`${label}: ${rateLimitDiagnostics(response, body)}`)
   }
   return new LlmError(message, code, {
+    ...body.length === 0 ? {} : { cause: new Error(body) },
     status: response.status,
     ...reset === undefined ? {} : { providerRetryAfterMs: waitFromReset(reset, now) },
   })
@@ -276,9 +325,13 @@ export async function oauthEndpointError(response: Response, label: string): Pro
   } catch {
     // Only swallow error-body parsing: the HTTP status still identifies the failure.
   }
-  const message = detail.length > 0
-    ? `${label} token endpoint error (HTTP ${String(response.status)}): ${detail}`
-    : `${label} token endpoint error (HTTP ${String(response.status)})`
+  // `detail` and `oauthCode` are the parsed fields, never raw body text: the message
+  // keeps a human-readable cause while the body itself is not carried into the session.
+  const fallback = oauthCode !== undefined && detail.length > 0
+    ? `${oauthCode}: ${detail}`
+    : detail
+  const message = `${label} token endpoint error (HTTP ${String(response.status)})`
+    + (fallback.length > 0 ? `: ${fallback}` : '')
   return new OAuthEndpointError(message, response.status, oauthCode, parseRetryAfterMs(response))
 }
 
@@ -296,7 +349,7 @@ export interface TokenManagerOptions<S extends TimedSession> {
   /** Refresh this long before `expiresAt`. */
   preemptMs: number
   load(): Promise<S | undefined>
-  save(session: S): Promise<void>
+  save(session: S, expectedPrior?: S): Promise<void>
   remove(): Promise<void>
   /** Perform the provider's refresh-token grant. */
   refresh(session: S): Promise<S>
@@ -403,7 +456,7 @@ export class TokenManager<S extends TimedSession> {
     const attempted = current ?? session
     this.attempted = attempted
     const next = await this.options.refresh(attempted)
-    await this.options.save(next)
+    await this.options.save(next, attempted)
     return next
   }
 

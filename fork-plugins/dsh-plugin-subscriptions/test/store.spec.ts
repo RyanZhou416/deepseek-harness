@@ -357,3 +357,38 @@ test('Codex config references resolve by unique email or workspace ID, never amb
   assert.equal(await resolveAccountKey('codex', 'bob@example.com', path), accountKeyOf('codex', bob))
   assert.equal(await resolveAccountKey('claude', 'alice@example.com', path), 'alice@example.com', 'other providers unchanged')
 })
+
+test('a refresh landing after a logout does not resurrect the account', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'dsh-store-cas-'))
+  TEMP_DIRS.push(dir)
+  const path = join(dir, 'auth.json')
+  const session = (access: string, refresh: string): ClaudeSession =>
+    ({ accessToken: access, refreshToken: refresh, expiresAt: Date.now() + 3_600_000 } as ClaudeSession)
+  const account = 'cas@example.com'
+  const read = session('access-1', 'refresh-1')
+  assert.equal(await saveAccountSession('claude', account, read, path), true, 'a first write lands')
+
+  // The user logs out while a refresh of `read` is in flight.
+  await deleteAccountSession('claude', account, path)
+  const late = session('access-2', 'refresh-2')
+  assert.equal(
+    await saveAccountSession('claude', account, late, path, { expectedPrior: read }),
+    false,
+    'a write whose prior is gone is refused',
+  )
+  assert.equal(await getAccountSession('claude', account, path), undefined, 'the account stays logged out')
+
+  // Logging back in and then losing the race must not overwrite the new session.
+  const relogin = session('access-3', 'refresh-3')
+  assert.equal(await saveAccountSession('claude', account, relogin, path), true)
+  assert.equal(
+    await saveAccountSession('claude', account, session('access-4', 'refresh-4'), path, { expectedPrior: read }),
+    false,
+    'a stale refresh is refused after a re-login',
+  )
+  assert.equal((await getAccountSession('claude', account, path))?.accessToken, 'access-3', 'the re-login survives')
+
+  // Without an expectation the write is unconditional, as logins need.
+  assert.equal(await saveAccountSession('claude', account, late, path), true)
+  assert.equal((await getAccountSession('claude', account, path))?.accessToken, 'access-2')
+})

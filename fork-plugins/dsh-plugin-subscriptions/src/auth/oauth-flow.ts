@@ -34,6 +34,16 @@ export interface AuthorizeInput {
 export interface FlowSpec {
   /** Path the provider redirects to on the loopback server. */
   callbackPath: string
+  /**
+   * The provider's own page that displays an authorization code instead of redirecting to a
+   * machine, when the provider has one.
+   *
+   * A cross-device login cannot use the loopback redirect: the browser runs on another device,
+   * so `localhost` resolves there and the code never reaches this process. This URL is what the
+   * provider offers for exactly that case, and the user pastes the code it shows into the
+   * pending attempt.
+   */
+  manualRedirectUri?: string
   listen: ListenSpec
   timeoutMs?: number
   /**
@@ -176,12 +186,19 @@ export class OAuthFlowManager {
   /**
    * Start a login attempt: mint PKCE/state, open the loopback callback
    * server, and build the authorize URL.
+   *
+   * In manual mode no loopback server is opened at all — the authorization happens on another
+   * device, so the redirect is the provider's code-displaying page and the only way the code
+   * arrives is the pending attempt's `manual()`.
+   *
    * @param provider - the provider route (one attempt at a time).
    * @param spec - static flow facts for this provider.
+   * @param options - `manual: true` for a cross-device login.
    * @returns the live attempt; its `waitCode()` settles the login.
-   * @throws when an attempt is already running or no callback port is free.
+   * @throws when an attempt is already running, no callback port is free, or manual mode is
+   *   requested for a provider with no code-displaying page.
    */
-  async start(provider: string, spec: FlowSpec): Promise<OAuthAttempt> {
+  async start(provider: string, spec: FlowSpec, options: { manual?: boolean } = {}): Promise<OAuthAttempt> {
     if (this.attempts.has(provider)) {
       throw new Error(`a ${provider} login attempt is already in progress`)
     }
@@ -247,9 +264,17 @@ export class OAuthFlowManager {
       else if (code !== undefined) resolveCode(code)
     }
 
-    const bound = await listen(handler, spec.listen)
-    servers = bound.servers
-    input.redirectUri = `http://${spec.listen.host}:${bound.port}${spec.callbackPath}`
+    if (options.manual === true) {
+      const manualRedirectUri = spec.manualRedirectUri
+      if (manualRedirectUri === undefined) {
+        throw new Error(`the ${provider} login has no cross-device mode; use the browser flow`)
+      }
+      input.redirectUri = manualRedirectUri
+    } else {
+      const bound = await listen(handler, spec.listen)
+      servers = bound.servers
+      input.redirectUri = `http://${spec.listen.host}:${bound.port}${spec.callbackPath}`
+    }
 
     timer = setTimeout(() => {
       settle(new Error(`login timed out after ${Math.round(timeoutMs / 1000)}s`))

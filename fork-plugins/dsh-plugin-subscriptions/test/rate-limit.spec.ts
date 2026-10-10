@@ -340,14 +340,17 @@ test('copilot uses generic retry-after and diagnoses unrecognized reset signals'
   assert.match(warnings[0], /x-ratelimit-reset: 2027-01-15T10:30:00Z/)
 })
 
-test('waiting widens the delay ceiling to the configured maximum', () => {
+test('waiting raises the disclosed-wait ceiling, not the backoff ceiling', () => {
   const policy = subscriptionRetryPolicy(
     DEFAULT_RETRY,
     { wait: true, maxWaitMs: 6 * 3_600_000 },
     'test: retryPolicy',
   )
   assert.equal(policy.mode, 'normal')
-  assert.equal(policy.maxDelayMs, 6 * 3_600_000)
+  // A provider may ask for hours; the route's own backoff keeps its own ceiling, so a local
+  // backoff can never grow into the wait it is willing to sit out.
+  assert.equal(policy.providerWaitMaxMs, 6 * 3_600_000)
+  assert.equal(policy.maxDelayMs, DEFAULT_RETRY.maxDelayMs)
   assert.equal(policy.initialDelayMs, DEFAULT_RETRY.initialDelayMs)
   assert.equal(policy.mode === 'normal' && policy.maxRetries, DEFAULT_RETRY.maxRetries)
   assert.ok(policy.mode === 'normal' && policy.retryableCodes.includes('RATE_LIMIT'))
@@ -429,16 +432,39 @@ test('every route reports a policy able to hold the configured wait', () => {
     discovery: false,
     rateLimit,
   })
+  // Two ceilings, two questions: every route accepts the configured wait for a
+  // provider-disclosed reset, and each keeps its own ceiling for its own backoff.
   for (const [route, adapter] of [['claude', claude], ['codex', codex], ['grok', grok], ['copilot', copilot]] as const) {
     const policy = adapter.providerRetryPolicy(route)
     assert.ok(policy !== undefined, `${route} reports a policy`)
-    assert.equal(policy.maxDelayMs, 4 * 3_600_000, `${route} accepts the configured wait`)
+    assert.equal(policy.providerWaitMaxMs, 4 * 3_600_000, `${route} accepts the configured wait`)
   }
+  // The claude route carries the client's own backoff shape: 32 s. Its delay therefore never
+  // exceeds the client's one-minute abandon line, which is why no code needs to implement it.
+  const claudePolicy = claude.providerRetryPolicy('claude')
+  assert.ok(claudePolicy !== undefined, 'claude reports a policy')
+  assert.equal(claudePolicy.maxDelayMs, 32_000, 'the local backoff keeps the client ceiling')
+
+  // With waiting off, nothing beyond the route's own backoff ceiling is accepted.
+  const noWait = new ClaudeAdapter({
+    models: [{ id: 'claude-opus-5' }],
+    streamIdleTimeoutMs: 1_000,
+    tokens: memoryTokens(claudeSession),
+    discovery: false,
+    rateLimit: { wait: false, maxWaitMs: 4 * 3_600_000 },
+  })
+  assert.equal(noWait.providerRetryPolicy('claude')?.providerWaitMaxMs, 32_000)
+
   // Every route carries Claude Code's retry budget, not just claude.
-  for (const [route, adapter] of [['claude', claude], ['codex', codex], ['grok', grok], ['copilot', copilot]] as const) {
+  for (const [route, adapter] of [['codex', codex], ['grok', grok], ['copilot', copilot]] as const) {
     const policy = adapter.providerRetryPolicy(route)
     assert.equal(policy?.mode === 'normal' && policy.maxRetries, DEFAULT_RETRY.maxRetries, route)
     assert.equal(policy?.initialDelayMs, DEFAULT_RETRY.initialDelayMs, route)
     assert.equal(policy?.jitterRatio, DEFAULT_RETRY.jitterRatio, route)
   }
+  // The claude route departs from the shared shape on the two values the client's own
+  // backoff helper carries, while keeping the same budget.
+  assert.equal(claudePolicy?.mode === 'normal' && claudePolicy.maxRetries, DEFAULT_RETRY.maxRetries)
+  assert.equal(claudePolicy?.initialDelayMs, 500)
+  assert.equal(claudePolicy?.jitterRatio, 0.25)
 })

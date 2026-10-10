@@ -11,6 +11,15 @@ import {
   LlmError,
 } from '@deepseek-ai/dsh-llm'
 import { ToolCallId } from '../compat.js'
+
+// The finish-reason map is merge-extensible so an adapter can surface a provider's own
+// reasons. A refusal is one: the model answered, declined, and stopped, which a caller
+// must be able to tell apart from a turn that completed.
+declare module '@deepseek-ai/dsh-llm' {
+  interface FinishReasonMap {
+    'refusal': { kind: 'refusal' }
+  }
+}
 import type {
   ContentBlock,
   ReplayEnvelope,
@@ -41,7 +50,9 @@ import type { ResolvedToolResultBlock, TranslatableMessage } from './resolved.js
 /**
  * Tags wrapping a mid-conversation system message where it sits in the history.
  */
-export const SYSTEM_REMINDER_OPEN = '<system-reminder>'
+export // The genuine client substitutes this when stripping blank text leaves a message empty.
+const NO_CONTENT_TEXT = '(no content)'
+const SYSTEM_REMINDER_OPEN = '<system-reminder>'
 export const SYSTEM_REMINDER_CLOSE = '</system-reminder>'
 
 /**
@@ -49,8 +60,14 @@ export const SYSTEM_REMINDER_CLOSE = '</system-reminder>'
  * are emitted by the wire builder, never here.
  */
 export interface AnthropicMessage {
-  role: 'user' | 'assistant'
-  content: WireBlock[]
+  role: 'user' | 'assistant' | 'system'
+  /**
+   * A mid-conversation system message carries its text as a plain string, which is what
+   * the genuine client sends; every other message carries blocks.
+   */
+  content: WireBlock[] | string
+  /** Clears a mid-conversation system message once the next user message arrives. */
+  clear_at?: 'next_user_message'
 }
 
 /**
@@ -108,6 +125,9 @@ function parseToolInput(raw: string): JsonValue {
  * @param message - one assembled user message, reordered in place.
  */
 function leadWithToolResults(message: AnthropicMessage): void {
+  // A mid-conversation system message carries its text as a string, so it has nothing
+  // to reorder; every other message reaching here carries blocks.
+  if (!Array.isArray(message.content)) return
   const firstOther = message.content.findIndex(block => block.type !== 'tool_result')
   if (firstOther === -1) return
   if (!message.content.slice(firstOther).some(block => block.type === 'tool_result')) return
@@ -141,30 +161,104 @@ interface ClaudeThinkingReplay {
 }
 
 /**
- * Read thinking signatures captured from an earlier Claude response.
+ * One server-tool block an earlier response captured, with the position it must
+ * be re-emitted at.
+ */
+interface ClaudeServerReplay {
+  /**
+   * Harness-visible blocks already open when the block arrived: it is re-emitted
+   * ahead of the harness block at this index.
+   */
+  index: number
+  /** The response block, replayed unchanged. */
+  block: unknown
+}
+
+/** Replay state recovered from one Claude assistant message. */
+interface ClaudeReplay {
+  /** One entry per harness block, aligned with the message's own blocks. */
+  blocks: readonly ClaudeThinkingReplay[]
+  /** Server-tool blocks to splice back in, in arrival order. */
+  serverBlocks: readonly ClaudeServerReplay[]
+}
+
+/** Nothing to replay: another provider's message, another model, or no envelope. */
+const NO_CLAUDE_REPLAY: ClaudeReplay = { blocks: [], serverBlocks: [] }
+
+/**
+ * The block types captured for replay. Nothing else recorded in the envelope is
+ * sent back: an unrecognized payload has no defined place in a request.
+ */
+const SERVER_BLOCK_TYPES: ReadonlySet<string> = new Set(['server_tool_use', 'tool_search_tool_result'])
+
+/**
+ * Read the replay state captured from an earlier Claude response.
  *
  * The envelope is this adapter's own: another provider's replay state, or a
  * signature minted for a different model, is ignored. Thinking blocks are
  * bound to the model that produced them.
  */
-function claudeReplayBlocks(message: TranslatableMessage, model: string | undefined): readonly ClaudeThinkingReplay[] {
+function claudeReplayBlocks(message: TranslatableMessage, model: string | undefined): ClaudeReplay {
   const source = message.source
-  if (source?.kind !== 'model' || source.provider !== 'claude') return []
-  if (model !== undefined && source.model !== model) return []
+  if (source?.kind !== 'model' || source.provider !== 'claude') return NO_CLAUDE_REPLAY
+  if (model !== undefined && source.model !== model) return NO_CLAUDE_REPLAY
   const envelope = source.replayState
-  if (typeof envelope !== 'object' || envelope === null) return []
-  const record = envelope as { response?: { kind?: unknown; version?: unknown }; blocks?: unknown }
-  if (record.response?.kind !== 'claude' || record.response.version !== 1 || !Array.isArray(record.blocks)) return []
-  return record.blocks.map((entry): ClaudeThinkingReplay => {
-    if (typeof entry !== 'object' || entry === null) return {}
+  if (typeof envelope !== 'object' || envelope === null) return NO_CLAUDE_REPLAY
+  const record = envelope as {
+    response?: { kind?: unknown; version?: unknown; serverBlocks?: unknown }
+    blocks?: unknown
+  }
+  if (record.response?.kind !== 'claude' || record.response.version !== 1 || !Array.isArray(record.blocks)) return NO_CLAUDE_REPLAY
+  return {
+    blocks: record.blocks.map((entry): ClaudeThinkingReplay => {
+      if (typeof entry !== 'object' || entry === null) return {}
+      const raw = entry as Record<string, unknown>
+      const signature = typeof raw.signature === 'string' && raw.signature.length > 0 ? raw.signature : undefined
+      const redacted = typeof raw.redacted === 'string' && raw.redacted.length > 0 ? raw.redacted : undefined
+      return {
+        ...signature === undefined ? {} : { signature },
+        ...redacted === undefined ? {} : { redacted },
+      }
+    }),
+    serverBlocks: claudeServerReplayBlocks(record.response.serverBlocks),
+  }
+}
+
+/**
+ * Read the server-tool blocks a response captured.
+ *
+ * These entries are durable adapter data on their way back to the wire, so each
+ * position and each block is checked first; an entry of any other shape is
+ * dropped rather than replayed unvalidated.
+ */
+function claudeServerReplayBlocks(value: unknown): readonly ClaudeServerReplay[] {
+  if (!Array.isArray(value)) return []
+  const entries: ClaudeServerReplay[] = []
+  for (const entry of value) {
+    if (typeof entry !== 'object' || entry === null) continue
     const raw = entry as Record<string, unknown>
-    const signature = typeof raw.signature === 'string' && raw.signature.length > 0 ? raw.signature : undefined
-    const redacted = typeof raw.redacted === 'string' && raw.redacted.length > 0 ? raw.redacted : undefined
-    return {
-      ...signature === undefined ? {} : { signature },
-      ...redacted === undefined ? {} : { redacted },
-    }
-  })
+    const index = raw.index
+    const block = raw.block
+    if (typeof index !== 'number' || !Number.isSafeInteger(index) || index < 0) continue
+    if (typeof block !== 'object' || block === null || Array.isArray(block)) continue
+    const type = (block as Record<string, unknown>).type
+    if (typeof type !== 'string' || !SERVER_BLOCK_TYPES.has(type)) continue
+    entries.push({ index, block })
+  }
+  return entries
+}
+
+/**
+ * Retake one captured response block as wire content.
+ *
+ * The envelope carries the block exactly as the response sent it, and both
+ * captured types are members of the wire library's message-content union, so
+ * the capture goes back onto the wire unchanged.
+ * @param entry - the replay entry recorded in the envelope.
+ * @returns the captured block as message content.
+ */
+function serverReplayBlock(entry: ClaudeServerReplay): WireBlock {
+  return entry.block as WireBlock
 }
 
 /**
@@ -186,9 +280,16 @@ function claudeReplayBlocks(message: TranslatableMessage, model: string | undefi
  * @param messages - ordered conversation messages with resolved images.
  * @param model - the model this request targets. Thinking signatures are
  *   model-bound, so a signature from another model is not replayed.
+ * @param midConversationSystem - whether this model accepts a mid-conversation system
+ *   message. The caller answers with the same predicate that decides the beta header, so
+ *   the message and the header cannot disagree.
  * @returns Anthropic messages in conversation order.
  */
-export function toAnthropicMessages(messages: readonly TranslatableMessage[], model?: string): AnthropicMessage[] {
+export function toAnthropicMessages(
+  messages: readonly TranslatableMessage[],
+  model?: string,
+  midConversationSystem = false,
+): AnthropicMessage[] {
   const out: AnthropicMessage[] = []
   const start = conversationStart(messages)
   for (const [index, message] of messages.entries()) {
@@ -196,12 +297,43 @@ export function toAnthropicMessages(messages: readonly TranslatableMessage[], mo
     // owns those. A later one rides here so the cached prefix ahead of it
     // stays byte-identical.
     if (message.role === 'system' && index < start) continue
+    if (message.role === 'system' && midConversationSystem) {
+      // The genuine client sends mid-conversation context as a system message the server
+      // drops once the next user message arrives, which is what keeps the cached prefix
+      // ahead of it intact. Gating this on the model's capability is what the client does
+      // too, and the same predicate decides the beta header, so the two agree.
+      const text = message.content
+        .filter((block) => block.type === 'text')
+        .map((block) => (block.type === 'text' ? block.text : ''))
+        .join('')
+      if (text.trim().length > 0) {
+        out.push({ role: 'system', content: text, clear_at: 'next_user_message' })
+      }
+      continue
+    }
     const role = message.role === 'system' ? 'user' : message.role
     const replay = claudeReplayBlocks(message, model)
     const blocks: WireBlock[] = []
+    let droppedBlankText = false
+    let serverCursor = 0
     for (const [blockIndex, block] of message.content.entries()) {
+      // A captured server-tool block is re-emitted ahead of the harness block at the
+      // position it recorded, which is where the response carried it.
+      while (serverCursor < replay.serverBlocks.length && replay.serverBlocks[serverCursor].index <= blockIndex) {
+        blocks.push(serverReplayBlock(replay.serverBlocks[serverCursor]))
+        serverCursor += 1
+      }
       switch (block.type) {
         case 'text':
+          // The genuine client drops a text block whose content is absent or
+          // whitespace-only before sending, and substitutes a placeholder when that
+          // leaves a message with no blocks. The API rejects such a block outright
+          // ("text content blocks must contain non-whitespace text"), so forwarding
+          // one fails the whole conversation rather than the single block.
+          if (block.text.trim().length === 0) {
+            droppedBlankText = true
+            break
+          }
           blocks.push({
             type: 'text',
             text: message.role === 'system'
@@ -241,7 +373,7 @@ export function toAnthropicMessages(messages: readonly TranslatableMessage[], mo
           // adapter resolves images before translation, so this is skipped.
           break
         case 'reasoning': {
-          const prior = replay[blockIndex]
+          const prior = replay.blocks[blockIndex]
           if (prior?.redacted !== undefined) {
             blocks.push({ type: 'redacted_thinking', data: prior.redacted })
             break
@@ -257,13 +389,32 @@ export function toAnthropicMessages(messages: readonly TranslatableMessage[], mo
           break
       }
     }
+    // A captured block that arrived after the last harness block still belongs after it.
+    while (serverCursor < replay.serverBlocks.length) {
+      blocks.push(serverReplayBlock(replay.serverBlocks[serverCursor]))
+      serverCursor += 1
+    }
+    if (blocks.length === 0 && droppedBlankText) {
+      // Stripping blank text left nothing behind: the genuine client keeps the message
+      // and substitutes a placeholder rather than sending an empty content array.
+      blocks.push({ type: 'text', text: NO_CONTENT_TEXT })
+    }
     if (blocks.length === 0) continue
     const last = out[out.length - 1]
-    if (last !== undefined && last.role === role) last.content.push(...blocks)
-    else out.push({ role, content: blocks })
+    if (
+      last !== undefined &&
+      last.role === role &&
+      Array.isArray(last.content)
+    ) {
+      last.content.push(...blocks)
+    } else {
+      out.push({ role, content: blocks })
+    }
   }
   for (const message of out) {
-    if (message.role === 'user') leadWithToolResults(message)
+    if (message.role === 'user' && Array.isArray(message.content)) {
+      leadWithToolResults(message)
+    }
   }
   narrateOrphanToolResults(out)
   return out
@@ -273,11 +424,13 @@ export function toAnthropicMessages(messages: readonly TranslatableMessage[], mo
 function narrateOrphanToolResults(messages: readonly AnthropicMessage[]): void {
   const calls = new Set<string>()
   for (const message of messages) {
+    if (!Array.isArray(message.content)) continue
     for (const block of message.content) {
       if (block.type === 'tool_use') calls.add(String(block.id))
     }
   }
   for (const message of messages) {
+    if (!Array.isArray(message.content)) continue
     for (const [index, block] of message.content.entries()) {
       if (block.type !== 'tool_result' || calls.has(String(block.tool_use_id))) continue
       const text = typeof block.content === 'string'
@@ -357,6 +510,20 @@ interface AnthropicUsage {
 }
 
 /** The subset of Anthropic SSE event shapes this translator reads. */
+/**
+ * The server's own account of the context edits it applied to this response.
+ *
+ * Present only while the context-management beta is active and only when an edit ran, so an
+ * absent field means the server applied nothing.
+ */
+export interface AnthropicContextManagement {
+  readonly applied_edits?: readonly {
+    readonly type?: string
+    readonly cleared_tool_uses?: number
+    readonly cleared_input_tokens?: number
+  }[]
+}
+
 export interface AnthropicStreamEvent {
   type: string
   index?: number
@@ -369,6 +536,12 @@ export interface AnthropicStreamEvent {
     name?: string
     /** Opaque payload of a `redacted_thinking` block. Must be replayed verbatim. */
     data?: string
+    /** `server_tool_use` input: the start object's value, or what `input_json_delta` builds. */
+    input?: unknown
+    /** `tool_search_tool_result` payload. Opaque; replayed verbatim. */
+    content?: unknown
+    /** The `server_tool_use` call a `tool_search_tool_result` answers. */
+    tool_use_id?: string
   }
   delta?: {
     type?: string
@@ -381,6 +554,8 @@ export interface AnthropicStreamEvent {
   }
   usage?: AnthropicUsage
   error?: { type?: string; message?: string }
+  /** The edits the server applied to this response, when it applied any. */
+  context_management?: AnthropicContextManagement
 }
 
 /** One open harness block under assembly. */
@@ -394,6 +569,21 @@ interface OpenBlock {
   signature: string
   /** `redacted_thinking.data`, when this block is a redacted thinking block. */
   redacted?: string
+}
+
+/**
+ * One open server-tool block under assembly.
+ *
+ * It never becomes a harness block: the response's own JSON is remembered and
+ * sent back unchanged at the position it occupied.
+ */
+interface OpenServerBlock {
+  /** Harness blocks already open when this block arrived: its re-emission position. */
+  index: number
+  /** The start object, replayed as it arrived. */
+  block: Record<string, unknown>
+  /** Concatenated `input_json_delta` payload, for a block that streams its input. */
+  input: string
 }
 
 /** Assemble the final ContentBlock for one open block. */
@@ -440,11 +630,15 @@ export class AnthropicStreamTranslator {
   private blocks = new Map<number, OpenBlock>()
   /** Replay entries aligned with harness block indexes. */
   private replay: ClaudeThinkingReplay[] = []
+  /** Server-tool blocks captured for the next request, in arrival order. */
+  private serverBlocks: ClaudeServerReplay[] = []
+  /** Open server-tool blocks under assembly, by wire index. */
+  private openServerBlocks = new Map<number, OpenServerBlock>()
   private nextIndex = 0
   private sawAnyBlock = false
   private pendingUsage: { inputTokens: number; cacheReadTokens?: number; cacheWriteTokens?: number; reasoningTokens?: number } | undefined
   private outputTokens: number | undefined
-  private stopReason: 'stop' | 'tool-calls' | 'max-tokens' = 'stop'
+  private stopReason: 'stop' | 'tool-calls' | 'max-tokens' | 'refusal' = 'stop'
   private usageEmitted = false
   /** Set once `message_stop` produced the terminal finish chunk. */
   terminated = false
@@ -474,11 +668,34 @@ export class AnthropicStreamTranslator {
     }
   }
 
+  /** Start capturing a server-tool block, which occupies no harness block index. */
+  private openServer(wireIndex: number, block: Record<string, unknown>): void {
+    this.openServerBlocks.set(wireIndex, { index: this.nextIndex, block, input: '' })
+  }
+
+  /** Finalize one captured server-tool block and keep it for the next request. */
+  private closeServer(wireIndex: number): void {
+    const open = this.openServerBlocks.get(wireIndex)
+    if (open === undefined) return
+    this.openServerBlocks.delete(wireIndex)
+    // A streamed input replaces whatever the start object carried; without one the start
+    // object's own input is the whole value, as it arrived.
+    const block = open.input.length === 0
+      ? open.block
+      : { ...open.block, input: parseToolInput(open.input) }
+    this.serverBlocks.push({ index: open.index, block })
+  }
+
   /**
-   * Replay envelope for a successful response that carried thinking the next
-   * turn must echo. Omitted when nothing was signed or redacted, so a plain
-   * text response stays free of adapter metadata.
+   * Replay envelope for a successful response that carried something the adapter
+   * must remember: thinking the next turn has to echo, the context edits the
+   * server reported applying, or a server-tool block the request has to carry
+   * back. Omitted when the response carried none of them, so a plain text
+   * response stays free of adapter metadata.
    */
+  /** The edits the server reported applying to this response, when it reported any. */
+  private appliedEdits: AnthropicContextManagement | undefined
+
   private replayEnvelope(): ReplayEnvelope | undefined {
     let useful = false
     const blocks: ClaudeThinkingReplay[] = []
@@ -487,8 +704,22 @@ export class AnthropicStreamTranslator {
       if (entry.signature !== undefined || entry.redacted !== undefined) useful = true
       blocks.push(entry)
     }
-    if (!useful) return undefined
-    return { response: { kind: 'claude', version: 1 }, blocks }
+    if (!useful && this.appliedEdits === undefined && this.serverBlocks.length === 0) return undefined
+    // The recorded edits ride the same envelope as the thinking signatures: both are what the
+    // adapter must remember from a response, and both are opaque to the harness. The field is
+    // optional, so an envelope written before it existed still reads as itself.
+    return {
+      response: {
+        kind: 'claude',
+        version: 1,
+        ...this.appliedEdits === undefined ? {} : { contextManagement: this.appliedEdits },
+        // Captured server-tool blocks ride here with the harness index each goes back ahead
+        // of, beside the per-block entries that stay aligned with the harness blocks. The
+        // field is optional too, so an older envelope still reads as itself.
+        ...this.serverBlocks.length === 0 ? {} : { serverBlocks: this.serverBlocks },
+      },
+      blocks,
+    }
   }
 
   private emitUsage(chunks: StreamChunk[]): void {
@@ -563,6 +794,12 @@ export class AnthropicStreamTranslator {
             })
             break
           }
+          case 'server_tool_use':
+          case 'tool_search_tool_result':
+            // A server-run tool block has no harness vocabulary, so it emits no chunk: the
+            // response's own JSON is remembered and sent back unchanged where it sat.
+            this.openServer(wireIndex, { ...block })
+            break
           default:
             break
         }
@@ -572,7 +809,15 @@ export class AnthropicStreamTranslator {
         const wireIndex = event.index ?? 0
         const block = this.blocks.get(wireIndex)
         const delta = event.delta
-        if (block === undefined || delta === undefined) return chunks
+        if (delta === undefined) return chunks
+        if (block === undefined) {
+          // A server-tool block streams its input the way a tool call streams its arguments.
+          const server = this.openServerBlocks.get(wireIndex)
+          if (server !== undefined && delta.type === 'input_json_delta') {
+            server.input += delta.partial_json ?? ''
+          }
+          return chunks
+        }
         switch (delta.type) {
           case 'text_delta':
             block.text += delta.text ?? ''
@@ -603,13 +848,19 @@ export class AnthropicStreamTranslator {
       case 'content_block_stop': {
         const wireIndex = event.index ?? 0
         const block = this.blocks.get(wireIndex)
-        if (block === undefined) return chunks
+        if (block === undefined) {
+          this.closeServer(wireIndex)
+          return chunks
+        }
         this.blocks.delete(wireIndex)
         this.remember(block)
         chunks.push({ type: 'block-end', index: block.index, block: closeBlock(block) })
         return chunks
       }
       case 'message_delta': {
+        // The server reports what it cleared on the delta that ends the message, which is the
+        // same place the client reads it from.
+        if (event.context_management !== undefined) this.appliedEdits = event.context_management
         if (event.usage?.output_tokens !== undefined) this.outputTokens = event.usage.output_tokens
         const reasoning = thinkingTokens(event.usage)
         if (reasoning !== undefined) {
@@ -630,6 +881,12 @@ export class AnthropicStreamTranslator {
           case 'max_tokens':
             this.stopReason = 'max-tokens'
             break
+          case 'refusal':
+            // A refusal is a stop the caller must be able to tell apart from a
+            // completed turn; reporting it as an ordinary stop would present a
+            // declined request as a finished answer.
+            this.stopReason = 'refusal'
+            break
           default:
             break
         }
@@ -642,6 +899,9 @@ export class AnthropicStreamTranslator {
           this.remember(block)
           chunks.push({ type: 'block-end', index: block.index, block: closeBlock(block) })
         }
+        // A server-tool block the stream never closed is still something the next request
+        // has to carry, the same way an unclosed harness block is emitted above.
+        for (const wireIndex of [...this.openServerBlocks.keys()]) this.closeServer(wireIndex)
         this.emitUsage(chunks)
         if (this.stopReason === 'stop' && !this.sawAnyBlock) {
           chunks.push({

@@ -12,7 +12,7 @@ import { MessageId, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import type { Message } from '@deepseek-ai/dsh-llm'
 import { CodexAdapter, codexRequestBody, fetchCodexModels } from '../src/providers/codex.js'
 import { GrokAdapter } from '../src/providers/grok.js'
-import { ClaudeAdapter, claudeThinkingBody, fetchClaudeModels } from '../src/providers/claude.js'
+import { ClaudeAdapter, claudeThinkingBody, fetchClaudeModelOptions } from '../src/providers/claude.js'
 import { CopilotAdapter, fetchCopilotModels } from '../src/providers/copilot.js'
 import { ModelCatalogCache } from '../src/providers/common.js'
 import { AccountTokenManager } from '../src/providers/accounts.js'
@@ -406,33 +406,15 @@ test('claude logged in returns the static catalog', async () => {
 })
 
 // The subscription endpoint advertises each model's limits (#101).
-const CLAUDE_MODELS_PAYLOAD = {
-  data: [
-    { type: 'model', id: 'claude-opus-5-5', display_name: 'Claude Opus 5.5', max_input_tokens: 1_000_000, max_tokens: 128_000 },
-    { type: 'model', id: 'claude-opus-4-5', display_name: 'Claude Opus 4.5', max_input_tokens: 200_000, max_tokens: 64_000 },
-    { type: 'model', id: 'claude-bare', display_name: 'Bare' },
-    { type: 'model', id: 'claude-odd', display_name: 'Odd', max_input_tokens: '1e6', max_tokens: -5 },
+const CLAUDE_BOOTSTRAP_PAYLOAD = {
+  client_data: null,
+  additional_model_options: [
+    { model: 'claude-opus-5-5', name: 'Claude Opus 5.5', description: 'newest' },
+    { model: 'claude-bare' },
+    { model: 'claude-retired', name: 'Retired', disabled_reason: 'no longer offered' },
+    { name: 'nameless' },
   ],
 }
-
-test('fetchClaudeModels prefers adaptive thinking when a model advertises both modes', async () => {
-  const models = await fetchClaudeModels(claudeSession, fakeFetch({
-    data: [
-      {
-        id: 'both',
-        display_name: 'Both',
-        capabilities: { thinking: { types: { enabled: { supported: true }, adaptive: { supported: true } } } },
-      },
-      {
-        id: 'budget',
-        display_name: 'Budget',
-        capabilities: { thinking: { types: { enabled: { supported: true } } } },
-      },
-    ],
-  }).fetchFn)
-  assert.equal(models[0]?.thinkingType, 'adaptive')
-  assert.equal(models[1]?.thinkingType, 'enabled')
-})
 
 test('claudeThinkingBody refuses a manual budget on Opus 5.5', () => {
   assert.deepEqual(
@@ -450,40 +432,61 @@ test('claudeThinkingBody refuses a manual budget on Opus 5.5', () => {
   assert.equal(claudeThinkingBody('claude-opus-4-5', undefined, 32_000), undefined)
 })
 
-test('fetchClaudeModels carries the advertised context window and output cap', async () => {
-  const models = await fetchClaudeModels(claudeSession, fakeFetch(CLAUDE_MODELS_PAYLOAD).fetchFn)
+test('model options carry the service additions, and nothing it disables', async () => {
+  const models = await fetchClaudeModelOptions(claudeSession, [], fakeFetch(CLAUDE_BOOTSTRAP_PAYLOAD).fetchFn)
+  // The endpoint carries display text only: limits and capabilities belong to the pinned
+  // profile, which mirrors the client's built-in catalogue.
   assert.deepEqual(models, [
-    { id: 'claude-opus-5-5', name: 'Claude Opus 5.5', contextWindow: 1_000_000, maxOutputTokens: 128_000 },
-    { id: 'claude-opus-4-5', name: 'Claude Opus 4.5', contextWindow: 200_000, maxOutputTokens: 64_000 },
-    { id: 'claude-bare', name: 'Bare' },
-    // Malformed limits are dropped rather than poisoning the catalog.
-    { id: 'claude-odd', name: 'Odd' },
+    { id: 'claude-opus-5-5', name: 'Claude Opus 5.5' },
+    { id: 'claude-bare', name: 'claude-bare' },
   ])
 })
 
-test('claude resolveModel serves discovered limits for models newer than the bundled catalog', async () => {
+test('a bootstrap response that is not the document it should be adds nothing', async () => {
+  const malformed = await fetchClaudeModelOptions(
+    claudeSession, [], fakeFetch({ unexpected: true }).fetchFn,
+  )
+  assert.deepEqual(malformed, [])
+  const refused = await fetchClaudeModelOptions(
+    claudeSession, [],
+    (async () => new Response('{}', { status: 500 })) as never,
+  )
+  assert.deepEqual(refused, [])
+})
+
+test('the options read carries the desktop client headers', async () => {
+  let seen: Record<string, string> = {}
+  const fetchFn = (async (_url: unknown, init?: { headers?: Record<string, string> }) => {
+    seen = init?.headers ?? {}
+    return new Response(JSON.stringify(CLAUDE_BOOTSTRAP_PAYLOAD), { status: 200 })
+  }) as never
+  await fetchClaudeModelOptions(claudeSession, [['anthropic-client-platform', 'desktop_app']], fetchFn)
+  assert.equal(seen['anthropic-client-platform'], 'desktop_app')
+  assert.equal(seen['content-type'], 'application/json')
+  assert.equal(seen['anthropic-beta'], 'oauth-2025-04-20')
+  assert.equal(seen['authorization']?.startsWith('Bearer '), true)
+})
+
+test('claude resolveModel keeps the fallbacks for a model the pinned catalogue does not carry', async () => {
   const claude = new ClaudeAdapter({
     models: STATIC_CLAUDE,
     streamIdleTimeoutMs: 1000,
     tokens: memoryTokens(claudeSession),
     discovery: true,
-    fetchFn: fakeFetch(CLAUDE_MODELS_PAYLOAD).fetchFn,
+    fetchFn: fakeFetch(CLAUDE_BOOTSTRAP_PAYLOAD).fetchFn,
   })
-  // Not in the configured catalog: the endpoint's numbers win over the 200k/32k fallbacks.
+  // The options endpoint names models; it does not describe them. A model outside the
+  // pinned catalogue therefore gets the documented fallbacks, exactly as it does for the
+  // genuine client, whose catalogue is the same built-in table.
   const fresh = await claude.resolveModel('claude', 'claude-opus-5-5')
-  assert.equal(fresh.context?.contextWindow, 1_000_000)
-  assert.equal(fresh.defaultMaxTokens, 128_000)
-  // Discovered but silent on limits: the fallbacks still apply.
-  const bare = await claude.resolveModel('claude', 'claude-bare')
-  assert.equal(bare.context?.contextWindow, 200_000)
-  assert.equal(bare.defaultMaxTokens, 32_000)
-  // Unknown to discovery and configuration alike: unchanged behaviour.
+  assert.equal(fresh.context?.contextWindow, 200_000)
+  assert.equal(fresh.defaultMaxTokens, 32_000)
   const unknown = await claude.resolveModel('claude', 'claude-unknown')
   assert.equal(unknown.context?.contextWindow, 200_000)
   assert.equal(unknown.defaultMaxTokens, 32_000)
 })
 
-test('claude configured output cap may lower but never exceed the discovered ceiling', async () => {
+test('claude honours the configured output cap and the catalogue window', async () => {
   const configured = [
     { id: 'claude-opus-4-5', name: 'Claude Opus 4.5', maxTokens: 16_000 },
     { id: 'claude-opus-5-5', name: 'Claude Opus 5.5', maxTokens: 256_000, contextWindow: 400_000 },
@@ -492,13 +495,17 @@ test('claude configured output cap may lower but never exceed the discovered cei
     models: configured,
     streamIdleTimeoutMs: 1000,
     tokens: memoryTokens(claudeSession),
-    discovery: true,
-    fetchFn: fakeFetch(CLAUDE_MODELS_PAYLOAD).fetchFn,
+    // No options read: this is about what the adapter does with the catalogue alone.
+    discovery: false,
   })
+  // The operator's cap is their decision and stands on its own: the ceiling it used to be
+  // clamped against came from an endpoint the genuine client never calls on this path.
   assert.equal((await claude.resolveModel('claude', 'claude-opus-4-5')).defaultMaxTokens, 16_000)
-  const capped = await claude.resolveModel('claude', 'claude-opus-5-5')
-  assert.equal(capped.defaultMaxTokens, 128_000)
-  assert.equal(capped.context?.contextWindow, 1_000_000, 'discovery outranks a stale configured window')
+  assert.equal((await claude.resolveModel('claude', 'claude-opus-5-5')).defaultMaxTokens, 256_000)
+  // The configured entry is authoritative for the models it names; the pinned catalogue
+  // still answers for everything it does not, which is where the fallbacks below come from.
+  const window = await claude.resolveModel('claude', 'claude-opus-5-5')
+  assert.equal(window.context?.contextWindow, 400_000)
 })
 
 test('fetchCodexModels tolerates entries without visibility or priority', async () => {

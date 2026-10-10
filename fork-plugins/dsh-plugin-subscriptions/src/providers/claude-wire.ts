@@ -1,5 +1,7 @@
+import type { ContextManagementConfig } from '@tormentalabs/claude-code-wire-compat'
 /**
- * Claude Code 2.1.280 wire construction for the claude provider.
+ * Claude Code 2.1.288 wire construction for the claude provider, presenting the
+ * Windows desktop identity.
  *
  * `buildClaudeCodeRequest` from `@tormentalabs/claude-code-wire-compat` owns
  * the pinned wire contract: the billing fingerprint and identity system
@@ -12,10 +14,15 @@
 
 import { randomUUID } from 'node:crypto'
 import {
-  buildClaudeCodeRequest,
-  CLAUDE_CODE_2_1_280_PROFILE,
+  CLAUDE_CODE_2_1_288_PROFILE,
   ClaudeCodeWireError,
+  SYSTEM_PROMPT_DYNAMIC_BOUNDARY,
+  buildClaudeCodeRequest,
+  supportsContextManagement,
+  supportsMidConversationSystem,
 } from '@tormentalabs/claude-code-wire-compat'
+import { desktopClientHeaders, desktopMachineProfile } from './claude-desktop.js'
+import { clientAtisFor } from './claude.js'
 import type {
   BuiltClaudeCodeRequest,
   ClaudeCodeEffort,
@@ -28,7 +35,24 @@ import { toAnthropicMessages, toAnthropicSystem, toAnthropicTools } from '../tra
 import { oversizeWireError } from './claude-images.js'
 
 /** Pinned CLI identity this route presents on every subscription endpoint. */
-export const CLAUDE_USER_AGENT: string = CLAUDE_CODE_2_1_280_PROFILE.userAgent
+export const CLAUDE_USER_AGENT: string = CLAUDE_CODE_2_1_288_PROFILE.userAgent
+
+/**
+ * The user agent the client uses on endpoints that are not the transport.
+ *
+ * The client has two: the transport one carries the entrypoint clause (what
+ * {@link CLAUDE_USER_AGENT} is), and the plain one is `claude-code/<version>` with no
+ * qualifier. Bootstrap, the OAuth profile read and the Files API use the plain form, so a
+ * client process emits both and this plugin has to as well.
+ */
+export const CLAUDE_PLAIN_USER_AGENT = `claude-code/${CLAUDE_CODE_2_1_288_PROFILE.cliVersion}`
+
+/*
+ * Anchored to the Windows desktop release: the desktop application pins Claude Code
+ * 2.1.288, spawns this same client with the `claude-desktop` entrypoint, and adds the
+ * client headers below. A desktop session and a CLI session therefore differ by the
+ * entrypoint and those headers, not by the request's shape.
+ */
 
 /** The `thinking` object this module maps onto the wire (display is fixed here). */
 export interface ClaudeWireThinking {
@@ -193,13 +217,67 @@ export function mapClaudeWireError(error: unknown, messages: readonly Translatab
   }
 }
 
-function claudeOs(): 'Windows' | 'Linux' | 'macOS' {
-  switch (process.platform) {
-    case 'win32': return 'Windows'
-    case 'darwin': return 'macOS'
-    default: return 'Linux'
-  }
+/**
+ * The cache ttl a request declares, computed as the client computes it.
+ *
+ * The client resolves one ttl per request: an hour when the account is a subscription and is
+ * not drawing on overage, and otherwise the server's own default, which it expresses by
+ * leaving the field out — and the beta header that declares the longer ttl is pushed only
+ * when the field is there. A session whose profile lookup never disclosed a subscription is
+ * therefore treated as having none, which sends the server's default rather than an hour.
+ *
+ * One input the client has and this does not: whether the account is currently in overage,
+ * which the client reads from the usage it tracks. Nothing on the request-building path knows
+ * that today, so an account in overage would still declare the hour here.
+ *
+ * @param session - the account whose request this is.
+ * @returns whether the request declares the longer ttl.
+ */
+function usesExtendedCacheTtl(session: ClaudeSession): boolean {
+  const subscription = session.subscriptionType
+  return subscription !== undefined && subscription !== 'free'
 }
+
+/**
+ * The one harness section a client-shaped request never carries: `harness:source` names the
+ * on-disk checkout of the harness, a machine-local path that belongs to no client.
+ *
+ * The harness identity section is deliberately not listed. What the model is told about its
+ * own environment is a deployment decision — the harness exposes `includeHarnessIdentity` and
+ * the persona for it — and removing it here would also discard a deployment's replacement.
+ */
+const MACHINE_LOCAL_SECTIONS: ReadonlySet<string> = new Set(['harness:source'])
+
+/** The harness section whose text a Claude request replaces with the deployment's own line. */
+const HARNESS_IDENTITY_SECTION = 'harness:identity'
+
+/**
+ * The identity a Claude request carries when the deployment sets no line.
+ *
+ * It describes the environment rather than naming a product: what the agent is, that its tool
+ * list is authoritative, and where its commands run. A client-shaped request carries the
+ * client's own identity block as well, so this line is what keeps the model from reading that
+ * block as a description of its toolset.
+ */
+export const DEFAULT_CLAUDE_IDENTITY_LINE = `You are an AI coding agent running inside a local agent harness on the user's machine.
+The tools listed in this request are the complete and authoritative set available to you: call them exactly as documented, and ignore tool names, commands, and workflows that belong to other environments. Shell commands run on the user's machine in the workspace the request context describes, and the user reads your replies in a local client.`
+
+/**
+ * The platform the anchored identity claims, and the architecture with it.
+ *
+ * The pinned profile is the Windows desktop, so these are constants rather than this
+ * host's values: a client reporting `claude-desktop` for Windows while sending another
+ * platform, or an architecture that application is not built for, contradicts itself, and
+ * a host-specific value would also identify the operator. The runtime version is pinned
+ * for the same reason, so a request never varies with the machine that sent it.
+ */
+export const CLAUDE_CLIENT_OS = 'Windows'
+
+/** Architecture the Windows desktop application is built for. */
+export const CLAUDE_CLIENT_ARCH = 'x64'
+
+/** Runtime version reported in place of this host's, so it cannot drift per machine. */
+export const CLAUDE_CLIENT_RUNTIME_VERSION = '24.13.0'
 
 const CLAUDE_EFFORTS = new Set<string>(['low', 'medium', 'high', 'xhigh', 'max'])
 
@@ -233,43 +311,136 @@ export async function buildClaudeWireRequest(
   effort: string | undefined,
   sessionId: string,
   account: string,
+  identityLine?: string,
+  contextManagement?: ContextManagementConfig,
 ): Promise<BuiltClaudeCodeRequest> {
   if (session.deviceId === undefined || session.accountUuid === undefined) {
     throw new Error('dsh-plugin-subscriptions: claude wire identity is missing; backfill it before building')
   }
-  const system = toAnthropicSystem(options.system, messages)
+  // No reporting block is injected. The carve defines the reporting text once and
+  // every consumer of it reads the block out of an array that already contains it;
+  // no site pushes it into a request, and the block is not part of the standard
+  // prompt text, so a genuine request does not carry it. Injecting it would add a
+  // block no genuine client sends — distinguishable in the opposite direction from
+  // the one this work exists to close. The library seam stays available for a
+  // caller that has a capture proving otherwise.
+  // The loop splits the rendered prompt at the boundary its sections declared; when it did,
+  // the two halves go out as the client's static and dynamic sides. Otherwise the prompt is
+  // passed whole, exactly as before.
+  // The loop hands the prompt over as its assembled sections. Sections whose contributor
+  // declared them stable go first, separated from the session-specific remainder by the
+  // marker the wire builder splits on: it joins each side into one block, leaves the identity
+  // block unmarked, and gives the shared side the global cache scope. Text after the marker
+  // keeps its assembly order, and the leading system-role messages stay last because they are
+  // session content. Without the section list the prompt is passed whole.
+  // Two of the harness's own sections describe a different product: the identity line names
+  // the harness, and the source section names a machine-local checkout path. A request shaped
+  // as the client carries the client's own identity block, so sending either leaves the model
+  // with two identities and a path that belongs to no client.
+  const identity = identityLine ?? DEFAULT_CLAUDE_IDENTITY_LINE
+  const sections = (options.systemSections ?? [])
+    .filter(section => !MACHINE_LOCAL_SECTIONS.has(section.name))
+    // The harness identity section becomes this route's own line. A configured line is a
+    // deployment's text rather than a compiled-in one, so it is never claimed as shareable.
+    .map(section => section.name === HARNESS_IDENTITY_SECTION
+      ? { name: section.name, text: identity, stable: section.stable && identityLine === undefined }
+      : section)
+    .filter(section => section.text.length > 0)
+  // A deployment that turns the harness identity off still gets this route's own line: the
+  // model needs to know its tool list is authoritative, and the client block it also carries
+  // describes a different toolset.
+  const identitySections = options.systemSections === undefined || sections.some(section => section.name === HARNESS_IDENTITY_SECTION)
+    ? sections
+    : [{ name: HARNESS_IDENTITY_SECTION, text: identity, stable: false }, ...sections]
+  const shared = identitySections.filter(section => section.stable)
+  // The filter and the identity replacement apply whether or not any section is stable, so a
+  // deployment whose sections are all session-specific still sends neither the machine-local
+  // path nor a second identity.
+  const system = options.systemSections === undefined
+    ? toAnthropicSystem(options.system, messages)
+    : shared.length === 0
+      ? [...identitySections.map(section => section.text), ...toAnthropicSystem(undefined, messages)]
+      : [
+          ...shared.map(section => section.text),
+          SYSTEM_PROMPT_DYNAMIC_BOUNDARY,
+          ...identitySections.filter(section => !section.stable).map(section => section.text),
+          ...toAnthropicSystem(undefined, messages),
+        ]
   const tools = options.tools !== undefined && options.tools.length > 0
     ? toAnthropicTools(options.tools)
     : undefined
   const resolvedEffort = claudeEffort(effort)
+  const atis = clientAtisFor(account)
   const chain = chainFor(account, sessionId)
   return buildClaudeCodeRequest({
     accessToken: session.accessToken,
     model: options.model,
     maxTokens,
-    messages: toAnthropicMessages(messages, options.model),
-    ...system.length === 0 ? {} : { system },
+    messages: toAnthropicMessages(
+      messages,
+      options.model,
+      // The same predicate that decides the beta header, so a mid-conversation
+      // system message and its header are always decided together.
+      supportsMidConversationSystem(options.model, CLAUDE_CODE_2_1_288_PROFILE),
+    ),
+    system,
+    // The edits go out only where the catalogue gives the model context management, so the
+    // request never states a policy the API would reject and the beta header follows the same
+    // fact. Absent, the body is byte-identical to one built without this parameter.
+    ...contextManagement === undefined || !supportsContextManagement(options.model)
+      ? {}
+      : { contextManagement },
     ...tools === undefined ? {} : { tools },
-    // Preserve the fork's historical breakpoint behavior: caching on, with a
-    // marker on the last system block, the last tool, and the newest message.
-    // The genuine client ships 1h cache markers, so the ttl matches its bytes.
-    cacheControl: { enabled: true, systemBreakpoint: true, toolBreakpoint: true, messageBreakpoint: true, ttl: '1h' },
+    // Caching on, with a marker on the system block and on the newest message. No tool
+    // marker: the client's only tool-marker seam is an option its main-loop tool builder
+    // never passes, so a genuine request carries three markers where a tool breakpoint made
+    // ours four. The ttl is computed the way the client computes it, and the beta that
+    // declares the longer ttl follows it rather than being sent unconditionally.
+    cacheControl: {
+      enabled: true,
+      systemBreakpoint: true,
+      toolBreakpoint: false,
+      messageBreakpoint: true,
+      ...usesExtendedCacheTtl(session) ? { ttl: '1h' as const } : {},
+    },
     runtime: {
       sessionId,
       deviceId: session.deviceId,
       accountUuid: session.accountUuid,
       runtime: 'node',
-      runtimeVersion: process.versions.node,
-      os: claudeOs(),
-      arch: process.arch,
+      runtimeVersion: CLAUDE_CLIENT_RUNTIME_VERSION,
+      os: CLAUDE_CLIENT_OS,
+      arch: CLAUDE_CLIENT_ARCH,
+      // This route is a programmatic client that supplies its own system prompt: the
+      // headless shape, which selects the standalone agent identity line rather than
+      // the interactive CLI one. The entrypoint and user agent come from the pinned
+      // profile, which records `claude-desktop`.
+      invocation: { isNonInteractive: true, hasAppendSystemPrompt: false },
     },
-    ...thinking === undefined ? {} : { thinking: { ...thinking, display: 'summarized' } },
+    // The display value is a per-version wire fact, so it belongs to the pinned
+    // profile rather than to this adapter: overriding it here sent the wrong value
+    // for the current release.
+    ...thinking === undefined ? {} : { thinking },
     ...resolvedEffort === undefined
       ? {}
       : { effort: resolvedEffort, outputConfig: { effort: resolvedEffort } },
+    // The desktop spawns its client with API_TIMEOUT_MS=900000, and the client reports
+    // that timeout as x-stainless-timeout; a bare CLI would report 600.
+    stainlessTimeoutSeconds: 900,
     stream: true,
     clientRequestId: randomUUID(),
     ...chain.previousRequestId === undefined ? {} : { previousRequestId: chain.previousRequestId },
     promptId: claudePromptId(account, sessionId, messages),
-  }, CLAUDE_CODE_2_1_280_PROFILE)
+    // The desktop identity. These names are not canonical for this package, so the
+    // default strict policy accepts them; they are non-cacheable request headers and
+    // do not disturb the body's own construction. The machine values are derived from
+    // the account rather than read from this host, so one account presents one machine
+    // and no two accounts present the same one.
+    extraHeaders: [
+      ...Object.entries(desktopClientHeaders()) as [string, string][],
+      // The client attaches the ATIS token to every request it sends through the
+      // first-party client, once a bootstrap read has disclosed one.
+      ...atis === undefined ? [] : [['x-cc-atis', atis] as [string, string]],
+    ],
+  }, CLAUDE_CODE_2_1_288_PROFILE)
 }

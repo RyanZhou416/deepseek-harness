@@ -671,10 +671,13 @@ test('Antigravity OAuth selects defaults or one complete override source without
   try {
     delete process.env.ANTIGRAVITY_CLIENT_ID
     delete process.env.ANTIGRAVITY_CLIENT_SECRET
-    const defaults = resolveAntigravityOAuthConfig()
-    assert.match(defaults.clientId, /\.apps\.googleusercontent\.com$/)
-    assert.ok(defaults.clientSecret && defaults.clientSecret.length > 10)
-    assert.deepEqual(resolveAntigravityOAuthConfig({ clientId: '  ', clientSecret: ' ' }), defaults)
+    // No application credential is committed, so an unconfigured environment is refused
+    // loudly rather than falling back to a shared default identity.
+    assert.throws(() => resolveAntigravityOAuthConfig(), /no OAuth client configured/)
+    assert.throws(
+      () => resolveAntigravityOAuthConfig({ clientId: '  ', clientSecret: ' ' }),
+      /no OAuth client configured/,
+    )
     assert.deepEqual(resolveAntigravityOAuthConfig(oauth), oauth)
     assert.deepEqual(resolveAntigravityOAuthConfig({ clientId: 'pkce-client' }), { clientId: 'pkce-client' })
     process.env.ANTIGRAVITY_CLIENT_ID = ' env-client '

@@ -4,5 +4,6 @@
  * Source: https://github.com/Rahularya01/pi-antigravity/blob/697858cafcf1faddf2ae898d2f053b2ff26c05e6/src/auth/oauth.ts
  */
 
-export const ANTIGRAVITY_DEFAULT_CLIENT_ID = "1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com"
-export const ANTIGRAVITY_DEFAULT_CLIENT_SECRET = "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"
+// Deliberately no defaults: the client identity comes from configuration or the
+// environment (`config.antigravity.clientId` / `clientSecret`, or ANTIGRAVITY_CLIENT_ID /
+// ANTIGRAVITY_CLIENT_SECRET), so no application credential is committed here.

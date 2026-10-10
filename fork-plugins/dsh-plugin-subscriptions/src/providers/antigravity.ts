@@ -45,7 +45,6 @@ import type {
   UsageWindow,
 } from './common.js'
 import { proxiedFetch } from '../http.js'
-import { ANTIGRAVITY_DEFAULT_CLIENT_ID, ANTIGRAVITY_DEFAULT_CLIENT_SECRET } from './antigravity-oauth-client.js'
 import { AccountTokenManager, DISCOVERY_TIMEOUT_MS, unionAccountCatalogs } from './accounts.js'
 import type { PoolAdapter } from './pool.js'
 import { DEFAULT_RATE_LIMIT_WAIT, DEFAULT_RETRY, subscriptionRetryPolicy } from './rate-limit.js'
@@ -103,7 +102,10 @@ export function resolveAntigravityOAuthConfig(config?: Partial<AntigravityOAuthC
     return { clientId: environmentId, ...environmentSecret ? { clientSecret: environmentSecret } : {} }
   }
   if (environmentSecret) throw new Error('ANTIGRAVITY_CLIENT_SECRET requires ANTIGRAVITY_CLIENT_ID')
-  return { clientId: ANTIGRAVITY_DEFAULT_CLIENT_ID, clientSecret: ANTIGRAVITY_DEFAULT_CLIENT_SECRET }
+  throw new Error(
+    'antigravity: no OAuth client configured; set config.antigravity.clientId (and clientSecret), '
+    + 'or ANTIGRAVITY_CLIENT_ID / ANTIGRAVITY_CLIENT_SECRET',
+  )
 }
 
 /** Normalize the configured API origin and reject paths/credentials. */
