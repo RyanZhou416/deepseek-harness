@@ -224,10 +224,16 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
     /**
      * Extra rows a feature adds to the resident composer's model menu, below the
      * model and effort cells. The seat itself stays single-owner: these rows are
-     * additive, they share the seat's Session, and each renders its own row. With
-     * no contribution the menu is the two cells the model seat renders alone.
+     * additive, they share the seat's Session, and each renders its own row. A
+     * row's cell opens its own pane inside the same card, exactly like the Model
+     * and Effort cells — the seat hides its cells and keeps the row mounted —
+     * and with no contribution the menu is the two cells the seat renders alone.
      */
-    'conversation.input.model.row': { kind: 'list'; scope: 'session' }
+    'conversation.input.model.row': {
+      kind: 'list'
+      scope: 'session'
+      owner: ModelMenuRowOwnerProps
+    }
   }
 
   interface SlotFactoryMap {
@@ -275,6 +281,32 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
     /** Input actions are absent without a current Session. */
     inputActions: InputActions | undefined
   }
+}
+
+/**
+ * Navigation face the composer model seat publishes to every row contributed
+ * through `conversation.input.model.row`. A row's cell is one of the seat's
+ * root rows; activating it hands the card to that row's own pane the same way
+ * the Model and Effort cells do: the seat hides its own cells, keeps the row
+ * mounted, and routes the menu's keys to the shown pane.
+ *
+ * A row's activating cell MUST carry `data-model-menu-row="<its row key>"`:
+ * the seat returns the keyboard to that marker when the pane is left, and
+ * never learns a row's key any other way. Every callback keeps one identity
+ * across renders, so a row may hold them in effect dependencies.
+ */
+export interface ModelMenuRowOwnerProps {
+  /** Contributed pane key on screen, or null while the seat shows its own panes. */
+  readonly activeRow: string | null
+  /**
+   * Show the pane belonging to the row keyed `rowKey`.
+   * @param rowKey - the row's own stable key.
+   */
+  readonly openRow: (rowKey: string) => void
+  /** Leave the shown contributed pane for the root pane, focusing the cell that opened it; a no-op when none is shown. */
+  readonly back: () => void
+  /** Close the menu, restoring focus to the trigger. */
+  readonly closeMenu: () => void
 }
 
 /** Owner share of the Hero agent-preset control. */

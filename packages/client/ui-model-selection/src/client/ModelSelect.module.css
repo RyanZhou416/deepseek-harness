@@ -127,6 +127,16 @@
   line-height: 18px;
 }
 
+/* The shown pane is the card's single scroll region. The card keeps its own
+   bounds (the max-height above), so a pane taller than the card scrolls here
+   instead of having its last row clipped by the card's overflow. */
+.pane {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow-y: auto;
+}
+
 .error,
 .warning {
   display: flex;
@@ -184,6 +194,9 @@
   display: flex;
   align-items: center;
   gap: 6px;
+  /* Rows keep their own height inside the pane's scroll region instead of
+     being squashed by a short card. */
+  flex: 0 0 auto;
   width: auto;
   min-width: 100%;
   min-height: 34px;
@@ -248,6 +261,8 @@
   display: flex;
   align-items: center;
   gap: 6px;
+  /* Fixed rhythm inside the pane's scroll region, like `.option`. */
+  flex: 0 0 auto;
   width: auto;
   min-width: 100%;
   height: 34px;

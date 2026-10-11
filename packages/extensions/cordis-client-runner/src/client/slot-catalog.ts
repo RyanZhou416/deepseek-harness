@@ -943,7 +943,7 @@ export const CLIENT_SLOT_API: readonly ClientSlotEntry[] = [
     kind: 'list',
     scope: 'session',
     summary: 'Extra rows a feature adds to the resident composer\'s model menu, below the model and effort cells.',
-    doc: 'Extra rows a feature adds to the resident composer\'s model menu, below the\nmodel and effort cells. The seat itself stays single-owner: these rows are\nadditive, they share the seat\'s Session, and each renders its own row. With\nno contribution the menu is the two cells the model seat renders alone.',
+    doc: 'Extra rows a feature adds to the resident composer\'s model menu, below the\nmodel and effort cells. The seat itself stays single-owner: these rows are\nadditive, they share the seat\'s Session, and each renders its own row. A\nrow\'s cell opens its own pane inside the same card, exactly like the Model\nand Effort cells — the seat hides its cells and keeps the row mounted —\nand with no contribution the menu is the two cells the seat renders alone.',
     registerOptions: [
       {
         name: 'id',
@@ -964,7 +964,9 @@ export const CLIENT_SLOT_API: readonly ClientSlotEntry[] = [
         doc: 'Display text where the owner projects one (nav rows, tabs). A thunk is re-read on every projection, so localized text follows the active locale without re-registering.',
       },
     ],
-    ownerProps: [],
+    ownerProps: [
+      '/**\n * Navigation face the composer model seat publishes to every row contributed\n * through `conversation.input.model.row`. A row\'s cell is one of the seat\'s\n * root rows; activating it hands the card to that row\'s own pane the same way\n * the Model and Effort cells do: the seat hides its own cells, keeps the row\n * mounted, and routes the menu\'s keys to the shown pane.\n *\n * A row\'s activating cell MUST carry `data-model-menu-row="<its row key>"`:\n * the seat returns the keyboard to that marker when the pane is left, and\n * never learns a row\'s key any other way. Every callback keeps one identity\n * across renders, so a row may hold them in effect dependencies.\n */\nexport interface ModelMenuRowOwnerProps {\n  /** Contributed pane key on screen, or null while the seat shows its own panes. */\n  readonly activeRow: string | null\n  /**\n   * Show the pane belonging to the row keyed `rowKey`.\n   * @param rowKey - the row\'s own stable key.\n   */\n  readonly openRow: (rowKey: string) => void\n  /** Leave the shown contributed pane for the root pane, focusing the cell that opened it; a no-op when none is shown. */\n  readonly back: () => void\n  /** Close the menu, restoring focus to the trigg /* …truncated — full shape in source */',
+    ],
     ownerPropsReferences: [],
     standardProps: [
       'useResource: UseResource',
@@ -990,7 +992,7 @@ export const CLIENT_SLOT_API: readonly ClientSlotEntry[] = [
     occupants: [],
     replaceRisk: 'none',
     example: 'return {\n  inject: [\'slots\'],\n  apply(ctx) {\n    ctx.slots.inject(\'conversation.input.model.row\', () => ctx.slots.register(\n      { name: \'conversation.input.model.row\', id: \'my-entry\', order: 100, label: \'My entry\' },\n      () => React.createElement(\'div\', null, \'hello\'),\n    ))\n  },\n}',
-    source: 'packages/client/ui-conversation/src/client/contract/slots.ts:230',
+    source: 'packages/client/ui-conversation/src/client/contract/slots.ts:232',
   },
   {
     key: 'conversation.input.overlay',

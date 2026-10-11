@@ -15,7 +15,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { registerHooks } from 'node:module'
-import { useSyncExternalStore } from 'react'
+import { useSyncExternalStore, useState } from 'react'
 import { createElement } from 'react'
 import type { ReactElement } from 'react'
 import { flushSync } from 'react-dom'
@@ -34,7 +34,7 @@ const { SpeedSelect, createSpeedLoader, createSpeedSetter } = await import('../s
 const { createSubscriptionsCache } = await import('../src/client/subscriptions-cache.js')
 css.deregister()
 import type { ObservableSnapshot, SubscriptionsCache } from '../src/client/subscriptions-cache.js'
-import type { ModelRef } from '../src/client/SpeedSelect.js'
+import type { ModelRef, SpeedSelectInjected } from '../src/client/SpeedSelect.js'
 import type { ProviderUsage } from '../src/client/SubscriptionsSection.js'
 import type { ConnectionHandle } from '@deepseek-ai/dsh-api-remotes/client'
 
@@ -246,6 +246,49 @@ async function settle(next: () => Promise<void>): Promise<void> {
   await new Promise(resolve => setImmediate(resolve))
 }
 
+/**
+ * What the minimal seat recorded while it stood in for ModelSelect: the pane it
+ * shows, how often the whole menu was closed, and the open action the row's cell
+ * calls.
+ */
+interface SeatLog {
+  activeRow: string | null
+  closes: number
+  openRow: (rowKey: string) => void
+}
+
+/**
+ * Mount SpeedSelect under a minimal seat that owns the pane state the way
+ * ModelSelect does: the row's cell asks for its pane, `back` returns to the
+ * seat's root pane, and `closeMenu` closes the whole card.
+ * @param injected - the row's scripted inject face.
+ * @param model - the session's model-selection source.
+ * @returns the element plus the seat's recorded state.
+ */
+function seatElement(
+  injected: Pick<SpeedSelectInjected, 'loadSpeed' | 'setSpeed'>,
+  model: PushedSource,
+): { element: ReactElement; seat: SeatLog } {
+  const seat: SeatLog = { activeRow: null, closes: 0, openRow: () => {} }
+  function Seat(): ReactElement {
+    const [activeRow, setActiveRow] = useState<string | null>(null)
+    seat.activeRow = activeRow
+    seat.openRow = (rowKey) => { flushSync(() => { setActiveRow(rowKey) }) }
+    return createElement(SpeedSelect, {
+      ...injected,
+      useModel: hookOver(model),
+      activeRow,
+      openRow: seat.openRow,
+      back: () => { flushSync(() => { setActiveRow(null) }) },
+      closeMenu: () => {
+        seat.closes += 1
+        flushSync(() => { setActiveRow(null) })
+      },
+    })
+  }
+  return { element: createElement(Seat), seat }
+}
+
 const CODEX_MODEL: ModelRef = { provider: 'codex', model: 'gpt-5-codex' }
 
 test('the badge reads the local snapshot on mount and registers no timer while collapsed', async () => {
@@ -361,15 +404,15 @@ test('a settled choice outranks a slow read, and every speed read names the mode
       },
     }
     const model = modelSource(CODEX_MODEL)
-    const stop = render(createElement(SpeedSelect, {
-      loadSpeed: createSpeedLoader(rpc),
-      setSpeed: createSpeedSetter(rpc),
-      useModel: hookOver(model),
-    }))
+    const { element, seat } = seatElement(
+      { loadSpeed: createSpeedLoader(rpc), setSpeed: createSpeedSetter(rpc) },
+      model,
+    )
+    const stop = render(element)
     release?.()
     await settle(async () => {})
     assert.deepEqual(seen[0]?.payload, { provider: 'codex', model: 'gpt-5-codex' })
-    const row = document.querySelector('[aria-haspopup="menu"]') as HTMLButtonElement
+    const row = document.querySelector('[data-model-menu-row]') as HTMLButtonElement
     assert.ok(row.getAttribute('aria-label')?.includes('Standard'), 'the row shows the read tier')
 
     // A switch moves the row onto the new model, and the read addresses it.
@@ -382,13 +425,16 @@ test('a settled choice outranks a slow read, and every speed read names the mode
     // Opening starts a slow read; the user's choice settles before it does, and
     // that superseded read must not put the replaced tier back on screen.
     flushSync(() => { row.click() })
+    assert.equal(seat.activeRow, 'codex-speed', 'the cell hands its pane to the seat')
     const fast = Array.from(document.querySelectorAll('[role="menuitemradio"]'))
       .find(option => option.textContent?.includes('Fast')) as HTMLButtonElement
     flushSync(() => { fast.click() })
     await settle(async () => {})
     release?.()
     await settle(async () => {})
-    assert.ok(document.querySelector('[aria-haspopup="menu"]')?.getAttribute('aria-label')?.includes('Fast'),
+    const restored = document.querySelector('[data-model-menu-row]') as HTMLButtonElement
+    assert.equal(seat.closes, 1, 'a settled choice closes the whole menu')
+    assert.ok(restored.getAttribute('aria-label')?.includes('Fast'),
       'the settled choice survives the read it superseded')
     stop()
   } finally {

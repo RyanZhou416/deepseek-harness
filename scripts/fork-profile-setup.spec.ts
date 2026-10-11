@@ -104,6 +104,22 @@ it('keeps the standalone subscriptions menu-row type aligned with the owning for
   expect(mirror).toBe(owner)
 })
 
+/** Normalize one locally declared owner interface, excluding documentation and export modifiers. */
+function menuOwnerType(path: string): string | undefined {
+  const source = ts.createSourceFile(path, readFileSync(path, 'utf8'), ts.ScriptTarget.Latest, true)
+  const owner = source.statements.find((statement): statement is ts.InterfaceDeclaration =>
+    ts.isInterfaceDeclaration(statement) && statement.name.text === 'ModelMenuRowOwnerProps')
+  return owner === undefined ? undefined
+    : ts.createPrinter({ removeComments: true }).printNode(ts.EmitHint.Unspecified, ts.factory.createTypeLiteralNode(owner.members), source)
+}
+
+it('keeps standalone menu navigation props aligned with the owning slot interface', () => {
+  const owner = menuOwnerType(resolve(repository, 'packages/client/ui-conversation/src/client/contract/slots.ts'))
+  const mirror = menuOwnerType(resolve(repository, 'fork-plugins/dsh-plugin-subscriptions/src/client/SpeedSelect.tsx'))
+  expect(owner).toBeDefined()
+  expect(mirror).toBe(owner)
+})
+
 /** Run the setup helper and retain its diagnostics for assertions. */
 function run(...args: string[]) {
   return spawnSync(process.execPath, [helper, ...args], { encoding: 'utf8' })

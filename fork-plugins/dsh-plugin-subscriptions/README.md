@@ -26,7 +26,7 @@ Models that advertise reasoning levels get an **Effort** selector in the same me
 
 ![Reasoning effort selector](https://raw.githubusercontent.com/V1ki/dsh-plugin-subscriptions/main/docs/images/model-effort.png)
 
-Models whose catalog advertises a fast tier get a **Speed** row inside the composer's model menu, under the model and reasoning-level rows — Standard or Fast. Fast is each route's own priority signal: Codex sends `service_tier: priority`, Cursor its catalog `fast` parameter, and Claude the Claude Code catalog's `speed: fast` field together with the beta that declares it. The choice is stored per model beside its default reasoning effort, so it survives a new session and a restart, and the model list in **Manage** offers the same Standard/Fast picker next to the effort selector. The `/fast` slash command offers the same choice as a popup; it errors with an explanation when the current model has no fast tier. Reading the speed choice consults only the selected provider's catalog, so an unrelated provider cannot delay this control.
+Models whose catalog advertises a fast tier get a **Speed** row inside the composer's model menu, under the model and reasoning-level rows: selecting it opens the Standard/Fast pane inside that same card, so the choices stay within the menu's bounds. Fast is each route's own priority signal: Codex sends `service_tier: priority`, Cursor its catalog `fast` parameter, and Claude the Claude Code catalog's `speed: fast` field together with the beta that declares it. The choice is stored per model beside its default reasoning effort, so it survives a new session and a restart, and the model list in **Manage** offers the same Standard/Fast picker next to the effort selector. The `/fast` slash command offers the same choice as a popup; it errors with an explanation when the current model has no fast tier. Reading the speed choice consults only the selected provider's catalog, so an unrelated provider cannot delay this control.
 
 ![Speed row inside the model menu, with its Standard/Fast options open](https://raw.githubusercontent.com/V1ki/dsh-plugin-subscriptions/main/docs/images/speed-toggle.png)
 
@@ -84,7 +84,7 @@ Image generation and editing share same-provider account scheduling: try the def
 
 ### DSH compatibility
 
-This fork artifact, `0.9.4-dsh017rc1.23`, is pinned to DSH `0.1.7-rc.1` and Cordis `4.0.4`. Its V4 tool-role translation, pinned Claude Code 2.1.288 wire, and UI were built and tested against that exact cohort; do not install it on an older DSH profile. The upstream public `0.9.4` package declares a broader peer range, which does not apply to this private artifact.
+This fork artifact, `0.9.4-dsh017rc1.24`, is pinned to DSH `0.1.7-rc.1` and Cordis `4.0.4`. Its V4 tool-role translation, pinned Claude Code 2.1.288 wire, and UI were built and tested against that exact cohort; do not install it on an older DSH profile. The upstream public `0.9.4` package declares a broader peer range, which does not apply to this private artifact.
 
 ### Managing accounts and pool models
 

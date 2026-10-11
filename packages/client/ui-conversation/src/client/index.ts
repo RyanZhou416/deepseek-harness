@@ -67,8 +67,8 @@ export type {
   ConversationWidthControlsInputProps, ConversationWidthControlsProps,
   ConversationStore, ConvViewOwnerProps, ConvViewProps, EmptyWorkspaceOwnerProps,
   HeroAgentPresetOwnerProps, HeroBrandMarkOwnerProps, InputControlOwnerProps, InputZone,
-  MessageImageLoader, MessageImageSource, MessageImagesOwnerProps, RenderMessageImages, UseConversation,
-  UseConversationViews,
+  MessageImageLoader, MessageImageSource, MessageImagesOwnerProps, ModelMenuRowOwnerProps,
+  RenderMessageImages, UseConversation, UseConversationViews,
 } from './contract/slots.ts'
 export type {
   BeginCommandRequest, CommandClaim, ConsumeTokenRequest, DraftAttachmentId, InputActions,

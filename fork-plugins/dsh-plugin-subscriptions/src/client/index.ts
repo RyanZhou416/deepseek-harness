@@ -39,9 +39,12 @@ import type { ImageGenerateToolviewInjected } from './ImageGenerateToolview.js'
 import { VideoGenerateToolview, createVideoLoader } from './VideoGenerateToolview.js'
 import type { VideoGenerateToolviewInjected } from './VideoGenerateToolview.js'
 import {
-  SpeedSelect, createSpeedLoader, createSpeedSetter, modelSelectionSource, resolveCurrentModel, settleSpeedTier,
+  ROW_KEY, SpeedSelect, createSpeedLoader, createSpeedSetter, modelSelectionSource, resolveCurrentModel,
+  settleSpeedTier,
 } from './SpeedSelect.js'
-import type { ModelDirectoriesLike, ModelDirectoryLike, ModelRef, SpeedSelectInjected, SpeedTier } from './SpeedSelect.js'
+import type {
+  ModelDirectoriesLike, ModelDirectoryLike, ModelMenuRowOwnerProps, ModelRef, SpeedSelectInjected, SpeedTier,
+} from './SpeedSelect.js'
 import { SubscriptionUsageBadge } from './SubscriptionUsageBadge.js'
 import type { SubscriptionUsageBadgeInjected } from './SubscriptionUsageBadge.js'
 import { createSubscriptionsCache } from './subscriptions-cache.js'
@@ -52,7 +55,9 @@ import type { SubscriptionsKey } from './locales.js'
 export type { SubscriptionsSectionInjected, SubscriptionsSectionProps } from './SubscriptionsSection.js'
 export type { ImageGenerateToolviewInjected, ImageGenerateToolviewProps } from './ImageGenerateToolview.js'
 export type { VideoGenerateToolviewInjected, VideoGenerateToolviewProps } from './VideoGenerateToolview.js'
-export type { SpeedSelectInjected, SpeedSelectProps, SpeedState, SpeedTier } from './SpeedSelect.js'
+export type {
+  ModelMenuRowOwnerProps, SpeedSelectInjected, SpeedSelectProps, SpeedState, SpeedTier,
+} from './SpeedSelect.js'
 export type { SubscriptionUsageBadgeInjected, SubscriptionUsageBadgeProps } from './SubscriptionUsageBadge.js'
 export type { SubscriptionsKey } from './locales.js'
 
@@ -68,10 +73,17 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
     /**
      * Mirror of ui-conversation's additive model-menu row child
      * (`packages/client/ui-conversation/src/client/contract/slots.ts`), which the
-     * installed `0.1.7-rc.1` contract does not declare. A later contract carrying
-     * the same shape merges with this entry.
+     * installed `0.1.7-rc.1` contract does not declare: neither the key nor the
+     * `ModelMenuRowOwnerProps` face declared in `SpeedSelect.tsx`, repeated there
+     * verbatim because this package compiles standalone against that contract. A
+     * later contract carrying the same shape merges with this entry, and
+     * `scripts/fork-profile-setup.spec.ts` holds both in step.
      */
-    'conversation.input.model.row': { kind: 'list'; scope: 'session' }
+    'conversation.input.model.row': {
+      kind: 'list'
+      scope: 'session'
+      owner: ModelMenuRowOwnerProps
+    }
   }
 }
 
@@ -227,7 +239,7 @@ export function apply(ctx: ClientContext): void {
     }
     scope.slots.inject('conversation.input.model.row', () => scope.slots.register({
       name: 'conversation.input.model.row',
-      id: 'codex-speed',
+      id: ROW_KEY,
       order: 0,
       locale: NS,
       inject: (sessionId: string): SpeedSelectInjected => ({

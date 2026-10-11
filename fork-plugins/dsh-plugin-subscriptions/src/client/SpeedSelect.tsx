@@ -1,13 +1,21 @@
 /**
  * Speed row: one row inside the composer's model menu
- * (`conversation.input.model.row`, the additive child of the model seat), opening
- * the two tiers in place, switching the session's current model between standard
- * routing and the fast tier. Codex uses its priority service tier; Cursor sends the
- * catalog `fast` parameter; Claude sends the catalogue's `speed` field. The choice is
- * stored per provider model in the node half (durable, alongside the per-model effort
- * defaults); this component holds only viewing state. The row renders nothing until
- * the current model advertises a fast tier, which is also what keeps the composer's
- * separate control gone: the setting lives here, in the menu that selects the model.
+ * (`conversation.input.model.row`, the additive child of the model seat),
+ * switching the session's current model between standard routing and the fast
+ * tier. Codex uses its priority service tier; Cursor sends the catalog `fast`
+ * parameter; Claude sends the catalogue's `speed` field. The choice is stored
+ * per provider model in the node half (durable, alongside the per-model effort
+ * defaults); this component holds only viewing state. The row renders nothing
+ * until the current model advertises a fast tier, which is also what keeps the
+ * composer's separate control gone: the setting lives here, in the menu that
+ * selects the model.
+ *
+ * The row drills in exactly like the seat's own Model and Effort cells: its
+ * cell is one of the menu's root rows and calling the seat's `openRow` replaces
+ * those cells with this row's pane inside the same card, so the card never
+ * grows past the menu's bounds. While the pane is shown the component stays
+ * mounted — its read, its in-flight write, and its failure strip survive the
+ * switch — and the seat routes ↑/↓, Escape, Tab, and Shift+Tab to the pane.
  *
  * The session's current model arrives as a bare observable source from
  * `ctx.modelDirectories` through the inject `hooks` compartment, so a switch
@@ -22,12 +30,19 @@
 import { useEffect, useRef, useState } from 'react'
 import type { CSSProperties } from 'react'
 import { IconCheckOutlineRegular, IconChevronRightOutlineRegular } from '@deepseek-ai/dsh-client-ui-primitives'
-import type { InjectFace, PropsLocale } from '@deepseek-ai/dsh-client-ui-slots'
+import type { InjectFace, OwnerOf, PropsLocale } from '@deepseek-ai/dsh-client-ui-slots'
 import type { ConnectionHandle } from '@deepseek-ai/dsh-api-remotes/client'
 import { callSubscriptionsAuth } from './SubscriptionsSection.js'
 import type { ObservableSnapshot } from './subscriptions-cache.js'
 import { en } from './locales.js'
 import type { SubscriptionsKey } from './locales.js'
+
+/**
+ * This row's key in the seat's menu: the pane its cell opens, the marker its
+ * cell carries for the seat's focus return, and the registration id the
+ * contribution registers under.
+ */
+export const ROW_KEY = 'codex-speed'
 
 /** One model's speed choice: standard routing or the fast (priority) tier. */
 export type SpeedTier = 'standard' | 'fast'
@@ -196,13 +211,41 @@ export interface SpeedSelectInjected {
 }
 
 /**
- * Props delivered by the slot outlet: the injected callbacks and the model
- * hook the framework binds from the inject hooks compartment. The framework's
- * own standard shares are ignored — everything arrives session-bound here.
+ * Navigation face the composer model seat publishes to every row contributed
+ * through `conversation.input.model.row`. A row's cell is one of the seat's
+ * root rows; activating it hands the card to that row's own pane the same way
+ * the Model and Effort cells do: the seat hides its own cells, keeps the row
+ * mounted, and routes the menu's keys to the shown pane.
+ *
+ * A row's activating cell MUST carry `data-model-menu-row="<its row key>"`:
+ * the seat returns the keyboard to that marker when the pane is left, and
+ * never learns a row's key any other way. Every callback keeps one identity
+ * across renders, so a row may hold them in effect dependencies.
+ */
+export interface ModelMenuRowOwnerProps {
+  /** Contributed pane key on screen, or null while the seat shows its own panes. */
+  readonly activeRow: string | null
+  /**
+   * Show the pane belonging to the row keyed `rowKey`.
+   * @param rowKey - the row's own stable key.
+   */
+  readonly openRow: (rowKey: string) => void
+  /** Leave the shown contributed pane for the root pane, focusing the cell that opened it; a no-op when none is shown. */
+  readonly back: () => void
+  /** Close the menu, restoring focus to the trigger. */
+  readonly closeMenu: () => void
+}
+
+/**
+ * Props delivered by the slot outlet: the seat's navigation face for this row,
+ * the injected callbacks, and the model hook the framework binds from the
+ * inject hooks compartment. The framework's own standard shares are ignored —
+ * everything arrives session-bound here.
  */
 export type SpeedSelectProps =
   & InjectFace<SpeedSelectInjected>
   & Partial<PropsLocale<'settings.subscriptions'>>
+  & OwnerOf<'conversation.input.model.row'>
 
 /**
  * Providers whose sessions can select the fast tier: the three whose routes carry a per-model
@@ -302,12 +345,15 @@ function fallbackTranslate(key: SubscriptionsKey): string {
 const TIERS: readonly SpeedTier[] = ['standard', 'fast']
 
 /**
- * The model menu's Speed row: a cell reading `速度` and the current tier, opening
- * the two tiers in place (standard/fast with descriptions, a check on the current
- * one). The cell keeps the shape of the seat's own root cells — label, current
- * value, chevron — so the row reads as one of them.
+ * The model menu's Speed row: a root cell reading `速度` and the current tier —
+ * the shape of the seat's own root cells (label, current value, chevron), so the
+ * row reads as one of them — whose pane holds the two tiers (standard/fast with
+ * descriptions, a check on the current one). Activating the cell asks the seat
+ * for the pane; the cell is hidden and the choices shown while the seat reports
+ * this row as its active pane, and the seat's own cells are hidden for as long
+ * as that lasts.
  *
- * The row re-reads when the session's model moves and when the menu opens, never
+ * The row re-reads when the session's model moves and when its pane opens, never
  * on a timer; a failed read keeps the last known state, so a transient RPC
  * failure can never lock the choice away. Every read is stamped with the choice
  * generation it started under and names the model it addresses, so a read a
@@ -315,14 +361,25 @@ const TIERS: readonly SpeedTier[] = ['standard', 'fast']
  * the menu no longer shows.
  */
 export function SpeedSelect(props: SpeedSelectProps) {
-  const { loadSpeed, setSpeed, useModel } = props
+  const { loadSpeed, setSpeed, useModel, activeRow, openRow, back, closeMenu } = props
   const translate = props.t ?? fallbackTranslate
   const model = useModel(value => value)
   const [view, setView] = useState<SpeedView>(INITIAL_SPEED_VIEW)
-  const [open, setOpen] = useState(false)
   const [busy, setBusy] = useState(false)
   const [failed, setFailed] = useState(false)
-  const rootRef = useRef<HTMLDivElement | null>(null)
+  /** Whether this row's pane is the one the seat shows. */
+  const active = activeRow === ROW_KEY
+  // The write settles later than the user can navigate: a settle that lands
+  // after the pane moved on, or after this row left the menu entirely, must not
+  // take a surface someone else is using.
+  const activeRef = useRef(active)
+  activeRef.current = active
+  /** Whether this row is still mounted; a settle after unmount closes nothing. */
+  const mountedRef = useRef(false)
+  useEffect(() => {
+    mountedRef.current = true
+    return () => { mountedRef.current = false }
+  }, [])
   // The inject face may be re-evaluated (new callback identities) on re-render;
   // the read effect mounts once and reads through these refs, so identity churn
   // neither resets the effect nor multiplies in-flight loads.
@@ -386,24 +443,26 @@ export function SpeedSelect(props: SpeedSelectProps) {
   // never starts a second read.
   useEffect(() => { reloadRef.current() }, [model?.provider, model?.model])
 
-  useEffect(() => {
-    if (!open) return
-    const closeOutside = (event: MouseEvent): void => {
-      if (!rootRef.current?.contains(event.target as Node)) setOpen(false)
-    }
-    document.addEventListener('mousedown', closeOutside)
-    return () => { document.removeEventListener('mousedown', closeOutside) }
-  }, [open])
+  // Opening this row's pane re-reads, the same way the seat's own lists do.
+  useEffect(() => { if (active) reloadRef.current() }, [active])
 
   const state = view.state
-  if (state === null || !state.visible) {
+  // A row that hides itself while its pane is shown — the session moved to a
+  // model with no fast tier — leaves the pane: the seat hides its own cells for
+  // a contributed pane, so an empty one would leave nothing to choose from.
+  const hidden = state === null || !state.visible
+  useEffect(() => {
+    if (active && hidden) back()
+  }, [active, hidden, back])
+
+  if (hidden) {
     return null
   }
 
   const choose = (tier: SpeedTier): void => {
     if (busy || model === null) return
     if (tier === state.tier) {
-      setOpen(false)
+      closeMenu()
       return
     }
     const addressed = model
@@ -412,22 +471,20 @@ export function SpeedSelect(props: SpeedSelectProps) {
     void setSpeed(addressed, tier).then((ok) => {
       setBusy(false)
       if (ok) {
-        // A write that settled after the row moved on addressed another model:
-        // stamping its tier here would show a tier the new model never stored.
-        if (sameModel(modelRef.current, addressed)) setView(current => settleChoice(current, tier))
-        setOpen(false)
+        // A successful write is the authoritative answer only for the model it
+        // addressed: one that settled after the menu moved on stamped nothing.
+        const settled = sameModel(modelRef.current, addressed)
+        if (settled) setView(current => settleChoice(current, tier))
+        // Closing belongs to that one choice, in the pane the user picked in and
+        // on the row that asked for it. A settle whose pane was left or replaced,
+        // whose model moved on, or whose row unmounted closes nothing.
+        if (settled && mountedRef.current && activeRef.current) closeMenu()
         return
       }
-      // The menu stays open with the failure in place, so the tier remains
-      // reachable for a retry without reopening the control.
+      // The pane stays open with the failure in place, so the tier remains
+      // reachable for a retry without reopening the menu.
       setFailed(true)
     })
-  }
-
-  const show = (): void => {
-    setFailed(false)
-    setOpen(true)
-    reloadRef.current()
   }
 
   const tierName = (tier: SpeedTier): string =>
@@ -437,38 +494,32 @@ export function SpeedSelect(props: SpeedSelectProps) {
   const cellAria = `${translate('speed')} · ${tierName(state.tier)}`
 
   return (
-    <div
-      ref={rootRef}
-      style={styles.root}
-      onKeyDown={(event) => {
-        if (event.key === 'Escape' && open) {
-          event.preventDefault()
-          setOpen(false)
-        }
-      }}
-    >
-      <button
-        type="button"
-        role="menuitem"
-        style={styles.cell}
-        aria-haspopup="menu"
-        aria-expanded={open}
-        aria-label={cellAria}
-        title={cellAria}
-        disabled={busy}
-        onClick={() => {
-          if (open) setOpen(false)
-          else show()
-        }}
-      >
-        <span style={styles.cellLabel}>{translate('speed')}</span>
-        <span style={styles.cellValue}>{tierName(state.tier)}</span>
-        <span style={{ ...styles.cellChevron, ...(open ? styles.cellChevronOpen : {}) }}>
-          <IconChevronRightOutlineRegular size={12} />
-        </span>
-      </button>
-      {open && (
-        <div style={styles.options} role="menu" aria-label={translate('speed')}>
+    // The root cell shows only while the seat is on its own panes, and the
+    // choices only while this row owns the shown pane. Neither is ever disabled:
+    // disabling the row that holds the keyboard blurs it, and the seat closes a
+    // menu whose focus left the card. The activation guards and `aria-disabled` /
+    // `aria-busy` state the pending write instead.
+    <div style={styles.root} aria-busy={busy || undefined}>
+      {activeRow === null && (
+        <button
+          type="button"
+          role="menuitem"
+          data-model-menu-row={ROW_KEY}
+          style={styles.cell}
+          aria-label={cellAria}
+          title={cellAria}
+          aria-disabled={busy || undefined}
+          onClick={() => { if (!busy) openRow(ROW_KEY) }}
+        >
+          <span style={styles.cellLabel}>{translate('speed')}</span>
+          <span style={styles.cellValue}>{tierName(state.tier)}</span>
+          <span style={styles.cellChevron}>
+            <IconChevronRightOutlineRegular size={12} />
+          </span>
+        </button>
+      )}
+      {active && (
+        <>
           {failed && <p role="alert" style={styles.error}>{translate('speedSaveFailed')}</p>}
           {TIERS.map(tier => (
             <button
@@ -477,7 +528,6 @@ export function SpeedSelect(props: SpeedSelectProps) {
               role="menuitemradio"
               aria-checked={tier === state.tier}
               style={styles.option}
-              disabled={busy}
               onClick={() => { choose(tier) }}
             >
               <span style={styles.optionText}>
@@ -487,7 +537,7 @@ export function SpeedSelect(props: SpeedSelectProps) {
               <span style={styles.optionCheck}>{tier === state.tier ? <IconCheckOutlineRegular size={14} /> : null}</span>
             </button>
           ))}
-        </div>
+        </>
       )}
     </div>
   )
@@ -513,10 +563,7 @@ const styles: Record<string, CSSProperties> = {
   },
   cellChevron: {
     display: 'inline-flex', flex: '0 0 auto', color: 'var(--dsw-alias-label-tertiary)',
-    transition: 'transform 120ms ease',
   },
-  cellChevronOpen: { transform: 'rotate(90deg)' },
-  options: { display: 'flex', flexDirection: 'column' },
   option: {
     boxSizing: 'border-box', display: 'flex', alignItems: 'center', gap: 6,
     width: 'auto', minWidth: '100%', minHeight: 34, padding: '5px 7px',

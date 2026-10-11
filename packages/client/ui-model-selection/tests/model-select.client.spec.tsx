@@ -1,11 +1,12 @@
 // @vitest-environment jsdom
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { RemoteError } from '@deepseek-ai/dsh-client-test-runtime'
 import { SessionId } from '@deepseek-ai/dsh-session/types'
 import type { ModelSelection } from '@deepseek-ai/dsh-api-remotes/client'
 import { createSnapshotStore } from '@deepseek-ai/dsh-client-store'
-import type { ComponentProps } from 'react'
+import type { ModelMenuRowOwnerProps } from '@deepseek-ai/dsh-client-ui-conversation/client'
+import { useEffect, type ComponentProps } from 'react'
 import type { ModelDirectoryState } from '../src/client/directory.ts'
 import { ModelSelect } from '../src/client/ModelSelect.tsx'
 import { zh } from '../src/client/locales.ts'
@@ -538,5 +539,268 @@ describe('ModelSelect feature rows', () => {
     fireEvent.click(screen.getByRole('button', { name: /选择模型/ }))
     expect(screen.getAllByRole('menuitem').map(cell => cell.textContent))
       .toEqual(['模型DeepSeek-V4-Flash', '推理等级High'])
+  })
+})
+
+describe('ModelSelect contributed panes', () => {
+  /** What the contributed pane shows in one case. */
+  let pane: 'tiers' | 'loading' | 'failure' = 'tiers'
+  /** Whether the contributed cell states a pending write instead of disabling itself. */
+  let cellPending = false
+  /** Mounts of the contributed row: the seat must keep it mounted across a pane switch. */
+  let rowMounts = 0
+
+  beforeEach(() => {
+    pane = 'tiers'
+    cellPending = false
+    rowMounts = 0
+  })
+
+  /**
+   * A feature row written against the seat's owner face: a marked root cell that
+   * asks for its pane, and the pane's own content.
+   */
+  function FeatureRow(props: ModelMenuRowOwnerProps) {
+    useEffect(() => { rowMounts += 1 }, [])
+    if (props.activeRow !== 'speed') {
+      return (
+        <button
+          type="button"
+          role="menuitem"
+          data-model-menu-row="speed"
+          aria-disabled={cellPending || undefined}
+          onClick={() => { props.openRow('speed') }}
+        >
+          速度 · 标准
+        </button>
+      )
+    }
+    if (pane === 'loading') return <div>载入中…</div>
+    if (pane === 'failure') {
+      return (
+        <>
+          <p role="alert">切换失败</p>
+          <button type="button">重试</button>
+        </>
+      )
+    }
+    return (
+      <>
+        <button type="button" role="menuitemradio" aria-checked>标准</button>
+        <button type="button" role="menuitemradio" aria-checked={false} onClick={() => { props.closeMenu() }}>快速</button>
+      </>
+    )
+  }
+
+  /** The seat's declared child renderer, drawing the featured row with its owner face. */
+  const featureSlot: ComponentProps<typeof ModelSelect>['renderSlot'] = (name, owner) => {
+    if (name !== 'conversation.input.model.row') return null
+    assertMenuOwner(owner)
+    return <FeatureRow {...owner} />
+  }
+
+  /** Narrow the generic slot renderer at this fixture's one declared child. */
+  function assertMenuOwner(owner: object): asserts owner is ModelMenuRowOwnerProps {
+    if (!('activeRow' in owner) || (owner.activeRow !== null && typeof owner.activeRow !== 'string')
+      || !('openRow' in owner) || typeof owner.openRow !== 'function'
+      || !('back' in owner) || typeof owner.back !== 'function'
+      || !('closeMenu' in owner) || typeof owner.closeMenu !== 'function') {
+      throw new Error('the model-menu child received no navigation owner')
+    }
+  }
+
+  /** Mount the seat with the contributed row and open the menu. */
+  function mountContributed(withPane: 'tiers' | 'loading' | 'failure' = 'tiers') {
+    pane = withPane
+    render(<ModelSelect
+      locked={false}
+      available
+      directory={createSnapshotStore(state())}
+      load={vi.fn()}
+      select={vi.fn().mockResolvedValue({ ok: true, value: undefined })}
+      t={t}
+      renderSlot={featureSlot}
+      SessionProvider={SessionProvider}
+    />)
+    const trigger = screen.getByRole('button', { name: /选择模型/ })
+    fireEvent.click(trigger)
+    return trigger
+  }
+
+  it('drills into the contributed pane and keeps the row mounted across the switch', () => {
+    mountContributed()
+    expect(rowMounts).toBe(1)
+    fireEvent.click(screen.getByRole('menuitem', { name: /速度/ }))
+    // The seat's own cells give way to the contributed pane.
+    expect(screen.queryByRole('menuitem', { name: /^模型/ })).toBeNull()
+    expect(screen.queryByRole('menuitem', { name: /推理等级/ })).toBeNull()
+    expect(screen.getAllByRole('menuitemradio').map(row => row.textContent)).toEqual(['标准', '快速'])
+    // The pane opens on its checked row.
+    expect(document.activeElement).toBe(screen.getByRole('menuitemradio', { name: '标准' }))
+    // The row stayed mounted, so its own state and in-flight work survive the drill.
+    expect(rowMounts).toBe(1)
+    fireEvent.keyDown(screen.getByRole('menuitemradio', { name: '标准' }), { key: 'Escape' })
+    expect(screen.getByRole('menuitem', { name: /速度/ })).toBeTruthy()
+    expect(rowMounts).toBe(1)
+  })
+
+  it('↑/↓ walk the root rows including a contributed one, wrapping', () => {
+    mountContributed()
+    const cells = screen.getAllByRole('menuitem')
+    expect(cells.map(cell => cell.textContent))
+      .toEqual(['模型DeepSeek-V4-Flash', '推理等级High', '速度 · 标准'])
+    cells[1]!.focus()
+    fireEvent.keyDown(cells[1]!, { key: 'ArrowDown' })
+    expect(document.activeElement).toBe(cells[2])
+    fireEvent.keyDown(cells[2]!, { key: 'ArrowDown' })
+    expect(document.activeElement).toBe(cells[0])
+    fireEvent.keyDown(cells[0]!, { key: 'ArrowUp' })
+    expect(document.activeElement).toBe(cells[2])
+    expect(screen.getByRole('menu')).toBeTruthy()
+  })
+
+  it('settles a contributed cell with Tab into its pane', () => {
+    mountContributed()
+    const cell = screen.getByRole('menuitem', { name: /速度/ })
+    cell.focus()
+    expect(fireEvent.keyDown(cell, { key: 'Tab' })).toBe(false)
+    expect(screen.getByRole('menuitemradio', { name: '标准' })).toBeTruthy()
+  })
+
+  it('Escape backs out of the contributed pane onto its cell, then closes to the trigger', async () => {
+    const trigger = mountContributed()
+    fireEvent.click(screen.getByRole('menuitem', { name: /速度/ }))
+    fireEvent.keyDown(screen.getByRole('menuitemradio', { name: '标准' }), { key: 'Escape' })
+    // The root pane is back, with the keyboard on the cell that opened the pane.
+    const cell = screen.getByRole('menuitem', { name: /速度/ })
+    expect(document.activeElement).toBe(cell)
+    expect(screen.getByRole('menuitem', { name: /^模型/ })).toBeTruthy()
+    fireEvent.keyDown(cell, { key: 'Escape' })
+    expect(screen.queryByRole('menu')).toBeNull()
+    await waitFor(() => { expect(document.activeElement).toBe(trigger) })
+  })
+
+  it('restores the keyboard to a contributed cell that only states aria-disabled', () => {
+    cellPending = true
+    mountContributed()
+    fireEvent.click(screen.getByRole('menuitem', { name: /速度/ }))
+    fireEvent.keyDown(screen.getByRole('menuitemradio', { name: '标准' }), { key: 'Escape' })
+    const cell = screen.getByRole('menuitem', { name: /速度/ })
+    // A pending row states the state instead of disabling itself: a disabled
+    // element cannot take the keyboard, which would strand focus on the trigger.
+    expect(cell.getAttribute('aria-disabled')).toBe('true')
+    expect(cell.hasAttribute('disabled')).toBe(false)
+    expect(document.activeElement).toBe(cell)
+  })
+
+  it('leaves the contributed pane on Shift+Tab like Escape', () => {
+    mountContributed()
+    fireEvent.click(screen.getByRole('menuitem', { name: /速度/ }))
+    const checked = screen.getByRole('menuitemradio', { name: '标准' })
+    expect(fireEvent.keyDown(checked, { key: 'Tab', shiftKey: true })).toBe(false)
+    expect(document.activeElement).toBe(screen.getByRole('menuitem', { name: /速度/ }))
+    expect(screen.getByRole('menu')).toBeTruthy()
+  })
+
+  it('closes the card and restores trigger focus when a contributed selection settles', async () => {
+    const trigger = mountContributed()
+    fireEvent.click(screen.getByRole('menuitem', { name: /速度/ }))
+    fireEvent.click(screen.getByRole('menuitemradio', { name: '快速' }))
+    expect(screen.queryByRole('menu')).toBeNull()
+    await waitFor(() => { expect(document.activeElement).toBe(trigger) })
+  })
+
+  it('keeps a rowless contributed pane navigable and leaves its retry its Tab', () => {
+    const trigger = mountContributed('failure')
+    fireEvent.click(screen.getByRole('menuitem', { name: /速度/ }))
+    // No rows to hand the keyboard to: the trigger keeps it, so the card's keys
+    // still reach the menu and the failure stays on screen.
+    expect(screen.getByRole('alert').textContent).toBe('切换失败')
+    expect(document.activeElement).toBe(trigger)
+    const retry = screen.getByRole('button', { name: '重试' })
+    expect(fireEvent.mouseDown(retry)).toBe(false)
+    retry.focus()
+    // A control that is not a row keeps the browser's traversal.
+    expect(fireEvent.keyDown(retry, { key: 'Tab' })).toBe(true)
+    fireEvent.keyDown(retry, { key: 'Escape' })
+    // Back on the root pane, on the cell that opened the pane.
+    expect(document.activeElement).toBe(screen.getByRole('menuitem', { name: /速度/ }))
+    expect(screen.queryByRole('alert')).toBeNull()
+    expect(screen.getByRole('menu')).toBeTruthy()
+  })
+
+  it('shows a contributed pane that is still loading without closing the card', () => {
+    mountContributed('loading')
+    fireEvent.click(screen.getByRole('menuitem', { name: /速度/ }))
+    expect(screen.getByText('载入中…')).toBeTruthy()
+    expect(screen.queryByRole('menuitem', { name: /^模型/ })).toBeNull()
+    expect(screen.getByRole('menu')).toBeTruthy()
+  })
+})
+
+describe('ModelSelect placement observer', () => {
+  /** Stub the card's measured box, as the portal case above does. */
+  function stubBox(width: number, height: number): () => void {
+    const offsetWidth = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'offsetWidth')!
+    const offsetHeight = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'offsetHeight')!
+    Object.defineProperty(HTMLElement.prototype, 'offsetWidth', { configurable: true, get: () => width })
+    Object.defineProperty(HTMLElement.prototype, 'offsetHeight', { configurable: true, get: () => height })
+    return () => {
+      Object.defineProperty(HTMLElement.prototype, 'offsetWidth', offsetWidth)
+      Object.defineProperty(HTMLElement.prototype, 'offsetHeight', offsetHeight)
+    }
+  }
+
+  /** The seat's plain share for a placement case. */
+  const seat = (
+    <ModelSelect
+      locked={false}
+      available
+      directory={createSnapshotStore(state())}
+      load={vi.fn()}
+      select={vi.fn().mockResolvedValue({ ok: true, value: undefined })}
+      t={t}
+      renderSlot={renderSlot}
+      SessionProvider={SessionProvider}
+    />
+  )
+
+  it('re-places on the card\'s own box changes and disconnects the observer with the menu', () => {
+    const callbacks: ResizeObserverCallback[] = []
+    let disconnects = 0
+    vi.stubGlobal('ResizeObserver', class {
+      constructor(callback: ResizeObserverCallback) { callbacks.push(callback) }
+      observe(): void {}
+      disconnect(): void { disconnects += 1 }
+    })
+    const restoreBox = stubBox(200, 300)
+    try {
+      render(seat)
+      const trigger = screen.getByRole('button', { name: /选择模型/ })
+      fireEvent.click(trigger)
+      expect(screen.getByRole('menu').style.left).toBe('12px')
+      expect(callbacks).toHaveLength(1)
+      // The card's own box moved with no scroll or resize event: re-clamping is
+      // the observer's job, and re-placing must not change that box.
+      expect(() => { callbacks[0]!([], {} as ResizeObserver) }).not.toThrow()
+      expect(screen.getByRole('menu').style.left).toBe('12px')
+      fireEvent.click(trigger)
+      expect(screen.queryByRole('menu')).toBeNull()
+      expect(disconnects).toBe(1)
+    } finally {
+      restoreBox()
+      vi.unstubAllGlobals()
+    }
+  })
+
+  it('places the card where ResizeObserver does not exist', () => {
+    vi.stubGlobal('ResizeObserver', undefined)
+    try {
+      render(seat)
+      fireEvent.click(screen.getByRole('button', { name: /选择模型/ }))
+      expect(screen.getByRole('menu')).toBeTruthy()
+    } finally {
+      vi.unstubAllGlobals()
+    }
   })
 })

@@ -41,10 +41,10 @@ DSH_SETUP_HELPER=$SCRIPT_DIR/fork-runtime/setup-profile.mjs
 DSH_CONTEXT_PATCH=$SCRIPT_DIR/fork-runtime/web/cordis.patch.yml
 DSH_AGENT_TEAMS_ARTIFACT=$SCRIPT_DIR/fork-plugins/releases/nanmicoder-dsh-agent-teams-0.1.20-dsh017rc1.3.tgz
 DSH_CONTEXT_ARTIFACT=$SCRIPT_DIR/fork-plugins/releases/dsh-context-0.55.0-dsh017rc1.3.tgz
-DSH_SUBSCRIPTIONS_ARTIFACT=$SCRIPT_DIR/fork-plugins/releases/dsh-plugin-subscriptions-0.9.4-dsh017rc1.23.tgz
+DSH_SUBSCRIPTIONS_ARTIFACT=$SCRIPT_DIR/fork-plugins/releases/dsh-plugin-subscriptions-0.9.4-dsh017rc1.24.tgz
 DSH_AGENT_TEAMS_SHA256=8CCAA66D5E026DBED6363CA569B25BB8D4869E931BD92DC495458175C151980A
 DSH_CONTEXT_SHA256=255BA7AA6B84DA2F1301CD7786A2DDBC39AEE0A69BC731547B464B5D32B7B27D
-DSH_SUBSCRIPTIONS_SHA256=A08028DBCA1E2661FE8702867E21D2C7DA71B539CB1FEB896FFE7100AC45F134
+DSH_SUBSCRIPTIONS_SHA256=7E34837EAD0066B61F0226CADED2194A4657DCBA286A9E938D413DB737E020AF
 
 for DSH_REQUIRED_FILE in \
   "$DSH_RUNTIME_HELPER" \
@@ -97,7 +97,7 @@ tar -xOzf "$DSH_CONTEXT_ARTIFACT" package/package.json \
     'dsh-context' '0.55.0-dsh017rc1.3'
 tar -xOzf "$DSH_SUBSCRIPTIONS_ARTIFACT" package/package.json \
   | node "$DSH_SETUP_HELPER" verify-manifest \
-    'dsh-plugin-subscriptions' '0.9.4-dsh017rc1.23'
+    'dsh-plugin-subscriptions' '0.9.4-dsh017rc1.24'
 
 # Reject an ambiguous user patch before package installation changes anything.
 node "$DSH_SETUP_HELPER" merge-patch \
