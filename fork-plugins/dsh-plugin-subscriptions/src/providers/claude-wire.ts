@@ -379,10 +379,11 @@ function claudeEffort(value: string | undefined): ClaudeCodeEffort | undefined {
  * `generate_session_title` source, which reports `auxiliary`. Every other request this route
  * issues is the conversation's own Messages call, which reports `main`.
  *
- * Two things the carve does not settle. The client gates emission of the header itself on an
- * internal predicate — an environment override, a host check, and a feature flag this package
- * cannot model — so this route always sends the header while the client may omit it; and
- * `subagent` and `workflow` name agent and workflow-run query sources that no call reaching
+ * The client sends the header unconditionally on an ordinary first-party session: its emission
+ * predicate short-circuits true at the host check, so the feature flag that would otherwise
+ * decide emission is reached only for a base URL that is not Anthropic's own — a case this route
+ * never produces. The header therefore carries the request class as its value on every request
+ * here. `subagent` and `workflow` name agent and workflow-run query sources that no call reaching
  * this adapter has, so neither class is reachable here.
  *
  * @param purpose - the provider-neutral classification the caller set on the request.
