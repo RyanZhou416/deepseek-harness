@@ -62,13 +62,13 @@ export type SpeedTier = 'standard' | 'fast'
 export interface SpeedState {
   /** The session's current speed tier (default `standard`). */
   tier: SpeedTier
-  /** Codex model ids whose catalog advertises a fast tier. */
+  /** Model ids whose route advertises a fast tier, across every provider that offers one. */
   fastModels: string[]
 }
 
 /** Speed state the RPC handler delegates to (in-memory, per session). */
 export interface SpeedController {
-  /** Current speed state: the session's tier and the fast-capable codex models. */
+  /** Current speed state: the session's tier and the fast-capable models. */
   speed(sessionId: string): Promise<SpeedState>
   /** Set one session's speed tier. */
   setSpeed(sessionId: string, tier: SpeedTier): Promise<void>

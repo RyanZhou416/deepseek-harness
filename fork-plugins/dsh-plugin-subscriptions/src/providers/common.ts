@@ -731,9 +731,7 @@ export interface DiscoveredModel {
   }
   /** Accepted request modalities the endpoint advertised (e.g. Copilot's vision support flag). */
   inputModalities?: ('text' | 'image')[]
-  /** Claude-specific: which extended-thinking wire shape this model accepts. */
-  thinkingType?: 'enabled' | 'adaptive'
-  /** The catalog advertises a fast tier (Codex priority service, or Cursor's `fast` parameter). */
+  /** The catalog advertises a fast tier (Codex priority service, Cursor's `fast` parameter, or Claude's `fast_mode` capability). */
   fastTier?: boolean
   /**
    * Cursor `models.list` parameters. Sent back as `model.params`.

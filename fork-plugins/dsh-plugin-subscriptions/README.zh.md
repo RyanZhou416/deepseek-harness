@@ -22,11 +22,11 @@
 
 ![模型选择器中的订阅模型](https://raw.githubusercontent.com/V1ki/dsh-plugin-subscriptions/main/docs/images/model-picker.png)
 
-声明了推理等级的模型会在同一菜单里多出**推理等级**选择 —— Codex 系列模型、Grok 4.6 / 4.5,以及 Copilot 的推理模型(档位和默认值来自各 provider 的实时目录,不是硬编码列表;Copilot 的 `capabilities.supports.reasoning_effort` 数组会按协议映射为 chat completions 的 `reasoning_effort` 或 Responses 的 `reasoning.effort`)。同时声明两个 Copilot 端点的模型(gpt-5.4、gpt-5-mini)默认走 chat completions,但请求同时携带函数工具和推理等级时会自动改走 `/responses` —— Copilot 在 chat 线路上拒绝这种组合:
+声明了推理等级的模型会在同一菜单里多出**推理等级**选择 —— Codex 系列模型、Grok 4.6 / 4.5、Copilot 的推理模型,以及 Claude 的模型(档位和默认值来自各 provider 自己的目录,不是硬编码列表:Claude 取自锁定的 Claude Code 目录,其余取自各自的实时目录;Copilot 的 `capabilities.supports.reasoning_effort` 数组会按协议映射为 chat completions 的 `reasoning_effort` 或 Responses 的 `reasoning.effort`)。所选模型的目录未声明的档位不会出现在选项里,已保存的此类覆盖值会回落到模型自身的默认档位。同时声明两个 Copilot 端点的模型(gpt-5.4、gpt-5-mini)默认走 chat completions,但请求同时携带函数工具和推理等级时会自动改走 `/responses` —— Copilot 在 chat 线路上拒绝这种组合:
 
 ![推理等级选择器](https://raw.githubusercontent.com/V1ki/dsh-plugin-subscriptions/main/docs/images/model-effort.png)
 
-目录声明了 fast tier(即 codex CLI 的 fast 模式)的 Codex 模型,会在输入框工具行(模型选择器旁)多出一个**速度**开关 —— 标准 / 快速(`service_tier: priority`),按会话生效。`/fast` 斜杠命令提供同样的弹窗选择;当前模型不支持快速档时会提示原因。
+目录声明了 fast tier 的模型,会在输入框工具行(模型选择器旁)多出一个**速度**开关 —— 标准 / 快速。快速按各路由自己的优先信号发送:Codex 发 `service_tier: priority`,Cursor 发目录的 `fast` 参数,Claude 发 Claude Code 目录的 `speed: fast` 字段以及声明该档位的 beta。该选择按会话保存在内存中,因此新会话与重启后都从标准开始。`/fast` 斜杠命令提供同样的弹窗选择;当前模型不支持快速档时会提示原因。
 
 ![速度开关及其标准/快速菜单](https://raw.githubusercontent.com/V1ki/dsh-plugin-subscriptions/main/docs/images/speed-toggle.png)
 
@@ -83,7 +83,7 @@ Codex 编辑走 `/backend-api/codex/images/edits`，Grok 编辑走 `/v1/images/e
 
 ### DSH 兼容性
 
-本 fork 离线包 `0.9.4-dsh017rc1.18` 固定适配 DSH `0.1.7-rc.1` 和 Cordis `4.0.4`。其 V4 工具消息转换、固定到 Claude Code 2.1.288 的 wire 与界面已针对这一确切版本组合构建、测试；不要安装到旧版 DSH profile。上游公开的 `0.9.4` 包声明了更宽的 peer 范围，但不适用于这个私有离线包。
+本 fork 离线包 `0.9.4-dsh017rc1.19` 固定适配 DSH `0.1.7-rc.1` 和 Cordis `4.0.4`。其 V4 工具消息转换、固定到 Claude Code 2.1.288 的 wire 与界面已针对这一确切版本组合构建、测试；不要安装到旧版 DSH profile。上游公开的 `0.9.4` 包声明了更宽的 peer 范围，但不适用于这个私有离线包。
 
 ### 管理账号与 Pool 模型
 
@@ -163,7 +163,7 @@ GitHub 安装的:重新执行一遍 `add github:V1ki/dsh-plugin-subscriptions` �
 
 Codex 模型还可填写上下文 token 数，留空跟随服务商。插件读取每个账号的 `context_window` 与 `max_context_window`，实际使用 `min(配置值, 账号最大值)`；未返回最大值时，保守地以上下文默认值为上限。账号池按实际成员分别解析并取最小窗口。这只调整 DSH 的本地上下文预算与压缩时机，不向 API 发送扩大容量的参数。更长的上下文可能增加响应延迟。
 
-Claude 模型没有上下文预算字段：模型选择器直接报告模型自身的容量 —— 文档点名的模型取自 Claude API 文档（当前为 1M 上下文 / 128K 输出，`claude-haiku-4-5` 是唯一的 200K / 64K 条目），其余模型取自锁定的 Claude Code 目录。文档中的 1M 窗口若无法用普通模型 ID 触达，则不予报告：`claude-sonnet-4-6` 与 `claude-opus-4-6` 只有在 `context-1m-2025-08-07` beta 下才接受一百万 token，而本路由从不组合该 beta，因此两者报告目录的 200K 窗口。目录窗口即 Claude Code 客户端自身压缩所用的窗口，可能小于模型上限；两个来源都未点名的模型回退为保守的 200K 上下文与 32K 输出上限。
+Claude 模型没有上下文预算字段：上下文大小按 Claude Code 客户端自己的方式选择 —— 在模型 ID 上带请求期 `[1m]` 标记，编辑器把它列成模型旁边单独的 **1M** 行。选择器按行报告模型自身的容量：文档点名的模型取自 Claude API 文档（当前为 1M 上下文 / 128K 输出，`claude-haiku-4-5` 是唯一的 200K / 64K 条目），其余模型取自锁定的 Claude Code 目录。只有该标记会组合 `context-1m-2025-08-07` beta、且目录为该模型声明了该 beta 时，才出现 1M 行；目录未声明该 beta 的带标记 ID 会回落到目录的 200K 窗口，两个来源都未点名的模型回退为保守的 200K 上下文与 32K 输出上限。
 
 同一区块可开关 Codex 的图片生成，以及 Grok 的图片生成、视频生成和 X 搜索。工具策略只影响保存后新建的会话；已有会话及其重启后的恢复保留创建时的策略。图片生成是共享工具，只有 Codex 与 Grok 均关闭或未配置时才完全隐藏；调用时也不会回退到该会话已禁用的 provider。Claude 和 Copilot 当前没有本插件提供的独立工具开关。
 

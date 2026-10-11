@@ -76,8 +76,6 @@ function sanitizeModel(value: unknown): DiscoveredModel | undefined {
       && (typeof raw.priority !== 'number' || !Number.isFinite(raw.priority)))) return undefined
   const reasoning = raw.reasoning === undefined ? undefined : sanitizeReasoning(raw.reasoning)
   if (raw.reasoning !== undefined && reasoning === undefined) return undefined
-  const thinkingType = raw.thinkingType
-  if (thinkingType !== undefined && thinkingType !== 'enabled' && thinkingType !== 'adaptive') return undefined
   const fastTier = raw.fastTier
   if (fastTier !== undefined && typeof fastTier !== 'boolean') return undefined
   const copilotWire = raw.copilotWire
@@ -107,7 +105,6 @@ function sanitizeModel(value: unknown): DiscoveredModel | undefined {
     ...raw.maxOutputTokens === undefined ? {} : { maxOutputTokens: raw.maxOutputTokens as number },
     ...raw.priority === undefined ? {} : { priority: raw.priority as number },
     ...reasoning === undefined ? {} : { reasoning },
-    ...thinkingType === undefined ? {} : { thinkingType: thinkingType as 'enabled' | 'adaptive' },
     ...fastTier === undefined ? {} : { fastTier },
     ...copilotWire === undefined ? {} : { copilotWire: copilotWire as 'chat-completions' | 'responses' },
     ...copilotResponses === undefined ? {} : { copilotResponses },

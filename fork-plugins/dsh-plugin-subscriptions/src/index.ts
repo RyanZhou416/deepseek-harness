@@ -994,10 +994,11 @@ export function apply(ctx: Context, config: Config): void {
   // expired access token renews instead of failing the lookup.
   const usageFetchers: UsageFetchers = {}
   // The composer Speed toggle's state: per-session, in-memory (a restart
-  // restores standard routing), gated per request on the model's discovered
+  // restores standard routing), gated per request on the model's own
   // fast-tier support so a stale choice cannot leak onto a plain model.
   const speedBySession = new Map<string, SpeedTier>()
   let codexAdapter: CodexAdapter | undefined
+  let claudeAdapter: ClaudeAdapter | undefined
   // Dropped on every copilot auth transition so replay state (captured
   // reasoning) never survives an account switch in memory.
   let copilotAdapter: CopilotAdapter | undefined
@@ -1114,7 +1115,8 @@ export function apply(ctx: Context, config: Config): void {
           // Refresh-and-replay on rejection, as the client issues this request.
           fetchClaudeUsage(await tokens.session(account), proxiedFetch, signal,
             async () => (await tokens.session(account, true)).accessToken)
-        const adapter = new ClaudeAdapter({
+        let adapter!: ClaudeAdapter
+        adapter = new ClaudeAdapter({
           models: catalog.claude,
           ...config.claudeIdentityLine === undefined ? {} : { identityLine: config.claudeIdentityLine },
           streamIdleTimeoutMs,
@@ -1126,7 +1128,12 @@ export function apply(ctx: Context, config: Config): void {
           catalogStore: catalogStore('claude'),
           defaultEffortOf: (model: string) => defaultEffortOf('claude', model),
           pool: () => poolAdapter,
+          speedFor: (sessionId, model) =>
+            sessionId !== undefined
+            && speedBySession.get(sessionId) === 'fast'
+            && adapter.supportsFastTier(model),
         })
+        claudeAdapter = adapter
         adapters.set('claude', adapter)
         handles.set('claude', register('claude', adapter))
         break
@@ -1414,6 +1421,7 @@ export function apply(ctx: Context, config: Config): void {
         }
       }
       fastModels.push(...await cursorAdapter?.fastCapableModels() ?? [])
+      fastModels.push(...await claudeAdapter?.fastCapableModels() ?? [])
       return {
         tier: speedBySession.get(sessionId) ?? 'standard',
         fastModels,

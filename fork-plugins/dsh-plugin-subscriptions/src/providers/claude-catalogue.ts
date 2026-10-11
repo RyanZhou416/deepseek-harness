@@ -10,9 +10,15 @@
  * `cc-2.1.288-modules`, whose twenty-one entries agree with
  * `.cc-carve/model-catalogue.json` on id, family and display name. An id with no display
  * text maps to the id itself rather than inventing a name.
+ *
+ * A listed model whose request-time 1M marker buys a larger window carries a second row under
+ * that marked id, which is how this route offers a context size: see
+ * {@link claudeCatalogueListing}. A listed model whose entry carries `fast_mode` also carries
+ * the fast tier, which is the capability the client's own fast-mode gate reads.
  */
 
 import { CLAUDE_CODE_2_1_288_PROFILE } from '@tormentalabs/claude-code-wire-compat'
+import { claudeOneMillionModelId } from './claude-model-limits.js'
 import type { DiscoveredModel } from './common.js'
 
 /** Display text the client's baked-in catalogue gives each pinned model id. */
@@ -51,13 +57,51 @@ export interface ClaudeCatalogueOption {
 /**
  * The client's built-in catalogue as catalogue rows, in the catalogue's own order.
  * No request is involved: the genuine client holds this table and lists from it.
+ *
+ * `fast_mode` is a per-model capability of that table rather than anything an account discloses,
+ * so the tier is decided here, from the profile's own string, and every row derived from this one
+ * inherits it.
  * @returns one row per pinned profile model id.
  */
 export function claudeBuiltInCatalogue(): DiscoveredModel[] {
-  return Object.keys(CLAUDE_CODE_2_1_288_PROFILE.supportedModels).map(id => ({
+  return Object.entries(CLAUDE_CODE_2_1_288_PROFILE.supportedModels).map(([id, entry]) => ({
     id,
     name: CLAUDE_DISPLAY_NAMES[id] ?? id,
+    ...entry.capabilities.includes('fast_mode') ? { fastTier: true } : {},
   }))
+}
+
+/**
+ * One catalogue row with a request-time 1M variant beside it, when the marker buys a window.
+ *
+ * A context size is selected on this route the way the genuine client selects it — by the `[1m]`
+ * marker on the model id, which composes the long-context beta — so the variant is one more row
+ * of the same model rather than a second control. It reuses the row it is derived from, display
+ * text, description and the account's own disabled state included, and only names the window it
+ * reaches; the window itself comes from {@link claudeOneMillionModelId}.
+ * @param rows - catalogue rows in listing order.
+ * @returns the expanded rows, in the same order with each variant after its own model.
+ */
+function withOneMillionRows(rows: readonly DiscoveredModel[]): DiscoveredModel[] {
+  const expanded: DiscoveredModel[] = []
+  for (const row of rows) {
+    expanded.push(row)
+    const marked = claudeOneMillionModelId(row.id)
+    if (marked !== undefined) expanded.push({ ...row, id: marked, name: `${row.name} (1M)` })
+  }
+  return expanded
+}
+
+/**
+ * The catalogue rows this route lists: the client's built-in table, one account's options when
+ * the endpoint answered with any, and a request-time 1M variant after every model the marker
+ * raises.
+ * @param options - the endpoint's options, or undefined when it disclosed none.
+ * @returns the merged catalogue rows with their variants.
+ */
+export function claudeCatalogueListing(options?: readonly ClaudeCatalogueOption[]): DiscoveredModel[] {
+  const base = claudeBuiltInCatalogue()
+  return withOneMillionRows(options === undefined ? base : mergeClaudeCatalogue(base, options))
 }
 
 /**

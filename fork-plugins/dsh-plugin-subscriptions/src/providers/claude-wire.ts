@@ -301,6 +301,21 @@ export function mapClaudeWireError(error: unknown, messages: readonly Translatab
 }
 
 /**
+ * The `speed` field a request carries for one session's tier.
+ *
+ * The client sends the field only on the fast tier, and it is also what the pinned builder
+ * reads to push `fast-mode-2026-02-01`, so the body value and the beta identifier are decided
+ * from this one input. Standard routing is the field's absence: a `"standard"` literal would be
+ * a request no client sends.
+ *
+ * @param fast - whether the session serving this request selected the fast tier.
+ * @returns the field to spread into the builder input, or nothing on standard routing.
+ */
+export function claudeSpeedField(fast: boolean): Pick<ClaudeCodeRequestInput, 'speed'> {
+  return fast ? { speed: 'fast' } : {}
+}
+
+/**
  * The cache ttl a request declares, computed as the client computes it.
  *
  * The client resolves one ttl per request: an hour when the account is a subscription and is
@@ -322,14 +337,19 @@ function usesExtendedCacheTtl(session: ClaudeSession): boolean {
 }
 
 /**
- * The one harness section a client-shaped request never carries: `harness:source` names the
- * on-disk checkout of the harness, a machine-local path that belongs to no client.
+ * The harness sections a client-shaped request never carries.
+ *
+ * `harness:source` names the on-disk harness checkout, and `app:web-surface` names the
+ * harness's own Web GUI, its loopback endpoint, and that GUI's dev-server contract. Both
+ * describe this deployment rather than the client the request claims to be, and neither is a
+ * fact about the work: the route's own identity line already states that the user reads its
+ * replies in a local client.
  *
  * The harness identity section is deliberately not listed. What the model is told about its
  * own environment is a deployment decision — the harness exposes `includeHarnessIdentity` and
  * the persona for it — and removing it here would also discard a deployment's replacement.
  */
-const MACHINE_LOCAL_SECTIONS: ReadonlySet<string> = new Set(['harness:source'])
+const HARNESS_LOCAL_SECTIONS: ReadonlySet<string> = new Set(['harness:source', 'app:web-surface'])
 
 /** The harness section whose text a Claude request replaces with the deployment's own line. */
 const HARNESS_IDENTITY_SECTION = 'harness:identity'
@@ -443,6 +463,9 @@ export function assertContextManagementBeta(
  * @param effort - the reasoning effort, when the model advertises efforts.
  * @param sessionId - the wire session identity, a UUID minted per account span by {@link claudeWireSessionId}.
  * @param account - the canonical account key owning this conversation's chain state.
+ * @param identityLine - the deployment's own identity line, when it configured one.
+ * @param contextManagement - the planned context edits, when the model accepts them.
+ * @param fast - whether this session selected the fast tier.
  * @returns the built request: pinned URL, header plan, and serialized body.
  */
 export async function buildClaudeWireRequest(
@@ -456,6 +479,7 @@ export async function buildClaudeWireRequest(
   account: string,
   identityLine?: string,
   contextManagement?: ContextManagementConfig,
+  fast = false,
 ): Promise<BuiltClaudeCodeRequest> {
   if (session.deviceId === undefined || session.accountUuid === undefined) {
     throw new Error('dsh-plugin-subscriptions: claude wire identity is missing; backfill it before building')
@@ -493,13 +517,14 @@ export async function buildClaudeWireRequest(
   // block unmarked, and gives the shared side the global cache scope. Text after the marker
   // keeps its assembly order, and the leading system-role messages stay last because they are
   // session content. Without the section list the prompt is passed whole.
-  // Two of the harness's own sections describe a different product: the identity line names
-  // the harness, and the source section names a machine-local checkout path. A request shaped
-  // as the client carries the client's own identity block, so sending either leaves the model
-  // with two identities and a path that belongs to no client.
+  // The harness's own sections describe this deployment rather than the client: the identity
+  // line names the product, the source section names the checkout, and the Web surface section
+  // names the harness's GUI and its loopback endpoint. A request shaped as the client carries
+  // the client's own identity block, so sending them leaves the model with two identities, a
+  // path that belongs to no client, and an endpoint the client never serves.
   const identity = identityLine ?? DEFAULT_CLAUDE_IDENTITY_LINE
   const sections = (options.systemSections ?? [])
-    .filter(section => !MACHINE_LOCAL_SECTIONS.has(section.name))
+    .filter(section => !HARNESS_LOCAL_SECTIONS.has(section.name))
     // The harness identity section becomes this route's own line. A configured line is a
     // deployment's text rather than a compiled-in one, so it is never claimed as shareable.
     .map(section => section.name === HARNESS_IDENTITY_SECTION
@@ -595,6 +620,9 @@ export async function buildClaudeWireRequest(
     ...resolvedEffort === undefined
       ? {}
       : { effort: resolvedEffort, outputConfig: { effort: resolvedEffort } },
+    // The fast tier is one field: the pinned builder emits `speed` from it and pushes the beta
+    // that declares the tier in the same composition, so nothing else here names either.
+    ...claudeSpeedField(fast),
     // The desktop spawns its client with API_TIMEOUT_MS=900000, and the client reports
     // that timeout as x-stainless-timeout; a bare CLI would report 600.
     stainlessTimeoutSeconds: 900,

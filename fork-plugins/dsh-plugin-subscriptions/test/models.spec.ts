@@ -13,7 +13,7 @@ import type { LlmModelInfo, Message } from '@deepseek-ai/dsh-llm'
 import { CodexAdapter, codexRequestBody, fetchCodexModels } from '../src/providers/codex.js'
 import { GrokAdapter } from '../src/providers/grok.js'
 import { ClaudeAdapter, claudeThinkingBody, fetchClaudeCatalogue } from '../src/providers/claude.js'
-import { claudeBuiltInCatalogue } from '../src/providers/claude-catalogue.js'
+import { claudeBuiltInCatalogue, claudeCatalogueListing } from '../src/providers/claude-catalogue.js'
 import { claudeDocumentedLimits, claudeModelLimits, claudeProfileLimits } from '../src/providers/claude-model-limits.js'
 import { CLAUDE_CODE_2_1_288_PROFILE } from '@tormentalabs/claude-code-wire-compat'
 import { CopilotAdapter, fetchCopilotModels } from '../src/providers/copilot.js'
@@ -366,6 +366,31 @@ test('a configured default cannot invent a reasoning block for claude', async ()
   assert.equal((await plain.resolveModel('claude', 'claude-opus-4-5')).reasoning, undefined)
 })
 
+test('the pinned catalogue is what advertises claude reasoning efforts', async () => {
+  // The effort levels come from the pinned profile, not from discovery: the adapter below
+  // never reads a catalog, and the settings surface still has to offer what the model accepts.
+  const claude = new ClaudeAdapter({
+    models: STATIC_CLAUDE,
+    streamIdleTimeoutMs: 1000,
+    tokens: memoryTokens(claudeSession),
+    discovery: false,
+  })
+  // `effort` carries low/medium/high, `xhigh_effort` adds xhigh and `max_effort` adds max.
+  const sonnet5 = await claude.resolveModel('claude', 'claude-sonnet-5')
+  assert.deepEqual(sonnet5.reasoning?.efforts.map(effort => effort.id), ['low', 'medium', 'high', 'xhigh', 'max'])
+  assert.equal(sonnet5.reasoning?.efforts[3].name, 'Extra High')
+  // The catalogue's own `default_effort` is what the picker preselects.
+  assert.equal(sonnet5.reasoning?.defaultEffort, 'high')
+  const sonnet46 = await claude.resolveModel('claude', 'claude-sonnet-4-6')
+  assert.deepEqual(sonnet46.reasoning?.efforts.map(effort => effort.id), ['low', 'medium', 'high', 'max'])
+  assert.equal(sonnet46.reasoning?.defaultEffort, undefined, 'a model the catalogue gives no default keeps none')
+  assert.equal((await claude.resolveModel('claude', 'claude-opus-5-5')).reasoning?.defaultEffort, 'medium')
+  // A model whose entry carries no effort flag advertises none, so a level cannot be chosen
+  // for it in the first place.
+  assert.equal((await claude.resolveModel('claude', 'claude-opus-4-5')).reasoning, undefined)
+  assert.equal((await claude.resolveModel('claude', 'claude-3-7-sonnet')).reasoning, undefined)
+})
+
 test('codex discovery failure falls back to the static catalog with a warning', async () => {
   const warnings: string[] = []
   const { fetchFn } = fakeFetch({ error: 'boom' }, 500)
@@ -472,8 +497,8 @@ test('the documented limit outranks the catalogue window, which outranks the con
 test('a documented window is reported only where a request can reach it without the 1M beta', () => {
   for (const id of ['claude-sonnet-4-6', 'claude-opus-4-6']) {
     const context = CLAUDE_CODE_2_1_288_PROFILE.supportedModels[id]?.context
-    // The catalogue marks these two with the 1M beta and a 200000 window, and this route sends
-    // a plain id, so the documented million is withheld from the resolved limit.
+    // The catalogue marks these two with the 1M beta and a 200000 window, and a plain id
+    // composes no beta, so the documented million is withheld from the resolved limit.
     assert.equal(context?.supports1mBeta, true, id)
     assert.equal(context?.native1m, undefined, id)
     assert.equal(claudeModelLimits(id).contextWindow, 200_000, id)
@@ -486,6 +511,59 @@ test('a documented window is reported only where a request can reach it without 
     if (entry.context?.supports1mBeta === true && entry.context.native1m !== true) continue
     assert.equal(claudeModelLimits(id).contextWindow, documented.contextWindow, id)
   }
+})
+
+test('the 1M marker is the one channel that reports the beta window, and it clamps where the pin denies it', () => {
+  // Every entry the profile marks with the 1M beta and a below-1M window is one the marker
+  // raises, and it is the only id under which that window is reported.
+  const raised = Object.entries(CLAUDE_CODE_2_1_288_PROFILE.supportedModels)
+    .filter(([, entry]) => entry.context?.supports1mBeta === true && entry.context.native1m !== true)
+    .map(([id]) => id)
+  assert.deepEqual(raised, ['claude-sonnet-4-0', 'claude-sonnet-4-5', 'claude-sonnet-4-6', 'claude-opus-4-6'])
+  for (const id of raised) {
+    const marked = `${id}[1m]`
+    assert.equal(claudeModelLimits(marked).contextWindow, 1_000_000, id)
+    assert.equal(claudeModelLimits(id).contextWindow, 200_000, id)
+    // The output ceiling is not beta-gated and does not move with the marker.
+    assert.equal(claudeModelLimits(marked).maxOutputTokens, claudeModelLimits(id).maxOutputTokens, id)
+  }
+  // A marked id the pin does not declare the beta for is clamped back to the plain window: a
+  // window a request cannot reach is never reported.
+  assert.equal(claudeModelLimits('claude-haiku-4-5[1m]').contextWindow, 200_000)
+  assert.equal(claudeModelLimits('claude-3-7-sonnet[1m]').contextWindow, 200_000)
+  assert.equal(claudeModelLimits('claude-unknown[1m]').contextWindow, 200_000)
+})
+
+test('the catalogue lists a 1M row for exactly the models the marker buys a window for', () => {
+  const rows = claudeCatalogueListing()
+  // One variant per raised model, listed directly after its own model, named for its window
+  // and inheriting everything else from the row it is derived from.
+  assert.deepEqual(
+    rows.filter(row => row.id.includes('[1m]')).map(row => row.id),
+    ['claude-sonnet-4-0[1m]', 'claude-sonnet-4-5[1m]', 'claude-sonnet-4-6[1m]', 'claude-opus-4-6[1m]'],
+  )
+  assert.deepEqual(
+    rows.slice(rows.findIndex(row => row.id === 'claude-sonnet-4-6'), rows.findIndex(row => row.id === 'claude-sonnet-4-6') + 2),
+    [
+      { id: 'claude-sonnet-4-6', name: 'Sonnet 4.6' },
+      { id: 'claude-sonnet-4-6[1m]', name: 'Sonnet 4.6 (1M)' },
+    ],
+  )
+  // The plain table is unchanged: the variants are a listing, not a second membership rule.
+  assert.deepEqual(claudeBuiltInCatalogue().map(row => row.id), Object.keys(CLAUDE_CODE_2_1_288_PROFILE.supportedModels))
+})
+
+test('a disabled account model carries its 1M row into the listing', async () => {
+  const payload = {
+    client_data: null,
+    additional_model_options: [{ model: 'claude-sonnet-4-6', disabled_reason: 'org disabled' }],
+  }
+  const rows = await fetchClaudeCatalogue(claudeSession, [], fakeFetch(payload).fetchFn)
+  assert.deepEqual(rows.find(row => row.id === 'claude-sonnet-4-6[1m]'), {
+    id: 'claude-sonnet-4-6[1m]',
+    name: 'Sonnet 4.6 (1M)',
+    disabledReason: 'org disabled',
+  })
 })
 
 test('the documented limits name catalogue models and never fall below the catalogue entry', () => {
@@ -522,16 +600,19 @@ test('the built-in catalogue lists the pinned profile with the client display na
 
 test('the account options add to the built-in catalogue rather than replacing it', async () => {
   const rows = await fetchClaudeCatalogue(claudeSession, [], fakeFetch(CLAUDE_BOOTSTRAP_PAYLOAD).fetchFn)
-  const base = claudeBuiltInCatalogue()
+  const base = claudeCatalogueListing()
   // Every built-in model survives in its catalogue position, with the account's own addition appended.
   assert.deepEqual(rows.map(row => row.id), [...base.map(row => row.id), 'claude-bare', 'claude-retired'])
   assert.deepEqual(rows.slice(base.length), [
     { id: 'claude-bare', name: 'claude-bare' },
     { id: 'claude-retired', name: 'Retired', disabledReason: 'no longer offered' },
   ])
-  // An option naming a built-in model replaces that row's display text in place, once.
+  // An option naming a built-in model replaces that row's display text in place, once, and
+  // leaves the capability the pinned catalogue gave it standing.
   const opus = rows.filter(row => row.id === 'claude-opus-5-5')
-  assert.deepEqual(opus, [{ id: 'claude-opus-5-5', name: 'Claude Opus 5.5', description: 'newest' }])
+  assert.deepEqual(opus, [
+    { id: 'claude-opus-5-5', name: 'Claude Opus 5.5', fastTier: true, description: 'newest' },
+  ])
   // An option naming no model is not a row.
   assert.equal(rows.some(row => row.id === 'nameless'), false)
 })
@@ -558,7 +639,7 @@ test('a disabled option surfaces as a disabled row instead of disappearing', asy
 })
 
 test('a response that is not the document leaves the built-in catalogue standing', async () => {
-  const base = claudeBuiltInCatalogue()
+  const base = claudeCatalogueListing()
   const malformed = await fetchClaudeCatalogue(
     claudeSession, [], fakeFetch({ unexpected: true }).fetchFn,
   )
@@ -697,6 +778,45 @@ test('codex discovery flags models whose catalog advertises a fast service tier'
   assert.equal(await staticAdapter.supportsFastTier('gpt-5.1-codex'), false)
   // Logged out: no fast models, so the Speed toggle hides after logout.
   const loggedOut = codexAdapter({ fetchFn })
+  assert.deepEqual(await loggedOut.fastCapableModels(), [])
+})
+
+test('claude fast capability comes from the pinned catalogue, not from discovery', async () => {
+  // Every catalogue row carries the tier the profile's own `fast_mode` string gives it.
+  const rows = claudeCatalogueListing()
+  assert.deepEqual(
+    rows.filter(row => row.fastTier === true).map(row => row.id),
+    Object.entries(CLAUDE_CODE_2_1_288_PROFILE.supportedModels)
+      .filter(([, entry]) => entry.capabilities.includes('fast_mode'))
+      .map(([id]) => id),
+    'the flag is the profile capability itself',
+  )
+  assert.deepEqual(rows.filter(row => row.fastTier === true).map(row => row.id), [
+    'claude-opus-4-8', 'claude-opus-5', 'claude-opus-5-5',
+  ])
+  assert.equal(rows.find(row => row.id === 'claude-fable-5')?.fastTier, undefined)
+
+  // Discovery is off and no request is issued: the capability is compiled in, so the picker
+  // offers the tier while the options read is unavailable.
+  const claude = new ClaudeAdapter({
+    models: STATIC_CLAUDE,
+    streamIdleTimeoutMs: 1000,
+    tokens: memoryTokens(claudeSession),
+    discovery: false,
+  })
+  assert.deepEqual(await claude.fastCapableModels(), ['claude-opus-4-8', 'claude-opus-5', 'claude-opus-5-5'])
+  assert.equal(claude.supportsFastTier('claude-opus-5-5'), true)
+  assert.equal(claude.supportsFastTier('claude-opus-5-5[1m]'), true, 'the marker is not part of the catalogue key')
+  assert.equal(claude.supportsFastTier('claude-fable-5'), false)
+  assert.equal(claude.supportsFastTier('claude-not-a-model'), false)
+
+  // Logged out: no fast models, so the Speed toggle hides after logout.
+  const loggedOut = new ClaudeAdapter({
+    models: STATIC_CLAUDE,
+    streamIdleTimeoutMs: 1000,
+    tokens: memoryTokens<ClaudeSession>(undefined),
+    discovery: false,
+  })
   assert.deepEqual(await loggedOut.fastCapableModels(), [])
 })
 

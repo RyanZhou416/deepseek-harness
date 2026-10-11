@@ -10,13 +10,17 @@
  * none, in this order: the documented per-model limit, the pinned profile's catalogue entry, and
  * a conservative pair for a model no source names.
  *
- * One documented figure is withheld. A model whose catalogue entry reaches its 1M window only
- * through the long-context beta — the 200000-window entries carrying the 1M-beta flag rather
- * than native 1M — is reported at the catalogue window instead, because this route sends a
- * plain model id and never composes that beta: the documentation states what the model accepts
- * with it, and reporting a window a request cannot use is a capacity the harness would then
- * plan against and the API would refuse. The output ceiling is not beta-gated and is reported
- * as documented.
+ * One documented figure is withheld from a plain model id. A model whose catalogue entry reaches
+ * its 1M window only through the long-context beta — the 200000-window entries carrying the
+ * 1M-beta flag rather than native 1M — is reported at the catalogue window instead, because a
+ * plain id composes no beta: the documentation states what the model accepts with it, and
+ * reporting a window a request cannot use is a capacity the harness would then plan against and
+ * the API would refuse. An id carrying the request-time `[1m]` marker composes that beta, so it
+ * reports the million the client believes; an id whose entry declares no such flag is clamped
+ * back to the plain window. The output ceiling is not beta-gated and is reported as documented.
+ *
+ * The catalogue key a wire model id resolves to therefore belongs to this module: the marker is a
+ * capacity choice, and every entry lookup here reads through it.
  */
 
 import { CLAUDE_CODE_2_1_288_PROFILE } from '@tormentalabs/claude-code-wire-compat'
@@ -46,8 +50,9 @@ export interface ClaudeModelLimits {
  * for it instead, and an id neither source carries falls to {@link CLAUDE_UNNAMED_LIMITS}.
  *
  * Two entries list the window the documentation states for the model rather than the window
- * this route can use: `claude-sonnet-4-6` and `claude-opus-4-6` reach a million tokens only
- * inside the long-context beta, and {@link claudeModelLimits} reports their catalogue window.
+ * this route reports for the plain id: `claude-sonnet-4-6` and `claude-opus-4-6` reach a million
+ * tokens only inside the long-context beta, and {@link claudeModelLimits} reports their catalogue
+ * window there. A `[1m]` id is what composes that beta.
  */
 const CLAUDE_DOCUMENTED_LIMITS: Readonly<Partial<Record<string, ClaudeModelLimits>>> = Object.freeze({
   'claude-fable-5': { contextWindow: 1_000_000, maxOutputTokens: 128_000 },
@@ -90,24 +95,61 @@ const CLAUDE_UNNAMED_LIMITS: ClaudeModelLimits = Object.freeze({
 })
 
 /**
+ * The window the client believes once `context-1m-2025-08-07` is on the request.
+ *
+ * The client's own constant rather than a documented per-model figure, which is why this module
+ * cannot read it from either of its two sources.
+ */
+const CLAUDE_ONE_MILLION_WINDOW = 1_000_000
+
+/**
+ * The request-time marker that selects the long-context beta.
+ *
+ * The pinned builder composes `context-1m-2025-08-07` from `/\[1m\]/iu.test(rawModel)` and strips
+ * the marker out of the id the body names, so it changes the window a request may use without
+ * changing the model.
+ */
+const ONE_MILLION_MARKER = '[1m]'
+
+/** Whether a wire model id carries {@link ONE_MILLION_MARKER}. */
+function carriesOneMillionMarker(model: string): boolean {
+  return /\[1m\]/iu.test(model)
+}
+
+/**
+ * The pinned catalogue's key for a wire model id.
+ * @param model - the wire model id.
+ * @returns the id the profile keys its catalogue entry by.
+ */
+function claudeCatalogueId(model: string): string {
+  return model.replace(/\[1m\]/giu, '')
+}
+
+/**
  * One model's entry in the pinned catalogue, when it carries one.
+ *
+ * A request-time marker is not part of the catalogue key, so a marked id reads the same entry as
+ * the plain one.
  * @param model - the wire model id.
  * @returns the catalogue entry, or undefined for an id the profile does not carry.
  */
-function claudeCatalogueEntry(model: string): ClaudeCodeCatalogueEntry | undefined {
+export function claudeCatalogueEntry(model: string): ClaudeCodeCatalogueEntry | undefined {
   const catalogue = CLAUDE_CODE_2_1_288_PROFILE.supportedModels
   // A model id is arbitrary text, so the catalogue is asked for an own key: an id spelled like
   // an inherited object member must not resolve to that member.
-  return Object.hasOwn(catalogue, model) ? catalogue[model] : undefined
+  const id = claudeCatalogueId(model)
+  return Object.hasOwn(catalogue, id) ? catalogue[id] : undefined
 }
 
 /**
  * The documented capacity for one model, when the documentation names it.
- * @param model - the wire model id.
+ * @param model - the wire model id; a request-time marker resolves to the id the documentation
+ *   names.
  * @returns the documented limits, or undefined for a model the documentation does not name.
  */
 export function claudeDocumentedLimits(model: string): ClaudeModelLimits | undefined {
-  return Object.hasOwn(CLAUDE_DOCUMENTED_LIMITS, model) ? CLAUDE_DOCUMENTED_LIMITS[model] : undefined
+  const id = claudeCatalogueId(model)
+  return Object.hasOwn(CLAUDE_DOCUMENTED_LIMITS, id) ? CLAUDE_DOCUMENTED_LIMITS[id] : undefined
 }
 
 /**
@@ -129,14 +171,31 @@ export function claudeProfileLimits(model: string): ClaudeModelLimits | undefine
 }
 
 /**
- * Whether this route can reach a model's documented window with the betas it sends.
+ * Whether this request composes the long-context beta for a model whose entry declares it.
  *
- * A catalogue entry whose 200000 window carries the 1M-beta flag rather than native 1M reaches
- * a million tokens only inside `context-1m-2025-08-07`, and the builder composes that beta from
- * a `[1m]` marker on the model id or an explicit override, neither of which this route sends.
+ * The client raises the window it believes to a million when the marker is on the id, and clamps
+ * that belief back to the entry's own 200000 window when the model does not declare the beta. The
+ * million is the client's constant rather than a documented per-model figure, so it answers for a
+ * model the current-model table does not name as well.
  *
  * @param model - the wire model id.
- * @returns true when the documented window is reachable without the long-context beta.
+ * @returns true when the id carries the marker and the entry declares the beta.
+ */
+function composesOneMillionBeta(model: string): boolean {
+  return carriesOneMillionMarker(model)
+    && claudeCatalogueEntry(model)?.context?.supports1mBeta === true
+}
+
+/**
+ * Whether this request can reach a model's documented window without composing the beta.
+ *
+ * A catalogue entry whose 200000 window carries the 1M-beta flag rather than native 1M reaches a
+ * million tokens only inside `context-1m-2025-08-07`; {@link composesOneMillionBeta} answers for
+ * the ids that compose it, so a plain id reports the catalogue window instead. An entry that
+ * declares no long-context flag needs no beta, and one whose window is native does not compose it.
+ *
+ * @param model - the wire model id.
+ * @returns true when the documented window is reachable without the beta.
  */
 function documentedWindowReachable(model: string): boolean {
   const context = claudeCatalogueEntry(model)?.context
@@ -144,15 +203,39 @@ function documentedWindowReachable(model: string): boolean {
 }
 
 /**
+ * The marked id whose request composes the long-context beta, when the marker buys a window.
+ *
+ * The marked id is the only channel this route has for a context size, so a model whose marked
+ * window equals its plain one — every native-1M entry, and every entry the beta flag does not
+ * cover, whose claim the client clamps back — gets no variant rather than a second id that
+ * reports the same capacity.
+ *
+ * @param model - the unmarked wire model id.
+ * @returns the marked id, or undefined when it reports no larger window than the plain one.
+ */
+export function claudeOneMillionModelId(model: string): string | undefined {
+  if (carriesOneMillionMarker(model)) return undefined
+  const marked = `${model}${ONE_MILLION_MARKER}`
+  return claudeModelLimits(marked).contextWindow > claudeModelLimits(model).contextWindow ? marked : undefined
+}
+
+/**
  * The capacity to report for one model when discovery disclosed none.
  *
  * @param model - the wire model id.
  * @returns the documented limit, the pinned catalogue's entry, or the conservative pair. A
- *   documented window that needs the long-context beta is replaced by the catalogue window.
+ *   documented window that needs the long-context beta is replaced by the catalogue window
+ *   under a plain id, and an id that composes the beta reports the million the client believes.
  */
 export function claudeModelLimits(model: string): ClaudeModelLimits {
   const documented = claudeDocumentedLimits(model)
   const catalogue = claudeProfileLimits(model)
+  if (composesOneMillionBeta(model)) {
+    return {
+      contextWindow: CLAUDE_ONE_MILLION_WINDOW,
+      maxOutputTokens: (documented ?? catalogue)?.maxOutputTokens ?? CLAUDE_UNNAMED_LIMITS.maxOutputTokens,
+    }
+  }
   if (documented === undefined) return catalogue ?? CLAUDE_UNNAMED_LIMITS
   if (catalogue === undefined) return documented
   return {

@@ -14,7 +14,7 @@ import type {
   LlmResolvedModelInfo,
   StreamChunk,
 } from '@deepseek-ai/dsh-llm'
-import { CLAUDE_CODE_2_1_288_PROFILE } from '@tormentalabs/claude-code-wire-compat'
+import { CLAUDE_CODE_2_1_288_PROFILE, isClaude3Model } from '@tormentalabs/claude-code-wire-compat'
 import type { BuiltClaudeCodeRequest } from '@tormentalabs/claude-code-wire-compat'
 import type { FlowSpec } from '../auth/oauth-flow.js'
 import type { ClaudeSession } from '../auth/store.js'
@@ -39,10 +39,11 @@ import {
 } from './claude-wire.js'
 import { STALE_TOOL_RESULT_IDLE_MS, planContextManagement } from './context-management.js'
 import type { ClaudeWireThinking } from './claude-wire.js'
-import { claudeBuiltInCatalogue, mergeClaudeCatalogue } from './claude-catalogue.js'
+import { claudeCatalogueListing } from './claude-catalogue.js'
 import type { ClaudeCatalogueOption } from './claude-catalogue.js'
-import { claudeModelLimits } from './claude-model-limits.js'
+import { claudeCatalogueEntry, claudeModelLimits } from './claude-model-limits.js'
 import {
+  effortDisplayName,
   httpLlmError,
   idleWatchdog,
   isEnforcementRefusal,
@@ -869,30 +870,21 @@ export async function fetchClaudeUsage(
   return { supported: true, windows }
 }
 
-interface ClaudeModelCapabilities {
-  thinking?: {
-    types?: {
-      enabled?: { supported?: boolean }
-      adaptive?: { supported?: boolean }
-    }
-  }
-  effort?: {
-    supported?: boolean
-    low?: { supported?: boolean }
-    medium?: { supported?: boolean }
-    high?: { supported?: boolean }
-    xhigh?: { supported?: boolean }
-    max?: { supported?: boolean }
-  }
-}
-
-function claudeThinkingType(capabilities: ClaudeModelCapabilities | undefined): 'enabled' | 'adaptive' | undefined {
-  const types = capabilities?.thinking?.types
-  // Adaptive wins when a model advertises both. Opus 5.5 rejects
-  // `thinking.type: enabled` and `budget_tokens` with HTTP 400.
-  if (types?.adaptive?.supported === true) return 'adaptive'
-  if (types?.enabled?.supported === true) return 'enabled'
-  return undefined
+/**
+ * The thinking shape the pinned catalogue gives one model.
+ *
+ * `adaptive` is the shape of every catalogued id carrying `adaptive_thinking`, and the manual
+ * budget covers the rest. Thinking itself has no catalogue string in any client version, so the
+ * shape is denied by the profile's own `claude-3-` predicate — the one the pinned package's
+ * thinking capabilities are derived from — and the Claude 3 entries are the ids it excludes.
+ * Opus 5.5 is not special-cased here: it advertises `adaptive_thinking`, and
+ * {@link claudeThinkingBody} carries the models that reject a manual budget regardless.
+ * @param model - the requested model id.
+ * @returns the shape to send, or undefined for a model the pin gives no thinking.
+ */
+function claudeThinkingType(model: string): 'enabled' | 'adaptive' | undefined {
+  if (claudeCatalogueEntry(model)?.capabilities.includes('adaptive_thinking') === true) return 'adaptive'
+  return isClaude3Model(model) ? undefined : 'enabled'
 }
 
 /**
@@ -910,7 +902,7 @@ function rejectsBudgetThinking(model: string): boolean {
  * models default to `display: 'omitted'`, which returns thinking blocks with
  * an empty `thinking` field. Without this override the Think panel stays empty.
  * @param model - the requested model id.
- * @param thinkingType - the type discovery advertised, when it advertised one.
+ * @param thinkingType - the shape the pinned catalogue gives the model, when it gives one.
  * @param maxTokens - the resolved output cap; the manual budget is derived from it.
  * @returns the wire `thinking` request, or undefined when the model takes none.
  */
@@ -929,16 +921,62 @@ export function claudeThinkingBody(
   return undefined
 }
 
-/** Effort levels in display order; a model exposes only the ones it advertises as supported. */
+/** Effort levels in display order; a model exposes only the ones its catalogue marks. */
 const CLAUDE_EFFORT_LEVELS = ['low', 'medium', 'high', 'xhigh', 'max'] as const
 
-function claudeReasoning(capabilities: ClaudeModelCapabilities | undefined): DiscoveredModel['reasoning'] {
-  const effort = capabilities?.effort
-  if (effort?.supported !== true) return undefined
-  const efforts = CLAUDE_EFFORT_LEVELS
-    .filter(level => effort[level]?.supported === true)
-    .map(level => ({ id: ReasoningEffortId(level), name: level[0].toUpperCase() + level.slice(1) }))
-  return efforts.length > 0 ? { efforts } : undefined
+/**
+ * The reasoning block the pinned catalogue gives one model.
+ *
+ * The catalogue's three effort flags are the model's own limit: `effort` carries the
+ * low/medium/high levels, `xhigh_effort` adds `xhigh` and `max_effort` adds `max`. A level the
+ * flags do not carry is therefore never advertised, so the harness refuses it before provider
+ * I/O and a stored override naming one is dropped by {@link mergeReasoning} — no request carries
+ * a level the pinned builder would refuse with `INVALID_EFFORT`. The catalogue's own
+ * `default_effort` stands as the block's default, which is the level the picker preselects and
+ * the one a request carries when no override is configured.
+ *
+ * @param model - the requested model id.
+ * @returns the advertised levels and the catalogue's default, or undefined for a model that
+ *   takes no effort.
+ */
+function claudeReasoning(model: string): DiscoveredModel['reasoning'] {
+  const entry = claudeCatalogueEntry(model)
+  if (entry === undefined || !entry.capabilities.includes('effort')) return undefined
+  const advertised = (level: (typeof CLAUDE_EFFORT_LEVELS)[number]): boolean => {
+    if (level === 'xhigh') return entry.capabilities.includes('xhigh_effort')
+    if (level === 'max') return entry.capabilities.includes('max_effort')
+    return true
+  }
+  const efforts = CLAUDE_EFFORT_LEVELS.filter(advertised).map(level => ({
+    id: ReasoningEffortId(level),
+    name: effortDisplayName(level),
+  }))
+  const preferred = entry.defaultEffort
+  return {
+    efforts,
+    // The runtime requires `defaultEffort ∈ efforts`; a profile bump that marked a default the
+    // model's own flags do not carry leaves the block without one rather than failing every call.
+    ...preferred === undefined || !efforts.some(effort => effort.id === preferred)
+      ? {}
+      : { defaultEffort: ReasoningEffortId(preferred) },
+  }
+}
+
+/**
+ * The effort one request carries, when the model's own catalogue carries that level.
+ *
+ * The advertised set is the limit. A level outside it is dropped, so the request goes out with
+ * the model's own default instead of a value the pinned builder refuses with `INVALID_EFFORT`;
+ * the harness already refuses such a level before dispatch, and this keeps a caller that reaches
+ * the adapter directly from turning a stale override into a failed request.
+ * @param model - the requested model id.
+ * @param effort - the harness-resolved effort, when the caller stated one.
+ * @returns the wire effort id, or undefined when the model does not accept it.
+ */
+function claudeRequestedEffort(model: string, effort: GenerateOptions['reasoningEffort']): string | undefined {
+  if (effort === undefined) return undefined
+  const offered = claudeReasoning(model)?.efforts ?? []
+  return offered.some(entry => entry.id === effort) ? String(effort) : undefined
 }
 
 /**
@@ -1001,7 +1039,7 @@ export async function fetchClaudeCatalogue(
     signal: signal === undefined ? timeout : AbortSignal.any([signal, timeout]),
   })
   // An endpoint that refuses the read is not an error: the built-in catalogue stands on its own.
-  if (!response.ok) return claudeBuiltInCatalogue()
+  if (!response.ok) return claudeCatalogueListing()
   const payload = await response.json() as ClaudeBootstrapDocument
   // The same document that supplements the catalogue carries the client data the request
   // header is drawn from, so one read serves both.
@@ -1010,8 +1048,8 @@ export async function fetchClaudeCatalogue(
     if (typeof atis === 'string' && atis.length > 0) clientAtis.set(account, atis)
   }
   const options = payload.additional_model_options
-  if (!Array.isArray(options)) return claudeBuiltInCatalogue()
-  return mergeClaudeCatalogue(claudeBuiltInCatalogue(), options)
+  if (!Array.isArray(options)) return claudeCatalogueListing()
+  return claudeCatalogueListing(options)
 }
 
 /**
@@ -1054,6 +1092,12 @@ interface ClaudeAdapterOptions {
    * the provider's own default.
    */
   defaultEffortOf?: (model: string) => string | undefined
+  /**
+   * Per-request speed lookup (the composer Speed toggle's host half). Returns
+   * whether this session's current choice sends the model on the fast tier;
+   * absent means every request stays on standard routing.
+   */
+  speedFor?: (sessionId: string | undefined, model: string) => boolean | Promise<boolean>
 }
 
 /** The Claude 4.5 family accepts image input. */
@@ -1151,6 +1195,33 @@ export class ClaudeAdapter extends PoolBackedAdapter {
     return { id: provider, name: 'Claude (Subscription)' }
   }
 
+  /**
+   * Whether the pinned catalogue marks this model fast-capable.
+   *
+   * `fast_mode` is the capability the client's own fast-mode gate reads, so a model without it
+   * never receives the tier however the session's toggle is set.
+   * @param model - the requested model id.
+   * @returns true when the model's catalogue entry carries `fast_mode`.
+   */
+  supportsFastTier(model: string): boolean {
+    return claudeCatalogueEntry(model)?.capabilities.includes('fast_mode') === true
+  }
+
+  /**
+   * Ids of every catalogued model carrying `fast_mode` (the Speed toggle's visibility list).
+   *
+   * The capability belongs to the pinned catalogue rather than to an account, so the list is the
+   * same for every account and needs no discovery read. Logged out, no session can select one of
+   * these models and the list is empty, which is how the control hides with the models.
+   * @returns the fast-capable model ids.
+   */
+  async fastCapableModels(): Promise<string[]> {
+    if ((await this.options.tokens.list()).length === 0) return []
+    return claudeCatalogueListing()
+      .filter(model => model.fastTier === true)
+      .map(model => model.id)
+  }
+
   override providerRetryPolicy(provider: string) {
     return subscriptionRetryPolicy(
       // The client's own retry shape: a 500 ms base, a 32 s ceiling and proportional jitter.
@@ -1167,7 +1238,10 @@ export class ClaudeAdapter extends PoolBackedAdapter {
   async resolveOwnModel(provider: string, model: string): Promise<LlmResolvedModelInfo> {
     const disc = await this.discovered(model)
     const configured = this.options.models.find(entry => entry.id === model)
-    const reasoning = mergeReasoning(this.options.defaultEffortOf?.(model), disc?.reasoning)
+    // The effort levels come from the pinned catalogue rather than from discovery: the profile
+    // is compiled in, so the picker offers what the model accepts even while a catalog read is
+    // unavailable, and a configured default merges over the same set the request path gates on.
+    const reasoning = mergeReasoning(this.options.defaultEffortOf?.(model), claudeReasoning(model))
     return {
       provider,
       id: model,
@@ -1326,10 +1400,13 @@ export class ClaudeAdapter extends PoolBackedAdapter {
     const messages = await bindClaudeFileIds(resolved, chainAccount, session.accessToken, fetchFn, signal)
     const maxTokens = options.maxTokens
       ?? claudeMaxTokens(this.options.models.find(entry => entry.id === options.model), disc, options.model)
-    const thinking = this.thinkingParam(options.model, disc?.thinkingType, maxTokens)
-    const effort = options.reasoningEffort !== undefined && disc?.reasoning !== undefined
-      ? String(options.reasoningEffort)
-      : undefined
+    // Both request controls come from the pinned catalogue, so the shape and the level a
+    // request carries are the model's own facts rather than whatever discovery last saw.
+    const thinking = this.thinkingParam(options.model, claudeThinkingType(options.model), maxTokens)
+    const effort = claudeRequestedEffort(options.model, options.reasoningEffort)
+    // Absent lookup means standard routing; the wire module sends the field and its beta only
+    // when this is true.
+    const fast = await this.options.speedFor?.(options.sessionId, options.model) ?? false
     const identitySession = await this.identitySession(session, account, fetchFn, signal)
     let built: BuiltClaudeCodeRequest
     try {
@@ -1340,7 +1417,7 @@ export class ClaudeAdapter extends PoolBackedAdapter {
       })
       built = await buildClaudeWireRequest(
         options, identitySession, messages, maxTokens, thinking, effort, sessionId, chainAccount,
-        this.options.identityLine, contextManagement,
+        this.options.identityLine, contextManagement, fast,
       )
     } catch (error: unknown) {
       const mapped = mapClaudeWireError(error, messages)

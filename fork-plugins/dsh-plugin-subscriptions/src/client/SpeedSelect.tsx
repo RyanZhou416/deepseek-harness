@@ -2,9 +2,10 @@
  * Speed toggle: one small control in the composer's right tool row
  * (`conversation.input.right`), switching the session between standard routing
  * and the fast tier. Codex uses its priority service tier; Cursor sends the
- * catalog `fast` parameter. The choice is per session and lives in the node
- * half (in-memory); this component holds only viewing state. The control
- * renders nothing until the current model advertises a fast tier.
+ * catalog `fast` parameter; Claude sends the catalogue's `speed` field. The
+ * choice is per session and lives in the node half (in-memory); this component
+ * holds only viewing state. The control renders nothing until the current model
+ * advertises a fast tier.
  *
  * Every color resolves through a `--dsw-alias-*` design token and every
  * user-visible string goes through the locale `t` of the
@@ -28,9 +29,55 @@ export interface SpeedState {
 }
 
 /** What {@link SpeedSelect} renders from: visibility plus the current tier. */
-interface SpeedSelectState {
+export interface SpeedSelectState {
   visible: boolean
   tier: SpeedTier
+}
+
+/**
+ * The speed state this control watches, and the choice generation its reads belong to.
+ *
+ * The poll's read and the user's choice are both asynchronous, and the read is the slower of the
+ * two (it asks the node half to enumerate the fast-capable models and the host for the session's
+ * current model). A read that started before a choice can therefore settle after it, and
+ * publishing that result would put the tier the user just replaced back on screen.
+ */
+export interface SpeedView {
+  /** Choices this control has settled; a read carries the value it started under. */
+  generation: number
+  /** The last state this control published, or null until the first read settles. */
+  state: SpeedSelectState | null
+}
+
+/** The view before anything has been read or chosen. */
+const INITIAL_SPEED_VIEW: SpeedView = { generation: 0, state: null }
+
+/**
+ * Fold one settled host read into the view, unless a choice has superseded it.
+ *
+ * Dropping the superseded read is what keeps a settled choice on screen: the tier in it is the
+ * one the choice replaced, so publishing it would show the setting reverting on its own until the
+ * next poll corrected it.
+ * @param view - the view the read settles into.
+ * @param read - the generation the read was started under.
+ * @param state - the state the read returned.
+ * @returns the updated view, or the same view when the read is stale.
+ */
+export function settleRead(view: SpeedView, read: number, state: SpeedSelectState): SpeedView {
+  return read === view.generation ? { ...view, state } : view
+}
+
+/**
+ * Fold one settled choice into the view, superseding every read started before it.
+ *
+ * The choice is stated directly rather than re-read: a successful write is the authoritative
+ * answer, and a fresh read would take another round trip to say the same thing.
+ * @param view - the view the choice settles into.
+ * @param tier - the tier the write accepted.
+ * @returns the updated view at the next generation.
+ */
+export function settleChoice(view: SpeedView, tier: SpeedTier): SpeedView {
+  return { generation: view.generation + 1, state: { visible: true, tier } }
 }
 
 /**
@@ -66,6 +113,32 @@ export type SpeedSelectProps = PropsRuntime<'conversation.input.right'>
   & Partial<PropsLocale<'settings.subscriptions'>>
 
 /**
+ * Providers whose sessions can select the fast tier: the three whose routes carry a per-model
+ * fast capability. The list is the visibility gate's provider half, and the model half is the
+ * node half's own fast-capable listing.
+ */
+const FAST_TIER_PROVIDERS: ReadonlySet<string> = new Set(['codex', 'cursor', 'claude'])
+
+/**
+ * Whether the Speed control belongs on screen for the session's current model.
+ *
+ * The gate has two halves: the model's route must be one whose requests carry a fast tier, and
+ * the node half must list that exact model id as fast-capable. A session with no model selection
+ * has nothing to switch.
+ * @param current - the session's effective model selection, or null when it has none.
+ * @param fastModels - the node half's fast-capable model ids.
+ * @returns true when the control should render.
+ */
+export function speedControlVisible(
+  current: { provider: string; model: string } | null,
+  fastModels: readonly string[],
+): boolean {
+  return current !== null
+    && FAST_TIER_PROVIDERS.has(current.provider)
+    && fastModels.includes(current.model)
+}
+
+/**
  * The `loadSpeed` half of the inject face: the plugin's own speed state plus
  * the host's current model selection (the visibility gate). A model-RPC
  * failure throws rather than answering "hidden" — the caller keeps its last
@@ -88,10 +161,7 @@ export function createSpeedLoader(
     const directories = models()
     if (directories === undefined) return { visible: false, tier: state.tier }
     const { current } = await directories.directoryFor(sessionId).load()
-    const visible = current !== null
-      && (current.provider === 'codex' || current.provider === 'cursor')
-      && state.fastModels.includes(current.model)
-    return { visible, tier: state.tier }
+    return { visible: speedControlVisible(current, state.fastModels), tier: state.tier }
   }
 }
 
@@ -146,11 +216,12 @@ const POLL_INTERVAL_MS = 3000
  * the current tier). The host pushes nothing on a model switch, so the
  * control re-reads on a slow poll with a single-flight guard; a failed read
  * keeps the last known state, so a transient RPC failure can never lock the
- * toggle away (the earlier mount-only load had no recovery path).
+ * toggle away. Every read is stamped with the choice generation it started
+ * under, and {@link settleRead} drops one that a later choice superseded.
  */
 export function SpeedSelect({ loadSpeed, setSpeed, t }: SpeedSelectProps) {
   const translate = t ?? fallbackTranslate
-  const [state, setState] = useState<SpeedSelectState | null>(null)
+  const [view, setView] = useState<SpeedView>(INITIAL_SPEED_VIEW)
   const [open, setOpen] = useState(false)
   const [busy, setBusy] = useState(false)
   const [failed, setFailed] = useState(false)
@@ -160,6 +231,10 @@ export function SpeedSelect({ loadSpeed, setSpeed, t }: SpeedSelectProps) {
   // neither resets the interval nor multiplies in-flight loads.
   const loadRef = useRef(loadSpeed)
   loadRef.current = loadSpeed
+  // The generation a read is stamped with. Mirrored from the view because the effect below mounts
+  // once and stamps a read when it starts, not when it settles.
+  const generationRef = useRef(view.generation)
+  generationRef.current = view.generation
 
   useEffect(() => {
     if (loadRef.current === undefined) return
@@ -169,8 +244,9 @@ export function SpeedSelect({ loadSpeed, setSpeed, t }: SpeedSelectProps) {
       const load = loadRef.current
       if (load === undefined || inflight) return
       inflight = true
+      const read = generationRef.current
       void load().then(
-        (loaded) => { if (!cancelled) setState(loaded) },
+        (loaded) => { if (!cancelled) setView(current => settleRead(current, read, loaded)) },
         () => { /* keep the last known state; the next tick retries */ },
       ).finally(() => { inflight = false })
     }
@@ -191,6 +267,7 @@ export function SpeedSelect({ loadSpeed, setSpeed, t }: SpeedSelectProps) {
     return () => { document.removeEventListener('mousedown', closeOutside) }
   }, [open])
 
+  const state = view.state
   if (loadSpeed === undefined || setSpeed === undefined || state === null || !state.visible) {
     return null
   }
@@ -206,7 +283,7 @@ export function SpeedSelect({ loadSpeed, setSpeed, t }: SpeedSelectProps) {
     void setSpeed(tier).then((ok) => {
       setBusy(false)
       if (ok) {
-        setState({ visible: true, tier })
+        setView(current => settleChoice(current, tier))
         setOpen(false)
         return
       }
@@ -221,7 +298,11 @@ export function SpeedSelect({ loadSpeed, setSpeed, t }: SpeedSelectProps) {
     setOpen(true)
     const load = loadRef.current
     if (load === undefined) return
-    void load().then(setState, () => { /* keep showing the last good state */ })
+    const read = generationRef.current
+    void load().then(
+      loaded => { setView(current => settleRead(current, read, loaded)) },
+      () => { /* keep showing the last good state */ },
+    )
   }
 
   const tierName = (tier: SpeedTier): string =>

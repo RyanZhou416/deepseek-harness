@@ -554,6 +554,59 @@ test('a machine-local harness section is not sent', async () => {
   assert.equal(system.filter(block => block.text.includes('You are a')).length, 2, 'the client block plus the deployment line')
 })
 
+/**
+ * The section a `dsh web` session registers for its own GUI, as the live request under
+ * `C:\Project\deepseek-harness-data\sessions` carried it.
+ */
+const WEB_SURFACE_SECTION = 'You are interacting with the user through the DeepSeek Harness Web GUI at http://127.0.0.1:3080. '
+  + 'When the user refers to "this page", "this GUI", or "this app" without naming another target, they mean this GUI. '
+  + 'The browser provides no implicit DOM, route, or screenshot context. '
+  + 'The client-plugin HMR receiver is active, but client-plugin changes reload without a refresh only while `pnpm run dev:web` '
+  + 'is also running from this same checkout to rebuild their bundles; verify that watcher before promising automatic updates. '
+  + 'Every other change — the apps/web shell and plain packages — requires rebuilding the affected Web artifacts and verifying this existing URL after a page refresh. '
+  + 'Starting another server does not update this GUI. '
+  + 'The apps/web Vite entry builds the shell but is not a standalone application because only dsh web injects window.__DSH_BOOT__. '
+  + 'Do not start a replacement server unless the user asks; if one is needed, use a managed background job and verify its exact URL.'
+
+test('a Web surface section does not name this harness to the client', async () => {
+  // The live request's own section set: the harness's identity and source lines, the Web
+  // surface line for the GUI the session was created through, and the deployment persona the
+  // `web` profile supplies. Only the client's own identity belongs in a client-shaped request.
+  const built = await buildClaudeWireRequest(
+    options({
+      systemSections: [
+        { name: 'harness:identity', text: 'You are an AI agent powered by DeepSeek Harness.', stable: true },
+        { name: 'tool:read', text: 'Use the read tool — not shell commands like cat — to inspect text files. Results include line numbers. Use offset and limit to continue reading large files.', stable: true },
+        { name: 'tool:pwsh', text: 'Non-zero exits are reported as `[exit code: N]` markers; investigate failures before moving on.', stable: true },
+        { name: 'deployment:persona-prefix', text: 'You are a coding agent powered by the claude-opus-5-5 model.', stable: false },
+        { name: 'agent-teams:usage', text: 'AgentTeams (Agent Teams) provides multi-agent team collaboration. Apply these rules when the user requests it (including /agent-teams) or when continuing an existing team.', stable: false },
+        { name: 'harness:source', text: 'The DeepSeek Harness implementation checkout is at C:\\Project\\deepseek-harness\\. The checkout location and current working directory are separate values and may differ; never infer the working directory from this path.', stable: false },
+        { name: 'app:web-surface', text: WEB_SURFACE_SECTION, stable: false },
+        { name: 'deployment:persona-suffix', text: 'Your working directory is D:\\Ryan416_DESKTOP-LETT6RL_TheSunNeverSets.', stable: false },
+      ],
+    }),
+    session(), history(), 32_000, undefined, undefined, wireSessionId('sess-web-surface'), ACCOUNT,
+  )
+  const system = parseBody(built).system as { text: string }[]
+  const systemText = system.map(block => block.text).join('\n\n')
+
+  // No passage identifies the harness: not the product, its GUI, its loopback endpoint, its
+  // CLI surface, or the checkout path.
+  assert.equal(systemText.includes('DeepSeek Harness'), false, 'no harness product name')
+  assert.equal(systemText.includes('Web GUI'), false, 'no harness GUI')
+  assert.equal(systemText.includes('127.0.0.1'), false, 'no loopback endpoint')
+  assert.equal(systemText.includes('dsh web'), false, 'no harness CLI surface')
+  assert.equal(systemText.includes('C:\\Project\\deepseek-harness'), false, 'no checkout path')
+
+  // The instructions and the real environment facts the model works from survive.
+  assert.match(systemText, /Use the read tool/, 'the read-tool guidance is carried')
+  assert.match(systemText, /Non-zero exits are reported/, 'the shell guidance is carried')
+  assert.match(systemText, /AgentTeams \(Agent Teams\) provides/, 'the team guidance is carried')
+  assert.match(systemText, /You are a coding agent powered by the claude-opus-5-5 model\./, 'the deployment persona is carried')
+  assert.match(systemText, /Your working directory is D:\\Ryan416_DESKTOP-LETT6RL_TheSunNeverSets\./, 'the workspace is carried')
+  assert.match(systemText, /authoritative set available to you/, 'the route own identity line is carried')
+})
+
 test('a loop-shaped request carries the prompt once, with no harness identity or local path', async () => {
   // The loop renders the prompt, hands it over as its sections, and leaves the same
   // rendered text as the derived history's leading system message. The sections are the
