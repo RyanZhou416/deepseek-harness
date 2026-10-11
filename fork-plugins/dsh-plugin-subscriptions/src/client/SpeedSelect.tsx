@@ -164,7 +164,7 @@ export function createSpeedLoader(
     const directories = models()
     if (directories === undefined) return { visible: false, tier: 'standard' }
     const { current } = await directories.directoryFor(sessionId).load()
-    if (current === null) return { visible: false, tier: 'standard' }
+    if (current === null || !FAST_TIER_PROVIDERS.has(current.provider)) return { visible: false, tier: 'standard' }
     const state = await callSubscriptionsAuth<SpeedState>(rpc, 'speed', {
       provider: current.provider,
       model: current.model,
@@ -184,7 +184,7 @@ export function createSpeedSetter(
       const directories = models()
       if (directories === undefined) return false
       const { current } = await directories.directoryFor(sessionId).load()
-      if (current === null) return false
+      if (current === null || !FAST_TIER_PROVIDERS.has(current.provider)) return false
       await callSubscriptionsAuth(rpc, 'setSpeed', { provider: current.provider, model: current.model, tier })
       return true
     } catch {

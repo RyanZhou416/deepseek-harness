@@ -1,8 +1,8 @@
 /**
  * The composer Speed control's two halves. The client half decides visibility from the session's
  * current provider and the node half's fast-capable listing, and addresses the stored tier by that
- * model; the node half builds the listing from every route whose models carry a fast tier and
- * answers the tier stored for the addressed model. Both are asserted here, so a control that
+ * model; the node half lists fast-capable models from the addressed provider only and answers
+ * the tier stored for the addressed model. Both are asserted here, so a control that
  * would switch nothing stays hidden and a route that can switch stays reachable.
  */
 
@@ -27,6 +27,9 @@ import type { FakeRpcHandler } from './fake-connection.js'
 import { saveAccountSession } from '../src/auth/store.js'
 import type { ClaudeSession } from '../src/auth/store.js'
 import type { SpeedState, SpeedTier } from '../src/client/SpeedSelect.js'
+import { CodexAdapter } from '../src/providers/codex.js'
+import { CursorAdapter } from '../src/providers/cursor.js'
+import { ClaudeAdapter } from '../src/providers/claude.js'
 
 const plugin = await import('../src/index.js')
 
@@ -104,6 +107,35 @@ test('the speed endpoint offers the claude models the pinned catalogue marks fas
   assert.equal(speedControlVisible({ provider: 'claude', model: 'claude-fable-5' }, state.fastModels), false)
 })
 
+test('reading one provider model\'s speed does not enumerate unrelated providers', async (t) => {
+  const codex = t.mock.method(CodexAdapter.prototype, 'fastCapableModels', async () => ['codex-fast'])
+  const cursor = t.mock.method(CursorAdapter.prototype, 'fastCapableModels', async () => ['cursor-fast'])
+  const claude = t.mock.method(ClaudeAdapter.prototype, 'fastCapableModels', async () => ['claude-opus-5'])
+  const ctx = new Context()
+  t.after(() => ctx.fiber.dispose())
+  ctx.provide('llm', { registerAdapter: () => Object.assign(() => {}, { replace: () => {} }) })
+  const fake = createFakeConnection()
+  const ready = Promise.withResolvers<void>()
+  ctx.provide('connection', { fetch: { register: (route: Parameters<typeof fake.connection.fetch.register>[0]) => {
+    const dispose = fake.connection.fetch.register(route)
+    if (route.path === '/api/subscriptions-auth.speed') ready.resolve()
+    return dispose
+  } } })
+  ctx.plugin(plugin, { providers: ['codex', 'cursor', 'claude'], pool: { enabled: false } })
+  await ready.promise
+  for (const [provider, model] of [['claude', 'claude-opus-5'], ['codex', 'codex-fast'], ['cursor', 'cursor-fast']]) {
+    codex.mock.resetCalls()
+    cursor.mock.resetCalls()
+    claude.mock.resetCalls()
+    const result = await fake.handler('speed', { provider, model }, new AbortController().signal)
+    assert.equal(result.ok, true)
+    assert.equal(codex.mock.callCount(), Number(provider === 'codex'), `${provider}: Codex discovery`)
+    assert.equal(cursor.mock.callCount(), Number(provider === 'cursor'), `${provider}: Cursor discovery`)
+    assert.equal(claude.mock.callCount(), Number(provider === 'claude'), `${provider}: Claude lookup`)
+    if (result.ok) assert.deepEqual((result.value as SpeedState).fastModels, [model])
+  }
+})
+
 /** One session's model directory, as the host service answers it. */
 function directories(current: { provider: string; model: string } | null): ModelDirectoriesLike {
   return { directoryFor: () => ({ load: async () => ({ current }) }) }
@@ -154,6 +186,17 @@ test('the composer control hides and writes nothing without a current model', as
   assert.deepEqual(await createSpeedLoader(rpc, () => undefined, 'session-1')(), { visible: false, tier: 'standard' })
   assert.equal(await createSpeedSetter(rpc, () => undefined, 'session-1')('fast'), false)
   assert.deepEqual(calls, [], 'no endpoint is called without a model to address')
+})
+
+test('providers without a speed control make no speed RPC calls', async () => {
+  for (const provider of ['deepseek-official', 'grok', 'copilot', 'antigravity']) {
+    const { rpc, calls, available } = speedRpc({ provider, model: 'm' }, 'fast', ['m'])
+    const state = await createSpeedLoader(rpc, available, 'session-1')()
+    assert.deepEqual(calls, [], `${provider}: no read`)
+    assert.deepEqual(state, { visible: false, tier: 'standard' })
+    assert.equal(await createSpeedSetter(rpc, available, 'session-1')('fast'), false)
+    assert.deepEqual(calls, [], `${provider}: no write`)
+  }
 })
 
 test('a failed speed write settles as a failed choice rather than rejecting', async () => {

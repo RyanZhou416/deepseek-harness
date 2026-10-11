@@ -389,10 +389,27 @@ test('a tier overriding an account-pool id wins with a single warning', async ()
     { codex: new FakeAdapter(() => serveOk()), claude: new FakeAdapter(() => serveOk()) },
     { tiers: { m: [{ provider: 'codex', account: 'a1', model: 'other' }] } },
   )
+  // The override is a routing fact: it is stated when the snapshot that applies
+  // it is assembled, while listing the extra rows reads configuration alone.
+  await pool.owns('codex', 'm')
   const extras = await pool.modelsForProvider('codex')
   assert.deepEqual(extras.map(model => model.id), ['m'])
   await pool.modelsForProvider('codex')
   assert.equal(warnings.filter(message => message.includes('overrides')).length, 1)
+})
+
+test('listing extra rows reads configuration only', async () => {
+  let reads = 0
+  const familiesFn = async (): Promise<Map<string, PoolDefinition>> => {
+    reads += 1
+    return freshAccounts()
+  }
+  const { pool } = makePool(
+    { codex: new FakeAdapter(() => serveOk()) },
+    { familiesFn, tiers: { smart: [{ provider: 'codex', account: 'a1', model: 'other' }] } },
+  )
+  assert.deepEqual((await pool.modelsForProvider('codex')).map(model => model.id), ['smart'])
+  assert.equal(reads, 0, 'the extra-row read assembled the account pools')
 })
 
 test('invalidate drops the pools snapshot so the next read reassembles', async () => {
@@ -891,7 +908,6 @@ test('resolveModel intersects member capabilities conservatively', async () => {
         { provider: 'codex', account: 'a1', model: 'big' },
         { provider: 'claude', account: 'a1', model: 'small' },
       ],
-      extra: true,
     }],
   ])
   const { pool } = makePool({ codex: first, claude: second }, { families: family })

@@ -27,11 +27,6 @@ export interface PoolDefinition {
   name?: string
   /** Description of the catalog entry, when the pool borrowed one. */
   description?: string
-  /**
-   * When true, the pool is an extra picker entry (a configured tier). Account
-   * pools leave this unset so they reuse the provider's existing catalog row.
-   */
-  extra?: boolean
 }
 
 /** One account's catalog as seen through that account's credentials. */

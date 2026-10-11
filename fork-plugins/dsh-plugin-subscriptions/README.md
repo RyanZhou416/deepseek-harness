@@ -26,7 +26,7 @@ Models that advertise reasoning levels get an **Effort** selector in the same me
 
 ![Reasoning effort selector](https://raw.githubusercontent.com/V1ki/dsh-plugin-subscriptions/main/docs/images/model-effort.png)
 
-Models whose catalog advertises a fast tier get a **Speed** row inside the composer's model menu, under the model and reasoning-level rows — Standard or Fast. Fast is each route's own priority signal: Codex sends `service_tier: priority`, Cursor its catalog `fast` parameter, and Claude the Claude Code catalog's `speed: fast` field together with the beta that declares it. The choice is stored per model beside its default reasoning effort, so it survives a new session and a restart, and the model list in **Manage** offers the same Standard/Fast picker next to the effort selector. The `/fast` slash command offers the same choice as a popup; it errors with an explanation when the current model has no fast tier.
+Models whose catalog advertises a fast tier get a **Speed** row inside the composer's model menu, under the model and reasoning-level rows — Standard or Fast. Fast is each route's own priority signal: Codex sends `service_tier: priority`, Cursor its catalog `fast` parameter, and Claude the Claude Code catalog's `speed: fast` field together with the beta that declares it. The choice is stored per model beside its default reasoning effort, so it survives a new session and a restart, and the model list in **Manage** offers the same Standard/Fast picker next to the effort selector. The `/fast` slash command offers the same choice as a popup; it errors with an explanation when the current model has no fast tier. Reading the speed choice consults only the selected provider's catalog, so an unrelated provider cannot delay this control.
 
 ![Speed row inside the model menu, with its Standard/Fast options open](https://raw.githubusercontent.com/V1ki/dsh-plugin-subscriptions/main/docs/images/speed-toggle.png)
 
@@ -84,7 +84,7 @@ Image generation and editing share same-provider account scheduling: try the def
 
 ### DSH compatibility
 
-This fork artifact, `0.9.4-dsh017rc1.21`, is pinned to DSH `0.1.7-rc.1` and Cordis `4.0.4`. Its V4 tool-role translation, pinned Claude Code 2.1.288 wire, and UI were built and tested against that exact cohort; do not install it on an older DSH profile. The upstream public `0.9.4` package declares a broader peer range, which does not apply to this private artifact.
+This fork artifact, `0.9.4-dsh017rc1.22`, is pinned to DSH `0.1.7-rc.1` and Cordis `4.0.4`. Its V4 tool-role translation, pinned Claude Code 2.1.288 wire, and UI were built and tested against that exact cohort; do not install it on an older DSH profile. The upstream public `0.9.4` package declares a broader peer range, which does not apply to this private artifact.
 
 ### Managing accounts and pool models
 
@@ -92,7 +92,7 @@ Open **Settings → Subscriptions → provider → Manage** to edit account alia
 
 ### Refreshing model lists
 
-In **Settings → Subscriptions → provider → Edit model list**, use **Refresh** to bypass the five-minute catalog cache and refresh the conversation model picker too. This is separate from refreshing subscription usage. If `models.<provider>` is explicitly configured with a non-empty list, that list still overrides discovery.
+In **Settings → Subscriptions → provider → Edit model list**, use **Refresh** to bypass the five-minute catalog cache and refresh the conversation model picker too. This is separate from refreshing subscription usage. If `models.<provider>` is explicitly configured with a non-empty list, that list still overrides discovery. Selecting a model reuses its account's last-known capabilities while stale data refreshes; sending a request still validates current account membership. Accounts without a cached catalog wait for their first discovery.
 
 Codex catalog visibility depends on the `client_version` request parameter. By default the plugin reads the stable version from the official npm `@openai/codex` package's public metadata (no CLI installation or subscription credentials sent to npm). Successful lookups are cached in memory for six hours; failures retry after five minutes and retain the last successful version, or the verified `0.153.4` fallback on first use. The lookup has a 5-second deadline, shares in-flight work across accounts, and ignores prerelease or regressed versions. On load the plugin also raises Node's Happy Eyeballs per-address connect attempt timeout to at least 1.5 seconds (never lowering a larger host value), because the 250ms default drops every connection on links where one TCP handshake takes longer than that. Manual model-list refresh also rechecks the version. An explicit plugin configuration field, `codexClientVersion: '0.153.4'`, takes precedence and disables automatic lookup; restart DSH after changing it. Model availability remains account-dependent; see [verification notes](docs/codex-catalog-refresh.md).
 

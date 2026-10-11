@@ -13,6 +13,7 @@ import { tmpdir } from 'node:os'
 import { basename, delimiter, dirname, join, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { expect, it } from 'vitest'
+import ts from 'typescript'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const repository = resolve(here, '..')
@@ -77,6 +78,31 @@ function sourceVersion(directory: string): string {
   if (typeof version !== 'string') throw new Error(`fork-plugins/${directory} declares no version`)
   return version
 }
+
+/** Read the model-menu row declaration without depending on formatting or comments. */
+function modelMenuRowType(path: string): string | undefined {
+  const source = ts.createSourceFile(path, readFileSync(path, 'utf8'), ts.ScriptTarget.Latest, true)
+  let found: ts.TypeNode | undefined
+  const visit = (node: ts.Node): void => {
+    if (ts.isInterfaceDeclaration(node) && node.name.text === 'SlotMap') {
+      for (const member of node.members) {
+        if (ts.isPropertySignature(member) && ts.isStringLiteral(member.name)
+          && member.name.text === 'conversation.input.model.row') found = member.type
+      }
+    }
+    ts.forEachChild(node, visit)
+  }
+  visit(source)
+  return found === undefined ? undefined
+    : ts.createPrinter({ removeComments: true }).printNode(ts.EmitHint.Unspecified, found, source)
+}
+
+it('keeps the standalone subscriptions menu-row type aligned with the owning fork contract', () => {
+  const owner = modelMenuRowType(resolve(repository, 'packages/client/ui-conversation/src/client/contract/slots.ts'))
+  const mirror = modelMenuRowType(resolve(repository, 'fork-plugins/dsh-plugin-subscriptions/src/client/index.ts'))
+  expect(owner).toBeDefined()
+  expect(mirror).toBe(owner)
+})
 
 /** Run the setup helper and retain its diagnostics for assertions. */
 function run(...args: string[]) {

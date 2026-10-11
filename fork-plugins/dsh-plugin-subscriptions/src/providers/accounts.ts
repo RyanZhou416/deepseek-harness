@@ -42,6 +42,21 @@ export interface AccountAwareAdapter extends LlmAdapter {
    */
   listOwnModels(provider: string, account?: string, signal?: AbortSignal): Promise<readonly LlmModelInfo[]>
   /**
+   * The provider's own catalog for one account for an advisory read: known rows
+   * answer from memory while a refresh runs in the background, and only a
+   * catalog with nothing known awaits its fetch. A fetch that cannot answer
+   * degrades to the static rows, and a login that vanished during it lists
+   * nothing, so `undefined` reports cancellation alone — the caller sits that
+   * account out instead of starting a second attempt. Absent on an adapter with
+   * no catalog of its own, where callers fall back to {@link listOwnModels},
+   * which stays the read for an explicit enumeration.
+   */
+  resolveOwnCatalog?(
+    provider: string,
+    account: string,
+    signal?: AbortSignal,
+  ): Promise<readonly LlmModelInfo[] | undefined>
+  /**
    * Capability resolution of the provider's OWN models, bypassing the pool
    * delegation. The pool resolves its members through this — an account pool
    * reuses the catalog wire id (e.g. `gpt-5.4`), so resolveModel would

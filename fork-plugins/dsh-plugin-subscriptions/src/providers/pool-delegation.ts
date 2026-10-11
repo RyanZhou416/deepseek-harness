@@ -49,6 +49,18 @@ export abstract class PoolBackedAdapter extends LlmAdapter {
     return this.catalogs.list(provider, account, signal)
   }
 
+  /**
+   * One account's own catalog for an advisory read, without blocking on a stale
+   * refresh. See {@link ProviderCatalog.resolve}.
+   */
+  async resolveOwnCatalog(
+    provider: string,
+    account: string,
+    signal?: AbortSignal,
+  ): Promise<readonly LlmModelInfo[] | undefined> {
+    return this.catalogs.resolve(provider, account, signal)
+  }
+
   override async resolveModel(provider: string, model: string): Promise<LlmResolvedModelInfo> {
     const pool = this.poolHost.pool?.()
     if (pool !== undefined && await pool.owns(provider as ProviderId, model)) {

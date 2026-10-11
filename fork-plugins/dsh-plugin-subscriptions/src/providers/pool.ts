@@ -49,8 +49,14 @@ export interface PoolAdapterOptions {
   defaultAccount: (provider: ProviderId) => Promise<string | undefined>
   /** Resolve legacy account aliases before pool deduplication and cache identity. */
   resolveAccount?: (provider: ProviderId, account: string) => Promise<string>
-  /** Account pools (auto-aggregated plus config overrides), resolved lazily. */
-  families: () => Promise<Map<string, PoolDefinition>>
+  /**
+   * Account pools (auto-aggregated plus config overrides). The provider hint
+   * scopes the sweep: a family source that lists accounts per provider must not
+   * enumerate another route's accounts for a read that only asks about one, so
+   * resolving a model never waits on an unrelated provider's catalog. A source
+   * that is already complete ignores it.
+   */
+  families: (provider?: ProviderId) => Promise<Map<string, PoolDefinition>>
   /** User-configured extra picker entries (heterogeneous fallbacks), by pool id. */
   tiers: Record<string, PoolMemberRef[]>
   /** Optional quota recovery for a depleted sticky account before choosing a replacement. */
@@ -155,24 +161,26 @@ export class PoolAdapter extends LlmAdapter {
   /** Messages already warned about — configuration diagnostics repeat every request otherwise. */
   private readonly warned = new Set<string>()
   /**
-   * Short-lived pools snapshot. `owns()` runs on every resolveModel — the
-   * model picker issues one per entry — and pool assembly touches every
-   * provider's catalog and account store, so recompute at most this often.
-   * Auth changes bump {@link generation} so a stale snapshot cannot land.
+   * Short-lived pools snapshots, one per provider route. `owns()` runs on every
+   * resolveModel — the model picker issues one per entry — and assembly reads
+   * every account of the provider it names, so recompute at most this often.
+   * Kept per provider because every read path already knows its route: a codex
+   * read must not pay for grok's discovery. Auth changes bump {@link generation}
+   * so a stale snapshot cannot land.
    */
-  private poolsCache: { at: number; pools: Map<string, PoolDefinition> } | undefined
-  private poolsInflight: Promise<Map<string, PoolDefinition>> | undefined
+  private readonly poolsCache = new Map<ProviderId, { at: number; pools: Map<string, PoolDefinition> }>()
+  private readonly poolsInflight = new Map<ProviderId, Promise<Map<string, PoolDefinition>>>()
   private generation = 0
 
   constructor(private readonly options: PoolAdapterOptions) {
     super()
   }
 
-  /** Drop the pools snapshot so the next read reflects the current accounts. */
+  /** Drop the pools snapshots so the next read reflects the current accounts. */
   invalidate(): void {
     this.generation += 1
-    this.poolsCache = undefined
-    this.poolsInflight = undefined
+    this.poolsCache.clear()
+    this.poolsInflight.clear()
   }
 
   /** Warn once per distinct message (pools() runs on every request). */
@@ -193,58 +201,66 @@ export class PoolAdapter extends LlmAdapter {
     return result
   }
 
-  /** Account pools (auto-aggregated plus config overrides) with usable members. */
-  private async familyPools(): Promise<Map<string, PoolDefinition>> {
-    return this.usable(new Map<string, PoolDefinition>(await this.options.families()))
+  /** One provider's account pools (auto-aggregated plus config overrides) with usable members. */
+  private async familyPools(provider: ProviderId): Promise<Map<string, PoolDefinition>> {
+    return this.usable(new Map<string, PoolDefinition>(await this.options.families(provider)))
   }
 
-  /** All pools (account pools merged with extra tiers) with usable members. */
-  private async pools(): Promise<Map<string, PoolDefinition>> {
-    const cached = this.poolsCache
+  /** The pools one provider's route resolves through, assembled at most once per TTL. */
+  private async pools(provider: ProviderId): Promise<Map<string, PoolDefinition>> {
+    const cached = this.poolsCache.get(provider)
     if (cached !== undefined && Date.now() - cached.at < POOLS_CACHE_TTL_MS) return cached.pools
     const gen = this.generation
-    this.poolsInflight ??= this.assemblePools()
-      .then((pools) => {
-        if (this.generation === gen) this.poolsCache = { at: Date.now(), pools }
-        return pools
-      })
-      .finally(() => {
-        this.poolsInflight = undefined
-      })
-    return this.poolsInflight
+    let inflight = this.poolsInflight.get(provider)
+    if (inflight === undefined) {
+      const created = this.assemblePools(provider)
+        .then((pools) => {
+          if (this.generation === gen) this.poolsCache.set(provider, { at: Date.now(), pools })
+          return pools
+        })
+        .finally(() => {
+          if (this.poolsInflight.get(provider) === created) this.poolsInflight.delete(provider)
+        })
+      this.poolsInflight.set(provider, created)
+      inflight = created
+    }
+    return inflight
   }
 
-  /** Recompute the pools snapshot (account pools merged with extra tiers). */
-  private async assemblePools(): Promise<Map<string, PoolDefinition>> {
-    const pools = await this.familyPools()
+  /** Recompute one provider's pools snapshot (its account pools merged with its own tiers). */
+  private async assemblePools(provider: ProviderId): Promise<Map<string, PoolDefinition>> {
+    const pools = await this.familyPools(provider)
     for (const [id, members] of Object.entries(this.options.tiers)) {
       if (members.length === 0) continue
       const owner = members[0].provider
+      // A tier is keyed under its first member's provider, so it belongs to that
+      // provider's snapshot only; its own members may still span providers.
+      if (owner !== provider) continue
       const key = poolKey(owner, id)
       if (pools.has(key)) this.warnOnce(`tier pool "${id}" overrides the account pool of the same id under ${owner}`)
-      pools.set(key, { members, extra: true })
+      pools.set(key, { members })
     }
     return this.usable(pools)
   }
 
   /**
-   * Extra picker rows one provider lists (configured tiers). Account pools
-   * reuse the catalog entry of the same wire id, so they are not listed
-   * again — the picker stays one row per model in ChatGPT / Claude / ….
+   * Extra picker rows one provider lists (configured tiers). This is a
+   * configuration read: an account pool reuses the catalog entry of its own wire
+   * id, so it contributes no row here, and answering must not assemble the
+   * account pools or await any provider's discovery. The row a tier lists is
+   * keyed under its first member's provider and named by its pool id, exactly as
+   * the assembled snapshot names it.
+   * @param provider - the provider route whose tiers are listed.
+   * @returns the provider's configured extra rows, in configuration order.
    */
   async modelsForProvider(provider: ProviderId): Promise<LlmModelInfo[]> {
-    const pools = await this.pools()
     const models: LlmModelInfo[] = []
-    for (const [key, definition] of pools) {
-      if (definition.extra !== true) continue
-      if (!key.startsWith(`${provider}/`)) continue
-      const id = key.slice(provider.length + 1)
-      models.push({
-        provider,
-        id,
-        name: definition.name ?? id,
-        ...definition.description === undefined ? {} : { description: definition.description },
-      })
+    for (const [id, members] of Object.entries(this.options.tiers)) {
+      if (members.length === 0 || members[0].provider !== provider) continue
+      // The assembled snapshot drops a pool whose members all lack a registered
+      // adapter; a tier row obeys the same rule.
+      if (members.every(member => this.options.adapters[member.provider] === undefined)) continue
+      models.push({ provider, id, name: id })
     }
     return models
   }
@@ -254,7 +270,7 @@ export class PoolAdapter extends LlmAdapter {
    * fail over, one account is pinned, or a configured tier).
    */
   async owns(provider: ProviderId, model: string): Promise<boolean> {
-    return (await this.pools()).has(poolKey(provider, model))
+    return (await this.pools(provider)).has(poolKey(provider, model))
   }
 
   /**
@@ -285,7 +301,7 @@ export class PoolAdapter extends LlmAdapter {
    * metadata is account-specific, so every distinct member is resolved.
    */
   override async resolveModel(provider: string, model: string): Promise<LlmResolvedModelInfo> {
-    const definition = (await this.pools()).get(poolKey(provider, model))
+    const definition = (await this.pools(provider as ProviderId)).get(poolKey(provider, model))
     if (definition === undefined) throw new LlmError(`unknown pool model "${model}"`, 'NO_ADAPTER')
     const resolved: LlmResolvedModelInfo[] = []
     let lastFailure: unknown
@@ -329,7 +345,7 @@ export class PoolAdapter extends LlmAdapter {
 
   async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
     const identity = poolKey(options.provider, options.model)
-    const definition = (await this.pools()).get(identity)
+    const definition = (await this.pools(options.provider as ProviderId)).get(identity)
     if (definition === undefined) throw new LlmError(`unknown pool model "${options.model}"`, 'NO_ADAPTER')
     const members = await this.concrete(definition.members)
     // Priority mode reads no usage, except for Claude: its floors are a usability rule rather

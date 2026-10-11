@@ -78,10 +78,10 @@ The low-overhead deployment values are `maxRequestSteps: 300`, `maxKeptTurns: 60
 ## Subscriptions
 
 - Source: `fork-plugins/dsh-plugin-subscriptions`
-- Current private version: `0.9.4-dsh017rc1.21`
+- Current private version: `0.9.4-dsh017rc1.22`
 - Upstream base: `V1ki/dsh-plugin-subscriptions v0.9.4`
 - Private host target: `dsh-v0.1.7-rc.1`
-- Distribution artifact: `fork-plugins/releases/dsh-plugin-subscriptions-0.9.4-dsh017rc1.21.tgz`
-- Artifact SHA256: `9A9DDB9B253CE33B1F657EBD8F13FA8A02BA0379D47203A7E6DCCAA4B9090D4D`
+- Distribution artifact: `fork-plugins/releases/dsh-plugin-subscriptions-0.9.4-dsh017rc1.22.tgz`
+- Artifact SHA256: `2CB1A08CCCAE8B3C5EA3E129ACEC0FDDE7B9DCE2A0B7D816B5C4214DC217FDC8`
 
 The private build keeps upstream multi-account providers, usage UI, Codex search, image/video tools, and credential format. Its RC.1 adaptation translates V4 tool-role messages without losing call identity or image results and pins the exact DSH dependency cohort; no Session or credential migration is introduced. Cursor login, usage, and local-SDK limits, ChatGPT reset-credit display, and the ChatGPT pool's 100 percent full mark are private behaviors. Reapply them from `fork-plugins/dsh-plugin-subscriptions/FORK_MAINTENANCE.md` after every upstream import.

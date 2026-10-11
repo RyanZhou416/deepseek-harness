@@ -63,7 +63,7 @@ export type { SpeedTier }
 export interface SpeedState {
   /** The stored tier for the requested model (default `standard`). */
   tier: SpeedTier
-  /** Model ids whose route advertises a fast tier, across every provider that offers one. */
+  /** Fast-capable ids for the requested provider; Codex includes its independent account rows. */
   fastModels: string[]
 }
 

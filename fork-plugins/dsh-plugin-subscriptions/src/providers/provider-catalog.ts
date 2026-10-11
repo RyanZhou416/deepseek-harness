@@ -129,6 +129,36 @@ export class ProviderCatalog {
   }
 
   /**
+   * One account's own rows for an advisory read: a catalog that is known but
+   * stale answers from memory and refreshes behind the caller, while a catalog
+   * with nothing known awaits its one fetch. A fetch that cannot answer degrades
+   * to the static rows exactly as {@link list} does, so one operation never buys
+   * a second attempt; `undefined` is cancellation alone, which the caller reads
+   * as "this account sits out".
+   * @param provider - the provider route the rows belong to.
+   * @param account - the account to read.
+   * @param signal - caller cancellation, forwarded to the fetch.
+   * @returns that account's rows, or `undefined` when the caller cancelled.
+   */
+  async resolve(
+    provider: string,
+    account: string,
+    signal?: AbortSignal,
+  ): Promise<readonly LlmModelInfo[] | undefined> {
+    if (!await this.host.tokens.hasSession(account)) return []
+    if (!this.host.discovery) return this.hooks.staticRows(provider)
+    const catalog = await this.cache(account)
+    const models = await catalog.resolve(() => this.hooks.fetchCatalog(account, signal))
+    if (models !== undefined) return models.map(model => this.hooks.row(provider, model))
+    if (signal?.aborted === true) return undefined
+    // The failed fetch may itself have proved the login is gone: a permanent
+    // refresh failure deletes the stored session, and a vanished credential
+    // lists nothing rather than a catalogue the account can no longer use.
+    if (!await this.host.tokens.hasSession(account)) return []
+    return this.hooks.staticRows(provider)
+  }
+
+  /**
    * The provider's own catalog: the union over every logged-in account, or one
    * account when named. Each account lookup is bounded and one failing account
    * sits out; a discovery failure warns and falls back to the static rows, a

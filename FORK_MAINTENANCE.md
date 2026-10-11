@@ -354,6 +354,14 @@ Gateway 每个 socket 只保留一枚待确认 Ping。未完成写入时，`buff
 
 **Focused verification.** `npx vitest run packages/client/ui-model-selection/tests/browser-plugin.client.spec.ts` covers the seat's `children` declaration; `npx vitest run packages/client/ui-model-selection/tests/model-select.client.spec.tsx` covers the contributed row's place in the root pane; `npx pnpm run gen-client-catalog --check` fails when the committed slot catalog is stale against the contract, and fails closed on a `children` entry that no `SlotMap` merge types.
 
+### Model catalog refresh coalescing
+
+`packages/client/ui-model-selection/src/client/catalog.ts` keeps the last complete catalog of the current Host generation published across a same-generation reload, so the composer model menu and the `/model` popup answer from it instead of waiting out a provider discovery the reload already started. Reloads never overlap: an invalidation arriving during one registers a single trailing reload that serves the newest generation, only the current generation publishes, and `resetGeneration()` still clears the superseded value first so no response from the previous Host reaches a reader. The retained catalog is published as `refreshing`, which keeps `ModelDirectory.syncInputs` waiting for its replacement instead of pairing it with a newer projection. An explicit `ModelDirectory.load()` loops until the published route names the live projection: a selection change therefore still waits for the catalog, a failed replacement is retried, and a read that cannot catch up rejects rather than handing the subscriptions Speed control's durable tier target the route the session left — only an unchanged route answers at once. The loop re-checks the directory's own lifecycle after every suspension (the shared catalog outlives the per-session directory), so a read whose session scope goes while it waits fails instead of re-checking a route a disposed directory can never publish. `ModelDirectoryResolver`'s constructor effect owns the catalog's teardown: `dispose()` bumps the generation, drops the queued trailing reload, rejects later reads, and starts nothing afterwards, so a read settling after the fiber goes publishes nothing and launches no follow-up.
+
+**Preservation rule.** Keep the retained value readable during a same-generation reload, the one-current-plus-one-trailing bound, newest-invalidation-wins, the reset clearing with its abandoned old-generation response, the explicit read's catch-up loop (lifecycle check after every suspension, retry on failure, reject rather than serve the replaced route), the catalog disposal owned by the resolver's effect, and the error/retry posture (a failed reload keeps the retained value and publishes `error`; the next explicit read starts a new one). Restoring an unconditional reload per forwarded `llm/adapters-updated` or `settings/document-updated` event reintroduces concurrent full-catalog rebuilds on every such event; returning a stale route from an explicit read reintroduces durable writes to the model the session just left; dropping the lifecycle check turns a disposed session's pending read into a loop that never suspends.
+
+**Focused verification.** `npx vitest run packages/client/ui-model-selection` covers the catalog, the seat and the popup behavior; the deferred cases in `tests/catalog.client.spec.ts` and `tests/browser-plugin.client.spec.ts` fail on the pre-change implementation (a warm reader blocks on the held reload, three invalidations issue four reads instead of two, an explicit read hands back the replaced route, a failed replacement is never retried, a disposal still starts a follow-up read, and a session scope disposed during a pending read re-enters without suspending). These are deterministic work counts, not browser timings.
+
 ### Isolated integrated validation
 
 `DSH_PERF_CAPTURE=1` 为合成 Web 续接场景保存同时段的 Node/浏览器 CPU profile、Chrome timeline 和源码映射（`tmp/runtime-profiles/`）。测量脚本预先定位控件并只检查尾部消息，避免全页可访问性查询污染剖面；普通无剖面基准与剖面归因结果分开。未来替换诊断时保留两侧录制、源码定位和对测试观察开销的检查，不能以单个 API 响应耗时代替卡顿归因。
@@ -464,7 +472,7 @@ Web profile 插入 `memory-watchdog.cjs`：250 ms 采样、60 s 日志、heap ra
 |---|---:|---|---|
 | `dshmarket` | — | Removed | 官方 Plugin Manager 接管安装、配置与运行时启停；profile 不恢复旧 package 或 bundle |
 | `@nanmicoder/dsh-agent-teams` | `0.1.20-dsh017rc1.3` | Installed, enabled | 真实 profile 使用仓内固定 artifact；停止 Host 后更新，禁止被 npm latest/next 直接覆盖 |
-| `dsh-plugin-subscriptions` | `0.9.4-dsh017rc1.20` | Installed; Windows Web enabled | 仓内固定 artifact；凭据文件原地保留，其他 profile 是否启用沿用显式插件配置。2026-10-11 核对的安装版本为 rc1.20（profile 依赖、安装目录 package.json 与解析到的 wire `0.7.2-dsh14` 三者一致）；rc1.21 已切包但未部署 |
+| `dsh-plugin-subscriptions` | `0.9.4-dsh017rc1.21` | Installed; Windows Web enabled | 仓内固定 artifact；凭据文件原地保留，其他 profile 是否启用沿用显式插件配置。2026-10-11 核对的安装版本为 rc1.21（profile 依赖、安装目录 package.json 与解析到的 wire `0.7.2-dsh14` 三者一致）；rc1.22 已切包但未部署 |
 | `@vlln/dsh-task-status` | Removed | Not installed | 已从依赖、bundle、patch、lockfile 和 `node_modules` 删除；profile 不得恢复 |
 | `dsh-context` | Windows: `0.55.0-dsh017rc1.3`; Mac: `0.55.0-dsh017rc1.1` | Installed, enabled | 真实 profile 保留 `300/60/100/400/100/100` bounds；源码与回滚规则见 `fork-plugins/dsh-context/FORK_MAINTENANCE.md` |
 | `dsh-shell-command` | Removed | No package or configuration | profile 不安装 |
@@ -515,9 +523,9 @@ Context 源码的工具归属追踪按 `cordis.original` 解包后的服务身�
 
 ### Local Subscriptions package
 
-维护真源位于 `fork-plugins\dsh-plugin-subscriptions`，仓库安装器使用 `fork-plugins\releases\dsh-plugin-subscriptions-0.9.4-dsh017rc1.21.tgz`，SHA256 为 `9A9DDB9B253CE33B1F657EBD8F13FA8A02BA0379D47203A7E6DCCAA4B9090D4D`。该摘要与仓内制品及其 `.sha256` 文件一致。该版本采用上游 v0.9.4 的多账号 provider、usage UI、Codex 搜索、图片结果、Antigravity 与 provider failover，并增加 RC.1 的 V4 工具角色转换；凭据格式与工具输出不变。
+维护真源位于 `fork-plugins\dsh-plugin-subscriptions`，仓库安装器使用 `fork-plugins\releases\dsh-plugin-subscriptions-0.9.4-dsh017rc1.22.tgz`，SHA256 为 `2CB1A08CCCAE8B3C5EA3E129ACEC0FDDE7B9DCE2A0B7D816B5C4214DC217FDC8`。该摘要与仓内制品及其 `.sha256` 文件一致。该版本采用上游 v0.9.4 的多账号 provider、usage UI、Codex 搜索、图片结果、Antigravity 与 provider failover，并增加 RC.1 的 V4 工具角色转换；凭据格式与工具输出不变。
 
-Windows Web profile 启用 `llm-subscriptions`，保留 `rateLimit.wait: false`。 制品在安装前须通过插件测试套件、实际安装目录的接口与 UI 开关检查；2026-10-11 当前源码的插件测试套件 860 项通过、0 失败、退出码 0。已验证的图片处理保持：21 张历史图片中原有 16 张超出多图尺寸上限，请求版本的长边均不超过 2,000 像素，原 Session 和附件摘要保持不变。2026-09-26，固定源码包的 506 项无密钥测试通过；隔离 Web profile 与真实 Web profile 均在随机本地端口启动，认证页面返回 HTTP 200，页面包含 Subscriptions 客户端资源。真实 Profile 的 Codex 状态接口识别到两个已存账号，默认账号的用量查询通过并刷新过期访问令牌；另一个账号及真实模型请求尚未验证。旧 profile patch 备份位于 `C:\Project\deepseek-harness-data\diagnostics\profile-backups\pre-subscriptions-enable-20260926`。
+Windows Web profile 启用 `llm-subscriptions`，保留 `rateLimit.wait: false`。 制品在安装前须通过插件测试套件、实际安装目录的接口与 UI 开关检查；2026-10-11 当前源码的插件测试套件 878 项通过、0 失败、退出码 0。已验证的图片处理保持：21 张历史图片中原有 16 张超出多图尺寸上限，请求版本的长边均不超过 2,000 像素，原 Session 和附件摘要保持不变。2026-09-26，固定源码包的 506 项无密钥测试通过；隔离 Web profile 与真实 Web profile 均在随机本地端口启动，认证页面返回 HTTP 200，页面包含 Subscriptions 客户端资源。真实 Profile 的 Codex 状态接口识别到两个已存账号，默认账号的用量查询通过并刷新过期访问令牌；另一个账号及真实模型请求尚未验证。旧 profile patch 备份位于 `C:\Project\deepseek-harness-data\diagnostics\profile-backups\pre-subscriptions-enable-20260926`。
 
 更新时使用 `git subtree pull --prefix=fork-plugins/dsh-plugin-subscriptions https://github.com/V1ki/dsh-plugin-subscriptions.git <tag> --squash`，再重放 `fork-plugins/dsh-plugin-subscriptions/FORK_MAINTENANCE.md`。真实 profile 始终安装仓内固定 artifact，禁止 npm latest 直接覆盖。
 
@@ -633,6 +641,7 @@ Profile 注册 `dsh-sdk-process-raw` 和 `subagent_process`：SDK profile、独�
 | Subscriptions V4 message translation | Ported onto v0.9.4 | Keep tool-call identity, result error/image handling and explicit developer-message refusal |
 | Legacy fixed-concurrency wrapper | Retired | Official `maxActiveSubagents` owns the active policy; do not mount the duplicate wrapper |
 | Declared model-menu row slot | Preserve | Keep the `conversation.input.model.row` declaration, the seat registration's `children` entry and the seat's `renderSlot` call in the root pane; `conversation.input.model` stays single-owner |
+| Model catalog refresh coalescing | Preserve | Keep warm readers answering from the retained same-generation catalog, one current plus one trailing reload with newest-invalidation-wins, the explicit read's catch-up loop (lifecycle check after every suspension, retry a failed replacement, reject rather than serve the replaced route), the resolver-owned catalog disposal that prevents follow-up work, and a Host reset that clears the superseded value before abandoning its response; do not restore one full-catalog reload per forwarded event |
 
 -----
 

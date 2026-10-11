@@ -13,7 +13,9 @@ import type { Context as ClientContext } from '@deepseek-ai/cordis'
 import type { ConnectionHandle } from '@deepseek-ai/dsh-api-remotes/client'
 // Type-only: pulls the shell's SlotMap merge (the 'settings.section' entry).
 import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
-// Type-only: pulls ui-conversation's SlotMap merge (the 'conversation.input.model.row' entry).
+// Type-only: pulls ui-conversation's SlotMap merge. The installed `0.1.7-rc.1`
+// contract predates the fork's additive model-menu row child, so that one key is
+// mirrored below (see the SlotMap merge).
 import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
 // Type-only: pulls the locale plugin's Context merge (ctx.locale).
 import type {} from '@deepseek-ai/dsh-client-locale/client'
@@ -46,6 +48,18 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
   interface LocaleNamespaceMap {
     /** The Subscriptions settings page copy. */
     'settings.subscriptions': SubscriptionsKey
+  }
+}
+
+declare module '@deepseek-ai/dsh-client-ui-slots' {
+  interface SlotMap {
+    /**
+     * Mirror of ui-conversation's additive model-menu row child
+     * (`packages/client/ui-conversation/src/client/contract/slots.ts`), which the
+     * installed `0.1.7-rc.1` contract does not declare. A later contract carrying
+     * the same shape merges with this entry.
+     */
+    'conversation.input.model.row': { kind: 'list'; scope: 'session' }
   }
 }
 

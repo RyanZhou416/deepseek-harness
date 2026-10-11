@@ -1318,20 +1318,31 @@ export function apply(ctx: Context, config: Config): void {
     }
     poolHealth = new PoolHealthRegistry()
     poolUsage = new PoolUsageTracker(fetcherFor)
-    const families = async (): Promise<Map<string, PoolDefinition>> => {
+    // One provider at a time: every pool read names its route, so listing one
+    // provider's accounts must not wait on another provider's discovery.
+    const families = async (only?: ProviderId): Promise<Map<string, PoolDefinition>> => {
       const pools = new Map<string, PoolDefinition>()
       if (autoAccounts) {
         // Discover each account's catalog separately: a model only pools the
         // accounts that actually list it (Plus is not asked to serve Pro-only
-        // models). A hang or discovery failure sits that account out.
+        // models). Pool membership is advisory, so a known catalog answers
+        // without waiting on its refresh and only an account with nothing known
+        // pays one fetch, inside this same bound. A hang or discovery failure
+        // sits that account out.
         const sources: Parameters<typeof buildAccountPools>[0] = {}
-        await Promise.all([...adapters].map(async ([provider, adapter]) => {
+        const swept = [...adapters].filter(([provider]) => only === undefined || provider === only)
+        await Promise.all(swept.map(async ([provider, adapter]) => {
           try {
             const accounts = (await accountTokens.get(provider)?.list() ?? []).map(entry => entry.key)
             if (accounts.length === 0) return
             const catalogs = (await Promise.all(accounts.map(async account => {
+              // An adapter with an advisory read uses it; an unavailable result is
+              // cancellation, never a reason to start a second attempt.
+              const advisory = adapter.resolveOwnCatalog?.bind(adapter)
               const models = await withTimeout(
-                signal => adapter.listOwnModels(provider, account, signal),
+                signal => advisory === undefined
+                  ? adapter.listOwnModels(provider, account, signal)
+                  : advisory(provider, account, signal),
                 POOL_USAGE_TIMEOUT_MS,
               )
               const settings = preferences.get(provider).accounts
@@ -1348,6 +1359,7 @@ export function apply(ctx: Context, config: Config): void {
       for (const [id, members] of Object.entries(poolConfig?.families ?? {})) {
         if (members.length === 0) continue
         const owner = members[0].provider
+        if (only !== undefined && owner !== only) continue
         const kept = members.filter(member => member.provider === owner)
         if (kept.length < members.length) {
           onWarn(`pool "${id}": cross-provider members are ignored; only ${owner} accounts are pooled`)
@@ -1405,17 +1417,24 @@ export function apply(ctx: Context, config: Config): void {
   // advertising the tier — stays on standard routing.
   const speed: SpeedController = {
     async speed(provider, model) {
-      const fastModels = await codexAdapter?.fastCapableModels() ?? []
-      const accountPreferences = preferences.get('codex').accounts
-      for (const { key } of await codexTokens?.list() ?? []) {
-        if (!accountPreferences || !Object.hasOwn(accountPreferences, key) || accountPreferences[key].independentEntry !== true) continue
-        for (const model of [...fastModels]) {
-          if (parseAccountModelId(model)) continue
-          if (await codexAdapter?.supportsFastTier(model, key)) fastModels.push(accountModelId(key, model))
+      // A speed read belongs to one provider; unrelated catalog discovery must not delay it.
+      const fastModels = provider === 'codex'
+        ? await codexAdapter?.fastCapableModels() ?? []
+        : provider === 'cursor'
+          ? await cursorAdapter?.fastCapableModels() ?? []
+          : provider === 'claude'
+            ? await claudeAdapter?.fastCapableModels() ?? []
+            : []
+      if (provider === 'codex') {
+        const accountPreferences = preferences.get(provider).accounts
+        for (const { key } of await codexTokens?.list() ?? []) {
+          if (!accountPreferences || !Object.hasOwn(accountPreferences, key) || accountPreferences[key].independentEntry !== true) continue
+          for (const model of [...fastModels]) {
+            if (parseAccountModelId(model)) continue
+            if (await codexAdapter?.supportsFastTier(model, key)) fastModels.push(accountModelId(key, model))
+          }
         }
       }
-      fastModels.push(...await cursorAdapter?.fastCapableModels() ?? [])
-      fastModels.push(...await claudeAdapter?.fastCapableModels() ?? [])
       return {
         tier: defaultSpeedOf(provider, model) ?? 'standard',
         fastModels,
