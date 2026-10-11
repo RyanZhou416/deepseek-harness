@@ -126,8 +126,8 @@ export function apply(ctx: ClientContext): void {
     order: 0,
     locale: NS,
     inject: (sessionId: string): SpeedSelectInjected => ({
-      loadSpeed: createSpeedLoader(connection, models, sessionId),
-      setSpeed: createSpeedSetter(connection, sessionId),
+      loadSpeed: createSpeedLoader(connection.rpc, models, sessionId),
+      setSpeed: createSpeedSetter(connection.rpc, models, sessionId),
     }),
   }, SpeedSelect))
 
@@ -164,7 +164,7 @@ export function apply(ctx: ClientContext): void {
       ui: {
         kind: 'popupSelect',
         options: async (session) => {
-          const state = await createSpeedLoader(connection, models, session.sessionId)()
+          const state = await createSpeedLoader(connection.rpc, models, session.sessionId)()
           if (!state.visible) throw new Error(t('commandFastUnavailable'))
           return ([
             { id: 'standard', label: t('speedStandard'), detail: t('speedStandardDescription') },
@@ -175,7 +175,7 @@ export function apply(ctx: ClientContext): void {
         // has to fail the selection: the shell states a settlement failure
         // through its own error strip.
         onSelect: (option, session) =>
-          settleSpeedTier(createSpeedSetter(connection, session.sessionId), option.id as 'standard' | 'fast', t),
+          settleSpeedTier(createSpeedSetter(connection.rpc, models, session.sessionId), option.id as 'standard' | 'fast', t),
       },
     }), 'dsh-plugin-subscriptions: /fast contribution')
   })

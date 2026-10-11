@@ -51,6 +51,13 @@ export interface AccountAwareAdapter extends LlmAdapter {
   resolveOwnModel(provider: string, model: string, account?: string): Promise<LlmResolvedModelInfo>
   /** Drop cached catalogs: one account, or every account when omitted (login/logout). */
   clearAccountCatalog(account?: string): void
+  /**
+   * Whether this route's catalog advertises the model's fast tier; absent on
+   * routes whose requests carry none. The account scopes which catalog entry
+   * answers (Codex and Cursor discover per account); omitted asks the
+   * default-first account that lists the model.
+   */
+  supportsFastTier?(model: string, account?: string): boolean | Promise<boolean>
 }
 
 /** Options for {@link unionAccountCatalogs}. */

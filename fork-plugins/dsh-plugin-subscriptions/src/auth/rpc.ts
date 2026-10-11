@@ -13,6 +13,7 @@ import type { RpcResult } from '../compat.js'
 import { AttachmentId } from '@deepseek-ai/dsh-attachment'
 import type { ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
 import { PROVIDER_IDS, type ProviderId } from './store.js'
+import type { SpeedTier } from '../model-defaults.js'
 import type { ProviderUsage, ResetCreditConsumeResult, ResetCreditList } from '../providers/common.js'
 import type { ProxyConfigView, ProxyDraft, ProxyInput, ProxyTestResult } from '../http.js'
 
@@ -55,23 +56,23 @@ export interface VideoBytesResult {
 /** Bare MP4 file names the `video` endpoint accepts (no path separators). */
 const VIDEO_NAME_PATTERN = /^[\w.-]+\.mp4$/
 
-/** One session's speed choice: standard routing or the fast (priority) tier. */
-export type SpeedTier = 'standard' | 'fast'
+/** One model's speed choice: standard routing or the fast (priority) tier. */
+export type { SpeedTier }
 
-/** `speed` endpoint value: the session's choice plus the visibility list. */
+/** `speed` endpoint value: one model's stored tier plus the visibility list. */
 export interface SpeedState {
-  /** The session's current speed tier (default `standard`). */
+  /** The stored tier for the requested model (default `standard`). */
   tier: SpeedTier
   /** Model ids whose route advertises a fast tier, across every provider that offers one. */
   fastModels: string[]
 }
 
-/** Speed state the RPC handler delegates to (in-memory, per session). */
+/** Speed state the RPC handler delegates to (the durable per-model store). */
 export interface SpeedController {
-  /** Current speed state: the session's tier and the fast-capable models. */
-  speed(sessionId: string): Promise<SpeedState>
-  /** Set one session's speed tier. */
-  setSpeed(sessionId: string, tier: SpeedTier): Promise<void>
+  /** Current speed state for one provider's model: its stored tier and the fast-capable models. */
+  speed(provider: ProviderId, model: string): Promise<SpeedState>
+  /** Store one provider's model tier; `standard` clears the stored entry. */
+  setSpeed(provider: ProviderId, model: string, tier: SpeedTier): Promise<void>
 }
 
 /** One logged-in account, as rendered by the Settings page. */
@@ -382,6 +383,15 @@ function readSpeedTier(payload: unknown): SpeedTier {
   return tier
 }
 
+/**
+ * Validate the model both speed endpoints address. The caller resolves the
+ * session's current model, so the payload names the provider route and the
+ * wire model id the stored tier belongs to.
+ */
+function readSpeedTarget(payload: unknown): { provider: ProviderId; model: string } {
+  return { provider: readProvider(payload), model: readString(payload, 'model') }
+}
+
 /** Validate the `image` endpoint's payload into a full attachment reference. */
 function readImageRef(payload: unknown): ImageAttachmentRef {
   if (typeof payload !== 'object' || payload === null) throw new BadRequest('payload must be an object')
@@ -456,12 +466,6 @@ function readForce(payload: unknown): boolean {
   if (force === undefined) return false
   if (typeof force !== 'boolean') throw new BadRequest('payload.force must be a boolean when present')
   return force
-}
-
-/** Validate the session id both speed endpoints carry. */
-function readSessionId(payload: unknown): string {
-  if (typeof payload !== 'object' || payload === null) throw new BadRequest('payload must be an object')
-  return readString(payload, 'sessionId')
 }
 
 /** Validate a `proxySet` payload into a shape `ProxyInput` accepts. */
@@ -619,11 +623,15 @@ async function dispatch(
       return ok(await controller.readImage(readImageRef(payload), signal))
     case 'video':
       return ok(await controller.readVideo(readVideoName(payload), signal))
-    case 'speed':
-      return ok(await speed.speed(readSessionId(payload)))
-    case 'setSpeed':
-      await speed.setSpeed(readSessionId(payload), readSpeedTier(payload))
+    case 'speed': {
+      const target = readSpeedTarget(payload)
+      return ok(await speed.speed(target.provider, target.model))
+    }
+    case 'setSpeed': {
+      const target = readSpeedTarget(payload)
+      await speed.setSpeed(target.provider, target.model, readSpeedTier(payload))
       return ok({ ok: true })
+    }
     case 'proxyGet':
       if (proxy === undefined) throw new BadRequest('proxy configuration is unavailable')
       return ok(await proxy.get())
@@ -653,7 +661,7 @@ async function dispatch(
  * Register the `/subscriptions-auth` RPC channel when a host connection exists.
  * @param ctx - the plugin context (headless profiles have no `connection`).
  * @param controller - the auth operations backing the endpoints.
- * @param speed - the per-session speed-tier state backing the Speed toggle.
+ * @param speed - the durable per-model speed-tier state backing the Speed toggle.
  * @param proxy - optional proxy-config controller backing `proxyGet`/`proxySet`/`proxyTest`.
  * @param modelDefaults - optional per-model default-effort state backing `modelDefaults`/`setModelDefault`.
  */

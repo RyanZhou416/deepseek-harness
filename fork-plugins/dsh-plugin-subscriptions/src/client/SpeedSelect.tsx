@@ -1,10 +1,11 @@
 /**
  * Speed toggle: one small control in the composer's right tool row
- * (`conversation.input.right`), switching the session between standard routing
- * and the fast tier. Codex uses its priority service tier; Cursor sends the
- * catalog `fast` parameter; Claude sends the catalogue's `speed` field. The
- * choice is per session and lives in the node half (in-memory); this component
- * holds only viewing state. The control renders nothing until the current model
+ * (`conversation.input.right`), switching the session's current model between
+ * standard routing and the fast tier. Codex uses its priority service tier;
+ * Cursor sends the catalog `fast` parameter; Claude sends the catalogue's
+ * `speed` field. The choice is stored per provider model in the node half
+ * (durable, alongside the per-model effort defaults); this component holds only
+ * viewing state. The control renders nothing until the current model
  * advertises a fast tier.
  *
  * Every color resolves through a `--dsw-alias-*` design token and every
@@ -19,7 +20,7 @@ import { callSubscriptionsAuth } from './SubscriptionsSection.js'
 import { en } from './locales.js'
 import type { SubscriptionsKey } from './locales.js'
 
-/** One session's speed choice: standard routing or the fast (priority) tier. */
+/** One model's speed choice: standard routing or the fast (priority) tier. */
 export type SpeedTier = 'standard' | 'fast'
 
 /** `speed` endpoint value, mirrored from the node half. */
@@ -97,9 +98,9 @@ export interface ModelDirectoriesLike {
 
 /** Injected dependencies of {@link SpeedSelect} (slot `inject`, session-bound). */
 export interface SpeedSelectInjected {
-  /** Load the session's speed state; `visible` false keeps the control hidden. */
+  /** Load the current model's speed state; `visible` false keeps the control hidden. */
   loadSpeed: () => Promise<SpeedSelectState>
-  /** Set the session's speed tier; resolves false when the write failed. */
+  /** Store the current model's speed tier; resolves false when the write failed. */
   setSpeed: (tier: SpeedTier) => Promise<boolean>
 }
 
@@ -139,10 +140,11 @@ export function speedControlVisible(
 }
 
 /**
- * The `loadSpeed` half of the inject face: the plugin's own speed state plus
- * the host's current model selection (the visibility gate). A model-RPC
- * failure throws rather than answering "hidden" — the caller keeps its last
- * known state, so a transient failure never locks the toggle away.
+ * The `loadSpeed` half of the inject face: the session's current model and the
+ * tier stored for it, plus the node half's fast-capable listing (the visibility
+ * gate). A model-RPC failure throws rather than answering "hidden" — the caller
+ * keeps its last known state, so a transient failure never locks the toggle
+ * away.
  *
  * `sessionId` is a plain string: slot and command contexts brand it through
  * different dsh-session copies, and only the service boundary needs one.
@@ -152,26 +154,44 @@ export function speedControlVisible(
  * at all) simply keeps the toggle hidden.
  */
 export function createSpeedLoader(
-  connection: ConnectionHandle,
+  rpc: ConnectionHandle['rpc'],
   models: () => ModelDirectoriesLike | undefined,
   sessionId: string,
 ): SpeedSelectInjected['loadSpeed'] {
   return async () => {
-    const state = await callSubscriptionsAuth<SpeedState>(connection.rpc, 'speed', { sessionId })
     const directories = models()
-    if (directories === undefined) return { visible: false, tier: state.tier }
+    if (directories === undefined) return { visible: false, tier: 'standard' }
     const { current } = await directories.directoryFor(sessionId).load()
+    if (current === null) return { visible: false, tier: 'standard' }
+    const state = await callSubscriptionsAuth<SpeedState>(rpc, 'speed', {
+      provider: current.provider,
+      model: current.model,
+    })
     return { visible: speedControlVisible(current, state.fastModels), tier: state.tier }
   }
 }
 
 /** The `setSpeed` half of the inject face: boolean outcome for the component's busy state. */
 export function createSpeedSetter(
-  connection: ConnectionHandle,
+  rpc: ConnectionHandle['rpc'],
+  models: () => ModelDirectoriesLike | undefined,
   sessionId: string,
 ): SpeedSelectInjected['setSpeed'] {
-  return tier => callSubscriptionsAuth(connection.rpc, 'setSpeed', { sessionId, tier })
-    .then(() => true, () => false)
+  return async (tier) => {
+    try {
+      const directories = models()
+      if (directories === undefined) return false
+      const { current } = await directories.directoryFor(sessionId).load()
+      if (current === null) return false
+      await callSubscriptionsAuth(rpc, 'setSpeed', { provider: current.provider, model: current.model, tier })
+      return true
+    } catch {
+      // Both failure sources — resolving the session's model, and the write
+      // itself — are reported as a failed settlement, which is what the
+      // control renders. A rejection would leave its busy state stuck.
+      return false
+    }
+  }
 }
 
 /**
@@ -180,7 +200,7 @@ export function createSpeedSetter(
  * notice surface of its own states the failure: the `/fast` popup renders
  * through the shell's error strip, while the composer control shows the same
  * copy in place.
- * @param setSpeed - the session's setter.
+ * @param setSpeed - the current model's setter.
  * @param tier - the picked tier.
  * @param t - Subscriptions dictionary translator.
  * @returns nothing once the write takes effect.

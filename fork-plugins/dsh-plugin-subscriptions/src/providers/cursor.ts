@@ -498,8 +498,14 @@ interface CursorAdapterOptions {
   defaultEffortOf?: (model: string) => string | undefined
   /** Local context-window override from Settings. Capped by the catalog maximum. */
   contextWindowOf?: (model: string) => number | undefined
-  /** True when this session's Speed control is set to fast. */
-  speedFor?: (sessionId: string | undefined, model: string) => boolean | Promise<boolean>
+  /**
+   * Per-model speed lookup (the composer Speed toggle's host half). Returns
+   * whether this model's stored configuration selects the fast tier; absent
+   * means every request stays on standard routing. This adapter applies the
+   * tier only where its own catalog advertises `fast`, so a stored `fast` on a
+   * model that stopped advertising it keeps standard routing.
+   */
+  speedFor?: (model: string) => boolean | Promise<boolean>
 }
 
 /** Cursor wire adapter. One instance serves the `cursor` provider route. */
@@ -664,7 +670,10 @@ export class CursorAdapter extends PoolBackedAdapter {
       )
       const turn = renderCursorTurn(resolved as readonly RequestMessage[], options.system)
       const discovered = await this.discovered(options.model)
-      const fast = await this.options.speedFor?.(options.sessionId, options.model)
+      // A stored fast tier reaches the wire only for a model whose own catalog
+      // advertises `fast`; otherwise the request keeps standard routing.
+      const fast = await this.options.speedFor?.(options.model) === true
+        && await this.supportsFastTier(options.model)
       const limits = cursorContextLimits(discovered, undefined)
       const override = this.options.contextWindowOf?.(options.model)
       const requested = limits === undefined

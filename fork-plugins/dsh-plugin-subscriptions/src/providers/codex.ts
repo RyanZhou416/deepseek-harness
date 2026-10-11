@@ -755,11 +755,15 @@ interface CodexAdapterOptions {
   defaultEffortOf?: (model: string) => string | undefined
   contextWindowOf?: (model: string) => number | undefined
   /**
-   * Per-request speed lookup (the composer Speed toggle's host half). Returns
-   * whether this session's current choice sends the model on the fast tier;
-   * absent means every request stays on standard routing.
+   * Per-model speed lookup (the composer Speed toggle's host half). Returns
+   * whether this model's stored configuration selects the fast tier; absent
+   * means every request stays on standard routing. The lookup answers only for
+   * the configuration: this adapter applies the tier only where its own catalog
+   * advertises `priority`, so a stored `fast` on a model that stopped
+   * advertising the tier keeps standard routing instead of sending a service
+   * tier the model cannot honour.
    */
-  speedFor?: (sessionId: string | undefined, model: string) => Promise<boolean> | boolean
+  speedFor?: (model: string) => Promise<boolean> | boolean
 }
 
 const CODEX_CALL_ID_MAX_LENGTH = 64
@@ -1071,8 +1075,10 @@ export class CodexAdapter extends PoolBackedAdapter {
     replayScopeKey: string,
   ): Promise<Response> {
     const messages = await resolveImages(options.messages, this.options.resolveAttachments?.(), signal)
-    const fast = this.options.speedFor !== undefined
-      && await this.options.speedFor(options.sessionId, options.model)
+    // A stored fast tier reaches the wire only for a model whose own catalog
+    // advertises `priority`; otherwise the request keeps standard routing.
+    const fast = await this.options.speedFor?.(options.model) === true
+      && await this.supportsFastTier(options.model)
     const body = codexRequestBody(options, toResponsesInput(
       messages,
       options.system,

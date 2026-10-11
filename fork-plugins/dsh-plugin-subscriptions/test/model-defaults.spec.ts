@@ -15,12 +15,14 @@ const HOME = mkdtempSync(join(tmpdir(), 'model-defaults-test-'))
 
 const {
   defaultEffortOf,
+  defaultSpeedOf,
   loadModelDefaults,
   modelDefaultsFilePath,
   modelDefaultsLoadError,
   modelDefaultsSnapshot,
   resetModelDefaultsForTests,
   setDefaultEffort,
+  setDefaultSpeed,
 } = await import('../src/model-defaults.js')
 const { effortDisplayName, mergeReasoning } = await import('../src/providers/common.js')
 
@@ -109,6 +111,109 @@ test('a malformed entry is skipped, the rest of its section survives', async () 
   // The skip is surfaced, not silent.
   assert.match(String(modelDefaultsLoadError()), /malformed/)
   assert.match(String(modelDefaultsLoadError()), /broken/)
+})
+
+test('setDefaultSpeed persists one model\'s tier and leaves its siblings on standard', async () => {
+  await fresh()
+  // Absence is standard routing, exactly as an absent effort follows the provider.
+  assert.equal(defaultSpeedOf('claude', 'claude-opus-5'), undefined)
+  await setDefaultSpeed('claude', 'claude-opus-5', 'fast')
+  assert.equal(defaultSpeedOf('claude', 'claude-opus-5'), 'fast')
+  // The tier belongs to the model it was stored for, on that route alone.
+  assert.equal(defaultSpeedOf('claude', 'claude-sonnet-5'), undefined)
+  assert.equal(defaultSpeedOf('codex', 'claude-opus-5'), undefined)
+
+  const path = modelDefaultsFilePath()
+  assert.deepEqual(JSON.parse(readFileSync(path, 'utf8')), {
+    speed: { claude: { 'claude-opus-5': 'fast' } },
+  })
+  if (process.platform !== 'win32') assert.equal(statSync(path).mode & 0o777, 0o600)
+})
+
+test('standard clears the stored tier and drops the speed section', async () => {
+  await fresh()
+  await setDefaultSpeed('cursor', 'composer-2', 'fast')
+  await setDefaultSpeed('cursor', 'composer-2', 'standard')
+  assert.equal(defaultSpeedOf('cursor', 'composer-2'), undefined)
+  assert.deepEqual(JSON.parse(readFileSync(modelDefaultsFilePath(), 'utf8')), {})
+})
+
+test('effort and speed share one document: neither overlapping save drops the other', async () => {
+  await fresh()
+  // The Settings rows save independently of the composer control, so an effort
+  // save and a speed save can overlap. One chain writes both.
+  await Promise.all([
+    setDefaultEffort('codex', 'gpt-5.6-sol', 'high'),
+    setDefaultSpeed('codex', 'gpt-5.6-sol', 'fast'),
+    setDefaultSpeed('claude', 'claude-opus-5', 'fast'),
+  ])
+  assert.equal(defaultEffortOf('codex', 'gpt-5.6-sol'), 'high')
+  assert.equal(defaultSpeedOf('codex', 'gpt-5.6-sol'), 'fast')
+  assert.equal(defaultSpeedOf('claude', 'claude-opus-5'), 'fast')
+  const onDisk = JSON.parse(readFileSync(modelDefaultsFilePath(), 'utf8')) as {
+    codex: Record<string, string>
+    speed: Record<string, Record<string, string>>
+  }
+  assert.equal(onDisk.codex['gpt-5.6-sol'], 'high')
+  assert.equal(onDisk.speed.codex['gpt-5.6-sol'], 'fast')
+  assert.equal(onDisk.speed.claude['claude-opus-5'], 'fast')
+})
+
+test('a malformed speed entry is skipped and reported without losing its sibling', async () => {
+  await fresh()
+  writeFileSync(modelDefaultsFilePath(), JSON.stringify({
+    claude: { 'claude-opus-5': 'high', broken: 42 },
+    speed: { claude: { 'claude-opus-5': 'fast', 'claude-sonnet-5': 'turbo' } },
+  }), 'utf8')
+  await resetModelDefaultsForTests()
+  await loadModelDefaults()
+  assert.equal(defaultEffortOf('claude', 'claude-opus-5'), 'high')
+  assert.equal(defaultSpeedOf('claude', 'claude-opus-5'), 'fast')
+  assert.equal(defaultSpeedOf('claude', 'claude-sonnet-5'), undefined)
+  assert.match(String(modelDefaultsLoadError()), /malformed/)
+  assert.match(String(modelDefaultsLoadError()), /claude-sonnet-5/)
+})
+
+test('a file written before the speed section existed keeps its effort defaults', async () => {
+  await fresh()
+  writeFileSync(modelDefaultsFilePath(), JSON.stringify({ codex: { 'gpt-5.6-sol': 'high' } }), 'utf8')
+  await resetModelDefaultsForTests()
+  await loadModelDefaults()
+  assert.equal(defaultEffortOf('codex', 'gpt-5.6-sol'), 'high')
+  assert.equal(defaultSpeedOf('codex', 'gpt-5.6-sol'), undefined)
+})
+
+test('a hostile speed section cannot pollute Object.prototype or smuggle in a provider', async () => {
+  await fresh()
+  writeFileSync(modelDefaultsFilePath(), JSON.stringify({
+    __proto__: { polluted: 'yes' },
+    speed: {
+      __proto__: { polluted: 'yes' },
+      evil: { x: 'fast' },
+      claude: { __proto__: 'fast', 'real-model': 'fast' },
+    },
+  }), 'utf8')
+  await resetModelDefaultsForTests()
+  await loadModelDefaults()
+  assert.equal((({}) as Record<string, unknown>).polluted, undefined, 'Object.prototype is untouched')
+  assert.equal(defaultSpeedOf('claude', 'real-model'), 'fast')
+  assert.equal(defaultSpeedOf('claude', 'toString'), undefined, 'an inherited key never resolves')
+  // Only the known provider survives the next write, so `evil` was never loaded.
+  await setDefaultSpeed('claude', 'second-model', 'fast')
+  const onDisk = JSON.parse(readFileSync(modelDefaultsFilePath(), 'utf8')) as { speed: Record<string, unknown> }
+  assert.deepEqual(Object.keys(onDisk.speed).sort(), ['claude'])
+})
+
+test('a failed speed save propagates and does not wedge later saves', async () => {
+  await fresh()
+  const { overridePersistForTests } = await import('../src/model-defaults.js')
+  overridePersistForTests(() => Promise.reject(new Error('injected persist failure')))
+  await assert.rejects(() => setDefaultSpeed('claude', 'x', 'fast'), /injected persist failure/)
+  // The failed write must not leave the live state ahead of the file.
+  assert.equal(defaultSpeedOf('claude', 'x'), undefined)
+  await fresh()
+  await setDefaultSpeed('claude', 'x', 'fast')
+  assert.equal(defaultSpeedOf('claude', 'x'), 'fast')
 })
 
 test('effortDisplayName spells xhigh out', () => {

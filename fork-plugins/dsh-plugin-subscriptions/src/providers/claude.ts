@@ -1093,11 +1093,13 @@ interface ClaudeAdapterOptions {
    */
   defaultEffortOf?: (model: string) => string | undefined
   /**
-   * Per-request speed lookup (the composer Speed toggle's host half). Returns
-   * whether this session's current choice sends the model on the fast tier;
-   * absent means every request stays on standard routing.
+   * Per-model speed lookup (the composer Speed toggle's host half). Returns
+   * whether this model's stored configuration selects the fast tier; absent
+   * means every request stays on standard routing. This adapter applies the
+   * tier only where the pinned catalogue advertises `fast_mode`, so a stored
+   * `fast` on a model without it keeps standard routing.
    */
-  speedFor?: (sessionId: string | undefined, model: string) => boolean | Promise<boolean>
+  speedFor?: (model: string) => boolean | Promise<boolean>
 }
 
 /** The Claude 4.5 family accepts image input. */
@@ -1404,9 +1406,11 @@ export class ClaudeAdapter extends PoolBackedAdapter {
     // request carries are the model's own facts rather than whatever discovery last saw.
     const thinking = this.thinkingParam(options.model, claudeThinkingType(options.model), maxTokens)
     const effort = claudeRequestedEffort(options.model, options.reasoningEffort)
-    // Absent lookup means standard routing; the wire module sends the field and its beta only
-    // when this is true.
-    const fast = await this.options.speedFor?.(options.sessionId, options.model) ?? false
+    // A stored fast tier reaches the wire only for a model whose catalogue
+    // entry carries `fast_mode`; otherwise the field and its beta stay absent
+    // and the request keeps standard routing.
+    const fast = await this.options.speedFor?.(options.model) === true
+      && this.supportsFastTier(options.model)
     const identitySession = await this.identitySession(session, account, fetchFn, signal)
     let built: BuiltClaudeCodeRequest
     try {

@@ -68,7 +68,7 @@ function tokens(): AccountTokenManager<ClaudeSession> {
 
 /**
  * One adapter over the in-memory session; `fetchFn` absent means no request is issued.
- * `fast` stands in for the session's Speed choice: absent leaves the lookup unwired, which is
+ * `fast` stands in for the model's stored Speed tier: absent leaves the lookup unwired, which is
  * how a route with no control at all behaves.
  */
 function adapter(fetchFn?: FetchFn, fast?: boolean): ClaudeAdapter {
@@ -85,7 +85,7 @@ function adapter(fetchFn?: FetchFn, fast?: boolean): ClaudeAdapter {
  * The body is the builder's JSON, read field by field, so it is typed loosely rather than
  * re-declared here.
  * @param options - the generate request to send.
- * @param fast - the session's Speed choice, when the test wires one.
+ * @param fast - the model's stored Speed tier, when the test wires one.
  * @returns the parsed body and the sent headers, lower-cased.
  */
 async function sent(
@@ -186,4 +186,13 @@ test('the fast tier rides body.speed and composes its beta exactly once', async 
     assert.equal('speed' in standard.body, false)
     assert.equal((standard.headers.get('anthropic-beta') ?? '').includes(SPEED_BETA), false)
   }
+})
+
+test('a stored fast tier never reaches a model whose catalogue entry lacks fast_mode', async () => {
+  // Fable 5 carries no `fast_mode`, so the stored tier cannot be honoured: the request keeps
+  // standard routing rather than carrying a speed field and its beta the model would refuse.
+  const refused = await sent({ model: 'claude-fable-5' }, true)
+  assert.equal('speed' in refused.body, false)
+  assert.equal((refused.headers.get('anthropic-beta') ?? '').includes(SPEED_BETA), false)
+  assert.equal(refused.chunks.at(-1)?.type, 'finish', 'the request still completes')
 })

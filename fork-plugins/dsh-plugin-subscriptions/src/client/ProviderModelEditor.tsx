@@ -5,6 +5,7 @@ import type { ProviderPreferences, SubscriptionTool } from '../provider-settings
 import type { SubscriptionProvider } from './SubscriptionsSection.js'
 import { callSubscriptionsAuth } from './subscriptions-rpc.js'
 import { modelRowLabel } from './format.js'
+import type { SpeedTier } from './SpeedSelect.js'
 import type { SubscriptionsKey } from './locales.js'
 
 interface ModelRow {
@@ -17,6 +18,10 @@ interface ModelRow {
   efforts?: { id: string; name: string }[]
   configured?: string
   maxContextWindow?: number
+  /** Whether this route advertises the model's fast tier; the picker appears only then. */
+  fastTier?: boolean
+  /** The stored speed tier, when one is set. */
+  configuredSpeed?: SpeedTier
 }
 interface Catalog {
   provider: SubscriptionProvider
@@ -40,6 +45,8 @@ interface ModelDraft {
   settings?: ProviderPreferences
   /** Reasoning-effort overrides that differ from the catalog; '' clears one. */
   efforts: { model: string; effort: string }[]
+  /** Speed-tier overrides that differ from the catalog. */
+  speeds: { model: string; tier: SpeedTier }[]
 }
 export interface ProviderModelEditorHandle {
   /**
@@ -59,7 +66,7 @@ const actions: CSSProperties = { display: 'flex', flexWrap: 'wrap', gap: 8, alig
 
 /**
  * Embedded section of the account manager dialog. It owns the model draft
- * (visibility, effort, context, tools) but not its submission: the dialog
+ * (visibility, effort, speed, context, tools) but not its submission: the dialog
  * collects the draft through the handle and saves it with the account edits
  * in one go, so there is a single Save/Cancel pair.
  */
@@ -70,6 +77,7 @@ export const ProviderModelEditor = forwardRef<ProviderModelEditorHandle, Props>(
   const [draft, setDraft] = useState<ProviderPreferences>({})
   const [contexts, setContexts] = useState<Record<string, string>>({})
   const [efforts, setEfforts] = useState<Record<string, string>>({})
+  const [speeds, setSpeeds] = useState<Record<string, SpeedTier>>({})
   const [query, setQuery] = useState('')
   const [busy, setBusy] = useState(false)
   const [dirty, setDirty] = useState(false)
@@ -82,6 +90,7 @@ export const ProviderModelEditor = forwardRef<ProviderModelEditorHandle, Props>(
     setCatalog(data)
     setDraft(data.settings)
     setEfforts(Object.fromEntries(data.models.map(model => [model.id, model.configured ?? ''])))
+    setSpeeds(Object.fromEntries(data.models.map(model => [model.id, model.configuredSpeed ?? 'standard'])))
     setContexts(Object.fromEntries(Object.entries(data.settings.contextWindows ?? {}).map(([id, value]) => [id, String(value)])))
     setDirty(false)
   }
@@ -103,7 +112,7 @@ export const ProviderModelEditor = forwardRef<ProviderModelEditorHandle, Props>(
 
   useImperativeHandle(ref, () => ({
     collect() {
-      if (!catalog || !dirty) return { efforts: [] }
+      if (!catalog || !dirty) return { efforts: [], speeds: [] }
       const windows: Record<string, number> = Object.create(null) as Record<string, number>
       for (const [model, text] of Object.entries(contexts)) {
         if (!text.trim()) continue
@@ -125,9 +134,14 @@ export const ProviderModelEditor = forwardRef<ProviderModelEditorHandle, Props>(
           const effort = efforts[model.id] ?? ''
           return effort === (model.configured ?? '') || !model.efforts?.length ? [] : [{ model: model.id, effort }]
         }),
+        speeds: catalog.models.flatMap(model => {
+          if (model.fastTier !== true) return []
+          const tier: SpeedTier = speeds[model.id] === 'fast' ? 'fast' : 'standard'
+          return tier === (model.configuredSpeed ?? 'standard') ? [] : [{ model: model.id, tier }]
+        }),
       }
     },
-  }), [catalog, dirty, draft, contexts, efforts, provider])
+  }), [catalog, dirty, draft, contexts, efforts, speeds, provider])
 
   const allModels = catalog?.models ?? []
   const known = new Set(allModels.map(model => model.id))
@@ -175,6 +189,16 @@ export const ProviderModelEditor = forwardRef<ProviderModelEditorHandle, Props>(
                 {model.efforts?.map(effort => <option key={effort.id} value={effort.id}>{effort.name}</option>)}
               </select>
             </label>}
+            {model.fastTier === true && <label style={actions}>{t('speed')}
+              <select style={control} aria-label={`${model.name} ${t('speed')}`}
+                value={speeds[model.id] ?? 'standard'} onChange={event => {
+                  setSpeeds({ ...speeds, [model.id]: event.target.value === 'fast' ? 'fast' : 'standard' })
+                  setDirty(true)
+                }}>
+                <option value="standard">{t('speedStandard')}</option>
+                <option value="fast">{t('speedFast')}</option>
+              </select>
+            </label>}
             {(provider === 'codex' || provider === 'cursor') && model.maxContextWindow !== undefined && <div style={actions}>
               <label style={actions}>{t('modelsContext')}
                 <input style={{ ...control, width: 140 }} inputMode="numeric" value={contexts[model.id] ?? ''}
@@ -188,6 +212,7 @@ export const ProviderModelEditor = forwardRef<ProviderModelEditorHandle, Props>(
           {models.length === 0 && <span>{t('modelDefaultsFilterEmpty', { query })}</span>}
         </div>
         {(provider === 'codex' || provider === 'cursor') && <small>{t('modelsContextHint')}</small>}
+        {allModels.some(model => model.fastTier === true) && <small>{t('modelsSpeedHint')}</small>}
         {catalog.tools.length > 0 && <div style={{ display: 'grid', gap: 8 }}>
           <strong>{t('modelsTools')}</strong>
           <small>{t('modelsToolsHint')}</small>

@@ -180,3 +180,53 @@ test('Antigravity registers the real multi-account adapter with provider setting
     await rm(home, { recursive: true, force: true })
   }
 })
+
+test('the editor catalog carries each model\'s fast capability and its stored speed tier', async () => {
+  // The Settings dialog offers the Speed picker per model, so the row has to
+  // state both whether this route advertises the tier and which tier is stored
+  // for that exact model.
+  const home = await mkdtemp(join(tmpdir(), 'settings-speed-'))
+  const previous = process.env.DSH_HOME
+  const { resetModelDefaultsForTests } = await import('../src/model-defaults.js')
+  await resetModelDefaultsForTests()
+  process.env.DSH_HOME = home
+  const ctx = new Context()
+  ctx.provide('llm', { registerAdapter: () => Object.assign(() => {}, { replace: () => {} }) })
+  const connection = createFakeConnection()
+  ctx.provide('connection', connection.connection)
+  const originalFast = CodexAdapter.prototype.supportsFastTier
+  CodexAdapter.prototype.supportsFastTier = async (model: string) => model === 'm1'
+  const runtime = ctx.plugin(plugin, {
+    providers: ['codex'],
+    pool: { enabled: false },
+    models: { codex: [{ id: 'm1', inputModalities: ['text'] }, { id: 'm2', inputModalities: ['text'] }] },
+  })
+  try {
+    await new Promise(resolve => setTimeout(resolve, 50))
+    if (!connection.registered()) await runtime
+    // The editor catalog lists what the logged-in accounts can serve.
+    await saveAccountSession('codex', 'account', {
+      accessToken: 'token', refreshToken: 'refresh', expiresAt: Date.now() + 3600_000, accountId: 'account', idToken: '',
+    })
+    const call = (endpoint: string, payload: unknown) => connection.handler(endpoint, payload, new AbortController().signal)
+    const before = await call('providerSettings', { provider: 'codex' })
+    assert.ok(before.ok)
+    const rows = (before.value as { models: { id: string; fastTier?: boolean; configuredSpeed?: string }[] }).models
+    assert.deepEqual(rows.map(row => [row.id, row.fastTier, row.configuredSpeed]), [
+      ['m1', true, undefined],
+      ['m2', undefined, undefined],
+    ])
+    assert.equal((await call('setSpeed', { provider: 'codex', model: 'm1', tier: 'fast' })).ok, true)
+    const after = await call('providerSettings', { provider: 'codex' })
+    assert.ok(after.ok)
+    const stored = (after.value as { models: { id: string; configuredSpeed?: string }[] }).models
+    assert.equal(stored[0]?.configuredSpeed, 'fast')
+    assert.equal(stored[1]?.configuredSpeed, undefined, 'a sibling model keeps standard routing')
+  } finally {
+    await runtime.dispose()
+    CodexAdapter.prototype.supportsFastTier = originalFast
+    await resetModelDefaultsForTests()
+    if (previous === undefined) delete process.env.DSH_HOME; else process.env.DSH_HOME = previous
+    await rm(home, { recursive: true, force: true })
+  }
+})

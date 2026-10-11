@@ -133,38 +133,46 @@ test('video endpoint: name validation and missing file', async () => {
   if (!missing.ok) assert.equal(missing.error.code, 'internal')
 })
 
-test('speed endpoints: per-session tier round trip and payload validation', async () => {
+test('speed endpoints: per-model tier round trip and payload validation', async () => {
   const handler = await mount()
   const signal = new AbortController().signal
   // Logged out and undiscovered: standard tier, no fast-capable models.
-  assert.deepEqual(await handler('speed', { sessionId: 's1' }, signal), {
+  assert.deepEqual(await handler('speed', { provider: 'claude', model: 'claude-opus-5' }, signal), {
     ok: true,
     value: { tier: 'standard', fastModels: [] },
   })
-  assert.deepEqual(await handler('setSpeed', { sessionId: 's1', tier: 'fast' }, signal), {
+  assert.deepEqual(await handler('setSpeed', { provider: 'claude', model: 'claude-opus-5', tier: 'fast' }, signal), {
     ok: true,
     value: { ok: true },
   })
-  assert.deepEqual(await handler('speed', { sessionId: 's1' }, signal), {
+  assert.deepEqual(await handler('speed', { provider: 'claude', model: 'claude-opus-5' }, signal), {
     ok: true,
     value: { tier: 'fast', fastModels: [] },
   })
-  // Another session is unaffected; setting standard clears the entry.
-  assert.deepEqual(await handler('speed', { sessionId: 's2' }, signal), {
+  // The tier belongs to the model it was set for: a sibling model on the same
+  // route, and the same model id on another route, both stay standard.
+  assert.deepEqual(await handler('speed', { provider: 'claude', model: 'claude-sonnet-5' }, signal), {
     ok: true,
     value: { tier: 'standard', fastModels: [] },
   })
-  await handler('setSpeed', { sessionId: 's1', tier: 'standard' }, signal)
-  assert.deepEqual(await handler('speed', { sessionId: 's1' }, signal), {
+  assert.deepEqual(await handler('speed', { provider: 'codex', model: 'claude-opus-5' }, signal), {
+    ok: true,
+    value: { tier: 'standard', fastModels: [] },
+  })
+  // Setting standard clears the stored entry.
+  await handler('setSpeed', { provider: 'claude', model: 'claude-opus-5', tier: 'standard' }, signal)
+  assert.deepEqual(await handler('speed', { provider: 'claude', model: 'claude-opus-5' }, signal), {
     ok: true,
     value: { tier: 'standard', fastModels: [] },
   })
 
   const bad = [
-    ['speed', {}, /sessionId/],
+    ['speed', {}, /provider/],
     ['speed', 'nope', /object/],
-    ['setSpeed', { sessionId: 's1' }, /tier/],
-    ['setSpeed', { sessionId: 's1', tier: 'ludicrous' }, /tier/],
+    ['speed', { provider: 'claude' }, /model/],
+    ['setSpeed', { provider: 'claude', model: 'claude-opus-5' }, /tier/],
+    ['setSpeed', { provider: 'claude', model: 'claude-opus-5', tier: 'ludicrous' }, /tier/],
+    ['setSpeed', { provider: 'nope', model: 'm', tier: 'fast' }, /provider/],
   ] as const
   for (const [endpoint, payload, pattern] of bad) {
     const result = await handler(endpoint, payload, signal)
@@ -174,6 +182,22 @@ test('speed endpoints: per-session tier round trip and payload validation', asyn
       assert.match(result.error.message, pattern)
     }
   }
+})
+
+test('a stored speed tier survives a host restart', async () => {
+  const handler = await mount()
+  const signal = new AbortController().signal
+  await handler('setSpeed', { provider: 'claude', model: 'durable-model', tier: 'fast' }, signal)
+  // A restart drops every in-process snapshot; only the file carries the tier.
+  const { loadModelDefaults, resetModelDefaultsForTests } = await import('../src/model-defaults.js')
+  await resetModelDefaultsForTests()
+  await loadModelDefaults()
+  const restarted = await mount()
+  assert.deepEqual(await restarted('speed', { provider: 'claude', model: 'durable-model' }, signal), {
+    ok: true,
+    value: { tier: 'fast', fastModels: [] },
+  })
+  await restarted('setSpeed', { provider: 'claude', model: 'durable-model', tier: 'standard' }, signal)
 })
 
 test('status endpoint: one corrupt provider entry degrades alone, others still report', async () => {

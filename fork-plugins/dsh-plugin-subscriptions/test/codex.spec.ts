@@ -300,6 +300,31 @@ test('codex spends no reset credit and resends nothing after a refusal it stated
   }
 })
 
+test('a stored fast tier rides only a codex model whose catalog advertises the service tier', async () => {
+  // The catalog marks one model fast-capable and leaves the other plain. `speedFor` stands in
+  // for the durable per-model store and answers fast for BOTH, so only the adapter's own
+  // capability check can keep `service_tier` off the second request.
+  const catalog = JSON.stringify({
+    models: [
+      { slug: 'gpt-5.6-sol', display_name: 'Sol', service_tiers: [{ id: 'priority' }] },
+      { slug: 'gpt-5.1-codex', display_name: 'Codex' },
+    ],
+  })
+  const { fetchFn, calls } = queuedFetch([catalog, COMPLETED_SSE, COMPLETED_SSE])
+  const adapter = new CodexAdapter({
+    models: [{ id: 'gpt-5.6-sol' }, { id: 'gpt-5.1-codex' }],
+    streamIdleTimeoutMs: 1000,
+    tokens: memoryAccounts({ acct: codexSession }),
+    discovery: true,
+    fetchFn,
+    speedFor: () => true,
+  })
+  await drain(adapter, { ...STREAM_OPTIONS, model: 'gpt-5.6-sol' })
+  await drain(adapter, { ...STREAM_OPTIONS, model: 'gpt-5.1-codex' })
+  assert.equal(calls[1]?.body.service_tier, 'priority')
+  assert.equal('service_tier' in (calls[2]?.body ?? {}), false)
+})
+
 test('codex still recovers an ordinary 429 that disclosed its window', async () => {
   const recovered: string[] = []
   let requests = 0

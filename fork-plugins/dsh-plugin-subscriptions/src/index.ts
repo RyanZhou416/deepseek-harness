@@ -37,14 +37,15 @@ import type {
   ModelDefaultView,
   ProviderStatus,
   SpeedController,
-  SpeedTier,
   VideoBytesResult,
 } from './auth/rpc.js'
 import {
   defaultEffortOf,
+  defaultSpeedOf,
   loadModelDefaults,
   modelDefaultsLoadError,
   setDefaultEffort,
+  setDefaultSpeed,
 } from './model-defaults.js'
 import {
   accountKeyOf,
@@ -993,10 +994,6 @@ export function apply(ctx: Context, config: Config): void {
   // Usage lookups resolve the session through the refresh-aware path, so an
   // expired access token renews instead of failing the lookup.
   const usageFetchers: UsageFetchers = {}
-  // The composer Speed toggle's state: per-session, in-memory (a restart
-  // restores standard routing), gated per request on the model's own
-  // fast-tier support so a stale choice cannot leak onto a plain model.
-  const speedBySession = new Map<string, SpeedTier>()
   let codexAdapter: CodexAdapter | undefined
   let claudeAdapter: ClaudeAdapter | undefined
   // Dropped on every copilot auth transition so replay state (captured
@@ -1082,10 +1079,7 @@ export function apply(ctx: Context, config: Config): void {
           defaultEffortOf: (model: string) => defaultEffortOf('codex', model),
           contextWindowOf: model => preferences.contextWindow('codex', model),
           pool: () => poolAdapter,
-          speedFor: (sessionId: string | undefined, model: string): boolean | Promise<boolean> =>
-            sessionId !== undefined
-            && speedBySession.get(sessionId) === 'fast'
-            && adapter.supportsFastTier(model),
+          speedFor: (model: string): boolean => defaultSpeedOf('codex', model) === 'fast',
         })
         codexAdapter = adapter
         adapters.set('codex', adapter)
@@ -1128,10 +1122,7 @@ export function apply(ctx: Context, config: Config): void {
           catalogStore: catalogStore('claude'),
           defaultEffortOf: (model: string) => defaultEffortOf('claude', model),
           pool: () => poolAdapter,
-          speedFor: (sessionId, model) =>
-            sessionId !== undefined
-            && speedBySession.get(sessionId) === 'fast'
-            && adapter.supportsFastTier(model),
+          speedFor: (model: string): boolean => defaultSpeedOf('claude', model) === 'fast',
         })
         claudeAdapter = adapter
         adapters.set('claude', adapter)
@@ -1257,10 +1248,7 @@ export function apply(ctx: Context, config: Config): void {
           catalogStore: catalogStore('cursor'),
           defaultEffortOf: model => defaultEffortOf('cursor', model),
           pool: () => poolAdapter,
-          speedFor: (sessionId, model) =>
-            sessionId !== undefined
-            && speedBySession.get(sessionId) === 'fast'
-            && adapter.supportsFastTier(model),
+          speedFor: (model: string): boolean => defaultSpeedOf('cursor', model) === 'fast',
           contextWindowOf: model => preferences.contextWindow('cursor', model),
         })
         cursorAdapter = adapter
@@ -1409,8 +1397,14 @@ export function apply(ctx: Context, config: Config): void {
     adapter.listModels = async route => (await list(route)).filter(model => preferences.visible(provider, model.id))
   }
 
+  // The composer Speed control and the Settings per-model picker share one
+  // durable tier per provider model, stored beside the per-model effort
+  // defaults. Each route applies it only where its own catalog advertises the
+  // fast tier, so a stored fast on a model that cannot honour it — a
+  // hand-edited file naming a plain model, or a catalog that stopped
+  // advertising the tier — stays on standard routing.
   const speed: SpeedController = {
-    async speed(sessionId) {
+    async speed(provider, model) {
       const fastModels = await codexAdapter?.fastCapableModels() ?? []
       const accountPreferences = preferences.get('codex').accounts
       for (const { key } of await codexTokens?.list() ?? []) {
@@ -1423,13 +1417,12 @@ export function apply(ctx: Context, config: Config): void {
       fastModels.push(...await cursorAdapter?.fastCapableModels() ?? [])
       fastModels.push(...await claudeAdapter?.fastCapableModels() ?? [])
       return {
-        tier: speedBySession.get(sessionId) ?? 'standard',
+        tier: defaultSpeedOf(provider, model) ?? 'standard',
         fastModels,
       }
     },
-    async setSpeed(sessionId, tier) {
-      if (tier === 'standard') speedBySession.delete(sessionId)
-      else speedBySession.set(sessionId, tier)
+    async setSpeed(provider, model, tier) {
+      await setDefaultSpeed(provider, model, tier)
     },
   }
   // Per-model default effort overrides (the Settings page's model pickers).
@@ -1568,11 +1561,18 @@ export function apply(ctx: Context, config: Config): void {
         }
         // A model with unavailable capabilities can still be hidden or restored.
         const info = await withTimeout(() => adapter.resolveModel(provider, model.id), DISCOVERY_TIMEOUT_MS).catch(() => undefined)
+        // Whether this route advertises the model's fast tier: the same
+        // question the request-side gate asks, so the Settings picker offers
+        // the tier exactly where a chosen fast can reach the wire.
+        const fastTier = await adapter.supportsFastTier?.(model.id) ?? false
+        const storedSpeed = defaultSpeedOf(provider, model.id)
         return {
           id: model.id, name: model.name,
           contextWindow: info?.context?.contextWindow,
           efforts: tierIds.has(model.id) ? [] : info?.reasoning?.efforts.map(({ id, name }) => ({ id, name })) ?? [],
           configured: defaultEffortOf(provider, model.id),
+          ...fastTier ? { fastTier: true } : {},
+          ...storedSpeed === undefined ? {} : { configuredSpeed: storedSpeed },
           ...(contexts.length ? {
             defaultContextWindow: Math.min(...contexts.map(entry => entry.default)),
             maxContextWindow: Math.min(...contexts.map(entry => entry.max)),

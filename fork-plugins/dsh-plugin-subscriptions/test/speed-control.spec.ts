@@ -1,7 +1,8 @@
 /**
  * The composer Speed control's two halves. The client half decides visibility from the session's
- * current provider and the node half's fast-capable listing; the node half builds that listing
- * from every route whose models carry a fast tier. Both are asserted here, so a control that
+ * current provider and the node half's fast-capable listing, and addresses the stored tier by that
+ * model; the node half builds the listing from every route whose models carry a fast tier and
+ * answers the tier stored for the addressed model. Both are asserted here, so a control that
  * would switch nothing stays hidden and a route that can switch stays reachable.
  */
 
@@ -9,6 +10,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { registerHooks } from 'node:module'
 import { Context } from '@deepseek-ai/cordis'
+import type { ConnectionHandle } from '@deepseek-ai/dsh-api-remotes/client'
 // The section imports host primitives that ship CSS modules; this spec needs only their empty
 // class map, not a browser stylesheet loader.
 const css = registerHooks({ load(url, context, nextLoad) {
@@ -16,14 +18,15 @@ const css = registerHooks({ load(url, context, nextLoad) {
     ? { format: 'module', source: 'export default {}', shortCircuit: true }
     : nextLoad(url, context)
 } })
-const { settleChoice, settleRead, speedControlVisible } = await import('../src/client/SpeedSelect.js')
+const { createSpeedLoader, createSpeedSetter, settleChoice, settleRead, speedControlVisible }
+  = await import('../src/client/SpeedSelect.js')
 css.deregister()
-import type { SpeedView } from '../src/client/SpeedSelect.js'
+import type { ModelDirectoriesLike, SpeedView } from '../src/client/SpeedSelect.js'
 import { createFakeConnection } from './fake-connection.js'
 import type { FakeRpcHandler } from './fake-connection.js'
 import { saveAccountSession } from '../src/auth/store.js'
 import type { ClaudeSession } from '../src/auth/store.js'
-import type { SpeedState } from '../src/client/SpeedSelect.js'
+import type { SpeedState, SpeedTier } from '../src/client/SpeedSelect.js'
 
 const plugin = await import('../src/index.js')
 
@@ -90,7 +93,7 @@ test('a settled choice outranks a read that started before it', () => {
 test('the speed endpoint offers the claude models the pinned catalogue marks fast', async () => {
   await saveAccountSession('claude', 'acct', CLAUDE_SESSION)
   const handler = await mount()
-  const result = await handler('speed', { sessionId: 'session-1' }, new AbortController().signal)
+  const result = await handler('speed', { provider: 'claude', model: 'claude-opus-5' }, new AbortController().signal)
   assert.equal(result.ok, true)
   if (!result.ok) return
   const state = result.value as SpeedState
@@ -99,4 +102,64 @@ test('the speed endpoint offers the claude models the pinned catalogue marks fas
   // control offers, and a catalogue model without the capability is not among them.
   for (const model of state.fastModels) assert.equal(speedControlVisible({ provider: 'claude', model }, state.fastModels), true)
   assert.equal(speedControlVisible({ provider: 'claude', model: 'claude-fable-5' }, state.fastModels), false)
+})
+
+/** One session's model directory, as the host service answers it. */
+function directories(current: { provider: string; model: string } | null): ModelDirectoriesLike {
+  return { directoryFor: () => ({ load: async () => ({ current }) }) }
+}
+
+/**
+ * The Connection RPC face the control calls through, recording every endpoint it reaches.
+ * `model` doubles as the session's current selection for the loader and the setter.
+ */
+function speedRpc(
+  model: { provider: string; model: string } | null,
+  tier: SpeedTier,
+  fastModels: string[],
+): { rpc: ConnectionHandle['rpc']; calls: { endpoint: string; payload: unknown }[]; available: () => ModelDirectoriesLike | undefined } {
+  const calls: { endpoint: string; payload: unknown }[] = []
+  return {
+    calls,
+    available: () => directories(model),
+    rpc: {
+      call: (_channel, endpoint, payload) => {
+        calls.push({ endpoint, payload })
+        return Promise.resolve(endpoint === 'subscriptions-auth.speed'
+          ? { ok: true as const, value: { tier, fastModels } }
+          : { ok: true as const, value: { ok: true } })
+      },
+    },
+  }
+}
+
+test('the composer control reads and writes the tier of the session\'s current model', async () => {
+  const { rpc, calls, available } = speedRpc({ provider: 'claude', model: 'claude-opus-5' }, 'fast', ['claude-opus-5'])
+  assert.deepEqual(await createSpeedLoader(rpc, available, 'session-1')(), { visible: true, tier: 'fast' })
+  assert.deepEqual(calls, [{ endpoint: 'subscriptions-auth.speed', payload: { provider: 'claude', model: 'claude-opus-5' } }])
+  // The write addresses the same model, so the stored tier follows the model rather than the
+  // session it was chosen in.
+  assert.equal(await createSpeedSetter(rpc, available, 'session-1')('standard'), true)
+  assert.deepEqual(calls[1], {
+    endpoint: 'subscriptions-auth.setSpeed',
+    payload: { provider: 'claude', model: 'claude-opus-5', tier: 'standard' },
+  })
+})
+
+test('the composer control hides and writes nothing without a current model', async () => {
+  const { rpc, calls, available } = speedRpc(null, 'fast', ['claude-opus-5'])
+  assert.deepEqual(await createSpeedLoader(rpc, available, 'session-1')(), { visible: false, tier: 'standard' })
+  assert.equal(await createSpeedSetter(rpc, available, 'session-1')('fast'), false)
+  // A shell with no model-selection service keeps the control hidden too.
+  assert.deepEqual(await createSpeedLoader(rpc, () => undefined, 'session-1')(), { visible: false, tier: 'standard' })
+  assert.equal(await createSpeedSetter(rpc, () => undefined, 'session-1')('fast'), false)
+  assert.deepEqual(calls, [], 'no endpoint is called without a model to address')
+})
+
+test('a failed speed write settles as a failed choice rather than rejecting', async () => {
+  // The composer leaves its busy state on the promise's settlement, so a rejection would stick
+  // the control; the fetch failure has to arrive as `false`.
+  const rpc: ConnectionHandle['rpc'] = { call: () => Promise.reject(new Error('offline')) }
+  const available = () => directories({ provider: 'claude', model: 'claude-opus-5' })
+  assert.equal(await createSpeedSetter(rpc, available, 'session-1')('fast'), false)
 })

@@ -26,7 +26,7 @@
 
 ![推理等级选择器](https://raw.githubusercontent.com/V1ki/dsh-plugin-subscriptions/main/docs/images/model-effort.png)
 
-目录声明了 fast tier 的模型,会在输入框工具行(模型选择器旁)多出一个**速度**开关 —— 标准 / 快速。快速按各路由自己的优先信号发送:Codex 发 `service_tier: priority`,Cursor 发目录的 `fast` 参数,Claude 发 Claude Code 目录的 `speed: fast` 字段以及声明该档位的 beta。该选择按会话保存在内存中,因此新会话与重启后都从标准开始。`/fast` 斜杠命令提供同样的弹窗选择;当前模型不支持快速档时会提示原因。
+目录声明了 fast tier 的模型,会在输入框工具行(模型选择器旁)多出一个**速度**开关 —— 标准 / 快速。快速按各路由自己的优先信号发送:Codex 发 `service_tier: priority`,Cursor 发目录的 `fast` 参数,Claude 发 Claude Code 目录的 `speed: fast` 字段以及声明该档位的 beta。该选择按模型保存,与默认推理档存在一起,因此新会话与重启后仍然保留;「管理」里的模型列表也会在每个支持快速档的模型旁给出同样的标准/快速选择。`/fast` 斜杠命令提供同样的弹窗选择;当前模型不支持快速档时会提示原因。
 
 ![速度开关及其标准/快速菜单](https://raw.githubusercontent.com/V1ki/dsh-plugin-subscriptions/main/docs/images/speed-toggle.png)
 
@@ -83,7 +83,7 @@ Codex 编辑走 `/backend-api/codex/images/edits`，Grok 编辑走 `/v1/images/e
 
 ### DSH 兼容性
 
-本 fork 离线包 `0.9.4-dsh017rc1.19` 固定适配 DSH `0.1.7-rc.1` 和 Cordis `4.0.4`。其 V4 工具消息转换、固定到 Claude Code 2.1.288 的 wire 与界面已针对这一确切版本组合构建、测试；不要安装到旧版 DSH profile。上游公开的 `0.9.4` 包声明了更宽的 peer 范围，但不适用于这个私有离线包。
+本 fork 离线包 `0.9.4-dsh017rc1.20` 固定适配 DSH `0.1.7-rc.1` 和 Cordis `4.0.4`。其 V4 工具消息转换、固定到 Claude Code 2.1.288 的 wire 与界面已针对这一确切版本组合构建、测试；不要安装到旧版 DSH profile。上游公开的 `0.9.4` 包声明了更宽的 peer 范围，但不适用于这个私有离线包。
 
 ### 管理账号与 Pool 模型
 

@@ -74,23 +74,28 @@ export function ProviderAccountManager({ provider, name, rpc, t, onClose }: Prop
   }
   /**
    * One submit for both drafts: the model editor's (visibility, effort,
-   * context, tools) and this dialog's account edits. A failure keeps the
+   * speed, context, tools) and this dialog's account edits. A failure keeps the
    * dialog open with every edit intact.
    */
   async function save() {
     if (saveLock.current) return
     // An invalid model draft (e.g. a malformed context window) blocks the
     // whole submit; the editor shows the reason next to the field.
-    const models = editor.current === null ? { efforts: [] } : editor.current.collect()
+    const models = editor.current === null ? { efforts: [], speeds: [] } : editor.current.collect()
     if (models === undefined) return
     saveLock.current = true
     setSaving(true)
     setSaveError('')
-    let savedEfforts = 0
+    let savedModels = 0
     try {
       for (const { model, effort } of models.efforts) {
         await callSubscriptionsAuth(rpc, 'setModelDefault', { provider, model, ...(effort ? { effort } : {}) })
-        savedEfforts++
+        savedModels++
+        if (!alive.current) return
+      }
+      for (const { model, tier } of models.speeds) {
+        await callSubscriptionsAuth(rpc, 'setSpeed', { provider, model, tier })
+        savedModels++
         if (!alive.current) return
       }
       // Re-read before writing: another client may have saved since this
@@ -105,7 +110,7 @@ export function ProviderAccountManager({ provider, name, rpc, t, onClose }: Prop
     } catch (error) {
       if (alive.current) {
         const message = error instanceof Error ? error.message : String(error)
-        setSaveError((savedEfforts ? t('modelsPartialSave') + ' ' : '') + t('accountsSaveFailed', { message }))
+        setSaveError((savedModels ? t('modelsPartialSave') + ' ' : '') + t('accountsSaveFailed', { message }))
       }
     } finally {
       saveLock.current = false
