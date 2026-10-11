@@ -142,12 +142,18 @@ export const ProviderModelEditor = forwardRef<ProviderModelEditorHandle, Props>(
     setContexts(Object.fromEntries(Object.entries(data.settings.contextWindows ?? {}).map(([id, value]) => [id, String(value)])))
     setDirty(false)
   }
+  /** Load this provider's settings; `force` is the explicit Refresh control's mode. */
   async function load(force = false) {
     const request = ++generation.current
     setBusy(true)
     setError('')
     try {
-      const data = await callSubscriptionsAuth<Catalog>(rpc, 'providerSettings', { provider, force })
+      // The default call reads the node half's cached settings; only the
+      // Refresh button asks for an explicit refresh.
+      const data = await callSubscriptionsAuth<Catalog>(rpc, 'providerSettings', {
+        provider,
+        ...force ? { force: true } : {},
+      })
       if (generation.current === request) reset(data)
     } catch (error) {
       if (generation.current === request) setError(String(error instanceof Error ? error.message : error))

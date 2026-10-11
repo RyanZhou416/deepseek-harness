@@ -143,6 +143,7 @@ test('the registered route reports the wrapped adapter\'s display identity', () 
 function unownedPool(
   provider: ProviderId,
   usage: (provider: ProviderId, account: string) => (() => Promise<ProviderUsage>) | undefined,
+  accountKeys: readonly string[] = ['a', 'b'],
 ) {
   const raw = new Raw()
   const health = new PoolHealthRegistry()
@@ -152,7 +153,7 @@ function unownedPool(
     provider,
     adapter: raw,
     settings: new ProviderSettingsStore(),
-    accounts: async () => [{ key: 'a', label: 'A' }, { key: 'b', label: 'B' }],
+    accounts: async () => accountKeys.map(key => ({ key, label: key.toUpperCase() })),
     pool: () => pool,
     onWarn: message => { warnings.push(message) },
   })
@@ -182,6 +183,29 @@ test('an unowned model still refuses a Claude account past a usage floor', async
   }))
   await consume(route, 'm:/模型')
   assert.deepEqual(raw.calls, ['stream:b:m:/模型'])
+})
+
+test('an unowned model resolves without a usage request and reads it once when streaming', async () => {
+  // Resolution is a listing-shaped read: the pool judges a candidate's floor from
+  // what it already knows, so resolving a model must reach no usage endpoint. Only
+  // the streaming path, which is about to commit the request, may read it.
+  let reads = 0
+  const { route, raw } = unownedPool('claude', (_provider, account) => () => {
+    reads += 1
+    return Promise.resolve({ supported: true,
+      windows: [{ kind: 'session' as const, usedPercent: account === 'a' ? 90 : 5 }] })
+  }, ['a'])
+  const resolved = await route.resolveModel('claude', 'm:/模型')
+  assert.equal(resolved.context?.contextWindow, 100)
+  assert.equal(reads, 0, 'resolveModel performs no usage request')
+
+  await assert.rejects(
+    consume(route, 'm:/模型'),
+    (error: unknown) => error instanceof LlmError && error.code === 'RATE_LIMIT',
+  )
+  assert.equal(reads, 1, 'the streaming path reads the account it is about to serve, exactly once')
+  assert.deepEqual(raw.calls.filter(call => call.startsWith('stream:')), [],
+    'an account past its floor is never contacted')
 })
 
 test('an unowned model reports the pool\'s cause and recovery hint when every account is held back', async () => {

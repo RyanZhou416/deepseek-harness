@@ -268,4 +268,30 @@ export class PoolHealthRegistry {
       if (key.startsWith(prefix)) this.records.delete(key)
     }
   }
+
+  /**
+   * Move one account's cooldown records to the canonical key the token store
+   * renamed it to: both the account-wide key and every member key under it.
+   *
+   * The records move rather than clear, because the rename is not a re-login: a
+   * parked account must stay parked, exactly as the cooldown the provider asked
+   * for says, instead of becoming selectable again under the new key. A record
+   * already held at the destination keeps whichever cooldown runs longer, so the
+   * move can neither shorten a wait nor un-park the account it lands on.
+   * @param provider - the provider route.
+   * @param from - the key the account's records were held under.
+   * @param to - the canonical key the account now resolves to.
+   */
+  renameAccount(provider: ProviderId, from: string, to: string): void {
+    if (from === to) return
+    const prefix = `${provider}/${from}/`
+    for (const [key, record] of [...this.records]) {
+      if (!key.startsWith(prefix)) continue
+      const moved = `${provider}/${to}/${key.slice(prefix.length)}`
+      const held = this.records.get(moved)
+      this.records.delete(key)
+      if (held !== undefined && held.unavailableUntil >= record.unavailableUntil) continue
+      this.records.set(moved, record)
+    }
+  }
 }

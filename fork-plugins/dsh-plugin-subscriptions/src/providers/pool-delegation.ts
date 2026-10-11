@@ -18,6 +18,7 @@ import type { ProviderId } from '../auth/store.js'
 import type { PoolAdapter } from './pool.js'
 import { withPoolTiers } from './provider-catalog.js'
 import type { ProviderCatalog } from './provider-catalog.js'
+import type { CatalogRefreshReport } from './common.js'
 
 /** The pool binding every delegating adapter carries in its constructor options. */
 interface PoolBinding {
@@ -31,6 +32,10 @@ interface PoolBinding {
  * pool facade. A subclass supplies its {@link ProviderCatalog} plus the
  * provider-specific pieces: {@link resolveOwnModel}, {@link streamOwn}, the
  * static and discovered row mapping, and its own account-catalog invalidation.
+ *
+ * The catalogue seam is split by cost, not by caller: {@link listOwnModels} and
+ * {@link resolveOwnCatalog} are pure reads that never start a provider request,
+ * and {@link refreshOwnCatalog} is the one path that does.
  */
 export abstract class PoolBackedAdapter extends LlmAdapter {
   /** The provider's account-indexed catalog, assigned by the subclass constructor. */
@@ -44,14 +49,14 @@ export abstract class PoolBackedAdapter extends LlmAdapter {
     return withPoolTiers(await this.listOwnModels(provider), this.poolHost.pool?.(), provider)
   }
 
-  /** The provider's own catalog: union of every account, or one account when named. */
+  /** The provider's own catalog: union of every account, or one account when named. Pure. */
   async listOwnModels(provider: string, account?: string, signal?: AbortSignal): Promise<readonly LlmModelInfo[]> {
     return this.catalogs.list(provider, account, signal)
   }
 
   /**
-   * One account's own catalog for an advisory read, without blocking on a stale
-   * refresh. See {@link ProviderCatalog.resolve}.
+   * One account's own catalog for an advisory read, from cache or the built-in
+   * rows. See {@link ProviderCatalog.resolve}.
    */
   async resolveOwnCatalog(
     provider: string,
@@ -59,6 +64,39 @@ export abstract class PoolBackedAdapter extends LlmAdapter {
     signal?: AbortSignal,
   ): Promise<readonly LlmModelInfo[] | undefined> {
     return this.catalogs.resolve(provider, account, signal)
+  }
+
+  /**
+   * The one path that asks the provider for a catalogue. See
+   * {@link AccountAwareAdapter.refreshOwnCatalog} for the exact `force` and
+   * cancellation semantics.
+   * @param provider - the provider route whose catalogue is refreshed.
+   * @param account - the account to refresh; the provider's default when omitted.
+   * @param options - `force` for an explicit refresh, `signal` to detach this caller.
+   * @returns which account was requested, skipped, cancelled or failed.
+   */
+  async refreshOwnCatalog(
+    provider: string,
+    account?: string,
+    options?: { force?: boolean; signal?: AbortSignal },
+  ): Promise<CatalogRefreshReport> {
+    return await this.catalogs.refresh(provider, account, options)
+  }
+
+  /** Await in-flight catalogue requests so disposal leaves no write behind. */
+  async drainOwnCatalogs(): Promise<void> {
+    await this.catalogs.drain()
+  }
+
+  /**
+   * Move one account's cached catalogue to the canonical key the token store
+   * renamed it to. See {@link ProviderCatalog.renameAccount} for why this must
+   * not wait on an in-flight request.
+   * @param from - the key the account's catalogue was stored under.
+   * @param to - the canonical key the account now resolves to.
+   */
+  async renameAccountCatalog(from: string, to: string): Promise<void> {
+    await this.catalogs.renameAccount(from, to)
   }
 
   override async resolveModel(provider: string, model: string): Promise<LlmResolvedModelInfo> {
@@ -69,7 +107,7 @@ export abstract class PoolBackedAdapter extends LlmAdapter {
     return this.resolveOwnModel(provider, model)
   }
 
-  /** Capability resolution of the provider's own models (the pool resolves members here). */
+  /** Capability resolution of the provider's own models (the pool resolves members here). Pure. */
   abstract resolveOwnModel(provider: string, model: string, account?: string): Promise<LlmResolvedModelInfo>
 
   async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {

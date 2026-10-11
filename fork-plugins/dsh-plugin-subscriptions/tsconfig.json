@@ -29,6 +29,9 @@
       ],
       "@deepseek-ai/dsh-attachment-local": [
         "../../packages/attachment/attachment-local/lib/types/index.d.ts"
+      ],
+      "@deepseek-ai/dsh-client-store": [
+        "../../packages/client/store/lib/types/index.d.ts"
       ]
     }
   },

@@ -35,10 +35,9 @@ import {
   mergeReasoning,
   oauthEndpointError,
   OAuthEndpointError,
-  discoverAcrossAccounts,
 } from './common.js'
 import type {
-  CatalogPersistence,
+  CatalogStoreFactory,
   DiscoveredModel,
   FetchFn,
   ModelEntry,
@@ -502,7 +501,14 @@ interface AntigravityAdapterOptions {
   onWarn?: (message: string) => void
   fetchFn?: FetchFn
   resolveAttachments?: () => AttachmentStore | undefined
-  catalogStore?: CatalogPersistence
+  /** Durable per-account catalogue store seeding capability metadata across restarts. */
+  catalogStore?: CatalogStoreFactory
+  /** How long a stored catalogue is trusted before an explicit refresh may replace it; defaults to 24 h. */
+  catalogMaxAgeMs?: number
+  /** Failure cooldown for a catalogue request that sent no retry-after; defaults to 60 s. */
+  cacheRetryDelayMs?: number
+  /** Called once after a refresh stored a catalogue different from the previous one. */
+  onCatalogChanged?: (provider: string) => void
   defaultEffortOf?: (model: string) => string | undefined
 }
 
@@ -512,7 +518,7 @@ export class AntigravityAdapter extends PoolBackedAdapter {
 
   constructor(private readonly options: AntigravityAdapterOptions) {
     super(options)
-    this.catalogs = new ProviderCatalog(options, 'Antigravity', {
+    this.catalogs = new ProviderCatalog(options, 'antigravity', 'Antigravity', {
       staticRows: provider => this.staticModels(provider),
       fetchCatalog: (account, signal) => this.fetchCatalog(account, signal),
       row: (provider, model) => this.listed(provider, model),
@@ -523,9 +529,12 @@ export class AntigravityAdapter extends PoolBackedAdapter {
     return { id: provider, name: 'Google Antigravity' }
   }
 
-  /** Drop cached catalogs after login/logout so the next list does not reuse a stale plan. */
+  /**
+   * Drop this account's cached catalogue, memory and disk, after login/logout or
+   * an identity change, so no read can serve the previous login's plan.
+   */
   clearAccountCatalog(account?: string): void {
-    this.catalogs.invalidate(account)
+    this.catalogs.clearAccountCatalog(account)
   }
 
   override providerRetryPolicy(provider: string) {
@@ -555,14 +564,10 @@ export class AntigravityAdapter extends PoolBackedAdapter {
     ))
   }
 
+  /** The known entry for one model, from the account caches only. */
   private async discovered(model: string, account?: string): Promise<DiscoveredModel | undefined> {
     if (!this.options.discovery) return undefined
-    const accounts = account === undefined ? (await this.options.tokens.list()).map(entry => entry.key) : [account]
-    return discoverAcrossAccounts(accounts, async key => {
-      const catalog = await this.catalogs.cache(key)
-      const models = await catalog.resolve(() => this.fetchCatalog(key))
-      return models?.find(entry => entry.id === model)
-    })
+    return await this.catalogs.findModel(model, account)
   }
 
   /** Capability resolution of the provider's own models (the pool resolves members here). */
@@ -596,7 +601,9 @@ export class AntigravityAdapter extends PoolBackedAdapter {
         session, payload, true, this.options.runtime, this.options.fetchFn, watchdog.signal,
       )
       if (response.status === 401) {
-        this.clearAccountCatalog(account)
+        // A rejected token is renewed for the SAME login, so the account's
+        // catalogue still describes it: refreshing the credential must not cost
+        // the capability metadata a running session already selected.
         session = await this.options.tokens.session(account, true)
         payload = toAntigravityRequest(options, messages, session.projectId, true)
         response = await requestAntigravityContent(

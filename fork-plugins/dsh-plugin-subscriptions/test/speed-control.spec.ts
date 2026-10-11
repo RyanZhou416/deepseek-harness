@@ -21,7 +21,7 @@ const css = registerHooks({ load(url, context, nextLoad) {
 const { createSpeedLoader, createSpeedSetter, settleChoice, settleRead, speedControlVisible }
   = await import('../src/client/SpeedSelect.js')
 css.deregister()
-import type { ModelDirectoriesLike, SpeedView } from '../src/client/SpeedSelect.js'
+import type { ModelDirectoryLike, SpeedView } from '../src/client/SpeedSelect.js'
 import { createFakeConnection } from './fake-connection.js'
 import type { FakeRpcHandler } from './fake-connection.js'
 import { saveAccountSession } from '../src/auth/store.js'
@@ -73,14 +73,15 @@ test('a settled choice outranks a read that started before it', () => {
   // The control watches this shape: the state it last published plus the generation its reads
   // are stamped with.
   const reading: SpeedView = { generation: 0, state: { visible: true, tier: 'standard' } }
-  // The race: a 3 s poll starts (stamped with the generation it starts under), the user picks
-  // Fast, and only then does the slower poll settle. Publishing it would put the replaced tier
-  // back on screen, which is the setting appearing to revert to standard on its own.
-  const read = reading.generation
+  const model = { provider: 'claude', model: 'claude-opus-5' }
+  // The race: a read starts (stamped with the generation and model it starts under), the user
+  // picks Fast, and only then does the slower read settle. Publishing it would put the replaced
+  // tier back on screen, which is the setting appearing to revert to standard on its own.
+  const read = { model, generation: reading.generation }
   const chosen = settleChoice(reading, 'fast')
   assert.deepEqual(chosen, { generation: 1, state: { visible: true, tier: 'fast' } })
   assert.equal(
-    settleRead(chosen, read, { visible: true, tier: 'standard' }),
+    settleRead(chosen, read, { visible: true, tier: 'standard' }, model),
     chosen,
     'the superseded read cannot undo the choice',
   )
@@ -88,8 +89,22 @@ test('a settled choice outranks a read that started before it', () => {
   // A read the current generation still owns is what keeps the control following the host: the
   // selector hides and returns as the session's model changes.
   assert.deepEqual(
-    settleRead(chosen, chosen.generation, { visible: false, tier: 'fast' }),
+    settleRead(chosen, { model, generation: chosen.generation }, { visible: false, tier: 'fast' }, model),
     { generation: 1, state: { visible: false, tier: 'fast' } },
+  )
+
+  // A read that answered for another model never reaches the row: it would show a tier the model
+  // on screen never stored.
+  assert.equal(
+    settleRead(chosen, { model: { provider: 'codex', model: 'gpt-5-codex' }, generation: chosen.generation },
+      { visible: true, tier: 'standard' }, { provider: 'claude', model: 'claude-opus-5' }),
+    chosen,
+    'a read of another model cannot speak for this one',
+  )
+  assert.deepEqual(
+    settleRead(chosen, { model: null, generation: chosen.generation }, { visible: false, tier: 'standard' }, null),
+    { generation: 1, state: { visible: false, tier: 'standard' } },
+    'both sides absent is the same model',
   )
 })
 
@@ -136,9 +151,12 @@ test('reading one provider model\'s speed does not enumerate unrelated providers
   }
 })
 
-/** One session's model directory, as the host service answers it. */
-function directories(current: { provider: string; model: string } | null): ModelDirectoriesLike {
-  return { directoryFor: () => ({ load: async () => ({ current }) }) }
+/** One session's shared directory: the observable store plus the explicit one-shot read. */
+function directory(current: { provider: string; model: string } | null): ModelDirectoryLike {
+  return {
+    store: { getSnapshot: () => ({ current }), subscribe: () => () => {} },
+    load: async () => ({ current }),
+  }
 }
 
 /**
@@ -149,11 +167,10 @@ function speedRpc(
   model: { provider: string; model: string } | null,
   tier: SpeedTier,
   fastModels: string[],
-): { rpc: ConnectionHandle['rpc']; calls: { endpoint: string; payload: unknown }[]; available: () => ModelDirectoriesLike | undefined } {
+): { rpc: ConnectionHandle['rpc']; calls: { endpoint: string; payload: unknown }[] } {
   const calls: { endpoint: string; payload: unknown }[] = []
   return {
     calls,
-    available: () => directories(model),
     rpc: {
       call: (_channel, endpoint, payload) => {
         calls.push({ endpoint, payload })
@@ -165,13 +182,15 @@ function speedRpc(
   }
 }
 
+const CLAUDE_MODEL = { provider: 'claude', model: 'claude-opus-5' }
+
 test('the composer control reads and writes the tier of the session\'s current model', async () => {
-  const { rpc, calls, available } = speedRpc({ provider: 'claude', model: 'claude-opus-5' }, 'fast', ['claude-opus-5'])
-  assert.deepEqual(await createSpeedLoader(rpc, available, 'session-1')(), { visible: true, tier: 'fast' })
+  const { rpc, calls } = speedRpc(CLAUDE_MODEL, 'fast', ['claude-opus-5'])
+  assert.deepEqual(await createSpeedLoader(rpc)(CLAUDE_MODEL), { visible: true, tier: 'fast' })
   assert.deepEqual(calls, [{ endpoint: 'subscriptions-auth.speed', payload: { provider: 'claude', model: 'claude-opus-5' } }])
   // The write addresses the same model, so the stored tier follows the model rather than the
   // session it was chosen in.
-  assert.equal(await createSpeedSetter(rpc, available, 'session-1')('standard'), true)
+  assert.equal(await createSpeedSetter(rpc)(CLAUDE_MODEL, 'standard'), true)
   assert.deepEqual(calls[1], {
     endpoint: 'subscriptions-auth.setSpeed',
     payload: { provider: 'claude', model: 'claude-opus-5', tier: 'standard' },
@@ -179,22 +198,20 @@ test('the composer control reads and writes the tier of the session\'s current m
 })
 
 test('the composer control hides and writes nothing without a current model', async () => {
-  const { rpc, calls, available } = speedRpc(null, 'fast', ['claude-opus-5'])
-  assert.deepEqual(await createSpeedLoader(rpc, available, 'session-1')(), { visible: false, tier: 'standard' })
-  assert.equal(await createSpeedSetter(rpc, available, 'session-1')('fast'), false)
-  // A shell with no model-selection service keeps the control hidden too.
-  assert.deepEqual(await createSpeedLoader(rpc, () => undefined, 'session-1')(), { visible: false, tier: 'standard' })
-  assert.equal(await createSpeedSetter(rpc, () => undefined, 'session-1')('fast'), false)
+  const { rpc, calls } = speedRpc(null, 'fast', ['claude-opus-5'])
+  assert.deepEqual(await createSpeedLoader(rpc)(null), { visible: false, tier: 'standard' })
+  // A model switch that has not resolved yet is the same case: nothing to address.
+  assert.equal(await createSpeedSetter(rpc)({ provider: 'grok', model: 'grok-4' }, 'fast'), false)
   assert.deepEqual(calls, [], 'no endpoint is called without a model to address')
 })
 
 test('providers without a speed control make no speed RPC calls', async () => {
   for (const provider of ['deepseek-official', 'grok', 'copilot', 'antigravity']) {
-    const { rpc, calls, available } = speedRpc({ provider, model: 'm' }, 'fast', ['m'])
-    const state = await createSpeedLoader(rpc, available, 'session-1')()
+    const { rpc, calls } = speedRpc({ provider, model: 'm' }, 'fast', ['m'])
+    const state = await createSpeedLoader(rpc)({ provider, model: 'm' })
     assert.deepEqual(calls, [], `${provider}: no read`)
     assert.deepEqual(state, { visible: false, tier: 'standard' })
-    assert.equal(await createSpeedSetter(rpc, available, 'session-1')('fast'), false)
+    assert.equal(await createSpeedSetter(rpc)({ provider, model: 'm' }, 'fast'), false)
     assert.deepEqual(calls, [], `${provider}: no write`)
   }
 })
@@ -203,6 +220,5 @@ test('a failed speed write settles as a failed choice rather than rejecting', as
   // The composer leaves its busy state on the promise's settlement, so a rejection would stick
   // the control; the fetch failure has to arrive as `false`.
   const rpc: ConnectionHandle['rpc'] = { call: () => Promise.reject(new Error('offline')) }
-  const available = () => directories({ provider: 'claude', model: 'claude-opus-5' })
-  assert.equal(await createSpeedSetter(rpc, available, 'session-1')('fast'), false)
+  assert.equal(await createSpeedSetter(rpc)(CLAUDE_MODEL, 'fast'), false)
 })

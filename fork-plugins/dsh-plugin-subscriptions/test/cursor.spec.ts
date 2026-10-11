@@ -293,6 +293,9 @@ test('a Cursor turn disables built-in tools and hands the first custom tool back
     tokens,
     discovery: true,
   })
+  // The registered route ensures the selected account's catalogue before it
+  // sends, so the turn below reads what this refresh stored.
+  await adapter.refreshOwnCatalog('cursor', 'a@example.com')
   const models = await adapter.listOwnModels('cursor', 'a@example.com')
   assert.deepEqual(models.map(model => model.id), ['composer-2.5'])
   const chunks: StreamChunk[] = []

@@ -2,8 +2,11 @@
  * Subscriptions settings section: one card per subscription provider with an
  * OAuth login/logout flow driven by the node half's `/subscriptions-auth` RPC
  * channel. Login state lives server-side; the page polls `status` only while
- * a login attempt is busy, so an idle page never polls. All state is local
- * React state — the page has no store.
+ * a login attempt is busy, so an idle page never polls. The provider roster
+ * and every account's usage come from the plugin application's shared cache
+ * (`subscriptions-cache.ts`), which the composer badge reads too: this page
+ * asks for a local snapshot on mount and only an explicit Refresh asks the
+ * node half for a refreshed one.
  *
  * Every color resolves through a `--dsw-alias-*` design token (the ui-theme
  * design-platform.css values flip under `body[data-ds-dark-theme]`), and
@@ -15,6 +18,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { CSSProperties, Dispatch, SetStateAction } from 'react'
 import type { ConnectionHandle } from '@deepseek-ai/dsh-api-remotes/client'
+import type { InjectFace } from '@deepseek-ai/dsh-client-ui-slots'
 import { en } from './locales.js'
 import { formatDateTime } from './format.js'
 import { ProviderAccountManager } from './ProviderAccountManager.js'
@@ -25,15 +29,12 @@ import { callSubscriptionsAuth, SubscriptionsAuthError } from './subscriptions-r
 export { callSubscriptionsAuth } from './subscriptions-rpc.js'
 import { errorLine, withActionError, withPollError } from './provider-errors.js'
 import type { ProviderErrorState } from './provider-errors.js'
+import type {
+  CachedUsage, ObservableSnapshot, StatusRead, StatusRoster, SubscriptionsCacheState, UsageReadMode,
+} from './subscriptions-cache.js'
 
 /** Poll cadence while a provider login attempt is busy. */
 const POLL_INTERVAL_MS = 2000
-
-/**
- * Model count above which the expanded default-effort list also offers a name
- * filter; below it the list is short enough to scan.
- */
-const MODEL_FILTER_THRESHOLD = 8
 
 /** Subscription provider ids, fixed by the node half's OAuth adapters. */
 export type SubscriptionProvider = 'codex' | 'claude' | 'grok' | 'copilot' | 'antigravity' | 'cursor'
@@ -52,11 +53,6 @@ export interface ProviderStatus {
   busy: boolean
   accounts: AccountStatus[]
   detail?: string
-}
-
-/** `status` endpoint value: the node half owns this shape. */
-interface StatusResponse {
-  providers: Record<SubscriptionProvider, ProviderStatus>
 }
 
 /** One rate-limit window as answered by the `usage` endpoint. */
@@ -97,6 +93,23 @@ export interface PoolReport {
   peerAvailable: boolean
 }
 
+/**
+ * Cache state the node half reports beside a usage snapshot.
+ *
+ * `missing` is not zero percent and not "unsupported": nothing has been read
+ * for this account yet. `stale` and `error` carry the last known windows, and
+ * `retryAt` is the instant the node half's cooldown lets a forced read run.
+ */
+export interface UsageCacheMetadata {
+  state: 'fresh' | 'stale' | 'missing' | 'error' | 'refreshing'
+  /** Instant the reported values were observed, on the node half's clock. */
+  observedAt?: number
+  /** Earliest instant a forced read is accepted again. */
+  retryAt?: number
+  /** Coded reason of an `error` state (never raw provider text). */
+  error?: string
+}
+
 /** `usage` endpoint value: the node half owns this shape. */
 export interface ProviderUsage {
   supported: boolean
@@ -108,24 +121,8 @@ export interface ProviderUsage {
   rateLimit?: RateLimitReport
   /** The account pool's view of this account, when the pool is enabled. */
   pool?: PoolReport
-}
-
-/** One model's default-effort picker state as answered by `modelDefaults`. */
-export interface ModelDefaultView {
-  id: string
-  name: string
-  /** The provider's own reason for refusing the model, or absent when it may serve. */
-  disabledReason?: string
-  /** Advertised effort levels, in catalog order (empty when the model has no reasoning). */
-  efforts: { id: string; name: string }[]
-  /** The user-configured default effort, when set. */
-  configured?: string
-}
-
-/** `modelDefaults` endpoint value: one provider's picker state. */
-export interface ModelDefaultsCatalog {
-  provider: SubscriptionProvider
-  models: ModelDefaultView[]
+  /** Freshness of this snapshot, when the node half reports one. */
+  cache?: UsageCacheMetadata
 }
 
 /** `proxyGet` endpoint value: the node half owns this shape (no secrets). */
@@ -160,13 +157,33 @@ export interface SubscriptionsSectionInjected {
   rpc: ConnectionHandle['rpc']
   /** Section copy: translate a 'settings.subscriptions' key with `{name}` template params. */
   t: (key: SubscriptionsKey, params?: Record<string, unknown>) => string
+  /**
+   * Read the shared cache's roster.
+   * @param options - `fresh` starts an independent read instead of folding into one already running.
+   * @returns the roster, or the message the caller renders.
+   */
+  readStatus: (options?: { fresh?: boolean }) => Promise<StatusRead>
+  /**
+   * Read one account's usage from the shared cache.
+   * @param provider - the account's provider.
+   * @param account - the account key.
+   * @param mode - local snapshot (default), if-needed refresh, or forced refresh.
+   * @returns nothing once the read has started.
+   */
+  readUsage: (provider: SubscriptionProvider, account: string, mode?: UsageReadMode) => Promise<void>
+  /** Registrant hooks compartment: the shared cache source, bound to `useUsage`. */
+  hooks: { usage: ObservableSnapshot<SubscriptionsCacheState> }
 }
 
 /**
- * Props delivered by the slot outlet: the inject face spread flat (the
- * renderer erases the share boundary at the render call).
+ * Props delivered by the slot outlet: the inject face with its hooks
+ * compartment bound (`useUsage` is the framework's own seat and is always
+ * present), and the optional members standalone renders may omit.
  */
-export type SubscriptionsSectionProps = Partial<SubscriptionsSectionInjected>
+export type SubscriptionsSectionProps =
+  & Partial<Pick<SubscriptionsSectionInjected, 'rpc' | 't'>>
+  & Required<Pick<SubscriptionsSectionInjected, 'readStatus' | 'readUsage'>>
+  & Pick<InjectFace<SubscriptionsSectionInjected>, 'useUsage'>
 
 /** Card display metadata, in page order (names are brand names, not translated). */
 const PROVIDERS: readonly { id: SubscriptionProvider; name: string }[] = [
@@ -181,15 +198,6 @@ const PROVIDERS: readonly { id: SubscriptionProvider; name: string }[] = [
 /** Human text of an action failure, SubscriptionsAuthError or not. */
 function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
-}
-
-/** Copy a keyed map without the entries whose key is not in `live`. */
-function dropStale<T>(map: Record<string, T>, live: ReadonlySet<string>): Record<string, T> {
-  const stale = Object.keys(map).filter(key => !live.has(key))
-  if (stale.length === 0) return map
-  const next = { ...map }
-  for (const key of stale) delete next[key]
-  return next
 }
 
 /**
@@ -392,6 +400,50 @@ export function usageBarColor(usedPercent: number): string {
 }
 
 /**
+ * Localized freshness line of one cached usage entry: when the values were
+ * observed, whether the node half kept a stale value, has none yet, failed its
+ * last revalidation, or is refreshing now, plus the instant a forced read may
+ * be tried again.
+ *
+ * The line states the cache's own state, so a `missing` account never reads as
+ * "zero percent" and a failed revalidation never hides the quotas that are
+ * still on screen.
+ * @param entry - the account's cache entry, or undefined before any read.
+ * @param t - section translate.
+ * @returns the line, or undefined when the entry carries nothing to state.
+ */
+export function usageCacheNote(
+  entry: CachedUsage | undefined,
+  t: SubscriptionsSectionInjected['t'],
+): string | undefined {
+  if (entry === undefined) return undefined
+  const now = Date.now()
+  const parts: string[] = []
+  const metadata = entry.usage?.cache
+  // Only the node half's own observation time is stated. A local read time would
+  // read as "updated just now" for values the Host never refreshed.
+  if (metadata?.observedAt !== undefined) {
+    parts.push(t('usageCacheUpdated', { date: formatDateTime(t, metadata.observedAt) }))
+  }
+  switch (metadata?.state) {
+    case 'stale': parts.push(t('usageCacheStale')); break
+    case 'missing': parts.push(t('usageCacheMissing')); break
+    case 'error':
+      parts.push(metadata.error === undefined
+        ? t('usageCacheFailedNoReason')
+        : t('usageCacheFailed', { message: metadata.error }))
+      break
+    case 'refreshing': parts.push(t('usageCacheRefreshing')); break
+    case 'fresh':
+    case undefined: break
+  }
+  if (metadata?.retryAt !== undefined && metadata.retryAt > now) {
+    parts.push(t('usageCacheRetry', { date: formatDateTime(t, metadata.retryAt) }))
+  }
+  return parts.length === 0 ? undefined : parts.join(' · ')
+}
+
+/**
  * The fact one account's red usage line states.
  *
  * `limit` and `near` come from the reported window percentages, `rejected` and
@@ -538,107 +590,17 @@ function messageColor(tone: 'success' | 'error'): string {
     : 'var(--dsw-alias-state-success-primary)'
 }
 
-/** What one provider's collapsible default-effort section renders. */
-interface ModelDefaultsView {
-  /** Models with reasoning levels, after the name filter — one row each. */
-  shown: ModelDefaultView[]
-  /** Models with reasoning levels before filtering (the header total). */
-  total: number
-  /** How many of those carry a user override (the header count). */
-  overridden: number
-  /** Models without reasoning levels: one count line, never a row each. */
-  withoutEfforts: number
-  /** Whether the list is long enough to deserve a filter box. */
-  showFilter: boolean
-}
-
-/**
- * Derive one provider's default-effort section from its catalog and filter.
- * Pure so the collapsed-header counts and the filter stay testable without a
- * DOM: rows come only from models that advertise levels, the count of the rest
- * rides as one line, and the filter matches display name or model id.
- * @param models - the provider's catalog models, or undefined while loading.
- * @param filter - the raw filter input (trimmed and lowercased here).
- * @returns the section's rows and header counts.
- */
-export function deriveModelDefaultsView(
-  models: readonly ModelDefaultView[] | undefined,
-  filter: string,
-): ModelDefaultsView {
-  const all = models ?? []
-  const withEfforts = all.filter(model => model.efforts.length > 0)
-  const query = filter.trim().toLowerCase()
-  const shown = query === ''
-    ? withEfforts
-    : withEfforts.filter(model => model.name.toLowerCase().includes(query)
-      || model.id.toLowerCase().includes(query))
-  return {
-    shown,
-    total: withEfforts.length,
-    overridden: withEfforts.filter(model => model.configured !== undefined).length,
-    withoutEfforts: all.length - withEfforts.length,
-    showFilter: withEfforts.length > MODEL_FILTER_THRESHOLD,
-  }
-}
-
-/** Inputs of the default-effort fetch decision (see {@link shouldFetchModelDefaults}). */
-export interface ModelDefaultsFetchInput {
-  /** Providers that currently have at least one account. */
-  loggedIn: readonly SubscriptionProvider[]
-  /** Providers whose disclosure is open. */
-  open: readonly SubscriptionProvider[]
-  /** The account signature the last completed fetch was answered for. */
-  loadedFor: string | undefined
-  /** The account signature of the current status snapshot. */
-  signature: string
-  /** Whether the last attempt failed (a failure latches until Retry). */
-  failed: boolean
-}
-
-/**
- * Whether the default-effort catalog needs (re)fetching.
- *
- * Fetching is gated on an *attempt* signature rather than on the payload
- * being empty: an empty answer is a legitimate result (a narrowed
- * `config.providers`, or a catalog that is momentarily unavailable), and
- * treating it as "not loaded yet" re-ran this effect forever. The signature
- * also covers the accounts, so logging a second provider in refetches
- * instead of leaving that card on the previous answer.
- * @param input - the decision inputs.
- * @returns true when the caller should start a fetch.
- */
-export function shouldFetchModelDefaults(input: ModelDefaultsFetchInput): boolean {
-  if (input.failed) return false
-  if (input.loggedIn.length === 0) return false
-  // Only an open disclosure pays for the per-model live resolve.
-  if (!input.open.some(provider => input.loggedIn.includes(provider))) return false
-  return input.loadedFor !== input.signature
-}
-
-/**
- * Stable signature of the accounts a catalog answer depends on. A change
- * means a previous answer is stale (an account arrived or left), so the next
- * open disclosure refetches.
- * @param statuses - the per-provider status snapshot.
- * @returns a signature string, stable across renders with equal accounts.
- */
-export function modelDefaultsSignature(
-  statuses: Partial<Record<SubscriptionProvider, ProviderStatus>>,
-): string {
-  return PROVIDERS
-    .map(({ id }) => `${id}:${(statuses[id]?.accounts ?? []).map(account => account.key).sort().join(',')}`)
-    .join('|')
-}
-
 /**
  * The Subscriptions settings page component.
  * @param props - the slot inject face ({@link SubscriptionsSectionInjected}).
  * @returns the section body, or a notice while the RPC face is absent.
  */
 export function SubscriptionsSection(props: SubscriptionsSectionProps) {
-  const { rpc } = props
+  const { rpc, readStatus, readUsage, useUsage } = props
   const t = props.t ?? fallbackTranslate
-  const [statuses, setStatuses] = useState<Partial<Record<SubscriptionProvider, ProviderStatus>>>({})
+  /** The shared cache snapshot: the roster and every account's usage entry. */
+  const cache = useUsage(snapshot => snapshot)
+  const [statuses, setStatuses] = useState<StatusRoster>({})
   /** Error lines per provider: a failed poll and a failed action, kept apart (see provider-errors.ts). */
   const [errorLines, setErrorLines] = useState<ProviderErrorState>({})
   const [manualDrafts, setManualDrafts] = useState<Record<SubscriptionProvider, string>>({
@@ -650,17 +612,8 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
   const [authorizeUrls, setAuthorizeUrls] = useState<Partial<Record<SubscriptionProvider, string>>>({})
   const [copiedCode, setCopiedCode] = useState<SubscriptionProvider | undefined>(undefined)
   const [copiedUrl, setCopiedUrl] = useState<SubscriptionProvider | undefined>(undefined)
-  /** Usage snapshots keyed `${provider}:${accountKey}` — every account tracks its own windows. */
-  const [usages, setUsages] = useState<Record<string, ProviderUsage>>({})
-  const [usageErrors, setUsageErrors] = useState<Record<string, string>>({})
-  const [usageLoading, setUsageLoading] = useState<Record<string, boolean>>({})
   const mountedRef = useRef(true)
   const pollersRef = useRef(new Map<SubscriptionProvider, ReturnType<typeof setInterval>>())
-  /** Accounts with a `usage` call in flight; guards the auto-fetch effect against re-entry. */
-  const usageInflightRef = useRef(new Set<string>())
-  /** Forced refreshes that arrived while a lookup was already running. */
-  const usageForceRef = useRef(new Set<string>())
-  const loadUsageRef = useRef<(provider: SubscriptionProvider, account: string, force?: boolean) => void>(() => {})
   /** Proxy config as last answered by `proxyGet`/`proxySet`. */
   const [proxy, setProxy] = useState<ProxyConfigView | undefined>(undefined)
   const [proxyLoadError, setProxyLoadError] = useState<string | undefined>(undefined)
@@ -700,27 +653,28 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
     }
   }, [])
 
-  /** Refetch every provider's status; stop a provider's poller once its attempt settles. */
-  const refresh = useCallback(async (): Promise<void> => {
+  /**
+   * Refetch every provider's status through the shared cache; stop a
+   * provider's poller once its attempt settles.
+   * @param fresh - start an independent read (a user action) instead of folding into one already running.
+   */
+  const refresh = useCallback(async (fresh = false): Promise<void> => {
     if (rpc === undefined) return
-    let response: StatusResponse
-    try {
-      response = await callSubscriptionsAuth<StatusResponse>(rpc, 'status', {})
-    } catch (error) {
+    const response = await readStatus({ fresh })
+    if (!mountedRef.current) return
+    if (!response.ok) {
       // A failed poll must not kill the page; busy providers keep polling and
       // the action paths report their own errors. But staying silent turns a
       // persistent failure into an endless "Checking…" — show it instead.
-      const message = error instanceof Error ? error.message : String(error)
-      for (const { id } of PROVIDERS) setProviderError(id, message)
+      for (const { id } of PROVIDERS) setProviderError(id, response.message)
       return
     }
-    if (!mountedRef.current) return
     setStatuses(response.providers)
     // The poll recovered: drop any error line a previous failed poll left.
     for (const { id } of PROVIDERS) setProviderError(id, undefined)
     for (const { id } of PROVIDERS) {
       const status = response.providers[id]
-      if (status.accounts.length > 0 || !status.busy) {
+      if (status === undefined || status.accounts.length > 0 || !status.busy) {
         stopPolling(id)
         // The attempt settled (success, timeout, or cancel): drop the code and
         // authorize-link cards.
@@ -728,7 +682,7 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
         setAuthorizeUrls(prev => dropKey(prev, id))
       }
     }
-  }, [rpc, stopPolling, setProviderError])
+  }, [rpc, readStatus, stopPolling, setProviderError])
 
   const startPolling = useCallback((provider: SubscriptionProvider): void => {
     if (pollersRef.current.has(provider)) return
@@ -755,49 +709,14 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
     }
   }, [refresh, startPolling])
 
-  const loadUsage = useCallback(async (provider: SubscriptionProvider, account: string, force = false): Promise<void> => {
-    const key = `${provider}:${account}`
+  /**
+   * Read one account's usage through the shared cache. `force` is the explicit
+   * Refresh control's mode; every other path reads the local snapshot only.
+   */
+  const loadUsage = useCallback((provider: SubscriptionProvider, account: string, mode: UsageReadMode = 'local'): void => {
     if (rpc === undefined) return
-    if (usageInflightRef.current.has(key)) {
-      if (force) usageForceRef.current.add(key)
-      return
-    }
-    usageInflightRef.current.add(key)
-    setUsageLoading(prev => ({ ...prev, [key]: true }))
-    try {
-      const usage = await callSubscriptionsAuth<ProviderUsage>(rpc, 'usage', { provider, account, ...force ? { force: true } : {} })
-      if (!mountedRef.current) return
-      setUsages(prev => ({ ...prev, [key]: usage }))
-      setUsageErrors((prev) => {
-        const next = { ...prev }
-        delete next[key]
-        return next
-      })
-    } catch (error) {
-      if (mountedRef.current) setUsageErrors(prev => ({ ...prev, [key]: messageOf(error) }))
-    } finally {
-      usageInflightRef.current.delete(key)
-      if (mountedRef.current) setUsageLoading(prev => ({ ...prev, [key]: false }))
-      if (usageForceRef.current.delete(key)) loadUsageRef.current(provider, account, true)
-    }
-  }, [rpc])
-  loadUsageRef.current = (provider, account, force) => { void loadUsage(provider, account, force ?? false) }
-
-  // Fetch usage once an account is logged in; drop the snapshots of accounts
-  // that vanished so a re-login refetches. A failed lookup does not auto-retry
-  // — the per-account Refresh button is the retry path.
-  useEffect(() => {
-    const live = new Set<string>()
-    for (const { id } of PROVIDERS) {
-      for (const account of statuses[id]?.accounts ?? []) {
-        const key = `${id}:${account.key}`
-        live.add(key)
-        if (usages[key] === undefined && usageErrors[key] === undefined) void loadUsage(id, account.key)
-      }
-    }
-    setUsages(prev => dropStale(prev, live))
-    setUsageErrors(prev => dropStale(prev, live))
-  }, [statuses, usages, usageErrors, loadUsage])
+    void readUsage(provider, account, mode)
+  }, [rpc, readUsage])
 
   const login = useCallback(async (provider: SubscriptionProvider, method?: 'oauth' | 'keychain' | 'manual'): Promise<void> => {
     if (rpc === undefined) return
@@ -809,7 +728,7 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
       })
       if (typeof response.authorizeUrl === 'string' && response.authorizeUrl === '') {
         // Instant login (e.g. imported from Claude Code credentials)
-        await refresh()
+        await refresh(true)
         return
       }
       if (typeof response.authorizeUrl !== 'string') {
@@ -846,7 +765,7 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
     } catch (error) {
       setActionError(provider, messageOf(error))
     }
-    await refresh()
+    await refresh(true)
   }, [rpc, stopPolling, setActionError, refresh])
 
   const submitManual = useCallback(async (provider: SubscriptionProvider): Promise<void> => {
@@ -860,7 +779,7 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
     } catch (error) {
       setActionError(provider, messageOf(error))
     }
-    await refresh()
+    await refresh(true)
   }, [rpc, manualDrafts, setActionError, refresh])
 
   const logout = useCallback(async (provider: SubscriptionProvider, account: string, display: string, name: string): Promise<void> => {
@@ -872,7 +791,7 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
     } catch (error) {
       setActionError(provider, messageOf(error))
     }
-    await refresh()
+    await refresh(true)
   }, [rpc, t, setActionError, refresh])
 
   const setDefault = useCallback(async (provider: SubscriptionProvider, account: string): Promise<void> => {
@@ -883,7 +802,7 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
     } catch (error) {
       setActionError(provider, messageOf(error))
     }
-    await refresh()
+    await refresh(true)
   }, [rpc, setActionError, refresh])
 
   /**
@@ -1035,13 +954,17 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
             {error !== undefined && <p style={styles.errorLine}>{error}</p>}
             {accounts.map((account) => {
               const usageKey = `${id}:${account.key}`
-              const usage = usages[usageKey]
-              const usageError = usageErrors[usageKey]
+              const entry = cache.usage[usageKey]
+              const usage = entry?.usage
+              const usageError = entry?.error
+              const usageBusy = cache.loading[usageKey] === true
               const display = account.account ?? account.key
               // Providers without a usage endpoint answer supported:false — no block.
-              const showUsage = usage?.supported !== false
-                && (usage !== undefined || usageError !== undefined || usageLoading[usageKey] === true)
+              // The block also appears while the account's first local read runs,
+              // so a listed account never renders without its usage region.
+              const showUsage = usage?.supported !== false && (entry !== undefined || usageBusy)
               const alert = usageAlert(id, usage?.windows, usage?.rateLimit, usage?.pool)
+              const cacheNote = usageCacheNote(entry, t)
               return (
                 <div key={account.key} style={styles.accountRow}>
                   <div style={styles.accountHeader}>
@@ -1081,9 +1004,10 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
                         )}
                         <button
                           type="button"
-                          style={{ ...styles.usageRefresh, ...usageLoading[usageKey] === true ? { opacity: 0.5, cursor: 'default' } : {} }}
-                          disabled={usageLoading[usageKey] === true}
-                          onClick={() => { void loadUsage(id, account.key, true) }}
+                          style={{ ...styles.usageRefresh, ...usageBusy ? { opacity: 0.5, cursor: 'default' } : {} }}
+                          disabled={usageBusy}
+                          aria-label={t('usageRefreshAccount', { account: display })}
+                          onClick={() => { loadUsage(id, account.key, 'force') }}
                         >
                           {t('usageRefresh')}
                         </button>
@@ -1095,13 +1019,13 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
                             && ` · ${t('usageResets', { date: formatDateTime(t, alert.resetsAt) })}`}
                         </p>
                       )}
-                      {usage === undefined && usageError === undefined && (
-                        <p style={styles.statusLine}>{t('usageLoading')}</p>
-                      )}
                       {usageError !== undefined && (
                         <p style={styles.errorLine}>{t('usageError', { message: usageError })}</p>
                       )}
-                      {usage?.windows !== undefined && usage.windows.length === 0 && (
+                      {usage === undefined && usageError === undefined && (
+                        <p style={styles.statusLine}>{t('usageLoading')}</p>
+                      )}
+                      {usage?.windows !== undefined && usage.windows.length === 0 && usage.cache?.state !== 'missing' && (
                         <p style={styles.statusLine}>{t('usageEmpty')}</p>
                       )}
                       {(usage?.windows ?? []).map((window, index) => {
@@ -1122,6 +1046,7 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
                           </div>
                         )
                       })}
+                      {cacheNote !== undefined && <p style={styles.statusLine}>{cacheNote}</p>}
                       {id === 'codex' && usage?.resetCredits !== undefined && (
                         <ResetCredits
                           rpc={rpc}
@@ -1129,7 +1054,7 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
                           accountKey={account.key}
                           accountLabel={display}
                           availableCount={usage.resetCredits.availableCount}
-                          onChanged={() => { void loadUsage(id, account.key, true) }}
+                          onChanged={() => { loadUsage(id, account.key, 'force') }}
                         />
                       )}
                     </div>

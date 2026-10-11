@@ -60,7 +60,7 @@ Requests derive image versions from saved normalized attachments without replaci
 
 Only logged-in providers appear in the session model picker; the lists above refresh on login/logout. Vision-capable models declare `['text', 'image']` input modalities, and image content is translated to each provider's wire format.
 
-Logged-in cards also show **subscription usage** — per rate-limit window (5-hour session, weekly, and per-model weekly where the plan has one) with the used percentage, a progress bar, and the reset time, plus a Refresh button. Codex usage comes from `chatgpt.com/backend-api/wham/usage` (also reports the plan), Claude usage from `api.anthropic.com/api/oauth/usage`, and Grok usage from the Grok Build CLI proxy's `cli-chat-proxy.grok.com/v1/billing` (the source of the CLI's `/usage` panel; reports the shared weekly pool and the subscription tier). Antigravity reports plan, credits, and per-model quotas from `loadCodeAssist` and `fetchAvailableModels` when those fields are present. Copilot exposes no usage endpoint, so its card shows no usage section. A card carries a red line when that account cannot serve: the provider's own `anthropic-ratelimit-unified-*` response headers, read off the Messages responses this Host sends, state the account's standing ahead of the usage percentages, and the line says separately whether the account itself is over its limit or needs a new login, or whether the account pool is serving from another account instead. A Claude account whose session window is at or past half used, or whose weekly window is at or past 89 percent, is held back from pool selection until its window resets (`pool.scheduling` sets both thresholds). When only those thresholds hold a pool back, the reported wait is the earliest window reset. If an enabled pool owns no entry for a model, the route says so once and serves that model from a single account instead of failing over silently.
+Logged-in cards also show **subscription usage** — per rate-limit window (5-hour session, weekly, and per-model weekly where the plan has one) with the used percentage, a progress bar, and the reset time, plus a Refresh button that re-reads that account upstream (a live failure cooldown still applies). A plain read serves the account's cached windows. Codex usage comes from `chatgpt.com/backend-api/wham/usage` (also reports the plan), Claude usage from `api.anthropic.com/api/oauth/usage`, and Grok usage from the Grok Build CLI proxy's `cli-chat-proxy.grok.com/v1/billing` (the source of the CLI's `/usage` panel; reports the shared weekly pool and the subscription tier). Antigravity reports plan, credits, and per-model quotas from `loadCodeAssist` and `fetchAvailableModels` when those fields are present. Copilot exposes no usage endpoint, so its card shows no usage section. A card carries a red line when that account cannot serve: the provider's own `anthropic-ratelimit-unified-*` response headers, read off the Messages responses this Host sends, state the account's standing ahead of the usage percentages, and the line says separately whether the account itself is over its limit or needs a new login, or whether the account pool is serving from another account instead. A Claude account whose session window is at or past half used, or whose weekly window is at or past 89 percent, is held back from pool selection until its window resets (`pool.scheduling` sets both thresholds). When only those thresholds hold a pool back, the reported wait is the earliest window reset. If an enabled pool owns no entry for a model, the route says so once and serves that model from a single account instead of failing over silently.
 
 Under **Subscriptions → ChatGPT → Manage**, **Automatically use reset credits when quota is exhausted** is off by default and takes effect after **Save changes**. It applies to Codex LLM requests, including independent account entries. When the current account exhausts a session or weekly window, its earliest-expiring available `codex_rate_limits` credit can be spent only if no available credit on any connected ChatGPT account expires sooner. Accounts excluded from routing still participate in this comparison; another account having quota does not prevent spending, and equal expiry times qualify. Tool-only image and search requests do not trigger this feature.
 
@@ -84,15 +84,27 @@ Image generation and editing share same-provider account scheduling: try the def
 
 ### DSH compatibility
 
-This fork artifact, `0.9.4-dsh017rc1.22`, is pinned to DSH `0.1.7-rc.1` and Cordis `4.0.4`. Its V4 tool-role translation, pinned Claude Code 2.1.288 wire, and UI were built and tested against that exact cohort; do not install it on an older DSH profile. The upstream public `0.9.4` package declares a broader peer range, which does not apply to this private artifact.
+This fork artifact, `0.9.4-dsh017rc1.23`, is pinned to DSH `0.1.7-rc.1` and Cordis `4.0.4`. Its V4 tool-role translation, pinned Claude Code 2.1.288 wire, and UI were built and tested against that exact cohort; do not install it on an older DSH profile. The upstream public `0.9.4` package declares a broader peer range, which does not apply to this private artifact.
 
 ### Managing accounts and pool models
 
 Open **Settings → Subscriptions → provider → Manage** to edit account aliases, automatic-pool participation and model allowlists, and independent account model entries. Each model appears once in the provider model list, carrying its own row settings and one pool checkbox per account whose catalog lists it; `(1M)` variants keep separate rows because each is a distinct wire id. Existing accounts continue using automatic pooling by default. Independent entries stay bound to one account and never fall back to another account when unavailable. These settings govern LLM routing, not image/video/search tool account policies. See [Account and model management](docs/account-management.md).
 
-### Refreshing model lists
+### Cached model lists and usage
 
-In **Settings → Subscriptions → provider → Edit model list**, use **Refresh** to bypass the five-minute catalog cache and refresh the conversation model picker too. This is separate from refreshing subscription usage. If `models.<provider>` is explicitly configured with a non-empty list, that list still overrides discovery. Selecting a model reuses its account's last-known capabilities while stale data refreshes; sending a request still validates current account membership. Accounts without a cached catalog wait for their first discovery.
+Discovered catalogues and usage readings are per-account caches under `~/.dsh/plugins/subscriptions/`, and a plain read answers from local state: it never queries a provider and never starts a timer. `models.json` holds one entry per provider account and `usage-cache.json` the normalized window readings with their observation times and read cooldowns; neither file holds a token. A `models.json` written before accounts were keyed is discarded rather than assigned to an account, and such an account re-discovers at its next refresh. A canonical-key rename moves an account's cached catalogue, usage reading and cooldowns to the new key; a rename the credential store only recorded on an earlier run is reconciled from its own alias records once before the first account read, so no retired key serves a session.
+
+Provider queries happen only on explicit events: a login refreshes that account's catalogue and no usage; opening a provider's **Manage** dialog revalidates that provider's catalogues only where an entry is older than the cache horizon; **Refresh** in **Edit model list** forces every account's catalogue of that provider (and re-checks the Codex client version); opening the usage pill asks for an if-needed reading of the current provider's usage; the usage **Refresh** control forces one account's reading; a consumed ChatGPT reset credit re-reads its account; the account a model request is about to use ensures its own catalogue; and the pool candidate about to serve ensures its own catalogue and usage reading.
+
+Every other read is local and reaches no provider: a finished run, a window focus, a reconnect generation, a model switch, a login/logout roster change, the Settings page's first paint, and the seeding read the browser cache runs for an account it has not seen. Pool ranking reads retained cache entries only, so ranking never sweeps the peer accounts. The only remaining timers are protocol or local: the login-progress poll while an authorization attempt is in flight (which also observes the device grant), the credential-store lock renewal, the badge's open-panel countdown, and the opt-in Claude Code keychain sync (`syncClaudeCodeCredentials`, every five minutes).
+
+`cache.modelMaxAgeMs` (default 24 h) is the catalogue freshness horizon, `cache.usageMaxAgeMs` (default 5 min) the usage horizon, and `cache.retryDelayMs` (default 60 s) the cooldown a failed read takes when the provider named none. A failed read stores that cooldown in the same file, so a restart still honours it, and an explicit refresh never bypasses a live cooldown.
+
+Only the Claude route reads rate-limit response headers, and only through the recognized `anthropic-ratelimit-unified-*` subset: such a response merges the windows those headers name, while every route merges the windows its own usage endpoint returns. A window an answer omits keeps its own reading and age, so an account whose endpoint reports no window is unknown rather than at zero.
+
+One limitation. An HTTP 403/404 that might mean a model was withdrawn does not trigger an automatic catalogue re-read, because no machine-readable code the plugin can trust separates that from an entitlement or endpoint refusal: the row keeps its last-known state until a manual **Refresh** or the ordinary stale-demand re-read.
+
+If `models.<provider>` is explicitly configured with a non-empty list, that list still overrides discovery. Selecting a model reuses its account's last-known capabilities; sending a request still validates current account membership, and an account with nothing cached contributes its built-in rows until an event refreshes it.
 
 Codex catalog visibility depends on the `client_version` request parameter. By default the plugin reads the stable version from the official npm `@openai/codex` package's public metadata (no CLI installation or subscription credentials sent to npm). Successful lookups are cached in memory for six hours; failures retry after five minutes and retain the last successful version, or the verified `0.153.4` fallback on first use. The lookup has a 5-second deadline, shares in-flight work across accounts, and ignores prerelease or regressed versions. On load the plugin also raises Node's Happy Eyeballs per-address connect attempt timeout to at least 1.5 seconds (never lowering a larger host value), because the 250ms default drops every connection on links where one TCP handshake takes longer than that. Manual model-list refresh also rechecks the version. An explicit plugin configuration field, `codexClientVersion: '0.153.4'`, takes precedence and disables automatic lookup; restart DSH after changing it. Model availability remains account-dependent; see [verification notes](docs/codex-catalog-refresh.md).
 
@@ -168,7 +180,7 @@ Claude models have no context-budget field: a context size is chosen the way the
 
 The same editor controls Codex Web Search and image generation, plus Grok image generation, video generation, and X search. Changes apply only to sessions created after saving; existing sessions retain their creation-time policy, including after restart. Image generation is shared: it disappears only when neither configured provider enables it, and execution never falls back to a provider disabled for that session. Claude and Copilot currently have no standalone subscription tools to configure.
 
-Preferences and tool-policy history live in `~/.dsh/plugins/subscriptions/provider-settings.json` (mode 0600), independently of the five-minute discovery cache. Existing non-empty `models.<provider>` configuration still defines the base catalog; visibility selections filter that catalog.
+Preferences and tool-policy history live in `~/.dsh/plugins/subscriptions/provider-settings.json` (mode 0600), independently of the cached model lists and usage readings. Existing non-empty `models.<provider>` configuration still defines the base catalog; visibility selections filter that catalog.
 
 ### Reasoning defaults in the model editor
 
@@ -187,6 +199,10 @@ Existing defaults continue to load from and save to `~/.dsh/plugins/subscription
     rateLimit:
       wait: true                       # wait out a closed rate-limit window (default)
       maxWaitMs: 21600000              # ceiling on one wait; 6 h, covers a 5-hour session window
+    cache:
+      modelMaxAgeMs: 86400000          # catalogue freshness horizon (default 24 h)
+      usageMaxAgeMs: 300000            # usage freshness horizon (default 5 min)
+      retryDelayMs: 60000              # failed-read cooldown when the provider names none
     models:                            # override the discovered/built-in catalogs
       codex:
         - { id: gpt-5.6-sol, name: GPT-5.6 Sol, contextWindow: 272000, inputModalities: [text, image] }
@@ -218,7 +234,7 @@ When a provider has **two or more logged-in accounts**, the picker shows the **u
 
 Selection is sticky per session, provider, and model pool. `priority` keeps its configured healthy-member order and session affinity. The default `quota_aware` strategy normalizes the existing `remaining quota / time until reset` scores within each availability band, then adds bounded preferences for Claude and ChatGPT resets and for finishing small ChatGPT remainders. A ChatGPT weekly window opened within 24 hours with an available reset card expiring within three days receives a finite bonus rather than an absolute priority. Automatic credit spending requires the separate opt-in setting described above.
 
-Claude and ChatGPT remain in the primary quota band below 100% used; other providers keep the 95% threshold. Any applicable full window puts a member in the last-resort band. Model-scoped windows affect only matching models. When a cached reset passes, the expired window stops contributing urgency or a full-quota assertion and requests a background refresh; an endpoint that continues returning that expired time does not cause a polling loop.
+Claude and ChatGPT remain in the primary quota band below 100% used; other providers keep the 95% threshold. Any applicable full window puts a member in the last-resort band. Model-scoped windows affect only matching models. When a cached reset passes, the expired window stops contributing urgency or a full-quota assertion, and the next demand re-reads it; an endpoint that continues returning that expired time does not cause a polling loop.
 
 Inside the ChatGPT finishing range, the ample-quota baseline fades in proportion to the remaining fraction and the finishing bonus grows. This also prefers a smaller remainder when every account has only a few percent left. Reset preference grows toward the reset deadline but stays bounded; each window kind has a configurable lookahead.
 
@@ -312,7 +328,7 @@ This plugin only supplies model routes. Approval policy lives elsewhere:
 ```sh
 pnpm install   # devDependencies link into a local deepseek-harness checkout — edit the paths first
 pnpm build     # tsc (lib/) + tsdown (lib/client.js browser bundle)
-pnpm test      # node --test over compiled unit specs
+pnpm test      # compile to lib-test, then node --test in a private DSH_HOME
 ```
 
 `prepare` (used by git installs) runs `tsdown.prepare.config.ts`: a self-contained bundle build of both faces with all `@deepseek-ai/*` specifiers external — they resolve from the dsh installation at runtime, so this package never carries a second cordis copy.
@@ -321,10 +337,10 @@ After `pnpm build`, restart `dsh web` to pick up changes.
 
 ## Layout
 
-- `src/index.ts` — plugin entry: config schema, adapter registration, auth-change re-announce, RPC wiring
+- `src/index.ts` — plugin entry: config schema (the cache horizons are resolved in `cache-policy.ts`), adapter registration, auth-change re-announce, RPC wiring
 - `src/auth/` — PKCE/JWT helpers, token store, OAuth flow engine (temp loopback callback server), Claude Code credential reader (Keychain/file), `/subscriptions-auth` RPC channel
-- `src/providers/` — per-provider OAuth constants/exchange/refresh + `LlmAdapter`s, multi-account token plumbing (`accounts.ts`), the pool (`pool.ts` + `pool-health.ts` / `pool-usage.ts` / `pool-family.ts`), and `rate-limit.ts` (reset-instant parsing + retry policy)
+- `src/providers/` — per-provider OAuth constants/exchange/refresh + `LlmAdapter`s, multi-account token plumbing (`accounts.ts`), the pool (`pool.ts` + `pool-health.ts` / `pool-usage.ts` / `pool-family.ts`), `rate-limit.ts` (reset-instant parsing + retry policy), and the durable per-account metadata caches (`catalog-store.ts` / `usage-store.ts`, with `cache-identities.ts` reconciling a stored account rename at load)
 - `src/translate/` — dsh `Message[]` ⟷ OpenAI Responses / Anthropic Messages / Antigravity wire formats, SSE → `StreamChunk`
 - `src/providers/codex-search.ts` — Codex provider for DSH's native `web_search` capability
 - `src/tools/` — `x_search`, `image_generate`, and `video_generate`
-- `src/client/` — the Settings → Subscriptions page (browser half, zh/en, theme-token aware)
+- `src/client/` — the Settings → Subscriptions page (browser half, zh/en, theme-token aware) and the one subscription cache the badge and the page share (`subscriptions-cache.ts`)

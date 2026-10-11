@@ -35,7 +35,7 @@ const SUBSCRIPTIONS_AUTH_ENDPOINTS = [
   'image', 'video',
   'speed', 'setSpeed',
   'proxyGet', 'proxySet', 'proxyTest',
-  'modelDefaults', 'setModelDefault',
+  'setModelDefault',
 ] as const
 
 /** Media types the attachment store accepts (ImageMediaType). */
@@ -112,41 +112,13 @@ interface ProxyConfigController {
   test(payload: { url?: string; proxy?: ProxyDraft }): Promise<ProxyTestResult>
 }
 
-/** One model's default-effort picker state, as rendered by the Settings page. */
-export interface ModelDefaultView {
-  /** Wire model id. */
-  id: string
-  /** Human-readable display name. */
-  name: string
-  /**
-   * The provider's own reason for refusing this model on the accounts that list it,
-   * or absent when it may serve. The row stays listed so the settings model list
-   * states why the model cannot be used instead of offering it as an ordinary row.
-   */
-  disabledReason?: string
-  /** Advertised effort levels, in catalog order (empty when the model has no reasoning). */
-  efforts: { id: string; name: string }[]
-  /** The user-configured default effort, when set. */
-  configured?: string
-}
-
-/** One provider's default-effort picker state. */
-export interface ModelDefaultsCatalog {
-  /** The subscription provider route. */
-  provider: ProviderId
-  /** Models the picker can configure, in catalog order. */
-  models: ModelDefaultView[]
-}
-
 /** Provider and account preference operations behind providerSettings/setProviderSettings. */
 interface ProviderSettingsController {
-  get(provider: ProviderId, force: boolean): Promise<unknown>
+  get(provider: ProviderId, force: boolean, refresh?: boolean): Promise<unknown>
   set(provider: ProviderId, settings: unknown): Promise<void>
 }
 
 export interface ModelDefaultsController {
-  /** Per-provider picker state for the Settings page. */
-  catalog(force?: boolean): Promise<ModelDefaultsCatalog[]>
   /** Set one model's configured default effort; undefined clears the override. */
   set(provider: ProviderId, model: string, effort: string | undefined): Promise<void>
 }
@@ -178,19 +150,15 @@ export interface AuthController {
   /** Pin the account direct (non-pool) routes serve. */
   setDefault(provider: ProviderId, account: string): Promise<void>
   /**
-   * Current subscription usage of one account.
-   *
-   * Beyond the reported windows, the payload carries this account's captured
-   * unified rate-limit report (`rateLimit`) when a request it issued since
-   * startup answered with one, and the account pool's view of it (`pool`) when
-   * the pool is enabled. Both are plugin-local state read without a round trip.
+   * Local subscription usage snapshot for one account. Plain reads never query
+   * the provider; missing data is reported through cache metadata, not as zero usage.
    * @param signal - caller cancellation from the RPC transport.
-   * @param force - bypass a fresh cached snapshot for an honest re-check
-   *   (the manual Refresh button); a live failure cooldown still applies.
-   * @returns `{ supported: false }` when the provider has no usage endpoint.
-   * @throws when logged out or the usage lookup fails.
+   * @param force - explicitly refresh even a fresh success; failure cooldown still applies.
+   * @param refresh - allow a scoped refresh only if the cached data needs one.
+   * @returns the retained usage and freshness metadata, or `{ supported: false }`.
+   * @throws on caller cancellation or a credential failure during an explicit refresh.
    */
-  usage(provider: ProviderId, account: string, signal: AbortSignal, force?: boolean): Promise<ProviderUsage>
+  usage(provider: ProviderId, account: string, signal: AbortSignal, force?: boolean, refresh?: boolean): Promise<ProviderUsage>
   /**
    * Banked ChatGPT reset credits for one account. Other providers answer
    * `{ supported: false }` and make no network call.
@@ -461,11 +429,16 @@ function readConsumeResetCredit(payload: unknown): {
 
 /** Validate the usage/model catalog endpoints' optional force flag. */
 function readForce(payload: unknown): boolean {
+  return readRefreshFlag(payload, 'force')
+}
+
+/** Refresh flags are validated at the RPC boundary, never inferred from truthiness. */
+function readRefreshFlag(payload: unknown, key: 'force' | 'refresh'): boolean {
   if (typeof payload !== 'object' || payload === null) return false
-  const force = (payload as Record<string, unknown>).force
-  if (force === undefined) return false
-  if (typeof force !== 'boolean') throw new BadRequest('payload.force must be a boolean when present')
-  return force
+  const value = (payload as Record<string, unknown>)[key]
+  if (value === undefined) return false
+  if (typeof value !== 'boolean') throw new BadRequest(`payload.${key} must be a boolean when present`)
+  return value
 }
 
 /** Validate a `proxySet` payload into a shape `ProxyInput` accepts. */
@@ -559,7 +532,7 @@ async function dispatch(
   switch (endpoint) {
     case 'providerSettings':
       if (!providerSettings) throw new BadRequest('provider settings are unavailable')
-      return ok(await providerSettings.get(readProvider(payload), readForce(payload)))
+      return ok(await providerSettings.get(readProvider(payload), readForce(payload), readRefreshFlag(payload, 'refresh')))
     case 'setProviderSettings': {
       if (!providerSettings) throw new BadRequest('provider settings are unavailable')
       const provider = readProvider(payload)
@@ -603,7 +576,7 @@ async function dispatch(
     }
     case 'usage': {
       const provider = readProvider(payload)
-      return ok(await controller.usage(provider, readString(payload, 'account'), signal, readForce(payload)))
+      return ok(await controller.usage(provider, readString(payload, 'account'), signal, readForce(payload), readRefreshFlag(payload, 'refresh')))
     }
     case 'resetCredits': {
       const provider = readProvider(payload)
@@ -641,10 +614,6 @@ async function dispatch(
     case 'proxyTest':
       if (proxy === undefined) throw new BadRequest('proxy configuration is unavailable')
       return ok(await proxy.test(readProxyTestPayload(payload)))
-    case 'modelDefaults': {
-      if (modelDefaults === undefined) throw new BadRequest('model defaults are unavailable')
-      return ok(await modelDefaults.catalog(readForce(payload)))
-    }
     case 'setModelDefault':
       if (modelDefaults === undefined) throw new BadRequest('model defaults are unavailable')
       {
@@ -663,7 +632,7 @@ async function dispatch(
  * @param controller - the auth operations backing the endpoints.
  * @param speed - the durable per-model speed-tier state backing the Speed toggle.
  * @param proxy - optional proxy-config controller backing `proxyGet`/`proxySet`/`proxyTest`.
- * @param modelDefaults - optional per-model default-effort state backing `modelDefaults`/`setModelDefault`.
+ * @param modelDefaults - optional per-model effort writer; catalogue reads belong to `providerSettings`.
  */
 export function registerAuthRpc(
   ctx: Context,

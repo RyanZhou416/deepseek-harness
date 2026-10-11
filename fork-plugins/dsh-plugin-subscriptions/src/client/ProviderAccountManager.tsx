@@ -60,11 +60,22 @@ export function ProviderAccountManager({ provider, name, rpc, t, onClose }: Prop
     let current = true
     setLoading(true)
     setError('')
+    // The cached answer is what the dialog shows, immediately; the requested
+    // provider's if-needed revalidation runs behind it and replaces the view
+    // when it lands. A failed revalidation keeps the cached catalog on screen,
+    // because the node half retains the previous values with its metadata.
     void callSubscriptionsAuth<Catalog>(rpc, 'providerSettings', { provider }).then(data => {
-      if (current) setCatalog(data)
+      if (!current) return
+      setCatalog(data)
+      setLoading(false)
+      void callSubscriptionsAuth<Catalog>(rpc, 'providerSettings', { provider, refresh: true }).then(refreshed => {
+        if (current) setCatalog(refreshed)
+      }).catch(() => { /* the cached catalog stays; the node half reports its own state */ })
     }).catch(error => {
-      if (current) setError(t('accountsLoadFailed', { message: error instanceof Error ? error.message : String(error) }))
-    }).finally(() => { if (current) setLoading(false) })
+      if (!current) return
+      setError(t('accountsLoadFailed', { message: error instanceof Error ? error.message : String(error) }))
+      setLoading(false)
+    })
     return () => { current = false }
   }, [provider, rpc, attempt])
 

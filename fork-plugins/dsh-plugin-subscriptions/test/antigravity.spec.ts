@@ -21,7 +21,7 @@ import {
   refreshAntigravity,
   requestAntigravityContent,
 } from '../src/providers/antigravity.js'
-import type { CatalogSnapshot, FetchFn } from '../src/providers/common.js'
+import type { CatalogSnapshot, CatalogStoreFactory, FetchFn } from '../src/providers/common.js'
 import {
   AntigravityStreamTranslator,
   streamAntigravity,
@@ -369,17 +369,21 @@ test('Antigravity resolves per-model output defaults and bounds configured defau
     return Response.json({ models: Object.fromEntries(Object.entries(limits).map(([id, maxOutputTokens]) => [id, { maxOutputTokens }])) })
   }
   const adapter = new AntigravityAdapter({ tokens, models: [], discovery: true, streamIdleTimeoutMs: 1000, runtime, fetchFn })
+  // One explicit refresh is what discovers; the per-model resolutions below are
+  // pure reads and share the entry it stored.
+  await adapter.refreshOwnCatalog('antigravity', 'alice')
   for (const [model, limit] of Object.entries(limits)) {
     const info = await adapter.resolveOwnModel('antigravity', model, 'alice')
     assert.equal(info.defaultMaxTokens, limit)
     const payload = toAntigravityRequest({ ...options([]), model, maxTokens: info.defaultMaxTokens }, [], session.projectId, true)
     assert.equal(payload.request.generationConfig?.maxOutputTokens, limit)
   }
-  assert.equal(fetches, 1, 'successive model resolutions reuse the catalog')
+  assert.equal(fetches, 1, 'successive model resolutions request nothing and reuse the catalog')
   const configured = new AntigravityAdapter({
     tokens, discovery: true, streamIdleTimeoutMs: 1000, runtime, fetchFn,
     models: [{ id: 'gemini-3.1-pro-low', maxTokens: 8192 }, { id: 'gpt-oss-120b-medium', maxTokens: 65536 }],
   })
+  await configured.refreshOwnCatalog('antigravity', 'alice')
   assert.equal((await configured.resolveOwnModel('antigravity', 'gemini-3.1-pro-low', 'alice')).defaultMaxTokens, 8192)
   assert.equal((await configured.resolveOwnModel('antigravity', 'gpt-oss-120b-medium', 'alice')).defaultMaxTokens, 32768)
 })
@@ -392,6 +396,8 @@ test('Antigravity output defaults remain account-scoped', async () => {
       shared: { maxOutputTokens: new Headers(init?.headers).get('authorization') === 'Bearer alice' ? 65535 : 32768 },
     } }),
   })
+  await adapter.refreshOwnCatalog('antigravity', 'alice')
+  await adapter.refreshOwnCatalog('antigravity', 'bob')
   assert.equal((await adapter.resolveOwnModel('antigravity', 'shared', 'alice')).defaultMaxTokens, 65535)
   assert.equal((await adapter.resolveOwnModel('antigravity', 'shared', 'bob')).defaultMaxTokens, 32768)
 })
@@ -399,15 +405,16 @@ test('Antigravity output defaults remain account-scoped', async () => {
 test('Antigravity uses persisted output limits after restart without a network request', async () => {
   const { tokens } = accountTokens()
   let saved: CatalogSnapshot | undefined
-  const catalogStore = {
-    load: async () => saved,
+  const catalogStore: CatalogStoreFactory = () => ({
+    load: async () => (saved === undefined ? undefined : { snapshot: saved }),
     save: async (snapshot: CatalogSnapshot) => { saved = structuredClone(snapshot) },
     clear: async () => { saved = undefined },
-  }
+  })
   const initial = new AntigravityAdapter({
     tokens, models: [], discovery: true, streamIdleTimeoutMs: 1000, runtime, catalogStore,
     fetchFn: async () => Response.json({ models: { 'gemini-3.1-pro-low': { maxOutputTokens: 65535 } } }),
   })
+  await initial.refreshOwnCatalog('antigravity', 'alice')
   assert.equal((await initial.resolveOwnModel('antigravity', 'gemini-3.1-pro-low', 'alice')).defaultMaxTokens, 65535)
   assert.equal(saved?.models[0].maxOutputTokens, 65535)
   let fetches = 0
@@ -419,20 +426,17 @@ test('Antigravity uses persisted output limits after restart without a network r
   assert.equal(fetches, 0)
 })
 
-test('Antigravity falls back for legacy caches, absent caps, failed discovery and discovery disabled', async () => {
+test('Antigravity falls back for legacy caches, absent caps, and discovery disabled', async () => {
   const { tokens } = accountTokens()
   const model = 'gemini-3.1-pro-low'
-  for (const mode of ['legacy-cache', 'missing-cap', 'offline', 'disabled'] as const) {
+  for (const mode of ['stored-without-cap', 'cold-cache', 'disabled'] as const) {
     const adapter = new AntigravityAdapter({
       tokens, models: [], discovery: mode !== 'disabled', streamIdleTimeoutMs: 1000, runtime,
-      ...(mode === 'legacy-cache' ? { catalogStore: {
-        load: async () => ({ at: Date.now(), models: [{ id: model, name: model }] }),
+      ...(mode === 'stored-without-cap' ? { catalogStore: (() => ({
+        load: async () => ({ snapshot: { at: Date.now(), models: [{ id: model, name: model }] } }),
         save: async () => {}, clear: async () => {},
-      } } : {}),
-      fetchFn: async () => {
-        if (mode !== 'missing-cap') throw new Error('offline')
-        return Response.json({ models: { [model]: {} } })
-      },
+      })) satisfies CatalogStoreFactory } : {}),
+      fetchFn: async () => { throw new Error('offline') },
     })
     assert.equal((await adapter.resolveOwnModel('antigravity', model, 'alice')).defaultMaxTokens, 32768, mode)
   }
@@ -453,12 +457,17 @@ test('Antigravity catalogs stay account-scoped and invalidate after account chan
       return Response.json({ models: { [token]: { displayName: token, inputTokenLimit: token === 'alice' ? 100 : 200 } } })
     },
   })
+  await adapter.refreshOwnCatalog('antigravity', 'alice')
+  await adapter.refreshOwnCatalog('antigravity', 'bob')
   assert.deepEqual((await adapter.listModels('antigravity')).map(model => model.id), ['alice', 'bob'])
   assert.equal((await adapter.resolveOwnModel('antigravity', 'bob', 'bob')).context?.contextWindow, 200)
   assert.deepEqual((await adapter.listOwnModels('antigravity', 'alice')).map(model => model.id), ['alice'])
   assert.deepEqual(reads.sort(), ['alice', 'bob'])
   accounts.set('bob', { ...accounts.get('bob')!, accessToken: 'bob-new' })
   adapter.clearAccountCatalog('bob')
+  assert.deepEqual((await adapter.listModels('antigravity')).map(model => model.id), ['alice'],
+    'a dropped catalogue serves nothing until it is refreshed again')
+  await adapter.refreshOwnCatalog('antigravity', 'bob')
   assert.deepEqual((await adapter.listModels('antigravity')).map(model => model.id), ['alice', 'bob-new'])
   accounts.delete('alice')
   adapter.clearAccountCatalog('alice')
@@ -491,15 +500,28 @@ test('Antigravity retries a 401 with the selected account and refreshed project'
   assert.equal(chunks.at(-1)?.type, 'finish')
 })
 
-test('Antigravity discovery propagates cancellation instead of serving a fallback catalog', async () => {
+test('Antigravity reads never throw for a cancelled caller, and a cancelled refresh starts nothing', async () => {
   const { tokens } = accountTokens()
   const controller = new AbortController()
   controller.abort()
+  let requested = 0
   const adapter = new AntigravityAdapter({
     tokens, models: [{ id: 'fallback' }], discovery: true, streamIdleTimeoutMs: 1000, runtime,
-    fetchFn: async (_input, init) => { init?.signal?.throwIfAborted(); throw new Error('missing signal') },
+    fetchFn: async (_input, init) => { requested += 1; init?.signal?.throwIfAborted(); throw new Error('missing signal') },
   })
-  await assert.rejects(adapter.listOwnModels('antigravity', 'alice', controller.signal), { name: 'AbortError' })
+  // Nothing is known yet, so the built-in rows stand in — without any request.
+  assert.deepEqual(
+    (await adapter.listOwnModels('antigravity', 'alice')).map(model => model.id),
+    ['fallback'],
+  )
+  // A caller that already cancelled gets no rows for that account rather than an
+  // error the picker would have to report.
+  assert.deepEqual(await adapter.listOwnModels('antigravity', 'alice', controller.signal), [])
+  assert.equal(requested, 0)
+  // A refresh from an already-cancelled caller requests nothing and says so.
+  const report = await adapter.refreshOwnCatalog('antigravity', 'alice', { signal: controller.signal })
+  assert.deepEqual(report.cancelled, ['alice'])
+  assert.equal(requested, 0, 'a cancelled caller must not start a request for the others')
 })
 
 test('Antigravity preserves tool-result images after parallel tool responses', () => {

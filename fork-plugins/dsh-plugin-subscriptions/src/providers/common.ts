@@ -9,6 +9,7 @@
 import { createHash, randomUUID } from 'node:crypto'
 import {
   CONTEXT_WINDOW_EXCEEDED_CODE,
+  errorChain,
   isContextWindowExceededError,
   isQuotaExceededError,
   LlmError,
@@ -653,6 +654,32 @@ export interface ResetCreditConsumeResult {
   windowsReset?: number
 }
 
+/**
+ * How fresh a usage payload is, from the reader's point of view. A payload read
+ * from cache without an upstream round trip is `missing`, `stale` or `error`
+ * rather than absent, so a display surface can say what it knows instead of
+ * presenting a never-observed account as an empty one.
+ */
+export type UsageCacheState = 'fresh' | 'stale' | 'missing' | 'error' | 'refreshing'
+
+/**
+ * Safe classification of a failed usage read. It carries no provider message,
+ * token or response body, so it is safe to persist and to show.
+ */
+export type UsageFailureReason = 'rate_limited' | 'unauthorized' | 'unreachable' | 'invalid_response' | 'unknown'
+
+/** Freshness of one usage payload, alongside the windows it describes. */
+export interface UsageCacheMeta {
+  /** Freshness of the payload this metadata accompanies. */
+  state: UsageCacheState
+  /** Epoch milliseconds of the newest observation behind the payload, when one exists. */
+  observedAt?: number
+  /** Epoch milliseconds a recorded failure stops suppressing upstream reads. */
+  retryAt?: number
+  /** Why the last upstream read failed, when one did. */
+  error?: UsageFailureReason
+}
+
 /** Subscription usage of one provider, as served by the `usage` RPC endpoint. */
 export interface ProviderUsage {
   /** False when the provider has no usage endpoint (grok); windows are absent then. */
@@ -683,6 +710,13 @@ export interface ProviderUsage {
    * instead) from a fact about this account alone.
    */
   pool?: UsagePoolState
+  /**
+   * Freshness of this payload. Present for reads served from the plugin's own
+   * usage cache — which is every read that did not just perform an upstream
+   * round trip — and absent when the payload came straight from a provider
+   * fetcher with no cache in front of it.
+   */
+  cache?: UsageCacheMeta
 }
 
 /** The account pool's view of one account, as the `usage` endpoint reports it. */
@@ -853,149 +887,408 @@ export async function discoverAcrossAccounts(
   return undefined
 }
 
-/** How long a discovered catalog is trusted before re-fetching. */
-const DISCOVERY_TTL_MS = 5 * 60_000
+/**
+ * How long a discovered catalogue is trusted before an explicit event may
+ * refresh it. Freshness is only ever read at those events: no timer and no read
+ * path consults it. A route overrides it with `catalogMaxAgeMs`.
+ */
+export const DEFAULT_CATALOG_MAX_AGE_MS = 24 * 60 * 60_000
 
-/** A durable snapshot of one provider's discovered catalog. */
+/**
+ * Failure cooldown applied when a catalogue request failed without disclosing a
+ * `retry-after`, so one outage is not re-queried at every explicit event. A route
+ * overrides it with `cacheRetryDelayMs`.
+ */
+export const DEFAULT_CACHE_RETRY_DELAY_MS = 60_000
+
+/** A durable snapshot of one provider account's discovered catalogue. */
 export interface CatalogSnapshot {
   /** Epoch milliseconds of the successful fetch that produced it. */
   at: number
+  /**
+   * The models the provider advertised. An empty array is an authoritative
+   * "this account lists nothing", distinct from having no snapshot at all.
+   */
   models: DiscoveredModel[]
 }
 
-/** The durable half of a {@link ModelCatalogCache} (the models.json store). */
+/**
+ * One failed catalogue request's cooldown, persisted beside the last good
+ * snapshot so a RESTART still honours a `retry-after` the provider disclosed.
+ * It carries no models and no fetch time: it is a hint about when the next
+ * request may run, never a catalogue, and never a fabricated `at`.
+ */
+export interface CatalogFailure {
+  /** Epoch milliseconds before which no catalogue request may run again. */
+  notBefore: number
+}
+
+/**
+ * The durable state of one provider account's catalogue: the last good snapshot
+ * and the last failure's cooldown, either of which may be absent on its own. A
+ * cold account that failed holds a failure alone — nothing is invented to make
+ * it look like a catalogue that was ever fetched.
+ */
+export interface CatalogRecord {
+  /** The last successfully stored catalogue, when one exists. */
+  snapshot?: CatalogSnapshot
+  /** The last failed request's cooldown, while it is still meaningful. */
+  failure?: CatalogFailure
+}
+
+/** The durable half of a {@link ModelCatalogCache} for ONE provider account. */
 export interface CatalogPersistence {
-  /** The last persisted snapshot, or undefined when absent or unusable. */
-  load(): Promise<CatalogSnapshot | undefined>
-  /** Persist a fresh snapshot (write-through after every successful fetch). */
+  /** The persisted record, or undefined when the account has none. */
+  load(): Promise<CatalogRecord | undefined>
+  /**
+   * Persist a fresh snapshot (write-through after every successful fetch). A
+   * stored failure is dropped: its cooldown belongs to the request that failed,
+   * and this one answered.
+   */
   save(snapshot: CatalogSnapshot): Promise<void>
-  /** Drop the persisted snapshot (a 401 proved the credential changed). */
+  /**
+   * Persist a failure's cooldown, keeping the last good snapshot if there is
+   * one. Optional on a double that keeps no durable state.
+   */
+  saveFailure?(failure: CatalogFailure): Promise<void>
+  /** Drop the persisted record (the login or the catalogue identity changed). */
   clear(): Promise<void>
 }
 
 /**
- * Cache for one provider's discovered model catalog. The TTL only decides
- * when to REFRESH; it never makes the cache forget: capability metadata
- * (reasoning efforts) must stay stable for a session that selected an effort,
- * or mid-conversation calls fail UNSUPPORTED_REASONING_EFFORT the moment the
- * cache goes stale. `listModels` awaits freshness via {@link get};
- * `resolveModel` uses {@link resolve}, which serves the last-known catalog
- * while a stale entry refreshes in the background, and only awaits the fetch
- * when nothing is known yet. An optional {@link CatalogPersistence} seeds the
- * last-known state across restarts and receives every successful fetch. A 401
- * that still fails after a forced token refresh must call {@link invalidate}.
+ * Durable store factory a route supplies so EVERY logged-in account keeps its
+ * own catalogue, not only the default one. The key is the account key.
+ *
+ * The two provider-wide operations exist for a logout that must drop records no
+ * in-memory cache holds: an account removed before its cache was ever built.
+ * Both are optional so a test double may implement only the per-account half.
+ */
+export interface CatalogStoreFactory {
+  /** The persistence hooks for one account key (usable without building a cache). */
+  (account: string): CatalogPersistence
+  /** Account keys this provider has a persisted entry for, without loading any. */
+  accounts?(): Promise<readonly string[]>
+  /** Drop every persisted entry of this provider, cache or no cache. */
+  clearAll?(): Promise<void>
+}
+
+/** One account's explicit catalogue-refresh outcome. */
+export type CatalogRefreshOutcome =
+  | { status: 'fetched'; models: readonly DiscoveredModel[] }
+  /** Nothing was requested: the entry is fresh, or a failure is still cooling down. */
+  | { status: 'skipped'; reason: 'fresh' | 'cooldown' }
+  /** The caller stopped waiting; the shared request continues for other waiters. */
+  | { status: 'cancelled' }
+
+/** What one provider-wide explicit refresh requested, skipped, cancelled or failed. */
+export interface CatalogRefreshReport {
+  /** Accounts whose catalogue this call requested from the provider. */
+  fetched: readonly string[]
+  /** Accounts answered from cache: nothing was missing/stale, or a failure is cooling down. */
+  skipped: readonly string[]
+  /** Accounts whose request ran and failed; each keeps its last-known catalogue. */
+  failed: readonly string[]
+  /** Accounts whose caller stopped waiting before the shared request settled. */
+  cancelled: readonly string[]
+}
+
+/** Durability, freshness bounds and warning sink of one {@link ModelCatalogCache}. */
+export interface ModelCatalogCacheOptions {
+  /** Durable half for this account; absent keeps the cache in memory only. */
+  persistence?: CatalogPersistence
+  /** Freshness window; stale makes the entry eligible for an explicit refresh. */
+  maxAgeMs?: number
+  /** Failure cooldown when the failure disclosed no `retry-after`. */
+  retryDelayMs?: number
+  /** Warning sink for an unreadable cache file or a failed save. */
+  onWarn?: (message: string) => void
+  /** Provider name in warnings, e.g. `codex`. */
+  label?: string
+  /**
+   * Called once when a refresh STORES a catalogue that differs from what was
+   * stored before. It belongs to the accepted result rather than to any waiting
+   * caller: several callers share one request, a caller that detached still
+   * leaves that request running, and one stored catalogue is one notification.
+   */
+  onStored?: () => void
+}
+
+/**
+ * The cooldown one failed request earns: the provider's own `retry-after` when
+ * it disclosed one — through either the classified `LlmError` or the raw
+ * `OAuthEndpointError` a route's own endpoint reader throws — otherwise the
+ * route's configured default.
+ */
+function catalogCooldownMs(error: unknown, fallbackMs: number): number {
+  const disclosed = error instanceof LlmError
+    ? error.failure.providerRetryAfterMs
+    : error instanceof OAuthEndpointError ? error.retryAfterMs : undefined
+  return typeof disclosed === 'number' && Number.isFinite(disclosed) && disclosed > 0 ? disclosed : fallbackMs
+}
+
+/**
+ * Whether a newly stored catalogue differs from the one it replaces. Compared
+ * as persisted, which is exactly what a re-reading picker would see.
+ */
+function sameCatalog(previous: readonly DiscoveredModel[] | undefined, next: readonly DiscoveredModel[]): boolean {
+  return JSON.stringify(previous ?? null) === JSON.stringify(next)
+}
+
+/**
+ * Await `work`, or stop waiting when the caller aborts. The work itself keeps
+ * running: several callers share one request, and one caller's cancellation
+ * must not abort what the others still await.
+ * @param work - the shared operation.
+ * @param signal - the calling waiter's cancellation, when any.
+ * @returns the result, or `undefined` when this waiter detached.
+ */
+async function waitUnlessAborted<T>(
+  work: Promise<T>,
+  signal?: AbortSignal,
+): Promise<{ value: T } | undefined> {
+  if (signal === undefined) return { value: await work }
+  if (signal.aborted) return undefined
+  let detach!: () => void
+  const aborted = new Promise<undefined>((resolve) => { detach = () => { resolve(undefined) } })
+  const onAbort = (): void => { detach() }
+  signal.addEventListener('abort', onAbort, { once: true })
+  try {
+    return await Promise.race([work.then(value => ({ value })), aborted])
+  } finally {
+    signal.removeEventListener('abort', onAbort)
+  }
+}
+
+/**
+ * ONE provider account's discovered-model catalogue.
+ *
+ * Reads ({@link read}, {@link lastKnown}) are pure: they may load the local
+ * cache file, they never start a provider request, and a stale entry is served
+ * as-is. Capability metadata (reasoning efforts) must stay stable for a session
+ * that selected an effort, so losing it to a lapsed window would fail
+ * mid-conversation calls with UNSUPPORTED_REASONING_EFFORT before provider I/O.
+ *
+ * {@link refresh} is the only path that starts a request, and it runs only when
+ * an explicit event asks for it. It coalesces concurrent callers into one
+ * request, keeps the last good snapshot when the request fails, and records a
+ * failure cooldown so repeated events do not re-query a failing provider.
+ * {@link invalidate} drops memory and disk and bumps the generation, so an
+ * in-flight request that lost that race cannot write its result back.
  */
 export class ModelCatalogCache {
   private entry: CatalogSnapshot | undefined
-  private inflight: Promise<DiscoveredModel[]> | undefined
+  private inflight: Promise<readonly DiscoveredModel[]> | undefined
   /** Settles once the persisted snapshot (when any) has been considered. */
   private seeded: Promise<void> | undefined
   /** Set by {@link invalidate} so an in-flight disk read cannot resurrect dropped state. */
   private seedDisabled = false
-  /** Bumped by {@link invalidate} so a loser in-flight fetch cannot write back. */
+  /** Bumped by {@link invalidate} so a loser in-flight request cannot write back. */
   private generation = 0
+  /** Epoch ms before which a refresh is skipped after a failure. */
+  private retryNotBefore: number | undefined
+  /** Every request and cache clear still running, so a route can drain them. */
+  private readonly work = new Set<Promise<unknown>>()
+  private readonly maxAgeMs: number
+  private readonly retryDelayMs: number
 
-  constructor(
-    private readonly persistence?: CatalogPersistence,
-    private readonly ttlMs = DISCOVERY_TTL_MS,
-  ) {}
-
-  /**
-   * The cached catalog when fresh, without fetching.
-   * @returns the cached models, or `undefined` when absent or stale.
-   */
-  cached(): readonly DiscoveredModel[] | undefined {
-    if (this.entry === undefined || Date.now() - this.entry.at >= this.ttlMs) return undefined
-    return this.entry.models
+  constructor(private readonly options: ModelCatalogCacheOptions = {}) {
+    this.maxAgeMs = options.maxAgeMs ?? DEFAULT_CATALOG_MAX_AGE_MS
+    this.retryDelayMs = options.retryDelayMs ?? DEFAULT_CACHE_RETRY_DELAY_MS
   }
 
   /**
-   * The last successfully fetched catalog, ignoring TTL. Used to carry
-   * capability metadata forward when a later fetch cannot re-enrich.
-   * @returns the last-known models, or `undefined` when nothing has been stored.
+   * The last-known catalogue for this account, from memory or the local cache
+   * file. Pure: it starts no provider request, however cold or stale it is.
+   * @returns the models, or `undefined` when nothing is known. `[]` is a known
+   *   catalogue that lists nothing, not an absent one.
+   */
+  async read(): Promise<readonly DiscoveredModel[] | undefined> {
+    await this.ensureSeeded()
+    return this.entry?.models
+  }
+
+  /**
+   * The last-known catalogue already in memory, ignoring freshness.
+   * @returns the models, or `undefined` before anything has been seeded or fetched.
    */
   lastKnown(): readonly DiscoveredModel[] | undefined {
     return this.entry?.models
   }
 
-  /** Load the persisted snapshot once; a fetch or invalidate that landed first wins. */
+  /** Whether the entry is missing or older than the freshness window. */
+  stale(): boolean {
+    return this.entry === undefined || Date.now() - this.entry.at >= this.maxAgeMs
+  }
+
+  /**
+   * Load the persisted record once; a request or invalidate that landed first
+   * wins. Both halves are seeded: the last good catalogue and, when it has not
+   * lapsed, the cooldown a failed request left behind — so a restart does not
+   * re-ask a provider that named its own retry instant.
+   */
   private ensureSeeded(): Promise<void> {
-    if (this.persistence === undefined) return Promise.resolve()
-    this.seeded ??= this.persistence.load().then(
-      (snapshot) => {
-        if (snapshot !== undefined && this.entry === undefined && !this.seedDisabled) {
-          this.entry = snapshot
+    const persistence = this.options.persistence
+    if (persistence === undefined) return Promise.resolve()
+    this.seeded ??= persistence.load().then(
+      (record) => {
+        if (record === undefined || this.seedDisabled) return
+        if (record.snapshot !== undefined && this.entry === undefined) this.entry = record.snapshot
+        const notBefore = record.failure?.notBefore
+        if (notBefore !== undefined && notBefore > Date.now() && this.retryNotBefore === undefined) {
+          this.retryNotBefore = notBefore
         }
       },
-      () => undefined,
+      (error: unknown) => {
+        // An unreadable cache file is not a catalogue: say so rather than letting
+        // the caller believe the empty read is the provider's own answer.
+        this.options.onWarn?.(
+          `${this.label()} catalogue cache could not be read (${errorChain(error)}); serving it as absent`,
+        )
+      },
     )
     return this.seeded
   }
 
-  /** Run (or join) the single in-flight fetch, updating memory and disk on success. */
-  private refresh(fetcher: () => Promise<DiscoveredModel[]>): Promise<DiscoveredModel[]> {
+  /** Track work a route must be able to drain before it is dropped. */
+  private track<T>(work: Promise<T>): Promise<T> {
+    this.work.add(work)
+    const done = (): void => { this.work.delete(work) }
+    void work.then(done, done)
+    return work
+  }
+
+  /** Write the snapshot through, reporting a save failure without losing memory state. */
+  private async persist(snapshot: CatalogSnapshot): Promise<void> {
+    const persistence = this.options.persistence
+    if (persistence === undefined) return
+    try {
+      await persistence.save(snapshot)
+    } catch (error: unknown) {
+      this.options.onWarn?.(
+        `${this.label()} catalogue could not be saved (${errorChain(error)}); it stays in memory only`,
+      )
+    }
+  }
+
+  /**
+   * Persist a failure's cooldown, so the wait the provider disclosed survives a
+   * restart. Reported rather than thrown: failing to remember it costs one
+   * extra request, which is what the memory-only behaviour cost anyway.
+   */
+  private async persistFailure(failure: CatalogFailure): Promise<void> {
+    const persistence = this.options.persistence
+    if (persistence?.saveFailure === undefined) return
+    try {
+      await persistence.saveFailure(failure)
+    } catch (error: unknown) {
+      this.options.onWarn?.(
+        `${this.label()} catalogue failure cooldown could not be saved (${errorChain(error)})`,
+      )
+    }
+  }
+
+  /** Run (or join) the single in-flight request, updating memory and disk on success. */
+  private run(fetcher: () => Promise<readonly DiscoveredModel[]>): Promise<readonly DiscoveredModel[]> {
     if (this.inflight !== undefined) return this.inflight
     const gen = this.generation
     const pending = fetcher()
-      .then((models) => {
+      .then(async (models) => {
         if (this.generation !== gen) return models
-        const snapshot: CatalogSnapshot = { at: Date.now(), models }
+        const snapshot: CatalogSnapshot = { at: Date.now(), models: [...models] }
+        const moved = !sameCatalog(this.entry?.models, snapshot.models)
         this.entry = snapshot
-        // Write-through is fire-and-forget: a failed save only costs durability.
-        void this.persistence?.save(snapshot).catch(() => undefined)
-        return models
+        this.retryNotBefore = undefined
+        await this.persist(snapshot)
+        // The accepted result reports itself: one stored catalogue is one
+        // notification, whether one caller waited or several, and whether or not
+        // any of them was still attached when it settled.
+        if (moved) this.options.onStored?.()
+        return snapshot.models
+      })
+      .catch(async (error: unknown) => {
+        if (this.generation === gen) {
+          const cooldownMs = catalogCooldownMs(error, this.retryDelayMs)
+          if (cooldownMs > 0) {
+            this.retryNotBefore = Date.now() + cooldownMs
+            await this.persistFailure({ notBefore: this.retryNotBefore })
+          }
+        }
+        throw error
       })
       .finally(() => {
         if (this.generation === gen) this.inflight = undefined
       })
-    this.inflight = pending
+    this.inflight = this.track(pending)
+    // A waiter that detached on its own signal must not leave an unhandled rejection.
+    void pending.catch(() => undefined)
     return pending
   }
 
   /**
-   * Return the cached catalog when fresh, otherwise fetch and cache it.
+   * Request this account's catalogue from the provider: the only path that
+   * starts a provider request. Concurrent callers share one request, and a
+   * failure keeps the last good snapshot in place.
    * @param fetcher - performs the provider's model-list request.
-   * @returns the discovered models.
-   * @throws the fetcher's failure (the `listModels` caller warns and falls back).
+   * @param options - `force` re-requests a fresh SUCCESS snapshot (an explicit
+   *   user refresh); it never bypasses a live failure cooldown, which is the
+   *   retry storm that cooldown exists to prevent. `signal` detaches THIS waiter
+   *   alone; the shared request continues for the others.
+   * @returns what this call did. A failed request rejects. A request that was
+   *   invalidated mid-flight (a logout dropped the account) still reports
+   *   `fetched`, because it ran, but its result is not stored.
    */
-  async get(fetcher: () => Promise<DiscoveredModel[]>): Promise<readonly DiscoveredModel[]> {
+  async refresh(
+    fetcher: () => Promise<readonly DiscoveredModel[]>,
+    options: { force?: boolean; signal?: AbortSignal } = {},
+  ): Promise<CatalogRefreshOutcome> {
     await this.ensureSeeded()
-    return this.cached() ?? this.refresh(fetcher)
+    // A caller that already cancelled must not start a request nothing is waiting for.
+    if (options.signal?.aborted === true) return { status: 'cancelled' }
+    if (options.force !== true && !this.stale()) return { status: 'skipped', reason: 'fresh' }
+    if (this.retryNotBefore !== undefined && Date.now() < this.retryNotBefore) {
+      return { status: 'skipped', reason: 'cooldown' }
+    }
+    const settled = await waitUnlessAborted(this.run(fetcher), options.signal)
+    if (settled === undefined) return { status: 'cancelled' }
+    return { status: 'fetched', models: settled.value }
   }
 
   /**
-   * The models for capability resolution. A fresh cache answers directly; a
-   * stale one answers immediately from the last-known catalog while a
-   * background refresh runs (a mid-conversation `resolveModel` must neither
-   * block on nor fail with the network); a cold cache awaits one fetch.
-   * @param fetcher - performs the provider's model-list request.
-   * @returns the models, or `undefined` when nothing is known (the caller
-   *   falls back to its static metadata). Never throws.
+   * Drop the cached catalogue: memory, the persisted entry, and the generation
+   * an in-flight request would need to write back. The next refresh re-reads it.
    */
-  async resolve(fetcher: () => Promise<DiscoveredModel[]>): Promise<readonly DiscoveredModel[] | undefined> {
-    await this.ensureSeeded()
-    const fresh = this.cached()
-    if (fresh !== undefined) return fresh
-    const known = this.entry?.models
-    if (known !== undefined) {
-      // Stale-while-revalidate: the refresh outcome serves the NEXT resolve.
-      this.refresh(fetcher).catch(() => undefined)
-      return known
-    }
-    try {
-      return await this.refresh(fetcher)
-    } catch {
-      return undefined
-    }
-  }
-
-  /** Drop the cached catalog (e.g. after a 401 proved the credential changed). */
   invalidate(): void {
     this.generation += 1
     this.entry = undefined
     this.inflight = undefined
     this.seedDisabled = true
-    void this.persistence?.clear().catch(() => undefined)
+    this.retryNotBefore = undefined
+    const persistence = this.options.persistence
+    if (persistence !== undefined) void this.track(persistence.clear().catch(() => undefined))
+  }
+
+  /**
+   * Forget a failure cooldown so ONE immediate retry may run, for a caller that
+   * has just renewed the credential the failed attempt used. The cooldown is
+   * meant for a provider that keeps refusing, not for the same request retried
+   * with a fresh token; a retry that also fails re-arms it, and one that answers
+   * clears the persisted hint with the snapshot it stores.
+   */
+  clearFailureCooldown(): void {
+    this.retryNotBefore = undefined
+  }
+
+  /**
+   * Await every request and cache clear still running, without starting new
+   * work, so a route being dropped leaves no write behind.
+   */
+  async drain(): Promise<void> {
+    while (this.work.size > 0) await Promise.allSettled([...this.work])
+  }
+
+  /** The provider name warnings are prefixed with. */
+  private label(): string {
+    return this.options.label ?? 'provider'
   }
 }
 
@@ -1023,9 +1316,11 @@ function isDiscoveryAuthFailure(error: unknown): boolean {
 
 /**
  * Run a catalog fetch, retrying once after a forced token refresh when the
- * first attempt is a 401/AUTH. Only {@link ModelCatalogCache.invalidate}s
- * when the retry is also an auth failure, so a refresh race cannot erase
- * last-known capability metadata.
+ * first attempt is a 401/AUTH. The retry clears the failure cooldown the first
+ * attempt armed — the credential it needed has just been renewed, so this one
+ * retry is warranted — and only {@link ModelCatalogCache.invalidate}s when the
+ * retry is also an auth failure, so a refresh race cannot erase last-known
+ * capability metadata.
  */
 export async function discoverOrRetryAuth<T>(
   session: (forceRefresh?: boolean) => Promise<unknown>,
@@ -1038,6 +1333,7 @@ export async function discoverOrRetryAuth<T>(
     if (isMissingOrInvalidCredential(error) || !isDiscoveryAuthFailure(error)) throw error
     try {
       await session(true)
+      catalog.clearFailureCooldown()
       return await run()
     } catch (retryError: unknown) {
       if (!isMissingOrInvalidCredential(retryError) && isDiscoveryAuthFailure(retryError)) {

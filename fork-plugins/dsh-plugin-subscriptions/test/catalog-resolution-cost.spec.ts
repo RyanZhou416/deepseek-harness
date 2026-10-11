@@ -1,12 +1,15 @@
 /**
- * Work-count and barrier regressions for what resolving a subscription model
- * costs through the registered `AccountPreferencesAdapter` route:
+ * Work-count and barrier regressions for what a subscription catalogue read
+ * costs through the registered `AccountPreferencesAdapter` route, plus the
+ * negative controls that prove the counts:
  *
- * - a capability question answers from a catalog that is known but stale, the
- *   way `ModelCatalogCache.resolve` promises, instead of awaiting its refresh;
- * - one provider's pool read fetches that provider's catalogs only;
- * - the mounted plugin's own wiring picks the advisory read, never a second
- *   attempt behind it.
+ * - no read — capability resolution, listing, pool membership, a Speed read —
+ *   starts a provider request, however cold or stale the catalogue is;
+ * - an actual request ensures the ONE selected account, not every peer;
+ * - N concurrent callers of one account produce one request;
+ * - a targeted refresh leaves its siblings alone, and `force` never bypasses a
+ *   live failure cooldown;
+ * - a logout during an in-flight refresh cannot resurrect the dropped catalogue.
  *
  * All are stated as deterministic work counts and barriers, never as elapsed
  * time: the catalog request is a counted stand-in the test releases explicitly,
@@ -14,13 +17,14 @@
  */
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
 import { LlmError } from '@deepseek-ai/dsh-llm'
-import type { LlmModelInfo, LlmResolvedModelInfo, StreamChunk } from '@deepseek-ai/dsh-llm'
+import type { GenerateOptions, LlmModelInfo, LlmResolvedModelInfo, StreamChunk } from '@deepseek-ai/dsh-llm'
 import { AccountPreferencesAdapter } from '../src/providers/account-preferences.js'
+import { catalogStore } from '../src/providers/catalog-store.js'
 import { PoolBackedAdapter } from '../src/providers/pool-delegation.js'
 import { ProviderCatalog } from '../src/providers/provider-catalog.js'
 import { PoolAdapter } from '../src/providers/pool.js'
@@ -29,8 +33,8 @@ import { PoolUsageTracker } from '../src/providers/pool-usage.js'
 import { resolvePoolScheduling } from '../src/providers/pool-scheduling.js'
 import { buildAccountPools, poolKey } from '../src/providers/pool-family.js'
 import type { PoolDefinition, PoolMemberRef } from '../src/providers/pool-family.js'
-import { DISCOVERY_TIMEOUT_MS, withTimeout } from '../src/providers/common.js'
-import type { CatalogPersistence, CatalogSnapshot, DiscoveredModel } from '../src/providers/common.js'
+import { DISCOVERY_TIMEOUT_MS, OAuthEndpointError, withTimeout } from '../src/providers/common.js'
+import type { CatalogPersistence, CatalogSnapshot, CatalogStoreFactory, DiscoveredModel } from '../src/providers/common.js'
 import { ProviderSettingsStore } from '../src/provider-settings.js'
 import { saveAccountSession } from '../src/auth/store.js'
 import type { ProviderId } from '../src/auth/store.js'
@@ -43,9 +47,6 @@ const MODELS: readonly DiscoveredModel[] = [
   { id: 'm1', name: 'Model 1' },
   { id: 'm2', name: 'Model 2' },
 ]
-
-/** `ModelCatalogCache`'s refresh window (common.ts `DISCOVERY_TTL_MS`), private to the module. */
-const DISCOVERY_TTL_MS = 5 * 60_000
 
 /** The catalog request's payload; a fresh array because the cache owns what it stores. */
 function servedModels(): DiscoveredModel[] {
@@ -95,21 +96,25 @@ interface ComposeOptions {
   /** Explicit family source, replacing the auto-account sweep. */
   families?: (provider: ProviderId | undefined) => Map<string, PoolDefinition>
   /**
-   * How the auto-account sweep reads one account's catalog. `swr` is the
-   * plugin's read (last-known answers, a fetch only when nothing is known);
-   * `blocking` is the read that awaited every refresh, kept as the negative
-   * control for the sweep's cost.
+   * How the auto-account sweep reads one account's catalog. `read` is the
+   * plugin's own path (a pure cache read that requests nothing); `refresh` is
+   * the negative control that awaits an explicit refresh per account, which is
+   * what a sweep would have to do to discover anything cold.
    */
-  sweep?: 'swr' | 'blocking'
+  sweep?: 'read' | 'refresh'
   /** Configured extra picker entries, by pool id. */
   tiers?: Record<string, PoolMemberRef[]>
 }
 
 interface Fixture {
   route(provider: ProviderId): AccountPreferencesAdapter
+  /** The raw adapter behind the registered route (its own catalogue seam). */
+  adapter(provider: ProviderId): CatalogAdapter
   pool: PoolAdapter
   /** Catalog requests issued for one provider so far. */
   fetches(provider: ProviderId): number
+  /** Catalog requests issued for one provider/account so far. */
+  fetchesFor(provider: ProviderId, account: string): number
   /** Auto-account sweeps performed so far. */
   sweeps(): number
   dispose(): Promise<void>
@@ -137,42 +142,47 @@ class CatalogAdapter extends PoolBackedAdapter {
         discovery: true,
         ...this.options.persistedAgeMs === undefined
           ? {}
-          : { catalogStore: persistedCatalog(this.options.persistedAgeMs) },
+          : { catalogStore: persistedStore(this.options.persistedAgeMs, this.providerId) },
       },
+      providerId,
       providerId,
       {
         staticRows: provider => MODELS.map(model => ({ provider, id: model.id, name: model.name })),
-        fetchCatalog: (account) => this.options.fetch(this.providerId, account ?? '<default>'),
+        fetchCatalog: (account) => this.options.fetch(this.providerId, account),
         row: (provider, model): LlmModelInfo => ({ provider, id: model.id, name: model.name }),
       },
     )
   }
 
-  /** Mirrors a concrete adapter's discovered-catalog capability lookup. */
+  /** Mirrors a concrete adapter's discovered-catalog capability lookup: a pure read. */
   async resolveOwnModel(provider: string, model: string, account?: string): Promise<LlmResolvedModelInfo> {
-    const keys = account === undefined ? this.store.keys(this.providerId) : [account]
-    for (const key of keys) {
-      const catalog = await this.catalogs.cache(key)
-      const models = await catalog.resolve(() => this.options.fetch(this.providerId, key))
-      const found = models?.find(entry => entry.id === model)
-      if (found !== undefined) return { provider, id: model, name: found.name }
-    }
-    return { provider, id: model, name: model }
+    const found = await this.catalogs.findModel(model, account)
+    return { provider, id: model, name: found?.name ?? model }
   }
 
   clearAccountCatalog(account?: string): void {
-    this.catalogs.invalidate(account)
+    this.catalogs.clearAccountCatalog(account)
   }
 
-  protected async *streamOwn(): AsyncIterable<StreamChunk> {
-    throw new LlmError('the fixture does not stream', 'NO_ADAPTER')
+  protected async *streamOwn(options: GenerateOptions, _account?: string): AsyncIterable<StreamChunk> {
+    yield { type: 'text-delta', index: 0, text: options.model }
+    yield { type: 'finish', reason: { kind: 'stop' } }
   }
 }
 
-/** A snapshot of the given age, as `models.json` leaves one behind. */
-function persistedCatalog(ageMs: number): CatalogPersistence {
+/**
+ * A store factory that serves one snapshot of the given age for EVERY account.
+ * The per-account isolation itself is covered by the store's own spec; this
+ * fixture only needs a catalogue that is already known and already stale.
+ */
+function persistedStore(ageMs: number, _provider: ProviderId): CatalogStoreFactory {
   const snapshot: CatalogSnapshot = { at: Date.now() - ageMs, models: [...MODELS] }
-  return { load: async () => snapshot, save: async () => undefined, clear: async () => undefined }
+  const persistence: CatalogPersistence = {
+    load: async () => ({ snapshot }),
+    save: async () => undefined,
+    clear: async () => undefined,
+  }
+  return () => persistence
 }
 
 /**
@@ -182,7 +192,7 @@ function persistedCatalog(ageMs: number): CatalogPersistence {
  */
 async function compose(options: ComposeOptions): Promise<Fixture> {
   const dir = await mkdtemp(join(tmpdir(), 'catalog-resolution-cost-'))
-  const counts = new Map<ProviderId, number>()
+  const counts = new Map<string, number>()
   const settings = new ProviderSettingsStore(join(dir, 'settings.json'))
   const concrete = new Map<ProviderId, CatalogAdapter>()
   const routes = new Map<ProviderId, AccountPreferencesAdapter>()
@@ -193,7 +203,8 @@ async function compose(options: ComposeOptions): Promise<Fixture> {
   const counted: ComposeOptions = {
     ...options,
     fetch: async (provider, account) => {
-      counts.set(provider, (counts.get(provider) ?? 0) + 1)
+      const key = `${provider}/${account}`
+      counts.set(key, (counts.get(key) ?? 0) + 1)
       return await options.fetch(provider, account)
     },
   }
@@ -225,11 +236,18 @@ async function compose(options: ComposeOptions): Promise<Fixture> {
       if (accounts.length === 0) return
       const catalogs = (await Promise.all(accounts.map(async (account) => {
         const adapter = concrete.get(key)!
+        if (options.sweep === 'refresh') {
+          // The negative control: discover each account explicitly, which is the
+          // only way a cold catalogue ever produces rows.
+          await withTimeout(
+            async signal => { await adapter.refreshOwnCatalog(key, account, { signal }) },
+            DISCOVERY_TIMEOUT_MS,
+          )
+          return { account, models: await adapter.listOwnModels(key, account) }
+        }
         const listed = await withTimeout(
-          async signal => options.sweep === 'blocking'
-            ? await adapter.listOwnModels(key, account, signal)
-            : await adapter.resolveOwnCatalog?.(key, account, signal)
-              ?? await adapter.listOwnModels(key, account, signal),
+          async signal => await adapter.resolveOwnCatalog?.(key, account, signal)
+            ?? await adapter.listOwnModels(key, account, signal),
           DISCOVERY_TIMEOUT_MS,
         )
         return listed === undefined ? undefined : { account, models: listed }
@@ -252,10 +270,15 @@ async function compose(options: ComposeOptions): Promise<Fixture> {
     onWarn: () => undefined,
   })
 
+  const forProvider = (provider: ProviderId): number =>
+    [...counts.entries()].filter(([key]) => key.startsWith(`${provider}/`)).reduce((total, [, count]) => total + count, 0)
+
   return {
     route: provider => routes.get(provider)!,
+    adapter: provider => concrete.get(provider)!,
     pool,
-    fetches: provider => counts.get(provider) ?? 0,
+    fetches: forProvider,
+    fetchesFor: (provider, account) => counts.get(`${provider}/${account}`) ?? 0,
     sweeps: () => sweeps,
     dispose: async () => { await rm(dir, { recursive: true, force: true }) },
   }
@@ -266,69 +289,97 @@ function ownPool(provider: ProviderId, account: string, model: string): Map<stri
   return new Map([[poolKey(provider, model), { members: [{ provider, account, model }] }]])
 }
 
-test('capability resolution answers from a stale catalog instead of awaiting its refresh', async t => {
+/** What one route's ProviderCatalog is given, as an adapter's own options shape it. */
+interface CatalogHarnessOptions {
+  /** Durable store; absent keeps every cache in memory. */
+  store?: CatalogStoreFactory
+  /** Accounts the store lists, default first. */
+  accounts?: readonly string[]
+  /** Accounts that still hold a credential; defaults to `accounts`. */
+  sessions?: () => readonly string[]
+  /** One account's catalogue request. */
+  fetch?: (account: string) => Promise<readonly DiscoveredModel[]>
+  /** Called when a stored catalogue moved. */
+  onCatalogChanged?: (provider: string) => void
+}
+
+/** A ProviderCatalog over a provider route, as the adapters wire one. */
+function catalogHarness(options: CatalogHarnessOptions = {}): ProviderCatalog {
+  const accounts = options.accounts ?? ['a1', 'a2']
+  const live = options.sessions ?? ((): readonly string[] => accounts)
+  return new ProviderCatalog(
+    {
+      tokens: {
+        list: async () => (await live()).map(key => ({ key })),
+        session: async () => ({ accessToken: 'a', refreshToken: 'r', expiresAt: Date.now() + 3_600_000 }),
+        hasSession: async account => account !== undefined && live().includes(account),
+        defaultAccount: async () => (await live())[0],
+      },
+      ...options.store === undefined ? {} : { catalogStore: options.store },
+      discovery: true,
+      ...options.onCatalogChanged === undefined ? {} : { onCatalogChanged: options.onCatalogChanged },
+    },
+    'codex',
+    'codex',
+    {
+      staticRows: provider => MODELS.map(model => ({ provider, id: model.id, name: model.name })),
+      fetchCatalog: async account => [...await (options.fetch ?? (async () => servedModels()))(account)],
+      row: (provider, model): LlmModelInfo => ({ provider, id: model.id, name: model.name }),
+    },
+  )
+}
+
+/** A store file path inside its own private temporary directory. */
+async function storePath(prefix: string): Promise<{ dir: string; store: CatalogStoreFactory }> {
+  const dir = await mkdtemp(join(tmpdir(), prefix))
+  return { dir, store: catalogStore('codex', { path: join(dir, 'models.json') }) }
+}
+
+const STALE_AGE_MS = 25 * 60 * 60_000
+
+test('capability resolution requests nothing, even from a stale catalogue', async t => {
   const gate = deferred()
   const fixture = await compose({
     providers: ['codex'],
     store: accountStore({ codex: ['a'] }),
-    persistedAgeMs: DISCOVERY_TTL_MS + 60_000,
+    persistedAgeMs: STALE_AGE_MS,
     families: () => ownPool('codex', 'a', 'm1'),
     fetch: async () => { await gate.promise; return servedModels() },
   })
   t.after(async () => { gate.release(); await fixture.dispose() })
 
-  let settled = false
-  const resolution = fixture.route('codex').resolveModel('codex', 'm1').then(
-    () => { settled = true },
-    () => { settled = true },
+  // The gated request would hang forever if the read joined it, so settling here
+  // IS the assertion; the count below names what did not happen.
+  const resolved = await fixture.route('codex').resolveModel('codex', 'm1')
+  assert.equal(resolved.id, 'm1')
+  assert.equal(
+    (await fixture.adapter('codex').resolveOwnModel('codex', 'm1', 'a')).name,
+    'Model 1',
+    'the stale catalogue is what answered the capability question',
   )
-  await drain()
-  assert.equal(settled, true, 'resolveModel awaited the refresh of a known catalog')
-
-  // The refresh is deferred, not dropped: releasing it settles the resolution,
-  // and the one catalog request it scheduled is the only one.
+  assert.equal(fixture.fetches('codex'), 0, 'a stale capability read started a request')
   gate.release()
-  await resolution
-  assert.equal(fixture.fetches('codex'), 1)
 })
 
-test('capability resolution still awaits the one fetch when nothing is known', async t => {
-  const gate = deferred()
+test('negative control: the same catalogue does request when something asks explicitly', async t => {
   const fixture = await compose({
     providers: ['codex'],
     store: accountStore({ codex: ['a'] }),
+    persistedAgeMs: STALE_AGE_MS,
     families: () => ownPool('codex', 'a', 'm1'),
-    fetch: async () => { await gate.promise; return servedModels() },
-  })
-  t.after(async () => { gate.release(); await fixture.dispose() })
-
-  let settled = false
-  const resolution = fixture.route('codex').resolveModel('codex', 'm1').then(
-    () => { settled = true },
-    () => { settled = true },
-  )
-  await drain()
-  assert.equal(settled, false, 'a cold catalog must await its fetch before answering')
-
-  gate.release()
-  await resolution
-  assert.equal(settled, true)
-})
-
-test('pool assembly fetches only the provider the caller names', async t => {
-  const fixture = await compose({
-    providers: ['codex', 'claude'],
-    store: accountStore({ codex: ['a1', 'a2'], claude: ['a1', 'a2'] }),
     fetch: async () => servedModels(),
   })
   t.after(async () => { await fixture.dispose() })
 
-  assert.equal(await fixture.pool.owns('codex', 'm1'), true)
-  assert.equal(fixture.fetches('claude'), 0, "the codex pool read fetched claude's catalog")
-  assert.equal(fixture.fetches('codex'), 2, "the codex pool read still lists codex's own accounts")
+  const report = await fixture.adapter('codex').refreshOwnCatalog('codex', 'a')
+  assert.deepEqual(report.fetched, ['a'])
+  assert.equal(fixture.fetchesFor('codex', 'a'), 1)
+  // A second explicit call finds the entry fresh and requests nothing.
+  assert.deepEqual((await fixture.adapter('codex').refreshOwnCatalog('codex', 'a')).skipped, ['a'])
+  assert.equal(fixture.fetchesFor('codex', 'a'), 1)
 })
 
-test('listing one provider fetches only that provider', async t => {
+test('listing a provider requests nothing, and a cold account serves the built-in rows', async t => {
   const fixture = await compose({
     providers: ['codex', 'claude'],
     store: accountStore({ codex: ['a1', 'a2'], claude: ['a1', 'a2'] }),
@@ -337,12 +388,12 @@ test('listing one provider fetches only that provider', async t => {
   t.after(async () => { await fixture.dispose() })
 
   const listed = await fixture.route('codex').listModels('codex')
-  assert.deepEqual(listed.map(model => model.id), ['m1', 'm2'])
-  assert.equal(fixture.fetches('claude'), 0, "the codex list fetched claude's catalog")
-  assert.equal(fixture.fetches('codex'), 2)
+  assert.deepEqual(listed.map(model => model.id), ['m1', 'm2'], 'the built-in rows stand in while nothing is known')
+  assert.equal(fixture.fetches('codex'), 0, 'listing requested a catalogue')
+  assert.equal(fixture.fetches('claude'), 0, "the codex list touched claude's catalogue")
 })
 
-test('resolving one provider fetches only that provider', async t => {
+test('pool membership reads request nothing', async t => {
   const fixture = await compose({
     providers: ['codex', 'claude'],
     store: accountStore({ codex: ['a1', 'a2'], claude: ['a1', 'a2'] }),
@@ -350,9 +401,167 @@ test('resolving one provider fetches only that provider', async t => {
   })
   t.after(async () => { await fixture.dispose() })
 
-  assert.equal((await fixture.route('codex').resolveModel('codex', 'm1')).id, 'm1')
-  assert.equal(fixture.fetches('claude'), 0, "the codex resolution fetched claude's catalog")
-  assert.ok(fixture.fetches('codex') > 0)
+  assert.equal(await fixture.pool.owns('codex', 'm1'), true)
+  assert.equal(fixture.fetches('codex'), 0, "pool membership requested codex's catalogue")
+  assert.equal(fixture.fetches('claude'), 0, "the codex pool read touched claude's catalogue")
+})
+
+test('a cold pool membership read never waits on a catalogue request', async t => {
+  const gate = deferred()
+  const fixture = await compose({
+    providers: ['codex'],
+    store: accountStore({ codex: ['a'] }),
+    sweep: 'read',
+    fetch: async () => { await gate.promise; return servedModels() },
+  })
+  t.after(async () => { gate.release(); await fixture.dispose() })
+
+  const owns = await withTimeout(async () => await fixture.pool.owns('codex', 'm1'), DISCOVERY_TIMEOUT_MS)
+  assert.equal(owns, true, 'a cold pool snapshot waited on the membership read')
+  assert.equal(fixture.fetches('codex'), 0)
+  gate.release()
+})
+
+test('negative control: a sweep that awaits an explicit refresh does wait on it', async t => {
+  const gate = deferred()
+  const fixture = await compose({
+    providers: ['codex'],
+    store: accountStore({ codex: ['a'] }),
+    sweep: 'refresh',
+    fetch: async () => { await gate.promise; return servedModels() },
+  })
+  t.after(async () => { gate.release(); await fixture.dispose() })
+
+  let settled = false
+  const owns = fixture.pool.owns('codex', 'm1').then(() => { settled = true }, () => { settled = true })
+  await drain()
+  assert.equal(settled, false, 'the refreshing sweep must await the request it started')
+  gate.release()
+  await owns
+  assert.equal(fixture.fetches('codex'), 1)
+})
+
+test('an actual request ensures only the account it is about to use', async t => {
+  const gate = deferred()
+  const fixture = await compose({
+    providers: ['codex'],
+    store: accountStore({ codex: ['a1', 'a2'] }),
+    // No families: the request falls back to the first eligible account itself.
+    families: () => new Map(),
+    fetch: async (_provider, account) => {
+      if (account === 'a1') await gate.promise
+      return [MODELS[0]]
+    },
+  })
+  t.after(async () => { gate.release(); await fixture.dispose() })
+
+  let first = true
+  const streaming = (async () => {
+    for await (const _chunk of fixture.route('codex').stream({ provider: 'codex', model: 'm1', messages: [] })) {
+      if (first) { first = false }
+    }
+  })().then(() => undefined, () => undefined)
+  await drain()
+  assert.equal(fixture.fetchesFor('codex', 'a1'), 1, 'the selected account was not ensured')
+  assert.equal(fixture.fetchesFor('codex', 'a2'), 0, 'a peer was ensured for a request that never reaches it')
+  gate.release()
+  await streaming
+})
+
+test('a request about to be sent does not proceed on a catalogue it cannot confirm', async t => {
+  const gate = deferred()
+  const fixture = await compose({
+    providers: ['codex'],
+    store: accountStore({ codex: ['a'] }),
+    families: () => new Map(),
+    fetch: async () => { await gate.promise; return [] },
+  })
+  t.after(async () => { gate.release(); await fixture.dispose() })
+
+  let settled = false
+  const streaming = (async () => {
+    for await (const _chunk of fixture.route('codex').stream({ provider: 'codex', model: 'm1', messages: [] })) {
+      // the gated catalogue never lists m1
+    }
+  })().then(() => { settled = true }, () => { settled = true })
+  await drain()
+  assert.equal(settled, false, 'the request must await the ensure of the account it is about to use')
+  gate.release()
+  await streaming
+  assert.equal(settled, true)
+})
+
+test('concurrent ensures of one account collapse into a single request', async t => {
+  const gate = deferred()
+  const fixture = await compose({
+    providers: ['codex'],
+    store: accountStore({ codex: ['a'] }),
+    families: () => new Map(),
+    fetch: async () => { await gate.promise; return servedModels() },
+  })
+  t.after(async () => { gate.release(); await fixture.dispose() })
+
+  const adapter = fixture.adapter('codex')
+  const attempts = Array.from({ length: 5 }, async () => await adapter.refreshOwnCatalog('codex', 'a'))
+  await drain()
+  assert.equal(fixture.fetchesFor('codex', 'a'), 1, 'each caller started its own request')
+  gate.release()
+  for (const report of await Promise.all(attempts)) assert.deepEqual(report.fetched, ['a'])
+  assert.equal(fixture.fetchesFor('codex', 'a'), 1)
+})
+
+test('a targeted refresh touches one account and leaves its sibling alone', async t => {
+  const fixture = await compose({
+    providers: ['codex'],
+    store: accountStore({ codex: ['a1', 'a2'] }),
+    families: () => new Map(),
+    fetch: async () => servedModels(),
+  })
+  t.after(async () => { await fixture.dispose() })
+
+  await fixture.adapter('codex').refreshOwnCatalog('codex', 'a2')
+  assert.equal(fixture.fetchesFor('codex', 'a2'), 1)
+  assert.equal(fixture.fetchesFor('codex', 'a1'), 0, 'refreshing one account refreshed a peer')
+  // An omitted account means the provider's default account, not every account.
+  await fixture.adapter('codex').refreshOwnCatalog('codex')
+  assert.equal(fixture.fetchesFor('codex', 'a1'), 1)
+  assert.equal(fixture.fetchesFor('codex', 'a2'), 1, 'a default-account refresh must not sweep the peers')
+})
+
+test('force re-requests a fresh success that an ordinary ensure skips', async t => {
+  const fixture = await compose({
+    providers: ['codex'],
+    store: accountStore({ codex: ['a'] }),
+    families: () => new Map(),
+    fetch: async () => servedModels(),
+  })
+  t.after(async () => { await fixture.dispose() })
+
+  const adapter = fixture.adapter('codex')
+  assert.deepEqual((await adapter.refreshOwnCatalog('codex', 'a')).fetched, ['a'])
+  assert.deepEqual((await adapter.refreshOwnCatalog('codex', 'a')).skipped, ['a'])
+  assert.equal(fixture.fetchesFor('codex', 'a'), 1)
+  assert.deepEqual((await adapter.refreshOwnCatalog('codex', 'a', { force: true })).fetched, ['a'])
+  assert.equal(fixture.fetchesFor('codex', 'a'), 2)
+})
+
+test('a failure cooldown holds for an ordinary ensure and for a forced refresh', async t => {
+  const fixture = await compose({
+    providers: ['codex'],
+    store: accountStore({ codex: ['a'] }),
+    families: () => new Map(),
+    fetch: async () => { throw new LlmError('catalog unavailable', 'TRANSPORT') },
+  })
+  t.after(async () => { await fixture.dispose() })
+
+  const adapter = fixture.adapter('codex')
+  assert.deepEqual((await adapter.refreshOwnCatalog('codex', 'a')).failed, ['a'])
+  assert.equal(fixture.fetchesFor('codex', 'a'), 1)
+  // Retrying past the cooldown is exactly the storm it exists to prevent, so a
+  // manual (forced) refresh waits it out too.
+  assert.deepEqual((await adapter.refreshOwnCatalog('codex', 'a')).skipped, ['a'])
+  assert.deepEqual((await adapter.refreshOwnCatalog('codex', 'a', { force: true })).skipped, ['a'])
+  assert.equal(fixture.fetchesFor('codex', 'a'), 1, 'a failing provider was queried again')
 })
 
 test('a configured tier stays with the provider that owns it', async t => {
@@ -373,7 +582,7 @@ test('a logged-out route still refuses a model no account lists', async t => {
   const fixture = await compose({
     providers: ['codex'],
     store: accountStore({ codex: [] }),
-    persistedAgeMs: DISCOVERY_TTL_MS + 60_000,
+    persistedAgeMs: STALE_AGE_MS,
     fetch: async () => servedModels(),
   })
   t.after(async () => { await fixture.dispose() })
@@ -405,25 +614,21 @@ test('a vanished login lists nothing even while a catalog is still known', async
   )
 })
 
-test('extra tier rows are configuration: listing them neither sweeps nor retries a failed listing', async t => {
+test('extra tier rows are configuration: listing them neither sweeps nor requests a catalogue', async t => {
   const fixture = await compose({
     providers: ['codex'],
     store: accountStore({ codex: ['a1', 'a2'] }),
+    swept: [],
     tiers: { smart: [{ provider: 'codex', account: 'a1', model: 'm1' }] },
-    // Every catalog request fails, which is what a timed-out discovery leaves
-    // behind: nothing cached and nothing in flight.
     fetch: async () => { throw new LlmError('catalog unavailable', 'TRANSPORT') },
   })
   t.after(async () => { await fixture.dispose() })
 
   await fixture.route('codex').listModels('codex')
-  const afterListing = fixture.fetches('codex')
   const sweepsAfterListing = fixture.sweeps()
-  assert.ok(afterListing > 0, 'the listing itself must have attempted the account catalogs')
-
   assert.deepEqual((await fixture.pool.modelsForProvider('codex')).map(model => model.id), ['smart'])
   assert.equal(fixture.sweeps(), sweepsAfterListing, 'listing extra rows swept the account catalogs')
-  assert.equal(fixture.fetches('codex'), afterListing, 'the extra-row read retried the failed listing')
+  assert.equal(fixture.fetches('codex'), 0, 'a read requested a catalogue')
 })
 
 test('extra rows keep their tier id, order and the usable-member rule', async t => {
@@ -446,103 +651,372 @@ test('extra rows keep their tier id, order and the usable-member rule', async t 
   assert.deepEqual((await fixture.pool.modelsForProvider('claude')).map(model => model.provider), ['claude'])
 })
 
-test('a cold pool snapshot reads membership without waiting on a stale refresh', async t => {
+test('a logout during an in-flight refresh cannot resurrect the dropped catalogue', async () => {
   const gate = deferred()
-  const fixture = await compose({
-    providers: ['codex'],
-    store: accountStore({ codex: ['a'] }),
-    persistedAgeMs: DISCOVERY_TTL_MS + 60_000,
-    sweep: 'swr',
-    fetch: async () => { await gate.promise; return servedModels() },
-  })
-  t.after(async () => { gate.release(); await fixture.dispose() })
-
-  let settled = false
-  const resolution = fixture.route('codex').resolveModel('codex', 'm1').then(
-    () => { settled = true },
-    () => { settled = true },
-  )
-  await drain()
-  assert.equal(settled, true, 'a cold pool snapshot waited on the membership refresh')
-  gate.release()
-  await resolution
-})
-
-test('the same cold membership read blocks when the sweep awaits the refresh', async t => {
-  // Negative control: the pair proves the sweep's own read, not the pool cache,
-  // is what the previous case removes.
-  const gate = deferred()
-  const fixture = await compose({
-    providers: ['codex'],
-    store: accountStore({ codex: ['a'] }),
-    persistedAgeMs: DISCOVERY_TTL_MS + 60_000,
-    sweep: 'blocking',
-    fetch: async () => { await gate.promise; return servedModels() },
-  })
-  t.after(async () => { gate.release(); await fixture.dispose() })
-
-  let settled = false
-  const resolution = fixture.route('codex').resolveModel('codex', 'm1').then(
-    () => { settled = true },
-    () => { settled = true },
-  )
-  await drain()
-  assert.equal(settled, false, 'the blocking sweep must await the membership refresh')
-  gate.release()
-  await resolution
-})
-
-test('a request still validates its member freshly', async t => {
-  const gate = deferred()
-  const fixture = await compose({
-    providers: ['codex'],
-    store: accountStore({ codex: ['a'] }),
-    persistedAgeMs: DISCOVERY_TTL_MS + 60_000,
-    sweep: 'swr',
-    fetch: async () => { await gate.promise; return servedModels() },
-  })
-  t.after(async () => { gate.release(); await fixture.dispose() })
-
-  let settled = false
-  const streaming = (async () => {
-    for await (const _chunk of fixture.route('codex').stream({ provider: 'codex', model: 'm1', messages: [] })) {
-      // the fixture adapter never yields
-    }
-  })().then(() => { settled = true }, () => { settled = true })
-  await drain()
-  assert.equal(settled, false, 'a request must not send against a catalog it cannot confirm')
-  gate.release()
-  await streaming
-})
-
-test('an advisory read that cannot answer leaves the stored login as the only fallback', async () => {
-  // `list` reports a login that vanished during discovery as no rows, and the
-  // advisory read must not answer with the static catalogue instead.
-  let sessions = 1
+  const calls: { provider: ProviderId; account: string }[] = []
   const catalog = new ProviderCatalog(
     {
       tokens: {
         list: async () => [{ key: 'a' }],
-        session: async () => { throw new LlmError('login expired or was revoked', 'MISSING_CREDENTIAL') },
-        hasSession: async () => sessions > 0,
+        session: async () => ({ accessToken: 'a', refreshToken: 'r', expiresAt: Date.now() + 3_600_000 }),
+        hasSession: async () => true,
         defaultAccount: async () => 'a',
       },
       discovery: true,
     },
     'codex',
+    'codex',
     {
       staticRows: provider => MODELS.map(model => ({ provider, id: model.id, name: model.name })),
-      fetchCatalog: async () => {
-        // The permanent refresh failure deletes the stored session mid-fetch.
-        sessions = 0
-        throw new LlmError('login expired or was revoked', 'MISSING_CREDENTIAL')
+      fetchCatalog: async (account) => {
+        calls.push({ provider: 'codex', account })
+        await gate.promise
+        return servedModels()
       },
       row: (provider, model): LlmModelInfo => ({ provider, id: model.id, name: model.name }),
     },
   )
 
-  assert.deepEqual(await catalog.resolve('codex', 'a'), [])
+  const pending = catalog.refresh('codex', 'a')
+  await drain()
+  catalog.clearAccountCatalog('a')
+  gate.release()
+  assert.deepEqual((await pending).fetched, ['a'], 'the request itself still settles for its caller')
+  assert.equal(await catalog.read('a'), undefined, 'the dropped catalogue must not come back')
+  assert.deepEqual((await catalog.list('codex', 'a')).map(model => model.id), ['m1', 'm2'],
+    'a dropped catalogue lists the built-in rows, never the login that was dropped')
+  assert.deepEqual(calls, [{ provider: 'codex', account: 'a' }])
+})
+
+test('an advisory read serves the built-in rows when nothing is known, without a request', async () => {
+  let requested = 0
+  const catalog = new ProviderCatalog(
+    {
+      tokens: {
+        list: async () => [{ key: 'a' }],
+        session: async () => { throw new LlmError('login expired or was revoked', 'MISSING_CREDENTIAL') },
+        hasSession: async () => true,
+        defaultAccount: async () => 'a',
+      },
+      discovery: true,
+    },
+    'codex',
+    'codex',
+    {
+      staticRows: provider => MODELS.map(model => ({ provider, id: model.id, name: model.name })),
+      fetchCatalog: async () => { requested += 1; return servedModels() },
+      row: (provider, model): LlmModelInfo => ({ provider, id: model.id, name: model.name }),
+    },
+  )
+
+  assert.deepEqual((await catalog.resolve('codex', 'a'))?.map(model => model.id), ['m1', 'm2'])
+  assert.deepEqual((await catalog.list('codex', 'a')).map(model => model.id), ['m1', 'm2'])
+  assert.equal(requested, 0, 'an advisory read requested a catalogue')
+})
+
+test('an authoritative empty catalogue lists nothing, where an unknown one lists the built-ins', async () => {
+  const catalog = new ProviderCatalog(
+    {
+      tokens: {
+        list: async () => [{ key: 'a' }],
+        session: async () => ({ accessToken: 'a', refreshToken: 'r', expiresAt: Date.now() + 3_600_000 }),
+        hasSession: async () => true,
+        defaultAccount: async () => 'a',
+      },
+      discovery: true,
+    },
+    'codex',
+    'codex',
+    {
+      staticRows: provider => MODELS.map(model => ({ provider, id: model.id, name: model.name })),
+      fetchCatalog: async () => [],
+      row: (provider, model): LlmModelInfo => ({ provider, id: model.id, name: model.name }),
+    },
+  )
+
+  // Nothing known yet: the built-in rows stand in, so a cold picker is never empty.
+  assert.deepEqual((await catalog.list('codex', 'a')).map(model => model.id), ['m1', 'm2'])
+  // The provider answered "no models for this account": that answer is authoritative.
+  assert.deepEqual((await catalog.refresh('codex', 'a')).fetched, ['a'])
   assert.deepEqual(await catalog.list('codex', 'a'), [])
+  assert.deepEqual(await catalog.resolve('codex', 'a'), [])
+})
+
+test('a stored catalogue is announced once, and only when it actually moved', async () => {
+  const announced: string[] = []
+  let served: DiscoveredModel[] = [MODELS[0]]
+  const catalog = new ProviderCatalog(
+    {
+      tokens: {
+        list: async () => [{ key: 'a' }],
+        session: async () => ({ accessToken: 'a', refreshToken: 'r', expiresAt: Date.now() + 3_600_000 }),
+        hasSession: async () => true,
+        defaultAccount: async () => 'a',
+      },
+      discovery: true,
+      onCatalogChanged: provider => announced.push(provider),
+    },
+    'codex',
+    'codex',
+    {
+      staticRows: provider => MODELS.map(model => ({ provider, id: model.id, name: model.name })),
+      fetchCatalog: async () => [...served],
+      row: (provider, model): LlmModelInfo => ({ provider, id: model.id, name: model.name }),
+    },
+  )
+
+  await catalog.refresh('codex', 'a')
+  assert.deepEqual(announced, ['codex'], 'the first stored catalogue is a change')
+  await catalog.refresh('codex', 'a', { force: true })
+  assert.deepEqual(announced, ['codex'], 're-requesting the same rows is not a change')
+  served = [MODELS[1]]
+  await catalog.refresh('codex', 'a', { force: true })
+  assert.deepEqual(announced, ['codex', 'codex'], 'moved rows are announced')
+})
+
+test('a non-default account keeps its own catalogue across a reload', async () => {
+  const { dir, store } = await storePath('catalog-reload-')
+  try {
+    const first = catalogHarness({ store })
+    await first.refresh('codex', 'a2')
+    assert.equal(await first.read('a1'), undefined, 'the unrefreshed account has nothing of its own')
+    assert.deepEqual((await first.read('a2'))?.map(model => model.id), ['m1', 'm2'])
+    await first.drain()
+
+    const reloaded = catalogHarness({ store })
+    assert.deepEqual(
+      (await reloaded.read('a2'))?.map(model => model.id),
+      ['m1', 'm2'],
+      'the non-default account catalogue survives a restart',
+    )
+    assert.equal(
+      await reloaded.read('a1'),
+      undefined,
+      'no other account may be attributed that catalogue',
+    )
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('an account logged out before any read built its cache loses its persisted catalogue', async () => {
+  const { dir, store } = await storePath('catalog-unloaded-logout-')
+  try {
+    // A previous process discovered and persisted this account's catalogue.
+    await store('a2').save({ at: Date.now(), models: servedModels() })
+    assert.notEqual(await store('a2').load(), undefined)
+
+    // This process logs the account out without ever reading its catalogue, so
+    // no cache holds it and only the store can be told to forget it.
+    const catalog = catalogHarness({ store })
+    catalog.clearAccountCatalog('a2')
+    await catalog.drain()
+
+    assert.equal(await store('a2').load(), undefined, 'the durable record outlived the logout')
+    assert.equal(await catalogHarness({ store }).read('a2'), undefined)
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('clearing without an account drops every persisted catalogue, loaded or not', async () => {
+  const { dir, store } = await storePath('catalog-forget-all-')
+  try {
+    await store('a1').save({ at: Date.now(), models: servedModels() })
+    await store('a2').save({ at: Date.now(), models: servedModels() })
+    const catalog = catalogHarness({ store })
+    // One account is loaded into a cache, the other is not; both must go.
+    assert.deepEqual((await catalog.read('a1'))?.map(model => model.id), ['m1', 'm2'])
+
+    catalog.clearAccountCatalog()
+    await catalog.drain()
+
+    assert.equal(await store('a1').load(), undefined)
+    assert.equal(await store('a2').load(), undefined, 'an unloaded account kept its record')
+    assert.equal(await catalog.read('a1'), undefined)
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('one stored catalogue is announced once, however many callers shared the request', async () => {
+  const gate = deferred()
+  const announced: string[] = []
+  let calls = 0
+  const catalog = catalogHarness({
+    onCatalogChanged: provider => announced.push(provider),
+    fetch: async () => {
+      calls += 1
+      await gate.promise
+      return servedModels()
+    },
+  })
+
+  const callers = Array.from({ length: 5 }, async () => await catalog.refresh('codex', 'a1'))
+  await drain()
+  assert.equal(calls, 1, 'the five callers share one request')
+  gate.release()
+  for (const report of await Promise.all(callers)) assert.deepEqual(report.fetched, ['a1'])
+  assert.deepEqual(announced, ['codex'], 'one stored catalogue is one notification')
+})
+
+test('a stored catalogue is announced even when its only caller detached', async () => {
+  const gate = deferred()
+  const announced: string[] = []
+  const catalog = catalogHarness({
+    onCatalogChanged: provider => announced.push(provider),
+    fetch: async () => { await gate.promise; return servedModels() },
+  })
+
+  const controller = new AbortController()
+  const detaching = catalog.refresh('codex', 'a1', { signal: controller.signal })
+  await drain()
+  controller.abort()
+  assert.deepEqual((await detaching).cancelled, ['a1'])
+  // The shared request keeps running, and the catalogue it stores is still
+  // announced: the notification belongs to the stored result, not to a waiter.
+  gate.release()
+  await catalog.drain()
+  assert.deepEqual(announced, ['codex'])
+  assert.deepEqual((await catalog.read('a1'))?.map(model => model.id), ['m1', 'm2'])
+})
+
+test('a capability read refuses an account whose credential was removed elsewhere', async () => {
+  const { dir, store } = await storePath('catalog-external-removal-')
+  try {
+    // The catalogue is on disk and the login is gone: the record describes a
+    // plan nothing may serve, so a named account is checked before its cache is.
+    await store('a1').save({ at: Date.now(), models: servedModels() })
+    const live = new Set<string>(['a1'])
+    const catalog = catalogHarness({ store, accounts: ['a1'], sessions: () => [...live] })
+    assert.equal((await catalog.findModel('m1', 'a1'))?.name, 'Model 1')
+
+    live.clear()
+    assert.equal(await catalog.findModel('m1', 'a1'), undefined, 'a removed credential kept its capabilities')
+    assert.deepEqual(
+      (await catalog.list('codex', 'a1')).map(model => model.id),
+      [],
+      'a logged-out account lists nothing',
+    )
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('a disclosed cooldown outlives the process that earned it', async () => {
+  const realNow = Date.now
+  const { dir, store } = await storePath('catalog-persisted-cooldown-')
+  let calls = 0
+  const refusing = async (): Promise<readonly DiscoveredModel[]> => {
+    calls += 1
+    throw new OAuthEndpointError('slow down', 429, undefined, 600_000)
+  }
+  let now = realNow()
+  try {
+    Date.now = () => now
+    const first = catalogHarness({ store, fetch: refusing })
+    assert.deepEqual((await first.refresh('codex', 'a1')).failed, ['a1'])
+    assert.equal(calls, 1)
+    await first.drain()
+
+    // A fresh instance stands in for a restarted process: it never saw that
+    // failure in memory, and the store is the only thing that can tell it.
+    now += 5 * 60_000
+    const restarted = catalogHarness({ store, fetch: refusing })
+    assert.deepEqual((await restarted.refresh('codex', 'a1')).skipped, ['a1'])
+    assert.deepEqual((await restarted.refresh('codex', 'a1', { force: true })).skipped, ['a1'])
+    assert.equal(calls, 1, 'a restart re-asked a provider that named its own retry instant')
+
+    now += 6 * 60_000
+    assert.deepEqual((await restarted.refresh('codex', 'a1', { force: true })).failed, ['a1'])
+    assert.equal(calls, 2, 'once the disclosed instant lapses the request may run again')
+  } finally {
+    Date.now = realNow
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('a cold failure keeps the cache cold and invents no catalogue', async () => {
+  const realNow = Date.now
+  const { dir, store } = await storePath('catalog-cold-failure-')
+  let calls = 0
+  let now = realNow()
+  try {
+    Date.now = () => now
+    // A provider that failed before it ever listed anything: the record must
+    // hold the cooldown and nothing that looks like a fetched catalogue.
+    const persistence = store('a1')
+    assert.ok(persistence.saveFailure !== undefined)
+    await persistence.saveFailure({ notBefore: now + 600_000 })
+
+    const file = JSON.parse(await readFile(join(dir, 'models.json'), 'utf8')) as {
+      providers: { codex: { accounts: Record<string, Record<string, unknown>> } }
+    }
+    const entry = file.providers.codex.accounts.a1!
+    assert.deepEqual(Object.keys(entry), ['failure'], 'a cold failure must not fabricate at/models')
+
+    const catalog = catalogHarness({
+      store,
+      fetch: async () => { calls += 1; return servedModels() },
+    })
+    assert.equal(await catalog.read('a1'), undefined, 'no catalogue was ever stored')
+    assert.deepEqual(
+      (await catalog.list('codex', 'a1')).map(model => model.id),
+      ['m1', 'm2'],
+      'the built-in rows stand in for a cold account',
+    )
+    assert.deepEqual((await catalog.refresh('codex', 'a1')).skipped, ['a1'])
+    assert.equal(calls, 0, 'the persisted cooldown held')
+    now += 11 * 60_000
+    assert.deepEqual((await catalog.refresh('codex', 'a1')).fetched, ['a1'])
+  } finally {
+    Date.now = realNow
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('a request that answers clears the persisted cooldown beside its snapshot', async () => {
+  const realNow = Date.now
+  const { dir, store } = await storePath('catalog-failure-cleared-')
+  let fail = true
+  let now = realNow()
+  try {
+    Date.now = () => now
+    const catalog = catalogHarness({
+      store,
+      fetch: async () => {
+        if (fail) throw new OAuthEndpointError('slow down', 429, undefined, 600_000)
+        return servedModels()
+      },
+    })
+    assert.deepEqual((await catalog.refresh('codex', 'a1')).failed, ['a1'])
+    assert.notEqual((await store('a1').load())?.failure, undefined)
+
+    now += 11 * 60_000
+    fail = false
+    assert.deepEqual((await catalog.refresh('codex', 'a1')).fetched, ['a1'])
+    const record = await store('a1').load()
+    assert.equal(record?.failure, undefined, 'the answered request left its old cooldown behind')
+    assert.deepEqual(record?.snapshot?.models.map(model => model.id), ['m1', 'm2'])
+  } finally {
+    Date.now = realNow
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('a cache file written before cooldowns were persisted still loads', async () => {
+  const { dir, store } = await storePath('catalog-old-shape-')
+  try {
+    await writeFile(join(dir, 'models.json'), JSON.stringify({
+      version: 2,
+      providers: { codex: { accounts: { a1: { at: 1_700_000_000_000, models: [...MODELS] } } } },
+    }))
+    const catalog = catalogHarness({ store })
+    assert.deepEqual((await catalog.read('a1'))?.map(model => model.id), ['m1', 'm2'])
+    assert.deepEqual((await catalog.refresh('codex', 'a1', { force: true })).fetched, ['a1'])
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
 })
 
 test('the mounted pool sweep consults the advisory read and starts no fresh listing behind it', async t => {

@@ -9,6 +9,12 @@
  * the current model advertises a fast tier, which is also what keeps the composer's
  * separate control gone: the setting lives here, in the menu that selects the model.
  *
+ * The session's current model arrives as a bare observable source from
+ * `ctx.modelDirectories` through the inject `hooks` compartment, so a switch
+ * re-reads the tier of the model now selected instead of polling for it. Every
+ * read and every write names the model it addresses, so neither can land on a
+ * model the menu no longer shows.
+ *
  * Every color resolves through a `--dsw-alias-*` design token and every
  * user-visible string goes through the locale `t` of the
  * 'settings.subscriptions' namespace, same as the settings section.
@@ -16,14 +22,21 @@
 import { useEffect, useRef, useState } from 'react'
 import type { CSSProperties } from 'react'
 import { IconCheckOutlineRegular, IconChevronRightOutlineRegular } from '@deepseek-ai/dsh-client-ui-primitives'
-import type { PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
+import type { InjectFace, PropsLocale } from '@deepseek-ai/dsh-client-ui-slots'
 import type { ConnectionHandle } from '@deepseek-ai/dsh-api-remotes/client'
 import { callSubscriptionsAuth } from './SubscriptionsSection.js'
+import type { ObservableSnapshot } from './subscriptions-cache.js'
 import { en } from './locales.js'
 import type { SubscriptionsKey } from './locales.js'
 
 /** One model's speed choice: standard routing or the fast (priority) tier. */
 export type SpeedTier = 'standard' | 'fast'
+
+/** A session's resolved model selection, as the model directory publishes it. */
+export interface ModelRef {
+  provider: string
+  model: string
+}
 
 /** `speed` endpoint value, mirrored from the node half. */
 export interface SpeedState {
@@ -40,10 +53,11 @@ export interface SpeedSelectState {
 /**
  * The speed state this control watches, and the choice generation its reads belong to.
  *
- * The poll's read and the user's choice are both asynchronous, and the read is the slower of the
- * two (it asks the node half to enumerate the fast-capable models and the host for the session's
- * current model). A read that started before a choice can therefore settle after it, and
- * publishing that result would put the tier the user just replaced back on screen.
+ * The read and the user's choice are both asynchronous, and the read is the slower of the
+ * two (it asks the node half to enumerate the fast-capable models). A read that started before a
+ * choice can therefore settle after it, and publishing that result would put the tier the user
+ * just replaced back on screen. A read also names the model it addressed, because a model
+ * switch moves the row onto a model whose tier that read never asked for.
  */
 export interface SpeedView {
   /** Choices this control has settled; a read carries the value it started under. */
@@ -52,22 +66,45 @@ export interface SpeedView {
   state: SpeedSelectState | null
 }
 
+/** One read in flight: the model it addresses and the choice generation it started under. */
+export interface SpeedRead {
+  /** The model this read answers for. */
+  model: ModelRef | null
+  /** The generation this read started under. */
+  generation: number
+}
+
 /** The view before anything has been read or chosen. */
 const INITIAL_SPEED_VIEW: SpeedView = { generation: 0, state: null }
 
+/** Whether two selections name the same route. */
+function sameModel(left: ModelRef | null, right: ModelRef | null): boolean {
+  if (left === null || right === null) return left === right
+  return left.provider === right.provider && left.model === right.model
+}
+
 /**
- * Fold one settled host read into the view, unless a choice has superseded it.
+ * Fold one settled host read into the view, unless a choice or a model switch superseded it.
  *
- * Dropping the superseded read is what keeps a settled choice on screen: the tier in it is the
- * one the choice replaced, so publishing it would show the setting reverting on its own until the
- * next poll corrected it.
+ * Dropping a superseded read is what keeps the row honest: a read stamped with an older
+ * generation carries the tier the user's choice replaced, and a read of another model answers a
+ * question the row is no longer asking — publishing either would show a tier that belongs to no
+ * model on screen.
  * @param view - the view the read settles into.
- * @param read - the generation the read was started under.
+ * @param read - the model and generation the read was started under.
  * @param state - the state the read returned.
+ * @param current - the model the row shows now.
  * @returns the updated view, or the same view when the read is stale.
  */
-export function settleRead(view: SpeedView, read: number, state: SpeedSelectState): SpeedView {
-  return read === view.generation ? { ...view, state } : view
+export function settleRead(
+  view: SpeedView,
+  read: SpeedRead,
+  state: SpeedSelectState,
+  current: ModelRef | null,
+): SpeedView {
+  if (read.generation !== view.generation) return view
+  if (!sameModel(read.model, current)) return view
+  return { ...view, state }
 }
 
 /**
@@ -84,35 +121,87 @@ export function settleChoice(view: SpeedView, tier: SpeedTier): SpeedView {
 }
 
 /**
- * Minimal structural face of ui-model-selection's `ctx.modelDirectories`
- * service (the sanctioned cross-plugin channel: cordis services, not value
- * imports — same mirroring discipline as ToolCallOwnerProps). Both dsh lines
- * ship it with this shape; it replaces rc.2's `connection.api.sessions.models`
- * read, which the 0.1.2-alpha removed along with the whole `.api` face.
+ * Minimal structural face of one session's model directory (ui-model-selection's
+ * `ctx.modelDirectories` service — the sanctioned cross-plugin channel: cordis
+ * services, not value imports, same mirroring discipline as ToolCallOwnerProps).
+ * `store` is the framework's own shared snapshot source for this session; the
+ * resolved `current` already includes the Host's default when the Session
+ * carries no selection of its own.
  */
+export interface ModelDirectoryLike {
+  /** The shared directory store; `current` is the session's resolved selection. */
+  readonly store: ObservableSnapshot<{ current: ModelRef | null }>
+  /** Explicit one-shot read, for entry points with no slot hook (the /fast command). */
+  load(): Promise<{ current: ModelRef | null }>
+}
+
+/** Structural face of ui-model-selection's `ctx.modelDirectories` service. */
 export interface ModelDirectoriesLike {
-  /** Resolve one session's shared model directory (throws for unknown sessions). */
-  directoryFor(sessionId: string): {
-    /** Load the directory; `current` is the session's effective model selection. */
-    load(): Promise<{ current: { provider: string; model: string } | null }>
+  /**
+   * Resolve one session's shared model directory (throws for unknown sessions).
+   * @param sessionId - the owning session.
+   * @returns the resident directory both selection entries share.
+   */
+  directoryFor(sessionId: string): ModelDirectoryLike
+}
+
+/**
+ * The session's resolved model selection as a bare observable source, for the
+ * inject `hooks` compartment. Snapshot identity follows the directory store's
+ * own `current` object, so a subscriber re-renders only when the selection moves.
+ * @param directory - the session's shared directory.
+ * @returns the observable selection source.
+ */
+export function modelSelectionSource(directory: ModelDirectoryLike): ObservableSnapshot<ModelRef | null> {
+  return {
+    getSnapshot: () => directory.store.getSnapshot().current,
+    subscribe: listener => directory.store.subscribe(listener),
   }
+}
+
+/**
+ * Resolve a session's model selection once, through the directory's explicit
+ * read. Entry points that receive no slot hook (the /fast command) use this;
+ * slot components read the observable source instead.
+ * @param models - the lazy service lookup.
+ * @param sessionId - the owning session.
+ * @returns the resolved selection, or null when nothing is selected.
+ */
+export async function resolveCurrentModel(
+  models: () => ModelDirectoriesLike | undefined,
+  sessionId: string,
+): Promise<ModelRef | null> {
+  const directories = models()
+  if (directories === undefined) return null
+  return (await directories.directoryFor(sessionId).load()).current
 }
 
 /** Injected dependencies of {@link SpeedSelect} (slot `inject`, session-bound). */
 export interface SpeedSelectInjected {
-  /** Load the current model's speed state; `visible` false keeps the control hidden. */
-  loadSpeed: () => Promise<SpeedSelectState>
-  /** Store the current model's speed tier; resolves false when the write failed. */
-  setSpeed: (tier: SpeedTier) => Promise<boolean>
+  /**
+   * Load one model's speed state; `visible` false keeps the control hidden.
+   * @param current - the model the row is showing, or null when none is selected.
+   * @returns the model's speed state.
+   */
+  loadSpeed: (current: ModelRef | null) => Promise<SpeedSelectState>
+  /**
+   * Store one model's speed tier.
+   * @param current - the addressed model.
+   * @param tier - the tier to store.
+   * @returns false when the write failed.
+   */
+  setSpeed: (current: ModelRef, tier: SpeedTier) => Promise<boolean>
+  /** Registrant hooks compartment: the session's resolved model selection. */
+  hooks: { model: ObservableSnapshot<ModelRef | null> }
 }
 
 /**
- * Props delivered by the slot outlet: the framework session kit and the model
- * seat's row owner share (unused — everything arrives session-bound through the
- * inject face), the injected callbacks, and the locale seat.
+ * Props delivered by the slot outlet: the injected callbacks and the model
+ * hook the framework binds from the inject hooks compartment. The framework's
+ * own standard shares are ignored — everything arrives session-bound here.
  */
-export type SpeedSelectProps = PropsRuntime<'conversation.input.model.row'>
-  & Partial<SpeedSelectInjected>
+export type SpeedSelectProps =
+  & InjectFace<SpeedSelectInjected>
   & Partial<PropsLocale<'settings.subscriptions'>>
 
 /**
@@ -133,7 +222,7 @@ const FAST_TIER_PROVIDERS: ReadonlySet<string> = new Set(['codex', 'cursor', 'cl
  * @returns true when the control should render.
  */
 export function speedControlVisible(
-  current: { provider: string; model: string } | null,
+  current: ModelRef | null,
   fastModels: readonly string[],
 ): boolean {
   return current !== null
@@ -142,28 +231,17 @@ export function speedControlVisible(
 }
 
 /**
- * The `loadSpeed` half of the inject face: the session's current model and the
- * tier stored for it, plus the node half's fast-capable listing (the visibility
- * gate). A model-RPC failure throws rather than answering "hidden" — the caller
- * keeps its last known state, so a transient failure never locks the toggle
- * away.
- *
- * `sessionId` is a plain string: slot and command contexts brand it through
- * different dsh-session copies, and only the service boundary needs one.
- *
- * `models` resolves lazily per call: the ui-model-selection service may
- * register after this plugin applies, and a shell without it (no model seat
- * at all) simply keeps the toggle hidden.
+ * The `loadSpeed` half of the inject face: the addressed model's stored tier plus
+ * the node half's fast-capable listing (the visibility gate). A model-RPC
+ * failure throws rather than answering "hidden" — the caller keeps its last
+ * known state, so a transient failure never locks the toggle away.
+ * @param rpc - Connection RPC caller.
+ * @returns the loader the inject face binds.
  */
 export function createSpeedLoader(
   rpc: ConnectionHandle['rpc'],
-  models: () => ModelDirectoriesLike | undefined,
-  sessionId: string,
 ): SpeedSelectInjected['loadSpeed'] {
-  return async () => {
-    const directories = models()
-    if (directories === undefined) return { visible: false, tier: 'standard' }
-    const { current } = await directories.directoryFor(sessionId).load()
+  return async (current) => {
     if (current === null || !FAST_TIER_PROVIDERS.has(current.provider)) return { visible: false, tier: 'standard' }
     const state = await callSubscriptionsAuth<SpeedState>(rpc, 'speed', {
       provider: current.provider,
@@ -173,36 +251,35 @@ export function createSpeedLoader(
   }
 }
 
-/** The `setSpeed` half of the inject face: boolean outcome for the component's busy state. */
+/**
+ * The `setSpeed` half of the inject face: boolean outcome for the component's busy state.
+ * @param rpc - Connection RPC caller.
+ * @returns the setter the inject face binds.
+ */
 export function createSpeedSetter(
   rpc: ConnectionHandle['rpc'],
-  models: () => ModelDirectoriesLike | undefined,
-  sessionId: string,
 ): SpeedSelectInjected['setSpeed'] {
-  return async (tier) => {
+  return async (current, tier) => {
     try {
-      const directories = models()
-      if (directories === undefined) return false
-      const { current } = await directories.directoryFor(sessionId).load()
-      if (current === null || !FAST_TIER_PROVIDERS.has(current.provider)) return false
+      if (!FAST_TIER_PROVIDERS.has(current.provider)) return false
       await callSubscriptionsAuth(rpc, 'setSpeed', { provider: current.provider, model: current.model, tier })
       return true
     } catch {
-      // Both failure sources — resolving the session's model, and the write
-      // itself — are reported as a failed settlement, which is what the
-      // control renders. A rejection would leave its busy state stuck.
+      // The write's own failure is reported as a failed settlement, which is
+      // what the control renders. A rejection would leave its busy state stuck.
       return false
     }
   }
 }
 
 /**
- * Settle one picked tier against the session. A false answer fails the call
- * with the dictionary's failure copy, which is how an entry point that owns no
+ * Settle one picked tier against a model. A false answer fails the call with
+ * the dictionary's failure copy, which is how an entry point that owns no
  * notice surface of its own states the failure: the `/fast` popup renders
  * through the shell's error strip, while the composer control shows the same
  * copy in place.
- * @param setSpeed - the current model's setter.
+ * @param setSpeed - the setter.
+ * @param current - the model the pick addresses.
  * @param tier - the picked tier.
  * @param t - Subscriptions dictionary translator.
  * @returns nothing once the write takes effect.
@@ -210,10 +287,11 @@ export function createSpeedSetter(
  */
 export async function settleSpeedTier(
   setSpeed: SpeedSelectInjected['setSpeed'],
+  current: ModelRef,
   tier: SpeedTier,
   t: (key: SubscriptionsKey) => string,
 ): Promise<void> {
-  if (!await setSpeed(tier)) throw new Error(t('speedSaveFailed'))
+  if (!await setSpeed(current, tier)) throw new Error(t('speedSaveFailed'))
 }
 
 /** English-dictionary fallback for a missing inject `t` (standalone renders). */
@@ -223,57 +301,90 @@ function fallbackTranslate(key: SubscriptionsKey): string {
 
 const TIERS: readonly SpeedTier[] = ['standard', 'fast']
 
-/** How often the row re-reads the host state (model switches arrive only by asking). */
-const POLL_INTERVAL_MS = 3000
-
 /**
  * The model menu's Speed row: a cell reading `速度` and the current tier, opening
  * the two tiers in place (standard/fast with descriptions, a check on the current
  * one). The cell keeps the shape of the seat's own root cells — label, current
- * value, chevron — so the row reads as one of them. The host pushes nothing on a
- * model switch, so the row re-reads on a slow poll with a single-flight guard; a
- * failed read keeps the last known state, so a transient RPC failure can never
- * lock the choice away. Every read is stamped with the choice generation it
- * started under, and {@link settleRead} drops one that a later choice superseded.
+ * value, chevron — so the row reads as one of them.
+ *
+ * The row re-reads when the session's model moves and when the menu opens, never
+ * on a timer; a failed read keeps the last known state, so a transient RPC
+ * failure can never lock the choice away. Every read is stamped with the choice
+ * generation it started under and names the model it addresses, so a read a
+ * later choice superseded is dropped and no read or write can land on a model
+ * the menu no longer shows.
  */
-export function SpeedSelect({ loadSpeed, setSpeed, t }: SpeedSelectProps) {
-  const translate = t ?? fallbackTranslate
+export function SpeedSelect(props: SpeedSelectProps) {
+  const { loadSpeed, setSpeed, useModel } = props
+  const translate = props.t ?? fallbackTranslate
+  const model = useModel(value => value)
   const [view, setView] = useState<SpeedView>(INITIAL_SPEED_VIEW)
   const [open, setOpen] = useState(false)
   const [busy, setBusy] = useState(false)
   const [failed, setFailed] = useState(false)
   const rootRef = useRef<HTMLDivElement | null>(null)
   // The inject face may be re-evaluated (new callback identities) on re-render;
-  // the poll effect mounts once and reads through this ref, so identity churn
-  // neither resets the interval nor multiplies in-flight loads.
+  // the read effect mounts once and reads through these refs, so identity churn
+  // neither resets the effect nor multiplies in-flight loads.
   const loadRef = useRef(loadSpeed)
   loadRef.current = loadSpeed
+  const modelRef = useRef(model)
+  modelRef.current = model
   // The generation a read is stamped with. Mirrored from the view because the effect below mounts
   // once and stamps a read when it starts, not when it settles.
   const generationRef = useRef(view.generation)
   generationRef.current = view.generation
+  /** The read in flight, or null. A settlement from any other read is discarded. */
+  const readingRef = useRef<SpeedRead | null>(null)
+  /** A model switch that arrived while a read was running: replay it once that read settles. */
+  const replayRef = useRef(false)
+  /** Read now, with the model the framework last published. */
+  const reloadRef = useRef<() => void>(() => {})
 
   useEffect(() => {
     if (loadRef.current === undefined) return
     let cancelled = false
-    let inflight = false
     const reload = (): void => {
       const load = loadRef.current
-      if (load === undefined || inflight) return
-      inflight = true
-      const read = generationRef.current
-      void load().then(
-        (loaded) => { if (!cancelled) setView(current => settleRead(current, read, loaded)) },
-        () => { /* keep the last known state; the next tick retries */ },
-      ).finally(() => { inflight = false })
+      if (load === undefined) return
+      if (readingRef.current !== null) {
+        // A read is running; the replay below re-reads the newest model once it settles.
+        replayRef.current = true
+        return
+      }
+      const read: SpeedRead = { model: modelRef.current, generation: generationRef.current }
+      readingRef.current = read
+      void load(read.model).then(
+        (loaded) => {
+          if (cancelled || readingRef.current !== read) return
+          readingRef.current = null
+          setView(current => settleRead(current, read, loaded, modelRef.current))
+        },
+        () => {
+          if (cancelled || readingRef.current !== read) return
+          readingRef.current = null
+          // A failed read keeps the last known state; the next model change or open retries.
+        },
+      ).finally(() => {
+        if (cancelled) return
+        if (replayRef.current) {
+          replayRef.current = false
+          reload()
+        }
+      })
     }
+    reloadRef.current = reload
     reload()
-    const timer = setInterval(reload, POLL_INTERVAL_MS)
     return () => {
       cancelled = true
-      clearInterval(timer)
+      reloadRef.current = () => {}
     }
   }, [])
+
+  // A model switch re-reads the tier of the model now selected. Keyed by the
+  // route, not the object identity, so a store republish of the same selection
+  // never starts a second read.
+  useEffect(() => { reloadRef.current() }, [model?.provider, model?.model])
 
   useEffect(() => {
     if (!open) return
@@ -285,22 +396,25 @@ export function SpeedSelect({ loadSpeed, setSpeed, t }: SpeedSelectProps) {
   }, [open])
 
   const state = view.state
-  if (loadSpeed === undefined || setSpeed === undefined || state === null || !state.visible) {
+  if (state === null || !state.visible) {
     return null
   }
 
   const choose = (tier: SpeedTier): void => {
-    if (busy) return
+    if (busy || model === null) return
     if (tier === state.tier) {
       setOpen(false)
       return
     }
+    const addressed = model
     setBusy(true)
     setFailed(false)
-    void setSpeed(tier).then((ok) => {
+    void setSpeed(addressed, tier).then((ok) => {
       setBusy(false)
       if (ok) {
-        setView(current => settleChoice(current, tier))
+        // A write that settled after the row moved on addressed another model:
+        // stamping its tier here would show a tier the new model never stored.
+        if (sameModel(modelRef.current, addressed)) setView(current => settleChoice(current, tier))
         setOpen(false)
         return
       }
@@ -313,13 +427,7 @@ export function SpeedSelect({ loadSpeed, setSpeed, t }: SpeedSelectProps) {
   const show = (): void => {
     setFailed(false)
     setOpen(true)
-    const load = loadRef.current
-    if (load === undefined) return
-    const read = generationRef.current
-    void load().then(
-      loaded => { setView(current => settleRead(current, read, loaded)) },
-      () => { /* keep showing the last good state */ },
-    )
+    reloadRef.current()
   }
 
   const tierName = (tier: SpeedTier): string =>

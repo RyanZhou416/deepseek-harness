@@ -9,10 +9,10 @@
  * accounts failovers; one listed by a single account is pinned to it.
  */
 
-import { LlmAdapter, LlmError } from '@deepseek-ai/dsh-llm'
+import { LlmAdapter, LlmError, errorChain } from '@deepseek-ai/dsh-llm'
 import type { GenerateOptions, LlmModelInfo, LlmResolvedModelInfo, StreamChunk } from '@deepseek-ai/dsh-llm'
 import { TokenManager, withTimeout } from './common.js'
-import type { TokenManagerOptions } from './common.js'
+import type { CatalogRefreshReport, TokenManagerOptions } from './common.js'
 import {
   deleteAccountSession,
   getAccountSession,
@@ -39,17 +39,17 @@ export interface AccountAwareAdapter extends LlmAdapter {
    * The provider's own catalog: one account when `account` is set, otherwise
    * the union of every logged-in account (default first; later duplicates
    * dropped). The picker uses the union; pool assembly lists each account.
+   * A read: it answers from the local cache or the built-in rows and never
+   * starts a provider request. Use {@link refreshOwnCatalog} for that.
    */
   listOwnModels(provider: string, account?: string, signal?: AbortSignal): Promise<readonly LlmModelInfo[]>
   /**
-   * The provider's own catalog for one account for an advisory read: known rows
-   * answer from memory while a refresh runs in the background, and only a
-   * catalog with nothing known awaits its fetch. A fetch that cannot answer
-   * degrades to the static rows, and a login that vanished during it lists
-   * nothing, so `undefined` reports cancellation alone — the caller sits that
-   * account out instead of starting a second attempt. Absent on an adapter with
-   * no catalog of its own, where callers fall back to {@link listOwnModels},
-   * which stays the read for an explicit enumeration.
+   * The provider's own catalog for one account for an advisory read: the
+   * last-known catalogue, or the built-in rows while nothing is known, without
+   * ever starting a provider request, so `undefined` reports caller cancellation
+   * alone — the caller sits that account out instead of starting a second
+   * attempt. Absent on an adapter with no catalog of its own, where callers fall
+   * back to {@link listOwnModels}, which stays the read for an explicit enumeration.
    */
   resolveOwnCatalog?(
     provider: string,
@@ -57,20 +57,63 @@ export interface AccountAwareAdapter extends LlmAdapter {
     signal?: AbortSignal,
   ): Promise<readonly LlmModelInfo[] | undefined>
   /**
+   * The ONE path that asks the provider for a catalogue. Every catalogue-owning
+   * adapter implements it; it is optional here only because an adapter without a
+   * catalogue of its own has nothing to refresh.
+   *
+   * `account` names the account to refresh and defaults to the provider's default
+   * account — never every peer. Without `force` it is an ensure: it requests the
+   * catalogue only when the entry is missing, older than the route's configured
+   * maximum age, and no failure cooldown is running; otherwise it reports the
+   * account as skipped. `force` re-requests a fresh successful entry (an explicit
+   * user refresh) and still honours a live failure cooldown, so a broken provider
+   * is not re-queried on every click. `signal` detaches this caller alone; a
+   * request other callers still await keeps running.
+   * @param provider - the provider route whose catalogue is refreshed.
+   * @param account - the account to refresh; the provider's default when omitted.
+   * @param options - `force` for an explicit refresh, `signal` for caller cancellation.
+   * @returns which account was requested, skipped, cancelled or failed.
+   */
+  refreshOwnCatalog?(
+    provider: string,
+    account?: string,
+    options?: { force?: boolean; signal?: AbortSignal },
+  ): Promise<CatalogRefreshReport>
+  /**
+   * Await every catalogue request this route still has in flight, without
+   * starting new work, so disposal leaves no write behind. Never rejects.
+   */
+  drainOwnCatalogs?(): Promise<void>
+  /**
    * Capability resolution of the provider's OWN models, bypassing the pool
    * delegation. The pool resolves its members through this — an account pool
    * reuses the catalog wire id (e.g. `gpt-5.4`), so resolveModel would
    * otherwise bounce straight back into the pool forever. The optional account
    * lets adapters with account-specific limits resolve that member conservatively.
+   * A read: it answers from cache and never starts a provider request.
    */
   resolveOwnModel(provider: string, model: string, account?: string): Promise<LlmResolvedModelInfo>
-  /** Drop cached catalogs: one account, or every account when omitted (login/logout). */
+  /**
+   * Drop the cached catalogue of one account, or every account when omitted: the
+   * stored entry goes too, and an in-flight request that loses the race cannot
+   * write back. Login/logout, account removal, or a changed catalogue identity.
+   */
   clearAccountCatalog(account?: string): void
+  /**
+   * Move one account's cached catalogue to the canonical key the store renamed
+   * it to, keeping the snapshot, its freshness instant and its failure cooldown
+   * under the new key. Called from the account manager's rename hook, which runs
+   * inside the save that proved the rename: it must not wait on an in-flight
+   * catalogue request.
+   * @param from - the key the account's catalogue was stored under.
+   * @param to - the canonical key the account now resolves to.
+   */
+  renameAccountCatalog?(from: string, to: string): Promise<void>
   /**
    * Whether this route's catalog advertises the model's fast tier; absent on
    * routes whose requests carry none. The account scopes which catalog entry
    * answers (Codex and Cursor discover per account); omitted asks the
-   * default-first account that lists the model.
+   * default-first account that lists the model. A read: never starts a request.
    */
   supportsFastTier?(model: string, account?: string): boolean | Promise<boolean>
 }
@@ -151,6 +194,23 @@ interface AccountTokenManagerOptions<S extends TimedSession> {
   makeOptions: (account: string) => Omit<TokenManagerOptions<S>, 'load' | 'save' | 'remove' | 'onRemoved' | 'displayName'>
   /** Called after a permanent refresh failure deleted one account's session. */
   onAccountRemoved?: (account: string) => void
+  /**
+   * Called when a successful save proves the store renamed one account's
+   * canonical key — a Codex identity that gained its stable user id, for
+   * instance. Awaited before the manager re-binds, so an owner of
+   * account-keyed state can move that account's own metadata to the new key
+   * before anything reads it.
+   *
+   * A rejection is contained by the caller: the renamed session is already
+   * stored and the store still resolves the old key through the alias it
+   * recorded, so a move that could not complete must not surface as a refresh
+   * failure for a usable account. The failure is reported through {@link onWarn}.
+   * @param from - the key the account was stored under until this save.
+   * @param to - the canonical key the store now resolves that account to.
+   */
+  onAccountRenamed?: (from: string, to: string) => Promise<void>
+  /** Warning sink for a rename move that could not complete; absent stays quiet. */
+  onWarn?: (message: string) => void
   /** Store backend; defaults to the durable auth store. */
   io?: AccountStoreIo<S>
 }
@@ -244,11 +304,25 @@ export class AccountTokenManager<S extends TimedSession> {
           await io.save(boundAccount, session, expectedPrior)
           const canonical = await this.resolveAccount(boundAccount)
           if (canonical !== boundAccount) {
+            const renamedFrom = boundAccount
+            try {
+              await this.options.onAccountRenamed?.(renamedFrom, canonical)
+            } catch (renameFailure: unknown) {
+              // The renamed session is stored and the store's alias still
+              // resolves the old key, so the account keeps serving; a move that
+              // failed here must not be reported as a refresh failure. The old
+              // key's state stays where it is, which is the degraded outcome the
+              // warning names.
+              this.options.onWarn?.(
+                `dsh-plugin-subscriptions: account state did not follow the renamed key `
+                + `"${renamedFrom}" -> "${canonical}" (${errorChain(renameFailure)})`,
+              )
+            }
             // Move the binding as well as the cache entry: logout can delete
             // aliases, so callbacks must not keep relying on the old key.
             // Retain the manager itself to preserve its in-flight refresh.
             this.managers.set(canonical, manager!)
-            if (this.managers.get(boundAccount) === manager) this.managers.delete(boundAccount)
+            if (this.managers.get(renamedFrom) === manager) this.managers.delete(renamedFrom)
             boundAccount = canonical
           }
         },

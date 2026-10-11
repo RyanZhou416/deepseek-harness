@@ -319,6 +319,9 @@ test('a stored fast tier rides only a codex model whose catalog advertises the s
     fetchFn,
     speedFor: () => true,
   })
+  // The route reads capability from the cache a send already ensured, so the
+  // catalog request is made here, at the explicit refresh, and not by the turn.
+  await adapter.refreshOwnCatalog('codex', 'acct')
   await drain(adapter, { ...STREAM_OPTIONS, model: 'gpt-5.6-sol' })
   await drain(adapter, { ...STREAM_OPTIONS, model: 'gpt-5.1-codex' })
   assert.equal(calls[1]?.body.service_tier, 'priority')

@@ -8,11 +8,16 @@
  * the current provider first and the default account (starred) first within
  * a provider. Model-scoped Antigravity usage follows the current model.
  *
- * Usage rides the `subscriptions-auth` `status` + `usage` endpoints on a slow
- * poll (the server shares its cache across UI surfaces); the current model
- * comes from ui-model-selection's `modelDirectories` service on a quicker
- * poll, since the host pushes nothing on a model switch. Renders nothing when
- * no provider has a logged-in account that reports usage.
+ * Everything on screen comes from the plugin application's shared cache
+ * (`subscriptions-cache.ts`) and from the framework's own model-selection
+ * seam: the session's resolved model arrives as a bare observable source from
+ * `ctx.modelDirectories` through the inject `hooks` compartment, and the cache
+ * supplies the roster and the usage entries. Nothing here polls — a read
+ * happens on mount, on a model change, on a window focus, and when the panel
+ * opens, and the panel's open state additionally re-renders the remaining-time
+ * labels on a local tick that never reaches the network.
+ *
+ * Renders nothing when no provider has a logged-in account that reports usage.
  *
  * The collapsed pill reads only the default account — the same account
  * direct (non-pool) routes serve — so it stays one short segment even for a
@@ -21,24 +26,27 @@
  * user-visible string goes through the locale `t` of the
  * 'settings.subscriptions' namespace.
  */
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import type { CSSProperties } from 'react'
 import { createPortal } from 'react-dom'
-import type { PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
+import type { InjectFace, PropsLocale } from '@deepseek-ai/dsh-client-ui-slots'
 import type { ConnectionHandle } from '@deepseek-ai/dsh-api-remotes/client'
 import { IconDataOutlineRegular, useAnchoredPosition, useDismissOnOutsidePointer } from '@deepseek-ai/dsh-client-ui-primitives'
-import { callSubscriptionsAuth, usageBarColor } from './SubscriptionsSection.js'
+import { usageBarColor, usageCacheNote } from './SubscriptionsSection.js'
 import { ResetCredits } from './ResetCredits.js'
 import type { AccountStatus, ProviderStatus, ProviderUsage, SubscriptionProvider, UsageWindow } from './SubscriptionsSection.js'
-import type { ModelDirectoriesLike } from './SpeedSelect.js'
+import type { ModelRef } from './SpeedSelect.js'
+import type {
+  CachedUsage, ObservableSnapshot, StatusRead, SubscriptionsCacheState, UsageReadMode,
+} from './subscriptions-cache.js'
 import { en } from './locales.js'
 import type { SubscriptionsKey } from './locales.js'
 
-/** How often the badge re-reads usage; the server also shares its own cache/negative-cache across UI surfaces. */
-const USAGE_POLL_INTERVAL_MS = 15 * 60_000
-
-/** How often the badge re-reads the session's current model (model switches arrive only by asking). */
-const MODEL_POLL_INTERVAL_MS = 3000
+/**
+ * Cadence of the panel's local countdown refresh. It only re-renders the
+ * remaining-time labels of an open panel and never reads anything.
+ */
+const COUNTDOWN_TICK_MS = 60_000
 
 /** Distance between the trigger's top edge and the dialog's bottom (host stat dialogs use the same). */
 const PANEL_GAP = 8
@@ -50,13 +58,42 @@ const PANEL_MARGIN = 12
 export interface SubscriptionUsageBadgeInjected {
   /** Connection RPC caller to reach the `subscriptions-auth` endpoints. */
   rpc: ConnectionHandle['rpc']
-  /** Resolve the session's effective provider and model together. */
-  currentModel: () => Promise<{ provider: string; model: string } | undefined>
+  /**
+   * Read the shared cache's roster; newly listed accounts seed a local read.
+   * @returns the roster, or the message the caller discards (the badge shows cached state only).
+   */
+  readStatus: () => Promise<StatusRead>
+  /**
+   * Read one account's usage.
+   * @param provider - the account's provider.
+   * @param account - the account key.
+   * @param mode - local snapshot (default), if-needed refresh, or forced refresh.
+   * @returns nothing once the read has started.
+   */
+  readUsage: (provider: SubscriptionProvider, account: string, mode?: UsageReadMode) => Promise<void>
+  /**
+   * Read every listed account of one provider.
+   * @param provider - the provider whose accounts are read.
+   * @param mode - read strength.
+   * @returns nothing once every read has started.
+   */
+  readProvider: (provider: SubscriptionProvider, mode?: UsageReadMode) => Promise<void>
+  /**
+   * Read every listed account.
+   * @param mode - read strength.
+   * @returns nothing once every read has started.
+   */
+  readAll: (mode?: UsageReadMode) => Promise<void>
+  /** Registrant hooks compartment: the shared cache and the session's model selection. */
+  hooks: {
+    usage: ObservableSnapshot<SubscriptionsCacheState>
+    model: ObservableSnapshot<ModelRef | null>
+  }
 }
 
 /** Props delivered by the slot outlet + inject + the locale seat. */
-export type SubscriptionUsageBadgeProps = PropsRuntime<'conversation.composer.dock'>
-  & Partial<SubscriptionUsageBadgeInjected>
+export type SubscriptionUsageBadgeProps =
+  & InjectFace<SubscriptionUsageBadgeInjected>
   & Partial<PropsLocale<'settings.subscriptions'>>
 
 /** One logged-in account's usage windows, as listed in the expanded dialog. */
@@ -71,6 +108,8 @@ interface AccountUsageDisplay {
   windows: UsageWindow[]
   /** ChatGPT banked reset credits, when the usage payload disclosed a count. */
   resetCredits?: number
+  /** The account's cache entry, for the freshness line the dialog states. */
+  entry?: CachedUsage
 }
 
 /** One provider's usage snapshot: every logged-in account that reports windows. */
@@ -97,22 +136,46 @@ const PROVIDER_NAMES: Record<SubscriptionProvider, string> = {
 }
 
 /**
- * The `currentModel` half of the inject face: the session's effective
- * model selection through ui-model-selection's `modelDirectories` service,
- * resolved lazily per call (the service may register after this plugin, and
- * a shell without it simply reports "unknown", which the badge treats as
- * "show every provider").
+ * Fold the shared cache into the badge's provider list: every logged-in
+ * account the cache holds an entry for — default account first, providers in
+ * the roster's order.
+ *
+ * An entry with no windows is still listed: the node half's `missing` state
+ * means "nothing read yet", not "no quota", and dropping the row would take
+ * the pill (and with it the panel's refresh control) off screen exactly when
+ * the user needs it. A retained payload survives a failed or stale
+ * revalidation, so a provider whose quota read is failing keeps the windows it
+ * last reported.
+ * @param state - the shared cache snapshot.
+ * @returns one entry per provider the cache holds usage state for.
  */
-export function createCurrentModelReader(
-  models: () => ModelDirectoriesLike | undefined,
-  sessionId: string,
-): SubscriptionUsageBadgeInjected['currentModel'] {
-  return async () => {
-    const directories = models()
-    if (directories === undefined) return undefined
-    const { current } = await directories.directoryFor(sessionId).load()
-    return current ?? undefined
+export function displaysOf(state: SubscriptionsCacheState): ProviderUsageDisplay[] {
+  const byProvider = new Map<SubscriptionProvider, ProviderUsageDisplay>()
+  for (const provider of Object.keys(state.status ?? {}) as SubscriptionProvider[]) {
+    const status = state.status?.[provider]
+    for (const account of accountsOf(status)) {
+      const entry = state.usage[`${provider}:${account.key}`]
+      if (entry === undefined) continue
+      const usage: ProviderUsage | undefined = entry.usage
+      if (usage?.supported === false) continue
+      const windows = usage?.windows ?? []
+      const plan = usage?.plan ?? account.plan
+      const resetCredits = provider === 'codex' ? usage?.resetCredits?.availableCount : undefined
+      const row: AccountUsageDisplay = {
+        key: account.key,
+        isDefault: account.isDefault,
+        ...account.account === undefined ? {} : { account: account.account },
+        ...plan === undefined ? {} : { plan },
+        windows,
+        ...resetCredits === undefined ? {} : { resetCredits },
+        entry,
+      }
+      const display = byProvider.get(provider)
+      if (display === undefined) byProvider.set(provider, { provider, name: PROVIDER_NAMES[provider], accounts: [row] })
+      else display.accounts.push(row)
+    }
   }
+  return [...byProvider.values()]
 }
 
 /**
@@ -166,6 +229,7 @@ export function previewWindows(windows: readonly UsageWindow[], model?: string) 
 export function compactSegment(d: ProviderUsageDisplay, model?: string, t: Translate = fallbackTranslate): string {
   const windows = pillAccountOf(d).windows
   if (d.provider === 'antigravity') {
+    if (windows.length === 0) return `${d.name} ${t('usageBadgeNoData')}`
     const matching = model === undefined ? [] : windows.filter(w => w.scope === model)
     if (matching.length === 0) {
       return `${d.name} ${t(model === undefined ? 'usageBadgeModelCount' : 'usageBadgeModelUnavailable', {
@@ -176,7 +240,8 @@ export function compactSegment(d: ProviderUsageDisplay, model?: string, t: Trans
     return `${d.name} ${parts.join(' · ')}`
   }
   const parts = windows.slice(0, 2).map(w => `${windowLabel(w, t)} ${usedPercent(w)}%`)
-  if (windows.length > 2) parts.push(`+${windows.length - 2}`)
+  if (windows.length === 0) parts.push(t('usageBadgeNoData'))
+  else if (windows.length > 2) parts.push(`+${windows.length - 2}`)
   return `${d.name} ${parts.join(' · ')}`
 }
 
@@ -193,7 +258,7 @@ export function collapsedDisplays(
   return match === undefined ? displays : [match]
 }
 
-/** Order for the expanded dialog: the current provider first, the rest in poll order. */
+/** Order for the expanded dialog: the current provider first, the rest in roster order. */
 export function expandedDisplays(
   displays: readonly ProviderUsageDisplay[],
   current: string | undefined,
@@ -233,17 +298,18 @@ function usageWindowLabel(t: Translate, window: UsageWindow): string {
 /**
  * The composer subscription-usage badge: a pill reading e.g.
  * `Codex 6d1h 25%` for the current model's provider, opening a dialog with
- * every provider's accounts and their windows. Returns null when no data is
- * available.
+ * every provider's accounts and their windows. Returns the bare dock seat when
+ * no account reports usage.
  */
-export function SubscriptionUsageBadge({ rpc, currentModel, t }: SubscriptionUsageBadgeProps) {
-  const translate: Translate = t ?? fallbackTranslate
-  const [displays, setDisplays] = useState<ProviderUsageDisplay[]>([])
-  const [selection, setSelection] = useState<{ provider: string; model: string } | undefined>(undefined)
+export function SubscriptionUsageBadge(props: SubscriptionUsageBadgeProps) {
+  const { rpc, readStatus, readUsage, readProvider, readAll, useUsage, useModel } = props
+  const translate: Translate = props.t ?? fallbackTranslate
+  const cache = useUsage(snapshot => snapshot)
+  const selection = useModel(value => value)
   const current = selection?.provider
   const [open, setOpen] = useState(false)
   const confirmLock = useRef(false)
-  const setConfirmLock = useCallback((locked: boolean) => { confirmLock.current = locked }, [])
+  const setConfirmLock = (locked: boolean): void => { confirmLock.current = locked }
   const setPanelOpen = (value: boolean | ((prev: boolean) => boolean)): void => {
     setOpen((prev) => {
       const next = typeof value === 'function' ? value(prev) : value
@@ -252,156 +318,61 @@ export function SubscriptionUsageBadge({ rpc, currentModel, t }: SubscriptionUsa
     })
   }
   const [hover, setHover] = useState(false)
-  const inflightRef = useRef(false)
-  const mountedRef = useRef(true)
+  /** Bumped by the open panel's local countdown tick; it never reads anything. */
+  const [, setTick] = useState(0)
   const rootRef = useRef<HTMLSpanElement | null>(null)
   const panelRef = useRef<HTMLDivElement | null>(null)
   // Always-rendered, invisible marker in the dock: locates the composer bar
   // (and the host stats row inside it) even while the pill itself is portaled.
   const seatRef = useRef<HTMLSpanElement | null>(null)
-  // The inject face may be re-evaluated (new callback identities) on
-  // re-render; the model poll mounts once and reads through this ref.
-  const currentRef = useRef(currentModel)
-  currentRef.current = currentModel
-  // Last-known-good windows per account (keyed `provider:accountKey`), kept
-  // across a failed poll (e.g. a 429 during the server's own negative-cache
-  // cooldown) so a row doesn't flicker away — it only disappears once the
-  // account actually logs out or a fetch succeeds but reports the window as
-  // unsupported.
-  const lastKnownRef = useRef(new Map<string, UsageWindow[]>())
-  const resetCountsRef = useRef(new Map<string, number>())
-  const refreshAgainRef = useRef(false)
-  const refreshRef = useRef<() => void>(() => {})
+  // The inject face may be re-evaluated (new callback identities) on re-render;
+  // the event effects read through these refs so identity churn re-runs nothing.
+  const readStatusRef = useRef(readStatus)
+  readStatusRef.current = readStatus
+  const readUsageRef = useRef(readUsage)
+  readUsageRef.current = readUsage
+  const readProviderRef = useRef(readProvider)
+  readProviderRef.current = readProvider
+  const readAllRef = useRef(readAll)
+  readAllRef.current = readAll
+  /** Provider whose local snapshot the last model-change read covered. */
+  const readProviderForRef = useRef<string | undefined>(undefined)
 
-  const refresh = useCallback(async (): Promise<void> => {
-    if (rpc === undefined) return
-    if (inflightRef.current) {
-      refreshAgainRef.current = true
-      return
-    }
-    refreshAgainRef.current = false
-    inflightRef.current = true
-    try {
-      const statusResp = await callSubscriptionsAuth<{
-        providers: Record<SubscriptionProvider, ProviderStatus>
-      }>(rpc, 'status', {})
-      if (!mountedRef.current) return
+  const displays = useMemo(() => displaysOf(cache), [cache])
 
-      // Every logged-in account of every provider, in a stable order (the
-      // `status` provider order, default account first) so rows don't jump
-      // around as polls settle at different times.
-      const roster: { provider: SubscriptionProvider; account: AccountStatus }[] = []
-      for (const provider of Object.keys(statusResp.providers) as SubscriptionProvider[]) {
-        for (const account of accountsOf(statusResp.providers[provider])) roster.push({ provider, account })
-      }
-      const keyOf = (provider: SubscriptionProvider, account: AccountStatus): string => `${provider}:${account.key}`
-
-      const lastKnown = lastKnownRef.current
-      const resetCounts = resetCountsRef.current
-      // Drop last-known state for anything no longer logged in — that is a
-      // real signal, unlike a fetch failure.
-      const live = new Set(roster.map(({ provider, account }) => keyOf(provider, account)))
-      for (const key of lastKnown.keys()) {
-        if (!live.has(key)) {
-          lastKnown.delete(key)
-          resetCounts.delete(key)
-        }
-      }
-
-      if (roster.length === 0) {
-        setDisplays([])
-        return
-      }
-
-      const results = await Promise.allSettled(
-        roster.map(async ({ provider, account }) => {
-          const usage = await callSubscriptionsAuth<ProviderUsage>(rpc, 'usage', { provider, account: account.key })
-          return { provider, account, usage }
-        }),
-      )
-      if (!mountedRef.current) return
-
-      const plans = new Map<string, string>()
-      for (const r of results) {
-        if (r.status !== 'fulfilled') continue // keep whatever is cached for this account
-        const { provider, account, usage } = r.value
-        const key = keyOf(provider, account)
-        if (usage.plan !== undefined) plans.set(key, usage.plan)
-        if (!usage.supported || !usage.windows || usage.windows.length === 0) {
-          lastKnown.delete(key)
-          resetCountsRef.current.delete(key)
-          continue
-        }
-        lastKnown.set(key, usage.windows)
-        if (provider === 'codex' && usage.resetCredits !== undefined) {
-          resetCountsRef.current.set(key, usage.resetCredits.availableCount)
-        } else {
-          resetCountsRef.current.delete(key)
-        }
-      }
-
-      const byProvider = new Map<SubscriptionProvider, ProviderUsageDisplay>()
-      for (const { provider, account } of roster) {
-        const key = keyOf(provider, account)
-        const windows = lastKnown.get(key)
-        if (windows === undefined) continue
-        const plan = plans.get(key) ?? account.plan
-        const resetCredits = provider === 'codex' ? resetCountsRef.current.get(key) : undefined
-        const row: AccountUsageDisplay = {
-          key: account.key,
-          isDefault: account.isDefault,
-          ...account.account === undefined ? {} : { account: account.account },
-          ...plan === undefined ? {} : { plan },
-          windows,
-          ...resetCredits === undefined ? {} : { resetCredits },
-        }
-        const display = byProvider.get(provider)
-        if (display === undefined) byProvider.set(provider, { provider, name: PROVIDER_NAMES[provider], accounts: [row] })
-        else display.accounts.push(row)
-      }
-      setDisplays([...byProvider.values()])
-    } catch {
-      // A failed poll must not crash the badge; keep last known state.
-    } finally {
-      inflightRef.current = false
-      if (refreshAgainRef.current && mountedRef.current) {
-        refreshAgainRef.current = false
-        refreshRef.current()
-      }
-    }
-  }, [rpc])
-  refreshRef.current = () => { void refresh() }
-
+  // Mount: read the roster once. The cache seeds a local usage read for every
+  // account it just learned about, so a first mount fills the pill without
+  // asking the node half for a refresh.
   useEffect(() => {
-    mountedRef.current = true
-    void refresh()
-    const timer = setInterval(() => { void refresh() }, USAGE_POLL_INTERVAL_MS)
-    return () => {
-      mountedRef.current = false
-      clearInterval(timer)
-    }
-  }, [refresh])
-
-  useEffect(() => {
-    if (currentRef.current === undefined) return
-    let cancelled = false
-    let inflight = false
-    const reload = (): void => {
-      const read = currentRef.current
-      if (read === undefined || inflight) return
-      inflight = true
-      void read().then(
-        (model) => { if (!cancelled) setSelection(model) },
-        () => { /* keep the last known provider; the next tick retries */ },
-      ).finally(() => { inflight = false })
-    }
-    reload()
-    const timer = setInterval(reload, MODEL_POLL_INTERVAL_MS)
-    return () => {
-      cancelled = true
-      clearInterval(timer)
-    }
+    void readStatusRef.current()
   }, [])
+
+  // A model switch re-reads the new provider's local snapshot once. The read
+  // targets the provider the framework just published, so a switch can never
+  // leave the pill showing the previous provider's numbers.
+  useEffect(() => {
+    if (current === undefined) return
+    if (readProviderForRef.current === current) return
+    readProviderForRef.current = current
+    void readProviderRef.current(current as SubscriptionProvider, 'local')
+  }, [current])
+
+  // Focus and reconnect-adjacent events never refresh upstream: they re-read
+  // the local snapshot, and duplicate events collapse into the reads already
+  // running inside the cache.
+  useEffect(() => {
+    const onFocus = (): void => { void readAllRef.current('local') }
+    window.addEventListener('focus', onFocus)
+    return () => { window.removeEventListener('focus', onFocus) }
+  }, [])
+
+  // The panel's remaining-time labels stay current while it is visible; this
+  // tick renders only and never reaches the network.
+  useEffect(() => {
+    if (!open) return
+    const timer = setInterval(() => { setTick(value => value + 1) }, COUNTDOWN_TICK_MS)
+    return () => { clearInterval(timer) }
+  }, [open])
 
   const pos = useAnchoredPosition({ open, anchorRef: rootRef, panelRef, side: 'top', gap: PANEL_GAP, margin: PANEL_MARGIN })
   useDismissOnOutsidePointer(rootRef, open, setPanelOpen, panelRef)
@@ -449,7 +420,12 @@ export function SubscriptionUsageBadge({ rpc, currentModel, t }: SubscriptionUsa
   const toggle = (): void => {
     const next = !open
     setOpen(next)
-    if (next) void refresh()
+    if (!next) return
+    // Opening shows what the cache already holds for every provider and asks
+    // for a refreshed snapshot of the CURRENT provider only; every other
+    // provider is refreshed from its own row's explicit control.
+    void readAllRef.current('local')
+    if (current !== undefined) void readProviderRef.current(current as SubscriptionProvider, 'if-needed')
   }
 
   const pill = (
@@ -491,19 +467,29 @@ export function SubscriptionUsageBadge({ rpc, currentModel, t }: SubscriptionUsa
                 </span>
                 {d.accounts.length === 1 && <AccountMeta account={d.accounts[0]!} translate={translate} />}
               </div>
-              {d.accounts.map((account, accountIndex) => (
+              {d.accounts.map((account, accountIndex) => {
+                const cacheNote = usageCacheNote(account.entry, translate)
+                return (
                 <div key={account.key} style={accountIndex === 0 ? undefined : styles.accountBlock}>
-                  {d.accounts.length > 1 && (
-                    <div style={styles.accountRow}>
-                      <AccountMeta account={account} translate={translate} />
-                    </div>
-                  )}
+                  <div style={styles.accountRow}>
+                    {d.accounts.length > 1 && <AccountMeta account={account} translate={translate} />}
+                    <button
+                      type="button"
+                      style={{ ...styles.accountRefresh, marginLeft: 'auto' }}
+                      disabled={cache.loading[`${d.provider}:${account.key}`] === true}
+                      aria-label={translate('usageRefreshAccount', { account: account.account ?? account.key })}
+                      onClick={() => { void readUsageRef.current(d.provider, account.key, 'force') }}
+                    >
+                      {translate('usageRefresh')}
+                    </button>
+                  </div>
                   <AccountWindows
                     key={`${d.provider}:${selection?.model ?? ''}`}
                     windows={account.windows}
                     model={d.provider === current ? selection?.model : undefined}
                     translate={translate}
                   />
+                  {cacheNote !== undefined && <p style={styles.cacheNote}>{cacheNote}</p>}
                   {d.provider === 'codex' && account.resetCredits !== undefined && rpc !== undefined && (
                     <ResetCredits
                       rpc={rpc}
@@ -511,12 +497,13 @@ export function SubscriptionUsageBadge({ rpc, currentModel, t }: SubscriptionUsa
                       accountKey={account.key}
                       accountLabel={account.account ?? account.key}
                       availableCount={account.resetCredits}
-                      onChanged={() => { void refresh() }}
+                      onChanged={() => { void readUsageRef.current(d.provider, account.key, 'force') }}
                       onDialogChange={setConfirmLock}
                     />
                   )}
                 </div>
-              ))}
+                )
+              })}
             </section>
           ))}
         </div>,
@@ -660,7 +647,13 @@ const styles: Record<string, CSSProperties> = {
   // Same star and color as the default-account marker in Settings → 订阅.
   defaultStar: { color: 'var(--dsw-alias-state-warn-label)' },
   accountBlock: { marginTop: 8 },
-  accountRow: { display: 'flex', marginBottom: 4 },
+  accountRow: { display: 'flex', alignItems: 'baseline', gap: 8, marginBottom: 4 },
+  // Plain text action so a per-account refresh reads as part of the row, not a button chrome.
+  accountRefresh: {
+    color: 'var(--dsw-alias-label-tertiary)', background: 'transparent', border: 'none',
+    font: 'inherit', fontSize: 11, padding: 0, cursor: 'pointer',
+  },
+  cacheNote: { margin: '4px 0 0', color: 'var(--dsw-alias-label-tertiary)', fontVariantNumeric: 'tabular-nums' },
   details: {
     color: 'var(--dsw-alias-label-tertiary)', display: 'grid',
     gridTemplateColumns: 'minmax(0, 1fr) max-content', gap: '4px 16px', margin: 0,

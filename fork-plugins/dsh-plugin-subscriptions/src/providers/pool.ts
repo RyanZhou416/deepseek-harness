@@ -121,8 +121,26 @@ function pastClaudeFloor(
   quota: MemberQuota | undefined,
   scheduling: PoolSchedulingPolicy,
 ): boolean {
-  if (!carriesUsageFloor(member.provider)) return false
-  return breachingWindows(floorWindows(quota), scheduling).length > 0
+  return usageFloorBreaches(member.provider, quota, scheduling).length > 0
+}
+
+/**
+ * The windows of one account's retained quota that breach its configured usage
+ * floor. Exported so a route that serves an account without going through the
+ * pool can apply the same reserve before it starts a request, instead of
+ * starting one the pool would have held back.
+ * @param provider - the provider route.
+ * @param quota - the account's retained quota, when usage is known.
+ * @param scheduling - the resolved policy naming both floors.
+ * @returns the breaching windows, in their original order; empty when none do.
+ */
+export function usageFloorBreaches(
+  provider: ProviderId,
+  quota: MemberQuota | undefined,
+  scheduling: PoolSchedulingPolicy,
+): UsageWindow[] {
+  if (!carriesUsageFloor(provider)) return []
+  return breachingWindows(floorWindows(quota), scheduling)
 }
 
 /**
@@ -350,20 +368,30 @@ export class PoolAdapter extends LlmAdapter {
     const members = await this.concrete(definition.members)
     // Priority mode reads no usage, except for Claude: its floors are a usability rule rather
     // than a ranking preference, so an account past them is excluded whichever strategy runs.
-    // The tracker caches each read, so this costs one lookup per cold member, not per request.
+    // These are retained-reading reads only — ranking never performs an upstream request, since
+    // polling every peer to rank it is exactly the idle traffic the pool avoids.
     const quotaMembers = this.options.strategy === 'priority'
       ? members.filter(member => member.provider === 'claude')
       : members
-    const quotas = new Map<ConcretePoolMember, MemberQuota>(await Promise.all(quotaMembers
-      .filter(member => this.options.health.isMemberAvailable(member.provider, member.account, member.model))
-      .map(async member => [member, await this.options.usage.quotaFor(member)] as const)))
+    const quotas = new Map<ConcretePoolMember, MemberQuota>()
+    for (const member of quotaMembers) {
+      if (!this.options.health.isMemberAvailable(member.provider, member.account, member.model)) continue
+      quotas.set(member, this.options.usage.quotaFor(member))
+    }
     const sessionId = options.sessionId
     const sticky = sessionId === undefined ? undefined : members.find(member =>
       memberKey(member.provider, member.account, member.model) === this.sticky.get(stickyKey(identity, sessionId)))
-    if (sticky !== undefined && quotas.get(sticky)?.available === false
-      && await this.options.recoverQuota?.(sticky, options.signal)) {
-      this.options.usage.invalidate(sticky.provider, sticky.account)
-      quotas.set(sticky, await this.options.usage.quotaFor(sticky))
+    if (sticky !== undefined && quotas.has(sticky)) {
+      // The sticky account is the likeliest candidate, so its own reading may be
+      // refreshed here — one request, never a peer's. A fresh reading costs
+      // nothing, and a stale one is exactly what an invalidation left behind, so
+      // recovery is judged against what the account reports now.
+      const stickyQuota = await this.options.usage.ensureForUse(sticky)
+      quotas.set(sticky, stickyQuota)
+      if (stickyQuota.available === false && await this.options.recoverQuota?.(sticky, options.signal)) {
+        this.options.usage.invalidate(sticky.provider, sticky.account)
+        quotas.set(sticky, await this.options.usage.ensureForUse(sticky))
+      }
     }
     let remaining = members
     const failures = new Map<ConcretePoolMember, unknown>()
@@ -378,16 +406,40 @@ export class PoolAdapter extends LlmAdapter {
       breachingWindows(floorWindows(quotas.get(member)), this.options.scheduling))
     while (remaining.length > 0) {
       options.signal?.throwIfAborted()
-      // Ranking and reservation are synchronous after shared quota reads settle.
+      // Ranking and reservation are synchronous over retained readings.
       // Concurrent requests therefore see earlier reservations before choosing.
       const member = this.select(remaining, quotas, identity, options.sessionId)[0]
       if (member === undefined) break
       remaining = remaining.filter(candidate => candidate !== member)
-      const adapter = this.options.adapters[member.provider]
-      if (adapter === undefined) continue
+      // The reservation starts before the candidate's reading is verified, so
+      // concurrent selections see each other's outstanding first-byte wait and
+      // spread across accounts rather than all choosing the same cold leader.
       const release = this.reserve(member)
       let iterator: AsyncIterator<StreamChunk> | undefined
       try {
+        // The one candidate about to serve is the only account whose reading may
+        // be refreshed. Peers were ranked from what was already known and are left
+        // alone, so a cold pool costs one usage request per attempt, not one per
+        // member, and an idle account is never swept to rank it.
+        const verified = await this.options.usage.ensureForUse(member)
+        quotas.set(member, verified)
+        // A cancellation during that read must not start a request.
+        options.signal?.throwIfAborted()
+        const breaching = usageFloorBreaches(member.provider, verified, this.options.scheduling)
+        if (breaching.length > 0) {
+          excludedWindows.push(...breaching)
+          continue
+        }
+        // A reading that just showed this account spent yields to any peer the
+        // pool would rank ahead of a last-resort member, instead of being tried
+        // first merely because it was the pool's cold-start leader.
+        if (verified.available === false && remaining.some(candidate =>
+          (quotas.get(candidate) ?? { available: true }).available !== false)) {
+          remaining = [...remaining, member]
+          continue
+        }
+        const adapter = this.options.adapters[member.provider]
+        if (adapter === undefined) continue
         let first: IteratorResult<StreamChunk>
         try {
           iterator = adapter.streamAccount(
@@ -414,7 +466,11 @@ export class PoolAdapter extends LlmAdapter {
           if ('cooldownMs' in classification) {
             this.recordCooldown(member, classification.scope, classification.cooldownMs, classification.reason)
             reasons.push(classification.reason)
-            if (classification.reason === QUOTA_EXCEEDED_CODE || classification.reason === 'RATE_LIMIT') {
+            // Only a spent allowance invalidates the usage reading. An auth
+            // cooldown says the login stopped working, which is no evidence
+            // about the allowance the usage endpoint last reported.
+            if (!isAuthCooldownReason(classification.reason)
+              && (classification.reason === QUOTA_EXCEEDED_CODE || classification.reason === 'RATE_LIMIT')) {
               this.options.usage.invalidate(member.provider, member.account)
             }
           }
@@ -452,14 +508,19 @@ export class PoolAdapter extends LlmAdapter {
    * the `usage` card's question ("could a peer serve instead?") without naming a model and
    * without the discovery that naming one would trigger. A model-scoped lane below its own
    * floor cannot make an account selectable when its session window breached.
+   *
+   * Deliberately answered from retained readings only: this is the peer test the usage card
+   * runs over every account, and reading them here would be the whole-pool sweep the pool
+   * exists to avoid. {@link accountHoldback} is the one that may read, because its caller is
+   * about to commit a request to the account it asks about.
    * @param provider - the provider route.
    * @param account - the resolved account key.
    * @returns true when only a window reset can make the account selectable again.
    */
   async accountAtFloor(provider: ProviderId, account: string): Promise<boolean> {
     if (!carriesUsageFloor(provider)) return false
-    const quota = await this.options.usage.quotaFor({ provider, account })
-    return breachingWindows(floorWindows(quota), this.options.scheduling).length > 0
+    const quota = this.options.usage.quotaFor({ provider, account })
+    return usageFloorBreaches(provider, quota, this.options.scheduling).length > 0
   }
 
   /**
@@ -469,15 +530,22 @@ export class PoolAdapter extends LlmAdapter {
    * that owns no entry for a model still consults this, so it cannot serve an account
    * the pool itself would have held back — and it can state the same cause and the
    * same earliest-recovery hint instead of naming an unavailable model.
+   *
+   * Answered from retained readings by default, because the callers that list or
+   * resolve a model must not reach the network. `ensure` is the caller's own
+   * statement that it is about to commit a request to this account, which buys the
+   * single read {@link PoolUsageTracker.ensureForUse} may perform.
    * @param provider - the provider route.
    * @param model - the catalog model id.
    * @param account - the resolved account key.
+   * @param ensure - permit one upstream usage read for this account when its reading is missing or stale.
    * @returns the holdback, or undefined when the account may serve now.
    */
   async accountHoldback(
     provider: ProviderId,
     model: string,
     account: string,
+    ensure = false,
   ): Promise<{ code: string; retryAfterMs?: number } | undefined> {
     const now = Date.now()
     const cooling = this.options.health.accountCooling(provider, account, now)
@@ -487,7 +555,10 @@ export class PoolAdapter extends LlmAdapter {
     // Only Claude carries floors, so only Claude needs a usage read here.
     if (!carriesUsageFloor(provider)) return undefined
     const member: ConcretePoolMember = { provider, account, model }
-    const breaching = breachingWindows(floorWindows(await this.options.usage.quotaFor(member)), this.options.scheduling)
+    const quota = ensure
+      ? await this.options.usage.ensureForUse(member)
+      : this.options.usage.quotaFor(member)
+    const breaching = usageFloorBreaches(provider, quota, this.options.scheduling)
     if (breaching.length === 0) return undefined
     const reset = earliestReset(breaching, now)
     // A floor is a spent allowance, not a refusal: `RATE_LIMIT` is what the pool-exhausted
@@ -526,7 +597,7 @@ export class PoolAdapter extends LlmAdapter {
     // has no entry. Unknown usage is not evidence of a spent allowance: leave
     // such a member in the primary band rather than in neither.
     const quotaOf = (member: ConcretePoolMember): MemberQuota =>
-      quotas.get(member) ?? { available: true, urgency: 0, fetchedAt: 0 }
+      quotas.get(member) ?? { available: true, urgency: 0, fetchedAt: 0, observation: 'unavailable' }
     const scored = usable.filter(member => quotaOf(member).available)
     const quotaFull = usable.filter(member => !quotaOf(member).available)
     const now = Date.now()
@@ -534,13 +605,28 @@ export class PoolAdapter extends LlmAdapter {
     for (const band of [scored, quotaFull]) {
       const maxUrgency = band.reduce((max, member) => Math.max(max, quotaOf(member).urgency), 0)
       for (const member of band) {
-        scores.set(member, poolSchedulingScore(member, quotaOf(member), maxUrgency,
+        const quota = quotaOf(member)
+        // An account nothing has been observed for yet scores the band's unit
+        // baseline: a cold cache is not a statement that the account is empty,
+        // and ranking it on invented urgency would both starve it and hand it
+        // traffic it may not be able to serve.
+        const ranked = quota.observation === 'unread' ? { ...quota, urgency: maxUrgency, windows: [] } : quota
+        scores.set(member, poolSchedulingScore(member, ranked, maxUrgency,
           this.active.get(accountKey(member.provider, member.account)) ?? 0, this.options.scheduling, now))
       }
     }
+    // A route with no usage endpoint can never be ranked on evidence, so it
+    // yields to an unread account the pool could still verify, which in turn
+    // yields to one it has actually observed.
+    const evidence = (member: ConcretePoolMember): number => {
+      const observation = quotaOf(member).observation
+      return observation === 'observed' ? 2 : observation === 'unread' ? 1 : 0
+    }
     const byQuota = (a: ConcretePoolMember, b: ConcretePoolMember): number => {
       const scoreOrder = scores.get(b)! - scores.get(a)!
-      if (scoreOrder !== 0 || this.options.scheduling.loadPenalty === 0) return scoreOrder
+      if (scoreOrder !== 0) return scoreOrder
+      const evidenceOrder = evidence(b) - evidence(a)
+      if (evidenceOrder !== 0 || this.options.scheduling.loadPenalty === 0) return evidenceOrder
       return (this.active.get(accountKey(a.provider, a.account)) ?? 0) - (this.active.get(accountKey(b.provider, b.account)) ?? 0)
     }
     scored.sort(byQuota)

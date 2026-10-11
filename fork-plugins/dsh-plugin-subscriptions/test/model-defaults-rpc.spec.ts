@@ -1,224 +1,95 @@
-/**
- * Unit tests for the `modelDefaults` / `setModelDefault` endpoints: payload
- * validation, the catalog shape served to the Settings page, and the
- * durable round trip through the per-model defaults store. Drives the real
- * plugin wiring with a fake host connection and a fake llm catalog;
- * DSH_HOME is redirected to a temp dir so the store file never leaks.
- */
-
+/** The effort writer persists validated choices; catalogue reads belong to providerSettings. */
 import { test } from 'node:test'
+import type { TestContext } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
 import { ReasoningEffortId } from '@deepseek-ai/dsh-llm'
-import type { FakeRpcHandler } from './fake-connection.js'
-import type { RpcResult } from '../src/compat.js'
 import { createFakeConnection } from './fake-connection.js'
-import { CodexAdapter } from '../src/providers/codex.js'
-const clearCodexCatalog = CodexAdapter.prototype.clearAccountCatalog
+import type { FakeRpcHandler } from './fake-connection.js'
+import {
+  defaultEffortOf, loadModelDefaults, resetModelDefaultsForTests,
+} from '../src/model-defaults.js'
+import * as plugin from '../src/index.js'
 
-const HOME = mkdtempSync(join(tmpdir(), 'model-defaults-rpc-test-'))
-
-const plugin = await import('../src/index.js')
-const { modelDefaultsFilePath, resetModelDefaultsForTests } = await import('../src/model-defaults.js')
-
-interface FakeLlm {
-  registered: string[]
-  replaced: string[]
-  catalogClears: number
-}
-
-/**
- * Mount the plugin with a fake llm catalog; return its RPC handler.
- *
- * DSH_HOME is set per mount rather than once at import: the specs share one
- * process and ESM runs every top-level body before the first test, so a
- * top-level assignment let whichever spec imported last own the home for all
- * of them. Each mount also resets the store and deletes the file, so the cases
- * below are independent — they used to pass only in their written order.
- */
-async function mount(options: { tier?: string; disabledReason?: string } = {}): Promise<{ handler: FakeRpcHandler; fake: FakeLlm }> {
-  process.env.DSH_HOME = HOME
-  assert.ok(modelDefaultsFilePath().startsWith(HOME), 'the store resolves inside this spec\'s temp home')
-  await resetModelDefaultsForTests()
-  rmSync(modelDefaultsFilePath(), { force: true })
-  const fake: FakeLlm = { registered: [], replaced: [], catalogClears: 0 }
-  CodexAdapter.prototype.clearAccountCatalog = function (account?: string) { fake.catalogClears++; clearCodexCatalog.call(this, account) }
+/** One private plugin composition with event-based route readiness. */
+async function mount(t: TestContext): Promise<{ handler: FakeRpcHandler; replaced: string[] }> {
+  const home = await mkdtemp(join(tmpdir(), 'model-defaults-rpc-'))
+  const previous = process.env.DSH_HOME
+  process.env.DSH_HOME = home
   const ctx = new Context()
-  const listed = [{
-    id: 'gpt-5.6-sol',
-    name: 'GPT-5.6-Sol',
-    ...options.disabledReason === undefined ? {} : { disabledReason: options.disabledReason },
-  }]
-  // A configured tier appears in the picker catalog the same way the pool
-  // contributes it, so the settings catalog has to recognise and skip it.
-  if (options.tier !== undefined) listed.push({ id: options.tier, name: options.tier })
-  const fakeLlm = {
-    listProviders: async (): Promise<{ id: string; name: string }[]> => [{ id: 'codex', name: 'Codex (ChatGPT)' }],
-    listModels: async (): Promise<{ id: string; name: string }[]> => listed,
+  t.after(async () => {
+    await ctx.fiber.dispose()
+    await resetModelDefaultsForTests()
+    if (previous === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previous
+    await rm(home, { recursive: true, force: true })
+  })
+  await resetModelDefaultsForTests()
+  const replaced: string[] = []
+  ctx.provide('llm', {
     resolveModelInfo: async (provider: string, model: string) => ({
-      provider,
-      id: model,
-      name: 'GPT-5.6-Sol',
+      provider, id: model, name: model,
       reasoning: {
-        efforts: [
-          { id: ReasoningEffortId('low'), name: 'Low' },
-          { id: ReasoningEffortId('high'), name: 'High' },
-        ],
+        efforts: [{ id: ReasoningEffortId('low'), name: 'Low' }, { id: ReasoningEffortId('high'), name: 'High' }],
         defaultEffort: ReasoningEffortId('low'),
       },
     }),
-    registerAdapter: (providers: string[]) => {
-      fake.registered.push(...providers)
-      return Object.assign(() => {}, {
-        replace: (next: string[]) => { fake.replaced.push(...next) },
-      })
-    },
+    registerAdapter: () => Object.assign(() => {}, {
+      replace: (routes: string[]) => { replaced.push(...routes) },
+    }),
+  })
+  const fake = createFakeConnection()
+  const ready = Promise.withResolvers<void>()
+  ctx.provide('connection', { fetch: { register: (route: Parameters<typeof fake.connection.fetch.register>[0]) => {
+    const stop = fake.connection.fetch.register(route)
+    if (route.path === '/api/subscriptions-auth.setModelDefault') ready.resolve()
+    return stop
+  } } })
+  ctx.plugin(plugin, { providers: ['codex'], pool: { enabled: false } })
+  await ready.promise
+  return { handler: fake.handler, replaced }
+}
+
+const call = (handler: FakeRpcHandler, payload: unknown) =>
+  handler('setModelDefault', payload, new AbortController().signal)
+
+test('a configured effort survives reloading its durable store and re-announces only its route', async t => {
+  const { handler, replaced } = await mount(t)
+  const result = await call(handler, { provider: 'codex', model: 'm', effort: 'high' })
+  assert.deepEqual(result, { ok: true, value: { ok: true } })
+  assert.deepEqual(replaced, ['codex'])
+  await resetModelDefaultsForTests()
+  await loadModelDefaults()
+  assert.equal(defaultEffortOf('codex', 'm'), 'high')
+})
+
+test('clearing an effort removes only that model override', async t => {
+  const { handler } = await mount(t)
+  await call(handler, { provider: 'codex', model: 'm', effort: 'high' })
+  await call(handler, { provider: 'codex', model: 'sibling', effort: 'low' })
+  assert.equal((await call(handler, { provider: 'codex', model: 'm' })).ok, true)
+  assert.equal(defaultEffortOf('codex', 'm'), undefined)
+  assert.equal(defaultEffortOf('codex', 'sibling'), 'low')
+})
+
+test('the effort writer rejects invalid providers, empty values and unsupported levels', async t => {
+  const { handler } = await mount(t)
+  for (const payload of [
+    { provider: 'nope', model: 'm', effort: 'high' },
+    { provider: 'codex', model: 'm', effort: '' },
+    { provider: 'codex', model: 'm', effort: 'max' },
+  ]) {
+    const result = await call(handler, payload)
+    assert.equal(result.ok, false)
+    if (!result.ok) assert.equal(result.error.code, 'bad-request')
   }
-  ctx.provide('llm', fakeLlm)
-  const connection = createFakeConnection()
-  ctx.provide('connection', connection.connection)
-  ctx.plugin(plugin, {
-    providers: ['codex'],
-    ...options.tier === undefined ? {} : {
-      pool: { tiers: { [options.tier]: [{ provider: 'codex', model: 'gpt-5.6-sol' }] } },
-    },
-  })
-  await new Promise(resolve => setTimeout(resolve, 50))
-  assert.ok(connection.registered(), 'the subscriptions-auth routes were registered')
-  return { handler: connection.handler, fake }
-}
-
-async function call(
-  handler: FakeRpcHandler,
-  endpoint: string,
-  payload: unknown,
-): Promise<RpcResult<unknown>> {
-  return handler(endpoint, payload, new AbortController().signal)
-}
-
-test('modelDefaults serves the listed models with their advertised efforts', async () => {
-  const { handler } = await mount()
-  const result = await call(handler, 'modelDefaults', {})
-  assert.equal(result.ok, true)
-  if (!result.ok) return
-  const value = result.value as { provider: string; models: { id: string; name: string; efforts: { id: string }[]; configured?: string }[] }[]
-  assert.equal(value.length, 1)
-  assert.equal(value[0]?.provider, 'codex')
-  assert.deepEqual(value[0]?.models[0], {
-    id: 'gpt-5.6-sol',
-    name: 'GPT-5.6-Sol',
-    efforts: [{ id: 'low', name: 'Low' }, { id: 'high', name: 'High' }],
-  })
+  assert.equal(defaultEffortOf('codex', 'm'), undefined)
 })
 
-test('modelDefaults carries the provider\'s disabled reason onto the settings row', async () => {
-  // The settings model list offers these rows as ordinary choices; a model the
-  // provider refuses has to arrive with the marker, or the row reads as selectable.
-  const { handler } = await mount({ disabledReason: 'no longer offered' })
-  const result = await call(handler, 'modelDefaults', {})
-  assert.equal(result.ok, true)
-  if (!result.ok) return
-  const value = result.value as { provider: string; models: { id: string; disabledReason?: string }[] }[]
-  assert.equal(value[0]?.models[0]?.disabledReason, 'no longer offered')
-})
-
-test('modelDefaults refresh validates force and re-announces the picker only on explicit refresh', async () => {
-  const { handler, fake } = await mount()
-  await call(handler, 'modelDefaults', {})
-  await call(handler, 'modelDefaults', { force: false })
-  assert.deepEqual(fake.replaced, [])
-  assert.equal(fake.catalogClears, 0)
-  assert.equal((await call(handler, 'modelDefaults', { force: 'true' })).ok, false)
-  assert.deepEqual(fake.replaced, [])
-  assert.equal((await call(handler, 'modelDefaults', { force: true })).ok, true)
-  assert.deepEqual(fake.replaced, ['codex'])
-  assert.equal(fake.catalogClears, 1)
-})
-
-test('setModelDefault persists and the next modelDefaults reports it', async () => {
-  const { handler, fake } = await mount()
-  const set = await call(handler, 'setModelDefault', {
-    provider: 'codex',
-    model: 'gpt-5.6-sol',
-    effort: 'high',
-  })
-  assert.deepEqual(set, { ok: true, value: { ok: true } })
-  // The route re-announces so the model picker re-queries the catalog.
-  assert.deepEqual(fake.replaced, ['codex'])
-  const view = await call(handler, 'modelDefaults', {})
-  assert.equal(view.ok, true)
-  if (!view.ok) return
-  const model = (view.value as { provider: string; models: { configured?: string }[] }[])[0]?.models[0]
-  assert.equal(model?.configured, 'high')
-})
-
-test('setModelDefault without effort clears the override', async () => {
-  const { handler } = await mount()
-  await call(handler, 'setModelDefault', { provider: 'codex', model: 'gpt-5.6-sol', effort: 'high' })
-  await call(handler, 'setModelDefault', { provider: 'codex', model: 'gpt-5.6-sol' })
-  const view = await call(handler, 'modelDefaults', {})
-  assert.equal(view.ok, true)
-  if (!view.ok) return
-  const model = (view.value as { provider: string; models: { configured?: string }[] }[])[0]?.models[0]
-  assert.equal(model?.configured, undefined)
-})
-
-test('setModelDefault rejects unknown providers and empty efforts', async () => {
-  const { handler } = await mount()
-  const badProvider = await call(handler, 'setModelDefault', {
-    provider: 'nope',
-    model: 'gpt-5.6-sol',
-    effort: 'high',
-  })
-  assert.equal(badProvider.ok, false)
-  if (!badProvider.ok) assert.match(badProvider.error.message, /payload.provider must be one of/)
-  const badEffort = await call(handler, 'setModelDefault', {
-    provider: 'codex',
-    model: 'gpt-5.6-sol',
-    effort: '',
-  })
-  assert.equal(badEffort.ok, false)
-  if (!badEffort.ok) assert.match(badEffort.error.message, /payload.effort must be a non-empty string/)
-})
-
-test('setModelDefault rejects an effort the model catalog does not advertise', async () => {
-  const { handler } = await mount()
-  // The fake catalog advertises low/high only; max must not be accepted.
-  const result = await call(handler, 'setModelDefault', {
-    provider: 'codex',
-    model: 'gpt-5.6-sol',
-    effort: 'max',
-  })
-  assert.equal(result.ok, false)
-  if (!result.ok) assert.match(result.error.message, /does not advertise a "max" reasoning effort/)
-  // And nothing was persisted.
-  const view = await call(handler, 'modelDefaults', {})
-  assert.equal(view.ok, true)
-  if (!view.ok) return
-  const model = (view.value as { provider: string; models: { configured?: string }[] }[])[0]?.models[0]
-  assert.equal(model?.configured, undefined)
-})
-
-test('setModelDefault accepts an advertised effort and clears with no effort', async () => {
-  const { handler } = await mount()
-  const ok = await call(handler, 'setModelDefault', { provider: 'codex', model: 'gpt-5.6-sol', effort: 'low' })
-  assert.equal(ok.ok, true)
-  const cleared = await call(handler, 'setModelDefault', { provider: 'codex', model: 'gpt-5.6-sol' })
-  assert.equal(cleared.ok, true, 'clearing always passes the whitelist')
-})
-
-test('modelDefaults leaves out configured tier rows', async () => {
-  // A tier resolves through the pool, which intersects its members' own
-  // capabilities and never consults the override for the tier id. Offering the
-  // row would save cleanly and change nothing the user can observe.
-  const { handler } = await mount({ tier: 'smart-tier' })
-  const result = await call(handler, 'modelDefaults', {})
-  assert.equal(result.ok, true)
-  if (!result.ok) return
-  const value = result.value as { provider: string; models: { id: string }[] }[]
-  const ids = value[0]?.models.map(model => model.id) ?? []
-  assert.deepEqual(ids, ['gpt-5.6-sol'], 'the tier row is skipped, the real model stays')
+test('there is no unscoped modelDefaults read endpoint that can refresh every provider', async t => {
+  const { handler } = await mount(t)
+  await assert.rejects(handler('modelDefaults', { force: true }, new AbortController().signal), /no route registered/)
 })

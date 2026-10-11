@@ -26,14 +26,13 @@ import {
   idleWatchdog,
   mapFetchFailure,
   mergeReasoning,
-  discoverAcrossAccounts,
   isDiscoveryAborted,
   oauthEndpointError,
   OAuthEndpointError,
 } from './common.js'
 import { AccountTokenManager } from './accounts.js'
 import type {
-  CatalogPersistence,
+  CatalogStoreFactory,
   DiscoveredModel,
   FetchFn,
   ModelEntry,
@@ -630,8 +629,14 @@ interface GrokAdapterOptions {
   fetchFn?: FetchFn
   /** Resolve the attachment service per request; absent means image requests fail loudly. */
   resolveAttachments?: () => AttachmentStore | undefined
-  /** Durable catalog store seeding capability metadata across restarts. */
-  catalogStore?: CatalogPersistence
+  /** Durable per-account catalogue store seeding capability metadata across restarts. */
+  catalogStore?: CatalogStoreFactory
+  /** How long a stored catalogue is trusted before an explicit refresh may replace it; defaults to 24 h. */
+  catalogMaxAgeMs?: number
+  /** Failure cooldown for a catalogue request that sent no retry-after; defaults to 60 s. */
+  cacheRetryDelayMs?: number
+  /** Called once after a refresh stored a catalogue different from the previous one. */
+  onCatalogChanged?: (provider: string) => void
   /**
    * Per-model default reasoning effort override (the Settings page's picker).
    * Returns the user-configured default for one model, or undefined to follow
@@ -648,7 +653,7 @@ export class GrokAdapter extends PoolBackedAdapter {
 
   constructor(private readonly options: GrokAdapterOptions) {
     super(options)
-    this.catalogs = new ProviderCatalog(options, 'grok', {
+    this.catalogs = new ProviderCatalog(options, 'grok', 'grok', {
       staticRows: provider => this.staticModels(provider),
       fetchCatalog: (account, signal) => this.fetchCatalog(account, signal),
       row: (provider, model) => this.listed(provider, model),
@@ -667,9 +672,12 @@ export class GrokAdapter extends PoolBackedAdapter {
     )
   }
 
-  /** Drop cached catalogs after login/logout so the next list does not reuse a stale plan. */
+  /**
+   * Drop this account's cached catalogue, memory and disk, after login/logout or
+   * an identity change, so no read can serve the previous login's plan.
+   */
   clearAccountCatalog(account?: string): void {
-    this.catalogs.invalidate(account)
+    this.catalogs.clearAccountCatalog(account)
   }
 
   /** One discovered entry as a picker row; modality follows the model's own input support. */
@@ -701,21 +709,15 @@ export class GrokAdapter extends PoolBackedAdapter {
   }
 
   /**
-   * The discovered entry for one model. Resolved through the cache's
-   * stale-while-revalidate path: capability metadata must stay stable across
-   * a long conversation — a session that selected a reasoning effort calls
-   * this on EVERY step, and forgetting the efforts just because the TTL
-   * lapsed mid-turn would fail the call with UNSUPPORTED_REASONING_EFFORT
-   * before provider I/O.
+   * The known entry for one model, from the account caches only: capability
+   * metadata must stay stable across a long conversation — a session that
+   * selected a reasoning effort calls this on EVERY step, and forgetting the
+   * efforts would fail the call with UNSUPPORTED_REASONING_EFFORT before
+   * provider I/O.
    */
   private async discovered(model: string): Promise<DiscoveredModel | undefined> {
     if (!this.options.discovery) return undefined
-    const accounts = (await this.options.tokens.list()).map(entry => entry.key)
-    return discoverAcrossAccounts(accounts, async account => {
-      const catalog = await this.catalogs.cache(account)
-      const models = await catalog.resolve(() => this.fetchCatalog(account))
-      return models?.find(entry => entry.id === model)
-    })
+    return await this.catalogs.findModel(model)
   }
 
   /** Capability resolution of the provider's own models (the pool resolves members here). */

@@ -10,11 +10,14 @@ const css = registerHooks({ load(url, context, nextLoad) {
     ? { format: 'module', source: 'export default {}', shortCircuit: true }
     : nextLoad(url, context)
 } })
-const { AccountWindows, compactSegment, createCurrentModelReader, previewWindows,
+const { AccountWindows, compactSegment, previewWindows,
   collapsedDisplays, expandedDisplays, windowLabel } = await import('../src/client/SubscriptionUsageBadge.js')
+const { usageCacheNote } = await import('../src/client/SubscriptionsSection.js')
+const { modelSelectionSource } = await import('../src/client/SpeedSelect.js')
 css.deregister()
 import type { ProviderUsageDisplay } from '../src/client/SubscriptionUsageBadge.js'
 import type { UsageWindow } from '../src/client/SubscriptionsSection.js'
+import { formatDateTime } from '../src/client/format.js'
 import { errorLine, withActionError, withPollError } from '../src/client/provider-errors.js'
 import { en, zh } from '../src/client/locales.js'
 
@@ -120,15 +123,38 @@ test('an action failure stays readable after the status refresh that follows it'
   assert.equal(errorLine(state, 'codex'), 'status unavailable')
 })
 
-test('model reader observes switches within the same provider and handles missing directories', async () => {
-  let model = 'one'
-  const read = createCurrentModelReader(() => ({ directoryFor: sessionId => {
-    assert.equal(sessionId, 'session')
-    return { load: async () => ({ current: { provider: 'antigravity', model } }) }
-  } }), 'session')
-  assert.deepEqual(await read(), { provider: 'antigravity', model: 'one' })
-  model = 'two'
-  assert.deepEqual(await read(), { provider: 'antigravity', model: 'two' })
-  assert.equal(await createCurrentModelReader(() => undefined, 'session')(), undefined)
-  assert.equal(await createCurrentModelReader(() => ({ directoryFor: () => ({ load: async () => ({ current: null }) }) }), 'session')(), undefined)
+test('the badge reads the session model from the shared directory source, not by asking', () => {
+  // The source is a projection over ui-model-selection's own directory store: no
+  // RPC, and the snapshot reference only moves when the selection does.
+  const one = { provider: 'antigravity', model: 'one' }
+  let current: { provider: string; model: string } | null = one
+  const source = modelSelectionSource({
+    store: { getSnapshot: () => ({ current }), subscribe: () => () => {} },
+    load: async () => ({ current }),
+  })
+  assert.equal(source.getSnapshot(), one)
+  const two = { provider: 'antigravity', model: 'two' }
+  current = two
+  assert.equal(source.getSnapshot(), two)
+  current = null
+  assert.equal(source.getSnapshot(), null)
+})
+
+test('cached usage missing is stated as missing, never as zero percent', () => {
+  for (const dictionary of [en, zh]) {
+    const t = translateFrom(dictionary)
+    const missing = usageCacheNote({
+      usage: { supported: true, windows: [], cache: { state: 'missing' } },
+    }, t)
+    assert.ok(missing?.includes(t('usageCacheMissing')))
+    // A stale or failed revalidation keeps the last known windows on the line.
+    const stale = usageCacheNote({
+      usage: { supported: true, windows, cache: { state: 'stale', observedAt: 1_700_000_000_000 } },
+    }, t)
+    assert.ok(stale?.includes(t('usageCacheUpdated', { date: formatDateTime(t, 1_700_000_000_000) })))
+    assert.ok(stale?.includes(t('usageCacheStale')))
+    assert.ok(usageCacheNote({ usage: { supported: true, windows, cache: { state: 'error', error: 'quota/read-failed', retryAt: Date.now() + 60_000 } } }, t)
+      ?.includes(t('usageCacheFailed', { message: 'quota/read-failed' })))
+    assert.equal(usageCacheNote(undefined, t), undefined)
+  }
 })

@@ -49,12 +49,18 @@ import {
   isEnforcementRefusal,
   mapFetchFailure,
   mergeReasoning,
-  discoverAcrossAccounts,
   oauthEndpointError,
   OAuthEndpointError,
 } from './common.js'
 import { AccountTokenManager } from './accounts.js'
-import type { CatalogPersistence, DiscoveredModel, FetchFn, ModelEntry, ProviderUsage, UsageWindow } from './common.js'
+import type {
+  CatalogStoreFactory,
+  DiscoveredModel,
+  FetchFn,
+  ModelEntry,
+  ProviderUsage,
+  UsageWindow,
+} from './common.js'
 import { ProviderCatalog, catalogRow } from './provider-catalog.js'
 import { PoolBackedAdapter } from './pool-delegation.js'
 import { proxiedFetch } from '../http.js'
@@ -71,6 +77,7 @@ import {
 } from './rate-limit.js'
 import type { RateLimitResetReader, RateLimitWait } from './rate-limit.js'
 import { parseUnifiedRateLimit, rememberUnifiedRateLimit } from './unified-rate-limit.js'
+import type { UnifiedRateLimitState } from './unified-rate-limit.js'
 
 export const CLAUDE_CLIENT_ID = '9d1c250a-e61b-44d9-88ed-5944d1962f5e'
 /**
@@ -1084,8 +1091,22 @@ interface ClaudeAdapterOptions {
   rateLimit?: RateLimitWait
   /** Resolve the attachment service per request; absent means image requests fail loudly. */
   resolveAttachments?: () => AttachmentStore | undefined
-  /** Durable catalog store seeding capability metadata across restarts. */
-  catalogStore?: CatalogPersistence
+  /** Durable per-account catalogue store seeding capability metadata across restarts. */
+  catalogStore?: CatalogStoreFactory
+  /** How long a stored catalogue is trusted before an explicit refresh may replace it; defaults to 24 h. */
+  catalogMaxAgeMs?: number
+  /** Failure cooldown for a catalogue request that sent no retry-after; defaults to 60 s. */
+  cacheRetryDelayMs?: number
+  /** Called once after a refresh stored a catalogue different from the previous one. */
+  onCatalogChanged?: (provider: string) => void
+  /**
+   * Resolves the sink for the unified rate-limit state an account's own answered
+   * response carried, once per stream and before the request is sent, so the sink
+   * captures the auth epoch that request starts under. The pool observes pass
+   * savings here instead of polling a usage endpoint; absent means nothing is
+   * reported.
+   */
+  usageObserverFor?: (account: string) => (state: UnifiedRateLimitState) => void
   /**
    * Per-model default reasoning effort override (the Settings page's picker).
    * Returns the user-configured default for one model, or undefined to follow
@@ -1133,7 +1154,7 @@ export class ClaudeAdapter extends PoolBackedAdapter {
 
   constructor(private readonly options: ClaudeAdapterOptions) {
     super(options)
-    this.catalogs = new ProviderCatalog(options, 'claude', {
+    this.catalogs = new ProviderCatalog(options, 'claude', 'claude', {
       staticRows: provider => this.staticModels(provider),
       fetchCatalog: (account, signal) => this.fetchCatalog(account, signal),
       row: (provider, model) => this.listed(provider, model),
@@ -1156,27 +1177,35 @@ export class ClaudeAdapter extends PoolBackedAdapter {
   }
 
   /**
-   * Drop cached catalogs after login/logout so the next list does not reuse a stale plan,
-   * and the account's uploaded Files API ids with them: those ids belong to the token that
-   * uploaded them, which a login change replaces.
+   * Drop this account's cached catalogue, memory and disk, after login/logout or
+   * an identity change — and the account's uploaded Files API ids with them:
+   * those ids belong to the token that uploaded them, which a login change replaces.
    * @param account - the account whose cached state is dropped, or every account when omitted.
    */
   clearAccountCatalog(account?: string): void {
-    this.catalogs.invalidate(account)
+    this.catalogs.clearAccountCatalog(account)
     clearClaudeFileIds(account)
   }
 
+  /** The known entry for one model, from the account caches only (never a request). */
   private async discovered(model: string): Promise<DiscoveredModel | undefined> {
     if (!this.options.discovery) return undefined
-    const accounts = (await this.options.tokens.list()).map(entry => entry.key)
-    return discoverAcrossAccounts(accounts, async account => {
-      const catalog = await this.catalogs.cache(account)
-      const models = await catalog.resolve(() => this.fetchCatalog(account))
-      return models?.find(entry => entry.id === model)
-    })
+    return await this.catalogs.findModel(model)
   }
 
+  /**
+   * The rows a read falls back to while no account catalogue is known.
+   *
+   * With discovery on, that fallback is the client's own baked-in catalogue —
+   * the same table a refused options read already degrades to — so a cold menu
+   * offers every pinned model, its 1M variants included, instead of only the
+   * configured shortlist. An explicit configuration (discovery off) is the
+   * operator's decision and is listed as given.
+   */
   private staticModels(provider: string): LlmModelInfo[] {
+    if (this.options.discovery) {
+      return claudeCatalogueListing().map(model => this.listed(provider, model))
+    }
     return this.options.models.map(model => ({
       provider,
       id: model.id,
@@ -1274,6 +1303,10 @@ export class ClaudeAdapter extends PoolBackedAdapter {
     // harness session, so no conversation spans two account identities.
     const harnessSessionId = options.sessionId !== undefined ? String(options.sessionId) : randomUUID()
     const chainAccount = await this.chainAccount(account)
+    // Resolved before the request so the observer captures the auth epoch this
+    // request starts under: one that outlives a logout must not report into a
+    // replaced account's state.
+    const observeUsage = chainAccount === '' ? undefined : this.options.usageObserverFor?.(chainAccount)
     const sessionId = claudeWireSessionId(chainAccount, harnessSessionId)
     try {
       let session = await this.options.tokens.session(account)
@@ -1289,6 +1322,9 @@ export class ClaudeAdapter extends PoolBackedAdapter {
       const rateLimit = parseUnifiedRateLimit(response.headers, Date.now())
       if (rateLimit !== undefined && chainAccount !== '') {
         rememberUnifiedRateLimit('claude', chainAccount, rateLimit)
+        // The answered response is the only place this account's own standing is
+        // observed, and the pool's tracker reads it from here rather than polling.
+        observeUsage?.(rateLimit)
       }
       if (!response.ok) {
         throw await httpLlmError(response, 'claude API', {

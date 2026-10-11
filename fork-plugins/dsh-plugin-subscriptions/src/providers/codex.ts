@@ -31,13 +31,12 @@ import {
   isEnforcementRefusal,
   mapFetchFailure,
   mergeReasoning,
-  discoverAcrossAccounts,
   oauthEndpointError,
   OAuthEndpointError,
 } from './common.js'
 import { AccountTokenManager } from './accounts.js'
 import type {
-  CatalogPersistence,
+  CatalogStoreFactory,
   DiscoveredModel,
   FetchFn,
   ModelEntry,
@@ -741,9 +740,15 @@ interface CodexAdapterOptions {
   fetchFn?: FetchFn
   /** Resolve the attachment service per request; absent means image requests fail loudly. */
   resolveAttachments?: () => AttachmentStore | undefined
-  /** Durable catalog store seeding capability metadata across restarts. */
-  catalogStore?: CatalogPersistence
-  /** Per-account catalog bound for the picker union (defaults to the shared discovery timeout). */
+  /** Durable per-account catalogue store seeding capability metadata across restarts. */
+  catalogStore?: CatalogStoreFactory
+  /** How long a stored catalogue is trusted before an explicit refresh may replace it; defaults to 24 h. */
+  catalogMaxAgeMs?: number
+  /** Failure cooldown for a catalogue request that sent no retry-after; defaults to 60 s. */
+  cacheRetryDelayMs?: number
+  /** Called once after a refresh stored a catalogue different from the previous one. */
+  onCatalogChanged?: (provider: string) => void
+  /** Per-account catalog bound for one catalogue request (defaults to the shared discovery timeout). */
   discoveryTimeoutMs?: number
   /** How long this route may hold a turn open waiting for a rate-limit window; defaults to waiting on, six-hour ceiling. */
   rateLimit?: RateLimitWait
@@ -865,7 +870,7 @@ export class CodexAdapter extends PoolBackedAdapter {
   constructor(private readonly options: CodexAdapterOptions) {
     super(options)
     codexClientVersion(options.clientVersion)
-    this.catalogs = new ProviderCatalog(options, 'codex', {
+    this.catalogs = new ProviderCatalog(options, 'codex', 'codex', {
       staticRows: provider => this.staticModels(provider),
       fetchCatalog: (account, signal) => this.fetchCatalog(account, signal),
       row: (provider, model) => this.listed(provider, model),
@@ -880,9 +885,12 @@ export class CodexAdapter extends PoolBackedAdapter {
     return fetchCodexModels(await this.options.tokens.session(account), this.options.fetchFn, signal, version)
   }
 
-  /** Drop cached catalogs after login/logout so the next list does not reuse a stale plan. */
+  /**
+   * Drop this account's cached catalogue, memory and disk, after login/logout or
+   * an identity change, so no read can serve the previous login's plan.
+   */
   clearAccountCatalog(account?: string): void {
-    this.catalogs.invalidate(account)
+    this.catalogs.clearAccountCatalog(account)
   }
 
   /**
@@ -927,22 +935,14 @@ export class CodexAdapter extends PoolBackedAdapter {
   }
 
   /**
-   * The discovered entry for one model. Resolved through the cache's
-   * stale-while-revalidate path so capability metadata stays stable across a
-   * long conversation: a discovered-only effort (one missing from the static
-   * CODEX_EFFORTS list) selected by the user must not vanish — and fail the
-   * call — just because the TTL lapsed mid-turn.
+   * The known entry for one model, from the account caches only. A discovered
+   * entry wins over the static one because it is the provider's own statement
+   * about the model; forgetting it while a session still uses its effort would
+   * fail the call, so this never trades the last-known metadata for a request.
    */
   private async discovered(model: string, account?: string): Promise<DiscoveredModel | undefined> {
     if (!this.options.discovery) return undefined
-    const accounts = account === undefined
-      ? (await this.options.tokens.list()).map(entry => entry.key)
-      : [account]
-    return discoverAcrossAccounts(accounts, async account => {
-      const catalog = await this.catalogs.cache(account)
-      const models = await catalog.resolve(() => this.fetchCatalog(account))
-      return models?.find(entry => entry.id === model)
-    })
+    return await this.catalogs.findModel(model, account)
   }
 
   /** Whether the discovered catalog advertises a fast tier for this model. */
@@ -950,30 +950,14 @@ export class CodexAdapter extends PoolBackedAdapter {
     return (await this.discovered(model, account))?.fastTier === true
   }
 
-  /** Ids of every discovered model with a fast tier (the Speed toggle's visibility list). */
+  /** Ids of every known model with a fast tier (the Speed toggle's visibility list). */
   async fastCapableModels(): Promise<string[]> {
     if (!this.options.discovery) return []
     // Not logged in → no fast models, so the Speed toggle hides after logout
     // (mirrors the listModels guard above). Union every account: a fast-capable
     // model only the non-default lists (e.g. gpt-5.6-sol) must still show Speed.
-    const accounts = (await this.options.tokens.list()).map(entry => entry.key)
-    if (accounts.length === 0) return []
-    const seen = new Set<string>()
-    const ids: string[] = []
-    for (const account of accounts) {
-      try {
-        const catalog = await this.catalogs.cache(account)
-        const models = await catalog.resolve(() => this.fetchCatalog(account))
-        for (const model of models ?? []) {
-          if (model.fastTier !== true || seen.has(model.id)) continue
-          seen.add(model.id)
-          ids.push(model.id)
-        }
-      } catch {
-        // sit out
-      }
-    }
-    return ids
+    if ((await this.options.tokens.list()).length === 0) return []
+    return await this.catalogs.fastTierIds()
   }
 
   /** Capability resolution of the provider's own models (the pool resolves members here). */

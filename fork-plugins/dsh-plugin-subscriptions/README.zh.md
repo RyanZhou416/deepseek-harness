@@ -60,7 +60,7 @@
 
 只有已登录的 provider 才会出现在会话模型选择器里;登录/退出后列表自动刷新。支持视觉的模型会声明 `['text', 'image']` 输入模态,图片内容会被翻译成各 provider 的 wire 格式。
 
-已登录的卡片还会显示**订阅用量**——按限额窗口(5 小时会话窗、每周窗,以及计划包含的按模型每周窗)展示已用百分比、进度条和重置时间,并带刷新按钮。Codex 用量来自 `chatgpt.com/backend-api/wham/usage`(同时报告计划类型),Claude 用量来自 `api.anthropic.com/api/oauth/usage`,Grok 用量来自 Grok Build CLI 代理的 `cli-chat-proxy.grok.com/v1/billing`(即 CLI `/usage` 面板的数据源,报告共享每周额度和订阅档位)。Antigravity 会在上游字段存在时从 `loadCodeAssist` 与 `fetchAvailableModels` 显示订阅档位、积分及按模型限额。Copilot 没有用量接口,其卡片不显示用量区块。账号无法提供服务时，卡片会显示一条红字提示：数据来自本机发出的 Messages 响应上的 `anthropic-ratelimit-unified-*` 响应头，优先于用量百分比，并分别说明是账号本身超额或需要重新登录，还是账号池已改用其他账号提供服务。 Claude 账号的会话窗用量达到或超过一半、或每周窗达到或超过 89% 时，会被排除在池选号之外，直到窗口重置（两个阈值都可在 `pool.scheduling` 配置）。当只有这些阈值挡住了池时，报告的等待时间取最早的一次窗口重置。若已启用的池对某个模型没有任何条目，路由会**明确提示一次**，并改由单个账号提供服务，而不是静默降级。
+已登录的卡片还会显示**订阅用量**——按限额窗口(5 小时会话窗、每周窗,以及计划包含的按模型每周窗)展示已用百分比、进度条和重置时间,并带刷新按钮(该按钮会向服务商重新读取该账号的用量;仍在冷却中的失败读取不会被绕过)。普通读取只返回账号已缓存的窗口。Codex 用量来自 `chatgpt.com/backend-api/wham/usage`(同时报告计划类型),Claude 用量来自 `api.anthropic.com/api/oauth/usage`,Grok 用量来自 Grok Build CLI 代理的 `cli-chat-proxy.grok.com/v1/billing`(即 CLI `/usage` 面板的数据源,报告共享每周额度和订阅档位)。Antigravity 会在上游字段存在时从 `loadCodeAssist` 与 `fetchAvailableModels` 显示订阅档位、积分及按模型限额。Copilot 没有用量接口,其卡片不显示用量区块。账号无法提供服务时，卡片会显示一条红字提示：数据来自本机发出的 Messages 响应上的 `anthropic-ratelimit-unified-*` 响应头，优先于用量百分比，并分别说明是账号本身超额或需要重新登录，还是账号池已改用其他账号提供服务。 Claude 账号的会话窗用量达到或超过一半、或每周窗达到或超过 89% 时，会被排除在池选号之外，直到窗口重置（两个阈值都可在 `pool.scheduling` 配置）。当只有这些阈值挡住了池时，报告的等待时间取最早的一次窗口重置。若已启用的池对某个模型没有任何条目，路由会**明确提示一次**，并改由单个账号提供服务，而不是静默降级。
 
 在 **订阅 → ChatGPT → 管理** 中，**额度耗尽时自动使用重置卡** 默认关闭，点击 **保存更改** 后生效。该设置适用于 Codex LLM 请求，包括独立账号入口。当前账号的会话窗或周额度耗尽时，只有所有已登录 ChatGPT 账号中都没有更早到期的可用卡，才会使用当前账号最早到期的可用 `codex_rate_limits` 卡。退出账号池的账号也参加比较；其他账号仍有额度不影响用卡，并列最早到期也符合条件。仅调用图片或搜索工具不会触发该功能。
 
@@ -83,15 +83,27 @@ Codex 编辑走 `/backend-api/codex/images/edits`，Grok 编辑走 `/v1/images/e
 
 ### DSH 兼容性
 
-本 fork 离线包 `0.9.4-dsh017rc1.22` 固定适配 DSH `0.1.7-rc.1` 和 Cordis `4.0.4`。其 V4 工具消息转换、固定到 Claude Code 2.1.288 的 wire 与界面已针对这一确切版本组合构建、测试；不要安装到旧版 DSH profile。上游公开的 `0.9.4` 包声明了更宽的 peer 范围，但不适用于这个私有离线包。
+本 fork 离线包 `0.9.4-dsh017rc1.23` 固定适配 DSH `0.1.7-rc.1` 和 Cordis `4.0.4`。其 V4 工具消息转换、固定到 Claude Code 2.1.288 的 wire 与界面已针对这一确切版本组合构建、测试；不要安装到旧版 DSH profile。上游公开的 `0.9.4` 包声明了更宽的 peer 范围，但不适用于这个私有离线包。
 
 ### 管理账号与 Pool 模型
 
 在 **设置 → 订阅 → 对应 provider → 管理** 中编辑账号别名、自动 Pool 参与范围与独立账号模型入口。每个模型在服务商模型列表中只出现一行，该行携带自己的行设置，以及目录包含该模型的每个账号各自的 Pool 勾选框；`(1M)` 变体各自保留独立行，因为它们是不同的 wire id。默认维持自动 Pool；独立入口固定使用一个账号，失效时不会回退到其他账号。此配置仅约束 LLM 路由，不改变图片、视频和搜索工具的账号策略。详见[账号与模型管理](docs/account-management.md)。
 
-### 刷新模型列表
+### 模型列表与用量的缓存
 
-在 **设置 → 订阅 → 对应 provider → 编辑模型列表** 中点击 **刷新**，可绕过五分钟目录缓存，并通知会话模型选择器重新读取。这与刷新订阅用量是两个独立操作。如果显式配置了非空的 `models.<provider>`，仍使用指定列表，不进行在线发现。选择模型时会复用该账号上次获取的能力信息，并在数据过期后后台刷新；实际发送请求前仍会校验当前账号的模型资格。没有目录缓存的账号仍需等待首次发现。
+发现的目录与用量读数都是 `~/.dsh/plugins/subscriptions/` 下按账号划分的缓存，普通读取只回答本地状态：既不查询服务商，也不会启动任何定时器。`models.json` 按服务商账号保存条目，`usage-cache.json` 保存规范化后的窗口读数及其观测时间与读取冷却；两者都不保存 token。未按账号分键的旧 `models.json` 会被丢弃而不会分配给某个账号，该账号在下次刷新时重新发现。规范 key 改名后，账号缓存的目录、用量读数与冷却会随之移动；仅在更早一次运行中被凭据存储记录下来的改名，会在首次账号读取之前按其自身的别名记录完成一次对账，因此不会有已退役的 key 继续服务会话。
+
+服务商查询只发生在明确的事件上：登录只刷新该账号自己的目录，不读取用量；打开服务商的 **管理** 对话框只会对超过缓存时间范围的目录做一次按需重新校验；**编辑模型列表** 里的 **刷新** 会强制刷新该服务商每个账号的目录（并重新检查 Codex 客户端版本）；展开用量胶囊会对当前服务商的用量做一次按需读取；用量 **刷新** 按钮会强制读取一个账号的用量；消耗一张 ChatGPT 重置卡会重新读取该账号；一次模型请求会确保它即将使用的那一个账号的目录；一次池请求会确保它即将使用的那一个候选账号的目录与用量读数。
+
+其余读取都只走本地、不触达服务商：回合结束、窗口获得焦点、连接代际重建、切换模型、账号名单变化、设置页首次渲染，以及浏览器缓存在遇到未见过的账号时补读一次。池排序只读取已缓存的条目，因此排序从不扫描同级账号。仅存的定时器都属于协议或本地：授权尝试进行期间的登录进度轮询（同时观察设备码授权）、凭据存储的锁续租、胶囊展开面板的倒计时，以及可选的 Claude Code Keychain 同步（`syncClaudeCodeCredentials`，每五分钟一次）。
+
+`cache.modelMaxAgeMs`（默认 24 小时）是目录的新鲜度时间范围，`cache.usageMaxAgeMs`（默认 5 分钟）是用量的新鲜度，`cache.retryDelayMs`（默认 60 秒）是服务商未给出重试时间时失败读取的冷却时长。失败的读取会把该冷却写入同一文件，重启后仍然生效，显式刷新也不会绕过仍在生效的冷却。
+
+只有 Claude 路由会读取限流响应头，且只读取可识别的 `anthropic-ratelimit-unified-*` 子集：这类响应只会合并它点名的那些窗口，而每条路由都会合并自己用量接口返回的窗口。响应未点名的窗口保留自己的读数与观测时间，因此用量接口没有报告窗口的账号属于未知，而不是零。
+
+一点限制。HTTP 403/404 可能表示模型已被下线，但不会触发自动重新读取目录：没有插件可以信任的机器可读代码能把它与权限或端点拒绝区分开，该行继续保持上次已知状态，直到手动 **刷新** 或按陈旧度触发的普通重读。
+
+如果显式配置了非空的 `models.<provider>`，仍使用指定列表，不进行在线发现。选择模型时会复用该账号上次获取的能力信息；实际发送请求前仍会校验当前账号的模型资格，没有任何缓存的账号在事件刷新之前提供的是内置条目。
 
 Codex 的目录可见性受请求中的 `client_version` 影响。默认自动读取 npm 官方 `@openai/codex` 包公开元数据中的稳定版本，不安装 CLI，也不向 npm 发送订阅登录凭据。查询成功后在内存缓存六小时；失败后五分钟再试，保留上次成功版本，首次失败则回退到已验证的 `0.153.4`。查询最多等待 5 秒，多账号共用查询，忽略预发布版和低于当前已知版本的结果。插件加载时还会把 Node 的 Happy Eyeballs 单地址建连尝试超时提高到至少 1.5 秒（不会降低宿主已设的更大值），因为默认 250ms 在一次 TCP 握手就超过该值的高延迟链路上会让所有连接失败。手动刷新模型列表也会重新检查版本。显式配置 `codexClientVersion: '0.153.4'` 时优先使用该值，并关闭自动查询；更改配置后需重启 DSH。模型仍以账号实际权限为准，详见[验证记录](docs/codex-catalog-refresh.md)。
 
@@ -167,7 +179,7 @@ Claude 模型没有上下文预算字段：上下文大小按 Claude Code 客户
 
 同一区块可开关 Codex 的图片生成，以及 Grok 的图片生成、视频生成和 X 搜索。工具策略只影响保存后新建的会话；已有会话及其重启后的恢复保留创建时的策略。图片生成是共享工具，只有 Codex 与 Grok 均关闭或未配置时才完全隐藏；调用时也不会回退到该会话已禁用的 provider。Claude 和 Copilot 当前没有本插件提供的独立工具开关。
 
-设置和工具策略历史独立存于 `~/.dsh/plugins/subscriptions/provider-settings.json`（权限 0600），不受五分钟模型发现缓存过期影响。原有非空 `models.<provider>` 配置仍决定基础目录；界面显示选择在该目录上生效。
+设置和工具策略历史独立存于 `~/.dsh/plugins/subscriptions/provider-settings.json`（权限 0600），不受上述模型列表与用量缓存影响。原有非空 `models.<provider>` 配置仍决定基础目录；界面显示选择在该目录上生效。
 
 ### 编辑模型的默认推理档
 
@@ -186,6 +198,10 @@ Claude 模型没有上下文预算字段：上下文大小按 Claude Code 客户
     rateLimit:
       wait: true                       # wait out a closed rate-limit window (default)
       maxWaitMs: 21600000              # ceiling on one wait; 6 h, covers a 5-hour session window
+    cache:
+      modelMaxAgeMs: 86400000          # catalogue freshness horizon (default 24 h)
+      usageMaxAgeMs: 300000            # usage freshness horizon (default 5 min)
+      retryDelayMs: 60000              # failed-read cooldown when the provider names none
     models:                            # override the discovered/built-in catalogs
       codex:
         - { id: gpt-5.6-sol, name: GPT-5.6 Sol, contextWindow: 272000, inputModalities: [text, image] }
@@ -216,7 +232,7 @@ Antigravity 为 Gemini 使用 `parametersJsonSchema`，为 Claude/GPT-OSS 使用
 
 选号会记住每个会话、提供方和模型池的账号。`priority` 保留配置的健康成员顺序及会话粘性。默认 `quota_aware` 在各可用性分组内归一化原有的“剩余额度 / 距重置时间”评分，再为 Claude、ChatGPT 的临近重置，以及 ChatGPT 的少量余额收尾增加有限权重。ChatGPT 的周窗口重置不足 24 小时，且有可用重置卡将在三天内到期时，只获得有限加分，不拥有绝对优先级。自动用卡须单独开启上文所述的设置。
 
-Claude 和 ChatGPT 在已用量低于 100% 时仍留在主要候选组，其他提供方保留 95% 阈值。任一适用窗口耗尽，都会把成员放入最后的候补组。模型专属窗口只影响匹配的模型。缓存中的重置时刻经过后，过期窗口不再贡献紧迫度或“额度已满”判定，并触发后台刷新；接口持续返回同一个过期时间时，不会形成反复查询循环。
+Claude 和 ChatGPT 在已用量低于 100% 时仍留在主要候选组，其他提供方保留 95% 阈值。任一适用窗口耗尽，都会把成员放入最后的候补组。模型专属窗口只影响匹配的模型。缓存中的重置时刻经过后，过期窗口不再贡献紧迫度或“额度已满”判定，并在下次需求时重新读取；接口持续返回同一个过期时间时，不会形成反复查询循环。
 
 进入 ChatGPT 收尾范围后，偏向余量充足账号的基础分按剩余比例减弱，收尾加分逐渐增强。因此，所有账号都只剩几个百分点时，也会更倾向收尾余量较少的账号。临近重置加分随截止时间接近而增加，但有明确上限，每类窗口均有可配置的观察范围。
 
@@ -310,7 +326,7 @@ DSH `v0.1.3-alpha.1` 新增宿主统一代理支持。建议在启动环境或 `
 ```sh
 pnpm install   # devDependencies link into a local deepseek-harness checkout — edit the paths first
 pnpm build     # tsc (lib/) + tsdown (lib/client.js browser bundle)
-pnpm test      # node --test over compiled unit specs
+pnpm test      # compile to lib-test, then node --test in a private DSH_HOME
 ```
 
 `prepare`(git 安装时触发)执行 `tsdown.prepare.config.ts`:自包含打包两个面,所有 `@deepseek-ai/*` 依赖外部化 —— 运行时从 dsh 安装解析,保证不会引入第二份 cordis。
@@ -319,10 +335,10 @@ pnpm test      # node --test over compiled unit specs
 
 ## 目录结构
 
-- `src/index.ts` —— 插件入口:配置 schema、adapter 注册、登录态变更通告、RPC 接线
+- `src/index.ts` —— 插件入口:配置 schema（缓存时间范围由 `cache-policy.ts` 解析）、adapter 注册、登录态变更通告、RPC 接线
 - `src/auth/` —— PKCE/JWT 工具、token 存储、OAuth 流程引擎(临时本地回调服务)、Claude Code 凭据读取器(Keychain/文件)、`/subscriptions-auth` RPC 通道
-- `src/providers/` —— 各 provider 的 OAuth 常量/换发/刷新 + `LlmAdapter` 实现，多账号 token 管理（`accounts.ts`），模型池（`pool.ts` + `pool-health.ts` / `pool-usage.ts` / `pool-family.ts`），以及 `rate-limit.ts`（限流重开时刻解析 + 重试策略）
+- `src/providers/` —— 各 provider 的 OAuth 常量/换发/刷新 + `LlmAdapter` 实现，多账号 token 管理（`accounts.ts`），模型池（`pool.ts` + `pool-health.ts` / `pool-usage.ts` / `pool-family.ts`），`rate-limit.ts`（限流重开时刻解析 + 重试策略），以及按账号持久化的元数据缓存（`catalog-store.ts` / `usage-store.ts`，`cache-identities.ts` 在加载时对账已记录的账号改名）
 - `src/translate/` —— dsh `Message[]` 与 OpenAI Responses / Anthropic Messages 格式互转,SSE → `StreamChunk`
 - `src/providers/codex-search.ts` —— 为 DSH 原生 `web_search` 能力提供 Codex 搜索实现
 - `src/tools/` —— `x_search`、`image_generate` 与 `video_generate`
-- `src/client/` —— 设置 → 订阅页面(浏览器面,中英文,跟随明暗主题)
+- `src/client/` —— 设置 → 订阅页面（浏览器面，中英文，跟随明暗主题），以及用量胶囊与设置页共用的同一份订阅缓存（`subscriptions-cache.ts`）

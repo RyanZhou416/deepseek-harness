@@ -1,5 +1,6 @@
 /** Account scheduling shared by image generation and editing, independent of chat catalogs/quota. */
 import { LlmError } from '@deepseek-ai/dsh-llm'
+import type { ProviderId } from '../auth/store.js'
 import type { AccountTokenManager } from './accounts.js'
 import { ENFORCEMENT_CODE, httpLlmError } from './common.js'
 import type { RateLimitResetReader } from './rate-limit.js'
@@ -55,6 +56,20 @@ export class ImageAccountPool {
   clear(provider: ImageProvider, account?: string): void {
     this.health.clear(provider, account)
     this.sticky = new WeakMap()
+  }
+
+  /**
+   * Move one account's image cooldowns to the canonical key the token store
+   * renamed it to. A rename is not a re-login: an account parked on an image
+   * failure stays parked instead of being tried again under the new key. A
+   * provider this pool does not serve has no image records to move.
+   * @param provider - the provider route (only the image providers key records).
+   * @param from - the key the account's image records were held under.
+   * @param to - the canonical key the account now resolves to.
+   */
+  renameAccount(provider: ProviderId, from: string, to: string): void {
+    if (provider !== 'codex' && provider !== 'grok') return
+    this.health.renameAccount(provider, from, to)
   }
 
   async request<S extends ImageSession>(request: ImageAccountRequest<S>): Promise<Response> {

@@ -21,6 +21,10 @@ import type {} from '@deepseek-ai/dsh-tools'
 // Type-only: activates the `ctx.web` Context merge for optional registration.
 import type {} from '@deepseek-ai/dsh-web'
 import type { AttachmentStore, ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
+import { dshHomePath } from '@deepseek-ai/dsh-home-paths'
+import { SubscriptionCacheSchema, resolveSubscriptionCachePolicy } from './cache-policy.js'
+import type { SubscriptionCachePolicy } from './cache-policy.js'
+import { createFileUsageStore } from './providers/usage-store.js'
 import { stopBridge } from './transport/claude-fetch.js'
 import { OAuthFlowManager, type OAuthAttempt } from './auth/oauth-flow.js'
 import { DeviceFlowManager, type DeviceAttempt } from './auth/device-flow.js'
@@ -32,9 +36,7 @@ import type {
   AuthController,
   ImageBytesResult,
   LoginMethod,
-  ModelDefaultsCatalog,
   ModelDefaultsController,
-  ModelDefaultView,
   ProviderStatus,
   SpeedController,
   VideoBytesResult,
@@ -68,6 +70,7 @@ import type {
 import { DISCOVERY_TIMEOUT_MS, isMissingOrInvalidCredential, OAuthEndpointError, validateModels, withTimeout } from './providers/common.js'
 import type { ModelEntry, ProviderUsage, ResetCreditConsumeResult, ResetCreditList, UsagePoolState } from './providers/common.js'
 import { AccountTokenManager } from './providers/accounts.js'
+import { reconcileStoredCodexAliases } from './providers/cache-identities.js'
 import type { AccountAwareAdapter } from './providers/accounts.js'
 import { DEFAULT_RATE_LIMIT_MAX_WAIT_MS, resolveRateLimitWait } from './providers/rate-limit.js'
 import type { RateLimitConfig } from './providers/rate-limit.js'
@@ -87,7 +90,8 @@ import { buildAccountPools, poolKey } from './providers/pool-family.js'
 import type { PoolDefinition, PoolMemberRef } from './providers/pool-family.js'
 import { PoolHealthRegistry } from './providers/pool-health.js'
 import { PoolUsageTracker, USAGE_TTL_MS } from './providers/pool-usage.js'
-import { forgetUnifiedRateLimit, unifiedRateLimitFor } from './providers/unified-rate-limit.js'
+import type { UsageFetcher } from './providers/pool-usage.js'
+import { forgetUnifiedRateLimit, renameUnifiedRateLimit, unifiedRateLimitFor } from './providers/unified-rate-limit.js'
 import {
   CodexAdapter,
   codexFlow,
@@ -190,6 +194,8 @@ export interface Config {
    * `claude` CLI in sync with a rotation this plugin performs.
    */
   syncClaudeCodeCredentials?: boolean
+  /** Demand-driven metadata freshness; no duration starts a polling timer. */
+  cache?: Partial<SubscriptionCachePolicy>
   /** Whether and how long a route waits out a closed rate-limit window. */
   rateLimit?: RateLimitConfig
   /** Advisory model catalogs overriding the built-in defaults, per provider. */
@@ -249,6 +255,7 @@ export const Config: z<Config> = z.object({
   streamIdleTimeoutMs: z.number().min(1).default(DEFAULT_STREAM_IDLE_TIMEOUT_MS),
   claudeIdentityLine: z.string(),
   syncClaudeCodeCredentials: z.boolean(),
+  cache: SubscriptionCacheSchema,
   rateLimit: z.object({
     wait: z.boolean().default(true),
     maxWaitMs: z.number().min(1).default(DEFAULT_RATE_LIMIT_MAX_WAIT_MS),
@@ -370,6 +377,12 @@ function planOf(provider: ProviderId, session: StoredSession): string | undefine
 /** Per-provider per-account usage lookup; providers without a usage endpoint are absent. */
 type UsageFetchers = Partial<Record<ProviderId, (account: string, signal: AbortSignal) => Promise<ProviderUsage>>>
 
+/** A metadata read respects both the owning cache lifecycle and its deadline. */
+function usageReadSignal(lifecycle?: AbortSignal): AbortSignal {
+  const timeout = AbortSignal.timeout(POOL_USAGE_TIMEOUT_MS)
+  return lifecycle === undefined ? timeout : AbortSignal.any([lifecycle, timeout])
+}
+
 /** ChatGPT reset-credit reads and spends. Absent when the Codex provider is not registered. */
 interface CodexResetCreditOps {
   list(account: string, signal: AbortSignal): Promise<ResetCreditList>
@@ -439,6 +452,9 @@ export class SubscriptionsAuthController implements AuthController {
    */
   private claims = new Map<ProviderId, number>()
 
+  /** Shared local usage snapshots even when account pooling is disabled. */
+  private readonly usageCache: PoolUsageTracker
+
   /** Cached reset-credit lists, keyed `provider/account`. Not consulted by pool selection. */
   private readonly creditCache = new Map<string, CreditCacheEntry>()
 
@@ -453,7 +469,7 @@ export class SubscriptionsAuthController implements AuthController {
     /** Device-flow attempts (copilot); polled in the background like the loopback flows. */
     private readonly deviceFlows: DeviceFlowManager,
     /** Announces an auth-state change so catalog readers re-query (fires `llm/adapters-updated`). */
-    private readonly onAuthChanged: (provider: ProviderId, account?: string) => void,
+    private readonly onAuthChanged: (provider: ProviderId, account?: string, reason?: 'login' | 'logout' | 'default') => void,
     /** Lazy attachment-store lookup for the `image` endpoint. */
     private readonly resolveAttachments: () => AttachmentStore | undefined,
     /** Usage lookups for providers that expose a usage endpoint. */
@@ -464,14 +480,8 @@ export class SubscriptionsAuthController implements AuthController {
      * plugin itself always uses the default.
      */
     private readonly readClaudeCreds: () => ClaudeSession | undefined = readClaudeCodeCredentials,
-    /**
-     * The pool's usage cache, when the pool is enabled. Routing `usage`
-     * through it (instead of the raw fetcher) means the Settings page shares
-     * the same negative cache as `quota_aware` selection — reopening the
-     * page can no longer re-hit an endpoint that is still cooling down from
-     * a 429.
-     */
-    private readonly poolUsage: PoolUsageTracker | undefined = undefined,
+    /** Usage snapshots shared with routing; absent only in isolated controller compositions. */
+    poolUsage: PoolUsageTracker | undefined = undefined,
     /** Antigravity OAuth/runtime configuration. */
     private readonly antigravityConfig: Config['antigravity'] = {},
     /** ChatGPT reset-credit operations. Other providers never call them. */
@@ -494,14 +504,23 @@ export class SubscriptionsAuthController implements AuthController {
       provider: ProviderId,
       account: string,
     ) => Promise<UsagePoolState | undefined> = () => Promise.resolve(undefined),
-  ) {}
+    /** Local identity reconciliation, shared with the registered model routes. */
+    private readonly beforeRead: () => Promise<void> = () => Promise.resolve(),
+  ) {
+    this.usageCache = poolUsage ?? new PoolUsageTracker((provider, account) => {
+      const fetcher = this.usageFetchers[provider]
+      return fetcher === undefined ? undefined : lifecycle => fetcher(account, usageReadSignal(lifecycle))
+    })
+  }
 
-  async usage(provider: ProviderId, account: string, signal: AbortSignal, force = false): Promise<ProviderUsage> {
-    const fetcher = this.usageFetchers[provider]
-    if (fetcher === undefined) return { supported: false }
-    const usage = this.poolUsage === undefined
-      ? await fetcher(account, signal)
-      : await this.poolUsage.snapshotFor(provider, account, force)
+  async usage(provider: ProviderId, account: string, signal: AbortSignal, force = false, refresh = false): Promise<ProviderUsage> {
+    await this.beforeRead()
+    signal.throwIfAborted()
+    const usage = force || refresh
+      ? await this.usageCache.refreshSnapshot(provider, account, force)
+      : this.usageCache.snapshotFor(provider, account)
+    signal.throwIfAborted()
+    if (!usage.supported) return usage
     // Both additions are plugin-local state read without a round trip, so a
     // provider or composition without them answers exactly as before.
     const rateLimit = unifiedRateLimitFor(provider, account)
@@ -536,7 +555,7 @@ export class SubscriptionsAuthController implements AuthController {
     if (provider !== 'codex' || ops === undefined) throw new Error('ChatGPT reset credits are unavailable')
     const result = await ops.consume(account, creditId, redeemRequestId, signal)
     this.forgetResetCredits(provider, account)
-    this.poolUsage?.invalidate(provider, account)
+    this.usageCache.invalidate(provider, account)
     return result
   }
 
@@ -652,7 +671,7 @@ export class SubscriptionsAuthController implements AuthController {
         const session: ClaudeSession = { ...imported, keychainBound: true }
         await this.persist('claude', session)
         this.lastError.delete('claude')
-        this.onAuthChanged('claude', accountKeyOf('claude', session))
+        this.onAuthChanged('claude', accountKeyOf('claude', session), 'login')
         return { authorizeUrl: '' }
       }
       if (method === 'keychain') {
@@ -740,7 +759,7 @@ export class SubscriptionsAuthController implements AuthController {
       if (this.claims.get(provider) !== claim) return
       await this.persist(provider, session)
       this.lastError.delete(provider)
-      this.onAuthChanged(provider, accountKeyOf(provider, session))
+      this.onAuthChanged(provider, accountKeyOf(provider, session), 'login')
     } catch (error) {
       // A failure is as stale as a success would have been: whoever claimed
       // the session while the exchange ran owns what the card shows, so a
@@ -764,7 +783,7 @@ export class SubscriptionsAuthController implements AuthController {
       const session = await completeCopilotLogin(githubToken)
       await this.persist(provider, session)
       this.lastError.delete(provider)
-      this.onAuthChanged(provider, accountKeyOf(provider, session))
+      this.onAuthChanged(provider, accountKeyOf(provider, session), 'login')
     } catch (error) {
       // A user-cancelled attempt is not a failure worth surfacing.
       if (!(error instanceof Error && error.message === 'login cancelled')) {
@@ -806,7 +825,7 @@ export class SubscriptionsAuthController implements AuthController {
       if (this.claims.get('cursor') !== claim) return
       await this.persist('cursor', session)
       this.lastError.delete('cursor')
-      this.onAuthChanged('cursor', accountKeyOf('cursor', session))
+      this.onAuthChanged('cursor', accountKeyOf('cursor', session), 'login')
     } catch (error) {
       if (this.claims.get('cursor') !== claim) return
       if (!(error instanceof Error && error.message === 'login cancelled')) {
@@ -870,17 +889,18 @@ export class SubscriptionsAuthController implements AuthController {
     if (provider === 'cursor') this.cancelCursorLogins()
     await deleteAccountSession(provider, account)
     this.lastError.delete(provider)
-    this.onAuthChanged(provider, account)
+    this.onAuthChanged(provider, account, 'logout')
   }
 
   async setDefault(provider: ProviderId, account: string): Promise<void> {
     await setDefaultAccount(provider, account)
-    this.onAuthChanged(provider, account)
+    this.onAuthChanged(provider, account, 'default')
   }
 }
 
 export function apply(ctx: Context, config: Config): void {
   const scheduling = resolvePoolScheduling(config.pool?.scheduling)
+  const cachePolicy = resolveSubscriptionCachePolicy(config.cache)
   // Outbound requests (catalog discovery, the npm version lookup, token
   // refresh) must survive links where one TCP handshake exceeds Node's 250ms
   // The Bun transport child is a process. Disabling or reloading the plugin has to
@@ -944,26 +964,61 @@ export function apply(ctx: Context, config: Config): void {
       () => undefined,
     )
   }
-  const authChanged = (provider: ProviderId, account?: string): void => {
+  let cacheActive = true
+  const authChanged = (provider: ProviderId, account?: string, reason: 'login' | 'logout' | 'default' | 'removed' = 'login'): void => {
+    if (!cacheActive) return
     if (provider === 'codex') refreshCodexPresence()
-    subscriptionsAuth?.forgetResetCredits(provider, account)
-    if (provider === 'codex' || provider === 'grok') imagePool.clear(provider, account)
-    // Login, logout, and credential death all pass through here; a codex or
-    // copilot auth transition also drops the adapter's captured reasoning
-    // replay state (isolation is already account-scoped — this is memory
-    // hygiene).
-    if (provider === 'copilot') copilotAdapter?.clearReplayState()
-    if (provider === 'codex') codexAdapter?.clearReplayState()
-    adapters.get(provider)?.clearAccountCatalog(account)
-    poolHealth?.clear(provider, account)
-    poolUsage?.invalidate(provider, account)
     poolAdapter?.invalidate()
-    // A dead login or a removed account must not leave its last captured
-    // rate-limit report on the card.
-    forgetUnifiedRateLimit(provider, account)
-    // Pool membership follows the accounts: re-announce every route so the
-    // picker re-queries (the changed provider's own catalog may shift too).
-    for (const [route, handle] of handles) handle.replace([route])
+    if (reason !== 'default') {
+      subscriptionsAuth?.forgetResetCredits(provider, account)
+      if (provider === 'codex' || provider === 'grok') imagePool.clear(provider, account)
+      if (provider === 'copilot') copilotAdapter?.clearReplayState()
+      if (provider === 'codex') codexAdapter?.clearReplayState()
+      adapters.get(provider)?.clearAccountCatalog(account)
+      poolHealth?.clear(provider, account)
+      poolUsage?.forget(provider, account)
+      forgetUnifiedRateLimit(provider, account)
+    }
+    handles.get(provider)?.replace([provider])
+    // An explicit login initializes only its own catalogue. Default-account changes
+    // and ordinary token renewal reuse account-scoped snapshots without any query.
+    if (reason === 'login' && account !== undefined) {
+      void adapters.get(provider)?.refreshOwnCatalog?.(provider, account).catch(error => {
+        if (cacheActive) onWarn(`catalogue initialization failed for ${provider}: ${errorChain(error)}`)
+      })
+    }
+  }
+  const renameAccountState = async (provider: ProviderId, from: string, to: string): Promise<void> => {
+    poolUsage?.renameAccount(provider, from, to)
+    poolHealth?.renameAccount(provider, from, to)
+    renameUnifiedRateLimit(provider, from, to)
+    imagePool.renameAccount(provider, from, to)
+    subscriptionsAuth?.forgetResetCredits(provider, from)
+    subscriptionsAuth?.forgetResetCredits(provider, to)
+    const move = async (label: string, operation: () => Promise<void>): Promise<void> => {
+      try { await operation() } catch (error: unknown) {
+        onWarn(`${label} could not persist renamed account state (${errorChain(error)})`)
+      }
+    }
+    // Policy projection is installed before either durable migration can fail.
+    await Promise.all([
+      move('account policy', () => preferences.renameAccount(provider, from, to)),
+      move('catalogue cache', async () => { await adapters.get(provider)?.renameAccountCatalog?.(from, to) }),
+    ])
+    poolAdapter?.invalidate()
+    if (cacheActive) handles.get(provider)?.replace([provider])
+  }
+  let identityReadiness: Promise<void> | undefined
+  const reconcileIdentities = (): Promise<void> => {
+    identityReadiness ??= providers.includes('codex')
+      ? reconcileStoredCodexAliases({ move: renameAccountState, onWarn })
+      : Promise.resolve()
+    return identityReadiness
+  }
+  const onCatalogChanged = (provider: string): void => {
+    if (!cacheActive) return
+    poolAdapter?.invalidate()
+    handles.get(provider)?.replace([provider])
   }
   // Per-model default effort overrides: start the load so the adapters'
   // synchronous `defaultEffortOf` callbacks see the persisted state as soon
@@ -1004,6 +1059,8 @@ export function apply(ctx: Context, config: Config): void {
   const register = (provider: ProviderId, adapter: AccountAwareAdapter): AdapterRegistrationHandle => {
     const route = new AccountPreferencesAdapter({
       provider, adapter, settings: preferences, pool: () => poolAdapter, onWarn,
+      beforeRead: reconcileIdentities,
+      resolveAccount: account => accountTokens.get(provider)?.resolveAccount(account) ?? Promise.resolve(account),
       accounts: async () => (await accountTokens.get(provider)?.list() ?? []).map(({ key, session }) => ({ key, label: accountOf(provider, session) ?? key })),
     })
     memberAdapters.set(provider, route.poolMember())
@@ -1020,7 +1077,9 @@ export function apply(ctx: Context, config: Config): void {
             refresh: refreshCodex,
             isPermanent: isCodexPermanentRefreshError,
           }),
-          onAccountRemoved: account => { authChanged('codex', account) },
+          onAccountRemoved: account => { authChanged('codex', account, 'removed') },
+          onAccountRenamed: (from, to) => renameAccountState('codex', from, to),
+          onWarn,
         })
         codexTokens = tokens
         refreshCodexPresence()
@@ -1068,6 +1127,9 @@ export function apply(ctx: Context, config: Config): void {
           models: catalog.codex,
           streamIdleTimeoutMs,
           rateLimit,
+          catalogMaxAgeMs: cachePolicy.modelMaxAgeMs,
+          cacheRetryDelayMs: cachePolicy.retryDelayMs,
+          onCatalogChanged,
           tokens,
           recoverQuota: recoverCodexQuota,
           discovery: !overridden.has('codex'),
@@ -1075,7 +1137,7 @@ export function apply(ctx: Context, config: Config): void {
           resolveAttachments,
           // Durable catalog: capability metadata (reasoning efforts) survives
           // restarts, so a resumed session's selected effort keeps resolving.
-          catalogStore: catalogStore('codex'),
+          catalogStore: catalogStore('codex', { onWarn }),
           defaultEffortOf: (model: string) => defaultEffortOf('codex', model),
           contextWindowOf: model => preferences.contextWindow('codex', model),
           pool: () => poolAdapter,
@@ -1101,7 +1163,7 @@ export function apply(ctx: Context, config: Config): void {
                 : refreshClaude(session),
             isPermanent: isClaudePermanentRefreshError,
           }),
-          onAccountRemoved: account => { authChanged('claude', account) },
+          onAccountRemoved: account => { authChanged('claude', account, 'removed') },
         })
         claudeTokens = tokens
         accountTokens.set('claude', tokens as AccountTokenManager<StoredSession>)
@@ -1115,11 +1177,15 @@ export function apply(ctx: Context, config: Config): void {
           ...config.claudeIdentityLine === undefined ? {} : { identityLine: config.claudeIdentityLine },
           streamIdleTimeoutMs,
           rateLimit,
+          catalogMaxAgeMs: cachePolicy.modelMaxAgeMs,
+          cacheRetryDelayMs: cachePolicy.retryDelayMs,
+          onCatalogChanged,
           tokens,
           discovery: !overridden.has('claude'),
           onWarn,
           resolveAttachments,
-          catalogStore: catalogStore('claude'),
+          catalogStore: catalogStore('claude', { onWarn }),
+          usageObserverFor: account => poolUsage?.captureUnifiedObserver('claude', account) ?? (() => {}),
           defaultEffortOf: (model: string) => defaultEffortOf('claude', model),
           pool: () => poolAdapter,
           speedFor: (model: string): boolean => defaultSpeedOf('claude', model) === 'fast',
@@ -1138,7 +1204,7 @@ export function apply(ctx: Context, config: Config): void {
             refresh: refreshGrok,
             isPermanent: isGrokPermanentRefreshError,
           }),
-          onAccountRemoved: account => { authChanged('grok', account) },
+          onAccountRemoved: account => { authChanged('grok', account, 'removed') },
         })
         grokTokens = tokens
         accountTokens.set('grok', tokens as AccountTokenManager<StoredSession>)
@@ -1148,13 +1214,16 @@ export function apply(ctx: Context, config: Config): void {
           models: catalog.grok,
           streamIdleTimeoutMs,
           rateLimit,
+          catalogMaxAgeMs: cachePolicy.modelMaxAgeMs,
+          cacheRetryDelayMs: cachePolicy.retryDelayMs,
+          onCatalogChanged,
           tokens,
           discovery: !overridden.has('grok'),
           onWarn,
           resolveAttachments,
           // Durable catalog: capability metadata (reasoning efforts) survives
           // restarts, so a resumed session's selected effort keeps resolving.
-          catalogStore: catalogStore('grok'),
+          catalogStore: catalogStore('grok', { onWarn }),
           defaultEffortOf: (model: string) => defaultEffortOf('grok', model),
           pool: () => poolAdapter,
         })
@@ -1171,20 +1240,23 @@ export function apply(ctx: Context, config: Config): void {
             refresh: refreshCopilot,
             isPermanent: isCopilotPermanentRefreshError,
           }),
-          onAccountRemoved: account => { authChanged('copilot', account) },
+          onAccountRemoved: account => { authChanged('copilot', account, 'removed') },
         })
         accountTokens.set('copilot', tokens as AccountTokenManager<StoredSession>)
         copilotAdapter = new CopilotAdapter({
           models: catalog.copilot,
           streamIdleTimeoutMs,
           rateLimit,
+          catalogMaxAgeMs: cachePolicy.modelMaxAgeMs,
+          cacheRetryDelayMs: cachePolicy.retryDelayMs,
+          onCatalogChanged,
           tokens,
           discovery: !overridden.has('copilot'),
           onWarn,
           resolveAttachments,
           // Durable catalog: capability metadata (per-model vision support,
           // context windows) survives restarts and network failures.
-          catalogStore: catalogStore('copilot'),
+          catalogStore: catalogStore('copilot', { onWarn }),
           defaultEffortOf: (model: string) => defaultEffortOf('copilot', model),
           pool: () => poolAdapter,
         })
@@ -1201,7 +1273,7 @@ export function apply(ctx: Context, config: Config): void {
             refresh: session => refreshAntigravity(session, resolveAntigravityOAuthConfig(config.antigravity)),
             isPermanent: isAntigravityPermanentRefreshError,
           }),
-          onAccountRemoved: account => { authChanged('antigravity', account) },
+          onAccountRemoved: account => { authChanged('antigravity', account, 'removed') },
         })
         accountTokens.set('antigravity', tokens as AccountTokenManager<StoredSession>)
         usageFetchers.antigravity = async (account, signal) => fetchAntigravityUsage(
@@ -1211,12 +1283,15 @@ export function apply(ctx: Context, config: Config): void {
           models: catalog.antigravity,
           streamIdleTimeoutMs,
           rateLimit,
+          catalogMaxAgeMs: cachePolicy.modelMaxAgeMs,
+          cacheRetryDelayMs: cachePolicy.retryDelayMs,
+          onCatalogChanged,
           tokens,
           discovery: !overridden.has('antigravity'),
           ...config.antigravity === undefined ? {} : { runtime: config.antigravity },
           onWarn,
           resolveAttachments,
-          catalogStore: catalogStore('antigravity'),
+          catalogStore: catalogStore('antigravity', { onWarn }),
           defaultEffortOf: model => defaultEffortOf('antigravity', model),
           pool: () => poolAdapter,
         })
@@ -1233,7 +1308,7 @@ export function apply(ctx: Context, config: Config): void {
             refresh: refreshCursor,
             isPermanent: isCursorPermanentRefreshError,
           }),
-          onAccountRemoved: account => { authChanged('cursor', account) },
+          onAccountRemoved: account => { authChanged('cursor', account, 'removed') },
         })
         accountTokens.set('cursor', tokens as AccountTokenManager<StoredSession>)
         let adapter!: CursorAdapter
@@ -1241,11 +1316,14 @@ export function apply(ctx: Context, config: Config): void {
           models: catalog.cursor,
           streamIdleTimeoutMs,
           rateLimit,
+          catalogMaxAgeMs: cachePolicy.modelMaxAgeMs,
+          cacheRetryDelayMs: cachePolicy.retryDelayMs,
+          onCatalogChanged,
           tokens,
           discovery: !overridden.has('cursor'),
           onWarn,
           resolveAttachments,
-          catalogStore: catalogStore('cursor'),
+          catalogStore: catalogStore('cursor', { onWarn }),
           defaultEffortOf: model => defaultEffortOf('cursor', model),
           pool: () => poolAdapter,
           speedFor: (model: string): boolean => defaultSpeedOf('cursor', model) === 'fast',
@@ -1271,53 +1349,34 @@ export function apply(ctx: Context, config: Config): void {
   // provider with fewer than two accounts simply has nothing to pool.
   const poolConfig = config.pool
   const autoAccounts = poolConfig?.autoAccounts ?? true
-  if (poolConfig?.enabled !== false && adapters.size >= 1) {
-    // Every poll gets a hard timeout: a cold usage cache AWAITS the first
-    // fetch during member selection, and a hanging usage endpoint must
-    // degrade the strategy (zero urgency), not stall the user's request.
-    // Copilot has no usage endpoint, so its accounts resolve no fetcher and
-    // score zero urgency — the natural last resort.
-    const fetcherFor = (provider: ProviderId, account: string): (() => Promise<ProviderUsage>) | undefined => {
-      switch (provider) {
-        case 'codex': {
-          const tokens = codexTokens
-          return tokens === undefined ? undefined : async () => {
-            const startedAt = Date.now()
-            const snapshot = await fetchCodexPoolUsage(await tokens.session(account), proxiedFetch, AbortSignal.timeout(POOL_USAGE_TIMEOUT_MS))
-            await codexAutoReset?.observeUsage(await tokens.resolveAccount(account), snapshot, startedAt)
-            return snapshot
-          }
-        }
-        case 'claude': {
-          const tokens = claudeTokens
-          return tokens === undefined ? undefined : async () =>
-            fetchClaudeUsage(await tokens.session(account), proxiedFetch,
-              AbortSignal.timeout(POOL_USAGE_TIMEOUT_MS),
-              async () => (await tokens.session(account, true)).accessToken)
-        }
-        case 'grok': {
-          const tokens = grokTokens
-          return tokens === undefined ? undefined : async () =>
-            fetchGrokUsage(await tokens.session(account), proxiedFetch, AbortSignal.timeout(POOL_USAGE_TIMEOUT_MS))
-        }
-        case 'antigravity': {
-          const tokens = accountTokens.get('antigravity')
-          return tokens === undefined ? undefined : async () => fetchAntigravityUsage(
-            await tokens.session(account) as AntigravitySession, config.antigravity, proxiedFetch,
-            AbortSignal.timeout(POOL_USAGE_TIMEOUT_MS),
-          )
-        }
-        case 'copilot':
-          return undefined
-        case 'cursor': {
-          const fetchUsage = usageFetchers.cursor
-          return fetchUsage === undefined ? undefined : async () =>
-            fetchUsage(account, AbortSignal.timeout(POOL_USAGE_TIMEOUT_MS))
-        }
+  const fetcherFor = (provider: ProviderId, account: string): UsageFetcher | undefined => {
+    const fetchUsage = usageFetchers[provider]
+    if (fetchUsage === undefined) return undefined
+    if (provider === 'codex' && poolConfig?.enabled !== false && codexTokens !== undefined) {
+      const tokens = codexTokens
+      return async lifecycle => {
+        const startedAt = Date.now()
+        const snapshot = await fetchCodexPoolUsage(await tokens.session(account), proxiedFetch, usageReadSignal(lifecycle))
+        await codexAutoReset?.observeUsage(await tokens.resolveAccount(account), snapshot, startedAt)
+        return snapshot
       }
     }
+    return lifecycle => fetchUsage(account, usageReadSignal(lifecycle))
+  }
+  const usageStore = createFileUsageStore({ file: dshHomePath('plugins', 'subscriptions', 'usage-cache.json'), onWarn })
+  poolUsage = new PoolUsageTracker(fetcherFor, {
+    freshMs: cachePolicy.usageMaxAgeMs,
+    retryDelayMs: cachePolicy.retryDelayMs,
+    store: usageStore,
+  })
+  const sharedUsage = poolUsage
+  ctx.effect(() => async () => {
+    cacheActive = false
+    await Promise.all([...adapters.values()].map(adapter => adapter.drainOwnCatalogs?.()))
+    await sharedUsage.dispose()
+  }, 'subscriptions: metadata cache lifecycle')
+  if (poolConfig?.enabled !== false && adapters.size >= 1) {
     poolHealth = new PoolHealthRegistry()
-    poolUsage = new PoolUsageTracker(fetcherFor)
     // One provider at a time: every pool read names its route, so listing one
     // provider's accounts must not wait on another provider's discovery.
     const families = async (only?: ProviderId): Promise<Map<string, PoolDefinition>> => {
@@ -1417,6 +1476,7 @@ export function apply(ctx: Context, config: Config): void {
   // advertising the tier — stays on standard routing.
   const speed: SpeedController = {
     async speed(provider, model) {
+      await reconcileIdentities()
       // A speed read belongs to one provider; unrelated catalog discovery must not delay it.
       const fastModels = provider === 'codex'
         ? await codexAdapter?.fastCapableModels() ?? []
@@ -1444,68 +1504,16 @@ export function apply(ctx: Context, config: Config): void {
       await setDefaultSpeed(provider, model, tier)
     },
   }
-  // Per-model default effort overrides (the Settings page's model pickers).
-  // The catalog re-reads the live model info per model — same source as the
-  // session model picker, so the offered effort levels match the picker
-  // exactly, and the configured default merges in through the adapters.
+  const refreshCatalog = async (provider: ProviderId, force: boolean): Promise<void> => {
+    if (!cacheActive || overridden.has(provider)) return
+    const adapter = adapters.get(provider)
+    if (adapter?.refreshOwnCatalog === undefined) return
+    if (provider === 'codex' && force) codexVersion.invalidate()
+    const accounts = await accountTokens.get(provider)?.list() ?? []
+    await Promise.all(accounts.map(account => adapter.refreshOwnCatalog!(provider, account.key, { force })))
+  }
+  // Manage reads providerSettings; effort writes validate against the same cached capabilities.
   const modelDefaults: ModelDefaultsController = {
-    async catalog(force = false): Promise<ModelDefaultsCatalog[]> {
-      if (force) {
-        codexVersion.invalidate()
-        // This is not an auth transition: retain health, usage and Copilot
-        // reasoning replay, but bypass every account's discovery cache.
-        for (const adapter of adapters.values()) adapter.clearAccountCatalog()
-        poolAdapter?.invalidate()
-        for (const [route, handle] of handles) handle.replace([route])
-      }
-      const visible = new Set((await ctx.llm.listProviders()).map(provider => provider.id))
-      const catalog: ModelDefaultsCatalog[] = []
-      for (const provider of PROVIDER_IDS) {
-        if (!visible.has(provider)) continue
-        let models: readonly LlmModelInfo[] = []
-        try {
-          models = await ctx.llm.listModels(provider)
-        } catch {
-          continue // provider unregistered or catalog unavailable; leave it out
-        }
-        // Configured tier rows resolve through the pool, which intersects its
-        // members' own capabilities and never consults defaultEffortOf for the
-        // tier id — an override on one would save cleanly and do nothing. Leave
-        // them out rather than offer a control that cannot take effect.
-        let tierIds: ReadonlySet<string> = new Set()
-        try {
-          const tiers = await poolAdapter?.modelsForProvider(provider)
-          if (tiers !== undefined) tierIds = new Set(tiers.map(tier => tier.id))
-        } catch {
-          // A pool that cannot enumerate leaves every row listed; the worst
-          // case is the pre-existing behaviour, not a missing card.
-        }
-        const views: ModelDefaultView[] = []
-        for (const model of models) {
-          if (tierIds.has(model.id) || parseAccountModelId(model.id)) continue
-          let info: LlmResolvedModelInfo | undefined
-          try {
-            info = await ctx.llm.resolveModelInfo(provider, model.id)
-          } catch {
-            continue // one broken entry must not hide the rest
-          }
-          if (info === undefined) continue
-          // `defaultEffortOf` rather than a bare index: model ids are catalog
-          // data, and an id like `toString` would otherwise inherit a function.
-          const override = defaultEffortOf(provider, model.id)
-          const disabledReason = modelDisabledReason(model)
-          views.push({
-            id: model.id,
-            name: model.name,
-            ...disabledReason === undefined ? {} : { disabledReason },
-            efforts: info.reasoning?.efforts.map(effort => ({ id: effort.id, name: effort.name })) ?? [],
-            ...override === undefined ? {} : { configured: override },
-          })
-        }
-        catalog.push({ provider, models: views })
-      }
-      return catalog
-    },
     async set(provider, model, effort) {
       // Garbage in, garbage out: accept only levels the model's own catalog
       // actually advertises (clearing with `undefined` always passes). A value
@@ -1542,22 +1550,19 @@ export function apply(ctx: Context, config: Config): void {
       await claudeTokens?.peek(accountKeyOf('claude', session)),
     ) as ClaudeSession,
     poolStateFor,
+    reconcileIdentities,
   )
   registerAuthRpc(ctx, subscriptionsAuth, speed, {
     get: () => proxyGetConfig(),
     set: input => proxySetConfig(input),
     test: payload => proxyTestConnection(payload.url, payload.proxy),
   }, modelDefaults, {
-    async get(provider, force) {
+    async get(provider, force, refresh = false) {
+      await reconcileIdentities()
       await loadModelDefaults()
       const adapter = adapters.get(provider)
       if (!adapter) throw new BadRequest(`provider ${provider} is not configured`)
-      if (force) {
-        if (provider === 'codex') codexVersion.invalidate()
-        adapter.clearAccountCatalog()
-        poolAdapter?.invalidate()
-        handles.get(provider)?.replace([provider])
-      }
+      if (force || refresh) await refreshCatalog(provider, force)
       const models = await fullCatalogs.get(provider)!(provider)
       // Enumerate each account once, with the same bounds used by pool discovery.
       const accounts = await accountTokens.get(provider)?.list() ?? []

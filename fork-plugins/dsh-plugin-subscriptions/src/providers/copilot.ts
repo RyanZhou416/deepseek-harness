@@ -41,13 +41,12 @@ import {
   idleWatchdog,
   mapFetchFailure,
   mergeReasoning,
-  discoverAcrossAccounts,
   oauthEndpointError,
   OAuthEndpointError,
 } from './common.js'
 import { AccountTokenManager } from './accounts.js'
 import type {
-  CatalogPersistence,
+  CatalogStoreFactory,
   DiscoveredModel,
   FetchFn,
   ModelEntry,
@@ -587,7 +586,14 @@ interface CopilotAdapterOptions {
   /** Resolve the attachment service per request; absent means image requests fail loudly. */
   resolveAttachments?: () => AttachmentStore | undefined
   /** Durable catalog store seeding capability metadata across restarts. */
-  catalogStore?: CatalogPersistence
+  /** Durable per-account catalogue store seeding capability metadata across restarts. */
+  catalogStore?: CatalogStoreFactory
+  /** How long a stored catalogue is trusted before an explicit refresh may replace it; defaults to 24 h. */
+  catalogMaxAgeMs?: number
+  /** Failure cooldown for a catalogue request that sent no retry-after; defaults to 60 s. */
+  cacheRetryDelayMs?: number
+  /** Called once after a refresh stored a catalogue different from the previous one. */
+  onCatalogChanged?: (provider: string) => void
   /** How long this route may hold a turn open waiting for a rate-limit window; defaults to waiting on, six-hour ceiling. */
   rateLimit?: RateLimitWait
   /**
@@ -612,7 +618,7 @@ export class CopilotAdapter extends PoolBackedAdapter {
 
   constructor(private readonly options: CopilotAdapterOptions) {
     super(options)
-    this.catalogs = new ProviderCatalog(options, 'copilot', {
+    this.catalogs = new ProviderCatalog(options, 'copilot', 'copilot', {
       staticRows: provider => this.staticModels(provider),
       fetchCatalog: (account, signal) => this.fetchCatalog(account, signal),
       row: (provider, model) => this.listed(provider, model),
@@ -624,9 +630,12 @@ export class CopilotAdapter extends PoolBackedAdapter {
     return fetchCopilotModels(await this.options.tokens.session(account), this.options.fetchFn, signal)
   }
 
-  /** Drop cached catalogs after login/logout so the next list does not reuse a stale plan. */
+  /**
+   * Drop this account's cached catalogue, memory and disk, after login/logout or
+   * an identity change, so no read can serve the previous login's plan.
+   */
   clearAccountCatalog(account?: string): void {
-    this.catalogs.invalidate(account)
+    this.catalogs.clearAccountCatalog(account)
   }
 
   override providerInfo(provider: string): LlmProviderInfo {
@@ -658,19 +667,13 @@ export class CopilotAdapter extends PoolBackedAdapter {
   }
 
   /**
-   * The discovered entry for one model. Resolved through the cache's
-   * stale-while-revalidate path: capability metadata must stay stable across
-   * a long conversation — a mid-turn refetch must neither block nor fail the
-   * call before provider I/O.
+   * The known entry for one model, from the account caches only: capability
+   * metadata must stay stable across a long conversation — a mid-turn refetch
+   * must neither block nor fail the call before provider I/O.
    */
   private async discovered(model: string): Promise<DiscoveredModel | undefined> {
     if (!this.options.discovery) return undefined
-    const accounts = (await this.options.tokens.list()).map(entry => entry.key)
-    return discoverAcrossAccounts(accounts, async account => {
-      const catalog = await this.catalogs.cache(account)
-      const models = await catalog.resolve(() => this.fetchCatalog(account))
-      return models?.find(entry => entry.id === model)
-    })
+    return await this.catalogs.findModel(model)
   }
 
   /**

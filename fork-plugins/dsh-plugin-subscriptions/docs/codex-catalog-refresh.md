@@ -29,19 +29,21 @@ also describes a staged rollout; never synthesize access by adding a static row.
 - Optional plugin config `codexClientVersion` overrides automatic lookup, with
   validation; the version is sent only to the catalog endpoint. A manual model
   refresh also expires the version lookup cache. No CLI installation is needed.
-- Settings → Subscriptions → Default reasoning effort now has **Refresh model
-  lists (all subscriptions)**. Unlike a normal read, it invalidates all account
-  catalog caches, invalidates pool membership, and re-announces routes so the
-  conversation model picker also re-queries. It does not clear usage, health,
-  credentials or Copilot reasoning replay.
-- Ordinary reads retain the five-minute discovery cache. Existing non-empty
-  `models.<provider>` configurations still intentionally disable discovery.
+- **Edit model list → Refresh** forces a fresh catalogue for every account of
+  that provider (an ordinary read serves the per-account cache). It invalidates
+  pool membership and re-announces the route so the conversation model picker
+  also re-queries. It does not clear usage, health, credentials or Copilot
+  reasoning replay.
+- Ordinary reads answer from the per-account catalogue cache; the freshness
+  horizon is `cache.modelMaxAgeMs` (24 hours by default), and only an explicit
+  event refreshes a stale entry. Existing non-empty `models.<provider>`
+  configurations still intentionally disable discovery.
 
 ## Tests
 
 Offline regressions exercise the version-gated GPT-6 response, explicit version
-overrides, malformed-version rejection before fetch, all-account cache refresh
-within the TTL, and real plugin RPC wiring (force validation, adapter cache
+overrides, malformed-version rejection before fetch, forced all-account catalogue
+refresh, and real plugin RPC wiring (force validation, adapter cache
 invalidation and picker re-announcement). They do not claim live model execution
 or browser interaction coverage.
 

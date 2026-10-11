@@ -32,6 +32,21 @@ interface Options {
   settings: ProviderSettingsStore
   accounts: () => Promise<readonly { key: string; label: string }[]>
   pool: () => PoolAdapter | undefined
+  /**
+   * Resolve one account reference to the key the store holds it under now — the
+   * hook a renamed account needs, so an independent entry a session selected
+   * before the rename keeps resolving. Absent leaves the reference unchanged.
+   */
+  resolveAccount?: (account: string) => Promise<string>
+  /**
+   * Readiness gate every public read awaits first, so no policy or catalogue
+   * read happens under a key the auth store has already retired (see
+   * `reconcileStoredCodexAliases`). Deliberately not consulted by the pool-member
+   * seam: that seam is only reached from inside a stream that has already passed
+   * the gate, and awaiting it again there would let the one-time reconciliation
+   * wait on the very call it is preparing.
+   */
+  beforeRead?: () => Promise<void>
   /** Where a pool that owns no entry for a requested model is reported. */
   onWarn: (message: string) => void
 }
@@ -62,17 +77,27 @@ export class AccountPreferencesAdapter extends LlmAdapter {
     return await withTimeout(signal => this.options.adapter.listOwnModels(this.options.provider, account, signal), DISCOVERY_TIMEOUT_MS) ?? []
   }
   /**
-   * The rows an availability check reads. A capability question uses the
-   * adapter's advisory catalog read when it has one, inside one bound; a request
-   * about to be sent, and an adapter with no catalog of its own, read the
-   * listing freshly.
+   * The rows an availability check reads.
+   *
+   * A capability question answers from the caches alone. A request about to be
+   * sent first ENSURES the one account being validated — a single provider
+   * request when that account's catalogue is missing or stale, never one per
+   * peer — and then reads it; a failed ensure warns and falls through to the
+   * last-known rows and the built-in catalog, so an unreachable provider does
+   * not turn a selectable model into a refusal.
    * @param account - the account whose catalog is checked.
-   * @param requireFresh - true for a request about to be sent.
+   * @param requireFresh - true for the account a request is about to use.
    * @returns that account's rows, empty when the read was cancelled.
    */
   private async listed(account: string, requireFresh: boolean): Promise<readonly LlmModelInfo[]> {
     const adapter = this.options.adapter
-    const advisory = requireFresh ? undefined : adapter.resolveOwnCatalog?.bind(adapter)
+    if (requireFresh) {
+      await withTimeout(
+        async signal => { await adapter.refreshOwnCatalog?.(this.options.provider, account, { signal }) },
+        DISCOVERY_TIMEOUT_MS,
+      ).catch(() => undefined)
+    }
+    const advisory = adapter.resolveOwnCatalog?.bind(adapter)
     if (advisory === undefined) return await this.models(account)
     return await withTimeout(
       signal => advisory(this.options.provider, account, signal),
@@ -116,6 +141,11 @@ export class AccountPreferencesAdapter extends LlmAdapter {
    * cause and hint: a spent allowance or a parked account is temporary and
    * retryable, and reporting `NO_ADAPTER` for it would name an unavailable model
    * and discard the recovery instant the provider already disclosed.
+   *
+   * A candidate's usage floor is judged from what the pool already knows, except
+   * on the streaming path: `requireFresh` is this caller's statement that it is
+   * about to commit a request, which is what permits the one usage read per
+   * candidate considered. Listing or resolving a model reaches no usage endpoint.
    */
   private async fallback(model: string, requireFresh: boolean): Promise<string> {
     const pool = this.options.pool()
@@ -126,7 +156,9 @@ export class AccountPreferencesAdapter extends LlmAdapter {
       let listed = false
       try { await this.requireAccount(key, model, false, requireFresh); listed = true } catch { /* unavailable catalog */ }
       if (!listed) continue
-      const holdback = pool === undefined ? undefined : await pool.accountHoldback(this.options.provider, model, key)
+      const holdback = pool === undefined
+        ? undefined
+        : await pool.accountHoldback(this.options.provider, model, key, requireFresh)
       if (holdback !== undefined) { held.push(holdback); continue }
       return key
     }
@@ -149,8 +181,9 @@ export class AccountPreferencesAdapter extends LlmAdapter {
     const raw = this.options.adapter
     /**
      * The account one pool member resolves to. `requireFresh` follows the same
-     * split as {@link requireAccount}: capability resolution may answer from the
-     * last-known catalog, while a member about to stream validates freshly.
+     * split as {@link requireAccount}: capability resolution answers from the
+     * caches, while the member about to stream ensures its own catalogue once
+     * before the membership check.
      */
     const keyFor = async (account: string | undefined, model: string, requireFresh: boolean): Promise<string> => {
       if (model.startsWith(ACCOUNT_MODEL_PREFIX)) throw new LlmError('Independent entries cannot be pool members', 'NO_ADAPTER')
@@ -176,6 +209,7 @@ export class AccountPreferencesAdapter extends LlmAdapter {
     } })
   }
   override async listModels(provider: string): Promise<readonly LlmModelInfo[]> {
+    await this.ready()
     const result = new Map<string, LlmModelInfo>()
     const catalogs = await Promise.all((await this.options.accounts()).map(async account => ({ ...account, models: await this.models(account.key).catch(() => []) })))
     for (const { key, label, models } of catalogs) {
@@ -197,26 +231,42 @@ export class AccountPreferencesAdapter extends LlmAdapter {
     return [...result.values()].sort((left, right) => priority(left) - priority(right))
   }
   override async resolveModel(provider: string, id: string): Promise<LlmResolvedModelInfo> {
+    await this.ready()
     const independent = parseAccountModelId(id)
     if (independent) {
-      await this.requireAccount(independent.account, independent.model, true, false)
-      const info = await this.options.adapter.resolveOwnModel(provider, independent.model, independent.account)
-      const label = (await this.options.accounts()).find(entry => entry.key === independent.account)?.label ?? independent.account
-      return { ...info, id, name: `${this.preference(independent.account)?.alias || label} · ${info.name}` }
+      // A session may hold an id naming the key this account had before the
+      // store renamed it; resolve first, and report the resolved key's label.
+      const account = await this.resolved(independent.account)
+      await this.requireAccount(account, independent.model, true, false)
+      const info = await this.options.adapter.resolveOwnModel(provider, independent.model, account)
+      const label = (await this.options.accounts()).find(entry => entry.key === account)?.label ?? account
+      return { ...info, id, name: `${this.preference(account)?.alias || label} · ${info.name}` }
     }
     const pool = this.options.pool()
     if (pool && await pool.owns(this.options.provider, id)) return pool.resolveModel(provider, id)
     return this.options.adapter.resolveOwnModel(provider, id, await this.fallback(id, false))
   }
   async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
+    await this.ready()
     const independent = parseAccountModelId(options.model)
     if (independent) {
-      await this.requireAccount(independent.account, independent.model, true, true)
-      yield* this.options.adapter.streamAccount({ ...options, model: independent.model }, independent.account)
+      const account = await this.resolved(independent.account)
+      await this.requireAccount(account, independent.model, true, true)
+      yield* this.options.adapter.streamAccount({ ...options, model: independent.model }, account)
       return
     }
     const pool = this.options.pool()
     if (pool && await pool.owns(this.options.provider, options.model)) { yield* pool.stream(options); return }
     yield* this.options.adapter.streamAccount(options, await this.fallback(options.model, true))
+  }
+
+  /** Wait for the one-time account-rename reconciliation before reading state. */
+  private async ready(): Promise<void> {
+    await this.options.beforeRead?.()
+  }
+
+  /** One account reference as the store holds it now (the rename hook). */
+  private async resolved(account: string): Promise<string> {
+    return this.options.resolveAccount === undefined ? account : await this.options.resolveAccount(account)
   }
 }

@@ -6,9 +6,9 @@ This subtree carries the private `dsh-plugin-subscriptions` build shipped with t
 
 - Upstream repository: `https://github.com/V1ki/dsh-plugin-subscriptions.git`
 - Upstream tag: `v0.9.4`
-- Fork package version: `0.9.4-dsh017rc1.22`
+- Fork package version: `0.9.4-dsh017rc1.23`
 - Subtree path: `fork-plugins/dsh-plugin-subscriptions`
-- Distribution artifact: `fork-plugins/releases/dsh-plugin-subscriptions-0.9.4-dsh017rc1.22.tgz`
+- Distribution artifact: `fork-plugins/releases/dsh-plugin-subscriptions-0.9.4-dsh017rc1.23.tgz`
 
 ## Fork behavior
 
@@ -24,13 +24,27 @@ No Session event or Session format changes. Existing Codex, Claude, Grok, Copilo
 
 ### Advisory model resolution
 
-Model selection and capability resolution use the account's last-known catalog while a stale snapshot refreshes in the background. A cold catalog still awaits one bounded discovery attempt, and logout and account allowlists remain current checks. The streaming path validates catalog membership freshly before sending; explicit catalog listing and manual refresh still request fresh data. Only the default account's catalog is persisted, so other accounts may require an initial discovery after a restart.
+Model selection and capability resolution answer from the account's last-known catalogue. A read never starts a provider request, however cold or stale the entry is: an account with nothing stored contributes its static rows, and logout and account allowlists remain current checks. Only the account a request is about to use ensures its own catalogue; the explicitly requested reads (opening **Manage**, the manual refresh) are the separate events that may query. Every account persists its own catalogue, so a restart serves each login's last-known plan rather than only the default account's.
 
 Pool snapshots are scoped to the requested provider. Configured extra tier rows are read directly from configuration without discovering account catalogs; explicit cross-provider tiers remain owned by their first member's provider. Pool membership assembly uses the advisory account read, while request-time membership and quota checks remain separate.
 
-**Preservation rule.** Keep advisory resolution separate from fresh stream validation, scope pool assembly by provider, and do not turn an unavailable advisory result into a second discovery attempt. Do not assemble account pools merely to enumerate configured tier rows.
+**Preservation rule.** Keep advisory resolution separate from fresh stream validation, scope pool assembly by provider, and do not turn an unavailable advisory result into a second discovery attempt. Do not assemble account pools merely to enumerate configured tier rows, and do not let a capability, picker or ranking read start a provider request.
 
 **Focused verification.** `test/catalog-resolution-cost.spec.ts` checks deferred refreshes, cold reads, provider isolation, logout, configured-tier enumeration and actual plugin wiring without remote requests. `test/pool.spec.ts` checks configured tier ownership and precedence. The performance assertions use request counts and held promises rather than elapsed-time thresholds.
+
+### Demand-driven metadata caches
+
+Catalogue and usage metadata are durable per-account caches under `DSH_HOME/plugins/subscriptions/`: `models.json` (layout version 2, one entry per provider ACCOUNT, a failure hint beside the last good snapshot) and `usage-cache.json` (normalized windows with their observation times, the plan, and a read cooldown; no token, request id or provider message). `src/cache-policy.ts` resolves `cache.modelMaxAgeMs` (24 h), `cache.usageMaxAgeMs` (5 min) and `cache.retryDelayMs` (60 s) as freshness and cooldown thresholds; no duration schedules work. `src/providers/catalog-store.ts` and `src/providers/usage-store.ts` own the files, `src/providers/provider-catalog.ts` and `src/providers/pool-usage.ts` are their readers, and `src/client/subscriptions-cache.ts` is the one browser-side cache the usage badge and the Settings page share.
+
+Provider queries happen only on explicit events: a login refreshes that account's catalogue and no usage; opening **Manage** revalidates that provider's catalogues only where an entry is stale; **Edit model list → Refresh** forces every account's catalogue; opening the usage pill asks for an if-needed read of the current provider; the usage Refresh control forces one account's reading; a consumed Codex reset credit re-reads its account; the account a request is about to use ensures its own catalogue; and the pool candidate about to serve ensures its own catalogue and usage reading. A finished run, a window focus, a connection reset, a model switch, a login/logout roster change and the cache's seeding read for a new account are local reads (`readProvider` / `readAll` with mode `local`) and reach no provider. Pool ranking otherwise reads retained entries, so ranking never sweeps peer accounts. A failed read stores its cooldown — the provider's disclosed `retry-after` when there is one, else `cache.retryDelayMs` — in the same file, and `force` re-requests a fresh success without ever bypassing a live cooldown. `models.json` rows written before accounts were keyed are discarded rather than attributed, and a canonical-key rename moves the account's catalogue, usage reading, cooldowns, pool health and account preferences to the new key — whether the save announced it or the store only recorded the alias on an earlier run, which `src/providers/cache-identities.ts` reconciles from the store's own alias records once, before the model routes, speed, usage and providerSettings reads, and without any provider query.
+
+The remaining timers are protocol or local: the login-progress poll while an authorization attempt is in flight (it also observes the Copilot device grant), the credential-store lock lease renewal, the open usage panel's countdown render, and the opt-in Claude Code keychain sync. The browser half re-reads locally on a finished run, a window focus, a new connection generation, a model switch and a roster change, and every one of those reads answers from the node half's cache.
+
+**Preservation rule.** Keep every provider read on those events; add no interval, timer, or read path that refreshes peers. Keep the failure cooldown durable and unbypassable by `force`, keep the caches keyed by provider account, keep the load-time alias reconciliation ahead of the first account read, and keep the legacy-layout discard rather than guessing an owner.
+
+Known limitation: an HTTP 403/404 that might mean a model was withdrawn does not trigger an automatic catalogue re-read, because no trustworthy machine-readable code separates that from an entitlement or endpoint refusal; recovery is a manual **Refresh** or the ordinary stale-demand re-read.
+
+**Focused verification.** `test/cache-policy.spec.ts` pins the thresholds and rejects unusable durations. `test/cache-demand-rpc.spec.ts` mounts the real plugin and asserts that repeated listing, resolution, `providerSettings`, `usage` and `speed` reads contact no catalogue owner and no network, that a scoped `refresh` addresses only the requested provider, and that an ambiguous flag is rejected. `test/catalog-store.spec.ts`, the `usage store:` cases in `test/pool-usage.spec.ts` and `test/usage-cache.spec.ts` cover the two cache files and the browser half; `test/catalog-resolution-cost.spec.ts` and `test/pool-usage.spec.ts` cover an idle clock, `force` against a live cooldown, a cooldown outliving the process and a non-default account's catalogue surviving a reload; `test/account-rename.spec.ts` covers the rename follow-through and the stored-alias reconciliation at load; `test/subscription-client-runtime.spec.ts` mounts both client surfaces to prove no network timer is registered.
 
 ### One owner for the provider catalog and pool plumbing
 
@@ -51,10 +65,10 @@ ids.
 
 A catalogue entry the provider marks disabled stays listed, and its reason travels all the way to
 the surfaces that offer the row: `modelDisabledReason` in `provider-catalog.ts` reads the extension
-the adapters put on their rows, `index.ts` carries it into the `modelDefaults` rows and the
-`providerSettings` account rows, the settings model list prints the provider row's marker through
-`modelRowLabel`, and each account's own marker rides that account's pool checkbox on the same model
-row — both with the localized `modelsDisabled` copy. The harness `LlmModelInfo`
+the adapters put on their rows, `index.ts` carries it into the `providerSettings` account rows,
+the settings model list prints each account's own marker beside that account's pool checkbox on
+the model row, and `modelRowLabel` renders the marker for any row whose own source stated one —
+both through the localized `modelsDisabled` copy. The harness `LlmModelInfo`
 contract has no such field, so the plugin owns the extension and must route every reader through
 `modelDisabledReason` rather than re-casting.
 
@@ -66,9 +80,10 @@ picker component, and its locale dictionaries — and is not made from this subt
 
 **Preservation rule.** Re-apply the delegation after an upstream import, which would otherwise
 restore six copies; keep `clearAccountCatalog` and `resolveOwnModel` as real prototype methods
-on the adapters, because `test/model-defaults-rpc.spec.ts` and
-`test/provider-settings-rpc.spec.ts` patch `CodexAdapter.prototype.clearAccountCatalog` and
-`CodexAdapter.prototype.resolveOwnModel`; and keep `disabledReason` on both RPC payloads, because a
+on the adapters, because `test/provider-settings-rpc.spec.ts` patches
+`CodexAdapter.prototype.resolveOwnModel`, `listOwnModels` and `supportsFastTier`, and
+`test/catalog-resolution-cost.spec.ts` patches `resolveOwnCatalog` / `listOwnModels`; and keep the
+provider-disabled reason on the `providerSettings` account rows, because a
 row that loses it reads as an ordinary selectable model. Re-measure the duplication ratchet after
 any change here: `package.json`'s `duplication` script holds `packages`/`scripts` at zero and the
 plugin path at a threshold just above what remains. Measured on this jscpd build with this config,
@@ -107,7 +122,7 @@ takeover, run repeatedly because it is concurrent), and `test/account-preference
 
 ### Removed upstream indirection
 
-Four pieces of upstream code were removed here and must not come back through an upstream
+Five pieces of upstream code were removed here and must not come back through an upstream
 import; each was proven to add nothing before it was deleted.
 
 - The Claude `/fast` description wrapper (a module whose body only called the locale getter it
@@ -120,6 +135,11 @@ import; each was proven to add nothing before it was deleted.
 - The `pool.autoFamilies` alias, its schema entry, and the two fallbacks that read it. The
   fallbacks were unreachable (the sibling field defaults to true), so removing them preserves
   behaviour even for a configuration that set the alias.
+- The unscoped `modelDefaults` read endpoint and its `ModelDefaultView` /
+  `ModelDefaultsCatalog` payload types. Effort defaults are written by `setModelDefault` and read
+  with the `providerSettings` reply, so one settings read serves the editor;
+  `test/model-defaults-rpc.spec.ts` keeps the three writer cases and an absence case for the
+  removed endpoint.
 
 ### Claude wire (pinned Claude Code 2.1.288)
 
@@ -192,7 +212,7 @@ Files: `src/providers/cursor.ts`, `src/auth/store.ts` (`CursorSession`), `src/in
 - Login uses the browser handshake (`loginDeepControl` plus `POST /auth/poll`), then mints a user API key. Chat uses only that key. `dashboardAccessToken` and `dashboardRefreshToken` are a separate pair used only for usage. Accounts stored before those fields exist must log in again. Do not read the IDE `state.vscdb`, and do not refresh the IDE session.
 - Do not pass `systemPrompt` to `Agent.create`. This SDK rejects `--system-prompt`. Prefix system text onto the user prompt.
 - Send `tools: []` when the harness has no tools, and `tools: ['mcp']` when custom tools exist. An empty allowlist turns off the MCP group those tools belong to.
-- Usage calls `GetCurrentPeriodUsage` and `GetPlanInfo` with the dashboard JWT, on Claude's existing triggers only: the settings card appearing, a manual refresh, pool selection, and the composer badge's 15-minute read. No extra timer. Map `apiPercentUsed` to API and `autoPercentUsed` to Auto.
+- Usage calls `GetCurrentPeriodUsage` and `GetPlanInfo` with the dashboard JWT only on demand: the usage pill's if-needed read of the current provider, an explicit Refresh, the reset-card consume, and the pool's check of the candidate about to serve. A finished run, a focus, a roster change and a model switch read the local snapshot and reach no endpoint, and no timer exists. Map `apiPercentUsed` to API and `autoPercentUsed` to Auto.
 - Catalog parameters from `Cursor.models.list` are only `context`, `reasoning_effort`, `effort`, `reasoning`, `fast`, and `thinking`. The first reasoning-like id feeds the effort picker, `fast` feeds the speed toggle, and `context` is snapped to a catalog value and sent. `thinking` is sent as the catalog default and has no separate control.
 - Grok 4.7 advertises `context=500k`, and the local SDK registry rejects that value with `Invalid parameters for registry model`. The desktop app does not use this local path, so 500k works there. On that error, retry once with the next smaller context (`256k`) and remember the rejected value for the process. Keep the selected effort and fast. Do not switch the user onto the Auto router (`default`).
 - Assistant and thinking events arrive one token at a time. Keep one prose block open across consecutive events of the same kind. Closing a block per token makes the host render one token per line.
@@ -221,7 +241,7 @@ Files: `src/providers/codex.ts`, `src/auth/rpc.ts` (`resetCredits`, `consumeRese
 
 Files: `src/providers/pool.ts`, `pool-usage.ts`, `pool-scheduling.ts`, `src/index.ts`, and the matching pool tests. The README owns `pool.scheduling` defaults. Preserve bounded reset preferences for Claude and ChatGPT, ChatGPT finishing that fades the ample-quota baseline, a finite reset-card bonus, and hysteresis over the same load-adjusted score. Claude and ChatGPT enter the full-quota fallback band at 100%; automatic credit spending is separately opt-in.
 
-Selection and reservation are synchronous after quota reads. The account counter spans model pools in one Host and covers first-byte waits through iterator cleanup. Release on every outcome, keep visible streams on their original account, and retain the barriers in the concurrency tests. Expired windows stop contributing and refresh without turning stale endpoint responses into a polling loop. Keyless profile evidence lives in `snapshots/session/subscription-pool-routing`.
+Selection and reservation are synchronous after quota reads. The account counter spans model pools in one Host and covers first-byte waits through iterator cleanup. Release on every outcome, keep visible streams on their original account, and retain the barriers in the concurrency tests. Expired windows stop contributing and are re-read on the next demand, without turning stale endpoint responses into a polling loop. Keyless profile evidence lives in `snapshots/session/subscription-pool-routing`.
 
 ### Subscription network retries
 
@@ -312,7 +332,7 @@ The composer's model menu Speed row, the `/fast` popup and the Settings model li
 
 A stored `fast` the model cannot honour — a hand-edited file naming a plain model, or a catalog that stopped advertising the tier — stays stored and inert: `CodexAdapter.request`, `CursorAdapter.streamOwn` and `ClaudeAdapter.request` each short-circuit on their own capability before the wire field is built. `ClaudeAdapter.request` passes the surviving tier to `buildClaudeWireRequest`, and `claudeSpeedField` emits `speed: 'fast'` or omits the field: Standard is the field's absence, never a `"standard"` literal. The pinned builder pushes `fast-mode-2026-02-01` from that same field inside `composeBetas`, so nothing else on this route may name the beta or pass it as an additional beta — one field, one composition.
 
-`SpeedSelect` renders the composer's one Speed control: a row contributed to the model menu, under the seat's model and effort cells. It registers into `conversation.input.model.row`, the additive child slot the `conversation.input.model` seat declares in `packages/client/ui-model-selection` (the seat itself stays single-owner; the key is declared in `packages/client/ui-conversation`'s contract, which is why the plugin needs no new dependency). It decides visibility from `FAST_TIER_PROVIDERS` and the node half's fast-capable listing (`speedControlVisible`), and stamps every read of the host state with the choice generation it started under (`settleRead`/`settleChoice`). The poll asks the node half to enumerate fast models and the host for the session's model, so its read is slower than the write it can race: without the stamp a read started before a choice settles after it and puts the replaced tier back on screen. The Settings model list reads the same store, and a row carries `fastTier` so the picker appears exactly where a chosen fast can reach the wire. A `speed` RPC enumerates only its requested provider, and the client skips that RPC for providers without a speed control; unrelated provider discovery must not delay the control.
+`SpeedSelect` renders the composer's one Speed control: a row contributed to the model menu, under the seat's model and effort cells. It registers into `conversation.input.model.row`, the additive child slot the `conversation.input.model` seat declares in `packages/client/ui-model-selection` (the seat itself stays single-owner; the key is declared in `packages/client/ui-conversation`'s contract, which is why the plugin needs no new dependency). It decides visibility from `FAST_TIER_PROVIDERS` and the node half's fast-capable listing (`speedControlVisible`), and stamps every read of the host state with the choice generation it started under (`settleRead`/`settleChoice`). The read asks the node half to enumerate fast models and the host for the session's model, so it is slower than the write it can race: without the stamp a read started before a choice settles after it and puts the replaced tier back on screen. The Settings model list reads the same store, and a row carries `fastTier` so the picker appears exactly where a chosen fast can reach the wire. A `speed` RPC enumerates only its requested provider, and the client skips that RPC for providers without a speed control; unrelated provider discovery must not delay the control.
 
 **Preservation rule.** Keep the tier durable and keyed by provider model, in one document with the effort defaults and behind one write chain. Keep the speed read provider-scoped and the client provider check before the RPC; `test/speed-control.spec.ts` rejects both cross-provider enumeration and RPCs for unsupported providers. Keep each route's `supportsFastTier` reading its own source — the pinned profile for Claude, the live catalog for Codex and Cursor — rather than a shared list, and keep the capability check inside the adapter that builds the request rather than only at the wiring, so no caller can send a tier its catalog does not advertise. Keep `speed` out of the body on Standard, and leave beta composition to the pinned builder. Keep one Speed control: the model-menu row, never a second control in the composer tool row — the chip this row replaced showed the same setting twice. Keep the harness's `conversation.input.model.row` child declaration (`packages/client/ui-model-selection`'s seat registration + the contract key in `packages/client/ui-conversation` + the `renderSlot` call in `ModelSelect`): dropping any of the three strands the row. This package also mirrors that key in `src/client/index.ts`, because the installed `@deepseek-ai/dsh-client-ui-conversation` `0.1.7-rc.1` contract predates it and `tsc` resolves the registry copy; keep the mirror until a contract declares the same shape. `scripts/fork-profile-setup.spec.ts` compares that declaration with the owning fork contract; both must remain identical, and a clean locked install must build without replacing installed dependency files. An upstream import restores a process-local per-session map, drops the capability short-circuit, restores the codex/cursor-only visibility gate, drops the generation stamp, and hides the control while a stored tier stands.
 
@@ -336,7 +356,11 @@ The `/fast` popup and the composer's model-menu Speed row both settle a picked t
 
 ## Verification and packaging
 
-Build the Harness from the repository root first with `pnpm run build`. The fork compiler resolves the LLM and attachment declarations from that build; `test/isolate-home.mjs` selects the repository TypeScript paths before the ESM-only test hook loads. Run the following from this directory:
+Build the Harness from the repository root first with `pnpm run build`. The fork compiler resolves the LLM and attachment declarations from that build; `test/isolate-home.mjs` selects the repository TypeScript paths before the ESM-only test hook loads.
+
+The canonical launcher is this package's `test` script: `tsc -p tsconfig.test.json && node --import ./test/isolate-home.mjs --import tsx/esm --test "lib-test/test/**/*.spec.js"`. `isolate-home.mjs` points `TSX_TSCONFIG_PATH` at the client solution config, pins `react`/`react-dom` to the workspace `packages/client/ui-primitives` copy so the plugin and the workspace primitives share one renderer identity in Node, and gives the process a private temporary `DSH_HOME` that it removes on exit. The package compiles JSX through its own `react-jsx` setting, `jsdom` 29.1.1, `@types/jsdom` and the `@deepseek-ai/dsh-client-store` type dependency are declared `devDependencies` and mirrored in the external lockfile, so the client specs need no dependency install and no checkout mutation; the client-runtime spec imports `jsdom` directly, so a missing DOM fixture fails there instead of passing silently. The suite's only conditional skip states its reason in `test/login.spec.ts` (a macOS Keychain entry shadows the credentials file).
+
+Run the following from this directory:
 
 ```powershell
 corepack pnpm@10.30.2 install --frozen-lockfile --ignore-scripts --ignore-workspace

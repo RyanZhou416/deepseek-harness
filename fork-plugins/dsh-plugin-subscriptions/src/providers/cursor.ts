@@ -34,7 +34,6 @@ import type { CursorSession } from '../auth/store.js'
 import { resolveImages } from '../translate/resolved.js'
 import type { AttachmentStore } from '@deepseek-ai/dsh-attachment'
 import {
-  discoverAcrossAccounts,
   effortDisplayName,
   idleWatchdog,
   mergeReasoning,
@@ -42,7 +41,14 @@ import {
   oauthEndpointError,
   mapFetchFailure,
 } from './common.js'
-import type { CatalogPersistence, DiscoveredModel, FetchFn, ModelEntry, ProviderUsage, UsageWindow } from './common.js'
+import type {
+  CatalogStoreFactory,
+  DiscoveredModel,
+  FetchFn,
+  ModelEntry,
+  ProviderUsage,
+  UsageWindow,
+} from './common.js'
 import { ProviderCatalog, catalogRow } from './provider-catalog.js'
 import { PoolBackedAdapter } from './pool-delegation.js'
 import { proxiedFetch } from '../http.js'
@@ -493,7 +499,13 @@ interface CursorAdapterOptions {
   discovery: boolean
   onWarn?: (message: string) => void
   resolveAttachments?: () => AttachmentStore | undefined
-  catalogStore?: CatalogPersistence
+  catalogStore?: CatalogStoreFactory
+  /** How long a stored catalogue is trusted before an explicit refresh may replace it; defaults to 24 h. */
+  catalogMaxAgeMs?: number
+  /** Failure cooldown for a catalogue request that sent no retry-after; defaults to 60 s. */
+  cacheRetryDelayMs?: number
+  /** Called once after a refresh stored a catalogue different from the previous one. */
+  onCatalogChanged?: (provider: string) => void
   rateLimit?: RateLimitWait
   defaultEffortOf?: (model: string) => string | undefined
   /** Local context-window override from Settings. Capped by the catalog maximum. */
@@ -521,7 +533,7 @@ export class CursorAdapter extends PoolBackedAdapter {
 
   constructor(private readonly options: CursorAdapterOptions) {
     super(options)
-    this.catalogs = new ProviderCatalog(options, 'cursor', {
+    this.catalogs = new ProviderCatalog(options, 'cursor', 'cursor', {
       staticRows: provider => this.staticModels(provider),
       fetchCatalog: (account, signal) => this.fetchCatalog(account, signal),
       row: (provider, model) => this.listed(provider, model),
@@ -540,9 +552,12 @@ export class CursorAdapter extends PoolBackedAdapter {
     )
   }
 
-  /** Drop cached catalogs after login/logout so the next list does not reuse a stale plan. */
+  /**
+   * Drop this account's cached catalogue, memory and disk, after login/logout or
+   * an identity change, so no read can serve the previous login's plan.
+   */
   clearAccountCatalog(account?: string): void {
-    this.catalogs.invalidate(account)
+    this.catalogs.clearAccountCatalog(account)
   }
 
   async resolveOwnModel(provider: string, model: string): Promise<LlmResolvedModelInfo> {
@@ -578,27 +593,11 @@ export class CursorAdapter extends PoolBackedAdapter {
     return (await this.discovered(model, account))?.fastTier === true
   }
 
-  /** Ids of every discovered model with a `fast` parameter. */
+  /** Ids of every known model with a `fast` parameter. Cache-only. */
   async fastCapableModels(): Promise<string[]> {
     if (!this.options.discovery) return []
-    const accounts = (await this.options.tokens.list()).map(entry => entry.key)
-    if (accounts.length === 0) return []
-    const seen = new Set<string>()
-    const ids: string[] = []
-    for (const account of accounts) {
-      try {
-        const catalog = await this.catalogs.cache(account)
-        const models = await catalog.resolve(() => this.fetchCatalog(account))
-        for (const model of models ?? []) {
-          if (model.fastTier !== true || seen.has(model.id)) continue
-          seen.add(model.id)
-          ids.push(model.id)
-        }
-      } catch {
-        // One account's catalog must not hide the others.
-      }
-    }
-    return ids
+    if ((await this.options.tokens.list()).length === 0) return []
+    return await this.catalogs.fastTierIds()
   }
 
   protected streamOwn(options: GenerateOptions, account?: string): AsyncIterable<StreamChunk> {
@@ -818,16 +817,10 @@ export class CursorAdapter extends PoolBackedAdapter {
     return models
   }
 
+  /** The known entry for one model, from the account caches only. */
   private async discovered(model: string, account?: string): Promise<DiscoveredModel | undefined> {
     if (!this.options.discovery) return undefined
-    const accounts = account === undefined
-      ? (await this.options.tokens.list()).map(entry => entry.key)
-      : [account]
-    return discoverAcrossAccounts(accounts, async account => {
-      const catalog = await this.catalogs.cache(account)
-      const models = await catalog.resolve(() => this.fetchCatalog(account))
-      return models?.find(entry => entry.id === model)
-    })
+    return await this.catalogs.findModel(model, account)
   }
 }
 

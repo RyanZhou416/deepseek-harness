@@ -310,9 +310,9 @@ test('usage endpoint: provider without a usage fetcher answers supported:false',
   assert.deepEqual(result, { ok: true, value: { supported: false } })
 })
 
-test('usage endpoint: logged-out provider answers an error result', async () => {
+test('usage endpoint: explicitly refreshing a logged-out provider answers an error result', async () => {
   const handler = await mount()
-  const result = await handler('usage', { provider: 'codex', account: 'a1' }, new AbortController().signal)
+  const result = await handler('usage', { provider: 'codex', account: 'a1', refresh: true }, new AbortController().signal)
   assert.equal(result.ok, false)
   if (!result.ok) {
     assert.equal(result.error.code, 'internal')
@@ -358,10 +358,14 @@ test('usage(): delegates to the pool usage cache, which withholds retries throug
     new OAuthFlowManager(), new DeviceFlowManager(), () => {}, () => undefined,
     { codex: unreachableFetcher }, undefined, poolUsage,
   )
-  await assert.rejects(controller.usage('codex', 'a1', new AbortController().signal), error)
+  assert.equal((await controller.usage('codex', 'a1', new AbortController().signal)).cache?.state, 'missing')
+  assert.equal(calls, 0, 'a missing snapshot is still a local read')
+  const failed = await controller.usage('codex', 'a1', new AbortController().signal, false, true)
+  assert.equal(failed.cache?.state, 'error')
+  assert.equal(failed.cache?.error, 'rate_limited')
   assert.equal(calls, 1)
-  await assert.rejects(controller.usage('codex', 'a1', new AbortController().signal), error)
-  assert.equal(calls, 1, 'a second call inside the retry-after window must not hit the network again')
+  await controller.usage('codex', 'a1', new AbortController().signal, true)
+  assert.equal(calls, 1, 'a manual refresh also honors the retry-after window')
 })
 
 test('usage(): a manual (forced) refresh bypasses a fresh cached snapshot, not a live cooldown', async () => {
@@ -373,14 +377,14 @@ test('usage(): a manual (forced) refresh bypasses a fresh cached snapshot, not a
     new OAuthFlowManager(), new DeviceFlowManager(), () => {}, () => undefined,
     { codex: unreachableFetcher }, undefined, poolUsage,
   )
-  await controller.usage('codex', 'a1', new AbortController().signal)
+  await controller.usage('codex', 'a1', new AbortController().signal, false, true)
   await controller.usage('codex', 'a1', new AbortController().signal)
   assert.equal(calls, 1, 'a plain call reuses the fresh cache')
   await controller.usage('codex', 'a1', new AbortController().signal, true)
   assert.equal(calls, 2, 'a forced call re-checks despite the fresh cache')
 })
 
-test('usage(): with no pool tracker (pool disabled), every call hits the raw fetcher directly', async () => {
+test('usage(): disabling the pool still leaves display reads behind the shared cache', async () => {
   let calls = 0
   const controller = new SubscriptionsAuthController(
     new OAuthFlowManager(), new DeviceFlowManager(), () => {}, () => undefined,
@@ -388,7 +392,11 @@ test('usage(): with no pool tracker (pool disabled), every call hits the raw fet
   )
   await controller.usage('codex', 'a1', new AbortController().signal)
   await controller.usage('codex', 'a1', new AbortController().signal)
-  assert.equal(calls, 2, 'unchanged prior behavior when the pool usage cache is unavailable')
+  assert.equal(calls, 0, 'display reads never bypass the cache when the pool is disabled')
+  await controller.usage('codex', 'a1', new AbortController().signal, false, true)
+  assert.equal(calls, 1)
+  await controller.usage('codex', 'a1', new AbortController().signal)
+  assert.equal(calls, 1, 'the controller retains the scoped refresh for later display reads')
 })
 
 // ---------------------------------------------------------------------------
@@ -417,7 +425,9 @@ test('usage(): appends the captured rate-limit report and the pool view, keeping
       ? { peerAvailable: true, coolingUntil: 2_000, coolingReason: 'quota' }
       : undefined,
   )
-  assert.deepEqual(await controller.usage('claude', 'a1', new AbortController().signal), {
+  const { cache, ...result } = await controller.usage('claude', 'a1', new AbortController().signal, false, true)
+  assert.equal(cache?.state, 'fresh')
+  assert.deepEqual(result, {
     supported: true,
     plan: 'max',
     windows: [{ kind: 'session', usedPercent: 100 }],
@@ -433,5 +443,7 @@ test('usage(): omits both attribution fields when nothing was captured and no po
     new OAuthFlowManager(), new DeviceFlowManager(), () => {}, () => undefined,
     { claude: async () => reported },
   )
-  assert.deepEqual(await controller.usage('claude', 'a1', new AbortController().signal), reported)
+  const { cache, ...result } = await controller.usage('claude', 'a1', new AbortController().signal, false, true)
+  assert.equal(cache?.state, 'fresh')
+  assert.deepEqual(result, reported)
 })

@@ -5,6 +5,12 @@
  * own. Section copy rides the client locale service: one 'settings.subscriptions'
  * namespace with zh/en dictionaries, rebound per read so the nav label and
  * page text follow the active locale.
+ *
+ * The browser half builds ONE subscription cache per plugin application and
+ * hands the same one to every contribution that shows usage, so the composer
+ * badge and the Settings page never run one identical read loop each. The
+ * cache reaches components only through the inject `hooks` compartment, which
+ * the renderer binds to `use<Name>` selector hooks.
  */
 // Type-only: pulls the `ctx.slots` Context merge (dsh-client-runtime owned it
 // on rc.2; ui-renderer's augmentation carries it on the 0.1.2-alpha line).
@@ -19,21 +25,27 @@ import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
 import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
 // Type-only: pulls the locale plugin's Context merge (ctx.locale).
 import type {} from '@deepseek-ai/dsh-client-locale/client'
+// Type-only: pulls the Connection plugin's `connection/reset` Events merge.
+import type {} from '@deepseek-ai/dsh-client-connection/client'
 // Type-only: the slash-command registry contract (the /fast contribution).
 import type { CommandUiContract } from '@deepseek-ai/dsh-client-ui-commands/client'
 // `.js` extension: this package's tsconfig lacks the reference repo's
 // allowImportingTsExtensions/rewriteRelativeImportExtensions pair; under
 // nodenext the .js specifier resolves to the .tsx source (see README note).
 import { SubscriptionsSection } from './SubscriptionsSection.js'
-import type { SubscriptionsSectionInjected } from './SubscriptionsSection.js'
+import type { SubscriptionsSectionInjected, SubscriptionProvider } from './SubscriptionsSection.js'
 import { ImageGenerateToolview, createImageLoader } from './ImageGenerateToolview.js'
 import type { ImageGenerateToolviewInjected } from './ImageGenerateToolview.js'
 import { VideoGenerateToolview, createVideoLoader } from './VideoGenerateToolview.js'
 import type { VideoGenerateToolviewInjected } from './VideoGenerateToolview.js'
-import { SpeedSelect, createSpeedLoader, createSpeedSetter, settleSpeedTier } from './SpeedSelect.js'
-import type { ModelDirectoriesLike, SpeedSelectInjected } from './SpeedSelect.js'
-import { SubscriptionUsageBadge, createCurrentModelReader } from './SubscriptionUsageBadge.js'
+import {
+  SpeedSelect, createSpeedLoader, createSpeedSetter, modelSelectionSource, resolveCurrentModel, settleSpeedTier,
+} from './SpeedSelect.js'
+import type { ModelDirectoriesLike, ModelDirectoryLike, ModelRef, SpeedSelectInjected, SpeedTier } from './SpeedSelect.js'
+import { SubscriptionUsageBadge } from './SubscriptionUsageBadge.js'
 import type { SubscriptionUsageBadgeInjected } from './SubscriptionUsageBadge.js'
+import { createSubscriptionsCache } from './subscriptions-cache.js'
+import type { ObservableSnapshot } from './subscriptions-cache.js'
 import { en, zh } from './locales.js'
 import type { SubscriptionsKey } from './locales.js'
 
@@ -96,7 +108,78 @@ export function apply(ctx: ClientContext): void {
   // browser shell the same key holds the full client ConnectionHandle.
   const connection = ctx.get('connection') as unknown as ConnectionHandle
   const t = ctx.locale.bind(NS) as SubscriptionsSectionInjected['t']
-  const injected = (): SubscriptionsSectionInjected => ({ rpc: connection.rpc, t })
+  /**
+   * Sessions a rendered slot contribution currently holds a model source for,
+   * with how many surfaces bind it. A forwarded Host event addresses only these;
+   * the entry appears with the first subscription and leaves with the last.
+   */
+  const active = new Map<string, { directory: ModelDirectoryLike; bindings: number }>()
+  // The /fast command entry point is the one model consumer with no slot scope;
+  // it resolves the service per invocation so registration order never matters.
+  const models = (): ModelDirectoriesLike | undefined =>
+    ctx.get('modelDirectories') as ModelDirectoriesLike | undefined
+  // The one cache this plugin application shares: created here, handed to every
+  // contribution below, and torn down with this fiber.
+  const cache = createSubscriptionsCache(connection.rpc)
+  ctx.effect(() => () => cache.dispose(), 'dsh-plugin-subscriptions: shared usage cache')
+  // A new connection generation's Host knows nothing the previous one answered:
+  // forget the old roster and entries first, then read the new Host's roster.
+  ctx.on('connection/reset', () => {
+    cache.reset()
+    void cache.readStatus({ fresh: true })
+  })
+  /**
+   * Coalesce a burst of equal-signal events into one local roster read: a login
+   * or logout made in another client, or a credential store change, arrives as
+   * several forwarded events at once.
+   */
+  let rosterQueued = false
+  const readRosterSoon = (): void => {
+    if (rosterQueued) return
+    rosterQueued = true
+    queueMicrotask(() => {
+      rosterQueued = false
+      void cache.readStatus()
+    })
+  }
+  // A finished run is the moment the host's usage numbers move while nothing in
+  // the UI asked for them. `api-session/status` is the same forwarded event
+  // ui-session consumes; only the true→false edge reads, and the read targets
+  // the provider behind that session's current model. Credential changes are the
+  // other source: a login or logout elsewhere must reach this page without
+  // waiting for a window focus.
+  //
+  // Both listeners address only sessions the composer already holds a rendered
+  // slot binding for. Resolving a directory for an arbitrary forwarded session
+  // id would both throw for an unknown one and create directories for sessions
+  // no client surface ever opened.
+  ctx.inject(['remote'], (scope: ClientContext) => {
+    const running = new Map<string, boolean>()
+    scope.effect(() => {
+      const stopStatus = scope.remote.$on('api-session/status', (sessionId: string, isRunning: boolean) => {
+        const previous = running.get(sessionId)
+        running.set(sessionId, isRunning)
+        if (previous !== true || isRunning) return
+        const provider = active.get(sessionId)?.directory.store.getSnapshot().current?.provider
+        if (provider !== undefined) void cache.readProvider(provider as SubscriptionProvider, 'local')
+      })
+      const stopCredentials = scope.remote.$on('credentials/reference-updated', () => { readRosterSoon() })
+      const stopAdapters = scope.remote.$on('llm/adapters-updated', () => { readRosterSoon() })
+      return () => {
+        stopStatus()
+        stopCredentials()
+        stopAdapters()
+        running.clear()
+      }
+    }, 'dsh-plugin-subscriptions: host-event usage reads')
+  })
+  const injected = (): SubscriptionsSectionInjected => ({
+    rpc: connection.rpc,
+    t,
+    readStatus: options => cache.readStatus(options),
+    readUsage: (provider, account, mode) => cache.readUsage(provider, account, mode),
+    hooks: { usage: cache.source },
+  })
   ctx.slots.inject('settings.section', () => ctx.slots.register({
     name: 'settings.section',
     id: 'subscriptions',
@@ -131,38 +214,53 @@ export function apply(ctx: ClientContext): void {
   // effort cells, so one setting has one control: ui-model-selection declares
   // `conversation.input.model.row` as an additive child of its `conversation.input.model`
   // seat, and this contribution renders the row. The framework synthesizes its `t` seat
-  // from `locale: NS`, and the inject face binds each session's RPC calls. The row hides
-  // itself for models whose catalog advertises no fast tier. The current-model read rides
-  // ui-model-selection's `modelDirectories` service, resolved lazily so registration order
-  // never matters.
-  const models = (): ModelDirectoriesLike | undefined =>
-    ctx.get('modelDirectories') as ModelDirectoriesLike | undefined
-  ctx.slots.inject('conversation.input.model.row', () => ctx.slots.register({
-    name: 'conversation.input.model.row',
-    id: 'codex-speed',
-    order: 0,
-    locale: NS,
-    inject: (sessionId: string): SpeedSelectInjected => ({
-      loadSpeed: createSpeedLoader(connection.rpc, models, sessionId),
-      setSpeed: createSpeedSetter(connection.rpc, models, sessionId),
-    }),
-  }, SpeedSelect))
+  // from `locale: NS`. The row hides itself for models whose catalog advertises no fast
+  // tier. Both model-facing contributions wait for the model-selection service
+  // itself, so a directory registered after this plugin still owns the sources
+  // they bind — there is no "absent" model source to fall back to.
+  ctx.inject(['slots', 'modelDirectories'], (scope: ClientContext) => {
+    const directories = scope.get('modelDirectories') as ModelDirectoriesLike
+    /** The tracked model source for one session's rendered contribution. */
+    const sourceFor = (sessionId: string): ObservableSnapshot<ModelRef | null> => {
+      const directory = directories.directoryFor(sessionId)
+      return retainedModelSource(sessionId, directory, active)
+    }
+    scope.slots.inject('conversation.input.model.row', () => scope.slots.register({
+      name: 'conversation.input.model.row',
+      id: 'codex-speed',
+      order: 0,
+      locale: NS,
+      inject: (sessionId: string): SpeedSelectInjected => ({
+        loadSpeed: createSpeedLoader(connection.rpc),
+        setSpeed: createSpeedSetter(connection.rpc),
+        hooks: { model: sourceFor(sessionId) },
+      }),
+    }, SpeedSelect))
 
-  // The subscription usage badge renders a stats pill in the composer's dock
-  // (conversation.composer.dock) — collapsed, the current model's provider
-  // (e.g. "Codex 6d1h 25%"); clicking opens every provider's windows. A fresh
-  // id means it appears beside the shipped StatsPills, never replacing them;
-  // the current-model read shares the Speed toggle's `modelDirectories` path.
-  ctx.slots.inject('conversation.composer.dock', () => ctx.slots.register({
-    name: 'conversation.composer.dock',
-    id: 'subscription-usage',
-    order: 10,
-    locale: NS,
-    inject: (sessionId: string): SubscriptionUsageBadgeInjected => ({
-      rpc: connection.rpc,
-      currentModel: createCurrentModelReader(models, sessionId),
-    }),
-  }, SubscriptionUsageBadge))
+    // The subscription usage badge renders a stats pill in the composer's dock
+    // (conversation.composer.dock) — collapsed, the current model's provider
+    // (e.g. "Codex 6d1h 25%"); clicking opens every provider's windows. A fresh
+    // id means it appears beside the shipped StatsPills, never replacing them;
+    // the current-model read shares the Speed row's model-selection source, and
+    // the usage entries come from the application's shared cache.
+    scope.slots.inject('conversation.composer.dock', () => scope.slots.register({
+      name: 'conversation.composer.dock',
+      id: 'subscription-usage',
+      order: 10,
+      locale: NS,
+      inject: (sessionId: string): SubscriptionUsageBadgeInjected => ({
+        rpc: connection.rpc,
+        readStatus: () => cache.readStatus(),
+        readUsage: (provider, account, mode) => cache.readUsage(provider, account, mode),
+        readProvider: (provider, mode) => cache.readProvider(provider, mode),
+        readAll: mode => cache.readAll(mode),
+        hooks: {
+          usage: cache.source,
+          model: sourceFor(sessionId),
+        },
+      }),
+    }, SubscriptionUsageBadge))
+  })
 
   // The /fast slash command offers the same Standard/Fast choice as a popup.
   // `available` is synchronous and sees only the session id, so the command
@@ -181,7 +279,10 @@ export function apply(ctx: ClientContext): void {
       ui: {
         kind: 'popupSelect',
         options: async (session) => {
-          const state = await createSpeedLoader(connection.rpc, models, session.sessionId)()
+          // A command entry point owns no slot hook, so it resolves the
+          // session's model once through the directory's explicit read.
+          const current = await resolveCurrentModel(models, session.sessionId)
+          const state = await createSpeedLoader(connection.rpc)(current)
           if (!state.visible) throw new Error(t('commandFastUnavailable'))
           return ([
             { id: 'standard', label: t('speedStandard'), detail: t('speedStandardDescription') },
@@ -191,9 +292,50 @@ export function apply(ctx: ClientContext): void {
         // This entry point owns no notice surface of its own, so a false answer
         // has to fail the selection: the shell states a settlement failure
         // through its own error strip.
-        onSelect: (option, session) =>
-          settleSpeedTier(createSpeedSetter(connection.rpc, models, session.sessionId), option.id as 'standard' | 'fast', t),
+        onSelect: async (option, session) => {
+          const current = await resolveCurrentModel(models, session.sessionId)
+          if (current === null) throw new Error(t('commandFastUnavailable'))
+          await settleSpeedTier(createSpeedSetter(connection.rpc), current, option.id as SpeedTier, t)
+        },
       },
     }), 'dsh-plugin-subscriptions: /fast contribution')
   })
+}
+
+/**
+ * Wrap one session's model source so its bound lifetime is visible to the
+ * plugin: the entry appears with the first subscriber (a mounted slot
+ * contribution) and leaves with the last one. A forwarded Host event reads the
+ * provider through this registry instead of resolving a directory for a session
+ * id no surface ever opened.
+ * @param sessionId - the owning session.
+ * @param directory - the session's shared model directory.
+ * @param active - the plugin's registry of bound sessions.
+ * @returns the model source for the inject hooks compartment.
+ */
+function retainedModelSource(
+  sessionId: string,
+  directory: ModelDirectoryLike,
+  active: Map<string, { directory: ModelDirectoryLike; bindings: number }>,
+): ObservableSnapshot<ModelRef | null> {
+  const source = modelSelectionSource(directory)
+  return {
+    getSnapshot: () => source.getSnapshot(),
+    subscribe: (listener) => {
+      const stop = source.subscribe(listener)
+      const entry = active.get(sessionId)
+      if (entry === undefined) active.set(sessionId, { directory, bindings: 1 })
+      else entry.bindings += 1
+      let released = false
+      return () => {
+        if (released) return
+        released = true
+        stop()
+        const current = active.get(sessionId)
+        if (current === undefined) return
+        if (current.bindings > 1) current.bindings -= 1
+        else active.delete(sessionId)
+      }
+    },
+  }
 }

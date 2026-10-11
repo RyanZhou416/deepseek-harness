@@ -30,6 +30,7 @@ function harness(options: {
   const removed: string[] = []
   const notified: string[] = []
   const refreshes: string[] = []
+  const renames: [string, string][] = []
   const tokens = new AccountTokenManager<TestSession>({
     provider: 'codex' as ProviderId,
     displayName: 'Test',
@@ -45,6 +46,10 @@ function harness(options: {
     onAccountRemoved: (account) => {
       notified.push(account)
     },
+    onAccountRenamed: (from, to) => {
+      renames.push([from, to])
+      return Promise.resolve()
+    },
     io: {
       list: () => Promise.resolve([...stored.entries()].map(([key, s]) => ({ key, session: s }) as AccountEntry<TestSession>)),
       get: account => Promise.resolve(account === undefined ? stored.values().next().value : stored.get(account)),
@@ -59,7 +64,38 @@ function harness(options: {
       },
     },
   })
-  return { tokens, stored, removed, notified, refreshes }
+  return { tokens, stored, removed, notified, refreshes, renames }
+}
+
+/**
+ * An in-memory store that models the store's own rekey: saving under `legacy`
+ * moves that entry to `canonical` and records the alias, so `resolve` answers
+ * the retired key with the canonical one only after that save. `events` records
+ * the save and, from the caller's hook, the move.
+ */
+function renamingStore(initial: TestSession) {
+  const stored = new Map<string, TestSession>([['legacy', initial]])
+  const events: string[] = []
+  let renamed = false
+  const target = (key: string | undefined): string => renamed && key === 'legacy' ? 'canonical' : key ?? 'canonical'
+  return {
+    stored,
+    events,
+    io: {
+      list: () => Promise.resolve([...stored.entries()].map(([key, s]) => ({ key, session: s }) as AccountEntry<TestSession>)),
+      get: (key?: string) => Promise.resolve(stored.get(target(key)) ?? stored.get('legacy')),
+      save: (key: string, value: TestSession) => {
+        events.push('save')
+        if (key === 'legacy') renamed = true
+        const to = target(key)
+        if (to !== key) stored.delete(key)
+        stored.set(to, value)
+        return Promise.resolve()
+      },
+      remove: (key: string) => { stored.delete(key); return Promise.resolve() },
+      resolve: (key: string) => Promise.resolve(target(key)),
+    },
+  }
 }
 
 test('session() without an account serves the default (first) account', async () => {
@@ -122,6 +158,105 @@ test('legacy and canonical keys share one in-flight refresh', async () => {
   assert.equal(calls, 1)
   assert.deepEqual([legacy.accessToken, canonical.accessToken, defaultSession.accessToken], ['new', 'new', 'new'])
   assert.equal(stored.has('canonical'), true)
+})
+
+test('a refresh that renames the account key moves that account before the manager re-binds', async () => {
+  const created: string[] = []
+  const renames: [string, string][] = []
+  const refreshes: string[] = []
+  const store = renamingStore(session('legacy', 1000))
+  let creationsWhileRenaming = -1
+  const tokens = new AccountTokenManager<TestSession>({
+    provider: 'codex',
+    displayName: 'Test',
+    makeOptions: account => {
+      created.push(account)
+      return {
+        preemptMs: 60_000,
+        refresh: async (current) => {
+          refreshes.push(account)
+          return { ...current, accessToken: `${current.accessToken}-new`, expiresAt: Date.now() + 3_600_000 }
+        },
+        isPermanent: () => false,
+      }
+    },
+    onAccountRenamed: async (from, to) => {
+      store.events.push('rename')
+      renames.push([from, to])
+      // Reading the old key here must reuse the installed manager: the move
+      // runs before the binding changes.
+      tokens.tokensFor(from)
+      creationsWhileRenaming = created.length
+    },
+    io: store.io,
+  })
+  const refreshed = await tokens.session('legacy')
+  assert.equal(refreshed.accessToken, 'legacy-new')
+  assert.deepEqual(store.events, ['save', 'rename'], 'the durable save lands before the move')
+  assert.deepEqual(renames, [['legacy', 'canonical']])
+  assert.equal(creationsWhileRenaming, 1, 'the move ran while the old binding was still installed')
+  assert.deepEqual(refreshes, ['legacy'], 'one refresh served the account')
+  assert.deepEqual(created, ['legacy'])
+  // The binding moved: both keys now serve through the one renamed manager, and
+  // the retired key reaches it through the alias the store recorded.
+  assert.equal((await tokens.session('canonical')).accessToken, 'legacy-new')
+  assert.equal((await tokens.session('legacy')).accessToken, 'legacy-new')
+  assert.deepEqual(created, ['legacy'], 'neither key minted a second manager')
+  assert.deepEqual(refreshes, ['legacy'], 'a stored session needs no further refresh')
+})
+
+test('a rename move that rejects does not fail the refresh that stored the session', async () => {
+  const store = renamingStore(session('legacy', 1000))
+  const renames: [string, string][] = []
+  const tokens = new AccountTokenManager<TestSession>({
+    provider: 'codex',
+    displayName: 'Test',
+    makeOptions: () => ({
+      preemptMs: 60_000,
+      refresh: async current => ({ ...current, accessToken: 'legacy-new', expiresAt: Date.now() + 3_600_000 }),
+      isPermanent: () => false,
+    }),
+    onAccountRenamed: async (from, to) => {
+      renames.push([from, to])
+      throw new Error('cache move failed')
+    },
+    io: store.io,
+  })
+  const served = await tokens.session('legacy')
+  assert.equal(served.accessToken, 'legacy-new', 'the refreshed session is served, not reported as an auth failure')
+  assert.deepEqual(renames, [['legacy', 'canonical']])
+  assert.equal(store.stored.has('canonical'), true, 'the store kept the session the refresh wrote')
+})
+
+test('a rename move that rejects is reported through the warn sink', async () => {
+  const store = renamingStore(session('legacy', 1000))
+  const warnings: string[] = []
+  const tokens = new AccountTokenManager<TestSession>({
+    provider: 'codex',
+    displayName: 'Test',
+    makeOptions: () => ({
+      preemptMs: 60_000,
+      refresh: async current => ({ ...current, accessToken: 'legacy-new', expiresAt: Date.now() + 3_600_000 }),
+      isPermanent: () => false,
+    }),
+    onAccountRenamed: async () => { throw new Error('cache move failed') },
+    onWarn: message => { warnings.push(message) },
+    io: store.io,
+  })
+  await tokens.session('legacy')
+  assert.equal(warnings.length, 1)
+  assert.match(warnings[0]!, /"legacy" -> "canonical"/, 'the warning names the move that did not complete')
+  assert.match(warnings[0]!, /cache move failed/)
+})
+
+test('an ordinary per-account refresh reports no rename', async () => {
+  const { tokens, renames } = harness({
+    accounts: { a1: session('at-1', 1000), a2: session('at-2') },
+    refresh: async (_account, current) => ({ ...current, accessToken: `${current.accessToken}-new`, expiresAt: Date.now() + 3_600_000 }),
+  })
+  await tokens.session('a1')
+  await tokens.session('a2')
+  assert.deepEqual(renames, [])
 })
 
 test('a permanent refresh failure removes only that account and notifies once', async () => {

@@ -150,6 +150,14 @@ ChatGPT 源码提供默认关闭的 `autoResetCredits` 开关，入口为订阅�
 
 订阅网络重试修复保留原始提供方策略穿过 `AccountPreferencesAdapter`，使十次重试、指数退避与抖动到达 Host。账号池中仍可请求的成员发生网络故障时，必须保留该成员的错误，不得把其他成员的额度或认证冷却附在它上面，造成超出等待上限而终止。保留账号尝试顺序的双向回归、策略透传测试，以及 `subscription-network-retry` 无密钥会话回放。该修复随 `0.9.4-dsh017rc1.14` 制品发布；安装须在 Host 停止后进行。
 
+### Subscription metadata caches (no polling)
+
+订阅插件的目录与用量元数据是按账号的持久缓存：`models.json`（布局版本 2，按服务商账号一条，失败冷却作为快照旁的提示）与 `usage-cache.json`（规范化窗口、观测时间、计划与读取冷却，不保存 token）。`cache.modelMaxAgeMs`（24 小时）、`cache.usageMaxAgeMs`（5 分钟）与 `cache.retryDelayMs`（60 秒）只作为新鲜度与冷却阈值，不驱动任何定时器。服务商查询只发生在明确事件上：登录只刷新该账号自己的目录，不读取用量；打开 **管理** 仅在条目陈旧时重新校验；**编辑模型列表 → 刷新** 强制刷新该服务商全部账号；展开用量胶囊会对当前服务商做一次按需用量读取；用量 **刷新** 按钮强制读取一个账号；消耗重置卡会重新读取该账号；即将使用的账号在发请求前确保自己的目录；池中即将服务的候选账号确保自己的目录与用量读数。池排序只读已缓存条目，不扫描同级账号；失败冷却落盘并在重启后继续生效，`force` 不绕过仍在生效的冷却；凭据存储记录过的账号改名会在模型路由、速度、用量与 providerSettings 读取之前，按存储自己的别名记录对账一次，且不发起任何服务商查询。浏览器端在回合结束、窗口获得焦点、连接代际重建、切换模型与账号名单变化时只做本地读取；仅存的定时器是登录进度轮询（含设备码授权）、凭据锁续租、用量面板倒计时与可选的 Claude Code Keychain 同步。已知限制：可能表示模型下线的 HTTP 403/404 不触发自动目录重读，因为当前没有可信任的机器可读代码把它与权限或端点拒绝区分开，只能靠手动刷新或按陈旧度重读。
+
+**Preservation rule.** 不要在插件里恢复任何周期性目录或用量轮询，也不要让能力、选择器或池排序读取发起上游请求；保持冷却落盘且 `force` 不能绕过，保持缓存按服务商账号分键，并保留旧布局的丢弃而不是猜测归属。
+
+**Focused verification.** `fork-plugins/dsh-plugin-subscriptions` 的 `test/cache-policy.spec.ts`、`test/catalog-store.spec.ts`、`test/usage-cache.spec.ts`、`test/account-rename.spec.ts`、`test/subscription-client-runtime.spec.ts`，加上 `test/catalog-resolution-cost.spec.ts` 的冷却跨重启与 `force` 不绕过用例、`test/pool-usage.spec.ts` 的“空闲时钟不触达接口”与“强制刷新不能穿透冷却”用例。
+
 ### Model-specific request images
 
 `dsh-llm.prepareRequestImages` shares retained-occurrence counting and per-attachment preparation across DeepSeek, pi-ai and subscription routes. Preserve immutable normalized attachments, count repeated user/tool images separately, exclude logged offloads, and derive each request from its current model route. Anthropic Messages and the Claude subscription adapter apply the 20/21-image dimension boundary; Claude also checks model image-count limits and exact JSON request bytes before dispatch. Compatible variants remain cached; changing models does not enlarge a previous preview or revive offloaded history. Focused checks: `llm/tests/request-images.spec.ts`, pi-ai context/routing tests, and `fork-plugins/dsh-plugin-subscriptions/test/image-policy.spec.ts`. Deployment requires rebuilding the matching Harness and pinned subscription artifact after the Host stops; source edits do not update the installed tarball.
@@ -472,7 +480,7 @@ Web profile 插入 `memory-watchdog.cjs`：250 ms 采样、60 s 日志、heap ra
 |---|---:|---|---|
 | `dshmarket` | — | Removed | 官方 Plugin Manager 接管安装、配置与运行时启停；profile 不恢复旧 package 或 bundle |
 | `@nanmicoder/dsh-agent-teams` | `0.1.20-dsh017rc1.3` | Installed, enabled | 真实 profile 使用仓内固定 artifact；停止 Host 后更新，禁止被 npm latest/next 直接覆盖 |
-| `dsh-plugin-subscriptions` | `0.9.4-dsh017rc1.21` | Installed; Windows Web enabled | 仓内固定 artifact；凭据文件原地保留，其他 profile 是否启用沿用显式插件配置。2026-10-11 核对的安装版本为 rc1.21（profile 依赖、安装目录 package.json 与解析到的 wire `0.7.2-dsh14` 三者一致）；rc1.22 已切包但未部署 |
+| `dsh-plugin-subscriptions` | `0.9.4-dsh017rc1.21` | Installed; Windows Web enabled | 仓内固定 artifact；凭据文件原地保留，其他 profile 是否启用沿用显式插件配置。2026-10-11 核对的安装版本为 rc1.21（profile 依赖、安装目录 package.json 与解析到的 wire `0.7.2-dsh14` 三者一致）；rc1.22 已切包但保留未部署，rc1.23 待部署 |
 | `@vlln/dsh-task-status` | Removed | Not installed | 已从依赖、bundle、patch、lockfile 和 `node_modules` 删除；profile 不得恢复 |
 | `dsh-context` | Windows: `0.55.0-dsh017rc1.3`; Mac: `0.55.0-dsh017rc1.1` | Installed, enabled | 真实 profile 保留 `300/60/100/400/100/100` bounds；源码与回滚规则见 `fork-plugins/dsh-context/FORK_MAINTENANCE.md` |
 | `dsh-shell-command` | Removed | No package or configuration | profile 不安装 |
@@ -523,9 +531,9 @@ Context 源码的工具归属追踪按 `cordis.original` 解包后的服务身�
 
 ### Local Subscriptions package
 
-维护真源位于 `fork-plugins\dsh-plugin-subscriptions`，仓库安装器使用 `fork-plugins\releases\dsh-plugin-subscriptions-0.9.4-dsh017rc1.22.tgz`，SHA256 为 `2CB1A08CCCAE8B3C5EA3E129ACEC0FDDE7B9DCE2A0B7D816B5C4214DC217FDC8`。该摘要与仓内制品及其 `.sha256` 文件一致。该版本采用上游 v0.9.4 的多账号 provider、usage UI、Codex 搜索、图片结果、Antigravity 与 provider failover，并增加 RC.1 的 V4 工具角色转换；凭据格式与工具输出不变。
+维护真源位于 `fork-plugins\dsh-plugin-subscriptions`，仓库安装器使用 `fork-plugins\releases\dsh-plugin-subscriptions-0.9.4-dsh017rc1.23.tgz`，SHA256 为 `A08028DBCA1E2661FE8702867E21D2C7DA71B539CB1FEB896FFE7100AC45F134`。该摘要与仓内制品及其 `.sha256` 文件一致。该版本采用上游 v0.9.4 的多账号 provider、usage UI、Codex 搜索、图片结果、Antigravity 与 provider failover，并增加 RC.1 的 V4 工具角色转换；凭据格式与工具输出不变。
 
-Windows Web profile 启用 `llm-subscriptions`，保留 `rateLimit.wait: false`。 制品在安装前须通过插件测试套件、实际安装目录的接口与 UI 开关检查；2026-10-11 当前源码的插件测试套件 878 项通过、0 失败、退出码 0。已验证的图片处理保持：21 张历史图片中原有 16 张超出多图尺寸上限，请求版本的长边均不超过 2,000 像素，原 Session 和附件摘要保持不变。2026-09-26，固定源码包的 506 项无密钥测试通过；隔离 Web profile 与真实 Web profile 均在随机本地端口启动，认证页面返回 HTTP 200，页面包含 Subscriptions 客户端资源。真实 Profile 的 Codex 状态接口识别到两个已存账号，默认账号的用量查询通过并刷新过期访问令牌；另一个账号及真实模型请求尚未验证。旧 profile patch 备份位于 `C:\Project\deepseek-harness-data\diagnostics\profile-backups\pre-subscriptions-enable-20260926`。
+Windows Web profile 启用 `llm-subscriptions`，保留 `rateLimit.wait: false`。 制品在安装前须通过插件测试套件、实际安装目录的接口与 UI 开关检查；2026-10-11 当前源码的插件测试套件 969 项通过、0 失败、0 跳过、退出码 0。已验证的图片处理保持：21 张历史图片中原有 16 张超出多图尺寸上限，请求版本的长边均不超过 2,000 像素，原 Session 和附件摘要保持不变。2026-09-26，固定源码包的 506 项无密钥测试通过；隔离 Web profile 与真实 Web profile 均在随机本地端口启动，认证页面返回 HTTP 200，页面包含 Subscriptions 客户端资源。真实 Profile 的 Codex 状态接口识别到两个已存账号，默认账号的用量查询通过并刷新过期访问令牌；另一个账号及真实模型请求尚未验证。旧 profile patch 备份位于 `C:\Project\deepseek-harness-data\diagnostics\profile-backups\pre-subscriptions-enable-20260926`。
 
 更新时使用 `git subtree pull --prefix=fork-plugins/dsh-plugin-subscriptions https://github.com/V1ki/dsh-plugin-subscriptions.git <tag> --squash`，再重放 `fork-plugins/dsh-plugin-subscriptions/FORK_MAINTENANCE.md`。真实 profile 始终安装仓内固定 artifact，禁止 npm latest 直接覆盖。
 
@@ -639,6 +647,7 @@ Profile 注册 `dsh-sdk-process-raw` 和 `subagent_process`：SDK profile、独�
 | Context field-level COW and bounded views | Preserve | v0.55.0 adds turn ledger and selective arguments, but not dirty retention, view identity reuse or closed-modal subscription release |
 | Context tool attribution ownership | Preserve | Deduplicate the raw `cordis.original` service, retain only the reader name, preserve the call-site receiver and restore ownership on unload |
 | Subscriptions V4 message translation | Ported onto v0.9.4 | Keep tool-call identity, result error/image handling and explicit developer-message refusal |
+| Subscription metadata caches | Preserve | Keep every catalogue/usage provider read on login, Manage, explicit refresh and the candidate about to serve; keep cooldowns durable and unbypassable by `force`; add no polling timer or peer sweep |
 | Legacy fixed-concurrency wrapper | Retired | Official `maxActiveSubagents` owns the active policy; do not mount the duplicate wrapper |
 | Declared model-menu row slot | Preserve | Keep the `conversation.input.model.row` declaration, the seat registration's `children` entry and the seat's `renderSlot` call in the root pane; `conversation.input.model` stays single-owner |
 | Model catalog refresh coalescing | Preserve | Keep warm readers answering from the retained same-generation catalog, one current plus one trailing reload with newest-invalidation-wins, the explicit read's catch-up loop (lifecycle check after every suspension, retry a failed replacement, reject rather than serve the replaced route), the resolver-owned catalog disposal that prevents follow-up work, and a Host reset that clears the superseded value before abandoning its response; do not restore one full-catalog reload per forwarded event |

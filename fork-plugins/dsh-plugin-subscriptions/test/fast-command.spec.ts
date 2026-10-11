@@ -19,6 +19,10 @@ const css = registerHooks({ load(url, context, nextLoad) {
 const { settleSpeedTier } = await import('../src/client/SpeedSelect.js')
 css.deregister()
 import { en, zh } from '../src/client/locales.js'
+import type { ModelRef } from '../src/client/SpeedSelect.js'
+
+/** The model the popup's picks are addressed to. */
+const MODEL: ModelRef = { provider: 'claude', model: 'claude-opus-5' }
 
 /** Dictionary-bound translator with `{name}` substitution, as the locale seat supplies it. */
 function translateFrom(dictionary: Record<keyof typeof en, string>) {
@@ -28,7 +32,7 @@ function translateFrom(dictionary: Record<keyof typeof en, string>) {
 test('a failed speed write rejects the /fast settlement with the failure copy', async () => {
   for (const dictionary of [en, zh]) {
     await assert.rejects(
-      settleSpeedTier(async () => false, 'fast', translateFrom(dictionary)),
+      settleSpeedTier(async () => false, MODEL, 'fast', translateFrom(dictionary)),
       (error: unknown) => {
         assert.ok(error instanceof Error)
         assert.equal(error.message, dictionary.speedSaveFailed)
@@ -39,11 +43,12 @@ test('a failed speed write rejects the /fast settlement with the failure copy', 
 })
 
 test('a speed write that takes settles the /fast selection and asks for the picked tier', async () => {
-  const asked: string[] = []
+  const asked: { model: ModelRef; tier: string }[] = []
   await settleSpeedTier(
-    async (tier) => { asked.push(tier); return true },
+    async (model, tier) => { asked.push({ model, tier }); return true },
+    MODEL,
     'standard',
     translateFrom(en),
   )
-  assert.deepEqual(asked, ['standard'])
+  assert.deepEqual(asked, [{ model: MODEL, tier: 'standard' }])
 })

@@ -484,41 +484,57 @@ function windowUsage(usedPercent: number, horizonMs: number): ProviderUsage {
   }
 }
 
+/**
+ * Warm each account's retained reading the way an explicit refresh does.
+ * Ranking itself never reads upstream, so a case asserting a quota ORDER states
+ * the readings the router ranks on before it streams.
+ */
+async function primeUsage(
+  tracker: PoolUsageTracker,
+  provider: ProviderId,
+  ...accounts: string[]
+): Promise<void> {
+  for (const account of accounts) await tracker.refreshSnapshot(provider, account, true)
+}
+
 test('quota_aware: the most urgent window (soon reset, plenty left) wins', async () => {
   const codex = new FakeAdapter((_options, account) => serveOk(account))
-  const { pool } = makePool({ codex }, {
+  const { pool, usage: tracker } = makePool({ codex }, {
     strategy: 'quota_aware',
     usage: usageFetchers({
       'codex/a1': windowUsage(50, 5 * 60 * 60_000),
       'codex/a2': windowUsage(10, 30 * 60_000),
     }),
   })
+  await primeUsage(tracker, 'codex', 'a1', 'a2')
   const chunks = await collect(pool.stream(OPTIONS))
   assert.equal((chunks[0] as { text: string }).text, 'a2')
 })
 
 test('quota_aware: a ChatGPT window at 100% gates its account out', async () => {
   const codex = new FakeAdapter((_options, account) => serveOk(account))
-  const { pool } = makePool({ codex }, {
+  const { pool, usage: tracker } = makePool({ codex }, {
     strategy: 'quota_aware',
     usage: usageFetchers({
       'codex/a1': windowUsage(50, 5 * 60 * 60_000),
       'codex/a2': windowUsage(100, 30 * 60_000),
     }),
   })
+  await primeUsage(tracker, 'codex', 'a1', 'a2')
   await collect(pool.stream(OPTIONS))
   assert.deepEqual(codex.accounts, ['a1'])
 })
 
 test('quota_aware: ChatGPT stays selectable at 99%', async () => {
   const codex = new FakeAdapter((_options, account) => serveOk(account))
-  const { pool } = makePool({ codex }, {
+  const { pool, usage: tracker } = makePool({ codex }, {
     strategy: 'quota_aware',
     usage: usageFetchers({
       'codex/a1': windowUsage(50, 5 * 60 * 60_000),
       'codex/a2': windowUsage(99, 60_000),
     }),
   })
+  await primeUsage(tracker, 'codex', 'a1', 'a2')
   await collect(pool.stream(OPTIONS))
   assert.deepEqual(codex.accounts, ['a2'])
 })
@@ -539,7 +555,7 @@ function weeklyUsage(usedPercent: number, remainingMs: number, expiresInMs?: num
 
 test('quota_aware: an approaching ChatGPT reset can outweigh a fresh expiring credit', async () => {
   const codex = new FakeAdapter((_options, account) => serveOk(account))
-  const { pool } = makePool({ codex }, {
+  const { pool, usage: tracker } = makePool({ codex }, {
     strategy: 'quota_aware',
     usage: usageFetchers({
       // The card preference is bounded, so it cannot force traffic away from a near reset.
@@ -547,6 +563,7 @@ test('quota_aware: an approaching ChatGPT reset can outweigh a fresh expiring cr
       'codex/a2': weeklyUsage(5, WEEK_MS - 12 * 60 * 60 * 1000, 2 * DAY_MS),
     }),
   })
+  await primeUsage(tracker, 'codex', 'a1', 'a2')
   await collect(pool.stream(OPTIONS))
   assert.deepEqual(codex.accounts, ['a1'])
 })
@@ -560,6 +577,7 @@ test('quota_aware: sticky holds against a fresh-credit account inside the margin
   const codex = new FakeAdapter((_options, account) => serveOk(account))
   const { pool, usage: tracker } = makePool({ codex }, { strategy: 'quota_aware', switchMargin: 2, usage })
   const options = { ...OPTIONS, sessionId: SessionId('fresh-credit') }
+  await primeUsage(tracker, 'codex', 'a1', 'a2')
   await collect(pool.stream(options))
   assert.deepEqual(codex.accounts, ['a1'])
   data['codex/a2'] = weeklyUsage(5, WEEK_MS - 12 * 60 * 60 * 1000, DAY_MS)
@@ -570,7 +588,7 @@ test('quota_aware: sticky holds against a fresh-credit account inside the margin
 
 test('quota_aware: remaining quota outranks a full account that holds an expiring credit', async () => {
   const codex = new FakeAdapter((_options, account) => serveOk(account))
-  const { pool } = makePool({ codex }, {
+  const { pool, usage: tracker } = makePool({ codex }, {
     strategy: 'quota_aware',
     usage: usageFetchers({
       'codex/a1': weeklyUsage(40, 2 * DAY_MS),
@@ -590,13 +608,14 @@ test('quota_aware: remaining quota outranks a full account that holds an expirin
 
 test('quota_aware: a full fresh-credit account leads the last-resort tail', async () => {
   const codex = new FakeAdapter((_options, account) => serveOk(account))
-  const { pool } = makePool({ codex }, {
+  const { pool, usage: tracker } = makePool({ codex }, {
     strategy: 'quota_aware',
     usage: usageFetchers({
       'codex/a1': weeklyUsage(100, 12 * 60 * 60 * 1000, DAY_MS),
       'codex/a2': weeklyUsage(100, WEEK_MS - 12 * 60 * 60 * 1000, DAY_MS),
     }),
   })
+  await primeUsage(tracker, 'codex', 'a1', 'a2')
   await collect(pool.stream(OPTIONS))
   assert.deepEqual(codex.accounts, ['a2'])
 })
@@ -611,7 +630,7 @@ test('quota_aware: Claude prefers the account whose window resets first', async 
       ],
     }],
   ])
-  const { pool } = makePool({ claude }, {
+  const { pool, usage: tracker } = makePool({ claude }, {
     strategy: 'quota_aware',
     families: family,
     usage: usageFetchers({
@@ -621,6 +640,7 @@ test('quota_aware: Claude prefers the account whose window resets first', async 
       'claude/a2': windowUsage(20, 5 * 60 * 60_000),
     }),
   })
+  await primeUsage(tracker, 'claude', 'a1', 'a2')
   await collect(pool.stream({ ...OPTIONS, provider: 'claude' }))
   assert.deepEqual(claude.accounts, ['a1'])
 })
@@ -655,17 +675,18 @@ test('quota_aware: hysteresis holds the sticky account until the margin is beate
   const { pool, usage: tracker } = makePool({ codex }, { strategy: 'quota_aware', switchMargin: 2, usage })
   const options = { ...OPTIONS, sessionId: SessionId('s1') }
 
+  await primeUsage(tracker, 'codex', 'a1', 'a2')
   await collect(pool.stream(options))
   assert.deepEqual(codex.accounts, ['a2'])
 
   data['codex/a2'] = windowUsage(0, 100 * 60_000)
   data['codex/a1'] = windowUsage(0, 60 * 60_000)
-  tracker.invalidate('codex')
+  await primeUsage(tracker, 'codex', 'a1', 'a2')
   const chunks = await collect(pool.stream(options))
   assert.equal((chunks[0] as { text: string }).text, 'a2')
 
   data['codex/a1'] = windowUsage(0, 30 * 60_000)
-  tracker.invalidate('codex')
+  await primeUsage(tracker, 'codex', 'a1', 'a2')
   const switched = await collect(pool.stream(options))
   assert.equal((switched[0] as { text: string }).text, 'a1')
 })
@@ -681,12 +702,12 @@ test('stream: a pre-chunk enforcement refusal ends the turn without another acco
     },
   })
   const member = { provider: 'codex' as const, account: 'a1', model: 'm' }
-  await usage.quotaFor(member)
+  await usage.ensureForUse(member)
   assert.equal(usageCalls.length, 1)
   await assert.rejects(collect(pool.stream(OPTIONS)), error => error === refusal)
   assert.deepEqual(codex.accounts, ['a1'], 'the refusal is not repeated on the sibling account')
   assert.equal(health.isMemberAvailable('codex', 'a1', 'other-model'), false, 'the account is parked')
-  await usage.quotaFor(member)
+  await usage.ensureForUse(member)
   assert.equal(usageCalls.length, 1, 'a refusal does not invalidate the usage snapshot')
 })
 
@@ -716,7 +737,7 @@ test('stream: a pre-chunk quota failure cools the whole account and fails over',
     },
   })
   const member = { provider: 'codex' as const, account: 'a1', model: 'm' }
-  await usage.quotaFor(member)
+  await usage.ensureForUse(member)
   assert.equal(usageCalls.length, 1)
   const chunks = await collect(pool.stream(OPTIONS))
   assert.equal((chunks[0] as { text: string }).text, 'a2')
@@ -725,7 +746,7 @@ test('stream: a pre-chunk quota failure cools the whole account and fails over',
   assert.equal(health.isMemberAvailable('codex', 'a1', 'other-model'), false)
   assert.equal(health.isMemberAvailable('codex', 'a2', 'm'), true)
   assert.equal(warnings.some(message => message.includes('trying the next member')), true)
-  await usage.quotaFor(member)
+  await usage.ensureForUse(member)
   assert.equal(usageCalls.length, 2)
 })
 
@@ -760,10 +781,10 @@ test('stream: a transient failure does not invalidate the usage snapshot', async
     },
   })
   const member = { provider: 'codex' as const, account: 'a1', model: 'm' }
-  await usage.quotaFor(member)
+  await usage.ensureForUse(member)
   assert.equal(usageCalls.length, 1)
   await collect(pool.stream(OPTIONS))
-  await usage.quotaFor(member)
+  await usage.ensureForUse(member)
   assert.equal(usageCalls.length, 1)
 })
 
@@ -787,6 +808,24 @@ test('stream: quota_aware selection never re-hits a usage endpoint still cooling
   await collect(pool.stream(OPTIONS))
   await collect(pool.stream(OPTIONS))
   assert.equal(usageCalls.length, 1, 'three requests in a row must cost at most one usage-endpoint hit')
+})
+
+test('stream: a model request reads usage only for the account it serves', async () => {
+  // Ranking never sweeps peers, so N idle accounts cost N-1 fewer usage reads
+  // per request — the whole point of ranking from retained readings.
+  const reads: string[] = []
+  const adapter = new FakeAdapter((_options, account) => serveOk(account))
+  const { pool } = makePool({ codex: adapter }, {
+    strategy: 'quota_aware',
+    usage: (provider, account) => {
+      if (provider !== 'codex') return undefined
+      return () => { reads.push(account); return Promise.resolve(windowUsage(10, 60 * 60_000)) }
+    },
+  })
+  await collect(pool.stream(OPTIONS))
+  assert.deepEqual(reads, ['a1'], 'only the chosen candidate was read')
+  await collect(pool.stream(OPTIONS))
+  assert.deepEqual(reads, ['a1'], 'a fresh reading serves the next request for free')
 })
 
 test('stream: a caller abandoning the stream closes the member stream', async () => {
@@ -989,10 +1028,11 @@ for (const provider of ['claude', 'codex'] as const) {
     const families = new Map([[poolKey(provider, 'm'), { members: [
       { provider, account: 'a1', model: 'm' }, { provider, account: 'a2', model: 'm' },
     ] }]])
-    const { pool } = makePool({ [provider]: adapter }, { strategy: 'quota_aware', families, usage: usageFetchers({
+    const { pool, usage: tracker } = makePool({ [provider]: adapter }, { strategy: 'quota_aware', families, usage: usageFetchers({
       [`${provider}/a1`]: weeklyUsage(20, 2 * DAY_MS),
       [`${provider}/a2`]: weeklyUsage(50, 2 * 60 * 60_000),
     }) })
+    await primeUsage(tracker, provider, 'a1', 'a2')
     await collect(pool.stream({ ...OPTIONS, provider }))
     assert.deepEqual(adapter.accounts, ['a2'])
   })
@@ -1004,15 +1044,18 @@ test('quota_aware: finishes a small ChatGPT remainder without overriding a healt
   const adapter = new FakeAdapter((_options, account) => serveOk(account))
   const { pool, usage } = makePool({ codex: adapter }, { strategy: 'quota_aware', usage: usageFetchers(data) })
   const existing = { ...OPTIONS, sessionId: SessionId('established') }
+  await primeUsage(usage, 'codex', 'a1', 'a2')
   await collect(pool.stream(existing))
   assert.deepEqual(adapter.accounts, ['a2'])
   data['codex/a1'] = weeklyUsage(97, 2 * DAY_MS)
   usage.invalidate('codex')
+  await primeUsage(usage, 'codex', 'a1', 'a2')
   await collect(pool.stream({ ...OPTIONS, sessionId: SessionId('new') }))
   await collect(pool.stream(existing))
   assert.deepEqual(adapter.accounts, ['a2', 'a1', 'a2'])
   data['codex/a2'] = weeklyUsage(100, 2 * DAY_MS)
   usage.invalidate('codex')
+  await primeUsage(usage, 'codex', 'a1', 'a2')
   await collect(pool.stream(existing))
   assert.deepEqual(adapter.accounts, ['a2', 'a1', 'a2', 'a1'])
 })
@@ -1020,10 +1063,11 @@ test('quota_aware: finishes a small ChatGPT remainder without overriding a healt
 test('quota_aware: reset urgency and finishing compete using the same bounded score', async (t) => {
   t.mock.timers.enable({ apis: ['Date'], now: Date.UTC(2026, 8, 30) })
   const adapter = new FakeAdapter((_options, account) => serveOk(account))
-  const { pool } = makePool({ codex: adapter }, { strategy: 'quota_aware', usage: usageFetchers({
+  const { pool, usage: tracker } = makePool({ codex: adapter }, { strategy: 'quota_aware', usage: usageFetchers({
     'codex/a1': weeklyUsage(97, 5 * DAY_MS),
     'codex/a2': weeklyUsage(50, 30 * 60_000),
   }) })
+  await primeUsage(tracker, 'codex', 'a1', 'a2')
   await collect(pool.stream(OPTIONS))
   assert.deepEqual(adapter.accounts, ['a2'])
 })
@@ -1040,12 +1084,15 @@ test('quota_aware: drains one ChatGPT remainder when every account has only a fe
     provider: 'codex' as const, account, model: 'm',
   })) }]])
   const { pool, usage } = makePool({ codex: adapter }, { strategy: 'quota_aware', families, usage: usageFetchers(data) })
+  await primeUsage(usage, 'codex', 'a1', 'a2', 'a3')
   await collect(pool.stream(OPTIONS))
   data['codex/a1'] = weeklyUsage(99.9, 2 * DAY_MS)
   usage.invalidate('codex')
+  await primeUsage(usage, 'codex', 'a1', 'a2', 'a3')
   await collect(pool.stream(OPTIONS))
   data['codex/a1'] = weeklyUsage(100, 2 * DAY_MS)
   usage.invalidate('codex')
+  await primeUsage(usage, 'codex', 'a1', 'a2', 'a3')
   await collect(pool.stream(OPTIONS))
   assert.deepEqual(adapter.accounts, ['a1', 'a1', 'a2'])
 })
@@ -1069,7 +1116,8 @@ test('quota_aware: simultaneous cold selections distribute first-byte waits acro
   const reads = iterators.map(iterator => iterator.next())
   try {
     await Promise.race([started.promise, Promise.all(reads)])
-    assert.deepEqual(adapter.accounts, ['a1', 'a2', 'a1', 'a2'])
+    assert.deepEqual([...adapter.accounts].sort(), ['a1', 'a1', 'a2', 'a2'],
+      'concurrent cold selections spread across both accounts instead of all taking the first')
     gate.resolve()
     await Promise.all(reads)
     await iterators[1].return?.()
@@ -1285,6 +1333,9 @@ test('the usage card counts a peer only when the pool would accept it', async ()
     const harness = claudeFloorPool(account =>
       account === 'a1' ? [{ kind: 'session', usedPercent: 5 }] : [{ kind: 'session', usedPercent }])
     harness.health.markUnavailable(accountKey('claude', 'a1'), 60_000, 'RATE_LIMIT')
+    // The card reads what the pool already knows: the peer's reading arrives by
+    // the same on-demand path a request would use, never by sweeping the pool.
+    await harness.usage.ensureForUse({ provider: 'claude', account: 'a2', model: 'm' })
     return await usagePoolState(harness.health, harness.pool, 'claude', 'a1', ['a1', 'a2'], () => true)
   }
   const served = await run(5)
@@ -1325,21 +1376,20 @@ test('a usage poll that fails after a real one still applies the floor that poll
   })
   await collect(harness.pool.stream(CLAUDE_OPTIONS))
   assert.deepEqual(adapter.accounts, ['a2'], 'a1 is past the session floor')
-  // The display keeps the last real snapshot; the routing view degrades to a
-  // zero-score failure while still holding the floor that snapshot established.
+  // The display keeps the last real reading, reported honestly as stale rather
+  // than presented as current, and the floors still see it.
   reachable = false
-  assert.deepEqual(await harness.usage.snapshotFor('claude', 'a1', true), {
-    supported: true,
-    windows: [{ kind: 'session', usedPercent: 60 }],
-  })
+  const stale = await harness.usage.refreshSnapshot('claude', 'a1', true)
+  assert.deepEqual(stale.windows, [{ kind: 'session', usedPercent: 60 }])
+  assert.equal(stale.cache?.state, 'stale')
+  assert.equal(stale.cache?.error, 'rate_limited')
   await collect(harness.pool.stream(CLAUDE_OPTIONS))
   assert.deepEqual(adapter.accounts, ['a2', 'a2'], 'an unreachable usage endpoint cannot make a spent allowance selectable')
-  // An enforcement failure drops the cached snapshot before the next poll. The
-  // floor still applies: the earlier poll observed a spent allowance, and a poll
-  // that cannot run is no evidence that the allowance came back.
+  // An invalidation marks the reading stale, which is no evidence that the
+  // allowance came back: the floor that reading established still applies.
   harness.usage.invalidate('claude', 'a1')
   await collect(harness.pool.stream(CLAUDE_OPTIONS))
-  assert.deepEqual(adapter.accounts, ['a2', 'a2', 'a2'], 'a dropped snapshot must not wash out a spent allowance')
+  assert.deepEqual(adapter.accounts, ['a2', 'a2', 'a2'], 'an invalidated reading must not wash out a spent allowance')
 })
 
 test('a pool held back only by the floors reports the earliest window reset as its wait', async () => {

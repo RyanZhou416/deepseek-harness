@@ -17,15 +17,22 @@ import { claudeBuiltInCatalogue, claudeCatalogueListing } from '../src/providers
 import { claudeDocumentedLimits, claudeModelLimits, claudeProfileLimits } from '../src/providers/claude-model-limits.js'
 import { CLAUDE_CODE_2_1_288_PROFILE } from '@tormentalabs/claude-code-wire-compat'
 import { CopilotAdapter, fetchCopilotModels } from '../src/providers/copilot.js'
-import { ModelCatalogCache } from '../src/providers/common.js'
+import { ModelCatalogCache, OAuthEndpointError } from '../src/providers/common.js'
 import { AccountTokenManager } from '../src/providers/accounts.js'
-import type { CatalogPersistence, CatalogSnapshot, FetchFn } from '../src/providers/common.js'
+import type { AccountAwareAdapter } from '../src/providers/accounts.js'
+import type { CatalogFailure, CatalogPersistence, CatalogRecord, CatalogSnapshot, CatalogStoreFactory, FetchFn } from '../src/providers/common.js'
 import type { ClaudeSession, CodexSession, CopilotSession, GrokSession } from '../src/auth/store.js'
 import { withTimeout } from '../src/providers/common.js'
 
 const STATIC_CODEX = [{ id: 'gpt-5.1-codex', name: 'GPT-5.1 Codex' }]
 const STATIC_CLAUDE = [{ id: 'claude-opus-4-5', name: 'Claude Opus 4.5' }]
 const STATIC_GROK = [{ id: 'grok-4', name: 'Grok 4' }]
+
+/**
+ * Older than the route's default freshness window (24 h), so an explicit
+ * refresh is eligible to replace it and a read still serves it as-is.
+ */
+const PAST_FRESHNESS_MS = 25 * 60 * 60_000
 
 test('Codex context overrides clamp per account, restore defaults, and distrust missing maxima', async () => {
   let requested: number | undefined = 512_000
@@ -41,6 +48,9 @@ test('Codex context overrides clamp per account, restore defaults, and distrust 
       { slug: 'unknown-max', context_window: 272000 },
     ] }))) as FetchFn,
   })
+  // Each account's ceiling is discovered per account, at an explicit refresh.
+  await primeCatalog(adapter, 'codex', 'pro')
+  await primeCatalog(adapter, 'codex', 'plus')
   assert.equal((await adapter.resolveOwnModel('codex', 'm', 'pro')).context?.contextWindow, 512000)
   assert.equal((await adapter.resolveOwnModel('codex', 'm', 'plus')).context?.contextWindow, 300000)
   assert.equal((await adapter.resolveOwnModel('codex', 'unknown-max', 'pro')).context?.contextWindow, 272000)
@@ -148,6 +158,7 @@ function codexAdapter(overrides: {
   fetchFn?: FetchFn
   warnings?: string[]
   defaultEffortOf?: (model: string) => string | undefined
+  discoveryTimeoutMs?: number
 }): CodexAdapter {
   return new CodexAdapter({
     models: STATIC_CODEX,
@@ -159,7 +170,15 @@ function codexAdapter(overrides: {
       ? {}
       : { onWarn: (message: string) => { overrides.warnings?.push(message) } },
     ...overrides.defaultEffortOf === undefined ? {} : { defaultEffortOf: overrides.defaultEffortOf },
+    ...overrides.discoveryTimeoutMs === undefined ? {} : { discoveryTimeoutMs: overrides.discoveryTimeoutMs },
   })
+}
+
+/** One release-on-demand barrier, so a pending request is a state, not a delay. */
+function deferred(): { promise: Promise<void>; release: () => void } {
+  let release!: () => void
+  const promise = new Promise<void>((resolve) => { release = resolve })
+  return { promise, release }
 }
 
 const CODEX_MODELS_PAYLOAD = {
@@ -239,13 +258,20 @@ test('codex catalog refresh invalidates all accounts and preserves configured ve
       return new Response(JSON.stringify({ models: [{ slug: fresh ? 'gpt-6-astra' : 'gpt-5.6-sol' }] }))
     },
   })
-  assert.deepEqual((await adapter.listModels('codex')).map(model => model.id), ['gpt-5.6-sol'])
+  /** Refresh both accounts explicitly, then read the union. */
+  const refreshed = async (): Promise<string[]> => {
+    await primeCatalog(adapter, 'codex', 'first')
+    await primeCatalog(adapter, 'codex', 'second')
+    return (await adapter.listModels('codex')).map(model => model.id)
+  }
+  assert.deepEqual(await refreshed(), ['gpt-5.6-sol'])
+  assert.equal(calls.length, 2)
   fresh = true
-  assert.deepEqual((await adapter.listModels('codex')).map(model => model.id), ['gpt-5.6-sol'])
+  assert.deepEqual(await refreshed(), ['gpt-5.6-sol'], 'a fresh entry is not re-requested')
   assert.equal(calls.length, 2)
   adapter.clearAccountCatalog()
-  assert.deepEqual((await adapter.listModels('codex')).map(model => model.id), ['gpt-6-astra'])
-  assert.equal(calls.length, 4, 'both accounts are fetched again within the TTL')
+  assert.deepEqual(await refreshed(), ['gpt-6-astra'])
+  assert.equal(calls.length, 4, 'both accounts are fetched again after their caches were dropped')
 })
 
 test('codex adapter uses the automatic compatibility version for catalog requests', async () => {
@@ -259,19 +285,21 @@ test('codex adapter uses the automatic compatibility version for catalog request
       return Response.json({ models: [{ slug: 'gpt-6-astra' }] })
     },
   })
+  await primeCatalog(adapter, 'codex')
   assert.deepEqual((await adapter.listModels('codex')).map(model => model.id), ['gpt-6-astra'])
-  await adapter.listModels('codex')
+  await primeCatalog(adapter, 'codex')
   assert.equal(lookups, 1, 'a cached model list needs no version lookup')
 })
 
 test('codex discovery maps, filters hidden entries, and sorts by priority', async () => {
   const { fetchFn, calls } = fakeFetch(CODEX_MODELS_PAYLOAD)
   const adapter = codexAdapter({ session: codexSession, fetchFn })
+  await primeCatalog(adapter, 'codex')
   const models = await adapter.listModels('codex')
   assert.deepEqual(models.map(model => model.id), ['gpt-5.1-codex', 'gpt-5.2-codex'])
   assert.equal(models[1].name, 'GPT-5.2 Codex')
   assert.equal(models[1].description, 'newest')
-  // The TTL cache serves the second call without another fetch.
+  // Reads never request: the one request was the explicit refresh above.
   await adapter.listModels('codex')
   assert.equal(calls(), 1)
 })
@@ -279,7 +307,7 @@ test('codex discovery maps, filters hidden entries, and sorts by priority', asyn
 test('resolveModel prefers discovered context window and reasoning efforts', async () => {
   const { fetchFn } = fakeFetch(CODEX_MODELS_PAYLOAD)
   const adapter = codexAdapter({ session: codexSession, fetchFn })
-  await adapter.listModels('codex')
+  await primeCatalog(adapter, 'codex')
   const resolved = await adapter.resolveModel('codex', 'gpt-5.2-codex')
   assert.equal(resolved.context?.contextWindow, 500_000)
   assert.deepEqual(
@@ -300,7 +328,7 @@ test('a configured default effort wins over the discovered one (codex)', async (
     fetchFn,
     defaultEffortOf: model => model === 'gpt-5.2-codex' ? 'low' : undefined,
   })
-  await adapter.listModels('codex')
+  await primeCatalog(adapter, 'codex')
   const resolved = await adapter.resolveModel('codex', 'gpt-5.2-codex')
   assert.equal(resolved.reasoning?.defaultEffort, 'low')
   assert.deepEqual(resolved.reasoning?.efforts.map(effort => effort.id), ['low', 'high'])
@@ -319,7 +347,7 @@ test('a configured default the discovered catalog dropped does not reach the wir
     fetchFn,
     defaultEffortOf: () => 'max',
   })
-  await adapter.listModels('codex')
+  await primeCatalog(adapter, 'codex')
   const resolved = await adapter.resolveModel('codex', 'gpt-5.2-codex')
   assert.deepEqual(resolved.reasoning?.efforts.map(effort => effort.id), ['low', 'high'],
     'an unadvertised level is not invented into the capability set')
@@ -395,15 +423,18 @@ test('codex discovery failure falls back to the static catalog with a warning', 
   const warnings: string[] = []
   const { fetchFn } = fakeFetch({ error: 'boom' }, 500)
   const adapter = codexAdapter({ session: codexSession, fetchFn, warnings })
+  await primeCatalog(adapter, 'codex')
   const models = await adapter.listModels('codex')
   assert.deepEqual(models.map(model => model.id), ['gpt-5.1-codex'])
   assert.equal(warnings.length, 1)
-  assert.match(warnings[0], /codex model discovery failed/)
+  assert.match(warnings[0], /codex model catalogue refresh failed/)
 })
 
 test('codex config override wins over discovery entirely', async () => {
   const { fetchFn, calls } = fakeFetch(CODEX_MODELS_PAYLOAD)
   const adapter = codexAdapter({ session: codexSession, fetchFn, discovery: false })
+  // Even an explicit refresh is a no-op: the configured catalog is the answer.
+  await primeCatalog(adapter, 'codex')
   const models = await adapter.listModels('codex')
   assert.deepEqual(models.map(model => model.id), ['gpt-5.1-codex'])
   assert.equal(calls(), 0)
@@ -418,6 +449,7 @@ test('grok discovery maps the data array', async () => {
     discovery: true,
     fetchFn,
   })
+  await primeCatalog(adapter, 'grok')
   const models = await adapter.listModels('grok')
   assert.deepEqual(models.map(model => model.id), ['grok-4-1', 'grok-code-2'])
 })
@@ -633,6 +665,7 @@ test('a disabled option surfaces as a disabled row instead of disappearing', asy
     discovery: true,
     fetchFn: fakeFetch(CLAUDE_BOOTSTRAP_PAYLOAD).fetchFn,
   })
+  await primeCatalog(claude, 'claude')
   const listed = await claude.listModels('claude') as readonly (LlmModelInfo & { disabledReason?: string })[]
   assert.equal(listed.find(row => row.id === 'claude-retired')?.disabledReason, 'no longer offered')
   assert.equal(listed.find(row => row.id === 'claude-bare')?.disabledReason, undefined)
@@ -659,9 +692,35 @@ test('claude discovery lists the built-in catalogue when the options read is ref
     discovery: true,
     fetchFn: (async () => new Response('{}', { status: 500 })) as never,
   })
+  await primeCatalog(claude, 'claude')
   const ids = (await claude.listModels('claude')).map(row => row.id)
   assert.ok(ids.length > 1)
   assert.equal(ids.includes('claude-sonnet-5'), true)
+})
+
+test('a cold claude menu is the pinned catalogue, not the configured shortlist', async () => {
+  const { fetchFn, calls } = fakeFetch(CLAUDE_BOOTSTRAP_PAYLOAD)
+  const claude = new ClaudeAdapter({
+    models: STATIC_CLAUDE,
+    streamIdleTimeoutMs: 1000,
+    tokens: memoryTokens(claudeSession),
+    discovery: true,
+    fetchFn,
+  })
+  const pinned = claudeCatalogueListing().map(row => row.id)
+  const rows = await claude.listModels('claude')
+  assert.equal(pinned.length, 25, 'the pinned table carries its 1M rows')
+  assert.deepEqual(rows.map(row => row.id), pinned, 'a cold menu offers every pinned model')
+  assert.ok(rows.some(row => row.id.endsWith('[1m]')), 'the 1M variants are listed')
+  assert.equal(calls(), 0, 'a cold menu must not ask the provider')
+  // An explicit configuration is the operator's decision: it is listed as given.
+  const configured = new ClaudeAdapter({
+    models: STATIC_CLAUDE,
+    streamIdleTimeoutMs: 1000,
+    tokens: memoryTokens(claudeSession),
+    discovery: false,
+  })
+  assert.deepEqual((await configured.listModels('claude')).map(row => row.id), ['claude-opus-4-5'])
 })
 
 test('the options read carries the desktop client headers', async () => {
@@ -769,6 +828,7 @@ test('codex discovery flags models whose catalog advertises a fast service tier'
     ],
   })
   const adapter = codexAdapter({ session: codexSession, fetchFn })
+  await primeCatalog(adapter, 'codex')
   assert.deepEqual(await adapter.fastCapableModels(), ['gpt-5.2-codex'])
   assert.equal(await adapter.supportsFastTier('gpt-5.2-codex'), true)
   assert.equal(await adapter.supportsFastTier('gpt-5.1-codex'), false)
@@ -985,6 +1045,7 @@ test('grok discovery drops generation and embedding models', async () => {
     discovery: true,
     fetchFn,
   })
+  await primeCatalog(adapter, 'grok')
   const models = await adapter.listModels('grok')
   assert.deepEqual(models.map(model => model.id), ['grok-4.6', 'grok-build-0.1'])
 })
@@ -1046,6 +1107,7 @@ test('grok discovery merges CLI-catalog reasoning metadata by model id', async (
     discovery: true,
     fetchFn: grokDualFetch(),
   })
+  await primeCatalog(adapter, 'grok')
   const models = await adapter.listModels('grok')
   assert.deepEqual(models.map(model => model.name), ['Grok 4.6', 'Grok 4.5', 'grok-build-0.1'])
   assert.equal(models[0].description, 'frontier')
@@ -1077,6 +1139,7 @@ test('grok discovery survives a CLI catalog failure with a warning', async () =>
     fetchFn: grokDualFetch({ error: 'boom' }, 500),
     onWarn: message => warnings.push(message),
   })
+  await primeCatalog(adapter, 'grok')
   const models = await adapter.listModels('grok')
   assert.deepEqual(models.map(model => model.id), ['grok-4.6', 'grok-4.5', 'grok-build-0.1'])
   assert.equal(warnings.length, 1)
@@ -1087,7 +1150,7 @@ test('grok discovery survives a CLI catalog failure with a warning', async () =>
 test('grok discovery keeps last-known reasoning when the CLI catalog fails', async () => {
   const warnings: string[] = []
   const store = memoryCatalogStore({
-    at: Date.now() - 3_600_000,
+    at: Date.now() - PAST_FRESHNESS_MS,
     models: [{
       id: 'grok-4.6',
       name: 'Grok 4.6',
@@ -1110,7 +1173,7 @@ test('grok discovery keeps last-known reasoning when the CLI catalog fails', asy
     onWarn: message => warnings.push(message),
     catalogStore: store,
   })
-  await adapter.listModels('grok')
+  await primeCatalog(adapter, 'grok')
   const resolved = await adapter.resolveModel('grok', 'grok-4.6')
   assert.deepEqual(resolved.reasoning?.efforts.map(effort => effort.id), ['xhigh', 'high'])
   assert.equal(resolved.reasoning?.defaultEffort, 'high')
@@ -1122,7 +1185,7 @@ test('grok discovery keeps last-known reasoning when the CLI catalog fails', asy
 
 test('grok discovery keeps last-known reasoning when the CLI catalog omits a model', async () => {
   const store = memoryCatalogStore({
-    at: Date.now() - 3_600_000,
+    at: Date.now() - PAST_FRESHNESS_MS,
     models: [{
       id: 'grok-4.6',
       name: 'Grok 4.6',
@@ -1143,7 +1206,7 @@ test('grok discovery keeps last-known reasoning when the CLI catalog omits a mod
     fetchFn: grokDualFetch({ data: GROK_CLI_PAYLOAD.data.filter(entry => entry.id === 'grok-4.5') }),
     catalogStore: store,
   })
-  await adapter.listModels('grok')
+  await primeCatalog(adapter, 'grok')
   const g46 = await adapter.resolveModel('grok', 'grok-4.6')
   assert.deepEqual(g46.reasoning?.efforts.map(effort => effort.id), ['xhigh', 'high'])
   const g45 = await adapter.resolveModel('grok', 'grok-4.5')
@@ -1164,7 +1227,7 @@ test('grok entries without reasoning support expose no efforts', async () => {
     discovery: true,
     fetchFn: grokDualFetch(cliPayload),
   })
-  await adapter.listModels('grok')
+  await primeCatalog(adapter, 'grok')
   assert.equal((await adapter.resolveModel('grok', 'grok-4.6')).reasoning, undefined)
   assert.equal((await adapter.resolveModel('grok', 'grok-4.5')).reasoning, undefined)
 })
@@ -1173,19 +1236,20 @@ test('empty discovery payload falls back to the static catalog with a warning', 
   const warnings: string[] = []
   const { fetchFn } = fakeFetch({ models: [] })
   const adapter = codexAdapter({ session: codexSession, fetchFn, warnings })
+  await primeCatalog(adapter, 'codex')
   const models = await adapter.listModels('codex')
   assert.deepEqual(models.map(model => model.id), ['gpt-5.1-codex'])
   assert.equal(warnings.length, 1)
   assert.match(warnings[0], /empty catalog/)
 })
 
-/** An in-memory CatalogPersistence fake with a snapshot inspection hook. */
-function memoryCatalogStore(initial?: CatalogSnapshot): CatalogPersistence & {
+/** An in-memory per-account CatalogStoreFactory fake with a snapshot inspection hook. */
+function memoryCatalogStore(initial?: CatalogSnapshot): CatalogStoreFactory & {
   saved: () => CatalogSnapshot | undefined
 } {
   let stored = initial
-  return {
-    load: () => Promise.resolve(stored),
+  const factory = (_account: string): CatalogPersistence => ({
+    load: () => Promise.resolve(stored === undefined ? undefined : { snapshot: stored }),
     save: (snapshot) => {
       stored = snapshot
       return Promise.resolve()
@@ -1194,82 +1258,255 @@ function memoryCatalogStore(initial?: CatalogSnapshot): CatalogPersistence & {
       stored = undefined
       return Promise.resolve()
     },
-    saved: () => stored,
-  }
+  })
+  return Object.assign(factory, { saved: () => stored })
 }
 
-/** Let fire-and-forget promise chains (background refresh, write-through) settle. */
+/** An in-memory store that keeps one record per account, as the durable one does. */
+function memoryAccountStore(): CatalogStoreFactory & {
+  snapshot: (account: string) => CatalogSnapshot | undefined
+  failure: (account: string) => CatalogFailure | undefined
+} {
+  const entries = new Map<string, CatalogRecord>()
+  const factory = (account: string): CatalogPersistence => ({
+    load: () => Promise.resolve(entries.get(account)),
+    save: (snapshot) => {
+      entries.set(account, { snapshot })
+      return Promise.resolve()
+    },
+    saveFailure: (failure) => {
+      entries.set(account, { ...entries.get(account), failure })
+      return Promise.resolve()
+    },
+    clear: () => {
+      entries.delete(account)
+      return Promise.resolve()
+    },
+  })
+  return Object.assign(factory, {
+    snapshot: (account: string) => entries.get(account)?.snapshot,
+    failure: (account: string) => entries.get(account)?.failure,
+  })
+}
+
+/**
+ * Prime one account's catalogue the way an explicit event does. Listing and
+ * capability reads are cache-only, so a test that wants discovered rows has to
+ * ask the provider for them first — exactly as the host does.
+ */
+async function primeCatalog(adapter: AccountAwareAdapter, provider: string, account?: string): Promise<void> {
+  await adapter.refreshOwnCatalog?.(provider, account)
+}
+
+/** Let fire-and-forget promise chains (a detached refresh, a write-through) settle. */
 function settle(): Promise<void> {
   return new Promise(resolve => setImmediate(resolve))
 }
 
-test('ModelCatalogCache serves the last-known catalog while a refresh runs or fails', async () => {
-  // ttlMs 0 makes every entry instantly stale, so each resolve exercises the
-  // stale-while-revalidate path.
-  const cache = new ModelCatalogCache(undefined, 0)
-  const first = await cache.resolve(() => Promise.resolve([{ id: 'a', name: 'A' }]))
-  assert.deepEqual(first?.map(model => model.id), ['a'])
-  // A stale entry answers immediately even when the background refresh fails.
-  const second = await cache.resolve(() => Promise.reject(new Error('offline')))
-  assert.deepEqual(second?.map(model => model.id), ['a'])
-  await settle()
-  // A successful background refresh serves the NEXT resolve.
-  const third = await cache.resolve(() => Promise.resolve([{ id: 'b', name: 'B' }]))
-  assert.deepEqual(third?.map(model => model.id), ['a'])
-  await settle()
-  const fourth = await cache.resolve(() => Promise.reject(new Error('unused')))
-  assert.deepEqual(fourth?.map(model => model.id), ['b'])
-})
+test('ModelCatalogCache reads are pure: no read starts a request, stale included', async () => {
+  const cache = new ModelCatalogCache({ maxAgeMs: 0 })
+  let calls = 0
+  const fetchOnce = (): Promise<{ id: string; name: string }[]> => {
+    calls += 1
+    return Promise.resolve([{ id: 'a', name: 'A' }])
+  }
+  assert.equal(await cache.read(), undefined)
+  assert.equal(cache.stale(), true)
+  assert.deepEqual(cache.lastKnown(), undefined)
+  assert.equal(calls, 0, 'a cold read must not request anything')
 
-test('ModelCatalogCache resolve on a cold cache without persistence awaits one fetch', async () => {
-  const cache = new ModelCatalogCache()
-  assert.equal(await cache.resolve(() => Promise.reject(new Error('offline'))), undefined)
-  const models = await cache.resolve(() => Promise.resolve([{ id: 'a', name: 'A' }]))
-  assert.deepEqual(models?.map(model => model.id), ['a'])
-})
-
-test('ModelCatalogCache lastKnown ignores TTL', async () => {
-  const cache = new ModelCatalogCache(undefined, 0)
-  assert.equal(cache.lastKnown(), undefined)
-  await cache.get(() => Promise.resolve([{ id: 'a', name: 'A' }]))
+  // Only an explicit refresh asks; every later read answers from what it stored.
+  assert.equal((await cache.refresh(fetchOnce)).status, 'fetched')
+  assert.equal(calls, 1)
+  assert.deepEqual((await cache.read())?.map(model => model.id), ['a'])
   assert.deepEqual(cache.lastKnown()?.map(model => model.id), ['a'])
-  assert.equal(cache.cached(), undefined)
+  assert.equal(calls, 1, 'a read after a refresh must not request anything')
+  // maxAgeMs 0 makes the stored entry instantly stale and the read still answers
+  // it: freshness decides when a refresh MAY run, never what a read returns.
+  assert.equal(cache.stale(), true)
+  assert.deepEqual((await cache.read())?.map(model => model.id), ['a'])
+  assert.equal(calls, 1)
+})
+
+test('ModelCatalogCache refresh coalesces concurrent callers into one request', async () => {
+  const cache = new ModelCatalogCache()
+  let calls = 0
+  let finish!: (models: { id: string; name: string }[]) => void
+  const fetchOnce = (): Promise<{ id: string; name: string }[]> => {
+    calls += 1
+    return new Promise(resolve => { finish = resolve })
+  }
+  const first = cache.refresh(fetchOnce)
+  await settle()
+  const second = cache.refresh(fetchOnce)
+  await settle()
+  assert.equal(calls, 1, 'the second caller must join the request in flight')
+  finish([{ id: 'a', name: 'A' }])
+  assert.deepEqual((await first).status, 'fetched')
+  assert.deepEqual((await second).status, 'fetched')
+  assert.equal(calls, 1)
+})
+
+test('ModelCatalogCache refresh skips a fresh entry and a cooling-down failure', async () => {
+  const cache = new ModelCatalogCache()
+  let calls = 0
+  const ok = (): Promise<{ id: string; name: string }[]> => {
+    calls += 1
+    return Promise.resolve([{ id: 'a', name: 'A' }])
+  }
+  assert.equal((await cache.refresh(ok)).status, 'fetched')
+  assert.deepEqual(await cache.refresh(ok), { status: 'skipped', reason: 'fresh' })
+  assert.equal(calls, 1)
+  // `force` re-requests a fresh SUCCESS, which is what an explicit refresh means.
+  assert.equal((await cache.refresh(ok, { force: true })).status, 'fetched')
+  assert.equal(calls, 2)
+})
+
+test('ModelCatalogCache honours a failure cooldown, and force never bypasses it', async () => {
+  const cache = new ModelCatalogCache({ maxAgeMs: 0, retryDelayMs: 60_000 })
+  let calls = 0
+  const fail = (): Promise<{ id: string; name: string }[]> => {
+    calls += 1
+    return Promise.reject(new Error('offline'))
+  }
+  await assert.rejects(() => cache.refresh(fail))
+  assert.equal(calls, 1)
+  assert.deepEqual(await cache.refresh(fail), { status: 'skipped', reason: 'cooldown' })
+  assert.deepEqual(await cache.refresh(fail, { force: true }), { status: 'skipped', reason: 'cooldown' })
+  assert.equal(calls, 1, 'a failing provider must not be queried on every action')
+})
+
+test('a catalogue failure that disclosed retry-after cools down for that long, force included', async () => {
+  const realNow = Date.now
+  const cache = new ModelCatalogCache({ maxAgeMs: 0, retryDelayMs: 60_000 })
+  let calls = 0
+  const fail = (): Promise<{ id: string; name: string }[]> => {
+    calls += 1
+    return Promise.reject(new OAuthEndpointError('slow down', 429, undefined, 600_000))
+  }
+  let now = realNow()
+  try {
+    Date.now = () => now
+    await assert.rejects(() => cache.refresh(fail))
+    assert.equal(calls, 1)
+    // Five minutes on: a default cooldown would have lapsed, the disclosed ten
+    // minutes have not, and a manual (forced) refresh waits it out too.
+    now += 5 * 60_000
+    assert.deepEqual(await cache.refresh(fail), { status: 'skipped', reason: 'cooldown' })
+    assert.deepEqual(await cache.refresh(fail, { force: true }), { status: 'skipped', reason: 'cooldown' })
+    assert.equal(calls, 1, 'the disclosed delay outlasts the configured default')
+    now += 6 * 60_000
+    await assert.rejects(() => cache.refresh(fail, { force: true }))
+    assert.equal(calls, 2, 'once the disclosed delay lapses the request may run again')
+  } finally {
+    Date.now = realNow
+  }
+})
+
+test('ModelCatalogCache keeps the last good snapshot when a refresh fails', async () => {
+  const cache = new ModelCatalogCache()
+  assert.equal((await cache.refresh(() => Promise.resolve([{ id: 'a', name: 'A' }]), { force: true })).status, 'fetched')
+  await assert.rejects(() => cache.refresh(
+    () => Promise.reject(new Error('offline')),
+    { force: true },
+  ))
+  assert.deepEqual((await cache.read())?.map(model => model.id), ['a'])
+})
+
+test('ModelCatalogCache cancellation detaches one waiter and not the shared request', async () => {
+  const cache = new ModelCatalogCache()
+  const controller = new AbortController()
+  let finish!: (models: { id: string; name: string }[]) => void
+  let calls = 0
+  const fetchOnce = (): Promise<{ id: string; name: string }[]> => {
+    calls += 1
+    return new Promise(resolve => { finish = resolve })
+  }
+  const detaching = cache.refresh(fetchOnce, { signal: controller.signal })
+  await settle()
+  const joined = cache.refresh(fetchOnce)
+  controller.abort()
+  assert.deepEqual(await detaching, { status: 'cancelled' })
+  assert.equal(calls, 1, 'the cancelled waiter owns no separate request')
+  finish([{ id: 'a', name: 'A' }])
+  assert.equal((await joined).status, 'fetched')
+  // The cancelled waiter did not abort what the other one awaited.
+  assert.deepEqual((await cache.read())?.map(model => model.id), ['a'])
 })
 
 test('ModelCatalogCache invalidate drops in-flight work so it cannot write back', async () => {
   const cache = new ModelCatalogCache()
   let finishFirst!: (models: { id: string; name: string }[]) => void
-  const first = cache.get(() => new Promise(resolve => {
-    finishFirst = resolve
-  }))
+  const first = cache.refresh(() => new Promise(resolve => { finishFirst = resolve }), { force: true })
   await settle()
   cache.invalidate()
-  const second = cache.get(() => Promise.resolve([{ id: 'good', name: 'Good' }]))
+  const second = cache.refresh(() => Promise.resolve([{ id: 'good', name: 'Good' }]), { force: true })
   finishFirst([{ id: 'expired', name: 'Expired' }])
-  assert.deepEqual((await first).map(model => model.id), ['expired'])
-  assert.deepEqual((await second).map(model => model.id), ['good'])
+  assert.equal((await first).status, 'fetched')
+  assert.equal((await second).status, 'fetched')
   assert.deepEqual(cache.lastKnown()?.map(model => model.id), ['good'])
 })
 
-test('grok resolveModel on a cold cache fetches the catalog itself', async () => {
+test('ModelCatalogCache persists per account and reports an unreadable file once', async () => {
+  const store = memoryAccountStore()
+  const alpha = new ModelCatalogCache({ persistence: store('alpha') })
+  const beta = new ModelCatalogCache({ persistence: store('beta') })
+  await alpha.refresh(() => Promise.resolve([{ id: 'a', name: 'A' }]), { force: true })
+  await beta.refresh(() => Promise.resolve([{ id: 'b', name: 'B' }]), { force: true })
+  assert.deepEqual(store.snapshot('alpha')?.models.map(model => model.id), ['a'])
+  assert.deepEqual(store.snapshot('beta')?.models.map(model => model.id), ['b'])
+  // A second cache over the same entry seeds from disk, exactly as a restart does.
+  const reloaded = new ModelCatalogCache({ persistence: store('alpha') })
+  assert.deepEqual((await reloaded.read())?.map(model => model.id), ['a'])
+
+  const warnings: string[] = []
+  const broken = new ModelCatalogCache({
+    persistence: {
+      load: () => Promise.reject(new Error('EACCES')),
+      save: () => Promise.resolve(),
+      clear: () => Promise.resolve(),
+    },
+    onWarn: message => warnings.push(message),
+    label: 'codex',
+  })
+  assert.equal(await broken.read(), undefined)
+  assert.equal(warnings.length, 1, 'an unreadable cache is reported, not silently treated as the provider answer')
+  assert.match(warnings[0], /codex catalogue cache could not be read/)
+})
+
+test('grok resolveModel never fetches: a cold cache answers from the built-in metadata', async () => {
+  let calls = 0
+  const dual = grokDualFetch()
+  const counting: FetchFn = ((input: RequestInfo | URL, init?: RequestInit) => {
+    calls += 1
+    return dual(input, init)
+  }) as FetchFn
   const adapter = new GrokAdapter({
     models: STATIC_GROK,
     streamIdleTimeoutMs: 1000,
     tokens: memoryTokens(grokSession),
     discovery: true,
-    fetchFn: grokDualFetch(),
+    fetchFn: counting,
   })
-  // No listModels first: after a restart, a resumed session's prepareCall can
-  // be the first caller.
+  // No refresh first: after a restart, a resumed session's prepareCall can be
+  // the first caller, and it must not turn a capability read into discovery.
   const resolved = await adapter.resolveModel('grok', 'grok-4.6')
-  assert.deepEqual(resolved.reasoning?.efforts.map(effort => effort.id), ['xhigh', 'high', 'medium', 'low'])
-  assert.equal(resolved.reasoning?.defaultEffort, 'high')
+  assert.equal(calls, 0, 'resolveModel started a provider request')
+  assert.equal(resolved.reasoning, undefined, 'nothing was discovered yet, so no effort is claimed')
+  assert.equal(resolved.context?.contextWindow, 256_000)
+  // An explicit refresh is what discovers, and the read then serves it.
+  await primeCatalog(adapter, 'grok')
+  assert.equal(calls, 2, 'the refresh is the one place a catalogue request happens')
+  const discovered = await adapter.resolveModel('grok', 'grok-4.6')
+  assert.deepEqual(discovered.reasoning?.efforts.map(effort => effort.id), ['xhigh', 'high', 'medium', 'low'])
+  assert.equal(discovered.reasoning?.defaultEffort, 'high')
 })
 
 test('grok resolveModel falls back to the persisted catalog when discovery fails', async () => {
   const store = memoryCatalogStore({
-    // One hour old: well past the TTL, so only the fallback path can serve it.
-    at: Date.now() - 3_600_000,
+    // Past the freshness window, and still what a read serves: freshness only
+    // decides when a refresh MAY run.
+    at: Date.now() - PAST_FRESHNESS_MS,
     models: [{
       id: 'grok-4.6',
       name: 'Grok 4.6',
@@ -1321,17 +1558,16 @@ test('grok discovery writes the fetched catalog through to the store', async () 
     fetchFn: grokDualFetch(),
     catalogStore: store,
   })
-  await adapter.listModels('grok')
-  await settle()
+  await primeCatalog(adapter, 'grok')
   const snapshot = store.saved()
   assert.notEqual(snapshot, undefined)
   const g46 = snapshot?.models.find(model => model.id === 'grok-4.6')
   assert.equal(g46?.reasoning?.defaultEffort, 'high')
 })
 
-test('grok listModels retries a 401 after a forced refresh before invalidating', async () => {
+test('an explicit refresh retries a 401 after a forced token refresh before invalidating', async () => {
   const store = memoryCatalogStore({
-    at: Date.now() - 3_600_000,
+    at: Date.now() - PAST_FRESHNESS_MS,
     models: [{
       id: 'grok-4.6',
       name: 'Grok 4.6',
@@ -1361,17 +1597,17 @@ test('grok listModels retries a 401 after a forced refresh before invalidating',
     fetchFn,
     catalogStore: store,
   })
+  await primeCatalog(adapter, 'grok')
   const models = await adapter.listModels('grok')
   assert.deepEqual(models.map(model => model.id), ['grok-4.6', 'grok-4.5', 'grok-build-0.1'])
   assert.equal(modelsCalls, 2)
-  await settle()
   assert.notEqual(store.saved(), undefined)
   assert.equal((await adapter.resolveModel('grok', 'grok-4.6')).reasoning?.defaultEffort, 'high')
 })
 
-test('grok listModels invalidates the catalog after a 401 that survives forced refresh', async () => {
+test('a 401 that survives the forced refresh drops the catalog instead of serving it', async () => {
   const store = memoryCatalogStore({
-    at: Date.now() - 3_600_000,
+    at: Date.now() - PAST_FRESHNESS_MS,
     models: [{
       id: 'grok-4.6',
       name: 'Grok 4.6',
@@ -1381,6 +1617,15 @@ test('grok listModels invalidates the catalog after a 401 that survives forced r
       },
     }],
   })
+  let saved: CatalogSnapshot | undefined
+  const storeWithSpy: CatalogStoreFactory = account => {
+    const persistence = store(account)
+    return {
+      load: persistence.load,
+      save: (snapshot) => { saved = snapshot; return persistence.save(snapshot) },
+      clear: persistence.clear,
+    }
+  }
   const fetchFn: FetchFn = ((url: unknown) => {
     const isCli = String(url).includes('cli-chat-proxy')
     return Promise.resolve(new Response(
@@ -1394,20 +1639,26 @@ test('grok listModels invalidates the catalog after a 401 that survives forced r
     tokens: memoryTokens(grokSession),
     discovery: true,
     fetchFn,
-    catalogStore: store,
+    catalogStore: storeWithSpy,
   })
+  await primeCatalog(adapter, 'grok')
   const models = await adapter.listModels('grok')
   assert.deepEqual(models.map(model => model.id), ['grok-4'])
-  await settle()
-  assert.equal(store.saved(), undefined)
+  assert.equal(saved, undefined, 'an auth failure must not persist a catalogue')
+  assert.equal(store.saved(), undefined, 'the dropped entry does not come back')
 })
 
-test('codex resolveModel on a cold cache fetches the catalog itself', async () => {
-  const { fetchFn } = fakeFetch(CODEX_MODELS_PAYLOAD)
+test('codex resolveModel never fetches: a cold cache answers the built-in capabilities', async () => {
+  const { fetchFn, calls } = fakeFetch(CODEX_MODELS_PAYLOAD)
   const adapter = codexAdapter({ session: codexSession, fetchFn })
   const resolved = await adapter.resolveModel('codex', 'gpt-5.2-codex')
-  assert.deepEqual(resolved.reasoning?.efforts.map(effort => effort.id), ['low', 'high'])
-  assert.equal(resolved.context?.contextWindow, 500_000)
+  assert.equal(calls(), 0, 'resolveModel started a provider request')
+  assert.equal(resolved.context?.contextWindow, 400_000)
+  await primeCatalog(adapter, 'codex')
+  assert.equal(calls(), 1)
+  const discovered = await adapter.resolveModel('codex', 'gpt-5.2-codex')
+  assert.deepEqual(discovered.reasoning?.efforts.map(effort => effort.id), ['low', 'high'])
+  assert.equal(discovered.context?.contextWindow, 500_000)
 })
 
 const STATIC_COPILOT = [{
@@ -1488,6 +1739,7 @@ test('copilot listModels returns [] when logged out', async () => {
 test('copilot listModels maps the discovered catalog and filters unusable entries', async () => {
   const { fetchFn } = fakeFetch(COPILOT_MODELS_PAYLOAD)
   const adapter = copilotAdapter({ session: copilotSession, fetchFn })
+  await primeCatalog(adapter, 'copilot')
   const models = await adapter.listModels('copilot')
   assert.deepEqual(models.map(model => model.id), ['gpt-4.1', 'o4-mini', 'gpt-5.6-sol'])
   // Vision support from the catalog becomes the model's input modalities.
@@ -1563,7 +1815,7 @@ test('copilot discovery tolerates duplicate, empty, and null effort entries', as
 test('copilot resolveModel serves discovered reasoning efforts', async () => {
   const { fetchFn } = fakeFetch(COPILOT_MODELS_PAYLOAD)
   const adapter = copilotAdapter({ session: copilotSession, fetchFn })
-  await adapter.listModels('copilot')
+  await primeCatalog(adapter, 'copilot')
   const resolved = await adapter.resolveModel('copilot', 'o4-mini')
   assert.deepEqual(resolved.reasoning?.efforts.map(effort => effort.id), ['low', 'medium', 'high'])
   const sol = await adapter.resolveModel('copilot', 'gpt-5.6-sol')
@@ -1578,6 +1830,7 @@ test('copilot resolveModel serves discovered reasoning efforts', async () => {
 test('copilot resolveModel serves discovered context windows and modalities', async () => {
   const { fetchFn } = fakeFetch(COPILOT_MODELS_PAYLOAD)
   const adapter = copilotAdapter({ session: copilotSession, fetchFn })
+  await primeCatalog(adapter, 'copilot')
   const resolved = await adapter.resolveModel('copilot', 'gpt-4.1')
   assert.equal(resolved.context?.contextWindow, 1_000_000)
   assert.deepEqual(resolved.inputModalities, ['text', 'image'])
@@ -1591,6 +1844,7 @@ test('copilot listModels falls back to the static catalog on discovery failure',
   const { fetchFn } = fakeFetch({ message: 'boom' }, 500)
   const warnings: string[] = []
   const adapter = copilotAdapter({ session: copilotSession, fetchFn, warnings })
+  await primeCatalog(adapter, 'copilot')
   const models = await adapter.listModels('copilot')
   assert.deepEqual(models.map(model => model.id), ['gpt-4o'])
   assert.deepEqual(models[0].inputModalities, ['text', 'image'])
@@ -1601,6 +1855,7 @@ test('copilot listModels treats an empty discovered catalog as a failure', async
   const { fetchFn } = fakeFetch({ data: [] })
   const warnings: string[] = []
   const adapter = copilotAdapter({ session: copilotSession, fetchFn, warnings })
+  await primeCatalog(adapter, 'copilot')
   const models = await adapter.listModels('copilot')
   assert.deepEqual(models.map(model => model.id), ['gpt-4o'])
   assert.equal(warnings.length, 1)
@@ -1672,7 +1927,7 @@ function abortableHang(): { fetchFn: FetchFn; signals: AbortSignal[] } {
   return { fetchFn, signals }
 }
 
-test('listModels keeps a healthy account catalog when the default account is expired', async () => {
+test('a healthy account catalogue survives the default account failing its refresh', async () => {
   const expired = { ...codexSession, accountId: 'expired', expiresAt: Date.now() - 1_000 }
   const good = { ...codexSession, accountId: 'good' }
   const solPayload = {
@@ -1693,6 +1948,9 @@ test('listModels keeps a healthy account catalog when the default account is exp
     fetchFn,
     discoveryTimeoutMs: 50,
   })
+  // One account's failed refresh sits that account out; the sibling still lists.
+  await primeCatalog(adapter, 'codex', 'expired')
+  await primeCatalog(adapter, 'codex', 'good')
   const models = await adapter.listModels('codex')
   assert.ok(models.some(model => model.id === 'gpt-5.6-sol'), models.map(model => model.id).join(','))
 })
@@ -1727,6 +1985,8 @@ test('listModels orders the account union by catalog priority', async () => {
     discovery: true,
     fetchFn,
   })
+  await primeCatalog(adapter, 'codex', 'plus')
+  await primeCatalog(adapter, 'codex', 'pro')
   const models = await adapter.listModels('codex')
   assert.deepEqual(models.map(model => model.id), [
     'gpt-5.6-sol',
@@ -1784,6 +2044,8 @@ test('resolveModel and Speed use a non-default account catalog for a model only 
     discovery: true,
     fetchFn,
   })
+  await primeCatalog(adapter, 'codex', 'plus')
+  await primeCatalog(adapter, 'codex', 'pro')
   const resolved = await adapter.resolveModel('codex', 'gpt-5.6-sol')
   assert.deepEqual(resolved.reasoning?.efforts.map(effort => effort.id), [
     'low',
@@ -1798,7 +2060,7 @@ test('resolveModel and Speed use a non-default account catalog for a model only 
   assert.deepEqual(await adapter.fastCapableModels(), ['gpt-5.6-sol'])
 })
 
-test('listModels sits out a hanging non-default account instead of blocking the picker', async () => {
+test('a hanging account is bounded by its own refresh, and its sibling still lists', async () => {
   const plus = { ...codexSession, accountId: 'plus' }
   const max = { ...codexSession, accountId: 'max' }
   const fetchFn = ((_url: string, init?: RequestInit) => {
@@ -1827,12 +2089,17 @@ test('listModels sits out a hanging non-default account instead of blocking the 
     discoveryTimeoutMs: 20,
   })
   const started = Date.now()
+  // The hanging account's own request is bounded by the route's timeout, so the
+  // explicit refresh reports it failed instead of blocking the caller.
+  const hung = await adapter.refreshOwnCatalog('codex', 'max')
+  assert.deepEqual(hung.failed, ['max'])
+  await primeCatalog(adapter, 'codex', 'plus')
   const models = await adapter.listModels('codex')
   assert.deepEqual(models.map(model => model.id), ['gpt-5.1-codex', 'gpt-5.2-codex'])
   assert.ok(Date.now() - started < 500)
 })
 
-test('clearAccountCatalog drops a non-default account cache so the next list refetches', async () => {
+test('clearAccountCatalog drops a non-default account cache so the next refresh requests again', async () => {
   const plus = { ...codexSession, accountId: 'plus' }
   const max = { ...codexSession, accountId: 'max' }
   const { fetchFn, calls } = fakeFetch(CODEX_MODELS_PAYLOAD)
@@ -1843,24 +2110,46 @@ test('clearAccountCatalog drops a non-default account cache so the next list ref
     discovery: true,
     fetchFn,
   })
+  await primeCatalog(adapter, 'codex', 'max')
   const first = await adapter.listOwnModels('codex', 'max')
   assert.deepEqual(first.map(model => model.id), ['gpt-5.1-codex', 'gpt-5.2-codex'])
-  await adapter.listOwnModels('codex', 'max')
+  await primeCatalog(adapter, 'codex', 'max')
   assert.equal(calls(), 1)
   adapter.clearAccountCatalog('max')
-  await adapter.listOwnModels('codex', 'max')
+  assert.deepEqual(
+    (await adapter.listOwnModels('codex', 'max')).map(model => model.id),
+    ['gpt-5.1-codex'],
+    'a dropped catalogue serves the built-in rows until the next refresh',
+  )
+  await primeCatalog(adapter, 'codex', 'max')
   assert.equal(calls(), 2)
 })
 
-test('clearAccountCatalog invalidates the default persisted catalog', async () => {
+test('clearAccountCatalog invalidates one account and leaves its sibling cached', async () => {
+  const plus = { ...codexSession, accountId: 'plus' }
+  const pro = { ...codexSession, accountId: 'pro' }
   const { fetchFn, calls } = fakeFetch(CODEX_MODELS_PAYLOAD)
-  const adapter = codexAdapter({ session: codexSession, fetchFn })
-  await adapter.listOwnModels('codex', 'acct')
-  await adapter.listOwnModels('codex', 'acct')
-  assert.equal(calls(), 1)
-  adapter.clearAccountCatalog('acct')
-  await adapter.listOwnModels('codex', 'acct')
+  const adapter = new CodexAdapter({
+    models: STATIC_CODEX,
+    streamIdleTimeoutMs: 1000,
+    tokens: memoryAccounts({ plus, pro }),
+    discovery: true,
+    fetchFn,
+  })
+  await primeCatalog(adapter, 'codex', 'plus')
+  await primeCatalog(adapter, 'codex', 'pro')
   assert.equal(calls(), 2)
+  adapter.clearAccountCatalog('pro')
+  assert.deepEqual(
+    (await adapter.listOwnModels('codex', 'plus')).map(model => model.id),
+    ['gpt-5.1-codex', 'gpt-5.2-codex'],
+  )
+  assert.deepEqual(
+    (await adapter.listOwnModels('codex', 'pro')).map(model => model.id),
+    ['gpt-5.1-codex'],
+  )
+  await primeCatalog(adapter, 'codex', 'pro')
+  assert.equal(calls(), 3, 'only the dropped account requests again')
 })
 
 test('fetchCodexModels forwards the abort signal and rejects when it fires', async () => {
@@ -1873,27 +2162,58 @@ test('fetchCodexModels forwards the abort signal and rejects when it fires', asy
   assert.equal(signals[0].aborted, true)
 })
 
-test('listOwnModels rethrows abort instead of falling back to the static catalog', async () => {
+test('a read is local: it answers from the built-in rows and ignores caller cancellation', async () => {
   const warnings: string[] = []
   const { fetchFn } = abortableHang()
   const adapter = codexAdapter({ session: codexSession, fetchFn, warnings })
+  // Nothing is known yet, so the built-in rows stand in — without any request.
+  assert.deepEqual(
+    (await adapter.listOwnModels('codex', 'acct')).map(model => model.id),
+    ['gpt-5.1-codex'],
+  )
+  // A caller that already cancelled gets no rows for that account rather than an
+  // error the picker would have to report.
   const controller = new AbortController()
-  const pending = adapter.listOwnModels('codex', 'acct', controller.signal)
   controller.abort()
-  await assert.rejects(pending)
+  assert.deepEqual(await adapter.listOwnModels('codex', 'acct', controller.signal), [])
   assert.deepEqual(warnings, [])
 })
 
-test('withTimeout returns undefined and aborts a hanging catalog fetch', async () => {
-  const { fetchFn, signals } = abortableHang()
+test('a cancelled waiter leaves the shared catalogue refresh running for its sibling', async () => {
+  const gate = deferred()
+  const calls: string[] = []
+  const fetchFn: FetchFn = (async (_url: string, init?: RequestInit) => {
+    calls.push('catalogue')
+    await gate.promise
+    init?.signal?.throwIfAborted()
+    return new Response(JSON.stringify(CODEX_MODELS_PAYLOAD), { status: 200 })
+  }) as FetchFn
   const adapter = codexAdapter({ session: codexSession, fetchFn })
-  const models = await withTimeout(
-    signal => adapter.listOwnModels('codex', 'acct', signal),
-    20,
+  const controller = new AbortController()
+  const detaching = adapter.refreshOwnCatalog('codex', 'acct', { signal: controller.signal })
+  await settle()
+  const joined = adapter.refreshOwnCatalog('codex', 'acct')
+  await settle()
+  assert.equal(calls.length, 1, 'the two callers share one request')
+  controller.abort()
+  assert.deepEqual((await detaching).cancelled, ['acct'])
+  gate.release()
+  assert.deepEqual((await joined).fetched, ['acct'], 'the sibling waiter still gets the result')
+  await adapter.drainOwnCatalogs()
+  assert.deepEqual(
+    (await adapter.listOwnModels('codex', 'acct')).map(model => model.id),
+    ['gpt-5.1-codex', 'gpt-5.2-codex'],
   )
-  assert.equal(models, undefined)
+})
+
+test('withTimeout bounds a catalogue refresh and the request it started is aborted', async () => {
+  const { fetchFn, signals } = abortableHang()
+  const adapter = codexAdapter({ session: codexSession, fetchFn, discoveryTimeoutMs: 20 })
+  const report = await adapter.refreshOwnCatalog('codex', 'acct')
+  assert.deepEqual(report.failed, ['acct'])
   assert.equal(signals.length, 1)
-  assert.equal(signals[0].aborted, true)
+  assert.equal(signals[0].aborted, true, 'a bounded request is aborted, not left running')
+  await adapter.drainOwnCatalogs()
 })
 
 test('withTimeout still settles when work ignores the abort signal', async () => {

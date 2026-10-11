@@ -226,3 +226,28 @@ export function forgetUnifiedRateLimit(provider?: ProviderId, account?: string):
     if (account === undefined ? held.startsWith(prefix) : held === key) captures.delete(held)
   }
 }
+
+/**
+ * Move one account's retained report to the canonical key the token store
+ * renamed it to, so the usage card keeps stating the provider's own standing for
+ * an account that is still the same login. When the new key already holds a
+ * report, the newer of the two is kept, so a rename never replaces a fresher
+ * answer with an older one.
+ * @param provider - the provider route.
+ * @param from - the key the report was retained under.
+ * @param to - the canonical key the account now resolves to.
+ */
+export function renameUnifiedRateLimit(provider: ProviderId, from: string, to: string): void {
+  const source = captureKey(provider, from)
+  const target = captureKey(provider, to)
+  if (source === target) return
+  const report = captures.get(source)
+  if (report === undefined) return
+  const held = captures.get(target)
+  captures.delete(source)
+  if (held !== undefined && held.observedAt >= report.observedAt) return
+  // Re-inserted at the most-recent end: only the eviction order of accounts that
+  // stopped answering changes, and the bound still holds.
+  captures.delete(target)
+  captures.set(target, report)
+}

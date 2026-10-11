@@ -279,12 +279,16 @@ test('consumeResetCredit invalidates the list cache and a usage read that was al
   const signal = new AbortController().signal
   await auth.listResetCredits('codex', 'a1', signal)
   assert.equal(lists, 1)
-  const staleUsage = auth.usage('codex', 'a1', signal)
+  // A plain usage read is a snapshot of what is already known; the two calls that
+  // must reach the endpoint ask for a refresh explicitly.
+  const staleUsage = auth.usage('codex', 'a1', signal, false, true)
   await auth.consumeResetCredit('codex', 'a1', CREDIT_ID, REQUEST_ID, signal)
-  const fresh = await auth.usage('codex', 'a1', signal)
+  const fresh = await auth.usage('codex', 'a1', signal, false, true)
   assert.equal(fresh.windows?.[0]?.usedPercent, 0)
   releaseFirst({ supported: true, windows: [{ kind: 'session', usedPercent: 100 }] })
-  assert.equal((await staleUsage).windows?.[0]?.usedPercent, 100)
+  // The superseded read is discarded whole, so its caller is answered with the
+  // newer retained reading rather than the older statement it fetched.
+  assert.equal((await staleUsage).windows?.[0]?.usedPercent, 0)
   const kept = await auth.usage('codex', 'a1', signal)
   assert.equal(kept.windows?.[0]?.usedPercent, 0, 'the older usage response must not replace the post-spend snapshot')
   await auth.listResetCredits('codex', 'a1', signal)
