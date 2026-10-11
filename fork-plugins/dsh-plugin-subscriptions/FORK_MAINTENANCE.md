@@ -6,9 +6,9 @@ This subtree carries the private `dsh-plugin-subscriptions` build shipped with t
 
 - Upstream repository: `https://github.com/V1ki/dsh-plugin-subscriptions.git`
 - Upstream tag: `v0.9.4`
-- Fork package version: `0.9.4-dsh017rc1.20`
+- Fork package version: `0.9.4-dsh017rc1.21`
 - Subtree path: `fork-plugins/dsh-plugin-subscriptions`
-- Distribution artifact: `fork-plugins/releases/dsh-plugin-subscriptions-0.9.4-dsh017rc1.20.tgz`
+- Distribution artifact: `fork-plugins/releases/dsh-plugin-subscriptions-0.9.4-dsh017rc1.21.tgz`
 
 ## Fork behavior
 
@@ -349,4 +349,4 @@ Import an exact reviewed tag through the subtree, reapply the RC.1 cohort and li
 
 ## Rollback
 
-Rollback changes only the pinned package and profile configuration after DSH stops. Preserve the plugin credential store and do not rewrite Session, attachment, or provider-account data. The artifact a rollback targets today is the retained previous release, `fork-plugins/releases/dsh-plugin-subscriptions-0.9.4-dsh017rc1.19.tgz`, installed through the same `pnpm add "dsh-plugin-subscriptions@file:<path>"` form the deployment step uses; the current release and every earlier tarball stay in `fork-plugins/releases/`. Never repack or delete a released tarball to make room.
+Rollback changes only the pinned package and profile configuration after DSH stops. Preserve the plugin credential store and do not rewrite Session, attachment, or provider-account data. The artifact a rollback targets today is the retained previous release, `fork-plugins/releases/dsh-plugin-subscriptions-0.9.4-dsh017rc1.20.tgz`, installed through the same `pnpm add "dsh-plugin-subscriptions@file:<path>"` form the deployment step uses; the current release and every earlier tarball stay in `fork-plugins/releases/`. Never repack or delete a released tarball to make room.

@@ -84,11 +84,11 @@ Image generation and editing share same-provider account scheduling: try the def
 
 ### DSH compatibility
 
-This fork artifact, `0.9.4-dsh017rc1.20`, is pinned to DSH `0.1.7-rc.1` and Cordis `4.0.4`. Its V4 tool-role translation, pinned Claude Code 2.1.288 wire, and UI were built and tested against that exact cohort; do not install it on an older DSH profile. The upstream public `0.9.4` package declares a broader peer range, which does not apply to this private artifact.
+This fork artifact, `0.9.4-dsh017rc1.21`, is pinned to DSH `0.1.7-rc.1` and Cordis `4.0.4`. Its V4 tool-role translation, pinned Claude Code 2.1.288 wire, and UI were built and tested against that exact cohort; do not install it on an older DSH profile. The upstream public `0.9.4` package declares a broader peer range, which does not apply to this private artifact.
 
 ### Managing accounts and pool models
 
-Open **Settings → Subscriptions → provider → Manage** to edit account aliases, automatic-pool participation and model allowlists, and independent account model entries. Existing accounts continue using automatic pooling by default. Independent entries stay bound to one account and never fall back to another account when unavailable. These settings govern LLM routing, not image/video/search tool account policies. See [Account and model management](docs/account-management.md).
+Open **Settings → Subscriptions → provider → Manage** to edit account aliases, automatic-pool participation and model allowlists, and independent account model entries. Each model appears once in the provider model list, carrying its own row settings and one pool checkbox per account whose catalog lists it; `(1M)` variants keep separate rows because each is a distinct wire id. Existing accounts continue using automatic pooling by default. Independent entries stay bound to one account and never fall back to another account when unavailable. These settings govern LLM routing, not image/video/search tool account policies. See [Account and model management](docs/account-management.md).
 
 ### Refreshing model lists
 
