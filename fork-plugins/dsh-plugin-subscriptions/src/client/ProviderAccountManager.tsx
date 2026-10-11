@@ -5,11 +5,10 @@ import type { AccountPreferences, ProviderPreferences } from '../provider-settin
 import type { SubscriptionProvider } from './SubscriptionsSection.js'
 import type { SubscriptionsKey } from './locales.js'
 import { callSubscriptionsAuth } from './subscriptions-rpc.js'
-import { accountModelRows, accountPoolSelection, mergeAccountChanges, mergeLatestAccounts } from './account-preferences.js'
-import type { AccountCatalogRow } from './account-preferences.js'
-import { modelRowLabel } from './format.js'
+import { accountPoolSelection, mergeAccountChanges, mergeLatestAccounts, unlistedPoolModels } from './account-preferences.js'
+import type { AccountCatalogRow, ModelPoolAccount } from './account-preferences.js'
 import { ProviderModelEditor } from './ProviderModelEditor.js'
-import type { ProviderModelEditorHandle } from './ProviderModelEditor.js'
+import type { ModelPoolEditing, ProviderModelEditorHandle } from './ProviderModelEditor.js'
 
 interface Catalog { settings: ProviderPreferences; accounts: AccountCatalogRow[] }
 interface Props {
@@ -71,6 +70,38 @@ export function ProviderAccountManager({ provider, name, rpc, t, onClose }: Prop
 
   function edit(key: string, next: AccountPreferences) {
     setChanges(current => ({ ...current, [key]: next }))
+  }
+  /** One account's pool preferences: this dialog's draft over the loaded catalog. */
+  function poolPreferences(key: string): AccountPreferences {
+    return changes[key] ?? catalog?.settings.accounts?.[key] ?? {}
+  }
+  /** Accounts the model list offers a pool checkbox for, aliased as the account rows show them. */
+  const poolAccounts: ModelPoolAccount[] = (catalog?.accounts ?? []).map(account => ({
+    key: account.key,
+    label: poolPreferences(account.key).alias ?? account.label,
+    models: account.models,
+  }))
+  /** One account's current pool selection, over the models its own catalog reports. */
+  function poolSelection(key: string): ReadonlySet<string> {
+    const account = catalog?.accounts.find(entry => entry.key === key)
+    return accountPoolSelection(poolPreferences(key), account?.models ?? [])
+  }
+  /** Record one model's pool membership for one account. */
+  function togglePoolModel(key: string, model: string): void {
+    const selected = new Set(poolSelection(key))
+    if (selected.has(model)) selected.delete(model)
+    else selected.add(model)
+    edit(key, { ...poolPreferences(key), poolModels: [...selected] })
+  }
+  /**
+   * The pool membership the model list carries. The list is the only place a model is
+   * listed, so each account's membership is edited on that model's own row.
+   */
+  const pool: ModelPoolEditing | undefined = catalog === undefined ? undefined : {
+    accounts: poolAccounts,
+    selectionOf: poolSelection,
+    toggle: togglePoolModel,
+    unlisted: unlistedPoolModels(poolAccounts, poolSelection),
   }
   /**
    * One submit for both drafts: the model editor's (visibility, effort,
@@ -143,8 +174,6 @@ export function ProviderAccountManager({ provider, name, rpc, t, onClose }: Prop
         {catalog.accounts.length === 0 && <p style={hint}>{t('accountsEmpty')}</p>}
         {catalog.accounts.map(account => {
           const preferences = changes[account.key] ?? catalog.settings.accounts?.[account.key] ?? {}
-          const selected = accountPoolSelection(preferences, account.models)
-          const models = accountModelRows(account, preferences)
           return <fieldset key={account.key} style={{ ...stack, border, borderRadius: 12, padding: 14, margin: 0 }}>
             <legend style={{ padding: '0 6px', fontWeight: 600, fontSize: 14, overflowWrap: 'anywhere', maxWidth: '100%' }}>{account.label}</legend>
             {account.unavailable && <p style={hint}>{t('accountsCatalogUnavailable')}</p>}
@@ -163,37 +192,22 @@ export function ProviderAccountManager({ provider, name, rpc, t, onClose }: Prop
             <label><input type="checkbox" checked={preferences.independentEntry === true}
               onChange={event => edit(account.key, { ...preferences, independentEntry: event.target.checked })} /> {t('accountsIndependent')}</label>
             <p style={hint}>{t('accountsIndependentHint')}</p>
-            <details>
-              <summary style={{ cursor: 'pointer', fontSize: 13 }}>{t('accountsModels')} · {preferences.poolModels === undefined
-                ? t('accountsModelsAll') : t('accountsModelsCount', { count: preferences.poolModels.length })}</summary>
-              <div style={{ ...stack, marginTop: 12 }}>
-                <p style={hint}>{t('accountsModelsHint')}</p>
-                <label><input type="checkbox" checked={preferences.poolModels === undefined} onChange={event => {
-                  const next = { ...preferences }
-                  if (event.target.checked) delete next.poolModels
-                  else next.poolModels = account.models.map(model => model.id)
-                  edit(account.key, next)
-                }} /> {t('accountsModelsAutomatic')}</label>
-                <div style={actions}>
-                  <button type="button" style={button} onClick={() => edit(account.key, { ...preferences, poolModels: models.map(model => model.id) })}>{t('modelsSelectAll')}</button>
-                  <button type="button" style={button} onClick={() => edit(account.key, { ...preferences, poolModels: [] })}>{t('modelsSelectNone')}</button>
-                </div>
-                <div style={{ ...stack, gap: 8, maxHeight: 240, overflowY: 'auto' }}>
-                  {models.map(model => <label key={model.id} style={{ fontSize: 13, overflowWrap: 'anywhere' }}>
-                    <input type="checkbox" checked={selected.has(model.id)} onChange={event => {
-                      const next = new Set(selected)
-                      if (event.target.checked) next.add(model.id); else next.delete(model.id)
-                      edit(account.key, { ...preferences, poolModels: [...next] })
-                    }} /> {modelRowLabel(t, model)}
-                  </label>)}
-                  {models.length === 0 && <p style={hint}>{t('accountsNoModels')}</p>}
-                </div>
-              </div>
-            </details>
+            <span style={{ fontSize: 13, fontWeight: 600 }}>{t('accountsModels')}</span>
+            <label><input type="checkbox" checked={preferences.poolModels === undefined} onChange={event => {
+              const next = { ...preferences }
+              if (event.target.checked) delete next.poolModels
+              else next.poolModels = account.models.map(model => model.id)
+              edit(account.key, next)
+            }} /> {t('accountsModelsAutomatic')}</label>
+            <p style={hint}>{t('accountsModelsHint')}</p>
+            <div style={actions}>
+              <button type="button" style={button} onClick={() => edit(account.key, { ...preferences, poolModels: account.models.map(model => model.id) })}>{t('modelsSelectAll')}</button>
+              <button type="button" style={button} onClick={() => edit(account.key, { ...preferences, poolModels: [] })}>{t('modelsSelectNone')}</button>
+            </div>
           </fieldset>
         })}
       </fieldset>}
-      <ProviderModelEditor ref={editor} provider={provider} rpc={rpc} t={t} disabled={saving} onDirtyChange={setModelsDirty} />
+      <ProviderModelEditor ref={editor} provider={provider} rpc={rpc} t={t} disabled={saving} onDirtyChange={setModelsDirty} pool={pool} />
       <footer style={{ ...stack, gap: 8, borderTop: border, padding: '14px 0 0',
         position: 'sticky', bottom: 0, background: 'var(--dsw-alias-bg-layer-1)' }}>
         {saveError && <p role="alert" style={{ ...hint, color: 'var(--dsw-alias-state-error-primary)' }}>{saveError}</p>}

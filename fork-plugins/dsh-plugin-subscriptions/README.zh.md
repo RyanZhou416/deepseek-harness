@@ -26,9 +26,9 @@
 
 ![推理等级选择器](https://raw.githubusercontent.com/V1ki/dsh-plugin-subscriptions/main/docs/images/model-effort.png)
 
-目录声明了 fast tier 的模型,会在输入框工具行(模型选择器旁)多出一个**速度**开关 —— 标准 / 快速。快速按各路由自己的优先信号发送:Codex 发 `service_tier: priority`,Cursor 发目录的 `fast` 参数,Claude 发 Claude Code 目录的 `speed: fast` 字段以及声明该档位的 beta。该选择按模型保存,与默认推理档存在一起,因此新会话与重启后仍然保留;「管理」里的模型列表也会在每个支持快速档的模型旁给出同样的标准/快速选择。`/fast` 斜杠命令提供同样的弹窗选择;当前模型不支持快速档时会提示原因。
+目录声明了 fast tier 的模型,会在输入框的模型菜单里(模型行与推理档行下方)多出一行**速度** —— 标准 / 快速。快速按各路由自己的优先信号发送:Codex 发 `service_tier: priority`,Cursor 发目录的 `fast` 参数,Claude 发 Claude Code 目录的 `speed: fast` 字段以及声明该档位的 beta。该选择按模型保存,与默认推理档存在一起,因此新会话与重启后仍然保留;「管理」里的模型列表也会在每个支持快速档的模型旁给出同样的标准/快速选择。`/fast` 斜杠命令提供同样的弹窗选择;当前模型不支持快速档时会提示原因。
 
-![速度开关及其标准/快速菜单](https://raw.githubusercontent.com/V1ki/dsh-plugin-subscriptions/main/docs/images/speed-toggle.png)
+![模型菜单里的速度行及其展开的标准/快速选项](https://raw.githubusercontent.com/V1ki/dsh-plugin-subscriptions/main/docs/images/speed-toggle.png)
 
 输入框下方的统计行会多出一个**订阅用量**胶囊，显示当前会话所选模型对应服务商的剩余额度窗口（选 GPT 模型时显示 Codex，选 Grok 模型时显示 Grok，以此类推）。点击即可展开查看所有已登录服务商及其全部账号 —— 默认账号带星标，当前服务商排在最前：
 

@@ -26,9 +26,9 @@ Models that advertise reasoning levels get an **Effort** selector in the same me
 
 ![Reasoning effort selector](https://raw.githubusercontent.com/V1ki/dsh-plugin-subscriptions/main/docs/images/model-effort.png)
 
-Models whose catalog advertises a fast tier get a **Speed** toggle in the composer's tool row, next to the model selector — Standard or Fast. Fast is each route's own priority signal: Codex sends `service_tier: priority`, Cursor its catalog `fast` parameter, and Claude the Claude Code catalog's `speed: fast` field together with the beta that declares it. The choice is stored per model beside its default reasoning effort, so it survives a new session and a restart, and the model list in **Manage** offers the same Standard/Fast picker next to the effort selector. The `/fast` slash command offers the same choice as a popup; it errors with an explanation when the current model has no fast tier.
+Models whose catalog advertises a fast tier get a **Speed** row inside the composer's model menu, under the model and reasoning-level rows — Standard or Fast. Fast is each route's own priority signal: Codex sends `service_tier: priority`, Cursor its catalog `fast` parameter, and Claude the Claude Code catalog's `speed: fast` field together with the beta that declares it. The choice is stored per model beside its default reasoning effort, so it survives a new session and a restart, and the model list in **Manage** offers the same Standard/Fast picker next to the effort selector. The `/fast` slash command offers the same choice as a popup; it errors with an explanation when the current model has no fast tier.
 
-![Speed toggle with the Standard/Fast menu open](https://raw.githubusercontent.com/V1ki/dsh-plugin-subscriptions/main/docs/images/speed-toggle.png)
+![Speed row inside the model menu, with its Standard/Fast options open](https://raw.githubusercontent.com/V1ki/dsh-plugin-subscriptions/main/docs/images/speed-toggle.png)
 
 The composer's stats row gains a **subscription usage** pill showing the remaining rate-limit window for the provider of the session's current model (Codex when a GPT model is selected, Grok for a Grok model, and so on). Click it to expand every logged-in provider and account — the default account is starred, and the current provider is listed first:
 

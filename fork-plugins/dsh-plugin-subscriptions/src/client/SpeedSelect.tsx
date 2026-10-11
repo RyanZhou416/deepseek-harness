@@ -1,12 +1,13 @@
 /**
- * Speed toggle: one small control in the composer's right tool row
- * (`conversation.input.right`), switching the session's current model between
- * standard routing and the fast tier. Codex uses its priority service tier;
- * Cursor sends the catalog `fast` parameter; Claude sends the catalogue's
- * `speed` field. The choice is stored per provider model in the node half
- * (durable, alongside the per-model effort defaults); this component holds only
- * viewing state. The control renders nothing until the current model
- * advertises a fast tier.
+ * Speed row: one row inside the composer's model menu
+ * (`conversation.input.model.row`, the additive child of the model seat), opening
+ * the two tiers in place, switching the session's current model between standard
+ * routing and the fast tier. Codex uses its priority service tier; Cursor sends the
+ * catalog `fast` parameter; Claude sends the catalogue's `speed` field. The choice is
+ * stored per provider model in the node half (durable, alongside the per-model effort
+ * defaults); this component holds only viewing state. The row renders nothing until
+ * the current model advertises a fast tier, which is also what keeps the composer's
+ * separate control gone: the setting lives here, in the menu that selects the model.
  *
  * Every color resolves through a `--dsw-alias-*` design token and every
  * user-visible string goes through the locale `t` of the
@@ -14,6 +15,7 @@
  */
 import { useEffect, useRef, useState } from 'react'
 import type { CSSProperties } from 'react'
+import { IconCheckOutlineRegular, IconChevronRightOutlineRegular } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import type { ConnectionHandle } from '@deepseek-ai/dsh-api-remotes/client'
 import { callSubscriptionsAuth } from './SubscriptionsSection.js'
@@ -105,11 +107,11 @@ export interface SpeedSelectInjected {
 }
 
 /**
- * Props delivered by the slot outlet: the framework session kit and InputZone
- * owner share (unused — everything arrives session-bound through the inject
- * face), the injected callbacks, and the locale seat.
+ * Props delivered by the slot outlet: the framework session kit and the model
+ * seat's row owner share (unused — everything arrives session-bound through the
+ * inject face), the injected callbacks, and the locale seat.
  */
-export type SpeedSelectProps = PropsRuntime<'conversation.input.right'>
+export type SpeedSelectProps = PropsRuntime<'conversation.input.model.row'>
   & Partial<SpeedSelectInjected>
   & Partial<PropsLocale<'settings.subscriptions'>>
 
@@ -221,23 +223,18 @@ function fallbackTranslate(key: SubscriptionsKey): string {
 
 const TIERS: readonly SpeedTier[] = ['standard', 'fast']
 
-/**
- * The composer Speed control: a trigger reading `速度 · 快速`/`速度 · 标准`
- * that opens a two-row menu (standard/fast with descriptions, check mark on
- * the current tier). Mount and every open reload the host state so a model
- * switch made since the last open self-corrects.
- */
-/** How often the control re-reads the host state (model switches arrive only by asking). */
+/** How often the row re-reads the host state (model switches arrive only by asking). */
 const POLL_INTERVAL_MS = 3000
 
 /**
- * The composer Speed control: a trigger reading `速度 · 快速`/`速度 · 标准`
- * that opens a two-row menu (standard/fast with descriptions, check mark on
- * the current tier). The host pushes nothing on a model switch, so the
- * control re-reads on a slow poll with a single-flight guard; a failed read
- * keeps the last known state, so a transient RPC failure can never lock the
- * toggle away. Every read is stamped with the choice generation it started
- * under, and {@link settleRead} drops one that a later choice superseded.
+ * The model menu's Speed row: a cell reading `速度` and the current tier, opening
+ * the two tiers in place (standard/fast with descriptions, a check on the current
+ * one). The cell keeps the shape of the seat's own root cells — label, current
+ * value, chevron — so the row reads as one of them. The host pushes nothing on a
+ * model switch, so the row re-reads on a slow poll with a single-flight guard; a
+ * failed read keeps the last known state, so a transient RPC failure can never
+ * lock the choice away. Every read is stamped with the choice generation it
+ * started under, and {@link settleRead} drops one that a later choice superseded.
  */
 export function SpeedSelect({ loadSpeed, setSpeed, t }: SpeedSelectProps) {
   const translate = t ?? fallbackTranslate
@@ -329,7 +326,7 @@ export function SpeedSelect({ loadSpeed, setSpeed, t }: SpeedSelectProps) {
     translate(tier === 'fast' ? 'speedFast' : 'speedStandard')
   const tierDescription = (tier: SpeedTier): string =>
     translate(tier === 'fast' ? 'speedFastDescription' : 'speedStandardDescription')
-  const triggerLabel = `${translate('speed')} · ${tierName(state.tier)}`
+  const cellAria = `${translate('speed')} · ${tierName(state.tier)}`
 
   return (
     <div
@@ -342,8 +339,28 @@ export function SpeedSelect({ loadSpeed, setSpeed, t }: SpeedSelectProps) {
         }
       }}
     >
+      <button
+        type="button"
+        role="menuitem"
+        style={styles.cell}
+        aria-haspopup="menu"
+        aria-expanded={open}
+        aria-label={cellAria}
+        title={cellAria}
+        disabled={busy}
+        onClick={() => {
+          if (open) setOpen(false)
+          else show()
+        }}
+      >
+        <span style={styles.cellLabel}>{translate('speed')}</span>
+        <span style={styles.cellValue}>{tierName(state.tier)}</span>
+        <span style={{ ...styles.cellChevron, ...(open ? styles.cellChevronOpen : {}) }}>
+          <IconChevronRightOutlineRegular size={12} />
+        </span>
+      </button>
       {open && (
-        <div style={styles.menu} role="menu" aria-label={translate('speed')}>
+        <div style={styles.options} role="menu" aria-label={translate('speed')}>
           {failed && <p role="alert" style={styles.error}>{translate('speedSaveFailed')}</p>}
           {TIERS.map(tier => (
             <button
@@ -351,63 +368,60 @@ export function SpeedSelect({ loadSpeed, setSpeed, t }: SpeedSelectProps) {
               type="button"
               role="menuitemradio"
               aria-checked={tier === state.tier}
-              style={styles.item}
+              style={styles.option}
               disabled={busy}
               onClick={() => { choose(tier) }}
             >
-              <span style={styles.itemCheck}>{tier === state.tier ? '✓' : ''}</span>
-              <span style={styles.itemText}>
-                <span style={styles.itemName}>{tierName(tier)}</span>
-                <span style={styles.itemDescription}>{tierDescription(tier)}</span>
+              <span style={styles.optionText}>
+                <span style={styles.optionName}>{tierName(tier)}</span>
+                <span style={styles.optionDescription}>{tierDescription(tier)}</span>
               </span>
+              <span style={styles.optionCheck}>{tier === state.tier ? <IconCheckOutlineRegular size={14} /> : null}</span>
             </button>
           ))}
         </div>
       )}
-      <button
-        type="button"
-        style={styles.trigger}
-        aria-haspopup="menu"
-        aria-expanded={open}
-        title={triggerLabel}
-        disabled={busy}
-        onClick={() => {
-          if (open) setOpen(false)
-          else show()
-        }}
-      >
-        {triggerLabel}
-      </button>
     </div>
   )
 }
 
+/**
+ * Row metrics mirror ui-model-selection's ModelSelect cells (`.cell`, `.option`):
+ * this row renders inside that menu card, between the seat's own rows.
+ */
 const styles: Record<string, CSSProperties> = {
-  root: { position: 'relative', display: 'inline-flex' },
-  trigger: {
-    border: '1px solid var(--dsw-alias-border-l2)', borderRadius: 8,
-    background: 'transparent', color: 'var(--dsw-alias-label-secondary)',
-    font: 'inherit', fontSize: 12, lineHeight: '18px',
-    padding: '2px 8px', cursor: 'pointer', whiteSpace: 'nowrap',
+  root: { display: 'flex', flexDirection: 'column' },
+  cell: {
+    boxSizing: 'border-box', display: 'flex', alignItems: 'center', gap: 6,
+    width: 'auto', minWidth: '100%', height: 34, padding: '0 8px',
+    border: 'none', borderRadius: 8, background: 'transparent',
+    color: 'var(--dsw-alias-label-primary)', font: 'inherit',
+    fontSize: 13, lineHeight: '20px', textAlign: 'left', cursor: 'pointer',
   },
-  menu: {
-    position: 'absolute', bottom: '100%', right: 0, marginBottom: 4,
-    minWidth: 180, padding: 4, zIndex: 20,
-    background: 'var(--dsw-alias-bg-layer-1)', border: '1px solid var(--dsw-alias-border-l2)',
-    borderRadius: 8, display: 'flex', flexDirection: 'column', gap: 2,
+  cellLabel: { flexGrow: 0, flexShrink: 0, flexBasis: 'auto', whiteSpace: 'nowrap' },
+  cellValue: {
+    flex: '1 1 auto', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis',
+    whiteSpace: 'nowrap', textAlign: 'right', color: 'var(--dsw-alias-label-tertiary)',
   },
-  item: {
-    display: 'flex', alignItems: 'flex-start', gap: 6, width: '100%',
-    border: 'none', borderRadius: 6, background: 'transparent',
-    padding: '6px 8px', cursor: 'pointer', font: 'inherit', textAlign: 'left',
+  cellChevron: {
+    display: 'inline-flex', flex: '0 0 auto', color: 'var(--dsw-alias-label-tertiary)',
+    transition: 'transform 120ms ease',
   },
-  itemCheck: {
-    width: 14, flexShrink: 0, fontSize: 12, lineHeight: '18px',
+  cellChevronOpen: { transform: 'rotate(90deg)' },
+  options: { display: 'flex', flexDirection: 'column' },
+  option: {
+    boxSizing: 'border-box', display: 'flex', alignItems: 'center', gap: 6,
+    width: 'auto', minWidth: '100%', minHeight: 34, padding: '5px 7px',
+    border: 'none', borderRadius: 8, background: 'transparent',
+    color: 'inherit', font: 'inherit', textAlign: 'left', cursor: 'pointer',
+  },
+  optionText: { display: 'flex', flex: '1', flexDirection: 'column', minWidth: 0 },
+  optionName: { fontSize: 13, lineHeight: '18px', fontWeight: 500, color: 'var(--dsw-alias-label-primary)' },
+  optionDescription: { fontSize: 12, lineHeight: '16px', color: 'var(--dsw-alias-label-tertiary)' },
+  optionCheck: {
+    display: 'grid', placeItems: 'center', flex: '0 0 14px',
     color: 'var(--dsw-alias-label-primary)',
   },
-  itemText: { display: 'flex', flexDirection: 'column' },
-  itemName: { fontSize: 12, lineHeight: '18px', color: 'var(--dsw-alias-label-primary)' },
-  itemDescription: { fontSize: 11, lineHeight: '16px', color: 'var(--dsw-alias-label-tertiary)' },
   error: {
     margin: 0, padding: '4px 8px', fontSize: 11, lineHeight: '16px',
     color: 'var(--dsw-alias-state-error-primary)',

@@ -4,11 +4,14 @@ import type { ConnectionHandle } from '@deepseek-ai/dsh-api-remotes/client'
 import type { ProviderPreferences, SubscriptionTool } from '../provider-settings.js'
 import type { SubscriptionProvider } from './SubscriptionsSection.js'
 import { callSubscriptionsAuth } from './subscriptions-rpc.js'
+import { modelPoolCells } from './account-preferences.js'
+import type { ModelPoolAccount } from './account-preferences.js'
 import { modelRowLabel } from './format.js'
 import type { SpeedTier } from './SpeedSelect.js'
 import type { SubscriptionsKey } from './locales.js'
 
-interface ModelRow {
+/** One row of the model list: a catalog model, or a saved id the catalog no longer lists. */
+export interface ModelRow {
   id: string
   name: string
   /** The provider's own reason for refusing the model, or absent when it may serve. */
@@ -29,6 +32,49 @@ interface Catalog {
   models: ModelRow[]
   tools: SubscriptionTool[]
 }
+
+/**
+ * The pool membership the model rows carry. One account's membership is edited on the
+ * model's own row, so the dialog lists every model exactly once.
+ */
+export interface ModelPoolEditing {
+  /** Accounts offering a checkbox, in dialog order. */
+  accounts: readonly ModelPoolAccount[]
+  /** One account's current pool selection. */
+  selectionOf: (key: string) => ReadonlySet<string>
+  /** Toggle one model's membership in one account's pool. */
+  toggle: (key: string, model: string) => void
+  /** Ids a saved allowlist names that no catalog lists any more; each keeps its row. */
+  unlisted: readonly string[]
+}
+
+/**
+ * The rows the model list renders, each model exactly once: the provider's catalog in its own
+ * order, then the saved ids the catalog no longer lists (hidden models and saved pool
+ * memberships), filtered by the search box.
+ * @param catalog - the provider's catalog rows.
+ * @param saved - saved ids the catalog no longer lists.
+ * @param query - the raw search box value.
+ * @returns the render rows.
+ */
+export function composeModelRows(
+  catalog: readonly ModelRow[],
+  saved: readonly string[],
+  query: string,
+): ModelRow[] {
+  const known = new Set(catalog.map(model => model.id))
+  const seen = new Set(known)
+  const rows = [...catalog]
+  for (const id of saved) {
+    if (seen.has(id)) continue
+    seen.add(id)
+    rows.push({ id, name: id })
+  }
+  const needle = query.trim().toLowerCase()
+  return needle === ''
+    ? rows
+    : rows.filter(model => `${model.name} ${model.id}`.toLowerCase().includes(needle))
+}
 interface Props {
   provider: SubscriptionProvider
   rpc: ConnectionHandle['rpc']
@@ -37,6 +83,8 @@ interface Props {
   disabled?: boolean
   /** Reports whether the draft differs from the loaded catalog. */
   onDirtyChange?: (dirty: boolean) => void
+  /** Per-account pool membership rendered on each model row; absent while the catalog loads. */
+  pool?: ModelPoolEditing | undefined
 }
 
 /** The editor's unsaved edits, collected by the owning dialog's single Save. */
@@ -71,7 +119,7 @@ const actions: CSSProperties = { display: 'flex', flexWrap: 'wrap', gap: 8, alig
  * in one go, so there is a single Save/Cancel pair.
  */
 export const ProviderModelEditor = forwardRef<ProviderModelEditorHandle, Props>(function ProviderModelEditor(
-  { provider, rpc, t, disabled = false, onDirtyChange }, ref,
+  { provider, rpc, t, disabled = false, onDirtyChange, pool }, ref,
 ) {
   const [catalog, setCatalog] = useState<Catalog>()
   const [draft, setDraft] = useState<ProviderPreferences>({})
@@ -145,8 +193,11 @@ export const ProviderModelEditor = forwardRef<ProviderModelEditorHandle, Props>(
 
   const allModels = catalog?.models ?? []
   const known = new Set(allModels.map(model => model.id))
-  const missing = (draft.visibleModels ?? []).filter(id => !known.has(id)).map(id => ({ id, name: id } as ModelRow))
-  const models = [...allModels, ...missing].filter(model => `${model.name} ${model.id}`.toLowerCase().includes(query.trim().toLowerCase()))
+  const saved = [
+    ...(draft.visibleModels ?? []),
+    ...pool?.unlisted ?? [],
+  ].filter(id => !known.has(id))
+  const models = composeModelRows(allModels, saved, query)
   const selected = new Set(draft.visibleModels ?? allModels.map(model => model.id))
   return <div style={{ borderTop: border, marginTop: 12, paddingTop: 12 }}>
     <h3 style={{ margin: 0, fontSize: 15 }}>{t('modelsEdit')}</h3>
@@ -171,12 +222,24 @@ export const ProviderModelEditor = forwardRef<ProviderModelEditorHandle, Props>(
           <button type="button" style={control} onClick={() => edit({ ...draft, visibleModels: [] })}>{t('modelsSelectNone')}</button>
         </div>
         <div style={{ maxHeight: 360, overflowY: 'auto', display: 'grid', gap: 8 }}>
-          {models.map(model => <div key={model.id} style={{ borderBottom: border, padding: '8px 2px', display: 'grid', gap: 8 }}>
+          {models.map(model => {
+            const cells = pool === undefined ? [] : modelPoolCells(model.id, pool.accounts, pool.selectionOf)
+            return <div key={model.id} style={{ borderBottom: border, padding: '8px 2px', display: 'grid', gap: 8 }}>
             <label style={{ overflowWrap: 'anywhere' }}><input type="checkbox" checked={selected.has(model.id)} onChange={event => {
               const next = new Set(selected)
               if (event.target.checked) next.add(model.id); else next.delete(model.id)
               edit({ ...draft, visibleModels: [...next] })
             }} /> {modelRowLabel(t, { ...model, unavailable: !known.has(model.id) })}</label>
+            {pool !== undefined && cells.length > 0 && <div style={actions}>
+              <span style={{ fontSize: 12, color: 'var(--dsw-alias-label-tertiary)' }}>{t('modelsPool')}</span>
+              {cells.map(cell => <label key={cell.key} style={actions}>
+                <input type="checkbox" checked={cell.allowed} aria-label={`${model.name} ${cell.label}`}
+                  onChange={() => { pool.toggle(cell.key, model.id) }} /> {cell.label}
+                {cell.disabledReason !== undefined && <span style={{ fontSize: 12, color: 'var(--dsw-alias-label-tertiary)' }}>
+                  · {t('modelsDisabled', { reason: cell.disabledReason })}
+                </span>}
+              </label>)}
+            </div>}
             <div style={actions}>
             {(model.efforts?.length ?? 0) > 0 && <label style={actions}>{t('modelDefaultsTitle')}
               <select style={control} aria-label={`${model.name} ${t('modelDefaultsTitle')}`}
@@ -208,7 +271,8 @@ export const ProviderModelEditor = forwardRef<ProviderModelEditorHandle, Props>(
               <small>{t('modelsContextBounds', { default: model.defaultContextWindow, max: model.maxContextWindow })}</small>
             </div>}
             </div>
-          </div>)}
+          </div>
+          })}
           {models.length === 0 && <span>{t('modelDefaultsFilterEmpty', { query })}</span>}
         </div>
         {(provider === 'codex' || provider === 'cursor') && <small>{t('modelsContextHint')}</small>}

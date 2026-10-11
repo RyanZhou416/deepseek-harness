@@ -13,7 +13,7 @@ import type { Context as ClientContext } from '@deepseek-ai/cordis'
 import type { ConnectionHandle } from '@deepseek-ai/dsh-api-remotes/client'
 // Type-only: pulls the shell's SlotMap merge (the 'settings.section' entry).
 import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
-// Type-only: pulls ui-conversation's SlotMap merge (the 'conversation.input.right' entry).
+// Type-only: pulls ui-conversation's SlotMap merge (the 'conversation.input.model.row' entry).
 import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
 // Type-only: pulls the locale plugin's Context merge (ctx.locale).
 import type {} from '@deepseek-ai/dsh-client-locale/client'
@@ -113,15 +113,18 @@ export function apply(ctx: ClientContext): void {
     inject: videoToolviewInjected,
   }, VideoGenerateToolview))
 
-  // The composer Speed toggle (codex fast tier) sits in the right tool row,
-  // just left of the model selector; the framework synthesizes its `t` seat
-  // from `locale: NS`, and the inject face binds each session's RPC calls.
-  // The current-model read rides ui-model-selection's `modelDirectories`
-  // service, resolved lazily so registration order never matters.
+  // The Speed row lives inside the composer's model menu, under the model and
+  // effort cells, so one setting has one control: ui-model-selection declares
+  // `conversation.input.model.row` as an additive child of its `conversation.input.model`
+  // seat, and this contribution renders the row. The framework synthesizes its `t` seat
+  // from `locale: NS`, and the inject face binds each session's RPC calls. The row hides
+  // itself for models whose catalog advertises no fast tier. The current-model read rides
+  // ui-model-selection's `modelDirectories` service, resolved lazily so registration order
+  // never matters.
   const models = (): ModelDirectoriesLike | undefined =>
     ctx.get('modelDirectories') as ModelDirectoriesLike | undefined
-  ctx.slots.inject('conversation.input.right', () => ctx.slots.register({
-    name: 'conversation.input.right',
+  ctx.slots.inject('conversation.input.model.row', () => ctx.slots.register({
+    name: 'conversation.input.model.row',
     id: 'codex-speed',
     order: 0,
     locale: NS,
