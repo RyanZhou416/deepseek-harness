@@ -346,6 +346,14 @@ Gateway 每个 socket 只保留一枚待确认 Ping。未完成写入时，`buff
 
 该组件只控制 WebSocket reconnect，不启动 Host。上游只有提供全局、sidebar-independent、actionable 状态且不引入 silent Host restart 时，才能替代它。
 
+### Declared model-menu row slot
+
+`packages/client/ui-conversation/src/client/contract/slots.ts` declares `conversation.input.model.row`, an additive list child of the single-owner `conversation.input.model` seat; `packages/client/ui-model-selection` declares that child in the seat registration's `children` and renders it through `renderSlot('conversation.input.model.row', {})` after the seat's own model and effort cells in the root pane. The child covers the root pane only: the seat keeps its single owner, a drilled pane stays the seat's own list, and a row set with no contributor leaves the two cells unchanged. The subscriptions plugin's one Speed control is a row registered into that child, so the model, its reasoning level and its speed are chosen in one menu; a plugin cannot add a row to another plugin's menu without a declared slot, and the plugin registers no composer control into `conversation.input.right` (its row semantics are [the plugin's record](fork-plugins/dsh-plugin-subscriptions/FORK_MAINTENANCE.md)).
+
+**Preservation rule.** An upstream import of `ui-conversation`'s contract or `ui-model-selection` must keep all three parts — the slot declaration, the `children` entry on the seat registration and the `renderSlot` call in the root pane — and `conversation.input.model` must stay single-owner. Each part fails differently when dropped: without the declaration the child names no slot, without the `children` entry contributors have no seat to register into, and without the render call the registered rows never reach the menu. Folding the rows into the seat's own registration, or rendering them from a drilled pane, breaks the same contract.
+
+**Focused verification.** `npx vitest run packages/client/ui-model-selection/tests/browser-plugin.client.spec.ts` covers the seat's `children` declaration; `npx vitest run packages/client/ui-model-selection/tests/model-select.client.spec.tsx` covers the contributed row's place in the root pane; `npx pnpm run gen-client-catalog --check` fails when the committed slot catalog is stale against the contract, and fails closed on a `children` entry that no `SlotMap` merge types.
+
 ### Isolated integrated validation
 
 `DSH_PERF_CAPTURE=1` 为合成 Web 续接场景保存同时段的 Node/浏览器 CPU profile、Chrome timeline 和源码映射（`tmp/runtime-profiles/`）。测量脚本预先定位控件并只检查尾部消息，避免全页可访问性查询污染剖面；普通无剖面基准与剖面归因结果分开。未来替换诊断时保留两侧录制、源码定位和对测试观察开销的检查，不能以单个 API 响应耗时代替卡顿归因。
@@ -624,6 +632,7 @@ Profile 注册 `dsh-sdk-process-raw` 和 `subagent_process`：SDK profile、独�
 | Context tool attribution ownership | Preserve | Deduplicate the raw `cordis.original` service, retain only the reader name, preserve the call-site receiver and restore ownership on unload |
 | Subscriptions V4 message translation | Ported onto v0.9.4 | Keep tool-call identity, result error/image handling and explicit developer-message refusal |
 | Legacy fixed-concurrency wrapper | Retired | Official `maxActiveSubagents` owns the active policy; do not mount the duplicate wrapper |
+| Declared model-menu row slot | Preserve | Keep the `conversation.input.model.row` declaration, the seat registration's `children` entry and the seat's `renderSlot` call in the root pane; `conversation.input.model` stays single-owner |
 
 -----
 
