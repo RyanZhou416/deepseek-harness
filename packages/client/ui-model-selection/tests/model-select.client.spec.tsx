@@ -22,6 +22,12 @@ const t: ComponentProps<typeof ModelSelect>['t'] = (key, params) => {
     : template.replace(/\{(\w+)\}/g, (match, name: string) => name in params ? String(params[name]) : match)
 }
 
+/** Child-row render share the seat is bound with; a case exercising the row overrides it. */
+const renderSlot: ComponentProps<typeof ModelSelect>['renderSlot'] = () => null
+
+/** Session seat the declared session-scope child brings; the row inherits the binding. */
+const SessionProvider: ComponentProps<typeof ModelSelect>['SessionProvider'] = ({ children }) => <>{children}</>
+
 const reasoning = {
   efforts: [
     { id: 'off', name: 'Off' },
@@ -68,6 +74,8 @@ describe('ModelSelect reasoning effort', () => {
       load={vi.fn()}
       select={select}
       t={t}
+      renderSlot={renderSlot}
+      SessionProvider={SessionProvider}
     />)
 
     const trigger = screen.getByRole('button', {
@@ -111,6 +119,8 @@ describe('ModelSelect reasoning effort', () => {
       load={vi.fn()}
       select={vi.fn().mockResolvedValue({ ok: true, value: undefined })}
       t={t}
+      renderSlot={renderSlot}
+      SessionProvider={SessionProvider}
     />)
 
     fireEvent.click(screen.getByRole('button', {
@@ -133,6 +143,8 @@ describe('ModelSelect reasoning effort', () => {
       load={vi.fn()}
       select={select}
       t={t}
+      renderSlot={renderSlot}
+      SessionProvider={SessionProvider}
     />)
 
     const trigger = screen.getByRole('button', { name: '选择模型，当前 deepseek-official/removed-model' })
@@ -159,6 +171,8 @@ describe('ModelSelect reasoning effort', () => {
       load={vi.fn()}
       select={vi.fn().mockResolvedValue({ ok: true, value: undefined })}
       t={t}
+      renderSlot={renderSlot}
+      SessionProvider={SessionProvider}
     />)
 
     expect(screen.getByRole('button', { name: '正在加载模型…' }).textContent)
@@ -195,6 +209,8 @@ describe('ModelSelect reasoning effort', () => {
       load={vi.fn()}
       select={select}
       t={t}
+      renderSlot={renderSlot}
+      SessionProvider={SessionProvider}
     />)
 
     const trigger = screen.getByRole('button', { name: /选择模型|当前/ })
@@ -223,6 +239,8 @@ describe('ModelSelect reasoning effort', () => {
         load={vi.fn()}
         select={vi.fn().mockResolvedValue({ ok: true, value: undefined })}
         t={t}
+        renderSlot={renderSlot}
+        SessionProvider={SessionProvider}
       />)
       const trigger = screen.getByRole('button', { name: /选择模型/ })
       fireEvent.click(trigger)
@@ -256,6 +274,8 @@ describe('ModelSelect reasoning effort', () => {
       load={load}
       select={vi.fn().mockResolvedValue(undefined)}
       t={t}
+      renderSlot={renderSlot}
+      SessionProvider={SessionProvider}
     />)
 
     expect(screen.queryByRole('button')).toBeNull()
@@ -273,6 +293,8 @@ describe('ModelSelect keyboard walk', () => {
       load={vi.fn()}
       select={select}
       t={t}
+      renderSlot={renderSlot}
+      SessionProvider={SessionProvider}
     />)
     fireEvent.click(screen.getByRole('button', { name: /选择模型/ }))
     return select
@@ -346,6 +368,8 @@ describe('ModelSelect keyboard walk', () => {
       load={vi.fn()}
       select={vi.fn().mockResolvedValue({ ok: true, value: undefined })}
       t={t}
+      renderSlot={renderSlot}
+      SessionProvider={SessionProvider}
     />)
     const trigger = screen.getByRole('button', { name: /选择模型/ })
     fireEvent.click(trigger)
@@ -392,6 +416,8 @@ describe('ModelSelect keyboard walk', () => {
       load={load}
       select={vi.fn().mockResolvedValue({ ok: true, value: undefined })}
       t={t}
+      renderSlot={renderSlot}
+      SessionProvider={SessionProvider}
     />)
     const trigger = screen.getByRole('button', { name: /选择模型/ })
     fireEvent.click(trigger)
@@ -456,11 +482,61 @@ describe('ModelSelect keyboard walk', () => {
       load={vi.fn()}
       select={vi.fn().mockResolvedValue({ ok: true, value: undefined })}
       t={t}
+      renderSlot={renderSlot}
+      SessionProvider={SessionProvider}
     />)
     fireEvent.click(screen.getByRole('button', { name: /选择模型/ }))
     fireEvent.click(screen.getByRole('menuitem', { name: /^模型/ }))
     const rows = screen.getAllByRole('menuitemradio')
     expect(rows.every(row => row.getAttribute('aria-checked') === 'false')).toBe(true)
     expect(document.activeElement).toBe(rows[0])
+  })
+})
+
+describe('ModelSelect feature rows', () => {
+  /** Render share as the seat receives it: one contributed row, drawn only by name. */
+  const withRow: ComponentProps<typeof ModelSelect>['renderSlot'] = name =>
+    name === 'conversation.input.model.row'
+      ? <button type="button" data-testid="feature-row">速度 · 标准</button>
+      : null
+
+  it('renders a contributed feature row below the seat\'s own cells, in the root pane only', () => {
+    render(<ModelSelect
+      locked={false}
+      available
+      directory={createSnapshotStore(state())}
+      load={vi.fn()}
+      select={vi.fn().mockResolvedValue({ ok: true, value: undefined })}
+      t={t}
+      renderSlot={withRow}
+      SessionProvider={SessionProvider}
+    />)
+    fireEvent.click(screen.getByRole('button', { name: /选择模型/ }))
+    const menu = screen.getByRole('menu')
+    expect(screen.getByTestId('feature-row')).toBeTruthy()
+    // Third row of the root pane, under the model and effort cells.
+    expect([...menu.querySelectorAll('button')].map(button => button.textContent))
+      .toEqual(['模型DeepSeek-V4-Flash', '推理等级High', '速度 · 标准'])
+    // A drilled pane is the seat's own list; the contributed row belongs to the root pane.
+    fireEvent.click(screen.getByRole('menuitem', { name: /^模型/ }))
+    expect(screen.queryByTestId('feature-row')).toBeNull()
+    fireEvent.keyDown(screen.getAllByRole('menuitemradio')[0]!, { key: 'Escape' })
+    expect(screen.getByTestId('feature-row')).toBeTruthy()
+  })
+
+  it('renders its own two cells alone when nothing contributes a row', () => {
+    render(<ModelSelect
+      locked={false}
+      available
+      directory={createSnapshotStore(state())}
+      load={vi.fn()}
+      select={vi.fn().mockResolvedValue({ ok: true, value: undefined })}
+      t={t}
+      renderSlot={renderSlot}
+      SessionProvider={SessionProvider}
+    />)
+    fireEvent.click(screen.getByRole('button', { name: /选择模型/ }))
+    expect(screen.getAllByRole('menuitem').map(cell => cell.textContent))
+      .toEqual(['模型DeepSeek-V4-Flash', '推理等级High'])
   })
 })

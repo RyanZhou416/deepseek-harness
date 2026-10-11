@@ -15,7 +15,9 @@
  * selected effort come from the Host rather than a client-owned vocabulary. A
  * rejected selection announces through the shared transient Toast anchored to
  * the composer card; the in-menu strip with Retry remains the catalog-load
- * surface.
+ * surface. Features add rows of their own under the root pane's cells through
+ * the declared `conversation.input.model.row` child slot; the seat stays
+ * single-owner and renders its own two cells alone when nothing registers.
  */
 import {
   useEffect, useId, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore,
@@ -28,7 +30,7 @@ import {
   IconCheckOutlineRegular, IconChevronDownOutlineRegular, IconChevronRightOutlineRegular,
   IconDataOutlineRegular, IconWarningOutlineRegular, Toast,
 } from '@deepseek-ai/dsh-client-ui-primitives'
-import type { PropsLocale } from '@deepseek-ai/dsh-client-ui-slots'
+import type { PropsLocale, PropsRenderSlots } from '@deepseek-ai/dsh-client-ui-slots'
 import type { ModelSelectInjected } from './slots.ts'
 import css from './ModelSelect.module.css'
 
@@ -48,12 +50,13 @@ const MEASURE_STYLE: CSSProperties = { visibility: 'hidden', left: 0, top: 0 }
 /**
  * Render the composer model seat.
  * @param props - owner share (locked) + injected face (shared directory
- * store/verbs) + the standard locale seat.
+ * store/verbs) + the standard locale seat + the declared child-row renderer.
  * @returns the trigger and, while open, the two-level menu.
  */
 export function ModelSelect(
-  { locked, available, directory, load, select, t }:
-  ModelSelectInjected & { locked: boolean } & PropsLocale<'model'>,
+  { locked, available, directory, load, select, t, renderSlot, SessionProvider }:
+  ModelSelectInjected & { locked: boolean } & PropsLocale<'model'>
+  & PropsRenderSlots<'conversation.input.model.row'>,
 ) {
   const state = useSyncExternalStore(
     fn => directory.subscribe(fn),
@@ -403,6 +406,11 @@ export function ModelSelect(
                   <IconChevronRightOutlineRegular className={css.cellChevron} />
                 </button>
               )}
+              {/* Feature-owned rows, under the seat's own cells. They are outside
+                  this seat's itemRefs, so ↑/↓ traverse the cells above and Tab
+                  reaches a row's own controls. The Provider carries this seat's
+                  Session to them, which their session-bound inject reads. */}
+              <SessionProvider>{renderSlot('conversation.input.model.row', {})}</SessionProvider>
             </>
           )}
 

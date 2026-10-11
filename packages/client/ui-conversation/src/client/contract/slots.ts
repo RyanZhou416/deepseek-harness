@@ -221,6 +221,13 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
      * --dsh-composer-model-icon-display to block for an occupant's compact display.
      */
     'conversation.input.model': { kind: 'single'; scope: 'session'; owner: InputControlOwnerProps }
+    /**
+     * Extra rows a feature adds to the resident composer's model menu, below the
+     * model and effort cells. The seat itself stays single-owner: these rows are
+     * additive, they share the seat's Session, and each renders its own row. With
+     * no contribution the menu is the two cells the model seat renders alone.
+     */
+    'conversation.input.model.row': { kind: 'list'; scope: 'session' }
   }
 
   interface SlotFactoryMap {

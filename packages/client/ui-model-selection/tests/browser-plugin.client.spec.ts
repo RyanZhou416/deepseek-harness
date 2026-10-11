@@ -120,11 +120,17 @@ async function bench(locale: 'zh' | 'en' = 'zh') {
   const seats = new Map<string, {
     inject: ((sessionId: SessionId) => ModelSelectInjected) | undefined
     locale: string | undefined
+    children: Record<string, { kind: string; scope: string }> | undefined
   }>()
   ctx.provide('slots', {
     inject(_name: string, callback: () => () => void) { return callback() },
-    register(options: { name: string; locale?: string; inject?: (sessionId: SessionId) => ModelSelectInjected }) {
-      seats.set(options.name, { inject: options.inject, locale: options.locale })
+    register(options: {
+      name: string
+      locale?: string
+      children?: Record<string, { kind: string; scope: string }>
+      inject?: (sessionId: SessionId) => ModelSelectInjected
+    }) {
+      seats.set(options.name, { inject: options.inject, locale: options.locale, children: options.children })
       return () => { seats.delete(options.name) }
     },
   })
@@ -179,6 +185,7 @@ async function bench(locale: 'zh' | 'en' = 'zh') {
       return ui
     },
     seat: () => seats.get('conversation.input.model')!,
+    seatChildren: () => seats.get('conversation.input.model')!.children,
     hostCurrent: () => selected,
     rejectSelection: () => {
       selectionFailure = new RemoteError('session/writer-held', 'writer held', { sessionId: sid('owned') })
@@ -213,6 +220,15 @@ describe('ui-model-selection dual entry', () => {
     expect(b.seat().inject).toBeTypeOf('function')
     // Copy rides the standard locale seat.
     expect(b.seat().locale).toBe('model')
+  })
+
+  it('declares the additive row slot a feature adds model-menu rows through', async () => {
+    const b = await bench()
+    // The seat stays single-owner: the row is a declared child of it, and its
+    // disappearance would strand every contributor that registers into it.
+    expect(b.seatChildren()).toEqual({
+      'conversation.input.model.row': { kind: 'list', scope: 'session' },
+    })
   })
 
   it('localizes built-in descriptions and preserves external provider descriptions', async () => {

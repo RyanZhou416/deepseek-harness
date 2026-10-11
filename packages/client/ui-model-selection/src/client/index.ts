@@ -181,6 +181,9 @@ export function apply(ctx: ClientContext): void {
     scope.slots.inject('conversation.input.model', () => scope.slots.register({
       name: 'conversation.input.model',
       locale: NS,
+      // Features add their own rows to the root menu through this declared child; the
+      // seat stays single-owner, and an unclaimed row set renders the two cells alone.
+      children: { 'conversation.input.model.row': { kind: 'list', scope: 'session' } },
       inject: (sessionId): ModelSelectInjected => {
         const directory = models.directoryFor(sessionId)
         const available = sessions.subagentAddress(sessionId) === undefined

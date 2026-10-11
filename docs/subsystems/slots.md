@@ -166,6 +166,7 @@ root
 │     │  ├─ conversation.input.permission
 │     │  ├─ conversation.input.plan
 │     │  └─ conversation.input.model
+│     │     └─ conversation.input.model.row
 │     ├─ conversation.input.overlay
 │     ├─ conversation.input.dock
 │     ├─ conversation.composer.dock

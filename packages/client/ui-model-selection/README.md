@@ -33,6 +33,8 @@ Mouse selection uses native browser clicks, including their cancellation behavio
 
 Models stay grouped by provider. The composer menu shows model and effort names only. The `/model` popup shows provider names and catalog descriptions; it localizes the two built-in DeepSeek descriptions and leaves external provider descriptions verbatim. The popup applies the selected model's default effort; the composer can then choose any advertised effort. An adapter without reasoning metadata leaves the Effort row absent; there is no arbitrary effort input.
 
+A feature may add rows of its own below the composer menu's model and effort cells by registering into the `conversation.input.model.row` child slot the seat declares; the seat stays single-owner, a row renders its own content, and an unclaimed row set leaves the two cells alone.
+
 The composer replaces the model and effort text with the Models icon when the expanded controls cannot share one line, and restores the text when space permits. The full selection remains available in the trigger's accessible name, tooltip, and menu.
 
 ### Unroutable sessions
