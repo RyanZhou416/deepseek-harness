@@ -50,6 +50,10 @@ export class ModelDirectoryResolver extends Service {
     super(ctx, 'modelDirectories')
     this.blockReason = config.blockReason
     this.catalog = new ModelCatalogDirectory(ctx)
+    // The shared catalog outlives every session directory, so this service owns
+    // its teardown: a read or a queued follow-up settling after the fiber goes
+    // must not publish into, or start work for, a composition that is gone.
+    ctx.effect(() => () => { this.catalog.dispose() }, 'ui-model-selection: shared model catalog')
     void this.catalog.load().catch(() => { /* selectors expose the shared error */ })
     ctx.on('connection/reset', () => {
       this.catalog.resetGeneration()

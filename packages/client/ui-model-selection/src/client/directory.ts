@@ -70,13 +70,66 @@ export class ModelDirectory {
 
   /**
    * Ensure the Host generation's shared advisory catalog is loaded.
-   * @returns the fresh directory value.
+   *
+   * While a same-generation replacement is loading, the published view keeps the
+   * last complete catalog/projection pair. An explicit read waits for the
+   * replacement whenever the live inputs already name a different route, so a
+   * caller acting on the returned selection never acts on the model the
+   * session's projection has replaced: a selection change is not instantaneous
+   * until the catalog catches up. Only a read whose route is unchanged answers
+   * at once from the retained catalog.
+   *
+   * The wait re-checks this directory's own lifecycle after every suspension:
+   * the shared catalog outlives the per-session directory, so a read that
+   * resumed after the session scope went would otherwise keep waiting for a view
+   * that can no longer be published.
+   * @returns the directory value naming the session's newest selection.
+   * @throws When the catalog cannot supply the replacement, so no route the
+   * caller could act on is known (a failed replacement is retried once first),
+   * or when this directory is disposed while the read waits.
    */
   async load(): Promise<ModelDirectoryState> {
     this.assertAvailable()
-    await this.catalog.load()
-    this.syncInputs()
-    return this.store.getSnapshot()
+    for (;;) {
+      this.assertNotDisposed()
+      await this.catalog.load()
+      this.assertNotDisposed()
+      this.syncInputs()
+      if (!this.routeAwaitingReplacement()) return this.store.getSnapshot()
+      if (this.catalog.store.getSnapshot().status === 'error') {
+        throw new Error('model selection: the shared model catalog could not supply the session\'s newest selection')
+      }
+      await this.catalog.settled()
+      this.syncInputs()
+    }
+  }
+
+  /**
+   * Fail a read whose session scope is gone. A disposed directory publishes no
+   * further view, so a waiting read could never observe the route it waits for
+   * and would re-check without ever suspending.
+   * @throws Whenever this directory has been disposed.
+   */
+  private assertNotDisposed(): void {
+    if (this.disposed) throw new Error('model selection: this session\'s model directory was disposed')
+  }
+
+  /**
+   * Whether the published view does not yet name the route the live inputs do,
+   * which is exactly what a same-generation replacement holds back. A ready
+   * catalog has already been combined, so this is only ever true while a
+   * replacement is loading or has failed.
+   * @returns true when an explicit read must wait for the replacement.
+   */
+  private routeAwaitingReplacement(): boolean {
+    const catalog = this.catalog.store.getSnapshot()
+    const projected = modelSelectionProjection(this.projected.getSnapshot())
+    if (catalog.value === null || projected === undefined) return false
+    const newest = projected.next ?? catalog.value.default
+    const current = this.store.getSnapshot().current
+    // Provider and model are compared as separate fields: an id may contain the
+    // separator a composed key would use.
+    return current === null || current.provider !== newest.provider || current.model !== newest.model
   }
 
   /**

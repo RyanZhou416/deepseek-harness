@@ -18,6 +18,7 @@ import { RemoteError, TestRemote } from '@deepseek-ai/dsh-client-test-runtime'
 import type { ModelSelection, ModelSelectionProjection } from '@deepseek-ai/dsh-api-session-controller/types'
 import type { CommandContribution, PopupSelectSpec, SelectOption } from '@deepseek-ai/dsh-client-ui-commands/client'
 import type { ModelSelectInjected } from '../src/client/slots.ts'
+import type { ModelDirectoryState } from '../src/client/directory.ts'
 import { apply, inject } from '../src/client/index.ts'
 import { zh } from '../src/client/locales.ts'
 
@@ -75,17 +76,28 @@ async function bench(locale: 'zh' | 'en' = 'zh') {
   // block follows this, never catalog membership.
   let routable = true
   let selectionFailure: RemoteError<'session/writer-held'> | undefined
+  // Held catalog reads let a test place projection and refresh states in a
+  // deterministic order; the value is captured when the read is issued, as the
+  // Host answers the generation it was asked about. The hold stays in place
+  // after a release, so a retry the client issues is held on the same terms.
+  let holdCatalog = false
+  let releaseCatalog: ((failure: boolean) => void) | undefined
   const sessionRemote = {
     modelCatalog: () => {
       calls.models += 1
-      return Promise.resolve({
-        ok: true as const,
-        value: {
-          default: defaultSelection,
-          routableProviders: routable ? ['deepseek-official'] : [],
-          groups: GROUPS,
-          failures: [],
-        },
+      const value = {
+        default: defaultSelection,
+        routableProviders: routable ? ['deepseek-official'] : [],
+        groups: GROUPS,
+        failures: [],
+      }
+      if (!holdCatalog) return Promise.resolve({ ok: true as const, value })
+      return new Promise((resolve) => {
+        releaseCatalog = (failure) => {
+          resolve(failure
+            ? { ok: false as const, error: new RemoteError('gateway/internal', 'catalog offline', {}) }
+            : { ok: true as const, value })
+        }
       })
     },
     selectModel: (payload: { sessionId: SessionId; provider: string; model: string; reasoningEffort?: string }) => {
@@ -195,10 +207,25 @@ async function bench(locale: 'zh' | 'en' = 'zh') {
     address: (id: SessionId) => { addressed.add(id) },
     setRoutable: (next: boolean) => { routable = next },
     blockOf: (key: string) => blocks.get(sid(key)),
+    holdCatalog: () => { holdCatalog = true },
+    releaseCatalog: (failure = false) => {
+      const release = releaseCatalog
+      releaseCatalog = undefined
+      release?.(failure)
+    },
   }
 }
 
 const projection = (id: string) => ({ sessionId: sid(id) })
+
+/**
+ * Let a released catalog read run out its `then`/`catch`/`finally` chain, so an
+ * assertion after it observes settlement without depending on the clock.
+ * @returns fulfillment once the chain has run.
+ */
+async function settle(): Promise<void> {
+  for (let turn = 0; turn < 6; turn += 1) await Promise.resolve()
+}
 
 describe('ui-model-selection dual entry', () => {
   it('carries writer contention to the model seat and localizes the command failure', async () => {
@@ -357,6 +384,191 @@ describe('ui-model-selection dual entry', () => {
         status: 'ready',
       })
     })
+  })
+
+  it('answers an explicit read with the session route while the shared catalog is replaced', async () => {
+    const b = await bench()
+    b.mint('s1')
+    const directory = b.ctx.modelDirectories.directoryFor(sid('s1'))
+    await directory.load()
+
+    b.holdCatalog()
+    b.remote.emit('settings/document-updated', ['llm-deepseek', 1])
+    b.setProjected(sid('s1'), {
+      lastUsed: { provider: 'deepseek-official', model: 'deepseek-v4-flash' },
+      next: { provider: 'deepseek-official', model: 'deepseek-v4-pro' },
+    })
+
+    // The published view keeps the last complete pair, which is what a repaint
+    // shows. A caller reading this value to act on a model — the Speed control's
+    // durable write target — must not receive the route the projection replaced,
+    // so the read waits for the replacement the event started.
+    let read: ModelDirectoryState | undefined
+    void directory.load().then((value) => { read = value })
+    await settle()
+    expect(read).toBeUndefined()
+    expect(directory.store.getSnapshot()).toMatchObject({
+      current: { provider: 'deepseek-official', model: 'deepseek-v4-flash' },
+      status: 'ready',
+    })
+
+    b.releaseCatalog()
+    await vi.waitFor(() => {
+      expect(read?.current).toEqual({ provider: 'deepseek-official', model: 'deepseek-v4-pro' })
+    })
+  })
+
+  it('answers an explicit read from the retained catalog when the session route is unchanged', async () => {
+    const b = await bench()
+    b.mint('s1')
+    const directory = b.ctx.modelDirectories.directoryFor(sid('s1'))
+    await directory.load()
+
+    b.holdCatalog()
+    b.remote.emit('llm/adapters-updated', [])
+    expect(b.calls.models).toBe(2)
+
+    // Nothing about the session's route moved, so the read must not wait on the
+    // replacement: answering from the retained catalog is the work this removes.
+    let read: ModelDirectoryState | undefined
+    void directory.load().then((value) => { read = value })
+    await settle()
+    expect(read).toMatchObject({
+      current: { provider: 'deepseek-official', model: 'deepseek-v4-flash' },
+      status: 'ready',
+    })
+    expect(b.calls.models).toBe(2)
+    b.releaseCatalog()
+  })
+
+  it('waits for the replacement when a directory first reads during one', async () => {
+    const b = await bench()
+    b.holdCatalog()
+    b.remote.emit('settings/document-updated', ['llm-deepseek', 1])
+    // The session opens while the replacement is in flight, so no complete pair
+    // has ever been published for it.
+    b.mint('s1')
+    const directory = b.ctx.modelDirectories.directoryFor(sid('s1'))
+    expect(directory.store.getSnapshot().status).toBe('loading')
+
+    let read: ModelDirectoryState | undefined
+    void directory.load().then((value) => { read = value })
+    await settle()
+    expect(read).toBeUndefined()
+
+    b.releaseCatalog()
+    await vi.waitFor(() => {
+      expect(read?.current).toEqual({ provider: 'deepseek-official', model: 'deepseek-v4-flash' })
+    })
+  })
+
+  it('never answers an explicit read with the replaced route when the replacement fails', async () => {
+    const b = await bench()
+    b.mint('s1')
+    const directory = b.ctx.modelDirectories.directoryFor(sid('s1'))
+    await directory.load()
+
+    b.holdCatalog()
+    b.remote.emit('settings/document-updated', ['llm-deepseek', 1])
+    b.setProjected(sid('s1'), {
+      lastUsed: { provider: 'deepseek-official', model: 'deepseek-v4-flash' },
+      next: { provider: 'deepseek-official', model: 'deepseek-v4-pro' },
+    })
+
+    let outcome: ModelDirectoryState | Error | undefined
+    void directory.load().then((value) => { outcome = value }, (error: Error) => { outcome = error })
+    await settle()
+    expect(outcome).toBeUndefined()
+
+    b.releaseCatalog(true)
+    await vi.waitFor(() => { expect(b.calls.models).toBe(3) })
+    // The failed replacement published nothing usable, so the read retries
+    // rather than handing back the route the projection replaced.
+    expect(outcome).toBeUndefined()
+
+    b.releaseCatalog()
+    await vi.waitFor(() => {
+      expect(outcome).toBeInstanceOf(Object)
+      expect((outcome as ModelDirectoryState).current).toEqual({
+        provider: 'deepseek-official', model: 'deepseek-v4-pro',
+      })
+    })
+  })
+
+  it('waits when the projection moves to another provider during a replacement', async () => {
+    const b = await bench()
+    b.mint('s1')
+    const directory = b.ctx.modelDirectories.directoryFor(sid('s1'))
+    await directory.load()
+
+    b.holdCatalog()
+    b.remote.emit('settings/document-updated', ['llm-deepseek', 1])
+    b.setProjected(sid('s1'), {
+      lastUsed: { provider: 'deepseek-official', model: 'deepseek-v4-flash' },
+      next: { provider: 'external', model: 'deepseek-v4-flash' },
+    })
+
+    // Provider and model are separate fields, so a move to another provider is
+    // the same wait as a model move inside one provider.
+    let read: ModelDirectoryState | undefined
+    void directory.load().then((value) => { read = value })
+    await settle()
+    expect(read).toBeUndefined()
+
+    b.releaseCatalog()
+    await vi.waitFor(() => {
+      expect(read?.current).toEqual({ provider: 'external', model: 'deepseek-v4-flash' })
+    })
+  })
+
+  it('fails a read whose session scope is disposed while the catalog is replaced', async () => {
+    const b = await bench()
+    const scope = b.mint('s1')
+    const directory = b.ctx.modelDirectories.directoryFor(sid('s1'))
+    await directory.load()
+
+    b.holdCatalog()
+    b.remote.emit('settings/document-updated', ['llm-deepseek', 1])
+    b.setProjected(sid('s1'), {
+      lastUsed: { provider: 'deepseek-official', model: 'deepseek-v4-flash' },
+      next: { provider: 'deepseek-official', model: 'deepseek-v4-pro' },
+    })
+
+    let outcome: ModelDirectoryState | Error | undefined
+    void directory.load().then((value) => { outcome = value }, (error: Error) => { outcome = error })
+    await settle()
+    expect(outcome).toBeUndefined()
+
+    // The session scope goes while the read waits on the shared catalog, which
+    // stays alive: the disposed directory publishes no further view, so the read
+    // must fail instead of waiting for a route it can never report.
+    await scope.fiber.dispose()
+    b.releaseCatalog()
+    await vi.waitFor(() => { expect(outcome).toBeInstanceOf(Error) })
+    expect((outcome as Error).message).toContain('disposed')
+    // The disposed read starts no further work either.
+    expect(b.calls.models).toBe(2)
+  })
+
+  it('disposes the shared catalog with the resolver fiber', async () => {
+    const b = await bench()
+    b.mint('s1')
+    await b.ctx.modelDirectories.directoryFor(sid('s1')).load()
+
+    b.holdCatalog()
+    b.remote.emit('settings/document-updated', ['llm-deepseek', 1])
+    b.remote.emit('settings/document-updated', ['llm-deepseek', 2])
+    expect(b.calls.models).toBe(2)
+
+    await b.fiber.dispose()
+    b.releaseCatalog()
+    await settle()
+    // The read the disposed composition owned neither starts the follow-up it
+    // queued nor publishes, and a forwarded event arriving afterwards starts
+    // nothing either.
+    expect(b.calls.models).toBe(2)
+    b.remote.emit('settings/document-updated', ['llm-deepseek', 3])
+    expect(b.calls.models).toBe(2)
   })
 
   it('scope disposal drops the directory; a reborn scope gets a fresh one', async () => {

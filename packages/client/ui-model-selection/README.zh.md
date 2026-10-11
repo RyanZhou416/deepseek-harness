@@ -55,7 +55,7 @@ Web GUI 允许用户通过 `/model` 弹窗或 composer 模型控件切换既有�
 <details>
 <summary>实现细节——点击展开</summary>
 
-两个入口共用一份由 `ModelDirectoryResolver`（`ctx.modelDirectories`）持有的会话级目录：`/model` popupSelect 贡献项（经 `ctx.commandUi` 注册）与 composer 的具名 `conversation.input.model` 位都经 `session.models` 加载会话的建议目录、经 `session.selectModel` 通过同一个 `ModelDirectory` 实例提交，因此任一入口所做的切换正是另一个入口接下来显示的。目录加载与选择共享一个代次计数器，旧响应不会覆盖新结果；连接重置丢弃所有常驻投影，并在显示前重新拉取 Host 恢复的选择。目录按会话惰性解析，随会话作用域一并 dispose（资源释放）；已寻址 subagent 会话不公开任一入口。每份常驻目录都会直接在转发的 `llm/adapters-updated` 与 `settings/document-updated` owner 事件上重拉。
+两个入口共用一份由 `ModelDirectoryResolver`（`ctx.modelDirectories`）持有的会话级目录：`/model` popupSelect 贡献项（经 `ctx.commandUi` 注册）与 composer 的具名 `conversation.input.model` 位都经 `session.models` 加载会话的建议目录、经 `session.selectModel` 通过同一个 `ModelDirectory` 实例提交，因此任一入口所做的切换正是另一个入口接下来显示的。目录加载与选择共享一个代次计数器，旧响应不会覆盖新结果；连接重置丢弃所有常驻投影，并在显示前重新拉取 Host 恢复的选择。目录按会话惰性解析，随会话作用域一并 dispose（资源释放）；已寻址 subagent 会话不公开任一入口。每份常驻会话目录都会在转发的 `llm/adapters-updated` 与 `settings/document-updated` owner 事件上重拉共享的 Host 代次模型目录；同一代次的重拉会继续发布上一份完整模型目录，因此路由未变的一次读取立即作答，而不必等待替换结果。重拉不会重叠：一串失效事件会合并为正在进行的重拉加上紧随其后的一次重拉，由后者服务最新代次，且只有当前代次可以发布。需要点明某个模型去执行操作（而非重绘）的读取，在实时输入已指向另一条路由时会等待模型目录追上，因此选择变更在模型目录给出替换项之前并非瞬时完成；只有路由未变的读取才立即作答。替换失败会重试，若仍无法点明该会话最新的选择，读取将拒绝而不是返回被替换掉的路由，调用方因此绝不会静默作用于会话已经离开的模型；读取等待期间其会话作用域消失时同样失败，因为已 dispose 的目录不再发布任何视图。连接重置会在加载替换项之前丢弃被取代的模型目录；resolver 的拆卸会 dispose 共享的模型目录：此时仍在进行的读取不会发布任何结果，也不会启动后续重拉。
 
 </details>
 
