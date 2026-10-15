@@ -94,11 +94,21 @@ function windowSnapshot(
   }
 }
 
+/** @param entries - published entries in order. @param seq - target sequence. @returns the first index holding a later sequence. */
+function insertionIndex(entries: readonly SessionEventLikeEntry[], seq: number): number {
+  const index = entries.findIndex(candidate => candidate.event.seq > seq)
+  return index < 0 ? entries.length : index
+}
+
 /** Exact delta that produced the latest event-window revision. */
 export type SessionEventChange =
   | { readonly kind: 'replace'; readonly entries: readonly SessionEventLikeEntry[] }
   | { readonly kind: 'prepend'; readonly entries: readonly SessionEventLikeEntry[] }
   | { readonly kind: 'append'; readonly entries: readonly SessionEventLikeEntry[] }
+  | {
+    readonly kind: 'insert-assistant'
+    readonly entry: SessionAssistantSettlementEntry
+  }
   | {
     readonly kind: 'settle-assistant'
     readonly attemptId: LlmAttemptId
@@ -120,6 +130,8 @@ export type SessionEventSource = ObservableSnapshot<SessionEventWindow>
 export class MutableSessionEventSource implements SessionEventSource {
   private readonly listeners = new Set<() => void>()
   private window: EventWindowNode = leaf([])
+  /** Highest sequence published in this window generation, including transient rows. */
+  private maxPublishedSeq = -1
   private snapshot: SessionEventWindow = windowSnapshot(
     this.window,
     false,
@@ -147,6 +159,10 @@ export class MutableSessionEventSource implements SessionEventSource {
    */
   replace(entries: readonly SessionEventLikeEntry[], hasMore: boolean): void {
     this.window = leaf(entries)
+    this.maxPublishedSeq = entries.reduce(
+      (highest, entry) => Math.max(highest, entry.event.seq),
+      -1,
+    )
     this.publish(hasMore, { kind: 'replace', entries })
   }
 
@@ -157,6 +173,7 @@ export class MutableSessionEventSource implements SessionEventSource {
    */
   prepend(entries: readonly SessionEventLikeEntry[], hasMore: boolean): void {
     this.window = concat(leaf(entries), this.window)
+    this.maxPublishedSeq = Math.max(this.maxPublishedSeq, entries.at(-1)?.event.seq ?? -1)
     this.publish(hasMore, { kind: 'prepend', entries })
   }
 
@@ -167,6 +184,7 @@ export class MutableSessionEventSource implements SessionEventSource {
   append(entry: SessionEventLikeEntry): void {
     const entries = [entry]
     this.window = concat(this.window, leaf(entries))
+    this.maxPublishedSeq = Math.max(this.maxPublishedSeq, entry.event.seq)
     this.publish(this.snapshot.hasMore, {
       kind: 'append',
       entries,
@@ -174,7 +192,28 @@ export class MutableSessionEventSource implements SessionEventSource {
   }
 
   /**
+   * Commit one durable Assistant settlement at its published sequence position,
+   * retaining that attempt's transient rows. A sequence above the published
+   * high-water mark appends; an already published or earlier sequence is
+   * inserted in order, so a delayed settlement cannot append backwards.
+   * @param entry - durable settlement committed for a held attempt.
+   */
+  commitAssistant(entry: SessionAssistantSettlementEntry): void {
+    if (entry.event.seq > this.maxPublishedSeq) {
+      this.append(entry)
+      return
+    }
+    // materialize may return the leaf array an earlier snapshot still exposes.
+    const entries = [...materialize(this.window)]
+    if (!this.insertOrdered(entries, entry)) return
+    this.window = leaf(entries)
+    this.publish(this.snapshot.hasMore, { kind: 'insert-assistant', entry })
+  }
+
+  /**
    * Replace one attempt's transient rows with its committed durable settlement.
+   * A call that removes no transient row and inserts nothing is a no-op: the
+   * published window and its revision stay untouched.
    * @param attemptId - process-local attempt whose live rows are now redundant.
    * @param entry - durable settlement committed for that attempt.
    */
@@ -182,17 +221,37 @@ export class MutableSessionEventSource implements SessionEventSource {
     const entries = materialize(this.window).filter(candidate => (
       candidate.type !== 'transient' || candidate.event.data.attemptId !== attemptId
     ))
-    if (entry !== undefined) {
-      const index = entries.findIndex(candidate => candidate.event.seq > entry.event.seq)
-      if (index < 0) entries.push(entry)
-      else entries.splice(index, 0, entry)
-    }
+    const removed = entries.length < this.window.length
+    const inserted = entry !== undefined && this.insertOrdered(entries, entry)
+    if (!removed && !inserted) return
     this.window = leaf(entries)
     this.publish(this.snapshot.hasMore, {
       kind: 'settle-assistant',
       attemptId,
       ...(entry === undefined ? {} : { entry }),
     })
+  }
+
+  /**
+   * Insert one settlement in sequence order, publishing nothing for an
+   * identical duplicate and rejecting a different entry that already owns the
+   * sequence before any mutation.
+   * @param entries - mutable window entries being rebuilt.
+   * @param entry - durable settlement to insert.
+   * @returns whether the window gained an entry.
+   */
+  private insertOrdered(
+    entries: SessionEventLikeEntry[],
+    entry: SessionAssistantSettlementEntry,
+  ): boolean {
+    const index = entries.findIndex(candidate => candidate.event.seq === entry.event.seq)
+    if (index >= 0) {
+      if (entries[index]?.event === entry.event) return false
+      throw new Error(`event window already holds a different entry at seq ${entry.event.seq}`)
+    }
+    entries.splice(insertionIndex(entries, entry.event.seq), 0, entry)
+    this.maxPublishedSeq = Math.max(this.maxPublishedSeq, entry.event.seq)
+    return true
   }
 
   private publish(

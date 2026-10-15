@@ -21,6 +21,8 @@ Session Controller 拥有连续的已加载逻辑 event window。每个 `Session
 
 Chat 与 Trajectory 可以识别同一个持久 event family，但各自保留自己的 Definition State 与最终 node payload。共享的 target-neutral 机制只包括 identity routing、有序 replay、Location data、predecessor dependency 与 publication cadence。
 
+`insert-assistant` 事件窗口变化按序插入延迟的持久结算，不清理该尝试的临时匹配。它使用与 `settle-assistant` 相同的有序合并重放受影响 Context；普通 `append` 仍要求序号递增。目标助手投影保持已结算消息对后到临时分片的权威性，工具 Definition 则继续保留实时匹配直到清理。
+
 ## Target 激活
 
 每个 Session 都保留单调增长的 active target 集合。创建或读取 target source 不会激活它。shell 会显式激活持久化选择或新选择的 View，其他消费者则通过 target source 的首个订阅激活 target。首次激活会创建该 target 的 builder，并从当前按 target 索引的 Context 调用一次 `replace()`。后续 flush 对每个 active target 调用 `apply()`，取消订阅不会移除 target。

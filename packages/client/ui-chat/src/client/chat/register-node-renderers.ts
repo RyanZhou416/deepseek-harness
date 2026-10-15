@@ -41,6 +41,10 @@ export function registerChatNodeRenderers(
     name: 'conversation.chat.node',
     key: 'assistant-step',
     locale: NS,
+    // Occurrence scope: the Assistant seat supplies the recovery payload, so a
+    // crashed reply shows its own plain-text fallback instead of abdicating
+    // the cell and blanking every other reply of the same registration.
+    failureScope: 'occurrence',
     inject: () => ({ hooks: { presentation } }),
   }, AssistantNodeView))
   ctx.slots.inject('conversation.chat.node', () => ctx.slots.register({

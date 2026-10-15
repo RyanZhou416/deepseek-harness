@@ -30,7 +30,7 @@ The [Conversation Definition](../../../../packages/client/ui-conversation/src/cl
 
 A named tool delta and `tool/call` are both initialization candidates. A live delta can create preparation; a historical `tool/call` creates the dispatched stage directly. Matching still reads only the current event, without Context lookup, additional roles, registries, or separate caches.
 
-Successful stream settlement publishes the final Assistant message while retaining transient deltas until `step/end`. Each `tool/call` updates its existing callId; the Assistant keeps its live ordering anchor until the same cleanup. Failed, interrupted, or abandoned streams retire their deltas immediately. On retirement the Assembler reselects starts and recomputes State from remaining Matches. Undispatched preparations hide without synthetic execution results.
+Successful stream settlement commits the final Assistant message by append or ordered insertion while retaining transient deltas until the owning `step/end` or `turn/end`; a boundary already published before the end frame causes atomic commitment and retirement. Each `tool/call` updates its existing callId; the Assistant keeps its live ordering anchor until the same cleanup. Failed, interrupted, or abandoned streams retire their deltas immediately. On retirement the Assembler reselects starts and recomputes State from remaining Matches. Undispatched preparations hide without synthetic execution results.
 
 ### Converge on final state without replaying preparation
 

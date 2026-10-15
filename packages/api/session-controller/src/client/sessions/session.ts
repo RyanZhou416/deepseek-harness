@@ -712,6 +712,14 @@ export class Session implements SessionFace {
       })
       return
     }
+    if (result?.type === 'commit') {
+      // Ordered commitment keeps the attempt's transient rows until its owning
+      // Step or Turn publishes its own retirement.
+      this.eventSource.commitAssistant(result.entry)
+      this.observeSubmissionEvent(result.entry.event)
+      this.notifier.markDirty()
+      return
+    }
     if (result?.type === 'settlement') {
       this.eventSource.settleAssistant(result.attemptId, result.entry)
       this.observeSubmissionEvent(result.entry.event)

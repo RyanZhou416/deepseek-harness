@@ -3,11 +3,22 @@ import type { ChatNode } from '../contract/chat-nodes.ts'
 import type {
   ChatLocationNodeIndex, ChatNodeStore, ChatTurnProcessPresentation,
 } from '../contract/snapshot.ts'
-import { TURN_PROCESS_INDEPENDENT_KINDS } from '../contract/turn-process.ts'
+import {
+  isTurnProcessMember, TURN_PROCESS_INDEPENDENT_KINDS, type TurnProcessRow,
+} from '../contract/turn-process.ts'
 
 function nodeTurn(node: ChatNode | undefined): number | undefined {
   const location = node?.location
   return location?.kind === 'turn' || location?.kind === 'step' ? location.turn.turn : undefined
+}
+
+/** Rows are presented one occurrence at a time, so a Node counts as its standalone part. */
+function processRow(node: ChatNode): TurnProcessRow {
+  return {
+    anchorSeq: node.anchorSeq,
+    step: node.kind === 'assistant-step' ? node.data.step : null,
+    groupPart: undefined,
+  }
 }
 
 function samePresentation(
@@ -58,12 +69,10 @@ function derivePresentation(
       hasInterleavedInput = true
       if (spec.answerAnchorSeq === null || node.anchorSeq < spec.answerAnchorSeq) compactAnswer = false
     }
-    if (TURN_PROCESS_INDEPENDENT_KINDS.has(node.kind)
-      || node.anchorSeq < spec.processStartSeq
-      || (spec.answerAnchorSeq !== null && node.anchorSeq >= spec.answerAnchorSeq)) continue
-    if (node.kind !== 'assistant-step' || spec.answerStep === null || node.data.step !== spec.answerStep) {
-      hasExternalProcess = true
-    }
+    if (TURN_PROCESS_INDEPENDENT_KINDS.has(node.kind)) continue
+    // Process rows after the protected reply still belong to the same outer
+    // control, so they keep it usable; the reply itself stays outside the fold.
+    if (isTurnProcessMember(spec, false, processRow(node))) hasExternalProcess = true
   }
   return {
     turn,

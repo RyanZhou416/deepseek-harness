@@ -1067,6 +1067,59 @@ describe('built-in conversation node Definitions', () => {
     })
   })
 
+  it('keeps the durable reply, usage, and timing when a transient chunk replays after its message', () => {
+    const value = assembler([
+      at(1, 'turn/start', { turn: 1 }),
+      at(2, 'step/start', { turn: 1, step: 1 }),
+      at(3, 'assistant/message', {
+        turn: 1,
+        step: 1,
+        message: assistantMessage('ordered-final', 'done'),
+        usage: { inputTokens: 7, outputTokens: 3 },
+      }, { surfaceOp: 'append' }),
+      at(3.5, 'assistant/live-chunk', {
+        turn: 1, step: 1, chunk: { type: 'text-delta', index: 0, text: ' late' },
+      }),
+      at(3.6, 'assistant/live-chunk', {
+        turn: 1, step: 1, chunk: { type: 'usage', usage: { inputTokens: 900, outputTokens: 900 } },
+      }),
+    ])
+    const assistant = node(snapshot(value), 'assistant-step')
+    expect(assistant?.anchorSeq).toBe(3)
+    expect(assistant?.data).toMatchObject({
+      status: 'settled',
+      blocks: [{ kind: 'text', text: 'done' }],
+      usage: { inputTokens: 7, outputTokens: 3 },
+      finalNode: {
+        seq: 3,
+        blocks: [{ kind: 'text', text: 'done' }],
+        usage: { inputTokens: 7, outputTokens: 3 },
+        timing: { firstTokenTime: null },
+      },
+    })
+
+    const partial = assembler([
+      at(3, 'assistant/message', {
+        turn: 1,
+        step: 1,
+        message: assistantMessage('partial-final', 'done'),
+        usage: { inputTokens: 7, outputTokens: 3 },
+      }, { surfaceOp: 'append' }),
+      at(3.5, 'assistant/live-chunk', {
+        turn: 1, step: 1, chunk: { type: 'text-delta', index: 0, text: ' late' },
+      }),
+      at(3.6, 'assistant/live-chunk', {
+        turn: 1, step: 1, chunk: { type: 'usage', usage: { inputTokens: 900, outputTokens: 900 } },
+      }),
+    ], true)
+    expect(node(snapshot(partial), 'assistant-step')?.data).toMatchObject({
+      status: 'settled',
+      blocks: [{ kind: 'text', text: 'done' }],
+      usage: { inputTokens: 7, outputTokens: 3 },
+      finalNode: { blocks: [{ kind: 'text', text: 'done' }], timing: { firstTokenTime: null } },
+    })
+  })
+
   it.each([
     { outcome: 'attempt', startLoaded: true },
     { outcome: 'attempt', startLoaded: false },

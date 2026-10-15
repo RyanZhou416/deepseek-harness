@@ -21,6 +21,8 @@ The Session Controller owns the contiguous loaded logical-event window. Each `Se
 
 Chat and Trajectory may recognize the same durable event family, but each keeps its own Definition State and final node payload. Shared target-neutral machinery is limited to identity routing, ordered replay, Location data, predecessor dependencies, and publication cadence.
 
+An `insert-assistant` event-window change inserts a delayed durable settlement into sequence order without retiring that attempt's transient matches. It replays affected Contexts through the same ordered merge used by `settle-assistant`; ordinary `append` retains its monotone-order requirement. Target Assistant projections keep a finalized message authoritative over later transient chunks, while Tool Definitions retain the live matches until retirement.
+
 ## Target activation
 
 Each Session keeps a monotonic set of active targets. Creating or reading a target source does not activate it. The shell explicitly activates its persisted or newly selected View, while another consumer activates a target through its first source subscription. First activation creates that target's builder and calls `replace()` once from the current target-indexed Contexts. Later flushes call `apply()` for every active target, and unsubscription does not remove one.

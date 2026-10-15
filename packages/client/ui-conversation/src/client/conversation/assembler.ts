@@ -290,13 +290,27 @@ export class ConversationNodeAssembler implements ConversationViewSnapshotStore 
     this.locationIndex.removeAssistantTransients(retired.map(candidate => candidate.event))
 
     let publication: ConversationPublication = retired.length === 0 ? 'none' : 'immediate'
-    if (entry !== undefined && !this.inputs.has(entry.event.seq)) {
-      this.inputs.set(entry.event.seq, entry)
-      this.locationIndex.insertAssistantSettlement(entry.event)
-      const pending = new Map<string, PendingMatch[]>()
-      publication = maximumPublication(publication, this.collectInput(entry, pending))
-      this.applyPendingMatches(pending, affected)
+    if (entry !== undefined) {
+      publication = maximumPublication(publication, this.insertAssistantEntry(entry, affected))
     }
+    this.replayContexts(affected)
+    if (this.replayRevisedDependents()) publication = 'immediate'
+    this.revised.clear()
+    return publication
+  }
+
+  /**
+   * Insert one durable Assistant commitment at its sequence position without
+   * retiring transient Matches; ordered commitment keeps the Preparing Tool
+   * rows and every other Match of the same attempt visible. The commitment's
+   * sequence may already sit below entries published while it was held.
+   * @param entry - durable message or attempt event committed after its sequence was published.
+   * @returns highest requested publication cadence.
+   */
+  insertAssistant(entry: SessionAssistantSettlementEntry): ConversationPublication {
+    this.revised.clear()
+    const affected = new Set<InternalContext>()
+    let publication = this.insertAssistantEntry(entry, affected)
     this.replayContexts(affected)
     if (this.replayRevisedDependents()) publication = 'immediate'
     this.revised.clear()
@@ -561,6 +575,27 @@ export class ConversationNodeAssembler implements ConversationViewSnapshotStore 
     }
     this.markDirty(context)
     return definition.publication?.(match) ?? 'immediate'
+  }
+
+  /**
+   * Index, match, and register one durable Assistant settlement inserted before
+   * the published tail. Already present sequences are ignored so a duplicate
+   * commitment publishes nothing.
+   * @param entry - durable message or attempt event.
+   * @param affected - Contexts receiving the new Match, extended in place.
+   * @returns publication requested by collecting the entry.
+   */
+  private insertAssistantEntry(
+    entry: SessionAssistantSettlementEntry,
+    affected: Set<InternalContext>,
+  ): ConversationPublication {
+    if (this.inputs.has(entry.event.seq)) return 'none'
+    this.inputs.set(entry.event.seq, entry)
+    this.locationIndex.insertAssistantSettlement(entry.event)
+    const pending = new Map<string, PendingMatch[]>()
+    const publication = this.collectInput(entry, pending)
+    this.applyPendingMatches(pending, affected)
+    return publication
   }
 
   private applyPendingMatches(

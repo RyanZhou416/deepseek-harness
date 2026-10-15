@@ -191,6 +191,12 @@ export const CLIENT_SLOT_API: readonly ClientSlotEntry[] = [
         type: 'string',
         doc: 'Your cell key: the entry renders where the owner dispatches this exact key. Registering an already-occupied key replaces that occupant.',
       },
+      {
+        name: 'failureScope',
+        requirement: 'optional',
+        type: '\'registration\' | \'occurrence\'',
+        doc: 'Default registration failure behavior is unchanged. occurrence keeps this registration live after one render fails and requires the owner to supply occurrenceRecovery with fallback and resetKey; it does not promote another registration of this key.',
+      },
     ],
     ownerProps: [
       '/** Command-row owner share. */\nexport interface CommandRowOwnerProps {\n  node: CommandNode\n  compaction?: CompactionSummaryNode\n}',
@@ -238,6 +244,12 @@ export const CLIENT_SLOT_API: readonly ClientSlotEntry[] = [
         requirement: 'required',
         type: 'string',
         doc: 'Your cell key: the entry renders where the owner dispatches this exact key. Registering an already-occupied key replaces that occupant.',
+      },
+      {
+        name: 'failureScope',
+        requirement: 'optional',
+        type: '\'registration\' | \'occurrence\'',
+        doc: 'Default registration failure behavior is unchanged. occurrence keeps this registration live after one render fails and requires the owner to supply occurrenceRecovery with fallback and resetKey; it does not promote another registration of this key.',
       },
     ],
     ownerProps: [
@@ -1796,6 +1808,12 @@ export const CLIENT_SLOT_API: readonly ClientSlotEntry[] = [
         type: 'string',
         doc: 'Your cell key: the entry renders where the owner dispatches this exact key. Registering an already-occupied key replaces that occupant.',
       },
+      {
+        name: 'failureScope',
+        requirement: 'optional',
+        type: '\'registration\' | \'occurrence\'',
+        doc: 'Default registration failure behavior is unchanged. occurrence keeps this registration live after one render fails and requires the owner to supply occurrenceRecovery with fallback and resetKey; it does not promote another registration of this key.',
+      },
     ],
     ownerProps: [],
     ownerPropsReferences: [],
@@ -1868,6 +1886,12 @@ export const CLIENT_SLOT_API: readonly ClientSlotEntry[] = [
         type: 'string',
         doc: 'Your cell key: the entry renders where the owner dispatches this exact key. Registering an already-occupied key replaces that occupant.',
       },
+      {
+        name: 'failureScope',
+        requirement: 'optional',
+        type: '\'registration\' | \'occurrence\'',
+        doc: 'Default registration failure behavior is unchanged. occurrence keeps this registration live after one render fails and requires the owner to supply occurrenceRecovery with fallback and resetKey; it does not promote another registration of this key.',
+      },
     ],
     ownerProps: [
       '/** One user-requested bundle activation and navigation to its configuration page. */\nexport interface PluginActivationOwnerProps {\n  readonly packageName: string\n  /** Dismiss guidance for this activation. */\n  readonly onDismiss: () => void\n  /** Dismiss guidance and open this bundle\'s detail page. */\n  readonly onOpenDetails: () => void\n}',
@@ -1905,6 +1929,12 @@ export const CLIENT_SLOT_API: readonly ClientSlotEntry[] = [
         requirement: 'required',
         type: 'string',
         doc: 'Your cell key: the entry renders where the owner dispatches this exact key. Registering an already-occupied key replaces that occupant.',
+      },
+      {
+        name: 'failureScope',
+        requirement: 'optional',
+        type: '\'registration\' | \'occurrence\'',
+        doc: 'Default registration failure behavior is unchanged. occurrence keeps this registration live after one render fails and requires the owner to supply occurrenceRecovery with fallback and resetKey; it does not promote another registration of this key.',
       },
     ],
     ownerProps: [
@@ -2150,6 +2180,12 @@ export const CLIENT_SLOT_API: readonly ClientSlotEntry[] = [
         requirement: 'required',
         type: 'string',
         doc: 'Your cell key: the entry renders where the owner dispatches this exact key. Registering an already-occupied key replaces that occupant.',
+      },
+      {
+        name: 'failureScope',
+        requirement: 'optional',
+        type: '\'registration\' | \'occurrence\'',
+        doc: 'Default registration failure behavior is unchanged. occurrence keeps this registration live after one render fails and requires the owner to supply occurrenceRecovery with fallback and resetKey; it does not promote another registration of this key.',
       },
     ],
     ownerProps: [
@@ -2543,6 +2579,12 @@ export const CLIENT_SLOT_API: readonly ClientSlotEntry[] = [
         requirement: 'required',
         type: 'string',
         doc: 'Your cell key: the entry renders where the owner dispatches this exact key. Registering an already-occupied key replaces that occupant.',
+      },
+      {
+        name: 'failureScope',
+        requirement: 'optional',
+        type: '\'registration\' | \'occurrence\'',
+        doc: 'Default registration failure behavior is unchanged. occurrence keeps this registration live after one render fails and requires the owner to supply occurrenceRecovery with fallback and resetKey; it does not promote another registration of this key.',
       },
     ],
     ownerProps: [
@@ -3107,6 +3149,12 @@ export const CLIENT_SLOT_API: readonly ClientSlotEntry[] = [
         type: 'string',
         doc: 'Your cell key: the entry renders where the owner dispatches this exact key. Registering an already-occupied key replaces that occupant.',
       },
+      {
+        name: 'failureScope',
+        requirement: 'optional',
+        type: '\'registration\' | \'occurrence\'',
+        doc: 'Default registration failure behavior is unchanged. occurrence keeps this registration live after one render fails and requires the owner to supply occurrenceRecovery with fallback and resetKey; it does not promote another registration of this key.',
+      },
     ],
     ownerProps: [],
     ownerPropsReferences: [],
@@ -3158,6 +3206,12 @@ export const CLIENT_SLOT_API: readonly ClientSlotEntry[] = [
         type: 'string',
         doc: 'Your cell key: the entry renders where the owner dispatches this exact key. Registering an already-occupied key replaces that occupant.',
       },
+      {
+        name: 'failureScope',
+        requirement: 'optional',
+        type: '\'registration\' | \'occurrence\'',
+        doc: 'Default registration failure behavior is unchanged. occurrence keeps this registration live after one render fails and requires the owner to supply occurrenceRecovery with fallback and resetKey; it does not promote another registration of this key.',
+      },
     ],
     ownerProps: [],
     ownerPropsReferences: [],
@@ -3206,6 +3260,12 @@ export const CLIENT_SLOT_API: readonly ClientSlotEntry[] = [
         requirement: 'required',
         type: 'string',
         doc: 'Your cell key: the entry renders where the owner dispatches this exact key. Registering an already-occupied key replaces that occupant.',
+      },
+      {
+        name: 'failureScope',
+        requirement: 'optional',
+        type: '\'registration\' | \'occurrence\'',
+        doc: 'Default registration failure behavior is unchanged. occurrence keeps this registration live after one render fails and requires the owner to supply occurrenceRecovery with fallback and resetKey; it does not promote another registration of this key.',
       },
     ],
     ownerProps: [
@@ -3261,6 +3321,12 @@ export const CLIENT_SLOT_API: readonly ClientSlotEntry[] = [
         requirement: 'required',
         type: 'string',
         doc: 'Your cell key: the entry renders where the owner dispatches this exact key. Registering an already-occupied key replaces that occupant.',
+      },
+      {
+        name: 'failureScope',
+        requirement: 'optional',
+        type: '\'registration\' | \'occurrence\'',
+        doc: 'Default registration failure behavior is unchanged. occurrence keeps this registration live after one render fails and requires the owner to supply occurrenceRecovery with fallback and resetKey; it does not promote another registration of this key.',
       },
     ],
     ownerProps: [
@@ -3365,6 +3431,12 @@ export const CLIENT_SLOT_API: readonly ClientSlotEntry[] = [
         requirement: 'required',
         type: 'string',
         doc: 'Your cell key: the entry renders where the owner dispatches this exact key. Registering an already-occupied key replaces that occupant.',
+      },
+      {
+        name: 'failureScope',
+        requirement: 'optional',
+        type: '\'registration\' | \'occurrence\'',
+        doc: 'Default registration failure behavior is unchanged. occurrence keeps this registration live after one render fails and requires the owner to supply occurrenceRecovery with fallback and resetKey; it does not promote another registration of this key.',
       },
     ],
     ownerProps: [
@@ -3511,6 +3583,12 @@ export const CLIENT_SLOT_API: readonly ClientSlotEntry[] = [
         requirement: 'required',
         type: 'string',
         doc: 'Your cell key: the entry renders where the owner dispatches this exact key. Registering an already-occupied key replaces that occupant.',
+      },
+      {
+        name: 'failureScope',
+        requirement: 'optional',
+        type: '\'registration\' | \'occurrence\'',
+        doc: 'Default registration failure behavior is unchanged. occurrence keeps this registration live after one render fails and requires the owner to supply occurrenceRecovery with fallback and resetKey; it does not promote another registration of this key.',
       },
     ],
     ownerProps: [
@@ -3889,6 +3967,12 @@ export const CLIENT_SLOT_API: readonly ClientSlotEntry[] = [
         type: 'string',
         doc: 'Your cell key: the entry renders where the owner dispatches this exact key. Registering an already-occupied key replaces that occupant.',
       },
+      {
+        name: 'failureScope',
+        requirement: 'optional',
+        type: '\'registration\' | \'occurrence\'',
+        doc: 'Default registration failure behavior is unchanged. occurrence keeps this registration live after one render fails and requires the owner to supply occurrenceRecovery with fallback and resetKey; it does not promote another registration of this key.',
+      },
     ],
     ownerProps: [
       '/** Standard owner currency supplied to every atomic Tool view. */\nexport interface ToolCallCommonProps {\n  /** Stable Hook; each invocation owns its open state and subscribes to enclosing-Turn resets. */\n  useDisclosure: UseDisclosure\n  /** Call identity, stable across all stages. */\n  callId: string\n  /** Wire Tool name and keyed dispatch value. */\n  toolName: string\n  /** Session workspace root for relative summaries. */\n  cwd?: string | undefined\n  /** Host account home; POSIX home-rooted summaries display as `~`. */\n  home?: string | undefined\n  /** Open an argument path at its optional requested line. */\n  openFile: (path: string, options?: OpenFileOptions) => void\n  /** Chat-supplied, session-authorized loader for durable images; Tool views do not manage attachment URLs. */\n  loadImage: MessageImageLoader\n  /** Inspect this call in the trajectory view when available. */\n  inspect?: (() => void) | undefined\n}',
@@ -3995,6 +4079,12 @@ export const CLIENT_SLOT_API: readonly ClientSlotEntry[] = [
         requirement: 'required',
         type: 'string',
         doc: 'Your cell key: the entry renders where the owner dispatches this exact key. Registering an already-occupied key replaces that occupant.',
+      },
+      {
+        name: 'failureScope',
+        requirement: 'optional',
+        type: '\'registration\' | \'occurrence\'',
+        doc: 'Default registration failure behavior is unchanged. occurrence keeps this registration live after one render fails and requires the owner to supply occurrenceRecovery with fallback and resetKey; it does not promote another registration of this key.',
       },
     ],
     ownerProps: [

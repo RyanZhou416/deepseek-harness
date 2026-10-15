@@ -402,3 +402,42 @@ describe('subscription API', () => {
     expect(keys).toHaveLength(1)
   })
 })
+
+describe('failure scope registration contract', () => {
+  it('stores an explicit registration scope and leaves absence absent', () => {
+    const core = new SlotCore()
+    mountFrame(core)
+    core.register({ name: 'test.keyed', key: 'a', failureScope: 'registration' }, Comp)
+    core.register({ name: 'test.keyed', key: 'b' }, Comp)
+    expect(core.entries('test.keyed').map(entry => entry.failureScope)).toEqual(['registration', undefined])
+  })
+
+  it('accepts occurrence scope on a keyed slot and stores it verbatim', () => {
+    const core = new SlotCore()
+    mountFrame(core)
+    const dispose = core.register({ name: 'test.keyed', key: 'a', failureScope: 'occurrence' }, Comp)
+    expect(core.entries('test.keyed')[0]?.failureScope).toBe('occurrence')
+    dispose()
+    expect(core.entries('test.keyed')).toHaveLength(0)
+  })
+
+  it('rejects an unsupported failure scope value before mutating the ledger', () => {
+    const core = new SlotCore()
+    mountFrame(core)
+    expect(() => core.register({ name: 'test.keyed', key: 'a', failureScope: 'session' as never }, Comp))
+      .toThrow(/unsupported failureScope "session"/)
+    expect(core.entries('test.keyed')).toHaveLength(0)
+  })
+
+  it('rejects occurrence scope on every non-keyed kind', () => {
+    const core = new SlotCore()
+    mountFrame(core)
+    expect(() => core.register({ name: 'test.single', failureScope: 'occurrence' }, Comp))
+      .toThrow(/occurrence isolation is available to keyed slots/)
+    expect(() => core.register({ name: 'test.list', id: 'a', failureScope: 'occurrence' }, Comp))
+      .toThrow(/occurrence isolation is available to keyed slots/)
+    expect(() => core.register({ name: 'test.chain', failureScope: 'occurrence', select: () => null }, Comp))
+      .toThrow(/occurrence isolation is available to keyed slots/)
+    expect(core.entries('test.single')).toHaveLength(0)
+  })
+})

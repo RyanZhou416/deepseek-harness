@@ -76,6 +76,7 @@ const REGISTER_OPTIONS: Readonly<Record<(typeof KINDS)[number], readonly OptionD
   ],
   keyed: [
     { name: 'key', requirement: 'required', type: 'string', doc: 'Your cell key: the entry renders where the owner dispatches this exact key. Registering an already-occupied key replaces that occupant.' },
+    { name: 'failureScope', requirement: 'optional', type: "'registration' | 'occurrence'", doc: 'Default registration failure behavior is unchanged. occurrence keeps this registration live after one render fails and requires the owner to supply occurrenceRecovery with fallback and resetKey; it does not promote another registration of this key.' },
   ],
   chain: [
     { name: 'select', requirement: 'required', type: '(owner) => unknown | null', doc: 'Pure routing selector. Entries are tried in ascending order; the first non-null result wins and arrives as the component\'s `matched` prop. All-null falls through to the owner\'s fallback.' },

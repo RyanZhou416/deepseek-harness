@@ -5,7 +5,7 @@ import type {
   ISessions, SessionBinding, SessionEventSource, SessionEventWindow,
 } from '@deepseek-ai/dsh-api-session-controller/client'
 import type { SessionEvent, SessionId } from '@deepseek-ai/dsh-session/types'
-import { WeakMapWithValues } from '@deepseek-ai/dsh-util-values'
+import { assertNever, WeakMapWithValues } from '@deepseek-ai/dsh-util-values'
 import {
   createSnapshotStore, type ObservableSnapshot, type SnapshotStore,
 } from '@deepseek-ai/dsh-client-store'
@@ -120,12 +120,17 @@ class BoundConversation implements ConversationBinding {
         this.publish(publication)
         return
       }
+      case 'insert-assistant':
+        this.publish(this.assembler.insertAssistant(window.change.entry))
+        return
       case 'settle-assistant':
         this.publish(this.assembler.settleAssistant(
           window.change.attemptId,
           window.change.entry,
         ))
         return
+      default:
+        return assertNever(window.change)
     }
   }
 

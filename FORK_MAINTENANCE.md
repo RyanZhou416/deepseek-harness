@@ -70,6 +70,14 @@ Continuable-subagent Queue edit/remove/steer 由 alpha.2 的通用 `session.upda
 
 ## Source deltas
 
+### Session reply visibility
+
+Delayed Assistant settlements commit at their sequence position without retiring preparing tool rows until the owning Step or Turn closes. Finalized Chat and Trajectory messages ignore later transient mutations. The shipped Assistant renderer opts into per-occurrence recovery; plain-text fallback leaves other replies live and preserves default failure behavior for custom overrides. Closed Turns keep their last available reply visible, including text beside tool calls or before tool-only Steps; process groups on either side remain expandable.
+
+**Preservation rule.** Keep ordered insertion separate from attempt retirement, count transient entries when routing commitment, and never mutate previously published windows. Do not globally disable slot abdication, expose reasoning in fallback, weaken footer action eligibility, or change Session formats. Source validation must not rebuild served Web artifacts or restart the running DSH without user coordination.
+
+**Focused verification.** Source Vitest suites under Session Controller, ui-conversation, ui-chat, ui-trajectory, ui-renderer, and ui-slots cover delayed commitment, immutable windows, tool preparation, isolated failures, and folding. [The recorded Turn-tail scenario](apps/web/tests/turn-tail-actions.e2e.ts) also asserts reply visibility and reachable tools after a later textless Step, including reload. Browser verification requires a coherent rebuilt artifact set and remains separate from source-only tests.
+
 ### Client startup graph updates
 
 The client module entry manager waits for graph updates queued during initial activation before Web boot audits entry readiness. Keep the existing serial queue and drain it until no newer queued operation replaces the observed promise; do not announce startup completion while an activation-triggered provider or consumer is still pending. This fix is independent of the withdrawn Session Browser plugin.

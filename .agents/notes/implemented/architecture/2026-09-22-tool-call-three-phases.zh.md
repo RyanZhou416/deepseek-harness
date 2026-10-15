@@ -30,7 +30,7 @@ Status: implemented
 
 Tool 的具名 delta 和 `tool/call` 都是创建入口。实时先收到 delta，就从 preparing 创建；历史先收到 `tool/call`，就从 start 创建。匹配函数仍然只读取当前事件，不查询 Context，不增加角色、注册表或旁路缓存。
 
-成功流结束时发布最终 Assistant 消息，瞬态 delta 保留到 `step/end`。每个 `tool/call` 更新已有 callId；Assistant 的实时排序锚点也保留到同一次清理。失败、中断或废弃的流立即移除 delta。清理时，Assembler 从剩余 Match 重新选择 start 并重算 State；未派发的准备节点隐藏，不合成执行结果。
+成功流结束时通过追加或有序插入提交最终 Assistant 消息，瞬态 delta 保留到所属 `step/end` 或 `turn/end`；结束帧之前已发布所属边界时，原子完成提交与清理。每个 `tool/call` 更新已有 callId；Assistant 的实时排序锚点也保留到同一次清理。失败、中断或废弃的流立即移除 delta。清理时，Assembler 从剩余 Match 重新选择 start 并重算 State；未派发的准备节点隐藏，不合成执行结果。
 
 ### 最终状态收敛，不重现准备过程
 

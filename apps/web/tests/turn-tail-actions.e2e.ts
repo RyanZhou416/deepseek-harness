@@ -243,6 +243,52 @@ describe('web e2e: assistant IconActions wait for the turn to end', () => {
     expect(tripwire.warnings).toEqual([])
   }, 60_000)
 
+  it.skipIf(MODE === 'record')('keeps the last recorded reply visible when a later Step ends without text', async () => {
+    await launch(() => ({ patches: [{
+      at: 1,
+      entry: {
+        kind: 'chunks',
+        chunks: [
+          { type: 'block-start', index: 0, blockType: 'reasoning' },
+          { type: 'reasoning-delta', index: 0, text: 'Checking the tool result.' },
+          { type: 'block-end', index: 0, block: { type: 'reasoning', text: 'Checking the tool result.' } },
+          { type: 'finish', reason: { kind: 'max-tokens' } },
+        ],
+      },
+    }] }))
+    onTestFailed(() => saveFailureShot(page, 'web-e2e-last-reply-visibility'))
+    const { settled } = await sendPrompt()
+    await settled
+    expect(sessionEvents.filter(event => event.type === 'turn/end').map(event => event.data.reason.kind))
+      .toEqual(['max-tokens'])
+    const reply = page.getByText(NARRATION, { exact: true })
+    const process = page.locator('[data-turn-process]')
+    await expect.poll(() => reply.isVisible(), { timeout: 10_000 }).toBe(true)
+    expect(await process.isDisabled()).toBe(false)
+    expect(await process.getAttribute('aria-expanded')).toBe('false')
+    expect(await page.getByRole('button', { name: 'Branch into a new conversation' }).getAttribute('aria-disabled'))
+      .toBe('true')
+    // Windows records the unavailable Bash call as a failed tool row; both
+    // outcomes must remain reachable through the same process disclosure.
+    const tool = page.locator('[data-chat-flow-kind="tool-call"]').first()
+    const group = tool.locator('xpath=ancestor::*[@data-chat-group-key]')
+    const groupControl = group.locator('[data-process-activity]')
+    expect(await groupControl.isVisible()).toBe(false)
+    await process.click()
+    await expect.poll(() => groupControl.isVisible()).toBe(true)
+    await groupControl.click()
+    await expect.poll(() => tool.isVisible()).toBe(true)
+    await process.click()
+    expect(await reply.isVisible()).toBe(true)
+    await expect.poll(() => groupControl.isVisible()).toBe(false)
+    const warningStart = tripwire.warnings.length
+    await page.reload({ waitUntil: 'load' })
+    await expect.poll(() => reply.isVisible(), { timeout: 15_000 }).toBe(true)
+    acknowledgeReloadConnectionLoss(tripwire, warningStart)
+    expect(tripwire.pageErrors).toEqual([])
+    expect(tripwire.warnings).toEqual([])
+  })
+
   it.skipIf(MODE === 'record').each([
     ['compact', 'Compact'], ['detailed', 'Detailed'], ['verbose', 'Verbose'],
   ] as const)('applies whole-Turn presentation in %s mode', async (mode, label) => {

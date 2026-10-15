@@ -24,6 +24,7 @@ import type {
   StandardSourceBinding, StoreInstanceLike,
 } from '@deepseek-ai/dsh-client-ui-renderer/client'
 import { createSlotRenderer } from '../src/client/scoped-slots.tsx'
+import { SlotAssemblyError } from '../src/client/errors.ts'
 
 type AnyProps = Record<string, unknown>
 type RenderSlotFn = (key: string, owner: object, opts?: RenderOpts) => ReactNode
@@ -1166,5 +1167,218 @@ describe('session-maybe adoption identity', () => {
       })
     })
     expect(view.container.textContent).toBe('replacement#1')
+  })
+})
+
+describe('occurrence failure scope', () => {
+  const KEYED_ROOT: DeclaredSpec = { kind: 'keyed', scope: 'root' }
+  const KEYED_SESSION: DeclaredSpec = { kind: 'keyed', scope: 'session' }
+  const KIDS = { 'k.opt': KEYED_ROOT }
+  /** Fallback body that fails on every render: the fallback is not a safe place either. */
+  const BrokenFallback = () => { throw new Error('fallback boom') }
+
+  it('contains an opted crash locally: fallback under the error anchor, other occurrences and registrations healthy', () => {
+    const h = makeHost()
+    h.declare('k.opt', KEYED_ROOT)
+    h.declare('k.other', KEYED_ROOT)
+    h.add('k.opt', {
+      component: () => { throw new Error('reply boom') },
+      options: { key: 'bad' },
+      failureScope: 'occurrence',
+    })
+    h.add('k.opt', {
+      component: () => <b>healthy reply</b>,
+      options: { key: 'good' },
+      failureScope: 'occurrence',
+    })
+    h.add('k.other', { component: () => <i>other registration</i>, options: { key: 'x' } })
+    const report = vi.spyOn(h.host, 'reportEntryError')
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const recovery = { fallback: <span>plain text</span>, resetKey: 'running' }
+    const { view } = mountRoot(h, { ...KIDS, 'k.other': KEYED_ROOT }, renderSlot => <>
+      <main>{renderSlot('k.opt', {}, { entryKey: 'bad', occurrenceRecovery: recovery })}</main>
+      <aside>{renderSlot('k.opt', {}, { entryKey: 'good', occurrenceRecovery: recovery })}</aside>
+      <nav>{renderSlot('k.other', {}, { entryKey: 'x' })}</nav>
+    </>)
+    spy.mockRestore()
+    const main = view.container.querySelector('main')!
+    expect(main.textContent).toBe('plain text')
+    expect(main.querySelector('[data-slot-error="k.opt"]')).not.toBeNull()
+    expect(view.container.querySelector('aside')!.textContent).toBe('healthy reply')
+    expect(view.container.querySelector('nav')!.textContent).toBe('other registration')
+    expect(report).toHaveBeenCalledTimes(1)
+    expect(report.mock.calls[0]![3]).toEqual({ abdicate: false })
+    report.mockRestore()
+  })
+
+  it('keeps an opted registration in its cell while an unopted override still abdicates to the lower priority', () => {
+    const crashing = () => { throw new Error('override boom') }
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => {})
+
+    const opted = makeHost()
+    opted.declare('k.opt', KEYED_ROOT)
+    opted.add('k.opt', { component: crashing, options: { key: 'k', priority: 0 }, failureScope: 'occurrence' })
+    opted.add('k.opt', { component: () => <b>lower priority</b>, options: { key: 'k', priority: 1 } })
+    const optedView = mountRoot(opted, KIDS, renderSlot => renderSlot('k.opt', {}, {
+      entryKey: 'k',
+      occurrenceRecovery: { fallback: <span>local fallback</span>, resetKey: 'running' },
+    }))
+    expect(optedView.view.container.textContent).toBe('local fallback')
+    // The opted cell never promotes: the lower-priority registration stays unmounted.
+    expect(optedView.view.container.textContent).not.toContain('lower priority')
+
+    const unopted = makeHost()
+    unopted.declare('k.opt', KEYED_ROOT)
+    unopted.add('k.opt', { component: crashing, options: { key: 'k', priority: 0 } })
+    unopted.add('k.opt', { component: () => <b>lower priority</b>, options: { key: 'k', priority: 1 } })
+    const unoptedView = mountRoot(unopted, KIDS, renderSlot => renderSlot('k.opt', {}, {
+      entryKey: 'k',
+      // The payload alone changes nothing: an unopted registration keeps its
+      // existing abdication and promotion behavior.
+      occurrenceRecovery: { fallback: <span>local fallback</span>, resetKey: 'running' },
+    }))
+    spy.mockRestore()
+    expect(unoptedView.view.container.textContent).toBe('lower priority')
+    expect(unoptedView.view.container.querySelector('[data-slot-error]')).toBeNull()
+  })
+
+  it('fails loud when an opted occurrence renders without its recovery payload', () => {
+    const h = makeHost()
+    h.declare('k.opt', KEYED_ROOT)
+    h.add('k.opt', { component: () => <b>reply</b>, options: { key: 'k' }, failureScope: 'occurrence' })
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    expect(() => mountRoot(h, KIDS, renderSlot => renderSlot('k.opt', {}, { entryKey: 'k' })))
+      .toThrow(SlotAssemblyError)
+    spy.mockRestore()
+    // The wiring failure retires nothing: the registration is still on the ledger.
+    expect(h.host.entriesOf('k.opt')).toHaveLength(1)
+  })
+
+  it('retries rich rendering once per generation and keeps the latest fallback props while it holds', () => {
+    const h = makeHost()
+    h.declare('k.opt', KEYED_ROOT)
+    let attempts = 0
+    let shouldThrow = true
+    h.add('k.opt', {
+      component: () => {
+        attempts += 1
+        if (shouldThrow) throw new Error('reply boom')
+        return <b>rich reply</b>
+      },
+      options: { key: 'k' },
+      failureScope: 'occurrence',
+    })
+    let resetKey = 'generation-one'
+    let label = 'first fallback'
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const { view } = mountRoot(h, KIDS, renderSlot => renderSlot('k.opt', {}, {
+      entryKey: 'k',
+      occurrenceRecovery: { fallback: <span>{label}</span>, resetKey },
+    }))
+    expect(view.container.textContent).toBe('first fallback')
+    const failedAttempts = attempts
+    // Same generation: the fallback re-renders with its latest props, no retry.
+    label = 'latest fallback'
+    act(() => { h.add('root', { component: () => null }) })
+    expect(view.container.textContent).toBe('latest fallback')
+    expect(attempts).toBe(failedAttempts)
+    // A moved generation retries the rich renderer.
+    shouldThrow = false
+    resetKey = 'generation-two'
+    act(() => { h.add('root', { component: () => null }) })
+    spy.mockRestore()
+    expect(view.container.textContent).toBe('rich reply')
+    expect(attempts).toBe(failedAttempts + 1)
+  })
+
+  it('does not remount healthy content when the owner generation moves', () => {
+    const h = makeHost()
+    h.declare('k.opt', KEYED_ROOT)
+    let mounts = 0
+    h.add('k.opt', {
+      component: () => {
+        const [incarnation] = useState(() => ++mounts)
+        return <b>{`alive#${incarnation}`}</b>
+      },
+      options: { key: 'k' },
+      failureScope: 'occurrence',
+    })
+    let resetKey = 'generation-one'
+    const { view } = mountRoot(h, KIDS, renderSlot => renderSlot('k.opt', {}, {
+      entryKey: 'k',
+      occurrenceRecovery: { fallback: <span>fallback</span>, resetKey },
+    }))
+    expect(view.container.textContent).toBe('alive#1')
+    resetKey = 'generation-two'
+    act(() => { h.add('root', { component: () => null }) })
+    expect(view.container.textContent).toBe('alive#1')
+    expect(mounts).toBe(1)
+  })
+
+  it('retries a failed session-scoped occurrence when the Session generation changes', () => {
+    const h = makeHost()
+    h.addSession('s1')
+    h.addSession('s2')
+    h.current.set('s1')
+    h.declare('k.sess', KEYED_SESSION)
+    h.add('k.sess', {
+      component: ({ sessionId }: { sessionId?: string }) => {
+        if (sessionId === 's1') throw new Error('reply boom')
+        return <b>{`recovered ${sessionId}`}</b>
+      },
+      options: { key: 'k' },
+      failureScope: 'occurrence',
+    })
+    const recovery = { fallback: <span>plain text</span>, resetKey: 'running' }
+    h.add('root', {
+      component: (props: AnyProps) => {
+        const Provider = props['SessionProvider'] as SessionProviderComponent
+        const renderSlot = props['renderSlot'] as RenderSlotFn
+        return (
+          <Provider session={h.current.getSnapshot()} empty={() => <i>empty</i>}>
+            {renderSlot('k.sess', {}, { entryKey: 'k', occurrenceRecovery: recovery })}
+          </Provider>
+        )
+      },
+      children: { 'k.sess': KEYED_SESSION },
+    })
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const view = render(<>{createSlotRenderer().renderRoot(h.host, {})}</>)
+    expect(view.container.textContent).toBe('plain text')
+    // Same node identity and the same owner reset key ('running' in both
+    // Sessions): only the Session incarnation moved, and the failed wrapper
+    // must still retry for it — the catcher is unmounted while failed and
+    // cannot carry the Session reset itself.
+    act(() => {
+      h.current.set('s2')
+      h.add('root', { component: () => null })   // root bump re-renders the dispatch site
+    })
+    spy.mockRestore()
+    expect(view.container.textContent).toBe('recovered s2')
+    expect(view.container.querySelector('[data-slot-error]')).toBeNull()
+  })
+
+  it('surfaces a failure inside the fallback to the parent boundary instead of re-entering it', () => {
+    const h = makeHost()
+    h.declare('k.opt', KEYED_ROOT)
+    h.add('k.opt', {
+      component: () => { throw new Error('reply boom') },
+      options: { key: 'k' },
+      failureScope: 'occurrence',
+    })
+    const report = vi.spyOn(h.host, 'reportEntryError')
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const { view } = mountRoot(h, KIDS, renderSlot => renderSlot('k.opt', {}, {
+      entryKey: 'k',
+      occurrenceRecovery: { fallback: <BrokenFallback />, resetKey: 'running' },
+    }))
+    spy.mockRestore()
+    // The root registration's own boundary owns the fallback's failure, so the
+    // occurrence recovery is never asked to render itself again. React may run
+    // several diagnostic passes for the nested failure; only its outcome is asserted.
+    expect(view.container.querySelector('[data-slot-error="root"]')).not.toBeNull()
+    expect(view.container.textContent).toBe('')
+    expect(report.mock.calls.map(call => call[3])).toEqual([{ abdicate: false }, { abdicate: true }])
+    report.mockRestore()
   })
 })

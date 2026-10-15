@@ -136,14 +136,14 @@ describe('ClientAssistantStream', () => {
     }
   })
 
-  it('publishes a successful message at stream end and retires its chunks at its Step end', () => {
+  it('commits a successful message at stream end and retires its chunks at its Step end', () => {
     const stream = opened()
     const durable = messageEvent(2)
     expect(stream.acceptDurable(durable)).toBeUndefined()
     expect(stream.acceptFrame(chunkFrame(0))).toEqual(expect.objectContaining({ type: 'transient' }))
     expect(stream.acceptFrame(end(1, {
       kind: 'committed', eventType: 'assistant/message', seq: 2,
-    }))).toEqual({ type: 'publish', entry: durable })
+    }))).toEqual({ type: 'commit', entry: durable })
     for (const [turn, step] of [[2, 1], [1, 2]]) {
       const unrelated = entry({ type: 'step/end', seq: SessionSeq(3), time: 3, data: { turn: turn!, step: step! } })
       expect(stream.acceptDurable(unrelated)).toEqual({ type: 'publish', entry: unrelated })
@@ -152,6 +152,48 @@ describe('ClientAssistantStream', () => {
     expect(stream.acceptDurable(closed)).toEqual({ type: 'publish', entry: closed, retireAttemptId: ATTEMPT })
     expect(stream.acceptDurable(ordinary(5))).toEqual({ type: 'publish', entry: ordinary(5) })
     expect(stream.acceptFrame(start(LlmAttemptId('session:2'), 4))).toBeUndefined()
+  })
+
+  it('commits a successful message published after a later transient chunk', () => {
+    const stream = opened()
+    const durable = messageEvent(2)
+    expect(stream.acceptDurable(durable)).toBeUndefined()
+    expect(stream.acceptFrame(chunkFrame(0))).toEqual(expect.objectContaining({ type: 'transient' }))
+    expect(stream.acceptFrame(chunkFrame(1))).toEqual(expect.objectContaining({ type: 'transient' }))
+
+    expect(stream.acceptFrame(end(2, {
+      kind: 'committed', eventType: 'assistant/message', seq: 2,
+    }))).toEqual({ type: 'commit', entry: durable })
+  })
+
+  it('settles a successful message atomically once its owning boundary published', () => {
+    const stream = opened()
+    const durable = messageEvent(2)
+    expect(stream.acceptDurable(durable)).toBeUndefined()
+    const closed = entry({ type: 'step/end', seq: SessionSeq(3), time: 3, data: { turn: 1, step: 1 } })
+    expect(stream.acceptDurable(closed)).toEqual({ type: 'publish', entry: closed })
+
+    expect(stream.acceptFrame(end(0, {
+      kind: 'committed', eventType: 'assistant/message', seq: 2,
+    }))).toEqual({ type: 'settlement', attemptId: ATTEMPT, entry: durable })
+    const later = entry({ type: 'step/end', seq: SessionSeq(4), time: 4, data: { turn: 1, step: 1 } })
+    expect(stream.acceptDurable(later)).toEqual({ type: 'publish', entry: later })
+  })
+
+  it('retires retained chunks at the owning Turn end only', () => {
+    const stream = opened()
+    const durable = messageEvent(2)
+    stream.acceptDurable(durable)
+    expect(stream.acceptFrame(end(0, {
+      kind: 'committed', eventType: 'assistant/message', seq: 2,
+    }))).toEqual({ type: 'commit', entry: durable })
+
+    const unrelated = entry({ type: 'turn/end', seq: SessionSeq(3), time: 3, data: { turn: 2, reason: { kind: 'completed' } } })
+    expect(stream.acceptDurable(unrelated)).toEqual({ type: 'publish', entry: unrelated })
+    const closed = entry({ type: 'turn/end', seq: SessionSeq(4), time: 4, data: { turn: 1, reason: { kind: 'completed' } } })
+    expect(stream.acceptDurable(closed)).toEqual({ type: 'publish', entry: closed, retireAttemptId: ATTEMPT })
+    const repeated = entry({ type: 'turn/end', seq: SessionSeq(5), time: 5, data: { turn: 1, reason: { kind: 'completed' } } })
+    expect(stream.acceptDurable(repeated)).toEqual({ type: 'publish', entry: repeated })
   })
 
   it('clears retained chunks on replacement and refuses a new attempt before Step completion', () => {

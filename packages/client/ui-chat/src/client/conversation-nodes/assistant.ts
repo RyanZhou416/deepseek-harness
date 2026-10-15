@@ -172,6 +172,17 @@ function settleMessage(
   }
 }
 
+/**
+ * A durable surface message owns the reply once ordered replay applied it:
+ * later transient chunks may still reach the fold, but they cannot revise its
+ * blocks, usage, anchor, or timing. Retries and boundaries still apply.
+ * @param state - current Step state.
+ * @returns whether a surface Assistant message already finalized this Step.
+ */
+function isFinalized(state: AssistantState): boolean {
+  return state.final?.event.type === 'assistant/message'
+}
+
 function closedBoundary(location: ConversationLocation): { seq: number; time: number } | undefined {
   if (location.kind === 'step' && location.step.status === 'closed' && location.step.end !== undefined) {
     return location.step.end
@@ -228,7 +239,9 @@ function fallbackState(context: ConversationNodeContext<AssistantState>): Assist
   for (const match of context.matches) {
     if (match.event.type === 'assistant/live-chunk') {
       state ??= initialState(match.event.data.turn, match.event.data.step)
-      state = updateChunk(state, match.event.data.chunk, match.event.seq, match.event.time)
+      if (!isFinalized(state)) {
+        state = updateChunk(state, match.event.data.chunk, match.event.seq, match.event.time)
+      }
       continue
     }
     if (match.event.type === 'assistant/message') {
@@ -306,6 +319,7 @@ export const assistantDefinition: ConversationNodeDefinition<AssistantState> = {
   },
   update: (context, match) => {
     if (match.event.type === 'assistant/live-chunk') {
+      if (isFinalized(context.state)) return context.state
       return updateChunk(context.state, match.event.data.chunk, match.event.seq, match.event.time)
     }
     if (match.event.type === 'assistant/message') return settleMessage(context.state, match, match.event)

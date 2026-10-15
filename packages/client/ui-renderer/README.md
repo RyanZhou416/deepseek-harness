@@ -53,6 +53,8 @@ The plugin activates after `slots`, `sessions`, and `layout`; it installs `creat
 
 `createSlotRenderer` connects the slot registry to React: ordinary entry lists and Factory definitions become reactive sources, and each outlet or occurrence renders through the installed renderer. Business plugins pass bare observable sources through typed `hooks`; the renderer binds them at the render position via the uSES adapter. A Factory Store factory stays lazy until an occurrence first materializes; its exclusive handle rejects persistence, render-time records stay weak, and an idempotent effect strongly retains only mounted occurrences while preserving identity across effect replay. Factory errors use the ordinary supervision channel without abdicating the shared definition: the definition and its fallback local Components report against the definition, caller-selected local Components report against the caller registration, and each boundary resets with its own scope incarnation.
 
+A keyed registration can opt into occurrence isolation through the [slot failure policy](../ui-slots/README.md). Its owner supplies a fallback and a stable reset key; a contained failure reports without retiring the registration, and the fallback continues reading current props. A changed reset key retries the renderer without remounting healthy siblings. Missing scope/providers remain assembly errors and escape containment. The empty-registration fallback is separate from failure recovery.
+
 ### Identity
 
 React, React DOM, Cordis, ui-slots, and ui-primitives retain one browser identity through the web shell's static module table; this package arrives as a dynamic client bundle.

@@ -1,6 +1,6 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type {
-  ConversationLocation, ConversationNodeContext, ConversationNodeDefinition, TurnLocation,
+  ConversationLocation, ConversationNodeContext, ConversationNodeDefinition, StepLocation, TurnLocation,
 } from '@deepseek-ai/dsh-client-ui-conversation/client'
 import type {} from '@deepseek-ai/dsh-llm-retry/types'
 import type { StreamChunk } from '@deepseek-ai/dsh-llm'
@@ -36,6 +36,8 @@ interface TurnProcessState {
   readonly messageCount: number
   readonly toolCallCount: number
   readonly subagentCount: number
+  /** Steps whose live stream has already produced reply content since its last reset. */
+  readonly replySteps: ReadonlySet<number>
 }
 
 type ConversationEvent = Parameters<ConversationNodeDefinition['match']>[0]
@@ -103,6 +105,7 @@ function fallbackState(context: ConversationNodeContext<TurnProcessState>): Turn
     messageCount: 0,
     toolCallCount: 0,
     subagentCount: 0,
+    replySteps: NO_REPLY_STEPS,
   }
   for (const match of context.matches) state = updateProcessState(state, match.event)
   return state
@@ -114,17 +117,71 @@ function isFinalAssistant(
   return data?.finalNode !== undefined
 }
 
-function latestAnswer(turn: TurnLocation): Readonly<FinalAssistantChatData> | null {
-  const latestStep = turn.steps.at(-1)
-  const data: Readonly<AssistantChatData> | undefined = latestStep?.data.get('assistant-step')
-  if (!isFinalAssistant(data) || !hasAssistantReplyContent(data.blocks)) return null
-  return data.blocks.some(block => block.kind === 'tool-call') ? null : data
+/** Read one Step's published finalized reply, when it carries visible reply content. */
+function stepReply(step: StepLocation | undefined): Readonly<FinalAssistantChatData> | null {
+  const data: Readonly<AssistantChatData> | undefined = step?.data.get('assistant-step')
+  return isFinalAssistant(data) && hasAssistantReplyContent(data.blocks) ? data : null
+}
+
+interface SelectedAnswer {
+  readonly step: StepLocation
+  readonly reply: Readonly<FinalAssistantChatData>
+}
+
+/** Newest loaded finalized reply across every Step of a closed Turn. */
+function closedTurnAnswer(turn: TurnLocation): SelectedAnswer | null {
+  for (let index = turn.steps.length - 1; index >= 0; index -= 1) {
+    const step = turn.steps[index]
+    if (step === undefined) continue
+    const reply = stepReply(step)
+    if (reply !== null) return { step, reply }
+  }
+  return null
+}
+
+interface CachedSelection {
+  readonly turn: TurnLocation
+  /** Selected Step, or null when no loaded Step held a finalized reply. */
+  readonly selected: SelectedAnswer | null
+}
+
+/**
+ * Per-State cache of the closed-Turn reply search. The State object identity is
+ * replaced by every Match that can change the selection and by every Context
+ * replay, and the Timeline reuses a Turn location until its own boundaries or
+ * Step list change, so a streamed token or a late transient frame in an already
+ * closed Turn reuses this result instead of rescanning the Turn. A changed
+ * location recomputes, which keeps a rebuilt window correct.
+ */
+const closedTurnSelections = new WeakMap<TurnProcessState, CachedSelection>()
+
+function latestAnswer(state: TurnProcessState, turn: TurnLocation): Readonly<FinalAssistantChatData> | null {
+  if (turn.status !== 'closed') {
+    const latest = stepReply(turn.steps.at(-1))
+    // An open Turn keeps its latest-Step selection: a reply that still shares
+    // its message with a Tool call is process content, not the answer.
+    return latest !== null && !latest.blocks.some(block => block.kind === 'tool-call') ? latest : null
+  }
+  const cached = closedTurnSelections.get(state)
+  if (cached !== undefined && cached.turn === turn) {
+    const selected = cached.selected
+    if (selected === null) return null
+    // A durable reply is immutable once settled; a synthetic interruption keeps
+    // growing from its Step's live frames, so one read refreshes its blocks,
+    // reasoning, and anchor without rescanning the Turn.
+    if (selected.reply.finalNode.messageId !== undefined) return selected.reply
+    const refreshed = stepReply(selected.step)
+    if (refreshed !== null) return refreshed
+  }
+  const selected = closedTurnAnswer(turn)
+  closedTurnSelections.set(state, { turn, selected })
+  return selected?.reply ?? null
 }
 
 function processSpec(state: TurnProcessState, turn: TurnLocation): TurnProcessSpec | null {
   const controlAnchorSeq = state.controlAnchorSeq ?? turn.start?.seq
   if (controlAnchorSeq === undefined) return null
-  const answer = latestAnswer(turn)
+  const answer = latestAnswer(state, turn)
   const counts = {
     messageCount: answer === null
       ? state.messageCount
@@ -167,8 +224,79 @@ function processSpec(state: TurnProcessState, turn: TurnLocation): TurnProcessSp
   }
 }
 
+/** Shared empty set for a Turn whose live stream has shown no reply content. */
+const NO_REPLY_STEPS: ReadonlySet<number> = new Set()
+
+/**
+ * Test whether one live frame carries reply content, mirroring
+ * {@link hasAssistantReplyContent} at chunk granularity: reasoning and Tool
+ * protocol material are process content, never a reply.
+ * @param chunk - streamed Assistant chunk.
+ * @returns whether the frame can make its Step a reply candidate.
+ */
+function replyContentChunk(chunk: StreamChunk): boolean {
+  if (chunk.type === 'text-delta') return chunk.text.trim() !== ''
+  if (chunk.type === 'block-start') {
+    return chunk.blockType !== 'text'
+      && chunk.blockType !== 'reasoning'
+      && chunk.blockType !== 'tool-call'
+  }
+  if (chunk.type !== 'block-end') return false
+  const block = chunk.block
+  if (block.type === 'reasoning' || block.type === 'tool-call') return false
+  if (block.type === 'text') return block.text.trim() !== ''
+  return true
+}
+
+/**
+ * Step of one live frame that can newly make its Step a reply candidate.
+ * @param event - folded Match.
+ * @returns the Step number for a reply-bearing live frame, otherwise undefined.
+ */
+function replyChunkStep(event: ConversationEvent): number | undefined {
+  if (event.type !== 'assistant/live-chunk') return undefined
+  return replyContentChunk(event.data.chunk) ? event.data.step : undefined
+}
+
+/**
+ * Whether one Match can change which finalized reply a closed Turn selects:
+ * durable settlement, retry reset, Turn/Step boundaries, or the first
+ * reply-bearing live frame of a Step since its stream began. Later tokens change
+ * that Step's content, not its eligibility, so the widened search never runs
+ * once per streamed token.
+ * @param state - current Turn process State.
+ * @param event - the Match being folded.
+ * @param replyStep - Step reported by {@link replyChunkStep}, when any.
+ * @returns whether the closed-Turn answer cache must be rebuilt.
+ */
+function changesSelection(
+  state: TurnProcessState,
+  event: ConversationEvent,
+  replyStep: number | undefined,
+): boolean {
+  return event.type === 'assistant/message'
+    || event.type === 'llm/retry'
+    || event.type === 'step/start'
+    || event.type === 'step/end'
+    || event.type === 'turn/end'
+    || (replyStep !== undefined && !state.replySteps.has(replyStep))
+}
+
 function updateProcessState(state: TurnProcessState, event: ConversationEvent): TurnProcessState {
-  let current = state
+  const replyStep = replyChunkStep(event)
+  // Replacing the immutable State object is what invalidates the closed-Turn
+  // answer cache; a Match that cannot change the selection reuses this identity.
+  let current = changesSelection(state, event, replyStep) ? { ...state } : state
+  if (replyStep !== undefined && !current.replySteps.has(replyStep)) {
+    current = { ...current, replySteps: new Set([...current.replySteps, replyStep]) }
+  }
+  if (event.type === 'llm/retry') {
+    // A retry clears that Step's streamed content, so its next reply-bearing
+    // frame is a new eligibility transition.
+    const replySteps = new Set(current.replySteps)
+    replySteps.delete(event.data.step)
+    current = { ...current, replySteps }
+  }
   if (event.type === 'assistant/message'
     && event.surfaceOp === 'append'
     && hasAssistantReplyContent(toAssistantBlocks(event.data.message.content))) {
@@ -234,6 +362,7 @@ export const turnProcessDefinition: ConversationNodeDefinition<TurnProcessState>
       messageCount: 0,
       toolCallCount: 0,
       subagentCount: 0,
+      replySteps: NO_REPLY_STEPS,
     }
   },
   update: (context, match) => updateProcessState(context.state, match.event),

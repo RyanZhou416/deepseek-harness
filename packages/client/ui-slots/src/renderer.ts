@@ -3,7 +3,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { ReactNode } from 'react'
 import type { ObservableSnapshot } from '@deepseek-ai/dsh-client-store'
 import type {
-  SessionAreaProps, SlotEntryDef, SlotScope, SlotSpec, StoredEntry, StoredFactory, Translate,
+  OccurrenceRecovery, SessionAreaProps, SlotEntryDef, SlotScope, SlotSpec, StoredEntry, StoredFactory, Translate,
 } from './index.ts'
 
 /**
@@ -121,6 +121,8 @@ export interface RenderOpts {
   fallback?: ReactNode
   /** Opaque occurrence context consumed only by function-valued injected Hooks. */
   hookContext?: unknown
+  /** Recovery payload for the selected occurrence when that registration opted into occurrence scope. */
+  occurrenceRecovery?: OccurrenceRecovery
 }
 
 /** Host API the `ui-renderer` SlotRegistry presents to its React renderer. */
@@ -155,10 +157,11 @@ export interface SlotRendererHost {
    */
   entriesOfSlot(key: string): readonly StoredEntry[]
   /**
-   * Report an entry boundary crash. With `info.abdicate` (shadowing kinds)
-   * the entry retires from its cell, one-shot, so the next survivor renders;
-   * chain crashes report without abdicating. The registration stays on the
-   * ledger either way.
+   * Report an entry boundary crash. With `info.abdicate` (shadowing kinds
+   * without an occurrence opt-in) the entry retires from its cell, one-shot,
+   * so the next survivor renders; chain crashes and occurrence-scoped crashes
+   * report without abdicating. The registration stays on the ledger either
+   * way.
    * @param key - slot key the entry rendered under.
    * @param entry - the crashed entry.
    * @param error - the crash cause.

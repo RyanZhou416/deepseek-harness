@@ -47,6 +47,8 @@ When an Assistant attempt retires without a visible message, Chat hides its alre
 <a id="command-and-failure-rows"></a>
 ## Command and failure rows
 
+A failing built-in Assistant renderer is isolated to its message occurrence. Its response shows the current text without Markdown processing, with a localized failure notice and an indicator for unavailable non-text content; reasoning-only occurrences never expose raw reasoning. Other replies and tool cards remain usable. The fallback updates while streaming and retries rich rendering at a new settlement generation, not per token. Custom renderer registrations retain their own failure policy.
+
 Generic command rows retain the ordinary command glyph in every lifecycle state; failure remains explicit through the row state and summary. A terminal Turn failure remains a separate red-dot notice; intermediate model retries do not create that notice, and an output-token limit uses the amber warning dot.
 
 -----

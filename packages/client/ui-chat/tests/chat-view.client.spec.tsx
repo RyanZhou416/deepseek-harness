@@ -22,6 +22,7 @@ import type {
 } from '@deepseek-ai/dsh-client-ui-conversation/client'
 import type { WorkspaceSnapshot } from '@deepseek-ai/dsh-api-workspace-controller/client'
 import { SessionSeq, type SessionId } from '@deepseek-ai/dsh-session/types'
+import { AttachmentId } from '@deepseek-ai/dsh-attachment'
 import type { SessionStatusSnapshot } from '@deepseek-ai/dsh-client-ui-session/client'
 import type { KeyedSnapshotSelectorHook, SnapshotSelectorHook } from '@deepseek-ai/dsh-client-ui-slots'
 import { bindSnapshotSelector, makeTranslate } from '@deepseek-ai/dsh-client-test-runtime'
@@ -200,6 +201,13 @@ const turnError = (seq: number, code?: string): TurnErrorNode => ({
 const turnMaxTokens = (seq: number): TurnMaxTokensNode => ({
   kind: 'turn-max-tokens', seq, time: seq * 1_000, turn: 1, step: 0,
 })
+const IMAGE_ATTACHMENT = {
+  attachmentId: AttachmentId('image-1'),
+  mediaType: 'image/png' as const,
+  bytes: 1,
+  width: 1,
+  height: 1,
+}
 const toolResult = (seq: number, callId: string, name = 'bash'): ToolResultNode => ({
   kind: 'tool-result', seq, time: seq * 1_000, callId,
   call: { name, argsRaw: `{"command":"cmd-${callId}","description":"run ${callId}"}` },
@@ -2224,6 +2232,223 @@ describe('ChatView', () => {
     const renewedToggle = view.getByRole('button', { name: '用时 4秒' })
     expect(renewedToggle.getAttribute('aria-expanded')).toBe('true')
     expect(members[0]?.getAttribute('hidden')).toBeNull()
+  })
+
+  it('keeps a finalized reply that shares its message with a Tool call outside the fold', () => {
+    const shared = {
+      ...assistant(2, 'shared answer', 1, 1),
+      blocks: [
+        { kind: 'text' as const, text: 'shared answer' },
+        { kind: 'tool-call' as const, callId: 'call-1', name: 'read', argsRaw: '{}' },
+      ],
+    }
+    const h = makeHarness({
+      nodes: [user(1, 'question'), shared, toolResult(3, 'a')],
+      turnTimings: new Map([[1, { startTime: 0, endTime: 4_000 }]]),
+      turnEnds: new Map([[1, 4]]),
+    })
+    const view = render(<h.ChatView {...h.props} />)
+    const toggle = turnProcessControl(view.container)!
+    const reply = view.container.querySelector<HTMLElement>('[data-chat-node-key="fixture:assistant:2"]')!
+    const members = [...view.container.querySelectorAll<HTMLElement>('[data-turn-process-member]')]
+
+    // The reply is protected even though its own message carries a Tool call,
+    // and the Tool row after it still gives the outer control its job.
+    expect(toggle.disabled).toBe(false)
+    expect(toggle.getAttribute('aria-expanded')).toBe('false')
+    expect(members.map(member => member.dataset.chatFlowKind)).toEqual(['tool-call'])
+    expect(members[0]?.getAttribute('hidden')).toBe('until-found')
+    expect(reply.hasAttribute('hidden')).toBe(false)
+    expect(view.getByText('shared answer')).toBeTruthy()
+
+    fireEvent.click(toggle)
+    expect(toggle.getAttribute('aria-expanded')).toBe('true')
+    expect(members[0]?.getAttribute('hidden')).toBeNull()
+    expect(reply.hasAttribute('hidden')).toBe(false)
+  })
+
+  it('keeps an earlier reply outside the fold when a later Step answers only with reasoning', () => {
+    const h = makeHarness({
+      nodes: [
+        user(1, 'question'),
+        assistant(2, 'earlier reply', 1, 1),
+        reasoningAssistant(4, 'thinking only', 1, 2),
+      ],
+      turnTimings: new Map([[1, { startTime: 0, endTime: 5_000 }]]),
+      turnEnds: new Map([[1, 5]]),
+    })
+    const view = render(<h.ChatView {...h.props} />)
+    const toggle = turnProcessControl(view.container)!
+    const members = [...view.container.querySelectorAll<HTMLElement>('[data-turn-process-member]')]
+
+    expect(toggle.disabled).toBe(false)
+    expect(members.map(member => member.dataset.chatFlowKind)).toEqual(['assistant-step'])
+    expect(members[0]?.getAttribute('hidden')).toBe('until-found')
+    expect(view.getByText('earlier reply').closest('[hidden]')).toBeNull()
+
+    fireEvent.click(toggle)
+    expect(members[0]?.getAttribute('hidden')).toBeNull()
+    expect(view.getByText('earlier reply').closest('[hidden]')).toBeNull()
+  })
+
+  it('folds the chosen reasoning part while its protected response stays visible', () => {
+    const answer = {
+      ...assistant(3, 'protected answer', 1, 1),
+      blocks: [
+        { kind: 'reasoning' as const, text: 'inspect the repository' },
+        { kind: 'text' as const, text: 'protected answer' },
+      ],
+    }
+    const builder = new ChatSnapshotBuilder()
+    const groups = new ConversationGroupStore<ProcessGroupData>()
+    const state = new ProcessState()
+    const snapshot = installGroupedSnapshot(builder, state, groups, chatSnapshotFixture({
+      nodes: [userInTurn(1, 'question', 1), answer, toolResult(4, 'a')],
+      turnTimings: new Map([[1, { startTime: 0, endTime: 5_000 }]]),
+      turnEnds: new Map([[1, 5]]),
+    }))
+    const h = makeHarness({ chat: snapshot })
+    h.setGrouped(groups)
+    const view = render(<h.ChatView {...h.props} />)
+    const toggle = turnProcessControl(view.container)!
+    const roots = [...view.container.querySelectorAll<HTMLElement>('[data-chat-group-key]')]
+    const response = view.container.querySelector<HTMLElement>('[data-chat-group-part="response"]')!
+    const reasoning = view.container.querySelector<HTMLElement>('[data-chat-group-part="reasoning"]')!
+
+    expect(roots).toHaveLength(2)
+    expect(toggle.disabled).toBe(false)
+    expect(response.closest('[hidden]')).toBeNull()
+    expect(reasoning.closest('[hidden]')).not.toBeNull()
+
+    fireEvent.click(toggle)
+    expect(toggle.getAttribute('aria-expanded')).toBe('true')
+    expect(roots.every(root => root.closest('[hidden]') === null)).toBe(true)
+    const header = roots[0]!.querySelector<HTMLButtonElement>('[data-process-activity]')!
+    fireEvent.click(header)
+    expect(reasoning.closest('[hidden]')).toBeNull()
+    expect(response.closest('[hidden]')).toBeNull()
+  })
+
+  it('protects an image-only reply without enabling footer actions on it', () => {
+    const imageReply = {
+      ...assistant(2, '', 1, 1),
+      blocks: [{ kind: 'image' as const, attachment: IMAGE_ATTACHMENT }],
+    }
+    const h = makeHarness({
+      nodes: [user(1, 'question'), imageReply],
+      turnTimings: new Map([[1, { startTime: 0, endTime: 3_000 }]]),
+      turnEnds: new Map([[1, 3]]),
+    })
+    const view = render(<h.ChatView {...h.props} />)
+    const toggle = turnProcessControl(view.container)!
+    const reply = view.container.querySelector<HTMLElement>('[data-chat-node-key="fixture:assistant:2"]')!
+
+    // No process content means no usable control, and an image-only reply
+    // stays text-free for the footer: no copy or branch action appears.
+    expect(toggle.disabled).toBe(true)
+    expect(reply.hasAttribute('hidden')).toBe(false)
+    expect(within(reply).queryAllByRole('button', { name: '复制' })).toHaveLength(0)
+    expect(view.queryAllByRole('button', { name: '在新对话中分支' })).toHaveLength(0)
+  })
+
+  it('keeps the max-tokens notice outside the fold of a protected reply', () => {
+    const h = makeHarness({
+      nodes: [user(1, 'try'), assistant(2, 'truncated answer', 1, 1), turnMaxTokens(3)],
+      turnTimings: new Map([[1, { startTime: 0, endTime: 4_000 }]]),
+      turnEnds: new Map([[1, 4]]),
+    })
+    const view = render(<h.ChatView {...h.props} />)
+    const toggle = turnProcessControl(view.container)!
+
+    expect(view.getAllByRole('status').map(status => status.textContent)).toContain(
+      '已达到输出 token 上限回答被截断，已有输出保留在对话中。发送“继续”可让模型接着输出。',
+    )
+    expect(view.getByText('truncated answer').closest('[hidden]')).toBeNull()
+    expect(view.container.querySelector('[data-turn-process-member]')).toBeNull()
+    expect(toggle.disabled).toBe(true)
+  })
+
+  it('keeps an aborted Turn open around its protected reply', () => {
+    const source = chatSnapshotFixture({
+      nodes: [user(1, 'question'), assistant(2, 'stopped answer', 1, 1), toolResult(3, 'a')],
+      turnTimings: new Map([[1, { startTime: 0, endTime: 5_000 }]]),
+      turnEnds: new Map([[1, 5]]),
+    })
+    const ended = source.timeline.turns.get(1)
+    if (ended === undefined) throw new Error('fixture lacks Turn 1')
+    const aborted: TurnLocation = {
+      ...ended,
+      end: {
+        type: 'turn/end',
+        seq: SessionSeq(5),
+        time: 5_000,
+        data: { turn: 1, reason: { kind: 'aborted', reason: { kind: 'user' } } },
+      },
+    }
+    const nodes = source.nodes.values().map(node => node.location.kind === 'turn' || node.location.kind === 'step'
+      ? { ...node, location: { ...node.location, turn: aborted } }
+      : node)
+    const builder = new ChatSnapshotBuilder()
+    const snapshot = builder.replace({ nodes, timeline: { turnOrder: [1], turns: new Map([[1, aborted]]) } })
+    builder.publish()
+    const h = makeHarness({ chat: snapshot })
+    const view = render(<h.ChatView {...h.props} />)
+    const toggle = turnProcessControl(view.container)!
+    const tool = view.container.querySelector<HTMLElement>('[data-chat-node-key="fixture:tool:a"]')!
+
+    // Cancellation keeps the whole Turn expanded: the reply and its process
+    // rows stay visible while the control stays non-interactive.
+    expect(toggle.disabled).toBe(true)
+    expect(toggle.getAttribute('aria-expanded')).toBe('true')
+    expect(view.getByText('stopped answer').closest('[hidden]')).toBeNull()
+    expect(tool.hasAttribute('hidden')).toBe(false)
+  })
+
+  it('keeps steering and its following process rows visible around the protected reply', () => {
+    const h = makeHarness({
+      nodes: [
+        user(1, 'question'),
+        assistant(2, 'first answer', 1, 1),
+        steering(3, 'also mention safety', 1),
+        toolResult(4, 'a'),
+      ],
+      turnTimings: new Map([[1, { startTime: 0, endTime: 6_000 }]]),
+      turnEnds: new Map([[1, 6]]),
+    })
+    const view = render(<h.ChatView {...h.props} />)
+    const toggle = turnProcessControl(view.container)!
+    const reply = view.container.querySelector<HTMLElement>('[data-chat-node-key="fixture:assistant:2"]')!
+    const tool = view.container.querySelector<HTMLElement>('[data-chat-node-key="fixture:tool:a"]')!
+
+    // Interleaved input forbids compact answer spacing and keeps the Turn open.
+    expect(toggle.disabled).toBe(true)
+    expect(reply.hasAttribute('data-turn-process-answer')).toBe(false)
+    expect(reply.hasAttribute('hidden')).toBe(false)
+    expect(view.getByText('also mention safety').closest('[hidden]')).toBeNull()
+    expect(tool.hasAttribute('hidden')).toBe(false)
+  })
+
+  it('protects the loaded reply of a partial Turn whose start is unloaded', () => {
+    const h = makeHarness({
+      chat: chatSnapshotFixture({
+        nodes: [assistant(2, 'loaded reply', 1, 1), toolResult(3, 'a')],
+        turnEnds: new Map([[1, 4]]),
+      }),
+      hasMore: true,
+    })
+    const view = render(<h.ChatView {...h.props} />)
+    const toggle = turnProcessControl(view.container)!
+    const reply = view.container.querySelector<HTMLElement>('[data-chat-node-key="fixture:assistant:2"]')!
+    const tool = view.container.querySelector<HTMLElement>('[data-chat-node-key="fixture:tool:a"]')!
+
+    expect(toggle.disabled).toBe(false)
+    expect(toggle.getAttribute('aria-expanded')).toBe('false')
+    expect(reply.hasAttribute('hidden')).toBe(false)
+    expect(tool.getAttribute('hidden')).toBe('until-found')
+
+    fireEvent.click(toggle)
+    expect(tool.getAttribute('hidden')).toBeNull()
+    expect(reply.hasAttribute('hidden')).toBe(false)
   })
 
   it('omits injected Context while folding and revealing the visible Turn process', () => {

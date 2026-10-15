@@ -8,7 +8,8 @@ import {
 } from 'react'
 import {
   SlotOwnershipError, StaleAuthorizationError, standardHookPropName,
-  type ChainRenderOpts, type HostObservable, type KeyedStandardSource, type LocaleFace, type RenderFactorySlot, type RenderOpts,
+  type ChainRenderOpts, type HostObservable, type KeyedStandardSource, type LocaleFace, type OccurrenceRecovery,
+  type RenderFactorySlot, type RenderOpts,
   type ScopedStandardSourceBinding, type SessionAreaProps, type SessionProviderComponent, type SlotRenderer,
   type SlotRendererHost, type SlotScope, type SlotScopeAdapter, type StandardSourceBinding,
   type StoredEntry, type StoredFactory, type Translate,
@@ -435,6 +436,41 @@ class FactoryErrorBoundary extends Component<
   }
   override render(): ReactNode {
     if (this.state.failed) return <div data-factory-error={this.props.name} />
+    return this.props.children
+  }
+}
+/* jscpd:ignore-end */
+
+/**
+ * Occurrence-scope crash catcher for a registration that opted into
+ * `failureScope: 'occurrence'`: the failure is reported without abdication and
+ * the occurrence is yielded to its owner's recovery. It renders nothing while
+ * failed, because the owner wrapper renders the fallback in its own body — a
+ * failure inside that fallback therefore reaches the next boundary above
+ * instead of re-entering the same recovery.
+ */
+/* jscpd:ignore-start -- deliberate twin of SlotErrorBoundary: identical boundary protocol, opposite containment outcome. */
+class OccurrenceCrashCatcher extends Component<
+  {
+    slotKey: string
+    onEntryError: (error: unknown) => void
+    onFailure: () => void
+    children: ReactNode
+  },
+  { failed: boolean }
+> {
+  override state = { failed: false }
+  static getDerivedStateFromError(error: unknown): { failed: boolean } {
+    if (error instanceof SlotAssemblyError) throw error
+    return { failed: true }
+  }
+  override componentDidCatch(error: unknown): void {
+    console.error(`slot entry crashed in '${this.props.slotKey}':`, error)
+    this.props.onEntryError(error)
+    this.props.onFailure()
+  }
+  override render(): ReactNode {
+    if (this.state.failed) return null
     return this.props.children
   }
 }
@@ -1063,6 +1099,97 @@ function StrictSessionEntry({ slotKey, entry, ownerProps, slotInjected, hookCont
  */
 const ANCHOR_STYLE = { display: 'contents' } as const
 
+/**
+ * Occurrence-scoped containment for one opted-in registration. The owner
+ * supplies the fallback and the generation it describes; a failure replaces
+ * only this occurrence, other occurrences of the same registration stay
+ * mounted, and the registration itself stays on the ledger.
+ *
+ * The recorded generation combines the owning scope incarnation with the
+ * owner's reset key, because the catcher is unmounted while the fallback shows
+ * and can no longer carry its own reset: a Session replacement retries rich
+ * rendering exactly like the default per-entry boundary. Healthy content below
+ * keeps its identity, since no React key moves.
+ */
+function OccurrenceSlot({
+  slotKey, entry, ownerProps, slotInjected, hookContext, hasHookContext, recovery, scope,
+}: {
+  slotKey: string
+  entry: StoredEntry
+  ownerProps: object
+  slotInjected: BoundSlotInject
+  hookContext: unknown
+  hasHookContext: boolean
+  recovery: OccurrenceRecovery
+  scope: SlotScope
+}) {
+  const host = useHost()
+  const binding = useScopeBinding()
+  // A strict session occurrence rendered without its binding is a wiring
+  // failure, and it stays one while a previous generation's fallback shows.
+  if (scope === 'session' && binding.key === undefined) {
+    throw new SlotAssemblyError(`strict session slot '${slotKey}' rendered without a scope binding`)
+  }
+  const scopedBinding = binding as ScopedStandardSourceBinding
+  const sessionGeneration = scope === 'session' ? sessionGenerationKeyOf(scopedBinding) : undefined
+  const generation = sessionGeneration === undefined
+    ? recovery.resetKey
+    : `${sessionGeneration}\u0000${recovery.resetKey}`
+  const [failedGeneration, setFailedGeneration] = useState<string | null>(null)
+  // Derived state during render: a moved generation retries rich rendering
+  // once, and the null state converges whether that retry succeeds or throws.
+  if (failedGeneration !== null && failedGeneration !== generation) setFailedGeneration(null)
+  if (failedGeneration !== null) {
+    return (
+      <div data-slot-error={slotKey} style={ANCHOR_STYLE}>
+        {recovery.fallback}
+      </div>
+    )
+  }
+  return (
+    <OccurrenceCrashCatcher
+      slotKey={slotKey}
+      key={sessionGeneration}
+      onEntryError={(error) => { host.reportEntryError(slotKey, entry, error, { abdicate: false }) }}
+      onFailure={() => { setFailedGeneration(generation) }}
+    >
+      {scope === 'session'
+        ? (
+          <SessionEntry
+            entry={entry}
+            ownerProps={ownerProps}
+            binding={scopedBinding}
+            slotKey={slotKey}
+            slotInjected={slotInjected}
+            hookContext={hookContext}
+            hasHookContext={hasHookContext}
+          />
+        )
+        : scope === 'session-maybe'
+          ? (
+            <SessionMaybeEntry
+              entry={entry}
+              ownerProps={ownerProps}
+              slotKey={slotKey}
+              slotInjected={slotInjected}
+              hookContext={hookContext}
+              hasHookContext={hasHookContext}
+            />
+          )
+          : (
+            <RootEntry
+              entry={entry}
+              ownerProps={ownerProps}
+              slotKey={slotKey}
+              slotInjected={slotInjected}
+              hookContext={hookContext}
+              hasHookContext={hasHookContext}
+            />
+          )}
+    </OccurrenceCrashCatcher>
+  )
+}
+
 function SlotOutlet({ slotKey, ownerProps, opts }: {
   slotKey: string
   ownerProps: object
@@ -1119,6 +1246,29 @@ function renderOutletContent(
   const guarded = (entry: StoredEntry, key?: string | number, owner: object = ownerProps) => {
     const hasHookContext = opts !== undefined && Object.hasOwn(opts, 'hookContext')
     const hookContext = opts?.hookContext
+    if (entry.failureScope === 'occurrence') {
+      const recovery = opts?.occurrenceRecovery
+      // Wiring failure, not user content: an opted registration owns its
+      // fallback, so a dispatch that omits it fails loud above the occurrence
+      // containment instead of degrading into an empty cell.
+      if (recovery === undefined) {
+        throw new SlotAssemblyError(
+          `slot '${slotKey}' entry opted into occurrence failure scope without an occurrenceRecovery payload`)
+      }
+      return (
+        <OccurrenceSlot
+          slotKey={slotKey}
+          key={key}
+          entry={entry}
+          ownerProps={owner}
+          slotInjected={slotInjected}
+          hookContext={hookContext}
+          hasHookContext={hasHookContext}
+          recovery={recovery}
+          scope={spec.scope}
+        />
+      )
+    }
     // Shadowing kinds abdicate on crash (the cell falls to its next
     // survivor); chain reports without abdicating — election alternatives
     // resolve at select time, and retiring a crashed elected entry would

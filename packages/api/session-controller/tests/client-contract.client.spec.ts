@@ -167,4 +167,111 @@ describe('Client Session contracts', () => {
     })
   })
 
+  it('appends an Assistant commitment above every published transient', () => {
+    const feed = new MutableSessionEventSource()
+    const opening = entry(SessionSeq(1))
+    const live = transient('attempt-one')
+    feed.replace([opening, live], false)
+    const settlement = assistantSettlement(SessionSeq(2))
+
+    feed.commitAssistant(settlement)
+
+    expect(feed.getSnapshot()).toEqual({
+      entries: [opening, live, settlement],
+      hasMore: false,
+      revision: 2,
+      change: { kind: 'append', entries: [settlement] },
+    })
+  })
+
+  it('inserts a delayed Assistant commitment at its published sequence position', () => {
+    const feed = new MutableSessionEventSource()
+    const listener = vi.fn()
+    feed.subscribe(listener)
+    const opening = entry(SessionSeq(1))
+    const live = transient('attempt-one')
+    const later = entry(SessionSeq(3))
+    feed.replace([opening, live], false)
+    feed.append(later)
+    listener.mockClear()
+
+    const settlement = assistantSettlement(SessionSeq(2))
+    feed.commitAssistant(settlement)
+
+    expect(feed.getSnapshot()).toEqual({
+      entries: [opening, live, settlement, later],
+      hasMore: false,
+      revision: 3,
+      change: { kind: 'insert-assistant', entry: settlement },
+    })
+    expect(listener).toHaveBeenCalledOnce()
+  })
+
+  it('tracks a prepended page when the previously published window is empty', () => {
+    const feed = new MutableSessionEventSource()
+    feed.replace([], true)
+    const later = entry(SessionSeq(3))
+    feed.prepend([later], false)
+    const settlement = assistantSettlement(SessionSeq(2))
+
+    feed.commitAssistant(settlement)
+
+    expect(feed.getSnapshot().entries).toEqual([settlement, later])
+    expect(feed.getSnapshot().change).toEqual({ kind: 'insert-assistant', entry: settlement })
+  })
+
+  it('does not mutate the entries an earlier snapshot still exposes', () => {
+    const feed = new MutableSessionEventSource()
+    const opening = entry(SessionSeq(1))
+    const live = transient('attempt-one')
+    const later = entry(SessionSeq(3))
+    const installed = [opening, live, later]
+    feed.replace(installed, false)
+    const before = feed.getSnapshot()
+    expect(before.entries).toBe(installed)
+
+    const settlement = assistantSettlement(SessionSeq(2))
+    feed.commitAssistant(settlement)
+
+    expect(before.entries).toBe(installed)
+    expect(before.entries).toEqual([opening, live, later])
+    expect(feed.getSnapshot().entries).toEqual([opening, live, settlement, later])
+  })
+
+  it('leaves the window and its listeners untouched when a settlement retires nothing', () => {
+    const feed = new MutableSessionEventSource()
+    const listener = vi.fn()
+    feed.subscribe(listener)
+    const opening = entry(SessionSeq(1))
+    const settlement = assistantSettlement(SessionSeq(2))
+    feed.replace([opening, settlement], false)
+    const published = feed.getSnapshot()
+    listener.mockClear()
+
+    feed.settleAssistant(LlmAttemptId('absent-attempt'))
+    feed.settleAssistant(LlmAttemptId('absent-attempt'), settlement)
+
+    expect(feed.getSnapshot()).toBe(published)
+    expect(listener).not.toHaveBeenCalled()
+  })
+
+  it('ignores a duplicate commitment and rejects a conflicting occupant before mutating', () => {
+    const feed = new MutableSessionEventSource()
+    const opening = entry(SessionSeq(1))
+    const live = transient('attempt-one')
+    const later = entry(SessionSeq(3))
+    feed.replace([opening, live, later], false)
+    const settlement = assistantSettlement(SessionSeq(2))
+    feed.commitAssistant(settlement)
+    const published = feed.getSnapshot()
+
+    feed.commitAssistant(settlement)
+    expect(feed.getSnapshot()).toBe(published)
+
+    const conflict = assistantSettlement(SessionSeq(2))
+    expect(() => { feed.commitAssistant(conflict) }).toThrow('event window already holds a different entry at seq 2')
+    expect(feed.getSnapshot()).toBe(published)
+    expect(feed.getSnapshot().entries).toHaveLength(4)
+  })
+
 })

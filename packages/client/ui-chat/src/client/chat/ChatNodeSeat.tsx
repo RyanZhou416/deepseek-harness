@@ -5,8 +5,12 @@ import type { ConversationLocationDataStore, ConversationTurnDataMap } from '@de
 import type { ChatNodeHookContext, ChatNodeOwnerProps, ChatViewSlotProps, UsePresentation } from '../contract/slots.ts'
 import type { ChatNode } from '../contract/chat-nodes.ts'
 import type { ChatNodeStore } from '../contract/snapshot.ts'
-import { TURN_PROCESS_INDEPENDENT_KINDS, turnProcessAlwaysOpen } from '../contract/turn-process.ts'
+import {
+  isTurnProcessAnswer, isTurnProcessMember, TURN_PROCESS_INDEPENDENT_KINDS, turnProcessAlwaysOpen,
+  type TurnProcessRow,
+} from '../contract/turn-process.ts'
 import { storedTurnProcessEntry } from '../stores.ts'
+import { assistantOccurrenceRecovery } from './AssistantRecovery.tsx'
 import { useSearchableHidden } from './searchable-hidden.ts'
 import css from './ChatView.module.css'
 
@@ -75,18 +79,26 @@ export const ChatNodeSeat = memo(function ChatNodeSeat({
     && foldCompleted
     && processPresentation.turn === processSpec.turn
     && (processPresentation.turnStarted || processPresentation.turnClosed)
+  // The protected reply is recognized by Turn/Step identity and occurrence part,
+  // never by the anchor: a durable message committed late can follow its own
+  // transient anchor, and a `reasoning` occurrence stays process content.
+  const processRow: TurnProcessRow | undefined = routedNode === undefined ? undefined : {
+    anchorSeq: routedNode.anchorSeq,
+    step: routedNode.kind === 'assistant-step' && processSpec !== undefined && turn === processSpec.turn
+      ? routedNode.data.step
+      : null,
+    groupPart,
+  }
   const processMember = routedNode !== undefined
+    && processRow !== undefined
     && processWindowReady
     && !TURN_PROCESS_INDEPENDENT_KINDS.has(routedNode.kind)
-    && routedNode.anchorSeq >= processSpec.processStartSeq
-    && (liveProcess || processSpec.answerAnchorSeq === null || routedNode.anchorSeq < processSpec.answerAnchorSeq
-      || (groupPart === 'reasoning' && routedNode.kind === 'assistant-step' && routedNode.data.step === processSpec.answerStep))
-  const processAnswer = routedNode !== undefined
+    && isTurnProcessMember(processSpec, liveProcess, processRow)
+  const processAnswer = processSpec !== undefined
+    && processRow !== undefined
     && processWindowReady
     && !liveProcess
-    && groupPart !== 'reasoning'
-    && routedNode.kind === 'assistant-step'
-    && routedNode.data.step === processSpec.answerStep
+    && isTurnProcessAnswer(processSpec, processRow.step, groupPart)
   const ownsDisclosure = routedNode?.kind === 'turn-process' || processAnswer
   const foldable = processWindowReady
     && (liveProcess || processMember || ownsDisclosure)
@@ -163,6 +175,11 @@ export const ChatNodeSeat = memo(function ChatNodeSeat({
       {renderSlot('conversation.chat.node', routedOwner, {
         entryKey: routedNode.kind,
         hookContext,
+        // The shipped Assistant registration opts into occurrence scope, so its
+        // seat supplies the plain-text recovery for that one occurrence.
+        ...(routedNode.kind === 'assistant-step'
+          ? { occurrenceRecovery: assistantOccurrenceRecovery(routedNode, groupPart, t) }
+          : {}),
         fallback: (
           <JsonBlock
             label={t('message.unknownSurface', { type: routedNode.kind })}

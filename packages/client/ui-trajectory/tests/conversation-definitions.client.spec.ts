@@ -246,6 +246,55 @@ describe('Trajectory conversation Definitions', () => {
     }])
   })
 
+  it('keeps the durable reply and request usage when a transient chunk replays after its message', () => {
+    const value = assembler([
+      at(1, 'turn/start', { turn: 1 }),
+      at(2, 'step/start', { turn: 1, step: 1 }),
+      at(3, 'assistant/message', {
+        turn: 1,
+        step: 1,
+        message: assistantMessage('trajectory-final', 'done'),
+        usage: { inputTokens: 7, outputTokens: 3 },
+      }),
+      at(3.5, 'assistant/live-chunk', {
+        turn: 1, step: 1, chunk: { type: 'text-delta', index: 0, text: ' late' },
+      }),
+      at(3.6, 'assistant/live-chunk', {
+        turn: 1, step: 1, chunk: { type: 'usage', usage: { inputTokens: 900, outputTokens: 900 } },
+      }),
+    ])
+
+    expect(snapshot(value).partial).toBeNull()
+    expect(snapshot(value).eventNodes).toMatchObject([{
+      kind: 'assistant',
+      blocks: [{ kind: 'text', text: 'done' }],
+      usage: { inputTokens: 7, outputTokens: 3 },
+      timing: { firstTokenTime: null },
+    }])
+    expect(snapshot(value).requests).toMatchObject([{
+      purpose: 'assistant',
+      status: 'complete',
+      usage: { inputTokens: 7, outputTokens: 3 },
+    }])
+
+    const partial = snapshot(assembler([
+      at(3, 'assistant/message', {
+        turn: 1,
+        step: 1,
+        message: assistantMessage('trajectory-partial', 'done'),
+        usage: { inputTokens: 7, outputTokens: 3 },
+      }),
+      at(3.5, 'assistant/live-chunk', {
+        turn: 1, step: 1, chunk: { type: 'text-delta', index: 0, text: ' late' },
+      }),
+    ], true))
+    expect(partial.eventNodes).toMatchObject([{
+      kind: 'assistant',
+      blocks: [{ kind: 'text', text: 'done' }],
+      timing: { firstTokenTime: null },
+    }])
+  })
+
   it('uses live Assistant deltas without replaying settled embedded streams', () => {
     const runningHistory = [
       at(1, 'turn/start', { turn: 1 }),

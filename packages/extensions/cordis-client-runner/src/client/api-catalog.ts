@@ -845,7 +845,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'SessionEventChange',
-    declaration: 'export type SessionEventChange = {\n    readonly kind: \'replace\';\n    readonly entries: readonly SessionEventLikeEntry[];\n} | {\n    readonly kind: \'prepend\';\n    readonly entries: readonly SessionEventLikeEntry[];\n} | {\n    readonly kind: \'append\';\n    readonly entries: readonly SessionEventLikeEntry[];\n} | {\n    readonly kind: \'settle-assistant\';\n    readonly attemptId: LlmAttemptId;\n    readonly entry?: SessionAssistantSettlementEntry;\n};',
+    declaration: 'export type SessionEventChange = {\n    readonly kind: \'replace\';\n    readonly entries: readonly SessionEventLikeEntry[];\n} | {\n    readonly kind: \'prepend\';\n    readonly entries: readonly SessionEventLikeEntry[];\n} | {\n    readonly kind: \'append\';\n    readonly entries: readonly SessionEventLikeEntry[];\n} | {\n    readonly kind: \'insert-assistant\';\n    readonly entry: SessionAssistantSettlementEntry;\n} | {\n    readonly kind: \'settle-assistant\';\n    readonly attemptId: LlmAttemptId;\n    readonly entry?: SessionAssistantSettlementEntry;\n};',
   },
   {
     name: 'SessionEventLikeEntry',
@@ -932,6 +932,10 @@ export const TYPE_API: readonly TypeApiEntry[] = [
     declaration: 'export interface SlotFactoryMap {\n}',
   },
   {
+    name: 'SlotFailureScope',
+    declaration: 'export type SlotFailureScope = \'registration\' | \'occurrence\';',
+  },
+  {
     name: 'SlotInjectFace',
     declaration: 'export type SlotInjectFace<I extends object> = I extends {\n    hooks: infer HS extends object;\n} ? Omit<I, \'hooks\'> & PropsSlotHooks<HS> : I;',
   },
@@ -973,7 +977,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'StoredEntry',
-    declaration: 'export interface StoredEntry {\n    component: unknown;\n    options: {\n        key?: string;\n        id?: string;\n        order?: number;\n        label?: SlotLabel;\n        priority?: number;\n    };\n    select?: ((owner: never) => unknown) | undefined;\n    inject?: ((...args: never[]) => Record<string, unknown>) | undefined;\n    children?: Readonly<Record<string, SlotSpec<SlotEntryDef>>> | undefined;\n    store?: StoreDecl | undefined;\n    locale?: string | undefined;\n    registrant?: string | undefined;\n}',
+    declaration: 'export interface StoredEntry {\n    component: unknown;\n    options: {\n        key?: string;\n        id?: string;\n        order?: number;\n        label?: SlotLabel;\n        priority?: number;\n    };\n    select?: ((owner: never) => unknown) | undefined;\n    inject?: ((...args: never[]) => Record<string, unknown>) | undefined;\n    children?: Readonly<Record<string, SlotSpec<SlotEntryDef>>> | undefined;\n    store?: StoreDecl | undefined;\n    locale?: string | undefined;\n    failureScope?: SlotFailureScope | undefined;\n    registrant?: string | undefined;\n}',
   },
   {
     name: 'StoredFactory',

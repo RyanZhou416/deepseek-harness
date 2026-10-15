@@ -103,6 +103,15 @@ export type SlotKind = 'single' | 'list' | 'keyed' | 'chain'
 /** Slot data context: global, current-session-optional, or strict session-bound. */
 export type SlotScope = 'root' | 'session-maybe' | 'session'
 
+/**
+ * Failure policy of one registration. Absent or `registration` keeps that
+ * slot kind's existing behavior (shadowing kinds let the crashed entry abdicate
+ * to the cell's next survivor, chains report without retiring); `occurrence`
+ * contains the crash in the occurrence that threw, reports it without
+ * abdication, and renders the owner's `occurrenceRecovery` payload instead.
+ */
+export type SlotFailureScope = 'registration' | 'occurrence'
+
 /** Declaration-merged explicit target types for non-root scope Providers. */
 export interface SlotScopeTargetMap {}
 
@@ -257,6 +266,24 @@ export type PropsRuntime<
   SlotInjectFace<SlotInjectOf<K>> &
   ScopeStandardProps<ScopeOf<K>>
 
+/**
+ * Owner-supplied recovery for one render occurrence of a registration that
+ * opted into `failureScope: 'occurrence'`. Its presence alone changes nothing:
+ * only the selected opted registration consumes it, and an opted registration
+ * rendered without it is an assembly failure.
+ */
+export interface OccurrenceRecovery {
+  /** Content replacing the failed occurrence; it must not re-enter the failed renderer. */
+  fallback: ReactNode
+  /**
+   * Owner generation of this occurrence (for example a durable message id, an
+   * interrupted boundary sequence, or `running`). A failed occurrence
+   * re-attempts its rich rendering once when this value changes; an unchanged
+   * value keeps the fallback while rendering its latest props.
+   */
+  resetKey: string
+}
+
 /** renderSlot dispatch options: keyed dispatch key, list filtering, and empty fallback. */
 export interface RenderOpts<EntryKey extends string = string> {
   entryKey?: EntryKey
@@ -264,6 +291,8 @@ export interface RenderOpts<EntryKey extends string = string> {
   fallback?: ReactNode
   /** Type-erased runtime seat; PropsRenderSlots narrows or removes it per slot declaration. */
   hookContext?: unknown
+  /** Recovery payload for the selected occurrence when that registration opted into occurrence scope. */
+  occurrenceRecovery?: OccurrenceRecovery
 }
 
 /** renderSlotChain dispatch options. */
@@ -829,6 +858,12 @@ type BaseOptions<
    * face — fails loud otherwise.
    */
   locale?: N
+  /**
+   * Failure policy of this registration (see {@link SlotFailureScope}).
+   * `occurrence` is accepted for keyed registrations only; an opted
+   * registration rendered without its owner's `occurrenceRecovery` fails loud.
+   */
+  failureScope?: SlotFailureScope
   /** Registrant identity label for diagnostics (the runtime Service wrapper stamps the caller's fiber name). */
   registrant?: string
 } & KindOptions<K, EntryKey, M>
@@ -851,6 +886,8 @@ export interface StoredEntry {
   store?: StoreDecl | undefined
   /** Declared dictionary namespace (the render machinery synthesizes the `t` seat from it). */
   locale?: string | undefined
+  /** Declared failure policy (absent keeps the slot kind's default). */
+  failureScope?: SlotFailureScope | undefined
   /** Diagnostics label of who registered. */
   registrant?: string | undefined
 }
@@ -883,6 +920,7 @@ interface ErasedOptions {
   children?: Record<string, SlotSpec<SlotEntryDef>> | undefined
   store?: StoreDecl | undefined
   locale?: string | undefined
+  failureScope?: string | undefined
   /* oxlint-disable-next-line typescript/no-explicit-any --
    * implementation-signature position only (both public overloads type inject
    * exactly); `never[]` would fail overload-to-implementation compatibility
@@ -1130,6 +1168,8 @@ export class SlotCore {
    * of different scopes throws. Kind constraints: keyed — missing `key`
    * throws; list — missing `id` throws; chain — missing `select` throws (the
    * selector is the entry's routing seat, see {@link ChainSelect}).
+   * `failureScope` accepts `registration` and `occurrence`; an unsupported
+   * value, or `occurrence` on a non-keyed kind, throws.
    *
    * Shadowing (single/keyed/list): entries sharing one cell (single — the
    * slot itself; keyed — same `key`; list — same `id`) coexist at distinct
@@ -1238,6 +1278,18 @@ export class SlotCore {
         if (options.select === undefined) throw new Error(`chain slot "${options.name}" requires options.select`)
         break
     }
+    // Failure policy is a registration-time contract: a caller composing
+    // dynamically reaches this check, and only keyed dispatch owns an
+    // occurrence identity for the owner to recover.
+    if (options.failureScope !== undefined
+      && options.failureScope !== 'registration' && options.failureScope !== 'occurrence') {
+      throw new Error(
+        `slot "${options.name}" received an unsupported failureScope "${options.failureScope}" (expected 'registration' or 'occurrence')`)
+    }
+    if (options.failureScope === 'occurrence' && spec.kind !== 'keyed') {
+      throw new Error(
+        `slot "${options.name}" declares failureScope 'occurrence' but its kind is '${spec.kind}' — occurrence isolation is available to keyed slots`)
+    }
     if (options.children) {
       for (const childKey of Object.keys(options.children)) {
         const childRec = this.records.get(childKey)
@@ -1272,6 +1324,7 @@ export class SlotCore {
       ...(options.children !== undefined ? { children: options.children } : {}),
       ...(options.store !== undefined ? { store: options.store } : {}),
       ...(options.locale !== undefined ? { locale: options.locale } : {}),
+      ...(options.failureScope !== undefined ? { failureScope: options.failureScope } : {}),
       ...(options.registrant !== undefined ? { registrant: options.registrant } : {}),
     }
     const next = [...rec.entries, entry]
@@ -1528,9 +1581,10 @@ export class SlotCore {
    * shadowing kinds — single/keyed/list) it first retires the entry from its
    * cell, one-shot: the record's version bumps through the ordinary mutation
    * channel so outlets re-project onto the cell's next survivor, and a
-   * repeat abdicating report no-ops entirely. Chain crashes report with
-   * `abdicate: false` — election alternatives resolve at select time, so the
-   * entry keeps its cell and only the notification fires. The registration
+   * repeat abdicating report no-ops entirely. Chain and opted occurrence
+   * crashes report with `abdicate: false`: the entry keeps its cell and only
+   * the notification fires. Chain election alternatives resolve at select
+   * time; occurrence recovery stays local to its render. The registration
    * itself stays on the ledger either way — raw {@link SlotCore.entries}
    * still lists the entry and its disposer keeps working.
    * @param key - slot key the entry rendered under.

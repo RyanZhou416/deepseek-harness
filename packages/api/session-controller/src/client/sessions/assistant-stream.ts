@@ -19,6 +19,12 @@ interface ActiveAttempt {
   readonly startedAfterSeq: number
   readonly turn: number
   readonly step: number
+  /**
+   * Whether a published boundary already closed this attempt's owning Step or
+   * Turn, making a later committed end an atomic settlement instead of an
+   * ordered commitment that retains transients.
+   */
+  boundaryClosed: boolean
   nextIndex: number
 }
 
@@ -31,6 +37,10 @@ export type ClientAssistantStreamResult =
     readonly retireAttemptId?: LlmAttemptId
   }
   | {
+    readonly type: 'commit'
+    readonly entry: SessionAssistantSettlementEntry
+  }
+  | {
     readonly type: 'settlement'
     readonly attemptId: LlmAttemptId
     readonly entry: SessionAssistantSettlementEntry
@@ -39,6 +49,17 @@ export type ClientAssistantStreamResult =
   | { readonly type: 'transient'; readonly entry: SessionTransientEventEntry }
   | { readonly type: 'rebaseline' }
   | undefined
+
+/**
+ * @param event - published durable entry.
+ * @param turn - owning Turn.
+ * @param step - owning Step.
+ * @returns whether the event closes that ownership.
+ */
+function closesBoundary(event: SessionLiveEventEntry['event'], turn: number, step: number): boolean {
+  if (event.type === 'step/end') return event.data.turn === turn && event.data.step === step
+  return event.type === 'turn/end' && event.data.turn === turn
+}
 
 /** Keeps transient Assistant presentation behind one settlement-aware interface. */
 export class ClientAssistantStream {
@@ -70,6 +91,7 @@ export class ClientAssistantStream {
         startedAfterSeq: opening.startedAfterSeq,
         turn: opening.turn,
         step: opening.step,
+        boundaryClosed: false,
         nextIndex: opening.nextIndex,
       }
     }
@@ -121,10 +143,12 @@ export class ClientAssistantStream {
 
   /**
    * Fold one dense transient frame and release its named durable settlement.
-   * Successful messages retain their transient rows until the owning Step ends;
-   * interrupted messages, failed attempts, and abandonment retire them immediately.
+   * A successful message commits in published order and retains its transient
+   * rows until the owning Step or Turn ends; one whose owning boundary already
+   * closed settles atomically instead. Interrupted messages, failed attempts,
+   * and abandonment retire their transient rows immediately.
    * @param frame - next Assistant stream frame received by the follow connection.
-   * @returns a transient, publication, or rebaseline decision, or `undefined` when no entry becomes visible.
+   * @returns a transient, publication, commitment, or rebaseline decision, or `undefined` when no entry becomes visible.
    */
   acceptFrame(frame: SessionAssistantStreamFrame): ClientAssistantStreamResult {
     switch (frame.type) {
@@ -137,6 +161,7 @@ export class ClientAssistantStream {
           startedAfterSeq: frame.startedAfterSeq,
           turn: frame.turn,
           step: frame.step,
+          boundaryClosed: false,
           nextIndex: 0,
         }
         return undefined
@@ -186,11 +211,14 @@ export class ClientAssistantStream {
           return { type: 'rebaseline' }
         }
         this.pending.delete(frame.outcome.seq)
-        if (entry.event.type === 'assistant/message' && entry.event.data.interrupted !== true) {
-          this.retainedAttempt = { attemptId: attempt.attemptId, turn: attempt.turn, step: attempt.step }
-          return this.publish(entry)
-        }
         this.publishedSeqs.add(entry.event.seq)
+        if (entry.event.type === 'assistant/message' && entry.event.data.interrupted !== true) {
+          if (attempt.boundaryClosed) {
+            return { type: 'settlement', attemptId: attempt.attemptId, entry }
+          }
+          this.retainedAttempt = { attemptId: attempt.attemptId, turn: attempt.turn, step: attempt.step }
+          return { type: 'commit', entry }
+        }
         return { type: 'settlement', attemptId: attempt.attemptId, entry }
       }
     }
@@ -210,9 +238,12 @@ export class ClientAssistantStream {
 
   private publish(entry: SessionLiveEventEntry): ClientAssistantStreamResult {
     this.publishedSeqs.add(entry.event.seq)
+    const active = this.activeAttempt
+    if (active !== undefined && closesBoundary(entry.event, active.turn, active.step)) {
+      active.boundaryClosed = true
+    }
     const retained = this.retainedAttempt
-    if (retained !== undefined && entry.event.type === 'step/end'
-      && entry.event.data.turn === retained.turn && entry.event.data.step === retained.step) {
+    if (retained !== undefined && closesBoundary(entry.event, retained.turn, retained.step)) {
       this.retainedAttempt = undefined
       return { type: 'publish', entry, retireAttemptId: retained.attemptId }
     }

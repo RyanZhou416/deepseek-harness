@@ -400,11 +400,28 @@ export function chatSnapshotFixture(input: {
         return typeof step === 'number' ? [step] : []
       }),
     )
-    const answer = assistants.findLast((candidate): candidate is FinalAssistantChatData =>
-      candidate.step === latestStep
-      && candidate.finalNode !== undefined
-      && hasAssistantReplyContent(candidate.blocks)
-      && !candidate.blocks.some(block => block.kind === 'tool-call'))
+    // Mirrors the Turn-process Definition: an open Turn keeps its latest-Step
+    // selection with the Tool-call veto, a closed Turn protects the newest
+    // finalized reply of any Step whether or not a Tool call shares its message.
+    const closedTurn = turns.get(turnNumber)?.end !== undefined
+    let closedAnswer: FinalAssistantChatData | undefined
+    if (closedTurn) {
+      for (const candidate of assistants) {
+        const finalNode = candidate.finalNode
+        if (finalNode === undefined || !hasAssistantReplyContent(candidate.blocks)) continue
+        if (closedAnswer === undefined
+          || candidate.step > closedAnswer.step
+          || (candidate.step === closedAnswer.step
+            && finalNode.seq > closedAnswer.finalNode.seq)) closedAnswer = { ...candidate, finalNode }
+      }
+    }
+    const answer = closedTurn
+      ? closedAnswer
+      : assistants.findLast((candidate): candidate is FinalAssistantChatData =>
+        candidate.step === latestStep
+        && candidate.finalNode !== undefined
+        && hasAssistantReplyContent(candidate.blocks)
+        && !candidate.blocks.some(block => block.kind === 'tool-call'))
     const controlAnchor = inTurn.find(candidate => candidate.kind === 'assistant-step'
       || candidate.kind === 'tool-call'
       || candidate.kind === 'model-retry')

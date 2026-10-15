@@ -395,6 +395,84 @@ describe('scope tree', () => {
     dispose()
   })
 
+  it('inserts a delayed committed Assistant settlement above its published transients', async ({ bench }) => {
+    const b = bench()
+    await feedList(b, [{ id: 's1' }])
+    using _reference = b.svc.retain(sid('s1'), { source: 'controllerOperation' })
+    await _reference.ready
+    const binding = b.svc.binding(sid('s1'))
+    if (binding === undefined) throw new Error('expected Session binding')
+    await vi.waitFor(() => {
+      expect(binding.session.getSnapshot().openState).toBe('open')
+    })
+    const attemptId = LlmAttemptId('web-ordered-attempt')
+    const durableMessage = {
+      type: 'event' as const,
+      event: {
+        type: 'assistant/message', seq: 0, time: 2,
+        data: {
+          turn: 1,
+          step: 1,
+          message: {
+            role: 'assistant',
+            content: [{ type: 'text', text: 'ordered' }],
+            source: { kind: 'model', provider: 'p', model: 'm' },
+            id: 'message-ordered',
+          },
+          stream: [{ type: 'text-chunks', time0: 1, index: 0, dt: [], texts: ['ordered'] }],
+        },
+        surfaceOp: 'append' as const,
+      },
+    }
+    b.mock.streams.push(FOLLOW, {
+      type: 'assistant-stream',
+      frame: { type: 'start', attemptId, revision: 1, startedAfterSeq: -1, turn: 1, step: 1 },
+    })
+    b.mock.streams.push(FOLLOW, {
+      type: 'assistant-stream',
+      frame: {
+        type: 'chunk', attemptId, revision: 2, index: 0, time: 1,
+        chunk: { type: 'text-delta', index: 0, text: 'ordered' },
+      },
+    })
+    await b.mock.streams.drained(FOLLOW)
+    b.mock.streams.push(FOLLOW, durableMessage)
+    await b.mock.streams.drained(FOLLOW)
+    await Promise.resolve()
+    b.mock.streams.push(FOLLOW, {
+      type: 'assistant-stream',
+      frame: {
+        type: 'chunk', attemptId, revision: 3, index: 1, time: 2,
+        chunk: { type: 'text-delta', index: 0, text: ' suffix' },
+      },
+    })
+    b.mock.streams.push(FOLLOW, {
+      type: 'event',
+      event: { type: 'tool/call', seq: 1, time: 3, data: { turn: 1, step: 1, callId: 'call-1', name: 'read', arguments: '{}' } },
+    })
+    await b.mock.streams.drained(FOLLOW)
+    await vi.waitFor(() => {
+      expect(binding.eventSource.getSnapshot().entries).toHaveLength(3)
+    })
+
+    b.mock.streams.push(FOLLOW, {
+      type: 'assistant-stream',
+      frame: {
+        type: 'end', attemptId, revision: 4, index: 2,
+        outcome: { kind: 'committed', eventType: 'assistant/message', seq: 0 },
+      },
+    })
+    await b.mock.streams.drained(FOLLOW)
+    await vi.waitFor(() => {
+      expect(binding.eventSource.getSnapshot().entries.map(entry => entry.event.type))
+        .toEqual(['assistant/live-chunk', 'assistant/message', 'assistant/live-chunk', 'tool/call'])
+    })
+    expect(binding.eventSource.getSnapshot().change).toEqual({
+      kind: 'insert-assistant',
+      entry: durableMessage,
+    })
+  })
+
   it('replaces an active assistant baseline on reconnect without duplicate chunks', async ({ bench }) => {
     const b = bench()
     const attemptId = LlmAttemptId('reconnect-attempt')

@@ -14,6 +14,7 @@ import {
   type SlotScopeAdapter, type StandardSourceBinding,
 } from '@deepseek-ai/dsh-client-ui-slots'
 import { createSlotRenderer } from '../src/client/scoped-slots.tsx'
+import { SlotAssemblyError } from '../src/client/errors.ts'
 
 declare module '@deepseek-ai/dsh-client-ui-slots' {
   interface SlotMap {
@@ -22,6 +23,7 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
     // only this suite's own test keys merge here.
     'spec.single': { kind: 'single'; scope: 'root'; owner: { label?: string } }
     'spec.list': { kind: 'list'; scope: 'root' }
+    'spec.keyed': { kind: 'keyed'; scope: 'root'; keyProps: { bad: { label?: string }; good: { label?: string } } }
   }
 }
 
@@ -141,5 +143,49 @@ describe('createSlotRenderer over the real SlotCore', () => {
     view.unmount()
     dispose()
     expect(() => captured!('spec.single', {})).toThrow(StaleAuthorizationError)
+  })
+
+  it('contains one opted occurrence against the real ledger while its sibling occurrence stays live', () => {
+    const core = new SlotCore()
+    const abdications: boolean[] = []
+    core.onEntryError((_key, _registration, _error, info) => { abdications.push(info.abdicated) })
+    const recovery = { fallback: <span>plain text</span>, resetKey: 'running' }
+    core.register({
+      name: 'root',
+      children: { 'spec.keyed': { kind: 'keyed', scope: 'root' } },
+    }, (props: PropsRenderSlots<'spec.keyed'>) => (
+      <>
+        <main>{props.renderSlot('spec.keyed', {}, { entryKey: 'bad', occurrenceRecovery: recovery })}</main>
+        <aside>{props.renderSlot('spec.keyed', {}, { entryKey: 'good', occurrenceRecovery: recovery })}</aside>
+      </>
+    ) as never)
+    core.register({ name: 'spec.keyed', key: 'bad', failureScope: 'occurrence' },
+      () => { throw new Error('reply boom') })
+    core.register({ name: 'spec.keyed', key: 'good', failureScope: 'occurrence' },
+      ({ label }: { label?: string }) => <b>{label ?? 'good reply'}</b>)
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const view = render(<>{createSlotRenderer().renderRoot(hostOver(core), {})}</>)
+    spy.mockRestore()
+    // Same registration, two occurrences: the crash stays local and the
+    // sibling keeps rendering from the same ledger entries.
+    expect(view.container.querySelector('main')!.textContent).toBe('plain text')
+    expect(view.container.querySelector('main [data-slot-error="spec.keyed"]')).not.toBeNull()
+    expect(view.container.querySelector('aside')!.textContent).toBe('good reply')
+    expect(abdications).toEqual([false])
+    expect(core.entries('spec.keyed')).toHaveLength(2)
+    expect(core.entriesOfSlot('spec.keyed')).toHaveLength(2)
+  })
+
+  it('fails loud when an opted registration is dispatched without its recovery payload', () => {
+    const core = new SlotCore()
+    core.register({
+      name: 'root',
+      children: { 'spec.keyed': { kind: 'keyed', scope: 'root' } },
+    }, (props: PropsRenderSlots<'spec.keyed'>) => props.renderSlot('spec.keyed', {}, { entryKey: 'bad' }) as never)
+    core.register({ name: 'spec.keyed', key: 'bad', failureScope: 'occurrence' }, () => <b>reply</b>)
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    expect(() => render(<>{createSlotRenderer().renderRoot(hostOver(core), {})}</>))
+      .toThrow(SlotAssemblyError)
+    spy.mockRestore()
   })
 })

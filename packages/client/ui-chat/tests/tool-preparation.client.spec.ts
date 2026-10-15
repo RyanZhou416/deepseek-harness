@@ -223,6 +223,26 @@ describe('Tool preparation and durable replay', () => {
     expect(h.material()).toEqual(replay.material())
   })
 
+  it('keeps every preparing Tool row when an ordered commitment sorts below its deltas', () => {
+    const h = harness()
+    h.assembler.append(delta(5.5, first))
+    h.assembler.append(delta(5.6, second))
+    expect(h.phases()).toEqual([[first, 'preparing'], [second, 'preparing']])
+    const keys = h.tools().map(node => node.key)
+
+    // The committed message (seq 5) becomes visible only after both deltas published.
+    h.assembler.insertAssistant(settlement())
+
+    expect(h.phases()).toEqual([[first, 'preparing'], [second, 'preparing']])
+    expect(h.tools().map(node => node.key)).toEqual(keys)
+    h.assembler.append(call(6))
+    expect(h.phases()).toEqual([[first, 'start'], [second, 'preparing']])
+    h.assembler.append(result(7))
+    h.assembler.append(call(8, second))
+    h.assembler.append(result(9, second))
+    expect(h.phases()).toEqual([[first, 'result'], [second, 'result']])
+  })
+
   it('abandons one attempt and lets a subsequent live attempt create its own preparation', () => {
     const h = harness()
     h.assembler.append(delta(2.1))
