@@ -20,6 +20,7 @@ import {
   assertSafeData,
   assertSelectPath,
   callRequest,
+  capabilitiesRequest,
   encodeRequest,
   evalArgv,
   ontologyDescribeRequest,
@@ -158,6 +159,79 @@ describe('aether-shell request builders', () => {
     const encoded = encodeRequest(callRequest('echo', ['hi']))
     expect(encoded).toBe('{"action":"call","builtin":"echo","args":["hi"]}')
     expect(JSON.parse(encoded)).toEqual({ action: 'call', builtin: 'echo', args: ['hi'] })
+  })
+})
+
+describe('aether-shell typed-v1 argument channel', () => {
+  // The channel's promise is that data stays data. These cases pin exactly which
+  // refusals it drops, and that it drops none of the others.
+  it('accepts interpolation text and non-identifier keys as data', () => {
+    expect(() => { assertSafeData('a${1 + 2}b', 'args[0]', 'typed-v1') }).not.toThrow()
+    expect(() => { assertSafeData({ 'a-b': 1, 'a:1,extra': 2, '': 3, 'has space': 4 }, 'args[0]', 'typed-v1') }).not.toThrow()
+    // A record decoded from JSON can carry `__proto__` as its own key; it stays
+    // data because nothing here assigns it onto a prototype.
+    expect(() => { assertSafeData(JSON.parse('{"__proto__": {"polluted": true}}'), 'args[0]', 'typed-v1') }).not.toThrow()
+    expect(() => { assertSafeData({ nested: { deep: ['x${y}', { 'bad-key': 1 }] } }, 'args[0]', 'typed-v1') }).not.toThrow()
+  })
+
+  it('keeps the number-fidelity refusal on every channel', () => {
+    for (const mode of ['legacy', 'typed-v1'] as const) {
+      expect(() => { assertSafeData(9_007_199_254_740_993, 'args[0]', mode) }).toThrowError(/E_INPUT_NUMBER/)
+      expect(() => { assertSafeData(-0, 'args[0]', mode) }).toThrowError(/negative zero/)
+      expect(() => { assertSafeData({ deep: [1e300] }, 'args[0]', mode) }).toThrowError(/args\[0\]\.deep\[0\]/)
+      expect(() => { assertSafeData(Number.MAX_SAFE_INTEGER, 'args[0]', mode) }).not.toThrow()
+    }
+  })
+
+  it('reads a broader select path on the typed channel and the strict one still applies without it', () => {
+    for (const path of ['name', 'meta.size', '1leading', 'a-b', 'has space', '$x', 'ünïcode.key']) {
+      expect(() => { assertSelectPath(path, 'select', 'typed-v1') }).not.toThrow()
+    }
+    for (const path of ['', '.a', 'a.', 'a..b', 'a\0b']) {
+      expect(() => { assertSelectPath(path, 'select', 'typed-v1') }).toThrowError(/E_INPUT_SELECT/)
+    }
+    // The converting channel is unchanged: it expands the path into source.
+    for (const path of ['1leading', 'a-b', 'has space', '$x']) {
+      expect(() => { assertSelectPath(path, 'select') }).toThrowError(/E_INPUT_SELECT/)
+    }
+  })
+
+  it('carries unsafe-by-conversion data on the typed channel only', () => {
+    expect(callRequest('echo', ['a${1 + 2}b'], 'typed-v1'))
+      .toEqual({ action: 'call', builtin: 'echo', args: ['a${1 + 2}b'] })
+    expect(pipelineRequest([{ builtin: 'echo', args: [{ 'bad-key': 1 }] }], undefined, resolved, 'typed-v1'))
+      .toEqual({ action: 'pipeline', steps: [{ builtin: 'echo', args: [{ 'bad-key': 1 }] }] })
+    // An explicit null seed is the None value on the typed channel, which is what
+    // `explicit_null_pipeline_input_v1` guarantees.
+    expect(pipelineRequest([{ builtin: 'echo' }], null, resolved, 'typed-v1'))
+      .toEqual({ action: 'pipeline', steps: [{ builtin: 'echo' }], input: null })
+    expect(ontologyDescribeRequest('x${1}', 'typed-v1'))
+      .toEqual({ action: 'call', builtin: 'ontology_describe', args: ['x${1}'] })
+
+    expect(() => callRequest('echo', ['a${1 + 2}b'])).toThrowError(/E_INPUT_LITERAL/)
+    expect(() => pipelineRequest([{ builtin: 'echo' }], null, resolved)).toThrowError(/E_INPUT_PIPELINE_NULL/)
+  })
+
+  it('keeps the checks that are not about data conversion', () => {
+    expect(() => callRequest('crypto.hash', [], 'typed-v1')).toThrowError(/E_INPUT_BUILTIN/)
+    expect(() => pipelineRequest([{ builtin: 'bad.name' }], undefined, resolved, 'typed-v1'))
+      .toThrowError(/steps\[0\]\.builtin/)
+    expect(() => { assertPredicate('', 'predicate', resolved) }).toThrowError(/E_INPUT_PREDICATE/)
+    const small = resolveConfig({ maxRequestBytes: 32 })
+    expect(() => { assertRequestBytes('x'.repeat(33), small) }).toThrowError(/E_INPUT_SIZE/)
+  })
+
+  it('pins the capability request the preflight sends', () => {
+    expect(capabilitiesRequest()).toEqual({ action: 'capabilities' })
+    expect(encodeRequest(capabilitiesRequest())).toBe('{"action":"capabilities"}')
+  })
+
+  it('defaults to the converting channel and refuses an unrecognized mode name', () => {
+    expect(resolveConfig({}).structuredDataMode).toBe('legacy')
+    expect(resolveConfig({ structuredDataMode: 'typed-v1' }).structuredDataMode).toBe('typed-v1')
+    // A `cordis.yml` value reaches this schema as parsed data, not as a typed
+    // literal, so the invalid spelling is fed through that same parsed boundary.
+    expect(() => ConfigSchema(JSON.parse('{"structuredDataMode":"typed"}'))).toThrowError(/structuredDataMode/)
   })
 })
 

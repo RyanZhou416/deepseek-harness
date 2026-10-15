@@ -7,6 +7,14 @@
  * this plugin does not own, and the interpreter's own process surface already
  * covers the long-running cases through its builtins.
  *
+ * The three tools that send argument data — discovery's query, one call, and one
+ * pipeline — share their one deadline across every request they make. On the
+ * `typed-v1` channel that includes the capability preflight, which is a real
+ * interpreter request the model never sees; each request therefore receives what
+ * remains rather than a second full deadline, and a call with nothing left
+ * returns the interrupted arm instead of starting a process with no timer.
+ * `aether_eval` sends a program, not data, so it takes no preflight.
+ *
  * Each tool measures its complete result — the canonical value and the exact
  * text it renders — against the deployment's result budget after projection, so
  * an oversized payload becomes one actionable failure instead of a partially
@@ -23,11 +31,12 @@ import type {} from '@deepseek-ai/dsh-sandbox'
 import type {} from '@deepseek-ai/dsh-sandbox-policy'
 import type {} from '@deepseek-ai/dsh-shell-env'
 import { callTimeout } from './config.ts'
-import type { ResolvedConfig } from './config.ts'
+import type { ResolvedConfig, StructuredDataMode } from './config.ts'
 import type { AetherDiscoverOutcome, AetherOntologyPage } from './discovery.ts'
 import { projectOntology } from './discovery.ts'
 import type { AetherExecDeps, AetherProcesses } from './exec.ts'
-import { runAether } from './exec.ts'
+import { deadlineExhaustedOutcome, runAether } from './exec.ts'
+import { probeTypedCapabilities } from './capabilities.ts'
 import { applyResultLimit } from './limit.ts'
 import type { AetherOutcome } from './outcome.ts'
 import { renderDiscovery, renderOutcome } from './render.ts'
@@ -219,6 +228,92 @@ const TIMEOUT_PARAMETER = {
 /** The working-directory and deadline arguments every tool accepts. */
 const CWD_AND_TIMEOUT_ENTRIES = { cwd: CWD_PARAMETER, timeoutMs: TIMEOUT_PARAMETER } as const
 
+/**
+ * The argument-channel facts a data tool states to the model, keyed by the mode
+ * this deployment selected. The text matches the checks this deployment really
+ * applies, because the mode is trusted configuration and never a call argument.
+ */
+const CALL_ARGUMENT_CHANNEL: Record<StructuredDataMode, string> = {
+  legacy: 'Arguments are data, never AetherShell source: a string containing `${` is rejected because the interpreter '
+    + 'would interpolate it as code, and every object key must be a plain identifier because the interpreter writes '
+    + 'keys unquoted. ',
+  'typed-v1': 'Arguments travel on the interpreter\'s typed argument channel, which this call verified, so a string '
+    + 'containing `${` and a non-identifier object key are data rather than source. ',
+}
+
+/** The same fact for one pipeline step; the seed's null rule is stated by the `input` parameter instead. */
+const STEP_ARGUMENT_CHANNEL: Record<StructuredDataMode, string> = {
+  legacy: 'Step arguments are data with the same `${` and object key limits as `aether_call`, and every step runs under this call\'s DSH file policy. ',
+  'typed-v1': 'Step arguments travel on the same verified typed channel as `aether_call`, and every step runs under this call\'s DSH file policy. ',
+}
+
+/** The `input` parameter's null rule, which only the converting channel cannot honour. */
+const PIPELINE_SEED_DESCRIPTION: Record<StructuredDataMode, string> = {
+  legacy: 'Value that starts the pipeline; omit it to start from the first step\'s call. An explicit null is rejected because the native request reads it as "no input" rather than the None value — seed None with aether_eval instead.',
+  'typed-v1': 'Value that starts the pipeline; omit it to start from the first step\'s call. An explicit null is sent as the None value, which this deployment verified the interpreter delivers.',
+}
+
+/** Smallest remaining budget that can still start one interpreter request. */
+const MIN_REQUEST_BUDGET_MS = 1
+
+/**
+ * The unspent part of this call's overall deadline.
+ *
+ * Floored, so no request is ever granted more time than the call has left; a
+ * rounded-up budget could hand the last request more than the deployment
+ * permitted.
+ * @param timeoutMs - the call's overall deadline in milliseconds.
+ * @param startedAt - `performance.now()` when the call's first request began.
+ * @returns the remaining milliseconds, possibly zero or negative.
+ */
+function remainingBudget(timeoutMs: number, startedAt: number): number {
+  return Math.floor(timeoutMs - (performance.now() - startedAt))
+}
+
+/**
+ * Run one native argument request under a single overall deadline.
+ *
+ * On the `typed-v1` channel the capability preflight runs first, under the same
+ * capability services, sandbox policy, environment, and working directory as the
+ * request itself, so the interpreter that answers is the one this call would
+ * reach. An exchange the preflight could not carry — refused by the file-effect
+ * policy, or stopped by a spent deadline — is returned with its own outcome and
+ * facts rather than reported as a capability verdict. The converting channel
+ * makes exactly one request, so that request receives the deployment's deadline
+ * unchanged rather than a recomputed remainder.
+ * @param deps - capability services, resolved configuration, and plugin-owned state for this call.
+ * @param options - the working directory, the call's deadline and cancellation, its channel, and the encoded request.
+ * @returns the canonical outcome, including the preflight's own refused or interrupted arm.
+ * @throws Error when the deployment's channel cannot be verified for this interpreter.
+ * @throws the structured abort when the caller cancelled the call.
+ */
+async function runNativeRequest(
+  deps: AetherExecDeps,
+  options: {
+    readonly cwd: string
+    readonly timeoutMs: number
+    readonly signal: AbortSignal
+    readonly structured: StructuredDataMode
+    readonly requestText: string
+  },
+): Promise<AetherOutcome> {
+  const request = (timeoutMs: number): Promise<AetherOutcome> => runAether(deps, {
+    invocation: { transport: 'agent-api', requestText: options.requestText },
+    cwd: options.cwd,
+    timeoutMs,
+    signal: options.signal,
+  })
+  if (options.structured === 'legacy') return request(options.timeoutMs)
+  const startedAt = performance.now()
+  const probeBudget = remainingBudget(options.timeoutMs, startedAt)
+  if (probeBudget < MIN_REQUEST_BUDGET_MS) return deadlineExhaustedOutcome(deps, options.timeoutMs)
+  const probe = await probeTypedCapabilities(deps, { cwd: options.cwd, timeoutMs: probeBudget, signal: options.signal })
+  if (probe.kind === 'stopped') return probe.outcome
+  const budget = remainingBudget(options.timeoutMs, startedAt)
+  if (budget < MIN_REQUEST_BUDGET_MS) return deadlineExhaustedOutcome(deps, options.timeoutMs)
+  return request(budget)
+}
+
 /** The capability services and plugin-owned state the tools read. */
 export interface AetherToolDependencies {
   /** Context supplying `subprocess`, `sandbox`, `sandboxPolicy`, the optional `shellEnv`, and the tool registry. */
@@ -342,13 +437,14 @@ export function createAetherTools(dependencies: AetherToolDependencies): ToolDef
         throw new Error('aether-shell [E_INPUT_QUERY]: query must be a non-empty category or builtin name')
       }
       const page = ontologyPage(args.offset, args.limit, config.maxManifestEntries)
-      const requestText = encodeRequest(args.query === undefined ? ontologyManifestRequest() : ontologyDescribeRequest(args.query))
+      const requestText = encodeRequest(args.query === undefined ? ontologyManifestRequest() : ontologyDescribeRequest(args.query, config.structuredDataMode))
       assertRequestBytes(requestText, config)
-      const outcome = await runAether(depsFor(exec), {
-        invocation: { transport: 'agent-api', requestText },
+      const outcome = await runNativeRequest(depsFor(exec), {
         cwd: resolveWorkdir(args.cwd, exec),
         timeoutMs: callTimeout(args.timeoutMs, config),
         signal: exec.signal,
+        structured: config.structuredDataMode,
+        requestText,
       })
       const projected = projectDiscovery(args.query, outcome, page)
       return applyResultLimit(projected, renderDiscovery(projected), config.maxResultBytes)
@@ -359,9 +455,8 @@ export function createAetherTools(dependencies: AetherToolDependencies): ToolDef
     name: 'aether_call',
     description: 'Call one native AetherShell builtin with positional JSON arguments and return its typed result. '
       + '`builtin` is one flat native name (`ls`, `crypto_hash`, `json_parse`); find names with `aether_discover`. '
-      + 'Arguments are data, never AetherShell source: a string containing `${` is rejected because the interpreter '
-      + 'would interpolate it as code, and every object key must be a plain identifier because the interpreter writes '
-      + 'keys unquoted. A process-capable builtin runs under this call\'s DSH file policy, which governs writes and '
+      + CALL_ARGUMENT_CHANNEL[config.structuredDataMode]
+      + 'A process-capable builtin runs under this call\'s DSH file policy, which governs writes and '
       + 'deletes rather than reads, network, or process control; the interpreter\'s own `sh` switch starts off as a '
       + 'convenience default, not a boundary. Foreground only, under a hard deadline. A '
       + 'result larger than the deployment\'s budgets fails loudly and names the narrowing remedy instead of returning '
@@ -382,13 +477,14 @@ export function createAetherTools(dependencies: AetherToolDependencies): ToolDef
     },
     async execute(args, exec) {
       assertWorkdir(args.cwd)
-      const requestText = encodeRequest(callRequest(args.builtin, args.args))
+      const requestText = encodeRequest(callRequest(args.builtin, args.args, config.structuredDataMode))
       assertRequestBytes(requestText, config)
-      const outcome = await runAether(depsFor(exec), {
-        invocation: { transport: 'agent-api', requestText },
+      const outcome = await runNativeRequest(depsFor(exec), {
         cwd: resolveWorkdir(args.cwd, exec),
         timeoutMs: callTimeout(args.timeoutMs, config),
         signal: exec.signal,
+        structured: config.structuredDataMode,
+        requestText,
       })
       return applyResultLimit(outcome, renderOutcome(outcome), config.maxResultBytes)
     },
@@ -400,8 +496,9 @@ export function createAetherTools(dependencies: AetherToolDependencies): ToolDef
       + 'result to the next. `select` maps each item of that step\'s result through a dotted field path, so '
       + '`select: "name"` reads the `name` field of every element. `predicate` is an AetherShell expression passed to '
       + 'that step\'s builtin as its lambda first argument and replaces the step\'s `args`. `input` starts the '
-      + 'pipeline from a value instead of from the first call. Step arguments are data with the same `${` and object '
-      + 'key limits as `aether_call`, and every step runs under this call\'s DSH file policy. Foreground only, '
+      + 'pipeline from a value instead of from the first call. '
+      + STEP_ARGUMENT_CHANNEL[config.structuredDataMode]
+      + 'Foreground only, '
       + 'under a hard deadline. '
       + DENIAL_GUIDANCE,
     parameters: {
@@ -422,7 +519,7 @@ export function createAetherTools(dependencies: AetherToolDependencies): ToolDef
       },
       input: {
         type: 'json',
-        description: 'Value that starts the pipeline; omit it to start from the first step\'s call. An explicit null is rejected because the native request reads it as "no input" rather than the None value — seed None with aether_eval instead.',
+        description: PIPELINE_SEED_DESCRIPTION[config.structuredDataMode],
       },
       ...CWD_AND_TIMEOUT_ENTRIES,
     },
@@ -432,13 +529,14 @@ export function createAetherTools(dependencies: AetherToolDependencies): ToolDef
     },
     async execute(args, exec) {
       assertWorkdir(args.cwd)
-      const requestText = encodeRequest(pipelineRequest(args.steps, args.input, config))
+      const requestText = encodeRequest(pipelineRequest(args.steps, args.input, config, config.structuredDataMode))
       assertRequestBytes(requestText, config)
-      const outcome = await runAether(depsFor(exec), {
-        invocation: { transport: 'agent-api', requestText },
+      const outcome = await runNativeRequest(depsFor(exec), {
         cwd: resolveWorkdir(args.cwd, exec),
         timeoutMs: callTimeout(args.timeoutMs, config),
         signal: exec.signal,
+        structured: config.structuredDataMode,
+        requestText,
       })
       return applyResultLimit(outcome, renderOutcome(outcome), config.maxResultBytes)
     },

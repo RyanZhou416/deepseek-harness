@@ -15,6 +15,12 @@
  *   and reports failure as `error[<CODE>]: <message>` on stderr with a non-zero
  *   exit.
  *
+ * A leading `--fixture-capabilities=<profile>` argv marker selects which
+ * interpreter generation answers the `capabilities` action, so a suite can prove
+ * the plugin fails closed against an interpreter that predates it: `v1` (the
+ * default), `legacy` (no such action), `version`, `partial`, `notrecord`, or
+ * `hang`.
+ *
  * Scenario selection is by request content, never by environment, so a test
  * cannot accidentally pass because ambient state chose the branch. Anything the
  * fixture does not recognize fails loudly.
@@ -132,16 +138,65 @@ const VALUE_BUILTINS = new Map([
   ['value_success_false', { value: { success: false, reason: 'a native value that merely looks like an envelope' }, type: 'Record' }],
 ])
 
+/** The argv marker selecting which interpreter generation answers the `capabilities` action. */
+const CAPABILITY_FLAG = '--fixture-capabilities='
+
+/** Every capability profile this stand-in implements; anything else fails loudly. */
+const CAPABILITY_PROFILES = ['v1', 'legacy', 'version', 'partial', 'notrecord', 'hang']
+
+/** The exact capability record a `v1` interpreter reports. */
+const CAPABILITIES_V1 = {
+  features: {
+    explicit_null_pipeline_input_v1: true,
+    typed_arguments_v1: true,
+    typed_pipeline_input_v1: true,
+  },
+  protocol: 'aethershell-agent-api',
+  protocol_version: 1,
+}
+
+/**
+ * Answer the `capabilities` action as the selected interpreter generation would.
+ * @param {string} profile - one allowlisted capability profile name.
+ */
+function answerCapabilities(profile) {
+  switch (profile) {
+    case 'v1':
+      return envelope(ok(CAPABILITIES_V1, 'Record', 'capabilities()'))
+    case 'version':
+      return envelope(ok({ ...CAPABILITIES_V1, protocol_version: 2 }, 'Record', 'capabilities()'))
+    case 'partial':
+      return envelope(ok({
+        ...CAPABILITIES_V1,
+        features: { ...CAPABILITIES_V1.features, typed_pipeline_input_v1: false },
+      }, 'Record', 'capabilities()'))
+    case 'notrecord':
+      return envelope(ok('capabilities unavailable', 'String', 'capabilities()'))
+    case 'hang':
+      return hang()
+    case 'legacy':
+      // An interpreter that predates the action reports it as an unknown
+      // request, which is how the Agent API answers any unrecognized action.
+      process.stderr.write('Error: Invalid JSON request: unknown action "capabilities"\n')
+      return finish(1)
+    default:
+      process.stderr.write(`Error: fixture has no capability profile ${JSON.stringify(profile)}\n`)
+      return finish(1)
+  }
+}
+
 /**
  * Answer one Agent API request.
  * @param {unknown} request - the decoded stdin request.
+ * @param {string} capabilityProfile - which interpreter generation answers `capabilities`.
  */
-function answerAgent(request) {
+function answerAgent(request, capabilityProfile) {
   if (typeof request !== 'object' || request === null || Array.isArray(request)) {
     process.stderr.write('Error: Invalid JSON request: expected an object\n')
     return finish(1)
   }
   const { action, builtin, args } = request
+  if (action === 'capabilities') return answerCapabilities(capabilityProfile)
   if (action === 'call') return answerCall(request, builtin, args ?? [])
   if (action === 'pipeline') return answerPipeline(request)
   if (action === 'eval') return finishEval(request.code)
@@ -326,8 +381,16 @@ function directiveEval(code) {
   }
 }
 
-const [, , ...argv] = process.argv
-if (argv[0] === 'agent' && argv[1] === 'execute') {
+const [, , ...rawArgv] = process.argv
+// The capability marker is fixture-only: the plugin never sets it, and a suite
+// uses it to put an interpreter of a known generation in front of the plugin.
+const marker = rawArgv[0]?.startsWith(CAPABILITY_FLAG) === true ? rawArgv.shift() : undefined
+const capabilityProfile = marker === undefined ? 'v1' : marker.slice(CAPABILITY_FLAG.length)
+const argv = rawArgv
+if (!CAPABILITY_PROFILES.includes(capabilityProfile)) {
+  process.stderr.write(`Error: fixture received an unknown capability profile ${JSON.stringify(capabilityProfile)}\n`)
+  finish(2)
+} else if (argv[0] === 'agent' && argv[1] === 'execute') {
   const raw = readStdin()
   let request
   try {
@@ -336,7 +399,7 @@ if (argv[0] === 'agent' && argv[1] === 'execute') {
     process.stderr.write('Error: Invalid JSON request: invalid JSON body\n')
     finish(1)
   }
-  if (request !== undefined) answerAgent(request)
+  if (request !== undefined) answerAgent(request, capabilityProfile)
 } else if (argv.includes('--deterministic') && argv.includes('-c')) {
   finishEval(argv[argv.indexOf('-c') + 1])
 } else {

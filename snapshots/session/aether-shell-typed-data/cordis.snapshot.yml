@@ -1,0 +1,39 @@
+# Keyless replay keeps the shipped headless composition and replaces only the
+# model adapter and the external AetherShell interpreter. The plugin, the
+# subprocess seam, the sandbox policy, and session persistence all stay real; the
+# scenario-local protocol fixture stands in for the binary this corpus cannot
+# install, and it answers the `capabilities` action the typed argument channel
+# requires before the plugin sends any argument data.
+- id: llm-deepseek
+  name: '@deepseek-ai/dsh-llm-deepseek'
+  disabled: true
+
+- insert:
+    - id: aether-shell
+      name: '../../../fork-plugins/dsh-plugin-aether-shell/src/index.ts'
+      config:
+        executable: !!js process.execPath
+        executableArgs:
+          # The fixture sits beside the selected Session fixture, so the sibling
+          # path is derived from the harness's own absolute fixture path.
+          - !!js 'process.env.DSH_SNAPSHOT_FILE.replace(/[^\\/]+$/, "aether-typed-data-fixture.mjs")'
+        structuredDataMode: typed-v1
+
+    - id: llm-replay
+      name: '@deepseek-ai/dsh-llm-replay'
+      config:
+        providers:
+          - id: deepseek-official
+            name: DeepSeek
+            models:
+              - id: deepseek-v4-flash
+              - id: deepseek-v4-pro
+
+# The recorded scenario exercises the native AetherShell query tools only. Both
+# shipped shell tools are disabled so the pinned header and prompt do not depend
+# on the host's shell dialect (tool-pwsh on Windows, tool-bash elsewhere).
+- id: tool-bash
+  disabled: true
+
+- id: tool-pwsh
+  disabled: true

@@ -2,5 +2,5 @@
 # side as of the last confirmed-consistent state. Both languages carry equal authority;
 # after editing either side, bring the other along and re-record with:
 #   pnpm run verify-translation-pairing --write fork-plugins/dsh-plugin-aether-shell/README.md
-README.md: b43b6563356249be6ed1d3c8e39f6442c8056dcf
-README.zh.md: 4b8f4962e5a0d8d6a712663ab9151463eac9462e
+README.md: c1177e2c413dcb80f51d688cc8eee4bb50ef15b9
+README.zh.md: d5fc6ba3fe663a98b2b35905b942ebc82c98f2a2

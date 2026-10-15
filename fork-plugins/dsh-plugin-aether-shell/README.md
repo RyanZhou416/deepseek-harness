@@ -27,7 +27,7 @@ Let an agent query AetherShell operations, evaluate typed programs, keep one int
 
 ### Prerequisites and installation
 
-The plugin targets DSH `0.1.7-rc.1` and the native AetherShell `12.0.2` protocol. Install AetherShell separately and configure its absolute executable path when the Host's existing PATH does not include it. Windows system-level installation can use `C:\Program Files\AetherShell\ae.exe`; changing PATH does not update an already-running Host's environment.
+The plugin targets DSH `0.1.7-rc.1`. The default `legacy` data mode supports the native AetherShell `12.0.2` protocol; `typed-v1` requires the typed-data capabilities provided by the personal `12.0.2+ryan.2` build. Install AetherShell separately and configure its absolute executable path when the Host's existing PATH does not include it. Windows system-level installation can use `C:\Program Files\AetherShell\ae.exe`; changing PATH does not update an already-running Host's environment.
 
 Build and pack from the checkout without installing dependencies:
 
@@ -55,9 +55,15 @@ From the checkout, install the generated tarball with `pnpm dsh plugin --profile
 
 The four query tools are stateless and start a fresh interpreter each call. They stay registered whenever the plugin is active, and none of them offers a background flag. The five session tools register while the live-agent registry is mounted, because a handle must belong to a calling agent; `aether_session_read` drains output written between calls, and a call in flight refuses a read because that output belongs to the call. `aether_job_start` registers while the job registry is mounted, with `job_output`, `job_list` and `job_kill` providing the read and stop controls.
 
-Use `aether_discover` before relying on an unfamiliar builtin. Call arguments are positional: `{"builtin":"len","args":[[1,2,3]]}` returns `3`; an array argument occupies one position. Named argument objects are not exposed because the interpreter's conversion can silently discard fields.
+Use `aether_discover` before relying on an unfamiliar builtin. Call arguments are positional: `{"builtin":"len","args":[[1,2,3]]}` returns `3`; an array argument occupies one position. Named argument objects are not exposed; pass a record inside the positional array so its fields remain one argument.
 
 A structured pipeline can use `{"input":[{"size":1},{"size":5},{"size":9}],"steps":[{"builtin":"where","predicate":"size > 2","select":"size"}]}` to return `[5,9]`. A predicate supplies the step's lambda instead of positional arguments; a selector appends a projection stage. Use `aether_eval` for explicit module syntax such as `str.upper("hello")` or `[1,2,3] | map(fn(x) => x * 2)`.
+
+### Structured-data compatibility
+
+Set `structuredDataMode: typed-v1` only for an interpreter implementing the typed-data protocol. Before each structured request, the plugin probes `capabilities` under the same DSH file policy and requires protocol version `1` with all three typed-data features. Probe and request share one deadline. A missing, unsupported or failed capability response stops the call before user data is sent; there is no automatic fallback. The default `legacy` mode keeps the interpolation, record-key and null-seed refusals needed by older interpreters.
+
+In verified `typed-v1` mode, `${...}` in JSON strings and non-identifier record keys remain literal data, and an explicit `input: null` seeds a native null. Builtin names remain flat; `predicate` and `aether_eval` are still executable AetherShell source. Unsafe-range integers remain refused in both modes. On the personal runtime, `byte_len("你好")` is `6` and `char_len("你好")` is `2`; `char_len` counts Unicode scalar values, not grapheme clusters, while `len` retains its existing string byte count.
 
 ### How the sandbox relates to the real environment
 
@@ -108,6 +114,7 @@ Override the bundle's `aether-shell` row in the profile patch. The executable ma
 | `executable` | `ae` | Native interpreter path or name. |
 | `executableArgs` | `[]` | Trusted argv prefix; offline tests use it for their external-runtime fixture. |
 | `mode` | `human` | `human` preserves typed native JSON; `agent` explicitly opts into AECON and AetherShell's additional native approval rules. |
+| `structuredDataMode` | `legacy` | `legacy` keeps older data guards; `typed-v1` requires a successful capability probe before forwarding typed JSON data. |
 | `allowShell` | `false` | Enable the interpreter's `sh()` builtin without changing DSH file policy. |
 | `timeoutMs` / `maxTimeoutMs` | `120000` / `600000` | Default and maximum per-call hard deadlines. |
 | `maxRequestBytes` | `1048576` | Encoded request or source byte cap. |
@@ -161,11 +168,11 @@ The tool declarations and their guidance form a stable request prefix for one co
 - A session's listed working directory is the initial directory its process started in. A program that changes the current directory changes the process's real `pwd()` while the listed value stays the start directory; read the process's own `pwd()` when the current directory matters.
 - A session's code state is never durable. A restart, a plugin unload, a deadline, cancellation, or a policy change loses the session's in-memory variables, functions and environment; files the program wrote remain, but there is no automatic reopen, replay, or history. Background jobs share the same no-checkpoint rule.
 - A denied call has no in-turn sandbox escalation fields; a user must change the Session's permission policy explicitly if broader file access is intended.
-- The native JSON-to-source API interpolates strings containing `${` and emits record keys unquoted. Structured argument/input data containing interpolation markers or non-identifier keys is rejected before execution, rather than silently changed. A session program reaches the interpreter as an encoded AetherShell string literal inside the native session call, so its own `${` interpolation keeps the meaning the caller wrote; a background job program travels the command line the same way `aether_eval` does, with no wrapper introduced.
-- The JSON request API lacks module namespaces and treats an explicit null pipeline seed as omitted. Use flat builtin names in calls/pipelines; use `aether_eval` for module syntax or a `None` seed. Unsafe numeric integers are rejected instead of silently rounded; request large integers as text.
+- Older native APIs interpolate `${` strings, emit record keys unquoted and treat a null pipeline seed as omitted. `legacy` refuses those inputs; verified `typed-v1` forwards them as typed data. Session programs retain their caller-written interpolation through encoded source, and background programs use the command line without an added wrapper.
+- Calls and pipelines accept flat builtin names, not module expressions. Use `aether_eval` or a persistent session for module syntax. Unsafe-range numeric integers are rejected rather than silently rounded; request large integers as text.
 - Printing to stdout or launching children that inherit stdout can contaminate a query tool's single-JSON response; that tool reports a protocol error rather than extracting a plausible result. Background jobs read raw streams and are not affected, but their output is unstructured text.
 - Oversized output is not parsed from a truncated tail. A surviving spill file is reported when available; otherwise narrow the query with native projection, filtering or `take`.
-- AetherShell operations have their own data conventions. For example, its JSON parsing/stringifying builtins are not a guarantee of lossless nullable-value round trips.
+- Runtime-specific builtin semantics are separate from typed transport. The personal build preserves JSON null round trips and offers explicit byte/scalar length operations; older releases may retain different builtin behavior.
 
 <a id="dev-note"></a>
 ### Dev Note

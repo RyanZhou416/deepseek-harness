@@ -453,14 +453,14 @@ function stoppedFacts(deps: AetherExecDeps, request: AetherRunRequest, stop: Aet
  * unchanged by the raw-facts split: this arm is built from the stop reason
  * alone rather than from whatever a partially run process left behind.
  * @param deps - capability services and the resolved configuration.
- * @param request - the run that was stopped.
+ * @param timeoutMs - the deadline this call applied, in milliseconds.
  * @param timedOut - whether the run's own deadline elapsed.
  * @param aborted - whether plugin teardown stopped the run.
  * @returns the canonical interrupted outcome.
  */
 function interruptedOutcome(
   deps: AetherExecDeps,
-  request: AetherRunRequest,
+  timeoutMs: number,
   timedOut: boolean,
   aborted: boolean,
 ): AetherOutcome {
@@ -474,11 +474,28 @@ function interruptedOutcome(
       signal: null,
       timedOut,
       aborted,
-      timeoutMs: request.timeoutMs,
+      timeoutMs,
       cleanupFailed: false,
     },
     stderr: noDiagnostics(),
   }
+}
+
+/**
+ * The interrupted outcome for a call whose overall deadline was already spent
+ * when its next interpreter request would have started.
+ *
+ * A caller that shares one deadline across several requests reaches this instead
+ * of starting a process with no time left. Starting one would be worse than
+ * refusing: a non-positive deadline arms no timer at all, so the request would
+ * run unbounded while the call claimed a deadline. The arm is the same one a
+ * deadline inside a run returns, so a caller reads one vocabulary for both.
+ * @param deps - capability services and the resolved configuration.
+ * @param timeoutMs - the overall deadline this call had spent, in milliseconds.
+ * @returns the canonical interrupted outcome, marked as a deadline.
+ */
+export function deadlineExhaustedOutcome(deps: AetherExecDeps, timeoutMs: number): AetherOutcome {
+  return interruptedOutcome(deps, timeoutMs, true, false)
 }
 
 /** The outcome for an exchange the sandbox refused. */
@@ -859,7 +876,7 @@ export async function runAether(deps: AetherExecDeps, request: AetherRunRequest)
     // requires; the deadline and plugin teardown are the interrupted outcome
     // this plugin has always returned for them, whatever the raw facts carry.
     if (stop === 'cancelled') throw toolAborted()
-    const interrupted = interruptedOutcome(deps, request, stop === 'deadline', stop !== 'deadline')
+    const interrupted = interruptedOutcome(deps, request.timeoutMs, stop === 'deadline', stop !== 'deadline')
     return facts.process.cleanupFailed
       ? { ...interrupted, process: { ...interrupted.process, cleanupFailed: true } }
       : interrupted

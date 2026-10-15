@@ -2,11 +2,11 @@
  * Validated deployment configuration for the AetherShell tools.
  *
  * Every deployment-varying choice — the interpreter, the native runtime mode,
- * the arbitrary-shell switch, the request and output byte budgets, and the
- * process deadlines — is a `Config` field, so a deployment changes it from
- * `cordis.yml` rather than from a constant. {@link resolveConfig} applies the
- * defaults and rejects a value the plugin could not run with before any
- * process starts; {@link callTimeout} resolves one call's deadline the same
+ * the argument channel, the arbitrary-shell switch, the request and output byte
+ * budgets, and the process deadlines — is a `Config` field, so a deployment
+ * changes it from `cordis.yml` rather than from a constant. {@link resolveConfig}
+ * applies the defaults and rejects a value the plugin could not run with before
+ * any process starts; {@link callTimeout} resolves one call's deadline the same
  * way.
  *
  * @module @ryanzhou416/dsh-plugin-aether-shell/config
@@ -51,6 +51,26 @@ export const AETHER_MODES = ['human', 'agent'] as const
 /** One accepted native runtime mode. */
 export type AetherMode = (typeof AETHER_MODES)[number]
 
+/**
+ * How this deployment's argument data reaches the interpreter.
+ *
+ * `legacy` is the conversion interpreters have performed since the JSON API:
+ * the interpreter turns JSON arguments into AetherShell source, so a string
+ * containing `${` is interpolated and an object key is written unquoted.
+ * `typed-v1` is the interpreter's typed argument channel, which carries the same
+ * values as data. Selecting `typed-v1` is a statement of intent, not proof: each
+ * native call verifies the interpreter's own capability reply before it sends
+ * argument data, and fails the call closed when that reply does not satisfy the
+ * contract.
+ */
+export const STRUCTURED_DATA_MODES = ['legacy', 'typed-v1'] as const
+
+/** One accepted argument channel this plugin can send data on. */
+export type StructuredDataMode = (typeof STRUCTURED_DATA_MODES)[number]
+
+/** Default argument channel: the conversion every shipped interpreter performs. */
+const DEFAULT_STRUCTURED_DATA_MODE: StructuredDataMode = 'legacy'
+
 /** Default interpreter: the bare name the AetherShell installer puts on `PATH`. */
 const DEFAULT_EXECUTABLE = 'ae'
 
@@ -82,6 +102,20 @@ export interface Config {
    * rejected instead of falling back to the interpreter's own default.
    */
   mode?: AetherMode
+  /**
+   * How this deployment's argument data reaches the interpreter (default
+   * `legacy`).
+   *
+   * `legacy` refuses the shapes that conversion would re-parse as code: a string
+   * containing `${`, a non-identifier object key, and an explicit null pipeline
+   * seed, which the native request reads as "no seed". `typed-v1` accepts those
+   * shapes, and sends them on the interpreter's typed channel, but only after
+   * that call verified the interpreter reports the required capabilities; an
+   * interpreter that does not fails the call closed instead of receiving the
+   * data on the converting channel. This is trusted deployment configuration and
+   * is never selectable per call.
+   */
+  structuredDataMode?: StructuredDataMode
   /**
    * Startup value of the interpreter's own `sh()` switch, passed as
    * `AETHER_ALLOW_SH` (default `false`). This is a convenience default, not a
@@ -129,6 +163,7 @@ export const Config: z<Config> = z.object({
   executable: z.string().default(DEFAULT_EXECUTABLE),
   executableArgs: z.array(z.string()).default([]),
   mode: z.union([...AETHER_MODES]).default(DEFAULT_MODE),
+  structuredDataMode: z.union([...STRUCTURED_DATA_MODES]).default(DEFAULT_STRUCTURED_DATA_MODE),
   allowShell: z.boolean().default(false),
   timeoutMs: z.number().default(DEFAULT_TIMEOUT_MS),
   maxTimeoutMs: z.number().default(DEFAULT_MAX_TIMEOUT_MS),
@@ -150,6 +185,7 @@ export interface ResolvedConfig {
   readonly executable: string
   readonly executableArgs: readonly string[]
   readonly mode: AetherMode
+  readonly structuredDataMode: StructuredDataMode
   readonly allowShell: boolean
   readonly timeoutMs: number
   readonly maxTimeoutMs: number
@@ -244,6 +280,17 @@ function readMode(value: string): AetherMode {
 }
 
 /**
+ * Accept only an argument channel this plugin implements. Forwarding an
+ * unrecognized name would select nothing, leaving the deployment believing it
+ * had chosen a channel while the plugin applied its own default; the two names
+ * are exact because each selects different validation.
+ */
+function readStructuredDataMode(value: string): StructuredDataMode {
+  if (value === 'legacy' || value === 'typed-v1') return value
+  throw new Error(`aether-shell: structuredDataMode must be "legacy" or "typed-v1", got ${JSON.stringify(value)}; "legacy" is the converting channel every interpreter performs and "typed-v1" is the interpreted channel this plugin verifies per call`)
+}
+
+/**
  * Apply the deployment defaults and reject values this plugin could not run with.
  * @param config - the loader-validated plugin configuration, possibly empty in a direct call.
  * @returns the complete configuration every run reads.
@@ -259,6 +306,7 @@ export function resolveConfig(config: Config = {}): ResolvedConfig {
     executable: readExecutable(config.executable ?? DEFAULT_EXECUTABLE),
     executableArgs: readExecutableArgs(config.executableArgs ?? []),
     mode: readMode(config.mode ?? DEFAULT_MODE),
+    structuredDataMode: readStructuredDataMode(config.structuredDataMode ?? DEFAULT_STRUCTURED_DATA_MODE),
     allowShell: config.allowShell ?? false,
     timeoutMs,
     maxTimeoutMs,
