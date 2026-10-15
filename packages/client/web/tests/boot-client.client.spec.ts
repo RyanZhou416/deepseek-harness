@@ -20,7 +20,11 @@ function graphOf(ids: readonly string[]): WebBootGraph {
 }
 
 /** Module system seeded with inline plugin modules; `loaded` records every transport call. */
-function modulesOf(graph: WebBootGraph, staticModules: Record<string, unknown>): { modules: ClientModuleLoader; loaded: string[] } {
+function modulesOf(graph: WebBootGraph, staticModules: Record<string, unknown>): {
+  modules: ClientModuleLoader
+  loaded: string[]
+  target: ClientModuleLoaderTarget
+} {
   const loaded: string[] = []
   const pendingQueue: ClientBundleRegistration[] = []
   const target: ClientModuleLoaderTarget = {
@@ -34,7 +38,7 @@ function modulesOf(graph: WebBootGraph, staticModules: Record<string, unknown>):
     staticModules,
     loadBundle: async (url) => { loaded.push(url) },
   })
-  return { modules, loaded }
+  return { modules, loaded, target }
 }
 
 /** Recording progress sink. */
@@ -75,6 +79,41 @@ describe('bootClient', () => {
       'orphan: pending (waiting for service: nothing)',
     )
     await ctx.fiber.dispose()
+  })
+
+  it('waits for graph updates queued during initial plugin activation', async () => {
+    const activating = Promise.withResolvers<undefined>()
+    const release = Promise.withResolvers<undefined>()
+    const mounted = vi.fn()
+    let firstSync: Promise<void> | undefined
+    const provider = { async apply(ctx: Context) {
+      activating.resolve(undefined)
+      await release.promise
+      ctx.provide('available', {})
+    } }
+    const consumer = { inject: ['available'], apply: mounted }
+    const { modules, target } = modulesOf(graphOf(['seed']), {
+      seed: { apply() { firstSync = modules.entries.sync(graphOf(['seed', 'provider'])) } },
+    })
+    target.load({ id: 'provider', factory: () => provider })
+    target.load({ id: 'consumer', factory: () => consumer })
+    const ctx = new Context()
+    const boot = bootClient({ ctx, modules, manifest: modules.manifest })
+      .then(() => mounted.mock.calls.length, (error: unknown) => error)
+    onTestFinished(async () => {
+      release.resolve(undefined)
+      await boot
+      await ctx.fiber.dispose()
+    })
+
+    await activating.promise
+    const latestSync = modules.entries.sync(graphOf(['seed', 'provider', 'consumer']))
+    release.resolve(undefined)
+    await Promise.all([firstSync, latestSync])
+
+    expect(await boot).toBe(1)
+    expect(mounted).toHaveBeenCalledOnce()
+    expect([...ctx.loader.entries()].map(entry => entry.fiber?.state)).toEqual([2, 2, 2])
   })
 
   it('reports and logs an import failure for a row that is neither seeded nor a graph row', async () => {

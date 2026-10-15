@@ -64,7 +64,7 @@ export class ClientEntries {
    * Create the initial roster and retain its entry identities for subsequent reconciliation.
    * @param loader - Page Loader, already configured with the module system.
    * @param manifest - Initial roster audited by the boot caller.
-   * @returns after initial entries and their activation settle; boot owns its activation audit.
+   * @returns after initial activation and updates queued during startup settle; boot owns its activation audit.
    */
   start(loader: Loader, manifest: BootManifest): Promise<void> {
     if (this.loader !== undefined) throw new Error('client-modules: entries already started')
@@ -81,6 +81,12 @@ export class ClientEntries {
       }))
       await loader.await()
       for (const row of this.modules.manifest.modules) this.revisions.set(row.id, row.rev)
+    }).then(async () => {
+      let pending: Promise<void>
+      do {
+        pending = this.queue
+        await pending
+      } while (pending !== this.queue)
     })
   }
 

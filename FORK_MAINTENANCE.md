@@ -70,6 +70,12 @@ Continuable-subagent Queue edit/remove/steer 由 alpha.2 的通用 `session.upda
 
 ## Source deltas
 
+### Client startup graph updates
+
+The client module entry manager waits for graph updates queued during initial activation before Web boot audits entry readiness. Keep the existing serial queue and drain it until no newer queued operation replaces the observed promise; do not announce startup completion while an activation-triggered provider or consumer is still pending. This fix is independent of the withdrawn Session Browser plugin.
+
+**Focused verification.** `pnpm exec vitest run packages/client/modules/tests packages/client/web/tests/boot-client.client.spec.ts` covers the loader lifecycle and the graph-update-during-activation regression. The regression must fail against the original startup implementation and pass with the queue drain.
+
 ### Stable prompt boundary for the subscription wire
 
 `@deepseek-ai/dsh-system-prompt` gained an opt-in `stable` flag on section registrations and
