@@ -54,3 +54,10 @@ native/system/test/bin/
 # Local test-run logs and Node diagnostics reports; produced by hand, never committed.
 *-run.txt
 report.*.json
+
+# Local team state and Session Browser deployment receipts; retain files locally.
+/.agent-teams/
+/fork-runtime/session-browser-deploy/releases/
+/fork-runtime/session-browser-deploy/current.json
+/fork-runtime/session-browser-deploy/state.json
+/fork-runtime/session-browser-deploy/preparation-evidence.json
