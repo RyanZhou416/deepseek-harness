@@ -175,11 +175,15 @@ function headerOf(log: string): JsonObject {
   return records(log)[0] ?? {}
 }
 
+/** Include the exact workspace spelling embedded in JSON-quoted runtime-context text. */
 function contextOf(logs: readonly string[]): NormalizeContext {
   const headers = logs.map(headerOf)
+  const cwd = typeof headers[0]?.cwd === 'string' ? headers[0].cwd : '\0missing-cwd\0'
+  const quotedCwd = JSON.stringify(cwd).slice(1, -1)
   return {
     sessionIds: headers.flatMap(header => typeof header.id === 'string' ? [header.id] : []),
-    cwd: typeof headers[0]?.cwd === 'string' ? headers[0].cwd : '\0missing-cwd\0',
+    cwd,
+    ...quotedCwd === cwd ? {} : { cwdAliases: [quotedCwd] },
   }
 }
 
@@ -802,6 +806,30 @@ async function verifyHeaders(scenario: HeadlessScenario, actualLogs: readonly Se
 }
 
 describe('headless recorded-session snapshots', () => {
+  it.each([
+    ['Windows', String.raw`C:\Users\runner\AppData\Local\Temp\dsh-log-snap-test`],
+    ['Windows UNC', String.raw`\\host\Shared Folder\dsh-log-snap-test`],
+    ['Linux', '/tmp/dsh-log-snap-test'],
+    ['macOS', '/var/folders/test/T/dsh-log-snap-test'],
+    ['quoted POSIX', '/tmp/"quoted"/dsh-log-snap-test'],
+  ])('compares JSON-quoted workspace paths in the %s recorded fixture', async (_platform, cwd) => {
+    const fixtureDir = join(snapshotsRoot, 'web-fetch')
+    const fixture = await readFile(join(fixtureDir, await primaryFixtureFile(fixtureDir)), 'utf8')
+    const probe = `Keep ${JSON.stringify(`${cwd}-other`)} and ${JSON.stringify(String.raw`D:\unrelated\path`)} and ${String.raw`\d+\w+`}.`
+    const render = (root: string): string => records(fixture).map(record => JSON.stringify(record, (key, value: unknown) => {
+      if (typeof value !== 'string') return value
+      const text = value.replaceAll('"{{cwd}}"', JSON.stringify(root)).replaceAll('{{cwd}}', root)
+      const runtimeContext = key === 'text'
+        && (value.startsWith('Current runtime context.') || value.startsWith('Current DSH file policy:'))
+      return runtimeContext ? `${text}\n${probe}` : text
+    })).join('\n') + '\n'
+    const actual = render(cwd)
+    const expected = render('{{cwd}}')
+
+    expect(normalizeSessionSnapshots([actual], contextOf([actual]), { nativeWriterOutput: true }))
+      .toEqual(normalizeSessionSnapshots([expected], contextOf([expected]), { nativeWriterOutput: true }))
+  })
+
   it('gives every composition and header class exactly one current-writer pin', () => {
     for (const scenario of scenarios) {
       expect(ownerOf(scenario), `${scenario.name}: composition owner`).toBeDefined()

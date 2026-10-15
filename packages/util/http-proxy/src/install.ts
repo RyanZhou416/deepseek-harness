@@ -3,7 +3,7 @@
  * process-wide record of which policy is active.
  *
  * `undici` is imported dynamically so the pure {@link ProxyPolicy} half stays loadable where no Node
- * transport exists, matching how `dsh-web-fetch-http` defers its own transport import.
+ * transport exists.
  * @module @deepseek-ai/dsh-http-proxy/install
  */
 

@@ -1,0 +1,9 @@
+- name: '@deepseek-ai/dsh-system-prompt'
+- name: '@deepseek-ai/dsh-tools'
+- name: '@deepseek-ai/dsh-web'
+  config:
+    fetchProvider: http
+- name: '@deepseek-ai/dsh-web-fetch-http'
+- name: '@deepseek-ai/dsh-tool-web'
+  config:
+    search: false

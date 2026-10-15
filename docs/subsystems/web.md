@@ -82,7 +82,7 @@ interface WebFetchRequest {
 }
 ```
 
-HTTP status is part of the fetched resource state, not automatically a failure: a successful network fetch of a `404`/`500` returns a `WebFetchResult` with the status code and a bounded decoded body. `url` is the final URL after allowed redirects. `WebError` is reserved for failures to safely retrieve or represent the resource.
+HTTP status is part of the fetched resource state, not automatically a failure: a successful network fetch of a `404`/`500` returns a `WebFetchResult` with the status code and a bounded decoded body. `url` is the final URL after allowed redirects. `WebError` is reserved for failures to retrieve or represent the resource.
 
 ```ts type-equiv
 /**
@@ -128,7 +128,7 @@ Selection never depends on registration, config, or HMR order: a capability has 
 
 The shipped Cordis, Code, and Standard presets expose `web_fetch` in every sandbox and approval mode without per-call confirmation. File sandbox presets do not govern Web network access. A deployment that needs confirmation must add a `tools/pre-execute` policy or disable fetch.
 
-The HTTP provider resolves each actual request, rejects non-public answers including private IPv4 reached through the active DNS64 prefix, pins the validated address set, and repeats enforcement for each same-origin redirect. A cross-origin redirect requires a new tool call and fresh public-address validation. These checks prevent SSRF access to non-public destinations but do not stop a model from sending data to a public URL.
+The HTTP provider sends each request through the process's global `fetch`, so routing follows the configured HTTP proxy or a system TUN route. It validates URL shape (HTTP(S) only, no embedded credentials, bounded length) and follows only same-origin redirects, re-validating each hop. It does not resolve, classify, or filter destination addresses, so loopback, private, link-local, and cloud-metadata destinations are reachable wherever the process can reach them; a deployment that needs a narrower policy must enforce it outside `web_fetch`. Requests carry no credentials of their own, and nothing here stops a model from sending data to a reachable URL.
 
 ## Errors
 
@@ -136,7 +136,7 @@ The HTTP provider resolves each actual request, rejects non-public answers inclu
 
 ## The service
 
-`WebRuntime` registers search and fetch providers, rejects duplicate ids with `WEB_DUPLICATE_PROVIDER`, and resolves providers at execution time with structured selection errors. The local fetch backend accepts only HTTP(S), rejects credentials, resolves each hostname once, rejects any answer set containing a non-public IPv4 or IPv6 destination or an active-prefix NAT64 translation to non-public IPv4, pins the request connection to the validated addresses, repeats those checks for every same-origin redirect hop, caps redirects, bytes, characters, and time, and decodes the body; the tool owns presentation.
+`WebRuntime` registers search and fetch providers, rejects duplicate ids with `WEB_DUPLICATE_PROVIDER`, and resolves providers at execution time with structured selection errors. The local fetch backend accepts only HTTP(S), rejects credentials, bounds URL length, sends one global `fetch` GET with credentials omitted, re-validates every same-origin redirect hop, caps redirects, bytes, characters, and time, and decodes the body; the tool owns presentation.
 
 <!-- BEGIN GENERATED cordis-surface (gen-cordis-catalog.ts) — do not edit between markers -->
 

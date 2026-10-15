@@ -142,6 +142,14 @@ positions, the chained stream-to-rebuild replay, and the no-capture case.
 
 `DSH_CLAUDE_PROXY_URL` 为 `dsh-http-proxy` 的 Claude 域名提供不允许 `NO_PROXY` 绕过的专用代理路由，非法配置拒绝启动，代理连接失败不回退直连。域名范围和保护边界以[包说明](packages/util/http-proxy/README.md#protected-claude-destinations)为准；这是显式代理保护，不检查 TUN 或最终公网出口。该变量只允许启动环境和 DSH_HOME 的 `.env` 提供，项目 `.env` 不能改写它。保留 `policy.spec.ts`、`claude-egress.spec.ts` 和 app-boot 的来源校验测试。运行中 Host 的配置尚未启用该源码功能；须停机后构建并在本机配置代理地址，不能仅凭 TUN 网卡存在就放行。
 
+### Web fetch without destination restrictions
+
+[HTTP 抓取提供方](packages/web/web-fetch-http/src/provider.ts) 经全局 `fetch` 发送匿名 `GET`，遵循进程代理策略或系统网络（包括 TUN），不解析、分类或固定目标地址，也不维护 Fake-IP 允许列表。**这是明确的网络访问权限扩大：** 模型可以读取 Host 可达的本机、私网、link-local 与云 metadata 服务，提供方不再提供公网目标隔离。需要限制目标的部署须在工具执行策略或网络出口实施限制，或禁用抓取；完整行为见[包说明](packages/web/web-fetch-http/README.md)。
+
+**Preservation rule.** 合并上游时保留不限制目标地址的行为，不得恢复公网地址校验、DNS64/NAT64 检查、地址固定或私有 dispatcher。保留全局 `fetch`、`credentials: 'omit'`、HTTP(S) 协议和 URL 长度限制、内嵌凭据拒绝、仅同源重定向、超时、响应大小与内容类型限制。
+
+**Focused verification.** `pnpm exec vitest run packages/web/web-fetch-http/tests packages/web/tool-web/tests` 覆盖传输与保留的限制；[Loader 测试](packages/web/tool-web/tests/loader-fetch.spec.ts) 通过 [YAML 组合](packages/web/tool-web/tests/fixtures/cordis.fetch.yml) 验证工具输出。`pnpm exec vitest run --config vitest.snapshot.config.ts -t web-fetch` 回放[抓取场景](snapshots/session/web-fetch/snapshot.yml)，[HTTP fixture](snapshots/session/web-fetch/web-fetch-fixture-server.mjs) 使用临时 loopback 端口而不替换 DNS。部署与产物验证前须停止 Host、清理本包旧 `lib/` 产物并重新构建，避免残留已删除模块的声明文件；不得在运行中替换 Host 产物。
+
 ### Subscription pool scheduling
 
 订阅插件的源码调度策略由 `pool.scheduling` 控制：Claude 与 ChatGPT 的临近重置、ChatGPT 的余额收尾及重置卡条件均采用有限加权，并用当前账号的活跃池请求数惩罚拥挤。保留按会话、提供方与模型池区分的粘性，统一按调整后评分应用切换门槛，首个输出后不切账号。并发预约覆盖首字节等待并在每条退出路径释放；已过期窗口不按无限紧迫度计分。保留 `pool.spec.ts` 的并发屏障和 `snapshots/session/subscription-pool-routing`。该策略包含在 `0.9.4-dsh017rc1.14` 制品中；部署须在 Host 停止后升级插件制品及版本固定记录。
@@ -651,6 +659,7 @@ Profile 注册 `dsh-sdk-process-raw` 和 `subagent_process`：SDK profile、独�
 | Legacy fixed-concurrency wrapper | Retired | Official `maxActiveSubagents` owns the active policy; do not mount the duplicate wrapper |
 | Declared model-menu row slot | Preserve | Keep the `conversation.input.model.row` declaration with its `ModelMenuRowOwnerProps` owner face, the seat registration's `children` entry, the seat's `renderSlot` call with the owner props, and the `data-model-menu-row` marker on a row's activating cell; `conversation.input.model` stays single-owner |
 | Model catalog refresh coalescing | Preserve | Keep warm readers answering from the retained same-generation catalog, one current plus one trailing reload with newest-invalidation-wins, the explicit read's catch-up loop (lifecycle check after every suspension, retry a failed replacement, reject rather than serve the replaced route), the resolver-owned catalog disposal that prevents follow-up work, and a Host reset that clears the superseded value before abandoning its response; do not restore one full-catalog reload per forwarded event |
+| Web fetch without destination restrictions | Preserve | Keep `web-fetch-http` on the global `fetch` with no address resolution, pinning, or private dispatcher; keep `credentials: 'omit'`, same-origin redirects, the URL length and embedded-credential rejection, and the byte/character/time/content-type caps; do not restore upstream's fail-closed public-address policy |
 
 -----
 
@@ -710,6 +719,8 @@ pnpm exec vitest run --config vitest.web.config.ts apps/web/tests/subagent-inter
 pnpm exec vitest run --config vitest.web.config.ts apps/web/tests/seeded-history.e2e.ts -t 'serves the projections baseline|lists the seeded session cold'
 
 pnpm exec vitest run packages/api/tool-session-message/tests/tool-session-message.spec.ts packages/api/tool-session-message/tests/loader-composition.spec.ts packages/core/tools/tests/gen-tool-catalog.spec.ts
+
+pnpm exec vitest run packages/web/web-fetch-http/tests packages/web/tool-web/tests
 
 pnpm exec vitest run --config vitest.web.config.ts apps/web/tests/session-message-composition.e2e.ts
 ```

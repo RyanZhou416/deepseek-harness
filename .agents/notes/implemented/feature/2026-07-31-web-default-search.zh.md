@@ -32,8 +32,8 @@ DeepSeek 搜索使用与官方会话适配器相同的 `DEEPSEEK_API_KEY` 凭据
 
 **提高 `dsh-tool-web` 的提供方无关超时。** 不予采纳：自定义提供方和部署有各自不同的延迟预期；这一部署预算应归已交付的 DeepSeek 组合所有。
 
-**在每个共享 base surface 上启用抓取。** 本文曾因各产品可能需要不同网络策略而否决该方案。已交付产品采用同一个完整工具集合后，[共享 base 的 Web 抓取默认值](../../archived/feature/2026-09-01-shared-base-web-fetch-default.md)取代了该否决；仅限公开目的地址与无需逐次审批的约束仍然有效。
+**在每个共享 base surface 上启用抓取。** 本文曾因各产品可能需要不同网络策略而否决该方案。已交付产品采用同一个完整工具集合后，[共享 base 的 Web 抓取默认值](../../archived/feature/2026-09-01-shared-base-web-fetch-default.md)取代了该否决；其中无需逐次审批的约束仍然有效，提供方不施加目标地址限制。
 
 ## 后果
 
-headless、完整 SDK、ACP 与仅使用 base 的自定义 profile 的原生模型请求都会携带 `web_search` 和 `web_fetch` schema 与指引；Web preset 会暴露同一对工具，PTC mode 还会通过 `run_code` 暴露它们。搜索会增加一次完整的辅助模型调用，并可能多次使用原生服务器工具；发起会话的日志仍可精确重建其不含密钥的请求。抓取会强制使用公开地址，并且无需逐次审批。Web 快照通道会启动已交付配置树，使用本地 Messages fixture（测试前置数据），经由真实 DeepSeek 提供方驱动一次回放的 `web_search` 调用，断言持久化的辅助请求与结构化结果，并固定最终浏览器呈现。共享 snapshot header 会固定通用的抓取 schema 与提示指引。组合冒烟测试会固定工具集合；构建后组合配置的转储固定已交付的一分钟搜索预算；提供方测试固定缺失、已存储及已轮换凭据的行为，以及字面值与环境变量的兼容性。
+headless、完整 SDK、ACP 与仅使用 base 的自定义 profile 的原生模型请求都会携带 `web_search` 和 `web_fetch` schema 与指引；Web preset 会暴露同一对工具，PTC mode 还会通过 `run_code` 暴露它们。搜索会增加一次完整的辅助模型调用，并可能多次使用原生服务器工具；发起会话的日志仍可精确重建其不含密钥的请求。抓取无需逐次审批，并且可以到达进程能到达的任何目标。Web 快照通道会启动已交付配置树，使用本地 Messages fixture（测试前置数据），经由真实 DeepSeek 提供方驱动一次回放的 `web_search` 调用，断言持久化的辅助请求与结构化结果，并固定最终浏览器呈现。共享 snapshot header 会固定通用的抓取 schema 与提示指引。组合冒烟测试会固定工具集合；构建后组合配置的转储固定已交付的一分钟搜索预算；提供方测试固定缺失、已存储及已轮换凭据的行为，以及字面值与环境变量的兼容性。

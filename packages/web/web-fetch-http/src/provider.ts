@@ -1,18 +1,14 @@
 /**
- * Safe HTTP(S) retrieval for `ctx.web`: validates and pins public IP destinations, follows
- * only same-origin redirects, enforces time and size limits, classifies and decodes text,
- * and leaves presentation to `@deepseek-ai/dsh-tool-web`. Requests carry no browser cookies
- * or ambient credentials.
+ * Anonymous HTTP(S) retrieval for `ctx.web` through the process transport and system network.
+ * Destination addresses are unrestricted, including loopback, private networks, and TUN mappings.
+ * The provider follows only same-origin redirects, bounds and decodes text, and leaves
+ * presentation to `@deepseek-ai/dsh-tool-web`. Requests omit browser cookies and credentials.
  * @module @deepseek-ai/dsh-web-fetch-http/provider
  */
 
 import { WebError } from '@deepseek-ai/dsh-web'
 import type { WebFetchBody, WebFetchProvider, WebFetchRequest, WebFetchResult } from '@deepseek-ai/dsh-web'
 import { deadline, timeoutOf } from '@deepseek-ai/dsh-timeout'
-import type { Response } from 'undici'
-import { proxyRouteFor } from '@deepseek-ai/dsh-http-proxy'
-import { isNonPublicIpLiteral, publicHttpNetwork } from './network.ts'
-import type { PublicAddress } from './network.ts'
 import { classifyContentType, decoderForCharset, isSameOrigin, parseCharset, validateFetchUrl } from './policy.ts'
 
 /** Resolved provider limits (the plugin's schemastery Config supplies defaults). */
@@ -29,26 +25,17 @@ export interface HttpFetchLimits {
   userAgent: string
 }
 
-/** Resolve one hostname to an already policy-validated address set. */
-export type HttpFetchResolver = (hostname: string, signal: AbortSignal) => Promise<PublicAddress[]>
-
 /** Stable id this provider registers under. */
 export const LOCAL_FETCH_PROVIDER_ID = 'http'
 
-/** The anonymous public HTTP(S) fetch provider. */
+/** Anonymous HTTP(S) retrieval without destination-address restrictions. */
 export class HttpFetchProvider implements WebFetchProvider {
   readonly id = LOCAL_FETCH_PROVIDER_ID
 
-  /**
-   * @param limits - resolved transport and response limits.
-   * @param resolveAddresses - resolver that rejects non-public destinations before returning.
-   */
-  constructor(
-    private readonly limits: HttpFetchLimits,
-    private readonly resolveAddresses: HttpFetchResolver = publicHttpNetwork.resolve,
-  ) {}
+  /** @param limits - resolved transport and response limits. */
+  constructor(private readonly limits: HttpFetchLimits) {}
 
-  /** No credentials to check — an anonymous public fetcher is always usable. */
+  /** No credentials to check — an anonymous fetcher is always usable. */
   available(): boolean {
     return true
   }
@@ -68,49 +55,37 @@ export class HttpFetchProvider implements WebFetchProvider {
     let redirectsFollowed = 0
 
     for (;;) {
-      const request = await this.requestOnce(currentUrl, signal)
-      const { response } = request
-      try {
-        if (isRedirectStatus(response.status)) {
-          // Enforce the redirect budget before resolving or validating the next hop.
-          if (redirectsFollowed >= this.limits.maxRedirects) {
-            await response.body?.cancel()
-            throw new WebError(`exceeded the maximum of ${this.limits.maxRedirects} redirects`, 'WEB_REDIRECT_BLOCKED')
-          }
-          const location = response.headers.get('location')
-          if (location === null) {
-            // A redirect status with no Location is not a usable resource. Cancel
-            // the (possibly streaming) body before throwing so no socket leaks.
-            await response.body?.cancel()
-            throw new WebError(`redirect response (HTTP ${response.status}) without a Location header`, 'WEB_PROVIDER_ERROR')
-          }
-          const target = resolveRedirect(location, currentUrl)
-          // Re-validate the target against the same transport hygiene a direct request gets: a
-          // redirect must not be a back door to a credentialed, non-http(s), or over-long URL
-          // that validateFetchUrl would reject.
-          let validatedTarget: URL
-          try {
-            validatedTarget = validateFetchUrl(target.toString())
-            if (!isSameOrigin(validatedTarget, currentUrl)) {
-              throw new WebError(
-                `cross-origin redirect to ${validatedTarget.origin} is not followed automatically; retry against that URL directly`,
-                'WEB_REDIRECT_BLOCKED',
-              )
-            }
-          } catch (error: unknown) {
-            await response.body?.cancel()
-            throw error
-          }
+      const response = await this.requestOnce(currentUrl, signal)
+      if (isRedirectStatus(response.status)) {
+        // Enforce the redirect budget before resolving or validating the next hop.
+        if (redirectsFollowed >= this.limits.maxRedirects) {
           await response.body?.cancel()
-          currentUrl = validatedTarget
-          redirectsFollowed++
-          continue
+          throw new WebError(`exceeded the maximum of ${this.limits.maxRedirects} redirects`, 'WEB_REDIRECT_BLOCKED')
         }
-
-        return await this.readBody(response, currentUrl, signal)
-      } finally {
-        await request.close()
+        const location = response.headers.get('location')
+        if (location === null) {
+          await response.body?.cancel()
+          throw new WebError(`redirect response (HTTP ${response.status}) without a Location header`, 'WEB_PROVIDER_ERROR')
+        }
+        let validatedTarget: URL
+        try {
+          const target = resolveRedirect(location, currentUrl)
+          validatedTarget = validateFetchUrl(target.toString())
+          if (!isSameOrigin(validatedTarget, currentUrl)) {
+            throw new WebError(
+              `cross-origin redirect to ${validatedTarget.origin} is not followed automatically; retry against that URL directly`,
+              'WEB_REDIRECT_BLOCKED',
+            )
+          }
+        } finally {
+          await response.body?.cancel()
+        }
+        currentUrl = validatedTarget
+        redirectsFollowed++
+        continue
       }
+
+      return await this.readBody(response, currentUrl, signal)
     }
   }
 
@@ -120,25 +95,8 @@ export class HttpFetchProvider implements WebFetchProvider {
       'accept': 'text/html,application/xhtml+xml,text/*;q=0.9,application/json;q=0.8',
     }
     try {
-      // A proxied hop skips public-address resolution and pinning: the proxy performs the origin's
-      // DNS, so there is no local address to validate, and pinning one would connect directly and
-      // bypass the proxy. A hop the policy bypasses — every loopback and every `NO_PROXY` entry —
-      // still takes the resolved-and-pinned path unchanged.
-      //
-      // One route decides both the branch and the dispatcher, so a mount or disposal between two
-      // reads cannot return a direct, unpinned agent for a URL this branch cleared as proxied.
-      //
-      // An IP literal the address checks would refuse never takes it. The proxy would resolve
-      // nothing — the address is already stated — so the shortcut would spend the checks for
-      // nothing and let a proxy on this machine reach the very service they keep out of reach.
-      const route = proxyRouteFor(url)
-      if (route.proxied && !isNonPublicIpLiteral(url.hostname)) {
-        return await publicHttpNetwork.requestVia(route.dispatcher, url, headers, signal)
-      }
-      const addresses = await this.resolveAddresses(url.hostname, signal)
-      return await publicHttpNetwork.request(url, addresses, headers, signal)
+      return await fetch(url, { method: 'GET', redirect: 'manual', credentials: 'omit', headers, signal })
     } catch (error: unknown) {
-      if (error instanceof WebError) throw error
       throw translateAbortOrNetwork(error, signal)
     }
   }
@@ -198,8 +156,7 @@ export class HttpFetchProvider implements WebFetchProvider {
     const chunks: Uint8Array[] = []
     let total = 0
     let truncatedByBytes = false
-    // Undici exposes response chunks as `any`; Fetch guarantees body chunks are Uint8Array.
-    const reader = response.body.getReader() as ReadableStreamDefaultReader<Uint8Array>
+    const reader = response.body.getReader()
     try {
       for (;;) {
         const { done, value } = await reader.read()

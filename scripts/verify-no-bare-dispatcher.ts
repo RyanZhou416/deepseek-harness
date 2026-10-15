@@ -3,14 +3,11 @@
  *
  * Node's built-in `fetch` routes through undici's global dispatcher, which `@deepseek-ai/dsh-http-proxy`
  * installs at launch. An explicitly supplied `dispatcher` overrides that global one, so a call site
- * that constructs `new Agent(...)` itself connects directly no matter what proxy the user configured
- * — the exact defect `web-fetch-http` carried before proxy support existed, where its DNS-pinning
- * agent silently bypassed every proxy.
+ * that constructs `new Agent(...)` itself connects directly regardless of the configured proxy.
  *
  * `proxyRouteFor(url)` from that package is the sanctioned way to ask where one request goes and to
- * get the transport that answer assumed. A call site that genuinely owns its transport — because it
- * carries per-request state the process-wide dispatcher cannot, as `web-fetch-http`'s address
- * pinning does — says so with the marker below.
+ * get the transport that answer assumed. A caller that must supply its own transport documents
+ * the reason with the exemption marker below.
  *
  * Discovery is syntax-aware, as `scripts/AGENTS.md` requires: a line-wise regex misses the
  * `{ dispatcher }` shorthand and a `new Alias(...)` whose import renamed `Agent`, and both bypass the

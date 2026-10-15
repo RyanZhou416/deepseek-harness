@@ -251,7 +251,7 @@ schema 校验会在执行前拒绝缺失或非数组的 `queries` 字段以及�
 - **没有覆盖整个批次的原生搜索计数器**：`searchMaxQueries` 限制 `ctx.web.search` 调用数，但提供方可以在每次调用内执行多次原生搜索；例如，配置了 `maxUses` 的以模型为后端的提供方最多可以执行 `searchMaxQueries × maxUses` 次原生搜索，`searchMaxResults` 只限制返回给调用方的组合来源。部署通过这些独立的消费方与提供方设置控制成本，因为服务不知道提供方内部的搜索计量单位。
 - **HTML→markdown 转换会省略无法安全表示的输入**——[turndown](https://github.com/mixmark-io/turndown) 会通过真实 DOM 转换至多 `fetchMaxOutputChars` 个源字符。512 层嵌套守卫与转换异常会产生固定省略标记，而不是返回原始 HTML；表格 `colspan` 仍不受支持，因为 GFM 无法表示跨列单元格（[已归档的依赖决策](../../../.agents/notes/archived/simplification/2026-07-26-turndown-for-tool-web-html-markdown.md)）。
 - **面向模型的接口有意保持精简，后续扩展暂缓**：`max_results` 保持为配置上限（不是模型参数），`web_fetch` 只接受 `url`（没有 `format`／`prompt`／LLM（大语言模型）摘要模式）；两项都列为 [seam Agent Note](../../../.agents/notes/implemented/architecture/2026-06-24-web-capability-seam.zh.md) 中的后续步骤。
-- **公开抓取不请求审批**——随产品交付的 `cordis`、`code` 与 `standard` preset 在所有 sandbox 和审批模式下公开 `web_fetch`。HTTP 提供方会阻止非公开目标，但模型仍可向公开 URL 发送数据。需要逐次确认的部署必须添加 `tools/pre-execute` 策略或禁用抓取。
+- **抓取不请求审批**——随产品交付的 `cordis`、`code` 与 `standard` preset 在所有 sandbox 和审批模式下公开 `web_fetch`。HTTP 提供方可以到达本进程能到达的任何目标，因此模型可以向某个 URL 发送数据，也可以读取本地网络上的服务。需要逐次确认或更窄可达范围的部署必须添加 `tools/pre-execute` 策略、限制网络出站，或禁用抓取。
 
 <a id="dev-note"></a>
 ### 开发备注

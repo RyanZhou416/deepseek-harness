@@ -1,5 +1,5 @@
 ---
-description: "The anonymous public HTTP(S) fetch backend for ctx.web: how deployments mount bounded, safe URL retrieval with same-origin redirects and text-only decoding."
+description: "The anonymous HTTP(S) fetch backend for ctx.web: how deployments mount bounded URL retrieval with same-origin redirects and text-only decoding."
 kind: "package-reference"
 ---
 
@@ -9,7 +9,7 @@ English | [中文](README.zh.md)
 
 ## Summary
 
-With `dsh-web-fetch-http`, the harness can fetch public HTTP(S) pages through the web service (`ctx.web`) and get their status code plus bounded, decoded content without sending credentials. Choose it when a composition needs safe retrieval with URL validation, public-address resolution, connection pinning, same-origin redirects, byte and character caps, and an explicit product `User-Agent`. It returns non-2xx responses as results rather than errors, and rejects non-public destinations, binary data, and unsupported content types. The model-facing `web_fetch` tool lives in `dsh-tool-web`, which renders this provider's bodies.
+With `dsh-web-fetch-http`, the harness can fetch HTTP(S) resources through the web service (`ctx.web`) and get their status code plus bounded, decoded content without sending credentials. Choose it for bounded retrieval with URL validation, same-origin redirects, byte caps, and an explicit product `User-Agent`. Requests go through the process's ordinary fetch transport, so any destination the process can reach, including loopback and private networks, is fetchable. It returns non-2xx responses as results rather than errors, and rejects binary data and unsupported content types. The model-facing `web_fetch` tool lives in `dsh-tool-web`, which renders this provider's bodies.
 
 ## Table of Contents
 
@@ -29,11 +29,11 @@ Mount the provider in a composition that already loads the web service; it regis
 
 ### When to choose it
 
-Choose this backend when a deployment must fetch public pages with bounded output and safe transport: no credentials are sent, every resolved address must be public, each connection is pinned to the validated answer set, redirects cannot escape the origin, and every response is capped.
+Choose this backend when a deployment must fetch HTTP(S) resources with bounded output: no credentials are sent, redirects cannot escape the origin, and every response is capped. Destination addresses are unrestricted, so `web_fetch` reaches loopback, private-network, and other hosts this process can reach; mount it only where the model may use that reach.
 
 ### Minimal configuration
 
-Load the web service and the provider; configurable limits have safe defaults and validate at plugin construction, so an invalid value fails loudly instead of building a provider with nonsensical caps. The URL security limit is fixed at 2,048 characters.
+Load the web service and the provider; configurable limits have safe defaults and validate at plugin construction, so an invalid value fails loudly instead of building a provider with nonsensical caps. The URL length limit is fixed at 2,048 characters.
 
 ```yaml
 - name: '@deepseek-ai/dsh-web'
@@ -52,7 +52,7 @@ The generated [configuration catalog](../../../docs/config-catalog.md#deepseek-a
 
 ### What a fetch returns
 
-A successful call yields a `WebFetchResult`: the final URL after allowed redirects, the HTTP status code, a decoded body classified as `html` or `text`, and a `truncated` flag. A non-2xx response is a result, not an error — the status code is part of the fetched resource state; `WebError` is reserved for failures to safely retrieve or represent the resource.
+A successful call yields a `WebFetchResult`: the final URL after allowed redirects, the HTTP status code, a decoded body classified as `html` or `text`, and a `truncated` flag. A non-2xx response is a result, not an error — the status code is part of the fetched resource state; `WebError` is reserved for failures to retrieve or represent the resource.
 
 ```text
 const page = await ctx.web.fetch({ url: 'https://example.com' })
@@ -61,7 +61,7 @@ const page = await ctx.web.fetch({ url: 'https://example.com' })
 
 ### Transport behavior
 
-The provider keeps requests anonymous and bounded: it accepts only `http:` and `https:` URLs without embedded credentials and rejects URLs over 2,048 characters. It resolves each hostname once, rejects the complete result if any IPv4 or IPv6 address is not public unicast, and pins the connection to that validated set. IPv6 checks discover the active DNS64 prefix and reject translations to non-public IPv4. Each same-origin redirect repeats resolution and pinning; cross-origin redirects fail and require a fresh call. The provider also enforces byte, character, hop, and time caps, rejects unsupported content types, and sends an explicit product `User-Agent`.
+The provider keeps requests anonymous and bounded: it accepts only `http:` and `https:` URLs without embedded credentials and rejects URLs over 2,048 characters. It sends one `GET` through the process's global `fetch` with credentials omitted, so routing follows the configured HTTP proxy or a system TUN route. The provider never resolves, classifies, or filters destination addresses: loopback, private, and link-local hosts are as reachable as any other. Each same-origin redirect is validated again before the next hop; cross-origin redirects fail and require a fresh call. The provider also enforces byte, character, hop, and time caps, rejects unsupported content types, and sends an explicit product `User-Agent`.
 
 ### Failures and recovery
 
@@ -81,7 +81,7 @@ This section explains the design decisions behind the provider; the observable b
 
 The package is built on one separation and one layered timeout:
 
-- **Safe retrieval vs. presentation.** This provider owns URL validation, public-address enforcement, connection pinning, HTTP transport, redirect policy, caps, charset decoding, and binary rejection; `dsh-tool-web` owns HTML→markdown and truncation formatting. A non-2xx response is data, not failure.
+- **Retrieval vs. presentation.** This provider owns URL validation, HTTP transport, redirect policy, caps, charset decoding, and binary rejection; `dsh-tool-web` owns HTML→markdown and truncation formatting. A non-2xx response is data, not failure.
 - **Two timeout layers.** The provider's `timeoutMs` is a resource backstop for direct `ctx.web.fetch()` callers; the model-facing tool-call budget belongs to `dsh-tool-call-timeout-policy`, which arms `exec.signal`. When the outer deadline fires first the provider reports `WEB_ABORTED` and the policy replaces it with `TOOL_TIMEOUT`; `WEB_FETCH_TIMEOUT` therefore identifies a direct service caller whose provider budget elapsed.
 
 ### Source map
@@ -89,14 +89,13 @@ The package is built on one separation and one layered timeout:
 | File | Role |
 |---|---|
 | [`src/index.ts`](src/index.ts) | Plugin entry: config schema, limit validation, provider registration |
-| [`src/provider.ts`](src/provider.ts) | The `HttpFetchProvider`: pinned transport, redirect following, capped reads, charset decoding |
-| [`src/network.ts`](src/network.ts) | Public-address resolution, DNS64 discovery, and connection pinning |
+| [`src/provider.ts`](src/provider.ts) | The `HttpFetchProvider`: global-fetch transport, redirect following, capped reads, charset decoding |
 | [`src/policy.ts`](src/policy.ts) | URL validation, same-origin checks, content-type classification, charset parsing |
 | — | No runtime invariant companion is published; this package exposes no independent event sequence or mutable data relation beyond contracts enforced at its owning seam. |
 
 ### Read path
 
-A fetch validates the URL, resolves the hostname once, rejects the complete answer set when any address is not public, and pins the connection to the accepted addresses. It repeats that check for each same-origin redirect; a cross-origin redirect or non-public target fails before response bytes are accepted. The final response is classified by `Content-Type`, decoded from its declared charset, and read under the byte cap; the decoded text is then truncated to the character cap.
+A fetch validates the URL, then sends one global `fetch` GET with credentials omitted and the product `User-Agent`. The destination address is not inspected, so loopback and private hosts connect through the process's own network. Every same-origin redirect re-runs URL validation before the next hop; a cross-origin redirect fails. The final response is classified by `Content-Type`, decoded from its declared charset, and read under the byte cap; the decoded text is then truncated to the character cap.
 
 </details>
 
@@ -132,6 +131,7 @@ No direct invalidation; the named consumer owns any request-prefix changes.
 
 These limits define when the provider is unsafe or a poor fit. They are current package constraints.
 
+- **Destinations are unrestricted** — the provider does not resolve, classify, or filter destination addresses, so `web_fetch` reaches loopback, private, link-local, and cloud-metadata endpoints this process can reach. Deployments that need a narrower policy must enforce it outside this package, for example with a `tools/pre-execute` policy or a network-level egress rule; the provider offers no address mode and no allowlist.
 - **Only textual content decodes** — html/xhtml and `text/*` plus JSON/XML families; a missing `Content-Type` or any binary type throws `WEB_UNSUPPORTED_CONTENT_TYPE`, and text-extractable PDF decoding is named deferred work.
 - **Charset comes only from the `Content-Type` header** (UTF-8 default) — an HTML `<meta charset>` declaration is ignored, and a declared-but-unrecognized charset label throws rather than falling back.
 

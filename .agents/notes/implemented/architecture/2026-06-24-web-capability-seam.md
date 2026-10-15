@@ -6,7 +6,7 @@ English | [中文](2026-06-24-web-capability-seam.zh.md)
 
 ## Problem
 
-The harness needs model-facing web tools without binding the model contract to one vendor's API shape. Search is the immediate pressure point: supporting both Exa search and Perplexity search from the start — two deliberately different provider shapes (Exa returns a flat `results[]` of `{title, url, highlights, publishedDate}`; Perplexity returns a generated answer plus citations) — is what proves the normalized web contract does not just mirror one vendor. Fetch is a separate operation: an anonymous public HTTP(S) fetch backend has transport, security, redirect, decoding, and size-limit concerns that are not the same as provider-backed search.
+The harness needs model-facing web tools without binding the model contract to one vendor's API shape. Search is the immediate pressure point: supporting both Exa search and Perplexity search from the start — two deliberately different provider shapes (Exa returns a flat `results[]` of `{title, url, highlights, publishedDate}`; Perplexity returns a generated answer plus citations) — is what proves the normalized web contract does not just mirror one vendor. Fetch is a separate operation: an anonymous HTTP(S) fetch backend has transport, redirect, decoding, and size-limit concerns that are not the same as provider-backed search.
 
 The model-facing API must stay stable while backends change. A search provider swap should not change how the model asks for a query, and a fetch implementation swap should not change how the model asks for a URL. Conversely, a provider package should not expose its own model-facing tool schema just because it has extra provider-specific knobs.
 
@@ -199,7 +199,7 @@ Full page retrieval remains the job of `web_fetch(url)`. Search snippets are dis
 
 ## Fetch request and result schema
 
-The `web_fetch` implementation is an anonymous public HTTP(S) fetch provider, `http`. It fetches bytes from a concrete URL, resolves and pins public destinations, applies the transport hygiene below, decodes textual content, and returns only the minimal model-useful result: final URL, status code, body, and truncation. It carries no browser cookies, editor credentials, git credentials, internal auth tokens, or implicit access to private services.
+The `web_fetch` implementation is an anonymous HTTP(S) fetch provider, `http`. It fetches bytes from a concrete URL through the process's ordinary `fetch` transport, applies the transport hygiene below, decodes textual content, and returns only the minimal model-useful result: final URL, status code, body, and truncation. It carries no browser cookies, editor credentials, git credentials, or internal auth tokens, and it adds no destination policy of its own.
 
 The seam request stays smaller than OpenCode's model-facing tool:
 
@@ -207,7 +207,7 @@ The seam request stays smaller than OpenCode's model-facing tool:
 
 The seam request deliberately does not include a per-call timeout, `format`, `prompt`, or provider-specific extraction controls. Cancellation is the direct optional execution signal, while the fetch provider owns one deployment-configured timeout backstop. `format` is a presentation decision over a fetched resource; `prompt` is a higher-level LLM summarization instruction; extraction APIs such as Firecrawl, Exa, Tavily, or Parallel may not expose a concrete HTTP response. If the product later needs provider-backed page extraction, that is a separate `web_extract` capability or a deliberate widening of this seam — extract semantics are never smuggled into `web_fetch` by making every HTTP field optional.
 
-HTTP status is part of the fetched resource state, not automatically a tool failure. A successful network fetch of a `404` or `500` response returns `WebFetchResult` with the status code and a bounded decoded body when the content type is supported. `WebError` is for failures to safely retrieve or represent the resource: invalid or blocked URL, redirect policy violation, timeout, abort, response too large, unsupported content type, provider failure, or network failure.
+HTTP status is part of the fetched resource state, not automatically a tool failure. A successful network fetch of a `404` or `500` response returns `WebFetchResult` with the status code and a bounded decoded body when the content type is supported. `WebError` is for failures to retrieve or represent the resource: invalid URL, rejected URL credentials, redirect policy violation, timeout, abort, response too large, unsupported content type, provider failure, or network failure.
 
 ```ts
 export interface WebFetchRequest {
@@ -230,19 +230,18 @@ export type WebFetchBody =
 
 `WebFetchBody` is a closed discriminated union because body kinds require coordinated changes to the seam, provider, and tool rather than independent plugin extension. Exhaustive switches make a new kind fail compilation at every renderer until handled. Separate object arms leave room for kind-specific fields.
 
-The provider owns safe resource retrieval: URL validation, HTTP transport, redirect policy, timeout, abort propagation, byte caps, charset decoding, content-type classification, and binary rejection. `dsh-tool-web` owns presentation: HTML-to-markdown, HTML-to-text, truncation formatting for the model, and future summaries.
+The provider owns resource retrieval: URL validation, HTTP transport, redirect policy, timeout, abort propagation, byte caps, charset decoding, content-type classification, and binary rejection. `dsh-tool-web` owns presentation: HTML-to-markdown, HTML-to-text, truncation formatting for the model, and future summaries.
 
 The fetch provider's resource controls:
 
 - Only `http:` and `https:` URLs are accepted; credentials in URLs are rejected.
-- A literal address or the complete result of one hostname lookup must contain only globally reachable unicast IPv4 or IPv6 destinations. IPv6 resolution also discovers the active DNS64 prefix and rejects NAT64 addresses that translate to non-public IPv4. Loopback, private, link-local, carrier-grade NAT, multicast, reserved, transition, translation, and private IPv4-mapped IPv6 addresses are rejected.
-- The request retains that validated address set in an Undici lookup callback instead of resolving the hostname again. The original hostname remains the HTTP Host and TLS SNI value, while DNS rebinding cannot replace the connection destination after validation.
+- The request goes through the process's global `fetch` with credentials omitted, so routing follows the configured proxy environment or a system TUN route, and the destination is never resolved, classified, or filtered here. Loopback, private, link-local, and cloud-metadata hosts are reachable wherever the process's network reaches them; [FORK_MAINTENANCE.md](../../../../FORK_MAINTENANCE.md) owns that exposure statement and its preservation rule.
 - Maximum URL length, response byte cap, decoded body character cap, timeout, and redirect hop cap are enforced.
 - Abort signals propagate through network fetches and expensive decoding.
-- Only same-origin redirects are followed automatically; each followed hop performs a fresh public-address lookup and pins its own connection. A cross-origin redirect fails with `WEB_REDIRECT_BLOCKED`, requiring a fresh tool call and fresh public-address validation. (Claude Code's WebFetch uses this same model — it does not auto-follow a cross-host redirect; it returns the redirect target to the model for a fresh call.)
+- Only same-origin redirects are followed automatically, and each followed hop re-validates the target URL against the same length, scheme, and credential rules. A cross-origin redirect fails with `WEB_REDIRECT_BLOCKED`, requiring a fresh tool call. (Claude Code's WebFetch uses this same model — it does not auto-follow a cross-host redirect; it returns the redirect target to the model for a fresh call.)
 - Requests carry an explicit product user agent rather than silently impersonating a browser.
 
-The provider rejects an entire DNS answer set when any address is not public instead of silently filtering the unsafe members. This fail-closed rule prevents connection-family selection or fallback from reaching an address that did not satisfy the public-network policy.
+The provider deliberately performs no address classification: these deployments must reach loopback, private-network, and TUN-translated destinations, so `WEB_BLOCKED_URL` is raised only for URL credentials. [Web fetch reaches any destination the process can](2026-10-11-web-fetch-unrestricted-destinations.md) owns that decision and supersedes this note's address-classification rule; the rest of this note stays current.
 
 ## Tool consumer behavior
 
@@ -308,19 +307,19 @@ Rejected for the first version. Those providers often return extracted or summar
 
 ### Mirror Claude Code's `url + prompt` WebFetch shape
 
-Rejected for the seam. `prompt` turns fetch into LLM summarization and couples public-web retrieval to a model provider. The harness seam should fetch and decode deterministically; `dsh-tool-web` can later offer summaries as a presentation mode without making `ctx.web` depend on `ctx.llm`.
+Rejected for the seam. `prompt` turns fetch into LLM summarization and couples web retrieval to a model provider. The harness seam should fetch and decode deterministically; `dsh-tool-web` can later offer summaries as a presentation mode without making `ctx.web` depend on `ctx.llm`.
 
 ### Validate DNS and then call an ordinary fetch
 
-Rejected because an ordinary fetch resolves the hostname again when it opens the connection. An attacker can return a public address during validation and a private address during the second lookup. Passing the validated answer set through the connection's lookup callback closes that rebinding interval while preserving hostname-based HTTP and TLS behavior.
+Rejected as a half-measure. An ordinary fetch resolves the hostname again when it opens the connection, so validating an address set and then letting fetch resolve it would leave a rebinding interval open; passing the validated answer set through the connection's lookup callback would close that interval while preserving hostname-based HTTP and TLS behavior. The shipped provider applies no address policy at all, so neither mechanism is present, and the destination-policy goal this comparison served is superseded by [Web fetch reaches any destination the process can](2026-10-11-web-fetch-unrestricted-destinations.md).
 
 ### Block private-looking hostname strings without pinning resolved addresses
 
-Rejected because hostname syntax does not establish the connection destination: an arbitrary public-looking name can resolve to loopback, a private range, or a cloud metadata address. Address classification belongs after resolution, and every address available to connection fallback must pass it.
+Rejected because hostname syntax does not establish the connection destination: an arbitrary public-looking name can resolve to loopback, a private range, or a cloud metadata address. A string check would promise a containment it cannot deliver. The destination-policy goal behind this rejection is superseded by [Web fetch reaches any destination the process can](2026-10-11-web-fetch-unrestricted-destinations.md).
 
-### Require per-call approval before public fetches
+### Require per-call approval before fetches
 
-Rejected for the shipped presets. Public-address validation blocks SSRF destinations, while per-call confirmation would interrupt ordinary browsing without controlling public data egress reliably: a model can reach the same public network through mounted shell tools. Deployments that require a dedicated confirmation step can add a `tools/pre-execute` policy or disable `web_fetch`.
+Rejected for the shipped presets. Per-call confirmation would interrupt ordinary browsing without controlling data egress reliably: a model can reach the same network through mounted shell tools. Deployments that require a dedicated confirmation step can add a `tools/pre-execute` policy or disable `web_fetch`.
 
 ## Consequences
 
@@ -332,7 +331,7 @@ Rejected for the shipped presets. Public-address validation blocks SSRF destinat
 
 **Provider state can change after startup.** A tool can be visible in the request assembled at step start and lose its provider before execution. The execution path resolves again and fails with a structured error.
 
-**Fetch is a network boundary, not just a read-only tool.** Public-address validation and connection pinning prevent `web_fetch` from reaching non-public destinations, but a model can still disclose data through a public URL and fetched text remains untrusted model input. The shipped `cordis`, `code`, and `standard` presets expose `web_fetch` in every sandbox and approval mode without per-call confirmation.
+**Fetch reaches whatever the process reaches, and is not a read-only tool.** The provider applies no address policy, so a model can disclose data through any reachable URL and read loopback, private-network, and cloud-metadata services this process can reach; fetched text remains untrusted model input. The shipped `cordis`, `code`, and `standard` presets expose `web_fetch` in every sandbox and approval mode without per-call confirmation, so a deployment that must restrict destinations enforces that outside `web_fetch`.
 
 **Large web content can damage context quality.** Providers enforce byte/character caps and report `truncated`; `tool-web` formats bounded model output with clear continuation or follow-up guidance.
 

@@ -82,7 +82,7 @@ interface WebFetchRequest {
 }
 ```
 
-HTTP 状态码是被抓取资源状态的一部分，不自动视为失败：即使一次成功的网络抓取收到 `404` 或 `500` 响应，也仍会产出一个 `WebFetchResult`，其中包含状态码和长度受限的已解码正文。`url` 是经过允许的重定向后的最终 URL。`WebError` 仅用于无法安全获取或表示资源的情况。
+HTTP 状态码是被抓取资源状态的一部分，不自动视为失败：即使一次成功的网络抓取收到 `404` 或 `500` 响应，也仍会产出一个 `WebFetchResult`，其中包含状态码和长度受限的已解码正文。`url` 是经过允许的重定向后的最终 URL。`WebError` 仅用于无法获取或表示资源的情况。
 
 ```ts type-equiv
 /**
@@ -128,7 +128,7 @@ type WebFetchBody =
 
 已交付的 Cordis、Code 与 Standard preset 会在所有 sandbox 和审批模式下暴露 `web_fetch`，无需逐次确认。文件 sandbox preset 不管辖 Web 网络访问。需要确认步骤的部署必须添加 `tools/pre-execute` 策略或禁用抓取。
 
-HTTP 提供方会解析每个实际请求，拒绝包括通过当前 DNS64 前缀抵达私有 IPv4 在内的非公开结果，固定已验证的地址集合，并在每次同源重定向时重复强制执行。跨源重定向需要新的工具调用和新的公开地址校验。这些检查会阻止通过 SSRF 访问非公开目的地址，但不会阻止模型把数据发送到公开 URL。
+HTTP 提供方通过进程的全局 `fetch` 发送每个请求，因此路由跟随已配置的 HTTP 代理或系统 TUN 路由。它校验 URL 形态（仅 HTTP(S)、不含内嵌凭据、长度有界），并且只跟随同源重定向，每一跳都重新校验。它不解析、分类或过滤目标地址，因此只要进程能到达，loopback、私有、link-local 与云 metadata 目标都可访问；需要更窄策略的部署必须在本包之外强制执行。这些请求自身不携带凭据，也不会阻止模型把数据发送到可到达的 URL。
 
 ## 错误
 
@@ -136,7 +136,7 @@ HTTP 提供方会解析每个实际请求，拒绝包括通过当前 DNS64 前�
 
 ## 服务
 
-`WebRuntime` 注册搜索与抓取提供方，以 `WEB_DUPLICATE_PROVIDER` 拒绝重复 id，并在执行时以结构化的选择错误解析提供方。本地抓取后端仅接受 HTTP(S)、拒绝凭证、对每个 hostname 只解析一次、拒绝包含任一非公开 IPv4／IPv6 目的地址或经当前前缀转换到非公开 IPv4 的 NAT64 地址的解析结果、把请求连接固定到已验证地址、对每一次同源重定向跳转重复这些校验、限制重定向次数、字节数、字符数和时间，并解码正文；展示由工具负责。
+`WebRuntime` 注册搜索与抓取提供方，以 `WEB_DUPLICATE_PROVIDER` 拒绝重复 id，并在执行时以结构化的选择错误解析提供方。本地抓取后端仅接受 HTTP(S)、拒绝凭证、限制 URL 长度、通过全局 `fetch` 发送一次省略凭据的 GET、对每一次同源重定向跳转重新校验、限制重定向次数、字节数、字符数和时间，并解码正文；展示由工具负责。
 
 <!-- BEGIN GENERATED cordis-surface (gen-cordis-catalog.ts) — do not edit between markers -->
 
