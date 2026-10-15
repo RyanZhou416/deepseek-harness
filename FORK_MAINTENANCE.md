@@ -84,6 +84,14 @@ The client module entry manager waits for graph updates queued during initial ac
 
 **Focused verification.** `pnpm exec vitest run packages/client/modules/tests packages/client/web/tests/boot-client.client.spec.ts` covers the loader lifecycle and the graph-update-during-activation regression. The regression must fail against the original startup implementation and pass with the queue drain.
 
+### Optional native AetherShell tools
+
+The fork-owned [AetherShell bundle](fork-plugins/dsh-plugin-aether-shell/README.md) adds operation discovery, positional JSON calls, structured pipelines, expression evaluation, owner-scoped native interpreter sessions and background jobs alongside the existing shell tools. It runs real host processes and shares the host filesystem; the DSH sandbox limits file writes and deletes rather than creating a virtual machine. It remains outside the official workspace and changes no Session format or agent loop.
+
+**Preservation rule.** Keep every interpreter invocation on the DSH subprocess and file-sandbox path with the calling Session's policy; never register a second `ctx.shell` or turn an access refusal into a retry through another shell. Preserve input-literal validation, complete-result limits, native-response error handling, discovery pagination and unload cancellation. Persistent handles own separate native processes, check policy before new requests, and await close on cancellation or policy change without replaying prior effects. Background jobs use the generic owner-fenced registry and retain raw output independently of the call that started them. The external interpreter is not redistributed. [Plugin maintenance](fork-plugins/dsh-plugin-aether-shell/FORK_MAINTENANCE.md) owns the detailed compatibility and cleanup rules.
+
+**Focused verification.** From the plugin directory run `pwsh -NoProfile -File scripts/run-local.ps1 typecheck`, `pwsh -NoProfile -File scripts/run-local.ps1 test` and `pwsh -NoProfile -File scripts/run-local.ps1 build`. The [recorded native-tools scenario](snapshots/session/aether-shell-native/snapshot.yml) and [session/job lifecycle scenario](snapshots/session/aether-shell-lifecycle/snapshot.yml) replay through the shipped headless profile; real-binary and Windows ACL tests verify the external interpreter and refused write effects separately from their protocol fixtures.
+
 ### Stable prompt boundary for the subscription wire
 
 `@deepseek-ai/dsh-system-prompt` gained an opt-in `stable` flag on section registrations and

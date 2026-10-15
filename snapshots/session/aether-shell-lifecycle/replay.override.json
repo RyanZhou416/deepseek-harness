@@ -1,0 +1,478 @@
+[
+  {
+    "kind": "chunks",
+    "chunks": [
+      {
+        "type": "block-start",
+        "index": 0,
+        "blockType": "tool-call"
+      },
+      {
+        "type": "tool-call-delta",
+        "index": 0,
+        "id": "call_session_open",
+        "name": "aether_session_open",
+        "argumentsDelta": "{\"name\":\"state\"}"
+      },
+      {
+        "type": "block-end",
+        "index": 0,
+        "block": {
+          "type": "tool-call",
+          "id": "call_session_open",
+          "name": "aether_session_open",
+          "arguments": "{\"name\":\"state\"}"
+        }
+      },
+      {
+        "type": "usage",
+        "usage": {
+          "inputTokens": 1200,
+          "outputTokens": 8
+        }
+      },
+      {
+        "type": "finish",
+        "reason": {
+          "kind": "tool-calls"
+        }
+      }
+    ]
+  },
+  {
+    "kind": "chunks",
+    "chunks": [
+      {
+        "type": "block-start",
+        "index": 0,
+        "blockType": "tool-call"
+      },
+      {
+        "type": "tool-call-delta",
+        "index": 0,
+        "id": "call_session_state",
+        "name": "aether_session_eval",
+        "argumentsDelta": "{\"session_id\":\"{{fromRequest:(?:opened |\\\"session_id\\\":\\\")([0-9a-f-]{36})}}\",\"code\":\"let n = 41; n\"}"
+      },
+      {
+        "type": "block-end",
+        "index": 0,
+        "block": {
+          "type": "tool-call",
+          "id": "call_session_state",
+          "name": "aether_session_eval",
+          "arguments": "{\"session_id\":\"{{fromRequest:(?:opened |\\\"session_id\\\":\\\")([0-9a-f-]{36})}}\",\"code\":\"let n = 41; n\"}"
+        }
+      },
+      {
+        "type": "usage",
+        "usage": {
+          "inputTokens": 1240,
+          "outputTokens": 8
+        }
+      },
+      {
+        "type": "finish",
+        "reason": {
+          "kind": "tool-calls"
+        }
+      }
+    ]
+  },
+  {
+    "kind": "chunks",
+    "chunks": [
+      {
+        "type": "block-start",
+        "index": 0,
+        "blockType": "tool-call"
+      },
+      {
+        "type": "tool-call-delta",
+        "index": 0,
+        "id": "call_session_increment",
+        "name": "aether_session_eval",
+        "argumentsDelta": "{\"session_id\":\"{{fromRequest:(?:opened |\\\"session_id\\\":\\\")([0-9a-f-]{36})}}\",\"code\":\"n + 1\"}"
+      },
+      {
+        "type": "block-end",
+        "index": 0,
+        "block": {
+          "type": "tool-call",
+          "id": "call_session_increment",
+          "name": "aether_session_eval",
+          "arguments": "{\"session_id\":\"{{fromRequest:(?:opened |\\\"session_id\\\":\\\")([0-9a-f-]{36})}}\",\"code\":\"n + 1\"}"
+        }
+      },
+      {
+        "type": "usage",
+        "usage": {
+          "inputTokens": 1280,
+          "outputTokens": 8
+        }
+      },
+      {
+        "type": "finish",
+        "reason": {
+          "kind": "tool-calls"
+        }
+      }
+    ]
+  },
+  {
+    "kind": "chunks",
+    "chunks": [
+      {
+        "type": "block-start",
+        "index": 0,
+        "blockType": "tool-call"
+      },
+      {
+        "type": "tool-call-delta",
+        "index": 0,
+        "id": "call_session_lambda",
+        "name": "aether_session_eval",
+        "argumentsDelta": "{\"session_id\":\"{{fromRequest:(?:opened |\\\"session_id\\\":\\\")([0-9a-f-]{36})}}\",\"code\":\"let double = fn(x) => x * 2; double(21)\"}"
+      },
+      {
+        "type": "block-end",
+        "index": 0,
+        "block": {
+          "type": "tool-call",
+          "id": "call_session_lambda",
+          "name": "aether_session_eval",
+          "arguments": "{\"session_id\":\"{{fromRequest:(?:opened |\\\"session_id\\\":\\\")([0-9a-f-]{36})}}\",\"code\":\"let double = fn(x) => x * 2; double(21)\"}"
+        }
+      },
+      {
+        "type": "usage",
+        "usage": {
+          "inputTokens": 1320,
+          "outputTokens": 8
+        }
+      },
+      {
+        "type": "finish",
+        "reason": {
+          "kind": "tool-calls"
+        }
+      }
+    ]
+  },
+  {
+    "kind": "chunks",
+    "chunks": [
+      {
+        "type": "block-start",
+        "index": 0,
+        "blockType": "tool-call"
+      },
+      {
+        "type": "tool-call-delta",
+        "index": 0,
+        "id": "call_session_list",
+        "name": "aether_session_list",
+        "argumentsDelta": "{}"
+      },
+      {
+        "type": "block-end",
+        "index": 0,
+        "block": {
+          "type": "tool-call",
+          "id": "call_session_list",
+          "name": "aether_session_list",
+          "arguments": "{}"
+        }
+      },
+      {
+        "type": "usage",
+        "usage": {
+          "inputTokens": 1360,
+          "outputTokens": 8
+        }
+      },
+      {
+        "type": "finish",
+        "reason": {
+          "kind": "tool-calls"
+        }
+      }
+    ]
+  },
+  {
+    "kind": "chunks",
+    "chunks": [
+      {
+        "type": "block-start",
+        "index": 0,
+        "blockType": "tool-call"
+      },
+      {
+        "type": "tool-call-delta",
+        "index": 0,
+        "id": "call_job_start",
+        "name": "aether_job_start",
+        "argumentsDelta": "{\"code\":\"print(\\\"JOB_STARTED\\\"); 7\",\"label\":\"counter\"}"
+      },
+      {
+        "type": "block-end",
+        "index": 0,
+        "block": {
+          "type": "tool-call",
+          "id": "call_job_start",
+          "name": "aether_job_start",
+          "arguments": "{\"code\":\"print(\\\"JOB_STARTED\\\"); 7\",\"label\":\"counter\"}"
+        }
+      },
+      {
+        "type": "usage",
+        "usage": {
+          "inputTokens": 1400,
+          "outputTokens": 8
+        }
+      },
+      {
+        "type": "finish",
+        "reason": {
+          "kind": "tool-calls"
+        }
+      }
+    ]
+  },
+  {
+    "kind": "chunks",
+    "chunks": [
+      {
+        "type": "block-start",
+        "index": 0,
+        "blockType": "tool-call"
+      },
+      {
+        "type": "tool-call-delta",
+        "index": 0,
+        "id": "call_job_wait",
+        "name": "job_output",
+        "argumentsDelta": "{\"job_id\":\"aether-1\",\"wait\":true}"
+      },
+      {
+        "type": "block-end",
+        "index": 0,
+        "block": {
+          "type": "tool-call",
+          "id": "call_job_wait",
+          "name": "job_output",
+          "arguments": "{\"job_id\":\"aether-1\",\"wait\":true}"
+        }
+      },
+      {
+        "type": "usage",
+        "usage": {
+          "inputTokens": 1440,
+          "outputTokens": 8
+        }
+      },
+      {
+        "type": "finish",
+        "reason": {
+          "kind": "tool-calls"
+        }
+      }
+    ]
+  },
+  {
+    "kind": "chunks",
+    "chunks": [
+      {
+        "type": "block-start",
+        "index": 0,
+        "blockType": "tool-call"
+      },
+      {
+        "type": "tool-call-delta",
+        "index": 0,
+        "id": "call_session_close",
+        "name": "aether_session_close",
+        "argumentsDelta": "{\"session_id\":\"{{fromRequest:(?:opened |\\\"session_id\\\":\\\")([0-9a-f-]{36})}}\"}"
+      },
+      {
+        "type": "block-end",
+        "index": 0,
+        "block": {
+          "type": "tool-call",
+          "id": "call_session_close",
+          "name": "aether_session_close",
+          "arguments": "{\"session_id\":\"{{fromRequest:(?:opened |\\\"session_id\\\":\\\")([0-9a-f-]{36})}}\"}"
+        }
+      },
+      {
+        "type": "usage",
+        "usage": {
+          "inputTokens": 1480,
+          "outputTokens": 8
+        }
+      },
+      {
+        "type": "finish",
+        "reason": {
+          "kind": "tool-calls"
+        }
+      }
+    ]
+  },
+  {
+    "kind": "chunks",
+    "chunks": [
+      {
+        "type": "block-start",
+        "index": 0,
+        "blockType": "tool-call"
+      },
+      {
+        "type": "tool-call-delta",
+        "index": 0,
+        "id": "call_job_fail",
+        "name": "aether_job_start",
+        "argumentsDelta": "{\"code\":\"no_such_builtin()\",\"label\":\"failing\"}"
+      },
+      {
+        "type": "block-end",
+        "index": 0,
+        "block": {
+          "type": "tool-call",
+          "id": "call_job_fail",
+          "name": "aether_job_start",
+          "arguments": "{\"code\":\"no_such_builtin()\",\"label\":\"failing\"}"
+        }
+      },
+      {
+        "type": "usage",
+        "usage": {
+          "inputTokens": 1520,
+          "outputTokens": 8
+        }
+      },
+      {
+        "type": "finish",
+        "reason": {
+          "kind": "tool-calls"
+        }
+      }
+    ]
+  },
+  {
+    "kind": "chunks",
+    "chunks": [
+      {
+        "type": "block-start",
+        "index": 0,
+        "blockType": "tool-call"
+      },
+      {
+        "type": "tool-call-delta",
+        "index": 0,
+        "id": "call_job_fail_read",
+        "name": "job_output",
+        "argumentsDelta": "{\"job_id\":\"aether-2\",\"wait\":true}"
+      },
+      {
+        "type": "block-end",
+        "index": 0,
+        "block": {
+          "type": "tool-call",
+          "id": "call_job_fail_read",
+          "name": "job_output",
+          "arguments": "{\"job_id\":\"aether-2\",\"wait\":true}"
+        }
+      },
+      {
+        "type": "usage",
+        "usage": {
+          "inputTokens": 1560,
+          "outputTokens": 8
+        }
+      },
+      {
+        "type": "finish",
+        "reason": {
+          "kind": "tool-calls"
+        }
+      }
+    ]
+  },
+  {
+    "kind": "chunks",
+    "chunks": [
+      {
+        "type": "block-start",
+        "index": 0,
+        "blockType": "tool-call"
+      },
+      {
+        "type": "tool-call-delta",
+        "index": 0,
+        "id": "call_job_fail_kill",
+        "name": "job_kill",
+        "argumentsDelta": "{\"job_id\":\"aether-2\"}"
+      },
+      {
+        "type": "block-end",
+        "index": 0,
+        "block": {
+          "type": "tool-call",
+          "id": "call_job_fail_kill",
+          "name": "job_kill",
+          "arguments": "{\"job_id\":\"aether-2\"}"
+        }
+      },
+      {
+        "type": "usage",
+        "usage": {
+          "inputTokens": 1600,
+          "outputTokens": 8
+        }
+      },
+      {
+        "type": "finish",
+        "reason": {
+          "kind": "tool-calls"
+        }
+      }
+    ]
+  },
+  {
+    "kind": "chunks",
+    "chunks": [
+      {
+        "type": "block-start",
+        "index": 0,
+        "blockType": "text"
+      },
+      {
+        "type": "text-delta",
+        "index": 0,
+        "text": "DONE"
+      },
+      {
+        "type": "block-end",
+        "index": 0,
+        "block": {
+          "type": "text",
+          "text": "DONE"
+        }
+      },
+      {
+        "type": "usage",
+        "usage": {
+          "inputTokens": 1640,
+          "outputTokens": 2
+        }
+      },
+      {
+        "type": "finish",
+        "reason": {
+          "kind": "stop"
+        }
+      }
+    ]
+  }
+]

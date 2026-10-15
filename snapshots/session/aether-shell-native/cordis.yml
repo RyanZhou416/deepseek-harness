@@ -1,0 +1,21 @@
+# Composition owner for the AetherShell scenario. The scenario is authored, so this
+# live twin is never recorded; it exists so the composition has exactly one owner and
+# so the replay patch's plugin wiring has a reviewable counterpart.
+- insert:
+    - id: aether-shell
+      name: '../../../fork-plugins/dsh-plugin-aether-shell/src/index.ts'
+      config:
+        executable: !!js process.execPath
+        executableArgs:
+          # The protocol fixture sits beside the selected Session fixture, so the
+          # sibling path is derived from the harness's own absolute fixture path.
+          - !!js 'process.env.DSH_SNAPSHOT_FILE.replace(/[^\\/]+$/, "aether-protocol-fixture.mjs")'
+
+# The recorded scenario exercises the native AetherShell tools only. Both shipped
+# shell tools are disabled so the pinned header and prompt do not depend on the
+# host's shell dialect (tool-pwsh on Windows, tool-bash elsewhere).
+- id: tool-bash
+  disabled: true
+
+- id: tool-pwsh
+  disabled: true

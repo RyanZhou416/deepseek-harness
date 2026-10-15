@@ -55,6 +55,10 @@ native/system/test/bin/
 *-run.txt
 report.*.json
 
+# AetherShell local audit state and atomic-write scratch files; never source.
+/.ae/
+/.aether_tmp_*
+
 # Local team state and Session Browser deployment receipts; retain files locally.
 /.agent-teams/
 /fork-runtime/session-browser-deploy/releases/

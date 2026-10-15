@@ -1,0 +1,4 @@
+lib/
+.artifacts/
+node_modules/
+*.tgz

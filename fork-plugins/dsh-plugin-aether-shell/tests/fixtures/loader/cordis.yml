@@ -1,0 +1,38 @@
+# Minimal AetherShell composition: the real app's Loader path over the real
+# tool, subprocess, sandbox-policy, and session-projection packages, with the
+# deployment's standing `danger-full-access` policy. The interpreter and its
+# fixture argv come from the spec's environment so one committed file describes
+# both the composition and the deterministic stand-in. `dsh-sandbox-local` is
+# mapped to the test's passthrough provider because the platform runner needs a
+# host-specific native backend; no confinement decision is exercised here.
+#
+# The Loader suite copies this file into a private directory before loading it:
+# unloading a plugin makes the Loader write `disabled: true` back into whichever
+# file it read, so this committed file must never be the one it boots.
+- id: system-prompt
+  name: '@deepseek-ai/dsh-system-prompt'
+
+- id: tools
+  name: '@deepseek-ai/dsh-tools'
+
+- id: session-projections
+  name: '@deepseek-ai/dsh-session-projection'
+
+- id: sandbox-policy
+  name: '@deepseek-ai/dsh-sandbox-policy'
+  config:
+    mode: danger-full-access
+
+- id: sandbox
+  name: '@deepseek-ai/dsh-sandbox-local'
+
+- id: subprocess
+  name: '@deepseek-ai/dsh-subprocess-local'
+
+- id: aether-shell
+  name: '@ryanzhou416/dsh-plugin-aether-shell'
+  config:
+    executable: !!js process.env.DSH_AETHER_INTERPRETER
+    # The expression is quoted: the `!!js` tag applies to a scalar node, so an
+    # unquoted flow sequence makes the whole config file fail to load.
+    executableArgs: !!js "[process.env.DSH_AETHER_FIXTURE]"

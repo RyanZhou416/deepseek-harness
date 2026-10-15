@@ -1,0 +1,49 @@
+# Keyless replay keeps the shipped headless composition and replaces only the
+# model adapter, the external AetherShell interpreter, and the local jobs
+# provider. The plugin, the subprocess seam, the sandbox policy, and session
+# persistence all stay real; the scenario-local protocol fixture stands in for the
+# binary this corpus cannot install, and the observing jobs provider publishes
+# each wait registration so that fixture can hold the recorded job open until the
+# model's own wait reads it.
+- id: llm-deepseek
+  name: '@deepseek-ai/dsh-llm-deepseek'
+  disabled: true
+
+- insert:
+    - id: aether-shell
+      name: '../../../fork-plugins/dsh-plugin-aether-shell/src/index.ts'
+      config:
+        executable: !!js process.execPath
+        executableArgs:
+          - !!js 'process.env.DSH_SNAPSHOT_FILE.replace(/[^\\/]+$/, "aether-lifecycle-fixture.mjs")'
+          # Trusted control root: the run's isolated DSH home plus the directory
+          # the observing jobs provider publishes wait registrations into.
+          - !!js 'process.env.DSH_HOME + "/aether-fixture-wait"'
+
+    - id: jobs-wait-observer
+      name: './jobs-wait-observer.mjs'
+      config:
+        terminalJobRetentionMs: 3600000
+        maxRetainedTerminalJobsPerOwner: 100
+
+    - id: llm-replay
+      name: '@deepseek-ai/dsh-llm-replay'
+      config:
+        providers:
+          - id: deepseek-official
+            name: DeepSeek
+            models:
+              - id: deepseek-v4-flash
+              - id: deepseek-v4-pro
+
+# The shipped local provider is disabled in favor of the observing subclass
+# above: the subclass registers the same `jobs` service and keeps every registry
+# semantic, so only one provider is ever present.
+- id: jobs
+  disabled: true
+
+- id: tool-bash
+  disabled: true
+
+- id: tool-pwsh
+  disabled: true
