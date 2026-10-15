@@ -61,3 +61,4 @@ report.*.json
 /fork-runtime/session-browser-deploy/current.json
 /fork-runtime/session-browser-deploy/state.json
 /fork-runtime/session-browser-deploy/preparation-evidence.json
+/fork-runtime/session-browser-deploy/DO-NOT-DELETE.txt
