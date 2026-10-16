@@ -66,3 +66,6 @@ report.*.json
 /fork-runtime/session-browser-deploy/state.json
 /fork-runtime/session-browser-deploy/preparation-evidence.json
 /fork-runtime/session-browser-deploy/DO-NOT-DELETE.txt
+
+# Local hash-bound subscription maintenance payload, backups, and build receipts.
+/fork-runtime/subscriptions-maintenance/
