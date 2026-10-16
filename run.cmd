@@ -8,7 +8,7 @@ set "DSH_DIAGNOSTICS=%DSH_HOME%\diagnostics"
 if not exist "%DSH_DIAGNOSTICS%" mkdir "%DSH_DIAGNOSTICS%"
 if errorlevel 1 goto :failed
 
-set "DSH_RUNTIME_NODE_OPTIONS=--max-old-space-size=16384 --report-on-fatalerror --report-uncaught-exception --report-exclude-env --report-exclude-network --report-directory=%DSH_DIAGNOSTICS%"
+set "DSH_RUNTIME_NODE_OPTIONS=--max-old-space-size=32768 --report-on-fatalerror --report-uncaught-exception --report-exclude-env --report-exclude-network --report-directory=%DSH_DIAGNOSTICS%"
 if defined NODE_OPTIONS (
   set "NODE_OPTIONS=%NODE_OPTIONS% %DSH_RUNTIME_NODE_OPTIONS%"
 ) else (
@@ -24,7 +24,9 @@ call "%~dp0scripts\fork-windows-pnpm.cmd" --version
 if errorlevel 1 goto :failed
 
 set "DSH_STEP=starting DeepSeek Harness"
-call "%~dp0scripts\fork-windows-pnpm.cmd" dsh web --patch "%~dp0fork-runtime\diagnostics\cordis.patch.yml"
+set "DSH_MEMORY_PATCH_ARGS="
+if exist "%DSH_HOME%\profiles\web\memory-limits.patch.yml" set DSH_MEMORY_PATCH_ARGS=--patch "%DSH_HOME%\profiles\web\memory-limits.patch.yml"
+call "%~dp0scripts\fork-windows-pnpm.cmd" dsh web --patch "%~dp0fork-runtime\diagnostics\cordis.patch.yml" %DSH_MEMORY_PATCH_ARGS%
 if errorlevel 1 goto :failed
 exit /b 0
 

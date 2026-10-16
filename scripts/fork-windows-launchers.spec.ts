@@ -130,6 +130,40 @@ describe('Windows fork launchers', () => {
     ])
   })
 
+  it.skipIf(process.platform !== 'win32').each([false, true])(
+    'starts with a 32 GiB heap and an optional next-launch memory overlay (overlay=%s)', (withOverlay) => {
+      const { root, bin, log, entry } = fixture(false)
+      mkdirSync(join(root, `dsh-pnpm-${pnpmVersion}`, 'node_modules', 'pnpm', 'bin'), { recursive: true })
+      writeFileSync(entry, [
+        "import { appendFileSync } from 'node:fs'",
+        "import { getHeapStatistics } from 'node:v8'",
+        `if (process.argv[2] === '--version') console.log(${JSON.stringify(pnpmVersion)})`,
+        'else appendFileSync(process.env.DSH_TEST_LOG, JSON.stringify({',
+        '  args: process.argv.slice(2), heapLimit: getHeapStatistics().heap_size_limit,',
+        '}) + "\\n")',
+        '',
+      ].join('\n'))
+      const profile = join(root, 'dsh-home', 'profiles', 'web')
+      const overlay = join(profile, 'memory-limits.patch.yml')
+      if (withOverlay) {
+        mkdirSync(profile, { recursive: true })
+        writeFileSync(overlay, '- id: local-memory-watchdog\n  config:\n    rssRestartMiB: 40960\n')
+      }
+
+      const result = launch(runLauncher, root, bin, log)
+
+      expect(result.signal, result.stderr || result.stdout).toBeNull()
+      expect(result.status, result.stderr || result.stdout).toBe(0)
+      const captured = JSON.parse(readFileSync(log, 'utf8')) as { args: string[]; heapLimit: number }
+      expect(captured.args).toEqual([
+        'dsh', 'web', '--patch', join(repositoryRoot, 'fork-runtime', 'diagnostics', 'cordis.patch.yml'),
+        ...withOverlay ? ['--patch', overlay] : [],
+      ])
+      expect(captured.heapLimit).toBeGreaterThanOrEqual(32 * 1024 ** 3)
+      expect(captured.heapLimit).toBeLessThan(33 * 1024 ** 3)
+    },
+  )
+
   it.skipIf(process.platform !== 'win32')('keeps pnpm started by installation work off the broken Corepack shim', () => {
     const { root, bin, log } = fixture(false)
     writeFileSync(join(root, 'pnpm-stub.mjs'), [
