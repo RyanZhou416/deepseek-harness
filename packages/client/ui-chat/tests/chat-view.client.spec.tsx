@@ -2660,6 +2660,33 @@ describe('ChatView', () => {
     expect(answer?.hasAttribute('data-turn-process-answer')).toBe(false)
   })
 
+  it('keeps both streaming and completed replies eligible for translation', () => {
+    const h = makeHarness({
+      nodes: [user(1, 'question'), assistant(2, 'earlier reply', 1, 1)],
+      partial: { turn: 1, step: 2, blocks: [{ kind: 'text', text: 'growing reply' }] },
+      running: true,
+    })
+    const view = render(<h.ChatView {...h.props} />)
+    const row = view.getByText('growing reply').closest('[data-chat-flow-kind="assistant-step"]')!
+    expect(row.getAttribute('translate')).toBeNull()
+    expect(row.classList.contains('notranslate')).toBe(false)
+    expect(view.getByText('earlier reply').closest('[translate="no"]')).toBeNull()
+    expect(view.getByText('question').closest('[translate="no"]')).toBeNull()
+
+    act(() => { h.setChat({ partial: { turn: 1, step: 2, blocks: [{ kind: 'text', text: 'growing reply updated' }] } }) })
+    expect(view.getByText('growing reply updated').closest('[data-chat-flow-kind="assistant-step"]')).toBe(row)
+    expect(row.getAttribute('translate')).toBeNull()
+
+    act(() => { h.set({
+      nodes: [user(1, 'question'), assistant(2, 'earlier reply', 1, 1), assistant(4, 'complete reply', 1, 2)],
+      partial: null, running: false, turnEnds: new Map([[1, 5]]),
+    }) })
+    const settledRow = view.getByText('complete reply').closest('[data-chat-flow-kind="assistant-step"]')!
+    expect(settledRow.getAttribute('translate')).toBeNull()
+    expect(settledRow.classList.contains('notranslate')).toBe(false)
+    expect(view.container.querySelector('[translate="no"]')).toBeNull()
+  })
+
   it('keeps a live Turn expanded and folds it once at turn/end', withClock(3_000, () => {
     const process = assistant(2, 'inspect', 1, 1)
     const h = makeHarness({

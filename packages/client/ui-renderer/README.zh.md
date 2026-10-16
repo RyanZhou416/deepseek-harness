@@ -53,7 +53,7 @@ kind: "package-reference"
 
 `createSlotRenderer` 把 slot 注册表连接到 React：普通 entry list 与 Factory definition 成为响应式 source，每个 outlet 或 occurrence 经已安装的渲染器渲染。业务插件通过带类型的 `hooks` 传递裸 observable source；渲染器经 uSES 适配器在渲染位置完成绑定。Factory Store factory 保持 lazy，直到 occurrence 首次物化时才创建 handle；其 exclusive handle 拒绝持久化，渲染期记录保持弱引用，幂等 effect 仅强引用 mounted occurrences，同时在 effect replay 期间保留 identity。Factory 错误使用普通监督通道且不会 abdicate 共享 definition：definition 及其 fallback 局部 Component 的失败归属 definition，调用方所选局部 Component 的失败归属调用方 registration，每个边界随自身 scope incarnation 重置。
 
-keyed 注册项可通过 [slot 失败策略](../ui-slots/README.zh.md)选择实例级隔离。拥有方提供降级内容和稳定的重置键；局部失败会上报，但不会停用注册项，降级内容继续读取当前属性。重置键变化时重试渲染器，不会重新挂载健康的兄弟实例。缺少作用域或提供方仍属于装配错误，必须向外抛出。空注册项的后备内容与失败恢复是不同机制。
+keyed 注册项可通过 [slot 失败策略](../ui-slots/README.zh.md)选择实例级隔离。拥有方提供降级内容和稳定的重置键；局部失败会上报，但不会停用注册项，降级内容继续读取当前属性。重置键变化时重试渲染器，不会重新挂载健康的兄弟实例。设置 `retryDomMutation: true` 时，捕获到 `NotFoundError` DOMException 后先提交降级内容，再为每个作用域实例代次和重置键执行一次全新挂载。同一受损子树的清理错误共用待执行的这次挂载；重新挂载后再失败就保留降级内容。其他错误不会安排恢复，也不会逐 token 或定时重试。缺少作用域或提供方仍属于装配错误，必须向外抛出。空注册项的后备内容与失败恢复是不同机制。
 
 ### 身份
 

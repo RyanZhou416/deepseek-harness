@@ -58,6 +58,7 @@ describe('assistantOccurrenceRecovery generation key', () => {
   it('keys on the node, the grouped portion, and the tagged reply generation', () => {
     const running = assistantOccurrenceRecovery(assistant([{ kind: 'text', text: 'hi' }]), undefined, t)
     expect(running.resetKey).toBe(JSON.stringify(['assistant:1:1', null, ['running']]))
+    expect(running.retryDomMutation).toBe(true)
 
     const settled = assistantOccurrenceRecovery(
       assistant([{ kind: 'text', text: 'hi' }], durable('m1'), 'assistant:1:1'), 'response', t)

@@ -295,7 +295,7 @@ describe('TrajectoryTable', () => {
 
     expect(screen.getByRole('heading', { name: 'Thinking heading' })
       .closest('[data-markdown-variant="compact"]')).not.toBeNull()
-    expect(screen.getByText('emphasis').tagName).toBe('STRONG')
+    expect(screen.getByText('emphasis').closest('strong')).not.toBeNull()
     expect(screen.getByRole('heading', { name: 'Answer heading' })
       .closest('[data-markdown-variant="compact"]')).toBeNull()
 

@@ -59,7 +59,7 @@ The slot declaration fixes two independent axes.
 
 `priority` is a shadowing rank for `single`, `list`, and `keyed` cells and an election order for `chain`. Lower values run or render first. Ordinary additive contributions should choose a fresh list `id` or keyed `key`; intentionally reusing a shipped cell replaces its presentation.
 
-Keyed registrations may opt into `failureScope: 'occurrence'`; the owner then supplies `occurrenceRecovery: { fallback, resetKey }` at `renderSlot`. A contained error does not retire the registration or promote a lower-priority entry. A missing payload or a renderer assembly error still fails loudly. Absent or `registration` failure scope keeps the slot kind's existing error behavior; an owner payload cannot change an unopted override's policy. [Slot rendering](../../packages/client/ui-renderer/README.md) owns fallback lifetime and reset behavior.
+Keyed registrations may opt into `failureScope: 'occurrence'`; the owner then supplies `occurrenceRecovery: { fallback, resetKey }` at `renderSlot`. A contained error does not retire the registration or promote a lower-priority entry. A missing payload or a renderer assembly error still fails loudly. Absent or `registration` failure scope keeps the slot kind's existing error behavior; an owner payload cannot change an unopted override's policy. The optional payload field `retryDomMutation` enables one automatic recovery from a DOM `NotFoundError` per occurrence generation. [Slot rendering](../../packages/client/ui-renderer/README.md) owns fallback lifetime and reset behavior.
 
 ## Component inputs
 

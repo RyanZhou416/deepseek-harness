@@ -1,8 +1,9 @@
 /**
  * Direct mdast→React markdown renderer. Replaces the react-markdown /
  * remark-rehype pipeline with one switch over parsed nodes so streaming can
- * cache frozen blocks as React elements; the rendered DOM is pinned
- * byte-for-byte by `tests/fixtures/markdown-dom` and must not drift.
+ * cache frozen blocks as React elements. Prose has stable inline parents so
+ * text-rewriting extensions cannot detach React's reconciliation targets.
+ * `tests/fixtures/markdown-dom` pins the remaining document structure and text.
  *
  * External link and image destinations pass a protocol allowlist; settled
  * local file links use an explicit owner callback. Images additionally require
@@ -269,10 +270,31 @@ function renderChildren(
   return nodes.map((node, index) => renderNode(node, index, context))
 }
 
+/**
+ * Keep the mutation target React-owned when an extension replaces inner text:
+ * a sole string child updates through the parent's textContent, not a detached
+ * Text fiber. The keyed Fragment keeps that parent stable as edge spaces change.
+ * Edge whitespace stays bare to preserve mixed-content accessible names, whose
+ * element contributions are trimmed; extensions rewriting whitespace or parent
+ * elements remain outside this protection.
+ */
+function textLeaf(value: string, key: Key): ReactNode {
+  const core = value.trim()
+  if (core === '') return value
+  const start = value.indexOf(core)
+  return (
+    <Fragment key={key}>
+      {value.slice(0, start)}
+      <span key="core">{core}</span>
+      {value.slice(start + core.length)}
+    </Fragment>
+  )
+}
+
 function renderNode(node: Md.RootContent, key: Key, context: MarkdownRenderContext): ReactNode {
   switch (node.type) {
     case 'text':
-      return node.value
+      return textLeaf(node.value, key)
     case 'paragraph':
       return <p key={key}>{renderChildren(node.children, context)}</p>
     case 'heading':
@@ -306,7 +328,7 @@ function renderNode(node: Md.RootContent, key: Key, context: MarkdownRenderConte
       // authored text, not a parsed destination, so no normalizeUri: port,
       // path, and query render unchanged.
       const href = inlineCodeHttpUrl(value)
-      if (href !== undefined) return <code key={key}>{renderSafeLink(href, [value], 'link')}</code>
+      if (href !== undefined) return <code key={key}>{renderSafeLink(href, [textLeaf(value, 'value')], 'link')}</code>
       // A token the owner's file-mention vocabulary recognizes opens that
       // file; the resolver, not this renderer, decides what names a file.
       // Inside an anchor the token stays inert — a button cannot nest there.
@@ -322,7 +344,7 @@ function renderNode(node: Md.RootContent, key: Key, context: MarkdownRenderConte
               onClick={mention.open}
             >
               <LinkIconMedium kind={classifyLinkPath(value)} className={css.linkIcon} />
-              {value}
+              {textLeaf(value, 'value')}
             </button>
           </code>
         )
@@ -331,7 +353,7 @@ function renderNode(node: Md.RootContent, key: Key, context: MarkdownRenderConte
     }
     case 'html':
       // No HTML parser enters the pipeline: raw HTML stays literal text.
-      return node.value
+      return textLeaf(node.value, key)
     case 'code':
       return renderCode(node, key, context)
     case 'math':
@@ -679,7 +701,13 @@ function renderLinkReference(
     // the same parse, but incremental segments and hand-built trees may still
     // present unresolved ones: revert to the bracketed source text — which is
     // not an anchor, so mentions inside it stay live.
-    return <Fragment key={key}>{'['}{renderChildren(node.children, context)}{referenceSuffix(node)}</Fragment>
+    return (
+      <Fragment key={key}>
+        {textLeaf('[', 'open')}
+        {renderChildren(node.children, context)}
+        {textLeaf(referenceSuffix(node), 'suffix')}
+      </Fragment>
+    )
   }
   const rendered = renderChildren(node.children, { ...context, inLink: true })
   return renderAnchor(definition.url, rendered, key, !anchorWrapsOnlyImages(node.children), context.streaming)
@@ -691,7 +719,7 @@ function renderImageReference(
   context: MarkdownRenderContext,
 ): ReactNode {
   const definition = context.targets.definitions.get(node.identifier.toUpperCase())
-  if (definition === undefined) return `![${node.alt ?? ''}${referenceSuffix(node)}`
+  if (definition === undefined) return textLeaf(`![${node.alt ?? ''}${referenceSuffix(node)}`, key)
   return renderImage(definition.url, node.alt ?? '', key, context)
 }
 
@@ -725,7 +753,7 @@ export function renderFootnoteSection(context: MarkdownRenderContext): ReactNode
     const backrefs: ReactNode[] = []
     for (let reference = 1; reference <= count; reference++) {
       if (backrefs.length > 0) backrefs.push(' ')
-      backrefs.push('↩')
+      backrefs.push(textLeaf('↩', `back-${reference}`))
       if (reference > 1) backrefs.push(<sup key={`re-${reference}`}>{String(reference)}</sup>)
     }
     const entries = renderBlockEntries(definition.children, context)

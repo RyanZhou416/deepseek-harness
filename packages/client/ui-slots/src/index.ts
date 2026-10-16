@@ -282,6 +282,14 @@ export interface OccurrenceRecovery {
    * value keeps the fallback while rendering its latest props.
    */
   resetKey: string
+  /**
+   * Opt into one clean remount per scope incarnation and reset key after a
+   * `NotFoundError` DOMException. The damaged subtree first unmounts into the
+   * fallback; additional cleanup errors share the pending remount. Failure
+   * after remount keeps the fallback. Other errors do not schedule a remount,
+   * and omitting this option preserves fallback-until-generation-change.
+   */
+  retryDomMutation?: boolean
 }
 
 /** renderSlot dispatch options: keyed dispatch key, list filtering, and empty fallback. */

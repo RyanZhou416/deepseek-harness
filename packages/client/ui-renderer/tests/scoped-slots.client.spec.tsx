@@ -10,7 +10,7 @@
  */
 import { describe, expect, it, vi } from 'vitest'
 import { act, fireEvent, render } from '@testing-library/react'
-import { useEffect, useState, type ReactNode } from 'react'
+import { StrictMode, useEffect, useLayoutEffect, useState, type ReactNode } from 'react'
 import { Context } from '@deepseek-ai/cordis'
 import type { SessionReference } from '@deepseek-ai/dsh-api-session-controller/client'
 import type {} from '@deepseek-ai/dsh-client-ui-session/client'
@@ -1176,6 +1176,503 @@ describe('occurrence failure scope', () => {
   const KIDS = { 'k.opt': KEYED_ROOT }
   /** Fallback body that fails on every render: the fallback is not a safe place either. */
   const BrokenFallback = () => { throw new Error('fallback boom') }
+
+  /**
+   * The element a text-translating browser extension injects around rendered
+   * content. A plain `string` so the DOM overloads for deprecated tag names do
+   * not apply to the probe.
+   */
+  const EXTENSION_WRAPPER_TAG: string = 'font'
+
+  /**
+   * The DOM mutation a text-translating browser extension performs on rendered
+   * content: it wraps the React-managed node in its own element, so React's
+   * next commit no longer finds that node where React left it and the DOM
+   * rejects the mutation with a NotFoundError DOMException.
+   * @param node - the node the extension wraps.
+   */
+  const wrapForTranslation = (node: Element): void => {
+    const wrapper = document.createElement(EXTENSION_WRAPPER_TAG)
+    node.parentNode!.insertBefore(wrapper, node)
+    wrapper.appendChild(node)
+  }
+
+  /**
+   * Shared runner for the DOM-mutation probes: occurrence mount counter, the
+   * body under test, and a fallback recording its own mount lifetime (the
+   * commit-before-remount evidence).
+   * @param body - the occurrence body, receiving its owner props plus the mount incarnation.
+   * @returns the counters, the occurrence component, and the recording fallback.
+   */
+  function domProbe(body: (props: AnyProps) => ReactNode) {
+    const probe = {
+      /** Occurrence mounts: one per committed incarnation. */
+      mounts: 0,
+      /** Fallback mount/unmount sequence, in commit order. */
+      fallbackLifecycle: [] as string[],
+    }
+    const component = (props: AnyProps) => {
+      const [incarnation] = useState(() => ++probe.mounts)
+      return body({ ...props, incarnation })
+    }
+    const Fallback = () => {
+      useEffect(() => {
+        probe.fallbackLifecycle.push('mount')
+        return () => { probe.fallbackLifecycle.push('unmount') }
+      }, [])
+      return <span>plain text</span>
+    }
+    return { probe, component, Fallback }
+  }
+
+  /**
+   * Occurrence whose update reproduces an `insertBefore` rejection: `markers`
+   * prepends a citation, and React places it against the answer line the
+   * extension wrapped.
+   */
+  const domAnswerProbe = () => domProbe(({ markers, incarnation }) => (
+    <p data-answer data-incarnation={incarnation as number}>
+      {Array.from({ length: (markers as number | undefined) ?? 0 }, (_, index) => (
+        <cite key={index} data-cite={index}>source</cite>
+      ))}
+      <span data-line>answer text</span>
+    </p>
+  ))
+
+  /**
+   * Occurrence whose settled swap reproduces a `removeChild` rejection: React
+   * removes the pending node, which the extension reparented under its wrapper.
+   */
+  const domRemovalProbe = () => domProbe(({ settled, incarnation }) => (
+    <p data-answer data-incarnation={incarnation as number}>
+      {settled === true ? <b data-settled>answer text</b> : <span data-pending>answer text</span>}
+    </p>
+  ))
+
+  const KEYED_DOM: DeclaredSpec = { kind: 'keyed', scope: 'root' }
+
+  it('recovers one real commit-phase DOM-mutation crash, committing the fallback first', () => {
+    const { probe, component, Fallback } = domAnswerProbe()
+    const h = makeHost()
+    h.declare('k.dom', KEYED_DOM)
+    h.add('k.dom', { component, options: { key: 'k' }, failureScope: 'occurrence' })
+    const report = vi.spyOn(h.host, 'reportEntryError')
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    let markers = 0
+    const { view } = mountRoot(h, { 'k.dom': KEYED_DOM }, renderSlot => renderSlot('k.dom', { markers }, {
+      entryKey: 'k',
+      occurrenceRecovery: { fallback: <Fallback />, resetKey: 'running', retryDomMutation: true },
+    }))
+    // The extension translates the answer line; the next update then inserts a
+    // citation before a node React can no longer find in the paragraph.
+    wrapForTranslation(view.container.querySelector('[data-line]')!)
+    markers = 1
+    act(() => { h.add('root', { component: () => null }) })
+    spy.mockRestore()
+    // The fallback committed before the remount, and the remount is the only one.
+    expect(probe.fallbackLifecycle).toEqual(['mount', 'unmount'])
+    expect(probe.mounts).toBe(2)
+    expect(report).toHaveBeenCalledTimes(1)
+    expect(report.mock.calls[0]![3]).toEqual({ abdicate: false })
+    expect(report.mock.calls[0]![2]).toBeInstanceOf(DOMException)
+    expect((report.mock.calls[0]![2] as DOMException).name).toBe('NotFoundError')
+    // Exactly one answer occurrence survives the recovery.
+    expect(view.container.querySelectorAll('[data-answer]')).toHaveLength(1)
+    expect(view.container.querySelectorAll('[data-line]')).toHaveLength(1)
+    expect(view.container.querySelectorAll(EXTENSION_WRAPPER_TAG)).toHaveLength(0)
+    expect(view.container.textContent).toBe('sourceanswer text')
+    report.mockRestore()
+  })
+
+  it('recovers one commit-phase removeChild rejection from a settled swap', () => {
+    const { probe, component, Fallback } = domRemovalProbe()
+    const h = makeHost()
+    h.declare('k.dom', KEYED_DOM)
+    h.add('k.dom', { component, options: { key: 'k' }, failureScope: 'occurrence' })
+    const report = vi.spyOn(h.host, 'reportEntryError')
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    let settled = false
+    const { view } = mountRoot(h, { 'k.dom': KEYED_DOM }, renderSlot => renderSlot('k.dom', { settled }, {
+      entryKey: 'k',
+      occurrenceRecovery: { fallback: <Fallback />, resetKey: 'running', retryDomMutation: true },
+    }))
+    // The extension reparents the pending node under its wrapper; React then
+    // removes that node for the settled body and removeChild rejects it.
+    wrapForTranslation(view.container.querySelector('[data-pending]')!)
+    settled = true
+    act(() => { h.add('root', { component: () => null }) })
+    spy.mockRestore()
+    expect(probe.fallbackLifecycle).toEqual(['mount', 'unmount'])
+    expect(probe.mounts).toBe(2)
+    expect(report).toHaveBeenCalledTimes(1)
+    expect(report.mock.calls[0]![3]).toEqual({ abdicate: false })
+    expect(report.mock.calls[0]![2]).toBeInstanceOf(DOMException)
+    expect((report.mock.calls[0]![2] as DOMException).name).toBe('NotFoundError')
+    expect(view.container.querySelectorAll('[data-answer]')).toHaveLength(1)
+    expect(view.container.querySelectorAll('[data-settled]')).toHaveLength(1)
+    expect(view.container.querySelectorAll(EXTENSION_WRAPPER_TAG)).toHaveLength(0)
+    expect(view.container.textContent).toBe('answer text')
+    report.mockRestore()
+  })
+
+  it('does not retry a DOM-mutation crash when the owner omits the opt-in', () => {
+    const { probe, component, Fallback } = domAnswerProbe()
+    const h = makeHost()
+    h.declare('k.dom', KEYED_DOM)
+    h.add('k.dom', { component, options: { key: 'k' }, failureScope: 'occurrence' })
+    const report = vi.spyOn(h.host, 'reportEntryError')
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    let markers = 0
+    const { view } = mountRoot(h, { 'k.dom': KEYED_DOM }, renderSlot => renderSlot('k.dom', { markers }, {
+      entryKey: 'k',
+      occurrenceRecovery: { fallback: <Fallback />, resetKey: 'running' },
+    }))
+    wrapForTranslation(view.container.querySelector('[data-line]')!)
+    markers = 1
+    act(() => { h.add('root', { component: () => null }) })
+    spy.mockRestore()
+    expect(probe.fallbackLifecycle).toEqual(['mount'])
+    expect(probe.mounts).toBe(1)
+    expect(report).toHaveBeenCalledTimes(1)
+    expect(view.container.textContent).toBe('plain text')
+    report.mockRestore()
+  })
+
+  it('does not recover a plain Error that merely carries the NotFoundError name', () => {
+    const h = makeHost()
+    h.declare('k.opt', KEYED_ROOT)
+    let attempts = 0
+    h.add('k.opt', {
+      component: () => {
+        attempts += 1
+        const error = new Error('application text')
+        error.name = 'NotFoundError'
+        throw error
+      },
+      options: { key: 'k' },
+      failureScope: 'occurrence',
+    })
+    const report = vi.spyOn(h.host, 'reportEntryError')
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const { view } = mountRoot(h, KIDS, renderSlot => renderSlot('k.opt', {}, {
+      entryKey: 'k',
+      occurrenceRecovery: { fallback: <span>plain text</span>, resetKey: 'running', retryDomMutation: true },
+    }))
+    const attemptsAtFallback = attempts
+    // Same generation: the fallback latches and nothing renders the thrower
+    // again, so the DOM-mutation opt-in never arms a retry for it.
+    act(() => { h.add('root', { component: () => null }) })
+    spy.mockRestore()
+    expect(view.container.textContent).toBe('plain text')
+    expect(attempts).toBe(attemptsAtFallback)
+    expect(report).toHaveBeenCalledTimes(1)
+    report.mockRestore()
+  })
+
+  it('rethrows an assembly error from an opted occurrence instead of recovering it', () => {
+    const h = makeHost()
+    h.declare('k.opt', KEYED_ROOT)
+    h.add('k.opt', {
+      component: () => { throw new SlotAssemblyError('miswired occurrence') },
+      options: { key: 'k' },
+      failureScope: 'occurrence',
+    })
+    const report = vi.spyOn(h.host, 'reportEntryError')
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    expect(() => mountRoot(h, KIDS, renderSlot => renderSlot('k.opt', {}, {
+      entryKey: 'k',
+      occurrenceRecovery: { fallback: <span>plain text</span>, resetKey: 'running', retryDomMutation: true },
+    }))).toThrow(SlotAssemblyError)
+    spy.mockRestore()
+    expect(report).not.toHaveBeenCalled()
+    report.mockRestore()
+  })
+
+  it('latches a repeated DOM-mutation crash in one generation after its single remount', () => {
+    const { probe, component, Fallback } = domAnswerProbe()
+    const h = makeHost()
+    h.declare('k.dom', KEYED_DOM)
+    h.add('k.dom', { component, options: { key: 'k' }, failureScope: 'occurrence' })
+    const report = vi.spyOn(h.host, 'reportEntryError')
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    let markers = 0
+    const { view } = mountRoot(h, { 'k.dom': KEYED_DOM }, renderSlot => renderSlot('k.dom', { markers }, {
+      entryKey: 'k',
+      occurrenceRecovery: { fallback: <Fallback />, resetKey: 'running', retryDomMutation: true },
+    }))
+    wrapForTranslation(view.container.querySelector('[data-line]')!)
+    markers = 1
+    act(() => { h.add('root', { component: () => null }) })
+    expect(probe.mounts).toBe(2)
+    // The extension translates the recovered line too: the same generation
+    // fails again, and its remount budget is already spent.
+    wrapForTranslation(view.container.querySelector('[data-line]')!)
+    markers = 2
+    act(() => { h.add('root', { component: () => null }) })
+    spy.mockRestore()
+    expect(probe.fallbackLifecycle).toEqual(['mount', 'unmount', 'mount'])
+    expect(probe.mounts).toBe(2)
+    expect(report).toHaveBeenCalledTimes(2)
+    expect(view.container.textContent).toBe('plain text')
+    expect(view.container.querySelector('[data-slot-error="k.dom"]')).not.toBeNull()
+    // The crashed subtree left the document with the extension's wrapper: the
+    // latched fallback leaves no orphaned answer copy behind.
+    expect(view.container.querySelectorAll('[data-answer]')).toHaveLength(0)
+    expect(view.container.querySelectorAll(EXTENSION_WRAPPER_TAG)).toHaveLength(0)
+    // Later same-generation props changes keep the fallback: no third capture.
+    markers = 3
+    act(() => { h.add('root', { component: () => null }) })
+    expect(probe.mounts).toBe(2)
+    expect(report).toHaveBeenCalledTimes(2)
+    expect(view.container.textContent).toBe('plain text')
+    report.mockRestore()
+  })
+
+  it('shares one pending recovery with a same-commit cleanup failure and latches after the remount', () => {
+    let cleanups = 0
+    /** Sibling removed by the same settled swap, owning a cleanup that fails once. */
+    const PendingCleanup = () => {
+      useLayoutEffect(() => () => {
+        cleanups += 1
+        if (cleanups === 1) throw new Error('cleanup boom')
+      }, [])
+      return null
+    }
+    const { probe, component, Fallback } = domProbe(({ settled, incarnation }) => (
+      <p data-answer data-incarnation={incarnation as number}>
+        {settled === true
+          ? <b data-settled>answer text</b>
+          : <>
+            <span data-pending>answer text</span>
+            <PendingCleanup />
+          </>}
+      </p>
+    ))
+    const h = makeHost()
+    h.declare('k.dom', KEYED_DOM)
+    h.add('k.dom', { component, options: { key: 'k' }, failureScope: 'occurrence' })
+    const report = vi.spyOn(h.host, 'reportEntryError')
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    let settled = false
+    const { view } = mountRoot(h, { 'k.dom': KEYED_DOM }, renderSlot => renderSlot('k.dom', { settled }, {
+      entryKey: 'k',
+      occurrenceRecovery: { fallback: <Fallback />, resetKey: 'running', retryDomMutation: true },
+    }))
+    // One settled swap, two failures in the same commit: React's removeChild
+    // rejects the node the extension reparented, then the removed component's
+    // cleanup throws before the retry effect flushes.
+    wrapForTranslation(view.container.querySelector('[data-pending]')!)
+    settled = true
+    act(() => { h.add('root', { component: () => null }) })
+    // The cleanup error shares the earned remount instead of cancelling it.
+    expect(probe.fallbackLifecycle).toEqual(['mount', 'unmount'])
+    expect(probe.mounts).toBe(2)
+    expect(report).toHaveBeenCalledTimes(2)
+    expect(report.mock.calls[0]![2]).toBeInstanceOf(DOMException)
+    expect((report.mock.calls[0]![2] as DOMException).name).toBe('NotFoundError')
+    expect(report.mock.calls[1]![2]).toBeInstanceOf(Error)
+    expect((report.mock.calls[1]![2] as Error).message).toBe('cleanup boom')
+    expect(view.container.querySelectorAll('[data-answer]')).toHaveLength(1)
+    expect(view.container.querySelectorAll('[data-settled]')).toHaveLength(1)
+    expect(view.container.textContent).toBe('answer text')
+    // A failure of the remounted subtree keeps the fallback for the generation.
+    wrapForTranslation(view.container.querySelector('[data-settled]')!)
+    settled = false
+    act(() => { h.add('root', { component: () => null }) })
+    spy.mockRestore()
+    expect(probe.fallbackLifecycle).toEqual(['mount', 'unmount', 'mount'])
+    expect(probe.mounts).toBe(2)
+    expect(report).toHaveBeenCalledTimes(3)
+    expect(report.mock.calls[2]![2]).toBeInstanceOf(DOMException)
+    expect(view.container.textContent).toBe('plain text')
+    expect(view.container.querySelectorAll('[data-answer]')).toHaveLength(0)
+    report.mockRestore()
+  })
+
+  it('restores the DOM-mutation allowance when the owner generation moves', () => {
+    const { probe, component, Fallback } = domAnswerProbe()
+    const h = makeHost()
+    h.declare('k.dom', KEYED_DOM)
+    h.add('k.dom', { component, options: { key: 'k' }, failureScope: 'occurrence' })
+    const report = vi.spyOn(h.host, 'reportEntryError')
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    let markers = 0
+    let resetKey = 'generation-one'
+    const { view } = mountRoot(h, { 'k.dom': KEYED_DOM }, renderSlot => renderSlot('k.dom', { markers }, {
+      entryKey: 'k',
+      occurrenceRecovery: { fallback: <Fallback />, resetKey, retryDomMutation: true },
+    }))
+    // Spend the generation's remount: one recovery, then one latched repeat.
+    wrapForTranslation(view.container.querySelector('[data-line]')!)
+    markers = 1
+    act(() => { h.add('root', { component: () => null }) })
+    wrapForTranslation(view.container.querySelector('[data-line]')!)
+    markers = 2
+    act(() => { h.add('root', { component: () => null }) })
+    expect(probe.mounts).toBe(2)
+    expect(view.container.textContent).toBe('plain text')
+    // A moved owner generation is a fresh budget: the rich renderer retries.
+    resetKey = 'generation-two'
+    act(() => { h.add('root', { component: () => null }) })
+    expect(probe.mounts).toBe(3)
+    expect(view.container.querySelectorAll('[data-answer]')).toHaveLength(1)
+    // And that generation's own remount is available.
+    wrapForTranslation(view.container.querySelector('[data-line]')!)
+    markers = 3
+    act(() => { h.add('root', { component: () => null }) })
+    spy.mockRestore()
+    expect(probe.mounts).toBe(4)
+    expect(report).toHaveBeenCalledTimes(3)
+    expect(view.container.querySelectorAll('[data-answer]')).toHaveLength(1)
+    expect(view.container.querySelectorAll(EXTENSION_WRAPPER_TAG)).toHaveLength(0)
+    expect(view.container.textContent).toBe('sourcesourcesourceanswer text')
+    report.mockRestore()
+  })
+
+  it('restores the DOM-mutation allowance when the Session generation moves', () => {
+    const { probe, component, Fallback } = domAnswerProbe()
+    const h = makeHost()
+    h.addSession('s1')
+    h.addSession('s2')
+    h.current.set('s1')
+    h.declare('k.sess', KEYED_SESSION)
+    h.add('k.sess', { component, options: { key: 'k' }, failureScope: 'occurrence' })
+    const report = vi.spyOn(h.host, 'reportEntryError')
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    let markers = 0
+    const recovery = { fallback: <Fallback />, resetKey: 'running', retryDomMutation: true }
+    h.add('root', {
+      component: (props: AnyProps) => {
+        const Provider = props['SessionProvider'] as SessionProviderComponent
+        const renderSlot = props['renderSlot'] as RenderSlotFn
+        return (
+          <Provider session={h.current.getSnapshot()} empty={() => <i>empty</i>}>
+            {renderSlot('k.sess', { markers }, { entryKey: 'k', occurrenceRecovery: recovery })}
+          </Provider>
+        )
+      },
+      children: { 'k.sess': KEYED_SESSION },
+    })
+    const view = render(<>{createSlotRenderer().renderRoot(h.host, {})}</>)
+    // Spend the Session generation's remount, exactly as in the owner-key case.
+    wrapForTranslation(view.container.querySelector('[data-line]')!)
+    markers = 1
+    act(() => { h.add('root', { component: () => null }) })
+    wrapForTranslation(view.container.querySelector('[data-line]')!)
+    markers = 2
+    act(() => { h.add('root', { component: () => null }) })
+    expect(probe.mounts).toBe(2)
+    expect(view.container.textContent).toBe('plain text')
+    // A different Session is a fresh generation with its own remount budget.
+    act(() => {
+      h.current.set('s2')
+      h.add('root', { component: () => null })
+    })
+    expect(probe.mounts).toBe(3)
+    expect(view.container.querySelectorAll('[data-answer]')).toHaveLength(1)
+    wrapForTranslation(view.container.querySelector('[data-line]')!)
+    markers = 3
+    act(() => { h.add('root', { component: () => null }) })
+    spy.mockRestore()
+    expect(probe.mounts).toBe(4)
+    expect(report).toHaveBeenCalledTimes(3)
+    expect(view.container.querySelectorAll('[data-answer]')).toHaveLength(1)
+    expect(view.container.textContent).toBe('sourcesourcesourceanswer text')
+    report.mockRestore()
+  })
+
+  it('keeps healthy occurrences mounted under the opt-in while the generation moves', () => {
+    const { probe, component, Fallback } = domAnswerProbe()
+    const h = makeHost()
+    h.declare('k.dom', KEYED_DOM)
+    h.add('k.dom', { component, options: { key: 'k' }, failureScope: 'occurrence' })
+    const report = vi.spyOn(h.host, 'reportEntryError')
+    let markers = 0
+    let resetKey = 'generation-one'
+    const { view } = mountRoot(h, { 'k.dom': KEYED_DOM }, renderSlot => renderSlot('k.dom', { markers }, {
+      entryKey: 'k',
+      occurrenceRecovery: { fallback: <Fallback />, resetKey, retryDomMutation: true },
+    }))
+    markers = 1
+    act(() => { h.add('root', { component: () => null }) })
+    resetKey = 'generation-two'
+    act(() => { h.add('root', { component: () => null }) })
+    expect(probe.mounts).toBe(1)
+    expect(probe.fallbackLifecycle).toEqual([])
+    expect(report).not.toHaveBeenCalled()
+    expect(view.container.querySelectorAll('[data-answer]')).toHaveLength(1)
+    expect(view.container.textContent).toBe('sourceanswer text')
+    report.mockRestore()
+  })
+
+  it('spends the one DOM-mutation remount once under StrictMode effect replay', () => {
+    const { component, Fallback } = domAnswerProbe()
+    const h = makeHost()
+    h.declare('k.dom', KEYED_DOM)
+    h.add('k.dom', { component, options: { key: 'k' }, failureScope: 'occurrence' })
+    const report = vi.spyOn(h.host, 'reportEntryError')
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    let markers = 0
+    h.add('root', {
+      component: (props: AnyProps) => {
+        const renderSlot = props['renderSlot'] as RenderSlotFn
+        return renderSlot('k.dom', { markers }, {
+          entryKey: 'k',
+          occurrenceRecovery: { fallback: <Fallback />, resetKey: 'running', retryDomMutation: true },
+        })
+      },
+      children: { 'k.dom': KEYED_DOM },
+    })
+    const view = render(<StrictMode>{createSlotRenderer().renderRoot(h.host, {})}</StrictMode>)
+    wrapForTranslation(view.container.querySelector('[data-line]')!)
+    markers = 1
+    act(() => { h.add('root', { component: () => null }) })
+    spy.mockRestore()
+    // Replayed effects must not spend a second remount: one capture, one answer.
+    expect(report).toHaveBeenCalledTimes(1)
+    expect(view.container.querySelectorAll('[data-answer]')).toHaveLength(1)
+    expect(view.container.querySelectorAll('[data-line]')).toHaveLength(1)
+    expect(view.container.textContent).toBe('sourceanswer text')
+    report.mockRestore()
+  })
+
+  it('latches a generic failure without arming the DOM-mutation remount', () => {
+    const h = makeHost()
+    h.declare('k.opt', KEYED_ROOT)
+    let attempts = 0
+    h.add('k.opt', {
+      component: () => {
+        attempts += 1
+        throw new Error('reply boom')
+      },
+      options: { key: 'k' },
+      failureScope: 'occurrence',
+    })
+    const fallbackLifecycle: string[] = []
+    const Fallback = () => {
+      useEffect(() => {
+        fallbackLifecycle.push('mount')
+        return () => { fallbackLifecycle.push('unmount') }
+      }, [])
+      return <span>plain text</span>
+    }
+    const report = vi.spyOn(h.host, 'reportEntryError')
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const { view } = mountRoot(h, KIDS, renderSlot => renderSlot('k.opt', {}, {
+      entryKey: 'k',
+      occurrenceRecovery: { fallback: <Fallback />, resetKey: 'running', retryDomMutation: true },
+    }))
+    const attemptsAtFallback = attempts
+    // Same generation: the generic failure latched, so the fallback is never
+    // unmounted and no later (DOM-mutation) render attempt can be made.
+    act(() => { h.add('root', { component: () => null }) })
+    spy.mockRestore()
+    expect(fallbackLifecycle).toEqual(['mount'])
+    expect(attempts).toBe(attemptsAtFallback)
+    expect(report).toHaveBeenCalledTimes(1)
+    expect(view.container.textContent).toBe('plain text')
+    report.mockRestore()
+  })
 
   it('contains an opted crash locally: fallback under the error anchor, other occurrences and registrations healthy', () => {
     const h = makeHost()

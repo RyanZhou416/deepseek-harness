@@ -83,5 +83,6 @@ export function assistantOccurrenceRecovery(
   return {
     fallback: <AssistantRecoveryFallback node={node} groupPart={groupPart} t={t} />,
     resetKey: JSON.stringify([node.key, groupPart ?? null, generation]),
+    retryDomMutation: true,
   }
 }

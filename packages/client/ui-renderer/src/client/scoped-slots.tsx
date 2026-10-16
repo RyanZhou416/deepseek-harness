@@ -454,7 +454,7 @@ class OccurrenceCrashCatcher extends Component<
   {
     slotKey: string
     onEntryError: (error: unknown) => void
-    onFailure: () => void
+    onFailure: (error: unknown) => void
     children: ReactNode
   },
   { failed: boolean }
@@ -467,7 +467,7 @@ class OccurrenceCrashCatcher extends Component<
   override componentDidCatch(error: unknown): void {
     console.error(`slot entry crashed in '${this.props.slotKey}':`, error)
     this.props.onEntryError(error)
-    this.props.onFailure()
+    this.props.onFailure(error)
   }
   override render(): ReactNode {
     if (this.state.failed) return null
@@ -475,6 +475,43 @@ class OccurrenceCrashCatcher extends Component<
   }
 }
 /* jscpd:ignore-end */
+
+/** Recognize DOM reparenting failures without treating an application's Error name as a DOM exception. */
+function isDomMutationError(error: unknown): boolean {
+  return error instanceof DOMException && error.name === 'NotFoundError'
+}
+
+/** Failure state and the single DOM-remount allowance for one scope and owner generation. */
+interface OccurrenceRecoveryState {
+  /** Full generation (owning scope incarnation + owner resetKey) these decisions belong to. */
+  readonly generation: string
+  /** The owner fallback is showing in place of the rich renderer. */
+  readonly failed: boolean
+  /** DOM-mutation remount budget: unspent, awaiting its commit, or spent. */
+  readonly domRetry: 'available' | 'pending' | 'spent'
+}
+
+/** Budget of a generation whose rich rendering has not failed: no failure, remount unspent. */
+function freshRecoveryState(generation: string): OccurrenceRecoveryState {
+  return { generation, failed: false, domRetry: 'available' }
+}
+
+/**
+ * One qualifying failure schedules a remount after fallback commits. Additional
+ * captures from the damaged subtree share that pending remount; a failure of
+ * the remounted subtree keeps the fallback until the generation changes.
+ */
+function settleRecoveryFailure(
+  state: OccurrenceRecoveryState,
+  generation: string,
+  error: unknown,
+  retryDomMutation: boolean,
+): OccurrenceRecoveryState {
+  const domRetry = retryDomMutation && state.domRetry === 'available' && isDomMutationError(error)
+    ? 'pending'
+    : state.domRetry
+  return { generation, failed: true, domRetry }
+}
 
 const rootStandardCache = new WeakMap<StandardSourceBinding, InjectedProps>()
 const sessionStandardCache = new WeakMap<StandardSourceBinding, WeakMap<StandardSourceBinding, InjectedProps>>()
@@ -1110,6 +1147,11 @@ const ANCHOR_STYLE = { display: 'contents' } as const
  * and can no longer carry its own reset: a Session replacement retries rich
  * rendering exactly like the default per-entry boundary. Healthy content below
  * keeps its identity, since no React key moves.
+ *
+ * An owner that sets {@link OccurrenceRecovery.retryDomMutation} additionally
+ * recovers one DOM-mutation crash per generation: that failure commits the
+ * fallback — so the subtree the extension damaged leaves the document — and
+ * the effect then remounts the rich renderer once from scratch.
  */
 function OccurrenceSlot({
   slotKey, entry, ownerProps, slotInjected, hookContext, hasHookContext, recovery, scope,
@@ -1135,11 +1177,28 @@ function OccurrenceSlot({
   const generation = sessionGeneration === undefined
     ? recovery.resetKey
     : `${sessionGeneration}\u0000${recovery.resetKey}`
-  const [failedGeneration, setFailedGeneration] = useState<string | null>(null)
-  // Derived state during render: a moved generation retries rich rendering
-  // once, and the null state converges whether that retry succeeds or throws.
-  if (failedGeneration !== null && failedGeneration !== generation) setFailedGeneration(null)
-  if (failedGeneration !== null) {
+  const [stored, setStored] = useState<OccurrenceRecoveryState>(() => freshRecoveryState(generation))
+  // Derived state during render: a moved generation is a fresh budget, so the
+  // occurrence retries rich rendering once more and the state converges
+  // whether that retry succeeds or throws.
+  let state = stored
+  if (state.generation !== generation) {
+    state = freshRecoveryState(generation)
+    setStored(state)
+  }
+  // A DOM-mutation failure is recovered only after the fallback committed:
+  // no timer can know when that commit landed, and remounting from the same
+  // commit that raised the rejection would rebuild into the damaged document.
+  // The functional update keeps a second invocation of this effect (StrictMode
+  // replays mount effects) from spending the same generation's remount twice.
+  const remountPending = state.failed && state.domRetry === 'pending'
+  useEffect(() => {
+    if (!remountPending) return
+    setStored(previous => previous.generation === generation && previous.domRetry === 'pending'
+      ? { ...previous, failed: false, domRetry: 'spent' }
+      : previous)
+  }, [generation, remountPending])
+  if (state.failed) {
     return (
       <div data-slot-error={slotKey} style={ANCHOR_STYLE}>
         {recovery.fallback}
@@ -1151,7 +1210,10 @@ function OccurrenceSlot({
       slotKey={slotKey}
       key={sessionGeneration}
       onEntryError={(error) => { host.reportEntryError(slotKey, entry, error, { abdicate: false }) }}
-      onFailure={() => { setFailedGeneration(generation) }}
+      onFailure={(error) => {
+        setStored(previous => settleRecoveryFailure(
+          previous, generation, error, recovery.retryDomMutation === true))
+      }}
     >
       {scope === 'session'
         ? (

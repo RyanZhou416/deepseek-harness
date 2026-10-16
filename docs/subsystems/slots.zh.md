@@ -59,7 +59,7 @@ Slot 声明固定两个相互独立的维度。
 
 对于 `single`、`list` 和 `keyed` cell，`priority` 是遮蔽优先级；对于 `chain`，它是选举顺序。数值越小越先运行或渲染。普通增量贡献应选用新的 list `id` 或 keyed `key`；复用已有 cell 表示有意替换其展示。
 
-keyed 注册项可选择 `failureScope: 'occurrence'`；拥有方随后在 `renderSlot` 提供 `occurrenceRecovery: { fallback, resetKey }`。局部错误不会停用注册项或递补到较低优先级条目。缺少载荷或渲染器装配错误仍明确失败。省略失败作用域或设置为 `registration` 时，保留该 slot 类型原有错误行为；拥有方载荷不能改变未选择新策略的覆盖项。[Slot 渲染](../../packages/client/ui-renderer/README.zh.md)拥有降级生命周期与重置行为。
+keyed 注册项可选择 `failureScope: 'occurrence'`；拥有方随后在 `renderSlot` 提供 `occurrenceRecovery: { fallback, resetKey }`。局部错误不会停用注册项或递补到较低优先级条目。缺少载荷或渲染器装配错误仍明确失败。省略失败作用域或设置为 `registration` 时，保留该 slot 类型原有错误行为；拥有方载荷不能改变未选择新策略的覆盖项。载荷的可选字段 `retryDomMutation` 为每个实例代次启用一次 DOM `NotFoundError` 自动恢复。[Slot 渲染](../../packages/client/ui-renderer/README.zh.md)拥有降级生命周期与重置行为。
 
 ## 组件输入
 

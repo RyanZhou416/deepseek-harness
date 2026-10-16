@@ -61,7 +61,7 @@ register 调用可以用 `store: defineStore(...)` 声明 store 席位：`init` 
 
 ### 渲染器约定
 
-当单个渲染失败不应停用共享注册项时，keyed 注册项可以设置 `failureScope: 'occurrence'`。实例拥有方随后必须向 `renderSlot` 传入 `occurrenceRecovery: { fallback, resetKey }`；缺少该载荷属于装配错误。未设置或使用 `registration` 时，保留该 slot 类型原有的失败行为；仅提供恢复载荷不会改变策略。实例隔离保留当前获选注册项，不会递补到同一 key 的其他条目。
+当单个渲染失败不应停用共享注册项时，keyed 注册项可以设置 `failureScope: 'occurrence'`。实例拥有方随后必须向 `renderSlot` 传入 `occurrenceRecovery: { fallback, resetKey }`；缺少该载荷属于装配错误。未设置或使用 `registration` 时，保留该 slot 类型原有的失败行为；仅提供恢复载荷不会改变策略。实例隔离保留当前获选注册项，不会递补到同一 key 的其他条目。载荷还可显式设置 `retryDomMutation: true`；[渲染器](../ui-renderer/README.zh.md)负责 DOM `NotFoundError` 失败的一次重新挂载策略。
 
 `renderer.ts` 携带安装约定（`SlotRenderer`、`SlotRendererHost`）以及 `StaleAuthorizationError`/`SlotOwnershipError`；ui-renderer 负责实现，并在其插件生命周期中完成安装。引擎产物与渲染器宿主约定携带裸快照 source（`getSnapshot`/`subscribe`），绝不携带 React 钩子——钩子绑定属于渲染机制。Factory 崩溃使用普通监督通道，幂等 effect 仅在 commit 后保留逐渲染位置 Store handle。
 

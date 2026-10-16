@@ -18,6 +18,15 @@ afterEach(cleanup)
  * outside `pre` (the markdown pipeline injects cosmetic newlines between
  * blocks that HTML rendering collapses), attributes sorted by name, children
  * indented for reviewable diffs.
+ *
+ * The renderer wraps every authored string in an attribute-free inline element
+ * so an external translation extension cannot desync React's reconciliation
+ * from the text node it rewrites. That wrapper is invisible here: reading
+ * through it keeps these baselines the DOM *below* the wrappers, so added or
+ * removed wrappers never count as user-visible Markdown changes. Only a span
+ * with no attributes and exactly one text-node child qualifies; every span
+ * with meaning of its own (code tokens, KaTeX, image alt text) still
+ * serializes as an element.
  */
 function serialize(node: Node, indent: string, inPre: boolean): string {
   if (node.nodeType !== Node.ELEMENT_NODE) return ''
@@ -31,6 +40,15 @@ function serialize(node: Node, indent: string, inPre: boolean): string {
   return `${indent}<${open}>\n${serializeChildren(element, `${indent}  `, nowInPre)}`
 }
 
+/** Whether a node is the renderer's own invisible text wrapper (see {@link serialize}). */
+function isTextWrapper(node: Node, inPre: boolean): boolean {
+  if (inPre || node.nodeType !== Node.ELEMENT_NODE) return false
+  const element = node as Element
+  if (element.tagName !== 'SPAN' || element.attributes.length !== 0) return false
+  const only = element.firstChild
+  return only !== null && only === element.lastChild && only.nodeType === Node.TEXT_NODE
+}
+
 function serializeChildren(element: Element, indent: string, inPre: boolean): string {
   let out = ''
   let textRun = ''
@@ -41,7 +59,7 @@ function serializeChildren(element: Element, indent: string, inPre: boolean): st
     textRun = ''
   }
   for (const child of element.childNodes) {
-    if (child.nodeType === Node.TEXT_NODE) {
+    if (child.nodeType === Node.TEXT_NODE || isTextWrapper(child, inPre)) {
       textRun += child.textContent ?? ''
       continue
     }

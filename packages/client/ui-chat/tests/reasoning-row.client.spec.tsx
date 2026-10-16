@@ -216,7 +216,7 @@ describe('ReasoningRow', () => {
     expect(view.queryByText('**Comparing checkout and merge bases**')).toBeNull()
 
     fireEvent.click(view.getByText('思考'))
-    expect(view.getByText('Comparing checkout and merge bases').tagName).toBe('STRONG')
+    expect(view.getByText('Comparing checkout and merge bases').closest('strong')).not.toBeNull()
     expect(view.container.querySelector('[class*="thinkBody"]')?.textContent).not.toContain('**')
   })
 
