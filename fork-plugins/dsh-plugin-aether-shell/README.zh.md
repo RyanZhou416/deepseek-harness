@@ -27,7 +27,7 @@ kind: "package-bundle"
 
 ### 前置条件与安装
 
-插件面向 DSH `0.1.7-rc.1`。默认的 `legacy` 数据模式支持原生 AetherShell `12.0.2` 协议；`typed-v1` 需要个人构建版 `12.0.2+ryan.2` 提供的类型化数据能力。单独安装 AetherShell；如果 Host 已继承的 PATH 中没有它，配置解释器绝对路径。Windows 系统级安装可使用 `C:\Program Files\AetherShell\ae.exe`；修改 PATH 不会更新已运行 Host 的环境。
+插件面向 DSH `0.1.7-rc.1`。插件 `.6` 需要本 fork 配套的 Host 构建，其工具运行时支持按结果省略展示 metadata；不要只把插件装到旧 Host 上。默认的 `legacy` 数据模式支持原生 AetherShell `12.0.2` 协议；`typed-v1` 需要个人构建版 `12.0.2+ryan.2` 提供的类型化数据能力。单独安装 AetherShell；如果 Host 已继承的 PATH 中没有它，配置解释器绝对路径。Windows 系统级安装可使用 `C:\Program Files\AetherShell\ae.exe`；修改 PATH 不会更新已运行 Host 的环境。
 
 从 checkout 构建并打包，无须安装依赖：
 
