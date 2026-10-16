@@ -171,8 +171,13 @@ export function decodeFailure(error: string): AetherFailure {
   if (!isJsonObject(parsed)) return { message: boundedMessage(error) }
   const inner = parsed.error
   if (!isJsonObject(inner)) return { message: boundedMessage(error) }
+  return decodeFailureFields(inner) ?? { message: boundedMessage(error) }
+}
+
+/** Decode known fields without parsing an already structured native failure again. */
+function decodeFailureFields(inner: Record<string, JsonValue>): AetherFailure | undefined {
   const message = inner.message
-  if (typeof message !== 'string') return { message: boundedMessage(error) }
+  if (typeof message !== 'string') return undefined
   const suggested = inner.did_you_mean
   const didYouMean = Array.isArray(suggested)
     ? suggested.filter((name): name is string => typeof name === 'string').map(name => boundedMessage(name))
@@ -184,6 +189,8 @@ export function decodeFailure(error: string): AetherFailure {
     ...didYouMean === undefined || didYouMean.length === 0 ? {} : { didYouMean },
     ...typeof inner.hint === 'string' ? { hint: boundedMessage(inner.hint) } : {},
     ...typeof inner.retryable === 'boolean' ? { retryable: inner.retryable } : {},
+    ...typeof inner.phase === 'string' || typeof inner.side_effects === 'string' || typeof inner.safe_to_retry === 'boolean'
+      ? { details: inner } : {},
   }
 }
 
@@ -227,9 +234,13 @@ export function toOutcome(
       ...shared,
     }
   }
+  const direct = isJsonObject(envelope.metadata) ? envelope.metadata.error : undefined
+  const failure = isJsonObject(direct) ? decodeFailureFields(direct) : undefined
   return {
     kind: 'error',
-    error: decodeFailure(envelope.error ?? 'the interpreter reported an unsuccessful request without an error message'),
+    error: failure === undefined || direct === undefined
+      ? decodeFailure(envelope.error ?? 'the interpreter reported an unsuccessful request without an error message')
+      : { ...failure, details: direct },
     ...envelope.resultType === undefined ? {} : { resultType: envelope.resultType },
     ...envelope.metadata === undefined ? {} : { metadata: envelope.metadata },
     ...shared,

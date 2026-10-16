@@ -1,0 +1,26 @@
+# Composition owner for the AetherShell retained-result scenario. The scenario is
+# authored, so this live twin is never recorded; it exists so the composition has
+# exactly one owner and so the replay patch's plugin wiring has a reviewable
+# counterpart. `maxResultBytes` is the trusted deployment budget this scenario
+# records: the listing the interpreter reports is larger than it, so the value is
+# retained whole and the model receives an id instead of the value.
+- insert:
+    - id: aether-shell
+      name: '../../../fork-plugins/dsh-plugin-aether-shell/src/index.ts'
+      config:
+        executable: !!js process.execPath
+        executableArgs:
+          # The fixture sits beside the selected Session fixture, so the sibling
+          # path is derived from the harness's own absolute fixture path.
+          - !!js 'process.env.DSH_SNAPSHOT_FILE.replace(/[^\\/]+$/, "aether-results-fixture.mjs")'
+        structuredDataMode: typed-v1
+        maxResultBytes: 4096
+
+# The recorded scenario exercises the native AetherShell query tools only. Both
+# shipped shell tools are disabled so the pinned header and prompt do not depend
+# on the host's shell dialect (tool-pwsh on Windows, tool-bash elsewhere).
+- id: tool-bash
+  disabled: true
+
+- id: tool-pwsh
+  disabled: true

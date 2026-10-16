@@ -184,6 +184,20 @@ describe('ToolRuntime', () => {
     })
   })
 
+  it.each([undefined, null] as const)('distinguishes omitted metadata from JSON null: %s', async (projected) => {
+    const ctx = await setup()
+    ctx.tools.register({
+      ...echoTool,
+      name: 'conditional-meta',
+      output: { ...echoTool.output, presentationMeta: () => projected },
+    })
+    const result = await ctx.tools.execute({ signal: testToolSignal, callId: ToolCallId('conditional-meta'), name: 'conditional-meta', arguments: { text: 'ok' } })
+    expect(result.isError).toBe(false)
+    expect(result.value).toBe('ok')
+    expect('meta' in result).toBe(projected !== undefined)
+    if (projected === null) expect(result.meta).toBeNull()
+  })
+
   it('omits meta when no presentation projector is declared', async () => {
     const ctx = await setup()
     ctx.tools.register({

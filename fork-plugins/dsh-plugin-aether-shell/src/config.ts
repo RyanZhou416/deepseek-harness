@@ -31,7 +31,15 @@ const DEFAULT_GRACE_MS = 3_000
 /** Default cap on the complete result one call may hand back, in bytes. */
 const DEFAULT_MAX_RESULT_BYTES = 65_536
 /** Smallest complete-result budget a deployment may configure, in bytes. */
-const MIN_RESULT_BYTES = 1_024
+export const MIN_RESULT_BYTES = 1_024
+/** Default number of oversized results one agent may hold for later paging. */
+const DEFAULT_MAX_RESULTS_PER_OWNER = 8
+/** Default serialized bytes of retained results one agent may hold. */
+const DEFAULT_MAX_STORED_RESULT_BYTES_PER_OWNER = 16 * 1024 * 1024
+/** Default serialized bytes of retained results every agent may hold together. */
+const DEFAULT_MAX_STORED_RESULT_BYTES = 64 * 1024 * 1024
+/** Default idle expiry for one retained result, in milliseconds. */
+const DEFAULT_RESULT_IDLE_TIMEOUT_MS = 1_800_000
 /** Default cap on ontology entries returned by one discovery call. */
 const DEFAULT_MAX_MANIFEST_ENTRIES = 64
 /** Default cap on one `predicate` expression fragment, in characters. */
@@ -156,6 +164,21 @@ export interface Config {
   sessionStartupTimeoutMs?: number
   /** Maximum background-job runtime; zero imposes no ceiling (default 0). */
   maxBackgroundRuntimeMs?: number
+  /**
+   * Oversized results one agent may hold for later paging (default 8).
+   *
+   * A result over `maxResultBytes` from `aether_call`, `aether_pipeline`, or
+   * `aether_eval` is retained whole and returned as a retrieval id. Reaching this
+   * limit refuses the new value rather than evicting an older one, so an id the
+   * model still holds never stops resolving.
+   */
+  maxResultsPerOwner?: number
+  /** Serialized bytes of retained results one agent may hold (default 16777216). */
+  maxStoredResultBytesPerOwner?: number
+  /** Serialized bytes of retained results every agent may hold together (default 67108864). */
+  maxStoredResultBytes?: number
+  /** Idle expiry for one retained result in milliseconds; zero disables expiry (default 1800000). */
+  resultIdleTimeoutMs?: number
 }
 
 /** Runtime configuration schema for the AetherShell tools. */
@@ -178,6 +201,10 @@ export const Config: z<Config> = z.object({
   sessionIdleTimeoutMs: z.number().step(1).min(0).default(1_800_000),
   sessionStartupTimeoutMs: z.number().step(1).min(1).default(30_000),
   maxBackgroundRuntimeMs: z.number().step(1).min(0).default(0),
+  maxResultsPerOwner: z.number().step(1).min(1).default(DEFAULT_MAX_RESULTS_PER_OWNER),
+  maxStoredResultBytesPerOwner: z.number().step(1).min(MIN_RESULT_BYTES).default(DEFAULT_MAX_STORED_RESULT_BYTES_PER_OWNER),
+  maxStoredResultBytes: z.number().step(1).min(MIN_RESULT_BYTES).default(DEFAULT_MAX_STORED_RESULT_BYTES),
+  resultIdleTimeoutMs: z.number().step(1).min(0).default(DEFAULT_RESULT_IDLE_TIMEOUT_MS),
 })
 
 /** Every configuration value one run reads, with no optional field left. */
@@ -200,6 +227,10 @@ export interface ResolvedConfig {
   readonly sessionIdleTimeoutMs: number
   readonly sessionStartupTimeoutMs: number
   readonly maxBackgroundRuntimeMs: number
+  readonly maxResultsPerOwner: number
+  readonly maxStoredResultBytesPerOwner: number
+  readonly maxStoredResultBytes: number
+  readonly resultIdleTimeoutMs: number
 }
 
 /** Reject a budget the plugin could not run with, at load rather than at the first call. */
@@ -264,6 +295,14 @@ function readSessionLimit(value: number): number {
   return value
 }
 
+/** Validate one positive whole-count or whole-byte retention bound. */
+function readCount(name: string, value: number): number {
+  if (!Number.isSafeInteger(value) || value <= 0) {
+    throw new Error(`aether-shell: ${name} must be a positive safe integer`)
+  }
+  return value
+}
+
 /** Reject an unusable fixture argv entry at load; an empty element would shift the interpreter's own argv. */
 function readExecutableArgs(values: readonly string[]): readonly string[] {
   return values.map((value, index) => readText(`executableArgs[${index}]`, value))
@@ -302,6 +341,11 @@ export function resolveConfig(config: Config = {}): ResolvedConfig {
   if (maxTimeoutMs < timeoutMs) {
     throw new Error(`aether-shell: maxTimeoutMs (${maxTimeoutMs}) must be at least timeoutMs (${timeoutMs})`)
   }
+  const maxStoredResultBytesPerOwner = readCount('maxStoredResultBytesPerOwner', config.maxStoredResultBytesPerOwner ?? DEFAULT_MAX_STORED_RESULT_BYTES_PER_OWNER)
+  const maxStoredResultBytes = readCount('maxStoredResultBytes', config.maxStoredResultBytes ?? DEFAULT_MAX_STORED_RESULT_BYTES)
+  if (maxStoredResultBytes < maxStoredResultBytesPerOwner) {
+    throw new Error(`aether-shell: maxStoredResultBytes (${maxStoredResultBytes}) must be at least maxStoredResultBytesPerOwner (${maxStoredResultBytesPerOwner}), or one agent's own limit could never be reached`)
+  }
   return {
     executable: readExecutable(config.executable ?? DEFAULT_EXECUTABLE),
     executableArgs: readExecutableArgs(config.executableArgs ?? []),
@@ -321,6 +365,10 @@ export function resolveConfig(config: Config = {}): ResolvedConfig {
     sessionIdleTimeoutMs: readMilliseconds('sessionIdleTimeoutMs', config.sessionIdleTimeoutMs ?? 1_800_000, true),
     sessionStartupTimeoutMs: readMilliseconds('sessionStartupTimeoutMs', config.sessionStartupTimeoutMs ?? 30_000, false),
     maxBackgroundRuntimeMs: readMilliseconds('maxBackgroundRuntimeMs', config.maxBackgroundRuntimeMs ?? 0, true),
+    maxResultsPerOwner: readCount('maxResultsPerOwner', config.maxResultsPerOwner ?? DEFAULT_MAX_RESULTS_PER_OWNER),
+    maxStoredResultBytesPerOwner,
+    maxStoredResultBytes,
+    resultIdleTimeoutMs: readMilliseconds('resultIdleTimeoutMs', config.resultIdleTimeoutMs ?? DEFAULT_RESULT_IDLE_TIMEOUT_MS, true),
   }
 }
 

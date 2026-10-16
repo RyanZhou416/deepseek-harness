@@ -88,6 +88,8 @@ ctx.tools.register(defineTool({
 
 ### Host 展示描述
 
+当某次结果没有 metadata 时，`output.presentationMeta` 可返回 `undefined`，注册表会省略 `meta`，而非记录空对象。返回的 JSON null 仍是显式 metadata；非 undefined 的 metadata 仍须通过无损 JSON 校验并冻结。
+
 工具可以为 Host 本地消费方保留纯函数 `presentCall()` 与 `presentResult()` 方法。内置 Web Client 不消费这些值，而是通过 `tool.call.toolview` 选择 renderer，并从原始调用参数、结果内容、失败状态与持久 metadata 派生 card props。[Client 派生展示决策](../../../.agents/notes/implemented/architecture/2026-08-23-client-derived-tool-presentation.zh.md)负责该 transport 拆分。
 
 -----

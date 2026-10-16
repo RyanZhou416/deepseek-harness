@@ -14,6 +14,7 @@
  * | `aether_call` | `call <builtin>` |
  * | `aether_pipeline` | `pipeline` |
  * | `aether_eval` | `ae --deterministic -c <code>` |
+ * | `aether_result_page` | none: reads a value this deployment retained |
  *
  * The deployment owns the permission decision, and the DSH sandbox is the
  * authority behind it. Every child runs under the calling session's resolved
@@ -34,11 +35,15 @@
  * optional and read per call, so the managed `DSH_*` facts are present exactly
  * when that registry is mounted.
  *
- * The four query tools use fresh processes under hard deadlines. Persistent
- * tools exist while the live-agent registry is mounted; each handle owns one
- * long-lived interpreter and its native in-memory state, without command replay
- * or restart recovery. Background execution exists while the job registry is
- * mounted, with ownership and output retrieval supplied by that registry.
+ * The four query tools use fresh processes under hard deadlines. A complete value
+ * over the deployment's result budget from `aether_call`, `aether_pipeline`, or
+ * `aether_eval` is retained in plugin process memory and returned as an id, which
+ * `aether_result_page` reads one bounded page at a time; the store writes no file,
+ * widens no policy, and never re-runs the program that produced the value.
+ * Persistent tools exist while the live-agent registry is mounted; each handle
+ * owns one long-lived interpreter and its native in-memory state, without command
+ * replay or restart recovery. Background execution exists while the job registry
+ * is mounted, with ownership and output retrieval supplied by that registry.
  * Every managed range is terminated and awaited on its lifetime's cleanup.
  * When the provider cannot prove quiescence, the plugin reports cleanup failure
  * rather than claiming the interpreter or its descendants stopped.
@@ -52,6 +57,9 @@ import type { Config } from './config.ts'
 import { AetherProcesses, createExecutableResolver } from './exec.ts'
 import { createAetherTools } from './tools.ts'
 import { createAetherBackgroundTool } from './background.ts'
+import { createAetherResultTools } from './result-tools.ts'
+import { AetherResults } from './results.ts'
+import { renderPage } from './render.ts'
 import { createAetherSessionTools } from './session-tools.ts'
 
 /** Plugin identity registered with the Cordis loader. */
@@ -76,16 +84,30 @@ export { Config } from './config.ts'
 export function apply(ctx: Context, config: Config = {}): void {
   const resolved = resolveConfig(config)
   const processes = new AetherProcesses((message: string) => { ctx.logger.warn(message) })
-  // Session disposers register later so they close their streams before this
-  // final process-range cleanup runs.
+  // Session and result disposers register later so they release their own state
+  // before this final process-range cleanup runs.
   ctx.effect(() => () => processes.dispose(resolved.graceMs), 'aether-shell.processes')
+  const results = new AetherResults({
+    config: resolved,
+    registry: () => ctx.get('agents'),
+    renderPage,
+    report: (message: string) => { ctx.logger.warn(message) },
+  }, {
+    maxResultsPerOwner: resolved.maxResultsPerOwner,
+    maxStoredResultBytesPerOwner: resolved.maxStoredResultBytesPerOwner,
+    maxStoredResultBytes: resolved.maxStoredResultBytes,
+    resultIdleTimeoutMs: resolved.resultIdleTimeoutMs,
+  })
+  ctx.effect(() => () => results.dispose(), 'aether-shell.results')
   const dependencies = {
     ctx,
     config: resolved,
     processes,
     resolveExecutable: createExecutableResolver(ctx.subprocess, resolved.executable),
   }
-  for (const tool of createAetherTools(dependencies)) ctx.tools.register(tool)
+  // The store itself never writes a file and never widens the file policy: a
+  // retained result is plugin process memory, released on unload.
+  for (const tool of createAetherTools({ ...dependencies, results })) ctx.tools.register(tool)
 
   ctx.inject(['agents'], (scope) => {
     const { sessions, tools } = createAetherSessionTools({ ...dependencies, ctx: scope }, {
@@ -95,6 +117,10 @@ export function apply(ctx: Context, config: Config = {}): void {
     })
     scope.effect(() => () => sessions.dispose(), 'aether-shell.sessions')
     for (const tool of tools) scope.tools.register(tool)
+    // Retrieval is registered only where the live-agent registry is: an id is
+    // fenced to the exact live Agent that produced it, so advertising the tool
+    // without that registry would promise an ownership nothing can check.
+    for (const tool of createAetherResultTools({ ctx: scope, config: resolved, results })) scope.tools.register(tool)
   })
 
   ctx.inject(['jobs'], (scope) => {
@@ -113,6 +139,7 @@ export { describeError, toolAborted } from './errors.ts'
 export { AETHER_TIMEOUT_CODE, aetherEnvironment, AetherProcesses as AetherProcessRegistry, createExecutableResolver as createAetherExecutableResolver, runAether } from './exec.ts'
 export type { AetherExecDeps, AetherInvocation, AetherPreparation, AetherRunRequest } from './exec.ts'
 export { applyResultLimit, RESULT_LIMIT_CODE } from './limit.ts'
+export type { AetherRetention, AetherRetentionClaim } from './limit.ts'
 export { jsonKindOf, stripRequestEcho } from './outcome.ts'
 export type {
   AetherDeniedOutcome,
@@ -122,12 +149,39 @@ export type {
   AetherInterruptedOutcome,
   AetherOutcome,
   AetherProcessFacts,
+  AetherRetainedFacts,
+  AetherRetainedOutcome,
   AetherSandboxFacts,
   AetherValueOutcome,
 } from './outcome.ts'
 export { AetherProtocolError, decodeEnvelope, decodeEvalOutcome, decodeFailure, toOutcome } from './protocol.ts'
 export type { AetherNativeEnvelope } from './protocol.ts'
-export { renderDiscovery, renderOutcome } from './render.ts'
+export { renderDiscovery, renderOutcome, renderPage, renderResultPage } from './render.ts'
+export { createAetherResultTools } from './result-tools.ts'
+export type { AetherResultToolDependencies } from './result-tools.ts'
+export {
+  aetherResultId,
+  AetherResults,
+  RESULT_FOREIGN_CODE,
+  RESULT_ITEM_TOO_LARGE_CODE,
+  RESULT_NOT_FOUND_CODE,
+  RESULT_OWNER_CODE,
+  RESULT_PAGE_ARG_CODE,
+} from './results.ts'
+export type {
+  AetherResultDropped,
+  AetherResultFailure,
+  AetherResultFormat,
+  AetherResultId,
+  AetherResultPage,
+  AetherResultPageOutcome,
+  AetherResultPageRequest,
+  AetherResultUnit,
+  AetherRetainedValue,
+  AetherResultsDependencies,
+  AetherResultsSettings,
+  AetherRetainOutcome,
+} from './results.ts'
 export {
   assertEvalCode,
   assertFlatBuiltin,

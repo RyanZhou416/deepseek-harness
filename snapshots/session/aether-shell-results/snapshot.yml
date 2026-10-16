@@ -1,0 +1,11 @@
+version: 1
+scenario: aether-shell-results
+profile: headless
+composition: aether-shell-results
+recording: authored
+permission: danger-full-access
+header:
+  class: aether-shell-results
+  pin: true
+replay:
+  override: true

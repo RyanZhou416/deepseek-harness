@@ -11,6 +11,10 @@
  * and a confining backend can refuse the operation before the interpreter ever
  * runs.
  *
+ * A produced value too large to return inline becomes {@link AetherRetainedOutcome}
+ * instead of a failure: it carries the same four facts and an identity its
+ * consumer pages, so an oversized result is still delivered whole.
+ *
  * @module @ryanzhou416/dsh-plugin-aether-shell/outcome
  */
 
@@ -67,8 +71,10 @@ export interface AetherFailure {
   hint?: string
   /** Names the interpreter suggested instead, when it reported any. */
   didYouMean?: string[]
-  /** Whether the interpreter considers the same request worth repeating. */
+  /** Whether the interpreter considers a corrected request potentially recoverable; not permission to replay effects. */
   retryable?: boolean
+  /** Direct native failure data, including phase and known effects, when the interpreter supplied it. */
+  details?: JsonValue
 }
 
 /** An exchange that produced a value. */
@@ -103,6 +109,43 @@ export interface AetherErrorOutcome {
   stderr: AetherDiagnostics
 }
 
+/** What one retained result holds, and how its consumer pages it. */
+export interface AetherRetainedFacts {
+  /** Opaque retrieval id, resolvable only by the agent whose call produced the value. */
+  id: string
+  /** The interpreter's own result type name for the retained value, when it named one. */
+  originalResultType?: string
+  /** Serialized UTF-8 byte size of the retained value. */
+  bytes: number
+  /** Units the retained value holds, counted in `unit`. */
+  total: number
+  /** The unit this value's own shape pages by default. */
+  unit: 'items' | 'utf8_bytes'
+  /** The whole value was retained; no part of it was dropped. */
+  complete: true
+  /** False: the value was not delivered inline. */
+  inline: false
+}
+
+/**
+ * An exchange whose complete value was too large to return inline, retained
+ * whole for paging with `aether_result_page`.
+ *
+ * This is a produced value, not a failure: the interpreter's process facts, its
+ * metadata, and its diagnostic stream travel unchanged, and the whole value is
+ * still held. Nothing here is a page — `result` describes the retained value,
+ * and `complete` is true because retention never drops a part of it.
+ */
+export interface AetherRetainedOutcome {
+  kind: 'retained'
+  /** The retained value's identity and shape, without any of its content. */
+  result: AetherRetainedFacts
+  metadata?: JsonValue
+  sandbox: AetherSandboxFacts
+  process: AetherProcessFacts
+  stderr: AetherDiagnostics
+}
+
 /**
  * An exchange the sandbox refused. The operation never ran, so this is not a
  * failure the interpreter reported and not a protocol problem: the recorded
@@ -129,7 +172,7 @@ export interface AetherInterruptedOutcome {
 }
 
 /** Canonical outcome of one AetherShell tool call. */
-export type AetherOutcome = AetherValueOutcome | AetherErrorOutcome | AetherDeniedOutcome | AetherInterruptedOutcome
+export type AetherOutcome = AetherValueOutcome | AetherRetainedOutcome | AetherErrorOutcome | AetherDeniedOutcome | AetherInterruptedOutcome
 
 /**
  * Whether a decoded value is a JSON object.
@@ -185,10 +228,7 @@ export function numberFidelityProblem(value: number): string | undefined {
  */
 export function stripRequestEcho(metadata: JsonValue | undefined): JsonValue | undefined {
   if (metadata === undefined || !isJsonObject(metadata)) return metadata
-  const kept: Record<string, JsonValue> = {}
-  for (const [key, value] of Object.entries(metadata)) {
-    if (key !== 'code_executed' && key !== 'code_attempted') kept[key] = value
-  }
+  const kept = Object.fromEntries(Object.entries(metadata).filter(([key]) => key !== 'code_executed' && key !== 'code_attempted'))
   return Object.keys(kept).length === 0 ? undefined : kept
 }
 

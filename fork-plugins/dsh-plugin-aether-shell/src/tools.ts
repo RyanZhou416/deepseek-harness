@@ -38,8 +38,10 @@ import type { AetherExecDeps, AetherProcesses } from './exec.ts'
 import { deadlineExhaustedOutcome, runAether } from './exec.ts'
 import { probeTypedCapabilities } from './capabilities.ts'
 import { applyResultLimit } from './limit.ts'
-import type { AetherOutcome } from './outcome.ts'
+import type { AetherRetention } from './limit.ts'
+import type { AetherOutcome, AetherValueOutcome } from './outcome.ts'
 import { renderDiscovery, renderOutcome } from './render.ts'
+import type { AetherResults } from './results.ts'
 import {
   assertEvalCode,
   assertRequestBytes,
@@ -101,6 +103,7 @@ const FAILURE_SCHEMA = {
     hint: { type: 'string' },
     didYouMean: { type: 'array', items: { type: 'string' } },
     retryable: { type: 'boolean' },
+    details: { type: 'json' },
   },
 } as const
 
@@ -160,8 +163,47 @@ const INTERRUPTED_ARM = {
   },
 } as const
 
+/** The arm an exchange whose complete value was retained for paging returns. */
+const RETAINED_ARM = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    kind: { type: 'string', required: true, const: 'retained' },
+    result: {
+      type: 'object',
+      additionalProperties: false,
+      required: true,
+      properties: {
+        id: { type: 'string', required: true, description: 'Retrieval id to pass to aether_result_page.' },
+        originalResultType: { type: 'string', description: 'The interpreter\'s own result type name for the retained value, when it named one.' },
+        bytes: { type: 'number', required: true, description: 'Serialized UTF-8 byte size of the retained value.' },
+        total: { type: 'number', required: true, description: 'Units the retained value holds, counted in `unit`.' },
+        unit: { type: 'string', required: true, enum: ['items', 'utf8_bytes'] },
+        complete: { type: 'boolean', required: true, const: true, description: 'The whole value was retained; no part of it was dropped.' },
+        inline: { type: 'boolean', required: true, const: false, description: 'False: the value was not delivered inline.' },
+      },
+    },
+    metadata: { type: 'json' },
+    sandbox: SANDBOX_SCHEMA,
+    process: PROCESS_SCHEMA,
+    stderr: DIAGNOSTICS_SCHEMA,
+  },
+} as const
+
 /** Canonical result of a call, a pipeline, or a program. */
-const OUTCOME_SCHEMA = { oneOf: [VALUE_ARM, ERROR_ARM, DENIED_ARM, INTERRUPTED_ARM] } as const
+const OUTCOME_SCHEMA = { oneOf: [VALUE_ARM, RETAINED_ARM, ERROR_ARM, DENIED_ARM, INTERRUPTED_ARM] } as const
+
+/**
+ * What a tool that returns a complete value says about an oversized one.
+ *
+ * The rule is stated once because all three value-returning tools share it, and
+ * it is stated for the model: a retained result is still delivered, so a caller
+ * that reads only this sentence knows to page rather than to give up.
+ */
+const RETENTION_GUIDANCE = 'A result over the deployment\'s complete-result budget is retained whole and '
+  + 'returned as an id you read with `aether_result_page`, which never runs the program again; when this '
+  + 'deployment cannot retain it, the call fails loudly and names the narrowing remedy instead of returning a '
+  + 'partial value. '
 
 /**
  * Denial guidance every effect-capable tool carries.
@@ -324,6 +366,8 @@ export interface AetherToolDependencies {
   readonly processes: AetherProcesses
   /** Interpreter resolver shared by every call. */
   readonly resolveExecutable: (signal?: AbortSignal) => Promise<string>
+  /** Retained-result store the value-returning tools hand an oversized value to. */
+  readonly results: AetherResults
 }
 
 /** Reject a blank working directory before it reaches a spawn. */
@@ -368,19 +412,33 @@ function ontologyPage(offset: number | undefined, limit: number | undefined, max
 
 /**
  * Attach the bounded ontology page to an outcome that produced a value.
+ *
+ * Discovery is bounded by its own entry budget and is never given a retention,
+ * so the retained arm is unreachable here; it is refused rather than returned,
+ * because this tool's schema declares no such arm.
  * @param query - the category or builtin name the call named, when it named one.
  * @param outcome - the canonical outcome of the discovery request.
  * @param page - the validated and capped page.
  * @returns the discovery outcome, unchanged for a failure or an interruption.
+ * @throws Error when an ontology page was retained, which this plugin never asks for.
  */
 function projectDiscovery(
   query: string | undefined,
   outcome: AetherOutcome,
   page: AetherOntologyPage,
 ): AetherDiscoverOutcome {
-  if (outcome.kind !== 'value') return outcome
-  const { value, discovery } = projectOntology(query, outcome.value, page)
-  return { ...outcome, value, discovery }
+  switch (outcome.kind) {
+    case 'value': {
+      const { value, discovery } = projectOntology(query, outcome.value, page)
+      return { ...outcome, value, discovery }
+    }
+    case 'retained':
+      throw new Error('aether-shell: aether_discover cannot return a retained result')
+    case 'error':
+    case 'denied':
+    case 'interrupted':
+      return outcome
+  }
 }
 
 /**
@@ -390,7 +448,7 @@ function projectDiscovery(
  * @returns the tool definitions in registration order.
  */
 export function createAetherTools(dependencies: AetherToolDependencies): ToolDefinition[] {
-  const { ctx, config, processes, resolveExecutable } = dependencies
+  const { ctx, config, processes, resolveExecutable, results } = dependencies
 
   /** Complete execution inputs for one call, including the calling session's own sandbox policy. */
   const depsFor = (exec: ToolRunContext): AetherExecDeps => ({
@@ -403,6 +461,38 @@ export function createAetherTools(dependencies: AetherToolDependencies): ToolDef
     resolveExecutable,
     report: (message: string) => { ctx.logger.warn(message) },
   })
+
+  /**
+   * How this call retains an oversized value, when it can retain one at all.
+   *
+   * A call with no calling agent cannot own a retained result, and the store
+   * refuses one whose agent is not the live registered Agent for its id; either
+   * way the bound falls back to the coded limit failure rather than advertising
+   * an id nothing can resolve.
+   * @param exec - the calling execution.
+   * @returns the retention for this call, or undefined when no agent owns it.
+   */
+  const retentionFor = (exec: ToolRunContext): AetherRetention | undefined => {
+    const owner = exec.agent
+    if (owner === undefined) return undefined
+    return {
+      retain: (outcome: AetherValueOutcome) => {
+        const stored = results.retain(owner, outcome.value, outcome.resultType)
+        if (stored.kind === 'refused') return { reason: stored.reason }
+        return {
+          outcome: {
+            kind: 'retained',
+            result: stored.value.summary,
+            ...outcome.metadata === undefined ? {} : { metadata: outcome.metadata },
+            sandbox: outcome.sandbox,
+            process: outcome.process,
+            stderr: outcome.stderr,
+          },
+          discard: () => { stored.value.discard() },
+        }
+      },
+    }
+  }
 
   const discover = defineTool({
     name: 'aether_discover',
@@ -458,9 +548,8 @@ export function createAetherTools(dependencies: AetherToolDependencies): ToolDef
       + CALL_ARGUMENT_CHANNEL[config.structuredDataMode]
       + 'A process-capable builtin runs under this call\'s DSH file policy, which governs writes and '
       + 'deletes rather than reads, network, or process control; the interpreter\'s own `sh` switch starts off as a '
-      + 'convenience default, not a boundary. Foreground only, under a hard deadline. A '
-      + 'result larger than the deployment\'s budgets fails loudly and names the narrowing remedy instead of returning '
-      + 'a partial value. '
+      + 'convenience default, not a boundary. Foreground only, under a hard deadline. '
+      + RETENTION_GUIDANCE
       + DENIAL_GUIDANCE,
     parameters: {
       builtin: { type: 'string', required: true, description: 'Flat native builtin name, for example "ls" or "crypto_hash".' },
@@ -474,6 +563,7 @@ export function createAetherTools(dependencies: AetherToolDependencies): ToolDef
     output: {
       schema: OUTCOME_SCHEMA,
       render: (_args, value) => [{ type: 'text', text: renderOutcome(value) }],
+      presentationMeta: (_args, value) => value.kind === 'retained' ? { resultId: value.result.id } : undefined,
     },
     async execute(args, exec) {
       assertWorkdir(args.cwd)
@@ -486,7 +576,7 @@ export function createAetherTools(dependencies: AetherToolDependencies): ToolDef
         structured: config.structuredDataMode,
         requestText,
       })
-      return applyResultLimit(outcome, renderOutcome(outcome), config.maxResultBytes)
+      return applyResultLimit(outcome, renderOutcome(outcome), config.maxResultBytes, retentionFor(exec))
     },
   })
 
@@ -500,6 +590,7 @@ export function createAetherTools(dependencies: AetherToolDependencies): ToolDef
       + STEP_ARGUMENT_CHANNEL[config.structuredDataMode]
       + 'Foreground only, '
       + 'under a hard deadline. '
+      + RETENTION_GUIDANCE
       + DENIAL_GUIDANCE,
     parameters: {
       steps: {
@@ -526,6 +617,7 @@ export function createAetherTools(dependencies: AetherToolDependencies): ToolDef
     output: {
       schema: OUTCOME_SCHEMA,
       render: (_args, value) => [{ type: 'text', text: renderOutcome(value) }],
+      presentationMeta: (_args, value) => value.kind === 'retained' ? { resultId: value.result.id } : undefined,
     },
     async execute(args, exec) {
       assertWorkdir(args.cwd)
@@ -538,7 +630,7 @@ export function createAetherTools(dependencies: AetherToolDependencies): ToolDef
         structured: config.structuredDataMode,
         requestText,
       })
-      return applyResultLimit(outcome, renderOutcome(outcome), config.maxResultBytes)
+      return applyResultLimit(outcome, renderOutcome(outcome), config.maxResultBytes, retentionFor(exec))
     },
   })
 
@@ -554,6 +646,7 @@ export function createAetherTools(dependencies: AetherToolDependencies): ToolDef
       + 'the program can change its own environment and reach the process builtins either way. Numbers outside the '
       + 'exact integer range this runtime can carry are rejected rather than rounded, so ask for such a value as text. '
       + 'Foreground only, under a hard deadline. '
+      + RETENTION_GUIDANCE
       + DENIAL_GUIDANCE,
     parameters: {
       code: { type: 'string', required: true, description: 'AetherShell program text: an expression, a lambda, or a sequence of statements.' },
@@ -562,6 +655,7 @@ export function createAetherTools(dependencies: AetherToolDependencies): ToolDef
     output: {
       schema: OUTCOME_SCHEMA,
       render: (_args, value) => [{ type: 'text', text: renderOutcome(value) }],
+      presentationMeta: (_args, value) => value.kind === 'retained' ? { resultId: value.result.id } : undefined,
     },
     async execute(args, exec) {
       assertWorkdir(args.cwd)
@@ -572,7 +666,7 @@ export function createAetherTools(dependencies: AetherToolDependencies): ToolDef
         timeoutMs: callTimeout(args.timeoutMs, config),
         signal: exec.signal,
       })
-      return applyResultLimit(outcome, renderOutcome(outcome), config.maxResultBytes)
+      return applyResultLimit(outcome, renderOutcome(outcome), config.maxResultBytes, retentionFor(exec))
     },
   })
 

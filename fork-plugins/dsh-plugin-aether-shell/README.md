@@ -46,6 +46,7 @@ From the checkout, install the generated tarball with `pnpm dsh plugin --profile
 | `aether_call` | Flat builtin name and positional JSON argument array | One call | Invoke one operation without generating AetherShell source. |
 | `aether_pipeline` | Ordered native steps and optional JSON input | One call | Filter, project and aggregate typed values in one execution. |
 | `aether_eval` | AetherShell source | One call | Evaluate expressions, lambdas and module calls in a fresh process. |
+| `aether_result_page` | Retained-result id, offset, format and optional drop | Until released | Read bounded pages of a complete result without repeating the operation. |
 | `aether_session_open` | Optional directory, label and deadline | Until closed | Start one persistent interpreter process and return an opaque session id. |
 | `aether_session_eval` | Session id and AetherShell source | One call | Evaluate a program in that process, where variables, functions, the current directory and the environment persist. |
 | `aether_session_read` | Session id | One call | Drain output a session wrote while no call was in flight, delivering it once. |
@@ -53,7 +54,7 @@ From the checkout, install the generated tarball with `pnpm dsh plugin --profile
 | `aether_session_close` | Session id | One call | Ask the native session to close and terminate its process. |
 | `aether_job_start` | AetherShell source, optional label, directory and deadline | Until done or killed | Start one background interpreter process and return its job id immediately. |
 
-The four query tools are stateless and start a fresh interpreter each call. They stay registered whenever the plugin is active, and none of them offers a background flag. The five session tools register while the live-agent registry is mounted, because a handle must belong to a calling agent; `aether_session_read` drains output written between calls, and a call in flight refuses a read because that output belongs to the call. `aether_job_start` registers while the job registry is mounted, with `job_output`, `job_list` and `job_kill` providing the read and stop controls.
+The four query tools start a fresh interpreter each call; retained JSON results live separately in bounded plugin memory. The result-page tool registers only with the live-agent registry. They stay registered whenever the plugin is active, and none of them offers a background flag. The five session tools register while the live-agent registry is mounted, because a handle must belong to a calling agent; `aether_session_read` drains output written between calls, and a call in flight refuses a read because that output belongs to the call. `aether_job_start` registers while the job registry is mounted, with `job_output`, `job_list` and `job_kill` providing the read and stop controls.
 
 Use `aether_discover` before relying on an unfamiliar builtin. Call arguments are positional: `{"builtin":"len","args":[[1,2,3]]}` returns `3`; an array argument occupies one position. Named argument objects are not exposed; pass a record inside the positional array so its fields remain one argument.
 
@@ -105,6 +106,14 @@ Query calls and session commands have explicit working directories and deadlines
 
 The response distinguishes a value, a native error, a file-sandbox denial, and an interruption. Interpreter exit facts and bounded stderr remain separate. Native API failures can occur with process exit zero. A returned application record containing `success:false` is ordinary data, not automatically a tool failure. AetherShell's child-program result remains inside that value; the interpreter's exit code is not the child's exit code.
 
+### Large results and error data
+
+A complete successful call, pipeline or eval value over the inline budget returns a distinct retained-result notice when a live owning Agent and storage capacity are available. Use `aether_result_page` with its id; pass back `nextOffset` until `complete` is true. `items` pages whole array elements or record fields. `json` returns UTF-8 byte chunks of the canonical JSON value: concatenate their `data` Strings in order, then parse once; it also retrieves a single oversized element. A page never silently cuts an item or character. `drop:true` releases the result. Paging does not run code or repeat effects.
+
+Results are private to the exact Agent, not shared by working directory. Count, per-Agent byte and global byte caps bound retention; byte caps account for encoded JSON, not V8 heap size. Full stores refuse new results without evicting existing ones. Idle expiry, Agent disposal, plugin unload or Host restart releases results; no recovery or disk cache is promised. Only complete, fidelity-checked captures are retained. A missing complete capture, unsafe number, absent owner or exhausted store remains a visible failure, not a partial result.
+
+Native failures exposing `metadata.error` are preserved as an object and rendered as JSON error data, including available expected/actual and phase/effect facts. Legacy error text remains supported. `safe_to_retry:false` prohibits automatic replay; a legacy recoverability hint is not a promise that earlier effects were undone. A returned business record containing `success:false` remains ordinary data.
+
 ### Configuration
 
 Override the bundle's `aether-shell` row in the profile patch. The executable may be an absolute path or a bare PATH name; relative paths containing separators are rejected.
@@ -119,7 +128,11 @@ Override the bundle's `aether-shell` row in the profile patch. The executable ma
 | `timeoutMs` / `maxTimeoutMs` | `120000` / `600000` | Default and maximum per-call hard deadlines. |
 | `maxRequestBytes` | `1048576` | Encoded request or source byte cap. |
 | `maxOutputBytes` / `maxSpillBytes` | `262144` / `8388608` | Per-stream memory and full-stream spill caps. |
-| `maxResultBytes` | `65536` | Complete canonical result and model-rendered response cap. |
+| `maxResultBytes` | `65536` | Complete inline result, retained notice and page response cap. |
+| `maxResultsPerOwner` | `8` | Retained results one Agent may hold. |
+| `maxStoredResultBytesPerOwner` | `16777216` | Encoded JSON bytes retained by one Agent. |
+| `maxStoredResultBytes` | `67108864` | Encoded JSON bytes retained by all Agents. |
+| `resultIdleTimeoutMs` | `1800000` | Release idle results after this interval; `0` disables expiry. |
 | `graceMs` | `3000` | Managed-process cleanup grace. |
 | `maxManifestEntries` | `64` | Discovery page-size cap. |
 | `maxExpressionChars` | `4096` | Per-step predicate length cap. |
@@ -156,7 +169,7 @@ The tool registry owns permission hooks and durable call/result events. The plug
 <a id="model-experience"></a>
 ## Model Experience
 
-Indirectly, through ten registered tools whose declarations, ownership and policy guidance the model reads on every request.
+Indirectly, through eleven registered tools whose declarations, ownership and policy guidance the model reads on every request.
 
 #### KV Cache effect
 
@@ -171,7 +184,7 @@ The tool declarations and their guidance form a stable request prefix for one co
 - Older native APIs interpolate `${` strings, emit record keys unquoted and treat a null pipeline seed as omitted. `legacy` refuses those inputs; verified `typed-v1` forwards them as typed data. Session programs retain their caller-written interpolation through encoded source, and background programs use the command line without an added wrapper.
 - Calls and pipelines accept flat builtin names, not module expressions. Use `aether_eval` or a persistent session for module syntax. Unsafe-range numeric integers are rejected rather than silently rounded; request large integers as text.
 - Printing to stdout or launching children that inherit stdout can contaminate a query tool's single-JSON response; that tool reports a protocol error rather than extracting a plausible result. Background jobs read raw streams and are not affected, but their output is unstructured text.
-- Oversized output is not parsed from a truncated tail. A surviving spill file is reported when available; otherwise narrow the query with native projection, filtering or `take`.
+- Truncated tails are never parsed as complete replies. The provider's complete spill can be decoded within `maxSpillBytes`; a capture exceeding that bound still fails explicitly. Large successful query values can be paged while their owner and plugin remain live; persistent-session and background output keep their separate existing limits.
 - Runtime-specific builtin semantics are separate from typed transport. The personal build preserves JSON null round trips and offers explicit byte/scalar length operations; older releases may retain different builtin behavior.
 
 <a id="dev-note"></a>

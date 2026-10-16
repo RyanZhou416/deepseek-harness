@@ -74,7 +74,7 @@ export interface AetherBackgroundSettings {
 }
 
 /** Capability services, resolved configuration, plugin-owned state, and the registry this tool starts jobs in. */
-export interface AetherBackgroundDependencies extends AetherToolDependencies {
+export interface AetherBackgroundDependencies extends Omit<AetherToolDependencies, 'results'> {
   /** The mounted job registry; the whole surface exists only while this does. */
   readonly jobs: JobRegistry
 }
@@ -114,7 +114,7 @@ export interface AetherJobFacts {
 
 /** One admitted background run: everything the starter needs, resolved before the job exists. */
 interface AetherBackgroundRun {
-  readonly deps: AetherToolDependencies
+  readonly deps: Omit<AetherToolDependencies, 'results'>
   readonly invocation: { readonly transport: 'command-line'; readonly code: string }
   readonly label: string
   readonly cwd: string

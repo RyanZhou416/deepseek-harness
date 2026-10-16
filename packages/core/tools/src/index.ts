@@ -215,8 +215,8 @@ export interface ToolOutputDefinition {
   readonly schema: JsonSchemaNode
   /** Pure projection from validated arguments and value to Native/model content. */
   render(args: unknown, value: JsonValue): ContentBlock[]
-  /** Pure replayable presentation projection, computed only for top-level calls. */
-  presentationMeta?(args: unknown, value: JsonValue): JsonValue
+  /** Pure replayable presentation projection for top-level calls; undefined omits metadata for that result. */
+  presentationMeta?(args: unknown, value: JsonValue): JsonValue | undefined
 }
 
 /** A registered tool: its schema plus the execution function. */
@@ -1841,13 +1841,13 @@ export class ToolRuntime extends Service {
     const content = snapshotProjection(tool.name, 'render', rendered)
     let meta: JsonValue | undefined
     if (exec.parent === undefined && tool.output.presentationMeta !== undefined) {
-      let projected: JsonValue
+      let projected: JsonValue | undefined
       try {
         projected = tool.output.presentationMeta(exec.arguments, value)
       } catch (error: unknown) {
         throw projectionError(tool.name, 'presentationMeta', error)
       }
-      meta = snapshotProjection(tool.name, 'presentationMeta', projected)
+      if (projected !== undefined) meta = snapshotProjection(tool.name, 'presentationMeta', projected)
     }
     const concludesTurn = this.concludingExecutions.has(exec)
     return this.markCanonical(exec, this.materializeFinalResult({

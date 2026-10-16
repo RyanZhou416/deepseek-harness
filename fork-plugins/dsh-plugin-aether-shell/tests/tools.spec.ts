@@ -440,15 +440,19 @@ describe('aether-shell output retention', () => {
     expect(text(result)).toContain('[stderr truncated; complete stream:')
   })
 
-  it('fails loudly with the spill pointer when the response exceeds the in-memory budget', async () => {
-    const mounted = await setup({ config: { maxOutputBytes: 4_096, maxSpillBytes: 1_048_576 } })
+  it('decodes the complete spill when only the in-memory response was truncated', async () => {
+    const mounted = await setup({ config: { maxOutputBytes: 4_096, maxSpillBytes: 1_048_576, maxResultBytes: 200_000 } })
+    const result = await mounted.call('aether_call', { builtin: 'big', args: [100_000] })
+    expect(result.isError).toBe(false)
+    expect(outcomeOf(result)).toMatchObject({ kind: 'value', value: 'x'.repeat(100_000) })
+  })
+
+  it('refuses a response when neither the memory window nor the spill retained it whole', async () => {
+    const mounted = await setup({ config: { maxOutputBytes: 4_096, maxSpillBytes: 8_192 } })
     const result = await mounted.call('aether_call', { builtin: 'big', args: [100_000] })
     expect(result.isError).toBe(true)
     expect(text(result)).toContain('E_PROTOCOL_TRUNCATED')
-    const spillPath = /complete stream: (.+?)(?:\n|$)/.exec(text(result))?.[1]
-    expect(spillPath).toBeDefined()
-    const spilled = await readFile(spillPath as string, 'utf8')
-    expect(spilled.length).toBeGreaterThanOrEqual(100_000)
+    expect(text(result)).toContain('effects of this invocation are unknown')
   })
 
   it('turns an oversized complete result into the narrowing failure', async () => {

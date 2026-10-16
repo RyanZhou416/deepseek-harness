@@ -35,6 +35,7 @@
  * @module @ryanzhou416/dsh-plugin-aether-shell/exec
  */
 
+import { closeSync, openSync, readSync } from 'node:fs'
 import { deadline, timeoutOf } from '@deepseek-ai/dsh-timeout'
 import { classifyRunnerFailure, isRunnerSpawnFailure, matchesSignature, SandboxUnavailableError } from '@deepseek-ai/dsh-sandbox'
 import type {
@@ -645,29 +646,120 @@ function namesDenial(denialSignatures: readonly string[], stderrText: string, fa
 }
 
 /**
+ * One bounded read of a spilled interpreter stream.
+ *
+ * `text` is the complete stream. `unavailable` carries the exact reason no
+ * complete copy exists, because this plugin falls back to nothing: a truncated
+ * response with no recoverable copy must fail and say why.
+ */
+type AetherSpillRead =
+  | { readonly kind: 'text'; readonly text: string }
+  | { readonly kind: 'unavailable'; readonly detail: string }
+
+/**
+ * Read a complete spilled stream from the subprocess provider's own file.
+ *
+ * The provider publishes the path only when the whole stream fit its own
+ * `maxSpillBytes` budget, and the file is the provider's private scratch copy of
+ * that stream, never a model-supplied path. The read is bounded by that same
+ * budget: one extra byte distinguishes "the whole stream" from a file that
+ * outgrew the contract, so a replaced or appended file is refused instead of read
+ * without limit, and the bytes are decoded strictly so a torn or re-encoded tail
+ * is a refusal rather than a silently altered document. The public collect type
+ * publishes no spill-failure callback, so this read reports the operating-system
+ * or decoding failure it observed itself.
+ * @param spillPath - the provider's spill file, when it created one.
+ * @param maxBytes - the deployment's whole-stream cap for one spill file.
+ * @returns the decoded stream, or the reason no complete copy could be read.
+ */
+function readSpilledStream(spillPath: string | undefined, maxBytes: number): AetherSpillRead {
+  if (spillPath === undefined) {
+    return { kind: 'unavailable', detail: 'the subprocess provider kept no complete copy of that stream' }
+  }
+  let descriptor: number
+  try {
+    descriptor = openSync(spillPath, 'r')
+  } catch (error) {
+    return { kind: 'unavailable', detail: `the provider's spill file could not be opened: ${describeError(error)}` }
+  }
+  try {
+    const capacity = maxBytes + 1
+    const buffer = Buffer.allocUnsafe(capacity)
+    let filled = 0
+    while (filled < capacity) {
+      const read = readSync(descriptor, buffer, filled, capacity - filled, filled)
+      if (read <= 0) break
+      filled += read
+    }
+    // Filling the extra byte proves the file is larger than the cap the provider
+    // promised, so no complete copy exists to decode.
+    if (filled >= capacity) {
+      return { kind: 'unavailable', detail: `the spill file holds more than the ${maxBytes}-byte cap, so it is not the complete stream the provider promises` }
+    }
+    try {
+      return { kind: 'text', text: new TextDecoder('utf-8', { fatal: true }).decode(buffer.subarray(0, filled)) }
+    } catch (error) {
+      return { kind: 'unavailable', detail: `the spill file is not valid UTF-8, so a response read from it could differ from what the interpreter wrote: ${describeError(error)}` }
+    }
+  } catch (error) {
+    return { kind: 'unavailable', detail: `reading the provider's spill file failed: ${describeError(error)}` }
+  } finally {
+    try { closeSync(descriptor) } catch { /* a failed close is not a decode failure; the descriptor closes with the process */ }
+  }
+}
+
+/**
+ * The interpreter's complete standard output, recovered from the provider's
+ * spill file when the in-memory window dropped bytes.
+ * @param deps - capability services and the resolved configuration supplying both stream budgets.
+ * @param stdout - the collected stdout, a tail when `truncated`.
+ * @returns the complete output text.
+ * @throws Error when the output was truncated and no complete copy could be read.
+ */
+function completeStdout(deps: AetherExecDeps, stdout: AetherDiagnostics): string {
+  if (!stdout.truncated) return stdout.text
+  const recovered = readSpilledStream(stdout.spillPath, deps.config.maxSpillBytes)
+  if (recovered.kind === 'text') return recovered.text
+  throw new Error(`aether-shell [E_PROTOCOL_TRUNCATED]: the response exceeded the ${deps.config.maxOutputBytes}-byte in-memory budget and this plugin reads no partial reply, so the call has no result: ${recovered.detail}; the effects of this invocation are unknown${recovery(stdout.spillPath)}`)
+}
+
+/**
+ * The collected-output facts a decoder reads once the complete text is known.
+ * @param stdout - the collected stdout the run reported.
+ * @param text - the complete output text, recovered when the in-memory tail was cut.
+ * @returns the diagnostics a protocol decoder reads, with no truncation left to describe.
+ */
+function completeDiagnostics(stdout: AetherDiagnostics, text: string): AetherDiagnostics {
+  return {
+    text,
+    truncated: false,
+    ...stdout.spillPath === undefined ? {} : { spillPath: stdout.spillPath },
+  }
+}
+
+/**
  * Read one settled exchange as the interpreter's protocol defines it.
  *
- * Decoding is what makes a stream a document, so the in-memory truncation that
- * makes the retained text a tail fails here rather than in the run that
- * produced it: a consumer that only streams the raw output never reaches this
+ * Decoding is what makes a stream a document, so an in-memory truncation is
+ * answered here rather than in the run that produced it: the provider's complete
+ * spilled copy is read when it exists, and the call fails only when no complete
+ * copy does. A consumer that only streams the raw output never reaches this
  * function and reports the truncation as a fact instead.
- * @param deps - capability services and the resolved configuration supplying the in-memory budget.
+ * @param deps - capability services and the resolved configuration supplying the stream budgets.
  * @param request - the invocation whose transport decides which protocol applies.
  * @param facts - raw facts of a run this plugin did not stop before settlement.
  * @returns the canonical outcome.
- * @throws Error when a successful Agent API request wrote no complete document to a truncated stdout stream.
+ * @throws Error when a truncated response has no readable complete copy.
  * @throws SandboxUnavailableError when the confining runner itself failed.
  * @throws AetherProtocolError when the stream is not the document its transport promises.
  */
 function decodeFacts(deps: AetherExecDeps, request: AetherRunRequest, facts: AetherDecodableFacts): AetherOutcome {
   const { process, stderr, stdout, sandbox } = facts
-  if (stdout.truncated) {
-    throw new Error(`aether-shell [E_PROTOCOL_TRUNCATED]: the response exceeded the ${deps.config.maxOutputBytes}-byte in-memory budget, so the retained stream is a tail and no complete JSON document can be read${recovery(stdout.spillPath)}`)
-  }
+  const text = completeStdout(deps, stdout)
   const { runnerFailure } = facts
   if (runnerFailure !== undefined) throw new SandboxUnavailableError(runnerFailure.mode, runnerFailure.detail)
   if (request.invocation.transport === 'command-line') {
-    const outcome = decodeEvalOutcome(process, stdout, stderr, sandbox)
+    const outcome = decodeEvalOutcome(process, completeDiagnostics(stdout, text), stderr, sandbox)
     return outcome.kind === 'error' && namesDenial(facts.denialSignatures, stderr.text, outcome.error.message)
       ? deniedOutcome(sandbox, process, stderr)
       : outcome
@@ -675,10 +767,10 @@ function decodeFacts(deps: AetherExecDeps, request: AetherRunRequest, facts: Aet
   // The Agent API exits 0 even when it reports a failed request, so a non-zero
   // exit with no reply is a process or confinement failure — never a protocol
   // complaint about a document that was never written.
-  if (process.exitCode !== null && process.exitCode !== 0 && stdout.text.trim().length === 0) {
+  if (process.exitCode !== null && process.exitCode !== 0 && text.trim().length === 0) {
     // Both streams are searched because a denied file effect can surface on
     // either one; the exit gate keeps this to an exchange that already failed.
-    if (matchesSignature(process.exitCode, `${stderr.text}\n${stdout.text}`, facts.denialSignatures)) {
+    if (matchesSignature(process.exitCode, `${stderr.text}\n${text}`, facts.denialSignatures)) {
       return deniedOutcome(sandbox, process, stderr)
     }
     return {
@@ -693,7 +785,7 @@ function decodeFacts(deps: AetherExecDeps, request: AetherRunRequest, facts: Aet
       stderr,
     }
   }
-  const envelope = decodeEnvelope(stdout.text, stdout.spillPath)
+  const envelope = decodeEnvelope(text, stdout.spillPath)
   const outcome = toOutcome(envelope, process, stderr, sandbox)
   if (outcome.kind === 'error'
     && namesDenial(facts.denialSignatures, stderr.text, outcome.error.message)) {

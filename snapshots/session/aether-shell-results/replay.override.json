@@ -1,0 +1,278 @@
+[
+  {
+    "kind": "chunks",
+    "chunks": [
+      {
+        "type": "block-start",
+        "index": 0,
+        "blockType": "tool-call"
+      },
+      {
+        "type": "tool-call-delta",
+        "index": 0,
+        "id": "call_results_list",
+        "name": "aether_call",
+        "argumentsDelta": "{\"builtin\":\"ls\",\"args\":[\".\"]}"
+      },
+      {
+        "type": "block-end",
+        "index": 0,
+        "block": {
+          "type": "tool-call",
+          "id": "call_results_list",
+          "name": "aether_call",
+          "arguments": "{\"builtin\":\"ls\",\"args\":[\".\"]}"
+        }
+      },
+      {
+        "type": "usage",
+        "usage": {
+          "inputTokens": 1200,
+          "outputTokens": 8
+        }
+      },
+      {
+        "type": "finish",
+        "reason": {
+          "kind": "tool-calls"
+        }
+      }
+    ]
+  },
+  {
+    "kind": "chunks",
+    "chunks": [
+      {
+        "type": "block-start",
+        "index": 0,
+        "blockType": "tool-call"
+      },
+      {
+        "type": "tool-call-delta",
+        "index": 0,
+        "id": "call_results_page_first",
+        "name": "aether_result_page",
+        "argumentsDelta": "{\"id\":\"{{fromRequest:aether result ([0-9a-f-]{36})}}\"}"
+      },
+      {
+        "type": "block-end",
+        "index": 0,
+        "block": {
+          "type": "tool-call",
+          "id": "call_results_page_first",
+          "name": "aether_result_page",
+          "arguments": "{\"id\":\"{{fromRequest:aether result ([0-9a-f-]{36})}}\"}"
+        }
+      },
+      {
+        "type": "usage",
+        "usage": {
+          "inputTokens": 1240,
+          "outputTokens": 8
+        }
+      },
+      {
+        "type": "finish",
+        "reason": {
+          "kind": "tool-calls"
+        }
+      }
+    ]
+  },
+  {
+    "kind": "chunks",
+    "chunks": [
+      {
+        "type": "block-start",
+        "index": 0,
+        "blockType": "tool-call"
+      },
+      {
+        "type": "tool-call-delta",
+        "index": 0,
+        "id": "call_results_page_next",
+        "name": "aether_result_page",
+        "argumentsDelta": "{\"id\":\"{{fromRequest:aether result ([0-9a-f-]{36})}}\",\"offset\":{{fromRequest:continue with offset ([0-9]+)}},\"format\":\"items\"}"
+      },
+      {
+        "type": "block-end",
+        "index": 0,
+        "block": {
+          "type": "tool-call",
+          "id": "call_results_page_next",
+          "name": "aether_result_page",
+          "arguments": "{\"id\":\"{{fromRequest:aether result ([0-9a-f-]{36})}}\",\"offset\":{{fromRequest:continue with offset ([0-9]+)}},\"format\":\"items\"}"
+        }
+      },
+      {
+        "type": "usage",
+        "usage": {
+          "inputTokens": 1280,
+          "outputTokens": 8
+        }
+      },
+      {
+        "type": "finish",
+        "reason": {
+          "kind": "tool-calls"
+        }
+      }
+    ]
+  },
+  {
+    "kind": "chunks",
+    "chunks": [
+      {
+        "type": "block-start",
+        "index": 0,
+        "blockType": "tool-call"
+      },
+      {
+        "type": "tool-call-delta",
+        "index": 0,
+        "id": "call_results_page_json",
+        "name": "aether_result_page",
+        "argumentsDelta": "{\"id\":\"{{fromRequest:aether result ([0-9a-f-]{36})}}\",\"format\":\"json\",\"limit\":200}"
+      },
+      {
+        "type": "block-end",
+        "index": 0,
+        "block": {
+          "type": "tool-call",
+          "id": "call_results_page_json",
+          "name": "aether_result_page",
+          "arguments": "{\"id\":\"{{fromRequest:aether result ([0-9a-f-]{36})}}\",\"format\":\"json\",\"limit\":200}"
+        }
+      },
+      {
+        "type": "usage",
+        "usage": {
+          "inputTokens": 1320,
+          "outputTokens": 8
+        }
+      },
+      {
+        "type": "finish",
+        "reason": {
+          "kind": "tool-calls"
+        }
+      }
+    ]
+  },
+  {
+    "kind": "chunks",
+    "chunks": [
+      {
+        "type": "block-start",
+        "index": 0,
+        "blockType": "tool-call"
+      },
+      {
+        "type": "tool-call-delta",
+        "index": 0,
+        "id": "call_results_drop",
+        "name": "aether_result_page",
+        "argumentsDelta": "{\"id\":\"{{fromRequest:aether result ([0-9a-f-]{36})}}\",\"drop\":true}"
+      },
+      {
+        "type": "block-end",
+        "index": 0,
+        "block": {
+          "type": "tool-call",
+          "id": "call_results_drop",
+          "name": "aether_result_page",
+          "arguments": "{\"id\":\"{{fromRequest:aether result ([0-9a-f-]{36})}}\",\"drop\":true}"
+        }
+      },
+      {
+        "type": "usage",
+        "usage": {
+          "inputTokens": 1360,
+          "outputTokens": 8
+        }
+      },
+      {
+        "type": "finish",
+        "reason": {
+          "kind": "tool-calls"
+        }
+      }
+    ]
+  },
+  {
+    "kind": "chunks",
+    "chunks": [
+      {
+        "type": "block-start",
+        "index": 0,
+        "blockType": "tool-call"
+      },
+      {
+        "type": "tool-call-delta",
+        "index": 0,
+        "id": "call_results_page_gone",
+        "name": "aether_result_page",
+        "argumentsDelta": "{\"id\":\"{{fromRequest:aether result ([0-9a-f-]{36})}}\"}"
+      },
+      {
+        "type": "block-end",
+        "index": 0,
+        "block": {
+          "type": "tool-call",
+          "id": "call_results_page_gone",
+          "name": "aether_result_page",
+          "arguments": "{\"id\":\"{{fromRequest:aether result ([0-9a-f-]{36})}}\"}"
+        }
+      },
+      {
+        "type": "usage",
+        "usage": {
+          "inputTokens": 1400,
+          "outputTokens": 8
+        }
+      },
+      {
+        "type": "finish",
+        "reason": {
+          "kind": "tool-calls"
+        }
+      }
+    ]
+  },
+  {
+    "kind": "chunks",
+    "chunks": [
+      {
+        "type": "block-start",
+        "index": 0,
+        "blockType": "text"
+      },
+      {
+        "type": "text-delta",
+        "index": 0,
+        "text": "DONE"
+      },
+      {
+        "type": "block-end",
+        "index": 0,
+        "block": {
+          "type": "text",
+          "text": "DONE"
+        }
+      },
+      {
+        "type": "usage",
+        "usage": {
+          "inputTokens": 1440,
+          "outputTokens": 2
+        }
+      },
+      {
+        "type": "finish",
+        "reason": {
+          "kind": "stop"
+        }
+      }
+    ]
+  }
+]

@@ -159,6 +159,10 @@ export async function probeTypedCapabilities(
       const code = outcome.error.code
       throw capabilityFailure(`the interpreter refused the capabilities action${code === undefined ? '' : ` (${code})`}: ${bounded(outcome.error.message)}`)
     }
+    case 'retained':
+      // Retention happens above this layer, in the complete-result bound, so a
+      // probe run through the executor has no retained arm to report.
+      throw new Error('aether-shell: a capability probe cannot produce a retained result')
     case 'denied':
     case 'interrupted':
       return { kind: 'stopped', outcome }

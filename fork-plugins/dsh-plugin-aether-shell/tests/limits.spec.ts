@@ -111,3 +111,19 @@ describe('aether-shell foreground-only surface', () => {
     }
   })
 })
+
+describe('aether-shell oversized results without a live agent', () => {
+  it('keeps the coded limit failure instead of advertising an unresolvable id', async () => {
+    const mounted = await setup({ config: { maxResultBytes: 1_024 } })
+    const result = await mounted.call('aether_call', { builtin: 'big', args: [4_000] })
+    expect(result.isError).toBe(false)
+    const value = valueOf(result)
+    expect(value['kind']).toBe('error')
+    expect((value['error'] as { code?: string }).code).toBe('E_RESULT_LIMIT')
+    expect(text(result)).toContain('over the maxResultBytes budget')
+    // Retention needs the live-agent registry to prove an owner, so this
+    // composition advertises no retrieval tool: the value is refused outright
+    // rather than replaced by an id nothing could resolve.
+    expect(mounted.ctx.tools.schemas().map(schema => schema.name)).not.toContain('aether_result_page')
+  })
+})

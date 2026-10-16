@@ -5,17 +5,29 @@
  * JSON (a string is its own text), because every byte here is a model token and
  * the complete-result budget already bounds the total. It adds only reading
  * aids — the interpreter's failure text, a sandbox denial marker, a deadline or
- * teardown marker, a nonzero exit marker, an unclean-cleanup marker, and the
- * bounded diagnostic stream. Native metadata and the `result_type` tag stay in
- * the canonical value for programmatic consumers.
+ * teardown marker, a nonzero exit marker, an unclean-cleanup marker, the
+ * retained-result notice, and the bounded diagnostic stream. Native metadata and
+ * the `result_type` tag stay in the canonical value for programmatic consumers.
+ *
+ * This module also owns the exact text of one retained page. The result bound
+ * measures a page in the text this function produces, so the renderer is the
+ * single home of that text rather than a second copy beside the bound.
  *
  * @module @ryanzhou416/dsh-plugin-aether-shell/render
  */
 
 import type { JsonValue } from '@deepseek-ai/dsh-util-values'
 import type { AetherDiscoverOutcome, AetherDiscovery } from './discovery.ts'
-import type { AetherDiagnostics, AetherFailure, AetherOutcome, AetherProcessFacts, AetherSandboxFacts } from './outcome.ts'
+import type {
+  AetherDiagnostics,
+  AetherFailure,
+  AetherOutcome,
+  AetherProcessFacts,
+  AetherRetainedOutcome,
+  AetherSandboxFacts,
+} from './outcome.ts'
 import { isJsonObject } from './outcome.ts'
+import type { AetherResultPage, AetherResultPageOutcome } from './results.ts'
 
 /** Static exhaustiveness guard for a closed outcome union. */
 function assertNever(value: never): never {
@@ -35,6 +47,7 @@ function renderValue(value: JsonValue): string {
 
 /** Render the interpreter's failure text with the code, suggestions, hint, and retry advice it supplied. */
 function renderFailure(error: AetherFailure): string {
+  if (error.details !== undefined) return JSON.stringify({ error: error.details })
   const parts = [`aether error${error.code === undefined ? '' : ` (${error.code})`}: ${error.message}`]
   if (error.hint !== undefined) parts.push(`hint: ${error.hint}`)
   const suggestions = error.didYouMean
@@ -74,6 +87,22 @@ function renderInterruption(timedOut: boolean): string {
   return timedOut ? '[timed out before the interpreter reported a result]' : '[stopped: the plugin unloaded]'
 }
 
+/**
+ * Render the notice that replaces a value too large to return inline.
+ *
+ * The notice names the value's shape, the exact tool call that reads it, and the
+ * fact that nothing was lost or re-run: it is the only place the model learns the
+ * retrieval tool exists, so it must carry the call rather than a bare id.
+ * @param outcome - the retained arm.
+ * @returns the model-facing notice.
+ */
+function renderRetained(outcome: AetherRetainedOutcome): string {
+  const { id, bytes, total, unit, originalResultType } = outcome.result
+  const kind = originalResultType === undefined ? '' : ` of type ${originalResultType}`
+  return `aether result ${id}: the complete value is ${bytes} bytes${kind} and is over this deployment's result budget, so it was retained whole instead of returned.`
+    + ` It holds ${total} ${unit}. Read it with aether_result_page { id: "${id}" }; paging reads the stored value without running anything again.`
+}
+
 /** Render `ontology_describe`'s unknown-name reply, which arrives as a successful record. */
 function renderUnknownOntology(value: JsonValue): string[] {
   if (!isJsonObject(value)) return [renderValue(value)]
@@ -99,12 +128,49 @@ export function renderOutcome(outcome: AetherOutcome): string {
   switch (outcome.kind) {
     case 'value':
       return text([renderValue(outcome.value), ...renderProcess(outcome.process), ...renderDiagnostics(outcome.stderr)])
+    case 'retained':
+      return text([renderRetained(outcome), ...renderProcess(outcome.process), ...renderDiagnostics(outcome.stderr)])
     case 'error':
       return text([renderFailure(outcome.error), ...renderProcess(outcome.process), ...renderDiagnostics(outcome.stderr)])
     case 'denied':
       return text([renderDenial(outcome.sandbox), ...renderProcess(outcome.process), ...renderDiagnostics(outcome.stderr)])
     case 'interrupted':
       return text([renderInterruption(outcome.timedOut), ...renderProcess(outcome.process), ...renderDiagnostics(outcome.stderr)])
+    default:
+      return assertNever(outcome)
+  }
+}
+
+/**
+ * Render one page of a retained result.
+ *
+ * The notice names the format, the unit, the range, and how to continue, because
+ * `offset` means an element index in one format and a byte offset in the other,
+ * and a caller that guesses between them would skip or repeat content.
+ * @param page - the page about to be returned.
+ * @returns the model-facing text, ending in the page's own content.
+ */
+export function renderPage(page: AetherResultPage): string {
+  const end = page.offset + page.shown
+  const notice = page.complete
+    ? `aether result ${page.id}: ${page.format} page, ${page.unit} ${page.offset}..${end} of ${page.total} (complete)`
+    : `aether result ${page.id}: ${page.format} page, ${page.unit} ${page.offset}..${end} of ${page.total}; continue with offset ${page.nextOffset}`
+  return `${notice}\n${renderValue(page.data)}`
+}
+
+/**
+ * Render one canonical `aether_result_page` result.
+ * @param outcome - the page, drop receipt, or coded refusal.
+ * @returns the model-facing text.
+ */
+export function renderResultPage(outcome: AetherResultPageOutcome): string {
+  switch (outcome.kind) {
+    case 'page':
+      return renderPage(outcome)
+    case 'dropped':
+      return `aether result ${outcome.id}: dropped`
+    case 'error':
+      return renderFailure(outcome.error)
     default:
       return assertNever(outcome)
   }

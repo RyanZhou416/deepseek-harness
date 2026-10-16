@@ -46,6 +46,7 @@ pwsh -NoProfile -File fork-plugins/dsh-plugin-aether-shell/scripts/run-local.ps1
 | `aether_call` | 平面内置操作名和位置 JSON 参数数组 | 单次调用 | 不生成 AetherShell 源码即可调用一个操作。 |
 | `aether_pipeline` | 有序原生步骤和可选的 JSON 输入 | 单次调用 | 一次执行中完成类型化值的过滤、投影和聚合。 |
 | `aether_eval` | AetherShell 源码 | 单次调用 | 在新进程中求值表达式、lambda 和模块调用。 |
+| `aether_result_page` | 保留结果的 id、偏移、格式，以及可选释放标志 | 直到释放 | 分页读取完整结果，不重复执行原操作。 |
 | `aether_session_open` | 可选目录、标签和期限 | 直到关闭 | 启动一个持久解释器进程并返回不透明会话 id。 |
 | `aether_session_eval` | 会话 id 和 AetherShell 源码 | 单次调用 | 在该进程中求值程序，变量、函数、当前目录和环境都会保留。 |
 | `aether_session_read` | 会话 id | 单次调用 | 取走无调用在途时会话写入的输出，且只交付一次。 |
@@ -53,7 +54,7 @@ pwsh -NoProfile -File fork-plugins/dsh-plugin-aether-shell/scripts/run-local.ps1
 | `aether_session_close` | 会话 id | 单次调用 | 请求原生会话关闭并终止其进程。 |
 | `aether_job_start` | AetherShell 源码，可选标签、目录和期限 | 直到完成或被终止 | 启动一个后台解释器进程并立即返回其任务 id。 |
 
-四个查询工具无状态，每次调用都启动新解释器。插件启用期间它们始终注册，且都不提供后台标志。五个会话工具在 live-agent 注册表挂载时注册，因为句柄必须属于某个调用 agent；`aether_session_read` 取走调用之间写入的输出，而调用在途时读取会被拒绝，因为那段输出属于该调用。`aether_job_start` 在任务注册表挂载时注册，读取和终止控制由 `job_output`、`job_list` 和 `job_kill` 提供。
+四个查询工具每次调用都启动新解释器；保留的 JSON 结果独立存在有容量上限的插件内存中。结果分页工具只在 live-agent 注册表挂载时注册。插件启用期间它们始终注册，且都不提供后台标志。五个会话工具在 live-agent 注册表挂载时注册，因为句柄必须属于某个调用 agent；`aether_session_read` 取走调用之间写入的输出，而调用在途时读取会被拒绝，因为那段输出属于该调用。`aether_job_start` 在任务注册表挂载时注册，读取和终止控制由 `job_output`、`job_list` 和 `job_kill` 提供。
 
 使用不熟悉的内置操作前先调用 `aether_discover`。调用参数按位置传递：`{"builtin":"len","args":[[1,2,3]]}` 返回 `3`；数组参数占据一个位置。不提供命名参数对象；把记录放在位置数组内，使其全部字段保持为一个参数。
 
@@ -105,6 +106,14 @@ DSH 限制的是解释器进程的文件写入和删除，依据所属 Session �
 
 响应区分值、原生错误、文件沙箱拒绝和中断。解释器退出事实与有界 stderr 分开保留。原生 API 可能在进程退出零时报告失败。应用返回记录中的 `success:false` 是普通数据，不会自动变成工具失败。AetherShell 的子程序结果仍在该值中；解释器退出码不是子程序退出码。
 
+### 大结果与错误数据
+
+当完整且成功的调用、管道或 eval 值超过内联上限，并且存在有效的所属 Agent 和保留容量时，工具会返回独立的保留结果通知。用其 id 调用 `aether_result_page`，持续传回 `nextOffset`，直到 `complete` 为 true。`items` 按完整数组元素或记录字段分页；`json` 返回规范 JSON 值的 UTF-8 字节片段，按顺序拼接 `data` 字符串后再解析，也能取回单个超大元素。页不会静默切断元素或字符。`drop:true` 释放结果。分页不运行代码，也不重复副作用。
+
+结果只属于原 Agent，不按工作目录共享。数量、单 Agent 字节和全局字节上限共同限制保留容量；字节按编码后的 JSON 计量，不代表 V8 堆大小。容量耗尽时拒绝新结果，不驱逐已有结果。空闲到期、Agent 释放、插件卸载或 Host 重启都会释放结果；不承诺恢复，也不写磁盘缓存。只有完整且通过保真检查的捕获结果才会保留；缺少完整捕获、数值不安全、缺少 owner 或容量耗尽均明确失败，不返回半截结果。
+
+原生失败中的 `metadata.error` 以对象保留，并以 JSON 错误数据呈现，包括可用的预期／实际值及阶段、效果事实；旧错误文本仍兼容。`safe_to_retry:false` 禁止自动重放，旧有的可恢复提示不代表较早效果已撤销。业务返回记录中的 `success:false` 仍是普通数据。
+
 ### 配置
 
 在 profile patch 中覆盖 bundle 的 `aether-shell` 条目。解释器可以是绝对路径或 PATH 名称；包含分隔符的相对路径会被拒绝。
@@ -119,7 +128,11 @@ DSH 限制的是解释器进程的文件写入和删除，依据所属 Session �
 | `timeoutMs` / `maxTimeoutMs` | `120000` / `600000` | 默认及最大单次调用硬期限。 |
 | `maxRequestBytes` | `1048576` | 编码请求或源码的字节上限。 |
 | `maxOutputBytes` / `maxSpillBytes` | `262144` / `8388608` | 每个流的内存和完整流 spill 上限。 |
-| `maxResultBytes` | `65536` | 完整规范结果和模型渲染响应上限。 |
+| `maxResultBytes` | `65536` | 完整内联结果、保留通知及分页响应的上限。 |
+| `maxResultsPerOwner` | `8` | 单个 Agent 可持有的保留结果数。 |
+| `maxStoredResultBytesPerOwner` | `16777216` | 单个 Agent 保留的 JSON 编码字节数。 |
+| `maxStoredResultBytes` | `67108864` | 全部 Agent 保留的 JSON 编码字节数。 |
+| `resultIdleTimeoutMs` | `1800000` | 空闲这么久后释放结果；`0` 禁用到期。 |
 | `graceMs` | `3000` | 托管进程清理宽限期。 |
 | `maxManifestEntries` | `64` | 发现结果的页大小上限。 |
 | `maxExpressionChars` | `4096` | 每个步骤的 predicate 长度上限。 |
@@ -156,7 +169,7 @@ DSH 限制的是解释器进程的文件写入和删除，依据所属 Session �
 <a id="model-experience"></a>
 ## 模型体验
 
-间接地，通过模型在每个请求中读取的十个已注册工具声明、其所有权和策略指引。
+间接地，通过模型在每个请求中读取的十一个已注册工具声明、其所有权和策略指引。
 
 #### KV Cache 影响
 
@@ -171,7 +184,7 @@ DSH 限制的是解释器进程的文件写入和删除，依据所属 Session �
 - 较旧的原生 API 会插值 `${` 字符串、输出不带引号的记录键，并将 null 管道初值视为省略。`legacy` 拒绝这些输入；已验证的 `typed-v1` 把它们作为类型化数据转发。会话程序通过编码后的源码保留调用方写入的插值，后台程序走命令行而不额外包装。
 - 调用与管道接受平面内置操作名，不接受模块表达式。模块语法使用 `aether_eval` 或持久会话。超出安全范围的数值整数会被拒绝，不会静默舍入；大整数应作为文本请求。
 - 打印到 stdout 或启动继承 stdout 的子进程可能污染查询工具的单一 JSON 响应；该工具报告协议错误，不从混合输出中挑选看似合理的结果。后台任务读取原始流，不受影响，但其输出是非结构化文本。
-- 不从截断尾部解析超大输出。完整 spill 文件仍可用时会报告其路径；否则使用原生投影、过滤或 `take` 缩小查询。
+- 不把截断尾部当作完整响应解析。provider 的完整 spill 可在 `maxSpillBytes` 范围内解码，超过该捕获上限仍明确失败。成功的大查询结果可在 owner 与插件存活期间分页取回；持久会话与后台输出保留各自既有的限制。
 - 运行件特有的内置操作语义与类型化传输相互独立。个人构建版保留 JSON null 往返，并提供明确的字节／标量长度操作；较旧发布版可能保留不同的内置操作行为。
 
 <a id="dev-note"></a>

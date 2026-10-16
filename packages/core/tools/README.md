@@ -88,6 +88,8 @@ A tool’s `projectContent` installs execution-prepared content before post-exec
 
 ### Host presentation descriptors
 
+`output.presentationMeta` may return `undefined` when that result has no metadata; the registry omits `meta` instead of logging an empty object. A returned JSON null remains explicit metadata. Defined metadata is still lossless-JSON validated and frozen.
+
 A tool can retain pure `presentCall()` and `presentResult()` methods for Host-local consumers. The built-in Web Client does not consume those values. It selects a renderer through `tool.call.toolview` and derives card props from raw call arguments, result content, failure state, and persisted metadata. The [Client-derived presentation decision](../../../.agents/notes/implemented/architecture/2026-08-23-client-derived-tool-presentation.md) owns this transport split.
 
 -----

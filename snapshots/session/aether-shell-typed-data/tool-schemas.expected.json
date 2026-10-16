@@ -2,7 +2,7 @@
   "initial": [
     {
       "name": "aether_call",
-      "description": "Call one native AetherShell builtin with positional JSON arguments and return its typed result. `builtin` is one flat native name (`ls`, `crypto_hash`, `json_parse`); find names with `aether_discover`. Arguments travel on the interpreter's typed argument channel, which this call verified, so a string containing `${` and a non-identifier object key are data rather than source. A process-capable builtin runs under this call's DSH file policy, which governs writes and deletes rather than reads, network, or process control; the interpreter's own `sh` switch starts off as a convenience default, not a boundary. Foreground only, under a hard deadline. A result larger than the deployment's budgets fails loudly and names the narrowing remedy instead of returning a partial value. An access the DSH file policy denies is final for this call: retrying the same effect through another tool or shell is not a workaround, this plugin offers no in-turn escalation field, grants no permission automatically, and retries nothing with a native approval token — the user must change the policy explicitly for that effect to be allowed.",
+      "description": "Call one native AetherShell builtin with positional JSON arguments and return its typed result. `builtin` is one flat native name (`ls`, `crypto_hash`, `json_parse`); find names with `aether_discover`. Arguments travel on the interpreter's typed argument channel, which this call verified, so a string containing `${` and a non-identifier object key are data rather than source. A process-capable builtin runs under this call's DSH file policy, which governs writes and deletes rather than reads, network, or process control; the interpreter's own `sh` switch starts off as a convenience default, not a boundary. Foreground only, under a hard deadline. A result over the deployment's complete-result budget is retained whole and returned as an id you read with `aether_result_page`, which never runs the program again; when this deployment cannot retain it, the call fails loudly and names the narrowing remedy instead of returning a partial value. An access the DSH file policy denies is final for this call: retrying the same effect through another tool or shell is not a workaround, this plugin offers no in-turn escalation field, grants no permission automatically, and retries nothing with a native approval token — the user must change the policy explicitly for that effect to be allowed.",
       "parameters": {
         "type": "object",
         "properties": {
@@ -60,7 +60,7 @@
     },
     {
       "name": "aether_eval",
-      "description": "Evaluate one AetherShell program and return its canonical JSON value. Unlike the other tools, the program runs on the interpreter's own command line, so lambdas, modules such as `file.read(\"notes.txt\")`, and multi-statement programs work and are not limited to flat builtin names. The program must exit successfully for a value; a failing program returns the interpreter's own error text. A program that prints nothing reports `resultType: \"none\"`. Everything the program does runs under this call's DSH file policy, which governs writes and deletes rather than file reads, network access, or process control. The interpreter's `sh` switch starts off, but that is a convenience default rather than a boundary, because the program can change its own environment and reach the process builtins either way. Numbers outside the exact integer range this runtime can carry are rejected rather than rounded, so ask for such a value as text. Foreground only, under a hard deadline. An access the DSH file policy denies is final for this call: retrying the same effect through another tool or shell is not a workaround, this plugin offers no in-turn escalation field, grants no permission automatically, and retries nothing with a native approval token — the user must change the policy explicitly for that effect to be allowed.",
+      "description": "Evaluate one AetherShell program and return its canonical JSON value. Unlike the other tools, the program runs on the interpreter's own command line, so lambdas, modules such as `file.read(\"notes.txt\")`, and multi-statement programs work and are not limited to flat builtin names. The program must exit successfully for a value; a failing program returns the interpreter's own error text. A program that prints nothing reports `resultType: \"none\"`. Everything the program does runs under this call's DSH file policy, which governs writes and deletes rather than file reads, network access, or process control. The interpreter's `sh` switch starts off, but that is a convenience default rather than a boundary, because the program can change its own environment and reach the process builtins either way. Numbers outside the exact integer range this runtime can carry are rejected rather than rounded, so ask for such a value as text. Foreground only, under a hard deadline. A result over the deployment's complete-result budget is retained whole and returned as an id you read with `aether_result_page`, which never runs the program again; when this deployment cannot retain it, the call fails loudly and names the narrowing remedy instead of returning a partial value. An access the DSH file policy denies is final for this call: retrying the same effect through another tool or shell is not a workaround, this plugin offers no in-turn escalation field, grants no permission automatically, and retries nothing with a native approval token — the user must change the policy explicitly for that effect to be allowed.",
       "parameters": {
         "type": "object",
         "properties": {
@@ -112,7 +112,7 @@
     },
     {
       "name": "aether_pipeline",
-      "description": "Run an ordered native AetherShell pipeline, each step calling one flat builtin and feeding its result to the next. `select` maps each item of that step's result through a dotted field path, so `select: \"name\"` reads the `name` field of every element. `predicate` is an AetherShell expression passed to that step's builtin as its lambda first argument and replaces the step's `args`. `input` starts the pipeline from a value instead of from the first call. Step arguments travel on the same verified typed channel as `aether_call`, and every step runs under this call's DSH file policy. Foreground only, under a hard deadline. An access the DSH file policy denies is final for this call: retrying the same effect through another tool or shell is not a workaround, this plugin offers no in-turn escalation field, grants no permission automatically, and retries nothing with a native approval token — the user must change the policy explicitly for that effect to be allowed.",
+      "description": "Run an ordered native AetherShell pipeline, each step calling one flat builtin and feeding its result to the next. `select` maps each item of that step's result through a dotted field path, so `select: \"name\"` reads the `name` field of every element. `predicate` is an AetherShell expression passed to that step's builtin as its lambda first argument and replaces the step's `args`. `input` starts the pipeline from a value instead of from the first call. Step arguments travel on the same verified typed channel as `aether_call`, and every step runs under this call's DSH file policy. Foreground only, under a hard deadline. A result over the deployment's complete-result budget is retained whole and returned as an id you read with `aether_result_page`, which never runs the program again; when this deployment cannot retain it, the call fails loudly and names the narrowing remedy instead of returning a partial value. An access the DSH file policy denies is final for this call: retrying the same effect through another tool or shell is not a workaround, this plugin offers no in-turn escalation field, grants no permission automatically, and retries nothing with a native approval token — the user must change the policy explicitly for that effect to be allowed.",
       "parameters": {
         "type": "object",
         "properties": {
@@ -160,6 +160,46 @@
         },
         "required": [
           "steps"
+        ]
+      }
+    },
+    {
+      "name": "aether_result_page",
+      "description": "Read one page of a result this deployment retained because it was too large to return inline. `aether_call`, `aether_pipeline`, and `aether_eval` report such a result as an id and its shape; this tool returns its content one bounded page at a time. Paging reads the stored value and never runs the program again, so no side effect of the original call is repeated. Format `items` (the default) pages an array by whole elements and a record by whole fields; format `json` pages the canonical JSON encoding by UTF-8 byte offset, which also reads one element larger than a whole page. `offset`, `shown`, `total`, and `nextOffset` are counted in the returned `unit`, so pass back the previous page's `nextOffset` rather than computing an offset yourself. A result is private to the agent that produced it, is released when it expires idle, and is released when you pass `drop`.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "Retrieval id of the retained result to read."
+          },
+          "offset": {
+            "type": "number",
+            "description": "Element index (format `items`) or UTF-8 byte offset (format `json`) to start at; defaults to the beginning. Pass back a previous page's `nextOffset`."
+          },
+          "limit": {
+            "type": "number",
+            "description": "Most elements, fields, or bytes to include. The page budget bounds the result either way."
+          },
+          "maxBytes": {
+            "type": "number",
+            "description": "Most bytes this page may occupy; defaults to the deployment's maxResultBytes and cannot exceed it."
+          },
+          "format": {
+            "type": "string",
+            "description": "`items` pages a container by whole elements or fields; `json` pages the canonical JSON encoding by UTF-8 byte offset.",
+            "enum": [
+              "items",
+              "json"
+            ]
+          },
+          "drop": {
+            "type": "boolean",
+            "description": "Release the retained result instead of reading it. Takes no other argument besides `id`."
+          }
+        },
+        "required": [
+          "id"
         ]
       }
     },
