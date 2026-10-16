@@ -27,7 +27,7 @@ Let an agent query AetherShell operations, evaluate typed programs, keep one int
 
 ### Prerequisites and installation
 
-The plugin targets DSH `0.1.7-rc.1`. Plugin `.6` requires this fork's matching Host build, whose tool runtime accepts omitted per-result presentation metadata; do not install it alone onto an older Host. The default `legacy` data mode supports the native AetherShell `12.0.2` protocol; `typed-v1` requires the typed-data capabilities provided by the personal `12.0.2+ryan.2` build. Install AetherShell separately and configure its absolute executable path when the Host's existing PATH does not include it. Windows system-level installation can use `C:\Program Files\AetherShell\ae.exe`; changing PATH does not update an already-running Host's environment.
+The plugin targets DSH `0.1.7-rc.1`. Plugin `.6` must be activated with this fork's matching Host build, whose tool runtime accepts omitted per-result presentation metadata; replacing the package does not upgrade the running Host. The default `legacy` data mode supports the native AetherShell `12.0.2` protocol; `typed-v1` requires the typed-data capabilities provided by the personal `12.0.2+ryan.2` build. Install AetherShell separately and configure its absolute executable path when the Host's existing PATH does not include it. Windows system-level installation can use `C:\Program Files\AetherShell\ae.exe`; changing PATH does not update an already-running Host's environment.
 
 Build and pack from the checkout without installing dependencies:
 
@@ -36,7 +36,7 @@ pwsh -NoProfile -File fork-plugins/dsh-plugin-aether-shell/scripts/run-local.ps1
 pwsh -NoProfile -File fork-plugins/dsh-plugin-aether-shell/scripts/run-local.ps1 pack
 ```
 
-From the checkout, install the generated tarball with `pnpm dsh plugin --profile <profile> add <tarball> --ignore-scripts` in an isolated Harness home before activating it in the real profile. The bundle inserts one `aether-shell` plugin row and does not disable other shell rows. Back up profile configuration before activation; do not replace an installed artifact while the Host is using it.
+From the checkout, install the generated tarball with `pnpm dsh plugin --profile <profile> add <tarball> --ignore-scripts` in an isolated Harness home before activating it in the real profile. The bundle inserts one `aether-shell` plugin row and does not disable other shell rows. Back up profile configuration before activation. Use DSH package management to replace a package while the Host runs; the loaded module generation stays active until restart. Restart after installation to load the new package with its matching Host build. Do not manually overwrite loaded module files.
 
 ### Choose the appropriate tool
 
