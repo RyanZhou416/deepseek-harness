@@ -93,7 +93,7 @@ References keep local Session data, scoped Contexts, and history streams alive, 
 
 | Field | Default | Meaning |
 |---|---:|---|
-| `idleSessionRetentionMs` | `300000` | Milliseconds an owned, durable idle Agent remains resident; `0` disables eviction |
+| `idleSessionRetentionMs` | `60000` | Milliseconds an owned, durable idle Agent remains resident; `0` disables eviction |
 | `nativeOpen` | platform-detected | Whether Session workspace paths can be handed to a native desktop opener |
 
 The generated [configuration catalog](../../../docs/config-catalog.md#deepseek-aidsh-api-session-controller) is the exhaustive source for accepted fields and their JSDoc.

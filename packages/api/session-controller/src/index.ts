@@ -64,7 +64,7 @@ import type {
   SessionUpdateQueueValue,
 } from './types.ts'
 
-const DEFAULT_IDLE_SESSION_RETENTION_MS = 300_000
+const DEFAULT_IDLE_SESSION_RETENTION_MS = 60_000
 
 export type * from './types.ts'
 export { ApiSessionNotFound } from './agent.ts'

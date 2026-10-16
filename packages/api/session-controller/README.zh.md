@@ -93,7 +93,7 @@ Client 的首次 `follow`、重连首屏与 `loadOlder()` 至少请求 50 条以
 
 | 字段 | 默认值 | 含义 |
 |---|---:|---|
-| `idleSessionRetentionMs` | `300000` | Controller 自己持有、已持久化的空闲 Agent 保持驻留的毫秒数；`0` 禁用淘汰 |
+| `idleSessionRetentionMs` | `60000` | Controller 自己持有、已持久化的空闲 Agent 保持驻留的毫秒数；`0` 禁用淘汰 |
 | `nativeOpen` | 平台探测 | 是否能把 Session 工作区路径交给原生桌面打开器 |
 
 生成的[配置目录](../../../docs/config-catalog.zh.md#deepseek-aidsh-api-session-controller)是所有受支持字段及其 JSDoc 的完整来源。

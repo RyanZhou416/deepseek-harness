@@ -99,19 +99,24 @@ async function harness(
 }
 
 describe('Session Controller idle Agent residency', () => {
-  it('defaults to five minutes and accepts zero as the disable value', () => {
-    expect(SessionController.Config({})).toMatchObject({ idleSessionRetentionMs: 300_000 })
+  it('defaults to one minute and preserves explicit overrides including zero', () => {
+    expect(SessionController.Config({})).toMatchObject({ idleSessionRetentionMs: 60_000 })
+    expect(SessionController.Config({ idleSessionRetentionMs: 120_000 })).toMatchObject({ idleSessionRetentionMs: 120_000 })
     expect(SessionController.Config({ idleSessionRetentionMs: 0 })).toMatchObject({ idleSessionRetentionMs: 0 })
     for (const value of [-1, 1.5]) {
       expect(() => SessionController.Config({ idleSessionRetentionMs: value })).toThrow()
     }
   })
 
-  it('flushes and unloads a durable owned Agent after its idle interval', async () => {
+  it('flushes and unloads a durable owned Agent at the one-minute default, not before', async () => {
     vi.useFakeTimers()
-    const { ctx, controller, agent, disposeHandle } = await harness(100)
+    const retentionMs = SessionController.Config({}).idleSessionRetentionMs
+    if (retentionMs === undefined) throw new Error('Session Controller must resolve an idle-retention default')
+    const { ctx, controller, agent, disposeHandle } = await harness(retentionMs)
 
-    await vi.advanceTimersByTimeAsync(100)
+    await vi.advanceTimersByTimeAsync(59_999)
+    expect(disposeHandle).not.toHaveBeenCalled()
+    await vi.advanceTimersByTimeAsync(1)
 
     expect(disposeHandle).toHaveBeenCalledOnce()
     expect(ctx.agents.get(sessionId)).toBeUndefined()
