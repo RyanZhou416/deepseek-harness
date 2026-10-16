@@ -61,7 +61,7 @@ The driver follows this sequence:
 
 ### Cancellation and ownership
 
-The required request signal covers both startup and the live run. Before publication, the creation transaction observes it, rolls back, and rejects; the driver re-checks once after publication to close the handoff race, then installs a minimal live-run listener. After fulfillment the caller owns the run: provider unload does not revoke it, and `dispose()` removes the abort listener, records cancellation, and delegates to the handle's memoized quiescence transaction, which stops the loop, removes the agent and session, and unwinds scoped registrations. Cancellation owns every non-completed in-flight outcome and reports `aborted`; an already-completed turn remains completed.
+The required request signal covers both startup and the live run. Before publication, the creation transaction observes it, rolls back, and rejects; the driver re-checks once after publication to close the handoff race, then installs a minimal live-run listener. After fulfillment the caller owns the run: provider unload does not revoke it, and `dispose()` removes the abort listener, records cancellation, and delegates to the handle's memoized quiescence transaction, which stops the loop, removes the agent and session, and unwinds scoped registrations. Cancellation owns every non-completed in-flight outcome and reports `aborted`; an already-completed turn remains completed. If the child's cancellation throws, the abort listener contains it, releases the handle once, and rejects `result` with that failure rather than letting Node raise an uncaught exception. A handle-release failure remains observable through `dispose()`.
 
 ### Structured output
 

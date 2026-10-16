@@ -70,6 +70,14 @@ Continuable-subagent Queue edit/remove/steer 由 alpha.2 的通用 `session.upda
 
 ## Source deltas
 
+### Shutdown cancellation after inbox unload
+
+Agent cancellation aborts its activity even if inbox clearing fails. Once the loop's owning fiber is inactive and the inbox registration is gone, cancellation skips only the unavailable durable clear and suppresses queued wakes; live missing-registration errors still fail loudly. The in-process child driver contains cancellation-listener failures, releases the child handle once, and reports the original failure through the result promise rather than as a process-level uncaught exception.
+
+**Preservation rule.** Keep normal cancellation's durable inbox splices and `keepInbox` semantics. Do not blanket-default missing projections, swallow cancellation faults, raise memory limits, or modify Session formats. This patch contains shutdown exceptions; it does not redesign concurrent root teardown or guarantee that its final events reach a persistence provider whose listeners have already unloaded.
+
+**Focused verification.** Run AgentLoop cancellation, inbox, resume, and shutdown-drain tests, the in-process-driver tests (including `shutdown-inbox.spec.ts`), and continuable-subagent tests. The cancellation regression must reject the original missing-inbox path, while live missing registrations still throw and activity abort still completes.
+
 ### Session reply visibility
 
 Delayed Assistant settlements commit at their sequence position without retiring preparing tool rows until the owning Step or Turn closes. Finalized Chat and Trajectory messages ignore later transient mutations. The shipped Assistant renderer opts into per-occurrence recovery; plain-text fallback leaves other replies live and preserves default failure behavior for custom overrides. Live Assistant replies remain translatable: Markdown text leaves retain React-owned element parents when an extension replaces or reparents the inner text. Opted DOM `NotFoundError` recovery remounts a damaged occurrence once per generation after fallback commits. Keep this bounded and local, never patch browser DOM methods or disable translation site-wide. [The translation regression](apps/web/tests/streaming-translation.e2e.ts) covers external text-node replacement, completed-reply translation, automatic recovery, and duplicate-free content. Closed Turns keep their last available reply visible, including text beside tool calls or before tool-only Steps; process groups on either side remain expandable.

@@ -115,7 +115,7 @@ export interface Config {
 
 Depends on: [`AgentOptions`](subsystems/core.md) · [`SessionId`](subsystems/core.md) · `Volatile` (`@deepseek-ai/cosmokit`)
 
-Source: [`packages/core/agent-loop/src/index.ts:294`](../packages/core/agent-loop/src/index.ts)
+Source: [`packages/core/agent-loop/src/index.ts:287`](../packages/core/agent-loop/src/index.ts)
 
 <a id="deepseek-aidsh-agent-preset"></a>
 

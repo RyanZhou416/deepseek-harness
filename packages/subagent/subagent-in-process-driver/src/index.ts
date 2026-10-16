@@ -153,6 +153,17 @@ export async function startInProcessRun(
 }
 
 /**
+ * Cancellation state shared by the abort listener and the run's result channel.
+ * `failure` is present exactly when the child refused the cancellation, so the
+ * run reports that fault instead of a cancellation it never obtained; the
+ * refused error is boxed because it may itself be `undefined`.
+ */
+interface RunCancellation {
+  cancelled: boolean
+  failure?: { readonly error: unknown }
+}
+
+/**
  * Wrap a published child in the single run lifecycle that owns signal handoff,
  * one turn, result settlement, and quiescent disposal.
  */
@@ -165,10 +176,26 @@ function drivePublishedRun(
   structured: StructuredAttachment | undefined,
 ): SubagentRun {
   const child = handle.agent
-  const flags = { cancelled: false }
+  const state: RunCancellation = { cancelled: false }
+  // Settles the turn wait when the cancellation itself failed, so a child that
+  // refused to stop cannot park the run.
+  const cancellationSettled = Promise.withResolvers<void>()
+  let released: Promise<void> | undefined
+  /** Release the published handle at most once, for the fault path and disposal alike. */
+  const release = (): Promise<void> => (released ??= handle.dispose())
   const onAbort = (): void => {
-    flags.cancelled = true
-    child.cancel({ kind: 'parent' })
+    state.cancelled = true
+    try {
+      child.cancel({ kind: 'parent' })
+    } catch (error: unknown) {
+      // Node reports a throwing abort listener as an uncaught exception rather
+      // than rethrowing it into the aborter, so an escaping cancel would crash
+      // the parent's shutdown: an arbitrary cancel failure, including one that
+      // precedes the phase abort, becomes this run's reported fault instead.
+      // The child may still be running, so the fault path releases the handle.
+      state.failure = { error }
+      cancellationSettled.resolve()
+    }
   }
   signal.addEventListener('abort', onAbort, { once: true })
   // Agent creation detaches its creation-only listener before returning. The
@@ -178,14 +205,23 @@ function drivePublishedRun(
 
   const result: Promise<SubagentResult> = (async () => {
     try {
-      if (!flags.cancelled) {
+      if (!state.cancelled) {
         child.followup(createUserMessage({ content: prompt, source: { kind: 'user' } }))
-        await child.whenIdle()
+        await Promise.race([child.whenIdle(), cancellationSettled.promise])
+      }
+      if (state.failure !== undefined) {
+        try {
+          await release()
+        } catch {
+          // The disposal channel reports failures to release the handle; this
+          // result reports the cancellation fault that required the release.
+        }
+        throw state.failure.error
       }
       return readResult(
         child,
         boundary,
-        flags.cancelled,
+        state.cancelled,
         structured ? { captured: structured.captured() } : undefined,
       )
     } finally {
@@ -199,8 +235,8 @@ function drivePublishedRun(
     result,
     async dispose(): Promise<void> {
       signal.removeEventListener('abort', onAbort)
-      flags.cancelled = true
-      const settlements = await Promise.allSettled([handle.dispose(), result])
+      state.cancelled = true
+      const settlements = await Promise.allSettled([release(), result])
       const disposal = settlements[0]
       // The result channel owns run faults; disposal reports only failure to
       // release the published handle after both operations settle.

@@ -6,7 +6,7 @@
  */
 import type { Volatile } from '@deepseek-ai/cosmokit'
 
-import { Context, FiberState, Service } from '@deepseek-ai/cordis'
+import { Context, Service } from '@deepseek-ai/cordis'
 import { randomUUID } from 'node:crypto'
 import z from '@deepseek-ai/schemastery'
 import { z as zod } from 'zod'
@@ -32,18 +32,11 @@ import type { ProjectionDefinition } from '@deepseek-ai/dsh-session-projection'
 import type {} from '@deepseek-ai/dsh-session-projection-cache'
 import { SessionPersistenceNotFoundError } from '@deepseek-ai/dsh-session-persistence'
 import type { SessionHandle, SessionPersistence } from '@deepseek-ai/dsh-session-persistence'
-import { ReactLoopAgent } from './agent.ts'
+import { ReactLoopAgent, INACTIVE_FIBER_STATES } from './agent.ts'
 import { inboxProjectionDefinition } from './inbox.ts'
 import { userInputProjectionDefinition } from './user-input.ts'
 import { DEFAULT_MAX_PARALLEL_TOOL_CALLS } from './constants.ts'
 import type {} from './runtime-context.ts'
-
-/** Fiber states that cannot own or serve a new lifecycle. */
-const INACTIVE_STATES: ReadonlySet<FiberState> = new Set([
-  FiberState.UNLOADING,
-  FiberState.DISPOSED,
-  FiberState.FAILED,
-])
 
 const turnBoundaryProjectionSchema: zod.ZodType<TurnBoundaryProjection> = zod.object({
   openTurnStartSeq: zod.number().int().nonnegative().transform(SessionSeq).nullable(),
@@ -112,7 +105,7 @@ class FactoryOwnership {
   }
 
   isActive(): boolean {
-    return this.accepting && !INACTIVE_STATES.has(this.fiber.state)
+    return this.accepting && !INACTIVE_FIBER_STATES.has(this.fiber.state)
   }
 
   /** Track one live agent's shared teardown until it has run. */

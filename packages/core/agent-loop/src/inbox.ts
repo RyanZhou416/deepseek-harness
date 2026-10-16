@@ -94,6 +94,17 @@ export class ReactLoopInbox implements InboxContract {
     return state['next-turn'].length > 0 || state['next-step'].length > 0
   }
 
+  /**
+   * Whether the owning registry still holds this session's inbox projection.
+   * `false` reports an unwound registration, so no read or splice can commit;
+   * every live read and mutation still fails loud through {@link current},
+   * while a cancellation may stop the driver without the durable clear.
+   * @returns whether the inbox unit is still registered.
+   */
+  get isRegistered(): boolean {
+    return this.projections.stateOf(this.session, 'inbox') !== undefined
+  }
+
   /** Durably cancel all pending input, clearing next-step before next-turn. */
   clear(): void {
     this.splice('next-step', 0, this.nextStep.length, [])

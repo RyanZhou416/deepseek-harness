@@ -1,6 +1,6 @@
 import { ToolCallId, createUserMessage } from '@deepseek-ai/dsh-llm'
 import type { ContextFormed } from '@deepseek-ai/dsh-llm'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import { type Agent, type AgentOptions } from '@deepseek-ai/dsh-agent'
 import { SessionId } from '@deepseek-ai/dsh-session'
@@ -152,6 +152,48 @@ describe('startInProcessRun', () => {
     expect(ctx.agents.list()).toHaveLength(beforeAgents)
     expect(ctx.sessions.list()).toHaveLength(beforeSessions)
   })
+  it('contains a throwing child cancel on the result channel without an uncaught exception', async () => {
+    const { ctx, parent, adapter } = await setup(['hang'])
+    const controller = new AbortController()
+    const cancelError = new Error('inbox projection is inactive')
+    // Node reports a throwing abort listener as an uncaught exception instead
+    // of rethrowing it into `abort()`, so containment is observed here.
+    const uncaught: unknown[] = []
+    const observe = (error: unknown): void => { uncaught.push(error) }
+    process.on('uncaughtExceptionMonitor', observe)
+    // Passthrough creation for just this child: only its `parent` cancellation
+    // refuses, as one whose Session projection is inactive does, while the
+    // factory's own disposal cancel still runs.
+    const createAgent = parent.ctx.agents.create.bind(parent.ctx.agents)
+    const create = vi.spyOn(parent.ctx.agents, 'create').mockImplementation(async (options) => {
+      const handle = await createAgent(options)
+      const cancel = handle.agent.cancel.bind(handle.agent)
+      handle.agent.cancel = (cause, cancelOptions) => {
+        if (cause.kind === 'parent') throw cancelError
+        cancel(cause, cancelOptions)
+      }
+      return handle
+    })
+    try {
+      const run = await startInProcessRun(request(parent, controller.signal), {})
+      await vi.waitFor(() => { expect(adapter.requests).toHaveLength(1) })
+
+      expect(() => { controller.abort('stop child') }).not.toThrow()
+      // The fault must not masquerade as a cancellation, and it keeps identity.
+      await expect(run.result).rejects.toBe(cancelError)
+      await new Promise(resolve => setImmediate(resolve))
+      expect(uncaught).toEqual([])
+      // Disposal still reaches quiescence and stays a separate channel.
+      await run.dispose()
+      expect(ctx.agents.get(run.id)).toBeUndefined()
+      await new Promise(resolve => setImmediate(resolve))
+      expect(uncaught).toEqual([])
+    } finally {
+      create.mockRestore()
+      process.off('uncaughtExceptionMonitor', observe)
+    }
+  })
+
   it('reports the turn outcome when later metadata is appended during flush', async () => {
     const { ctx, parent } = await setup([maxTokensResponse('partial answer')])
     let injected = false
