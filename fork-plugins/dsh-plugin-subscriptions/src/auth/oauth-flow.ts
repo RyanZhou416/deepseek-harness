@@ -1,9 +1,10 @@
 /**
  * Generic OAuth authorization-code flow engine: one temporary loopback HTTP
- * server per login attempt receives the provider's redirect, validates
- * `state`, and yields the authorization `code`. A pasted callback URL or bare
- * code can substitute for the browser redirect (`manual`), and the user can
- * abort (`cancel`). At most one attempt per provider runs at a time.
+ * server per login attempt receives the provider's redirect, validates the
+ * callback `state` on the success and error redirects alike, and yields the
+ * authorization `code`. A pasted callback URL or bare code can substitute for
+ * the browser redirect (`manual`), and the user can abort (`cancel`). At most
+ * one attempt per provider runs at a time.
  */
 
 import { createServer, type RequestListener, type Server } from 'node:http'
@@ -227,17 +228,17 @@ export class OAuthFlowManager {
         response.end('not found')
         return
       }
+      if (url.searchParams.get('state') !== input.state) {
+        // A stray or replayed redirect must not kill the real attempt.
+        response.writeHead(400, { 'content-type': 'text/plain' })
+        response.end('state mismatch')
+        return
+      }
       const errorDescription = url.searchParams.get('error_description') ?? url.searchParams.get('error')
       if (errorDescription !== null) {
         response.writeHead(200, { 'content-type': 'text/html' })
         response.end(failurePage(errorDescription))
         settle(new Error(`authorization failed: ${errorDescription}`))
-        return
-      }
-      if (url.searchParams.get('state') !== input.state) {
-        // A stray or replayed redirect must not kill the real attempt.
-        response.writeHead(400, { 'content-type': 'text/plain' })
-        response.end('state mismatch')
         return
       }
       const code = url.searchParams.get('code')

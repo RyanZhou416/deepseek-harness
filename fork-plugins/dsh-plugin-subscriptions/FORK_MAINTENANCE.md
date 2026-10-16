@@ -22,6 +22,14 @@ No Session event or Session format changes. Existing Codex, Claude, Grok, Copilo
 
 `V1ki/dsh-plugin-subscriptions` v0.9.4 does not contain the behaviors in this section. A subtree import overwrites `src/`, `test/`, and `package.json`. Restore every item here before packaging, then run the package suite and rebuild the tarball. The tests named below fail if the behavior was dropped.
 
+### OAuth callback correlation
+
+The loopback OAuth handler validates the callback path and the attempt's `state` before handling either an authorization code or a provider error. A callback with missing or mismatched state receives HTTP 400 and cannot settle the attempt. A matching provider error still rejects the login and releases its callback listener. Manual code entry retains its separate input rules.
+
+**Preservation rule.** Keep state validation ahead of both `error` and `error_description`; do not let an uncorrelated rejection cancel another login attempt.
+
+**Focused verification.** `test/oauth-flow.spec.ts` exercises the real callback listener on OS-assigned loopback ports with synthetic callbacks, including missing and mismatched state, a later matching callback, matching provider errors, and unrelated paths. No authorization or token endpoint is contacted.
+
 ### Advisory model resolution
 
 Model selection and capability resolution answer from the account's last-known catalogue. A read never starts a provider request, however cold or stale the entry is: an account with nothing stored contributes its static rows, and logout and account allowlists remain current checks. Only the account a request is about to use ensures its own catalogue; the explicitly requested reads (opening **Manage**, the manual refresh) are the separate events that may query. Every account persists its own catalogue, so a restart serves each login's last-known plan rather than only the default account's.

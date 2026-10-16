@@ -172,6 +172,10 @@ positions, the chained stream-to-rebuild replay, and the no-capture case.
 
 **Focused verification.** `pnpm exec vitest run packages/web/web-fetch-http/tests packages/web/tool-web/tests` 覆盖传输与保留的限制；[Loader 测试](packages/web/tool-web/tests/loader-fetch.spec.ts) 通过 [YAML 组合](packages/web/tool-web/tests/fixtures/cordis.fetch.yml) 验证工具输出。`pnpm exec vitest run --config vitest.snapshot.config.ts -t web-fetch` 回放[抓取场景](snapshots/session/web-fetch/snapshot.yml)，[HTTP fixture](snapshots/session/web-fetch/web-fetch-fixture-server.mjs) 使用临时 loopback 端口而不替换 DNS。部署与产物验证前须停止 Host、清理本包旧 `lib/` 产物并重新构建，避免残留已删除模块的声明文件；不得在运行中替换 Host 产物。
 
+### Subscription OAuth callback correlation
+
+订阅插件的本机 OAuth 回调在处理成功或提供方错误之前均校验本次登录的 `state`。保留缺失或不匹配状态返回 HTTP 400、登录继续等待的行为，不能让无关错误回调结束当前登录；匹配状态的授权错误仍正常结束该次登录。具体规则与随机本机端口回归由[插件维护说明](fork-plugins/dsh-plugin-subscriptions/FORK_MAINTENANCE.md#oauth-callback-correlation)拥有，不改手动授权码输入规则或凭据格式。
+
 ### Subscription pool scheduling
 
 订阅插件的源码调度策略由 `pool.scheduling` 控制：Claude 与 ChatGPT 的临近重置、ChatGPT 的余额收尾及重置卡条件均采用有限加权，并用当前账号的活跃池请求数惩罚拥挤。保留按会话、提供方与模型池区分的粘性，统一按调整后评分应用切换门槛，首个输出后不切账号。并发预约覆盖首字节等待并在每条退出路径释放；已过期窗口不按无限紧迫度计分。保留 `pool.spec.ts` 的并发屏障和 `snapshots/session/subscription-pool-routing`。该策略包含在 `0.9.4-dsh017rc1.14` 制品中；部署须在 Host 停止后升级插件制品及版本固定记录。

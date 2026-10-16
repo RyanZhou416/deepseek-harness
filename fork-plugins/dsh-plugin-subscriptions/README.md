@@ -166,6 +166,8 @@ Either way, restart `dsh web` afterwards so the new version loads.
 
 Not logged in? The provider stays out of the picker, and requests fail with `MISSING_CREDENTIAL` pointing at the Settings page; nothing else breaks.
 
+A browser OAuth callback must carry the current attempt's `state`, whether it reports success or an authorization error. A missing or mismatched `state` receives HTTP 400 and leaves the login waiting for its own callback; only a matching callback can complete or reject that attempt.
+
 ### Multiple accounts
 
 Every provider accepts several accounts: once one is connected, the card grows an **Add account** button (Claude offers **Browser authorization** and **Import Claude Code** separately). Accounts are keyed by their identity (email / login) — re-logging the same account updates it in place, a different account appends. Browser authorization signs in whichever account the browser currently uses, so switch accounts there first (or use an incognito window with the manual code) to add a different one. The ★ default account serves the direct provider routes; pool routes use every account. A Claude account imported from Claude Code stays synced with the CLI's credential store; OAuth-added Claude accounts refresh standalone so several accounts never fight over the Keychain entry.
