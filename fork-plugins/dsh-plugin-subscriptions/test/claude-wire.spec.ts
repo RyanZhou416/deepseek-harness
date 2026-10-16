@@ -20,13 +20,40 @@ import type { GenerateOptions } from '@deepseek-ai/dsh-llm'
 import {
   assertContextManagementBeta,
   boundedTwoLevelMap,
-  buildClaudeWireRequest,
+  buildClaudeWireRequest as buildClaudeWireRequestWithContinuation,
   CLAUDE_USER_AGENT,
   claudeRequestClass,
-  claudeWireSessionId,
   mapClaudeWireError,
-  rememberClaudeRequestId,
 } from '../src/providers/claude-wire.js'
+
+/**
+ * The builder in this file's positional shape, with the continuation facts stated explicitly.
+ *
+ * The builder no longer mints a wire session id or remembers a chain: the durable span store commits
+ * the identity and the retained history's selector states the id to chain. Every ordinary request
+ * therefore passes the empty facts, and the cases that need a pin or a chained id state them.
+ */
+function buildClaudeWireRequest(
+  options: GenerateOptions,
+  session: ClaudeSession,
+  messages: readonly TranslatableMessage[],
+  maxTokens: number,
+  thinking: Parameters<typeof buildClaudeWireRequestWithContinuation>[4],
+  effort: Parameters<typeof buildClaudeWireRequestWithContinuation>[5],
+  sessionId: string,
+  account: string,
+  continuation: { readonly atisPin?: string; readonly previousRequestId?: string } = {},
+  identityLine?: Parameters<typeof buildClaudeWireRequestWithContinuation>[8],
+  contextManagement?: ContextManagementConfig,
+  fast = false,
+  policy?: Parameters<typeof buildClaudeWireRequestWithContinuation>[11],
+): ReturnType<typeof buildClaudeWireRequestWithContinuation> {
+  return buildClaudeWireRequestWithContinuation(options, session, messages, maxTokens, thinking, effort, {
+    sessionId,
+    atisPin: continuation.atisPin,
+    previousRequestId: continuation.previousRequestId,
+  }, account, identityLine, contextManagement, fast, policy)
+}
 import { oversizeWireError } from '../src/providers/claude-images.js'
 import {
   bindClaudeFileIds,
@@ -50,11 +77,11 @@ function session(): ClaudeSession {
     accessToken: 'synthetic-access-token-0123456789abcdef0123456789abcdef0123456789abcdef',
     refreshToken: 'ref',
     expiresAt: Date.now() + 3_600_000,
-    scopes: 'scopes',
+    scopes: 'user:profile user:inference',
     accountUuid: 'uuid-1',
     deviceId: 'dev-1',
-    // The cache ttl and the beta that declares it follow the subscription, so the session
-    // these tests build is a subscriber's, as the pooled accounts are.
+    // The cache ttl and the beta that declares it follow the granted scope set, so the
+    // session these tests build is a subscriber's, as the pooled accounts are.
     subscriptionType: 'max',
   }
 }
@@ -230,7 +257,7 @@ test('the context-management field and the beta that declares it travel together
   const built = await buildClaudeWireRequest(
     options({ model: 'claude-opus-5' }),
     session(), history(), 32_000, { type: 'adaptive' }, undefined,
-    wireSessionId('sess-context-management'), ACCOUNT, undefined, plan,
+    wireSessionId('sess-context-management'), ACCOUNT, {}, undefined, plan,
   )
   assert.deepEqual(parseBody(built).context_management, plan)
   const beta = headerMap(built).get('anthropic-beta') ?? ''
@@ -330,79 +357,58 @@ test('a caller stop sequence is refused instead of silently dropped', async () =
   assert.equal('stop_sequences' in parseBody(empty), false)
 })
 
-test('the previous request id chains into the billing block per session', async () => {
-  rememberClaudeRequestId(ACCOUNT, wireSessionId('sess-2'), 'req_abc123')
-  const chained = await buildClaudeWireRequest(options(), session(), history(), 32_000, undefined, undefined, wireSessionId('sess-2'), ACCOUNT)
+test('the selected previous request id chains into the billing block', async () => {
+  // The selection is the retained history's own fact (see the continuation selector's cases); this
+  // asserts the builder maps exactly what its caller selected.
+  const chained = await buildClaudeWireRequest(
+    options(), session(), history(), 32_000, undefined, undefined, wireSessionId('sess-2'), ACCOUNT,
+    { previousRequestId: 'req_abc123' },
+  )
   assert.match(parseBody(chained).system[0].text, / cc_prev_req=req_abc123;/)
 
+  // A request whose history selected no id chains nothing.
   const fresh = await buildClaudeWireRequest(options(), session(), history(), 32_000, undefined, undefined, wireSessionId('sess-3'), ACCOUNT)
   assert.ok(!parseBody(fresh).system[0].text.includes('cc_prev_req='))
-
-  // A response without a request-id header clears the chain, matching the
-  // genuine client's continuity commit.
-  rememberClaudeRequestId(ACCOUNT, wireSessionId('sess-2'), null)
-  const cleared = await buildClaudeWireRequest(options(), session(), history(), 32_000, undefined, undefined, wireSessionId('sess-2'), ACCOUNT)
-  assert.ok(!parseBody(cleared).system[0].text.includes('cc_prev_req='))
 })
 
-test('conversation chains are isolated per account', async () => {
-  rememberClaudeRequestId('acct-a', wireSessionId('sess-x'), 'req_aaa111')
-  const onA = await buildClaudeWireRequest(options(), session(), history(), 32_000, undefined, undefined, wireSessionId('sess-x'), 'acct-a')
-  assert.match(parseBody(onA).system[0].text, / cc_prev_req=req_aaa111;/)
+test('the chained id is the caller\'s selection, never a process-local memory', async () => {
+  const first = await buildClaudeWireRequest(
+    options(), session(), history(), 32_000, undefined, undefined, wireSessionId('sess-x'), 'acct-a',
+    { previousRequestId: 'req_aaa111' },
+  )
+  assert.match(parseBody(first).system[0].text, / cc_prev_req=req_aaa111;/)
 
-  // A pool failover to another account in the same session starts a fresh
-  // chain: no foreign request id, and its own prompt id.
-  const onB = await buildClaudeWireRequest(options(), session(), history(), 32_000, undefined, undefined, wireSessionId('sess-x'), 'acct-b')
-  assert.ok(!parseBody(onB).system[0].text.includes('cc_prev_req='))
+  // A later request that selected nothing does not inherit the earlier one's id: no map remembers it.
+  const second = await buildClaudeWireRequest(options(), session(), history(), 32_000, undefined, undefined, wireSessionId('sess-x'), 'acct-a')
+  assert.ok(!parseBody(second).system[0].text.includes('cc_prev_req='))
 
-  const backOnA = await buildClaudeWireRequest(options(), session(), history(), 32_000, undefined, undefined, wireSessionId('sess-x'), 'acct-a')
-  assert.match(parseBody(backOnA).system[0].text, / cc_prev_req=req_aaa111;/)
+  // Another account's request carries its own selection and cannot reach the first account's id.
+  const other = await buildClaudeWireRequest(
+    options(), session(), history(), 32_000, undefined, undefined, wireSessionId('sess-x'), 'acct-b',
+    { previousRequestId: 'req_bbb222' },
+  )
+  assert.match(parseBody(other).system[0].text, / cc_prev_req=req_bbb222;/)
+  assert.ok(!parseBody(other).system[0].text.includes('req_aaa111'))
 })
 
-test('the wire session id is a UUID minted per account span', async () => {
-  const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
-  // The client declares its session as a UUID. A harness session id is
-  // `session-<uuid>`, which is not one and never reaches the wire.
-  const onA = claudeWireSessionId('acct-a', 'session-11111111-1111-4111-8111-111111111111')
-  assert.match(onA, uuid, 'a UUID rather than the harness session id')
-  assert.notEqual(onA, 'session-11111111-1111-4111-8111-111111111111')
-  assert.equal(
-    claudeWireSessionId('acct-a', 'session-11111111-1111-4111-8111-111111111111'),
-    onA,
-    'the id is stable per account span',
-  )
+test('the builder declares the wire identity it is given, pin and chain included', async () => {
+  const spanId = '11111111-1111-4111-8111-111111111111'
+  const built = await buildClaudeWireRequest(options(), session(), history(), 32_000, undefined, undefined, spanId, ACCOUNT)
+  const body = parseBody(built)
+  assert.equal(headerMap(built).get('x-claude-code-session-id'), spanId)
+  assert.equal(JSON.parse(body.metadata.user_id as string).session_id, spanId)
+  // The identity is the caller's committed fact, not something minted per build.
+  const again = await buildClaudeWireRequest(options(), session(), history(), 32_000, undefined, undefined, spanId, ACCOUNT)
+  assert.equal(headerMap(again).get('x-claude-code-session-id'), spanId)
 
-  const rolled = claudeWireSessionId('acct-b', 'session-11111111-1111-4111-8111-111111111111')
-  assert.notEqual(rolled, onA, 'a failover account gets its own wire session id')
-  assert.match(rolled, uuid)
-  assert.equal(
-    claudeWireSessionId('acct-b', 'session-11111111-1111-4111-8111-111111111111'),
-    rolled,
-    'the rolled id stays stable for its span',
+  const withFacts = await buildClaudeWireRequest(
+    options(), session(), history(), 32_000, undefined, undefined, spanId, ACCOUNT,
+    { atisPin: 'atis-token-1', previousRequestId: 'req_orig111' },
   )
-
-  // Switching back resumes the original id, and its chain.
-  assert.equal(
-    claudeWireSessionId('acct-a', 'session-11111111-1111-4111-8111-111111111111'),
-    onA,
-  )
-  rememberClaudeRequestId('acct-a', onA, 'req_orig111')
-  const back = await buildClaudeWireRequest(options(), session(), history(), 32_000, undefined, undefined, onA, 'acct-a')
-  assert.match(parseBody(back).system[0].text, / cc_prev_req=req_orig111;/)
-
-  // A rolled span builds under its own identity: its session id rides the
-  // header and the correlation triple, and it starts with no foreign chain.
-  const span = await buildClaudeWireRequest(options(), session(), history(), 32_000, undefined, undefined, rolled, 'acct-b')
-  const body = parseBody(span)
-  assert.equal(JSON.parse(body.metadata.user_id as string).session_id, rolled)
-  assert.equal(headerMap(span).get('x-claude-code-session-id'), rolled)
-  assert.ok(!body.system[0].text.includes('cc_prev_req='))
-
-  // Different harness sessions stay independent even on the same account.
-  assert.notEqual(
-    claudeWireSessionId('acct-a', 'session-22222222-2222-4222-8222-222222222222'),
-    onA,
-  )
+  assert.equal(headerMap(withFacts).get('x-cc-atis'), 'atis-token-1')
+  assert.match(parseBody(withFacts).system[0].text, / cc_prev_req=req_orig111;/)
+  // The pin is not carried by a request that states none: the header is absent.
+  assert.equal(headerMap(built).get('x-cc-atis'), undefined)
 })
 
 test('a non-UUID wire session id is refused before the request is built', async () => {
@@ -490,20 +496,18 @@ test('mapClaudeWireError maps every wire code to a diagnosable INVALID_REQUEST',
   assert.equal(mapClaudeWireError(new Error('boom'), history()), undefined, 'non-wire errors pass through')
 })
 
-test('the cache ttl and its beta follow the subscription', async () => {
+test('the cache ttl and its beta follow the granted scope', async () => {
   // The client resolves one ttl per request and pushes the beta that declares the longer one
-  // only when that ttl is used. An account whose profile disclosed no subscription gets the
-  // server's own default, expressed by leaving the field out entirely.
+  // only when that ttl is used. The deciding input is the `user:inference` scope, so a session
+  // granted no such scope gets the server's own default, expressed by leaving the field out.
   const subscriber = await buildClaudeWireRequest(options(), session(), history(), 32_000, undefined, undefined, wireSessionId('sess-ttl'), ACCOUNT)
   assert.match(String(subscriber.body), /"ttl":"1h"/)
   const subscriberBeta = String(subscriber.headers.find(([name]) => name.toLowerCase() === 'anthropic-beta')?.[1] ?? '')
   assert.match(subscriberBeta, /extended-cache-ttl/)
 
   // The field is absent rather than undefined: the option type forbids an explicit undefined.
-  const { subscriptionType: omitted, ...noSubscription } = session()
-  void omitted
   const plain = await buildClaudeWireRequest(
-    options(), noSubscription, history(), 32_000, undefined, undefined, wireSessionId('sess-ttl-plain'), ACCOUNT,
+    options(), { ...session(), scopes: 'user:profile' }, history(), 32_000, undefined, undefined, wireSessionId('sess-ttl-plain'), ACCOUNT,
   )
   assert.equal(String(plain.body).includes('"ttl"'), false, 'no ttl key at all')
   const plainBeta = String(plain.headers.find(([name]) => name.toLowerCase() === 'anthropic-beta')?.[1] ?? '')
@@ -656,7 +660,7 @@ test('the identity line is this route own and never names the harness', async ()
   const build = async (identityLine?: string): Promise<{ body: string; system: { text: string }[] }> => {
     const built = await buildClaudeWireRequest(
       options({ systemSections: sections }), session(), history(), 32_000,
-      undefined, undefined, wireSessionId('sess-identity'), ACCOUNT, identityLine,
+      undefined, undefined, wireSessionId('sess-identity'), ACCOUNT, {}, identityLine,
     )
     return { body: String(built.body), system: parseBody(built).system as { text: string }[] }
   }

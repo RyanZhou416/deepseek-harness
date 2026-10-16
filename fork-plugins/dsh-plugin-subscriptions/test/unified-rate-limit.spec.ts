@@ -6,6 +6,7 @@
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
 
 import {
   forgetUnifiedRateLimit,
@@ -140,4 +141,49 @@ test('forgetting drops one account, a whole provider, or everything', () => {
   assert.equal(unifiedRateLimitFor('codex', 'a1')?.status, 'rejected', 'another provider is untouched')
   forgetUnifiedRateLimit()
   assert.equal(unifiedRateLimitFor('codex', 'a1'), undefined)
+})
+
+test('this module adapts response headers into the shared core and keeps no parser of its own', () => {
+  // The core's read-only source states absence as `undefined` while this platform's `get`
+  // answers `null`, so the one member the family gate sees is asserted on both sides of that
+  // conversion, and an absent member is never handed on as an empty string. The counter is a
+  // plain object rather than a `Headers`: the parser declares only the method it reads, so the
+  // read accounting needs no cast and no unused method stubs.
+  const headers = rejectedHeaders()
+  let reads = 0
+  const counting = {
+    get: (name: string): string | null => {
+      reads += 1
+      return headers.get(name)
+    },
+  }
+  const state = parseUnifiedRateLimit(counting, 1_786_000_000_000)
+  assert.equal(state?.status, 'rejected')
+  assert.equal(state?.windows.length, 2)
+  assert.equal(state?.observedAt, 1_786_000_000_000)
+  assert.ok(reads > 0, 'the report is read through the response headers')
+  assert.equal(
+    parseUnifiedRateLimit(new Headers({ 'anthropic-ratelimit-unified-fallback': 'available' }), 0)?.fallbackAvailable,
+    true,
+    'a real Headers response is read through the same adapter',
+  )
+  // A member the response states as blank is absent, not an empty string that later reads as
+  // zero: the standing stays unstated.
+  assert.equal(
+    parseUnifiedRateLimit(new Headers({
+      'anthropic-ratelimit-unified-7d-utilization': ' ',
+      'anthropic-ratelimit-unified-status': ' ',
+    }), 0)?.status,
+    'other',
+  )
+
+  // The family's member names and the reset encodings belong to the core now: this module
+  // is expected to name them only to decide whether a response is a report at all.
+  const source = readFileSync(new URL('../src/providers/unified-rate-limit.ts', import.meta.url), 'utf8')
+  const executable = source
+    .split('\n')
+    .filter(line => !/^\s*(?:\/\*|\*|\/\/)/.test(line))
+    .join('\n')
+  assert.ok(!/Date\.parse|Number\(/.test(executable), 'the reset encodings are the core resolver\'s business')
+  assert.ok(!/textOf|numberOf/.test(executable), 'the member reads are the core\'s business')
 })

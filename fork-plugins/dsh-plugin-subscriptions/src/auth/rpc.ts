@@ -13,9 +13,12 @@ import type { RpcResult } from '../compat.js'
 import { AttachmentId } from '@deepseek-ai/dsh-attachment'
 import type { ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
 import { PROVIDER_IDS, type ProviderId } from './store.js'
+import { CLAUDE_CREDENTIAL_MODES, isClaudeCredentialMode } from './claude-credential-ownership.js'
+import type { ClaudeCredentialMode } from './claude-credential-ownership.js'
 import type { SpeedTier } from '../model-defaults.js'
 import type { ProviderUsage, ResetCreditConsumeResult, ResetCreditList } from '../providers/common.js'
 import type { ProxyConfigView, ProxyDraft, ProxyInput, ProxyTestResult } from '../http.js'
+import type { ControlRequirements } from '../claude-core/control-requirements.js'
 
 /**
  * Endpoint-name prefix under the shared `/api` channel: endpoint `status`
@@ -30,7 +33,7 @@ export const SUBSCRIPTIONS_AUTH_PREFIX = 'subscriptions-auth.'
  */
 const SUBSCRIPTIONS_AUTH_ENDPOINTS = [
   'providerSettings', 'setProviderSettings',
-  'status', 'login', 'manual', 'cancel', 'logout', 'setDefault', 'usage',
+  'status', 'login', 'manual', 'cancel', 'logout', 'setDefault', 'setCredentialOwnership', 'usage',
   'resetCredits', 'consumeResetCredit',
   'image', 'video',
   'speed', 'setSpeed',
@@ -75,7 +78,376 @@ export interface SpeedController {
   setSpeed(provider: ProviderId, model: string, tier: SpeedTier): Promise<void>
 }
 
-/** One logged-in account, as rendered by the Settings page. */
+/**
+ * Fixed reason codes a credential dimension may carry. A closed set, so no
+ * provider or transport text can reach the client through this field.
+ */
+export type CredentialCode = 'REAUTH_REQUIRED'
+
+/**
+ * Credential dimension of one account: whether the stored authorization can
+ * serve a request at all. Independent of quota and protocol state. The states
+ * mirror the account-maintenance owner's own closed set, so the projection
+ * reports exactly what that owner decided.
+ */
+export interface CredentialStatus {
+  state:
+    /** A stored credential exists and nothing is wrong with it. */
+    | 'ready'
+    /** A refresh cycle is running for this account. */
+    | 'refreshing'
+    /** The provider permanently refused the credential; a user login is required. */
+    | 'reauth_required'
+    /** No credential is stored. */
+    | 'missing'
+    /** Expiry is unknown, so no deadline can be scheduled. */
+    | 'unknown-expiry'
+    /** The credential's source is externally owned, so this plugin does not renew it on a timer. */
+    | 'maintenance-unsupported'
+    /**
+     * The credential's source is externally owned and this plugin may still refresh it and
+     * write the rotation back through the pre-existing path; coordination with that external
+     * holder is not proven, so the same grant may be spent twice.
+     */
+    | 'external-coordination-unproven'
+  /** Fixed reason code; absent for a usable credential. */
+  code?: CredentialCode
+  /** Epoch ms the parking record expires, when the source stated one; absent means unknown. */
+  until?: number
+  /** Epoch ms the owner may next run its credential check. */
+  nextCheckAt?: number
+}
+
+/** Fixed reason codes an availability dimension may carry. */
+export type AvailabilityCode =
+  | 'QUOTA_EXHAUSTED'
+  | 'RATE_LIMITED'
+  | 'ENFORCEMENT_REFUSAL'
+  | 'PROVIDER_UNAVAILABLE'
+  | 'REQUEST_TIMEOUT'
+  | 'MODEL_UNAVAILABLE'
+  | 'PROVIDER_ERROR'
+
+/**
+ * Availability dimension of one account: a quota window, a transient provider
+ * failure, or a refusal the provider aimed at this identity. Never merged with
+ * the credential dimension, so "sign-in expired" cannot render as a cooldown.
+ */
+export interface AvailabilityStatus {
+  /** `refused` is a stated refusal, which is not a waitable cooldown. */
+  state: 'available' | 'cooling' | 'transient' | 'refused'
+  /** Fixed reason code; absent for `available`. */
+  code?: AvailabilityCode
+  /** Epoch ms the parking record expires; absent means the recovery time is unknown. */
+  until?: number
+}
+
+/** Fixed reason codes a protocol dimension may carry. */
+export type ProtocolCode = 'CLIENT_VERSION_UNSUPPORTED' | 'UNSUPPORTED_RESPONSE'
+
+/**
+ * Protocol-compatibility dimension of the account's frozen wire profile. A
+ * version refusal is not cleared by a re-login or a quota reset.
+ */
+export interface ProtocolStatus {
+  state: 'current' | 'upgrade_required' | 'unsupported_response'
+  /** Fixed reason code; absent for `current`. */
+  code?: ProtocolCode
+  /** Protocol-configuration id/fingerprint the state belongs to. */
+  profileId?: string
+  /** Epoch ms the state was first observed. */
+  since?: number
+}
+
+/**
+ * Account-profile freshness dimension. `stale`/`unavailable` describe the
+ * cached profile only and never claim the credential became invalid.
+ */
+export interface ProfileStatus {
+  state: 'fresh' | 'stale' | 'missing' | 'unavailable'
+  /** Epoch ms the retained profile was captured. */
+  capturedAt?: number
+  /** Whether the retained profile carries every field the current protocol requires. */
+  complete?: boolean
+}
+
+/** Fixed reason codes a managed-policy dimension may carry, from its own blockers. */
+export type PolicyCode = 'POLICY_UNSUPPORTED' | 'POLICY_INVALID_VALUE' | 'POLICY_CONSENT_REQUIRED'
+
+/** The operation scope a managed-policy restriction or blocker reaches. */
+export type PolicyScope = 'tool' | 'model' | 'mcp' | 'execution' | 'network' | 'unknown'
+
+/**
+ * Managed-policy dimension of one account. `blocked` is the state an
+ * unsupported or unapplied restriction leaves: the operations it affects stay
+ * suspended rather than silently continuing.
+ */
+export interface PolicyStatus {
+  state: 'ineligible' | 'loading' | 'current' | 'stale' | 'unavailable' | 'consent-required' | 'blocked'
+  /** Fixed code of the first blocker; absent while no restriction blocks an operation. */
+  code?: PolicyCode
+  /** The operations or models the state applies to; absent means the whole account. */
+  scope?: PolicyScope
+  /** Epoch ms the retained policy snapshot was fetched. */
+  fetchedAt?: number
+}
+
+/** Fixed reason codes a Claude policy-limits dimension may carry. */
+export type PolicyLimitsCode =
+  /** The read could not use the stored credential. Whether that credential is still valid is the credential dimension's fact, not this one. */
+  | 'CREDENTIAL_UNAVAILABLE'
+  /** The provider refused the credential for this read. */
+  | 'AUTH_REJECTED'
+  /** The read failed at the transport or status level. */
+  | 'REQUEST_FAILED'
+  /** The response did not satisfy the pinned `policy_limits` envelope. */
+  | 'PARSE_FAILED'
+  /** This plugin's own response-size bound stopped the read; the provider stated no restriction. */
+  | 'RESPONSE_OVER_LIMIT'
+
+/**
+ * Fixed blocker codes a policy-limits dimension may carry, the owner's own
+ * closed set. While any is in force every verdict is refused, so a restriction
+ * this build could not re-state never leaves an operation silently allowed.
+ */
+export type PolicyLimitsBlocker =
+  /** The durable store exists but cannot be trusted; a restriction may have been lost. */
+  | 'policy_limits_state_unavailable'
+  /** The stored document stated restriction keys this build cannot re-state. */
+  | 'policy_limits_unknown_keys'
+  /** The stored document named core skills, whose names are not retained. */
+  | 'policy_limits_core_skills_unstored'
+  /** The stored document's taints did not all normalize, so its taint set is incomplete. */
+  | 'policy_limits_lossy_taints'
+
+/** The monitoring notice the owner holds, already normalized and bounded by the core's parse. */
+export interface PolicyLimitsOwnerNotice {
+  readonly text: string
+  /** The url the server stated, or `null` for none. */
+  readonly url: string | null
+}
+
+/**
+ * The monitoring notice the client renders. Its text is displayed as text, and
+ * its url is a destination the user opens deliberately: the client links it and
+ * never fetches it.
+ */
+export interface PolicyLimitsNotice {
+  /** The notice text, normalized and bounded by the core's parse. */
+  text: string
+  /** The notice's https url, when the server stated a usable one. */
+  url?: string
+}
+
+/**
+ * Claude `policy_limits` dimension of one account: whether this build holds a
+ * limits document and what that document refuses. Independent of the
+ * managed-settings {@link PolicyStatus} — separate documents, separate owners,
+ * neither replacing the other.
+ *
+ * Only fixed codes, counts, booleans and the normalized notice cross to the
+ * client: the adopted document, its `defaults`, its core-skill names and its
+ * taint values stay on the host, counts replace the key lists, the control
+ * obligations arrive as this build's own fixed tri-state, and the notice arrives
+ * as its own text rather than as a document member.
+ */
+export interface PolicyLimitsStatus {
+  /**
+   * `ineligible` is an eligibility refusal, never a document that came back
+   * empty; `blocked` is a restriction in force, never a quota state.
+   */
+  state: 'ineligible' | 'loading' | 'current' | 'stale' | 'unavailable' | 'blocked'
+  /** Fixed reason code; absent when the state alone states the outcome. */
+  code?: PolicyLimitsCode
+  /** Fixed blockers in force; absent while the document is enforced as stated. */
+  blockers?: readonly PolicyLimitsBlocker[]
+  /** Epoch ms the retained document was fetched; absent when none was ever adopted. */
+  fetchedAt?: number
+  /** How many registered keys this build cannot enforce exactly; absent when there are none. */
+  unknownCount?: number
+  /** How many keys the retained document refuses; the key names themselves are not sent. */
+  deniedCount?: number
+  /** How many compliance taints are in force; the taint values themselves are not sent. */
+  taintCount?: number
+  /** How many configured capabilities this build does not provide; absent when there are none. */
+  unsupportedScopeCount?: number
+  /**
+   * The control obligations the document in force states, when it states any. The owner's own
+   * tri-state answers whether each is in force, and `unsupportedActiveControls` names the ones
+   * in force that this build provides no capability for. Nothing here refuses an operation.
+   */
+  controlRequirements?: ControlRequirements
+  /**
+   * Whether a monitoring notice is in force. A notice restricts no key, so this
+   * is a display fact: {@link PolicyLimitsStatus.noticeContent} carries its text
+   * once this process has read it.
+   */
+  notice?: boolean
+  /**
+   * The notice's text and url, when this process read them. Absent while only
+   * the notice's existence is retained, which the client states as text it has
+   * not read rather than as no notice.
+   */
+  noticeContent?: PolicyLimitsNotice
+  /**
+   * What the verdicts are answered from: a document this process confirmed
+   * (`live`), one kept through a failed read or restored from the durable store
+   * (`stale`), or nothing at all (`none`, where the no-live-policy order
+   * answers).
+   */
+  fallback: 'live' | 'stale' | 'none'
+}
+
+/**
+ * The policy-limits owner's own status, as {@link projectPolicyLimits} reads
+ * it. Only these members are consulted, so no adopted document, default value,
+ * core-skill name, taint value or notice text can reach the client through this
+ * path.
+ */
+export interface PolicyLimitsOwnerStatus {
+  readonly state: PolicyLimitsStatus['state']
+  /** The owner's own reason text; it never reaches the client verbatim. */
+  readonly reason: string
+  readonly fallback: PolicyLimitsStatus['fallback']
+  readonly fetchedAt?: number
+  /** Keys the live document refused; the client receives their count only. */
+  readonly deniedKeys?: readonly string[]
+  /** The fixed failure the last read produced, when it failed. Only its fixed sub-reason is read. */
+  readonly failure?: { readonly reason?: string }
+  /** The owner's blockers in force, as its own fixed codes. */
+  readonly blockers?: readonly string[]
+  /** Whether a monitoring notice is in force; its text arrives through the notice argument. */
+  readonly notice?: boolean
+  /** The compliance taints in force; the client receives their count only. */
+  readonly taints?: readonly string[]
+  /** Capabilities the document configures that this build does not provide; only their count is read. */
+  readonly unsupportedScopes?: readonly { readonly scope: string; readonly reason: string }[]
+  /** The control obligations the document in force states, when it states any. */
+  readonly controlRequirements?: ControlRequirements
+}
+
+/**
+ * The owner's reason vocabulary, mapped onto the codes the client localizes. A
+ * reason outside this map contributes no code rather than its own text.
+ */
+const POLICY_LIMITS_REASON_CODES: Readonly<Record<string, PolicyLimitsCode>> = Object.freeze({
+  credential_unavailable: 'CREDENTIAL_UNAVAILABLE',
+  auth_failed: 'AUTH_REJECTED',
+  request_failed: 'REQUEST_FAILED',
+  read_failed: 'REQUEST_FAILED',
+  parse_failed: 'PARSE_FAILED',
+  body_over_limit: 'RESPONSE_OVER_LIMIT',
+})
+
+/** Every blocker code that may cross, in the order the owner's own union declares them. */
+const POLICY_LIMITS_BLOCKERS: readonly PolicyLimitsBlocker[] = Object.freeze([
+  'policy_limits_state_unavailable',
+  'policy_limits_unknown_keys',
+  'policy_limits_core_skills_unstored',
+  'policy_limits_lossy_taints',
+])
+
+/** Map one owner reason onto its fixed code; an unmapped reason carries none. */
+function policyLimitsCode(reason: string | undefined): PolicyLimitsCode | undefined {
+  if (reason === undefined || !Object.hasOwn(POLICY_LIMITS_REASON_CODES, reason)) return undefined
+  return POLICY_LIMITS_REASON_CODES[reason]
+}
+
+/**
+ * Filter the owner's blockers down to the codes this contract carries, dropping
+ * anything else rather than forwarding it as text.
+ * @param reported - the blocker codes the owner reported, when it reported any.
+ * @returns the carried blocker codes, empty when the owner reported none.
+ */
+function policyLimitsBlockers(reported: readonly string[] | undefined): readonly PolicyLimitsBlocker[] {
+  return (reported ?? []).filter(
+    (code): code is PolicyLimitsBlocker => (POLICY_LIMITS_BLOCKERS as readonly string[]).includes(code),
+  )
+}
+
+/**
+ * Project the owner's notice onto the client's copy of it.
+ * @param notice - the owner's notice, when this process read one.
+ * @returns the notice with an https url, or undefined when there is none to show.
+ */
+function policyLimitsNotice(notice: PolicyLimitsOwnerNotice | undefined): PolicyLimitsNotice | undefined {
+  if (notice === undefined) return undefined
+  const url = notice.url !== null && notice.url.startsWith('https://') ? notice.url : undefined
+  return { text: notice.text, ...url === undefined ? {} : { url } }
+}
+
+/**
+ * Project the policy-limits owner's status onto the client's dimension.
+ *
+ * The owner's reason is free-form text, its denied keys and taints carry remote
+ * values, and a notice carries remote prose and a destination, so each is
+ * mapped: a reason reaches the client only as a fixed code, a key list and a
+ * taint list only as counts, and a notice only through {@link policyLimitsNotice}.
+ * The control obligations cross as their own closed triple of this build's own
+ * fixed values, never as the server's key names.
+ * @param status - the owner's status for one account, or undefined when it holds none.
+ * @param unsupported - the owner's unmapped-key gaps for that account, when it reports any.
+ * @param notice - the owner's notice for that account, when its text was read.
+ * @returns the projected dimension, or undefined so the client omits it instead
+ *   of reporting it healthy.
+ */
+export function projectPolicyLimits(
+  status: PolicyLimitsOwnerStatus | undefined,
+  unsupported: readonly { readonly key: string; readonly reason: string }[] = [],
+  notice: PolicyLimitsOwnerNotice | undefined = undefined,
+): PolicyLimitsStatus | undefined {
+  if (status === undefined) return undefined
+  const code = policyLimitsCode(status.failure?.reason) ?? policyLimitsCode(status.reason)
+  const blockers = policyLimitsBlockers(status.blockers)
+  const deniedCount = status.deniedKeys?.length ?? 0
+  const taintCount = status.taints?.length ?? 0
+  const scopeCount = status.unsupportedScopes?.length ?? 0
+  const controls = status.controlRequirements
+  const controlRequirements = controls === undefined ? undefined : {
+    trustedDevices: controls.trustedDevices,
+    webSearchMcpIsolation: controls.webSearchMcpIsolation,
+    unsupportedActiveControls: controls.unsupportedActiveControls,
+  }
+  const content = policyLimitsNotice(notice)
+  return {
+    state: status.state,
+    fallback: status.fallback,
+    ...code === undefined ? {} : { code },
+    ...blockers.length === 0 ? {} : { blockers },
+    ...status.fetchedAt === undefined ? {} : { fetchedAt: status.fetchedAt },
+    ...unsupported.length === 0 ? {} : { unknownCount: unsupported.length },
+    ...deniedCount === 0 ? {} : { deniedCount },
+    ...taintCount === 0 ? {} : { taintCount },
+    ...scopeCount === 0 ? {} : { unsupportedScopeCount: scopeCount },
+    ...controlRequirements === undefined ? {} : { controlRequirements },
+    ...status.notice === true ? { notice: true } : {},
+    ...content === undefined ? {} : { noticeContent: content },
+  }
+}
+
+/**
+ * How one Claude account's credential is owned, as the Settings surface reports it.
+ *
+ * This is provenance and write authority only: `firstPartyOAuth` is a separate fact, and the
+ * mode never decides whether an organization policy applies.
+ */
+export interface CredentialOwnershipStatus {
+  /** The stored or inferred ownership mode. */
+  mode: 'legacy-writeback' | 'read-only-import' | 'independent-oauth'
+  /** Whether a store outside this plugin holds the credential. */
+  external: boolean
+  /**
+   * Present only for `legacy-writeback`: this plugin may spend the same refresh grant the
+   * external holder spends, and coordination with that holder is not proven.
+   */
+  coordinationUnproven?: true
+}
+
+/**
+ * Every independent state one account is reported in. Each dimension is
+ * computed by its own owner; a dimension whose owner has nothing to report is
+ * omitted rather than defaulted to a healthy value.
+ */
 export interface AccountStatus {
   /** Stable account key (store identity). */
   key: string
@@ -87,7 +459,63 @@ export interface AccountStatus {
   plan?: string
   /** Whether direct (non-pool) routes serve this account. */
   isDefault: boolean
+  /** Credential dimension. Always reported: it is what the account roster itself proves. */
+  credential: CredentialStatus
+  /**
+   * Credential ownership, reported for routes that have the concept (Claude only). Absent
+   * everywhere else, where there is no mode to state.
+   */
+  credentialOwnership?: CredentialOwnershipStatus
+  /** Quota / temporary availability; absent while nothing has parked this account. */
+  availability?: AvailabilityStatus
+  /** Protocol compatibility of the frozen profile; absent for routes without one. */
+  protocol?: ProtocolStatus
+  /** Account-profile freshness; absent for routes without profile maintenance. */
+  profile?: ProfileStatus
+  /** Managed policy; absent until eligibility for this account was evaluated. */
+  policy?: PolicyStatus
+  /** Claude policy limits; absent while no owner reports this account. */
+  policyLimits?: PolicyLimitsStatus
 }
+
+/** The provider operation a recorded failure belongs to. */
+export type ProviderOperation = 'login' | 'import' | 'logout' | 'status'
+
+/**
+ * Fixed code describing one recorded provider-operation failure. Closed set:
+ * the client renders its own localized copy per code, so no server text is
+ * stored or shown.
+ */
+export type ProviderFailureCode =
+  | 'CANCELLED'
+  | 'CREDENTIALS_UNAVAILABLE'
+  | 'CREDENTIALS_REJECTED'
+  | 'PROVIDER_REJECTED'
+  | 'NETWORK'
+  | 'TIMEOUT'
+  | 'INVALID_RESPONSE'
+  | 'UNKNOWN'
+
+/** One recorded provider-operation failure, in allowlisted fields only. */
+export interface ProviderOperationFailure {
+  /** Fixed failure code. */
+  code: ProviderFailureCode
+  /** Operation the failure belongs to. */
+  operation: ProviderOperation
+  /** Epoch ms the failure was recorded. */
+  at: number
+  /** HTTP status the provider answered with, when it sent one. */
+  status?: number
+  /** The provider's own error code (e.g. OAuth `invalid_grant`), never a message. */
+  providerCode?: string
+  /** Earliest instant a retry is accepted, when the provider stated one. */
+  retryAt?: number
+}
+
+/** Fixed code naming why this plugin refused to register one provider route. */
+export type ProviderUnavailableCode =
+  /** The Host build does not declare the failure-recovery contract the route requires. */
+  | 'CLAUDE_HOST_INCOMPATIBLE'
 
 /** Login state of one provider, as rendered by the Settings page. */
 export interface ProviderStatus {
@@ -95,8 +523,16 @@ export interface ProviderStatus {
   busy: boolean
   /** Logged-in accounts, default first. */
   accounts: AccountStatus[]
-  /** The last login error, shown until the next success. */
-  detail?: string
+  /**
+   * The last failed operation, shown until the next success on that provider.
+   * Replaces a free-text detail line: the client localizes it from {@link ProviderFailureCode}.
+   */
+  lastError?: ProviderOperationFailure
+  /**
+   * Present when this plugin refused to register the route for this Host, so
+   * the card can state why instead of showing an unexplained logged-out route.
+   */
+  unavailable?: ProviderUnavailableCode
 }
 
 /** How a Claude login should acquire credentials (other providers ignore it). */
@@ -149,6 +585,27 @@ export interface AuthController {
   logout(provider: ProviderId, account: string): Promise<void>
   /** Pin the account direct (non-pool) routes serve. */
   setDefault(provider: ProviderId, account: string): Promise<void>
+  /**
+   * Persist one Claude account's credential-ownership mode.
+   *
+   * The mode decides who may rotate the credential: only `legacy-writeback` may spend the
+   * shared refresh grant and write back, and only `independent-oauth` runs this plugin's own
+   * renewal timer. Moving between the two external modes is a setting this call may persist;
+   * `independent-oauth` is not, because it means this plugin holds its own authorization, which
+   * only the browser sign-in flow can produce.
+   * @param riskAcknowledged - the caller's explicit statement that it showed the
+   *   legacy-writeback risk and the user accepted it. Enforced by this server rather than
+   *   trusted from a client, so no caller of the channel can move an account onto the
+   *   grant-spending mode without stating it.
+   * @throws BadRequest when the account is unknown, the requested conversion is refused, or a
+   *   real conversion onto legacy-writeback arrives without the risk acknowledgement.
+   */
+  setCredentialOwnership(
+    provider: ProviderId,
+    account: string,
+    mode: ClaudeCredentialMode,
+    riskAcknowledged: boolean,
+  ): Promise<void>
   /**
    * Local subscription usage snapshot for one account. Plain reads never query
    * the provider; missing data is reported through cache metadata, not as zero usage.
@@ -340,6 +797,39 @@ function readLoginMethod(payload: unknown, provider: ProviderId): LoginMethod | 
     throw new BadRequest('payload.method must be "oauth", "keychain", or "manual"')
   }
   return method
+}
+
+/**
+ * Validate the `setCredentialOwnership` endpoint's target mode.
+ *
+ * An unrecognized value is refused here rather than stored: the mode decides who may spend a
+ * shared refresh grant, so it is never inferred from a string this build does not implement.
+ * @param payload - the endpoint payload.
+ * @returns the target mode.
+ */
+function readCredentialOwnershipMode(payload: unknown): ClaudeCredentialMode {
+  const mode = (payload as Record<string, unknown>).mode
+  if (!isClaudeCredentialMode(mode)) {
+    throw new BadRequest(`payload.mode must be one of ${CLAUDE_CREDENTIAL_MODES.join(', ')}`)
+  }
+  return mode
+}
+
+/**
+ * Validate the `setCredentialOwnership` endpoint's risk acknowledgement.
+ *
+ * Absent reads as "not acknowledged": the server's own rule refuses a conversion onto
+ * legacy-writeback without it, so a caller that omits the field can never rely on a client's
+ * dialog having been shown.
+ * @param payload - the endpoint payload.
+ * @returns the caller's acknowledgement.
+ */
+function readCredentialOwnershipRiskAcknowledged(payload: unknown): boolean {
+  if (typeof payload !== 'object' || payload === null) return false
+  const value = (payload as Record<string, unknown>).riskAcknowledged
+  if (value === undefined) return false
+  if (typeof value !== 'boolean') throw new BadRequest('payload.riskAcknowledged must be a boolean when present')
+  return value
 }
 
 /** Validate the `setSpeed` endpoint's tier. */
@@ -541,13 +1031,15 @@ async function dispatch(
     }
     case 'status': {
       // One provider's failure (a corrupt store entry, a broken flow) must not
-      // blind the whole page: it degrades to an error detail on that provider
-      // while the others still report their real status.
+      // blind the whole page: it degrades to a fixed failure code on that
+      // provider while the others still report their real status. The thrown
+      // text stays on the server: a status read is not an operation the user
+      // asked for, and its message may quote a store path or provider body.
       const entries = await Promise.all(PROVIDER_IDS.map(
-        async provider => [provider, await controller.status(provider).catch((error: unknown) => ({
+        async provider => [provider, await controller.status(provider).catch(() => ({
           busy: false,
           accounts: [],
-          detail: error instanceof Error ? error.message : String(error),
+          lastError: { code: 'UNKNOWN', operation: 'status', at: Date.now() },
         }) satisfies ProviderStatus)] as const,
       ))
       return ok({ providers: Object.fromEntries(entries) })
@@ -572,6 +1064,16 @@ async function dispatch(
     case 'setDefault': {
       const provider = readProvider(payload)
       await controller.setDefault(provider, readString(payload, 'account'))
+      return ok({ ok: true })
+    }
+    case 'setCredentialOwnership': {
+      const provider = readProvider(payload)
+      await controller.setCredentialOwnership(
+        provider,
+        readString(payload, 'account'),
+        readCredentialOwnershipMode(payload),
+        readCredentialOwnershipRiskAcknowledged(payload),
+      )
       return ok({ ok: true })
     }
     case 'usage': {

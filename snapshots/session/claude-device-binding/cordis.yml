@@ -1,0 +1,8 @@
+# These protocol probes use no shell tools; keep request schemas independent of the host OS.
+- id: tool-bash
+  disabled: true
+- id: tool-pwsh
+  disabled: true
+- insert:
+    - id: claude-device-binding-probe
+      name: ../../../fork-plugins/dsh-plugin-subscriptions/test/fixtures/claude-device-binding-probe.mjs

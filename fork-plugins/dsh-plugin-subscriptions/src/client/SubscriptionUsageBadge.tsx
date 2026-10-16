@@ -103,6 +103,13 @@ interface AccountUsageDisplay {
   /** Display handle (email / login), when the provider reports one. */
   account?: string
   plan?: string
+  /**
+   * Short marker for a state that stops this account serving as it is (a
+   * re-login requirement, a stated refusal, an unsupported protocol, a blocking
+   * policy limit). Absent while the account's dimensions are nominal; the
+   * Settings card owns detail.
+   */
+  notice?: BadgeNotice
   /** The account direct routes serve; the collapsed pill reads this one. */
   isDefault: boolean
   windows: UsageWindow[]
@@ -110,6 +117,33 @@ interface AccountUsageDisplay {
   resetCredits?: number
   /** The account's cache entry, for the freshness line the dialog states. */
   entry?: CachedUsage
+}
+
+/** A dictionary key one account's badge marker renders. */
+type BadgeNotice =
+  | 'accountStateReauth'
+  | 'accountStateCredentialMissing'
+  | 'accountStateRefused'
+  | 'accountStateProtocolUpgrade'
+  | 'accountStatePolicyLimitsBlocked'
+
+/**
+ * The one marker an account's dimensions earn in the badge.
+ *
+ * The badge states only what takes the account out of service, because the
+ * collapsed pill and the dialog share this line: a cooling window is already
+ * visible as a percentage, while a dead sign-in is not. Settings owns the
+ * full set of dimensions.
+ * @param account - the account as answered by the `status` endpoint.
+ * @returns the dictionary key to render, or undefined while the account serves.
+ */
+function usageNoticeOf(account: AccountStatus): BadgeNotice | undefined {
+  if (account.credential.state === 'reauth_required') return 'accountStateReauth'
+  if (account.credential.state === 'missing') return 'accountStateCredentialMissing'
+  if (account.availability?.state === 'refused') return 'accountStateRefused'
+  if (account.protocol?.state === 'upgrade_required') return 'accountStateProtocolUpgrade'
+  if (account.policyLimits?.state === 'blocked') return 'accountStatePolicyLimitsBlocked'
+  return undefined
 }
 
 /** One provider's usage snapshot: every logged-in account that reports windows. */
@@ -161,11 +195,13 @@ export function displaysOf(state: SubscriptionsCacheState): ProviderUsageDisplay
       const windows = usage?.windows ?? []
       const plan = usage?.plan ?? account.plan
       const resetCredits = provider === 'codex' ? usage?.resetCredits?.availableCount : undefined
+      const notice = usageNoticeOf(account)
       const row: AccountUsageDisplay = {
         key: account.key,
         isDefault: account.isDefault,
         ...account.account === undefined ? {} : { account: account.account },
         ...plan === undefined ? {} : { plan },
+        ...notice === undefined ? {} : { notice },
         windows,
         ...resetCredits === undefined ? {} : { resetCredits },
         entry,
@@ -537,11 +573,16 @@ function statsScopeOf(seat: HTMLElement): HTMLElement | null {
 /**
  * One account's handle and plan: `★ ys@example.com · 计划：pro`. The star
  * marks the default account (the one direct routes serve and the collapsed
- * pill reads), the same glyph Settings → 订阅 uses.
+ * pill reads), the same glyph Settings → 订阅 uses. A state that takes the
+ * account out of service is appended as a short marker; the Settings card is
+ * where its reason and recovery time are stated.
  */
 function AccountMeta({ account, translate }: { account: AccountUsageDisplay; translate: Translate }) {
-  const parts = [account.account, account.plan === undefined ? undefined : translate('usagePlan', { plan: account.plan })]
-    .filter((part): part is string => part !== undefined && part !== '')
+  const parts = [
+    account.account,
+    account.plan === undefined ? undefined : translate('usagePlan', { plan: account.plan }),
+    account.notice === undefined ? undefined : translate(account.notice),
+  ].filter((part): part is string => part !== undefined && part !== '')
   return (
     <span style={styles.providerMeta} title={account.account}>
       {account.isDefault && <span style={styles.defaultStar} aria-label={translate('defaultBadge')}>★ </span>}

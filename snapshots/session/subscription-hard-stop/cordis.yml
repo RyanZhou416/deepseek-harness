@@ -1,0 +1,30 @@
+# The hard-stop case uses no shell tools; keep its request schema identical across hosts.
+- id: tool-bash
+  disabled: true
+- id: tool-pwsh
+  disabled: true
+- id: llm-deepseek
+  config:
+    thinking: enabled
+    reasoningEffort: max
+    retryPolicy:
+      mode: normal
+      maxRetries: 2
+      backoff:
+        initialDelayMs: 1
+        maxDelayMs: 1
+        jitterRatio: 0
+    models:
+      - id: deepseek-v4-flash
+      - id: deepseek-v4-pro
+- id: agent-default-model
+  config:
+    provider: deepseek-official
+    model: deepseek-v4-flash
+- id: session-persistence-jsonl
+  config:
+    root: !!js dshHomePath('sessions')
+    compression: none
+- id: agent-instructions
+  config:
+    maxBytes: 65536

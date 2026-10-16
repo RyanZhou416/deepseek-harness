@@ -18,7 +18,11 @@ import type { ClaudeSession } from '../src/auth/store.js'
 import { resolveImages } from '../src/translate/resolved.js'
 import type { ResolvedImagePart, TranslatableBlock, TranslatableMessage } from '../src/translate/resolved.js'
 import { toAnthropicMessages } from '../src/translate/anthropic.js'
+import { ownedClaudeContinuation } from './claude-maintenance-fixtures.js'
+import { PermittingRecordPort } from './recording-port.js'
 
+/** A synthetic machine fingerprint; never this host's own identifier. */
+const FINGERPRINT = 'f'.repeat(64)
 
 async function withImageStore(run: (store: LocalAttachmentStore, ref: ImageAttachmentRef) => Promise<void>): Promise<void> {
   const dshHome = await mkdtemp(join(tmpdir(), 'dsh-image-policy-'))
@@ -131,8 +135,11 @@ describe('subscription request images', () => {
     assert.throws(() => assertClaudeRequestBytes('a'.repeat(32_001_000), messages), { code: 'INVALID_REQUEST' })
   })
 
-  it('sends the resized bytes through the real Claude adapter before any provider fetch', async () => {
+  it('sends the resized bytes through the real Claude adapter before any provider fetch', async (t) => {
     await withImageStore(async (store, ref) => {
+      // A real send is served under a durable identity owner and a recording port; both are
+      // prerequisites of the route and unrelated to the bytes this case asserts.
+      const continuation = await ownedClaudeContinuation(t, ['test'])
       const session: ClaudeSession = {
         accessToken: 'test-only',
         refreshToken: 'test-only',
@@ -150,6 +157,8 @@ describe('subscription request images', () => {
       const adapter = new ClaudeAdapter({
         models: [{ id: 'claude-test', contextWindow: 200_000 }], tokens, discovery: false,
         streamIdleTimeoutMs: 60_000, resolveAttachments: () => store,
+        deviceFingerprint: () => FINGERPRINT,
+        continuation, requestRecord: new PermittingRecordPort(),
         fetchFn: async (_url, init) => {
           calls += 1
           const body = String(init?.body)
@@ -163,7 +172,12 @@ describe('subscription request images', () => {
           return new Response('data: {"type":"message_stop"}\n\n', { headers: { 'content-type': 'text/event-stream' } })
         },
       })
-      for await (const chunk of adapter.stream({ provider: 'claude', model: 'claude-test', messages: history(ref, 21) })) void chunk
+      for await (const chunk of adapter.stream({
+        provider: 'claude',
+        model: 'claude-test',
+        sessionId: 'sess-image-policy' as NonNullable<Parameters<typeof adapter.stream>[0]['sessionId']>,
+        messages: history(ref, 21),
+      })) void chunk
       assert.equal(calls, 1)
     })
   })

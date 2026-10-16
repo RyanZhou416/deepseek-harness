@@ -488,7 +488,7 @@ test('login(claude): an import beats a token exchange that then fails', async ()
       const status = await controller.status('claude')
       assert.equal(status.accounts.length, 1, 'the imported session is still the stored one')
       assert.equal((await listAccounts('claude'))[0]?.session.accessToken, 'imported-cli')
-      assert.equal(status.detail, undefined, 'the superseded failure stayed off the status')
+      assert.equal(status.lastError, undefined, 'the superseded failure stayed off the status')
     } finally {
       held.restore()
     }

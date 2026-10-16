@@ -32,7 +32,7 @@ export interface ModelEntry {
   /** Per-request output cap for this model. */
   maxTokens?: number
   /** Accepted request modalities; when set, wins over the provider default. */
-  inputModalities?: ('text' | 'image')[]
+  inputModalities?: ('text' | 'image')[] | undefined
   /**
    * Force this model's upstream protocol. Only the copilot adapter consumes
    * the semantics; the union is inlined here to avoid a circular import of
@@ -181,6 +181,8 @@ interface HttpLlmErrorOptions {
    * `retry-after` often names a short backoff.
    */
   rateLimitReset?: RateLimitResetReader
+  /** Provider-specific retry headers; absent preserves the shared retry-after reader. */
+  retryHeaderReset?: (response: Response, now: number) => number | undefined
   /** Diagnostic sink for a 429 that disclosed no reset instant this code recognizes. */
   onWarn?: (message: string) => void
 }
@@ -231,6 +233,56 @@ function firstString(...values: unknown[]): string | undefined {
   return undefined
 }
 
+/** Inputs the shared, provider-neutral HTTP failure classification reads. */
+export interface SharedHttpFailureInput {
+  /** The failed response, for its status and headers. */
+  readonly response: Response
+  /** The complete response body. */
+  readonly body: string
+  /** The reset instant the caller resolved, when one was disclosed. */
+  readonly reset: number | undefined
+  /** Current epoch milliseconds. */
+  readonly now: number
+  /** Whether the status was 429. */
+  readonly rateLimited: boolean
+}
+
+/**
+ * The ordered status and refusal classification every subscription route shares.
+ *
+ * A route with its own ordering composes around this rather than restating it: it decides
+ * the cases its provider adds first, then delegates here, so a shared rule changes in one
+ * place. Returns undefined for a status this table does not name, which the caller reports
+ * as its own `HTTP_<status>` code.
+ * @param input - the failed response and the instant facts the table reads.
+ * @returns the stable failure code, or undefined for an unnamed status.
+ */
+export function sharedHttpFailureCode(input: SharedHttpFailureInput): string | undefined {
+  const { response, body, reset, now, rateLimited } = input
+  const shown = body.slice(0, 500)
+  if (response.status === 401 || response.status === 403) return 'AUTH'
+  if (isEnforcementRefusal(response, body, reset, now)) return ENFORCEMENT_CODE
+  if (rateLimited) return 'RATE_LIMIT'
+  if (isQuotaExceededError(shown)) return QUOTA_EXCEEDED_CODE
+  if (response.status === 400 && isContextWindowExceededError(shown)) return CONTEXT_WINDOW_EXCEEDED_CODE
+  if (response.status === 408 || response.status === 504) return 'TIMEOUT'
+  if (response.status >= 500) return 'SERVER'
+  return undefined
+}
+
+/**
+ * The message one failed response reports: the diagnostic label, the status, and the
+ * provider's own structured error fields — never the raw body.
+ * @param label - diagnostic prefix naming the provider API.
+ * @param response - the failed response.
+ * @param body - the complete response body.
+ * @returns the message to report.
+ */
+export function httpFailureMessage(label: string, response: Response, body: string): string {
+  const detail = structuredErrorDetail(body)
+  return `${label} error (HTTP ${String(response.status)})${detail.length > 0 ? `: ${detail}` : ''}`
+}
+
 /**
  * Build an LlmError from a non-2xx provider response, mapping the status to a
  * stable code and, for a rate-limited request, the disclosed reset instant to
@@ -266,15 +318,7 @@ export async function httpLlmError(
   // The readers below need the whole body to classify it; the message carries only the
   // provider's own structured fields, and the raw body rides the error's cause so an
   // arbitrary upstream echo never becomes durable session text.
-  const shown = body.slice(0, 500)
-  const detail = structuredErrorDetail(body)
-  const suffix = detail.length > 0 ? `: ${detail}` : ''
-  const message = `${label} error (HTTP ${String(response.status)})${suffix}`
   const now = Date.now()
-  // The readers below need the whole body to classify it; the message carries only the
-  // provider's own structured fields, and the raw body rides the error's cause so an
-  // arbitrary upstream echo never becomes durable session text.
-  //
   // The provider's reader runs on a 429 and nowhere else. Providers attach
   // their rate-limit headers to every response, so reading them on a transient
   // 500 would report the current window's rollover — hours out — as the delay
@@ -288,25 +332,18 @@ export async function httpLlmError(
   // generic header then names a short backoff that would burn the retry budget
   // re-hitting the same closed window.
   const rateLimited = response.status === 429
+  const retryHeaderReset = options.retryHeaderReset ?? retryAfterInstant
   const reset = rateLimited
-    ? options.rateLimitReset?.(response, body, now) ?? retryAfterInstant(response, now)
-    : retryAfterInstant(response, now)
-  let code: string
-  // A 401 or 403 is a credential or permission refusal: it keeps its own code,
-  // which the discovery path and the account cards already read, and the pool
-  // treats that code as terminal for the turn.
-  if (response.status === 401 || response.status === 403) code = 'AUTH'
-  else if (isEnforcementRefusal(response, body, reset, now)) code = ENFORCEMENT_CODE
-  else if (rateLimited) code = 'RATE_LIMIT'
-  else if (isQuotaExceededError(shown)) code = QUOTA_EXCEEDED_CODE
-  else if (response.status === 400 && isContextWindowExceededError(shown)) code = CONTEXT_WINDOW_EXCEEDED_CODE
-  else if (response.status === 408 || response.status === 504) code = 'TIMEOUT'
-  else if (response.status >= 500) code = 'SERVER'
-  else code = `HTTP_${String(response.status)}`
+    ? options.rateLimitReset?.(response, body, now) ?? retryHeaderReset(response, now)
+    : retryHeaderReset(response, now)
+  // The shared table names every status these routes classify; a status it does not name keeps
+  // its own HTTP code, which no route retries.
+  const code = sharedHttpFailureCode({ response, body, reset, now, rateLimited })
+    ?? `HTTP_${String(response.status)}`
   if (reset === undefined && rateLimited) {
     options.onWarn?.(`${label}: ${rateLimitDiagnostics(response, body)}`)
   }
-  return new LlmError(message, code, {
+  return new LlmError(httpFailureMessage(label, response, body), code, {
     ...body.length === 0 ? {} : { cause: new Error(body) },
     status: response.status,
     ...reset === undefined ? {} : { providerRetryAfterMs: waitFromReset(reset, now) },
@@ -456,15 +493,89 @@ export interface TokenManagerOptions<S extends TimedSession> {
   /** Refresh this long before `expiresAt`. */
   preemptMs: number
   load(): Promise<S | undefined>
-  save(session: S, expectedPrior?: S): Promise<void>
-  remove(): Promise<void>
+  /**
+   * Read the stored session together with the revision it is stored under, in ONE read.
+   *
+   * This is the read a refresh spends its grant from, and it is deliberately not two calls:
+   * reading the session and then the revision separately lets a logout and a same-token
+   * re-login land between them, pairing the old session with the new revision so the
+   * conditional write succeeds and overwrites the login. Absent falls back to
+   * {@link load}, with the token comparison as the whole guard.
+   * @returns the stored session and its revision; `session` is `undefined` when logged out.
+   */
+  loadCredential?(): Promise<{ session: S | undefined; revision: number | undefined }>
+  /**
+   * Persist a refresh result under the manager's own scope key. The store is
+   * the authority, and the manager re-reads after every save, so an
+   * implementation need not report a conditional write it refused.
+   * @param session - the refreshed session to store.
+   * @param expectedPrior - the session the refresh spent.
+   * @param expectedRevision - the revision that session was read under.
+   */
+  save(session: S, expectedPrior?: S, expectedRevision?: number): Promise<void>
+  /**
+   * Delete the stored session. With `expectedPrior`, the store deletes it only
+   * while it is still that session, so a removal cannot destroy a login or a
+   * rotation that landed after the caller read it.
+   * @param expectedPrior - the session this refresh spent, when one was attempted.
+   * @param expectedRevision - the revision that session was read under.
+   * @returns true when the session was removed, false when the removal was
+   *   refused because the store held something else. An implementation may
+   *   return nothing, which reads as removed.
+   */
+  remove(expectedPrior?: S, expectedRevision?: number): Promise<void | boolean>
   /** Perform the provider's refresh-token grant. */
   refresh(session: S): Promise<S>
   /** Whether a refresh failure is permanent (re-login required). */
   isPermanent(error: unknown): boolean
-  /** Called after a permanent refresh failure deleted the stored session. */
+  /** Called when a permanent refresh failure actually deleted the stored session. */
   onRemoved?(): void
+  /**
+   * Run one account's whole refresh cycle — re-read the store, spend the grant, save —
+   * under cross-process ownership, so two cooperating processes sharing one credential
+   * store cannot both spend the same refresh grant. Absent keeps the in-process
+   * single-flight and the store's conditional write alone.
+   *
+   * Ownership is a precondition, not a hint: a cycle that cannot own the scope must not
+   * run, because rotating without it is exactly the double-spend this prevents. The
+   * manager answers a refusal with {@link REFRESH_BUSY_CODE} so a caller with a still-valid
+   * credential keeps it instead of sending an expired one.
+   * @param cycle - the read-refresh-save sequence to run while owned.
+   * @returns the cycle's outcome, or `{ acquired: false }` when another owner held it.
+   */
+  withRefreshOwnership?<T>(cycle: () => Promise<T>): Promise<RefreshOwnershipOutcome<T>>
 }
+
+/**
+ * Whether a refresh failure means this scope's session is gone from the store
+ * rather than temporarily unusable. Such a failure never takes the transient
+ * fallback (the credential the caller holds was logged out) and never takes the
+ * permanent branch (there is nothing left to remove or report).
+ * @param error - the thrown refresh failure.
+ * @returns true when the caller must see the logged-out result.
+ */
+function isMissingCredential(error: unknown): boolean {
+  return error instanceof LlmError && error.code === 'MISSING_CREDENTIAL'
+}
+
+/**
+ * The failure a refresh reports when another owner holds cross-process refresh ownership
+ * for the account and the wait was exhausted.
+ *
+ * Deliberately neither `AUTH` nor `INVALID_CREDENTIAL`: no grant was spent and nothing was
+ * refused by the provider, so the credential is untouched and the caller may retry. It is
+ * not retryable by the pool either — the pool's classifier fails the turn on an unknown
+ * code without parking the account.
+ */
+export const REFRESH_BUSY_CODE = 'REFRESH_BUSY'
+
+/**
+ * What a {@link TokenManagerOptions.withRefreshOwnership} implementation reports.
+ * @typeParam T - the value the owned cycle produces.
+ */
+export type RefreshOwnershipOutcome<T> =
+  | { readonly acquired: true; readonly value: T }
+  | { readonly acquired: false }
 
 /**
  * Per-provider session freshness: loads the stored session, refreshes
@@ -472,11 +583,22 @@ export interface TokenManagerOptions<S extends TimedSession> {
  * coalesces concurrent refreshes behind one in-flight promise. Permanent
  * refresh failures delete the stored session and surface INVALID_CREDENTIAL
  * with a re-login hint; transient failures fall back to a still-valid token.
+ *
+ * The stored session is the authority. A refresh answers with what the store
+ * holds after the write, so a save the store refused — a logout, a re-login or
+ * a concurrent rotation that won the compare-and-set — is never returned, and a
+ * scope whose session disappeared while the refresh ran fails
+ * MISSING_CREDENTIAL instead of reviving the credential the caller still holds.
+ * A permanent failure likewise deletes the session it spent only while the
+ * store still holds it, serves a login that landed in the meantime, and reports
+ * the removal once.
  */
 export class TokenManager<S extends TimedSession> {
   private inflight: Promise<S> | undefined
   /** The session whose refresh token the in-flight refresh is spending. */
   private attempted: S | undefined
+  /** The revision that session was read under, when the backend keeps one. */
+  private attemptedRevision: number | undefined
 
   constructor(private readonly options: TokenManagerOptions<S>) {
     this.options = options
@@ -503,18 +625,14 @@ export class TokenManager<S extends TimedSession> {
    * Resolve a usable session, refreshing proactively or on demand.
    * @param forceRefresh - refresh regardless of expiry (used after a 401).
    * @returns the persisted session to send.
-   * @throws LlmError MISSING_CREDENTIAL when logged out, INVALID_CREDENTIAL
-   *   when the refresh grant is permanently rejected.
+   * @throws LlmError MISSING_CREDENTIAL when logged out — including a scope
+   *   whose session was removed while its refresh was in flight, which is never
+   *   revived and never answered with the pre-logout credential;
+   *   INVALID_CREDENTIAL when the refresh grant is permanently rejected.
    */
   async session(forceRefresh = false): Promise<S> {
     const session = await this.options.load()
-    if (session === undefined) {
-      throw new LlmError(
-        `dsh-plugin-subscriptions: not logged in to ${this.options.displayName}; `
-        + 'log in via Settings → Subscriptions in the dsh web app',
-        'MISSING_CREDENTIAL',
-      )
-    }
+    if (session === undefined) throw this.missingCredential()
     if (!forceRefresh && session.expiresAt - Date.now() > this.options.preemptMs) {
       return session
     }
@@ -524,17 +642,28 @@ export class TokenManager<S extends TimedSession> {
     try {
       return await this.inflight
     } catch (error) {
+      // Nothing is stored for this scope any more: the account was removed while
+      // the refresh ran. The transient fallback would send the pre-logout
+      // credential, and the permanent branch would report a removal and delete an
+      // account that is already gone, so the logged-out result is the whole answer.
+      if (isMissingCredential(error)) throw error
       if (this.options.isPermanent(error)) {
-        // A re-login may have landed while this refresh was failing: its
-        // session carries a different refresh token, and deleting it would
-        // log out an account that just signed in. Serve it instead.
+        // Remove only the session this refresh was spending. The store performs
+        // the comparison inside its own lock, so a re-login or a concurrent
+        // rotation that stored a different session between the read and this
+        // call wins and the removal is refused.
         const attempted = this.attempted
+        const attemptedRevision = this.attemptedRevision
+        const removed = attempted === undefined
+          ? await this.options.remove(undefined, attemptedRevision)
+          : await this.options.remove(attempted, attemptedRevision)
+        // Read the winner: a login that landed while this refresh was failing is
+        // served instead of being reported as a dead credential.
         const stored = await this.options.load()
-        if (stored !== undefined && attempted !== undefined && stored.refreshToken !== attempted.refreshToken) {
-          return stored
-        }
-        await this.options.remove()
-        this.options.onRemoved?.()
+        if (stored !== undefined) return stored
+        // Only the caller whose removal deleted the entry reports it, so
+        // concurrent waiters that lost the removal stay silent.
+        if (removed !== false) this.options.onRemoved?.()
         throw new LlmError(
           `${this.options.displayName} login expired or was revoked; log in again via Settings → Subscriptions`,
           'INVALID_CREDENTIAL',
@@ -551,20 +680,65 @@ export class TokenManager<S extends TimedSession> {
     }
   }
 
+  /** The logged-out result for this manager's own scope. */
+  private missingCredential(): LlmError {
+    return new LlmError(
+      `dsh-plugin-subscriptions: not logged in to ${this.options.displayName}; `
+      + 'log in via Settings → Subscriptions in the dsh web app',
+      'MISSING_CREDENTIAL',
+    )
+  }
+
   private async doRefresh(session: S): Promise<S> {
-    // A concurrent caller may have refreshed while this one waited: re-read
-    // the store and skip the round trip when the stored session is fresh.
-    const current = await this.options.load()
+    const ownership = this.options.withRefreshOwnership
+    if (ownership === undefined) return this.refreshCycle(session)
+    const outcome = await ownership(() => this.refreshCycle(session))
+    if (outcome.acquired) return outcome.value
+    // Another owner is rotating this credential. The store is re-read before giving up:
+    // that owner may already have stored its result, and a credential that outlives the one
+    // this caller holds is the one to send — never the credential the winner just replaced.
+    const stored = await this.options.load()
+    if (stored === undefined) throw this.missingCredential()
+    if (stored.accessToken !== session.accessToken && stored.expiresAt > session.expiresAt) return stored
+    throw new LlmError(
+      `${this.options.displayName} credential refresh is owned by another process; retry shortly`,
+      REFRESH_BUSY_CODE,
+    )
+  }
+
+  private async refreshCycle(session: S): Promise<S> {
+    // The session a grant is spent from and its revision come from one read, so no writer
+    // can land between them and pair this session with a revision it was never stored under.
+    const combined = this.options.loadCredential
+    const read = combined === undefined
+      ? { session: await this.options.load(), revision: undefined }
+      : await combined()
+    const current = read.session
     if (current !== undefined
       && current.accessToken !== session.accessToken
       && current.expiresAt - Date.now() > this.options.preemptMs) {
       return current
     }
-    const attempted = current ?? session
+    // This scope's session is gone: the account was removed after the caller
+    // read it. Refreshing the caller's copy would spend a grant and hand back a
+    // credential the store no longer holds, so the removal is the whole answer.
+    if (current === undefined) throw this.missingCredential()
+    const attempted = current
     this.attempted = attempted
+    const attemptedRevision = read.revision
+    this.attemptedRevision = attemptedRevision
     const next = await this.options.refresh(attempted)
-    await this.options.save(next, attempted)
-    return next
+    await this.options.save(next, attempted, attemptedRevision)
+    // The stored session is the authority, not the grant just minted: the save
+    // may have been refused (a logout, a re-login or a concurrent rotation won
+    // the compare-and-set) and the save hook need not report that. Re-read and
+    // answer with what the store holds now — never a session it refused. The
+    // manager knows only its own scope key, so it cannot judge whether a winner
+    // is the same user; any identity decision belongs to the caller that owns
+    // the account key.
+    const stored = await this.options.load()
+    if (stored === undefined) throw this.missingCredential()
+    return stored
   }
 
   /**
@@ -572,9 +746,18 @@ export class TokenManager<S extends TimedSession> {
    * backfill (minted device id, discovered account uuid) uses this; the next
    * {@link session} read loads the updated copy from the store.
    * @param session - the updated session to store.
+   * @param expectedPrior - the stored session this update was derived from. The
+   *   store refuses the write once another writer has replaced it, so a backfill
+   *   cannot roll a rotation back.
+   * @param expectedRevision - the revision that stored session was read under. A
+   *   caller that read the session and its revision together passes it so a
+   *   write derived from that read is refused once the record has moved on —
+   *   including by a write that left the credential fields identical, such as an
+   *   ownership-mode change, a logout or a same-token re-login. Absent keeps the
+   *   session comparison as the whole guard.
    */
-  async replace(session: S): Promise<void> {
-    await this.options.save(session)
+  async replace(session: S, expectedPrior?: S, expectedRevision?: number): Promise<void> {
+    await this.options.save(session, expectedPrior, expectedRevision)
   }
 }
 

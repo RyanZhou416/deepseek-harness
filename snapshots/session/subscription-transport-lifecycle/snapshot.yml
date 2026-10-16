@@ -1,0 +1,10 @@
+version: 1
+scenario: subscription-transport-lifecycle
+profile: headless
+composition: subscription-transport-lifecycle
+recording: authored
+header:
+  class: subscription-transport-lifecycle
+  pin: true
+replay:
+  override: true

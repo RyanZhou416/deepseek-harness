@@ -17,6 +17,14 @@ import {
   desktopMachineProfile,
 } from '../src/providers/claude-desktop.js'
 
+/** The account uuids the adapter binds a device to; the login email is not an input. */
+const UUID_A = '3f1c8a52-0d47-4b90-8e21-77c9a4f10b6d'
+const UUID_B = '9a0e5b74-2c31-4f68-b1dd-40e7f2a83c59'
+
+/** Synthetic machine fingerprints; neither is this host's own identifier. */
+const FINGERPRINT = 'a1'.repeat(32)
+const OTHER_FINGERPRINT = 'b2'.repeat(32)
+
 /** Sizes a plausible desktop reports, and the bucket each must land in. */
 const EXPECTED_BUCKET: ReadonlyArray<readonly [number, string]> = [
   [8, '8'],
@@ -122,18 +130,19 @@ test('no host value can reach a request', async () => {
   }
 })
 
-test('the device id is the client’s format and belongs to the account alone', () => {
-  const id = deriveClaudeDeviceId('someone@example.com')
+test('the device id is the client’s format and belongs to the account uuid alone', () => {
+  const id = deriveClaudeDeviceId(`uuid:${UUID_A}`, FINGERPRINT)
   assert.match(id, /^[0-9a-f]{64}$/, 'the client uses 64 lowercase hex characters')
-  assert.equal(id, deriveClaudeDeviceId('someone@example.com'), 'stable for one account')
-  assert.notEqual(id, deriveClaudeDeviceId('other@example.com'), 'distinct per account')
+  assert.equal(id, deriveClaudeDeviceId(`uuid:${UUID_A}`, FINGERPRINT), 'stable for one account')
+  assert.notEqual(id, deriveClaudeDeviceId(`uuid:${UUID_B}`, FINGERPRINT), 'distinct per account')
+  assert.notEqual(id, deriveClaudeDeviceId(`uuid:${UUID_A}`, OTHER_FINGERPRINT), 'distinct per machine')
 })
 
 test('signing out and in again presents the same device', () => {
   // The credential record is deleted on logout, so an id stored inside it would be lost.
-  // Deriving from the account key instead keeps the device stable across the whole cycle.
-  const before = deriveClaudeDeviceId('member@example.com')
-  const after = deriveClaudeDeviceId('member@example.com')
+  // Deriving from the account uuid and this machine keeps the device stable across the cycle.
+  const before = deriveClaudeDeviceId(`uuid:${UUID_A}`, FINGERPRINT)
+  const after = deriveClaudeDeviceId(`uuid:${UUID_A}`, FINGERPRINT)
   assert.equal(before, after)
   assert.deepEqual(
     desktopMachineProfile(before),

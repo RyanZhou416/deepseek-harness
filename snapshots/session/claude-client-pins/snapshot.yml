@@ -1,0 +1,10 @@
+version: 1
+scenario: claude-client-pins
+profile: headless
+composition: claude-client-pins
+recording: authored
+header:
+  class: claude-client-pins
+  pin: true
+replay:
+  override: true

@@ -57,10 +57,19 @@ function harness(options: {
         stored.set(account, s)
         return Promise.resolve()
       },
-      remove: (account) => {
+      remove: (account, expectedPrior) => {
+        // Mirror the durable store: a named prior removes only that session, so
+        // a re-login that landed while the refresh was failing survives.
+        const current = stored.get(account)
+        if (expectedPrior !== undefined
+          && (current === undefined
+            || current.accessToken !== expectedPrior.accessToken
+            || current.refreshToken !== expectedPrior.refreshToken)) {
+          return Promise.resolve(false)
+        }
         stored.delete(account)
         removed.push(account)
-        return Promise.resolve()
+        return Promise.resolve(true)
       },
     },
   })
@@ -341,4 +350,112 @@ test('a permanent refresh failure still removes the account when nothing replace
   assert.deepEqual(removed, ['a1'])
   assert.deepEqual(notified, ['a1'])
   assert.equal(stored.has('a1'), false)
+})
+
+// ---------------------------------------------------------------------------
+// The optional use-path preparation hook
+// ---------------------------------------------------------------------------
+
+/** A manager over one in-memory session, recording what the hook and the store saw. */
+function preparedHarness(prepare?: (account: string, forceRefresh: boolean) => Promise<TestSession | undefined>) {
+  const stored = new Map<string, TestSession>([['a1', session('at-stored')]])
+  const hookCalls: string[] = []
+  const loads: string[] = []
+  const refreshes: string[] = []
+  const tokens = new AccountTokenManager<TestSession>({
+    provider: 'codex' as ProviderId,
+    displayName: 'Test',
+    makeOptions: () => ({
+      preemptMs: 0,
+      refresh: (current) => { refreshes.push(current.accessToken); return Promise.resolve(current) },
+      isPermanent: () => false,
+    }),
+    ...prepare === undefined ? {} : {
+      prepareSession: async (account: string, forceRefresh: boolean) => {
+        hookCalls.push(`${account}:${String(forceRefresh)}`)
+        return await prepare!(account, forceRefresh)
+      },
+    },
+    io: {
+      list: () => Promise.resolve([...stored.entries()].map(([key, s]) => ({ key, session: s }) as AccountEntry<TestSession>)),
+      get: (account) => {
+        loads.push(account ?? 'default')
+        return Promise.resolve(account === undefined ? stored.values().next().value : stored.get(account))
+      },
+      save: (account, s) => { stored.set(account, s); return Promise.resolve() },
+      remove: (account) => { stored.delete(account); return Promise.resolve(true) },
+    },
+  })
+  return { tokens, stored, hookCalls, loads, refreshes }
+}
+
+test('the use-path hook is consulted by session() alone', async () => {
+  const h = preparedHarness(() => Promise.resolve(undefined))
+  await h.tokens.session('a1')
+  await h.tokens.session('a1', true)
+  assert.deepEqual(h.hookCalls, ['a1:false', 'a1:true'], 'the use path passes the account and the forced-refresh request')
+  assert.equal(h.loads.length > 0, true, 'a hook that declines leaves the manager its own path')
+
+  h.hookCalls.length = 0
+  h.loads.length = 0
+  await h.tokens.list()
+  await h.tokens.peek('a1')
+  await h.tokens.snapshot('a1')
+  await h.tokens.revisionOf('a1')
+  await h.tokens.hasSession('a1')
+  assert.deepEqual(h.hookCalls, [], 'a status, list or snapshot read never consults the hook')
+})
+
+test('a hook that answers takes over the use without loading or refreshing', async () => {
+  const h = preparedHarness(() => Promise.resolve(session('at-prepared')))
+  assert.equal((await h.tokens.session('a1')).accessToken, 'at-prepared')
+  assert.deepEqual(h.loads, [], 'the stored credential is never loaded for this use')
+  assert.deepEqual(h.refreshes, [], 'and no grant is spent')
+  // The manager's own scope is untouched: a use the hook declines still serves the store.
+  const plain = preparedHarness(() => Promise.resolve(undefined))
+  assert.equal((await plain.tokens.session('a1')).accessToken, 'at-stored')
+})
+
+test('a manager without the hook is unchanged', async () => {
+  const h = preparedHarness()
+  assert.equal((await h.tokens.session('a1')).accessToken, 'at-stored')
+  assert.deepEqual(h.hookCalls, [])
+  assert.deepEqual(h.refreshes, [], 'a fresh credential is served without a refresh, exactly as before')
+})
+
+// ---------------------------------------------------------------------------
+// The conditional identity write's revision
+// ---------------------------------------------------------------------------
+
+test('persist forwards the revision a caller decided on, and none when it decided on none', async () => {
+  const stored = new Map<string, TestSession>([['a1', session('at-1')]])
+  const saves: { prior?: TestSession; revision?: number }[] = []
+  const tokens = new AccountTokenManager<TestSession>({
+    provider: 'codex' as ProviderId,
+    displayName: 'Test',
+    makeOptions: () => ({ preemptMs: 0, refresh: async current => current, isPermanent: () => false }),
+    io: {
+      list: () => Promise.resolve([...stored.entries()].map(([key, s]) => ({ key, session: s }) as AccountEntry<TestSession>)),
+      get: account => Promise.resolve(account === undefined ? stored.values().next().value : stored.get(account)),
+      save: (account, value, expectedPrior, expectedRevision) => {
+        saves.push({
+          ...expectedPrior === undefined ? {} : { prior: expectedPrior },
+          ...expectedRevision === undefined ? {} : { revision: expectedRevision },
+        })
+        stored.set(account, value)
+        return Promise.resolve()
+      },
+      remove: account => { stored.delete(account); return Promise.resolve(true) },
+    },
+  })
+  const prior = stored.get('a1')!
+  const next = { ...prior, accessToken: 'at-2' }
+  await tokens.persist('a1', next, prior, 7)
+  await tokens.persist('a1', next, prior)
+  assert.deepEqual(
+    saves.map(entry => entry.revision),
+    [7, undefined],
+    'the revision rides along only when the caller decided on one, so every other route keeps its own guard',
+  )
+  assert.equal(saves[0]?.prior?.accessToken, 'at-1', 'and the session it was read under still rides along')
 })

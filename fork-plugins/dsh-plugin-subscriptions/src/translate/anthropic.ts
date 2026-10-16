@@ -6,12 +6,37 @@
  */
 
 import {
-  CONTEXT_WINDOW_EXCEEDED_CODE,
   EMPTY_RESPONSE_CODE,
   LlmError,
 } from '@deepseek-ai/dsh-llm'
 import { ToolCallId } from '../compat.js'
-import { ENFORCEMENT_CODE, namesBillingRefusal } from '../providers/common.js'
+import { classifyClaudeSseFailure, claudeFailureError, claudeFinishFailure, STREAM_INCOMPLETE_CODE } from '../providers/claude-failure.js'
+import type { ClaudeSseErrorObject } from '../providers/claude-failure.js'
+import { CLAUDE_PROTOCOL_PROFILE } from '../providers/claude-protocol.js'
+import type { ClaudeProtocolProfile } from '../providers/claude-protocol.js'
+import type { ClaudeRefusalProbe } from '../providers/claude-failure.js'
+import { CLAUDE_CONTINUATION_VERSION } from '../claude-engine/continuation.js'
+import type { ClaudeContinuationV1 } from '../claude-engine/continuation.js'
+import type { ClaudeAccountRef } from '../claude-core/account-ref.js'
+export type { ClaudeRefusalProbe as AnthropicRefusalProbe } from '../providers/claude-failure.js'
+
+/**
+ * The identity facts one accepted Claude response records beside its blocks.
+ *
+ * The adapter's own state is the only source of these: the account reference the salt derives, the
+ * identity generation in force, and the span's harness session and committed wire session. The
+ * request id belongs to the response itself, so the translator adds it.
+ */
+export interface ClaudeContinuationMetadata {
+  /** The account the turn was served for, as the store's verifiable reference. */
+  readonly accountRef: ClaudeAccountRef
+  /** The identity generation in force when the turn was served. */
+  readonly spanEpoch: number
+  /** The harness session the turn belongs to. */
+  readonly harnessSessionId: string
+  /** The wire session the turn was served under. */
+  readonly wireSessionId: string
+}
 
 // The finish-reason map is merge-extensible so an adapter can surface a provider's own
 // reasons. A refusal is one: the model answered, declined, and stopped, which a caller
@@ -61,6 +86,15 @@ const SYSTEM_REMINDER_CLOSE = '</system-reminder>'
  * `tool_use` in the request has no result to answer it.
  */
 export const MISSING_TOOL_RESULT_TEXT = '[Tool result missing due to internal error]'
+
+/**
+ * Failure code for a response the harness cannot complete a turn from: a stop
+ * reason this adapter has no way to continue, or server-tool content with
+ * nothing the harness can present or answer. Deliberately outside every
+ * subscription route's retryable set, so the request is not repeated
+ * automatically and the turn fails instead of passing as a completed one.
+ */
+export const UNSUPPORTED_RESPONSE_CODE = 'UNSUPPORTED_RESPONSE'
 
 /**
  * One Anthropic request message. The Claude Code identity and billing blocks
@@ -173,8 +207,11 @@ interface ClaudeThinkingReplay {
  */
 interface ClaudeServerReplay {
   /**
-   * Harness-visible blocks already open when the block arrived: it is re-emitted
-   * ahead of the harness block at this index.
+   * Position in the assembled message's own block order: the block is re-emitted
+   * ahead of the harness block at this index. A response that ended at a
+   * generation limit records the position the message keeps after assembly
+   * drops its tool calls ({@link AnthropicStreamTranslator}), so an envelope
+   * written before that rebasing names the response's own position instead.
    */
   index: number
   /** The response block, replayed unchanged. */
@@ -571,13 +608,29 @@ function thinkingTokens(usage: AnthropicUsage | undefined): number | undefined {
   return typeof value === 'number' && Number.isFinite(value) ? value : undefined
 }
 
-/** Usage fields this translator reads. `thinking_tokens` requires beta `thinking-token-count-2026-05-13`. */
+/**
+ * Usage fields this translator reads. `thinking_tokens` requires beta
+ * `thinking-token-count-2026-05-13`. Missing and null counts preserve earlier values.
+ */
 interface AnthropicUsage {
-  input_tokens?: number
-  output_tokens?: number
-  cache_read_input_tokens?: number
-  cache_creation_input_tokens?: number
-  output_tokens_details?: { thinking_tokens?: number }
+  input_tokens?: number | null
+  output_tokens?: number | null
+  cache_read_input_tokens?: number | null
+  cache_creation_input_tokens?: number | null
+  output_tokens_details?: { thinking_tokens?: number | null } | null
+}
+
+/**
+ * Token totals a stream has stated so far, in harness terms. A field holds the last
+ * count an event stated, and stays undefined until one does, so a count the stream
+ * never mentioned is not invented.
+ */
+interface ReportedUsage {
+  inputTokens?: number | undefined
+  outputTokens?: number | undefined
+  cacheReadTokens?: number | undefined
+  cacheWriteTokens?: number | undefined
+  reasoningTokens?: number | undefined
 }
 
 /** The subset of Anthropic SSE event shapes this translator reads. */
@@ -624,7 +677,11 @@ export interface AnthropicStreamEvent {
     stop_reason?: string
   }
   usage?: AnthropicUsage
-  error?: { type?: string; message?: string }
+  /**
+   * The provider's error object, read whole: a refusal can be named by the event's type, by a
+   * flat code, or by a code nested under `details`, and the classifier reads all three.
+   */
+  error?: ClaudeSseErrorObject
   /** The edits the server applied to this response, when it applied any. */
   context_management?: AnthropicContextManagement
 }
@@ -640,6 +697,8 @@ interface OpenBlock {
   signature: string
   /** `redacted_thinking.data`, when this block is a redacted thinking block. */
   redacted?: string
+  /** A `tool_use` start object's own `input`, used when no `input_json_delta` streams one. */
+  startInput?: unknown
 }
 
 /**
@@ -669,68 +728,76 @@ function closeBlock(block: OpenBlock): ContentBlock {
         type: 'tool-call',
         id: ToolCallId(block.callId),
         name: block.name ?? '',
-        arguments: block.text,
+        arguments: blockArguments(block),
       }
   }
 }
 
 /**
- * Reports whether an in-band error event is a refusal the provider stated is
- * final.
+ * The argument text one closing tool block reports.
  *
- * The status and headers that make a failure terminal belong to the response,
- * and an `error` event can arrive inside a 200, so the caller that owns the
- * response answers this; the event alone cannot.
+ * A streamed input is the whole value when the provider sent one; a tool whose input was
+ * never streamed reports the start object's own value, so a zero-argument call closes as
+ * `{}` rather than as an empty string no consumer can parse.
+ * @param block - the tool block being closed.
+ * @returns the raw JSON argument text.
  */
-export type AnthropicRefusalProbe = (
-  error: { type?: string; message?: string } | undefined,
-) => boolean
+function blockArguments(block: OpenBlock): string {
+  if (block.text.length > 0) return block.text
+  if (block.startInput === undefined) return ''
+  const serialized = JSON.stringify(block.startInput)
+  return serialized === undefined ? '' : serialized
+}
 
 /**
- * Error-event types that can carry a refusal the provider stated is final.
+ * Whether a tool block's argument text is a complete JSON value.
  *
- * These are the events the provider sends for a request it will not serve: the
- * rate limit that is really an exhausted allowance, and the overload and API
- * failures it also reports as retryable conditions. Everything else — a policy,
- * permission, or not-found error — is not a statement about retrying, and a
- * credential error is classified before this set is consulted at all.
+ * An unclosed or malformed argument stream must never become an executable tool call, so
+ * the terminal state checks this before the response can be reported as a success.
+ * @param block - the tool block being closed.
+ * @returns true when the reported arguments parse as JSON.
  */
-const REFUSAL_BEARING_ERROR_TYPES: ReadonlySet<string> = new Set([
-  'rate_limit_error',
-  'overloaded_error',
-  'api_error',
-])
+function hasCompleteToolArguments(block: OpenBlock): boolean {
+  const text = blockArguments(block)
+  if (text.length === 0) return false
+  try {
+    JSON.parse(text)
+    return true
+  } catch {
+    // Only swallow argument parsing: an unparseable argument stream is this block's answer.
+    return false
+  }
+}
 
 /**
  * Classify an Anthropic `error` event into a thrown LlmError.
  *
- * The retryable event types — a rate limit, and the overload and API failures
- * the provider states are transient — are classified as retryable by default,
- * because the usual cause is a window that reopens or a moment of congestion.
- * A refusal the provider will not accept a retry for arrives on those same
- * types, or on any type whose message names a billing or credit refusal, so the
- * caller's {@link AnthropicRefusalProbe} decides which of the two this one is;
- * without a probe the default stands.
+ * The event carries no status and no headers, so the response-level ordering lives in the
+ * Claude failure classifier; this passes the event through with the caller's
+ * {@link ClaudeRefusalProbe}, which is the only thing that can say whether the response a
+ * 200 carried was itself a refusal.
  * @param error - the wire error object.
  * @param isRefusal - the caller's classification of this event against the
  *   response it arrived on.
+ * @param profile - the compatibility profile the request was built from.
+ * @param outputDelivered - whether output for this request already reached the Host.
  * @returns the mapped error.
  */
 function anthropicFailure(
-  error: { type?: string; message?: string } | undefined,
-  isRefusal?: AnthropicRefusalProbe,
+  error: ClaudeSseErrorObject | undefined,
+  isRefusal: ClaudeRefusalProbe | undefined,
+  profile: ClaudeProtocolProfile,
+  outputDelivered: boolean,
 ): LlmError {
   const type = error?.type ?? 'unknown_error'
   const message = error?.message ?? `Anthropic reported ${type}`
-  if (type === 'invalid_request_error' && /prompt is too long/i.test(message)) {
-    return new LlmError(message, CONTEXT_WINDOW_EXCEEDED_CODE)
-  }
-  if (type === 'authentication_error') return new LlmError(message, 'AUTH')
-  if ((REFUSAL_BEARING_ERROR_TYPES.has(type) || namesBillingRefusal(message)) && isRefusal?.(error) === true) {
-    return new LlmError(message, ENFORCEMENT_CODE)
-  }
-  if (type === 'rate_limit_error') return new LlmError(message, 'RATE_LIMIT')
-  return new LlmError(message, 'SERVER')
+  const decision = classifyClaudeSseFailure({
+    error,
+    profile,
+    outputDelivered,
+    ...isRefusal === undefined ? {} : { isRefusal },
+  })
+  return claudeFailureError(decision, message)
 }
 
 /**
@@ -738,7 +805,10 @@ function anthropicFailure(
  * {@link push} and collect the emitted harness StreamChunks. Block indexes
  * are allocated in first-seen order; `usage` is emitted before the terminal
  * `finish`, and nothing is emitted after it. `error` events throw
- * {@link LlmError}.
+ * {@link LlmError}. A stop reason this adapter cannot continue — a paused turn,
+ * a server-side compaction, or one it does not model — and a response whose only
+ * content was server-tool blocks both end as an error finish carrying
+ * {@link UNSUPPORTED_RESPONSE_CODE} rather than an ordinary stop.
  */
 export class AnthropicStreamTranslator {
   private blocks = new Map<number, OpenBlock>()
@@ -746,16 +816,29 @@ export class AnthropicStreamTranslator {
   private replay: ClaudeThinkingReplay[] = []
   /** Server-tool blocks captured for the next request, in arrival order. */
   private serverBlocks: ClaudeServerReplay[] = []
+  /** Harness block kind per harness index, so a pruned response can rebase captures. */
+  private blockKinds: OpenBlock['kind'][] = []
   /** Open server-tool blocks under assembly, by wire index. */
   private openServerBlocks = new Map<number, OpenServerBlock>()
   private nextIndex = 0
   private sawAnyBlock = false
-  private pendingUsage: { inputTokens: number; cacheReadTokens?: number; cacheWriteTokens?: number; reasoningTokens?: number } | undefined
-  private outputTokens: number | undefined
+  /** Token totals every usage object so far has stated, in harness terms. */
+  private reportedUsage: ReportedUsage = {}
   private stopReason: 'stop' | 'tool-calls' | 'max-tokens' | 'refusal' = 'stop'
+  /** The stop reason that left the turn uncontinuable, for the failure it reports. */
+  private unsupportedStopReason: string | undefined
   private usageEmitted = false
   /** Set once `message_stop` produced the terminal finish chunk. */
   terminated = false
+  /**
+   * Whether any chunk other than the terminal finish has gone out for this response.
+   *
+   * The first chunk the Host receives commits the attempt, so this is the delivery
+   * boundary a later failure reports: a failure after it may not be replayed.
+   */
+  private delivered = false
+  /** Set when a tool block closed with arguments that do not parse as JSON. */
+  private incompleteToolSeen = false
 
   /**
    * @param requestId - the `request-id` response header this stream answers, recorded on
@@ -763,10 +846,15 @@ export class AnthropicStreamTranslator {
    *   checkable from the session log. Omitted when the response carried no such header.
    * @param isRefusal - classifies an in-band `error` event against the response it
    *   arrived on. Omitted when the caller has no response to classify against.
+   * @param profile - the frozen compatibility profile this stream was opened under.
+   * @param continuation - the identity facts this attempt was prepared under, when the
+   *   adapter has them; they are recorded with every accepted response.
    */
   constructor(
     private readonly requestId?: string,
-    private readonly isRefusal?: AnthropicRefusalProbe,
+    private readonly isRefusal?: ClaudeRefusalProbe,
+    private readonly profile: ClaudeProtocolProfile = CLAUDE_PROTOCOL_PROFILE,
+    private readonly continuation?: ClaudeContinuationMetadata,
   ) {}
 
   private open(wireIndex: number, kind: OpenBlock['kind'], chunks: StreamChunk[], callId = '', name?: string): OpenBlock {
@@ -779,6 +867,7 @@ export class AnthropicStreamTranslator {
       ...name === undefined ? {} : { name },
     }
     this.blocks.set(wireIndex, block)
+    this.blockKinds[block.index] = kind
     this.sawAnyBlock = true
     chunks.push({ type: 'block-start', index: block.index, blockType: kind })
     return block
@@ -816,6 +905,29 @@ export class AnthropicStreamTranslator {
   private appliedEdits: AnthropicContextManagement | undefined
 
   /**
+   * The captured server-tool blocks with positions in the assembled message.
+   *
+   * A capture records how many harness blocks preceded it in the response, which
+   * is also where it goes back while the message keeps every block. Assembly
+   * drops the tool calls of a response that ended at a generation limit, so that
+   * recorded position would name a block the message no longer carries and the
+   * next request would emit the captured pair after text it originally led.
+   * Rebasing past the dropped blocks ahead of each capture leaves every index a
+   * position in the message's own blocks, pruned or not.
+   * @returns the captures, in arrival order, at message positions.
+   */
+  private rebasedServerBlocks(): readonly ClaudeServerReplay[] {
+    if (this.stopReason !== 'max-tokens') return this.serverBlocks
+    return this.serverBlocks.map((capture) => {
+      let dropped = 0
+      for (let index = 0; index < capture.index; index++) {
+        if (this.blockKinds[index] === 'tool-call') dropped += 1
+      }
+      return { index: capture.index - dropped, block: capture.block }
+    })
+  }
+
+  /**
    * Replay envelope for a successful response that carried something the adapter
    * must remember: thinking the next turn has to echo, the context edits the
    * server reported applying, a server-tool block the request has to carry back,
@@ -831,11 +943,17 @@ export class AnthropicStreamTranslator {
       if (entry.signature !== undefined || entry.redacted !== undefined) useful = true
       blocks.push(entry)
     }
+    const serverBlocks = this.rebasedServerBlocks()
+    // The continuation member is where a later request reads its chain from, so an accepted
+    // response records the envelope whenever the adapter prepared these facts, even when the
+    // response carried nothing else worth replaying.
+    const continuation = this.continuationEnvelope()
     if (
       !useful &&
       this.appliedEdits === undefined &&
-      this.serverBlocks.length === 0 &&
-      this.requestId === undefined
+      serverBlocks.length === 0 &&
+      this.requestId === undefined &&
+      continuation === undefined
     ) {
       return undefined
     }
@@ -846,11 +964,12 @@ export class AnthropicStreamTranslator {
       response: {
         kind: 'claude',
         version: 1,
+        ...continuation === undefined ? {} : { continuation },
         ...this.appliedEdits === undefined ? {} : { contextManagement: this.appliedEdits },
-        // Captured server-tool blocks ride here with the harness index each goes back ahead
+        // Captured server-tool blocks ride here with the message position each goes back ahead
         // of, beside the per-block entries that stay aligned with the harness blocks. The
         // field is optional too, so an older envelope still reads as itself.
-        ...this.serverBlocks.length === 0 ? {} : { serverBlocks: this.serverBlocks },
+        ...serverBlocks.length === 0 ? {} : { serverBlocks },
         // The response's own request id, beside the rest of the response-level metadata.
         // Optional on the same terms: an envelope written before it existed still reads.
         ...this.requestId === undefined ? {} : { requestId: this.requestId },
@@ -859,50 +978,86 @@ export class AnthropicStreamTranslator {
     }
   }
 
+  /**
+   * The continuation member this attempt's prepared identity facts state.
+   *
+   * The identifier the next request chains is the response's own `request-id`, which the caller
+   * reads from the answered response; a response that carried none records the identity without it,
+   * and the reader then skips that turn rather than chaining a value it never saw.
+   * @returns the accepted-core continuation, or undefined when the caller prepared no facts.
+   */
+  private continuationEnvelope(): ClaudeContinuationV1 | undefined {
+    const facts = this.continuation
+    if (facts === undefined) return undefined
+    return {
+      v: CLAUDE_CONTINUATION_VERSION,
+      accountRef: facts.accountRef,
+      spanEpoch: facts.spanEpoch,
+      harnessSessionId: facts.harnessSessionId,
+      wireSessionId: facts.wireSessionId,
+      ...this.requestId === undefined ? {} : { requestId: this.requestId },
+    }
+  }
+
+  /**
+   * Fold one event's usage into the stream's totals.
+   *
+   * Counts are totals, not increments. A later number, including zero, replaces
+   * that field; absent/null fields retain their earlier values. Input and cache
+   * counters stay disjoint, as required by the harness usage contract.
+   * @param usage - the usage object the event carried.
+   */
+  private mergeUsage(usage: AnthropicUsage | undefined): void {
+    if (usage === undefined) return
+    const totals = this.reportedUsage
+    totals.inputTokens = usage.input_tokens ?? totals.inputTokens
+    totals.outputTokens = usage.output_tokens ?? totals.outputTokens
+    totals.cacheReadTokens = usage.cache_read_input_tokens ?? totals.cacheReadTokens
+    totals.cacheWriteTokens = usage.cache_creation_input_tokens ?? totals.cacheWriteTokens
+    const reasoning = thinkingTokens(usage)
+    if (reasoning !== undefined) totals.reasoningTokens = reasoning
+  }
+
   private emitUsage(chunks: StreamChunk[]): void {
     if (this.usageEmitted) return
     this.usageEmitted = true
+    const totals = this.reportedUsage
     const usage: TokenUsage = {
-      inputTokens: this.pendingUsage?.inputTokens ?? 0,
-      outputTokens: this.outputTokens ?? 0,
-      ...this.pendingUsage?.cacheReadTokens !== undefined
-        ? { cacheReadTokens: this.pendingUsage.cacheReadTokens }
-        : {},
-      ...this.pendingUsage?.cacheWriteTokens !== undefined
-        ? { cacheWriteTokens: this.pendingUsage.cacheWriteTokens }
-        : {},
-      ...this.pendingUsage?.reasoningTokens !== undefined
-        ? { reasoningTokens: this.pendingUsage.reasoningTokens }
-        : {},
+      inputTokens: totals.inputTokens ?? 0,
+      outputTokens: totals.outputTokens ?? 0,
+      ...totals.cacheReadTokens === undefined ? {} : { cacheReadTokens: totals.cacheReadTokens },
+      ...totals.cacheWriteTokens === undefined ? {} : { cacheWriteTokens: totals.cacheWriteTokens },
+      ...totals.reasoningTokens === undefined ? {} : { reasoningTokens: totals.reasoningTokens },
     }
     chunks.push({ type: 'usage', usage })
   }
 
   /**
    * Process one parsed Anthropic SSE event.
+   *
+   * Everything except the terminal finish counts as delivered output: a usage report, a
+   * reasoning fragment and a tool-argument fragment all reach the Host, so they commit the
+   * attempt exactly as visible text does.
    * @param event - the parsed event object.
    * @returns the StreamChunks this event produced (possibly none).
    */
   push(event: AnthropicStreamEvent): StreamChunk[] {
+    const chunks = this.handle(event)
+    if (chunks.some(chunk => chunk.type !== 'finish')) this.delivered = true
+    return chunks
+  }
+
+  /**
+   * Apply one parsed event to this stream's state.
+   * @param event - the parsed event object.
+   * @returns the StreamChunks this event produced (possibly none).
+   */
+  private handle(event: AnthropicStreamEvent): StreamChunk[] {
     if (this.terminated) return []
     const chunks: StreamChunk[] = []
     switch (event.type) {
       case 'message_start': {
-        const usage = event.message?.usage
-        if (usage !== undefined) {
-          const reasoning = thinkingTokens(usage)
-          this.pendingUsage = {
-            inputTokens: usage.input_tokens ?? 0,
-            ...usage.cache_read_input_tokens !== undefined
-              ? { cacheReadTokens: usage.cache_read_input_tokens }
-              : {},
-            ...usage.cache_creation_input_tokens !== undefined
-              ? { cacheWriteTokens: usage.cache_creation_input_tokens }
-              : {},
-            ...reasoning === undefined ? {} : { reasoningTokens: reasoning },
-          }
-          this.outputTokens = usage.output_tokens ?? this.outputTokens
-        }
+        this.mergeUsage(event.message?.usage)
         return chunks
       }
       case 'content_block_start': {
@@ -922,6 +1077,9 @@ export class AnthropicStreamTranslator {
           }
           case 'tool_use': {
             const opened = this.open(wireIndex, 'tool-call', chunks, block.id ?? '', block.name)
+            // A tool with no streamed input carries its whole value on the start object, so the
+            // start value is what closes such a block rather than an empty argument string.
+            if (block.input !== undefined) opened.startInput = block.input
             chunks.push({
               type: 'tool-call-delta',
               index: opened.index,
@@ -990,6 +1148,11 @@ export class AnthropicStreamTranslator {
           return chunks
         }
         this.blocks.delete(wireIndex)
+        // A tool block the provider closed with unparseable arguments cannot become an
+        // executable call. The terminal stop reason decides whether that is a truncation the
+        // harness prunes or a malformed response, so the fact is recorded here and judged at
+        // `message_stop`.
+        if (block.kind === 'tool-call' && !hasCompleteToolArguments(block)) this.incompleteToolSeen = true
         this.remember(block)
         chunks.push({ type: 'block-end', index: block.index, block: closeBlock(block) })
         return chunks
@@ -998,41 +1161,56 @@ export class AnthropicStreamTranslator {
         // The server reports what it cleared on the delta that ends the message, which is the
         // same place the client reads it from.
         if (event.context_management !== undefined) this.appliedEdits = event.context_management
-        if (event.usage?.output_tokens !== undefined) this.outputTokens = event.usage.output_tokens
-        const reasoning = thinkingTokens(event.usage)
-        if (reasoning !== undefined) {
-          this.pendingUsage = {
-            inputTokens: this.pendingUsage?.inputTokens ?? 0,
-            ...this.pendingUsage,
-            reasoningTokens: reasoning,
+        this.mergeUsage(event.usage)
+        const stopReason = event.delta?.stop_reason
+        // A delta that states no reason says nothing about how the turn ended, and an empty
+        // string is not a reason either; only a stated one moves the terminal state.
+        if (stopReason !== undefined && stopReason.length > 0) {
+          switch (stopReason) {
+            case 'end_turn':
+            case 'stop_sequence':
+              this.stopReason = 'stop'
+              break
+            case 'tool_use':
+              this.stopReason = 'tool-calls'
+              break
+            // Both reasons end generation at a limit: keep partial text and let the
+            // harness omit tool calls from the truncated turn. A rejected prompt's
+            // error event still uses CONTEXT_WINDOW_EXCEEDED in anthropicFailure.
+            case 'max_tokens':
+            case 'model_context_window_exceeded':
+              this.stopReason = 'max-tokens'
+              break
+            case 'refusal':
+              // A refusal is a stop the caller must be able to tell apart from a
+              // completed turn; reporting it as an ordinary stop would present a
+              // declined request as a finished answer.
+              this.stopReason = 'refusal'
+              break
+            default:
+              // `pause_turn` (the server paused for a server-side tool it is still running),
+              // `compaction`, and every reason this adapter does not model leave the harness no
+              // completed answer: continuing such a turn needs a request this adapter does not
+              // build, and reporting an ordinary stop would present it as a finished one.
+              this.unsupportedStopReason = stopReason
+              break
           }
-        }
-        switch (event.delta?.stop_reason) {
-          case 'end_turn':
-          case 'stop_sequence':
-            this.stopReason = 'stop'
-            break
-          case 'tool_use':
-            this.stopReason = 'tool-calls'
-            break
-          case 'max_tokens':
-            this.stopReason = 'max-tokens'
-            break
-          case 'refusal':
-            // A refusal is a stop the caller must be able to tell apart from a
-            // completed turn; reporting it as an ordinary stop would present a
-            // declined request as a finished answer.
-            this.stopReason = 'refusal'
-            break
-          default:
-            break
         }
         return chunks
       }
       case 'message_stop': {
         this.terminated = true
+        // The delivery boundary as this terminal event found it: the finish chunk below is
+        // this call's own output, not output already handed to the Host.
+        const deliveredBefore = this.delivered
+        let incompleteTool = this.incompleteToolSeen
         for (const [wireIndex, block] of [...this.blocks]) {
           this.blocks.delete(wireIndex)
+          // A generation limit legitimately cuts a tool call short, and the harness drops
+          // tool calls from a truncated turn; every other terminal state must present
+          // executable arguments or fail rather than hand over a partial call.
+          if (block.kind === 'tool-call' && this.stopReason !== 'max-tokens'
+            && !hasCompleteToolArguments(block)) incompleteTool = true
           this.remember(block)
           chunks.push({ type: 'block-end', index: block.index, block: closeBlock(block) })
         }
@@ -1040,7 +1218,44 @@ export class AnthropicStreamTranslator {
         // has to carry, the same way an unclosed harness block is emitted above.
         for (const wireIndex of [...this.openServerBlocks.keys()]) this.closeServer(wireIndex)
         this.emitUsage(chunks)
-        if (this.stopReason === 'stop' && !this.sawAnyBlock) {
+        if (incompleteTool && this.stopReason !== 'max-tokens') {
+          chunks.push({
+            type: 'finish',
+            reason: {
+              kind: 'error',
+              failure: claudeFinishFailure({
+                message: 'Anthropic ended the turn with an incomplete tool call',
+                code: 'MALFORMED_RESPONSE',
+              }, deliveredBefore),
+            },
+          })
+        } else if (this.unsupportedStopReason !== undefined) {
+          chunks.push({
+            type: 'finish',
+            reason: {
+              kind: 'error',
+              failure: claudeFinishFailure({
+                message: `Anthropic ended the turn with unsupported stop reason "${this.unsupportedStopReason}"`,
+                code: UNSUPPORTED_RESPONSE_CODE,
+              }, deliveredBefore),
+            },
+          })
+        } else if (this.stopReason === 'stop' && !this.sawAnyBlock && this.serverBlocks.length > 0) {
+          // Server-tool blocks are not harness content, so this response has nothing to present,
+          // and the request declared no server tool whose result the harness could act on. It
+          // fails closed instead of taking the empty-response path, which would retry the same
+          // request and could still end the turn with nothing shown.
+          chunks.push({
+            type: 'finish',
+            reason: {
+              kind: 'error',
+              failure: claudeFinishFailure({
+                message: 'Anthropic returned server-tool content with no harness-visible block',
+                code: UNSUPPORTED_RESPONSE_CODE,
+              }, deliveredBefore),
+            },
+          })
+        } else if (this.stopReason === 'stop' && !this.sawAnyBlock) {
           chunks.push({
             type: 'finish',
             reason: {
@@ -1059,7 +1274,7 @@ export class AnthropicStreamTranslator {
         return chunks
       }
       case 'error':
-        throw anthropicFailure(event.error, this.isRefusal)
+        throw anthropicFailure(event.error, this.isRefusal, this.profile, this.delivered)
       default:
         // ping and future event types carry no harness content.
         return chunks
@@ -1074,15 +1289,21 @@ export class AnthropicStreamTranslator {
  * @param requestId - the response's `request-id` header, when it carried one.
  * @param isRefusal - classifies an in-band `error` event against the response it
  *   arrived on, so a refusal stated inside a 200 is not retried as a rate limit.
- * @returns the chunk stream; throws when the stream ends before `message_stop`.
+ * @param profile - the frozen compatibility profile this request was built under.
+ * @param continuation - the identity facts this attempt was prepared under, when the adapter has
+ *   them; they are recorded with every accepted response.
+ * @returns the chunk stream; throws when the stream ends before `message_stop`, with the
+ *   delivery boundary the caller needs to decide whether a replay is still permitted.
  */
 export async function* streamAnthropic(
   stream: ReadableStream<Uint8Array>,
   onActivity?: () => void,
   requestId?: string,
-  isRefusal?: AnthropicRefusalProbe,
+  isRefusal?: ClaudeRefusalProbe,
+  profile?: ClaudeProtocolProfile,
+  continuation?: ClaudeContinuationMetadata,
 ): AsyncGenerator<StreamChunk> {
-  const translator = new AnthropicStreamTranslator(requestId, isRefusal)
+  const translator = new AnthropicStreamTranslator(requestId, isRefusal, profile ?? CLAUDE_PROTOCOL_PROFILE, continuation)
   for await (const sseEvent of parseSse(stream, onActivity)) {
     let event: AnthropicStreamEvent
     try {
@@ -1093,8 +1314,13 @@ export async function* streamAnthropic(
     yield* translator.push(event)
     if (translator.terminated) return
   }
-  // The body ended without its terminal event: the wire dropped mid-response, which the
-  // client retries as a dropped connection, so this takes the retryable transport code.
-  // A payload that cannot be parsed is a different failure and keeps MALFORMED_RESPONSE.
-  throw new LlmError('Anthropic SSE stream ended before message_stop', 'TRANSPORT')
+  // The body ended without its terminal event. The response was accepted, so this request has
+  // certainly been sent and its outcome is unknown: replaying it could submit the same turn
+  // twice however little was delivered, and no delivery boundary changes that. A transport
+  // failure that never produced a response is a different case, raised by the caller's fetch.
+  throw new LlmError(
+    'Anthropic SSE stream ended before message_stop',
+    STREAM_INCOMPLETE_CODE,
+    { retryDisposition: 'forbid' },
+  )
 }

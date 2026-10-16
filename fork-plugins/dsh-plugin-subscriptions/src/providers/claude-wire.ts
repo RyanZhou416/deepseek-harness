@@ -22,8 +22,8 @@ import {
   supportsContextManagement,
   supportsMidConversationSystem,
 } from '@tormentalabs/claude-code-wire-compat'
-import { desktopClientHeaders, desktopMachineProfile } from './claude-desktop.js'
-import { clientAtisFor } from './claude.js'
+import { desktopClientHeaders } from './claude-desktop.js'
+import { unifiedRateLimitFor } from './unified-rate-limit.js'
 import type {
   BuiltClaudeCodeRequest,
   ClaudeCodeEffort,
@@ -34,10 +34,18 @@ import type { GenerateOptions } from '@deepseek-ai/dsh-llm'
 import type { ClaudeSession } from '../auth/store.js'
 import type { TranslatableMessage } from '../translate/resolved.js'
 import { toAnthropicMessages, toAnthropicSystem, toAnthropicTools } from '../translate/anthropic.js'
+import { resolveSuppressBetas } from '../claude-engine/request-policy.js'
+import type { ClaudeEnginePolicy } from '../claude-engine/request-policy.js'
 import { oversizeWireError } from './claude-images.js'
+import { CLAUDE_PROTOCOL_PROFILE, claudeRoleHeaders } from './claude-protocol.js'
 
-/** Pinned CLI identity this route presents on every subscription endpoint. */
-export const CLAUDE_USER_AGENT: string = CLAUDE_CODE_2_1_288_PROFILE.userAgent
+/**
+ * Pinned CLI identity this route presents on every subscription endpoint.
+ *
+ * The compatibility profile owns the claim; this is the name the request-building path
+ * already used for it.
+ */
+export const CLAUDE_USER_AGENT: string = CLAUDE_PROTOCOL_PROFILE.userAgent
 
 /**
  * The user agent the client uses on endpoints that are not the transport.
@@ -47,7 +55,7 @@ export const CLAUDE_USER_AGENT: string = CLAUDE_CODE_2_1_288_PROFILE.userAgent
  * qualifier. Bootstrap, the OAuth profile read and the Files API use the plain form, so a
  * client process emits both and this plugin has to as well.
  */
-export const CLAUDE_PLAIN_USER_AGENT = `claude-code/${CLAUDE_CODE_2_1_288_PROFILE.cliVersion}`
+export const CLAUDE_PLAIN_USER_AGENT = CLAUDE_PROTOCOL_PROFILE.plainUserAgent
 
 /*
  * Anchored to the Windows desktop release: the desktop application pins Claude Code
@@ -148,57 +156,21 @@ export function boundedTwoLevelMap<V>(limit: number): BoundedTwoLevelMap<V> {
 }
 
 /**
- * Bounded per-account, per-session conversation-chaining state: the last
- * response `request-id`, chained as `cc_prev_req` by the next request of the
- * same conversation. Keyed by the canonical account key first, so a pool
- * switching accounts mid-session never chains one account's request id into
- * another account's requests. Upstream semantics: a response without a
- * request-id clears the chained id.
- */
-interface ClaudeChainState {
-  previousRequestId?: string
-}
-
-const CHAIN_LIMIT = 256
-/** Account key → session id → chain state. */
-const chains = boundedTwoLevelMap<ClaudeChainState>(CHAIN_LIMIT)
-
-function chainFor(account: string, sessionId: string): ClaudeChainState {
-  const existing = chains.get(account, sessionId)
-  if (existing !== undefined) return existing
-  const state: ClaudeChainState = {}
-  chains.set(account, sessionId, state)
-  return state
-}
-
-/**
- * Wire session ids per account span.
+ * The per-request facts the continuation owner prepared before this request is built.
  *
- * A genuine Claude Code conversation runs under one account, and its
- * `X-Claude-Code-Session-Id` is a UUID minted for that conversation. A pool
- * failover mid-session must not continue the first account's wire session
- * under the second account's identity, so each account span of a harness
- * session gets its own UUID and keeps it: switching back resumes the original
- * id and chain. The harness session id is the key this table is indexed by, not
- * a value that reaches the wire — it is `session-<uuid>`, which no genuine
- * client ever sends.
+ * Every member is an explicit input. The wire session identity is the one the span store committed
+ * for this request's span, the pin is the one that span froze (or nothing when it sends none), and
+ * the previous request id is the one the log-derived selector chose — none of them is minted,
+ * looked up or defaulted here, because a second source for any of them would disagree with the
+ * durable one after a restart.
  */
-const WIRE_SESSION_LIMIT = 256
-/** Harness session id → account → stable wire session id. */
-const wireSessions = boundedTwoLevelMap<string>(WIRE_SESSION_LIMIT)
-
-/**
- * The wire session id for one account span of a harness session.
- * @param account - the canonical account key serving this request.
- * @param harnessSessionId - the harness session the conversation belongs to.
- * @returns the stable `X-Claude-Code-Session-Id` for this (account, session).
- */
-export function claudeWireSessionId(account: string, harnessSessionId: string): string {
-  const existing = wireSessions.get(harnessSessionId, account)
-  if (existing !== undefined) return existing
-  const wireId = randomUUID()
-  wireSessions.set(harnessSessionId, account, wireId)
-  return wireId
+export interface ClaudeWireContinuation {
+  /** The wire session identity this request declares. */
+  readonly sessionId: string
+  /** The `x-cc-atis` token the span froze, or undefined when it sends none. */
+  readonly atisPin: string | undefined
+  /** The earlier turn's `request-id` this request chains, or undefined when it chains none. */
+  readonly previousRequestId: string | undefined
 }
 
 /**
@@ -206,24 +178,6 @@ export function claudeWireSessionId(account: string, harnessSessionId: string): 
  * `session_id` its correlation metadata carries.
  */
 const WIRE_SESSION_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
-
-/**
- * Record the response `request-id` the billing block of the next request in
- * this account's session chains as `cc_prev_req`. A response without the
- * header clears the chained id, matching the genuine client's continuity
- * commit.
- * @param account - the canonical account key the response belonged to.
- * @param sessionId - the harness session the response belongs to.
- * @param requestId - the `request-id` response header, or null when absent.
- */
-export function rememberClaudeRequestId(account: string, sessionId: string, requestId: string | null): void {
-  const state = chainFor(account, sessionId)
-  if (requestId === null) {
-    delete state.previousRequestId
-    return
-  }
-  state.previousRequestId = requestId
-}
 
 /**
  * The ordinal of the user prompt turn a request belongs to: one per user message
@@ -316,24 +270,37 @@ export function claudeSpeedField(fast: boolean): Pick<ClaudeCodeRequestInput, 's
 }
 
 /**
+ * The OAuth scope the client reads to treat an account as a subscriber; the plan label a
+ * profile read returns is not part of that decision.
+ */
+const USER_INFERENCE_SCOPE = 'user:inference'
+
+/**
  * The cache ttl a request declares, computed as the client computes it.
  *
- * The client resolves one ttl per request: an hour when the account is a subscription and is
- * not drawing on overage, and otherwise the server's own default, which it expresses by
- * leaving the field out — and the beta header that declares the longer ttl is pushed only
- * when the field is there. A session whose profile lookup never disclosed a subscription is
- * therefore treated as having none, which sends the server's default rather than an hour.
- *
- * One input the client has and this does not: whether the account is currently in overage,
- * which the client reads from the usage it tracks. Nothing on the request-building path knows
- * that today, so an account in overage would still declare the hour here.
+ * A main OAuth request whose granted scopes include `user:inference`, and whose account is not
+ * drawing on overage, declares an hour. A helper call (`compaction`, `session-title`) and an
+ * account on overage omit the field, so the server's own default applies, and the beta that
+ * declares the longer ttl follows the field rather than the account. The overage reading is the
+ * account's already-captured unified rate-limit report, so this performs no I/O; a plan label is
+ * not an input.
  *
  * @param session - the account whose request this is.
+ * @param account - the canonical account key that report is filed under.
+ * @param purpose - the call kind the caller classified, when it classified one.
  * @returns whether the request declares the longer ttl.
  */
-function usesExtendedCacheTtl(session: ClaudeSession): boolean {
-  const subscription = session.subscriptionType
-  return subscription !== undefined && subscription !== 'free'
+function usesExtendedCacheTtl(
+  session: ClaudeSession,
+  account: string,
+  purpose: GenerateOptions['purpose'],
+): boolean {
+  if (purpose === 'compaction' || purpose === 'session-title') return false
+  if (!session.scopes.split(/\s+/).includes(USER_INFERENCE_SCOPE)) return false
+  const report = unifiedRateLimitFor('claude', account)
+  const onOverage = report?.status === 'rejected'
+    && (report.overageStatus === 'allowed' || report.overageStatus === 'allowed_warning')
+  return !onOverage
 }
 
 /**
@@ -443,29 +410,47 @@ export function assertContextManagementBeta(
 }
 
 /**
- * Build the pinned Claude Code wire request for one generate call.
+ * Refuse a conversation shape that a withholding policy cannot express.
  *
- * The stored session must already carry `deviceId` and `accountUuid`; the
- * adapter backfills both before calling here.
- *
- * Two harness sampling options map onto this request shape differently. A
- * `temperature` is the caller's own value on every request the pinned builder
- * emits the field for, which is what the client sends: the caller's override, or
- * its compiled-in 1, on the models whose profile gives them the parameter. Stop
- * sequences have no field in this shape — the client's main-session request
- * carries none — so a caller asking for one is refused instead of being sent a
- * request that cannot halt on it.
- * @param options - the harness generate request.
- * @param session - the account session whose token the request uses.
- * @param messages - conversation messages with images resolved.
- * @param maxTokens - the resolved output cap.
- * @param thinking - the wire thinking parameter, when the model takes one.
- * @param effort - the reasoning effort, when the model advertises efforts.
- * @param sessionId - the wire session identity, a UUID minted per account span by {@link claudeWireSessionId}.
- * @param account - the canonical account key owning this conversation's chain state.
+ * The mid-conversation betas are what carry a system role inside the conversation. When a policy
+ * withholds them, such a message has no wire form this route may send, and rewriting it as a
+ * top-level prompt would send a request the caller never asked for. A leading system message is a
+ * different thing: it opens the conversation and states the same instruction the top-level system
+ * prompt carries, so it stays legal.
+ * @param messages - the translated conversation.
+ * @param model - the model the request is for.
+ * @throws LlmError naming the unsupported shape, with a forbidding retry disposition.
+ */
+export function assertPolicyRequestShape(messages: readonly TranslatableMessage[], model: string): void {
+  void model
+  for (const [index, message] of messages.entries()) {
+    if (message.role !== 'system' || index === 0) continue
+    // A local policy decision, not a server statement about this client's version: reporting it as
+    // a version refusal would block the shared provider profile and send the user to an upgrade
+    // that cannot help. The message is fixed and carries no part of the conversation.
+    throw new LlmError(
+      'claude request shape unsupported under the account policy: a mid-conversation system message cannot be expressed while that policy withholds the mid-conversation betas',
+      'POLICY_UNSUPPORTED',
+      { retryDisposition: 'forbid' },
+    )
+  }
+}
+
+/**
+ * Build the pinned Claude Code request for one attempt.
+ * @param options - the caller's generate options.
+ * @param session - the account session the request is made under.
+ * @param messages - the translated conversation.
+ * @param maxTokens - the output cap for this request.
+ * @param thinking - the thinking parameter, when the model takes one.
+ * @param effort - the requested effort level, when the model takes one.
+ * @param continuation - the wire session identity, sent pin and chained request id the durable
+ *   owner prepared for this request; each is used exactly as given.
+ * @param account - the account the request is billed to.
  * @param identityLine - the deployment's own identity line, when it configured one.
  * @param contextManagement - the planned context edits, when the model accepts them.
  * @param fast - whether this session selected the fast tier.
+ * @param policy - the caller's resolved policy, when it stated one.
  * @returns the built request: pinned URL, header plan, and serialized body.
  */
 export async function buildClaudeWireRequest(
@@ -475,12 +460,14 @@ export async function buildClaudeWireRequest(
   maxTokens: number,
   thinking: ClaudeWireThinking | undefined,
   effort: string | undefined,
-  sessionId: string,
+  continuation: ClaudeWireContinuation,
   account: string,
   identityLine?: string,
   contextManagement?: ContextManagementConfig,
   fast = false,
+  policy?: ClaudeEnginePolicy,
 ): Promise<BuiltClaudeCodeRequest> {
+  const sessionId = continuation.sessionId
   if (session.deviceId === undefined || session.accountUuid === undefined) {
     throw new Error('dsh-plugin-subscriptions: claude wire identity is missing; backfill it before building')
   }
@@ -561,8 +548,11 @@ export async function buildClaudeWireRequest(
     ? toAnthropicTools(options.tools)
     : undefined
   const resolvedEffort = claudeEffort(effort)
-  const atis = clientAtisFor(account)
-  const chain = chainFor(account, sessionId)
+  // The pin belongs to this account span of the conversation, and the span store is the only owner
+  // that decides it: the first request freezes it, and a bootstrap read that lands later cannot
+  // change what this span sends.
+  const atis = continuation.atisPin
+  const suppressBetas = resolveSuppressBetas(policy)
   const statesContextManagement = contextManagement !== undefined && supportsContextManagement(options.model)
   const built = await buildClaudeCodeRequest({
     accessToken: session.accessToken,
@@ -574,9 +564,11 @@ export async function buildClaudeWireRequest(
     messages: toAnthropicMessages(
       messages,
       options.model,
-      // The same predicate that decides the beta header, so a mid-conversation
-      // system message and its header are always decided together.
-      supportsMidConversationSystem(options.model, CLAUDE_CODE_2_1_288_PROFILE),
+      // The same predicate that decides the beta header, so a mid-conversation system message and
+      // its header are always decided together. A suppressing policy turns the predicate off: the
+      // message is refused by the caller's own gate rather than degraded into a top-level prompt.
+      supportsMidConversationSystem(options.model, CLAUDE_CODE_2_1_288_PROFILE)
+        && resolveSuppressBetas(policy) === undefined,
     ),
     system,
     // The edits go out only where the catalogue gives the model context management, so the
@@ -594,7 +586,7 @@ export async function buildClaudeWireRequest(
       systemBreakpoint: true,
       toolBreakpoint: false,
       messageBreakpoint: true,
-      ...usesExtendedCacheTtl(session) ? { ttl: '1h' as const } : {},
+      ...usesExtendedCacheTtl(session, account, options.purpose) ? { ttl: '1h' as const } : {},
     },
     runtime: {
       sessionId,
@@ -623,6 +615,9 @@ export async function buildClaudeWireRequest(
     // The fast tier is one field: the pinned builder emits `speed` from it and pushes the beta
     // that declares the tier in the same composition, so nothing else here names either.
     ...claudeSpeedField(fast),
+    // The caller's resolved policy, expressed in the builder's own switch: withheld exactly when
+    // it said so, absent otherwise. The beta names come from the engine's helper, never a copy.
+    ...suppressBetas === undefined ? {} : { suppressBetas },
     // The desktop spawns its client with API_TIMEOUT_MS=900000, and the client reports
     // that timeout as x-stainless-timeout; a bare CLI would report 600.
     stainlessTimeoutSeconds: 900,
@@ -632,17 +627,15 @@ export async function buildClaudeWireRequest(
     // compaction or a session-title helper, and the client reports those two as `compaction`
     // and `auxiliary`. Everything else here is the conversation's own Messages request.
     requestClass: claudeRequestClass(options.purpose),
-    ...chain.previousRequestId === undefined ? {} : { previousRequestId: chain.previousRequestId },
+    ...continuation.previousRequestId === undefined ? {} : { previousRequestId: continuation.previousRequestId },
     promptId: claudePromptId(sessionId, promptTurn(messages)),
-    // The desktop identity. These names are not canonical for this package, so the
-    // default strict policy accepts them; they are non-cacheable request headers and
-    // do not disturb the body's own construction. The machine values are derived from
-    // the account rather than read from this host, so one account presents one machine
-    // and no two accounts present the same one.
+    // Messages carry the desktop platform/version pair, not the application-only
+    // memory profile. These extra headers do not alter the body construction.
     extraHeaders: [
       ...Object.entries(desktopClientHeaders()) as [string, string][],
-      // The client attaches the ATIS token to every request it sends through the
-      // first-party client, once a bootstrap read has disclosed one.
+      // The client attaches the ATIS token to the requests of the conversation that was
+      // handed it. Here that is the account span this request belongs to, frozen at its
+      // first request, so nothing sent later in the span can change the value.
       ...atis === undefined ? [] : [['x-cc-atis', atis] as [string, string]],
     ],
   }, CLAUDE_CODE_2_1_288_PROFILE)

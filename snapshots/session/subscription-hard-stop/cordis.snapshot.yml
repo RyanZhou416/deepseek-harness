@@ -1,0 +1,39 @@
+# Only the provider is replayed; the shipped loop and retry executor retain the hard-stop decision.
+- id: tool-bash
+  disabled: true
+- id: tool-pwsh
+  disabled: true
+- id: llm-deepseek
+  disabled: true
+- id: plugin-package-inventory-deepseek
+  disabled: true
+- id: session-title-llm
+  disabled: true
+- id: agent-default-model
+  config:
+    provider: deepseek-official
+    model: deepseek-v4-flash
+- id: session-persistence-jsonl
+  config:
+    root: !!js dshHomePath('sessions')
+    compression: none
+- id: agent-instructions
+  config:
+    maxBytes: 65536
+- insert:
+    - id: llm-replay
+      name: '@deepseek-ai/dsh-llm-replay'
+      config:
+        providers:
+          - id: deepseek-official
+            name: DeepSeek
+            retryPolicy:
+              mode: normal
+              maxRetries: 2
+              backoff:
+                initialDelayMs: 1
+                maxDelayMs: 1
+                jitterRatio: 0
+            models:
+              - id: deepseek-v4-flash
+              - id: deepseek-v4-pro

@@ -16,77 +16,74 @@
  * Values are a status token, an epoch-seconds reset, a utilization fraction
  * (`0.82`, or `1` once the cap is reached), or a threshold (`0.75`, `0.95`).
  *
+ * Reading those headers and reporting them are the shared pure core's job
+ * (`../claude-core/quota-observation.js`): this module adapts a header source to the core's
+ * read-only one, injects the providers' shared reset reader, and owns the bounded per-account
+ * record below. The core is the only reader of the header family, so the plugin has one header
+ * parse rather than one per consumer.
+ *
  * @module dsh-plugin-subscriptions/providers/unified-rate-limit
  */
 
+import {
+  CLAUDE_UNIFIED_HEADER_PREFIX,
+  CLAUDE_UNIFIED_MEMBER_SUFFIXES,
+  CLAUDE_UNIFIED_WINDOW_PREFIXES,
+  CLAUDE_UNIFIED_WINDOW_SUFFIXES,
+  parseRawFacts,
+  projectLegacy,
+} from '../claude-core/quota-observation.js'
+import type {
+  LegacyResetResolver,
+  QuotaHeaderSource,
+  QuotaLegacyState,
+} from '../claude-core/quota-observation.js'
 import { resetInstantFromValue } from './rate-limit.js'
 import type { ProviderId } from '../auth/store.js'
 
-/** Prefix every member of the unified rate-limit family shares. */
-const UNIFIED_PREFIX = 'anthropic-ratelimit-unified-'
+/**
+ * The header source this module reads: the one operation it uses, with this platform's
+ * absence convention.
+ *
+ * A `Headers` satisfies it, and so does any object carrying the same method — which is what
+ * lets a caller observe the reads without constructing a response. The return stays
+ * `string | null` because that is what `Headers.get` answers and the difference is resolved
+ * exactly once, in {@link headerSource}.
+ */
+export interface UnifiedRateLimitHeaders {
+  /** One response header's value, or `null` when the response carried none. */
+  get(name: string): string | null
+}
 
 /**
- * The status member's accepted values; anything else is reported as `other` so
- * an unrecognized token is visible rather than silently read as `allowed`.
+ * The shared reset reader as the core's resolver port. `Headers.get` answers `null` for a
+ * member the response did not carry while the port states absence as `undefined`, so this
+ * adapter is where that one difference is resolved; a value present but blank stays blank
+ * and the core classifies it.
+ * @param rawText - the reset member's text as the core read it.
+ * @param now - the current epoch milliseconds.
+ * @returns epoch milliseconds of the reset, or undefined when the value disclosed none.
  */
-type UnifiedRateLimitStatus = 'allowed' | 'allowed_warning' | 'rejected' | 'other'
+const resolveUnifiedReset: LegacyResetResolver = (rawText, now) =>
+  resetInstantFromValue(rawText === undefined ? null : rawText, now)
 
-/** Standalone members naming the account's standing and its overage route. */
-const MEMBER_SUFFIXES = [
-  'status',
-  'reset',
-  'representative-claim',
-  'fallback',
-  'overage-status',
-  'overage-reset',
-  'overage-disabled-reason',
-  'overage-in-use',
-  'overage-scope',
-] as const
-
-/** Window prefixes the provider meters separately, each with its own readings. */
-const WINDOW_PREFIXES = ['5h', '7d', '7d_oi', 'overage'] as const
-
-/** The three readings every window prefix carries. */
-const WINDOW_SUFFIXES = ['utilization', 'reset', 'surpassed-threshold'] as const
-
-/** One window's reading, from that window's three unified members. */
-interface UnifiedWindowReading {
-  /** Window token: `5h`, `7d`, `7d_oi` or `overage`. */
-  window: string
-  /** Fraction of the window consumed (0–1), as the provider reported it. */
-  utilization?: number
-  /** Epoch milliseconds at which the window reopens. */
-  resetsAt?: number
-  /** Threshold (0.75 or 0.95) the utilization passed, when the provider sent it. */
-  surpassedThreshold?: number
+/**
+ * Adapt a header source to the core's read-only source.
+ *
+ * This platform's `get` answers `null` for an absent member, and the core's source states
+ * absence as `undefined`; the conversion happens here and nowhere else, so a missing member
+ * is never handed on as an empty string.
+ * @param headers - the response headers to read.
+ * @returns the read-only source the core reads.
+ */
+function headerSource(headers: UnifiedRateLimitHeaders): QuotaHeaderSource {
+  return {
+    get: (name: string): string | undefined => headers.get(name) ?? undefined,
+  }
 }
 
 /** One account's last unified rate-limit report. */
-export interface UnifiedRateLimitState {
-  /** The account's standing: `rejected` is the provider refusing its requests. */
-  status: UnifiedRateLimitStatus
-  /** Epoch milliseconds the claiming window reopens, from the `reset` member. */
-  resetsAt?: number
-  /** The window claiming the limit (`5h`, `7d`, `overage`, ...), when named. */
-  claim?: string
-  /** Whether the provider advertised a fallback route past the limit. */
-  fallbackAvailable?: boolean
-  /** The overage route's own status; `allowed` means requests still flow on overage. */
-  overageStatus?: UnifiedRateLimitStatus
-  /** Epoch milliseconds the overage cap reopens. */
-  overageResetsAt?: number
-  /** Why overage is unavailable (`org_spend_cap_reached`, ...), when the provider said so. */
-  overageDisabledReason?: string
-  /** Whether this account's requests are currently drawing on paid overage. */
-  overageInUse?: boolean
-  /** Which budget the overage draws on: `service`, `channel` or `group_pool`. */
-  overageScope?: string
-  /** Per-window readings, in {@link WINDOW_PREFIXES} order. */
-  windows: UnifiedWindowReading[]
-  /** Epoch milliseconds this report was read off the response. */
-  observedAt: number
-}
+export type UnifiedRateLimitState = QuotaLegacyState
 
 /**
  * Accounts whose report is retained. Each entry is replaced by that account's
@@ -102,22 +99,23 @@ function captureKey(provider: ProviderId, account: string): string {
   return `${provider}/${account}`
 }
 
-function statusOf(value: string | undefined): UnifiedRateLimitStatus {
-  return value === 'allowed' || value === 'allowed_warning' || value === 'rejected' ? value : 'other'
-}
-
-/** One member's raw value, or undefined when absent or blank. */
-function textOf(headers: Headers, name: string): string | undefined {
-  const raw = headers.get(name)
-  return raw === null || raw.trim() === '' ? undefined : raw.trim()
-}
-
-/** A numeric member, or undefined when absent, blank or not a number. */
-function numberOf(headers: Headers, name: string): number | undefined {
-  const raw = textOf(headers, name)
-  if (raw === undefined) return undefined
-  const value = Number(raw)
-  return Number.isFinite(value) ? value : undefined
+/**
+ * Whether a response carries any member of the family this plugin reads.
+ *
+ * The member and window names come from the core, which is the family's only reader: this gate
+ * asks the same response for the same names so a response that carried none still answers
+ * `undefined` rather than an empty report.
+ * @param headers - the response headers to test.
+ * @returns true when the response carried at least one member of the family.
+ */
+function carriesUnifiedReport(headers: UnifiedRateLimitHeaders): boolean {
+  const named = [
+    ...CLAUDE_UNIFIED_MEMBER_SUFFIXES,
+    ...CLAUDE_UNIFIED_WINDOW_PREFIXES.flatMap(
+      window => CLAUDE_UNIFIED_WINDOW_SUFFIXES.map(suffix => `${window}-${suffix}`),
+    ),
+  ]
+  return named.some(suffix => headers.get(`${CLAUDE_UNIFIED_HEADER_PREFIX}${suffix}`) !== null)
 }
 
 /**
@@ -126,56 +124,20 @@ function numberOf(headers: Headers, name: string): number | undefined {
  * A response is a report when it carries any member this module reads; one
  * carrying none answers `undefined`, so an account with no captured report is
  * distinguishable from one whose provider reported `allowed`.
+ *
+ * The reading itself belongs to the shared core: this function hands it the response
+ * headers and the providers' own reset reader, and returns the report unchanged. It reads
+ * no more of the response than {@link UnifiedRateLimitHeaders} declares.
  * @param headers - the response headers to read.
  * @param now - the current epoch milliseconds, injected so parsing is testable.
  * @returns the reported state, or undefined when the response carried no such member.
  */
-export function parseUnifiedRateLimit(headers: Headers, now: number): UnifiedRateLimitState | undefined {
-  const member = (suffix: string): string => `${UNIFIED_PREFIX}${suffix}`
-  const present = MEMBER_SUFFIXES.some(suffix => headers.get(member(suffix)) !== null)
-    || WINDOW_PREFIXES.some(window => WINDOW_SUFFIXES.some(suffix => headers.get(member(`${window}-${suffix}`)) !== null))
-  if (!present) return undefined
-  const resetOf = (suffix: string): number | undefined =>
-    resetInstantFromValue(headers.get(member(suffix)), now)
-  const windows: UnifiedWindowReading[] = []
-  for (const window of WINDOW_PREFIXES) {
-    const utilization = numberOf(headers, member(`${window}-utilization`))
-    const resetsAt = resetOf(`${window}-reset`)
-    const surpassedThreshold = numberOf(headers, member(`${window}-surpassed-threshold`))
-    if (utilization === undefined && resetsAt === undefined && surpassedThreshold === undefined) continue
-    windows.push({
-      window,
-      ...utilization === undefined ? {} : { utilization },
-      ...resetsAt === undefined ? {} : { resetsAt },
-      ...surpassedThreshold === undefined ? {} : { surpassedThreshold },
-    })
-  }
-  const status = textOf(headers, member('status'))
-  const resetsAt = resetOf('reset')
-  const overageResetsAt = resetOf('overage-reset')
-  const claim = textOf(headers, member('representative-claim'))
-  const fallback = textOf(headers, member('fallback'))
-  const overageStatus = textOf(headers, member('overage-status'))
-  const overageDisabledReason = textOf(headers, member('overage-disabled-reason'))
-  const overageInUse = textOf(headers, member('overage-in-use'))
-  const overageScope = textOf(headers, member('overage-scope'))
-  return {
-    // A response that carried windows but no status member reports those
-    // windows and leaves the account's standing unstated. Reading the absence
-    // as `allowed` would present a refusal the response did not describe as a
-    // healthy account, so it reads `other` like any unrecognized token.
-    status: statusOf(status),
-    ...resetsAt === undefined ? {} : { resetsAt },
-    ...claim === undefined ? {} : { claim },
-    ...fallback === undefined ? {} : { fallbackAvailable: fallback === 'available' },
-    ...overageStatus === undefined ? {} : { overageStatus: statusOf(overageStatus) },
-    ...overageResetsAt === undefined ? {} : { overageResetsAt },
-    ...overageDisabledReason === undefined ? {} : { overageDisabledReason },
-    ...overageInUse === undefined ? {} : { overageInUse: overageInUse === 'true' },
-    ...overageScope === undefined ? {} : { overageScope },
-    windows,
-    observedAt: now,
-  }
+export function parseUnifiedRateLimit(
+  headers: UnifiedRateLimitHeaders,
+  now: number,
+): UnifiedRateLimitState | undefined {
+  if (!carriesUnifiedReport(headers)) return undefined
+  return projectLegacy(parseRawFacts(headerSource(headers)), { resolveReset: resolveUnifiedReset, now })
 }
 
 /**

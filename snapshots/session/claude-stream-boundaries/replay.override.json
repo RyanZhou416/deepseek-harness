@@ -1,0 +1,73 @@
+[
+  {
+    "kind": "chunks",
+    "chunks": [
+      {
+        "type": "block-start",
+        "index": 0,
+        "blockType": "tool-call"
+      },
+      {
+        "type": "tool-call-delta",
+        "index": 0,
+        "id": "claude-stream-boundaries-0",
+        "name": "claude_stream_boundaries_probe",
+        "argumentsDelta": "{}"
+      },
+      {
+        "type": "block-end",
+        "index": 0,
+        "block": {
+          "type": "tool-call",
+          "id": "claude-stream-boundaries-0",
+          "name": "claude_stream_boundaries_probe",
+          "arguments": "{}"
+        }
+      },
+      {
+        "type": "usage",
+        "usage": {
+          "inputTokens": 10,
+          "outputTokens": 5
+        }
+      },
+      {
+        "type": "finish",
+        "reason": {
+          "kind": "tool-calls"
+        }
+      }
+    ]
+  },
+  {
+    "kind": "chunks",
+    "chunks": [
+      {
+        "type": "block-start",
+        "index": 0,
+        "blockType": "text"
+      },
+      {
+        "type": "block-end",
+        "index": 0,
+        "block": {
+          "type": "text",
+          "text": "One bridge and three response boundaries. The body read frame by frame carried 4096 bytes — sixty-four times its 64-byte cap — to its end frame, the body left unread failed with backpressure one frame past its cap with exactly one cancel frame, and its sibling stream was unaffected. A generation limit that pruned a local call kept the captured server-tool pair ahead of the text it preceded, and paused, compacting, and server-tool-only turns ended as UNSUPPORTED_RESPONSE rather than as the retryable empty completion. The Claude adapter's identity backfill cost one refresh grant and two profile reads, its Messages request carried the rotated credential, and the store kept both the rotation and the backfilled identity."
+        }
+      },
+      {
+        "type": "usage",
+        "usage": {
+          "inputTokens": 10,
+          "outputTokens": 5
+        }
+      },
+      {
+        "type": "finish",
+        "reason": {
+          "kind": "stop"
+        }
+      }
+    ]
+  }
+]

@@ -1,0 +1,10 @@
+version: 1
+scenario: claude-device-binding
+profile: headless
+composition: claude-device-binding
+recording: authored
+header:
+  class: claude-device-binding
+  pin: true
+replay:
+  override: true

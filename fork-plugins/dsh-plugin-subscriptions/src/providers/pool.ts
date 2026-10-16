@@ -26,7 +26,7 @@ import { ENFORCEMENT_CODE } from './common.js'
 import type { UsagePoolState, UsageWindow } from './common.js'
 import type { ConcretePoolMember, PoolDefinition, PoolMemberRef } from './pool-family.js'
 import { poolKey } from './pool-family.js'
-import { accountKey, classifyPoolFailure, exhaustionCode, isAuthCooldownReason, memberKey, PoolHealthRegistry } from './pool-health.js'
+import { accountKey, classifyPoolFailure, exhaustionCode, isAuthCooldownReason, isHardStopCode, memberKey, PoolHealthRegistry } from './pool-health.js'
 import type { PoolFailureScope } from './pool-health.js'
 import type { MemberQuota, PoolUsageTracker } from './pool-usage.js'
 import { poolSchedulingScore } from './pool-scheduling.js'
@@ -734,14 +734,19 @@ export class PoolAdapter extends LlmAdapter {
       : reset === undefined ? recovery : Math.min(recovery, reset)
     const retryAfterMs = next === undefined ? undefined : Math.max(next - now, 1)
     const detail = cause instanceof Error && cause.message.length > 0 ? cause.message : undefined
+    // A pool exhausted by a refusal, or by an error no route could classify, ends the turn
+    // without automatic recovery: the terminal error keeps that decision and discloses no
+    // wait, because a stopped turn must not present a retry countdown.
+    const hardStop = isHardStopCode(code)
     return new LlmError(
       detail === undefined
         ? `pool "${model}" exhausted: every member is unavailable or failed`
         : `pool "${model}" exhausted: ${detail}`,
       code,
       {
-        ...retryAfterMs === undefined ? {} : { providerRetryAfterMs: retryAfterMs },
+        ...retryAfterMs === undefined || hardStop ? {} : { providerRetryAfterMs: retryAfterMs },
         ...cause === undefined ? {} : { cause },
+        ...hardStop ? { retryDisposition: 'forbid' as const } : {},
       },
     )
   }

@@ -1,0 +1,155 @@
+/**
+ * The Claude route's declared cache ttl, against the inputs the genuine 2.1.288 client
+ * reads: the granted OAuth scope set, the call kind, and the account's own captured
+ * unified rate-limit report. The builder is pure and the transport is never reached;
+ * no network.
+ *
+ * The false friends this file exists for: a plan name (present, absent, or `free`) never
+ * decides the ttl, `overage-in-use` is not the client's overage predicate, and one
+ * account's report is never read for another account's request.
+ */
+
+import { test } from 'node:test'
+import assert from 'node:assert/strict'
+import { createHash } from 'node:crypto'
+
+import type { GenerateOptions } from '@deepseek-ai/dsh-llm'
+import { buildClaudeWireRequest } from '../src/providers/claude-wire.js'
+import {
+  forgetUnifiedRateLimit,
+  rememberUnifiedRateLimit,
+} from '../src/providers/unified-rate-limit.js'
+import type { UnifiedRateLimitState } from '../src/providers/unified-rate-limit.js'
+import type { ClaudeSession } from '../src/auth/store.js'
+import type { TranslatableMessage } from '../src/translate/resolved.js'
+
+const SCOPED = 'user:profile user:inference'
+const UNSCOPED = 'user:profile'
+
+function session(overrides: Partial<ClaudeSession> = {}): ClaudeSession {
+  return {
+    // Long synthetic token: the builder's token-isolation check rejects a request whose
+    // access token is a substring of any other header value, and a realistic token never is.
+    accessToken: 'synthetic-access-token-0123456789abcdef0123456789abcdef0123456789abcdef',
+    refreshToken: 'ref',
+    expiresAt: Date.now() + 3_600_000,
+    scopes: SCOPED,
+    accountUuid: 'uuid-1',
+    deviceId: 'dev-1',
+    subscriptionType: 'max',
+    ...overrides,
+  }
+}
+
+function history(): TranslatableMessage[] {
+  return [{ role: 'user', content: [{ type: 'text', text: 'hello' }] }]
+}
+
+function options(purpose?: GenerateOptions['purpose']): GenerateOptions {
+  return {
+    provider: 'claude',
+    model: 'claude-opus-5',
+    messages: history() as never,
+    system: 'be terse',
+    ...purpose === undefined ? {} : { purpose },
+  }
+}
+
+/** One captured unified report; every member a test does not state stays unset. */
+function report(overrides: Partial<UnifiedRateLimitState> = {}): UnifiedRateLimitState {
+  return { status: 'allowed', windows: [], observedAt: Date.now(), ...overrides }
+}
+
+/** The wire session id a named attempt declares: the client declares its session as a UUID. */
+function wireSessionId(name: string): string {
+  const bytes = Buffer.from(createHash('sha256').update(`cache-ttl:${name}`).digest().subarray(0, 16))
+  bytes[6] = (bytes[6] & 0x0f) | 0x40
+  bytes[8] = (bytes[8] & 0x3f) | 0x80
+  const hex = bytes.toString('hex')
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`
+}
+
+/** Whether one built request declares the hour and carries the beta that states it. */
+async function declaresHour(
+  account: string,
+  accountSession: ClaudeSession,
+  purpose?: GenerateOptions['purpose'],
+): Promise<{ ttl: boolean; beta: boolean }> {
+  const built = await buildClaudeWireRequest(
+    options(purpose), accountSession, history(), 32_000, undefined, undefined,
+    { sessionId: wireSessionId(`${account}:${purpose ?? 'main'}:${accountSession.scopes}`),
+      atisPin: undefined, previousRequestId: undefined }, account,
+  )
+  const beta = String(built.headers.find(([name]) => name.toLowerCase() === 'anthropic-beta')?.[1] ?? '')
+  return {
+    ttl: String(built.body).includes('"ttl":"1h"'),
+    beta: beta.includes('extended-cache-ttl'),
+  }
+}
+
+test('a scoped session with no captured report declares the hour', async () => {
+  forgetUnifiedRateLimit()
+  assert.deepEqual(await declaresHour('acct-none', session()), { ttl: true, beta: true })
+})
+
+test('the plan name never decides the ttl', async () => {
+  forgetUnifiedRateLimit()
+  // The profile read is not consulted at all: an undisclosed plan and a plan named `free`
+  // both declare the hour, because the granted scope set is what the client reads.
+  const { subscriptionType: undisclosed, ...noPlan } = session()
+  void undisclosed
+  assert.deepEqual(await declaresHour('acct-noplan', { ...noPlan, scopes: SCOPED }), { ttl: true, beta: true })
+  assert.deepEqual(await declaresHour('acct-free', session({ subscriptionType: 'free' })), { ttl: true, beta: true })
+})
+
+test('a session granted no user:inference scope takes the server default', async () => {
+  forgetUnifiedRateLimit()
+  assert.deepEqual(await declaresHour('acct-unscoped', session({ scopes: UNSCOPED })), { ttl: false, beta: false })
+  assert.deepEqual(await declaresHour('acct-empty', session({ scopes: '' })), { ttl: false, beta: false })
+})
+
+test('overage-in-use alone is not the client overage predicate', async () => {
+  forgetUnifiedRateLimit()
+  // The client derives its own term from the status and the overage route; the separate
+  // `overage-in-use` member is a different statement and must not withdraw the hour.
+  rememberUnifiedRateLimit('claude', 'acct-inuse', report({ overageInUse: true }))
+  assert.deepEqual(await declaresHour('acct-inuse', session()), { ttl: true, beta: true })
+})
+
+test('a rejected status on an allowed overage route withdraws the hour', async () => {
+  forgetUnifiedRateLimit()
+  rememberUnifiedRateLimit('claude', 'acct-ov-allowed', report({ status: 'rejected', overageStatus: 'allowed' }))
+  assert.deepEqual(await declaresHour('acct-ov-allowed', session()), { ttl: false, beta: false })
+
+  rememberUnifiedRateLimit('claude', 'acct-ov-warning', report({ status: 'rejected', overageStatus: 'allowed_warning' }))
+  assert.deepEqual(await declaresHour('acct-ov-warning', session()), { ttl: false, beta: false })
+
+  // A rejected status whose overage route is itself refused is not the predicate.
+  rememberUnifiedRateLimit('claude', 'acct-ov-rejected', report({ status: 'rejected', overageStatus: 'rejected' }))
+  assert.deepEqual(await declaresHour('acct-ov-rejected', session()), { ttl: true, beta: true })
+
+  // Nor is an overage route answering while the account itself stands fine.
+  rememberUnifiedRateLimit('claude', 'acct-plain', report({ overageStatus: 'allowed' }))
+  assert.deepEqual(await declaresHour('acct-plain', session()), { ttl: true, beta: true })
+})
+
+test('a helper call takes the server default even for a scoped session', async () => {
+  forgetUnifiedRateLimit()
+  // The client's long-ttl allowlist names its main-thread, sdk, auto-mode and
+  // memory-relevance sources; `compact` and `generate_session_title` are not on it.
+  assert.deepEqual(await declaresHour('acct-compact', session(), 'compaction'), { ttl: false, beta: false })
+  assert.deepEqual(await declaresHour('acct-title', session(), 'session-title'), { ttl: false, beta: false })
+  assert.deepEqual(await declaresHour('acct-main', session()), { ttl: true, beta: true })
+})
+
+test('one account report is never read for another account', async () => {
+  forgetUnifiedRateLimit()
+  rememberUnifiedRateLimit('claude', 'acct-on-ov', report({ status: 'rejected', overageStatus: 'allowed' }))
+  rememberUnifiedRateLimit('claude', 'acct-clean', report())
+  assert.deepEqual(await declaresHour('acct-on-ov', session()), { ttl: false, beta: false })
+  assert.deepEqual(await declaresHour('acct-clean', session()), { ttl: true, beta: true })
+  // Reversed order, so neither result can come from the other's capture order.
+  assert.deepEqual(await declaresHour('acct-clean', session()), { ttl: true, beta: true })
+  assert.deepEqual(await declaresHour('acct-on-ov', session()), { ttl: false, beta: false })
+  forgetUnifiedRateLimit()
+})

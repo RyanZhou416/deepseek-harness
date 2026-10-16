@@ -66,7 +66,7 @@ function scriptedUsage(): Scripted {
   let next: ProviderUsage = { supported: true, windows: [] }
   const providerStatus = (accounts: string[]): unknown => ({
     busy: false,
-    accounts: accounts.map(key => ({ key, isDefault: key === accounts[0] })),
+    accounts: accounts.map(key => ({ key, isDefault: key === accounts[0], credential: { state: 'ready' } })),
   })
   const rpc: ConnectionHandle['rpc'] = {
     call: (_channel, endpoint, payload) => {

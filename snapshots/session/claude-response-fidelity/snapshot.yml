@@ -1,0 +1,10 @@
+version: 1
+scenario: claude-response-fidelity
+profile: headless
+composition: claude-response-fidelity
+recording: authored
+header:
+  class: claude-response-fidelity
+  pin: true
+replay:
+  override: true

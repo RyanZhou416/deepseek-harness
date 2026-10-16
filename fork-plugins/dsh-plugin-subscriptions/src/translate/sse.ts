@@ -1,10 +1,20 @@
 /**
- * Minimal SSE byte-stream parser (~30 lines of framing): reassembles chunks,
- * splits CRLF/LF lines, joins multi-`data:` payloads, skips comments and
- * non-data fields, and dispatches an event only on its blank-line terminator.
- * An unterminated tail at EOF is truncation and is dropped, matching the
- * spec-strict framing the harness's own adapters use.
+ * Minimal SSE byte-stream parser: reassembles chunks, splits CRLF/LF lines, joins
+ * multi-`data:` payloads, skips comments and non-data fields, and dispatches an
+ * event only on its blank-line terminator. An unterminated tail at EOF is
+ * truncation and is dropped, matching the spec-strict framing the harness's own
+ * adapters use.
+ *
+ * The framing itself lives in `claude-engine/sse.ts`, which a caller outside the harness uses
+ * directly; this module keeps only what is specific to the harness stream: reading a
+ * `ReadableStream`, the idle-activity callback, and cancelling unread bytes on early exit.
+ *
+ * EOF releases the reader; an earlier iterator exit awaits source cancellation before
+ * releasing it. Closing an async iterator does not interrupt an outstanding read:
+ * callers must abort the underlying request to unblock a pending read.
  */
+
+import { createSseFramer } from '../claude-engine/sse.js'
 
 /** One parsed SSE event. */
 interface SseEvent {
@@ -26,37 +36,30 @@ export async function* parseSse(
 ): AsyncGenerator<SseEvent> {
   const reader = stream.getReader()
   const decoder = new TextDecoder()
-  let pending = ''
-  let dataLines: string[] = []
-  let eventName: string | undefined
+  const framer = createSseFramer()
+  let ended = false
   try {
     while (true) {
       const { done, value } = await reader.read()
-      if (done) return
-      onActivity?.()
-      pending += decoder.decode(value, { stream: true })
-      let newline = pending.indexOf('\n')
-      while (newline >= 0) {
-        let line = pending.slice(0, newline)
-        pending = pending.slice(newline + 1)
-        newline = pending.indexOf('\n')
-        if (line.endsWith('\r')) line = line.slice(0, -1)
-        if (line.length === 0) {
-          if (dataLines.length > 0) {
-            yield { data: dataLines.join('\n'), ...eventName === undefined ? {} : { event: eventName } }
-          }
-          dataLines = []
-          eventName = undefined
-        } else if (line.startsWith(':')) {
-          onActivity?.()
-        } else if (line.startsWith('data:')) {
-          dataLines.push(line.slice(5).replace(/^ /, ''))
-        } else if (line.startsWith('event:')) {
-          eventName = line.slice(6).replace(/^ /, '')
-        }
+      if (done) {
+        ended = true
+        return
       }
+      onActivity?.()
+      const pushed = framer.push(decoder.decode(value, { stream: true }), onActivity)
+      for (const event of pushed.events) yield event
+      // A frame past the framer's cap ends this stream where it stands rather than growing.
+      if (pushed.overflowed === true) return
     }
   } finally {
+    // Early iterator exit owns cancellation of unread response bytes.
+    if (!ended) {
+      try {
+        await reader.cancel()
+      } catch (_cancelFailure) {
+        // Preserve the consumer's return or original failure if source cleanup rejects.
+      }
+    }
     reader.releaseLock()
   }
 }

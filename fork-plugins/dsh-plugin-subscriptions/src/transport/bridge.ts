@@ -4,6 +4,10 @@
  * Owns one long-lived Bun child, multiplexes requests over it by `streamId`, and
  * presents each response as a web `Response` whose body streams from the frames.
  *
+ * The child holds an upstream request open until the bridge tells it otherwise, so a
+ * body its caller stops reading is released with one cancel frame per stream, exactly
+ * as an abort is.
+ *
  * The duplex is injectable so the framing and failure paths are testable without
  * spawning a process; the default duplex spawns the built child under the Bun
  * runtime.
@@ -63,12 +67,25 @@ export class BridgeError extends Error {
 const MAX_BODY_FRAME_BYTES = 1024 * 1024
 
 /**
- * Queued response bytes a stream may fall behind by before the bridge gives up.
+ * Default cap on one response body's unread bytes.
  *
- * A consumer that stops reading would otherwise grow the queue for the life of a
- * long-lived child. The cap converts that into a diagnosable failure.
+ * A consumer that stops reading would otherwise grow that body's queue for the life of
+ * a long-lived child, so the cap converts it into a diagnosable per-stream failure. It
+ * measures the queue itself, so bytes a pending read already claimed and bytes the
+ * consumer took are not backlog. Deployments override it through
+ * {@link BridgeOptions.maxQueuedBytes}.
  */
-const MAX_QUEUED_BYTES = 32 * 1024 * 1024
+export const DEFAULT_MAX_QUEUED_BYTES = 32 * 1024 * 1024
+
+/** Deployment-varying limits for one bridge. */
+export interface BridgeOptions {
+  /**
+   * Largest unread backlog, in bytes, one response body may accumulate before that
+   * stream fails with `backpressure`. Must be a positive safe integer; defaults to
+   * {@link DEFAULT_MAX_QUEUED_BYTES}.
+   */
+  readonly maxQueuedBytes?: number
+}
 
 /** Statuses that must be delivered without a body. */
 const NULL_BODY_STATUSES = new Set([101, 204, 205, 304])
@@ -83,7 +100,6 @@ interface Pending {
   readonly signal: AbortSignal | undefined
   onAbort: (() => void) | undefined
   headersSent: boolean
-  queued: number
 }
 
 /** A started bridge. */
@@ -92,14 +108,24 @@ export class BunBridge {
   readonly #decoder = new FrameDecoder()
   readonly #pending = new Map<number, Pending>()
   readonly #byId = new Map<string, Pending>()
+  readonly #maxQueuedBytes: number
   #nextIndex = 0
   #dead: BridgeError | undefined
 
   /**
    * @param duplex - Bytes-level channel to the child.
+   * @param options - Deployment limits; an unset member keeps its default.
+   * @throws RangeError when `options.maxQueuedBytes` is not a positive safe integer.
    */
-  constructor(duplex: BridgeDuplex) {
+  constructor(duplex: BridgeDuplex, options: BridgeOptions = {}) {
+    const maxQueuedBytes = options.maxQueuedBytes ?? DEFAULT_MAX_QUEUED_BYTES
+    if (!Number.isSafeInteger(maxQueuedBytes) || maxQueuedBytes <= 0) {
+      throw new RangeError(
+        `maxQueuedBytes must be a positive safe integer, received ${String(maxQueuedBytes)}`,
+      )
+    }
     this.#duplex = duplex
+    this.#maxQueuedBytes = maxQueuedBytes
     duplex.onData((bytes) => {
       const frames = this.#decoder.push(bytes)
       const failure = this.#decoder.error
@@ -131,12 +157,20 @@ export class BunBridge {
    *
    * @param url - Absolute request URL.
    * @param init - Method, headers, body and optional abort signal.
-   * @returns The response, with a body that streams from the child.
-   * @throws BridgeError for a dead child, an unsupported body form, or a write
-   *   failure; the caller decides whether to retry.
+   * @returns The one outcome of the request: the response, whose body streams from the
+   *   child, or the rejection below. A write failure is reported through this same
+   *   promise, after any frame the child already delivered for the request.
+   * @throws BridgeError for a dead child, a signal that is already aborted, an
+   *   unsupported body form, or a write that failed before the child answered; the
+   *   caller decides whether to retry.
    */
   async request(url: string, init: RequestInit): Promise<Response> {
     if (this.#dead !== undefined) throw this.#dead
+    const signal = init.signal ?? undefined
+    // A caller that already aborted has no request to make: sending it would ask the
+    // child to open an upstream request whose only purpose is to be cancelled.
+    if (signal !== undefined && signal.aborted) throw new BridgeError('cancelled')
+
     const streamId = randomUUID()
     const index = this.#nextIndex
     this.#nextIndex += 1
@@ -144,11 +178,21 @@ export class BunBridge {
     const body = bodyBytes(init.body)
 
     let controller!: ReadableStreamDefaultController<Uint8Array>
-    const stream = new ReadableStream<Uint8Array>({
-      start: (c) => {
-        controller = c
+    const stream = new ReadableStream<Uint8Array>(
+      {
+        start: (c) => {
+          controller = c
+        },
+        // The consumer abandoning the body — a translator returning at its terminal event,
+        // for one — is the only notice the child gets to stop the request upstream.
+        cancel: () => {
+          this.#release(pending)
+        },
       },
-    })
+      // The queue is counted in bytes, so `controller.desiredSize` reports what this
+      // body still holds unread rather than how many frames have arrived.
+      { highWaterMark: this.#maxQueuedBytes, size: (chunk) => chunk.byteLength },
+    )
 
     let pending!: Pending
     const response = new Promise<Response>((resolve, reject) => {
@@ -159,20 +203,26 @@ export class BunBridge {
         controller,
         resolve,
         reject,
-        signal: init.signal ?? undefined,
+        signal,
         onAbort: undefined,
         headersSent: false,
-        queued: 0,
       }
     })
 
     const headers = headerPairs(init.headers)
 
-    // Registered before the first write: a duplex may answer synchronously, and a
-    // response arriving before the entry existed would be dropped and the request
-    // would never settle. A failed write settles the entry instead of leaking it.
+    // Registered before the first write because a duplex may answer synchronously
+    // inside `write` and settle this entry: a listener attached after that point would
+    // outlive the request on the caller's signal. A failed write settles the entry too,
+    // which removes this listener.
     this.#pending.set(index, pending)
     this.#byId.set(streamId, pending)
+    if (signal !== undefined) {
+      pending.onAbort = () => {
+        this.#cancel(pending)
+      }
+      signal.addEventListener('abort', pending.onAbort, { once: true })
+    }
 
     try {
       this.#duplex.write(
@@ -193,23 +243,21 @@ export class BunBridge {
         this.#duplex.write(encodeControl({ streamId, type: 'body-end' }))
       }
     } catch (error) {
-      this.#settle(pending)
-      throw new BridgeError(
+      const failure = new BridgeError(
         'child-error',
         `writing to the transport child failed: ${error instanceof Error ? error.message : String(error)}`,
       )
-    }
-
-    const signal = init.signal
-    if (signal !== undefined && signal !== null) {
-      if (signal.aborted) {
-        this.#cancel(pending)
-      } else {
-        pending.onAbort = () => {
-          this.#cancel(pending)
-        }
-        signal.addEventListener('abort', pending.onAbort, { once: true })
+      // A synchronously replying duplex may already have settled this entry — and its
+      // promise — from inside the write that failed. Only an entry still owned here is
+      // failed and released; either way the caller adopts the same `response` promise
+      // every other path returns, so no second rejected promise is left unhandled and
+      // no request is left without an outcome.
+      if (this.#pending.has(pending.index)) {
+        if (pending.headersSent) pending.controller.error(failure)
+        else pending.reject(failure)
+        this.#settle(pending)
       }
+      return response
     }
 
     return response
@@ -222,21 +270,43 @@ export class BunBridge {
   }
 
   /**
-   * Stops one request: tells the child to abandon it and fails the caller locally.
+   * Tells the child to abandon one stream and stops tracking it, at most once.
+   *
+   * The response body's cancellation and the caller's abort both arrive here, so the
+   * entry's presence is what makes a release idempotent: whichever runs first sends the
+   * single cancel frame the child expects, and the other is a no-op.
+   *
+   * Ownership is revoked before that frame is written. A duplex may deliver the child's
+   * own end or error for this stream from inside the write, and a still-owned entry
+   * would hand those frames to a controller whose body the consumer already abandoned —
+   * closing an aborted body as if it had completed.
+   *
+   * @param pending - The stream to release.
+   * @returns Whether this call was the one that released the stream.
+   */
+  #release(pending: Pending): boolean {
+    if (!this.#pending.has(pending.index)) return false
+    this.#settle(pending)
+    try {
+      this.#duplex.write(encodeControl({ streamId: pending.streamId, type: 'cancel' }))
+    } catch (_writeFailure) {
+      // A failed write only means the child never learned it was released; the stream
+      // is no longer tracked either way.
+    }
+    return true
+  }
+
+  /**
+   * Stops one request because its caller aborted: releases it upstream and fails the
+   * caller locally.
    *
    * @param pending - The stream to cancel.
    */
   #cancel(pending: Pending): void {
-    if (!this.#pending.has(pending.index)) return
-    try {
-      this.#duplex.write(encodeControl({ streamId: pending.streamId, type: 'cancel' }))
-    } catch {
-      // The child is already gone; the exit path settles this entry.
-    }
+    if (!this.#release(pending)) return
     const error = new BridgeError('cancelled')
     if (pending.headersSent) pending.controller.error(error)
     else pending.reject(error)
-    this.#settle(pending)
   }
 
   #onFrames(frames: readonly Frame[]): void {
@@ -244,19 +314,29 @@ export class BunBridge {
       if (frame.tag === 2) {
         const pending = this.#pending.get(frame.streamIndex)
         if (pending === undefined) continue
-        pending.queued += frame.bytes.byteLength
-        if (pending.queued > MAX_QUEUED_BYTES) {
-          const error = new BridgeError('backpressure', `${pending.queued} bytes unread`)
-          if (pending.headersSent) pending.controller.error(error)
-          else pending.reject(error)
-          this.#settle(pending)
-          continue
-        }
         try {
           pending.controller.enqueue(frame.bytes)
         } catch {
           // The consumer cancelled or the stream already closed: stop tracking it.
           this.#settle(pending)
+          continue
+        }
+        // The queue's remaining byte capacity: an enqueue subtracts the chunk and a
+        // consumer read returns what it took, so a negative value is exactly this
+        // stream's unread backlog exceeding its cap. A chunk a pending read was already
+        // waiting for is handed over without entering the queue, so it leaves this
+        // unchanged and cannot trip the cap; the frame codec bounds that chunk instead.
+        const remaining = pending.controller.desiredSize
+        if (remaining !== null && remaining < 0) {
+          const error = new BridgeError(
+            'backpressure',
+            `${String(this.#maxQueuedBytes - remaining)} bytes unread`,
+          )
+          // Ownership is revoked and the child is told to abandon the request before
+          // the body is failed, exactly as a caller abort does it.
+          this.#release(pending)
+          if (pending.headersSent) pending.controller.error(error)
+          else pending.reject(error)
         }
         continue
       }

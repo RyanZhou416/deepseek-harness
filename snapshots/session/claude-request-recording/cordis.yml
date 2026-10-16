@@ -1,0 +1,28 @@
+# The recording composition: the headless profile already mounts the Host's recording
+# service and the shipped JSONL persistence, so this patch adds only the plugin under test.
+# The assembly calls the real plugin module's own `apply` and states the internals a
+# deterministic test must replace — the Messages transport, the two independent read
+# transports and the Claude Code credential-source reader — because the Loader supplies
+# none. Claude only with an explicit catalog, so the composition registers no subscription
+# tool and assembles no model-discovery request. This recording-only scenario excludes
+# platform shell tools; its header owns the remaining schema set.
+
+- id: tool-bash
+  name: '@deepseek-ai/dsh-tool-bash'
+  disabled: true
+
+- id: tool-pwsh
+  name: '@deepseek-ai/dsh-tool-pwsh'
+  disabled: true
+
+- insert:
+    - id: claude-request-recording-probe
+      name: ../../../fork-plugins/dsh-plugin-subscriptions/test/fixtures/claude-request-recording-probe.mjs
+      inject: ['llm', 'sessionPersistence']
+      config:
+        providers: [claude]
+        models:
+          claude:
+            - id: claude-opus-4-5
+        pool:
+          enabled: false

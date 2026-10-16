@@ -14,6 +14,10 @@
  * the session fields directly (no `accounts` wrapper); reads migrate them
  * in memory, and the next write persists the new shape — existing logins
  * survive the upgrade untouched.
+ *
+ * A Claude entry may state its credential ownership mode. An absent field reads as the mode its
+ * own facts imply; a value this build does not implement fails the whole read rather than being
+ * inferred from or dropped, because it decides who may spend a shared refresh grant.
  */
 
 import { randomBytes } from 'node:crypto'
@@ -23,6 +27,8 @@ import { dirname } from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
 import { dshHomePath } from '@deepseek-ai/dsh-home-paths'
 import { withStoreLock } from './store-lock.js'
+import { CLAUDE_CREDENTIAL_MODES, isClaudeCredentialMode } from './claude-credential-ownership.js'
+import type { ClaudeCredentialMode } from './claude-credential-ownership.js'
 
 /** Provider routes this plugin can serve. */
 export type ProviderId = 'codex' | 'claude' | 'grok' | 'copilot' | 'antigravity' | 'cursor'
@@ -72,8 +78,9 @@ export interface ClaudeSession extends AccountKeyedSession {
    */
   accountUuid?: string
   /**
-   * Stable per-account device id minted at login; the second member of the
-   * correlation triple. Backfilled on first use for pre-upgrade sessions.
+   * Deterministic account-and-local-OS device id used in the correlation triple.
+   * The Claude adapter rechecks it before Messages and conditionally replaces
+   * legacy account-only ids or values copied from another OS installation.
    */
   deviceId?: string
   /**
@@ -81,6 +88,14 @@ export interface ClaudeSession extends AccountKeyedSession {
    * store (Keychain/file): only bound accounts sync refreshes back to it.
    */
   keychainBound?: boolean
+  /**
+   * How this account's credential is owned, and therefore who may rotate it.
+   * Absent on records written before the field existed, where the mode is
+   * inferred from {@link keychainBound}; a stated value outranks that inference
+   * and survives a restart. See `claude-credential-ownership.ts` for the modes
+   * and the conversions allowed between them.
+   */
+  credentialOwnershipMode?: ClaudeCredentialMode
 }
 
 /** Stored Grok (X Premium / xAI) subscription session. */
@@ -158,6 +173,13 @@ interface ProviderAccounts<S> {
   accounts: Record<string, S>
   /** Old keys remain bound to their migrated account, never a workspace sibling. */
   aliases?: Record<string, string>
+  /**
+   * Per-account credential revision, bumped by every accepted write of that account
+   * (save, removal) and never decremented. A reader that decided on a revision can
+   * therefore tell whether the credential it reasoned about is still the current one.
+   * Absent on stores written before revisions existed, which read as revision 0.
+   */
+  revisions?: Record<string, number>
 }
 
 /** The durable store shape: per provider, its accounts. */
@@ -168,6 +190,13 @@ interface SessionMap {
   copilot?: ProviderAccounts<CopilotSession>
   antigravity?: ProviderAccounts<AntigravitySession>
   cursor?: ProviderAccounts<CursorSession>
+  /**
+   * Per-provider, per-account revision high-water marks. They outlive the account they
+   * name: removing the last account of a provider takes the account map away, and this
+   * map is what keeps the next login of that account on a higher revision than the
+   * credential the removal retired — in this process and in every other one.
+   */
+  revisions?: Record<string, Record<string, number>>
 }
 
 /** Any stored session, for provider-agnostic plumbing. */
@@ -365,6 +394,48 @@ function legacyAuthFilePath(): string {
   return dshHomePath('plugins', 'router', 'auth.json')
 }
 
+/**
+ * Refuse an unrecognized ownership mode where a Claude record crosses the durable boundary.
+ *
+ * The mode decides who may spend a shared refresh grant and write it back, so a value this
+ * build does not implement is neither inferred from nor silently dropped: inferring would pick
+ * an owner by accident, and dropping the record would strand the account's tokens on the next
+ * write. The whole read fails instead, naming the account and the field.
+ *
+ * The write path calls this too, through {@link writeStore}, so an unusable value is refused
+ * before the file is replaced rather than surfacing as a broken store on the next read.
+ * @param provider - the provider route the record belongs to.
+ * @param account - the account key, named in the failure.
+ * @param value - the record, from a parsed file or from a caller about to be stored.
+ * @throws Error when the record states a mode this build does not implement.
+ */
+function assertClaudeCredentialOwnershipMode(provider: ProviderId, account: string, value: unknown): void {
+  if (provider !== 'claude') return
+  if (typeof value !== 'object' || value === null) return
+  const mode = (value as Record<string, unknown>)['credentialOwnershipMode']
+  if (mode === undefined || isClaudeCredentialMode(mode)) return
+  throw new Error(
+    `subscriptions auth store: entry "${provider}/${account}" states credentialOwnershipMode `
+    + `"${typeof mode === 'string' ? mode : String(mode)}", which is not one of `
+    + `${CLAUDE_CREDENTIAL_MODES.join(', ')}; fix or delete the store file`,
+  )
+}
+
+/**
+ * Refuse the whole write when any Claude record in it states an unusable ownership mode.
+ *
+ * Every write of this file goes through {@link writeStore}, so validating here covers the save,
+ * removal and default-account paths alike: a caller can never replace a good store with one
+ * that the next read would reject. Nothing is written when this throws.
+ * @param store - the store about to be persisted.
+ * @throws Error when a stored Claude record states a mode this build does not implement.
+ */
+function assertStoredClaudeOwnershipModes(store: SessionMap): void {
+  for (const [account, session] of Object.entries(store.claude?.accounts ?? {})) {
+    assertClaudeCredentialOwnershipMode('claude', account, session)
+  }
+}
+
 /** Check that one durable session carries the fields every session needs. */
 function assertSessionShape(provider: ProviderId, account: string, value: unknown): asserts value is StoredSession {
   if (typeof value !== 'object' || value === null) {
@@ -384,6 +455,7 @@ function assertSessionShape(provider: ProviderId, account: string, value: unknow
       'subscriptions auth store: entry "antigravity" is missing projectId; log out and complete Antigravity login again',
     )
   }
+  assertClaudeCredentialOwnershipMode(provider, account, entry)
 }
 
 /**
@@ -429,6 +501,10 @@ export async function loadStore(path = authFilePath()): Promise<SessionMap> {
  * persists the store without the skipped entry. Structural failures (invalid
  * JSON, a non-object file) still throw — those say the file itself is broken.
  *
+ * A Claude entry stating an ownership mode this build does not implement is a structural
+ * failure too: inferring an owner from it would decide who spends a shared refresh grant by
+ * accident, and skipping it would strand the account's tokens on the next write.
+ *
  * @param text - the file's contents.
  * @param path - the file the text came from, named in structural errors.
  * @returns the session map and whether a token-derived account key was replaced.
@@ -445,6 +521,8 @@ function parseStore(text: string, path: string): { store: SessionMap; rekeyed: b
   }
   const raw = parsed as Record<string, unknown>
   const store: SessionMap = {}
+  const tombstones = readRevisionTombstones(raw.revisions)
+  if (Object.keys(tombstones).length > 0) store.revisions = tombstones
   let rekeyed = false
   for (const provider of PROVIDER_IDS) {
     const entry = raw[provider]
@@ -462,6 +540,7 @@ function parseStore(text: string, path: string): { store: SessionMap; rekeyed: b
       }
       const session = record as unknown as StoredSession
       const key = provider === 'codex' ? (session as CodexSession).accountId : accountKeyOf(provider, session)
+      assertClaudeCredentialOwnershipMode(provider, key, record)
       // An identity-less session was just keyed by a minted id; write it so the account
       // keeps that key rather than taking a new one on the next read.
       if (accountIdentityOf(provider, session) === undefined) rekeyed = true
@@ -480,6 +559,7 @@ function parseStore(text: string, path: string): { store: SessionMap; rekeyed: b
     const kept: Record<string, StoredSession> = {}
     for (const [account, session] of Object.entries(accounts)) {
       if (isValidSessionShape(session)) {
+        assertClaudeCredentialOwnershipMode(provider, account, session as Record<string, unknown>)
         kept[account] = session as StoredSession
       } else {
         console.warn(
@@ -509,11 +589,13 @@ function parseStore(text: string, path: string): { store: SessionMap; rekeyed: b
       keyed[minted] = session
       rekeyed = true
     }
+    const revisions = readRevisionMap(record.revisions)
     ;(store as Record<string, unknown>)[provider] = {
       ...record,
       ...aliases === undefined ? {} : { aliases },
       default: validDefault,
       accounts: keyed,
+      ...Object.keys(revisions).length === 0 ? {} : { revisions },
     }
   }
   if (store.codex !== undefined) migrateCodex(store.codex)
@@ -563,6 +645,9 @@ async function replaceStoreFile(tmp: string, path: string): Promise<void> {
 
 /** Persist the whole store atomically with owner-only permissions. */
 async function writeStore(store: SessionMap, path: string): Promise<void> {
+  // Before anything is written: one unusable mode would make every later read of this file
+  // throw, so the store that is about to replace it is refused instead.
+  assertStoredClaudeOwnershipModes(store)
   await mkdir(dirname(path), { recursive: true })
   const tmp = `${path}.tmp-${process.pid}-${Math.random().toString(36).slice(2)}`
   try {
@@ -665,16 +750,168 @@ export async function getAccountSession<K extends ProviderId>(
 }
 
 /**
+ * A store-minted, monotonic revision of one account's credential.
+ *
+ * It changes whenever the credential does — a rotation, a re-login, a removal — and never
+ * returns to an earlier value, so a caller that recorded a revision can tell whether the
+ * credential it reasoned about is still the one stored.
+ */
+export type CredentialRevision = number
+
+/**
+ * One account's stored credential together with the revision it is stored under.
+ * @typeParam S - the provider's session type.
+ */
+export interface AccountCredential<S> {
+  /** Canonical account key the credential is stored under. */
+  key: string
+  session: S
+  revision: CredentialRevision
+}
+
+/**
+ * Highest revision this process has already issued for one account.
+ *
+ * The persisted high-water mark is the cross-process authority; this floor covers the
+ * window before a write lands and a store file that predates the revision map. It is keyed
+ * by store path as well as provider and account, so two stores — a test home and the real
+ * one, or two DSH homes — never share a counter.
+ */
+const revisionFloors = new Map<string, number>()
+
+/** Key of one store's process-local revision floor. */
+function revisionFloorKey(path: string, provider: ProviderId, account: string): string {
+  return `${path}\u0000${provider}\u0000${account}`
+}
+
+/**
+ * Validate one persisted revision map.
+ *
+ * Revisions are read from a file, which is an untyped boundary, so a value that is not a
+ * non-negative safe integer is dropped rather than trusted; the account keeps reading as
+ * revision 0 and the next accepted write mints a higher one.
+ * @param value - the parsed value to validate.
+ * @returns the usable entries, empty when the value carries none.
+ */
+function readRevisionMap(value: unknown): Record<string, number> {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return {}
+  const kept: Record<string, number> = {}
+  for (const [account, revision] of Object.entries(value)) {
+    if (account.length === 0) continue
+    if (typeof revision !== 'number' || !Number.isSafeInteger(revision) || revision < 0) continue
+    kept[account] = revision
+  }
+  return kept
+}
+
+/**
+ * Validate the root revision map, keeping only known providers.
+ * @param value - the parsed value to validate.
+ * @returns the usable per-provider maps, empty when the value carries none.
+ */
+function readRevisionTombstones(value: unknown): Record<string, Record<string, number>> {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return {}
+  const raw = value as Record<string, unknown>
+  const kept: Record<string, Record<string, number>> = {}
+  for (const provider of PROVIDER_IDS) {
+    const accounts = readRevisionMap(raw[provider])
+    if (Object.keys(accounts).length > 0) kept[provider] = accounts
+  }
+  return kept
+}
+
+/**
+ * The next revision for one account: one above both the persisted high-water mark and
+ * every revision this process has already issued for it.
+ * @param path - the store file, so unrelated stores keep unrelated counters.
+ * @param provider - the provider route.
+ * @param entry - the provider's stored entry, when it has one.
+ * @param tombstones - the store's root high-water marks.
+ * @param account - the canonical account key.
+ * @returns the revision the next accepted write establishes.
+ */
+function nextCredentialRevision(
+  path: string,
+  provider: ProviderId,
+  entry: ProviderAccounts<StoredSession> | undefined,
+  tombstones: Record<string, Record<string, number>> | undefined,
+  account: string,
+): CredentialRevision {
+  const key = revisionFloorKey(path, provider, account)
+  const persisted = Math.max(
+    entry?.revisions?.[account] ?? 0,
+    tombstones?.[provider]?.[account] ?? 0,
+  )
+  const next = Math.max(persisted, revisionFloors.get(key) ?? 0) + 1
+  revisionFloors.set(key, next)
+  return next
+}
+
+/**
+ * Record one account's new revision in both places it must persist: beside the account,
+ * for readers of that entry, and at the store root, so it survives the account's removal.
+ * @param store - the loaded store, mutated in place.
+ * @param provider - the provider route.
+ * @param account - the canonical account key.
+ * @param revision - the revision this write establishes.
+ */
+function recordCredentialRevision(
+  store: SessionMap,
+  provider: ProviderId,
+  account: string,
+  revision: CredentialRevision,
+): void {
+  store.revisions = {
+    ...store.revisions,
+    [provider]: { ...store.revisions?.[provider], [account]: revision },
+  }
+}
+
+/**
+ * Read one account's credential and the revision it is stored under, without any side
+ * effect and without refreshing. A caller that will act on the session keeps the revision
+ * and re-reads before committing an effect that must not land on a newer credential.
+ * @param provider - the provider route.
+ * @param account - the account key; defaults to the provider's default account.
+ * @param path - store file path; defaults to {@link authFilePath}.
+ * @returns the credential snapshot, or `undefined` when the account is not logged in.
+ */
+export async function getAccountCredential<K extends ProviderId>(
+  provider: K,
+  account?: string,
+  path = authFilePath(),
+): Promise<AccountCredential<SessionOf<K>> | undefined> {
+  const store = await loadStore(path)
+  const entry = store[provider]
+  if (entry === undefined) return undefined
+  const requested = account ?? entry.default
+  if (requested === undefined) return undefined
+  const key = resolveAccount(entry, requested)
+  const session = entry.accounts[key] as SessionOf<K> | undefined
+  if (session === undefined) return undefined
+  return {
+    key,
+    session,
+    revision: currentRevision(store, provider, entry as ProviderAccounts<StoredSession> | undefined, key),
+  }
+}
+
+/**
  * Write one account's session, preserving the others. The first account of a
  * provider becomes its default.
  *
  * The session is validated before it lands: a corrupt entry written here
  * would fail every later read of the whole store (one bad entry breaks all
  * providers' status), so the write path must be as strict as the read path.
+ * Every accepted write also bumps that account's {@link CredentialRevision}.
  * @param provider - the provider route.
  * @param account - the account key (see {@link accountKeyOf}).
  * @param session - the fresh session from a login or refresh.
  * @param path - store file path; defaults to {@link authFilePath}.
+ * @param options - `expectedPrior` compares the stored session's tokens, and
+ *   `expectedRevision` compares the stored revision, so a decision taken on either can be
+ *   refused once a newer credential landed. Both are optional; a caller that reads a
+ *   revision before deciding passes it.
  * @throws when the session is missing accessToken/refreshToken/expiresAt.
  */
 export async function saveAccountSession<K extends ProviderId>(
@@ -682,7 +919,7 @@ export async function saveAccountSession<K extends ProviderId>(
   account: string,
   session: SessionOf<K>,
   path = authFilePath(),
-  options: { expectedPrior?: SessionOf<K> } = {},
+  options: { expectedPrior?: SessionOf<K>; expectedRevision?: CredentialRevision } = {},
 ): Promise<boolean> {
   assertSessionShape(provider, account, session)
   return serialize(path, async () => {
@@ -706,14 +943,41 @@ export async function saveAccountSession<K extends ProviderId>(
       const stored = entry?.accounts[account]
       if (!sameStoredSession(stored, options.expectedPrior)) return false
     }
+    // A revision the caller decided on is checked the same way, which also refuses a write
+    // whose credential tokens happen to repeat an earlier state.
+    if (options.expectedRevision !== undefined
+      && currentRevision(store, provider, entry as ProviderAccounts<StoredSession> | undefined, account) !== options.expectedRevision) {
+      return false
+    }
+    const revision = nextCredentialRevision(path, provider, entry as ProviderAccounts<StoredSession> | undefined, store.revisions, account)
     ;(store as Record<string, unknown>)[provider] = {
       ...entry,
       default: entry?.default ?? account,
       accounts: { ...entry?.accounts, [account]: session },
+      revisions: { ...entry?.revisions, [account]: revision },
     } satisfies ProviderAccounts<SessionOf<K>>
+    recordCredentialRevision(store, provider, account, revision)
     await writeStore(store, path)
     return true
   })
+}
+
+/**
+ * The revision one account currently reads as: the persisted high-water mark, whether it
+ * sits beside the account or at the store root.
+ * @param store - the loaded store.
+ * @param provider - the provider route.
+ * @param entry - the provider's stored entry, when it has one.
+ * @param account - the canonical account key.
+ * @returns the revision, 0 when nothing was ever recorded.
+ */
+function currentRevision(
+  store: SessionMap,
+  provider: ProviderId,
+  entry: ProviderAccounts<StoredSession> | undefined,
+  account: string,
+): CredentialRevision {
+  return Math.max(entry?.revisions?.[account] ?? 0, store.revisions?.[provider]?.[account] ?? 0)
 }
 
 /**
@@ -734,23 +998,54 @@ function sameStoredSession(
 /**
  * Delete one account's session (logout). Deleting the default moves the badge
  * to the next remaining account.
+ *
+ * The removal runs inside the store's own serialization, so a caller that names
+ * the session it read cannot delete one another writer stored in the meantime:
+ * a login or a rotation that landed first is kept, and the caller answers false.
  * @param provider - the provider route.
  * @param account - the account key.
  * @param path - store file path; defaults to {@link authFilePath}.
+ * @param options - `expectedPrior` makes the removal conditional on the stored
+ *   session still being that one, and `expectedRevision` on the stored revision still
+ *   being the one the caller read, exactly as {@link saveAccountSession} does.
+ * @returns true when the session was actually removed; false when the account
+ *   was already absent or another writer had replaced the named session.
  */
-export async function deleteAccountSession(
-  provider: ProviderId,
+export async function deleteAccountSession<K extends ProviderId>(
+  provider: K,
   account: string,
   path = authFilePath(),
-): Promise<void> {
+  options: { expectedPrior?: SessionOf<K>; expectedRevision?: CredentialRevision } = {},
+): Promise<boolean> {
   return serialize(path, async () => {
     const store = await loadStore(path)
-    const entry = store[provider]
-    if (entry === undefined) return
+    const entry = store[provider] as ProviderAccounts<SessionOf<K>> | undefined
+    if (entry === undefined) return false
     account = resolveAccount(entry, account)
-    if (!Object.hasOwn(entry.accounts, account)) return
+    if (!Object.hasOwn(entry.accounts, account)) return false
+    if (options.expectedRevision !== undefined
+      && currentRevision(store, provider, entry as ProviderAccounts<StoredSession> | undefined, account) !== options.expectedRevision) {
+      return false
+    }
+    // The stored session is the authority: a caller that read one only deletes
+    // while that session is still the one there, so a refresh that started
+    // before a logout or a re-login cannot destroy the newer credential.
+    if (options.expectedPrior !== undefined
+      && !sameStoredSession(entry.accounts[account], options.expectedPrior)) return false
     const accounts = { ...entry.accounts }
     delete accounts[account]
+    // The removal is itself a credential change: a re-login must land on a higher revision
+    // than the credential this logout retired, and a decision taken before it must not
+    // still read as current. The root high-water mark is written either way, so removing
+    // the provider's last account does not reset the counter.
+    const revision = nextCredentialRevision(
+      path,
+      provider,
+      entry as ProviderAccounts<StoredSession>,
+      store.revisions,
+      account,
+    )
+    recordCredentialRevision(store, provider, account, revision)
     if (Object.keys(accounts).length === 0) {
       delete store[provider]
     } else {
@@ -758,9 +1053,11 @@ export async function deleteAccountSession(
         ...entry,
         ...entry.default === account ? { default: Object.keys(accounts)[0] } : { default: entry.default },
         accounts,
+        revisions: { ...entry.revisions, [account]: revision },
       }
     }
     await writeStore(store, path)
+    return true
   })
 }
 

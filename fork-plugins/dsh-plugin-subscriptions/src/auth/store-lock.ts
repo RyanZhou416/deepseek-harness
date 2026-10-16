@@ -56,6 +56,15 @@ const DEFAULT_TIMING: LockTiming =
   { retries: 10, minTimeoutMs: 100, maxTimeoutMs: 1_000, staleMs: STALE_MS }
 
 /**
+ * What {@link withStoreLockOwned} reports: the work's result under an owned lock, or the
+ * refusal to run it at all.
+ *
+ * The two outcomes are separate members rather than an optional value, so a `run` that
+ * legitimately answers `undefined` is never read as "the lock was not acquired".
+ */
+export type StoreLockOutcome<T> = { readonly acquired: true; readonly value: T } | { readonly acquired: false }
+
+/**
  * Run one operation with the lock held for the given resource.
  *
  * @param resourcePath - the file the lock protects; the lock is `${path}.lock`, as upstream
@@ -72,6 +81,50 @@ export async function withStoreLock<T>(
   const lockPath = `${resourcePath}.lock`
   const owner = await acquire(lockPath, timing)
   if (owner === undefined) return run()
+  return await runHeld(lockPath, owner, timing, run)
+}
+
+/**
+ * Run one operation only while this process owns the lock.
+ *
+ * Unlike {@link withStoreLock}, a lock that cannot be waited out does NOT degrade to
+ * running unowned: the caller is told it did not acquire ownership, so work that must not
+ * overlap — spending a refresh grant two processes would invalidate — stops instead of
+ * running without mutual exclusion. The wait is bounded by `timing`, so a caller that
+ * keeps being refused reports a busy failure rather than blocking forever.
+ *
+ * @param resourcePath - the file the lock protects; the lock is `${path}.lock`.
+ * @param run - the work to perform while owning the lock; it never starts on refusal.
+ * @param timing - the waiting policy; the default is the one described above.
+ * @returns the work's outcome, or `{ acquired: false }` when another holder could not be
+ *   waited out.
+ */
+export async function withStoreLockOwned<T>(
+  resourcePath: string,
+  run: () => Promise<T>,
+  timing: LockTiming = DEFAULT_TIMING,
+): Promise<StoreLockOutcome<T>> {
+  const lockPath = `${resourcePath}.lock`
+  const owner = await acquire(lockPath, timing)
+  if (owner === undefined) return { acquired: false }
+  return { acquired: true, value: await runHeld(lockPath, owner, timing, run) }
+}
+
+/**
+ * Run `run` with a held lock, renewing the lease while it works and releasing it afterwards.
+ *
+ * @param lockPath - the lock directory.
+ * @param owner - this holder's token.
+ * @param timing - the waiting policy, whose staleness bound sets the renewal period.
+ * @param run - the work to perform while holding the lock.
+ * @returns whatever `run` returned.
+ */
+async function runHeld<T>(
+  lockPath: string,
+  owner: string,
+  timing: LockTiming,
+  run: () => Promise<T>,
+): Promise<T> {
   const stopRenewal = renewHeldLock(lockPath, owner, timing)
   try {
     return await run()

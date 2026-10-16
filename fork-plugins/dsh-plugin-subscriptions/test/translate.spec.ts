@@ -1112,17 +1112,28 @@ test('every error type that can carry a stated-final refusal is routed through t
 })
 
 test('an error type that carries no stated-final refusal keeps its own classification', () => {
-  // The probe answers for the whole response, so consulting it for a type that is
-  // not about retrying would relabel a policy or permission failure the provider
-  // never stated was final.
-  for (const type of ['policy_blocked', 'permission_error', 'not_found_error']) {
+  // The probe answers for the whole response, so consulting it for a type that is not about
+  // retrying would relabel a policy or permission failure the provider never stated was final.
+  // Those types are classified by what they name rather than defaulting to a transient server
+  // failure, and a type this route does not map stays unclassified instead of retryable.
+  for (const [type, code] of [
+    ['policy_blocked', 'PERMISSION_DENIED'],
+    ['permission_error', 'PERMISSION_DENIED'],
+    ['not_found_error', 'INVALID_REQUEST'],
+  ] as const) {
     const probed = new AnthropicStreamTranslator(undefined, () => true)
     assert.throws(
       () => probed.push({ type: 'error', error: { type, message: 'the provider declined' } }),
-      (error: unknown) => error instanceof LlmError && error.code === 'SERVER',
-      `${type} stays SERVER`,
+      (error: unknown) => error instanceof LlmError && error.code === code,
+      `${type} is ${code}`,
     )
   }
+  const unmapped = new AnthropicStreamTranslator(undefined, () => true)
+  assert.throws(
+    () => unmapped.push({ type: 'error', error: { type: 'some_future_error', message: 'unmapped' } }),
+    (error: unknown) => error instanceof LlmError && error.code === 'UNCLASSIFIED_PROVIDER_ERROR',
+    'an unmapped structured type is not reported as a transient server failure',
+  )
   const auth = new AnthropicStreamTranslator(undefined, () => true)
   assert.throws(
     () => auth.push({ type: 'error', error: { type: 'authentication_error', message: 'bad token' } }),
@@ -1199,7 +1210,7 @@ const TEXT_RESPONSE: readonly string[] = [
   anthropicFrame('message_stop', { type: 'message_stop' }),
 ]
 
-test('streamAnthropic: a body that ends before message_stop fails as a retryable transport truncation', async () => {
+test('streamAnthropic: an accepted body that ends before message_stop is incomplete and not replayable', async () => {
   const chunks: StreamChunk[] = []
   let failure: unknown
   try {
@@ -1207,11 +1218,13 @@ test('streamAnthropic: a body that ends before message_stop fails as a retryable
   } catch (error) {
     failure = error
   }
-  // What the stream already delivered stays delivered; the missing terminal event is the
-  // failure, and the client retries it as a dropped connection.
+  // What the stream already delivered stays delivered. The response was accepted, so the
+  // request has been sent and its outcome is unknown: the turn fails as incomplete and may not
+  // be resent, whatever the delivery boundary was.
   assert.deepEqual(chunks.at(-1), { type: 'block-end', index: 0, block: { type: 'text', text: 'hi' } })
   assert.ok(failure instanceof LlmError, 'a truncated body throws')
-  assert.equal(failure.code, 'TRANSPORT', 'the retry policy repeats TRANSPORT')
+  assert.equal(failure.code, 'STREAM_INCOMPLETE')
+  assert.equal(failure.failure.retryDisposition, 'forbid')
 })
 
 test('streamAnthropic: a body with its terminal event completes without throwing', async () => {

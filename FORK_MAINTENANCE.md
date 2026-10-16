@@ -172,9 +172,47 @@ positions, the chained stream-to-rebuild replay, and the no-capture case.
 
 **Focused verification.** `pnpm exec vitest run packages/web/web-fetch-http/tests packages/web/tool-web/tests` 覆盖传输与保留的限制；[Loader 测试](packages/web/tool-web/tests/loader-fetch.spec.ts) 通过 [YAML 组合](packages/web/tool-web/tests/fixtures/cordis.fetch.yml) 验证工具输出。`pnpm exec vitest run --config vitest.snapshot.config.ts -t web-fetch` 回放[抓取场景](snapshots/session/web-fetch/snapshot.yml)，[HTTP fixture](snapshots/session/web-fetch/web-fetch-fixture-server.mjs) 使用临时 loopback 端口而不替换 DNS。部署与产物验证前须停止 Host、清理本包旧 `lib/` 产物并重新构建，避免残留已删除模块的声明文件；不得在运行中替换 Host 产物。
 
+### Claude transport request lifetime
+
+订阅插件的 Bun 子进程按请求跟踪 fetch 任务，控制帧读取不等待响应体结束；流中取消与其他请求可以继续派发。消费者提前结束 SSE 时，取消沿 reader、bridge 和子进程中止控制器传递，正常 EOF 不重复取消。保留每请求独立收尾、输入关闭时的中止与任务等待，以及取消清理失败不覆盖原始错误的规则；具体实现与回归归属见[插件维护说明](fork-plugins/dsh-plugin-subscriptions/FORK_MAINTENANCE.md#claude-transport-request-lifetime)。
+
+**Focused verification.** 保留插件的 `transport-child.spec.ts`、`transport-bridge.spec.ts`、`sse-lifecycle.spec.ts` 及[无密钥会话回放](snapshots/session/subscription-transport-lifecycle/snapshot.yml)。本项不改请求字段、重试、响应字节上限或凭据格式。制品升级必须经过打包验证与停机安装，不得在运行中替换 Host 或插件制品。
+
+### Claude response fidelity
+
+订阅 Claude 适配器将流式 `model_context_window_exceeded` 映射为已有的 `max-tokens`：保留部分文本，组装时去掉工具调用及对应回放项，不把生成中达到上限误报为正常完成或输入被拒。用量从起始与后续事件按字段更新，数字零可覆盖、缺席／null 保留、不重复累计 output、不混合输入与缓存计数。保留[插件回归与职责约定](fork-plugins/dsh-plugin-subscriptions/FORK_MAINTENANCE.md#claude-response-limits-and-final-usage)及[无密钥记录会话](snapshots/session/claude-response-fidelity/snapshot.yml)；不修改 DSH 整体重试、工具执行或凭据协议。源码改动未自动进入已安装制品，部署仍需独立打包和停机确认。
+
+### Claude unread backlog, replay and identity refresh
+
+未读上限由插件配置 `claudeTransportMaxQueuedBytes` 控制，只计算尚未消费的响应字节，溢出时取消对应上游流。生成上限后的新 replay 会按保留块重算服务器工具位置；不支持的结束原因及仅服务器工具块的普通完成使用不自动重试的 `UNSUPPORTED_RESPONSE`，上限／拒绝保持各自结果。身份补全保留 profile 刷新后的凭据，通过条件写入和回读避免旧令牌覆盖并发轮换；具体规则与回归见[插件维护说明](fork-plugins/dsh-plugin-subscriptions/FORK_MAINTENANCE.md#claude-replay-and-identity-refresh)和[无密钥记录会话](snapshots/session/claude-stream-boundaries/snapshot.yml)。保留旧记录的读取兼容性，不引入 CC 自动续请求或核心循环改动；安装制品升级仍需停机确认。
+
 ### Subscription OAuth callback correlation
 
 订阅插件的本机 OAuth 回调在处理成功或提供方错误之前均校验本次登录的 `state`。保留缺失或不匹配状态返回 HTTP 400、登录继续等待的行为，不能让无关错误回调结束当前登录；匹配状态的授权错误仍正常结束该次登录。具体规则与随机本机端口回归由[插件维护说明](fork-plugins/dsh-plugin-subscriptions/FORK_MAINTENANCE.md#oauth-callback-correlation)拥有，不改手动授权码输入规则或凭据格式。
+
+### Claude startup and credential ownership
+
+子进程入口按规范文件路径识别，保留带空格与 URL 转义字符路径、导入不自动运行的回归。共享启动 Promise 只覆盖进行中的启动，死亡子进程不阻塞后续独立请求重建，传输层不重放旧请求、不回退 Node。请求全程固定账号，401 重发前取消旧响应体，刷新后返回持久存储的获胜会话而非被拒绝写入的 grant。保留[插件合同与聚焦回归](fork-plugins/dsh-plugin-subscriptions/FORK_MAINTENANCE.md#claude-startup-rejected-responses-and-token-commits)和[恢复场景](snapshots/session/claude-request-recovery/snapshot.yml)。本地导入仍要求完整 OAuth 会话，不新增裸令牌支持；设备 ID 的账号／本机 OS 绑定策略不等于 CC 的配置根随机策略，迁移与缓存重建约定见下项；对比范围限于客户端责任，不以离线通过声称所有客户端分支已等价。
+
+**Preservation rule.** Claude 凭据所有权由 `credentialOwnershipMode` 的解析结果决定，其规则与能力只由 `src/auth/claude-credential-ownership.ts` 拥有：只读导入每次使用都按当前外部来源 winner 核对身份与来源自己声明的 scope，失败即停止，不回落本地缓存令牌、不花费共享 grant、不写外部存储、不删除已存授权；`legacy-writeback` 可能花费同一共享 grant，且仅在 `syncClaudeCodeCredentials` 启用时写回外部来源，其状态必须继续标注 `external-coordination-unproven`，不得称为安全的 single writer；只有 `independent-oauth` 拥有主动续期定时器，只读账号不进入任何会触发 grant 的 sweep；mode 不得豁免一方 OAuth 的组织政策资格；列表与状态读取不触外部来源、不发请求。模式 owner、导入与转换规则、聚焦测试名字与合成来源验证范围见[插件维护说明该节](fork-plugins/dsh-plugin-subscriptions/FORK_MAINTENANCE.md#claude-credential-ownership-modes)。
+
+### Claude account and OS device identity
+
+设备 ID 由稳定账号 UUID 与本机 OS 标识的哈希确定性派生，不再只按账号生成。Messages 前按条件迁移旧值或另一机器的缓存值，不改变令牌、scope 或账号 UUID；登录交换与本地导入不依赖机器标识可读性。保留原始设备标识不落盘／不日志／不发请求、不可读时明确失败、同机器缓存丢失可重建、跨机器与账号分离的合同。OS 重装和克隆仍可能改变或复制系统标识；详见[插件维护说明](fork-plugins/dsh-plugin-subscriptions/FORK_MAINTENANCE.md#claude-account-and-device-binding)及[无密钥绑定回放](snapshots/session/claude-device-binding/snapshot.yml)。运行中的安装与已有真实账号不会因源码修改而变动。
+
+### Claude client pins and transport defaults
+
+Claude Messages 的 `retry-after-ms` 优先于 `retry-after`，429 的账号重置时间仍优先，明确拒绝仍不重试；其他提供方解析规则不变。保留[毫秒等待回归](fork-plugins/dsh-plugin-subscriptions/test/claude-retry-hint.spec.ts)。
+
+账号／wire-session 首次请求固定 ATIS（含空值），后续 bootstrap 仅影响新跨度；身份清理先撤销在途读取权限，迟到响应不能恢复旧值。Bun 子进程必须带 `--no-env-file`，防止工作目录环境文件绕过继承白名单；保留证书／主机名校验、显式 CA 环境和不兼容运行件的明确失败。具体合同、进程内缓存边界及离线验证见[插件维护说明](fork-plugins/dsh-plugin-subscriptions/FORK_MAINTENANCE.md#claude-client-pins-and-transport-environment)和[客户端 pin 回放](snapshots/session/claude-client-pins/snapshot.yml)。不把未支持的 CC 轮次字段、子代理缓存淘汰或 mTLS／代理分支自动加到默认请求。
+
+### Claude hard stop and account maintenance (subscriptions)
+
+订阅插件用一份有序分类决定 Claude 拒绝（失败状态或 `200` 内的 `error` 事件）：拒绝码白名单之外的代码一律 `retryDisposition: 'forbid'`，已交付输出后任何代码都硬停止；403 不刷新凭据，一次 401 重发之后的重发已耗尽，已发出的 Messages 请求失败属交付不明确。维护只绑定真实请求过的账号，释放仅发生在会话销毁、用户停止、登出或账号移除时；托管策略按资格获取，无法校验或无法执行的一律拒绝。Host 必须声明 `ctx.llm.failureRecoveryVersion === 1`，否则 Claude 路由不注册并报告 `CLAUDE_HOST_INCOMPATIBLE`。
+
+**Preservation rule.** 保留硬停止、保守拒绝与 Host 前置检查，不得给未列出的码默认许可，也不得在 Host 未声明契约时降级注册。
+
+**Focused verification.** 保留[插件维护说明](fork-plugins/dsh-plugin-subscriptions/FORK_MAINTENANCE.md#claude-failure-classification-and-hard-stop)与[账号维护说明](fork-plugins/dsh-plugin-subscriptions/FORK_MAINTENANCE.md#claude-account-maintenance-for-live-sessions)列出的聚焦验证；已经完成的源码、制品与安装检查及其限制由实现状态页统一记录，不把历史重叠批次合并成全套通过。独立 `policy_limits` 文档（自有缓存／校验器／单飞、两个执行点同键同映射、未知键用固定占位符、通知仅展示且由用户主动打开链接）与可抽取的 core／engine／account-client 合同见[策略限制维护说明](fork-plugins/dsh-plugin-subscriptions/FORK_MAINTENANCE.md#claude-policy-limits-independent-document)与[可抽取组件说明](fork-plugins/dsh-plugin-subscriptions/FORK_MAINTENANCE.md#extractable-claude-components-core-engine-account-client)、[已知控制义务分类说明](fork-plugins/dsh-plugin-subscriptions/FORK_MAINTENANCE.md#known-control-obligations-and-unsupported-capability-warning)；未完成项与上限以[实现状态说明](fork-plugins/dsh-plugin-subscriptions/docs/claude-implementation-status.md)为准。`.30` 已完成停机安装与制品核验；仅修复 OAuth 回调的 `.31` 已完成打包和私有升级预演，尚未安装。
 
 ### Subscription pool scheduling
 
@@ -200,7 +238,11 @@ ChatGPT 源码提供默认关闭的 `autoResetCredits` 开关，入口为订阅�
 
 订阅插件的 Claude 聊天请求全部经 `@tormentalabs/claude-code-wire-compat`(fork 精确固定 `0.7.2-dsh14`,GPL-3.0-or-later,私有制品不对外分发)按 pinned `CLAUDE_CODE_2_1_288_PROFILE`(CLI 2.1.288 / SDK 0.128.0)构建:billing 指纹块与 identity system 块、beta 组合、`metadata.user_id` 关联三元组、cache breakpoint 与完整头部计划均由构建器拥有,不得再手写 `anthropic-beta`/`x-app`/缓存标记。保留 `cacheControl` 四开关并带 `ttl: '1h'`(真实客户端出厂值),thinking 的 `display: 'summarized'`、effort 与 `output_config` 同发;构建器按 pinned 目录校验两者。不发 `accept` 头(真实客户端不发)。
 
-身份:`sessionId` 取 harness 会话 id(缺失时每请求 UUID),`deviceId`/`accountUuid` 存于 `ClaudeSession`(登录时铸造/发现,刷新保留,旧会话首用懒回填;回填失败以 `INVALID_REQUEST` 明确失败,不发送伪造三元组);`deviceId` 按真实客户端格式铸造为 64 位十六进制(32 随机字节),绝非 UUID。`previousRequestId` 把响应 `request-id` 头链入下一请求 billing 块的 `cc_prev_req`,按(规范账号, wire 会话)分键,池在同一会话内切换账号绝不会把另一账号的 request-id 链进来(共 256 条上限);响应缺头时清除链路。`cc_prompt_id` 由(会话, 轮次)确定性派生(`claudePromptId`):同一会话同一轮次必得同一 id、请求字节也相同,另一会话或下一轮则不同 —— 它是**模型可见**的值,DSH 的"模型可见⟺已记录"要求它可重建,随机 UUID 无法重建。该轮的工具续步复用同一 id;probe/标题辅助请求的抑制未建模。响应 `request-id` 头另记入该助手消息的回放信封(`response.requestId`),与 `cc_prev_req` 链路互为可核对的两侧。池切换还会滚动 wire 会话 id(`claudeWireSessionId`,共 256 条上限):harness 会话的第一个账号段沿用 harness 会话 id 逐字不变(单账号会话字节不变),之后的每个账号段铸新 UUID,使一段对话不会横跨两个账号身份;切回原账号恢复原 id 与原链。构建器 `INPUT_TOO_LARGE` 经 `oversizeWireError` 映射回已记录的图片 offload 错误,精确 32 MB 检查保留在 `assertClaudeRequestBytes`;其余构建器拒绝码经 `mapClaudeWireError` 映射为带 wire 码与解释的 `INVALID_REQUEST`(`INVALID_EFFORT`/`INVALID_THINKING`/`UNSUPPORTED_CAPABILITY`/`CRYPTO_UNAVAILABLE`/`INVALID_IDENTITY`/`INVALID_UNICODE`,其余走默认),不得以通用 transport 失败示人。中途 system 消息在所有模型上以 user 角色 `<system-reminder>` 形式随历史就位(新 wire 无 system 角色消息),DSH 侧 `systemPromptUpdate: 'in-history'` 分辨率不变。usage/models/Files 端点改用 pinned profile 的 CLI user-agent;本地 `claude --version` 探测已删除。装配请求时补齐缺失的 `tool_result`:请求内没有任何结果应答的 `tool_use` 才按真实客户端原位合成 `is_error: true` 的 `[Tool result missing due to internal error]`(结果已在请求别处出现则不合成,只改装配请求、不改历史,与 `tool-pairing.ts` 对其它 wire 的全局配对一致);Files API 上传缓存按(规范账号, 内容 sha256)分键并限 256 条,登录/登出随该账号缓存一起清除,池切换绝不复用其它账号的 file id;Claude/Codex/Grok 的 code 与 refresh 授予请求一律 `redirect: 'error'`,不得跟随重定向把 code 或 refresh token 重放到另一来源。聚焦验证:`test/claude-wire.spec.ts`、更新后的 `test/translate.spec.ts` 与 `test/models.spec.ts`(全部注入 fetch、零凭据),授予重定向与上传缓存另见 `test/codex.spec.ts`、`test/grok.spec.ts`。已随 `0.9.4-dsh017rc1.14` 构建;部署走 `fork-plugins/deploy-subscriptions-web.ps1`:停 Host 后在普通 PowerShell 运行,脚本校验 sha256、Host 监听护栏、自动备份已装副本与 `package.json`/`pnpm-lock.yaml`,并用 `pnpm add` 更新 profile 的 file 固定引用(避免后续 `pnpm install` 降级),不触碰 `DSH_HOME\plugins\subscriptions` 凭据目录;回滚用旧 tgz 走同样的 `pnpm add` 形式。
+身份:`sessionId` 取 harness 会话 id(缺失时在 `stream()` 最前以固定 `CLAUDE_REQUEST_RECORD_CONTEXT_REQUIRED` 拒绝,不再铸造随机 UUID),`deviceId`/`accountUuid` 存于 `ClaudeSession`(登录时铸造/发现,刷新保留,旧会话首用懒回填;回填失败以 `INVALID_REQUEST` 明确失败,不发送伪造三元组);`deviceId` 保持 64 位十六进制格式，由账号键与本机 OS 标识的哈希确定性派生；这是 DSH 的设备绑定策略，不冒称 CC 的随机配置根策略。上一请求 id 从持久化的 session 日志中选取,而不是来自进程内表:由 retained assistant 消息的 trusted metadata 指明同一账号引用、wire 会话与 span epoch,其响应 `request-id` 才进入下一请求 billing 块的 `cc_prev_req`;池在同一会话内切换账号绝不会把另一账号的 request-id 链进来,缺失或空的 request-id 向前寻找合格记录，选中的非空 id 若非法则省略而不回溯。`cc_prompt_id` 由(会话, 轮次)确定性派生(`claudePromptId`):同一会话同一轮次必得同一 id、请求字节也相同,另一会话或下一轮则不同 —— 它是**模型可见**的值,DSH 的"模型可见⟺已记录"要求它可重建,随机 UUID 无法重建。该轮的工具续步复用同一 id;probe/标题辅助请求的抑制未建模。响应 `request-id` 头另记入该助手消息的回放信封(`response.requestId`),与 `cc_prev_req` 链路互为可核对的两侧。每个账号段的 wire 会话 id 都是私有 span 文档中的持久事实;harness 会话 id 是选取键,从不出现在 wire 上;切回原账号时由日志与 span 文档重新选出原 id 与原链。构建器 `INPUT_TOO_LARGE` 经 `oversizeWireError` 映射回已记录的图片 offload 错误,精确 32 MB 检查保留在 `assertClaudeRequestBytes`;其余构建器拒绝码经 `mapClaudeWireError` 映射为带 wire 码与解释的 `INVALID_REQUEST`(`INVALID_EFFORT`/`INVALID_THINKING`/`UNSUPPORTED_CAPABILITY`/`CRYPTO_UNAVAILABLE`/`INVALID_IDENTITY`/`INVALID_UNICODE`,其余走默认),不得以通用 transport 失败示人。中途 system 消息在所有模型上以 user 角色 `<system-reminder>` 形式随历史就位(新 wire 无 system 角色消息),DSH 侧 `systemPromptUpdate: 'in-history'` 分辨率不变。usage 使用协议配置的 transport user-agent，models/bootstrap 和 Files 使用 plain `claude-code/2.1.288`；不运行本地 `claude --version` 探测。装配请求时补齐缺失的 `tool_result`:请求内没有任何结果应答的 `tool_use` 才按真实客户端原位合成 `is_error: true` 的 `[Tool result missing due to internal error]`(结果已在请求别处出现则不合成,只改装配请求、不改历史,与 `tool-pairing.ts` 对其它 wire 的全局配对一致);Files API 上传缓存按(规范账号, 内容 sha256)分键并限 256 条,登录/登出随该账号缓存一起清除,池切换绝不复用其它账号的 file id;Claude/Codex/Grok 的 code 与 refresh 授予请求一律 `redirect: 'error'`,不得跟随重定向把 code 或 refresh token 重放到另一来源。聚焦验证:`test/claude-wire.spec.ts`、更新后的 `test/translate.spec.ts` 与 `test/models.spec.ts`(全部注入 fetch、零凭据),授予重定向与上传缓存另见 `test/codex.spec.ts`、`test/grok.spec.ts`。已随 `0.9.4-dsh017rc1.14` 构建;部署走 `fork-plugins/deploy-subscriptions-web.ps1`:停 Host 后在普通 PowerShell 运行,脚本校验 sha256、Host 监听护栏、自动备份已装副本与 `package.json`/`pnpm-lock.yaml`,并用 `pnpm add` 更新 profile 的 file 固定引用(避免后续 `pnpm install` 降级),不触碰 `DSH_HOME\plugins\subscriptions` 凭据目录;回滚用旧 tgz 走同样的 `pnpm add` 形式。
+
+### Prepared-request recording before the Claude POST
+
+订阅插件的 Claude Messages 路由在构建完请求字节之后、`onSend()` 与 `fetchFn` 之前，把这次尝试的准备记录写入该请求所属 session 的日志，并等待其到达持久存储；记录失败、被拒绝或超时一律以 `retryDisposition: 'forbid'` 拒绝该次 Messages 发送（Messages 0 字节；此前 Files 准备可能已经发生）。**服务成功返回只保证**该次 system 文本已进入日志并 flush 成功，单条 prepared 记录的存在不代表已达持久屏障。无 `GenerateOptions.sessionId` 时在 `stream()` 最前以固定 `CLAUDE_REQUEST_RECORD_CONTEXT_REQUIRED` 拒绝。Host 必须提供 `@deepseek-ai/dsh-llm-request-record`；缺失时只把 `'claude'` 推入 `refusedRoutes` 并报告既有 `CLAUDE_HOST_INCOMPATIBLE`，其他 provider 不受影响。该事件 required-on-read、不设 `ignorable`，因此 reader 必须先于 writer 部署；Session 格式版本仍为 4，不因该事件 bump。事件 schema、服务契约与部署顺序由新包 [README](packages/llm/llm-request-record/README.md) 拥有；真实请求由用户亲自验证，安全停用须保留新日志与已轮换凭据。
 
 ### Goal disabled by default
 
@@ -565,7 +607,7 @@ Context 源码的工具归属追踪按 `cordis.original` 解包后的服务身�
 
 ### Local Subscriptions package
 
-维护真源位于 `fork-plugins\dsh-plugin-subscriptions`，仓库安装器使用 `fork-plugins\releases\dsh-plugin-subscriptions-0.9.4-dsh017rc1.24.tgz`，SHA256 为 `7E34837EAD0066B61F0226CADED2194A4657DCBA286A9E938D413DB737E020AF`。该摘要与仓内制品及其 `.sha256` 文件一致。该版本采用上游 v0.9.4 的多账号 provider、usage UI、Codex 搜索、图片结果、Antigravity 与 provider failover，并增加 RC.1 的 V4 工具角色转换；凭据格式与工具输出不变。
+维护源码位于 [订阅插件](fork-plugins/dsh-plugin-subscriptions/README.zh.md)。截至 2026-10-16，核验过的 Web 安装基线为 `.30`；[`.31` 候选包](fork-plugins/releases/dsh-plugin-subscriptions-0.9.4-dsh017rc1.31.tgz)仅修复 OAuth 回调的状态校验，尚未安装，SHA256 由[同名校验文件](fork-plugins/releases/dsh-plugin-subscriptions-0.9.4-dsh017rc1.31.tgz.sha256)固定。该候选不含启动预热，客户端和其他运行模块与 `.30` 保持一致。已验证范围与保留差异由[实现状态](fork-plugins/dsh-plugin-subscriptions/docs/claude-implementation-status.md)拥有；不能从源码版本推断任何运行进程已经更新。
 
 Windows Web profile 启用 `llm-subscriptions`，保留 `rateLimit.wait: false`。 制品在安装前须通过插件测试套件、实际安装目录的接口与 UI 开关检查；2026-10-11 当前源码的插件测试套件 978 项通过、0 失败、0 跳过、退出码 0。已验证的图片处理保持：21 张历史图片中原有 16 张超出多图尺寸上限，请求版本的长边均不超过 2,000 像素，原 Session 和附件摘要保持不变。2026-09-26，固定源码包的 506 项无密钥测试通过；隔离 Web profile 与真实 Web profile 均在随机本地端口启动，认证页面返回 HTTP 200，页面包含 Subscriptions 客户端资源。真实 Profile 的 Codex 状态接口识别到两个已存账号，默认账号的用量查询通过并刷新过期访问令牌；另一个账号及真实模型请求尚未验证。旧 profile patch 备份位于 `C:\Project\deepseek-harness-data\diagnostics\profile-backups\pre-subscriptions-enable-20260926`。
 

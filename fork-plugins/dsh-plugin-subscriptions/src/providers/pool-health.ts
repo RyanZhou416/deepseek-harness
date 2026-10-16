@@ -18,6 +18,7 @@
 import { CONTEXT_WINDOW_EXCEEDED_CODE, LlmError, QUOTA_EXCEEDED_CODE } from '@deepseek-ai/dsh-llm'
 import type { ProviderId } from '../auth/store.js'
 import { ENFORCEMENT_CODE } from './common.js'
+import { CLIENT_VERSION_UNSUPPORTED_CODE, PERMISSION_DENIED_CODE } from './claude-failure.js'
 
 /** Registry key for one pool member. */
 export function memberKey(provider: ProviderId, account: string, model: string): string {
@@ -41,11 +42,15 @@ export type PoolFailureScope = 'member' | 'account'
 
 /**
  * Codes naming a refusal the provider aimed at one identity: an
- * enforcement-shaped rejection, and every credential refusal. A pool answers
- * none of them from another account.
+ * enforcement-shaped rejection, every credential refusal, and the two Claude
+ * refusals that are evidence about the request's identity or its compatibility
+ * profile rather than about an allowance. A pool answers none of them from
+ * another account.
  */
 const REFUSAL_CODES: readonly string[] = [
   ENFORCEMENT_CODE,
+  CLIENT_VERSION_UNSUPPORTED_CODE,
+  PERMISSION_DENIED_CODE,
   'AUTH',
   'INVALID_CREDENTIAL',
   'MISSING_CREDENTIAL',
@@ -58,6 +63,19 @@ const REFUSAL_CODES: readonly string[] = [
  */
 export function isRefusalCode(code: string): boolean {
   return REFUSAL_CODES.includes(code)
+}
+
+/**
+ * Whether a failure code ends the turn with no automatic recovery at all.
+ *
+ * Every refusal is one, and so is an error this route could not classify: the design
+ * forbids reporting an unmapped failure as a transient server fault, so the pool's own
+ * terminal error must not present it as one either.
+ * @param code - the failure code a pool member reported.
+ * @returns true when the terminal error must carry the hard stop.
+ */
+export function isHardStopCode(code: string): boolean {
+  return code === 'UNCLASSIFIED_PROVIDER_ERROR' || isRefusalCode(code)
 }
 
 /**
@@ -130,12 +148,37 @@ function retryAfterMs(error: LlmError): number | undefined {
  * are account-level. Both record a cooldown — the disclosed reset when the
  * refusal carried one, {@link AUTH_COOLDOWN_MS} for a dead login — so the
  * account is not asked again until something may have changed.
+ *
+ * A failure that already carries the hard stop is decided by that field before
+ * its code is read: switching members is itself a resend, so a forbidden
+ * failure may not be answered from another account however recoverable its code
+ * looks. Its account-state side effects are still recorded where the code names
+ * one.
  * @param error - the failure thrown by a member adapter's stream.
  * @param provider - the failing member's provider (decides the quota scope).
  * @returns the action the pool should take.
  */
 export function classifyPoolFailure(error: unknown, provider: ProviderId): PoolFailureAction {
   if (!(error instanceof LlmError)) return { action: 'throw' }
+  if (error.failure.retryDisposition === 'forbid') {
+    switch (error.code) {
+      case ENFORCEMENT_CODE:
+        return {
+          action: 'park',
+          cooldownMs: retryAfterMs(error) ?? DEFAULT_QUOTA_COOLDOWN_MS,
+          reason: error.code,
+          scope: 'account',
+        }
+      case 'AUTH':
+      case 'INVALID_CREDENTIAL':
+      case 'MISSING_CREDENTIAL':
+        return { action: 'park', cooldownMs: AUTH_COOLDOWN_MS, reason: error.code, scope: 'account' }
+      default:
+        // A protocol, permission or unclassified refusal says nothing about this account's
+        // allowance or its login, so it records no cooldown and simply ends the turn.
+        return { action: 'throw' }
+    }
+  }
   switch (error.code) {
     case QUOTA_EXCEEDED_CODE:
     case 'RATE_LIMIT':
@@ -152,6 +195,14 @@ export function classifyPoolFailure(error: unknown, provider: ProviderId): PoolF
         reason: error.code,
         scope: 'account',
       }
+    case CLIENT_VERSION_UNSUPPORTED_CODE:
+    case PERMISSION_DENIED_CODE:
+    case 'UNCLASSIFIED_PROVIDER_ERROR':
+      // Terminal for this turn, and evidence about the compatibility profile, the request or a
+      // condition this route cannot name — never about the account's credentials or its
+      // allowance. So no account cooldown is recorded and no sibling account is asked, which
+      // is what a protocol refusal or an unmapped error exists to stop.
+      return { action: 'throw' }
     case 'AUTH':
     case 'INVALID_CREDENTIAL':
     case 'MISSING_CREDENTIAL':

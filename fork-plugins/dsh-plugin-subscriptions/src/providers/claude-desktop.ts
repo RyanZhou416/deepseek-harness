@@ -6,13 +6,10 @@
  * both from the host's physical memory — bucketing it for the class and rounding it to
  * gigabytes.
  *
- * Reporting this host's memory would publish the machine's real size on every request and
- * would make every account served here look like the same machine. Neither is acceptable
- * when several accounts share a host: a distinctive memory size identifies the operator,
- * and one device presenting several accounts is not something the genuine client ever
- * does. The pair is therefore derived once per account from that account's device id and
- * then frozen, so one account always presents one plausible machine, and no two accounts
- * present the same one.
+ * This plugin derives the application-header memory pair from its stored device id instead
+ * of measuring the host. That is a DSH-specific synthetic profile, not evidence of the
+ * desktop application's device scope or server acceptance. Messages use only the two
+ * headers returned by desktopClientHeaders; the additional application fields are separate.
  */
 
 import { createHash } from 'node:crypto'
@@ -68,11 +65,9 @@ export function desktopDeviceClass(totalMemoryBytes: number): string {
 /**
  * The machine profile one account presents.
  *
- * Deterministic in the seed, so an account presents the same machine for as long as its
- * device id lives, and two accounts differ unless their digests collide. The bucket is
- * computed from the reported size with the desktop's own function, so the pair is always
- * self-consistent: a client that reported 16 GB under the `gt16` bucket would contradict
- * itself.
+ * Deterministic in the seed; distinct ids can select the same memory size. The bucket
+ * follows the reported size using the desktop's bucket function. This is not a measurement
+ * of either the current host or a genuine desktop installation.
  *
  * @param deviceId - Seed identifying the account; its device id.
  * @returns Memory size and the bucket that size falls in.

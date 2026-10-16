@@ -499,6 +499,12 @@ test('subscription routes retry the harness transient codes plus MALFORMED_RESPO
     ['EMPTY_RESPONSE', 'RATE_LIMIT', 'SERVER', 'TIMEOUT', 'TRANSPORT', 'MALFORMED_RESPONSE'],
   )
   assert.equal(policy.mode === 'normal' && policy.retryableCodes.includes(ENFORCEMENT_CODE), false)
+  // The Claude route's terminal codes are absent too: each one is a refusal or an error the
+  // route could not classify, and a code listed as retryable is a claim that the harness may
+  // resend the logical request at all.
+  for (const code of ['CLIENT_VERSION_UNSUPPORTED', 'PERMISSION_DENIED', 'UNCLASSIFIED_PROVIDER_ERROR', 'INVALID_REQUEST']) {
+    assert.equal(policy.mode === 'normal' && policy.retryableCodes.includes(code), false, code)
+  }
 })
 
 test('opting out of waiting restores the route defaults exactly', () => {

@@ -29,7 +29,7 @@ const built = await buildClaudeWireRequest(
   32_000,
   undefined,
   undefined,
-  '00000000-0000-4000-8000-000000000001',
+  { sessionId: '00000000-0000-4000-8000-000000000001', atisPin: undefined, previousRequestId: undefined },
   'acct-a',
 )
 

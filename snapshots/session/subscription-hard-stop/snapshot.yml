@@ -1,9 +1,10 @@
 version: 1
 scenario: subscription-hard-stop
 profile: headless
-composition: retry
+composition: subscription-hard-stop
 recording: authored
 header:
-  class: retry
+  class: subscription-hard-stop
+  pin: true
 replay:
   override: true

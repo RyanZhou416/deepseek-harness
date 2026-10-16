@@ -21,8 +21,23 @@
       "node"
     ],
     "paths": {
+      "@deepseek-ai/cordis-plugin-loader": [
+        "../../vendor/loader/lib/types/index.d.ts"
+      ],
       "@deepseek-ai/dsh-llm": [
         "../../packages/llm/llm/lib/types/index.d.ts"
+      ],
+      "@deepseek-ai/dsh-llm-request-record": [
+        "../../packages/llm/llm-request-record/lib/types/index.d.ts"
+      ],
+      "@deepseek-ai/dsh-session": [
+        "../../packages/core/session/lib/types/index.d.ts"
+      ],
+      "@deepseek-ai/dsh-session-persistence-jsonl": [
+        "../../packages/session/session-persistence-jsonl/lib/types/index.d.ts"
+      ],
+      "@deepseek-ai/dsh-loader-smoke": [
+        "../../packages/test-support/loader-smoke/lib/types/index.d.ts"
       ],
       "@deepseek-ai/dsh-attachment": [
         "../../packages/attachment/attachment/lib/types/index.d.ts"

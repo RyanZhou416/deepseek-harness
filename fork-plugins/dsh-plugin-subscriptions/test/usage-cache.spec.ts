@@ -71,7 +71,14 @@ function scripted(): {
     calls,
     statusCalls: () => statusCalls,
     roster: (accounts, provider = 'codex') => {
-      roster = { [provider]: { busy: false, accounts: accounts.map(key => ({ key, isDefault: key === accounts[0] })) } }
+      roster = {
+        [provider]: {
+          busy: false,
+          // The credential dimension is part of every account row; these fixtures are
+          // logged in with nothing parked.
+          accounts: accounts.map(key => ({ key, isDefault: key === accounts[0], credential: { state: 'ready' as const } })),
+        },
+      }
     },
     answer: (usage) => { nextUsage = usage; failure = undefined },
     fail: (message) => { failure = message },

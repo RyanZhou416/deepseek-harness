@@ -1,0 +1,10 @@
+version: 1
+scenario: claude-stream-boundaries
+profile: headless
+composition: claude-stream-boundaries
+recording: authored
+header:
+  class: claude-stream-boundaries
+  pin: true
+replay:
+  override: true

@@ -17,12 +17,22 @@
 
 import { fileURLToPath } from 'node:url'
 import { proxiedFetch, proxyAppliesTo } from '../http.js'
-import { BunBridge, spawnBunChild } from './bridge.js'
+import { BunBridge, DEFAULT_MAX_QUEUED_BYTES, spawnBunChild } from './bridge.js'
 import { resolveBunRuntime } from './bun-runtime.js'
 import { describeHostClaudeRoute, hostClaudeRoute } from './host-egress.js'
 
 /** Environment variable that turns the bridge off. */
 const BRIDGE_SWITCH_ENV = 'DSH_SUBSCRIPTIONS_BRIDGE'
+
+/**
+ * Runtime flag that stops the child from loading `.env` files out of its working directory.
+ *
+ * Bun loads `.env`, `.env.local` and the mode-specific variants automatically, so a file beside
+ * the directory the Host was launched in would reach the process that issues the Messages request
+ * whatever `childEnvironment` filtered out: it could set NODE_TLS_REJECT_UNAUTHORIZED, a proxy, or
+ * a trust anchor. The flag makes the child's environment the allowlist and nothing else.
+ */
+const BUN_NO_ENV_FILE_FLAG = '--no-env-file'
 
 /** Host and path whose traffic the bridge carries, and nothing else. */
 const CLAUDE_MESSAGES_HOST = 'api.anthropic.com'
@@ -41,29 +51,77 @@ export class BridgeUnavailableError extends Error {
 
 let bridge: BunBridge | undefined
 let starting: Promise<BunBridge> | undefined
+let maxQueuedBytes = DEFAULT_MAX_QUEUED_BYTES
+
+/**
+ * Configure the unread response limit before the shared child starts.
+ *
+ * A child that has already ended holds no limit: the next request starts a new one, so the
+ * limit is changeable again. A live child captured its limit at construction, and a start
+ * in progress captured it too, so both still refuse a change rather than letting a running
+ * child keep enforcing a value the operator replaced.
+ *
+ * @param value - Positive safe-integer byte limit for each response body.
+ * @throws RangeError for an invalid limit; Error if a live bridge or a start in progress
+ *   holds another limit.
+ */
+export function configureClaudeTransport(value: number): void {
+  if (!Number.isSafeInteger(value) || value <= 0) {
+    throw new RangeError('claudeTransportMaxQueuedBytes must be a positive safe integer')
+  }
+  if ((liveBridge() !== undefined || starting !== undefined) && value !== maxQueuedBytes) {
+    throw new Error('Stop the Claude transport before changing its unread response limit')
+  }
+  maxQueuedBytes = value
+}
+
+/** The bridge that can still serve a request, or undefined once it has ended. */
+function liveBridge(): BunBridge | undefined {
+  return bridge !== undefined && !bridge.dead ? bridge : undefined
+}
 
 /** Child entry emitted next to this module by the build. */
 function childScript(): string {
   return fileURLToPath(new URL('./bun-child.js', import.meta.url))
 }
 
+/**
+ * Returns the shared bridge, starting one when no live child serves requests.
+ *
+ * A bridge that ended is not an answer for the next request: a child that crashed, was
+ * killed, or desynchronized its frame stream is replaced here, so a request that arrives
+ * after it starts a fresh child instead of failing for the life of the process. Nothing is
+ * replayed — the request that failed stays failed — and nothing falls back to the Node
+ * transport. The start in progress is shared by concurrent callers and cleared when it
+ * settles, so a rejection is never remembered as the standing answer.
+ *
+ * @returns The live bridge, or the start in progress.
+ */
 function startBridge(): Promise<BunBridge> {
-  if (bridge !== undefined && !bridge.dead) return Promise.resolve(bridge)
-  starting ??= (async () => {
+  const live = liveBridge()
+  if (live !== undefined) return Promise.resolve(live)
+  if (starting !== undefined) return starting
+  const attempt = (async () => {
     const runtime = resolveBunRuntime()
-    const started = new BunBridge(spawnBunChild({ command: runtime, args: [childScript()] }))
+    const started = new BunBridge(
+      spawnBunChild({ command: runtime, args: [BUN_NO_ENV_FILE_FLAG, childScript()] }),
+      { maxQueuedBytes },
+    )
+    // The bridge this replaces ended without `stopBridge`, so its child is terminated
+    // with it rather than left behind holding a request nobody can read.
+    const replaced = bridge
     bridge = started
+    replaced?.dispose()
     return started
   })()
-  // A failed start must not be cached: the operator's remedy is to install the
-  // runtime or point the override at one, which cannot take effect if the rejection
-  // is remembered for the life of the process.
-  starting = starting.catch((error: unknown) => {
-    starting = undefined
-    bridge = undefined
-    throw error
-  })
-  return starting
+  starting = attempt
+  // Only the start this call owns may clear the slot: `stopBridge` clears it too, and a
+  // later start that took the slot keeps it.
+  const settled = (): void => {
+    if (starting === attempt) starting = undefined
+  }
+  attempt.then(settled, settled)
+  return attempt
 }
 
 /** Reports whether the bridge is currently enabled by configuration. */
@@ -135,7 +193,10 @@ export async function claudeApiFetch(
 
 /** Stops the bridge child; called by profile teardown and by tests. */
 export async function stopBridge(): Promise<void> {
-  bridge?.dispose()
+  const stopped = bridge
+  // The module state is cleared before the child is signalled, so nothing observes a
+  // bridge that is being torn down as the live one.
   bridge = undefined
   starting = undefined
+  stopped?.dispose()
 }

@@ -39,6 +39,151 @@ const POLL_INTERVAL_MS = 2000
 /** Subscription provider ids, fixed by the node half's OAuth adapters. */
 export type SubscriptionProvider = 'codex' | 'claude' | 'grok' | 'copilot' | 'antigravity' | 'cursor'
 
+/**
+ * Credential dimension of one account, mirrored from the node half's `CredentialStatus`.
+ * `until` is the instant the owner's own record expires; `nextCheckAt` its next check.
+ */
+export interface CredentialStatus {
+  state:
+    | 'ready'
+    | 'refreshing'
+    | 'reauth_required'
+    | 'missing'
+    | 'unknown-expiry'
+    | 'maintenance-unsupported'
+    | 'external-coordination-unproven'
+  code?: 'REAUTH_REQUIRED'
+  until?: number
+  nextCheckAt?: number
+}
+
+/**
+ * Credential ownership of one Claude account, mirrored from the node half's
+ * `CredentialOwnershipStatus`. It states provenance and write authority only, never which
+ * OAuth client issued the credential.
+ */
+export interface CredentialOwnershipStatus {
+  mode: 'legacy-writeback' | 'read-only-import' | 'independent-oauth'
+  /** Whether a store outside this plugin holds the credential. */
+  external: boolean
+  /** Present only for `legacy-writeback`: coordination with the external holder is unproven. */
+  coordinationUnproven?: true
+}
+
+/** Quota / temporary-availability dimension of one account. */
+export interface AvailabilityStatus {
+  state: 'available' | 'cooling' | 'transient' | 'refused'
+  code?:
+    | 'QUOTA_EXHAUSTED'
+    | 'RATE_LIMITED'
+    | 'ENFORCEMENT_REFUSAL'
+    | 'PROVIDER_UNAVAILABLE'
+    | 'REQUEST_TIMEOUT'
+    | 'MODEL_UNAVAILABLE'
+    | 'PROVIDER_ERROR'
+  until?: number
+}
+
+/** Protocol-compatibility dimension of one account's frozen wire profile. */
+export interface ProtocolStatus {
+  state: 'current' | 'upgrade_required' | 'unsupported_response'
+  code?: 'CLIENT_VERSION_UNSUPPORTED' | 'UNSUPPORTED_RESPONSE'
+  profileId?: string
+  since?: number
+}
+
+/** Account-profile freshness dimension. */
+export interface ProfileStatus {
+  state: 'fresh' | 'stale' | 'missing' | 'unavailable'
+  capturedAt?: number
+  /** Whether the retained profile carries every field the current protocol requires. */
+  complete?: boolean
+}
+
+/** Managed-policy dimension of one account. */
+export interface PolicyStatus {
+  state: 'ineligible' | 'loading' | 'current' | 'stale' | 'unavailable' | 'consent-required' | 'blocked'
+  code?: 'POLICY_UNSUPPORTED' | 'POLICY_INVALID_VALUE' | 'POLICY_CONSENT_REQUIRED'
+  scope?: 'tool' | 'model' | 'mcp' | 'execution' | 'network' | 'unknown'
+  fetchedAt?: number
+}
+
+/** Fixed reason codes the Claude policy-limits dimension may carry. */
+export type PolicyLimitsCode =
+  | 'CREDENTIAL_UNAVAILABLE'
+  | 'AUTH_REJECTED'
+  | 'REQUEST_FAILED'
+  | 'PARSE_FAILED'
+  | 'RESPONSE_OVER_LIMIT'
+
+/** Fixed blocker codes the Claude policy-limits dimension may carry. */
+export type PolicyLimitsBlocker =
+  | 'policy_limits_state_unavailable'
+  | 'policy_limits_unknown_keys'
+  | 'policy_limits_core_skills_unstored'
+  | 'policy_limits_lossy_taints'
+
+/**
+ * The monitoring notice the node half read from the accepted document. Its text
+ * is rendered as text, and its url is a destination the user opens deliberately.
+ */
+export interface PolicyLimitsNotice {
+  text: string
+  /** The notice's https url, when the server stated a usable one. */
+  url?: string
+}
+
+/**
+ * Whether one control obligation is in force for the account's limits document:
+ * `active` means the document requires it, `not-enforced` means it does not, and
+ * `unknown` means the document answered nothing — never a refusal.
+ */
+export type ControlRequirement = 'active' | 'not-enforced' | 'unknown'
+
+/** One observed control, in the plugin's own vocabulary rather than the server's key. */
+export type UnsupportedActiveControl = 'trusted-devices' | 'web-search-mcp-isolation'
+
+/** The control obligations the account's limits document states. */
+export interface ControlRequirements {
+  /** `require_trusted_devices`. */
+  trustedDevices: ControlRequirement
+  /** `enforce_web_search_mcp_isolation`. */
+  webSearchMcpIsolation: ControlRequirement
+  /** The controls in force that this client provides no capability for; it refuses nothing. */
+  unsupportedActiveControls: readonly UnsupportedActiveControl[]
+}
+
+/**
+ * Claude `policy_limits` dimension of one account, mirrored from the node
+ * half's `PolicyLimitsStatus`. Independent of the managed {@link PolicyStatus}:
+ * the two documents have separate caches and neither replaces the other. Only
+ * fixed codes, counts, booleans and the normalized notice arrive; the document,
+ * its defaults, its taints and its key names stay on the node half.
+ */
+export interface PolicyLimitsStatus {
+  state: 'ineligible' | 'loading' | 'current' | 'stale' | 'unavailable' | 'blocked'
+  code?: PolicyLimitsCode
+  /** Blockers in force; while any is present every verdict is refused. */
+  blockers?: readonly PolicyLimitsBlocker[]
+  fetchedAt?: number
+  /** Registered keys the node half cannot enforce exactly. */
+  unknownCount?: number
+  /** Keys the retained document refuses; the key names themselves are not sent. */
+  deniedCount?: number
+  /** Compliance taints in force; the taint values themselves are not sent. */
+  taintCount?: number
+  /** Configured capabilities the node half does not provide. */
+  unsupportedScopeCount?: number
+  /** Control obligations the retained document states, when it states any; absent otherwise. */
+  controlRequirements?: ControlRequirements
+  /** Whether a monitoring notice is in force; a notice restricts no key. */
+  notice?: boolean
+  /** The notice's text and url, once the node half has read them; absent while only its presence is known. */
+  noticeContent?: PolicyLimitsNotice
+  /** What the verdicts are answered from: a confirmed document, a retained one, or nothing. */
+  fallback: 'live' | 'stale' | 'none'
+}
+
 /** One logged-in account as answered by the `status` endpoint. */
 export interface AccountStatus {
   key: string
@@ -46,13 +191,51 @@ export interface AccountStatus {
   expiresAt?: number
   plan?: string
   isDefault: boolean
+  /** Credential dimension; always reported. */
+  credential: CredentialStatus
+  /** Credential ownership; absent for routes without the concept (reported for Claude only). */
+  credentialOwnership?: CredentialOwnershipStatus
+  /** Quota / temporary availability; absent while nothing has parked this account. */
+  availability?: AvailabilityStatus
+  /** Protocol compatibility; absent for routes without a recorded protocol state. */
+  protocol?: ProtocolStatus
+  /** Account-profile freshness; absent for routes without profile maintenance. */
+  profile?: ProfileStatus
+  /** Managed policy; absent until eligibility for this account was evaluated. */
+  policy?: PolicyStatus
+  /** Claude policy limits; absent while no owner reports this account. */
+  policyLimits?: PolicyLimitsStatus
+}
+
+/** Fixed code describing one recorded provider-operation failure. */
+export type ProviderFailureCode =
+  | 'CANCELLED'
+  | 'CREDENTIALS_UNAVAILABLE'
+  | 'CREDENTIALS_REJECTED'
+  | 'PROVIDER_REJECTED'
+  | 'NETWORK'
+  | 'TIMEOUT'
+  | 'INVALID_RESPONSE'
+  | 'UNKNOWN'
+
+/** One recorded provider-operation failure, in allowlisted fields only. */
+export interface ProviderOperationFailure {
+  code: ProviderFailureCode
+  operation: 'login' | 'import' | 'logout' | 'status'
+  at: number
+  status?: number
+  providerCode?: string
+  retryAt?: number
 }
 
 /** One provider's login state as answered by the `status` endpoint. */
 export interface ProviderStatus {
   busy: boolean
   accounts: AccountStatus[]
-  detail?: string
+  /** The last failed operation; the card localizes it from its fixed code. */
+  lastError?: ProviderOperationFailure
+  /** Present when the node half refused to register this route in this Host. */
+  unavailable?: 'CLAUDE_HOST_INCOMPATIBLE'
 }
 
 /** One rate-limit window as answered by the `usage` endpoint. */
@@ -283,6 +466,13 @@ const styles: Record<string, CSSProperties> = {
     padding: '8px 10px', marginTop: 4,
   },
   accountHeader: { display: 'flex', alignItems: 'center', gap: 8 },
+  // A state line keeps the card's own typography; only its ink differs, so a
+  // cooling window reads as information while a re-login reads as a warning.
+  accountStateWarning: { margin: 0, fontSize: 12, lineHeight: '18px', color: 'var(--dsw-alias-state-warn-label)' },
+  accountStateInfo: { margin: 0, fontSize: 12, lineHeight: '18px', color: 'var(--dsw-alias-label-tertiary)' },
+  // A notice's destination inherits its line's ink, so it stays readable in both
+  // themes without a color of its own; only the underline marks it as a link.
+  accountStateLink: { color: 'inherit', textDecoration: 'underline' },
   accountName: { fontSize: 13, lineHeight: '20px', color: 'var(--dsw-alias-label-primary)', userSelect: 'all' },
   starButton: {
     border: 'none', background: 'transparent', padding: 0,
@@ -377,6 +567,245 @@ function statusText(t: SubscriptionsSectionInjected['t'], status: ProviderStatus
   if (status.busy) return t('loginInProgress')
   if (status.accounts.length > 0) return t('loggedInCount', { count: status.accounts.length })
   return t('notLoggedIn')
+}
+
+/**
+ * Localized labels for the profile states that state something to the user.
+ * A `fresh` profile says nothing, so it has no entry.
+ */
+const PROFILE_STATE_COPY: Partial<Record<ProfileStatus['state'], SubscriptionsKey>> = {
+  stale: 'accountStateProfileStale',
+  missing: 'accountStateProfileMissing',
+  unavailable: 'accountStateProfileUnavailable',
+}
+
+/** Localized labels for the policy states that state something to the user (`current` is silent). */
+const POLICY_STATE_COPY: Partial<Record<PolicyStatus['state'], SubscriptionsKey>> = {
+  ineligible: 'accountStatePolicyIneligible',
+  loading: 'accountStatePolicyLoading',
+  stale: 'accountStatePolicyStale',
+  unavailable: 'accountStatePolicyUnavailable',
+  'consent-required': 'accountStatePolicyConsent',
+  blocked: 'accountStatePolicyBlocked',
+}
+
+/**
+ * Localized labels for the Claude policy-limits states that state something to
+ * the user (`current` is silent). Each describes the limits document alone, so
+ * none of them reads as a sign-in or quota fact.
+ */
+const POLICY_LIMITS_STATE_COPY: Partial<Record<PolicyLimitsStatus['state'], SubscriptionsKey>> = {
+  ineligible: 'accountStatePolicyLimitsIneligible',
+  loading: 'accountStatePolicyLimitsLoading',
+  stale: 'accountStatePolicyLimitsStale',
+  unavailable: 'accountStatePolicyLimitsUnavailable',
+  blocked: 'accountStatePolicyLimitsBlocked',
+}
+
+/**
+ * Localized cause of the fixed policy-limits codes, appended to the state's
+ * line. Each names this plugin's own read, so a credential it could not use
+ * never reads as an expired sign-in and a response over its own size bound never
+ * reads as a restriction the provider stated.
+ */
+const POLICY_LIMITS_CODE_COPY: Partial<Record<PolicyLimitsCode, SubscriptionsKey>> = {
+  CREDENTIAL_UNAVAILABLE: 'accountStatePolicyLimitsCredential',
+  AUTH_REJECTED: 'accountStatePolicyLimitsAuthRejected',
+  REQUEST_FAILED: 'accountStatePolicyLimitsRequestFailed',
+  PARSE_FAILED: 'accountStatePolicyLimitsParseFailed',
+  RESPONSE_OVER_LIMIT: 'accountStatePolicyLimitsResponseLimit',
+}
+
+/** Localized labels for the recorded provider-operation failure codes. */
+const PROVIDER_FAILURE_COPY: Record<ProviderFailureCode, SubscriptionsKey> = {
+  CANCELLED: 'providerFailureCancelled',
+  CREDENTIALS_UNAVAILABLE: 'providerFailureCredentialsUnavailable',
+  CREDENTIALS_REJECTED: 'providerFailureCredentialsRejected',
+  PROVIDER_REJECTED: 'providerFailureProviderRejected',
+  NETWORK: 'providerFailureNetwork',
+  TIMEOUT: 'providerFailureTimeout',
+  INVALID_RESPONSE: 'providerFailureInvalidResponse',
+  UNKNOWN: 'providerFailureUnknown',
+}
+
+/**
+ * One line an account's reported dimensions contribute to its card.
+ *
+ * `warn` marks a state that stops the account serving as it is (a re-login, a
+ * refusal, an unsupported protocol); `info` marks a fact about cached state
+ * (a cooling window, a stale profile), which must not read as a failure.
+ */
+export interface AccountStateLine {
+  text: string
+  tone: 'warn' | 'info'
+  /**
+   * Destination a line states. The card links it only when it is an `https`
+   * one, and opening it is the user's own click.
+   */
+  url?: string
+}
+
+/**
+ * Localized lines for one account's reported dimensions, in a fixed order:
+ * credential, availability, protocol, profile, policy, policy limits, observed
+ * control requirement, notice.
+ *
+ * Every dimension is rendered from its own state, so a re-login requirement is
+ * never shown as a quota cooldown and a stale profile is never shown as an
+ * invalid credential. A dimension the node half did not report contributes
+ * nothing rather than a healthy-looking line.
+ * @param account - the account as answered by the `status` endpoint.
+ * @param t - section translate.
+ * @returns the lines to render beside the account, empty when every dimension is nominal.
+ */
+export function accountStateLines(
+  account: AccountStatus,
+  t: SubscriptionsSectionInjected['t'],
+): AccountStateLine[] {
+  const lines: AccountStateLine[] = []
+  if (account.credential.state === 'reauth_required') lines.push({ text: t('accountStateReauth'), tone: 'warn' })
+  if (account.credential.state === 'missing') lines.push({ text: t('accountStateCredentialMissing'), tone: 'warn' })
+  if (account.credential.state === 'refreshing') lines.push({ text: t('accountStateCredentialRefreshing'), tone: 'info' })
+  if (account.credential.state === 'unknown-expiry') {
+    lines.push({ text: t('accountStateCredentialUnknownExpiry'), tone: 'info' })
+  }
+  if (account.credential.state === 'maintenance-unsupported') {
+    lines.push({ text: t('accountStateCredentialExternal'), tone: 'info' })
+  }
+  if (account.credential.state === 'external-coordination-unproven') {
+    // The coordination premise is unproven, and saying nothing would read as a coordinated
+    // single writer.
+    lines.push({ text: t('accountStateCredentialExternalUnproven'), tone: 'warn' })
+  }
+  const availability = account.availability
+  if (availability?.state === 'refused') lines.push({ text: t('accountStateRefused'), tone: 'warn' })
+  if (availability?.state === 'cooling') {
+    lines.push({
+      text: availability.until === undefined
+        ? t('accountStateCoolingUnknown')
+        : t('accountStateCooling', { date: formatDateTime(t, availability.until) }),
+      tone: 'info',
+    })
+  }
+  if (availability?.state === 'transient') {
+    lines.push({
+      text: availability.until === undefined
+        ? t('accountStateTransientUnknown')
+        : t('accountStateTransient', { date: formatDateTime(t, availability.until) }),
+      tone: 'info',
+    })
+  }
+  if (account.protocol?.state === 'upgrade_required') lines.push({ text: t('accountStateProtocolUpgrade'), tone: 'warn' })
+  if (account.protocol?.state === 'unsupported_response') {
+    lines.push({ text: t('accountStateProtocolUnsupported'), tone: 'warn' })
+  }
+  if (account.profile !== undefined) {
+    const key = PROFILE_STATE_COPY[account.profile.state]
+    if (key !== undefined) lines.push({ text: t(key), tone: 'info' })
+    else if (account.profile.complete === false) {
+      // A fresh profile that lacks a required field is still incomplete: the state
+      // alone would read as healthy.
+      lines.push({ text: t('accountStateProfileIncomplete'), tone: 'info' })
+    }
+  }
+  if (account.policy !== undefined) {
+    const key = POLICY_STATE_COPY[account.policy.state]
+    // A blocked or consent-required policy stops affected operations, so it
+    // reads as a warning; a stale or unavailable snapshot is informational.
+    const tone = account.policy.state === 'blocked' || account.policy.state === 'consent-required' ? 'warn' : 'info'
+    if (key !== undefined) lines.push({ text: t(key), tone })
+  }
+  const limits = account.policyLimits
+  if (limits !== undefined) {
+    // A verdict the owner answers from no live document is not a confirmed
+    // read: saying nothing would read as an account whose limits were checked.
+    const key = POLICY_LIMITS_STATE_COPY[limits.state]
+      ?? (limits.fallback === 'live' ? undefined : 'accountStatePolicyLimitsUnconfirmed')
+    if (key !== undefined) {
+      const cause = limits.code === undefined ? undefined : POLICY_LIMITS_CODE_COPY[limits.code]
+      // A live restriction suspends operations; every other state describes the
+      // document the plugin holds, so it reads as information.
+      const tone = limits.state === 'blocked' ? 'warn' : 'info'
+      lines.push({ text: cause === undefined ? t(key) : `${t(key)} · ${t(cause)}`, tone })
+    }
+    // A control the document requires and this client cannot provide is stated as an
+    // observed requirement, never as an enforced one: the copy says so, and no operation is
+    // refused or parked for it. Both controls share this one line.
+    const controls = limits.controlRequirements
+    if (controls !== undefined && controls.unsupportedActiveControls.length > 0) {
+      lines.push({ text: t('accountStatePolicyLimitsUnsupportedControl'), tone: 'warn' })
+    }
+  }
+  const notice = limits?.noticeContent
+  if (notice !== undefined) {
+    // The notice is the provider's own prose: the localized label states where
+    // it came from, and the text itself stays text.
+    lines.push({
+      text: t('accountStatePolicyLimitsNotice', { text: notice.text }),
+      tone: 'info',
+      ...notice.url === undefined ? {} : { url: notice.url },
+    })
+  } else if (limits?.notice === true) {
+    // A retained snapshot keeps the notice's existence without its text, which
+    // is not the same fact as having no notice.
+    lines.push({ text: t('accountStatePolicyLimitsNoticePending'), tone: 'info' })
+  }
+  return lines
+}
+
+/**
+ * One account's reported dimension lines.
+ *
+ * Every line is rendered as text, so provider prose cannot become markup. A
+ * line's destination becomes a link only when it is an `https` one, and the
+ * card only offers it: opening it is the user's own click and the card never
+ * requests it.
+ * @param props - the lines and the section translate.
+ * @returns the lines as rendered beside one account.
+ */
+export function AccountStateLines({ lines, t }: {
+  lines: readonly AccountStateLine[]
+  t: SubscriptionsSectionInjected['t']
+}) {
+  return (
+    <>
+      {lines.map((line, index) => (
+        <p key={index} style={line.tone === 'warn' ? styles.accountStateWarning : styles.accountStateInfo}>
+          {line.text}
+          {line.url !== undefined && line.url.startsWith('https://') && (
+            <>
+              {' '}
+              <a
+                href={line.url}
+                target="_blank"
+                rel="noopener noreferrer"
+                title={line.url}
+                style={styles.accountStateLink}
+              >
+                {t('accountStatePolicyLimitsNoticeLink')}
+              </a>
+            </>
+          )}
+        </p>
+      ))}
+    </>
+  )
+}
+
+/**
+ * Localized line for one recorded provider-operation failure.
+ * @param failure - the failure the `status` endpoint reported.
+ * @param t - section translate.
+ * @returns the line, with the provider's stated retry instant when it sent one.
+ */
+export function providerFailureLine(
+  failure: ProviderOperationFailure,
+  t: SubscriptionsSectionInjected['t'],
+): string {
+  const base = t(PROVIDER_FAILURE_COPY[failure.code])
+  return failure.retryAt === undefined
+    ? base
+    : `${base} · ${t('providerFailureRetryAt', { date: formatDateTime(t, failure.retryAt) })}`
 }
 
 /**
@@ -806,6 +1235,44 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
   }, [rpc, setActionError, refresh])
 
   /**
+   * Change one Claude account's credential ownership.
+   *
+   * Moving onto `legacy-writeback` shares the refresh grant this plugin does not own, so it
+   * needs the user's explicit confirmation first; the confirmation copy is locale-owned like
+   * every other string here. The server enforces the same rule, so the acknowledgement is sent
+   * only when the user actually confirmed, and a cancelled dialog sends nothing at all.
+   * @param provider - the provider card the account belongs to.
+   * @param account - the account key to change.
+   * @param display - the account's display name, named in the confirmation.
+   * @param mode - the ownership mode to persist.
+   */
+  const setOwnership = useCallback(async (
+    provider: SubscriptionProvider,
+    account: string,
+    display: string,
+    mode: 'legacy-writeback' | 'read-only-import',
+  ): Promise<void> => {
+    if (rpc === undefined) return
+    let riskAcknowledged = false
+    if (mode === 'legacy-writeback') {
+      if (!window.confirm(t('ownershipLegacyConfirm', { account: display }))) return
+      riskAcknowledged = true
+    }
+    setActionError(provider, undefined)
+    try {
+      await callSubscriptionsAuth<{ ok: true }>(rpc, 'setCredentialOwnership', {
+        provider,
+        account,
+        mode,
+        riskAcknowledged,
+      })
+    } catch (error) {
+      setActionError(provider, messageOf(error))
+    }
+    await refresh(true)
+  }, [rpc, t, setActionError, refresh])
+
+  /**
    * Copy one card's code or link and flag that card as copied for 1.5s.
    * @param provider - the provider card whose copy button was pressed.
    * @param text - the code or link to place on the clipboard.
@@ -948,8 +1415,11 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
               <span style={styles.name}>{name}</span>
             </div>
             <p style={styles.statusLine}>{statusText(t, status)}</p>
-            {status?.detail !== undefined && status.detail !== '' && (
-              <p style={styles.statusLine}>{status.detail}</p>
+            {status?.unavailable !== undefined && (
+              <p style={styles.accountStateWarning}>{t('providerUnavailableHostIncompatible')}</p>
+            )}
+            {status?.lastError !== undefined && (
+              <p style={styles.statusLine}>{providerFailureLine(status.lastError, t)}</p>
             )}
             {error !== undefined && <p style={styles.errorLine}>{error}</p>}
             {accounts.map((account) => {
@@ -959,6 +1429,12 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
               const usageError = entry?.error
               const usageBusy = cache.loading[usageKey] === true
               const display = account.account ?? account.key
+              const stateLines = accountStateLines(account, t)
+              // The only accounts whose ownership is a choice are the externally sourced ones:
+              // both external modes read Claude Code's store, and moving between them is a
+              // setting rather than a new authorization.
+              const ownership = account.credentialOwnership
+              const ownershipSwitchable = ownership !== undefined && ownership.external
               // Providers without a usage endpoint answer supported:false — no block.
               // The block also appears while the account's first local read runs,
               // so a listed account never renders without its usage region.
@@ -995,6 +1471,27 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
                       {t('logout')}
                     </button>
                   </div>
+                  <AccountStateLines lines={stateLines} t={t} />
+                  {ownershipSwitchable && (
+                    <div style={styles.actions}>
+                      <button
+                        type="button"
+                        style={styles.button}
+                        onClick={() => {
+                          void setOwnership(
+                            id,
+                            account.key,
+                            display,
+                            ownership.mode === 'legacy-writeback' ? 'read-only-import' : 'legacy-writeback',
+                          )
+                        }}
+                      >
+                        {ownership.mode === 'legacy-writeback'
+                          ? t('ownershipUseReadOnly')
+                          : t('ownershipUseLegacy')}
+                      </button>
+                    </div>
+                  )}
                   {showUsage && (
                     <div style={styles.usage}>
                       <div style={styles.usageHeader}>

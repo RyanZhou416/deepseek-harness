@@ -1,0 +1,2 @@
+DSH_P22_ENV_SENTINEL=from-dotenv
+DSH_P22_ENV_SENTINEL_BASE=base-file

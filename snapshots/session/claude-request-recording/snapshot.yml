@@ -1,0 +1,10 @@
+version: 1
+scenario: claude-request-recording
+profile: headless
+composition: claude-request-recording
+recording: authored
+header:
+  class: claude-request-recording
+  pin: true
+replay:
+  override: true

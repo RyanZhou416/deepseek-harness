@@ -362,6 +362,12 @@ export function resolveRateLimitWait(config: RateLimitConfig | undefined, path: 
  * is not a transient failure to back off from, and retrying it is the traffic
  * the refusal was sent to stop. `RATE_LIMIT` stays here for the ordinary case —
  * a 429 that disclosed the window it reopens.
+ *
+ * The Claude route's own terminal codes are absent for the same reason and are
+ * carried instead by the failure's `retryDisposition: 'forbid'`:
+ * `CLIENT_VERSION_UNSUPPORTED`, `PERMISSION_DENIED`, `UNCLASSIFIED_PROVIDER_ERROR`
+ * and `INVALID_REQUEST`. A code listed here is a claim that the harness may
+ * resend the logical request at all; none of those may be.
  */
 const SUBSCRIPTION_RETRYABLE_CODES: readonly string[] = Object.freeze([
   'EMPTY_RESPONSE',

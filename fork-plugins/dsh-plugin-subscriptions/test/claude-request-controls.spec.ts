@@ -7,20 +7,26 @@
  */
 
 import { test } from 'node:test'
+import type { TestContext } from 'node:test'
 import assert from 'node:assert/strict'
 
 import { ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import type { GenerateOptions, StreamChunk } from '@deepseek-ai/dsh-llm'
 import { BETA_REGISTRY_2_1_288 } from '@tormentalabs/claude-code-wire-compat'
 import { AccountTokenManager } from '../src/providers/accounts.js'
-import { ClaudeAdapter } from '../src/providers/claude.js'
+import { ClaudeAdapter, deriveClaudeDeviceId } from '../src/providers/claude.js'
 import { claudeOneMillionModelId } from '../src/providers/claude-model-limits.js'
 import type { FetchFn } from '../src/providers/common.js'
 import type { ClaudeSession } from '../src/auth/store.js'
 import type { TranslatableMessage } from '../src/translate/resolved.js'
+import { PermittingRecordPort } from './recording-port.js'
+import { ownedClaudeContinuation } from './claude-maintenance-fixtures.js'
 
 const ONE_MILLION_BETA = BETA_REGISTRY_2_1_288.LONG_CONTEXT.header
 const SPEED_BETA = BETA_REGISTRY_2_1_288.SPEED.header
+
+/** A synthetic machine fingerprint; never this host's own identifier. */
+const FINGERPRINT = 'f'.repeat(64)
 
 const SESSION: ClaudeSession = {
   accessToken: 'synthetic-access-token-0123456789abcdef0123456789abcdef0123456789abcdef',
@@ -28,7 +34,8 @@ const SESSION: ClaudeSession = {
   expiresAt: Date.now() + 3_600_000,
   scopes: 'user:inference',
   accountUuid: 'uuid-1',
-  deviceId: 'd'.repeat(64),
+  // Already bound to this machine, so a request presents it without a rebind write.
+  deviceId: deriveClaudeDeviceId('uuid:uuid-1', FINGERPRINT),
   subscriptionType: 'max',
 }
 
@@ -69,11 +76,23 @@ function tokens(): AccountTokenManager<ClaudeSession> {
 /**
  * One adapter over the in-memory session; `fetchFn` absent means no request is issued.
  * `fast` stands in for the model's stored Speed tier: absent leaves the lookup unwired, which is
- * how a route with no control at all behaves.
+ * how a route with no control at all behaves. The construction is the shape the real route uses:
+ * a durable continuation owner to commit the wire identity and a recorder for the prepared request.
+ * @param t - the case that owns the continuation state.
+ * @param fetchFn - the synthetic egress, when the case sends one.
+ * @param fast - the model's stored Speed tier, when the test wires one.
+ * @returns the adapter over this case's state.
  */
-function adapter(fetchFn?: FetchFn, fast?: boolean): ClaudeAdapter {
+async function adapter(
+  t: Pick<TestContext, 'after'>,
+  fetchFn?: FetchFn,
+  fast?: boolean,
+): Promise<ClaudeAdapter> {
   return new ClaudeAdapter({
     models: [], discovery: false, streamIdleTimeoutMs: 60_000, tokens: tokens(),
+    deviceFingerprint: () => FINGERPRINT,
+    continuation: await ownedClaudeContinuation(t, ['acct']),
+    requestRecord: new PermittingRecordPort(),
     ...fetchFn === undefined ? {} : { fetchFn },
     ...fast === undefined ? {} : { speedFor: () => fast },
   })
@@ -84,11 +103,13 @@ function adapter(fetchFn?: FetchFn, fast?: boolean): ClaudeAdapter {
  *
  * The body is the builder's JSON, read field by field, so it is typed loosely rather than
  * re-declared here.
+ * @param t - the case that owns the continuation state.
  * @param options - the generate request to send.
  * @param fast - the model's stored Speed tier, when the test wires one.
  * @returns the parsed body and the sent headers, lower-cased.
  */
 async function sent(
+  t: Pick<TestContext, 'after'>,
   options: Partial<GenerateOptions> & Pick<GenerateOptions, 'model'>,
   fast?: boolean,
 ): Promise<{
@@ -103,11 +124,12 @@ async function sent(
     headers = Object.fromEntries(Object.entries(init?.headers ?? {}))
     return new Response(RESPONSE_SSE, { headers: { 'content-type': 'text/event-stream' } })
   }
-  const instance = adapter(fetchFn, fast)
+  const instance = await adapter(t, fetchFn, fast)
   const chunks: StreamChunk[] = []
   const request: GenerateOptions = {
     provider: 'claude',
     messages: history() as never,
+    sessionId: 'sess-controls' as NonNullable<GenerateOptions['sessionId']>,
     ...options,
   }
   for await (const chunk of instance.stream(request)) chunks.push(chunk)
@@ -118,59 +140,59 @@ async function sent(
   }
 }
 
-test('a chosen effort reaches output_config.effort, and the catalogue shape rides the request', async () => {
+test('a chosen effort reaches output_config.effort, and the catalogue shape rides the request', async t => {
   // Sonnet 5 advertises every level, so a chosen one is what the request carries; its
   // catalogue entry marks adaptive thinking.
-  const sonnet = await sent({ model: 'claude-sonnet-5', reasoningEffort: ReasoningEffortId('xhigh') })
+  const sonnet = await sent(t, { model: 'claude-sonnet-5', reasoningEffort: ReasoningEffortId('xhigh') })
   assert.deepEqual(sonnet.body.output_config, { effort: 'xhigh' })
   assert.deepEqual(sonnet.body.thinking, { type: 'adaptive', display: 'updates' })
 
   // Opus 4.5 carries no effort flag, and its catalogue entry marks thinking without the
   // adaptive type, so the manual budget is the shape it gets.
-  const opus = await sent({ model: 'claude-opus-4-5', reasoningEffort: ReasoningEffortId('high') })
+  const opus = await sent(t, { model: 'claude-opus-4-5', reasoningEffort: ReasoningEffortId('high') })
   assert.equal('output_config' in opus.body, false)
   assert.deepEqual(opus.body.thinking, { budget_tokens: 16_000, type: 'enabled', display: 'updates' })
 
   // No effort asked for leaves the field off the request, which is the client's own default.
-  const defaulted = await sent({ model: 'claude-sonnet-5' })
+  const defaulted = await sent(t, { model: 'claude-sonnet-5' })
   assert.equal('output_config' in defaulted.body, false)
 })
 
-test('a level the model does not accept is dropped rather than sent', async () => {
+test('a level the model does not accept is dropped rather than sent', async t => {
   // Sonnet 4.6 can choose `max` but not `xhigh`: the level it accepts is what the request
   // carries, and the one it does not goes out as no effort at all rather than failing on the
   // builder's capability check.
-  const accepted = await sent({ model: 'claude-sonnet-4-6', reasoningEffort: ReasoningEffortId('max') })
+  const accepted = await sent(t, { model: 'claude-sonnet-4-6', reasoningEffort: ReasoningEffortId('max') })
   assert.deepEqual(accepted.body.output_config, { effort: 'max' })
 
-  const dropped = await sent({ model: 'claude-sonnet-4-6', reasoningEffort: ReasoningEffortId('xhigh') })
+  const dropped = await sent(t, { model: 'claude-sonnet-4-6', reasoningEffort: ReasoningEffortId('xhigh') })
   assert.equal('output_config' in dropped.body, false)
   assert.equal(JSON.stringify(dropped.body).includes('xhigh'), false)
   assert.equal(dropped.chunks.at(-1)?.type, 'finish', 'the request still completes')
 })
 
-test('the 1M marker composes the long-context beta and leaves the model name alone', async () => {
+test('the 1M marker composes the long-context beta and leaves the model name alone', async t => {
   const marked = claudeOneMillionModelId('claude-sonnet-4-6')
   assert.equal(marked, 'claude-sonnet-4-6[1m]')
   if (marked === undefined) return
 
-  const listed = adapter()
+  const listed = await adapter(t)
   // The window the variant claims is the one the marker buys, and the plain id keeps the
   // catalogue window this route can reach without the beta.
   assert.equal((await listed.resolveModel('claude', marked)).context?.contextWindow, 1_000_000)
   assert.equal((await listed.resolveModel('claude', 'claude-sonnet-4-6')).context?.contextWindow, 200_000)
 
-  const built = await sent({ model: marked })
+  const built = await sent(t, { model: marked })
   // The pinned builder strips the marker from the model it names and pushes the beta on top.
   assert.equal(built.body.model, 'claude-sonnet-4-6')
   assert.equal((built.headers.get('anthropic-beta') ?? '').split(',').includes(ONE_MILLION_BETA), true)
 
-  const plain = await sent({ model: 'claude-sonnet-4-6' })
+  const plain = await sent(t, { model: 'claude-sonnet-4-6' })
   assert.equal((plain.headers.get('anthropic-beta') ?? '').includes(ONE_MILLION_BETA), false)
 })
 
-test('the fast tier rides body.speed and composes its beta exactly once', async () => {
-  const fast = await sent({ model: 'claude-opus-5' }, true)
+test('the fast tier rides body.speed and composes its beta exactly once', async t => {
+  const fast = await sent(t, { model: 'claude-opus-5' }, true)
   assert.equal(fast.body.speed, 'fast')
   // One field, one composition: the body value and the beta identifier come from the same
   // input, so the identifier is present exactly once however the composed list is ordered.
@@ -180,18 +202,18 @@ test('the fast tier rides body.speed and composes its beta exactly once', async 
 
   // Standard routing is the field's absence: no `speed` key at all, and no beta declaring a
   // tier the request does not use. A lookup answering false and no lookup agree.
-  const answered = await sent({ model: 'claude-opus-5' }, false)
-  const unwired = await sent({ model: 'claude-opus-5' })
+  const answered = await sent(t, { model: 'claude-opus-5' }, false)
+  const unwired = await sent(t, { model: 'claude-opus-5' })
   for (const standard of [answered, unwired]) {
     assert.equal('speed' in standard.body, false)
     assert.equal((standard.headers.get('anthropic-beta') ?? '').includes(SPEED_BETA), false)
   }
 })
 
-test('a stored fast tier never reaches a model whose catalogue entry lacks fast_mode', async () => {
+test('a stored fast tier never reaches a model whose catalogue entry lacks fast_mode', async t => {
   // Fable 5 carries no `fast_mode`, so the stored tier cannot be honoured: the request keeps
   // standard routing rather than carrying a speed field and its beta the model would refuse.
-  const refused = await sent({ model: 'claude-fable-5' }, true)
+  const refused = await sent(t, { model: 'claude-fable-5' }, true)
   assert.equal('speed' in refused.body, false)
   assert.equal((refused.headers.get('anthropic-beta') ?? '').includes(SPEED_BETA), false)
   assert.equal(refused.chunks.at(-1)?.type, 'finish', 'the request still completes')
