@@ -1,0 +1,19 @@
+[
+  {
+    "kind": "chunks",
+    "chunks": [
+      {
+        "type": "finish",
+        "reason": {
+          "kind": "error",
+          "failure": {
+            "message": "the provider refused this request and forbade an automatic resend",
+            "code": "RATE_LIMIT",
+            "status": 429,
+            "retryDisposition": "forbid"
+          }
+        }
+      }
+    ]
+  }
+]

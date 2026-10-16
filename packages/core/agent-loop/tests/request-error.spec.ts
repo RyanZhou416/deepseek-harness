@@ -122,6 +122,38 @@ describe('agent/request-error', () => {
     })
   })
 
+  it('refuses a retry action for a failure that forbids resending', async () => {
+    const adapter = new MockAdapter([
+      () => { throw new LlmError('client protocol version refused', 'CLIENT_VERSION_UNSUPPORTED', { retryDisposition: 'forbid' }) },
+      textResponse('must not run'),
+    ])
+    const ctx = await harness(adapter)
+    const agent = await ctx.agentLoop.create(SessionId('request-error-forbid'), { provider: 'mock', model: 'mock' })
+    let recoveries = 0
+    ctx.on('agent/request-error', async () => {
+      recoveries += 1
+      return { kind: 'retry' }
+    })
+
+    agent.followup(createUserMessage({ content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } }))
+    await agent.whenIdle()
+
+    // The failure is terminal before recovery is offered, so a listener that
+    // would force a retry never runs and never gets to schedule anything.
+    expect(recoveries).toBe(0)
+    expect(adapter.requests).toHaveLength(1)
+    expect(agent.session.snapshotEvents().filter(event => event.type === 'step/start')).toHaveLength(1)
+    expect(agent.session.snapshotEvents().find(event => event.type === 'turn/end')).toMatchObject({
+      type: 'turn/end',
+      data: {
+        reason: {
+          kind: 'error',
+          error: { code: 'CLIENT_VERSION_UNSUPPORTED', retryDisposition: 'forbid' },
+        },
+      },
+    })
+  })
+
   it('does not retry when the recovery listener fails before returning its action', async () => {
     const adapter = new MockAdapter([fail('busy', 'RATE_LIMIT'), textResponse('unused')])
     const ctx = await harness(adapter)

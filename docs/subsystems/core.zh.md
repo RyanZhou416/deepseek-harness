@@ -339,7 +339,7 @@ type PreStepDecision =
   }
 ```
 
-`agent/request-error` 在失败的模型步骤关闭之后、其轮次关闭之前运行。listener 可以在失败轮次的 signal 仍然存活时修复持久状态或 await 策略工作。处理该错误的 listener 返回 `{ kind: 'retry' }` 且不调用 `next()`；默认的 `undefined` 会让失败保持终态。
+`agent/request-error` 在失败的模型步骤关闭之后、其轮次关闭之前运行。listener 可以在失败轮次的 signal 仍然存活时修复持久状态或 await 策略工作。处理该错误的 listener 返回 `{ kind: 'retry' }` 且不调用 `next()`；默认的 `undefined` 会让失败保持终态。若失败的 [`LlmFailure.retryDisposition`](llm-streaming.zh.md#llmfailure) 为 `'forbid'`，该失败根本不会进入这条 waterfall：loop 关闭失败步骤并报告该失败，因此没有 listener 能安排等待、修复状态或返回一个它本就必须拒绝的动作。
 
 ```ts type-equiv
 /** Action returned by a listener that owns model-request recovery. */

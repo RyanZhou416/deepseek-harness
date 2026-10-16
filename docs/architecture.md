@@ -107,7 +107,7 @@ turn/start
 turn/end
 ```
 
-`turn/*`, `step/*`, `system/message`, `user/message`, `assistant/message`, `assistant/attempt`, and `tool/*` are durable session events; the rest are live extension points across three domains. `agent/assistant-stream` publishes process-local start, transient chunk, and end frames. The loop commits the complete compact stream as one message or log-only attempt before a committed end frame, and the Web Session-follow adapter is the live event's only remote consumer. `agent/prepare-input`, `agent/pre-step`, `agent/message-surface`, `agent/request`, `llm/stream`, and the three `tools/*` events are waterfalls, whose listeners must call `next()` to delegate; `agent/turn-stopping` is serial and has no `next()`.
+`turn/*`, `step/*`, `system/message`, `user/message`, `assistant/message`, `assistant/attempt`, and `tool/*` are durable session events; the rest are live extension points across three domains. `agent/assistant-stream` publishes process-local start, transient chunk, and end frames. The loop commits the complete compact stream before a committed end frame, and the Web Session-follow adapter is its only remote consumer. `agent/prepare-input`, `agent/pre-step`, `agent/message-surface`, `agent/request`, `llm/stream`, and the three `tools/*` events are waterfalls whose listeners delegate with `next()`; `agent/request-error` receives a failed attempt unless its [`retryDisposition`](subsystems/llm-streaming.md#llmfailure) is `'forbid'`, and `agent/turn-stopping` is serial.
 
 The inbox drives work: wake messages start it; idle injections wait. Its durable projection exposes pending input without Agents. Input after the final inbox decision latches a post-convergence replacement turn.
 

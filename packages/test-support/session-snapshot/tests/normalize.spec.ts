@@ -1153,6 +1153,59 @@ describe('scrubModelRequestBulk', () => {
     expect(once.split('\n')[3]).toBe(other)
     expect(scrubModelRequestBulk(once)).toBe(once)
   })
+
+  it('tokenizes the recorded request system text and digest of llm/request-record and keeps every other field', () => {
+    const record = JSON.stringify({
+      type: 'llm/request-record',
+      seq: 14,
+      time: 9,
+      data: {
+        v: 1,
+        phase: 'prepared',
+        provider: 'claude',
+        model: 'claude-opus-4-5',
+        purpose: 'conversation',
+        systemBlocks: ['billing block', 'identity block', 'be terse'],
+        systemDigest: 'a'.repeat(64),
+        wireLibrary: '@tormentalabs/claude-code-wire-compat@0.7.2-dsh14',
+        profile: 'claude-code-2.1.288-sdk-0.128.0',
+      },
+    })
+    const raw = `${headerLine}\n${record}\n`
+    const once = scrubModelRequestBulk(raw)
+    expect(once.split('"{{system}}"').length - 1).toBe(3)
+    expect(once).toContain('"systemDigest":"{{systemDigest}}"')
+    expect(once).toContain('"v":1')
+    expect(once).toContain('"phase":"prepared"')
+    expect(once).toContain('"provider":"claude"')
+    expect(once).toContain('"model":"claude-opus-4-5"')
+    expect(once).toContain('"purpose":"conversation"')
+    expect(once).toContain('"wireLibrary":"@tormentalabs/claude-code-wire-compat@0.7.2-dsh14"')
+    expect(once).toContain('"profile":"claude-code-2.1.288-sdk-0.128.0"')
+    expect(once).not.toContain('billing block')
+    expect(once).not.toContain('be terse')
+    expect(once.split('\n')[0]).toBe(headerLine)
+    expect(once.split('\n')).toHaveLength(raw.split('\n').length)
+    expect(scrubModelRequestBulk(once)).toBe(once)
+  })
+
+  it('leaves a record whose system-block list is absent or not an array byte-identical', () => {
+    const absent = JSON.stringify({ type: 'llm/request-record', seq: 15, time: 9, data: { v: 1, phase: 'prepared' } })
+    const notAnArray = JSON.stringify({ type: 'llm/request-record', seq: 16, time: 9, data: { v: 1, systemBlocks: 'nope' } })
+    const raw = `${headerLine}\n${absent}\n${notAnArray}\n`
+    expect(scrubModelRequestBulk(raw)).toBe(raw)
+  })
+
+  it('never touches a recorded request when only tool schemas are scrubbed', () => {
+    const record = JSON.stringify({
+      type: 'llm/request-record',
+      seq: 17,
+      time: 9,
+      data: { v: 1, systemBlocks: ['billing block'], systemDigest: 'a'.repeat(64) },
+    })
+    const raw = `${headerLine}\n${record}\n`
+    expect(scrubToolSchemas(raw)).toBe(raw)
+  })
 })
 
 describe('scrubSessionSnapshot', () => {

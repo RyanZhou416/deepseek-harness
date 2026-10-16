@@ -82,7 +82,7 @@ The executor is built on one rule: **durable before wait, open-step boundaries.*
 
 ### Recovery flow
 
-A failed step arrives on the waterfall with its provider and resolved policy. Always mode settles downstream recovery first and honors a downstream `retry` decision; normal mode first checks that the failure code is eligible and the budget is not exhausted. The plugin computes the delay — provider `Retry-After` when valid and within bounds, otherwise local bounded exponential backoff with symmetric jitter — appends the `llm/retry` event, waits on a cancellable timer, appends `llm/retry-started`, and returns `{ kind: 'retry' }`. The loop then re-runs the failed step inside the same open turn over the same durable history.
+A failed step arrives on the waterfall with its provider and resolved policy. A failure carrying `LlmFailure.retryDisposition: 'forbid'` returns to the listeners after this one without scheduling anything — no `llm/retry` record, no wait, and no retry decision — because its producer forbade every automatic resend. Always mode settles downstream recovery first and honors a downstream `retry` decision; normal mode first checks that the failure code is eligible and the budget is not exhausted. The plugin computes the delay — provider `Retry-After` when valid and within bounds, otherwise local bounded exponential backoff with symmetric jitter — appends the `llm/retry` event, waits on a cancellable timer, appends `llm/retry-started`, and returns `{ kind: 'retry' }`. The loop then re-runs the failed step inside the same open turn over the same durable history, and independently refuses any resend for a forbidden failure without offering it to this waterfall at all.
 
 ### Waterfall composition
 

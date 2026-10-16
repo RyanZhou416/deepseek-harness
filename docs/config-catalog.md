@@ -1887,6 +1887,29 @@ Depends on: [`ModelModality`](../packages/llm/llm/src/index.ts) · [`RetryPolicy
 
 Source: [`packages/test-support/llm-replay/src/index.ts:1123`](../packages/test-support/llm-replay/src/index.ts)
 
+<a id="deepseek-aidsh-llm-request-record"></a>
+
+## `@deepseek-ai/dsh-llm-request-record`
+
+Requires: `sessions`
+
+```ts config-catalog
+/** Loader configuration of the recording service. */
+export interface Config {
+  /**
+   * Milliseconds a prepared record may wait for `SessionStore.flush` before its
+   * producer is told the record is not durable.
+   *
+   * Required, never defaulted: the bound is what keeps a stalled durability
+   * listener from holding a model request open indefinitely, so a deployment
+   * states it instead of inheriting a compiled-in number.
+   */
+  readonly flushTimeoutMs: number
+}
+```
+
+Source: [`packages/llm/llm-request-record/src/index.ts:76`](../packages/llm/llm-request-record/src/index.ts)
+
 <a id="deepseek-aidsh-llm-retry"></a>
 
 ## `@deepseek-ai/dsh-llm-retry`

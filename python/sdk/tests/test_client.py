@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import inspect
 import sys
 import threading
@@ -1172,3 +1173,66 @@ def test_client_reports_missing_bundled_runtime_dependency(monkeypatch: pytest.M
 
     with pytest.raises(FileNotFoundError, match="Install deepseek-harness-runtime-bin"):
         HarnessClient(HarnessConfig(dsh_home="/explicit/home")).start()
+
+
+def test_high_level_sdk_preserves_prepared_request_record(tmp_path: Path) -> None:
+    script = tmp_path / "fake_record_runtime.py"
+    script.write_text(
+        """
+import json
+import sys
+
+for line in sys.stdin:
+    msg = json.loads(line)
+    method = msg.get("method")
+    if method == "initialize":
+        print(json.dumps({"jsonrpc": "2.0", "id": msg["id"], "result": {"serverInfo": {"name": "fake-runtime"}}}), flush=True)
+    elif method == "session/prompt":
+        params = msg.get("params") or {}
+        session_id = params["sessionId"]
+        print(json.dumps({"jsonrpc": "2.0", "method": "session.event", "params": {"sessionId": session_id, "event": {"type": "agent/inbox/spliced", "seq": 0, "time": 0, "data": {"target": "next-turn", "start": 0, "inserted": [{"id": "message-1"}]}}}}), flush=True)
+        print(json.dumps({"jsonrpc": "2.0", "method": "session.status", "params": {"sessionId": session_id, "status": "running"}}), flush=True)
+        print(json.dumps({"jsonrpc": "2.0", "id": msg["id"], "result": {"messageId": "message-1"}}), flush=True)
+        print(json.dumps({"jsonrpc": "2.0", "method": "session.event", "params": {"sessionId": session_id, "event": {"type": "llm/request-record", "seq": 2, "time": 0, "data": {"v": 1, "phase": "prepared", "provider": "claude", "model": "claude-sonnet-4-5", "purpose": "conversation", "systemBlocks": ["you are a helpful agent"], "systemDigest": __SYSTEM_DIGEST__, "wireLibrary": "@tormentalabs/claude-code-wire-compat@0.7.2-dsh14", "profile": "claude-code-2.1.288-sdk-0.128.0"}}}}), flush=True)
+        print(json.dumps({"jsonrpc": "2.0", "method": "session.event", "params": {"sessionId": session_id, "event": {"type": "assistant/message", "seq": 3, "time": 0, "data": {"content": [{"type": "text", "text": "recorded"}]}}}}), flush=True)
+        print(json.dumps({"jsonrpc": "2.0", "method": "session.status", "params": {"sessionId": session_id, "status": "idle"}}), flush=True)
+    elif method == "shutdown":
+        print(json.dumps({"jsonrpc": "2.0", "id": msg["id"], "result": {}}), flush=True)
+        break
+""".strip().replace(
+            "__SYSTEM_DIGEST__",
+            json.dumps(hashlib.sha256(json.dumps(["you are a helpful agent"], separators=(",", ":"), ensure_ascii=False).encode()).hexdigest()),
+        )
+    )
+
+    record = {
+        "type": "llm/request-record",
+        "seq": 2,
+        "time": 0,
+        "data": {
+            "v": 1,
+            "phase": "prepared",
+            "provider": "claude",
+            "model": "claude-sonnet-4-5",
+            "purpose": "conversation",
+            "systemBlocks": ["you are a helpful agent"],
+            "systemDigest": hashlib.sha256(
+                json.dumps(["you are a helpful agent"], separators=(",", ":"), ensure_ascii=False).encode()
+            ).hexdigest(),
+            "wireLibrary": "@tormentalabs/claude-code-wire-compat@0.7.2-dsh14",
+            "profile": "claude-code-2.1.288-sdk-0.128.0",
+        },
+    }
+
+    with DeepSeekHarness(_launch_args=(sys.executable, str(script)), cwd=str(tmp_path)) as harness:
+        result = harness.run("record it", session_id="main")
+
+    # The record arrives after the accepted-response receipt, and the SDK projects
+    # every event field unchanged.
+    assert result.events[1] == record
+    assert [event["type"] for event in result.events] == [
+        "agent/inbox/spliced",
+        "llm/request-record",
+        "assistant/message",
+    ]
+    assert result.final_response == "recorded"

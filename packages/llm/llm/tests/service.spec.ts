@@ -456,6 +456,41 @@ describe('LlmRuntime', () => {
     })
   })
 
+  it('preserves a producer-forbidden resend decision in the terminal failure', async () => {
+    const failure = new LlmError('client protocol version refused', 'CLIENT_VERSION_UNSUPPORTED', {
+      status: 400,
+      retryDisposition: 'forbid',
+    })
+    const ctx = new Context()
+    await ctx.plugin(LlmRuntime)
+    ctx.llm.registerAdapter(['test'], new ThrowingAdapter(failure))
+
+    const chunks = await collect(ctx.llm.stream({
+      provider: 'test',
+      model: 'test',
+      messages: [],
+    }))
+
+    expect(chunks.at(-1)).toEqual({
+      type: 'finish',
+      reason: {
+        kind: 'error',
+        failure: {
+          message: 'client protocol version refused',
+          code: 'CLIENT_VERSION_UNSUPPORTED',
+          status: 400,
+          retryDisposition: 'forbid',
+        },
+      },
+    })
+  })
+
+  it('declares the provider-neutral failure-recovery contract version', async () => {
+    const ctx = new Context()
+    await ctx.plugin(LlmRuntime)
+    expect(ctx.llm.failureRecoveryVersion).toBe(1)
+  })
+
   it('normalizes arbitrary adapter rejections without throwing them downstream', async () => {
     const adapter = new class extends LlmAdapter {
       stream(_options: GenerateOptions): AsyncIterable<StreamChunk> {
@@ -1359,6 +1394,7 @@ describe('LlmRuntime', () => {
     expect(() => new LlmError(1 as never, 'RATE_LIMIT')).toThrow(/message/)
     expect(() => new LlmError('busy', 1 as never)).toThrow(/code/)
     expect(() => new LlmError('busy', 'RATE_LIMIT', { requestId: 1 as never })).toThrow(/requestId/)
+    expect(() => new LlmError('busy', 'RATE_LIMIT', { retryDisposition: 'never' as never })).toThrow(/retryDisposition/)
   })
 
   it('LlmError extends the shared HarnessError base', async () => {

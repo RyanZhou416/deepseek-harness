@@ -39,6 +39,9 @@ function validateFailure(value: unknown, fail: InvariantFailure): asserts value 
     && (typeof failure.requestId !== 'string' || failure.requestId.length === 0)) {
     fail('llm/retry failure.requestId must be a non-empty string when present')
   }
+  if (failure.retryDisposition !== undefined && failure.retryDisposition !== 'forbid') {
+    fail('llm/retry failure.retryDisposition must be "forbid" when present')
+  }
 }
 
 /** Validate one retry record against the currently open request step. */

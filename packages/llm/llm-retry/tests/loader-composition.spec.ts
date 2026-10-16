@@ -84,20 +84,21 @@ async function loadYaml(lines: readonly string[]): Promise<Context> {
 }
 
 describe('real Loader composition', () => {
+  const COMPOSITION = [
+    "- name: '@deepseek-ai/dsh-llm'",
+    "- name: '@deepseek-ai/dsh-session'",
+    "- name: '@deepseek-ai/dsh-session-projection'",
+    "- name: '@deepseek-ai/dsh-system-prompt'",
+    "- name: '@deepseek-ai/dsh-tools'",
+    "- name: '@deepseek-ai/dsh-agent'",
+    "- name: '@deepseek-ai/dsh-llm-retry'",
+    "- name: '@deepseek-ai/dsh-agent-loop'",
+  ]
   // Real-Loader composition resolves workspace packages through tsx at test
   // time; first resolution after the host/client program split is slow enough
   // to trip the default 5s budget on cold caches.
   it('loads provider-supplied policy and records recovery through the shipping loop', { timeout: 60_000 }, async () => {
-    const loaded = await loadYaml([
-      "- name: '@deepseek-ai/dsh-llm'",
-      "- name: '@deepseek-ai/dsh-session'",
-      "- name: '@deepseek-ai/dsh-session-projection'",
-      "- name: '@deepseek-ai/dsh-system-prompt'",
-      "- name: '@deepseek-ai/dsh-tools'",
-      "- name: '@deepseek-ai/dsh-agent'",
-      "- name: '@deepseek-ai/dsh-llm-retry'",
-      "- name: '@deepseek-ai/dsh-agent-loop'",
-    ])
+    const loaded = await loadYaml(COMPOSITION)
 
     const unloaded = [...loaded.loader.entries()]
       .filter(entry => entry.fiber === undefined && !entry.disabled)
@@ -116,6 +117,57 @@ describe('real Loader composition', () => {
     expect(agent.session.deriveMessages().at(-1)).toMatchObject({
       role: 'assistant',
       content: [{ type: 'text', text: 'recovered' }],
+    })
+  })
+
+  it('declares the failure-recovery capability and stops a forbidden resend at one request', { timeout: 60_000 }, async () => {
+    class ForbiddenAdapter extends LlmAdapter {
+      requests = 0
+      private readonly retryPolicy = resolveRetryPolicy({
+        mode: 'always',
+        backoff: { initialDelayMs: 1, maxDelayMs: 1, jitterRatio: 0 },
+      }, 'loader test provider retryPolicy')
+
+      override providerRetryPolicy(_provider: string): ResolvedRetryPolicy {
+        return this.retryPolicy
+      }
+
+      async * stream(_options: GenerateOptions): AsyncIterable<StreamChunk> {
+        this.requests += 1
+        throw new LlmError('client protocol version refused', 'CLIENT_VERSION_UNSUPPORTED', {
+          status: 400,
+          retryDisposition: 'forbid',
+        })
+      }
+    }
+
+    const loaded = await loadYaml(COMPOSITION)
+    expect(loaded.llm.failureRecoveryVersion).toBe(1)
+
+    const adapter = new ForbiddenAdapter()
+    loaded.llm.registerAdapter(['mock'], adapter)
+    // A listener that always asks for a retry: the durable decision still ends
+    // the step after one provider request and never offers recovery at all.
+    let listenerRuns = 0
+    loaded.on('agent/request-error', async () => {
+      listenerRuns += 1
+      return { kind: 'retry' }
+    })
+    const agent = await loaded.agentLoop.create(SessionId('loader-forbid'), { provider: 'mock', model: 'mock' })
+
+    agent.followup(createUserMessage({ content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } }))
+    await agent.whenIdle()
+
+    expect(listenerRuns).toBe(0)
+    expect(adapter.requests).toBe(1)
+    expect(agent.session.snapshotEvents().some(event => event.type === 'llm/retry')).toBe(false)
+    expect(agent.session.snapshotEvents().findLast(event => event.type === 'turn/end')).toMatchObject({
+      data: {
+        reason: {
+          kind: 'error',
+          error: { code: 'CLIENT_VERSION_UNSUPPORTED', retryDisposition: 'forbid' },
+        },
+      },
     })
   })
 })

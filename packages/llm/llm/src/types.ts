@@ -57,6 +57,20 @@ export interface LlmFailure {
    * selected occurrences in an `image/offload` event and retries the step.
    */
   readonly offloadImages?: number
+  /**
+   * `'forbid'` when the producer of this failure forbids every automatic
+   * resend of the logical request that produced it — no recovery listener may
+   * cause a second provider request, whatever the provider's retry policy is
+   * configured to do. Absent means the failure carries no such decision and
+   * ordinary policy decides.
+   *
+   * The agent loop treats such a failure as terminal without offering it to
+   * `agent/request-error`, and `dsh-llm-retry` schedules no wait for it, so no
+   * listener's action and no registration order can dispatch a second request.
+   * Provider-specific refusal classification stays with the adapter that sets
+   * it; this field carries only the provider-neutral disposition.
+   */
+  readonly retryDisposition?: 'forbid'
 }
 
 /** Plain text visible to the end user. */

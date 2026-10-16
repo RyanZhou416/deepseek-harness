@@ -65,4 +65,44 @@ describe('JSONL retry-event persistence', () => {
       await ctx.fiber.dispose()
     }
   })
+
+  it('round-trips a producer-forbidden failure through the durable attempt and turn close', async () => {
+    const ctx = await backend()
+    try {
+      const session = ctx.sessions.create(SessionId('retry-jsonl-forbid'))
+      const handle = await ctx.sessionPersistence.create(session.header)
+      const failure = {
+        message: 'client protocol version refused',
+        code: 'CLIENT_VERSION_UNSUPPORTED',
+        status: 400,
+        retryDisposition: 'forbid',
+      } as const
+      session.append('turn/start', { turn: 1 })
+      session.append('step/start', { turn: 1, step: 1 })
+      session.append('request/header', {
+        header: { config: { provider: 'mock', model: 'mock' } },
+        reason: 'initial',
+      })
+      const attempt = session.append('assistant/attempt', {
+        turn: 1,
+        step: 1,
+        stream: [{ type: 'chunk', time: 1, chunk: { type: 'finish', reason: { kind: 'error', failure } } }],
+      })
+      session.append('step/end', { turn: 1, step: 1 })
+      const closed = session.append('turn/end', { turn: 1, reason: { kind: 'error', error: failure } })
+
+      await ctx.sessions.flush(session)
+      await handle.close()
+      const reader = await ctx.sessionPersistence.open(session.id, 'read')
+      try {
+        const loaded = await reader.read()
+        expect(loaded.events.find(item => item.type === 'assistant/attempt')).toEqual(attempt)
+        expect(loaded.events.find(item => item.type === 'turn/end')).toEqual(closed)
+      } finally {
+        await reader.close()
+      }
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
 })

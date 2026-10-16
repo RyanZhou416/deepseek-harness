@@ -496,17 +496,23 @@ export class ReactLoopAgent implements Agent {
             'assistant/attempt',
             () => this.session.append('assistant/attempt', { turn, step, stream: live.stream }).seq,
           )
-          const action = await this.dispatch.waterfall(
-            'agent/request-error', {
-              turn,
-              step,
-              provider: request.provider,
-              failure: finish.failure,
-              retryPolicy: preparedCall?.retryPolicy,
-              signal,
-            },
-            () => Promise.resolve<RequestErrorAction>(undefined),
-          )
+          const action = finish.failure.retryDisposition === 'forbid'
+            // A producer-forbidden resend never reaches the recovery waterfall:
+            // the failure is terminal, so no listener can schedule a wait,
+            // repair state, or hand back an action this loop would refuse. The
+            // refusal is therefore independent of listener registration order.
+            ? undefined
+            : await this.dispatch.waterfall(
+              'agent/request-error', {
+                turn,
+                step,
+                provider: request.provider,
+                failure: finish.failure,
+                retryPolicy: preparedCall?.retryPolicy,
+                signal,
+              },
+              () => Promise.resolve<RequestErrorAction>(undefined),
+            )
           signal.throwIfAborted()
           if (action?.kind !== 'retry') {
             throw new LlmError(finish.failure.message, finish.failure.code, finish.failure)

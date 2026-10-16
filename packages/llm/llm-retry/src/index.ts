@@ -197,6 +197,11 @@ export function apply(ctx: Context, config: Config = {}, internals: RetryInterna
     next: () => Promise<RequestErrorAction>,
   ): Promise<RequestErrorAction> {
     if (policy === undefined) return next()
+    // A producer-forbidden resend outranks every policy, `always` included:
+    // this executor schedules no wait and no durable retry record, and leaves
+    // the decision to the listeners after it. The loop independently refuses
+    // any retry action for the same failure, so this is not the only guard.
+    if (failure.retryDisposition === 'forbid') return next()
     if (policy.mode === 'always') {
       if (signal.aborted || lifetime.signal.aborted) return
       const fusedSignal = AbortSignal.any([signal, lifetime.signal])

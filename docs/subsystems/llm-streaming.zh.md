@@ -239,7 +239,7 @@ type StreamChunk =
 
 ## `LlmFailure`
 
-每个抛出的失败或最终适配器的带内失败都会规范化为一种可序列化、提供方无关的 payload。`providerRetryAfterMs` 是经校验、由提供方请求的正数延迟，而不是重试决策；`ProviderRequestId` 是用于诊断的不透明品牌字符串。
+每个抛出的失败或最终适配器的带内失败都会规范化为一种可序列化、提供方无关的 payload。`providerRetryAfterMs` 是经校验、由提供方请求的正数延迟，而不是重试决策；`ProviderRequestId` 是用于诊断的不透明品牌字符串。`retryDisposition: 'forbid'` 是失败唯一可携带的硬终止决定：agent loop 之后不再把该失败交给 `agent/request-error`，并拒绝任何 retry 动作；`dsh-llm-retry` 不安排等待。因此 `always` 模式与 listener 注册顺序都无法发出第二次请求。`LlmRuntime.failureRecoveryVersion` 是 Host 发行版对这条完整契约——归一、持久保留、恢复调度与重发闸门——声明的版本；未实现该契约的构建没有此字段，自带 loop 的调用方必须自行执行该决定。
 
 ```ts type-equiv
 /** Serializable provider or transport failure facts; policy decides whether they are retryable. */
@@ -261,6 +261,20 @@ interface LlmFailure {
    * selected occurrences in an `image/offload` event and retries the step.
    */
   readonly offloadImages?: number
+  /**
+   * `'forbid'` when the producer of this failure forbids every automatic
+   * resend of the logical request that produced it — no recovery listener may
+   * cause a second provider request, whatever the provider's retry policy is
+   * configured to do. Absent means the failure carries no such decision and
+   * ordinary policy decides.
+   *
+   * The agent loop treats such a failure as terminal without offering it to
+   * `agent/request-error`, and `dsh-llm-retry` schedules no wait for it, so no
+   * listener's action and no registration order can dispatch a second request.
+   * Provider-specific refusal classification stays with the adapter that sets
+   * it; this field carries only the provider-neutral disposition.
+   */
+  readonly retryDisposition?: 'forbid'
 }
 ```
 
@@ -904,6 +918,93 @@ declare abstract class LlmAdapter {
 
 `ContentBlockType`（带 `index` 关联的块所携带的键集合）从上文的 [`ContentBlockMap`](#content-blocks-and-messages) 派生。
 
+## 发送前请求记录
+
+`ctx.llmRequestRecord` 发布某个模型路由已组装、即将发送的内容。路由在发送 Messages 请求之前调用 `recordPreparedRequest()`；服务随即向拥有该请求的会话日志追加一条 `llm/request-record` 事件，并等待该日志到达持久存储。此前的文件准备不受这一记录屏障约束。记录只陈述已组装的内容，从不陈述发送结果：持久化等待失败、被拒或触发期限时，记录仍留在日志中，而发送被禁止。有界等待、提供方与该事件的机密级别由[包 README](../../packages/llm/llm-request-record/README.zh.md)负责；完整的事件 payload（含类别 `LlmRequestRecordPurpose`）由生成的[持久化目录](../persistence-catalog.zh.md)负责。
+
+### `LlmRequestRecordContext`
+
+`recordPreparedRequest()` 的会话参数：接收该记录的日志。
+
+```ts type-equiv
+/** The session whose log receives one prepared-request record. */
+interface LlmRequestRecordContext {
+  /** Live session that owns the request being recorded. */
+  readonly sessionId: SessionId
+}
+```
+
+### `LlmRequestRecordPayload`
+
+`recordPreparedRequest()` 的观察参数。
+
+```ts type-equiv
+/**
+ * What a producer observed, which the recording service completes into
+ * {@link LlmRequestRecordData}.
+ *
+ * The version, the phase and the system digest are deliberately not caller
+ * input: the service derives them, so every record of one build states the same
+ * schema and the digest always describes exactly
+ * {@link LlmRequestRecordData.systemBlocks}.
+ */
+interface LlmRequestRecordPayload {
+  /** Producer discriminant of the route that built the request. */
+  readonly provider: 'claude'
+  /** Model id the request names. */
+  readonly model: string
+  /** Closed request classification. */
+  readonly purpose: LlmRequestRecordPurpose
+  /** The emitted system text, one entry per system block, in wire order. */
+  readonly systemBlocks: readonly string[]
+  /** The pinned wire library that built the recorded body, as `name@version`. */
+  readonly wireLibrary: string
+  /** The compatibility profile the builder reported for the recorded body. */
+  readonly profile: string
+}
+```
+
+### `LlmRequestRecordOutcome`
+
+`recordPreparedRequest()` 解析出的结果。
+
+```ts type-equiv
+/**
+ * What one recording attempt produced.
+ *
+ * `ok: true` carries the recorded event's own sequence number — the only
+ * identity a prepared record has. `ok: false` forbids the send: no durable
+ * record carries the request, and the caller's retry disposition is `forbid`.
+ *
+ * The union is the capability's whole failure vocabulary, so a caller routes on
+ * one set of codes. `REQUEST_RECORD_UNAVAILABLE` is what this service reports;
+ * `CLAUDE_REQUEST_RECORD_CONTEXT_REQUIRED` is reported by a producer that
+ * reaches the seam with no session at all, before there is a service call to
+ * make, and it is declared here so that both sides name the same code.
+ */
+type LlmRequestRecordOutcome =
+  | { readonly ok: true; readonly preparedId: SessionSeq }
+  | { readonly ok: false; readonly code: LlmRequestRecordFailureCode }
+```
+
+### `LlmRequestRecordFailureCode`
+
+`ok: false` 结果可携带的 code。
+
+```ts type-equiv
+/**
+ * Fixed reasons a prepared record could not be published.
+ *
+ * Both forbid the send: the producer holds no durable record of the request it
+ * was about to submit, and resending would repeat that condition. The service
+ * states them as `ok: false` results; the producer's own local constants carry
+ * the same literals, checked against this union at compile time.
+ */
+type LlmRequestRecordFailureCode =
+  | 'REQUEST_RECORD_UNAVAILABLE'
+  | 'CLAUDE_REQUEST_RECORD_CONTEXT_REQUIRED'
+```
+
 <!-- BEGIN GENERATED cordis-surface (gen-cordis-catalog.ts) — do not edit between markers -->
 
 <a id="cordis-surface"></a>
@@ -1096,6 +1197,29 @@ stream(options: GenerateOptions): AsyncIterable<StreamChunk>
 Types: [FileAttachmentRef](attachment.zh.md)
 
 Source: [`packages/llm/llm/src/index.ts`](../../packages/llm/llm/src/index.ts)
+
+<a id="ctxllmrequestrecord--llmrequestrecordservice-abstract-seam"></a>
+
+### `ctx.llmRequestRecord` — `LlmRequestRecordService` (abstract seam)
+
+Abstract recording service: the capability a model route depends on to publish a prepared request.
+
+One implementation per context; a consumer reaches it through `ctx.inject(['llmRequestRecord'], …)` (a scoped dependency) or `ctx.get`, never by appending to a session itself.
+
+```ts cordis-catalog
+/**
+ * Append one prepared request to its session's log and wait for that log to
+ * reach durable storage, bounded by the configured deadline.
+ * @param context - the live session that owns the request.
+ * @param payload - the producer's observation of the request it is about to submit.
+ * @returns the recorded event's sequence number, or the fixed reason the
+ *   producer must not send. Every condition a producer acts on arrives here as
+ *   a result; this method does not reject for one.
+ */
+abstract recordPreparedRequest( context: LlmRequestRecordContext, payload: LlmRequestRecordPayload, ): Promise<LlmRequestRecordOutcome>
+```
+
+Source: [`packages/llm/llm-request-record/src/index.ts`](../../packages/llm/llm-request-record/src/index.ts)
 
 <a id="llm-events"></a>
 

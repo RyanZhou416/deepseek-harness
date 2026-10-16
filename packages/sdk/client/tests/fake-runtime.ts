@@ -31,6 +31,8 @@
  *   data member (`no-data`) for wire-validation probes.
  * - `FAKE_EMPTY_MESSAGE`: record an empty assistant/message whose embedded
  *   stream contains only usage and max-tokens settlement.
+ * - `FAKE_REQUEST_RECORD`: JSON record-data payload for one `llm/request-record`
+ *   event between the turn's `turn/start` and `assistant/message`.
  * - `FAKE_HANG_INIT`: never answer `initialize` (mid-handshake cancel probe).
  * - `FAKE_INIT_READY` + `FAKE_INIT_GO`: touch the READY file when `initialize`
  *   arrives, then poll for the GO file before answering (deterministic
@@ -120,6 +122,9 @@ function runTurn(sessionId: string): void {
     return
   }
   event(sessionId, 'turn/start', { turn: 0 })
+  if (env.FAKE_REQUEST_RECORD !== undefined) {
+    event(sessionId, 'llm/request-record', JSON.parse(env.FAKE_REQUEST_RECORD) as object)
+  }
   if (env.FAKE_MALFORMED_MESSAGE !== undefined) {
     event(sessionId, 'assistant/attempt', {
       turn: 0,

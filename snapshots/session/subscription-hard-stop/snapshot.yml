@@ -1,0 +1,9 @@
+version: 1
+scenario: subscription-hard-stop
+profile: headless
+composition: retry
+recording: authored
+header:
+  class: retry
+replay:
+  override: true

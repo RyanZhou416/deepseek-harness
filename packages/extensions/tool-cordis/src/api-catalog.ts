@@ -1343,6 +1343,11 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
     description: 'The abstract `llm` service: an adapter registry plus a streaming model-call API, interceptable via the `llm/stream` waterfall.',
     methods: [
       {
+        signature: 'readonly failureRecoveryVersion: number = 1',
+        description: 'Version of the provider-neutral failure-recovery contract this Host build implements. `1` means adapter failures are normalized without losing LlmFailure.retryDisposition, the Session log and its readers retain it, and every automatic resend path of the shipping composition — the agent loop\'s `agent/request-error` decision and `dsh-llm-retry`\'s scheduling — honors it. A consumer that wires its own loop or retry executor must enforce the disposition itself; this number describes the Host that ships this service, not the caller\'s composition.\n\nConfiguration cannot raise or fake this value, and it is absent on a build that does not implement the contract, so an adapter that requires the guarantee refuses to register instead of degrading silently.',
+        parameters: [],
+      },
+      {
         signature: 'registerAdapter(providers: string[], adapter: LlmAdapter): AdapterRegistrationHandle',
         description: 'Register an adapter for the given provider routes. Throws `LlmError` with code `DUPLICATE_ADAPTER` if any provider already has an adapter (all-or-nothing). Disposed with the fiber.',
         parameters: [{ name: 'providers', description: 'every provider route this adapter should serve.' }, { name: 'adapter', description: 'the adapter that streams calls for those providers.' }],
@@ -1432,6 +1437,19 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
         description: 'Stream one model call as raw chunks (token-level deltas). Replay state is retained only when the same adapter instance owns its historical provider and the target provider. Final adapter selection remains fixed through asynchronous exact-model resolution and dispatch. Adapter selection, dispatch, and iteration failures become terminal `error` or `aborted` finish chunks; middleware, nested-call, cleanup, and consumer failures remain thrown.',
         parameters: [{ name: 'options', description: 'the full request; `options.provider` selects the adapter.' }],
         returns: 'the chunk stream, possibly wrapped by `llm/stream` listeners.',
+      },
+    ],
+  },
+  {
+    key: 'llmRequestRecord',
+    summary: 'Abstract recording service: the capability a model route depends on to publish a prepared request.',
+    description: 'Abstract recording service: the capability a model route depends on to publish a prepared request.\n\nOne implementation per context; a consumer reaches it through `ctx.inject([\'llmRequestRecord\'], …)` (a scoped dependency) or `ctx.get`, never by appending to a session itself.',
+    methods: [
+      {
+        signature: 'abstract recordPreparedRequest( context: LlmRequestRecordContext, payload: LlmRequestRecordPayload, ): Promise<LlmRequestRecordOutcome>',
+        description: 'Append one prepared request to its session\'s log and wait for that log to reach durable storage, bounded by the configured deadline.',
+        parameters: [{ name: 'context', description: 'the live session that owns the request.' }, { name: 'payload', description: 'the producer\'s observation of the request it is about to submit.' }],
+        returns: 'the recorded event\'s sequence number, or the fixed reason the producer must not send. Every condition a producer acts on arrives here as a result; this method does not reject for one.',
       },
     ],
   },
@@ -5375,7 +5393,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'LlmFailure',
-    declaration: 'export interface LlmFailure {\n    readonly message: string;\n    readonly code: string;\n    readonly status?: number;\n    readonly providerRetryAfterMs?: number;\n    readonly requestId?: ProviderRequestId;\n    readonly offloadImages?: number;\n}',
+    declaration: 'export interface LlmFailure {\n    readonly message: string;\n    readonly code: string;\n    readonly status?: number;\n    readonly providerRetryAfterMs?: number;\n    readonly requestId?: ProviderRequestId;\n    readonly offloadImages?: number;\n    readonly retryDisposition?: \'forbid\';\n}',
   },
   {
     name: 'LlmImageRequestPrice',
@@ -5410,12 +5428,32 @@ export const TYPE_API: readonly TypeApiEntry[] = [
     declaration: 'export interface LlmReasoningEffortInfo {\n    id: ReasoningEffortId;\n    name: string;\n    description?: string;\n}',
   },
   {
+    name: 'LlmRequestRecordContext',
+    declaration: 'export interface LlmRequestRecordContext {\n    readonly sessionId: SessionId;\n}',
+  },
+  {
+    name: 'LlmRequestRecordFailureCode',
+    declaration: 'export type LlmRequestRecordFailureCode = \'REQUEST_RECORD_UNAVAILABLE\' | \'CLAUDE_REQUEST_RECORD_CONTEXT_REQUIRED\';',
+  },
+  {
+    name: 'LlmRequestRecordOutcome',
+    declaration: 'export type LlmRequestRecordOutcome = {\n    readonly ok: true;\n    readonly preparedId: SessionSeq;\n} | {\n    readonly ok: false;\n    readonly code: LlmRequestRecordFailureCode;\n};',
+  },
+  {
+    name: 'LlmRequestRecordPayload',
+    declaration: 'export interface LlmRequestRecordPayload {\n    readonly provider: \'claude\';\n    readonly model: string;\n    readonly purpose: LlmRequestRecordPurpose;\n    readonly systemBlocks: readonly string[];\n    readonly wireLibrary: string;\n    readonly profile: string;\n}',
+  },
+  {
+    name: 'LlmRequestRecordPurpose',
+    declaration: 'export type LlmRequestRecordPurpose = NonNullable<GenerateOptions[\'purpose\']> | \'conversation\';',
+  },
+  {
     name: 'LlmResolvedModelInfo',
     declaration: 'export interface LlmResolvedModelInfo extends LlmModelInfo {\n    context?: LlmModelContext;\n    defaultMaxTokens?: number;\n    reasoning?: LlmModelReasoningInfo;\n    systemPromptUpdate?: SystemPromptUpdate;\n}',
   },
   {
     name: 'LlmRuntime',
-    declaration: 'export class LlmRuntime extends TypertRemoteService {\n    constructor(ctx: Context);\n    registerAdapter(providers: string[], adapter: LlmAdapter): AdapterRegistrationHandle;\n    @Remote\n    listProviders(): LlmProviderInfo[];\n    registerConfigurableProviders(entries: readonly LlmConfigurableProvider[]): DirectoryRegistrationHandle;\n    @Remote\n    listConfigurableProviders(): LlmConfigurableProvider[];\n    registerModelDiscovery(settingsNs: string, discover: (request: LlmModelDiscoveryRequest, signal?: AbortSignal) => Promise<readonly LlmDiscoveredModel[]>): () => void;\n    async discoverModels(settingsNs: string, request: LlmModelDiscoveryRequest, signal?: AbortSignal): Promise<LlmDiscoveredModel[]>;\n    @Remote(\'discoverModels\')\n    async remoteDiscoverModels(settingsNs: string, request: LlmModelDiscoveryRequest, signal: AbortSignal): Promise<LlmDiscoveredModel[]>;\n    providerRetryPolicy(provider: string): ResolvedRetryPolicy;\n    imageRequestPricing(provider: string, model: string): LlmImageRequestPricing | undefined;\n    fileRequestText(ref: FileAttachmentRef): string;\n    async listModels(provider: string): Promise<LlmModelInfo[]>;\n    async resolveModelInfo(provider: string, model: string, signal?: AbortSignal): Promise<LlmResolvedModelInfo>;\n    async resolveCallConfig(config: LlmCallConfig, signal?: AbortSignal): Promise<LlmCallConfig>;\n    async prepareCall(config: LlmCallConfig, signal?: AbortSignal): Promise<PreparedLlmCall>;\n    stream(options: GenerateOptions) /* …truncated — full shape in source */',
+    declaration: 'export class LlmRuntime extends TypertRemoteService {\n    readonly failureRecoveryVersion: number;\n    constructor(ctx: Context);\n    registerAdapter(providers: string[], adapter: LlmAdapter): AdapterRegistrationHandle;\n    @Remote\n    listProviders(): LlmProviderInfo[];\n    registerConfigurableProviders(entries: readonly LlmConfigurableProvider[]): DirectoryRegistrationHandle;\n    @Remote\n    listConfigurableProviders(): LlmConfigurableProvider[];\n    registerModelDiscovery(settingsNs: string, discover: (request: LlmModelDiscoveryRequest, signal?: AbortSignal) => Promise<readonly LlmDiscoveredModel[]>): () => void;\n    async discoverModels(settingsNs: string, request: LlmModelDiscoveryRequest, signal?: AbortSignal): Promise<LlmDiscoveredModel[]>;\n    @Remote(\'discoverModels\')\n    async remoteDiscoverModels(settingsNs: string, request: LlmModelDiscoveryRequest, signal: AbortSignal): Promise<LlmDiscoveredModel[]>;\n    providerRetryPolicy(provider: string): ResolvedRetryPolicy;\n    imageRequestPricing(provider: string, model: string): LlmImageRequestPricing | undefined;\n    fileRequestText(ref: FileAttachmentRef): string;\n    async listModels(provider: string): Promise<LlmModelInfo[]>;\n    async resolveModelInfo(provider: string, model: string, signal?: AbortSignal): Promise<LlmResolvedModelInfo>;\n    async resolveCallConfig(config: LlmCallConfig, signal?: AbortSignal): Promise<LlmCallConfig>;\n    async prepareCall(config: LlmCallConfig, signal?: AbortSignal): Promise<PreparedL /* …truncated — full shape in source */',
   },
   {
     name: 'LocalizedText',

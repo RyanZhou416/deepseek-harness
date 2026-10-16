@@ -1,0 +1,8 @@
+# Real Loader composition for the prepared-request recording seam. The package's
+# own entry is mounted by name with the durability bound it requires, over the
+# session store every record is appended to.
+- name: '@deepseek-ai/dsh-session'
+
+- name: '@deepseek-ai/dsh-llm-request-record'
+  config:
+    flushTimeoutMs: 2000

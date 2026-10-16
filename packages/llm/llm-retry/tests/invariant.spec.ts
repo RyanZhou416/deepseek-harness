@@ -121,6 +121,7 @@ describe('llm-retry invariants', () => {
           status: 429,
           providerRetryAfterMs: 25,
           requestId: ProviderRequestId('request-1'),
+          retryDisposition: 'forbid',
         },
       })
     }).not.toThrow()
@@ -146,6 +147,11 @@ describe('llm-retry invariants', () => {
       ],
       ['request-id-type', { message: 'failed', code: 'RATE_LIMIT', requestId: 1 }, /failure\.requestId/],
       ['request-id-empty', { message: 'failed', code: 'RATE_LIMIT', requestId: '' }, /failure\.requestId/],
+      [
+        'retry-disposition-unknown',
+        { message: 'failed', code: 'RATE_LIMIT', retryDisposition: 'never' },
+        /failure\.retryDisposition/,
+      ],
     ]
     for (const [name, invalidFailure, message] of invalidFailures) {
       const session = openStep(ctx, `retry-invariant-failure-${name}`)

@@ -237,7 +237,7 @@ Process-local `agent/assistant-stream` frames carry live presentation. Durable r
 
 ## `LlmFailure`
 
-Every thrown or in-band final-adapter failure normalizes to one serializable provider-neutral payload. `providerRetryAfterMs` is a validated positive delay requested by the provider, not a retry decision; `ProviderRequestId` is an opaque branded string for diagnostics.
+Every thrown or in-band final-adapter failure normalizes to one serializable provider-neutral payload. `providerRetryAfterMs` is a validated positive delay requested by the provider, not a retry decision; `ProviderRequestId` is an opaque branded string for diagnostics. `retryDisposition: 'forbid'` is the one hard-stop decision a failure can carry: the agent loop then never offers the failure to `agent/request-error` and refuses any retry action, and `dsh-llm-retry` schedules no wait, so `always` mode and listener registration order cannot dispatch a second request. `LlmRuntime.failureRecoveryVersion` is the Host build's declared version of that complete contract — normalization, durable retention, recovery scheduling, and the resend gate; it is absent on a build that does not implement it, and a caller wiring its own loop must enforce the disposition itself.
 
 ```ts type-equiv
 /** Serializable provider or transport failure facts; policy decides whether they are retryable. */
@@ -259,6 +259,20 @@ interface LlmFailure {
    * selected occurrences in an `image/offload` event and retries the step.
    */
   readonly offloadImages?: number
+  /**
+   * `'forbid'` when the producer of this failure forbids every automatic
+   * resend of the logical request that produced it — no recovery listener may
+   * cause a second provider request, whatever the provider's retry policy is
+   * configured to do. Absent means the failure carries no such decision and
+   * ordinary policy decides.
+   *
+   * The agent loop treats such a failure as terminal without offering it to
+   * `agent/request-error`, and `dsh-llm-retry` schedules no wait for it, so no
+   * listener's action and no registration order can dispatch a second request.
+   * Provider-specific refusal classification stays with the adapter that sets
+   * it; this field carries only the provider-neutral disposition.
+   */
+  readonly retryDisposition?: 'forbid'
 }
 ```
 
@@ -898,6 +912,93 @@ declare abstract class LlmAdapter {
 
 `ContentBlockType` (the key set the `index`-correlated blocks carry) derives from [`ContentBlockMap`](#content-blocks-and-messages) above.
 
+## Prepared-request recording
+
+`ctx.llmRequestRecord` publishes what one model route has assembled and is about to send. The route calls `recordPreparedRequest()` before sending its Messages request; the service appends one `llm/request-record` event to the owning session's log and waits for that log to reach durable storage. Earlier file preparation is outside this recording barrier. A record states what was emitted, never an outcome: a failed, rejected or timed-out durability wait still leaves the record in the log and forbids the send. The [package README](../../packages/llm/llm-request-record/README.md) owns the bounded wait, the provider and the event's confidentiality; the generated [persistence catalog](../persistence-catalog.md) owns the complete event payload, the `LlmRequestRecordPurpose` classification included.
+
+### `LlmRequestRecordContext`
+
+The session argument of `recordPreparedRequest()`: the log that receives the record.
+
+```ts type-equiv
+/** The session whose log receives one prepared-request record. */
+interface LlmRequestRecordContext {
+  /** Live session that owns the request being recorded. */
+  readonly sessionId: SessionId
+}
+```
+
+### `LlmRequestRecordPayload`
+
+The observation argument of `recordPreparedRequest()`.
+
+```ts type-equiv
+/**
+ * What a producer observed, which the recording service completes into
+ * {@link LlmRequestRecordData}.
+ *
+ * The version, the phase and the system digest are deliberately not caller
+ * input: the service derives them, so every record of one build states the same
+ * schema and the digest always describes exactly
+ * {@link LlmRequestRecordData.systemBlocks}.
+ */
+interface LlmRequestRecordPayload {
+  /** Producer discriminant of the route that built the request. */
+  readonly provider: 'claude'
+  /** Model id the request names. */
+  readonly model: string
+  /** Closed request classification. */
+  readonly purpose: LlmRequestRecordPurpose
+  /** The emitted system text, one entry per system block, in wire order. */
+  readonly systemBlocks: readonly string[]
+  /** The pinned wire library that built the recorded body, as `name@version`. */
+  readonly wireLibrary: string
+  /** The compatibility profile the builder reported for the recorded body. */
+  readonly profile: string
+}
+```
+
+### `LlmRequestRecordOutcome`
+
+What `recordPreparedRequest()` resolves to.
+
+```ts type-equiv
+/**
+ * What one recording attempt produced.
+ *
+ * `ok: true` carries the recorded event's own sequence number — the only
+ * identity a prepared record has. `ok: false` forbids the send: no durable
+ * record carries the request, and the caller's retry disposition is `forbid`.
+ *
+ * The union is the capability's whole failure vocabulary, so a caller routes on
+ * one set of codes. `REQUEST_RECORD_UNAVAILABLE` is what this service reports;
+ * `CLAUDE_REQUEST_RECORD_CONTEXT_REQUIRED` is reported by a producer that
+ * reaches the seam with no session at all, before there is a service call to
+ * make, and it is declared here so that both sides name the same code.
+ */
+type LlmRequestRecordOutcome =
+  | { readonly ok: true; readonly preparedId: SessionSeq }
+  | { readonly ok: false; readonly code: LlmRequestRecordFailureCode }
+```
+
+### `LlmRequestRecordFailureCode`
+
+The codes an `ok: false` outcome can carry.
+
+```ts type-equiv
+/**
+ * Fixed reasons a prepared record could not be published.
+ *
+ * Both forbid the send: the producer holds no durable record of the request it
+ * was about to submit, and resending would repeat that condition. The service
+ * states them as `ok: false` results; the producer's own local constants carry
+ * the same literals, checked against this union at compile time.
+ */
+type LlmRequestRecordFailureCode =
+  | 'REQUEST_RECORD_UNAVAILABLE'
+  | 'CLAUDE_REQUEST_RECORD_CONTEXT_REQUIRED'
+```
+
 <!-- BEGIN GENERATED cordis-surface (gen-cordis-catalog.ts) — do not edit between markers -->
 
 <a id="cordis-surface"></a>
@@ -1090,6 +1191,29 @@ stream(options: GenerateOptions): AsyncIterable<StreamChunk>
 Types: [FileAttachmentRef](attachment.md)
 
 Source: [`packages/llm/llm/src/index.ts`](../../packages/llm/llm/src/index.ts)
+
+<a id="ctxllmrequestrecord--llmrequestrecordservice-abstract-seam"></a>
+
+### `ctx.llmRequestRecord` — `LlmRequestRecordService` (abstract seam)
+
+Abstract recording service: the capability a model route depends on to publish a prepared request.
+
+One implementation per context; a consumer reaches it through `ctx.inject(['llmRequestRecord'], …)` (a scoped dependency) or `ctx.get`, never by appending to a session itself.
+
+```ts cordis-catalog
+/**
+ * Append one prepared request to its session's log and wait for that log to
+ * reach durable storage, bounded by the configured deadline.
+ * @param context - the live session that owns the request.
+ * @param payload - the producer's observation of the request it is about to submit.
+ * @returns the recorded event's sequence number, or the fixed reason the
+ *   producer must not send. Every condition a producer acts on arrives here as
+ *   a result; this method does not reject for one.
+ */
+abstract recordPreparedRequest( context: LlmRequestRecordContext, payload: LlmRequestRecordPayload, ): Promise<LlmRequestRecordOutcome>
+```
+
+Source: [`packages/llm/llm-request-record/src/index.ts`](../../packages/llm/llm-request-record/src/index.ts)
 
 <a id="llm-events"></a>
 

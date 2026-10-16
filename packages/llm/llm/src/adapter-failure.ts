@@ -70,13 +70,15 @@ function failureSnapshot(value: unknown): LlmFailure | undefined {
     const providerRetryAfterMs = candidate.providerRetryAfterMs
     const requestId = candidate.requestId
     const offloadImages = candidate.offloadImages
+    const retryDisposition = candidate.retryDisposition
     if (typeof message !== 'string' || message.length === 0
       || typeof code !== 'string' || code.length === 0
       || (status !== undefined && (!Number.isInteger(status) || status < 100 || status > 599))
       || (providerRetryAfterMs !== undefined
         && (!Number.isFinite(providerRetryAfterMs) || providerRetryAfterMs <= 0))
       || (requestId !== undefined && (typeof requestId !== 'string' || requestId.length === 0))
-      || (offloadImages !== undefined && (!Number.isSafeInteger(offloadImages) || offloadImages <= 0))) return undefined
+      || (offloadImages !== undefined && (!Number.isSafeInteger(offloadImages) || offloadImages <= 0))
+      || (retryDisposition !== undefined && retryDisposition !== 'forbid')) return undefined
     return Object.freeze({
       message,
       code,
@@ -84,6 +86,7 @@ function failureSnapshot(value: unknown): LlmFailure | undefined {
       ...providerRetryAfterMs === undefined ? {} : { providerRetryAfterMs },
       ...requestId === undefined ? {} : { requestId },
       ...offloadImages === undefined ? {} : { offloadImages },
+      ...retryDisposition === undefined ? {} : { retryDisposition },
     })
   } catch (_sdkFailureGetter) {
     return undefined

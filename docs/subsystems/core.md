@@ -331,7 +331,7 @@ type PreStepDecision =
   }
 ```
 
-`agent/request-error` runs after a failed model step closes and before its turn closes. Listeners can repair durable state or await policy work while the failed turn's signal is still live. A handling listener returns `{ kind: 'retry' }` without calling `next()`; the default `undefined` leaves the failure terminal.
+`agent/request-error` runs after a failed model step closes and before its turn closes. Listeners can repair durable state or await policy work while the failed turn's signal is still live. A handling listener returns `{ kind: 'retry' }` without calling `next()`; the default `undefined` leaves the failure terminal. A failure whose [`LlmFailure.retryDisposition`](llm-streaming.md#llmfailure) is `'forbid'` never reaches this waterfall: the loop closes the failed step and reports the failure, so no listener can schedule a wait, repair state, or hand back an action it would have to refuse.
 
 ```ts type-equiv
 /** Action returned by a listener that owns model-request recovery. */

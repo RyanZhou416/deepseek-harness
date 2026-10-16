@@ -198,6 +198,15 @@ const SERVICE_ROLES: ServiceRole[] = [
     note: 'Adapters register provider implementations; the loop and compaction call the provider-neutral stream service.',
   },
   {
+    key: 'llmRequestRecord',
+    pkg: 'llm-request-record',
+    title: 'Prepared request recording',
+    mode: 'seam',
+    implementations: ['llm-request-record'],
+    consumers: ['dsh-plugin-subscriptions'],
+    note: 'The package owns both the service contract and its Session-log provider; the subscription plugin waits for a bounded durable record before sending Claude Messages.',
+  },
+  {
     key: 'deepseekLlmApiExtensions',
     pkg: 'deepseek-llm-api-extensions',
     title: 'Official DeepSeek request extensions',

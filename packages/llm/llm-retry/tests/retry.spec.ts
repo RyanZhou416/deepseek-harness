@@ -19,6 +19,7 @@ import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime, { defineContentToolFixture } from '@deepseek-ai/dsh-tools'
 import AgentRegistry from '@deepseek-ai/dsh-agent'
 import type { Agent, RequestErrorAction } from '@deepseek-ai/dsh-agent'
+import { agentEvents } from '@deepseek-ai/dsh-agent'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
 import * as retry from '../src/index.ts'
 
@@ -1041,5 +1042,137 @@ describe('provider-routed retry policy', () => {
     expect(() => {
       retry.apply(ctx, { retryPolciy: {} } as unknown as retry.Config)
     }).toThrow(/unknown key "retryPolciy"/)
+  })
+
+  describe('producer-forbidden resends', () => {
+    const forbidden = () => new LlmError('client protocol version refused', 'CLIENT_VERSION_UNSUPPORTED', {
+      status: 400,
+      retryDisposition: 'forbid',
+    })
+
+    it.each(['downstream', 'upstream'] as const)(
+      'never resends a forbidden failure and never offers it to a %s retry listener under always mode',
+      async (position) => {
+        vi.useFakeTimers()
+        const adapter = new ScriptedAdapter([forbidden(), textResponse('must not run')])
+        let listenerRuns = 0
+        const maliciousRetry = async (): Promise<RequestErrorAction> => {
+          listenerRuns += 1
+          return { kind: 'retry' }
+        }
+        const beforeRetry = position === 'upstream'
+          ? (ctx: Context): void => { ctx.on('agent/request-error', maliciousRetry) }
+          : undefined
+        ;({ ctx: context } = await harness(adapter, { mock: alwaysConfig({ initialDelayMs: 1, maxDelayMs: 1 }) }, beforeRetry))
+        if (position === 'downstream') context.on('agent/request-error', maliciousRetry)
+        const agent = await context.agentLoop.create(SessionId(`retry-forbid-${position}`), {
+          provider: 'mock',
+          model: 'mock',
+        })
+
+        agent.followup(createUserMessage({ content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } }))
+        await waitForIdle(context, agent)
+        await vi.advanceTimersByTimeAsync(60_000)
+
+        expect(listenerRuns).toBe(0)
+        expect(adapter.requests).toHaveLength(1)
+        expect(agent.session.snapshotEvents().filter(event => event.type === 'step/start')).toHaveLength(1)
+        expect(agent.session.snapshotEvents().some(event => event.type === 'llm/retry')).toBe(false)
+        expect(agent.session.snapshotEvents().findLast(event => event.type === 'turn/end')).toMatchObject({
+          data: {
+            reason: {
+              kind: 'error',
+              error: { code: 'CLIENT_VERSION_UNSUPPORTED', retryDisposition: 'forbid' },
+            },
+          },
+        })
+        const attempt = agent.session.snapshotEvents().findLast(event => event.type === 'assistant/attempt')
+        expect(attempt?.type === 'assistant/attempt'
+          ? expandAssistantStream(attempt.data.stream).at(-1)?.chunk
+          : undefined).toMatchObject({
+          type: 'finish',
+          reason: {
+            kind: 'error',
+            failure: { code: 'CLIENT_VERSION_UNSUPPORTED', retryDisposition: 'forbid' },
+          },
+        })
+      },
+    )
+
+    it('delegates instead of scheduling when a forbidden failure reaches the waterfall directly', async () => {
+      const adapter = new ScriptedAdapter([textResponse('unused')])
+      ;({ ctx: context } = await harness(adapter, { mock: alwaysConfig({ initialDelayMs: 1, maxDelayMs: 1 }) }))
+      const agent = await context.agentLoop.create(SessionId('retry-forbid-direct'), {
+        provider: 'mock',
+        model: 'mock',
+      })
+      let downstreamRuns = 0
+      context.on('agent/request-error', async () => { downstreamRuns += 1 })
+
+      const decision = await agentEvents(context, agent).waterfall('agent/request-error', {
+        turn: 1,
+        step: 1,
+        provider: 'mock',
+        failure: {
+          message: 'client protocol version refused',
+          code: 'CLIENT_VERSION_UNSUPPORTED',
+          retryDisposition: 'forbid',
+        },
+        retryPolicy: adapter.providerRetryPolicy('mock'),
+        signal: new AbortController().signal,
+      }, () => Promise.resolve<RequestErrorAction>(undefined))
+
+      expect(decision).toBeUndefined()
+      expect(downstreamRuns).toBe(1)
+      expect(adapter.requests).toHaveLength(0)
+      expect(agent.session.snapshotEvents().some(event => event.type === 'llm/retry')).toBe(false)
+    })
+
+    it('keeps an external cancellation authoritative for a forbidden failure', async () => {
+      class CancellingAdapter extends ScriptedAdapter {
+        cancel: () => void = () => {}
+        override async * stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
+          this.requests.push(options)
+          this.cancel()
+          throw forbidden()
+        }
+      }
+      const adapter = new CancellingAdapter([])
+      ;({ ctx: context } = await harness(adapter, { mock: alwaysConfig() }))
+      const agent = await context.agentLoop.create(SessionId('retry-forbid-cancel'), {
+        provider: 'mock',
+        model: 'mock',
+      })
+      adapter.cancel = () => { agent.cancel({ kind: 'user' }) }
+
+      agent.followup(createUserMessage({ content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } }))
+      await waitForIdle(context, agent)
+
+      expect(adapter.requests).toHaveLength(1)
+      expect(agent.session.snapshotEvents().some(event => event.type === 'llm/retry')).toBe(false)
+      expect(agent.session.snapshotEvents().at(-1)).toMatchObject({
+        type: 'turn/end',
+        data: { reason: { kind: 'aborted', reason: { kind: 'user' } } },
+      })
+    })
+
+    it('still retries the same code when the failure carries no disposition', async () => {
+      vi.useFakeTimers()
+      const adapter = new ScriptedAdapter([
+        new LlmError('client protocol version refused', 'CLIENT_VERSION_UNSUPPORTED', { status: 400 }),
+        textResponse('recovered'),
+      ])
+      ;({ ctx: context } = await harness(adapter, { mock: alwaysConfig({ initialDelayMs: 1, maxDelayMs: 1 }) }))
+      const agent = await context.agentLoop.create(SessionId('retry-no-forbid'), { provider: 'mock', model: 'mock' })
+      const scheduled = waitForRetry(context, agent, 1)
+
+      agent.followup(createUserMessage({ content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } }))
+      await scheduled
+      const idle = waitForIdle(context, agent)
+      await vi.advanceTimersByTimeAsync(1)
+      await idle
+
+      expect(adapter.requests).toHaveLength(2)
+    })
   })
 })

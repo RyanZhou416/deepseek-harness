@@ -18,6 +18,7 @@ const MESSAGE_ID = '{{messageId}}'
 const USED_TOKENS = '{{usedTokens}}'
 const CWD = '{{cwd}}'
 const SYSTEM = '{{system}}'
+const SYSTEM_DIGEST = '{{systemDigest}}'
 const TOOLS = '{{tools}}'
 const EVENT_TIME = '{{eventTime}}'
 const EVENT_OMITTED_BYTES = '{{eventOmittedBytes}}'
@@ -503,14 +504,17 @@ function hasSessionFormatVersion(rawLog: string): boolean {
 }
 
 /**
- * Replace the rendered prompt text of every `system/message` event with the
- * `{{system}}` token. The text block keeps its position and type, so the
- * fixture still shows one system node per prompt version; an empty `content`
- * (no system prompt) stays empty. Request headers and every other line pass
- * through byte-for-byte; the transform is idempotent.
+ * Replace the rendered prompt text of every `system/message` event, and the
+ * recorded request system text of every `llm/request-record` event, with the
+ * `{{system}}` token. A text block keeps its position and type, so the fixture
+ * still shows one system node per prompt version and one token per emitted
+ * request block; an empty `content` (no system prompt) stays empty, and a
+ * record that carries no system-block list stays byte-identical. A record's
+ * digest moves to `{{systemDigest}}` with the text it covers. Request headers
+ * and every other line pass through byte-for-byte; the transform is idempotent.
  *
  * @param rawLog The raw session `.jsonl` content.
- * @returns The JSONL with system-prompt text tokenized.
+ * @returns The JSONL with system-prompt and recorded request text tokenized.
  */
 export function scrubSystemPrompts(rawLog: string): string {
   return scrubModelRequestContent(rawLog, { system: true })
@@ -532,9 +536,10 @@ export function scrubToolSchemas(rawLog: string): string {
 
 /**
  * Replace all bulky model-request content in a session JSONL with stable
- * tokens: the `system/message` prompt text handled by
- * {@link scrubSystemPrompts} and the request-header tool schemas handled by
- * {@link scrubToolSchemas}. Field presence, config, and reason are kept.
+ * tokens: the `system/message` prompt text and the `llm/request-record`
+ * recorded request text handled by {@link scrubSystemPrompts}, and the
+ * request-header tool schemas handled by {@link scrubToolSchemas}. Field
+ * presence, config, reason, and every other record field are kept.
  * Lines without content to scrub pass through byte-for-byte, and the
  * transform is idempotent.
  *
@@ -611,6 +616,15 @@ function scrubModelRequestContent(rawLog: string, options: ModelRequestScrubOpti
       const block = systemPromptBlock(data)
       if (block === undefined) return line
       block.text = SYSTEM
+      return JSON.stringify(record)
+    }
+    if (options.system === true && record.type === 'llm/request-record') {
+      // A prepared-request record carries the request's own system text. One token
+      // per emitted block keeps the recorded block count readable, and the digest
+      // derived from that text is tokenized with it.
+      if (!Array.isArray(data.systemBlocks)) return line
+      data.systemBlocks = data.systemBlocks.map(() => SYSTEM)
+      data.systemDigest = SYSTEM_DIGEST
       return JSON.stringify(record)
     }
     if (options.tools === true && record.type === 'request/header') {

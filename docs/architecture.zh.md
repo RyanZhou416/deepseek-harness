@@ -111,7 +111,7 @@ turn/start
 turn/end
 ```
 
-`turn/*`、`step/*`、`system/message`、`user/message`、`assistant/message`、`assistant/attempt` 和 `tool/*` 是持久会话事件；其余是分属三个事件域的实时扩展点。`agent/assistant-stream` 发布进程本地 start、瞬态 chunk 与 end frame。loop 会在 committed end frame 前把完整紧凑 stream 提交为一个 message 或仅日志 attempt；Web Session-follow adapter 是该 live event 唯一的远程消费方。`agent/prepare-input`、`agent/pre-step`、`agent/message-surface`、`agent/request`、`llm/stream` 和三个 `tools/*` 事件是 waterfall（瀑布式事件），其监听器必须调用 `next()` 才能委托下去；`agent/turn-stopping` 是 serial 事件，没有 `next()`。
+`turn/*`、`step/*`、`system/message`、`user/message`、`assistant/message`、`assistant/attempt` 和 `tool/*` 是持久会话事件；其余是分属三个事件域的实时扩展点。`agent/assistant-stream` 发布进程本地 start、瞬态 chunk 与 end frame。loop 会在 committed end frame 前提交完整紧凑 stream，Web Session-follow adapter 是其唯一的远程消费方。`agent/prepare-input`、`agent/pre-step`、`agent/message-surface`、`agent/request`、`llm/stream` 和三个 `tools/*` 事件是 waterfall（瀑布式事件），其监听器用 `next()` 委托；失败的尝试会到达 `agent/request-error`，除非其 [`retryDisposition`](subsystems/llm-streaming.zh.md#llmfailure) 为 `'forbid'`；`agent/turn-stopping` 是 serial 事件。
 
 inbox 驱动工作：唤醒消息会启动它；idle 注入保持等待。其持久投影使待处理输入在没有 Agent 时仍可读取。最终 inbox 决定后的输入会锁存一个收敛后替代轮次。
 

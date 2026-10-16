@@ -65,4 +65,24 @@ describe('adapter failure normalization', () => {
     Object.defineProperty(error, 'message', { get() { throw new Error('message getter failed') } })
     expect(normalizeLlmFailure(error)).toEqual({ message: 'LLM adapter failed', code: 'UNKNOWN' })
   })
+
+  it('carries a producer-forbidden resend decision and drops an invalid one', () => {
+    const forbidden = new Error('client protocol version refused') as Error & { failure: unknown; code: string }
+    forbidden.failure = {
+      message: 'client protocol version refused',
+      code: 'CLIENT_VERSION_UNSUPPORTED',
+      retryDisposition: 'forbid',
+    }
+    forbidden.code = 'CLIENT_VERSION_UNSUPPORTED'
+    expect(normalizeLlmFailure(forbidden)).toEqual({
+      message: 'client protocol version refused',
+      code: 'CLIENT_VERSION_UNSUPPORTED',
+      retryDisposition: 'forbid',
+    })
+
+    const malformed = new Error('provider failed') as Error & { failure: unknown; code: string }
+    malformed.failure = { message: 'provider failed', code: 'FOREIGN', retryDisposition: 'maybe' }
+    malformed.code = 'FOREIGN'
+    expect(normalizeLlmFailure(malformed)).toEqual({ message: 'provider failed', code: 'UNKNOWN' })
+  })
 })

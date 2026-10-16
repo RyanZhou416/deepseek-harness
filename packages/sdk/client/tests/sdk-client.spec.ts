@@ -5,6 +5,7 @@
  * and session-tree scoping, error surfaces, timeouts, and the dispose ladder.
  */
 
+import { createHash } from 'node:crypto'
 import { mkdir, mkdtemp, readFile, realpath, rm, stat } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { isAbsolute, join, relative, resolve as resolvePath } from 'node:path'
@@ -212,6 +213,38 @@ describe('DeepSeekHarness', () => {
       expect(event.data).not.toHaveProperty('parameters')
       expect(event.data).not.toHaveProperty('schema')
     }
+  })
+
+  it('forwards a recorded llm/request-record event to RunResult.events unchanged', async () => {
+    const systemBlocks = ['you are a helpful agent']
+    // Fixture labels for the recorded facts, not claims about a shipped wire library.
+    const data = {
+      v: 1,
+      phase: 'prepared',
+      provider: 'claude',
+      model: 'claude-sonnet-4-5',
+      purpose: 'conversation',
+      systemBlocks,
+      systemDigest: createHash('sha256').update(JSON.stringify(systemBlocks)).digest('hex'),
+      wireLibrary: '@tormentalabs/claude-code-wire-compat@0.7.2-dsh14',
+      profile: 'claude-code-2.1.288-sdk-0.128.0',
+    }
+    const expected = { type: 'llm/request-record', seq: 2, time: 0, data }
+    const harness = harnessWith({ FAKE_REQUEST_RECORD: JSON.stringify(data) })
+
+    const result = await harness.run('record')
+
+    // The receipt is seq 0 and the fake's turn/start is seq 1, so the record is
+    // the third event; the client projects no field of it.
+    expect(result.events).toContainEqual(expected)
+    expect(result.events.map(event => event.type)).toEqual([
+      'agent/inbox/spliced',
+      'turn/start',
+      'llm/request-record',
+      'assistant/message',
+      'turn/end',
+    ])
+    expect(result.finalResponse).toBe('hello from fake runtime')
   })
 
   it('runs a turn end to end and reuses the runtime across sessions', async () => {

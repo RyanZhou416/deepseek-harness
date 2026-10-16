@@ -82,7 +82,7 @@ kind: "package-reference"
 
 ### 恢复流程
 
-失败步骤连同其提供方与解析后的策略一起到达 waterfall。always mode 先结算下游恢复，并遵循下游的 `retry` 决定；normal mode 先检查失败 code 是否合格、预算是否未耗尽。插件计算延迟——有效且在边界内的提供方 `Retry-After`，否则带对称抖动的本地有界指数退避——追加 `llm/retry` 事件，在可取消定时器上等待，追加 `llm/retry-started`，然后返回 `{ kind: 'retry' }`。loop 随后在同一个打开的轮次内重跑失败步骤（仍基于同一份持久历史）。
+失败步骤连同其提供方与解析后的策略一起到达 waterfall。携带 `LlmFailure.retryDisposition: 'forbid'` 的失败不安排任何东西就交回本监听器之后的监听器——不写 `llm/retry` 记录、不等待、不给出重试决定——因为其生产者禁止一切自动重发。always mode 先结算下游恢复，并遵循下游的 `retry` 决定；normal mode 先检查失败 code 是否合格、预算是否未耗尽。插件计算延迟——有效且在边界内的提供方 `Retry-After`，否则带对称抖动的本地有界指数退避——追加 `llm/retry` 事件，在可取消定时器上等待，追加 `llm/retry-started`，然后返回 `{ kind: 'retry' }`。loop 随后在同一个打开的轮次内重跑失败步骤（仍基于同一份持久历史），并对被禁止的失败独立拒绝任何重发，根本不把它交给这条 waterfall。
 
 ### Waterfall 组合
 

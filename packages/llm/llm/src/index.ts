@@ -86,6 +86,8 @@ export interface LlmErrorOptions extends ErrorOptions {
   requestId?: ProviderRequestId
   /** Positive count of additional oldest retained image occurrences to offload; only with `IMAGE_OFFLOAD_REQUIRED`. */
   offloadImages?: number
+  /** `'forbid'` to forbid every automatic resend of this logical request; see {@link LlmFailure.retryDisposition}. */
+  retryDisposition?: 'forbid'
 }
 
 /**
@@ -116,6 +118,9 @@ export class LlmError extends HarnessError {
       && (typeof options.requestId !== 'string' || options.requestId.length === 0)) {
       throw new Error('LlmError requestId must be a non-empty string')
     }
+    if (options?.retryDisposition !== undefined && options.retryDisposition !== 'forbid') {
+      throw new Error('LlmError retryDisposition must be "forbid" when present')
+    }
     super(message, code, options)
     this.name = 'LlmError'
     this.failure = Object.freeze({
@@ -125,6 +130,7 @@ export class LlmError extends HarnessError {
       ...options?.providerRetryAfterMs === undefined ? {} : { providerRetryAfterMs: options.providerRetryAfterMs },
       ...options?.requestId === undefined ? {} : { requestId: options.requestId },
       ...options?.offloadImages === undefined ? {} : { offloadImages: options.offloadImages },
+      ...options?.retryDisposition === undefined ? {} : { retryDisposition: options.retryDisposition },
     })
   }
 }
@@ -336,6 +342,22 @@ export interface DirectoryRegistrationHandle {
  * API, interceptable via the `llm/stream` waterfall.
  */
 export class LlmRuntime extends TypertRemoteService {
+  /**
+   * Version of the provider-neutral failure-recovery contract this Host build
+   * implements. `1` means adapter failures are normalized without losing
+   * {@link LlmFailure.retryDisposition}, the Session log and its readers retain
+   * it, and every automatic resend path of the shipping composition — the
+   * agent loop's `agent/request-error` decision and `dsh-llm-retry`'s
+   * scheduling — honors it. A consumer that wires its own loop or retry
+   * executor must enforce the disposition itself; this number describes the
+   * Host that ships this service, not the caller's composition.
+   *
+   * Configuration cannot raise or fake this value, and it is absent on a build
+   * that does not implement the contract, so an adapter that requires the
+   * guarantee refuses to register instead of degrading silently.
+   */
+  readonly failureRecoveryVersion: number = 1
+
   private adapters = new Map<string, AdapterRegistration>()
   private directory = new Map<string, LlmConfigurableProvider>()
   private discoveries = new Map<
