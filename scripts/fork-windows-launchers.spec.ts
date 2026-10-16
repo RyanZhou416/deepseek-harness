@@ -43,6 +43,14 @@ describe('Windows fork launchers', () => {
     }
   })
 
+  it('gates a prepared AetherShell activation before the normal Host launch', () => {
+    const source = readFileSync(runLauncher, 'utf8')
+    expect(source).toContain('if exist "%DSH_HOME%\\aether-activation.pending.json"')
+    expect(source.indexOf('scripts\\fork-activate-aether.ps1')).toBeLessThan(source.indexOf('dsh web --patch'))
+    expect(source).toContain('if errorlevel 1 goto :failed')
+    expect(readFileSync(buildLauncher, 'utf8')).not.toContain('activate-aether')
+  })
+
   function fixture(brokenCache: boolean) {
     const root = mkdtempSync(join(tmpdir(), 'dsh windows clean-'))
     temporaryRoots.push(root)
@@ -128,6 +136,25 @@ describe('Windows fork launchers', () => {
       'pnpm run build',
       `pnpm dsh web --patch ${join(repositoryRoot, 'fork-runtime', 'diagnostics', 'cordis.patch.yml')}`,
     ])
+  })
+
+  it.skipIf(process.platform !== 'win32')('refuses an invalid prepared update without starting the Host or changing the plan', () => {
+    const { root, bin, log, entry } = fixture(false)
+    mkdirSync(join(root, `dsh-pnpm-${pnpmVersion}`, 'node_modules', 'pnpm', 'bin'), { recursive: true })
+    writeFileSync(entry, readFileSync(join(root, 'pnpm-stub.mjs')))
+    const home = join(root, 'dsh-home')
+    mkdirSync(home)
+    const pending = join(home, 'aether-activation.pending.json')
+    const plan = JSON.stringify({ schemaVersion: 0, completed: false })
+    writeFileSync(pending, plan)
+
+    const result = launch(runLauncher, root, bin, log)
+
+    expect(result.signal, result.stderr || result.stdout).toBeNull()
+    expect(result.status, result.stderr || result.stdout).toBe(1)
+    expect(result.stdout + result.stderr).toContain('unsupported version')
+    expect(readFileSync(pending, 'utf8')).toBe(plan)
+    expect(existsSync(log) ? readFileSync(log, 'utf8') : '').not.toContain('dsh web')
   })
 
   it.skipIf(process.platform !== 'win32')('keeps pnpm started by installation work off the broken Corepack shim', () => {
