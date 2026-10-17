@@ -393,9 +393,23 @@ describe('child outlets and the renderSlot binding', () => {
     const { view } = mountRoot(h, { 'k.list': { kind: 'list', scope: 'root' } },
       renderSlot => renderSlot('k.list', {}))
     spy.mockRestore()
-    expect(view.container.textContent).toBe('alive')
+  expect(view.container.textContent).toContain('alive')
+  expect(view.container.querySelector('[data-slot-error] button')).not.toBeNull()
     expect(view.container.querySelector('[data-slot-error]')).not.toBeNull()
   })
+  it('renders a visible crash face with a reload action instead of a silent anchor', () => {
+    const h = makeHost()
+    h.declare('k.single', SINGLE_ROOT)
+    h.add('k.single', { component: () => { throw new Error('face boom') } })
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const { view } = mountRoot(h, { 'k.single': SINGLE_ROOT }, renderSlot => renderSlot('k.single', {}))
+    spy.mockRestore()
+    const face = view.container.querySelector('[data-slot-error="k.single"]')
+    expect(face).not.toBeNull()
+    expect(face?.getAttribute('role')).toBe('alert')
+    expect(face?.querySelector('button')).not.toBeNull()
+  })
+
 })
 
 describe('chain outlets and the renderSlotChain binding', () => {
@@ -1057,7 +1071,8 @@ describe('inject: execution point, parameter derivation, cache granularity', () 
     spy.mockRestore()
     // The failing entry blacks out alone; the sibling and the tree above survive.
     expect(view.container.querySelector('main')).not.toBeNull()
-    expect(view.container.textContent).toBe('alive')
+  expect(view.container.textContent).toContain('alive')
+  expect(view.container.querySelector('[data-slot-error] button')).not.toBeNull()
     expect(view.container.querySelector('[data-slot-error]')).not.toBeNull()
   })
 

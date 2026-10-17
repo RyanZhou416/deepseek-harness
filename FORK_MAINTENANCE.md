@@ -568,6 +568,12 @@ Fork 不再维护独立 subagent Queue Remote 或错误码。后续上游合并�
 
 客户端模块热替换（重建 `lib/client.js` 后浏览器收到新模块）时，旧模块的 `conversation` service 会先于它的 slot 座位卸载而被撤销。`conversation.composer.bar` 的 inject 原先调用 `concreteConversation(ctx)` 并在服务缺失时抛错，`SlotErrorBoundary` 把该座位换成空的 crash face，输入栏消失（上游讨论 #5119）。修复：inject 先取 `ctx.get('conversation')`，缺失时返回与「无会话」相同的 inert bar；重载后的模块挂载全新 entry 并缓存真实 props，所以这只是一次渲染窗口。**Preservation rule.** 任何在 inject 里按 ctx 查找本插件服务的代码都必须容忍短暂缺失。**Focused verification.** `packages/client/ui-conversation/tests` 790 项通过；客户端 typecheck 5/5；重建 `lib/client.js` 后页面模块 rev 变化即复现该窗口，控制台不再出现 `slot entry crashed in 'conversation.composer.bar'`。
 
+#### Visible slot crash face
+
+`SlotErrorBoundary` 与 dry-cell 出口原先只渲染空的 `<div data-slot-error>`：任何 slot 渲染异常（包括 composer 的 inject 崩溃）都表现为静默消失、只能刷新恢复（上游讨论 #1614 的第一处缺陷）。本 fork 改为可见的 `role="alert"` 面板：显示运行时错误信息与一个重新加载按钮（`aria-label` 取 slot key），并保留 `data-slot-error` 供测试与诊断；不引入新的本地化文案，避免 `client/locale` 与 renderer 之间的项目引用环（locale 已引用 ui-renderer）。**Preservation rule.** 上游重写崩溃面时保留可见性、`role="alert"`、重新加载动作与 `data-slot-error`。**Focused verification.** `packages/client/ui-renderer/tests/scoped-slots.client.spec.tsx` 的 "renders a visible crash face" 用例。
+
+**Known gap.** fork base 的 `OccurrenceRecoveryState` 与 `retryDomMutation`（keyed occurrence 的崩溃恢复，Chat 的 `AssistantRecovery` 依赖它）在 0.2.1 合并后只剩 `ui-slots` 的类型与测试，renderer 实现缺失；该 spec 的 16 个 recovery 用例在本次改动之前就已失败。恢复该实现是独立工作项。
+
 ### Released V3 error-turn migration
 
 `session-format-v3-to-v4` 只在 V3 step 已记录 `tool/call`、没有追加结果且同一 turn 随后以 `reason.kind: 'error'` 结束时，于 `step/end` 前插入 `TOOL_OUTCOME_UNKNOWN` 的 tool 角色错误结果，引用已记录的启动事件；它不执行工具，也不把已开始调用伪称为 `TOOL_NOT_STARTED`。正常完成轮次、后续新 step 和未关闭尾部继续拒绝，原始 V3 代际保持不变。上游合并须保留这一限定修复与原生 V4 的未结算调用拒绝规则。聚焦验证由 `packages/session/session-format-v3-to-v4/tests/error-turn-tools.spec.ts` 和 `packages/session/session-persistence-jsonl/tests/v3-error-tool-migration.spec.ts` 覆盖；一份 7,011 事件的真实 V3 日志经实际 JSONL 后端只读恢复为 7,012 个 V4 事件，源 SHA-256 未变，未发布后继文件。

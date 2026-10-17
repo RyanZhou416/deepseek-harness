@@ -402,13 +402,35 @@ function sessionGenerationKeyOf(binding: ScopedStandardSourceBinding): number {
  * only shows until that re-render lands (permanently once the cell is dry —
  * the outlet then owns the crash face).
  */
+/**
+ * Render a failed slot entry instead of a silent empty anchor.
+ * @param props - failed slot key, anchor tag, and the sanitized error detail.
+ * @returns The visible crash face with a reload action.
+ */
+function CrashFace({ slotKey, anchor: Anchor, detail }: {
+  slotKey: string
+  anchor: SlotAnchorTag
+  detail: string
+}): ReactNode {
+  return (
+    <Anchor data-slot-error={slotKey} role="alert" style={ANCHOR_STYLE}>
+      <span>{detail === '' ? slotKey : detail}</span>
+      <button type="button" aria-label={slotKey} onClick={() => { window.location.reload() }}>
+        {'\u21bb'}
+      </button>
+    </Anchor>
+  )
+}
+
 class SlotErrorBoundary extends Component<
-  { slotKey: string; anchor?: SlotAnchorTag; onEntryError: (error: unknown) => void; children: ReactNode }, { failed: boolean }
+  { slotKey: string; anchor?: SlotAnchorTag; onEntryError: (error: unknown) => void; children: ReactNode },
+  { failed: boolean; detail: string }
 > {
-  override state = { failed: false }
-  static getDerivedStateFromError(error: unknown): { failed: boolean } {
+  override state = { failed: false, detail: '' }
+  static getDerivedStateFromError(error: unknown): { failed: boolean; detail: string } {
     if (error instanceof SlotAssemblyError) throw error
-    return { failed: true }
+    const message = error instanceof Error ? error.message : String(error)
+    return { failed: true, detail: message.length > 160 ? `${message.slice(0, 157)}...` : message }
   }
   override componentDidCatch(error: unknown): void {
     console.error(`slot entry crashed in '${this.props.slotKey}':`, error)
@@ -416,7 +438,7 @@ class SlotErrorBoundary extends Component<
   }
   override render(): ReactNode {
     const Anchor = this.props.anchor ?? 'div'
-    if (this.state.failed) return <Anchor data-slot-error={this.props.slotKey} />
+    if (this.state.failed) return <CrashFace slotKey={this.props.slotKey} anchor={Anchor} detail={this.state.detail} />
     return this.props.children
   }
 }
@@ -1174,7 +1196,7 @@ function renderOutletContent(
   // A cell whose every registration abdicated keeps the crash face: the
   // shadowing collapse ran out of survivors, which is a failure state, not
   // the owner's natural-empty fallback.
-  const deadCell = () => <Anchor data-slot-error={slotKey} />
+  const deadCell = () => <CrashFace slotKey={slotKey} anchor={Anchor} detail="" />
 
   if (spec.kind === 'single') {
     const entry = host.entriesOfSlot(slotKey)[0]
@@ -1245,7 +1267,7 @@ function renderOutletContent(
     <>
       {list.map((item, i) => item.entry !== undefined
         ? guarded(item.entry, `e${entryKeyOf(item.entry)}`)
-        : <Anchor data-slot-error={slotKey} key={`x${item.id ?? i}`} />)}
+        : <CrashFace slotKey={slotKey} anchor={Anchor} detail="" key={`x${item.id ?? i}`} />)}
     </>
   )
 }
@@ -1284,7 +1306,7 @@ function RootOutlet({ ownerProps }: { ownerProps: object }) {
     // Registrations exist but every one abdicated: the shadowing collapse ran
     // dry, so the crash face replaces the tree (registered-but-broken is a
     // crash, not the boot-order assembly failure below).
-    if (host.entriesOf('root').length > 0) return <div data-slot-error="root" />
+    if (host.entriesOf('root').length > 0) return <CrashFace slotKey="root" anchor="div" detail="" />
     throw new SlotAssemblyError("renderSlot('root') before any 'root' registration (boot order)")
   }
   // Same anchor contract as SlotOutlet: 'root' is a slot like any other, and
