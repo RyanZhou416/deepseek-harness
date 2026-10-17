@@ -90,6 +90,7 @@ function fakeSessions(ctx: Context): { sessions: ISessions; binding: SessionBind
     subagentAddress: () => undefined,
     refreshProjections: () => Promise.reject(new Error('unused fake Sessions operation')),
     refresh: () => Promise.reject(new Error('unused fake Sessions operation')),
+    refreshArchived: () => Promise.reject(new Error('unused fake Sessions operation')),
     search: () => Promise.reject(new Error('unused fake Sessions operation')),
     fork: () => Promise.reject(new Error('unused fake Sessions operation')),
     editLastMessage: () => Promise.reject(new Error('unused fake Sessions operation')),

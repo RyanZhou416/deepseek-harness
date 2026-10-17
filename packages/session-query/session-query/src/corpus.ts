@@ -59,10 +59,10 @@ export class SessionCorpus {
    * @param signal - optional cancellation for persistence listing.
    * @returns records in deterministic newest-first order.
    */
-  async listSessions(signal?: AbortSignal): Promise<SessionRecord[]> {
+  async listSessions(signal?: AbortSignal, options?: { readonly excludeSessionIds?: ReadonlySet<SessionId> }): Promise<SessionRecord[]> {
     signal?.throwIfAborted()
     const persistence = this._persistence
-    const persisted = persistence === undefined ? [] : await listPersisted(persistence, signal)
+    const persisted = persistence === undefined ? [] : await listPersisted(persistence, signal, options?.excludeSessionIds)
     signal?.throwIfAborted()
     const records = new Map<SessionId, SessionRecord>()
     for (const { header, formatStatus } of persisted) {
@@ -264,9 +264,10 @@ function orderedResults<Value>(
 async function listPersisted(
   persistence: SessionPersistence,
   signal?: AbortSignal,
+  excludeSessionIds?: ReadonlySet<SessionId>,
 ): Promise<readonly SessionPersistenceSnapshot[]> {
   try {
-    return await persistence.list(signal === undefined ? undefined : { signal })
+    return await persistence.list(signal === undefined && excludeSessionIds === undefined ? undefined : { ...(signal === undefined ? {} : { signal }), ...(excludeSessionIds === undefined ? {} : { excludeSessionIds }) })
   } catch (error: unknown) {
     if (signal?.aborted) signal.throwIfAborted()
     throw new SessionQueryError(

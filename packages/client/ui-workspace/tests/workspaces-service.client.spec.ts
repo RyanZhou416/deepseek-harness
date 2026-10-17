@@ -142,6 +142,7 @@ class FakeSessions implements ISessions {
   readonly editLastMessage = vi.fn<ISessions['editLastMessage']>(async () => undefined)
   readonly retained: RetainedSession[] = []
   readonly refreshProjections = vi.fn<ISessions['refreshProjections']>(() => Promise.resolve())
+  readonly refreshArchived = vi.fn<ISessions['refreshArchived']>(() => Promise.resolve())
   readonly retain = vi.fn<ISessions['retain']>((target) => {
     const release = vi.fn<() => void>()
     const sessionId = typeof target === 'string' ? target : target.childSessionId

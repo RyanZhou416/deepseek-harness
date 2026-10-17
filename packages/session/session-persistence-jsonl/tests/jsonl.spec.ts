@@ -3200,4 +3200,18 @@ describe('JsonlSessionPersistence listing concurrency', () => {
     listingProbe.failures.set(earlierSession, earlierSessionFailure)
     await expect(listingCtx.sessionPersistence.list()).rejects.toBe(earlierSessionFailure)
   })
+  it('skips excluded Session directories before reading their contents', async () => {
+    await seed('/work', ['keep-one', 'archived-one'])
+    listingProbe.active = true
+    listingProbe.failures.set(
+      dirname(rawLogPath(listingRoot, '/work', SessionId('archived-one'))),
+      Object.assign(new Error('must not read an archived Session directory'), { code: 'EACCES' }),
+    )
+    const listed = await listingCtx.sessionPersistence.list({
+      excludeSessionIds: new Set([SessionId('archived-one')]),
+    })
+    listingProbe.active = false
+    expect(listed.map(item => item.header.id)).toEqual(['keep-one'])
+  })
+
 })

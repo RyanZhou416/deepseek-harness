@@ -31,7 +31,7 @@ Use `ctx.sessionQuery` from application code when you need to read or search ses
 
 | Operation | What you get |
 |---|---|
-| `listSessions()` | Every logical session, newest first, with `live` and `persisted` availability flags and optional `formatStatus` |
+| `listSessions()` | Every logical session, newest first, with `live` and `persisted` availability flags and optional `formatStatus`; an explicit `excludeSessionIds` set skips those ids before any persistence read (the Host uses it for archived Sessions) |
 | `readSession(id)` | The complete replay-validated raw event log, without making the session live |
 | `filterSessions(filters)` | Sessions matching ANDed metadata and availability predicates |
 | `filterEvents(id, filters)` | Semantic event documents matching metadata and literal-text predicates |

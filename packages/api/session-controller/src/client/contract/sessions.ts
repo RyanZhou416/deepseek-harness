@@ -112,6 +112,12 @@ export interface ISessions {
    */
   refresh(): Promise<void>
   /**
+   * Load archived Sessions on demand; the default baseline omits them so a
+   * boot pull never scans archived logs.
+   * @returns completion of the pull that first includes archived rows.
+   */
+  refreshArchived(): Promise<void>
+  /**
    * Search the Host's visible message-content index. Results stay
    * request-local; the list snapshot remains the metadata authority.
    * @param query - non-blank literal phrase.

@@ -359,6 +359,14 @@ export class ClientSessions implements ISessions {
   refresh(): Promise<void> {
     return this.manager.refreshList()
   }
+  /**
+   * Load archived Sessions on demand for the archived view.
+   * @returns completion of the pull that first includes archived rows.
+   */
+  refreshArchived(): Promise<void> {
+    return this.manager.ensureArchivedList()
+  }
+
 
   /**
    * Search the Host's visible message-content index. Results stay

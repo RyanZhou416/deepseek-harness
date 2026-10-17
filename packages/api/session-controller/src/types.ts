@@ -265,6 +265,8 @@ export interface SkillListValue {
 
 /** Session list request. */
 export interface SessionListRequest {
+  /** Include archived Sessions; the default list skips their logs so boot does not decode them. */
+  readonly includeArchived?: boolean
   readonly cursor?: string
 }
 

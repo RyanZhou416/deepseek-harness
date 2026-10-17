@@ -114,6 +114,7 @@ async function bench() {
     operation: (reference: SessionReference) => unknown,
   ) => await operation(retain(target)))
   const fork = vi.fn<ISessions['fork']>(async () => sid('forked'))
+  const refreshArchived = vi.fn<ISessions['refreshArchived']>(async () => {})
   const pinSession = vi.fn(async () => undefined)
   const unpinSession = vi.fn(async () => undefined)
   // The Host snapshots the injected hooks derive from and a pin's order write
@@ -150,6 +151,7 @@ async function bench() {
     subagentAddress: vi.fn(() => undefined),
     refreshProjections: vi.fn(() => Promise.resolve()),
     fork,
+    refreshArchived,
   } as never)
   const pickDirectory = vi.fn(() => Promise.resolve({ ok: true as const, value: '/projects/picked' }))
   const directoryPicker = { pick: pickDirectory }
@@ -163,7 +165,7 @@ async function bench() {
   ctx.provide('locale', locale)
   return {
     ctx, slots: ctx.get('slots') as SlotRegistry, locale, create, rename, commands, accessSource,
-    retain, using, selectPanel, search, renameSession, binding, fork, pickDirectory, pinSession, unpinSession,
+    retain, using, selectPanel, search, renameSession, binding, fork, refreshArchived, pickDirectory, pinSession, unpinSession,
     workspacesSubscribe, initializeDefault, history, scope, sessionOf,
     setWorkspaces: (snapshot: WorkspaceSnapshot): void => { workspaceSnapshot = snapshot },
     setSessions: (snapshot: SessionListState): void => { sessionSnapshot = snapshot },
@@ -519,6 +521,23 @@ describe('ui-workspace apply', () => {
     }
     // A rejected archive raises no notice.
     expect(toast.hooks.toast.getSnapshot()).toEqual({ kind: 'archived', sessionId: 'one', seq: 1 })
+  })
+  it('loads archived rows once when the archived filter is shown', async () => {
+    const b = await bench()
+    declare(b.slots, 'sidebar.workspaces', 'shell.overlay')
+    await b.ctx.plugin({ inject: [...inject], apply }).await()
+    const view = viewInstance(b.slots)
+    const toast = faceOf(entry(b.slots, 'shell.overlay', 'workspace.row-toast')) as RowToastInjected
+    expect(b.refreshArchived).not.toHaveBeenCalled()
+
+    const archived = b.slots.entries('workspace.toast').find(row => row.options.key === 'archived')!
+    const display = faceOf(archived) as ArchiveToastInjected
+    display.filterAction(b.locale.bind('workspace'), toast.dismissToast).onClick()
+    expect(view.getSnapshot().archivedFilter).toBe('show')
+    expect(b.refreshArchived).toHaveBeenCalledOnce()
+
+    view.actions.setArchivedFilter('only')
+    expect(b.refreshArchived).toHaveBeenCalledOnce()
   })
 
   it('turns the Host\'s running-work refusal into the stop-and-archive confirmation, which archives with stopActivity', async () => {

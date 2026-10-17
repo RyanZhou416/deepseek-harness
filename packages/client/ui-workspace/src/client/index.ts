@@ -117,6 +117,28 @@ export function apply(ctx: Context): void {
   // view order through the same instance the renderer hands the browser.
   const viewHandle = createWorkspaceViewStore()
   const viewInstance = viewHandle.create()
+  // Archived rows are excluded from the default baseline; load them only when
+  // a view filter asks to show them, once per client generation.
+  let archivedRequested = false
+  const ensureArchivedRows = (): void => {
+    const filter = viewInstance.store.getSnapshot().archivedFilter
+    if (archivedRequested || (filter !== 'show' && filter !== 'only')) return
+    archivedRequested = true
+    void sessions.refreshArchived().catch((error: unknown) => {
+      archivedRequested = false
+      console.warn('ui-workspace: archived Session list refresh failed:', error)
+    })
+  }
+  ctx.effect(() => {
+    const stopView = viewInstance.store.subscribe(ensureArchivedRows)
+    const stopSessions = sessions.list.subscribe(ensureArchivedRows)
+    return () => {
+      stopView()
+      stopSessions()
+    }
+  }, 'ui-workspace: archived Session rows')
+  ensureArchivedRows()
+
   const viewStore: typeof viewHandle = { ...viewHandle, create: () => viewInstance }
   const rowToast = createSnapshotStore<RowToastState | null>(null)
   let toastSeq = 0

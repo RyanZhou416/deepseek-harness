@@ -151,7 +151,7 @@ These limits define where the seam's guarantees stop. They are current package c
 - **A backend plugin reload under live sessions fails their writers loudly** — a reloaded backend cannot serve handles the old instance issued; writes fail until the sessions restart, and nothing silently re-adopts the logs.
 - **Only handle-acquired sessions persist** — `ctx.sessions.create` + `session/flush` alone stores nothing; agent-loop is the production acquisition point, and tests seed storage through `create`/`append`/`close`.
 - **No deletion or retention API** — pruning stored sessions is out-of-band backend maintenance.
-- **`list()` is unpaginated and unfiltered** — it returns every stored session's snapshot; fine for local stores, unindexed at scale.
+- **`list()` is unpaginated and excludes only explicit ids** — it returns every other stored session's snapshot; `excludeSessionIds` skips those directories before any per-session read (the Host passes the archived set). Fine for local stores, unindexed at scale.
 - **Synthetic closers are the only crash story** — resume appends `interruptedTurnClosers` through the write handle; there is no partial-turn resume that continues an interrupted turn instead of closing it.
 
 <a id="dev-note"></a>

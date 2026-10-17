@@ -115,6 +115,8 @@ export class SessionManager {
   private listPhase: SessionListPhase = 'pending'
   private listError: RemoteFailure | null = null
   private listInflight: Promise<void> | null = null
+  /** Whether the established list baseline includes archived rows. */
+  private archivedBaseline = false
   /** Active list request's mutation log; its identity also fences completion after reconnect. */
   private listMutations: SessionListMutation[] | null = null
   private readonly addresses = new Map<SessionId, SubagentAddress>()
@@ -426,8 +428,18 @@ export class SessionManager {
 
   // ---- List API ----
 
+  /**
+   * Ensure archived Sessions are present in the client baseline.
+   * @returns completion of the pull that includes archived rows.
+   */
+  ensureArchivedList(): Promise<void> {
+    if (this.archivedBaseline) return Promise.resolve()
+    return this.refreshList(true)
+  }
+
   /** Full refresh via session.list (single-flight within one Host generation). */
-  refreshList(): Promise<void> {
+  refreshList(includeArchived = false): Promise<void> {
+    if (includeArchived && this.listInflight !== null) return this.listInflight.then(() => this.refreshList(true))
     if (this.listInflight !== null) return this.listInflight
     this.listState = 'loading'
     this.listError = null
@@ -437,7 +449,7 @@ export class SessionManager {
     this.notifier.markDirty()
     this.listInflight = (async () => {
       try {
-        const result = await this.remote.session.list({})
+        const result = await this.remote.session.list(includeArchived ? { includeArchived: true } : {})
         if (this.listMutations !== mutations) return
         if (result.ok) {
           const baseline: SessionSummary[] = this.listPhase === 'pending'
@@ -457,6 +469,7 @@ export class SessionManager {
           const retained = this.retainedIds(summaries)
           for (const sessionId of this.engagedSessions) this.pruneEngagement(sessionId, retained)
           this.listState = 'idle'
+          this.archivedBaseline = includeArchived
           this.listPhase = 'ready'
           this.updateParentAvailability()
           // Resident Sessions and list rows share one display blank, reconciled with the metadata projection.

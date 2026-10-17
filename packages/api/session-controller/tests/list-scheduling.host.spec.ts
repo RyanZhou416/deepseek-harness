@@ -42,7 +42,7 @@ function betweenRows(action: () => void): void {
   immediates.add(handle)
 }
 
-async function harness(rows: readonly Row[], summaryMs = 8, workSliceMs = 8) {
+async function harness(rows: readonly Row[], summaryMs = 8, workSliceMs = 8, archived: readonly string[] = []) {
   const ctx = new Context()
   contexts.add(ctx)
   await ctx.plugin(SessionStore)
@@ -81,8 +81,10 @@ async function harness(rows: readonly Row[], summaryMs = 8, workSliceMs = 8) {
     if (row.phase === 'live') attach(row.id)
     return { header: session.header, live: row.phase === 'live', persisted: true }
   })
-  const listSessions = vi.fn(async (_signal?: AbortSignal) => records)
+  const listSessions = vi.fn(async (_signal?: AbortSignal, options?: { readonly excludeSessionIds?: ReadonlySet<unknown> }) =>
+    records.filter(record => options?.excludeSessionIds?.has(record.header.id) !== true))
   ctx.provide('sessionQuery', { listSessions } as never)
+  if (archived.length > 0) ctx.provide('workspaceRegistry', { archivedSessionIds: archived.map(id => SessionId(id)) } as never)
   ctx.provide('sessionProjectionCache', {
     cachedSnapshot: (header: SessionRecord['header']) => {
       recordSummary('cold', header.id)
@@ -340,5 +342,20 @@ describe('Session-list work slices', () => {
     ])
     expect(h.ctx.agents.get(SessionId('queued'))).toBeDefined()
     expect(h.ctx.sessions.get(SessionId('removed'))).toBeUndefined()
+  })
+})
+
+describe('archived Session filtering', () => {
+  it('omits archived Sessions by default and returns them on request', async () => {
+    const h = await harness([
+      { id: 'keep-one', phase: 'cold' },
+      { id: 'archived-one', phase: 'cold' },
+    ], 1, 8, ['archived-one'])
+    await h.list.list()
+    expect(h.listSessions).toHaveBeenLastCalledWith(undefined, { excludeSessionIds: new Set([SessionId('archived-one')]) })
+
+    const all = await h.list.list(undefined, { includeArchived: true })
+    expect(all.map(item => item.sessionId).sort()).toEqual(['archived-one', 'keep-one'])
+    expect(h.listSessions).toHaveBeenLastCalledWith(undefined)
   })
 })

@@ -15,7 +15,7 @@ import {
 } from '@deepseek-ai/dsh-session-format-catalog'
 import { readdirSync, type Dirent } from 'node:fs'
 import { open, mkdir, readdir, realpath, link, rm, stat, truncate } from 'node:fs/promises'
-import { dirname, join, resolve } from 'node:path'
+import { basename, dirname, join, resolve } from 'node:path'
 import { performance } from 'node:perf_hooks'
 import { scheduler } from 'node:timers/promises'
 import { createHash, randomBytes } from 'node:crypto'
@@ -574,6 +574,10 @@ class JsonlSessionPersistence extends SessionPersistence {
    * @returns one snapshot per session, in no promised order.
    */
   async list(options?: SessionPersistenceListOptions): Promise<readonly SessionPersistenceSnapshot[]> {
+    const excluded = options?.excludeSessionIds
+    const skipSegments = excluded === undefined || excluded.size === 0
+      ? undefined
+      : new Set([...excluded].map(encodeSegment))
     const signal = options?.signal
     const snapshots: SessionPersistenceSnapshot[] = []
     const listed = new Set<SessionId>()
@@ -581,7 +585,9 @@ class JsonlSessionPersistence extends SessionPersistence {
     // append lands mid-scan is then still in this snapshot (its artifact may
     // predate the scan), so create-to-list visibility never has a hole.
     const pending = [...this.tracker.pendingEntries()]
-    const artifacts = await this.listArtifacts(signal)
+    const artifacts = skipSegments === undefined
+      ? await this.listArtifacts(signal)
+      : await this.listArtifacts(signal, skipSegments)
     const corpusRevision = artifacts.some(artifact => artifact.sourceVersion < SESSION_FORMAT_VERSION)
       ? await this.historicalCorpusRevision(signal) : undefined
     const statted = settledValues(await settleLimited(this.listLimit, artifacts, async (artifact) => {
@@ -610,6 +616,7 @@ class JsonlSessionPersistence extends SessionPersistence {
       })
     }
     for (const [id, entry] of pending) {
+      if (excluded?.has(id) === true) continue
       if (!listed.has(id)) snapshots.push({ header: entry.header, revision: entry.revision })
     }
     signal?.throwIfAborted()
@@ -1196,11 +1203,11 @@ class JsonlSessionPersistence extends SessionPersistence {
   }
 
   /** Enumerate selected physical generations without interpreting their headers or bodies. */
-  private async listGenerations(signal?: AbortSignal): Promise<ResolvedJsonlGeneration[]> {
+  private async listGenerations(signal?: AbortSignal, skipSegments?: ReadonlySet<string>): Promise<ResolvedJsonlGeneration[]> {
     const selected = await this.mapSessionDirectories((dir) => {
       signal?.throwIfAborted()
       return this.resolveGenerationInDirectory(dir, signal)
-    }, signal)
+    }, signal, skipSegments)
     return selected.filter(source => source !== undefined)
   }
 
@@ -1216,6 +1223,7 @@ class JsonlSessionPersistence extends SessionPersistence {
   private async mapSessionDirectories<R>(
     task: (dir: string) => Promise<R>,
     signal?: AbortSignal,
+    skipSegments?: ReadonlySet<string>,
   ): Promise<R[]> {
     const limit = this.listLimit
     // The root read counts against the same bound as every other listing read.
@@ -1231,7 +1239,8 @@ class JsonlSessionPersistence extends SessionPersistence {
       // Appended one by one: spreading a large project as call arguments exceeds the engine's argument limit.
       for (const dir of outcome.value) dirs.push(dir)
     }
-    const results = settledValues(await settleLimited(limit, dirs, task))
+    const considered = skipSegments === undefined ? dirs : dirs.filter(dir => !skipSegments.has(basename(dir)))
+    const results = settledValues(await settleLimited(limit, considered, task))
     if (projectFailure !== undefined) throw projectFailure.reason
     return results
   }
@@ -1256,8 +1265,10 @@ class JsonlSessionPersistence extends SessionPersistence {
 
   private async listArtifacts(
     signal?: AbortSignal,
+    skipSegments?: ReadonlySet<string>,
   ): Promise<Array<GenerationHeader & { path: string; sourceVersion: number }>> {
     signal?.throwIfAborted()
+    if (skipSegments !== undefined) return this.scanArtifacts(skipSegments)
     await this.ensureRootEncoding()
     signal?.throwIfAborted()
     if (this.listing === undefined) {
@@ -1271,8 +1282,8 @@ class JsonlSessionPersistence extends SessionPersistence {
   }
 
   /** Select and validate one header per physical Session directory, reusing cached values by exact revision. */
-  private async scanArtifacts(): Promise<Array<GenerationHeader & { path: string; sourceVersion: number }>> {
-    const generations = await this.listGenerations()
+  private async scanArtifacts(skipSegments?: ReadonlySet<string>): Promise<Array<GenerationHeader & { path: string; sourceVersion: number }>> {
+    const generations = await this.listGenerations(undefined, skipSegments)
     const selectedPaths = new Set(generations.map(selected => selected.sourcePath))
     for (const path of this.listedHeaders.keys()) {
       if (!selectedPaths.has(path)) this.listedHeaders.delete(path)

@@ -1933,3 +1933,31 @@ describe('running facts without UI reminders', () => {
     expect(manager.getListSnapshot()).not.toHaveProperty('current')
   })
 })
+
+describe('archived Session baseline', () => {
+  it('loads archived rows on demand and refetches after a default pull drops them', async ({ mock, remote }) => {
+    const manager = makeManager(mock, remote)
+    onTestFinished(() => manager.dispose())
+
+    remote.session.list.mockResolvedValueOnce(ok({ items: [summary(S1)] }))
+    await manager.refreshList()
+    expect(remote.session.list).toHaveBeenLastCalledWith({})
+    expect(manager.getListSnapshot().items.map(item => item.sessionId)).toEqual([S1])
+
+    remote.session.list.mockResolvedValueOnce(ok({ items: [summary(S1), summary(S2, { updatedAt: 50 })] }))
+    await manager.ensureArchivedList()
+    expect(remote.session.list).toHaveBeenLastCalledWith({ includeArchived: true })
+    expect(manager.getListSnapshot().items.map(item => item.sessionId).sort()).toEqual([S1, S2])
+
+    await manager.ensureArchivedList()
+    expect(remote.session.list).toHaveBeenCalledTimes(2)
+
+    remote.session.list.mockResolvedValueOnce(ok({ items: [summary(S1)] }))
+    await manager.refreshList()
+    expect(manager.getListSnapshot().items.map(item => item.sessionId)).toEqual([S1])
+
+    remote.session.list.mockResolvedValueOnce(ok({ items: [summary(S1), summary(S2, { updatedAt: 50 })] }))
+    await manager.ensureArchivedList()
+    expect(remote.session.list).toHaveBeenCalledTimes(4)
+  })
+})

@@ -108,6 +108,12 @@ export interface SessionPersistenceStatOptions {
 export interface SessionPersistenceListOptions {
   /** Optional cancellation for backend listing work. */
   readonly signal?: AbortSignal
+  /**
+   * Session ids to exclude from this listing before any per-session read. The
+   * Host passes the archived set so a catalogue pull never stats or decodes
+   * archived logs; `stat` and `open` still address those Sessions by id.
+   */
+  readonly excludeSessionIds?: ReadonlySet<SessionId>
 }
 
 declare module '@deepseek-ai/cordis' {

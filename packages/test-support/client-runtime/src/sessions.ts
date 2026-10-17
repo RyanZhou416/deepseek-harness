@@ -311,7 +311,7 @@ export class TestSessions implements ISessions {
 
   /** Calls observed on the service-level face, newest last. */
   readonly calls: {
-    method: 'create' | 'refreshProjections' | 'refresh' | 'search' | 'fork' | 'editLastMessage'
+    method: 'create' | 'refreshProjections' | 'refresh' | 'refreshArchived' | 'search' | 'fork' | 'editLastMessage'
     args: unknown[]
   }[] = []
 
@@ -649,6 +649,12 @@ export class TestSessions implements ISessions {
     this.calls.push({ method: 'refresh', args: [] })
     return Promise.resolve()
   }
+  /** Record an archived-list refresh; fixture callers publish rows explicitly. */
+  refreshArchived(): Promise<void> {
+    this.calls.push({ method: 'refreshArchived', args: [] })
+    return Promise.resolve()
+  }
+
 
   /**
    * Replace the sidebar-search result page (the call is still recorded).

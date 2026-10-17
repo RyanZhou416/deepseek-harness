@@ -8,6 +8,7 @@ import type { ImageAttachmentLimits } from '@deepseek-ai/dsh-attachment'
 import type { Session, SessionEvent, SessionHeader, SessionId } from '@deepseek-ai/dsh-session'
 import type { ProjectionSnapshot } from '@deepseek-ai/dsh-session-projection'
 import type {} from '@deepseek-ai/dsh-session-projection-cache'
+import type {} from '@deepseek-ai/dsh-workspace'
 import { SessionQueryError, type SessionRecord, type SessionSearchCursor } from '@deepseek-ai/dsh-session-query'
 import { RemoteError } from '@deepseek-ai/dsh-typert-protocol'
 import { z } from 'zod'
@@ -134,9 +135,14 @@ export class ApiSessionList {
    * @param signal - optional cancellation for persistence reads and summary generation.
    * @returns visible Session summaries ordered by activity.
    */
-  async list(signal?: AbortSignal): Promise<SessionSummary[]> {
+  async list(signal?: AbortSignal, options?: { readonly includeArchived?: boolean }): Promise<SessionSummary[]> {
     signal?.throwIfAborted()
-    const records = await this.ctx.sessionQuery.listSessions(signal)
+    const registry = options?.includeArchived === true ? undefined : this.ctx.get('workspaceRegistry')
+    const archived = registry?.archivedSessionIds
+    const excludeSessionIds = archived === undefined || archived.length === 0 ? undefined : new Set(archived)
+    const records = excludeSessionIds === undefined
+      ? await this.ctx.sessionQuery.listSessions(signal)
+      : await this.ctx.sessionQuery.listSessions(signal, { excludeSessionIds })
     signal?.throwIfAborted()
     const items: SessionSummary[] = []
     const cold: SessionRecord[] = []
