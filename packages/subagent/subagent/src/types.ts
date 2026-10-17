@@ -357,3 +357,11 @@ export interface SubagentProvider {
    */
   prepareContinuable?(request: ContinuableCreateRequest): Promise<ContinuableCreateSpec>
 }
+
+/** Detached model selection for tool validation; creation always resolves the current policy again. */
+export interface PreparedSubagentModel {
+  /** Effective explicit options; ordinary inheritance still supplies omitted values. */
+  readonly agentOptions: AgentOptions | undefined
+  /** Applied user override, or null for ordinary selection. */
+  readonly override: SubagentModelOverride | null
+}

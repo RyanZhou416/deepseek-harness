@@ -459,7 +459,7 @@ function toolRow(anchorSeq: number): ChatNode<'tool-call'> {
     anchorSeq,
     location: { kind: 'turn', turn: TURN },
     visibility: 'visible',
-    data: { root: { phase: 'start', callId: `call-${String(anchorSeq)}`, name: 'bash', argsRaw: '{}', turn: 1, step: 1, time: anchorSeq, subCalls: [] } },
+    data: { root: { phase: 'start', callId: `call-${String(anchorSeq)}`, name: 'bash', argsRaw: '{}', args: {}, turn: 1, step: 1, time: anchorSeq, subCalls: [] } },
   }
 }
 

@@ -178,6 +178,17 @@ function deriveAutoReviewDenial(block: ToolCallBlock): AutoReviewDenial | null {
  * @param node - the settled result node.
  * @returns the flattened result text (may be empty).
  */
+/**
+ * Whether a result would produce an expanded output section without flattening it.
+ * @param node - settled result to inspect.
+ * @returns whether its displayed output would be nonempty.
+ */
+export function hasResultText(node: ToolResultNode): boolean {
+  if (node.content.length === 0) return node.error !== undefined
+  if (node.content.length > 1) return true
+  const first = node.content[0]
+  return first !== undefined && (first.type !== 'text' || first.text !== '')
+}
 export function resultText(node: ToolResultNode): string {
   const parts: string[] = []
   for (const block of node.content) {

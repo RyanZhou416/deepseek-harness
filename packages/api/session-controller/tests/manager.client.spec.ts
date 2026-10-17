@@ -453,7 +453,7 @@ describe('SessionManager query lifetime', () => {
     expect(failed?.values).toBe(first?.values)
     expect(manager.getListSnapshot().projectionsBySession[S2]).toBe(second)
 
-    remote.session.projections.mockResolvedValueOnce(ok({ asOfSeq: 0, values: { title: 'ready' } }))
+    remote.session.projections.mockResolvedValueOnce(ok({ kind: 'sequenced', asOfSeq: 0, values: { title: 'ready' } }))
     await manager.refreshProjections(S1)
     expect(manager.getListSnapshot().projectionsBySession[S1]).toEqual({
       values: { title: 'ready' }, state: 'ready', error: null,
