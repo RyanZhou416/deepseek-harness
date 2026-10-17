@@ -1,6 +1,5 @@
-// Per-session modal stores (src/client/modalStore.ts): identity, observable
-// set semantics, and the deferred token-consume guards. Session ids are
-// unique per test so the module-level Maps never leak between cases.
+// Per-session modal stores (src/client/modalStore.ts): identity, observable set semantics, and the deferred
+// token-consume guards. Session ids are unique per test so the module-level Maps never leak between cases.
 
 import assert from 'node:assert/strict'
 import { describe, test } from 'vitest'

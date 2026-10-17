@@ -33,6 +33,14 @@ yarn-error.log*
 .pnpm-store/
 .tmp/
 
+# Local tool state: CodeGraph index, IDE, agent tooling. They are not gate
+# inputs, and their churn would otherwise invalidate the pre-commit stamp.
+.codegraph/
+.idea/
+.zcode/
+
 # Environment variables
 .env
 .env.local
+# macOS Finder metadata
+.DS_Store

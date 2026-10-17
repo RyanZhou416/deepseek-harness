@@ -1,13 +1,8 @@
-/**
- * One live check for the Plugin-info card: lazy with 1h TTL; registries
- * are tried strictly in order — official npm first, npmmirror only as a
- * fallback — and one-at-a-time, never in parallel. Each source's failure
- * (non-ok response, missing/non-string version, network error) advances
- * to the next one; only an all-source failure resolves to null so the
- * card silently keeps its static version.
- */
+/** Lazy 1h TTL check for the update hints: npm first, npmmirror as fallback, one at a time; all
+ *  sources failing resolves null. */
 
-import { PLUGIN_NAME } from './meta'
+import { useEffect, useState } from 'react'
+import { PLUGIN_NAME, PLUGIN_VERSION } from './meta'
 
 const REGISTRY_HOSTS = [
   'https://registry.npmjs.org',
@@ -41,7 +36,7 @@ export function fetchLatestVersion(): Promise<string | null> {
   return cached.promise
 }
 
-/** Numeric semver compare (pre-release suffix ignored): is `latest` strictly newer than `current`? */
+/** Numeric semver compare; the pre-release suffix is dropped (1.2.0-rc.1 == 1.2.0). */
 export function isNewerVersion(latest: string, current: string): boolean {
   const parse = (v: string): number[] =>
     v.replace(/^v/, '').split('-', 1)[0].split('.').map(n => parseInt(n, 10) || 0)
@@ -53,4 +48,18 @@ export function isNewerVersion(latest: string, current: string): boolean {
     if (x !== y) return x > y
   }
   return false
+}
+
+/** The newer registry version for this build, or null — the read behind every surface's update hint. A dev
+ *  build never asks; the 1h TTL cache answers every later mount from the first fetch. */
+export function useNewerVersion(): string | null {
+  const [latest, setLatest] = useState<string | null>(null)
+  useEffect(() => {
+    if (PLUGIN_VERSION.includes('-dev')) return
+    let on = true
+    // fetchLatestVersion never rejects (every failure narrows to null); the `on` flag drops late results.
+    void fetchLatestVersion().then((v) => { if (on && v) setLatest(v) })
+    return () => { on = false }
+  }, [])
+  return latest !== null && isNewerVersion(latest, PLUGIN_VERSION) ? latest : null
 }

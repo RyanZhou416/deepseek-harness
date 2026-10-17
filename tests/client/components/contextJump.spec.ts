@@ -1,9 +1,3 @@
-// ContextJump (src/client/components/contextJump.tsx) — the assistant-action
-// jump button rendered for real: seat props re-proved, the clicked reply's
-// request seq resolved off the served node seat, the relay + view opening
-// driven through the real viewFocus module over a test client context (no
-// sidebarRight service armed → the conversation-tab fallback).
-
 import { createElement as h } from 'react'
 import assert from 'node:assert/strict'
 import { describe, test } from 'vitest'

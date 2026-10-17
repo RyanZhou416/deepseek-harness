@@ -1,8 +1,5 @@
-// ErrorBoundary (src/client/components/errorBoundary.tsx): real subtree
-// errors degrade to the styled error card; Retry resets the boundary.
 // React logs caught errors to console and replays the failed render through a
-// fake DOM event — silenced with a window-error preventer and a spy, never
-// mocked.
+// fake DOM event — silenced with a window-error preventer and a spy, never mocked.
 
 import { createElement as h } from 'react'
 import assert from 'node:assert/strict'

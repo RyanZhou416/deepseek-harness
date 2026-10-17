@@ -1,5 +1,3 @@
-/** The one-line label cascade shared by the Context browser's element rows. */
-
 import type { SurfaceNode } from '../../shared/types'
 import type { ViewKit } from '../viewkit'
 

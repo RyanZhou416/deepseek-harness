@@ -1,70 +1,112 @@
-/**
- * Context tab root: renders the `contextTimeline` projection and composes stats, composition, history, events and messages.
- * The data plane is the harness's projection pipeline end to end; the one addition is the split generation's on-demand
- * detail read (timelineSource.ts) — the pushed wire value is the slim head, and the heavy collections arrive from the
- * host's detail endpoint only while the tab (or modal) is open.
- */
-
-import { createElement as h, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactElement } from 'react'
-import type { ContextEventRecord, RequestRecord, SurfaceNode } from '../../shared/types'
+import { createElement as h, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactElement, type ReactNode } from 'react'
+import type { Category, ContextEventRecord, RequestRecord, SurfaceNode } from '../../shared/types'
+import { CATS } from '../categories'
 import { briefNodes, briefOf } from '../brief'
 import { headlineOf } from '../headline'
 import type { ContextViewProps } from '../services'
-import { contextBreakdownOf, contextPressureOf, conversationNodesOf, headersOf, imageLoaderOf, numOf, projectionOf, tokenUsageOf, unsupportedOf } from '../services'
+import { conversationNodesOf, headersOf, imageLoaderOf, projectionOf, unsupportedOf } from '../services'
 import type { ClientCtx, ConversationNodeLike } from '../services'
 import { makeContentFetcher, makeHeaderFetcher, useHistoryFace } from '../historyPage'
-import { useTimelineSource } from '../timelineSource'
+import { useContextSession } from '../sessionData'
 import { makeDetailNote } from './detailNote'
 import { canOpenPathsOf, openPathVia, openResourceVia, workspaceOf } from '../services'
+import { makeAttachmentOpener } from '../attachmentSource'
 import { activityOf, activityOfOps, locateStepOf, previewAddressOf } from '../fileActivity'
 import type { FileEntry, FileOp } from '../fileActivity'
 import type { ContextSettings } from '../settings'
 import type { ViewKit } from '../viewkit'
-import { makeAgentHeads } from '../agentHeads'
+import type { AgentHeads } from '../agentHeads'
+import { agentSelfOf } from '../agentTree'
 import { makeContextBrowser } from './browser'
+import type { CatFocus } from './browser'
 import { makeAgentGraph } from './agentGraph'
-import { makeDonut } from './donut'
+import { Donut } from './donut'
 import { makeCurrentComposition } from './currentComposition'
 import { makeEventList } from './events'
 import { makeFileCard } from './fileCard'
 import { makePluginInfo } from './pluginInfo'
 import { makeUpgradeGate } from './upgradeGate'
 import { makeRequestDetail } from './requestDetail'
-import { countsOfRecords, makeStatsContext, makeSubagentCost } from './statsContext'
+import { countsOfRecords, makeStatsContext, makeSubagentCost, toolTallyOf } from './statsContext'
 import { makeStatsTiming } from './statsTiming'
 import { makeStatsTokens } from './statsTokens'
 import { makeLegend, makeStackedBar } from './stackedBar'
 import { aggregateByTurn, attachMarkers, jumpTargetOf, makeTrendChart, turnStepsOf } from './trendChart'
+import { makeTrendOverview } from './trendOverview'
+import { assemble } from '../assemble'
+import { trendBandsOf } from '../dna'
 
-import { subscribeContextFocus, takeContextFocus } from '../viewFocus'
+import { activateViewTab, openContextSidebar, subscribeContextFocus, takeContextFocus } from '../viewFocus'
 import { revealInScrollParent } from '../revealScroll'
 import { makeErrorBoundary } from './errorBoundary'
 
-// The context page scrolls inside the conversation's shared `[data-conversation-scroll]` container, which the chat bottom-anchors — mirror
-// the chat's chatScroll pattern: a module-level per-session position ledger (survives tab remounts), restored once content renders; first
-// visits start at the top.
+// The page scrolls inside the conversation's shared `[data-conversation-scroll]` container, which the chat bottom-anchors;
+// a module-level per-session ledger survives tab remounts and restores once content renders.
 const viewScroll = new Map<string, number>()
 
 const EVENT_KINDS = ['inject', 'compaction', 'prune', 'model', 'mode'] as const
+
+/** Scroll the Context Browser card to the top of the page's scrollport: the stats figures and the events card's
+ * injection rows both jump into it, and neither may land below the fold. */
+function revealBrowser(root: HTMLElement | null): void {
+  /* v8 ignore start -- every render path attaches the root and draws the browser card, so the target always resolves. */
+  const browser = root?.querySelector('.lc-col-browser') ?? null
+  if (browser !== null) revealInScrollParent(browser)
+  /* v8 ignore stop */
+}
+
+/** The Context browser's height ceiling: three times the left column's stacked cards beside it (the
+ * current-composition card plus the trend card). The DNA flat feed lays every message out at once, and an
+ * uncapped card would outgrow the page; taller content scrolls inside the card. Null — uncapped — while
+ * no card measures (the loading frame). */
+export function browserCapOf(cardHeights: readonly number[]): number | null {
+  let sum = 0
+  for (const h of cardHeights) sum += h
+  return sum > 0 ? Math.round(sum * 3) : null
+}
+
+/** The trend card's reserved body: the plot lane plus an empty detail panel wearing the panel's OWN classes, so the
+ * pending and loaded states are measured by the same CSS and cannot drift. Without it the first step's arrival grew
+ * the card by its whole height and shoved every card below it down the page. */
+function TrendReserved(props: { children: ReactNode; catLabel: (cat: Category | 'system' | 'tools') => string }): ReactElement {
+  return (
+    <div className="lc-trend-lane">
+      <div className="lc-trend-plot">{props.children}</div>
+      <div className="lc-detail">
+        <div className="lc-detail-head" />
+        <div className="lc-brief" />
+        <div className="lc-stacked-wrap"><div className="lc-stacked" /></div>
+        <div className="lc-legend">
+          {CATS.map(c => (
+            <span key={c.key} className="lc-chip">
+              <i style={{ background: c.color }} />
+              <span className="lc-chip-label">{props.catLabel(c.key)}</span>
+              <span className="lc-chip-nums" />
+            </span>
+          ))}
+        </div>
+      </div>
+    </div>
+  )
+}
 
 export function makeContextView(
   ctx: ClientCtx,
   kit: ViewKit,
   settings: ContextSettings,
+  /** The page-scope cold-head cache the caller shares across every agent-data reader. */
+  heads: AgentHeads,
 ): (props: ContextViewProps) => ReactElement {
-  const { t } = kit
+  const { t, catLabel } = kit
   const StackedBar = makeStackedBar(kit)
   const Legend = makeLegend(kit)
   const CurrentComposition = makeCurrentComposition(kit, StackedBar, Legend)
   const TrendChart = makeTrendChart(kit)
-  const RequestDetail = makeRequestDetail(kit, StackedBar)
+  const TrendOverview = makeTrendOverview(kit)
+  const RequestDetail = makeRequestDetail(kit, StackedBar, Legend)
   const EventList = makeEventList(kit)
   const FileCard = makeFileCard(kit, settings)
-  const Donut = makeDonut(kit)
-  // One page-scope cold-head cache serves both subagent-data readers: the
-  // Agent network card's composition rings and the stats board's
-  // subagent-cost cell fetch each relative once.
-  const heads = makeAgentHeads(ctx)
+  // The stats board's subagent-cost cell reads the shared page-scope cold-head cache.
   const StatsContext = makeStatsContext(kit, makeSubagentCost(ctx, heads))
   const StatsTiming = makeStatsTiming(kit, Donut)
   const StatsTokens = makeStatsTokens(kit, Donut)
@@ -75,49 +117,30 @@ export function makeContextView(
   const AgentGraph = makeAgentGraph(ctx, kit, heads)
   const ErrorBoundary = makeErrorBoundary(t)
 
-  // The body renders under the error boundary: a corrupt projection value (past the timelineOf shape guard) degrades to a styled error
-  // card, not a white screen; the boundary itself has NO hooks, so the body's hook order and loading/data flow stay unchanged.
   function ContextViewBody(props: ContextViewProps): ReactElement {
     const sessionId = props.sessionId
-    // The right Sidebar's panel is a narrow column: it drops the two head cards
-    // that only pay off on the full-width tab (context stats, plugin info).
     const inSidebar = props.host === 'sidebar'
-    // The timeline source (timelineSource.ts): the pushed value on the inline
-    // generation, or the slim head merged with the on-demand detail on the
-    // split generation. `detailState`/`retryDetail` drive the detail cards'
-    // loading/failed notes.
-    const source = useTimelineSource(ctx, props)
-    const data = source.data
-    // Official token-meter `contextPressure` projection — the same key the chat's context ring reads; token-meter owns estimation, the Host
-    // no longer mirrors it. Absent → derived fallback.
-    const pressure = projectionOf(props, 'contextPressure', contextPressureOf)
-    // Official token-meter `tokenUsage` projection — the same data the chat stats line below the input box reads for its '缓存命中' figure, so
-    // the stats board's cache-hit cell reuses it verbatim; absent → the cell drops to a dash instead of estimating.
-    const usage = projectionOf(props, 'tokenUsage', tokenUsageOf)
-    // Official token-meter `contextBreakdown` projection — the exact rows the chat ring's click-open panel shows, so the overview legend
-    // reads identically by construction; absent → the fold's own same-estimator sums inside headlineOf.
-    const breakdown = projectionOf(props, 'contextBreakdown', contextBreakdownOf)
-    // `contextHeaders` companion projection (full system prompt + tool schemas) for the Context browser; absent key = older Host half →
-    // those sections degrade to tokens-only with a note.
+    const { source, data, pressure, breakdown, usage } = useContextSession(props)
+    // `contextHeaders` (full system prompt + tool schemas) for the Context browser; absent on older Host halves →
+    // tokens-only sections with a note.
     const headers = projectionOf(props, 'contextHeaders', headersOf)
     const [selectedSeq, setSelectedSeq] = useState<number | null>(null)
     const [hoveredSeq, setHoveredSeq] = useState<number | null>(null)
     const [hoverTurn, setHoverTurn] = useState<number | null>(null)
-    // Mount-time default from the plugin settings card; in-chart toggling stays mount-local and never writes back.
+    // Mount-time defaults from the plugin settings card; in-chart toggling stays mount-local and never writes back.
     const [granularity, setGranularity] = useState<'step' | 'turn'>(() => settings.defaultGranularity())
-    // 'total' plots each request's cumulative composition, 'delta' its incremental change vs the previous one;
-    // like granularity, the default is read at mount and in-chart toggling never writes back.
     const [trendMode, setTrendMode] = useState<'total' | 'delta'>(() => settings.defaultTrendMode())
-    // Adaptive scale (the title-adjacent toggle): the trend bars rescale to the visible window; like the two
-    // toggles above, mount-local and never written back.
+    // DNA mode: per-item fingerprints of each request's context (dna.ts).
+    const [dna, setDna] = useState(false)
     const [adaptive, setAdaptive] = useState(false)
-    // Strip-clicked turn: chart switches to turn granularity and scroll-centers that turn's bar, then clears via onFocusTurnHandled.
+    // The overview face: the whole retained log as one continuous ribbon (trendOverview.tsx). Exclusive with DNA
+    // mode (per-bar fingerprints are illegible at ribbon scale) and Adaptive (the whole log IS the visible
+    // window): activating one clears the others.
+    const [overview, setOverview] = useState(false)
+    const [durationCurve, setDurationCurve] = useState(() => settings.defaultDurationCurve() === 'show')
     const [focusTurn, setFocusTurn] = useState<number | null>(null)
-    // Chat → Context jump: the assistant-action relay's one-shot request, held until the projection data is in, then resolved into a
-    // turn-level pin below (mirrors the strip-click's consume-once focus flow).
     const [jumpSeq, setJumpSeq] = useState<number | null>(null)
     const [hoverCat, setHoverCat] = useState<string | null>(null)
-    // The browser's open category: the trend card focuses its bars on it (collapsing the category restores all).
     const [focusCat, setFocusCat] = useState<string | null>(null)
     const [pickedKinds, setPickedKinds] = useState<string[]>([...EVENT_KINDS])
     const toggleKind = (k: string) => {
@@ -127,33 +150,25 @@ export function makeContextView(
         return p.length === 1 ? [...EVENT_KINDS] : p.filter(x => x !== k)
       })
     }
-    // Step-brief → browser reveal bridge: one-shot focus request consumed by the Context browser.
-    const [nodeFocus, setNodeFocus] = useState<{ step: number | 'live'; seq: number; cat: SurfaceNode['cat'] } | null>(null)
+    // One-shot reveal bridge; `key` is the band key both DNA surfaces share ('sys' / 'tool:<name>' / 'n<seq>').
+    const [nodeFocus, setNodeFocus] = useState<{ step: number | 'live'; key: string; cat: Category | 'system' | 'tools' } | null>(null)
     const clearNodeFocus = useCallback(() => { setNodeFocus(null) }, [])
 
-    // Session-authorized durable-image loader for the browser's attachment cards, resolved through the harness `uiConversation` service
-    // (`imageUrl`); absent service/session degrades the cards to metadata-only, never an error.
     const loadImage = useMemo(
       () => imageLoaderOf(ctx, typeof sessionId === 'string' ? sessionId : undefined),
       [ctx, sessionId],
     )
 
-    // The gateway page face, as a React seat: the first render can race the
-    // declared inject (a watch rebuild remounts this view before the fiber
-    // re-fires), and both fetchers below must rebuild — not stick to the
-    // static degradation — when the face lands or is revoked.
+    // The gateway page face can land after the first render (a watch rebuild remounts this view before the fiber
+    // re-fires): the fetchers below must rebuild when it lands or is revoked.
     const historyFace = useHistoryFace()
 
-    // Targeted full-content fetch for browser nodes outside the conversation window (one seq-anchored history read per expanded row);
-    // absent face/session degrades to the static hint — never an error.
     const fetchContent = useMemo(
       () => (typeof sessionId === 'string' && sessionId !== '' && historyFace !== undefined
         ? makeContentFetcher(sessionId)
         : undefined),
       [sessionId, historyFace],
     )
-    // On-demand header epoch content (system prompt text, tool schemas) for the Context browser — one seq-anchored history read per
-    // opened epoch; the `contextHeaders` projection carries metadata only. Same degradation shape as fetchContent.
     const fetchHeader = useMemo(
       () => (typeof sessionId === 'string' && sessionId !== '' && historyFace !== undefined
         ? makeHeaderFetcher(sessionId)
@@ -165,9 +180,45 @@ export function makeContextView(
     const scrollerRef = useRef<HTMLElement | null>(null)
     // The session whose position was already applied this mount — re-applying on re-renders would yank the reader's scroll.
     const restoredRef = useRef<string | null>(null)
+    const [catFocus, setCatFocus] = useState<CatFocus | null>(null)
+    const clearCatFocus = useCallback(() => { setCatFocus(null) }, [])
 
-    // Restore the saved position (or the top on first visit) in a layout effect, so the chat's bottom-anchored position never flashes in
-    // first.
+    // The browser column's height cap — 3× the composition + trend cards beside it (browserCapOf) — re-measured
+    // per render and followed by a ResizeObserver, since pane drags and card reflows change no prop.
+    const leftColRef = useRef<HTMLDivElement | null>(null)
+    const [browserCap, setBrowserCap] = useState<number | null>(null)
+    const [, setCapTick] = useState(0)
+    useLayoutEffect(() => {
+      const col = leftColRef.current
+      /* v8 ignore next 1 -- the loading frame renders no left column; every carded render attaches it. */
+      if (col === null) return
+      // The column renders exactly the composition + trend cards; 3× their stacked height is the cap.
+      const next = browserCapOf([...col.children].map(el => el.getBoundingClientRect().height))
+      setBrowserCap(prev => (prev === next ? prev : next))
+    })
+    /* v8 ignore start -- jsdom has neither ResizeObserver nor layout: the cap's math is pinned by browserCapOf's unit tests. */
+    useEffect(() => {
+      const col = leftColRef.current
+      if (col === null || typeof ResizeObserver !== 'function') return
+      const observer = new ResizeObserver(() => { setCapTick(tick => tick + 1) })
+      observer.observe(col)
+      for (const el of col.querySelectorAll(':scope > .lc-card')) observer.observe(el)
+      return () => { observer.disconnect() }
+    }, [data])
+    /* v8 ignore stop */
+    const onFigureClick = useCallback((figure: 'skills' | 'answers'): void => {
+      setCatFocus(figure === 'skills' ? { cat: 'skill' } : { cat: 'assistant', kind: 'answer' })
+      revealBrowser(rootRef.current)
+    }, [])
+    // The stats board's family cell names the Agent Network card: its own tab when the preferences serve one,
+    // else the right Sidebar panel that keeps the card inline. A deployment serving neither — a stripped
+    // harness, or the tab hidden with no Sidebar — leaves the cell a plain figure instead of a dead button.
+    const hasFamilyView = settings.fleetTab() === 'show' || settings.defaultPlacement() !== 'tab'
+    const onTeamClick = useCallback((): void => {
+      if (!activateViewTab(t('tab.fleet'))) openContextSidebar(ctx)
+    }, [t])
+
+    // Restore the saved position in a layout effect, so the chat's bottom-anchored position never flashes in first.
     useLayoutEffect(() => {
       if (typeof sessionId !== 'string' || sessionId === '' || data === null) return
       if (restoredRef.current === sessionId) return
@@ -182,8 +233,7 @@ export function makeContextView(
       scroller.scrollTop = viewScroll.get(sessionId) ?? 0
     }, [sessionId, data])
 
-    // Save the position on unmount/session change — a layout-effect cleanup, so it fires before the incoming view's own layout effects
-    // re-scroll the shared container.
+    // Save the position in a layout-effect cleanup, so it fires before the incoming view's layout effects re-scroll the shared container.
     useLayoutEffect(() => {
       return () => {
         if (typeof sessionId !== 'string' || sessionId === '') return
@@ -193,37 +243,37 @@ export function makeContextView(
       }
     }, [sessionId])
 
-    // No locale subscription here: the harness slot outlet subscribes the
-    // LocaleFace revision and re-renders every entry on a locale switch, and
-    // the kit's bound `t` reads the active locale at call time.
+    // No locale subscription here: the harness slot outlet re-renders every entry on a locale switch, and the kit's
+    // bound `t` reads the active locale at call time.
 
-    // Hooks stay unconditional (Rules of Hooks): the projection value can arrive AFTER a loading first render, and an early return above
-    // these useMemos would grow the hook count between renders (React #310); fall back to empty collections and keep the loading return
-    // below the last hook.
     const requests = data ? data.requests : []
     const events = data ? data.events : []
-    // The stats board's count figures — the split head's precomputed tallies, or
-    // the collections' own derivation on the inline generation. Shared by the
-    // stats card's shape cells and the events card's kind-filter counts.
     const counts = data?.counts ?? countsOfRecords(requests, events)
-    // The per-kind tallies that ride the filter buttons: only the three priced
-    // kinds the host counts (model/mode switches carry no tally, hence undefined).
+    // Only the three kinds the host tallies; model/mode switches carry no count.
     const kindCounts: Record<string, number | undefined> = { inject: counts.injects, compaction: counts.compactions, prune: counts.prunes }
     const shownEvents = pickedKinds.length === EVENT_KINDS.length ? events : events.filter(e => pickedKinds.includes(e.kind))
-    // Per-step bars, or one per turn (each turn's LAST step's record); memoized so hover-driven re-renders keep bar props identity-stable —
-    // the chart's memoized bars then skip reconciliation (turn-mode aggregation allocates).
+    // Per-step bars, or one per turn (each turn's LAST step's record); memoized so hover-driven re-renders keep bar props identity-stable.
     const displayRequests = useMemo(
       () => (granularity === 'turn' ? aggregateByTurn(requests) : requests),
       [requests, granularity],
     )
-    // The step labels' per-turn totals ("第 s 步 (共 n 步)"), tallied over the RAW step records — turn-mode
-    // aggregates read their own stepCount instead.
+    // Tallied over the RAW step records — turn-mode aggregates read their own stepCount instead.
     const stepsOf = useMemo(() => turnStepsOf(requests), [requests])
     const markers = useMemo(() => attachMarkers(displayRequests, events), [displayRequests, events])
+    // One assemble() per displayed record — the same pure reconstruction the browser uses — memoized so hover-driven
+    // re-renders never reassemble.
+    /* v8 ignore next 1 -- a missing projection returns the loading screen before the trend card
+       (and its DNA toggle) renders, so `dna && data === null` cannot occur. */
+    const dnaBands = useMemo(
+      () => (dna && data !== null ? displayRequests.map(req => trendBandsOf(assemble(data, headers, req.seq))) : null),
+      [dna, data, headers, displayRequests],
+    )
+    const revealBand = useCallback((seq: number, band: { key: string; cat: Category | 'system' | 'tools' }): void => {
+      setNodeFocus({ step: seq, key: band.key, cat: band.cat })
+    }, [])
 
-    // Chat → Context jump, leg 1: pick up the assistant-action relay's request for this session —
-    // once per mount, and again on every later record (the sidebar landing keeps this view mounted
-    // while the user jumps between replies).
+    // Chat → Context jump, leg 1: pick up the relay's request once per mount and on every later record (the sidebar
+    // landing keeps this view mounted).
     useEffect(() => {
       if (typeof sessionId !== 'string' || sessionId === '') return
       const take = (): void => {
@@ -234,12 +284,8 @@ export function makeContextView(
       return subscribeContextFocus(take)
     }, [sessionId])
 
-    // Leg 2: the action row belongs to the reply that CLOSED a turn, so the jump is turn-level — flip the chart to turn bars, pin that
-    // turn's aggregate (the relayed seq is the turn's last request, exactly the aggregate's record), and center it: the same flow as a
-    // turn-strip click. An aged-out turn clamps to the oldest retained bar. The landing then reveals the Current Composition card, so
-    // the card and the pinned turn's trend chart share the scrollport (revealScroll.ts; no scrollable ancestor → a quiet no-op).
-    // The split generation waits for the detail read first: the relayed seq resolves against the served request records, so the
-    // one-shot request must not be consumed while the collections are still pending (it re-fires when they land).
+    // Leg 2: the relayed seq is the turn's LAST request — exactly the aggregate's record — so the jump pins that turn bar; the one-shot
+    // request must not be consumed while the split generation's collections are still pending (it re-fires when they land).
     const detailReady = source.detailState === 'ready' || source.detailState === 'legacy'
     useEffect(() => {
       if (jumpSeq === null || data === null || !detailReady) return
@@ -249,20 +295,13 @@ export function makeContextView(
       setGranularity('turn')
       setSelectedSeq(target.seq)
       setFocusTurn(target.turn ?? 0)
-      // The restore layout effect already applied the saved position on this same data render
-      // (layout effects precede this one); the reveal overrides it wherever it landed.
       /* v8 ignore next 2 -- the effect only fires while mounted, and both render paths attach
          rootRef and render the composition card. */
       const anchor = rootRef.current?.querySelector('[data-lc-current]') ?? null
       if (anchor !== null) revealInScrollParent(anchor)
     }, [jumpSeq, data, requests, detailReady])
 
-    // Step-brief raw material: every served node seq-sorted (live tail + archive), and the conversation-snapshot
-    // join the brief uses for call-argument enrichment (same join the Context browser builds).
     const briefList = useMemo(() => (data ? briefNodes(data) : []), [data])
-    // The conversation-window join, from the `useChat` seat. The seat is a
-    // real hook — invoked unconditionally per render (stable order);
-    // undefined join = render without it, never an error.
     const convNodes = conversationNodesOf(props)
     const bySeq = useMemo(() => {
       const m = new Map<number, ConversationNodeLike>()
@@ -270,7 +309,6 @@ export function makeContextView(
       return m
     }, [convNodes])
 
-    // Active bar / pin lookup — derived BEFORE the loading-return so the hooks below stay unconditional (React #310).
     let pinnedIdx = -1
     for (let i = 0; i < displayRequests.length; i++) if (displayRequests[i].seq === selectedSeq) pinnedIdx = i
     const pinnedReq = pinnedIdx >= 0 ? displayRequests[pinnedIdx] : null
@@ -281,25 +319,20 @@ export function makeContextView(
     if (activeIdx < 0) activeIdx = pinnedIdx
     if (activeIdx < 0 && displayRequests.length > 0) activeIdx = displayRequests.length - 1
     const activeReq = activeIdx >= 0 ? displayRequests[activeIdx] : null
-    // File activity follows the same active bar: the EXCLUSIVE upper bound is the next RAW request's seq, so the picked step's own
-    // tool calls (results land before the next request) count too; the latest bar's null bound serves everything.
+    // File activity follows the same active bar: the EXCLUSIVE upper bound is the next RAW request's seq (the picked step's own
+    // tool calls count too); the latest bar's null bound serves everything.
     let filesBefore: number | null = null
     if (activeReq !== null) {
-      // The active bar's seq always exists in the raw list (turn aggregates keep their last step's record).
       const ri = requests.findIndex(r => r.seq === activeReq.seq)
       filesBefore = ri + 1 < requests.length ? requests[ri + 1].seq : null
     }
-    // The active bar's semantic identity ("what this step was about"); pure derivation over the served nodes, null when nothing is known.
     const brief = useMemo(
       () => (activeReq !== null ? briefOf(briefList, displayRequests, activeIdx) : null),
       [activeReq, briefList, displayRequests, activeIdx],
     )
     const convOf = useCallback((seq: number): ConversationNodeLike | undefined => bySeq.get(seq), [bySeq])
 
-    // File activity follows the same active bar: the op-log generation reads the fold-derived records (full
-    // session-log coverage); older hosts keep the conversation-window derivation. Recomputed when the brief
-    // source, the conversation join, or the upper bound moves — hover/select elsewhere (composition chips,
-    // kind filters) leaves every input reference untouched, so the walk is skipped on those renders.
+    // Memoized on the walk's inputs only: hover/select renders elsewhere leave every input reference untouched, so the walk is skipped.
     const fileActivity = useMemo(
       () => {
         if (data !== null && data.fileOps !== undefined) {
@@ -309,13 +342,20 @@ export function makeContextView(
       },
       [data, briefList, convOf, filesBefore],
     )
-    // The session's workspace root — './'-relative row paths when known; read per
-    // render (an observable snapshot), so the next projection push re-renders with it.
+    // The stats card's pill tallies; the null bound means the WHOLE session.
+    const ioTotals = useMemo(
+      () => {
+        const totals = (data !== null && data.fileOps !== undefined
+          ? activityOfOps(data.fileOps, data.archive, null)
+          : activityOf(briefList, convOf, null)).totals
+        return { reads: totals.read.ops, writes: totals.write.ops, searches: totals.search.ops, images: totals.image.ops }
+      },
+      [data, briefList, convOf],
+    )
+    const toolTally = useMemo(() => (data ? toolTallyOf(data.nodes) : []), [data])
+    // Read per render off the observable snapshot, so the next projection push re-renders with the current workspace root.
     const workspace = typeof ctx.get === 'function' ? workspaceOf(ctx, typeof sessionId === 'string' ? sessionId : undefined) : undefined
-    // The system-opener affordance rides the same ctx; both resolve before the early return.
-    // The capability is an RPC answer now (the synchronous host-description fact is gone),
-    // so it lands in state once the probe settles — inert file names until then; the
-    // effect's cleanup drops an answer that arrives after the view unmounted.
+    // The capability is an async RPC answer, so file names stay inert until the probe settles.
     const [canOpenPaths, setCanOpenPaths] = useState(false)
     useEffect(() => {
       let live = true
@@ -326,11 +366,7 @@ export function makeContextView(
       () => (canOpenPaths ? openPathVia(ctx) : undefined),
       [canOpenPaths, ctx],
     )
-    // The right-Sidebar preview opener (the same optional column the Context
-    // tab itself registers into): resolved off `ctx` at mount, the face
-    // re-proved per call, so an HMR reload's revocation never leaves a stale
-    // opener. Absent face = no `onPreview` at all, and the card keeps its
-    // system-open affordance untouched.
+    // The preview column this tab registers into; the face is re-proved per call, so an HMR revocation leaves no stale opener.
     const previewOpener = useMemo(() => openResourceVia(ctx), [ctx])
     const sessionKey = typeof sessionId === 'string' ? sessionId : undefined
     const previewFile = useMemo(
@@ -342,39 +378,65 @@ export function makeContextView(
         },
       [previewOpener, sessionKey, workspace],
     )
+    const openAttachment = useMemo(
+      () => makeAttachmentOpener(ctx, typeof sessionId === 'string' ? sessionId : undefined, workspace),
+      [ctx, sessionId, workspace],
+    )
     const locateFileOp = useCallback((op: FileOp): void => {
-      // A nested Code-Mode op has no surface row of its own — it reveals on
-      // its parent run_code result (whose removal stamp the op carries).
+      // A nested Code-Mode op has no surface row of its own — it reveals on its parent run_code result.
       const seq = op.parent ?? op.seq
       const step = locateStepOf(requests, seq, op.gone)
       if (step === null) return
-      setNodeFocus({ step, seq, cat: 'tool' })
+      setNodeFocus({ step, key: 'n' + String(seq), cat: 'tool' })
     }, [requests])
-    // A brief row's reveal target: inputs/opener live in the picked step's OWN assembled surface; the response node (seq === the
-    // request's) first appears in the NEXT step's surface — or the live surface when the last bar is picked.
+    // A response node (seq === the request's) first appears in the NEXT step's surface, or the live surface on the last bar.
     const locateNode = useCallback((node: SurfaceNode, isResponse: boolean): void => {
       /* v8 ignore next 1 -- locateNode is only wired to brief rows, and
          brief !== null guarantees activeReq !== null in the same closure. */
       if (activeReq === null) return
       const next = isResponse && activeIdx + 1 < displayRequests.length ? displayRequests[activeIdx + 1] : null
       const step: number | 'live' = isResponse ? (next !== null ? next.seq : 'live') : activeReq.seq
-      setNodeFocus({ step, seq: node.seq, cat: node.cat })
+      setNodeFocus({ step, key: 'n' + String(node.seq), cat: node.cat })
     }, [activeReq, activeIdx, displayRequests])
 
+    // An injection event carries the seq of the very surface node it added (fold.ts), so its row can reveal that node
+    // at the step that first carried it. Resolution comes from the served node: its `gone` stamp bounds the reveal
+    // (a removed item shows only on the steps before its removal), and its category is the fold's own verdict — skill
+    // machinery lands in `skill`, which the event's `sub` does not cover (the catalog digest rides an untagged event).
+    const nodeOfSeq = useMemo(() => {
+      const m = new Map<number, SurfaceNode>()
+      if (data !== null) {
+        for (const n of data.nodes) m.set(n.seq, n)
+        for (const n of data.archive) m.set(n.seq, n)
+      }
+      return m
+    }, [data])
+    const focusInject = useCallback((ev: ContextEventRecord): void => {
+      const node = nodeOfSeq.get(ev.seq)
+      const step = locateStepOf(requests, ev.seq, node?.gone)
+      // Removed before any step dispatched it: there is nothing left to show.
+      if (step === null) return
+      setNodeFocus({ step, key: 'n' + String(ev.seq), cat: node?.cat ?? 'inject' })
+      revealBrowser(rootRef.current)
+    }, [requests, nodeOfSeq])
+
     if (!data) {
-      return <div className="lc-root" ref={rootRef}><div className="lc-empty">{t('loading')}</div></div>
+      return (
+        <div className="lc-root" ref={rootRef}>
+          {source.detailState === 'failed'
+            ? <DetailNote state="failed" onRetry={source.retryDetail} />
+            : <div className="lc-empty">{t('loading')}</div>}
+        </div>
+      )
     }
 
     const markerOf = (req: RequestRecord): ContextEventRecord | undefined => {
       const i = displayRequests.indexOf(req)
-      /* v8 ignore next 1 -- the only caller passes displayRequests[activeIdx],
-         an element of the very array indexOf scans. */
+      /** v8 ignore next 1 -- the only caller passes displayRequests[activeIdx], an element of the very array indexOf scans. */
       return i >= 0 ? markers[i] : undefined
     }
 
-    // Provider-anchored CURRENT occupancy (contextPressure.projectedTokens): the headline, because the fixed 4-chars/token heuristic
-    // undercounts CJK by ~10–15% — proportions stay heuristic but are anchored to the real billed total. Shared with the /context popup
-    // (headline.ts); composition rides the official `contextBreakdown` rows.
+    // Provider-anchored occupancy: the 4-chars/token heuristic undercounts CJK by ~10–15%, so the headline anchors to the billed total.
     const head = headlineOf(data, pressure, breakdown)
     let fileScope = t('files.scopeLatest')
     if (activeReq !== null && filesBefore !== null) {
@@ -383,31 +445,23 @@ export function makeContextView(
         : t('detail.step', { t: activeReq.turn ?? 0, s: activeReq.step ?? 0, n: stepsOf(activeReq.turn) })
     }
 
-    // Turn highlight is hover-only: the turn strip hover wins, then the hovered bar's turn — no fallback, so a pinned or default selection
-    // never keeps a turn glowing.
+    // Turn highlight is hover-only (strip hover wins, then the hovered bar's turn): no fallback, so a pinned or
+    // default selection never glows.
     let activeTurn: number | null = hoverTurn
     if (activeTurn === null && hoveredSeq !== null) {
       for (const req of displayRequests) if (req.seq === hoveredSeq) { activeTurn = req.turn ?? null; break }
     }
 
-    // The trend card mirrors the SAME shared category hover the browser's live link uses: the overview's 'free' key drops
-    // (no segment in the chart or the detail bar), and every bar + the detail bar light that category's segment.
+    // Mirrors the browser's shared category hover; the overview's 'free' key drops — it has no segment in the chart or the detail bar.
     const trendHoverCat = hoverCat !== null && hoverCat !== 'free' ? hoverCat : null
 
-    // The cost cell prices in the active locale (zh → CNY, else USD), read at render time — the locale subscription above already
-    // re-renders on a switch; older hosts without getLocale fall back to USD.
     const localeSvc = ctx.get('locale')
     const activeLocale = localeSvc !== undefined && typeof localeSvc.getLocale === 'function'
       ? localeSvc.getLocale().active
       : 'en'
     const subtitle = (data.model ?? '') + (data.provider ? ' · ' + data.provider : '')
-    // The host's baseline gate (host/fallback.ts): the cards below render
-    // the fallback's zeroed data while the modal names both versions and
-    // urges the upgrade. Absent record = a supported harness, no gate.
     const gate = unsupportedOf(data.unsupported)
 
-    // The three main-row cards, built once and laid out by the shared
-    // arrangement below (every host uses the same row).
     const compositionCard = (
       <CurrentComposition
         head={head}
@@ -416,22 +470,69 @@ export function makeContextView(
         onHoverKey={setHoverCat}
       />
     )
+    // Both trend faces share the records + hover/select flow; only the overview's turn click pins instead of
+    // scroll-centering (there is no scroll), and the bar chart carries DNA/adaptive extras. The `key` stays out —
+    // a spread carrying it trips React's spread-key warning — and rides the faces explicitly for the per-session
+    // remount that re-anchors at the newest bars instead of inheriting stale scroll state.
+    const trendBase = {
+      // ALL retained requests (bounded by the host's maxKeptTurns/maxRequestSteps config): earlier
+      // turns/steps stay reachable via scroll or the fit width.
+      requests: displayRequests,
+      markers,
+      selectedSeq: pinnedReq ? pinnedReq.seq : null,
+      hoveredSeq,
+      activeTurn,
+      granularity,
+      mode: trendMode,
+      hoverCat: trendHoverCat,
+      focusCat,
+      durationCurve,
+      onSelect: setSelectedSeq,
+      onHover: setHoveredSeq,
+      onHoverTurn: setHoverTurn,
+    }
     const trendCard = (
       <div className="lc-card">
         <div className="lc-card-title">
           <span className="lc-card-title-text">{t('trend.title')}</span>
-          {/* The adaptive switch rides the title's right (the browser card's DNA toggle idiom): bars rescale
-              to the bars currently on screen instead of the whole retained log. */}
-          <span className="lc-gran lc-trend-adaptive" role="group" title={t('trend.adaptiveHint')}>
+          <span className="lc-gran lc-trend-mods" role="group">
+            <button
+              type="button"
+              className={'lc-gran-btn' + (dna ? ' lc-gran-on' : '')}
+              title={t('trend.dnaTip')}
+              onClick={() => {
+                const on = !dna
+                setDna(on)
+                if (on) setOverview(false)
+              }}
+            >{t('trend.dna')}</button>
             <button
               type="button"
               className={'lc-gran-btn' + (adaptive ? ' lc-gran-on' : '')}
-              onClick={() => { setAdaptive(on => !on) }}
+              title={t('trend.adaptiveHint')}
+              onClick={() => {
+                const on = !adaptive
+                setAdaptive(on)
+                if (on) setOverview(false)
+              }}
             >{t('trend.adaptive')}</button>
+            <button
+              type="button"
+              className={'lc-gran-btn' + (durationCurve ? ' lc-gran-on' : '')}
+              title={t('trend.durationTip')}
+              onClick={() => { setDurationCurve(on => !on) }}
+            >{t('trend.duration')}</button>
+            <button
+              type="button"
+              className={'lc-gran-btn' + (overview ? ' lc-gran-on' : '')}
+              title={t('trend.overviewTip')}
+              onClick={() => {
+                const on = !overview
+                setOverview(on)
+                if (on) { setDna(false); setAdaptive(false) }
+              }}
+            >{t('trend.overview')}</button>
           </span>
-          {focusCat !== null
-            ? <span className="lc-card-sub">{t('trend.focus', { cat: kit.catLabel(focusCat) })}</span>
-            : null}
           <div className="lc-trend-ctl">
             <div className="lc-gran">
               <button
@@ -456,49 +557,55 @@ export function makeContextView(
           </div>
         </div>
         {displayRequests.length === 0
-          // Split generation, first detail read pending or failed: say
-          // so instead of claiming the session has no history.
+          // Split generation, first detail read pending or failed: say so instead of claiming no history.
           ? (detailReady
-            ? <div className="lc-empty">{t('trend.empty')}</div>
-            : <DetailNote state={source.detailState === 'failed' ? 'failed' : 'loading'} onRetry={source.retryDetail} />)
+            ? <TrendReserved catLabel={catLabel}><div className="lc-empty">{t('trend.empty')}</div></TrendReserved>
+            : <TrendReserved catLabel={catLabel}>
+              <DetailNote state={source.detailState === 'failed' ? 'failed' : 'loading'} onRetry={source.retryDetail} />
+            </TrendReserved>)
           : (
             <div>
-              <TrendChart
-                // Remount per session: switching sessions re-anchors the chart at the newest bars instead of inheriting stale scroll
-                // state.
-                key={sessionId}
-                // Render ALL retained requests (bounded by the host's maxKeptTurns/maxRequestSteps config) so earlier turns/steps
-                // stay reachable via horizontal scroll.
-                requests={displayRequests}
-                markers={markers}
-                selectedSeq={pinnedReq ? pinnedReq.seq : null}
-                hoveredSeq={hoveredSeq}
-                activeTurn={activeTurn}
-                granularity={granularity}
-                mode={trendMode}
-                focusTurn={focusTurn}
-                hoverCat={trendHoverCat}
-                focusCat={focusCat}
-                adaptive={adaptive}
-                onSelect={setSelectedSeq}
-                onHover={setHoveredSeq}
-                onHoverTurn={setHoverTurn}
-                onPickTurn={(turn) => { setGranularity('turn'); setFocusTurn(turn) }}
-                onFocusTurnHandled={() => { setFocusTurn(null) }}
-              />
+              {overview
+                ? (
+                  <TrendOverview
+                    key={sessionId}
+                    {...trendBase}
+                    onPickTurn={(turn) => {
+                      setGranularity('turn')
+                      // No scroll to center: pin the turn's closing record — the same seq its aggregate keeps.
+                      let seq: number | null = null
+                      for (const req of displayRequests) if ((req.turn ?? 0) === turn) seq = req.seq
+                      /* v8 ignore next 1 -- the clicked block always has records (blocks walk the same list),
+                         so the pinned seq is never null. */
+                      if (seq !== null) setSelectedSeq(seq)
+                    }}
+                  />
+                )
+                : (
+                  <TrendChart
+                    key={sessionId}
+                    {...trendBase}
+                    focusTurn={focusTurn}
+                    adaptive={adaptive}
+                    dna={dnaBands}
+                    onPickBand={revealBand}
+                    onPickTurn={(turn) => { setGranularity('turn'); setFocusTurn(turn) }}
+                    onFocusTurnHandled={() => { setFocusTurn(null) }}
+                  />
+                )}
               <RequestDetail
                 request={activeReq}
                 // Delta mode pairs the detail with the SAME previous record the chart diffs against (first bar: null).
                 prev={trendMode === 'delta' && activeIdx >= 0 ? (activeIdx > 0 ? displayRequests[activeIdx - 1] : null) : undefined}
-                /* v8 ignore next 1 -- RequestDetail renders only when
-                   displayRequests.length > 0, which forces activeReq
-                   non-null via the activeIdx fallback above. */
+                /** v8 ignore next 1 -- RequestDetail renders only when displayRequests.length > 0, which forces activeReq
+                 * non-null via the activeIdx fallback above. */
                 marker={activeReq !== null ? markerOf(activeReq) : undefined}
                 brief={brief}
                 convOf={convOf}
                 stepsOf={stepsOf}
                 onLocate={locateNode}
                 hoverKey={trendHoverCat}
+                onHoverKey={setHoverCat}
               />
             </div>
           )}
@@ -519,42 +626,43 @@ export function makeContextView(
         nodeFocus={nodeFocus}
         onNodeFocusHandled={clearNodeFocus}
         loadImage={loadImage}
+        openAttachment={openAttachment}
         detailState={source.detailState}
         onDetailRetry={source.retryDetail}
+        catFocus={catFocus}
+        onCatFocusHandled={clearCatFocus}
+        // The DNA switch is shared with the trend card: both toggles move as one.
+        dna={dna}
+        onDnaChange={setDna}
       />
     )
 
     return (
       <div className="lc-root" ref={rootRef}>
 
-        {/* The head band splits into two rows: the session's shape beside the
-            plugin card at a 3:1 split, then the two donut cards together. The
-            sidebar panel drops the first row (context stats / plugin info pay
-            off only on the full-width tab); the rows' own flex-wrap stacks the
-            pair in a narrow pane at the cards' min-width floors. */}
         {inSidebar ? null : (
           <div className="lc-cols lc-head">
-            <StatsContext counts={counts} humanInputs={data.humanInputs} toolCalls={data.toolCalls} usage={usage}
-              cost={data.cost} locale={activeLocale} sessionId={typeof sessionId === 'string' ? sessionId : undefined} />
+            <StatsContext counts={counts} humanInputs={data.humanInputs} answers={data.answers} toolCalls={data.toolCalls}
+              files={ioTotals} tools={toolTally}
+              cost={data.cost} locale={activeLocale} sessionId={typeof sessionId === 'string' ? sessionId : undefined}
+              onFigureClick={onFigureClick} onTeamClick={hasFamilyView ? onTeamClick : undefined} />
             <PluginInfo />
           </div>
         )}
         <div className="lc-cols lc-head">
           <StatsTokens usage={usage} current={data.current} breakdown={breakdown} />
-          <StatsTiming timing={data.timing ?? null} />
+          <StatsTiming timing={data.timing ?? null} spans={data.spans} />
         </div>
 
-        {/* One arrangement for every host: composition over trend in the left
-            column, the browser beside them and stretched to the pair's height.
-            All columns share the 360px floor (`min-w-[min(360px,100%)]`): the
-            rows wrap at it, and a sub-360px pane narrows the column instead
-            of overflowing. */}
         <div className="lc-cols lc-cols-main">
-          <div className="lc-col flex-1 min-w-[min(360px,100%)]">{compositionCard}{trendCard}</div>
-          {/* `lc-col-browser` stretches the browser card to the left column's
-              height; the /context modal, which draws its own stack, must stay
-              content-sized. */}
-          <div className="lc-col lc-col-browser flex-1 min-w-[min(360px,100%)]">{browserCard}</div>
+          <div className="lc-col flex-1 min-w-[min(360px,100%)]" ref={leftColRef}>{compositionCard}{trendCard}</div>
+          {/* Stretches the browser card to the left column's height; the /context modal draws its own stack and stays content-sized.
+              Capped at 3× the left cards' height (browserCapOf): the DNA feed lays out every message, so the card's rows region
+              scrolls inside the capped card. */}
+          <div
+            className="lc-col lc-col-browser flex-1 min-w-[min(360px,100%)]"
+            style={browserCap !== null ? { maxHeight: browserCap } : undefined}
+          >{browserCard}</div>
         </div>
 
         <div className="lc-cols">
@@ -578,22 +686,20 @@ export function makeContextView(
                 })}
               </div>
             </div>
-            <EventList events={shownEvents} state={source.detailState} onRetry={source.retryDetail} />
+            <EventList events={shownEvents} state={source.detailState} onRetry={source.retryDetail} onInjectFocus={focusInject} />
           </div>
           <FileCard activity={fileActivity} scope={fileScope} workspace={workspace}
             onPreview={previewFile} onOpen={fileOpener} onLocate={locateFileOp}
             state={source.detailState} onRetry={source.retryDetail} />
         </div>
 
-        <AgentGraph
-          sessionId={typeof sessionId === 'string' ? sessionId : undefined}
-          self={{
-            head,
-            billed: usage !== null ? numOf(usage.uncachedInputTokens) + numOf(usage.outputTokens)
-              + numOf(usage.cacheReadTokens) + numOf(usage.cacheWriteTokens) : null,
-            requests: requests.length,
-          }}
-        />
+        {/* The card's standalone home is the Fleet tab; the right Sidebar's panel is too narrow to split, so it keeps the card inline. */}
+        {inSidebar ? (
+          <AgentGraph
+            sessionId={typeof sessionId === 'string' ? sessionId : undefined}
+            self={agentSelfOf(data, pressure, breakdown, usage)}
+          />
+        ) : null}
 
         <div className="lc-foot">{t('footer')}</div>
 

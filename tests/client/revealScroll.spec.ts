@@ -1,6 +1,5 @@
-// revealScroll (src/client/revealScroll.ts) — the jump's landing reveal,
-// driven against real jsdom DOM: the nearest scrollable ancestor takes the
-// rect-delta scroll, the walk stops at body/null, hostile chains never throw.
+// revealScroll (src/client/revealScroll.ts) — the jump's landing reveal against real jsdom DOM: the nearest
+// ancestor that ACTUALLY scrolls (overflowing style alone is not enough) takes the rect-delta scroll.
 
 import assert from 'node:assert/strict'
 import { describe, test } from 'vitest'
@@ -9,10 +8,13 @@ import { revealInScrollParent } from '../../src/client/revealScroll'
 /** A viewport rect carrying only the top the reveal reads. */
 const top = (t: number): DOMRect => ({ top: t }) as DOMRect
 
-/** An overflow-styled scroller holding the anchor, with stubbed viewport tops. */
+/** An overflow-styled scroller holding the anchor, stubbed with real overflow and viewport tops. */
 function mounted(oy: 'auto' | 'scroll', scrollerTop: number, anchorTop: number): { scroller: HTMLDivElement; anchor: HTMLDivElement } {
   const scroller = document.createElement('div')
   scroller.style.overflowY = oy
+  // jsdom reports 0 for both — an operative scroller must overflow its box.
+  Object.defineProperty(scroller, 'scrollHeight', { value: 500 })
+  Object.defineProperty(scroller, 'clientHeight', { value: 200 })
   scroller.getBoundingClientRect = () => top(scrollerTop)
   const anchor = document.createElement('div')
   anchor.getBoundingClientRect = () => top(anchorTop)
@@ -34,6 +36,22 @@ describe('revealInScrollParent', () => {
     const { scroller, anchor } = mounted('scroll', 0, 200)
     assert.equal(revealInScrollParent(anchor), true)
     assert.equal(scroller.scrollTop, 200)
+    scroller.remove()
+  })
+
+  test('a grow-with-content box (auto yet never overflowing) is skipped for the real scroller above', () => {
+    // The Context tab's own `.lc-root` shape on layouts where an OUTER
+    // container scrolls: styled auto, scrollHeight == clientHeight — taking
+    // it would scroll a no-op while the real scroller waits above.
+    const { scroller, anchor } = mounted('auto', 0, 300)
+    const grown = document.createElement('div')
+    grown.style.overflowY = 'auto'
+    Object.defineProperty(grown, 'scrollHeight', { value: 300 })
+    Object.defineProperty(grown, 'clientHeight', { value: 300 })
+    grown.appendChild(anchor)
+    scroller.appendChild(grown)
+    assert.equal(revealInScrollParent(anchor), true)
+    assert.equal(scroller.scrollTop, 300, 'the real scroller above takes the delta')
     scroller.remove()
   })
 

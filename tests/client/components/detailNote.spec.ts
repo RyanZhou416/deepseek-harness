@@ -1,7 +1,3 @@
-// DetailNote (src/client/components/detailNote.tsx): the split generation's
-// detail-pending note — loading strip, the failed state's retry button, and
-// the inert plain-text failure when no retry is wired.
-
 import { createElement as h } from 'react'
 import assert from 'node:assert/strict'
 import { describe, test } from 'vitest'

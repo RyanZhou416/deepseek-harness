@@ -1,26 +1,16 @@
 /**
- * The file-operation parser — the ONE derivation of "what the agent did to
- * files" from a settled file-tool call. Shared by both halves: the host fold
- * books the op log from the durable tool lifecycle (tool/call +
- * tool/result + tool/code-dispatch), and the client's INLINE-generation
- * fallback re-derives ops from the conversation-window join when an older
- * host serves no `fileOps`.
+ * The file-operation parser — the ONE derivation of "what the agent did to files" from a settled
+ * file-tool call: the host fold books the op log from the durable tool lifecycle, and the
+ * client's INLINE-generation fallback re-derives ops from the conversation-window join.
  *
- * Tool coverage matches the harness's built-ins on every supported baseline
- * (0.1.2-rc.1): read / read_image / write / edit (tool-fs) and grep / glob
- * (tool-fs-search), plus the Anthropic-style `str_replace_editor` (view
- * reads, every other command writes). Line deltas are estimates read off the
- * call ARGUMENTS (an edit's old/new strings, a write's content), never off
- * result payloads. A search resolves further when its result's bounded
- * presentation meta names the matched files — the ops then row per real
- * file with the match count, and only a capped (`truncated`) or malformed
- * meta falls back to the call's own target (the narrowing path, else the
- * searched pattern itself).
+ * Tool coverage matches the harness built-ins on every supported baseline (0.1.7-rc.2+):
+ * read / read_image / write / edit (tool-fs), grep / glob (tool-fs-search), plus
+ * `str_replace_editor`. Line deltas are estimates read off the call ARGUMENTS, never result
+ * payloads.
  */
 
 import type { FileOpRecord } from './types'
 
-/** Parse a call's raw JSON arguments; non-string/malformed/non-record inputs yield null. */
 export function parseCallArgs(raw: unknown): Record<string, unknown> | null {
   if (typeof raw !== 'string' || raw === '') return null
   try {
@@ -42,49 +32,29 @@ const KIND_BY_TOOL: Record<string, FileOpRecord['kind']> = {
   glob: 'search',
 }
 
-/** The file purpose of a tool, or null for non-file tools (bash, web_search…). */
 export function kindOfTool(tool: string | undefined): FileOpRecord['kind'] | null {
   if (tool === undefined) return null
   return KIND_BY_TOOL[tool] ?? null
 }
 
-/**
- * The file purpose of one executed call. Like {@link kindOfTool} except for
- * the one file tool whose purpose follows its arguments: `str_replace_editor`
- * reads on `view` and writes on every other command (create / str_replace /
- * insert — an unknown command writes too; the call failed and the row keeps
- * its error flag).
- */
+/** The file purpose of one executed call: `str_replace_editor` reads on `view`, writes on every
+ * other command (an unknown command's call failed and keeps its error flag). */
 export function kindOfCall(tool: string, args: Record<string, unknown> | null): FileOpRecord['kind'] | null {
   if (tool === 'str_replace_editor') return args !== null && args.command === 'view' ? 'read' : 'write'
   return kindOfTool(tool)
 }
 
-/**
- * Whether a settled call's arguments can yield an op at all: the file tools
- * plus `str_replace_editor`, whose purpose follows its `command`. The public
- * face of the gate {@link opsOfCall} short-circuits on — callers that decide
- * whether to parse or to KEEP a call's raw arguments ask here instead of
- * restating the tool list.
- */
+/** Whether a call's arguments can yield an op — the gate {@link opsOfCall} short-circuits on. */
 export function opBearingTool(tool: string): boolean {
   return tool === 'str_replace_editor' || kindOfTool(tool) !== null
 }
 
-/**
- * Whether a call's raw arguments must ride the fold state
- * (TimelineState.callNames): every op-bearing tool, plus `run_code`, whose
- * `description` labels the ops its nested dispatches book at flush time.
- */
+/** Op-bearing tools plus `run_code`, whose `description` labels the ops its nested dispatches book. */
 export function rawArgsNeeded(tool: string): boolean {
   return opBearingTool(tool) || tool === 'run_code'
 }
 
-/**
- * The operation's target path: the path-ish argument of read/write tools;
- * for searches the narrowing `path`, else the pattern itself (a pathless
- * grep/glob's target IS the pattern — the workspace-wide search text).
- */
+/** The operation's target path; for a pathless search it is the searched pattern itself (the workspace-wide search text). */
 export function pathOfArgs(tool: string, args: Record<string, unknown> | null): string | null {
   if (args === null) return null
   if (tool === 'grep' || tool === 'glob') {
@@ -100,7 +70,6 @@ export function pathOfArgs(tool: string, args: Record<string, unknown> | null): 
   return null
 }
 
-/** Rendered line count: '' is 0, a trailing newline closes its own line. */
 export function linesOf(s: string): number {
   if (s === '') return 0
   let n = 0
@@ -108,7 +77,6 @@ export function linesOf(s: string): number {
   return s.endsWith('\n') ? n : n + 1
 }
 
-/** The added/removed pair of one content-bearing argument set, or zeros. */
 function pairOf(added: unknown, removed: unknown): { added: number; removed: number } {
   return {
     added: typeof added === 'string' ? linesOf(added) : 0,
@@ -116,13 +84,8 @@ function pairOf(added: unknown, removed: unknown): { added: number; removed: num
   }
 }
 
-/**
- * The signed line footprint of one call: an edit removes its old string and
- * adds its new one; a write adds its content (the pre-existing body, if any,
- * is unknowable from the arguments — the estimate stays honest about that);
- * `str_replace_editor` splits the same shapes across its commands. Callers
- * reach here only with parsed args (a null parse yields no path).
- */
+/** The signed line footprint of one call: an edit removes its old string and adds its new one; a
+ * write adds its content alone — the pre-existing body is unknowable from the arguments. */
 function deltaOf(tool: string, args: Record<string, unknown>): { added: number; removed: number } {
   if (tool === 'edit') return pairOf(args.new_string, args.old_string)
   if (tool === 'write') return pairOf(args.content, undefined)
@@ -134,9 +97,7 @@ function deltaOf(tool: string, args: Record<string, unknown>): { added: number; 
   return { added: 0, removed: 0 }
 }
 
-/** The exact window a read's result meta reports: `offset` plus the retained
- * `lines` array (the same bounded payload the read card renders from). Null
- * for a foreign or malformed meta. */
+/** The exact window a read's result meta reports (`offset` plus the retained `lines` array); null for a foreign or malformed meta. */
 function readWindowOf(meta: unknown): { start: number; count: number } | null {
   if (meta === null || typeof meta !== 'object') return null
   const m = meta as { path?: unknown; offset?: unknown; lines?: unknown }
@@ -146,8 +107,6 @@ function readWindowOf(meta: unknown): { start: number; count: number } | null {
   return { start: m.offset, count: m.lines.length }
 }
 
-/** The limit estimate: the tool reads up to `limit` lines from `offset`;
- * absent when the call reads unbounded. */
 function readEstimateOf(args: Record<string, unknown>): { count: number; est: true } | undefined {
   const limit = args.limit
   return typeof limit === 'number' && Number.isFinite(limit) && limit > 0
@@ -155,18 +114,12 @@ function readEstimateOf(args: Record<string, unknown>): { count: number; est: tr
     : undefined
 }
 
-/** What a read op shows: the exact window off the result meta, else the
- * limit estimate, else nothing (an unbounded read names no footprint). */
 function readOf(meta: unknown, args: Record<string, unknown>): { start: number; count: number } | { count: number; est: true } | undefined {
   const win = readWindowOf(meta)
   if (win !== null) return { start: win.start, count: win.count }
   return readEstimateOf(args)
 }
 
-/**
- * A search op's detail: the pattern, with the include filter appended when
- * one narrowed the call. A patternless (malformed) search has no detail.
- */
 function searchDetailOf(args: Record<string, unknown> | null): string | undefined {
   const pattern = args?.pattern
   if (typeof pattern !== 'string' || pattern === '') return undefined
@@ -174,13 +127,9 @@ function searchDetailOf(args: Record<string, unknown> | null): string | undefine
   return typeof include === 'string' && include !== '' ? `${pattern} (${include})` : pattern
 }
 
-/**
- * The files a search demonstrably reached, read off the result's bounded
- * presentation meta (grep groups matched lines by file; glob lists paths).
- * Only the COMPLETE list attributes: a capped search (`truncated`) names a
- * partial file set, and a malformed meta names none — both fall back to the
- * call's own target. Each entry carries the reported match count.
- */
+/** The files a search demonstrably reached, read off the result's presentation meta (grep groups
+ * matched lines by file; glob lists paths). Only a COMPLETE list attributes — a capped or
+ * malformed meta names none, and the call falls back to its own target. */
 function searchFilesOf(meta: unknown): { path: string; hits: number }[] | null {
   if (meta === null || typeof meta !== 'object') return null
   const m = meta as { shape?: unknown; truncated?: unknown; files?: unknown; paths?: unknown }
@@ -202,16 +151,9 @@ function searchFilesOf(meta: unknown): { path: string; hits: number }[] | null {
   return files.length > 0 ? files : null
 }
 
-/**
- * The one-shot per-call op assembly, uniform across every producer: the
- * host's call/result pairing (args off the armed call, meta off the
- * result), the nested Code-Mode settle (no meta exists on a dispatch — the
- * read window and per-file search attribution degrade to the argument-only
- * forms), and the client's inline-generation join fallback. Returns zero to
- * N records: a search with the complete matched-file meta rows per file;
- * any other file call rows once; a non-file tool (or a call whose arguments
- * resolve no target) rows nothing.
- */
+/** The one-shot per-call op assembly, uniform across every producer (the host's call/result
+ * pairing, the nested Code-Mode settle, the client's inline join). A dispatch carries no meta,
+ * so its read window and per-file attribution degrade to the argument-only forms. */
 export function opsOfCall(input: {
   seq: number
   tool: string
@@ -223,9 +165,7 @@ export function opsOfCall(input: {
   parent?: number
   program?: string
 }): FileOpRecord[] {
-  // A non-op-bearing tool never rows one — skip its arguments parse entirely
-  // (a call's arguments are its largest payload, and the fold may hand a large
-  // bash/pwsh call here).
+  // A non-op-bearing tool's arguments are never parsed — they can be a large bash/pwsh payload.
   const args = opBearingTool(input.tool) ? parseCallArgs(input.argsRaw) : null
   const kind = kindOfCall(input.tool, args)
   if (kind === null) return []
@@ -242,13 +182,9 @@ export function opsOfCall(input: {
     ...(input.parent !== undefined ? { parent: input.parent } : {}),
     ...(input.program !== undefined ? { program: input.program } : {}),
   }
-  // A search whose result meta carries the COMPLETE matched-file list rows
-  // its ops per real file — even when the call's own arguments failed to
-  // parse (the detail line just drops out). The call's own target (the
-  // searched path, or the pattern for a workspace-wide search) rows TOO —
-  // "what was searched" and "what got hit" both count; only the degenerate
-  // single-file search (the target IS the sole matched file) skips the
-  // duplicate target row.
+  // A search with the COMPLETE matched-file meta rows per real file; the call's own target rows
+  // TOO ("what was searched" and "what got hit" both count), except the degenerate single-file
+  // search whose target IS the sole matched file.
   if (kind === 'search') {
     const files = searchFilesOf(input.meta)
     if (files !== null) {

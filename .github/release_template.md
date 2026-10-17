@@ -14,10 +14,19 @@ dsh plugin --profile web update dsh-context@latest
 
 ## What's New
 
-The single most important user-facing change, as a narrative. Drop this section when there is no headline change.
-- **<Headline change N>** — <what it is, why it matters, 2–4 sentences.>
-  - <Key property 1>
-  - <Key property 2>
+(The important user-facing changes)
+
+### Features
+
+- ** <Headline change N>**
+  - <Key briefing 1>
+  - <Key briefing 2>
+
+### Fixes
+- ...
+
+### Changes
+- ...
 
 ## Commits
 

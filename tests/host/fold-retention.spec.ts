@@ -1,10 +1,6 @@
-// Retention tests for the timeline fold (src/host/fold.ts): trimToLastTurns
-// unit behavior plus trimState's turn-run / step / event / archive bounds,
-// driven through the real projection unit with tiny config bounds. The
-// restored-state defenses (a projection-cache restore can carry archived
-// entries without `gone` — the state schema leaves it optional) are exercised
-// by feeding hand-crafted states through def.apply, exactly what a cache
-// restore seeds.
+// Retention in the timeline fold (src/host/foldState.ts): trimToLastTurns plus trimState's turn-run / step / event / archive bounds, driven
+// through the real projection unit with tiny config bounds. The restored-state defenses (a cache restore can carry archived entries without
+// `gone` — the state schema leaves it optional) are exercised by feeding hand-crafted states through def.apply.
 
 import assert from 'node:assert/strict'
 import { describe, test } from 'vitest'
@@ -79,8 +75,7 @@ describe('trimState request/event bounds', () => {
       [1, 2, 3, 4, 5].map(i => assistantMessage(i, { turn: 1, step: i })),
       { maxKeptTurns: 10, maxRequestSteps: 3 },
     )
-    // One turn-run: the turn trim cannot cut mid-turn, so the step backstop
-    // slices the newest tail.
+    // One turn-run: the turn trim cannot cut mid-turn, so the step backstop slices the newest tail.
     assert.deepEqual(drive.state.requests.map(r => r.seq), [3, 4, 5])
   })
 
@@ -105,8 +100,7 @@ describe('the incremental turnRuns ledger', () => {
       assistantMessage(4, { turn: 2, step: 1 }),
       assistantMessage(5, { turn: 2, step: 2 }),
     ])
-    // Scan semantics: the leading turn-less record forms no run; runs open at
-    // turn 1 (record 2) and turn 2 (record 4).
+    // Scan semantics: the leading turn-less record forms no run; runs open at turn 1 (record 2) and turn 2 (record 4).
     assert.equal(drive.state.turnRuns, 2)
     assertStatesPlainJson(drive)
   })
@@ -131,7 +125,7 @@ describe('trimState archive pruning', () => {
     const drive = driveTimeline([
       assistantMessage(1, { turn: 1, step: 1 }),
       compaction(2, 'prune', { shadowedSeqs: [1], shadowedTokenCount: 9 }),
-      assistantMessage(3, { turn: 1, step: 2, surfaceOp: { op: 'replace', start: 1, end: 1 } }),
+      assistantMessage(3, { turn: 1, step: 2, surfaceOp: { op: 'replace', startSeq: 1, endSeq: 1 } }),
       assistantMessage(4, { turn: 2, step: 1 }),
       assistantMessage(5, { turn: 3, step: 1 }),
     ], { maxKeptTurns: 2 })
@@ -146,13 +140,13 @@ describe('trimState archive pruning', () => {
     const drive = driveTimeline([
       userMessage(1, [{ type: 'text', text: 'aaaa' }]),
       compaction(2, 'prune', { shadowedSeqs: [1], shadowedTokenCount: 9 }),
-      userMessage(3, [{ type: 'text', text: 'b' }], undefined, { surfaceOp: { op: 'replace', start: 1, end: 1 } }),
+      userMessage(3, [{ type: 'text', text: 'b' }], undefined, { surfaceOp: { op: 'replace', startSeq: 1, endSeq: 1 } }),
       userMessage(4, [{ type: 'text', text: 'cccc' }]),
       compaction(5, 'prune', { shadowedSeqs: [4], shadowedTokenCount: 9 }),
-      userMessage(6, [{ type: 'text', text: 'd' }], undefined, { surfaceOp: { op: 'replace', start: 4, end: 4 } }),
+      userMessage(6, [{ type: 'text', text: 'd' }], undefined, { surfaceOp: { op: 'replace', startSeq: 4, endSeq: 4 } }),
       userMessage(7, [{ type: 'text', text: 'eeee' }]),
       compaction(8, 'prune', { shadowedSeqs: [7], shadowedTokenCount: 9 }),
-      userMessage(9, [{ type: 'text', text: 'f' }], undefined, { surfaceOp: { op: 'replace', start: 7, end: 7 } }),
+      userMessage(9, [{ type: 'text', text: 'f' }], undefined, { surfaceOp: { op: 'replace', startSeq: 7, endSeq: 7 } }),
     ], { maxArchiveNodes: 1 })
     assert.equal(drive.states[6].archiveFloor, 3, 'the first drop sets the floor (no existing one)')
     assert.deepEqual(drive.state.archived.map(n => n.seq), [7], 'only the newest removal survives')
@@ -166,8 +160,7 @@ describe('trimState restored-state defenses', () => {
     const def = timelineDef({ maxArchiveNodes: 2 })
     const st = createTimelineState()
     st.requests.push(req(5, 1, 1))
-    // A restored/legacy row without `gone`: `gone ?? Infinity` keeps it above
-    // any oldest retained request.
+    // A restored/legacy row without `gone`: `gone ?? Infinity` keeps it above any oldest retained request.
     st.archived.push({ seq: 1, cat: 'user', tokens: 9 })
     const next = def.apply(st, planMode(10, { active: true }))
     assert.deepEqual(next.archived.map(n => n.seq), [1])

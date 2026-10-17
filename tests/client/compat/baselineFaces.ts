@@ -1,6 +1,5 @@
-// Per-baseline harness client faces (tests/baselines.ts): the in-memory
-// service implementations a given dsh generation actually serves, so the
-// always-on suite can drive the plugin's client half through each baseline's
+// Per-baseline harness client faces (tests/baselines.ts): the in-memory service implementations a given dsh
+// generation actually serves, so the always-on suite can drive the plugin's client half through each baseline's
 // seams. The real-code complement runs in the `compat` vitest project.
 
 import { TestClientCtx } from '../helpers/harness'
@@ -33,20 +32,17 @@ function historyEvents(): unknown[] {
   ]
 }
 
-/**
- * Arm a test ctx with the harness service faces the way the generation
+/** Arm a test ctx with the harness service faces the way the generation
  * composes them: the gateway remotes (the traced `remote` facade carrying
  * the session page, plus the direct `remote.session` service whose
  * undeclared reads throw) and the durable-image loader service. Arm the
- * plugin's declared inject (`watchHistoryFaces`) to resolve the page face.
- */
+ * plugin's declared inject (`watchHistoryFaces`) to resolve the page face. */
 export function baselineCtx(): { ctx: TestClientCtx; calls: { page: unknown[]; image: { sessionId: string; attachment: unknown }[] } } {
   const ctx = new TestClientCtx()
   const calls: { page: unknown[]; image: { sessionId: string; attachment: unknown }[] } = { page: [], image: [] }
   const events = historyEvents()
 
-  // The remote resolves the ClientResult itself; rows are
-  // `{type:'event', event}` records.
+  // The remote resolves the ClientResult itself; rows are `{type:'event', event}` records.
   const page = (request: unknown): Promise<unknown> => {
     calls.page.push(request)
     return Promise.resolve({ ok: true, value: { records: events.map(event => ({ type: 'event', event })) } })

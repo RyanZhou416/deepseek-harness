@@ -1,9 +1,6 @@
-// A faithful in-memory implementation of the harness client context the
-// plugin's `apply` consumes. Every member implements the DOCUMENTED contract
-// (cordis effect/inject semantics, locale fallback chain, slot registry,
-// sessions scope) rather than a test-specific stub — registrations
-// and disposals behave the way the real harness's do, so specs assert through
-// the same seams the production runtime uses.
+// A faithful in-memory implementation of the harness client context the plugin's `apply` consumes: every member
+// implements the DOCUMENTED contract (cordis effect/inject semantics, locale fallback chain, slot registry,
+// sessions scope) rather than a test-specific stub, so specs assert through the same seams production uses.
 
 import type { ClientCtx, LocaleService, SlotRegistration, SlotsService } from '../../../src/client/services'
 import { makeTranslate } from './kit'
@@ -14,7 +11,7 @@ export interface SlotEntry {
 }
 
 export class TestSlots implements SlotsService {
-  readonly entries: SlotEntry[] = []
+  readonly seated: SlotEntry[] = []
 
   inject(_name: string, callback: () => unknown): unknown {
     // slots.inject is a declaration injection riding the caller's effect:
@@ -24,16 +21,35 @@ export class TestSlots implements SlotsService {
 
   register(registration: SlotRegistration, component: (props: { sessionId?: string } & Record<string, unknown>) => unknown): unknown {
     const entry: SlotEntry = { registration, component }
-    this.entries.push(entry)
+    this.seated.push(entry)
     return () => {
-      const i = this.entries.indexOf(entry)
-      if (i >= 0) this.entries.splice(i, 1)
+      const i = this.seated.indexOf(entry)
+      if (i >= 0) this.seated.splice(i, 1)
     }
+  }
+
+  /** The raw ledger view (`SlotRegistry.entries`): one stored record per seated
+   * entry of the slot, `options` carrying the registered cell fields — the shape
+   * the session header reads and the second-mount guard proves against. */
+  entries(name: string): {
+    component: SlotEntry['component']
+    options: { key?: string; id?: string; order?: number; priority?: number }
+    locale?: string
+  }[] {
+    return this.of(name).map(e => ({
+      component: e.component,
+      options: {
+        ...(e.registration.key !== undefined ? { key: e.registration.key } : {}),
+        ...(e.registration.id !== undefined ? { id: e.registration.id } : {}),
+        ...(e.registration.order !== undefined ? { order: e.registration.order } : {}),
+      },
+      ...(e.registration.locale !== undefined ? { locale: e.registration.locale } : {}),
+    }))
   }
 
   /** Every registration for a slot name (list slots keep several). */
   of(name: string): SlotEntry[] {
-    return this.entries.filter(e => e.registration.name === name)
+    return this.seated.filter(e => e.registration.name === name)
   }
 }
 
@@ -63,12 +79,10 @@ export interface TestClientCtxOptions {
   services?: Record<string, unknown>
 }
 
-/**
- * A client ctx with cordis semantics: `inject` runs its callback once every
+/** A client ctx with cordis semantics: `inject` runs its callback once every
  * requested service exists (services are armed via options.services or
  * setService — arming later replays pending callbacks, like cordis), and
- * `effect` collects disposers that `dispose()` runs LIFO.
- */
+ * `effect` collects disposers that `dispose()` runs LIFO. */
 export class TestClientCtx {
   readonly slots = new TestSlots()
   readonly locale: TestLocale
@@ -87,11 +101,10 @@ export class TestClientCtx {
 
   setService(name: string, service: unknown): void {
     this.services.set(name, service)
-    // Cordis surfaces services as context properties (ctx.settingsScope …).
+    // Cordis surfaces services as context properties (ctx.configForms …).
     if (!(name in this)) {
       Object.defineProperty(this, name, { get: () => this.services.get(name), configurable: true })
     }
-    // Cordis replays waiting injects once their dependency list completes.
     for (let i = this.pending.length - 1; i >= 0; i--) {
       const p = this.pending[i]
       if (p.deps.every(d => this.services.has(d))) {
@@ -101,12 +114,10 @@ export class TestClientCtx {
     }
   }
 
-  /**
-   * Cordis semantics: an inject gets its fiber handle as soon as it is
+  /** Cordis semantics: an inject gets its fiber handle as soon as it is
    * declared (PENDING while a service is still missing) — disposing it either
    * cancels the pending wait or unwinds the loaded callback, and the loaded
-   * disposer also belongs to the context's own dispose (LIFO). Either path
-   * retires it, so the two lifetimes never run it twice.
+   * disposer also belongs to the context's own dispose (LIFO). Either path retires it, so the two lifetimes never run it twice.
    */
   inject(deps: string[] | Record<string, unknown>, cb: (ctx: TestClientCtx) => (() => void) | void): { dispose: () => Promise<void> } {
     const list = Array.isArray(deps) ? deps : Object.keys(deps)

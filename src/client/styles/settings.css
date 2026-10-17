@@ -1,18 +1,18 @@
-/* The settings-entry card at the foot of the Context tab (settingsCard.tsx). */
-.lc-settings-card { background: var(--dsw-alias-bg-layer-3); border: 1px solid var(--dsw-alias-border-l2); border-radius: 12px; transition: border-color var(--ds-transition-duration, 0.2s) var(--ds-ease-in-out, ease-in-out), background-color var(--ds-transition-duration, 0.2s) var(--ds-ease-in-out, ease-in-out); }
-.lc-settings-card:hover { border-color: var(--dsw-alias-label-dimmed); }
-.lc-settings-open, .lc-settings-open:hover { background: var(--dsw-alias-bg-layer-2); border-color: var(--dsw-alias-label-dimmed); }
-.lc-settings-head { width: 100%; appearance: none; border: 0; background: none; font: inherit; color: inherit; text-align: left; cursor: pointer; display: flex; align-items: center; gap: 12px; padding: 14px 16px; border-radius: 12px; }
-.lc-settings-headtext { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
-.lc-settings-name { font-size: 15px; font-weight: 600; line-height: 1.4; color: var(--dsw-alias-label-primary); }
-.lc-settings-desc { font-size: 13px; line-height: 1.5; color: var(--dsw-alias-label-tertiary); }
-.lc-settings-chevron { flex: none; color: var(--dsw-alias-label-tertiary); transition: transform var(--ds-transition-duration, 0.2s) var(--ds-ease-in-out, ease-in-out); }
-.lc-settings-open .lc-settings-chevron { transform: rotate(180deg); }
-.lc-settings-body { border-top: 1px solid var(--dsw-alias-border-l2); margin: 0 16px; padding: 4px 0 12px; }
-/* The Plugins-page card (Config-form generation): the page draws the section
-   chrome, so the rows render flat inside their own block. */
+/* The Plugins page owns the card chrome; the rows organize into titled groups. Group heads
+   mirror the harness's Plugins-page .sectionTitle; separators reuse its row-separator token. */
 .lc-settings-prefs { padding: 4px 0; }
 .lc-settings-row { display: flex; align-items: center; gap: 8px; padding: 8px 0; }
-.lc-settings-label { flex: 1; min-width: 0; font-size: 14px; color: var(--dsw-alias-label-primary); }
+/* Weight pinned so the title's 500 keeps its one-step lead over rows in any inherited context. */
+.lc-settings-label { flex: 1; min-width: 0; font-size: 14px; font-weight: 400; color: var(--dsw-alias-label-primary); }
 .lc-settings-select { display: inline-flex; align-items: center; gap: 12px; height: 36px; padding: 0 14px; border: none; border-radius: 18px; background: var(--dsw-alias-bg-module-platform); font: inherit; font-size: 14px; line-height: 22px; color: var(--dsw-alias-label-primary); cursor: pointer; transition: background-color var(--ds-transition-duration, 0.2s) var(--ds-ease-in-out, ease-in-out); }
 .lc-settings-note { color: var(--dsw-alias-label-tertiary); font-size: 12px; line-height: 1.5; margin: 12px 0 4px; }
+/* The in-group hint rides the group title's spacing; the top margin is the read-only notice's. */
+.lc-settings-group .lc-settings-note { margin: 4px 0 0; }
+.lc-settings-group + .lc-settings-group { margin-top: 12px; padding-top: 12px; border-top: 0.5px solid var(--dsw-alias-border-l2); }
+.lc-settings-group-title { font-size: 14px; font-weight: 500; line-height: 20px; color: var(--dsw-alias-label-primary); }
+/* The text rows fold the label above the control (a wide row would crush under pane-width pressure);
+   control styling mirrors the harness's own ConfigField textarea tokens. */
+.lc-settings-textrow { flex-direction: column; align-items: stretch; }
+.lc-settings-textarea { width: 100%; box-sizing: border-box; padding: 6px 12px; border: 0.5px solid var(--dsw-alias-border-l4); border-radius: var(--dsw-radius-md); background: var(--dsw-alias-bg-layer-3); color: var(--dsw-alias-label-primary); font: inherit; font-size: 13px; line-height: 1.5; resize: vertical; }
+.lc-settings-textarea:disabled { opacity: 0.5; cursor: default; }
+.lc-settings-textarea::placeholder { color: var(--dsw-alias-label-tertiary); }

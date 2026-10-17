@@ -1,12 +1,5 @@
-/**
- * The fetch-on-miss state machine behind the Context browser's two on-demand
- * reads (a row's full message content and a header epoch's prompt/schemas):
- * one targeted history read per key the local data missed, with a visible
- * terminal state for every outcome — `absent` when the durable log does not
- * hold the key, `failed` arming the retry button, never an unhandled
- * rejection or a spinner that never resolves. Landed values cache by key:
- * history is immutable, so a resolved key never refetches.
- */
+/** The fetch-on-miss state machine: one targeted history read per missed key; `absent`/`failed` are terminal, and a landed
+ * value caches by key (history is immutable, so it never refetches). */
 
 import { useEffect, useState, type ReactNode } from 'react'
 import type { Translate } from '../i18n'
@@ -14,18 +7,12 @@ import type { Translate } from '../i18n'
 export type FetchMissState = 'idle' | 'loading' | 'absent' | 'failed'
 
 export interface FetchOnMiss<T> {
-  /** Resolved values by key (immutable history — a landed value never refetches). */
   values: Map<number, T>
   state: FetchMissState
-  /** Re-arm the read after a failure (the retry button). */
   retry: () => void
 }
 
-/**
- * Run one fetch for `key` when it is set and not yet cached. `key` null (no
- * target open) or `fetcher` undefined (older host without the history face)
- * leaves the machine idle; the caller renders the matching note either way.
- */
+/** `key` null or `fetcher` undefined (an older host without the history face) leaves the machine idle; the caller renders the note. */
 export function useFetchOnMiss<T>(
   key: number | null,
   fetcher: ((key: number) => Promise<T | null>) | undefined,
@@ -59,13 +46,7 @@ export function useFetchOnMiss<T>(
   return { values, state, retry: () => { setAttempt(a => a + 1) } }
 }
 
-/**
- * The note a not-yet-loaded fetch target shows — one expression for both
- * on-demand reads: the legacy static hint (`emptyKey`) when no fetcher is
- * composed, `loading` while the read is in flight (and on the first frame
- * before the effect fires), `notInLog` when the durable log does not hold
- * the key, and a retry button after a failed read.
- */
+/** The trailing `loading` also covers the first frame, before the effect fires. */
 export function fetchMissNote(
   t: Translate,
   fetcher: unknown,

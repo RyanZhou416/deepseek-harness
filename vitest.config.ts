@@ -1,13 +1,6 @@
 import { defineConfig } from 'vitest/config'
 
-// Specs import src/ directly (never the built lib/ artifacts), so the suite
-// runs with no build step and coverage reflects exactly what ships. Three
-// projects split by runtime and preconditions: host/shared run in plain
-// node, client specs in jsdom (React 18 + the real
-// @deepseek-ai/dsh-client-ui-primitives, inlined so vite resolves its
-// CSS-module imports), and the compat matrix drives the BUILT plugin against
-// real harness sources per baseline tag. Files are small, single-module,
-// and stateless — vitest forks them across workers in parallel.
+// Specs import src/ directly, never the built lib/, so the suite needs no build step and coverage reflects what ships.
 export default defineConfig({
   test: {
     reporters: ['dot'],
@@ -20,33 +13,25 @@ export default defineConfig({
         },
       },
       {
-        // The inlined primitives dist references a sourcemap it does not
-        // ship; vite's warning is noise, so the client lane logs errors only.
+        // The inlined primitives dist references a sourcemap it does not ship; vite's warning is noise.
         logLevel: 'error',
         test: {
           name: 'client',
           include: ['tests/client/**/*.spec.ts'],
           environment: 'jsdom',
+          // One jsdom environment per worker instead of one per file: ~30% off the coverage suite's runtime. Client-only — the host project fails under this pool.
+          pool: 'vmThreads',
           setupFiles: ['tests/client/setup.ts'],
           server: {
             deps: {
-              // The primitives dist imports .module.css; inlining lets vite
-              // transform it (externalized Node ESM would reject the .css).
+              // The primitives dist imports .module.css; inlining lets vite transform it (externalized Node ESM would reject the .css).
               inline: ['@deepseek-ai/dsh-client-ui-primitives'],
             },
           },
         },
       },
       {
-        // The built-artifact lane (tests/compat/): the bundle smoke over
-        // lib/client.js, plus the real-code compat matrix against the
-        // ACTUAL harness sources at every baseline tag (tests/baselines.ts).
-        // Both exercise the BUILT plugin and skip cleanly when lib/ is
-        // absent; the matrix also needs a dsh checkout (env DSH_REPO) — the
-        // release workflow builds and fetches the tags before `pnpm test`.
-        // The first matrix run per baseline installs the tag's vendored
-        // cordis into the staging dir (.tmp/compat, npm-cached) — hence the
-        // timeout.
+        // Exercises the BUILT plugin and skips cleanly when lib/ is absent. The matrix also needs a dsh checkout (env DSH_REPO), and its first run per baseline installs the tag's vendored cordis into .tmp/compat — hence the timeout.
         test: {
           name: 'compat',
           include: ['tests/compat/**/*.spec.ts'],
@@ -66,8 +51,7 @@ export default defineConfig({
       ],
       thresholds: { perFile: true, statements: 100, branches: 100, functions: 100, lines: 100 },
       reporter: ['text', 'html'],
-      // The text table lists only files below 100%; an empty table means full
-      // coverage (thresholds still fail the run when anything is short).
+      // The text table lists only files below 100%; an empty table means full coverage.
       skipFull: true,
       reportsDirectory: './coverage',
     },

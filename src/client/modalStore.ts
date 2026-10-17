@@ -1,10 +1,5 @@
-/**
- * Per-session open-state stores for the /context modal, plus the deferred
- * token-consume guards. Module-level so the state survives overlay remounts;
- * the trigger source (pick/enter) opens it, the overlay component subscribes
- * and renders. Implements the ObservableSnapshot pair the slot `hooks`
- * compartment binds as a `useContextModal` selector hook.
- */
+/** Per-session open-state stores for the /context modal, plus the deferred token-consume guards;
+ *  module-level so the state survives overlay remounts. */
 
 import type { TokenSpan } from './services'
 
@@ -37,13 +32,8 @@ export function modalStoreOf(sessionId: string): ModalStore {
   return store
 }
 
-// ---- deferred token consumption -------------------------------------------
-// The `/context` token stays in the composer while the modal is open and is
-// consumed only when the modal closes. Each open path records the guard the
-// input shell understands (span CAS for menu picks, bare-token equality for
-// enter); the close path takes it and dispatches the scoped
-// `slash/input-consume-token` event. A stale guard (the user typed meanwhile)
-// fails soft inside the shell — the draft is left untouched.
+// Each open path records the guard the input shell understands — span CAS for picks, bare-token equality
+// for enter — and the close path dispatches `slash/input-consume-token`; a stale guard fails soft.
 
 export type ConsumeGuard =
   | { kind: 'span'; span: TokenSpan }

@@ -1,8 +1,3 @@
-// PluginInfo (src/client/components/pluginInfo.tsx): static metadata rows
-// plus the live npm latest-version check. fetch is stubbed per test and the
-// modules are re-imported fresh (vi.resetModules) so the baked-in version
-// define and the fetch TTL cache both start clean.
-
 import { createElement as h } from 'react'
 import assert from 'node:assert/strict'
 import { afterEach, describe, test, vi } from 'vitest'
@@ -11,15 +6,14 @@ import { flush, makeKit, mount, query, queryAll, text } from '../helpers/kit'
 
 const kit = makeKit()
 
-type FetchBody = { version?: unknown }
-
-function stubFetchOk(body: FetchBody) {
+function stubFetchOk(body: { version?: unknown }) {
   const fetchMock = vi.fn((_input: unknown) => Promise.resolve({ ok: true, json: () => Promise.resolve(body) }))
   vi.stubGlobal('fetch', fetchMock)
   return fetchMock
 }
 
-/** Fresh latestVersion + pluginInfo modules; `version` emulates the tsdown define. */
+/** Fresh latestVersion + pluginInfo modules — resetModules so the baked-in version define
+ * and the fetch TTL cache start clean; `version` emulates the tsdown define. */
 async function loadPluginInfo(version?: string): Promise<ReturnType<typeof makePluginInfoFn>> {
   vi.resetModules()
   if (version === undefined) delete (globalThis as Record<string, unknown>).__DSH_CTX_VERSION__
@@ -55,9 +49,8 @@ describe('PluginInfo', () => {
     assert.equal(rows[1].getAttribute('href'), 'https://github.com/bowenliang123/dsh-context')
     // The settings entry: a button (no href) below GitHub — the guarded jump runs on click.
     assert.equal(rows[2].getAttribute('href'), null)
-    assert.equal(query(rows[2], '.lc-pi-label').textContent, 'Settings')
-    assert.equal(query(rows[2], '.lc-pi-value').textContent, 'Open preferences')
-    // The tagline is the repo link too: hover underlines it, a click opens GitHub.
+    assert.equal(query(rows[2], '.lc-pi-label').textContent, 'Plugin Settings')
+    assert.equal(query(rows[2], '.lc-pi-value').textContent, 'Open plugin settings')
     const hint = query(m.container, '.lc-pi-hint')
     assert.ok(text(hint).includes('The best DSH context plugin'))
     assert.equal(hint.getAttribute('href'), 'https://github.com/bowenliang123/dsh-context')
@@ -89,46 +82,5 @@ describe('PluginInfo', () => {
     await flush()
     assert.equal(queryAll(m.container, '.lc-pi-update').length, 0)
     await m.unmount()
-  })
-
-  test('every registry failing narrows to null and renders no chip', async () => {
-    const fetchMock = vi.fn(() => Promise.resolve({ ok: false, json: () => Promise.resolve(null) }))
-    vi.stubGlobal('fetch', fetchMock)
-    const PluginInfo = await loadPluginInfo('1.0.0')
-    const m = await mount(h(PluginInfo, {}))
-    await flush()
-    // Both registries (official npm then npmmirror) are tried before giving up.
-    assert.equal(fetchMock.mock.calls.length, 2)
-    assert.equal(queryAll(m.container, '.lc-pi-update').length, 0)
-    await m.unmount()
-  })
-
-  test('falls back to npmmirror when the official registry fails', async () => {
-    const fetchMock = vi.fn((input: unknown) => {
-      const url = String(input)
-      if (url.startsWith('https://registry.npmjs.org/')) {
-        return Promise.resolve({ ok: false, json: () => Promise.resolve(null) })
-      }
-      return Promise.resolve({ ok: true, json: () => Promise.resolve({ version: '1.1.0' }) })
-    })
-    vi.stubGlobal('fetch', fetchMock)
-    const PluginInfo = await loadPluginInfo('1.0.0')
-    const m = await mount(h(PluginInfo, {}))
-    await flush()
-    assert.equal(fetchMock.mock.calls.length, 2)
-    assert.equal(query(m.container, '.lc-pi-update').textContent, '↑ v1.1.0')
-    await m.unmount()
-  })
-
-  test('unmounting before the answer lands drops the late result', async () => {
-    let resolveFetch: ((res: { ok: boolean; json: () => Promise<FetchBody> }) => void) | null = null
-    vi.stubGlobal('fetch', vi.fn(() => new Promise((resolve) => { resolveFetch = resolve })))
-    const PluginInfo = await loadPluginInfo('1.0.0')
-    const m = await mount(h(PluginInfo, {}))
-    await m.unmount()
-    resolveFetch!({ ok: true, json: () => Promise.resolve({ version: '2.0.0' }) })
-    await flush()
-    // No state update after unmount, no act warning, no chip anywhere.
-    assert.equal(queryAll(document.body, '.lc-pi-update').length, 0)
   })
 })

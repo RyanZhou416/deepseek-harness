@@ -1,9 +1,5 @@
-// The client balance reader (src/client/balance.ts): the delivered payload's
-// boundary proof (hostile entries drop, a payload with no valid entry is no
-// balance), the display-currency pick with the account's first currency as
-// fallback, and the read that paints the remembered figure while one
-// background route read revalidates it — including every storage and
-// transport failure, which serve the remembered figure rather than a blank.
+// The client balance reader (src/client/balance.ts): the payload boundary proof and the read that paints the
+// remembered figure while a background route read revalidates it — failures serve the remembered figure, never a blank.
 
 import assert from 'node:assert/strict'
 import { afterEach, beforeEach, describe, test, vi } from 'vitest'

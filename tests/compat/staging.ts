@@ -1,12 +1,7 @@
-// Staging + probe helpers for the compat matrix (matrix.spec.ts): stage the
-// REAL harness sources at a baseline tag, boot the plugin's BUILT host entry
-// on the tag's real registry + vendored cordis, and read the tag's client
-// seams straight from its sources.
-//
-// The registry probe runs as a small spawned driver INSIDE the staging dir,
-// so the bare `@deepseek-ai/cordis` import resolves to the cordis release
-// that harness line vendors (not this repo's) — one process per baseline,
-// reported as one JSON line.
+// Staging + probe helpers for the compat matrix (matrix.spec.ts): stage the REAL harness sources at a baseline tag, boot the plugin's BUILT
+// host entry on the tag's real registry + vendored cordis, and read the tag's client seams straight from its sources. The registry probe
+// runs as a small spawned driver INSIDE the staging dir, so the bare `@deepseek-ai/cordis` import resolves to the cordis release that
+// harness line vendors (not this repo's) — one process per baseline, reported as one JSON line.
 
 import { spawnSync } from 'node:child_process'
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
@@ -85,18 +80,15 @@ export function ensureHostDeps(baseline: Baseline): void {
   if (run.status !== 0) throw new Error(`npm install ${JSON.stringify(deps)} failed: ${(run.stderr ?? '').trim().slice(0, 300)}`)
 }
 
-/** The tag's settings namespace pattern, read off the file the baseline names (null when absent). */
-export function namespacePatternOf(baseline: Baseline, file: string): RegExp | null {
-  const source = dshShow(baseline.tag, file)
-  const match = /^const NAMESPACE_PATTERN = \/(.+)\/([gimsuy]*)$/m.exec(source)
-  return match === null ? null : new RegExp(match[1], match[2])
-}
-
 export interface DriverReport {
   registered: boolean
   keys: string[]
   gateOk: boolean
   coldMatches: boolean
+  developerTokens: number | null
+  developerRequestTokens: number | null
+  /** V4 tool-registry `developer/message` changes survive the real cache/read paths. */
+  developerRestoreMatches: boolean
   /** Issue #44: hostile gateway usage keeps the served values schema-valid on the REAL registry. */
   hostileSnapshotOk: boolean
   hostilePrompt: number | null
@@ -109,13 +101,10 @@ export interface DriverReport {
   poisonedSnapshotThrows: boolean
 }
 
-/**
- * The staged host driver: runs INSIDE the baseline's staging dir, applies the
+/** The staged host driver: runs INSIDE the baseline's staging dir, applies the
  * plugin's real host entry into the tag's real registry, drives a canonical
- * log through the registry's own snapshot / checkpoint / restore paths, and
- * reports as one JSON line.
- */
-function driverSource(pluginUrl: string): string {
+ * log through the registry's own snapshot / checkpoint / restore paths, and reports as one JSON line. */
+function driverSource(pluginUrl: string, developerMessages: boolean): string {
   return `
 import { Context } from '@deepseek-ai/cordis'
 import { SessionProjectionRegistry } from './registry/index.ts'
@@ -137,40 +126,73 @@ const drive = (context, target, events) => {
 }
 const log = [
   ev(0, 'session/created'),
-  ev(1, 'request/header', { header: { system: 'You are an agent.', tools: [{ name: 'bash', description: 'run' }], config: { model: 'deepseek-v4-flash', provider: 'deepseek' } }, reason: 'initial' }),
-  ev(2, 'request/context', { contextWindow: 128000 }),
-  ev(3, 'step/start'),
-  ev(4, 'user/message', { content: [{ type: 'text', text: 'hello' }] }),
-  ev(5, 'assistant/message', { message: { content: [{ type: 'text', text: 'hi' }] } }),
-  ev(6, 'tool/call', { callId: 'c1', name: 'bash', arguments: '{}' }),
-  ev(7, 'tool/result', { message: { source: { callId: 'c1' }, content: [{ type: 'text', text: 'ok' }] } }),
-  ev(8, 'step/end'),
-  ev(9, 'plan/mode', { active: true }),
-  ev(10, 'compaction/summary', { summary: [{ type: 'text', text: 'so far' }], shadowedSeqs: [4] }),
+  ev(1, 'request/header', { header: { tools: [{ name: 'bash', description: 'run' }], config: { model: 'deepseek-v4-flash', provider: 'deepseek' } }, reason: 'initial' }),
+  ev(2, 'system/message', { turn: 0, step: 0, message: { content: [{ type: 'text', text: 'You are an agent.' }] } }),
+  ev(3, 'request/context', { contextWindow: 128000 }),
+  ev(4, 'step/start'),
+  ev(5, 'user/message', { content: [{ type: 'text', text: 'hello' }] }),
+  ev(6, 'assistant/message', { message: { content: [{ type: 'text', text: 'hi' }] } }),
+  ev(7, 'tool/call', { callId: 'c1', name: 'bash', arguments: '{}' }),
+  ev(8, 'tool/result', { message: { source: { callId: 'c1' }, content: [{ type: 'text', text: 'ok' }] } }),
+  ev(9, 'step/end'),
+  ev(10, 'plan/mode', { active: true }),
+  ev(11, 'compaction/summary', { summary: [{ type: 'text', text: 'so far' }], shadowedSeqs: [5] }),
 ]
 drive(ctx, session, log)
 const snapshot = registry.snapshot(session)
 const gate = snapshotJsonValue(registry.checkpoint(session))
 const cold = registry.restore({}, log, 0, session.header)
 
+// Tool-registry messages exist only in the supported V4 baselines.
+let developerTokens = null
+let developerRequestTokens = null
+let developerRestoreMatches = false
+if (${developerMessages}) {
+  const ctxC = new Context()
+  const registryC = new SessionProjectionRegistry(ctxC)
+  ctxC.sessionProjections = registryC
+  plugin.apply(ctxC, {})
+  const sessionC = { seq: 0, header: { id: 'registry-change-session', cwd: '/tmp' }, events: [] }
+  ctxC.emit('session/created', sessionC)
+  const registryLog = [
+    ev(0, 'request/header', { header: { tools: [{ name: 'read_file', description: 'read a file', parameters: { type: 'object' } }] }, reason: 'change' }),
+    ev(1, 'user/message', { content: [{ type: 'text', text: 'hello' }] }),
+    ev(2, 'developer/message', { turn: 1, step: 1, headerSeq: 0, message: { role: 'developer', source: { kind: 'tool-registry' }, content: [{ type: 'tool-addition', toolName: 'read_file' }, { type: 'tool-removal', toolName: 'shell' }] } }),
+    ev(3, 'assistant/message', { turn: 1, step: 1, message: { content: [{ type: 'text', text: 'reply' }] } }),
+  ]
+  drive(ctxC, sessionC, registryLog)
+  const values = registryC.snapshot(sessionC).values
+  const node = values.contextTimeline.nodes.find(n => n.seq === 2)
+  developerTokens = node ? node.tokens : null
+  developerRequestTokens = values.contextTimeline.requests[0].inject
+  const rows = snapshotJsonValue(registryC.checkpoint(sessionC))
+  const warm = registryC.restore(rows, registryLog, 0, sessionC.header)
+  // Preserve log offsets while reproducing the old fold's ignored event.
+  const oldLog = registryLog.map(e => e.type === 'developer/message' ? { ...e, type: 'todo/write' } : e)
+  const oldRows = registryC.restore({}, oldLog, 0, sessionC.header).checkpoint
+  oldRows.contextTimeline.ver = 24
+  const rebuilt = registryC.restore(oldRows, registryLog, 0, sessionC.header)
+  developerRestoreMatches = JSON.stringify(warm.snapshot.values) === JSON.stringify(values)
+    && JSON.stringify(rebuilt.snapshot.values) === JSON.stringify(values)
+}
+
 // ---- Probe A (issue #44): hostile provider usage on the REAL registry. ----
 // A mis-accounting gateway's figures (negative uncached input from
 // cached_tokens > prompt_tokens, fractional counts, string buckets, a NaN a
 // hostile direct-drive could supply) ride the durable log legally; the
-// plugin's served values must stay schema-valid through the registry's own
-// strict parse on every later delivery.
+// plugin's served values must stay schema-valid through the registry's own strict parse on every later delivery.
 const hostile = [
-  ev(11, 'step/start'),
-  ev(12, 'assistant/message', { turn: 1, step: 2, message: { content: [{ type: 'text', text: 'h1' }] }, usage: { inputTokens: -80, cacheReadTokens: 150.7, cacheWriteTokens: '10', outputTokens: 22.4 } }),
-  ev(13, 'assistant/message', { turn: 1, step: 3, message: { content: [] }, usage: { inputTokens: NaN, outputTokens: null } }),
-]
+  ev(12, 'step/start'),
+  ev(13, 'assistant/message', { turn: 1, step: 2, message: { content: [{ type: 'text', text: 'h1' }] }, usage: { inputTokens: -80, cacheReadTokens: 150.7, cacheWriteTokens: '10', outputTokens: 22.4 } }),
+  ev(14, 'assistant/message', { turn: 1, step: 3, message: { content: [] }, usage: { inputTokens: NaN, outputTokens: null } },
+)]
 drive(ctx, session, hostile)
 let hostileSnapshotOk = true
 let hostilePrompt = null
 let hostileCacheRead = null
 try {
   const hostileSnap = registry.snapshot(session)
-  const rec = hostileSnap.values.contextTimeline.requests.find(r => r.seq === 12)
+  const rec = hostileSnap.values.contextTimeline.requests.find(r => r.seq === 13)
   hostilePrompt = rec ? rec.prompt : null
   hostileCacheRead = rec ? rec.cacheRead : null
 } catch {
@@ -206,7 +228,7 @@ ctxB.emit('session/created', sessionB)
 const notified = []
 registryB.onChanged((s, key) => { if (s === sessionB && key === 'contextTimeline') notified.push(key) })
 const poisonLog = [
-  ev(0, 'request/header', { header: { system: 's', tools: [], config: { model: 'deepseek-v4-flash', provider: 'p' } }, reason: 'initial' }),
+  ev(0, 'request/header', { header: { tools: [], config: { model: 'deepseek-v4-flash', provider: 'p' } }, reason: 'initial' }),
   ev(1, 'assistant/message', { turn: 1, step: 1, message: { content: [{ type: 'text', text: 'ok' }] }, usage: { inputTokens: 10, cacheReadTokens: 20, outputTokens: 5 } }),
 ]
 drive(ctxB, sessionB, poisonLog)
@@ -228,6 +250,9 @@ process.stdout.write('DRIVER-JSON ' + JSON.stringify({
   keys: Object.keys(snapshot.values).sort(),
   gateOk: gate !== undefined,
   coldMatches: JSON.stringify(cold.snapshot.values) === JSON.stringify(snapshot.values),
+  developerTokens,
+  developerRequestTokens,
+  developerRestoreMatches,
   hostileSnapshotOk,
   hostilePrompt,
   hostileCacheRead,
@@ -245,7 +270,7 @@ export function runDriver(baseline: Baseline): DriverReport {
   stageFile(baseline, 'packages/session/session-projection/src/types.ts', join('registry', 'types.ts'))
   stageFile(baseline, 'packages/util/values/src/index.ts', join('dsh', 'json-values.ts'))
   const driver = join(STAGE, baseline.id, 'driver.mjs')
-  writeFileSync(driver, driverSource(`file://${join(REPO, 'lib', 'index.js')}`))
+  writeFileSync(driver, driverSource(`file://${join(REPO, 'lib', 'index.js')}`, baseline.foldEventTypes.includes('developer/message')))
   const run = spawnSync(process.execPath, [driver], { cwd: STAGE, encoding: 'utf8', timeout: 60_000 })
   const line = (run.stdout ?? '').split('\n').find(l => l.startsWith('DRIVER-JSON '))
   if (line === undefined) {
@@ -260,54 +285,40 @@ export function bundleRequires(): string[] {
   return [...new Set([...source.matchAll(/require\("([^"]+)"\)/g)].map(m => m[1]))]
 }
 
-/**
- * The slot registrations the client half mounts on EVERY baseline (identical
- * spellings in each generation's sources). The preferences card seat and the
- * settings transport are asserted separately, per generation — the matrix
- * spec pins them to the baseline's `settings` seam (`settings.plugin.item` +
- * `settingsScope` through V3, the Plugins page's `plugins.bundle.config` +
- * `configForms` from the Config-form generation on).
- */
+/** The slot registrations the client half mounts on EVERY baseline (identical
+ * spellings in each generation's sources). */
 export const SLOT_SEAMS = [
   'conversation.view',
   'conversation.chat.assistant-actions',
   'conversation.input.overlay',
 ] as const
 
-/**
- * The ui-primitives icon seams the client bundle renders, as [modern, legacy]
- * name pairs: the vocabulary renamed across the range (`…Outline16`/`…14`
- * through 0.1.5, `…OutlineRegular`/`…OutlineMedium` from 0.1.6), and a
- * missing name is `undefined` at the browser's runtime — React error #130.
- * `src/client/primitives.ts` resolves whichever spelling the running
- * generation serves; each pair must exist in at least one spelling per tag.
- */
+/** The ui-primitives icon seams the client bundle renders: every supported
+ * line ships the `…OutlineRegular`/`…OutlineMedium` vocabulary, and a missing
+ * name is `undefined` at the browser's runtime — React error #130.
+ * `src/client/primitives.ts` resolves each by name; every one must exist per tag. */
 export const ICON_SEAMS = [
-  ['IconBranchOutlineRegular', 'IconBranchOutline16'],
-  ['IconPlusOutlineRegular', 'IconPlusOutline16'],
-  ['IconCheckOutlineRegular', 'IconCheckOutline16'],
-  ['IconCopyOutlineRegular', 'IconCopyOutline16'],
-  ['IconCloseOutlineRegular', 'IconCloseOutline16'],
-  ['IconSettingsOutlineMedium', 'IconSettingsOutline14'],
-  ['IconChevronDownOutlineMedium', 'IconChevronDownOutline14'],
+  'IconBranchOutlineRegular',
+  'IconPlusOutlineRegular',
+  'IconCheckOutlineRegular',
+  'IconCopyOutlineRegular',
+  'IconCloseOutlineRegular',
+  'IconSettingsOutlineMedium',
+  'IconChevronDownOutlineMedium',
+  'IconChevronUpOutlineMedium',
+  'IconSearchOutlineRegular',
+  'FileTypeIcon',
 ] as const
 
-/**
- * The event families the host fold switches on (src/host/fold.ts) — the UNION
- * over every supported generation. No single harness line carries them all
- * (`assistant/chunk` and `tool/code-dispatch` are V0/V2-only; `system/message`
- * and `tool/ptc-dispatch` are V3-only), so the per-baseline probe asserts the
- * baseline's own `foldEventTypes` subset, and a matrix test asserts this union
- * equals the baselines' union — a fold case added without a baseline list
- * fails loudly instead of going unprobed.
- */
-export const FOLD_EVENT_TYPES = [
-  'request/header', 'request/context', 'step/start', 'step/end',
-  'user/message', 'tool/call', 'tool/result', 'assistant/message',
-  'assistant/chunk', 'assistant/attempt',
-  'tool/code-dispatch', 'tool/ptc-dispatch',
-  'plan/mode', 'compaction/summary', 'compaction/prune', 'system/message',
-] as const
+/** The event families the host fold actually switches on, read out of `src/host/fold.ts` so the
+ * matrix can never check a hand-copied list against itself. Throws when the labels are not found,
+ * so a refactor that moves the switch fails loudly instead of going vacuously green. */
+export function foldEventTypesFromSource(): readonly string[] {
+  const source = readFileSync(join(REPO, 'src', 'host', 'fold.ts'), 'utf8')
+  const labels = [...source.matchAll(/^\s*case '([a-z-]+\/[a-z-]+)':/gm)].map(m => m[1])
+  if (labels.length === 0) throw new Error('fold.ts: no event case labels found — the matrix cannot verify the baseline lists')
+  return [...new Set(labels)].sort()
+}
 
 /** The tag's durable-event vocabulary (packages/core/session/src/known-event-types.ts). */
 export async function knownEventTypesOf(baseline: Baseline): Promise<ReadonlySet<string>> {

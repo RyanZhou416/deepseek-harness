@@ -1,28 +1,18 @@
-/**
- * Category presentation config: the seven priced buckets (system, tool
- * schemas, and the five surface categories) with their chart colors, plus
- * the part builders behind the composition card.
- *
- * Two figures ride on every part, mirroring the official chat context
- * meter's own split: `raw` is the heuristic count (the meter panel's `~`
- * rows — identical to the ring panel by construction when the official
- * `contextBreakdown` projection feeds it), while `value` is the
- * provider-anchored bar width (the ring's fill proportioned by the
- * heuristic ratios). Without a provider anchor the two are equal.
- */
+/** Category presentation config. Every part carries two figures: `raw`, the
+ * heuristic count, and `value`, the provider-anchored bar width proportioned by
+ * the heuristic ratios (equal when no anchor applies). */
 
 import type { Category, ContextBreakdown, RequestRecord, Snapshot, TokenUsage } from '../shared/types'
 
 export interface PartsPart {
   key: string
   color: string
-  /** Bar-width figure (provider-anchored when an anchor applies). */
   value: number
   /** Heuristic count shown by the legend and tooltips (defaults to value). */
   raw?: number
-  /** Tooltip display name (defaults to the category label of `key`) — DNA mode names individual items. */
+  /** Tooltip display name, defaulting to the category label of `key`. */
   label?: string
-  /** Shared-hover group: an incoming hover key equal to a part's group lights it (DNA bands light per category). */
+  /** Shared-hover group: a hover key equal to a part's group lights it. */
   group?: string
 }
 
@@ -36,10 +26,11 @@ export const CATS: { key: Category | 'system' | 'tools'; color: string }[] = [
   { key: 'tool', color: 'var(--color-teal-500)' },
 ]
 
-/** Category key → bar color, for per-item bands (the browser's DNA mode) that bypass the CATS-order part builders. */
 export const CAT_COLOR = Object.fromEntries(CATS.map(c => [c.key, c.color])) as Record<Category | 'system' | 'tools', string>
 
-const MESSAGE_CATS: readonly (Category | 'system' | 'tools')[] = ['user', 'inject', 'skill', 'assistant', 'tool']
+/** The message-fold categories in canonical order — the tail of CATS without the
+ * singular `system`/`tools` bands. The pie panel and the block map lay parts out in this order. */
+export const MESSAGE_CATS: readonly (Category | 'system' | 'tools')[] = ['user', 'inject', 'skill', 'assistant', 'tool']
 
 export function partsOf(breakdown: Snapshot['current'] | RequestRecord): PartsPart[] {
   return CATS.map((c) => {
@@ -47,15 +38,8 @@ export function partsOf(breakdown: Snapshot['current'] | RequestRecord): PartsPa
   })
 }
 
-/**
- * Build the pie-consistent raw parts: system/tools/messages take the
- * OFFICIAL `contextBreakdown` figures when delivered (the exact counts the
- * chat ring's panel shows), with the message bucket subdivided into the
- * four surface categories by the fold's per-category ratios (rounding
- * residue lands on the largest category, so the four always sum exactly to
- * the official message figure). Absent the projection, the fold's own sums
- * serve — the same fixed estimator, so identical on image-free sessions.
- */
+/** Build the pie-consistent raw parts from the OFFICIAL `contextBreakdown`
+ * figures when delivered, subdividing messages by the fold's ratios; absent the projection the fold's own sums serve. */
 export function officialParts(
   current: Snapshot['current'],
   breakdown: ContextBreakdown | null,
@@ -74,8 +58,8 @@ export function officialParts(
       assigned += count
       if (current[cat as Category] > current[largest]) largest = cat as Category
     }
-    // Rounding residue lands on the largest category; clamp so a tiny
-    // message bucket with several rounded-up shares never goes negative.
+    // Rounding residue lands on the largest category; the clamp keeps a tiny
+    // message bucket with several rounded-up shares from going negative.
     shares[largest] = Math.max(0, shares[largest] + messages - assigned)
   } else {
     for (const cat of MESSAGE_CATS) shares[cat] = 0
@@ -83,21 +67,14 @@ export function officialParts(
   return CATS.map(c => ({
     key: c.key,
     color: c.color,
-    /* v8 ignore next 1 -- `shares` is initialized with system/tools and both
-       foldSurface arms assign every MESSAGE_CATS key, so each key is always
-       defined; the fallback is defensive. */
+    /** v8 ignore next 1 -- `shares` is initialized with system/tools and both
+     * foldSurface arms assign every MESSAGE_CATS key, so each key is always defined; the fallback is defensive. */
     value: shares[c.key] ?? 0,
   }))
 }
 
-/**
- * Reproportion heuristic parts so they sum to a provider-anchored target —
- * the same trick the official ContextMeter uses: the heuristic breakdown
- * supplies the composition RATIOS, the provider sample the total. The
- * anchored figure rides `value` (bar widths); the heuristic count stays on
- * `raw` for the legend and tooltips. Returns the parts unchanged when no
- * anchor applies.
- */
+/** Reproportion heuristic parts to a provider-anchored target: the heuristic
+ * supplies the ratios, the provider sample the total; `value` takes the anchored figure and `raw` keeps the heuristic count. */
 export function anchoredParts(parts: PartsPart[], target: number | null): PartsPart[] {
   const sourced = parts.map(p => ({ ...p, raw: p.raw ?? p.value }))
   if (target === null || target <= 0) return sourced
@@ -109,18 +86,9 @@ export function anchoredParts(parts: PartsPart[], target: number | null): PartsP
   return sourced.map(p => ({ ...p, value: Math.round(p.raw * scale) }))
 }
 
-/**
- * The Token card's billed split, by WHAT the tokens are rather than by how
- * the provider cached them: the six composition categories share the
- * provider-reported prompt-side total (uncached + cache read + cache write —
- * the chat stats line's billed input) by the composition card's own
- * estimated ratios, and the provider's exact output count closes the ring as
- * the seventh part. Only the per-category split is estimated — every
- * category's sum and the output figure are provider-reported, so the parts
- * total equals the chat line's whole-session token count by construction. A
- * zero/negative prompt total (or a hostile negative output) never invents a
- * split: the prompt parts zero out / the output clamps at 0.
- */
+/** The Token card's billed split by WHAT the tokens are: the six composition
+ * categories share the provider-reported prompt total by the composition card's
+ * ratios, and the exact output count closes the ring, so the parts total the chat line's token count by construction. */
 export function billedParts(
   current: Snapshot['current'],
   breakdown: ContextBreakdown | null,

@@ -1,5 +1,4 @@
-// Client project setup: React 18 `act` requires this flag to flush effects
-// synchronously in tests; every jsdom spec shares the real React runtime.
+// Client project setup: React 18 `act` requires this flag to flush effects synchronously in tests.
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 
 import { resetModelPrices, setModelPricesLoader } from '../../src/client/modelPrices'
@@ -10,8 +9,7 @@ if (typeof Element !== 'undefined' && Element.prototype.scrollIntoView === undef
   Element.prototype.scrollIntoView = () => {}
 }
 
-// The model-price store starts DORMANT in tests: its loader resolves never,
-// so no spec ever reaches the network. Specs that need prices inject their
-// own loader (resetModelPrices + setModelPricesLoader, see modelPrices.spec).
+// The model-price store starts DORMANT in tests: its loader resolves never, so no spec ever reaches the network. Specs that need prices
+// inject their own loader (resetModelPrices + setModelPricesLoader, see modelPrices.spec).
 resetModelPrices()
 setModelPricesLoader(() => new Promise(() => {}))

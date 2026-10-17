@@ -1,21 +1,16 @@
-// Projection narrowing (src/client/services.ts): the no-white-screen wire
-// guards — numOf, timelineOf fast/slow paths, contextPressureOf,
-// contextBreakdownOf, tokenUsageOf, timingOf, headersOf — plus the seat
-// helpers over the harness service faces (conversationNodesOf, imageLoaderOf).
+// Projection narrowing (src/client/services.ts): the no-white-screen wire guards and the service-face seat helpers.
 
 import assert from 'node:assert/strict'
 import { describe, test } from 'vitest'
 import {
   activityOf,
-  canOpenPathsOf,
   contextBreakdownOf,
   contextPressureOf,
   conversationNodesOf,
+  entrySeated,
   headersOf,
   imageLoaderOf,
   numOf,
-  openPathVia,
-  openResourceVia,
   timelineOf,
   timingOf,
   tokenUsageOf,
@@ -171,16 +166,24 @@ describe('timelineOf', () => {
   })
 
   test('model/provider/contextWindow: wrong-typed dropped, right-typed kept', () => {
-    const kept = timelineOf({ current: 1, model: 'm', provider: 'p', contextWindow: 100 })
+    const kept = timelineOf({ current: 1, model: 'm', provider: 'p', contextWindow: 100, maxOutputTokens: 256000 })
     assert.ok(kept !== null)
     assert.equal(kept.model, 'm')
     assert.equal(kept.provider, 'p')
     assert.equal(kept.contextWindow, 100)
+    assert.equal(kept.maxOutputTokens, 256000)
     const dropped = timelineOf({ current: 1, model: 5, provider: {}, contextWindow: 'x' })
     assert.ok(dropped !== null)
     assert.ok(!('model' in dropped))
     assert.ok(!('provider' in dropped))
     assert.ok(!('contextWindow' in dropped))
+    // The output cap is re-proved like every other scalar: a hostile, non-finite, or non-positive one
+    // drops whole (reserve.ts reserves nothing without it) instead of reaching the mask math.
+    for (const maxOutputTokens of ['256000', Number.NaN, Number.POSITIVE_INFINITY, 0, -1]) {
+      const capped = timelineOf({ current: 1, maxOutputTokens })
+      assert.ok(capped !== null)
+      assert.ok(!('maxOutputTokens' in capped), String(maxOutputTokens))
+    }
   })
 
   test('images/toolCalls/humanInputs/surfaceFloor/archiveFloor are kept only when numbers', () => {
@@ -277,9 +280,9 @@ describe('timelineOf', () => {
   })
 
   test('the unsupported gate record survives the sanitizing slow path only when well-formed', () => {
-    const kept = timelineOf({ current: 1, unsupported: { current: '0.1.1-rc.2', minimum: '0.1.2-rc.1' } })
+    const kept = timelineOf({ current: 1, unsupported: { current: '0.1.1-rc.2', minimum: '0.1.7-rc.2' } })
     assert.ok(kept !== null)
-    assert.deepEqual(kept.unsupported, { current: '0.1.1-rc.2', minimum: '0.1.2-rc.1' })
+    assert.deepEqual(kept.unsupported, { current: '0.1.1-rc.2', minimum: '0.1.7-rc.2' })
     for (const bad of ['x', null, {}, { current: 1, minimum: 'm' }, { current: 'c' }]) {
       const out = timelineOf({ current: 1, unsupported: bad })
       assert.ok(out !== null)
@@ -292,15 +295,20 @@ describe('timelineOf', () => {
       ok: true,
       model: 'm',
       current,
-      counts: { turns: 3, steps: 12, injects: 2, compactions: 1, prunes: 0 },
+      counts: { turns: 3, steps: 12, injects: 2, compactions: 1, prunes: 0, skills: 4 },
       last: { seq: 9, total: 100, prompt: 90 },
       detailRev: 12,
+      humanInputs: 2,
+      answers: 3,
       fileOps: [{ seq: 2, path: 'a.ts', kind: 'read', tool: 'read', err: false, added: 0, removed: 0 }],
       fileOpsFloor: 5,
+      spans: [{ kind: 'ttft', start: 0, end: 100 }, null],
     }
     const out = timelineOf(head)
     assert.ok(out !== null)
-    assert.deepEqual(out.counts, { turns: 3, steps: 12, injects: 2, compactions: 1, prunes: 0 })
+    assert.deepEqual(out.counts, { turns: 3, steps: 12, injects: 2, compactions: 1, prunes: 0, skills: 4 })
+    assert.equal(out.humanInputs, 2)
+    assert.equal(out.answers, 3)
     assert.deepEqual(out.last, { seq: 9, total: 100, prompt: 90 })
     assert.equal(out.detailRev, 12)
     assert.deepEqual(out.requests, [])
@@ -308,12 +316,14 @@ describe('timelineOf', () => {
     assert.deepEqual(out.archive, [])
     assert.equal(out.fileOps?.length, 1, 'the op log survives the head sanitize')
     assert.equal(out.fileOpsFloor, 5)
+    assert.equal(out.spans?.length, 1, 'the strip spans survive, junk entries dropped')
   })
 
   test('the slim head fields re-prove: partial counts zero per field, shapeless last/detailRev drop', () => {
-    const out = timelineOf({ current, counts: { turns: 2, steps: 'many' }, last: { seq: 'x' }, detailRev: 'r' })
+    const out = timelineOf({ current, counts: { turns: 2, steps: 'many' }, last: { seq: 'x' }, detailRev: 'r', answers: 'many' })
     assert.ok(out !== null)
-    assert.deepEqual(out.counts, { turns: 2, steps: 0, injects: 0, compactions: 0, prunes: 0 })
+    assert.deepEqual(out.counts, { turns: 2, steps: 0, injects: 0, compactions: 0, prunes: 0, skills: 0 })
+    assert.ok(!('answers' in out), 'a wrong-typed answers tally drops like any other scalar')
     assert.ok(!('last' in out), 'a wrong-typed seq drops the anchor whole')
     assert.ok(!('detailRev' in out), 'a wrong-typed revision drops the marker (reads as the inline generation)')
     const noCounts = timelineOf({ current, counts: 'junk', last: null, detailRev: NaN })
@@ -331,8 +341,7 @@ describe('timelineOf', () => {
 
   test('a slim head carrying the (empty) collections passes through by reference, markers intact', () => {
     // The host's head builder emits the four collections as empty lists, so
-    // the split generation rides the cheap pass-through path like any
-    // well-formed value — the markers/counts survive untouched.
+    // the split generation rides the cheap pass-through path like any well-formed value — the markers/counts survive untouched.
     const head = {
       ok: true,
       current,
@@ -351,7 +360,7 @@ describe('timelineOf', () => {
 
 describe('unsupportedOf', () => {
   test('well-formed records pass through as plain data', () => {
-    assert.deepEqual(unsupportedOf({ current: '0.1.1-rc.2', minimum: '0.1.2-rc.1' }), { current: '0.1.1-rc.2', minimum: '0.1.2-rc.1' })
+    assert.deepEqual(unsupportedOf({ current: '0.1.1-rc.2', minimum: '0.1.7-rc.2' }), { current: '0.1.1-rc.2', minimum: '0.1.7-rc.2' })
   })
 
   test('non-records and wrong-typed fields degrade to null', () => {
@@ -749,103 +758,6 @@ describe('workspaceOf', () => {
   })
 })
 
-describe('canOpenPathsOf / openPathVia', () => {
-  const ctxWith = (services: Record<string, unknown>): ClientCtx => ({ get: (name: string) => services[name] }) as unknown as ClientCtx
-  /** A loopback connection whose generic RPC answers per endpoint. */
-  const rpcConn = (routes: Record<string, () => unknown>, over: Record<string, unknown> = {}): Record<string, unknown> => ({
-    isLoopback: true,
-    rpc: { call: (channel: string, endpoint: string) => Promise.resolve(routes[endpoint]?.()) },
-    ...over,
-  })
-  const openable = (): Record<string, unknown> =>
-    rpcConn({ 'session/canOpenWorkspacePath': () => ({ ok: true, value: true }) })
-
-  test('the capability remote gates the opener, behind the loopback fact', async () => {
-    assert.equal(await canOpenPathsOf(ctxWith({ connection: openable() })), true)
-    // The remote's answer is re-proved: non-true values and failed results are both "no".
-    assert.equal(await canOpenPathsOf(ctxWith({ connection: rpcConn({ 'session/canOpenWorkspacePath': () => ({ ok: true, value: false }) }) })), false)
-    assert.equal(await canOpenPathsOf(ctxWith({ connection: rpcConn({ 'session/canOpenWorkspacePath': () => ({ ok: false }) }) })), false)
-    assert.equal(await canOpenPathsOf(ctxWith({ connection: rpcConn({ 'session/canOpenWorkspacePath': () => 'garbage' }) })), false)
-    // The harness's own gate: a page not on the operator's machine never opens.
-    assert.equal(await canOpenPathsOf(ctxWith({ connection: { isLoopback: false, rpc: openable().rpc } })), false)
-    // No connection service at all.
-    assert.equal(await canOpenPathsOf(ctxWith({})), false)
-  })
-
-  test('hostile connections and failed transports resolve false, never reject', async () => {
-    const throwProp = (): never => { throw new Error('boom') }
-    // A service lookup itself may throw.
-    assert.equal(await canOpenPathsOf({ get: throwProp } as unknown as ClientCtx), false)
-    // An rpc face whose call read throws; a loopback fact that throws on read.
-    assert.equal(await canOpenPathsOf(ctxWith({ connection: { isLoopback: true, rpc: { get call(): unknown { return throwProp() } } } })), false)
-    assert.equal(await canOpenPathsOf(ctxWith({ connection: { get isLoopback(): boolean { return throwProp() }, rpc: openable().rpc } })), false)
-    // A call that is not a function, and one that rejects.
-    assert.equal(await canOpenPathsOf(ctxWith({ connection: { isLoopback: true, rpc: { call: 7 } } })), false)
-    assert.equal(await canOpenPathsOf(ctxWith({ connection: { isLoopback: true, rpc: { call: () => Promise.reject(new Error('offline')) } } })), false)
-  })
-
-  test('openPathVia returns a fire-and-forget caller that swallows failures', async () => {
-    const open = openPathVia(ctxWith({ connection: { rpc: { call: () => Promise.reject(new Error('no desktop')) } } }))
-    assert.ok(open !== undefined)
-    open('/repo/a.ts') // must not throw
-    // A synchronously throwing transport joins the same silence.
-    const syncThrow = openPathVia(ctxWith({ connection: { rpc: { call: () => { throw new Error('sync') } } } }))
-    syncThrow!('/repo/a.ts')
-    assert.equal(openPathVia(ctxWith({})), undefined)
-  })
-
-  test('the opener forwards the requested path through the open remote', async () => {
-    const calls: { channel: string; endpoint: string; payload: unknown }[] = []
-    const open = openPathVia(ctxWith({
-      connection: {
-        rpc: {
-          call: (channel: string, endpoint: string, payload: unknown) => {
-            calls.push({ channel, endpoint, payload })
-            return Promise.resolve({ ok: true, value: { opened: true } })
-          },
-        },
-      },
-    }))
-    open!('/repo/a.ts')
-    await new Promise(resolve => setTimeout(resolve, 0))
-    assert.deepEqual(calls, [{ channel: '/api', endpoint: 'session/openWorkspacePath', payload: { args: { request: { path: '/repo/a.ts' } } } }])
-  })
-})
-
-describe('openResourceVia', () => {
-  const ctxWith = (services: Record<string, unknown>): ClientCtx => ({ get: (name: string) => services[name] }) as unknown as ClientCtx
-
-  test('forwards the address to the Sidebar face and reports the open', () => {
-    const opened: string[] = []
-    const open = openResourceVia(ctxWith({ sidebarRight: { openResource: (address: string) => { opened.push(address) } } }))
-    assert.ok(open !== undefined)
-    assert.equal(open('dsh-resource://file/session/s1/a.ts'), true)
-    assert.deepEqual(opened, ['dsh-resource://file/session/s1/a.ts'])
-  })
-
-  test('an absent or hostile face yields no opener at all', () => {
-    assert.equal(openResourceVia(ctxWith({})), undefined)
-    assert.equal(openResourceVia(ctxWith({ sidebarRight: null })), undefined)
-    assert.equal(openResourceVia(ctxWith({ sidebarRight: {} })), undefined)
-    assert.equal(openResourceVia(ctxWith({ sidebarRight: { openResource: 7 } })), undefined)
-    // A service lookup itself may throw.
-    assert.equal(openResourceVia({ get: () => { throw new Error('boom') } } as unknown as ClientCtx), undefined)
-  })
-
-  test('a refusal reports false instead of throwing, so the caller can fall back', () => {
-    const open = openResourceVia(ctxWith({ sidebarRight: { openResource: () => { throw new Error('no type claims it') } } }))
-    assert.equal(open!('dsh-resource://file/session/s1/a.ts'), false)
-  })
-
-  test('the face is re-proved per call: a revoked service refuses after the opener was built', () => {
-    const services: Record<string, unknown> = { sidebarRight: { openResource: () => {} } }
-    const open = openResourceVia(ctxWith(services))
-    assert.ok(open !== undefined)
-    // The plugin unloaded (HMR): the written face is gone.
-    services.sidebarRight = undefined
-    assert.equal(open('dsh-resource://file/session/s1/a.ts'), false)
-  })
-})
 
 describe('activityOf', () => {
   test('absent or non-record values stay null (an older host serves no such key)', () => {
@@ -880,5 +792,106 @@ describe('activityOf', () => {
       },
     })
     assert.deepEqual(out, { days: { '2026-09-16': { tokens: 15, requests: 1 } } })
+  })
+
+  test('a well-formed pricing record rides both the pass-through and the sanitized copy', () => {
+    const cost = { deepseek: { 'deepseek-v4': { peak: { uncached: 10, cacheRead: 5, cacheWrite: 0, output: 2 } } } }
+    const wire = { days: { '2026-09-16': { tokens: 15, requests: 1, cost } } }
+    assert.ok(activityOf(wire) === (wire as never))
+    const dirty = { days: { '2026-09-16': { tokens: 15, requests: 1, cost }, '09-16': { tokens: 1, requests: 1 } } }
+    assert.deepEqual(activityOf(dirty), { days: { '2026-09-16': { tokens: 15, requests: 1, cost } } })
+  })
+
+  test('a malformed pricing record drops the fee whole; the day survives', () => {
+    const out = activityOf({
+      days: {
+        '2026-09-16': { tokens: 15, requests: 1, cost: 'x' },
+        '2026-09-15': { tokens: 3, requests: 1, cost: { deepseek: 7 } },
+      },
+    })
+    assert.deepEqual(out, {
+      days: { '2026-09-16': { tokens: 15, requests: 1 }, '2026-09-15': { tokens: 3, requests: 1 } },
+    })
+  })
+
+  test('a well-formed skill table rides the pass-through; malformed tallies drop per name', () => {
+    const skills = { tdd: { n: 2, last: 1_758_000_000_000 } }
+    const wire = { days: { '2026-09-16': { tokens: 15, requests: 1, skills } } }
+    assert.ok(activityOf(wire) === (wire as never))
+    const out = activityOf({
+      days: {
+        '2026-09-16': {
+          tokens: 15,
+          requests: 1,
+          skills: {
+            tdd: { n: 1, last: 5 },
+            'bad-count': { n: 'x', last: 5 },
+            'bad-last': { n: 1, last: Number.NaN },
+            'neg-count': { n: -1, last: 5 },
+            'not-record': null,
+          },
+        },
+        '2026-09-17': { tokens: 1, requests: 1, skills: 'x' },
+        '2026-09-18': { tokens: 1, requests: 1, skills: [] },
+        '2026-09-19': { tokens: 1, requests: 1, skills: {} },
+      },
+    })
+    assert.deepEqual(out, {
+      days: {
+        '2026-09-16': { tokens: 15, requests: 1, skills: { tdd: { n: 1, last: 5 } } },
+        '2026-09-17': { tokens: 1, requests: 1 },
+        '2026-09-18': { tokens: 1, requests: 1 },
+        '2026-09-19': { tokens: 1, requests: 1 },
+      },
+    }, 'non-record and empty-after-scrubbing tables drop whole; the days survive')
+  })
+})
+
+describe('entrySeated — the slot-ledger second-mount guard', () => {
+  /** A ctx whose slots face carries the given raw ledger (or a hostile face). */
+  const ctxWith = (entries: unknown): ClientCtx => ({ slots: { entries: () => entries } } as unknown as ClientCtx)
+
+  test('true when the ledger seats the id', () => {
+    const ctx = ctxWith([
+      { component: () => null, options: { id: 'context-jump', order: 20 } },
+    ])
+    assert.equal(entrySeated(ctx, 'conversation.chat.assistant-actions', 'context-jump'), true)
+  })
+
+  test('false when the slot seats other ids only, or nothing', () => {
+    const other = ctxWith([{ component: () => null, options: { id: 'feedback' } }])
+    assert.equal(entrySeated(other, 'conversation.chat.assistant-actions', 'context-jump'), false)
+    const empty = ctxWith([])
+    assert.equal(entrySeated(empty, 'conversation.chat.assistant-actions', 'context-jump'), false)
+  })
+
+  test('fail-open: a missing or non-function face, a non-array ledger, and a throwing face all read as unseated', () => {
+    assert.equal(entrySeated({ slots: {} } as unknown as ClientCtx, 's', 'x'), false, 'no entries member')
+    const primitive = { slots: { entries: 7 } } as unknown as ClientCtx
+    assert.equal(entrySeated(primitive, 's', 'x'), false, 'entries is not callable')
+    assert.equal(entrySeated(ctxWith('nope'), 's', 'x'), false, 'ledger is not an array')
+    const hostile = { slots: { entries: () => { throw new Error('boom') } } } as unknown as ClientCtx
+    assert.equal(entrySeated(hostile, 's', 'x'), false, 'the read throws')
+  })
+
+  test('an entry failing the stored shape drops alone; one bad entry never hides a real marker', () => {
+    const mixed = ctxWith([
+      null,
+      'row',
+      { component: () => null, options: 'not-a-record' },
+      { component: () => null, options: { id: 'context-jump' } },
+    ])
+    assert.equal(entrySeated(mixed, 's', 'context-jump'), true)
+    const badOnly = ctxWith([{ component: () => null, options: 7 }])
+    assert.equal(entrySeated(badOnly, 's', 'context-jump'), false)
+  })
+
+  test('the ledger read is keyed by slot: the face is asked for the named slot only', () => {
+    const asked: string[] = []
+    const ctx = {
+      slots: { entries: (name: string) => { asked.push(name); return [] } },
+    } as unknown as ClientCtx
+    assert.equal(entrySeated(ctx, 'conversation.chat.assistant-actions', 'context-jump'), false)
+    assert.deepEqual(asked, ['conversation.chat.assistant-actions'])
   })
 })

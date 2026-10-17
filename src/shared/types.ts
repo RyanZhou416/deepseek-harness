@@ -1,54 +1,23 @@
-/**
-  * Shared wire contract — the snapshot model exchanged between the Host and Client halves. Delivered as the `view()` payload of the
-  * `contextTimeline`/`contextHeaders` session projections (registered on `ctx.sessionProjections`; the registry pushes finished views as
-  * `session/projection` frames — see host/timeline.ts). TYPE-ONLY host-side module: both halves import these as `import type`, so nothing
-  * from here ever reaches the runtime bundles.
- */
+/** Shared wire contract — the snapshot model exchanged between the Host and Client halves: the
+ * `view()` payloads of the `contextTimeline` / `contextHeaders` / `contextActivity` session projections. */
 
 import type { ActivityState } from '../host/activity'
 import type { HeadersState } from '../host/headers'
-import type { TimelineState } from '../host/fold'
-// The registry package ROOT carries the `@deepseek-ai/cordis` Context
-// augmentation (`sessionProjections` service); the `/types` subpath below
-// only declares the merge-extensible maps.
+import type { TimelineState } from '../host/foldState'
+// The registry package ROOT carries the `@deepseek-ai/cordis` Context augmentation
+// (`sessionProjections` service); the `/types` subpath only declares the merge-extensible maps.
 import type {} from '@deepseek-ai/dsh-session-projection'
 import type {} from '@deepseek-ai/dsh-session-projection/types'
 
 declare module '@deepseek-ai/dsh-session-projection/types' {
-  // Both maps take the plugin keys: `SessionProjectionMap` names the
-  // client-visible wire values, `SessionProjectionStateMap` constrains the
-  // unit `key`s and their fold-state types (the split arrived with
-  // dsh 0.1.1 — the definition's K constraint moved to the state map).
   interface SessionProjectionMap {
-    /**
-     * The plugin's context timeline: current composition, counters, and the
-     * headline anchor. Since the split generation the wire value is the SLIM
-     * head (every delivery channel — session.list rows, control baselines,
-     * push frames — carries it whole); the per-request history, context
-     * events, and the surface/archive collections ride the on-demand detail
-     * channel ({@link ContextTimelineDetail}, host/detail.ts). Channel-less
-     * hosts keep the inline generation (the collections stay in the value).
-     * Key absence = the plugin's host half is not composed.
-     */
+    /** The plugin's timeline: slim head on the split generation, inline value on channel-less
+     * hosts; key absence = the host half is not composed. */
     contextTimeline: ContextTimeline
-    /**
-     * The request-header CONTENT epochs (full system prompt + tool schemas)
-     * behind the timeline's envelope figures. A separate unit so the hot
-     * `contextTimeline` value stays lean: headers change rarely, so this
-     * value (and its pushes) change only when a `request/header` lands.
-     * The Context browser card reads it to show the actual prompt/schema
-     * content of a picked step (key absence = older host: tokens only).
-     */
+    /** Request-header content epochs — a separate unit so the hot timeline value stays lean;
+     * key absence = an older host (tokens only). */
     contextHeaders: ContextHeaders
-    /**
-     * The per-day activity ledger (billed tokens + completed requests keyed
-     * by local day) behind the Context Dashboard's heatmap — the timeline's
-     * "current snapshot" cannot draw a per-day chart, so the overview reads
-     * this off every session-list row's projection column. Tiny (one small
-     * record per day, retention-capped), so riding every list row costs
-     * nothing next to the timeline head. Key absence = older host: the
-     * heatmap degrades to its empty note.
-     */
+    /** The per-day activity ledger behind the Context Insights heatmap; key absence = an older host (empty heatmap). */
     contextActivity: ContextActivity
   }
   interface SessionProjectionStateMap {
@@ -58,121 +27,166 @@ declare module '@deepseek-ai/dsh-session-projection/types' {
   }
 }
 
-/**
- * The priced surface buckets. `skill` carries every skill-machinery content
- * the harness injects (issue #66): the `<available_skills>` catalog digest,
- * a user-explicit `/name` invocation's instructions message, and the content
- * a `skill`-tool load returns (modeled as a tool result by the harness).
- */
+/** The priced surface buckets. `skill` carries the skill-machinery content the harness injects:
+ * the `<available_skills>` digest, a `/name` invocation's instructions, and a `skill`-tool load. */
 export type Category = 'user' | 'inject' | 'skill' | 'assistant' | 'tool'
 
-/**
- * One live system-prompt node (Snapshot.systems) — the harness models the
- * system prompt as a surface node, so its TEXT is fetched on demand from the
- * event at `seq`: a V3 `system/message` event, or the V0/V2 `request/header`
- * whose envelope carried `header.system`. `tokens` is the node's heuristic
- * price (0 for a dormant empty node, which the harness reads as "no system
- * prompt"); the effective figure is the LAST node with `tokens > 0`.
- */
+/** One live system-prompt node; the harness models the prompt as a surface node, so its TEXT is
+ * fetched from the `system/message` event at `seq`. The effective figure is the LAST node with `tokens > 0`. */
 export interface SystemPromptNode {
   seq: number
   time: number
   tokens: number
 }
 
-/**
- * The stats board's count figures, precomputed host-side over the RETAINED
- * request/event records (the same set the detail payload serves). Carried by
- * the split-generation wire head so the board — and the Agent card's
- * per-session request tally — never need the collections themselves.
- * `steps` doubles as the retained request-record count.
- */
+/** Counts precomputed over the RETAINED request/event records; `steps` is the retained request-record count. */
 export interface TimelineCounts {
   turns: number
   steps: number
   injects: number
   compactions: number
   prunes: number
+  /** Distinct names among the retained events tagged `sub: 'skill'`; the `<available_skills>`
+   * digest has no name and never counts. Absent = 0. */
+  skills?: number
 }
 
-/**
- * The newest retained request record's billing summary — the headline's
- * derived-occupancy anchor (`prompt + surface movement since`), carried by
- * the split-generation wire head so the headline never needs the request
- * records themselves.
- */
+/** The newest retained request record's billing summary. */
 export interface TimelineLast {
   seq: number
   total: number
   prompt?: number
 }
 
-/** One day's ledger entry in the `contextActivity` projection. */
 export interface ActivityDay {
-  /**
-   * Billed tokens folded from provider-reported usage that day (prompt-side
-   * input + cache read/write + output). Requests without a usage settlement
-   * count only toward `requests` — a fabricated 0 never understates the day.
-   */
+  /** Billed tokens from provider-reported usage that day (input + cache read/write + output); a
+   * settlement-less request counts only toward `requests`. */
   tokens: number
   /** Completed model calls (assistant settlements) that day. */
   requests: number
+  /** The day's billed buckets keyed provider → model → pricing period, scoped to the day the
+   * requests INITIATED in. Absent = tokens-only bars. */
+  cost?: SessionCostUsage
+  /** Skill name → `{ n: loads, last: last-load instant in epoch ms }`; absent = an empty day. */
+  skills?: Record<string, { n: number; last: number }>
 }
 
-/**
- * The per-session daily activity ledger (`contextActivity` wire value):
- * day key (`YYYY-MM-DD`, host-local — see shared/days.ts) → that day's
- * billed volume, retention-capped by the fold. The Context Dashboard merges
- * every listed session's ledger into its activity heatmap.
- */
+/** The per-session daily ledger: host-local day key (`YYYY-MM-DD`, shared/days.ts) → that day's
+ * billed volume; the Context Insights page merges every listed session's ledger. */
 export interface ContextActivity {
   days: Record<string, ActivityDay>
 }
 
-/**
- * The per-user display-preference vocabulary of the `dsh-context` settings
- * namespace — the ONE declaration both halves share: the Host registers the
- * namespace schema against it (host/settings.ts), the Client binds the scope
- * and edits fields by name (client/settings.ts). Type-only, so both bundles
- * erase it.
- */
+/** One available skill's catalog metadata, served by `/api/dsh-context/skills` (host/skills.ts); every field but `name` is best-effort. */
+export interface SkillInfo {
+  /** Kebab-case identifier — the join key onto `ActivityDay.skills`. */
+  name: string
+  description: string
+  /** Absolute instruction file path, when the provider is filesystem-backed. */
+  path?: string
+  /** Discovery source bucket (e.g. 'project-agents', 'user-dsh', 'bundled'). */
+  source?: string
+}
+
+/** The durable `subagent/descriptor` identity of one agent session, as the Fleet detail route serves it. */
+export interface FleetDescriptor {
+  mode: 'one-shot' | 'continuable'
+  label?: string
+  /** The `ctx.subagents` provider name that established the child ('spawn' / 'fork' / …). */
+  provider?: string
+  agentProvider?: string
+  agentModel?: string
+  persona?: string
+}
+
+/** One inter-agent message lifted from a session log: a team relay in the recipient's log
+ * (`agent-message`), a historical mailbox delivery (`team-message`), or the runtime's account of a
+ * child settling in the parent's log (`subagent-settled`). */
+export interface FleetMessage {
+  seq: number
+  /** Event instant (epoch ms). */
+  time: number
+  kind: 'relay' | 'mailbox' | 'settled'
+  /** Sender session id, when the source attests one. */
+  from?: string
+  /** The historical mailbox's sender NAME (no id join needed). */
+  fromName?: string
+  /** Text excerpt, already capped by the route. */
+  text: string
+}
+
+/** One roster fact lifted from a lead session's durable `team/member` records — the projection
+ * strips these fields, so the Fleet detail route serves them for the member cards. */
+export interface FleetMemberInfo {
+  name: string
+  /** The delegation's own role summary, authored at spawn. */
+  description: string
+  /** The `ctx.subagents` provider that established the member ('spawn' / 'fork'). */
+  provider?: string
+  context?: 'fresh' | 'fork'
+}
+
+/** The Fleet detail route's per-session payload (`/api/dsh-context/fleet`): the agent's delegation
+ * prompt, its descriptor composition, its latest reply, and the inter-agent traffic its own log
+ * attests. A LEAD session additionally serves its roster facts. */
+export interface FleetDetail {
+  descriptor?: FleetDescriptor
+  /** The first non-injection user message — a child's delegation briefing, a root's first human prompt. */
+  initialPrompt?: string
+  /** The newest assistant text — the agent's latest report-back. */
+  lastReply?: { time: number; text: string }
+  /** Roster facts off `team/member` records (lead logs only), keyed by member name. */
+  roster?: FleetMemberInfo[]
+  /** Newest-first inter-agent messages found in this session's log. */
+  messages: FleetMessage[]
+  /** True when the route's caps cut the message list or a text. */
+  truncated: boolean
+}
+
+/** The display-preference vocabulary of the `dsh-context` entry — the ONE declaration shared by
+ * the Host Config schema (host/config.ts) and the Client's settings form (client/settings.ts). */
 export type DefaultGranularity = 'step' | 'turn'
 
 export type DefaultTrendMode = 'total' | 'delta'
 
-/** File Activity row order: most operations first, most-recently-touched first, or path ascending. */
+/** The browser delta baseline: against the immediately preceding record, or the previous turn's last step. */
+export type DefaultDeltaBase = 'step' | 'turn'
+
 export type DefaultFileSort = 'count' | 'latest' | 'path'
 
-/** Tool-definition row order: largest schema first, most call hits first, or name ascending. */
 export type DefaultToolSort = 'size' | 'count' | 'name'
 
-/** Where the Context view is offered: the conversation tab, the right Sidebar, or both. */
 export type DefaultPlacement = 'all' | 'tab' | 'sidebar'
 
-/** Whether the Context Insights panel's sidebar entry is offered at all. */
 export type InsightsEntry = 'show' | 'hide'
+
+export type DefaultDurationCurve = 'show' | 'hide'
+
+/** Whether the Fleet conversation tab is served. */
+export type FleetTab = 'show' | 'hide'
 
 export interface PluginSettings {
   defaultPlacement: DefaultPlacement
   defaultGranularity: DefaultGranularity
   defaultTrendMode: DefaultTrendMode
+  defaultDeltaBase: DefaultDeltaBase
   defaultToolSort: DefaultToolSort
   defaultFileSort: DefaultFileSort
   insightsEntry: InsightsEntry
+  defaultDurationCurve: DefaultDurationCurve
+  fleetTab: FleetTab
+  /** Free text joined ahead of the harness's assembled system prompt; empty disables. */
+  promptPrefix: string
+  /** Free text joined behind the harness's assembled system prompt; empty disables. */
+  promptSuffix: string
 }
 
-/** The section fields the settings card edits, as the Host schema names them. */
 export type SettingsField = keyof PluginSettings
 
 export interface Snapshot {
   ok: boolean
-  /**
-   * The host's baseline-gate record, present ONLY when the running harness
-   * is below the plugin's supported baseline: the host then folds nothing
-   * and every figure in this snapshot is zero/empty. The client keeps
-   * rendering the (blank) cards and pops the upgrade gate modal naming
-   * `current` (the detected harness version) and `minimum` (the baseline).
-   */
+  /** Present ONLY when the running harness is below the supported baseline: the host folds
+   * nothing (all figures zero) and the client shows the upgrade gate. */
   unsupported?: {
     current: string
     minimum: string
@@ -180,6 +194,9 @@ export interface Snapshot {
   model?: string
   provider?: string
   contextWindow?: number
+  /** The newest request envelope's routed output cap, which auto-compaction reserves before pricing
+   * its pressure trigger. Absent = no cap in the log (or a row folded before the field existed). */
+  maxOutputTokens?: number
   current: {
     system: number
     tools: number
@@ -190,130 +207,58 @@ export interface Snapshot {
     tool: number
     total: number
   }
-  /**
-   * Image blocks live in the CURRENT context (user uploads plus tool-result
-   * images, nested blocks included) — the sum over the live surface nodes'
-   * `imgs`, so compaction/prune shrink it. Absent from older hosts; clients
-   * treat absence as zero.
-   */
+  /** Image blocks in the CURRENT context (uploads plus nested tool-result images), summed over live surface nodes. Absent = 0. */
   images?: number
-  /**
-   * Tool calls whose result is live in the CURRENT context (one `tool/result`
-   * folds to one `tool` surface node). Calls still in flight and results
-   * compacted/pruned out of the surface are not counted. Absent from older
-   * hosts; clients treat absence as zero.
-   */
+  /** Tool calls whose result is live (a `skill`-tool node keeps counting); in-flight and
+   * compacted/pruned-out calls are excluded. Absent = 0. */
   toolCalls?: number
-  /**
-   * Whole-session human-input tally: every non-injection `user/message`
-   * (the user's own messages) plus every answered `ask_user_question`
-   * result (one per answer submission). A running total over the COMPLETE
-   * log — turns the retained window no longer holds still count. Absent
-   * from older hosts; clients treat absence as zero.
-   */
+  /** Whole-session tally of non-injection `user/message` plus answered `ask_user_question` — a
+   * running total over the COMPLETE log. Absent = 0. */
   humanInputs?: number
-  /**
-   * The user's newest own message as a one-line bounded preview (first text
-   * block, whitespace collapsed, ~80 chars): the session cards' footer line.
-   * Additive-optional — absent from rows folded before the field existed
-   * (older hosts, idle sessions' cached rows); clients hide the line then.
-   */
+  /** Whole-session replies: one per assistant message carrying non-blank text (tool-only steps are not replies). Absent = 0. */
+  answers?: number
+  /** The newest own message as a one-line preview (first text block, whitespace collapsed, 80 chars max). Absent = hidden. */
   lastUser?: string
-  /**
-   * Split-generation head fields — present exactly when the host serves the
-   * SLIM head (the heavy collections moved to the on-demand detail channel,
-   * host/detail.ts) and absent on the inline generation (older or
-   * channel-less hosts serve the collections in place). `detailRev` is the
-   * detail's revision marker: it bumps whenever the detail collections
-   * change, so an open tab refetches on the push alone.
-   */
+  /** Split-generation head fields — present exactly when the host serves the slim head;
+   * `detailRev` bumps whenever the detail collections change. */
   counts?: TimelineCounts
   last?: TimelineLast
   detailRev?: number
-  /**
-   * The per-request history / context-event collections. On the split
-   * generation these stay ABSENT from the wire value (every session.list row,
-   * control baseline, and push frame would carry them whole otherwise); the
-   * client fills them from the detail channel ({@link ContextTimelineDetail}).
-   */
+  /** The slim head serves these EMPTY (the collections ride the detail channel); the client swaps in the detail payload's collections. */
   requests: RequestRecord[]
   events: ContextEventRecord[]
-  /**
-   * Cumulative session-cost raw material (per-provider, per-model billed
-   * token totals — see SessionCostUsage). Absent until a request with a
-   * known model reports usage.
-   */
+  /** Cumulative session-cost raw material (SessionCostUsage); absent until a request with a known model reports usage. */
   cost?: SessionCostUsage
-  /**
-   * Whole-session timing totals (see TimingTotals). Absent until the first
-   * step lifecycle completes in the log (older plugin builds never folded
-   * one — clients treat absence as an empty timing card).
-   */
+  /** Whole-session timing totals (TimingTotals). Absent until the first step lifecycle completes. */
   timing?: TimingTotals
-  /**
-   * The live system-prompt nodes, oldest first — the browser's per-step source
-   * for the System section. Absent when the log carried no system prompt, and
-   * on older plugin builds (the client then falls back to the header epoch's
-   * own `systemTokens`, the pre-V3 shape).
-   */
+  /** The live system-prompt nodes, oldest first. Absent on rows folded before the field existed
+   * — the client then reads the header epoch's `systemTokens`. */
   systems?: SystemPromptNode[]
-  /**
-     * The served live surface: the newest `maxNodes` tail PLUS every live inject node older than the tail (injections land first and are
-     * few,
-    * so they are pinned). Seq-ordered, oldest first.
-   */
+  /** The served live surface: the newest `maxNodes` tail PLUS every live inject/skill node older
+   * than the tail (they land first and are pinned). Seq-ordered, oldest first. */
   nodes: SurfaceNode[]
-  /** Live nodes not served (the overflow beyond `maxNodes`, minus pinned injects — see `nodes`). */
+  /** Live nodes not served: the overflow beyond `maxNodes` minus the pinned inject/skill nodes. */
   droppedNodes: number
-  /**
-   * Recently REMOVED surface nodes (compaction/prune shadows), each stamped
-   * with `gone` (the replacing event's seq). Together with `nodes` this lets
-   * the Context browser reconstruct the assembled surface of any retained
-   * step: alive at request R = seq < R.seq && (gone undefined || gone > R.seq).
-   */
+  /** Recently REMOVED surface nodes (compaction/prune shadows) stamped with `gone` (the replacing
+   * event's seq); a node belongs to request R when `seq < R.seq && (gone undefined || gone > R.seq)`. */
   archive: SurfaceNode[]
-  /**
-   * Coverage floor of the served live `nodes`: the newest seq among the
-   * `droppedNodes` live nodes not served. Present only when droppedNodes > 0.
-   */
+  /** Newest seq among the `droppedNodes` nodes not served; present only when droppedNodes > 0. */
   surfaceFloor?: number
-  /**
-   * Coverage floor of `archive`: the newest `gone` among archive entries the
-   * retention bounds dropped. Steps with seq < archiveFloor may miss removed
-   * nodes (the browser shows the reconstruction as approximate).
-   */
+  /** Newest `gone` among retention-dropped archive entries; steps below it may miss removed nodes. */
   archiveFloor?: number
-  /**
-   * The fold-derived file-operation log and its trim floor — present on the
-   * INLINE wire value (channel-less hosts) and on the detail payload
-   * (ContextTimelineDetail), absent from the slim head (they ride the detail
-   * channel there).
-   */
+  /** The fold-derived file-op log and trim floor: the INLINE value and detail payload, never the slim head. */
   fileOps?: FileOpRecord[]
   fileOpsFloor?: number
+  /** The timing strip's painted spans: INLINE value and detail payload only; absent on rows folded before the collection existed. */
+  spans?: TimingSpan[]
 }
 
-/**
- * The on-demand DETAIL payload of the split `contextTimeline` generation —
- * the heavy collections (per-request records, context events, the served
- * surface window, and the removed-node archive) that the slim wire head no
- * longer carries through every delivery channel. The host serves it off the
- * live fold state at the `/dsh-context` `detail` endpoint (host/detail.ts);
- * `rev` mirrors the head's `detailRev` at build time and acts as the
- * client's latest-wins cursor.
- */
+/** The on-demand DETAIL payload of the split generation: the heavy collections the slim head no
+ * longer carries (host/detail.ts). `rev` mirrors the head's `detailRev` and is the client's latest-wins cursor. */
 export interface ContextTimelineDetail {
   rev: number
-  /**
-   * The slim wire head at the SAME fold cut as the collections: the
-   * composition scalars (`current`), the window/model envelope, and the
-   * precomputed counts. Sessions listed cold (never attached since the
-   * requesting unit last changed) carry no `contextTimeline` projection row
-   * for the browser's list reads, so the Agent network card fetches this
-   * head per node to render their composition rings. The host always serves
-   * it; optional so a payload missing it still serves the collections (the
-   * detail cards) and only the ring composition degrades.
-   */
+  /** The slim head at the SAME fold cut as the collections — a session listed cold has no
+   * `contextTimeline` row, so the Agent network ring reads this. Optional. */
   head?: ContextTimeline
   requests: RequestRecord[]
   events: ContextEventRecord[]
@@ -322,31 +267,17 @@ export interface ContextTimelineDetail {
   archive: SurfaceNode[]
   surfaceFloor?: number
   archiveFloor?: number
-  /**
-   * The fold-derived file-operation log (shared/fileOps.ts): one record per
-   * executed file op, newest-retained, covering the full log (never
-   * window-bound like the client-side join derivation it replaces on this
-   * generation). Code-Mode nested dispatches book ops located on their
-   * parent run_code result (`parent`).
-   */
+  /** The file-op log (shared/fileOps.ts) over the FULL log; Code-Mode nested dispatches book on their parent run_code result (`parent`). */
   fileOps?: FileOpRecord[]
   /** The newest dropped op's seq when the op log trimmed (coverage honesty, same family as archiveFloor). */
   fileOpsFloor?: number
+  /** The completed steps' time slices in log order, positioned by their real instants. Absent = no strip. */
+  spans?: TimingSpan[]
 }
 
-/**
- * One executed file operation (a settled file-tool call with a resolved
- * target), folded host-side from the durable tool lifecycle: the call's
- * name+arguments (`tool/call`), the result's presentation meta and error
- * (`tool/result`), or a nested Code-Mode settle (`tool/code-dispatch`,
- * located on its parent run_code result via `parent` + `program`).
- *
- * `gone` is NOT host-stamped: the client joins it from the detail's archive
- * at render time (the op's result node leaving the live surface marks where
- * its content is still viewable). Line deltas are estimates read off the
- * call ARGUMENTS (an edit's old/new strings, a write's content), never off
- * result payloads.
- */
+/** One executed file operation, folded host-side from the durable tool lifecycle (`tool/call` +
+ * `tool/result`, or a nested `tool/ptc-dispatch`); line deltas are estimates read off the call
+ * ARGUMENTS. `gone` is client-joined, not host-stamped. */
 export interface FileOpRecord {
   seq: number
   /** The op's file; for a pathless search the searched PATTERN (`pattern: true`). */
@@ -357,7 +288,7 @@ export interface FileOpRecord {
   err: boolean
   added: number
   removed: number
-  /** What was searched for, when a search named both a path and a pattern. */
+  /** The searched pattern, with the include filter when one narrowed the call. */
   detail?: string
   /** Meta-attributed search op only: matched lines the result reported for this file. */
   hits?: number
@@ -373,73 +304,49 @@ export interface FileOpRecord {
   gone?: number
 }
 
-/**
-  * The `contextTimeline` projection's whole value — the same snapshot the Client has always rendered. `ok` is always `true` here (a
-  * delivered projection is by definition available); kept for wire compatibility with the snapshot shape.
- */
+/** The `contextTimeline` projection's whole value; `ok` is always `true` here (kept for wire compatibility). */
 export type ContextTimeline = Snapshot
 
-/**
- * The official token-meter `contextPressure` projection (registered by
- * `@deepseek-ai/dsh-token-meter` on the same `SessionProjectionMap`): the
- * provider-anchored occupancy of the NEXT request. The Client reads this key
- * directly instead of the Host mirroring it inside `contextTimeline`
- * (token-meter owns estimation and replay — the docs' stated division of
- * labor). Fields are independent last-wins records; absent until a provider
- * reports usage. Absent key/value = the registry (or the meter) is not
- * composed — the Client falls back to its derived anchor.
- */
+/** The official token-meter `contextPressure` projection: the provider-anchored occupancy of the
+ * NEXT request; fields are independent last-wins records. Absent = the meter is not composed (the
+ * client then falls back to its derived anchor). */
 export interface ContextPressure {
   /** Provider-reported prompt size of the most recent request (input + cache). */
   pressureTokens?: number
   /** pressureTokens + heuristic surface movement since the sample (clamped ≥ 0). */
   projectedTokens?: number
-  /** Newest recorded route capacity (last-wins). */
   contextWindow?: number
 }
 
-/**
- * The official token-meter `contextBreakdown` projection: the heuristic
- * composition rows the chat ring's click-open panel shows (system prompt,
- * tool schemas, conversation). The Client reads this key directly so the
- * composition card's proportions AND counts stay identical to the panel's
- * by construction; the message bucket is subdivided into the plugin's four
- * surface categories by the fold's per-category ratios. Absent key/value =
- * an older harness without the meter's projection units — callers fall back
- * to the fold's own sums (identical estimator, minus the image correction).
- */
+/** The official token-meter `contextBreakdown` projection: the heuristic composition rows the chat
+ * ring's panel shows. Read directly so the card's counts stay identical to the panel's; the message
+ * bucket splits into the five message-bearing surface categories. Absent = an older harness. */
 export interface ContextBreakdown {
   systemTokens: number
   toolsTokens: number
   messageTokens: number
 }
 
-/**
- * The official token-meter `tokenUsage` projection (registered by
- * `@deepseek-ai/dsh-token-meter` on the same `SessionProjectionMap`): durable
- * cumulative provider-reported usage across the COMPLETE session log. The four
- * buckets are disjoint (reasoning tokens are already inside `outputTokens`).
- * The Client reads this key directly to compute the cache-hit share — the
- * exact same data the chat stats line below the input box shows, same formula
- * — instead of the Host mirroring it inside `contextTimeline`. Absent until a
- * provider reports usage.
- */
+/** The official token-meter `tokenUsage` projection: durable cumulative provider-reported usage
+ * across the COMPLETE log; the four buckets are disjoint (reasoning sits inside `outputTokens`). */
 export interface TokenUsage {
-  /** Billed prompt tokens that missed the provider cache. */
   uncachedInputTokens: number
-  /** Billed output tokens (reasoning included). */
   outputTokens: number
-  /** Billed prompt tokens served from the provider cache. */
   cacheReadTokens: number
-  /** Billed prompt tokens written into the provider cache. */
   cacheWriteTokens: number
 }
 
-/**
- * Cumulative billed-token totals for one pricing bucket of the session-cost
- * estimate (host-folded, never trimmed — running totals over the COMPLETE
- * session log, immune to the request/event retention bounds).
- */
+/** One painted span of the timing card's session-time strip (a step's TTFT wait, decode block,
+ * tool-run window, or residue gap). `start`/`end` are the slice's REAL instants; the strip packs
+ * them gapless in log order, and `end` > `start` always. */
+export interface TimingSpan {
+  /** The timing card's own slice vocabulary (same keys, same colors). */
+  kind: 'ttft' | 'reasoning' | 'text' | 'toolarg' | 'tools' | 'other'
+  start: number
+  end: number
+}
+
+/** One pricing bucket's cumulative billed tokens: a running total over the COMPLETE session log, never trimmed. */
 export interface CostBucketTotals {
   uncached: number
   cacheRead: number
@@ -447,107 +354,56 @@ export interface CostBucketTotals {
   output: number
 }
 
-/**
- * One completed tool name's whole-session call tally behind the timing
- * card's top-tools ranking (running totals, never trimmed).
- */
 export interface ToolTimingTotals {
   calls: number
   ms: number
 }
 
 /**
- * Whole-session timing totals, host-folded from the durable `step/start` /
- * `step/end` / `tool/call` / `tool/result` lifecycle plus the model call's
- * first token (running totals over the COMPLETE session log — the same
- * never-trimmed framing as `cost`). The first token comes from a V0
- * `assistant/chunk` delta or from the call's own embedded stream
- * (`assistant/message.data.stream` / `assistant/attempt.data.stream`, the
- * V2+ settlement) — whichever the log carries, matching the harness's own
- * session-stats fold. Durations are wall-clock milliseconds: `wallMs` sums
- * whole steps, `ttftMs` the step-start → first-token slice (the model wait)
- * and `genMs` the first-token → assistant-message slice (the generation) —
- * both only over calls whose stream carried a token delta, `toolsMs` the sum
- * of per-call tool durations (parallel calls each count, so it can overlap).
- * Absent until the first step lifecycle completes in the log.
+ * Whole-session timing totals, host-folded from the durable step/tool lifecycle plus the call's
+ * first token (its embedded `assistant/message.data.stream`); running totals over the COMPLETE log.
  *
- * The generation window itself splits by WHAT was being decoded, off the
- * stream's `block-start` framing (`blockType`): `reasoningMs` (the model's
- * thinking), `textMs` (the answer text), and `toolArgMs` (the tool-call
- * arguments). Each marker owns the interval up to the next one (the last one
- * up to the assistant message), so the three tile the marker span and together
- * account for essentially all of `genMs` — the span opens at the first marker,
- * which can sit marginally before the first token, so it is not an exact
- * partition. They are ADDITIVE-OPTIONAL: cached projection rows written before
- * the split carry `genMs` without them, so the card falls back to the
- * un-split shape instead of the cache row being discarded (the
- * stateVersion-15 rationale in host/timeline.ts).
+ * Milliseconds: `wallMs` sums whole steps; `ttftMs` the step-start → decode-start slice and `genMs`
+ * the decode-start → assistant-message slice (only over calls whose stream carried a token delta);
+ * `toolsMs` sums per-call tool durations (parallel calls each count). The decode window opens at the
+ * first OBSERVABLE instant — the first token, or an earlier `block-start` marker (a redacted
+ * reasoning block leaves no chunk): anchoring at the token would double-count the marker-tiled
+ * window past 100%.
+ *
+ * The generation split comes off the stream's `block-start` framing (`blockType`): `reasoningMs` /
+ * `textMs` / `toolArgMs` and their block counts, each marker owning the interval to the next.
+ * `speedTokens`/`speedMs` are the harness-parity throughput seat (first-token → assistant-message,
+ * calls carrying both); `speedMs` KEEPS the first-token anchor. `calls` counts folded assistant
+ * messages, `toolCalls` folded call/result pairs.
  */
 export interface TimingTotals {
-  /** Summed wall time of completed steps (the session's active time). */
   wallMs: number
-  /** Summed step-start → first-token time (the model wait, TTFT). */
   ttftMs: number
-  /** Summed first-token → assistant-message time (the generation). */
   genMs: number
-  /** Reasoning-decode slice of `genMs` (the model's thinking). */
   reasoningMs?: number
-  /** Counted reasoning-decode blocks (the Thinking slice's tally). */
   reasoningBlocks?: number
-  /** Answer-text decode slice of `genMs`. */
   textMs?: number
-  /** Counted answer-text decode blocks (the Answer slice's tally). */
   textBlocks?: number
-  /** Tool-call-argument decode slice of `genMs`. */
   toolArgMs?: number
-  /**
-   * Counted tool-call-argument decode blocks — one per tool call whose
-   * arguments the stream decoded (the Tool args slice's tally). The counts are
-   * ADDITIVE-OPTIONAL like their spans: a row cached before they existed (or a
-   * call whose stream framed no blocks) carries none, and the card qualifies
-   * only what was actually counted.
-   */
   toolArgBlocks?: number
-  /**
-   * The decode-throughput seat, paired exactly as the harness's own
-   * session-stats fold pairs them: `speedTokens` sums provider-reported
-   * output tokens and `speedMs` the first-token → assistant-message
-   * windows, over the calls that carried BOTH a first-token stamp and a
-   * usage report — a subset of `genMs`, which counts every token-stamped
-   * call regardless of usage. Additive-optional: cached rows written before
-   * the seat existed lack them, and the card falls back to no chip.
-   */
   speedTokens?: number
   speedMs?: number
-  /** Completed model calls (assistant messages folded). */
   calls: number
-  /** Summed per-call durations of completed tool calls. */
   toolsMs: number
-  /** Completed tool calls (call/result pairs folded). */
   toolCalls: number
   /** Per-tool-name tallies behind the timing card's ranking (bounded). */
   tools: Record<string, ToolTimingTotals>
 }
 
-/**
- * One billed model's cumulative totals split by pricing period. Providers
- * without period-based pricing book everything under `peak` (the list-price
- * period); DeepSeek splits at fold time — peak windows bill at list price,
- * off-peak (all other hours) at half.
- */
+/** One billed model's totals split by pricing period: providers without period pricing book
+ * everything under `peak`; DeepSeek bills `peak` at list price and `off` at half. */
 export interface CostModelUsage {
   peak?: CostBucketTotals
   off?: CostBucketTotals
 }
 
-/**
- * The session-cost estimate's raw material: cumulative provider-reported
- * billed-token totals, keyed by the request envelope's DSH provider id (''
- * when a log carries none) and then by its model id — the exact (provider,
- * model) faces the Client's model-price book resolves (the models.dev
- * registry, client/modelPrices.ts). Running totals per key; absent until a
- * request with a known model reports usage.
- */
+/** The session-cost raw material: cumulative provider-reported billed tokens keyed by the request
+ * envelope's DSH provider id ('' when none) then model id — the faces the Client's models.dev price book resolves. */
 export interface SessionCostUsage {
   [provider: string]: { [model: string]: CostModelUsage }
 }
@@ -560,21 +416,11 @@ export interface SurfaceNode {
   tokens: number
   /** Image blocks inside this node's message (absent when zero). */
   imgs?: number
-  /**
-   * Removal marker, present only on `archive` entries: the seq of the
-   * replacement surface event that shadowed this node (compaction/prune).
-   * The node is part of the assembled context of every request with
-   * seq > this node.seq and seq < gone.
-   */
+  /** Set only on `archive` entries: the seq of the replacement event that shadowed this node. */
   gone?: number
   form?: string
-  /**
-   * The producer identity the matching inject event names (host pricing.ts
-   * `injectionSourceName`: the plugin id, the reconciled instruction files,
-   * or the durable kind). Stamped on injection nodes alongside the event, so
-   * the browser rows label them the way the events card does; absent when the
-   * source carries no readable identity or the node predates the stamp.
-   */
+  /** The producer identity the matching inject event names (host pricing.ts
+   * `injectionSourceName`); absent when unreadable or predating the stamp. */
   name?: string
   text?: string
   tool?: string
@@ -597,34 +443,22 @@ export interface RequestRecord {
   tool: number
   total: number
   prompt?: number
-  /**
-   * Skill-machinery tokens of this request (the `skill` composition
-   * category — catalog digests, invocation instructions, `skill`-tool
-   * loads). Always written by the current fold; absent on rows folded
-   * before the category existed (read as 0).
-   */
+  /** Skill-machinery tokens of this request (the `skill` composition category); absent on rows
+   * folded before the category existed (read as 0). */
   skill?: number
-  /**
-   * Billed cache-read (served) prompt tokens of this request — the
-   * hit-rate numerator against `prompt` (input + cacheRead + cacheWrite).
-   * Absent on older hosts / usage-less requests; zero is a real value.
-   */
+  /** Billed cache-read (served) prompt tokens — the hit-rate numerator against `prompt`; absent
+   * on older hosts, and zero is a real value. */
   cacheRead?: number
   output?: number
-  /**
-   * Turn-mode aggregate marker, set by the Client's aggregateByTurn (one bar
-   * per turn shows its LAST step's record). The Host never sets it.
-   */
+  /** The step's ACTIVE ms (`step/start` → `step/end` minus in-step user waits: approval decisions
+   * and `ask_user_question`), stamped at `step/end`; absent while the step is open. */
+  activeMs?: number
+  /** Turn-mode aggregate marker, set by the Client's aggregateByTurn (the Host never sets it). */
   stepCount?: number
-  /**
-   * Delta-mode signed net change, set by the Client's deltaOf (only present
-   * on the delta-transformed records the TrendChart plots). The Host never
-   * sets it.
-   */
+  /** Delta-mode signed net change, set by the Client's deltaOf (the Host never sets it). */
   net?: number
 }
 
-/** A notable context event (compaction, prune, injection, model switch). */
 export interface ContextEventRecord {
   seq: number
   time: number
@@ -634,7 +468,6 @@ export interface ContextEventRecord {
   count?: number
   sub?: string
   name?: string
-  /** One-line producer account (notice-form summary), shown after the name. */
   detail?: string
   from?: string
   to?: string
@@ -646,41 +479,22 @@ export interface ContextEventRecord {
   step?: number
 }
 
-/**
- * Sentinel `HeaderTool.plugin` value marking a tool whose provider could not
- * be attributed: it was already registered in the harness tool service when
- * this plugin's runtime attribution hook installed (boot-time third-party
- * tools — e.g. local-link plugins that apply before dsh-context). The client
- * renders a localized "unknown plugin" tag with an explanatory tooltip. No
- * real plugin name can collide (it is not a valid package identifier).
- */
+/** Sentinel `HeaderTool.plugin` value marking a tool whose provider could not be attributed (it was
+ * already registered when this plugin's attribution hook installed); no real plugin name collides. */
 export const UNKNOWN_TOOL_SOURCE = '<unknown-plugin>'
 
 /** One tool of a request-header epoch, with its display price. */
 export interface HeaderTool {
   name: string
   tokens: number
-  /**
-   * The registering plugin's label, when attribution is known: the host's
-   * best-effort attribution (`mcp:<server>` for MCP tools, or the pinned
-   * first-party package map), or a `plugin` field carried by the raw header
-   * entry — no supported-baseline harness path writes one, but the read
-   * stays defensive for foreign/newer producers. `UNKNOWN_TOOL_SOURCE` marks
-   * a tool whose provider predates the attribution hook; absent means
-   * nothing is known and the browser shows no tag.
-   */
+  /** The registering plugin's label when known: `mcp:<server>` for MCP tools, or the pinned
+   * first-party map; `UNKNOWN_TOOL_SOURCE` marks a boot-time tool, absent = no tag. */
   plugin?: string
 }
 
-/**
- * One request-header epoch's METADATA: the epoch boundaries and token prices
- * in force from this event's seq until the next epoch. The epoch CONTENT
- * (full system prompt text, tool descriptions/schemas) is not projected —
- * every session.list row, control baseline, push frame, and projection-cache
- * checkpoint would otherwise carry it per session × epoch. The client
- * fetches one epoch's content on demand (a seq-anchored history read off
- * `seq`) as a {@link HeaderEpochContent}.
- */
+/** One request-header epoch's METADATA (epoch boundaries and token prices, in force from this seq
+ * until the next). The CONTENT is deliberately not projected — every list row and push frame would
+ * carry it — and is fetched on demand as a {@link HeaderEpochContent}. */
 export interface HeaderRecord {
   seq: number
   time: number
@@ -694,18 +508,13 @@ export interface ContextHeaders {
   headers: HeaderRecord[]
 }
 
-/**
- * The fetched CONTENT of one request-header epoch — the full system prompt
- * text and per-tool descriptions/schemas, mapped client-side off the raw
- * durable event (see historyPage.ts). Tool identity joins the epoch metadata
- * by `name`; absent description/schema means the raw entry carried none.
- */
+/** The fetched CONTENT of one request-header epoch, mapped client-side off the raw durable event
+ * (historyPage.ts); tool identity joins the metadata by `name`. */
 export interface HeaderEpochContent {
   system?: string
   tools: Array<{
     name: string
     description?: string
-    /** The raw JSON schema object the model received (plain JSON). */
     schema?: unknown
   }>
 }
@@ -714,24 +523,16 @@ export interface HeaderEpochContent {
 export interface PlatformBalanceEntry {
   /** The ISO code the platform reported (`CNY` / `USD`). */
   currency: string
-  /** Total available funds: `granted` + `toppedUp`. Derived here rather than read
-   * from the platform's own `total_balance`, which rounds independently of its
-   * parts and can land a cent away from what the breakdown beside it shows. */
+  /** `granted` + `toppedUp`, derived rather than read from the platform's `total_balance`, which rounds independently of its parts. */
   total: number
   /** The not-expired granted (gift) balance. */
   granted: number
-  /** The topped-up balance. */
   toppedUp: number
 }
 
-/**
- * The DeepSeek open-platform balance, served by the plugin's
- * `/api/dsh-context/balance` fetch route (host/balance.ts). `null` on the
- * wire — and nothing rendered client-side — whenever the platform is not
- * configured or the read fails: the capsule only ever shows a live figure.
- */
+/** The DeepSeek open-platform balance, served by `/api/dsh-context/balance`; `null` on the wire
+ * (nothing rendered) when unconfigured or the read fails. */
 export interface PlatformBalance {
-  /** Whether the platform reports the balance sufficient for API calls. */
   isAvailable: boolean
   /** One entry per currency the account holds; at least one. */
   balances: PlatformBalanceEntry[]

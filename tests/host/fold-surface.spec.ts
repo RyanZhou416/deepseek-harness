@@ -1,8 +1,5 @@
-// applySurface paths of the fold (src/host/fold.ts): per-category node
-// projection (text/calls/tool/skill/plugin previews, image counts), the
-// callNames consume-once lifecycle, the shadow-price claim arm/consume
-// protocol, and every surfaceOp variant (append, range replace, shadowed-seq
-// replace with the net-freed event rewrite). No mocks: the real fold runs.
+// applySurface paths of the fold (src/host/fold.ts): per-category node projection, the callNames
+// consume-once lifecycle, the shadow-price claim protocol, and every surfaceOp variant. No mocks: the real fold runs.
 
 import assert from 'node:assert/strict'
 import { describe, test } from 'vitest'
@@ -49,34 +46,14 @@ describe('applySurface tool/result branch', () => {
     ])
     const node = state.surface.at(-1)
     assert.equal(node?.tool, 'bash')
-    assert.equal(node?.err, undefined, 'no error flag without data.error')
+    assert.equal(node?.err, undefined, 'no error flag without the message mark')
     assert.deepEqual(state.callNames, {}, 'the consumed entry leaves the persisted map')
   })
 
-  test('an unknown source callId falls through to the content block id', () => {
-    // Neither id is armed: the node ends up tool-less (a replay window where
-    // the tool/call event is gone). Note the fold assigns the lookup miss
-    // onto the node, so this state is not assertPlainJson-able.
+  test('an unknown source callId pairs nothing (a replay window where the tool/call event is gone)', () => {
     const { state } = driveTimeline([toolResult(1, { callId: 'ghost', content: text('ok') })])
     assert.equal(state.surface.at(-1)?.tool, undefined)
     assert.deepEqual(state.callNames, {})
-  })
-
-  test('a block toolCallId hit names the node when the source id is unknown', () => {
-    const ev: TimelineEvent = {
-      type: 'tool/result', seq: 2, time: at(),
-      data: {
-        callId: 'x',
-        message: {
-          source: { kind: 'tool', callId: 'x' },
-          content: [{ type: 'tool-result', toolCallId: 'c1', content: text('ok') }],
-        },
-      },
-      surfaceOp: 'append',
-    }
-    const { state } = driveTimeline([toolCall(1, { callId: 'c1', name: 'bash' }), ev])
-    assert.equal(state.surface.at(-1)?.tool, 'bash')
-    assert.deepEqual(state.callNames, {}, 'both the source id and the block id are consumed')
   })
 
   test('consume-once rebuild keeps the other pending calls', () => {
@@ -88,10 +65,12 @@ describe('applySurface tool/result branch', () => {
     assert.equal(state.callNames.c2?.name, 'read', 'the unanswered call stays armed')
   })
 
-  test('a result with neither id leaves callNames untouched', () => {
+  test('a result without the source callId pairs nothing and leaves callNames untouched', () => {
+    // A hostile/foreign envelope: the admission validation requires the
+    // source callId, so a source-less row can only arrive hostile — it folds to an unnamed node instead of throwing.
     const ev: TimelineEvent = {
       type: 'tool/result', seq: 2, time: at(),
-      data: { message: { content: [{ type: 'tool-result', content: text('ok') }] } },
+      data: { message: { role: 'tool', toolCallId: 'keep', content: text('ok') } },
       surfaceOp: 'append',
     }
     const { state } = driveTimeline([toolCall(1, { callId: 'keep', name: 'read' }), ev])
@@ -99,22 +78,32 @@ describe('applySurface tool/result branch', () => {
     assert.equal(state.callNames.keep?.name, 'read')
   })
 
-  test('data.error flags the node', () => {
+  test('the message isError flags the node', () => {
     const { state } = driveTimeline([
       toolCall(1, { callId: 'c1', name: 'bash' }),
       toolResult(2, { callId: 'c1', content: text('boom'), error: true }),
     ])
-    assert.equal(state.surface.at(-1)?.err, true)
-  })
-
-  test('the V4 message isError flags the node (no envelope error object)', () => {
-    const { state } = driveTimeline([
-      toolCall(1, { callId: 'c1', name: 'bash' }),
-      toolResult(2, { callId: 'c1', content: text('boom'), error: true, v4: true }),
-    ])
     const node = state.surface.at(-1)
     assert.equal(node?.err, true)
-    assert.equal(node?.tool, 'bash', 'the V4 source callId still pairs the node')
+    assert.equal(node?.tool, 'bash', 'the source callId still pairs the node')
+  })
+
+  test('the retired envelope-only error mark no longer flags the node', () => {
+    // The pre-V4 spelling (an event-level `data.error` with no message mark)
+    // is unreachable through the supported harnesses' admission validation;
+    // a hostile replay carrying it degrades to an unflagged node, never a throw.
+    const ev: TimelineEvent = {
+      type: 'tool/result', seq: 2, time: at(),
+      data: {
+        error: true,
+        message: { role: 'tool', toolCallId: 'c1', source: { kind: 'tool', callId: 'c1' }, content: text('boom') },
+      },
+      surfaceOp: 'append',
+    }
+    const { state } = driveTimeline([toolCall(1, { callId: 'c1', name: 'bash' }), ev])
+    const node = state.surface.at(-1)
+    assert.equal(node?.err, undefined)
+    assert.equal(node?.tool, 'bash')
   })
 })
 
@@ -218,7 +207,7 @@ describe('surfaceOp variants', () => {
 
   test('a non-replace op object appends', () => {
     const { state } = driveTimeline([
-      userMessage(1, text('x'), undefined, { surfaceOp: { op: 'insert', start: 0, end: 0 } }),
+      userMessage(1, text('x'), undefined, { surfaceOp: { op: 'insert', startSeq: 0, endSeq: 0 } }),
     ])
     assert.equal(state.surface.length, 1)
   })
@@ -229,7 +218,7 @@ describe('surfaceOp variants', () => {
       userMessage(2, text(big)), // 12 tokens
       userMessage(3, text(big)), // 12 tokens — NOT shadowed, survives the replace
       compaction(4, 'summary', { shadowedTokenCount: 100, shadowedSeqs: [1, 2] }),
-      userMessage(5, text('bbbbbbbb'), undefined, { surfaceOp: { op: 'replace', start: 1, end: 2 } }), // 10 tokens
+      userMessage(5, text('bbbbbbbb'), undefined, { surfaceOp: { op: 'replace', startSeq: 1, endSeq: 2 } }), // 10 tokens
     ])
     assert.deepEqual(state.surface.map(n => n.seq), [3, 5])
     assert.equal(state.sums.user, 22)
@@ -243,7 +232,7 @@ describe('surfaceOp variants', () => {
     const { state } = driveTimeline([
       userMessage(1, text(big)), // 12 tokens
       compaction(2, 'prune', { shadowedTokenCount: 12, shadowedSeqs: [1] }),
-      userMessage(3, text('x'.repeat(400)), undefined, { surfaceOp: { op: 'replace', start: 1, end: 1 } }), // 108 tokens
+      userMessage(3, text('x'.repeat(400)), undefined, { surfaceOp: { op: 'replace', startSeq: 1, endSeq: 1 } }), // 108 tokens
     ])
     assert.equal(state.events[0].tokens, 0)
     assert.equal(state.sums.user, 108)
@@ -254,7 +243,7 @@ describe('surfaceOp variants', () => {
       userMessage(1, text('aaaa')), // 9 tokens
       userMessage(2, text('bbbb')), // 9 tokens
       compaction(3, 'summary', { shadowedTokenCount: 50, shadowedSeqs: [] }),
-      userMessage(4, text('cccc'), undefined, { surfaceOp: { op: 'replace', start: 1, end: 2 } }),
+      userMessage(4, text('cccc'), undefined, { surfaceOp: { op: 'replace', startSeq: 1, endSeq: 2 } }),
     ])
     assert.deepEqual(state.surface.map(n => n.seq), [4], 'range replace splices the node in place')
     assert.equal(state.sums.user, 9)
@@ -268,7 +257,7 @@ describe('surfaceOp variants', () => {
       userMessage(1, text('aaaa')),
       userMessage(2, text('bbbb')),
       userMessage(3, text('cccc')),
-      userMessage(4, text('dddddddd'), undefined, { surfaceOp: { op: 'replace', start: 2, end: 2 } }),
+      userMessage(4, text('dddddddd'), undefined, { surfaceOp: { op: 'replace', startSeq: 2, endSeq: 2 } }),
     ])
     assert.deepEqual(state.surface.map(n => n.seq), [1, 4, 3])
     assert.deepEqual(state.archived.map(n => [n.seq, n.gone]), [[2, 4]])
@@ -277,7 +266,7 @@ describe('surfaceOp variants', () => {
   test('a replace whose start seq is missing appends', () => {
     const { state } = driveTimeline([
       userMessage(1, text('aaaa')),
-      userMessage(2, text('bbbb'), undefined, { surfaceOp: { op: 'replace', start: 99, end: 100 } }),
+      userMessage(2, text('bbbb'), undefined, { surfaceOp: { op: 'replace', startSeq: 99, endSeq: 100 } }),
     ])
     assert.deepEqual(state.surface.map(n => n.seq), [1, 2])
   })
@@ -285,18 +274,17 @@ describe('surfaceOp variants', () => {
   test('a replace whose end seq is missing appends', () => {
     const { state } = driveTimeline([
       userMessage(1, text('aaaa')),
-      userMessage(2, text('bbbb'), undefined, { surfaceOp: { op: 'replace', start: 1, end: 99 } }),
+      userMessage(2, text('bbbb'), undefined, { surfaceOp: { op: 'replace', startSeq: 1, endSeq: 99 } }),
     ])
     assert.deepEqual(state.surface.map(n => n.seq), [1, 2])
   })
 
   test('restored state: claim without pendingShadowEventSeq skips the rewrite', () => {
-    // A checkpoint restore may carry the claim fields partially — def.apply
-    // accepts any TimelineState.
+    // A checkpoint restore may carry the claim fields partially — def.apply accepts any TimelineState.
     const def = timelineDef({})
     const base = driveTimeline([userMessage(1, text(big))]).state
     const restored: TimelineState = { ...base, pendingShadowedSeqs: [1] }
-    const next = def.apply(restored, userMessage(2, text('bbbb'), undefined, { surfaceOp: { op: 'replace', start: 1, end: 1 } }))
+    const next = def.apply(restored, userMessage(2, text('bbbb'), undefined, { surfaceOp: { op: 'replace', startSeq: 1, endSeq: 1 } }))
     assert.deepEqual(next.surface.map(n => n.seq), [2])
     assert.equal(next.archived.length, 1)
     assert.equal(next.events.length, 0, 'no event to rewrite, no crash')
@@ -308,7 +296,7 @@ describe('surfaceOp variants', () => {
     const def = timelineDef({})
     const base = driveTimeline([userMessage(1, text(big))]).state
     const restored: TimelineState = { ...base, pendingShadowedSeqs: [1], pendingShadowEventSeq: 999 }
-    const next = def.apply(restored, userMessage(2, text('bbbb'), undefined, { surfaceOp: { op: 'replace', start: 1, end: 1 } }))
+    const next = def.apply(restored, userMessage(2, text('bbbb'), undefined, { surfaceOp: { op: 'replace', startSeq: 1, endSeq: 1 } }))
     assert.deepEqual(next.surface.map(n => n.seq), [2])
     assert.equal(next.events.length, 0)
     assert.ok(!('pendingShadowEventSeq' in next))

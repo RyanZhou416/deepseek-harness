@@ -1,6 +1,5 @@
-// The view kit (src/client/viewkit.ts): the dependency bag exposes the
-// translate/format helpers and the event-text delegates (full event-text
-// coverage lives in the events spec — here only one delegation spot-check).
+// The view kit (src/client/viewkit.ts): the dependency bag's translate/format helpers and event-text delegates.
+// Full event-text coverage lives in the events spec — here only one delegation spot-check.
 
 import assert from 'node:assert/strict'
 import { describe, test } from 'vitest'

@@ -1,6 +1,4 @@
-// historyPage (src/client/historyPage.ts): the targeted content fetch — raw
-// durable-log pages mapped into the browser's conversation-node shapes, plus
-// the per-session fetcher built over the shared api client.
+// historyPage (src/client/historyPage.ts): raw durable-log pages mapped into the browser's conversation-node shapes.
 
 import { act, createElement as h } from 'react'
 import assert from 'node:assert/strict'
@@ -64,10 +62,10 @@ describe('pageNodesOf — the durable-page mapper', () => {
     assert.deepEqual(nodes.get(12), { kind: 'tool-result', seq: 12, call: null, content: [], isError: false })
   })
 
-  test('the call head falls back to the result block\u2019s toolCallId when the source omits it', () => {
+  test('the call head reads the message toolCallId when the source omits it', () => {
     const page = [
       row('tool/call', 20, { callId: 'cb', name: 'read', arguments: '{"path":"a.ts"}' }),
-      row('tool/result', 21, { message: { content: [{ toolCallId: 'cb', content: [] }] } }),
+      row('tool/result', 21, { message: { role: 'tool', toolCallId: 'cb', content: [] } }),
     ]
     assert.deepEqual(pageNodesOf(page).get(21)?.call, { name: 'read', argsRaw: '{"path":"a.ts"}' })
   })
@@ -118,25 +116,23 @@ describe('pageNodesOf — the durable-page mapper', () => {
     assert.deepEqual(pageNodesOf([row('assistant/message', 21, {})]).get(21), { kind: 'assistant', seq: 21, blocks: [] })
   })
 
-  test('tool results pair with their in-page call head; isError rides block or envelope', () => {
+  test('tool results pair with their in-page call head; isError rides the message mark', () => {
     const page = [
       row('tool/call', 30, { callId: 'c9', name: 'bash', arguments: '{"command":"pwd"}' }),
       row('tool/result', 31, {
-        callId: 'c9',
-        error: true,
-        message: { source: { callId: 'c9' }, content: [{ toolCallId: 'c9', content: [{ type: 'text', text: 'out' }] }] },
+        message: { role: 'tool', toolCallId: 'c9', isError: true, source: { kind: 'tool', callId: 'c9' }, content: [{ type: 'text', text: 'out' }] },
       }),
       row('tool/result', 32, {
-        message: { source: { callId: 'missing' }, content: [{ isError: true, content: [] }] },
+        message: { role: 'tool', toolCallId: 'missing', isError: true, source: { kind: 'tool', callId: 'missing' }, content: [] },
       }),
       row('tool/result', 33, { message: {} }),
     ]
     const nodes = pageNodesOf(page)
     const paired = nodes.get(31)
     assert.deepEqual(paired?.call, { name: 'bash', argsRaw: '{"command":"pwd"}' })
-    assert.deepEqual(paired?.content, [{ type: 'text', text: 'out' }])
-    assert.equal(paired?.isError, true, 'envelope error flag')
-    assert.equal(nodes.get(32)?.isError, true, 'block error flag without a pairable call')
+    assert.deepEqual(paired?.content, [{ type: 'text', text: 'out' }], 'the direct content blocks')
+    assert.equal(paired?.isError, true, 'the message error mark')
+    assert.equal(nodes.get(32)?.isError, true, 'the mark without a pairable call')
     assert.equal(nodes.get(32)?.call, null)
     assert.deepEqual(nodes.get(33)?.content, [])
     assert.equal(nodes.get(33)?.isError, false)
@@ -234,8 +230,7 @@ describe('makeContentFetcher — the per-session targeted read', () => {
   test('a hostile or shapeless declared face leaves the slot unset (issue #42)', () => {
     // The traced proxy can throw on the property READ itself, or serve a
     // null / primitive / verb-less / hostile-verb face — the declared
-    // callback contains all of it, the slot stays unset, and the fetcher
-    // degrades instead of taking the view down.
+    // callback contains all of it, the slot stays unset, and the fetcher degrades instead of taking the view down.
     const remotes = [
       { get session() { throw new Error('traced read failed') } },
       { session: null },
@@ -261,8 +256,7 @@ describe('makeContentFetcher — the per-session targeted read', () => {
 
   test('the declared inject tolerates a shapeless remote service', () => {
     const ctx = new TestClientCtx()
-    // Both names exist but the facade bears no session namespace: the
-    // callback fires and leaves the slot unset, never throwing.
+    // Both names exist but the facade bears no session namespace: the callback fires and leaves the slot unset, never throwing.
     ctx.setService('remote', {})
     ctx.setService('remote.session', {})
     watchHistoryFaces(asClientCtx(ctx))
@@ -305,12 +299,12 @@ describe('makeContentFetcher — the per-session targeted read', () => {
     broken.dispose()
   })
 
-  test('a V3 system/message event maps its prompt text (the epoch fetch reads both shapes)', async () => {
+  test('a system/message event maps its prompt text', async () => {
     const ctx = armHistoryFaces({ session: pageFace([
-      ev('system/message', 7, { message: { content: [{ type: 'text', text: 'V3 prompt' }, { type: 'text', text: ' line two' }] } }),
+      ev('system/message', 7, { message: { content: [{ type: 'text', text: 'the prompt' }, { type: 'text', text: ' line two' }] } }),
     ]) })
     const content = await makeHeaderFetcher('s')!(7)
-    assert.deepEqual(content, { system: 'V3 prompt line two', tools: [] })
+    assert.deepEqual(content, { system: 'the prompt line two', tools: [] })
     ctx.dispose()
   })
 
@@ -355,7 +349,6 @@ describe('makeHeaderFetcher — the lazy epoch content read', () => {
       type: 'request/header', seq: 5, time: 5,
       data: {
         header: {
-          system: 'You are an agent.',
           tools: [
             { name: 'bash', description: 'run a command', parameters: { type: 'object' } },
             { name: 'mcp__gh__issue', description: '', plugin: 'mcp:github' },
@@ -369,7 +362,7 @@ describe('makeHeaderFetcher — the lazy epoch content read', () => {
     const fetch = makeHeaderFetcher('sess')!
     const content = await fetch(5)
     assert.deepEqual(calls, [{ address: { kind: 'session', sessionId: 'sess' }, throughSeq: 5, beforeSeq: 6 }])
-    assert.equal(content?.system, 'You are an agent.')
+    assert.equal(content?.system, undefined, 'a header epoch never carries prompt text (it lives in system/message)')
     assert.equal(content?.tools.length, 4)
     assert.equal(content?.tools[0]?.name, 'bash')
     assert.equal(content?.tools[0]?.description, 'run a command')
@@ -393,17 +386,21 @@ describe('makeHeaderFetcher — the lazy epoch content read', () => {
   })
 
   test('a page holding OLDER epochs caches them for free alongside the picked one', async () => {
-    const older = ev('request/header', 1, { header: { system: 'OLD', tools: [] } })
-    const picked = ev('request/header', 5, { header: { system: 'NEW', tools: [] } })
+    // Prompt text comes from system/message epochs; header epochs are tools-only.
+    const olderSys = ev('system/message', 1, { message: { content: [{ type: 'text', text: 'OLD' }] } })
+    const older = ev('request/header', 2, { header: { tools: [] } })
+    const picked = ev('request/header', 5, { header: { tools: [] } })
     const calls: unknown[] = []
-    const ctx = armHistoryFaces({ session: pageFace([older, picked], calls) })
+    const ctx = armHistoryFaces({ session: pageFace([olderSys, older, picked], calls) })
     const fetch = makeHeaderFetcher('s')!
     const c5 = await fetch(5)
-    assert.equal(c5?.system, 'NEW')
+    assert.deepEqual(c5, { tools: [] })
     assert.deepEqual(calls, [{ address: { kind: 'session', sessionId: 's' }, throughSeq: 5, beforeSeq: 6 }])
-    // The older epoch resolves from the cache — no second page read.
+    // The older epochs resolve from the cache — no second page read.
+    const c2 = await fetch(2)
+    assert.deepEqual(c2, { tools: [] })
     const c1 = await fetch(1)
-    assert.equal(c1?.system, 'OLD')
+    assert.equal(c1?.system, 'OLD', 'a system/message epoch maps to its prompt text')
     assert.equal(calls.length, 1)
     ctx.dispose()
   })

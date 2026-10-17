@@ -7,8 +7,8 @@ body:
     id: dsh-version
     attributes:
       label: DeepSeek Harness version / DeepSeek Harness 版本
-      description: The `@deepseek-ai/dsh` version in use, from `dsh --version`. Supported range is 0.1.2-rc.1+. / 正在使用的 `@deepseek-ai/dsh` 版本（`dsh --version`）。支持范围为 0.1.2-rc.1+。
-      placeholder: e.g. 0.1.5-rc.1
+      description: The `@deepseek-ai/dsh` version in use, from `dsh --version`. / 正在使用的 `@deepseek-ai/dsh` 版本（`dsh --version`）。
+      placeholder: e.g. 0.1.7-rc.2
     validations:
       required: true
   - type: input
@@ -16,7 +16,7 @@ body:
     attributes:
       label: dsh-context version / dsh-context 版本
       description: The installed dsh-context plugin version. / 已安装的 dsh-context 插件版本。
-      placeholder: e.g. 0.47.0
+      placeholder: e.g. 0.56.1
     validations:
       required: true
   - type: textarea
@@ -65,4 +65,4 @@ body:
       label: Screenshots / 截图或录屏
       description: Drag & drop screenshots or screen recordings here, if any. / 如有截图或录屏，请拖拽到此处。
     validations:
-      required: false
+      required: true

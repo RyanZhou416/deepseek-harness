@@ -1,13 +1,10 @@
-// StackedBar + Legend (src/client/components/stackedBar.tsx) rendered with
-// real React through a state-holding hover harness, plus direct mounts for
-// the scale/free/reserve/tooltip branch matrix.
-
 import { createElement as h, useState } from 'react'
 import assert from 'node:assert/strict'
 import { describe, test } from 'vitest'
 import { makeLegend, makeStackedBar } from '../../../src/client/components/stackedBar'
 import type { PartsPart } from '../../../src/client/categories'
-import { click, hover, makeKit, mount, query, queryAll, unhover } from '../helpers/kit'
+import type { ContextReserve } from '../../../src/client/reserve'
+import { click, hover, makeKit, mount, query, queryAll, tipRows, unhover } from '../helpers/kit'
 
 const kit = makeKit()
 const StackedBar = makeStackedBar(kit)
@@ -18,7 +15,7 @@ function part(key: string, value: number, raw?: number): PartsPart {
 }
 
 /** A parent that really holds the hover key, so hovering re-renders the bar. */
-function HoverHarness(props: { parts: PartsPart[]; max?: number; minBand?: number; reserve?: { ratio: number; label: string } }) {
+function HoverHarness(props: { parts: PartsPart[]; max?: number; minBand?: number; reserve?: ContextReserve }) {
   const [hoverKey, setHoverKey] = useState<string | null>(null)
   return h(StackedBar, { parts: props.parts, max: props.max, minBand: props.minBand, hoverKey, onHoverKey: setHoverKey, reserve: props.reserve })
 }
@@ -82,19 +79,19 @@ describe('StackedBar layout', () => {
 })
 
 describe('StackedBar entrance grow', () => {
-  test('segments and the free track carry the grow-in stagger slots in layout order; the reserve band stays unanimated', async () => {
+  test('segments and the free track carry the grow-in stagger slots in layout order; the reserve masks stay unanimated', async () => {
     const m = await mount(h(StackedBar, {
       parts: [part('system', 700), part('user', 300)],
       max: 2000,
-      reserve: { ratio: 0.8, label: 'headroom' },
+      reserve: { threshold: 1400, headroom: 300, output: 300 },
     }))
     const slot = (el: Element): string => (el as HTMLElement).style.getPropertyValue('--lc-i')
     const segs = queryAll(m.container, '.lc-stacked-seg')
     assert.equal(slot(segs[0]), '0')
     assert.equal(slot(segs[1]), '1')
-    // The free track opens right after the last occupied segment; the reserve band carries no slot.
+    // The free track opens right after the last occupied segment; the masks carry no slot.
     assert.equal(slot(query(m.container, '.lc-stacked-free')), '2')
-    assert.equal(slot(query(m.container, '.lc-reserve')), '')
+    for (const mask of queryAll(m.container, '.lc-reserve')) assert.equal(slot(mask), '')
     await m.unmount()
   })
 
@@ -126,8 +123,10 @@ describe('StackedBar hover link', () => {
     assert.equal(box.style.width, '50%')
     const tip = query(m.container, '.lc-bar-tip')
     assert.ok(tip.className.includes('lc-bar-tip-on'))
-    assert.equal(tip.textContent, 'User Messages ≈900 (88%) of used context')
+    assert.equal(tip.getAttribute('role'), 'tooltip')
+    assert.deepEqual(tipRows(tip), ['User Messages', '≈900 · 88% of used context', null])
     assert.equal(tip.style.left, '27.5%')
+    assert.equal(tip.style.transform, '')
     await unhover(query(m.container, '.lc-stacked'))
     assert.equal(query(m.container, '.lc-stacked').className, 'lc-stacked')
     assert.equal(query(m.container, '.lc-bar-tip').className, 'lc-tip lc-bar-tip')
@@ -135,12 +134,12 @@ describe('StackedBar hover link', () => {
     await m.unmount()
   })
 
-  test('the first tiny segment clamps the tooltip to the 12% edge; raw count drives the tooltip figure', async () => {
+  test('the first tiny segment anchors the tooltip to its true center; raw count drives the figure row', async () => {
     const m = await mount(h(HoverHarness, { parts: [part('system', 100, 120), part('user', 900)], max: 2000 }))
     await hover(queryAll(m.container, '.lc-stacked-seg')[0])
     const tip = query(m.container, '.lc-bar-tip')
-    assert.equal(tip.textContent, 'System Prompt ≈120 (12%) of used context')
-    assert.equal(tip.style.left, '12%')
+    assert.deepEqual(tipRows(tip), ['System Prompt', '≈120 · 12% of used context', null])
+    assert.equal(tip.style.left, '2.5%')
     await m.unmount()
   })
 
@@ -150,7 +149,7 @@ describe('StackedBar hover link', () => {
     assert.ok(query(m.container, '.lc-stacked-free').className.includes('lc-stacked-free-on'))
     const tip = query(m.container, '.lc-bar-tip')
     assert.ok(tip.className.includes('lc-bar-tip-on'))
-    assert.equal(tip.textContent, 'Free Window 1.0k (50%)')
+    assert.deepEqual(tipRows(tip), ['Free Window', '1.0k · 50% of window', null])
     assert.equal(tip.style.left, '75%')
     await unhover(query(m.container, '.lc-stacked'))
     assert.equal(query(m.container, '.lc-bar-tip').className, 'lc-tip lc-bar-tip')
@@ -175,7 +174,7 @@ describe('StackedBar hover link', () => {
     const m = await mount(h(StackedBar, { parts: [part('user', 100, 0)], hoverKey: 'user' }))
     const tip = query(m.container, '.lc-bar-tip')
     assert.ok(tip.className.includes('lc-bar-tip-on'))
-    assert.equal(tip.textContent, 'User Messages ≈0 (0%) of used context')
+    assert.deepEqual(tipRows(tip), ['User Messages', '≈0 · 0% of used context', null])
     await m.unmount()
   })
 
@@ -185,7 +184,39 @@ describe('StackedBar hover link', () => {
     const m = await mount(h(StackedBar, { parts: [part('user', -5)], max: 0, hoverKey: 'free' }))
     const tip = query(m.container, '.lc-bar-tip')
     assert.ok(tip.className.includes('lc-bar-tip-on'))
-    assert.equal(tip.textContent, 'Free Window 5 (0%)')
+    assert.deepEqual(tipRows(tip), ['Free Window', '5 · 0% of window', null])
+    await m.unmount()
+  })
+
+  test('a tip that would overhang the bar is shifted back inside by its own measured width', async () => {
+    const props = { parts: [part('system', 100, 120), part('user', 900)], max: 2000, hoverKey: 'system' }
+    const m = await mount(h(StackedBar, props))
+    const wrap = query(m.container, '.lc-stacked-wrap')
+    const tip = query(m.container, '.lc-bar-tip')
+    // jsdom lays nothing out: pin the two boxes the measure pass reads.
+    const pin = (el: Element, width: number): void => {
+      Object.defineProperty(el, 'getBoundingClientRect', {
+        configurable: true,
+        value: () => ({ left: 0, top: 0, width, height: 0, right: width, bottom: 0 }),
+      })
+    }
+    pin(wrap, 400)
+    pin(tip, 300)
+    // Segment 0 centers at 2.5% → 10px, so the left half overhangs by 140.
+    await m.update(h(StackedBar, props))
+    assert.equal(tip.style.transform, 'translateX(calc(-50% + 140px))')
+    // A tip that fits keeps the bare percentage anchor, unshifted.
+    pin(tip, 60)
+    await m.update(h(StackedBar, { ...props, hoverKey: 'user' }))
+    assert.equal(tip.style.left, '27.5%')
+    assert.equal(tip.style.transform, '')
+    // The free track centers at 75% → 300px; a wider tip now overhangs on the RIGHT instead.
+    pin(tip, 260)
+    await m.update(h(StackedBar, { ...props, hoverKey: 'free' }))
+    assert.equal(tip.style.transform, 'translateX(calc(-50% - 30px))')
+    // Dropping the hover retracts the shift along with the bubble.
+    await m.update(h(StackedBar, { ...props, hoverKey: null }))
+    assert.equal(tip.style.transform, '')
     await m.unmount()
   })
 
@@ -199,38 +230,104 @@ describe('StackedBar hover link', () => {
   })
 })
 
-describe('StackedBar reserve band', () => {
-  test('rendered over the rightmost window slice; hover shows its label and yields the hover link', async () => {
-    const m = await mount(h(HoverHarness, {
-      parts: [part('user', 100)],
-      max: 1000,
-      reserve: { ratio: 0.8, label: 'reserved headroom' },
-    }))
-    const band = query(m.container, '.lc-reserve')
-    assert.equal(band.style.left, '80%')
-    assert.equal(band.style.width, '20%')
-    await hover(band)
+describe('StackedBar reserve masks', () => {
+  const RESERVE = { threshold: 800, headroom: 100, output: 100 }
+
+  test('a bound pressure budget: the two masks tile the window tail from the trigger, no line', async () => {
+    const m = await mount(h(HoverHarness, { parts: [part('user', 100)], max: 1000, reserve: RESERVE }))
+    const headroom = query(m.container, '.lc-reserve-headroom')
+    assert.equal(headroom.style.left, '80%')
+    assert.equal(headroom.style.width, '10%')
+    const output = query(m.container, '.lc-reserve-output')
+    assert.equal(output.style.left, '90%')
+    assert.equal(output.style.width, '10%')
+    // The headroom mask's own left edge IS the trigger, so no separate line is drawn.
+    assert.equal(queryAll(m.container, '.lc-trigger').length, 0)
+    await hover(headroom)
     const tip = query(m.container, '.lc-bar-tip')
     assert.ok(tip.className.includes('lc-bar-tip-on'))
-    assert.equal(tip.textContent, 'reserved headroom')
-    assert.equal(tip.style.left, '88%') // clamped: 80 + 20/2 = 90 → 88
+    assert.deepEqual(tipRows(tip), ['Compaction Headroom', '100', 'Auto-compaction is expected to fire at 80% of the window'])
+    assert.equal(tip.style.left, '85%')
     assert.equal(query(m.container, '.lc-stacked').className, 'lc-stacked') // hoverKey cleared
-    await unhover(band)
+    await unhover(headroom)
     assert.equal(query(m.container, '.lc-bar-tip').className, 'lc-tip lc-bar-tip')
-    // Stack-level mouseleave also clears an active reserve hover.
-    await hover(band)
-    assert.ok(query(m.container, '.lc-bar-tip').className.includes('lc-bar-tip-on'))
+    await hover(output)
+    assert.deepEqual(tipRows(query(m.container, '.lc-bar-tip')), ['LLM Output Reservation', '100', 'The model\'s maximum output tokens'])
+    assert.equal(query(m.container, '.lc-bar-tip').style.left, '95%')
+    // Stack-level mouseleave also clears an active mask hover.
     await unhover(query(m.container, '.lc-stacked'))
     assert.equal(query(m.container, '.lc-bar-tip').className, 'lc-tip lc-bar-tip')
     await m.unmount()
   })
 
+  test('a bound window fraction: true-size masks at the window tail, the trigger as its own line', async () => {
+    // threshold 800 sits strictly left of the masks' 840 edge: headroom + output (160) < 20% of the window.
+    const reserve = { threshold: 800, headroom: 60, output: 100 }
+    const m = await mount(h(HoverHarness, { parts: [part('user', 100)], max: 1000, reserve }))
+    const headroom = query(m.container, '.lc-reserve-headroom')
+    assert.equal(headroom.style.left, '84%')
+    assert.equal(headroom.style.width, '6%')
+    const output = query(m.container, '.lc-reserve-output')
+    assert.equal(output.style.left, '90%')
+    assert.equal(output.style.width, '10%')
+    const line = query(m.container, '.lc-trigger')
+    assert.equal(line.style.left, '80%')
+    // The headroom mask describes only itself; the trigger fact belongs to the line.
+    await hover(headroom)
+    assert.deepEqual(tipRows(query(m.container, '.lc-bar-tip')), ['Compaction Headroom', '60', 'Buffer kept free ahead of the output reservation'])
+    await unhover(headroom)
+    await hover(line)
+    const tip = query(m.container, '.lc-bar-tip')
+    assert.deepEqual(tipRows(tip), ['Auto-compaction trigger', '800 · 80% of window', 'Compaction fires when the used tokens reach this line'])
+    assert.equal(tip.style.left, '80%')
+    assert.equal(query(m.container, '.lc-stacked').className, 'lc-stacked') // hoverKey cleared
+    await unhover(line)
+    assert.equal(query(m.container, '.lc-bar-tip').className, 'lc-tip lc-bar-tip')
+    await m.unmount()
+  })
+
+  test('a zero-extent mask is dropped; an output-only reserve renders the rightmost mask alone', async () => {
+    const m = await mount(h(HoverHarness, {
+      parts: [part('user', 100)],
+      max: 1000,
+      reserve: { threshold: 1000, headroom: 0, output: 0 },
+    }))
+    assert.equal(queryAll(m.container, '.lc-reserve').length, 0)
+    assert.equal(queryAll(m.container, '.lc-trigger').length, 0)
+    await m.update(h(HoverHarness, {
+      parts: [part('user', 100)],
+      max: 1000,
+      reserve: { threshold: 900, headroom: 0, output: 100 },
+    }))
+    assert.equal(queryAll(m.container, '.lc-reserve-headroom').length, 0)
+    assert.equal(queryAll(m.container, '.lc-trigger').length, 0)
+    const output = query(m.container, '.lc-reserve-output')
+    assert.equal(output.style.left, '90%')
+    assert.equal(output.style.width, '10%')
+    await m.unmount()
+  })
+
+  test('a used region past the window rescales the masks with the track', async () => {
+    const m = await mount(h(HoverHarness, {
+      parts: [part('user', 2000)],
+      max: 1000,
+      reserve: RESERVE,
+    }))
+    // scale = the occupied total: the window tail now occupies the bar's second half.
+    assert.equal(query(m.container, '.lc-reserve-headroom').style.left, '40%')
+    assert.equal(query(m.container, '.lc-reserve-headroom').style.width, '5%')
+    assert.equal(query(m.container, '.lc-reserve-output').style.left, '45%')
+    await m.unmount()
+  })
+
   test('not rendered without a positive window, even when configured', async () => {
-    const reserve = { ratio: 0.8, label: 'reserved headroom' }
+    const reserve = RESERVE
     const m = await mount(h(StackedBar, { parts: [part('user', 100)], reserve }))
     assert.equal(queryAll(m.container, '.lc-reserve').length, 0)
+    assert.equal(queryAll(m.container, '.lc-trigger').length, 0)
     await m.update(h(StackedBar, { parts: [part('user', 100)], max: 0, reserve }))
     assert.equal(queryAll(m.container, '.lc-reserve').length, 0)
+    assert.equal(queryAll(m.container, '.lc-trigger').length, 0)
     await m.unmount()
   })
 })
@@ -283,7 +380,7 @@ describe('StackedBar DNA bands', () => {
     await hover(queryAll(m.container, '.lc-stacked-seg')[0])
     const tip = query(m.container, '.lc-bar-tip')
     assert.ok(tip.className.includes('lc-bar-tip-on'))
-    assert.equal(tip.textContent, 'bash · 09:00:00 ≈30 (30%) of used context')
+    assert.deepEqual(tipRows(tip), ['bash · 09:00:00', '≈30 · 30% of used context', null])
     await m.unmount()
   })
 
@@ -328,8 +425,8 @@ describe('StackedBar minBand floor', () => {
     assert.equal(segs[1].style.width, '5%')
     await hover(segs[1])
     const tip = query(m.container, '.lc-bar-tip')
-    assert.equal(tip.textContent, 'User Messages ≈10 (1%) of used context')
-    assert.equal(tip.style.left, '88%', 'the tooltip clamps to the bar edge on a floored sliver')
+    assert.deepEqual(tipRows(tip), ['User Messages', '≈10 · 1% of used context', null])
+    assert.equal(tip.style.left, '97.5%', 'the anchor is the floored sliver\'s rendered center, not the true 99% one')
     await m.unmount()
   })
 

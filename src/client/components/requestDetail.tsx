@@ -5,45 +5,39 @@ import { cacheHitPercent } from '../format'
 import type { StepBrief } from '../brief'
 import { blockSummaryOf, callNamesOf, callSummaryOf } from '../callSummary'
 import type { ConversationNodeLike } from '../services'
-import type { StackedBarProps } from './stackedBar'
+import type { StackedBarProps, LegendProps } from './stackedBar'
 import type { ViewKit } from '../viewkit'
 
 export interface RequestDetailProps {
   request: RequestRecord | null
-  /**
-   * Delta mode: the record displayed just before this one (null on the first
+  /** Delta mode: the record displayed just before this one (null on the first
    * bar). Its PRESENCE switches the panel from cumulative makeup to the signed
-   * change against that previous record — the same pairing the chart's
-   * deltaOf plots.
-   */
+   * change against that previous record — the same pairing the chart's deltaOf plots. */
   prev?: RequestRecord | null
   marker?: ContextEventRecord | null
   /** The step's semantic identity (turn opener / inputs / reply) — see brief.ts; null renders an empty reserved lane. */
   brief?: StepBrief | null
   /** Conversation-snapshot join for call-argument enrichment; absent join = names only, never an error. */
   convOf?: (seq: number) => ConversationNodeLike | undefined
-  /**
-   * Per-turn step totals (the parent's `turnStepsOf` over the served requests) behind the head's
-   * step-of-total figure; absent = a 1-step turn.
-   */
+  /** Per-turn step totals (the parent's `turnStepsOf` over the served requests) behind the head's
+   * step-of-total figure; absent = a 1-step turn. */
   stepsOf?: (turn: number | undefined) => number
   /** Reveal a brief row's node in the Context browser; absent = rows render inert. */
   onLocate?: (node: SurfaceNode, isResponse: boolean) => void
-  /**
-   * Mirrored category hover (shared with the overview/browser): lights the composition bar's matching
-   * segment; the bar never reports hovers back.
-   */
+  /** Category hover shared with the overview/browser and the composition legend: lights the matching bar
+   * segment and chip, and the chips report hovers back — the bar never does. */
   hoverKey?: string | null
+  onHoverKey?: (key: string | null) => void
 }
 
 export function makeRequestDetail(
   kit: ViewKit,
   StackedBar: (props: StackedBarProps) => ReactElement,
+  Legend: (props: LegendProps) => ReactElement,
 ): ComponentType<RequestDetailProps> {
-  const { t, fmt, fmtTime, catLabel, eventLabel, eventAt } = kit
+  const { t, fmt, fmtTime, eventLabel, eventAt } = kit
 
-  /**
-   * One brief row: a fixed-width kind tag plus one glanceable line. The tag carries a styled, instant explanation bubble (the
+  /** One brief row: a fixed-width kind tag plus one glanceable line. The tag carries a styled, instant explanation bubble (the
    * shared `.lc-tip` chrome); the content span keeps the native title (preview + locate hint), so the two never stack.
    * Clickable when the browser linkage is wired AND the row carries a node (the always-present In row's empty state stays inert).
    */
@@ -76,13 +70,10 @@ export function makeRequestDetail(
     )
   }
 
-  /**
-   * One line's anatomy — a compact FACT tag plus the preview text, mirroring the Context browser's element rows so a
+  /** One line's anatomy — a compact FACT tag plus the preview text, mirroring the Context browser's element rows so a
    * brief line reads exactly like the browser row its click reveals: tool results tag the tool name, skill content
    * the skill name, assistant replies the call breadcrumb, injections the form, user messages image attachments.
-   * The branches cover the Category union; a hostile cat degrades into the
-   * user tail — a plain text row, never a throw.
-   */
+   * The branches cover the Category union; a hostile cat degrades into the user tail — a plain text row, never a throw. */
   function chipParts(n: SurfaceNode, conv: ConversationNodeLike | undefined): { tag: string | null; text: string } {
     if (n.cat === 'tool') {
       const summary = callSummaryOf(conv)
@@ -90,10 +81,9 @@ export function makeRequestDetail(
       return { tag: null, text: summary ?? t('node.toolResult') }
     }
     if (n.cat === 'skill') {
-      // Skill content (issue #66): a load/invocation tags its NAME, the
-      // catalog digest its form label ('目录更新'). A text-less row (the
-      // `skill`-tool load — its content rode the tool result) previews the
-      // call summary, like the tool rows do.
+      // Skill content (issue #66): a load/invocation tags its NAME, the catalog digest its form label (the
+      // catalog-updated wording). A text-less row (the `skill`-tool load — its content rode the tool result)
+      // previews the call summary, like the tool rows do.
       return {
         tag: n.skill !== undefined ? t('node.skillTag', { name: n.skill }) : t('form.' + (n.form ?? 'context')),
         text: n.text ?? callSummaryOf(conv) ?? '',
@@ -128,10 +118,8 @@ export function makeRequestDetail(
     return tag !== null ? (text !== '' ? tag + ' · ' + text : tag) : text
   }
 
-  /**
-   * The brief's container ALWAYS renders — a fixed three-row lane (`.lc-brief`'s min-height) so scrubbing the chart never
-   * changes the panel's height; unknown or empty steps just leave parts of the lane blank instead of collapsing it.
-   */
+  /** The brief's container ALWAYS renders — a fixed three-row lane (`.lc-brief`'s min-height) so scrubbing the chart never
+   * changes the panel's height; unknown or empty steps just leave parts of the lane blank instead of collapsing it. */
   function BriefSection(props: {
     brief: StepBrief | null | undefined
     convOf?: (seq: number) => ConversationNodeLike | undefined
@@ -145,11 +133,9 @@ export function makeRequestDetail(
     const locateChip = props.onLocate === undefined ? undefined : (n: SurfaceNode) =>
       (e?: MouseEvent) => { e?.stopPropagation(); props.onLocate?.(n, false) }
     const MAX_CHIPS = 3
-    /**
-     * The ONE content unit of the brief — inputs and the reply share the same chip anatomy (error dot, fact tag,
+    /** The ONE content unit of the brief — inputs and the reply share the same chip anatomy (error dot, fact tag,
      * preview text). Input chips are compact and individually clickable (each locates its own node); the reply is a
-     * single chip grown to the row's width, left inert because the row button already locates it.
-     */
+     * single chip grown to the row's width, left inert because the row button already locates it. */
     const nodeChip = (n: SurfaceNode, onClick?: (e?: MouseEvent) => void, grow = false): ReactElement => {
       const { tag, text } = chipParts(n, convOf(n.seq))
       return (
@@ -208,8 +194,7 @@ export function makeRequestDetail(
     const head = isTurn
       ? t('detail.turn', {
         t: req.turn ?? 0,
-        /* v8 ignore next -- isTurn already guarantees stepCount !== undefined;
-           the fallback is defensive. */
+        /** v8 ignore next -- isTurn already guarantees stepCount !== undefined; the fallback is defensive. */
         n: req.stepCount ?? 0,
       })
       : t('detail.step', { t: req.turn ?? 0, s: req.step ?? 0, n: props.stepsOf?.(req.turn) ?? 1 })
@@ -219,22 +204,19 @@ export function makeRequestDetail(
     const marker = props.marker ?? null
     const markerAt = marker !== null ? eventAt(marker) : null
     // Delta mode: per-category SIGNED change vs the previous record (the chart stacks them diverging
-    // above/below its zero line); provider usage chips drop out — prompt/output/cacheRead are
-    // per-request figures, not deltas.
+    // above/below its zero line); provider usage chips drop out — prompt/output/cacheRead are per-request figures, not deltas.
     const delta = props.prev !== undefined
     const prev = props.prev ?? null
     const deltas = CATS.map(c => delta ? (req[c.key] || 0) - (prev !== null ? prev[c.key] || 0 : 0) : 0)
     let net = 0
-    let maxAbs = 0
     if (delta) {
-      for (const d of deltas) {
-        net += d
-        if (Math.abs(d) > maxAbs) maxAbs = Math.abs(d)
-      }
+      for (const d of deltas) net += d
     }
     const parts = delta
       ? CATS.map((c, i) => ({ key: c.key, color: c.color, value: Math.abs(deltas[i]) }))
       : partsOf(req)
+    // Delta's chips print the signed change; the bar's own parts keep only magnitudes.
+    const legendParts = delta ? parts.map((p, i) => ({ ...p, raw: deltas[i] })) : parts
     return (
       <div className="lc-detail">
         <div className="lc-detail-head">
@@ -246,63 +228,31 @@ export function makeRequestDetail(
           {delta ? <span className="lc-detail-tag">{t('gran.delta')}</span> : null}
           <span className="lc-detail-time">{fmtTime(req.time)}</span>
           {/* Metric chips: one neutral pill per provider figure; the cache figure drops out on hosts
-              that do not fold `cacheRead` (and on usage-less requests). */}
-          {delta ? (
-            <span className={'lc-detail-metric' + (net > 0 ? ' lc-detail-metric-up' : net < 0 ? ' lc-detail-metric-down' : '')}>
-              {t('tip.delta', { n: (net > 0 ? '+' : '') + fmt(net) })}
-            </span>
-          ) : null}
-          {!delta && req.prompt !== undefined
-            ? <span className="lc-detail-metric">{t('detail.actual', { n: fmt(req.prompt) })}</span>
-            : null}
-          {!delta && req.output !== undefined
-            ? <span className="lc-detail-metric">{t('detail.output', { n: fmt(req.output) })}</span>
-            : null}
-          {!delta && req.prompt !== undefined && req.cacheRead !== undefined
-            ? <span className="lc-detail-metric">{t('detail.cache', { n: cacheHitPercent(req.cacheRead, req.prompt) ?? '—' })}</span>
-            : null}
+              that do not fold `cacheRead` (and on usage-less requests). They share one row of their own
+              (`flex-basis: 100%`), so the header is always the same height: sharing a wrapped line with the
+              identity row made it depend on which pill topped each line, which moved as the figures changed. */}
+          <span className="lc-detail-metrics">
+            {delta ? (
+              <span className={'lc-detail-metric' + (net > 0 ? ' lc-detail-metric-up' : net < 0 ? ' lc-detail-metric-down' : '')}>
+                {t('tip.delta', { n: (net > 0 ? '+' : '') + fmt(net) })}
+              </span>
+            ) : null}
+            {!delta && req.prompt !== undefined
+              ? <span className="lc-detail-metric">{t('detail.actual', { n: fmt(req.prompt) })}</span>
+              : null}
+            {!delta && req.output !== undefined
+              ? <span className="lc-detail-metric">{t('detail.output', { n: fmt(req.output) })}</span>
+              : null}
+            {!delta && req.prompt !== undefined && req.cacheRead !== undefined
+              ? <span className="lc-detail-metric">{t('detail.cache', { n: cacheHitPercent(req.cacheRead, req.prompt) ?? '—' })}</span>
+              : null}
+          </span>
         </div>
         <BriefSection brief={props.brief} convOf={props.convOf} onLocate={props.onLocate} />
         {/* Mirrors the shared category hover with the tip off — a cross-card hover must not float a second tooltip
             over a bar the pointer does not rest on (same rule as the browser's own bar). */}
         <StackedBar parts={parts} height={10} hoverKey={props.hoverKey} tip={false} />
-        <div className="lc-detail-rows">
-          {CATS.map((c, i) => {
-            const v = delta ? deltas[i] : req[c.key] || 0
-            const mag = Math.abs(v)
-            return (
-              <div key={c.key} className={'lc-detail-row' + (props.hoverKey === c.key ? ' lc-detail-row-on' : '')}>
-                <i style={{ background: c.color }} />
-                <span className="lc-detail-label">{catLabel(c.key)}</span>
-                <span className="lc-bar-track">
-                  {delta ? (
-                    <>
-                      {/* Mini diverging bar echoing the chart: zero at the middle, growth fills right,
-                          shrinkage fills left, one shared scale across the rows. */}
-                      <span className="lc-bar-zero" />
-                      {v !== 0 ? (
-                        <span
-                          className={'lc-bar-fill ' + (v > 0 ? 'lc-bar-fill-up' : 'lc-bar-fill-down')}
-                          style={{ width: `${mag / maxAbs * 50}%`, background: c.color }}
-                        />
-                      ) : null}
-                    </>
-                  ) : (
-                    <span className="lc-bar-fill" style={{ width: `${req.total > 0 ? v / req.total * 100 : 0}%`, background: c.color }} />
-                  )}
-                </span>
-                {delta ? (
-                  <span className={'lc-detail-num' + (v > 0 ? ' lc-detail-num-up' : v < 0 ? ' lc-detail-num-down' : '')}>
-                    {(v > 0 ? '+' : '') + fmt(v)}
-                  </span>
-                ) : (
-                  <span className="lc-detail-num">{'≈' + fmt(v)}</span>
-                )}
-                <span className="lc-detail-pct">{!delta && req.total > 0 ? `${Math.round(v / req.total * 100)}%` : ''}</span>
-              </div>
-            )
-          })}
-        </div>
+        <Legend parts={legendParts} hoverKey={props.hoverKey} onHoverKey={props.onHoverKey} delta={delta} />
       </div>
     )
   })

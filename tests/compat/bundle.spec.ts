@@ -1,14 +1,8 @@
-// The bundle smoke, as part of the `compat` project: the only check that
-// exercises the BUILT artifacts (lib/client.js) — the packaging glue (the
-// `window.__ModuleLoader__.load({id, factory})` handoff, the CSS channel's
-// data-plugin style tags, platform-module requires) only exists after tsdown
-// runs. Skipped cleanly when lib/ is absent (run `pnpm run build` first);
-// the release workflow builds before `pnpm test`, so it always runs there.
-//
-// Everything here runs against the REAL bundle in its own JSDOM with REAL
-// React and the REAL ui-primitives — only the harness services
-// (locale/slots/effects) are in-memory implementations of their documented
-// contracts.
+// The bundle smoke, as part of the `compat` project: the only check that exercises the BUILT artifacts (lib/client.js) — the packaging glue
+// (the `window.__ModuleLoader__.load({id, factory})` handoff, the CSS channel's data-plugin style tags, platform-module requires) only
+// exists after tsdown runs. Skipped cleanly when lib/ is absent (run `pnpm run build` first); the release workflow builds before `pnpm
+// test`, so it always runs there. Everything here runs against the REAL bundle in its own JSDOM with REAL React and the REAL ui-primitives
+// — only the harness services (locale/slots/effects) are in-memory implementations of their documented contracts.
 
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
@@ -26,13 +20,12 @@ describe.skipIf(staging.artifactsMissing())('bundle smoke — the built lib/clie
   // worker (per-file fork), so the assignment stays file-local.
   const globals = globalThis as { window?: unknown; document?: unknown }
 
-  /** The factory handoff the bundle registers through. */
   let handoff: { id: string; factory: (require: (spec: string) => unknown) => unknown } | null = null
   /** Everything the assertions below look at, captured by the setup. */
   const state: {
     plugin?: { name: string; inject: string[]; apply(ctx: unknown): void }
     dicts: Map<string, Record<string, Record<string, string>>>
-    slots: [string, { order?: number; id?: string; label?: () => string; inject?: (sessionId?: string) => unknown }][]
+    slots: [string, { name?: string; order?: number; id?: string; label?: () => string; inject?: (sessionId?: string) => unknown }][]
     sources: { trigger: string }[]
     disposers: (() => void)[]
   } = { dicts: new Map(), slots: [], sources: [], disposers: [] }
@@ -44,12 +37,9 @@ describe.skipIf(staging.artifactsMissing())('bundle smoke — the built lib/clie
     globals.window = dom.window
     globals.document = dom.window.document
 
-    // The module table: the shell seeds exactly these specifiers. The bundle
-    // must require nothing else (the tsdown purity gate pins this too). The
-    // primitives dist ships CSS modules Node cannot parse — the bundle only
+    // The primitives dist ships CSS modules Node cannot parse — the bundle only
     // references its components as React leaves, so inert stand-ins play the
-    // shell's role here (their real rendering is covered by the vitest
-    // jsdom lane).
+    // shell's role here (their real rendering is covered by the vitest jsdom lane).
     const inert = (name: string) => {
       const C = (): null => null
       ;(C as { displayName?: string }).displayName = name
@@ -83,7 +73,7 @@ describe.skipIf(staging.artifactsMissing())('bundle smoke — the built lib/clie
       inject(_deps: string[], cb: (c: unknown) => void) {
         // Cordis fires the callback once every requested service exists; this
         // fake answers every name it knows up front, so it fires immediately.
-        // The settingsScope wiring guards on the absent binder itself.
+        // The configForms wiring guards on the absent service itself.
         cb(ctx)
       },
       effect(fn: () => (() => void) | void) {
@@ -100,8 +90,17 @@ describe.skipIf(staging.artifactsMissing())('bundle smoke — the built lib/clie
         },
       },
       slots: {
-        inject: (name: string, fn: () => unknown) => { state.slots.push([name, fn() as (typeof state.slots)[number][1]]) },
-        register: (opts: (typeof state.slots)[number][1]) => opts,
+        // The registry records every `register()` call and returns its idempotent disposer; an `inject`
+        // callback returns the declaration effect's own disposer (registry.ts `SlotInjectionEffect`), so the
+        // return value is never the registration — one `inject` may declare several.
+        inject: (_name: string, fn: () => unknown) => fn(),
+        register: (opts: (typeof state.slots)[number][1]) => {
+          state.slots.push([opts.name ?? '', opts])
+          return () => {
+            const i = state.slots.findIndex(entry => entry[1] === opts)
+            if (i >= 0) state.slots.splice(i, 1)
+          }
+        },
       },
     }
     state.plugin = handoff.factory(moduleTable) as typeof state.plugin
@@ -128,22 +127,26 @@ describe.skipIf(staging.artifactsMissing())('bundle smoke — the built lib/clie
     assert.ok(!css.includes('120ms ease'), 'lightningcss minified the sheet')
   })
 
-  test('registrations: bilingual dictionaries, five slots, the /context trigger source', () => {
+  test('registrations: bilingual dictionaries, six slots, the /context trigger source', () => {
     assert.ok(state.dicts.get('dsh-context')?.zh && state.dicts.get('dsh-context')?.en, 'bilingual dictionaries registered')
-    assert.equal(state.slots.length, 5, 'view tab + assistant action + input overlay + dashboard entry and overlay slots')
+    assert.equal(state.slots.length, 6, 'view tabs + assistant action + input overlay + insight page and sidebar entry slots')
     assert.equal(state.slots[0]?.[0], 'conversation.view')
     assert.equal(state.slots[0]?.[1].order, 20)
     assert.equal(state.slots[0]?.[1].label?.(), '上下文', 'tab label localized')
-    assert.equal(state.slots[1]?.[0], 'conversation.chat.assistant-actions')
-    assert.equal(state.slots[1]?.[1].id, 'context-jump', 'jump action rides its own slot id')
-    assert.equal(state.slots[2]?.[0], 'conversation.input.overlay')
-    const overlayInject = state.slots[2]?.[1].inject
+    assert.equal(state.slots[1]?.[0], 'conversation.view')
+    assert.equal(state.slots[1]?.[1].order, 30, 'the Fleet tab follows the Context tab')
+    assert.equal(state.slots[1]?.[1].label?.(), '编队', 'fleet tab label localized')
+    assert.equal(state.slots[2]?.[0], 'conversation.chat.assistant-actions')
+    assert.equal(state.slots[2]?.[1].id, 'context-jump', 'jump action rides its own slot id')
+    assert.equal(state.slots[3]?.[0], 'conversation.input.overlay')
+    const overlayInject = state.slots[3]?.[1].inject
     const overlayHooks = overlayInject?.('s1') as { hooks: { contextModal: { getSnapshot: unknown } } } | undefined
     assert.equal(typeof overlayHooks?.hooks.contextModal.getSnapshot, 'function', 'overlay hooks carry the modal store')
-    assert.equal(state.slots[3]?.[0], 'sidebar.footer.action', 'the dashboard entry above Settings')
-    assert.equal(state.slots[3]?.[1].id, 'context-overview')
-    assert.equal(state.slots[4]?.[0], 'shell.overlay', 'the dashboard panel rides the frame-wide overlay seat')
-    assert.equal(state.slots[4]?.[1].id, 'context-overview')
+    assert.equal(state.slots[4]?.[0], 'main', 'the insight page rides the layout\'s keyed main seat')
+    assert.equal(state.slots[4]?.[1].key, 'dsh-context', 'the page panel key is the plugin id')
+    assert.equal(state.slots[5]?.[0], 'sidebar.panellist', 'the insight entry rides the sidebar panel list')
+    assert.equal(state.slots[5]?.[1].id, 'dsh-context', 'the entry id addresses the main panel')
+    assert.equal(state.slots[5]?.[1].label?.(), '上下文洞察', 'the entry label localized')
     assert.equal(state.sources.length, 1, '/context trigger source registered')
     assert.equal(state.sources[0]?.trigger, '/', 'trigger is the slash')
   })

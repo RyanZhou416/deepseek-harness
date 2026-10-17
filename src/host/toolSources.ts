@@ -2,35 +2,16 @@
  * Tool-to-plugin attribution for the Context browser's tool schema rows.
  *
  * The durable `request/header` event logs each tool as a plain `ToolSchema`
- * (`name`/`description`/`parameters` only) — the harness strips everything
- * else at assembly, so the registering plugin is not in the session log. This
- * module recovers what it can without a harness change:
- *
- * 1. A `plugin` field a (future) harness or MCP client carries on the raw
- *    header entry — passed through verbatim by headers.ts's recordOf, ahead
- *    of everything here.
- * 2. MCP tools: `dsh-mcp-client` names every proxied tool
- *    `mcp__<server>__<rawName>`, so the server is recoverable from the name.
- * 3. Shipped first-party tools: a PINNED name → package map derived from the
- *    deepseek-harness official tool-schema catalog (the shipped tool packages
- *    at the supported dsh baseline, tests/baselines.ts; names verified stable
- *    across the plugin's supported range). Third-party tools stay
- *    unattributed rather than guessed.
- *
- * Pure string functions: fully unit-testable, no harness imports.
+ * (`name`/`description`/`parameters` only), so the registering plugin is not in the log. Three
+ * recovery sources: a `plugin` field a foreign producer carries on the raw header entry (passed
+ * through by headers.ts), the `dsh-mcp-client` name grammar, and a pinned name → package map of
+ * the shipped first-party tools. Third-party tools stay unattributed rather than guessed.
  */
 
-/** MCP server-name prefix of `dsh-mcp-client` proxied tools. */
 export const MCP_PREFIX = 'mcp__'
 
-/**
- * Recover the MCP server display label from a proxied tool name, or undefined
- * for non-MCP names. `dsh-mcp-client` names tools `mcp__<server>__<rawName>`
- * (normalized, and hash-appended when overlong/invalid — the label then shows
- * whatever of the server survived the truncation). The separating `__` is the
- * LAST one in the name, and it must sit AFTER the `mcp__` prefix: the prefix's
- * own separator (or an empty server right after it) is not a server.
- */
+/** Recover the MCP server label from a proxied tool name: `dsh-mcp-client` names tools
+ * `mcp__<server>__<rawName>`, so the server is the text before the LAST `__`, past the prefix. */
 export function mcpServerOf(name: string): string | undefined {
   if (!name.startsWith(MCP_PREFIX)) return undefined
   const cut = name.lastIndexOf('__')
@@ -39,25 +20,18 @@ export function mcpServerOf(name: string): string | undefined {
   return server.length > 0 ? server : undefined
 }
 
-/** The `mcp:<server>` display label of a proxied tool name, or undefined. */
 export function mcpSourceOf(name: string): string | undefined {
   const server = mcpServerOf(name)
   return server !== undefined ? `mcp:${server}` : undefined
 }
 
-/** The pinned package of a first-party tool name, or undefined. */
 export function pinnedSourceOf(name: string): string | undefined {
   return FIRST_PARTY_SOURCES[name]
 }
 
-/**
- * Pinned first-party tool → plugin package map (see header comment). One entry
- * per model-facing name of the shipped tool packages in the official
- * tool-schema catalog of the supported dsh baseline; names are verified
- * stable across the supported harness range. Packages that mount under
- * distinct names per composition (bash/pwsh persistent variants, the
- * `subagent_fork` fixed-route alias) map to their primary package.
- */
+/** Pinned first-party tool → package map: one entry per model-facing name of the shipped tool
+ * packages at the supported dsh baseline (tests/baselines.ts). Packages mounting under distinct
+ * names per composition (bash/pwsh variants, the `subagent_fork` alias) map to their primary one. */
 export const FIRST_PARTY_SOURCES: Readonly<Record<string, string>> = Object.freeze({
   read: '@deepseek-ai/dsh-tool-fs',
   write: '@deepseek-ai/dsh-tool-fs',

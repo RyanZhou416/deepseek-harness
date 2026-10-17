@@ -1,6 +1,4 @@
-// The /context slash command (src/client/command.ts): soft service
-// dependency, trigger-source registration, candidates, pick, and enter
-// adjudication over a faithful harness ctx. Session ids are unique per test
+// The /context slash command (src/client/command.ts) over a faithful harness ctx. Session ids are unique per test
 // so the module-level modal/consume state never leaks between cases.
 
 import assert from 'node:assert/strict'
@@ -15,7 +13,6 @@ import { makeKit } from './helpers/kit'
 
 type Source = Parameters<InputTriggersFace['registerSource']>[0]
 
-/** A real in-memory input-trigger face (registerSource records + disposes). */
 class TestInputTriggers {
   readonly sources: Source[] = []
 
@@ -74,8 +71,7 @@ describe('candidates', () => {
     const { source } = setup()
     const candidates = await source.candidates({ sessionId: 'cmd-empty' }, { query: '', position: 'leading', signal: SIGNAL })
     // The localized section replaces the menu's raw source-name title row;
-    // the localized label and glyph are display-only (older harness builds
-    // render the bare name).
+    // the localized label and glyph are display-only (older harness builds render the bare name).
     assert.deepEqual(candidates, [{
       name: 'context',
       label: DICT_EN['cmd.label'],

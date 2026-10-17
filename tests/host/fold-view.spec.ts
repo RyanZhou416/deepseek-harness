@@ -1,7 +1,4 @@
-// Wire-view tests for buildTimelineView (src/host/fold.ts): counters,
-// non-aliasing copies, the cost buckets, the serving window (newest tail +
-// pinned injects + coverage floors), event→request attribution, and view
-// purity. Driven through the real projection unit (driveTimeline / def.wire.view).
+// buildTimelineView (src/host/foldWire.ts) driven through the real projection unit (driveTimeline / def.wire.view).
 
 import assert from 'node:assert/strict'
 import { describe, test } from 'vitest'
@@ -16,8 +13,7 @@ const bucket = (uncached: number, cacheRead: number, cacheWrite: number, output:
 describe('buildTimelineView unknown-model shape', () => {
   test('optional scalars stay ABSENT keys until known — never undefined-valued (issue #29)', () => {
     // A fold over events that name no model/provider/capacity: the served
-    // view must not carry `undefined`-valued properties, which fail the
-    // harness's lossless-JSON push pipeline whole.
+    // view must not carry `undefined`-valued properties, which fail the harness's lossless-JSON push pipeline whole.
     const { view } = driveTimeline([
       userMessage(1, [{ type: 'text', text: 'aaaa' }]),
       assistantMessage(2, { turn: 1, step: 1 }),
@@ -25,22 +21,44 @@ describe('buildTimelineView unknown-model shape', () => {
     assert.equal(view.model, undefined)
     assert.equal(view.provider, undefined)
     assert.equal(view.contextWindow, undefined)
+    assert.equal(view.maxOutputTokens, undefined)
     assert.ok(!('model' in view), 'no own `model` key')
     assert.ok(!('provider' in view), 'no own `provider` key')
     assert.ok(!('contextWindow' in view), 'no own `contextWindow` key')
+    assert.ok(!('maxOutputTokens' in view), 'no own `maxOutputTokens` key')
     assertPlainJson(view)
   })
 
   test('known scalars ride their own keys once a request names them', () => {
     const { view } = driveTimeline([
-      header(1, { system: 'sys', config: { model: 'deepseek-v4-flash', provider: 'deepseek' } }),
+      header(1, { config: { model: 'deepseek-v4-flash', provider: 'deepseek', maxTokens: 256000 } }),
       requestContext(2, { provider: 'deepseek', model: 'deepseek-v4-flash', contextWindow: 128000 }),
       userMessage(3, [{ type: 'text', text: 'hi' }]),
     ])
     assert.equal(view.model, 'deepseek-v4-flash')
     assert.equal(view.provider, 'deepseek')
     assert.equal(view.contextWindow, 128000)
+    assert.equal(view.maxOutputTokens, 256000)
     assertPlainJson(view)
+  })
+
+  test('the routed output cap is LAST-WINS across headers, exactly as the compaction backend reads it', () => {
+    // A later header without a cap clears it (dsh's `reservedCompletionTokens` falls back to zero, not
+    // to the previous envelope), and a hostile cap never lands in the persisted state.
+    const cleared = driveTimeline([
+      header(1, { config: { model: 'm', provider: 'p', maxTokens: 256000 } }),
+      header(2, { config: { model: 'm', provider: 'p' }, reason: 'change' }),
+    ])
+    assert.equal(cleared.view.maxOutputTokens, undefined)
+    for (const maxTokens of ['256000', -1, 0, Number.NaN, Number.POSITIVE_INFINITY, null] as const) {
+      const { view } = driveTimeline([header(1, { config: { model: 'm', provider: 'p', maxTokens } })])
+      assert.equal(view.maxOutputTokens, undefined, String(maxTokens))
+    }
+    const kept = driveTimeline([
+      header(1, { config: { model: 'm', provider: 'p', maxTokens: 8000 } }),
+      header(2, { config: { model: 'm', provider: 'p', maxTokens: 256000 }, reason: 'change' }),
+    ])
+    assert.equal(kept.view.maxOutputTokens, 256000)
   })
 })
 
@@ -174,7 +192,7 @@ describe('buildTimelineView copies', () => {
   test('archive entries are copies too', () => {
     const { state, view } = driveTimeline([
       userMessage(1, [{ type: 'text', text: 'aaaa' }]),
-      userMessage(2, [{ type: 'text', text: 'b' }], undefined, { surfaceOp: { op: 'replace', start: 1, end: 1 } }),
+      userMessage(2, [{ type: 'text', text: 'b' }], undefined, { surfaceOp: { op: 'replace', startSeq: 1, endSeq: 1 } }),
     ])
     assert.equal(view.archive.length, 1)
     assert.notEqual(view.archive[0], state.archived[0])
@@ -367,7 +385,7 @@ describe('buildTimelineView event attribution', () => {
 
   test('a turn-less previous request stamps no from-side', () => {
     const { view } = driveTimeline([
-      assistantMessage(1, {}), // no turn/step: a replayed log row
+      assistantMessage(1, {}),
       planMode(2, { active: true }),
       assistantMessage(3, { turn: 1, step: 1 }),
     ])

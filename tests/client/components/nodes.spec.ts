@@ -1,6 +1,3 @@
-// The node-text label cascade (src/client/components/nodes.tsx), pure and
-// driven directly — the Context browser's element-row previews.
-
 import assert from 'node:assert/strict'
 import { describe, test } from 'vitest'
 import { makeNodeText } from '../../../src/client/components/nodes'

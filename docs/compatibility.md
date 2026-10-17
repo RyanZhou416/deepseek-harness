@@ -1,99 +1,111 @@
 # Compatibility
 
-dsh-context declares per-release compatibility with `@deepseek-ai/dsh` in its package manifest (`dsh.compatibility.dshReleases`). This page records what is actually verified for each declared release, and how.
+The rules dsh-context must hold on every supported `@deepseek-ai/dsh` release, and the evidence for each. Supported releases are declared in `package.json` (`dsh.compatibility.dshReleases`); baselines and their per-line seam faces are pinned in `tests/baselines.ts`.
 
-Last verified: **2026-09-23** (plugin `dsh-context@0.55.0` source tree, dsh `0.1.7-alpha.2`).
+**Grammar.** Entries are numbered **rules** (the bold lead is the invariant), plus **Limitation** (an accepted gap), **Check** (how a claim is proven), and **Procedure** (how to run a compatibility task). Evidence rides in trailing parens — paths in this repo, or `dsh:` paths in the harness tree read at the baseline tag — or as a table directly beneath the rule it maps. A rationale appears only where code cannot show it.
 
-## Supported dsh releases
+**Law.** Record only what no other artifact carries; delete what code, tests, or git history already say. Verify against the dsh sources before acting — source wins over this page. Less is ALWAYS better.
 
-| dsh release | Session log | Declared | Automated seam matrix | Disposable-profile install / uninstall |
-| --- | --- | --- | --- | --- |
-| `0.1.2-rc.1` | V0 | compatible | ✅ baseline `v0.1.2-rc.1` | ✅ install OK → 1 composed row → uninstall OK → 0 rows (verified 2026-09-05) |
-| `0.1.3-alpha.2` | V2 | compatible | ✅ baseline `v0.1.3-alpha.2` | ✅ install OK → 1 composed row → uninstall OK → 0 rows (verified 2026-09-09) |
-| `0.1.5-rc.1` | V3 | compatible | ✅ baseline `v0.1.5-rc.1` | ✅ install OK → 1 composed row → uninstall OK → 0 rows (verified 2026-09-10) |
-| `0.1.7-alpha.2` | V4 | compatible | ✅ baseline `v0.1.7-alpha.2` | — (not yet performed manually) |
+Last verified: **2026-10-14** (dsh-context `0.70.0`, dsh `0.2.0-rc.2` npm install and `0.2.1-alpha.3` tree).
 
-The automated seam matrix runs for every row on every `pnpm test`. The disposable-profile column is a manual, per-release check: each release's CLI was installed from npm into a temporary `DSH_HOME` (the real `~/.dsh` is never touched) — `0.1.2-rc.1` on 2026-09-05, `0.1.3-alpha.2` on 2026-09-09, and `0.1.5-rc.1` on 2026-09-10, against the official npm registry (a stale mirror can 404 the harness's own dependency closure before the plugin is even considered).
+## 1 · Supported set
 
-Releases older than `0.1.2-rc.1` — the `0.1.1` line and the `0.1.2-alpha.*` previews — were supported and verified through `dsh-context@0.41.x` and are no longer in the support matrix.
+*What the plugin declares it works on.*
 
-## Baseline gate
+1. **Support exactly `0.1.7-rc.2` and `0.2.0-rc.2`** — both the V4 durable-log generation. The floor is `0.1.7-rc.2` because it is the first `0.1.7`-line release with a complete npm dependency closure; anything older gets §2's fallback composition with an upgrade prompt, never a fold.
 
-The declared floor is enforced at runtime, not only documented. At startup the host resolves the running harness's version — first from the module tree the plugin is bound to, then from the `$DSH_HOME/profiles/node_modules` mirror — and compares it against `0.1.2-rc.1` (channel order: release > rc > beta > alpha):
+## 2 · Admission
 
-- **Below the floor** — fallback projection units that fold nothing and serve zeroed data: the Context tab keeps its (empty) cards while a modal names both versions and urges the update.
-- **At or above the floor** — the real projection units.
-- **Undetectable or unparseable** — **fails open** into the real units, so a probe misfire never blanks a working deployment.
+*Whether the plugin loads at all.*
 
-The mirror reflects whichever installation last booted a CLI profile, which need not be the running one (a packaged desktop client never refreshes it), so it never outranks the running module tree. Implementation: `src/host/version.ts`, `src/host/fallback.ts`, `src/shared/version.ts`.
+**Harness-side**
 
-## Session-log generations
+1. **dsh ≥ `0.1.7` enforces a plugin's `@deepseek-ai/dsh*` peer ranges** at startup and install (semver, `includePrerelease: true`; exemption `dsh plugin allow-version`). This plugin's peers are all `>=0.1.7-rc.2` — no exemption on any supported line. (dsh: `packages/boot/app-boot/src/plugin-compatibility.ts`, `apps/cli/src/plugin.ts`)
 
-The supported range spans four durable-log generations, and the plugin folds all of them from one shape-driven code path (`src/host/logShapes.ts`):
+**Plugin-side**
 
-| Seam | V0 (`0.1.2-rc.x`) | V2 (`0.1.3-alpha.x`) | V3 (`0.1.5-alpha.x+`) | V4 (`0.1.6/0.1.7+`) |
-| --- | --- | --- | --- | --- |
-| System prompt | `request/header.header.system` | same as V0 | `system/message` surface node | same as V3 |
-| First token | `assistant/chunk` events | embedded `assistant/message.data.stream` (also `assistant/attempt.data.stream`) | same as V2 | same as V2 |
-| Replacement endpoints | `{ start, end }` | same as V0 | `{ startSeq, endSeq }` | same as V3 |
-| Nested PTC dispatch | `tool/code-dispatch` | same as V0 | `tool/ptc-dispatch` | same as V3 |
-| Tool result | `tool-result` wrapper block, `role: 'user'` | same as V0 | same as V0 | `role: 'tool'`, lifted `message.toolCallId`/`message.isError`, direct content (no wrapper block) |
+2. **Enforce the floor again at runtime** — a pre-`0.1.7` harness has no gate and would still load the plugin. Below the floor: zeroed fallback units plus an upgrade modal. Version undetectable: FAIL OPEN into the real units — a probe misfire must never blank a working deployment, and the home mirror (last-booted profile) never outranks the running module tree. (`src/host/version.ts`, `src/host/fallback.ts`, `src/shared/version.ts`)
+3. **Feature-detect `.volatile()` at schema build time**, so the same bundle loads — preferences inert — on a below-floor harness whose schemastery predates it. (`src/host/config.ts`)
 
-V4 also adds durable event families the fold does not switch on: `developer/message` (a surface message type with no first-party producer yet), `workspace/changes` (a deliverables log record), and `image/offload` (the compaction image-offload decision, whose message rewrites ride the harness's message-projection layer). Unknown event types return the fold state unchanged, so these are inert; the one known delta is below.
+## 3 · Fold
 
-The fold never branches on a detected harness version: a log carries exactly one generation, and the spellings are mutually exclusive. The version probe is best-effort — it reports the module tree the embedding shell resolves plugin imports to, which a packaged client may redirect — so it decides which units register and nothing more.
+*Durable events → projection state, host-side.*
 
-### Known V4 deltas
+**Shapes**
 
-- **Tool-result error mark**: V4 made the event-level `data.error` identity optional while lifting `isError` onto the message, so the fold reads the flag from BOTH spellings (`src/host/fold.ts`); a V4 result carrying only `message.isError` still flags its surface node and file-op row.
-- **Image offload accounting (deferred)**: when a route rejects with `IMAGE_OFFLOAD_REQUIRED`, the harness offloads images out of the context through a message projection. The plugin's fold reads raw durable events, so an offloaded message keeps its pre-offload image count and price until compaction removes it — an over-count on a rare recovery path, not a crash. Revisit alongside the harness's own token-meter treatment if it shows up in practice.
-- **User preferences (shipped)**: the V4 line (first shipped in `0.1.6-alpha.2`) retired the `settings.register` host face and the `settings.plugin.item` browser slot — plugin configuration moved to the Plugins page, derived from each loader entry's own Config schema. The plugin serves both generations from one entry schema:
-  - The entry `Config` (`src/host/config.ts`) is schemastery. Cordis still validates the `config:` block through its Standard Schema face on every supported line; on V4+ the SAME schema is what the settings `describe` projects — the namespace is the entry id (`dsh-context`) and the six preference fields (`.volatile()`-marked) are the served, live-editable form; the fold bounds stay ordinary entry config (their edit remounts the entry, a preference edit commits volatile-only and never remounts).
-  - The browser half registers its card on the seat the running line declares, by service presence: `settingsScope` + `settings.plugin.item` through V3, `configForms` + the Plugins page's keyed `plugins.bundle.config` on V4+ (`ctx.configForms.whileServed` keeps the card alive only while the Host serves the namespace). Both seats render the same six preference rows.
-  - The `.volatile()` modifier exists only on the Config-form generations' schemastery; the schema builder feature-detects it, so the same bundle loads on `0.1.2-rc.1` (whose schemastery 3.18.2 predates the modifier) and on V4+.
-  - Deliberate relaxations against the replaced zod schema: schemastery objects merge unknown keys through instead of failing the load, and only whole-value edits are rejected by range/step checks (bounds remain `min 1, step 1`).
-  - Preference values persisted by older lines live in the settings document (`settings.yaml` section `dsh-context`); the V4 harness's own legacy import moves that section into the profile entry of the same name on first boot, so existing values carry into the new surface.
+1. **One shape-driven path; never branch on a detected harness version.** (`src/host/fold.ts`, `src/host/logShapes.ts`)
+2. **Trust the migration guarantee; carry no legacy readers.** Every read path the plugin rides (live open, persistence handles, `sessionQuery.observeSession`) migrates pre-V4 logs to V4; an unconvertible log is refused with `SessionFormatUnsupportedError`, never served raw. Pre-V4 spellings exist nowhere in this repo. (dsh: `packages/session/session-format-v3-to-v4`, `packages/session/session-format-catalog`, `packages/session/session-persistence/src/errors.ts`, `packages/session-query/session-query/src/documents.ts`)
+3. **`developer/message` folds into injected context** — request composition, live surface, archives; never human inputs; an empty-content event keeps its surface node at zero tokens where the harness's `deriveEventMessage` projects null. (`src/host/fold.ts`)
+4. **Read tool-result errors from `message.isError` alone** — the generation admits event-level `data.error` only alongside it; a hostile envelope-only row degrades to unflagged, never a throw. (`src/host/fold.ts`)
 
-## Web client seams
+**Totality**
 
-The browser half rides generation-specific seats, each reached through an optional seam so an older line simply goes without the capability. The V3 line moved two of them, and the newest release moved one back:
+5. **Folds are TOTAL** — unknown event types return state unchanged; a malformed event drops whole (no partial state); no `undefined`-valued property is ever materialized into persisted state. The projection registry drives `apply` with no error boundary: one throw stalls the unit's cells and push feed forever, and one `undefined` property fails EVERY projection-cache write for the session.
 
-| Seam | V3 before `0.1.5-alpha.2` | `0.1.5-alpha.2` | `0.1.5-rc.1+` |
-| --- | --- | --- | --- |
-| Conversation panel root | flat `conversation` slot | keyed `main` panel's `main.conversation` (the plugin's `conversation.view` seat is unchanged and hangs under it) | same as `0.1.5-alpha.2` |
-| Right Sidebar guide entry | glyph + title + required description line | glyph + title (the description line was dropped) | glyph + title + optional description line (restored; the plugin contributes it) |
+- **Limitation — image offload (deferred):** on `IMAGE_OFFLOAD_REQUIRED` the harness offloads images via a message projection; the fold reads raw durable events, so an offloaded message keeps its pre-offload image count and price until compaction removes it. Revisit only if it shows in practice.
 
-The plugin contributes to whichever face the running line serves: the guide capsule carries `order`, `title`, and `icon` on every generation and adds the `description` thunk, which `0.1.5-alpha.1` required, `0.1.5-alpha.2` ignored, and `0.1.5-rc.1+` renders. The `guideEntry` probe in `tests/baselines.ts` pins the fields of the newest supported generation.
+## 4 · Metering parity
 
-The File Activity card's file-name affordance is the same optional-column story: on a line with the right Sidebar it opens the file's preview tab through `ctx.sidebarRight.openResource` (the built-in Files sidebar's own path), building the `dsh-resource://file/…` address with the harness's browser-safe `fileAddressFor` (inlined by the client bundle, exactly as the Sidebar's own file types inline it). On an older line the preview face is absent (or refuses the address), and the name keeps its original system-open behavior; the `sidebar.nav` probe pins the navigation face's spelling.
+*Figures the plugin prints that the harness also prints.*
 
-The Context Dashboard's DeepSeek balance capsule is an all-optional stack, so it arms nowhere it cannot: the host reaches the `settings` and `credentials` services only inside a deferred `ctx.inject` (and re-reads them per request, so a key added while the host runs is picked up on the next open), mounts `/api/dsh-context/balance` through the same Connection exact-route registry as the detail and backfill routes, and the outbound `/user/balance` read carries the key only inside the host process. The capsule appears only on a live, well-formed answer; a deployment whose llm-deepseek provider is not composed (no `llm-deepseek` settings section), whose credentials service cannot resolve the key, whose connection service lacks the exact-route registry, or whose platform read fails (network, non-2xx, malformed payload, a third-party endpoint that does not serve the balance path) answers a typed `null` and the browser renders nothing — no pill, no spinner, no error state.
+1. **Mirror, don't import.** Re-fit when a supported line moves an implementation; verify differentially against the harness's own projections (§8). Right-hand paths are `dsh:` tree paths.
 
-## What each check means
+| Plugin site | dsh source mirrored |
+| --- | --- |
+| `src/shared/estimate.ts` | `packages/llm/token-meter/src/estimate.ts` — `estimateSystemMessage` and its per-block text arm |
+| `src/shared/fileTokens.ts` | `packages/llm/llm/src/content.ts` `fileHandleText` — a `file` block costs its request handle text, never its bytes (priced via `packages/llm/token-meter/src/route-pricing.ts`); price the pathless arm |
+| TPS chip first-token anchor | `packages/llm/llm/src/assistant-stream.ts` `assistantStreamFirstTokenTime` |
+| `src/client/headline.ts` `occupancyPercent` | `packages/client/ui-conversation/src/client/context-occupancy.ts` — internal to the kernel bundle, no package export, hence mirrored |
+| `src/client/reserve.ts` | `packages/compaction/compaction-basic/src/config.ts` — only the shipped defaults (`thresholdRatio` 0.8, `headroomTokens` 65536): preset realms make a deployment's policy unreadable; when `contextWindow − reservedOutput − headroomTokens` is non-positive the backend refuses (`TargetPressureConfigError`), so the bar paints no masks |
 
-- **Automated seam matrix** — part of this repository's `pnpm test` (the `compat` vitest project). For every baseline tag it stages the harness's REAL sources at that tag, boots the plugin's built host entry into that tag's actual `SessionProjectionRegistry` on the cordis release the line vendors, and probes the tag's client seams (slots, finalized-nodes seat, image loader, history face/envelope, markdown chrome, platform module table, that generation's durable-event vocabulary, the right Sidebar tab seam, its guide-entry contract and its resource-navigation face where the line ships one, the preferences card seat and settings transport). Definitions live in `tests/baselines.ts`; the release workflow fetches the pinned baseline tags before testing. Optional seams are asserted BOTH ways: the right Sidebar tab registers only on the generation that serves it, every older line is proven to have no such service, and the preferences card's slot and transport are proven present/absent per generation, so the plugin's deferred registrations stay inert instead of pending.
-- **Statistics against the harness's own folds** — the plugin's figures are differentially checked against the harness's OWN projection values (`sessionStats`, `contextBreakdown`, `contextPressure`, `tokenUsage`) over real V0 and V3 session logs: system/tools/message tokens, per-request counts, turns/steps, TTFT, generation, tool time, and every billed cost bucket match exactly, and a migrated V0→V3 log reproduces the same figures as its V0 original.
-- **Disposable-profile install / uninstall** — for each release, that exact `dsh` CLI version was installed from npm into a temporary `DSH_HOME` (the real `~/.dsh` is never touched), then:
-  1. `dsh plugin --profile <disposable> add dsh-context` — install OK;
-  2. `dsh --profile <disposable> --dump-config` — the bundle's `- id: dsh-context` row composes into the effective configuration (exactly 1 row);
-  3. `dsh plugin --profile <disposable> remove dsh-context` — uninstall OK, dump-config back to 0 rows.
+- **Limitation — declared divergence:** the timing card's wait/generation boundary opens at the first OBSERVABLE instant (the first token, or an earlier `block-start` marker the token packing could not stamp), not at the meter's first-token anchor — so marker-tiled decode buckets and the split never double-count one window.
 
-## Scope
+## 5 · Client surface
 
-These checks prove source-level seam compatibility, statistical parity with the harness's own folds, and disposable-profile install/start-composition/uninstall per release. They are not a claim of full web-app runtime acceptance on a real Profile — visible UI behavior depends on the harness generation and the browser half, which the seam matrix approximates from the tag's sources.
+*What the browser half may rely on.*
 
-## Upgrading from an older plugin build
+**Seams**
 
-The skill-injection category (issue #66) bumps the timeline projection's `stateVersion` (18 → 19): skill content — the `<available_skills>` catalog digest, a user-explicit `/name` invocation's instructions message, and the content a `skill`-tool load returns — now folds into its own `skill` composition bucket instead of `inject`/`tool`. The re-bucketing changes the fold's per-category sums, so on upgrade every cached per-session row is invalidated and re-folded from the durable log, which rebuilds them under the new categories. The bump orphans the `contextTimeline` key for idle sessions, which have no refresh channel until they go live again — such a session re-folds when its log receives its next event. New sessions are exact from their first event.
+1. **Every capability rides an OPTIONAL seam** — deferred `ctx.inject` (never a hard `inject`), the face re-proved before use, the registration guarded, the module declared in `dsh.client.inject`. No service → no capability: no pending fiber, no throw. Per-line faces are pinned in `tests/baselines.ts` and probed by §8's matrix.
+2. **Mount at most once per page** (issue #137) — the client-plugin runner force-assigns a fresh shadowing priority to every registration, so the slot registry's same-priority duplicate guard never fires across a double mount. Read the raw ledger; mount nothing when `context-jump` is already seated; the read fails open. (dsh: `packages/client/ui-renderer/src/client/registry.ts` `SlotRegistry.entries`; probe `ledger`)
+3. **Session jump uses the sidebar's own verb**, `uiWorkspace.openSession(SessionTarget)` — never the sessions service's `open(id)`, removed by the `0.1.6` selection refactor (issue #90). (dsh: `packages/client/ui-workspace/src/client/navigation.ts`; probe `sessionNav`)
+4. **The member card's open prefers the right Sidebar's subagent chat**, addressed by the row's own direct parent — a face that is absent or leaves the address unclaimed keeps rule 3's whole-view jump. (dsh: `packages/client/ui-subagent/src/client/sidebar-chat/index.tsx`, `packages/client/ui-sidebar-right/src/client/service.ts`)
 
-The Agent network card covers the orphaned relatives without waiting for a visit: a session listed without a `contextTimeline` row (composition absent, occupancy only) fetches its slim head from the plugin's `/api/dsh-context/detail` fetch route (mounted through Connection's exact-route registry, behind the same authenticated `/api` fence), which folds the durable log on demand — the node's ring renders the full composition the first time the card opens. The same backfill serves sessions whose cache predates the plugin's installation entirely. Where the route is unavailable (the baseline gate, a connection service without the exact-route registry), the card degrades to the pressure-only occupancy ring as before.
+**Boundary**
 
-The session cards' last-user-message preview (`lastUser` on the `contextTimeline` head) bumps the timeline projection's `stateVersion` (19 → 20): a stale row can never gain the field while its session is idle (it only lands when a user message folds), so on upgrade every cached timeline row is invalidated and refolded from the durable log. To keep the bump from orphaning idle sessions' rows, the warm-up (`src/host/backfill.ts`) probes BOTH dashboard rows — `contextActivity` AND `contextTimeline` — and cold-refolds every session whose either row is missing or version-stale, so previews (and every other head figure) are exact for the whole session list the first time the dashboard opens after the upgrade. A deployment without the cold-path services — or whose client cannot mount the warm-up's trigger route — degrades to the per-session refold on the session's next activity, the same as pre-warm-up upgrades.
+5. **Re-prove everything at the boundary** — collections re-proven, scalars zeroed, whole-value absence stays `null` (the loading screen); structural narrowing over blind casts; skip elements that fail the shape instead of throwing. (`src/client/timelineSource.ts`)
+6. **Isolate per-item work over hostile objects**; every async read resolves to data or a retryable failure note — never an eternal spinner. (`src/client/timelineSource.ts`)
+7. **A pushed revision decrease resets the detail ledger** — stale reads never merge into the new head. (`src/client/timelineSource.ts`)
+8. **Fetch routes ride browser-relative spellings** (issue #159) — the client never issues a root-absolute `/api/...` URL: fetch resolves the relative form against the page's document base, so a deployment behind a path-prefixed reverse proxy (page at `/app/dsh/`) keeps its prefix, where a root-absolute spelling 404s at the gateway. (`src/client/apiRoutes.ts`)
 
-The Context Dashboard (the sidebar-foot panel) reads its `contextActivity` projection — a per-day ledger of billed tokens and completed requests, `stateVersion` 1 — off every session-list row's projection column. A new key is purely additive: no existing cached row is invalidated, but sessions folded before the unit existed (and sessions that predate the plugin entirely, whose `contextTimeline`/`contextHeaders` rows are missing too) have nothing to serve until they next go live. The plugin therefore runs a one-pass warm-up on demand (`src/host/backfill.ts`): the dashboard is the rows' only reader, so its panel POSTs the plugin's `/api/dsh-context/backfill` fetch route (the same authenticated `/api` fence as the detail route) the first time it opens, and only then does the host walk the corpus — for every stored session missing the row it cold-reads the durable log once through the projection cache's own cold-read ladder (`coldSnapshot`), which seeds each unit from its cached rows, folds the remainder, and writes the refreshed checkpoint back. The pass runs once per host process (later opens and later POSTs are no-ops); live sessions are skipped (they fold for themselves); a legacy log the running harness refuses to migrate (e.g. a v0 artifact carrying events outside the released migration surface) is permanent — its per-session detail logs at debug and the pass ends with one summary info line, so an unmigratable corpus costs one line per dashboard-open process, not one warn per session per boot; and a deployment whose client never opens the dashboard never cold-reads a thing. A deployment without the sessionQuery/sessionProjectionCache/sessionPersistence/sessions services — or whose connection service lacks the exact-route registry — simply never arms the pass (such a client could not open the dashboard to read the rows anyway).
+- **Limitation — complete prompt sections:** a deployment registering a `complete` system-prompt section keeps ONLY that section (registry design); `promptPrefix`/`promptSuffix` are dropped there. (dsh: `packages/core/system-prompt`)
 
-To force a full refold of an existing session sooner, delete its cached projection row — it is a derived cache and is rebuilt from the durable log:
+## 6 · Projection cache
 
-```bash
-rm ~/.dsh/storages/session_projcache/sessions/<session-id>.json
-```
+*How fold-state changes reach existing installations.*
+
+1. **Bump a unit's `stateVersion` iff later events cannot backfill the change** — running totals, per-step collections flushed at `step/end`, materialized envelopes. Serve-time-derivable fields need no bump, and new wire fields are additive-optional: a pre-field row serves without them and the client degrades per §5's boundary rules. Current versions sit at each unit's `stateVersion` site; past bumps live in git history.
+2. **Stale rows refold from the durable log**; the warm-up probes BOTH `contextActivity` and `contextTimeline` and cold-refolds missing or stale rows on first page open, so idle sessions rebuild exactly. (`src/host/backfill.ts`)
+3. **Every cold read passes the host-wide gate** (issue #121) — FIFO, one at a time, only while the V8 heap sits below two-thirds of its ceiling; a skipped read takes the caller's designed no-data path, never a failure. (`src/host/coldRead.ts`)
+4. **The warm-up folds sessions over 2,000 events in in-memory slices** (issue #145) through `sessionProjections.restore`/`hydrate`, `sessions.prepare`, and `sessionProjectionCache.write`, with one write-back at the log end and byte-identical rows to a single-shot `coldSnapshot`; any face absent → the session stays on the single-shot path (the faces exist on every supported line, §8's matrix probes them). (`src/host/backfill.ts`)
+
+- **Procedure — force one session's refold:** `rm ~/.dsh/storages/session_projcache/sessions/<session-id>.json` — a derived cache, rebuilt from the durable log.
+
+## 7 · Packaging
+
+*Dependency declarations that look dead and are not.*
+
+1. **Declare `@deepseek-ai/dsh-client-ui-primitives`' bare imports as this plugin's own build/test requirements** — its `lib/index.js` imports `shiki`, `@shikijs/langs/*`, `katex`, the `mdast-util-*`/`micromark-*` chain, `anser`, `clsx`, `diff`, and `simple-icons` while listing them as its own devDependencies. The client bundle never carries them (`deps.onlyBundle` + the `dsh-client-bundle-purity` plugin, `tsdown.config.ts`). If a primitives release starts inlining them, drop the matching entries in the same change.
+2. **Declare `@deepseek-ai/dsh-client-store`, `@deepseek-ai/dsh-util-code-language`, and the store's own `zustand` + `immer`** — same reason, reached only through the primitives dist.
+3. **Never add `tailwindcss` as a direct dependency** — `@tailwindcss/node` pins it at the same version; a second resolving copy breaks the napi native binding (`src/client/styles/tailwind.css`).
+
+## 8 · Verification
+
+*How every claim above is proven.*
+
+- **Check — seam matrix** (the `compat` vitest project, every `pnpm test` in CI): stages the harness's REAL sources per baseline tag, boots the BUILT plugin into the tag's actual registries on its vendored cordis, probes the host and client seams, asserts retired seams ABSENT (`settings.register`, settings `get(ns)`, sessions `open(id)`), and asserts every event family `src/host/fold.ts` switches on is declared by every baseline. Requires a dsh checkout (`DSH_REPO`, default `~/dev/deepseek-harness`) and `pnpm run build` first; CI fails on a missing tag, a dev box skips with a printed reason.
+- **Check — differential statistics:** figures verified equal to the harness's own projections (`sessionStats`, `contextBreakdown`, `contextPressure`, `tokenUsage`) over real session logs — tokens, request counts, turns/steps, TTFT, generation, tool time, billed cost buckets.
+- **Check — install (manual, per release):** install the exact CLI into a disposable `DSH_HOME` (never the real `~/.dsh`); `dsh plugin add dsh-context` → `--dump-config` shows exactly 1 composed row → `dsh plugin remove` → 0 rows. Pin an exact plugin version for a just-published build — the profile's package-manager release-age policy can lag.
+- **Check — hostile fixtures:** every guard branch carries them (wrong types, missing fields, throwing accessors) — an untested guard is an unverified promise.
+- **Procedure — add a baseline:** one `Baseline` entry in `tests/baselines.ts` (tag, vendored cordis, faces) plus the tag in both workflows' fetch step; run `pnpm test` and re-fit whichever seam a failing probe names.
+- **Limitation — scope:** these checks prove source-level seam compatibility, statistical parity, and install/uninstall per release — not full web-app runtime acceptance on a real profile.

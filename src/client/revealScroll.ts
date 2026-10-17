@@ -1,26 +1,18 @@
-/**
- * Scroll an element's nearest scrollable ancestor so the element tops that
- * scrollport. The jump's landing reveal needs this host-agnostic: the
- * conversation tab scrolls the shared `[data-conversation-scroll]` container
- * while the right Sidebar scrolls dockkit's pane body (a CSS-module class,
- * no stable attribute of its own), so the walk takes whichever ancestor
- * actually scrolls — the rect delta lands the anchor flush regardless of the
- * container's current position. `document.body` ends the walk: the page
- * itself never scrolls. False — never a throw — when no ancestor scrolls (the
- * layout already shows the element) or the chain turns hostile.
- *
- * @module dsh-context/client/revealScroll
- */
+/** Scroll an element's nearest operative scrollable ancestor so the element tops that scrollport.
+ * Host-agnostic: the conversation tab scrolls a shared container, while the right Sidebar's scroller
+ * differs per shell layout. False — never a throw — when no ancestor scrolls or the chain turns hostile. */
 
 export function revealInScrollParent(anchor: Element): boolean {
   try {
     for (let el = anchor.parentElement; el !== null && el !== document.body; el = el.parentElement) {
       const oy = window.getComputedStyle(el).overflowY
-      if (oy === 'auto' || oy === 'scroll') {
+      // The OPERATIVE scroller, not just an overflow-styled one: a box that grows with its content
+      // (the Context tab's own `.lc-root` where an outer container scrolls) reports auto yet never moves.
+      if ((oy === 'auto' || oy === 'scroll') && el.scrollHeight > el.clientHeight) {
         el.scrollTop += anchor.getBoundingClientRect().top - el.getBoundingClientRect().top
         return true
       }
     }
-  } catch { /* hostile chain: the reveal degrades to nothing */ }
+  } catch { /* the reveal degrades to nothing */ }
   return false
 }

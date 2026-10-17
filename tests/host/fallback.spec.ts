@@ -1,8 +1,5 @@
-// The baseline gate's fallback units (src/host/fallback.ts), driven over the
-// REAL session-projection registry: the gate's value arrives through the
-// ordinary snapshot cut no matter what the log carries, both registry
-// contract generations read their own shape off the definition, and cached
-// rows from either direction seed harmlessly.
+// The baseline gate's fallback units (src/host/fallback.ts) over the REAL session-projection registry:
+// the gate's value arrives through the ordinary snapshot cut, no matter what the log carries.
 
 import assert from 'node:assert/strict'
 import { describe, test } from 'vitest'
@@ -26,7 +23,7 @@ async function boot() {
 
 function appendAnything(session: Session): void {
   session.append('request/header', {
-    header: { config: { model: 'deepseek-v4-flash', provider: 'deepseek' }, system: 'sys', tools: [] },
+    header: { config: { model: 'deepseek-v4-flash', provider: 'deepseek' } },
     reason: 'initial',
   })
   session.append('user/message', {

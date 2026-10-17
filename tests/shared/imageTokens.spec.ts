@@ -1,7 +1,5 @@
-// The official DeepSeek vision image-token calculator port
-// (src/shared/imageTokens.ts). Reference values verified against the docs
-// calculator itself (see the module header); the pixel sweep pins the
-// documented 117–384 band and the null contract for degenerate input.
+// The official DeepSeek vision image-token calculator port (src/shared/imageTokens.ts). Reference values verified against the docs
+// calculator itself (see the module header).
 
 import assert from 'node:assert/strict'
 import { describe, test } from 'vitest'

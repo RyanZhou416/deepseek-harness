@@ -1,7 +1,3 @@
-// events.tsx — makeEventText pure helpers plus EventList rendered with real
-// React (real shared icon components), including the truncation layout effect
-// and the empty→non-empty hook-count regression (issue #12).
-
 import { act, createElement as h } from 'react'
 import assert from 'node:assert/strict'
 import { describe, test } from 'vitest'
@@ -57,17 +53,17 @@ describe('makeEventText.eventLabel', () => {
 
 describe('makeEventText.eventAt', () => {
   test('boundary events label the gap: same-turn range, cross-turn range, single point', () => {
-    assert.equal(eventAt(ev({ kind: 'compaction', turn: 2, step: 4, fromTurn: 2, fromStep: 3 })), 'Turn 2 · Step 3→4')
-    assert.equal(eventAt(ev({ kind: 'prune', turn: 51, step: 1, fromTurn: 50, fromStep: 8 })), 'Turn 50 · Step 8 → Turn 51 · Step 1')
-    assert.equal(eventAt(ev({ kind: 'compaction', turn: 2, step: 3 })), 'Turn 2 · Step 3')
+    assert.equal(eventAt(ev({ kind: 'compaction', turn: 2, step: 4, fromTurn: 2, fromStep: 3 })), 'T2 S3→4')
+    assert.equal(eventAt(ev({ kind: 'prune', turn: 51, step: 1, fromTurn: 50, fromStep: 8 })), 'T50 S8 → T51 S1')
+    assert.equal(eventAt(ev({ kind: 'compaction', turn: 2, step: 3 })), 'T2 S3')
     // A partial from-side falls back to the single point.
-    assert.equal(eventAt(ev({ kind: 'compaction', turn: 2, step: 3, fromTurn: 2 })), 'Turn 2 · Step 3')
+    assert.equal(eventAt(ev({ kind: 'compaction', turn: 2, step: 3, fromTurn: 2 })), 'T2 S3')
   })
 
   test('missing turn/step yields null; non-boundary kinds keep their single point', () => {
     assert.equal(eventAt(ev({ kind: 'compaction' })), null)
     assert.equal(eventAt(ev({ kind: 'prune', turn: 1 })), null)
-    assert.equal(eventAt(ev({ kind: 'inject', turn: 1, step: 2 })), 'Turn 1 · Step 2')
+    assert.equal(eventAt(ev({ kind: 'inject', turn: 1, step: 2 })), 'T1 S2')
     assert.equal(eventAt(ev({ kind: 'model' })), null)
   })
 })
@@ -96,8 +92,7 @@ describe('EventList', () => {
     assert.ok(text(rows[0]).includes('Context Injection'))
     assert.equal(queryAll(rows[0], '.lc-event-tokens').length, 0)
 
-    // Foreign kind: EVENT_ICONS miss → '•' fallback, and the kind label
-    // resolves through the locale chain to the key itself.
+    // Foreign kind: EVENT_ICONS miss → '•' fallback, and the kind label resolves through the locale chain to the key itself.
     assert.equal(query(rows[1], '.lc-event-icon').textContent, '•')
     assert.equal(query(rows[1], '.lc-kind').textContent, 'kind.mystery')
 
@@ -108,17 +103,17 @@ describe('EventList', () => {
     assert.equal(down.textContent, '−100')
     assert.equal(queryAll(rows[2], '.lc-event-at').length, 0)
 
-    // Model switch: real IconBranchOutline16 svg.
+    // Model switch: real IconBranchOutlineRegular svg.
     assert.ok(query(rows[3], '.lc-event-icon svg') instanceof SVGElement)
     assert.ok(text(rows[3]).includes('Model switched: a → b'))
     assert.equal(query(rows[3], '.lc-kind').textContent, 'Switch')
 
-    // Inject: real IconPlusOutline16 svg, positive token delta, position, time.
+    // Inject: real IconPlusOutlineRegular svg, positive token delta, position, time.
     assert.ok(query(rows[4], '.lc-event-icon svg') instanceof SVGElement)
     const up = query(rows[4], '.lc-event-tokens')
     assert.ok(up.className.includes('lc-up'))
     assert.equal(up.textContent, '+50')
-    assert.equal(query(rows[4], '.lc-event-at').textContent, 'Turn 1 · Step 1')
+    assert.equal(query(rows[4], '.lc-event-at').textContent, 'T1 S1')
     assert.equal(query(rows[4], '.lc-event-time').textContent, fmtTime(time))
     await m.unmount()
   })
@@ -133,10 +128,8 @@ describe('EventList', () => {
     assert.equal(labels[0].getAttribute('title'), '')
     assert.equal(labels[1].getAttribute('title'), '')
 
-    // Newest first: labels[0] is the prune, labels[1] the inject.
-    // Force an empty-text overflow on the prune label (the
-    // `el.textContent || ''` fallback arm) and a real overflow on the
-    // inject label, then resize.
+    // Newest first: labels[0] is the prune, labels[1] the inject. Force an empty-text overflow on the prune label (the
+    // `el.textContent || ''` fallback arm) and a real overflow on the inject label, then resize.
     Object.defineProperty(labels[0], 'scrollWidth', { value: 100, configurable: true })
     Object.defineProperty(labels[1], 'scrollWidth', { value: 100, configurable: true })
     labels[0].textContent = ''
@@ -195,6 +188,31 @@ describe('EventList', () => {
     await m.update(h(EventList, { events: [] }))
     assert.ok(text(m.container).includes('No context events yet'))
     await m.unmount()
+  })
+
+  test('an injection label links into the browser; other kinds and a handler-less list keep plain labels', async () => {
+    const events = [
+      ev({ seq: 1, kind: 'inject', form: 'notice', name: 'hook' }),
+      ev({ seq: 2, kind: 'prune' }),
+    ]
+    const focused: ContextEventRecord[] = []
+    const m = await mount(h(EventList, { events, onInjectFocus: e => { focused.push(e) } }))
+    const rows = queryAll(m.container, '.lc-event')
+    // Newest first: the prune row leads, and only the injection becomes a link.
+    assert.equal(rows[0].querySelector('.lc-event-jump'), null)
+    assert.equal(query(rows[0], '.lc-event-label').tagName, 'SPAN')
+    const link = query(rows[1], '.lc-event-jump')
+    assert.equal(link.tagName, 'BUTTON')
+    assert.equal(link.textContent, 'Notice · hook')
+    await click(link)
+    assert.deepEqual(focused.map(e => e.seq), [1])
+    await m.unmount()
+
+    // No handler (a view with no browser to open): every label stays a plain span.
+    const plain = await mount(h(EventList, { events }))
+    assert.equal(queryAll(plain.container, '.lc-event-jump').length, 0)
+    assert.equal(queryAll(plain.container, '.lc-event-label').length, 2)
+    await plain.unmount()
   })
 })
 

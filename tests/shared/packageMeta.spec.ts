@@ -1,9 +1,5 @@
-// The package's Plugins-page metadata (locale/en.json, locale/zh.json): the
-// localized title/description the Host's package-meta reader serves to the
-// Plugins page and settings inventory, keyed by the active locale with `en`
-// as the fallback. The specs pin the files' shape AND their declaration in
-// package.json — a file the exports/files lists miss would work from a
-// linked checkout and silently vanish from the published package.
+// The specs pin the locale files' shape AND their listing in package.json's `files`/`exports` — a locale file those
+// lists miss would work from a linked checkout and silently vanish from the published package.
 
 import { readFile, readdir } from 'node:fs/promises'
 import assert from 'node:assert/strict'
