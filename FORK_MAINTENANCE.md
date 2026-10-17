@@ -572,7 +572,10 @@ Fork 不再维护独立 subagent Queue Remote 或错误码。后续上游合并�
 
 `SlotErrorBoundary` 与 dry-cell 出口原先只渲染空的 `<div data-slot-error>`：任何 slot 渲染异常（包括 composer 的 inject 崩溃）都表现为静默消失、只能刷新恢复（上游讨论 #1614 的第一处缺陷）。本 fork 改为可见的 `role="alert"` 面板：显示运行时错误信息与一个重新加载按钮（`aria-label` 取 slot key），并保留 `data-slot-error` 供测试与诊断；不引入新的本地化文案，避免 `client/locale` 与 renderer 之间的项目引用环（locale 已引用 ui-renderer）。**Preservation rule.** 上游重写崩溃面时保留可见性、`role="alert"`、重新加载动作与 `data-slot-error`。**Focused verification.** `packages/client/ui-renderer/tests/scoped-slots.client.spec.tsx` 的 "renders a visible crash face" 用例。
 
-**Known gap.** fork base 的 `OccurrenceRecoveryState` 与 `retryDomMutation`（keyed occurrence 的崩溃恢复，Chat 的 `AssistantRecovery` 依赖它）在 0.2.1 合并后只剩 `ui-slots` 的类型与测试，renderer 实现缺失；该 spec 的 16 个 recovery 用例在本次改动之前就已失败。恢复该实现是独立工作项。
+#### Occurrence crash recovery
+
+fork 独有的 occurrence 级崩溃恢复在 0.2.1 合并后只剩 `ui-slots` 的类型与测试，renderer 实现缺失：keyed occurrence 失败只替换自身并渲染 owner fallback，其他 occurrence 与注册项保持；`retryDomMutation` 允许每个 generation 在 fallback 提交后重挂一次富渲染（针对翻译扩展改动 DOM 产生的 `NotFoundError`），generation 由 Session 实例与 owner `resetKey` 组合，变化即重置预算。本次按 fork base 移植回 `OccurrenceRecoveryState`、`settleRecoveryFailure`、`OccurrenceCrashCatcher` 与 `OccurrenceSlot`，并把 `guarded` 的 occurrence 分支接回。**Preservation rule.** 上游再次重构 outlet dispatch 时保留 occurrence 分支与 generation 重置语义；fallback 自身失败必须冒泡到父边界，不得重新进入本恢复逻辑。**Focused verification.** `packages/client/ui-renderer/tests/scoped-slots.client.spec.tsx` 的 16 个 occurrence 用例；整个 renderer 套件 162 项通过。
+
 
 ### Released V3 error-turn migration
 

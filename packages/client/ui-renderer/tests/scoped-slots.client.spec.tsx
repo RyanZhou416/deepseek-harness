@@ -1889,7 +1889,8 @@ describe('occurrence failure scope', () => {
     // occurrence recovery is never asked to render itself again. React may run
     // several diagnostic passes for the nested failure; only its outcome is asserted.
     expect(view.container.querySelector('[data-slot-error="root"]')).not.toBeNull()
-    expect(view.container.textContent).toBe('')
+  // The crash face is visible now; the fallback's failure never re-enters the recovery.
+  expect(view.container.querySelector('[data-slot-error="root"] button')).not.toBeNull()
     expect(report.mock.calls.map(call => call[3])).toEqual([{ abdicate: false }, { abdicate: true }])
     report.mockRestore()
   })
