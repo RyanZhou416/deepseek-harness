@@ -23,6 +23,7 @@ function scope(extra = {}) {
   const listeners = new Map()
   const effects = []
   const ctx = {
+    agents: { list: () => [] },
     ...extra, listeners,
     logger: { warn() {} },
     on(name, fn) {
@@ -74,6 +75,7 @@ async function requestSelection(agent) {
 
 await test('native SubagentRuntime keeps its receiver through FIFO delivery and retirement guard', async t => {
   const host = new Context()
+  host.provide('workingDirectory', {})
   const fiber = host.plugin(SubagentRuntime)
   t.after(() => fiber.dispose())
   await fiber.await()
@@ -121,7 +123,8 @@ await test('native SubagentRuntime keeps its receiver through FIFO delivery and 
   }
   // Only the downstream continuation manager is replaced. The real Cordis
   // service method still executes this.requireContinuations(), unlike old fakes.
-  runtime.continuations = manager
+  if (typeof runtime.startActivation === 'function') runtime.manager = manager
+  else runtime.continuations = manager
   const captain = { id: 'captain', session: { header: {} } }
   const ctx = scope({ subagents: runtime })
   const methodKey = typeof runtime.followup === 'function' ? 'followup' : typeof runtime[deliverKey] === 'function' ? deliverKey : queueKey
@@ -387,4 +390,102 @@ await test('serial initialization failure vetoes creation instead of admitting a
   installContinuableMemberSetup(ctx, () => { throw new Error('damaged durable model route') })
   assert.throws(() => ctx.emit('agent/created', { agent: child(), source: 'resume' }), /damaged durable model route/)
   ctx.dispose()
+})
+
+await test('managed activations restore scoped persona and tools before fresh and cold requests', async t => {
+  const workspace = await mkdtemp(join(tmpdir(), 'agent-teams-managed-'))
+  t.after(() => rm(workspace, { recursive: true, force: true }))
+  const setup = { persona: 'EXACT_MEMBER_PERSONA', toolFilter: { deny: ['captain_only'] } }
+  const team = { id: 'team', name: 'Team', captainSessionId: 'captain', createdAt: 1, taskSeq: 0, tasks: [],
+    members: [{ id: 'member-id', name: 'worker', status: 'idle', joinedAt: 1,
+      provider: 'primary', model: 'model', runtimeSetup: setup }] }
+  await createTeamDir(join(workspace, '.agent-teams'), team)
+  for (const cold of [false, true]) {
+    const ctx = scope({ subagents: { ...modernRuntime(), startActivation() {} } })
+    const bridge = installMemberSelectionRuntime(ctx, '.agent-teams')
+    const agent = child({ workspace })
+    const installed = new Map()
+    agent.ctx.tools = { restrict(filter) { installed.set('filter', filter); return () => installed.delete('filter') } }
+    agent.ctx.systemPrompt = { getSectionOrder: () => 1, section(section) {
+      installed.set('persona', section.text); return () => installed.delete('persona')
+    } }
+    const admit = async () => {
+      ctx.emit('agent/created', { agent, source: cold ? 'resume' : 'create' })
+      assert.deepEqual(installed.get('filter'), setup.toolFilter)
+      assert.equal(installed.get('persona'), setup.persona)
+      assert.equal((await selection(agent)).provider, 'primary')
+    }
+    if (cold) await admit()
+    else await bridge.withPending('captain', 'agent-teams:team:worker', { provider: 'primary', model: 'model' }, admit, setup)
+    ctx.dispose()
+    assert.equal(installed.size, 0)
+  }
+})
+
+await test('managed start strips retired options and guards native activation creation', async () => {
+  const { startMember, guardSubagentCreation, drainMemberChildren } = await import('../lib/harness-compat.js')
+  let received, drained
+  const runtime = {
+    async startActivation(spec) { assert.equal(this, runtime); received = spec; return { childId: 'child', result: Promise.resolve({}) } },
+    async drainChildren(parent, ids) { assert.equal(this, runtime); drained = ids },
+  }
+  const ctx = scope({ subagents: runtime })
+  guardSubagentCreation(ctx, parent => { if (parent.id === 'member') throw Error('depth exceeded') })
+  const spec = { provider: 'spawn', label: 'worker', signal, request: { parent: { id: 'captain' }, prompt: content, persona: 'role', toolFilter: { deny: [] } } }
+  assert.equal((await startMember(runtime, spec)).childId, 'child')
+  assert.equal(received.delivery, 'parent')
+  assert.ok(!('persona' in received.request)); assert.ok(!('toolFilter' in received.request))
+  await assert.rejects(runtime.startActivation({ ...spec, request: { ...spec.request, parent: { id: 'member' } } }), /depth exceeded/)
+  await drainMemberChildren(runtime, spec.request.parent, ['child'])
+  assert.deepEqual(drained, ['child'])
+  ctx.dispose()
+  await runtime.startActivation({ ...spec, request: { ...spec.request, parent: { id: 'member' } } })
+})
+
+await test('managed cold resume rejects missing setup and fresh failed persona rolls back tool scope', async t => {
+  const workspace = await mkdtemp(join(tmpdir(), 'agent-teams-managed-failure-'))
+  t.after(() => rm(workspace, { recursive: true, force: true }))
+  await createTeamDir(join(workspace, '.agent-teams'), {
+    id: 'team', name: 'Team', captainSessionId: 'captain', createdAt: 1, taskSeq: 0, tasks: [],
+    members: [{ id: 'member-id', name: 'worker', status: 'idle', joinedAt: 1, provider: 'primary', model: 'model' }],
+  })
+  const ctx = scope({ subagents: { ...modernRuntime(), startActivation() {} } })
+  const bridge = installMemberSelectionRuntime(ctx, '.agent-teams')
+  const cold = child({ workspace })
+  assert.throws(() => ctx.emit('agent/created', { agent: cold, source: 'resume' }), /runtime setup is missing/)
+  assert.equal(cold.ctx.listeners.get('agent/pre-step').size, 0)
+  const fresh = child({ workspace })
+  let restricted = false
+  fresh.ctx.tools = { restrict() { restricted = true; return () => { restricted = false } } }
+  fresh.ctx.systemPrompt = { getSectionOrder: () => 1, section() { throw Error('persona refused') } }
+  await assert.rejects(bridge.withPending('captain', 'agent-teams:team:worker', { provider: 'primary', model: 'model' }, async () => {
+    ctx.emit('agent/created', { agent: fresh, source: 'create' })
+  }, { persona: 'role', toolFilter: { deny: [] } }), /persona refused/)
+  assert.equal(restricted, false)
+  assert.equal(fresh.ctx.listeners.get('agent/pre-step').size, 0)
+  assert.equal(bridge.isPendingMember(fresh), false)
+  ctx.dispose()
+})
+
+await test('reload rehydrates live agents once and rejects requests when restoration fails', async () => {
+  const agent = child()
+  const extra = { subagents: modernRuntime(), agents: { list: () => [agent] } }
+  let installed = 0, disposed = 0
+  const setup = () => { installed++; return () => { disposed++ } }
+  const first = scope(extra)
+  installContinuableMemberSetup(first, setup)
+  first.dispose()
+  const second = scope(extra)
+  installContinuableMemberSetup(second, setup)
+  second.emit('agent/created', { agent, source: 'resume' })
+  assert.deepEqual({ installed, disposed }, { installed: 2, disposed: 1 })
+  second.dispose()
+  assert.equal(disposed, 2)
+  const broken = scope(extra)
+  installContinuableMemberSetup(broken, () => { throw new Error('invalid saved setup') })
+  await assert.rejects(() => requestSelection(agent), /invalid saved setup/)
+  broken.dispose()
+  assert.equal((await requestSelection(agent)).model, 'parent-model')
+  agent.ctx.dispose()
+  assert.equal(disposed, 2)
 })

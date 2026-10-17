@@ -8,7 +8,7 @@
  * sendMessage instead steers a running Agent and must never carry team jobs.
  */
 import type { Context } from '@deepseek-ai/cordis'
-import type { Agent } from '@deepseek-ai/dsh-agent'
+import type { Agent, AgentOptions } from '@deepseek-ai/dsh-agent'
 import type { ContentBlock, MessageId, MessageSource } from '@deepseek-ai/dsh-llm'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import * as dshSession from '@deepseek-ai/dsh-session'
@@ -41,6 +41,70 @@ interface RuntimeBoundary {
   sendMessage?: Send
   [hostPromptQueue]?: Queue
   [hostPromptDeliver]?: Deliver
+}
+
+/** Version-independent creation contract; legacy-only options stay at this seam. */
+export interface MemberStartSpec {
+  provider: string
+  label: string
+  request: {
+    parent: Agent
+    prompt: ContentBlock[]
+    agentOptions?: AgentOptions
+    persona?: string
+    toolFilter?: MemberToolFilter
+  }
+  signal: AbortSignal
+}
+interface CreationBoundary {
+  start?: (name: string, request: MemberStartSpec['request']) => Promise<unknown>
+  startContinuable?: (spec: MemberStartSpec) => Promise<{ childId: SessionId }>
+  startActivation?: (spec: MemberStartSpec & { delivery: 'parent' }) => Promise<{
+    childId: SessionId
+    result: Promise<unknown>
+  }>
+}
+export function usesManagedActivations(runtime: Context['subagents']): boolean {
+  return typeof (runtime as unknown as CreationBoundary).startActivation === 'function'
+}
+
+export async function startMember(runtime: Context['subagents'], spec: MemberStartSpec): Promise<{ childId: SessionId }> {
+  const host = runtime as unknown as CreationBoundary
+  if (typeof host.startActivation === 'function') {
+    const { persona: _persona, toolFilter: _filter, ...request } = spec.request
+    const activation = await host.startActivation.call(runtime, { ...spec, request, delivery: 'parent' })
+    // Preserve native settlement as the missing-report/error fallback on both
+    // fresh and resumed activations. mailbox.ts deduplicates successful reports.
+    void activation.result.catch(() => undefined)
+    return activation
+  }
+  if (typeof host.startContinuable !== 'function') return unsupported('missing member creation API')
+  return host.startContinuable.call(runtime, spec)
+}
+
+/** Wrap every available creation API, restoring only this plugin's own methods. */
+export function guardSubagentCreation(ctx: Context, check: (parent: Agent) => void): void {
+  const runtime = ctx.subagents as unknown as CreationBoundary
+  ctx.effect(() => {
+    const disposers: (() => void)[] = []
+    for (const key of ['start', 'startContinuable', 'startActivation'] as const) {
+      const original = runtime[key]
+      if (typeof original !== 'function') continue
+      const descriptor = Object.getOwnPropertyDescriptor(runtime, key)
+      const guarded = async (...args: unknown[]): Promise<unknown> => {
+        const request = key === 'start' ? args[1] : (args[0] as MemberStartSpec).request
+        check((request as MemberStartSpec['request']).parent)
+        return Reflect.apply(original, ctx.subagents, args)
+      }
+      Object.defineProperty(runtime, key, { value: guarded, writable: true, configurable: true })
+      disposers.push(() => {
+        if (Object.getOwnPropertyDescriptor(runtime, key)?.value !== guarded) return
+        if (descriptor === undefined) Reflect.deleteProperty(runtime, key)
+        else Object.defineProperty(runtime, key, descriptor)
+      })
+    }
+    return () => { for (const dispose of disposers) dispose() }
+  }, 'agent-teams: member delegation budget')
 }
 
 function boundary(runtime: Context['subagents']): RuntimeBoundary {
@@ -147,7 +211,7 @@ export function installContinuableMemberSetup(ctx: Context, setup: Setup): void 
   const installed = new WeakSet<Agent>()
   const active = new Set<() => void>()
   ctx.effect(() => {
-    const stop = onAgentReady(ctx, (agent, vetoable) => {
+    const attach = (agent: Agent, vetoable: boolean): void => {
       if (installed.has(agent)) return
       // Deliberately synchronous: awaiting here loses the first-request race.
       let teardown: () => void
@@ -180,11 +244,21 @@ export function installContinuableMemberSetup(ctx: Context, setup: Setup): void 
         dispose()
         throw error
       }
-    })
-    return () => {
+    }
+    const stop = onAgentReady(ctx, attach)
+    const cleanup = (): void => {
       stop()
       for (const dispose of [...active]) dispose()
     }
+    try {
+      // Reloads keep Agents alive but dispose the previous plugin's setup.
+      // Subscribe first, then hydrate the live registry; attach is idempotent.
+      for (const agent of ctx.agents.list()) attach(agent, false)
+    } catch (error) {
+      cleanup()
+      throw error
+    }
+    return cleanup
   }, 'agent-teams: member lifecycle compatibility')
 }
 
@@ -389,4 +463,15 @@ export async function startMemberWithLenientFilter<T>(
       current.deny = current.deny.filter(name => !droppable.includes(name))
     }
   }
+}
+
+/** Targeted recursive cancellation renamed with the unified activation manager. */
+export async function drainMemberChildren(runtime: Context['subagents'], parent: Agent, ids: readonly SessionId[]): Promise<void> {
+  const host = runtime as unknown as {
+    drainChildren?: (parent: Agent, ids: readonly SessionId[]) => Promise<void>
+    drainContinuableChildren?: (parent: Agent, ids: readonly SessionId[]) => Promise<void>
+  }
+  const drain = host.drainChildren ?? host.drainContinuableChildren
+  if (typeof drain !== 'function') return unsupported('missing targeted child drain')
+  await drain.call(runtime, parent, ids)
 }

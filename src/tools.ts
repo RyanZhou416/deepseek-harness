@@ -1,3 +1,4 @@
+import { drainMemberChildren } from './harness-compat.ts'
 /**
  * The `agent_teams_*` model-facing tools.
  *
@@ -524,7 +525,7 @@ async function stopTeamMemberActivations(
   // Every supported exact host has targeted recursive drain. Unlike interrupt,
   // it closes admission and clears queued work before awaiting descendants.
   signal?.throwIfAborted()
-  await ctx.subagents.drainContinuableChildren(captain, memberIds)
+  await drainMemberChildren(ctx.subagents, captain, memberIds)
 }
 
 export async function haltTeamWork(input: {
@@ -639,9 +640,7 @@ export function registerAgentTeamsTools(ctx: Context, config: ToolsConfig): Agen
   installMemberDelegationGuard(ctx, config.stateDir, config.memberMaxDepth ?? 0)
   installMailboxAdmission(ctx, config.stateDir)
   const scheduler = installTeamScheduler(ctx, { stateDir: config.stateDir, executionPrompt: config.executionPrompt, dispatch: dispatchMember })
-  const memberSelections = installMemberSelectionRuntime(ctx, config.stateDir, (workspace, teamId, memberName) => (
-    scheduler.kickMember(workspace, teamId, memberName)
-  ))
+
 
   async function dispatchMember(captain: Agent, teamId: string, memberName: string, text: string, signal: AbortSignal, mode: 'queue' | 'steer', attemptId?: string): Promise<boolean> {
     const root = stateRootOf(workspaceOf(captain), config)
@@ -911,14 +910,7 @@ export function registerAgentTeamsTools(ctx: Context, config: ToolsConfig): Agen
     return { teamId: discarded.teamId }
   }
 
-  const runtime: AgentTeamsRuntime = {
-    isPendingMember: memberSelections.isPendingMember,
-    updateStagedPlan,
-    updateStagedPlanBatch,
-    approveStagedTeam,
-    continueStagedPlanning,
-    discardStagedTeam,
-  }
+
 
   ctx.tools.register(defineTool({
     name: 'agent_teams_create',
@@ -2529,6 +2521,20 @@ export function registerAgentTeamsTools(ctx: Context, config: ToolsConfig): Agen
       return { deleted: true, team_name: team.name }
     },
   }))
+  // Live-member hydration validates saved filters against registered tools.
+  const memberSelections = installMemberSelectionRuntime(ctx, config.stateDir, (workspace, teamId, memberName) => (
+    scheduler.kickMember(workspace, teamId, memberName)
+  ))
+
+  const runtime: AgentTeamsRuntime = {
+    isPendingMember: memberSelections.isPendingMember,
+    updateStagedPlan,
+    updateStagedPlanBatch,
+    approveStagedTeam,
+    continueStagedPlanning,
+    discardStagedTeam,
+  }
+
   return runtime
 }
 

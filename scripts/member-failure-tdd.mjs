@@ -71,7 +71,7 @@ async function fixture(t, { captainStatus = 'idle', fallback, captainOffline = f
   const disposers = []
   const ctx = {
     logger: { debug() {}, warn(message) { warnings.push(message) } },
-    agents: { get(id) { return id === child.id ? child : id === captain.id && !captainOffline ? captain : undefined } },
+    agents: { list: () => [], get(id) { return id === child.id ? child : id === captain.id && !captainOffline ? captain : undefined } },
     on(name, listener) { rootListeners.set(name, listener); return () => rootListeners.delete(name) },
     effect(setup) { const dispose = setup(); disposers.push(dispose); return dispose },
     subagents: {

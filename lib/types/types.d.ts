@@ -252,6 +252,11 @@ export interface TeamMember {
      * authority that reapplies the filter to a cold-resumed child.
      */
     toolFilter?: MemberToolFilter;
+    /** Exact child-scoped setup restored on hosts with managed activations. */
+    runtimeSetup?: {
+        persona: string;
+        toolFilter: MemberToolFilter;
+    };
     joinedAt: number;
     status: MemberStatus;
     /** Execution admission is closed while a failed/pending handoff is drained. */
