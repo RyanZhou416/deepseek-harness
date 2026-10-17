@@ -1,6 +1,6 @@
 {
   "name": "@ryanzhou416/dsh-plugin-aether-shell",
-  "version": "0.1.0-dsh017rc1.6",
+  "version": "0.1.0-dsh021rc2.1",
   "private": true,
   "type": "module",
   "description": "Optional native AetherShell queries, persistent interpreter sessions and background jobs for DSH agents",
@@ -16,18 +16,18 @@
     "pack:local": "pwsh -NoProfile -File scripts/run-local.ps1 pack"
   },
   "peerDependencies": {
-    "@deepseek-ai/cordis": "4.0.4",
-    "@deepseek-ai/schemastery": "3.18.4",
-    "@deepseek-ai/dsh-tools": "0.1.7-rc.1",
-    "@deepseek-ai/dsh-subprocess": "0.1.7-rc.1",
-    "@deepseek-ai/dsh-sandbox": "0.1.7-rc.1",
-    "@deepseek-ai/dsh-sandbox-policy": "0.1.7-rc.1",
-    "@deepseek-ai/dsh-shell-env": "0.1.7-rc.1",
-    "@deepseek-ai/dsh-timeout": "0.1.7-rc.1",
-    "@deepseek-ai/dsh-llm": "0.1.7-rc.1",
-    "@deepseek-ai/dsh-util-values": "0.1.7-rc.1",
-    "@deepseek-ai/dsh-brand": "0.1.7-rc.1",
-    "@deepseek-ai/dsh-agent": "0.1.7-rc.1",
-    "@deepseek-ai/dsh-jobs": "0.1.7-rc.1"
+    "@deepseek-ai/cordis": "4.0.5",
+    "@deepseek-ai/schemastery": "3.18.5",
+    "@deepseek-ai/dsh-tools": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-subprocess": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-sandbox": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-sandbox-policy": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-shell-env": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-timeout": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-llm": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-util-values": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-brand": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-agent": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-jobs": "0.2.1-rc.2"
   }
 }
