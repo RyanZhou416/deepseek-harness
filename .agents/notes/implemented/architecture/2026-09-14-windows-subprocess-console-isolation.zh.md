@@ -38,4 +38,4 @@ Win32 单元测试固定创建标志、隐藏启动状态、标准流句柄，�
 
 ## Related
 
-[原生子进程 owner 决策](2026-08-28-subprocess-native-containment.zh.md)继续拥有 Job 与范围停稳机制。[Windows ACL 沙箱决策](../feature/2026-08-08-windows-acl-restricted-token-sandbox.zh.md)继续拥有受限令牌与文件写入策略。
+[原生子进程 owner 决策](../../archived/architecture/2026-08-28-subprocess-native-containment.md)继续拥有 Job 与范围停稳机制。[Windows ACL 沙箱决策](../feature/2026-08-08-windows-acl-restricted-token-sandbox.zh.md)继续拥有受限令牌与文件写入策略。

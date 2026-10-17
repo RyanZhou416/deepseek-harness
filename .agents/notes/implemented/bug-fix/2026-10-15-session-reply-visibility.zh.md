@@ -46,7 +46,7 @@ Chat 还为每个作用域内的回复代次选择一次 DOM `NotFoundError` 自
 
 客户端保留现有流与结束帧关联，因此结束帧永久缺失时，仍需现有跟随恢复或重新打开。实例隔离对显式选择的注册项放弃较低优先级递补，纯文本也不能重现富媒体。同一步骤重试期间仍可读取降级文本，直到新结算代次重试富文本渲染。
 
-[嵌入式流决策](../architecture/2026-09-01-v2-embedded-assistant-streams.zh.md)、[节点与分组组装](../architecture/2026-09-21-conversation-build-groups.zh.md)、[slot 所有权](../architecture/2026-07-22-slot-type-chain-implementation.zh.md)和 [Chat/Trajectory 分离](2026-09-14-chat-presentation-defaults.zh.md)保留各自独立理由。本决策细化客户端发布与显示行为，不替代这些机制。
+[嵌入式流决策](../architecture/2026-09-01-v2-embedded-assistant-streams.zh.md)、[节点与分组组装](../architecture/2026-09-21-conversation-build-groups.zh.md)、[slot 所有权](../architecture/2026-07-22-slot-type-chain-implementation.zh.md)和 Chat/Trajectory 分离保留各自独立理由。本决策细化客户端发布与显示行为，不替代这些机制。
 
 ## 验证
 

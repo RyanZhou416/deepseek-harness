@@ -46,7 +46,7 @@ The response occurrence is protected by Turn/Step identity and content part, not
 
 The client retains the existing stream/end join, so a permanently missing end frame still requires existing follow recovery or reopening. Occurrence isolation deliberately forgoes lower-priority promotion for opted registrations, and plain text cannot reproduce rich media. Same-Step retries remain readable in fallback until a new settlement generation retries rich rendering.
 
-The [embedded-stream decision](../architecture/2026-09-01-v2-embedded-assistant-streams.md), [Node/Group assembly](../architecture/2026-09-21-conversation-build-groups.md), [slot ownership](../architecture/2026-07-22-slot-type-chain-implementation.md), and [Chat/Trajectory separation](2026-09-14-chat-presentation-defaults.md) retain their independent rationale. This decision refines client publication and display behavior without replacing those mechanisms.
+The [embedded-stream decision](../architecture/2026-09-01-v2-embedded-assistant-streams.md), [Node/Group assembly](../architecture/2026-09-21-conversation-build-groups.md), [slot ownership](../architecture/2026-07-22-slot-type-chain-implementation.md), and Chat/Trajectory separation retain their independent rationale. This decision refines client publication and display behavior without replacing those mechanisms.
 
 ## Verification
 

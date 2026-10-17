@@ -38,4 +38,4 @@ Win32 unit tests pin the creation flags, hidden startup state, stdio handles, an
 
 ## Related
 
-The [native subprocess owner](2026-08-28-subprocess-native-containment.md) retains Job and range-settlement ownership. The [Windows ACL sandbox decision](../feature/2026-08-08-windows-acl-restricted-token-sandbox.md) retains restricted-token and file-write policy ownership.
+The [native subprocess owner](../../archived/architecture/2026-08-28-subprocess-native-containment.md) retains Job and range-settlement ownership. The [Windows ACL sandbox decision](../feature/2026-08-08-windows-acl-restricted-token-sandbox.md) retains restricted-token and file-write policy ownership.
