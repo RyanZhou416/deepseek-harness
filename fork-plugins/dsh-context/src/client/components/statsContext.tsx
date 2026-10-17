@@ -5,6 +5,7 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent, type MouseEvent, type ReactElement, type ReactNode } from 'react'
 import type { ContextEventRecord, ContextTimeline, RequestRecord, SessionCostUsage, SurfaceNode, TimelineCounts } from '../../shared/types'
 import { estimateSessionCost, billedTokensOf, formatCost, formatPriceRate, mergeCostUsage, priceFaceOf, toCurrency } from '../cost'
+import { REFERENCE_PRICE_DATE, referenceModelPriceOf } from '../../shared/modelPricing'
 import type { CostCurrency, ModelBook, PriceFace } from '../cost'
 import { sessionsFaceOf, subagentCostFoldOf } from '../agentTree'
 import type { AgentHeads } from '../agentHeads'
@@ -15,7 +16,7 @@ import { asRecord, type ClientCtx } from '../services'
 import { isDeepSeekProvider } from '../../shared/providers'
 import type { ViewKit } from '../viewkit'
 
-interface PriceRow { key: string; face: PriceFace }
+interface PriceRow { key: string; face: PriceFace; reference?: boolean; longContext?: boolean }
 
 const BANDS: readonly (readonly [keyof PriceFace['rate'], string])[] = [
   ['hit', 'stats.costHit'],
@@ -36,7 +37,13 @@ function priceRowsOf(usage: SessionCostUsage | undefined, book: ModelBook | null
     for (const model of Object.keys(models)) {
       const face = priceFaceOf(book, provider, model)
       if (face === null) continue
-      rows.push({ key: provider + '/' + model, face })
+      const periods = asRecord(models[model])
+      rows.push({
+        key: provider + '/' + model,
+        face,
+        ...referenceModelPriceOf(provider, model) === undefined ? {} : { reference: true },
+        ...periods !== null && asRecord(periods['long']) !== null ? { longContext: true } : {},
+      })
     }
   }
   return rows
@@ -304,28 +311,29 @@ export function makeStatsContext(
                   <b>{fmtRate(r.face.rate[bucket])}</b>
                 </span>
               ))}
-              <span className="lc-stat-tip-by">{t('stats.costPriceBy', { p: r.face.pid, m: r.face.mid })}</span>
+              <span className="lc-stat-tip-by">{t('stats.costPriceBy', { p: r.face.pid, m: r.face.mid })}</span>`n              {r.longContext === true ? <span className="lc-stat-tip-band"><i>{t('stats.costLongContext')}</i></span> : null}
             </span>
           ))}
         </span>
       ) : null
-    const notes = (deep: boolean): ReactElement[] =>
+    const notes = (deep: boolean, reference: boolean): ReactElement[] =>
       [
         currency === 'cny' ? <span key="cny">{t('stats.costTipCny')}</span> : null,
         deep ? <span key="peak">{t('stats.costTipDeepseek')}</span> : null,
+        reference ? <span key="reference">{t('stats.costReference', { date: REFERENCE_PRICE_DATE })}</span> : null,
       ].filter((el): el is ReactElement => el !== null)
     const costTip: ReactNode = [
       t('stats.costTip'),
       <span key="billed" className="lc-stat-tip-row">{t('stats.billedTip')}</span>,
       pricesBlock(rows),
-      ...notes(deepseek),
+      ...notes(deepseek, rows.some(r => r.reference === true)),
       unpriced ? <span key="unavailable">{t('stats.costUnavailable')}</span> : null,
     ]
     const subTip: ReactNode = [
       t('stats.subCostTip'),
       <span key="billed" className="lc-stat-tip-row">{t('stats.billedTip')}</span>,
       pricesBlock(subRows),
-      ...notes(subDeepseek),
+      ...notes(subDeepseek, subRows.some(r => r.reference === true)),
       subUnpriced ? <span key="unavailable">{t('stats.costUnavailable')}</span> : null,
     ]
     // A no-deps layout effect re-measures after every render (a same-string bail-out keeps it loopless); the

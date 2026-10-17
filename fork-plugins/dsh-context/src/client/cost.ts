@@ -10,6 +10,7 @@
 
 import type { SessionCostUsage } from '../shared/types'
 import { isDeepSeekProvider, modelsDevProviderOf } from '../shared/providers'
+import { COST_PERIODS, referenceModelPriceOf } from '../shared/modelPricing'
 import { asRecord, numOf, type LocaleService } from './services'
 
 export type CostCurrency = 'usd' | 'cny'
@@ -166,7 +167,24 @@ function lookupFace(models: Record<string, PriceTriple>, model: string): { mid: 
  * while the model-side tiers can hand the same id to a self-named host that
  * bills cache hits as plain input (azure's `deepseek-v4-pro`, issue #93).
  */
-export function priceFaceOf(book: ModelBook | null | undefined, provider: string, model: string): PriceFace | null {
+export function priceFaceOf(
+  book: ModelBook | null | undefined,
+  provider: string,
+  model: string,
+  longContext = false,
+): PriceFace | null {
+  // Verified subscription routes price from the bundled reference list even when
+  // the registry is unavailable; a long-context request uses its own tier.
+  const reference = referenceModelPriceOf(provider, model)
+  if (reference !== undefined) {
+    // A long-context request prices only on a tier that actually advertises one.
+    if (longContext) {
+      return reference.longContext === undefined
+        ? null
+        : { pid: modelsDevProviderOf(provider), mid: model, rate: reference.longContext.price }
+    }
+    return { pid: modelsDevProviderOf(provider), mid: model, rate: reference.standard }
+  }
   if (book === null || book === undefined) return null
   const registryPid = modelsDevProviderOf(provider)
   const direct = branchOf(book.prices, registryPid)
@@ -186,8 +204,13 @@ export function priceFaceOf(book: ModelBook | null | undefined, provider: string
   return cand === null ? null : { pid: cand.pid, mid: cand.mid, rate: cand.rate }
 }
 
-export function priceOf(book: ModelBook | null | undefined, provider: string, model: string): PriceTriple | null {
-  return priceFaceOf(book, provider, model)?.rate ?? null
+export function priceOf(
+  book: ModelBook | null | undefined,
+  provider: string,
+  model: string,
+  longContext = false,
+): PriceTriple | null {
+  return priceFaceOf(book, provider, model, longContext)?.rate ?? null
 }
 
 /** Price the session's cumulative billed totals; `peak` buckets double for
@@ -197,7 +220,8 @@ export function estimateSessionCost(
   book: ModelBook | null | undefined,
   currency: CostCurrency,
 ): number | null {
-  if (usage === null || usage === undefined || book === null || book === undefined) return null
+  // Verified reference prices need no live book, so only the usage gate applies.
+  if (usage === null || usage === undefined) return null
   let total = 0
   let any = false
   for (const provider of Object.keys(usage)) {
@@ -206,12 +230,15 @@ export function estimateSessionCost(
     // The doubled peak period is DeepSeek's alone.
     const deepseek = isDeepSeekProvider(provider)
     for (const model of Object.keys(models)) {
-      const rate = priceOf(book, provider, model)
       const periods = asRecord(models[model])
-      if (rate === null || periods === null) continue
-      for (const period of ['peak', 'off'] as const) {
+      if (periods === null) continue
+      for (const period of COST_PERIODS) {
         const bucket = asRecord(periods[period])
         if (bucket === null) continue
+        // A whole-request long-context bucket prices at its own tier; the
+        // verified references carry it, the registry does not.
+        const rate = priceOf(book, provider, model, period === 'long')
+        if (rate === null) continue
         const price = (numOf(bucket.cacheRead) * rate.hit + numOf(bucket.uncached) * rate.miss
           + numOf(bucket.cacheWrite) * rate.write + numOf(bucket.output) * rate.out) / 1e6
         total += deepseek && period === 'peak' ? price * PEAK_FACTOR : price
@@ -231,7 +258,7 @@ export function billedTokensOf(usage: SessionCostUsage | null | undefined): numb
     for (const model of Object.keys(models)) {
       const periods = asRecord(models[model])
       if (periods === null) continue
-      for (const period of ['peak', 'off'] as const) {
+      for (const period of COST_PERIODS) {
         const bucket = asRecord(periods[period])
         if (bucket === null) continue
         total += numOf(bucket.uncached) + numOf(bucket.cacheRead) + numOf(bucket.cacheWrite) + numOf(bucket.output)
@@ -254,7 +281,7 @@ function mergeInto(out: SessionCostUsage, usage: SessionCostUsage | null | undef
       const periods = asRecord(models[model])
       if (periods === null || Array.isArray(periods)) continue
       const target = branch[model] ?? (branch[model] = {})
-      for (const period of ['peak', 'off'] as const) {
+      for (const period of COST_PERIODS) {
         const bucket = asRecord(periods[period])
         if (bucket === null || Array.isArray(bucket)) continue
         const prev = target[period] ?? { uncached: 0, cacheRead: 0, cacheWrite: 0, output: 0 }

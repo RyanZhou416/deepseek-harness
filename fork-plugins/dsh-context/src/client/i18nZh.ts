@@ -48,6 +48,8 @@ export const DICT_ZH = {
   'stats.billedTip': 'Token 用量为计费合计：未缓存输入、缓存读取、缓存写入与输出。',
   'stats.subCostTip': '全部层级的子 Agent 会话各自累计费用（同口径估算）的合计，不含当前 Agent 自身。',
   'stats.costPriceHead': '每百万 Token 价格：',
+  'stats.costReference': '订阅渠道使用 {date} 核对的官方 API 标准速度挂牌价（不依赖 models.dev 可用性）。',
+  'stats.costLongContext': '长上下文价',
   'stats.costPriceBy': '按 {p} · {m} 在 models.dev 的刊登价格如上。',
   'stats.costHit': '缓存输入',
   'stats.costMiss': '未缓存输入',

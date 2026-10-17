@@ -1,3 +1,4 @@
+// DeepSeek Harness fork modification: subscription API reference prices and context tiers.
 /**
  * The Context Insights page's data layer, derived off the root-scope `useSessions`
  * snapshot: every session-list row already carries the host's
@@ -13,6 +14,7 @@ import { workspaceTitleOf } from '@deepseek-ai/dsh-util-workspace-path'
 import { dayKeyOf, endOfDayKey, startOfDayKey } from '../shared/days'
 import { BACKFILL_ROUTE } from './apiRoutes'
 import { billedParts } from './categories'
+import { COST_PERIODS } from '../shared/modelPricing'
 import { cacheHitPercent } from './format'
 import { estimateSessionCost, mergeCostUsage } from './cost'
 import type { CostCurrency, ModelBook } from './cost'
@@ -489,7 +491,7 @@ export function usageTotalsOf(usage: SessionCostUsage | null | undefined): Usage
     const models = usage[provider]
     for (const model of Object.keys(models)) {
       const periods = models[model]
-      for (const period of ['peak', 'off'] as const) {
+      for (const period of COST_PERIODS) {
         const bucket = periods[period]
         if (bucket === undefined) continue
         totals.input += bucket.uncached
@@ -734,3 +736,4 @@ export function relativeTime(t: (key: string, params?: Record<string, string | n
   if (hours < 24) return t('ov.time.h', { n: hours })
   return t('ov.time.d', { n: Math.floor(hours / 24) })
 }
+

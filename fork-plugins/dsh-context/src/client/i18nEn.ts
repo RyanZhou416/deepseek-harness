@@ -51,6 +51,8 @@ export const DICT_EN = {
   'stats.billedTip': 'Token usage is the billed total: uncached input, cache read, cache write, and output.',
   'stats.subCostTip': 'Summed estimates of every descendant subagent session’s own cumulative cost — all levels of the subtree (same basis); the current agent is not included.',
   'stats.costPriceHead': 'Per-1M-token rates:',
+  'stats.costReference': 'Subscription routes price from vendor API reference rates verified on {date}, independent of models.dev availability.',
+  'stats.costLongContext': 'long-context rate',
   'stats.costPriceBy': 'Priced as listed on models.dev for {p} · {m}.',
   'stats.costHit': 'Cache input',
   'stats.costMiss': 'Uncached input',

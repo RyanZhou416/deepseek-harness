@@ -95,7 +95,7 @@ const USER_EVENT = {
 }
 
 function basename(path: string): string {
-  return path.slice(path.lastIndexOf('/') + 1)
+  return path.slice(Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\')) + 1)
 }
 
 function observing(events: unknown): { observeSession(id: string, options: unknown): Promise<unknown>; disposed(): boolean } {

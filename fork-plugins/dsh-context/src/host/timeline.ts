@@ -1,3 +1,5 @@
+// DeepSeek Harness fork modification: slim views enforce deployment bounds before first delivery. See ../../FORK_MAINTENANCE.md.
+
 /**
  * The `contextTimeline` session projection unit — the plugin's data plane.
  *
@@ -24,7 +26,7 @@ import { resolveBounds } from './config'
 import type { ProjectionDefinition } from './compat'
 import type { ContextTimeline } from '../shared/types'
 import { applyTimeline } from './fold'
-import { createTimelineState } from './foldState'
+import { countTurnRuns, createTimelineState, trimState } from './foldState'
 import type { TimelineState } from './foldState'
 import { buildTimelineHead, buildTimelineView } from './foldWire'
 
@@ -144,6 +146,7 @@ const costBucketsSchema = z.object({
 const costModelSchema = z.object({
   peak: costBucketsSchema.optional(),
   off: costBucketsSchema.optional(),
+  long: costBucketsSchema.optional(),
 }).strict()
 
 const costModelsSchema = z.record(z.string(), costModelSchema)
@@ -297,8 +300,55 @@ const timelineStateSchema = z.object({
  */
 export function createContextTimelineDefinition(config: Config, slim: () => boolean): ProjectionDefinition<'contextTimeline', TimelineState> {
   const bounds = resolveBounds(config)
-  const view = (state: TimelineState): ContextTimeline =>
-    slim() ? buildTimelineHead(state) : buildTimelineView(state, bounds)
+  // Restored checkpoints can predate a bound change, so the FIRST view clamps to the
+  // deployment's current bounds without rewriting the checkpoint. Two weak caches keep
+  // one wire reference per generation per state, so an unchanged state serves the same
+  // value and the registry's Object.is check suppresses revalidation and publication.
+  const overBound = (state: TimelineState): boolean =>
+    state.requests.length > bounds.maxRequestSteps
+    || state.events.length > bounds.maxEvents
+    || state.archived.length > bounds.maxArchiveNodes
+    || state.fileOps.length > bounds.maxFileOps
+    || countTurnRuns(state.requests) > bounds.maxKeptTurns
+  const bounded = (state: TimelineState): TimelineState => {
+    if (!overBound(state)) return state
+    const copy: TimelineState = {
+      ...state,
+      requests: [...state.requests],
+      events: [...state.events],
+      archived: [...state.archived],
+      fileOps: [...state.fileOps],
+      spans: [...state.spans],
+    }
+    trimState(copy, bounds)
+    return copy
+  }
+  // One retained value per generation: a state whose WIRE inputs are all unchanged
+  // (host-only churn such as a pending tool call, the open step slot, or a buffered
+  // Code-Mode op) reuses the previous raw value, so the registry's Object.is check
+  // suppresses revalidation and publication.
+  const WIRE_INPUT_KEYS = [
+    'surface', 'sums', 'systemTokens', 'systems', 'toolsTokens', 'model', 'provider', 'lastModel',
+    'contextWindow', 'maxOutputTokens', 'requests', 'events', 'archived', 'cost', 'humanInputs',
+    'answers', 'lastUser', 'archiveFloor', 'detailRev', 'timing', 'spans', 'fileOps', 'fileOpsFloor',
+  ] as const satisfies readonly (keyof TimelineState)[]
+  const sameWireInputs = (a: TimelineState, b: TimelineState): boolean =>
+    WIRE_INPUT_KEYS.every(key => a[key] === b[key])
+  const headLast: { state?: TimelineState; view?: ContextTimeline } = {}
+  const inlineLast: { state?: TimelineState; view?: ContextTimeline } = {}
+  const view = (state: TimelineState): ContextTimeline => {
+    const last = slim() ? headLast : inlineLast
+    // A NEW state whose wire inputs are all shared reuses the previous value; two calls
+    // on the same state object still build distinct values (the purity contract).
+    if (last.state !== undefined && last.state !== state && sameWireInputs(last.state, state)) {
+      return last.view as ContextTimeline
+    }
+    const boundedState = bounded(state)
+    const value = slim() ? buildTimelineHead(boundedState) : buildTimelineView(boundedState, bounds)
+    last.state = state
+    last.view = value
+    return value
+  }
   const definition: ProjectionDefinition<'contextTimeline', TimelineState> = {
     key: 'contextTimeline',
     stateSchema: timelineStateSchema,
@@ -313,3 +363,4 @@ export function createContextTimelineDefinition(config: Config, slim: () => bool
   }
   return definition
 }
+

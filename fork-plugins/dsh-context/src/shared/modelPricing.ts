@@ -26,19 +26,22 @@ export const COST_PERIODS = ['peak', 'off', 'long'] as const
 
 const REFERENCES: readonly ReferenceModelPrice[] = [
   {
-    provider: 'openai', model: 'gpt-6-astra',
+    provider: 'openai',
+    model: 'gpt-6-astra',
     standard: { miss: 10, hit: 1, write: 12.5, out: 50 },
     longContext: { above: 272_000, price: { miss: 20, hit: 2, write: 25, out: 75 } },
   },
   {
-    provider: 'openai', model: 'gpt-6-sol',
+    provider: 'openai',
+    model: 'gpt-6-sol',
     standard: { miss: 2, hit: 0.2, write: 2.5, out: 10 },
     longContext: { above: 272_000, price: { miss: 4, hit: 0.4, write: 5, out: 15 } },
   },
   { provider: 'anthropic', model: 'claude-opus-5-5', standard: { miss: 4, hit: 0.2, write: 5, out: 20 } },
   { provider: 'anthropic', model: 'claude-fable-5-1', standard: { miss: 10, hit: 0.25, write: 12.5, out: 50 } },
   {
-    provider: 'xai', model: 'grok-4.7',
+    provider: 'xai',
+    model: 'grok-4.7',
     standard: { miss: 2, hit: 0.5, write: 2, out: 6 },
     longContext: { above: 200_000, price: { miss: 4, hit: 1, write: 4, out: 12 } },
   },

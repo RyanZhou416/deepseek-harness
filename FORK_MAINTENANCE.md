@@ -31,7 +31,7 @@
 | Published fork | `master` after local integration | `dsh-v0.2.1-rc.2` 官方结构、32 GiB Windows Host、长任务保护与 fork-maintained plugin 基线；精确 SHA 用 Git 查询 |
 | Current official target | `dsh-v0.2.1-rc.2` on 2026-10-17 | 精确不可变 tag；不要改合并已越过该 tag 的 rolling `upstream/master` |
 | AgentTeams subtree | `fork-plugins/dsh-agent-teams` | 上游 `v0.1.24`（main，含 0.2.1 适配）+ 本 fork `0.1.24-dsh021rc2.1` 私有发布通道与有界未读邮箱缓存 |
-| Context subtree | `fork-plugins/dsh-context` | 上游 `v0.55.0` + 本 fork 字段级投影、V4 header 计价和关闭 modal 性能优化 |
+| Context subtree | `fork-plugins/dsh-context` | 上游 `v0.73.0` + 本 fork 参照价/长上下文计费和视图期边界裁剪 |
 | Subscriptions subtree | `fork-plugins/dsh-plugin-subscriptions` | 上游 `v0.9.4` + 本 fork RC.1/V4 私有适配与 pinned Claude Code 2.1.288 wire；凭据与 Session 格式不变 |
 
 当前维护的源码兼容基线是 `dsh-v0.2.1-rc.2`（合并分支 `integrate/upstream-0.2.1-rc.2`，合入 `master` 后成为发布基线）。整合采用官方 Agent 创建、handle-based Session persistence、Session format V4、通用 `session.updateQueue`、引用拥有的 Client Session、Plugin Manager、Subagent activation limits、cursorless Assistant frame、Web Terminal、SSH、MCP resources、Browser/Computer Use 和连接容错，再按本文的行为与测试补回仍缺失部分；后续合并禁止整体恢复旧版文件。
@@ -623,13 +623,13 @@ AgentTeams 的 `scripts/activity-state.perf.mjs` 使用 27/58 个合成团队、
 
 ### Local Context package
 
-维护真源位于 `fork-plugins\dsh-context`，仓库安装器使用 `fork-plugins\releases\dsh-context-0.55.0-dsh017rc1.3.tgz`，SHA256 为 `255BA7AA6B84DA2F1301CD7786A2DDBC39AEE0A69BC731547B464B5D32B7B27D`。该版本采用上游 v0.55.0 的 V0/V2/V3/V4 fold、Context Insights、余额展示、增量 turn 账本、按需 backfill 与 slim-head/on-demand-detail 传输，并保持既有 projection key 和 Session event vocabulary 不变。
+维护真源位于 `fork-plugins/dsh-context`，当前源码为上游 `v0.73.0` 加 fork 复写后的 `0.73.0-dsh021rc2.1`；安装器仍指向上一代 `fork-plugins\releases\dsh-context-0.55.0-dsh017rc1.3.tgz`（SHA256 `255BA7AA6B84DA2F1301CD7786A2DDBC39AEE0A69BC731547B464B5D32B7B27D`），重新打包并停机升级前不得替换。上游 v0.73.0 把 fold 拆成 `foldState`/`foldMetering`/`foldWire`，用 `ensure([...])` 做字段级 copy-on-write，投影契约改为 registry 的泛型 `ProjectionDefinition`，本地因此把 `zod` 固定到 registry 依赖的 `4.4.3`（版本自带的 `_zod.version` 参与类型同一性，漂移会让 `register()` 拒绝全部 projection），并把三处注册调用改成显式泛型参数，避免整个 projection map 重新实例化超出编译器深度。
 
-私有构建保留经官方文档核对的 GPT-6 Astra/Sol、Claude Opus 5.5/Fable 5.1 与 Cursor Grok 4.7 标准速度 API 等值价格。价格匹配识别订阅 provider 别名；投影版本 21 按单次请求区分长上下文费率，必须保留 `long` 费用分组在 wire、Client sanitizer、Agent 合并和总 token 统计中的传递。费用不是订阅账单，定价日期、缓存写入假设和来源见 `fork-plugins/dsh-context/docs/model-pricing.md`。定向价格与界面测试、投影兼容测试、构建包 smoke，以及四个价格/费用模块的 100% 覆盖率是维护检查；升级真实 profile 前仍须确认 DSH 已停止。
+私有构建保留经官方文档核对的 GPT-6 Astra/Sol、Claude Opus 5.5/Fable 5.1 与 Cursor Grok 4.7 标准速度 API 等值价格：`shared/providers.ts` 把 `codex`/`claude`/`grok` 解析到官方 vendor，`shared/modelPricing.ts` 提供带核对日期的参照价与长上下文阈值，`client/cost.ts` 先查参照价再查 models.dev 书，`host/foldMetering.ts` 按整次请求 prompt 大小把费用记进 `long` 分组。`long` 分组必须在 wire、Client sanitizer、Agent 合并和总 token 统计中全程传递；请求超过阈值却没有长上下文档位时按未定价处理。费用不是订阅账单，定价日期、缓存写入假设和来源见 `fork-plugins/dsh-context/docs/model-pricing.md`。定向价格与界面测试、投影兼容测试、构建包 smoke，以及四个价格/费用模块的 100% 覆盖率是维护检查；升级真实 profile 前仍须确认 DSH 已停止。
 
 Windows Web profile 的 Context 内存修复升级备份位于 `C:\Project\deepseek-harness-data\profile-backups\context-memory-20260927-200916`，安装版本为 `0.55.0-dsh017rc1.3`；已核对安装后的 Host bundle 与构建输出 SHA256 相同，其他直接依赖、bundle 列表和 profile patch 保持原值。定价升级的旧备份 `context-pricing-20260927-063430` 继续保留。
 
-Context 源码的工具归属追踪按 `cordis.original` 解包后的服务身份去重，只保存读取者的插件名，避免恢复回调数组长期持有 Agent 专属代理及其 Session。引用链、隔离内存实验和回归检查见[插件维护记录](fork-plugins/dsh-context/FORK_MAINTENANCE.md#tool-attribution-lifetime)。此修复包含在 `0.55.0-dsh017rc1.3` artifact 中；Windows 已在 Host 停止时完成切换并以诊断模式重启，认证 Web 页面返回 HTTP 200。Mac 的 `setup.command` 与安装校验版本也指向该 artifact，但尚未在 Mac 安装验证。后续插件升级仍须停止 Host 后操作。
+工具归属追踪的存活期问题（只保存读取者 fiber 名、解包 traced proxy、卸载时还原 `register`、缺失 reader 时按调用栈解析包名）在 v0.73.0 上游已经等价实现并带回归测试，本 fork 不再单独维护该补丁；其余隔离内存结论仍见[插件维护记录](fork-plugins/dsh-context/FORK_MAINTENANCE.md)。Windows 端到端切换验证针对 `0.55.0-dsh017rc1.3` artifact，新源码重新打包前不得据此声称已安装。后续插件升级仍须停止 Host 后操作。
 
 ### Local Subscriptions package
 
@@ -639,7 +639,7 @@ Windows Web profile 启用 `llm-subscriptions`，保留 `rateLimit.wait: false`�
 
 更新时使用 `git subtree pull --prefix=fork-plugins/dsh-plugin-subscriptions https://github.com/V1ki/dsh-plugin-subscriptions.git <tag> --squash`，再重放 `fork-plugins/dsh-plugin-subscriptions/FORK_MAINTENANCE.md`。真实 profile 始终安装仓内固定 artifact，禁止 npm latest 直接覆盖。
 
-本地优化包含 timeline fold 字段级 copy-on-write、request/event/archive/file-op dirty retention trim、恢复态首个 slim/inline/detail value 的 bounds clamp、Host-only 状态的引用稳定 inline/slim cache、关闭 `/context` modal 时释放 projection/detail/history/conversation 订阅，以及用 V3 `system/message` 为后续 header epoch 计价。真实 profile 停机升级后使用 `maxRequestSteps: 300`、`maxKeptTurns: 60`、`maxEvents: 100`、`maxNodes: 400`、`maxArchiveNodes: 100` 和 `maxFileOps: 100`。这些上限只缩小 Context 派生展示，不修改 Session 历史。
+本地优化包含 timeline fold 字段级 copy-on-write 与 dirty retention trim（上游 `ensure([...])` + `trimState` 已等价实现）、恢复态首个 wire value 的 bounds clamp、仅 Host 可见状态变化时复用上一份 wire 值的缓存，以及价格相关界面。`/context` modal 的惰性订阅与用 V3 `system/message` 为 header epoch 计价两项已退役：前者由上游稳定的 hook 顺序取代，后者的上游契约明确 header epoch 只折叠元数据，`systemTokens` 只从缓存 v1 行读取，重复计价会让同一 epoch 出现两个来源。真实 profile 停机升级后使用 `maxRequestSteps: 300`、`maxKeptTurns: 60`、`maxEvents: 100`、`maxNodes: 400`、`maxArchiveNodes: 100` 和 `maxFileOps: 100`。这些上限只缩小 Context 派生展示，不修改 Session 历史。
 
 更新时使用 `git subtree pull --prefix=fork-plugins/dsh-context https://github.com/bowenliang123/dsh-context.git <tag> --squash`，再逐项重放 `fork-plugins/dsh-context/FORK_MAINTENANCE.md` 所列行为。不得用 npm latest 直接覆盖真实 profile。
 

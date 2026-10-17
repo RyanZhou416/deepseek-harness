@@ -13,6 +13,7 @@
 
 import type { Context } from '@deepseek-ai/cordis'
 import { createContextActivityDefinition } from './activity'
+import type { ActivityState } from './activity'
 import { watchAttachmentChannel } from './attachment'
 import { createToolAttribution } from './attribution'
 import { watchBalanceChannel } from './balance'
@@ -23,10 +24,12 @@ import { watchDetailChannel } from './detail'
 import { createFallbackActivityDefinition, createFallbackHeadersDefinition, createFallbackTimelineDefinition } from './fallback'
 import { watchFleetChannel } from './fleet'
 import { createContextHeadersDefinition } from './headers'
+import type { HeadersState } from './headers'
 import { watchPromptInjection } from './promptInjection'
 import { watchStepIdentity } from './stepIdentity'
 import { watchSkillCatalog } from './skills'
 import { createContextTimelineDefinition } from './timeline'
+import type { TimelineState } from './foldState'
 import { detectHarnessVersion } from './version'
 import { meetsBaseline } from '../shared/version'
 
@@ -65,9 +68,9 @@ export function apply(ctx: Context, config: Config): void {
   watchStepIdentity(ctx)
   // The unit's view reads the gate per serve: slim wire while the detail channel is live, inline otherwise.
   const gate = watchDetailChannel(ctx, resolveBounds(config), coldReads)
-  ctx.sessionProjections.register(createContextTimelineDefinition(config, () => gate.live))
-  ctx.sessionProjections.register(createContextHeadersDefinition(name => attribution.ownerOf(name)))
-  ctx.sessionProjections.register(createContextActivityDefinition())
+  ctx.sessionProjections.register<'contextTimeline', TimelineState>(createContextTimelineDefinition(config, () => gate.live))
+  ctx.sessionProjections.register<'contextHeaders', HeadersState>(createContextHeadersDefinition(name => attribution.ownerOf(name)))
+  ctx.sessionProjections.register<'contextActivity', ActivityState>(createContextActivityDefinition())
   watchActivityBackfill(ctx, coldReads)
   watchPromptInjection(ctx, config)
 }

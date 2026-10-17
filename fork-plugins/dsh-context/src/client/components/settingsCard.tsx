@@ -240,3 +240,4 @@ export function makePluginConfigCard(kit: ViewKit): (props: SettingsCardProps) =
     )
   }
 }
+

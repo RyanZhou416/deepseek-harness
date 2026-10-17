@@ -1,4 +1,5 @@
 /// <reference types="node" />
+// DeepSeek Harness fork modification: deduplicate raw tool services without retaining reader contexts.
 /**
  * Live tool→plugin attribution layered on the static recovery in toolSources.ts.
  *
@@ -147,15 +148,19 @@ export function createToolAttribution(ctx: Context): ToolAttribution {
   const patched: (() => void)[] = []
 
   const wrapInstance = (tools: unknown) => {
-    if (!tools || typeof tools !== 'object' || wrapped.has(tools)) return
-    const register = (tools as { register?: unknown }).register
+    if (!tools || typeof tools !== 'object') return
+    // Cordis returns a fresh context-bound proxy on each read. Restoring through
+    // those proxies would keep their Agent scopes alive until this plugin unloads.
+    const target: unknown = Reflect.get(tools, Symbol.for('cordis.original')) ?? tools
+    if (!target || typeof target !== 'object' || wrapped.has(target)) return
+    const register = (target as { register?: unknown }).register
     if (typeof register !== 'function') return
     wrapped.add(tools)
     // A reload re-installs the hook on a still-wrapped instance: peel the previous
     // incarnation's wrapper so wrappers never stack.
     const original = (register as { attributedOriginal?: unknown }).attributedOriginal ?? register
     if (typeof original !== 'function') return
-    const instance = tools as { register: (this: unknown, definition?: { name?: unknown }) => unknown }
+    const instance = target as { register: (this: unknown, definition?: { name?: unknown }) => unknown }
     const wrappedRegister = function (this: unknown, definition?: { name?: unknown }) {
       const toolName = definition?.name
       let owner = lastReader
@@ -223,3 +228,4 @@ export function createToolAttribution(ctx: Context): ToolAttribution {
         ?? (boot.has(name) ? UNKNOWN_TOOL_SOURCE : undefined),
   }
 }
+

@@ -163,3 +163,4 @@ module.exports = {
   inject: ['slots', 'locale'],
   apply,
 }
+

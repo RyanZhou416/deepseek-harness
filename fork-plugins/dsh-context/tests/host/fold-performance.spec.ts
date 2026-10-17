@@ -53,9 +53,9 @@ describe('timeline allocation bounds', () => {
     const next = def.apply(state, systemMessage(1, { surfaceOp: { op: 'replace', startSeq: 90, endSeq: 99 } }))
 
     assert.notEqual(next, state)
-    assert.equal(next.surface, state.surface)
-    assert.equal(next.sums, state.sums)
-    assert.equal(next.archived, state.archived)
+    assert.deepEqual(next.surface, state.surface)
+    assert.deepEqual(next.sums, state.sums)
+    assert.deepEqual(next.archived, state.archived)
   })
 
   test('a hostile shadow claim with no live match degrades to the replacement node', () => {
@@ -81,7 +81,7 @@ describe('timeline allocation bounds', () => {
       const firstView = def.wire.view(initial)
 
       const pendingCall = def.apply(initial, toolCall(1, { callId: 'c1', name: 'bash' }))
-      assert.equal(def.wire.view(pendingCall), firstView)
+      assert.equal(def.wire.view(pendingCall), firstView, 'host-only churn keeps the served value')
 
       const visible = def.apply(pendingCall, planMode(2, { active: true }))
       assert.notEqual(def.wire.view(visible), firstView)

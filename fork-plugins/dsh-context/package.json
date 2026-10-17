@@ -1,6 +1,6 @@
 {
   "name": "dsh-context",
-  "version": "0.73.0",
+  "version": "0.73.0-dsh021rc2.1",
   "description": "A DeepSeek Harness plugin for context insight and management, with context dashboard and context command, for understanding how the context is made of, and how it evolves.",
   "icon": "icon.svg",
   "author": "bowenliang123",
@@ -15,7 +15,7 @@
   "type": "module",
   "engines": {
     "node": "^22.19.0 || >=24.0.0",
-    "dsh": ">=0.1.7-rc.2 || >=0.2.0-rc.2"
+    "dsh": ">=0.2.1-rc.2 || >=0.2.0-rc.2"
   },
   "main": "lib/index.js",
   "types": "lib/index.d.ts",
@@ -70,7 +70,7 @@
     },
     "compatibility": {
       "dshReleases": {
-        "0.1.7-rc.2": "compatible",
+        "0.2.1-rc.2": "compatible",
         "0.2.0-rc.2": "compatible"
       }
     }
@@ -86,13 +86,13 @@
   ],
   "license": "Apache-2.0",
   "dependencies": {
-    "zod": "^4.4.3"
+    "zod": "4.4.3"
   },
   "peerDependencies": {
-    "@deepseek-ai/cordis": "^4.0.4",
-    "@deepseek-ai/dsh-client-ui-primitives": ">=0.1.7-rc.2",
-    "@deepseek-ai/dsh-session": ">=0.1.7-rc.2",
-    "@deepseek-ai/schemastery": "^3.18.2",
+    "@deepseek-ai/cordis": "^4.0.5",
+    "@deepseek-ai/dsh-client-ui-primitives": ">=0.2.1-rc.2",
+    "@deepseek-ai/dsh-session": ">=0.2.1-rc.2",
+    "@deepseek-ai/schemastery": "^3.18.5",
     "react": "^18.3.1",
     "react-dom": "^18.3.1"
   },
@@ -108,14 +108,14 @@
     }
   },
   "devDependencies": {
-    "@deepseek-ai/cordis": "^4.0.4",
-    "@deepseek-ai/dsh-client-store": "0.1.7-rc.2",
-    "@deepseek-ai/dsh-client-ui-primitives": "0.1.7-rc.2",
-    "@deepseek-ai/dsh-session": "0.1.7-rc.2",
-    "@deepseek-ai/dsh-session-projection": "0.1.7-rc.2",
-    "@deepseek-ai/dsh-util-code-language": "0.1.7-rc.2",
-    "@deepseek-ai/dsh-util-workspace-path": "0.1.7-rc.2",
-    "@deepseek-ai/schemastery": "^3.18.4",
+    "@deepseek-ai/cordis": "^4.0.5",
+    "@deepseek-ai/dsh-client-store": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-client-ui-primitives": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-session": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-session-projection": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-util-code-language": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-util-workspace-path": "0.2.1-rc.2",
+    "@deepseek-ai/schemastery": "^3.18.5",
     "@opencode-ai/models": "^0.0.87",
     "@shikijs/langs": "^4.3.1",
     "@stylistic/eslint-plugin": "^5.10.0",

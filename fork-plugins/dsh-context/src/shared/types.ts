@@ -400,6 +400,8 @@ export interface TimingTotals {
 export interface CostModelUsage {
   peak?: CostBucketTotals
   off?: CostBucketTotals
+  /** Whole requests above a verified model's prompt-token pricing threshold. */
+  long?: CostBucketTotals
 }
 
 /** The session-cost raw material: cumulative provider-reported billed tokens keyed by the request
@@ -537,3 +539,4 @@ export interface PlatformBalance {
   /** One entry per currency the account holds; at least one. */
   balances: PlatformBalanceEntry[]
 }
+
