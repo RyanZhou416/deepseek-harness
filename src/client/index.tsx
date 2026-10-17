@@ -18,13 +18,16 @@ import type { UsePanelInfo } from '@deepseek-ai/dsh-client-ui-layout/client'
 // Official model catalog/directory service. The staged roster reads its
 // provider/model/effort metadata without mutating the captain's own selection.
 import type {} from '@deepseek-ai/dsh-client-ui-model-selection/client'
-import { ActivityPanel } from './ActivityPanel.tsx'
+import type {} from '@deepseek-ai/dsh-client-ui-sidebar-right/client'
+import { ActivitySurface, WorkspaceActivity, createWorkspaceBridge, TEAM_TAB_ID, TEAM_TAB_KIND } from './WorkspaceActivity.tsx'
+import { TeamChatEntry, TeamTurnCard } from './TeamChatEntry.tsx'
+import { createWorkspaceState } from './workspace-state.ts'
 import { AgentTeamsCard, type AgentTeamsCardInjected } from './AgentTeamsCard.tsx'
 import { agentTeamsCardDefinition } from './agent-teams-card-definition.ts'
 import {
   AGENT_TEAMS_LOCALE_NAMESPACE, en, zh, type AgentTeamsLocaleKey,
 } from './locales.ts'
-import { openAgentTeamMember, type AgentTeamsLayoutNavigator } from './session-navigation.ts'
+import { openAgentTeamMember, type AgentTeamsLayoutNavigator, type AgentTeamsWorkspaceNavigator } from './session-navigation.ts'
 
 declare module '@deepseek-ai/dsh-client-ui-slots' {
   interface LocaleNamespaceMap {
@@ -53,12 +56,14 @@ function HiddenAgentTeamsCommand(): null {
  * monitor via a window event — the recovery path for an old session.
  */
 export function apply(ctx: ClientContext): void {
+  const bridge = createWorkspaceBridge()
+  const state = createWorkspaceState()
   ctx.effect(
     () => ctx.locale.register(AGENT_TEAMS_LOCALE_NAMESPACE, { zh, en }),
     'agent-teams: dictionaries',
   )
   const openMember = (parentId: SessionId, childId: SessionId): void => {
-    void openAgentTeamMember(ctx.sessions, parentId, childId, ctx.layout as AgentTeamsLayoutNavigator).catch((error: unknown) => {
+    void openAgentTeamMember(ctx.sessions, parentId, childId, ctx.layout as AgentTeamsLayoutNavigator, ctx.get('uiWorkspace') as AgentTeamsWorkspaceNavigator | undefined).catch((error: unknown) => {
       console.warn(`agent-teams: failed to open member transcript ${childId}: ${String(error)}`)
     })
   }
@@ -67,7 +72,9 @@ export function apply(ctx: ClientContext): void {
     const usePanel = usePanelInfo ?? useLegacyPanelInfo
     const conversationVisible = usePanel(panel => panel.activePanelId === null)
     return (
-    <ActivityPanel
+    <ActivitySurface
+      bridge={bridge}
+      state={state}
       conversationVisible={conversationVisible}
       sessionsList={ctx.sessions.list}
       modelDirectories={ctx.modelDirectories}
@@ -76,6 +83,34 @@ export function apply(ctx: ClientContext): void {
     />
     )
   }
+  // Optional service scope keeps legacy hosts working and removes every native
+  // contribution when the host provider disappears (including HMR).
+  ctx.inject(['sidebarRight', 'sidebarRightTabs'], (native) => {
+    const t = native.locale.bind(AGENT_TEAMS_LOCALE_NAMESPACE)
+    native.effect(() => native.sidebarRightTabs.register({
+      id: TEAM_TAB_ID, kind: TEAM_TAB_KIND,
+      title: () => t('workspace.title'),
+    }))
+    native.slots.inject('conversation.session.header.actions', () => native.slots.register({
+      name: 'conversation.session.header.actions', id: 'agent-teams-entry', order: 50,
+      locale: AGENT_TEAMS_LOCALE_NAMESPACE,
+    }, TeamChatEntry))
+    native.slots.inject('conversation.chat.turnTail', () => native.slots.register({
+      name: 'conversation.chat.turnTail', id: 'agent-teams-summary', order: 50,
+      locale: AGENT_TEAMS_LOCALE_NAMESPACE,
+      inject: () => ({ openMember }),
+    }, TeamTurnCard))
+    native.slots.inject('sidebar.right.pane.tab', () => {
+      const dispose = native.slots.register({
+        name: 'sidebar.right.pane.tab', key: TEAM_TAB_ID,
+        locale: AGENT_TEAMS_LOCALE_NAMESPACE,
+        inject: () => ({ state, modelDirectories: native.modelDirectories, openMember }),
+      }, WorkspaceActivity)
+      bridge.set(native.sidebarRight)
+      return () => { bridge.set(undefined); dispose() }
+    })
+  })
+
   ctx.slots.inject('shell.overlay', () => ctx.slots.register({
     name: 'shell.overlay',
     id: 'agent-teams-activity',
@@ -98,7 +133,7 @@ export function apply(ctx: ClientContext): void {
     key: 'agent-teams',
     locale: AGENT_TEAMS_LOCALE_NAMESPACE,
     inject: (): AgentTeamsCardInjected => ({
-      openMember,
+      openMember, workspaceBridge: bridge,
     }),
   }, AgentTeamsCard))
 }

@@ -6,6 +6,12 @@
   <img src="./assets/readme/hero.svg" width="100%" alt="dsh-agent-teams 把一个 DeepSeek Harness 会话变成可协作的多智能体团队">
 </p>
 
+<div align="center">
+
+[![AtomGit](https://atomgit.com/NanmiCoder/dsh-agent-teams/star/new_badge.svg)](https://atomgit.com/NanmiCoder/dsh-agent-teams)
+
+</div>
+
 <p align="center">
   <a href="https://dshfind.com/zh/plugins/NanmiCoder/dsh-agent-teams?ref=badge"><img src="https://img.shields.io/badge/%E7%94%B1%20dshfind-%E6%8E%A8%E8%8D%90-FFD700?style=flat-square" alt="由 dshfind 推荐"></a>
   <a href="https://dshfind.com/zh/plugins/NanmiCoder/dsh-agent-teams?ref=badge"><img src="https://dshfind.com/api/badge/NanmiCoder/dsh-agent-teams?lang=zh" alt="dshfind 评分"></a>
@@ -25,12 +31,12 @@
 你只需用自然语言提出目标。插件会提供精简的固定团队协议、14 个业务工具、持久化状态、自动共享任务调度和实时 Web UI，不需要额外的 Workflow 引擎。
 
 <p align="center">
-  <img src="./assets/ui.png" width="100%" alt="DeepSeek Harness 对话与 AgentTeams 实时活动面板，展示成员、任务依赖和回报">
+  <img src="./assets/readme/workspace.png" width="100%" alt="DeepSeek Harness 对话与 AgentTeams 实时活动面板，展示成员、任务依赖和回报">
 </p>
 
 ## 版本更新
 
-[v0.1.20](./release-notes/v0.1.20.md) 仅把本文档中的版本引用同步到 npm `latest`，不含任何代码或行为变更，打包产物与 `0.1.19` 完全一致。上一份有实质变更的版本是 [v0.1.19](./release-notes/v0.1.19.md)：宿主禁用或改名委派工具时成员仍能正常启动；自动修复范围改为从 `requiredFix` 推导；新增队长专用的 `agent_teams_amend_task`。推荐 DeepSeek Harness `0.1.5-rc.1`，保留三个旧宿主目标。
+[v0.1.23](./release-notes/v0.1.23.md) 修复团队标识、成员模型路由、质量与修复门禁及 fork 冷恢复，并新增由工作区所有者配置的成员工具策略。本插件正式版使用 npm `latest` 渠道；推荐宿主仍为 Harness `0.2.0-rc.2`（宿主的 `next` 渠道）。精确支持范围见 [compatibility.json](./compatibility.json)。
 
 ## 为什么需要 AgentTeams？
 
@@ -48,37 +54,53 @@
 
 ## 安装与版本选择
 
-**推荐组合：DeepSeek Harness `0.1.5-rc.1` + AgentTeams `0.1.20`。Harness 仍为预发布版本。**
+**推荐组合：DeepSeek Harness `0.2.0-rc.2` + AgentTeams `0.1.23`。宿主仍为 RC 版本。**
 
 | 使用场景 | DeepSeek Harness | AgentTeams 插件 |
 | --- | --- | --- |
-| **推荐安装** | **`0.1.5-rc.1`** | **`0.1.20`** |
-| 保留旧 RC | `0.1.2-rc.1` | `0.1.20` |
-| 开发者测试 Alpha | `0.1.2-alpha.5` | `0.1.20` |
-| 保留旧 Alpha | `0.1.2-alpha.2` | `0.1.20` |
+| **推荐版本** | **`0.2.0-rc.2`** | **`0.1.23`** |
+| 上一推荐 RC | `0.1.7-rc.2` | `0.1.23` |
+| 保留旧 RC | `0.1.5-rc.1`, `0.1.5-rc.2`, `0.1.5-rc.3` | `0.1.23` |
+| 保留旧 RC | `0.1.2-rc.1` | `0.1.23` |
+| 开发者测试 Alpha | `0.1.2-alpha.5` | `0.1.23` |
+| 保留旧 Alpha | `0.1.2-alpha.2` | `0.1.23` |
 
-### 1. 安装 DeepSeek Harness
+### 桌面端
+
+在应用侧栏打开「插件 → 添加插件」，输入 npm 包名和版本：
+
+```text
+@nanmicoder/dsh-agent-teams@0.1.23
+```
+
+安装完成后点击「立即启用」；宿主提示需要重启时，重启桌面应用。发布版请使用上面的包名，npm 或 GitHub 网页链接与 npm 包名不是同一种安装来源。从 Git 安装时，请选用包含下方所述已验证构建产物的提交。
+
+桌面端自带 Harness 内核与包管理器，升级全局 CLI 不会升级桌面端；普通独立 CLI 不能管理桌面 profile，桌面端自带的 CLI carrier 在此版本可以管理。当前精确目标是已发布的 `0.2.0-rc.2`，仍属于 RC；此前源码预测的 `0.2.0` 已退出支持声明。详见[迁移验收记录](./docs/harness-0.2.0-rc.2/README.md)。
+
+### CLI / Web：1. 安装 DeepSeek Harness
 
 ```sh
-npm install --global @deepseek-ai/dsh@0.1.5-rc.1
+npm install --global @deepseek-ai/dsh@0.2.0-rc.2
 dsh --version
 ```
 
 已有该版本可跳过。Alpha 仅供主动测试：手动指定表中的 Alpha 版本，并按[维护指南](./docs/maintenance-workflow.md)锁定整组宿主依赖。
 
-### 2. 安装 AgentTeams 插件
+### CLI / Web：2. 安装 AgentTeams 插件
 
-安装到 `web` profile；使用其他 profile 时替换名称：
+从 npm 安装或升级插件（命令锁定本次 `latest` 正式版）：
 
 ```sh
-dsh plugin --profile web add --save-exact @nanmicoder/dsh-agent-teams@0.1.20
+dsh plugin --profile web add --save-exact @nanmicoder/dsh-agent-teams@0.1.23
 ```
 
-**安装后，停止并重新启动该 profile 的 Harness 进程，再刷新浏览器。**
+CLI 管理的安装可将 `web` 换成实际使用的 CLI profile。**安装后，停止并重新启动该 profile 的 Harness 进程，再刷新浏览器。** 安装插件不会自动升级宿主；Harness 的 `latest` 与插件的 `latest` 是两个独立渠道。
 
-npm 默认标签 `latest` 现指向 `0.1.20`，因此新 profile 使用 `dsh plugin --profile web add @nanmicoder/dsh-agent-teams` 即可安装本版；需要锁定版本时使用上面的精确版本命令。推荐宿主为 Harness `0.1.5-rc.1`，安装插件不会自动升级宿主。源码安装见[维护指南](./docs/maintenance-workflow.md)，验证范围见[本版验收记录](./docs/releases/v0.1.19/README.md)。
+从 Git 安装时，使用固定到包含已验证 `lib/` 构建产物的提交的 Git 包规格，不要填 npm 网页链接。仓库随代码分发服务端、客户端和类型产物，安装时不需要执行 `prepare` 或批准构建脚本。源码维护者每次修改源码后，都需运行 `pnpm build` 并更新已提交的产物。已经发布的 npm 产物保持不变。
 
-> Desktop 用户需核对应用内置的 Harness 核心；全局 CLI 升级不会升级桌面内核。旧 `0.1.0-*` / `0.1.1-*` 或其他未列出的宿主，请先保留已工作的组合，参考[旧版本与诊断指引](./docs/maintenance-workflow.md)。
+手动克隆源码的用户，拉取代码后需重新运行 `pnpm install --frozen-lockfile` 和 `pnpm build`，再重启对应的 Harness；只更新 Git 不会更新本地构建产物。详见[维护指南](./docs/maintenance-workflow.md)。
+
+> 旧 `0.1.0-*` / `0.1.1-*` 或其他未列出的宿主，请先保留已工作的组合，参考[旧版本与诊断指引](./docs/maintenance-workflow.md)。
 
 完整[兼容清单](./compatibility.json)、[源码安装与 Alpha 验证](./docs/maintenance-workflow.md)、[已验证范围与平台限制](./docs/maintenance-2026-09-06/release/README.md)。
 
@@ -87,6 +109,12 @@ npm 默认标签 `latest` 现指向 `0.1.20`，因此新 profile 使用 `dsh plu
 > 使用 AgentTeams 审查 v0.5.3 之后的提交，分别从性能、安全和产品角度分工，最后输出一份汇总报告。
 
 队长会话从第一轮起保留精简的固定核心协议和原有 14 个业务工具，直接调用，无需额外的加载工具或激活调用。已配置模板的精简目录固定保留。创建、批准、继续或结束团队都不会改写系统提示词和工具 schema，会话压缩或代码模式丢弃工具结果也不会丢失核心规则。成员保留四个团队工具、固定成员说明及普通编程/研究工具。Web 批准后会通知并唤醒队长，后续成员报告会再次唤醒它，无需忙轮询。详见[固定协议与 benchmark 标准](./docs/progressive-loading.md)。
+
+## 在工作区查看团队
+
+从当前聊天标题栏或回复下方的团队卡片点击 **查看团队**，在原生「团队协作」标签页中查看成员分工、任务依赖和执行进度。入口跟随所属聊天，不放在通用工作区开始页。
+
+页面直接呈现团队和任务内容；宽屏并排展示，窄分栏自动堆叠。点击任务可定位负责成员，成员图标可打开对应会话。关闭标签页不会停止团队；回到所属聊天可以再次打开。已完成团队保留归档，旧宿主继续使用活动面板。
 
 ## 工作方式
 
@@ -125,9 +153,25 @@ npm 默认标签 `latest` 现指向 `0.1.20`，因此新 profile 使用 `dsh plu
     memberModel: deepseek-v4
     memberMaxDepth: 0
     maxMembers: 8
+    toolPolicies:
+      researcher:
+        allow: [read, glob, grep]
+      implementer:
+        deny: [web_search]
 ```
 
 `memberMaxDepth` 默认 `0`，团队成员不能再创建子代理；显式设为 `1` 可允许一层后代，运行时和代码工具调用同样受限。默认成员统一通过团队消息汇报，避免再走宿主消息重复通知队长。无任务成员不调用模型；任务分配开启独立轮次，纠正消息进入最近的模型步骤。消息投递与读取分别记录；移除和归档必须等成员分支及待处理输入清理完成后才报告成功。
+
+`toolPolicies` 是部署方配置：按 id 复用的成员工具策略。成员只能“按 id 选择”——`agent_teams_add_member` 的 `tool_policy`、内联 `plan` 的成员行，或 profile 成员行的 `tool_policy`。队长模型只能选择已声明的策略，不能提交原始 allow/deny 列表，也不能在运行时新建策略。
+
+- `deny` 让指定全局工具从该成员的 schema 中消失，并拒绝其调用。
+- `allow` 只保留列出的全局工具；四个协调工具（`agent_teams_claim_task`、`agent_teams_update_task`、`agent_teams_send_message`、`agent_teams_status`）始终会被加入 allow 列表。
+- 队长专属工具始终被拒绝，策略无法重新打开；策略也不允许拒绝必须保留的协调工具。
+- 未知 id、空策略、空列表会在挂载时或写入成员前直接失败。
+- `agent_teams_status` 会显示每个成员选择的策略 id；完整生效过滤器保存在 `team.json` 供审计，重启后由子会话的持久 descriptor 重新应用。
+- 未配置策略的团队与成员保持原有工具集和记录结构；`agent_teams_edit_plan` 传空 `tool_policy` 可清除暂存成员的策略。
+
+这是全局工具的模型可见性与调用限制，不是 OS 沙箱，也不是授权边界。
 
 普通调研、仓库审计可用 `agent_teams_create({name, description, approval:"required", plan:{members:[{name:"researcher"}], tasks:[{id:"audit", subject:"审计现有实现", assignee:"researcher"}]}})` 一次创建完整草案。任务的 `dependencies` 引用同一批中的 `id`，支持前向引用并校验环；结果返回实际任务 ID。`kind=review` 专用于对既有 implementation/repair 任务的质量复审，普通仓库审计使用默认的 `kind=work`。
 

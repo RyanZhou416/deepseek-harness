@@ -20,8 +20,8 @@ function locatePackage(name, from) {
 }
 
 /** Inspect manifests only; never execute packages or read credentials/configuration. */
-export function inspectInstallation(hostRoot, profileRoot) {
-  const allowed = validatePolicy(policy)
+export function inspectInstallation(hostRoot, profileRoot, support = policy) {
+  const allowed = validatePolicy(support)
   const root = resolve(hostRoot)
   const own = join(root, 'package.json')
   const hostPath = existsSync(own) && manifest(own).name === '@deepseek-ai/dsh'
@@ -68,11 +68,12 @@ export function inspectInstallation(hostRoot, profileRoot) {
   }
   const mixed = packages.filter(pkg => pkg.version !== host.version)
   const problems = []
+  const sourceCandidate = support.sourceCandidates?.find(candidate => candidate.version === host.version)
   const policyPackage = manifest(new URL('../package.json', import.meta.url))
   if (plugin && plugin.version !== policyPackage.version) {
     problems.push(`Installed plugin ${plugin.version} differs from this policy's plugin ${policyPackage.version}; verify its own host compatibility`)
   }
-  if (!allowed.includes(host.version)) problems.push(`Unsupported host ${host.version}; recommended target is ${policy.recommendedHost}`)
+  if (!allowed.includes(host.version) && !sourceCandidate) problems.push(`Unsupported host ${host.version}; recommended target is ${support.recommendedHost}`)
   if (mixed.length) problems.push(`${mixed.length} resolved DSH packages differ from host ${host.version}`)
   if (missing.length) problems.push(`Missing packages: ${[...new Set(missing)].join(', ')}`)
   const identities = new Map()
@@ -88,8 +89,12 @@ export function inspectInstallation(hostRoot, profileRoot) {
     host: { version: host.version, path: dirname(hostPath) },
     ...(plugin ? { plugin } : {}),
     checkedPackages: packages.length, supportedHosts: allowed,
+    validation: sourceCandidate ? { kind: 'source-preview', ...sourceCandidate, sourceCommitVerified: false } : { kind: allowed.includes(host.version) ? 'published-matrix' : 'unsupported' },
     problems, packages,
-    limits: ['Checks files resolved from the supplied roots; does not identify the running process or prove plugin behavior.'],
+    limits: [
+      'Checks files resolved from the supplied roots; does not identify the running process or prove plugin behavior.',
+      ...(sourceCandidate ? [`Host ${host.version} is pre-adapted against source ${sourceCandidate.commit}; this inspection does not verify that the installed release matches that source.`] : []),
+    ],
   }
 }
 

@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import test from 'node:test'
 import { releaseMetadata } from './release-metadata.mjs'
-import { policy } from './compatibility.mjs'
+import { policy, workspacePolicy } from './compatibility.mjs'
 
 const fixture = (version, tag) => ({
   ...JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')),
@@ -17,10 +17,11 @@ test('stable latest requires the recommended host and bounded compatibility', ()
   for (const name of Object.keys(alphaOnly.devDependencies)) {
     if (name === '@deepseek-ai/dsh' || name.startsWith('@deepseek-ai/dsh-')) alphaOnly.devDependencies[name] = '0.1.2-alpha.2'
   }
-  for (const name of Object.keys(alphaOnly.pnpm.overrides)) {
-    if (name === '@deepseek-ai/dsh' || name.startsWith('@deepseek-ai/dsh-')) alphaOnly.pnpm.overrides[name] = '0.1.2-alpha.2'
+  const workspace = structuredClone(workspacePolicy)
+  for (const name of Object.keys(workspace.overrides)) {
+    if (name === '@deepseek-ai/dsh' || name.startsWith('@deepseek-ai/dsh-')) workspace.overrides[name] = '0.1.2-alpha.2'
   }
-  assert.throws(() => releaseMetadata(alphaOnly), /recommended host/)
+  assert.throws(() => releaseMetadata(alphaOnly, policy, workspace), /recommended host/)
   assert.throws(() => releaseMetadata(fixture('0.1.16', 'latest'), {
     ...policy, recommendedHost: '0.1.2-alpha.2',
     supportedHosts: [{ version: '0.1.2-alpha.2', track: 'recommended' }],

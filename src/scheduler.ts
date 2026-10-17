@@ -33,6 +33,8 @@ import {
   withTeamLock,
   writeTeam,
 } from './state.ts'
+import { contractStaleness, isVerdictKind, taskKindOf, verdictScopePatterns } from './quality-gates.ts'
+import { digestWorkspacePaths, snapshotWorkspacePaths } from './artifacts.ts'
 import type { TeamMember, TeamState, TeamTask } from './types.ts'
 
 /** Per-dependency output cap in the assignment prompt. */
@@ -74,6 +76,7 @@ export interface DispatchTicket {
   readonly previousStatus?: 'claimed' | 'in_progress'
   readonly previousAttempt?: number
   readonly previousAttemptId?: string
+  readonly previousResult?: Pick<TeamTask, 'output' | 'verdict' | 'findings' | 'changedPaths' | 'acceptanceResults' | 'commandsRun'>
   readonly subject: string
   readonly description?: string
   readonly teamDescription?: string
@@ -89,6 +92,7 @@ export interface DispatchTicket {
   readonly acceptance?: readonly string[]
   readonly verify?: readonly string[]
   readonly reviewedTaskId?: string
+  readonly findingSourceTaskIds?: readonly string[]
 }
 
 function taskProfileSeedId(task: TeamTask): string | undefined {
@@ -203,13 +207,21 @@ function nextReadyTask(tasks: readonly TeamTask[], memberName: string): TeamTask
     ?? ready.find(task => task.assignee === undefined)
 }
 
-export function assignmentPrompt(ticket: DispatchTicket, stateDir: string, teamId: string): string {
+export function assignmentPrompt(
+  ticket: DispatchTicket,
+  stateDir: string,
+  teamId: string,
+  workOrderWarnings: readonly string[] = [],
+): string {
   const description = ticket.description === undefined ? '' : `\n\n${ticket.description}`
   const seed = ticket.profileSeedId === undefined ? '' : ` [${ticket.profileSeedId}]`
   const goal = ticket.teamDescription?.trim() || '(not provided)'
   const protocol = ticket.profileProtocol?.trim() || '(none)'
   const executionPrompt = ticket.executionPrompt?.trim()
   const kind = ticket.kind?.trim() || 'work'
+  const staleWorkOrder = workOrderWarnings.length === 0
+    ? ''
+    : `\nBefore you edit anything: this auto-generated work order was derived from a workspace that has since changed.\n${workOrderWarnings.map((warning) => `- ${warning}`).join('\n')}\nRe-read the cited files first, locate the code by content anchor rather than by any position, and report a blocker instead of editing a target that no longer exists.\n`
   const contract = [
     `Kind: ${kind}${ticket.round === undefined ? '' : ` (round ${ticket.round})`}`,
     ticket.objective === undefined || ticket.objective === '' ? '' : `Objective: ${ticket.objective}`,
@@ -218,6 +230,7 @@ export function assignmentPrompt(ticket: DispatchTicket, stateDir: string, teamI
     ticket.acceptance === undefined || ticket.acceptance.length === 0 ? '' : `Acceptance: ${ticket.acceptance.join('; ')}`,
     ticket.verify === undefined || ticket.verify.length === 0 ? '' : `Verify: ${ticket.verify.join('; ')}`,
     ticket.reviewedTaskId === undefined ? '' : `Reviewed task: ${ticket.reviewedTaskId}`,
+    ticket.findingSourceTaskIds === undefined || ticket.findingSourceTaskIds.length === 0 ? '' : `Fixes findings of: ${ticket.findingSourceTaskIds.join(', ')}`,
   ].filter((line) => line !== '').join('\n')
   const structuredCompletion = ['implementation', 'repair', 'verification', 'integration'].includes(kind)
     ? `
@@ -244,13 +257,13 @@ Completed dependency results:
 ${formatDependencyOutputs(ticket.dependencyOutputs)}
 
 Task: ${ticket.taskId}${seed} — ${ticket.subject}${description}
-${contract === '' ? '' : `\nContract:\n${contract}\n`}
+${staleWorkOrder}${contract === '' ? '' : `\nContract:\n${contract}\n`}
 ${structuredCompletion}
 Attempt: ${ticket.attempt}
 Attempt id: ${ticket.attemptId}
 
-Call agent_teams_claim_task for ${ticket.taskId}; it will return this same attempt_id. Include attempt_id=${ticket.attemptId} in every agent_teams_update_task call. If it is rejected as stale, stop work because the task was reassigned. claimed cannot jump to completed. Mark in_progress first, then completed or failed. Include attempt_id on every update. Then send_message to captain and become idle.
-When finishing: use status=completed only when the task's success criteria are satisfied; use status=failed when blocking findings or validation failures mean downstream work must not proceed; include a concise output in either case. Quality kinds must submit structured fields: review/requirements need verdict=pass to complete (needs_revision/reject must fail with findings); implementation/repair/verification/integration need acceptanceResults and commandsRun, while implementation/repair also need in-scope changedPaths. Use status values "passed" or "failed" inside those arrays. After the work and verification finish, call agent_teams_update_task immediately; do not wait for captain confirmation and do not continue exploring. Do not approve your own implementation. Mail is not a formal next review. Treat the dependency results above as source material. Do not ignore them. Work only this task and only its in-scope paths in this turn.
+Call agent_teams_claim_task for ${ticket.taskId}; it will return this same attempt_id. Include attempt_id=${ticket.attemptId} in every agent_teams_update_task call. If it is rejected as stale, stop work because the task was reassigned. claimed cannot jump to completed. Mark in_progress first, then completed or failed. Include attempt_id on every update. Then send_message to captain with source_task_id and source_attempt_id and become idle.
+When finishing: use status=completed only when the task's success criteria are satisfied; use status=failed when blocking findings or validation failures mean downstream work must not proceed; include a concise output in either case. Quality kinds must submit structured fields: review/requirements need verdict=pass to complete (needs_revision/reject must fail with findings); implementation/repair/verification/integration need acceptanceResults and commandsRun, while implementation/repair also need in-scope changedPaths. Use status values "passed" or "failed" inside those arrays. After the work and verification finish, call agent_teams_update_task immediately; do not wait for captain confirmation and do not continue exploring. Do not approve your own implementation. Mail is not a formal next review. Completed work must not be repeated to attach late evidence: call update_task on the original task with its attempt_id and acceptanceResults/commandsRun/evidence_note; supplements are append-only and cannot change its verdict. Treat the dependency results above as source material. Do not ignore them. Work only this task and only its in-scope paths in this turn.
 
 State policy: ${stateDir}/${teamId}/ is read-only diagnostics; mutate team state only through agent_teams_* tools.`
 }
@@ -365,7 +378,18 @@ export function installTeamScheduler(ctx: Context, config: SchedulerConfig): Tea
           const previousStatus = recoverOwned ? task.status as 'claimed' | 'in_progress' : undefined
           const previousAttempt = recoverOwned ? task.attempt : undefined
           const previousAttemptId = recoverOwned ? task.attemptId : undefined
+          const previousResult = recoverOwned ? {
+            output: task.output, verdict: task.verdict, findings: task.findings,
+            changedPaths: task.changedPaths, acceptanceResults: task.acceptanceResults, commandsRun: task.commandsRun,
+          } : undefined
           const attemptId = beginTaskAttempt(task, currentMember.name)
+          // A verdict must be able to say which revision was on disk when it
+          // started, so a review that runs while someone else edits the tree
+          // cannot later claim to have judged stable bytes (issue #161).
+          if (isVerdictKind(taskKindOf(task))) {
+            const scope = verdictScopePatterns(fresh, task)
+            if (scope.length > 0) task.verdictStartSnapshot = snapshotWorkspacePaths(workspace, scope)
+          }
           // A recovered generation is parked before delivery. This makes each
           // (member, attempt) recovery idempotent even if every status poll
           // sees a disposed handle. Fresh pending work remains unparked so a
@@ -384,6 +408,7 @@ export function installTeamScheduler(ctx: Context, config: SchedulerConfig): Tea
             attemptId,
             previousAssignee,
             recoveredOwned: recoverOwned,
+            ...previousResult === undefined ? {} : { previousResult },
             ...previousStatus === undefined ? {} : { previousStatus },
             ...previousAttempt === undefined ? {} : { previousAttempt },
             ...previousAttemptId === undefined ? {} : { previousAttemptId },
@@ -403,6 +428,7 @@ export function installTeamScheduler(ctx: Context, config: SchedulerConfig): Tea
             ...task.acceptance === undefined ? {} : { acceptance: task.acceptance },
             ...task.verify === undefined ? {} : { verify: task.verify },
             ...task.reviewedTaskId === undefined ? {} : { reviewedTaskId: task.reviewedTaskId },
+            ...task.findingSourceTaskIds === undefined ? {} : { findingSourceTaskIds: task.findingSourceTaskIds },
             dependencyOutputs: collectCompletedDependencyOutputs(
               fresh.tasks,
               task.id,
@@ -412,7 +438,14 @@ export function installTeamScheduler(ctx: Context, config: SchedulerConfig): Tea
         })
         if (ticket === undefined) return
 
-        const prompt = assignmentPrompt(ticket, config.stateDir, team.id)
+        const taskForWarning = team.tasks.find((item) => item.id === ticket.taskId)
+        const workOrderStale = taskForWarning?.contractSnapshot === undefined
+          ? []
+          : contractStaleness(
+            taskForWarning,
+            digestWorkspacePaths(workspace, taskForWarning.contractSnapshot.artifacts.map((artifact) => artifact.path)),
+          )
+        const prompt = assignmentPrompt(ticket, config.stateDir, team.id, workOrderStale)
         const signal = new AbortController().signal
         const accepted = config.dispatch === undefined
           ? await deliverToMember(ctx, captain, ticket.memberId, prompt, signal)
@@ -434,6 +467,7 @@ export function installTeamScheduler(ctx: Context, config: SchedulerConfig): Tea
             task.assignee = ticket.previousAssignee
             task.attempt = ticket.previousAttempt
             task.attemptId = ticket.previousAttemptId
+            Object.assign(task, ticket.previousResult)
             parkedAttempts.set(ticket.memberId, ticket.previousAttemptId)
           } else {
             task.status = 'pending'
