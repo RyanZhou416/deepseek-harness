@@ -23,6 +23,8 @@ coverage/
 oxlint-contract-*.ts
 .humanize/
 tmp/
+# Root-local investigation scratch; keep it off the source change list.
+/.tmp/
 .claude/commands/
 .claude/launch.json
 .claude/settings.json
