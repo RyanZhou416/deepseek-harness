@@ -191,6 +191,11 @@ async function mountHost(capability: number | undefined): Promise<{
   const plugin = await import('../src/index.js')
   const registered: string[] = []
   const ctx = new Context()
+  // The Claude route also mounts only while a Host provides the recording seam; the
+  // capability below is what this spec varies.
+  ctx.provide('llmRequestRecord', {
+    recordPreparedRequest: async () => ({ ok: true, preparedId: 0 }),
+  })
   ctx.provide('llm', {
     // A status read must not register anything beyond the adapters themselves.
     registerAdapter: (providers: string[]) => {
@@ -231,7 +236,8 @@ test('a Host without the declared contract loses the Claude route and keeps the 
 test('a Host that declares the contract registers the Claude route', async () => {
   store({ claude: { acct: { accessToken: TOKEN, refreshToken: REFRESH, expiresAt: Date.now() + 3_600_000 } } })
   const host = await mountHost(1)
-  assert.deepEqual(host.registered, ['claude', 'codex'])
+  // Registration order follows each provider's own injection, so only the set is the contract.
+  assert.deepEqual([...host.registered].sort(), ['claude', 'codex'])
   const claude = await host.status('claude')
   assert.equal('unavailable' in claude, false)
   assert.equal((claude.accounts as unknown[]).length, 1)

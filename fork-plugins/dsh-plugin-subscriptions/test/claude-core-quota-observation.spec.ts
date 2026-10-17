@@ -11,6 +11,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
+import { sourceUrl } from './source-url.js'
 
 import {
   CLAUDE_UNIFIED_HEADER_PREFIX,
@@ -26,7 +27,7 @@ import type { QuotaHeaderSource } from '../src/claude-core/quota-observation.js'
 import { resetInstantFromValue } from '../src/providers/rate-limit.js'
 import { parseUnifiedRateLimit } from '../src/providers/unified-rate-limit.js'
 
-const SOURCE_URL = new URL('../src/claude-core/quota-observation.ts', import.meta.url)
+const SOURCE_URL = sourceUrl('claude-core/quota-observation.ts')
 const UNIFIED_PREFIX = CLAUDE_UNIFIED_HEADER_PREFIX
 const NOW = 1_786_000_000_000
 

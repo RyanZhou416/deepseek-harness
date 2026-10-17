@@ -105,6 +105,10 @@ test('the guard is registered once through the tools seam, and policy is not a v
   const restrictions: Record<string, unknown>[] = []
   const guards: ((execution: { name: string; agent?: { session: { id: unknown } } }) => string | undefined)[] = []
   const ctx = new Context()
+  // The Claude route mounts only while a Host provides the recording seam.
+  ctx.provide('llmRequestRecord', {
+    recordPreparedRequest: async () => ({ ok: true, preparedId: 0 }),
+  })
   ctx.provide('llm', {
     failureRecoveryVersion: 1,
     registerAdapter: (providers: string[]) => {
@@ -125,7 +129,8 @@ test('the guard is registered once through the tools seam, and policy is not a v
 
   // The Claude route is registered (the Host declares the contract) and the enforcement is
   // one execution-stage guard covering the whole registry.
-  assert.deepEqual(registered, ['claude', 'grok'])
+  // Registration order follows each provider's own injection, so only the set is the contract.
+  assert.deepEqual([...registered].sort(), ['claude', 'grok'])
   assert.equal(guards.length, 1, 'exactly one guard, not one per agent or per tool')
   assert.equal(restrictions.length, 0, 'policy is not a visibility restriction; local preferences narrow nothing by default')
 
