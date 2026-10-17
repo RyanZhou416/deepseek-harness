@@ -85,7 +85,7 @@ describe('macOS fork launchers', () => {
     expect(cleanLauncher).toContain('\npnpm run clean\n')
     expect(cleanLauncher).not.toMatch(/\brm\b/)
     expect(runLauncher).toContain('dsh_prepare_macos_toolchain "$SCRIPT_DIR"\ndsh_prepare_macos_web_runtime')
-    expect(runLauncher).toContain('\npnpm dsh web\n')
+    expect(runLauncher).toContain('\npnpm exec node --expose-internals --import tsx/esm "$SCRIPT_DIR/apps/cli/src/bin.ts" web\n')
 
     if (process.platform !== 'win32') {
       expect(statSync(join(repositoryRoot, 'build.command')).mode & 0o111).not.toBe(0)

@@ -135,7 +135,7 @@ describe('Windows fork launchers', () => {
     expect(readFileSync(log, 'utf8').trim().split(/\r?\n/)).toEqual([
       'pnpm install --child-concurrency=4 --optimistic-repeat-install=false',
       'pnpm run build',
-      `pnpm dsh web --patch ${join(repositoryRoot, 'fork-runtime', 'diagnostics', 'cordis.patch.yml')}`,
+      `pnpm exec node --expose-internals --import tsx/esm ${join(repositoryRoot, 'apps', 'cli', 'src', 'bin.ts')} web --patch ${join(repositoryRoot, 'fork-runtime', 'diagnostics', 'cordis.patch.yml')}`,
     ])
   })
 
@@ -165,7 +165,8 @@ describe('Windows fork launchers', () => {
       expect(result.status, result.stderr || result.stdout).toBe(0)
       const captured = JSON.parse(readFileSync(log, 'utf8')) as { args: string[]; heapLimit: number }
       expect(captured.args).toEqual([
-        'dsh', 'web', '--patch', join(repositoryRoot, 'fork-runtime', 'diagnostics', 'cordis.patch.yml'),
+        'exec', 'node', '--expose-internals', '--import', 'tsx/esm',
+        join(repositoryRoot, 'apps', 'cli', 'src', 'bin.ts'), 'web', '--patch', join(repositoryRoot, 'fork-runtime', 'diagnostics', 'cordis.patch.yml'),
         ...withOverlay ? ['--patch', overlay] : [],
       ])
       expect(captured.heapLimit).toBeGreaterThanOrEqual(32 * 1024 ** 3)

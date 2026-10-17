@@ -26,7 +26,7 @@ if errorlevel 1 goto :failed
 set "DSH_STEP=starting DeepSeek Harness"
 set "DSH_MEMORY_PATCH_ARGS="
 if exist "%DSH_HOME%\profiles\web\memory-limits.patch.yml" set DSH_MEMORY_PATCH_ARGS=--patch "%DSH_HOME%\profiles\web\memory-limits.patch.yml"
-call "%~dp0scripts\fork-windows-pnpm.cmd" dsh web --patch "%~dp0fork-runtime\diagnostics\cordis.patch.yml" %DSH_MEMORY_PATCH_ARGS%
+call "%~dp0scripts\fork-windows-pnpm.cmd" exec node --expose-internals --import tsx/esm "%~dp0apps\cli\src\bin.ts" web --patch "%~dp0fork-runtime\diagnostics\cordis.patch.yml" %DSH_MEMORY_PATCH_ARGS%
 if errorlevel 1 goto :failed
 exit /b 0
 

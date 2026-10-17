@@ -14,4 +14,4 @@ fi
 dsh_prepare_macos_toolchain "$SCRIPT_DIR"
 dsh_prepare_macos_web_runtime
 
-pnpm dsh web
+pnpm exec node --expose-internals --import tsx/esm "$SCRIPT_DIR/apps/cli/src/bin.ts" web
