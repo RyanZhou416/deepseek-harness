@@ -544,6 +544,8 @@ Web bundle 的 `standard`、`ptc` 与 `cordis` preset 在 Agent 工具作用域�
 
 同包的 `session_message_status` 用目标 Session id 与已接受 `messageId` 只读折叠目标完整日志，不唤醒目标。它区分 pending-context、claimed、model-context、processing-tool、completed、rejected、discarded 与 unknown，并从顶层工具事件和 PTC sub-dispatch 同时识别未结算 `terminal_send` 的 terminal blocking；状态是时间点观察，不自动推送给发送方。
 
+2026-10-18 合并到 0.2.1-rc.2 时，上游整体替换了 `packages/bundle/web-app/presets/{standard,ptc,cordis}.patch.yml`，三个文件中的 `tool-session-message` 行随之消失，Web 启动的工具目录对比因此报「移除 session_create / session_find / session_message_status / session_send_message」。修复是把 `- id: tool-session-message` 与 `name: '@deepseek-ai/dsh-tool-session-message'` 两行重新插回三个 preset 的 `tool-jobs` 之后，并同步外置 `chatgpt-dsh` 预设；该包继续以 `workspace:*` 列在 web-app bundle 依赖中。**Preservation rule.** 上游以后再次改写这些 preset 文件时，必须逐行核对这三处插入，不能整文件接受上游版本。**Focused verification.** `dsh --profile web --dump-config` 输出三条 `tool-session-message`；`apps/web/tests/shipped-composition.e2e.ts` 的 `EXPECTED_TOOLS` 含 `session_send_message`（Windows 上仅 bash/pwsh 平台差异失败）；`pnpm exec tsx scripts/verify-cordis-config.ts` 报告 350 个配置通过。
+
 #### Retired official Team scheduling patches
 
 `forceRunInBackground` 与 `yieldWaitOnNextStep` 没有进入 0.1.6 移植。真实 profile 使用外置 AgentTeams，不挂载官方实验性 Team profile；保留两个仅由未启用 profile 消费的公共配置会扩大每次上游合并的冲突面。普通 jobs completion wake、Windows 控制台隔离和 AgentTeams 自己的 next-step delivery 独立保留。

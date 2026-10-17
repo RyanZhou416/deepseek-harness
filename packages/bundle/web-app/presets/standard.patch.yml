@@ -32,6 +32,8 @@
               sampleOverCapGlobResults: false
           - id: tool-jobs
             name: '@deepseek-ai/dsh-tool-jobs'
+          - id: tool-session-message
+            name: '@deepseek-ai/dsh-tool-session-message'
           - id: tool-schedule
             name: '@deepseek-ai/dsh-tool-schedule'
           - id: skill-filesystem
