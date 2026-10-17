@@ -38,6 +38,7 @@ import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { collectArchivedTeamsActivity, collectTeamsActivity } from './snapshot.ts'
+import { ActivityQueryError, parseActivityQuery } from './activity-query.ts'
 import { findTeamByCaptain } from './state.ts'
 import { leadIdentityOfAsync } from './lineage.ts'
 import { formatProfilesForPrompt, type TeamProfileConfig } from './profiles.ts'
@@ -268,10 +269,21 @@ export function apply(ctx: Context, config: Config): void {
         workspacePath: workspace.path,
         stateRoot: join(workspace.path, resolved.stateDir),
       }))
+      // Scoped selectors keep discovery and card targets cheap; malformed
+      // scope rejects instead of falling back to an all-team scan.
+      let query
+      try {
+        query = parseActivityQuery(url)
+      } catch (error: unknown) {
+        if (!(error instanceof ActivityQueryError)) throw error
+        res.writeHead(400, { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' })
+        res.end(error.message)
+        return
+      }
       // ?archived=1 serves teams moved to archive/ (post-delete review).
-      const snapshots = url.searchParams.get('archived') === '1'
-        ? await collectArchivedTeamsActivity(ctx, roots)
-        : await collectTeamsActivity(ctx, roots)
+      const snapshots = query.archived
+        ? await collectArchivedTeamsActivity(ctx, roots, query.options)
+        : await collectTeamsActivity(ctx, roots, query.options)
       const body = JSON.stringify({ teams: snapshots })
       res.writeHead(200, {
         'content-type': 'application/json; charset=utf-8',

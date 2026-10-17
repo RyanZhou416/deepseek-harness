@@ -83,6 +83,8 @@ export interface TeamActivitySnapshot {
   readonly members: readonly TeamActivityMember[]
   readonly tasks: readonly TeamActivityTask[]
   readonly messageCount: number
+  /** Whether staged-plan authoring fields are present; scoped callers may request a summary. */
+  readonly detail: 'summary' | 'full'
   readonly captainInbox: readonly TeamActivityMessage[]
   /** Present when the snapshot could audit the workspace bytes. */
   readonly loopState?: string
@@ -96,12 +98,49 @@ export interface TeamSnapshotOptions {
   readonly includeRemoved?: boolean
   /** Archived teams have no meaningful live activity after their sessions stop. */
   readonly historic?: boolean
+  /** Include staged-plan authoring text (team description, execution prompts, task descriptions). */
+  readonly includeDetails?: boolean
+  /** Include legacy captain-inbox preview bodies. */
+  readonly includeCaptainInbox?: boolean
   /**
    * Absolute workspace path of the owning workspace. When present, the snapshot
    * audits the current bytes behind every recorded verdict, so the panel and
    * the model-facing status tool cannot report different delivery verdicts.
    */
   readonly workspacePath?: string
+}
+
+/** One explicit conversation-card target. */
+export interface TeamActivityTarget {
+  readonly captainSessionId: string
+  readonly teamId: string
+}
+
+/** Selection applied before activity and mailbox assembly. */
+export interface TeamActivityCollectionOptions {
+  /** Current captain whose teams are needed for discovery. */
+  readonly captainSessionId?: string
+  /** Explicit durable teams retained by visible conversation cards. */
+  readonly targets?: readonly TeamActivityTarget[]
+  /** Include staged-plan authoring fields. */
+  readonly includeDetails?: boolean
+  /** Include legacy captain-inbox preview bodies. */
+  readonly includeCaptainInbox?: boolean
+}
+
+/**
+ * Whether one team belongs to a scoped collection request.
+ * @param state - the durable team record.
+ * @param options - selection switches; no scope selects every team.
+ * @returns true when the team should be collected.
+ */
+function selectedTeam(state: TeamState, options: TeamActivityCollectionOptions): boolean {
+  const captain = options.captainSessionId?.trim() ?? ''
+  const targets = options.targets ?? []
+  if (captain === '' && targets.length === 0) return true
+  return (captain !== '' && state.captainSessionId === captain) || targets.some(target => (
+    target.captainSessionId === state.captainSessionId && target.teamId === state.id
+  ))
 }
 
 /** The current task of a member: its first unfinished owned task. */
@@ -136,6 +175,8 @@ export async function assembleTeamSnapshot(
   state: TeamState,
   options: TeamSnapshotOptions = {},
 ): Promise<TeamActivitySnapshot> {
+  // Omitted switches keep the panel's original payload; only an explicit summary trims.
+  const detail: 'summary' | 'full' = options.includeDetails === false ? 'summary' : 'full'
   const tasks = state.tasks
   const depths = taskDepthsById(tasks)
   const roster = options.includeRemoved === true
@@ -163,7 +204,7 @@ export async function assembleTeamSnapshot(
       provider: member.provider?.trim() ?? '',
       model: member.model?.trim() ?? '',
       reasoningEffort: member.reasoningEffort?.trim() ?? '',
-      executionPrompt: member.executionPrompt ?? '',
+      executionPrompt: detail === 'full' ? member.executionPrompt ?? '' : '',
       status: member.status,
       activity: options.historic === true
         ? 'idle'
@@ -197,7 +238,7 @@ export async function assembleTeamSnapshot(
     workspace,
     teamId: state.id,
     name: state.name,
-    ...state.description !== undefined ? { description: state.description } : {},
+    ...state.description === undefined || detail !== 'full' ? {} : { description: state.description },
     captainSessionId: state.captainSessionId,
     phase: state.phase ?? 'running',
     ...state.phase === 'staged'
@@ -213,7 +254,7 @@ export async function assembleTeamSnapshot(
     tasks: tasks.map((task) => ({
       id: task.id,
       subject: task.subject,
-      description: task.description ?? '',
+      description: detail === 'full' ? task.description ?? '' : '',
       status: task.status,
       state: taskVisualState(task.status, task.dependencies, tasks),
       assignee: task.assignee ?? '',
@@ -228,10 +269,13 @@ export async function assembleTeamSnapshot(
     })),
     messageCount: captainInbox.length
       + members.reduce((count, member) => count + member.unread, 0),
-    captainInbox: captainInbox.slice(-5).map((message) => ({
-      from: message.from,
-      content: message.content,
-    })),
+    detail,
+    captainInbox: options.includeCaptainInbox === false
+      ? []
+      : captainInbox.slice(-5).map((message) => ({
+          from: message.from,
+          content: message.content,
+        })),
   }
 }
 
@@ -244,6 +288,7 @@ export async function assembleTeamSnapshot(
 export async function collectTeamsActivity(
   ctx: Context,
   roots: readonly { workspace: string; stateRoot: string; workspacePath?: string }[],
+  options: TeamActivityCollectionOptions = {},
 ): Promise<TeamActivitySnapshot[]> {
   const snapshots: TeamActivitySnapshot[] = []
   for (const root of roots) {
@@ -260,9 +305,11 @@ export async function collectTeamsActivity(
       if (!entry.isDirectory()) continue
       try {
         const state = await readTeam(root.stateRoot, entry.name)
-        if (state === undefined) continue
+        if (state === undefined || !selectedTeam(state, options)) continue
         snapshots.push(await assembleTeamSnapshot(ctx, root.stateRoot, root.workspace, state, {
           ...root.workspacePath === undefined ? {} : { workspacePath: root.workspacePath },
+          ...options.includeDetails === undefined ? {} : { includeDetails: options.includeDetails },
+          ...options.includeCaptainInbox === undefined ? {} : { includeCaptainInbox: options.includeCaptainInbox },
         }))
       } catch {
         ctx.logger.warn(`agent-teams: skipped unreadable team state "${entry.name}" in workspace "${root.workspace}"`)
@@ -283,19 +330,25 @@ export async function collectTeamsActivity(
 export async function collectArchivedTeamsActivity(
   ctx: Context,
   roots: readonly { workspace: string; stateRoot: string }[],
+  options: TeamActivityCollectionOptions = {},
 ): Promise<TeamActivitySnapshot[]> {
   const snapshots: TeamActivitySnapshot[] = []
   for (const root of roots) {
     for (const teamId of await listArchivedTeamIds(root.stateRoot)) {
       try {
         const state = await readArchivedTeam(root.stateRoot, teamId)
-        if (state === undefined) continue
+        if (state === undefined || !selectedTeam(state, options)) continue
         snapshots.push(await assembleTeamSnapshot(
           ctx,
           join(root.stateRoot, 'archive'),
           root.workspace,
           state,
-          { includeRemoved: true, historic: true },
+          {
+            includeRemoved: true,
+            historic: true,
+            ...options.includeDetails === undefined ? {} : { includeDetails: options.includeDetails },
+            ...options.includeCaptainInbox === undefined ? {} : { includeCaptainInbox: options.includeCaptainInbox },
+          },
         ))
       } catch {
         ctx.logger.warn(`agent-teams: skipped unreadable archived team "${teamId}" in workspace "${root.workspace}"`)

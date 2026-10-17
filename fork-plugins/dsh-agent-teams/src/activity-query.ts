@@ -1,22 +1,6 @@
+import type { TeamActivityCollectionOptions, TeamActivityTarget } from './snapshot.ts'
 /** Activity-state query parsing for scoped and legacy browser clients. */
 
-/** One explicit team target request: a captain session plus its team id. */
-export interface TeamActivityTarget {
-  readonly captainSessionId: string
-  readonly teamId: string
-}
-
-/**
- * Fork-owned scoped activity selection parsed from the route URL. The merged
- * snapshot collector reads its own options, so this contract stays local to the
- * route parser until the Host route consumes it again.
- */
-export interface TeamActivityCollectionOptions {
-  readonly captainSessionId?: string
-  readonly targets?: readonly TeamActivityTarget[]
-  readonly includeDetails?: boolean
-  readonly includeCaptainInbox?: boolean
-}
 
 /** A malformed activity-state selection that must not fall back to an all-team scan. */
 export class ActivityQueryError extends Error {}

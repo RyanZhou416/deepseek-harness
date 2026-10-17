@@ -495,6 +495,8 @@ AgentTeams 成员是用户指定的例外；核心 `startAgentTeamsMember` symbo
 
 **Preservation rule.** 成员级 persona 与工具限制只在旧主机上生效；0.2.1 起成员工具集由所选 Agent Preset 的插件组合决定，不再有按成员的 deny 列表。不要为此在 `packages/subagent` 里加 fork 分支，也不要在预设之外重建动态 persona。
 
+活动面板的取数契约也留在 fork：`/plugins/dsh-agent-teams/state` 无参数时保持全量且带完整详情与收件箱预览（面板行为不变）；`captainSessionId` 或成对的 `teamCaptainSessionId`+`teamId` 只返回所选团队；`detail=1` 再附带团队描述、成员执行提示词、任务描述等重字段，`archived=1` 走归档集合。非法分域参数返回 400，不回退成全量扫描。
+
 **Focused verification.** 在 `fork-plugins/dsh-agent-teams` 运行 `pnpm typecheck`、`pnpm build` 与 `pnpm verify`（覆盖 fallback/member-failure TDD、issue regressions、quality gates、lifecycle、stress、compatibility、doctor、skill、harness contract、capabilities、release metadata）。`release-metadata.test.mjs` 需同时覆盖 `dsh021rc2` 私有通道与 `0.2.1-rc.2` 推荐宿主。
 ### Subagent and AgentTeams responsiveness
 

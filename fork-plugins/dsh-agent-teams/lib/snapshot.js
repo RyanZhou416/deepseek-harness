@@ -13,6 +13,19 @@ import { memberActivity } from "./members.js";
 import { canDeclareDelivery, describeQualityLoop, verdictAuditNotes } from "./quality-gates.js";
 import { auditTeamWorkspace } from "./workspace-audit.js";
 import { CAPTAIN_KEY, listArchivedTeamIds, readArchivedTeam, readUnreadMailbox, readTeam, taskDepthsById, taskVisualState, } from "./state.js";
+/**
+ * Whether one team belongs to a scoped collection request.
+ * @param state - the durable team record.
+ * @param options - selection switches; no scope selects every team.
+ * @returns true when the team should be collected.
+ */
+function selectedTeam(state, options) {
+    const captain = options.captainSessionId?.trim() ?? '';
+    const targets = options.targets ?? [];
+    if (captain === '' && targets.length === 0)
+        return true;
+    return (captain !== '' && state.captainSessionId === captain) || targets.some(target => (target.captainSessionId === state.captainSessionId && target.teamId === state.id));
+}
 /** The current task of a member: its first unfinished owned task. */
 function currentTaskOf(memberName, tasks) {
     for (const task of tasks) {
@@ -40,6 +53,8 @@ export function memberModelRoute(member) {
  * @returns the panel snapshot.
  */
 export async function assembleTeamSnapshot(ctx, stateRoot, workspace, state, options = {}) {
+    // Omitted switches keep the panel's original payload; only an explicit summary trims.
+    const detail = options.includeDetails === false ? 'summary' : 'full';
     const tasks = state.tasks;
     const depths = taskDepthsById(tasks);
     const roster = options.includeRemoved === true
@@ -68,7 +83,7 @@ export async function assembleTeamSnapshot(ctx, stateRoot, workspace, state, opt
             provider: member.provider?.trim() ?? '',
             model: member.model?.trim() ?? '',
             reasoningEffort: member.reasoningEffort?.trim() ?? '',
-            executionPrompt: member.executionPrompt ?? '',
+            executionPrompt: detail === 'full' ? member.executionPrompt ?? '' : '',
             status: member.status,
             activity: options.historic === true
                 ? 'idle'
@@ -102,7 +117,7 @@ export async function assembleTeamSnapshot(ctx, stateRoot, workspace, state, opt
         workspace,
         teamId: state.id,
         name: state.name,
-        ...state.description !== undefined ? { description: state.description } : {},
+        ...state.description === undefined || detail !== 'full' ? {} : { description: state.description },
         captainSessionId: state.captainSessionId,
         phase: state.phase ?? 'running',
         ...state.phase === 'staged'
@@ -118,7 +133,7 @@ export async function assembleTeamSnapshot(ctx, stateRoot, workspace, state, opt
         tasks: tasks.map((task) => ({
             id: task.id,
             subject: task.subject,
-            description: task.description ?? '',
+            description: detail === 'full' ? task.description ?? '' : '',
             status: task.status,
             state: taskVisualState(task.status, task.dependencies, tasks),
             assignee: task.assignee ?? '',
@@ -133,10 +148,13 @@ export async function assembleTeamSnapshot(ctx, stateRoot, workspace, state, opt
         })),
         messageCount: captainInbox.length
             + members.reduce((count, member) => count + member.unread, 0),
-        captainInbox: captainInbox.slice(-5).map((message) => ({
-            from: message.from,
-            content: message.content,
-        })),
+        detail,
+        captainInbox: options.includeCaptainInbox === false
+            ? []
+            : captainInbox.slice(-5).map((message) => ({
+                from: message.from,
+                content: message.content,
+            })),
     };
 }
 /**
@@ -145,7 +163,7 @@ export async function assembleTeamSnapshot(ctx, stateRoot, workspace, state, opt
  * @param roots - `{ workspace, stateRoot }` pairs (resolved absolute roots).
  * @returns the snapshots in stable order (workspace, then team id).
  */
-export async function collectTeamsActivity(ctx, roots) {
+export async function collectTeamsActivity(ctx, roots, options = {}) {
     const snapshots = [];
     for (const root of roots) {
         let entries;
@@ -163,10 +181,12 @@ export async function collectTeamsActivity(ctx, roots) {
                 continue;
             try {
                 const state = await readTeam(root.stateRoot, entry.name);
-                if (state === undefined)
+                if (state === undefined || !selectedTeam(state, options))
                     continue;
                 snapshots.push(await assembleTeamSnapshot(ctx, root.stateRoot, root.workspace, state, {
                     ...root.workspacePath === undefined ? {} : { workspacePath: root.workspacePath },
+                    ...options.includeDetails === undefined ? {} : { includeDetails: options.includeDetails },
+                    ...options.includeCaptainInbox === undefined ? {} : { includeCaptainInbox: options.includeCaptainInbox },
                 }));
             }
             catch {
@@ -184,15 +204,20 @@ export async function collectTeamsActivity(ctx, roots) {
  * @param roots - `{ workspace, stateRoot }` pairs.
  * @returns the archived snapshots in stable order.
  */
-export async function collectArchivedTeamsActivity(ctx, roots) {
+export async function collectArchivedTeamsActivity(ctx, roots, options = {}) {
     const snapshots = [];
     for (const root of roots) {
         for (const teamId of await listArchivedTeamIds(root.stateRoot)) {
             try {
                 const state = await readArchivedTeam(root.stateRoot, teamId);
-                if (state === undefined)
+                if (state === undefined || !selectedTeam(state, options))
                     continue;
-                snapshots.push(await assembleTeamSnapshot(ctx, join(root.stateRoot, 'archive'), root.workspace, state, { includeRemoved: true, historic: true }));
+                snapshots.push(await assembleTeamSnapshot(ctx, join(root.stateRoot, 'archive'), root.workspace, state, {
+                    includeRemoved: true,
+                    historic: true,
+                    ...options.includeDetails === undefined ? {} : { includeDetails: options.includeDetails },
+                    ...options.includeCaptainInbox === undefined ? {} : { includeCaptainInbox: options.includeCaptainInbox },
+                }));
             }
             catch {
                 ctx.logger.warn(`agent-teams: skipped unreadable archived team "${teamId}" in workspace "${root.workspace}"`);

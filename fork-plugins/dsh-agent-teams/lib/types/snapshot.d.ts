@@ -68,6 +68,8 @@ export interface TeamActivitySnapshot {
     readonly members: readonly TeamActivityMember[];
     readonly tasks: readonly TeamActivityTask[];
     readonly messageCount: number;
+    /** Whether staged-plan authoring fields are present; scoped callers may request a summary. */
+    readonly detail: 'summary' | 'full';
     readonly captainInbox: readonly TeamActivityMessage[];
     /** Present when the snapshot could audit the workspace bytes. */
     readonly loopState?: string;
@@ -84,12 +86,32 @@ export interface TeamSnapshotOptions {
     readonly includeRemoved?: boolean;
     /** Archived teams have no meaningful live activity after their sessions stop. */
     readonly historic?: boolean;
+    /** Include staged-plan authoring text (team description, execution prompts, task descriptions). */
+    readonly includeDetails?: boolean;
+    /** Include legacy captain-inbox preview bodies. */
+    readonly includeCaptainInbox?: boolean;
     /**
      * Absolute workspace path of the owning workspace. When present, the snapshot
      * audits the current bytes behind every recorded verdict, so the panel and
      * the model-facing status tool cannot report different delivery verdicts.
      */
     readonly workspacePath?: string;
+}
+/** One explicit conversation-card target. */
+export interface TeamActivityTarget {
+    readonly captainSessionId: string;
+    readonly teamId: string;
+}
+/** Selection applied before activity and mailbox assembly. */
+export interface TeamActivityCollectionOptions {
+    /** Current captain whose teams are needed for discovery. */
+    readonly captainSessionId?: string;
+    /** Explicit durable teams retained by visible conversation cards. */
+    readonly targets?: readonly TeamActivityTarget[];
+    /** Include staged-plan authoring fields. */
+    readonly includeDetails?: boolean;
+    /** Include legacy captain-inbox preview bodies. */
+    readonly includeCaptainInbox?: boolean;
 }
 /** Compact `provider/model` route for the activity panel, or just the model. */
 export declare function memberModelRoute(member: {
@@ -115,7 +137,7 @@ export declare function collectTeamsActivity(ctx: Context, roots: readonly {
     workspace: string;
     stateRoot: string;
     workspacePath?: string;
-}[]): Promise<TeamActivitySnapshot[]>;
+}[], options?: TeamActivityCollectionOptions): Promise<TeamActivitySnapshot[]>;
 /**
  * Collect every archived team under the given workspace state roots (the
  * `archive/` subdirectory of each state root). Used by the historic panel
@@ -127,4 +149,4 @@ export declare function collectTeamsActivity(ctx: Context, roots: readonly {
 export declare function collectArchivedTeamsActivity(ctx: Context, roots: readonly {
     workspace: string;
     stateRoot: string;
-}[]): Promise<TeamActivitySnapshot[]>;
+}[], options?: TeamActivityCollectionOptions): Promise<TeamActivitySnapshot[]>;
