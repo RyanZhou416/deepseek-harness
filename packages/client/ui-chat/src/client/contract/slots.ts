@@ -216,6 +216,10 @@ export interface ChatNodeOwnerProps {
   openFile: (path: string, options?: OpenFileOptions) => void
   inspectCall: ((callId: ToolCallId) => void) | undefined
   forkAt: (seq: number) => void
+  /** Latest eligible user message; absent while the session cannot accept an edit. */
+  editableMessageSeq?: number | undefined
+  /** Submit a revised latest prompt and open the accepted continuation. */
+  editLastMessage?: ((seq: number, text: string, requestId: SessionRequestId) => Promise<void>) | undefined
   /** Session-authorized image loader supplied by the Chat view. */
   loadImage: MessageImageLoader
   fileMentions: (owner: TurnTailOwnerProps) => MarkdownFileMentions | undefined

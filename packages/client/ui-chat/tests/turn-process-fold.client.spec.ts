@@ -9,6 +9,7 @@ import {
   type ConversationTurnDataMap, type ConversationViewDefinition, type TurnLocation,
 } from '@deepseek-ai/dsh-client-ui-conversation/client'
 import type { SessionEvent } from '@deepseek-ai/dsh-session/types'
+import { PartialArguments } from '@deepseek-ai/dsh-util-values'
 import { EMPTY_CHAT_SNAPSHOT } from '../src/client/contract/snapshot.ts'
 import {
   isTurnProcessAnswer, isTurnProcessMember, type TurnProcessSpec,
@@ -459,7 +460,7 @@ function toolRow(anchorSeq: number): ChatNode<'tool-call'> {
     anchorSeq,
     location: { kind: 'turn', turn: TURN },
     visibility: 'visible',
-    data: { root: { phase: 'start', callId: `call-${String(anchorSeq)}`, name: 'bash', argsRaw: '{}', args: {}, turn: 1, step: 1, time: anchorSeq, subCalls: [] } },
+    data: { root: { phase: 'start', callId: `call-${String(anchorSeq)}`, name: 'bash', argsRaw: '{}', args: PartialArguments.EMPTY, turn: 1, step: 1, time: anchorSeq, subCalls: [] } },
   }
 }
 
