@@ -47,7 +47,7 @@ type Phase =
     lastTurn: number
     wakeRequested: boolean
   }
-  | { kind: 'running'; abort: AbortController; turn: number; step: number; wakeRequested: boolean }
+  | { kind: 'running'; abort: AbortController; turn: number; step: number; wakeRequested: boolean; retiring: boolean }
 
 type StepEndReason = Extract<TurnEndReason, { kind: 'completed' | 'max-tokens' }>
 
@@ -164,6 +164,9 @@ export class ReactLoopAgent implements Agent {
     const wakingAfterAbort = wakeup && this.phase.kind !== 'idle' && this.phase.abort.signal.aborted
     const resolvedTarget = wakingAfterAbort ? 'next-turn' : target
     this.inbox.splice(resolvedTarget, Infinity, 0, [message])
+    // The driver already made its last inbox decision but has not published
+    // idle: a wake now would be ignored, so convergence must replay it.
+    if (this.phase.kind === 'running' && this.phase.retiring) this.phase.wakeRequested = true
     if (wakeup) this.wakeDriver(wakingAfterAbort)
   }
 
@@ -262,6 +265,7 @@ export class ReactLoopAgent implements Agent {
       turn: this.phase.lastTurn,
       step: 0,
       wakeRequested: false,
+      retiring: false,
     })
     this.loopCtx.agents.withInitiator(this, () => this.kick()).then(driver.resolve, driver.reject)
   }
@@ -421,7 +425,13 @@ export class ReactLoopAgent implements Agent {
         this.throwError(error)
       }
     }
-    if (!this.inbox.hasPending) return false
+    if (!this.inbox.hasPending) {
+      // turn() has made its last inbox decision; input admitted before the
+      // driver publishes idle can only be replayed through convergence.
+      phase.retiring = true
+      return false
+    }
+    phase.retiring = false
     phase.abort = new AbortController()
     // A fresh controller makes a latch set on the old one stale: the live driver claims the queue itself.
     phase.wakeRequested = false
