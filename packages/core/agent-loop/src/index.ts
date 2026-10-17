@@ -33,6 +33,7 @@ import { SessionPersistenceNotFoundError } from '@deepseek-ai/dsh-session-persis
 import type { SessionHandle, SessionPersistence } from '@deepseek-ai/dsh-session-persistence'
 import { ReactLoopAgent } from './agent.ts'
 import { inboxProjectionDefinition } from './inbox.ts'
+import { userInputProjectionDefinition } from './user-input.ts'
 import { DEFAULT_MAX_PARALLEL_TOOL_CALLS } from './constants.ts'
 import type {} from './runtime-context.ts'
 
@@ -379,8 +380,11 @@ export class AgentLoop extends Service implements AgentFactory {
       yield unregisterTurnBoundary
       const unregisterInbox = ctx.sessionProjections.register(inboxProjectionDefinition)
       yield unregisterInbox
+      const unregisterUserInput = ctx.sessionProjections.register(userInputProjectionDefinition)
+      yield unregisterUserInput
       // Cordis skips later disposers after a rejection; finally still releases projections.
       yield () => ownership.dispose().finally(() => {
+        unregisterUserInput()
         unregisterInbox()
         unregisterTurnBoundary()
       })

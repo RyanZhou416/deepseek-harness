@@ -305,6 +305,8 @@ export class ReactLoopAgent implements Agent {
     if (this.phase.kind !== 'running') throw new Error(`agent "${this.id}": pre-step outside running phase`)
     const signal = this.phase.abort.signal
     const claimed = this.inbox.claim(target, position.turn)
+    // Claimed input can still be rewritten or dropped before prompt assembly.
+    this.dispatch.waterfall('agent/prepare-input', { messages: claimed }, () => {})
     const assembly = await this.loopCtx.systemPrompt.assemble(assembleContextFor(this, signal))
     signal.throwIfAborted()
     const decision = await this.dispatch.waterfall(
@@ -473,7 +475,10 @@ export class ReactLoopAgent implements Agent {
               contextAdmitted = true
             }
           } else {
-            this.session.append('user/message', message, { surfaceOp: 'append' })
+            // Placement is resolved at durable admission so a revision can
+            // replace the nodes it shadows instead of appending.
+            const intent = this.dispatch.waterfall('agent/message-surface', { message }, () => ({ surfaceOp: 'append' }))
+            this.session.append('user/message', message, intent)
           }
         }
       }

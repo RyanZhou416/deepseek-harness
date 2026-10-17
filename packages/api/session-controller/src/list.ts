@@ -79,8 +79,13 @@ export class ApiSessionList {
   /**
    * @param ctx - Host context carrying Session, query, persistence, and projection services.
    * @param workSliceMs - Resolved positive integral list-work budget in milliseconds.
+   * @param excludedProjectionKeys - deployment-selected keys omitted before rendering catalog hints.
    */
-  constructor(private readonly ctx: Context, private readonly workSliceMs: number) {
+  constructor(
+    private readonly ctx: Context,
+    private readonly workSliceMs: number,
+    private readonly excludedProjectionKeys: ReadonlySet<string> = new Set(),
+  ) {
     ctx.sessionProjections.register<'sessionListMetadata', SessionListMetadata>({
       key: 'sessionListMetadata',
       stateSchema: sessionListMetadataSchema,
@@ -296,13 +301,14 @@ export class ApiSessionList {
       if (session !== undefined) {
         // The live registry computed the block for this Session: its watermark
         // shares the sequence space of the Session's baselines and frames.
-        return hintsOf('sequenced', this.ctx.sessionProjections.cachedSnapshot(session))
+        return hintsOf('sequenced', this.ctx.sessionProjections.cachedSnapshot(session, undefined, this.excludedProjectionKeys))
       }
       // A cold row reads the persisted cache by header alone; the cache serves
       // seeded and unseeded lifecycles alike because a listing never seeds a
       // fold. The watermark is the stored record's own.
       const cache = this.ctx.get('sessionProjectionCache')
-      return hintsOf('cached', cache?.cachedSnapshot(header) ?? cache?.cachedPredecessorTitle(header))
+      return hintsOf('cached', cache?.cachedSnapshot(header, undefined, this.excludedProjectionKeys)
+      ?? (this.excludedProjectionKeys.has('title') ? undefined : cache?.cachedPredecessorTitle(header)))
     } catch (error) {
       this.ctx.logger.warn(
         `api-session.list: projection column for "${header.id}" failed; serving the row without it: ${String(error)}`,

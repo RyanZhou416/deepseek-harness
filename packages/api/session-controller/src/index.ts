@@ -97,6 +97,8 @@ export interface Config {
   readonly nativeOpen?: boolean
   /** Positive integral milliseconds of list work before yielding between complete rows. */
   readonly listWorkSliceMs?: number
+  /** Projection keys the catalog omits before rendering its hint values. */
+  readonly listProjectionExcludeKeys?: string[]
 }
 
 /** Deployment policy after schema defaults have been applied. */
@@ -136,6 +138,7 @@ export class SessionController extends TypertRemoteService {
   static Config: z<Config, ResolvedConfig> = z.object({
     nativeOpen: z.boolean(),
     listWorkSliceMs: z.natural().min(1).default(16),
+  listProjectionExcludeKeys: z.array(z.string().min(1).pattern(/^(?!sessionListMetadata$)/u).required()).default([]),
   })
 
   private readonly agents: ApiSessionAgentController
@@ -174,7 +177,7 @@ export class SessionController extends TypertRemoteService {
       await Promise.allSettled([...this.promotions])
     }, 'session-controller.promotions')
     this.history = new SessionHistoryController(ctx, (observation) => { this.promote(observation) })
-    this.listState = new ApiSessionList(ctx, resolved.listWorkSliceMs)
+    this.listState = new ApiSessionList(ctx, resolved.listWorkSliceMs, new Set(config.listProjectionExcludeKeys))
     this.fileApplications = internals.fileApplications ?? nativeFileApplications
     this.openFileApplication = internals.openFileApplication ?? openNativeFileApplication
     this.openPath = internals.openPath ?? openNativeAssociatedPath
