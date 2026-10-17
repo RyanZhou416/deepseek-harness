@@ -469,6 +469,16 @@ Gateway 每个 socket 只保留一枚待确认 Ping。未完成写入时，`buff
 
 `apps/web/stress-tests/workload.ts` 是多 Agent 压测共享的合成模型，其工具比例按真实部署的只读聚合计数校准；`agent-lifetime.stress.ts` 检查已销毁 Agent/Session 能否回收，`multi-agent-typing.stress.ts` 在数十至上百个运行 Agent 下检查输入框丢字、插入位置和只读窗口，`session-switch.stress.ts` 测量空闲与数十个运行 Agent 下经侧栏切换到冷、热长 Session 的显示耗时和 Host 事件循环阻塞。lifetime 的卸载等待窗口覆盖 `jobs` 长任务，因为有运行中后台任务的 Agent 按设计不卸载；switch 按真实日志约每帧两个事件写入种子，并先让目标经历一次驱逐以生成投影检查点。三者都使用测试私有 DSH_HOME 和随机端口，以 `pnpm exec vitest run --config vitest.web-stress.config.ts <file>` 运行，`DSH_STRESS_*` 与 `DSH_LIFETIME_*` 旋钮以各文件头为准，其中 `DSH_LIFETIME_LEAK_HANDLES=1` 模拟比请求活得更久的传输句柄。lifetime 发现残留时在 `tmp/agent-lifetime/` 写出堆快照，并用 `fork-runtime/diagnostics/retainers.mjs` 输出最短强引用链；typing 的 `stall` 与 `reconnect` 模式在页面内包装 WebSocket，以模拟 Host 卡顿后的积压与断线，并让积压帧逐条作为独立任务派发。Playwright 的 WebSocket 路由与测试 Host 同进程，会拖慢 Host 并制造假超时，因此不得用它替代页面内注入。`launchWebScaffold()` 只在 replay 对比时记录 `session/created`，以免 scaffold 本身成为留存者。快照可能包含路径，留在本机，禁止提交。
 
+### 0.2.1-rc.2 落地记录
+
+2026-10-18：主检出 `C:\Project\deepseek-harness` 从 `5724be341b` 快进到 `7ce101ed64`（集成分支 tip），随后 `build.cmd` 重建并以 `run.cmd` 重启 Host；当前 Host 为 0.2.1-rc.2，Web GUI 在 3080。回滚锚点是 `5724be341b`，profile 清单备份在 `C:\Project\dsh-validation\landing\profile-backup`。
+
+四个插件在这一代改为 **profile `link:` 到主检出** —— `@nanmicoder/dsh-agent-teams`、`dsh-context`、`dsh-plugin-subscriptions`、`@ryanzhou416/dsh-plugin-aether-shell` 都指向 `fork-plugins/<name>`。打包成 tgz 再装进 profile 这条路走不通：subscriptions 的依赖里有相对路径 `file:../releases/tormentalabs-claude-code-wire-compat-*.tgz`（脱离插件目录即失效），另有 6 个 `@oven/bun-*` 可选依赖会在安装时拉取大包。link 方式已由隔离 profile 冒烟与真实 profile 启动共同验证。
+
+**Preservation rule.** 这一代的 profile 不装 fork 插件的 tgz；升级或换机时重装应使用 `dsh plugin --profile web add <fork-plugins/<name>>`，不要回退到 `fork-plugins/releases/` 下的旧制品（那是 0.1.7 一代，会被 0.2.1 的兼容性检查拒绝）。插件源码改动在 Host 重启后生效，不需要重新打包。
+
+**Focused verification.** 落地后确认：`node --import tsx/esm apps/cli/src/bin.ts --version` 输出 `0.2.1-rc.2`；`restart-*.log` 结尾 `RESTART OK` 且 `no plugin compatibility warnings`；带 token 的 `GET /` 返回 200；页面模块表含 `dsh-agent-teams`、`dsh-context` 与 `subscriptions` 条目，`aether-shell` 为纯 Host 插件因此无客户端条目。隔离冒烟可用独立 `DSH_HOME` 与随机端口复现（本次 3083）。
+
 ### Snapshot corpus ownership
 
 仓库级回放语料（`snapshots/**`，`pnpm run test:snapshot`）只在它声明的平台（macOS/Linux）上充当门禁。Windows 上工具面本来就不同 —— `bash-sandbox` 按 `process.platform === 'win32'` 关闭、`sandbox-windows-acl` 只在 Windows 注册 —— 所以 request header、工具 schema 和整条 transcript 的逐字节比对必然漂移。禁止在 Windows 上把语料"修绿"：提交 Windows 形状的期望值会让 Linux CI 全部变红。
