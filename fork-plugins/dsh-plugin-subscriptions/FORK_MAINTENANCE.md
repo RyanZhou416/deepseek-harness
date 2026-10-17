@@ -6,9 +6,9 @@ This subtree carries the private `dsh-plugin-subscriptions` build shipped with t
 
 - Upstream repository: `https://github.com/V1ki/dsh-plugin-subscriptions.git`
 - Upstream tag: `v0.9.4`
-- Fork source candidate: `0.9.4-dsh017rc1.33` — the installed profile records its own version in the install receipt, so this line names the candidate instead of hardcoding what a deployment runs; the current install state is recorded in [docs/claude-implementation-status.md](docs/claude-implementation-status.md)
+- Fork source candidate: `0.9.4-dsh021rc2.1` — the real Web profile links this directory rather than installing a receipt, so a Host restart runs the checkout build; the historical install state is recorded in [docs/claude-implementation-status.md](docs/claude-implementation-status.md)
 - Subtree path: `fork-plugins/dsh-plugin-subscriptions`
-- Distribution artifact: `fork-plugins/releases/dsh-plugin-subscriptions-0.9.4-dsh017rc1.33.tgz`, the tarball the packaging step writes for this candidate
+- Distribution artifact: none — the profile installs this source through a `link:` dependency; the previous-generation tarballs live under `fork-plugins/releases/archive/` and must not be installed
 
 ## Fork behavior
 

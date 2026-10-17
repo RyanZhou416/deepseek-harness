@@ -83,7 +83,7 @@ Codex 编辑走 `/backend-api/codex/images/edits`，Grok 编辑走 `/v1/images/e
 
 ### DSH 兼容性
 
-本 fork 的源码候选为 `0.9.4-dsh017rc1.33`，固定适配 DSH `0.1.7-rc.1` 和 Cordis `4.0.4`。其 V4 工具消息转换、固定到 Claude Code 2.1.288 的 wire 与界面以这一确切版本组合为目标；不要安装到旧版 DSH profile。运行中 profile 实际执行的版本由该 profile 的安装 manifest 决定，不由源码版本代表 —— 当前安装状态由[实现状态说明](docs/claude-implementation-status.md)拥有。上游公开的 `0.9.4` 包声明了更宽的 peer 范围，但不适用于这个私有包。
+本 fork 的源码候选为 `0.9.4-dsh021rc2.1`，固定适配 DSH `0.2.1-rc.2` 和 Cordis `4.0.5`。其 V4 工具消息转换、固定到 Claude Code 2.1.288 的 wire 与界面以这一确切版本组合为目标；不要安装到旧版 DSH profile。真实 Web profile 以 `link:` 指向本目录，Host 重启后即执行本检出的构建；[实现状态说明](docs/claude-implementation-status.md)拥有历史安装状态。上游公开的 `0.9.4` 包声明了更宽的 peer 范围，但不适用于这个私有包。
 
 ### 管理账号与 Pool 模型
 

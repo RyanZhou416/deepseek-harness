@@ -32,7 +32,7 @@ In the DSH fork, members keep their AgentTeams provider/model/effort even when o
 
 Ask in natural language. The plugin provides the team protocol, 14 coordination tools, persistent state, an automatic shared-task scheduler, and a live Web UI—without requiring a separate workflow engine.
 
-> This fork packages upstream `v0.1.20` as `0.1.20-dsh017rc1.3` for DSH `0.1.7-rc.1`. Install the checked-in artifact documented in [`../README.md`](../README.md); the public npm instructions below describe the upstream release channel.
+> This fork tracks upstream `v0.1.24` as `0.1.24-dsh021rc2.1` for DSH `0.2.1-rc.2`. The real Web profile links this directory instead of installing a tarball, as [`../README.md`](../README.md) records; the public npm instructions below describe the upstream release channel.
 
 <p align="center">
   <img src="./assets/readme/workspace.png" width="100%" alt="AgentTeams native workspace with members, task dependencies, and progress">

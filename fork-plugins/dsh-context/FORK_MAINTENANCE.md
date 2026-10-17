@@ -8,7 +8,7 @@ This subtree carries the DeepSeek Harness fork build of `dsh-context`. It retain
 - Upstream tag: `v0.73.0`
 - Fork package version: `0.73.0-dsh021rc2.1`
 - Subtree path: `fork-plugins/dsh-context`
-- Distribution artifact: none yet — `fork-plugins/releases/dsh-context-0.55.0-dsh017rc1.3.tgz` is the previous generation and must not be advertised as this source
+- Distribution artifact: none — the real Web profile links this directory and runs the rebuilt `lib/`; the previous-generation tarball lives under `fork-plugins/releases/archive/` and must not be advertised as this source
 
 ## Fork behavior
 
