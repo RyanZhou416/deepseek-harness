@@ -15,7 +15,7 @@ import vm from 'node:vm'
 
 const ROOT_ENV = 'DSH_SUBSCRIPTIONS_ARTIFACT_ROOT'
 const PACKAGE_NAME = 'dsh-plugin-subscriptions'
-const PACKAGE_VERSION = '0.9.4-dsh017rc1.31'
+const PACKAGE_VERSION = '0.9.4-dsh017rc1.33'
 
 const declaredRoot = process.env[ROOT_ENV]
 assert.ok(typeof declaredRoot === 'string' && declaredRoot.trim().length > 0, `${ROOT_ENV} must name the unpacked package root`)

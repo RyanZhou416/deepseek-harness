@@ -83,7 +83,7 @@ Codex 编辑走 `/backend-api/codex/images/edits`，Grok 编辑走 `/v1/images/e
 
 ### DSH 兼容性
 
-本 fork 离线包 `0.9.4-dsh017rc1.31` 固定适配 DSH `0.1.7-rc.1` 和 Cordis `4.0.4`。其 V4 工具消息转换、固定到 Claude Code 2.1.288 的 wire 与界面已针对这一确切版本组合构建、测试；不要安装到旧版 DSH profile。上游公开的 `0.9.4` 包声明了更宽的 peer 范围，但不适用于这个私有离线包。
+本 fork 的源码候选为 `0.9.4-dsh017rc1.33`，固定适配 DSH `0.1.7-rc.1` 和 Cordis `4.0.4`。其 V4 工具消息转换、固定到 Claude Code 2.1.288 的 wire 与界面以这一确切版本组合为目标；不要安装到旧版 DSH profile。运行中 profile 实际执行的版本由该 profile 的安装 manifest 决定，不由源码版本代表 —— 当前安装状态由[实现状态说明](docs/claude-implementation-status.md)拥有。上游公开的 `0.9.4` 包声明了更宽的 peer 范围，但不适用于这个私有包。
 
 ### 管理账号与 Pool 模型
 
@@ -364,7 +364,7 @@ Bun 子进程使用 `--no-env-file` 启动，工作目录中的 `.env` 文件不
 
 ## Claude 失败恢复与账号维护（源码树）
 
-本节描述已实现的请求和维护规则。[实现状态说明](docs/claude-implementation-status.md)记录源码级验证、仍存在的限制与安装状态：运行中的 profile 执行已验收的 `0.9.4-dsh017rc1.30` 制品，`0.9.4-dsh017rc1.31` 已打包并通过验收但尚未安装。只有当 Host 声明 `ctx.llm.failureRecoveryVersion` 为 `1` 时 Claude 才会注册 —— 该契约保证失败的 `retryDisposition` 能穿过适配器归一化、Session 日志和每一条自动重发路径；其他 Host 上该路由不会注册，卡片报告 `CLAUDE_HOST_INCOMPATIBLE`，而不是运行一个该 Host 无法兑现的重试保证。Claude 还要求 `@deepseek-ai/dsh-llm-request-record`：既不提供该失败恢复版本、也不提供该记录服务的 Host 只会不注册 Claude 路由，其他 provider 的注册不受影响。
+本节描述已实现的请求和维护规则。[实现状态说明](docs/claude-implementation-status.md)记录源码级验证、仍存在的限制及上次核实的安装状态；单凭源码或包版本，不能确定运行中的 Host 已加载哪个版本。只有当 Host 声明 `ctx.llm.failureRecoveryVersion` 为 `1` 时 Claude 才会注册 —— 该契约保证失败的 `retryDisposition` 能穿过适配器归一化、Session 日志和每一条自动重发路径；其他 Host 上该路由不会注册，卡片报告 `CLAUDE_HOST_INCOMPATIBLE`，而不是运行一个该 Host 无法兑现的重试保证。Claude 还要求 `@deepseek-ai/dsh-llm-request-record`：既不提供该失败恢复版本、也不提供该记录服务的 Host 只会不注册 Claude 路由，其他 provider 的注册不受影响。
 
 所有 Claude 拒绝都由同一份有序分类决定，无论它以失败状态还是以 `200` 内的 `error` 事件到达。声明的客户端版本下限（`CLIENT_VERSION_UNSUPPORTED`）、提供方声明为最终的拒绝（`ENFORCEMENT`）、裸 403（`PERMISSION_DENIED`）、本路由未映射的结构化错误类型（`UNCLASSIFIED_PROVIDER_ERROR`）、本路由无法服务的请求（`INVALID_REQUEST`），以及未到达业务终态就结束的流（`STREAM_INCOMPLETE`）都携带 `retryDisposition: 'forbid'`：重试执行器不安排等待，Agent 循环不重发该步骤，已声明的拒绝也不会改用账号池中的另一个账号应答。只要已有输出交付，任何代码都成为硬停止。403 是本路由上的权限拒绝，既不刷新也不清除已存凭据，也绝不会被渲染成登录过期；其他提供方保留原有的状态与头部处理。一次认证拒绝在单个逻辑请求内最多获得一次受控刷新与重发，该次重发之后到达的拒绝同样携带硬停止，因此「刷新、重发、再刷新」不会重复；Messages 请求已发出后才抛出的失败也属于硬停止，而发出前抛出的失败与上下文超限保留各自声明的恢复路径。
 
@@ -374,7 +374,7 @@ Bun 子进程使用 `--no-env-file` 启动，工作目录中的 `.env` 文件不
 
 已存资料在 `claudeMaintenance.profileMaxAgeMs` 内保持新鲜，默认 24 小时；与基线相等的年龄已经算陈旧，该记录会被重新读取而不是继续复用。响应只有在同时带有 `account.uuid`、`account.email` 与 `organization.uuid` 时才会被采纳，而 reader 只按 pinned 客户端自己的证据判定完整：`organization.billing_type` 已声明、`account.created_at` 存在、`organization.subscription_created_at` 已声明，以及 `cc_onboarding_flags` 存在；该字段缺席时按 `{}` 处理，不会因此判定不完整。订阅类型刻意不在该判定内：未知或 `null` 套餐是完整答案，而不是每次请求都重读的理由，响应未涉及的属性保留已知值。写入于该证据契约之前的记录不带 `completenessVersion`，因此被读作不完整并由一次有界读取替换；同一文件中已存的策略状态会保留。
 
-托管设置读取以已确认的元数据为条件：没有已存凭据的账号、以及不由本插件自身 OAuth 路径服务的账号都不会发起读取，已确认的 `pro` 或 `max` 订阅不读取，`team` 或 `enterprise` 组织以及未知或 `null` 订阅会读取。这就是 `null` 与 `pro` 的区别 —— 只有 pinned 客户端自己视为个人 pro/max 的值才算已确认。执行以拒绝实现保守：无法校验的文档、不支持或未映射的键、没有已注册消费者的限制，以及无法证明不受影响的检查，都会拒绝该操作而不是放行；工具守卫在每次执行时按该会话实际路由过的账号判定，因此 Agent 创建之后才采纳的限制仍会拦截调用。每个 `claudeMaintenance` 值都在加载时校验：零或负值是配置错误，而不是关闭某项能力的方式，且 `failureBackoffMs` 不得超过 `maxFailureBackoffMs`。
+托管设置读取以已确认的元数据为条件：没有已存凭据的账号、以及不由本插件自身 OAuth 路径服务的账号都不会发起读取，已确认的 `pro` 或 `max` 订阅不读取，`team` 或 `enterprise` 组织以及未知或 `null` 订阅会读取。这就是 `null` 与 `pro` 的区别 —— 只有 pinned 客户端自己视为个人 pro/max 的值才算已确认。执行以拒绝实现保守：无法校验的文档、不支持或未映射的键、没有已注册消费者的限制，以及无法证明不受影响的检查，都会拒绝该操作而不是放行；工具守卫在每次执行时按该会话实际路由过的账号判定，因此 Agent 创建之后才采纳的限制仍会拦截调用。每个 `claudeMaintenance` 值都在加载时校验：零或负值是配置错误，而不是关闭某项能力的方式，且 `failureBackoffMs` 不得超过 `maxFailureBackoffMs`。只有端点空成功完整陈述的记录才算作策略 —— checksum 与 revision 为空、无 key、无 blocker 且 `enforced: false` —— 其恢复不增加 settings 或组织请求；其余恢复记录由符合条件且已绑定的账号在下次请求时完整读取一次、不发送 validator，而已确认 `pro`/`max` 的账号仍不读取，真实组织不匹配继续拒绝。见 [FORK_MAINTENANCE.md](FORK_MAINTENANCE.md#claude-account-maintenance-for-live-sessions)。
 
 托管设置读取发送自己的角色头部 —— 纯 `claude-code/2.1.288` user agent、`oauth-2025-04-20` beta，以及 `cache-control: no-cache` 与 `pragma: no-cache`，使端点前方的代理或网关无法用缓存的策略文档应答 —— 并使用自己的十秒期限，该期限不被下面的 token 期限覆盖。这些是受检客户端分支在这一固定、非网关配置下选用的值；它们不构成"所有客户端分支、提供方策略行为或风控判定都等价"的声明。
 

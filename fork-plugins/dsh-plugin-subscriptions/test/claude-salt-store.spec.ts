@@ -11,10 +11,11 @@
  * The last cases drive the private I/O boundary rather than the store's own logic: they hold a
  * real write, let a real deadline elapse while that write is genuinely unsettled, and count every
  * timer and abort listener the wait hands out. The cases after them drive one document's owner
- * directly, with barriers rather than sleeps: a caller that arrives while the owner is writing
- * waits for it and then runs its own change, a caller whose own wait ends first runs none of its
- * own work, and a caller still waiting when the owner is closed is refused. Nothing here sleeps or
- * simulates a store state, so the behaviour under test is the store's own.
+ * directly, with barriers and an injected clock rather than sleeps: a caller that arrives while
+ * the owner is writing waits for it and then runs its own change, a caller whose own wait ends
+ * first runs none of its own work, a caller whose wait ended leaves the write it started owned,
+ * and a caller still waiting when the owner is closed is refused. Nothing here sleeps or simulates
+ * a store state, so the behaviour under test is the store's own.
  */
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
@@ -146,6 +147,64 @@ function recordingWaits(onWait?: () => void): { host: ContinuationWaitHost; reco
     },
   }
   return { host, record }
+}
+
+/** What one case can drive on its own clock and timers. */
+interface FakeClock {
+  readonly host: ContinuationWaitHost
+  readonly record: WaitRecord
+  /** Move the clock forward and fire every timer whose instant has arrived. */
+  advance(ms: number): void
+  /** How many timers are still registered. */
+  pending(): number
+}
+
+/**
+ * A wait host whose clock and timers one case drives, so a budget can end with no real time
+ * passing and several waits can be pending at once.
+ * @param onWait - called when a bounded wait starts, so a case can observe a caller waiting at a
+ *   deterministic point instead of polling or sleeping.
+ * @returns the host, what it handed out, and the controls for its clock.
+ */
+function fakeClockWaits(onWait?: () => void): FakeClock {
+  let now = 0
+  let nextTimer = 0
+  const timers = new Map<number, { readonly dueAt: number; readonly fire: () => void }>()
+  const record: WaitRecord = { scheduled: 0, cancelled: 0, subscribed: 0, removed: 0 }
+  const host: ContinuationWaitHost = {
+    now: () => now,
+    schedule: (delayMs, fire) => {
+      record.scheduled += 1
+      if (onWait !== undefined) onWait()
+      const id = (nextTimer += 1)
+      timers.set(id, { dueAt: now + Math.max(1, Math.floor(delayMs)), fire })
+      return () => {
+        record.cancelled += 1
+        timers.delete(id)
+      }
+    },
+    onAbort: (signal, fire) => {
+      record.subscribed += 1
+      signal.addEventListener('abort', fire, { once: true })
+      return () => {
+        record.removed += 1
+        signal.removeEventListener('abort', fire)
+      }
+    },
+  }
+  return {
+    host,
+    record,
+    advance: (ms) => {
+      now += ms
+      for (const [id, timer] of [...timers]) {
+        if (timer.dueAt > now) continue
+        timers.delete(id)
+        timer.fire()
+      }
+    },
+    pending: () => timers.size,
+  }
 }
 
 test('the first use creates a salt and derives a verifiable reference', async () => {
@@ -361,51 +420,77 @@ test('a first use creates a document directory that does not exist yet', async (
   }
 })
 
-test('a deadline refuses while the owned write is still pending, and the state stays closed until it settles', async () => {
-  const root = privateRoot()
-  const path = join(root, 'salt.json')
-  const started = deferred()
-  const hold = deferred()
-  const { files, calls } = countingFiles({ hold: hold.promise, onWrite: () => started.resolve() })
-  const store = storeAt(path, { deadlineMs: 30, lockTimeoutMs: LOCK_TIMEOUT_MS, files })
-  try {
-    const pending = store.ensure()
-    // The logical bound ends the caller's wait while the owned write is still held.
-    const refused = await pending
-    await started.promise
-    assert.equal(refused.kind, 'unavailable')
-    if (refused.kind !== 'unavailable') return
-    assert.equal(refused.code, LOCAL_CONTINUATION_STATE_UNAVAILABLE)
-    assert.match(refused.reason, /deadline/)
-    assert.equal(calls.writes, 1, 'the write really started and stayed owned')
+/** The two ways a caller's own wait can end while the write it started is still held. */
+const abandonedWaits = {
+  cancel: 'a caller that stops waiting leaves its held write owned, and the caller that arrives next is served',
+  deadline: 'a caller whose budget ends leaves its held write owned, and the caller that arrives next is served',
+} as const
 
-    // The owned write has not settled, so no later operation may decide from the document: the
-    // refusal is immediate, and the refused caller runs no read of its own rather than waiting for
-    // a write to finish that may still replace what it would read.
-    const stillClosed = await store.ensure()
-    assert.equal(stillClosed.kind, 'unavailable')
-    if (stillClosed.kind === 'unavailable') assert.match(stillClosed.reason, /not settled/)
-    assert.equal(calls.reads, 1, 'the refused caller performed no read of its own')
+for (const variant of ['cancel', 'deadline'] as const) {
+  test(abandonedWaits[variant], async () => {
+    const root = privateRoot()
+    const path = join(root, 'salt.json')
+    const started = deferred()
+    const hold = deferred()
+    const secondWaits = deferred()
+    let secondQueued = false
+    const clock = fakeClockWaits(() => { if (secondQueued) secondWaits.resolve() })
+    const { files, calls } = countingFiles({ hold: hold.promise, onWrite: () => started.resolve() })
+    const io = new ContinuationIo({
+      path,
+      deadlineMs: DEADLINE_MS,
+      lockTimeoutMs: LOCK_TIMEOUT_MS,
+      files,
+      waits: clock.host,
+    })
+    const stopping = new AbortController()
+    const seen: (string | undefined)[] = []
+    try {
+      const first = io.update(
+        (current) => { seen.push(current); return 'account-a' },
+        variant === 'cancel' ? { expiresAt: 1_000, signal: stopping.signal } : { expiresAt: 10 },
+      )
+      await started.promise
+      // The caller's own wait ends while the write it started is genuinely still running.
+      if (variant === 'cancel') stopping.abort()
+      else clock.advance(10)
+      const stopped = await first
+      assert.equal(stopped.kind, 'unavailable')
+      if (stopped.kind !== 'unavailable') return
+      assert.match(stopped.reason, variant === 'cancel' ? /stopped waiting/ : /deadline/)
+      assert.equal(calls.writes, 1, 'the write it started is still owned and still running')
 
-    hold.resolve()
-    await store.close()
-    assert.equal(calls.writes, 1, 'nothing was retried after the wait ended')
+      secondQueued = true
+      const second = io.update(
+        (current) => { seen.push(current); return `${current ?? ''}+account-b` },
+        { expiresAt: 1_000 },
+      )
+      secondQueued = false
+      // The arriving caller must be waiting, not already refused: an early result here is the
+      // regression this case exists for.
+      assert.equal(await Promise.race([
+        secondWaits.promise.then(() => 'waiting' as const),
+        second.then(() => 'finished' as const),
+      ]), 'waiting')
+      assert.deepEqual(calls, { reads: 1, writes: 1, directories: 1 })
+      assert.deepEqual(seen, [undefined], 'the waiting caller ran no change of its own')
 
-    // The document the pending write committed is the one that stands, read back from disk.
-    const settled = JSON.parse(readFileSync(path, 'utf8')) as { version: number; salt: string }
-    assert.equal(settled.version, CLAUDE_SALT_VERSION)
-    assert.equal(settled.salt.length > 0, true)
-    assert.deepEqual(await storeAt(path).ensure(), { kind: 'ready', version: CLAUDE_SALT_VERSION })
-
-    // Disposal is terminal: the store takes no further work.
-    assert.equal((await store.ensure()).kind, 'unavailable')
-  } finally {
-    // Release the barrier and let the owned work settle even when an assertion above failed.
-    hold.resolve()
-    await store.close()
-    rmSync(root, { recursive: true, force: true, maxRetries: 3, retryDelay: 20 })
-  }
-})
+      hold.resolve()
+      assert.deepEqual(await second, { kind: 'applied', text: 'account-a+account-b', written: true },
+        'the waiting caller changed the document the abandoned write committed')
+      assert.deepEqual(seen, [undefined, 'account-a'])
+      assert.deepEqual(calls, { reads: 2, writes: 2, directories: 2 })
+      assert.equal(readFileSync(path, 'utf8'), 'account-a+account-b')
+      assert.equal(clock.record.scheduled, clock.record.cancelled, 'every wait released its timer')
+      assert.equal(clock.record.subscribed, clock.record.removed, 'every wait released its abort listener')
+      assert.equal(clock.pending(), 0, 'no timer is left registered')
+    } finally {
+      hold.resolve()
+      await io.close()
+      rmSync(root, { recursive: true, force: true, maxRetries: 3, retryDelay: 20 })
+    }
+  })
+}
 
 test('close waits for the owned write to settle rather than reporting a settlement it did not see', async () => {
   const root = privateRoot()
@@ -743,6 +828,144 @@ test('close waits for the held write and refuses the caller that was waiting for
     // Disposal is terminal for a caller that arrives after it as well.
     assert.equal((await io.update(() => 'account-c')).kind, 'unavailable')
     assert.equal(calls.writes, 1)
+  } finally {
+    hold.resolve()
+    await io.close()
+    rmSync(root, { recursive: true, force: true, maxRetries: 3, retryDelay: 20 })
+  }
+})
+
+/** The two ways a caller waiting for an abandoned write can stop waiting. */
+const waitingEnds = {
+  cancel: 'a caller that stops waiting for an abandoned write runs no work of its own, and the next caller is served',
+  deadline: 'a caller whose budget ends while it waits for an abandoned write runs no work of its own, and the next caller is served',
+} as const
+
+for (const variant of ['cancel', 'deadline'] as const) {
+  test(waitingEnds[variant], async () => {
+    const root = privateRoot()
+    const path = join(root, 'salt.json')
+    const started = deferred()
+    const hold = deferred()
+    const secondWaits = deferred()
+    let secondQueued = false
+    const clock = fakeClockWaits(() => { if (secondQueued) secondWaits.resolve() })
+    const { files, calls } = countingFiles({ hold: hold.promise, onWrite: () => started.resolve() })
+    const io = new ContinuationIo({
+      path,
+      deadlineMs: DEADLINE_MS,
+      lockTimeoutMs: LOCK_TIMEOUT_MS,
+      files,
+      waits: clock.host,
+    })
+    const abandoned = new AbortController()
+    const stopping = new AbortController()
+    const seen: (string | undefined)[] = []
+    try {
+      const first = io.update(
+        (current) => { seen.push(current); return 'account-a' },
+        { expiresAt: 1_000, signal: abandoned.signal },
+      )
+      await started.promise
+      abandoned.abort()
+      assert.equal((await first).kind, 'unavailable')
+      assert.equal(calls.writes, 1, 'the abandoned write is still owned and still running')
+
+      secondQueued = true
+      const second = io.update(
+        (current) => { seen.push(current); return 'never' },
+        variant === 'deadline' ? { expiresAt: 50 } : { expiresAt: 1_000, signal: stopping.signal },
+      )
+      secondQueued = false
+      assert.equal(await Promise.race([
+        secondWaits.promise.then(() => 'waiting' as const),
+        second.then(() => 'finished' as const),
+      ]), 'waiting', 'the caller is really waiting for the abandoned write')
+      // The caller's own wait ends, with no real time passing, while the write it waits for is held.
+      if (variant === 'deadline') clock.advance(50)
+      else stopping.abort()
+      const refused = await second
+      assert.equal(refused.kind, 'unavailable')
+      if (refused.kind !== 'unavailable') return
+      assert.equal(refused.code, LOCAL_CONTINUATION_STATE_UNAVAILABLE)
+      assert.match(refused.reason, variant === 'deadline' ? /deadline/ : /stopped waiting/)
+      assert.equal(seen.length, 1, 'the waiting caller ran no change of its own')
+      assert.deepEqual(calls, { reads: 1, writes: 1, directories: 1 })
+
+      hold.resolve()
+      await io.drain()
+      assert.equal(readFileSync(path, 'utf8'), 'account-a', 'the abandoned write still committed')
+
+      // A caller after both ended waits takes its own fresh budget and is served: neither ended
+      // wait left a permanent refusal behind.
+      assert.deepEqual(await io.update((current) => { seen.push(current); return `${current ?? ''}-c` }),
+        { kind: 'applied', text: 'account-a-c', written: true })
+      assert.deepEqual(seen, [undefined, 'account-a'])
+      assert.deepEqual(calls, { reads: 2, writes: 2, directories: 2 })
+      assert.equal(readFileSync(path, 'utf8'), 'account-a-c')
+      assert.equal(clock.record.scheduled, clock.record.cancelled, 'every wait released its timer')
+      assert.equal(clock.record.subscribed, clock.record.removed, 'every wait released its abort listener')
+      assert.equal(clock.pending(), 0, 'no timer is left registered')
+    } finally {
+      hold.resolve()
+      await io.close()
+      rmSync(root, { recursive: true, force: true, maxRetries: 3, retryDelay: 20 })
+    }
+  })
+}
+
+test('close settles an abandoned write and refuses the caller that was waiting for it', async () => {
+  const root = privateRoot()
+  const path = join(root, 'salt.json')
+  const started = deferred()
+  const hold = deferred()
+  const secondWaits = deferred()
+  let secondQueued = false
+  const clock = fakeClockWaits(() => { if (secondQueued) secondWaits.resolve() })
+  const { files, calls } = countingFiles({ hold: hold.promise, onWrite: () => started.resolve() })
+  const io = new ContinuationIo({
+    path,
+    deadlineMs: DEADLINE_MS,
+    lockTimeoutMs: LOCK_TIMEOUT_MS,
+    files,
+    waits: clock.host,
+  })
+  const abandoned = new AbortController()
+  let queuedRuns = 0
+  try {
+    const first = io.update(() => 'account-a', { expiresAt: 1_000, signal: abandoned.signal })
+    await started.promise
+    abandoned.abort()
+    assert.equal((await first).kind, 'unavailable')
+
+    secondQueued = true
+    const queued = io.update(() => { queuedRuns += 1; return 'account-b' })
+    secondQueued = false
+    assert.equal(await Promise.race([
+      secondWaits.promise.then(() => 'waiting' as const),
+      queued.then(() => 'finished' as const),
+    ]), 'waiting', 'the caller is really waiting for the abandoned write')
+
+    let closeSettled = false
+    const closing = io.close().then(() => { closeSettled = true })
+    // Several turns for the disposal to (wrongly) report itself settled while the write is held.
+    for (let turn = 0; turn < 4; turn += 1) await Promise.resolve()
+    assert.equal(closeSettled, false, 'disposal cannot observe a settlement that has not happened')
+
+    hold.resolve()
+    await closing
+    assert.equal(closeSettled, true)
+
+    // The caller that was waiting on the abandoned write wakes to the closed state and runs nothing.
+    const refused = await queued
+    assert.equal(refused.kind, 'unavailable')
+    if (refused.kind !== 'unavailable') return
+    assert.match(refused.reason, /disposed/)
+    assert.equal(queuedRuns, 0)
+    assert.deepEqual(calls, { reads: 1, writes: 1, directories: 1 })
+    assert.equal(readFileSync(path, 'utf8'), 'account-a')
+    assert.equal(clock.record.scheduled, clock.record.cancelled, 'every wait released its timer')
+    assert.equal(clock.pending(), 0, 'no timer is left registered')
   } finally {
     hold.resolve()
     await io.close()

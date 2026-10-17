@@ -2940,9 +2940,19 @@ export function apply(ctx: Context, config: Config, internals: SubscriptionInter
                   // The refusal carries the hard stop: the Host must not retry the turn and the
                   // pool route must not move the request onto another account, because no other
                   // account satisfies the organization this one's accepted policy pinned.
+                  // An unverified pin is a statement about this process's own view, not a
+                  // provider rejection: the accepted record was restored without the settings
+                  // body it was projected from, so the next real request states it again. The
+                  // copy names the one request held back — the profile and settings reads this
+                  // account already made did reach the provider — and nothing about a server
+                  // validation; only a pin the policy itself stated, and this account then
+                  // failed, goes back to the operator as a refusal.
+                  const unverified = outcome.code === 'pin_unverified'
+                  const pinCheckReason = unverified && projected?.kind === 'unknown' ? ` (${projected.reason})` : ''
                   throw new LlmError(
-                    `claude organization validation refused this account (${outcome.code}); `
-                    + 'the operator must re-authorize it instead of serving it',
+                    unverified
+                      ? `claude organization policy not reverified locally; Messages request not sent; retry after policy check${pinCheckReason}`
+                      : `claude organization validation refused this account (${outcome.code})`,
                     POLICY_ORG_PIN_REFUSED,
                     { retryDisposition: 'forbid' },
                   )

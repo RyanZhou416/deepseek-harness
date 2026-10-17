@@ -33,18 +33,22 @@
  * - Disposal waits for a held response, cancels it, and the refused document is never adopted.
  * It does not claim provider behaviour: every response here is synthesized.
  */
-import { test } from 'node:test'
+import { after, test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdirSync, mkdtempSync, readdirSync, existsSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readdirSync, existsSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { LlmError, errorChain } from '@deepseek-ai/dsh-llm'
-import type { GenerateOptions, StreamChunk } from '@deepseek-ai/dsh-llm'
+import type { StreamChunk } from '@deepseek-ai/dsh-llm'
 import type { ToolExecutionInput } from '@deepseek-ai/dsh-tools'
 import { ToolCallId } from '../src/compat.js'
+import { CLAUDE_REQUEST_RECORD_CONTEXT_REQUIRED } from '../src/providers/claude-wire-record.js'
 import type { Config, ModelEntry } from '../src/index.js'
 import type { CoreHttpRequest, CoreHttpResponse, CoreTransport } from '../src/claude-core/index.js'
 
+const originalFetch = globalThis.fetch
+const originalHome = process.env.DSH_HOME
+const originalBunPath = process.env.DSH_SUBSCRIPTIONS_BUN_PATH
 const root = mkdtempSync(join(tmpdir(), 'claude-limits-production-'))
 // The Messages request is the one this plugin issues through its own Bun transport. Pinning the
 // runtime at a path that does not exist makes that request fail locally, before any socket, so
@@ -56,6 +60,8 @@ interface RecordedCall {
   readonly url: string
   readonly method: string
   readonly signal: AbortSignal
+  /** The request's headers, where a conditional settings read states its own validator. */
+  readonly headers: Headers
 }
 
 const providerCalls: RecordedCall[] = []
@@ -64,13 +70,28 @@ let settingsAnswer: (call: RecordedCall) => Response = () =>
 
 globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
   const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url
-  const call: RecordedCall = { url, method: init?.method ?? 'GET', signal: init?.signal ?? new AbortController().signal }
+  const call: RecordedCall = {
+    url,
+    method: init?.method ?? 'GET',
+    signal: init?.signal ?? new AbortController().signal,
+    headers: new Headers(init?.headers),
+  }
   providerCalls.push(call)
   if (url.includes('/api/claude_code/settings')) return settingsAnswer(call)
   // Every other destination — a token refresh, a profile read, a usage lookup — is a request
   // this spec refuses to make. The plugin contains the failure; the count is what is asserted.
   throw new Error(`this spec performs no network request (${url})`)
 }) as typeof fetch
+
+// Restore borrowed process state and remove only this file's private test homes.
+after(() => {
+  globalThis.fetch = originalFetch
+  if (originalHome === undefined) delete process.env.DSH_HOME
+  else process.env.DSH_HOME = originalHome
+  if (originalBunPath === undefined) delete process.env.DSH_SUBSCRIPTIONS_BUN_PATH
+  else process.env.DSH_SUBSCRIPTIONS_BUN_PATH = originalBunPath
+  rmSync(root, { recursive: true, force: true })
+})
 
 /** One fresh harness home per mount, so no durable record crosses a case boundary. */
 let mounts = 0
@@ -138,15 +159,27 @@ function seedProfile(account: string, subscriptionType: string | null, accountUu
 }
 
 /**
- * Store an accepted policy a previous run left behind.
+ * Store the confirmed profile and the accepted policy a previous run left behind.
  *
- * The record keeps this plugin's own projected vocabulary only, and a restored snapshot carries
- * no settings — so its organization pin is unknown rather than absent, which is exactly the
- * state the pin checker must refuse instead of reading as "no pin in force".
+ * The policy record keeps this plugin's own projected vocabulary only, so a restored snapshot
+ * carries no settings and states no pin this process may act on: its first bound request reads
+ * the document in full, unconditionally, instead of revalidating a body nobody read. The one
+ * exception is the endpoint's own empty-success record — an empty checksum and revision with
+ * nothing keyed, blocked or enforced — whose stored projection is its whole document, so its
+ * first bound request determines no further read. The confirmed profile travels in the same
+ * record so no request reads the provider profile: this spec's provider stub answers settings.
+ * @param account - the account key the record belongs to.
+ * @param options - the account UUID the stored credential names (a profile restored under
+ *   another UUID is dropped as another identity's) and whether to store the endpoint's
+ *   empty-success record instead of a projected snapshot.
  */
-function seedRestoredPolicy(account: string): void {
+function seedRestoredPolicy(
+  account: string,
+  options: { readonly accountUuid: string; readonly emptySuccess?: boolean },
+): void {
   const directory = join(process.env.DSH_HOME!, 'plugins', 'subscriptions')
   mkdirSync(directory, { recursive: true })
+  const emptySuccess = options.emptySuccess === true
   writeFileSync(join(directory, 'claude-maintenance.json'), JSON.stringify({
     version: 1,
     accounts: [{
@@ -154,9 +187,18 @@ function seedRestoredPolicy(account: string): void {
       origin: 'https://api.anthropic.com',
       protocolFingerprint: FINGERPRINT,
       organization: 'org-1',
+      profile: {
+        accountUuid: options.accountUuid,
+        emailAddress: `${account}@example.com`,
+        subscriptionType: null,
+        capturedAt: Date.now(),
+        complete: true,
+        completenessVersion: 1,
+        credentialRevision: 0,
+      },
       policy: {
-        checksum: 'checksum-restored',
-        revision: 'revision-restored',
+        checksum: emptySuccess ? '' : 'checksum-restored',
+        revision: emptySuccess ? '' : 'revision-restored',
         acceptedAt: 1,
         keys: [],
         blockers: [],
@@ -174,7 +216,7 @@ function seedRestoredPolicy(account: string): void {
   return {
     calls,
     transport: async (request: CoreHttpRequest): Promise<CoreHttpResponse> => {
-      const call: RecordedCall = { url: request.url, method: request.method, signal: request.signal }
+      const call: RecordedCall = { url: request.url, method: request.method, signal: request.signal, headers: new Headers(request.headers) }
       calls.push(call)
       return await handler(call, calls.length - 1)
     },
@@ -205,10 +247,6 @@ const VERSION_REFUSAL = JSON.stringify({
   },
 })
 
-/** A committed request's session id, branded the way the llm service declares it. */
-const llmSessionId = (id: string): NonNullable<GenerateOptions['sessionId']> =>
-  id as NonNullable<GenerateOptions['sessionId']>
-
 /** The agent identity one tool execution carries; the registry reads exactly these fields. */
 type ExecutionAgent = NonNullable<ToolExecutionInput['agent']>
 const executionAgent = (sessionId: string): ExecutionAgent =>
@@ -232,6 +270,10 @@ interface Composition {
 
 /**
  * Mount the plugin's real composition over scripted provider transports.
+ *
+ * The Host side is real too: the composition mounts the `SessionStore` and the
+ * `SessionRequestRecordProvider` the Claude route is registered under, because that route exists
+ * only while a Host provides `llmRequestRecord`.
  * @param options - the policy_limits answers, the organization answers, the settings body, the
  *   pool configuration, and the records this run starts from (written before the plugin loads
  *   them, exactly as a previous run would have left them).
@@ -249,9 +291,16 @@ async function mount(options: {
   settingsAnswer = options.settings ?? (() => Response.json({ uuid: 'settings-1', checksum: 'checksum-1', settings: {} }))
   const { Context } = await import('@deepseek-ai/cordis')
   const ToolRuntime = (await import('@deepseek-ai/dsh-tools')).default
+  const { default: SessionStore, SessionId } = await import('@deepseek-ai/dsh-session')
+  const SessionRequestRecordProvider = (await import('@deepseek-ai/dsh-llm-request-record')).default
   const { createFakeConnection } = await import('./fake-connection.js')
   const plugin = await import('../src/index.js')
   const ctx = new Context()
+  // `SessionStore.flush` reports a durable checkpoint only when a listener participates, and this
+  // composition keeps its session log in memory: its own listener is that participant.
+  await ctx.plugin(SessionStore)
+  await ctx.plugin(SessionRequestRecordProvider, { flushTimeoutMs: 2_000 })
+  ctx.on('session/flush', () => {})
   ctx.provide('systemPrompt', { tools: () => () => {} })
   await ctx.plugin(ToolRuntime)
   const fake = createFakeConnection()
@@ -300,11 +349,15 @@ async function mount(options: {
     get providerCalls() { return providerCalls },
     request: async (sessionId) => {
       assert.ok(route !== undefined, 'the plugin registered its Claude route')
+      const requested = sessionId === undefined ? undefined : SessionId(sessionId)
+      // The recording service resolves the session the request names, so that session must be live
+      // in the store before the adapter publishes its prepared record.
+      if (requested !== undefined && ctx.sessions.get(requested) === undefined) ctx.sessions.create(requested)
       const stream = route.stream({
         provider: 'claude',
         model: MODEL.id,
         messages: [],
-        ...sessionId === undefined ? {} : { sessionId: llmSessionId(sessionId) },
+        ...requested === undefined ? {} : { sessionId: requested },
         signal: new AbortController().signal,
       })
       try {
@@ -321,7 +374,7 @@ async function mount(options: {
         provider: 'codex',
         model: 'gpt-5.1',
         messages: [],
-        sessionId: llmSessionId(sessionId),
+        sessionId: SessionId(sessionId),
         signal: new AbortController().signal,
       }, (): AsyncIterable<StreamChunk> => (async function* () {
         yield { type: 'text-delta', index: 0, text: 'hello' }
@@ -365,12 +418,31 @@ function assertRefusal(error: unknown, code: string): LlmError {
   return error
 }
 
+/**
+ * The managed-settings reads among one composition's provider calls.
+ *
+ * A case owns the settings read its accepted policy requires; a profile read a confirmed
+ * record should have prevented is not this case's fact to assert.
+ * @param app - the mounted composition.
+ * @returns the recorded calls to the managed-settings endpoint, in order.
+ */
+function settingsReads(app: Composition): readonly RecordedCall[] {
+  return app.providerCalls.filter(call => call.url.includes('/api/claude_code/settings'))
+}
+
 test('a known Pro/Max account reads neither settings nor limits and still reaches the wire', async () => {
   const app = await mount({
     // The entitlement excludes this account, so neither independent read may be attempted.
     policy: () => { throw new Error('no policy_limits read is allowed for an ineligible account') },
+    // The roster and the confirmed Pro/Max profile are stored before the plugin loads them:
+    // the shipped continuation owner initializes the accounts it serves during apply, never
+    // from a later request, and the confirmed profile is what keeps the background owner from
+    // reading the provider profile this case asserts nothing was sent for.
+    seed: () => {
+      seedStore([{ key: 'acct-max', subscriptionType: 'max', accountUuid: 'uuid-max' }])
+      seedProfile('acct-max', 'max', 'uuid-max')
+    },
   })
-  seedStore([{ key: 'acct-max', subscriptionType: 'max', accountUuid: 'uuid-max' }])
 
   assertWireReached(await app.request('session-max'))
   assert.equal(app.policy.calls.length, 0, 'no policy_limits request was sent')
@@ -416,11 +488,13 @@ test('the confirmed profile metadata decides eligibility, and an explicit null i
 test('a version refusal in a 401 is recorded once, refreshes nothing, and blocks the next account offline', async () => {
   const app = await mount({
     policy: () => new Response(VERSION_REFUSAL, { status: 401, headers: { 'content-type': 'application/json' } }),
+    seed: () => {
+      seedStore([
+        { key: 'acct-1', subscriptionType: null, accountUuid: 'uuid-1' },
+        { key: 'acct-2', subscriptionType: null, accountUuid: 'uuid-2' },
+      ])
+    },
   })
-  seedStore([
-    { key: 'acct-1', subscriptionType: null, accountUuid: 'uuid-1' },
-    { key: 'acct-2', subscriptionType: null, accountUuid: 'uuid-2' },
-  ])
 
   const first = assertRefusal(await app.request('session-1'), 'CLIENT_VERSION_UNSUPPORTED')
   assert.equal(first.failure?.retryDisposition, 'forbid', 'the refusal carries the hard stop')
@@ -452,8 +526,8 @@ test('an oversized policy body is refused after one request and its stream is ca
       },
       cancel() { cancels += 1 },
     }), { status: 200 }),
+    seed: () => { seedStore([{ key: 'acct-1', subscriptionType: null, accountUuid: 'uuid-1' }]) },
   })
-  seedStore([{ key: 'acct-1', subscriptionType: null, accountUuid: 'uuid-1' }])
 
   const failure = assertRefusal(await app.request('session-1'), 'POLICY_LIMITS_UNAVAILABLE')
   assert.equal(failure.failure?.retryDisposition, 'forbid',
@@ -474,8 +548,10 @@ test('an oversized policy body is refused after one request and its stream is ca
 test('a failed read refuses the request instead of sending it under an unknown policy', async () => {
   // A 4xx the shared classifier does not recognize is terminal for the reader: one attempt,
   // and the prohibition travels with the refusal.
-  const app = await mount({ policy: () => new Response('{}', { status: 400 }) })
-  seedStore([{ key: 'acct-1', subscriptionType: null, accountUuid: 'uuid-1' }])
+  const app = await mount({
+    policy: () => new Response('{}', { status: 400 }),
+    seed: () => { seedStore([{ key: 'acct-1', subscriptionType: null, accountUuid: 'uuid-1' }]) },
+  })
 
   const failure = assertRefusal(await app.request('session-1'), 'POLICY_LIMITS_UNAVAILABLE')
   assert.equal(failure.failure?.retryDisposition, 'forbid', 'the terminal read keeps its prohibition')
@@ -484,8 +560,10 @@ test('a failed read refuses the request instead of sending it under an unknown p
 })
 
 test('the organization pin validates only when the accepted policy states one, and a mismatch is a hard stop', async () => {
-  const noPin = await mount({ policy: () => Response.json({ restrictions: {} }) })
-  seedStore([{ key: 'acct-1', subscriptionType: null, accountUuid: 'uuid-1' }])
+  const noPin = await mount({
+    policy: () => Response.json({ restrictions: {} }),
+    seed: () => { seedStore([{ key: 'acct-1', subscriptionType: null, accountUuid: 'uuid-1' }]) },
+  })
   assertWireReached(await noPin.request('session-1'))
   assert.equal(noPin.org.calls.length, 0, 'a policy that states no pin sends no validation')
   await noPin.dispose()
@@ -493,8 +571,8 @@ test('the organization pin validates only when the accepted policy states one, a
   const matched = await mount({
     policy: () => Response.json({ restrictions: {} }),
     settings: () => Response.json({ uuid: 'settings-2', checksum: 'checksum-2', settings: { forceLoginOrgUUID: 'org-1' } }),
+    seed: () => { seedStore([{ key: 'acct-1', subscriptionType: null, accountUuid: 'uuid-1' }]) },
   })
-  seedStore([{ key: 'acct-1', subscriptionType: null, accountUuid: 'uuid-1' }])
   assertWireReached(await matched.request('session-1'))
   assert.equal(matched.org.calls.length, 1, 'a stated pin is validated before the first wire request')
   assert.equal(matched.org.calls[0]?.method, 'POST')
@@ -508,8 +586,8 @@ test('the organization pin validates only when the accepted policy states one, a
     policy: () => Response.json({ restrictions: {} }),
     org: () => Response.json({ organization_uuid: 'org-9' }),
     settings: () => Response.json({ uuid: 'settings-3', checksum: 'checksum-3', settings: { forceLoginOrgUUID: 'org-1' } }),
+    seed: () => { seedStore([{ key: 'acct-1', subscriptionType: null, accountUuid: 'uuid-1' }]) },
   })
-  seedStore([{ key: 'acct-1', subscriptionType: null, accountUuid: 'uuid-1' }])
   const refused = assertRefusal(await mismatched.request('session-1'), 'POLICY_ORG_PIN_REFUSED')
   // The hard stop is what keeps the Host from retrying the turn and the pool from moving the
   // request onto an account that cannot satisfy the organization this one's policy pinned.
@@ -520,33 +598,80 @@ test('the organization pin validates only when the accepted policy states one, a
   const invalid = await mount({
     policy: () => Response.json({ restrictions: {} }),
     settings: () => Response.json({ uuid: 'settings-4', checksum: 'checksum-4', settings: { forceLoginOrgUUID: [] } }),
+    seed: () => { seedStore([{ key: 'acct-1', subscriptionType: null, accountUuid: 'uuid-1' }]) },
   })
-  seedStore([{ key: 'acct-1', subscriptionType: null, accountUuid: 'uuid-1' }])
   // A present-but-unusable pin is refused before the validation: the settings document that
   // states it cannot be applied, so the account is not served and no request is sent.
   assertRefusal(await invalid.request('session-1'), 'POLICY_INVALID_VALUE')
   assert.equal(invalid.org.calls.length, 0, 'a present-but-unusable pin is refused without a request')
   await invalid.dispose()
 
-  // A restored policy states no pin at all, which is not the same fact as "no pin in force":
-  // the account is refused until a fresh read states it again, and nothing is validated.
+  // A restored policy carries no settings body, so it states no pin this process may act on:
+  // the first bound request reads the document in full and is judged by that answer. The read
+  // is deliberately unconditional — a restored checksum cannot revalidate a document nobody
+  // read — and the fresh empty document states no pin, which is the absence of a pin rather
+  // than the unverified pin the restored record alone would have been.
   const restored = await mount({
     policy: () => Response.json({ restrictions: {} }),
     seed: () => {
       seedStore([{ key: 'acct-1', subscriptionType: null, accountUuid: 'uuid-1' }])
-      seedRestoredPolicy('acct-1')
+      seedRestoredPolicy('acct-1', { accountUuid: 'uuid-1' })
     },
   })
-  const unverified = assertRefusal(await restored.request('session-1'), 'POLICY_ORG_PIN_REFUSED')
-  assert.equal(unverified.failure?.retryDisposition, 'forbid')
-  assert.equal(restored.org.calls.length, 0, 'an unknown pin sends no validation')
+  assertWireReached(await restored.request('session-1'))
+  assert.equal(restored.policy.calls.length, 1, 'the restored record is re-read once for this request')
+  const restoredSettings = settingsReads(restored)
+  assert.equal(restoredSettings.length, 1, 'the one settings read is the request the first request sends')
+  assert.equal(restoredSettings[0]?.headers.get('if-none-match'), null,
+    'a restored record contributes no validator, so the read is unconditional')
+  assert.equal(restored.org.calls.length, 0, 'a document that states no pin sends no validation')
   await restored.dispose()
+
+  // The endpoint's own empty-success record is the one restored policy whose stored projection
+  // IS its whole document: an empty checksum and revision with nothing keyed, blocked or
+  // enforced states exactly the body `{}`. Its first bound request therefore determines nothing
+  // over the wire — no settings read states the pin, and the pin that record states is none —
+  // and the real route still reaches the local transport.
+  const emptyRestored = await mount({
+    policy: () => Response.json({ restrictions: {} }),
+    seed: () => {
+      seedStore([{ key: 'acct-1', subscriptionType: null, accountUuid: 'uuid-1' }])
+      seedRestoredPolicy('acct-1', { accountUuid: 'uuid-1', emptySuccess: true })
+    },
+  })
+  assertWireReached(await emptyRestored.request('session-1'))
+  assert.equal(settingsReads(emptyRestored).length, 0,
+    'the empty-success record states its own body, so no settings read is sent')
+  assert.equal(emptyRestored.org.calls.length, 0, 'a stated absence of a pin sends no validation')
+  await emptyRestored.dispose()
+
+  // The same restored record with the one read that would state its pin failing transiently: the
+  // record keeps no settings body, so the pin stays unverified and the real route raises the copy
+  // an operator sees — asserted through the plugin rather than read from its source. Nothing
+  // leaves this process: the settings read is answered by the throwing stub above.
+  const unverified = await mount({
+    policy: () => Response.json({ restrictions: {} }),
+    settings: () => { throw new Error('synthetic transient managed-settings read failure') },
+    seed: () => {
+      seedStore([{ key: 'acct-1', subscriptionType: null, accountUuid: 'uuid-1' }])
+      seedRestoredPolicy('acct-1', { accountUuid: 'uuid-1' })
+    },
+  })
+  const unpinned = assertRefusal(await unverified.request('session-1'), 'POLICY_ORG_PIN_REFUSED')
+  assert.ok(unpinned.message.includes('organization policy not reverified locally; Messages request not sent'),
+    `the refusal states the request was held back: ${unpinned.message}`)
+  assert.ok(!unpinned.message.includes('re-authorize'), 'an unverified pin is not a credential refusal')
+  assert.equal(unpinned.failure?.retryDisposition, 'forbid', 'the unverified pin keeps the hard stop')
+  assert.equal(unverified.org.calls.length, 0, 'an unverified pin is never sent for validation')
+  await unverified.dispose()
 })
 
 test('the guard enforces the verdicts through the Host registry, and a similar name is not the capability', async () => {
   // An adopted empty document constrains nothing at all.
-  const empty = await mount({ policy: () => Response.json({ restrictions: {} }) })
-  seedStore([{ key: 'acct-1', subscriptionType: null, accountUuid: 'uuid-1' }])
+  const empty = await mount({
+    policy: () => Response.json({ restrictions: {} }),
+    seed: () => { seedStore([{ key: 'acct-1', subscriptionType: null, accountUuid: 'uuid-1' }]) },
+  })
   assertWireReached(await empty.request('session-a'))
   assert.equal((await empty.execute('session-never', 'host_probe')).isError, false, 'an unattributed session is untouched')
   assert.equal((await empty.execute('session-a', 'host_probe')).isError, false)
@@ -571,8 +696,8 @@ test('the guard enforces the verdicts through the Host registry, and a similar n
         allow_stats_transcript_scan: { allowed: false },
       },
     }),
+    seed: () => { seedStore([{ key: 'acct-1', subscriptionType: null, accountUuid: 'uuid-1' }]) },
   })
-  seedStore([{ key: 'acct-1', subscriptionType: null, accountUuid: 'uuid-1' }])
   assertWireReached(await webFetch.request('session-a'))
   const webRefusal = await webFetch.executeMessage('session-a', 'web_fetch')
   assert.ok(webRefusal?.includes('POLICY_LIMITS_UNSUPPORTED'), `the refusal names its code: ${String(webRefusal)}`)
@@ -590,8 +715,8 @@ test('the guard enforces the verdicts through the Host registry, and a similar n
   // which has no way to state that reach.
   const unknown = await mount({
     policy: () => Response.json({ restrictions: { allow_something_new: { allowed: false } } }),
+    seed: () => { seedStore([{ key: 'acct-1', subscriptionType: null, accountUuid: 'uuid-1' }]) },
   })
-  seedStore([{ key: 'acct-1', subscriptionType: null, accountUuid: 'uuid-1' }])
   // The same conservative answer refuses this plugin's own model request when it is sent
   // under that document: an unknown restriction is never read as permission. The key the
   // provider stated is remote text, so the refusal names the fixed placeholder instead.
@@ -605,8 +730,8 @@ test('the guard enforces the verdicts through the Host registry, and a similar n
   // blanket refusal: it neither stops the document nor blocks an ordinary Host tool.
   const defaults = await mount({
     policy: () => Response.json({ restrictions: {}, defaults: { remote_control_at_startup: true } }),
+    seed: () => { seedStore([{ key: 'acct-1', subscriptionType: null, accountUuid: 'uuid-1' }]) },
   })
-  seedStore([{ key: 'acct-1', subscriptionType: null, accountUuid: 'uuid-1' }])
   assertWireReached(await defaults.request('session-a'))
   assert.equal((await defaults.execute('session-a', 'host_probe')).isError, false)
   assert.equal(defaults.runs('host_probe'), 1)
@@ -617,8 +742,8 @@ test('the guard enforces the verdicts through the Host registry, and a similar n
   const unsupportedSettings = await mount({
     policy: () => Response.json({ restrictions: {} }),
     settings: () => Response.json({ uuid: 's', checksum: 'c', settings: { somethingNew: true } }),
+    seed: () => { seedStore([{ key: 'acct-1', subscriptionType: null, accountUuid: 'uuid-1' }]) },
   })
-  seedStore([{ key: 'acct-1', subscriptionType: null, accountUuid: 'uuid-1' }])
   assert.ok((await unsupportedSettings.request('session-a')) instanceof Error, 'the readiness seam refused the request')
   const settingsRefusal = await unsupportedSettings.executeMessage('session-a', 'host_probe')
   assert.ok(settingsRefusal?.includes('POLICY_UNSUPPORTED'), `the refusal names the blocker: ${String(settingsRefusal)}`)
@@ -626,8 +751,10 @@ test('the guard enforces the verdicts through the Host registry, and a similar n
   await unsupportedSettings.dispose()
 
   // A committed request on another provider retires this session's Claude attribution.
-  const other = await mount({ policy: () => Response.json({ restrictions: {} }) })
-  seedStore([{ key: 'acct-1', subscriptionType: null, accountUuid: 'uuid-1' }])
+  const other = await mount({
+    policy: () => Response.json({ restrictions: {} }),
+    seed: () => { seedStore([{ key: 'acct-1', subscriptionType: null, accountUuid: 'uuid-1' }]) },
+  })
   assertWireReached(await other.request('session-a'))
   await other.requestOtherProvider('session-a')
   assert.equal((await other.execute('session-a', 'host_probe')).isError, false, 'the retired session keeps its tools')
@@ -635,22 +762,29 @@ test('the guard enforces the verdicts through the Host registry, and a similar n
 })
 
 test('a request that names no session is judged and starts no background owner', async () => {
-  const app = await mount({ policy: () => Response.json({ restrictions: {} }) })
-  seedStore([{ key: 'acct-1', subscriptionType: null, accountUuid: 'uuid-1' }])
+  const app = await mount({
+    policy: () => Response.json({ restrictions: {} }),
+    seed: () => { seedStore([{ key: 'acct-1', subscriptionType: null, accountUuid: 'uuid-1' }]) },
+  })
 
-  // The session-less request still reads the document it must be judged by.
-  assertWireReached(await app.request())
-  assert.equal(app.policy.calls.length, 1, 'a session-less request performs the bounded read')
-  // Its binding is request-scoped: the next session-less request reads again rather than
-  // inheriting a background owner that would keep a cadence alive for nobody.
-  assertWireReached(await app.request())
-  assert.equal(app.policy.calls.length, 2, 'the request-scoped binding was released, so no state was reused')
+  // A prepared Messages request is recorded in its session's log, so a request that names no
+  // session has nowhere to be recorded: it is refused at zero side effects, before the account
+  // chain, the credential read, the policy document and any Files upload.
+  const refused = assertRefusal(await app.request(), CLAUDE_REQUEST_RECORD_CONTEXT_REQUIRED)
+  assert.equal(refused.failure?.retryDisposition, 'forbid', 'the refusal carries the hard stop')
+  assert.equal(app.policy.calls.length, 0, 'a session-less request reads no policy document')
+  // Its binding is request-scoped: the next session-less request is refused the same way rather
+  // than inheriting a background owner that would keep a cadence alive for nobody.
+  assertRefusal(await app.request(), CLAUDE_REQUEST_RECORD_CONTEXT_REQUIRED)
+  assert.equal(app.policy.calls.length, 0, 'no background owner was started, so nothing was reused')
 
   // A document that states an unknown key refuses this plugin's own model request too: the
   // conservative answer is never read as permission, and the failure text stays silent.
-  const denied = await mount({ policy: () => Response.json({ restrictions: { allow_something_new: { allowed: true } } }) })
-  seedStore([{ key: 'acct-1', subscriptionType: null, accountUuid: 'uuid-1' }])
-  assertRefusal(await denied.request(), 'POLICY_LIMITS_UNSUPPORTED')
+  const denied = await mount({
+    policy: () => Response.json({ restrictions: { allow_something_new: { allowed: true } } }),
+    seed: () => { seedStore([{ key: 'acct-1', subscriptionType: null, accountUuid: 'uuid-1' }]) },
+  })
+  assertRefusal(await denied.request('session-1'), 'POLICY_LIMITS_UNSUPPORTED')
   await denied.dispose()
   await app.dispose()
 })
@@ -670,11 +804,13 @@ test('a two-account pool does not move a refused request onto the other account'
         ],
       },
     },
+    seed: () => {
+      seedStore([
+        { key: 'acct-1', subscriptionType: null, accountUuid: 'uuid-1' },
+        { key: 'acct-2', subscriptionType: null, accountUuid: 'uuid-2' },
+      ])
+    },
   })
-  seedStore([
-    { key: 'acct-1', subscriptionType: null, accountUuid: 'uuid-1' },
-    { key: 'acct-2', subscriptionType: null, accountUuid: 'uuid-2' },
-  ])
   const failure = await app.request('session-1')
   const refused = assertRefusal(failure, 'POLICY_ORG_PIN_REFUSED')
   assert.equal(refused.failure?.retryDisposition, 'forbid')
@@ -688,8 +824,10 @@ test('an unknown policy key is refused without letting its text reach a model, a
   // instruction. The denial must survive, and the text must not cross any boundary this
   // plugin owns — the model-facing tool error, the request failure or the status projection.
   const secret = 'synthetic TOKEN=do-not-echo'
-  const app = await mount({ policy: () => Response.json({ restrictions: { [secret]: { allowed: false } } }) })
-  seedStore([{ key: 'acct-1', subscriptionType: null, accountUuid: 'uuid-1' }])
+  const app = await mount({
+    policy: () => Response.json({ restrictions: { [secret]: { allowed: false } } }),
+    seed: () => { seedStore([{ key: 'acct-1', subscriptionType: null, accountUuid: 'uuid-1' }]) },
+  })
   // The request itself is refused by the same conservative answer; the attribution its
   // readiness recorded before that decision still judges this session's tool calls.
   assertRefusal(await app.request('session-a'), 'POLICY_LIMITS_UNSUPPORTED')
@@ -704,8 +842,10 @@ test('an unknown policy key is refused without letting its text reach a model, a
 
   // Under a document that states it as allowed, this plugin's own model request is refused by
   // the same conservative answer, and the failure text is equally silent about the key.
-  const model = await mount({ policy: () => Response.json({ restrictions: { [secret]: { allowed: true } } }) })
-  seedStore([{ key: 'acct-1', subscriptionType: null, accountUuid: 'uuid-1' }])
+  const model = await mount({
+    policy: () => Response.json({ restrictions: { [secret]: { allowed: true } } }),
+    seed: () => { seedStore([{ key: 'acct-1', subscriptionType: null, accountUuid: 'uuid-1' }]) },
+  })
   const failure: unknown = await model.request('session-a')
   assert.ok(failure instanceof LlmError, `the request was refused: ${String(failure)}`)
   assert.equal(failure.code, 'POLICY_LIMITS_UNSUPPORTED')
@@ -723,8 +863,8 @@ test('a confirmed HIPAA taint supplies the engine policy without blocking the pr
   // the adapter's own covered cases, so they are not duplicated here.
   const app = await mount({
     policy: () => Response.json({ restrictions: {}, compliance_taints: ['hipaa'] }),
+    seed: () => { seedStore([{ key: 'acct-1', subscriptionType: null, accountUuid: 'uuid-1' }]) },
   })
-  seedStore([{ key: 'acct-1', subscriptionType: null, accountUuid: 'uuid-1' }])
   assertWireReached(await app.request('session-hips'))
   const claude = await app.status()
   const accounts = claude['accounts'] as { policyLimits?: { state: string } }[]
@@ -753,8 +893,8 @@ test('the owner\'s normalized notice reaches the status dimension, and nothing r
       defaults: { remote_control_at_startup: true },
       monitoring_notice: { text: 'synthetic notice text', url: 'https://example.com/notice' },
     }),
+    seed: () => { seedStore([{ key: 'acct-1', subscriptionType: null, accountUuid: 'uuid-1' }]) },
   })
-  seedStore([{ key: 'acct-1', subscriptionType: null, accountUuid: 'uuid-1' }])
   assertWireReached(await app.request('session-notice'))
   const claude = await app.status()
   const accounts = claude['accounts'] as {
@@ -788,8 +928,8 @@ test('disposal waits for a held policy response, cancels it, and adopts nothing 
         resolve(Response.json({ restrictions: {} }))
       }
     }),
+    seed: () => { seedStore([{ key: 'acct-1', subscriptionType: null, accountUuid: 'uuid-1' }]) },
   })
-  seedStore([{ key: 'acct-1', subscriptionType: null, accountUuid: 'uuid-1' }])
 
   const pending = app.request('session-1')
   // Wait for the request to reach the held read before disposal starts: the readiness before it

@@ -10,14 +10,13 @@
  *    this document's operation is still running waits for that operation inside the same absolute
  *    budget and then runs its own change: waiting never adopts the earlier operation's result, and
  *    a wait that ends first starts none of the arriving caller's own I/O. The operation a caller
- *    started stays owned by this helper: it keeps running, it stays on the document's critical
- *    path, and a caller whose own wait ended is told only that the state is unavailable. Such an
- *    operation is uncertain until it really settles, and every later operation on the document is
- *    refused for as long as that lasts, because a decision read from a document a pending write
- *    may still replace is not one the store can vouch for. Once it settles, the document is read
- *    again — this helper never retries a write, or completes one, after the wait that abandoned it
- *    ended. The write runs inside the lock, so a process that honours this lock cannot decide from
- *    the document either while the abandoned work is still writing.
+ *    started stays owned by this helper: it keeps running, and a caller whose own wait ended is
+ *    told only that the state is unavailable. Every later caller waits for that operation's real
+ *    settlement under its own absolute budget and then reads and changes the document inside the
+ *    lock, so no caller decides from a document a pending write may still replace. An ended wait
+ *    neither retries nor revokes the owned operation; that operation may still commit before its
+ *    lock is released. The write runs inside the lock, so a process that honours this lock cannot
+ *    decide from the document either while the abandoned work is still writing.
  * 2. Every outcome of a wait — elapsed, timed out, aborted — releases that wait's own timer and
  *    abort listener, so a caller that keeps sending requests accumulates neither.
  * 3. One read-modify-write runs entirely inside the lock this plugin already owns
@@ -249,12 +248,11 @@ export interface ContinuationIoOptions {
 /**
  * One continuation document's owned work.
  *
- * The helper is the document's owner in this process: it starts every read-modify-write under
- * the plugin's own lock, keeps a started operation alive past the caller's wait, refuses new
- * work while an operation that lost its caller is still settling, and can be closed once the
- * plugin is disposed. One caller at a time changes the document: a caller that arrives while
- * another operation runs waits for it under its own budget and then changes the document itself,
- * so two requests that merely overlap are serialised rather than refused.
+ * The helper is the document's owner in this process: it starts every read-modify-write under the
+ * plugin's own lock, keeps a started operation alive past the caller's wait, makes a later caller
+ * wait for that operation's real settlement before reading and changing the document itself, and
+ * can be closed once the plugin is disposed. One caller at a time changes the document, so two
+ * requests that merely overlap are serialised rather than refused.
  */
 export class ContinuationIo {
   private readonly path: string
@@ -262,13 +260,11 @@ export class ContinuationIo {
   private readonly deadlineMs: number
   private readonly files: ContinuationFiles
   private readonly waits: ContinuationWaitHost
-  private readonly settling = new Set<Promise<ContinuationOutcome>>()
   /**
-   * Owned work whose caller stopped waiting while its own I/O was still running. Every later
-   * operation is refused until each of these really settles, and settlement clears only its own
-   * entry.
+   * Owned work that has not really settled yet. A later caller waits for every entry under its own
+   * budget, and settlement removes only its own entry.
    */
-  private readonly uncertain = new Set<Promise<ContinuationOutcome>>()
+  private readonly settling = new Set<Promise<ContinuationOutcome>>()
   private closed = false
 
   /**
@@ -289,10 +285,10 @@ export class ContinuationIo {
    * the same document and then drop the other's change. Returning `undefined` leaves the
    * document as it is, which is how a caller reads without writing. A caller whose signal is
    * already aborted, and a caller whose budget has already ended, perform no file operation at
-   * all. A caller that arrives while an operation this helper owns is still running waits for it
-   * inside the same budget and then runs its own change; a wait that ends first starts none of
-   * this caller's work, and an operation whose own caller stopped waiting is refused to every
-   * later caller until it really settles.
+   * all. A caller that arrives while an operation this helper owns is still running waits for that
+   * operation's real settlement under its own budget and then runs its own change; a wait that
+   * ends first starts none of this caller's work, and a caller that stopped waiting does not
+   * revoke the operation it started.
    * @param change - the pure change, given the current text (undefined when the document is
    *   absent); returning undefined means "write nothing".
    * @param deadline - the absolute budget and cancellation the caller resolved; absent starts one
@@ -319,9 +315,6 @@ export class ContinuationIo {
         return continuationUnavailable('the caller stopped waiting before the continuation state settled')
       }
       if (this.closed) return continuationUnavailable('the continuation state is being disposed')
-      if (this.uncertain.size > 0) {
-        return continuationUnavailable('an earlier continuation state operation has not settled')
-      }
       if (this.remainingMs(bound) <= 0) {
         return continuationUnavailable('the continuation state did not settle within the deadline')
       }
@@ -337,9 +330,8 @@ export class ContinuationIo {
     const owned = this.own(change)
     const outcome = await this.awaitSettlement(owned, bound)
     if (outcome === 'elapsed') return await owned
-    // This call's own I/O was still running when its wait ended, so it is uncertain until it really
-    // settles: no later caller may decide from the document before then.
-    if (this.settling.has(owned)) this.uncertain.add(owned)
+    // Only this wait ended: the owned write keeps running, and a later caller waits for its real
+    // settlement instead of deciding from the document.
     return continuationUnavailable(outcome === 'aborted'
       ? 'the caller stopped waiting before the continuation state settled'
       : 'the continuation state did not settle within the deadline')
@@ -435,11 +427,7 @@ export class ContinuationIo {
   private own(change: (current: string | undefined) => string | undefined): Promise<ContinuationOutcome> {
     const work = this.run(change)
     this.settling.add(work)
-    const release = (): void => {
-      this.settling.delete(work)
-      // Real settlement clears this work's own uncertainty mark, and no other.
-      this.uncertain.delete(work)
-    }
+    const release = (): void => { this.settling.delete(work) }
     void work.then(release, release)
     return work
   }

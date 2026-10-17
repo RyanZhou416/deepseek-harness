@@ -27,7 +27,7 @@ const ARTIFACT_ROOT_ENV = 'DSH_SUBSCRIPTIONS_ARTIFACT_ROOT'
 
 /** The manifest name and release suffix an artifact root must state. */
 const PACKAGE_NAME = 'dsh-plugin-subscriptions'
-const CANDIDATE_VERSION_SUFFIX = '.31'
+const CANDIDATE_VERSION_SUFFIX = '.33'
 
 /** The closed set both probes read: each module's sibling source, and its built file under `lib`. */
 const PRODUCT_MODULES = {

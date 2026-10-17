@@ -264,6 +264,14 @@ interface ClaudeAccountState {
   policyDocumentBlocker: ClaudePolicyBlocker | undefined
   /** Whether the one bounded initialization read has been attempted for this identity. */
   policyDetermined: boolean
+  /**
+   * Whether the accepted policy's settings body is the one this process holds. A snapshot
+   * restored from disk keeps the record's projection and no document, so its pin is unknown
+   * and it cannot be revalidated conditionally until a full read supplies both again — the
+   * one exception being the endpoint's empty-success statuses, whose stored projection is the
+   * whole body `{}`.
+   */
+  policyBodyComplete: boolean
   /** Work owned by this account state, so a release waits for exactly what it started. */
   work: Set<Promise<unknown>>
   /** An identity conflict observed while reading; stops maintenance for this account. */
@@ -717,9 +725,11 @@ export class ClaudeMaintenanceController {
    *
    * The raw settings document is deliberately not exposed: only the pin and the revision it
    * belongs to leave this owner, so a consumer cannot read or persist a remote value the
-   * minimal projection does not keep. A snapshot restored from disk carries no settings, so
-   * its pin is `unknown` — a state that keeps the blocker in force until a fresh read states
-   * the pin again, never `none`.
+   * minimal projection does not keep. An accepted policy is only as good as the document it
+   * was read from: a snapshot restored from disk carries no settings, so its pin reads as
+   * unknown and the pin checker keeps refusing until a fresh full read states it again —
+   * never as the absence of a pin. The endpoint's empty-success record is the exception: its
+   * own record states the whole empty body, so the absence of a pin is stated, not assumed.
    * @param account - the canonical account key.
    * @returns the projected pin state, or `undefined` when this account holds no policy.
    */
@@ -729,7 +739,7 @@ export class ClaudeMaintenanceController {
     const state = this.stateByAccount(account)
     if (state?.policy === undefined) return undefined
     const revision = state.policy.revision
-    if (state.policyReason === 'restored') {
+    if (!state.policyBodyComplete) {
       return { kind: 'unknown', revision, reason: 'the accepted policy was restored without its pin; a fresh read states it again' }
     }
     return { kind: 'stated', pin: orgPinFromSettings(state.policy.settings), revision }
@@ -827,10 +837,22 @@ export class ClaudeMaintenanceController {
         }
         state.policyStatus = blockers.length === 0 ? 'current' : 'blocked'
         state.policyReason = 'restored'
-        // A snapshot whose restrictions the store kept needs a fresh read before it can
-        // enforce again, so the first bound request determines its policy rather than
-        // trusting the restored one. The poller re-verifies it either way.
-        state.policyDetermined = !unrestored
+        // The endpoint's fixed empty-success statuses are the one accepted policy whose
+        // stored projection is its whole document: an empty checksum and revision, no key,
+        // no blocker and nothing enforced state exactly the body `{}`. That body is the
+        // projection itself, so the pin it states — none — is known here and the first bound
+        // request reads nothing. Any other restored record keeps its projection without a
+        // settings body, whatever its keys said: nothing here states its pin, and the first
+        // bound request determines the policy with one bounded unconditional full read rather
+        // than trusting the restored one — the body is what makes a later conditional read
+        // valid.
+        const emptySuccessBody = record.policy.checksum === ''
+          && record.policy.revision === ''
+          && record.policy.keys.length === 0
+          && record.policy.blockers.length === 0
+          && record.policy.enforced === false
+        state.policyDetermined = emptySuccessBody
+        state.policyBodyComplete = emptySuccessBody
       }
       this.notify(state.key)
     }
@@ -980,6 +1002,7 @@ export class ClaudeMaintenanceController {
       policyRefused: undefined,
       policyDocumentBlocker: undefined,
       policyDetermined: false,
+      policyBodyComplete: false,
       work: new Set(),
       identityConflict: false,
       stopped: false,
@@ -1093,21 +1116,42 @@ export class ClaudeMaintenanceController {
    * others and is cancelled when the last waiter leaves. The read is bounded by the
    * configured timeout, which aborts it: nothing keeps running in the background, and a
    * read that was cancelled this way leaves the identity undetermined so a later request
-   * retries it rather than being judged by a refusal that never arrived.
+   * retries it rather than being judged by a refusal that never arrived. The retry is the
+   * next real request's, never a loop here, and a failed read keeps its own backoff: a
+   * restored or failed policy is read again only once that backoff has passed.
    * @param state - the account state being judged.
    * @param signal - the caller's own cancellation.
    */
   private async ensurePolicyDetermined(state: ClaudeAccountState, signal?: AbortSignal): Promise<void> {
-    if (state.policyReady === undefined && state.policyDetermined) return
-    if (this.options.fetchSettings === undefined && state.policyReady === undefined) {
-      state.policyDetermined = true
-      if (state.policyStatus === 'ineligible') {
-        state.policyStatus = 'unavailable'
-        state.policyReason = 'settings-fetch-unavailable'
+    // A read already in flight for this identity is the one this caller waits for, whoever
+    // started it — the bounded initialization or the poller. None of the conditions below may
+    // short-circuit that: the answer that read is about to produce is the answer this request
+    // is judged by, so the caller settles through the same join, race and cancellation path
+    // as the read's own starter. Only with nothing in flight can the identity be asked again.
+    if (state.policyReady === undefined) {
+      // A provider refusal is terminal: no later request re-asks it.
+      if (state.policyRefused !== undefined) return
+      // The identity's determination has already run and asking again could not improve it:
+      // the document is held, or this entitlement admits no document, or the entitlement
+      // excludes the read altogether. Until a later binding or an organization change resets
+      // the identity, a request is judged by what that determination left.
+      if (state.policyDetermined
+        && (state.policyBodyComplete || state.policy === undefined || state.policyStatus === 'ineligible')) return
+      // No settings fetch is injected: the determination records the missing read and reports
+      // it, exactly as it did before this gate existed.
+      if (this.options.fetchSettings === undefined) {
+        state.policyDetermined = true
+        if (state.policyStatus === 'ineligible') {
+          state.policyStatus = 'unavailable'
+          state.policyReason = 'settings-fetch-unavailable'
+        }
+        return
       }
-      return
+      // A recorded failure keeps its own backoff: a request inside it reads nothing and is
+      // judged by what is already known. Past it, this request takes its own bounded turn.
+      if (state.policyRetryAt !== undefined && this.clock.now() < state.policyRetryAt) return
     }
-    const shared = this.startPolicyDetermination(state)
+    const shared = state.policyReady ?? this.startPolicyDetermination(state)
     if (shared === undefined) return
     const leave = this.joinPolicyWait(state, signal)
     try {
@@ -1329,6 +1373,7 @@ export class ClaudeMaintenanceController {
     state.policyStatus = 'ineligible'
     state.policyReason = 'not-evaluated'
     state.policyDetermined = false
+    state.policyBodyComplete = false
     state.policyRefused = undefined
     state.policyDocumentBlocker = undefined
     state.policyRetryAt = undefined
@@ -1519,6 +1564,10 @@ export class ClaudeMaintenanceController {
     const eligibility = claudePolicyEligibility(eligibilityInput)
     state.policyReason = eligibility.reason
     if (eligibility.kind !== 'eligible') {
+      // The entitlement admits no read, so no document can be established for this account and
+      // nothing is sent. A restored projection stays exactly as it is: this build cannot state
+      // its pin, and an account whose plan is unreadable is not evidence that a policy an
+      // earlier run accepted — or the restriction it enforced — has gone away.
       state.policyStatus = 'ineligible'
       this.cancelPolicyTimer(state)
       this.notify(state.key)
@@ -1548,12 +1597,16 @@ export class ClaudeMaintenanceController {
       return
     }
     let accessToken = credential.token
+    // A conditional read is only valid for a document this process actually holds: a restored
+    // projection has no settings body, so it contributes no validator and a 304 against it
+    // would revalidate a document nobody read.
+    const cached = state.policyBodyComplete ? state.policy : undefined
     const readOnce = (token: string): Promise<Awaited<ReturnType<typeof readClaudeManagedSettings>>> =>
       readClaudeManagedSettings({
         identity: state.identity,
         account: state.identity.account,
         accessToken: token,
-        ...state.policy === undefined ? {} : { cached: state.policy },
+        ...cached === undefined ? {} : { cached },
         now: this.clock.now(),
         consumers: this.consumers,
         fetchSettings,
@@ -1590,6 +1643,10 @@ export class ClaudeMaintenanceController {
         state.policyBackoffMs = 0
         state.policyRefused = undefined
         state.policyDocumentBlocker = undefined
+        // Every one of these outcomes answers with the full document: an accepted envelope
+        // carries its settings, an empty success states that there are none, and a 304 was
+        // only sent against a body this process already held.
+        state.policyBodyComplete = true
         state.policyStatus = result.snapshot.blockers.length === 0 ? 'current' : 'blocked'
         state.policyReason = result.snapshot.blockers.length === 0 ? 'accepted' : 'unsupported-restrictions'
         this.schedulePersist()
