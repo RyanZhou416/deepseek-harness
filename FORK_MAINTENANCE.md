@@ -639,6 +639,8 @@ Windows Web profile 启用 `llm-subscriptions`，保留 `rateLimit.wait: false`�
 
 更新时使用 `git subtree pull --prefix=fork-plugins/dsh-plugin-subscriptions https://github.com/V1ki/dsh-plugin-subscriptions.git <tag> --squash`，再重放 `fork-plugins/dsh-plugin-subscriptions/FORK_MAINTENANCE.md`。真实 profile 始终安装仓内固定 artifact，禁止 npm latest 直接覆盖。
 
+订阅插件暂不整体升级：上游 v0.9.5–v0.9.9 的主体是 Claude 传输层（prompt-cache TTL、32MB 图片预算）与 provider 路由重写，而本地 Claude 线已经过针对性调优并有自己的回归，整包导入会把这些改动推平。2026-10-18 的三方比对确认：换行重试之外的候选补丁要么本地已等价实现（pool 耗尽错误已按真实失败原因归类并带最早恢复时间），要么不适用于本地代码（Codex 推理档位里没有 `ultra`）。已挑入的只有 catalog-store 的 Windows 重命名重试（上游 #129）。后续如需 Codex 重置额度、模型目录缓存、显示名等特性，逐条按补丁挑入，不做整包替换。
+
 本地优化包含 timeline fold 字段级 copy-on-write 与 dirty retention trim（上游 `ensure([...])` + `trimState` 已等价实现）、恢复态首个 wire value 的 bounds clamp、仅 Host 可见状态变化时复用上一份 wire 值的缓存，以及价格相关界面。`/context` modal 的惰性订阅与用 V3 `system/message` 为 header epoch 计价两项已退役：前者由上游稳定的 hook 顺序取代，后者的上游契约明确 header epoch 只折叠元数据，`systemTokens` 只从缓存 v1 行读取，重复计价会让同一 epoch 出现两个来源。真实 profile 停机升级后使用 `maxRequestSteps: 300`、`maxKeptTurns: 60`、`maxEvents: 100`、`maxNodes: 400`、`maxArchiveNodes: 100` 和 `maxFileOps: 100`。这些上限只缩小 Context 派生展示，不修改 Session 历史。
 
 更新时使用 `git subtree pull --prefix=fork-plugins/dsh-context https://github.com/bowenliang123/dsh-context.git <tag> --squash`，再逐项重放 `fork-plugins/dsh-context/FORK_MAINTENANCE.md` 所列行为。不得用 npm latest 直接覆盖真实 profile。
