@@ -576,6 +576,10 @@ Fork 不再维护独立 subagent Queue Remote 或错误码。后续上游合并�
 
 fork 独有的 occurrence 级崩溃恢复在 0.2.1 合并后只剩 `ui-slots` 的类型与测试，renderer 实现缺失：keyed occurrence 失败只替换自身并渲染 owner fallback，其他 occurrence 与注册项保持；`retryDomMutation` 允许每个 generation 在 fallback 提交后重挂一次富渲染（针对翻译扩展改动 DOM 产生的 `NotFoundError`），generation 由 Session 实例与 owner `resetKey` 组合，变化即重置预算。本次按 fork base 移植回 `OccurrenceRecoveryState`、`settleRecoveryFailure`、`OccurrenceCrashCatcher` 与 `OccurrenceSlot`，并把 `guarded` 的 occurrence 分支接回。**Preservation rule.** 上游再次重构 outlet dispatch 时保留 occurrence 分支与 generation 重置语义；fallback 自身失败必须冒泡到父边界，不得重新进入本恢复逻辑。**Focused verification.** `packages/client/ui-renderer/tests/scoped-slots.client.spec.tsx` 的 16 个 occurrence 用例；整个 renderer 套件 162 项通过。
 
+#### Undo merge window
+
+Lexical 的 history 在每个窗口内合并连续输入，而窗口从上一次按键重新计时，所以连续输入超过 1 秒的整段文字仍会被一次 undo 整段撤销（上游讨论 #1614 的第三处缺陷）。`input/editor/undo-boundary.ts` 在跨过 merge window 的那次编辑**之前**把上一状态压入同一个 undo 栈，使一次 undo 最多回退一个窗口，并且不产生无效果的空撤销项；自然停顿的边界仍由 Lexical 自己处理。**Preservation rule.** 重新接入历史时必须让 `registerHistory` 与 `installUndoBoundary` 共享同一个 `historyState`，否则边界压入的是另一套栈。**Focused verification.** `packages/client/ui-conversation/tests/editor-undo-boundary.client.spec.tsx`（连续输入一窗口、自然停顿不重复），以及 `packages/client/ui-conversation/tests` 792 项。
+
 
 ### Released V3 error-turn migration
 

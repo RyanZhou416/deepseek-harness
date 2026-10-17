@@ -12,6 +12,7 @@ import { mergeRegister } from '@lexical/utils'
 import type { DraftReference, ReferenceInsert } from '../../contract/draft-editor.ts'
 import type { CommandClaim } from '../../contract/input.ts'
 import { registerReferenceActivation } from './reference-activation.ts'
+import { installUndoBoundary } from './undo-boundary.ts'
 import { ReferenceChipNode, $createReferenceChipNode } from './chip-node.tsx'
 import { CommandChipNode, $createCommandChipNode, registerCommandChipSeat } from './command-chip-node.tsx'
 import { registerCommandChipSelection } from './command-chip-selection.ts'
@@ -46,6 +47,8 @@ const HISTORY_MERGE_DELAY_MS = 1000
 export class DraftEditorRuntime {
   /** The editor bound by the Composer's contenteditable host. */
   readonly editor: LexicalEditor
+  /** Shared undo/redo stacks, segmented per merge window by installUndoBoundary. */
+  private readonly history = createEmptyHistoryState()
   private projected: EditorProjection = {
     detectText: '', clipboardText: '', occurrences: [], selection: null, caret: null, command: undefined,
   }
@@ -89,7 +92,8 @@ export class DraftEditorRuntime {
       this.editor.registerNodeTransform(RootNode, preserveExternalSelection),
       registerReferenceActivation(this.editor, (source, reference) =>
         this.deps.openReference(source, reference)),
-      registerHistory(this.editor, createEmptyHistoryState(), HISTORY_MERGE_DELAY_MS),
+      registerHistory(this.editor, this.history, HISTORY_MERGE_DELAY_MS),
+      installUndoBoundary(this.editor, this.history, HISTORY_MERGE_DELAY_MS),
       this.editor.registerUpdateListener(() => { this.deps.onUpdate() }),
       registerCommandChipSeat(this.editor),
       registerCommandChipSelection(this.editor),
