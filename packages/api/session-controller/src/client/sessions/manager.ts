@@ -6,6 +6,7 @@ import type { SessionProjectionMap } from '@deepseek-ai/dsh-session-projection/t
 import type { WorkspaceId } from '@deepseek-ai/dsh-workspace/types'
 import type {
   SessionControlBaseline,
+  SessionEditLastMessageRequest,
   SessionControlFrame,
   SessionProjectionHints,
   SessionRenameValue,
@@ -240,8 +241,12 @@ export class SessionManager {
    * @param sessionId - the session to get.
    * @returns the resident instance.
    */
-  get(sessionId: SessionId): Session {
-    let session = this.sessions.get(sessionId)
+  /** Admit a revision of the latest text prompt through the Host command. */
+  editLastMessage(request: SessionEditLastMessageRequest): Promise<RemoteResult<{ accepted: true }>> {
+    return this.remote.session.editLastMessage(request)
+  }
+
+  get(sessionId: SessionId): Session {    let session = this.sessions.get(sessionId)
     if (session === undefined) {
       session = this.createSession(sessionId)
       this.sessions.set(sessionId, session)

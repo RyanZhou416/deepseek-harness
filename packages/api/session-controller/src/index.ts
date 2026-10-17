@@ -42,6 +42,7 @@ import type {
   SessionCancelValue,
   SessionControlFrame,
   SessionCreateRequest,
+  SessionEditLastMessageRequest,
   SessionCreateValue,
   SessionFollowFrame,
   SessionFollowRequest,
@@ -272,6 +273,12 @@ export class SessionController extends TypertRemoteService {
    * @param signal - cancellation for persistence reads and summary generation.
    * @returns visible Session summaries ordered by activity.
    */
+  /** Revise the latest text prompt inside its existing Session. */
+  @Remote('editLastMessage')
+  editLastMessage(request: SessionEditLastMessageRequest): Promise<SessionPromptValue> {
+    return this.commands.editLastMessage(request)
+  }
+
   @Remote('list')
   async list(_request: SessionListRequest, signal: AbortSignal): Promise<SessionListValue> {
     const items = await this.listState.list(signal)

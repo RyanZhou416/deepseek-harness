@@ -336,6 +336,16 @@ export interface SessionForkRequest {
 }
 
 /** Identity of a newly forked Session. */
+/** Revision of the latest text prompt within its existing Session. */
+export interface SessionEditLastMessageRequest {
+  readonly sessionId: SessionId
+  /** Current user/message sequence; stale targets are rejected. */
+  readonly seq: number
+  readonly text: string
+  /** Stable identity for retries of this revision. */
+  readonly requestId: SessionRequestId
+}
+
 export interface SessionForkValue {
   readonly sessionId: SessionId
 }

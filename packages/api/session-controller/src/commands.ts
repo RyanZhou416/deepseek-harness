@@ -40,6 +40,7 @@ import type {
   SessionCancelRequest,
   SessionCancelValue,
   SessionCreateRequest,
+  SessionEditLastMessageRequest,
   SessionCreateValue,
   SessionForkRequest,
   SessionForkValue,
@@ -108,6 +109,42 @@ export class SessionCommandController {
    * @param request - optional blank Session to reuse, location, and Agent preset.
    * @returns the created or reused Session identity and its preset when configured.
    */
+  /**
+   * Admit an idempotent revision without creating or selecting another Session.
+   * @param request - existing Session, current prompt, revised text, and submission identity.
+   * @returns acknowledgement of durable inbox admission.
+   */
+  async editLastMessage(request: SessionEditLastMessageRequest): Promise<SessionPromptValue> {
+    if (!Number.isSafeInteger(request.seq) || request.seq < 0 || Object.is(request.seq, -0)
+      || request.text.trim() === '' || request.requestId.length === 0) {
+      throw new RemoteError('gateway/bad-request', 'invalid last-message edit', {})
+    }
+    const agent = await this.resolveAgent(request.sessionId)
+    if (hasPromptRequest(agent, request.requestId)) return { accepted: true }
+    const selection = this.agents.selectionFor(agent).current
+    if (!routeServed(this.ctx, selection.provider)) {
+      throw new RemoteError('session/model-unavailable', 'select an available model before editing', selection)
+    }
+    let operation: Promise<SessionPromptValue>
+    try {
+      operation = agent.runMaintenance((signal): Promise<SessionPromptValue> => {
+        signal.throwIfAborted()
+        if (agent.inbox.nextTurn.length > 0 || agent.inbox.nextStep.length > 0) {
+          throw new RemoteError('session/agent-busy', 'finish or remove pending messages before editing', { reason: 'pending input' })
+        }
+        const originalSeq = editableMessage(this.ctx, agent, request.seq)
+        agent.followup(createUserMessage({
+          content: [{ type: 'text', text: request.text }],
+          source: { kind: 'user', rpcId: request.requestId, replacesUserMessage: originalSeq },
+        }))
+        return Promise.resolve({ accepted: true })
+      })
+    } catch (error) {
+      throw new RemoteError('session/agent-busy', 'stop the current turn before editing', { reason: String(error) })
+    }
+    return operation
+  }
+
   async create(request: SessionCreateRequest): Promise<SessionCreateValue> {
     if (request.workspaceId !== undefined && request.cwd !== undefined) {
       throw new RemoteError('gateway/bad-request', 'session.create accepts workspaceId or cwd, not both', {})
@@ -670,4 +707,20 @@ function referencedImage(
     if (found !== undefined) return found
   }
   return undefined
+}
+/** Whether the provider still has a served route under the current deployment. */
+function routeServed(ctx: Context, provider: string): boolean {
+  return ctx.llm.listProviders().some(entry => entry.id === provider)
+}
+
+/** Check the latest projected human input against current surface membership. */
+function editableMessage(ctx: Context, agent: Agent, seq: number): SessionSeq {
+  const state = ctx.sessionProjections.stateOf(agent.session, 'userInput')
+  if (state === undefined) throw new Error('Editing requires the userInput projection')
+  const latest = state.latest
+  if (latest === null || latest.seq !== seq || !agent.session.surface.nodes.includes(latest.seq)) {
+    throw new RemoteError('gateway/bad-request', 'only the latest current user message can be edited', {})
+  }
+  if (!latest.textOnly) throw new RemoteError('gateway/bad-request', 'message editing requires a text-only prompt', {})
+  return latest.seq
 }
