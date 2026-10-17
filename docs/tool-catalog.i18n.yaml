@@ -9,8 +9,8 @@
   en: 6cc2cd9ced70bb09
   zh: 1c0e6cb4ba2ed637
 /tool-schema-catalog/tool-package-map:
-  en: e72ad7af437fa362
-  zh: d8f3683a4efe01b0
+  en: 42cfc12b6c257413
+  zh: 23d240e900dc0bbe
 /tool-schema-catalog/deepseek-ai-dsh-plugin-manager:
   en: e0143916bb634762
   zh: e0143916bb634762
@@ -201,14 +201,29 @@
   en: 45bd083870e2c92d
   zh: 45bd083870e2c92d
 /tool-schema-catalog/deepseek-ai-dsh-tool-ralph/ralph:
-  en: e97552156225cf10
+  en: a732667170df892a
   zh: 9ea32b8485e950ec
 /tool-schema-catalog/deepseek-ai-dsh-tool-skill:
   en: 927a5ac0974b7642
   zh: 927a5ac0974b7642
 /tool-schema-catalog/deepseek-ai-dsh-tool-skill/skill:
-  en: 9b159d5831855afb
-  zh: 275ee82af0e0f59a
+  en: 48c216a8df988820
+  zh: 462aaa06a8204267
+/tool-schema-catalog/deepseek-ai-dsh-tool-session-message:
+  en: 2186016b57bd29b9
+  zh: 2186016b57bd29b9
+/tool-schema-catalog/deepseek-ai-dsh-tool-session-message/session-create:
+  en: d98bcc55025f7dd0
+  zh: 814acf08cf3a4727
+/tool-schema-catalog/deepseek-ai-dsh-tool-session-message/session-find:
+  en: 8cb83d531f01e65b
+  zh: 0709534d9a96cd53
+/tool-schema-catalog/deepseek-ai-dsh-tool-session-message/session-message-status:
+  en: c8d2cde0504b9723
+  zh: bf93d171a103885f
+/tool-schema-catalog/deepseek-ai-dsh-tool-session-message/session-send-message:
+  en: cfb6358a1f8bd12b
+  zh: 0c722e42ad1cbc98
 /tool-schema-catalog/deepseek-ai-dsh-tool-session-query:
   en: eac1dff4b6d9e195
   zh: eac1dff4b6d9e195

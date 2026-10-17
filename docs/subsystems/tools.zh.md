@@ -18,7 +18,7 @@ interface ToolOutputDefinition {
   /** Pure projection from validated arguments and value to Native/model content. */
   render(args: unknown, value: JsonValue): ContentBlock[]
   /** Pure replayable presentation projection for native and nested calls. */
-  presentationMeta?(args: unknown, value: JsonValue): JsonValue
+  presentationMeta?(args: unknown, value: JsonValue): JsonValue | undefined
 }
 ```
 

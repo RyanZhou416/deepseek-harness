@@ -54,6 +54,8 @@ kind: "package-reference"
 
 生成的[配置目录](../../../docs/config-catalog.zh.md#deepseek-aidsh-tool-subagent)是每个受支持字段及其 JSDoc 的穷尽式真源。
 
+<a id="delegation-modes"></a>
+
 ### 受管理的委派
 
 运行时接受子任务后，每次调用都会返回 `started subagent <childId>`，不等待子任务结果。activation 独立于已完成的工具调用拥有这项工作；运行时发送完成通知并释放执行资源。

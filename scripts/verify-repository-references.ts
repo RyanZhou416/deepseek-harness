@@ -18,6 +18,8 @@ const excludedPrefixes = [
   'fork-plugins/dsh-context/',
   'fork-plugins/dsh-plugin-subscriptions/',
   '.agents/notes/archived/',
+  // Lock files record wheel sizes and package digests whose hex tokens can equal a commit prefix.
+  'python/sdk/uv.lock',
 ]
 const gitOutputLimit = 64 * 1024 * 1024
 // One 41-byte line per object; 1.2 million objects produce about 49 MiB.

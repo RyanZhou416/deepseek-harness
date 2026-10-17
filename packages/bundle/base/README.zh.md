@@ -27,7 +27,7 @@ kind: "package-bundle"
 
 本 fork 在所有基于 base 的 profile 中默认禁用 Goal：服务、自动轮次、模型工具和 `/goal` 命令均不启用。Web 预设也禁用自己的 Goal 命令／工具行与目标栏。[禁用输入插件](../../goal/goal-round-driver/README.zh.md#disabled-deployments)阻止排队的 Goal 工作进入新的模型请求；已保存的 Goal 事件保持完整。
 
-委派工具在后台运行，并拒绝前台请求；[subagent 工具](../../subagent/tool-subagent/README.zh.md#foreground-and-background-modes)定义执行模式配置。
+委派工具在后台运行，并拒绝前台请求；[subagent 工具](../../subagent/tool-subagent/README.zh.md#delegation-modes)定义执行模式配置。
 
 你会自动获得 dsh 核心：随发行版交付的 `web`、`headless`、`sdk` 与 `acp` profile 已包含它，自定义 profile 则把它列为第一个组合包。之后一切无需任何额外配置即可工作。
 

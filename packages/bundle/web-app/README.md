@@ -29,7 +29,7 @@ Run `dsh --profile web` for browser chat, model and settings management, and ses
 <a id="use-this-package"></a>
 ## Use this package
 
-The Standard, PTC, and Creator presets configure delegation tools to return background ids and reject foreground requests; see the [subagent tool](../../subagent/tool-subagent/README.md#foreground-and-background-modes).
+The Standard, PTC, and Creator presets configure delegation tools to return background ids and reject foreground requests; see the [subagent tool](../../subagent/tool-subagent/README.md#delegation-modes).
 
 Start the GUI, open your browser, and start talking to the agent. The flags fine-tune the invocation.
 

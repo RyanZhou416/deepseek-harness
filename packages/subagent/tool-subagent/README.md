@@ -54,6 +54,8 @@ Load the subagent service, an in-process or remote backend, and this tool; then 
 
 The generated [configuration catalog](../../../docs/config-catalog.md#deepseek-aidsh-tool-subagent) is the exhaustive source for every accepted field and its JSDoc.
 
+<a id="delegation-modes"></a>
+
 ### Managed delegation
 
 Every call returns `started subagent <childId>` after the runtime accepts the child. It does not wait for the child's result. The activation owns the work independently of the completed tool call; the runtime sends a completion notice and releases execution resources.

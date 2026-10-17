@@ -13,6 +13,30 @@
     },
     {
       "doc": "docs/subsystems/llm-streaming.md",
+      "symbol": "UserMessageSource",
+      "source": "packages/llm/llm/src/message.ts"
+    },
+    {
+      "doc": "docs/subsystems/llm-streaming.md",
+      "symbol": "LlmRequestRecordContext",
+      "source": "packages/llm/llm-request-record/src/types.ts"
+    },
+    {
+      "doc": "docs/subsystems/llm-streaming.md",
+      "symbol": "LlmRequestRecordPayload",
+      "source": "packages/llm/llm-request-record/src/types.ts"
+    },
+    {
+      "doc": "docs/subsystems/llm-streaming.md",
+      "symbol": "LlmRequestRecordOutcome",
+      "source": "packages/llm/llm-request-record/src/index.ts"
+    },
+    {
+      "doc": "docs/subsystems/llm-streaming.md",
+      "symbol": "LlmRequestRecordFailureCode",
+      "source": "packages/llm/llm-request-record/src/types.ts"
+    },    {
+      "doc": "docs/subsystems/llm-streaming.md",
       "symbol": "AssistantProviderMetadata",
       "source": "packages/llm/llm/src/message.ts"
     },

@@ -844,10 +844,17 @@ resolveAgent(sessionId: SessionId): Promise<ApiSessionAgentResult>
 inspect( sessionId: SessionId, signal?: AbortSignal, ): Promise<SessionInspection>
 
 /**
- * Read all visible Session rows without resuming an Agent.
- * @param _request - reserved empty list request.
- * @param signal - cancellation for persistence reads and summary generation.
- * @returns visible Session summaries ordered by activity.
+ * Revise the latest text prompt inside its existing Session.
+ * @param request - Session, replacement text, and request identity.
+ * @returns the accepted prompt value of the revised continuation.
+ */
+@Remote('editLastMessage') editLastMessage(request: SessionEditLastMessageRequest): Promise<SessionPromptValue>
+
+/**
+ * List Sessions this connection may read.
+ * @param _request - unused; the list is derived from current state.
+ * @param signal - cancellation before publication.
+ * @returns visible Session summaries.
  */
 @Remote('list') async list(_request: SessionListRequest, signal: AbortSignal): Promise<SessionListValue>
 
@@ -932,13 +939,6 @@ workspaceDesktop(): { name: string; available: boolean; fileManager: 'finder' | 
  * @returns the new Session identity.
  */
 @Remote('fork') async fork(request: SessionForkRequest): Promise<SessionForkValue>
-
-/**
- * Revise the latest prompt and regenerate inside the same Session.
- * @param request - target prompt, revised text, and stable submission identity.
- * @returns acknowledgement that the revision entered the inbox.
- */
-@Remote('editLastMessage') editLastMessage(request: SessionEditLastMessageRequest): Promise<SessionPromptValue>
 
 /**
  * Admit one prompt after explicitly resuming its Session.

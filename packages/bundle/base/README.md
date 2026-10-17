@@ -27,7 +27,7 @@ Every base-backed `dsh --profile` surface runs on `dsh-base`, so those surfaces 
 
 The fork disables Goal by default in all base-backed profiles: the service, automatic rounds, model tools, and `/goal` command are inactive. Web presets also disable their Goal command/tool rows and the Goal bar. The [disabled-input plugin](../../goal/goal-round-driver/README.md#disabled-deployments) prevents queued Goal work from entering new model requests; stored Goal events remain intact.
 
-Delegation tools run in the background and reject foreground requests; the [subagent tool](../../subagent/tool-subagent/README.md#foreground-and-background-modes) owns the execution-mode configuration.
+Delegation tools run in the background and reject foreground requests; the [subagent tool](../../subagent/tool-subagent/README.md#delegation-modes) owns the execution-mode configuration.
 
 You get the dsh core automatically: the shipped `web`, `headless`, `sdk`, and `acp` profiles already include it, and a custom profile names it as its first bundle. After that, everything works with no further configuration.
 

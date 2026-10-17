@@ -228,9 +228,9 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
     methods: [
       {
         signature: 'currentInitiator(): Agent | undefined',
-        description: 'Read the Agent that initiated the inherited asynchronous driver chain. Use this optional form for logging, tracing, metrics, or host attribution that also supports agentless calls. When a parent creates a child, setup reports the causal parent while the setup callback\'s Agent parameter identifies the child.',
+        description: 'Read the Agent that initiated the inherited asynchronous driver chain. Use this optional form for logging, tracing, metrics, or host attribution that also supports agentless calls. When a parent creates a child, setup reports the causal parent while the setup callback\'s Agent parameter identifies the child. The boundary holds its Agent weakly, so a continuation that outlives every other reference to that Agent reads `undefined`.',
         parameters: [],
-        returns: 'the inherited Agent, or `undefined` outside an initiator boundary and inside an explicit clearing boundary.',
+        returns: 'the inherited Agent, or `undefined` outside an initiator boundary, inside an explicit clearing boundary, and after the inherited Agent was collected.',
         throws: ['when this service instance has been disposed.'],
       },
       {
@@ -1429,6 +1429,11 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
     description: 'The abstract `llm` service: an adapter registry plus a streaming model-call API, interceptable via the `llm/stream` waterfall.',
     methods: [
       {
+        signature: 'readonly failureRecoveryVersion: number = 1',
+        description: 'Version of the provider-neutral failure-recovery contract this Host build implements. `1` means adapter failures are normalized without losing LlmFailure.retryDisposition, the Session log and its readers retain it, and every automatic resend path of the shipping composition — the agent loop\'s `agent/request-error` decision and `dsh-llm-retry`\'s scheduling — honors it. A consumer that wires its own loop or retry executor must enforce the disposition itself; this number describes the Host that ships this service, not the caller\'s composition.\n\nConfiguration cannot raise or fake this value, and it is absent on a build that does not implement the contract, so an adapter that requires the guarantee refuses to register instead of degrading silently.',
+        parameters: [],
+      },
+      {
         signature: 'registerAdapter(providers: string[], adapter: LlmAdapter): AdapterRegistrationHandle',
         description: 'Register an adapter for the given provider routes. Throws `LlmError` with code `DUPLICATE_ADAPTER` if any provider already has an adapter (all-or-nothing). Disposed with the fiber.',
         parameters: [{ name: 'providers', description: 'every provider route this adapter should serve.' }, { name: 'adapter', description: 'the adapter that streams calls for those providers.' }],
@@ -1524,6 +1529,19 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
         description: 'Stream one model call as raw chunks (token-level deltas). Replay state is retained only when the same adapter instance owns its historical provider and the target provider. Final adapter selection remains fixed through asynchronous exact-model resolution and dispatch. Adapter selection, dispatch, and iteration failures become terminal `error` or `aborted` finish chunks; middleware, nested-call, cleanup, and consumer failures remain thrown.',
         parameters: [{ name: 'options', description: 'the full request; `options.provider` selects the adapter.' }],
         returns: 'the chunk stream, possibly wrapped by `llm/stream` listeners.',
+      },
+    ],
+  },
+  {
+    key: 'llmRequestRecord',
+    summary: 'Abstract recording service: the capability a model route depends on to publish a prepared request.',
+    description: 'Abstract recording service: the capability a model route depends on to publish a prepared request.\n\nOne implementation per context; a consumer reaches it through `ctx.inject([\'llmRequestRecord\'], …)` (a scoped dependency) or `ctx.get`, never by appending to a session itself.',
+    methods: [
+      {
+        signature: 'abstract recordPreparedRequest( context: LlmRequestRecordContext, payload: LlmRequestRecordPayload, ): Promise<LlmRequestRecordOutcome>',
+        description: 'Append one prepared request to its session\'s log and wait for that log to reach durable storage, bounded by the configured deadline.',
+        parameters: [{ name: 'context', description: 'the live session that owns the request.' }, { name: 'payload', description: 'the producer\'s observation of the request it is about to submit.' }],
+        returns: 'the recorded event\'s sequence number, or the fixed reason the producer must not send. Every condition a producer acts on arrives here as a result; this method does not reject for one.',
       },
     ],
   },
@@ -2071,10 +2089,16 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
         returns: 'the current attached state or persisted header and event prefix.',
       },
       {
+        signature: '@Remote(\'editLastMessage\') editLastMessage(request: SessionEditLastMessageRequest): Promise<SessionPromptValue>',
+        description: 'Revise the latest text prompt inside its existing Session.',
+        parameters: [{ name: 'request', description: 'Session, replacement text, and request identity.' }],
+        returns: 'the accepted prompt value of the revised continuation.',
+      },
+      {
         signature: '@Remote(\'list\') async list(_request: SessionListRequest, signal: AbortSignal): Promise<SessionListValue>',
-        description: 'Read all visible Session rows without resuming an Agent.',
-        parameters: [{ name: '_request', description: 'reserved empty list request.' }, { name: 'signal', description: 'cancellation for persistence reads and summary generation.' }],
-        returns: 'visible Session summaries ordered by activity.',
+        description: 'List Sessions this connection may read.',
+        parameters: [{ name: '_request', description: 'unused; the list is derived from current state.' }, { name: 'signal', description: 'cancellation before publication.' }],
+        returns: 'visible Session summaries.',
       },
       {
         signature: '@Remote(\'search\') async search(request: SessionSearchRequest, signal: AbortSignal): Promise<SessionSearchValue>',
@@ -2271,9 +2295,9 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
     description: 'The persisted projection cache service. Opens the `session_projcache` domain at init, checkpoints live sessions on a throttled write-behind (count/interval triggers from Config) plus three mandatory points — session creation, `turn/end`, and session disposal (the live-to-cold moment) — and serves the cached rows for a session header. Every durable write is fail-soft: failures log a warning and the cache self-heals on the next write.',
     methods: [
       {
-        signature: 'cachedSnapshot( meta: SessionHeader, keys?: readonly Extract<keyof SessionProjectionMap, string>[], ): ProjectionSnapshot | undefined',
+        signature: 'cachedSnapshot( meta: SessionHeader, keys?: readonly Extract<keyof SessionProjectionMap, string>[], excludeKeys?: ReadonlySet<string>, ): ProjectionSnapshot | undefined',
         description: 'The zero-I/O listing read: whole values viewed straight from the stored rows (version-matching keys only) of the record bound to the caller\'s lifecycle. The header is the only identity witness a listing holds, so this face matches the lifecycle identity (`formatVersion`, `createdAt`, `cwd`, `isSeeded`) and not the inherited cut: within one format generation the cut is fixed at fork time, so it distinguishes no lifecycle the other fields do not, and a viewed value never seeds a fold. The view is as stale as the last durable checkpoint but never wrong and never from an unrelated log. Its `asOfSeq` is the lowest watermark among the served rows: the stored record\'s own position, which the header cannot relate to the log the caller later opens. The Session list therefore labels the block as cached, and the client lets every value the connected Session produces supersede it whatever this number says.',
-        parameters: [{ name: 'meta', description: 'the listed session\'s header (identity witness; no log read).' }, { name: 'keys', description: 'optional projection keys required by the caller\'s audience.' }],
+        parameters: [{ name: 'meta', description: 'the listed session\'s header (identity witness; no log read).' }, { name: 'keys', description: 'optional projection keys required by the caller\'s audience.' }, { name: 'excludeKeys', description: 'keys omitted before state validation or viewing; stored rows remain available to other readers.' }],
         returns: 'the viewed block, or `undefined` when no usable row exists for this lifecycle at the current Session format.',
       },
       {
@@ -2338,9 +2362,9 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
         returns: 'the snapshot; `values` is empty when no selected client-visible unit is registered.',
       },
       {
-        signature: 'cachedSnapshot( session: Session, keys?: readonly Extract<keyof SessionProjectionMap, string>[], ): ProjectionSnapshot | undefined',
+        signature: 'cachedSnapshot( session: Session, keys?: readonly Extract<keyof SessionProjectionMap, string>[], excludeKeys?: ReadonlySet<string>, ): ProjectionSnapshot | undefined',
         description: 'Read only already-materialized client-visible cells without folding history. Values may trail the live Session and are therefore hints, not a complete baseline. Missing cells are omitted.',
-        parameters: [{ name: 'session', description: 'attached Session whose cached cells are inspected.' }, { name: 'keys', description: 'optional wire keys to view.' }],
+        parameters: [{ name: 'session', description: 'attached Session whose cached cells are inspected.' }, { name: 'keys', description: 'optional wire keys to view.' }, { name: 'excludeKeys', description: 'keys omitted before viewing; exclusions also apply to explicitly selected keys.' }],
         returns: 'the lowest common cached cut, or `undefined` when no wire cell exists.',
       },
       {
@@ -2356,9 +2380,9 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
         returns: 'the offset for the stored-log suffix read (`SessionHandle.read`), or `undefined` when no unit is registered (no read needed — {@link restore} would serve empty values regardless).',
       },
       {
-        signature: 'viewCheckpoint( checkpoint: ProjectionCheckpoint, keys?: readonly Extract<keyof SessionProjectionMap, string>[], ): Partial<SessionProjectionMap>',
+        signature: 'viewCheckpoint( checkpoint: ProjectionCheckpoint, keys?: readonly Extract<keyof SessionProjectionMap, string>[], excludeKeys?: ReadonlySet<string>, ): Partial<SessionProjectionMap>',
         description: 'View a checkpoint\'s rows without any log read: for every registered client-visible unit whose row\'s `ver` matches, serve the schema-validated `view` of the schema-validated stored state; mismatched, malformed, or absent rows leave their key absent (a cold or listing consumer treats it as not-yet-available and a fuller read path refolds it). The zero-I/O rung of the read ladder — values are as stale as their rows, never wrong.',
-        parameters: [{ name: 'checkpoint', description: 'persisted rows for one session (possibly stale or empty).' }, { name: 'keys', description: 'optional wire keys to view.' }],
+        parameters: [{ name: 'checkpoint', description: 'persisted rows for one session (possibly stale or empty).' }, { name: 'keys', description: 'optional wire keys to view.' }, { name: 'excludeKeys', description: 'keys omitted before state validation or viewing, including explicitly selected keys.' }],
         returns: 'whole values per key with a usable row; empty when none.',
       },
       {
@@ -3034,6 +3058,12 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
         description: 'Start a local or external child.',
         parameters: [{ name: 'spec', description: 'task, backend, and result recipient.' }],
         returns: 'activation with a message id only for local children.',
+      },
+      {
+        signature: 'prepareModel(name: string, requested?: AgentOptions): PreparedSubagentModel',
+        description: 'Read effective model options for tool validation. Creation resolves the current policy again. Providers without Agent-option support reject creation while the override is enabled.',
+        parameters: [{ name: 'name', description: 'registered subagent backend.' }, { name: 'requested', description: 'caller-selected options before the user override.' }],
+        returns: 'detached effective options and the applied override.',
       },
       {
         signature: 'async waitForChildren(parent: Agent): Promise<boolean>',
@@ -4070,12 +4100,28 @@ export const EVENT_API: readonly EventApiEntry[] = [
     parameters: [{ name: 'payload', description: '.message - the inserted message. Scope-filtered dispatch (`@deepseek-ai/dsh-scope`): agent-scoped listeners receive only that agent.' }],
   },
   {
+    name: 'agent/message-surface',
+    mode: 'waterfall',
+    signature: '\'agent/message-surface\'(this: Scoped<Agent>, payload: { agent: Agent; message: UserMessage }, next: () => SurfaceIntent<\'user/message\'>): SurfaceIntent<\'user/message\'>',
+    summary: 'Resolve a user\'s surface placement synchronously at durable admission.',
+    description: 'Resolve a user\'s surface placement synchronously at durable admission. The default appends. Replacements cite the current nodes they shadow.',
+    parameters: [{ name: 'payload', description: '.message - accepted message after pre-step processing.' }, { name: 'next', description: 'remaining placement listeners; the default appends. Scope-filtered dispatch (`@deepseek-ai/dsh-scope`): agent-scoped listeners receive only that agent.' }],
+  },
+  {
     name: 'agent/pre-step',
     mode: 'waterfall',
     signature: '\'agent/pre-step\'(this: Scoped<Agent>, payload: { agent: Agent; messages: UserMessage[]; turn: number; step: number; signal: AbortSignal }, next: () => Promise<PreStepDecision>): Promise<PreStepDecision>',
     summary: 'Reject a proposed step or replace the messages that enter it.',
     description: 'Reject a proposed step or replace the messages that enter it. Calling `next()` preserves the current messages.',
     parameters: [{ name: 'payload', description: '.signal - the current turn\'s cancellation signal. Scope-filtered dispatch (`@deepseek-ai/dsh-scope`): agent-scoped listeners receive only that agent.' }],
+  },
+  {
+    name: 'agent/prepare-input',
+    mode: 'waterfall',
+    signature: '\'agent/prepare-input\'(this: Scoped<Agent>, payload: { agent: Agent; messages: UserMessage[] }, next: () => void): void',
+    summary: 'Prepare claimed input synchronously before prompt assembly and pre-step processors.',
+    description: 'Prepare claimed input synchronously before prompt assembly and pre-step processors.',
+    parameters: [{ name: 'payload', description: '.messages - messages claimed for the proposed step.' }, { name: 'next', description: 'remaining input preparation listeners; the default does nothing. Scope-filtered dispatch (@deepseek-ai/dsh-scope): agent-scoped listeners receive only that agent.' }],
   },
   {
     name: 'agent/request',
@@ -4855,7 +4901,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'AssembledSection',
-    declaration: 'export interface AssembledSection {\n    name: string;\n    text: string;\n    interpolate?: boolean;\n}',
+    declaration: 'export interface AssembledSection {\n    name: string;\n    text: string;\n    interpolate?: boolean;\n    stable?: boolean;\n}',
   },
   {
     name: 'AssistantMessage',
@@ -5927,7 +5973,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'LlmFailure',
-    declaration: 'export interface LlmFailure {\n    readonly message: string;\n    readonly code: string;\n    readonly status?: number;\n    readonly providerRetryAfterMs?: number;\n    readonly requestId?: ProviderRequestId;\n    readonly offloadImages?: number;\n}',
+    declaration: 'export interface LlmFailure {\n    readonly message: string;\n    readonly code: string;\n    readonly status?: number;\n    readonly providerRetryAfterMs?: number;\n    readonly requestId?: ProviderRequestId;\n    readonly offloadImages?: number;\n    readonly retryDisposition?: \'forbid\';\n}',
   },
   {
     name: 'LlmImageRequestPrice',
@@ -5966,12 +6012,32 @@ export const TYPE_API: readonly TypeApiEntry[] = [
     declaration: 'export interface LlmReasoningEffortInfo {\n    id: ReasoningEffortId;\n    name: string;\n    description?: string;\n}',
   },
   {
+    name: 'LlmRequestRecordContext',
+    declaration: 'export interface LlmRequestRecordContext {\n    readonly sessionId: SessionId;\n}',
+  },
+  {
+    name: 'LlmRequestRecordFailureCode',
+    declaration: 'export type LlmRequestRecordFailureCode = \'REQUEST_RECORD_UNAVAILABLE\' | \'CLAUDE_REQUEST_RECORD_CONTEXT_REQUIRED\';',
+  },
+  {
+    name: 'LlmRequestRecordOutcome',
+    declaration: 'export type LlmRequestRecordOutcome = {\n    readonly ok: true;\n    readonly preparedId: SessionSeq;\n} | {\n    readonly ok: false;\n    readonly code: LlmRequestRecordFailureCode;\n};',
+  },
+  {
+    name: 'LlmRequestRecordPayload',
+    declaration: 'export interface LlmRequestRecordPayload {\n    readonly provider: \'claude\';\n    readonly model: string;\n    readonly purpose: LlmRequestRecordPurpose;\n    readonly systemBlocks: readonly string[];\n    readonly wireLibrary: string;\n    readonly profile: string;\n}',
+  },
+  {
+    name: 'LlmRequestRecordPurpose',
+    declaration: 'export type LlmRequestRecordPurpose = NonNullable<GenerateOptions[\'purpose\']> | \'conversation\';',
+  },
+  {
     name: 'LlmResolvedModelInfo',
     declaration: 'export interface LlmResolvedModelInfo extends LlmModelInfo {\n    context?: LlmModelContext;\n    defaultMaxTokens?: number;\n    reasoning?: LlmModelReasoningInfo;\n    systemPromptUpdate?: SystemPromptUpdate;\n    toolUpdate?: ToolUpdate;\n}',
   },
   {
     name: 'LlmRuntime',
-    declaration: 'export class LlmRuntime extends TypertRemoteService {\n    constructor(ctx: Context);\n    registerAdapter(providers: string[], adapter: LlmAdapter): AdapterRegistrationHandle;\n    @Remote\n    listProviders(): LlmProviderInfo[];\n    registerConfigurableProviders(entries: readonly LlmConfigurableProvider[]): DirectoryRegistrationHandle;\n    @Remote\n    listConfigurableProviders(): LlmConfigurableProvider[];\n    registerModelDiscovery(settingsNs: string, discover: (request: LlmModelDiscoveryRequest, signal?: AbortSignal) => Promise<readonly LlmDiscoveredModel[]>): () => void;\n    async discoverModels(settingsNs: string, request: LlmModelDiscoveryRequest, signal?: AbortSignal): Promise<LlmDiscoveredModel[]>;\n    @Remote(\'discoverModels\')\n    async remoteDiscoverModels(settingsNs: string, request: LlmModelDiscoveryRequest, signal: AbortSignal): Promise<LlmDiscoveredModel[]>;\n    providerRetryPolicy(provider: string): ResolvedRetryPolicy;\n    imageRequestPricing(provider: string, model: string): LlmImageRequestPricing | undefined;\n    imageRequestTarget(provider: string, model: string, image: ImageAttachmentRef): ImageRequestTarget;\n    fileRequestText(ref: FileAttachmentRef): string;\n    async listModels(provider: string): Promise<LlmModelInfo[]>;\n    async resolveModelInfo(provider: string, model: string, signal?: AbortSignal): Promise<LlmResolvedModelInfo>;\n    async resolveCallConfig(config: LlmCallConfig, signal?: AbortSignal): Promise<LlmCallConfig>;\n    async prepareCall(conf /* …truncated — full shape in source */',
+    declaration: 'export class LlmRuntime extends TypertRemoteService {\n    readonly failureRecoveryVersion: number;\n    constructor(ctx: Context);\n    registerAdapter(providers: string[], adapter: LlmAdapter): AdapterRegistrationHandle;\n    @Remote\n    listProviders(): LlmProviderInfo[];\n    registerConfigurableProviders(entries: readonly LlmConfigurableProvider[]): DirectoryRegistrationHandle;\n    @Remote\n    listConfigurableProviders(): LlmConfigurableProvider[];\n    registerModelDiscovery(settingsNs: string, discover: (request: LlmModelDiscoveryRequest, signal?: AbortSignal) => Promise<readonly LlmDiscoveredModel[]>): () => void;\n    async discoverModels(settingsNs: string, request: LlmModelDiscoveryRequest, signal?: AbortSignal): Promise<LlmDiscoveredModel[]>;\n    @Remote(\'discoverModels\')\n    async remoteDiscoverModels(settingsNs: string, request: LlmModelDiscoveryRequest, signal: AbortSignal): Promise<LlmDiscoveredModel[]>;\n    providerRetryPolicy(provider: string): ResolvedRetryPolicy;\n    imageRequestPricing(provider: string, model: string): LlmImageRequestPricing | undefined;\n    imageRequestTarget(provider: string, model: string, image: ImageAttachmentRef): ImageRequestTarget;\n    fileRequestText(ref: FileAttachmentRef): string;\n    async listModels(provider: string): Promise<LlmModelInfo[]>;\n    async resolveModelInfo(provider: string, model: string, signal?: AbortSignal): Promise<LlmResolvedModelInfo>;\n    async resolveCallConfig(config: LlmCallConfig, signal?: AbortSignal): Promi /* …truncated — full shape in source */',
   },
   {
     name: 'LocalAtInput',
@@ -6211,7 +6277,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'MessageSourceMap',
-    declaration: 'export interface MessageSourceMap {\n    user: {\n        kind: \'user\';\n    };\n    model: ModelMessageSource;\n    tool: ToolMessageSource;\n    \'system-prompt\': SystemPromptMessageSource;\n}',
+    declaration: 'export interface MessageSourceMap {\n    user: UserMessageSource;\n    model: ModelMessageSource;\n    tool: ToolMessageSource;\n    \'system-prompt\': SystemPromptMessageSource;\n}',
   },
   {
     name: 'ModDefinition',
@@ -6470,6 +6536,10 @@ export const TYPE_API: readonly TypeApiEntry[] = [
     declaration: 'export interface PreparedReferencedMessage {\n    content: ContentBlock[];\n    additionalContext?: UserMessage;\n}',
   },
   {
+    name: 'PreparedSubagentModel',
+    declaration: 'export interface PreparedSubagentModel {\n    readonly agentOptions: AgentOptions | undefined;\n    readonly override: SubagentModelOverride | null;\n}',
+  },
+  {
     name: 'PrepareSessionOptions',
     declaration: 'export type PrepareSessionOptions = (CreateSessionOptions & {\n    readonly eventState?: undefined;\n}) | RestoredSessionOptions;',
   },
@@ -6563,7 +6633,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'PromptSection',
-    declaration: 'export interface PromptSection {\n    readonly name: string;\n    readonly order: number;\n    readonly text: string | ((context: AssembleContext) => string);\n    readonly interpolate?: boolean;\n    readonly complete?: boolean;\n}',
+    declaration: 'export interface PromptSection {\n    readonly name: string;\n    readonly order: number;\n    readonly text: string | ((context: AssembleContext) => string);\n    readonly interpolate?: boolean;\n    readonly complete?: boolean;\n    readonly stable?: boolean;\n}',
   },
   {
     name: 'PromptSectionOrderName',
@@ -6803,7 +6873,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'ResolvedRetryBackoff',
-    declaration: 'export interface ResolvedRetryBackoff {\n    readonly initialDelayMs: number;\n    readonly maxDelayMs: number;\n    readonly jitterRatio: number;\n}',
+    declaration: 'export interface ResolvedRetryBackoff {\n    readonly initialDelayMs: number;\n    readonly maxDelayMs: number;\n    readonly providerWaitMaxMs: number;\n    readonly jitterRatio: number;\n}',
   },
   {
     name: 'ResolvedRetryPolicy',
@@ -7072,6 +7142,10 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   {
     name: 'SessionCreateValue',
     declaration: 'export interface SessionCreateValue {\n    readonly sessionId: SessionId;\n    readonly agentPreset?: string;\n}',
+  },
+  {
+    name: 'SessionEditLastMessageRequest',
+    declaration: 'export interface SessionEditLastMessageRequest {\n    readonly sessionId: SessionId;\n    readonly seq: number;\n    readonly text: string;\n    readonly requestId: SessionRequestId;\n}',
   },
   {
     name: 'SessionEndInput',
@@ -7854,6 +7928,10 @@ export const TYPE_API: readonly TypeApiEntry[] = [
     declaration: 'export type SubagentListEntry = SubagentCatalogRow & {\n    readonly kind: \'child\';\n    readonly hasChildren: boolean;\n} | {\n    readonly kind: \'diagnostic\';\n    readonly id: SessionId;\n    readonly reason: \'corrupt\' | \'unsupported\' | \'unavailable\';\n};',
   },
   {
+    name: 'SubagentModelOverride',
+    declaration: 'export interface SubagentModelOverride {\n    readonly provider: string;\n    readonly model: string;\n    readonly reasoningEffort?: string;\n}',
+  },
+  {
     name: 'SubagentPromptReceipt',
     declaration: 'export interface SubagentPromptReceipt {\n    readonly messageId: MessageId;\n}',
   },
@@ -7891,7 +7969,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'SubagentRuntime',
-    declaration: 'export class SubagentRuntime extends TypertRemoteService {\n    static Config;\n    static inject;\n    constructor(ctx: Context, private config: Config);\n    resolveMaxDepth(configured?: number | \'provider-managed\'): number | undefined;\n    startActivation(spec: SubagentActivationSpec & {\n        readonly childId: SessionId;\n    }): Promise<SubagentActivation & {\n        readonly messageId: MessageId;\n    }>;\n    startActivation(spec: SubagentActivationSpec): Promise<SubagentActivation>;\n    async startActivation(spec: SubagentActivationSpec): Promise<SubagentActivation>;\n    async waitForChildren(parent: Agent): Promise<boolean>;\n    async sendMessage(sender: Agent, targetId: SessionId, content: ContentBlock[], options: SubagentSendMessageOptions): Promise<MessageId>;\n    interrupt(targetSessionId: SessionId, authority: SubagentInterruptAuthority): void;\n    async drainDescendants(parents: readonly Agent[]): Promise<void>;\n    async drainChildren(parent: Agent, childIds: readonly SessionId[]): Promise<void>;\n    listChildren(parentSessionId: SessionId, signal?: AbortSignal): Promise<SubagentCatalogEntry[]>;\n    listDescendants(rootSessionId: SessionId, signal?: AbortSignal): Promise<SubagentDescendantListEntry[]>;\n    @Remote(\'prompt\')\n    async prompt(request: SubagentPromptRequest, signal: AbortSignal): Promise<SubagentPromptReceipt>;\n    @Remote(\'interruptByParent\')\n    interruptByParent(childSessionId: SessionId, parentSessionId: SessionId, mode: \'continuable\'): SubagentIn /* …truncated — full shape in source */',
+    declaration: 'export class SubagentRuntime extends TypertRemoteService {\n    static Config;\n    static inject;\n    constructor(ctx: Context, private config: Config);\n    resolveMaxDepth(configured?: number | \'provider-managed\'): number | undefined;\n    startActivation(spec: SubagentActivationSpec & {\n        readonly childId: SessionId;\n    }): Promise<SubagentActivation & {\n        readonly messageId: MessageId;\n    }>;\n    startActivation(spec: SubagentActivationSpec): Promise<SubagentActivation>;\n    async startActivation(spec: SubagentActivationSpec): Promise<SubagentActivation>;\n    prepareModel(name: string, requested?: AgentOptions): PreparedSubagentModel;\n    async waitForChildren(parent: Agent): Promise<boolean>;\n    async sendMessage(sender: Agent, targetId: SessionId, content: ContentBlock[], options: SubagentSendMessageOptions): Promise<MessageId>;\n    interrupt(targetSessionId: SessionId, authority: SubagentInterruptAuthority): void;\n    async drainDescendants(parents: readonly Agent[]): Promise<void>;\n    async drainChildren(parent: Agent, childIds: readonly SessionId[]): Promise<void>;\n    listChildren(parentSessionId: SessionId, signal?: AbortSignal): Promise<SubagentCatalogEntry[]>;\n    listDescendants(rootSessionId: SessionId, signal?: AbortSignal): Promise<SubagentDescendantListEntry[]>;\n    @Remote(\'prompt\')\n    async prompt(request: SubagentPromptRequest, signal: AbortSignal): Promise<SubagentPromptReceipt>;\n    @Remote(\'interruptByParent\')\n    interruptByParent(childS /* …truncated — full shape in source */',
   },
   {
     name: 'SubagentSendMessageOptions',
@@ -7903,7 +7981,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'SubagentStartRequest',
-    declaration: 'export interface SubagentStartRequest {\n    readonly cwd?: string;\n    readonly agentPreset?: string;\n    readonly label?: string;\n    readonly prompt: ContentBlock[];\n    readonly parent: Agent;\n    readonly signal: AbortSignal;\n    readonly agentOptions?: AgentOptions;\n    readonly outputSchema?: ObjectJsonSchema;\n    readonly maxDepth?: number;\n}',
+    declaration: 'export interface SubagentStartRequest {\n    readonly cwd?: string;\n    readonly agentPreset?: string;\n    readonly label?: string;\n    readonly prompt: ContentBlock[];\n    readonly parent: Agent;\n    readonly signal: AbortSignal;\n    readonly agentOptions?: AgentOptions;\n    readonly inheritReasoningEffort?: boolean;\n    readonly outputSchema?: ObjectJsonSchema;\n    readonly maxDepth?: number;\n}',
   },
   {
     name: 'SubagentStopReason',
@@ -8279,7 +8357,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'ToolOutputDefinition',
-    declaration: 'export interface ToolOutputDefinition {\n    readonly schema: JsonSchemaNode;\n    render(args: unknown, value: JsonValue): ContentBlock[];\n    presentationMeta?(args: unknown, value: JsonValue): JsonValue;\n}',
+    declaration: 'export interface ToolOutputDefinition {\n    readonly schema: JsonSchemaNode;\n    render(args: unknown, value: JsonValue): ContentBlock[];\n    presentationMeta?(args: unknown, value: JsonValue): JsonValue | undefined;\n}',
   },
   {
     name: 'ToolPresentationMode',
@@ -8548,6 +8626,10 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   {
     name: 'UserMessage',
     declaration: 'export interface UserMessage extends MessageBase {\n    readonly role: \'user\';\n}',
+  },
+  {
+    name: 'UserMessageSource',
+    declaration: 'export interface UserMessageSource {\n    readonly kind: \'user\';\n}',
   },
   {
     name: 'VerifiedWebhookDelivery',

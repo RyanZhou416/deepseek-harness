@@ -101,6 +101,8 @@ interface SubagentStartRequest {
    * before initializing the separate child runtime.
    */
   readonly agentOptions?: AgentOptions
+  /** Whether an omitted reasoning effort may inherit from the parent; defaults to true. Requires agentOptions capability. */
+  readonly inheritReasoningEffort?: boolean
   /**
    * Object-rooted JSON Schema within `assertObjectJsonSchema`'s enforced subset. Start rejects
    * unsupported schemas or providers without the capability. Data must be plain host-realm JSON;
@@ -447,6 +449,15 @@ startActivation(spec: SubagentActivationSpec & { readonly childId: SessionId }):
 startActivation(spec: SubagentActivationSpec): Promise<SubagentActivation>
 
 /**
+ * Read effective model options for tool validation. Creation resolves the current policy again.
+ * Providers without Agent-option support reject creation while the override is enabled.
+ * @param name - registered subagent backend.
+ * @param requested - caller-selected options before the user override.
+ * @returns detached effective options and the applied override.
+ */
+prepareModel(name: string, requested?: AgentOptions): PreparedSubagentModel
+
+/**
  * Join progressing descendants without cancelling them. Idle descendants whose
  * inboxes require a later wake stay resident and do not delay host completion.
  * @param parent - the exact parent whose descendant work is observed.
@@ -600,7 +611,7 @@ getProvider(name: string): SubagentProvider | undefined
 list(): string[]
 ```
 
-Types: [Agent](core.zh.md) · [ContentBlock](llm-streaming.zh.md) · [MessageId](llm-streaming.zh.md) · [SessionId](core.zh.md)
+Types: [Agent](core.zh.md) · [AgentOptions](core.zh.md) · [ContentBlock](llm-streaming.zh.md) · [MessageId](llm-streaming.zh.md) · [SessionId](core.zh.md)
 
 Source: [`packages/subagent/subagent/src/index.ts`](../../packages/subagent/subagent/src/index.ts)
 

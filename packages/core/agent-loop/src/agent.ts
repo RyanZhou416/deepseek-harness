@@ -16,7 +16,7 @@ import type {
   RequestErrorAction,
 } from '@deepseek-ai/dsh-agent'
 import { agentEvents, assembleContextFor } from '@deepseek-ai/dsh-agent'
-import type { GenerateOptions, LlmCallConfig, Message, PreparedLlmCall } from '@deepseek-ai/dsh-llm'
+import type { GenerateOptions, LlmCallConfig, Message, PreparedLlmCall, SystemPromptSection } from '@deepseek-ai/dsh-llm'
 import {
   LlmError,
   createAssistantMessage,
@@ -29,7 +29,7 @@ import type { Scope } from '@deepseek-ai/dsh-scope'
 import { createScope } from '@deepseek-ai/dsh-scope'
 import type { EpochHeader, RequestContext, Session, SessionId, SessionSeq, TurnEndReason, UserMessage } from '@deepseek-ai/dsh-session'
 import { canonicalHeader, headerEquals, ToolCallRecovery } from '@deepseek-ai/dsh-session'
-import { joinContextSections, renderContextSections, renderPrompt } from '@deepseek-ai/dsh-system-prompt'
+import { joinContextSections, renderContextSections, renderPrompt, renderPromptSections } from '@deepseek-ai/dsh-system-prompt'
 import type { PromptAssembly } from '@deepseek-ai/dsh-system-prompt'
 import type {} from '@deepseek-ai/dsh-session-projection'
 import { FiberState, type Context } from '@deepseek-ai/cordis'
@@ -449,6 +449,11 @@ export class ReactLoopAgent implements Agent {
 
     const { assembly } = decision
     const renderedPrompt = renderPrompt(assembly)
+    // The same sections the render joined, kept identifiable so an adapter can group shared
+    // text ahead of session-specific text without re-deriving the grouping from prose.
+    const promptSections = Object.freeze(
+      renderPromptSections(assembly).map(section => Object.freeze({ ...section })),
+    )
     let firstAttempt = true
     while (true) {
       const { config, preparedCall } = await this.prepareRequest(turn, step, signal)
@@ -486,7 +491,7 @@ export class ReactLoopAgent implements Agent {
         this.session.append('user/message', context, { surfaceOp: 'append' })
       }
       firstAttempt = false
-      const request = this.buildRequest(config, preparedCall, assembly.tools, { turn, step }, startsRequestSeries, signal)
+      const request = this.buildRequest(config, preparedCall, assembly.tools, { turn, step }, startsRequestSeries, signal, promptSections)
       const live = new AssistantStreamAttempt(
         this.session.id,
         ++this.assistantAttemptCounter,
@@ -673,6 +678,7 @@ export class ReactLoopAgent implements Agent {
     position: { turn: number; step: number },
     startsRequestSeries: boolean,
     signal: AbortSignal,
+    promptSections: readonly SystemPromptSection[],
   ): GenerateOptions {
     const { session } = this
     const surfaceGeneration = session.surface.contentGeneration
@@ -750,6 +756,7 @@ export class ReactLoopAgent implements Agent {
       messages: boundaryMessages,
       toolHistory: session.toolHistory(),
       ...header.tools !== undefined ? { tools: header.tools } : {},
+      ...promptSections.length > 0 ? { systemSections: promptSections } : {},
       sessionId: this.session.id,
       signal,
     }))
