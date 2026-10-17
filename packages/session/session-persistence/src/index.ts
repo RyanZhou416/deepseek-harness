@@ -122,6 +122,41 @@ export interface SessionPersistenceListOptions {
   readonly excludeSubagentSessions?: boolean
 }
 
+/**
+ * One contiguous history window read from a stored generation without
+ * materializing the complete Session.
+ *
+ * The window is intended for read-only history opening and backwards paging.
+ * It validates the selected frames and each returned row, not the complete
+ * log's cross-event relationships; callers that need exact replay validation
+ * (resume, write, export) keep using `open` and the full read path.
+ */
+export interface SessionWindow {
+  /** Detached header of the generation the window came from. */
+  readonly header: SessionHeader
+  /** Exact fork-inherited event count paired with {@link header}. */
+  readonly inheritedEventCount: SessionLogOffset
+  /** Contiguous durable events, oldest first. */
+  readonly events: readonly SessionEvent[]
+  /** Last durable seq represented by {@link events}; `-1` for an empty window. */
+  readonly cursor: number
+  /** Whether events with a seq below the first returned event still exist. */
+  readonly hasMore: boolean
+}
+
+/** Options for {@link SessionPersistence.readWindow}. */
+export interface SessionWindowRequest {
+  /** Optional cancellation for index and frame reads. */
+  readonly signal?: AbortSignal
+  /**
+   * Return events ending below this seq; omitted reads the newest window.
+   * A window never includes the `beforeSeq` event itself.
+   */
+  readonly beforeSeq?: number
+  /** Upper bound on returned events; the backend applies its own default. */
+  readonly maxEvents?: number
+}
+
 declare module '@deepseek-ai/cordis' {
   interface Context {
     sessionPersistence: SessionPersistence
@@ -215,6 +250,20 @@ export abstract class SessionPersistence extends Service {
    * @returns one snapshot per stored session.
    */
   abstract list(options?: SessionPersistenceListOptions): Promise<readonly SessionPersistenceSnapshot[]>
+
+  /**
+   * Read one bounded history window from a stored generation.
+   *
+   * Optional capability: backends without a random-access generation index
+   * omit it, and consumers must fall back to `open` plus a full read. An
+   * implementation returns `undefined` when it cannot establish a validated
+   * window (missing or stale index, unsupported format, concurrent change),
+   * never a partially validated guess.
+   * @param id - the stored session to read.
+   * @param request - optional cancellation, upper bound, and backwards cursor.
+   * @returns the contiguous window, or `undefined` when the backend cannot serve one.
+   */
+  readWindow?(id: SessionId, request?: SessionWindowRequest): Promise<SessionWindow | undefined>
 }
 
 export default SessionPersistence

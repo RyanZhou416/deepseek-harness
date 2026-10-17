@@ -772,6 +772,54 @@ describe('SessionProjectionCache listing read', () => {
     expect(cache.cachedSnapshot(headerOf(SessionId('malformed'))))
       .toBeUndefined()
   })
+
+  it('serves a window header the last checkpoint cut, never the live log end', async () => {
+    const { ctx, cache } = await harness()
+    const id = SessionId('window-opening-cut')
+    const created = whenWritten(ctx, id)
+    const session = ctx.sessions.create(id)
+    await created
+    mark(session, ['checkpointed'])
+    const written = whenWritten(ctx, id)
+    const checkpointSeq = endTurn(session).seq
+    await written
+    // Throttled behind the checkpoint: folded live, never written.
+    mark(session, ['after-checkpoint'])
+    // A window read holds a detached header parsed from the stored generation,
+    // not the live Session.
+    const storedHeader: SessionHeader = structuredClone(session.header)
+
+    const baseline = cache.cachedSnapshot(storedHeader)
+
+    // The opening baseline is the checkpoint's own fold cut — the durable
+    // cursor when it was written — and stays below the live log end. History
+    // forwards this number unchanged: a checkpoint baseline, not the window's
+    // cut.
+    expect(baseline).toEqual({
+      asOfSeq: checkpointSeq,
+      values: { 'cache-test/marks': { marks: ['checkpointed'] } },
+    })
+    expect(baseline?.asOfSeq).toBeLessThan(session.seq - 1)
+  })
+
+  it('serves only state-validated rows and sets the watermark from served rows', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-projcache-'))
+    roots.push(root)
+    await seedRecord(root, 'window-partial', {
+      'cache-test/marks': { ver: 1, seq: SessionSeq(2), val: { marks: ['usable'] } },
+      'cache-test/marks3': { ver: 99, seq: SessionSeq(7), val: { marks: ['other-version'] } },
+    })
+    const { ctx, cache } = await harness({ root })
+    ctx.sessionProjections.register(marks3Unit)
+
+    // A row written under another unit stateVersion is not served, and the
+    // returned watermark covers only served rows. A consumer that reads an
+    // omitted key as absence at the cut misreads this block.
+    expect(cache.cachedSnapshot(headerOf(SessionId('window-partial')))).toEqual({
+      asOfSeq: 2,
+      values: { 'cache-test/marks': { marks: ['usable'] } },
+    })
+  })
 })
 
 describe('SessionProjectionCache cold-read seeding', () => {

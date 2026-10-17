@@ -25,8 +25,13 @@ export const releasedV4SessionFormatCodec = Object.freeze({
   decodeHeader(value: unknown) {
     return { ...releasedV2SessionFormatCodec.decodeHeader(physicalV2(value)), version: 4 }
   },
-  createDecoder(value, recovery) {
-    const decoder = releasedV2SessionFormatCodec.createDecoder(physicalV2(value), recovery)
+  createDecoder(value, recovery, start?: {
+    readonly rowIndex?: number
+    readonly eventCount?: number
+    readonly inheritedEventCount?: number
+    readonly partial?: boolean
+  }) {
+    const decoder = releasedV2SessionFormatCodec.createDecoder(physicalV2(value), recovery, start)
     return {
       ...decoder,
       header: { ...decoder.header, version: 4 },

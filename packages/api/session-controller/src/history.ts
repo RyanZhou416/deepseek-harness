@@ -15,7 +15,9 @@ import type {
   SessionLogOffset as SessionLogOffsetType,
   SessionSeqCursor,
 } from '@deepseek-ai/dsh-session'
-import { SessionQueryError, type SessionObservation } from '@deepseek-ai/dsh-session-query'
+import type { SessionWindow, SessionWindowRequest } from '@deepseek-ai/dsh-session-persistence'
+import { SessionQueryError, type SessionObservation, type SessionWindowRead } from '@deepseek-ai/dsh-session-query'
+import { interruptedTurnClosers } from '@deepseek-ai/dsh-session'
 import type {} from '@deepseek-ai/dsh-subagent'
 import { RemoteError } from '@deepseek-ai/dsh-typert-protocol'
 import type { JsonValue } from '@deepseek-ai/dsh-util-values'
@@ -37,6 +39,10 @@ import { SessionAssistantStreamAccumulator } from './assistant-stream.ts'
 
 const DEFAULT_MAX_MESSAGES = 50
 const MESSAGE_TYPES = new Set(['user/message', 'assistant/message'])
+/** Largest event count one bounded stored-history window read may request. */
+const SESSION_WINDOW_MAX_EVENTS = 10_000
+/** Smallest event budget one message-aligned page requests beyond its tail alignment span. */
+const SESSION_WINDOW_MIN_EVENTS = 2_000
 
 interface FollowOpening {
   readonly frame: Extract<SessionFollowFrame, { readonly type: 'snapshot' }>
@@ -91,6 +97,12 @@ export class SessionHistoryController {
     const beforeSeq = request.beforeSeq === undefined
       ? undefined
       : SessionLogOffset(request.beforeSeq)
+    // Live Sessions and gap repairs keep the existing source path without an extra async hop.
+    const windowSessionId = this.windowSessionId(request.address)
+    const windowPage = windowSessionId === undefined || (throughSeq >= 0 && beforeSeq === undefined)
+      ? undefined
+      : await this.pageFromWindow(windowSessionId, request, throughSeq, beforeSeq, signal)
+    if (windowPage !== undefined) return windowPage
     using source = await this.sourceFor(request.address, signal, false)
     signal.throwIfAborted()
     const sourceLog = source.events
@@ -118,6 +130,110 @@ export class SessionHistoryController {
       records,
       hasMore: page.hasMore,
     }
+  }
+
+  /**
+   * Serve one page from a bounded stored window when the Session is not live.
+   *
+   * Only the empty tail cut (`throughSeq === -1`) and older pages (`beforeSeq`)
+   * take this path: those cuts need no dense-array probe of the complete log.
+   * An older-page window ends at `throughSeq`, so its tail proves the requested
+   * cut's dense anchor. Returns undefined when the complete source must answer.
+   * @param sessionId - non-live Session addressed by the request.
+   * @param request - validated page request.
+   * @param throughSeq - inclusive cut derived from the request.
+   * @param beforeSeq - exclusive end of the requested page, when present.
+   * @param signal - caller cancellation for the window read.
+   * @returns the message-aligned page, or undefined to use the complete source.
+   */
+  private async pageFromWindow(
+    sessionId: SessionId,
+    request: SessionPageRequest,
+    throughSeq: SessionSeqCursor,
+    beforeSeq: SessionLogOffsetType | undefined,
+    signal: AbortSignal,
+  ): Promise<SessionPage | undefined> {
+    const older = throughSeq >= 0
+    const end = Math.min(throughSeq + 1, beforeSeq ?? throughSeq + 1)
+    const read = await this.readStoredWindow(sessionId, older
+      ? {
+        beforeSeq: throughSeq + 1,
+        signal,
+        maxEvents: windowEventBound(request, throughSeq + 1 - end),
+      }
+      : { signal, maxEvents: 1 })
+    if (read === undefined) return undefined
+    this.validateWindow(request.address, read.window, read.projections)
+    // A negative cut ends before every event, so the validated page is empty.
+    if (!older) return { records: [], hasMore: false }
+    const sourceCursor: SessionSeqCursor = SessionSeq(read.window.cursor)
+    if (throughSeq > sourceCursor) {
+      throw new RemoteError(
+        'gateway/bad-request',
+        `session page through seq ${String(throughSeq)} is past cursor ${String(sourceCursor)}`,
+        {},
+      )
+    }
+    // The window tail is the requested dense anchor; anything else needs the complete log.
+    if (read.window.events.at(-1)?.seq !== throughSeq) return undefined
+    const page = paginateSlice(
+      read.window.events,
+      SessionLogOffset(read.window.events[0]?.seq ?? read.window.cursor + 1),
+      SessionLogOffset(end),
+      request.maxMessages ?? DEFAULT_MAX_MESSAGES,
+      request.turnWindow,
+    )
+    if (page === undefined) return undefined
+    return {
+      records: pageRecords(page.events),
+      hasMore: page.hasMore,
+    }
+  }
+
+  /**
+   * Read one bounded stored window, mapping a missing Session to the complete
+   * source path's canonical not-found handling.
+   * @param sessionId - stored Session to read.
+   * @param request - bounded window request.
+   * @returns the validated window and checkpoint, or undefined to fall back.
+   */
+  private async readStoredWindow(
+    sessionId: SessionId,
+    request: SessionWindowRequest,
+  ): Promise<SessionWindowRead | undefined> {
+    try {
+      return await this.ctx.sessionQuery.readWindow(sessionId, request)
+    } catch (error: unknown) {
+      if (error instanceof SessionQueryError && error.code === 'SESSION_QUERY_SESSION_NOT_FOUND') {
+        return undefined
+      }
+      throw error
+    }
+  }
+
+  /**
+   * Resolve a non-live ordinary Session address the bounded window path may serve.
+   * @param address - durable history address.
+   * @returns the addressed Session id, or undefined when the complete source is required.
+   */
+  private windowSessionId(address: SessionAddress): SessionId | undefined {
+    if (address.kind !== 'session') return undefined
+    return this.ctx.sessions.get(address.sessionId) === undefined ? address.sessionId : undefined
+  }
+
+  /**
+   * Validate a stored window header exactly as a complete observation.
+   * @param address - durable history address being served.
+   * @param window - stored window whose header identifies the generation.
+   * @param projections - checkpoint baseline, when the window path carries one.
+   */
+  private validateWindow(
+    address: SessionAddress,
+    window: SessionWindow,
+    projections: SessionWindowRead['projections'],
+  ): void {
+    if (window.header.cwd === undefined) rejectNotFound(address)
+    validateAddress(address, window.header, window.inheritedEventCount, projections)
   }
 
   /**
@@ -255,6 +371,12 @@ export class SessionHistoryController {
     signal: AbortSignal,
     ordinal: () => number,
   ): Promise<FollowOpening> {
+    // Live Sessions keep the existing source path without an extra async hop.
+    const windowSessionId = this.windowSessionId(request.address)
+    const windowOpening = windowSessionId === undefined
+      ? undefined
+      : await this.openWindow(windowSessionId, request, signal, ordinal)
+    if (windowOpening !== undefined) return windowOpening
     using source = await this.sourceFor(request.address, signal, true)
     const events = source.events
     signal.throwIfAborted()
@@ -283,6 +405,65 @@ export class SessionHistoryController {
       ...request.address.kind === 'session' && source.source === 'prepared'
         ? { promotion: source.retain() }
         : {},
+    }
+  }
+
+  /**
+   * Build the opening frame from one bounded stored window when the Session is
+   * not live and the persistence index can serve it.
+   *
+   * The window carries a projection checkpoint, never an exact cut, so a read
+   * without one falls back to the complete observation rather than inventing
+   * projection values. No prepared historical Session is materialized here.
+   * @param sessionId - non-live Session addressed by the request.
+   * @param request - follow request and caller history limits.
+   * @param signal - stream cancellation.
+   * @param ordinal - current assistant-stream frame watermark.
+   * @returns the complete opening, or undefined to use the exact source.
+   */
+  private async openWindow(
+    sessionId: SessionId,
+    request: SessionFollowRequest,
+    signal: AbortSignal,
+    ordinal: () => number,
+  ): Promise<FollowOpening | undefined> {
+    const read = await this.readStoredWindow(sessionId, {
+      signal,
+      maxEvents: windowEventBound(request, 0),
+    })
+    if (read === undefined || read.projections === undefined) return undefined
+    signal.throwIfAborted()
+    this.validateWindow(request.address, read.window, read.projections)
+    // The complete observation balances an interrupted final turn with in-memory
+    // closers; a tail window must present the same transcript shape.
+    const events = [...read.window.events, ...interruptedTurnClosers(read.window.events)]
+    const cursor = SessionSeq(events.at(-1)?.seq ?? -1)
+    const page = paginateSlice(
+      events,
+      SessionLogOffset(events[0]?.seq ?? cursor + 1),
+      SessionLogOffset(cursor + 1),
+      request.maxMessages ?? DEFAULT_MAX_MESSAGES,
+      request.turnWindow,
+    )
+    if (page === undefined) return undefined
+    const assistantStream = request.assistantStream === true
+      ? this.assistantStreams.get(sessionId)?.snapshot() ?? { revision: 0 }
+      : undefined
+    // The accumulator snapshot and this watermark are synchronous. Frames
+    // through the cut are represented or superseded by that baseline.
+    const assistantStreamOrdinalCut = ordinal()
+    return {
+      frame: {
+        type: 'snapshot',
+        header: wireHeader(read.window.header),
+        cursor,
+        records: pageRecords(page.events),
+        hasMore: page.hasMore,
+        projections: projectionBlock(read.projections),
+        ...assistantStream === undefined ? {} : { assistantStream },
+      },
+      cursor,
+      assistantStreamOrdinalCut,
     }
   }
 
@@ -443,15 +624,49 @@ function paginate(
   turnWindow?: SessionPageRequest['turnWindow'],
 ): { readonly events: SessionEvent[]; readonly hasMore: boolean } {
   const end = SessionLogOffset(Math.min(throughSeq + 1, beforeSeq ?? throughSeq + 1))
+  const page = paginateSlice(events, SessionLogOffset(0), end, maxMessages, turnWindow)
+  /* v8 ignore next 3 -- A complete log starts at seq 0, so its cut never falls below the slice. */
+  if (page === undefined) {
+    throw new RemoteError('gateway/internal', 'complete session log pagination fell below its start', {})
+  }
+  return page
+}
+
+/**
+ * Cut one message-aligned page from a contiguous event slice that may begin
+ * above seq 0.
+ *
+ * Returns undefined when the cut or a cited source event falls below the slice,
+ * because only the complete log can answer that page. `hasMore` follows the
+ * complete-log rule: the page does not start at the log's first event.
+ * @param events - contiguous durable events.
+ * @param baseSeq - absolute seq of `events[0]`.
+ * @param endSeq - exclusive absolute end of the page.
+ * @param maxMessages - message budget that stops the backwards scan.
+ * @param turnWindow - optional Turn alignment minima.
+ * @returns the page, or undefined when the slice cannot cover its cut.
+ */
+function paginateSlice(
+  events: readonly SessionEvent[],
+  baseSeq: SessionLogOffsetType,
+  endSeq: SessionLogOffsetType,
+  maxMessages: number,
+  turnWindow?: SessionPageRequest['turnWindow'],
+): { readonly events: SessionEvent[]; readonly hasMore: boolean } | undefined {
+  const end = endSeq - baseSeq
+  // An empty tail cut at seq 0 is a real page; any other empty slice hides the cut below it.
+  if (end < 0 || (end === 0 && endSeq > 0)) return undefined
   let count = 0
   let turns = 0
-  let cut = SessionLogOffset(0)
+  let cut = baseSeq
+  let resolved = false
   for (let index = end - 1; index >= 0; index--) {
     const event = events[index] as SessionEvent
     if (turnWindow !== undefined && event.type === 'turn/start') {
       turns++
       if (count >= turnWindow.minMessages && turns >= turnWindow.minTurns) {
-        cut = SessionLogOffset(index)
+        cut = SessionLogOffset(event.seq)
+        resolved = true
         break
       }
     }
@@ -464,12 +679,33 @@ function paginate(
         if (source < groupStart) groupStart = source
       }
     }
+    if (groupStart < baseSeq) return undefined
     if (count >= maxMessages) {
       cut = SessionLogOffset(groupStart)
+      resolved = true
       break
     }
   }
-  return { events: events.slice(cut, end), hasMore: cut > 0 }
+  if (!resolved && baseSeq > 0) return undefined
+  return { events: events.slice(cut - baseSeq, end), hasMore: cut > 0 }
+}
+
+/**
+ * Events one bounded window request must cover for a message-aligned page.
+ * @param request - caller history limits.
+ * @param span - events between the window tail and the page's absolute end.
+ * @returns the bounded `maxEvents` to request from persistence.
+ */
+function windowEventBound(
+  request: Pick<SessionPageRequest, 'maxMessages' | 'turnWindow'>,
+  span: number,
+): number {
+  const messages = request.maxMessages ?? DEFAULT_MAX_MESSAGES
+  const turnHeadroom = (request.turnWindow?.minTurns ?? 0) * 64
+  return Math.min(
+    SESSION_WINDOW_MAX_EVENTS,
+    span + Math.max(SESSION_WINDOW_MIN_EVENTS, messages * 4 + turnHeadroom),
+  )
 }
 
 /** Translate current logical Session metadata to the browser wire. */

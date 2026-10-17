@@ -219,7 +219,10 @@ describe('SessionHistoryController', () => {
       isSeeded: false,
     }
     const observed = deferred<SessionObservation>()
-    ctx.provide('sessionQuery', { observeSession: () => observed.promise } as never)
+    ctx.provide('sessionQuery', {
+      observeSession: () => observed.promise,
+      readWindow: () => Promise.resolve(undefined),
+    } as never)
     const transport = new SessionHistoryController(ctx, vi.fn())
     const abort = new AbortController()
     const iterator = transport.follow({ address: { kind: 'session', sessionId } }, abort.signal)
@@ -382,6 +385,7 @@ describe('SessionHistoryController', () => {
         cursor: -1,
         retain: vi.fn(), [Symbol.dispose]: vi.fn(),
       } satisfies SessionObservation),
+      readWindow: () => Promise.resolve(undefined),
     } as never)
     const history = new SessionHistoryController(ctx, vi.fn())
     const abort = new AbortController()
@@ -414,6 +418,7 @@ describe('SessionHistoryController', () => {
     } as SessionObservation
     ctx.provide('sessionQuery', {
       observeSession: () => Promise.resolve(source),
+      readWindow: () => Promise.resolve(undefined),
     } as never)
     const history = new SessionHistoryController(ctx, () => { throw new Error('activation failed') })
     const iterator = history.follow({ address: { kind: 'session', sessionId } }, signal())
@@ -442,7 +447,10 @@ describe('SessionHistoryController', () => {
       retain: () => promotion,
       [Symbol.dispose]: disposeOpening,
     } as SessionObservation
-    ctx.provide('sessionQuery', { observeSession: () => Promise.resolve(source) } as never)
+    ctx.provide('sessionQuery', {
+      observeSession: () => Promise.resolve(source),
+      readWindow: () => Promise.resolve(undefined),
+    } as never)
     const activate = vi.fn()
     const history = new SessionHistoryController(ctx, activate)
     const iterator = history.follow({ address: { kind: 'session', sessionId } }, signal())[Symbol.asyncIterator]()

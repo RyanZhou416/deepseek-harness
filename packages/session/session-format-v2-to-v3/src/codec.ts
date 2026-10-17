@@ -8,6 +8,7 @@ import type {
   SessionFormatHeader,
 } from '@deepseek-ai/dsh-session-format'
 import { releasedV2SessionFormatCodec } from '@deepseek-ai/dsh-session-format-v1-to-v2'
+import type { SessionFormatDecoderStart } from '@deepseek-ai/dsh-session-format-v1-to-v2'
 import { assertReleasedV3Header, assertV3EventAdmission } from './validation.ts'
 import { assertV3Event, assertV3StructuralRow } from './payload.ts'
 
@@ -17,8 +18,8 @@ export const releasedV3SessionFormatCodec = Object.freeze({
   decodeHeader(value: unknown) {
     return { ...releasedV2SessionFormatCodec.decodeHeader(v2PhysicalHeader(value)), version: 3 }
   },
-  createDecoder(value, recovery) {
-    const decoder = releasedV2SessionFormatCodec.createDecoder(v2PhysicalHeader(value), recovery)
+  createDecoder(value, recovery, start?: SessionFormatDecoderStart) {
+    const decoder = releasedV2SessionFormatCodec.createDecoder(v2PhysicalHeader(value), recovery, start)
     let issue: SessionFormatError | undefined
     let acceptedInheritedCut: number | undefined
     return {
@@ -50,6 +51,7 @@ export const releasedV3SessionFormatCodec = Object.freeze({
         })
       },
       finish(context) {
+        if (start?.partial === true) return decoder.finish(context)
         if (issue === undefined) return decoder.finish(context)
         if (decoder.header.isSeeded && acceptedInheritedCut === undefined) {
           throw new SessionFormatError('format v3 seeded Session lacks an accepted inherited end-seed marker')

@@ -15,6 +15,7 @@ import {
 } from '@deepseek-ai/dsh-session'
 import { foldSessionTitle } from '@deepseek-ai/dsh-session-title'
 import type { SessionTitleSnapshot } from '@deepseek-ai/dsh-session-title'
+import type { SessionWindowRequest } from '@deepseek-ai/dsh-session-persistence'
 import type {
   SessionEventResultFilter,
   SessionEventSearchPage,
@@ -36,6 +37,7 @@ import type {
   SessionSurfaceSnapshot,
   SessionTitleObservation,
   SessionTitleObservationResult,
+  SessionWindowRead,
 } from './types.ts'
 import {
   SESSION_QUERY_DEFAULT_PERSISTED_INSPECT_CONCURRENCY,
@@ -156,6 +158,42 @@ export abstract class SessionQueryEngine extends Service {
     options: SessionObservationOptions = {},
   ): Promise<SessionObservation> {
     return this._observations.read(sessionId, options)
+  }
+
+  /**
+   * Read one bounded stored-history window through the persistence backend's
+   * optional generation index, with the stored projection checkpoint.
+   *
+   * Backends without `readWindow` return nothing here, and callers fall back to
+   * the full observation path. A window validates its own rows, not the
+   * complete log's cross-event relationships; exact replay consumers keep
+   * using {@link readSession}.
+   * @param sessionId - stored session to read.
+   * @param request - optional cancellation, upper bound, and backwards cursor.
+   * @returns the window plus its checkpoint projection baseline, or `undefined`
+   *   when the backend cannot serve a validated window.
+   */
+  async readWindow(
+    sessionId: SessionId,
+    request: SessionWindowRequest = {},
+  ): Promise<SessionWindowRead | undefined> {
+    const persistence = this.ctx.get('sessionPersistence')
+    const window = await persistence?.readWindow?.(sessionId, request)
+    request.signal?.throwIfAborted()
+    if (window === undefined) return undefined
+    if (window.header.id !== sessionId) {
+      throw new SessionQueryError(
+        `session persistence returned "${window.header.id}" for "${sessionId}"`,
+        'SESSION_QUERY_SOURCE_CONFLICT',
+      )
+    }
+    const checkpoint = this.ctx.get('sessionProjectionCache')?.cachedSnapshot(window.header)
+    // A checkpoint ahead of the stored window cannot describe it (detach-drain
+    // crash, torn-tail repair, restored log); opening then needs the full read.
+    const projections = checkpoint !== undefined && checkpoint.asOfSeq <= window.cursor
+      ? checkpoint
+      : undefined
+    return { window, ...projections === undefined ? {} : { projections } }
   }
 
   /**

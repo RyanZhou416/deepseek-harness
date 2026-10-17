@@ -86,6 +86,8 @@ kind: "package-reference"
 
 `open(id, 'read'|'write')` 选择最高规范 generation。当前格式输入走普通快速路径。对于历史输入，只读 open 会单遍解码并迁移源、校验当前逻辑结果，然后在不发布后继的情况下返回。写 open 会在可用时复用按 revision 为键的 preparation，否则执行同一套 preparation，再按有界分片编码同目录临时文件、在 Worker Thread 中校验、复查源修订，并在返回前以不覆盖方式发布当前后继。源保持逐字节不变。如果源在 preparation 后发生变化，该次写 open 会失败，已经返回给读方的逻辑历史不会被替换；后续写 open 会针对新的 revision 重新执行 preparation。后端在 memo 化前冻结已解码的 event graph，并在此时将其标记为 `shared-frozen`；每个嵌套对象和数组都会冻结，句柄读取和 slice 即使为空也保留该状态。只有尚未实体化的 pending 空日志报告 `detached`。`stat(id)` 与 `list()` 只选择并转换最高 generation 的 header，不读取事件行，也不启动迁移；快照携带所选文件的 `sizeBytes` 与尽力而为的修订号。当前格式修订号标识该文件；历史格式修订号还包含持久化根目录中所选文件的指纹，因此子日志变化会使缓存的逻辑事件失效。指纹只读取文件系统元数据；无关变化也会保守地使历史修订号失效。一次 `list()` 为其历史条目共用一个全库指纹。选择 `compression: 'none'` 后，日志是外部读取方可直接消费的换行分隔文本；压缩默认值必须经后端读取。
 
+后端还实现可选的有界尾部窗口。`readWindow(id, request)` 返回当前 generation 最新的连续事件，而无需解码被省略的前缀：对于 Zstandard 存储，它扫描完整帧边界，只解压覆盖所请求事件上限所需的尾部帧，在第一条所选行的序号上播种当前 codec，并且只解码这些行；对于 `compression: 'none'`，它以同样方式选择尾部换行分隔行。请求默认 2,000 个事件，上限为 10,000。当仅存在历史 generation、header 为 seeded（其继承切点位于被省略的前缀中）、`beforeSeq` 请求向后窗口、日志带有撕裂尾部或某帧未结束于记录边界、所选行未解码为正好所请求的序号、或 `maxEvents` 不是正安全整数时，后端返回 `undefined`——绝不返回部分或猜测的窗口；调用方随后读取完整日志。返回的 `SessionWindow` 携带存储的 header、最后一个事件的 `cursor`，以及窗口从 seq 0 之上开始时的 `hasMore`；其继承数量为零，因为 seeded 头部走完整读取。在一份实测 153 MB 压缩日志上，读取最新 2,000 个事件约需 1 秒，而完整读取约需 2.9 秒。
+
 校验只有在 Worker 自然以退出码 0 结束后，才接受其成功响应。并发配额一直保留到该次退出；取消或 Worker 错误会先终止并等待 Worker 退出，再使校验失败。
 
 历史正文准备通过 [V3→V4](../session-format-v3-to-v4/README.zh.md) 补齐父目录：从 header 找到候选直属子 Session，通过历史编解码器逐个读取其自身 descriptor，保留紧凑证据与来源修订。此过程不准备子目录，也不发布子后继。不可读或不支持的 header（包括损坏的 Zstandard header 帧）不参与发现，也不出现在 `list()` 中。直接访问损坏的压缩 header 仍会失败；header 的 I/O 错误与取消错误继续传播。子日志解码或 descriptor 字段失败会产生带子路径的警告；父目录没有完整条目时，通过 `subagent/catalog` 保留 header 身份信息。健康子项和已有父目录项仍可使用。打开损坏子 Session 时仍报告该子会话的错误。缺失、不支持或多个 descriptor 同样生成模式未知的目录项，不编造标签。已发布的未知条目仍可浏览；读取子历史时会重试实际日志，并从有效 descriptor 确定模式。准备返回、复用与发布前会重新检查成员集合及已检查来源的修订，也包括读取失败的子日志，使修复后的子日志能够使旧准备缓存失效。来源变化时只读打开重试一次，写打开拒绝发布。取消仍会中止操作。当前 V4 打开跳过发现，并在暴露事件前校验目录字段、唯一性及当前投递归属。
@@ -117,6 +119,7 @@ kind: "package-reference"
 | [`src/index.ts`](src/index.ts) | 插件入口：`Config` schema、后端服务类与文件存储原语 |
 | [`src/storage.ts`](src/storage.ts) | JSONL 句柄、已路由实时事件缓冲、进程内写入者记账、监听器、teardown |
 | [`src/format.ts`](src/format.ts) | 日志路径派生、header 编码与当前记录扫描 |
+| [`src/window.ts`](src/window.ts) | 为 `readWindow` 执行无索引尾部窗口选择与播种行解码 |
 | [`src/generation.ts`](src/generation.ts) | 单遍历史还原、有界 stage 编码、源 revision 检查与排他后继发布 |
 | [`src/migration-verifier.ts`](src/migration-verifier.ts) | stage 与竞争 generation 校验的 Worker 生命周期 |
 | [`src/zstd.ts`](src/zstd.ts) | Zstandard 帧压缩、解码与帧扫描 |
@@ -164,6 +167,7 @@ JSONL 存储不修改实时请求前缀。只有重建历史、当前 envelope �
 - **格式迁移保留已配置编码，且只支持 catalog 中的链**——本 build 把受支持的历史代迁移到当前格式；更改压缩需要独立根，保留的旧版本不提供自动 fallback 或 downgrade 支持。
 - **平铺文件存储布局不加载**——加载前使用独立根，或将预发布产物移入项目/会话目录布局。
 - **压缩文件不能直接按行读取**——使用后端加载；或在写入新根前选择 `compression: 'none'`，供外部行读取方使用。
+- **窗口读取仅限尾部且无索引**——`readWindow` 从文件末尾扫描，服务当前 generation 的最新切片，因此向后分页（`beforeSeq`）与历史 generation 走完整读取路径；向后翻页历史需要付出完整读取。
 - **不删除会话文件**——日志在 `root` 下累积，直到外部移除；seam 无删除接口。
 - **每会话一个活动写入方**——写句柄认领在所属后端实例内排除第二个写入方，内核锁（`session.lock` 上的非阻塞 `flock(2)`；Windows 上为由该路径派生的命名内核信号量，零文件系统足迹）排除其他所有实例与进程；锁在以写模式打开既有产物时立即获取，新建会话则仅在首次实体化写入之前获取，因此未实体化的会话不留任何文件系统足迹。崩溃持有者的锁随其进程消亡，会话立即可再写入，而活着但卡死的持有者会阻塞写入方直到其进程退出（POSIX 上删除锁文件即放弃该排他；释放本身从不删除它）。咨询式 `flock` 在部分网络文件系统（NFSv3）上不可靠，Windows 信号量名按登录会话隔离。
 - **根作用域的并发卸载不保证顺序**——Cordis 可能在提供者等待消费者清理前，已将正在卸载的消费者移出注册表。此处的依赖顺序仅覆盖移除该提供者所触发的消费者卸载。

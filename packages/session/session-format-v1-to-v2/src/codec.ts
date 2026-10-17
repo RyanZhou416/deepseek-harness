@@ -27,8 +27,8 @@ export const releasedV2SessionFormatCodec = Object.freeze({
   decodeHeader(value: unknown) {
     return decodePhysicalHeader(value)
   },
-  createDecoder(headerValue: unknown, recovery: SessionFormatRecovery) {
-    return createDecoder(headerValue, recovery)
+  createDecoder(headerValue: unknown, recovery: SessionFormatRecovery, start?: SessionFormatDecoderStart) {
+    return createDecoder(headerValue, recovery, start)
   },
   encodeHeader(header: SessionFormatHeader, inheritedEventCount: number) {
     return encodeHeader(header, inheritedEventCount)
@@ -72,14 +72,27 @@ function decodePhysicalHeader(value: unknown): SessionFormatHeader {
   return header
 }
 
+/** Optional decoder resume point for a validated tail window. */
+export interface SessionFormatDecoderStart {
+  /** Physical row index of the first supplied row. */
+  readonly rowIndex?: number
+  /** Logical seq expected for the first supplied row. */
+  readonly eventCount?: number
+  /** Already-known inherited cut from the preceding prefix. */
+  readonly inheritedEventCount?: number
+  /** Skip seeded-marker completion checks because the supplied rows are a validated window. */
+  readonly partial?: boolean
+}
+
 function createDecoder(
   headerValue: unknown,
   recovery: SessionFormatRecovery,
+  start?: SessionFormatDecoderStart,
 ): SessionFormatArtifactDecoder {
   const header = decodePhysicalHeader(headerValue)
-  let rowIndex = 0
-  let eventCount = 0
-  let inheritedEventCount: number | undefined
+  let rowIndex = start?.rowIndex ?? 0
+  let eventCount = start?.eventCount ?? 0
+  let inheritedEventCount: number | undefined = start?.inheritedEventCount
   let issue: SessionFormatError | undefined
   return {
     header,
@@ -118,6 +131,7 @@ function createDecoder(
       context.emitEvent(event)
     },
     finish(_context) {
+      if (start?.partial === true) return inheritedEventCount ?? 0
       if (header.isSeeded && inheritedEventCount === undefined) {
         throw new SessionFormatError('released v2 seeded Session lacks an inherited end-seed marker')
       }
