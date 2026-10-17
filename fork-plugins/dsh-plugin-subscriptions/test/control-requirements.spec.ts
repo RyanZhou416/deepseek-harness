@@ -20,8 +20,9 @@ import {
   parsePolicyLimitsDocument,
 } from '../src/claude-core/index.js'
 import type { PolicyLimitsDocument } from '../src/claude-core/index.js'
+import { sourceUrl } from './source-url.js'
 
-const SOURCE_URL = new URL('../src/claude-core/control-requirements.ts', import.meta.url)
+const SOURCE_URL = sourceUrl('claude-core/control-requirements.ts')
 
 /**
  * One document the envelope's own parser accepted.

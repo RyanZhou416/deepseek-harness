@@ -15,11 +15,18 @@ async function mount(t: TestContext) {
   t.after(() => ctx.fiber.dispose())
   const adapters = new Map<string, LlmAdapter>()
   ctx.provide('llm', {
+    // The Claude route registers only against a host that declares failure recovery 1.
+    failureRecoveryVersion: 1,
     registerAdapter: (providers: string[], adapter: LlmAdapter) => {
       for (const provider of providers) adapters.set(provider, adapter)
       return Object.assign(() => {}, { replace: () => {} })
     },
     resolveModelInfo: (provider: string, model: string) => adapters.get(provider)!.resolveModel(provider, model),
+  })
+  // The Claude route mounts only while a Host provides the recording seam; these
+  // reads never prepare a request, so the recorder only has to exist.
+  ctx.provide('llmRequestRecord', {
+    recordPreparedRequest: async () => ({ ok: false, code: 'REQUEST_RECORD_UNAVAILABLE' }),
   })
   const fake = createFakeConnection()
   const ready = Promise.withResolvers<void>()

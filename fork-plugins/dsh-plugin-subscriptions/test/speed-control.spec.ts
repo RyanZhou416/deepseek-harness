@@ -44,7 +44,12 @@ const CLAUDE_SESSION: ClaudeSession = {
 /** Mount the plugin for the claude route alone and return its RPC handler. */
 async function mount(): Promise<FakeRpcHandler> {
   const ctx = new Context()
-  ctx.provide('llm', { registerAdapter: () => Object.assign(() => {}, { replace: () => {} }) })
+  // The Claude route registers only against a host declaring failure recovery 1.
+  ctx.provide('llm', { failureRecoveryVersion: 1, registerAdapter: () => Object.assign(() => {}, { replace: () => {} }) })
+  // The Claude route mounts only while a Host provides the recording seam.
+  ctx.provide('llmRequestRecord', {
+    recordPreparedRequest: async () => ({ ok: false, code: 'REQUEST_RECORD_UNAVAILABLE' }),
+  })
   const fake = createFakeConnection()
   ctx.provide('connection', fake.connection)
   ctx.plugin(plugin, { providers: ['claude'], pool: { enabled: false } })
@@ -128,7 +133,12 @@ test('reading one provider model\'s speed does not enumerate unrelated providers
   const claude = t.mock.method(ClaudeAdapter.prototype, 'fastCapableModels', async () => ['claude-opus-5'])
   const ctx = new Context()
   t.after(() => ctx.fiber.dispose())
-  ctx.provide('llm', { registerAdapter: () => Object.assign(() => {}, { replace: () => {} }) })
+  // The Claude route registers only against a host declaring failure recovery 1.
+  ctx.provide('llm', { failureRecoveryVersion: 1, registerAdapter: () => Object.assign(() => {}, { replace: () => {} }) })
+  // The Claude route mounts only while a Host provides the recording seam.
+  ctx.provide('llmRequestRecord', {
+    recordPreparedRequest: async () => ({ ok: false, code: 'REQUEST_RECORD_UNAVAILABLE' }),
+  })
   const fake = createFakeConnection()
   const ready = Promise.withResolvers<void>()
   ctx.provide('connection', { fetch: { register: (route: Parameters<typeof fake.connection.fetch.register>[0]) => {

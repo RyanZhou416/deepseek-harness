@@ -619,7 +619,12 @@ async function mount(policy: (call: RecordedCall, index: number) => Response): P
     const fake = createFakeConnection()
     ctx.provide('connection', fake.connection)
     let route: { stream: (options: unknown) => AsyncIterable<unknown> } | undefined
-    ctx.provide('llm', {
+    // The Claude route mounts only while a Host provides the recording seam, and this spec
+    // drives a real request through it, so the recorder must report a durable record.
+    ctx.provide('llmRequestRecord', {
+      recordPreparedRequest: async () => ({ ok: true, preparedId: 0 }),
+    })
+  ctx.provide('llm', {
       failureRecoveryVersion: 1,
       registerAdapter: (_providers: string[], adapter: { stream: (options: unknown) => AsyncIterable<unknown> }) => {
         route = adapter

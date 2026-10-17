@@ -7,6 +7,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
+import { sourceUrl } from './source-url.js'
 
 import {
   forgetUnifiedRateLimit,
@@ -179,7 +180,7 @@ test('this module adapts response headers into the shared core and keeps no pars
 
   // The family's member names and the reset encodings belong to the core now: this module
   // is expected to name them only to decide whether a response is a report at all.
-  const source = readFileSync(new URL('../src/providers/unified-rate-limit.ts', import.meta.url), 'utf8')
+  const source = readFileSync(sourceUrl('providers/unified-rate-limit.ts'), 'utf8')
   const executable = source
     .split('\n')
     .filter(line => !/^\s*(?:\/\*|\*|\/\/)/.test(line))
