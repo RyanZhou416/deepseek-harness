@@ -11,12 +11,13 @@
  */
 
 import { randomUUID } from 'node:crypto'
+import { AsyncLocalStorage } from 'node:async_hooks'
 import { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { ScopedLayers, scopeOf } from '@deepseek-ai/dsh-scope'
 import type { SessionId } from '@deepseek-ai/dsh-session'
-import { deadline, timeoutOf } from '@deepseek-ai/dsh-timeout'
+import { deadline, MAX_TIMER_DELAY_MS, timeoutOf } from '@deepseek-ai/dsh-timeout'
 import { JobRegistry, JobId } from '@deepseek-ai/dsh-jobs'
 import type {
   JobAppendOptions, JobEvent, JobEvents, JobHandle, JobKind, JobOutcome, JobOutputRead, JobOutputSource,
@@ -26,6 +27,7 @@ import { JobEventHub, JobLayer } from './events.ts'
 import { startPump } from './pump.ts'
 import type { PumpHandle } from './pump.ts'
 import { OutputRing } from './ring.ts'
+import { TerminalRetention } from './retention.ts'
 
 /** Timeout code that distinguishes a bounded wait from caller cancellation. */
 export const TASK_WAIT_TIMEOUT = 'TASK_WAIT_TIMEOUT'
@@ -59,6 +61,10 @@ export interface Config {
   settledRetainBytes?: number
   /** Poll interval for a job's pull sources, in milliseconds; omission defaults to 150. */
   pumpPollMs?: number
+  /** Terminal-record idle retention in milliseconds; omission keeps records until owner or service disposal. */
+  terminalJobRetentionMs?: number
+  /** Target terminal records per exact owner; only model-read records are count-pruned. */
+  maxRetainedTerminalJobsPerOwner?: number
 }
 
 /**
@@ -89,6 +95,8 @@ interface TrackedJob {
   modelCursor: number
   /** Whether the first post-settlement read already handed out `result`. */
   resultDelivered: boolean
+  /** Whether a terminal model read received the output/status before count pruning. */
+  reported: boolean
   /** Producer-shared progress line and commit binding. */
   state: ProducerState
   /** Terminal reason; a recorded kill reason is merged in at settlement. */
@@ -149,6 +157,8 @@ export class LocalJobRegistry extends JobRegistry {
       .min(1)
       .max(Number.MAX_SAFE_INTEGER)
       .default(DEFAULT_PUMP_POLL_MS),
+    terminalJobRetentionMs: z.number().step(1).min(0).max(MAX_TIMER_DELAY_MS),
+    maxRetainedTerminalJobsPerOwner: z.number().step(1).min(0).max(Number.MAX_SAFE_INTEGER),
   })
 
   /** Schemastery-defaulted active-job limit. */
@@ -160,6 +170,7 @@ export class LocalJobRegistry extends JobRegistry {
   /** Schemastery-defaulted pull-source poll interval. */
   private readonly pumpPollMs: number
   private store = new Map<JobId, TrackedJob>()
+  private readonly terminalRetention: TerminalRetention
   /**
    * Controllers and scoped subscriptions layered by the scope that registered
    * them, in the tools-registry shape: a contribution files into its
@@ -189,6 +200,20 @@ export class LocalJobRegistry extends JobRegistry {
     this.settledRetainBytes = resolved.settledRetainBytes
     this.pumpPollMs = resolved.pumpPollMs
     this.selfCtx = ctx
+    const agents = ctx.get('agents')
+    // Retention timers outlive individual Agents and may run during registry teardown.
+    const runRetention = agents === undefined
+      ? AsyncLocalStorage.snapshot()
+      : agents.withoutInitiator(() => AsyncLocalStorage.snapshot())
+    this.terminalRetention = new TerminalRetention(
+      config.terminalJobRetentionMs,
+      config.maxRetainedTerminalJobsPerOwner,
+      (id) => {
+        const job = this.store.get(id)
+        if (job !== undefined) this.drop([job])
+      },
+      (callback, delay) => runRetention(setTimeout, callback, delay),
+    )
     this.hub = new JobEventHub(this.layers, (message) => { ctx.logger.warn(message) })
     ctx.effect(() => () => this.disposeAll(), 'jobs teardown')
   }
@@ -254,6 +279,7 @@ export class LocalJobRegistry extends JobRegistry {
       ring,
       modelCursor: 0,
       resultDelivered: false,
+      reported: false,
       state,
       detail: undefined,
       result: undefined,
@@ -473,12 +499,17 @@ export class LocalJobRegistry extends JobRegistry {
     const result = isTerminal(job.status) && !job.resultDelivered ? job.result : undefined
     if (result !== undefined) job.resultDelivered = true
     if (isTerminal(job.status)) job.ring.trim(this.settledRetainBytes)
-    return {
+    const projection: JobRead = {
       chunks: read.chunks,
       lossy: read.lossy,
       ...result !== undefined ? { result } : {},
       job: this.view(job),
     }
+    if (isTerminal(job.status)) {
+      job.reported = true
+      this.terminalRetention.report(job.id)
+    }
+    return projection
   }
 
   private killJob(job: TrackedJob, reason?: string): 'requested' | 'already-finished' {
@@ -616,7 +647,8 @@ export class LocalJobRegistry extends JobRegistry {
     }
     job.state.progress = undefined
     job.result = outcome.result
-    job.finishedAt = Date.now()
+    const finishedAt = Date.now()
+    job.finishedAt = finishedAt
     this.recordSessionEvent(job, {
       finishedAt: job.finishedAt, status: outcome.status, cause, producerReported,
       ...job.detail !== undefined ? { detail: job.detail } : {},
@@ -634,6 +666,7 @@ export class LocalJobRegistry extends JobRegistry {
     // The ring's stream ends with settlement; the signal follows the committed
     // settlement so an observer that wakes on it reads the terminal state.
     this.emitOutput(job)
+    this.terminalRetention.track(job.id, job.owner, finishedAt, job.reported)
   }
 
   /**
@@ -662,7 +695,8 @@ export class LocalJobRegistry extends JobRegistry {
   /** Drop settled records and announce each removal, the one visible-set change no per-job record carries. */
   private drop(jobs: readonly TrackedJob[]): void {
     for (const job of jobs) {
-      this.store.delete(job.id)
+      if (!this.store.delete(job.id)) continue
+      this.terminalRetention.forget(job.id)
       this.emit({ type: 'removed', job: this.view(job) }, job.owner)
     }
   }
@@ -680,6 +714,7 @@ export class LocalJobRegistry extends JobRegistry {
     // Without the removals it keeps the rows it last received after a
     // registry reload.
     this.drop(all)
+    this.terminalRetention.dispose()
     // Detach cross-fiber owner effects after the shared store is quiescent.
     const ownerCleanups = [...this.ownerCleanups.values()]
     this.ownerCleanups.clear()
