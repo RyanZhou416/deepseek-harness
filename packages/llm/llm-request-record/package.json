@@ -1,7 +1,7 @@
 {
   "name": "@deepseek-ai/dsh-llm-request-record",
   "description": "Prepared-request recording seam: one model route publishes what it is about to send into its session log and waits for that record to reach durable storage before the provider sees any bytes",
-  "version": "0.1.7-rc.1",
+  "version": "0.2.1-rc.2",
   "publishConfig": {
     "access": "public"
   },
