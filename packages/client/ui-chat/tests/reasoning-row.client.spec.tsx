@@ -40,7 +40,7 @@ describe('AssistantMarkdown reasoning blocks', () => {
     expect(view.container.querySelectorAll('[data-variant="think"]')).toHaveLength(1)
     fireEvent.click(view.getByRole('button'))
     expect(calls).toHaveBeenCalledWith('conversation.chat.reasoning.body', { text, running: false })
-    expect(view.getByText('Visible reasoning').tagName).toBe('STRONG')
+    expect(view.getByText('Visible reasoning').closest('strong')).not.toBeNull()
     expect(blocks.map(block => block.text)).toEqual(texts)
   })
 

@@ -5,8 +5,7 @@ import type { ConversationLocationDataStore, ConversationTurnDataMap } from '@de
 import type { ChatNodeHookContext, ChatNodeOwnerProps, ChatFlowSlotProps, UsePresentation } from '../contract/slots.ts'
 import type { ChatNode } from '../contract/chat-nodes.ts'
 import type { ChatNodeStore } from '../contract/snapshot.ts'
-import { isAtOrOutside } from '../contract/group-tree.ts'
-import { turnProcessAlwaysOpen } from '../contract/turn-process.ts'
+import { isTurnProcessAnswer, isTurnProcessMember, turnProcessAlwaysOpen, TURN_PROCESS_INDEPENDENT_KINDS, type TurnProcessRow } from '../contract/turn-process.ts'
 import { turnProcessOpen } from '../stores.ts'
 import { hiddenOrCollapsing } from './flow-motion.ts'
 import css from './ChatView.module.css'
@@ -75,18 +74,23 @@ export const ChatNodeSeat = memo(function ChatNodeSeat({
     && foldCompleted
     && processPresentation.turn === processSpec.turn
     && (processPresentation.turnStarted || processPresentation.turnClosed)
+  const processRow: TurnProcessRow | undefined = routedNode !== undefined && processSpec !== undefined
+    ? {
+        anchorSeq: routedNode.anchorSeq,
+        step: routedNode.kind === 'assistant-step' && turn === processSpec.turn ? routedNode.data.step : null,
+        groupPart,
+      }
+    : undefined
   const processMember = routedNode !== undefined
+    && processRow !== undefined
     && processWindowReady
-    && !isAtOrOutside(routedNode, 'turn')
-    && routedNode.anchorSeq >= processSpec.processStartSeq
-    && (liveProcess || processSpec.answerAnchorSeq === null || routedNode.anchorSeq < processSpec.answerAnchorSeq
-      || (groupPart === 'reasoning' && routedNode.kind === 'assistant-step' && routedNode.data.step === processSpec.answerStep))
-  const processAnswer = routedNode !== undefined
+    && !TURN_PROCESS_INDEPENDENT_KINDS.has(routedNode.kind)
+    && isTurnProcessMember(processSpec, liveProcess, processRow)
+  const processAnswer = processSpec !== undefined
+    && processRow !== undefined
     && processWindowReady
     && !liveProcess
-    && groupPart !== 'reasoning'
-    && routedNode.kind === 'assistant-step'
-    && routedNode.data.step === processSpec.answerStep
+    && isTurnProcessAnswer(processSpec, processRow.step, groupPart)
   const ownsDisclosure = routedNode?.kind === 'turn-process' || processAnswer
   const foldable = processWindowReady
     && (liveProcess || processMember || ownsDisclosure)

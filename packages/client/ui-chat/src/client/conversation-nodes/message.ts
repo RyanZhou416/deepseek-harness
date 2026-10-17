@@ -44,6 +44,12 @@ function isCompactionCheckpoint(event: Parameters<ConversationNodeDefinition['ma
   return source.kind === 'compact-checkpoint'
 }
 
+/** Human revisions are visible prompts; other surface replacements remain model-only. */
+function isHumanRevision(event: Parameters<ConversationNodeDefinition['match']>[0]): boolean {
+  return event.type === 'user/message' && isReplacementSurfaceEvent(event)
+    && event.data.source.kind === 'user' && 'replacesUserMessage' in event.data.source
+}
+
 /** Context presentation shared by user-role injections and developer messages. */
 function contextMessage(
   event: Pick<ContextMessageNode, 'seq' | 'time'>,
@@ -66,8 +72,13 @@ export const messageDefinition: ConversationNodeDefinition<MessageNode> = {
   target: 'chat',
   match: (event) => {
     if (event.type === 'user/message') {
-      return isAppendSurfaceEvent(event) && !isCompactionCheckpoint(event)
-        ? { id: String(event.data.id), role: 'start' }
+      return (isAppendSurfaceEvent(event) || isHumanRevision(event)) && !isCompactionCheckpoint(event)
+        ? {
+            id: isHumanRevision(event)
+              ? `revision:`
+              : String(event.data.id),
+            role: 'start',
+          }
         : null
     }
     return null
@@ -105,13 +116,52 @@ export const messageDefinition: ConversationNodeDefinition<MessageNode> = {
       }
       : {
         kind: 'user',
-        seq: event.seq,
-        time: event.time,
+        ...(isHumanRevision(event) && event.surfaceOp !== 'append'
+          ? {
+              editedRange: {
+                start: event.surfaceOp.startSeq,
+                before: match.location.kind === 'step' || match.location.kind === 'turn'
+                  ? match.location.turn.start?.seq ?? event.seq
+                  : event.seq,
+              },
+            }
+          : {}),
+        seq: event.seq,        time: event.time,
         content: event.data.content,
         source: event.data.source,
       }
   },
-  update: context => context.state,
+  update: (context, match) => {
+    if (context.state.kind !== 'user' || match.event.type !== 'user/message' || !isHumanRevision(match.event)) {
+      return context.state
+    }
+    const event = match.event
+    // Consecutive edits widen the superseded range instead of replacing it:
+    // every row either edit shadowed stays hidden behind the newest prompt.
+    const previousRange = context.state.kind === 'user' ? context.state.editedRange : undefined
+    const currentRange = event.surfaceOp === 'append'
+      ? undefined
+      : {
+          start: event.surfaceOp.startSeq,
+          before: match.location.kind === 'step' || match.location.kind === 'turn'
+            ? match.location.turn.start?.seq ?? event.seq
+            : event.seq,
+        }
+    const editedRange = currentRange === undefined
+      ? previousRange
+      : {
+          start: Math.min(previousRange?.start ?? currentRange.start, currentRange.start),
+          before: Math.max(previousRange?.before ?? currentRange.before, currentRange.before),
+        }
+    return {
+      ...context.state,
+      ...(editedRange === undefined ? {} : { editedRange }),
+      seq: event.seq,
+      time: event.time,
+      content: event.data.content,
+      source: event.data.source,
+    }
+  },
   buildViewNode: (context) => {
     if (context.state === undefined) return null
     const waking = context.state.kind === 'context'

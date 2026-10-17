@@ -60,7 +60,7 @@ describe('last-message editor', () => {
     }
     const props: Partial<ChatNodeViewProps<'user'>> = {
       node,
-      loadImage: async () => '', openFile: vi.fn(),
+      loadImage: async () => '', renderFactorySlot: () => null, openFile: vi.fn(),
       editableMessageSeq: 4, editLastMessage: save, t,
     }
     const view = render(<UserMessageNodeView {...props as ChatNodeViewProps<'user'>} />)
