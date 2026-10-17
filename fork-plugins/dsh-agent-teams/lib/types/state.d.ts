@@ -18,6 +18,21 @@ export { amendTaskContract, buildCoverageMatrix, canDeclareDelivery, classifyCha
 export type { ContractAmendmentInput } from './quality-gates.ts';
 /** Mailbox key of the captain. */
 export declare const CAPTAIN_KEY = "captain";
+/** Internal observability used by the plugin's offline performance checks. */
+export interface UnreadMailboxCacheStats {
+    readonly entries: number;
+    readonly bytes: number;
+    readonly hits: number;
+    readonly misses: number;
+    readonly fileReads: number;
+    readonly invalidations: number;
+    readonly maxEntries: number;
+    readonly maxBytes: number;
+}
+/** Snapshot unread-projection cache counters without exposing cached content. */
+export declare function unreadMailboxCacheStats(): UnreadMailboxCacheStats;
+/** Clear only the transient projection cache and counters; disk is untouched. */
+export declare function resetUnreadMailboxCache(): void;
 /**
  * Serialize mutations of one team across the whole process.
  * @param key - the team id (or any mutation scope).
@@ -102,6 +117,33 @@ export declare function readTeam(stateRoot: string, teamId: string): Promise<Tea
  * @returns the team record, or `undefined` when absent.
  */
 export declare function readTeamSync(stateRoot: string, teamId: string): TeamState | undefined;
+/**
+ * Whether a team read failed on the contents of `team.json` (truncated,
+ * crash zero-filled, or schema-invalid) rather than on I/O.
+ * @param error - the error thrown by {@link readTeam} or {@link readTeamSync}.
+ * @returns true for JSON and team-shape failures.
+ */
+export declare function isUnreadableTeamState(error: unknown): boolean;
+/**
+ * Warn once per team directory and failure that a workspace-wide scan skipped
+ * an unreadable team. Scans skip such teams so one damaged team cannot fail
+ * team lookups for every other session in the workspace; reads that name the
+ * team directly still throw.
+ * @param stateRoot - resolved absolute state root directory.
+ * @param teamId - the skipped team's directory name.
+ * @param error - the content failure.
+ */
+export declare function reportUnreadableTeam(stateRoot: string, teamId: string, error: unknown): void;
+/**
+ * Take the unreadable-team skips recorded since the last call, so a caller that
+ * degraded instead of throwing can still report why.
+ * @returns one entry per team directory skipped by a scan.
+ */
+export declare function drainSkippedUnreadableTeams(): readonly {
+    stateRoot: string;
+    teamId: string;
+    message: string;
+}[];
 /**
  * Persist one team record (inside the caller's lock).
  * @param stateRoot - resolved absolute state root directory.

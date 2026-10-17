@@ -1,7 +1,7 @@
 /** Durable delivery receipts and execution-generation filtering at step admission. */
 import type { Context } from '@deepseek-ai/cordis'
 import { join } from 'node:path'
-import { acknowledgeMailbox, CAPTAIN_KEY, discardMailboxMessages, findTeamByCaptain, readMailbox, readUnreadMailbox, readTeam, sanitizeKey, withTeamLock } from './state.ts'
+import { acknowledgeMailbox, CAPTAIN_KEY, discardMailboxMessages, drainSkippedUnreadableTeams, findTeamByCaptain, readMailbox, readUnreadMailbox, readTeam, sanitizeKey, withTeamLock } from './state.ts'
 import type { TeamMessage, TeamState } from './types.ts'
 import { sessionOwnEvents } from './harness-compat.ts'
 import { leadIdentityOfAsync, sessionLeadsTeamAsync } from './lineage.ts'
@@ -79,6 +79,13 @@ export function installMailboxAdmission(ctx: Context, stateDir: string): void {
       // Narrow containment: only AgentTeams state reads degrade silently.
       try {
         const owned = await findTeamByCaptain(root, payload.agent.id, await leadIdentityOfAsync(ctx, payload.agent.session))
+        const skipped = drainSkippedUnreadableTeams()
+        // A scan skips a corrupt team instead of throwing; admission still
+        // degrades to plain pass-through and reports why.
+        if (skipped.length > 0) {
+          ctx.logger?.warn(`agent-teams: mailbox admission degraded to plain pass-through for agent ${payload.agent.id}: could not read team state under ${root} (a team.json may be corrupt or unreadable): ${skipped.map(entry => entry.message).join('; ') || 'unreadable team state'}`)
+          return decision
+        }
         if (owned !== undefined) await withTeamLock(`team:${root}:${owned.id}`, async () => {
           const team = await readTeam(root, owned.id)
           if (team === undefined || !(await sessionLeadsTeamAsync(ctx, team, payload.agent.id)) || team.halted) return
