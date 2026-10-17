@@ -1,6 +1,19 @@
-# Bilingual-pair consistency record (docs/i18n/README.md): the git blob hash of each
-# side as of the last confirmed-consistent state. Both languages carry equal authority;
-# after editing either side, bring the other along and re-record with:
+# Bilingual-pair consistency record for 2026-08-31-bounded-transient-runtime-retention.md (docs/i18n/README.md): per heading
+# section, a hash of its English and Chinese blocks outside code blocks and generated regions.
+# After editing either side, bring the other along and re-record with:
 #   pnpm run verify-translation-pairing --write .agents/notes/implemented/bug-fix/2026-08-31-bounded-transient-runtime-retention.md
-2026-08-31-bounded-transient-runtime-retention.md: 76e2f0b9f38ba6294f84e105652337187f8f5fca
-2026-08-31-bounded-transient-runtime-retention.zh.md: 709fc809892414ba39daaeb7556859439adb088b
+/agent-note-bounded-transient-runtime-retention:
+  en: 1e94a1b0431b5256
+  zh: 2c4c4310af31fee0
+/agent-note-bounded-transient-runtime-retention/problem:
+  en: 4684c3e4d0ea708c
+  zh: 4a2207eaa9cabedf
+/agent-note-bounded-transient-runtime-retention/decision:
+  en: 42a62d5b3e4440e8
+  zh: 00d9fd6fc6328279
+/agent-note-bounded-transient-runtime-retention/alternatives-considered:
+  en: 223831fe76569c46
+  zh: fc51e623766b7a53
+/agent-note-bounded-transient-runtime-retention/consequences:
+  en: 8949e9841618025e
+  zh: ba06bd2160eb6474

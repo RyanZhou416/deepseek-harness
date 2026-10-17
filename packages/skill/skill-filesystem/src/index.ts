@@ -9,19 +9,16 @@
  * @module @deepseek-ai/dsh-skill-filesystem
  */
 
-import { AsyncLocalStorage } from 'node:async_hooks'
 import { access, lstat, readdir, readFile, realpath, stat } from 'node:fs/promises'
 import { unwatchFile, watchFile, type Stats } from 'node:fs'
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
-import { homedir } from 'node:os'
 import type { Context } from '@deepseek-ai/cordis'
-import type {} from '@deepseek-ai/dsh-agent'
 import chokidar from 'chokidar'
 import z from '@deepseek-ai/schemastery'
 import type Schema from '@deepseek-ai/schemastery'
 import { parse as parseYaml } from 'yaml'
 import type { FileSystem, FsDirEntry, FsTarget } from '@deepseek-ai/dsh-fs'
-import { canonicalizeWatchPath, resolveDshHome } from '@deepseek-ai/dsh-home-paths'
+import { canonicalizeWatchPath, resolveAgentsHome, resolveDshHome } from '@deepseek-ai/dsh-home-paths'
 import {
   BUNDLED_SKILL_RANK,
   isSkillName,
@@ -167,7 +164,7 @@ export class FileSystemSkillProvider implements SkillProvider {
     this.name = config.providerName ?? 'filesystem'
     this.includeDefaultRoots = config.includeDefaultRoots ?? true
     this.dshHome = resolveDshHome(config.dshHome)
-    this.agentsHome = resolve(config.agentsHome ?? process.env.DSH_AGENTS_HOME ?? join(homedir(), '.agents'))
+    this.agentsHome = resolveAgentsHome(config.agentsHome)
     this.customSkillDirs = (config.customSkillDirs ?? []).map(root => resolve(root))
     this.watchManager = new SkillWatchManager(ctx, control.invalidate, resolveWatchConfig(config))
     control.signal.addEventListener('abort', () => { void this.dispose() }, { once: true })
@@ -293,19 +290,12 @@ class SkillWatchManager {
   private readonly lifecycle = new AbortController()
   private closing = false
   private invalidationQueued = false
-  /** Native watch handles retain the async context that created them, so they open outside the discovering Agent. */
-  private readonly detached: <R>(operation: () => R) => R
 
   constructor(
     private readonly ctx: Context,
     private readonly invalidate: () => void,
     private readonly config: ResolvedWatchConfig,
-  ) {
-    const agents = ctx.get('agents')
-    this.detached = agents === undefined
-      ? AsyncLocalStorage.snapshot()
-      : agents.withoutInitiator(() => AsyncLocalStorage.snapshot())
-  }
+  ) {}
 
   async observeRoots(roots: readonly SkillRoot[]): Promise<void> {
     if (this.closing) return
@@ -466,10 +456,10 @@ class SkillWatchManager {
     const listener = (_current: Stats, _previous: Stats): void => {
       void this.handleAncestorWatchEvent(state, mode)
     }
-    this.detached(() => watchFile(mode.nextPath, {
+    watchFile(mode.nextPath, {
       persistent: false,
       interval: this.config.pollIntervalMs,
-    }, listener))
+    }, listener)
     return {
       mode,
       close() {
@@ -498,7 +488,7 @@ class SkillWatchManager {
   }
 
   private async openRootWatcher(state: RootWatchState, mode: Extract<RootWatchMode, { kind: 'root' }>): Promise<WatchHandle> {
-    const watcher = this.detached(() => chokidar.watch(mode.anchor, {
+    const watcher = chokidar.watch(mode.anchor, {
       // Chokidar owns late native fs.watch errors only for persistent watchers;
       // this provider's effect explicitly closes every handle at teardown.
       persistent: true,
@@ -512,20 +502,10 @@ class SkillWatchManager {
       },
       usePolling: this.config.usePolling,
       interval: this.config.pollIntervalMs,
-    }))
-    const handle: WatchHandle = {
-      mode,
-      close: () => watcher.close(),
-    }
+    })
     let ready = false
     const readiness = Promise.withResolvers<undefined>()
     const signal = this.lifecycle.signal
-    if (signal.aborted) {
-      await this.closeWatcher(handle)
-      signal.throwIfAborted()
-    }
-    const onAbort = (): void => { readiness.reject(signal.reason) }
-    signal.addEventListener('abort', onAbort, { once: true })
     const onError = (error: unknown): void => {
       if (!ready) {
         readiness.reject(error)
@@ -533,6 +513,24 @@ class SkillWatchManager {
       }
       this.handleWatcherError(state, error)
     }
+    const handle: WatchHandle = {
+      mode,
+      close: () => {
+        // `close()` drops every listener but leaves a scheduled write-settle
+        // poll; its straggler stats a file this teardown is deleting, which
+        // Windows reports as EPERM, and an 'error' emission with no listener
+        // is rethrown as an uncaught exception. Re-attach across the close.
+        const closing = watcher.close()
+        watcher.on('error', onError)
+        return closing
+      },
+    }
+    if (signal.aborted) {
+      await this.closeWatcher(handle)
+      signal.throwIfAborted()
+    }
+    const onAbort = (): void => { readiness.reject(signal.reason) }
+    signal.addEventListener('abort', onAbort, { once: true })
     watcher.on('error', onError)
     watcher.once('ready', () => {
       ready = true

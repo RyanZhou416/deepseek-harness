@@ -8,10 +8,9 @@ import {
 } from 'react'
 import {
   SlotOwnershipError, StaleAuthorizationError, standardHookPropName,
-  type ChainRenderOpts, type HostObservable, type KeyedStandardSource, type LocaleFace, type OccurrenceRecovery,
-  type RenderFactorySlot, type RenderOpts,
+  type ChainRenderOpts, type HostObservable, type KeyedStandardSource, type LocaleFace, type RenderFactorySlot, type RenderOpts,
   type ScopedStandardSourceBinding, type SessionAreaProps, type SessionProviderComponent, type SlotRenderer,
-  type SlotRendererHost, type SlotScope, type SlotScopeAdapter, type StandardSourceBinding,
+  type SlotEntryDef, type SlotRendererHost, type SlotScope, type SlotScopeAdapter, type SlotSpec, type StandardSourceBinding,
   type StoredEntry, type StoredFactory, type Translate,
 } from '@deepseek-ai/dsh-client-ui-slots'
 import {
@@ -22,6 +21,7 @@ import {
 import { SlotAssemblyError } from './errors.ts'
 
 type InjectedProps = Record<string, unknown>
+type SlotAnchorTag = 'div' | 'span'
 
 type SlotHookFactory = (standard: InjectedProps, hookContext: unknown) => unknown
 type SlotHookFactories = Readonly<Record<string, SlotHookFactory>>
@@ -80,7 +80,7 @@ function boundRenderSlot(host: SlotRendererHost, entry: StoredEntry): RenderSlot
       if (declared.kind === 'chain') {
         throw new SlotOwnershipError(`slot '${key}' is declared 'chain' — use renderSlotChain`)
       }
-      return <SlotOutlet slotKey={key} ownerProps={owner} opts={opts} />
+      return <SlotOutlet slotKey={key} ownerProps={owner} opts={opts} declaredInline={declared.inline === true} />
     }
     renderSlotCache.set(entry, binding)
   }
@@ -109,7 +109,7 @@ function boundRenderSlotChain(host: SlotRendererHost, entry: StoredEntry): Rende
       if (declared.kind !== 'chain') {
         throw new SlotOwnershipError(`slot '${key}' is declared '${declared.kind}', not 'chain' — use renderSlot`)
       }
-      return <SlotOutlet slotKey={key} ownerProps={owner} opts={opts} />
+      return <SlotOutlet slotKey={key} ownerProps={owner} opts={opts} declaredInline={declared.inline === true} />
     }
     renderSlotChainCache.set(entry, binding)
   }
@@ -129,7 +129,7 @@ function boundFactoryRenderSlot(host: SlotRendererHost, definition: StoredFactor
     const declared = definition.children?.[key]
     if (declared === undefined) throw new SlotOwnershipError(`slot '${key}' is not declared by this Factory`)
     if (declared.kind === 'chain') throw new SlotOwnershipError(`slot '${key}' is declared 'chain' — use renderSlotChain`)
-    return <SlotOutlet slotKey={key} ownerProps={owner} opts={opts} />
+    return <SlotOutlet slotKey={key} ownerProps={owner} opts={opts} declaredInline={declared.inline === true} />
   }
   factoryRenderSlotCache.set(definition, binding)
   return binding
@@ -147,7 +147,7 @@ function boundFactoryRenderSlotChain(host: SlotRendererHost, definition: StoredF
     if (declared.kind !== 'chain') {
       throw new SlotOwnershipError(`slot '${key}' is declared '${declared.kind}', not 'chain' — use renderSlot`)
     }
-    return <SlotOutlet slotKey={key} ownerProps={owner} opts={opts} />
+    return <SlotOutlet slotKey={key} ownerProps={owner} opts={opts} declaredInline={declared.inline === true} />
   }
   factoryRenderSlotChainCache.set(definition, binding)
   return binding
@@ -403,7 +403,7 @@ function sessionGenerationKeyOf(binding: ScopedStandardSourceBinding): number {
  * the outlet then owns the crash face).
  */
 class SlotErrorBoundary extends Component<
-  { slotKey: string; onEntryError: (error: unknown) => void; children: ReactNode }, { failed: boolean }
+  { slotKey: string; anchor?: SlotAnchorTag; onEntryError: (error: unknown) => void; children: ReactNode }, { failed: boolean }
 > {
   override state = { failed: false }
   static getDerivedStateFromError(error: unknown): { failed: boolean } {
@@ -415,7 +415,8 @@ class SlotErrorBoundary extends Component<
     this.props.onEntryError(error)
   }
   override render(): ReactNode {
-    if (this.state.failed) return <div data-slot-error={this.props.slotKey} />
+    const Anchor = this.props.anchor ?? 'div'
+    if (this.state.failed) return <Anchor data-slot-error={this.props.slotKey} />
     return this.props.children
   }
 }
@@ -440,78 +441,6 @@ class FactoryErrorBoundary extends Component<
   }
 }
 /* jscpd:ignore-end */
-
-/**
- * Occurrence-scope crash catcher for a registration that opted into
- * `failureScope: 'occurrence'`: the failure is reported without abdication and
- * the occurrence is yielded to its owner's recovery. It renders nothing while
- * failed, because the owner wrapper renders the fallback in its own body — a
- * failure inside that fallback therefore reaches the next boundary above
- * instead of re-entering the same recovery.
- */
-/* jscpd:ignore-start -- deliberate twin of SlotErrorBoundary: identical boundary protocol, opposite containment outcome. */
-class OccurrenceCrashCatcher extends Component<
-  {
-    slotKey: string
-    onEntryError: (error: unknown) => void
-    onFailure: (error: unknown) => void
-    children: ReactNode
-  },
-  { failed: boolean }
-> {
-  override state = { failed: false }
-  static getDerivedStateFromError(error: unknown): { failed: boolean } {
-    if (error instanceof SlotAssemblyError) throw error
-    return { failed: true }
-  }
-  override componentDidCatch(error: unknown): void {
-    console.error(`slot entry crashed in '${this.props.slotKey}':`, error)
-    this.props.onEntryError(error)
-    this.props.onFailure(error)
-  }
-  override render(): ReactNode {
-    if (this.state.failed) return null
-    return this.props.children
-  }
-}
-/* jscpd:ignore-end */
-
-/** Recognize DOM reparenting failures without treating an application's Error name as a DOM exception. */
-function isDomMutationError(error: unknown): boolean {
-  return error instanceof DOMException && error.name === 'NotFoundError'
-}
-
-/** Failure state and the single DOM-remount allowance for one scope and owner generation. */
-interface OccurrenceRecoveryState {
-  /** Full generation (owning scope incarnation + owner resetKey) these decisions belong to. */
-  readonly generation: string
-  /** The owner fallback is showing in place of the rich renderer. */
-  readonly failed: boolean
-  /** DOM-mutation remount budget: unspent, awaiting its commit, or spent. */
-  readonly domRetry: 'available' | 'pending' | 'spent'
-}
-
-/** Budget of a generation whose rich rendering has not failed: no failure, remount unspent. */
-function freshRecoveryState(generation: string): OccurrenceRecoveryState {
-  return { generation, failed: false, domRetry: 'available' }
-}
-
-/**
- * One qualifying failure schedules a remount after fallback commits. Additional
- * captures from the damaged subtree share that pending remount; a failure of
- * the remounted subtree keeps the fallback until the generation changes.
- */
-function settleRecoveryFailure(
-  state: OccurrenceRecoveryState,
-  generation: string,
-  error: unknown,
-  retryDomMutation: boolean,
-): OccurrenceRecoveryState {
-  const domRetry = retryDomMutation && state.domRetry === 'available' && isDomMutationError(error)
-    ? 'pending'
-    : state.domRetry
-  return { generation, failed: true, domRetry }
-}
 
 const rootStandardCache = new WeakMap<StandardSourceBinding, InjectedProps>()
 const sessionStandardCache = new WeakMap<StandardSourceBinding, WeakMap<StandardSourceBinding, InjectedProps>>()
@@ -1062,6 +991,7 @@ function FactoryOutlet({ name, inputProps, slots: selected = EMPTY_FACTORY_SELEC
     () => host.getFactoryVersion(name),
   )
   const definition = host.factoryOf(name)
+  const nextAncestors = useMemo(() => new Set(ancestors).add(name), [ancestors, name])
   if (definition === undefined) return <>{fallback ?? null}</>
   if (ancestors.has(name)) throw new SlotOwnershipError(`recursive render of factory '${name}'`)
   for (const localName of Object.keys(selected)) {
@@ -1069,7 +999,6 @@ function FactoryOutlet({ name, inputProps, slots: selected = EMPTY_FACTORY_SELEC
       throw new SlotOwnershipError(`local slot '${localName}' is not declared by factory '${name}'`)
     }
   }
-  const nextAncestors = new Set(ancestors).add(name)
   const scopeIdentity = definition.scope === 'root'
     ? 'root'
     : definition.scope === 'session'
@@ -1097,8 +1026,9 @@ function FactoryOutlet({ name, inputProps, slots: selected = EMPTY_FACTORY_SELEC
   )
 }
 
-function StrictSessionEntry({ slotKey, entry, ownerProps, slotInjected, hookContext, hasHookContext, onEntryError }: {
+function StrictSessionEntry({ slotKey, anchor, entry, ownerProps, slotInjected, hookContext, hasHookContext, onEntryError }: {
   slotKey: string
+  anchor: SlotAnchorTag
   entry: StoredEntry
   ownerProps: object
   slotInjected: BoundSlotInject
@@ -1114,7 +1044,7 @@ function StrictSessionEntry({ slotKey, entry, ownerProps, slotInjected, hookCont
   // Per-session remount rides this key; per-entry remount rides the outer
   // element's entry-identity key (the outlet's guarded() call).
   return (
-    <SlotErrorBoundary slotKey={slotKey} key={sessionGenerationKeyOf(scopedBinding)} onEntryError={onEntryError}>
+    <SlotErrorBoundary slotKey={slotKey} anchor={anchor} key={sessionGenerationKeyOf(scopedBinding)} onEntryError={onEntryError}>
       <SessionEntry
         entry={entry}
         ownerProps={ownerProps}
@@ -1136,126 +1066,11 @@ function StrictSessionEntry({ slotKey, entry, ownerProps, slotInjected, hookCont
  */
 const ANCHOR_STYLE = { display: 'contents' } as const
 
-/**
- * Occurrence-scoped containment for one opted-in registration. The owner
- * supplies the fallback and the generation it describes; a failure replaces
- * only this occurrence, other occurrences of the same registration stay
- * mounted, and the registration itself stays on the ledger.
- *
- * The recorded generation combines the owning scope incarnation with the
- * owner's reset key, because the catcher is unmounted while the fallback shows
- * and can no longer carry its own reset: a Session replacement retries rich
- * rendering exactly like the default per-entry boundary. Healthy content below
- * keeps its identity, since no React key moves.
- *
- * An owner that sets {@link OccurrenceRecovery.retryDomMutation} additionally
- * recovers one DOM-mutation crash per generation: that failure commits the
- * fallback — so the subtree the extension damaged leaves the document — and
- * the effect then remounts the rich renderer once from scratch.
- */
-function OccurrenceSlot({
-  slotKey, entry, ownerProps, slotInjected, hookContext, hasHookContext, recovery, scope,
-}: {
-  slotKey: string
-  entry: StoredEntry
-  ownerProps: object
-  slotInjected: BoundSlotInject
-  hookContext: unknown
-  hasHookContext: boolean
-  recovery: OccurrenceRecovery
-  scope: SlotScope
-}) {
-  const host = useHost()
-  const binding = useScopeBinding()
-  // A strict session occurrence rendered without its binding is a wiring
-  // failure, and it stays one while a previous generation's fallback shows.
-  if (scope === 'session' && binding.key === undefined) {
-    throw new SlotAssemblyError(`strict session slot '${slotKey}' rendered without a scope binding`)
-  }
-  const scopedBinding = binding as ScopedStandardSourceBinding
-  const sessionGeneration = scope === 'session' ? sessionGenerationKeyOf(scopedBinding) : undefined
-  const generation = sessionGeneration === undefined
-    ? recovery.resetKey
-    : `${sessionGeneration}\u0000${recovery.resetKey}`
-  const [stored, setStored] = useState<OccurrenceRecoveryState>(() => freshRecoveryState(generation))
-  // Derived state during render: a moved generation is a fresh budget, so the
-  // occurrence retries rich rendering once more and the state converges
-  // whether that retry succeeds or throws.
-  let state = stored
-  if (state.generation !== generation) {
-    state = freshRecoveryState(generation)
-    setStored(state)
-  }
-  // A DOM-mutation failure is recovered only after the fallback committed:
-  // no timer can know when that commit landed, and remounting from the same
-  // commit that raised the rejection would rebuild into the damaged document.
-  // The functional update keeps a second invocation of this effect (StrictMode
-  // replays mount effects) from spending the same generation's remount twice.
-  const remountPending = state.failed && state.domRetry === 'pending'
-  useEffect(() => {
-    if (!remountPending) return
-    setStored(previous => previous.generation === generation && previous.domRetry === 'pending'
-      ? { ...previous, failed: false, domRetry: 'spent' }
-      : previous)
-  }, [generation, remountPending])
-  if (state.failed) {
-    return (
-      <div data-slot-error={slotKey} style={ANCHOR_STYLE}>
-        {recovery.fallback}
-      </div>
-    )
-  }
-  return (
-    <OccurrenceCrashCatcher
-      slotKey={slotKey}
-      key={sessionGeneration}
-      onEntryError={(error) => { host.reportEntryError(slotKey, entry, error, { abdicate: false }) }}
-      onFailure={(error) => {
-        setStored(previous => settleRecoveryFailure(
-          previous, generation, error, recovery.retryDomMutation === true))
-      }}
-    >
-      {scope === 'session'
-        ? (
-          <SessionEntry
-            entry={entry}
-            ownerProps={ownerProps}
-            binding={scopedBinding}
-            slotKey={slotKey}
-            slotInjected={slotInjected}
-            hookContext={hookContext}
-            hasHookContext={hasHookContext}
-          />
-        )
-        : scope === 'session-maybe'
-          ? (
-            <SessionMaybeEntry
-              entry={entry}
-              ownerProps={ownerProps}
-              slotKey={slotKey}
-              slotInjected={slotInjected}
-              hookContext={hookContext}
-              hasHookContext={hasHookContext}
-            />
-          )
-          : (
-            <RootEntry
-              entry={entry}
-              ownerProps={ownerProps}
-              slotKey={slotKey}
-              slotInjected={slotInjected}
-              hookContext={hookContext}
-              hasHookContext={hasHookContext}
-            />
-          )}
-    </OccurrenceCrashCatcher>
-  )
-}
-
-function SlotOutlet({ slotKey, ownerProps, opts }: {
+function SlotOutlet({ slotKey, ownerProps, opts, declaredInline }: {
   slotKey: string
   ownerProps: object
   opts?: (RenderOpts & ChainRenderOpts) | undefined
+  declaredInline: boolean
 }) {
   const host = useHost()
   // Version tick drives entries() re-read; the host batches per microtask.
@@ -1267,6 +1082,10 @@ function SlotOutlet({ slotKey, ownerProps, opts }: {
   // bodies re-derive their `t` seat at the new revision (fresh identity).
   useLocaleRevision(host.locale)
   const scopeBinding = useScopeBinding()
+  const spec = host.specOf(slotKey)
+  // Retained elements keep their declaration's anchor after unload, but never
+  // use that declaration to dispatch entries while the live spec is absent.
+  const Anchor = (spec === undefined ? declaredInline : spec.inline === true) ? 'span' : 'div'
   // Anchor contract: every slot render site exposes a stable
   // `[data-slot="<key>"]` wrapper — the addressable seam dynamic styles
   // target — and `display:contents` keeps it layout-neutral. The wrapper
@@ -1274,9 +1093,9 @@ function SlotOutlet({ slotKey, ownerProps, opts }: {
   // undeclared-empty states all render inside it, so the anchor's presence
   // never flickers with registration churn.
   return (
-    <div data-slot={slotKey} style={ANCHOR_STYLE}>
-      {renderOutletContent(host, slotKey, ownerProps, opts, scopeBinding)}
-    </div>
+    <Anchor data-slot={slotKey} style={ANCHOR_STYLE}>
+      {spec === undefined ? null : renderOutletContent(host, slotKey, ownerProps, opts, scopeBinding, spec)}
+    </Anchor>
   )
 }
 
@@ -1287,14 +1106,11 @@ function renderOutletContent(
   ownerProps: object,
   opts: (RenderOpts & ChainRenderOpts) | undefined,
   scopeBinding: StandardSourceBinding,
+  spec: SlotSpec<SlotEntryDef>,
 ): ReactNode {
-  const spec = host.specOf(slotKey)
-  // Undeclared (or no-longer-declared) keys render empty: a declaring entry's
-  // unload returns the slot to the undeclared state while retained elements
-  // may still be mounted — natural empty, not an ownership failure.
-  if (!spec) return null
+  const Anchor = spec.inline === true ? 'span' : 'div'
   if (spec.kind === 'chain' && opts?.fallbackOnly === true) {
-    return renderChainResult(slotKey, null, opts)
+    return renderChainResult(slotKey, null, opts, Anchor)
   }
   if (spec.scope === 'session' && scopeBinding.key === undefined) {
     throw new SlotAssemblyError(`strict session slot '${slotKey}' rendered without a scope binding`)
@@ -1308,29 +1124,6 @@ function renderOutletContent(
   const guarded = (entry: StoredEntry, key?: string | number, owner: object = ownerProps) => {
     const hasHookContext = opts !== undefined && Object.hasOwn(opts, 'hookContext')
     const hookContext = opts?.hookContext
-    if (entry.failureScope === 'occurrence') {
-      const recovery = opts?.occurrenceRecovery
-      // Wiring failure, not user content: an opted registration owns its
-      // fallback, so a dispatch that omits it fails loud above the occurrence
-      // containment instead of degrading into an empty cell.
-      if (recovery === undefined) {
-        throw new SlotAssemblyError(
-          `slot '${slotKey}' entry opted into occurrence failure scope without an occurrenceRecovery payload`)
-      }
-      return (
-        <OccurrenceSlot
-          slotKey={slotKey}
-          key={key}
-          entry={entry}
-          ownerProps={owner}
-          slotInjected={slotInjected}
-          hookContext={hookContext}
-          hasHookContext={hasHookContext}
-          recovery={recovery}
-          scope={spec.scope}
-        />
-      )
-    }
     // Shadowing kinds abdicate on crash (the cell falls to its next
     // survivor); chain reports without abdicating — election alternatives
     // resolve at select time, and retiring a crashed elected entry would
@@ -1342,6 +1135,7 @@ function renderOutletContent(
       ? (
         <StrictSessionEntry
           slotKey={slotKey}
+          anchor={Anchor}
           entry={entry}
           ownerProps={owner}
           slotInjected={slotInjected}
@@ -1352,7 +1146,7 @@ function renderOutletContent(
         />
       )
       : (
-        <SlotErrorBoundary slotKey={slotKey} key={key} onEntryError={onEntryError}>
+        <SlotErrorBoundary slotKey={slotKey} anchor={Anchor} key={key} onEntryError={onEntryError}>
           {spec.scope === 'session-maybe'
             ? (
               <SessionMaybeEntry
@@ -1380,7 +1174,7 @@ function renderOutletContent(
   // A cell whose every registration abdicated keeps the crash face: the
   // shadowing collapse ran out of survivors, which is a failure state, not
   // the owner's natural-empty fallback.
-  const deadCell = () => <div data-slot-error={slotKey} />
+  const deadCell = () => <Anchor data-slot-error={slotKey} />
 
   if (spec.kind === 'single') {
     const entry = host.entriesOfSlot(slotKey)[0]
@@ -1423,7 +1217,7 @@ function renderOutletContent(
         break
       }
     }
-    return renderChainResult(slotKey, elected, opts)
+    return renderChainResult(slotKey, elected, opts, Anchor)
   }
   // list: one row per id cell — the cell's shadowing winner, or the crash
   // face once every entry of the cell abdicated (a dry cell must not
@@ -1451,7 +1245,7 @@ function renderOutletContent(
     <>
       {list.map((item, i) => item.entry !== undefined
         ? guarded(item.entry, `e${entryKeyOf(item.entry)}`)
-        : <div data-slot-error={slotKey} key={`x${item.id ?? i}`} />)}
+        : <Anchor data-slot-error={slotKey} key={`x${item.id ?? i}`} />)}
     </>
   )
 }
@@ -1461,16 +1255,17 @@ function renderChainResult(
   slotKey: string,
   elected: ReactNode,
   opts: (RenderOpts & ChainRenderOpts) | undefined,
+  Anchor: SlotAnchorTag,
 ): ReactNode {
   if (!opts?.overlay) return elected ?? <>{opts?.fallback ?? null}</>
   return (
     <>
-      <div
+      <Anchor
         data-chain-overlay-fallback={slotKey}
         style={{ display: elected === null ? 'contents' : 'none' }}
       >
         {opts.fallback ?? null}
-      </div>
+      </Anchor>
       {elected}
     </>
   )

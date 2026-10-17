@@ -2,16 +2,15 @@
 // pages a deployment's exposed host-plane namespaces produce, one field edited
 // through the real wire down to `$DSH_HOME/cordis.patch.yml`, the override badge
 // and reset that layering produces, and a community bundle's row configuration
-// registered by its own browser half. The forced-model case uses one scoped
-// scripted adapter; all other model routes fail if an unexpected stream occurs.
+// registered by its own browser half. Zero model calls: everything is client
+// state plus the settings document and the profile on a blank frame, so there
+// is no fixture and a stray stream would fail loud on the open llm seam.
 import { readFile } from 'node:fs/promises'
 import { fileURLToPath } from 'node:url'
 import type { Browser, Locator, Page } from 'playwright'
 import { chromium } from 'playwright'
-import { afterAll, beforeAll, describe, expect, it, onTestFailed, onTestFinished } from 'vitest'
-import { ReasoningEffortId } from '@deepseek-ai/dsh-llm'
-import { SessionId } from '@deepseek-ai/dsh-session'
-import { MockAdapter, textResponse } from '../../../packages/core/agent-loop/tests/mock-adapter.ts'
+import { ON_DEMAND_BUNDLES, OPTIONAL_BUNDLES } from '@deepseek-ai/dsh-app-boot'
+import { afterAll, beforeAll, describe, expect, it, onTestFailed } from 'vitest'
 import { join } from 'node:path'
 import {
   assertFixtureInventory, captureStableAria, compareOrRefreshGolden,
@@ -25,13 +24,6 @@ const ROW_EXPECTED = join(SNAPSHOT_DIR, 'row.expected.md')
 const BUNDLE_EXPECTED = join(SNAPSHOT_DIR, 'bundle.expected.md')
 const FIXTURE_PLUGINS = fileURLToPath(new URL('./fixtures/plugins', import.meta.url))
 const MODE = webSnapshotMode()
-const SHELL_ENTRY = process.platform === 'win32' ? 'pwsh-sandbox' : 'bash-sandbox'
-const SHELL_DEFAULT_TIMEOUT = process.platform === 'win32' ? '120000' : '60000'
-
-class ForcedModelAdapter extends MockAdapter {
-  override providerInfo(provider: string) { return { id: provider, name: 'Override Test' } }
-  override async listModels(provider: string) { return [await this.resolveModel(provider, 'override-model')] }
-}
 
 describe('web e2e: plugin configuration pages', () => {
   let scaffold: WebScaffold
@@ -44,6 +36,7 @@ describe('web e2e: plugin configuration pages', () => {
     // below, that half registers its row's configuration into the page.
     scaffold = await launchWebScaffold({
       extraOverlayPath: fileURLToPath(new URL('./pin-browse-picker.overlay.yml', import.meta.url)),
+      deepSeekSearch: { apiKeyEnv: 'DSH_PLUGIN_CONFIG_E2E_UNUSED_KEY' },
       profile: { packages: [{ dir: join(FIXTURE_PLUGINS, 'fixture-live-client') }] },
     })
     browser = await chromium.launch()
@@ -76,7 +69,7 @@ describe('web e2e: plugin configuration pages', () => {
     while (await panel.getByRole('button', { name: /^返回/ }).count() > 0) {
       await panel.getByRole('button', { name: /^返回/ }).first().click()
     }
-    await panel.getByRole('heading', { name: '官方', exact: true }).waitFor({ timeout: 20_000 })
+    await panel.getByRole('heading', { name: '内置插件配置', exact: true }).waitFor({ timeout: 20_000 })
     return panel
   }
 
@@ -91,34 +84,122 @@ describe('web e2e: plugin configuration pages', () => {
     return readFile(join(scaffold.harnessHome, 'profiles', 'scaffold', 'cordis.patch.yml'), 'utf8').catch(() => '')
   }
 
-  it('lists one official page per exposed host-plane namespace after the official bundles', async () => {
+  it('keeps configuration pages first and opens the full experimental plugin list separately', async () => {
     onTestFailed(() => saveFailureShot(page, 'web-e2e-plugin-config-cards'))
     const panel = await openPlugins()
 
     // Every page the shipped web composition exposes: the shell executor, the
-    // agent loop, subagent selection, and the DeepSeek search provider, after
-    // the official bundles the installation ships switched off.
+    // agent loop, subagent selection, and the DeepSeek search provider.
     await panel.getByRole('button', { name: '查看 网页搜索', exact: true }).waitFor({ timeout: 20_000 })
-    const official = panel.locator('[data-plugin-group="official"]')
-    expect(await official.locator('[data-plugin-package]').count()).toBe(2)
-    expect(await official.locator('[data-plugin-item]').count()).toBe(4)
-    for (const title of ['终端', 'Agent 循环', 'Subagent', '网页搜索']) {
-      expect(await official.getByRole('button', { name: `查看 ${title}`, exact: true }).count()).toBe(1)
+    const basic = panel.locator('[data-plugin-group="basic"]')
+    expect(await basic.locator('[data-plugin-item]').count()).toBe(4)
+    expect(await basic.locator(':scope > ul > li').evaluateAll(cards => cards.map(card => card.getAttribute('data-plugin-item'))))
+      .toEqual(['subagent', 'web-search', 'agent-loop', 'shell'])
+    for (const title of ['子智能体', '网页搜索', 'Agent 循环', '终端']) {
+      expect(await basic.getByRole('button', { name: `查看 ${title}`, exact: true }).count()).toBe(1)
     }
     // A card carries the one-liner; the fields wait for the page.
-    expect(await official.getByText('限制每条命令最多能跑多久、最多输出多少内容。', { exact: true }).count()).toBe(1)
+    expect(await basic.getByText('限制每条命令最多能跑多久、最多输出多少内容。', { exact: true }).count()).toBe(1)
     expect(await panel.getByLabel('命令超时（毫秒）').count()).toBe(0)
+
+    const extensions = panel.locator('[data-plugin-group="extensions"]')
+    const more = panel.getByRole('button', { name: '更多', exact: true })
+    expect(await extensions.getByRole('heading', { name: '实验性插件', exact: true }).count()).toBe(1)
+    expect(await extensions.getByRole('button', { name: '更多', exact: true }).textContent()).toBe('更多')
+    expect(await extensions.getByRole('list').isVisible()).toBe(true)
+    expect(await panel.locator('[data-plugin-group="more"]').count()).toBe(0)
+    await more.focus()
+    await page.keyboard.press('Enter')
+    await panel.getByRole('heading', { name: '实验性插件', exact: true, level: 1 }).waitFor()
+    expect(await panel.locator('[data-plugin-group="more"] [data-plugin-package]').count())
+      .toBe(OPTIONAL_BUNDLES.length + ON_DEMAND_BUNDLES.length)
+    expect(await basic.count()).toBe(0)
+    expect(await extensions.count()).toBe(0)
+    expect(await panel.locator('[data-plugin-group="bundles"]').count()).toBe(0)
+    await panel.getByRole('button', { name: '查看 Git 工作树', exact: true }).click()
+    await panel.locator('[data-plugin-detail]').waitFor()
+    await panel.getByRole('button', { name: '返回 实验性插件', exact: true }).click()
+    await panel.getByRole('heading', { name: '实验性插件', exact: true, level: 1 }).waitFor()
+    await panel.getByRole('button', { name: '返回插件', exact: true }).focus()
+    await page.keyboard.press('Space')
+    expect(await extensions.getByRole('list').isVisible()).toBe(true)
+    expect(await panel.locator('[data-plugin-group="more"]').count()).toBe(0)
+    await more.click()
+    await page.reload({ waitUntil: 'load' })
+    await openPlugins()
+    expect(await extensions.getByRole('list').isVisible()).toBe(true)
+    expect(await panel.locator('[data-plugin-group="more"]').count()).toBe(0)
 
     const snapshot = await captureStableAria(page, '[data-plugin-panel]', scaffold.workspaceCwd)
     await compareOrRefreshGolden(OFFICIAL_EXPECTED, snapshot, MODE)
     expect(tripwire.pageErrors).toEqual([])
   }, 60_000)
 
+  it('switches search and fetch to the Search and Fetch APIs together and preserves each API’s endpoint', async () => {
+    onTestFailed(() => saveFailureShot(page, 'web-e2e-search-api-settings'))
+    const panel = await openPlugins()
+    await openPage(panel, '网页搜索')
+    const toggle = panel.getByRole('switch', { name: '启用新版 Web 搜索 API', exact: true })
+    const endpoint = panel.locator('#plugin-config-web-search-endpoint')
+    const maxUses = panel.getByLabel('单次请求最多搜索次数', { exact: true })
+    const save = panel.getByRole('button', { name: '保存', exact: true })
+    expect(await toggle.getAttribute('aria-checked')).toBe('false')
+    expect(await panel.getByRole('link', { name: '网页搜索与抓取指南', exact: true }).getAttribute('href'))
+      .toBe('https://api-docs.deepseek.com/zh-cn/guides/search')
+    expect(await panel.getByLabel('Messages API 基础地址', { exact: true }).count()).toBe(1)
+    expect(await maxUses.inputValue()).toBe('5')
+    expect(await endpoint.inputValue()).toBe('')
+    expect(await save.isDisabled()).toBe(true)
+    await endpoint.fill('https://messages.test/anthropic/v1')
+    await save.click()
+    await expect.poll(() => save.isDisabled()).toBe(true)
+    await toggle.focus()
+    await page.keyboard.press('Space')
+    expect(await panel.getByLabel('Search / Fetch API 基础地址', { exact: true }).count()).toBe(1)
+    expect(await endpoint.inputValue()).toBe('https://api.deepseek.com/v1/tools')
+    expect(await maxUses.count()).toBe(0)
+    const count = panel.getByLabel('每次搜索结果数', { exact: true })
+    expect(await count.inputValue()).toBe('10')
+    await count.fill('51')
+    await panel.getByText('请填 1–50 的整数；留空表示使用默认值。', { exact: true }).waitFor()
+    expect(await save.isDisabled()).toBe(true)
+    expect(await toggle.isDisabled()).toBe(true)
+    await count.fill('10')
+    expect(await settingsDocument()).not.toContain('searchProvider: deepseek-search-api')
+    await endpoint.fill('https://search-api.test/api/v1/tools')
+    await save.click()
+    await expect.poll(() => save.isDisabled()).toBe(true)
+    await expect.poll(settingsDocument).toContain('searchProvider: deepseek-search-api')
+    await expect.poll(settingsDocument).toContain('fetchProvider: deepseek-fetch-api')
+    await expect.poll(settingsDocument).toContain('baseURL: https://search-api.test/api/v1/tools')
+    await page.reload({ waitUntil: 'load' })
+    await page.waitForSelector('[class*="frame"]', { timeout: 30_000 })
+    await openPlugins()
+    await openPage(panel, '网页搜索')
+    expect(await toggle.getAttribute('aria-checked')).toBe('true')
+    expect(await endpoint.inputValue()).toBe('https://search-api.test/api/v1/tools')
+    const snapshot = await captureStableAria(page, '[data-plugin-panel]', scaffold.workspaceCwd)
+    await compareOrRefreshGolden(join(SNAPSHOT_DIR, 'web-search.expected.md'), snapshot, MODE)
+    await panel.getByRole('button', { name: '恢复默认', exact: true }).click()
+    expect(await endpoint.inputValue()).toBe('https://api.deepseek.com/v1/tools')
+    await save.click()
+    await expect.poll(() => save.isDisabled()).toBe(true)
+    await expect.poll(settingsDocument).not.toContain('https://search-api.test/api/v1/tools')
+    await toggle.click()
+    expect(await endpoint.inputValue()).toBe('https://messages.test/anthropic/v1')
+    await save.click()
+    await expect.poll(() => save.isDisabled()).toBe(true)
+    await expect.poll(settingsDocument).not.toContain('searchProvider: deepseek-search-api')
+    await expect.poll(settingsDocument).not.toContain('fetchProvider: deepseek-fetch-api')
+    expect(await settingsDocument()).toContain('baseURL: https://messages.test/anthropic/v1')
+    expect(tripwire.pageErrors).toEqual([])
+  })
+
   it('saves subagent limits and resets them to the deployment defaults', async () => {
     const panel = await openPlugins()
-    await openPage(panel, 'Subagent')
+    await openPage(panel, '子智能体')
     const depth = panel.getByLabel('最大递归深度', { exact: true })
-    const capacity = panel.getByLabel('Subagent 并行数量上限', { exact: true })
+    const capacity = panel.getByLabel('子智能体并行数量上限', { exact: true })
     expect(await depth.inputValue()).toBe('1')
     expect(await capacity.inputValue()).toBe('8')
     await depth.fill('2')
@@ -128,7 +209,7 @@ describe('web e2e: plugin configuration pages', () => {
     await expect.poll(settingsDocument).toContain('maxActiveSubagents: 12')
     await expect.poll(settingsDocument).toContain('maxDepth: 2')
     await openPlugins()
-    await openPage(panel, 'Subagent')
+    await openPage(panel, '子智能体')
     const snapshot = await captureStableAria(page, '[data-plugin-panel]', scaffold.workspaceCwd)
     await compareOrRefreshGolden(join(SNAPSHOT_DIR, 'subagent.expected.md'), snapshot, MODE)
     const controlHeight = await depth.evaluate(element => element.getBoundingClientRect().height)
@@ -141,152 +222,15 @@ describe('web e2e: plugin configuration pages', () => {
     await panel.getByRole('button', { name: '保存', exact: true }).click()
     await expect.poll(() => panel.getByRole('button', { name: '保存', exact: true }).isDisabled()).toBe(true)
     await openPlugins()
-    await openPage(panel, 'Subagent')
+    await openPage(panel, '子智能体')
     expect(await depth.inputValue()).toBe('1')
     expect(await capacity.inputValue()).toBe('8')
-    await panel.getByRole('button', { name: '返回插件列表', exact: true }).click()
-  })
-
-  it('saves a forced child model through the UI and restores ordinary selection', async () => {
-    onTestFailed(() => saveFailureShot(page, 'web-e2e-subagent-model-override'))
-    const adapter = new ForcedModelAdapter([textResponse('forced child answer')], {
-      efforts: [{ id: ReasoningEffortId('high'), name: 'High' }], defaultEffort: ReasoningEffortId('high'),
-    })
-    const unregister = scaffold.ctx.llm.registerAdapter(['override-test'], adapter)
-    onTestFinished(unregister)
-    const panel = await openPlugins()
-    await openPage(panel, 'Subagent')
-    const section = panel.getByRole('region', { name: '强制模型覆盖', exact: true })
-    await section.getByRole('switch', { name: '为新建 Subagent 强制指定模型' }).click()
-    const save = panel.getByRole('button', { name: '保存', exact: true })
-    expect(await save.isDisabled()).toBe(true)
-    await section.getByRole('button', { name: '提供方', exact: true }).click()
-    await page.getByRole('menu').getByText('Override Test', { exact: true }).click()
-    await section.getByRole('button', { name: '模型', exact: true }).click()
-    await page.getByRole('menu').getByText('override-model', { exact: true }).click()
-    await section.getByRole('button', { name: '推理强度', exact: true }).click()
-    await page.keyboard.press('Escape')
-    await expect.poll(() => page.getByRole('menu').count()).toBe(0)
-    await section.getByRole('button', { name: '推理强度', exact: true }).click()
-    await page.getByRole('menu').getByText('High', { exact: true }).click()
-    await save.click()
-    await expect.poll(() => save.isDisabled()).toBe(true)
-    await expect.poll(settingsDocument).toContain('modelOverride:')
-    await expect.poll(() => scaffold.ctx.subagents.prepareModel('spawn', { provider: 'missing', model: 'wrong' }).agentOptions)
-      .toEqual({ provider: 'override-test', model: 'override-model', reasoningEffort: 'high' })
-    const parent = await scaffold.ctx.agents.create({
-      sessionId: SessionId('override-ui-parent'), meta: { cwd: scaffold.workspaceCwd },
-      agentOptions: { provider: 'deepseek-official', model: 'deepseek-v4-flash' },
-    })
-    onTestFinished(() => parent.dispose())
-    const child = await scaffold.ctx.subagents.start('spawn', {
-      parent: parent.agent, prompt: [{ type: 'text', text: 'test forced route' }], signal: new AbortController().signal,
-      agentOptions: { provider: 'missing', model: 'wrong', reasoningEffort: ReasoningEffortId('max') },
-    })
-    onTestFinished(() => child.dispose())
-    expect((await child.result).stopReason).toBe('completed')
-    expect(adapter.requests).toHaveLength(1)
-    expect(adapter.requests[0]).toMatchObject({ provider: 'override-test', model: 'override-model', reasoningEffort: 'high' })
-    await child.dispose()
-    await parent.dispose()
-    await openPlugins()
-    await openPage(panel, 'Subagent')
-    expect(await section.getByRole('switch').getAttribute('aria-checked')).toBe('true')
-    await compareOrRefreshGolden(join(SNAPSHOT_DIR, 'subagent-override.expected.md'),
-      await captureStableAria(page, '[data-plugin-panel]', scaffold.workspaceCwd), MODE)
-    await page.screenshot({ path: fileURLToPath(new URL('../../../tmp/subagent-override-ui.png', import.meta.url)) })
-    await page.emulateMedia({ colorScheme: 'dark' })
-    await page.screenshot({ path: fileURLToPath(new URL('../../../tmp/subagent-override-ui-dark.png', import.meta.url)) })
-    await page.emulateMedia({ colorScheme: 'light' })
-    await section.getByRole('button', { name: '恢复默认', exact: true }).click()
-    await save.click()
-    await expect.poll(() => save.isDisabled()).toBe(true)
-    expect(scaffold.ctx.subagents.prepareModel('spawn').override).toBeNull()
-    expect(tripwire.pageErrors).toEqual([])
-  })
-
-  it('sets the same child model override from General Settings and the plugin page', async () => {
-    onTestFailed(() => saveFailureShot(page, 'web-e2e-general-subagent-override'))
-    const adapter = new ForcedModelAdapter([textResponse('general override answer')], {
-      efforts: [{ id: ReasoningEffortId('high'), name: 'High' }], defaultEffort: ReasoningEffortId('high'),
-    })
-    const unregister = scaffold.ctx.llm.registerAdapter(['general-override-test'], adapter)
-    onTestFinished(unregister)
-    await page.getByRole('button', { name: '设置', exact: true }).click()
-    const dialog = page.getByRole('dialog', { name: '设置' })
-    await dialog.getByRole('button', { name: '通用设置', exact: true }).click()
-    const row = dialog.locator('[data-subagent-override-row]')
-    const model = row.getByRole('button', { name: 'Subagent 覆盖模型', exact: true })
-    const effort = row.getByRole('button', { name: 'Subagent 推理强度', exact: true })
-    await model.click()
-    await page.getByRole('menuitem', { name: 'override-model', exact: true }).click()
-    await expect.poll(() => scaffold.ctx.subagents.prepareModel('spawn').override)
-      .toEqual({ provider: 'general-override-test', model: 'override-model' })
-    await effort.click()
-    await page.getByRole('menuitem', { name: 'High', exact: true }).click()
-    await expect.poll(() => scaffold.ctx.subagents.prepareModel('spawn').override)
-      .toEqual({ provider: 'general-override-test', model: 'override-model', reasoningEffort: 'high' })
-    await expect.poll(() => row.getAttribute('aria-busy')).toBe('false')
-    await compareOrRefreshGolden(join(SNAPSHOT_DIR, 'general-subagent-override.expected.md'),
-      await captureStableAria(page, '[data-subagent-override-row]', scaffold.workspaceCwd), MODE)
-    await row.screenshot({ path: fileURLToPath(new URL('../../../tmp/general-subagent-override-row.png', import.meta.url)) })
-    await dialog.screenshot({ path: fileURLToPath(new URL('../../../tmp/general-subagent-override-light.png', import.meta.url)) })
-    await page.emulateMedia({ colorScheme: 'dark' })
-    await dialog.screenshot({ path: fileURLToPath(new URL('../../../tmp/general-subagent-override-dark.png', import.meta.url)) })
-    await page.emulateMedia({ colorScheme: 'light' })
-
-    await page.setViewportSize({ width: 640, height: 600 })
-    await model.click()
-    const menu = page.getByRole('menu')
-    const box = await menu.boundingBox()
-    expect(box).not.toBeNull()
-    expect(box!.x).toBeGreaterThanOrEqual(0)
-    expect(box!.y).toBeGreaterThanOrEqual(0)
-    expect(box!.x + box!.width).toBeLessThanOrEqual(640)
-    expect(box!.y + box!.height).toBeLessThanOrEqual(600)
-    await page.keyboard.press('Escape')
-    await expect.poll(() => menu.count()).toBe(0)
-    await expect.poll(() => model.evaluate(element => document.activeElement === element)).toBe(true)
-    await model.click()
-    await dialog.getByText('Subagent 模型覆盖', { exact: true }).click()
-    await expect.poll(() => menu.count()).toBe(0)
-    await page.setViewportSize({ width: 1680, height: 1000 })
-
-    const panel = await openPlugins()
-    await openPage(panel, 'Subagent')
-    const section = panel.getByRole('region', { name: '强制模型覆盖', exact: true })
-    expect(await section.getByRole('button', { name: '模型', exact: true }).textContent()).toBe('override-model')
-    expect(await section.getByRole('button', { name: '推理强度', exact: true }).textContent()).toBe('High')
-    const parent = await scaffold.ctx.agents.create({
-      sessionId: SessionId('general-override-parent'), meta: { cwd: scaffold.workspaceCwd },
-      agentOptions: { provider: 'deepseek-official', model: 'deepseek-v4-flash' },
-    })
-    onTestFinished(() => parent.dispose())
-    const child = await scaffold.ctx.subagents.start('spawn', {
-      parent: parent.agent, prompt: [{ type: 'text', text: 'test General Settings override' }], signal: new AbortController().signal,
-      agentOptions: { provider: 'missing', model: 'wrong' },
-    })
-    onTestFinished(() => child.dispose())
-    expect((await child.result).stopReason).toBe('completed')
-    expect(adapter.requests).toHaveLength(1)
-    expect(adapter.requests[0]).toMatchObject({ provider: 'general-override-test', model: 'override-model', reasoningEffort: 'high' })
-
-    await page.getByRole('button', { name: '设置', exact: true }).click()
-    await dialog.getByRole('button', { name: '通用设置', exact: true }).click()
-    await effort.click()
-    await page.getByRole('menuitem', { name: '模型默认值', exact: true }).click()
-    await expect.poll(() => scaffold.ctx.subagents.prepareModel('spawn').override)
-      .toEqual({ provider: 'general-override-test', model: 'override-model' })
-    await model.click()
-    await page.getByRole('menuitem', { name: '不覆盖', exact: true }).click()
-    await expect.poll(() => scaffold.ctx.subagents.prepareModel('spawn').override).toBeNull()
-    expect(tripwire.pageErrors).toEqual([])
-    await page.keyboard.press('Escape')
+    await panel.getByRole('button', { name: '返回插件', exact: true }).click()
   })
 
   it('opens field explanations with the keyboard and retains unsaved edits', async () => {
     const panel = await openPlugins()
-    await openPage(panel, 'Subagent')
+    await openPage(panel, '子智能体')
     const depth = panel.getByLabel('最大递归深度', { exact: true })
     await depth.fill('2')
     const depthHelp = panel.getByRole('button', { name: '最大递归深度说明', exact: true })
@@ -294,27 +238,27 @@ describe('web e2e: plugin configuration pages', () => {
     await depthHelp.press('Enter')
     const depthRules = panel.getByRole('region', { name: '最大递归深度说明', exact: true })
     await depthRules.waitFor()
-    expect(await depthRules.getByText('限制 Agent 创建 Subagent 的递归层级。', { exact: true }).count()).toBe(1)
+    expect(await depthRules.getByText('限制 Agent 创建子智能体的递归层级。', { exact: true }).count()).toBe(1)
     const depthTable = depthRules.getByRole('table', { name: '最大递归深度说明', exact: true })
-    expect(await depthTable.getByRole('row', { name: '0 禁用 Subagent', exact: true }).count()).toBe(1)
-    expect(await depthTable.getByRole('row', { name: '1 仅允许主 Agent 创建 Subagent', exact: true }).count()).toBe(1)
+    expect(await depthTable.getByRole('row', { name: '0 禁用子智能体', exact: true }).count()).toBe(1)
+    expect(await depthTable.getByRole('row', { name: '1 仅允许主 Agent 创建子智能体', exact: true }).count()).toBe(1)
     expect(await depthRules.getByText('如果某个工具单独设置了最大递归深度，以该工具的设置为准。', { exact: true }).count()).toBe(1)
     await depthHelp.press('Enter')
     expect(await depthRules.count()).toBe(0)
     expect(await depth.inputValue()).toBe('2')
-    await panel.getByRole('button', { name: 'Subagent 并行数量上限说明', exact: true }).click()
-    const capacityRules = panel.getByRole('region', { name: 'Subagent 并行数量上限说明', exact: true })
-    expect(await capacityRules.getByText('同一主 Agent 下，所有递归层级同时存活的 Subagent 总数，主 Agent 不计入。达到上限时，新的启动请求会被拒绝。', { exact: true }).count()).toBe(1)
-    await panel.getByRole('button', { name: '返回插件列表', exact: true }).click()
-    await openPage(panel, 'Subagent')
+    await panel.getByRole('button', { name: '子智能体并行数量上限说明', exact: true }).click()
+    const capacityRules = panel.getByRole('region', { name: '子智能体并行数量上限说明', exact: true })
+    expect(await capacityRules.getByText('同一主 Agent 下，所有递归层级同时存活的子智能体总数，主 Agent 不计入。达到上限时，新的启动请求会被拒绝。', { exact: true }).count()).toBe(1)
+    await panel.getByRole('button', { name: '返回插件', exact: true }).click()
+    await openPage(panel, '子智能体')
     expect(await depth.inputValue()).toBe('1')
   })
 
   it('saves limits and the model allowlist together from the shared card', async () => {
     onTestFailed(() => saveFailureShot(page, 'web-e2e-plugin-config-subagent-model-selection'))
     const panel = await openPlugins()
-    await openPage(panel, 'Subagent')
-    const toggle = panel.getByRole('switch', { name: '允许 Agent 为 Subagent 选择模型' })
+    await openPage(panel, '子智能体')
+    const toggle = panel.getByRole('switch', { name: '允许 Agent 为子智能体选择模型' })
 
     await panel.getByLabel('最大递归深度', { exact: true }).fill('2')
     await toggle.click()
@@ -348,14 +292,13 @@ describe('web e2e: plugin configuration pages', () => {
     onTestFailed(() => saveFailureShot(page, 'web-e2e-plugin-config-write'))
     const panel = await openPlugins()
     await openPage(panel, '终端')
-    const entry = [...scaffold.ctx.loader.entries()].find(row => row.options.id === SHELL_ENTRY)!
+    const entry = [...scaffold.ctx.loader.entries()].find(row => row.options.id === 'bash-sandbox')!
     const fiber = entry.fiber
-    expect(fiber).toBeDefined()
 
     const timeout = panel.getByLabel('命令超时（毫秒）')
     await timeout.waitFor({ timeout: 10_000 })
     // The composed default this deployment ships, before any user layer.
-    expect(await timeout.inputValue()).toBe(SHELL_DEFAULT_TIMEOUT)
+    expect(await timeout.inputValue()).toBe('60000')
     await timeout.fill('12000')
     await timeout.blur()
 
@@ -387,8 +330,8 @@ describe('web e2e: plugin configuration pages', () => {
     await timeout.waitFor({ timeout: 10_000 })
 
     await timeout.fill('7000')
-    await panel.getByRole('button', { name: '返回插件列表' }).click()
-    await panel.getByRole('heading', { name: '官方', exact: true }).waitFor({ timeout: 10_000 })
+    await panel.getByRole('button', { name: '返回插件' }).click()
+    await panel.getByRole('heading', { name: '内置插件配置', exact: true }).waitFor({ timeout: 10_000 })
     await openPage(panel, '终端')
 
     await expect.poll(() => panel.getByLabel('命令超时（毫秒）').inputValue(), { timeout: 5_000 }).toBe('12000')
@@ -422,14 +365,14 @@ describe('web e2e: plugin configuration pages', () => {
     // The reset stages the composed default; the document still carries the
     // override until the save lands.
     await panel.getByRole('button', { name: '恢复默认' }).click()
-    await expect.poll(() => timeout.inputValue(), { timeout: 5_000 }).toBe(SHELL_DEFAULT_TIMEOUT)
+    await expect.poll(() => timeout.inputValue(), { timeout: 5_000 }).toBe('60000')
     expect(await settingsDocument()).toContain('timeoutMs: 12000')
 
     await panel.getByRole('button', { name: '保存', exact: true }).click()
 
     await expect.poll(async () => (await settingsDocument()).includes('timeoutMs'), { timeout: 10_000 })
       .toBe(false)
-    expect(await timeout.inputValue()).toBe(SHELL_DEFAULT_TIMEOUT)
+    expect(await timeout.inputValue()).toBe('60000')
     expect(await panel.getByText('已覆盖').count()).toBe(0)
     expect(tripwire.pageErrors).toEqual([])
   }, 60_000)
@@ -463,7 +406,9 @@ describe('web e2e: plugin configuration pages', () => {
     expect(await bundlePage.getByRole('button', { name: '夹具操作' }).count()).toBe(1)
     expect(await bundlePage.locator('[data-live-badge="bundle"]').textContent()).toBe('夹具标签')
     expect(await bundlePage.getByRole('region', { name: '夹具区块' }).getByText('来自夹具的区块内容').count()).toBe(1)
-    const bundleSnapshot = await captureStableAria(page, '[data-plugin-panel]', scaffold.workspaceCwd)
+    const bundleSnapshot = await captureStableAria(page, '[data-plugin-panel]', scaffold.workspaceCwd, {
+      replacements: [[FIXTURE_PLUGINS, '{{fixtures}}']],
+    })
     await compareOrRefreshGolden(BUNDLE_EXPECTED, bundleSnapshot, MODE)
     await configure.click()
 
@@ -486,7 +431,7 @@ describe('web e2e: plugin configuration pages', () => {
     await bundlePage.waitFor({ timeout: 10_000 })
 
     // An official plugin's page is another subject; the fixture's entries render nothing for it.
-    await panel.getByRole('button', { name: '返回插件列表' }).click()
+    await panel.getByRole('button', { name: '返回插件' }).click()
     await openPage(panel, '终端')
     const itemPage = panel.locator('[data-plugin-item-detail]')
     expect(await itemPage.locator('[data-live-action], [data-live-badge], [data-live-section]').count()).toBe(0)
@@ -495,7 +440,7 @@ describe('web e2e: plugin configuration pages', () => {
 
   it.skipIf(MODE === 'record')('keeps the fixture inventory closed', async () => {
     expect(tripwire.warnings).toEqual([])
-    await assertFixtureInventory(SNAPSHOT_DIR, ['bundle.expected.md', 'official.expected.md', 'row.expected.md', 'subagent.expected.md', 'subagent-override.expected.md'])
+    await assertFixtureInventory(SNAPSHOT_DIR, ['bundle.expected.md', 'official.expected.md', 'row.expected.md', 'subagent.expected.md', 'web-search.expected.md'])
   })
 
 

@@ -1,13 +1,14 @@
 /**
  * Pure row-model derivation for tool summary rows: variant classification,
- * one-line summary, expanded-body text, and flattened result output from the
- * frozen call slice. Input material comes from the call ARGUMENTS; output and
- * error material from the settled result node. A supported terminal call gets
- * its expanded body from `terminalCardModel` instead.
+ * one-line summary, expansion-time body input, and flattened result output
+ * from the frozen call slice. Labels keep the call arguments; navigation,
+ * output, and errors use the settled result. A supported terminal
+ * call gets its expanded body from `terminalCardModel` instead.
  */
-import type { ToolCallBlock, ToolResultNode } from '@deepseek-ai/dsh-client-ui-chat/client'
+import type { ToolArgs, ToolCallBlock, ToolResultNode } from '@deepseek-ai/dsh-client-ui-chat/client'
 import type { LocaleKeysOf } from '@deepseek-ai/dsh-client-ui-slots'
-import { abbreviateHomePath, relativizeToCwd } from '@deepseek-ai/dsh-util-workspace-path'
+import { abbreviateHomePath, isAbsoluteWorkspacePath, relativizeToCwd } from '@deepseek-ai/dsh-util-workspace-path'
+import { recordedAbsolutePath } from './recorded-path.ts'
 
 export type { ToolCallBlock } from '@deepseek-ai/dsh-client-ui-chat/client'
 
@@ -87,6 +88,7 @@ const TOOL_TITLE_KEYS: Record<string, ToolTitleKey> = {
   schedule_create: 'tool.title.createSchedule',
   schedule_list: 'tool.title.listSchedules',
   schedule_delete: 'tool.title.deleteSchedule',
+  schedule_update: 'tool.title.updateSchedule',
   cordis_inspect_list: 'tool.title.inspectProviders',
   cordis_inspect_query: 'tool.title.queryRuntime',
   cordis_inspect_self: 'tool.title.inspectPlugins',
@@ -144,14 +146,14 @@ export interface ToolRowModel {
   /** Generic rows retain the wire tool name; available arguments append their summary. */
   summary: string
   /**
-   * Filesystem path from args (`path` / `file_path`) when the row is a file
-   * tool; absent for URL reads and non-file tools. The chat view resolves
-   * relative values against the session cwd before opening.
+   * Operation-time absolute result path for file rows. Old results without
+   * location metadata retain their argument fallback; running relative paths
+   * stay unavailable until their result identifies the target.
    */
   filePath: string | undefined
   /** Original argument JSON retained for expansion-time body formatting. */
   bodyRaw: string | null
-  /** Flattened result text; null while running or when the result carries no text. */
+  /** Flattened result text ({@link resultText}); null while running or when the result carries no text. */
   output: string | null
   /** First line of the result text on an error row; null for every other state. */
   errorSummary: string | null
@@ -188,22 +190,11 @@ export function resultText(node: ToolResultNode): string {
   return parts.join('\n')
 }
 
-/** Whether a result would produce an expanded output section without flattening it.
- * @param node - settled result to inspect.
- * @returns whether its displayed output would be nonempty.
- */
-export function hasResultText(node: ToolResultNode): boolean {
-  if (node.content.length === 0) return node.error !== undefined
-  if (node.content.length > 1) return true
-  const first = node.content[0]
-  return first !== undefined && (first.type !== 'text' || first.text !== '')
-}
-
 function parseArgs(argsRaw: string): unknown {
   try {
     return JSON.parse(argsRaw)
   } catch {
-    // Non-JSON args (mid-stream truncation): summary/body fall back to the raw string.
+    // Non-JSON args (mid-stream truncation or a rejected call kept verbatim): summary/body fall back to the raw string.
     return undefined
   }
 }
@@ -211,15 +202,6 @@ function parseArgs(argsRaw: string): unknown {
 function firstLine(text: string): string {
   const nl = text.indexOf('\n')
   return nl === -1 ? text : text.slice(0, nl)
-}
-
-/** Read a collapsed error line without serializing every result block. */
-function resultFirstLine(node: ToolResultNode): string | null {
-  const first = node.content[0]
-  if (first === undefined) return node.error === undefined ? null : `${node.error.name}: ${node.error.code}`
-  if (first.type !== 'text') return '{'
-  if (first.text !== '') return firstLine(first.text)
-  return node.content.length > 1 ? '' : null
 }
 
 function pickString(args: Record<string, unknown>, keys: readonly string[]): string | undefined {
@@ -247,7 +229,7 @@ function deriveSummary(variant: ToolRowVariant, argsRaw: string): string {
   if (typeof parsed !== 'object' || parsed === null) return firstLine(argsRaw)
   const args = parsed as Record<string, unknown>
   if (variant === 'search' && Array.isArray(args.queries)) {
-    const queries = args.queries.filter((query): query is string => typeof query === 'string' && query !== '')
+    const queries = args.queries.filter((query: unknown): query is string => typeof query === 'string' && query !== '')
     if (queries.length > 0) return queries.map(firstLine).join(', ')
   }
   const picked = pickString(args, SUMMARY_KEYS[variant])
@@ -264,6 +246,24 @@ const FILE_PATH_KEYS = ['path', 'file_path'] as const
 /** File-tool variants whose summary may be an openable workspace path. */
 const FILE_PATH_VARIANTS: ReadonlySet<ToolRowVariant> = new Set(['read', 'write', 'edit'])
 
+/**
+ * Summary material read the same way at every stage from the argument view: a
+ * complete `file_path` for file tools, otherwise the `description` text so far.
+ * Empty when the view carries neither, so the caller falls back to the raw text.
+ */
+function argumentSummary(
+  variant: ToolRowVariant, args: ToolArgs, cwd?: string, home?: string,
+): { summary: string; filePath: string | undefined } {
+  if (FILE_PATH_VARIANTS.has(variant)) {
+    const path = args.complete('file_path') ? args.text('file_path') : undefined
+    // Decoding text can discover an invalid escape and make complete() false.
+    const filePath = path !== undefined && path !== '' && args.complete('file_path') ? firstLine(path) : undefined
+    return { summary: filePath === undefined ? '' : abbreviateHomePath(relativizeToCwd(filePath, cwd), home), filePath }
+  }
+  const description = args.text('description')
+  return { summary: description === undefined ? '' : firstLine(description), filePath: undefined }
+}
+
 function deriveFilePath(variant: ToolRowVariant, argsRaw: string): string | undefined {
   if (!FILE_PATH_VARIANTS.has(variant)) return undefined
   const parsed = parseArgs(argsRaw)
@@ -272,10 +272,11 @@ function deriveFilePath(variant: ToolRowVariant, argsRaw: string): string | unde
   return picked === undefined ? undefined : firstLine(picked)
 }
 
-/** Format arguments only when a generic Tool row expands.
- * @param variant - selected Tool presentation.
- * @param argsRaw - original Tool arguments.
- * @returns expanded input text, or null for empty input.
+/**
+ * Format one argument payload when its generic input body becomes visible.
+ * @param variant - row presentation selected for the Tool name.
+ * @param argsRaw - original argument JSON or incomplete raw text.
+ * @returns display body, or null for empty input.
  */
 export function formatToolBody(variant: ToolRowVariant, argsRaw: string): string | null {
   if (argsRaw === '') return null
@@ -303,29 +304,34 @@ export function toolRowModel(toolName: string, block: ToolCallBlock, cwd?: strin
   const titleKey = toolTitleKey(toolName)
   const done = 'kind' in block
   const argsRaw = done ? block.call?.argsRaw ?? '' : block.phase === 'start' ? block.argsRaw : null
+  const primary = argumentSummary(variant, block.args, cwd, home)
+  const argumentPath = primary.filePath ?? (argsRaw === null ? undefined : deriveFilePath(variant, argsRaw))
+  const recordedPath = done ? recordedAbsolutePath(block.meta, 'path') : undefined
+  const canUseArgumentPath = argumentPath !== undefined
+    && (isAbsoluteWorkspacePath(argumentPath) || done && !block.isError && block.parentCallId === undefined)
+  const filePath = argumentPath === undefined ? undefined
+    : recordedPath ?? (canUseArgumentPath ? argumentPath : undefined)
   const state: ToolRowState = !done ? block.phase === 'preparing' ? 'preparing' : 'running'
     : block.error?.code === 'interrupted' ? 'stopped'
       : block.isError ? 'error' : 'ok'
-  const base = argsRaw === null ? ''
+  // The argument view serves every stage; the raw text is the fallback when it carries nothing useful.
+  const base = primary.summary !== '' || argsRaw === null ? primary.summary
     : argsRaw === '' ? block.callId
       : abbreviateHomePath(relativizeToCwd(deriveSummary(variant, argsRaw), cwd), home)
   const summary = [titleKey === 'tool.title.generic' ? toolName : '', base].filter(Boolean).join(' · ')
   // The empty string is "no text" for both derived result fields: a settled
   // call with blank content has nothing to expand, and a blank first line
   // would erase the collapsed error row's summary slot.
-  let cachedOutput: string | null | undefined
-  const errorSummary = state === 'error' && done ? resultFirstLine(block) : null
+  const output = done ? (resultText(block) || null) : null
+  const errorSummary = state === 'error' && output !== null ? firstLine(output) : null
   const bodyRaw = argsRaw === '' ? null : argsRaw
   return {
     variant,
     titleKey,
     summary,
-    filePath: argsRaw === null ? undefined : deriveFilePath(variant, argsRaw),
+    filePath,
     bodyRaw,
-    get output() {
-      if (cachedOutput === undefined) cachedOutput = done ? resultText(block) || null : null
-      return cachedOutput
-    },
+    output,
     errorSummary,
     autoReviewDenial: deriveAutoReviewDenial(block),
     state,

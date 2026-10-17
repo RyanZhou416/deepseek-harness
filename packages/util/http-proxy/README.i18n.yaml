@@ -1,6 +1,58 @@
-# Bilingual-pair consistency record (docs/i18n/README.md): the git blob hash of each
-# side as of the last confirmed-consistent state. Both languages carry equal authority;
-# after editing either side, bring the other along and re-record with:
+# Bilingual-pair consistency record for README.md (docs/i18n/README.md): per heading
+# section, a hash of its English and Chinese blocks outside code blocks and generated regions.
+# After editing either side, bring the other along and re-record with:
 #   pnpm run verify-translation-pairing --write packages/util/http-proxy/README.md
-README.md: 61488b0004c2f319fc459c12c7a51f0679c29e3d
-README.zh.md: 5122816a8f99a28da29d98086984f8d18b637c98
+/:
+  en: 117b4d191f773a9c
+  zh: 0b9e150f6cd23b04
+/deepseek-ai-dsh-http-proxy:
+  en: 6c9406455954c0e3
+  zh: 5bcd0337d80a2047
+/deepseek-ai-dsh-http-proxy/summary:
+  en: c3b1b32ab36f5f97
+  zh: 143b744ab361f0d4
+/deepseek-ai-dsh-http-proxy/table-of-contents:
+  en: d152484eb41ac6b4
+  zh: 09388d293f9be9cb
+/deepseek-ai-dsh-http-proxy/use-this-package:
+  en: e640eb261450e3be
+  zh: d0aa6af3d862bbf9
+/deepseek-ai-dsh-http-proxy/use-this-package/writing-a-new-outbound-call:
+  en: 6f766157a59693e3
+  zh: d1e6f6ea10c35209
+/deepseek-ai-dsh-http-proxy/use-this-package/what-the-policy-reads:
+  en: aeda5785ec6f2db1
+  zh: dd80635ee24438b7
+/deepseek-ai-dsh-http-proxy/use-this-package/protected-claude-destinations:
+  en: 3e6402fc338048e3
+  zh: 5b95178301eff504
+/deepseek-ai-dsh-http-proxy/use-this-package/failures:
+  en: 4248bc9a662680ed
+  zh: 4150ade9f1aa9287
+/deepseek-ai-dsh-http-proxy/understand-the-implementation:
+  en: ee4615a04fa6503d
+  zh: ee2c5fb2204a43cf
+/deepseek-ai-dsh-http-proxy/understand-the-implementation/design-philosophy:
+  en: 8cc3c8243686587b
+  zh: 1f2f0e99402799e3
+/deepseek-ai-dsh-http-proxy/understand-the-implementation/source-map:
+  en: a099f88dd0c7d394
+  zh: 7325b7ea973bce13
+/deepseek-ai-dsh-http-proxy/understand-the-implementation/bypass-matching:
+  en: e9ad6c2e8ee2fc21
+  zh: c10de6995cf594bc
+/deepseek-ai-dsh-http-proxy/further-exploration:
+  en: 58ba34eac33c2d29
+  zh: 2a68bfced08df9c0
+/deepseek-ai-dsh-http-proxy/model-experience:
+  en: e0af6a1073934d5a
+  zh: d8bf9c77b54ed5ae
+/deepseek-ai-dsh-http-proxy/model-experience/kv-cache-effect:
+  en: 7f12ca92e7722f98
+  zh: 97fa75de6a3f6a3f
+/deepseek-ai-dsh-http-proxy/known-limitations-and-deferred-work:
+  en: d78161eedad372b0
+  zh: 0dd0e8603b734df5
+/deepseek-ai-dsh-http-proxy/known-limitations-and-deferred-work/dev-note:
+  en: 8f915ac6f4fc1525
+  zh: 29b06e0aae5a30ec

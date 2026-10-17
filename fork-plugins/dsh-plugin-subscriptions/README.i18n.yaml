@@ -1,6 +1,88 @@
-# Bilingual-pair consistency record (docs/i18n/README.md): the git blob hash of each
-# side as of the last confirmed-consistent state. Both languages carry equal authority;
-# after editing either side, bring the other along and re-record with:
+# Bilingual-pair consistency record for README.md (docs/i18n/README.md): per heading
+# section, a hash of its English and Chinese blocks outside code blocks and generated regions.
+# After editing either side, bring the other along and re-record with:
 #   pnpm run verify-translation-pairing --write fork-plugins/dsh-plugin-subscriptions/README.md
-README.md: 00756fe2d71d95097d4bc4ac7ba6f29427a53c30
-README.zh.md: 3f60483beef7981a52eeb7997ca4b9de1067e91b
+/dsh-plugin-subscriptions:
+  en: 02f55ef0d8dd0219
+  zh: b070ead6aac0f698
+/dsh-plugin-subscriptions/demo:
+  en: abd6ab5d409a6918
+  zh: 44b89697d5b87e65
+/dsh-plugin-subscriptions/providers:
+  en: 6d93995e154c4bd4
+  zh: 698edbb0459541f3
+/dsh-plugin-subscriptions/install:
+  en: 98304b8243bd9f26
+  zh: 50ca82df59e0bc52
+/dsh-plugin-subscriptions/install/dsh-compatibility:
+  en: 413b744bf5356cba
+  zh: cf73cbcf262b6cb7
+/dsh-plugin-subscriptions/install/managing-accounts-and-pool-models:
+  en: 3ccc755c474344f0
+  zh: 415e57933e850b56
+/dsh-plugin-subscriptions/install/cached-model-lists-and-usage:
+  en: f63fe1e4aeebc75a
+  zh: ce8ba7f50c0d00da
+/dsh-plugin-subscriptions/install/installation-commands:
+  en: 37eb04fb8248825e
+  zh: b58cac19c39fa4d2
+/dsh-plugin-subscriptions/update:
+  en: d881c7c0e5f34c27
+  zh: fb6e6ee78e2e2fe9
+/dsh-plugin-subscriptions/use:
+  en: 91513dc7fe8f7552
+  zh: 2f27a5077b798609
+/dsh-plugin-subscriptions/use/multiple-accounts:
+  en: 458fe96d980832da
+  zh: 1b4982884e51c33f
+/dsh-plugin-subscriptions/use/edit-visible-models-context-windows-and-tools:
+  en: 746278c1c714f46c
+  zh: ef30ef50214a2bd3
+/dsh-plugin-subscriptions/use/reasoning-defaults-in-the-model-editor:
+  en: 11da4d91f79a7b79
+  zh: 8db519dcabef0db3
+/dsh-plugin-subscriptions/config:
+  en: d9c75339ec59b05c
+  zh: 00f55710c03393bf
+/dsh-plugin-subscriptions/model-pools:
+  en: 4932cf0aa7ee132a
+  zh: fa0dae8682af3c37
+/dsh-plugin-subscriptions/model-pools/waiting-out-a-rate-limit-window:
+  en: 9f055f2c67153884
+  zh: 218427f02204e84e
+/dsh-plugin-subscriptions/claude-stream-lifetime:
+  en: f025e8b5c19092fd
+  zh: aa0bc52963a7c714
+/dsh-plugin-subscriptions/claude-response-limits-and-usage:
+  en: 53964cf07fca8124
+  zh: 62627f5359ed69ae
+/dsh-plugin-subscriptions/claude-authentication-and-alignment-limits:
+  en: 68e8c14d52f0827e
+  zh: eb1830cfd838846e
+/dsh-plugin-subscriptions/claude-authentication-and-alignment-limits/credential-ownership:
+  en: 12f88d7319b03e57
+  zh: d5ca5a08e921ee59
+/dsh-plugin-subscriptions/claude-client-metadata-and-transport-defaults:
+  en: 1288bbed1a13d5d6
+  zh: 621cf399d1704a85
+/dsh-plugin-subscriptions/claude-failure-recovery-and-account-maintenance-source-tree:
+  en: 66a2873934af2398
+  zh: 988f2eb355b6ebe1
+/dsh-plugin-subscriptions/claude-continuation-state-source-tree:
+  en: 5a588fe91197912f
+  zh: e0d52795adaef052
+/dsh-plugin-subscriptions/claude-policy-limits-and-extractable-components-source-tree:
+  en: 994b83c3c1f6208c
+  zh: 091f56fcea1d4d7d
+/dsh-plugin-subscriptions/proxy:
+  en: 4ff77b50e65e87e4
+  zh: 8640533cf7acf76e
+/dsh-plugin-subscriptions/related-plugins:
+  en: 84a3a4a78cb85368
+  zh: fb963bd3c3ab7801
+/dsh-plugin-subscriptions/develop:
+  en: c0524e9ec0e45502
+  zh: 8d60fa3c0742c96a
+/dsh-plugin-subscriptions/layout:
+  en: 185a768f84ff1c6a
+  zh: ed9746a089ce006c

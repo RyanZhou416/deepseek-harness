@@ -18,7 +18,6 @@ import { RemoteError, TestRemote } from '@deepseek-ai/dsh-client-test-runtime'
 import type { ModelSelection, ModelSelectionProjection } from '@deepseek-ai/dsh-api-session-controller/types'
 import type { CommandContribution, PopupSelectSpec, SelectOption } from '@deepseek-ai/dsh-client-ui-commands/client'
 import type { ModelSelectInjected } from '../src/client/slots.ts'
-import type { ModelDirectoryState } from '../src/client/directory.ts'
 import { apply, inject } from '../src/client/index.ts'
 import { zh } from '../src/client/locales.ts'
 
@@ -72,32 +71,23 @@ async function bench(locale: 'zh' | 'en' = 'zh') {
   let selected = defaultSelection
   const calls = { models: 0, select: 0 }
   const projections = new Map<SessionId, SnapshotStore<ModelSelectionProjection | undefined>>()
-  // Whether the Host reports an adapter for the current route; the composer
-  // block follows this, never catalog membership.
+  // Whether the Host advertises available models for the current route.
   let routable = true
+  let catalogFailure = false
+  let groups = GROUPS
   let selectionFailure: RemoteError<'session/writer-held'> | undefined
-  // Held catalog reads let a test place projection and refresh states in a
-  // deterministic order; the value is captured when the read is issued, as the
-  // Host answers the generation it was asked about. The hold stays in place
-  // after a release, so a retry the client issues is held on the same terms.
-  let holdCatalog = false
-  let releaseCatalog: ((failure: boolean) => void) | undefined
   const sessionRemote = {
     modelCatalog: () => {
       calls.models += 1
-      const value = {
-        default: defaultSelection,
-        routableProviders: routable ? ['deepseek-official'] : [],
-        groups: GROUPS,
-        failures: [],
-      }
-      if (!holdCatalog) return Promise.resolve({ ok: true as const, value })
-      return new Promise((resolve) => {
-        releaseCatalog = (failure) => {
-          resolve(failure
-            ? { ok: false as const, error: new RemoteError('gateway/internal', 'catalog offline', {}) }
-            : { ok: true as const, value })
-        }
+      if (catalogFailure) return Promise.reject(new Error('catalog offline'))
+      return Promise.resolve({
+        ok: true as const,
+        value: {
+          default: defaultSelection,
+          routableProviders: routable ? ['deepseek-official'] : [],
+          groups: routable ? groups : [],
+          failures: [],
+        },
       })
     },
     selectModel: (payload: { sessionId: SessionId; provider: string; model: string; reasoningEffort?: string }) => {
@@ -132,17 +122,11 @@ async function bench(locale: 'zh' | 'en' = 'zh') {
   const seats = new Map<string, {
     inject: ((sessionId: SessionId) => ModelSelectInjected) | undefined
     locale: string | undefined
-    children: Record<string, { kind: string; scope: string }> | undefined
   }>()
   ctx.provide('slots', {
     inject(_name: string, callback: () => () => void) { return callback() },
-    register(options: {
-      name: string
-      locale?: string
-      children?: Record<string, { kind: string; scope: string }>
-      inject?: (sessionId: SessionId) => ModelSelectInjected
-    }) {
-      seats.set(options.name, { inject: options.inject, locale: options.locale, children: options.children })
+    register(options: { name: string; locale?: string; inject?: (sessionId: SessionId) => ModelSelectInjected }) {
+      seats.set(options.name, { inject: options.inject, locale: options.locale })
       return () => { seats.delete(options.name) }
     },
   })
@@ -154,7 +138,11 @@ async function bench(locale: 'zh' | 'en' = 'zh') {
   const scopes = new Map<SessionId, Context>()
   const bindings = new Map<SessionId, {
     sessionId: SessionId
-    session: { sessionId: SessionId; projections: { faceOf: () => SnapshotStore<ModelSelectionProjection | undefined> } }
+    session: {
+      sessionId: SessionId
+      getSnapshot: () => { blank: boolean }
+      projections: { faceOf: () => SnapshotStore<ModelSelectionProjection | undefined> }
+    }
     ctx: Context
   }>()
   const addressed = new Set<SessionId>()
@@ -165,10 +153,12 @@ async function bench(locale: 'zh' | 'en' = 'zh') {
       ? { parentSessionId: sid('parent'), childSessionId: id, mode: 'continuable' as const }
       : undefined,
   })
+  const track = vi.fn()
+  ctx.provide('productAnalytics', { enabled: true, track } as never)
   const fiber = ctx.plugin({ inject: [...inject], apply })
   await fiber.await()
   await ctx.plugin(function probe() {}).await()
-  const mint = (key: string) => {
+  const mint = (key: string, blank = false) => {
     const id = sid(key)
     const handle = createScope(ctx, id)
     scopes.set(id, handle.ctx)
@@ -179,7 +169,7 @@ async function bench(locale: 'zh' | 'en' = 'zh') {
     projections.set(id, projection)
     const binding = {
       sessionId: id,
-      session: { sessionId: id, projections: { faceOf: () => projection } },
+      session: { sessionId: id, getSnapshot: () => ({ blank }), projections: { faceOf: () => projection } },
       ctx: handle.ctx,
     }
     bindings.set(id, binding)
@@ -189,7 +179,7 @@ async function bench(locale: 'zh' | 'en' = 'zh') {
     return { ...handle, projection }
   }
   return {
-    ctx, fiber, mint, calls, remote,
+    ctx, fiber, mint, calls, remote, track,
     contribution: () => contribution!,
     popup: (): PopupSelectSpec => {
       const ui = contribution!.ui
@@ -197,7 +187,6 @@ async function bench(locale: 'zh' | 'en' = 'zh') {
       return ui
     },
     seat: () => seats.get('conversation.input.model')!,
-    seatChildren: () => seats.get('conversation.input.model')!.children,
     hostCurrent: () => selected,
     rejectSelection: () => {
       selectionFailure = new RemoteError('session/writer-held', 'writer held', { sessionId: sid('owned') })
@@ -205,27 +194,14 @@ async function bench(locale: 'zh' | 'en' = 'zh') {
     setHostCurrent: (selection: ModelSelection) => { defaultSelection = selection },
     setProjected: (id: SessionId, value: ModelSelectionProjection) => { projections.get(id)?.set(value) },
     address: (id: SessionId) => { addressed.add(id) },
+    setGroups: (next: typeof GROUPS) => { groups = next },
+    setCatalogFailure: (next: boolean) => { catalogFailure = next },
     setRoutable: (next: boolean) => { routable = next },
     blockOf: (key: string) => blocks.get(sid(key)),
-    holdCatalog: () => { holdCatalog = true },
-    releaseCatalog: (failure = false) => {
-      const release = releaseCatalog
-      releaseCatalog = undefined
-      release?.(failure)
-    },
   }
 }
 
 const projection = (id: string) => ({ sessionId: sid(id) })
-
-/**
- * Let a released catalog read run out its `then`/`catch`/`finally` chain, so an
- * assertion after it observes settlement without depending on the clock.
- * @returns fulfillment once the chain has run.
- */
-async function settle(): Promise<void> {
-  for (let turn = 0; turn < 6; turn += 1) await Promise.resolve()
-}
 
 describe('ui-model-selection dual entry', () => {
   it('carries writer contention to the model seat and localizes the command failure', async () => {
@@ -236,7 +212,7 @@ describe('ui-model-selection dual entry', () => {
     b.rejectSelection()
     await expect(b.popup().onSelect(options[0]!, input)).rejects.toThrow(zh['error.sessionInUse'])
     expect(b.ctx.modelDirectories.directoryFor(sid('owned')).store.getSnapshot()).toMatchObject({
-      status: 'error', error: 'session/writer-held: writer held',
+      status: 'error', pending: null, error: 'session/writer-held: writer held',
     })
   })
 
@@ -249,52 +225,50 @@ describe('ui-model-selection dual entry', () => {
     expect(b.seat().locale).toBe('model')
   })
 
-  it('declares the additive row slot a feature adds model-menu rows through', async () => {
-    const b = await bench()
-    // The seat stays single-owner: the row is a declared child of it, and its
-    // disappearance would strand every contributor that registers into it.
-    expect(b.seatChildren()).toEqual({
-      'conversation.input.model.row': { kind: 'list', scope: 'session' },
-    })
-  })
-
-  it('localizes built-in descriptions and preserves external provider descriptions', async () => {
-    const b = await bench()
+  it.each(['zh', 'en'] as const)('shows names and providers without catalog descriptions (%s)', async (locale) => {
+    const b = await bench(locale)
     b.mint('s1')
     const options = await b.popup().options(projection('s1'), new AbortController().signal)
     expect(options.map((o: SelectOption) => o.label)).toEqual([
       'DeepSeek-V4-Flash', 'DeepSeek-V4-Pro', 'External Flash',
     ])
-    expect(options[0]).toMatchObject({
-      active: true,
-      detail: 'DeepSeek · 快速、高效且经济；适合目标明确、常规或并行任务。',
-    })
-    expect(options[1]?.detail)
-      .toBe('DeepSeek · 更强的自主编码、知识与复杂推理能力；适合复杂或质量优先的任务，但成本更高。')
-    expect(options[2]?.detail).toBe('External Provider · Provider-authored description.')
+    expect(options.map(option => option.group?.label)).toEqual(['DeepSeek', 'DeepSeek', 'External Provider'])
+    expect(options.every(option => option.detail === undefined)).toBe(true)
+    expect(b.popup().searchMode).toBe('fuzzy-label')
+    expect(options[0]?.active).toBe(true)
     expect(options[1]?.active).toBeUndefined()
+    expect(b.popup().searchLabels?.()).toEqual(locale === 'zh'
+      ? { placeholder: '搜索模型…', empty: '暂无可用模型', noResults: '没有匹配的模型。' }
+      : { placeholder: 'Search models…', empty: 'No models available.', noResults: 'No matching models.' })
   })
 
-  it('keeps built-in descriptions unchanged in English', async () => {
-    const b = await bench('en')
-    b.mint('s1')
-    const options = await b.popup().options(projection('s1'), new AbortController().signal)
-    expect(options[0]?.detail)
-      .toBe('DeepSeek · Fast, efficient, and economical; suited to focused, routine, or parallel tasks.')
-    expect(options[1]?.detail)
-      .toBe('DeepSeek · Stronger agentic coding, knowledge, and difficult reasoning; suited to complex or quality-critical tasks at higher cost.')
+  it('orders popup provider groups account-first while retaining third-party catalog order', async () => {
+    const b = await bench()
+    try {
+      b.setGroups([
+        GROUPS[1]!, GROUPS[0]!, { ...GROUPS[0]!, id: 'deepseek-account', name: 'DeepSeek Account' },
+        { ...GROUPS[1]!, id: 'last-provider', name: 'Last Provider' },
+      ])
+      b.remote.emit('llm/adapters-updated', [])
+      b.mint('s1')
+      const options = await b.popup().options(projection('s1'), new AbortController().signal)
+      expect([...new Set(options.map(option => option.group?.name))])
+        .toEqual(['deepseek-account', 'deepseek-official', 'external', 'last-provider'])
+    } finally {
+      await b.ctx.fiber.dispose()
+    }
   })
 
   it('a seat selection is the current the popup marks active next — one shared state', async () => {
     const b = await bench()
     b.mint('s1')
     const seatFace = b.seat().inject!(sid('s1'))
-    // Switch through the SEAT entry.
-    expect(await seatFace.select({
-      provider: 'deepseek-official',
-      model: 'deepseek-v4-pro',
-      reasoningEffort: 'max',
-    })).toEqual({ ok: true, value: undefined })
+    // Switch through the SEAT entry; the directory holds the submission until it settles.
+    const selection = { provider: 'deepseek-official', model: 'deepseek-v4-pro', reasoningEffort: 'max' }
+    const settled = seatFace.select(selection)
+    expect(seatFace.directory.getSnapshot()).toMatchObject({ status: 'selecting', pending: selection })
+    expect(await settled).toEqual({ ok: true, value: undefined })
+    expect(seatFace.directory.getSnapshot()).toMatchObject({ status: 'ready', pending: null })
     expect(b.hostCurrent()).toEqual({
       provider: 'deepseek-official',
       model: 'deepseek-v4-pro',
@@ -324,6 +298,40 @@ describe('ui-model-selection dual entry', () => {
     })
   })
 
+  it.each(['en', 'zh'] as const)('localizes account provider headings in the %s model popup', async (locale) => {
+    const b = await bench(locale)
+    try {
+      b.setGroups([{ ...GROUPS[0]!, id: 'deepseek-account', name: 'DeepSeek Account' }])
+      b.remote.emit('llm/adapters-updated', [])
+      b.mint('s1')
+      const options = await b.popup().options(projection('s1'), new AbortController().signal)
+      expect(options[0]?.group?.label).toBe(locale === 'zh' ? 'DeepSeek 账号' : 'DeepSeek Account')
+    } finally {
+      await b.ctx.fiber.dispose()
+    }
+  })
+
+  it('removes account models from the picker after sign-out', async () => {
+    const b = await bench('en')
+    try {
+      b.setGroups([{ ...GROUPS[0]!, id: 'deepseek-account', name: 'DeepSeek Account' }, ...GROUPS])
+      b.remote.emit('llm/adapters-updated', [])
+      b.mint('s1')
+      const before = await b.popup().options(projection('s1'), new AbortController().signal)
+      expect(before.some(option => option.group?.label === 'DeepSeek Account')).toBe(true)
+      b.setGroups(GROUPS)
+      b.remote.emit('credentials/record-updated', ['deepseek-account-platform'])
+      await vi.waitFor(() => {
+        expect(b.ctx.modelDirectories.directoryFor(sid('s1')).store.getSnapshot().groups).toEqual(GROUPS)
+      })
+      const after = await b.popup().options(projection('s1'), new AbortController().signal)
+      expect(after.some(option => option.group?.label === 'DeepSeek Account')).toBe(false)
+      expect(after.length).toBeGreaterThan(0)
+    } finally {
+      await b.ctx.fiber.dispose()
+    }
+  })
+
   it('both entries share one directory instance per session, isolated across sessions', async () => {
     const b = await bench()
     b.mint('a')
@@ -342,7 +350,20 @@ describe('ui-model-selection dual entry', () => {
     expect(b.calls.models).toBe(1)
   })
 
-  it('keeps the durable projected selection while the eager catalog reconnects', async () => {
+  it('drops a pending selection on connection reset and ignores its late settlement', async () => {
+    const b = await bench()
+    b.mint('s1')
+    const face = b.seat().inject!(sid('s1'))
+    await b.ctx.modelDirectories.directoryFor(sid('s1')).load()
+    const late = face.select({ provider: 'deepseek-official', model: 'deepseek-v4-pro' })
+    expect(face.directory.getSnapshot().pending).toEqual({ provider: 'deepseek-official', model: 'deepseek-v4-pro' })
+    b.ctx.emit('connection/reset')
+    expect(face.directory.getSnapshot()).toMatchObject({ status: 'loading', pending: null })
+    await late
+    expect(face.directory.getSnapshot().pending).toBeNull()
+  })
+
+  it('hides the effective selection until the reconnected catalog validates it', async () => {
     const b = await bench()
     b.mint('s1')
     const face = b.seat().inject!(sid('s1'))
@@ -351,17 +372,17 @@ describe('ui-model-selection dual entry', () => {
 
     b.ctx.emit('connection/reset')
     expect(face.directory.getSnapshot()).toMatchObject({
-      current: { provider: 'deepseek-official', model: 'deepseek-v4-pro' },
-      status: 'ready',
+      current: null,
+      status: 'loading',
     })
     face.load()
     expect(face.directory.getSnapshot()).toMatchObject({
-      current: { provider: 'deepseek-official', model: 'deepseek-v4-pro' },
-      status: 'ready',
+      current: null,
+      status: 'loading',
     })
   })
 
-  it('keeps the last complete view while a refreshed catalog catches up with projection', async () => {
+  it('retains the selected model while refreshing its catalog', async () => {
     const b = await bench()
     b.mint('s1')
     const face = b.seat().inject!(sid('s1'))
@@ -375,7 +396,9 @@ describe('ui-model-selection dual entry', () => {
     })
     expect(face.directory.getSnapshot()).toMatchObject({
       current: { provider: 'deepseek-official', model: 'deepseek-v4-flash' },
-      status: 'ready',
+      groups: GROUPS,
+      routable: null,
+      status: 'loading',
     })
 
     await vi.waitFor(() => {
@@ -386,189 +409,28 @@ describe('ui-model-selection dual entry', () => {
     })
   })
 
-  it('answers an explicit read with the session route while the shared catalog is replaced', async () => {
+  it('retains the last catalog on refresh failure and recovers on retry', async () => {
     const b = await bench()
-    b.mint('s1')
-    const directory = b.ctx.modelDirectories.directoryFor(sid('s1'))
-    await directory.load()
-
-    b.holdCatalog()
-    b.remote.emit('settings/document-updated', ['llm-deepseek', 1])
-    b.setProjected(sid('s1'), {
-      lastUsed: { provider: 'deepseek-official', model: 'deepseek-v4-flash' },
-      next: { provider: 'deepseek-official', model: 'deepseek-v4-pro' },
-    })
-
-    // The published view keeps the last complete pair, which is what a repaint
-    // shows. A caller reading this value to act on a model — the Speed control's
-    // durable write target — must not receive the route the projection replaced,
-    // so the read waits for the replacement the event started.
-    let read: ModelDirectoryState | undefined
-    void directory.load().then((value) => { read = value })
-    await settle()
-    expect(read).toBeUndefined()
-    expect(directory.store.getSnapshot()).toMatchObject({
-      current: { provider: 'deepseek-official', model: 'deepseek-v4-flash' },
-      status: 'ready',
-    })
-
-    b.releaseCatalog()
-    await vi.waitFor(() => {
-      expect(read?.current).toEqual({ provider: 'deepseek-official', model: 'deepseek-v4-pro' })
-    })
-  })
-
-  it('answers an explicit read from the retained catalog when the session route is unchanged', async () => {
-    const b = await bench()
-    b.mint('s1')
-    const directory = b.ctx.modelDirectories.directoryFor(sid('s1'))
-    await directory.load()
-
-    b.holdCatalog()
-    b.remote.emit('llm/adapters-updated', [])
-    expect(b.calls.models).toBe(2)
-
-    // Nothing about the session's route moved, so the read must not wait on the
-    // replacement: answering from the retained catalog is the work this removes.
-    let read: ModelDirectoryState | undefined
-    void directory.load().then((value) => { read = value })
-    await settle()
-    expect(read).toMatchObject({
-      current: { provider: 'deepseek-official', model: 'deepseek-v4-flash' },
-      status: 'ready',
-    })
-    expect(b.calls.models).toBe(2)
-    b.releaseCatalog()
-  })
-
-  it('waits for the replacement when a directory first reads during one', async () => {
-    const b = await bench()
-    b.holdCatalog()
-    b.remote.emit('settings/document-updated', ['llm-deepseek', 1])
-    // The session opens while the replacement is in flight, so no complete pair
-    // has ever been published for it.
-    b.mint('s1')
-    const directory = b.ctx.modelDirectories.directoryFor(sid('s1'))
-    expect(directory.store.getSnapshot().status).toBe('loading')
-
-    let read: ModelDirectoryState | undefined
-    void directory.load().then((value) => { read = value })
-    await settle()
-    expect(read).toBeUndefined()
-
-    b.releaseCatalog()
-    await vi.waitFor(() => {
-      expect(read?.current).toEqual({ provider: 'deepseek-official', model: 'deepseek-v4-flash' })
-    })
-  })
-
-  it('never answers an explicit read with the replaced route when the replacement fails', async () => {
-    const b = await bench()
-    b.mint('s1')
-    const directory = b.ctx.modelDirectories.directoryFor(sid('s1'))
-    await directory.load()
-
-    b.holdCatalog()
-    b.remote.emit('settings/document-updated', ['llm-deepseek', 1])
-    b.setProjected(sid('s1'), {
-      lastUsed: { provider: 'deepseek-official', model: 'deepseek-v4-flash' },
-      next: { provider: 'deepseek-official', model: 'deepseek-v4-pro' },
-    })
-
-    let outcome: ModelDirectoryState | Error | undefined
-    void directory.load().then((value) => { outcome = value }, (error: Error) => { outcome = error })
-    await settle()
-    expect(outcome).toBeUndefined()
-
-    b.releaseCatalog(true)
-    await vi.waitFor(() => { expect(b.calls.models).toBe(3) })
-    // The failed replacement published nothing usable, so the read retries
-    // rather than handing back the route the projection replaced.
-    expect(outcome).toBeUndefined()
-
-    b.releaseCatalog()
-    await vi.waitFor(() => {
-      expect(outcome).toBeInstanceOf(Object)
-      expect((outcome as ModelDirectoryState).current).toEqual({
-        provider: 'deepseek-official', model: 'deepseek-v4-pro',
+    try {
+      b.mint('s1')
+      const face = b.seat().inject!(sid('s1'))
+      await b.ctx.modelDirectories.directoryFor(sid('s1')).load()
+      b.setCatalogFailure(true)
+      b.remote.emit('credentials/record-updated', ['DEEPSEEK_API_KEY'])
+      await vi.waitFor(() => {
+        expect(face.directory.getSnapshot()).toMatchObject({
+          current: { provider: 'deepseek-official', model: 'deepseek-v4-flash' },
+          groups: GROUPS, routable: null, status: 'error', error: 'catalog offline',
+        })
       })
-    })
-  })
-
-  it('waits when the projection moves to another provider during a replacement', async () => {
-    const b = await bench()
-    b.mint('s1')
-    const directory = b.ctx.modelDirectories.directoryFor(sid('s1'))
-    await directory.load()
-
-    b.holdCatalog()
-    b.remote.emit('settings/document-updated', ['llm-deepseek', 1])
-    b.setProjected(sid('s1'), {
-      lastUsed: { provider: 'deepseek-official', model: 'deepseek-v4-flash' },
-      next: { provider: 'external', model: 'deepseek-v4-flash' },
-    })
-
-    // Provider and model are separate fields, so a move to another provider is
-    // the same wait as a model move inside one provider.
-    let read: ModelDirectoryState | undefined
-    void directory.load().then((value) => { read = value })
-    await settle()
-    expect(read).toBeUndefined()
-
-    b.releaseCatalog()
-    await vi.waitFor(() => {
-      expect(read?.current).toEqual({ provider: 'external', model: 'deepseek-v4-flash' })
-    })
-  })
-
-  it('fails a read whose session scope is disposed while the catalog is replaced', async () => {
-    const b = await bench()
-    const scope = b.mint('s1')
-    const directory = b.ctx.modelDirectories.directoryFor(sid('s1'))
-    await directory.load()
-
-    b.holdCatalog()
-    b.remote.emit('settings/document-updated', ['llm-deepseek', 1])
-    b.setProjected(sid('s1'), {
-      lastUsed: { provider: 'deepseek-official', model: 'deepseek-v4-flash' },
-      next: { provider: 'deepseek-official', model: 'deepseek-v4-pro' },
-    })
-
-    let outcome: ModelDirectoryState | Error | undefined
-    void directory.load().then((value) => { outcome = value }, (error: Error) => { outcome = error })
-    await settle()
-    expect(outcome).toBeUndefined()
-
-    // The session scope goes while the read waits on the shared catalog, which
-    // stays alive: the disposed directory publishes no further view, so the read
-    // must fail instead of waiting for a route it can never report.
-    await scope.fiber.dispose()
-    b.releaseCatalog()
-    await vi.waitFor(() => { expect(outcome).toBeInstanceOf(Error) })
-    expect((outcome as Error).message).toContain('disposed')
-    // The disposed read starts no further work either.
-    expect(b.calls.models).toBe(2)
-  })
-
-  it('disposes the shared catalog with the resolver fiber', async () => {
-    const b = await bench()
-    b.mint('s1')
-    await b.ctx.modelDirectories.directoryFor(sid('s1')).load()
-
-    b.holdCatalog()
-    b.remote.emit('settings/document-updated', ['llm-deepseek', 1])
-    b.remote.emit('settings/document-updated', ['llm-deepseek', 2])
-    expect(b.calls.models).toBe(2)
-
-    await b.fiber.dispose()
-    b.releaseCatalog()
-    await settle()
-    // The read the disposed composition owned neither starts the follow-up it
-    // queued nor publishes, and a forwarded event arriving afterwards starts
-    // nothing either.
-    expect(b.calls.models).toBe(2)
-    b.remote.emit('settings/document-updated', ['llm-deepseek', 3])
-    expect(b.calls.models).toBe(2)
+      expect(b.blockOf('s1')).toBeUndefined()
+      b.setCatalogFailure(false)
+      await b.ctx.modelDirectories.directoryFor(sid('s1')).load()
+      expect(face.directory.getSnapshot().routable).toBe(true)
+      expect(b.blockOf('s1')).toBeUndefined()
+    } finally {
+      await b.ctx.fiber.dispose()
+    }
   })
 
   it('scope disposal drops the directory; a reborn scope gets a fresh one', async () => {
@@ -581,75 +443,34 @@ describe('ui-model-selection dual entry', () => {
     expect(face2.directory).not.toBe(face1.directory)
   })
 
-  it('keeps the replacement directory block when the previous scope finishes cleanup', async () => {
+  it('retains saved effort for existing and new sessions after credentials disappear', async () => {
     const b = await bench()
-    const first = b.mint('s1')
-    const oldDirectory = b.ctx.modelDirectories.directoryFor(sid('s1'))
-    await oldDirectory.load()
-    const replacement = b.mint('s1')
-    replacement.projection.set({ lastUsed: null, next: { provider: 'missing', model: 'unserved' } })
-    const directory = b.ctx.modelDirectories.directoryFor(sid('s1'))
     try {
-      expect(directory).not.toBe(oldDirectory)
-      expect(directory.store.getSnapshot().routable).toBe(false)
-      expect(b.blockOf('s1')?.reason).toBe(zh['blocked.composer'])
-      await first.fiber.dispose()
-      expect(b.blockOf('s1')?.reason).toBe(zh['blocked.composer'])
-      await replacement.fiber.dispose()
-      expect(b.blockOf('s1')).toBeUndefined()
-    } finally {
-      await Promise.all([first.fiber.dispose(), replacement.fiber.dispose()])
-      await b.ctx.fiber.dispose()
-    }
-  })
-
-  it.each([false, true])('ignores late old projection publication while the replacement is routable=%s', async (routable) => {
-    const b = await bench()
-    const first = b.mint('s1')
-    const oldDirectory = b.ctx.modelDirectories.directoryFor(sid('s1'))
-    await oldDirectory.load()
-    const replacement = b.mint('s1')
-    replacement.projection.set({ lastUsed: null,
-      next: { provider: routable ? 'deepseek-official' : 'missing', model: 'replacement' } })
-    const directory = b.ctx.modelDirectories.directoryFor(sid('s1'))
-    try {
-      expect(directory.store.getSnapshot().routable).toBe(routable)
-      const expected = b.blockOf('s1')
-      await Promise.resolve().then(() => {
-        first.projection.set({ lastUsed: null,
-          next: { provider: routable ? 'missing' : 'deepseek-official', model: 'late-old' } })
+      b.setHostCurrent({ provider: 'deepseek-official', model: 'deepseek-v4-flash', reasoningEffort: 'max' })
+      b.mint('existing')
+      const existing = b.ctx.modelDirectories.directoryFor(sid('existing'))
+      await existing.load()
+      b.setProjected(sid('existing'), { lastUsed: null,
+        next: { provider: 'deepseek-official', model: 'deepseek-v4-flash', reasoningEffort: 'high' } })
+      b.setRoutable(false)
+      b.remote.emit('settings/document-updated', ['llm-deepseek', 1])
+      expect(existing.store.getSnapshot().retainedEffort).toBe('High')
+      await vi.waitFor(() => {
+        expect(existing.store.getSnapshot()).toMatchObject({ current: { provider: 'deepseek-official', model: 'deepseek-v4-flash', reasoningEffort: 'high' }, routable: false, retainedEffort: 'High' })
       })
-      expect(oldDirectory.store.getSnapshot().routable).toBe(!routable)
-      expect(b.blockOf('s1')).toBe(expected)
+      b.mint('new')
+      const fresh = b.ctx.modelDirectories.directoryFor(sid('new'))
+      expect(fresh.store.getSnapshot()).toMatchObject({ current: { provider: 'deepseek-official', model: 'deepseek-v4-flash', reasoningEffort: 'max' }, routable: false, retainedEffort: 'Max' })
     } finally {
-      await Promise.all([first.fiber.dispose(), replacement.fiber.dispose()])
       await b.ctx.fiber.dispose()
     }
   })
 
-  it('clears an obsolete block when the new binding has no model directory', async () => {
-    const b = await bench()
-    const first = b.mint('s1')
-    first.projection.set({ lastUsed: null, next: { provider: 'missing', model: 'unserved' } })
-    await b.ctx.modelDirectories.directoryFor(sid('s1')).load()
-    const replacement = b.mint('s1')
-    try {
-      expect(b.blockOf('s1')).toBeDefined()
-      await first.fiber.dispose()
-      expect(b.blockOf('s1')).toBeUndefined()
-    } finally {
-      await Promise.all([first.fiber.dispose(), replacement.fiber.dispose()])
-      await b.ctx.fiber.dispose()
-    }
-  })
-
-  it('blocks the composer only once the Host reports the route unservable', async () => {
+  it('keeps the composer usable when current catalog models disappear', async () => {
     const b = await bench()
     b.mint('s1')
     const face = b.seat().inject!(sid('s1'))
 
-    // Before the first load nothing is known. `null` is not `false`: a slow
-    // or unreachable Host must never lock a working composer.
     expect(b.blockOf('s1')).toBeUndefined()
     face.load()
     await Promise.resolve()
@@ -661,7 +482,7 @@ describe('ui-model-selection dual entry', () => {
     b.remote.emit('settings/document-updated', ['llm-deepseek', 1])
     await Promise.resolve()
     await Promise.resolve()
-    expect(b.blockOf('s1')?.reason).toBe(zh['blocked.composer'])
+    expect(b.blockOf('s1')).toBeUndefined()
     expect(b.calls.models).toBe(2)
 
     // Recovering clears it without a reload of the surface.
@@ -673,33 +494,16 @@ describe('ui-model-selection dual entry', () => {
     expect(b.calls.models).toBe(3)
   })
 
-  it('never blocks on catalog membership alone', async () => {
+  it('retains an unavailable durable selection without replacing or rewriting it', async () => {
     const b = await bench()
     b.mint('s1')
     const face = b.seat().inject!(sid('s1'))
-    // A model the route serves but no longer advertises: the seat prompts for
-    // a selection, the composer stays usable. Blocking here would break a
-    // supported configuration (a narrowed `models` list over a live route).
-    b.setHostCurrent({ provider: 'deepseek-official', model: 'unlisted' })
-    face.load()
-    await Promise.resolve()
-    await Promise.resolve()
-    const snapshot = face.directory.getSnapshot()
-    expect(snapshot.groups.flatMap(group => group.models.map(model => model.id))).not.toContain('unlisted')
+    const intended = { provider: 'deepseek-official', model: 'unlisted' }
+    b.setProjected(sid('s1'), { lastUsed: intended, next: intended })
+    await vi.waitFor(() => { expect(face.directory.getSnapshot().status).toBe('ready') })
+    expect(face.directory.getSnapshot().current).toEqual(intended)
     expect(b.blockOf('s1')).toBeUndefined()
-  })
-
-  it('clears its block when the session scope goes', async () => {
-    const b = await bench()
-    const scope = b.mint('s1')
-    b.setRoutable(false)
-    const face = b.seat().inject!(sid('s1'))
-    face.load()
-    b.remote.emit('llm/adapters-updated', [])
-    await vi.waitFor(() => { expect(b.blockOf('s1')).toBeDefined() })
-
-    await scope.fiber.dispose()
-    expect(b.blockOf('s1')).toBeUndefined()
+    expect(b.calls.select).toBe(0)
   })
 
   it('an unknown session fails loud at the seat inject', async () => {
@@ -732,4 +536,24 @@ describe('ui-model-selection dual entry', () => {
     await Promise.resolve()
     expect(b.calls).toEqual({ models: 2, select: 0 })
   })
+})
+
+
+it.each([false, true])('reports accepted switches with blank=%s and no refused switch', async (blank) => {
+  const b = await bench('en')
+  const scope = b.mint('analytics', blank)
+  try {
+    const face = b.seat().inject!(sid('analytics'))
+    await face.select({ provider: 'deepseek-official', model: 'deepseek-v4-pro', reasoningEffort: 'max' })
+    expect(b.track).toHaveBeenCalledWith('model_switch', { ...blank ? {} : { session_id: 'analytics' }, switch_from: 'deepseek-official/deepseek-v4-flash', switch_to: 'deepseek-official/deepseek-v4-pro' })
+    b.track.mockClear()
+    await face.select({ provider: 'deepseek-official', model: 'deepseek-v4-pro', reasoningEffort: 'high' })
+    expect(b.track).toHaveBeenCalledExactlyOnceWith('thinking_level_switch', {
+      ...blank ? {} : { session_id: 'analytics' }, model_name: 'deepseek-official/deepseek-v4-pro', switch_from: 'max', switch_to: 'high',
+    })
+    b.track.mockClear()
+    b.rejectSelection()
+    await face.select({ provider: 'deepseek-official', model: 'deepseek-v4-flash' })
+    expect(b.track).not.toHaveBeenCalled()
+  } finally { await scope.fiber.dispose(); await b.ctx.fiber.dispose() }
 })

@@ -260,6 +260,7 @@ export class AgentRegistry extends Service {
       typeCtx.typert.lookups.register('agent', {
         parameter: 'agent',
         wire: 'agentId',
+        resource: 'session',
         hostTypeSymbol: '@deepseek-ai/dsh-agent#Agent',
         wireTypeSymbol: '@deepseek-ai/dsh-session/types#SessionId',
         resolve: sessionId => this.get(sessionId),
@@ -267,6 +268,7 @@ export class AgentRegistry extends Service {
       typeCtx.typert.contexts.registerHost('agent', {
         wire: 'agentId',
         wireTypeSymbol: '@deepseek-ai/dsh-session/types#SessionId',
+        resource: 'session',
         resolve: sessionId => this.get(sessionId)?.ctx,
       })
     })

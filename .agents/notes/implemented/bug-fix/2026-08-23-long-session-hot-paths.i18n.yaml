@@ -1,6 +1,22 @@
-# Bilingual-pair consistency record (docs/i18n/README.md): the git blob hash of each
-# side as of the last confirmed-consistent state. Both languages carry equal authority;
-# after editing either side, bring the other along and re-record with:
+# Bilingual-pair consistency record for 2026-08-23-long-session-hot-paths.md (docs/i18n/README.md): per heading
+# section, a hash of its English and Chinese blocks outside code blocks and generated regions.
+# After editing either side, bring the other along and re-record with:
 #   pnpm run verify-translation-pairing --write .agents/notes/implemented/bug-fix/2026-08-23-long-session-hot-paths.md
-2026-08-23-long-session-hot-paths.md: 1659e22655f1884a74f1d968da9d23b7bcff50cd
-2026-08-23-long-session-hot-paths.zh.md: 77fa59fa83a1521e28ae7050097c2ea3c41421e7
+/agent-note-long-sessions-bound-repeated-allocation-and-live-residency:
+  en: 456a30d1de0dd77f
+  zh: d739a395bfe1f2c1
+/agent-note-long-sessions-bound-repeated-allocation-and-live-residency/problem:
+  en: e1766e51e562c3ac
+  zh: aebdd38c323811d5
+/agent-note-long-sessions-bound-repeated-allocation-and-live-residency/decision:
+  en: d29cc70615ed2b90
+  zh: ee1c6325ac0cf893
+/agent-note-long-sessions-bound-repeated-allocation-and-live-residency/verification:
+  en: dfb6f6b15dc3e9da
+  zh: 4bf753bc4e0c4b6b
+/agent-note-long-sessions-bound-repeated-allocation-and-live-residency/alternatives-considered:
+  en: bd98e3126539b6a2
+  zh: 8ba8c54d4962a965
+/agent-note-long-sessions-bound-repeated-allocation-and-live-residency/consequences:
+  en: 984a539a8a6c102a
+  zh: 7ebd272ccc4acc3a

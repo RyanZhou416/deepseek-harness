@@ -3,22 +3,11 @@ import type { ChatNode } from '../contract/chat-nodes.ts'
 import type {
   ChatLocationNodeIndex, ChatNodeStore, ChatTurnProcessPresentation,
 } from '../contract/snapshot.ts'
-import {
-  isTurnProcessMember, TURN_PROCESS_INDEPENDENT_KINDS, type TurnProcessRow,
-} from '../contract/turn-process.ts'
+import { isAtOrOutside } from '../contract/group-tree.ts'
 
 function nodeTurn(node: ChatNode | undefined): number | undefined {
   const location = node?.location
   return location?.kind === 'turn' || location?.kind === 'step' ? location.turn.turn : undefined
-}
-
-/** Rows are presented one occurrence at a time, so a Node counts as its standalone part. */
-function processRow(node: ChatNode): TurnProcessRow {
-  return {
-    anchorSeq: node.anchorSeq,
-    step: node.kind === 'assistant-step' ? node.data.step : null,
-    groupPart: undefined,
-  }
 }
 
 function samePresentation(
@@ -52,7 +41,7 @@ function derivePresentation(
   let openingHumanAnchor: number | undefined
   for (const key of keys) {
     const node = nodes.get(key) as ChatNode | undefined
-    if ((node?.kind === 'user' || node?.kind === 'steering' || node?.kind === 'turn-trigger')
+    if (node !== undefined && isAtOrOutside(node, 'input')
       && (spec.controlAnchorSeq === location.turn.start?.seq || node.anchorSeq < spec.controlAnchorSeq)) {
       openingHumanAnchor = Math.max(openingHumanAnchor ?? node.anchorSeq, node.anchorSeq)
     }
@@ -64,15 +53,17 @@ function derivePresentation(
   for (const key of keys) {
     const node = nodes.get(key) as ChatNode | undefined
     if (node === undefined || !isVisibleChatNode(node) || node.kind === 'turn-process') continue
-    if ((node.kind === 'user' || node.kind === 'steering' || node.kind === 'turn-trigger')
+    if (isAtOrOutside(node, 'input')
       && (openingHumanAnchor === undefined || node.anchorSeq > openingHumanAnchor)) {
       hasInterleavedInput = true
       if (spec.answerAnchorSeq === null || node.anchorSeq < spec.answerAnchorSeq) compactAnswer = false
     }
-    if (TURN_PROCESS_INDEPENDENT_KINDS.has(node.kind)) continue
-    // Process rows after the protected reply still belong to the same outer
-    // control, so they keep it usable; the reply itself stays outside the fold.
-    if (isTurnProcessMember(spec, false, processRow(node))) hasExternalProcess = true
+    if (isAtOrOutside(node, 'turn')
+      || node.anchorSeq < spec.processStartSeq
+      || (spec.answerAnchorSeq !== null && node.anchorSeq >= spec.answerAnchorSeq)) continue
+    if (node.kind !== 'assistant-step' || spec.answerStep === null || node.data.step !== spec.answerStep) {
+      hasExternalProcess = true
+    }
   }
   return {
     turn,

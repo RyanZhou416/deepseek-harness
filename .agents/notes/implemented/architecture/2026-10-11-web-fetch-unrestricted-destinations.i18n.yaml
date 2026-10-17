@@ -1,6 +1,25 @@
-# Bilingual-pair consistency record (docs/i18n/README.md): the git blob hash of each
-# side as of the last confirmed-consistent state. Both languages carry equal authority;
-# after editing either side, bring the other along and re-record with:
+# Bilingual-pair consistency record for 2026-10-11-web-fetch-unrestricted-destinations.md (docs/i18n/README.md): per heading
+# section, a hash of its English and Chinese blocks outside code blocks and generated regions.
+# After editing either side, bring the other along and re-record with:
 #   pnpm run verify-translation-pairing --write .agents/notes/implemented/architecture/2026-10-11-web-fetch-unrestricted-destinations.md
-2026-10-11-web-fetch-unrestricted-destinations.md: 56e589b10271fc609125f214f72637c06058dead
-2026-10-11-web-fetch-unrestricted-destinations.zh.md: 90a9fa1d5612adff60c06a5694fff8867011eec2
+/agent-note-web-fetch-reaches-any-destination-the-process-can:
+  en: 9f2eabf65d3e9a23
+  zh: 57225e399b93bf50
+/agent-note-web-fetch-reaches-any-destination-the-process-can/problem:
+  en: 27fd43294231ff5e
+  zh: 386af752bd05569e
+/agent-note-web-fetch-reaches-any-destination-the-process-can/decision:
+  en: 8dacbdebdb8b9b56
+  zh: bbd248492ba8d859
+/agent-note-web-fetch-reaches-any-destination-the-process-can/supersession-and-scope:
+  en: a7a3d312787333fc
+  zh: e1dcc0e3ad7ac8cf
+/agent-note-web-fetch-reaches-any-destination-the-process-can/alternatives-considered:
+  en: 577bebd1652d8351
+  zh: b124b9fab933d5ab
+/agent-note-web-fetch-reaches-any-destination-the-process-can/consequences:
+  en: f90cb9c0dd1df9af
+  zh: da955431928b9a41
+/agent-note-web-fetch-reaches-any-destination-the-process-can/testing:
+  en: c765b110a0f1d3f4
+  zh: 655206106952ccb0

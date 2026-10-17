@@ -1,6 +1,19 @@
-# Bilingual-pair consistency record (docs/i18n/README.md): the git blob hash of each
-# side as of the last confirmed-consistent state. Both languages carry equal authority;
-# after editing either side, bring the other along and re-record with:
+# Bilingual-pair consistency record for README.md (docs/i18n/README.md): per heading
+# section, a hash of its English and Chinese blocks outside code blocks and generated regions.
+# After editing either side, bring the other along and re-record with:
 #   pnpm run verify-translation-pairing --write fork-runtime/diagnostics/README.md
-README.md: b0c1a87a6dc1ef5afcab2c10bc088e59b2eb2ba5
-README.zh.md: 0f8d34b5ffcdce1ab1970d723f93cfe11f2d5959
+/windows-memory-diagnostics:
+  en: 3c8d89d55b629246
+  zh: b2ddb62fed1de76b
+/windows-memory-diagnostics/summary:
+  en: 7f868562fa25c1f2
+  zh: 960cf6a7d23e2b41
+/windows-memory-diagnostics/configuration:
+  en: 843fba740ffc036d
+  zh: 9870d7591855c279
+/windows-memory-diagnostics/evidence-and-interpretation:
+  en: 87b20e370f8e4fba
+  zh: 337167a5f9fd2e00
+/windows-memory-diagnostics/verification:
+  en: 290d9306bbe526bf
+  zh: b084eebdca91b601

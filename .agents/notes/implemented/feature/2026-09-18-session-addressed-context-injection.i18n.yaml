@@ -1,6 +1,25 @@
-# Bilingual-pair consistency record (docs/i18n/README.md): the git blob hash of each
-# side as of the last confirmed-consistent state. Both languages carry equal authority;
-# after editing either side, bring the other along and re-record with:
+# Bilingual-pair consistency record for 2026-09-18-session-addressed-context-injection.md (docs/i18n/README.md): per heading
+# section, a hash of its English and Chinese blocks outside code blocks and generated regions.
+# After editing either side, bring the other along and re-record with:
 #   pnpm run verify-translation-pairing --write .agents/notes/implemented/feature/2026-09-18-session-addressed-context-injection.md
-2026-09-18-session-addressed-context-injection.md: c59c2f507a4fa93dc603cf0744d97051edfe3429
-2026-09-18-session-addressed-context-injection.zh.md: 35fb762ccd584da395e2de28599e96a7777ed473
+/agent-note-session-addressed-agent-messages-use-attributed-context-injection:
+  en: 77ca01d551d9b03d
+  zh: 7a4729be84de6a2a
+/agent-note-session-addressed-agent-messages-use-attributed-context-injection/problem:
+  en: e319550a0de800bd
+  zh: 4445b2969a1040c4
+/agent-note-session-addressed-agent-messages-use-attributed-context-injection/decision:
+  en: 325285fcb039318f
+  zh: a4d79712f7059e13
+/agent-note-session-addressed-agent-messages-use-attributed-context-injection/decision/technical-availability-is-not-target-policy:
+  en: b234053937366ce9
+  zh: c79a94f9d59dbd62
+/agent-note-session-addressed-agent-messages-use-attributed-context-injection/verification:
+  en: df6b3990ceacacc6
+  zh: 889a5a84c2b9fbd9
+/agent-note-session-addressed-agent-messages-use-attributed-context-injection/alternatives-considered:
+  en: c102174b51e33f9a
+  zh: aab18c5a695890fe
+/agent-note-session-addressed-agent-messages-use-attributed-context-injection/consequences:
+  en: 1d5b6215ad77419d
+  zh: 079fa81b1d0b095d

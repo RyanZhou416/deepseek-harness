@@ -6,7 +6,7 @@
 
 import type { Branded } from '@deepseek-ai/dsh-brand'
 import type { FileAttachmentRef, ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
-import type { ToolCallId, ProviderRequestId, ReasoningEffortId } from './brand.ts'
+import type { MessageId, ToolCallId, ProviderRequestId, ReasoningEffortId } from './brand.ts'
 import type { Message, UserMessage } from './message.ts'
 
 declare module '@deepseek-ai/cordis' {
@@ -35,7 +35,6 @@ export type {
   ToolMessageSource,
   ToolResultMessage,
   UserMessage,
-  UserMessageSource,
 } from './message.ts'
 
 /** Serializable provider or transport failure facts; policy decides whether they are retryable. */
@@ -146,9 +145,8 @@ export interface ToolRemovalBlock {
 
 /**
  * Merge-extensible content blocks keyed by `type`. New core blocks must land
- * with adapter, UI, and compaction support. Developer tool-change blocks are
- * reserved for Session V4 persistence; providers and UI reject them until
- * their producers and consumers are implemented together.
+ * with adapter, UI, and compaction support. Tool-change blocks belong to
+ * developer messages; `projectToolUpdates` selects what each route receives.
  */
 export interface ContentBlockMap {
   'text': TextBlock
@@ -279,8 +277,26 @@ export interface LlmConfigurableProvider {
    * from outside.
    */
   declared?: boolean
+  /**
+   * Route endpoint the adapter uses when the profile sets no `baseURL`; the
+   * adapter may still send an individual model to that model's own endpoint.
+   * Absent when the route has no fixed endpoint.
+   */
+  defaultBaseURL?: string
+  /** Environment variables used to construct a provider endpoint; absent when none are reported. */
+  baseURLEnv?: readonly string[]
+  /** Authentication the adapter performs when the profile names no credential reference; absent when it reports none. */
+  nativeAuth?: LlmNativeAuth
   /** Configuration diagnostic for repair; unaffected models may remain serviceable. */
   error?: string
+}
+
+/** Authentication a provider route performs without a credential reference in its profile. */
+export interface LlmNativeAuth {
+  /** Environment variables the route's authentication reads, in lookup order; empty when it reads none. */
+  env: readonly string[]
+  /** Whether a stored OAuth sign-in can authenticate the route. */
+  oauth: boolean
 }
 
 /**
@@ -394,7 +410,7 @@ export interface LlmReasoningEffortInfo {
 
 /** Selectable reasoning efforts for one exact provider/model route. */
 export interface LlmModelReasoningInfo {
-  /** Supported efforts in adapter-preferred display order. */
+  /** Supported efforts from least to greatest selectable reasoning effort, not predicted token use or latency. */
   efforts: readonly LlmReasoningEffortInfo[]
   /**
    * Adapter-configured default materialized into requests when callers omit
@@ -411,6 +427,17 @@ export interface LlmModelReasoningInfo {
  */
 export type SystemPromptUpdate = 'in-history'
 
+/**
+ * How a model accepts native tool declarations that change mid-conversation.
+ * `'addition-only'`: the model reads a `tool-addition` block in a later
+ * developer message as activating a tool declared with `deferLoading`, so an
+ * added tool follows the cached history instead of rewriting the declaration
+ * list. `'in-history'`: the model additionally reads `tool-removal` blocks,
+ * so a removed tool keeps its declaration and the removal follows the history.
+ * Absent means every request declares the complete current tool list.
+ */
+export type ToolUpdate = 'in-history' | 'addition-only'
+
 /** Exact-route model metadata resolved by its owning adapter. */
 export interface LlmResolvedModelInfo extends LlmModelInfo {
   /** Provider-owned context capacity when known. */
@@ -421,6 +448,8 @@ export interface LlmResolvedModelInfo extends LlmModelInfo {
   reasoning?: LlmModelReasoningInfo
   /** Declared mid-conversation system prompt handling; absent means only a leading system message is read. */
   systemPromptUpdate?: SystemPromptUpdate
+  /** Declared mid-conversation tool declaration handling; absent means every request declares the complete tool list. */
+  toolUpdate?: ToolUpdate
 }
 
 /**
@@ -497,14 +526,17 @@ export interface RequestUserInput {
 /** A durable conversation message or a user input used only for one request. */
 export type RequestMessage = Message | RequestUserInput
 
-/** One rendered system-prompt section, in assembly order. */
-export interface SystemPromptSection {
-  /** The contributing section's unique name. */
-  readonly name: string
-  /** The section's interpolated text. */
-  readonly text: string
-  /** Whether the contributing section declared its text stable across assemblies. */
-  readonly stable: boolean
+/** Logged tool declarations and update identities since the last declaration reset. */
+export interface ToolHistory {
+  /** Complete active declarations at the start of this history. */
+  readonly tools: readonly ToolSchema[]
+  /** Ordered developer messages, with additions resolved from their historical headers. */
+  readonly updates: readonly {
+    /** Identity used to locate this update in the derived request history. */
+    readonly messageId: MessageId
+    /** Added definitions resolved from the event's referenced request header. */
+    readonly additions: readonly ToolSchema[]
+  }[]
 }
 
 /** A single model request, fully assembled. */
@@ -526,19 +558,10 @@ export interface GenerateOptions {
    * system slot ahead of `messages`. Loop-built requests leave it undefined.
    */
   system?: string
-  /**
-   * The rendered system prompt as its assembled sections, when the loop built the prompt
-   * from an assembly. Joining the texts with blank lines in this order reproduces the
-   * prompt exactly.
-   *
-   * Present so an adapter can group the text differently: text whose contributing section
-   * declared itself stable across assemblies of this build may be placed ahead of
-   * session-specific text, which lets more of a request be a shareable cache prefix. An
-   * adapter that does not regroup sends the sections in this order, unchanged.
-   */
-  systemSections?: readonly SystemPromptSection[]
   /** Tool schemas (adapters map to the provider's `tools` field). */
   tools?: ToolSchema[]
+  /** Session-folded tool history used for route projection; omission sends complete declarations without tool updates. */
+  toolHistory?: ToolHistory
   temperature?: number
   maxTokens?: number
   /**
@@ -555,8 +578,8 @@ export interface GenerateOptions {
   sessionId?: Branded<'SessionId'>
   /**
    * Provider-neutral classification for an auxiliary model call. Adapters may
-   * map the purpose to model-hidden transport metadata or purpose-specific
-   * generation policy. Ordinary conversation requests leave it unset.
+   * map the purpose to model-hidden transport metadata. Ordinary conversation
+   * requests leave it unset.
    */
   purpose?: 'compaction' | 'session-title'
 }

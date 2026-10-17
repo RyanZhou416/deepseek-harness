@@ -1,6 +1,139 @@
-# Bilingual-pair consistency record (docs/i18n/README.md): the git blob hash of each
-# side as of the last confirmed-consistent state. Both languages carry equal authority;
-# after editing either side, bring the other along and re-record with:
+# Bilingual-pair consistency record for README.md (docs/i18n/README.md): per heading
+# section, a hash of its English and Chinese blocks outside code blocks and generated regions.
+# After editing either side, bring the other along and re-record with:
 #   pnpm run verify-translation-pairing --write packages/api/tool-session-message/README.md
-README.md: bdc92651e553046cf96dd0e237d0701c4741e99c
-README.zh.md: 7e27bdc83457081dd2bc1067b113e65164115152
+/:
+  en: 5854f56ffd591320
+  zh: d214f954e38ca6f1
+/deepseek-ai-dsh-tool-session-message:
+  en: 40416f304efeaee8
+  zh: af9c890f4f7103a4
+/deepseek-ai-dsh-tool-session-message/summary:
+  en: a315f206826ee379
+  zh: 8ae7e3ca6ac5eef9
+/deepseek-ai-dsh-tool-session-message/table-of-contents:
+  en: d152484eb41ac6b4
+  zh: 09388d293f9be9cb
+/deepseek-ai-dsh-tool-session-message/use-this-package:
+  en: 9d7c1f306ba9cf46
+  zh: 346c4332a91285cb
+/deepseek-ai-dsh-tool-session-message/use-this-package/when-to-choose-it:
+  en: 8974e2a3b675348c
+  zh: 06835ef5f5411205
+/deepseek-ai-dsh-tool-session-message/use-this-package/minimal-configuration:
+  en: 38ac5f4df4a224b3
+  zh: c33465a6d457e889
+/deepseek-ai-dsh-tool-session-message/use-this-package/creating-and-starting-an-independent-session:
+  en: b252e491f113c80b
+  zh: 05a7f02b9177897f
+/deepseek-ai-dsh-tool-session-message/use-this-package/finding-an-independent-session:
+  en: f55fb69d829eab82
+  zh: a0cb045edc3d79af
+/deepseek-ai-dsh-tool-session-message/use-this-package/delivery:
+  en: 6f76696c098963bd
+  zh: 9d19715425303e9c
+/deepseek-ai-dsh-tool-session-message/use-this-package/status-inspection:
+  en: bc3d1a6aeaeb53bd
+  zh: 678918b3fcc87e5c
+/deepseek-ai-dsh-tool-session-message/use-this-package/failure-and-cancellation:
+  en: 8317f52304e27b85
+  zh: d56f2471236bd6dd
+/deepseek-ai-dsh-tool-session-message/understand-the-implementation:
+  en: d2c1de77bf5512be
+  zh: 5d460fef9975e489
+/deepseek-ai-dsh-tool-session-message/understand-the-implementation/design-concept:
+  en: f01b0742fbb36804
+  zh: 3c409a9417ba9dbd
+/deepseek-ai-dsh-tool-session-message/understand-the-implementation/source-and-trust:
+  en: 3aae9df1640cda66
+  zh: f36d6c71cbd7ebd3
+/deepseek-ai-dsh-tool-session-message/understand-the-implementation/source-map:
+  en: 8f3acf4a7f46e4e8
+  zh: 56a598d2ffea9e5a
+/deepseek-ai-dsh-tool-session-message/further-exploration:
+  en: b8214361abfdbe2a
+  zh: 3fe90e05a6861320
+/deepseek-ai-dsh-tool-session-message/model-experience:
+  en: 215e7ba838619b7b
+  zh: a311da3843709f90
+/deepseek-ai-dsh-tool-session-message/model-experience/tool-schema:
+  en: e4c7376d4f29dbd5
+  zh: 6b7a9eaf69c9ea53
+/deepseek-ai-dsh-tool-session-message/model-experience/tool-schema/what-the-model-sees:
+  en: 9588909ee93e8ce1
+  zh: f58d625bd9afb672
+/deepseek-ai-dsh-tool-session-message/model-experience/tool-schema/token-effect:
+  en: 5c43dbbde28c1f67
+  zh: d799d05bfd4d98cb
+/deepseek-ai-dsh-tool-session-message/model-experience/tool-schema/kv-cache-effect:
+  en: 65f83ac6c8665710
+  zh: 7a388bbe5c492a45
+/deepseek-ai-dsh-tool-session-message/model-experience/session-creation-result:
+  en: 0db2460073983ef4
+  zh: 6793e35b191b8afc
+/deepseek-ai-dsh-tool-session-message/model-experience/session-creation-result/what-the-model-sees:
+  en: 80e8825544893d05
+  zh: bbc37c0cd3f4d451
+/deepseek-ai-dsh-tool-session-message/model-experience/session-creation-result/token-effect:
+  en: f4c8c90800a83c2b
+  zh: 0ab91fcb2e79f4eb
+/deepseek-ai-dsh-tool-session-message/model-experience/session-creation-result/kv-cache-effect:
+  en: 9a9eee5d25b28aa7
+  zh: bed3e34df864c339
+/deepseek-ai-dsh-tool-session-message/model-experience/session-discovery-result:
+  en: 2ea3b95168f6653d
+  zh: 437c320ada96cde2
+/deepseek-ai-dsh-tool-session-message/model-experience/session-discovery-result/what-the-model-sees:
+  en: 753c3b3bea135aa8
+  zh: ae7b0dc3af226da3
+/deepseek-ai-dsh-tool-session-message/model-experience/session-discovery-result/token-effect:
+  en: 5fb630907cab820d
+  zh: 23d047793580a246
+/deepseek-ai-dsh-tool-session-message/model-experience/session-discovery-result/kv-cache-effect:
+  en: 4a629edb36a17e32
+  zh: 5a7539cfbf404c54
+/deepseek-ai-dsh-tool-session-message/model-experience/received-peer-message:
+  en: 20adbd6b45758af9
+  zh: 9c8c541323a66f32
+/deepseek-ai-dsh-tool-session-message/model-experience/received-peer-message/what-the-model-sees:
+  en: a2e0353f9cebcea9
+  zh: dc8aace166c06a8d
+/deepseek-ai-dsh-tool-session-message/model-experience/received-peer-message/what-the-model-sees/peer-framing:
+  en: 1bf5891b70f63336
+  zh: 55bb1233e2a54bac
+/deepseek-ai-dsh-tool-session-message/model-experience/received-peer-message/token-effect:
+  en: edb4bb46191f9925
+  zh: afb78971bac6fd33
+/deepseek-ai-dsh-tool-session-message/model-experience/received-peer-message/kv-cache-effect:
+  en: 7de30078760de37f
+  zh: 99035a4df9427bff
+/deepseek-ai-dsh-tool-session-message/model-experience/delivery-result:
+  en: ab964e307bd37dca
+  zh: 03f975252f838a42
+/deepseek-ai-dsh-tool-session-message/model-experience/delivery-result/what-the-model-sees:
+  en: e10a3825e83d184c
+  zh: 0bc1095af5acf27e
+/deepseek-ai-dsh-tool-session-message/model-experience/delivery-result/token-effect:
+  en: be2cc527f686ea5c
+  zh: 974f0cfd8cad9045
+/deepseek-ai-dsh-tool-session-message/model-experience/delivery-result/kv-cache-effect:
+  en: bdc61e68c8a2ed55
+  zh: 51b69648c404b1f3
+/deepseek-ai-dsh-tool-session-message/model-experience/status-result:
+  en: 8a36bec4f4e65537
+  zh: e3391d82a24a62f5
+/deepseek-ai-dsh-tool-session-message/model-experience/status-result/what-the-model-sees:
+  en: 3210ba0b059bfae4
+  zh: 45cf5aff451a0a18
+/deepseek-ai-dsh-tool-session-message/model-experience/status-result/token-effect:
+  en: d4b02ae4ec51a52e
+  zh: f7f3fcfaba138b79
+/deepseek-ai-dsh-tool-session-message/model-experience/status-result/kv-cache-effect:
+  en: bdc61e68c8a2ed55
+  zh: 51b69648c404b1f3
+/deepseek-ai-dsh-tool-session-message/known-limitations-and-deferred-work:
+  en: acc522bc25aeb000
+  zh: 3310b532fa441195
+/deepseek-ai-dsh-tool-session-message/known-limitations-and-deferred-work/dev-note:
+  en: e67f633dc6fe7773
+  zh: 3bb0c20c93f16f98

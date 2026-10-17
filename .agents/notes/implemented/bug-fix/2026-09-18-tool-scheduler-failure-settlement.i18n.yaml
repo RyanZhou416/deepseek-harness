@@ -1,6 +1,22 @@
-# Bilingual-pair consistency record (docs/i18n/README.md): the git blob hash of each
-# side as of the last confirmed-consistent state. Both languages carry equal authority;
-# after editing either side, bring the other along and re-record with:
+# Bilingual-pair consistency record for 2026-09-18-tool-scheduler-failure-settlement.md (docs/i18n/README.md): per heading
+# section, a hash of its English and Chinese blocks outside code blocks and generated regions.
+# After editing either side, bring the other along and re-record with:
 #   pnpm run verify-translation-pairing --write .agents/notes/implemented/bug-fix/2026-09-18-tool-scheduler-failure-settlement.md
-2026-09-18-tool-scheduler-failure-settlement.md: 006f9af31900f4d6ae1c3b5455b97792adbf470e
-2026-09-18-tool-scheduler-failure-settlement.zh.md: 62d0c0e644fa40fe94811e5b0e686d8bf6d33d2d
+/agent-note-tool-scheduler-failures-retain-provider-valid-history:
+  en: ab043a11256f6aca
+  zh: 334bee4d1e403db6
+/agent-note-tool-scheduler-failures-retain-provider-valid-history/problem:
+  en: 9b7de95bb9ae2f06
+  zh: a02c1b7e970873c9
+/agent-note-tool-scheduler-failures-retain-provider-valid-history/decision:
+  en: e29b70fdd252f9d2
+  zh: f94e59e858b4e595
+/agent-note-tool-scheduler-failures-retain-provider-valid-history/verification:
+  en: d3df678a60360bf0
+  zh: bc77e4df801f243c
+/agent-note-tool-scheduler-failures-retain-provider-valid-history/alternatives-considered:
+  en: 33aaf16b6c633050
+  zh: aaa3206de55e57c4
+/agent-note-tool-scheduler-failures-retain-provider-valid-history/consequences:
+  en: b04a8df6f8703f79
+  zh: 6e116c0c7a0042fc

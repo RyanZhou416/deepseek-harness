@@ -294,47 +294,28 @@ export function presentGlobResult(_args: { pattern: string; path?: string }, res
  * @param caps - the deployment's resolved glob caps (plugin config after defaulting).
  */
 export function applyGlobTool(ctx: Context, caps: GlobToolCaps): void {
-  const overCapGuidance = caps.sampleOverCapGlobResults
-    ? 'while a larger one is sampled across top-level entries, so it spans the tree instead of one subtree.'
-    : 'while a larger one keeps the modification-time-ordered head.'
   ctx.systemPrompt.section({
     name: 'tool:glob',
-    stable: true,
     order: ctx.systemPrompt.getSectionOrder('TOOL_GLOB'),
     text: ({ scope }) => ctx.tools.get('glob', scope) === undefined
       ? ''
-      : 'Use the glob tool — not shell find — to discover files by path pattern. '
-      + 'When the target directory is known, set path to that directory and use a pattern within it (e.g. path="src", pattern="**/*.ts"). '
-      + 'A directory prefix in pattern only filters matches; it does not narrow the directory tree searched. '
-      + 'After a timeout, narrow path instead of repeating the same workspace-wide search. '
-      + 'A pattern with no "/" matches basenames at any depth, so "*" matches every file in the tree rather than its top level. '
-      + `Results are files only, never directories, and include hidden and ignored files: a result that fits comes back in modification-time order, ${overCapGuidance}`,
+      : 'Use the glob tool — not shell find — to discover files by path pattern.',
   })
 
-  const overCapDescription = caps.sampleOverCapGlobResults
-    ? `a larger result instead returns ${caps.maxResults} paths sampled across top-level entries`
-    : `a larger result returns the first ${caps.maxResults} paths in modification-time order`
+  const overCapDescription = caps.sampleOverCapGlobResults ? 'is sampled across top-level entries' : 'keeps the first paths'
   const tool = defineTool({
     name: 'glob',
-    description: 'Find files whose paths match a glob pattern. '
-      + 'Set path to the narrowest known directory; a directory prefix in pattern does not narrow the search root. '
-      + 'Returns matching file paths — never directories — '
-      + 'including hidden and ignored files (VCS metadata directories are excluded). '
-      + `Up to ${caps.maxResults} paths come back in modification-time order; ${overCapDescription}, `
-      + 'says so, and reports where the complete sorted list was saved. This tool does not enumerate directory entries.',
+    description: 'Find files, not directories, whose paths match a glob pattern, including hidden and ignored files. '
+      + `Returns up to ${caps.maxResults} paths in modification-time order; a larger result ${overCapDescription} `
+      + 'and reports where the complete list was saved.',
     parameters: {
       pattern: {
         type: 'string',
         required: true,
-        description: 'Glob pattern to filter file paths (e.g. "**/*.ts", "**/*.test.js"). '
-          + 'A pattern with no "/" matches basenames at any depth. '
-          + 'A directory prefix filters matches but does not narrow the search root; set path to the directory to search.',
+        description: 'Glob pattern to match file paths against (e.g. "**/*.ts", "src/**/*.test.js"). '
+          + 'A pattern with no "/" matches the basename at any depth, so "*" and "*.ts" both search the whole tree; include a separator to anchor the depth.',
       },
-      path: {
-        type: 'string',
-        description: 'Directory tree to search; use the narrowest known directory. '
-          + 'Defaults to the session workspace; a relative path resolves against it.',
-      },
+      path: { type: 'string', description: 'Directory to search in. Defaults to the session workspace; a relative path resolves against it.' },
     },
     timeoutMs: caps.timeoutMs,
     output: {

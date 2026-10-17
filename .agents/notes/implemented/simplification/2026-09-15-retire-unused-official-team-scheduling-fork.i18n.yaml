@@ -1,6 +1,19 @@
-# Bilingual-pair consistency record (docs/i18n/README.md): the git blob hash of each
-# side as of the last confirmed-consistent state. Both languages carry equal authority;
-# after editing either side, bring the other along and re-record with:
+# Bilingual-pair consistency record for 2026-09-15-retire-unused-official-team-scheduling-fork.md (docs/i18n/README.md): per heading
+# section, a hash of its English and Chinese blocks outside code blocks and generated regions.
+# After editing either side, bring the other along and re-record with:
 #   pnpm run verify-translation-pairing --write .agents/notes/implemented/simplification/2026-09-15-retire-unused-official-team-scheduling-fork.md
-2026-09-15-retire-unused-official-team-scheduling-fork.md: bf812c2077d6b1083e45e0154416301b61816d32
-2026-09-15-retire-unused-official-team-scheduling-fork.zh.md: 1c8d3b62c5c34aaa28e1f6b51068af28ba49acad
+/agent-note-retire-unused-official-team-scheduling-fork:
+  en: 082a3731c0c3bf8d
+  zh: fcab0975708129f2
+/agent-note-retire-unused-official-team-scheduling-fork/problem:
+  en: 321eb30dba4c36bc
+  zh: 3a2c2ce4e1332bdb
+/agent-note-retire-unused-official-team-scheduling-fork/decision:
+  en: 38c753287b53f427
+  zh: b15d74509e688df8
+/agent-note-retire-unused-official-team-scheduling-fork/alternatives-considered:
+  en: 0063b5f963e0073e
+  zh: a59147df02deb336
+/agent-note-retire-unused-official-team-scheduling-fork/consequences:
+  en: 763f103a54c8e90c
+  zh: 7652750e335f37dd

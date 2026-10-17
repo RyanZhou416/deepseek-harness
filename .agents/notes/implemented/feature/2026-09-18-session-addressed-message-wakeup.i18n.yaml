@@ -1,6 +1,22 @@
-# Bilingual-pair consistency record (docs/i18n/README.md): the git blob hash of each
-# side as of the last confirmed-consistent state. Both languages carry equal authority;
-# after editing either side, bring the other along and re-record with:
+# Bilingual-pair consistency record for 2026-09-18-session-addressed-message-wakeup.md (docs/i18n/README.md): per heading
+# section, a hash of its English and Chinese blocks outside code blocks and generated regions.
+# After editing either side, bring the other along and re-record with:
 #   pnpm run verify-translation-pairing --write .agents/notes/implemented/feature/2026-09-18-session-addressed-message-wakeup.md
-2026-09-18-session-addressed-message-wakeup.md: 07df5fb4874258f8f9acbfa6dfb4a1962fa5ec3a
-2026-09-18-session-addressed-message-wakeup.zh.md: 643bb187db21db064495df59e2687f74e35b4520
+/agent-note-session-addressed-messages-wake-idle-targets:
+  en: 66ce527b2222e29f
+  zh: 3363323ad850aae6
+/agent-note-session-addressed-messages-wake-idle-targets/problem:
+  en: 187a856671de19c1
+  zh: 399908711ac3330f
+/agent-note-session-addressed-messages-wake-idle-targets/decision:
+  en: 1f6d50e5e882eae1
+  zh: 696cd0c9c8faec0c
+/agent-note-session-addressed-messages-wake-idle-targets/verification:
+  en: c208a16ef05b4ff7
+  zh: baf42be874758a57
+/agent-note-session-addressed-messages-wake-idle-targets/alternatives-considered:
+  en: fbd27d39634437ea
+  zh: 4eb2796e3c65824a
+/agent-note-session-addressed-messages-wake-idle-targets/consequences:
+  en: ba8e7f43387f08af
+  zh: fa1fff741a287aa7

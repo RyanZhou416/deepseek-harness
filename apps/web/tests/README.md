@@ -2,7 +2,7 @@
 
 English | [中文](README.zh.md)
 
-These tests boot the real web composition in-process and drive it with real browsers over real HTTP. Chromium runs the full lane; the [model and reasoning picker scenario](declared-reasoning.e2e.ts) also runs in WebKit to cover native mouse focus behavior. The lane's mechanics — modes, fixtures, goldens, and the deliberate composition divergences from `dsh web` — are documented in [`scaffold.ts`](scaffold.ts) and the [browser e2e Agent Note](../../../.agents/notes/implemented/testing/2026-07-24-web-gui-browser-e2e-lane.md).
+These tests boot the real web composition in-process and drive it with real browsers over real HTTP. Chromium runs the full lane; the [model and reasoning picker scenario](declared-reasoning.e2e.ts) also runs in WebKit to cover native mouse focus behavior. [Session replay recovery](session-replay-reload.e2e.ts) also runs in WebKit, sharing the `fresh-round-trip` recording and expected output without rewriting them. It covers active-stream reload, completed-turn reload, and reopening a Session. The lane's mechanics — modes, fixtures, goldens, and the deliberate composition divergences from `dsh web` — are documented in [`scaffold.ts`](scaffold.ts) and the [browser e2e Agent Note](../../../.agents/notes/implemented/testing/2026-07-24-web-gui-browser-e2e-lane.md).
 
 After installing workspace dependencies, install the browsers and their system dependencies from the repository root:
 
@@ -14,19 +14,13 @@ On Linux, `--with-deps` installs dependencies through the system package manager
 
 Ordinary scenarios begin with no registered Workspace or Session and a durable marker recording a removed default Workspace, so explicit folder-selection scenarios retain control of their cwd. `launchWebScaffold({ firstUse: true })` leaves initialization eligible for startup scenarios.
 
-## Manual load diagnostics
-
-`complex-history.perf.ts` runs under `vitest.web.perf.config.ts` and reports large workspace/history costs, eight continued turns, and a 100-turn browser soak. Synthetic history reserves the current format's system head before user messages. The workspace case checks all stored Sessions and the five-row preview plus hidden count; Trajectory measurements use logical row counts because the table virtualizes mounted rows. Live tool turns execute the platform's shipped shell (`pwsh` on Windows, `bash` elsewhere) and assert the returned marker. Its GC checkpoints measure browser heap, DOM nodes, and listeners; the test retains observed Session events, so the test Host's RSS is not a product-retention measurement.
-
-`../stress-tests/subagent-reconnect.stress.ts` runs under `vitest.web-stress.config.ts`: eight real continuable children produce paced synthetic output while a real WebSocket is closed and reconnected. It checks retained draft/title, complete durable child output, unique lifecycle events, and child release, and reports trusted keyboard-input and recovery times without a new timing budget. Both diagnostics use private temporary data, a source-resolved Host, and built Client assets; they exclude remote model latency.
-
-Set `DSH_PERF_CAPTURE=1` for a separate diagnostic run of the default-window or fully expanded continuation cases. The first turn writes browser CPU profiles, a Chrome timeline, a Host CPU profile, and available source maps under `tmp/runtime-profiles/`. Capture uses an in-process Node inspector session without opening a listening port. It resolves the Send control before recording and checks only the recent message nodes during recording; profile-enabled timings include instrumentation and must stay separate from ordinary benchmark samples.
-
 ## Completion observations
 
-Plugin configuration tests select the active platform shell and assert its shipped timeout default, saved override, and restored default. The inactive shell's Loader row is not evidence of live configuration updates.
+State-sensitive cases use Workspace, admission, attachment, and model-stream barriers to separate visible intermediate states from completed operations. Model-picker persistence assertions wait for the saved default, independently of menu closure. Details close waits for frame transitions; archive verification assigns an explicit title to the seeded Session and follows that identity across reload. The [CI test reliability workflow](../../../.agents/skills/dsh-ci-test-reliability/SKILL.md#synchronize-on-state) owns these synchronization rules.
 
-State-sensitive cases use Workspace, admission, attachment, and model-stream barriers to separate visible intermediate states from completed operations. Details close waits for frame transitions; archive verification assigns an explicit title to the seeded Session and follows that identity across reload. See the [CI fixture synchronization decision](../../../.agents/notes/implemented/testing/2026-09-08-ci-completion-observations.md).
+[Idle-submission handoff](idle-submission-handoff.e2e.ts) waits up to the scaffold's 30-second turn-completion budget for Host frames and browser placement. Vitest owns scaffold teardown so a replay-consumption error does not replace the failed scenario assertion.
+
+Plugin-manager switches wait up to `PLUGIN_TOGGLE_SETTLE_MS` (10 seconds) for the Host's profile write and the store's follow-up inventory read, the two steps that republish `aria-checked`; that constant's JSDoc records the measured chain.
 
 Explicit scrolling uses `scrollIntoView` from `support.ts`: it resolves the locator again when its old element detaches and checks connection in the same browser task as native scrolling. Scenarios retain their visibility and geometry assertions after scrolling.
 

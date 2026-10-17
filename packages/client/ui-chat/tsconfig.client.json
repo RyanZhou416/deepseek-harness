@@ -116,6 +116,9 @@
     },
     {
       "path": "../ui-input-trigger"
+    },
+    {
+      "path": "../product-analytics/tsconfig.client.json"
     }
   ],
   "exclude": [

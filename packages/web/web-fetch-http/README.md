@@ -91,7 +91,6 @@ The package is built on one separation and one layered timeout:
 | [`src/index.ts`](src/index.ts) | Plugin entry: config schema, limit validation, provider registration |
 | [`src/provider.ts`](src/provider.ts) | The `HttpFetchProvider`: global-fetch transport, redirect following, capped reads, charset decoding |
 | [`src/policy.ts`](src/policy.ts) | URL validation, same-origin checks, content-type classification, charset parsing |
-| — | No runtime invariant companion is published; this package exposes no independent event sequence or mutable data relation beyond contracts enforced at its owning seam. |
 
 ### Read path
 

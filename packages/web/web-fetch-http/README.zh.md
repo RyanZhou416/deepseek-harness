@@ -91,7 +91,6 @@ const page = await ctx.web.fetch({ url: 'https://example.com' })
 | [`src/index.ts`](src/index.ts) | 插件入口：配置 schema、上限验证、提供方注册 |
 | [`src/provider.ts`](src/provider.ts) | `HttpFetchProvider`：全局 fetch 传输、重定向跟随、有界读取、charset 解码 |
 | [`src/policy.ts`](src/policy.ts) | URL 校验、同源检查、内容类型分类、charset 解析 |
-| — | 不发布运行时不变量配套入口；除所属 seam 强制执行的约定外，本包没有独立的事件序列或可变数据关系。 |
 
 ### 读取路径
 

@@ -1,6 +1,25 @@
-# Bilingual-pair consistency record (docs/i18n/README.md): the git blob hash of each
-# side as of the last confirmed-consistent state. Both languages carry equal authority;
-# after editing either side, bring the other along and re-record with:
+# Bilingual-pair consistency record for 2026-09-14-windows-subprocess-console-isolation.md (docs/i18n/README.md): per heading
+# section, a hash of its English and Chinese blocks outside code blocks and generated regions.
+# After editing either side, bring the other along and re-record with:
 #   pnpm run verify-translation-pairing --write .agents/notes/implemented/architecture/2026-09-14-windows-subprocess-console-isolation.md
-2026-09-14-windows-subprocess-console-isolation.md: c56bd14b6211fea8b59f19617e6988d0e256ce96
-2026-09-14-windows-subprocess-console-isolation.zh.md: 0b77e0ec7f49ebef0cd3eb2a9ad61b94770fd4ed
+/agent-note-windows-ordinary-subprocesses-use-private-consoles:
+  en: 97c13c61fbcd3d12
+  zh: bfb1da0d20f3326d
+/agent-note-windows-ordinary-subprocesses-use-private-consoles/problem:
+  en: 333b924f6bea950a
+  zh: dc70bee6f6f8c3d8
+/agent-note-windows-ordinary-subprocesses-use-private-consoles/decision:
+  en: 7ab2f51f49b3eb5d
+  zh: c18737d336063f6d
+/agent-note-windows-ordinary-subprocesses-use-private-consoles/alternatives-considered:
+  en: 3b450ea3f3ca1760
+  zh: ac87ca2716fea4a1
+/agent-note-windows-ordinary-subprocesses-use-private-consoles/consequences:
+  en: b272b97107f459c3
+  zh: e356aa130744c11e
+/agent-note-windows-ordinary-subprocesses-use-private-consoles/verification:
+  en: d5fec6006f09766a
+  zh: ab65c26d082c7fac
+/agent-note-windows-ordinary-subprocesses-use-private-consoles/related:
+  en: a255da7eccba258d
+  zh: 7aed326aac03d8d1

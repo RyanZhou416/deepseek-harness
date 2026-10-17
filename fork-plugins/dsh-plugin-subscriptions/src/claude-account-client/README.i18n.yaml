@@ -1,6 +1,22 @@
-# Bilingual-pair consistency record (docs/i18n/README.md): the git blob hash of each
-# side as of the last confirmed-consistent state. Both languages carry equal authority;
-# after editing either side, bring the other along and re-record with:
+# Bilingual-pair consistency record for README.md (docs/i18n/README.md): per heading
+# section, a hash of its English and Chinese blocks outside code blocks and generated regions.
+# After editing either side, bring the other along and re-record with:
 #   pnpm run verify-translation-pairing --write fork-plugins/dsh-plugin-subscriptions/src/claude-account-client/README.md
-README.md: a3bd7b503c2e87572618fda832df399c26c3c5bb
-README.zh.md: 21726ab06812c4241eb14f7549cd2845bf046ea0
+/claude-account-client-pure-single-account-maintenance-client:
+  en: 4e2e51510401637f
+  zh: 211b7cb33d3963c2
+/claude-account-client-pure-single-account-maintenance-client/ownership-boundary:
+  en: 54d9c05b85b5ab72
+  zh: db38f5051569df41
+/claude-account-client-pure-single-account-maintenance-client/exported-api:
+  en: a4b77feffcc07735
+  zh: 82e56aeebfa9e0af
+/claude-account-client-pure-single-account-maintenance-client/product-safeguard-declarations-deliberate-differences:
+  en: a83d059582989cf9
+  zh: 1eeba03fbf3dd15c
+/claude-account-client-pure-single-account-maintenance-client/runtime-platform-declaration:
+  en: 48f79a761a216ac1
+  zh: c295c76d821f7ebb
+/claude-account-client-pure-single-account-maintenance-client/not-implemented-explicit-gaps:
+  en: b9d549b4cf673ecd
+  zh: b6425b09a40e669f

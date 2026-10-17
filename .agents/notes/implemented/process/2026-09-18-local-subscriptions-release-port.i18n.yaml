@@ -1,6 +1,19 @@
-# Bilingual-pair consistency record (docs/i18n/README.md): the git blob hash of each
-# side as of the last confirmed-consistent state. Both languages carry equal authority;
-# after editing either side, bring the other along and re-record with:
+# Bilingual-pair consistency record for 2026-09-18-local-subscriptions-release-port.md (docs/i18n/README.md): per heading
+# section, a hash of its English and Chinese blocks outside code blocks and generated regions.
+# After editing either side, bring the other along and re-record with:
 #   pnpm run verify-translation-pairing --write .agents/notes/implemented/process/2026-09-18-local-subscriptions-release-port.md
-2026-09-18-local-subscriptions-release-port.md: 24a5e6c6b9cea36fab4cf5624249b103673d46cb
-2026-09-18-local-subscriptions-release-port.zh.md: 23c5fa611aada7f767df70e9e31a651c08326d6b
+/agent-note-exact-local-subscriptions-release-ports:
+  en: 94b77e81fd8ea79f
+  zh: b3e7cf14de46a046
+/agent-note-exact-local-subscriptions-release-ports/problem:
+  en: 8021591bb57156f8
+  zh: b791c6b64b2fdde4
+/agent-note-exact-local-subscriptions-release-ports/decision:
+  en: faa46328e02f88d3
+  zh: 508799eaad095054
+/agent-note-exact-local-subscriptions-release-ports/alternatives-considered:
+  en: 4b1a73ffb18889aa
+  zh: d2d89f0c2795fba2
+/agent-note-exact-local-subscriptions-release-ports/consequences:
+  en: b03bcb88c9002aa6
+  zh: ac9caf9bfeda9a3c

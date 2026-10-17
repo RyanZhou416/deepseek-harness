@@ -1,6 +1,28 @@
-# Bilingual-pair consistency record (docs/i18n/README.md): the git blob hash of each
-# side as of the last confirmed-consistent state. Both languages carry equal authority;
-# after editing either side, bring the other along and re-record with:
+# Bilingual-pair consistency record for 2026-10-15-claude-request-record-and-retry-disposition.md (docs/i18n/README.md): per heading
+# section, a hash of its English and Chinese blocks outside code blocks and generated regions.
+# After editing either side, bring the other along and re-record with:
 #   pnpm run verify-translation-pairing --write docs/persistence-changes/2026-10-15-claude-request-record-and-retry-disposition.md
-2026-10-15-claude-request-record-and-retry-disposition.md: fbc178d0c28bb4858ac8e24c66c1a704a936157f
-2026-10-15-claude-request-record-and-retry-disposition.zh.md: b36717e8bb5bb2e96bb3f48cd6334908e0dd55d1
+/:
+  en: 3d5a424ae7d7e46b
+  zh: c22a8e4a62d8cc1a
+/2026-10-15-claude-request-record-and-retry-disposition:
+  en: 3e669127e93b23d8
+  zh: bab9754f4ecbf5f6
+/2026-10-15-claude-request-record-and-retry-disposition/summary:
+  en: f88668ca3e5b76d2
+  zh: 6e23345f22ab56b7
+/2026-10-15-claude-request-record-and-retry-disposition/table-of-contents:
+  en: 6cf314a069ceb451
+  zh: 9adff678e9ecab3b
+/2026-10-15-claude-request-record-and-retry-disposition/declaration:
+  en: 6907136f28e48c90
+  zh: 02f8298485f3d8e7
+/2026-10-15-claude-request-record-and-retry-disposition/compatibility:
+  en: a2f1be6e514ad900
+  zh: c14b8cae218352ad
+/2026-10-15-claude-request-record-and-retry-disposition/verification:
+  en: a8685985fd85876e
+  zh: dcafabceab60945b
+/2026-10-15-claude-request-record-and-retry-disposition/dev-note:
+  en: b75c8458928b72b9
+  zh: 003ba4e17b4b5269

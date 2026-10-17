@@ -1,6 +1,19 @@
-# Bilingual-pair consistency record (docs/i18n/README.md): the git blob hash of each
-# side as of the last confirmed-consistent state. Both languages carry equal authority;
-# after editing either side, bring the other along and re-record with:
+# Bilingual-pair consistency record for 2026-09-04-portable-macos-fork-launchers.md (docs/i18n/README.md): per heading
+# section, a hash of its English and Chinese blocks outside code blocks and generated regions.
+# After editing either side, bring the other along and re-record with:
 #   pnpm run verify-translation-pairing --write .agents/notes/implemented/process/2026-09-04-portable-macos-fork-launchers.md
-2026-09-04-portable-macos-fork-launchers.md: 5504eeb388134091cceee8b7ad6419b3a39459b1
-2026-09-04-portable-macos-fork-launchers.zh.md: cfa6f3511ebe2a93f0f596b9cbabab0ce6e510da
+/agent-note-portable-macos-fork-launchers:
+  en: aa97183e9bd52af6
+  zh: b8d86ecd22000440
+/agent-note-portable-macos-fork-launchers/problem:
+  en: c9a6043dcd1bee42
+  zh: 0fd9404b36c2d730
+/agent-note-portable-macos-fork-launchers/decision:
+  en: 7ee01d2cf615b626
+  zh: f8589150c72a76f4
+/agent-note-portable-macos-fork-launchers/alternatives-considered:
+  en: 64ac11e3330e1499
+  zh: 34b083b28e8165a3
+/agent-note-portable-macos-fork-launchers/consequences:
+  en: da9e0d19310ef77e
+  zh: b2ac40f8bd7dd7c2

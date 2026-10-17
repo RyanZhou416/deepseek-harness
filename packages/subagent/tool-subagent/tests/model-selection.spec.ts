@@ -1,6 +1,5 @@
-import { describe, expect, it, onTestFinished, vi } from 'vitest'
-import LocalJobRegistry from '@deepseek-ai/dsh-jobs-local'
-import * as ToolJobs from '@deepseek-ai/dsh-tool-jobs'
+import { mountWorkingDirectoryFixture } from '../../subagent/tests/working-directory-fixture.ts'
+import { describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import { ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
@@ -40,24 +39,6 @@ function parentWithRoute(
 }
 
 describe('dsh-tool-subagent model selection', () => {
-  it.each([false, true])('applies the forced route over conflicting tool arguments in background=%s', async (background) => {
-    const requests: SubagentStartRequest[] = []
-    const ctx = await setup({
-      provider: 'mock', withModelSelection: true,
-      modelOverride: { provider: 'forced', model: 'selected', reasoningEffort: 'low' },
-    }, { onStart: (request) => { requests.push(request) } })
-    onTestFinished(() => ctx.fiber.dispose())
-    await ctx.plugin(LocalJobRegistry)
-    await ctx.plugin(ToolJobs, {})
-    ctx.llm.registerAdapter(['forced'], new MockAdapter([], REASONING))
-    const result = await callSubagent(ctx, { description: 'agent-teams:fake:member', prompt: 'do work',
-      provider: 'missing', model: 'not-authorized', reasoning_effort: 'impossible', run_in_background: background })
-    expect(result.isError, text(result)).toBe(false)
-    await vi.waitFor(() => { expect(requests).toHaveLength(1) })
-    expect(requests[0]).toMatchObject({ agentOptions: { provider: 'forced', model: 'selected', reasoningEffort: 'low' },
-      inheritReasoningEffort: false })
-  })
-
   it('rejects empty route ids at the configuration boundary', () => {
     expect(() => { assertAllowedModelRoutes([{ provider: '', model: 'model' }]) })
       .toThrow('requires non-empty provider and model ids')
@@ -133,12 +114,12 @@ describe('dsh-tool-subagent model selection', () => {
     const schema = ctx.tools.schemas(agent).find(entry => entry.name === 'subagent')!
     const props = (schema.parameters as { properties?: Record<string, unknown> }).properties ?? {}
     expect(Object.keys(props).sort()).toEqual([
+      'cwd',
       'description',
       'model',
       'prompt',
       'provider',
       'reasoning_effort',
-      'run_in_background',
     ])
     expect(schema.description).toContain('list_subagent_models')
     expect(ctx.tools.get('list_subagent_models', agent)).toBeDefined()
@@ -155,7 +136,7 @@ describe('dsh-tool-subagent model selection', () => {
     const ctx = await setup({ provider: 'mock' })
     const schema = ctx.tools.schemas().find(entry => entry.name === 'subagent')!
     const props = (schema.parameters as { properties?: Record<string, unknown> }).properties ?? {}
-    expect(Object.keys(props).sort()).toEqual(['description', 'prompt', 'run_in_background'])
+    expect(Object.keys(props).sort()).toEqual(['cwd', 'description', 'prompt'])
     expect(schema.description).not.toContain('list_subagent_models')
     expect(ctx.tools.get('list_subagent_models')).toBeUndefined()
 
@@ -412,6 +393,7 @@ describe('dsh-tool-subagent model selection', () => {
     await ctx.plugin(SessionProjectionRegistry)
     await ctx.plugin(SystemPrompt)
     await ctx.plugin(ToolRuntime)
+    await mountWorkingDirectoryFixture(ctx)
     await ctx.plugin(SubagentRuntime)
     await mock.mountScriptedProvider(ctx, { name: 'mock' })
     await ctx.plugin(tool, {
@@ -423,25 +405,23 @@ describe('dsh-tool-subagent model selection', () => {
       },
     })
 
-    const configured = await callSubagent(ctx, { description: 'configured effort', prompt: 'do it' })
+    const configured = await callSubagent(ctx, { description: 'configured effort', prompt: 'do it' }, { agent: parentWithRoute() })
     expect(configured.isError).toBe(true)
     expect(text(configured)).toContain('`llm` service is unavailable')
 
   })
 
-  it('keeps pure inherited routing usable without an LLM service lookup', async () => {
-    let starts = 0
-    const ctx = new Context()
-    await ctx.plugin(SessionProjectionRegistry)
-    await ctx.plugin(SystemPrompt)
-    await ctx.plugin(ToolRuntime)
-    await ctx.plugin(SubagentRuntime)
-    await mock.mountScriptedProvider(ctx, { name: 'mock', onStart: () => { starts += 1 } })
-    await ctx.plugin(tool, { provider: 'mock' })
+  it('keeps pure inherited routing usable without resolving an LLM route', async () => {
+    const started = vi.fn()
+    const ctx = await setup({ provider: 'mock' }, { onStart: started })
+    const adapter = new MockAdapter([])
+    const resolve = vi.spyOn(adapter, 'resolveModel')
+    ctx.llm.registerAdapter(['alpha'], adapter)
 
     const result = await callSubagent(ctx, { description: 'inherit route', prompt: 'do it' })
     expect(result.isError).toBe(false)
-    expect(starts).toBe(1)
+    expect(started).toHaveBeenCalledOnce()
+    expect(resolve).not.toHaveBeenCalled()
   })
 
   it('warns that changing a fork route can lose inherited-prefix reuse', async () => {

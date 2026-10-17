@@ -1,6 +1,19 @@
-# Bilingual-pair consistency record (docs/i18n/README.md): the git blob hash of each
-# side as of the last confirmed-consistent state. Both languages carry equal authority;
-# after editing either side, bring the other along and re-record with:
+# Bilingual-pair consistency record for 2026-09-04-context-projection-cost-controls.md (docs/i18n/README.md): per heading
+# section, a hash of its English and Chinese blocks outside code blocks and generated regions.
+# After editing either side, bring the other along and re-record with:
 #   pnpm run verify-translation-pairing --write .agents/notes/implemented/architecture/2026-09-04-context-projection-cost-controls.md
-2026-09-04-context-projection-cost-controls.md: 763330aef22cae9ead4d62a703608f8cca7e0d76
-2026-09-04-context-projection-cost-controls.zh.md: 1cc74f4ddaf74b202c2d7815e102e3b016d64b0a
+/agent-note-context-projection-cost-controls:
+  en: 72012f8286a43bb4
+  zh: 7427213efee29229
+/agent-note-context-projection-cost-controls/problem:
+  en: 6074cdeedb57be37
+  zh: cf2a4f5c0ded36e7
+/agent-note-context-projection-cost-controls/decision:
+  en: f435acaa4e22461b
+  zh: 9021b6b38321ce3d
+/agent-note-context-projection-cost-controls/alternatives-considered:
+  en: 20cd8fb46ce24106
+  zh: 48258b624ef2ad33
+/agent-note-context-projection-cost-controls/consequences:
+  en: ccd4b35bcf60e67f
+  zh: c334299041360f19

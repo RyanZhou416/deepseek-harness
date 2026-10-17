@@ -1,6 +1,64 @@
-# Bilingual-pair consistency record (docs/i18n/README.md): the git blob hash of each
-# side as of the last confirmed-consistent state. Both languages carry equal authority;
-# after editing either side, bring the other along and re-record with:
+# Bilingual-pair consistency record for README.md (docs/i18n/README.md): per heading
+# section, a hash of its English and Chinese blocks outside code blocks and generated regions.
+# After editing either side, bring the other along and re-record with:
 #   pnpm run verify-translation-pairing --write fork-plugins/dsh-plugin-aether-shell/README.md
-README.md: b4e30065748b01e8dd93550be877b0ac3a6b347a
-README.zh.md: 95f1c621ac447d4227e3cffce9121cba3d23eeeb
+/:
+  en: 62f784adaaa55e6d
+  zh: 6175c7e783e5c3e0
+/ryanzhou416-dsh-plugin-aether-shell:
+  en: c2ad30e2637d7522
+  zh: 334f8da37de87a2e
+/ryanzhou416-dsh-plugin-aether-shell/summary:
+  en: 6ba1fc5b0d90b101
+  zh: ff9c6cba82a22aa5
+/ryanzhou416-dsh-plugin-aether-shell/table-of-contents:
+  en: d152484eb41ac6b4
+  zh: e9efa9780e085327
+/ryanzhou416-dsh-plugin-aether-shell/use-this-package:
+  en: bbff250eba0f1b89
+  zh: 0a618f05cc88ee2b
+/ryanzhou416-dsh-plugin-aether-shell/use-this-package/prerequisites-and-installation:
+  en: 0858bcf65950502a
+  zh: ce77c338244bbf2c
+/ryanzhou416-dsh-plugin-aether-shell/use-this-package/choose-the-appropriate-tool:
+  en: 498e859ab580458d
+  zh: 20e3e6d077d70bae
+/ryanzhou416-dsh-plugin-aether-shell/use-this-package/structured-data-compatibility:
+  en: a6d25341edc556c0
+  zh: be5181597834768e
+/ryanzhou416-dsh-plugin-aether-shell/use-this-package/how-the-sandbox-relates-to-the-real-environment:
+  en: e0122f32d28f4632
+  zh: 82b2b80e84ff38ef
+/ryanzhou416-dsh-plugin-aether-shell/use-this-package/persistent-sessions:
+  en: 88397b033c5d5d35
+  zh: 877649c2aafef84e
+/ryanzhou416-dsh-plugin-aether-shell/use-this-package/background-jobs:
+  en: 8cc0a177bcc168c8
+  zh: dbdf2c4b7c2922c5
+/ryanzhou416-dsh-plugin-aether-shell/use-this-package/execution-and-permissions:
+  en: b989f06b854cf470
+  zh: 28192179aef2365b
+/ryanzhou416-dsh-plugin-aether-shell/use-this-package/large-results-and-error-data:
+  en: a3d2a0becbafca93
+  zh: afe7554032df49a2
+/ryanzhou416-dsh-plugin-aether-shell/use-this-package/configuration:
+  en: 29037da9a9f01400
+  zh: f99fdaf6a07fd176
+/ryanzhou416-dsh-plugin-aether-shell/understand-the-implementation:
+  en: 0e56d5288eeb63e1
+  zh: b047293b03e72338
+/ryanzhou416-dsh-plugin-aether-shell/further-exploration:
+  en: 7263f499cab8692b
+  zh: 49a0eab28e815bf5
+/ryanzhou416-dsh-plugin-aether-shell/model-experience:
+  en: 1429f78e997edb25
+  zh: 6f1990600176b955
+/ryanzhou416-dsh-plugin-aether-shell/model-experience/kv-cache-effect:
+  en: 277b98a757d382ca
+  zh: c9c2665a1250a6af
+/ryanzhou416-dsh-plugin-aether-shell/known-limitations-and-deferred-work:
+  en: d478e102079cb16a
+  zh: 14c7c32a317e0511
+/ryanzhou416-dsh-plugin-aether-shell/known-limitations-and-deferred-work/dev-note:
+  en: 0a1253c6f7b5e8b9
+  zh: 8cf5bc5201fe4738

@@ -14,7 +14,6 @@ English | [中文](README.zh.md)
 ## Table of Contents
 
 - [Use this package](#use-this-package)
-  - [Identify shared prompt sections](#identify-shared-prompt-sections)
 - [Understand the implementation](#understand-the-implementation)
 - [Further Exploration](#further-exploration)
 - [Model Experience](#model-experience)
@@ -45,29 +44,38 @@ The config owns the fixed opener, runtime context, deployment persona prefix and
 | Field | Default | Meaning |
 |---|---|---|
 | `includeHarnessIdentity` | `true` | Include the fixed `You are an AI agent powered by DeepSeek Harness.` first-party opener at order −1000. Set false only when a compatibility deployment owns the complete system prompt. |
-| `includeRuntimeContext` | `true` | Include ordered dynamic runtime context in assembly |
+| `includeRuntimeContext` | `true` | Include optional ordered dynamic runtime context in assembly |
 | `personaPrefix` | `''` | Global persona prefix template at order `0`, before first-party guidance |
 | `personaSuffix` | `''` | Global `deployment:persona-suffix` template at order `10200`, after first-party guidance |
 | `toolOrder` | — | Explicit model-facing tool order with one `'<unlisted-tools>'` rest entry |
 
 The generated [configuration catalog](../../../docs/config-catalog.md#deepseek-aidsh-system-prompt) is the exhaustive source for every accepted field. A `toolOrder` list without exactly one rest entry or with duplicates fails at load; a listed name with no registered tool rejects every `assemble()`.
 
-### Identify shared prompt sections
+### Contribute a prompt section
 
-`renderPromptSections(assembly)` returns one entry per non-empty section — its `name`, its interpolated `text`, and its `stable` declaration — in assembly order. It applies the same interpolation and dropping rules as `renderPrompt`, so joining the texts with blank lines reproduces that function's result exactly.
+Sections carry static or context-resolved text with an `order`; they are concatenated in ascending order and equal orders use code-unit name order. Repository-owned contributors resolve centrally allocated positions through `ctx.systemPrompt.getSectionOrder(name)`; runtime-context contributors use `getContextOrder(name)`. External contributions may use any finite order. A `complete: true` section becomes the exact complete prompt after assembly; more than one effective complete section makes assembly fail.
 
-A section declares `stable: true` about its own text. Nothing infers it, and the default is false. The declaration covers text fixed for every assembly of this build — a string compiled into the package, or empty. Text that varies by session, deployment, machine, or an external source is not eligible, because a shared cache entry asserts that its content is the same for every reader. Presence may still vary between assemblies: a tool's documentation is absent where that tool is not registered.
+```text
+ctx.systemPrompt.section({
+  name: 'tool:bash',
+  order: 100,
+  text: 'Prefer bash for file and process operations.',
+})
+```
 
-This is what a provider needs to place text ahead of session-specific content, since a cache is matched along a prefix, so only text at the front of a prompt can be shared.
+Set `interpolate: false` on a section or dynamic context to preserve its text literally, including `{{…}}` groups in generated tool documentation or directory names. Other contributions interpolate variables by default.
 
+`refreshContext(assembly, context)` refreshes registered runtime facts after pre-step and route preparation. It preserves accepted sections, tools, variables, and contexts contributed only by the assembly waterfall, applies current optional-context suppression, and restores missing required entries. Put changing facts in context providers; registered context text is read again before admission.
 
 ### Contribute a prompt variable
 
-Variables are referenced from section text as `{{name}}` and resolved at each assembly; scoped variables shadow a same-named global for that agent. The loop supplies `model` and `cwd`; any plugin can register the facts it owns.
+Variables are referenced from section or context text as `{{name}}` and resolved at each assembly; scoped variables shadow a same-named global for that agent. The loop supplies `provider` and `model`; plugins can register the facts they own. The working-directory service supplies directory text as literal user context.
 
 ```text
-ctx.systemPrompt.variable('cwd', ({ agent }) => agent?.session.header.cwd)
+ctx.systemPrompt.variable('response_language', () => 'English')
 ```
+
+Custom persona templates must not depend on a built-in `{{cwd}}` variable: the loop does not register it, so unresolved references fail prompt assembly before any model request. Remove the `Your working directory is {{cwd}}.` clause from home, profile, or invocation `personaSuffix` settings and preset `suffix` fields, preserving unrelated text. Omit or clear an otherwise empty suffix. The [working-directory service](../../session/working-directory/README.md) supplies the required current-directory context.
 
 ### Contribute tool schemas
 
@@ -75,7 +83,7 @@ Tool-schema providers are evaluated per assembly and contribute the model-visibl
 
 ### Suppress runtime context
 
-`suppressRuntimeContext()` removes every dynamic runtime-context contribution for the calling scope without disabling the services that own the underlying facts; multiple suppressors compose and the effect restores context when none remains.
+`suppressRuntimeContext()` removes optional dynamic context for the calling scope without disabling the owning services. Contributions marked `required` remain visible. Multiple suppressors compose; optional context returns when none remains.
 
 -----
 
@@ -96,7 +104,6 @@ The package is a registry plus a cooperative assembly pipeline. One `assemble()`
 | File | Role |
 |---|---|
 | [`src/index.ts`](src/index.ts) | Plugin entry: `SystemPrompt` service, config, assembly pipeline, `renderPrompt` |
-| [`src/invariant.ts`](src/invariant.ts) | Invariant companion |
 
 ### Assembly and rendering
 
@@ -130,7 +137,7 @@ The package-level contract is enough for most consumers; read these when you nee
 
 #### What the model sees
 
-First-party sections render the harness identity, deployment persona prefix (including the model-name introduction), reusable instructions (including the generated tools SDK and structured-output guidance), then the environment-bearing suffix: harness source (`10000`), Web surface (`10100`), and deployment persona suffix (`10200`). External section orders and assembly listeners remain authoritative. `includeHarnessIdentity: false` omits only that fixed opener. Empty sections disappear; scoped sections and variables can shadow globals for one agent. The `system-prompt/assemble` waterfall determines the delivered prompt and tool schemas unless one effective section declares itself complete — that exact section then becomes the whole system prompt while the waterfall's contexts, tools, and variables remain. The rendered prompt reaches the model as a system-role message of derived history — surface node 0, or the latest system node after an in-history update — neither the loop request nor `request/header` carries a separate `system` field. If the complete rendering is empty, the loop clears every active system node through logged empty replacements, so no older prompt remains in model history. Ordered dynamic contexts are separate from sections and become sourced user-role snapshots only when present; `includeRuntimeContext: false` or a scoped suppressor removes them all.
+First-party sections render the harness identity, deployment persona prefix (including the model-name introduction), reusable instructions (including the generated tools SDK and structured-output guidance), then the environment-bearing suffix: harness source (`10000`), Web surface (`10100`), and deployment persona suffix (`10200`). External section orders and assembly listeners remain authoritative. `includeHarnessIdentity: false` omits only that fixed opener. Empty sections disappear; scoped sections and variables can shadow globals for one agent. The `system-prompt/assemble` waterfall determines the delivered prompt and tool schemas unless one effective section declares itself complete — that exact section then becomes the whole system prompt while the waterfall's contexts, tools, and variables remain. The rendered prompt reaches the model as a system-role message of derived history — surface node 0, or the latest system node after an in-history update — neither the loop request nor `request/header` carries a separate `system` field. If the complete rendering is empty, the loop clears every active system node through logged empty replacements, so no older prompt remains in model history. Ordered dynamic contexts are separate from sections and become sourced user-role snapshots only when present; `includeRuntimeContext: false` or a scoped suppressor removes optional contributions while required operational context remains.
 
 ##### Harness identity
 

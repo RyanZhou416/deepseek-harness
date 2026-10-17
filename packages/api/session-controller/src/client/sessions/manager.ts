@@ -4,12 +4,9 @@ import type { SubagentAddress } from '@deepseek-ai/dsh-subagent/client'
 import { SessionSeq, type SessionId, type SessionSeqCursor } from '@deepseek-ai/dsh-session/types'
 import type { SessionProjectionMap } from '@deepseek-ai/dsh-session-projection/types'
 import type { WorkspaceId } from '@deepseek-ai/dsh-workspace/types'
-import { shallowEqual } from '@deepseek-ai/dsh-client-store'
 import type {
   SessionControlBaseline,
   SessionControlFrame,
-  SessionForkRequest,
-  SessionEditLastMessageRequest,
   SessionProjectionHints,
   SessionRenameValue,
   SessionSummary,
@@ -18,7 +15,7 @@ import { mergeOrderedBaseline } from '../ordered-baseline.ts'
 import { isRemoteFailure } from '@deepseek-ai/dsh-api-gateway/client'
 import { assertNever } from '@deepseek-ai/dsh-util-values'
 import type { RemoteFailure, RemoteResult } from '@deepseek-ai/dsh-typert-protocol'
-import type { SessionListEntry } from './lineage.ts'
+import type { SessionListEntry, TitledSessionSummary } from './lineage.ts'
 import { flattenLineage } from './lineage.ts'
 // Type-only merge edge: the title domain's client-namespace outlet declares
 // the 'title' projection key this manager projects into list rows (and any
@@ -61,10 +58,10 @@ export interface SessionListSnapshot {
 
 }
 
-/** Shared projection values and read lifecycle; identity remains stable while these fields are unchanged. */
+/** Shared projection values and the lifecycle of their explicit baseline read. */
 export interface SessionProjectionSnapshot {
   readonly values: Readonly<Partial<SessionProjectionMap>>
-  readonly state: 'idle' | 'loading' | 'ready' | 'error'
+  readonly state: 'idle' | 'loading' | 'ready' | 'migration-required' | 'error'
   readonly error: RemoteFailure | null
 }
 
@@ -74,14 +71,6 @@ interface ProjectionInflight {
 }
 
 type ProjectionLoad = Omit<SessionProjectionSnapshot, 'values'>
-
-interface ListEntryCache {
-  readonly summary: SessionSummary
-  readonly values: Readonly<Partial<SessionProjectionMap>> | undefined
-  readonly blank: boolean
-  readonly fallbackTitle: string | undefined
-  readonly entry: SessionListEntry
-}
 
 type SessionListMutation =
   | { kind: 'upsert' | 'placeholder'; summary: SessionSummary }
@@ -124,20 +113,18 @@ export class SessionManager {
 
 
   private listSnapshotCache: SessionListSnapshot
-  /** Reuse derived rows for unchanged inputs, and preserve output identity across equal Host refreshes. */
-  private readonly entryCache = new Map<SessionId, ListEntryCache>()
-  private lineageSummaries: readonly SessionSummary[] = []
-  private lineageOrder: readonly { readonly index: number; readonly depth: number }[] = []
-  /** Previous-generation titles retained only while the current Host has not answered for a row. */
-  private readonly titlePresentationFallbacks = new Map<SessionId, string>()
+  /** Entry-identity cache (reference stability): list rebuilds reuse the previous entry
+   *  object when every field matches — wire refreshes mint all-new summary objects, so identity
+   *  must be recovered by value or every SessionListItem memo misses on every refresh. */
+  private entryCache = new Map<SessionId, SessionListEntry>()
   private itemsCache: readonly SessionListEntry[] = []
   private readonly notifier = new Notifier(() => {
-    this.listSnapshotCache = this.buildListSnapshot(this.listSnapshotCache.projectionsBySession)
+    this.listSnapshotCache = this.buildListSnapshot()
   })
 
   /** @param remote - generated Remote namespaces used by catalog and history readers. */
   constructor(private readonly remote: SessionRemotes) {
-    this.listSnapshotCache = this.buildListSnapshot({})
+    this.listSnapshotCache = this.buildListSnapshot()
   }
 
   /**
@@ -166,8 +153,9 @@ export class SessionManager {
 
   /**
    * Resolve an address for breadcrumb navigation without retaining transport authority.
-   * @param sessionId - possible child id in an already-loaded catalog.
-   * @returns A retained or catalog-derived direct-parent address.
+   * @param sessionId - possible child id in received Session metadata.
+   * @returns A retained address, then a catalog address, then an unknown-mode address
+   *   from a listed subagent header; undefined without that evidence.
    */
   subagentAddress(sessionId: SessionId): SubagentAddress | undefined {
     const retained = this.addresses.get(sessionId)
@@ -175,7 +163,7 @@ export class SessionManager {
     for (const parentSessionId of this.projectionStores.keys()) {
       const child = this.projectionStores.get(parentSessionId)?.values().subagentCatalog
         ?.find(entry => entry.id === sessionId)
-      if (child !== undefined) {
+      if (child !== undefined && child.mode !== 'external') {
         return {
           parentSessionId,
           childSessionId: sessionId,
@@ -183,7 +171,13 @@ export class SessionManager {
         }
       }
     }
-    return undefined
+    const summary = this.summaries.find(summary => summary.sessionId === sessionId)
+    if (summary?.origin !== 'subagent' || summary.parentSessionId === undefined) return undefined
+    return {
+      parentSessionId: summary.parentSessionId,
+      childSessionId: sessionId,
+      mode: 'unknown',
+    }
   }
 
   // ---- Instance management ----
@@ -212,7 +206,6 @@ export class SessionManager {
     this.listMutations = null
     this.listInflight = null
     this.engagedSessions.clear()
-    this.titlePresentationFallbacks.clear()
     const reads = [...this.projectionInflight.values()]
     for (const { controller } of reads) controller.abort()
     this.projectionInflight.clear()
@@ -262,7 +255,7 @@ export class SessionManager {
         const address = this.addresses.get(sessionId)
         const child = address === undefined ? undefined : this.projectionStores.get(address.parentSessionId)?.values().subagentCatalog
           ?.find(entry => entry.id === sessionId)
-        if (child !== undefined) {
+        if (child !== undefined && child.mode !== 'external') {
           // A catalogued child exists only after its delegated session has
           // durable history, even though child rows do not carry `blank`.
           session.handleBlank(false)
@@ -334,14 +327,11 @@ export class SessionManager {
       store = new ProjectionValueStore()
       const projections = store
       store.subscribeAny(() => {
-        if (projections.values().title !== undefined) {
-          this.titlePresentationFallbacks.delete(sessionId)
-        }
         // Newer history or control metadata corrects a resident Session's stale list hint.
         if (projections.values().sessionListMetadata?.blank === false) {
           this.sessions.get(sessionId)?.handleBlank(false)
         }
-        this.notifier.markFrameDirty()
+        this.notifier.markDirty()
       })
       this.projectionStores.set(sessionId, store)
     }
@@ -349,7 +339,7 @@ export class SessionManager {
   }
 
   /**
-   * Load a complete projection baseline once per connection; retry unsuccessful reads.
+   * Read projections without starting migration; retry failed or migration-deferred reads.
    * @param sessionId - Session to inspect without opening its conversation.
    * @returns completion of the current or newly started read.
    */
@@ -367,14 +357,26 @@ export class SessionManager {
         const result = await this.remote.session.projections({ sessionId }, controller.signal)
         if (controller.signal.aborted) return
         if (result.ok) {
-          this.titlePresentationFallbacks.delete(sessionId)
-          if (result.value !== null) {
-            store.seed({ ...result.value, asOfSeq: sessionSeqCursor(result.value.asOfSeq) })
+          const value = result.value
+          if (value !== null) {
+            switch (value.kind) {
+              case 'sequenced':
+                store.seed({ values: value.values, asOfSeq: sessionSeqCursor(value.asOfSeq) })
+                break
+              case 'migration-required':
+                store.applyCached(value.values)
+                break
+              default:
+                assertNever(value, 'session projections result')
+            }
           } else if (store.values() === initialValues) {
             // A later frame proves existence independently of an earlier missing read.
             store.clear()
           }
-          this.projectionLoads.set(sessionId, { state: 'ready', error: null })
+          this.projectionLoads.set(sessionId, {
+            state: value?.kind === 'migration-required' ? 'migration-required' : 'ready',
+            error: null,
+          })
         } else {
           this.projectionLoads.set(sessionId, { state: 'error', error: result.error })
         }
@@ -454,7 +456,6 @@ export class SessionManager {
           for (const s of result.value.items) {
             if (s.projections !== undefined) this.applyListBlock(s.sessionId, s.projections)
           }
-          this.titlePresentationFallbacks.clear()
         } else {
           this.listState = 'error'
           this.listError = result.error
@@ -501,17 +502,21 @@ export class SessionManager {
    * Contract session.create; on success merge into summaries immediately (no
    * wait for the next refresh). A created session is blank by definition
    * (entity birth precedes the first message).
-   * @param opts - target workspace or working directory, plus an optional caller-owned id.
-   * @returns the create result.
+   * @param opts - target workspace or working directory, an optional blank Session to reuse, and an optional Agent preset.
+   * @returns the create result, naming the Session the Host created or reused.
   */
   async create(
     opts: {
       workspaceId?: WorkspaceId
       cwd?: string
       sessionId?: SessionId
+      agentPreset?: string
     } = {},
   ): Promise<RemoteResult<{ sessionId: SessionId }>> {
-    const shared = opts.sessionId === undefined ? {} : { sessionId: opts.sessionId }
+    const shared = {
+      ...(opts.sessionId === undefined ? {} : { sessionId: opts.sessionId }),
+      ...(opts.agentPreset === undefined ? {} : { agentPreset: opts.agentPreset }),
+    }
     const payload = opts.workspaceId !== undefined
       ? { workspaceId: opts.workspaceId, ...shared }
       : { ...(opts.cwd === undefined ? {} : { cwd: opts.cwd }), ...shared }
@@ -545,16 +550,17 @@ export class SessionManager {
    * preserve it or lower it after an exact cut before the first `turn/start`;
    * lineage rides parentSessionId. A child published before Workspace
    * attachment fails is also reconciled into the list.
-   * @param opts - source session and optional inclusive boundary.
+   * @param opts - source session, optional exact inclusive boundary seq, and permission to start migration.
    * @returns the fork result (the child session id).
    */
   async fork(
-    opts: SessionForkRequest,
+    opts: { sessionId: SessionId; atSeq?: SessionSeq; allowMigration?: boolean },
   ): Promise<RemoteResult<{ sessionId: SessionId }>> {
     const source = this.summaries.find(s => s.sessionId === opts.sessionId)
     const result = await this.remote.session.fork({
       sessionId: opts.sessionId,
       ...opts.atSeq === undefined ? {} : { atSeq: opts.atSeq },
+      ...opts.allowMigration === undefined ? {} : { allowMigration: opts.allowMigration },
     })
     const childId = result.ok
       ? result.value.sessionId
@@ -567,15 +573,6 @@ export class SessionManager {
       } })
     }
     return result
-  }
-
-  /**
-   * Submit a revision without changing catalog or selection identity.
-   * @param request - same-session prompt revision.
-   * @returns durable admission receipt or the Host refusal.
-   */
-  editLastMessage(request: SessionEditLastMessageRequest): Promise<RemoteResult<{ accepted: true }>> {
-    return this.remote.session.editLastMessage(request)
   }
 
   /**
@@ -649,22 +646,18 @@ export class SessionManager {
       this.replaceControlBaseline(frame.value)
       return
     }
-    // Each live control frame is its own task, so microtask batching would rebuild the whole list once per frame received.
-    if (this.projectionStore(frame.sessionId).apply(frame.key, frame.value, SessionSeq(frame.seq))) {
-      this.notifier.markFrameDirty()
-    }
+    this.projectionStore(frame.sessionId).apply(frame.key, frame.value, SessionSeq(frame.seq))
+    this.notifier.markDirty()
   }
 
   private replaceControlBaseline(baseline: SessionControlBaseline): void {
-    const previousSize = this.projectionStores.size
-    let changed = false
+
     for (const [sessionId, block] of Object.entries(baseline.projections)) {
-      if (this.titlePresentationFallbacks.delete(sessionId as SessionId)) changed = true
       const store = this.projectionStore(sessionId as SessionId)
       const asOfSeq = sessionSeqCursor(block.asOfSeq)
-      if (store.seed({ ...block, asOfSeq })) changed = true
+      store.seed({ ...block, asOfSeq })
     }
-    if (changed || this.projectionStores.size !== previousSize) this.notifier.markDirty()
+    this.notifier.markDirty()
   }
 
   /**
@@ -707,7 +700,6 @@ export class SessionManager {
    * @param sessionId - removed Session identity.
    */
   handleSessionRemoved(sessionId: SessionId): void {
-    this.titlePresentationFallbacks.delete(sessionId)
     const durableSubagent = this.subagentAddress(sessionId) !== undefined
       || this.summaries.some(summary => summary.sessionId === sessionId && summary.origin === 'subagent')
     this.recordMutation(durableSubagent
@@ -767,7 +759,6 @@ export class SessionManager {
    * Opened Session follow streams resume independently through API Gateway.
    */
   handleConnected(): void {
-    this.captureTitlePresentationFallbacks()
     for (const store of this.projectionStores.values()) store.clear()
     this.listMutations = null
     this.listInflight = null
@@ -783,54 +774,35 @@ export class SessionManager {
     for (const parentSessionId of parents) void this.refreshProjections(parentSessionId)
   }
 
-  /** Retain current titles as display text while the replacement generation is unresolved. */
-  private captureTitlePresentationFallbacks(): void {
-    const next = new Map<SessionId, string>()
-    for (const summary of this.summaries) {
-      const projected = this.projectionStores.get(summary.sessionId)?.values().title
-      const title = projected !== undefined
-        ? projected
-        : this.titlePresentationFallbacks.get(summary.sessionId)
-      if (typeof title === 'string' && title !== '') next.set(summary.sessionId, title)
-    }
-    this.titlePresentationFallbacks.clear()
-    for (const [sessionId, title] of next) this.titlePresentationFallbacks.set(sessionId, title)
-  }
-
-  private buildListSnapshot(previousProjections: SessionListSnapshot['projectionsBySession']): SessionListSnapshot {
-    this.refreshLineageOrder()
-    const items = this.lineageOrder.map(({ index, depth }) => {
-      const summary = this.summaries[index] as SessionSummary
-      const projectionValues = this.projectionStores.get(summary.sessionId)?.values()
-      const blank = this.effectiveBlank(summary)
-      const fallbackTitle = this.titlePresentationFallbacks.get(summary.sessionId)
-      const cached = this.entryCache.get(summary.sessionId)
-      if (cached?.summary === summary && cached.values === projectionValues
-        && cached.blank === blank && cached.fallbackTitle === fallbackTitle && cached.entry.depth === depth) {
-        return cached.entry
-      }
-      const projectedTitle = projectionValues?.title
-      const title = projectedTitle !== undefined
-        ? projectedTitle
-        : fallbackTitle
+  private buildListSnapshot(): SessionListSnapshot {
+    const merged: TitledSessionSummary[] = this.summaries.map((summary) => {
+      // List rows read the generic 'title' projection key (host-computed unit
+      // value; there is no dedicated title frame).
+      const projectionStore = this.projectionStores.get(summary.sessionId)
+      const title = projectionStore?.get('title')
+      const projectionValues = projectionStore?.values()
       const metadata = projectionValues?.sessionListMetadata
-      const { agentAvailable: _agentAvailable, ...row } = summary
-      const next: SessionListEntry = {
-        ...row,
-        depth,
+      return {
+        ...summary,
         // Cached list hints can precede a history opening or control update.
-        blank: blank && metadata?.blank !== false,
+        blank: this.effectiveBlank(summary) && metadata?.blank !== false,
         updatedAt: Math.max(summary.updatedAt, metadata?.lastPromptAt ?? 0),
         ...(typeof title === 'string' && title !== '' ? { title } : {}),
         ...(projectionValues === undefined ? {} : { projectionValues }),
       }
-      const prev = cached?.entry
-      const entry = prev !== undefined && prev.updatedAt === next.updatedAt && prev.running === next.running
-        && prev.blank === next.blank && prev.parentSessionId === next.parentSessionId && prev.cwd === next.cwd
-        && prev.origin === next.origin && prev.title === next.title && prev.depth === next.depth
-        && prev.projectionValues === next.projectionValues
-        ? prev : next
-      this.entryCache.set(summary.sessionId, { summary, values: projectionValues, blank, fallbackTitle, entry })
+    })
+    const fresh = flattenLineage(merged)
+    const items = fresh.map((entry) => {
+      const prev = this.entryCache.get(entry.sessionId)
+      if (
+        prev !== undefined && prev.updatedAt === entry.updatedAt && prev.running === entry.running
+        && prev.blank === entry.blank
+        && prev.parentSessionId === entry.parentSessionId && prev.cwd === entry.cwd
+        && prev.origin === entry.origin && prev.title === entry.title && prev.depth === entry.depth
+        && prev.formatStatus === entry.formatStatus
+        && prev.projectionValues === entry.projectionValues
+      ) return prev
+      this.entryCache.set(entry.sessionId, entry)
       return entry
     })
     const itemIds = new Set(items.map(entry => entry.sessionId))
@@ -839,43 +811,16 @@ export class SessionManager {
     }
     const sameOrder = items.length === this.itemsCache.length && items.every((e, i) => e === this.itemsCache[i])
     if (!sameOrder) this.itemsCache = items
-    const projectionEntries = [...this.projectionStores].map(([sessionId, store]): [SessionId, SessionProjectionSnapshot] => {
-      const values = store.values()
-      const load = this.projectionLoads.get(sessionId)
-      const state = load?.state ?? 'idle'
-      const error = load?.error ?? null
-      const previous = previousProjections[sessionId]
-      return [sessionId, previous !== undefined && previous.values === values && previous.state === state && previous.error === error
-        ? previous
-        : { values, state, error }]
-    })
-    const projectionsBySession = Object.fromEntries(projectionEntries)
     return {
       items: this.itemsCache,
       state: this.listState,
       phase: this.listPhase,
       error: this.listError,
-      projectionsBySession: shallowEqual(previousProjections, projectionsBySession)
-        ? previousProjections
-        : projectionsBySession,
+      projectionsBySession: Object.fromEntries([...this.projectionStores].map(([sessionId, store]) => [
+        sessionId,
+        { values: store.values(), state: 'idle', error: null, ...this.projectionLoads.get(sessionId) },
+      ])),
     }
-  }
-
-  /** Host order, membership and parent links determine lineage independently of live projection values. */
-  private refreshLineageOrder(): void {
-    if (this.lineageSummaries === this.summaries) return
-    const changed = this.lineageSummaries.length !== this.summaries.length
-      || this.summaries.some((summary, index) => {
-        const previous = this.lineageSummaries[index] as SessionSummary
-        return previous.sessionId !== summary.sessionId || previous.parentSessionId !== summary.parentSessionId
-      })
-    this.lineageSummaries = this.summaries
-    if (!changed) return
-    const indexes = new Map(this.summaries.map((summary, index) => [summary.sessionId, index]))
-    this.lineageOrder = flattenLineage(this.summaries).map(entry => ({
-      index: indexes.get(entry.sessionId) as number,
-      depth: entry.depth,
-    }))
   }
 }
 
@@ -894,6 +839,7 @@ function applyMutation(summaries: readonly SessionSummary[], mutation: SessionLi
         ...(mutation.kind === 'upsert' ? {
           agentAvailable: mutation.summary.agentAvailable,
           running: mutation.summary.running,
+          ...(mutation.summary.formatStatus === undefined ? {} : { formatStatus: mutation.summary.formatStatus }),
         } : {}),
         ...(existing.cwd === undefined && mutation.summary.cwd !== undefined ? { cwd: mutation.summary.cwd } : {}),
         ...(existing.parentSessionId === undefined && mutation.summary.parentSessionId !== undefined
@@ -904,6 +850,7 @@ function applyMutation(summaries: readonly SessionSummary[], mutation: SessionLi
       if (filled.cwd === existing.cwd && filled.parentSessionId === existing.parentSessionId
         && filled.origin === existing.origin && filled.blank === existing.blank
         && filled.agentAvailable === existing.agentAvailable && filled.running === existing.running
+        && filled.formatStatus === existing.formatStatus
       ) return [...summaries]
       return summaries.map(summary => summary.sessionId === mutation.summary.sessionId ? filled : summary)
     }

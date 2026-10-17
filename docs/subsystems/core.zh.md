@@ -110,10 +110,7 @@ interface Agent {
    * turn and runs when the aborted activity converges to idle; a `disposed`
    * cancel leaves it parked. A wake submitted while already idle always opens
    * its turn boundary, even when its message is cleared before the driver
-   * claims ([cancel-convergence wake latch](../../../../.agents/notes/implemented/bug-fix/2026-08-07-cancel-convergence-wake-latch.md)).
-   * Input admitted after a running driver makes its final inbox decision
-   * is replayed after that driver converges to idle
-   * ([retirement wake latch](../../../../.agents/notes/implemented/feature/2026-08-11-background-job-completion-wakes-an-idle-owner.md)).
+   * claims ([driver wake convergence](../../agent-loop/src/agent.ts)).
    * @param message - identified content and the source that supplied it.
    * @param target - the preferred next-turn or next-step inbox boundary.
    * @param wakeup - whether delivery may wake the driver.
@@ -139,10 +136,9 @@ interface Agent {
   /**
    * Queue model-facing context for the next pre-step without waking the
    * driver. A running driver claims it at the nearest later step boundary;
-   * context admitted during driver retirement is replayed after convergence.
-   * Idle drivers leave new context pending until follow-up or steering wakes
-   * them. It may miss a request whose pre-step already claimed its batch.
-   * Cancellation or disposal may discard pending context.
+   * idle drivers leave it pending until follow-up or steering
+   * wakes them. It may miss a request whose pre-step already claimed its
+   * batch. Cancellation or disposal may discard pending context.
    * @param message - identified injected context and the source that supplied it.
    */
   inject(message: UserMessage): void
@@ -339,7 +335,7 @@ type PreStepDecision =
   }
 ```
 
-`agent/request-error` 在失败的模型步骤关闭之后、其轮次关闭之前运行。listener 可以在失败轮次的 signal 仍然存活时修复持久状态或 await 策略工作。处理该错误的 listener 返回 `{ kind: 'retry' }` 且不调用 `next()`；默认的 `undefined` 会让失败保持终态。若失败的 [`LlmFailure.retryDisposition`](llm-streaming.zh.md#llmfailure) 为 `'forbid'`，该失败根本不会进入这条 waterfall：loop 关闭失败步骤并报告该失败，因此没有 listener 能安排等待、修复状态或返回一个它本就必须拒绝的动作。
+`agent/request-error` 在失败的模型步骤关闭之后、其轮次关闭之前运行。listener 可以在失败轮次的 signal 仍然存活时修复持久状态或 await 策略工作。处理该错误的 listener 返回 `{ kind: 'retry' }` 且不调用 `next()`；默认的 `undefined` 会让失败保持终态。
 
 ```ts type-equiv
 /** Action returned by a listener that owns model-request recovery. */
@@ -366,6 +362,8 @@ type SessionStartSource = 'startup' | 'resume' | 'clear' | 'compact'
 唯一属于核心的流水线编写类型：每个已注册工具*是什么*——一个面向模型的 `ToolSchema` 加上一个 `execute` 函数，以及可选的最终内容回调与 UI 回调。工具作者很少手动构造它（`defineTool` DSL 会使用类型化参数构建），但它是注册表存储并由循环用于分发的约定。
 
 其完整字段、`defineTool`/`ValueSchemaSpec`/`ParameterSchemaSpec` 类型化 schema DSL、`ToolExecution`/`ToolExecutionResult` waterfall 类型，以及工具展示 UI 类型都在 **[tools.md](tools.zh.md)** 中。
+
+<a id="repo-wide-type-patterns"></a>
 
 ## 全仓通用类型模式
 
@@ -446,7 +444,8 @@ currentSelection(): ModelSelection
 
 /**
  * Save the complete default model selection. A deployment without a configuration
- * editor keeps its composition entry.
+ * editor keeps its composition entry. Saves commit in submission order; a failed
+ * save rejects its caller without blocking later saves.
  * @param next - resolved selection accepted by an entry point.
  * @returns fulfillment after the optional profile write settles.
  */
@@ -508,13 +507,19 @@ Registry of YAML-declared presets and the revisions live Agents retain.
  */
 async register(definition: PresetDefinition): Promise<() => Promise<void>>
 
+/** Inspect retained revisions, or the exact revision an Agent joined.
+ * @param ctx - optional Agent context; omission includes all retained revisions.
+ * @returns detached module references and isolation diagnostics; no match returns an empty list.
+ */
+inspectCompositions(ctx?: Context): AgentPresetInspection[]
+
 /** Read every declared preset, including activation failures.
  * @returns Display metadata and loading diagnostics.
  */
 async list(): Promise<AgentPreset[]>
 
-/** Read the selection roster and chooser policy.
- * @returns Current presets, default and chooser policy.
+/** Read the selection roster.
+ * @returns Current presets, each marked when it is the default.
  */
 @Remote('list') async remoteExportList(): Promise<AgentPresetRoster>
 
@@ -564,7 +569,9 @@ serviceFor<K extends string & keyof Context>(agent: { ctx: Context }, name: K): 
  */
 async recompose(ctx: Context, id: string): Promise<AgentPreset>
 
-/** Select a preset before a session starts its first turn.
+/** Select a preset before a session starts its first turn. A Session whose
+ * log records the preset and whose Agent runs its current revision keeps its
+ * composition; nothing is logged or announced.
  * @param agent Target Agent.
  * @param agentPreset Requested identity.
  * @returns Committed preset identity.
@@ -602,10 +609,8 @@ Initiator methods provide same-process causal attribution only. Ambient presence
  * that also supports agentless calls. When a parent creates a child, setup
  * reports the causal parent while the setup callback's Agent parameter
  * identifies the child.
- * The boundary holds its Agent weakly, so a continuation that outlives every
- * other reference to that Agent reads `undefined`.
- * @returns the inherited Agent, or `undefined` outside an initiator boundary,
- *   inside an explicit clearing boundary, and after the inherited Agent was collected.
+ * @returns the inherited Agent, or `undefined` outside an initiator boundary
+ *   and inside an explicit clearing boundary.
  * @throws when this service instance has been disposed.
  */
 currentInitiator(): Agent | undefined
@@ -932,29 +937,6 @@ Types: [Scoped](scope.zh.md) · [UserMessage](session.zh.md)
 
 Source: [`packages/core/agent/src/runtime-types.ts`](../../packages/core/agent/src/runtime-types.ts)
 
-<a id="agentmessage-surface--waterfall"></a>
-
-#### `agent/message-surface` — waterfall
-
-Resolve a user's surface placement synchronously at durable admission. The default appends. Replacements cite the current nodes they shadow.
-
-```ts cordis-catalog
-/**
- * Resolve a user's surface placement synchronously at durable admission.
- * The default appends. Replacements cite the current nodes they shadow.
- * @param payload.agent - agent admitting the processed message.
- * @param payload.message - accepted message after pre-step processing.
- * @param next - remaining placement listeners; the default appends.
- * Scope-filtered dispatch (`@deepseek-ai/dsh-scope`): agent-scoped listeners receive only that agent.
- * @mode waterfall
- */
-'agent/message-surface'(this: Scoped<Agent>, payload: { agent: Agent; message: UserMessage }, next: () => SurfaceIntent<'user/message'>): SurfaceIntent<'user/message'>
-```
-
-Types: [Scoped](scope.zh.md) · [SurfaceIntent](session.zh.md) · [UserMessage](session.zh.md)
-
-Source: [`packages/core/agent/src/runtime-types.ts`](../../packages/core/agent/src/runtime-types.ts)
-
 <a id="agentpre-step--waterfall"></a>
 
 #### `agent/pre-step` — waterfall
@@ -974,28 +956,6 @@ Reject a proposed step or replace the messages that enter it. Calling `next()` p
  * @mode waterfall
  */
 'agent/pre-step'(this: Scoped<Agent>, payload: { agent: Agent; messages: UserMessage[]; turn: number; step: number; signal: AbortSignal }, next: () => Promise<PreStepDecision>): Promise<PreStepDecision>
-```
-
-Types: [Scoped](scope.zh.md) · [UserMessage](session.zh.md)
-
-Source: [`packages/core/agent/src/runtime-types.ts`](../../packages/core/agent/src/runtime-types.ts)
-
-<a id="agentprepare-input--waterfall"></a>
-
-#### `agent/prepare-input` — waterfall
-
-Prepare claimed input synchronously before prompt assembly and pre-step processors.
-
-```ts cordis-catalog
-/**
- * Prepare claimed input synchronously before prompt assembly and pre-step processors.
- * @param payload.agent - owner of the claimed input and current history.
- * @param payload.messages - messages claimed for the proposed step.
- * @param next - remaining input preparation listeners; the default does nothing.
- * Scope-filtered dispatch (@deepseek-ai/dsh-scope): agent-scoped listeners receive only that agent.
- * @mode waterfall
- */
-'agent/prepare-input'(this: Scoped<Agent>, payload: { agent: Agent; messages: UserMessage[] }, next: () => void): void
 ```
 
 Types: [Scoped](scope.zh.md) · [UserMessage](session.zh.md)

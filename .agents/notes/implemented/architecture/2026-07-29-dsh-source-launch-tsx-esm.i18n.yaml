@@ -1,6 +1,19 @@
-# Bilingual-pair consistency record (docs/i18n/README.md): the git blob hash of each
-# side as of the last confirmed-consistent state. Both languages carry equal authority;
-# after editing either side, bring the other along and re-record with:
+# Bilingual-pair consistency record for 2026-07-29-dsh-source-launch-tsx-esm.md (docs/i18n/README.md): per heading
+# section, a hash of its English and Chinese blocks outside code blocks and generated regions.
+# After editing either side, bring the other along and re-record with:
 #   pnpm run verify-translation-pairing --write .agents/notes/implemented/architecture/2026-07-29-dsh-source-launch-tsx-esm.md
-2026-07-29-dsh-source-launch-tsx-esm.md: aec1cb48e90c0985fca15b34c6d6c9aa62d7448e
-2026-07-29-dsh-source-launch-tsx-esm.zh.md: e5ff87e923815b6f93e75289db591b55761ad0f3
+/agent-note-dsh-source-launch-through-the-tsx-esm-hook:
+  en: 55846ac57e07eeda
+  zh: 3de03730d4b28863
+/agent-note-dsh-source-launch-through-the-tsx-esm-hook/problem:
+  en: 68385f7e47d3ac1f
+  zh: 285ca290832e2939
+/agent-note-dsh-source-launch-through-the-tsx-esm-hook/decision:
+  en: 12adf8ed56b4d5c3
+  zh: fbbb9add935730c0
+/agent-note-dsh-source-launch-through-the-tsx-esm-hook/alternatives-considered:
+  en: 20570370093f2be6
+  zh: 576830ddd89359f6
+/agent-note-dsh-source-launch-through-the-tsx-esm-hook/consequences:
+  en: fa888b9694bbf1d4
+  zh: e0ff12a9cb2e58e2

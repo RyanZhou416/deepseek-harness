@@ -3,19 +3,19 @@
 // calls) and pins the settled conversation aria after the footers are
 // focus-revealed — the surface package jsdom tests cannot substitute for
 // (docs/testing.md snapshot rule).
-import { mkdir, readFile, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, readdir, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import type { Browser, Page } from 'playwright'
+import { zstdCompressSync } from 'node:zlib'
+import type { Browser, Page, Request as BrowserRequest } from 'playwright'
 import { chromium } from 'playwright'
 import { afterAll, beforeAll, describe, expect, it, onTestFailed } from 'vitest'
-import { SessionId } from '@deepseek-ai/dsh-session'
-import { MockAdapter, textResponse } from '../../../packages/core/agent-loop/tests/mock-adapter.ts'
+import { SESSION_FORMAT_VERSION, SessionId } from '@deepseek-ai/dsh-session'
 import {
   acknowledgeReloadConnectionLoss, assertFixtureInventory, captureStableAria, compareOrRefreshGolden, fixtureUserPrompts,
-  launchWebScaffold, parseSeedFixture, renderSeedFixture, seedSession, watchConsole, webSnapshotMode, type WebScaffold,
+  launchWebScaffold, parseSeedFixture, realizeSeedFixture, renderSeedFixture, seedSession, watchConsole, webSnapshotMode, type WebScaffold,
 } from './scaffold.ts'
-import { openSettings, newEnglishPage, saveFailureShot } from './support.ts'
+import { openSettings, newEnglishPage, pinBrowserClock, saveFailureShot, WEB_FIXTURE_TIME } from './support.ts'
 
 const SNAPSHOT_DIR = fileURLToPath(new URL('../../../snapshots/web/message-actions', import.meta.url))
 // Borrowed read-only: this scenario needs any settled user+assistant pair, not
@@ -23,6 +23,7 @@ const SNAPSHOT_DIR = fileURLToPath(new URL('../../../snapshots/web/message-actio
 const SEED = fileURLToPath(new URL('../../../snapshots/web/seeded-history/session.v3.jsonl', import.meta.url))
 const UI_EXPECTED = join(SNAPSHOT_DIR, 'ui.expected.md')
 const FORK_EXPECTED = join(SNAPSHOT_DIR, 'fork.expected.md')
+const UNOPENED_FORK_EXPECTED = join(SNAPSHOT_DIR, 'fork-unopened.expected.md')
 const MODE = webSnapshotMode()
 const SEED_ID = 'message-actions-web-e2e'
 
@@ -192,7 +193,8 @@ describe('web e2e: message IconActions and clocks on settled history', () => {
   let tripwire: ReturnType<typeof watchConsole>
 
   beforeAll(async () => {
-    scaffold = await launchWebScaffold({})
+    scaffold = await launchWebScaffold()
+    await mkdir(fileURLToPath(new URL('../../../.artifacts/screenshots/non-migrating-session-reads', import.meta.url)), { recursive: true })
     const sessionCwd = join(scaffold.workspaceCwd, 'workspace')
     await mkdir(sessionCwd, { recursive: true })
     await writeFile(join(sessionCwd, 'a.txt'), 'alpha\n')
@@ -202,9 +204,14 @@ describe('web e2e: message IconActions and clocks on settled history', () => {
     expect(parseSeedFixture(raw).events.flatMap(event => event.type === 'request/header'
       ? [event.data.reason]
       : []), 'adapted seed must carry an unchanged resume header').toEqual(['initial', 'resume'])
-    await seedSession(scaffold, raw, SEED_ID)
+    // The fixture carries no times of its own, so the seed anchors them at
+    // `Date.now() - 60_000` unless the scenario names the shared fixture day.
+    // 90 s keeps the earliest rows in the `1min` bucket and the later ones,
+    // carried by their stream spans, inside `now` — what the fork golden records.
+    await seedSession(scaffold, raw, SEED_ID, undefined, { createdAt: WEB_FIXTURE_TIME - 90_000 })
     browser = await chromium.launch()
     page = await newEnglishPage(browser)
+    await pinBrowserClock(page)
     tripwire = watchConsole(page)
     await page.goto(scaffold.authenticatedUrl, { waitUntil: 'load' })
     await page.waitForSelector('[class*="frame"]', { timeout: 30_000 })
@@ -216,7 +223,7 @@ describe('web e2e: message IconActions and clocks on settled history', () => {
   })
 
   it.skipIf(MODE === 'record')('enables branch only on the completed transcript tail', async () => {
-    onTestFailed(() => saveFailureShot(page, 'web-e2e-message-actions'))
+    onTestFailed(() => saveFailureShot(page, 'screenshots/non-migrating-session-reads/web-e2e-message-actions'))
     const groupRow = page.locator('[role="treeitem"]').first()
     await groupRow.waitFor({ timeout: 15_000 })
     await groupRow.click()
@@ -246,37 +253,8 @@ describe('web e2e: message IconActions and clocks on settled history', () => {
     await page.keyboard.press('Tab')
     await expect.poll(() => page.getByRole('tooltip').allTextContents(), { timeout: 5_000 })
       .toEqual(['Available only on the last message of a completed turn'])
-    await expect.poll(() => page.getByRole('button', { name: 'Edit last message', exact: true }).count(), { timeout: 5_000 }).toBe(1)
+    await expect.poll(() => page.getByRole('button', { name: 'Edit' }).count(), { timeout: 5_000 }).toBe(0)
   }, 60_000)
-
-  it.skipIf(MODE === 'record')('opens the last-message draft and cancels without altering history', async () => {
-    onTestFailed(() => saveFailureShot(page, 'last-message-editor'))
-    await page.getByRole('button', { name: 'Edit last message', exact: true }).click()
-    const editor = page.getByRole('textbox', { name: 'Revised message', exact: true })
-    expect(await editor.inputValue()).toBe(NEXT_PROMPT)
-    await editor.fill('A revised final request.\nKeep the earlier context.')
-    await compareOrRefreshGolden(join(SNAPSHOT_DIR, 'edit.expected.md'),
-      await captureStableAria(page, 'form:has(textarea[aria-label="Revised message"])', scaffold.workspaceCwd), MODE)
-    const viewport = page.viewportSize()!
-    try {
-      for (const colorScheme of ['light', 'dark'] as const) {
-        await page.emulateMedia({ colorScheme })
-        await page.setViewportSize({ width: 390, height: 844 })
-        await expect.poll(async () => (await editor.boundingBox())?.width ?? 0).toBeGreaterThan(100)
-        const bounds = await editor.boundingBox()
-        expect(bounds).not.toBeNull()
-        expect(bounds!.width).toBeGreaterThan(100)
-        expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(390)
-        if (MODE === 'refresh') await saveFailureShot(page, `last-message-editor-${colorScheme}`)
-      }
-    } finally {
-      await page.emulateMedia({ colorScheme: 'light' })
-      await page.setViewportSize(viewport)
-    }
-    await page.getByRole('button', { name: 'Cancel', exact: true }).click()
-    expect(await page.getByText(NEXT_PROMPT, { exact: true }).count()).toBe(1)
-    expect(await page.getByText('ORIGINAL ONLY', { exact: true }).count()).toBe(1)
-  })
 
   it.skipIf(MODE === 'record')('keeps an action tooltip above the sticky composer', async () => {
     onTestFailed(() => saveFailureShot(page, 'web-e2e-message-action-tooltip-layer'))
@@ -340,11 +318,12 @@ describe('web e2e: message IconActions and clocks on settled history', () => {
     await page.getByRole('button', { name: /^Select model, current/ })
       .waitFor({ timeout: 10_000 })
     await page.getByText(/Cache hit \d+%/u).first().waitFor({ timeout: 10_000 })
-    // Keep a footer focused so opacity-hidden actions stay in the a11y tree
-    // as an active/focused control during the capture.
-    await page.getByRole('button', { name: 'Copy' }).first().focus()
-    await page.getByRole('button', { name: 'Copy' }).first().hover()
-    await page.getByRole('tooltip', { name: 'Copy', exact: true }).waitFor({ timeout: 5_000 })
+    await page.mouse.move(0, 0)
+    // The golden includes the keyboard-focused action and its visible tooltip.
+    const copy = page.getByRole('button', { name: 'Copy', exact: true }).first()
+    await copy.press('Shift+Tab')
+    await page.keyboard.press('Tab')
+    await page.getByRole('tooltip', { name: 'Copy', exact: true }).waitFor({ state: 'visible', timeout: 5_000 })
     const snapshot = (await captureStableAria(page, '[class*="centerCol"]', scaffold.workspaceCwd))
       .split(SEED_ID).join('{{seededId}}')
     await compareOrRefreshGolden(UI_EXPECTED, snapshot, MODE)
@@ -352,7 +331,8 @@ describe('web e2e: message IconActions and clocks on settled history', () => {
 
   it.skipIf(MODE === 'record')('persists performance detail and hides statistics in Compact', async () => {
     onTestFailed(() => saveFailureShot(page, 'web-e2e-performance-usage'))
-    const stats = page.locator('[data-composer-stats]')
+    const stats = page.locator('[data-composer-stat]')
+    const statsText = async (): Promise<string> => (await stats.allTextContents()).join(' ')
     await openSettings(page, 'en')
     const dialog = page.getByRole('dialog', { name: 'Settings', exact: true })
     const row = dialog.getByText('Performance & usage', { exact: true }).locator('../..')
@@ -361,11 +341,11 @@ describe('web e2e: message IconActions and clocks on settled history', () => {
     await expect.poll(() => scaffold.ctx.settings.describe().find(row => row.ns === 'ui-chat')?.value).toMatchObject({ performanceUsage: 'compact' })
     await dialog.getByRole('button', { name: 'Close', exact: true }).click()
     await expect.poll(() => stats.locator('button').count()).toBe(0)
-    expect(await stats.textContent()).not.toContain('turns')
-    expect(await stats.textContent()).toContain('Cache hit')
-    await stats.hover()
+    expect(await statsText()).not.toContain('turns')
+    expect(await statsText()).toContain('Cache hit')
+    await stats.first().hover()
     expect(await page.getByRole('dialog').count()).toBe(0)
-    await compareOrRefreshGolden(join(SNAPSHOT_DIR, 'compact.expected.md'), await captureStableAria(page, '[data-composer-stats]', scaffold.workspaceCwd), MODE)
+    await compareOrRefreshGolden(join(SNAPSHOT_DIR, 'compact.expected.md'), await captureStableAria(page, '[data-composer-dock]', scaffold.workspaceCwd), MODE)
     const warningStart = tripwire.warnings.length
     await page.reload()
     await openSettings(page, 'en')
@@ -444,65 +424,83 @@ describe('web e2e: message IconActions and clocks on settled history', () => {
     await compareOrRefreshGolden(FORK_EXPECTED, tree, MODE)
   })
 
-  it.skipIf(MODE === 'record')('regenerates from the revised last prompt through the loaded application', async () => {
-    onTestFailed(() => saveFailureShot(page, 'last-message-regenerate'))
-    const adapter = new MockAdapter([textResponse('REVISED ANSWER'), textResponse('SECOND REVISED ANSWER')])
-    adapter.listModels = async provider => [{ provider, id: 'test-model', name: 'Edit test model' }]
-    const dispose = scaffold.ctx.effect(() => scaffold.ctx.llm.registerAdapter(['message-edit-test'], adapter))
-    try {
-      const result = await scaffold.ctx.sessionController.selectModel({
-        sessionId: SessionId(SEED_ID), provider: 'message-edit-test', model: 'test-model',
-      })
-      expect(result.selected.provider).toBe('message-edit-test')
-      await page.getByText('Use the read tool twice', { exact: true }).click()
-      await page.getByRole('button', { name: 'Edit last message', exact: true }).click()
-      await page.getByRole('textbox', { name: 'Revised message', exact: true }).fill('REVISED QUESTION')
-      const existingAgents = scaffold.ctx.agents.list().map(agent => agent.id).sort()
-      const selectedUrl = page.url()
-      const response = page.waitForResponse(response => new URL(response.url()).pathname === '/api/session/editLastMessage')
-      await page.getByRole('button', { name: 'Save and regenerate', exact: true }).click()
-      const body = await (await response).json() as { result: { ok: boolean } }
-      expect(body.result.ok, JSON.stringify(body)).toBe(true)
-      await page.getByText('REVISED ANSWER', { exact: true }).waitFor({ timeout: 15_000 })
-      expect(adapter.requests).toHaveLength(1)
-      expect(scaffold.ctx.agents.list().map(agent => agent.id).sort()).toEqual(existingAgents)
-      expect(page.url()).toBe(selectedUrl)
-      const request = JSON.stringify(adapter.requests[0]!.messages)
-      expect(request).toContain('REVISED QUESTION')
-      expect(request).toContain(SECOND_PROMPT)
-      expect(request).not.toContain(NEXT_PROMPT)
-      expect(request).not.toContain('ORIGINAL ONLY')
-      expect(await page.getByText(NEXT_PROMPT, { exact: true }).count()).toBe(0)
-      expect(await page.getByText('ORIGINAL ONLY', { exact: true }).count()).toBe(0)
-      const warningStart = tripwire.warnings.length
-      await page.reload()
-      await page.getByText('REVISED ANSWER', { exact: true }).waitFor({ timeout: 15_000 })
-      acknowledgeReloadConnectionLoss(tripwire, warningStart)
-      expect(await page.getByText(NEXT_PROMPT, { exact: true }).count()).toBe(0)
-      await page.getByRole('button', { name: 'Edit last message', exact: true }).click()
-      const revisedEditor = page.getByRole('textbox', { name: 'Revised message', exact: true })
-      expect(await revisedEditor.inputValue()).toBe('REVISED QUESTION')
-      await revisedEditor.fill('SECOND REVISED QUESTION')
-      await page.getByRole('button', { name: 'Save and regenerate', exact: true }).click()
-      await page.getByText('SECOND REVISED ANSWER', { exact: true }).waitFor({ timeout: 15_000 })
-      expect(adapter.requests).toHaveLength(2)
-      expect(scaffold.ctx.agents.list().map(agent => agent.id).sort()).toEqual(existingAgents)
-      expect(page.url()).toBe(selectedUrl)
-      const currentRequest = adapter.requests[1]!.messages.flatMap(message => message.content)
-        .flatMap(block => block.type === 'text' ? [block.text] : [])
-      expect(currentRequest).toContain('SECOND REVISED QUESTION')
-      expect(currentRequest).not.toContain('REVISED QUESTION')
-      expect(currentRequest).not.toContain('REVISED ANSWER')
-      expect(await page.getByText('REVISED QUESTION', { exact: true }).count()).toBe(0)
-      expect(await page.getByText('REVISED ANSWER', { exact: true }).count()).toBe(0)
-    } finally {
-      await dispose()
-    }
-  }, 60_000)
+  it.skipIf(MODE === 'record')('forks an unopened current-format Session from its sidebar row', async () => {
+    onTestFailed(() => saveFailureShot(page, 'screenshots/non-migrating-session-reads/current-cold-fork'))
+    const id = SessionId('message-actions-current-cold')
+    await seedSession(scaffold, completedTailFixture(await readFile(SEED, 'utf8')), id)
+    const warningStart = tripwire.warnings.length
+    await page.reload({ waitUntil: 'load' })
+    const row = page.locator(`[data-row-key="session:${id}"]`)
+    await row.waitFor()
+    acknowledgeReloadConnectionLoss(tripwire, warningStart)
+    expect(scaffold.ctx.agents.get(id)).toBeUndefined()
+    await row.hover()
+    await row.locator('button[aria-label^="Session actions for "]').click()
+    await page.getByRole('menuitem', { name: 'Fork session', exact: true }).click()
+    await expect.poll(() => scaffold.ctx.agents.list().some(agent => agent.session.header.parentSession === id)).toBe(true)
+    expect(scaffold.ctx.agents.get(id)).toBeUndefined()
+    expect(await row.getAttribute('aria-selected')).not.toBe('true')
+  })
 
-  it.skipIf(MODE === 'record')('keeps the fixture inventory closed', async () => {
+  it.skipIf(MODE === 'record')('guides only a migration-required sidebar fork to opening its source', async () => {
+    onTestFailed(() => saveFailureShot(page, 'screenshots/non-migrating-session-reads/migration-required-fork'))
+    const id = SessionId('message-actions-needs-migration')
+    const [header, ...events] = realizeSeedFixture(scaffold, await readFile(SEED, 'utf8'), id).trimEnd().split('\n')
+      .map((line): Record<string, unknown> => JSON.parse(line) as Record<string, unknown>)
+    expect(header?.version).toBe(3)
+    const projects = (await readdir(scaffold.persistenceRoot, { withFileTypes: true })).filter(entry => entry.isDirectory())
+    expect(projects).toHaveLength(1)
+    const directory = join(scaffold.persistenceRoot, projects[0]!.name, id)
+    const predecessor = join(directory, 'session.v3.jsonl.zstd')
+    const createdAt = WEB_FIXTURE_TIME - 90_000
+    const rows = [{ ...header, id, cwd: scaffold.workspaceCwd, createdAt },
+      ...events.map((event, seq) => ({ ...event, seq, time: createdAt + seq + 1 }))]
+    const source = Buffer.concat(rows.map(row => zstdCompressSync(Buffer.from(`${JSON.stringify(row)}\n`))))
+    await mkdir(directory, { recursive: true })
+    await writeFile(predecessor, source)
+    await expect(scaffold.ctx.sessionPersistence.stat(id)).resolves.toMatchObject({ formatStatus: 'migration-required' })
+
+    const warningStart = tripwire.warnings.length
+    await page.reload({ waitUntil: 'load' })
+    await page.getByRole('button', { name: /^Show \d+ more sessions$/ }).click()
+    const row = page.locator(`[data-row-key="session:${id}"]`)
+    await row.waitFor()
+    acknowledgeReloadConnectionLoss(tripwire, warningStart)
+    const forkRequests: string[] = []
+    const trackFork = (request: BrowserRequest): void => {
+      const path = new URL(request.url()).pathname
+      if (path === '/api/session/fork') forkRequests.push(path)
+    }
+    page.on('request', trackFork)
+    try {
+      await row.hover()
+      await row.locator('button[aria-label^="Session actions for "]').click()
+      await page.getByRole('menuitem', { name: 'Fork session', exact: true }).click()
+      const notice = page.getByRole('alert').filter({ hasText: 'Open the original session to complete migration before creating a branch.' })
+      await notice.waitFor()
+      expect(await page.getByRole('menuitem', { name: 'Fork session', exact: true }).count()).toBe(0)
+      expect(forkRequests).toEqual(['/api/session/fork'])
+      expect(scaffold.ctx.agents.get(id)).toBeUndefined()
+      expect(await readdir(directory)).toEqual(['session.v3.jsonl.zstd'])
+      expect(await readFile(predecessor)).toEqual(source)
+      await compareOrRefreshGolden(UNOPENED_FORK_EXPECTED,
+        await captureStableAria(page, '[role="alert"]', scaffold.workspaceCwd), MODE)
+      await notice.getByRole('button', { name: 'Open original session', exact: true }).click()
+      await expect.poll(() => row.getAttribute('aria-selected')).toBe('true')
+      await expect.poll(() => scaffold.ctx.agents.get(id)).toBeDefined()
+      await expect(scaffold.ctx.sessionPersistence.stat(id)).resolves.toMatchObject({ formatStatus: 'current' })
+      expect(await readdir(directory)).toContain(`session.v${SESSION_FORMAT_VERSION}.jsonl.zstd`)
+      expect(await readFile(predecessor)).toEqual(source)
+      expect(forkRequests).toEqual(['/api/session/fork'])
+      expect(scaffold.ctx.agents.list().filter(agent => agent.session.header.parentSession === id)).toEqual([])
+    } finally {
+      page.off('request', trackFork)
+    }
+  })
+
+  it.skipIf(MODE === 'record')('issued zero model calls and kept a closed inventory', async () => {
     expect(tripwire.pageErrors).toEqual([])
     expect(tripwire.warnings).toEqual([])
-    await assertFixtureInventory(SNAPSHOT_DIR, ['compact.expected.md', 'edit.expected.md', 'fork.expected.md', 'ui.expected.md'])
+    await assertFixtureInventory(SNAPSHOT_DIR, ['compact.expected.md', 'fork.expected.md', 'fork-unopened.expected.md', 'ui.expected.md'])
   })
 })

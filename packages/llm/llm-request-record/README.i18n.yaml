@@ -1,6 +1,64 @@
-# Bilingual-pair consistency record (docs/i18n/README.md): the git blob hash of each
-# side as of the last confirmed-consistent state. Both languages carry equal authority;
-# after editing either side, bring the other along and re-record with:
+# Bilingual-pair consistency record for README.md (docs/i18n/README.md): per heading
+# section, a hash of its English and Chinese blocks outside code blocks and generated regions.
+# After editing either side, bring the other along and re-record with:
 #   pnpm run verify-translation-pairing --write packages/llm/llm-request-record/README.md
-README.md: d22f60ea3565897c253440db608c387fe5dbd05c
-README.zh.md: 61867b4f4937b3380d40118915234cd7f9e8edae
+/:
+  en: a8324a1093f3ed00
+  zh: dc06a2e7e310ca40
+/deepseek-ai-dsh-llm-request-record:
+  en: ff929ab5e0243f72
+  zh: 6e6dfcff3f8a3db0
+/deepseek-ai-dsh-llm-request-record/summary:
+  en: ec4593532d315ae6
+  zh: be061b5985d68769
+/deepseek-ai-dsh-llm-request-record/table-of-contents:
+  en: d152484eb41ac6b4
+  zh: 405b30feaf48c087
+/deepseek-ai-dsh-llm-request-record/use-this-package:
+  en: 4de8a9d32807c496
+  zh: 8c1969d00fa70cd8
+/deepseek-ai-dsh-llm-request-record/use-this-package/recording-one-prepared-request:
+  en: e2fdb5af99376651
+  zh: 04b410fa67fce3c5
+/deepseek-ai-dsh-llm-request-record/use-this-package/reading-one-recorded-request:
+  en: e6ea3762642e44c3
+  zh: b8ce1404f71b95c0
+/deepseek-ai-dsh-llm-request-record/use-this-package/the-recorded-event:
+  en: e81e00f01be22425
+  zh: 3c17b109e883b000
+/deepseek-ai-dsh-llm-request-record/use-this-package/confidentiality:
+  en: 7d5050501e20f6d1
+  zh: bd53c935d13d67b0
+/deepseek-ai-dsh-llm-request-record/understand-the-implementation:
+  en: 42b15ac6321706aa
+  zh: c5500056b41ce570
+/deepseek-ai-dsh-llm-request-record/understand-the-implementation/source-map:
+  en: 713500d184363a39
+  zh: ba3ffaab3c41d9be
+/deepseek-ai-dsh-llm-request-record/understand-the-implementation/why-one-package-holds-both-roles:
+  en: dbde8abe9acae273
+  zh: ae24e0e75dcd8fc2
+/deepseek-ai-dsh-llm-request-record/understand-the-implementation/durability-semantics:
+  en: 94baa9551ab2f0e7
+  zh: 5a4b426d42d38a2f
+/deepseek-ai-dsh-llm-request-record/understand-the-implementation/consumer-contract:
+  en: faaba833dd0ac401
+  zh: 2c3594d3fa35fdd1
+/deepseek-ai-dsh-llm-request-record/further-exploration:
+  en: a061637b3f2368c2
+  zh: f734c741d1adfea9
+/deepseek-ai-dsh-llm-request-record/model-experience:
+  en: 7e022dd2fb2aa084
+  zh: 685ccd000b5cdfc5
+/deepseek-ai-dsh-llm-request-record/model-experience/kv-cache-effect:
+  en: 224196ac94028f81
+  zh: ea7cb120487c9d11
+/deepseek-ai-dsh-llm-request-record/known-limitations-and-deferred-work:
+  en: 01b8f1519c183755
+  zh: 86181d3be72ad685
+/deepseek-ai-dsh-llm-request-record/known-limitations-and-deferred-work/dev-note:
+  en: a63e51f03bdb279f
+  zh: 2c6a0dff706cf8f0
+/deepseek-ai-dsh-llm-request-record/known-limitations-and-deferred-work/dev-note/future-per-session-flush-coalescing:
+  en: 9ed564c70340f13a
+  zh: 0bff2b20cf74f5f9

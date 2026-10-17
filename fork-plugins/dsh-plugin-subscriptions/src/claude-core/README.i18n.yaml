@@ -1,6 +1,25 @@
-# Bilingual-pair consistency record (docs/i18n/README.md): the git blob hash of each
-# side as of the last confirmed-consistent state. Both languages carry equal authority;
-# after editing either side, bring the other along and re-record with:
+# Bilingual-pair consistency record for README.md (docs/i18n/README.md): per heading
+# section, a hash of its English and Chinese blocks outside code blocks and generated regions.
+# After editing either side, bring the other along and re-record with:
 #   pnpm run verify-translation-pairing --write fork-plugins/dsh-plugin-subscriptions/src/claude-core/README.md
-README.md: 1c503a0c9345f3ae724617ff71c05216f9f11f38
-README.zh.md: 42c700a52c7446adb8bbd265da50bb8d072a5abb
+/claude-core-shared-pure-single-account-protocol-core:
+  en: 94895805d910ce45
+  zh: 0cc9721f30f6d78c
+/claude-core-shared-pure-single-account-protocol-core/module-responsibilities:
+  en: 4b76c9362a5ebd8c
+  zh: 449f32f4c43b1d45
+/claude-core-shared-pure-single-account-protocol-core/ownership-boundaries:
+  en: d80f18a1ae47c037
+  zh: 174cc35d4b971d1d
+/claude-core-shared-pure-single-account-protocol-core/exported-api:
+  en: a102f81923ebd433
+  zh: a2f01b0f25c0ee08
+/claude-core-shared-pure-single-account-protocol-core/configuration-behavior-statement:
+  en: 4277e89b0eb82d37
+  zh: 4d0295ca1dd58183
+/claude-core-shared-pure-single-account-protocol-core/product-guard-statements-deliberate-differences:
+  en: 922fba7053e88651
+  zh: d5839fff537b8ddf
+/claude-core-shared-pure-single-account-protocol-core/not-implemented-explicit-gaps:
+  en: 8d85317cf9a55f9a
+  zh: 1b84d72b9f25b0c2

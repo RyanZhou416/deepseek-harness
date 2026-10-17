@@ -1,6 +1,28 @@
-# Bilingual-pair consistency record (docs/i18n/README.md): the git blob hash of each
-# side as of the last confirmed-consistent state. Both languages carry equal authority;
-# after editing either side, bring the other along and re-record with:
+# Bilingual-pair consistency record for web.md (docs/i18n/README.md): per heading
+# section, a hash of its English and Chinese blocks outside code blocks and generated regions.
+# After editing either side, bring the other along and re-record with:
 #   pnpm run verify-translation-pairing --write docs/subsystems/web.md
-web.md: 5e0d792ce8d1de0dc147e53faef895bbc4b61204
-web.zh.md: df3adea8245dbcdd28523c5d445859a947ded2b9
+/web-access:
+  en: 86d12e6e81fb63b8
+  zh: 52ed66dcacaf6d85
+/web-access/why-one-capability-has-two-operations:
+  en: 380da3cd0aabd52b
+  zh: 1317c26089c3ab07
+/web-access/search-request-and-result:
+  en: 1ad94deb713024e2
+  zh: 9d3df730fa99ad89
+/web-access/fetch-request-and-result:
+  en: a95a0d82612cb41a
+  zh: 4709b275afc16dc7
+/web-access/provider-availability:
+  en: da78eb96d684ad47
+  zh: 4b726cc04c92ef13
+/web-access/fetch-network-policy:
+  en: 1bb4d56b013b41e5
+  zh: 69fa4dcc35a85283
+/web-access/errors:
+  en: b07c04f462b4a0d9
+  zh: de5f09cd2fb0324c
+/web-access/the-service:
+  en: 41b014fc865c0f21
+  zh: 6ccdd18fe116b13e

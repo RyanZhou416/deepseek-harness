@@ -1,6 +1,19 @@
-# Bilingual-pair consistency record (docs/i18n/README.md): the git blob hash of each
-# side as of the last confirmed-consistent state. Both languages carry equal authority;
-# after editing either side, bring the other along and re-record with:
+# Bilingual-pair consistency record for 2026-09-10-external-agentteams-release-port.md (docs/i18n/README.md): per heading
+# section, a hash of its English and Chinese blocks outside code blocks and generated regions.
+# After editing either side, bring the other along and re-record with:
 #   pnpm run verify-translation-pairing --write .agents/notes/implemented/process/2026-09-10-external-agentteams-release-port.md
-2026-09-10-external-agentteams-release-port.md: 209feafe83cf2e618a5fe7962c137101155d03bf
-2026-09-10-external-agentteams-release-port.zh.md: 629597f8d129a778f7e9a5a99633f7079e9703f1
+/agent-note-exact-external-agentteams-release-ports:
+  en: 6b9e23afe9a6db16
+  zh: b845d001f877d4bc
+/agent-note-exact-external-agentteams-release-ports/problem:
+  en: 0bd10b9ed93cb2ae
+  zh: a1c7322fe0ce98c0
+/agent-note-exact-external-agentteams-release-ports/decision:
+  en: 1a12c20039a2721b
+  zh: e7a7782ca86ebbec
+/agent-note-exact-external-agentteams-release-ports/alternatives-considered:
+  en: e9104b2bedc927ea
+  zh: dc6cc18f87eb9211
+/agent-note-exact-external-agentteams-release-ports/consequences:
+  en: 8259d58abd7ad0c6
+  zh: 308b09e658deb4ab

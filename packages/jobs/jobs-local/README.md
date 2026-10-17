@@ -45,8 +45,6 @@ Loading the plugin registers `ctx.jobs`; every field is optional.
 | `retainBytes` | `262144` | Live ring retention per job, in UTF-8 bytes |
 | `settledRetainBytes` | `16384` | Ring retention kept after a job settles, in UTF-8 bytes; bytes the model has not read stay until its first terminal read |
 | `pumpPollMs` | `150` | Poll interval for a job's pull sources, in milliseconds |
-| `terminalJobRetentionMs` | omitted | Milliseconds to retain a terminal record, whether read or unread; omission keeps it until owner or service disposal |
-| `maxRetainedTerminalJobsPerOwner` | omitted | Target terminal records per exact owner or unowned bucket; only model-read records are count-pruned |
 
 The generated [configuration catalog](../../../docs/config-catalog.md#deepseek-aidsh-jobs-local) is the exhaustive source for the accepted fields.
 
@@ -54,15 +52,19 @@ The generated [configuration catalog](../../../docs/config-catalog.md#deepseek-a
 
 The limit counts the exact owner's `running` and `stopping` records; all unowned jobs share one separate service-level bucket. Terminal history does not occupy capacity, and only a producer's `done` settlement releases a stopping job's place. At capacity, `start()` fails before the producer runs, with an error that names the limit and tells the agent to kill an unneeded job, wait for it to finish, and retry — the registry neither queues nor preempts.
 
-Count retention removes the oldest reported terminal records from each exact-owner bucket; unreported records may exceed the target until they are reported, expire by TTL, or reach teardown. TTL retention removes terminal records whether reported or not. Running and stopping records are never retention candidates, and a pending waiter or its just-settled job remains protected until the immediate result read can finish.
-
 ### Lifecycle
 
 Jobs belong to their owner and backend, not to the producer tool, so producer or controller reloads do not stop them. When an agent that owns jobs is disposed, its jobs are cancelled, their producers awaited, and their snapshots removed; service disposal does the same for every remaining job. A cancellation that throws during teardown force-fails the record and warns that the work may be orphaned, so teardown never deadlocks.
 
+### Session timing records
+
+Owned jobs record registration and settlement in their original Session, independently of model output collection. SDK consumers receive the same events through `session.event`; the [jobs reference](../../../docs/subsystems/jobs.md#session-lifecycle-records) defines identities, timestamps, and producer settlement reports. Events already persisted remain available after process exit; live jobs and output rings are not resumed.
+
+Lifecycle facts are appended synchronously at the registration or settlement commit, before live hub subscribers and completion waiters react. Append failures warn without abandoning execution or blocking cleanup; consumers must retain incomplete histories as incomplete.
+
 ### What can go wrong
 
-Starting work fails without a controller that serves the owner — loading `dsh-tool-jobs` attaches one, and `start()` otherwise refuses with a message naming it. A producer cancel that returns without settling `done` stays indistinguishable from a slow stop and can stall teardown while holding one capacity slot. Every record disappears when the harness process exits.
+Starting work fails without a controller that serves the owner — loading `dsh-tool-jobs` attaches one, and `start()` otherwise refuses with a message naming it. A producer cancel that returns without settling `done` stays indistinguishable from a slow stop and can stall teardown while holding one capacity slot. Live registry records disappear when the harness process exits; persisted lifecycle events remain.
 
 -----
 
@@ -78,7 +80,6 @@ This section explains the design decisions behind the registry and points at the
 
 - **In-memory records, fresh projections.** `LocalJobRegistry` keeps one `TrackedJob` per job — lifecycle state, the output ring, and the model cursor — and projects a new read-only view or chunk copy per call; callers never receive live state.
 - **Retention is bounded per ring.** Appends past the live cap drop the oldest retained chunks (a single oversized chunk keeps its UTF-8-safe tail); a reader below the retained window gets a lossy read, never an error. Settlement trims to the settled cap but never below the bytes the model cursor has not consumed, so a job that finishes before its first `job_output` hands over everything the live cap retained; that terminal read then trims to the settled cap.
-- **Terminal records have separate optional bounds.** One unref timer expires records, and per-owner reported heaps choose the oldest read result for count pruning. Shared expiry and deferred-prune timers run without an initiating Agent, including when an expiry callback schedules the next timer. Removed jobs leave only lightweight heap references until bounded compaction; an unread record remains available until TTL or teardown.
 - **Owner-relative layers, one process-wide registry.** Controllers and `{ owners: 'scope' }` subscriptions are filed into the scope that registered them (`ScopedLayers`), and reads union the global layer with the owner's scope chain — so one preset's job controls never hold `start()` open for an agent whose own composition loads none, and a scoped settlement reaches only the listeners its owner's composition registered.
 - **Preflight before start.** `start()` checks controller service, spec validity, live ownership, and capacity before invoking the producer, so a rejection leaves no job id or execution resource; registration commits without a later failable step.
 - **First-wins settlement, event last.** The earliest terminal outcome records once, waits for the pump's final drain, trims the ring, releases waiters, and then delivers one `settled` event with per-listener containment, followed by the ring's final `output` signal.
@@ -92,8 +93,6 @@ This section explains the design decisions behind the registry and points at the
 | [`src/events.ts`](src/events.ts) | Scope-layered event routing: `{ owner }`, `{ owners: 'all' }`, and `{ owners: 'scope' }` subscriptions |
 | [`src/ring.ts`](src/ring.ts) | The bounded per-job output ring: append, retention trim, offset reads |
 | [`src/pump.ts`](src/pump.ts) | The registry-owned pull pump: one timer per job, final drain before settlement |
-| [`src/retention.ts`](src/retention.ts) | Optional terminal TTL/count indexes and their single expiry timer |
-| — | No runtime invariant companion is published; `@deepseek-ai/dsh-jobs/invariant` owns the event-protocol and event-versus-read checks. This provider's admission decision uses private configuration and must fail before a backend starter runs; `LocalJobRegistry.start()` enforces it synchronously for current producers. Repeating an aggregate after publication would expose private configuration solely to this companion and would not verify the fail-closed pre-start guarantee. |
 
 ### Scope layers
 
@@ -120,7 +119,8 @@ Read these pages when the package-level contract is not enough. They move from t
 - [jobs group map](../README.md) — the sibling group page and its package table.
 - [Registry contract](../jobs/README.md) — the abstract `ctx.jobs` service this package implements.
 - [Model-facing job controls](../tool-jobs/README.md) — the `job_output`, `job_list`, and `job_kill` tools and completion notices.
-- [Generic long-running tool runtime Agent Note](../../../.agents/notes/implemented/architecture/2026-06-20-generic-long-running-tool-runtime.md) — the design behind the background-job runtime.
+- [Generic long-running tool runtime reference](../jobs/README.md) — the design behind the background-job runtime.
+- [Job lifecycle recording decision](../../../.agents/notes/implemented/bug-fix/2026-09-30-job-session-lifecycle.md) — durable timing, execution identity, and recording-failure behavior.
 - [job-registry seam Agent Note](../../../.agents/notes/archived/architecture/2026-07-26-job-registry-seam.md) — the owner-fenced registry contract and its rationale.
 
 -----
@@ -141,7 +141,8 @@ No direct invalidation; the named consumers own any request-prefix changes.
 
 These limits define when the registry is a poor fit. They are current package constraints, not a task backlog.
 
-- **Jobs are process-local** — records die with the harness process; durable or cross-restart execution needs a separate backend implementing the seam.
+- **Jobs are process-local** — live execution and output rings die with the harness process; durable or cross-restart execution needs a separate backend implementing the seam.
+- **Final settlement persistence is not guaranteed during teardown** — normal one-shot completion, signal shutdown, or hard exit can stop Session routing or close its writer before the final `job/settled` reaches storage. Consumers must retain the interval as incomplete when settlement is absent; cross-fiber shutdown ordering is outside this journal's contract.
 - **A silently ineffective cancel can stall teardown and hold capacity** — if `cancel` returns without settling `done`, the registry cannot distinguish it from a slow stop; the job keeps one bucket slot for the rest of the service lifetime, and only an explicit throw can be force-failed safely.
 
 <a id="dev-note"></a>

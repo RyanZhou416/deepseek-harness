@@ -1,4 +1,4 @@
-import { useMemo, useEffect, useRef, useState, type CSSProperties, type KeyboardEvent, type MouseEvent, type RefObject } from 'react'
+import { useMemo, useEffect, useRef, useState, type CSSProperties, type KeyboardEvent, type MouseEvent } from 'react'
 import { createPortal } from 'react-dom'
 import {
   type SessionProjectionMap, type SessionSummary,
@@ -16,8 +16,8 @@ import type {} from '@deepseek-ai/dsh-token-meter/client'
 import css from './SubagentHeaderLineage.module.css'
 
 type SubagentCatalogSnapshot = Omit<SessionProjectionSnapshot, 'values' | 'state'> & {
-  state: 'loading' | 'ready' | 'error'
-  entries: readonly (SessionProjectionMap['subagentCatalog'][number] & { activity: 'running' | 'inactive' })[]
+  state: 'loading' | 'ready' | 'migration-required' | 'error'
+  entries: (SessionProjectionMap['subagentCatalog'][number] & { activity: 'running' | 'inactive' })[]
 }
 type Catalogs = Readonly<Record<SessionId, SubagentCatalogSnapshot>>
 
@@ -197,12 +197,11 @@ function isKnownLeaf(catalog: SubagentCatalogSnapshot | undefined): boolean {
   return catalog?.state === 'ready' && catalog.entries.length === 0
 }
 
-/** Render siblings newest-first and recurse only through explicitly expanded rows. */
+/** Render one catalog level and recurse only through explicitly expanded rows. */
 function CatalogRows({
   parentSessionId, currentSessionId, catalog, catalogs, summaries, expanded, level,
   openChild, openChildAside, refreshProjection, toggleBranch, closeCatalog, t,
 }: CatalogRowsProps & { t: TranslateNS<typeof NS> }) {
-  const entries = useMemo(() => [...catalog.entries].sort((left, right) => right.createdAt - left.createdAt), [catalog.entries])
   const [now, setNow] = useState(() => Date.now())
   const running = catalog.entries.some(entry => entry.activity === 'running')
   useEffect(() => {
@@ -211,7 +210,10 @@ function CatalogRows({
     return () => { clearInterval(timer) }
   }, [running])
   const emptyLoading = catalog.state === 'loading' && catalog.entries.length === 0
-  const reserveDisclosure = catalog.entries.some(entry => !isKnownLeaf(catalogs[entry.id]))
+  const reserveDisclosure = catalog.entries.some(entry =>
+    entry.mode !== 'external' && !isKnownLeaf(catalogs[entry.id])
+    && summaries[entry.id]?.formatStatus !== 'migration-required'
+    && catalogs[entry.id]?.state !== 'migration-required')
   return (
     <>
       {emptyLoading && (
@@ -230,25 +232,29 @@ function CatalogRows({
           </button>
         </div>
       )}
-      {entries.map((entry) => {
+      {catalog.entries.map((entry) => {
+        const external = entry.mode === 'external'
         const childCatalog = catalogs[entry.id]
         const isCurrent = entry.id === currentSessionId
-        const isExpanded = expanded.has(entry.id)
-        const knownLeaf = isKnownLeaf(childCatalog)
+        const knownLeaf = external || isKnownLeaf(childCatalog)
+        const requiresOpening = summaries[entry.id]?.formatStatus === 'migration-required'
+          || childCatalog?.state === 'migration-required'
+        const canExpand = !knownLeaf && !requiresOpening
+        const isExpanded = canExpand && expanded.has(entry.id)
         const childLoading = childCatalog === undefined
           || (childCatalog.state === 'loading' && childCatalog.entries.length === 0)
         const summary = summaries[entry.id]
         const label = entry.label ?? entry.id
-        const mode = entry.mode === 'unknown' ? t('mode.unknown')
+        const mode = external ? t('mode.external') : entry.mode === 'unknown' ? t('mode.unknown')
           : entry.mode === 'one-shot' ? t('mode.oneShot') : t('mode.continuable')
-        const completed = entry.activity === 'inactive'
+        const completed = !external && entry.activity === 'inactive'
           && summary?.projectionValues?.subagentTiming?.lastTurnCompleted === true
-        const activity = entry.activity === 'running'
+        const activity = external ? undefined : entry.activity === 'running'
           ? t('activity.running')
           : completed
             ? t('activity.completed')
             : t('activity.inactive')
-        const secondary = [summary?.title, mode, activity]
+        const secondary = [summary?.title, requiresOpening ? t('catalog.migrationRequired') : mode, activity]
           .filter(value => value !== undefined)
           .join(' · ')
         const totalTokens = tokenTotal(summary?.projectionValues?.tokenUsage)
@@ -271,17 +277,12 @@ function CatalogRows({
           .join(' · ')
 
         const open = (): void => {
+          if (external) return
           openChild({
             parentSessionId,
             childSessionId: entry.id,
             mode: entry.mode,
           })
-          closeCatalog()
-        }
-        const openAside = (event: MouseEvent<HTMLButtonElement>): void => {
-          event.preventDefault()
-          event.stopPropagation()
-          openChildAside({ parentSessionId, childSessionId: entry.id, mode: entry.mode })
           closeCatalog()
         }
         const handleKey = (event: KeyboardEvent<HTMLDivElement>): void => {
@@ -290,7 +291,7 @@ function CatalogRows({
             event.stopPropagation()
             open()
           } else if (
-            (event.key === 'ArrowRight' && !knownLeaf && !isExpanded)
+            (event.key === 'ArrowRight' && canExpand && !isExpanded)
             || (event.key === 'ArrowLeft' && isExpanded)
           ) {
             event.preventDefault()
@@ -308,16 +309,17 @@ function CatalogRows({
           <div key={entry.id} className={css.node}>
             <div
               role="treeitem"
-              tabIndex={0}
+              tabIndex={external ? -1 : 0}
+              aria-disabled={external || undefined}
               aria-level={level}
               aria-current={isCurrent || undefined}
               aria-label={[label, secondary, metrics].filter(value => value !== '').join(' ')}
-              {...knownLeaf ? {} : { 'aria-expanded': isExpanded }}
+              {...canExpand ? { 'aria-expanded': isExpanded } : {}}
               className={css.row}
               onClick={open}
               onKeyDown={handleKey}
             >
-              {knownLeaf
+              {!canExpand
                 ? reserveDisclosure && <span className={css.disclosureSpace} />
                 : (
                   <button
@@ -351,13 +353,18 @@ function CatalogRows({
                     )}
                   </span>
                 )}
-                {!isCurrent && (
+                {!isCurrent && !external && (
                   <Tooltip label={t('open.sidebar')} side="bottom" align="end">
                     <button
                       type="button"
                       className={css.sidebarButton}
                       aria-label={t('open.sidebar.aria', { label })}
-                      onClick={openAside}
+                      onClick={(event) => {
+                        event.preventDefault()
+                        event.stopPropagation()
+                        openChildAside({ parentSessionId, childSessionId: entry.id, mode: entry.mode })
+                        closeCatalog()
+                      }}
                       onKeyDown={(event) => { event.stopPropagation() }}
                     >
                       <IconChevronRightOutlineRegular />
@@ -366,7 +373,7 @@ function CatalogRows({
                 )}
               </div>
             </div>
-            {isExpanded && !knownLeaf && (
+            {isExpanded && (
               <div
                 role="group"
                 className={css.children}
@@ -430,146 +437,6 @@ type CatalogDropdownProps = CatalogDropdownSharedProps & (
 
 const MENU_VIEWPORT_MARGIN = 16
 
-interface DirectCatalogSlice {
-  readonly entries: SessionProjectionMap['subagentCatalog'] | undefined
-  readonly state: SessionProjectionSnapshot['state']
-  readonly error: SessionProjectionSnapshot['error']
-}
-
-const EMPTY_CATALOG_ENTRIES: SessionProjectionMap['subagentCatalog'] = []
-
-function sameCatalogSlice(left: DirectCatalogSlice | undefined, right: DirectCatalogSlice | undefined): boolean {
-  return left === right || left !== undefined && right !== undefined
-    && left.entries === right.entries && left.state === right.state && left.error === right.error
-}
-
-function sameScalars<T>(left: readonly T[], right: readonly T[]): boolean {
-  return left.length === right.length && left.every((value, index) => value === right[index])
-}
-
-/** Subscribe only to one root catalog and its direct-child activity while the menu is closed. */
-function useDirectCatalog(
-  rootSessionId: SessionId,
-  useSessions: CatalogDropdownSharedProps['useSessions'],
-  useSessionStatus: CatalogDropdownSharedProps['useSessionStatus'],
-): SubagentCatalogSnapshot | undefined {
-  const slice = useSessions((state): DirectCatalogSlice | undefined => {
-    const snapshot = state.projectionsBySession[rootSessionId]
-    return snapshot === undefined
-      ? undefined
-      : {
-        entries: snapshot.values.subagentCatalog,
-        state: snapshot.state,
-        error: snapshot.error,
-      }
-  }, sameCatalogSlice)
-  const entries = slice?.entries ?? EMPTY_CATALOG_ENTRIES
-  const summaryRunning = useSessions(
-    state => entries.map(entry => state.byId[entry.id]?.running),
-    sameScalars,
-  )
-  const statusRunning = useSessionStatus(
-    state => entries.map(entry => state.get(entry.id)?.running),
-    sameScalars,
-  )
-  return useMemo(() => slice === undefined
-    ? undefined
-    : {
-      state: slice.state === 'idle'
-        ? slice.entries === undefined ? 'loading' : 'ready'
-        : slice.state,
-      error: slice.error,
-      entries: entries.map((entry, index) => ({
-        ...entry,
-        activity: (statusRunning[index] ?? summaryRunning[index]) === true
-          ? 'running' as const
-          : 'inactive' as const,
-      })),
-    }, [entries, slice, statusRunning, summaryRunning])
-}
-
-interface CatalogMenuProps extends CatalogDropdownSharedProps {
-  readonly currentSessionId: SessionId | undefined
-  readonly menuPosition: CSSProperties | undefined
-  readonly menuRef: RefObject<HTMLDivElement>
-  readonly onMouseEnter: () => void
-  readonly onMouseLeave: () => void
-  readonly closeCatalog: () => void
-}
-
-/** Mount the complete catalog subscriptions only while the tree is visible. */
-function CatalogMenu({
-  rootSessionId, currentSessionId, menuPosition, menuRef,
-  useSessions, useSessionStatus, openChild, openChildAside, refreshProjection,
-  onMouseEnter, onMouseLeave, closeCatalog, t,
-}: CatalogMenuProps) {
-  const projections = useSessions(state => state.projectionsBySession)
-  const summaries = useSessions(state => state.byId)
-  const statuses = useSessionStatus(value => value)
-  const catalogs = useMemo<Catalogs>(() => Object.fromEntries(Object.entries(projections).map(([id, snapshot]) => [id, {
-    state: snapshot.state === 'idle'
-      ? snapshot.values.subagentCatalog === undefined ? 'loading' : 'ready'
-      : snapshot.state,
-    error: snapshot.error,
-    entries: (snapshot.values.subagentCatalog ?? []).map(entry => ({
-      ...entry,
-      activity: (statuses.get(entry.id)?.running ?? summaries[entry.id]?.running) === true ? 'running' as const : 'inactive' as const,
-    })),
-  }])), [projections, summaries, statuses])
-  const catalog: SubagentCatalogSnapshot = catalogs[rootSessionId] ?? { entries: [], state: 'loading', error: null }
-  const [expanded, setExpanded] = useState<ReadonlySet<SessionId>>(() => new Set())
-
-  const closeBranch = (root: SessionId): void => {
-    const closing = new Set<SessionId>()
-    const visit = (parentSessionId: SessionId): void => {
-      if (closing.has(parentSessionId) || !expanded.has(parentSessionId)) return
-      closing.add(parentSessionId)
-      const branch = catalogs[parentSessionId]
-      for (const entry of branch?.entries ?? []) visit(entry.id)
-    }
-    visit(root)
-    setExpanded(current => new Set([...current].filter(id => !closing.has(id))))
-  }
-
-  const toggleBranch = (childSessionId: SessionId): void => {
-    if (expanded.has(childSessionId)) {
-      closeBranch(childSessionId)
-      return
-    }
-    setExpanded(current => new Set(current).add(childSessionId))
-    refreshProjection(childSessionId)
-  }
-
-  return createPortal((
-    <div
-      ref={menuRef}
-      className={css.menu}
-      style={menuPosition}
-      onMouseEnter={onMouseEnter}
-      onMouseLeave={onMouseLeave}
-    >
-      <div className={css.menuBody} role="tree" aria-label={t('tree.aria')}>
-        <CatalogRows
-          parentSessionId={rootSessionId}
-          currentSessionId={currentSessionId}
-          catalog={catalog}
-          catalogs={catalogs}
-          summaries={summaries}
-          expanded={expanded}
-          level={1}
-          openChild={openChild}
-          openChildAside={openChildAside}
-          refreshProjection={refreshProjection}
-          toggleBranch={toggleBranch}
-          closeCatalog={closeCatalog}
-          t={t}
-        />
-      </div>
-    </div>
-  ), document.body)
-}
-
-
 /** Place a portaled catalog below its trigger without crossing the viewport edge. */
 function catalogMenuPosition(trigger: HTMLButtonElement): CSSProperties {
   const rect = trigger.getBoundingClientRect()
@@ -589,9 +456,30 @@ function CatalogDropdown({
   useSessions, useSessionStatus, openChild, openChildAside, refreshProjection, t,
 }: CatalogDropdownProps) {
   const ancestorSwitcher = variant === 'switcher' && openTitle !== undefined
-  const catalog = useDirectCatalog(rootSessionId, useSessions, useSessionStatus)
+  const projections = useSessions(state => state.projectionsBySession)
+  const summaries = useSessions(state => state.byId)
+  const statuses = useSessionStatus(value => value)
+  const catalogs = useMemo<Catalogs>(() => {
+    return Object.fromEntries(Object.entries(projections).map(([id, snapshot]) => {
+      const projected = snapshot.values.subagentCatalog
+      const state = snapshot.state === 'idle'
+        ? projected === undefined ? 'loading' : 'ready'
+        : snapshot.state === 'migration-required' && projected !== undefined ? 'ready' : snapshot.state
+      return [id, {
+        state,
+        error: snapshot.error,
+        entries: (projected ?? []).map(entry => ({
+          ...entry,
+          activity: (statuses.get(entry.id)?.running ?? summaries[entry.id]?.running) === true
+            ? 'running' as const : 'inactive' as const,
+        })),
+      } satisfies SubagentCatalogSnapshot]
+    }))
+  }, [projections, summaries, statuses])
+  const catalog = catalogs[rootSessionId]
   const [open, setOpen] = useState(false)
   const [menuPosition, setMenuPosition] = useState<CSSProperties>()
+  const [expanded, setExpanded] = useState<ReadonlySet<SessionId>>(() => new Set())
   const rootRef = useRef<HTMLDivElement>(null)
   const triggerRef = useRef<HTMLButtonElement>(null)
   const menuRef = useRef<HTMLDivElement>(null)
@@ -601,7 +489,7 @@ function CatalogDropdown({
   const pinnedRef = useRef(false)
   const currentEntry = currentSessionId === undefined
     ? undefined
-    : catalog?.entries.find(entry => entry.id === currentSessionId)
+    : projections[rootSessionId]?.values.subagentCatalog?.find(entry => entry.id === currentSessionId)
   const switcherDisplayTitle = currentEntry !== undefined
     ? currentEntry.label ?? currentEntry.id
     : displayTitle
@@ -640,6 +528,7 @@ function CatalogDropdown({
       pinnedRef.current = false
       setOpen(false)
       setMenuPosition(undefined)
+      setExpanded(new Set())
     }
     if (restoreFocus) queueMicrotask(() => { triggerRef.current?.focus() })
   }
@@ -662,6 +551,29 @@ function CatalogDropdown({
       hoverCloseTimer.current = undefined
       changeOpen(false)
     }, 120)
+  }
+
+  const closeBranch = (root: SessionId): void => {
+    const closing = new Set<SessionId>()
+    const visit = (parentSessionId: SessionId): void => {
+      if (closing.has(parentSessionId) || !expanded.has(parentSessionId)) return
+      closing.add(parentSessionId)
+      const branch = catalogs[parentSessionId]
+      for (const entry of branch?.entries ?? []) {
+        visit(entry.id)
+      }
+    }
+    visit(root)
+    setExpanded(current => new Set([...current].filter(id => !closing.has(id))))
+  }
+
+  const toggleBranch = (childSessionId: SessionId): void => {
+    if (expanded.has(childSessionId)) {
+      closeBranch(childSessionId)
+      return
+    }
+    setExpanded(current => new Set(current).add(childSessionId))
+    refreshProjection(childSessionId)
   }
 
   useEffect(() => {
@@ -713,6 +625,7 @@ function CatalogDropdown({
     if (!open) return
     pinnedRef.current = false
     setOpen(false)
+    setExpanded(new Set())
   }, [visible, open])
 
   if (!visible) return null
@@ -801,23 +714,33 @@ function CatalogDropdown({
           ? <SubagentSwitcherIcon />
           : <IconChevronDownOutlineRegular className={open ? css.triggerOpen : undefined} />}
       </button>
-      {open && (
-        <CatalogMenu
-          rootSessionId={rootSessionId}
-          currentSessionId={currentSessionId}
-          menuPosition={menuPosition}
-          menuRef={menuRef}
-          useSessions={useSessions}
-          useSessionStatus={useSessionStatus}
-          openChild={openChild}
-          openChildAside={openChildAside}
-          refreshProjection={refreshProjection}
+      {open && createPortal((
+        <div
+          ref={menuRef}
+          className={css.menu}
+          style={menuPosition}
           onMouseEnter={cancelHoverClose}
           onMouseLeave={scheduleHoverClose}
-          closeCatalog={() => { changeOpen(false) }}
-          t={t}
-        />
-      )}
+        >
+          <div className={css.menuBody} role="tree" aria-label={t('tree.aria')}>
+            <CatalogRows
+              parentSessionId={rootSessionId}
+              currentSessionId={currentSessionId}
+              catalog={presentedCatalog}
+              catalogs={catalogs}
+              summaries={summaries}
+              expanded={expanded}
+              level={1}
+              openChild={openChild}
+              openChildAside={openChildAside}
+              refreshProjection={refreshProjection}
+              toggleBranch={toggleBranch}
+              closeCatalog={() => { changeOpen(false) }}
+              t={t}
+            />
+          </div>
+        </div>
+      ), document.body)}
     </div>
   )
 }
@@ -828,7 +751,7 @@ export type SubagentCatalogActionProps =
 
 /**
  * Session-header catalog action for root sessions: the descendant count and
- * its dropdown at the start of the header actions band. Child sessions render nothing
+ * its dropdown after the preset label in the header actions band. Child sessions render nothing
  * here — their breadcrumb switcher in the lineage slot owns the same
  * navigation.
  * @param props - Session standard props plus the catalog actions and translator.
@@ -869,7 +792,8 @@ export function SubagentHeaderLineage({
     for (const [parentId, snapshot] of Object.entries(state.projectionsBySession)) {
       if (snapshot.values.subagentCatalog?.some(entry => entry.id === lineageSessionId)) return parentId as SessionId
     }
-    return undefined
+    const summary = state.byId[lineageSessionId]
+    return summary?.origin === 'subagent' ? summary.parentId : undefined
   })
   const shared = { useSessions, useSessionStatus, openChild, openChildAside, refreshProjection, t }
   // Root sessions carry no breadcrumb; their descendant count lives in the
@@ -878,7 +802,7 @@ export function SubagentHeaderLineage({
   return (
     <>
       <CatalogDropdown
-        key={lineageSessionId}
+        key={`switcher:${lineageSessionId}`}
         rootSessionId={parentId}
         currentSessionId={lineageSessionId}
         variant="switcher"
@@ -888,7 +812,7 @@ export function SubagentHeaderLineage({
       />
       {openTitle === undefined && (
         <CatalogDropdown
-          key={lineageSessionId}
+          key={`children:${lineageSessionId}`}
           rootSessionId={lineageSessionId}
           variant="count"
           {...shared}

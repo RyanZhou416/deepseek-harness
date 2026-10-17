@@ -1,4 +1,4 @@
-/** Map system snapshots and conversation turns to Messages using the configured route capability. */
+/** Map system snapshots, tool changes, and conversation turns to Messages using the configured route capability. */
 
 import { LlmError, requestImageHandleText } from '@deepseek-ai/dsh-llm'
 import type { ContentBlock, GenerateOptions, ImageAttachmentAccessResolver, Message, RequestMessage } from '@deepseek-ai/dsh-llm'
@@ -23,70 +23,11 @@ function toolInput(raw: string): Record<string, unknown> {
     : {}
 }
 
-/** Provider-required empty error result for a durable historical call with no recorded result. */
-function missingToolResult(callId: string): WireBlock {
-  return { type: 'tool_result', tool_use_id: callId, content: [], is_error: true }
-}
-
-/**
- * Make historical tool groups acceptable to Messages without changing durable history.
- * Real results retain their order; any missing ids receive empty error results before
- * ordinary user content or the next assistant message.
- */
-function balanceToolResults(messages: WireMessage[]): WireMessage[] {
-  const balanced: WireMessage[] = []
-  let pendingOrder: string[] = []
-  let pending = new Set<string>()
-
-  const closePending = (): void => {
-    if (pendingOrder.length === 0) return
-    balanced.push({ role: 'user', content: pendingOrder.map(missingToolResult) })
-    pendingOrder = []
-    pending = new Set()
-  }
-
-  for (const message of messages) {
-    if (message.role === 'assistant') {
-      closePending()
-      const calls = message.content.filter(block => block.type === 'tool_use')
-      pendingOrder = calls.map(block => block.id)
-      pending = new Set(pendingOrder)
-      if (pending.size !== calls.length) {
-        throw new LlmError('DeepSeek Messages duplicate tool call id', 'INVALID_REQUEST')
-      }
-      balanced.push(message)
-      continue
-    }
-    if (message.role === 'system') {
-      closePending()
-      balanced.push(message)
-      continue
-    }
-
-    const results = message.content.filter(block => block.type === 'tool_result')
-    for (const result of results) {
-      if (!pending.delete(result.tool_use_id)) {
-        throw new LlmError('DeepSeek Messages tool result has no matching call', 'INVALID_REQUEST')
-      }
-    }
-    message.content = [
-      ...results,
-      ...pendingOrder.filter(callId => pending.has(callId)).map(missingToolResult),
-      ...message.content.filter(block => block.type !== 'tool_result'),
-    ]
-    pendingOrder = []
-    pending = new Set()
-    balanced.push(message)
-  }
-  closePending()
-  return balanced
-}
-
 function assistant(message: Message, model: string, onReplayDegrade?: (reason: string) => void): WireBlock[] {
   const replay = readReplay(message, model, onReplayDegrade)
-  return message.content.map((block, index): WireBlock => {
+  return message.content.flatMap((block, index): WireBlock | WireBlock[] => {
     switch (block.type) {
-      case 'text': return { type: 'text', text: block.text }
+      case 'text': return block.text.length === 0 ? [] : { type: 'text', text: block.text }
       case 'reasoning': return {
         type: 'thinking', thinking: block.text,
         ...replay?.[index]?.signature === undefined ? {} : { signature: replay[index].signature },
@@ -99,7 +40,11 @@ function assistant(message: Message, model: string, onReplayDegrade?: (reason: s
 
 /** Serialize one complete request using already prepared image bytes.
  * User and tool-result content omits reasoning and tool-call blocks.
- * Empty user messages are skipped; empty tool results retain their call ids.
+ * Empty assistant text blocks and empty user/assistant messages are skipped;
+ * empty tool results retain their call ids.
+ * Developer messages, already projected for this route by `LlmRuntime`, become
+ * system-role updates after the preceding user turn, with tool changes as
+ * `tool_addition` and `tool_removal` references to the declared tool.
  * @param options - provider-neutral request.
  * @param connection - validated defaults and thinking policy.
  * @param history - image-projected history with complete system snapshots; durable messages remain unchanged.
@@ -139,21 +84,22 @@ export function serialize(
   // update after that user/tool-result turn and before the next assistant.
   const flushSystemUpdates = () => {
     if (systemUpdates.length === 0) return
-    const previous = messages.at(-1)
-    if (previous?.role === 'assistant') {
-      const calls = previous.content.filter(block => block.type === 'tool_use')
-      if (calls.length > 0) {
-        messages.push({ role: 'user', content: calls.map(block => missingToolResult(block.id)) })
-      }
-    }
     if (messages.at(-1)?.role !== 'user') return unsupported('system update without a preceding user or tool-result turn')
     messages.push(...systemUpdates.splice(0))
   }
-  // Deferred definitions are persisted for V4; provider loading is intentionally deferred.
-  if (options.tools?.some(tool => tool.deferLoading === true)) return unsupported('deferred tool loading')
   for (const message of history) {
-    // Developer history is persisted for V4; provider serialization is intentionally deferred.
-    if (message.role === 'developer') return unsupported('developer message')
+    if (message.role === 'developer') {
+      const content = message.content.flatMap((block): WireBlock[] => {
+        switch (block.type) {
+          case 'text': return block.text.length === 0 ? [] : [{ type: 'text', text: block.text }]
+          case 'tool-addition': return [{ type: 'tool_addition', tool: { type: 'tool_reference', name: block.toolName } }]
+          case 'tool-removal': return [{ type: 'tool_removal', tool: { type: 'tool_reference', name: block.toolName } }]
+          default: return unsupported(`developer content ${block.type}`)
+        }
+      })
+      if (content.length > 0) systemUpdates.push({ role: 'system', content })
+      continue
+    }
     if (message.content.some(block => block.type === 'tool-addition' || block.type === 'tool-removal')) {
       return unsupported('tool-change blocks outside developer messages')
     }
@@ -169,27 +115,42 @@ export function serialize(
       }
       continue
     }
-    if (message.role === 'assistant') flushSystemUpdates()
     const content: WireBlock[] = message.role === 'assistant'
       ? assistant(message, options.model, onReplayDegrade)
       : message.role === 'tool'
         ? [{ type: 'tool_result', tool_use_id: message.toolCallId, content: input(message.content), ...message.isError === undefined ? {} : { is_error: message.isError } }]
         : message.content.flatMap((block): WireBlock[] => input([block]))
-    if (message.role === 'user' && content.length === 0) continue
+    if ((message.role === 'user' || message.role === 'assistant') && content.length === 0) continue
+    if (message.role === 'assistant') flushSystemUpdates()
     const wireRole = message.role === 'tool' ? 'user' : message.role
     const previous = messages.at(-1)
     if (previous?.role === wireRole) previous.content.push(...content)
     else messages.push({ role: wireRole, content })
   }
   flushSystemUpdates()
-  const balancedMessages = balanceToolResults(messages)
-  const effort = options.purpose === 'session-title' ? 'off' : options.reasoningEffort ?? (connection.defaults.reasoningEffort ?? (connection.defaults.thinking === 'disabled' ? 'off' : 'high'))
+  let pending = new Set<string>()
+  for (const message of messages) {
+    if (message.role === 'assistant') {
+      const calls = message.content.filter(block => block.type === 'tool_use')
+      pending = new Set(calls.map(block => block.id))
+      if (pending.size !== calls.length) throw new LlmError('DeepSeek Messages duplicate tool call id', 'INVALID_REQUEST')
+    } else if (message.role === 'user') {
+      const results = message.content.filter(block => block.type === 'tool_result')
+      for (const result of results) {
+        if (!pending.delete(result.tool_use_id)) throw new LlmError('DeepSeek Messages tool result has no matching call', 'INVALID_REQUEST')
+      }
+      if (pending.size > 0) throw new LlmError('DeepSeek Messages tool calls need immediate results', 'INVALID_REQUEST')
+      message.content = [...results, ...message.content.filter(block => block.type !== 'tool_result')]
+    }
+  }
+  if (pending.size > 0) throw new LlmError('DeepSeek Messages history ends with unresolved tools', 'INVALID_REQUEST')
+  const effort = options.reasoningEffort ?? (connection.defaults.reasoningEffort ?? (connection.defaults.thinking === 'disabled' ? 'off' : 'high'))
   if (!['off', 'low', 'high', 'max'].includes(effort) || (connection.defaults.thinking === 'disabled' && effort !== 'off')) {
     throw new LlmError(`DeepSeek Messages does not support reasoning effort ${effort}`, 'UNSUPPORTED_REASONING_EFFORT')
   }
   const system = [options.system, historySystem].filter(Boolean).join('\n\n')
   return {
-    model: options.model, stream: true, messages: balancedMessages,
+    model: options.model, stream: true, messages,
     max_tokens: options.maxTokens ?? model?.maxTokens ?? connection.maxTokens,
     thinking: { type: effort === 'off' ? 'disabled' : 'enabled' },
     ...effort === 'off' ? {} : { output_config: { effort: effort as 'low' | 'high' | 'max' } },
@@ -197,7 +158,12 @@ export function serialize(
     ...options.temperature === undefined ? {} : { temperature: options.temperature },
     ...options.stop === undefined ? {} : { stop_sequences: options.stop },
     ...options.tools === undefined ? {} : {
-      tools: options.tools.map(tool => ({ name: tool.name, description: tool.description, input_schema: tool.parameters })),
+      tools: options.tools.map(tool => ({
+        name: tool.name,
+        description: tool.description,
+        input_schema: tool.parameters,
+        ...tool.deferLoading === true ? { defer_loading: true as const } : {},
+      })),
     },
   }
 }

@@ -1,6 +1,31 @@
-# Bilingual-pair consistency record (docs/i18n/README.md): the git blob hash of each
-# side as of the last confirmed-consistent state. Both languages carry equal authority;
-# after editing either side, bring the other along and re-record with:
+# Bilingual-pair consistency record for 2026-10-15-session-reply-visibility.md (docs/i18n/README.md): per heading
+# section, a hash of its English and Chinese blocks outside code blocks and generated regions.
+# After editing either side, bring the other along and re-record with:
 #   pnpm run verify-translation-pairing --write .agents/notes/implemented/bug-fix/2026-10-15-session-reply-visibility.md
-2026-10-15-session-reply-visibility.md: f8686d147c8facbdbfdd436019a01ed3bf6f06fb
-2026-10-15-session-reply-visibility.zh.md: 309810c507b85cbfd4e0ba28c298b6246818a66d
+/agent-note-preserve-replies-across-settlement-rendering-failure-and-process-folding:
+  en: 3e375092f40e5d7d
+  zh: 9efa31f893197076
+/agent-note-preserve-replies-across-settlement-rendering-failure-and-process-folding/problem:
+  en: 4929bcdde7aceecf
+  zh: 4df011e7250f5ffe
+/agent-note-preserve-replies-across-settlement-rendering-failure-and-process-folding/decision:
+  en: a15c7c13f167e5ac
+  zh: 63bcc2ef60c2f344
+/agent-note-preserve-replies-across-settlement-rendering-failure-and-process-folding/decision/commitment-and-retirement-have-separate-owners:
+  en: c20f9d47c398d52b
+  zh: 48ae2bf2a29b3a4e
+/agent-note-preserve-replies-across-settlement-rendering-failure-and-process-folding/decision/the-registrant-opts-into-occurrence-isolation:
+  en: 2dcc354979c545e6
+  zh: ba931d6acc1d76d8
+/agent-note-preserve-replies-across-settlement-rendering-failure-and-process-folding/decision/a-closed-turn-protects-its-last-available-reply:
+  en: b440eab190811e42
+  zh: 82aa00626fd1082c
+/agent-note-preserve-replies-across-settlement-rendering-failure-and-process-folding/alternatives-considered:
+  en: 9db631bcda09719e
+  zh: 82ff8ce580e41add
+/agent-note-preserve-replies-across-settlement-rendering-failure-and-process-folding/consequences:
+  en: b9766d99e73481c1
+  zh: c04a1555062db64e
+/agent-note-preserve-replies-across-settlement-rendering-failure-and-process-folding/verification:
+  en: ecafb341269f8515
+  zh: 3a22cb712fc24986

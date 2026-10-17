@@ -17,70 +17,6 @@ export interface TurnProcessSpec {
   readonly subagentCount: number
 }
 
-/** Identity of one visible Chat row considered by whole-Turn process membership. */
-export interface TurnProcessRow {
-  readonly anchorSeq: number
-  /** Owning Assistant Step when the row is an Assistant occurrence, otherwise null. */
-  readonly step: number | null
-  /** Occurrence part inside a grouped Assistant node; absent for a standalone row. */
-  readonly groupPart: string | undefined
-}
-
-/**
- * Test whether one row renders the reply a Turn's process disclosure protects.
- * Identity is Turn/Step plus occurrence part, never an anchor comparison: a
- * durable message committed late can sit after its own transient anchor.
- * @param spec - published Turn process specification.
- * @param step - owning Assistant Step, or null for another Node kind.
- * @param groupPart - occurrence part of the row, absent for a standalone row.
- * @returns whether the row stays outside the whole-Turn fold.
- */
-export function isTurnProcessAnswer(
-  spec: TurnProcessSpec,
-  step: number | null,
-  groupPart: string | undefined,
-): boolean {
-  return spec.answerStep !== null
-    && step === spec.answerStep
-    && (groupPart === undefined || groupPart === 'response')
-}
-
-/**
- * Test whether one visible row belongs to its Turn's foldable process content.
- * An open Turn keeps its existing membership at and after the process start; a
- * closed Turn folds every process row on either side of the protected reply, so
- * a Tool call or a later Tool-only Step cannot withdraw the reply from view.
- * @param spec - published Turn process specification.
- * @param live - whether the owning Turn is still open.
- * @param row - visible row identity.
- * @returns whether the whole-Turn disclosure hides this row while folded.
- */
-export function isTurnProcessMember(
-  spec: TurnProcessSpec,
-  live: boolean,
-  row: TurnProcessRow,
-): boolean {
-  if (row.anchorSeq < spec.processStartSeq) return false
-  if (live || spec.answerAnchorSeq === null) return true
-  return !isTurnProcessAnswer(spec, row.step, row.groupPart)
-}
-
-const TURN_PROCESS_INDEPENDENT_KIND_LIST = [
-  'system-prompt',
-  'user',
-  'steering',
-  'turn-trigger',
-  'turn-process',
-  'turn-error',
-  'turn-max-tokens',
-  'turn-tail',
-] as const satisfies readonly ChatNode['kind'][]
-
-/** Chat Node kinds that remain independent of a Turn's process disclosure. */
-export const TURN_PROCESS_INDEPENDENT_KINDS: ReadonlySet<string> = new Set(
-  TURN_PROCESS_INDEPENDENT_KIND_LIST,
-)
-
 /**
  * Compare immutable Turn-process specifications by their published fields.
  * @param left - previous specification.
@@ -118,5 +54,5 @@ export function turnProcessAlwaysOpen(node: ChatNode | undefined): boolean {
   const location = node?.location
   if (location?.kind !== 'turn' && location?.kind !== 'step') return false
   const reason = location.turn.end?.data.reason.kind
-  return location.turn.status === 'open' || reason === 'aborted' || reason === 'error'
+  return location.turn.status === 'open' || reason === 'aborted' || reason === 'interrupted' || reason === 'error'
 }

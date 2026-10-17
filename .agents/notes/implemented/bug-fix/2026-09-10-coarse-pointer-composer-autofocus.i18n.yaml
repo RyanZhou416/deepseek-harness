@@ -1,6 +1,19 @@
-# Bilingual-pair consistency record (docs/i18n/README.md): the git blob hash of each
-# side as of the last confirmed-consistent state. Both languages carry equal authority;
-# after editing either side, bring the other along and re-record with:
+# Bilingual-pair consistency record for 2026-09-10-coarse-pointer-composer-autofocus.md (docs/i18n/README.md): per heading
+# section, a hash of its English and Chinese blocks outside code blocks and generated regions.
+# After editing either side, bring the other along and re-record with:
 #   pnpm run verify-translation-pairing --write .agents/notes/implemented/bug-fix/2026-09-10-coarse-pointer-composer-autofocus.md
-2026-09-10-coarse-pointer-composer-autofocus.md: ff05ce26ffc95dc9509e183a2b9369d4f2d1c1fb
-2026-09-10-coarse-pointer-composer-autofocus.zh.md: 889f0a9757d560fcaff80ca6a9a4cb7fcd9bfdbb
+/agent-note-coarse-pointer-composer-autofocus:
+  en: f645fa002896b9ef
+  zh: 860768df69266199
+/agent-note-coarse-pointer-composer-autofocus/problem:
+  en: 80d60cd4815a4595
+  zh: fd8b4934e779c25a
+/agent-note-coarse-pointer-composer-autofocus/decision:
+  en: 3b7662b8f9a5dae3
+  zh: b1329d84f1013bb3
+/agent-note-coarse-pointer-composer-autofocus/alternatives-considered:
+  en: e5a0c3435ebe1920
+  zh: ddb3363c35f52dcf
+/agent-note-coarse-pointer-composer-autofocus/consequences:
+  en: 9565500f4b89cf8c
+  zh: 9164b56eb12a028f

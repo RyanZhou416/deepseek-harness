@@ -4,7 +4,7 @@ import type {
 } from '@deepseek-ai/dsh-client-ui-conversation/client'
 import { isAppendSurfaceEvent, isReplacementSurfaceEvent } from '@deepseek-ai/dsh-session/surface'
 import type { InboxState } from './inbox.ts'
-import { chatNode } from './common.ts'
+import { chatNode, contextLocation } from './common.ts'
 import { contextForm, contextProducer } from './event-projection.ts'
 
 interface ReferencedUserMessageNode extends UserMessageNode {
@@ -12,8 +12,6 @@ interface ReferencedUserMessageNode extends UserMessageNode {
   readonly referenceLabels?: readonly string[]
   /** Skill names the same step's `skill-invocation` injections loaded. */
   readonly skillNames?: readonly string[]
-  /** Original conversation rows superseded by this committed revision. */
-  readonly editedRange?: { readonly start: number; readonly before: number }
 }
 
 interface ReferencedSteeringMessageNode extends SteeringMessageNode {
@@ -44,24 +42,37 @@ function isCompactionCheckpoint(event: Parameters<ConversationNodeDefinition['ma
   return source.kind === 'compact-checkpoint'
 }
 
+/** Context presentation shared by user-role injections and developer messages. */
+function contextMessage(
+  event: Pick<ContextMessageNode, 'seq' | 'time'>,
+  message: Pick<ContextMessageNode, 'content' | 'source'>,
+): ContextMessageNode {
+  return {
+    kind: 'context',
+    seq: event.seq,
+    time: event.time,
+    content: message.content,
+    source: message.source,
+    producer: contextProducer(message.source),
+    form: contextForm(message.source),
+  }
+}
+
 /** User, steering, and injected-context message classification Definition. */
 export const messageDefinition: ConversationNodeDefinition<MessageNode> = {
   kind: 'input-message',
   target: 'chat',
   match: (event) => {
     if (event.type === 'user/message') {
-      return (isAppendSurfaceEvent(event) || isHumanRevision(event)) && !isCompactionCheckpoint(event)
-        ? { id: isHumanRevision(event) && 'replacesUserMessage' in event.data.source
-          ? `revision:${String(event.data.source.replacesUserMessage)}` : String(event.data.id), role: 'start' }
+      return isAppendSurfaceEvent(event) && !isCompactionCheckpoint(event)
+        ? { id: String(event.data.id), role: 'start' }
         : null
     }
-    // Developer history is persisted for V4; presentation is intentionally deferred.
-    if (event.type === 'developer/message') throw new Error('Chat developer messages are not supported yet')
     return null
   },
   start: (_context, match, reader) => {
-    if (match.event.type !== 'user/message') throw new Error('input-message start requires user/message')
     const event = match.event
+    if (event.type !== 'user/message') throw new Error('input-message start requires user/message')
     if (event.data.source.kind !== 'user') {
       const nextTurn = reader.previous<InboxState>('inbox-next-turn')?.state
       const nextStep = reader.previous<InboxState>('inbox-next-step')?.state
@@ -75,14 +86,8 @@ export const messageDefinition: ConversationNodeDefinition<MessageNode> = {
         && nextStep.currentClaimed.has(String(event.data.id))
 
       return {
-        kind: 'context',
+        ...contextMessage(event, event.data),
         waking: nextTurn?.currentClaimed.has(String(event.data.id)) === true || idleSteer,
-        seq: event.seq,
-        time: event.time,
-        content: event.data.content,
-        source: event.data.source,
-        producer: contextProducer(event.data.source),
-        form: contextForm(event.data.source),
       }
     }
     const claimed = reader.previous<InboxState>('inbox-next-step')
@@ -98,46 +103,52 @@ export const messageDefinition: ConversationNodeDefinition<MessageNode> = {
       }
       : {
         kind: 'user',
-        ...(isHumanRevision(event) && event.surfaceOp !== 'append' ? {
-          editedRange: {
-            start: event.surfaceOp.startSeq,
-            before: match.location.kind === 'step' || match.location.kind === 'turn' ? match.location.turn.start?.seq ?? event.seq : event.seq,
-          },
-        } : {}),
         seq: event.seq,
         time: event.time,
         content: event.data.content,
         source: event.data.source,
       }
   },
-  update: (context, match) => {
-    if (context.state.kind !== 'user' || match.event.type !== 'user/message' || !isHumanRevision(match.event)) return context.state
-    return { ...context.state, seq: match.event.seq, time: match.event.time,
-      content: match.event.data.content, source: match.event.data.source }
-  },
+  update: context => context.state,
   buildViewNode: (context) => {
     if (context.state === undefined) return null
     const waking = context.state.kind === 'context'
       && context.start?.event.type === 'user/message'
       && context.state.waking === true
-    const revision = context.state.kind === 'user' && context.state.editedRange !== undefined
-    const anchorSeq = revision ? context.start?.event.seq ?? context.state.seq : context.state.seq
-    return chatNode(context, waking ? 'turn-trigger' : context.state.kind, anchorSeq, context.state,
-      revision
-        ? { location: context.matches.at(-1)?.location ?? context.start?.location ?? { kind: 'unresolved' } } : {})
+    // Human input claimed for Step 1 opens an exchange; Notice-woken Turns and
+    // later steering stay in the current exchange, so they never fold earlier Turns.
+    const location = contextLocation(context)
+    const human = context.state.kind === 'user' || context.state.kind === 'steering'
+    const opensExchange = human && location.kind === 'step' && location.step.step === 1
+    return chatNode(
+      context,
+      waking ? 'turn-trigger' : context.state.kind,
+      context.state.seq,
+      context.state,
+      { location, groupTree: opensExchange ? 'exchange' : (human || waking) ? 'input' : undefined },
+    )
+  },
+}
+
+/** Developer history uses the input-message lifecycle and context presentation. */
+export const developerMessageDefinition: ConversationNodeDefinition<MessageNode> = {
+  ...messageDefinition,
+  kind: 'developer-message',
+  match: event => event.type === 'developer/message'
+    ? { id: String(event.data.message.id), role: 'start' }
+    : null,
+  start: (_context, match) => {
+    const event = match.event
+    if (event.type !== 'developer/message') throw new Error('developer-message start requires developer/message')
+    return contextMessage(event, event.data.message)
   },
 }
 
 /**
- * Register the user, steering, and injected-context message contribution.
+ * Register user, steering, injected-context, and developer message contributions.
  * @param ctx - owning UI Conversation context.
  */
 export function registerMessageConversationNode(ctx: Context): void {
   ctx.uiConversation.events.register(messageDefinition)
-}
-
-/** Human revisions are visible prompts; other surface replacements remain model-only. */
-function isHumanRevision(event: Parameters<ConversationNodeDefinition['match']>[0]): boolean {
-  return event.type === 'user/message' && isReplacementSurfaceEvent(event)
-    && event.data.source.kind === 'user' && 'replacesUserMessage' in event.data.source
+  ctx.uiConversation.events.register(developerMessageDefinition)
 }
