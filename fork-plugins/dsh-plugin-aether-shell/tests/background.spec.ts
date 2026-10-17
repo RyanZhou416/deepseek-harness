@@ -315,7 +315,7 @@ describe('aether_job_start admission', () => {
     const mounted = await setup()
     const result = await mounted.call({ code: 'bg:logthenhang:started' })
     expect(result.isError).toBe(false)
-    expect(textOf(result)).toBe('started background job aether-1')
+    expect(textOf(result)).toMatch(/^started background job aether-[\da-f]{16}$/u)
     const id = jobIdOf(result)
     const view = mounted.ctx.jobs.get(id, mounted.sessionId)
     expect(view).toMatchObject({ kind: 'aether', status: 'running', owner: mounted.sessionId })
