@@ -3099,7 +3099,7 @@ describe('Remote stream client carrier lifecycle', () => {
       const pending = client.open('feed/follow', {}, new AbortController().signal)
         [Symbol.asyncIterator]().next()
       const rejected = expect(pending).rejects.toMatchObject({
-        name: 'RemoteStreamCarrierError', message: 'api gateway: Remote stream WebSocket closed',
+        name: 'RemoteStreamCarrierError', message: expect.stringContaining('api gateway: Remote stream WebSocket closed'),
       })
       try {
         socket.drop()

@@ -273,17 +273,20 @@ export class RemoteStreamMuxClient {
         this.lost(socket, error)
         if (socket.readyState < 2) socket.close()
       }
-      const closed = (): void => {
+      const closed = (event: { readonly code?: number, readonly reason?: string, readonly wasClean?: boolean }): void => {
         socket.removeEventListener('open', opened)
         socket.removeEventListener('error', failed)
         socket.removeEventListener('message', received)
+        const options = { cause: { code: event.code, reason: event.reason, wasClean: event.wasClean } }
+        const status = `code ${String(event.code)}, clean ${String(event.wasClean)}`
         if (!settled) {
           rejectCandidate(new RemoteStreamCarrierError(
-            'api gateway: Remote stream WebSocket closed before opening',
+            `api gateway: Remote stream WebSocket closed before opening (${status})`,
+            options,
           ))
           return
         }
-        this.lost(socket)
+        this.lost(socket, new RemoteStreamCarrierError(`api gateway: Remote stream WebSocket closed (${status})`, options))
       }
       const received = (event: { readonly data: unknown }): void => { this.receive(socket, event.data) }
       this.cancelCandidate = rejectCandidate

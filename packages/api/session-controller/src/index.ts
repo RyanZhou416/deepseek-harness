@@ -69,6 +69,8 @@ import type {
   SessionUpdateQueueValue,
 } from './types.ts'
 
+const DEFAULT_IDLE_SESSION_RETENTION_MS = 60_000
+
 export type * from './types.ts'
 export { ApiSessionNotFound } from './agent.ts'
 export { SessionFileReferences } from './file-references.ts'
@@ -96,6 +98,8 @@ export interface Config {
   /** Override platform desktop-opener detection. */
   readonly nativeOpen?: boolean
   /** Positive integral milliseconds of list work before yielding between complete rows. */
+  /** Milliseconds an owned, durable idle Session remains live after activity; zero disables eviction. */
+  readonly idleSessionRetentionMs?: number
   readonly listWorkSliceMs?: number
   /** Projection keys the catalog omits before rendering its hint values. */
   readonly listProjectionExcludeKeys?: string[]
@@ -137,7 +141,8 @@ export class SessionController extends TypertRemoteService {
 
   static Config: z<Config, ResolvedConfig> = z.object({
     nativeOpen: z.boolean(),
-    listWorkSliceMs: z.natural().min(1).default(16),
+    idleSessionRetentionMs: z.natural().default(DEFAULT_IDLE_SESSION_RETENTION_MS),
+  listWorkSliceMs: z.natural().min(1).default(16),
   listProjectionExcludeKeys: z.array(z.string().min(1).pattern(/^(?!sessionListMetadata$)/u).required()).default([]),
   })
 
@@ -163,7 +168,10 @@ export class SessionController extends TypertRemoteService {
     ctx.typert.resources.register('session', { field: 'sessionId' })
     const resolved = SessionController.Config(config)
     installModelSelectionProjection(ctx)
-    this.agents = new ApiSessionAgentController(ctx)
+    this.agents = new ApiSessionAgentController(
+      ctx,
+      config.idleSessionRetentionMs ?? DEFAULT_IDLE_SESSION_RETENTION_MS,
+    )
     this.commands = new SessionCommandController(ctx, this.agents, process.cwd())
     ctx.effect(() => ctx.fileUploads.registerAgentResolver(async (sessionId) => {
       const result = await this.agents.resolveAgent(sessionId)
@@ -176,7 +184,11 @@ export class SessionController extends TypertRemoteService {
     ctx.effect(() => async () => {
       await Promise.allSettled([...this.promotions])
     }, 'session-controller.promotions')
-    this.history = new SessionHistoryController(ctx, (observation) => { this.promote(observation) })
+    this.history = new SessionHistoryController(
+      ctx,
+      (observation) => { this.promote(observation) },
+      sessionId => this.agents.retainForFollower(sessionId),
+    )
     this.listState = new ApiSessionList(ctx, resolved.listWorkSliceMs, new Set(config.listProjectionExcludeKeys))
     this.fileApplications = internals.fileApplications ?? nativeFileApplications
     this.openFileApplication = internals.openFileApplication ?? openNativeFileApplication
@@ -196,6 +208,7 @@ export class SessionController extends TypertRemoteService {
       ctx.emit('api-session/added', this.listState.summaryFor(session))
     })
     ctx.on('session/disposed', (session) => {
+      if (this.agents.isResidencyEviction(session)) return
       ctx.emit('api-session/removed', session.id)
     })
     const publishAgentAvailability = ({ agent }: { agent: Agent }): undefined => {
