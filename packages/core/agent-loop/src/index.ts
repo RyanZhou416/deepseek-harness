@@ -890,12 +890,16 @@ export class AgentLoop extends Service implements AgentFactory {
           const persisted = coldRead.events
           const closers = interruptedTurnClosers(persisted)
           if (closers.length > 0) await handle.append(closers)
+          const seed = [...persisted, ...closers]
           preparation = SessionPreparation.create(this.runtime.ctx.sessions.prepare(id, {
-            seed: [...persisted, ...closers],
+            seed,
             meta: structuredClone(handle.header),
             inheritedEventCount: handle.inheritedEventCount,
             eventState: coldRead.eventState,
           }))
+          // Without checkpoint cells, the Agent's first projection read folds
+          // every unit over the whole log synchronously on the event loop.
+          this.runtime.ctx.get('sessionProjectionCache')?.hydratePrepared(preparation.session, seed)
           stored = { handle, storedCount: persisted.length + closers.length }
           await this.appendUnstoredSuffix(stored, preparation.session)
         } finally {
