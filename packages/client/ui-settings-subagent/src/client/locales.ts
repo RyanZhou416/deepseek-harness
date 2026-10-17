@@ -20,6 +20,13 @@ export type SubagentSettingsLocaleKey =
   | 'subagentModelSelectionPartial' | 'subagentModelSelectionUnavailable'
   | 'subagentModelSelectionUnavailableGroup' | 'subagentModelSelectionEmpty'
   | 'subagentModelSelectionRequired' | 'subagentModelSelectionConflict' | 'subagentModelSelectionOff'
+  | 'subagentOverrideGeneralModel' | 'subagentOverrideGeneralEffort'
+  | 'subagentOverrideGeneralTitle' | 'subagentOverrideGeneralDescription'
+  | 'subagentOverrideOff' | 'subagentOverrideSaveFailed' | 'subagentOverrideTitle'
+  | 'subagentOverrideToggle' | 'subagentOverrideScope' | 'subagentOverrideProvider'
+  | 'subagentOverrideModel' | 'subagentOverrideEffort' | 'subagentOverrideChoose'
+  | 'subagentOverrideDefaultEffort' | 'subagentOverrideRequired'
+  | 'subagentOverrideUnavailable' | 'subagentOverrideCatalogFailed'
 
 /** English copy. */
 export const en: Record<SubagentSettingsLocaleKey, string> = {
@@ -58,7 +65,23 @@ export const en: Record<SubagentSettingsLocaleKey, string> = {
   subagentModelSelectionRequired: 'Select at least one model before saving.',
   subagentModelSelectionConflict: 'Settings changed elsewhere. Discard your draft and try again.',
   subagentModelSelectionOff: 'Subagents use configured defaults or inherit the parent agent\'s model. Saved model choices are retained.',
-}
+  subagentOverrideGeneralModel: 'Subagent override model',
+  subagentOverrideGeneralEffort: 'Subagent reasoning effort',
+  subagentOverrideGeneralTitle: 'Subagent model override',
+  subagentOverrideGeneralDescription: 'Applies to new ordinary Subagents',
+  subagentOverrideOff: 'No override',
+  subagentOverrideSaveFailed: 'Could not save. Please try again.',
+  subagentOverrideTitle: 'Forced model',
+  subagentOverrideToggle: 'Force a model for new Subagents',
+  subagentOverrideScope: 'Overrides agent choices for new Subagents, including those created from existing sessions. AgentTeams members keep their own settings. Existing Subagents keep their saved models. Backends that cannot apply this override reject new requests.',
+  subagentOverrideProvider: 'Provider',
+  subagentOverrideModel: 'Model',
+  subagentOverrideEffort: 'Reasoning effort',
+  subagentOverrideChoose: 'Select…',
+  subagentOverrideDefaultEffort: 'Model default',
+  subagentOverrideRequired: 'Select a provider and model before saving.',
+  subagentOverrideUnavailable: 'This saved model is not advertised by the current directory. Its selection is retained; creation fails if the provider cannot resolve it.',
+  subagentOverrideCatalogFailed: 'Some models could not be loaded. Your selection is retained.',}
 
 /** Simplified Chinese copy. */
 export const zh: Record<SubagentSettingsLocaleKey, string> = {
@@ -97,7 +120,23 @@ export const zh: Record<SubagentSettingsLocaleKey, string> = {
   subagentModelSelectionRequired: '保存前请至少选择一个模型。',
   subagentModelSelectionConflict: '设置已在其他位置更新。请放弃修改后重试。',
   subagentModelSelectionOff: '关闭后，子智能体使用配置的默认模型或继承父 Agent 的模型；已选模型会保留。',
-}
+  subagentOverrideGeneralModel: 'Subagent 覆盖模型',
+  subagentOverrideGeneralEffort: 'Subagent 推理强度',
+  subagentOverrideGeneralTitle: 'Subagent 模型覆盖',
+  subagentOverrideGeneralDescription: '仅影响新建的普通 Subagent',
+  subagentOverrideOff: '不覆盖',
+  subagentOverrideSaveFailed: '未能保存，请重试',
+  subagentOverrideTitle: '强制模型覆盖',
+  subagentOverrideToggle: '为新建 Subagent 强制指定模型',
+  subagentOverrideScope: '优先于 Agent 的模型选择，也适用于已有会话新建的 Subagent。AgentTeams 成员使用自己的设置；已有 Subagent 保留已保存的模型。不支持应用覆盖的后端会拒绝新的创建请求',
+  subagentOverrideProvider: '提供方',
+  subagentOverrideModel: '模型',
+  subagentOverrideEffort: '推理强度',
+  subagentOverrideChoose: '请选择…',
+  subagentOverrideDefaultEffort: '模型默认值',
+  subagentOverrideRequired: '保存前请选择提供方和模型',
+  subagentOverrideUnavailable: '当前目录未公布这个已保存的模型，选择仍会保留；如果提供方无法解析该模型，创建请求会失败',
+  subagentOverrideCatalogFailed: '部分模型无法加载，已保留你的选择',}
 
 /**
  * The form frame's copy, read from this page's dictionary.

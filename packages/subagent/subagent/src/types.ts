@@ -10,6 +10,7 @@
  */
 
 import type { Agent, AgentOptions } from '@deepseek-ai/dsh-agent'
+import type { SubagentModelOverride } from './model-override-types.ts'
 import type { Branded } from '@deepseek-ai/dsh-brand'
 import type { ContentBlock, MessageId } from '@deepseek-ai/dsh-llm'
 import type { SessionEvent, SessionId } from '@deepseek-ai/dsh-session'
@@ -167,6 +168,8 @@ export interface SubagentStartRequest {
    * before initializing the separate child runtime.
    */
   readonly agentOptions?: AgentOptions
+  /** Whether an omitted reasoning effort may inherit from the parent; defaults to true. Requires agentOptions capability. */
+  readonly inheritReasoningEffort?: boolean
   /**
    * Object-rooted JSON Schema within `assertObjectJsonSchema`'s enforced subset. Start rejects
    * unsupported schemas or providers without the capability. Data must be plain host-realm JSON;
