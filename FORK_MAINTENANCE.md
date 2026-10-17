@@ -601,14 +601,15 @@ Web profile 插入 `memory-watchdog.cjs`：250 ms 采样、60 s 日志、heap ra
 | Package | Installed | Runtime state | Preserve rule |
 |---|---:|---|---|
 | `dshmarket` | — | Removed | 官方 Plugin Manager 接管安装、配置与运行时启停；profile 不恢复旧 package 或 bundle |
-| `@nanmicoder/dsh-agent-teams` | `0.1.20-dsh017rc1.3` | Installed, enabled | 真实 profile 使用仓内固定 artifact；停止 Host 后更新，禁止被 npm latest/next 直接覆盖 |
-| `dsh-plugin-subscriptions` | `0.9.4-dsh017rc1.23` | Installed; Windows Web enabled | 仓内固定 artifact；凭据文件原地保留，其他 profile 是否启用沿用显式插件配置。2026-10-11 核对的安装版本为 rc1.23（profile 依赖、安装目录 package.json 与解析到的 wire `0.7.2-dsh14` 三者一致）；rc1.24 已切包但保留未部署 |
+| `@nanmicoder/dsh-agent-teams` | `0.1.24-dsh021rc2.1` | Installed, enabled | 真实 profile 以 `link:` 指向 `fork-plugins/dsh-agent-teams`；源码改动重启 Host 后生效，禁止被 npm latest/next 覆盖 |
+| `dsh-plugin-subscriptions` | `0.9.4-dsh021rc2.1` | Installed; Windows Web enabled | 真实 profile 以 `link:` 指向 `fork-plugins/dsh-plugin-subscriptions`；凭据文件原地保留，其他 profile 是否启用沿用显式插件配置。2026-10-18 前的 rc1.23/rc1.33 为上一代制品，仅归档 |
 | `@vlln/dsh-task-status` | Removed | Not installed | 已从依赖、bundle、patch、lockfile 和 `node_modules` 删除；profile 不得恢复 |
-| `dsh-context` | Windows: `0.55.0-dsh017rc1.3`; Mac: `0.55.0-dsh017rc1.1` | Installed, enabled | 真实 profile 保留 `300/60/100/400/100/100` bounds；源码与回滚规则见 `fork-plugins/dsh-context/FORK_MAINTENANCE.md` |
+| `dsh-context` | `0.73.0-dsh021rc2.1` | Installed, enabled | 真实 profile 以 `link:` 指向 `fork-plugins/dsh-context`，并保留 `300/60/100/400/100/100` bounds；源码与回滚规则见 `fork-plugins/dsh-context/FORK_MAINTENANCE.md` |
 | `dsh-shell-command` | Removed | No package or configuration | profile 不安装 |
 | `@deepseek-ai/dsh-subagent-dsh-sdk` | Link to source checkout | Enabled for process provider | 跟随源码构建，worker 数据与主 sessions 隔离 |
+| `@ryanzhou416/dsh-plugin-aether-shell` | `0.1.0-dsh021rc2.1` | Installed, enabled | 真实 profile 以 `link:` 指向 `fork-plugins/dsh-plugin-aether-shell`；纯 Host 插件，无客户端资源 |
 
-AgentTeams、Context 与 Subscriptions 均使用本地 `file:` tgz，不依赖 release-age 例外。profile 不再安装 dshmarket；禁止 wildcard 和未经审计的 `pnpm update --latest`。
+2026-10-18 起四个 fork 插件（AgentTeams、Context、Subscriptions、AetherShell）均以 `link:` 指向主检出的 `fork-plugins/<name>`，不再安装 `file:` tgz —— subscriptions 的相对 `file:` 依赖与 `@oven/bun-*` 可选依赖使 tgz 无法装进 profile。profile 不再安装 dshmarket；禁止 wildcard 和未经审计的 `pnpm update --latest`。
 
 2026-09-24 的 Windows profile 升级先将四个配置文件备份到 `C:\Project\deepseek-harness-data\diagnostics\profile-backups\pre-017rc1-20260924-1900`，再用 DSH Plugin Manager 安装三个固定 tgz。`verify-profile`、`verify-patch` 与组合后的 `verify-dump` 均通过；没有修改 Session、附件或凭据。
 
@@ -616,7 +617,7 @@ Mac 主 checkout 已快进至同一 fork master；`clean.command`、`build.comma
 
 ### Local AgentTeams package
 
-维护真源位于 `fork-plugins\dsh-agent-teams`，完整保留上游运行源码、测试、构建脚本和资产。仓库安装器使用 `fork-plugins\releases\nanmicoder-dsh-agent-teams-0.1.20-dsh017rc1.3.tgz`，SHA256 为 `8CCAA66D5E026DBED6363CA569B25BB8D4869E931BD92DC495458175C151980A`。该 package 标记为 private，禁止用上游 npm scope 发布；Windows profile 已安装该 artifact，更新须在 Host 停止后进行。
+维护真源位于 `fork-plugins\dsh-agent-teams`，完整保留上游运行源码、测试、构建脚本和资产。当前安装为 `0.1.24-dsh021rc2.1` 的 `link:` 依赖；`fork-plugins\releases\nanmicoder-dsh-agent-teams-0.1.20-dsh017rc1.3.tgz`（SHA256 `8CCAA66D5E026DBED6363CA569B25BB8D4869E931BD92DC495458175C151980A`）只作历史归档。该 package 标记为 private，禁止用上游 npm scope 发布；Windows profile 已安装该 artifact，更新须在 Host 停止后进行。
 
 fork artifact 随 Git 提交，同事不依赖这台机器的外置 `.local-plugins-src`。保留当前与仍被已安装 profile 引用的制品及校验值，历史制品也可从 Git 历史恢复。
 
@@ -625,7 +626,7 @@ fork artifact 随 Git 提交，同事不依赖这台机器的外置 `.local-plug
 1. 保留上游 v0.1.19 的原子 roster/DAG 创建、仅启动 ready member、改名工具成员恢复、repair scope、任务修订、next-step 协调、陈旧消息抑制、attempt 校验、退休成员清理、安全 reassignment 与任务纠正；v0.1.20 只更新上游文档。
 2. RC.1 发行路径使用 awaited `agent/created`、`Session.ownEvents()` 与统一 Host delivery adapter；legacy setup 和旧 Host Queue 形态只保留为回归 fixture，不构成发行兼容声明。
 3. Team 内部队长指令、scheduler assignment、peer delivery 和 mailbox recovery 使用 Host Queue/Steer 规则，来源为 `agent-teams-host`；fork 不再重复维护最近-step 或退休成员策略。
-4. Client 使用 `uiConversation`、`uiWorkspace` 的 projection refresh 与 `[data-composer-input]`；Host capability 层保持 14 个 Captain 工具和 4 个成员工具稳定。package peer、development dependency、完整 DSH override cohort 与 lockfile 固定为 `0.1.7-rc.1`。
+4. Client 使用 `uiConversation`、`uiWorkspace` 的 projection refresh 与 `[data-composer-input]`；Host capability 层保持 14 个 Captain 工具和 4 个成员工具稳定。package peer、development dependency、完整 DSH override cohort 与 lockfile 固定为 `0.2.1-rc.2`。
 5. 普通 captain 不驻留时，成员报告先通过 Host Session Controller cold resume captain；Captain Session start 会重投 durable mailbox，成功逐条 ack，失败记录及后缀释放 delivery lease。
 6. Windows directory rename 使用独立的 5 次重试预算；构建清理目标用跨平台 `basename()` 校验。
 7. `readUnreadMailbox()` 使用只保留 pending 消息的 256-entry / 8 MiB 有界 LRU，并以 `dev/ino/size/mtimeNs/ctimeNs` 检测文件替换；lease 每次按当前时间重算，append/claim/release/ack/archive/remove 成功后精确失效。完整历史读取和磁盘 JSONL 字节格式不变。
@@ -633,7 +634,7 @@ fork artifact 随 Git 提交，同事不依赖这台机器的外置 `.local-plug
 
 9. 只有明确 captain/team 对且不含 Captain 发现请求时，在原有 live/archive 目录枚举后先按 team id 过滤，再读取 `team.json` 并重新校验记录 id 与 captain。保留目录顺序、目录错误传播、目录类型过滤和旧 id；Captain 发现仍读取全部团队。Host 与面板复用按 assignee 精确值分组的任务索引，保留任务顺序、首个运行任务、完成数、removed roster、模型选择和详情；缺失 assignee 与显式空值不同。索引只跟随当前输入，不引入跨请求状态缓存。
 
-10. `state.ts` 的 `atomicWriteText` 在临时文件改名前、以及 Windows 直接覆盖回退中，都先 `FileHandle.sync()`，断电后不会留下长度正确而内容全零的 `team.json` 或 mailbox。`findTeamByCaptain`、`findTeamByParticipant` 与 capability 的 `currentTeam` 扫描工作区时跳过 JSON 或结构损坏的团队，并按目录与原因以 `DSH_AGENT_TEAMS_UNREADABLE_TEAM` 进程警告提示一次；按 team id 直接读取仍抛错，I/O 错误照常传播。2026-10-04 崩溃零填充了一个 3 MB `team.json`，该工作区每次插入收件箱消息后回合都以 JSON 解析失败结束。回归为 `capabilities.test.mjs` 的 unrelated unreadable team 用例（旧实现返回 JSON 错误）与 `verify.mjs` 的 zero-filled 查找检查。该修复随 `0.1.20-dsh017rc1.3` 发布；插件目录依赖须按锁文件对齐到 `0.1.7-rc.1` 后再构建（本机 pnpm store 已有时可 `--offline`），否则客户端类型检查失败。
+10. `state.ts` 的 `atomicWriteText` 在临时文件改名前、以及 Windows 直接覆盖回退中，都先 `FileHandle.sync()`，断电后不会留下长度正确而内容全零的 `team.json` 或 mailbox。`findTeamByCaptain`、`findTeamByParticipant` 与 capability 的 `currentTeam` 扫描工作区时跳过 JSON 或结构损坏的团队，并按目录与原因以 `DSH_AGENT_TEAMS_UNREADABLE_TEAM` 进程警告提示一次；按 team id 直接读取仍抛错，I/O 错误照常传播。2026-10-04 崩溃零填充了一个 3 MB `team.json`，该工作区每次插入收件箱消息后回合都以 JSON 解析失败结束。回归为 `capabilities.test.mjs` 的 unrelated unreadable team 用例（旧实现返回 JSON 错误）与 `verify.mjs` 的 zero-filled 查找检查。该修复随 `0.1.20-dsh017rc1.3` 发布；插件目录依赖须按锁文件对齐到 `0.2.1-rc.2` 后再构建（本机 pnpm store 已有时可 `--offline`），否则客户端类型检查失败。
 
 AgentTeams 的 `scripts/activity-state.perf.mjs` 使用 27/58 个合成团队、1,500/2,600 个任务。请求一个团队摘要时，live 响应由约 2.865 MB 的全量结果降至 10,416 字节，归档由约 5.003 MB 降至 8,458 字节；所选团队的 56/45 项任务完整保留，详情仍可单独读取。明确目标预筛选的构建产物对照每版各启动三个 Node 进程，按相同 case 顺序温热文件/邮箱缓存：live target-summary 为 `[20.27, 19.20, 20.16]` → `[1.12, 1.37, 1.38]` ms，中位数 20.16 → 1.37 ms；archive 为 `[37.28, 37.88, 39.56]` → `[1.45, 1.38, 1.30]` ms，中位数 37.88 → 1.38 ms。结果字节数及任务数相同，Captain 发现仍承担扫描成本。该测量覆盖命名目标的组件读取，不代表整页或模型延迟。成员分组另用 3×12 与 8×256 的合成单团队验证；参考算法访问次数只作复杂度对照，不作旧产品计时，包含邮箱 I/O 的单团队装配未显示稳定耗时收益。离线 verify、类型检查、兼容/HTTP/生命周期验证及旧 consumer 负对照构成后续合并的验证入口。
 
@@ -643,21 +644,21 @@ AgentTeams 的 `scripts/activity-state.perf.mjs` 使用 27/58 个合成团队、
 
 ### Local Context package
 
-维护真源位于 `fork-plugins/dsh-context`，当前源码为上游 `v0.73.0` 加 fork 复写后的 `0.73.0-dsh021rc2.1`；安装器仍指向上一代 `fork-plugins\releases\dsh-context-0.55.0-dsh017rc1.3.tgz`（SHA256 `255BA7AA6B84DA2F1301CD7786A2DDBC39AEE0A69BC731547B464B5D32B7B27D`），重新打包并停机升级前不得替换。上游 v0.73.0 把 fold 拆成 `foldState`/`foldMetering`/`foldWire`，用 `ensure([...])` 做字段级 copy-on-write，投影契约改为 registry 的泛型 `ProjectionDefinition`，本地因此把 `zod` 固定到 registry 依赖的 `4.4.3`（版本自带的 `_zod.version` 参与类型同一性，漂移会让 `register()` 拒绝全部 projection），并把三处注册调用改成显式泛型参数，避免整个 projection map 重新实例化超出编译器深度。
+维护真源位于 `fork-plugins/dsh-context`，当前源码为上游 `v0.73.0` 加 fork 复写后的 `0.73.0-dsh021rc2.1`；真实 profile 以 `link:` 指向该目录，安装后须重建 `lib/` 并重启 Host。`fork-plugins\releases\dsh-context-0.55.0-dsh017rc1.3.tgz`（SHA256 `255BA7AA6B84DA2F1301CD7786A2DDBC39AEE0A69BC731547B464B5D32B7B27D`）只作历史归档。上游 v0.73.0 把 fold 拆成 `foldState`/`foldMetering`/`foldWire`，用 `ensure([...])` 做字段级 copy-on-write，投影契约改为 registry 的泛型 `ProjectionDefinition`，本地因此把 `zod` 固定到 registry 依赖的 `4.4.3`（版本自带的 `_zod.version` 参与类型同一性，漂移会让 `register()` 拒绝全部 projection），并把三处注册调用改成显式泛型参数，避免整个 projection map 重新实例化超出编译器深度。
 
 私有构建保留经官方文档核对的 GPT-6 Astra/Sol、Claude Opus 5.5/Fable 5.1 与 Cursor Grok 4.7 标准速度 API 等值价格：`shared/providers.ts` 把 `codex`/`claude`/`grok` 解析到官方 vendor，`shared/modelPricing.ts` 提供带核对日期的参照价与长上下文阈值，`client/cost.ts` 先查参照价再查 models.dev 书，`host/foldMetering.ts` 按整次请求 prompt 大小把费用记进 `long` 分组。`long` 分组必须在 wire、Client sanitizer、Agent 合并和总 token 统计中全程传递；请求超过阈值却没有长上下文档位时按未定价处理。费用不是订阅账单，定价日期、缓存写入假设和来源见 `fork-plugins/dsh-context/docs/model-pricing.md`。定向价格与界面测试、投影兼容测试、构建包 smoke，以及四个价格/费用模块的 100% 覆盖率是维护检查；升级真实 profile 前仍须确认 DSH 已停止。
 
-Windows Web profile 的 Context 内存修复升级备份位于 `C:\Project\deepseek-harness-data\profile-backups\context-memory-20260927-200916`，安装版本为 `0.55.0-dsh017rc1.3`；已核对安装后的 Host bundle 与构建输出 SHA256 相同，其他直接依赖、bundle 列表和 profile patch 保持原值。定价升级的旧备份 `context-pricing-20260927-063430` 继续保留。
+Windows Web profile 的 Context 内存修复升级备份位于 `C:\Project\deepseek-harness-data\profile-backups\context-memory-20260927-200916`，当时版本为 `0.55.0-dsh017rc1.3`（已由 `0.73.0-dsh021rc2.1` 取代）；已核对安装后的 Host bundle 与构建输出 SHA256 相同，其他直接依赖、bundle 列表和 profile patch 保持原值。定价升级的旧备份 `context-pricing-20260927-063430` 继续保留。
 
-工具归属追踪的存活期问题（只保存读取者 fiber 名、解包 traced proxy、卸载时还原 `register`、缺失 reader 时按调用栈解析包名）在 v0.73.0 上游已经等价实现并带回归测试，本 fork 不再单独维护该补丁；其余隔离内存结论仍见[插件维护记录](fork-plugins/dsh-context/FORK_MAINTENANCE.md)。Windows 端到端切换验证针对 `0.55.0-dsh017rc1.3` artifact，新源码重新打包前不得据此声称已安装。后续插件升级仍须停止 Host 后操作。
+工具归属追踪的存活期问题（只保存读取者 fiber 名、解包 traced proxy、卸载时还原 `register`、缺失 reader 时按调用栈解析包名）在 v0.73.0 上游已经等价实现并带回归测试，本 fork 不再单独维护该补丁；其余隔离内存结论仍见[插件维护记录](fork-plugins/dsh-context/FORK_MAINTENANCE.md)。Windows 端到端切换验证曾针对 `0.55.0-dsh017rc1.3` artifact；2026-10-18 的 `0.73.0-dsh021rc2.1` 以 link 安装并通过隔离与真实 profile 启动验证。后续插件源码改动须重建 `lib/` 并重启 Host。
 
 ### Local Subscriptions package
 
-维护源码位于 [订阅插件](fork-plugins/dsh-plugin-subscriptions/README.zh.md)。2026-10-17 的启动 manifest 与 257 个安装文件核对确认已加载 [`.33` 制品](fork-plugins/releases/dsh-plugin-subscriptions-0.9.4-dsh017rc1.33.tgz)，其 SHA256 由[同名校验文件](fork-plugins/releases/dsh-plugin-subscriptions-0.9.4-dsh017rc1.33.tgz.sha256)固定；[`.32` 制品](fork-plugins/releases/dsh-plugin-subscriptions-0.9.4-dsh017rc1.32.tgz)保留为上一安装代次。`.32` 修复组织策略的重启恢复，`.33` 修复续接状态 IO 的有界等待。当前安装状态、已验证范围与保留差异由[实现状态](fork-plugins/dsh-plugin-subscriptions/docs/claude-implementation-status.md)拥有；不能从源码版本推断任何运行进程已经更新。
+维护源码位于 [订阅插件](fork-plugins/dsh-plugin-subscriptions/README.zh.md)。2026-10-18 起真实 profile 以 `link:` 指向 `fork-plugins/dsh-plugin-subscriptions`（`0.9.4-dsh021rc2.1`）；2026-10-17 的启动 manifest 与 257 个安装文件核对对应上一代 [`.33` 制品](fork-plugins/releases/dsh-plugin-subscriptions-0.9.4-dsh017rc1.33.tgz)，其 SHA256 由[同名校验文件](fork-plugins/releases/dsh-plugin-subscriptions-0.9.4-dsh017rc1.33.tgz.sha256)固定；[`.32` 制品](fork-plugins/releases/dsh-plugin-subscriptions-0.9.4-dsh017rc1.32.tgz)保留为更早代次。`.32` 修复组织策略的重启恢复，`.33` 修复续接状态 IO 的有界等待。当前安装状态、已验证范围与保留差异由[实现状态](fork-plugins/dsh-plugin-subscriptions/docs/claude-implementation-status.md)拥有；不能从源码版本推断任何运行进程已经更新。
 
 Windows Web profile 启用 `llm-subscriptions`，保留 `rateLimit.wait: false`。 制品在安装前须通过插件测试套件、实际安装目录的接口与 UI 开关检查；2026-10-11 当前源码的插件测试套件 978 项通过、0 失败、0 跳过、退出码 0。已验证的图片处理保持：21 张历史图片中原有 16 张超出多图尺寸上限，请求版本的长边均不超过 2,000 像素，原 Session 和附件摘要保持不变。2026-09-26，固定源码包的 506 项无密钥测试通过；隔离 Web profile 与真实 Web profile 均在随机本地端口启动，认证页面返回 HTTP 200，页面包含 Subscriptions 客户端资源。真实 Profile 的 Codex 状态接口识别到两个已存账号，默认账号的用量查询通过并刷新过期访问令牌；另一个账号及真实模型请求尚未验证。旧 profile patch 备份位于 `C:\Project\deepseek-harness-data\diagnostics\profile-backups\pre-subscriptions-enable-20260926`。
 
-更新时使用 `git subtree pull --prefix=fork-plugins/dsh-plugin-subscriptions https://github.com/V1ki/dsh-plugin-subscriptions.git <tag> --squash`，再重放 `fork-plugins/dsh-plugin-subscriptions/FORK_MAINTENANCE.md`。真实 profile 始终安装仓内固定 artifact，禁止 npm latest 直接覆盖。
+更新时使用 `git subtree pull --prefix=fork-plugins/dsh-plugin-subscriptions https://github.com/V1ki/dsh-plugin-subscriptions.git <tag> --squash`，再重放 `fork-plugins/dsh-plugin-subscriptions/FORK_MAINTENANCE.md`。真实 profile 始终以 `link:` 指向仓内插件目录，禁止 npm latest 直接覆盖。
 
 订阅插件暂不整体升级：上游 v0.9.5–v0.9.9 的主体是 Claude 传输层（prompt-cache TTL、32MB 图片预算）与 provider 路由重写，而本地 Claude 线已经过针对性调优并有自己的回归，整包导入会把这些改动推平。2026-10-18 的三方比对确认：换行重试之外的候选补丁要么本地已等价实现（pool 耗尽错误已按真实失败原因归类并带最早恢复时间），要么不适用于本地代码（Codex 推理档位里没有 `ultra`）。已挑入的只有 catalog-store 的 Windows 重命名重试（上游 #129）。后续如需 Codex 重置额度、模型目录缓存、显示名等特性，逐条按补丁挑入，不做整包替换。
 
