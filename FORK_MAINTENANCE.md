@@ -599,6 +599,8 @@ Lexical 的 history 在每个窗口内合并连续输入，而窗口从上一次
 
 所有启动 Host 的入口都显式传 `--expose-internals`：`run.cmd`/`run.command` 以 `pnpm exec node --expose-internals --import tsx/esm apps/cli/src/bin.ts web` 启动，根 `dsh`/`start:web`/`demo:inspector` 脚本与 `dev:web` 的 `dsh web` 子进程同样带上。缺少它时 Loader 无法解析 profile 的 link 插件（`dsh-context`、AgentTeams、Subscriptions），HMR 也会拒绝启动，控制台表现为 `4 entries did not activate`；`NODE_OPTIONS` 不接受该开关，必须放在 node argv 上。聚焦验证为两个启动器 spec 的启动参数断言。
 
+JSONL 会话存储增加根目录下的 `.session-catalog.json` 头部缓存与 `excludeSubagentSessions` 列表选项：列表按目录段记录 header、格式状态、日志大小与 mtime，匹配才信任缓存，缺失、损坏或过期时回退读取并重建。Host 的默认 `session.list` 与工作区启动头部索引不再加载归档和子智能体会话；子智能体会话通过母会话的 subagent 目录访问，归档/恢复随母会话状态生效。一次性子智能体归属修复脚本不入库。聚焦验证：`catalog.spec.ts`、JSONL 列表测试、session-query 的子智能体排除用例与 workspace 启动索引用例。
+
 若存在显式准备的订阅维护计划，Windows [构建入口](build.cmd) 先交给[维护钩子](scripts/fork-subscriptions-maintenance.ps1)：运行中的 Host 会被拒绝，候选和脚本指纹必须匹配，检查与安装失败不能报告构建成功；仅安装模式跳过整仓依赖安装和构建。计划、备份与回执只保存在被忽略的本地维护目录，仓库不自带可执行部署计划；完成一次性安装后，普通构建路径恢复。维护钩子不停止或启动 Host，用户继续手动操作；随机本机端口和私有玩具计划的回归由 `scripts/fork-subscriptions-maintenance.spec.ts` 拥有。
 
 macOS 的 `clean.command`、`build.command` 和 `run.command` 共用 `scripts/fork-macos-runtime.sh`。`clean.command` 与 Windows 入口使用同一个仓库 cleaner，保留依赖与用户数据。该 helper 从 `PATH`、Apple Silicon Homebrew 和 Intel Homebrew 路径查找 Node，拒绝不受支持的 Node 23，仅在私有临时目录安装固定 Corepack fallback，并使用仓库锁定的 pnpm；如果更新或中断留下不完整的固定版本缓存，它会在启动 pnpm 前删除该版本目录并重新下载，不需要手动清理。`run.command` 默认 `DSH_HOME=~/.dsh`，创建权限 `0700` 的 diagnostics，启用 Node fatal/uncaught reports，并把 V8 old-space 设为物理内存的一半且限制在 4–16 GiB；`DSH_MAX_OLD_SPACE_MIB` 可显式覆盖。它不会静默重启 Host。

@@ -59,10 +59,13 @@ export class SessionCorpus {
    * @param signal - optional cancellation for persistence listing.
    * @returns records in deterministic newest-first order.
    */
-  async listSessions(signal?: AbortSignal, options?: { readonly excludeSessionIds?: ReadonlySet<SessionId> }): Promise<SessionRecord[]> {
+  async listSessions(signal?: AbortSignal, options?: {
+    readonly excludeSessionIds?: ReadonlySet<SessionId>
+    readonly excludeSubagentSessions?: boolean
+  }): Promise<SessionRecord[]> {
     signal?.throwIfAborted()
     const persistence = this._persistence
-    const persisted = persistence === undefined ? [] : await listPersisted(persistence, signal, options?.excludeSessionIds)
+    const persisted = persistence === undefined ? [] : await listPersisted(persistence, signal, options)
     signal?.throwIfAborted()
     const records = new Map<SessionId, SessionRecord>()
     for (const { header, formatStatus } of persisted) {
@@ -74,6 +77,7 @@ export class SessionCorpus {
       })
     }
     for (const session of this._ctx.sessions.list()) {
+      if (options?.excludeSubagentSessions === true && session.header.origin === 'subagent') continue
       const durable = records.get(session.id)
       if (durable !== undefined) assertSessionHeadersCompatible(session.header, durable.header)
       records.set(session.id, {
@@ -264,10 +268,22 @@ function orderedResults<Value>(
 async function listPersisted(
   persistence: SessionPersistence,
   signal?: AbortSignal,
-  excludeSessionIds?: ReadonlySet<SessionId>,
+  options?: {
+    readonly excludeSessionIds?: ReadonlySet<SessionId>
+    readonly excludeSubagentSessions?: boolean
+  },
 ): Promise<readonly SessionPersistenceSnapshot[]> {
   try {
-    return await persistence.list(signal === undefined && excludeSessionIds === undefined ? undefined : { ...(signal === undefined ? {} : { signal }), ...(excludeSessionIds === undefined ? {} : { excludeSessionIds }) })
+    const excludeSessionIds = options?.excludeSessionIds
+    const excludeSubagentSessions = options?.excludeSubagentSessions === true
+    const query = signal === undefined && excludeSessionIds === undefined && !excludeSubagentSessions
+      ? undefined
+      : {
+          ...(signal === undefined ? {} : { signal }),
+          ...(excludeSessionIds === undefined ? {} : { excludeSessionIds }),
+          ...(excludeSubagentSessions ? { excludeSubagentSessions: true } : {}),
+        }
+    return await persistence.list(query)
   } catch (error: unknown) {
     if (signal?.aborted) signal.throwIfAborted()
     throw new SessionQueryError(

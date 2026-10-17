@@ -163,15 +163,22 @@ class TestPersistence extends SessionPersistence {
     return Promise.resolve({ header: structuredClone(entry.meta), revision: entryRevision(entry) })
   }
 
-  list(options?: { signal?: AbortSignal }): Promise<readonly SessionPersistenceSnapshot[]> {
+  list(options?: {
+    signal?: AbortSignal
+    excludeSessionIds?: ReadonlySet<SessionIdType>
+    excludeSubagentSessions?: boolean
+  }): Promise<readonly SessionPersistenceSnapshot[]> {
     TestPersistence.listCalls += 1
     TestPersistence.listSignals.push(options?.signal)
     if (TestPersistence.listOverride !== undefined) return TestPersistence.listOverride(options?.signal)
     if (TestPersistence.listFailure !== undefined) return rejectUnknown(TestPersistence.listFailure)
-    const snapshots = [...TestPersistence.entries.values()].map(entry => ({
-      header: structuredClone(entry.meta),
-      revision: entryRevision(entry),
-    }))
+    const snapshots = [...TestPersistence.entries.values()]
+      .filter(entry => options?.excludeSessionIds?.has(entry.meta.id) !== true)
+      .filter(entry => options?.excludeSubagentSessions !== true || entry.meta.origin !== 'subagent')
+      .map(entry => ({
+        header: structuredClone(entry.meta),
+        revision: entryRevision(entry),
+      }))
     TestPersistence.afterList?.()
     return Promise.resolve(snapshots)
   }
@@ -566,6 +573,27 @@ describe('session-query exact reads', () => {
       title: 'Live title', eventSeq: 0,
     })
     expect(Object.keys((await ctx.sessionQuery.listSessions())[0]!)).toEqual(['header', 'live', 'persisted', 'formatStatus'])
+  })
+
+  it('omits subagent-origin persisted and live sessions when requested', async () => {
+    const parent = header('subagent-parent', 1)
+    const child = header('subagent-child', 2, { origin: 'subagent', parentSession: SessionId('subagent-parent') })
+    TestPersistence.reset([
+      { meta: parent, events: eventLog() },
+      { meta: child, events: eventLog() },
+    ])
+    const ctx = await liveContext()
+    await ctx.plugin(TestPersistence)
+    expect((await ctx.sessionQuery.listSessions()).map(record => record.header.id).sort())
+      .toEqual(['subagent-child', 'subagent-parent'])
+
+    const ordinary = await ctx.sessionQuery.listSessions(undefined, { excludeSubagentSessions: true })
+    expect(ordinary.map(record => record.header.id)).toEqual(['subagent-parent'])
+
+    // A live child is excluded by the same option.
+    ctx.sessions.create(child.id, { meta: { createdAt: 2, origin: 'subagent', parentSession: parent.id } })
+    expect((await ctx.sessionQuery.listSessions(undefined, { excludeSubagentSessions: true })).map(record => record.header.id))
+      .toEqual(['subagent-parent'])
   })
 
   it('batches unique persisted title observations through one cancellable corpus scan', async () => {

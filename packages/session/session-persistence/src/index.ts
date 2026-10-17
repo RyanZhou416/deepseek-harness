@@ -114,6 +114,12 @@ export interface SessionPersistenceListOptions {
    * archived logs; `stat` and `open` still address those Sessions by id.
    */
   readonly excludeSessionIds?: ReadonlySet<SessionId>
+  /**
+   * Drop subagent-origin Sessions from this listing. The Workspace bootstrap
+   * indexes ordinary Sessions only: subagent rows are reached through their
+   * parent's catalog, so their headers are not needed there.
+   */
+  readonly excludeSubagentSessions?: boolean
 }
 
 declare module '@deepseek-ai/cordis' {

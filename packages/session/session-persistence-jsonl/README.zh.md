@@ -54,7 +54,7 @@ kind: "package-reference"
 
 ### 磁盘布局
 
-每个会话在可读项目目录下获得一个会话自有目录。每个规范 generation 都以版本与文件名一致的物理 header 开始。当前格式为每个持久事件存储一行；冻结的 v0 与 v1 reader 也能理解其历史 packed Assistant delta 行。当前格式在 header 中存储 `isSeeded`，并从最后一个带标记的 `session/end-seed` 推导 inherited cut；历史 codec 则转换其数字 `seedLength`。格式 catalog 会在句柄暴露当前逻辑值之前完成该转换。当前存储记录使用下文所述的无损来源序列表示：
+每个会话在可读项目目录下获得一个会话自有目录。每个规范 generation 都以版本与文件名一致的物理 header 开始。当前格式为每个持久事件存储一行；冻结的 v0 与 v1 reader 也能理解其历史 packed Assistant delta 行。当前格式在 header 中存储 `isSeeded`，并从最后一个带标记的 `session/end-seed` 推导 inherited cut；历史 codec 则转换其数字 `seedLength`。格式 catalog 会在句柄暴露当前逻辑值之前完成该转换。当前存储记录使用下文所述的无损来源序列表示。根目录还保存 `.session-catalog.json`，这是以会话目录名为键的 header 缓存：每条记录包含 header、其格式状态，以及观察到时的日志大小与修改时间；只有当两者仍然匹配时列表才信任该条目，否则重新解码 header。缺失、损坏或过期的 catalog 会通过这条回退路径重建；删除它是安全的，但会让下一次列表读取每个 header。
 
 ```text
 <root>/

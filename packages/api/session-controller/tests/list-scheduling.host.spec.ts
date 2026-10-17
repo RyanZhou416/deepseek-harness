@@ -81,8 +81,13 @@ async function harness(rows: readonly Row[], summaryMs = 8, workSliceMs = 8, arc
     if (row.phase === 'live') attach(row.id)
     return { header: session.header, live: row.phase === 'live', persisted: true }
   })
-  const listSessions = vi.fn(async (_signal?: AbortSignal, options?: { readonly excludeSessionIds?: ReadonlySet<unknown> }) =>
-    records.filter(record => options?.excludeSessionIds?.has(record.header.id) !== true))
+  const listSessions = vi.fn(async (
+    _signal?: AbortSignal,
+    options?: { readonly excludeSessionIds?: ReadonlySet<unknown>; readonly excludeSubagentSessions?: boolean },
+  ) =>
+    records
+      .filter(record => options?.excludeSessionIds?.has(record.header.id) !== true)
+      .filter(record => options?.excludeSubagentSessions !== true || record.header.origin !== 'subagent'))
   ctx.provide('sessionQuery', { listSessions } as never)
   if (archived.length > 0) ctx.provide('workspaceRegistry', { archivedSessionIds: archived.map(id => SessionId(id)) } as never)
   ctx.provide('sessionProjectionCache', {
@@ -236,7 +241,7 @@ describe('Session-list work slices', () => {
     expect(h.trace).toEqual(abortAt === 'first'
       ? [`${phase}:first`]
       : [`${phase}:first`, `${phase}:middle`, `${phase}:last`])
-    expect(h.listSessions).toHaveBeenCalledExactlyOnceWith(controller.signal)
+    expect(h.listSessions).toHaveBeenCalledExactlyOnceWith(controller.signal, { excludeSubagentSessions: true })
     if (phase === 'live' && abortAt === 'first') {
       expect(lookup).toHaveBeenCalledExactlyOnceWith(SessionId('first'))
     }
@@ -352,10 +357,13 @@ describe('archived Session filtering', () => {
       { id: 'archived-one', phase: 'cold' },
     ], 1, 8, ['archived-one'])
     await h.list.list()
-    expect(h.listSessions).toHaveBeenLastCalledWith(undefined, { excludeSessionIds: new Set([SessionId('archived-one')]) })
+    expect(h.listSessions).toHaveBeenLastCalledWith(undefined, {
+      excludeSessionIds: new Set([SessionId('archived-one')]),
+      excludeSubagentSessions: true,
+    })
 
     const all = await h.list.list(undefined, { includeArchived: true })
     expect(all.map(item => item.sessionId).sort()).toEqual(['archived-one', 'keep-one'])
-    expect(h.listSessions).toHaveBeenLastCalledWith(undefined)
+    expect(h.listSessions).toHaveBeenLastCalledWith(undefined, { excludeSubagentSessions: true })
   })
 })

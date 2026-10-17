@@ -53,10 +53,11 @@ async function harness(options: HarnessOptions = {}) {
 
   let listed = options.sessions ?? []
   const list = vi.fn(async (
-    listOptions?: { excludeSessionIds?: ReadonlySet<string> },
+    listOptions?: { excludeSessionIds?: ReadonlySet<string>; excludeSubagentSessions?: boolean },
   ): Promise<SessionPersistenceSnapshot[]> =>
     listed
       .filter(header => listOptions?.excludeSessionIds?.has(header.id) !== true)
+      .filter(header => listOptions?.excludeSubagentSessions !== true || header.origin !== 'subagent')
       .map(header => ({ header, revision: SessionPersistenceRevision(`rev-${header.id}`) })))
   const open = vi.fn(() => { throw new Error('event bodies must not be opened') })
   const stat = vi.fn(() => { throw new Error('per-session stat must not be needed') })
@@ -274,7 +275,7 @@ describe('WorkspaceRegistry lifecycle and bootstrap', () => {
     expect(storedState(pool)).toEqual({ initialized: true, workspaceIds: [], archivedSessionIds: [], pinnedSessionIds: [] })
   })
 
-  it('indexes startup headers without archived sessions no Workspace references', async () => {
+  it('indexes startup headers without archived or subagent sessions', async () => {
     const dir = await makeDir('startup-archived-unreferenced')
     const id = 'workspace-startup-archive'
     const pool = storedPool([[id, record(dir, ['kept'])]], {
@@ -285,13 +286,22 @@ describe('WorkspaceRegistry lifecycle and bootstrap', () => {
     })
     const result = await harness({
       pool,
-      sessions: [header('kept', dir, 100), header('gone', dir, 200), header('active', dir, 300)],
+      sessions: [
+        header('kept', dir, 100),
+        header('gone', dir, 200),
+        header('active', dir, 300),
+        { ...header('child', dir, 400), origin: 'subagent', parentSession: SessionId('active') },
+      ],
     })
 
     expect(result.list).toHaveBeenCalledTimes(1)
-    const options = result.list.mock.calls[0]?.[0] as { excludeSessionIds?: ReadonlySet<string> } | undefined
+    const options = result.list.mock.calls[0]?.[0] as {
+      excludeSessionIds?: ReadonlySet<string>
+      excludeSubagentSessions?: boolean
+    } | undefined
     expect(options?.excludeSessionIds).toEqual(new Set(['gone']))
-    // The referenced archived session stays indexed; the unreferenced one is skipped.
+    expect(options?.excludeSubagentSessions).toBe(true)
+    // The referenced archived session stays indexed; the unreferenced one and the subagent are skipped.
     expect(result.registry.list()[0]!.sessionIds).toEqual(['kept'])
   })
 

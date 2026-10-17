@@ -183,10 +183,13 @@ export abstract class SessionQueryEngine extends Service {
   /**
    * List the complete logical corpus using live-preferred records.
    * @param signal - optional cancellation for persistence listing.
-   * @param options - session ids excluded before per-session reads (archived Sessions).
+   * @param options - session ids excluded before per-session reads (archived Sessions), and whether subagent Sessions are omitted.
    * @returns deterministic newest-first cloned session records.
    */
-  listSessions(signal?: AbortSignal, options?: { readonly excludeSessionIds?: ReadonlySet<SessionId> }): Promise<SessionRecord[]> {
+  listSessions(signal?: AbortSignal, options?: {
+    readonly excludeSessionIds?: ReadonlySet<SessionId>
+    readonly excludeSubagentSessions?: boolean
+  }): Promise<SessionRecord[]> {
     return this._corpus.listSessions(signal, options)
   }
 

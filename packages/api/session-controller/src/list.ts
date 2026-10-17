@@ -140,9 +140,12 @@ export class ApiSessionList {
     const registry = options?.includeArchived === true ? undefined : this.ctx.get('workspaceRegistry')
     const archived = registry?.archivedSessionIds
     const excludeSessionIds = archived === undefined || archived.length === 0 ? undefined : new Set(archived)
-    const records = excludeSessionIds === undefined
-      ? await this.ctx.sessionQuery.listSessions(signal)
-      : await this.ctx.sessionQuery.listSessions(signal, { excludeSessionIds })
+    // Subagent rows are reached through their parent's catalog, never through
+    // this list; excluding them there keeps the pull to ordinary Sessions.
+    const records = await this.ctx.sessionQuery.listSessions(signal, {
+      ...(excludeSessionIds === undefined ? {} : { excludeSessionIds }),
+      excludeSubagentSessions: true,
+    })
     signal?.throwIfAborted()
     const items: SessionSummary[] = []
     const cold: SessionRecord[] = []

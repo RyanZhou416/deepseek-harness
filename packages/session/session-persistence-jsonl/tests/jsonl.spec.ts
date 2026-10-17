@@ -1234,7 +1234,8 @@ describe('JsonlSessionPersistence: immutable format generations', () => {
       })
       const [listed] = await ctx.sessionPersistence.list()
       expect(listed?.formatStatus).toBe(formatStatus)
-      expect(readTally.bySuffix.size).toBe(0)
+      // The header catalog is a metadata read; no log body may be opened.
+      expect([...readTally.bySuffix.keys()].filter(path => !path.endsWith('.session-catalog.json'))).toEqual([])
     }
   })
 
@@ -3212,6 +3213,39 @@ describe('JsonlSessionPersistence listing concurrency', () => {
     })
     listingProbe.active = false
     expect(listed.map(item => item.header.id)).toEqual(['keep-one'])
+  })
+
+  it('skips subagent Session directories from the persisted catalog', async () => {
+    await writeLog(listingCtx.sessionPersistence, meta('catalog-parent', '/work'), oneTurnLog())
+    await writeLog(listingCtx.sessionPersistence, {
+      ...meta('catalog-child', '/work'),
+      origin: 'subagent',
+      parentSession: SessionId('catalog-parent'),
+    }, oneTurnLog())
+    await listingCtx.sessionPersistence.list()
+
+    const catalog = JSON.parse(await readFile(join(listingRoot, '.session-catalog.json'), 'utf8')) as {
+      sessions: Record<string, { header: SessionHeader }>
+    }
+    expect(catalog.sessions[encodeSegment('catalog-child')]?.header.origin).toBe('subagent')
+
+    // A fresh backend drops the in-process caches, so only the catalog can let
+    // the child directory be skipped before its contents are read.
+    const freshCtx = new Context()
+    const fiber = await freshCtx.plugin(JsonlSessionPersistence, { root: listingRoot, compression: 'none', listConcurrency: 2 })
+    try {
+      listingProbe.active = true
+      listingProbe.failures.set(
+        dirname(rawLogPath(listingRoot, '/work', SessionId('catalog-child'))),
+        Object.assign(new Error('must not read a subagent Session directory'), { code: 'EACCES' }),
+      )
+      const listed = await freshCtx.sessionPersistence.list({ excludeSubagentSessions: true })
+      listingProbe.active = false
+      expect(listed.map(item => item.header.id)).toEqual(['catalog-parent'])
+    } finally {
+      listingProbe.active = false
+      await fiber.dispose()
+    }
   })
 
 })

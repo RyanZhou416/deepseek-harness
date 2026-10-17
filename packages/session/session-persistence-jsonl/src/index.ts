@@ -33,6 +33,7 @@ import {
   type SessionPersistenceRevision as PersistenceRevision,
 } from '@deepseek-ai/dsh-session-persistence'
 import { JsonlBackendTracker, JsonlSessionHandle, type StorageHandleState } from './storage.ts'
+import { SessionCatalog } from './catalog.ts'
 import { SessionWriteLease } from './lease.ts'
 import { SESSION_FORMAT_VERSION, SessionId as makeSessionId, SessionLogOffset } from '@deepseek-ai/dsh-session'
 import type { SessionEvent, SessionId, SessionHeader, SessionLogOffset as SessionLogOffsetType } from '@deepseek-ai/dsh-session'
@@ -361,6 +362,8 @@ class JsonlSessionPersistence extends SessionPersistence {
   private readonly listedHeaders = new Map<string, { revision: PersistenceRevision; header: GenerationHeader }>()
   /** One in-flight metadata scan shared by every concurrent list caller. */
   private listing: Promise<Array<GenerationHeader & { path: string; sourceVersion: number }>> | undefined
+  /** Immutable-header cache reused across processes; rebuilt from log reads when absent or stale. */
+  private readonly catalog: SessionCatalog
 
   constructor(ctx: Context, public config: Config, private readonly tracker: JsonlBackendTracker) {
     super(ctx)
@@ -373,6 +376,7 @@ class JsonlSessionPersistence extends SessionPersistence {
     }
     // Resolve once so later process.cwd() changes cannot split one backend across roots.
     this.root = resolve(config.root)
+    this.catalog = new SessionCatalog(this.root, message => this.ctx.logger.warn(message))
     this.compression = config.compression ?? DEFAULT_COMPRESSION
     this.listLimit = pLimit(config.listConcurrency ?? DEFAULT_LIST_CONCURRENCY)
     this.generationFormat = {
@@ -575,19 +579,22 @@ class JsonlSessionPersistence extends SessionPersistence {
    */
   async list(options?: SessionPersistenceListOptions): Promise<readonly SessionPersistenceSnapshot[]> {
     const excluded = options?.excludeSessionIds
-    const skipSegments = excluded === undefined || excluded.size === 0
-      ? undefined
-      : new Set([...excluded].map(encodeSegment))
+    const excludeSubagentSessions = options?.excludeSubagentSessions === true
     const signal = options?.signal
+    await this.catalog.load()
+    const skip = new Set<string>()
+    if (excluded !== undefined) for (const id of excluded) skip.add(encodeSegment(id))
+    if (excludeSubagentSessions) for (const segment of this.catalog.subagentSegments()) skip.add(segment)
+    const skipSegments = skip.size === 0 ? undefined : skip
     const snapshots: SessionPersistenceSnapshot[] = []
     const listed = new Set<SessionId>()
     // Snapshot pending entries BEFORE scanning storage: a session whose first
     // append lands mid-scan is then still in this snapshot (its artifact may
     // predate the scan), so create-to-list visibility never has a hole.
     const pending = [...this.tracker.pendingEntries()]
-    const artifacts = skipSegments === undefined
+    const artifacts = skipSegments === undefined && !excludeSubagentSessions
       ? await this.listArtifacts(signal)
-      : await this.listArtifacts(signal, skipSegments)
+      : await this.listArtifacts(signal, skipSegments, excludeSubagentSessions)
     const corpusRevision = artifacts.some(artifact => artifact.sourceVersion < SESSION_FORMAT_VERSION)
       ? await this.historicalCorpusRevision(signal) : undefined
     const statted = settledValues(await settleLimited(this.listLimit, artifacts, async (artifact) => {
@@ -605,6 +612,7 @@ class JsonlSessionPersistence extends SessionPersistence {
     for (const entry of statted) {
       if (entry === undefined) continue
       const { artifact, identity } = entry
+      if (excludeSubagentSessions && artifact.header.origin === 'subagent') continue
       listed.add(artifact.header.id)
       snapshots.push({
         header: artifact.header,
@@ -617,6 +625,7 @@ class JsonlSessionPersistence extends SessionPersistence {
     }
     for (const [id, entry] of pending) {
       if (excluded?.has(id) === true) continue
+      if (excludeSubagentSessions && entry.header.origin === 'subagent') continue
       if (!listed.has(id)) snapshots.push({ header: entry.header, revision: entry.revision })
     }
     signal?.throwIfAborted()
@@ -1266,9 +1275,12 @@ class JsonlSessionPersistence extends SessionPersistence {
   private async listArtifacts(
     signal?: AbortSignal,
     skipSegments?: ReadonlySet<string>,
+    excludeSubagentSessions = false,
   ): Promise<Array<GenerationHeader & { path: string; sourceVersion: number }>> {
     signal?.throwIfAborted()
-    if (skipSegments !== undefined) return this.scanArtifacts(skipSegments)
+    if (skipSegments !== undefined || excludeSubagentSessions) {
+      return this.scanArtifacts(skipSegments, excludeSubagentSessions)
+    }
     await this.ensureRootEncoding()
     signal?.throwIfAborted()
     if (this.listing === undefined) {
@@ -1281,8 +1293,12 @@ class JsonlSessionPersistence extends SessionPersistence {
     return waitWithAbort(this.listing, signal)
   }
 
-  /** Select and validate one header per physical Session directory, reusing cached values by exact revision. */
-  private async scanArtifacts(skipSegments?: ReadonlySet<string>): Promise<Array<GenerationHeader & { path: string; sourceVersion: number }>> {
+  /** Select and validate one header per physical Session directory, reusing the durable catalog and in-process cache by exact revision. */
+  private async scanArtifacts(
+    skipSegments?: ReadonlySet<string>,
+    excludeSubagentSessions = false,
+  ): Promise<Array<GenerationHeader & { path: string; sourceVersion: number }>> {
+    await this.catalog.load()
     const generations = await this.listGenerations(undefined, skipSegments)
     const selectedPaths = new Set(generations.map(selected => selected.sourcePath))
     for (const path of this.listedHeaders.keys()) {
@@ -1292,8 +1308,19 @@ class JsonlSessionPersistence extends SessionPersistence {
       try {
         const identity = await stat(selected.sourcePath, { bigint: true })
         const revision = fileRevision(identity)
+        const segment = basename(dirname(selected.sourcePath))
+        const cataloged = this.catalog.lookup(segment, identity)
+        if (cataloged !== undefined && encodeSegment(cataloged.header.id) === segment) {
+          return { selected, metadata: cataloged }
+        }
         const cached = this.listedHeaders.get(selected.sourcePath)
         if (cached !== undefined && cached.revision === revision) {
+          this.catalog.remember(segment, {
+            header: cached.header.header,
+            formatStatus: cached.header.formatStatus,
+            sizeBytes: Number(identity.size),
+            mtimeMs: Number(identity.mtimeMs),
+          })
           return { selected, metadata: cached.header }
         }
         const metadata = await this.readGenerationHeader(selected, undefined, undefined)
@@ -1302,6 +1329,12 @@ class JsonlSessionPersistence extends SessionPersistence {
           return { selected, metadata }
         }
         this.listedHeaders.set(selected.sourcePath, { revision, header: metadata })
+        this.catalog.remember(segment, {
+          header: metadata.header,
+          formatStatus: metadata.formatStatus,
+          sizeBytes: Number(identity.size),
+          mtimeMs: Number(identity.mtimeMs),
+        })
         return { selected, metadata }
       } catch (error: unknown) {
         if (isENOENT(error) || error instanceof SessionFormatUnsupportedError || error instanceof SessionPersistenceCorruptionError) {
@@ -1317,12 +1350,17 @@ class JsonlSessionPersistence extends SessionPersistence {
       if (outcome.status === 'rejected') throw outcome.reason
       const { selected, metadata } = outcome.value
       if (metadata === undefined) continue
+      if (excludeSubagentSessions && metadata.header.origin === 'subagent') continue
       if (ids.has(metadata.header.id)) {
         throw new Error(`duplicate JSONL session id "${metadata.header.id}" appears in multiple project directories`)
       }
       ids.add(metadata.header.id)
       artifacts.push({ ...metadata, path: selected.sourcePath, sourceVersion: selected.sourceVersion })
     }
+    if (skipSegments === undefined && !excludeSubagentSessions) {
+      this.catalog.prune(new Set(generations.map(selected => basename(dirname(selected.sourcePath)))))
+    }
+    await this.catalog.flush()
     return artifacts
   }
   /** Read and translate one selected generation header without inspecting its body. */

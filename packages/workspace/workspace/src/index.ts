@@ -210,7 +210,7 @@ export class WorkspaceRegistry extends Service {
       await this.replaceHeaderIndex(headers)
       await this.bootstrap(headers)
     } else if (this.table.size > 0) {
-      await this.replaceHeaderIndex(await this.listStoredHeaders({ excludeArchived: true }))
+      await this.replaceHeaderIndex(await this.listStoredHeaders({ excludeArchived: true, excludeSubagentSessions: true }))
     }
 
     await this.indexLiveSessions()
@@ -846,14 +846,25 @@ export class WorkspaceRegistry extends Service {
    * Every stored session's header, projected from the persistence snapshot listing.
    * @param options - `excludeArchived` skips archived headers no Workspace record
    * references: archived rows stay out of every default list, so indexing them
-   * would only repeat the persistence scan at startup.
+   * would only repeat the persistence scan at startup. `excludeSubagentSessions`
+   * skips subagent-origin headers: those rows are reached through their parent's
+   * catalog, and a Workspace account never needs them.
    * @returns Stored session headers.
    */
-  private async listStoredHeaders(options?: { readonly excludeArchived?: boolean }): Promise<SessionHeader[]> {
+  private async listStoredHeaders(options?: {
+    readonly excludeArchived?: boolean
+    readonly excludeSubagentSessions?: boolean
+  }): Promise<SessionHeader[]> {
     const excluded = options?.excludeArchived === true ? this.archivedHeaderExclusions() : undefined
+    const excludeSubagentSessions = options?.excludeSubagentSessions === true
     const snapshots = excluded === undefined || excluded.size === 0
-      ? await this.ctx.sessionPersistence.list()
-      : await this.ctx.sessionPersistence.list({ excludeSessionIds: excluded })
+      ? excludeSubagentSessions
+        ? await this.ctx.sessionPersistence.list({ excludeSubagentSessions: true })
+        : await this.ctx.sessionPersistence.list()
+      : await this.ctx.sessionPersistence.list({
+          excludeSessionIds: excluded,
+          ...(excludeSubagentSessions ? { excludeSubagentSessions: true } : {}),
+        })
     return snapshots.map(snapshot => snapshot.header)
   }
 
