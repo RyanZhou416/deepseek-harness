@@ -52,8 +52,12 @@ async function harness(options: HarnessOptions = {}) {
   ctx.provide('storageDomain', facility)
 
   let listed = options.sessions ?? []
-  const list = vi.fn(async (): Promise<SessionPersistenceSnapshot[]> =>
-    listed.map(header => ({ header, revision: SessionPersistenceRevision(`rev-${header.id}`) })))
+  const list = vi.fn(async (
+    listOptions?: { excludeSessionIds?: ReadonlySet<string> },
+  ): Promise<SessionPersistenceSnapshot[]> =>
+    listed
+      .filter(header => listOptions?.excludeSessionIds?.has(header.id) !== true)
+      .map(header => ({ header, revision: SessionPersistenceRevision(`rev-${header.id}`) })))
   const open = vi.fn(() => { throw new Error('event bodies must not be opened') })
   const stat = vi.fn(() => { throw new Error('per-session stat must not be needed') })
   ctx.provide('sessionPersistence', { list, open, stat } as never)
@@ -268,6 +272,27 @@ describe('WorkspaceRegistry lifecycle and bootstrap', () => {
     expect(second.list).not.toHaveBeenCalled()
     expect(second.registry.list()).toEqual([])
     expect(storedState(pool)).toEqual({ initialized: true, workspaceIds: [], archivedSessionIds: [], pinnedSessionIds: [] })
+  })
+
+  it('indexes startup headers without archived sessions no Workspace references', async () => {
+    const dir = await makeDir('startup-archived-unreferenced')
+    const id = 'workspace-startup-archive'
+    const pool = storedPool([[id, record(dir, ['kept'])]], {
+      initialized: true,
+      workspaceIds: [id],
+      archivedSessionIds: ['kept', 'gone'],
+      pinnedSessionIds: [],
+    })
+    const result = await harness({
+      pool,
+      sessions: [header('kept', dir, 100), header('gone', dir, 200), header('active', dir, 300)],
+    })
+
+    expect(result.list).toHaveBeenCalledTimes(1)
+    const options = result.list.mock.calls[0]?.[0] as { excludeSessionIds?: ReadonlySet<string> } | undefined
+    expect(options?.excludeSessionIds).toEqual(new Set(['gone']))
+    // The referenced archived session stays indexed; the unreferenced one is skipped.
+    expect(result.registry.list()[0]!.sessionIds).toEqual(['kept'])
   })
 
   it('reuses partial records after a bootstrap record write fails', async () => {

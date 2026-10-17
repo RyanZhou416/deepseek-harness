@@ -210,7 +210,7 @@ export class WorkspaceRegistry extends Service {
       await this.replaceHeaderIndex(headers)
       await this.bootstrap(headers)
     } else if (this.table.size > 0) {
-      await this.replaceHeaderIndex(await this.listStoredHeaders())
+      await this.replaceHeaderIndex(await this.listStoredHeaders({ excludeArchived: true }))
     }
 
     await this.indexLiveSessions()
@@ -829,9 +829,31 @@ export class WorkspaceRegistry extends Service {
     }
   }
 
-  /** Every stored session's header, projected from the persistence snapshot listing. */
-  private async listStoredHeaders(): Promise<SessionHeader[]> {
-    const snapshots = await this.ctx.sessionPersistence.list()
+  /** Archive set entries no Workspace record references; their headers are not indexed at startup. */
+  private archivedHeaderExclusions(): ReadonlySet<SessionId> {
+    const state = this.requireState()
+    if (state.archivedSessionIds.length === 0) return new Set()
+    const referenced = new Set<SessionId>()
+    for (const id of state.workspaceIds) {
+      const record = this.requireTable().get(id) as WorkspaceRecord | undefined
+      if (record === undefined) continue
+      for (const sessionId of record.sessionIds) referenced.add(sessionId)
+    }
+    return new Set(state.archivedSessionIds.filter(id => !referenced.has(id)))
+  }
+
+  /**
+   * Every stored session's header, projected from the persistence snapshot listing.
+   * @param options - `excludeArchived` skips archived headers no Workspace record
+   * references: archived rows stay out of every default list, so indexing them
+   * would only repeat the persistence scan at startup.
+   * @returns Stored session headers.
+   */
+  private async listStoredHeaders(options?: { readonly excludeArchived?: boolean }): Promise<SessionHeader[]> {
+    const excluded = options?.excludeArchived === true ? this.archivedHeaderExclusions() : undefined
+    const snapshots = excluded === undefined || excluded.size === 0
+      ? await this.ctx.sessionPersistence.list()
+      : await this.ctx.sessionPersistence.list({ excludeSessionIds: excluded })
     return snapshots.map(snapshot => snapshot.header)
   }
 
