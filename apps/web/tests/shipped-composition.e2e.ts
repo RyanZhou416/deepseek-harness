@@ -543,6 +543,7 @@ it('assembles the shipped Web transport, catalog, guidance, and defaults', async
       "maxDelayMs": 10000,
       "maxRetries": 5,
       "mode": "normal",
+      "providerWaitMaxMs": 10000,
       "retryableCodes": [
         "EMPTY_RESPONSE",
         "RATE_LIMIT",
@@ -561,6 +562,7 @@ it('assembles the shipped Web transport, catalog, guidance, and defaults', async
       "jitterRatio": 0.1,
       "maxDelayMs": 10000,
       "mode": "always",
+      "providerWaitMaxMs": 10000,
     }
   `)
   await ctx.settings.update('llm-pi-ai', {
@@ -576,6 +578,7 @@ it('assembles the shipped Web transport, catalog, guidance, and defaults', async
       "maxDelayMs": 10000,
       "maxRetries": 5,
       "mode": "normal",
+      "providerWaitMaxMs": 10000,
       "retryableCodes": [
         "EMPTY_RESPONSE",
         "RATE_LIMIT",
@@ -591,6 +594,7 @@ it('assembles the shipped Web transport, catalog, guidance, and defaults', async
       "jitterRatio": 0.1,
       "maxDelayMs": 10000,
       "mode": "always",
+      "providerWaitMaxMs": 10000,
     }
   `)
   // The directory tool is global; the deployment's default preset supplies the agent's remaining tools.
