@@ -16,7 +16,7 @@ import type {
 } from '@deepseek-ai/dsh-attachment'
 import type { Context as PiContext, ImageContent, Message as PiMessage, SystemMessage, TextContent, Tool as PiTool } from '@earendil-works/pi-ai'
 import { toPiAssistant } from './replay.ts'
-import { requestImageDimensions } from '@deepseek-ai/dsh-attachment'
+import { longEdgeDimensions, requestImageDimensions } from '@deepseek-ai/dsh-attachment'
 import { DEFAULT_REQUEST_IMAGE_MAX_BYTES, DEFAULT_REQUEST_IMAGE_PIXEL_BUDGET } from './config.ts'
 
 /** Join the text blocks of a harness message. */
@@ -97,32 +97,40 @@ function userContent(
   return content
 }
 
-function collectImageRefs(
-  blocks: readonly ContentBlock[],
-  refs: Map<AttachmentId, ImageAttachmentRef>,
-): void {
-  for (const block of blocks) {
-    if (block.type === 'image') {
-      if (block.offloaded !== true) refs.set(block.attachment.attachmentId, block.attachment)
-    }
-  }
-}
-
 async function prepareRequestImages(
   messages: readonly RequestMessage[],
   attachments: AttachmentStore,
-  budget: PiImageRequestBudget,
+  images: PiImageRequestContext,
   signal?: AbortSignal,
 ): Promise<Map<AttachmentId, RequestImageAttachment>> {
-  const refs = new Map<AttachmentId, ImageAttachmentRef>()
-  for (const message of messages) collectImageRefs(message.content, refs)
-  const orderedRefs = [...refs.values()]
-  const prepared = await Promise.all(orderedRefs.map(
-    ref => attachments.readImageRequest(ref, requestImageTarget(ref, budget), signal),
+  const budget = images.requestImagePolicy ?? {
+    maxPixels: DEFAULT_REQUEST_IMAGE_PIXEL_BUDGET,
+    maxBytes: DEFAULT_REQUEST_IMAGE_MAX_BYTES,
+  }
+  const retained = new Map<AttachmentId, { ref: ImageAttachmentRef; occurrences: number }>()
+  for (const message of messages) {
+    for (const block of message.content) {
+      if (block.type !== 'image' || block.offloaded === true) continue
+      const existing = retained.get(block.attachment.attachmentId)
+      if (existing === undefined) retained.set(block.attachment.attachmentId, { ref: block.attachment, occurrences: 1 })
+      else existing.occurrences += 1
+    }
+  }
+  const total = [...retained.values()].reduce((sum, entry) => sum + entry.occurrences, 0)
+  if (images.maxRequestImages !== undefined && total > images.maxRequestImages) {
+    throw new LlmError(
+      `pi-ai request images exceed the ${images.maxRequestImages}-image ceiling; ${total - images.maxRequestImages} more oldest occurrence(s) must be offloaded.`,
+      IMAGE_OFFLOAD_REQUIRED_CODE,
+      { offloadImages: total - images.maxRequestImages },
+    )
+  }
+  const ordered = [...retained.values()]
+  const prepared = await Promise.all(ordered.map(
+    entry => attachments.readImageRequest(entry.ref, requestImageTarget(entry.ref, budget, entry.occurrences), signal),
   ))
   const versions = new Map<AttachmentId, RequestImageAttachment>()
-  for (const [index, ref] of orderedRefs.entries()) {
-    versions.set(ref.attachmentId, prepared[index] as RequestImageAttachment)
+  for (const [index, entry] of ordered.entries()) {
+    versions.set(entry.ref.attachmentId, prepared[index] as RequestImageAttachment)
   }
   return versions
 }
@@ -264,6 +272,8 @@ export interface PiImageRequestContext {
   resolveImageAccess: ImageAttachmentAccessResolver
   /** Request-level bound on the base64-encoded payload of retained images; omission leaves the bound unchecked. */
   maxRequestImageBytes?: number
+  /** Protocol image-count ceiling for the resolved model. */
+  maxRequestImages?: number
   /** Route pixel and raw encoded-byte budgets. */
   requestImagePolicy?: PiImageRequestBudget
 }
@@ -274,6 +284,8 @@ export interface PiImageRequestBudget {
   maxPixels: number
   /** Encoded-byte target for one request image. */
   maxBytes: number
+  /** Protocol long-edge limit, resolved against the retained occurrence count. */
+  maxDimension?: (imageCount: number) => number
 }
 
 /**
@@ -282,8 +294,13 @@ export interface PiImageRequestBudget {
  * @param budget - resolved route pixel and byte limits.
  * @returns dimensions and byte target shared by serialization and screenshot coordinate mapping.
  */
-export function requestImageTarget(ref: ImageAttachmentRef, budget: PiImageRequestBudget): ImageRequestTarget {
-  return { ...requestImageDimensions(ref.width, ref.height, budget.maxPixels), maxBytes: budget.maxBytes }
+export function requestImageTarget(ref: ImageAttachmentRef, budget: PiImageRequestBudget, imageCount = 1): ImageRequestTarget {
+  const dimensions = requestImageDimensions(ref.width, ref.height, budget.maxPixels)
+  const limit = budget.maxDimension?.(imageCount)
+  const capped = limit !== undefined && Math.max(dimensions.width, dimensions.height) > limit
+    ? longEdgeDimensions(ref.width, ref.height, limit)
+    : dimensions
+  return { ...capped, maxBytes: budget.maxBytes }
 }
 
 /**
@@ -333,13 +350,10 @@ async function toPiContextWithImages(
   onReplayDegrade?: (reason: string) => void,
 ): Promise<PiContext> {
   const { attachments, resolveImageAccess, maxRequestImageBytes } = images
-  const requestImagePolicy = images.requestImagePolicy ?? {
-    maxPixels: DEFAULT_REQUEST_IMAGE_PIXEL_BUDGET,
-    maxBytes: DEFAULT_REQUEST_IMAGE_MAX_BYTES,
-  }
+
   assertSupportedHistory(options.messages)
   const split = splitSystemPrompt(options)
-  const requestImages = await prepareRequestImages(split.messages, attachments, requestImagePolicy, options.signal)
+  const requestImages = await prepareRequestImages(split.messages, attachments, images, options.signal)
   if (maxRequestImageBytes !== undefined) {
     const offloadImages = requiredImageOffload(
       split.messages,

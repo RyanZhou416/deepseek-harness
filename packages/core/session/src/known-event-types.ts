@@ -44,6 +44,7 @@ export const KNOWN_SESSION_EVENT_TYPES: ReadonlySet<string> = new Set([
   'image/offload',
   'job/registered',
   'job/settled',
+  'llm/request-record',
   'llm/retry',
   'llm/retry-started',
   'model/selection',
