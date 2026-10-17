@@ -78,17 +78,23 @@ test('a second provider never loses the first one\'s accounts', async () => {
   assert.equal((await codex.load())?.snapshot?.models[0].id, 'gpt-5-codex')
 })
 
-test('concurrent writes of two accounts cannot clobber each other', async () => {
+test('concurrent writes across rounds never lose a sibling account', async () => {
   const path = await tempStorePath()
   const factory = catalogStore('grok', { path })
-  const accounts = ['alpha', 'beta', 'gamma', 'delta']
-  // Started together, without awaiting in between: an unserialized
-  // read-modify-write would let the last writer drop its siblings' entries.
-  await Promise.all(accounts.map(async (account, index) =>
-    await factory(account).save({ at: index, models: [{ id: `grok-${account}`, name: account }] })))
-  for (const [index, account] of accounts.entries()) {
-    const loaded = await factory(account).load()
-    assert.equal(loaded?.snapshot?.at, index, `${account} lost its entry`)
+  const accounts = ['alpha', 'beta', 'gamma', 'delta', 'epsilon']
+  for (let round = 0; round < 10; round++) {
+    // One settled entry each round that the batch below must preserve.
+    await factory('seed').save({ at: round, models: [{ id: 'grok-seed', name: 'Seed' }] })
+    // Started together, without awaiting in between: an unserialized
+    // read-modify-write would let the last writer drop its siblings, and a
+    // rename Windows refuses while another handle holds the file would fail
+    // the write outright (upstream issue #129).
+    await Promise.all(accounts.map(async account =>
+      await factory(account).save({ at: round, models: [{ id: `grok-${account}`, name: account }] })))
+    for (const account of ['seed', ...accounts]) {
+      const loaded = await factory(account).load()
+      assert.equal(loaded?.snapshot?.at, round, `round ${round}: ${account} lost its entry`)
+    }
   }
 })
 

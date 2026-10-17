@@ -350,6 +350,35 @@ async function readStore(path: string, onWarn?: (message: string) => void): Prom
   return store
 }
 
+/**
+ * Windows refuses to replace a file another handle holds open without
+ * `FILE_SHARE_DELETE` (an indexer, antivirus scan, or a second dsh profile
+ * reading the cache), surfacing as a transient `EPERM`/`EBUSY`/`EACCES` on
+ * `rename` (upstream issue #129). Retry briefly before giving the write up.
+ */
+const RENAME_RETRY_CODES: ReadonlySet<string> = new Set(['EPERM', 'EBUSY', 'EACCES'])
+const RENAME_RETRIES = 5
+const RENAME_RETRY_DELAY_MS = 20
+
+/**
+ * `rename` with a short bounded retry on share-mode conflicts.
+ * @param from - the temporary file written beside the target.
+ * @param to - the durable target path.
+ * @returns a promise resolving once the target carries the new bytes.
+ */
+async function renameWithRetry(from: string, to: string): Promise<void> {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      await rename(from, to)
+      return
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code
+      if (attempt >= RENAME_RETRIES || code === undefined || !RENAME_RETRY_CODES.has(code)) throw error
+      await new Promise(resolve => setTimeout(resolve, RENAME_RETRY_DELAY_MS * (attempt + 1)))
+    }
+  }
+}
+
 /** Persist the whole file atomically (tmp file + rename). */
 async function writeStore(store: StoredAccounts, path: string): Promise<void> {
   await mkdir(dirname(path), { recursive: true })
@@ -363,7 +392,7 @@ async function writeStore(store: StoredAccounts, path: string): Promise<void> {
   const file: CatalogFile = { version: CATALOG_FILE_VERSION, providers }
   try {
     await writeFile(tmp, JSON.stringify(file, null, 2))
-    await rename(tmp, path)
+    await renameWithRetry(tmp, path)
   } catch (error) {
     await rm(tmp, { force: true })
     throw error
