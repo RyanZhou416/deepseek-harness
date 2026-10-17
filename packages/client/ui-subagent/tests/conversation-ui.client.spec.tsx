@@ -27,7 +27,7 @@ const GRANDCHILD = 'grandchild' as SessionId
 const t: SubagentHeaderLineageProps['t'] = makeTranslate(zh)
 
 type CatalogFixtureEntry<Entry = SubagentCatalogEntry> = Entry extends SubagentCatalogEntry
-  ? Omit<Entry, 'createdAt'> & { activity: 'running' | 'inactive' }
+  ? Omit<Entry, 'createdAt'> & { activity: 'running' | 'inactive'; createdAt?: number }
   : never
 
 type CatalogFixture = { entries: readonly CatalogFixtureEntry[]; parentAvailable: boolean; state: SessionListState['projectionsBySession'][SessionId]['state']; error: SessionListState['projectionsBySession'][SessionId]['error'] }
@@ -37,11 +37,11 @@ function catalog(over: Partial<CatalogFixture> = {}): CatalogFixture {
     entries: [
       {
         id: CHILD, mode: 'continuable', label: 'worker',
-        activity: 'running',
+        activity: 'running', createdAt: 1,
       },
       {
         id: 'child-2' as SessionId, mode: 'one-shot',
-        label: 'reviewer', activity: 'inactive',
+        label: 'reviewer', activity: 'inactive', createdAt: 2,
       },
     ],
     parentAvailable: true,
@@ -78,7 +78,7 @@ function props(
     phase: 'ready',
     projectionsBySession: Object.fromEntries(Object.entries(catalogs).map(([id, catalog]) => [id, {
       state: catalog.state, error: catalog.error,
-      values: { subagentCatalog: catalog.entries.map(({ activity: _activity, ...entry }) => ({ ...entry, createdAt: 1 })) },
+      values: { subagentCatalog: catalog.entries.map(({ activity: _activity, createdAt, ...entry }) => ({ ...entry, createdAt: createdAt ?? 1 })) },
     }])) ,
   } satisfies SessionListState
   function useSessions<T>(select: (snapshot: SessionListState) => T): T {
@@ -193,6 +193,14 @@ describe('SubagentHeaderLineage', () => {
     hoverCatalog(screen.getByRole('button'))
     expect(screen.getByRole('treeitem', { name: /worker/ })).toBeTruthy()
     expect(screen.getByRole('treeitem', { name: /reviewer/ })).toBeTruthy()
+  })
+
+  it('orders each catalog level by creation time descending', () => {
+    render(<HeaderCatalog {...props(catalog())} />)
+    hoverCatalog(screen.getByRole('button'))
+    const rows = screen.getAllByRole('treeitem')
+    expect(rows[0]).toBe(screen.getByRole('treeitem', { name: /reviewer/ }))
+    expect(rows[1]).toBe(screen.getByRole('treeitem', { name: /worker/ }))
   })
 
   it('combines projected membership with Session activity on the closed trigger', () => {
@@ -316,14 +324,14 @@ describe('SubagentHeaderLineage', () => {
     const trigger = screen.getByRole('button', { name: /1 个子智能体，正在运行/ })
     fireEvent.keyDown(trigger, { key: 'ArrowDown' })
     await Promise.resolve()
-    expect(document.activeElement).toBe(screen.getByRole('treeitem', { name: /worker/ }))
+    expect(document.activeElement).toBe(screen.getByRole('treeitem', { name: /reviewer/ }))
 
     fireEvent.keyDown(document.activeElement as Element, { key: 'End' })
-    expect(document.activeElement).toBe(screen.getByRole('treeitem', { name: /reviewer/ }))
-    fireEvent.keyDown(document.activeElement as Element, { key: 'Home' })
     expect(document.activeElement).toBe(screen.getByRole('treeitem', { name: /worker/ }))
-    fireEvent.keyDown(document.activeElement as Element, { key: 'ArrowUp' })
+    fireEvent.keyDown(document.activeElement as Element, { key: 'Home' })
     expect(document.activeElement).toBe(screen.getByRole('treeitem', { name: /reviewer/ }))
+    fireEvent.keyDown(document.activeElement as Element, { key: 'ArrowUp' })
+    expect(document.activeElement).toBe(screen.getByRole('treeitem', { name: /worker/ }))
     fireEvent.keyDown(document.activeElement as Element, { key: 'Escape' })
     await Promise.resolve()
     expect(screen.queryByRole('tree')).toBeNull()
@@ -1019,7 +1027,7 @@ describe('SubagentHeaderLineage', () => {
     const trigger = screen.getByRole('button', { name: /1 个子智能体，正在运行/ })
     hoverCatalog(trigger)
     fireEvent.keyDown(screen.getByRole('tree'), { key: 'ArrowUp' })
-    expect(document.activeElement).toBe(screen.getByRole('treeitem', { name: /reviewer/ }))
+    expect(document.activeElement).toBe(screen.getByRole('treeitem', { name: /worker/ }))
     fireEvent.keyDown(trigger, { key: 'ArrowDown' })
     view.unmount()
     await Promise.resolve()
