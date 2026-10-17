@@ -2364,6 +2364,9 @@ importers:
       '@deepseek-ai/dsh-llm-pi-ai':
         specifier: workspace:*
         version: link:../../llm/llm-pi-ai
+      '@deepseek-ai/dsh-llm-request-record':
+        specifier: workspace:*
+        version: link:../../llm/llm-request-record
       '@deepseek-ai/dsh-llm-retry':
         specifier: workspace:*
         version: link:../../llm/llm-retry
@@ -2664,6 +2667,9 @@ importers:
       '@deepseek-ai/dsh-fs-local':
         specifier: workspace:*
         version: link:../../fs/fs-local
+      '@deepseek-ai/dsh-goal-round-driver':
+        specifier: workspace:*
+        version: link:../../goal/goal-round-driver
       '@deepseek-ai/dsh-jobs-local':
         specifier: workspace:*
         version: link:../../jobs/jobs-local

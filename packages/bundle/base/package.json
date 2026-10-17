@@ -60,6 +60,7 @@
     "@deepseek-ai/dsh-api-gateway": "workspace:*",
     "@deepseek-ai/dsh-api-remote-access": "workspace:*",
     "@deepseek-ai/dsh-llm": "workspace:*",
+    "@deepseek-ai/dsh-llm-request-record": "workspace:*",
     "@deepseek-ai/dsh-llm-deepseek-api-key": "workspace:*",
     "@deepseek-ai/dsh-llm-deepseek-account": "workspace:*",
     "@deepseek-ai/dsh-llm-pi-ai": "workspace:*",

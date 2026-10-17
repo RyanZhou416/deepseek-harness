@@ -144,6 +144,15 @@
       config:
         root: !!js dshHomePath('sessions')
 
+    # Every Messages request records what it is about to send into its own session log and waits
+    # for that record to reach durable storage before the provider sees any bytes. The bound is
+    # the deployment's: a stalled durability listener must not hold a model request open
+    # indefinitely.
+    - id: llm-request-record
+      name: '@deepseek-ai/dsh-llm-request-record'
+      config:
+        flushTimeoutMs: 5000
+
     # Durable image bytes live outside the append-only session log. Messages
     # keep content-addressed references that this shared backend resolves for
     # provider requests and authorized history reads.
