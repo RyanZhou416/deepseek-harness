@@ -28,13 +28,13 @@
 |---|---|---|
 | Fork remote | `origin = https://github.com/RyanZhou416/deepseek-harness.git` | 唯一常规推送目标 |
 | Official remote | `upstream = https://github.com/deepseek-ai/deepseek-harness.git` | 只用于 fetch 和合并官方 release tag |
-| Published fork | `master` after local integration | `dsh-v0.1.7-rc.1` 官方结构、32 GiB Windows Host、长任务保护与 fork-maintained plugin 基线；精确 SHA 用 Git 查询 |
-| Current official target | `dsh-v0.1.7-rc.1` on 2026-09-24 | 精确不可变 tag；不要改合并已越过该 tag 的 rolling `upstream/master` |
+| Published fork | `master` after local integration | `dsh-v0.2.1-rc.2` 官方结构、32 GiB Windows Host、长任务保护与 fork-maintained plugin 基线；精确 SHA 用 Git 查询 |
+| Current official target | `dsh-v0.2.1-rc.2` on 2026-10-17 | 精确不可变 tag；不要改合并已越过该 tag 的 rolling `upstream/master` |
 | AgentTeams subtree | `fork-plugins/dsh-agent-teams` | 上游 `v0.1.20` + 本 fork RC.1 私有适配与有界未读邮箱缓存 |
 | Context subtree | `fork-plugins/dsh-context` | 上游 `v0.55.0` + 本 fork 字段级投影、V4 header 计价和关闭 modal 性能优化 |
 | Subscriptions subtree | `fork-plugins/dsh-plugin-subscriptions` | 上游 `v0.9.4` + 本 fork RC.1/V4 私有适配与 pinned Claude Code 2.1.288 wire；凭据与 Session 格式不变 |
 
-当前维护的源码兼容基线是 `dsh-v0.1.7-rc.1`。整合采用官方 Agent 创建、handle-based Session persistence、Session format V4、通用 `session.updateQueue`、引用拥有的 Client Session、Plugin Manager、Subagent activation limits、cursorless Assistant frame、Web Terminal、SSH、MCP resources、Browser/Computer Use 和连接容错，再按本文的行为与测试补回仍缺失部分；后续合并禁止整体恢复旧版文件。
+当前维护的源码兼容基线是 `dsh-v0.2.1-rc.2`（合并分支 `integrate/upstream-0.2.1-rc.2`，合入 `master` 后成为发布基线）。整合采用官方 Agent 创建、handle-based Session persistence、Session format V4、通用 `session.updateQueue`、引用拥有的 Client Session、Plugin Manager、Subagent activation limits、cursorless Assistant frame、Web Terminal、SSH、MCP resources、Browser/Computer Use 和连接容错，再按本文的行为与测试补回仍缺失部分；后续合并禁止整体恢复旧版文件。
 
 RC.1 的 `SESSION_FORMAT_VERSION` 为 `4`；只读 open 可以准备受支持的历史 generation，写 open 在验证后发布 v4 successor。第三方插件即使磁盘数据可读，也必须重新构建并在隔离 profile 验证逻辑 API；旧代文件不得原地改写。
 
@@ -86,6 +86,13 @@ Delayed Assistant settlements commit at their sequence position without retiring
 
 **Focused verification.** Source Vitest suites under Session Controller, ui-conversation, ui-chat, ui-trajectory, ui-renderer, and ui-slots cover delayed commitment, immutable windows, tool preparation, isolated failures, and folding. [The recorded Turn-tail scenario](apps/web/tests/turn-tail-actions.e2e.ts) also asserts reply visibility and reachable tools after a later textless Step, including reload. Browser verification requires a coherent rebuilt artifact set and remains separate from source-only tests.
 
+### 0.2.1-rc.2 合并后的结构承接
+
+官方 0.2.1-rc.2 重组了若干承载本次 fork 行为的位置，`master` 上必须继续成立的事实如下：子代理创建统一走 `SubagentRuntime.startActivation(spec)`，被放弃的 `start`/`startContinuable` 不再存在；强制子模型策略在激活启动器前解析（`prepareModel` + `config.modelOverride`），AgentTeams 成员通过 host-only `startAgentTeamsMember` 符号绕过该策略；人工修订由消息 Definition 直接产出（键为 `revision:<replacesUserMessage>`，携带 `editedRange`），连续编辑把被取代区间取并集，历史行由此隐藏；Turn 流程成员按 Turn/Step 加 occurrence 判定，受保护回复之后的流程行仍让外层控制可用；工具行结果文本按需压平，折叠路径只调用 `hasResultText`；Client 模型目录在同代重载间保留、卸载清理，并承上官方的 `reasoningFor` 元数据；Client Session Manager 保留条目缓存、回退标题与控制基线规则，同时承上官方的 `migration-required` 投影状态与 subagent 地址解析。
+
+**Preservation rule.** 新结构下按上述位置补回行为，禁止整体恢复 RC.1 文件、恢复已删除的 `startContinuable` 或 `TURN_PROCESS_INDEPENDENT_KINDS` 之外的旧判定，也禁止把 `subagent/child-preset` 之外的新 waterfall 当作既有能力。AgentTeams 成员豁免只经 host-only 符号，不进入工具参数，也不向子孙继承。`editedRange` 只影响 Chat 可见性，不改动 Session 日志、成本历史或格式版本。
+
+**Focused verification.** `pnpm run build` 需保持九个门禁全绿；`tsc -p tsconfig.host.json` 与 `tsc -b tsconfig.client.json` 均为 0；`packages/subagent`（892 passed / 1 skipped）、`packages/api/session-controller/tests/manager.client.spec.ts`（111）、`packages/client/ui-chat/tests` 与 `packages/client/ui-tool/tests` 覆盖激活策略、目录身份、修订折叠与折叠路径惰性；`verify-export-jsdoc` 与 `verify-client-ui-i18n` 覆盖文档与本地化契约。
 ### Client startup graph updates
 
 The client module entry manager waits for graph updates queued during initial activation before Web boot audits entry readiness. Keep the existing serial queue and drain it until no newer queued operation replaces the observed promise; do not announce startup completion while an activation-triggered provider or consumer is still pending. This fix is independent of the withdrawn Session Browser plugin.
