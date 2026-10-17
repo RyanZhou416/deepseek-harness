@@ -12,6 +12,8 @@ interface ReferencedUserMessageNode extends UserMessageNode {
   readonly referenceLabels?: readonly string[]
   /** Skill names the same step's `skill-invocation` injections loaded. */
   readonly skillNames?: readonly string[]
+  /** Original conversation rows superseded by this committed revision. */
+  readonly editedRange?: { readonly start: number; readonly before: number }
 }
 
 interface ReferencedSteeringMessageNode extends SteeringMessageNode {

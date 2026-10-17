@@ -16,6 +16,7 @@ import type {
 } from '@deepseek-ai/dsh-client-ui-slots'
 import type { ObservableSnapshot } from '@deepseek-ai/dsh-client-store'
 import type { MarkdownFileMentions, MarkdownLabels } from '@deepseek-ai/dsh-client-ui-primitives'
+import type { SessionRequestId } from '@deepseek-ai/dsh-api-session-controller/types'
 import type {} from '@deepseek-ai/dsh-client-ui-layout/client'
 // Type-only: the Session-scope access Hook (`useAccess`) the Chat entries read.
 import type {} from '@deepseek-ai/dsh-client-ui-session/client'
@@ -310,6 +311,10 @@ export interface ChatViewInjected {
     /** Resolve one optional group without subscribing the root View to its data. */
     chatGroup: (key: string) => ObservableSnapshot<GroupSnapshot<ConversationGroupData<'chat'>> | undefined> | undefined
   }
+  /** Latest eligible user message; absent while the session cannot accept an edit. */
+  editableMessageSeq?: number | undefined
+  /** Create and open a revised continuation without the original prompt and reply. */
+  editLastMessage?: ((seq: number, text: string, requestId: SessionRequestId) => Promise<void>) | undefined
   /** Open one HTTP(S) message link at the selected destination, using an external tab if Sidebar Browser is unavailable. */
   openExternalLink: (url: string) => void
   openFile: (path: string, options?: OpenFileOptions) => Promise<void>
