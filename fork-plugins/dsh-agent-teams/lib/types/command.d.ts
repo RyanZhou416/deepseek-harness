@@ -9,6 +9,10 @@ declare module '@deepseek-ai/dsh-llm' {
             readonly goal?: string;
             readonly profile?: string;
         };
+        'agent-teams-host': {
+            readonly kind: 'agent-teams-host';
+            readonly plugin: 'dsh-agent-teams';
+        };
     }
 }
 /**
