@@ -2287,6 +2287,12 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
         parameters: [{ name: 'options', description: 'optional cancellation.' }],
         returns: 'one snapshot per stored session.',
       },
+      {
+        signature: 'readWindow?(id: SessionId, request?: SessionWindowRequest): Promise<SessionWindow | undefined>',
+        description: 'Read one bounded history window from a stored generation.\n\nOptional capability: backends without a random-access generation index omit it, and consumers must fall back to `open` plus a full read. An implementation returns `undefined` when it cannot establish a validated window (missing or stale index, unsupported format, concurrent change), never a partially validated guess.',
+        parameters: [{ name: 'id', description: 'the stored session to read.' }, { name: 'request', description: 'optional cancellation, upper bound, and backwards cursor.' }],
+        returns: 'the contiguous window, or `undefined` when the backend cannot serve one.',
+      },
     ],
   },
   {
@@ -2362,6 +2368,12 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
         returns: 'the snapshot; `values` is empty when no selected client-visible unit is registered.',
       },
       {
+        signature: 'wireKeys(): readonly Extract<keyof SessionProjectionMap, string>[]',
+        description: 'Every registered client-visible key, in registration order: the complete key set one `snapshot` cut carries for the current composition. A cached block that omits one of these keys is partial, and a consumer that needs a complete baseline must not seed client values from it — adopting it would clear the values of the keys it omits. Host-only units never appear; the set follows registration, so it changes as domains load and unload.',
+        parameters: [],
+        returns: 'the registered client-visible keys; empty when no unit has a wire view.',
+      },
+      {
         signature: 'cachedSnapshot( session: Session, keys?: readonly Extract<keyof SessionProjectionMap, string>[], excludeKeys?: ReadonlySet<string>, ): ProjectionSnapshot | undefined',
         description: 'Read only already-materialized client-visible cells without folding history. Values may trail the live Session and are therefore hints, not a complete baseline. Missing cells are omitted.',
         parameters: [{ name: 'session', description: 'attached Session whose cached cells are inspected.' }, { name: 'keys', description: 'optional wire keys to view.' }, { name: 'excludeKeys', description: 'keys omitted before viewing; exclusions also apply to explicitly selected keys.' }],
@@ -2411,6 +2423,12 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
         returns: 'a caller-owned observation lease.',
       },
       {
+        signature: 'async readWindow( sessionId: SessionId, request: SessionWindowRequest = {}, ): Promise<SessionWindowRead | undefined>',
+        description: 'Read one bounded stored-history window through the persistence backend\'s optional generation index, with the stored projection checkpoint when that checkpoint is a complete baseline for the window.\n\nBackends without `readWindow` return nothing here, and callers fall back to the full observation path. A window validates its own rows, not the complete log\'s cross-event relationships; exact replay consumers keep using readSession. The baseline is attached only when it does not lead the window `cursor` and carries every registered client-visible key; a baseline missing either condition is omitted, so a history opener falls back to the complete observation instead of seeding client values from a partial block.',
+        parameters: [{ name: 'sessionId', description: 'stored session to read.' }, { name: 'request', description: 'optional cancellation, upper bound, and backwards cursor.' }],
+        returns: 'the window plus its complete checkpoint projection baseline, or `undefined` when the backend cannot serve a validated window.',
+      },
+      {
         signature: 'abstract searchSessions( request: SessionSearchRequest, exec?: SessionSearchExecContext, ): Promise<SessionSearchPage<SessionSearchHit>>',
         description: 'Search the live-preferred logical corpus and group by session.',
         parameters: [{ name: 'request', description: 'query text, metadata filters, page size, and cursor.' }, { name: 'exec', description: 'optional cancellation control.' }],
@@ -2423,9 +2441,9 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
         returns: 'matching event hits and their target header from one indexed generation.',
       },
       {
-        signature: 'listSessions(signal?: AbortSignal): Promise<SessionRecord[]>',
+        signature: 'listSessions(signal?: AbortSignal, options?: { readonly excludeSessionIds?: ReadonlySet<SessionId> readonly excludeSubagentSessions?: boolean }): Promise<SessionRecord[]>',
         description: 'List the complete logical corpus using live-preferred records.',
-        parameters: [{ name: 'signal', description: 'optional cancellation for persistence listing.' }],
+        parameters: [{ name: 'signal', description: 'optional cancellation for persistence listing.' }, { name: 'options', description: 'session ids excluded before per-session reads (archived Sessions), and whether subagent Sessions are omitted.' }],
         returns: 'deterministic newest-first cloned session records.',
       },
       {
@@ -5613,7 +5631,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'GenerateOptions',
-    declaration: 'export interface GenerateOptions {\n    provider: string;\n    model: string;\n    reasoningEffort?: ReasoningEffortId;\n    messages: RequestMessage[];\n    system?: string;\n    tools?: ToolSchema[];\n    toolHistory?: ToolHistory;\n    temperature?: number;\n    maxTokens?: number;\n    stop?: string[];\n    signal?: AbortSignal;\n    sessionId?: Branded<\'SessionId\'>;\n    purpose?: \'compaction\' | \'session-title\';\n}',
+    declaration: 'export interface GenerateOptions {\n    provider: string;\n    model: string;\n    reasoningEffort?: ReasoningEffortId;\n    messages: RequestMessage[];\n    system?: string;\n    systemSections?: readonly SystemPromptSection[];\n    tools?: ToolSchema[];\n    toolHistory?: ToolHistory;\n    temperature?: number;\n    maxTokens?: number;\n    stop?: string[];\n    signal?: AbortSignal;\n    sessionId?: Branded<\'SessionId\'>;\n    purpose?: \'compaction\' | \'session-title\';\n}',
   },
   {
     name: 'GenericCallView',
@@ -7305,7 +7323,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'SessionListRequest',
-    declaration: 'export interface SessionListRequest {\n    readonly cursor?: string;\n}',
+    declaration: 'export interface SessionListRequest {\n    readonly includeArchived?: boolean;\n    readonly cursor?: string;\n}',
   },
   {
     name: 'SessionListValue',
@@ -7377,7 +7395,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'SessionPersistenceListOptions',
-    declaration: 'export interface SessionPersistenceListOptions {\n    readonly signal?: AbortSignal;\n}',
+    declaration: 'export interface SessionPersistenceListOptions {\n    readonly signal?: AbortSignal;\n    readonly excludeSessionIds?: ReadonlySet<SessionId>;\n    readonly excludeSubagentSessions?: boolean;\n}',
   },
   {
     name: 'SessionPersistenceOpenOptions',
@@ -7610,6 +7628,18 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   {
     name: 'SessionUpdateQueueValue',
     declaration: 'export interface SessionUpdateQueueValue {\n    readonly accepted: true;\n}',
+  },
+  {
+    name: 'SessionWindow',
+    declaration: 'export interface SessionWindow {\n    readonly header: SessionHeader;\n    readonly inheritedEventCount: SessionLogOffset;\n    readonly events: readonly SessionEvent[];\n    readonly cursor: number;\n    readonly hasMore: boolean;\n}',
+  },
+  {
+    name: 'SessionWindowRead',
+    declaration: 'export interface SessionWindowRead {\n    window: SessionWindow;\n    projections?: ProjectionSnapshot;\n}',
+  },
+  {
+    name: 'SessionWindowRequest',
+    declaration: 'export interface SessionWindowRequest {\n    readonly signal?: AbortSignal;\n    readonly beforeSeq?: number;\n    readonly maxEvents?: number;\n}',
   },
   {
     name: 'SessionWireEvent',
@@ -8086,6 +8116,10 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   {
     name: 'SystemPromptMessageSource',
     declaration: 'export interface SystemPromptMessageSource {\n    kind: \'system-prompt\';\n}',
+  },
+  {
+    name: 'SystemPromptSection',
+    declaration: 'export interface SystemPromptSection {\n    readonly name: string;\n    readonly text: string;\n    readonly stable: boolean;\n}',
   },
   {
     name: 'SystemPromptUpdate',

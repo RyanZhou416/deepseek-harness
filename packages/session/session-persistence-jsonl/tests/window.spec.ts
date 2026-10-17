@@ -147,14 +147,19 @@ describe('JsonlSessionPersistence.readWindow: index-free tail', () => {
     expect(window?.hasMore).toBe(false)
   })
 
-  it('falls back for beforeSeq paging, seeded headers, and invalid bounds', async () => {
+  it('serves beforeSeq paging and falls back for seeded headers and invalid bounds', async () => {
     const { persistence, root } = await mount('none')
     const id = 'window-fallbacks'
-    await store(persistence, id, turnLog(20))
+    const events = turnLog(20)
+    await store(persistence, id, events)
 
-    expect(await persistence.readWindow?.(SessionId(id), { beforeSeq: 10 })).toBeUndefined()
+    expectWindow(await persistence.readWindow?.(SessionId(id), { beforeSeq: 10 }), events.slice(0, 10))
+    const older = await persistence.readWindow?.(SessionId(id), { beforeSeq: 15, maxEvents: 5 })
+    expectWindow(older, events.slice(10, 15))
+    expect(older?.hasMore).toBe(true)
     expect(await persistence.readWindow?.(SessionId(id), { maxEvents: 0 })).toBeUndefined()
     expect(await persistence.readWindow?.(SessionId(id), { maxEvents: 1.5 })).toBeUndefined()
+    expect(await persistence.readWindow?.(SessionId(id), { beforeSeq: -1 })).toBeUndefined()
 
     const seededId = 'window-seeded'
     const seeded = await persistence.create({ ...meta(seededId, '/work'), isSeeded: true }, {
@@ -163,6 +168,7 @@ describe('JsonlSessionPersistence.readWindow: index-free tail', () => {
     await seeded.flush()
     await seeded.close()
     expect(await persistence.readWindow?.(SessionId(seededId))).toBeUndefined()
+    expect(await persistence.readWindow?.(SessionId(seededId), { beforeSeq: 1 })).toBeUndefined()
 
     const missing = await persistence.readWindow?.(SessionId('window-missing'))
     expect(missing).toBeUndefined()

@@ -824,3 +824,42 @@ describe('SessionProjectionRegistry drive', () => {
     expect(() => ctx.sessionProjections.snapshot(session)).toThrow()
   })
 })
+
+describe('SessionProjectionRegistry wire key enumeration', () => {
+  it('lists client-visible keys in registration order and excludes host-only units', async () => {
+    const { ctx } = await harness()
+    ctx.sessionProjections.register(marksUnit())
+    ctx.sessionProjections.register(countUnit())
+    ctx.sessionProjections.register(stableViewUnit(state => state.value))
+
+    expect(ctx.sessionProjections.wireKeys()).toEqual(['test/marks', 'test/stable-view'])
+  })
+
+  it('reports no client-visible keys for an empty registry or one holding only host-only units', async () => {
+    const { ctx } = await harness()
+    expect(ctx.sessionProjections.wireKeys()).toEqual([])
+    ctx.sessionProjections.register(countUnit())
+    expect(ctx.sessionProjections.wireKeys()).toEqual([])
+  })
+
+  it('counts one shared key once while any registrant of it remains', async () => {
+    const { ctx } = await harness()
+    const first = ctx.sessionProjections.register(marksUnit())
+    const second = ctx.sessionProjections.register(marksUnit())
+    expect(ctx.sessionProjections.wireKeys()).toEqual(['test/marks'])
+    first()
+    expect(ctx.sessionProjections.wireKeys()).toEqual(['test/marks'])
+    second()
+    expect(ctx.sessionProjections.wireKeys()).toEqual([])
+  })
+
+  it('drops a key when its registering fiber unloads (HMR safety)', async () => {
+    const { ctx } = await harness()
+    const fiber = await ctx.plugin(Object.assign((inner: Context) => {
+      inner.sessionProjections.register(marksUnit())
+    }, { inject: ['sessionProjections'] }))
+    expect(ctx.sessionProjections.wireKeys()).toEqual(['test/marks'])
+    await fiber.dispose()
+    expect(ctx.sessionProjections.wireKeys()).toEqual([])
+  })
+})

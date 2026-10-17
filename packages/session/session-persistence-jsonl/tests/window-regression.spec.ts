@@ -7,7 +7,7 @@
 
 import { Context } from '@deepseek-ai/cordis'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { appendFile, mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises'
+import { appendFile, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { MessageId, freezeMessage } from '@deepseek-ai/dsh-llm'
@@ -390,13 +390,20 @@ describe('JSONL readWindow: empty, invalid, and unavailable sources', () => {
     expect(window?.header.id).toBe(id)
   })
 
-  it('declines backwards paging and invalid bounds so callers keep the full read', async () => {
+  it('serves backwards paging and declines invalid bounds so callers keep the full read', async () => {
     const { persistence } = await mount('none')
     const id = 'window-declines'
     const events = turnLog(20)
     await store(persistence, id, events)
 
-    for (const beforeSeq of [0, 1, 10, 20, 21, 1_000]) {
+    expectWindow(await readWindow(persistence, id, { beforeSeq: 0 }), [])
+    expectWindow(await readWindow(persistence, id, { beforeSeq: 1 }), events.slice(0, 1))
+    expectWindow(await readWindow(persistence, id, { beforeSeq: 10 }), events.slice(0, 10))
+    expectWindow(await readWindow(persistence, id, { beforeSeq: 20, maxEvents: 5 }), events.slice(15, 20))
+    expectWindow(await readWindow(persistence, id, { beforeSeq: 21 }), events)
+    expectWindow(await readWindow(persistence, id, { beforeSeq: 1_000, maxEvents: 3 }), events.slice(-3))
+
+    for (const beforeSeq of [-1, 1.5, Number.NaN, Number.POSITIVE_INFINITY, -0, Number.MAX_SAFE_INTEGER + 1]) {
       expect(await readWindow(persistence, id, { beforeSeq })).toBeUndefined()
     }
     for (const maxEvents of [0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY]) {
@@ -478,29 +485,26 @@ describe('JSONL readWindow: empty, invalid, and unavailable sources', () => {
       .rejects.toMatchObject({ name: 'AbortError' })
   })
 
-  it('never serves a window affected by a missing, corrupt, or stale index sidecar', async () => {
-    // The durable generation index is deferred; until it lands this guards the
-    // required invariant that a sidecar can neither truncate nor corrupt a window.
+  it('keeps the index-free newest window independent of a damaged generation index', async () => {
     const mounted = await mount('none')
     const { persistence } = mounted
     const id = 'window-sidecar'
     const events = turnLog(60)
     await store(persistence, id, events)
     const path = logOf(mounted, id)
-    const sidecar = `${path}.window.json`
+    const sidecar = `${path}.window-index.json`
 
-    expectWindow(await readWindow(persistence, id, { maxEvents: 10 }), events.slice(-10))
-
+    // Build the durable index through a backwards page, then damage it: the
+    // newest window never consults the sidecar.
+    expectWindow(await readWindow(persistence, id, { beforeSeq: 50, maxEvents: 10 }), events.slice(40, 50))
     await writeFile(sidecar, '{"version":1,"frames":[')
     expectWindow(await readWindow(persistence, id, { maxEvents: 10 }), events.slice(-10))
 
-    const source = await stat(path)
     await writeFile(sidecar, JSON.stringify({
       version: 1,
-      source: { name: path, sizeBytes: source.size - 1, mtimeMs: 0 },
+      source: { sizeBytes: 0, mtimeMs: 0 },
       inheritedEventCount: 0,
-      eventCount: 3,
-      frames: [{ offset: 0, length: 1, events: 3, firstSeq: 0, lastSeq: 2 }],
+      frames: [],
     }))
     expectWindow(await readWindow(persistence, id, { maxEvents: 10 }), events.slice(-10))
 

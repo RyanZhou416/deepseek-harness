@@ -46,7 +46,7 @@ await ctx.sessionPersistence.flush()                           // backend-wide d
 
 服务级 `flush()` 排空每个活跃写句柄已路由的事件并把其会话实体化，效果与各句柄自己的 `flush` 完全相同；失败按会话聚合为一个 `AggregateError` 而不中途放弃清扫，清扫途中被关闭的句柄视同已 flush，因为 close 本身会持久排空。
 
-后端还可以提供可选的 `readWindow(id, { beforeSeq?, maxEvents?, signal? })` 能力。它返回一个 `SessionWindow`——存储的 header、其精确继承数量、一段连续的持久事件、最后一个被表示的 `cursor`，以及是否仍有更早事件——而无需实体化完整 Session。`beforeSeq` 让窗口在该 seq 之前结束（省略则读取最新窗口），`maxEvents` 在后端默认值与上限内约束结果。窗口是用于打开历史与向后分页的只读优化：后端校验所选记录及其连续 `seq`，而非完整日志的跨事件关系，因此恢复、写入与导出仍使用 `open` 加完整读取。后端如何服务窗口由其自身存储设计决定：具备随机访问 generation 索引的后端可以应答 `beforeSeq`，没有索引的后端则对该请求返回 `undefined`。没有该能力的后端省略它，无法建立已校验窗口的后端返回 `undefined`；两种情况下消费方都必须回退到完整读取路径，而不是把缺失的窗口当作空历史。
+后端还可以提供可选的 `readWindow(id, { beforeSeq?, maxEvents?, signal? })` 能力。它返回一个 `SessionWindow`——存储的 header、其精确继承数量、一段连续的持久事件、最后一个被表示的 `cursor`，以及是否仍有更早事件——而无需实体化完整 Session。`beforeSeq` 让窗口在该 seq 之前结束（省略则读取最新窗口），`maxEvents` 在后端默认值与上限内约束结果。窗口是用于打开历史与向后分页的只读优化：后端校验所选记录及其连续 `seq`，而非完整日志的跨事件关系，因此恢复、写入与导出仍使用 `open` 加完整读取。后端如何服务窗口由其自身存储设计决定：随产品交付的 JSONL 后端在每个当前 generation 旁持久化可重建的解码索引，并只读取所选段来应答 `beforeSeq`；没有此类索引的后端则对该请求返回 `undefined`。没有该能力的后端省略它，无法建立已校验窗口的后端返回 `undefined`；两种情况下消费方都必须回退到完整读取路径，而不是把缺失的窗口当作空历史。
 
 每一次日志读写都流经返回的 `SessionHandle`；不存在按 id 寻址的 append 或 load 方法。`handle.read(offset?, length?)` 返回 `{ eventState, events }`：外层 slice 属于调用方，`eventState` 则区分由调用方独占的 `detached` 事件图与可能同时位于后端缓存中的 `shared-frozen` 事件图。该状态由生成方确定，即使切片为空也会保留。两种状态都能直接接管而无需复制；需要可变事件的消费方必须先克隆事件。读取绝不包含撕裂尾部，同一句柄上的重复读取绝不会观察到比先前读取更旧的状态，写句柄也能读到自己成功的 append。`handle.append(events)` 追加一个连续批次，其第一个 `seq` 等于已存储 next-seq；完成时的持久化是尽力而为的——批次被接受、有序，并对同一后端实例上的读取可见，只有完成的 `flush` 才承诺它在崩溃后依然存在（交付的 JSONL 后端恰好会立即持久化每个批次）。`handle.flush()` 是持久性屏障，同时把空的已创建会话实体化，使其可被持久列出。`handle.close()` 幂等且不可取消：读句柄释放本地资源；写句柄完成待处理的持久化并释放写所有权。一旦某次 `append` 或 `flush` 完成，其后在同一后端实例上开始的读取——无论经由任何句柄，还是经由 `stat`/`list`——至少能观察到该前缀。
 
@@ -89,7 +89,7 @@ await ctx.sessionPersistence.flush()                           // backend-wide d
 - **无损 JSON 数据。** 批次与 header 经过共享的单遍校验并快照边界（`materializeAppendBatch`/`materializeCreateHeader`）；无法序列化的载荷在调用处被拒绝。
 - **持久性。** `append` 尽力而为地持久化；`flush`——逐句柄或服务级——是承诺存储并同时把空会话实体化的屏障。
 - **遇到未知或无效格式时拒绝读取。** `validateStoredEvents` 拒绝未知事件词汇与已废弃的预发布形态；`assertVersion` 拒绝外来格式版本。分片让出事件循环来采纳事件的后端先对整份日志运行 `assertStoredEventTypes`，再逐条调用 `adoptStoredEvent`，使更新版本写入的日志仍以"不支持"而非"损坏"被拒绝。
-- **要么返回已校验窗口，要么不返回。** 可选的 `readWindow` 要么返回连续且已逐行校验的 `SessionWindow`，要么返回 `undefined`；它绝不基于未校验切片猜测，消费方则回退到完整读取。
+- **要么返回已校验窗口，要么不返回。** 可选的 `readWindow` 要么返回连续且已逐行校验的 `SessionWindow`，要么返回 `undefined`；它绝不基于未校验切片猜测，消费方则回退到完整读取。后端可以持久化可重建索引来服务 `beforeSeq`，但该索引绝不替代对所选行的解码与校验。
 - **每个后端实例单写者。** 提供方的进程内认领在 `create`/`open('write')` 时取得，在句柄关闭时释放。
 
 ### 源码地图

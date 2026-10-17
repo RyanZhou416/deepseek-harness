@@ -390,6 +390,26 @@ Exact reads, filters, and traces are backend-independent concrete behavior. A ba
 observeSession( sessionId: SessionId, options: SessionObservationOptions = {}, ): Promise<SessionObservation>
 
 /**
+ * Read one bounded stored-history window through the persistence backend's
+ * optional generation index, with the stored projection checkpoint when that
+ * checkpoint is a complete baseline for the window.
+ *
+ * Backends without `readWindow` return nothing here, and callers fall back to
+ * the full observation path. A window validates its own rows, not the
+ * complete log's cross-event relationships; exact replay consumers keep
+ * using {@link readSession}. The baseline is attached only when it does not
+ * lead the window `cursor` and carries every registered client-visible key;
+ * a baseline missing either condition is omitted, so a history opener falls
+ * back to the complete observation instead of seeding client values from a
+ * partial block.
+ * @param sessionId - stored session to read.
+ * @param request - optional cancellation, upper bound, and backwards cursor.
+ * @returns the window plus its complete checkpoint projection baseline, or
+ *   `undefined` when the backend cannot serve a validated window.
+ */
+async readWindow( sessionId: SessionId, request: SessionWindowRequest = {}, ): Promise<SessionWindowRead | undefined>
+
+/**
  * Search the live-preferred logical corpus and group by session.
  * @param request - query text, metadata filters, page size, and cursor.
  * @param exec - optional cancellation control.
@@ -408,9 +428,10 @@ abstract searchEvents( request: SessionEventSearchRequest, exec?: SessionSearchE
 /**
  * List the complete logical corpus using live-preferred records.
  * @param signal - optional cancellation for persistence listing.
+ * @param options - session ids excluded before per-session reads (archived Sessions), and whether subagent Sessions are omitted.
  * @returns deterministic newest-first cloned session records.
  */
-listSessions(signal?: AbortSignal): Promise<SessionRecord[]>
+listSessions(signal?: AbortSignal, options?: { readonly excludeSessionIds?: ReadonlySet<SessionId> readonly excludeSubagentSessions?: boolean }): Promise<SessionRecord[]>
 
 /**
  * Read and replay-validate one complete logical session log without making it live.
@@ -505,7 +526,7 @@ async traceEvent(request: SessionEventTraceRequest, signal?: AbortSignal): Promi
 async readEvent(request: SessionEventReadRequest, signal?: AbortSignal): Promise<SessionEventWindow>
 ```
 
-Types: [SessionId](core.zh.md) · [SessionTitleSnapshot](session-title.zh.md)
+Types: [SessionId](core.zh.md) · [SessionTitleSnapshot](session-title.zh.md) · [SessionWindowRequest](persistence.zh.md)
 
 Source: [`packages/session-query/session-query/src/index.ts`](../../packages/session-query/session-query/src/index.ts)
 <!-- END GENERATED cordis-surface -->

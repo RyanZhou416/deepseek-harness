@@ -133,6 +133,7 @@ export class ApiSessionList {
   /**
    * Read every visible attached and persisted Session without activating an Agent.
    * @param signal - optional cancellation for persistence reads and summary generation.
+   * @param options - when `includeArchived` is true, archived Sessions are listed too.
    * @returns visible Session summaries ordered by activity.
    */
   async list(signal?: AbortSignal, options?: { readonly includeArchived?: boolean }): Promise<SessionSummary[]> {

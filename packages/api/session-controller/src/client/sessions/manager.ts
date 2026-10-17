@@ -437,7 +437,11 @@ export class SessionManager {
     return this.refreshList(true)
   }
 
-  /** Full refresh via session.list (single-flight within one Host generation). */
+  /**
+   * Full refresh via session.list (single-flight within one Host generation).
+   * @param includeArchived - whether the pull must also include archived rows.
+   * @returns completion of the refresh.
+   */
   refreshList(includeArchived = false): Promise<void> {
     if (includeArchived && this.listInflight !== null) return this.listInflight.then(() => this.refreshList(true))
     if (this.listInflight !== null) return this.listInflight

@@ -33,7 +33,7 @@ Use `ctx.sessionQuery` from application code when you need to read or search ses
 |---|---|
 | `listSessions()` | Every logical session, newest first, with `live` and `persisted` availability flags and optional `formatStatus`; an explicit `excludeSessionIds` set skips those ids before any persistence read (the Host uses it for archived Sessions), and `excludeSubagentSessions` omits subagent-origin Sessions (the Host's default list does, because subagent rows are reached through their parent's catalog) |
 | `readSession(id)` | The complete replay-validated raw event log, without making the session live |
-| `readWindow(id, request?)` | One bounded stored-history window plus its checkpoint projection baseline, or `undefined` when persistence or the window capability is absent |
+| `readWindow(id, request?)` | One bounded stored-history window plus its complete checkpoint projection baseline when available, or `undefined` when persistence or the window capability is absent |
 | `filterSessions(filters)` | Sessions matching ANDed metadata and availability predicates |
 | `filterEvents(id, filters)` | Semantic event documents matching metadata and literal-text predicates |
 | `readTitleSnapshots(ids)` | The latest folded title per session, bound to its source header |
@@ -45,7 +45,7 @@ Use `ctx.sessionQuery` from application code when you need to read or search ses
 
 Body-free records expose only `SessionHeader.isSeeded`. Reads that return event bodies (`readSession`, `readSurface`, `readEvent`) and retained `SessionObservation` values also carry the exact `inheritedEventCount`, so callers can distinguish inherited and owned events without inferring a cut from the log.
 
-`readWindow` reads a bounded stored-history window through the persistence backend's optional window capability. It returns `{ window, projections? }`: the validated contiguous window and, when the mounted projection cache holds a matching checkpoint, a `ProjectionSnapshot` whose `asOfSeq` is the checkpoint's own stored watermark, not a claim about the window cursor. Treat that block as a baseline that a later exact observation supersedes. A checkpoint whose `asOfSeq` is ahead of the window `cursor` is dropped, because it cannot describe that stored window. The query layer delegates without reading the complete log and returns `undefined` when the capability is missing; consumers then fall back to their own exact read path. A window validates its selected rows, not the complete log's cross-event relationships, so replay-validating consumers keep using `readSession`.
+`readWindow` reads a bounded stored-history window through the persistence backend's optional window capability. It returns `{ window, projections? }`: the validated contiguous window and, when the mounted projection cache holds a complete checkpoint for that Session, a `ProjectionSnapshot` whose `asOfSeq` is the checkpoint's own stored watermark, not a claim about the window cursor. The query layer attaches that baseline only when `asOfSeq` does not lead the window `cursor` and the block carries every key the mounted projection registry declares client-visible; a checkpoint missing either condition is omitted, so a consumer falls back to its exact path instead of seeding client values from a partial block. Without a mounted registry only the watermark rule applies. Treat an attached block as a baseline that a later exact observation supersedes; it may trail the window cursor. The query layer delegates without reading the complete log and returns `undefined` when the capability is missing. A window validates its selected rows, not the complete log's cross-event relationships, so replay-validating consumers keep using `readSession`.
 
 ### Filters
 
@@ -153,7 +153,7 @@ These limits define when this package is a poor fit or needs special operational
 - **No caller authorization** — this is trusted context-wide infrastructure; a model tool or UI must constrain which sessions its caller may inspect.
 - **No provider coordinator or fallback** — the service is abstract over search, so a composition must mount a concrete backend; there is no search-provider registry or fallback implementation.
 - **Exact reads replay whole logs** — `readSession`, `readSurface`, `filterEvents`, and event traces load and validate the complete logical log, so very large histories pay full inspection per call; `listSessions` stays lightweight.
-- **Window reads are validated slices, not exact observations** — `readWindow` returns boundedly read rows with a checkpoint baseline that may be partial or stale and no complete-log replay; it does not replace `readSession` validation or an exact `observeSession` cut.
+- **Window reads are validated slices, not exact observations** — `readWindow` returns boundedly read rows with a complete checkpoint baseline or none, and no complete-log replay; an attached baseline may trail the window cursor, and it does not replace `readSession` validation or an exact `observeSession` cut.
 - **Literal text scan, not full-text search** — the `text` filter scans extracted documents with a regular expression and does not rank; ranked search requires the mounted backend.
 
 <a id="dev-note"></a>

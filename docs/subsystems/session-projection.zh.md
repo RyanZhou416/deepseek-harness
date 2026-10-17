@@ -256,6 +256,17 @@ stateOf<K extends keyof SessionProjectionStateMap>( session: Session, key: K, ):
 snapshot( session: Session, keys?: readonly Extract<keyof SessionProjectionMap, string>[], ): ProjectionSnapshot
 
 /**
+ * Every registered client-visible key, in registration order: the complete
+ * key set one `snapshot` cut carries for the current composition. A cached
+ * block that omits one of these keys is partial, and a consumer that needs a
+ * complete baseline must not seed client values from it — adopting it would
+ * clear the values of the keys it omits. Host-only units never appear; the
+ * set follows registration, so it changes as domains load and unload.
+ * @returns the registered client-visible keys; empty when no unit has a wire view.
+ */
+wireKeys(): readonly Extract<keyof SessionProjectionMap, string>[]
+
+/**
  * Read only already-materialized client-visible cells without folding history.
  * Values may trail the live Session and are therefore hints, not a complete
  * baseline. Missing cells are omitted.

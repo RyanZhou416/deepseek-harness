@@ -16,6 +16,7 @@ import {
 import { foldSessionTitle } from '@deepseek-ai/dsh-session-title'
 import type { SessionTitleSnapshot } from '@deepseek-ai/dsh-session-title'
 import type { SessionWindowRequest } from '@deepseek-ai/dsh-session-persistence'
+import type { ProjectionSnapshot } from '@deepseek-ai/dsh-session-projection'
 import type {
   SessionEventResultFilter,
   SessionEventSearchPage,
@@ -162,16 +163,21 @@ export abstract class SessionQueryEngine extends Service {
 
   /**
    * Read one bounded stored-history window through the persistence backend's
-   * optional generation index, with the stored projection checkpoint.
+   * optional generation index, with the stored projection checkpoint when that
+   * checkpoint is a complete baseline for the window.
    *
    * Backends without `readWindow` return nothing here, and callers fall back to
    * the full observation path. A window validates its own rows, not the
    * complete log's cross-event relationships; exact replay consumers keep
-   * using {@link readSession}.
+   * using {@link readSession}. The baseline is attached only when it does not
+   * lead the window `cursor` and carries every registered client-visible key;
+   * a baseline missing either condition is omitted, so a history opener falls
+   * back to the complete observation instead of seeding client values from a
+   * partial block.
    * @param sessionId - stored session to read.
    * @param request - optional cancellation, upper bound, and backwards cursor.
-   * @returns the window plus its checkpoint projection baseline, or `undefined`
-   *   when the backend cannot serve a validated window.
+   * @returns the window plus its complete checkpoint projection baseline, or
+   *   `undefined` when the backend cannot serve a validated window.
    */
   async readWindow(
     sessionId: SessionId,
@@ -188,9 +194,7 @@ export abstract class SessionQueryEngine extends Service {
       )
     }
     const checkpoint = this.ctx.get('sessionProjectionCache')?.cachedSnapshot(window.header)
-    // A checkpoint ahead of the stored window cannot describe it (detach-drain
-    // crash, torn-tail repair, restored log); opening then needs the full read.
-    const projections = checkpoint !== undefined && checkpoint.asOfSeq <= window.cursor
+    const projections = checkpoint !== undefined && this._baselineComplete(checkpoint, window.cursor)
       ? checkpoint
       : undefined
     return { window, ...projections === undefined ? {} : { projections } }
@@ -458,6 +462,25 @@ export abstract class SessionQueryEngine extends Service {
       )
     }
     return value
+  }
+
+  /**
+   * Whether one cached checkpoint is a complete projection baseline for a
+   * stored window: it must not lead the window cursor and must carry a value
+   * for every registered client-visible key. Without a mounted registry there
+   * is no key set to prove completeness against, so only the watermark rule
+   * applies. A checkpoint ahead of the window cannot describe it (detach-drain
+   * crash, torn-tail repair, restored log); a partial checkpoint would clear
+   * the client values of the keys it omits.
+   * @param checkpoint - cache block served for the window's Session header.
+   * @param cursor - last stored seq the window serves.
+   * @returns whether a history opener may seed client values from the block.
+   */
+  private _baselineComplete(checkpoint: ProjectionSnapshot, cursor: number): boolean {
+    if (checkpoint.asOfSeq > cursor) return false
+    const registry = this.ctx.get('sessionProjections')
+    return registry === undefined
+      || registry.wireKeys().every(key => Object.hasOwn(checkpoint.values, key))
   }
 }
 

@@ -49,7 +49,7 @@ import {
 import { ensureDurableDirectoryWin32, publishNewFileWin32 } from './win32.ts'
 import { verifyCurrentGenerationInWorker } from './migration-verifier.ts'
 import { prepareCatalogFacts } from './catalog-migration.ts'
-import { readJsonlTailWindow, windowEventLimit } from './window.ts'
+import { readJsonlIndexedWindow, readJsonlTailWindow, windowEventLimit } from './window.ts'
 import {
   JsonlGenerationSourceChangedError,
   JsonlGenerationUnsupportedMigrationError,
@@ -635,27 +635,32 @@ class JsonlSessionPersistence extends SessionPersistence {
   }
 
   /**
-   * Read one bounded tail window from the current generation without decoding
-   * the complete Session.
+   * Read one bounded window from the current generation without decoding the
+   * complete Session.
    *
-   * This backend serves only the newest slice: backwards paging, historical
-   * generations, seeded headers whose inherited cut needs the omitted prefix,
-   * and any source that fails tail validation return `undefined` so the caller
-   * uses the complete read path. Tail rows are decoded with a decoder seeded at
-   * the first selected row; the window is never a partially validated guess.
+   * The newest slice stays index-free. A `beforeSeq` request pages backwards
+   * through the durable generation index beside the selected generation: the
+   * sidecar is rebuilt from one full frame walk when it is missing, stale,
+   * corrupt, or inconsistent, and only the selected segments are read and
+   * decoded. Historical generations, seeded headers whose inherited cut needs
+   * the omitted prefix, invalid bounds, and any source that fails window
+   * validation return `undefined` so the caller uses the complete read path.
+   * Every returned row is decoded behind a seeded decoder; the window is never a
+   * partially validated guess.
    * @param id - the stored session to read.
    * @param request - optional cancellation, backwards cursor, and event bound.
-   * @returns the validated tail window, or `undefined` to request the full read.
+   * @returns the validated window, or `undefined` to request the full read.
    */
   override async readWindow(id: SessionId, request?: SessionWindowRequest): Promise<SessionWindow | undefined> {
     const signal = request?.signal
     signal?.throwIfAborted()
+    const beforeSeq = request?.beforeSeq
+    if (beforeSeq !== undefined
+      && (!Number.isSafeInteger(beforeSeq) || beforeSeq < 0 || Object.is(beforeSeq, -0))) return undefined
     await this.ensureRootEncoding()
     signal?.throwIfAborted()
     const path = await this.resolveCurrentLog(id, signal)
     if (path === undefined) return undefined
-    // Backwards paging needs a generation index; the newest slice does not.
-    if (request?.beforeSeq !== undefined) return undefined
     const maxEvents = windowEventLimit(request?.maxEvents)
     if (maxEvents === undefined) return undefined
     const headerLine = this.compression === 'zstd'
@@ -665,7 +670,7 @@ class JsonlSessionPersistence extends SessionPersistence {
     let headerValue: unknown
     let meta: SessionHeader
     try {
-      headerValue = JSON.parse(headerLine) as unknown
+      headerValue = JSON.parse(headerLine)
       assertNoRetiredHeaderFields(headerValue)
       const classified = sessionFormatCatalog.readHeader(headerValue)
       if (classified.status !== 'current') return undefined
@@ -674,9 +679,31 @@ class JsonlSessionPersistence extends SessionPersistence {
       return undefined
     }
     await this.assertStoredIdentity(path, SESSION_FORMAT_VERSION, meta, id, signal)
-    // The inherited cut lives in the omitted prefix; a tail read cannot
+    // The inherited cut lives in the omitted prefix; a window read cannot
     // establish it, so a seeded history keeps the complete read path.
     if (meta.isSeeded) return undefined
+    if (beforeSeq !== undefined) {
+      let indexed: Awaited<ReturnType<typeof readJsonlIndexedWindow>>
+      try {
+        indexed = await readJsonlIndexedWindow(
+          path, this.compression, headerValue, headerLine, beforeSeq, maxEvents, signal,
+        )
+      } catch {
+        signal?.throwIfAborted()
+        return undefined
+      }
+      if (indexed === undefined) return undefined
+      // Only an unseeded generation reaches this path, so its validated cut is zero.
+      if (indexed.inheritedEventCount !== 0) return undefined
+      const adopted = await adoptStoredEventsCooperatively(meta, [...indexed.events], this.locate(meta), signal)
+      return {
+        header: meta,
+        inheritedEventCount: SessionLogOffset(0),
+        events: adopted.events,
+        cursor: adopted.events.at(-1)?.seq ?? -1,
+        hasMore: indexed.hasMore,
+      }
+    }
     const source = await readStableJsonlFile(path, signal)
     signal?.throwIfAborted()
     let window: Awaited<ReturnType<typeof readJsonlTailWindow>>

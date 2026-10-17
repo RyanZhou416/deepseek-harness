@@ -353,6 +353,24 @@ export class SessionProjectionRegistry extends Service {
   }
 
   /**
+   * Every registered client-visible key, in registration order: the complete
+   * key set one `snapshot` cut carries for the current composition. A cached
+   * block that omits one of these keys is partial, and a consumer that needs a
+   * complete baseline must not seed client values from it — adopting it would
+   * clear the values of the keys it omits. Host-only units never appear; the
+   * set follows registration, so it changes as domains load and unload.
+   * @returns the registered client-visible keys; empty when no unit has a wire view.
+   */
+  wireKeys(): readonly Extract<keyof SessionProjectionMap, string>[] {
+    const keys: Extract<keyof SessionProjectionMap, string>[] = []
+    for (const registration of this.registrations.values()) {
+      if (registration.def.wire === undefined) continue
+      keys.push(registration.def.key as Extract<keyof SessionProjectionMap, string>)
+    }
+    return keys
+  }
+
+  /**
    * Read only already-materialized client-visible cells without folding history.
    * Values may trail the live Session and are therefore hints, not a complete
    * baseline. Missing cells are omitted.

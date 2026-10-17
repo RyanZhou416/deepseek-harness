@@ -1,18 +1,22 @@
 /**
- * Index-free tail windows over one current JSONL Session generation.
+ * Bounded windows over one current JSONL Session generation.
  *
- * A window selects the trailing physical frames, seeds the released v4 decoder
- * at the first selected row's seq, and decodes only those rows. It never
+ * The newest window stays index-free: it selects the trailing physical frames,
+ * seeds the released v4 decoder at the first selected row's seq, and decodes
+ * only those rows. A backwards (`beforeSeq`) window uses the durable generation
+ * index to read and decode only the selected decode segments. Neither path
  * establishes the complete-log relationships that `SessionLogScanner` checks;
  * readers that need those keep using the full read path.
  * @module @deepseek-ai/dsh-session-persistence-jsonl/window
  */
 
+import { open as openFile, type FileHandle } from 'node:fs/promises'
 import { KNOWN_SESSION_EVENT_TYPES } from '@deepseek-ai/dsh-session'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import type { SessionFormatEvent, SessionFormatMigrationContext } from '@deepseek-ai/dsh-session-format'
 import { assertV4RowAdmission, releasedV4SessionFormatCodec } from '@deepseek-ai/dsh-session-format-v3-to-v4'
 import type { JsonlCompression } from './format.ts'
+import { loadWindowIndex, readWindowIndexSource, rebuildWindowIndex, type JsonlWindowIndex, type JsonlWindowIndexFrame } from './window-index.ts'
 import { decompressZstdFrame, scanZstdFrames } from './zstd.ts'
 
 /** Default trailing event bound for one history window. */
@@ -26,6 +30,12 @@ export interface JsonlTailWindow {
   readonly events: readonly SessionEvent[]
   /** Whether durable events below the first returned seq still exist. */
   readonly hasMore: boolean
+}
+
+/** One validated backwards window read from a durable generation index. */
+export interface JsonlIndexedWindow extends JsonlTailWindow {
+  /** Exact inherited cut the index build validated; an unseeded generation reports `0`. */
+  readonly inheritedEventCount: number
 }
 
 /**
@@ -207,4 +217,216 @@ async function selectZstdTail(
   const firstSeq = (firstRow as { seq?: unknown }).seq
   if (typeof firstSeq !== 'number' || !Number.isSafeInteger(firstSeq) || firstSeq < 0) return undefined
   return { lines, firstSeq, selectedAll }
+}
+
+/** One selected decode segment paired with its plaintext bytes. */
+interface FramePlaintext {
+  readonly frame: JsonlWindowIndexFrame
+  readonly plaintext: Buffer
+}
+
+/**
+ * Read the events ending below `beforeSeq` from the durable generation index.
+ *
+ * The window selects the trailing index segments covering the requested row
+ * range, reads only their byte range, and seeds the released v4 decoder at the
+ * first selected segment. Rows in that segment below the requested start are
+ * decoded and dropped so the decoder's sequence gate keeps proving row
+ * numbering. Any missing, stale, corrupt, or inconsistent index returns
+ * `undefined` so the caller reads the complete log.
+ * @param sourcePath - selected current-generation file path.
+ * @param compression - configured physical encoding.
+ * @param headerValue - parsed physical header of the same revision.
+ * @param headerLine - exact header record text the index must reproduce.
+ * @param beforeSeq - exclusive end of the requested window.
+ * @param maxEvents - clamped positive window bound.
+ * @param signal - optional cancellation.
+ * @returns the validated backwards window, or `undefined` when it cannot be established.
+ */
+export async function readJsonlIndexedWindow(
+  sourcePath: string,
+  compression: JsonlCompression,
+  headerValue: unknown,
+  headerLine: string,
+  beforeSeq: number,
+  maxEvents: number,
+  signal?: AbortSignal,
+): Promise<JsonlIndexedWindow | undefined> {
+  signal?.throwIfAborted()
+  let loaded = await loadWindowIndex(sourcePath, compression, headerValue, headerLine, signal)
+  if (loaded === undefined) return undefined
+  for (let attempt = 0; ; attempt += 1) {
+    signal?.throwIfAborted()
+    const window = await decodeIndexedWindow(
+      sourcePath, compression, headerValue, loaded.index, beforeSeq, maxEvents, signal,
+    )
+    if (window !== undefined) return window
+    // A sidecar can be structurally valid and bound to the current revision yet
+    // still disagree with the bytes it claims to index. Rebuild once instead of
+    // disabling paging until the generation changes.
+    if (!loaded.cached || attempt > 0) return undefined
+    const rebuilt = await rebuildWindowIndex(sourcePath, compression, headerValue, headerLine, signal)
+    if (rebuilt === undefined) return undefined
+    loaded = { index: rebuilt, cached: false }
+  }
+}
+
+/** Select, read, and decode one backwards window from an accepted index. */
+async function decodeIndexedWindow(
+  sourcePath: string,
+  compression: JsonlCompression,
+  headerValue: unknown,
+  index: JsonlWindowIndex,
+  beforeSeq: number,
+  maxEvents: number,
+  signal: AbortSignal | undefined,
+): Promise<JsonlIndexedWindow | undefined> {
+  let totalEvents = 0
+  for (const frame of index.frames) totalEvents += frame.events
+  // A cut at or below the inherited boundary is empty; a cut past the log end
+  // keeps every durable event.
+  const boundary = Math.min(beforeSeq, totalEvents)
+  if (boundary === 0) {
+    return { events: [], hasMore: false, inheritedEventCount: index.inheritedEventCount }
+  }
+  const startRow = Math.max(0, boundary - maxEvents)
+  const firstFrame = frameContainingRow(index.frames, startRow)
+  const lastFrame = frameContainingRow(index.frames, boundary - 1)
+  if (firstFrame === undefined || lastFrame === undefined || firstFrame > lastFrame) return undefined
+  const selected = index.frames.slice(firstFrame, lastFrame + 1)
+  const first = selected[0] as JsonlWindowIndexFrame
+  const last = selected[selected.length - 1] as JsonlWindowIndexFrame
+  const bytes = await readGenerationRange(sourcePath, first.offset, last.offset + last.length, signal)
+  if (bytes === undefined) return undefined
+  signal?.throwIfAborted()
+  // The index describes one exact revision; a generation that changed while the
+  // segments were read can no longer be served from their offsets.
+  const current = await readWindowIndexSource(sourcePath, signal)
+  if (current === undefined
+    || current.sizeBytes !== index.source.sizeBytes
+    || current.mtimeMs !== index.source.mtimeMs) return undefined
+  const plains: FramePlaintext[] = []
+  for (const frame of selected) {
+    signal?.throwIfAborted()
+    const slice = bytes.subarray(frame.offset - first.offset, frame.offset - first.offset + frame.length)
+    if (compression !== 'zstd') {
+      plains.push({ frame, plaintext: slice })
+      continue
+    }
+    try {
+      plains.push({ frame, plaintext: await decompressZstdFrame(slice) })
+    } catch {
+      signal?.throwIfAborted()
+      return undefined
+    }
+  }
+  return decodeIndexedFrames(plains, startRow, boundary, headerValue, index.inheritedEventCount, signal)
+}
+
+/** Decode the selected segments and prove the returned slice is the requested dense range. */
+function decodeIndexedFrames(
+  plains: readonly FramePlaintext[],
+  startRow: number,
+  boundary: number,
+  headerValue: unknown,
+  inheritedEventCount: number,
+  signal: AbortSignal | undefined,
+): JsonlIndexedWindow | undefined {
+  const expected = boundary - startRow
+  const events: SessionEvent[] = []
+  let currentRow = -1
+  const context: SessionFormatMigrationContext = {
+    emitEvent(event: SessionFormatEvent) {
+      if (currentRow >= startRow) events.push(event as SessionEvent)
+    },
+    emitRun(run) {
+      if (currentRow < startRow) return
+      for (const event of run.expand()) events.push(event as SessionEvent)
+    },
+  }
+  let inherited: number
+  try {
+    const first = plains[0] as FramePlaintext
+    const decoder = releasedV4SessionFormatCodec.createDecoder(headerValue, 'strict', {
+      rowIndex: first.frame.firstRow,
+      eventCount: first.frame.firstSeq,
+      partial: true,
+    })
+    for (const { frame, plaintext } of plains) {
+      signal?.throwIfAborted()
+      if (plaintext.length === 0 || plaintext.at(-1) !== 0x0A) return undefined
+      let lineStart = 0
+      let row = frame.firstRow
+      let rows = 0
+      for (let newline = plaintext.indexOf(0x0A); newline !== -1; newline = plaintext.indexOf(0x0A, lineStart)) {
+        const line = plaintext.subarray(lineStart, newline)
+        lineStart = newline + 1
+        rows += 1
+        // The final selected segment may continue past the requested cut.
+        if (row >= boundary) continue
+        currentRow = row
+        row += 1
+        const parsed: unknown = JSON.parse(line.toString('utf8'))
+        assertV4RowAdmission(parsed, KNOWN_SESSION_EVENT_TYPES)
+        decoder.decodeRow(parsed, context)
+      }
+      if (rows !== frame.events) return undefined
+    }
+    inherited = decoder.finish(context)
+  } catch {
+    signal?.throwIfAborted()
+    return undefined
+  }
+  if (inherited !== inheritedEventCount) return undefined
+  if (events.length !== expected) return undefined
+  if (events.length > 0) {
+    if (Number((events[0] as SessionEvent).seq) !== startRow) return undefined
+    if (Number((events[events.length - 1] as SessionEvent).seq) !== boundary - 1) return undefined
+  }
+  return { events, hasMore: startRow > 0, inheritedEventCount }
+}
+
+/** Binary-search the segment containing one physical row. */
+function frameContainingRow(frames: readonly JsonlWindowIndexFrame[], row: number): number | undefined {
+  let low = 0
+  let high = frames.length - 1
+  while (low <= high) {
+    const middle = (low + high) >>> 1
+    const frame = frames[middle] as JsonlWindowIndexFrame
+    if (row < frame.firstRow) high = middle - 1
+    else if (row >= frame.firstRow + frame.events) low = middle + 1
+    else return middle
+  }
+  return undefined
+}
+
+/** Read one exact byte range without loading the omitted prefix. */
+async function readGenerationRange(
+  path: string,
+  start: number,
+  end: number,
+  signal: AbortSignal | undefined,
+): Promise<Buffer | undefined> {
+  const length = end - start
+  if (!Number.isSafeInteger(length) || length <= 0) return undefined
+  const buffer = Buffer.alloc(length)
+  let handle: FileHandle | undefined
+  try {
+    handle = await openFile(path, 'r')
+    let offset = 0
+    while (offset < length) {
+      signal?.throwIfAborted()
+      const { bytesRead } = await handle.read(buffer, offset, length - offset, start + offset)
+      if (bytesRead === 0) return undefined
+      offset += bytesRead
+    }
+  } catch {
+    // A vanished or unreadable generation keeps the window out; the complete
+    // read reports the storage fault.
+    signal?.throwIfAborted()
+    return undefined
+  } finally {
+    await handle?.close()
+  }
+  return buffer
 }

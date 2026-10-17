@@ -33,7 +33,7 @@ kind: "package-reference"
 |---|---|
 | `listSessions()` | 每个逻辑会话，最新的在前，带 `live` 与 `persisted` 可用性标志及可选 `formatStatus`；显式 `excludeSessionIds` 会在任何持久化读取之前跳过这些 id（Host 用它传入归档集合），`excludeSubagentSessions` 则省略子智能体来源的会话（Host 默认列表这样做，因为子智能体行通过其母会话的目录访问） |
 | `readSession(id)` | 经过回放校验的完整原始事件日志，且不会让该会话变为实时 |
-| `readWindow(id, request?)` | 一个有界存储历史窗口及其检查点投影基线；持久化或窗口能力缺失时为 `undefined` |
+| `readWindow(id, request?)` | 一个有界存储历史窗口，以及可用时其完整检查点投影基线；持久化或窗口能力缺失时为 `undefined` |
 | `filterSessions(filters)` | 匹配 AND 连接的元数据与可用性谓词的会话 |
 | `filterEvents(id, filters)` | 匹配元数据与字面文本谓词的语义事件文档 |
 | `readTitleSnapshots(ids)` | 每个会话的最新折叠标题，绑定到其来源 header |
@@ -45,7 +45,7 @@ kind: "package-reference"
 
 不带正文的记录只公开 `SessionHeader.isSeeded`。返回事件正文的读取（`readSession`、`readSurface`、`readEvent`）与保留的 `SessionObservation` 值还携带精确 `inheritedEventCount`，因此调用方无需从日志推断切点即可区分继承事件与自有事件。
 
-`readWindow` 通过持久化后端可选的窗口能力读取一个有界存储历史窗口。它返回 `{ window, projections? }`：已校验的连续窗口，以及当挂载的投影缓存持有匹配检查点时的一个 `ProjectionSnapshot`——其 `asOfSeq` 是检查点自身的存储水位，而不是关于窗口 cursor 的声明。把该块视为基线，后续精确观察会取代它。若检查点的 `asOfSeq` 超前于窗口 `cursor`，该检查点会被丢弃，因为它无法描述该存储窗口。查询层只做委派，不读取完整日志；能力缺失时返回 `undefined`，消费方随后回退到自己的精确读取路径。窗口校验所选行，而非完整日志的跨事件关系，因此需要回放校验的消费方继续使用 `readSession`。
+`readWindow` 通过持久化后端可选的窗口能力读取一个有界存储历史窗口。它返回 `{ window, projections? }`：已校验的连续窗口，以及当挂载的投影缓存持有该会话的完整检查点时的一个 `ProjectionSnapshot`——其 `asOfSeq` 是检查点自身的存储水位，而不是关于窗口 cursor 的声明。查询层只在 `asOfSeq` 不超前于窗口 `cursor`，且该块携带挂载的投影注册表声明为客户端可见的每个键时附加该基线；缺少任一条件的检查点会被省略，使消费方回退到自己的精确路径，而不是用部分块播种客户端值。未挂载注册表时只应用水位规则。把附加的块视为基线，后续精确观察会取代它；它可以落后于窗口 cursor。查询层只做委派，不读取完整日志；能力缺失时返回 `undefined`。窗口校验所选行，而非完整日志的跨事件关系，因此需要回放校验的消费方继续使用 `readSession`。
 
 ### 过滤器
 
@@ -153,7 +153,7 @@ kind: "package-reference"
 - **无调用方授权**——这是上下文范围内的可信基础设施；模型工具或 UI 必须限制调用方可检查的会话。
 - **无提供方协调器或回退**——服务在搜索上是抽象的，组合必须挂载具体后端；没有搜索提供方注册表或回退实现。
 - **精确读取回放整个日志**——`readSession`、`readSurface`、`filterEvents` 与事件追踪会加载并校验完整逻辑日志，因此非常大的历史每次调用都要付出完整检查；`listSessions` 保持轻量。
-- **窗口读取是已校验切片，而非精确观察**——`readWindow` 返回有界读取的行、可能部分或过期的检查点基线，且不做完整日志回放；它不替代 `readSession` 校验或 `observeSession` 的精确切点。
+- **窗口读取是已校验切片，而非精确观察**——`readWindow` 返回有界读取的行，检查点基线要么完整要么缺席，且不做完整日志回放；附加的基线可能落后于窗口 cursor，它不替代 `readSession` 校验或 `observeSession` 的精确切点。
 - **字面文本扫描，而非全文搜索**——`text` 过滤器用正则表达式扫描提取出的文档且不提供排名；带排名的搜索需要挂载后端。
 
 <a id="dev-note"></a>

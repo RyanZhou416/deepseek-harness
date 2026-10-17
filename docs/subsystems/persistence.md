@@ -410,6 +410,20 @@ abstract stat(id: SessionId, options?: SessionPersistenceStatOptions): Promise<S
  * @returns one snapshot per stored session.
  */
 abstract list(options?: SessionPersistenceListOptions): Promise<readonly SessionPersistenceSnapshot[]>
+
+/**
+ * Read one bounded history window from a stored generation.
+ *
+ * Optional capability: backends without a random-access generation index
+ * omit it, and consumers must fall back to `open` plus a full read. An
+ * implementation returns `undefined` when it cannot establish a validated
+ * window (missing or stale index, unsupported format, concurrent change),
+ * never a partially validated guess.
+ * @param id - the stored session to read.
+ * @param request - optional cancellation, upper bound, and backwards cursor.
+ * @returns the contiguous window, or `undefined` when the backend cannot serve one.
+ */
+readWindow?(id: SessionId, request?: SessionWindowRequest): Promise<SessionWindow | undefined>
 ```
 
 Types: [SessionId](core.md)

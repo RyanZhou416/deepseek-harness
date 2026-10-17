@@ -57,6 +57,7 @@ export class SessionCorpus {
   /**
    * List the complete logical corpus with live precedence and cloned headers.
    * @param signal - optional cancellation for persistence listing.
+   * @param options - optional archived/subagent id and origin exclusions for the stored pull.
    * @returns records in deterministic newest-first order.
    */
   async listSessions(signal?: AbortSignal, options?: {

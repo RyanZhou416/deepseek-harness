@@ -473,7 +473,7 @@ Gateway 每个 socket 只保留一枚待确认 Ping。未完成写入时，`buff
 
 ### 0.2.1-rc.2 落地记录
 
-2026-10-18：主检出 `C:\Project\deepseek-harness` 从 `5724be341b` 快进到 `7ce101ed64`（集成分支 tip），随后 `build.cmd` 重建并以 `run.cmd` 重启 Host；当前 Host 为 0.2.1-rc.2，Web GUI 在 3080。回滚锚点是 `5724be341b`，profile 清单备份在 `C:\Project\dsh-validation\landing\profile-backup`。
+2026-10-18：主检出 `C:\Project\deepseek-harness` 从集成分支 tip 快进到 0.2.1-rc.2，随后 `build.cmd` 重建并以 `run.cmd` 重启 Host；当前 Host 为 0.2.1-rc.2，Web GUI 在 3080。回滚锚点记录在 profile 清单备份 `C:\Project\dsh-validation\landing\profile-backup` 中。
 
 四个插件在这一代改为 **profile `link:` 到主检出** —— `@nanmicoder/dsh-agent-teams`、`dsh-context`、`dsh-plugin-subscriptions`、`@ryanzhou416/dsh-plugin-aether-shell` 都指向 `fork-plugins/<name>`。打包成 tgz 再装进 profile 这条路走不通：subscriptions 的依赖里有相对路径 `file:../releases/tormentalabs-claude-code-wire-compat-*.tgz`（脱离插件目录即失效），另有 6 个 `@oven/bun-*` 可选依赖会在安装时拉取大包。link 方式已由隔离 profile 冒烟与真实 profile 启动共同验证。
 
@@ -585,6 +585,14 @@ Lexical 的 history 在每个窗口内合并连续输入，而窗口从上一次
 
 `session-format-v3-to-v4` 只在 V3 step 已记录 `tool/call`、没有追加结果且同一 turn 随后以 `reason.kind: 'error'` 结束时，于 `step/end` 前插入 `TOOL_OUTCOME_UNKNOWN` 的 tool 角色错误结果，引用已记录的启动事件；它不执行工具，也不把已开始调用伪称为 `TOOL_NOT_STARTED`。正常完成轮次、后续新 step 和未关闭尾部继续拒绝，原始 V3 代际保持不变。上游合并须保留这一限定修复与原生 V4 的未结算调用拒绝规则。聚焦验证由 `packages/session/session-format-v3-to-v4/tests/error-turn-tools.spec.ts` 和 `packages/session/session-persistence-jsonl/tests/v3-error-tool-migration.spec.ts` 覆盖；一份 7,011 事件的真实 V3 日志经实际 JSONL 后端只读恢复为 7,012 个 V4 事件，源 SHA-256 未变，未发布后继文件。
 
+### Stored history window reads
+
+`SessionPersistence.readWindow` 是可选能力；JSONL 后端为当前代际提供尾部窗口和 `beforeSeq` 窗口。尾部窗口不依赖索引，只扫描 zstd 帧边界并解码尾部帧；`beforeSeq` 使用代际旁的 `<generation>.window-index.json`（按帧/行段记录 offset、firstRow、firstSeq、events，源 size/mtime 绑定，原子发布，缺失/过期/损坏时完整重建），只读取选中段。v4 解码器支持 `{rowIndex, eventCount, partial}` 种子起点；窗口校验选中行，完整跨事件关系校验仍属于 open/write/resume。seeded、历史代际、无效边界、帧/行不连续或无法建立索引时返回 `undefined`，history 回退完整读取。真实 161 MB / 182,347 事件会话实测：尾部 2000 事件约 0.21–0.34 s，首次 `beforeSeq` 含一次性建索引约 12–14 s，索引预热后 2000 事件页约 0.14–0.16 s，完整读取约 2.75–2.91 s；小日志的尾部窗口可能慢于完整读取，消费方应允许回退。
+
+**Preservation rule.** 上游合并后必须保留 `readWindow` 的可选回退语义、代际索引的 size/mtime 绑定与原子重建、窗口只做选中行校验（不得冒充完整 replay），以及 seeded/历史/损坏日志的完整读取回退。索引是派生缓存而不是事实来源：删除后只能触发重建，不能改写或删除源 generation。不要为窗口读取引入常驻多会话缓存。
+
+**Focused verification.** `packages/session/session-persistence-jsonl/tests/window*.spec.ts`、`packages/session-query/session-query/tests/window*.spec.ts`、`packages/api/session-controller/tests/*window*.host.spec.ts` 覆盖尾部/分页、索引重建、损坏/过期回退、投影完整性、真实后端 loadOlder 以及完整读取回退。
+
 ### Glob search-root guidance
 
 `packages/fs/tool-fs-search/src/glob.ts` 的系统提示和工具 schema 明确区分 `path` 搜索根与 `pattern` 结果过滤：已知目录时传入最窄的 `path`，超时后缩小目录再试，不能把 pattern 中的目录前缀当成遍历范围限制。该定制不修改 ripgrep argv、结果排序、权限或默认 30 秒预算。
@@ -613,7 +621,7 @@ RC.1 的 `verify-no-unknown-casts` 静态门禁除了官方 baseline，还读取
 
 ### Derived files
 
-`docs/config-catalog*`、`docs/subsystems/subagent*`、`docs/tool-catalog*`、`packages/extensions/tool-cordis/src/api-catalog.ts`、slot catalog、README/i18n sidecars 和 `pnpm-lock.yaml` 是上述 owner source 的派生物。合并时先保留官方生成物，再完成 source port，最后运行 generators；禁止只保留 generated diff。
+`docs/config-catalog*`、`docs/subsystems/subagent*`、`docs/tool-catalog*`、`packages/extensions/tool-cordis/src/api-catalog.ts`、slot catalog、README/i18n sidecars 和 `pnpm-lock.yaml` 是上述 owner source 的派生物；`<generation>.window-index.json` 是 JSONL 窗口读取的派生缓存。合并时先保留官方生成物，再完成 source port，最后运行 generators；禁止只保留 generated diff。
 
 当前主要决策记录为：[long-session hot paths](.agents/notes/implemented/bug-fix/2026-08-23-long-session-hot-paths.md)、[bounded transient retention](.agents/notes/implemented/bug-fix/2026-08-31-bounded-transient-runtime-retention.md)、[connection recovery control](.agents/notes/implemented/feature/2026-08-28-web-connection-recovery-control.md) 和 [steer-responsive Agent Teams](.agents/notes/implemented/feature/2026-08-30-steer-responsive-agent-team-work.md)。
 

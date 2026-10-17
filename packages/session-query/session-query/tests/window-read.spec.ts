@@ -1,4 +1,8 @@
-/** Independent coverage of the SessionQuery window read consumed by cold history. */
+/**
+ * Independent coverage of the SessionQuery window read consumed by cold
+ * history, including which stored projection checkpoints may become the
+ * opening baseline.
+ */
 
 import { Context } from '@deepseek-ai/cordis'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
@@ -156,11 +160,99 @@ describe('SessionQueryEngine.readWindow projection checkpoint baseline', () => {
 
     const result = await ctx.sessionQuery.readWindow(SESSION)
 
+    // No registry is mounted, so no client-visible key set exists to prove
+    // completeness against: the watermark rule alone decides.
     expect(cachedSnapshot).toHaveBeenCalledExactlyOnceWith(expected.header)
     expect(result?.projections).toEqual(baseline)
     expect(result?.projections?.asOfSeq).toBe(3)
     expect(result?.window.cursor).toBe(6)
     expect(result?.projections?.asOfSeq).not.toBe(result?.window.cursor)
+  })
+
+  it('keeps a baseline that carries every registered client-visible key', async () => {
+    const ctx = await queryContext()
+    const expected = storedWindow(header(), 5, 2)
+    ctx.provide('sessionPersistence', { readWindow: () => Promise.resolve(expected) } as never)
+    const baseline: ProjectionSnapshot = {
+      asOfSeq: SessionSeq(4),
+      values: { title: 'checkpointed' },
+    }
+    ctx.provide('sessionProjectionCache', { cachedSnapshot: () => baseline } as never)
+    ctx.provide('sessionProjections', { wireKeys: () => ['title'] } as never)
+
+    const result = await ctx.sessionQuery.readWindow(SESSION)
+
+    expect(result?.projections).toBe(baseline)
+  })
+
+  it('keeps a baseline whose watermark ends exactly at the window cursor', async () => {
+    const ctx = await queryContext()
+    const expected = storedWindow(header(), 5, 2)
+    ctx.provide('sessionPersistence', { readWindow: () => Promise.resolve(expected) } as never)
+    const baseline: ProjectionSnapshot = {
+      asOfSeq: SessionSeq(expected.cursor),
+      values: { title: 'checkpointed' },
+    }
+    ctx.provide('sessionProjectionCache', { cachedSnapshot: () => baseline } as never)
+    ctx.provide('sessionProjections', { wireKeys: () => ['title'] } as never)
+
+    const result = await ctx.sessionQuery.readWindow(SESSION)
+
+    expect(result?.projections).toBe(baseline)
+  })
+
+  it('drops a partial baseline that omits a registered client-visible key', async () => {
+    const ctx = await queryContext()
+    const expected = storedWindow(header(), 5, 2)
+    ctx.provide('sessionPersistence', { readWindow: () => Promise.resolve(expected) } as never)
+    const cachedSnapshot = vi.fn((): ProjectionSnapshot => ({
+      asOfSeq: SessionSeq(4),
+      values: { title: 'checkpointed' },
+    }))
+    ctx.provide('sessionProjectionCache', { cachedSnapshot } as never)
+    // The composition carries another client-visible key whose stored row is
+    // unusable, so the block is only a per-key hint: adopting it as the opening
+    // baseline would leave that key's client value cleared.
+    ctx.provide('sessionProjections', { wireKeys: () => ['title', 'sessionListMetadata'] } as never)
+
+    const result = await ctx.sessionQuery.readWindow(SESSION)
+
+    expect(cachedSnapshot).toHaveBeenCalledOnce()
+    expect(result).toEqual({ window: expected })
+    expect(result?.projections).toBeUndefined()
+  })
+
+  it('drops a complete baseline whose watermark leads the window cursor', async () => {
+    const ctx = await queryContext()
+    const expected = storedWindow(header(), 5, 2)
+    ctx.provide('sessionPersistence', { readWindow: () => Promise.resolve(expected) } as never)
+    const baseline: ProjectionSnapshot = {
+      asOfSeq: SessionSeq(expected.cursor + 1),
+      values: { title: 'ahead' },
+    }
+    ctx.provide('sessionProjectionCache', { cachedSnapshot: () => baseline } as never)
+    ctx.provide('sessionProjections', { wireKeys: () => ['title'] } as never)
+
+    const result = await ctx.sessionQuery.readWindow(SESSION)
+
+    expect(result).toEqual({ window: expected })
+    expect(result?.projections).toBeUndefined()
+  })
+
+  it('does not consult the registry when the cache holds no checkpoint', async () => {
+    const ctx = await queryContext()
+    const expected = storedWindow(header())
+    ctx.provide('sessionPersistence', { readWindow: () => Promise.resolve(expected) } as never)
+    const cachedSnapshot = vi.fn().mockReturnValue(undefined)
+    const wireKeys = vi.fn(() => ['title'])
+    ctx.provide('sessionProjectionCache', { cachedSnapshot } as never)
+    ctx.provide('sessionProjections', { wireKeys } as never)
+
+    const result = await ctx.sessionQuery.readWindow(SESSION)
+
+    expect(result).toEqual({ window: expected })
+    expect(cachedSnapshot).toHaveBeenCalledOnce()
+    expect(wireKeys).not.toHaveBeenCalled()
   })
 
   it('rejects a window from another Session before reading its checkpoint', async () => {
