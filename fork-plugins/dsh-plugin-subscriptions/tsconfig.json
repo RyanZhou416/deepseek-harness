@@ -36,6 +36,9 @@
       "@deepseek-ai/dsh-session-persistence-jsonl": [
         "../../packages/session/session-persistence-jsonl/lib/types/index.d.ts"
       ],
+      "@deepseek-ai/dsh-session-persistence": [
+        "../../packages/session/session-persistence/lib/types/index.d.ts"
+      ],
       "@deepseek-ai/dsh-loader-smoke": [
         "../../packages/test-support/loader-smoke/lib/types/index.d.ts"
       ],
