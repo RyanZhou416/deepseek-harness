@@ -32,7 +32,7 @@ import { canonicalHeader, headerEquals, ToolCallRecovery } from '@deepseek-ai/ds
 import { joinContextSections, renderContextSections, renderPrompt } from '@deepseek-ai/dsh-system-prompt'
 import type { PromptAssembly } from '@deepseek-ai/dsh-system-prompt'
 import type {} from '@deepseek-ai/dsh-session-projection'
-import type { Context } from '@deepseek-ai/cordis'
+import { FiberState, type Context } from '@deepseek-ai/cordis'
 import { ReactLoopInbox } from './inbox.ts'
 import { RuntimeContextProjection } from './runtime-context.ts'
 import { AssistantStreamAttempt } from './assistant-stream.ts'
@@ -93,6 +93,13 @@ function abortedCancelCause(signal: AbortSignal): AgentCancelCause | undefined {
       return assertNever(cause)
   }
 }
+
+/** Fiber states that cannot own or serve a new lifecycle. */
+export const INACTIVE_FIBER_STATES: ReadonlySet<FiberState> = new Set([
+  FiberState.UNLOADING,
+  FiberState.DISPOSED,
+  FiberState.FAILED,
+])
 
 /** Drives one session through turn and step boundaries. */
 export class ReactLoopAgent implements Agent {
@@ -173,11 +180,36 @@ export class ReactLoopAgent implements Agent {
   }
 
   cancel(cause: AgentCancelCause, options: CancelOptions = {}): void {
-    if (!options.keepInbox) {
-      this.inbox.clear()
-      if (this.phase.kind !== 'idle') this.phase.wakeRequested = false
+    try {
+      if (this.inboxUnreachable) {
+        // The lifecycle that registered this inbox projection already unwound
+        // it: no splice can commit, and no wake can ever be replayed, so only
+        // the abort below still lands.
+        if (this.phase.kind !== 'idle') this.phase.wakeRequested = false
+      } else if (!options.keepInbox) {
+        // Dropped before the durable clear so a listener reacting to the clear
+        // cannot find a latch pointing at input this cancel removes, and so a
+        // clear that throws still drops it.
+        if (this.phase.kind !== 'idle') this.phase.wakeRequested = false
+        this.inbox.clear()
+      }
+    } finally {
+      // A cancelled activity must abort even when its durable clear failed, or
+      // the owner awaiting quiescence would wait for a driver that never ends.
+      if (this.phase.kind !== 'idle') this.phase.abort.abort(cause)
     }
-    if (this.phase.kind !== 'idle') this.phase.abort.abort(cause)
+  }
+
+  /**
+   * Whether the lifecycle owning this loop's inbox registration has unwound.
+   * The fiber state decides the common live cancellation first; only an
+   * inactive lifecycle with a missing registration is closed, while a live
+   * lifecycle with a missing registration is an invariant failure
+   * `ReactLoopInbox.clear` must still report.
+   * @returns whether the inbox can no longer be read or spliced.
+   */
+  private get inboxUnreachable(): boolean {
+    return INACTIVE_FIBER_STATES.has(this.loopCtx.fiber.state) && !this.inbox.isRegistered
   }
 
   runMaintenance<T>(job: (signal: AbortSignal) => Promise<T>): Promise<T> {
