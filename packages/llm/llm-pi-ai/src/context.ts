@@ -292,6 +292,7 @@ export interface PiImageRequestBudget {
  * Resolve the request target for one source under the route budgets.
  * @param ref - normalized source image.
  * @param budget - resolved route pixel and byte limits.
+ * @param imageCount - images sharing this request, used by count-aware dimension caps.
  * @returns dimensions and byte target shared by serialization and screenshot coordinate mapping.
  */
 export function requestImageTarget(ref: ImageAttachmentRef, budget: PiImageRequestBudget, imageCount = 1): ImageRequestTarget {

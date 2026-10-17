@@ -172,13 +172,6 @@ function deriveAutoReviewDenial(block: ToolCallBlock): AutoReviewDenial | null {
 }
 
 /**
- * Flatten a settled result's content blocks to display text: text blocks
- * verbatim, other block shapes as pretty JSON. Empty content on a failed call
- * falls back to the structured error's `name: code` line.
- * @param node - the settled result node.
- * @returns the flattened result text (may be empty).
- */
-/**
  * Whether a result would produce an expanded output section without flattening it.
  * @param node - settled result to inspect.
  * @returns whether its displayed output would be nonempty.
@@ -189,6 +182,14 @@ export function hasResultText(node: ToolResultNode): boolean {
   const first = node.content[0]
   return first !== undefined && (first.type !== 'text' || first.text !== '')
 }
+
+/**
+ * Flatten a settled result's content blocks to display text: text blocks
+ * verbatim, other block shapes as pretty JSON. Empty content on a failed call
+ * falls back to the structured error's `name: code` line.
+ * @param node - the settled result node.
+ * @returns the flattened result text (may be empty).
+ */
 export function resultText(node: ToolResultNode): string {
   const parts: string[] = []
   for (const block of node.content) {

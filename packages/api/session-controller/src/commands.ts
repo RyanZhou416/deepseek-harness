@@ -145,6 +145,11 @@ export class SessionCommandController {
     return operation
   }
 
+  /**
+   * Create one Session from an explicit working directory or workspace.
+   * @param request - creation inputs; workspaceId and cwd are mutually exclusive.
+   * @returns the created Session identity.
+   */
   async create(request: SessionCreateRequest): Promise<SessionCreateValue> {
     if (request.workspaceId !== undefined && request.cwd !== undefined) {
       throw new RemoteError('gateway/bad-request', 'session.create accepts workspaceId or cwd, not both', {})

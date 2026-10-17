@@ -346,6 +346,7 @@ export interface SessionEditLastMessageRequest {
   readonly requestId: SessionRequestId
 }
 
+/** Identity of the Session produced by a fork. */
 export interface SessionForkValue {
   readonly sessionId: SessionId
 }
