@@ -1,8 +1,4 @@
-/**
- * Plugin self-metadata for the Plugin info card. Version is substituted at
- * build time (tsdown `define` in tsdown.config.ts, read from package.json);
- * the typeof guard keeps a dev/test bundle built without defines working.
- */
+/** Build-time defines (tsdown.config.ts); the typeof guards cover a bundle built without them. */
 
 declare const __DSH_CTX_VERSION__: string | undefined
 declare const __DSH_CTX_REPO__: string | undefined

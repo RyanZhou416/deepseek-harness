@@ -1,12 +1,13 @@
-// Latest-version check (src/client/latestVersion.ts): registry fetch with a
-// 1h TTL and the semver comparator. The fetch is stubbed per test — the
-// suite never hits the network — and each fetch test re-imports the module
-// (vi.resetModules) to reset the module-level cache. Two registries are
-// tried in order (official npm, then npmmirror as a fallback).
+// Latest-version check (src/client/latestVersion.ts): registry fetch with a 1h TTL, the semver comparator,
+// and the useNewerVersion hook every surface's update hint reads.
+// The fetch is stubbed per test — the suite never hits the network — and each fetch test re-imports the module
+// (vi.resetModules) to reset the module-level cache. Two registries are tried in order (official npm, then npmmirror).
 
+import { createElement as h } from 'react'
 import assert from 'node:assert/strict'
 import { afterEach, describe, test, vi } from 'vitest'
 import { isNewerVersion } from '../../src/client/latestVersion'
+import { flush, mount } from './helpers/kit'
 
 const HOUR_MS = 60 * 60 * 1000
 
@@ -14,6 +15,7 @@ afterEach(() => {
   vi.unstubAllGlobals()
   vi.useRealTimers()
   vi.resetModules()
+  delete (globalThis as Record<string, unknown>).__DSH_CTX_VERSION__
 })
 
 async function freshModule(): Promise<typeof import('../../src/client/latestVersion')> {
@@ -154,5 +156,65 @@ describe('isNewerVersion', () => {
 
   test('garbage segments parse as zero', () => {
     assert.equal(isNewerVersion('x.y', '0.0.0'), false)
+  })
+})
+
+/** Mount the hook through a throwaway component; `version` emulates the tsdown define. The settled value is
+ *  what the hook last reported — an empty string stands for null, and a late setState still re-renders. */
+async function renderUseNewerVersion(version?: string): Promise<{ settled: () => string; unmount: () => Promise<void> }> {
+  vi.resetModules()
+  if (version === undefined) delete (globalThis as Record<string, unknown>).__DSH_CTX_VERSION__
+  else (globalThis as Record<string, unknown>).__DSH_CTX_VERSION__ = version
+  const { useNewerVersion } = await import('../../src/client/latestVersion')
+  const seen: string[] = []
+  function Probe(): null {
+    seen.push(useNewerVersion() ?? '')
+    return null
+  }
+  const m = await mount(h(Probe, {}))
+  await flush()
+  return { settled: () => seen[seen.length - 1], unmount: () => m.unmount() }
+}
+
+describe('useNewerVersion', () => {
+  test('a newer registry version is served to the caller', async () => {
+    vi.stubGlobal('fetch', async () => ({ ok: true, json: async () => ({ version: '1.1.0' }) }))
+    const { settled, unmount } = await renderUseNewerVersion('1.0.0')
+    assert.equal(settled(), '1.1.0')
+    await unmount()
+  })
+
+  test('a dev build never checks the registry', async () => {
+    const fetchMock = vi.fn()
+    vi.stubGlobal('fetch', fetchMock)
+    const { settled, unmount } = await renderUseNewerVersion() // PLUGIN_VERSION = 0.0.0-dev
+    assert.equal(fetchMock.mock.calls.length, 0)
+    assert.equal(settled(), '')
+    await unmount()
+  })
+
+  test('a version that is not newer stays null', async () => {
+    vi.stubGlobal('fetch', async () => ({ ok: true, json: async () => ({ version: '1.0.0' }) }))
+    const { settled, unmount } = await renderUseNewerVersion('1.0.0')
+    assert.equal(settled(), '')
+    await unmount()
+  })
+
+  test('every registry failing stays null', async () => {
+    vi.stubGlobal('fetch', async () => ({ ok: false, json: async () => ({}) }))
+    const { settled, unmount } = await renderUseNewerVersion('1.0.0')
+    assert.equal(settled(), '')
+    await unmount()
+  })
+
+  test('unmounting before the answer lands drops the late result', async () => {
+    let resolveFetch: ((res: { ok: boolean; json: () => Promise<{ version: string }> }) => void) | null = null
+    vi.stubGlobal('fetch', vi.fn(() => new Promise((resolve) => { resolveFetch = resolve })))
+    const { settled, unmount } = await renderUseNewerVersion('1.0.0')
+    await unmount()
+    resolveFetch!({ ok: true, json: () => Promise.resolve({ version: '2.0.0' }) })
+    await flush()
+    // No state update after unmount, no act warning, and the value never lands.
+    assert.equal(settled(), '')
   })
 })

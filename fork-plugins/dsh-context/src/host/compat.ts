@@ -1,55 +1,25 @@
 /**
  * Session-projection unit contract compatibility layer.
  *
- * Supported harness baseline (see docs/compatibility.md): dsh
- * 0.1.2-rc.1+. On it, the session-projection registry drives the unit
- * contract (introduced in dsh 0.1.1-rc.1, replacing the pre-0.1.1
- * `{ schema, view }` shape): the real projection units emit only the modern
- * shape, while the below-baseline fallback units (fallback.ts) still carry
- * the legacy top-level aliases so the gate serves on any harness that can
- * deliver projections at all.
- *
- *   `{ key, stateSchema, init, apply, wire?, stateVersion }`
- *
- * - `stateSchema` validates the PERSISTED fold state before a checkpoint row
- *   seeds a fold; the state itself must stay plain JSON (the projection
- *   cache's lossless-JSON write precondition).
- * - A client-visible unit carries a `wire` block (`viewSchema` + `view`).
- *   A unit WITHOUT `wire` is host-only — its value is never delivered to
- *   clients, and the Context tab would sit on its loading screen forever.
- *
- * The registry hands a fresh fold the session's immutable header and the
- * fork-inherited prefix length: `init(header: SessionHeader,
- * inheritedEventCount: SessionLogOffset)`. A zero-argument `init` satisfies
- * that contract as-is (both arguments go unobserved).
- *
- * The installed devDependency types pin the newest published surface
- * (0.1.2-rc.1), whose `wire?` is optional; this plugin's units are always
- * client-visible, and the registry's wired-register overload demands `wire`
- * PRESENT — which the dts's optional `wire?` fails. The contract is
- * therefore mirrored here as {@link ProjectionDefinition} to keep both
- * halves compile-checked.
+ * The installed dsh types pin the oldest supported surface (0.1.7-rc.2), whose optional
+ * `wire?` fails the registry's wired-register overload, so the contract is mirrored here as
+ * {@link ProjectionDefinition} to keep both halves compile-checked.
  */
 
 import type { z } from 'zod'
 import type { SessionProjectionMap } from '@deepseek-ai/dsh-session-projection/types'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 
-/** The session-projection unit contract served by dsh 0.1.2-rc.1+ (local mirror). */
+/** The session-projection unit contract served by dsh 0.1.7-rc.2+ (local mirror). */
 export interface ProjectionDefinition<K extends keyof SessionProjectionMap, S> {
   key: K
+  /** Validates persisted state before a checkpoint row seeds a fold; the state must stay plain JSON. */
   stateSchema: z.ZodType<S>
-  /**
-   * Fresh fold state for the empty log. The registry passes the session's
-   * immutable header and the fork-inherited prefix length; a zero-argument
-   * init satisfies the contract (both arguments go unobserved).
-   */
+  /** The registry passes the session header and the fork-inherited prefix length; a zero-argument init leaves both unobserved. */
   init(): S
-  /**
-   * Pure transition: previous state + one committed event → next state.
-   * Events the unit ignores MUST return the same state reference.
-   */
+  /** Pure transition; an ignored event MUST return the same state reference. */
   apply(state: S, event: SessionEvent): S
+  /** Client-visible units only: a unit without `wire` is host-only, so its value never reaches the browser. */
   wire: {
     viewSchema: z.ZodType<SessionProjectionMap[K]>
     view(state: S): SessionProjectionMap[K]

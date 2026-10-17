@@ -1,10 +1,3 @@
-// The shared file-op parser (src/shared/fileOps.ts): the ONE per-call
-// assembly consumed by the host fold and the client's inline-generation
-// fallback alike. Pins the whole producer matrix: the six built-ins, the
-// Anthropic-style editor, the search meta attribution (complete / truncated
-// / malformed / args-less), the read window vs the limit estimate, the
-// pattern-target fallback, and the zero-ops degradations.
-
 import assert from 'node:assert/strict'
 import { describe, test } from 'vitest'
 import { opsOfCall, parseCallArgs } from '../../src/shared/fileOps'
@@ -89,8 +82,7 @@ describe('opsOfCall — one op per settled call', () => {
       argsRaw: JSON.stringify({ pattern: 'TODO' }),
       meta: grepMeta({ 'a.ts': 3, 'b.ts': 1 }),
     })
-    // The searched path/pattern rows first (here the workspace-wide pattern),
-    // then each hit file with its count.
+    // The searched path/pattern rows first (here the workspace-wide pattern), then each hit file with its count.
     assert.deepEqual(ops.map(o => [o.path, o.hits]), [['TODO', undefined], ['a.ts', 3], ['b.ts', 1]])
     assert.equal(ops[0].pattern, true, 'the pathless target rows as the pattern')
     assert.ok(ops.slice(1).every(o => o.detail === 'TODO'), 'the pattern detail rides each hit op')

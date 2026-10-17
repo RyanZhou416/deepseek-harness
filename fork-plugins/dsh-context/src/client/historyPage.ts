@@ -1,24 +1,14 @@
 /**
- * Targeted full-content fetch for the Context browser — the fallback that
- * replaces blind tail paging. When a surface node's seq is outside the
- * conversation window, ONE seq-anchored history read returns the page
- * containing that event: the host cuts pages on whole append-origin message
- * boundaries, so the newest group on the page covers `seq` whenever the
- * durable log still holds it. The read rides the harness gateway remotes
- * (`remote.session.page`, with the inclusive cut `throughSeq` pinned to the
- * target seq) and the raw events map into the same conversation-node shapes
- * the window join delivers (a thin display subset of dsh's own fold).
- * Fetched nodes cache per session — history is immutable, so a seq never
- * needs fetching twice.
+ * Targeted full-content fetch for the Context browser, replacing blind tail
+ * paging: ONE seq-anchored history read (`remote.session.page`, inclusive
+ * `throughSeq` cut pinned to the target) returns the page holding that event,
+ * since the host cuts pages on whole message boundaries. Fetched nodes cache per
+ * session because history is immutable.
  *
  * The remote face is resolved through the DECLARED inject
- * (`watchHistoryFaces`): this plugin's module inject lists only slots/
- * locale, and NONDECLARED reads of the traced service proxy throw "cannot
- * get property … without inject" and can take a view down. The injection
- * callback runs under a fiber that declares both `remote` and
- * `remote.session` (the dsh idiom), so the property path resolves there and
- * nowhere else; the resolved face is re-proved and a hostile read leaves
- * the slot unset instead of ever throwing.
+ * (`watchHistoryFaces`): a NONDECLARED read of the traced service proxy throws
+ * ("cannot get property … without inject") and can take a view down, so the
+ * callback declares both `remote` and `remote.session` in one fiber.
  */
 
 import { useSyncExternalStore } from 'react'
@@ -28,14 +18,10 @@ import type {
 } from './services'
 import type { HeaderEpochContent } from '../shared/types'
 
-/** Narrow one served row to a validated durable event envelope, or null. */
 function eventOf(entry: unknown): { type: string; seq: number; data: Record<string, unknown> } | null {
   if (entry === null || typeof entry !== 'object') return null
-  // History records wrap the envelope in an `event` field
-  // (`{type:'event'|'chunks', event}`); a bare envelope passes too, so shape
-  // drift degrades instead of breaking the page. Packed chunk-row records
-  // flow through as unknown types and project to nothing downstream — only
-  // final events matter here.
+  // History records wrap the envelope in an `event` field; a bare envelope
+  // passes too, and packed chunk rows project to nothing downstream.
   const inner = (entry as HistoryEntryLike).event ?? entry
   if (typeof inner !== 'object') return null
   const e = inner as { type?: unknown; seq?: unknown; data?: unknown }
@@ -44,7 +30,6 @@ function eventOf(entry: unknown): { type: string; seq: number; data: Record<stri
   return { type: e.type, seq: e.seq, data }
 }
 
-/** All string texts of an event's message-content shape joined (compaction summaries). */
 function textOf(blocks: unknown): string | null {
   if (!Array.isArray(blocks)) return null
   let out = ''
@@ -55,12 +40,8 @@ function textOf(blocks: unknown): string | null {
   return out.trim() === '' ? null : out
 }
 
-/**
- * The system prompt's exact rendered text — every text block joined with NO
- * normalization: a whitespace-only prompt is still the prompt the model
- * received (the host prices it as text), so it must render rather than read
- * as absent. Null when the content carries no text block at all.
- */
+/** The system prompt's exact text, every block joined with NO normalization: a
+ * whitespace-only prompt is still the prompt the model received, so it must render rather than read as absent. */
 function systemTextOf(blocks: unknown): string | null {
   if (!Array.isArray(blocks)) return null
   let out = ''
@@ -75,11 +56,7 @@ function systemTextOf(blocks: unknown): string | null {
   return seen ? out : null
 }
 
-/**
- * One assistant content block → the snapshot block vocabulary the browser
- * already renders (`kind`: text/reasoning/image/tool-call); unmappable
- * blocks pass through raw and degrade to the generic JSON section.
- */
+/** One assistant content block → the snapshot block vocabulary; unmappable blocks pass through raw. */
 function assistantBlockOf(block: unknown): Record<string, unknown> {
   const b = block !== null && typeof block === 'object' ? block as { type?: unknown; text?: unknown; attachment?: unknown; name?: unknown; arguments?: unknown } : null
   switch (b?.type) {
@@ -98,13 +75,8 @@ function assistantBlockOf(block: unknown): Record<string, unknown> {
   }
 }
 
-/**
- * Map one history page into joined conversation nodes keyed by their event
- * seq — the display subset of the browser's join: user messages, assistant
- * blocks, tool results paired with their in-page call head, and compaction
- * checkpoints paired with their summary event. Everything else (headers,
- * boundaries, chunks, bare calls) projects to nothing.
- */
+/** Map one history page into joined conversation nodes keyed by event seq —
+ * the display subset of the browser's join; headers, boundaries, chunks, and bare calls project to nothing. */
 export function pageNodesOf(entries: readonly unknown[]): Map<number, ConversationNodeLike> {
   const nodes = new Map<number, ConversationNodeLike>()
   const calls = new Map<string, { name: string; argsRaw: string }>()
@@ -137,9 +109,8 @@ export function pageNodesOf(entries: readonly unknown[]): Map<number, Conversati
         ? source.compactionId
         : null
       if (compactionId !== null) {
-        // A compaction checkpoint: the model-visible envelope never renders —
-        // the marker shows its summary instead (null when the page cut left
-        // the summary event outside).
+        // A compaction checkpoint: the model-visible envelope renders its
+        // summary instead (null when the page cut left the summary outside).
         nodes.set(seq, { kind: 'compaction', seq, summary: summaries.get(compactionId) ?? null })
         continue
       }
@@ -161,20 +132,20 @@ export function pageNodesOf(entries: readonly unknown[]): Map<number, Conversati
       continue
     }
     if (type === 'tool/result') {
+      // The V4 first-class tool-role message: `toolCallId`/`isError` live on
+      // the message and the content is the direct block list.
       const message = data.message !== null && typeof data.message === 'object' ? data.message as Record<string, unknown> : null
       const source = message?.source !== null && typeof message?.source === 'object' ? message.source as Record<string, unknown> : null
-      const first = Array.isArray(message?.content) ? (message.content as unknown[])[0] : undefined
-      const block = first !== null && typeof first === 'object' ? first as Record<string, unknown> : null
-      const callId = typeof source?.callId === 'string' ? source.callId
-        : typeof block?.toolCallId === 'string' ? block.toolCallId
+      const callId = typeof message?.toolCallId === 'string' ? message.toolCallId
+        : typeof source?.callId === 'string' ? source.callId
           : null
       const call = callId !== null ? calls.get(callId) ?? null : null
       nodes.set(seq, {
         kind: 'tool-result',
         seq,
         call,
-        content: block !== null && Array.isArray(block.content) ? block.content as readonly unknown[] : [],
-        isError: block?.isError === true || data.error === true,
+        content: Array.isArray(message?.content) ? message.content as readonly unknown[] : [],
+        isError: message?.isError === true,
       })
       continue
     }
@@ -182,9 +153,7 @@ export function pageNodesOf(entries: readonly unknown[]): Map<number, Conversati
   return nodes
 }
 
-/** The `page` verb of a history face, re-proved and bound to its owner.
- * Hostile objects (any accessor backed by host state can throw) degrade to
- * undefined instead of escaping the read. */
+/** Bind the face's `page` verb; a hostile accessor degrades to undefined. */
 function readPageOf(face: unknown): SessionPageFace['page'] | undefined {
   if (face === null || typeof face !== 'object') return undefined
   try {
@@ -195,11 +164,8 @@ function readPageOf(face: unknown): SessionPageFace['page'] | undefined {
   }
 }
 
-/**
- * The gateway history page verb, resolved through the DECLARED inject
- * (see {@link watchHistoryFaces}) and bound up front: a method extracted
- * unbound loses `this`, and the traced `remote` proxy that hands it out
- * requires the inject to resolve at all.
+/** The gateway history page verb from the DECLARED inject, bound up front: a
+ * method extracted unbound loses `this`, and the traced `remote` proxy that hands it out requires the inject to resolve at all.
  */
 let declaredPage: SessionPageFace['page'] | undefined
 
@@ -210,44 +176,30 @@ function setPageFace(page: SessionPageFace['page'] | undefined): void {
   for (const listener of [...faceListeners]) listener()
 }
 
-/** The page face resolved so far, for non-React readers (the fetcher builders). */
 export function historyFace(): SessionPageFace['page'] | undefined {
   return declaredPage
 }
 
-/** Subscribe to face resolution and revocation (plugin reload/HMR). */
 export function subscribeHistoryFace(listener: () => void): () => void {
   faceListeners.add(listener)
   return () => { faceListeners.delete(listener) }
 }
 
-/** The store snapshot both useSyncExternalStore seats read (client and hydration). */
 function faceSnapshot(): SessionPageFace['page'] | undefined {
   return declaredPage
 }
 
-/**
- * The React seat over the resolved page face. A mount can RACE the declared
- * inject — a watch rebuild (patchReload) remounts the slot components before
- * the injected fiber re-fires — so the first render may legitimately see no
- * face. Subscribing keeps that transient state from sticking: the fetchers
- * derived downstream rebuild when the face lands (or is revoked), instead of
- * degrading to the static note for the mount's whole lifetime.
- */
+/** The React seat over the resolved page face. A mount can RACE the declared
+ * inject (a watch rebuild remounts slot components before the injected fiber
+ * re-fires), so the first render may see no face; subscribing rebuilds the downstream fetchers when it lands or is revoked. */
 export function useHistoryFace(): SessionPageFace['page'] | undefined {
   return useSyncExternalStore(subscribeHistoryFace, faceSnapshot, faceSnapshot)
 }
 
-/**
- * Register the plugin's history face with the harness through the DECLARED
- * inject — both `remote` AND `remote.session` (the ui-chat idiom) must be in
- * one fiber's requirement list, because the traced `remote` proxy resolves
- * `.session` through the context and each name needs the other's
- * declaration; an undeclared read of the traced proxy throws instead of
- * resolving. The callback re-runs on every unload/remount, so it owns the
- * slot's lifetime. The face itself is re-proven: a never-fired invocation
- * or a hostile property read leaves the slot unset — nothing here can throw.
- */
+/** Register the plugin's history face through the DECLARED inject: `remote` and
+ * `remote.session` must sit in one fiber's requirement list, since the traced
+ * proxy resolves `.session` through the context and an undeclared read throws.
+ * The callback re-runs per unload/remount and owns the slot's lifetime. */
 export function watchHistoryFaces(ctx: ClientCtx): void {
   ctx.inject(['remote', 'remote.session'], (c) => {
     try {
@@ -260,11 +212,9 @@ export function watchHistoryFaces(ctx: ClientCtx): void {
   })
 }
 
-/** The rows array of a successful history page, under the served envelope. */
 function rowsOf(response: unknown): readonly unknown[] {
-  // Envelope unwrapping: the remote resolves to the ClientResult itself
-  // ({ok, value}). A bare {records} payload passes too. Anything else
-  // rejects so the caller can offer a retry instead of claiming absence.
+  // The remote resolves to the ClientResult itself ({ok, value}); a bare
+  // {records} payload passes too. Anything else rejects, so the caller can offer a retry instead of claiming absence.
   let payload: unknown = response
   if (payload !== null && typeof payload === 'object' && 'ok' in payload) {
     const r = payload as { ok?: unknown; value?: unknown }
@@ -279,22 +229,13 @@ function rowsOf(response: unknown): readonly unknown[] {
   return rows
 }
 
-/**
- * The session's history reader over the gateway remotes (`remote.session.page`),
- * from the declared-inject slot. The page cuts message-aligned pages, so the
- * returned read covers `seq` whenever the durable log still holds it: the
- * inclusive cut is pinned to the seq itself, the exclusive bound one past
- * it. Undefined when the slot holds no face (the inject never fired or
- * served no usable page verb) — callers keep their static degradation.
+/** The session's history reader from the declared-inject slot, with the cut
+ * pinned to the seq (`beforeSeq` one past it). Undefined when the slot holds no face — callers keep their static degradation.
  */
 function pageReaderOf(sessionId: string): ((seq: number) => Promise<unknown>) | undefined {
-  // The face resolved at build time: absent face = the caller's static
-  // degradation, a resolved face stays bound for the fetcher's lifetime.
   const page = declaredPage
   if (page === undefined) return undefined
   return (seq) => {
-    // The inclusive log cut pinned to the target seq, the exclusive bound
-    // one past it.
     return page({
       address: { kind: 'session' as const, sessionId },
       throughSeq: seq,
@@ -303,40 +244,25 @@ function pageReaderOf(sessionId: string): ((seq: number) => Promise<unknown>) | 
   }
 }
 
-/**
- * Build the browser's per-session fetcher over the gateway history face
- * (`remote.session.page`): message-aligned pages whose inclusive cut pinned
- * to `seq` (exclusive bound one past it) cover the seq whenever the durable
- * log still holds it. Undefined when no face was resolved at build time —
- * the caller keeps its static preview-plus-hint degradation. Found nodes
- * cache in the closure: one mount re-reading a row never re-fetches.
- */
+/** Build the browser's per-session fetcher over the gateway history face, or
+ * undefined when no face resolved at build time (the caller keeps its static preview-plus-hint degradation). */
 export function makeContentFetcher(sessionId: string): ContentFetcher | undefined {
   const read = pageReaderOf(sessionId)
   if (read === undefined) return undefined
-  // Fetched nodes cache in the closure: history is immutable, so one mount
-  // re-reading a row never re-fetches.
   const cache = new Map<number, ConversationNodeLike>()
   return async (seq) => {
     const hit = cache.get(seq)
     if (hit !== undefined) return hit
-    // The whole envelope is re-proven (no-white-screen guarantee): a failed or
-    // malformed read rejects so the browser offers a retry instead of guessing.
     const node = pageNodesOf(rowsOf(await read(seq))).get(seq) ?? null
     if (node !== null) cache.set(seq, node)
     return node
   }
 }
 
-/**
- * Map one raw durable event into the epoch content the browser renders. A
- * `request/header` yields the full system prompt text (V0/V2 envelope) plus
- * each tool's producer description and raw schema; a V3 `system/message`
- * yields the prompt text alone (its tools live in the request header). Both
- * mirror the host fold's per-entry guards — a null or primitive tool entry
- * degrades to an unnamed row instead of throwing the read. Null when the
- * envelope carries neither.
- */
+/** Map one raw durable event into the epoch content the browser renders: a
+ * `request/header` yields each tool's description and raw schema, a
+ * `system/message` the prompt text alone. A null or primitive tool entry
+ * degrades to an unnamed row instead of throwing the read. */
 function headerContentOf(event: { type: string; data: Record<string, unknown> }): HeaderEpochContent | null {
   const { type, data } = event
   if (type === 'system/message') {
@@ -362,23 +288,12 @@ function headerContentOf(event: { type: string; data: Record<string, unknown> })
       schema: t,
     })
   }
-  return {
-    ...(typeof rawHeader.system === 'string' && rawHeader.system !== '' ? { system: rawHeader.system } : {}),
-    tools,
-  }
+  return { tools }
 }
 
-/**
- * The on-demand CONTENT fetch for the browser's System and Tools sections —
- * the lazy counterpart of the node fetcher above. One seq-anchored history
- * read off the requested seq returns the page holding that event (non-message
- * events ride the page verbatim); a `request/header` maps to the epoch's
- * tools (and its V0/V2 system text), a `system/message` to a V3 prompt's
- * text. Landed content caches per seq (history is immutable), and OLDER
- * epochs sharing the page cache for free — stepping back through epochs walks
- * the same pages. Undefined when no history face exists — the browser keeps a
- * metadata-only degradation instead.
- */
+/** The on-demand CONTENT fetch for the browser's System and Tools sections: one
+ * seq-anchored read returns the page holding the event, and landed content
+ * caches per seq so stepping back through epochs reuses the same pages. Undefined when no history face exists. */
 export function makeHeaderFetcher(sessionId: string): HeaderFetcher | undefined {
   const read = pageReaderOf(sessionId)
   if (read === undefined) return undefined
@@ -386,8 +301,6 @@ export function makeHeaderFetcher(sessionId: string): HeaderFetcher | undefined 
   return async (seq) => {
     const hit = cache.get(seq)
     if (hit !== undefined) return hit
-    // Same re-prove contract as the node fetcher: a failed or malformed read
-    // rejects so the browser offers a retry instead of guessing.
     const rows = rowsOf(await read(seq))
     let picked: HeaderEpochContent | null = null
     for (const entry of rows) {
@@ -395,8 +308,7 @@ export function makeHeaderFetcher(sessionId: string): HeaderFetcher | undefined 
       if (ev === null || (ev.type !== 'request/header' && ev.type !== 'system/message')) continue
       const content = headerContentOf(ev)
       if (content === null) continue
-      // The page's exclusive bound is seq + 1, so every content event on it
-      // is the picked one or an OLDER one — cache them all.
+      // The page's exclusive bound is seq + 1, so every content event on it is the picked one or an OLDER one — cache them all.
       cache.set(ev.seq, content)
       if (ev.seq === seq) picked = content
     }

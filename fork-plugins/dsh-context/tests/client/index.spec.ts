@@ -1,8 +1,4 @@
-// DeepSeek Harness fork modification: cover the 0.1.6 settingsScope/Plugins seat pairing.
-// Client entry (src/client/index.ts): the plugin's apply() wiring asserted
-// through the faithful harness-context seams — dictionaries, slots, the
-// /context trigger source, and the deferred settingsScope inject — plus real
-// renders of the registered components.
+// Client entry (src/client/index.ts): the plugin's apply() wiring through the faithful harness-context seams.
 
 import { createElement as h, type ReactElement } from 'react'
 import assert from 'node:assert/strict'
@@ -11,10 +7,9 @@ import { DICT_EN, DICT_ZH } from '../../src/client/i18n'
 import { modalStoreOf, type ModalStore } from '../../src/client/modalStore'
 import type { SettingsField, SettingsScopeLike, SettingsState } from '../../src/client/settings'
 import { TestClientCtx, TestSessions, asClientCtx } from './helpers/harness'
-import { click, mount, query, queryAll } from './helpers/kit'
+import { mount, query, queryAll, text } from './helpers/kit'
 
-// The entry ships via `module.exports` (bundle handoff shape); its runtime
-// exports are the plugin triple, opaque to the static import type.
+// The entry ships via `module.exports` (bundle handoff shape); its runtime exports are the plugin triple, opaque to the static import type.
 const { name, inject, apply } = (await import('../../src/client/index')) as unknown as {
   name: string
   inject: string[]
@@ -44,6 +39,37 @@ function makeScope(snapshot: { status: string; value: unknown; writable: boolean
   return rec
 }
 
+/** A configForms face serving the given form (the card seat's transport). */
+function formsServing(form: SettingsScopeLike): {
+  get(namespace: string): SettingsScopeLike
+  whileServed(namespaces: readonly string[], register: () => () => void): () => void
+} {
+  return {
+    get: () => form,
+    whileServed: () => () => {},
+  }
+}
+
+/** A settings form whose snapshot the test drives (the emit path). */
+function scopeWith(snapshot: { status: string; value: unknown; writable: boolean }): SettingsScopeLike & {
+  emit(next: { status: string; value: unknown; writable: boolean }): void
+} {
+  let current = snapshot
+  const listeners = new Set<() => void>()
+  return {
+    getSnapshot: () => current,
+    subscribe(listener) {
+      listeners.add(listener)
+      return () => { listeners.delete(listener) }
+    },
+    set: () => Promise.resolve(),
+    emit(next) {
+      current = next
+      for (const listener of listeners) listener()
+    },
+  }
+}
+
 describe('client entry: constants', () => {
   test('name and inject declare the plugin identity and hard dependencies', () => {
     assert.equal(name, 'dsh-context')
@@ -60,7 +86,7 @@ describe('client entry: dictionaries', () => {
     assert.equal(dicts.zh, DICT_ZH)
     assert.equal(dicts.en, DICT_EN)
     // The bound translate resolves through the active-locale → en chain.
-    assert.equal(ctx.locale.bind('dsh-context')('tab'), 'Context')
+    assert.equal(ctx.locale.bind('dsh-context')('tab.context'), 'Context')
     ctx.dispose()
     assert.equal(ctx.locale.namespaces.has('dsh-context'), false)
   })
@@ -68,7 +94,7 @@ describe('client entry: dictionaries', () => {
   test('the zh active locale binds the zh dictionary arm', () => {
     const ctx = new TestClientCtx({ locale: 'zh' })
     applyTo(ctx)
-    assert.equal(ctx.locale.bind('dsh-context')('tab'), '上下文')
+    assert.equal(ctx.locale.bind('dsh-context')('tab.context'), '上下文')
     ctx.dispose()
   })
 })
@@ -78,7 +104,7 @@ describe('client entry: conversation.view slot', () => {
     const ctx = new TestClientCtx()
     applyTo(ctx)
     const entries = ctx.slots.of('conversation.view')
-    assert.equal(entries.length, 1)
+    assert.equal(entries.length, 2)
     const { registration, component } = entries[0]
     assert.equal(registration.name, 'conversation.view')
     assert.equal(registration.id, 'context')
@@ -95,11 +121,44 @@ describe('client entry: conversation.view slot', () => {
     ctx.dispose()
   })
 
-  test('the tab label translates to zh under an zh locale', () => {
+  test('registers the Fleet tab right of the Context tab, and its component renders the same card', async () => {
+    const ctx = new TestClientCtx({ services: { sessions: { list: { getSnapshot: () => ({ byId: {} }), subscribe: () => () => {} } } } })
+    applyTo(ctx)
+    const { registration, component } = ctx.slots.of('conversation.view')[1]
+    assert.equal(registration.name, 'conversation.view')
+    assert.equal(registration.id, 'fleet')
+    assert.equal(registration.order, 30)
+    assert.equal(registration.locale, 'dsh-context')
+    assert.equal(registration.label?.(), 'Fleet')
+
+    const el = component({ sessionId: 's1', useProjection: () => undefined }) as ReactElement
+    assert.equal(typeof el.type, 'function')
+    assert.equal((el.type as { name: string }).name, 'FleetView')
+    const m = await mount(el)
+    assert.equal(query(m.container, '.lc-empty').textContent, 'Reading the session log…')
+    await m.unmount()
+    ctx.dispose()
+  })
+
+  test('the tab labels translate to zh under an zh locale', () => {
     const ctx = new TestClientCtx({ locale: 'zh' })
     applyTo(ctx)
-    assert.equal(ctx.slots.of('conversation.view')[0].registration.label?.(), '上下文')
+    const labels = ctx.slots.of('conversation.view').map(e => e.registration.label?.())
+    assert.deepEqual(labels, ['上下文', '编队'])
     ctx.dispose()
+  })
+
+  test('the fleetTab preference serves and withdraws the Fleet tab alone', () => {
+    const scope = scopeWith({ status: 'ready', value: { fleetTab: 'hide' }, writable: true })
+    const ctx = new TestClientCtx({ services: { configForms: formsServing(scope) } })
+    applyTo(ctx)
+    assert.deepEqual(ctx.slots.of('conversation.view').map(e => e.registration.id), ['context'], 'only the Context tab is served')
+    scope.emit({ status: 'ready', value: { fleetTab: 'show' }, writable: true })
+    assert.deepEqual(ctx.slots.of('conversation.view').map(e => e.registration.id), ['context', 'fleet'])
+    scope.emit({ status: 'ready', value: { fleetTab: 'hide' }, writable: true })
+    assert.deepEqual(ctx.slots.of('conversation.view').map(e => e.registration.id), ['context'], 'the Context tab is never churned')
+    ctx.dispose()
+    assert.deepEqual(ctx.slots.of('conversation.view'), [])
   })
 })
 
@@ -199,111 +258,54 @@ describe('client entry: conversation.input.overlay slot', () => {
   })
 })
 
-describe('client entry: Context Dashboard seats', () => {
-  test('registers the sidebar-foot entry and the frame overlay, both rendering', async () => {
+describe('client entry: Context Insights page seats', () => {
+  test('registers the keyed main page and the sidebar panel-list entry under one id', async () => {
     const ctx = new TestClientCtx()
     applyTo(ctx)
 
-    const actions = ctx.slots.of('sidebar.footer.action')
-    assert.equal(actions.length, 1)
-    assert.equal(actions[0].registration.name, 'sidebar.footer.action')
-    assert.equal(actions[0].registration.id, 'context-overview')
-    assert.equal(actions[0].registration.locale, 'dsh-context')
-    const actionEl = actions[0].component({ wide: true }) as ReactElement
-    assert.equal((actionEl.type as { name: string }).name, 'OverviewButton')
-    const actionMount = await mount(actionEl)
-    assert.equal(query(actionMount.container, '.lc-ov-entry-label').textContent, 'Context Insights')
-    await actionMount.unmount()
+    const pages = ctx.slots.of('main')
+    assert.equal(pages.length, 1)
+    assert.equal(pages[0].registration.name, 'main')
+    assert.equal(pages[0].registration.key, 'dsh-context')
+    assert.equal(pages[0].registration.locale, 'dsh-context')
+    const pageEl = pages[0].component({}) as ReactElement
+    assert.equal((pageEl.type as { name: string }).name, 'OverviewPanel')
+    const pageMount = await mount(pageEl)
+    assert.ok(query(pageMount.container, 'section.lc-ov-page') !== null, 'the page renders on mount (mount IS the open)')
+    assert.ok(text(pageMount.container).includes('The session list is unavailable'), 'no standard kit degrades visibly')
+    await pageMount.unmount()
 
-    const overlays = ctx.slots.of('shell.overlay')
-    assert.equal(overlays.length, 1)
-    assert.equal(overlays[0].registration.name, 'shell.overlay')
-    assert.equal(overlays[0].registration.id, 'context-overview')
-    assert.equal(overlays[0].registration.locale, 'dsh-context')
-    const overlayEl = overlays[0].component({}) as ReactElement
-    assert.equal((overlayEl.type as { name: string }).name, 'OverviewPanel')
-    const overlayMount = await mount(overlayEl)
-    assert.equal(overlayMount.container.textContent, '', 'closed by default')
-    await overlayMount.unmount()
+    const entries = ctx.slots.of('sidebar.panellist')
+    assert.equal(entries.length, 1)
+    assert.equal(entries[0].registration.name, 'sidebar.panellist')
+    assert.equal(entries[0].registration.id, 'dsh-context', 'the entry id addresses the main panel')
+    assert.equal(entries[0].registration.order, 20, 'after the shipped Plugins (0) and Automation tasks (10)')
+    assert.equal(entries[0].registration.locale, 'dsh-context')
+    assert.equal(entries[0].registration.label?.(), 'Context Insights')
+    const iconMount = await mount(entries[0].component({ size: 16 }) as ReactElement)
+    assert.ok(query(iconMount.container, 'svg') !== null, 'the entry glyph renders')
+    await iconMount.unmount()
     ctx.dispose()
   })
 
-  test('the entry opens the overlay through the shared store', async () => {
-    const ctx = new TestClientCtx()
+  test('the insightsEntry preference unwinds and remounts the pair', async () => {
+    const scope = scopeWith({ status: 'ready', value: {}, writable: true })
+    const ctx = new TestClientCtx({ services: { configForms: formsServing(scope) } })
     applyTo(ctx)
-    const actionEl = ctx.slots.of('sidebar.footer.action')[0].component({ wide: true }) as ReactElement
-    const actionMount = await mount(actionEl)
-    await click(query(actionMount.container, 'button.lc-ov-entry'))
-    const overlayEl = ctx.slots.of('shell.overlay')[0].component({}) as ReactElement
-    const overlayMount = await mount(overlayEl)
-    assert.ok(overlayMount.container.textContent!.includes('The session list is unavailable'))
-    await actionMount.unmount()
-    await overlayMount.unmount()
-    // Reset for other specs sharing the module store.
-    const { overviewStore } = await import('../../src/client/overviewStore')
-    overviewStore.set(false)
+    assert.equal(ctx.slots.of('main').length, 1, 'the default entry mounts the page')
+    scope.emit({ status: 'ready', value: { insightsEntry: 'hide' }, writable: true })
+    assert.equal(ctx.slots.of('main').length, 0, 'hiding the entry unwinds the page')
+    assert.equal(ctx.slots.of('sidebar.panellist').length, 0, 'hiding unwinds the entry')
+    scope.emit({ status: 'ready', value: { insightsEntry: 'show' }, writable: true })
+    assert.equal(ctx.slots.of('main').length, 1)
+    assert.equal(ctx.slots.of('sidebar.panellist').length, 1)
     ctx.dispose()
+    assert.equal(ctx.slots.of('main').length, 0, 'the plugin dispose unwinds the pair')
+    assert.equal(ctx.slots.of('sidebar.panellist').length, 0)
   })
 })
 
-describe('client entry: settingsScope inject', () => {
-  test('absent at apply time: the inject stays pending — no settings.plugin.item slot', () => {
-    const ctx = new TestClientCtx()
-    applyTo(ctx)
-    assert.equal(ctx.slots.of('settings.plugin.item').length, 0)
-    ctx.dispose()
-  })
-
-  test('armed later: the pending inject runs — scope attached and card slot registered', () => {
-    const ctx = new TestClientCtx()
-    applyTo(ctx)
-    const scope = makeScope({ status: 'ready', value: {}, writable: true })
-    const specs: { namespace: string }[] = []
-    ctx.setService('settingsScope', {
-      bind: (spec: { namespace: string }) => {
-        specs.push(spec)
-        return scope
-      },
-    })
-    assert.deepEqual(specs, [{ namespace: 'dsh-context' }])
-    assert.equal(scope.subscribes, 1)
-    assert.equal(ctx.slots.of('settings.plugin.item').length, 1)
-    assert.equal(ctx.slots.of('plugins.bundle.config').length, 1)
-    ctx.dispose()
-  })
-
-  test('the 0.1.6 Plugins seat renders through settingsScope', async () => {
-    const scope = makeScope({ status: 'ready', value: {}, writable: true })
-    const ctx = new TestClientCtx({ services: { settingsScope: { bind: () => scope } } })
-    try {
-      applyTo(ctx)
-      const entry = ctx.slots.of('plugins.bundle.config')[0]
-      assert.equal(entry.registration.key, 'dsh-context')
-      const face = entry.registration.inject?.() as { hooks: { contextSettings: { getSnapshot(): SettingsState } } }
-      const element = entry.component({}) as ReactElement
-      const mounted = await mount(h(element.type as never, {
-        useContextSettings: <T,>(select: (state: SettingsState) => T): T => select(face.hooks.contextSettings.getSnapshot()),
-      }))
-      try {
-        assert.equal(queryAll(mounted.container, '.lc-settings-select').length, 6)
-      } finally {
-        await mounted.unmount()
-      }
-    } finally {
-      ctx.dispose()
-    }
-  })
-
-  test('defensive arm: service key present but undefined — early return, no slot, no throw', () => {
-    const ctx = new TestClientCtx()
-    ctx.setService('settingsScope', undefined)
-    applyTo(ctx)
-    assert.equal(ctx.slots.of('settings.plugin.item').length, 0)
-    ctx.dispose()
-  })
-})
-
-describe('client entry: configForms inject (the Config-form generation)', () => {
+describe('client entry: configForms inject', () => {
   /** A configForms stand-in capturing the whileServed registration. */
   function fakeConfigForms(form: SettingsScopeLike): {
     gets: string[]
@@ -354,7 +356,7 @@ describe('client entry: configForms inject (the Config-form generation)', () => 
     const scope = makeScope({ status: 'ready', value: { defaultTrendMode: 'delta' }, writable: true })
     const forms = fakeConfigForms(scope)
     ctx.setService('configForms', forms)
-    // The namespace follows the settingsScope generation's join key.
+    // The namespace is the entry id.
     assert.deepEqual(forms.gets, ['dsh-context'])
     assert.equal(scope.subscribes, 1, 'the settings store attached to the form')
     assert.deepEqual(forms.whileServedCalls, [['dsh-context']])
@@ -387,7 +389,8 @@ describe('client entry: configForms inject (the Config-form generation)', () => 
     const m = await mount(h(el.type as never, {
       useContextSettings: <T,>(sel: (state: SettingsState) => T): T => sel(store.getSnapshot()),
     }))
-    assert.equal(queryAll(m.container, '.lc-settings-select').length, 6)
+    assert.equal(queryAll(m.container, '.lc-settings-select').length, 9)
+    assert.equal(queryAll(m.container, '.lc-settings-textarea').length, 2)
     assert.equal(m.container.querySelector('.lc-settings-head'), null, 'no settings-section chrome on this seat')
     await m.unmount()
     disposeRegistration()
@@ -425,86 +428,7 @@ describe('client entry: right Sidebar Context tab', () => {
   })
 })
 
-describe('client entry: settings card slot', () => {
-  function setup(): {
-    ctx: TestClientCtx
-    scope: ReturnType<typeof makeScope>
-    registration: { name: string; key?: string; locale?: string; inject?: () => unknown }
-    component: (props: Record<string, unknown>) => unknown
-  } {
-    const scope = makeScope({ status: 'loading', value: null, writable: false })
-    const ctx = new TestClientCtx({
-      services: { settingsScope: { bind: () => scope } },
-    })
-    applyTo(ctx)
-    const entry = ctx.slots.of('settings.plugin.item')[0]
-    return {
-      ctx,
-      scope,
-      registration: entry.registration as never,
-      component: entry.component as never,
-    }
-  }
-
-  test('registers the keyed card; inject exposes the settings store and a set verb', () => {
-    const { ctx, scope, registration } = setup()
-    assert.equal(registration.name, 'settings.plugin.item')
-    assert.equal(registration.key, 'dsh-context')
-    assert.equal(registration.locale, 'dsh-context')
-
-    const face = registration.inject?.() as {
-      hooks: { contextSettings: { getSnapshot(): SettingsState } }
-      set: (field: SettingsField, value: string) => void
-    }
-    assert.equal(face.hooks.contextSettings.getSnapshot().granularity, 'step')
-    face.set('defaultGranularity', 'turn')
-    assert.equal(face.hooks.contextSettings.getSnapshot().granularity, 'turn')
-    assert.deepEqual(scope.sets, [{ field: 'defaultGranularity', value: 'turn' }])
-    ctx.dispose()
-  })
-
-  test('the component renders the card DOM (loading status → disabled selects)', async () => {
-    const { ctx, component } = setup()
-    const el = component({}) as ReactElement
-    assert.equal(typeof el.type, 'function')
-    assert.equal((el.type as { name: string }).name, 'SettingsCard')
-    const store = (ctx.slots.of('settings.plugin.item')[0].registration.inject?.() as {
-      hooks: { contextSettings: { getSnapshot(): SettingsState } }
-    }).hooks.contextSettings
-    const m = await mount(h(el.type as never, {
-      useContextSettings: <T,>(sel: (state: SettingsState) => T): T => sel(store.getSnapshot()),
-    }))
-    assert.ok(query(m.container, '.lc-settings-card'))
-    await click(query(m.container, '.lc-settings-head'))
-    const selects = queryAll(m.container, '.lc-settings-select')
-    assert.equal(selects.length, 6)
-    for (const s of selects) assert.ok((s as HTMLButtonElement).disabled)
-    await m.unmount()
-    ctx.dispose()
-  })
-})
-
 describe('client entry: placement gating', () => {
-  /** A settings scope whose snapshot the test drives (the emit path). */
-  function scopeWith(snapshot: { status: string; value: unknown; writable: boolean }): SettingsScopeLike & {
-    emit(next: { status: string; value: unknown; writable: boolean }): void
-  } {
-    let current = snapshot
-    const listeners = new Set<() => void>()
-    return {
-      getSnapshot: () => current,
-      subscribe(listener) {
-        listeners.add(listener)
-        return () => { listeners.delete(listener) }
-      },
-      set: () => Promise.resolve(),
-      emit(next) {
-        current = next
-        for (const listener of listeners) listener()
-      },
-    }
-  }
-
   /** The sidebar registry stand-in counting registrations and disposer calls. */
   function registry(): { definitions: unknown[]; disposed: number; register(d: unknown): () => void } {
     const rec = {
@@ -518,11 +442,21 @@ describe('client entry: placement gating', () => {
     return rec
   }
 
+  test('a registry that hands back no disposer unwinds the tab mount without a throw', () => {
+    const ctx = new TestClientCtx()
+    // A foreign/hostile registry: the registration contract's disposer is absent, so the mount's own
+    // disposer must skip it rather than call a non-function on the placement flip.
+    ;(ctx.slots as unknown as { register: () => unknown }).register = () => undefined
+    applyTo(ctx)
+    ctx.dispose()
+    assert.deepEqual(ctx.slots.of('conversation.view'), [])
+  })
+
   test("the persisted 'sidebar' placement skips the conversation tab and keeps the sidebar", () => {
     const scope = scopeWith({ status: 'ready', value: { defaultPlacement: 'sidebar' }, writable: true })
-    const ctx = new TestClientCtx({ services: { settingsScope: { bind: () => scope } } })
+    const ctx = new TestClientCtx({ services: { configForms: formsServing(scope) } })
     applyTo(ctx)
-    assert.deepEqual(ctx.slots.of('conversation.view'), [], 'the dropped tab never registered')
+    assert.deepEqual(ctx.slots.of('conversation.view'), [], 'the dropped tabs never registered')
     const tabs = registry()
     ctx.setService('sidebarRightTabs', tabs)
     assert.equal(tabs.definitions.length, 1, 'the kept sidebar still registers')
@@ -534,26 +468,71 @@ describe('client entry: placement gating', () => {
 
   test('a preference flip moves the registrations live; disposal unwinds everything', () => {
     const scope = scopeWith({ status: 'ready', value: {}, writable: true })
-    const ctx = new TestClientCtx({ services: { settingsScope: { bind: () => scope } } })
+    const ctx = new TestClientCtx({ services: { configForms: formsServing(scope) } })
     applyTo(ctx)
     const tabs = registry()
     ctx.setService('sidebarRightTabs', tabs)
-    assert.equal(ctx.slots.of('conversation.view').length, 1, "the default 'all' carries both")
+    assert.equal(ctx.slots.of('conversation.view').length, 2, "the default 'all' carries both tabs")
 
     scope.emit({ status: 'ready', value: { defaultPlacement: 'tab' }, writable: true })
     assert.equal(tabs.disposed, 1, 'the sidebar registration unwound')
     assert.deepEqual(ctx.slots.of('sidebar.right.pane.tab'), [])
     assert.deepEqual(ctx.slots.of('sidebar.right.pane.tab.title'), [])
-    assert.equal(ctx.slots.of('conversation.view').length, 1)
+    assert.equal(ctx.slots.of('conversation.view').length, 2)
 
     scope.emit({ status: 'ready', value: { defaultPlacement: 'all' }, writable: true })
     assert.equal(tabs.definitions.length, 2, 'the sidebar re-registered')
     assert.equal(ctx.slots.of('sidebar.right.pane.tab').length, 1)
-    assert.equal(ctx.slots.of('conversation.view').length, 1, 'the kept tab is never churned')
+    assert.equal(ctx.slots.of('conversation.view').length, 2, 'the kept tabs are never churned')
     ctx.dispose()
     assert.equal(tabs.disposed, 2)
     assert.deepEqual(ctx.slots.of('conversation.view'), [])
     assert.deepEqual(ctx.slots.of('sidebar.right.pane.tab'), [])
+  })
+})
+
+describe('client entry: second-mount guard', () => {
+  test('a ledger already seating the jump marker skips the whole apply', () => {
+    const sources: unknown[] = []
+    const ctx = new TestClientCtx({ services: { inputTriggers: { registerSource: (src: unknown) => {
+      sources.push(src)
+      return () => {
+        const i = sources.indexOf(src)
+        if (i >= 0) sources.splice(i, 1)
+      }
+    } } } })
+    applyTo(ctx)
+    const first = ctx.slots.of('conversation.view').length
+    assert.ok(first > 0, 'the first mount registers')
+    assert.equal(sources.length, 1, 'the first mount registers the /context source')
+    // The second mount of the same bundle — the static profile bundle plus a dynamic-runner run in one page.
+    applyTo(ctx)
+    assert.equal(ctx.slots.of('conversation.view').length, first, 'no second tab is seated')
+    assert.equal(ctx.slots.of('conversation.chat.assistant-actions').length, 1)
+    assert.equal(ctx.slots.of('conversation.input.overlay').length, 1)
+    assert.equal(ctx.slots.of('main').length, 1)
+    assert.equal(ctx.slots.of('sidebar.panellist').length, 1)
+    assert.equal(sources.length, 1, 'no second /context source')
+    ctx.dispose()
+  })
+
+  test('a ledger seating foreign entries only fails open into a full mount', () => {
+    const ctx = new TestClientCtx()
+    ctx.slots.register({ name: 'conversation.chat.assistant-actions', id: 'feedback' }, () => null)
+    applyTo(ctx)
+    assert.equal(ctx.slots.of('conversation.view').length, 2, 'the tabs register')
+    assert.equal(ctx.slots.of('conversation.chat.assistant-actions').length, 2, 'the jump registers beside the foreign row')
+    ctx.dispose()
+  })
+
+  test('a hostile ledger face fails open into a full mount', () => {
+    const ctx = new TestClientCtx()
+    ;(ctx.slots as unknown as { entries: () => never }).entries = () => {
+      throw new Error('boom')
+    }
+    applyTo(ctx)
+    assert.equal(ctx.slots.of('conversation.view').length, 2)
+    ctx.dispose()
   })
 })
 

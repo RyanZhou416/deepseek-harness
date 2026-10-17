@@ -1,22 +1,15 @@
 // DeepSeek Harness fork modification: subscription API reference prices and context tiers.
 /**
- * Client-side harness boundary — the exact API surface this plugin consumes
- * from the harness web half, plus the sanitizers that re-prove every
- * delivered value at that boundary.
+ * Client-side harness boundary: the harness web-half surface this plugin
+ * consumes, plus the sanitizers that re-prove every delivered value.
  *
- * The plugin bundles its own code but relies on the reader to deliver the
- * framework standard kit to slot components (`sessionId`, `useChat`,
- * `useProjection`, `t` …); only the small faces below are referenced across
- * modules. The INTERFACES are type-only (the runtime services come from the
- * user's harness); the `*Of` functions are the runtime guards the
- * no-white-screen guarantee rides on. Data arrives as pushed session
- * projections (`useProjection` standard seat); the ONE exception is the
- * gateway history page read (`remote.session.page`, see historyPage.ts) that
- * fetches a request-header epoch's content on demand.
+ * The interfaces are type-only — the runtime services come from the user's
+ * harness, so every face is re-proved at its call site.
  */
 
 import type { Context } from '@deepseek-ai/cordis'
 import type { ComponentType } from 'react'
+import type { AttachmentRef } from '../shared/attachment'
 import { estimateSystemTokens } from '../shared/estimate'
 import { COST_PERIODS } from '../shared/modelPricing'
 import type { ActivityDay, ContextActivity, ContextBreakdown, ContextHeaders, ContextPressure, ContextTimeline, CostModelUsage, HeaderEpochContent, SystemPromptNode, TimingTotals, TokenUsage, ToolTimingTotals } from '../shared/types'
@@ -29,15 +22,12 @@ export interface LocaleService {
 
 export interface SlotRegistration {
   name: string
-  /** List slots dispatch on id + order. */
   id?: string
   order?: number
-  /** Keyed slots (e.g. settings.plugin.item) dispatch on the entry key. */
   key?: string
-  /** optional dictionary namespace; the framework then synthesizes the `t` seat. */
+  /** Dictionary namespace; the framework synthesizes the `t` seat from it. */
   locale?: string
   label?: () => string
-  /** optional business face factory; a `hooks` compartment binds selector hooks onto props. */
   inject?: (sessionId?: string) => unknown
 }
 
@@ -47,102 +37,88 @@ export interface SlotsService {
     registration: SlotRegistration,
     component: (props: { sessionId?: string } & Record<string, unknown>) => unknown,
   ): unknown
+  /** The slot ledger's raw entries view (`SlotCore.entries`): one stored record
+   * per seated entry, its `options` carrying the registered `id`/`order`/….
+   * Optional: an older face mounts without the second-mount guard. */
+  entries?(name: string): unknown
 }
 
-/**
- * One guide-page capsule a right-Sidebar tab type contributes (dsh
- * 0.1.5-rc.1+): the glyph, the title, and the optional one-line description,
- * exactly the fields `SidebarRightGuideEntry` carries.
- */
+/** Whether the page's slot ledger already seats an entry with `id` on the named
+ * list slot. Reads the raw ledger (the view the session header renders), so a
+ * seated entry is one the harness would paint — exactly what a second mount of
+ * this bundle must not add. Fail-open: an absent, shape-shifted, or hostile
+ * face reports false, so the mount proceeds and never blanks a working one. */
+export function entrySeated(ctx: ClientCtx, name: string, id: string): boolean {
+  try {
+    const entries = ctx.slots.entries?.(name)
+    if (!Array.isArray(entries)) return false
+    for (const entry of entries) {
+      const options = asRecord(asRecord(entry)?.options)
+      if (options !== null && options.id === id) return true
+    }
+    return false
+  } catch {
+    return false
+  }
+}
+
+/** The harness `SidebarRightGuideEntry` subset a right-Sidebar tab type contributes. */
 export interface SidebarGuideEntryLike {
-  /** Ascending position among every registered type's entries. */
   order: number
   title: () => string
-  /**
-   * One line under the title on what picking the capsule opens; the guide
-   * renders it only while it lists few enough entries. Optional, so a line
-   * whose guide body ignores it simply goes without.
-   */
   description?: () => string
   icon?: ComponentType<{ size?: number }>
 }
 
-/** One right-Sidebar tab type registration (the fields this plugin uses). */
 export interface SidebarTabDefinitionLike {
-  /** This implementation's identity, unique across every registration. */
   id: string
-  /** What `openTab` names; also the page address's discriminator. */
   kind: string
-  /** The tab chip's text, captured when the tab opens. */
   title: () => string
-  /** Entry capsules for the guide page (omitted = the type stays off it). */
   guide?: readonly SidebarGuideEntryLike[]
 }
 
-/**
- * The right Sidebar's tab-type registry (`ctx.sidebarRightTabs`), as far as
- * this plugin consumes it. OPTIONAL by contract: the service ships only on the
- * 0.1.5 line (0.1.5-rc.1+ supported), so the plugin reaches it through a
- * deferred inject and stays fully functional (no pending fiber, no throw)
- * without it.
- */
+/** The right Sidebar's tab-type registry (`ctx.sidebarRightTabs`), reached
+ * through a deferred inject: a deployment without it composes fully (no pending fiber, no throw). */
 export interface SidebarTabsFace {
   register(definition: SidebarTabDefinitionLike): () => void
 }
 
-/**
- * The right Sidebar's navigation face (`ctx.sidebarRight`), as far as this
- * plugin consumes it: `openResource` claims a `dsh-resource://file/…` address
- * through the shipped preview type and reveals the column in the same step.
- * The same optional generation as {@link SidebarTabsFace}; the caller re-proves
- * the verb at runtime and falls back to the system opener when it is absent or
- * refuses the address.
- */
-export interface SidebarResourceFace {
-  openResource(address: string): void
+/** The opener's placement options the Sidebar face accepts (the harness's
+ * `SidebarRightOpenResourceOptions`): the opening type's name, and whether to
+ * claim a fresh pane instead of the resource's open occurrence. */
+export interface SidebarResourceOpenOptions {
+  kind?: string
+  preferNewPane?: boolean
 }
 
-/**
- * The conversation node, as far as the Context browser consumes it: the
- * framework's finalized chat nodes carry the source surface event's `seq`
- * plus the full content — the browser joins its surface nodes on `seq` to
- * show actual content without carrying it through the projection.
- */
+/** The right Sidebar's navigation face (`ctx.sidebarRight`): `openResource`
+ * claims a `dsh-resource://…` address — the shipped preview type for files,
+ * the shipped subagent type for a chat. The caller falls back to its other
+ * opener when the face is absent or refuses. */
+export interface SidebarResourceFace {
+  openResource(address: string, options?: SidebarResourceOpenOptions): void
+}
+
+/** A finalized chat node: it carries the source surface event's `seq`, so the
+ * browser joins its nodes on `seq` instead of projecting their content. */
 export interface ConversationNodeLike {
   kind: string
   seq: number
-  /**
-   * The durable message id (assistant nodes on the harness chat nodes; absent
-   * on synthetic/interrupted replies) — the key the chat's assistant-action
-   * seat addresses a finalized reply by.
-   */
+  /** Durable message id; absent on synthetic/interrupted replies. */
   messageId?: unknown
   content?: readonly unknown[]
   blocks?: readonly unknown[]
   call?: { name: string; argsRaw: string } | null
   isError?: boolean
   summary?: string | null
-  /**
-   * Nested Code-Mode call tree (dsh's recursive ToolCallBlock[]) on a tool
-   * result whose call ran sub-dispatches — a PTC `run_code` program. Consumed
-   * structurally only (fileActivity): every block is re-proved at runtime and
-   * malformed shapes drop out instead of throwing.
-   */
+  /** Nested dsh ToolCallBlock[] tree of a PTC `run_code` dispatch; re-proved structurally in fileActivity. */
   subCalls?: readonly unknown[]
-  /** The tool result's bounded presentation meta (a search's matched files), as the join delivers it. */
+  /** Tool-result presentation meta (a search's matched files), as the join delivers it. */
   meta?: unknown
 }
 
-/**
- * A durable image attachment reference, as far as this plugin consumes it
- * (dsh's `ImageAttachmentRef`, minimally re-typed so the plugin stays free
- * of an attachment-package dependency). The durable log holds only this ref
- * — never inline bytes. Since dsh 0.1.2-rc.1 the width/height/bytes describe
- * the NORMALIZED raster under a deployment-resolvable policy (defaults:
- * total-pixel budget 2048×2048, long edge capped at 8192px — the 0.1.1 line
- * capped the long edge at 2048px); `originalDimensions` carries the
- * pre-normalization size when normalization reduced the image.
- */
+/** dsh's `ImageAttachmentRef`, re-typed to stay free of an attachment-package
+ * dependency. The durable log holds only this ref, never inline bytes. */
 export interface ImageRefLike {
   attachmentId: string
   name?: string
@@ -152,25 +128,13 @@ export interface ImageRefLike {
   originalDimensions?: { width: number; height: number }
 }
 
-/** Loads a session-authorized display URL for one durable image reference. */
 export type ImageLoader = (attachment: ImageRefLike) => Promise<string>
 
-/**
- * The harness conversation client service, minimally typed for image
- * resolution — the same call the chat view's own message images ride on
- * (`ctx.uiConversation.imageUrl`).
- */
 export interface UiConversationFace {
   imageUrl?(sessionId: string, attachment: ImageRefLike): Promise<string>
 }
 
-/**
- * A session-authorized durable-image loader over the harness conversation
- * face (`uiConversation.imageUrl`), or undefined when the service is not
- * composed — the caller degrades to metadata-only cards. Hostile snapshots
- * and throwing service reads are caught: this helper can never take a
- * render down.
- */
+/** Session-authorized image loader; undefined off an absent/hostile service (metadata-only cards). */
 export function imageLoaderOf(
   ctx: ClientCtx,
   sessionId: string | undefined,
@@ -186,21 +150,17 @@ export function imageLoaderOf(
   return undefined
 }
 
-/**
- * The `useChat` standard seat (the finalized chat nodes live on a per-view
- * `ChatSnapshot` whose `legacy` slice keeps the plain `ConversationNode[]`).
- * Minimally typed: the selector receives the harness snapshot (untrusted —
- * re-proved outside), and the slice it returns must be reference-stable so
- * the framework's selector-hook equality can gate re-renders.
- */
+/** The named host path of one session-cited attachment (the plugin's own location route);
+ * null resolves the browser's unavailable note. */
+export type AttachmentLocator = (attachment: AttachmentRef) => Promise<string | null>
+
+/** On-click opener of one attachment's preview; false = nothing took it. */
+export type AttachmentOpener = (attachment: AttachmentRef) => Promise<boolean>
+
+/** The `useChat` seat. The selector must return a reference-stable slice: a fresh object re-renders the view on every event. */
 export type UseChatLike = <T>(selector: (snapshot: unknown) => T) => T
 
-/**
- * The conversation-window nodes this plugin joins on, from the `useChat`
- * seat (`ChatSnapshot.legacy.nodes`). Returns undefined when the seat does
- * not deliver a real array (absent seat, foreign harness, hostile snapshot)
- * — callers render without the join, never an error.
- */
+/** `ChatSnapshot.legacy.nodes`, or undefined when the seat delivers no real array; callers render without the join. */
 export function conversationNodesOf(props: {
   useChat?: UseChatLike
 }): readonly ConversationNodeLike[] | undefined {
@@ -216,36 +176,21 @@ export function conversationNodesOf(props: {
   return undefined
 }
 
-/**
- * The framework standard kit of a session-scope slot component, as far as
- * this plugin consumes it: the resolve session id and the key-addressed
- * projection reader that delivers the `contextTimeline` value (undefined =
- * the host unit is absent or no value has arrived yet).
- */
+/** The framework standard kit of a session-scope slot component. */
 export interface SessionStandardProps {
   sessionId?: string
   useProjection?: (key: string) => unknown
-  /** The chat-view snapshot seat (see {@link UseChatLike}). */
+  /** The chat-view snapshot seat. */
   useChat?: UseChatLike
 }
 
-/**
- * The Context view's props: the framework standard kit plus this plugin's own
- * host marker. The right Sidebar's panel registration sets `host`, so the SAME
- * view drops the head cards a narrow column cannot serve.
- */
 export interface ContextViewProps extends SessionStandardProps {
-  /** Set only by the right-Sidebar registration; absent in the conversation tab and the /context modal. */
+  /** Set only by the right-Sidebar registration, which drops the head cards a narrow column cannot serve. */
   host?: 'sidebar'
 }
 
-/**
- * Read one projection key through the standard seat, narrowed at the
- * boundary: null when the seat is absent (a harness without the projection
- * pipeline) or the delivered value fails the narrow. The seat is a real
- * hook — call this unconditionally at the top of the component, one call
- * per key, in a stable order.
- */
+/** Read one projection key through the standard seat, narrowed at the
+ * boundary. The seat is a hook: call it unconditionally at the top of the component, one call per key, in a stable order. */
 export function projectionOf<T>(props: SessionStandardProps, key: string, narrow: (value: unknown) => T | null): T | null {
   if (typeof props.useProjection !== 'function') return null
   return narrow(props.useProjection(key))
@@ -256,48 +201,46 @@ export type ClientCtx = Context & {
   slots: SlotsService
 }
 
-/**
- * Narrow an unknown projection value to a string-keyed record, or null when
- * it is not one. The boundary type is Record<string, unknown> on purpose:
- * every field read below must re-prove itself (the no-white-screen
- * guarantee), so no field may borrow the wire type before its check.
- * Shared by every sanitizer here and by the agent-tree derivation
- * (agentTree.ts) — the ONE record guard for the whole client half.
- */
+/** The boundary type is `Record<string, unknown>` on purpose, so every field read re-proves itself before borrowing a wire type. */
 export function asRecord(value: unknown): Record<string, unknown> | null {
   if (value === null || value === undefined || typeof value !== 'object') return null
   return value as Record<string, unknown>
 }
 
-/**
- * Safe finite-number read: a missing/non-numeric/NaN field degrades to 0
- * instead of leaking into the UI as NaN percentages or broken arithmetic.
- */
+/** A missing, non-numeric, or NaN field degrades to 0. */
 export function numOf(value: unknown): number {
   return typeof value === 'number' && Number.isFinite(value) ? value : 0
 }
 
-/** Shared per-item collection guard: drop non-object entries, keep the rest. */
-export function objectsOf<T>(value: unknown): T[] {
+function objectsOf<T>(value: unknown): T[] {
   if (!Array.isArray(value)) return []
   return value.filter((v): v is T => v !== null && typeof v === 'object')
 }
 
-/**
- * The fast path's collection check: a real array whose entries are ALL
- * records. A null/primitive entry would pass a bare Array.isArray yet throw
- * on the first property read downstream (`req.seq` on null), so it sends the
- * value down the sanitizing slow path, where `objectsOf` drops it.
- */
+/** The collection/floor block shared by the full snapshot (timelineOf) and the split detail (timelineSource.ts). */
+export function collectionsOf(data: Record<string, unknown>): Pick<ContextTimeline,
+  'requests' | 'events' | 'nodes' | 'droppedNodes' | 'archive'
+  | 'surfaceFloor' | 'archiveFloor' | 'fileOps' | 'fileOpsFloor' | 'spans'> {
+  return {
+    requests: objectsOf(data.requests),
+    events: objectsOf(data.events),
+    nodes: objectsOf(data.nodes),
+    droppedNodes: numOf(data.droppedNodes),
+    archive: objectsOf(data.archive),
+    ...(typeof data.surfaceFloor === 'number' ? { surfaceFloor: data.surfaceFloor } : {}),
+    ...(typeof data.archiveFloor === 'number' ? { archiveFloor: data.archiveFloor } : {}),
+    ...(data.fileOps !== undefined ? { fileOps: objectsOf(data.fileOps) } : {}),
+    ...(typeof data.fileOpsFloor === 'number' ? { fileOpsFloor: data.fileOpsFloor } : {}),
+    ...(data.spans !== undefined ? { spans: objectsOf(data.spans) } : {}),
+  }
+}
+
+/** A null/primitive entry passes a bare `Array.isArray` yet throws on the first property read, so it takes the sanitizing slow path. */
 function recordsOnly(value: unknown): boolean {
   return Array.isArray(value) && value.every(e => e !== null && typeof e === 'object')
 }
 
-/**
- * Narrow a delivered `unsupported` gate record (the host's baseline gate —
- * see host/fallback.ts): both version strings re-proved, anything else
- * degrades to null (no gate shown) instead of rendering garbage.
- */
+/** The host's baseline-gate record (host/fallback.ts); anything but two version strings degrades to null. */
 export function unsupportedOf(value: unknown): { current: string; minimum: string } | null {
   const data = asRecord(value)
   if (data === null) return null
@@ -305,13 +248,7 @@ export function unsupportedOf(value: unknown): { current: string; minimum: strin
   return { current: data.current, minimum: data.minimum }
 }
 
-/**
- * The session-cost raw material, re-proved per provider/model/period/bucket
- * (the shape the client's cost.ts prices): a branch, model, or period that
- * is not a plain record drops whole — never a half-proved row — and bucket
- * fields zero out via numOf, so garbage can only price as zero, never as
- * NaN. Absent stays absent.
- */
+/** Session-cost raw material: an unproved branch drops whole and buckets zero out, so garbage prices as zero, never NaN. */
 function costOf(value: unknown): ContextTimeline['cost'] | undefined {
   const data = asRecord(value)
   if (data === null || Array.isArray(data)) return undefined
@@ -341,7 +278,6 @@ function costOf(value: unknown): ContextTimeline['cost'] | undefined {
   return out
 }
 
-/** The fast-path structural check for `cost`: every branch is a plain record (bucket fields re-prove in costOf/cost.ts). */
 function costFastOk(value: unknown): boolean {
   if (value === undefined) return true
   const data = asRecord(value)
@@ -352,27 +288,14 @@ function costFastOk(value: unknown): boolean {
   })
 }
 
-/**
- * Narrow a delivered projection value to a RENDER-SAFE context timeline —
- * the client's no-white-screen guarantee against backend/parse failures.
- *
- * A value that is not a record at all (capability absent, nothing delivered
- * yet) stays `null` and callers show the loading screen. A record that fails
- * the wire shape (corrupt checkpoint restore, a failed/older host payload,
- * plugin drift) is SANITIZED instead of rejected: every collection becomes
- * an array, non-object entries are dropped, `current` becomes a numeric
- * breakdown, and wrong-typed scalars are dropped or zeroed — so the whole
- * tab still renders with every usable piece of data instead of throwing
- * during render and unmounting the conversation view.
- */
+/** Narrow a delivered projection value to a RENDER-SAFE context timeline: a
+ * non-record stays `null` (callers show the loading screen), while a record
+ * failing the wire shape is SANITIZED, so a corrupt payload cannot throw during render and unmount the conversation view. */
 export function timelineOf(value: unknown): ContextTimeline | null {
   const data = asRecord(value)
   if (data === null) return null
   const current = data.current
-  // The wire shape check for the cheap pass-through path: `current` must be
-  // a full numeric breakdown (the host always sends all seven fields), and
-  // every collection must be a real list. Anything else takes the slow path
-  // and is rebuilt into the safe shape below.
+  // Fast-path shape check: the host always sends a full numeric breakdown and real collections; anything else is rebuilt below.
   const numericBreakdown = current !== null && typeof current === 'object'
     && ['system', 'tools', 'user', 'inject', 'skill', 'assistant', 'tool', 'total']
       .every(k => typeof (current as Record<string, unknown>)[k] === 'number')
@@ -384,14 +307,13 @@ export function timelineOf(value: unknown): ContextTimeline | null {
     && systemsFastOk(data.systems)
     && timingFastOk(data.timing)
     && costFastOk(data.cost)) {
-    // Well-formed: pass the delivered value through untouched (cheap, and reference-stable so plain re-renders stay zero-copy).
+    // The untouched pass-through keeps the value reference-stable for the selector equality.
     return data as unknown as ContextTimeline
   }
   const safeCurrent: Record<string, unknown> = current !== null && typeof current === 'object' ? current as Record<string, unknown> : {}
   const cost = costOf(data.cost)
   const timing = timingOf(data.timing)
-  // The baseline-gate record survives sanitizing: a fallback payload that
-  // somehow fails the fast path must still pop the gate modal.
+  // The baseline-gate record survives sanitizing: a fallback payload failing the fast path must still pop the gate modal.
   const unsupported = unsupportedOf(data.unsupported)
   // The split-generation head fields survive sanitizing too.
   const counts = countsOf(data.counts)
@@ -402,6 +324,9 @@ export function timelineOf(value: unknown): ContextTimeline | null {
     ...(typeof data.model === 'string' ? { model: data.model } : {}),
     ...(typeof data.provider === 'string' ? { provider: data.provider } : {}),
     ...(typeof data.contextWindow === 'number' ? { contextWindow: data.contextWindow } : {}),
+    ...(typeof data.maxOutputTokens === 'number' && Number.isFinite(data.maxOutputTokens) && data.maxOutputTokens > 0
+      ? { maxOutputTokens: data.maxOutputTokens }
+      : {}),
     current: {
       system: numOf(safeCurrent.system),
       tools: numOf(safeCurrent.tools),
@@ -412,35 +337,23 @@ export function timelineOf(value: unknown): ContextTimeline | null {
       tool: numOf(safeCurrent.tool),
       total: numOf(safeCurrent.total),
     },
-    requests: objectsOf(data.requests),
-    events: objectsOf(data.events),
-    nodes: objectsOf(data.nodes),
-    droppedNodes: numOf(data.droppedNodes),
+    ...collectionsOf(data),
     ...(typeof data.images === 'number' ? { images: data.images } : {}),
     ...(typeof data.toolCalls === 'number' ? { toolCalls: data.toolCalls } : {}),
     ...(typeof data.humanInputs === 'number' ? { humanInputs: data.humanInputs } : {}),
+    ...(typeof data.answers === 'number' && Number.isFinite(data.answers) ? { answers: data.answers } : {}),
     ...(typeof data.lastUser === 'string' && data.lastUser !== '' ? { lastUser: data.lastUser.slice(0, 200) } : {}),
-    archive: objectsOf(data.archive),
     ...(counts !== undefined ? { counts } : {}),
     ...(last !== undefined ? { last } : {}),
     ...(typeof data.detailRev === 'number' && Number.isFinite(data.detailRev) ? { detailRev: data.detailRev } : {}),
     ...(cost !== undefined ? { cost } : {}),
     ...(timing !== null ? { timing } : {}),
     ...(data.systems !== undefined ? { systems: systemsOf(data.systems) } : {}),
-    ...(typeof data.surfaceFloor === 'number' ? { surfaceFloor: data.surfaceFloor } : {}),
-    ...(typeof data.archiveFloor === 'number' ? { archiveFloor: data.archiveFloor } : {}),
-    ...(data.fileOps !== undefined ? { fileOps: objectsOf(data.fileOps) } : {}),
-    ...(typeof data.fileOpsFloor === 'number' ? { fileOpsFloor: data.fileOpsFloor } : {}),
   }
   return safe
 }
 
-/**
- * The live system-prompt nodes, re-proved per entry and sorted by seq: an
- * entry missing a finite seq/time/tokens drops out (the browser then falls
- * back to the header epoch), so a hostile collection can never produce a NaN
- * prompt figure or an unfetchable seq. Absent or empty stays absent.
- */
+/** Live system-prompt nodes sorted by seq; a dropped entry leaves the browser on the header epoch. */
 function systemsOf(value: unknown): ContextTimeline['systems'] {
   const list = objectsOf<Record<string, unknown>>(value)
   const out: SystemPromptNode[] = []
@@ -454,14 +367,7 @@ function systemsOf(value: unknown): ContextTimeline['systems'] {
   return out.sort((a, b) => a.seq - b.seq)
 }
 
-/**
- * The fast path's check for the live system-prompt nodes: every entry must
- * carry the three finite numbers the browser reads — `seq` for the per-step
- * resolution, `time` for the DNA band, `tokens` for its width. A primitive
- * entry, or one whose fields are not numbers, sends the payload down the
- * sanitizing slow path (`systemsOf` drops it) instead of leaking `undefined`
- * into the bar math. An absent list is fine.
- */
+/** Every entry must carry finite `seq`/`time`/`tokens`, else the payload takes the sanitizing slow path. */
 function systemsFastOk(value: unknown): boolean {
   if (value === undefined) return true
   if (!Array.isArray(value)) return false
@@ -474,12 +380,7 @@ function systemsFastOk(value: unknown): boolean {
   })
 }
 
-/**
- * The split head's count figures, re-proved field by field: a present-but-
- * partial record zeroes its unreadable fields (the stats board's no-NaN
- * guarantee), an absent or non-record value stays absent (legacy generation
- * — callers derive the counts from the collections instead).
- */
+/** Split-head counts; an absent value stays absent (legacy generation) and callers derive the counts from the collections. */
 function countsOf(value: unknown): ContextTimeline['counts'] {
   const data = asRecord(value)
   if (data === null) return undefined
@@ -489,10 +390,10 @@ function countsOf(value: unknown): ContextTimeline['counts'] {
     injects: numOf(data.injects),
     compactions: numOf(data.compactions),
     prunes: numOf(data.prunes),
+    skills: numOf(data.skills),
   }
 }
 
-/** The split head's newest-request summary; absent or shapeless stays absent. */
 function lastOf(value: unknown): ContextTimeline['last'] {
   const data = asRecord(value)
   if (data === null) return undefined
@@ -505,16 +406,8 @@ function lastOf(value: unknown): ContextTimeline['last'] {
   }
 }
 
-/**
- * Narrow a delivered projection value to the official token-meter
- * `contextPressure` projection (provider-anchored occupancy of the next
- * request). Absent key or value = the meter's projection is not composed
- * (e.g. a harness without the session-projection registry) — callers fall
- * back to their derived anchor, so the UI degrades gracefully. The three
- * fields are independent last-wins records on the wire (dsh's strict wire
- * schema), so each is re-proved on its own: a wrong-typed field drops out,
- * the readable ones survive.
- */
+/** The token-meter `contextPressure` projection. Its three fields are independent last-wins records of different moments (dsh's
+ * `ContextPressureProjection`), so each is re-proved alone and an absent value sends callers to their derived anchor. */
 export function contextPressureOf(value: unknown): ContextPressure | null {
   const data = asRecord(value)
   if (data === null) return null
@@ -525,13 +418,7 @@ export function contextPressureOf(value: unknown): ContextPressure | null {
   return out
 }
 
-/**
- * Narrow a delivered projection value to the official token-meter
- * `contextBreakdown` projection (the heuristic composition rows of the chat
- * ring's panel). Every figure must be a finite number — a partial/corrupt
- * value degrades to null so the composition card falls back to the fold's
- * own sums instead of mixing sources.
- */
+/** The token-meter `contextBreakdown` projection; a partial value degrades to null so the card uses the fold's own sums. */
 export function contextBreakdownOf(value: unknown): ContextBreakdown | null {
   const data = asRecord(value)
   if (data === null) return null
@@ -542,15 +429,9 @@ export function contextBreakdownOf(value: unknown): ContextBreakdown | null {
   return { systemTokens, toolsTokens, messageTokens }
 }
 
-/**
- * Narrow a delivered projection value to the official token-meter
- * `tokenUsage` projection (durable cumulative provider usage). Absent key or
- * value = the meter's projection is not composed (or no request has reported
- * usage yet) — callers drop the cache-hit cell to a dash. The wire schema is
- * strict with all four buckets REQUIRED (dsh token-meter's projectionSchema),
- * so a partial/corrupt value degrades the whole value to null instead of
- * undercounting the billed total.
- */
+/** The token-meter `tokenUsage` projection. Its wire schema requires all four
+ * buckets (dsh token-meter's `projectionSchema`), so a partial value degrades
+ * whole to null rather than undercount the billed total. */
 export function tokenUsageOf(value: unknown): TokenUsage | null {
   const data = asRecord(value)
   if (data === null) return null
@@ -562,30 +443,17 @@ export function tokenUsageOf(value: unknown): TokenUsage | null {
   return { uncachedInputTokens, outputTokens, cacheReadTokens, cacheWriteTokens }
 }
 
-/**
- * A non-negative finite number (the timing totals' every field): NaN or a
- * negative degrades to 0 instead of leaking into donut shares.
- */
+/** A NaN or negative value degrades to 0 instead of leaking into donut shares. */
 function msNumOf(value: unknown): number {
   return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : 0
 }
 
-/**
- * The OPTIONAL timing scalars (the generation split's spans and block counts):
- * a real non-negative number passes, anything else — including absence — reads
- * as undefined so the field stays absent on the narrowed value (see
- * `timingOf`).
- */
+/** An optional timing scalar; anything but a non-negative number stays undefined, so the field never materializes as a zero. */
 function optNumOf(value: unknown): number | undefined {
   return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : undefined
 }
 
-/**
- * Cheap whole-value check for the pass-through path of `timelineOf`: absent
- * timing passes; present timing must already be well-formed (every scalar
- * numeric, every per-name row shaped) — anything else sends the payload down
- * the sanitizing slow path.
- */
+/** Whole-value check for `timelineOf`'s pass-through path; anything but a well-formed timing object takes the sanitizing slow path. */
 function timingFastOk(value: unknown): boolean {
   if (value === undefined) return true
   if (value === null || typeof value !== 'object' || Array.isArray(value)) return false
@@ -593,9 +461,7 @@ function timingFastOk(value: unknown): boolean {
   for (const k of ['wallMs', 'ttftMs', 'genMs', 'calls', 'toolsMs', 'toolCalls']) {
     if (typeof t[k] !== 'number') return false
   }
-  // The generation split and the block counts are optional but, when present,
-  // must be finite non-negative numbers — the same gate the slow path applies,
-  // so a hostile bucket cannot slip through the fast path (see `timingOf`).
+  // Optional split/block scalars must pass the same non-negative gate the slow path applies.
   for (const k of ['reasoningMs', 'textMs', 'toolArgMs', 'reasoningBlocks', 'textBlocks', 'toolArgBlocks']) {
     const v = t[k]
     if (v !== undefined && (typeof v !== 'number' || !Number.isFinite(v) || v < 0)) return false
@@ -611,13 +477,7 @@ function timingFastOk(value: unknown): boolean {
   return true
 }
 
-/**
- * Narrow a delivered timing totals value (see TimingTotals) to a RENDER-SAFE
- * shape — the timing card's no-white-screen guarantee. A value that is not a
- * record stays null (the card renders its empty state); wrong-typed scalars
- * zero out and per-name rows failing the shape drop individually, so one
- * hostile row never blanks the ranking.
- */
+/** Narrow delivered TimingTotals to a render-safe shape; one row failing the shape drops alone, so it never blanks the ranking. */
 export function timingOf(value: unknown): TimingTotals | null {
   const data = asRecord(value)
   if (data === null) return null
@@ -625,8 +485,7 @@ export function timingOf(value: unknown): TimingTotals | null {
   const rawTools = data.tools
   if (rawTools !== null && typeof rawTools === 'object' && !Array.isArray(rawTools)) {
     for (const k in rawTools) {
-      // A JSON-delivered record can carry an own '__proto__' key; assigning it
-      // would set the prototype instead of a row — skip it.
+      // An own '__proto__' key would set the prototype instead of a row.
       if (k === '__proto__' || !Object.hasOwn(rawTools, k)) continue
       const row = (rawTools as Record<string, unknown>)[k]
       if (row === null || typeof row !== 'object') continue
@@ -645,9 +504,7 @@ export function timingOf(value: unknown): TimingTotals | null {
     toolCalls: msNumOf(data.toolCalls),
     tools,
   }
-  // The optional scalars stay ABSENT when the host did not serve them (a row
-  // cached before the split / the counts) or served a non-number: the card
-  // renders the un-split shape / no qualifier instead of meaningless zeros.
+  // Optional scalars stay absent when the host served none, so the card renders the un-split shape instead of meaningless zeros.
   const reasoning = optNumOf(data.reasoningMs)
   if (reasoning !== undefined) totals.reasoningMs = reasoning
   const reasoningBlocks = optNumOf(data.reasoningBlocks)
@@ -664,25 +521,17 @@ export function timingOf(value: unknown): TimingTotals | null {
 }
 
 /**
- * Narrow a delivered projection value to the plugin's `contextHeaders`
- * (request-header epoch METADATA — boundaries, token prices, attribution).
- * Absent key = an older Host half without the companion unit — the Context
- * browser degrades its system/tools sections to a metadata-only note.
+ * The plugin's `contextHeaders` projection: request-header epoch METADATA
+ * (boundaries, token prices, attribution); epoch CONTENT is fetched on demand
+ * (historyPage.ts), never carried here.
  *
- * Entry-level shape is checked too: a malformed epoch (corrupt payload with
- * a missing tools list, a wrong-typed systemTokens, or a tool row whose
- * name/tokens the browser reads blindly — `tool.name.toLowerCase()` and
- * `b.tokens - a.tokens` throw on junk) would crash the browser's
- * tools/sections reads, so the WHOLE projection degrades to null and the
- * card falls back to its metadata-only note. The epoch CONTENT is
- * not part of this value — the browser fetches it per epoch on demand.
+ * One malformed epoch degrades the WHOLE projection to null, because
+ * downstream reads call `tool.name.toLowerCase()` and `b.tokens - a.tokens`
+ * blindly.
  *
- * The pre-#37 wire generation carries the system TEXT instead of its token
- * price (a host still running the old view — stale watch build, an app not
- * restarted since the upgrade — serves it from its cache verbatim), so the
- * two generations are normalized to the metadata shape here: unpriced legacy
- * entries get the shared meter heuristic applied, priced ones and
- * new-shape values pass through untouched.
+ * A pre-#37 host serving from its cache still carries the system TEXT in
+ * place of its token price, so unpriced entries get the shared meter
+ * heuristic here.
  */
 export function headersOf(value: unknown): ContextHeaders | null {
   const headers = asRecord(value)
@@ -716,15 +565,8 @@ export function headersOf(value: unknown): ContextHeaders | null {
   } as unknown as ContextHeaders
 }
 
-/**
- * Narrow a delivered `contextActivity` value (the per-day ledger the Context
- * Overview's heatmap reads off each session-list row) to a render-safe shape.
- * Absent or non-record stays null (an older host serves no such key — the
- * heatmap renders its empty note). Per-day re-proved: a malformed key or a
- * wrong-typed figure drops just that entry, a hostile day record can never
- * produce a NaN cell, and a well-formed payload passes through untouched
- * (reference-stable for the selector equality).
- */
+/** The per-day `contextActivity` ledger behind the Overview heatmap and usage
+ * chart. Absent stays null (an older host serves no such key); per-day re-proof drops just the bad entry or fee. */
 export function activityOf(value: unknown): ContextActivity | null {
   const data = asRecord(value)
   if (data === null) return null
@@ -743,11 +585,40 @@ export function activityOf(value: unknown): ContextActivity | null {
       dirty = true
       continue
     }
-    days[key] = { tokens, requests }
+    // The day's pricing record (additive-optional); an empty result drops whole (empty ≠ zero) and the day's figures survive.
+    const proved = costOf(entry.cost)
+    const cost = proved !== undefined && Object.keys(proved).length > 0 ? proved : undefined
+    if (entry.cost !== undefined && cost === undefined) dirty = true
+    // The day's skill table (additive-optional): a malformed tally drops just that name.
+    const skills = skillTalliesOf(entry.skills)
+    if (entry.skills !== undefined && skills === undefined) dirty = true
+    days[key] = {
+      tokens,
+      requests,
+      ...(cost !== undefined ? { cost } : {}),
+      ...(skills !== undefined ? { skills } : {}),
+    }
   }
-  // Fully well-formed: pass the delivered value through untouched (cheap, and
-  // reference-stable for the selector equality); otherwise the sanitized copy.
+  // The untouched pass-through keeps the value reference-stable for the selector equality.
   return dirty ? { days } : data as unknown as ContextActivity
+}
+
+/** One day's skill-load table; a name needs a finite count and load instant, and an empty-after-scrubbing record drops whole. */
+function skillTalliesOf(value: unknown): ActivityDay['skills'] | undefined {
+  const data = asRecord(value)
+  if (data === null || Array.isArray(data)) return undefined
+  const skills: Record<string, { n: number; last: number }> = {}
+  let any = false
+  for (const name of Object.keys(data)) {
+    const tally = asRecord(data[name])
+    const n = tally?.n
+    const last = tally?.last
+    if (typeof n !== 'number' || !Number.isFinite(n) || n < 0
+      || typeof last !== 'number' || !Number.isFinite(last)) continue
+    skills[name] = { n, last }
+    any = true
+  }
+  return any ? skills : undefined
 }
 
 export interface TriggerCandidate {
@@ -778,11 +649,7 @@ export interface TriggerPick {
 
 export type SourcePickOutcome = 'handled' | undefined
 
-/**
- * The harness input-trigger service (`ctx.inputTriggers`), as far as this
- * plugin consumes it: registering one '/' source whose candidates, picks,
- * and enter adjudication all stay on the client.
- */
+/** The harness input-trigger service (`ctx.inputTriggers`): one '/' source whose candidates, picks, and enter stay client-side. */
 export interface InputTriggersFace {
   registerSource(src: {
     trigger: '/'
@@ -808,39 +675,18 @@ export interface SessionScopeFace {
 
 export interface SessionsFace {
   scope(id: string): SessionScopeFace | undefined
-  /**
-   * Select a listed session as current — the sidebar row click's own verb
-   * (the Context Dashboard's session cards ride it to jump). Re-proved at the
-   * call site; absent on a face that predates the verb.
-   */
-  open?(id: string): void
-  /**
-   * Re-pull the session-list baseline (the rows' projection column included).
-   * The overview rides it on open so host-side backfill rows (backfill.ts)
-   * reach a long-connected browser without a reload.
-   */
+  /** Re-pull the session-list baseline; the overview rides it on open so backfill rows (backfill.ts) reach a long-connected browser. */
   refresh?(): Promise<unknown>
 }
 
-/** One history page row: the raw event plus the optional host-computed view. */
 export interface HistoryEntryLike {
   event?: unknown
 }
 
-/**
- * The seq-anchored history page verb of the harness gateway remotes: the
- * session namespace mounts as a traced cordis service literally named
- * `remote.session`. The plugin resolves it through the DECLARED inject
- * (`watchHistoryFaces` in historyPage.ts — a non-declared read of the
- * traced proxy throws), so reads are undefined on harnesses that never
- * mount it rather than crashing. `throughSeq` is the inclusive log cut (a
- * seq that must exist in the log), `beforeSeq` the exclusive upper bound,
- * and the response wraps the rows in a `ClientResult`-style envelope. Rows
- * are `SessionHistoryRecord`s — `{type:'event', event}` entries plus packed
- * `{type:'chunks', …}` runs the mapper skips (every event the fold needs —
- * user/assistant messages, tool calls/results, compaction summaries — is
- * always served verbatim; only streaming deltas pack).
- */
+/** The gateway's seq-anchored history page verb (`remote.session.page`):
+ * `throughSeq` is the inclusive log cut and must exist in the log, `beforeSeq`
+ * the exclusive upper bound. Rows are `SessionHistoryRecord`s —
+ * `{type:'event', event}` plus packed `{type:'chunks', …}` runs the mapper skips, since only streaming deltas pack. */
 export interface SessionPageFace {
   page(request: {
     address: { kind: 'session'; sessionId: string }
@@ -850,13 +696,8 @@ export interface SessionPageFace {
   }, signal?: AbortSignal): Promise<unknown>
 }
 
-/**
- * The connection service face, as far as this plugin consumes it: the
- * generic Connection RPC caller (the harness's unary channel transport)
- * plus the loopback fact the harness's own open affordances gate on.
- */
+/** The connection service face: the generic RPC caller and the loopback fact the harness's own open affordances gate on. */
 export interface ConnectionFace {
-  /** Whether the page reaches the Host on the operator's own machine. */
   isLoopback?: boolean
   rpc?: {
     call?(channel: string, endpoint: string, payload: unknown, signal?: AbortSignal): Promise<unknown>
@@ -868,11 +709,8 @@ const OPEN_CHANNEL = '/api'
 const CAN_OPEN_ENDPOINT = 'session/canOpenWorkspacePath'
 const OPEN_ENDPOINT = 'session/openWorkspacePath'
 
-/**
- * The connection's bound generic-RPC caller, or undefined when the service
- * is absent or hostile — every read is guarded, so this can never throw.
- */
-export function rpcCallOf(ctx: ClientCtx): ((channel: string, endpoint: string, payload: unknown) => Promise<unknown>) | undefined {
+/** The connection's bound generic-RPC caller, or undefined off an absent/hostile service. */
+function rpcCallOf(ctx: ClientCtx): ((channel: string, endpoint: string, payload: unknown) => Promise<unknown>) | undefined {
   try {
     const rpc = asRecord((ctx.get('connection') as ConnectionFace | undefined)?.rpc)
     const fn = rpc?.call
@@ -883,16 +721,10 @@ export function rpcCallOf(ctx: ClientCtx): ((channel: string, endpoint: string, 
   return undefined
 }
 
-/**
- * The SESSION's workspace root — the `cwd` its session-list row carries (the
- * host session canon, not the host process's own launch directory) — or
- * undefined when the face is absent, the snapshot is malformed, or the row
- * names no cwd. Every field is re-proved — the no-white-screen guarantee.
- */
+/** The SESSION's workspace root — the `cwd` on its session-list row, not the host process's launch directory. */
 export function workspaceOf(ctx: ClientCtx, sessionId: string | undefined): string | undefined {
   if (typeof sessionId !== 'string' || sessionId === '') return undefined
-  // The snapshot and its rows are host data — a hostile object may throw on
-  // the call or on property access, and the card must never blank over it.
+  // Host data: a hostile object may throw on the call or on property access.
   try {
     const sessions = ctx.get('sessions') as { list?: { getSnapshot(): unknown } } | undefined
     const snapshot = typeof sessions?.list?.getSnapshot === 'function' ? sessions.list.getSnapshot() : undefined
@@ -905,14 +737,9 @@ export function workspaceOf(ctx: ClientCtx, sessionId: string | undefined): stri
   }
 }
 
-/**
- * Whether this deployment can hand a path to the user's native desktop: the
- * page must reach the Host on the operator's own machine (`isLoopback`, the
- * harness's own gate) AND the session controller's opener capability remote
- * must answer true. The capability is an RPC round-trip now (the synchronous
- * host-description fact is gone), so the answer is asynchronous; every
- * absence, hostility, or transport failure resolves false — never a rejection.
- */
+/** Whether this deployment can hand a path to the native desktop: loopback AND
+ * the session controller's opener capability answer over an RPC round-trip;
+ * every absence, hostility, or transport failure resolves false. */
 export async function canOpenPathsOf(ctx: ClientCtx): Promise<boolean> {
   const call = rpcCallOf(ctx)
   if (call === undefined) return false
@@ -927,12 +754,7 @@ export async function canOpenPathsOf(ctx: ClientCtx): Promise<boolean> {
   }
 }
 
-/**
- * The system path opener over the session controller's open remote, or
- * undefined when the connection carries no RPC caller. Fire-and-forget:
- * rejections (unknown path, no desktop, offline) swallow — the affordance
- * is best-effort by nature.
- */
+/** The system path opener over the session controller's open remote, or undefined without an RPC caller; fire-and-forget. */
 export function openPathVia(ctx: ClientCtx): ((path: string) => void) | undefined {
   const call = rpcCallOf(ctx)
   if (call === undefined) return undefined
@@ -946,19 +768,12 @@ export function openPathVia(ctx: ClientCtx): ((path: string) => void) | undefine
   }
 }
 
-/**
- * The right Sidebar's resource opener over `ctx.sidebarRight`, or undefined
- * when this harness serves no such column (every line older than 0.1.5-rc.1) or
- * the face is hostile — the caller then keeps its system-open degradation.
- * Synchronous, and it reports whether the column took the address: `openResource`
- * throws for a no-type-claims address or with no session surface mounted, and an
- * unwired preview must fall back rather than become an inert click. The face is
- * re-proved at call time (the service can land or be revoked across an HMR
- * reload), so the returned closure reads it per open.
- */
-export function openResourceVia(ctx: ClientCtx): ((address: string) => boolean) | undefined {
-  // The face is untrusted at the boundary, so the raw service is re-proved as a
-  // record with a callable `openResource` (never trusted off the cast).
+/** The right Sidebar's resource opener, or undefined when the column is absent
+ * — the caller keeps its system-open degradation. `openResource` throws for an
+ * unclaimed address or with no session surface, so the caller learns whether
+ * the address was taken. The face is re-proved per open: a service can land or be revoked across an HMR reload. */
+export function openResourceVia(ctx: ClientCtx): ((address: string, options?: SidebarResourceOpenOptions) => boolean) | undefined {
+  // The untrusted face is re-proved as a record with a callable `openResource`.
   const faceOf = (): SidebarResourceFace | undefined => {
     try {
       const face = asRecord(ctx.get('sidebarRight'))
@@ -970,31 +785,63 @@ export function openResourceVia(ctx: ClientCtx): ((address: string) => boolean) 
     }
   }
   if (faceOf() === undefined) return undefined
-  return (address: string): boolean => {
+  return (address: string, options?: SidebarResourceOpenOptions): boolean => {
     const face = faceOf()
     if (face === undefined) return false
     try {
-      face.openResource(address)
+      face.openResource(address, options)
       return true
     } catch {
-      // No preview type claims it, or no session surface is mounted: the caller
-      // falls back instead of showing an inert affordance.
+      // No preview type claims it, or no session surface is mounted.
       return false
     }
   }
 }
 
-/**
- * On-demand full content for one surface-node seq: resolves the joined
- * conversation node, `null` when the durable log does not hold the seq,
- * rejects on transport/RPC failure (the caller distinguishes the three).
- */
+/** Jump to one session through the view owner's own selection verb
+ * (`uiWorkspace.openSession`) — the sidebar row click rides the same verb and
+ * the sessions service carries no selection verb. An absent or hostile face swallows, so a dead jump stays on the page. */
+export function openSessionVia(ctx: ClientCtx, id: string): void {
+  try {
+    const workspace = asRecord(ctx.get('uiWorkspace'))
+    const open = workspace?.openSession
+    if (typeof open === 'function') open.call(workspace, id)
+  } catch { /* absent or hostile face — the jump is best-effort */ }
+}
+
+/** The right Sidebar's subagent-chat resource address — the shipped subagent
+ * catalog's canonical spelling for its "open in sidebar" verb, replicated
+ * verbatim (the host publishes no helper): its parser accepts only this form. */
+export function subagentChatAddressOf(address: { parentSessionId: string; childSessionId: string; mode: string }): string {
+  const query = new URLSearchParams({ parent: address.parentSessionId, mode: address.mode })
+  return `dsh-resource://subagentchat/session/${encodeURIComponent(address.childSessionId)}?${query}`
+}
+
+/** One subagent session's aside address as a family row supplies it: the direct
+ * parent is the row's own edge, and a row without its subagent projection rides
+ * the harness's own `unknown` mode. */
+export interface SubagentAddressLike {
+  parentSessionId?: string
+  childSessionId: string
+  mode?: 'one-shot' | 'continuable' | 'unknown'
+}
+
+/** Open one subagent session in the right Sidebar's chat presentation — the
+ * shipped catalog's aside verb (kind `subagentchat`, a new pane). False when
+ * the parent edge is unknown, the column absent, or the address unclaimed:
+ * the caller keeps its whole-view jump. */
+export function openChildAsideVia(ctx: ClientCtx, address: SubagentAddressLike): boolean {
+  const { parentSessionId, childSessionId, mode } = address
+  if (parentSessionId === undefined) return false
+  const open = openResourceVia(ctx)
+  return open !== undefined && open(
+    subagentChatAddressOf({ parentSessionId, childSessionId, mode: mode ?? 'unknown' }),
+    { kind: 'subagentchat', preferNewPane: true },
+  )
+}
+
+/** On-demand content for one surface-node seq: `null` when the durable log lacks the seq, rejects on transport failure. */
 export type ContentFetcher = (seq: number) => Promise<ConversationNodeLike | null>
 
-/**
- * On-demand CONTENT for one `contextHeaders` epoch seq: the fetched system
- * prompt and tool schemas (see historyPage.ts), `null` when the durable log
- * does not hold the epoch, rejects on transport/RPC failure (the caller
- * distinguishes the three).
- */
+/** On-demand system prompt and tool schemas for one `contextHeaders` epoch seq (historyPage.ts); `null` when the log lacks the epoch. */
 export type HeaderFetcher = (seq: number) => Promise<HeaderEpochContent | null>

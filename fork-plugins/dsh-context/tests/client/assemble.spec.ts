@@ -1,14 +1,10 @@
-// Context assembly (src/client/assemble.ts): the header epoch lookup and
-// the per-step surface reconstruction with its coverage flags.
+// Context assembly (src/client/assemble.ts): the header epoch lookup and the per-step surface reconstruction with its coverage flags.
 
 import assert from 'node:assert/strict'
 import { describe, test } from 'vitest'
 import { assemble, headerAt, systemAt } from '../../src/client/assemble'
-import type { ContextHeaders, ContextTimeline, HeaderRecord, SurfaceNode } from '../../src/shared/types'
-
-function node(seq: number, over: Partial<SurfaceNode> = {}): SurfaceNode {
-  return { seq, cat: 'user', tokens: 1, ...over }
-}
+import type { ContextHeaders, ContextTimeline, HeaderRecord } from '../../src/shared/types'
+import { surfaceNodeAt } from './helpers/kit'
 
 function epoch(seq: number): HeaderRecord {
   return { seq, time: 0, tools: [] }
@@ -56,7 +52,7 @@ describe('headerAt', () => {
 
 describe('assemble live view', () => {
   test('a null seq returns all live nodes for the next request', () => {
-    const data = timeline({ nodes: [node(1), node(5)] })
+    const data = timeline({ nodes: [surfaceNodeAt(1), surfaceNodeAt(5)] })
     const h = headers(10)
     const out = assemble(data, h, null)
     assert.equal(out.live, true)
@@ -68,7 +64,7 @@ describe('assemble live view', () => {
   })
 
   test('dropped live nodes are all part of the live context', () => {
-    const data = timeline({ nodes: [node(5)], droppedNodes: 3, surfaceFloor: 4 })
+    const data = timeline({ nodes: [surfaceNodeAt(5)], droppedNodes: 3, surfaceFloor: 4 })
     assert.equal(assemble(data, null, null).missingLive, 3)
   })
 })
@@ -76,12 +72,12 @@ describe('assemble live view', () => {
 describe('assemble past step', () => {
   test('the surface is live nodes before the step plus still-alive archive nodes', () => {
     const data = timeline({
-      nodes: [node(1), node(3), node(8)],
+      nodes: [surfaceNodeAt(1), surfaceNodeAt(3), surfaceNodeAt(8)],
       archive: [
-        node(2, { gone: 10 }),
-        node(4, { gone: 5 }),
-        node(6),
-        node(9, { gone: 12 }),
+        surfaceNodeAt(2, { gone: 10 }),
+        surfaceNodeAt(4, { gone: 5 }),
+        surfaceNodeAt(6),
+        surfaceNodeAt(9, { gone: 12 }),
       ],
     })
     const out = assemble(data, null, 7)
@@ -90,7 +86,7 @@ describe('assemble past step', () => {
   })
 
   test('the assembled nodes come back in seq order', () => {
-    const data = timeline({ nodes: [node(3), node(1)], archive: [node(2, { gone: 10 })] })
+    const data = timeline({ nodes: [surfaceNodeAt(3), surfaceNodeAt(1)], archive: [surfaceNodeAt(2, { gone: 10 })] })
     assert.deepEqual(assemble(data, null, 7).nodes.map(n => n.seq), [1, 2, 3])
   })
 

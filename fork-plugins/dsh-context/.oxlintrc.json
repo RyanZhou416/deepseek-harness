@@ -194,6 +194,12 @@
           "error",
           "always"
         ],
+        "@stylistic/object-property-newline": [
+          "error",
+          {
+            "allowAllPropertiesOnSameLine": true
+          }
+        ],
         "@stylistic/arrow-parens": [
           "error",
           "as-needed",

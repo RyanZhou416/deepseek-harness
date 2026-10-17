@@ -1,5 +1,3 @@
-/** `fmt`: the k/M/B suffix style shared by bars/details/stats; `fmtTime`: local HH:MM:SS. */
-
 export function fmt(n: number | null | undefined): string {
   if (n === undefined || n === null || isNaN(n)) return '—'
   const sign = n < 0 ? '-' : ''
@@ -10,7 +8,6 @@ export function fmt(n: number | null | undefined): string {
   return sign + String(Math.round(a))
 }
 
-/** Byte sizes for attachment metadata (1 kB = 1000 B, matching the k/M style of `fmt`). */
 export function fmtBytes(n: number | null | undefined): string {
   if (n === undefined || n === null || isNaN(n) || n < 0) return '—'
   if (n >= 1e6) return (n / 1e6).toFixed(1) + ' MB'
@@ -18,34 +15,26 @@ export function fmtBytes(n: number | null | undefined): string {
   return String(Math.round(n)) + ' B'
 }
 
-/**
- * Cache-hit share of billed prompt-side input (`reads` over `billed`),
- * TRUNCATED to `decimals` places (cut, not round) — same formula as the
- * harness chat stats line's '缓存命中' figure and the stats board's cell
- * (which shows two decimals). Null when nothing was billed. The 1e-9 epsilon
- * absorbs only float noise (integer token counts never sit that close to a
- * boundary).
- */
-export function cacheHitPercent(reads: number, billed: number, decimals = 2): string | null {
+/** Cache-hit share of billed prompt input, TRUNCATED to two decimals (the figure
+ * the harness chat stats line and the token card's corner show); the epsilon
+ * absorbs float noise only. Null when nothing was billed. */
+export function cacheHitPercent(reads: number, billed: number): string | null {
   if (!(billed > 0)) return null
-  const factor = 10 ** decimals
-  const scaled = Math.trunc((reads / billed) * 100 * factor + 1e-9)
-  return `${Math.floor(scaled / factor)}.${String(scaled % factor).padStart(decimals, '0')}`
+  const scaled = Math.trunc((reads / billed) * 100 * 100 + 1e-9)
+  return `${Math.floor(scaled / 100)}.${String(scaled % 100).padStart(2, '0')}`
 }
+
+/** One shared formatter: building an Intl formatter per call costs ~50× the format itself. */
+const TIME_FMT = new Intl.DateTimeFormat('en-GB', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' })
 
 export function fmtTime(t: number): string {
-  // en-GB 24-hour clock zero-pads HH:MM:SS without a helper; invalid dates must show '—' (toLocaleTimeString throws RangeError).
+  // en-GB zero-pads HH:MM:SS; an invalid date must show '—' (format throws RangeError).
   const d = new Date(t)
   if (isNaN(d.getTime())) return '—'
-  return d.toLocaleTimeString('en-GB', { hour12: false })
+  return TIME_FMT.format(d)
 }
 
-/**
- * Share of a whole as a compact leading percentage for the slice rows:
- * '—' when nothing totals, '0.0%' for empty slices, '<0.1%' for non-zero
- * crumbs a 0.1%-precision figure would erase. One decimal everywhere; shares
- * cap at 100% (parallel tool time can over-run the wall it belongs to).
- */
+/** Share of a whole: '<0.1%' for non-zero crumbs a 0.1%-precision figure would erase; shares cap at 100%. */
 export function fmtShare(part: number, total: number): string {
   if (!Number.isFinite(part) || !Number.isFinite(total) || total <= 0) return '—'
   if (part <= 0) return '0.0%'
@@ -54,12 +43,7 @@ export function fmtShare(part: number, total: number): string {
   return `${pct.toFixed(1)}%`
 }
 
-/**
- * Whole-session durations for the timing card, locale-free compact units: raw
- * ms under a second, one-decimal seconds under a minute, then m/s and h/m.
- * Non-finite or non-positive input shows the dash (callers render their empty
- * state anyway).
- */
+/** Whole-session durations in locale-free compact units; non-positive input shows the dash. */
 export function fmtDuration(ms: number): string {
   if (!Number.isFinite(ms) || ms <= 0) return '—'
   if (ms < 1000) return `${Math.round(ms)}ms`

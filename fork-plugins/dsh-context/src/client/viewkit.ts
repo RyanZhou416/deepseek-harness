@@ -1,5 +1,3 @@
-/** Shared dependency bag for component factories, built once per plugin apply (t, formatters, catLabel, event-text helpers). */
-
 import type { ContextEventRecord } from '../shared/types'
 import { fmt, fmtDuration, fmtShare, fmtTime } from './format'
 import { makeEventText } from './components/events'

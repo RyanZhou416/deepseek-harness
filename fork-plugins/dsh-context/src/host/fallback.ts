@@ -1,30 +1,19 @@
 /**
  * The baseline gate's fallback projection units (see host/index.ts).
  *
- * On a harness below the supported baseline (shared/version.ts) the plugin
- * registers these INSTEAD of the real folds: the log's event shapes on such
- * a harness are outside the compat matrix, so nothing is parsed at all —
- * `apply` is the identity over an opaque empty state, and `view` serves a
- * fixed value whose timeline snapshot carries the gate record (`unsupported`:
- * the detected harness version and the baseline). The client's cards render
- * the blank data and its gate modal urges the upgrade; the registry pipeline
- * (fold, cache, push feed) keeps working end to end, so nothing hangs on a
- * loading screen.
+ * On a harness below the supported baseline the plugin registers these INSTEAD of the real
+ * folds: nothing is parsed at all — `apply` is the identity over an opaque empty state, and
+ * `view` serves a fixed value whose timeline snapshot carries the gate record (`unsupported`:
+ * the detected harness version and the baseline), so the client renders blank cards and its gate
+ * modal.
  *
- * The definition carries BOTH registry contract generations: the modern
- * `stateSchema` + `wire` block (dsh 0.1.1-rc.1+, the realistic below-baseline
- * case) and the pre-0.1.1 top-level `schema` + `view` aliases that line's
- * registry reads instead. Each registry ignores the other generation's
- * fields, so one definition serves the gate on every harness that can
- * deliver projections to clients at all.
+ * The definition also carries the pre-0.1.1 top-level `schema` + `view` aliases those harnesses' registry reads
+ * instead of `stateSchema` + `wire`. They serve only harnesses outside the support matrix (docs/compatibility.md),
+ * where this gate is the entire plugin behaviour.
  *
- * `stateVersion` is pinned at 1. Downgrade/upgrade cache choreography: a
- * downgrade to a gated harness refolds the timeline key from scratch (no
- * ver-1 rows exist for it) and seeds the headers key from the real unit's
- * ver-1 rows — stripped to the empty state, which the gate never reads. An
- * upgrade back discards the fallback's ver-1 timeline rows and REJECTS its
- * ver-1 headers rows at the real unit's stricter state schema, refolding
- * both from the log. Nothing stale survives in either direction.
+ * `stateVersion` is pinned at 1: a downgrade refolds the timeline key and seeds the headers key
+ * stripped to the empty state (which the gate never reads); an upgrade back discards or rejects
+ * the fallback rows and refolds both from the log.
  */
 
 import { z } from 'zod'
@@ -35,11 +24,8 @@ import { contextActivitySchema } from './activity'
 import { contextHeadersSchema } from './headers'
 import { contextTimelineSchema } from './timeline'
 
-/**
- * The opaque fold state: the gate folds nothing, so any cached row seeds it
- * (strip-mode object — never a discard, never a throw), and the plain-JSON
- * cache-write gate trivially holds.
- */
+/** The opaque fold state: the gate folds nothing, so any cached row seeds it (strip mode, never
+ * a discard or a throw) and the plain-JSON cache-write gate trivially holds. */
 const fallbackStateSchema = z.object({})
 type FallbackState = z.infer<typeof fallbackStateSchema>
 
@@ -49,7 +35,6 @@ interface LegacyDefinitionShape<V> {
   view(state: FallbackState): V
 }
 
-/** One gate unit: identity fold over the opaque state, constant view, both contract generations. */
 function fallbackDefinition<K extends 'contextTimeline' | 'contextHeaders' | 'contextActivity'>(
   key: K,
   wireSchema: z.ZodType<SessionProjectionMap[K]>,
@@ -68,10 +53,6 @@ function fallbackDefinition<K extends 'contextTimeline' | 'contextHeaders' | 'co
   }
 }
 
-/**
- * The fallback `contextTimeline` unit: serves the fixed zeroed snapshot
- * naming the detected harness `current` version against the baseline.
- */
 export function createFallbackTimelineDefinition(current: string) {
   return fallbackDefinition('contextTimeline', contextTimelineSchema, {
     ok: true,
@@ -85,19 +66,10 @@ export function createFallbackTimelineDefinition(current: string) {
   })
 }
 
-/**
- * The fallback `contextHeaders` unit: an empty epoch list — the browser's
- * header sections degrade to their metadata-free rendering.
- */
 export function createFallbackHeadersDefinition() {
   return fallbackDefinition('contextHeaders', contextHeadersSchema, { headers: [] })
 }
 
-/**
- * The fallback `contextActivity` unit: an empty ledger — the overview's
- * heatmap renders its empty note instead of waiting on a key that the gate
- * would never deliver.
- */
 export function createFallbackActivityDefinition() {
   return fallbackDefinition('contextActivity', contextActivitySchema, { days: {} })
 }

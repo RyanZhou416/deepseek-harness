@@ -1,18 +1,13 @@
-// StatsTokens (src/client/components/statsTokens.tsx) rendered with real
-// React: the donut centered on the chat stats line's whole-session billed
-// total, sliced by composition category — the prompt side shared by the
-// estimated ratios, output exact.
-
 import { createElement as h } from 'react'
 import assert from 'node:assert/strict'
 import { describe, test } from 'vitest'
-import { makeDonut } from '../../../src/client/components/donut'
+import { Donut } from '../../../src/client/components/donut'
 import { makeStatsTokens } from '../../../src/client/components/statsTokens'
 import type { ContextBreakdown, Snapshot, TokenUsage } from '../../../src/shared/types'
 import { makeKit, mount, query, queryAll, hover, unhover } from '../helpers/kit'
 
 const kit = makeKit()
-const StatsTokens = makeStatsTokens(kit, makeDonut(kit))
+const StatsTokens = makeStatsTokens(kit, Donut)
 
 const CURRENT: Snapshot['current'] = { system: 200, tools: 100, user: 300, inject: 100, skill: 0, assistant: 200, tool: 100, total: 1000 }
 // Billed input 400 (300 uncached + 100 read), output 50 → the chat line's 450.
@@ -110,5 +105,34 @@ describe('StatsTokens', () => {
     assert.equal(query(m.container, '.lc-donut-center b').textContent, '0')
     assert.equal(queryAll(m.container, '.lc-sl-row').length, 8)
     await m.unmount()
+  })
+})
+
+describe('StatsTokens — the cache-hit corner figure', () => {
+  test('a billed session shows the chat line\'s cache-hit share in the title row', async () => {
+    const m = await mount(h(StatsTokens, { usage: USAGE, current: CURRENT, breakdown: null }))
+    const rate = query(m.container, '.lc-card-rate')
+    assert.equal(rate?.textContent, 'Cache Hit 25.00%', '100 reads over the 400 billed')
+    assert.ok(rate?.getAttribute('title')?.includes('Cumulative cache-read share'))
+    await m.unmount()
+  })
+
+  test('the figure localizes its label and tooltip', async () => {
+    const kitZh = makeKit('zh')
+    const StatsTokensZh = makeStatsTokens(kitZh, Donut)
+    const m = await mount(h(StatsTokensZh, { usage: USAGE, current: CURRENT, breakdown: null }))
+    const rate = query(m.container, '.lc-card-rate')
+    assert.equal(rate?.textContent, '缓存命中 25.00%')
+    assert.ok(rate?.getAttribute('title')?.includes('整个会话累计的缓存读取'))
+    await m.unmount()
+  })
+
+  test('an unbilled or unreported session renders no figure', async () => {
+    const zero: TokenUsage = { uncachedInputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 }
+    for (const usage of [null, zero] as (TokenUsage | null)[]) {
+      const m = await mount(h(StatsTokens, { usage, current: CURRENT, breakdown: null }))
+      assert.equal(queryAll(m.container, '.lc-card-rate').length, 0, JSON.stringify(usage))
+      await m.unmount()
+    }
   })
 })

@@ -1,47 +1,52 @@
-// The generation-proof icon resolver (src/client/primitives.ts): each ui-primitives
-// icon resolves across the range's two naming vocabularies — modern first, legacy
-// fallback — and a name missing from BOTH (a future rename) degrades to a
+// The defensive icon resolver (src/client/primitives.ts): each ui-primitives icon resolves by its export name;
+// a name missing from the module (a future rename) or a namespace that throws on the read degrades to a
 // render-nothing component instead of the React #130 element-type crash.
 
 import assert from 'node:assert/strict'
 import { describe, test } from 'vitest'
-import { resolveIcon, IconBranch, IconPlus, IconCheck, IconCopy, IconClose, IconSettings, IconChevronDown } from '../../src/client/primitives'
+import { FileTypeGlyph, resolveFileGlyph, resolveIcon, IconBranch, IconPlus, IconCheck, IconCopy, IconClose, IconSettings, IconChevronDown } from '../../src/client/primitives'
 
 describe('resolveIcon', () => {
-  const modern = function ModernIcon(): null { return null }
-  const legacy = function LegacyIcon(): null { return null }
+  const icon = function SomeIcon(): null { return null }
 
-  test('the modern spelling wins when both generations export the icon', () => {
-    assert.equal(resolveIcon('modern', 'legacy', { modern, legacy }), modern)
-  })
-
-  test('the legacy spelling backs the modern one up (through-0.1.5 generations)', () => {
-    assert.equal(resolveIcon('modern', 'legacy', { legacy }), legacy)
+  test('a present export resolves to the component', () => {
+    assert.equal(resolveIcon('icon', { icon }), icon)
   })
 
   test('a name present but not a component renders nothing', () => {
-    const icon = resolveIcon('modern', 'legacy', { modern: 42, legacy: null })
-    assert.equal(icon({}), null, 'the fallback component renders null')
+    const resolved = resolveIcon('icon', { icon: 42 })
+    assert.equal(resolved({}), null, 'the fallback component renders null')
   })
 
-  test('a name missing from both spellings renders nothing (future rename)', () => {
-    const icon = resolveIcon('IconGhostOutlineRegular', 'IconGhostOutline16', {})
-    assert.equal(icon({}), null)
+  test('a missing name renders nothing (a future rename)', () => {
+    const resolved = resolveIcon('IconGhostOutlineRegular', {})
+    assert.equal(resolved({}), null)
   })
 
   test('a namespace that throws on property access degrades to the fallback', () => {
     // Partial module mocks and hostile namespaces throw on the READ itself.
     const hostile = new Proxy({}, { get() { throw new Error('hostile export read') } })
-    const icon = resolveIcon('IconBranchOutlineRegular', 'IconBranchOutline16', hostile)
-    assert.equal(icon({}), null)
+    const resolved = resolveIcon('IconBranchOutlineRegular', hostile)
+    assert.equal(resolved({}), null)
   })
 
   test('the module-level exports resolve against the pinned generation', () => {
-    // The devDep carries the legacy vocabulary, so these exercised the
-    // legacy branch at module load; on a modern harness the same seven
-    // exports resolve through the modern names instead.
+    // The devDep carries the supported vocabulary, so these resolved at module load.
     for (const icon of [IconBranch, IconPlus, IconCheck, IconCopy, IconClose, IconSettings, IconChevronDown]) {
       assert.equal(typeof icon, 'function', 'every seam resolves to a component')
     }
+    assert.equal(typeof FileTypeGlyph, 'function', 'the file-type glyph resolves too')
+  })
+})
+
+describe('resolveFileGlyph', () => {
+  const glyph = function SomeGlyph(): null { return null }
+
+  test('a present export resolves; a missing, non-component, or hostile read renders nothing', () => {
+    assert.equal(resolveFileGlyph({ FileTypeIcon: glyph }), glyph)
+    assert.equal(resolveFileGlyph({ FileTypeIcon: 42 })({}), null)
+    assert.equal(resolveFileGlyph({})({}), null)
+    const hostile = new Proxy({}, { get() { throw new Error('hostile export read') } })
+    assert.equal(resolveFileGlyph(hostile)({}), null)
   })
 })

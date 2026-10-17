@@ -1,10 +1,9 @@
-// viewFocus (src/client/viewFocus.ts) — the chat→Context jump relay, the
-// sidebar-tab opener, and the conversation-tab activation, driven against a
-// real jsdom tab bar.
+// viewFocus (src/client/viewFocus.ts) — the chat→Context jump relay, the sidebar-tab opener, and the
+// conversation-tab activation against a real jsdom tab bar.
 
 import assert from 'node:assert/strict'
 import { describe, test } from 'vitest'
-import { activateContextTab, openContextSidebar, requestContextFocus, subscribeContextFocus, takeContextFocus } from '../../src/client/viewFocus'
+import { activateViewTab, openContextSidebar, requestContextFocus, subscribeContextFocus, takeContextFocus } from '../../src/client/viewFocus'
 import { asClientCtx, TestClientCtx } from './helpers/harness'
 
 describe('context focus relay', () => {
@@ -42,8 +41,7 @@ describe('context focus subscription', () => {
   test('a listener unsubscribing another mid-notify skips it (later records do not re-run it)', () => {
     let late = 0
     let offLate: () => void = () => {}
-    // Insertion order matters: the remover runs first and detaches the victim
-    // before Set iteration reaches it.
+    // Insertion order matters: the remover runs first and detaches the victim before Set iteration reaches it.
     const offRemover = subscribeContextFocus(() => { offLate() })
     offLate = subscribeContextFocus(() => { late++ })
     requestContextFocus('sv-mid', 1)
@@ -82,7 +80,7 @@ describe('openContextSidebar', () => {
   })
 })
 
-describe('activateContextTab', () => {
+describe('activateViewTab', () => {
   test('clicks the inactive tab matching the label, skips the active one, and reports misses', () => {
     type Counted = HTMLElement & { __clicks: () => number }
     const bar = document.createElement('div')
@@ -102,23 +100,23 @@ describe('activateContextTab', () => {
     const trajectory = mk('Trajectory', false)
     document.body.appendChild(bar)
     try {
-      assert.equal(activateContextTab('Context'), true)
+      assert.equal(activateViewTab('Context'), true)
       assert.equal(context.__clicks(), 1)
       assert.equal(chat.__clicks(), 0)
 
       // Already-active: reported success without a redundant click.
       context.setAttribute('aria-selected', 'true')
-      assert.equal(activateContextTab('Context'), true)
+      assert.equal(activateViewTab('Context'), true)
       assert.equal(context.__clicks(), 1)
 
       // Whitespace-padded label text still matches the trimmed comparison.
       context.setAttribute('aria-selected', 'false')
       context.textContent = '  Context '
-      assert.equal(activateContextTab('Context'), true)
+      assert.equal(activateViewTab('Context'), true)
       assert.equal(context.__clicks(), 2)
 
       // No tab carries the label → nothing clicked, false.
-      assert.equal(activateContextTab('Missing'), false)
+      assert.equal(activateViewTab('Missing'), false)
       assert.equal(trajectory.__clicks(), 0)
     } finally {
       bar.remove()

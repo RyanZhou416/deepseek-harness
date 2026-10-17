@@ -1,13 +1,9 @@
-// One session card in the overview grid (src/client/components/
-// overviewCard.tsx): the full-data rendering (donut, occupancy, mini
-// stats), the metadata-only degradation, the markers, and the open relay.
-
 import { createElement as h } from 'react'
 import assert from 'node:assert/strict'
 import { describe, test } from 'vitest'
 import { makeOverviewCard } from '../../../src/client/components/overviewCard'
 import type { OverviewRow } from '../../../src/client/overview'
-import type { ContextActivity, ContextTimeline } from '../../../src/shared/types'
+import type { ContextActivity, ContextTimeline, SessionCostUsage } from '../../../src/shared/types'
 import { click, makeKit, mount, query, queryAll, text } from '../helpers/kit'
 
 const kit = makeKit()
@@ -21,34 +17,38 @@ function rowOf(over: Partial<OverviewRow> = {}): OverviewRow {
     updatedAt: NOW - 3 * 3_600_000,
     running: false,
     current: false,
+    archived: false,
     timeline: null,
     activity: null,
+    family: [over.timeline ?? null],
+    familyCost: null,
     ...over,
   }
 }
+
+const FAMILY_COST: SessionCostUsage = { deepseek: { m: { peak: { uncached: 1000, cacheRead: 500, cacheWrite: 0, output: 250 } } } }
 
 const TIMELINE = {
   current: { system: 100, tools: 50, user: 30, inject: 10, skill: 10, assistant: 200, tool: 100, total: 500 },
   contextWindow: 1000,
   requests: [{}, {}],
   counts: { turns: 9, steps: 12, injects: 1, compactions: 0, prunes: 0 },
-  cost: { deepseek: { m: { peak: { uncached: 1000, cacheRead: 500, cacheWrite: 0, output: 250 } } } },
+  cost: FAMILY_COST,
 } as unknown as ContextTimeline
 
 describe('OverviewCard', () => {
   test('a folded session renders the donut, occupancy, and the three figures', async () => {
-    const m = await mount(h(Card, { row: rowOf({ timeline: TIMELINE }), costLabel: '$0.02', now: NOW, onOpen: () => {} }))
+    const m = await mount(h(Card, { row: rowOf({ timeline: TIMELINE, familyCost: FAMILY_COST }), costLabel: '$0.02', now: NOW, onOpen: () => {} }))
     const card = query(m.container, 'button.lc-ov-session')
     assert.ok(!card.className.includes('lc-ov-session-current'))
     assert.equal(query(m.container, '.lc-ov-session-title').textContent, 'refactor the parser')
     assert.equal(query(m.container, '.lc-ov-session-time').textContent, '3h ago')
-    // The mini donut: center carries the current total and the window share.
     assert.equal(query(m.container, '.lc-donut-center b').textContent, '500')
     assert.equal(query(m.container, '.lc-donut-center span').textContent, '50.0%')
-    // The three mini stats: turns+steps lead, then total billed, then cost.
+    // The three mini stats: turns+steps lead, then the team's billed, then its cost.
     const labels = queryAll(m.container, '.lc-ov-mini-label').map(el => el.textContent)
     const values = queryAll(m.container, '.lc-ov-mini-value').map(el => el.textContent)
-    assert.deepEqual(labels, ['Turns', 'Total', 'Cost'])
+    assert.deepEqual(labels, ['Turns', 'Total Tokens', 'Total Est. Cost'])
     assert.deepEqual(values, ['9 turns · 12 steps', '1.8k', '$0.02'])
     await m.unmount()
   })
@@ -170,7 +170,7 @@ describe('OverviewCard', () => {
     const ZhCard = makeOverviewCard(makeKit('zh'))
     const m = await mount(h(ZhCard, { row: rowOf({ timeline: TIMELINE }), costLabel: '¥0.13', now: NOW, onOpen: () => {} }))
     const labels = queryAll(m.container, '.lc-ov-mini-label').map(el => el.textContent)
-    assert.deepEqual(labels, ['轮次', '总用量', '费用'])
+    assert.deepEqual(labels, ['轮次', 'Token 总用量', '总预估费用'])
     const values = queryAll(m.container, '.lc-ov-mini-value').map(el => el.textContent)
     assert.equal(values[0], '9 轮 12 步')
     assert.equal(query(m.container, '.lc-ov-session-time').textContent, '3 小时前')

@@ -1,7 +1,4 @@
-// File activity derivation (src/client/fileActivity.ts) — the pure fold
-// behind the File Activity card: tool→kind classification, path extraction,
-// line-delta estimates, per-file aggregation, nested Code-Mode (PTC) call
-// folding, search-meta attribution, and the locate-target lookup.
+// File activity derivation (src/client/fileActivity.ts) — the pure fold behind the File Activity card.
 
 import assert from 'node:assert/strict'
 import { describe, test } from 'vitest'
@@ -200,7 +197,6 @@ describe('activityOf', () => {
     ])
     assert.equal(a.entries.length, 1)
     assert.deepEqual(a.entries[0].ops.map(o => o.seq), [7])
-    // Only the path-resolved call reaches the totals.
     assert.equal(a.totals.read.ops, 1)
     assert.equal(a.totals.write.ops, 0)
     assert.equal(a.totals.read.files, 1)
@@ -305,6 +301,10 @@ describe('locateStepOf', () => {
     assert.equal(locateStepOf(requests, 35, undefined), 'live')
     assert.equal(locateStepOf([], 1, undefined), 'live')
   })
+
+  test('a re-ordered wire still resolves the first request logged after the node', () => {
+    assert.equal(locateStepOf([{ seq: 30 }, { seq: 10 }, { seq: 20 }] as RequestRecord[], 5, undefined), 10)
+  })
 })
 
 /** One settled nested sub-call block, as the conversation join delivers it. */
@@ -387,7 +387,6 @@ describe('activityOf — nested Code-Mode (PTC) calls', () => {
     assert.equal(read?.parent, 30)
     assert.equal(read?.program, 'Read failing test and its fixture')
     assert.equal(read?.time, T0 + 20)
-    // The minimal block carries no time and no error.
     const minimal = file.ops.find(o => o.seq === 27)
     assert.equal(minimal?.time, undefined)
     assert.equal(minimal?.err, false)
@@ -415,8 +414,7 @@ describe('activityOf — nested Code-Mode (PTC) calls', () => {
     })])
     assert.deepEqual(a.entries.map(e => e.path), ['/b.ts', '/a.ts'])
     assert.equal(a.entries[1].ops[0].err, true)
-    // The parent's stamp locates the op; a failed program does not fail its
-    // earlier successful reads.
+    // The parent's stamp locates the op; a failed program does not fail its earlier successful reads.
     const ok = a.entries[0].ops[0]
     assert.equal(ok.err, false)
     assert.equal(ok.gone, 40)
@@ -507,8 +505,7 @@ describe('activityOf — search meta attribution', () => {
         meta: { shape: 'paths', truncated: false, total: 1, paths: ['/old.ts'] },
       }),
     ])
-    // The searched target rows too: '/src' (the narrowed path) and the two
-    // pathless patterns ride ahead of their hit files.
+    // The searched target rows too: '/src' (the narrowed path) and the two pathless patterns ride ahead of their hit files.
     assert.deepEqual(a.entries.map(e => e.path), ['old', '/old.ts', 'broad', '/src', '/src/a.ts', '/src/b.ts'])
     const byPath = new Map(a.entries.map(e => [e.path, e]))
     const srcA = byPath.get('/src/a.ts')!
@@ -681,8 +678,7 @@ describe('glyphOf', () => {
       assert.ok(g.text !== undefined, `badge text color missing for ${base}`)
     }
     // The text color contrasts with the fill: near-black on light shades (the
-    // JS yellow, shell green, rust peach), white on dark ones (including the
-    // kotlin lilac, just under the threshold).
+    // JS yellow, shell green, rust peach), white on dark ones (including the kotlin lilac, just under the threshold).
     assert.equal(glyphOf('/x/index.js', 'text').text, '#1f2328')
     assert.equal(glyphOf('/x/deploy.sh', 'text').text, '#1f2328')
     assert.equal(glyphOf('/x/lib.rs', 'text').text, '#1f2328')
@@ -703,22 +699,29 @@ describe('glyphOf', () => {
 describe('displayPathOf', () => {
   const ws = '/Users/bw/dev/dsh-context'
 
-  test('workspace paths shorten to a ./-relative form', () => {
-    assert.equal(displayPathOf(ws + '/src/client/a.ts', ws), './src/client/a.ts')
+  test('workspace and relative paths display bare-relative; the workspace root itself keeps ./', () => {
+    assert.equal(displayPathOf(ws + '/src/client/a.ts', ws), 'src/client/a.ts')
+    // The workspace root has no relative remainder: the bare dot form stays.
     assert.equal(displayPathOf(ws, ws), './')
     assert.equal(displayPathOf(ws + '/', ws), './')
-    assert.equal(displayPathOf('tests/client/a.spec.ts', ws), './tests/client/a.spec.ts')
-    assert.equal(displayPathOf('./tests/a.ts', ws), './tests/a.ts')
+    assert.equal(displayPathOf('tests/client/a.spec.ts', ws), 'tests/client/a.spec.ts')
+    assert.equal(displayPathOf('./tests/a.ts', ws), 'tests/a.ts')
+    // A recorded absolute path carrying an embedded `./` relativizes through it too.
+    assert.equal(displayPathOf('/repo/./a.ts', '/repo'), 'a.ts')
   })
 
   test('everything else stays verbatim', () => {
     assert.equal(displayPathOf('/etc/hosts', ws), '/etc/hosts')
     assert.equal(displayPathOf(ws + '-sibling/a.ts', ws), ws + '-sibling/a.ts')
     assert.equal(displayPathOf('C:\\repo\\a.ts', ws), 'C:\\repo\\a.ts')
-    assert.equal(displayPathOf('needle', ws), './needle')
+    assert.equal(displayPathOf('needle', ws), 'needle')
     assert.equal(displayPathOf(ws + '/a.ts', undefined), ws + '/a.ts')
     // Without a known workspace a relative path is still workspace-relative by definition.
-    assert.equal(displayPathOf('needle', undefined), './needle')
+    assert.equal(displayPathOf('needle', undefined), 'needle')
+    assert.equal(displayPathOf('./needle', undefined), 'needle')
+    // A raw all-`./` degenerate leaves nothing to display: the raw form stays.
+    assert.equal(displayPathOf('./', ws), './')
+    assert.equal(displayPathOf('././', ws), '././')
   })
 })
 

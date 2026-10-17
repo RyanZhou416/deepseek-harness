@@ -1,8 +1,3 @@
-// FileCard (src/client/components/fileCard.tsx) rendered with real React:
-// purpose/form filter chips, path search, per-file rows with count badges
-// and line deltas, expandable operation logs, the op-level locate hook,
-// workspace-relative path display, and the system-open affordance.
-
 import { act, createElement as h } from 'react'
 import assert from 'node:assert/strict'
 import { describe, test } from 'vitest'
@@ -25,7 +20,6 @@ function entry(path: string, over: Partial<FileEntry>): FileEntry {
   return { path, form: 'text', reads: 0, writes: 0, searches: 0, added: 0, removed: 0, errs: 0, ops: [], ...over }
 }
 
-/** Five files exercising every row anatomy: split paths, all badges, deltas both ways, failures, a directory, an image. */
 function richActivity(over: Partial<FileActivity> = {}): FileActivity {
   return {
     entries: [
@@ -84,14 +78,19 @@ async function typeSearch(container: ParentNode, value: string): Promise<void> {
 }
 
 describe('FileCard — empty state', () => {
-  test('no file ops renders the empty state without controls', async () => {
+  test('no file ops keeps the controls so the card measures the same as a populated one', async () => {
     const m = await mount(h(FileCard, {
       activity: richActivity({ entries: [] }),
       scope: 'Turn 1 · Step 1',
     }))
     assert.ok(text(m.container).includes('No file reads, writes, or searches'))
     assert.ok(text(m.container).includes('Turn 1 · Step 1'))
-    assert.equal(queryAll(m.container, '.lc-fa-ctl').length, 0)
+    // The empty state wears the SAME filter band and the SAME reserved lane as a populated card: the card's
+    // activity re-scopes on every step, and a controls-free empty state resized the page on the first read.
+    assert.equal(queryAll(m.container, '.lc-fa-ctl').length, 1)
+    assert.equal(queryAll(m.container, '.lc-fa-meta').length, 1)
+    assert.equal(queryAll(m.container, '.lc-lane').length, 1)
+    assert.equal(queryAll(m.container, '.lc-fa-list').length, 0)
     await m.unmount()
   })
 })
@@ -103,7 +102,6 @@ describe('FileCard — header, rows, and filters', () => {
     assert.ok(text(chipByLabel(m.container, 'All')).includes('16'))
     assert.ok(text(chipByLabel(m.container, 'Read')).includes('12'))
     assert.ok(text(chipByLabel(m.container, 'Images')).includes('1'))
-    // Meta strip: file count + aggregate delta (+7 −3).
     const meta = query(m.container, '.lc-fa-meta')
     assert.ok(text(meta).includes('5 files'))
     assert.ok(text(meta).includes('+7'))
@@ -114,7 +112,6 @@ describe('FileCard — header, rows, and filters', () => {
     assert.equal(rows.length, 5)
     // Default order is most-active first: many.log (9 ops) → a.ts (4) → the one-op files by recency.
     assert.deepEqual(rows.map(r => r.title), ['/var/many.log', '/src/a.ts', '/shots/ui.png', 'solo.md', '/src/'])
-    // Path split: muted dir + bold base; every badge and the row delta.
     const first = rows[0]
     assert.ok(first.querySelector('.lc-fa-path em')?.textContent === '/var/')
     assert.ok(first.querySelector('.lc-fa-path b')?.textContent === 'many.log')
@@ -128,14 +125,13 @@ describe('FileCard — header, rows, and filters', () => {
     assert.ok(text(aRow).includes('+2') && text(aRow).includes('−3'))
     assert.ok(aRow.querySelector('.lc-br-err-dot') !== null)
     assert.ok(aRow.title === '/src/a.ts')
-    // The directory row trims its trailing slash for display.
     const dirRow = rows.find(r => r.title === '/src/')
     assert.ok(dirRow !== undefined)
     assert.ok(dirRow.querySelector('.lc-fa-path b')?.textContent === 'src')
-    // The extension-less row relativizes with no workspace known: a './' dir span, and no badges beyond its own kind.
+    // The extension-less row relativizes with no workspace known: the dropped './' leaves no dir span.
     const solo = rows.find(r => r.title === 'solo.md')
     assert.ok(solo !== undefined)
-    assert.ok(solo.querySelector('.lc-fa-path em')?.textContent === './')
+    assert.ok(solo.querySelector('.lc-fa-path em') === null)
     assert.ok(solo.querySelector('.lc-fa-path b')?.textContent === 'solo.md')
     assert.ok(text(solo).includes('+5') && !text(solo).includes('−'))
     // solo.md's only op is timeless: the row drops its time cell.
@@ -234,7 +230,6 @@ describe('FileCard — header, rows, and filters', () => {
     const titles = () => queryAll(m.container, '.lc-fa-row').map(r => r.title)
     const sortBtns = queryAll(m.container, '.lc-fa-sort .lc-gran-btn')
     assert.equal(sortBtns.length, 3)
-    // Count order by default: 9 ops → 4 ops → one-op files by recency.
     assert.ok(sortBtns[0].className.includes('lc-gran-on'))
     assert.deepEqual(titles(), ['/var/many.log', '/src/a.ts', '/shots/ui.png', 'solo.md', '/src/'])
     // Latest order: many.log (seq 28) → ui.png (9) → solo.md (8) → a.ts (7) → /src/ (6).
@@ -455,25 +450,24 @@ describe('FileCard — workspace display and system open', () => {
 
   const baseOf = (row: HTMLElement): HTMLElement => query(row, '.lc-fa-path b')
 
-  test('workspace paths display ./-relative; pattern rows and outside paths stay verbatim', async () => {
+  test('workspace and relative paths display bare-relative; pattern rows and outside paths stay verbatim', async () => {
     const m = await mount(h(FileCard, { activity: workspaceActivity(), scope: 'live', workspace: '/repo' }))
-    // Inside the workspace: './'-relative dir + base.
+    // Inside the workspace: bare-relative dir + base, no './' prefix.
     const a = rowOf(m.container, '/repo/src/a.ts')
-    assert.ok(a.querySelector('.lc-fa-path em')?.textContent === './src/')
+    assert.ok(a.querySelector('.lc-fa-path em')?.textContent === 'src/')
     assert.ok(baseOf(a).textContent === 'a.ts')
     // An absolute path outside the workspace keeps its verbatim form.
     const hosts = rowOf(m.container, '/etc/hosts')
     assert.ok(hosts.querySelector('.lc-fa-path em')?.textContent === '/etc/')
-    // A bare-relative path displays './'-prefixed.
     const rel = rowOf(m.container, 'rel/b.md')
-    assert.ok(rel.querySelector('.lc-fa-path em')?.textContent === './rel/')
+    assert.ok(rel.querySelector('.lc-fa-path em')?.textContent === 'rel/')
     // A pattern-as-target search row shows the pattern, never relativized.
     const pat = rowOf(m.container, 'needle')
     assert.equal(pat.querySelector('.lc-fa-path em'), null)
     assert.ok(baseOf(pat).textContent === 'needle')
-    // A './'-prefixed path keeps its form.
+    // A './'-prefixed path drops the prefix.
     const dot = rowOf(m.container, './dot/c.ts')
-    assert.ok(dot.querySelector('.lc-fa-path em')?.textContent === './dot/')
+    assert.ok(dot.querySelector('.lc-fa-path em')?.textContent === 'dot/')
     await m.unmount()
   })
 
@@ -532,15 +526,13 @@ describe('FileCard — workspace display and system open', () => {
       onPreview: e => { previewed.push(e); return true },
       onOpen: p => { opened.push(p) },
     }))
-    // The preview affordance leads: the title says so, and the click never
-    // reaches the system opener.
+    // The preview affordance leads: the title says so, and the click never reaches the system opener.
     const a = baseOf(rowOf(m.container, '/repo/src/a.ts'))
     assert.equal(a.getAttribute('title'), 'Preview in the sidebar')
     await click(a)
     assert.deepEqual(previewed.map(e => e.path), ['/repo/src/a.ts'])
     assert.equal(opened.length, 0)
-    // A refusal (no preview type claims it, no surface mounted) still opens on
-    // the system rather than becoming an inert click.
+    // A refusal (no preview type claims it, no surface mounted) still opens on the system rather than becoming an inert click.
     await m.unmount()
     const m2 = await mount(h(FileCard, {
       activity: workspaceActivity(),

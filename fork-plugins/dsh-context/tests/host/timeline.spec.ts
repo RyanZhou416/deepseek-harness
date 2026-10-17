@@ -1,9 +1,5 @@
-// DeepSeek Harness fork modification: subscription API reference prices and context tiers.
-// Unit tests for the contextTimeline projection unit (src/host/timeline.ts) —
-// the projection-definition contract surface (stateSchema + required wire),
-// its wire/state schemas, and the config-resolved retention bounds. Fold
-// semantics themselves live in fold.ts; here we pin the definition's contract
-// over a real folded log built with the shared envelope builders.
+// The contextTimeline projection unit (src/host/timeline.ts) — the projection-definition contract surface (stateSchema + required wire),
+// its schemas, and the config-resolved retention bounds, over a real folded log. Fold semantics themselves live in fold.ts.
 
 import assert from 'node:assert/strict'
 import { describe, test } from 'vitest'
@@ -18,6 +14,7 @@ import {
   requestContext,
   stepEnd,
   stepStart,
+  systemMessage,
   toolCall,
   toolResult,
   userMessage,
@@ -28,21 +25,21 @@ import type { TimelineEvent } from '../../src/host/fold'
 function realLog(): TimelineEvent[] {
   return [
     header(1, {
-      system: 'You are an agent.',
       tools: [{ name: 'bash', description: 'run a command' }],
       model: 'deepseek-v4-flash',
       provider: 'deepseek',
     }),
-    requestContext(2, { contextWindow: 128000 }),
-    stepStart(3),
-    userMessage(4, [{ type: 'text', text: 'hello there' }], { kind: 'user' }),
-    assistantMessage(5, { turn: 1, step: 0, usage: { inputTokens: 10, outputTokens: 5, cacheReadTokens: 3 } }),
-    toolCall(6, { callId: 'c1', name: 'bash' }),
-    toolResult(7, { callId: 'c1', content: [{ type: 'text', text: 'ok' }] }),
-    stepEnd(8),
-    assistantMessage(9, { turn: 1, step: 1, usage: { inputTokens: 20, outputTokens: 8 } }),
-    compaction(10, 'summary', { shadowedTokenCount: 12, shadowedSeqs: [4] }),
-    planMode(11, { active: true }),
+    systemMessage(2),
+    requestContext(3, { contextWindow: 128000 }),
+    stepStart(4),
+    userMessage(5, [{ type: 'text', text: 'hello there' }], { kind: 'user' }),
+    assistantMessage(6, { turn: 1, step: 0, usage: { inputTokens: 10, outputTokens: 5, cacheReadTokens: 3 } }),
+    toolCall(7, { callId: 'c1', name: 'bash' }),
+    toolResult(8, { callId: 'c1', content: [{ type: 'text', text: 'ok' }] }),
+    stepEnd(9),
+    assistantMessage(10, { turn: 1, step: 1, usage: { inputTokens: 20, outputTokens: 8 } }),
+    compaction(11, 'summary', { shadowedTokenCount: 12, shadowedSeqs: [5] }),
+    planMode(12, { active: true }),
   ]
 }
 
@@ -50,7 +47,7 @@ describe('createContextTimelineDefinition', () => {
   test('carries the supported projection contract on one unit', () => {
     const def = createContextTimelineDefinition({}, () => false)
     assert.equal(def.key, 'contextTimeline')
-    assert.equal(def.stateVersion, 21)
+    assert.equal(def.stateVersion, 28)
     assert.equal(typeof def.init, 'function')
     assert.equal(typeof def.apply, 'function')
     // The supported registry contract: stateSchema + a REQUIRED wire block.
@@ -74,6 +71,11 @@ describe('createContextTimelineDefinition', () => {
     assert.ok(view.nodes.length > 0)
     assert.ok(view.requests.length > 0)
     assert.ok(view.events.length > 0)
+    // The duration overlay's per-request step active time (RequestRecord.activeMs): the first
+    // request's step ran start (tick 4s) → end (tick 9s) with its bash call inside and no user
+    // waits; the second folded after stepEnd consumed the slot.
+    assert.equal(view.requests[0].activeMs, 5000, 'step start → step end, the tool run included')
+    assert.equal(view.requests[1].activeMs, undefined, 'no open step slot, no stamp')
 
     for (const [index, state] of drive.states.entries()) {
       def.stateSchema.parse(structuredClone(state)) // throws on drift
@@ -101,7 +103,7 @@ describe('createContextTimelineDefinition', () => {
 
   test('maxNodes bounds the served surface nodes', () => {
     const events: TimelineEvent[] = [
-      header(1, { system: 's', model: 'm', provider: 'p' }),
+      header(1, { model: 'm', provider: 'p' }),
       userMessage(2, [{ type: 'text', text: 'one' }], { kind: 'user' }),
       userMessage(3, [{ type: 'text', text: 'two' }], { kind: 'user' }),
       userMessage(4, [{ type: 'text', text: 'three' }], { kind: 'user' }),

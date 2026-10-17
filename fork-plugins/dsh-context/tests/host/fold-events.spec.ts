@@ -1,16 +1,14 @@
-// applyTimeline switch-case paths of the fold (src/host/fold.ts): every
-// durable event type's record-keeping (headers, context, tool calls,
-// injections, skill tagging, request records, plan mode, compaction arming)
-// plus the session-cost accumulation (model family match, Beijing peak
-// windows, per-period running totals). No mocks: the real fold runs.
+// applyTimeline paths of the fold (src/host/fold.ts). No mocks: the real fold runs.
 
 import assert from 'node:assert/strict'
 import { describe, test } from 'vitest'
 import type { TimelineEvent } from '../../src/host/fold'
 import {
+  assistantAttempt,
   assistantMessage,
   at,
   compaction,
+  endSeed,
   foreign,
   header,
   planMode,
@@ -212,6 +210,16 @@ describe('user/message injection records', () => {
     assert.ok(!('detail' in state.events[0]))
   })
 
+  test('a hostile form (truthy non-string) degrades to the default inject form', () => {
+    // The harness validates a source's `kind` but not its `form`: a durable
+    // number must not ride the record into the strict wire/state schemas (the permanent per-session freeze class).
+    const { state } = driveTimeline([
+      userMessage(1, text('note'), { kind: 'plugin', plugin: 'dsh-x', form: 123 } as never),
+    ])
+    assert.equal(state.events[0].name, 'dsh-x')
+    assert.equal(state.events[0].form, 'context')
+  })
+
   test('a non-notice form records no detail', () => {
     const { state } = driveTimeline([
       userMessage(1, text('catalog'), { kind: 'skill-catalog', form: 'catalog' }),
@@ -295,25 +303,27 @@ describe('tool/result skill tagging', () => {
     assert.equal(state.events.length, 0)
   })
 
-  test('skill content nested two tool-result levels deep still tags', () => {
+  test('skill content nested inside a foreign wrapper block never tags', () => {
+    // The skill wrapper rides the result's own text blocks (first-level); a
+    // nested foreign block is a hostile shape — unscanned, never a throw.
     const ev: TimelineEvent = {
       type: 'tool/result', seq: 1, time: at(),
       data: {
         message: {
-          content: [{ type: 'tool-result', content: [{ type: 'tool-result', content: skillBody('deep') }] }],
+          content: [{ type: 'foreign-wrapper', content: [{ type: 'text', text: '<skill_content name="deep">x</skill_content>' }] }],
         },
       },
       surfaceOp: 'append',
     }
     const { state } = driveTimeline([ev])
-    assert.equal(state.surface.at(-1)?.skill, 'deep')
-    assert.equal(state.events[0].name, 'deep')
+    assert.equal(state.surface.at(-1)?.skill, undefined)
+    assert.equal(state.events.length, 0)
   })
 
-  test('nested empty text yields no tag', () => {
+  test('an empty text block yields no tag', () => {
     const ev: TimelineEvent = {
       type: 'tool/result', seq: 1, time: at(),
-      data: { message: { content: [{ type: 'tool-result', toolCallId: 'e', content: [{ type: 'text', text: '' }] }] } },
+      data: { message: { role: 'tool', toolCallId: 'e', content: [{ type: 'text', text: '' }] } },
       surfaceOp: 'append',
     }
     const { state } = driveTimeline([ev])
@@ -389,13 +399,34 @@ describe('assistant/message request records', () => {
   })
 })
 
+describe('the answers tally (assistant messages carrying text)', () => {
+  test('a textual reply tallies one; a tool-only dispatch, an empty projection, and blank text do not', () => {
+    const { state } = driveTimeline([
+      assistantMessage(1, { content: [{ type: 'text', text: 'here is the answer' }] }),
+      assistantMessage(2, { content: [{ type: 'tool-call', name: 'bash' }] }),
+      assistantMessage(3, { content: [] }), // usage-only: projects to no message
+      assistantMessage(4, { content: [{ type: 'text', text: '   ' }] }), // blank text is not a reply
+      assistantAttempt(5, {}), // a committed-no-message attempt is not a reply either
+      assistantMessage(6, { content: [{ type: 'text', text: 'done' }] }),
+    ])
+    assert.equal(state.answers, 2)
+    assertPlainJson(state)
+  })
+
+  test('text beside tool calls still counts — the reply rode the same message', () => {
+    const { state } = driveTimeline([
+      assistantMessage(1, { content: [{ type: 'text', text: 'checking' }, { type: 'tool-call', name: 'bash' }] }),
+    ])
+    assert.equal(state.answers, 1)
+  })
+})
+
 describe('hostile provider usage (issue #44: stats must survive nonconforming figures)', () => {
   // The registry parses every served view (and every cold-restored state)
   // against the unit's strict integer schemas with no containment: one raw
   // nonconforming figure in the state fails the gate on EVERY later delivery
   // and permanently freezes the session's projection feed. The fold therefore
-  // sanitizes each bucket before it touches the state, and the records stay
-  // complete (billed, not dropped).
+  // sanitizes each bucket before it touches the state, and the records stay complete (billed, not dropped).
   test('fractional buckets round to integers', () => {
     const { state } = driveTimeline([
       assistantMessage(1, { usage: { inputTokens: 10.4, cacheReadTokens: 20.6, outputTokens: 3.5 } }),
@@ -467,6 +498,55 @@ describe('hostile provider usage (issue #44: stats must survive nonconforming fi
     assert.deepEqual(state.cost?.['deepseek-official']?.['deepseek-v4-flash']?.peak, {
       uncached: 0, cacheRead: 300, cacheWrite: 10, output: 0,
     })
+  })
+})
+
+describe('session/end-seed', () => {
+  // A seeded fork's inherited prefix: a settlement the parent session already
+  // priced, replayed verbatim into the child's log (issue #94).
+  const inherited = [
+    header(1, { model: 'deepseek-v3' }),
+    assistantMessage(2, { usage: { inputTokens: 100 } }),
+  ]
+
+  test('a tagged marker zeroes the inherited prefix\'s spend', () => {
+    const { state } = driveTimeline([...inherited, endSeed(3, { inherited: true })])
+    assert.deepEqual(state.cost, {})
+  })
+
+  test('spend after the cut prices afresh', () => {
+    const { state } = driveTimeline([
+      ...inherited,
+      endSeed(3, { inherited: true }),
+      assistantMessage(4, { usage: { inputTokens: 7 } }),
+    ])
+    assert.equal(state.cost?.['']?.['deepseek-v3']?.peak?.uncached, 7)
+  })
+
+  test('nested seeds re-reset at each cut; the surviving total is post-own-cut spend', () => {
+    const { state } = driveTimeline([
+      ...inherited,
+      endSeed(3, { inherited: true }),
+      assistantMessage(4, { usage: { inputTokens: 7 } }), // the middle fork's own work
+      endSeed(5, { inherited: true }), // a fork of that fork: cuts its inherited work too
+      assistantMessage(6, { usage: { inputTokens: 2 } }),
+    ])
+    assert.equal(state.cost?.['']?.['deepseek-v3']?.peak?.uncached, 2)
+  })
+
+  test('the untagged resume marker keeps the totals and the state reference', () => {
+    const { def, state } = driveTimeline(inherited)
+    assert.ok(state.cost !== undefined)
+    assert.equal(def.apply(state, endSeed(3, {})), state)
+  })
+
+  test('a marker without a strict `inherited: true` flag is a no-op', () => {
+    const { def, state } = driveTimeline(inherited)
+    const before = state.cost
+    for (const data of [undefined, null, {}, { inherited: 'yes' }, { inherited: 1 }, { inherited: null }]) {
+      assert.equal(def.apply(state, endSeed(3, data)), state, `data ${JSON.stringify(data)} must not reset`)
+    }
+    assert.equal(state.cost, before)
   })
 })
 
@@ -690,8 +770,7 @@ describe('hostile events', () => {
   test('null and primitive content blocks price and render as nothing', () => {
     const blocks = [null, 7, 'x', { type: 'text', text: 'hello' }] as never
     // The tool/result has NO preceding tool/call — the unpaired lookup must
-    // not stamp an `undefined`-valued node.tool (it would fail every
-    // projection-cache write for the session).
+    // not stamp an `undefined`-valued node.tool (it would fail every projection-cache write for the session).
     const { state } = driveTimeline([
       userMessage(1, blocks),
       toolResult(2, { callId: 'c1', content: blocks }),

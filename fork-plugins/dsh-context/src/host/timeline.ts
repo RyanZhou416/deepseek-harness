@@ -1,5 +1,3 @@
-// DeepSeek Harness fork modification: slim views enforce deployment bounds before first delivery. See ../../FORK_MAINTENANCE.md.
-
 /**
  * The `contextTimeline` session projection unit — the plugin's data plane.
  *
@@ -25,8 +23,10 @@ import type { Config } from './config'
 import { resolveBounds } from './config'
 import type { ProjectionDefinition } from './compat'
 import type { ContextTimeline } from '../shared/types'
-import { applyTimeline, createTimelineState, createTimelineView } from './fold'
-import type { TimelineState } from './fold'
+import { applyTimeline } from './fold'
+import { createTimelineState } from './foldState'
+import type { TimelineState } from './foldState'
+import { buildTimelineHead, buildTimelineView } from './foldWire'
 
 /** Validate the wire payload before it leaves the host (strict: no drift). */
 const surfaceNodeSchema = z.object({
@@ -65,13 +65,14 @@ const requestRecordSchema = z.object({
   tool: z.number().int().nonnegative(),
   total: z.number().int().nonnegative(),
   prompt: z.number().int().nonnegative().optional(),
-  /**
-   * Skill-machinery tokens (issue #66). The fold writes it on every record;
-   * optional so rows folded before the category existed still parse.
-   */
+  /** Skill-machinery tokens (issue #66). The fold writes it on every record;
+   * optional so rows folded before the category existed still parse. */
   skill: z.number().int().nonnegative().optional(),
   cacheRead: z.number().int().nonnegative().optional(),
   output: z.number().int().nonnegative().optional(),
+  /** The request's step active milliseconds (see RequestRecord.activeMs).
+   * Optional so a record whose step never closed (the live tail) still parses. */
+  activeMs: z.number().nonnegative().optional(),
   stepCount: z.number().int().positive().optional(),
 }).strict()
 
@@ -115,6 +116,13 @@ const fileOpSchema = z.object({
   gone: z.number().int().nonnegative().optional(),
 }).strict()
 
+/** One painted span of the timing strip (shared/types.ts TimingSpan). */
+const timingSpanSchema = z.object({
+  kind: z.enum(['ttft', 'reasoning', 'text', 'toolarg', 'tools', 'other']),
+  start: z.number(),
+  end: z.number(),
+}).strict()
+
 const currentSchema = z.object({
   system: z.number().int().nonnegative(),
   tools: z.number().int().nonnegative(),
@@ -136,12 +144,12 @@ const costBucketsSchema = z.object({
 const costModelSchema = z.object({
   peak: costBucketsSchema.optional(),
   off: costBucketsSchema.optional(),
-  long: costBucketsSchema.optional(),
 }).strict()
 
 const costModelsSchema = z.record(z.string(), costModelSchema)
 
-const costUsageSchema = z.record(z.string(), costModelsSchema)
+/** The session-cost wire shape — shared by every projection that serves one (activity.ts imports it). */
+export const costUsageSchema = z.record(z.string(), costModelsSchema)
 
 const toolTimingSchema = z.object({
   calls: z.number().int().nonnegative(),
@@ -152,16 +160,13 @@ const timingTotalsSchema = z.object({
   wallMs: z.number().nonnegative(),
   ttftMs: z.number().nonnegative(),
   genMs: z.number().nonnegative(),
-  // Additive-optional (see TimingTotals): rows cached before the generation
-  // split carry `genMs` without these, and must keep parsing. The block counts
-  // are additive-optional the same way (rows cached before they existed).
+  // Additive-optional: rows cached before the generation split, the block counts, or the throughput seat existed must keep parsing.
   reasoningMs: z.number().nonnegative().optional(),
   reasoningBlocks: z.number().int().nonnegative().optional(),
   textMs: z.number().nonnegative().optional(),
   textBlocks: z.number().int().nonnegative().optional(),
   toolArgMs: z.number().nonnegative().optional(),
   toolArgBlocks: z.number().int().nonnegative().optional(),
-  // The throughput seat, additive-optional for the same reason.
   speedTokens: z.number().nonnegative().optional(),
   speedMs: z.number().nonnegative().optional(),
   calls: z.number().int().nonnegative(),
@@ -183,6 +188,8 @@ const countsSchema = z.object({
   injects: z.number().int().nonnegative(),
   compactions: z.number().int().nonnegative(),
   prunes: z.number().int().nonnegative(),
+  // Additive-optional like every head field derived at view time: a cached row restores with its full event set.
+  skills: z.number().int().nonnegative().optional(),
 }).strict()
 
 /** The newest retained request's billing summary (the split head's headline anchor). */
@@ -192,24 +199,24 @@ const lastSchema = z.object({
   prompt: z.number().int().nonnegative().optional(),
 }).strict()
 
-/**
- * One wire contract for both generations: the SPLIT head (envelope scalars +
+/** One wire contract for both generations: the SPLIT head (envelope scalars +
  * counts/last/detailRev; the heavy collections stay absent — they ride the
  * on-demand detail channel, host/detail.ts) and the INLINE value
  * (channel-less hosts and the fallback unit carry the collections in place).
- * The collections are therefore optional on the schema; the split marker is
- * `detailRev` (present ⟺ split).
- */
+ * The collections are therefore optional on the schema; the split marker is `detailRev` (present ⟺ split). */
 export const contextTimelineSchema = z.object({
   ok: z.literal(true),
   unsupported: unsupportedSchema.optional(),
   model: z.string().optional(),
   provider: z.string().optional(),
   contextWindow: z.number().optional(),
+  maxOutputTokens: z.number().positive().optional(),
   current: currentSchema,
   images: z.number().int().nonnegative().optional(),
   toolCalls: z.number().int().nonnegative().optional(),
   humanInputs: z.number().int().nonnegative().optional(),
+  // Additive-optional like humanInputs: rows folded before the field existed read without it, and clients degrade to zero.
+  answers: z.number().int().nonnegative().optional(),
   lastUser: z.string().optional(),
   counts: countsSchema.optional(),
   last: lastSchema.optional(),
@@ -226,14 +233,12 @@ export const contextTimelineSchema = z.object({
   archiveFloor: z.number().int().nonnegative().optional(),
   fileOps: z.array(fileOpSchema).optional(),
   fileOpsFloor: z.number().int().nonnegative().optional(),
+  spans: z.array(timingSpanSchema).optional(),
 }).strict() as unknown as z.ZodType<ContextTimeline>
 
-/**
- * The persisted fold-state schema (the registry's `stateSchema`
+/** The persisted fold-state schema (the registry's `stateSchema`
  * contract). Validates the plain-JSON `TimelineState` before a checkpoint
- * row seeds a fold — the same shape guarantee the projection cache's
- * plain-JSON precondition already enforces at write time.
- */
+ * row seeds a fold — the same shape guarantee the projection cache's plain-JSON precondition already enforces at write time. */
 const timelineStateSchema = z.object({
   surface: z.array(surfaceNodeSchema),
   sums: z.object({
@@ -245,12 +250,12 @@ const timelineStateSchema = z.object({
   }).strict(),
   systemTokens: z.number().int().nonnegative(),
   systems: z.array(systemPromptNodeSchema).optional(),
-  systemsFromHeader: z.literal(true).optional(),
   toolsTokens: z.number().int().nonnegative(),
   model: z.string().optional(),
   provider: z.string().optional(),
   lastModel: z.string().optional(),
   contextWindow: z.number().optional(),
+  maxOutputTokens: z.number().positive().optional(),
   requests: z.array(requestRecordSchema),
   turnRuns: z.number().int().nonnegative().optional(),
   events: z.array(contextEventSchema),
@@ -259,151 +264,52 @@ const timelineStateSchema = z.object({
   archiveFloor: z.number().optional(),
   timing: timingTotalsSchema.optional(),
   humanInputs: z.number().int().nonnegative().optional(),
+  answers: z.number().int().nonnegative().optional(),
   lastUser: z.string().optional(),
   stepStart: z.object({
     time: z.number(),
     firstToken: z.number().optional(),
-    // The generation split's in-flight accumulator (see TimelineState.stepStart),
-    // with the opened blocks counted per bucket.
-    decode: z.object({ reasoning: z.number(), text: z.number(), toolarg: z.number() }).strict().optional(),
-    blocks: z.object({ reasoning: z.number().int(), text: z.number().int(), toolarg: z.number().int() }).strict().optional(),
-    block: z.object({ kind: z.enum(['reasoning', 'text', 'toolarg']), since: z.number() }).strict().optional(),
   }).strict().optional(),
+  stepWaits: z.array(z.object({ start: z.number(), end: z.number() }).strict()).optional(),
+  stepApprovals: z.record(z.string(), z.number()).optional(),
+  stepRequestSeq: z.number().optional(),
   callNames: z.record(z.string(), z.object({ name: z.string(), start: z.number(), argsRaw: z.string().optional() }).strict()),
   pendingShadowedSeqs: z.array(z.number()).optional(),
   pendingShadowEventSeq: z.number().optional(),
   detailRev: z.number().int().nonnegative().optional(),
   fileOps: z.array(fileOpSchema),
   fileOpsFloor: z.number().int().nonnegative().optional(),
+  spans: z.array(timingSpanSchema),
+  stepSpans: z.array(timingSpanSchema).optional(),
   pendingCodeOps: z.record(z.string(), z.array(fileOpSchema)).optional(),
 }) as unknown as z.ZodType<TimelineState>
 
 /**
- * The context-timeline projection unit, created per plugin instance with its
- * config-resolved retention bounds (config.ts), and registered on
- * `ctx.sessionProjections`. Registry lifecycle notes (mirrored from the
- * harness contract): registration is an effect on the caller's fiber — an
- * unloaded Host half removes the key, and clients read it as capability
- * absence. `stateVersion` must be bumped whenever the persisted state shape
- * or fold semantics change (invalidation of cached rows); config-only
- * changes never require it (bounds tune retention, not state shape).
+ * The `contextTimeline` projection unit, created per plugin instance with its config-resolved retention bounds.
  *
- * The definition carries the session-projection contract served by every
- * supported harness (see compat.ts): `stateSchema` + a REQUIRED `wire` block.
- * (The return type is the mirrored contract, not the installed dts
- * `ProjectionDefinition`: the registry's wired-register overload demands
- * `wire` PRESENT, which the dts's optional `wire?` fails.) Without the
- * `wire` block the registry treats the unit as host-only and never delivers
- * `contextTimeline` to the browser (the Context tab would stay on its
- * loading screen forever).
+ * The registry serves the value only when the unit carries a `wire` block; a unit without one is host-only and the
+ * Context tab would wait on its loading screen forever.
  *
- * `slim` selects the wire generation PER SERVE (a liveness probe, not a
- * fixed flag): while the on-demand detail channel is live (host/detail.ts),
- * the wire value is the SLIM head (buildTimelineHead) — the heavy
- * collections no longer ride every session.list row, control baseline,
- * follow snapshot, and push frame. Before the channel arms (the connection
- * service may activate after this plugin) or on a deployment whose
- * connection/sessions services never compose, the unit serves the INLINE
- * value so the tab keeps working end to end. Both generations validate
- * against the same schema (the collections are optional on it), and both
- * fold the SAME state — the split is view-only, so no `stateVersion` bump
- * and no cached-row invalidation comes with it (the `detailRev` state field
- * is additive-optional: older rows restore without it and read as revision
- * 0).
+ * `slim` picks the wire generation PER SERVE, as a liveness probe rather than a fixed flag: while the on-demand
+ * detail channel is live the value is the slim head, and before it arms (or on a deployment whose connection
+ * services never compose) the inline value keeps the tab working end to end. Both generations validate against the
+ * same schema and fold the same state, so the split is view-only.
  */
 export function createContextTimelineDefinition(config: Config, slim: () => boolean): ProjectionDefinition<'contextTimeline', TimelineState> {
   const bounds = resolveBounds(config)
-  const view: (state: TimelineState) => ContextTimeline = createTimelineView(bounds, slim)
+  const view = (state: TimelineState): ContextTimeline =>
+    slim() ? buildTimelineHead(state) : buildTimelineView(state, bounds)
   const definition: ProjectionDefinition<'contextTimeline', TimelineState> = {
     key: 'contextTimeline',
     stateSchema: timelineStateSchema,
     wire: { viewSchema: contextTimelineSchema, view },
     init: () => createTimelineState(),
     apply: (state: TimelineState, event: SessionEvent) => applyTimeline(state, event as Parameters<typeof applyTimeline>[1], bounds),
-    // 2: the occupancy mirror left the persisted state (client reads official `contextPressure`); cached rows refolded.
-    // 3: the removed-node archive (`archived` + `archiveFloor`) joined the state; cached rows refolded.
-    // 4 since 0.18: the persisted state no longer carries `undefined`-valued
-    // properties (model/provider/lastModel/contextWindow are absent until
-    // known; pendingShadowedSeqs is deleted when consumed). The previous
-    // shape violated the plain-JSON persisted-state precondition and failed
-    // EVERY session-projection-cache write (TypeError: projection checkpoint
-    // is not losslessly JSON-serializable) — which also starved the `title`
-    // projection row and broke the session list after a restart. The bump
-    // discards old cached rows and refolds them clean.
-    // 5: the session-cost totals (`cost`) joined the state; cached rows refolded.
-    // 6: image blocks reprice via the official vision calculator instead of the meter's generic JSON branch; cached rows refolded.
-    // 7: the whole-session image count (`images`) joined the state; cached rows refolded.
-    // 8: the image count moved to per-node `imgs` (live-surface cell); cached rows refolded.
-    // 9: per-request billed cache-read tokens (`cacheRead`) joined request records; cached rows refolded.
-    // 10: the `toolList` summary left the state and the wire view; cached rows refolded.
-    // 11: whole-session timing totals (`timing` + the `stepStart` slot) joined the
-    // state and `callNames` values grew a `start` instant ({name, start} — was a
-    // bare name string); cached rows refolded from the log, which rebuilds the
-    // timing totals for sessions started under older plugin builds.
-    // 12: the timing totals split the model call into `ttftMs` (step start →
-    // first token) + `genMs` (first token → message) — `lmMs` left the shape,
-    // and the `stepStart` slot gained the `firstToken` stamp; cached rows
-    // refolded from the log, which rebuilds the split.
-    // 13: provider-reported usage buckets are sanitized (deep-read, rounded,
-    // clamped non-negative — see fold.ts `tokenCountOf`) before they enter
-    // request records and the session-cost totals. A nonconforming raw figure
-    // (fractional counts, a gateway reporting cached_tokens > prompt_tokens)
-    // previously rode the state verbatim and failed the wire/state schemas'
-    // integer gates on EVERY later delivery, permanently freezing the
-    // session's projection feed (issue #44); cached rows refold clean.
-    // 14: the fold-derived file-operation log joined the state (`fileOps` +
-    // `fileOpsFloor` + the pending Code-Mode buffer; `callNames` entries grew
-    // the raw call arguments) — the File Activity card's full-log coverage,
-    // replacing the client-side conversation-window derivation. Cached rows
-    // refold from the log, which rebuilds the op log for sessions started
-    // under older plugin builds.
-    // 15: a search with the complete matched-file meta now books its call
-    // TARGET (the searched path / the pattern) in addition to the per-file
-    // hit rows — the op log's fold semantics changed, so cached rows refold.
-    //
-    // 15 since 0.47: the fold reads BOTH supported log generations (see
-    // host/logShapes.ts) — V3 `system/message` nodes, embedded assistant
-    // streams, `startSeq`/`endSeq` replacements, `tool/ptc-dispatch`. The new
-    // state fields (`systems`, `systemsFromHeader`) are additive-OPTIONAL, so
-    // cached rows keep parsing and stay USABLE: a bump would invalidate every
-    // row and orphan the key for idle sessions, which have no refresh channel
-    // until they go live again (the #37 regression) — strictly worse than a
-    // pre-fix session showing its corrected figures from the next folded
-    // event onward.
-    //
-    // 16: the whole-session human-input tally (`humanInputs`) joined the
-    // state — a running total that later events cannot backfill, so unlike
-    // the 0.47 additive fields a pre-tally cached row would undercount
-    // forever; cached rows refold from the log, which rebuilds the tally
-    // (the `timing`/`fileOps` precedent).
-    //
-    // 17: the session-cost totals (`cost`) rekeyed from the DeepSeek
-    // family × peak/off-period buckets to per-(provider, model) totals,
-    // priced client-side from the models.dev registry (client/modelPrices.ts)
-    // instead of the hardcoded rate table. The old shape cannot be
-    // reinterpreted, so cached rows refold from the log, which rebuilds the
-    // new keys.
-    //
-    // 18: the per-model totals gained the pricing-period split (peak /
-    // half-price off-peak — DeepSeek's period-based list; every other
-    // provider books everything under `peak`). The old shape cannot be
-    // reinterpreted, so cached rows refold from the log, which rebuilds the
-    // periods.
-    //
-    // 19: the skill-machinery composition bucket (`skill`) joined the state —
-    // skill-catalog digests and `/name` invocation messages left `inject`, and
-    // `skill`-tool loads left `tool` (issue #66). The re-bucketing changes
-    // the fold's per-category sums, so cached rows refold from the log, which
-    // rebuilds them under the new categories.
-    //
-    // 20: the session cards' last-user-message preview (`lastUser`) joined
-    // the state and head. A stale row can never gain the field while its
-    // session is idle (it only lands when a user message folds), so cached
-    // rows refold from the log; the startup warm-up (backfill.ts) now probes
-    // the `contextTimeline` row too, rebuilding idle sessions' rows instead
-    // of orphaning the key.
-    // 21: rebuild per-request long-context cost buckets from the unchanged Session log.
-    stateVersion: 21,
+    // Bump on any change to the persisted state shape or the fold's semantics, which invalidates cached rows and
+    // makes them refold from the durable log. A field the log can still backfill, or one the view derives at serve
+    // time, must NOT bump: invalidating every in-generation row orphans the key for idle sessions, which have no
+    // refresh channel until they go live again.
+    stateVersion: 28,
   }
   return definition
 }

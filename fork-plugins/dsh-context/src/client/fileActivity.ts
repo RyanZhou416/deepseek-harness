@@ -1,33 +1,17 @@
 /**
- * File activity — what the agent DID to files. Since the op-log generation,
- * the host fold derives one record per executed file op from the durable
- * tool lifecycle (shared/fileOps.ts), covering the full session log — the
- * card rides the detail channel's `fileOps` and only filters + aggregates
- * here. Older hosts (the inline generation) serve no `fileOps`: the legacy
- * path re-derives the ops client-side from the served tool-result nodes
- * joined with the conversation window — same parser, but window-bound (a
- * call whose arguments aged out of the join names no target and is skipped).
+ * File activity — what the agent DID to files. The op-log generation's host fold
+ * derives one record per executed file op over the whole log
+ * (shared/fileOps.ts), so this module only filters and aggregates; older hosts
+ * serve no `fileOps`, and the legacy path re-derives the ops from the served
+ * nodes joined with the conversation window (window-bound).
  *
- * Code Mode (PTC) runs nested calls instead: the host folds each settled
- * sub-dispatch (`tool/code-dispatch`) as ops located on the parent run_code
- * result; the legacy path walks the conversation node's `subCalls` tree to
- * the same effect. A nested dispatch's persisted event carries no result
- * meta (upstream vocabulary), so nested reads keep the limit-estimate form
- * and nested searches the call-target form.
- *
- * Scope: `before` is the EXCLUSIVE upper seq bound (the next request's seq),
- * so the picked step's own calls — whose results land before the next
- * request — are included; null serves everything (the latest view). A nested
- * op's scope key is its parent result's seq (the run_code result is what the
- * step's surface shows), matching the legacy node-level filter.
+ * `before` is the exclusive upper seq bound (the next request's seq).
  */
 
 import type { FileOpRecord, RequestRecord, SurfaceNode } from '../shared/types'
 import { opsOfCall, parseCallArgs } from '../shared/fileOps'
-// The harness's browser-safe file-address layer, inlined by the client bundle
-// (the purity gate's INLINE_SAFE list, as the right Sidebar's own file types
-// do): a produced address is the exact `dsh-resource://file/…` spelling the
-// preview type claims and the Host resolves.
+// The harness's browser-safe file-address layer, inlined by the client bundle:
+// the produced address is the `dsh-resource://file/…` spelling the preview claims.
 import { fileAddressFor } from '@deepseek-ai/dsh-util-workspace-path'
 import type { ConversationNodeLike } from './services'
 
@@ -35,7 +19,6 @@ export type FileOp = FileOpRecord
 export type FileOpKind = FileOpRecord['kind']
 export type FileForm = 'text' | 'image' | 'dir'
 
-/** One file's aggregated activity; `ops` newest first. */
 export interface FileEntry {
   path: string
   form: FileForm
@@ -53,12 +36,10 @@ export interface FileEntry {
 export interface FileKindTotal { files: number; ops: number }
 
 export interface FileActivity {
-  /** Path-resolved files, most-recently-touched first. */
   entries: FileEntry[]
   totals: Record<FileOpKind | 'image', FileKindTotal> & { added: number; removed: number }
 }
 
-/** The file's form — multimodal reads and image extensions scan apart; a trailing slash marks a directory target. */
 export function formOf(tool: string, path: string): FileForm {
   if (tool === 'read_image' || IMAGE_EXT.test(path)) return 'image'
   if (path.endsWith('/')) return 'dir'
@@ -67,18 +48,16 @@ export function formOf(tool: string, path: string): FileForm {
 
 const IMAGE_EXT = /\.(png|jpe?g|gif|webp|svg|bmp|ico|avif)$/i
 
-/** One row icon: the emoji — or, when `color` is set, a letter badge with that
- * fill and `glyph` as its label — plus the i18n key naming its bucket (the row's hover title). */
+/** One row icon: the emoji, or a letter badge when `color` is set, plus the i18n key naming its bucket. */
 export interface FileGlyph {
   glyph: string
   tip: string
   /** Language-badge fill; present only on the code-file buckets. */
   color?: string
-  /** Badge text color, riding along with `color` (white, or near-black on light fills). */
   text?: string
 }
 
-/** Directory buckets, by last path segment (lowercased, explicit plurals). Checked in order, then hidden dirs, then the plain folder. */
+/** Directory buckets by last path segment; then hidden dirs, then the plain folder. */
 const DIR_BUCKETS: (readonly [readonly string[], string, string])[] = [
   [['test', 'tests', '__tests__', 'spec', 'specs', 'e2e'], '🧪', 'files.glyph.tests'],
   [['doc', 'docs', 'documentation'], '📚', 'files.glyph.docs'],
@@ -89,17 +68,11 @@ const DIR_BUCKETS: (readonly [readonly string[], string, string])[] = [
   [['assets', 'static', 'public', 'images', 'fonts', 'icons', 'media'], '🎨', 'files.glyph.assets'],
 ]
 
-/** Lockfile base names that do not end in `.lock`. */
 const LOCK_NAMES = ['package-lock.json', 'pnpm-lock.yaml', 'npm-shrinkwrap.json']
 const MAKE_NAMES = ['makefile', 'justfile', 'cmakelists.txt']
-/** A test file by name: a standalone or delimited `test`, or an inline `.test.`. */
 const TEST_NAME = /(^|[^a-z0-9])test([^a-z0-9]|$)|\.test\./
 
-/**
- * Programming-language files render as letter badges over their language's
- * color (GitHub Linguist shades). Checked before the emoji buckets, so a
- * language file never falls through to one.
- */
+/** Language files render as letter badges over their language's color, before the emoji buckets. */
 const CODE_LANGS: (readonly [readonly string[], string, string, string])[] = [
   [['tsx'], 'TSX', '#3178c6', 'files.glyph.lang.ts'],
   [['ts'], 'TS', '#3178c6', 'files.glyph.lang.ts'],
@@ -127,18 +100,13 @@ const CODE_LANGS: (readonly [readonly string[], string, string, string])[] = [
   [['sql'], 'SQL', '#e38c00', 'files.glyph.database'],
 ]
 
-/**
- * Badge text by fill luminance: white on dark shades, near-black on light
- * ones (the JS yellow, the shell green) — a fixed dark tone, never pure
- * black, so it sits quietly next to the white badges.
- */
+/** Badge text by fill luminance: white on dark shades, near-black (never pure black) on light ones. */
 function badgeTextColor(hex: string): string {
   const n = parseInt(hex.slice(1), 16)
   const luminance = (0.299 * ((n >> 16) & 255) + 0.587 * ((n >> 8) & 255) + 0.114 * (n & 255)) / 255
   return luminance < 0.6 ? '#ffffff' : '#1f2328'
 }
 
-/** Extension buckets for non-code files, most specific first. */
 const EXT_BUCKETS: (readonly [readonly string[], string, string])[] = [
   [['yaml', 'yml', 'toml', 'ini', 'conf', 'cfg', 'properties', 'env'], '⚙️', 'files.glyph.config'],
   [['json', 'jsonc', 'json5', 'jsonl', 'ndjson', 'xml'], '🧾', 'files.glyph.data'],
@@ -184,7 +152,6 @@ function fileGlyph(base: string): FileGlyph {
   return { glyph: '📄', tip: 'files.form.text' }
 }
 
-/** The row icon for one file entry: form first (image/dir), then the file-name tables. */
 export function glyphOf(path: string, form: FileForm): FileGlyph {
   if (form === 'image') return { glyph: '🖼', tip: 'files.form.image' }
   const trimmed = path.endsWith('/') ? path.slice(0, -1) : path
@@ -194,27 +161,17 @@ export function glyphOf(path: string, form: FileForm): FileGlyph {
 
 const DRIVE_PATH = /^[a-zA-Z]:[\\/]/
 
-/**
- * The absolute form of a real file path: verbatim when already absolute,
- * resolved against the workspace root when relative, and undefined when a
- * relative path has no root to resolve against (the system open can't reach
- * it). Callers keep search-pattern "paths" away from here.
- */
+/** The absolute form of a real file path: verbatim when already absolute,
+ * resolved against the workspace root when relative, undefined when a relative path has no root to resolve against. */
 export function absPathOf(path: string, workspace: string | undefined): string | undefined {
   if (path.startsWith('/') || DRIVE_PATH.test(path)) return path
   if (workspace === undefined || workspace === '' || path.startsWith('.')) return undefined
   return workspace.replace(/\/+$/, '') + '/' + path.replace(/^\/+/, '')
 }
 
-/**
- * The right-Sidebar preview address of a real file — the session-scoped
- * `dsh-resource://file/…` address the shipped preview type claims, built by
- * the harness's own `fileAddressFor` (the files sidebar's idiom: a path under
- * the workspace collapses to its session-relative spelling, so every route to
- * one file settles on one tab). Undefined for a pathless search's PATTERN, a
- * directory target, a missing session, and any path the encoder rejects — the
- * caller falls back to the system opener or renders the name inert.
- */
+/** The session-scoped `dsh-resource://file/…` preview address, built by the
+ * harness's own `fileAddressFor`, so every route to one file settles on one
+ * tab. Undefined for a search pattern, a directory, a missing session, or a path the encoder rejects. */
 export function previewAddressOf(
   path: string,
   form: FileForm,
@@ -226,33 +183,31 @@ export function previewAddressOf(
   try {
     return fileAddressFor(sessionId, workspace, path)
   } catch {
-    // A lone surrogate in an untrusted log path fails URI encoding; it is
-    // simply not previewable, never a thrown render.
+    // A lone surrogate in an untrusted log path fails URI encoding: not previewable, never a thrown render.
     return undefined
   }
 }
 
-/**
- * The row's display form of a path: inside the workspace (or already
- * workspace-relative) it shortens to a './'-prefixed relative — an absolute
- * path outside the workspace, a Windows drive path, and an already-'.'
- * relative keep their verbatim form.
- */
+/** The display form of a relative remainder: its repeating leading `./` drops;
+ * a raw all-`./` degenerate leaves nothing to show, so it displays as itself. */
+function bareOf(remainder: string): string {
+  const bare = remainder.replace(/^(?:\.\/)+/, '')
+  return bare !== '' ? bare : remainder
+}
+
+/** The row's display path: inside the workspace it shortens to the bare workspace-relative
+ * form, and other forms stay verbatim. */
 export function displayPathOf(path: string, workspace: string | undefined): string {
   const root = workspace !== undefined && workspace.length > 1 ? workspace.replace(/\/+$/, '') : undefined
   if (root !== undefined) {
-    if (path === root) return './'
-    if (path.startsWith(root + '/')) return './' + path.slice(root.length + 1)
+    if (path === root || path === root + '/') return './'
+    if (path.startsWith(root + '/')) return bareOf(path.slice(root.length + 1))
   }
-  if (path.startsWith('/') || DRIVE_PATH.test(path) || path.startsWith('.')) return path
-  return './' + path
+  if (path.startsWith('/') || DRIVE_PATH.test(path)) return path
+  return bareOf(path)
 }
 
-/**
- * Fold op records into per-file activity: scope-filtered, aggregated per
- * path, ops newest first. The presentation half of the card — the parsing
- * is the shared parser's (shared/fileOps.ts), however the records arrived.
- */
+/** Fold op records into per-file activity: scope-filtered, aggregated per path, ops newest first. */
 function aggregateOps(ops: readonly FileOp[], before: number | null): FileActivity {
   const totals: FileActivity['totals'] = {
     read: { files: 0, ops: 0 },
@@ -264,8 +219,7 @@ function aggregateOps(ops: readonly FileOp[], before: number | null): FileActivi
   }
   const byPath = new Map<string, FileEntry>()
   for (const op of ops) {
-    // A nested op's scope key is its parent result's seq (the run_code result
-    // is what the step's surface shows) — the legacy node-level filter's rule.
+    // A nested op's scope key is its parent result's seq.
     const key = op.parent ?? op.seq
     if (before !== null && key >= before) continue
     totals[op.kind].ops++
@@ -274,8 +228,12 @@ function aggregateOps(ops: readonly FileOp[], before: number | null): FileActivi
       entry = {
         path: op.path,
         form: formOf(op.tool, op.path),
-        reads: 0, writes: 0, searches: 0,
-        added: 0, removed: 0, errs: 0,
+        reads: 0,
+        writes: 0,
+        searches: 0,
+        added: 0,
+        removed: 0,
+        errs: 0,
         ops: [],
         ...(op.pattern === true ? { pattern: true as const } : {}),
       }
@@ -306,11 +264,7 @@ function aggregateOps(ops: readonly FileOp[], before: number | null): FileActivi
   return { entries, totals }
 }
 
-/**
- * The op-log generation's read of the card: the fold-derived records (the
- * detail payload's `fileOps`), with `gone` joined from the detail's archive
- * at render time (the op's result node leaving the live surface bounds where
- * its content stays viewable — the locate bridge reads it).
+/** The op-log generation's read of the card: fold-derived records, with `gone` joined from the detail's archive at render time.
  */
 export function activityOfOps(ops: readonly FileOpRecord[], archive: readonly SurfaceNode[], before: number | null): FileActivity {
   const goneBySeq = new Map<number, number>()
@@ -322,7 +276,6 @@ export function activityOfOps(ops: readonly FileOpRecord[], archive: readonly Su
   return aggregateOps(joined, before)
 }
 
-/** One settled nested call of a Code-Mode tree, as far as the legacy join consumes it. */
 interface SubCall {
   name: string
   argsRaw: string
@@ -332,12 +285,7 @@ interface SubCall {
   subCalls?: readonly unknown[]
 }
 
-/**
- * Narrow one block of a conversation node's `subCalls` tree to a settled
- * nested call, or null. The join is defensive — a running call has no result
- * kind yet, and any malformed block is dropped, never thrown. (Null and
- * non-object blocks never reach here: the folding loop pre-filters them.)
- */
+/** Narrow one block of a node's `subCalls` tree to a settled nested call; a running or malformed block is dropped. */
 function subCallOf(block: unknown): SubCall | null {
   const b = block as Record<string, unknown>
   if (b.kind !== 'tool-result') return null
@@ -361,19 +309,12 @@ function programOf(conv: ConversationNodeLike | undefined): string | undefined {
   return typeof description === 'string' && description !== '' ? description : undefined
 }
 
-/**
- * Depth guard for nested Code-Mode trees. The SDK bindings exclude `run_code`
- * itself, so a real tree is one level deep; the cap only bounds defensive
- * re-entry over a malformed join.
- */
+/** Depth guard for nested Code-Mode trees: the SDK bindings exclude `run_code` itself, so a real tree is one level deep. */
 const SUBCALL_MAX_DEPTH = 8
 
-/**
- * The legacy nested walk: every settled sub-dispatch whose arguments resolve
- * to a file target books one op, attributed to the nested tool and located
- * on the parent run_code result. `seen` holds the already-visited blocks, so
- * a malformed (cyclic) join cannot loop.
- */
+/** The legacy nested walk: every settled sub-dispatch whose arguments resolve to
+ * a file target books one op, located on the parent run_code result. `seen`
+ * holds visited blocks, so a malformed cyclic join cannot loop. */
 function foldSubCalls(
   blocks: readonly unknown[],
   parent: SurfaceNode,
@@ -403,13 +344,8 @@ function foldSubCalls(
   }
 }
 
-/**
- * The INLINE generation's derivation: ops from the served tool-result nodes
- * joined with the conversation window (arguments/meta live on the join —
- * window-bound; the op-log generation covers the full session instead).
- * One node's join data can never take the card down: anything that throws
- * while folding it drops that node and the walk carries on.
- */
+/** The INLINE generation's derivation from the served nodes joined with the
+ * conversation window (window-bound). Anything that throws while folding a node drops that node and the walk carries on. */
 export function activityOf(
   nodes: SurfaceNode[],
   convOf: (seq: number) => ConversationNodeLike | undefined,
@@ -438,22 +374,18 @@ export function activityOf(
         foldSubCalls(subCalls, n, programOf(conv), ops, new Set<object>(), 1)
       }
     } catch {
-      // Unreachable with well-formed join data; the guard exists so it can
-      // never matter.
+      // The guard exists so malformed join data can never matter.
     }
   }
   return aggregateOps(ops, null)
 }
 
-/**
- * The browser step whose assembled surface SHOWS an op's result node: the
- * first request dispatched after it while it was still alive (that step's
- * brief is where the result landed). A live node no request has consumed
- * yet reveals on the live surface; an archived node no retained step still
- * contains is not viewable anywhere (null → the row stays inert).
- */
+/** The browser step whose surface SHOWS an op's result node: the first request dispatched after it while it was still
+ * alive. Sorted here because the wire's append order is not guaranteed (restored rows can re-order) — the same rule
+ * the browser's own entry stamps read. */
 export function locateStepOf(requests: RequestRecord[], seq: number, gone: number | undefined): number | 'live' | null {
-  for (const r of requests) {
+  const sorted = requests.slice().sort((a, b) => a.seq - b.seq)
+  for (const r of sorted) {
     if (r.seq > seq && (gone === undefined || gone > r.seq)) return r.seq
   }
   return gone === undefined ? 'live' : null

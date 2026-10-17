@@ -1,19 +1,15 @@
-// RequestDetail (src/client/components/requestDetail.tsx) rendered with real
-// React in jsdom: header chips, delta mode, per-category rows, and the step
-// brief (chipParts/nodeLine cascades, locate linkage).
-
 import { createElement as h } from 'react'
 import assert from 'node:assert/strict'
 import { describe, test } from 'vitest'
 import { makeRequestDetail } from '../../../src/client/components/requestDetail'
-import { makeStackedBar } from '../../../src/client/components/stackedBar'
+import { makeStackedBar, makeLegend } from '../../../src/client/components/stackedBar'
 import type { RequestRecord, ContextEventRecord, SurfaceNode } from '../../../src/shared/types'
 import type { ConversationNodeLike } from '../../../src/client/services'
 import type { StepBrief } from '../../../src/client/brief'
-import { makeKit, mount, click, queryAll, query, text } from '../helpers/kit'
+import { makeKit, mount, click, queryAll, query, surfaceNode, text } from '../helpers/kit'
 
 const kit = makeKit()
-const RequestDetail = makeRequestDetail(kit, makeStackedBar(kit))
+const RequestDetail = makeRequestDetail(kit, makeStackedBar(kit), makeLegend(kit))
 
 function req(over: Partial<RequestRecord>): RequestRecord {
   return {
@@ -23,12 +19,15 @@ function req(over: Partial<RequestRecord>): RequestRecord {
   }
 }
 
-function node(over: Partial<SurfaceNode> & { seq: number }): SurfaceNode {
-  return { cat: 'user', tokens: 5, ...over }
-}
 
 /** Full-category fixture so every row renders a non-zero figure. */
 const FULL = { system: 100, tools: 200, user: 300, inject: 50, assistant: 400, tool: 250, total: 1300 }
+
+/** A category chip's anatomy — dot, label, figures — by each child's base class (a delta chip's figures add a
+ *  sign modifier). Pinned structurally: a child added, removed or reordered fails here in either mode. */
+const CHIP_ANATOMY = ['', 'lc-chip-label', 'lc-chip-nums']
+const anatomy = (container: HTMLElement): string[][] =>
+  queryAll(container, '.lc-legend .lc-chip').map(c => Array.from(c.children).map(el => el.className.split(' ')[0]))
 
 describe('RequestDetail header', () => {
   test('null request renders nothing', async () => {
@@ -37,7 +36,7 @@ describe('RequestDetail header', () => {
     await m.unmount()
   })
 
-  test('step detail: title, time, usage chips, per-category rows', async () => {
+  test('step detail: title, time, usage chips, per-category chips', async () => {
     const m = await mount(h(RequestDetail, {
       request: req({ prompt: 1000, output: 120, cacheRead: 500 }),
     }))
@@ -52,15 +51,14 @@ describe('RequestDetail header', () => {
     const ms = await mount(h(RequestDetail, { request: req({}), stepsOf: (turn) => (turn === 1 ? 7 : 1) }))
     assert.ok(text(query(ms.container, '.lc-detail-head')).includes('Turn 1 · Step 1 of 7'))
     await ms.unmount()
-    const rows = queryAll(m.container, '.lc-detail-row')
-    assert.equal(rows.length, 7)
-    assert.ok(text(rows[0]).includes('System Prompt'))
-    assert.ok(text(rows[0]).includes('≈100'))
-    const pcts = queryAll(m.container, '.lc-detail-pct').map(el => text(el))
+    const chips = queryAll(m.container, '.lc-legend .lc-chip')
+    assert.equal(chips.length, 7)
+    assert.ok(text(chips[0]).includes('System Prompt'))
+    assert.ok(text(chips[0]).includes('≈100'))
+    const pcts = queryAll(m.container, '.lc-chip-nums em').map(el => text(el))
     assert.ok(pcts.some(p => p.endsWith('%')), 'percentages rendered when total > 0')
-    const fills = queryAll<HTMLElement>(m.container, '.lc-bar-fill')
-    assert.equal(fills.length, 7, 'one fill per row in cumulative mode')
-    assert.ok(fills[0].style.width !== '0%', 'non-zero categories fill the track')
+    assert.equal(pcts[0], '8%', 'the share rides the used total: 100 of 1300')
+    assert.deepEqual(anatomy(m.container), Array.from({ length: 7 }, () => CHIP_ANATOMY))
     await m.unmount()
   })
 
@@ -112,16 +110,15 @@ describe('RequestDetail header', () => {
     }
     const m = await mount(h(RequestDetail, { request: req({}), marker }))
     const chip = query(m.container, '.lc-detail-marker')
-    assert.ok(text(chip).includes('✂ Turn 2 · Step 3→4'))
+    assert.ok(text(chip).includes('✂ T2 S3→4'))
     assert.equal(chip.getAttribute('title'), 'Context compacted (summary replaced 3 messages)')
     await m.unmount()
 
-    // Cross-turn gap.
     const m2 = await mount(h(RequestDetail, {
       request: req({}),
       marker: { seq: 9, time: 1, kind: 'prune', fromTurn: 2, fromStep: 8, turn: 3, step: 1 },
     }))
-    assert.ok(text(query(m2.container, '.lc-detail-marker')).includes('Turn 2 · Step 8 → Turn 3 · Step 1'))
+    assert.ok(text(query(m2.container, '.lc-detail-marker')).includes('T2 S8 → T3 S1'))
     await m2.unmount()
 
     // Same-request boundary (no from-stamps).
@@ -129,7 +126,7 @@ describe('RequestDetail header', () => {
       request: req({}),
       marker: { seq: 9, time: 1, kind: 'compaction', count: 2, turn: 4, step: 2 },
     }))
-    assert.ok(text(query(m3.container, '.lc-detail-marker')).includes('✂ Turn 4 · Step 2'))
+    assert.ok(text(query(m3.container, '.lc-detail-marker')).includes('✂ T4 S2'))
     await m3.unmount()
 
     // No turn/step stamps (event in flight) → no marker chip.
@@ -147,7 +144,7 @@ describe('RequestDetail header', () => {
 })
 
 describe('RequestDetail delta mode', () => {
-  test('signed deltas vs the previous record: net chip, diverging rows, no usage chips', async () => {
+  test('signed deltas vs the previous record: net chip, signed chips, no usage chips', async () => {
     const request = req({ system: 150, tools: 200, user: 250, inject: 0, assistant: 300, tool: 350, total: 1250, prompt: 900 })
     const prev = req({ ...FULL, inject: 0 })
     const m = await mount(h(RequestDetail, { request, prev }))
@@ -159,22 +156,14 @@ describe('RequestDetail delta mode', () => {
     assert.ok(text(metric).includes('Δ 0'))
     assert.ok(!metric.className.includes('lc-detail-metric-up'))
     assert.ok(!metric.className.includes('lc-detail-metric-down'))
-    const zeros = queryAll(m.container, '.lc-bar-zero')
-    assert.equal(zeros.length, 7, 'every delta row carries the zero line')
-    const upFills = queryAll(m.container, '.lc-bar-fill-up')
-    const downFills = queryAll(m.container, '.lc-bar-fill-down')
-    assert.equal(upFills.length, 2, 'system +50, tool +100')
-    assert.equal(downFills.length, 2, 'user -50, assistant -100')
-    // maxAbs = 100 (assistant/tool): tool fills the full half-track, system half of it.
-    assert.equal((upFills[1] as HTMLElement).style.width, '50%')
-    assert.equal((upFills[0] as HTMLElement).style.width, '25%')
-    const nums = queryAll(m.container, '.lc-detail-num')
-    assert.ok(text(nums[0]).includes('+50'))
-    assert.ok(nums[0].className.includes('lc-detail-num-up'))
-    assert.ok(text(nums[2]).includes('-50'))
-    assert.ok(nums[2].className.includes('lc-detail-num-down'))
-    assert.ok(!nums[1].className.includes('lc-detail-num-up'), 'zero delta is neutral')
-    assert.ok(queryAll(m.container, '.lc-detail-pct').every(el => text(el) === ''), 'no percentages in delta mode')
+    const figs = queryAll(m.container, '.lc-chip-nums')
+    assert.ok(text(figs[0]).includes('+50'))
+    assert.ok(figs[0].className.includes('lc-chip-nums-up'))
+    assert.ok(text(figs[2]).includes('-50'))
+    assert.ok(figs[2].className.includes('lc-chip-nums-down'))
+    assert.ok(!figs[1].className.includes('lc-chip-nums-up'), 'zero delta is neutral')
+    assert.equal(queryAll(m.container, '.lc-chip-nums em').length, 0, 'a signed change carries no share')
+    assert.deepEqual(anatomy(m.container), Array.from({ length: 7 }, () => CHIP_ANATOMY), 'delta chips carry no diverging bar')
     await m.unmount()
   })
 
@@ -183,7 +172,8 @@ describe('RequestDetail delta mode', () => {
     const metric = query(m.container, '.lc-detail-metric')
     assert.ok(metric.className.includes('lc-detail-metric-up'))
     assert.ok(text(metric).includes('Δ +1.3k'))
-    assert.equal(queryAll(m.container, '.lc-bar-fill-down').length, 0)
+    assert.equal(queryAll(m.container, '.lc-chip-nums-down').length, 0)
+    assert.equal(queryAll(m.container, '.lc-chip-nums-up').length, 6, 'every non-zero category reads up')
     await m.unmount()
 
     const m2 = await mount(h(RequestDetail, {
@@ -193,25 +183,25 @@ describe('RequestDetail delta mode', () => {
     const metric2 = query(m2.container, '.lc-detail-metric')
     assert.ok(metric2.className.includes('lc-detail-metric-down'))
     assert.ok(text(metric2).includes('Δ -1.3k'))
-    assert.equal(queryAll(m2.container, '.lc-bar-fill-up').length, 0)
-    assert.equal(queryAll(m2.container, '.lc-bar-fill-down').length, 6)
+    assert.equal(queryAll(m2.container, '.lc-chip-nums-up').length, 0)
+    assert.equal(queryAll(m2.container, '.lc-chip-nums-down').length, 6)
     await m2.unmount()
   })
 
-  test('cumulative rows with a zero total render zero-width fills and no percentages', async () => {
+  test('cumulative chips with a zero total render zero figures and no shares', async () => {
     const m = await mount(h(RequestDetail, {
       request: req({ system: 0, tools: 0, user: 0, inject: 0, assistant: 0, tool: 0, total: 0 }),
     }))
-    for (const fill of queryAll<HTMLElement>(m.container, '.lc-bar-fill')) {
-      assert.equal(fill.style.width, '0%')
-    }
-    assert.ok(queryAll(m.container, '.lc-detail-pct').every(el => text(el) === ''))
+    const figs = queryAll(m.container, '.lc-chip-nums').map(el => text(el))
+    assert.equal(figs.length, 7)
+    assert.ok(figs.every(f => f === '≈0'))
+    assert.equal(queryAll(m.container, '.lc-chip-nums em').length, 0)
     await m.unmount()
   })
 })
 
 describe('RequestDetail composition bar hover-link', () => {
-  test('the mirrored hoverKey dims the bar, lights the matching segment and detail row; the tip stays off', async () => {
+  test('the mirrored hoverKey dims the bar, lights the matching segment and chip; the tip stays off', async () => {
     const m = await mount(h(RequestDetail, { request: req({}), hoverKey: 'tools' }))
     const bar = query(m.container, '.lc-stacked')
     assert.ok(bar.className.includes('lc-stacked-dim'), 'a mirrored hover dims the bar')
@@ -219,26 +209,24 @@ describe('RequestDetail composition bar hover-link', () => {
     assert.equal(segs.length, 6, 'all six categories render')
     assert.ok(segs[1].className.includes('lc-stacked-seg-on'), 'exactly the tools segment (CATS order) lights')
     assert.ok(segs.filter(s => s.className.includes('lc-stacked-seg-on')).length === 1)
-    // The per-category detail rows follow the same key.
-    const rows = queryAll(m.container, '.lc-detail-row')
-    assert.ok(rows[1].className.includes('lc-detail-row-on'), 'the tools row lights too')
-    assert.ok(rows.filter(r => r.className.includes('lc-detail-row-on')).length === 1)
+    const chips = queryAll(m.container, '.lc-legend .lc-chip')
+    assert.ok(chips[1].className.includes('lc-chip-on'), 'the tools chip lights too')
+    assert.ok(chips.filter(c => c.className.includes('lc-chip-on')).length === 1)
     assert.equal(queryAll(m.container, '.lc-bar-tip').length, 0, 'a mirrored hover floats no tooltip')
 
-    // No hover: the bar renders neutral, still tip-less.
     const m2 = await mount(h(RequestDetail, { request: req({}) }))
     assert.equal(query(m2.container, '.lc-stacked').className, 'lc-stacked')
-    assert.equal(queryAll(m2.container, '.lc-detail-row-on').length, 0)
+    assert.equal(queryAll(m2.container, '.lc-chip-on').length, 0)
     assert.equal(queryAll(m2.container, '.lc-bar-tip').length, 0)
     await m2.unmount()
     await m.unmount()
   })
 
-  test('delta-mode detail rows light the matching category too', async () => {
+  test('delta-mode detail chips light the matching category too', async () => {
     const m = await mount(h(RequestDetail, { request: req({}), prev: req({ ...FULL }), hoverKey: 'user' }))
-    const rows = queryAll(m.container, '.lc-detail-row')
-    assert.ok(rows[2].className.includes('lc-detail-row-on'), 'the user row lights in delta mode')
-    assert.ok(rows.filter(r => r.className.includes('lc-detail-row-on')).length === 1)
+    const chips = queryAll(m.container, '.lc-legend .lc-chip')
+    assert.ok(chips[2].className.includes('lc-chip-on'), 'the user chip lights in delta mode')
+    assert.ok(chips.filter(c => c.className.includes('lc-chip-on')).length === 1)
     await m.unmount()
   })
 })
@@ -265,14 +253,14 @@ describe('RequestDetail brief section', () => {
 
   test('opener, inputs with overflow, and reply rows render with tags and previews', async () => {
     const brief: StepBrief = {
-      opener: node({ seq: 1, cat: 'user', text: 'please refactor this' }),
+      opener: surfaceNode({ seq: 1, cat: 'user', text: 'please refactor this' }),
       inputs: [
-        node({ seq: 21, cat: 'tool', tool: 'bash' }),
-        node({ seq: 22, cat: 'inject', form: 'snapshot', text: 'state v2' }),
-        node({ seq: 23, cat: 'user', text: 'extra note', imgs: 3 }),
-        node({ seq: 24, cat: 'inject', form: 'notice' }),
+        surfaceNode({ seq: 21, cat: 'tool', tool: 'bash' }),
+        surfaceNode({ seq: 22, cat: 'inject', form: 'snapshot', text: 'state v2' }),
+        surfaceNode({ seq: 23, cat: 'user', text: 'extra note', imgs: 3 }),
+        surfaceNode({ seq: 24, cat: 'inject', form: 'notice' }),
       ],
-      response: node({ seq: 25, cat: 'assistant', calls: ['bash', 'write'], text: 'done' }),
+      response: surfaceNode({ seq: 25, cat: 'assistant', calls: ['bash', 'write'], text: 'done' }),
     }
     const m = await mount(h(RequestDetail, {
       request: req({}), brief,
@@ -282,17 +270,14 @@ describe('RequestDetail brief section', () => {
     assert.equal(rows.length, 3)
     assert.ok(text(rows[0]).includes('please refactor this'), 'opener row carries the user text')
     assert.ok(text(rows[0]).includes('User'), 'opener tagged as the turn opener')
-    // Inputs: three chips + the overflow pill.
     const chips = queryAll(rows[1], '.lc-brief-chip')
     assert.equal(chips.length, 3, 'inputs capped at MAX_CHIPS')
     assert.ok(text(rows[1]).includes('+1'), 'overflow pill counts the hidden inputs')
     assert.ok(text(chips[0]).includes('bash') && text(chips[0]).includes('list files'), 'tool chip: name tag + call summary')
     assert.ok(text(chips[1]).includes('State Snapshot') && text(chips[1]).includes('Snapshot: state v2'))
     assert.ok(text(chips[2]).includes('Image ×3'), 'user chip counts attachments')
-    // Rows are inert without onLocate.
     assert.equal(rows[0].tagName, 'DIV')
     assert.ok(!chips[0].className.includes('lc-brief-chip-link'))
-    // Reply: one grown chip with the call breadcrumb.
     const replyChip = query(rows[2], '.lc-brief-chip')
     assert.ok(replyChip.className.includes('lc-brief-chip-grow'))
     assert.ok(text(replyChip).includes('bash › write'))
@@ -308,12 +293,12 @@ describe('RequestDetail brief section', () => {
       calls.push({ seq: n.seq, isResponse })
     }
     const brief: StepBrief = {
-      opener: node({ seq: 1, cat: 'user', text: 'open' }),
+      opener: surfaceNode({ seq: 1, cat: 'user', text: 'open' }),
       inputs: [
-        node({ seq: 21, cat: 'tool', tool: 'bash', err: true }),
-        node({ seq: 22, cat: 'inject', form: 'catalog', text: 'tools changed' }),
+        surfaceNode({ seq: 21, cat: 'tool', tool: 'bash', err: true }),
+        surfaceNode({ seq: 22, cat: 'inject', form: 'catalog', text: 'tools changed' }),
       ],
-      response: node({ seq: 25, cat: 'assistant', text: 'reply text' }),
+      response: surfaceNode({ seq: 25, cat: 'assistant', text: 'reply text' }),
     }
     const m = await mount(h(RequestDetail, {
       request: req({}), brief, onLocate,
@@ -321,9 +306,7 @@ describe('RequestDetail brief section', () => {
     }))
     const rows = queryAll(m.container, '.lc-brief-row')
     assert.equal(rows[0].tagName, 'BUTTON', 'rows become buttons when locate is wired')
-    // Error dot on the failed tool chip.
     assert.equal(queryAll(rows[1], '.lc-br-err-dot').length, 1)
-    // Chip click: locates the chip's node, not the row's first input twice.
     const chip = queryAll(rows[1], '.lc-brief-chip')[1]
     assert.ok(chip.className.includes('lc-brief-chip-link'))
     await click(chip)
@@ -342,27 +325,27 @@ describe('RequestDetail brief section', () => {
   test('chipParts cascade: tool/assistant/inject/user kinds and the skill-inject fallback', async () => {
     const inputs: SurfaceNode[] = [
       // skill: a `skill`-tool load — name tag wins, call summary through the join.
-      node({ seq: 30, cat: 'skill', skill: 'code-review', tool: 'skill' }),
+      surfaceNode({ seq: 30, cat: 'skill', skill: 'code-review', tool: 'skill' }),
       // tool: name tag, no join → no text.
-      node({ seq: 31, cat: 'tool', tool: 'read' }),
+      surfaceNode({ seq: 31, cat: 'tool', tool: 'read' }),
       // tool: no name, no join → untagged Tool Result placeholder.
-      node({ seq: 32, cat: 'tool' }),
+      surfaceNode({ seq: 32, cat: 'tool' }),
       // assistant: text + call list breadcrumb.
-      node({ seq: 33, cat: 'assistant', calls: ['bash'], text: 'looking' }),
+      surfaceNode({ seq: 33, cat: 'assistant', calls: ['bash'], text: 'looking' }),
       // assistant: textless, block summary through the join.
-      node({ seq: 34, cat: 'assistant', calls: ['write'] }),
+      surfaceNode({ seq: 34, cat: 'assistant', calls: ['write'] }),
       // assistant: no own calls; the breadcrumb is recovered from the join.
-      node({ seq: 35, cat: 'assistant' }),
+      surfaceNode({ seq: 35, cat: 'assistant' }),
       // assistant: truly empty reply.
-      node({ seq: 36, cat: 'assistant', calls: [] }),
+      surfaceNode({ seq: 36, cat: 'assistant', calls: [] }),
       // inject: plain form with text.
-      node({ seq: 37, cat: 'inject', form: 'relay', text: 'from agent' }),
+      surfaceNode({ seq: 37, cat: 'inject', form: 'relay', text: 'from agent' }),
       // inject: form absent → Context Injection.
-      node({ seq: 38, cat: 'inject', text: 'plain' }),
+      surfaceNode({ seq: 38, cat: 'inject', text: 'plain' }),
       // user: single image, no text.
-      node({ seq: 39, cat: 'user', imgs: 1 }),
+      surfaceNode({ seq: 39, cat: 'user', imgs: 1 }),
       // user: plain text.
-      node({ seq: 40, cat: 'user', text: 'hi' }),
+      surfaceNode({ seq: 40, cat: 'user', text: 'hi' }),
     ]
     const convs: Record<number, ConversationNodeLike> = {
       30: { kind: 'tool-result', seq: 30, call: { name: 'bash', argsRaw: '{"description":"load skill"}' } },
@@ -371,8 +354,7 @@ describe('RequestDetail brief section', () => {
       44: { kind: 'assistant', seq: 44, blocks: [{ kind: 'tool-call', name: 'write', argsRaw: '{"file_path":"a.ts"}' }] },
     }
     // One row per input would need 11 rows; instead render them as one inputs
-    // list — chips are the unit under test (3 shown + overflow), so render
-    // batches through separate mounts.
+    // list — chips are the unit under test (3 shown + overflow), so render batches through separate mounts.
     const render = async (list: SurfaceNode[]) => {
       const m = await mount(h(RequestDetail, {
         request: req({}),
@@ -407,38 +389,33 @@ describe('RequestDetail brief section', () => {
     assert.equal(chipText(m4, 1), 'hi')
     await m4.unmount()
 
-    // The skill bucket names itself; an invocation message previews its text.
-    const m5 = await render([node({ seq: 41, cat: 'skill', skill: 'ponytail' })])
+    const m5 = await render([surfaceNode({ seq: 41, cat: 'skill', skill: 'ponytail' })])
     assert.equal(chipText(m5, 0), 'Skill · ponytail', 'a text-less skill row tags the name')
     await m5.unmount()
-    const m6 = await render([node({ seq: 42, cat: 'skill', skill: 'ponytail', text: 'notes inside' })])
+    const m6 = await render([surfaceNode({ seq: 42, cat: 'skill', skill: 'ponytail', text: 'notes inside' })])
     assert.ok(chipText(m6, 0).includes('Skill · ponytail') && chipText(m6, 0).includes('notes inside'))
     await m6.unmount()
 
-    // A category outside the fold's vocabulary (host drift) degrades into the
-    // user tail — a plain text row, never a throw.
-    const m7 = await render([node({ seq: 43, cat: 'mystery' as never, text: 'survivor' })])
+    // A category outside the fold's vocabulary (host drift) degrades into the user tail — a plain text row, never a throw.
+    const m7 = await render([surfaceNode({ seq: 43, cat: 'mystery' as never, text: 'survivor' })])
     assert.equal(chipText(m7, 0), 'survivor', 'hostile cat renders its text plainly')
     await m7.unmount()
-    const m8 = await render([node({ seq: 44, cat: 'mystery' as never, calls: ['bash', 'read'] })])
+    const m8 = await render([surfaceNode({ seq: 44, cat: 'mystery' as never, calls: ['bash', 'read'] })])
     assert.equal(chipText(m8, 0), '', 'hostile cat with no text renders an inert chip')
     await m8.unmount()
 
-    // A text-less skill row without a join: the name tag carries the chip alone.
-    const m11 = await render([node({ seq: 47, cat: 'skill', skill: 'grilling', tool: 'skill' })])
+    const m11 = await render([surfaceNode({ seq: 47, cat: 'skill', skill: 'grilling', tool: 'skill' })])
     assert.equal(chipText(m11, 0), 'Skill · grilling')
     await m11.unmount()
-    // The catalog digest tags its form; a nameless, formless skill row
-    // degrades to the context label.
+    // The catalog digest tags its form; a nameless, formless skill row degrades to the context label.
     const m11b = await render([
-      node({ seq: 471, cat: 'skill', form: 'catalog' }),
-      node({ seq: 472, cat: 'skill' }),
+      surfaceNode({ seq: 471, cat: 'skill', form: 'catalog' }),
+      surfaceNode({ seq: 472, cat: 'skill' }),
     ])
     assert.equal(chipText(m11b, 0), 'Catalog Update')
     assert.equal(chipText(m11b, 1), 'Context Injection')
     await m11b.unmount()
-    // Textless injection: the form tag carries the chip alone.
-    const m12 = await render([node({ seq: 48, cat: 'inject', form: 'notice' })])
+    const m12 = await render([surfaceNode({ seq: 48, cat: 'inject', form: 'notice' })])
     assert.equal(chipText(m12, 0), 'Notice')
     await m12.unmount()
   })
@@ -448,9 +425,8 @@ describe('RequestDetail brief section', () => {
     const onLocate = (n: SurfaceNode, isResponse: boolean): void => {
       calls.push({ seq: n.seq, isResponse })
     }
-    // A turn's opening step: opener known, zero inputs — the In row still occupies its line.
     const brief: StepBrief = {
-      opener: node({ seq: 1, cat: 'user' }),
+      opener: surfaceNode({ seq: 1, cat: 'user' }),
       inputs: [],
     }
     const m = await mount(h(RequestDetail, { request: req({}), brief, onLocate }))
@@ -466,7 +442,7 @@ describe('RequestDetail brief section', () => {
 
     const m2 = await mount(h(RequestDetail, {
       request: req({}),
-      brief: { inputs: [node({ seq: 5, cat: 'user', text: 'just input' })] },
+      brief: { inputs: [surfaceNode({ seq: 5, cat: 'user', text: 'just input' })] },
     }))
     const rows2 = queryAll(m2.container, '.lc-brief-row')
     assert.equal(rows2.length, 1)
@@ -474,10 +450,9 @@ describe('RequestDetail brief section', () => {
     assert.equal(queryAll(m2.container, '.lc-brief-more').length, 0, 'no overflow pill at the cap')
     await m2.unmount()
 
-    // Opener carrying an image upload: the fact tag shows on the opener row.
     const m3 = await mount(h(RequestDetail, {
       request: req({}),
-      brief: { opener: node({ seq: 7, cat: 'user', text: 'see attached', imgs: 2 }), inputs: [] },
+      brief: { opener: surfaceNode({ seq: 7, cat: 'user', text: 'see attached', imgs: 2 }), inputs: [] },
     }))
     const fact = query(m3.container, '.lc-brief-fact')
     assert.equal(text(fact), 'Image ×2')

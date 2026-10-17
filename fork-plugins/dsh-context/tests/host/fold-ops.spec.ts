@@ -1,9 +1,6 @@
-// The fold-derived file-op log (src/host/fold.ts + shared/fileOps.ts): ops
-// book at tool/result off the armed call's arguments and the result's
-// presentation meta; Code-Mode sub-dispatches buffer under their run_code
-// root and flush at its result with parent/program stamps; the log trims to
-// maxFileOps with a coverage floor; and the detail builder serves detached
-// copies. Driven through the real projection unit.
+// The fold-derived file-op log (src/host/fold.ts + shared/fileOps.ts): ops book at tool/result off the armed call's arguments and the
+// result's presentation meta; Code-Mode sub-dispatches buffer under their run_code root and flush at its result with parent/program stamps;
+// the log trims to maxFileOps with a coverage floor. Driven through the real projection unit.
 
 import assert from 'node:assert/strict'
 import { describe, test } from 'vitest'
@@ -84,24 +81,22 @@ describe('the file-op log — call/result pairing', () => {
     assert.equal(state.callNames.c1, undefined, 'the pending entry consumed at the result')
   })
 
-  test('the error flag reads the envelope error object, the block isError, or the V4 message isError', () => {
+  test('the error flag reads the message isError mark', () => {
     const { state } = driveTimeline([
       toolCall(1, { callId: 'c1', name: 'read', arguments: JSON.stringify({ file_path: 'a.ts' }) }),
       toolResult(2, { callId: 'c1', content: [{ type: 'text', text: 'no' }], error: true }),
       toolCall(3, { callId: 'c2', name: 'read', arguments: JSON.stringify({ file_path: 'b.ts' }) }),
-      // A block-level isError (no envelope error object).
+      // A hostile envelope-only mark (the retired pre-V4 spelling): the
+      // admission validation forbids `data.error` without the message mark, so a row carrying it alone reads as non-error.
       {
         type: 'tool/result', seq: 4, time: 4,
         data: {
-          callId: 'c2',
-          message: { content: [{ type: 'tool-result', toolCallId: 'c2', isError: true, content: [] }], source: { kind: 'tool', callId: 'c2' } },
+          error: true,
+          message: { role: 'tool', toolCallId: 'c2', source: { kind: 'tool', callId: 'c2' }, content: [] },
         },
       } as unknown as TimelineEvent,
-      toolCall(5, { callId: 'c3', name: 'read', arguments: JSON.stringify({ file_path: 'c.ts' }) }),
-      // The V4 spelling: the mark lifted onto the message, no envelope error.
-      toolResult(6, { callId: 'c3', content: [{ type: 'text', text: 'v4' }], error: true, v4: true }),
     ])
-    assert.deepEqual(state.fileOps.map(o => o.err), [true, true, true])
+    assert.deepEqual(state.fileOps.map(o => o.err), [true, false])
   })
 
   test('a call whose raw arguments are not a string still pairs by name (ops degrade to nothing)', () => {
@@ -134,7 +129,7 @@ describe('the file-op log — Code Mode (PTC) sub-dispatches', () => {
     const { state } = driveTimeline([
       toolCall(1, { callId: 'rc1', name: 'run_code', arguments: '{}' }),
       codeDispatch(2, { rootCallId: 'rc1', name: 'bash', arguments: { command: 'ls' } }),
-      { type: 'tool/code-dispatch', seq: 3, time: 3, data: null } as unknown as TimelineEvent,
+      { type: 'tool/ptc-dispatch', seq: 3, time: 3, data: null } as unknown as TimelineEvent,
       codeDispatch(4, { name: 'read' }), // no rootCallId
       toolResult(5, { callId: 'rc1', content: [{ type: 'text', text: 'ok' }] }),
     ])

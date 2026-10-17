@@ -1,18 +1,9 @@
-// A per-baseline driver over the session-projection registry's DOCUMENTED
-// semantics — the rules the REAL dsh registries enforce, mirrored from the
-// source at each baseline tag so the always-on suite pins the plugin's units
-// against every supported registry generation:
-//
-//   dsh-v0.1.2-rc.1  packages/session/session-projection/src/index.ts
-//
-// The real-code matrix (tests/compat/matrix.spec.ts) runs the ACTUAL registry
-// sources per tag; this driver exists so `pnpm test` alone still detects a
-// definition that drifts from any supported generation's rules (a missing
-// wire block, a non-plain-JSON state, an init that cannot take the header…).
+// A driver over the session-projection registry's DOCUMENTED semantics — the rules the REAL dsh registries enforce, mirrored
+// from `packages/session/session-projection/src/index.ts` at each supported tag. The real-code matrix (tests/compat/matrix.spec.ts) runs
+// the ACTUAL registry sources per tag; this driver exists so `pnpm test` alone still detects a definition that drifts from any supported
+// generation's rules (a missing wire block, a non-plain-JSON state, an init that cannot take the header…). Every supported line shares
+// one documented contract, so the driver takes no baseline: one run covers them all.
 
-import type { Baseline } from '../../baselines'
-
-/** Type-erased unit view the registry machinery works with. */
 interface ErasedDefinition {
   key: string
   stateSchema: { parse(value: unknown): unknown }
@@ -60,9 +51,7 @@ export interface CheckpointRow {
 
 export type Checkpoint = Record<string, CheckpointRow>
 
-/**
- * The registry's register-time rules: a non-negative safe integer
- * `stateVersion`, and a shared key must agree on the version.
+/** The registry's register-time rules: a non-negative safe integer `stateVersion`, and a shared key must agree on the version.
  */
 export class RegistryViolationError extends Error {}
 
@@ -72,8 +61,6 @@ import { snapshotJson } from '../helpers/projection'
 export class RegistryDriver {
   private readonly registrations = new Map<string, { def: ErasedDefinition; cells: Map<SessionLike, UnitCell> }>()
   private readonly listeners = new Set<ChangeListener>()
-
-  constructor(readonly baseline: Baseline) {}
 
   /** `ctx.sessionProjections.register` — accepts the plugin's real definitions. */
   register(definition: DefinitionLike): () => void {
@@ -88,8 +75,7 @@ export class RegistryDriver {
     const def: ErasedDefinition = {
       key: definition.key,
       stateSchema: definition.stateSchema,
-      // The registry calls init(header, inheritedEventCount); the plugin's
-      // zero-argument init observes neither argument.
+      // The registry calls init(header, inheritedEventCount); the plugin's zero-argument init observes neither argument.
       init: (header, inheritedEventCount) => definition.init(header, inheritedEventCount),
       apply: (state, event) => definition.apply(state, event),
       wire,
@@ -170,13 +156,10 @@ export class RegistryDriver {
     return rows
   }
 
-  /**
-   * The projection cache's WRITE precondition (session-projection-cache
+  /** The projection cache's WRITE precondition (session-projection-cache
    * src/index.ts): every row must be losslessly JSON-serializable or the
    * whole write fails with a TypeError — one undefined-valued property in
-   * one unit's state once broke every session on the host (issues #5-#7,
-   * #27-#30). Returns the detached JSON image.
-   */
+   * one unit's state once broke every session on the host (issues #5-#7, #27-#30). Returns the detached JSON image. */
   checkpointJson(session: SessionLike): Record<string, unknown> | undefined {
     return snapshotJson(this.checkpoint(session)) as Record<string, unknown> | undefined
   }
@@ -210,11 +193,7 @@ export class RegistryDriver {
     return floor === undefined ? undefined : Math.max(floor - 1, 0)
   }
 
-  /**
-   * Cold read: seed usable rows through stateSchema.parse, refold the rest.
-   * `inheritedEventCount` is the fork-inherited prefix length the registry
-   * hands to unit initialization (0 for a plain session).
-   */
+  /** Cold read: seed usable rows through stateSchema.parse, refold the rest. */
   restore(checkpoint: Checkpoint, events: { seq: number }[], baseSeq: number, header: unknown, inheritedEventCount = 0): ProjectionSnapshot {
     const endSeq = events.at(-1)?.seq ?? baseSeq - 1
     const values: Record<string, unknown> = {}

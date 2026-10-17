@@ -1,13 +1,9 @@
-// The timeline source (src/client/timelineSource.ts): the detail payload
-// narrow, the Connection-RPC fetcher, the per-session detail store machine
-// (debounce / single-flight / latest-wins / refold / retry / backoff), and
-// the useTimelineSource hook merging both wire generations into the value
-// the cards render.
+// The timeline source (src/client/timelineSource.ts): the detail store machine and the
+// useTimelineSource hook merging both wire generations into the value the cards render.
 
 import { act, createElement as h, type ReactElement } from 'react'
 import assert from 'node:assert/strict'
 import { describe, test, vi, afterEach } from 'vitest'
-import type { ClientCtx } from '../../src/client/services'
 import {
   DetailStore,
   detailOf,
@@ -17,7 +13,6 @@ import {
   useTimelineSource,
 } from '../../src/client/timelineSource'
 import type { ContextTimeline, ContextTimelineDetail } from '../../src/shared/types'
-import { TestClientCtx, asClientCtx } from './helpers/harness'
 import { mount, text, until } from './helpers/kit'
 
 afterEach(() => {
@@ -53,18 +48,13 @@ function slimHead(rev: number, over: Record<string, unknown> = {}): Record<strin
   }
 }
 
-/**
- * Stub the global fetch with a programmable detail reply (the transport the
- * detail reader POSTs) and return a bare ctx — the reader never touches the
- * ctx's services for the read itself.
- */
-function ctxWithCall(behavior: () => { status?: number; body?: unknown }): ClientCtx {
+/** Stub the global fetch with a programmable detail reply (the transport the detail reader POSTs). */
+function stubDetailFetch(behavior: () => { status?: number; body?: unknown }): void {
   vi.stubGlobal('fetch', async () => {
     const outcome = await behavior()
     const status = outcome.status ?? 200
     return { ok: status === 200, status, json: async () => outcome.body }
   })
-  return asClientCtx(new TestClientCtx())
 }
 
 describe('detailOf', () => {
@@ -93,7 +83,6 @@ describe('detailOf', () => {
     assert.equal(narrowed.droppedNodes, 0, 'a wrong-typed scalar zeroes')
     assert.equal(narrowed.surfaceFloor, 7)
     assert.equal(narrowed.archiveFloor, undefined, 'a wrong-typed floor stays absent')
-    // A numeric archiveFloor rides through.
     assert.equal(detailOf(detail(1, { archiveFloor: 9 }))?.archiveFloor, 9)
     // The op log and its floor ride through, per-item guarded.
     const withOps = detailOf(detail(1, {
@@ -102,8 +91,14 @@ describe('detailOf', () => {
     }))
     assert.equal(withOps?.fileOps?.length, 1, 'junk entries drop')
     assert.equal(withOps?.fileOpsFloor, 4)
+    // The timing strip's painted spans ride through, per-item guarded too.
+    const withSpans = detailOf(detail(1, {
+      spans: [{ kind: 'ttft', start: 0, end: 100 }, null],
+    }))
+    assert.equal(withSpans?.spans?.length, 1, 'junk span entries drop')
     // Absent stays absent (the legacy inline generation's marker).
     assert.equal(detailOf(detail(1))?.fileOps, undefined)
+    assert.equal(detailOf(detail(1))?.spans, undefined)
   })
 
   test('the slim head rides through sanitized; a malformed head drops alone', () => {
@@ -124,26 +119,31 @@ describe('detailOf', () => {
 
 describe('makeDetailFetcher', () => {
   test('no session id yields no fetcher', () => {
-    assert.equal(makeDetailFetcher(ctxWithCall(() => ({ body: null })), ''), undefined)
+    assert.equal(makeDetailFetcher(''), undefined)
   })
 
   test('the envelope contract: not-ok rejects, null value means absent, malformed value rejects', async () => {
-    const failed = makeDetailFetcher(ctxWithCall(() => ({ body: { ok: false, error: { code: 'x', message: 'm', details: {} } } })), 's1')!
+    stubDetailFetch(() => ({ body: { ok: false, error: { code: 'x', message: 'm', details: {} } } }))
+    const failed = makeDetailFetcher('s1')!
     await assert.rejects(() => failed(), /detail read failed/)
 
-    const absent = makeDetailFetcher(ctxWithCall(() => ({ body: { ok: true, value: null } })), 's1')!
+    stubDetailFetch(() => ({ body: { ok: true, value: null } }))
+    const absent = makeDetailFetcher('s1')!
     assert.equal(await absent(), null)
 
-    const malformed = makeDetailFetcher(ctxWithCall(() => ({ body: { ok: true, value: { no: 'rev' } } })), 's1')!
+    stubDetailFetch(() => ({ body: { ok: true, value: { no: 'rev' } } }))
+    const malformed = makeDetailFetcher('s1')!
     await assert.rejects(() => malformed(), /detail read malformed/)
 
-    const transport = makeDetailFetcher(ctxWithCall(() => {
+    stubDetailFetch(() => {
       throw new Error('offline')
-    }), 's1')!
+    })
+    const transport = makeDetailFetcher('s1')!
     await assert.rejects(() => transport(), /offline/)
 
     // A non-200 answer (the route absent on an inline-generation host) rejects.
-    const missing = makeDetailFetcher(ctxWithCall(() => ({ status: 404, body: 'not found' })), 's1')!
+    stubDetailFetch(() => ({ status: 404, body: 'not found' }))
+    const missing = makeDetailFetcher('s1')!
     await assert.rejects(() => missing(), /HTTP 404/)
   })
 
@@ -154,15 +154,14 @@ describe('makeDetailFetcher', () => {
       seen.body = JSON.parse(String(init.body))
       return { ok: true, status: 200, json: async () => ({ ok: true, value: detail(4) }) }
     })
-    const d = await makeDetailFetcher(asClientCtx(new TestClientCtx()), 's1')!()
+    const d = await makeDetailFetcher('s1')!()
     assert.equal(d?.rev, 4)
-    assert.equal(seen.url, '/api/dsh-context/detail')
+    assert.equal(seen.url, 'api/dsh-context/detail')
     assert.deepEqual(seen.body, { sessionId: 's1' })
   })
 })
 
 describe('DetailStore', () => {
-  /** A fetcher with a call log and a programmable queue of outcomes. */
   function scriptedFetcher(outcomes: (ContextTimelineDetail | null | Error)[]): { fetcher: () => Promise<ContextTimelineDetail | null>; calls: number[] } {
     const calls: number[] = []
     return {
@@ -194,7 +193,6 @@ describe('DetailStore', () => {
     assert.equal(store.getSnapshot().failed, false)
     assert.equal(calls.length, 1)
     assert.ok(seen.length > 0, 'listeners fired')
-    // The same revision asks for nothing new.
     store.request(1)
     await settle()
     assert.equal(calls.length, 1, 'a covered revision does not refetch')
@@ -209,6 +207,114 @@ describe('DetailStore', () => {
     store.request(1)
     await settle()
     assert.equal(seen.length, 0)
+  })
+
+  test('a parked store arms no read (the last unsubscribe drops the pending window)', async () => {
+    vi.useFakeTimers()
+    const { fetcher, calls } = scriptedFetcher([detail(1)])
+    const store = new DetailStore(fetcher, 10)
+    const off = store.subscribe(() => {})
+    store.request(1)
+    assert.equal(store.getSnapshot().pending, true, 'the debounce window is armed')
+    off()
+    assert.equal(store.getSnapshot().pending, false, 'parking drops the pending window')
+    await vi.advanceTimersByTimeAsync(100)
+    assert.equal(calls.length, 0, 'a parked store never reaches the fetcher')
+    // A further rev while still parked arms nothing either.
+    store.request(2)
+    await vi.advanceTimersByTimeAsync(100)
+    assert.equal(calls.length, 0)
+    vi.useRealTimers()
+  })
+
+  test('a read settling after the last unsubscribe does not re-arm', async () => {
+    vi.useFakeTimers()
+    let reject!: (error: Error) => void
+    let calls = 0
+    const store = new DetailStore(() => {
+      calls++
+      return new Promise<ContextTimelineDetail | null>((_resolve, rej) => { reject = rej })
+    }, 10)
+    const off = store.subscribe(() => {})
+    store.request(1)
+    await vi.advanceTimersByTimeAsync(10)
+    assert.equal(calls, 1, 'the read is in flight')
+    off()
+    reject(new Error('offline'))
+    await vi.advanceTimersByTimeAsync(0)
+    await vi.advanceTimersByTimeAsync(1000)
+    assert.equal(calls, 1, 'no retry is armed once nobody is subscribed')
+    vi.useRealTimers()
+  })
+
+  test('a store parked without a payload re-reads on the next subscribe', async () => {
+    vi.useFakeTimers()
+    const { fetcher, calls } = scriptedFetcher([new Error('offline'), detail(1)])
+    const store = new DetailStore(fetcher, 10)
+    const off = store.subscribe(() => {})
+    store.request(1)
+    await vi.advanceTimersByTimeAsync(10)
+    assert.equal(calls.length, 1)
+    assert.equal(store.getSnapshot().failed, true)
+    off()
+    await vi.advanceTimersByTimeAsync(1000)
+    assert.equal(calls.length, 1, 'the parked retry is dropped')
+    store.subscribe(() => {})
+    // The SAME head rev must read again: the failed read already marked it
+    // "wanted", which would otherwise swallow the resumed store's request.
+    store.request(1)
+    await vi.advanceTimersByTimeAsync(10)
+    assert.equal(calls.length, 2, 'the resumed store reads instead of sticking on the note')
+    vi.useRealTimers()
+  })
+
+  test('a parked store with a cached payload resumes without a read', async () => {
+    const { fetcher, calls } = scriptedFetcher([detail(1)])
+    const store = new DetailStore(fetcher, 0)
+    const off = store.subscribe(() => {})
+    store.request(1)
+    await until(() => store.getSnapshot().detail?.rev === 1, 'the first read never landed')
+    off()
+    store.subscribe(() => {})
+    store.request(1)
+    await settle()
+    assert.equal(calls.length, 1, 'the cached payload still covers the rev')
+  })
+
+  test('a shared store parks only when its last subscriber leaves', async () => {
+    vi.useFakeTimers()
+    const { fetcher, calls } = scriptedFetcher([detail(1)])
+    const store = new DetailStore(fetcher, 10)
+    // The tab and the /context modal share one store per session.
+    const offTab = store.subscribe(() => {})
+    const offModal = store.subscribe(() => {})
+    store.request(1)
+    offTab()
+    await vi.advanceTimersByTimeAsync(10)
+    assert.equal(calls.length, 1, 'the remaining subscriber still gets its read')
+    offModal()
+    store.request(2)
+    await vi.advanceTimersByTimeAsync(100)
+    assert.equal(calls.length, 1, 'the parked store arms nothing')
+    vi.useRealTimers()
+  })
+
+  test('release drops the cached payload and any armed window', async () => {
+    vi.useFakeTimers()
+    const { fetcher, calls } = scriptedFetcher([detail(1), detail(2)])
+    const store = new DetailStore(fetcher, 10)
+    store.subscribe(() => {})
+    store.request(1)
+    await vi.advanceTimersByTimeAsync(10)
+    assert.equal(store.hasPayload, true)
+    store.request(2)
+    assert.equal(store.getSnapshot().pending, true, 'a second window is armed')
+    store.release()
+    assert.equal(store.hasPayload, false)
+    assert.equal(store.getSnapshot().pending, false)
+    await vi.advanceTimersByTimeAsync(100)
+    assert.equal(calls.length, 1, 'the released store arms nothing')
+    vi.useRealTimers()
   })
 
   test('a rev bump during the in-flight read re-reads after settle (trailing edge)', async () => {
@@ -246,6 +352,65 @@ describe('DetailStore', () => {
     assert.equal(store.getSnapshot().detail?.rev, 5)
     store.request(2)
     await until(() => store.getSnapshot().detail?.rev === 2, 'the refold reset never refetched')
+  })
+
+  for (const outcome of ['detail', 'absent', 'failure'] as const) {
+    for (const timerFired of [false, true]) {
+      test(`a refold ignores an old ${outcome} before a new read (timer fired: ${String(timerFired)})`, async () => {
+        vi.useFakeTimers()
+        let resolve!: (value: ContextTimelineDetail | null) => void
+        let reject!: (reason: Error) => void
+        let calls = 0
+        const first = new Promise<ContextTimelineDetail | null>((res, rej) => {
+          resolve = res
+          reject = rej
+        })
+        const store = new DetailStore(() => {
+          calls++
+          return calls === 1 ? first : Promise.resolve(detail(2))
+        }, 10)
+        store.request(5)
+        await vi.advanceTimersByTimeAsync(10)
+        store.request(2)
+        if (timerFired) await vi.advanceTimersByTimeAsync(10)
+        assert.equal(calls, 1, 'the reset never stacks a concurrent read')
+
+        if (outcome === 'failure') reject(new Error('offline'))
+        else resolve(outcome === 'detail' ? detail(5) : null)
+        await vi.advanceTimersByTimeAsync(0)
+        assert.equal(store.getSnapshot().detail, null, 'old collections must not land under the new head')
+        assert.equal(store.getSnapshot().failed, false, 'old absence or failure must not fail the new generation')
+        assert.equal(store.getSnapshot().pending, true, 'the new generation still needs its read')
+
+        await vi.advanceTimersByTimeAsync(10)
+        assert.equal(calls, 2)
+        assert.equal(store.getSnapshot().detail?.rev, 2)
+        assert.equal(store.getSnapshot().failed, false)
+        assert.equal(store.getSnapshot().pending, false)
+      })
+    }
+  }
+
+  test('several refolds during one read converge to the latest generation', async () => {
+    vi.useFakeTimers()
+    let resolve!: (value: ContextTimelineDetail | null) => void
+    let calls = 0
+    const first = new Promise<ContextTimelineDetail | null>(res => { resolve = res })
+    const store = new DetailStore(() => {
+      calls++
+      return calls === 1 ? first : Promise.resolve(detail(1))
+    }, 10)
+    store.request(5)
+    await vi.advanceTimersByTimeAsync(10)
+    store.request(3)
+    store.request(1)
+    await vi.advanceTimersByTimeAsync(10)
+    resolve(detail(5))
+    await vi.advanceTimersByTimeAsync(0)
+    assert.equal(store.getSnapshot().detail, null)
+    await vi.advanceTimersByTimeAsync(10)
+    assert.equal(calls, 2)
+    assert.equal(store.getSnapshot().detail?.rev, 1)
   })
 
   test('a transport failure with no detail arms the failed state; the backoff trailing recovers on its own', async () => {
@@ -355,7 +520,6 @@ describe('DetailStore', () => {
     await vi.advanceTimersByTimeAsync(10)
     assert.equal(calls.length, 1, 'the first read fires after the base window')
     assert.equal(store.getSnapshot().failed, true)
-    // The failed read's trailing edge waits out the DOUBLED window.
     await vi.advanceTimersByTimeAsync(19)
     assert.equal(calls.length, 1, 'the trailing read waits out the doubled window')
     await vi.advanceTimersByTimeAsync(1)
@@ -390,20 +554,93 @@ describe('DetailStore', () => {
 
 describe('detailStoreOf', () => {
   test('one store per session, shared by every consumer; reset drops the cache', () => {
-    const ctx = ctxWithCall(() => ({ body: { ok: true, value: detail(1) } }))
-    const a = detailStoreOf(ctx, 's1')
-    assert.equal(a, detailStoreOf(ctxWithCall(() => ({ body: { ok: true, value: null } })), 's1'), 'the session key wins, the first fetcher keeps serving')
-    assert.notEqual(a, detailStoreOf(ctx, 's2'))
+    stubDetailFetch(() => ({ body: { ok: true, value: detail(1) } }))
+    const a = detailStoreOf('s1')
+    assert.equal(a, detailStoreOf('s1'), 'the session key wins, the first fetcher keeps serving')
+    assert.notEqual(a, detailStoreOf('s2'))
     resetTimelineDetailStores()
-    assert.notEqual(detailStoreOf(ctx, 's1'), a, 'a reset store is a fresh instance')
+    assert.notEqual(detailStoreOf('s1'), a, 'a reset store is a fresh instance')
+  })
+
+  function countingFetch(): Map<string, number> {
+    const calls = new Map<string, number>()
+    vi.stubGlobal('fetch', async (_url: unknown, init?: { body?: string }) => {
+      if (init?.body === undefined) return { ok: false, status: 404, json: async () => null }
+      const id = (JSON.parse(init.body) as { sessionId: string }).sessionId
+      calls.set(id, (calls.get(id) ?? 0) + 1)
+      return { ok: true, status: 200, json: async () => ({ ok: true, value: detail(1) }) }
+    })
+    return calls
+  }
+
+  /** The app's mount path for one session: subscribe, request, land, leave. */
+  async function visitStore(id: string): Promise<DetailStore> {
+    const store = detailStoreOf(id)
+    const off = store.subscribe(() => {})
+    store.request(1)
+    await until(() => store.hasPayload, `store ${id} never landed its read`)
+    off()
+    return store
+  }
+
+  test('the page cache bounds retained payloads; a demoted session reads again', async () => {
+    const calls = countingFetch()
+    const ids = Array.from({ length: 12 }, (_, i) => 'cap-' + i)
+    for (const id of ids) await visitStore(id)
+    assert.equal(detailStoreOf(ids[11]).hasPayload, true, 'the newest visit stays cached')
+    assert.equal(detailStoreOf(ids[0]).hasPayload, false, 'the oldest visit was demoted')
+    // The cached session re-opens without a read; the demoted one reads again.
+    await visitStore(ids[11])
+    assert.equal(calls.get(ids[11]), 1, 'a cached re-open reads nothing')
+    await visitStore(ids[0])
+    assert.equal(calls.get(ids[0]), 2, 'a demoted re-open reads once more')
+  })
+
+  test('a mounted store is never demoted', async () => {
+    countingFetch()
+    const ids = Array.from({ length: 12 }, (_, i) => 'live-' + i)
+    const held = detailStoreOf(ids[0])
+    const off = held.subscribe(() => {})
+    held.request(1)
+    await until(() => held.hasPayload, 'the mounted store never landed')
+    for (const id of ids.slice(1)) await visitStore(id)
+    assert.equal(held.active, true)
+    assert.equal(held.hasPayload, true, 'a mounted store keeps its payload')
+    off()
+  })
+
+  test('a burst of opens is trimmed back to the bound on the next open', async () => {
+    countingFetch()
+    const ids = Array.from({ length: 12 }, (_, i) => 'burst-' + i)
+    // Every store subscribes and requests BEFORE any read lands.
+    const offs: (() => void)[] = []
+    const created = ids.map((id) => {
+      const store = detailStoreOf(id)
+      offs.push(store.subscribe(() => {}))
+      store.request(1)
+      return store
+    })
+    for (const [i, store] of created.entries()) {
+      await until(() => store.hasPayload, 'burst store ' + String(i) + ' never landed')
+    }
+    for (const off of offs) off()
+    // The next open trims the excess, oldest first.
+    await visitStore('burst-extra')
+    assert.equal(created[0].hasPayload, false, 'the oldest burst payload is released')
+    assert.equal(created[11].hasPayload, true, 'the newest burst payload survives')
+    // A later open walks past the already-demoted entries to the next victim.
+    await visitStore('burst-extra-2')
+    assert.equal(created[5].hasPayload, false)
+    assert.equal(created[11].hasPayload, true)
   })
 })
 
 /** A probe component rendering the source's observable surface as text. */
-function SourceProbe(props: { ctx: ClientCtx; sessionId: string; value: unknown }): ReactElement {
-  const source = useTimelineSource(props.ctx, {
+function SourceProbe(props: { sessionId: string; value?: unknown; useProjection?: (key: string) => unknown }): ReactElement {
+  const useProjection = props.useProjection ?? ((key: string) => (key === 'contextTimeline' ? props.value : undefined))
+  const source = useTimelineSource({
     sessionId: props.sessionId,
-    useProjection: (key: string) => (key === 'contextTimeline' ? props.value : undefined),
+    useProjection,
   })
   const data = source.data
   return h('div', null,
@@ -413,6 +650,7 @@ function SourceProbe(props: { ctx: ClientCtx; sessionId: string; value: unknown 
     h('span', { 'data-k': 'rev' }, String(data?.detailRev ?? 'x')),
     h('span', { 'data-k': 'floors' }, `${String(data?.surfaceFloor ?? 'x')}/${String(data?.archiveFloor ?? 'x')}`),
     h('span', { 'data-k': 'ops' }, String(data?.fileOps?.length ?? 'x')),
+    h('span', { 'data-k': 'spans' }, String(data?.spans?.length ?? 'x')),
     h('span', { 'data-k': 'model' }, data?.model ?? 'x'),
     h('button', { 'data-k': 'retry', onClick: source.retryDetail }, 'retry'))
 }
@@ -422,9 +660,40 @@ function probeRead(container: HTMLElement, key: string): string {
 }
 
 describe('useTimelineSource', () => {
+  test('a refold never merges the previous generation into the pushed head', async () => {
+    vi.useFakeTimers()
+    const response = (value: ContextTimelineDetail) => ({ ok: true, json: async () => ({ ok: true, value }) })
+    let resolve!: (value: ReturnType<typeof response>) => void
+    let calls = 0
+    const first = new Promise<ReturnType<typeof response>>(res => { resolve = res })
+    vi.stubGlobal('fetch', () => {
+      calls++
+      return calls === 1 ? first : Promise.resolve(response(detail(2)))
+    })
+    const m = await mount(h(SourceProbe, { sessionId: 's1', value: slimHead(5) }))
+    try {
+      await act(async () => { await vi.advanceTimersByTimeAsync(300) })
+      await m.update(h(SourceProbe, { sessionId: 's1', value: slimHead(2) }))
+      await act(async () => { await vi.advanceTimersByTimeAsync(300) })
+      await act(async () => {
+        resolve(response(detail(5)))
+        await vi.advanceTimersByTimeAsync(0)
+      })
+      assert.equal(probeRead(m.container, 'rev'), '2')
+      assert.equal(probeRead(m.container, 'state'), 'loading')
+      assert.equal(probeRead(m.container, 'steps'), '0', 'no rows from the discarded generation')
+      await act(async () => { await vi.advanceTimersByTimeAsync(300) })
+      assert.equal(calls, 2)
+      assert.equal(probeRead(m.container, 'state'), 'ready')
+      assert.equal(detailStoreOf('s1').getSnapshot().detail?.rev, 2)
+    } finally {
+      await m.unmount()
+    }
+  })
+
   test('the inline generation passes through untouched and never fetches', async () => {
     let calls = 0
-    const ctx = ctxWithCall(() => {
+    stubDetailFetch(() => {
       calls++
       return { body: { ok: true, value: detail(1) } }
     })
@@ -438,7 +707,7 @@ describe('useTimelineSource', () => {
       droppedNodes: 0,
       archive: [],
     }
-    const m = await mount(h(SourceProbe, { ctx, sessionId: 's1', value: inline }))
+    const m = await mount(h(SourceProbe, { sessionId: 's1', value: inline }))
     await new Promise(resolve => setTimeout(resolve, 350))
     assert.equal(probeRead(m.container, 'state'), 'legacy')
     assert.equal(probeRead(m.container, 'steps'), '1')
@@ -451,16 +720,91 @@ describe('useTimelineSource', () => {
     await m.unmount()
   })
 
-  test('no projection value keeps the loading surface', async () => {
-    const m = await mount(h(SourceProbe, { ctx: ctxWithCall(() => ({ body: null })), sessionId: 's1', value: undefined }))
+  test('the cold start: no pushed value opens the channel itself and renders from the read', async () => {
+    let calls = 0
+    stubDetailFetch(() => {
+      calls++
+      return { body: { ok: true, value: detail(2, { head: slimHead(2) }) } }
+    })
+    const m = await mount(h(SourceProbe, { sessionId: 's1', value: undefined }))
+    // The first paint waits on the cold read — then the read's own slim head stands in for the never-pushed projection value.
     assert.equal(probeRead(m.container, 'state'), 'loading')
+    await until(() => probeRead(m.container, 'state') === 'ready', 'the cold read never landed')
+    assert.equal(probeRead(m.container, 'model'), 'm', 'the read head renders')
+    assert.equal(probeRead(m.container, 'rev'), '2')
+    assert.equal(probeRead(m.container, 'steps'), '1', 'the read collections merge')
+    assert.ok(calls >= 1)
+    await m.unmount()
+  })
+
+  test('a pushed head arriving after the cold read takes the channel back', async () => {
+    // The stub folds the served rev per the latest requested revision — the
+    // production route folds the requested session at its current watermark.
+    let servedRev = 1
+    vi.stubGlobal('fetch', async () => ({ ok: true, status: 200, json: async () => ({ ok: true, value: detail(servedRev, { head: slimHead(servedRev, { model: servedRev === 1 ? 'cold-m' : 'pushed-m' }) }) }) }))
+    // The probe reads `useProjection` through a mutable capture so an update
+    // rerender sees the freshly pushed head (the real seat reads per render).
+    let pushed: unknown = undefined
+    function PushProbe(): ReactElement {
+      return h(SourceProbe, {
+        sessionId: 's1',
+        useProjection: (key: string) => (key === 'contextTimeline' ? pushed : undefined),
+      })
+    }
+    const m = await mount(h(PushProbe, null))
+    await until(() => probeRead(m.container, 'state') === 'ready', 'the cold read never landed')
+    assert.equal(probeRead(m.container, 'model'), 'cold-m')
+    // The pushed head outruns the cold read's revision: same per-session store, one trailing refetch, the pushed value renders.
+    servedRev = 2
+    pushed = slimHead(2, { model: 'pushed-m' })
+    await m.update(h(PushProbe, null))
+    assert.equal(probeRead(m.container, 'model'), 'pushed-m', 'the pushed head wins at once')
+    assert.equal(probeRead(m.container, 'rev'), '2', 'the pushed revision renders')
+    await until(() => detailStoreOf('s1').getSnapshot().detail?.rev === 2, 'the pushed head never trailed the channel')
+    await m.unmount()
+  })
+
+  test('the cold read failing arms the retry affordance instead of stalling', async () => {
+    let online = false
+    stubDetailFetch(() => {
+      if (!online) throw new Error('offline')
+      return { body: { ok: true, value: detail(1, { head: slimHead(1) }) } }
+    })
+    const m = await mount(h(SourceProbe, { sessionId: 's1', value: undefined }))
+    await until(() => probeRead(m.container, 'state') === 'failed', 'the cold failure never surfaced')
     assert.equal(probeRead(m.container, 'steps'), 'null')
+    online = true
+    await act(async () => {
+      ;(m.container.querySelector('[data-k="retry"]') as HTMLElement).click()
+    })
+    await until(() => probeRead(m.container, 'state') === 'ready', 'the retry never recovered')
+    await m.unmount()
+  })
+
+  test('a cold payload without its head types the failure (nothing renderable, no stall)', async () => {
+    stubDetailFetch(() => ({ body: { ok: true, value: detail(1) } }))
+    const m = await mount(h(SourceProbe, { sessionId: 's1', value: undefined }))
+    await until(() => probeRead(m.container, 'state') === 'failed', 'the headless payload never surfaced')
+    await m.unmount()
+  })
+
+  test('an absent cold answer (the session left the live set) surfaces the failed note', async () => {
+    stubDetailFetch(() => ({ body: { ok: true, value: null } }))
+    const m = await mount(h(SourceProbe, { sessionId: 's1', value: undefined }))
+    await until(() => probeRead(m.container, 'state') === 'failed', 'absence never surfaced')
+    await m.unmount()
+  })
+
+  test('no session id to read for: the cold start types the failure, not an eternal spinner', async () => {
+    stubDetailFetch(() => ({ body: { ok: true, value: detail(1, { head: slimHead(1) }) } }))
+    const m = await mount(h(SourceProbe, { sessionId: '', value: undefined }))
+    await until(() => probeRead(m.container, 'state') === 'failed', 'the empty-id cold start never surfaced')
     await m.unmount()
   })
 
   test('the split generation: counters render off the head immediately, the detail lands through the channel', async () => {
     let calls = 0
-    const ctx = ctxWithCall(() => {
+    stubDetailFetch(() => {
       calls++
       return {
         body: {
@@ -470,11 +814,12 @@ describe('useTimelineSource', () => {
             archiveFloor: 5,
             fileOps: [{ seq: 2, path: 'a.ts', kind: 'read', tool: 'read', err: false, added: 0, removed: 0 }],
             fileOpsFloor: 4,
+            spans: [{ kind: 'ttft', start: 0, end: 100 }, { kind: 'other', start: 100, end: 1_400 }],
           }),
         },
       }
     })
-    const m = await mount(h(SourceProbe, { ctx, sessionId: 's1', value: slimHead(3) }))
+    const m = await mount(h(SourceProbe, { sessionId: 's1', value: slimHead(3) }))
     // The first paint: the head's counters with the detail still pending.
     assert.equal(probeRead(m.container, 'state'), 'loading')
     assert.equal(probeRead(m.container, 'turns'), '1', 'the head counters render before the detail lands')
@@ -485,34 +830,34 @@ describe('useTimelineSource', () => {
     assert.equal(probeRead(m.container, 'rev'), '3')
     assert.equal(probeRead(m.container, 'floors'), '2/5', 'the detail floors merge')
     assert.equal(probeRead(m.container, 'ops'), '1', 'the op log merges')
+    assert.equal(probeRead(m.container, 'spans'), '2', 'the strip spans merge')
     assert.ok(calls >= 1)
     await m.unmount()
   })
 
   test('a rev bump on the pushed head refetches the detail', async () => {
     let served = 3
-    const ctx = ctxWithCall(() => ({ body: { ok: true, value: detail(served) } }))
-    const m = await mount(h(SourceProbe, { ctx, sessionId: 's1', value: slimHead(3) }))
+    stubDetailFetch(() => ({ body: { ok: true, value: detail(served) } }))
+    const m = await mount(h(SourceProbe, { sessionId: 's1', value: slimHead(3) }))
     await until(() => probeRead(m.container, 'state') === 'ready', 'the first read never landed')
-    assert.equal(detailStoreOf(ctx, 's1').getSnapshot().detail?.rev, 3)
+    assert.equal(detailStoreOf('s1').getSnapshot().detail?.rev, 3)
     served = 4
-    await m.update(h(SourceProbe, { ctx, sessionId: 's1', value: slimHead(4) }))
-    // The probe's rev cell reads the HEAD's marker (4 as pushed); the store's
-    // served detail proves the refetch.
+    await m.update(h(SourceProbe, { sessionId: 's1', value: slimHead(4) }))
+    // The probe's rev cell reads the HEAD's marker (4 as pushed); the store's served detail proves the refetch.
     assert.equal(probeRead(m.container, 'rev'), '4')
-    await until(() => detailStoreOf(ctx, 's1').getSnapshot().detail?.rev === 4, 'the refetch never landed')
+    await until(() => detailStoreOf('s1').getSnapshot().detail?.rev === 4, 'the refetch never landed')
     await m.unmount()
   })
 
   test('the failed read arms the retry affordance, which refires the read', async () => {
     let online = false
     let calls = 0
-    const ctx = ctxWithCall(() => {
+    stubDetailFetch(() => {
       calls++
       if (!online) throw new Error('offline')
       return { body: { ok: true, value: detail(1) } }
     })
-    const m = await mount(h(SourceProbe, { ctx, sessionId: 's1', value: slimHead(1) }))
+    const m = await mount(h(SourceProbe, { sessionId: 's1', value: slimHead(1) }))
     await until(() => probeRead(m.container, 'state') === 'failed', 'the failure never surfaced')
     online = true
     await act(async () => {
@@ -524,8 +869,8 @@ describe('useTimelineSource', () => {
   })
 
   test('an absent answer (the session left the live set) surfaces the failed note', async () => {
-    const ctx = ctxWithCall(() => ({ body: { ok: true, value: null } }))
-    const m = await mount(h(SourceProbe, { ctx, sessionId: 's1', value: slimHead(1) }))
+    stubDetailFetch(() => ({ body: { ok: true, value: null } }))
+    const m = await mount(h(SourceProbe, { sessionId: 's1', value: slimHead(1) }))
     await until(() => probeRead(m.container, 'state') === 'failed', 'absence never surfaced')
     await m.unmount()
   })

@@ -18,8 +18,11 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      # Reads the pinned pnpm version from `packageManager` in package.json.
+      # No `packageManager` field in this plugin's package.json, so both
+      # workflows pin the version explicitly.
       - uses: pnpm/action-setup@v6
+        with:
+          version: latest
 
       - uses: actions/setup-node@v7
         with:
@@ -28,10 +31,33 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Test (typecheck + vitest against src; no build needed)
-        run: pnpm test
+      - name: Build
+        run: pnpm run build
 
-      # The packaging glue (module handoff, CSS channel) only exists after
-      # tsdown runs — the smoke script verifies the built bundle.
-      - name: Build + bundle smoke
-        run: pnpm run build && pnpm run test
+      - name: Lint
+        run: pnpm run lint
+
+      - name: Typecheck
+        run: pnpm run typecheck
+
+      # The `compat` vitest project inside `pnpm test` boots the BUILT plugin
+      # against the REAL harness sources at every supported baseline tag
+      # (tests/baselines.ts is the source of truth — keep this fetch list in
+      # step when a baseline is added). It skips SILENTLY without the tags, so
+      # this fetch must sit BEFORE Test or a PR that breaks a seam goes green.
+      # Only the tags are fetched, so the clone stays shallow.
+      - name: Fetch the dsh baseline tags
+        run: |
+          mkdir -p .tmp/dsh-repo
+          cd .tmp/dsh-repo
+          git init -q
+          git remote add origin https://github.com/deepseek-ai/deepseek-harness.git
+          git fetch --depth 1 -q origin \
+            refs/tags/dsh-v0.1.7-rc.2:refs/tags/dsh-v0.1.7-rc.2 \
+            refs/tags/dsh-v0.2.0-rc.2:refs/tags/dsh-v0.2.0-rc.2
+
+      # `pnpm test` is the vitest run only: all three projects (host and client
+      # against src, compat against the BUILT plugin at each baseline tag) plus
+      # the per-file coverage thresholds. Typecheck is its own step above.
+      - name: Test
+        run: DSH_REPO="$PWD/.tmp/dsh-repo" pnpm test

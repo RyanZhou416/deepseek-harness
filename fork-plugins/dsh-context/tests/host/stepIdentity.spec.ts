@@ -1,15 +1,12 @@
-// Tests for the step-boundary message identity guard (src/host/stepIdentity.ts)
-// — the issue #51 compatibility layer. The harness's load path refuses a
-// session whose log holds an unidentified `user/message`, while the runtime
-// append path never checks; the guard mints ids at the `agent/pre-step` seam
-// so a stripped message can no longer persist unidentified.
+// The step-boundary message identity guard (src/host/stepIdentity.ts) — the issue #51 compatibility
+// layer. The harness's load path refuses a session whose log holds an unidentified `user/message`,
+// while the runtime append path never checks; the guard mints ids at the `agent/pre-step` seam.
 
 import assert from 'node:assert/strict'
 import { describe, test } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import { identifiedMessages, watchStepIdentity, type PreStepDecision } from '../../src/host/stepIdentity'
 
-/** A well-formed identified message. */
 function identified(id = 'm-1'): Record<string, unknown> {
   return { id, role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: 'hi' }] }
 }
@@ -66,7 +63,6 @@ describe('identifiedMessages', () => {
 })
 
 describe('watchStepIdentity', () => {
-  /** Boot a context with the guard and dispatch one pre-step waterfall. */
   async function drive(inner: () => Promise<PreStepDecision>): Promise<PreStepDecision> {
     const ctx = new Context()
     watchStepIdentity(ctx)

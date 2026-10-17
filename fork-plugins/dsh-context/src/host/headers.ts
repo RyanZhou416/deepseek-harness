@@ -1,55 +1,29 @@
 /**
- * The `contextHeaders` session projection unit — the request-header EPOCH
- * METADATA behind the timeline's envelope figures.
+ * The `contextHeaders` session projection unit — the request-header EPOCH METADATA behind the
+ * timeline's envelope figures.
  *
- * The hot `contextTimeline` unit carries only token prices of the system
- * prompt and tool schemas; this companion unit keeps the per-epoch METADATA
- * (epoch seq/time boundaries, per-tool token prices and plugin attribution)
- * so the Context browser can pick the header epoch in force at any step and
- * size its sections immediately. The epoch CONTENT (full system prompt text,
- * full tool JSON schemas) deliberately does NOT ride the projection VALUE:
- * session projections are served whole in every `session.list` row, control
- * baseline, push frame, and change notification, so carrying content here
- * multiplied it by sessions × epochs across every channel. The client
- * fetches one epoch's `request/header` event on demand — a seq-anchored
- * history read off the epoch's `seq`, the same targeted read the browser
- * already uses for message content — and caches it per session (history is
- * immutable).
+ * The epoch CONTENT (full system prompt, full tool schemas) deliberately does NOT ride the
+ * projection value: projections are served whole in every `session.list` row, baseline, push
+ * frame, and change notification, so content here would be multiplied by sessions × epochs. The
+ * client fetches one epoch's `request/header` on demand through the session history.
  *
- * Read-compat over the persisted state (the pinned decision behind keeping
- * `stateVersion` at 1): the harness serves a cold session's projections from
- * its CACHED checkpoint rows and has no refresh channel for an idle session
- * — a version bump invalidates every row and orphans the key until the
- * session goes live again (the #37 regression). The state therefore still
- * ACCEPTS the v1 content-bearing record shape, current folds append
- * metadata-only records alongside any seeded legacy ones, and the view
- * normalizes BOTH to the metadata-only wire shape (pricing the legacy system
- * text at read time). Cached v1 rows keep working, new checkpoint writes
- * shrink as legacy epochs age out of the capped list, and the wire — the
- * part every delivery channel carries — is metadata-only from day one.
- *
- * Same projection contract as the timeline unit: pure init/apply/view,
- * `Object.is` reference stability for uninteresting events, plain-JSON
- * bounded state (epoch list capped — see HEADERS_MAX).
+ * `stateVersion` stays 1 by decision (the #37 regression): a bump invalidates every cached row
+ * and, for an idle session with no projection refresh channel, orphans the key until it goes
+ * live. The state therefore still ACCEPTS the v1 content-bearing record shape, and the view
+ * normalizes both generations to the metadata-only wire form.
  */
 
 import { z } from 'zod'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import type { ProjectionDefinition } from './compat'
-import type { ContextHeaders, HeaderRecord, HeaderTool, SystemPromptNode } from '../shared/types'
+import type { ContextHeaders, HeaderRecord, HeaderTool } from '../shared/types'
 import { estimateToolSchema } from './pricing'
-import { estimateSystemContent, estimateSystemTokens } from '../shared/estimate'
-import { replaceRangeOf } from './logShapes'
+import { estimateSystemTokens } from '../shared/estimate'
 
-/** Retention cap on header epochs (metadata only; changes are rare; 50 is generous). */
 const HEADERS_MAX = 50
-const SYSTEM_NODES_MAX = 8
 
-/**
- * One stored tool: the v1 row shape carried the producer description and the
- * raw schema; folds since the #37 slim-down append metadata-only entries.
- */
-export interface StoredHeaderTool {
+/** One stored tool: v1 rows carried the producer description and raw schema; later folds append metadata-only. */
+interface StoredHeaderTool {
   name: string
   tokens: number
   description?: string
@@ -57,8 +31,8 @@ export interface StoredHeaderTool {
   schema?: unknown
 }
 
-/** One stored epoch: v1 rows carried `system`; folds since carry `systemTokens`. */
-export interface StoredHeaderRecord {
+/** One stored epoch: v1 rows carried `system`; later folds carry `systemTokens`. */
+interface StoredHeaderRecord {
   seq: number
   time: number
   system?: string
@@ -68,14 +42,9 @@ export interface StoredHeaderRecord {
 
 export interface HeadersState {
   headers: StoredHeaderRecord[]
-  /** V3 system-prompt nodes retained until the next request-header epoch. */
-  systems?: SystemPromptNode[]
 }
 
-/**
- * The persisted-state schema: the SUPERSET of both record generations, so a
- * cached v1 row (content-bearing) seeds the fold instead of being discarded.
- */
+/** The persisted-state schemas: the superset of both record generations, so a cached v1 row (content-bearing) still seeds a fold. */
 const storedToolSchema = z.object({
   name: z.string(),
   tokens: z.number().int().nonnegative(),
@@ -94,107 +63,65 @@ const storedEpochSchema = z.object({
 
 const contextHeadersStateSchema = z.object({
   headers: z.array(storedEpochSchema),
-  systems: z.array(z.object({
-    seq: z.number(),
-    time: z.number(),
-    tokens: z.number().int().nonnegative(),
-  }).strict()).optional(),
 }).strict() as unknown as z.ZodType<HeadersState>
 
-/** The wire schema: strict metadata — the shape every delivery channel carries. */
 const headerToolWireSchema = z.object({
   name: z.string(),
   tokens: z.number().int().nonnegative(),
   plugin: z.string().optional(),
 }).strict()
 
-/** Exported for the fallback unit (fallback.ts): one wire contract, one schema. */
 export const contextHeadersSchema = z.object({
   headers: z.array(z.object({
     seq: z.number(),
     time: z.number(),
-    // Absent when the epoch logged no system prompt; the estimated tokens
-    // ride the metadata so the browser can size the section pre-fetch.
+    // Absent when the epoch logged no system prompt; sizes the section pre-fetch.
     systemTokens: z.number().int().nonnegative().optional(),
     tools: z.array(headerToolWireSchema),
   }).strict()),
 }).strict() as unknown as z.ZodType<ContextHeaders>
 
-function recordOf(event: SessionEvent, systemTokens?: number): StoredHeaderRecord | null {
+function recordOf(event: SessionEvent): StoredHeaderRecord | null {
   if (event.type !== 'request/header') return null
-  const rawHeader = (event.data as { header?: unknown }).header
+  // This unit has no try/catch, so an impossible shape must degrade to "not an epoch" instead of
+  // throwing out of the registry's drive loop.
+  const rawHeader = (event.data as { header?: unknown } | undefined)?.header
   if (rawHeader === null || rawHeader === undefined || typeof rawHeader !== 'object') return null
-  const header = rawHeader as { system?: unknown; tools?: unknown[] }
+  // A supported epoch header never carries a system prompt (`EpochHeader.system` is `never`), so
+  // epochs fold metadata-only; the stored `system` field exists for cached v1 rows.
+  const header = rawHeader as { tools?: unknown[] }
   const tools = Array.isArray(header.tools) ? header.tools : []
   const record: StoredHeaderRecord = {
     seq: event.seq,
     time: event.time,
     tools: tools.map((t): StoredHeaderTool => {
-      // The log is untrusted input: a null or primitive entry degrades to an
-      // unnamed, JSON-priced tool instead of throwing the fold.
+      // A null or primitive entry degrades to an unnamed, JSON-priced tool instead of throwing.
       const tool = (t !== null && typeof t === 'object' ? t : {}) as { name?: unknown; plugin?: unknown }
       const entry: StoredHeaderTool = {
         name: typeof tool.name === 'string' ? tool.name : '?',
         tokens: estimateToolSchema(t),
       }
-      // An attribution carried by the raw entry is kept verbatim so the
-      // view-time resolver never overrides it. No supported-baseline harness
-      // path writes one (ToolSchema has no plugin field) — the read stays
-      // defensive for foreign/newer producers. The epoch CONTENT
-      // (descriptions, schemas, system text) stays in the durable log for the
-      // client's on-demand fetch.
+      // Kept verbatim so the view-time resolver never overrides an attribution the producer
+      // wrote; no supported-baseline path writes one (ToolSchema has no plugin field).
       if (typeof tool.plugin === 'string' && tool.plugin !== '') {
         entry.plugin = tool.plugin
       }
       return entry
     }),
   }
-  if (typeof header.system === 'string' && header.system.length > 0) {
-    record.systemTokens = estimateSystemTokens(header.system)
-  } else if (systemTokens !== undefined) {
-    record.systemTokens = systemTokens
-  }
   return record
 }
 
-function effectiveSystemTokens(systems: readonly SystemPromptNode[]): number {
-  for (let index = systems.length - 1; index >= 0; index -= 1) {
-    const tokens = systems[index].tokens
-    if (tokens > 0) return tokens
-  }
-  return 0
-}
-
-function applySystemMessage(state: HeadersState, event: SessionEvent): HeadersState {
-  const data = event.data as { message?: { content?: unknown } }
-  let systems = state.systems ?? []
-  const replacement = replaceRangeOf(event.surfaceOp)
-  if (replacement !== null) {
-    systems = systems.filter(node => node.seq < replacement.start || node.seq > replacement.end)
-  }
-  systems = [...systems, {
-    seq: event.seq,
-    time: event.time,
-    tokens: estimateSystemContent(data.message?.content),
-  }]
-  if (systems.length > SYSTEM_NODES_MAX) systems = systems.slice(-SYSTEM_NODES_MAX)
-  return { ...state, systems }
-}
-
 /**
-  * The context-headers projection unit; registered alongside the timeline unit (host/index.ts); clients read it through
-  * `useProjection('contextHeaders')` and fetch an epoch's full content on demand via the session history (historyPage.ts).
-  * Contract mirror with a REQUIRED `wire` block (see compat.ts).
-  * @param resolve - best-effort tool-to-plugin attribution (see toolSources.ts); fills a missing `plugin` at view time so
-  * epochs folded without attribution still render a tag when the source is known.
+ * The context-headers projection unit, registered alongside the timeline unit (host/index.ts).
+ * @param resolve - best-effort tool-to-plugin attribution (see toolSources.ts); fills a missing
+ * `plugin` at view time so epochs folded without attribution still render a tag.
  */
 export function createContextHeadersDefinition(
   resolve?: (name: string) => string | undefined,
 ): ProjectionDefinition<'contextHeaders', HeadersState> {
-  // The view normalizes both stored generations to the metadata-only wire
-  // shape: legacy v1 epochs are stripped of their content here (the system
-  // text is priced once per read — the read side of a rarely-moving unit),
-  // current epochs pass through.
+  // The view normalizes both stored generations to the metadata-only wire shape: legacy v1
+  // epochs are stripped of their content here (the system text is priced once per read).
   const view = (state: HeadersState): ContextHeaders => ({
     headers: state.headers.map((h): HeaderRecord => {
       const record: HeaderRecord = {
@@ -219,20 +146,15 @@ export function createContextHeadersDefinition(
     wire: { viewSchema: contextHeadersSchema, view },
     init: (): HeadersState => ({ headers: [] }),
     apply: (state: HeadersState, event: SessionEvent): HeadersState => {
-      if (event.type === 'system/message') return applySystemMessage(state, event)
-      const systemTokens = state.systems === undefined ? undefined : effectiveSystemTokens(state.systems)
-      const record = recordOf(event, systemTokens)
+      const record = recordOf(event)
       if (record === null) return state
-      // The agent loop already suppresses unchanged headers; a cheap guard
-      // against the same epoch arriving twice in a row (e.g. resume replays).
+      // The agent loop suppresses unchanged headers; this guards a same-epoch replay.
       const last = state.headers.at(-1)
       if (last !== undefined && last.seq === record.seq) return state
       const headers = [...state.headers, record]
-      return { ...state, headers: headers.length > HEADERS_MAX ? headers.slice(-HEADERS_MAX) : headers }
+      return { headers: headers.length > HEADERS_MAX ? headers.slice(-HEADERS_MAX) : headers }
     },
-    // Pinned at 1 on purpose (see the read-compat note above): a bump would
-    // invalidate every cached row and orphan the key for idle cold sessions,
-    // which have no projection refresh channel until they go live.
+    // Pinned at 1 on purpose (see the module header's read-compat note).
     stateVersion: 1,
   }
   return definition

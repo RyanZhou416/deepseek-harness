@@ -1,7 +1,5 @@
-// Category parts (src/client/categories.ts): the seven-bucket parts builder,
-// the official contextBreakdown split (rounding residue on the largest
-// category, clamped), the provider-anchored reproportioning, and the Token
-// card's billed-usage split.
+// Category parts (src/client/categories.ts): the seven-bucket parts builder, the official contextBreakdown split
+// (rounding residue on the largest category, clamped) and the provider-anchored reproportioning.
 
 import assert from 'node:assert/strict'
 import { describe, test } from 'vitest'
