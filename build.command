@@ -13,5 +13,5 @@ fi
 . "$DSH_MACOS_RUNTIME_HELPER"
 dsh_prepare_macos_toolchain "$SCRIPT_DIR"
 
-pnpm install
+pnpm_config_auto_install_peers=false pnpm install
 pnpm run build

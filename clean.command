@@ -15,7 +15,7 @@ dsh_prepare_macos_toolchain "$SCRIPT_DIR"
 
 if [ ! -r "$SCRIPT_DIR/node_modules/tsx/package.json" ]; then
   printf '%s\n' 'Project dependencies are missing. Installing them before cleanup...'
-  pnpm install
+  pnpm_config_auto_install_peers=false pnpm install
 fi
 
 pnpm run clean

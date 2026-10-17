@@ -26,7 +26,7 @@ set "DSH_STEP=installing the verified local workspace links"
 set "pnpm_config_trust_lockfile=true"
 set "COREPACK_ENABLE_NETWORK=0"
 set "pnpm_config_verify_deps_before_run=false"
-node "%DSH_LOCAL_PNPM%" install --offline --frozen-lockfile --ignore-scripts --child-concurrency=2 --optimistic-repeat-install=false
+node "%DSH_LOCAL_PNPM%" install --offline --frozen-lockfile --ignore-scripts --child-concurrency=2 --optimistic-repeat-install=false --config.auto-install-peers=false
 if errorlevel 1 goto :failed
 set "DSH_STEP=building the project"
 node "%DSH_LOCAL_PNPM%" run build

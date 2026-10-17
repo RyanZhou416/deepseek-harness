@@ -26,6 +26,15 @@ describe('Windows fork launchers', () => {
     expect(source).not.toMatch(/\b(?:del|erase|rd|rmdir)\b/i)
     expect(source).not.toContain('DSH_HOME')
   })
+  it('pins the lockfile peer setting for every dependency install', () => {
+    const helper = readFileSync(pnpmLauncher, 'utf8')
+    const build = readFileSync(buildLauncher, 'utf8')
+    // The committed lockfile records autoInstallPeers: false; a plain install
+    // with pnpm's default rewrites peer resolutions across the whole lockfile.
+    expect(helper).toContain('pnpm_config_auto_install_peers=false')
+    expect(build).toContain('--config.auto-install-peers=false')
+  })
+
 
   it('bounds pnpm install workers in both Windows entry points', () => {
     for (const launcher of [buildLauncher, cleanLauncher]) {

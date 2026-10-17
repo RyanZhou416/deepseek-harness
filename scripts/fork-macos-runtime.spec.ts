@@ -408,4 +408,11 @@ printf 'prefix=%s\\n' "$DSH_COREPACK_HOME"
       'corepack@0.34.5',
     ])
   })
+  it('pins the lockfile peer setting in the build and clean launchers', () => {
+    for (const name of ['build.command', 'clean.command']) {
+      const source = readFileSync(join(repositoryRoot, name), 'utf8')
+      expect(source).toContain('pnpm_config_auto_install_peers=false pnpm install')
+    }
+  })
+
 })

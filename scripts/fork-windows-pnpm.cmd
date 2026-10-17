@@ -7,6 +7,7 @@ if not defined DSH_PNPM_VERSION exit /b 1
 
 if not defined npm_config_registry set "npm_config_registry=https://registry.npmmirror.com"
 if not defined npm_config_cache set "npm_config_cache=%TEMP%\dsh-npm-cache"
+if not defined pnpm_config_auto_install_peers set "pnpm_config_auto_install_peers=false"
 set "DSH_PNPM_HOME=%TEMP%\dsh-pnpm-%DSH_PNPM_VERSION%"
 set "DSH_PNPM_ENTRY=%DSH_PNPM_HOME%\node_modules\pnpm\bin\pnpm.mjs"
 set "DSH_PNPM_SHIM=%DSH_PNPM_HOME%\node_modules\.bin\pnpm.cmd"
