@@ -16,7 +16,7 @@ import { installModelSelection } from '@deepseek-ai/dsh-agent';
 import { foldSubagentDescriptor } from '@deepseek-ai/dsh-subagent';
 import { createUserMessage, LlmError, ReasoningEffortId } from '@deepseek-ai/dsh-llm';
 import { join } from 'node:path';
-import { guardSubagentDelivery, installContinuableMemberSetup, memberToolFilter, queueMemberPrompt, restrictableToolNames, startMemberWithLenientFilter, steerMemberPrompt, sessionOwnEvents } from "./harness-compat.js";
+import { guardSubagentCreation, startMember, usesManagedActivations, guardSubagentDelivery, installContinuableMemberSetup, memberToolFilter, queueMemberPrompt, restrictableToolNames, startMemberWithLenientFilter, steerMemberPrompt, sessionOwnEvents } from "./harness-compat.js";
 import { markMailboxDelivered, appendMailbox, CAPTAIN_KEY, createMessage, readRetiredMemberIds, readTeamSync, readTeam, releaseMailboxDelivery, withTeamLock, writeTeam } from "./state.js";
 import { mailboxPrompt } from "./mailbox.js";
 import { nearestLiveLead } from "./lineage.js";
@@ -478,6 +478,7 @@ function describeMemberRouteFailure(provider, model, error) {
  */
 export function installMemberSelectionRuntime(ctx, stateDir, onFailureSettled) {
     const pending = new Map();
+    const pendingSetup = new Map();
     installContinuableMemberSetup(ctx, (childCtx, child) => {
         const descriptor = foldSubagentDescriptor(sessionOwnEvents(child.session));
         if (descriptor?.mode !== 'continuable' || !descriptor.label.startsWith(MEMBER_LABEL_PREFIX)) {
@@ -510,11 +511,47 @@ export function installMemberSelectionRuntime(ctx, stateDir, onFailureSettled) {
                 return { kind: 'reject' };
             return next();
         });
+        // New activations no longer persist persona/toolFilter in host descriptors.
+        // Install them before the first request, and restore the exact saved values
+        // after a cold resume. Historical descriptors remain owned by Harness.
+        const savedTeam = pending.has(key) ? undefined : readTeamSync(stateRoot, teamId);
+        const savedMember = savedTeam?.captainSessionId === parentSessionId
+            ? savedTeam.members.find(member => member.id === child.id && member.name === memberName)
+            : undefined;
+        const setup = pendingSetup.get(key) ?? savedMember?.runtimeSetup;
+        if (usesManagedActivations(ctx.subagents) && savedMember !== undefined
+            && setup === undefined && descriptor.toolFilter === undefined) {
+            disposeAdmission();
+            throw new Error('agent-teams: saved member runtime setup is missing; refusing an unrestricted resume');
+        }
+        let disposeSetup = () => undefined;
+        if (usesManagedActivations(ctx.subagents) && setup !== undefined) {
+            try {
+                const stopFilter = childCtx.tools.restrict(setup.toolFilter);
+                try {
+                    const stopPersona = childCtx.systemPrompt.section({
+                        name: 'deployment:persona-prefix',
+                        order: childCtx.systemPrompt.getSectionOrder('DEPLOYMENT_PERSONA_PREFIX'),
+                        text: setup.persona,
+                    });
+                    disposeSetup = () => { stopPersona(); stopFilter(); };
+                }
+                catch (error) {
+                    stopFilter();
+                    throw error;
+                }
+            }
+            catch (error) {
+                disposeAdmission();
+                throw error;
+            }
+        }
+        const cleanupAdmission = () => { disposeSetup(); disposeAdmission(); };
         let selection = pending.get(key);
         if (selection === undefined) {
             const team = readTeamSync(stateRoot, teamId);
             if (team?.captainSessionId !== parentSessionId)
-                return disposeAdmission;
+                return cleanupAdmission;
             const durableMember = team.members.find(member => member.name === memberName);
             selection = selectionFromMember(durableMember);
             if (selection !== undefined && (descriptor.agentProvider !== durableMember?.provider || descriptor.agentModel !== durableMember?.model)) {
@@ -571,7 +608,7 @@ export function installMemberSelectionRuntime(ctx, stateDir, onFailureSettled) {
         });
         // Legacy teams still need failure reporting even without a saved route.
         if (selection === undefined)
-            return () => { disposeFailure(); disposeAdmission(); };
+            return () => { disposeFailure(); cleanupAdmission(); };
         const selectionRef = { current: modelSelection(selection), assembled: undefined };
         const disposeSelection = installModelSelection(childCtx, selectionRef);
         const fallback = selection.fallback;
@@ -601,7 +638,7 @@ export function installMemberSelectionRuntime(ctx, stateDir, onFailureSettled) {
             disposeFallback();
             disposeSelection();
             disposeFailure();
-            disposeAdmission();
+            cleanupAdmission();
         };
     });
     return {
@@ -611,17 +648,20 @@ export function installMemberSelectionRuntime(ctx, stateDir, onFailureSettled) {
             return parent !== undefined && descriptor?.mode === 'continuable'
                 && pending.has(pendingSelectionKey(parent, descriptor.label));
         },
-        async withPending(parentSessionId, label, selection, operation) {
+        async withPending(parentSessionId, label, selection, operation, setup) {
             const key = pendingSelectionKey(parentSessionId, label);
             if (pending.has(key)) {
                 throw new Error(`member model selection is already pending for "${label}"`);
             }
             pending.set(key, selection);
+            if (setup !== undefined)
+                pendingSetup.set(key, setup);
             try {
                 return await operation();
             }
             finally {
                 pending.delete(key);
+                pendingSetup.delete(key);
             }
         },
     };
@@ -729,10 +769,11 @@ export async function spawnMember(ctx, config, selections, llmSelection, captain
     if (provider.prepareContinuable === undefined) {
         throw new Error(`agent-teams: provider "${config.provider}" does not support continuable members`);
     }
-    if (!provider.capabilities.persona) {
+    const legacyCapabilities = provider.capabilities;
+    if (!usesManagedActivations(ctx.subagents) && !legacyCapabilities.persona) {
         throw new Error(`agent-teams: provider "${config.provider}" cannot apply a member persona`);
     }
-    if (!provider.capabilities.toolFilter) {
+    if (!usesManagedActivations(ctx.subagents) && !legacyCapabilities.toolFilter) {
         throw new Error(`agent-teams: provider "${config.provider}" cannot restrict captain-only tools for members`);
     }
     const label = `${MEMBER_LABEL_PREFIX}${team.id}:${member.name}`;
@@ -740,11 +781,12 @@ export async function spawnMember(ctx, config, selections, llmSelection, captain
     // captain-only deny list plus the depth entries this host registers.
     const requestedFilter = resolvedFilter ?? memberToolFilter(config.maxDepth, restrictableToolNames(captain));
     // The lenient retry may drop names this host reports unknown; keep the exact
-    // filter the host accepted so team.json and the child descriptor agree.
+    // filter the host accepted for the durable member setup.
     let acceptedFilter = requestedFilter;
-    const start = await selections.withPending(captain.id, label, llmSelection, () => (startMemberWithLenientFilter(toolFilter => {
+    const start = await startMemberWithLenientFilter(toolFilter => {
         acceptedFilter = toolFilter;
-        return ctx.subagents.startContinuable({
+        const setup = { persona: memberPersona(team, member, stateDir, config.executionPrompt), toolFilter };
+        return selections.withPending(captain.id, label, llmSelection, () => startMember(ctx.subagents, {
             provider: config.provider,
             label,
             request: {
@@ -769,12 +811,15 @@ export async function spawnMember(ctx, config, selections, llmSelection, captain
                 // the configured member-relative descendant budget instead.
             },
             signal,
-        });
-    }, requestedFilter, relaxableDeny)));
+        }), setup);
+    }, requestedFilter, relaxableDeny);
     member.id = start.childId;
+    if (usesManagedActivations(ctx.subagents)) {
+        member.runtimeSetup = { persona: memberPersona(team, member, stateDir, config.executionPrompt), toolFilter: acceptedFilter };
+    }
     // Only a policy member carries a persisted filter snapshot; a member without
-    // a policy keeps the previous record shape and behavior. The descriptor, not
-    // this snapshot, is what reapplies the filter on a cold resume.
+    // a policy keeps its public record shape. Legacy descriptors or runtimeSetup
+    // restore the filter on cold resume, depending on the host generation.
     if (member.toolFilter !== undefined)
         member.toolFilter = { ...acceptedFilter };
 }
@@ -844,7 +889,6 @@ export function installRetiredMemberGuard(ctx, stateDir) {
 }
 /** Bound all descendant creation, including renamed tools and code-runtime calls. */
 export function installMemberDelegationGuard(ctx, stateDir, maxDepth) {
-    const runtime = ctx.subagents;
     let active = true;
     const check = (parent) => {
         if (!active)
@@ -878,27 +922,8 @@ export function installMemberDelegationGuard(ctx, stateDir, maxDepth) {
             depth++;
         }
     };
-    ctx.effect(() => {
-        const start = runtime.start;
-        const continuable = runtime.startContinuable;
-        const startDescriptor = Object.getOwnPropertyDescriptor(runtime, 'start');
-        const continuableDescriptor = Object.getOwnPropertyDescriptor(runtime, 'startContinuable');
-        const guardedStart = async (name, request) => { check(request.parent); return start.call(runtime, name, request); };
-        const guardedContinuable = async (spec) => { check(spec.request.parent); return continuable.call(runtime, spec); };
-        runtime.start = guardedStart;
-        runtime.startContinuable = guardedContinuable;
-        return () => {
-            active = false;
-            for (const [key, fn, descriptor] of [['start', guardedStart, startDescriptor], ['startContinuable', guardedContinuable, continuableDescriptor]]) {
-                if (Object.getOwnPropertyDescriptor(runtime, key)?.value !== fn)
-                    continue;
-                if (descriptor === undefined)
-                    Reflect.deleteProperty(runtime, key);
-                else
-                    Object.defineProperty(runtime, key, descriptor);
-            }
-        };
-    }, 'agent-teams: member delegation budget');
+    guardSubagentCreation(ctx, check);
+    ctx.effect(() => () => { active = false; }, 'agent-teams: delegation guard lifetime');
 }
 /**
  * Snapshot the real driver activity for durable member ids.

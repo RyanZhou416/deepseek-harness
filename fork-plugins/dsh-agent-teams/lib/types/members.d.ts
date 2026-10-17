@@ -108,7 +108,7 @@ export interface MemberSelectionRuntime {
     /** Trusted fresh-child admission, before the durable member id is written. */
     isPendingMember(agent: Agent): boolean;
     /** Make one selection visible while Harness materializes the fresh child. */
-    withPending<T>(parentSessionId: string, label: string, selection: MemberLlmSelection, operation: () => Promise<T>): Promise<T>;
+    withPending<T>(parentSessionId: string, label: string, selection: MemberLlmSelection, operation: () => Promise<T>, setup?: TeamMember['runtimeSetup']): Promise<T>;
 }
 /**
  * Validate a resolved roster against every provider catalog before any child

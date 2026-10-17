@@ -782,6 +782,9 @@ function isTeamMember(value: unknown): value is TeamMember {
     // A member without a policy keeps the legacy shape: both fields stay absent.
     && isOptionalNonBlankString(value['toolPolicy'])
     && (value['toolFilter'] === undefined || isMemberToolFilter(value['toolFilter']))
+    && (value['runtimeSetup'] === undefined || (isRecord(value['runtimeSetup'])
+      && typeof value['runtimeSetup']['persona'] === 'string'
+      && isMemberToolFilter(value['runtimeSetup']['toolFilter'])))
     && isFiniteNumber(value['joinedAt'])
     && (value['status'] === 'idle' || value['status'] === 'working' || value['status'] === 'removed')
 }

@@ -1,6 +1,6 @@
 {
   "name": "@nanmicoder/dsh-agent-teams",
-  "version": "0.1.23-dsh021rc2.1",
+  "version": "0.1.24-dsh021rc2.1",
   "description": "AgentTeams for DeepSeek Harness: multi-agent team collaboration (captain, members, tasks with dependencies, messaging) driven by natural language, with a tree monitor in the web GUI",
   "type": "module",
   "main": "lib/index.js",
@@ -34,7 +34,7 @@
   ],
   "license": "MIT",
   "author": {
-    "name": "\u7a0b\u5e8f\u5458\u963f\u6c5f (Relakkes)",
+    "name": "程序员阿江 (Relakkes)",
     "email": "relakkes@gmail.com",
     "url": "https://github.com/NanmiCoder"
   },

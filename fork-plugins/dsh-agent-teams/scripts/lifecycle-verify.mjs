@@ -161,7 +161,7 @@ const ctx = {
     listeners.set(name, current)
     return () => listeners.set(name, current.filter(candidate => candidate !== listener))
   },
-  agents: {
+  agents: { list: () => [],
     get(id) {
       return liveAgents.get(id)
     },

@@ -8,11 +8,30 @@
  * sendMessage instead steers a running Agent and must never carry team jobs.
  */
 import type { Context } from '@deepseek-ai/cordis';
-import type { Agent } from '@deepseek-ai/dsh-agent';
+import type { Agent, AgentOptions } from '@deepseek-ai/dsh-agent';
 import type { ContentBlock, MessageId, MessageSource } from '@deepseek-ai/dsh-llm';
 import type { Session, SessionEvent, SessionId } from '@deepseek-ai/dsh-session';
 import { type MemberToolFilter } from './tool-policies.ts';
 type Setup = (childCtx: Context, child: Agent) => () => void;
+/** Version-independent creation contract; legacy-only options stay at this seam. */
+export interface MemberStartSpec {
+    provider: string;
+    label: string;
+    request: {
+        parent: Agent;
+        prompt: ContentBlock[];
+        agentOptions?: AgentOptions;
+        persona?: string;
+        toolFilter?: MemberToolFilter;
+    };
+    signal: AbortSignal;
+}
+export declare function usesManagedActivations(runtime: Context['subagents']): boolean;
+export declare function startMember(runtime: Context['subagents'], spec: MemberStartSpec): Promise<{
+    childId: SessionId;
+}>;
+/** Wrap every available creation API, restoring only this plugin's own methods. */
+export declare function guardSubagentCreation(ctx: Context, check: (parent: Agent) => void): void;
 declare module '@deepseek-ai/dsh-llm' {
     interface MessageSourceMap {
         'agent-teams': {
@@ -121,4 +140,6 @@ export declare function memberToolFilter(maxDepth: number | undefined, knownTool
  * @returns the started member.
  */
 export declare function startMemberWithLenientFilter<T>(start: (filter: MemberToolFilter) => Promise<T>, filter: MemberToolFilter, relaxableDeny?: readonly string[]): Promise<T>;
+/** Targeted recursive cancellation renamed with the unified activation manager. */
+export declare function drainMemberChildren(runtime: Context['subagents'], parent: Agent, ids: readonly SessionId[]): Promise<void>;
 export {};
