@@ -477,7 +477,7 @@ Gateway 每个 socket 只保留一枚待确认 Ping。未完成写入时，`buff
 
 **Preservation rule.** 这一代的 profile 不装 fork 插件的 tgz；升级或换机时重装应使用 `dsh plugin --profile web add <fork-plugins/<name>>`，不要回退到 `fork-plugins/releases/` 下的旧制品（那是 0.1.7 一代，会被 0.2.1 的兼容性检查拒绝）。插件源码改动在 Host 重启后生效，不需要重新打包。
 
-旧的 0.1.7 一代 tgz 与 sha256 已移到 `fork-plugins/releases/archive/`（含说明 `README.txt`），只作历史；它们不会被任何 profile 安装，也不得用 `pnpm add` 回装。
+旧的 0.1.7 一代插件 tgz 与 sha256 已移到 `fork-plugins/releases/archive/`（含说明 `README.txt`），只作历史；它们不会被任何 profile 安装，也不得用 `pnpm add` 回装。例外是 `@tormentalabs/claude-code-wire-compat-0.7.2-dsh14.tgz`：它是 subscriptions 的 `file:` 依赖，必须留在 `fork-plugins/releases/` 根目录，否则插件重装解析失败。
 
 **Focused verification.** 落地后确认：`node --import tsx/esm apps/cli/src/bin.ts --version` 输出 `0.2.1-rc.2`；`restart-*.log` 结尾 `RESTART OK` 且 `no plugin compatibility warnings`；带 token 的 `GET /` 返回 200；页面模块表含 `dsh-agent-teams`、`dsh-context` 与 `subscriptions` 条目，`aether-shell` 为纯 Host 插件因此无客户端条目。隔离冒烟可用独立 `DSH_HOME` 与随机端口复现（本次 3083）。
 
