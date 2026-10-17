@@ -560,6 +560,14 @@ Alpha.2 Queue Dock 通过通用 `session.updateQueue` 对 live Session 的精确
 
 Fork 不再维护独立 subagent Queue Remote 或错误码。后续上游合并必须保留 `session.updateQueue` 的 occurrence identity、通用 Session/continuable-child 寻址、发送中禁用状态、单条与批量 Steer，以及 durable `agent/inbox/spliced` 记录。
 
+#### Composer settling visibility
+
+打开中的空白会话在 history replay 期间以 `settling` phase 隐藏 composer 座位（`visibility: hidden`，避免 hero/docked 布局闪动）。上游该隐藏没有时间上限：慢或卡住的开场会让输入栏一直不可见，切换会话再回来才恢复（上游讨论 #1614 的第二处缺陷；同讨论的另外两处是崩溃面不可见与 undo 合并窗口，尚未移植）。本 fork 加上 3000ms 上限：超过后按 docked 姿态渲染，`openState` 落定后 phase 自动纠正。**Preservation rule.** 上游再次改写 settling/phase 计算时保留这个上限，不要让 `visibility: hidden` 无界。**Focused verification.** `packages/client/ui-conversation/tests/skeleton.client.spec.tsx` 的 "the hide is capped" 用 fake timers 断言 3000ms 后 `data-phase` 从 `settling` 变为 `active`，`openState: 'open'` 后回到 `hero`；该包 790 项客户端测试通过。
+
+#### Composer inject during client-module replacement
+
+客户端模块热替换（重建 `lib/client.js` 后浏览器收到新模块）时，旧模块的 `conversation` service 会先于它的 slot 座位卸载而被撤销。`conversation.composer.bar` 的 inject 原先调用 `concreteConversation(ctx)` 并在服务缺失时抛错，`SlotErrorBoundary` 把该座位换成空的 crash face，输入栏消失（上游讨论 #5119）。修复：inject 先取 `ctx.get('conversation')`，缺失时返回与「无会话」相同的 inert bar；重载后的模块挂载全新 entry 并缓存真实 props，所以这只是一次渲染窗口。**Preservation rule.** 任何在 inject 里按 ctx 查找本插件服务的代码都必须容忍短暂缺失。**Focused verification.** `packages/client/ui-conversation/tests` 790 项通过；客户端 typecheck 5/5；重建 `lib/client.js` 后页面模块 rev 变化即复现该窗口，控制台不再出现 `slot entry crashed in 'conversation.composer.bar'`。
+
 ### Released V3 error-turn migration
 
 `session-format-v3-to-v4` 只在 V3 step 已记录 `tool/call`、没有追加结果且同一 turn 随后以 `reason.kind: 'error'` 结束时，于 `step/end` 前插入 `TOOL_OUTCOME_UNKNOWN` 的 tool 角色错误结果，引用已记录的启动事件；它不执行工具，也不把已开始调用伪称为 `TOOL_NOT_STARTED`。正常完成轮次、后续新 step 和未关闭尾部继续拒绝，原始 V3 代际保持不变。上游合并须保留这一限定修复与原生 V4 的未结算调用拒绝规则。聚焦验证由 `packages/session/session-format-v3-to-v4/tests/error-turn-tools.spec.ts` 和 `packages/session/session-persistence-jsonl/tests/v3-error-tool-migration.spec.ts` 覆盖；一份 7,011 事件的真实 V3 日志经实际 JSONL 后端只读恢复为 7,012 个 V4 事件，源 SHA-256 未变，未发布后继文件。

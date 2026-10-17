@@ -1,9 +1,13 @@
+import { useEffect, useState } from 'react'
 import type { ConversationSlotProps } from '../contract/slots.ts'
 import { conversationPhase } from '../contract/snapshot.ts'
 import { ConversationWidthControls } from './ConversationWidthControls.tsx'
 import css from './ConversationRoot.module.css'
 
 const CONTENT_SLOTS = { widthControls: ConversationWidthControls }
+
+/** Upper bound on the settling hide, after which the docked posture renders and self-corrects. */
+const SETTLING_HIDE_CAP_MS = 3000
 
 /**
  * Render the existing main Conversation frame around the extracted content.
@@ -38,9 +42,18 @@ export function ConversationMainPanel(props: ConversationSlotProps) {
     (shellPhase === 'blank' && openState === 'loading' && summaryBlank !== true)
     || parentAvailabilityPending
   )
+  // A slow or stalled open must not leave the composer invisible forever: past
+  // the cap the seat renders docked, and the phase self-corrects when the open lands.
+  const [settlingExpired, setSettlingExpired] = useState(false)
+  useEffect(() => {
+    setSettlingExpired(false)
+    if (!settling) return undefined
+    const timer = setTimeout(() => { setSettlingExpired(true) }, SETTLING_HIDE_CAP_MS)
+    return () => { clearTimeout(timer) }
+  }, [settling, sessionId])
   const hero = sessionId === undefined
     || (shellPhase === 'blank' && (openState === 'open' || summaryBlank === true))
-  const phase = settling ? 'settling' : hero ? 'hero' : 'active'
+  const phase = settling && !settlingExpired ? 'settling' : hero ? 'hero' : 'active'
 
   return (
     <div className={css.root} data-phase={phase}>

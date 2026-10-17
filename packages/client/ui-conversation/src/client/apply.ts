@@ -460,26 +460,30 @@ export function apply(ctx: Context, config: Config = Config({})): void {
       'conversation.composer.dock': { kind: 'list', scope: 'session' },
     },
     inject: (sessionId: SessionId | undefined): ComposerBarInjected => {
-      if (sessionId === undefined) {
-        return {
-          keyboard: undefined,
-          addFiles: undefined,
-          removeAttachment: undefined,
-          resolveDraftAttachments: undefined,
-          retryFileUpload: undefined,
-          toggleCommandMenu: undefined,
-          stop: undefined,
-          hooks: {
-            stopShortcut,
-            busyEnter: submissionPolicy.busyEnter,
-            fileUploads: ABSENT_FILE_UPLOADS,
-            notices: ABSENT_NOTICES,
-            lexicon: ABSENT_LEXICON,
-            menuLauncher: ABSENT_MENU_LAUNCHER,
-          },
-        }
-      }
-      const conversation = concreteConversation(ctx)
+      const inertBar = (): ComposerBarInjected => ({
+        keyboard: undefined,
+        addFiles: undefined,
+        removeAttachment: undefined,
+        resolveDraftAttachments: undefined,
+        retryFileUpload: undefined,
+        toggleCommandMenu: undefined,
+        stop: undefined,
+        hooks: {
+          stopShortcut,
+          busyEnter: submissionPolicy.busyEnter,
+          fileUploads: ABSENT_FILE_UPLOADS,
+          notices: ABSENT_NOTICES,
+          lexicon: ABSENT_LEXICON,
+          menuLauncher: ABSENT_MENU_LAUNCHER,
+        },
+      })
+      if (sessionId === undefined) return inertBar()
+      // Client-module replacement can dispose this plugin's service before its
+      // seats unmount; throwing here abdicates the composer entry and leaves the
+      // input bar gone (upstream issue #5119). Render the inert bar for that
+      // window; the reloaded module mounts a fresh entry with the real props.
+      const conversation = ctx.get('conversation') as ConversationController | undefined
+      if (conversation === undefined) return inertBar()
       const shell = inputHub.shell(sessionId)
       const inputTriggers = inputHub.inputTriggers(sessionId)
       const bridge = hostPathBridge()
