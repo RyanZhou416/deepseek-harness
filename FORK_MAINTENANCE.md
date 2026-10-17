@@ -469,6 +469,16 @@ Gateway 每个 socket 只保留一枚待确认 Ping。未完成写入时，`buff
 
 `apps/web/stress-tests/workload.ts` 是多 Agent 压测共享的合成模型，其工具比例按真实部署的只读聚合计数校准；`agent-lifetime.stress.ts` 检查已销毁 Agent/Session 能否回收，`multi-agent-typing.stress.ts` 在数十至上百个运行 Agent 下检查输入框丢字、插入位置和只读窗口，`session-switch.stress.ts` 测量空闲与数十个运行 Agent 下经侧栏切换到冷、热长 Session 的显示耗时和 Host 事件循环阻塞。lifetime 的卸载等待窗口覆盖 `jobs` 长任务，因为有运行中后台任务的 Agent 按设计不卸载；switch 按真实日志约每帧两个事件写入种子，并先让目标经历一次驱逐以生成投影检查点。三者都使用测试私有 DSH_HOME 和随机端口，以 `pnpm exec vitest run --config vitest.web-stress.config.ts <file>` 运行，`DSH_STRESS_*` 与 `DSH_LIFETIME_*` 旋钮以各文件头为准，其中 `DSH_LIFETIME_LEAK_HANDLES=1` 模拟比请求活得更久的传输句柄。lifetime 发现残留时在 `tmp/agent-lifetime/` 写出堆快照，并用 `fork-runtime/diagnostics/retainers.mjs` 输出最短强引用链；typing 的 `stall` 与 `reconnect` 模式在页面内包装 WebSocket，以模拟 Host 卡顿后的积压与断线，并让积压帧逐条作为独立任务派发。Playwright 的 WebSocket 路由与测试 Host 同进程，会拖慢 Host 并制造假超时，因此不得用它替代页面内注入。`launchWebScaffold()` 只在 replay 对比时记录 `session/created`，以免 scaffold 本身成为留存者。快照可能包含路径，留在本机，禁止提交。
 
+### Snapshot corpus ownership
+
+仓库级回放语料（`snapshots/**`，`pnpm run test:snapshot`）只在它声明的平台（macOS/Linux）上充当门禁。Windows 上工具面本来就不同 —— `bash-sandbox` 按 `process.platform === 'win32'` 关闭、`sandbox-windows-acl` 只在 Windows 注册 —— 所以 request header、工具 schema 和整条 transcript 的逐字节比对必然漂移。禁止在 Windows 上把语料"修绿"：提交 Windows 形状的期望值会让 Linux CI 全部变红。
+
+2026-10-18 在本机跑全量得到 137 失败 / 45 通过 / 16 跳过（198 用例）；抽查的 `request header` 与 `session 0` 差异全部是上面两类平台项。唯一与合并相关、且与平台无关的遗留是 fork 自录场景 `background-job-wait-wake`：它的会话文件仍是 `session.v2.jsonl`，而当前只保留 v3 基线与 v4 当前格式。打包后的快照文件不是持久化层能直接读取的原始 generation log，官方 `migrate:sessions-to-v4` 会报 `corrupt_log`；正规修复是用同一个场景重新录制，这需要 `DEEPSEEK_API_KEY`。
+
+**Preservation rule.** 语料结论以 Linux 运行为准；Windows 差异按平台解释，不修改期望值、不去改 fixture 迁就 Windows。该场景在重新录制前保持现状。
+
+**Focused verification.** 需要真实结论时在 Linux 上跑 `pnpm run test:snapshot`；重新录制用 `pnpm run test:snapshot:record -t background-job-wait-wake`（会调用真实模型）。fork 自己的插件套件（agent-teams / context / subscriptions）与仓库 build、typecheck、文档门禁不受此影响，仍按各自小节验证。
+
 ### Subagent catalog ordering
 
 The conversation-header subagent menu sorts each sibling level by creation time descending, keeping catalog order for equal timestamps. Preserve the original projection arrays and stable row positions during activity updates; `ui-subagent/tests/conversation-ui.client.spec.tsx` covers newest-first display without mutating catalog membership.
