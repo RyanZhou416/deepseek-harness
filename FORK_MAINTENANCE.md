@@ -30,7 +30,7 @@
 | Official remote | `upstream = https://github.com/deepseek-ai/deepseek-harness.git` | 只用于 fetch 和合并官方 release tag |
 | Published fork | `master` after local integration | `dsh-v0.2.1-rc.2` 官方结构、32 GiB Windows Host、长任务保护与 fork-maintained plugin 基线；精确 SHA 用 Git 查询 |
 | Current official target | `dsh-v0.2.1-rc.2` on 2026-10-17 | 精确不可变 tag；不要改合并已越过该 tag 的 rolling `upstream/master` |
-| AgentTeams subtree | `fork-plugins/dsh-agent-teams` | 上游 `v0.1.20` + 本 fork RC.1 私有适配与有界未读邮箱缓存 |
+| AgentTeams subtree | `fork-plugins/dsh-agent-teams` | 上游 `v0.1.24`（main，含 0.2.1 适配）+ 本 fork `0.1.24-dsh021rc2.1` 私有发布通道与有界未读邮箱缓存 |
 | Context subtree | `fork-plugins/dsh-context` | 上游 `v0.55.0` + 本 fork 字段级投影、V4 header 计价和关闭 modal 性能优化 |
 | Subscriptions subtree | `fork-plugins/dsh-plugin-subscriptions` | 上游 `v0.9.4` + 本 fork RC.1/V4 私有适配与 pinned Claude Code 2.1.288 wire；凭据与 Session 格式不变 |
 
@@ -489,6 +489,13 @@ Focused verification: `packages/subagent/tool-subagent/tests/tool-subagent.spec.
 
 AgentTeams 成员是用户指定的例外；核心 `startAgentTeamsMember` symbol 与插件 `harness-compat.startMember` 配对，保留 Team 成员自己的模型选择，普通后代仍走受覆盖的入口。不得改成按标签前缀豁免、model-visible 跳过参数或仅前端默认值。保留现有 `start/startContinuable` 调用路径上的插件生命周期/委派限制。合并上游时验证 `subagent/tests/{service,child-agent,continuation}.spec.ts`、`tool-subagent/tests/model-selection.spec.ts`、设置页 controller/component tests 与 `apps/web/tests/plugin-config.e2e.ts` 的 override 保存快照；同时保留 AgentTeams 内部适配器与对应私有包。
 
+### AgentTeams 在 0.2.1 上的成员创建
+
+官方 0.2.1 删除了 delegation 请求中的 `persona` 与 `toolFilter`（`tool-subagent` 会对这两个配置直接报错）。上游 v0.1.24 的 `harness-compat.startMember` 因此按主机分层：存在 `startActivation` 时改传 `delivery: 'parent'` 并在请求中丢弃这两个字段，同时吞掉 `activation.result` 的失败以保留结算兜底；只支持 `startContinuable` 的旧主机仍走原路径。fork 不在核心层回补这两个字段。
+
+**Preservation rule.** 成员级 persona 与工具限制只在旧主机上生效；0.2.1 起成员工具集由所选 Agent Preset 的插件组合决定，不再有按成员的 deny 列表。不要为此在 `packages/subagent` 里加 fork 分支，也不要在预设之外重建动态 persona。
+
+**Focused verification.** 在 `fork-plugins/dsh-agent-teams` 运行 `pnpm typecheck`、`pnpm build` 与 `pnpm verify`（覆盖 fallback/member-failure TDD、issue regressions、quality gates、lifecycle、stress、compatibility、doctor、skill、harness contract、capabilities、release metadata）。`release-metadata.test.mjs` 需同时覆盖 `dsh021rc2` 私有通道与 `0.2.1-rc.2` 推荐宿主。
 ### Subagent and AgentTeams responsiveness
 
 #### Continuable child steer
@@ -497,7 +504,7 @@ AgentTeams 成员是用户指定的例外；核心 `startAgentTeamsMember` symbo
 
 #### External AgentTeams mailbox delivery
 
-外置 AgentTeams v0.1.20 拥有 live member 的 next-step delivery、inactive member 的 Queue、稳定 message id、accept/ack、target-local serialization、crash recovery、cold replay 与退休成员拒绝。RC.1 的 Host 协调消息使用专属 `agent-teams-host` source；Fork 不修改 DSH 官方实验性 Team mailbox。
+外置 AgentTeams v0.1.24 拥有 live member 的 next-step delivery、inactive member 的 Queue、稳定 message id、accept/ack、target-local serialization、crash recovery、cold replay 与退休成员拒绝。RC.1 的 Host 协调消息使用专属 `agent-teams-host` source；Fork 不修改 DSH 官方实验性 Team mailbox。
 
 Fork 仍让 inactive Captain 通过 Session Controller cold resume，并在 awaited `agent/created` 阶段按 durable mailbox 顺序重投；成功逐条 ack，失败释放当前记录和未处理后缀。未读 projection 使用 256-entry / 8 MiB LRU，磁盘 JSONL 格式不变。
 
