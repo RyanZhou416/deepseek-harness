@@ -24,7 +24,7 @@ import {
   SessionPersistence, SessionPersistenceRevision, SessionFormatUnsupportedError,
   SessionPersistenceCorruptionError,
   SessionAlreadyExistsError, SessionPersistenceNotFoundError,
-  assertStoredId, materializeCreateHeader, sessionFormatVersionRefusal, validateStoredEvents,
+  assertStoredId, materializeCreateHeader, sessionFormatVersionRefusal, adoptStoredEvent, assertStoredEventTypes,
   type SessionAccess, type SessionHandle,
   type SessionHandleReadResult,
   type SessionLocation, type SessionPersistenceCreateOptions,
@@ -65,6 +65,7 @@ export type { JsonlCompression } from './format.ts'
  * log, so the memo only needs the sessions in flight between those steps.
  */
 const COLD_LOG_MEMO_MAX_ENTRIES = 2
+const DEFAULT_COLD_LOG_MEMO_RETENTION_MS = 10_000
 
 const DEFAULT_COMPRESSION: JsonlCompression = 'zstd'
 /**
@@ -72,7 +73,7 @@ const DEFAULT_COMPRESSION: JsonlCompression = 'zstd'
  * frame-boundary event-loop yields against `setImmediate` overhead. One frame
  * remains an indivisible synchronous decode.
  */
-const ZSTD_DECODE_YIELD_INTERVAL_MS = 500
+const ZSTD_DECODE_YIELD_INTERVAL_MS = 50
 
 /** Assert that the independently decodable first frame contains only the header record. */
 function assertZstdHeaderFrame(plaintext: Buffer): void {
@@ -102,6 +103,8 @@ export interface Config {
   root: string
   /** Physical encoding; defaults to checksummed Zstandard frames. */
   compression?: JsonlCompression
+  /** Idle milliseconds a decoded cold log stays reusable; zero disables the memo. Defaults to 10000. */
+  coldLogMemoRetentionMs?: number
   /**
    * Maximum directory, header, and stat reads in flight across all concurrent
    * listings of this backend (`list()`, the root encoding check, and historical
@@ -172,9 +175,33 @@ function freezeStoredEvent(event: SessionEvent): void {
   }
 }
 
-/** Establish immutable sharing for one decoded event graph and report that state. */
-function freezeStoredEvents(events: SessionEvent[]): FrozenStoredEvents {
-  for (const event of events) freezeStoredEvent(event)
+/**
+ * Validate one exclusively owned decoded log, then adopt and deep-freeze its
+ * events in event-loop slices and freeze the array.
+ * @param meta - the stored header the events belong to.
+ * @param events - exclusively owned decoded events; adopted in place.
+ * @param location - the artifact named by refusals.
+ * @param signal - cancellation observed after each yield.
+ * @returns the frozen events and their sharing state.
+ */
+async function adoptStoredEventsCooperatively(
+  meta: SessionHeader,
+  events: SessionEvent[],
+  location: SessionLocation,
+  signal?: AbortSignal,
+): Promise<FrozenStoredEvents> {
+  assertStoredEventTypes(meta, events, location)
+  let yieldDeadline = performance.now() + ZSTD_DECODE_YIELD_INTERVAL_MS
+  for (const [index, event] of events.entries()) {
+    const adopted = adoptStoredEvent(meta, event)
+    freezeStoredEvent(adopted)
+    events[index] = adopted
+    if (index + 1 < events.length && performance.now() >= yieldDeadline) {
+      await scheduler.yield()
+      signal?.throwIfAborted()
+      yieldDeadline = performance.now() + ZSTD_DECODE_YIELD_INTERVAL_MS
+    }
+  }
   Object.freeze(events)
   return { eventState: 'shared-frozen', events }
 }
@@ -184,6 +211,20 @@ interface ResolvedJsonlGeneration {
   readonly sourcePath: string
   readonly sourceVersion: number
   readonly currentPath: string
+}
+
+/** One backend-owned operation shared by its current callers. */
+interface SharedRead<T> {
+  readonly controller: AbortController
+  readonly promise: Promise<T>
+  settled: boolean
+  waiters: number
+}
+
+/** One current-generation decode shared by callers that selected the same file revision. */
+interface CurrentRead extends SharedRead<CurrentStoredLog> {
+  readonly sourcePath: string
+  readonly sourceRevision: PersistenceRevision
 }
 
 /** One backend-owned historical preparation shared by its current callers. */
@@ -310,8 +351,12 @@ class JsonlSessionPersistence extends SessionPersistence {
    * revision guard.
    */
   private readonly coldLogMemo = new Map<SessionId, StoredLog>()
+  /** Idle-expiry timers for the memo; one unref'ed timer per retained log. */
+  private readonly coldLogMemoTimers = new Map<SessionId, NodeJS.Timeout>()
   /** One joinable decode/migration operation per selected historical Session file revision. */
   private readonly migrationPreparations = new Map<SessionId, MigrationPreparation>()
+  /** One joinable decode per session while callers observe the same physical revision. */
+  private readonly currentReads = new Map<SessionId, CurrentRead>()
 
   constructor(ctx: Context, public config: Config, private readonly tracker: JsonlBackendTracker) {
     super(ctx)
@@ -335,6 +380,11 @@ class JsonlSessionPersistence extends SessionPersistence {
         error instanceof SessionFormatUnsupportedMigrationError,
     }
     this.assertUsableRoot()
+    ctx.effect(() => () => {
+      for (const timer of this.coldLogMemoTimers.values()) clearTimeout(timer)
+      this.coldLogMemoTimers.clear()
+      this.coldLogMemo.clear()
+    }, 'session-persistence-jsonl.coldLogMemo')
   }
 
   /**
@@ -615,18 +665,12 @@ class JsonlSessionPersistence extends SessionPersistence {
     const probe = fileRevision(await stat(selected.sourcePath, { bigint: true }))
     const memoized = this.coldLogMemo.get(id)
     if (memoized?.status === 'current' && memoized.revision === probe) {
-      this.coldLogMemo.delete(id)
+      this.forgetStoredLog(id)
       this.coldLogMemo.set(id, memoized)
+      this.armColdLogMemoTimer(id)
       return memoized
     }
-    const current = await readStableJsonlFile(selected.sourcePath, signal)
-    return this.decodeStoredLog(
-      selected.sourcePath,
-      id,
-      current.bytes,
-      fileRevision(current.identity),
-      signal,
-    )
+    return this.readCurrentGeneration(selected.sourcePath, id, probe, signal)
   }
 
   /** Probe the memo and otherwise decode one historical generation under backend cancellation. */
@@ -642,11 +686,12 @@ class JsonlSessionPersistence extends SessionPersistence {
       try {
         await memoized.validateRelatedSources()
       } catch (error: unknown) {
-        this.coldLogMemo.delete(id)
+        this.forgetStoredLog(id)
         throw this.generationFailure(id, selected, error)
       }
-      this.coldLogMemo.delete(id)
+      this.forgetStoredLog(id)
       this.coldLogMemo.set(id, memoized)
+      this.armColdLogMemoTimer(id)
       return memoized
     }
     return this.prepareStoredMigration(id, selected, signal)
@@ -725,12 +770,12 @@ class JsonlSessionPersistence extends SessionPersistence {
     const meta = this.currentHeader(prepared.artifact.header)
     assertStoredId(id, meta)
     const events = prepared.artifact.events as SessionEvent[]
-    validateStoredEvents(meta, events, { kind: 'jsonl', path: selected.sourcePath })
+    const frozen = await adoptStoredEventsCooperatively(meta, events, { kind: 'jsonl', path: selected.sourcePath }, signal)
     const stored: PreparedStoredLog = {
       status: 'prepared',
       validateRelatedSources,
       meta,
-      ...freezeStoredEvents(events),
+      ...frozen,
       tornTruncateTo: undefined,
       recoveredTail: [],
       inheritedEventCount: SessionLogOffset(prepared.artifact.inheritedEventCount),
@@ -749,7 +794,7 @@ class JsonlSessionPersistence extends SessionPersistence {
       identity = await migration.value.publish()
     } catch (error: unknown) {
       /* v8 ignore else -- a newer preparation may have replaced this stale cache entry. */
-      if (this.coldLogMemo.get(id) === stored) this.coldLogMemo.delete(id)
+      if (this.coldLogMemo.get(id) === stored) this.forgetStoredLog(id)
       throw this.generationFailure(id, migration.source, error)
     }
     const published: CurrentStoredLog = {
@@ -801,14 +846,57 @@ class JsonlSessionPersistence extends SessionPersistence {
     const probe = fileRevision(await stat(path, { bigint: true }))
     const memoized = this.coldLogMemo.get(expectedId)
     if (memoized?.status === 'current' && memoized.revision === probe) {
-      this.coldLogMemo.delete(expectedId)
+      this.forgetStoredLog(expectedId)
       this.coldLogMemo.set(expectedId, memoized)
+      this.armColdLogMemoTimer(expectedId)
       return memoized
     }
-    const { bytes, identity } = await readStableJsonlFile(path, signal)
-    return this.decodeStoredLog(path, expectedId, bytes, fileRevision(identity), signal)
+    return this.readCurrentGeneration(path, expectedId, probe, signal)
   }
 
+  /** Await one shared operation and abort it only after its last waiter leaves. */
+  private async waitForSharedRead<T>(read: SharedRead<T>, signal: AbortSignal | undefined, forget: () => void): Promise<T> {
+    read.waiters += 1
+    try {
+      return await waitWithAbort(read.promise, signal)
+    } finally {
+      read.waiters -= 1
+      if (read.waiters === 0 && !read.settled) {
+        forget()
+        read.controller.abort()
+      }
+    }
+  }
+
+  /** Share one current-generation decode while callers observe the same physical revision. */
+  private readCurrentGeneration(
+    path: string,
+    id: SessionId,
+    revision: PersistenceRevision,
+    signal?: AbortSignal,
+  ): Promise<CurrentStoredLog> {
+    signal?.throwIfAborted()
+    let read = this.currentReads.get(id)
+    if (read === undefined || read.sourcePath !== path || read.sourceRevision !== revision) {
+      const controller = new AbortController()
+      const promise = (async () => {
+        const current = await readStableJsonlFile(path, controller.signal)
+        return this.decodeStoredLog(path, id, current.bytes, fileRevision(current.identity), controller.signal)
+      })()
+      read = { sourcePath: path, sourceRevision: revision, controller, promise, settled: false, waiters: 0 }
+      this.currentReads.set(id, read)
+      const created = read
+      const release = (): void => {
+        created.settled = true
+        if (this.currentReads.get(id) === created) this.currentReads.delete(id)
+      }
+      void promise.then(release, release)
+    }
+    const selected = read
+    return this.waitForSharedRead(selected, signal, () => {
+      if (this.currentReads.get(id) === selected) this.currentReads.delete(id)
+    })
+  }
   /** Decode and memoize one already-stable current physical snapshot. */
   private async decodeStoredLog(
     path: string,
@@ -857,26 +945,54 @@ class JsonlSessionPersistence extends SessionPersistence {
     signal?.throwIfAborted()
     assertStoredId(expectedId, parsed.meta)
     const location = this.locate(parsed.meta)
-    validateStoredEvents(parsed.meta, parsed.events, location)
     const { events, ...rest } = parsed
+    const frozen = await adoptStoredEventsCooperatively(parsed.meta, events, location, signal)
     const stored: CurrentStoredLog = {
       status: 'current',
       ...rest,
-      ...freezeStoredEvents(events),
+      ...frozen,
       revision,
     }
     this.memoizeStoredLog(expectedId, stored)
     return stored
   }
 
-  /** Insert one parsed log into the bounded handoff cache. */
+  /** Insert one parsed log into the bounded handoff cache and arm its idle expiry. */
   private memoizeStoredLog(id: SessionId, stored: StoredLog): void {
-    this.coldLogMemo.delete(id)
+    this.forgetStoredLog(id)
+    const retentionMs = this.config.coldLogMemoRetentionMs ?? DEFAULT_COLD_LOG_MEMO_RETENTION_MS
+    if (retentionMs === 0) return
     this.coldLogMemo.set(id, stored)
+    this.armColdLogMemoTimer(id)
     for (const oldest of this.coldLogMemo.keys()) {
       if (this.coldLogMemo.size <= COLD_LOG_MEMO_MAX_ENTRIES) break
-      this.coldLogMemo.delete(oldest)
+      this.forgetStoredLog(oldest)
     }
+  }
+
+  /** Arm or renew one memo entry's idle expiry without reordering the LRU. */
+  private armColdLogMemoTimer(id: SessionId): void {
+    const retentionMs = this.config.coldLogMemoRetentionMs ?? DEFAULT_COLD_LOG_MEMO_RETENTION_MS
+    const previous = this.coldLogMemoTimers.get(id)
+    if (previous !== undefined) clearTimeout(previous)
+    if (retentionMs === 0) {
+      this.coldLogMemoTimers.delete(id)
+      return
+    }
+    const timer = setTimeout(() => {
+      this.coldLogMemoTimers.delete(id)
+      this.coldLogMemo.delete(id)
+    }, retentionMs)
+    timer.unref()
+    this.coldLogMemoTimers.set(id, timer)
+  }
+
+  /** Release a memo reference and its idle timer without affecting callers that already hold the log. */
+  private forgetStoredLog(id: SessionId): void {
+    const timer = this.coldLogMemoTimers.get(id)
+    if (timer !== undefined) clearTimeout(timer)
+    this.coldLogMemoTimers.delete(id)
+    this.coldLogMemo.delete(id)
   }
 
   /**
@@ -912,7 +1028,7 @@ class JsonlSessionPersistence extends SessionPersistence {
     isMaterialized: boolean,
     inheritedEventCount: SessionLogOffsetType,
   ): Promise<void> {
-    this.coldLogMemo.delete(header.id)
+    this.forgetStoredLog(header.id)
     await this.ensureRootEncoding()
     if (isMaterialized) {
       await this.appendLines(header, events)
@@ -928,7 +1044,7 @@ class JsonlSessionPersistence extends SessionPersistence {
    * @param inheritedEventCount - the exact fork-inherited prefix length written into the header line.
    */
   async persistHeader(header: SessionHeader, inheritedEventCount: SessionLogOffsetType): Promise<void> {
-    this.coldLogMemo.delete(header.id)
+    this.forgetStoredLog(header.id)
     await this.ensureRootEncoding()
     await this.materialize(header, inheritedEventCount, [])
     this.tracker.materialized(header.id)
@@ -940,7 +1056,7 @@ class JsonlSessionPersistence extends SessionPersistence {
    * @param truncateTo - the byte offset the artifact is truncated to.
    */
   async truncateTornTail(header: SessionHeader, truncateTo: number): Promise<void> {
-    this.coldLogMemo.delete(header.id)
+    this.forgetStoredLog(header.id)
     await this.repair(header, truncateTo)
     this.ctx.logger.warn(`${this.name}: session "${header.id}" recovered from a torn tail; incomplete tail bytes were discarded`)
   }
@@ -1808,6 +1924,7 @@ export const name = 'session-persistence-jsonl'
 export const Config: z<Config> = z.object({
   root: z.string().required(),
   compression: JsonlCompressionSchema,
+  coldLogMemoRetentionMs: z.natural().max(2_147_483_647).default(DEFAULT_COLD_LOG_MEMO_RETENTION_MS),
   listConcurrency: z.natural().min(1).default(DEFAULT_LIST_CONCURRENCY),
 })
 

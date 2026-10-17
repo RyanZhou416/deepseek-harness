@@ -29,7 +29,10 @@ export * from './types.ts'
 export { SessionPreparation } from './preparation.ts'
 export type { SessionPreparationOptions } from './preparation.ts'
 export type { AssistantMessage, DeveloperMessage, SystemMessage, ToolResultMessage, UserMessage } from '@deepseek-ai/dsh-llm'
-export { interruptedTurnClosers, ToolCallRecovery, TOOL_NOT_STARTED, TOOL_OUTCOME_UNKNOWN } from './repair.ts'
+export {
+  interruptedTurnClosers, ToolCallRecovery, TOOL_NOT_STARTED, TOOL_NOT_STARTED_TEXT,
+  TOOL_OUTCOME_UNKNOWN, TOOL_OUTCOME_UNKNOWN_TEXT,
+} from './repair.ts'
 export type { SessionSurface, SurfaceFoldReplacement, SurfaceFoldResult, SessionMessageProjection, SessionMessageProjectionContext } from './surface.ts'
 export { deriveEventMessage, foldSurface, isAppendSurfaceEvent, isReplacementSurfaceEvent, isSurfaceEvent, isSurfaceEligibleType } from './surface.ts'
 export { canonicalHeader, foldRequestHeader, headerEquals } from './request-header.ts'
@@ -430,6 +433,8 @@ interface SessionEntry {
 
 /** Store attachment for the append path; module-private to keep Session store-agnostic publicly. */
 const attachments = new WeakMap<Session, SessionEntry>()
+/** Event identities whose complete object graphs already satisfy Session's immutable ownership rule. */
+const shareableSessionEvents = new WeakSet<SessionEvent>()
 
 /**
  * Grammar of a {@link PluginRecordType}: `plugin:` followed by
@@ -642,9 +647,11 @@ export class Session {
       // a bad seed would surface only later as a backend rejection or a silent
       // divergence between the live log and disk.
       for (const [index, source] of seed.entries()) {
-        // The seed is a persistence/replay boundary: validate and detach the
-        // complete event in one lossless-JSON pass.
-        const snapshot = mode === 'snapshot' ? snapshotJsonValue(source) : source
+        // The seed is a persistence/replay boundary. Only event identities
+        // already owned and frozen by this module may cross it without another
+        // lossless-JSON snapshot.
+        const shared = mode === 'snapshot' && shareableSessionEvents.has(source)
+        const snapshot = mode === 'snapshot' && !shared ? snapshotJsonValue(source) : source
         if (snapshot === undefined) {
           throw new Error(`seed event at index ${index} is not losslessly JSON-serializable`)
         }
@@ -660,7 +667,11 @@ export class Session {
         } catch (error: unknown) {
           throw new Error(`invalid seed event at index ${index}: ${error instanceof Error ? error.message : 'invalid surface metadata'}`)
         }
-        this.log.push(mode === 'snapshot' ? deepFreeze(snapshot) : snapshot)
+        const accepted = mode === 'snapshot' && !shared ? deepFreeze(snapshot) : snapshot
+        if (mode === 'snapshot' || (mode === 'shared-frozen' && Object.isFrozen(accepted))) {
+          shareableSessionEvents.add(accepted)
+        }
+        this.log.push(accepted)
       }
     }
     this.firstLiveSeq = SessionLogOffset(this.log.length)
@@ -875,6 +886,7 @@ export class Session {
    */
   private commit(event: SessionEvent, entry: SessionEntry | undefined): void {
     this.surfaceManager.validateNext(event)
+    shareableSessionEvents.add(event)
 
     if (entry !== undefined) entry.appending = true
     try {
