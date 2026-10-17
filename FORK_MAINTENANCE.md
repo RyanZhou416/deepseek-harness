@@ -60,7 +60,7 @@ Continuable-subagent Queue edit/remove/steer 由 alpha.2 的通用 `session.upda
 1. `C:\Project\deepseek-harness-data\sessions`、`attachments`、`storages`、`.credentials.yaml`、`settings.yaml`、`.anonymous-user-id` 和 `plugins` 是用户数据，不是可重建缓存。禁止删除、重命名、原地迁移或用验证副本覆盖。
 2. AgentTeams 状态位于各工作区的 `.agent-teams\<teamId>\team.json` 与 `inbox\*.jsonl`。它不在 DSH_HOME 内，但同样属于会话成果和恢复数据，任何代码 clean 都不得触碰。
 3. 会话或插件格式升级必须先复制到隔离 DSH_HOME 验证。integration 版本第一次启动禁止直接指向真实 DSH_HOME。
-4. Fork 改动不得新增或修改 Session event type、`SESSION_FORMAT_VERSION`、JSONL/Zstd 路径或物理布局，除非用户明确批准迁移并已有可逆备份。当前已提交 fork 没有这些格式变化。
+4. Fork 改动不得新增或修改 Session event type、`SESSION_FORMAT_VERSION` 或源 generation 的 JSONL/Zstd 物理布局，除非用户明确批准迁移并已有可逆备份。窗口读取的 `<generation>.window-index.json` 是派生缓存，不是 Session 格式或源 generation 的一部分：必须可删除重建、只绑定源 size/mtime，且不能改变源文件；当前 fork 没有 Session 格式或版本变化。
 5. Host 内存压力不得触发静默自动重启。watchdog 可以优雅关闭并落盘，前端必须显示断线，恢复由用户手动启动。
 6. 上游冲突采用“官方结构优先、fork 行为逐项重做”。Session、API、schema、包布局、生成文件和 lockfile 不得整树保留旧 fork 版本。
 7. 外置 profile、preset、本地 tgz 和 DSH_HOME 不受 Git 保护；每次上游或插件更新前必须单独备份它们。
@@ -287,7 +287,7 @@ Chat edits the latest ordinary text-only user message in its existing idle Sessi
 
 `packages/session/session-persistence-jsonl/src/index.ts` 以精确 selected-generation revision 缓存验证后的 header，并让并发 `list()` caller 共享一次 discovery。单个 caller abort 只取消自己的等待；revision 变化会重新验证，删除路径会清理 cache，返回值保持 detached。
 
-该优化不改变 JSONL/Zstd 文件格式。上游替代必须能识别 append、replace、delete，并且不能让一个 caller 的取消终止所有并发 caller。
+该优化不改变 JSONL/Zstd 文件格式。上游替代必须能识别 append、replace、delete，并且不能让一个 caller 的取消终止所有并发 caller。窗口读取的代际索引是另一种派生缓存，见 [Stored history window reads](#stored-history-window-reads)。
 
 #### Decoded cold-log retention
 
@@ -343,9 +343,9 @@ Session search 和 event search 使用 exact-generation/request/cursor key 的 i
 
 #### History follow opening ownership
 
-`packages/api/session-controller/src/history.ts` 在交付首帧前完成完整历史观察与 message-aligned page，首帧只携带所需页面、header 和 projection baseline。完整观察在 generator 长期等待事件前释放；prepared Session 的独立 promotion 租约只保留到首帧交付并转交后台激活，取消或同步激活失败会释放该租约。首帧交付后 follower 放开 Agent residency pin，仍监听 `session/event`、`session/created` 与可选的 Assistant frame，因此空闲 Agent 淘汰及之后冷恢复不会截断历史流。
+`packages/api/session-controller/src/history.ts` 的 follow 首帧先对非 live 普通 Session 尝试 `sessionQuery.readWindow` 的尾部窗口：窗口只提供所需页面、header、cursor 和完整的 projection checkpoint；窗口不可用、checkpoint 不完整或不是普通 Session 时回退完整历史观察。尾部窗口路径不物化完整历史，也不产生 prepared promotion；完整观察仍只在 generator 长期等待事件前持有，prepared Session 的独立 promotion 租约只保留到首帧交付并转交后台激活，取消或同步激活失败会释放该租约。首帧交付后 follower 放开 Agent residency pin，仍监听 `session/event`、`session/created` 与可选的 Assistant frame，因此空闲 Agent 淘汰及之后冷恢复不会截断历史流。`page` 的 `throughSeq === -1` 空尾页也先走一次单事件窗口校验；`beforeSeq` 旧页在索引可用时走窗口，否则回退完整读取。
 
-上游替代必须验证首帧 cut、帧 ordinal、后续事件连续性、开场取消和 promotion 失败的单次释放；把 `using` 观察留在 async generator 的长期循环中会重新持有整份历史。
+上游替代必须验证首帧 cut、帧 ordinal、后续事件连续性、开场取消和 promotion 失败的单次释放；把 `using` 观察留在 async generator 的长期循环中会重新持有整份历史。窗口路径还必须保留完整 checkpoint 校验（所有 `wireKeys()` 存在且 `asOfSeq <= window.cursor`）、窗口/完整读取回退，以及 interrupted final turn 的 balance，不能只用一个残缺 projection block 清空客户端值。
 
 #### Reference-owned Client Sessions
 
@@ -607,6 +607,8 @@ Lexical 的 history 在每个窗口内合并连续输入，而窗口从上一次
 
 所有启动 Host 的入口都显式传 `--expose-internals`：`run.cmd`/`run.command` 以 `pnpm exec node --expose-internals --import tsx/esm apps/cli/src/bin.ts web` 启动，根 `dsh`/`start:web`/`demo:inspector` 脚本与 `dev:web` 的 `dsh web` 子进程同样带上。缺少它时 Loader 无法解析 profile 的 link 插件（`dsh-context`、AgentTeams、Subscriptions），HMR 也会拒绝启动，控制台表现为 `4 entries did not activate`；`NODE_OPTIONS` 不接受该开关，必须放在 node argv 上。聚焦验证为两个启动器 spec 的启动参数断言。
 
+运行中的 Host 会监听外置 profile patch；修改 `cordis.patch.yml` 会触发 HMR 卸载/重挂载，重挂载窗口内 Gateway 可能短暂报 `active Service "sessionController" is unavailable`，正在加载的 `session/follow` 会失败。修改 profile 后应重启 Host，不要依赖 HMR 热重载；源码修改则需要重新构建或重启后才对运行中的 Host 生效。
+
 JSONL 会话存储增加根目录下的 `.session-catalog.json` 头部缓存与 `excludeSubagentSessions` 列表选项：列表按目录段记录 header、格式状态、日志大小与 mtime，匹配才信任缓存，缺失、损坏或过期时回退读取并重建。Host 的默认 `session.list` 与工作区启动头部索引不再加载归档和子智能体会话；子智能体会话通过母会话的 subagent 目录访问，归档/恢复随母会话状态生效。一次性子智能体归属修复脚本不入库。聚焦验证：`catalog.spec.ts`、JSONL 列表测试、session-query 的子智能体排除用例与 workspace 启动索引用例。
 
 若存在显式准备的订阅维护计划，Windows [构建入口](build.cmd) 先交给[维护钩子](scripts/fork-subscriptions-maintenance.ps1)：运行中的 Host 会被拒绝，候选和脚本指纹必须匹配，检查与安装失败不能报告构建成功；仅安装模式跳过整仓依赖安装和构建。计划、备份与回执只保存在被忽略的本地维护目录，仓库不自带可执行部署计划；完成一次性安装后，普通构建路径恢复。维护钩子不停止或启动 Host，用户继续手动操作；随机本机端口和私有玩具计划的回归由 `scripts/fork-subscriptions-maintenance.spec.ts` 拥有。
@@ -697,7 +699,7 @@ Windows Web profile 的 Context 内存修复升级备份位于 `C:\Project\deeps
 
 维护源码位于 [订阅插件](fork-plugins/dsh-plugin-subscriptions/README.zh.md)。2026-10-18 起真实 profile 以 `link:` 指向 `fork-plugins/dsh-plugin-subscriptions`（`0.9.4-dsh021rc2.1`）；2026-10-17 的启动 manifest 与 257 个安装文件核对对应上一代 [`.33` 制品](fork-plugins/releases/archive/dsh-plugin-subscriptions-0.9.4-dsh017rc1.33.tgz)，其 SHA256 由[同名校验文件](fork-plugins/releases/archive/dsh-plugin-subscriptions-0.9.4-dsh017rc1.33.tgz.sha256)固定；[`.32` 制品](fork-plugins/releases/archive/dsh-plugin-subscriptions-0.9.4-dsh017rc1.32.tgz)保留为更早代次。`.32` 修复组织策略的重启恢复，`.33` 修复续接状态 IO 的有界等待。当前安装状态、已验证范围与保留差异由[实现状态](fork-plugins/dsh-plugin-subscriptions/docs/claude-implementation-status.md)拥有；不能从源码版本推断任何运行进程已经更新。
 
-Windows Web profile 启用 `llm-subscriptions`，保留 `rateLimit.wait: false`。 制品在安装前须通过插件测试套件、实际安装目录的接口与 UI 开关检查；2026-10-11 当前源码的插件测试套件 978 项通过、0 失败、0 跳过、退出码 0。已验证的图片处理保持：21 张历史图片中原有 16 张超出多图尺寸上限，请求版本的长边均不超过 2,000 像素，原 Session 和附件摘要保持不变。2026-09-26，固定源码包的 506 项无密钥测试通过；隔离 Web profile 与真实 Web profile 均在随机本地端口启动，认证页面返回 HTTP 200，页面包含 Subscriptions 客户端资源。真实 Profile 的 Codex 状态接口识别到两个已存账号，默认账号的用量查询通过并刷新过期访问令牌；另一个账号及真实模型请求尚未验证。旧 profile patch 备份位于 `C:\Project\deepseek-harness-data\diagnostics\profile-backups\pre-subscriptions-enable-20260926`。
+Windows Web profile 启用 `llm-subscriptions`，保留 `rateLimit.wait: false`，并把 `continuationStateDeadlineMs` 与 `continuationStateLockTimeoutMs` 放宽到 `5000`。这两个字段只在本机外置 profile 生效，插件默认仍是 1000/2000；大会话或并发 spans 准备超过原预算时会以 `LOCAL_CONTINUATION_STATE_UNAVAILABLE` / `retryDisposition: 'forbid'` 拒绝请求，修改后必须重启 Host。 制品在安装前须通过插件测试套件、实际安装目录的接口与 UI 开关检查；2026-10-11 当前源码的插件测试套件 978 项通过、0 失败、0 跳过、退出码 0。已验证的图片处理保持：21 张历史图片中原有 16 张超出多图尺寸上限，请求版本的长边均不超过 2,000 像素，原 Session 和附件摘要保持不变。2026-09-26，固定源码包的 506 项无密钥测试通过；隔离 Web profile 与真实 Web profile 均在随机本地端口启动，认证页面返回 HTTP 200，页面包含 Subscriptions 客户端资源。真实 Profile 的 Codex 状态接口识别到两个已存账号，默认账号的用量查询通过并刷新过期访问令牌；另一个账号及真实模型请求尚未验证。旧 profile patch 备份位于 `C:\Project\deepseek-harness-data\diagnostics\profile-backups\pre-subscriptions-enable-20260926`。
 
 更新时使用 `git subtree pull --prefix=fork-plugins/dsh-plugin-subscriptions https://github.com/V1ki/dsh-plugin-subscriptions.git <tag> --squash`，再重放 `fork-plugins/dsh-plugin-subscriptions/FORK_MAINTENANCE.md`。真实 profile 始终以 `link:` 指向仓内插件目录，禁止 npm latest 直接覆盖。
 
@@ -775,7 +777,8 @@ Profile 注册 `dsh-sdk-process-raw` 和 `subagent_process`：SDK profile、独�
 | Resume projection checkpoint seeding | Preserve | Hydrate a resumed prepared Session through the optional projection cache before the Agent reads projections; cover both resume and cold observation |
 | Cold-read event-loop slices | Preserve | Keep cold-read decode and stored-event adoption slices at 50 ms with the whole-log type check before per-event adoption, unless upstream bounds them equally or tighter |
 | Five-minute idle Agent eviction | Preserve | Require opening-only follower pin, child/inbox/job exclusions, flush + persistence proof and cold resume |
-| History follow opening release | Preserve | Require bounded opening output, full-observation release, promotion ownership and gap-free delivery across eviction |
+| History follow opening release | Preserve | Require window-first opening for non-live ordinary Sessions with complete checkpoint proof, bounded opening output, full-observation fallback/release, promotion ownership and gap-free delivery across eviction |
+| Stored history window reads / generation index | Preserve | Keep the optional `readWindow` fallback contract, index-free tail, size/mtime-bound atomic index rebuild, selected-row validation only (never a complete replay claim), and seeded/historical/corrupt full-read fallback; the sidecar is derived, never a source of truth |
 | Reference-owned Client Session generations | Replaced by official references | Keep final-release withdrawal and projection-store retention; do not restore `suspendHistory()` |
 | 20k final-message packed rebase | Replaced by cursorless Assistant frames | Keep official transient-stream settlement; do not restore scalar chunk accumulation |
 | Tool output/card lazy calculation | Ported onto RC.1 | Preserve generic output-on-expand and card-array laziness; official already defers input formatting |
@@ -868,6 +871,8 @@ pnpm exec vitest run packages/api/session-controller/tests/agent-residency.host.
 
 pnpm exec vitest run packages/api/session-controller/tests/session-history-journal.host.spec.ts packages/api/session-controller/tests/transport.host.spec.ts packages/api/session-controller/tests/session-cold.host.spec.ts
 
+pnpm exec vitest run packages/session/session-persistence-jsonl/tests/window.spec.ts packages/session/session-persistence-jsonl/tests/window-index.spec.ts packages/session/session-persistence-jsonl/tests/window-index-regression.spec.ts packages/session/session-persistence-jsonl/tests/window-regression.spec.ts packages/session-query/session-query/tests/window.spec.ts packages/session-query/session-query/tests/window-read.spec.ts packages/api/session-controller/tests/session-history-window.host.spec.ts packages/api/session-controller/tests/history-window.host.spec.ts packages/api/session-controller/tests/session-history-paging.host.spec.ts
+
 pnpm exec vitest run packages/jobs/jobs-local/tests/retention.spec.ts packages/jobs/jobs-local/tests/jobs.spec.ts packages/jobs/jobs-local/tests/loader-composition.spec.ts packages/jobs/tool-jobs/tests/tool-jobs.spec.ts packages/subagent/subagent/tests/continuation.spec.ts packages/subagent/subagent/tests/control.spec.ts packages/subagent/tool-subagent-control/tests/tool-subagent-control.spec.ts packages/experimental/agent-team/tests/team.spec.ts packages/shell/tool-pwsh/tests/tools.spec.ts
 
 pnpm exec vitest run scripts/fork-profile-setup.spec.ts packages/skill/skill-filesystem/tests/skill-filesystem-watcher.spec.ts packages/core/agent/tests/agent-initiator.spec.ts packages/fs/tool-fs/tests/read-render.spec.ts packages/storage/storage-json/tests/per-record-load-concurrency.spec.ts
@@ -926,7 +931,8 @@ corepack pnpm@10.30.2 verify
 
 ## Known limitations
 
-- 运行中的 Agent 仍完整持有 Host `Session.log`；一个持续输出的单会话仍可能线性增长。`SessionHandle.read(offset, length)` 目前也先解码整份 JSONL/Zstd 再切片，同步历史消费者尚未完成迁移；以上留存修复不是运行中 Agent 的 event-level paging。后续实现须先满足[同步事件读取弃用约束](.agents/notes/implemented/architecture/2026-09-09-deprecate-synchronous-session-event-reads.md)，不能只给 `read()` 增加分页参数。
+- 运行中的 Agent 仍完整持有 Host `Session.log`；一个持续输出的单会话仍可能线性增长。`SessionHandle.read(offset, length)` 目前也先解码整份 JSONL/Zstd 再切片；非 live 普通 Session 的 follow 首帧和旧页已走窗口读取，但 live、seeded、历史代际、无完整 projection checkpoint 或索引不可用时仍回退完整观察，因此不是运行中 Agent 的 event-level paging。后续实现须先满足[同步事件读取弃用约束](.agents/notes/implemented/architecture/2026-09-09-deprecate-synchronous-session-event-reads.md)，不能只给 `read()` 增加分页参数。
+- 大会话首次 `beforeSeq` 会同步构建代际索引：161 MB / 182,347 事件实测 12–14 s，显著慢于一次完整读取（2.75–2.91 s）；预热后 2000 事件页约 138–161 ms，尾部窗口约 213–337 ms。每个 warm page 重新解析约 7.3 MB sidecar，没有常驻 index cache；小日志的 index-free tail 可能慢于完整读取（949 KB：80–98 ms vs 26 ms）。后台预建/并行建索引和真实 benchmark 仍是 deferred，当前 benchmark 数字来自一次性真实 Session 审计，不是 CI 门禁。
 - Alpha.2 已显著降低长会话初始化、流式更新、代码高亮、布局与导航预览成本，但仍不等价于完整 variable-height Chat virtualization；Tool lazy 也不能替代它。
 - Host 的普通 Agent loop 仍主要运行在一个 Node event loop；process worker 是显式 one-shot 旁路，不是透明的全局多核调度。
 - 第一次不同的 broad SQLite query 仍可能同步占用一个 Host thread。
