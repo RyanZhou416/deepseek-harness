@@ -1,9 +1,11 @@
 /** Stable, agent-scoped presentation. Business authority stays in the tools. */
+import { onAgentReady } from './harness-compat.ts'
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { readdirSync } from 'node:fs'
 import { join } from 'node:path'
-import { isUnreadableTeamState, readTeamSync, readRetiredMemberIdsSync, reportUnreadableTeam } from './state.ts'
+import { readTeamSync, readRetiredMemberIdsSync } from './state.ts'
+import { leadIdentityOf, teamLeadMatch } from './lineage.ts'
 import type { TeamState } from './types.ts'
 import { MEMBER_TOOL_NAMES, TEAM_TOOL_NAMES } from './tool-names.ts'
 
@@ -27,7 +29,8 @@ function stateRoot(agent: Agent, config: CapabilityConfig): string {
 }
 
 /** Synchronous startup/HMR hydration must finish before the first assembly. */
-function currentTeam(agent: Agent, config: CapabilityConfig): TeamState | undefined {
+function currentTeam(ctx: Context, agent: Agent, config: CapabilityConfig): TeamState | undefined {
+  const lead = leadIdentityOf(ctx, agent.session)
   const root = stateRoot(agent, config)
   let entries
   try { entries = readdirSync(root, { withFileTypes: true }) } catch (error) {
@@ -37,15 +40,8 @@ function currentTeam(agent: Agent, config: CapabilityConfig): TeamState | undefi
   let found: TeamState | undefined
   for (const entry of entries) {
     if (!entry.isDirectory() || entry.name === 'archive') continue
-    let team: TeamState | undefined
-    try {
-      team = readTeamSync(root, entry.name)
-    } catch (error) {
-      if (!isUnreadableTeamState(error)) throw error
-      reportUnreadableTeam(root, entry.name, error)
-      continue
-    }
-    if (team === undefined || (team.captainSessionId !== agent.id
+    const team = readTeamSync(root, entry.name)
+    if (team === undefined || (!teamLeadMatch(team, lead)
       && !team.members.some(member => member.id === agent.id))) continue
     if (found !== undefined) throw new Error('ambiguous AgentTeams membership')
     found = team
@@ -72,8 +68,8 @@ export function installTeamCapabilities(ctx: Context, config: CapabilityConfig):
     let member = config.isPendingMember(agent)
     try {
       member ||= readRetiredMemberIdsSync(stateRoot(agent, config)).has(agent.id)
-      const team = currentTeam(agent, config)
-      member ||= team !== undefined && team.captainSessionId !== agent.id
+      const team = currentTeam(ctx, agent, config)
+      member ||= team !== undefined && !teamLeadMatch(team, leadIdentityOf(ctx, agent.session))
     } catch (error) {
       // Unrelated damaged state must not disable ordinary conversation.
       // Business tools still validate durable team state before acting.
@@ -108,10 +104,7 @@ export function installTeamCapabilities(ctx: Context, config: CapabilityConfig):
       return agent !== undefined && states.get(agent)?.member ? TEAM_MEMBER_PROMPT : captainPrompt
     },
   })
-  ctx.on('agent/created', ({ agent }) => {
-    attach(agent)
-    return undefined
-  })
+  onAgentReady(ctx, agent => { attach(agent) })
   ctx.effect(() => () => {
     mounted = false
     for (const state of [...active]) state.dispose()

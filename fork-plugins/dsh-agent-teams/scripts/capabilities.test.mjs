@@ -19,12 +19,28 @@ const requireTools = createRequire(import.meta.resolve('@deepseek-ai/dsh-tools')
 const requireDsh = createRequire(import.meta.resolve('@deepseek-ai/dsh/package.json'))
 const requireBase = createRequire(requireDsh.resolve('@deepseek-ai/dsh-base/package.json'))
 const { ToolResultPruner } = await import(pathToFileURL(requireBase.resolve('@deepseek-ai/dsh-compaction-tool-result-pruner')).href)
-const { default: SessionProjections } = await import(pathToFileURL(requireBase.resolve('@deepseek-ai/dsh-session-projection')).href)
-const { default: FileSystem } = await import(pathToFileURL(requireBase.resolve('@deepseek-ai/dsh-fs-local')).href)
-const { default: Subprocess } = await import(pathToFileURL(requireBase.resolve('@deepseek-ai/dsh-subprocess-local')).href)
-const { default: Sandbox } = await import(pathToFileURL(requireBase.resolve('@deepseek-ai/dsh-sandbox-local')).href)
-const { default: SandboxPolicy } = await import(pathToFileURL(requireBase.resolve('@deepseek-ai/dsh-sandbox-policy')).href)
-const { default: NodePtcRuntime } = await import(pathToFileURL(requireBase.resolve('@deepseek-ai/dsh-ptc-runtime-node')).href)
+async function mountCodeRuntime(host, workspace) {
+  const fibers = []
+  const load = async (name, config) => {
+    const module = await import(pathToFileURL(requireBase.resolve('@deepseek-ai/dsh-' + name)).href)
+    const fiber = host.plugin(module.default ?? module.NodePtcRuntime, config)
+    fibers.push(fiber)
+    await fiber.await()
+  }
+  try {
+    let modern = false
+    try { requireBase.resolve('@deepseek-ai/dsh-ptc-runtime-node'); modern = true } catch {}
+    if (modern) {
+      await load('session-projection')
+      await load('fs-local')
+      await load('subprocess-local')
+      await load('sandbox-local')
+      await load('sandbox-policy', { mode: 'danger-full-access', workspaceRoot: workspace })
+      await load('ptc-runtime-node', { timeoutMs: 10000, maxOutputBytes: 1048576, maxOldGenerationSizeMb: 128 })
+    } else await load('code-runtime-worker-thread', { computeMs: 3000, maxWallMs: 10000, maxOutputBytes: 1048576, maxOldGenerationSizeMb: 128 })
+    return { dispose: async () => { for (const fiber of fibers.reverse()) await fiber.dispose() } }
+  } catch (error) { for (const fiber of fibers.reverse()) await fiber.dispose(); throw error }
+}
 const { createScope } = await import(pathToFileURL(requireTools.resolve('@deepseek-ai/dsh-scope')).href)
 
 function assertCaptainProtocol(system) {
@@ -37,21 +53,9 @@ test('stable tool presentation uses real scoped registry and prompt assembly', a
   const host = new Context()
   const prompt = host.plugin(SystemPrompt, { includeHarnessIdentity: false })
   await prompt.await()
-  const runtimeFibers = []
-  for (const [runtimePlugin, config] of [
-    [SessionProjections, {}],
-    [FileSystem, { cwd: workspace }],
-    [Subprocess, {}],
-    [Sandbox, {}],
-    [SandboxPolicy, { mode: 'danger-full-access', workspaceRoot: workspace }],
-    [NodePtcRuntime, { graceMs: 50 }],
-  ]) {
-    const runtimeFiber = host.plugin(runtimePlugin, config)
-    await runtimeFiber.await()
-    runtimeFibers.push(runtimeFiber)
-  }
   const tools = host.plugin(ToolRuntime, { mode: 'native' })
   await tools.await()
+  const worker = await mountCodeRuntime(host, workspace)
   const agents = []
   const scopes = []
   const noop = () => {}
@@ -70,13 +74,11 @@ test('stable tool presentation uses real scoped registry and prompt assembly', a
   } })
   await business.await()
   const createAgent = (id, parentSession, events = []) => {
-    const sessionEvents = events.map((event, seq) => ({ ...event, seq, time: seq + 1 }))
-    const agent = { id, status: 'idle', session: { header: { cwd: workspace, parentSession, seedLength: 0 }, events: sessionEvents,
-      inheritedEventCount: 0,
-      get seq() { return sessionEvents.length },
-      append(type, data) { const event = { type, data, seq: sessionEvents.length, time: Date.now() }; sessionEvents.push(event); return event },
-      eventAt(seq) { return sessionEvents[seq] },
-      snapshotEvents() { return [...sessionEvents] },
+    events = events.map((event, seq) => ({ ...event, seq }))
+    const agent = { id, status: 'idle', session: { header: { cwd: workspace, parentSession, seedLength: 0 }, events,
+      inheritedEventCount: 0, get seq() { return events.length },
+      snapshotEvents: () => events.slice(), eventAt: seq => events[seq],
+      append(type, data) { const event = { seq: events.length, type, data }; events.push(event); return event },
     } }
     const scope = createScope(owned, agent)
     agent.ctx = scope.ctx
@@ -130,7 +132,7 @@ test('stable tool presentation uses real scoped registry and prompt assembly', a
     })
     await t.test('the original tool allowlist can directly create and archive', async () => {
       const legacy = createAgent('legacy-captain')
-      host.emit('agent/created', { agent: legacy, source: 'startup' })
+      host.emit('agent/session-start', { agent: legacy, source: 'startup' })
       const restore = legacy.ctx.tools.restrict({ allow: [...TEAM_TOOL_NAMES] })
       try {
         assert.deepEqual((await names(legacy)).sort(), [...TEAM_TOOL_NAMES].sort())
@@ -171,7 +173,7 @@ test('stable tool presentation uses real scoped registry and prompt assembly', a
       const member = createAgent('child', a.id, [{ type: 'subagent/descriptor', data: {
         version: 3, mode: 'continuable', provider: 'spawn', label: 'agent-teams:saved:worker', agentProvider: 'fake', agentModel: 'fake',
       } }])
-      host.emit('agent/created', { agent: member, source: 'startup' })
+      host.emit('agent/session-start', { agent: member, source: 'startup' })
       pendingMembers.delete('child')
       assert.deepEqual((await names(member)).sort(), [...MEMBER_TOOL_NAMES].sort())
       assert.equal(renderPrompt(await assemble(member)), TEAM_MEMBER_PROMPT)
@@ -184,13 +186,13 @@ test('stable tool presentation uses real scoped registry and prompt assembly', a
       const child = createAgent('ordinary-child', a.id, [{ type: 'subagent/descriptor', data: {
         version: 3, mode: 'continuable', provider: 'spawn', label: 'agent-teams:saved:worker', agentProvider: 'fake', agentModel: 'fake',
       } }])
-      host.emit('agent/created', { agent: child, source: 'startup' })
+      host.emit('agent/session-start', { agent: child, source: 'startup' })
       assert.deepEqual(await names(child), captainNames)
     })
     await t.test('a retired member remains restricted to member operations on cold resume', async () => {
       await recordRetiredMemberIds(stateRoot, ['retired-child'])
       const child = createAgent('retired-child', a.id)
-      host.emit('agent/created', { agent: child, source: 'resume' })
+      host.emit('agent/session-start', { agent: child, source: 'resume' })
       assert.deepEqual((await names(child)).sort(), [...MEMBER_TOOL_NAMES].sort())
     })
     await t.test('PTC and both modes keep the operation SDK stable after status', async () => {
@@ -237,7 +239,7 @@ test('stable tool presentation uses real scoped registry and prompt assembly', a
     })
     await t.test('a cold captain loads its durable role before its first request', async () => {
       const cold = createAgent(a.id)
-      host.emit('agent/created', { agent: cold, source: 'resume' })
+      host.emit('agent/session-start', { agent: cold, source: 'resume' })
       assert.equal((await names(cold)).length, 14)
       assert.equal(await header(cold), initialHeader)
       // This new Agent has no historical tool calls. Persisted work is
@@ -278,22 +280,16 @@ test('stable tool presentation uses real scoped registry and prompt assembly', a
       assertCaptainProtocol(renderPrompt(await assemble(b)))
       assert.equal(await header(b), initialHeader)
     })
-    await t.test('an unrelated unreadable team neither fails lookups nor changes the fixed header', async () => {
+    await t.test('read failure leaves the fixed header intact', async () => {
       await mkdir(join(stateRoot, 'broken'))
       await writeFile(join(stateRoot, 'broken/team.json'), '{broken')
-      await mkdir(join(stateRoot, 'zero-filled'))
-      await writeFile(join(stateRoot, 'zero-filled/team.json'), Buffer.alloc(4096))
-      const status = await execute(b, 'agent_teams_status')
-      assert.equal(status.isError, true)
-      assert.match(status.error.message, /do not lead or belong to any active team/)
+      assert.equal((await execute(b, 'agent_teams_status')).isError, true)
       assert.deepEqual(await names(b), captainNames)
     })
   } finally {
     await fiber.dispose()
     for (const scope of scopes.reverse()) await scope.dispose()
-    await business.dispose(); await tools.dispose()
-    for (const runtimeFiber of runtimeFibers.reverse()) await runtimeFiber.dispose()
-    await prompt.dispose()
+    await business.dispose(); await tools.dispose(); await worker.dispose(); await prompt.dispose()
     await rm(workspace, { recursive: true, force: true })
   }
 })

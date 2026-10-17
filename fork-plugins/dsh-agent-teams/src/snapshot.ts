@@ -9,16 +9,16 @@
  */
 
 import type { Context } from '@deepseek-ai/cordis'
-import { createHash } from 'node:crypto'
 import { readdir } from 'node:fs/promises'
 import { join } from 'node:path'
 import { memberActivity } from './members.ts'
+import { canDeclareDelivery, describeQualityLoop, verdictAuditNotes } from './quality-gates.ts'
+import { auditTeamWorkspace } from './workspace-audit.ts'
 import {
   CAPTAIN_KEY, listArchivedTeamIds, readArchivedTeam, readUnreadMailbox, readTeam,
   taskDepthsById, taskVisualState,
 } from './state.ts'
 import type { MemberStatus, TeamState, TeamTask } from './types.ts'
-import { indexTasksByAssignee } from './task-index.ts'
 
 /** Visual task state for the activity panel. */
 export type VisualTaskState = 'blocked' | 'open' | 'running' | 'completed' | 'failed' | 'cancelled'
@@ -31,7 +31,7 @@ export interface TeamActivityMember {
   readonly provider: string
   readonly model: string
   readonly reasoningEffort: string
-  readonly executionPrompt?: string
+  readonly executionPrompt: string
   readonly status: MemberStatus
   readonly activity: 'working' | 'idle' | 'unknown'
   readonly progress: number
@@ -45,7 +45,7 @@ export interface TeamActivityMember {
 export interface TeamActivityTask {
   readonly id: string
   readonly subject: string
-  readonly description?: string
+  readonly description: string
   readonly status: string
   readonly state: VisualTaskState
   readonly assignee: string
@@ -55,15 +55,22 @@ export interface TeamActivityTask {
   readonly kind?: string
   readonly round?: number
   readonly verdict?: string
+  /**
+   * Set when this task's verdict or auto-generated work order no longer
+   * describes the current bytes; the panel must not render a bare pass badge.
+   */
+  readonly verdictStale?: string
+  /** Durable last-write stamp; drives the finished-member ordering (issue #192). */
+  readonly updatedAt: number
 }
 
-/** One captain-inbox preview row retained for legacy unscoped clients. */
+/** One captain-inbox preview row. */
 export interface TeamActivityMessage {
   readonly from: string
   readonly content: string
 }
 
-/** One panel payload for a team. */
+/** The full panel payload for one team. */
 export interface TeamActivitySnapshot {
   readonly workspace: string
   readonly teamId: string
@@ -73,14 +80,14 @@ export interface TeamActivitySnapshot {
   readonly phase: 'staged' | 'running'
   readonly planReviewState?: 'awaiting_review' | 'awaiting_feedback'
   readonly halted?: boolean
-  /** Whether long staged-plan authoring fields are present. */
-  readonly detail: 'summary' | 'full'
-  /** Changes when staged authoring text changes. */
-  readonly detailRevision?: string
   readonly members: readonly TeamActivityMember[]
   readonly tasks: readonly TeamActivityTask[]
   readonly messageCount: number
-  readonly captainInbox?: readonly TeamActivityMessage[]
+  readonly captainInbox: readonly TeamActivityMessage[]
+  /** Present when the snapshot could audit the workspace bytes. */
+  readonly loopState?: string
+  readonly deliverable?: boolean
+  readonly delivery?: { readonly ok: boolean; readonly blockers: readonly string[]; readonly warnings: readonly string[] }
 }
 
 /** Snapshot projection switches for live and archived teams. */
@@ -89,71 +96,20 @@ export interface TeamSnapshotOptions {
   readonly includeRemoved?: boolean
   /** Archived teams have no meaningful live activity after their sessions stop. */
   readonly historic?: boolean
-  /** Include staged-plan authoring text that the live panel otherwise loads on demand. */
-  readonly includeDetails?: boolean
-  /** Include legacy captain-inbox preview bodies. */
-  readonly includeCaptainInbox?: boolean
+  /**
+   * Absolute workspace path of the owning workspace. When present, the snapshot
+   * audits the current bytes behind every recorded verdict, so the panel and
+   * the model-facing status tool cannot report different delivery verdicts.
+   */
+  readonly workspacePath?: string
 }
 
-/** One explicit conversation-card target. */
-export interface TeamActivityTarget {
-  readonly captainSessionId: string
-  readonly teamId: string
-}
-
-/** Selection applied before activity and mailbox assembly. */
-export interface TeamActivityCollectionOptions {
-  /** Current captain whose teams are needed for discovery. */
-  readonly captainSessionId?: string
-  /** Explicit durable teams retained by visible conversation cards. */
-  readonly targets?: readonly TeamActivityTarget[]
-  /** Include staged-plan authoring fields. */
-  readonly includeDetails?: boolean
-  /** Include legacy captain-inbox preview bodies. */
-  readonly includeCaptainInbox?: boolean
-}
-
-function selectedTeam(state: TeamState, options: TeamActivityCollectionOptions): boolean {
-  const captain = options.captainSessionId?.trim() ?? ''
-  const targets = options.targets ?? []
-  if (captain === '' && targets.length === 0) return true
-  return (captain !== '' && state.captainSessionId === captain) || targets.some(target => (
-    target.captainSessionId === state.captainSessionId && target.teamId === state.id
-  ))
-}
-
-function requestedTeamIds(options: TeamActivityCollectionOptions): ReadonlySet<string> | undefined {
-  if ((options.captainSessionId?.trim() ?? '') !== '') return undefined
-  const targets = options.targets ?? []
-  if (targets.length === 0) return undefined
-  return new Set(targets.map(target => target.teamId))
-}
-
-function stagedDetailRevision(state: TeamState): string {
-  const hash = createHash('sha256')
-  const add = (value: string | undefined): void => {
-    const text = value ?? ''
-    hash.update(`${Buffer.byteLength(text)}:`)
-    hash.update(text)
+/** The current task of a member: its first unfinished owned task. */
+function currentTaskOf(memberName: string, tasks: readonly TeamTask[]): string {
+  for (const task of tasks) {
+    if (task.status === 'in_progress' && task.assignee === memberName) return task.id
   }
-  add(state.description)
-  add(state.planReviewState)
-  for (const member of state.members) {
-    add(member.name)
-    add(member.role)
-    add(member.provider)
-    add(member.model)
-    add(member.reasoningEffort)
-    add(member.executionPrompt)
-  }
-  for (const task of state.tasks) {
-    add(task.id)
-    add(task.subject)
-    add(task.description)
-    add(task.assignee)
-    for (const dependency of task.dependencies) add(dependency)
-  }
-  return hash.digest('base64url')
+  return ''
 }
 
 /** Compact `provider/model` route for the activity panel, or just the model. */
@@ -171,7 +127,6 @@ export function memberModelRoute(member: { provider?: string; model?: string } |
  * @param stateRoot - resolved absolute state root of the owning workspace.
  * @param workspace - display name of the owning workspace.
  * @param state - the durable team record.
- * @param options - historic roster/activity and long-detail projection switches.
  * @returns the panel snapshot.
  */
 export async function assembleTeamSnapshot(
@@ -186,11 +141,6 @@ export async function assembleTeamSnapshot(
   const roster = options.includeRemoved === true
     ? state.members
     : state.members.filter((member) => member.status !== 'removed')
-  const tasksByAssignee = indexTasksByAssignee(tasks)
-  const rosterByName = new Map<string, (typeof roster)[number]>()
-  for (const member of roster) {
-    if (!rosterByName.has(member.name)) rosterByName.set(member.name, member)
-  }
   const activity = options.historic === true
     ? new Map<string, 'running' | 'idle' | 'ready'>()
     : memberActivity(ctx, roster.map((member) => member.id))
@@ -204,9 +154,8 @@ export async function assembleTeamSnapshot(
     }
   }
   const members: TeamActivityMember[] = roster.map((member) => {
-    const owned = tasksByAssignee.get(member.name)
-    const done = owned?.completed ?? 0
-    const total = owned?.tasks.length ?? 0
+    const owned = tasks.filter((task) => task.assignee === member.name)
+    const done = owned.filter((task) => task.status === 'completed').length
     return {
       id: member.id,
       name: member.name,
@@ -214,9 +163,7 @@ export async function assembleTeamSnapshot(
       provider: member.provider?.trim() ?? '',
       model: member.model?.trim() ?? '',
       reasoningEffort: member.reasoningEffort?.trim() ?? '',
-      ...options.includeDetails === true
-        ? { executionPrompt: member.executionPrompt ?? '' }
-        : {},
+      executionPrompt: member.executionPrompt ?? '',
       status: member.status,
       activity: options.historic === true
         ? 'idle'
@@ -227,99 +174,98 @@ export async function assembleTeamSnapshot(
                 ? 'idle'
                 : 'unknown')
           : 'idle',
-      progress: total === 0 ? 0 : Math.round((done / total) * 100),
+      progress: owned.length === 0 ? 0 : Math.round((done / owned.length) * 100),
       done,
-      total,
-      currentTask: owned?.currentTask ?? '',
+      total: owned.length,
+      currentTask: currentTaskOf(member.name, tasks),
       unread: unreadByMember.get(member.name) ?? 0,
     }
   })
   const captainInbox = await readUnreadMailbox(stateRoot, state.id, CAPTAIN_KEY)
+  // The panel must reach the same delivery conclusion as the status tool, so
+  // it reads the same current bytes instead of trusting task records alone.
+  const audit = options.workspacePath === undefined ? undefined : auditTeamWorkspace(options.workspacePath, state)
+  const deliveryCheck = audit === undefined ? canDeclareDelivery(state) : canDeclareDelivery(state, audit)
+  const loop = audit === undefined ? describeQualityLoop(state) : describeQualityLoop(state, audit)
+  const staleById = new Map<string, string[]>()
+  if (audit !== undefined) {
+    for (const note of verdictAuditNotes(state, audit)) {
+      staleById.set(note.taskId, [...staleById.get(note.taskId) ?? [], note.message])
+    }
+  }
   return {
     workspace,
     teamId: state.id,
     name: state.name,
-    ...options.includeDetails === true && state.description !== undefined
-      ? { description: state.description }
-      : {},
+    ...state.description !== undefined ? { description: state.description } : {},
     captainSessionId: state.captainSessionId,
     phase: state.phase ?? 'running',
     ...state.phase === 'staged'
-      ? {
-          planReviewState: state.planReviewState ?? 'awaiting_review' as const,
-          detailRevision: stagedDetailRevision(state),
-        }
+      ? { planReviewState: state.planReviewState ?? 'awaiting_review' as const }
       : {},
     ...state.halted === true ? { halted: true } : {},
-    detail: options.includeDetails === true ? 'full' : 'summary',
+    ...audit === undefined ? {} : {
+      loopState: loop.state,
+      deliverable: loop.deliverable,
+      delivery: { ok: deliveryCheck.ok, blockers: [...deliveryCheck.blockers], warnings: [...deliveryCheck.warnings] },
+    },
     members,
     tasks: tasks.map((task) => ({
       id: task.id,
       subject: task.subject,
-      ...options.includeDetails === true
-        ? { description: task.description ?? '' }
-        : {},
+      description: task.description ?? '',
       status: task.status,
       state: taskVisualState(task.status, task.dependencies, tasks),
       assignee: task.assignee ?? '',
-      model: memberModelRoute(task.assignee === undefined ? undefined : rosterByName.get(task.assignee)),
+      model: memberModelRoute(roster.find((member) => member.name === task.assignee)),
       dependencies: task.dependencies,
       depth: depths.get(task.id) ?? 0,
       ...task.kind === undefined ? {} : { kind: task.kind },
       ...task.round === undefined ? {} : { round: task.round },
       ...task.verdict === undefined ? {} : { verdict: task.verdict },
+      ...staleById.get(task.id) === undefined ? {} : { verdictStale: (staleById.get(task.id) as string[]).join('; ') },
+      updatedAt: task.updatedAt,
     })),
     messageCount: captainInbox.length
       + members.reduce((count, member) => count + member.unread, 0),
-    ...options.includeCaptainInbox === true
-      ? {
-          captainInbox: captainInbox.slice(-5).map(message => ({
-            from: message.from,
-            content: message.content,
-          })),
-        }
-      : {},
-  }
-}
-
-async function listLiveTeamIds(stateRoot: string): Promise<readonly string[]> {
-  try {
-    return (await readdir(stateRoot, { withFileTypes: true }))
-      .filter(entry => entry.isDirectory())
-      .map(entry => entry.name)
-  } catch (error: unknown) {
-    if (error instanceof Error && 'code' in error && (error as NodeJS.ErrnoException).code === 'ENOENT') return []
-    throw error
+    captainInbox: captainInbox.slice(-5).map((message) => ({
+      from: message.from,
+      content: message.content,
+    })),
   }
 }
 
 /**
- * Collect selected live teams under the given workspace state roots.
+ * Collect every team under the given workspace state roots.
  * @param ctx - the plugin context.
  * @param roots - `{ workspace, stateRoot }` pairs (resolved absolute roots).
- * @param options - captain/team selection and detail projection.
  * @returns the snapshots in stable order (workspace, then team id).
  */
 export async function collectTeamsActivity(
   ctx: Context,
-  roots: readonly { workspace: string; stateRoot: string }[],
-  options: TeamActivityCollectionOptions = {},
+  roots: readonly { workspace: string; stateRoot: string; workspacePath?: string }[],
 ): Promise<TeamActivitySnapshot[]> {
   const snapshots: TeamActivitySnapshot[] = []
-  const requested = requestedTeamIds(options)
   for (const root of roots) {
-    const teamIds = await listLiveTeamIds(root.stateRoot)
-    for (const teamId of teamIds) {
-      if (requested !== undefined && !requested.has(teamId)) continue
+    let entries
+    try {
+      entries = await readdir(root.stateRoot, { withFileTypes: true })
+    } catch (error: unknown) {
+      if (error instanceof Error && 'code' in error && (error as NodeJS.ErrnoException).code === 'ENOENT') {
+        continue
+      }
+      throw error
+    }
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue
       try {
-        const state = await readTeam(root.stateRoot, teamId)
-        if (state === undefined || !selectedTeam(state, options)) continue
+        const state = await readTeam(root.stateRoot, entry.name)
+        if (state === undefined) continue
         snapshots.push(await assembleTeamSnapshot(ctx, root.stateRoot, root.workspace, state, {
-          includeDetails: options.includeDetails,
-          includeCaptainInbox: options.includeCaptainInbox,
+          ...root.workspacePath === undefined ? {} : { workspacePath: root.workspacePath },
         }))
       } catch {
-        ctx.logger.warn(`agent-teams: skipped unreadable team state "${teamId}" in workspace "${root.workspace}"`)
+        ctx.logger.warn(`agent-teams: skipped unreadable team state "${entry.name}" in workspace "${root.workspace}"`)
       }
     }
   }
@@ -327,39 +273,29 @@ export async function collectTeamsActivity(
 }
 
 /**
- * Collect selected archived teams under the given workspace state roots (the
+ * Collect every archived team under the given workspace state roots (the
  * `archive/` subdirectory of each state root). Used by the historic panel
  * path to restore full team detail after deletion.
  * @param ctx - the plugin context.
  * @param roots - `{ workspace, stateRoot }` pairs.
- * @param options - captain/team selection and detail projection.
  * @returns the archived snapshots in stable order.
  */
 export async function collectArchivedTeamsActivity(
   ctx: Context,
   roots: readonly { workspace: string; stateRoot: string }[],
-  options: TeamActivityCollectionOptions = {},
 ): Promise<TeamActivitySnapshot[]> {
   const snapshots: TeamActivitySnapshot[] = []
-  const requested = requestedTeamIds(options)
   for (const root of roots) {
-    const teamIds = await listArchivedTeamIds(root.stateRoot)
-    for (const teamId of teamIds) {
-      if (requested !== undefined && !requested.has(teamId)) continue
+    for (const teamId of await listArchivedTeamIds(root.stateRoot)) {
       try {
         const state = await readArchivedTeam(root.stateRoot, teamId)
-        if (state === undefined || !selectedTeam(state, options)) continue
+        if (state === undefined) continue
         snapshots.push(await assembleTeamSnapshot(
           ctx,
           join(root.stateRoot, 'archive'),
           root.workspace,
           state,
-          {
-            includeRemoved: true,
-            historic: true,
-            includeDetails: options.includeDetails,
-            includeCaptainInbox: options.includeCaptainInbox,
-          },
+          { includeRemoved: true, historic: true },
         ))
       } catch {
         ctx.logger.warn(`agent-teams: skipped unreadable archived team "${teamId}" in workspace "${root.workspace}"`)

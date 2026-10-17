@@ -3,10 +3,10 @@ import { pathToFileURL } from 'node:url'
 import { policy, validatePackageCompatibility } from './compatibility.mjs'
 
 // Keep every prerelease and fork build away from npm's default channel.
-export function releaseMetadata(pkg, support = policy) {
-  const match = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-(alpha|beta|rc|dsh012rc1|dsh013alpha2|dsh015alpha2|dsh015rc1|dsh016alpha1|dsh016alpha2|dsh017rc1)\.(0|[1-9]\d*))?$/.exec(pkg.version)
+export function releaseMetadata(pkg, support = policy, workspace) {
+  const match = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-(alpha|beta|rc|dsh[0-9a-z]+)\.(0|[1-9]\d*))?$/.exec(pkg.version)
   if (!match || match[0] !== pkg.version) throw new Error(`Unsupported release version: ${pkg.version}`)
-  validatePackageCompatibility(pkg, support)
+  validatePackageCompatibility(pkg, support, workspace)
   const channel = match[4]
   const distTag = channel === undefined
     ? 'latest'

@@ -44,6 +44,8 @@ jobs:
       - name: Validate the single compatibility policy
         id: policy
         run: node scripts/compatibility.mjs --github-output >> "$GITHUB_OUTPUT"
+      - name: Verify committed Git installation artifacts before rebuilding
+        run: node scripts/git-artifacts.mjs
       - name: Typecheck, build, and verify
         run: |
           pnpm typecheck

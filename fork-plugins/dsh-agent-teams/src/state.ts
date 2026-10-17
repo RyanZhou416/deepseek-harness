@@ -15,10 +15,12 @@
 
 import { createHash, randomUUID } from 'node:crypto'
 import { readFileSync } from 'node:fs'
-import { mkdir, open, readFile, readdir, rename, rm, stat } from 'node:fs/promises'
-import { join, sep } from 'node:path'
-import { TERMINAL_TASK_STATUSES, type TaskStatus, type TeamMember, type TeamMessage, type TeamProfileSnapshot, type TeamState, type TeamTask } from './types.ts'
-import { hasValidQualityTaskFields, isReviewPolicy, normalizeBlankOptionalTaskFields } from './quality-gates.ts'
+import { mkdir, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises'
+import { join } from 'node:path'
+import type { MemberToolFilter } from './tool-policies.ts'
+import { FINDING_SEVERITIES, REVIEW_VERDICTS, TASK_KINDS, TERMINAL_TASK_STATUSES, type ReviewFinding, type TaskStatus, type TeamMember, type TeamMessage, type TeamProfileSnapshot, type TeamState, type TeamTask } from './types.ts'
+import { hasValidQualityTaskFields, isReviewPolicy, isValidFindingLine, normalizeBlankOptionalTaskFields } from './quality-gates.ts'
+import { teamLeadMatch, type LeadIdentity } from './lineage.ts'
 
 export {
   amendTaskContract,
@@ -32,7 +34,9 @@ export {
   hasValidQualityTaskFields,
   isQualityKind,
   isTaskRevision,
+  isValidFindingLine,
   normalizeBlankOptionalTaskFields,
+  normalizeSentinelNumericTaskFields,
   pathMatchesScope,
   planQualityFollowUp,
   qualityPlanningPrompt,
@@ -53,136 +57,6 @@ const RETIRED_MEMBERS_FILE = 'retired-members.json'
 
 /** In-process per-team mutation queues (promise chains). */
 const locks = new Map<string, Promise<unknown>>()
-
-/** Bounded process-local projection cache; it never owns acknowledged history. */
-const UNREAD_MAILBOX_CACHE_MAX_ENTRIES = 256
-const UNREAD_MAILBOX_CACHE_MAX_BYTES = 8 * 1024 * 1024
-
-interface MailboxDiagnostic {
-  readonly lineNumber: number
-  readonly message: string
-}
-
-interface UnreadMailboxCacheEntry {
-  readonly signature: string
-  readonly pending: readonly Readonly<TeamMessage>[]
-  readonly diagnostics: readonly MailboxDiagnostic[]
-  readonly bytes: number
-}
-
-const unreadMailboxCache = new Map<string, UnreadMailboxCacheEntry>()
-let unreadMailboxCacheBytes = 0
-let unreadMailboxCacheHits = 0
-let unreadMailboxCacheMisses = 0
-let unreadMailboxFileReads = 0
-let unreadMailboxCacheInvalidations = 0
-
-/** Internal observability used by the plugin's offline performance checks. */
-export interface UnreadMailboxCacheStats {
-  readonly entries: number
-  readonly bytes: number
-  readonly hits: number
-  readonly misses: number
-  readonly fileReads: number
-  readonly invalidations: number
-  readonly maxEntries: number
-  readonly maxBytes: number
-}
-
-/** Snapshot unread-projection cache counters without exposing cached content. */
-export function unreadMailboxCacheStats(): UnreadMailboxCacheStats {
-  return {
-    entries: unreadMailboxCache.size,
-    bytes: unreadMailboxCacheBytes,
-    hits: unreadMailboxCacheHits,
-    misses: unreadMailboxCacheMisses,
-    fileReads: unreadMailboxFileReads,
-    invalidations: unreadMailboxCacheInvalidations,
-    maxEntries: UNREAD_MAILBOX_CACHE_MAX_ENTRIES,
-    maxBytes: UNREAD_MAILBOX_CACHE_MAX_BYTES,
-  }
-}
-
-/** Clear only the transient projection cache and counters; disk is untouched. */
-export function resetUnreadMailboxCache(): void {
-  unreadMailboxCache.clear()
-  unreadMailboxCacheBytes = 0
-  unreadMailboxCacheHits = 0
-  unreadMailboxCacheMisses = 0
-  unreadMailboxFileReads = 0
-  unreadMailboxCacheInvalidations = 0
-}
-
-function isMissingFile(error: unknown): boolean {
-  return error instanceof Error
-    && 'code' in error
-    && (error as NodeJS.ErrnoException).code === 'ENOENT'
-}
-
-async function mailboxFileSignature(file: string): Promise<string> {
-  try {
-    const value = await stat(file, { bigint: true })
-    return `${value.dev}:${value.ino}:${value.size}:${value.mtimeNs}:${value.ctimeNs}`
-  } catch (error: unknown) {
-    if (isMissingFile(error)) return 'missing'
-    throw error
-  }
-}
-
-function removeUnreadMailboxCacheEntry(file: string): void {
-  const existing = unreadMailboxCache.get(file)
-  if (existing === undefined) return
-  unreadMailboxCache.delete(file)
-  unreadMailboxCacheBytes -= existing.bytes
-}
-
-function invalidateUnreadMailbox(file: string): void {
-  if (!unreadMailboxCache.has(file)) return
-  removeUnreadMailboxCacheEntry(file)
-  unreadMailboxCacheInvalidations += 1
-}
-
-function invalidateTeamUnreadMailboxes(stateRoot: string, teamId: string): void {
-  const inbox = join(stateRoot, teamId, 'inbox')
-  const prefix = `${inbox}${sep}`
-  for (const file of [...unreadMailboxCache.keys()]) {
-    if (file === inbox || file.startsWith(prefix)) invalidateUnreadMailbox(file)
-  }
-}
-
-function rememberUnreadMailbox(file: string, entry: UnreadMailboxCacheEntry): void {
-  removeUnreadMailboxCacheEntry(file)
-  if (entry.bytes > UNREAD_MAILBOX_CACHE_MAX_BYTES) return
-  while (unreadMailboxCache.size >= UNREAD_MAILBOX_CACHE_MAX_ENTRIES
-    || unreadMailboxCacheBytes + entry.bytes > UNREAD_MAILBOX_CACHE_MAX_BYTES) {
-    const oldest = unreadMailboxCache.keys().next().value as string | undefined
-    if (oldest === undefined) break
-    removeUnreadMailboxCacheEntry(oldest)
-  }
-  unreadMailboxCache.set(file, entry)
-  unreadMailboxCacheBytes += entry.bytes
-}
-
-function touchUnreadMailbox(file: string, entry: UnreadMailboxCacheEntry): void {
-  unreadMailboxCache.delete(file)
-  unreadMailboxCache.set(file, entry)
-}
-
-function replayMailboxDiagnostics(
-  diagnostics: readonly MailboxDiagnostic[],
-  onMalformedLine?: (lineNumber: number, error: unknown) => void,
-): void {
-  if (onMalformedLine === undefined) return
-  for (const diagnostic of diagnostics) {
-    onMalformedLine(diagnostic.lineNumber, new Error(diagnostic.message))
-  }
-}
-
-function availableUnreadMessages(
-  pending: readonly Readonly<TeamMessage>[],
-): TeamMessage[] {
-  return pending.map(message => ({ ...message }))
-}
 
 /**
  * Serialize mutations of one team across the whole process.
@@ -294,6 +168,16 @@ export function transitionError(current: TaskStatus, next: TaskStatus): string |
   return undefined
 }
 
+/** Execution results belong to one attempt; a retry must produce its own evidence. */
+function clearAttemptResult(task: TeamTask): void {
+  task.output = undefined
+  task.verdict = undefined
+  task.findings = undefined
+  task.changedPaths = undefined
+  task.acceptanceResults = undefined
+  task.commandsRun = undefined
+}
+
 /** Activate the task's current generation for one owner and return its capability id. */
 export function activateTaskAttempt(task: TeamTask, assignee: string): string {
   const attemptId = randomUUID()
@@ -302,7 +186,7 @@ export function activateTaskAttempt(task: TeamTask, assignee: string): string {
   task.attemptId = attemptId
   task.handoffId = undefined
   task.reassigning = false
-  task.output = undefined
+  clearAttemptResult(task)
   task.updatedAt = Date.now()
   return attemptId
 }
@@ -338,7 +222,7 @@ export function invalidateTaskAttempt(
   task.status = 'pending'
   task.assignee = nextAssignee
   task.reassigning = reassigning
-  task.output = undefined
+  clearAttemptResult(task)
   task.updatedAt = Date.now()
 }
 
@@ -351,7 +235,6 @@ export async function createTeamDir(stateRoot: string, state: TeamState): Promis
   const dir = join(stateRoot, state.id)
   await mkdir(join(dir, 'inbox'), { recursive: true })
   await atomicWriteText(join(dir, 'team.json'), JSON.stringify(state, null, 2))
-  invalidateTeamUnreadMailboxes(stateRoot, state.id)
 }
 
 /**
@@ -365,7 +248,7 @@ export async function readTeam(stateRoot: string, teamId: string): Promise<TeamS
     const value: unknown = JSON.parse(stripLeadingBom(raw))
     const team = coerceTeamState(value, teamId)
     if (team === undefined) {
-      throw new Error(`invalid AgentTeams state in team "${teamId}"`)
+      throw new Error(`invalid AgentTeams state in team "${teamId}": ${describeTeamStateDefect(value, teamId)}`)
     }
     return team
   } catch (error: unknown) {
@@ -391,7 +274,7 @@ export function readTeamSync(stateRoot: string, teamId: string): TeamState | und
     const value: unknown = JSON.parse(stripLeadingBom(raw))
     const team = coerceTeamState(value, teamId)
     if (team === undefined) {
-      throw new Error(`invalid AgentTeams state in team "${teamId}"`)
+      throw new Error(`invalid AgentTeams state in team "${teamId}": ${describeTeamStateDefect(value, teamId)}`)
     }
     return team
   } catch (error: unknown) {
@@ -399,51 +282,6 @@ export function readTeamSync(stateRoot: string, teamId: string): TeamState | und
       return undefined
     }
     throw error
-  }
-}
-
-/**
- * Whether a team read failed on the contents of `team.json` (truncated,
- * crash zero-filled, or schema-invalid) rather than on I/O.
- * @param error - the error thrown by {@link readTeam} or {@link readTeamSync}.
- * @returns true for JSON and team-shape failures.
- */
-export function isUnreadableTeamState(error: unknown): boolean {
-  return error instanceof SyntaxError
-    || (error instanceof Error && error.message.startsWith('invalid AgentTeams state'))
-}
-
-const reportedUnreadableTeams = new Set<string>()
-
-/**
- * Warn once per team directory and failure that a workspace-wide scan skipped
- * an unreadable team. Scans skip such teams so one damaged team cannot fail
- * team lookups for every other session in the workspace; reads that name the
- * team directly still throw.
- * @param stateRoot - resolved absolute state root directory.
- * @param teamId - the skipped team's directory name.
- * @param error - the content failure.
- */
-export function reportUnreadableTeam(stateRoot: string, teamId: string, error: unknown): void {
-  // Crash zero-fill puts NULs into the JSON error text.
-  const reason = String(error).replace(/[\u0000-\u001f]/gu, '?')
-  const key = `${join(stateRoot, teamId)}\n${reason}`
-  if (reportedUnreadableTeams.has(key)) return
-  if (reportedUnreadableTeams.size >= 256) reportedUnreadableTeams.clear()
-  reportedUnreadableTeams.add(key)
-  process.emitWarning(`agent-teams: skipped unreadable team state "${teamId}" under "${stateRoot}": ${reason}`, {
-    code: 'DSH_AGENT_TEAMS_UNREADABLE_TEAM',
-  })
-}
-
-/** {@link readTeam} for workspace-wide scans: an unreadable team reads as absent after one warning. */
-async function readTeamForScan(stateRoot: string, teamId: string): Promise<TeamState | undefined> {
-  try {
-    return await readTeam(stateRoot, teamId)
-  } catch (error: unknown) {
-    if (!isUnreadableTeamState(error)) throw error
-    reportUnreadableTeam(stateRoot, teamId, error)
-    return undefined
   }
 }
 
@@ -503,11 +341,14 @@ export async function recordRetiredMemberIds(stateRoot: string, memberIds: reado
  * Find the team owned by one captain session (at most one per captain).
  * @param stateRoot - resolved absolute state root directory.
  * @param captainSessionId - the owning session id.
+ * @param lead - durable lead identity of the calling session, when it may lead
+ *   through a fork chain; omitted keeps the exact-id contract.
  * @returns the team record, or undefined when the captain leads no team.
  */
 export async function findTeamByCaptain(
   stateRoot: string,
   captainSessionId: string,
+  lead?: LeadIdentity,
 ): Promise<TeamState | undefined> {
   let entries
   try {
@@ -521,8 +362,9 @@ export async function findTeamByCaptain(
   let found: TeamState | undefined
   for (const entry of entries) {
     if (!entry.isDirectory()) continue
-    const team = await readTeamForScan(stateRoot, entry.name)
-    if (team?.captainSessionId === captainSessionId) {
+    const team = await readTeam(stateRoot, entry.name)
+    if (team !== undefined && (team.captainSessionId === captainSessionId
+      || (lead !== undefined && teamLeadMatch(team, lead)))) {
       if (found !== undefined && found.id !== team.id) {
         throw new Error(`captain session leads multiple active teams ("${found.id}", "${team.id}"); archive one before continuing`)
       }
@@ -534,15 +376,18 @@ export async function findTeamByCaptain(
 
 /**
  * Find the team in which one session is an active participant.
- * Captains match `captainSessionId`; members match their durable child session
- * id. Removed members no longer have access to team-scoped tools.
+ * Captains match `captainSessionId` — including a lead session that inherited
+ * it through a fork — and members match their durable child session id.
+ * Removed members no longer have access to team-scoped tools.
  * @param stateRoot - resolved absolute state root directory.
  * @param agentSessionId - calling captain/member session id.
+ * @param lead - durable lead identity of the calling session, when available.
  * @returns the team record, or undefined when the caller belongs to no team.
  */
 export async function findTeamByParticipant(
   stateRoot: string,
   agentSessionId: string,
+  lead?: LeadIdentity,
 ): Promise<TeamState | undefined> {
   let entries
   try {
@@ -556,9 +401,10 @@ export async function findTeamByParticipant(
   let found: TeamState | undefined
   for (const entry of entries) {
     if (!entry.isDirectory()) continue
-    const team = await readTeamForScan(stateRoot, entry.name)
-    const participates = team?.captainSessionId === agentSessionId
-      || team?.members.some((member) => member.id === agentSessionId && member.status !== 'removed') === true
+    const team = await readTeam(stateRoot, entry.name)
+    const participates = team !== undefined && (team.captainSessionId === agentSessionId
+      || (lead !== undefined && teamLeadMatch(team, lead))
+      || team.members.some((member) => member.id === agentSessionId && member.status !== 'removed'))
     if (participates && team !== undefined) {
       if (found !== undefined && found.id !== team.id) {
         throw new Error(`agent session belongs to multiple active teams ("${found.id}", "${team.id}"); the target team is ambiguous`)
@@ -599,31 +445,6 @@ export async function appendMailbox(
   }
   const separator = existing !== '' && !existing.endsWith('\n') ? '\n' : ''
   await atomicWriteText(file, `${existing}${separator}${JSON.stringify(message)}\n`)
-  invalidateUnreadMailbox(file)
-}
-
-function parseMailboxText(
-  raw: string,
-  onMalformedLine?: (lineNumber: number, error: unknown) => void,
-): TeamMessage[] {
-  const messages: TeamMessage[] = []
-  for (const [index, rawLine] of raw.split('\n').entries()) {
-    const line = stripLeadingBom(rawLine)
-    if (line.trim() === '') continue
-    let value: unknown
-    try {
-      value = JSON.parse(line)
-    } catch {
-      onMalformedLine?.(index + 1, new Error('invalid JSON'))
-      continue
-    }
-    if (!isTeamMessage(value)) {
-      onMalformedLine?.(index + 1, new Error('invalid message shape'))
-      continue
-    }
-    messages.push(value)
-  }
-  return messages
 }
 
 /**
@@ -644,9 +465,28 @@ export async function readMailbox(
   const file = join(stateRoot, teamId, 'inbox', `${sanitizeKey(agentKey)}.jsonl`)
   try {
     const raw = await readFile(file, 'utf8')
-    return parseMailboxText(raw, onMalformedLine)
+    const messages: TeamMessage[] = []
+    for (const [index, rawLine] of raw.split('\n').entries()) {
+      const line = stripLeadingBom(rawLine)
+      if (line.trim() === '') continue
+      let value: unknown
+      try {
+        value = JSON.parse(line)
+      } catch {
+        onMalformedLine?.(index + 1, new Error('invalid JSON'))
+        continue
+      }
+      if (!isTeamMessage(value)) {
+        onMalformedLine?.(index + 1, new Error('invalid message shape'))
+        continue
+      }
+      messages.push(value)
+    }
+    return messages
   } catch (error: unknown) {
-    if (isMissingFile(error)) return []
+    if (error instanceof Error && 'code' in error && (error as NodeJS.ErrnoException).code === 'ENOENT') {
+      return []
+    }
     throw error
   }
 }
@@ -658,40 +498,8 @@ export async function readUnreadMailbox(
   agentKey: string,
   onMalformedLine?: (lineNumber: number, error: unknown) => void,
 ): Promise<TeamMessage[]> {
-  const file = join(stateRoot, teamId, 'inbox', `${sanitizeKey(agentKey)}.jsonl`)
-  const signatureBefore = await mailboxFileSignature(file)
-  const cached = unreadMailboxCache.get(file)
-  if (cached !== undefined && cached.signature === signatureBefore) {
-    unreadMailboxCacheHits += 1
-    touchUnreadMailbox(file, cached)
-    replayMailboxDiagnostics(cached.diagnostics, onMalformedLine)
-    return availableUnreadMessages(cached.pending)
-  }
-
-  unreadMailboxCacheMisses += 1
-  const diagnostics: MailboxDiagnostic[] = []
-  let raw = ''
-  try {
-    unreadMailboxFileReads += 1
-    raw = await readFile(file, 'utf8')
-  } catch (error: unknown) {
-    if (!isMissingFile(error)) throw error
-  }
-  const messages = parseMailboxText(raw, (lineNumber, error) => {
-    const message = error instanceof Error ? error.message : String(error)
-    diagnostics.push({ lineNumber, message })
-    onMalformedLine?.(lineNumber, error)
-  })
-  const pending = messages
+  return (await readMailbox(stateRoot, teamId, agentKey, onMalformedLine))
     .filter(message => message.readAt === undefined && message.discardedAt === undefined)
-    .map(message => Object.freeze({ ...message }))
-  const signatureAfter = await mailboxFileSignature(file)
-  if (signatureAfter === signatureBefore) {
-    const bytes = pending.reduce((total, message) => total + Buffer.byteLength(JSON.stringify(message)), 0)
-      + diagnostics.reduce((total, diagnostic) => total + Buffer.byteLength(diagnostic.message) + 16, 0)
-    rememberUnreadMailbox(file, { signature: signatureAfter, pending, diagnostics, bytes })
-  }
-  return availableUnreadMessages(pending)
 }
 
 /** Pending delivery is distinct from delivered-but-not-yet-read input. */
@@ -732,7 +540,6 @@ async function mutateMailbox(
     }
   })
   await atomicWriteText(file, lines.join('\n'))
-  invalidateUnreadMailbox(file)
 }
 
 /** Lease selected fallback messages to one delivery path. */
@@ -802,8 +609,6 @@ function stripLeadingBom(value: string): string {
 
 /** Rename attempts before falling back to a direct overwrite. */
 const ATOMIC_RENAME_RETRIES = 3
-/** Directory locks can outlive a file replacement's fallback window on Windows. */
-const ATOMIC_DIRECTORY_RENAME_RETRIES = 5
 /** Pause between rename attempts, giving a briefly-locking owner time to finish. */
 const ATOMIC_RENAME_RETRY_DELAY_MS = 50
 /**
@@ -898,31 +703,16 @@ export async function replaceFileAtomicOrDirect(
 async function atomicWriteText(file: string, content: string): Promise<void> {
   const temporary = `${file}.${process.pid}.${randomUUID()}.tmp`
   try {
-    await writeDurableText(temporary, content, 'wx')
+    await writeFile(temporary, content, { encoding: 'utf8', flag: 'wx' })
   } catch (error: unknown) {
     await rm(temporary, { force: true }).catch(() => undefined)
     throw error
   }
   await replaceFileAtomicOrDirect(temporary, file, content, {
     rename: (from, to) => rename(from, to),
-    writeFile: (target, payload) => writeDurableText(target, payload, 'w'),
+    writeFile: (target, payload) => writeFile(target, payload, 'utf8'),
     remove: (path) => rm(path, { force: true }),
   })
-}
-
-/**
- * Write UTF-8 text and flush it to stable storage before returning. Without
- * the flush, a power loss after the rename can leave the target at its new
- * length with never-written (zero-filled) contents.
- */
-async function writeDurableText(file: string, content: string, flag: 'w' | 'wx'): Promise<void> {
-  const handle = await open(file, flag)
-  try {
-    await handle.writeFile(content, 'utf8')
-    await handle.sync()
-  } finally {
-    await handle.close()
-  }
 }
 
 /** Whether a parsed JSON value is a plain record. */
@@ -933,6 +723,38 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 /** Whether a value is an optional string. */
 function isOptionalString(value: unknown): value is string | undefined {
   return value === undefined || typeof value === 'string'
+}
+
+/** Whether a value is a non-empty (non-blank) string. */
+function nonemptyString(value: unknown): value is string {
+  return typeof value === 'string' && value.trim() !== ''
+}
+
+/** Whether a value is an absent or non-blank string (a persisted id/name). */
+function isOptionalNonBlankString(value: unknown): value is string | undefined {
+  return value === undefined || (typeof value === 'string' && value.trim() !== '')
+}
+
+/** Whether a value is a non-empty list of non-blank tool names. */
+function isToolNameList(value: unknown): value is string[] {
+  return Array.isArray(value)
+    && value.length > 0
+    && value.every(name => typeof name === 'string' && name.trim() !== '')
+}
+
+/**
+ * Validate one persisted effective tool filter (#59). `deny` is part of the
+ * contract and never empty (the captain-only deny list is always included); an
+ * `allow` list, when present, is non-empty for the same reason. A wrong-typed
+ * or empty list is rejected instead of being silently accepted at the durable
+ * boundary — the same class of drift #188 fixed for team records.
+ */
+function isMemberToolFilter(value: unknown): value is MemberToolFilter {
+  if (!isRecord(value)) return false
+  const allow = value['allow']
+  const deny = value['deny']
+  if (allow !== undefined && !isToolNameList(allow)) return false
+  return isToolNameList(deny)
 }
 
 /** Whether a value is a finite timestamp/counter number. */
@@ -957,6 +779,9 @@ function isTeamMember(value: unknown): value is TeamMember {
     && (value['executionPrompt'] === undefined || typeof value['executionPrompt'] === 'string')
     && (value['fallback'] === undefined || (isRecord(value['fallback']) && typeof value['fallback']['provider'] === 'string' && typeof value['fallback']['model'] === 'string'))
     && (value['fallbackActive'] === undefined || typeof value['fallbackActive'] === 'boolean')
+    // A member without a policy keeps the legacy shape: both fields stay absent.
+    && isOptionalNonBlankString(value['toolPolicy'])
+    && (value['toolFilter'] === undefined || isMemberToolFilter(value['toolFilter']))
     && isFiniteNumber(value['joinedAt'])
     && (value['status'] === 'idle' || value['status'] === 'working' || value['status'] === 'removed')
 }
@@ -1013,7 +838,9 @@ function coerceTeamState(value: unknown, expectedId: string): TeamState | undefi
     // Tolerate legacy dirty records instead of bricking the whole team on
     // reload: blank optional fields written by older builds (or by models that
     // materialize optionals as "") are normalized to omitted, matching the
-    // profileSeedId handling below and the tool-input normalization.
+    // profileSeedId handling below and the tool-input normalization. The same
+    // pass drops out-of-contract numeric sentinels such as `line: -1`
+    // (issue #188), so an already-written bad record self-heals on read.
     const cleaned = normalizeBlankOptionalTaskFields(task)
     if (cleaned['profileSeedId'] !== undefined && (typeof cleaned['profileSeedId'] !== 'string' || cleaned['profileSeedId'].trim() === '')) {
       const next = { ...cleaned }
@@ -1026,6 +853,173 @@ function coerceTeamState(value: unknown, expectedId: string): TeamState | undefi
   return isTeamState(coerced, expectedId) ? coerced : undefined
 }
 
+/**
+ * Name the first durable defect in a record `coerceTeamState` rejected. Before
+ * this, a rejected `team.json` surfaced only as
+ * `invalid AgentTeams state in team "x"` — no task, no field, no value — while
+ * every AgentTeams tool (read *and* write) failed at once, leaving an operator
+ * to bisect the file by hand (issue #188). The detail is computed only on the
+ * failure path, so the happy path keeps its existing cost.
+ * @param raw - the parsed record as read from disk, before coercion.
+ * @param expectedId - the team id the record was read for.
+ * @returns a `task "t2": findings[0].line -1 must be ...` style detail.
+ */
+export function describeTeamStateDefect(raw: unknown, expectedId: string): string {
+  if (!isRecord(raw)) return 'record must be a JSON object'
+  if (!Array.isArray(raw['tasks'])) {
+    return raw['tasks'] === undefined ? 'tasks is missing' : `tasks must be an array (got ${typeof raw['tasks']})`
+  }
+  const tasks = (raw['tasks'] as unknown[]).map((task) => isRecord(task) ? normalizeBlankOptionalTaskFields(task) : task)
+  for (const [index, task] of tasks.entries()) {
+    if (!isRecord(task)) return `tasks[${index}] must be an object`
+    const label = typeof task['id'] === 'string' && task['id'] !== '' ? `task "${task['id'] as string}"` : `tasks[${index}]`
+    const detail = describeTaskDefect(task)
+    if (detail === undefined) continue
+    return `${label}: ${detail}`
+  }
+  const ids = tasks.filter(isRecord).map((task) => task['id'])
+  if (ids.some((id) => typeof id !== 'string' || id === '')) return 'a task id must be a non-empty string'
+  const seen = new Set<string>()
+  for (const id of ids as string[]) {
+    if (seen.has(id)) return `task "${id}": duplicated task id`
+    seen.add(id)
+  }
+  if (raw['id'] !== expectedId) return `id ${JSON.stringify(raw['id'])} must equal "${expectedId}"`
+  if (typeof raw['name'] !== 'string' || raw['name'].trim() === '') return 'name must be a non-empty string'
+  if (!isOptionalString(raw['description'])) return 'description must be a string'
+  if (raw['profile'] !== undefined && !isTeamProfileSnapshot(raw['profile'])) return 'profile is not a valid profile snapshot'
+  if (typeof raw['captainSessionId'] !== 'string' || raw['captainSessionId'] === '') return 'captainSessionId must be a non-empty string'
+  if (!isFiniteNumber(raw['createdAt'])) return 'createdAt must be a finite number'
+  if (!Array.isArray(raw['members'])) return 'members must be an array'
+  const memberKeys = new Set<string>()
+  const memberIds = new Set<string>()
+  for (const [index, member] of (raw['members'] as unknown[]).entries()) {
+    if (!isTeamMember(member)) return `members[${index}] is not a valid member record`
+    const key = sanitizeKey(member.name)
+    if (key === CAPTAIN_KEY) return `members[${index}]: name "${member.name}" is reserved for the captain`
+    if (memberKeys.has(key)) return `members[${index}]: name "${member.name}" is already used by another member`
+    memberKeys.add(key)
+    if (member.id === '') continue
+    if (memberIds.has(member.id)) return `members[${index}]: id "${member.id}" is duplicated`
+    memberIds.add(member.id)
+  }
+  if (!Number.isSafeInteger(raw['taskSeq']) || (raw['taskSeq'] as number) < 0) return 'taskSeq must be an integer >= 0'
+  if (raw['phase'] !== undefined && raw['phase'] !== 'staged' && raw['phase'] !== 'running') {
+    return `phase ${JSON.stringify(raw['phase'])} must be "staged" or "running"`
+  }
+  if (raw['planReviewState'] !== undefined
+    && raw['planReviewState'] !== 'awaiting_review'
+    && raw['planReviewState'] !== 'awaiting_feedback') {
+    return `planReviewState ${JSON.stringify(raw['planReviewState'])} is invalid`
+  }
+  for (const key of ['approvedAt', 'haltedAt'] as const) {
+    if (raw[key] !== undefined && !isFiniteNumber(raw[key])) return `${key} must be a finite number`
+  }
+  if (raw['halted'] !== undefined && typeof raw['halted'] !== 'boolean') return 'halted must be a boolean'
+  if (raw['reviewPolicy'] !== undefined && !isReviewPolicy(raw['reviewPolicy'])) return 'reviewPolicy is invalid'
+  if (raw['escalated'] !== undefined && typeof raw['escalated'] !== 'boolean') return 'escalated must be a boolean'
+  return 'record does not satisfy the durable team contract'
+}
+
+/** The first task-contract violation, or `undefined` when the task is valid. */
+function describeTaskDefect(task: Record<string, unknown>): string | undefined {
+  if (typeof task['id'] !== 'string') return 'id must be a string'
+  if (!isOptionalString(task['profileSeedId'])) return 'profileSeedId must be a string'
+  if (typeof task['profileSeedId'] === 'string' && task['profileSeedId'].trim() === '') return 'profileSeedId must not be blank'
+  if (typeof task['subject'] !== 'string') return 'subject must be a string'
+  if (!isOptionalString(task['description'])) return 'description must be a string'
+  const statuses = ['pending', 'claimed', 'in_progress', 'completed', 'failed', 'cancelled']
+  if (!statuses.includes(task['status'] as string)) return `status ${JSON.stringify(task['status'])} is invalid`
+  if (!isOptionalString(task['assignee'])) return 'assignee must be a string'
+  if (!Array.isArray(task['dependencies'])) return 'dependencies must be an array'
+  if (!(task['dependencies'] as unknown[]).every((dependency) => typeof dependency === 'string')) return 'dependencies must contain only strings'
+  if (!isOptionalString(task['output'])) return 'output must be a string'
+  if (task['attempt'] !== undefined && !(Number.isSafeInteger(task['attempt']) && (task['attempt'] as number) >= 0)) {
+    return `attempt ${JSON.stringify(task['attempt'])} must be an integer >= 0`
+  }
+  if (!isOptionalString(task['attemptId'])) return 'attemptId must be a string'
+  if (!isOptionalString(task['handoffId'])) return 'handoffId must be a string'
+  if (!isOptionalString(task['handoffFromMemberId'])) return 'handoffFromMemberId must be a string'
+  if (task['reassigning'] !== undefined && typeof task['reassigning'] !== 'boolean') return 'reassigning must be a boolean'
+  if (!isFiniteNumber(task['createdAt'])) return 'createdAt must be a finite number'
+  if (!isFiniteNumber(task['updatedAt'])) return 'updatedAt must be a finite number'
+  return describeQualityTaskDefect(task)
+}
+
+/** Mirror of `hasValidQualityTaskFields`, reporting the first failing field. */
+function describeQualityTaskDefect(task: Record<string, unknown>): string | undefined {
+  if (task['kind'] !== undefined && !(TASK_KINDS as readonly string[]).includes(task['kind'] as string)) {
+    return `kind ${JSON.stringify(task['kind'])} is invalid`
+  }
+  if (task['verdict'] !== undefined && !(REVIEW_VERDICTS as readonly string[]).includes(task['verdict'] as string)) {
+    return `verdict ${JSON.stringify(task['verdict'])} is invalid`
+  }
+  if (task['round'] !== undefined && !(Number.isSafeInteger(task['round']) && (task['round'] as number) >= 1)) {
+    return `round ${JSON.stringify(task['round'])} must be an integer >= 1`
+  }
+  for (const key of ['objective', 'reviewedTaskId', 'sourceTaskId'] as const) {
+    if (task[key] !== undefined && !nonemptyString(task[key])) return `${key} must be a non-empty string`
+  }
+  if (task['reviewedAttempt'] !== undefined
+    && !(Number.isSafeInteger(task['reviewedAttempt']) && (task['reviewedAttempt'] as number) >= 0)) {
+    return `reviewedAttempt ${JSON.stringify(task['reviewedAttempt'])} must be an integer >= 0`
+  }
+  const stringLists = ['inScope', 'outOfScope', 'acceptance', 'verify', 'deliverables', 'nonGoals', 'changedPaths', 'sourceFindingIds', 'coverageOf'] as const
+  for (const key of stringLists) {
+    const value = task[key]
+    if (value === undefined) continue
+    if (!Array.isArray(value)) return `${key} must be an array`
+    const badIndex = (value as unknown[]).findIndex((item) => !nonemptyString(item))
+    if (badIndex >= 0) return `${key}[${badIndex}] must be a non-empty string`
+  }
+  if (task['findings'] !== undefined) {
+    const findings = task['findings']
+    if (!Array.isArray(findings)) return 'findings must be an array'
+    for (const [index, finding] of (findings as unknown[]).entries()) {
+      const detail = describeFindingDefect(finding)
+      if (detail !== undefined) return `findings[${index}].${detail}`
+    }
+    const ids = (findings as ReviewFinding[]).map((finding) => finding.id)
+    if (new Set(ids).size !== ids.length) return 'findings ids must be unique'
+  }
+  if (task['acceptanceResults'] !== undefined) {
+    const results = task['acceptanceResults']
+    if (!Array.isArray(results)) return 'acceptanceResults must be an array'
+    for (const [index, result] of (results as unknown[]).entries()) {
+      if (!isRecord(result)) return `acceptanceResults[${index}] must be an object`
+      if (!nonemptyString(result['criterion'])) return `acceptanceResults[${index}].criterion must be a non-empty string`
+      if (result['status'] !== 'passed' && result['status'] !== 'failed') return `acceptanceResults[${index}].status must be "passed" or "failed"`
+      if (result['evidence'] !== undefined && typeof result['evidence'] !== 'string') return `acceptanceResults[${index}].evidence must be a string`
+    }
+  }
+  if (task['commandsRun'] !== undefined) {
+    const commands = task['commandsRun']
+    if (!Array.isArray(commands)) return 'commandsRun must be an array'
+    for (const [index, command] of (commands as unknown[]).entries()) {
+      if (!isRecord(command)) return `commandsRun[${index}] must be an object`
+      if (!nonemptyString(command['command'])) return `commandsRun[${index}].command must be a non-empty string`
+      if (command['status'] !== 'passed' && command['status'] !== 'failed') return `commandsRun[${index}].status must be "passed" or "failed"`
+    }
+  }
+  return undefined
+}
+
+/** The first finding-contract violation, or `undefined` when the finding is valid. */
+function describeFindingDefect(finding: unknown): string | undefined {
+  if (!isRecord(finding)) return 'must be an object'
+  if (!nonemptyString(finding['id'])) return 'id must be a non-empty string'
+  if (!(FINDING_SEVERITIES as readonly string[]).includes(finding['severity'] as string)) {
+    return `severity ${JSON.stringify(finding['severity'])} is invalid`
+  }
+  if (!nonemptyString(finding['problem'])) return 'problem must be a non-empty string'
+  if (!nonemptyString(finding['requiredFix'])) return 'requiredFix must be a non-empty string'
+  if (finding['file'] !== undefined && !nonemptyString(finding['file'])) return 'file must be a non-empty string'
+  if (finding['line'] !== undefined && !isValidFindingLine(finding['line'])) {
+    return `line ${JSON.stringify(finding['line'])} must be an integer >= 0 (omit it when there is no line number)`
+  }
+  if (finding['resolved'] !== undefined && typeof finding['resolved'] !== 'boolean') return 'resolved must be a boolean'
+  return undefined
+}
 export function isTeamTask(value: unknown): value is TeamTask {
   if (!isRecord(value)) return false
   return typeof value['id'] === 'string'
@@ -1117,6 +1111,9 @@ function isTeamMessage(value: unknown): value is TeamMessage {
     && (value['discardedAt'] === undefined || isFiniteNumber(value['discardedAt']))
     && (value['taskId'] === undefined || typeof value['taskId'] === 'string')
     && (value['attemptId'] === undefined || typeof value['attemptId'] === 'string')
+    && (value['sourceTaskId'] === undefined || typeof value['sourceTaskId'] === 'string')
+    && (value['sourceAttemptId'] === undefined || typeof value['sourceAttemptId'] === 'string')
+    && (value['sourceTaskStatus'] === undefined || ['pending', 'claimed', 'in_progress', 'completed', 'failed', 'cancelled'].includes(value['sourceTaskStatus'] as string))
 }
 
 /**
@@ -1126,7 +1123,6 @@ function isTeamMessage(value: unknown): value is TeamMessage {
  */
 export async function removeTeamDir(stateRoot: string, teamId: string): Promise<void> {
   await rm(join(stateRoot, teamId), { recursive: true, force: true })
-  invalidateTeamUnreadMailboxes(stateRoot, teamId)
 }
 
 /**
@@ -1144,7 +1140,7 @@ async function renameWithRetry(from: string, to: string): Promise<void> {
       await rename(from, to)
       return
     } catch (error: unknown) {
-      if (isRetryableRenameError(error) && attempt < ATOMIC_DIRECTORY_RENAME_RETRIES) {
+      if (isRetryableRenameError(error) && attempt < ATOMIC_RENAME_RETRIES) {
         await sleep(ATOMIC_RENAME_RETRY_DELAY_MS)
         continue
       }
@@ -1202,8 +1198,6 @@ export async function archiveTeamDir(stateRoot: string, teamId: string): Promise
   // The new generation is authoritative. A failed cleanup only leaves a
   // hidden recovery directory, which archive discovery deliberately ignores.
   if (displaced) await rm(previous, { recursive: true, force: true }).catch(() => undefined)
-  invalidateTeamUnreadMailboxes(stateRoot, teamId)
-  invalidateTeamUnreadMailboxes(archiveRoot, teamId)
 }
 
 /**

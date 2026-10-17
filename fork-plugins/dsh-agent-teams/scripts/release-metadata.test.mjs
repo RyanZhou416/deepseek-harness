@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import test from 'node:test'
 import { releaseMetadata } from './release-metadata.mjs'
-import { policy } from './compatibility.mjs'
+import { policy, workspacePolicy } from './compatibility.mjs'
 
 const checkedIn = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'))
 const fixture = (version, tag) => ({
@@ -15,10 +15,19 @@ test('stable latest requires the exact recommended host cohort', () => {
   assert.deepEqual(releaseMetadata(fixture('0.1.16', 'latest')), {
     value: '0.1.16', dist_tag: 'latest', prerelease: false,
   })
-  const mixed = fixture('0.1.16', 'latest')
-  mixed.devDependencies['@deepseek-ai/dsh-agent'] = '0.1.2-rc.1'
-  assert.throws(() => releaseMetadata(mixed), /exact development host/)
-})
+  const alphaOnly = fixture('0.1.16', 'latest')
+  for (const name of Object.keys(alphaOnly.devDependencies)) {
+    if (name === '@deepseek-ai/dsh' || name.startsWith('@deepseek-ai/dsh-')) alphaOnly.devDependencies[name] = '0.1.2-alpha.2'
+  }
+  const workspace = structuredClone(workspacePolicy)
+  for (const name of Object.keys(workspace.overrides)) {
+    if (name === '@deepseek-ai/dsh' || name.startsWith('@deepseek-ai/dsh-')) workspace.overrides[name] = '0.1.2-alpha.2'
+  }
+  assert.throws(() => releaseMetadata(alphaOnly, policy, workspace), /recommended host/)
+  assert.throws(() => releaseMetadata(fixture('0.1.16', 'latest'), {
+    ...policy, recommendedHost: '0.1.2-alpha.2',
+    supportedHosts: [{ version: '0.1.2-alpha.2', track: 'recommended' }],
+  }), /Alpha\/beta/)})
 
 for (const suffix of ['alpha', 'beta', 'rc']) {
   test(`${suffix} candidates use the fork preview channel`, () => {
@@ -35,7 +44,7 @@ for (const suffix of ['alpha', 'beta', 'rc']) {
 }
 
 test('fork compatibility releases use their explicit private channel', () => {
-  for (const channel of ['dsh012rc1', 'dsh013alpha2', 'dsh015alpha2', 'dsh015rc1', 'dsh016alpha2', 'dsh017rc1']) {
+  for (const channel of ['dsh012rc1', 'dsh013alpha2', 'dsh015alpha2', 'dsh015rc1', 'dsh016alpha2', 'dsh017rc1', 'dsh021rc2']) {
     const version = `0.1.16-${channel}.1`
     assert.deepEqual(releaseMetadata(fixture(version, channel)), {
       value: version,

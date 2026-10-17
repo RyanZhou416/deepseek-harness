@@ -81,6 +81,86 @@ export function liveCaptainTeam<T extends { readonly captainSessionId: string; r
   return teams.find((team) => team.captainSessionId === owner && team.halted !== true)
 }
 
+/** Minimal member shape needed to order the delegation list (issue #192). */
+export interface MemberListEntry {
+  readonly name: string
+  readonly activity?: string
+  readonly status?: string
+}
+
+/** Minimal task shape needed to derive a member's finish time (issue #192). */
+export interface MemberFinishTask {
+  readonly assignee: string
+  readonly status: string
+  readonly updatedAt?: number
+}
+
+/**
+ * Latest terminal-task `updatedAt` owned by one member.
+ * @param memberName - member whose owned tasks are scanned.
+ * @param tasks - team tasks carrying durable `updatedAt` stamps.
+ * @returns the newest terminal stamp, or undefined when the member owns none.
+ */
+export function memberFinishedAt(
+  memberName: string,
+  tasks: readonly MemberFinishTask[],
+): number | undefined {
+  let latest: number | undefined
+  for (const task of tasks) {
+    if (task.assignee !== memberName) continue
+    if (task.status !== 'completed' && task.status !== 'failed' && task.status !== 'cancelled') continue
+    const stamp = task.updatedAt
+    if (typeof stamp !== 'number' || !Number.isFinite(stamp)) continue
+    if (latest === undefined || stamp > latest) latest = stamp
+  }
+  return latest
+}
+
+/** Whether a member still has live work (running activity or an open task). */
+function memberIsRunning(
+  member: MemberListEntry,
+  tasks: readonly MemberFinishTask[],
+): boolean {
+  if (member.activity === 'working' || member.status === 'working') return true
+  return tasks.some((task) => task.assignee === member.name
+    && (task.status === 'pending' || task.status === 'claimed' || task.status === 'in_progress'))
+}
+
+/**
+ * Order the delegation member list for issue #192.
+ *
+ * Running members keep their incoming relative order and come first; finished
+ * members follow sorted by finish time, newest first. Members without a
+ * derivable finish time keep their incoming relative order after the stamped
+ * ones, so an older host that omits stamps never reorders them randomly.
+ * @param members - delegation roster in snapshot order.
+ * @param tasks - team tasks carrying durable `updatedAt` stamps.
+ * @returns the members in display order.
+ */
+export function orderDelegationMembers<TMember extends MemberListEntry>(
+  members: readonly TMember[],
+  tasks: readonly MemberFinishTask[],
+): readonly TMember[] {
+  const running: { member: TMember; index: number }[] = []
+  const finishedStamped: { member: TMember; index: number; finishedAt: number }[] = []
+  const finishedUnstamped: { member: TMember; index: number }[] = []
+  members.forEach((member, index) => {
+    if (memberIsRunning(member, tasks)) {
+      running.push({ member, index })
+      return
+    }
+    const finishedAt = memberFinishedAt(member.name, tasks)
+    if (finishedAt === undefined) finishedUnstamped.push({ member, index })
+    else finishedStamped.push({ member, index, finishedAt })
+  })
+  finishedStamped.sort((left, right) => right.finishedAt - left.finishedAt || left.index - right.index)
+  return [
+    ...running,
+    ...finishedStamped,
+    ...finishedUnstamped,
+  ].map((entry) => entry.member)
+}
+
 /** Whether the captain chat should keep showing the in-progress banner. */
 export function teamIsActive(team: {
   readonly phase?: string
@@ -204,14 +284,20 @@ export function taskStages<T extends RelationshipTask>(tasks: readonly T[]): rea
  * each stage. Edges use cubic curves so fan-in remains readable without
  * turning every task into a large card.
  */
-export function compactDagLayout<T extends RelationshipTask>(tasks: readonly T[]): CompactDagLayout<T> {
+export function compactDagLayout<T extends RelationshipTask>(tasks: readonly T[], dimensions?: {
+  readonly nodeWidth: number; readonly nodeHeight: number; readonly columnGap: number; readonly rowGap: number
+}): CompactDagLayout<T> {
+  const nodeWidth = dimensions?.nodeWidth ?? COMPACT_DAG_NODE_WIDTH
+  const nodeHeight = dimensions?.nodeHeight ?? COMPACT_DAG_NODE_HEIGHT
+  const columnGap = dimensions?.columnGap ?? COMPACT_DAG_COLUMN_GAP
+  const rowGap = dimensions?.rowGap ?? COMPACT_DAG_ROW_GAP
   const stages = taskStages(tasks)
   const positions = new Map<string, { x: number; y: number }>()
   const nodes: CompactDagNode<T>[] = []
   for (const [column, stage] of stages.entries()) {
     for (const [row, task] of stage.tasks.entries()) {
-      const x = column * (COMPACT_DAG_NODE_WIDTH + COMPACT_DAG_COLUMN_GAP)
-      const y = row * (COMPACT_DAG_NODE_HEIGHT + COMPACT_DAG_ROW_GAP)
+      const x = column * (nodeWidth + columnGap)
+      const y = row * (nodeHeight + rowGap)
       positions.set(task.id, { x, y })
       nodes.push({ task, x, y })
     }
@@ -223,10 +309,10 @@ export function compactDagLayout<T extends RelationshipTask>(tasks: readonly T[]
     for (const dependency of task.dependencies) {
       const source = positions.get(dependency)
       if (source === undefined) continue
-      const x1 = source.x + COMPACT_DAG_NODE_WIDTH
-      const y1 = source.y + COMPACT_DAG_NODE_HEIGHT / 2
+      const x1 = source.x + nodeWidth
+      const y1 = source.y + nodeHeight / 2
       const x2 = target.x
-      const y2 = target.y + COMPACT_DAG_NODE_HEIGHT / 2
+      const y2 = target.y + nodeHeight / 2
       edges.push({
         from: dependency,
         to: task.id,
@@ -238,10 +324,10 @@ export function compactDagLayout<T extends RelationshipTask>(tasks: readonly T[]
   return {
     width: stages.length === 0
       ? 0
-      : stages.length * COMPACT_DAG_NODE_WIDTH + (stages.length - 1) * COMPACT_DAG_COLUMN_GAP,
+      : stages.length * nodeWidth + (stages.length - 1) * columnGap,
     height: stages.length === 0
       ? 0
-      : rows * COMPACT_DAG_NODE_HEIGHT + (rows - 1) * COMPACT_DAG_ROW_GAP,
+      : rows * nodeHeight + (rows - 1) * rowGap,
     nodes,
     edges,
   }
