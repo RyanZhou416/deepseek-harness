@@ -28,6 +28,8 @@
  * @module @deepseek-ai/dsh-subagent
  */
 import type { Volatile } from '@deepseek-ai/cordis'
+import type { SubagentModelOverride } from './model-override-types.ts'
+import type { PreparedSubagentModel } from './types.ts'
 
 import { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
@@ -36,8 +38,8 @@ import type {} from '@deepseek-ai/dsh-attachment'
 import { scopeTarget } from '@deepseek-ai/dsh-scope'
 import type { Scoped } from '@deepseek-ai/dsh-scope'
 import { assertObjectJsonSchema } from '@deepseek-ai/dsh-tools'
-import type { ContentBlock, MessageId, MessageSource } from '@deepseek-ai/dsh-llm'
-import type { Agent } from '@deepseek-ai/dsh-agent'
+import { ReasoningEffortId, type ContentBlock, type MessageId, type MessageSource } from '@deepseek-ai/dsh-llm'
+import type { Agent, AgentOptions } from '@deepseek-ai/dsh-agent'
 import type { SessionId } from '@deepseek-ai/dsh-session'
 import { canonicalClientTimeZone } from '@deepseek-ai/dsh-util-time'
 import { Remote, RemoteError, TypertRemoteService, principalOf, type Principal } from '@deepseek-ai/dsh-typert-protocol'
@@ -75,7 +77,7 @@ import { installSubagentArchiveAdmission } from './archive-admission.ts'
 import type { SubagentCatalogEntry } from './projection-types.ts'
 import { subagentIdentityProjectionDefinition, subagentTimingProjectionDefinition } from './projection.ts'
 import { subagentCatalogProjectionDefinition } from './catalog.ts'
-import { deliverSubagentPrompt } from './internal.ts'
+import { deliverSubagentPrompt, startAgentTeamsMember } from './internal.ts'
 
 export type {} from './catalog.ts'
 export * from './out-of-process.ts'
@@ -188,6 +190,8 @@ export interface Config {
   maxActiveSubagents: Volatile<number>
   /** Default delegation depth for tools without an explicit limit; defaults to 1. */
   maxDepth: Volatile<number>
+  /** Forced model for new children except AgentTeams members; false disables it, unsupported backends reject while enabled. */
+  modelOverride: Volatile<SubagentModelOverride | false>
 }
 
 /** Named provider registry with managed activations, durable discovery, and local child messaging. */
@@ -195,6 +199,14 @@ export class SubagentRuntime extends TypertRemoteService {
   static Config = z.object({
     maxDepth: z.number().step(1).min(0).max(Number.MAX_SAFE_INTEGER).default(1).volatile(),
     maxActiveSubagents: z.number().step(1).min(1).max(Number.MAX_SAFE_INTEGER).default(8).volatile(),
+    modelOverride: z.union([
+      z.const(false),
+      z.object({
+        provider: z.string().min(1).required(),
+        model: z.string().min(1).required(),
+        reasoningEffort: z.string().min(1),
+      }),
+    ]).default(false).volatile(),
   })
   static inject = ['workingDirectory']
   private providers = new Map<string, SubagentProvider>()
@@ -267,6 +279,20 @@ export class SubagentRuntime extends TypertRemoteService {
    * childId requires a local backend and guarantees an accepted messageId.
    */
   async startActivation(spec: SubagentActivationSpec): Promise<SubagentActivation> {
+    return this.launchActivation(spec, true)
+  }
+
+  /**
+   * Create an AgentTeams member under the plugin's own model policy, bypassing
+   * the user override that applies to ordinary delegations.
+   * @param spec - member creation with the plugin's resolved execution options.
+   * @returns the accepted member activation.
+   */
+  protected [startAgentTeamsMember](spec: SubagentActivationSpec): Promise<SubagentActivation> {
+    return this.launchActivation(spec, false)
+  }
+
+  private async launchActivation(spec: SubagentActivationSpec, applyOverride: boolean): Promise<SubagentActivation> {
     const provider = this.expectProvider(spec.provider)
     if (spec.childId !== undefined && provider.prepareContinuable === undefined) {
       throw new SubagentError('reserved child ids require a local backend', 'UNSUPPORTED_CAPABILITY')
@@ -278,11 +304,64 @@ export class SubagentRuntime extends TypertRemoteService {
       throw new SubagentError('subagent creation requires the exact live parent agent', 'UNAUTHORIZED')
     }
     if (spec.request.outputSchema !== undefined) assertObjectJsonSchema(spec.request.outputSchema)
+    const { override, agentOptions } = applyOverride
+      ? this.prepareModel(spec.provider, spec.request.agentOptions)
+      : { override: null, agentOptions: spec.request.agentOptions }
+    if (override !== null) {
+      spec.signal.throwIfAborted()
+      const llm = this.ctx.get('llm')
+      if (llm === undefined) throw new Error('subagent model override requires the llm service')
+      await llm.resolveCallConfig({
+        provider: override.provider,
+        model: override.model,
+        ...override.reasoningEffort === undefined ? {} : { reasoningEffort: ReasoningEffortId(override.reasoningEffort) },
+      }, spec.signal)
+      if (this.providers.get(spec.provider) !== provider) {
+        throw new SubagentError(`subagent provider "${spec.provider}" changed after model selection; retry creation`, 'NO_PROVIDER')
+      }
+    }
+    const selected: SubagentActivationSpec = agentOptions === undefined && override === null
+      ? spec
+      : {
+          ...spec,
+          request: {
+            ...spec.request,
+            ...agentOptions === undefined ? {} : { agentOptions },
+            ...override === null ? {} : { inheritReasoningEffort: false },
+          },
+        }
     return provider.prepareContinuable === undefined
-      ? manager.startExternal(spec)
-      : manager.startLocal(spec)
+      ? manager.startExternal(selected)
+      : manager.startLocal(selected)
   }
 
+  /**
+   * Read effective model options for tool validation. Creation resolves the current policy again.
+   * Providers without Agent-option support reject creation while the override is enabled.
+   * @param name - registered subagent backend.
+   * @param requested - caller-selected options before the user override.
+   * @returns detached effective options and the applied override.
+   */
+  prepareModel(name: string, requested?: AgentOptions): PreparedSubagentModel {
+    const provider = this.expectProvider(name)
+    const configured = this.config.modelOverride.get()
+    if (configured !== false && !provider.capabilities.agentOptions) {
+      throw new SubagentError(`subagent provider "${name}" cannot enforce the configured model override`, 'UNSUPPORTED_CAPABILITY')
+    }
+    const override = configured === false ? null : Object.freeze({ ...configured })
+    let agentOptions = requested === undefined ? undefined : { ...requested }
+    if (override !== null) {
+      const { reasoningEffort: _effort, ...options } = agentOptions ?? {}
+      agentOptions = {
+        ...options,
+        provider: override.provider,
+        model: override.model,
+        ...override.reasoningEffort === undefined ? {} : { reasoningEffort: ReasoningEffortId(override.reasoningEffort) },
+      }
+    }
+    if (agentOptions !== undefined) Object.freeze(agentOptions)
+    return { agentOptions, override }
+  }
   /**
    * Join progressing descendants without cancelling them. Idle descendants whose
    * inboxes require a later wake stay resident and do not delay host completion.
@@ -636,7 +715,7 @@ export class SubagentRuntime extends TypertRemoteService {
       )
     }
     const needs: { when: boolean; cap: keyof SubagentCapabilities }[] = [
-      { when: request.agentOptions !== undefined, cap: 'agentOptions' },
+      { when: request.agentOptions !== undefined || request.inheritReasoningEffort !== undefined, cap: 'agentOptions' },
       { when: request.outputSchema !== undefined, cap: 'outputSchema' },
       { when: request.maxDepth !== undefined, cap: 'depthLimit' },
     ]

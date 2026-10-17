@@ -9,6 +9,7 @@ import type { ContentBlock, MessageId, MessageSource } from '@deepseek-ai/dsh-ll
 import type { SessionId } from '@deepseek-ai/dsh-session'
 import type { ToolDefinition } from '@deepseek-ai/dsh-tools'
 import type SubagentRuntime from './index.ts'
+import type { SubagentActivation, SubagentActivationSpec } from './types.ts'
 import type { SubagentDelivery } from './control-types.ts'
 /** Process-stable identity carried only by the standard adjacent-Agent messaging tool. */
 export const adjacentAgentSendMessageTool = Symbol.for('dsh.subagent.adjacentAgentSendMessageTool')
@@ -106,4 +107,18 @@ export function steerHostSubagentPrompt(
     signal,
     'steer',
   )
+}
+
+/** Host-only AgentTeams member creation; the plugin owns its member model policy. */
+export const startAgentTeamsMember = Symbol.for('dsh.subagent.startAgentTeamsMember')
+
+/**
+ * Start one AgentTeams member with the plugin's model policy through the private Host adapter.
+ * @param runtime - subagent runtime owning the member lifecycle.
+ * @param spec - member creation request from the AgentTeams plugin.
+ * @returns the accepted member activation.
+ */
+export function startHostAgentTeamsMember(runtime: SubagentRuntime, spec: SubagentActivationSpec): Promise<SubagentActivation> {
+  const start = Reflect.get(runtime, startAgentTeamsMember) as (spec: SubagentActivationSpec) => Promise<SubagentActivation>
+  return start.call(runtime, spec)
 }
