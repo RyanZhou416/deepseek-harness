@@ -269,6 +269,8 @@ ChatGPT 源码提供默认关闭的 `autoResetCredits` 开关，入口为订阅�
 
 Chat edits the latest ordinary text-only user message in its existing idle Session with no pending input. `session.editLastMessage` admits a durable queued revision; `agent/prepare-input` excludes the obsolete suffix before context assembly, and `agent/message-surface` finalizes the normally processed input at request admission. Preserve the Session identity and current model, strict exclusion of the old prompt and response from derived history, retry identity across request preparation, and hidden superseded Chat rows after reload. Original log events and spent-token totals remain; filesystem effects are not rolled back. Focused verification lives in `packages/api/session-controller/tests/edit-last-message.host.spec.ts`, Chat conversation-node tests, and the Web message-actions scenario.
 
+2026-10-18 合并后，`session.editLastMessage` 与其 Chat 入口（`LastMessageEditor`、`MessageItem` 的 `canEdit`）都在，但 `ChatView` 计算并下传 `editableMessageSeq` 的接线以及 `ChatFlow`/`ChatNodeSeat` 的透传在结构重组时丢失，导致编辑按钮永不出现。修复补齐三处：`ChatView` 按「运行中、已移除、subagent、pendingSubmissions、inbox 非空」判定后取最后一条 user 节点 seq；`ChatFlow` 与 `ChatNodeSeat` 原样透传到 `ChatNodeOwnerProps`。**Preservation rule.** 上游再次改写 Chat 视图结构时，逐处核对 `editableMessageSeq` 的产生与透传，不能只保留契约字段。**Focused verification.** `pnpm exec vitest run packages/client/ui-chat/tests/last-message-editor.client.spec.tsx packages/client/ui-chat/tests/chat-view.client.spec.tsx`（180 项通过）、客户端 typecheck 5/5；重建 `packages/client/ui-chat/lib/client.js` 后页面模块 rev 变化即生效，无需重启 Host。
+
 ### Long-session Host allocation
 
 #### Incremental token accounting

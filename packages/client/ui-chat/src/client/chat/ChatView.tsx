@@ -12,6 +12,7 @@ import {
 } from '@deepseek-ai/dsh-client-ui-primitives'
 import { isAtOrOutside } from '../contract/group-tree.ts'
 import type { ChatFlowHookContext, ChatViewSlotProps, OpenFileOptions } from '../contract/slots.ts'
+import type { ChatNode } from '../contract/chat-nodes.ts'
 import type { ChatSnapshot } from '../contract/snapshot.ts'
 import { TurnNavigator } from './TurnNavigator.tsx'
 import { mergeTurnRailItems } from './turn-rail-items.ts'
@@ -59,7 +60,7 @@ const MOTION_TAIL_MS = 800
  */
 export function ChatView({
   useSession, useChat, useConversation, useSessions, renderSlot,
-  sessionId, openFile, openExternalLink, loadOlder, loadThrough, loadImage, inspectCall, chatScroll, forkAt, fileMentions,
+  sessionId, openFile, openExternalLink, loadOlder, loadThrough, loadImage, inspectCall, chatScroll, forkAt, editLastMessage, fileMentions,
   usePresentation, useProjection, t,
 }: ChatViewSlotProps) {
   const order = useChat(s => s.order)
@@ -91,6 +92,18 @@ export function ChatView({
     },
   }), [cwd, t])
   const running = useSession(s => s.running)
+  const editBlocked = useSession(s => s.removed || s.subagent !== null || s.pendingSubmissions.length > 0)
+  const latestUserSeq = useChat((snapshot) => {
+    const key = snapshot.order.findLast((candidate) => {
+      const node = snapshot.nodes.get(candidate)
+      return node?.kind === 'user' || node?.kind === 'steering'
+    })
+    const node = key === undefined ? undefined : snapshot.nodes.get(key)
+    return node?.kind === 'user' ? (node as ChatNode<'user'>).data.seq : undefined
+  })
+  const editableMessageSeq = running || editBlocked
+    || (inbox?.['next-turn'].length ?? 0) > 0 || (inbox?.['next-step'].length ?? 0) > 0
+    ? undefined : latestUserSeq
   // Fold transitions run while a Turn is live, while an input is pending, and briefly after settling.
   const [motionTail, setMotionTail] = useState(false)
   useEffect(() => {
@@ -226,7 +239,7 @@ export function ChatView({
             <MarkdownDelegateProvider openFile={requestOpenFile} openExternalLink={openExternalLink} fileImages={fileImages}>
               {renderSlot('conversation.chat.flow', {
                 entries, pendingInputs, lastInputTurn, deferCollapse,
-                cwd, openFile: requestOpenFile, inspectCall, forkAt, loadImage, fileMentions,
+                cwd, openFile: requestOpenFile, inspectCall, forkAt, editableMessageSeq, editLastMessage, loadImage, fileMentions,
               }, { hookContext: flowContext })}
             </MarkdownDelegateProvider>
             {/* No pending placeholders: questions (ui-user-questions) and approvals
