@@ -140,8 +140,8 @@ it('recovers a browser while eight continuable children stream without losing th
     const title = page.getByRole('treeitem').filter({ has: page.getByText(TITLE, { exact: true }) })
     await title.waitFor({ timeout: 20_000 })
 
-    const children = await Promise.all(Array.from({ length: CHILDREN }, (_, index) => world.ctx.subagents.startContinuable({
-      provider: 'spawn', label: `Concurrent child ${String(index)}`, signal: adapter.stopped.signal,
+    const children = await Promise.all(Array.from({ length: CHILDREN }, (_, index) => world.ctx.subagents.startActivation({
+      provider: 'spawn', label: `Concurrent child ${String(index)}`, signal: adapter.stopped.signal, delivery: 'parent',
       request: {
         parent, prompt: [{ type: 'text', text: `Generate the fixed child ${String(index)} stream.` }],
         agentOptions: { provider: PROVIDER, model: `reconnect-child-${String(index)}` },
