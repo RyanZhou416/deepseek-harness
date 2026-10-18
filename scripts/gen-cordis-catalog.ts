@@ -609,6 +609,8 @@ export const LINK_MAP: Readonly<Record<string, string>> = {
   SessionEventTraceRequest: 'session-query.md',
   SessionEventWindow: 'session-query.md',
   SessionLineageTrace: 'session-query.md',
+  SessionMetadataObservation: 'session-query.md',
+  SessionMetadataOptions: 'session-query.md',
   SessionObservation: 'session-query.md',
   SessionObservationOptions: 'session-query.md',
   SessionRecord: 'session-query.md',
