@@ -45,11 +45,17 @@
   en: d9c75339ec59b05c
   zh: 00f55710c03393bf
 /dsh-plugin-subscriptions/model-pools:
-  en: 4932cf0aa7ee132a
-  zh: fa0dae8682af3c37
+  en: 17d6628a392e4427
+  zh: 3bf514fe0458621c
+/dsh-plugin-subscriptions/model-pools/account-concurrency:
+  en: 86623de434f1f9ea
+  zh: b2241f88c78b0271
+/dsh-plugin-subscriptions/model-pools/error-taxonomy:
+  en: 5dc27c21c814a437
+  zh: 03a297260315b228
 /dsh-plugin-subscriptions/model-pools/waiting-out-a-rate-limit-window:
-  en: 9f055f2c67153884
-  zh: 218427f02204e84e
+  en: 49ed8f0f97d0c6ca
+  zh: a1bb46de52998a95
 /dsh-plugin-subscriptions/claude-stream-lifetime:
   en: f025e8b5c19092fd
   zh: aa0bc52963a7c714

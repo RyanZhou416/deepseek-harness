@@ -60,6 +60,28 @@ flowchart LR
   cfg --> plugin_dsh_base_credentials
   plugin_dsh_base_llm_pi_ai["llm-pi-ai<br/>@deepseek-ai/dsh-llm-pi-ai"]
   cfg --> plugin_dsh_base_llm_pi_ai
+  plugin_dsh_base_claude_opus_5_5["claude-opus-5-5<br/>Claude Opus 5.5"]
+  cfg --> plugin_dsh_base_claude_opus_5_5
+  plugin_dsh_base_claude_sonnet_5_5["claude-sonnet-5-5<br/>Claude Sonnet 5.5"]
+  cfg --> plugin_dsh_base_claude_sonnet_5_5
+  plugin_dsh_base_claude_fable_5_1["claude-fable-5-1<br/>Claude Fable 5.1"]
+  cfg --> plugin_dsh_base_claude_fable_5_1
+  plugin_dsh_base_claude_haiku_4_5_20251001["claude-haiku-4-5-20251001<br/>Claude Haiku 4.5"]
+  cfg --> plugin_dsh_base_claude_haiku_4_5_20251001
+  plugin_dsh_base_claude_sonnet_5["claude-sonnet-5<br/>Claude Sonnet 5"]
+  cfg --> plugin_dsh_base_claude_sonnet_5
+  plugin_dsh_base_claude_opus_5["claude-opus-5<br/>Claude Opus 5"]
+  cfg --> plugin_dsh_base_claude_opus_5
+  plugin_dsh_base_claude_fable_5["claude-fable-5<br/>Claude Fable 5"]
+  cfg --> plugin_dsh_base_claude_fable_5
+  plugin_dsh_base_claude_opus_4_8["claude-opus-4-8<br/>Claude Opus 4.8"]
+  cfg --> plugin_dsh_base_claude_opus_4_8
+  plugin_dsh_base_claude_opus_4_7["claude-opus-4-7<br/>Claude Opus 4.7"]
+  cfg --> plugin_dsh_base_claude_opus_4_7
+  plugin_dsh_base_claude_opus_4_6["claude-opus-4-6<br/>Claude Opus 4.6"]
+  cfg --> plugin_dsh_base_claude_opus_4_6
+  plugin_dsh_base_claude_sonnet_4_6["claude-sonnet-4-6<br/>Claude Sonnet 4.6"]
+  cfg --> plugin_dsh_base_claude_sonnet_4_6
   plugin_dsh_base_session_persistence_jsonl["session-persistence-jsonl<br/>@deepseek-ai/dsh-session-persistence-jsonl"]
   cfg --> plugin_dsh_base_session_persistence_jsonl
   plugin_dsh_base_llm_request_record["llm-request-record<br/>@deepseek-ai/dsh-llm-request-record"]
@@ -232,6 +254,17 @@ flowchart LR
 | `deepseek-account` | `@deepseek-ai/dsh-deepseek-account-platform` |
 | `credentials` | `@deepseek-ai/dsh-credentials-local` |
 | `llm-pi-ai` | `@deepseek-ai/dsh-llm-pi-ai` |
+| `claude-opus-5-5` | `Claude Opus 5.5` |
+| `claude-sonnet-5-5` | `Claude Sonnet 5.5` |
+| `claude-fable-5-1` | `Claude Fable 5.1` |
+| `claude-haiku-4-5-20251001` | `Claude Haiku 4.5` |
+| `claude-sonnet-5` | `Claude Sonnet 5` |
+| `claude-opus-5` | `Claude Opus 5` |
+| `claude-fable-5` | `Claude Fable 5` |
+| `claude-opus-4-8` | `Claude Opus 4.8` |
+| `claude-opus-4-7` | `Claude Opus 4.7` |
+| `claude-opus-4-6` | `Claude Opus 4.6` |
+| `claude-sonnet-4-6` | `Claude Sonnet 4.6` |
 | `session-persistence-jsonl` | `@deepseek-ai/dsh-session-persistence-jsonl` |
 | `llm-request-record` | `@deepseek-ai/dsh-llm-request-record` |
 | `attachment-local` | `@deepseek-ai/dsh-attachment-local` |

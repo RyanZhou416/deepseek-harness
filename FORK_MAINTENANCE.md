@@ -870,9 +870,10 @@ Profile 注册 `dsh-sdk-process-raw` 和 `subagent_process`：SDK profile、独�
 6. Resolve Session/core/API/schema/package layout/generated catalogs/lockfile with official structure first. Resolve conflict files individually; do not apply repository-wide `-X theirs` and do not wholesale cherry-pick old fork commits.
 7. Commit the official-first merge before porting fork behavior. Re-implement only the still-missing rows in [Preservation matrix](#preservation-matrix), using the target tag's APIs and focused tests.
 8. Take official lockfile first, update manifests during ports, then regenerate with the pinned pnpm version. Update owner source before generated catalogs and bilingual sidecars.
-9. Build and test only in the integration worktree. Boot a copied DSH_HOME, validate the long-session clone and every enabled plugin, then compare source Session hashes.
-10. Push `origin/integrate/upstream-<tag>`. After it passes, fast-forward master and push normally; never raw force-push.
-11. Rebuild the real checkout and profile, update this document's baseline and preservation rows, then let the user start DSH manually.
+9. Run `pnpm exec tsx scripts/persistence-changes.ts --check` after the merge. `forked persistence history for <root>: <a> and <b>` means an upstream record's `previous` names a state older than this fork's tip for a shared root; refresh the unaccepted terminal record against the remaining history with `pnpm exec tsx scripts/persistence-changes.ts --update <record-id>` ([competing records](docs/cookbook/reviewing-persistence-type-changes.md#competing-records)), then review its reported `changes` and `roots`. Never delete a competing record or hand-edit a digest; the command rewrites the declaration, after schemas, catalogs, and pairing. The 0.2.1-rc.2 integration resolved `2026-09-28-user-message-revisions` this way against `2026-10-13-user-rpc-principal` for the four user-message roots.
+10. Build and test only in the integration worktree. Boot a copied DSH_HOME, validate the long-session clone and every enabled plugin, then compare source Session hashes.
+11. Push `origin/integrate/upstream-<tag>`. After it passes, fast-forward master and push normally; never raw force-push.
+12. Rebuild the real checkout and profile, update this document's baseline and preservation rows, then let the user start DSH manually.
 
 -----
 
@@ -980,6 +981,7 @@ corepack pnpm@10.30.2 verify
 - AgentTeams 的 append/claim/ack 仍会整份重写单个 mailbox JSONL；未读投影缓存已消除不变文件的每秒重读/解析，但超长高频写邮箱仍存在 O(N) 写放大。下一步只能在保持旧 JSONL 可读和归档历史完整的前提下优化。
 - AgentTeams 的进程内 team lock Map 与 scheduler parked-attempt Map 仍有小量键保留；当前有界数据量不构成 P1，但后续应随 team archive/remove 回收。
 - Diagnostics 目前没有自动轮转，长期运行后需按具体文件人工归档。
+- `verify-client-domain-graph` is red on this tree **and on a pristine `dsh-v0.2.1-rc.2` tree**: `pnpm exec tsx scripts/verify-client-domain-graph.ts` reports the same 87 violations from the same file→specifier pairs (23 CSS/SVG/WebP asset imports plus 64 TS imports across `ui-sidebar-documentpreview`, `ui-sidebar-browser`, `ui-settings-account`, `ui-plugin-manager`, `ui-workspace`, `ui-conversation`, and `ui-chat`; the `session-actions -> rows` CSS edges are part of that upstream set). This is inherited upstream client-ownership debt, not a fork delta: do not baseline, weaken, or suppress the gate. Clearing it needs the upstream `contract/` refactor; until that lands, report it as a retained red. Reproduce the baseline side with `git archive dsh-v0.2.1-rc.2 packages/client scripts/verify-client-domain-graph.ts | tar -x -C <dir>` and `pnpm exec tsx <dir>/scripts/verify-client-domain-graph.ts`; both trees print the identical 87.
 
 ## Dev Note
 
@@ -1013,8 +1015,12 @@ provider block for the mac pool:
 **Preservation rule.** Keep the route, `apiKeyEnv`, `baseURL`, `x-cc-backend`
 header, and model ids when syncing upstream. A profile-level `llm-pi-ai` config
 replaces this default for that profile; do not turn the preset into a shared
-credential store.
+credential store. The generated `apps/cli/composition.md` must keep these
+`claude-*` model rows: regenerate it with `pnpm run gen-doc-graphs` after a
+preset or provider change, and never hand-edit the graph or accept an upstream
+composition doc that drops them.
 
 **Focused verification.** Start a fresh profile with `CC_POOL_API_KEY` set,
 confirm `CC 订阅池` appears with its models, and send one local non-Claude
 fixture request. Do not run real account or provider requests from this check.
+`pnpm run verify-doc-graphs` reports the generated graph docs up to date.
