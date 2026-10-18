@@ -361,7 +361,10 @@ export function resolveRateLimitWait(config: RateLimitConfig | undefined, path: 
  * `ENFORCEMENT` is deliberately absent: a refusal the provider stated is final
  * is not a transient failure to back off from, and retrying it is the traffic
  * the refusal was sent to stop. `RATE_LIMIT` stays here for the ordinary case —
- * a 429 that disclosed the window it reopens.
+ * a 429 that disclosed the window it reopens. `CONFLICT` covers a 409 the
+ * provider could not settle (the target changed), which the same account may
+ * retry after its backoff. `MODEL_DENIED` is absent: retrying cannot make the
+ * model callable, and a sibling account must not be asked.
  *
  * The Claude route's own terminal codes are absent for the same reason and are
  * carried instead by the failure's `retryDisposition: 'forbid'`:
@@ -375,6 +378,7 @@ const SUBSCRIPTION_RETRYABLE_CODES: readonly string[] = Object.freeze([
   'SERVER',
   'TIMEOUT',
   'TRANSPORT',
+  'CONFLICT',
   'MALFORMED_RESPONSE',
 ])
 

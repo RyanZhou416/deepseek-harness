@@ -484,19 +484,19 @@ test('waiting raises the disclosed-wait ceiling, not the backoff ceiling', () =>
   assert.ok(policy.mode === 'normal' && policy.retryableCodes.includes('RATE_LIMIT'))
 })
 
-test('subscription routes retry the harness transient codes plus MALFORMED_RESPONSE', () => {
+test('subscription routes retry the harness transient codes plus MALFORMED_RESPONSE and CONFLICT', () => {
   const policy = subscriptionRetryPolicy(
     DEFAULT_RETRY,
     { wait: true, maxWaitMs: DEFAULT_RATE_LIMIT_MAX_WAIT_MS },
     'test: retryPolicy',
   )
-  // Eligibility is the harness's transient defaults plus MALFORMED_RESPONSE: a route that
-  // reads back a stream payload it cannot parse would otherwise fail a turn the genuine
-  // client retries without streaming. ENFORCEMENT is absent by contract: a refusal the
-  // provider stated is final is not a transient failure to back off from.
+  // Eligibility is the harness's transient defaults plus MALFORMED_RESPONSE (a stream payload
+  // the route cannot parse is retried by the genuine client without streaming) and CONFLICT
+  // (a 409 target change the same account may retry). ENFORCEMENT is absent by contract: a
+  // refusal the provider stated is final is not a transient failure to back off from.
   assert.deepEqual(
     policy.mode === 'normal' ? policy.retryableCodes : undefined,
-    ['EMPTY_RESPONSE', 'RATE_LIMIT', 'SERVER', 'TIMEOUT', 'TRANSPORT', 'MALFORMED_RESPONSE'],
+    ['EMPTY_RESPONSE', 'RATE_LIMIT', 'SERVER', 'TIMEOUT', 'TRANSPORT', 'CONFLICT', 'MALFORMED_RESPONSE'],
   )
   assert.equal(policy.mode === 'normal' && policy.retryableCodes.includes(ENFORCEMENT_CODE), false)
   // The Claude route's terminal codes are absent too: each one is a refusal or an error the

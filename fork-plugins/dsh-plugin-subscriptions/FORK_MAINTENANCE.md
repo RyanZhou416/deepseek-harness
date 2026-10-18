@@ -99,6 +99,60 @@ the duplicated-lines percentage in the report is the signal: `--threshold` alone
 the exit code (any clone exits with the config's `exitCode: 1`, a clone-free run exits 0), so the
 script's `--exit-code 0` is what keeps the documented run green.
 
+### Subscription account concurrency and 429 policy
+
+A pool member is one subscription account, and the service meters it as a whole. `pool-gate.ts`
+owns those shared facts and `pool.ts` owns the session-to-account affinity; together they enforce:
+
+- one account serves at most `pool.concurrency.maxSessionsPerAccount` sessions (default 2), a
+  session sends one request at a time, and the next session waits in FIFO order for a slot;
+- one shared account request limiter (token bucket `requestsPerMinute` = 20 with `burst` = 2, plus
+  `minGapMs` = 1500 ms) applies to every session of the account and is active by default;
+- an ordinary 429 backs off only the session that received it, using the provider's disclosed wait
+  when it sent one, and never moves the request to a sibling account; `backoff.maxRetries` = 10
+  consecutive backoffs end the turn's retry budget (a hard-stopped `rate_limited`), and the next
+  turn starts a fresh one;
+- a window/quota 429, an account-level refusal and a revoked credential park the account until
+  the disclosed reset, which every session sees;
+- a session keeps its bound account across turns; a rematch happens only at a `turn/start`
+  boundary, only because the bound account is exhausted or parked, and at most once per turn;
+  with no healthy account the pool reports `NO_AVAILABLE_ACCOUNT` and contacts nothing.
+
+The gate consumes the taxonomy classified in `pool-health.ts`; producers live in
+`common.ts`/`claude-failure.ts`:
+
+| Class | Producer | Effect |
+|---|---|---|
+| Transient | 408, 409 (`CONFLICT`), ordinary 429, 500/502/503/504/529, `TRANSPORT`, `TIMEOUT`, pre-delivery `MALFORMED_RESPONSE` | `session-backoff` |
+| Account cooldown | 429 window/quota (`ENFORCEMENT` on a 429), account-shaped 403 (`ENFORCEMENT` on a 403: stated-final, billing/credits, disabled account), `QUOTA` | `account-cooldown` |
+| Refresh | 401 `AUTH`, revoked-wording 403 `AUTH` | `refresh` (parked after `maxRefreshAttempts` = 2) |
+| Model-scoped | model-wording 403/404 (`MODEL_DENIED`), unnamed 404 (`HTTP_404`) | `model-scoped` |
+| Terminal | 400 `INVALID_REQUEST`, 413, version/policy/content refusals, `ABORTED`, post-delivery malformed, non-403/429 `x-should-retry: false` | `throw` |
+| Member-ineligible | `NO_ADAPTER` from the account-policy seam | `member-ineligible` (no request was sent) |
+
+`403 modelDenied` now has a real producer: a 403/404 body (bounded) whose text names one model —
+`model_not_found`-style codes or `model … does not exist / no access / not permitted` wording —
+classifies as `MODEL_DENIED`, and the Claude route does the same for an in-band error naming a
+model. A plain 403 that staffs no revoked wording stays `PERMISSION_DENIED` (terminal); a 403
+naming a revoked credential/account becomes `AUTH` (refresh).
+
+**Preservation rule.** Do not reintroduce pre-output failover for provider failures, an account
+switch inside a turn, or a per-request-only concurrency limit. Keep `switchMargin` out of the
+pool config and out of selection: proactive re-ranking across turns spreads one conversation over
+several accounts. Keep the gate's account cooldowns in the shared `PoolHealthRegistry`, because
+the Settings card and the scheduler must state the same fact. `SessionTurns` must key each
+`turn/start` afresh: the session log's turn counter restarts on resume. Keep the 429 rule absolute:
+no class may replay a 429 on a sibling account; `dsh-llm-retry` only retries the same account.
+
+**Focused verification.** `test/pool-failure-table.spec.ts` is the table-driven producer × class ×
+effect matrix (shared HTTP, Claude HTTP, in-band `error.type`, network/TLS/timeout/abort, malformed
+before/after delivery). `test/pool-gate.spec.ts` covers slots, serialization, the shared limiter
+and its defaults, per-session backoff and retry budget, refresh accounting, cooldowns, the bound
+turn identity and the bounded queues. `test/pool.spec.ts` covers two concurrent sessions, the
+queued third session, one request per session, ordinary-429 isolation, window-429 cooldown plus
+one-rematch-per-turn, refresh-then-park behaviour, the typed `no_available_account`, and the
+local-exclusion yield. `test/pool-health.spec.ts` pins the failure effects.
+
 ### Wire fidelity, stream errors, and the store lock
 
 Four contracts the pinned wire and the credential lock depend on:
@@ -108,7 +162,7 @@ Four contracts the pinned wire and the credential lock depend on:
   before assembly, because the pinned request shape has no stop-sequence field. The genuine
   client's main-session body carries a temperature and no stop field at all.
 - **A truncated stream is a transport failure.** A body that ends before its terminal event
-  raises `TRANSPORT`, which the harness retries and the pool treats as a member switch; the
+  raises `TRANSPORT`, which the harness retries on the same account; the
   genuine client calls the same condition a dropped connection and retries it. `MALFORMED_RESPONSE`
   is retryable on these routes through `subscriptionRetryPolicy`.
 - **The credential lock renews its lease.** A held lock touches its own directory every half

@@ -881,7 +881,7 @@ try {
   const roster = (await state()).members
   const alpha = liveAgents.get(roster.find(m => m.name === 'alpha').id)
   const beta = liveAgents.get(roster.find(m => m.name === 'beta').id)
-  const gamma = liveAgents.get(roster.find(m => m.name === 'gamma').id)
+  let gamma = liveAgents.get(roster.find(m => m.name === 'gamma').id)
   check('manually added members persist the global fallback for later activations',
     (await state())?.members.every(member => member.fallback?.provider === 'backup'
       && member.fallback?.model === 'backup-model'))
@@ -966,9 +966,11 @@ try {
       && deliveries.length === deliveriesBeforeDisposedParkedKicks)
   liveAgents.set(alpha.id, alpha)
 
-  // Unobserved recovery whose followup fails must restore the original open
-  // capability and consume that generation's budget. Later status kicks must
-  // not recast it into pending or a new attempt.
+  // Unobserved recovery whose followup fails must not strand the durable
+  // generation: the dispatcher retires the dead activation and starts one
+  // fresh activation that continues the recovered attempt. The failed
+  // replacement path (restore and park) is covered by
+  // dispatch-recovery.test.mjs.
   const tRecoverFail = await call('agent_teams_create_task', {
     subject: 'unobserved recovery delivery failure', assignee: 'gamma',
   })
@@ -982,38 +984,48 @@ try {
   }, gamma)
   liveAgents.delete(gamma.id)
   failNextDelivery.add(gamma.id)
-  const deliveriesBeforeFailedRecovery = deliveries.length
+  const childrenBeforeRecoveryFallback = children.length
   await call('agent_teams_status', {})
   await new Promise(resolve => setTimeout(resolve, 20))
-  const rolledBackRecovery = await task(tRecoverFail.task_id)
+  const recoveredFallback = await task(tRecoverFail.task_id)
+  const recoveredMember = (await state()).members.find(member => member.name === 'gamma')
+  if (recoveredMember === undefined) throw new Error('recovered gamma member is missing')
+  check('issue159 failed recovery delivery starts one fresh activation that keeps the attempt',
+    recoveredFallback?.status === 'claimed'
+      && recoveredFallback.assignee === 'gamma'
+      && recoveredFallback.attempt === recoverFailClaim.attempt + 1
+      && recoveredFallback.attemptId !== undefined
+      && recoveredFallback.attemptId !== recoverFailClaim.attempt_id
+      && recoveredMember.id !== ''
+      && recoveredMember.id !== gamma.id
+      && recoveredMember.spawnError === undefined
+      && children.length === childrenBeforeRecoveryFallback + 1)
+  const deliveriesAfterRecoveryFallback = deliveries.length
   await Promise.all([
     call('agent_teams_status', {}),
     call('agent_teams_status', {}),
     call('agent_teams_status', {}),
   ])
   await new Promise(resolve => setTimeout(resolve, 20))
-  check('issue159 failed recovery restores partial evidence with the original capability', rolledBackRecovery?.output === 'partial progress' && rolledBackRecovery.commandsRun?.[0]?.command === 'partial-check')
   const throttledFailedRecovery = await task(tRecoverFail.task_id)
-  check('failed unobserved recovery restores the original capability and later kicks do not recast it',
-    rolledBackRecovery?.status === 'in_progress'
-      && rolledBackRecovery.assignee === 'gamma'
-      && rolledBackRecovery.attempt === recoverFailClaim.attempt
-      && rolledBackRecovery.attemptId === recoverFailClaim.attempt_id
-      && deliveries.length === deliveriesBeforeFailedRecovery
-      && throttledFailedRecovery?.status === 'in_progress'
-      && throttledFailedRecovery.attempt === recoverFailClaim.attempt
-      && throttledFailedRecovery.attemptId === recoverFailClaim.attempt_id
-      && deliveries.length === deliveriesBeforeFailedRecovery)
-  liveAgents.set(gamma.id, gamma)
+  check('recovered fallback activation is not rotated again by later kicks',
+    throttledFailedRecovery?.status === 'claimed'
+      && throttledFailedRecovery.attempt === recoveredFallback?.attempt
+      && throttledFailedRecovery.attemptId === recoveredFallback?.attemptId
+      && deliveries.length === deliveriesAfterRecoveryFallback)
+  gamma = liveAgents.get(recoveredMember.id)
   const recoverFailComplete = await call('agent_teams_claim_task', { task_id: tRecoverFail.task_id }, gamma)
+  await call('agent_teams_update_task', {
+    task_id: tRecoverFail.task_id, status: 'in_progress', attempt_id: recoverFailComplete.attempt_id,
+  }, gamma)
   await call('agent_teams_update_task', {
     task_id: tRecoverFail.task_id,
     status: 'completed',
     output: 'closed failed-recovery fixture',
     attempt_id: recoverFailComplete.attempt_id,
   }, gamma)
-  check('restored capability remains usable after a failed recovery delivery',
-    recoverFailComplete.attempt_id === recoverFailClaim.attempt_id
+  check('the fresh activation continues the recovered capability',
+    recoverFailComplete.attempt_id === recoveredFallback?.attemptId
       && (await task(tRecoverFail.task_id))?.status === 'completed')
   publishStatus(gamma, 'idle')
 
@@ -1361,11 +1373,15 @@ try {
       && archivedSnapshot.tasks
         .filter(task => ['alpha', 'beta', 'gamma'].includes(task.assignee))
         .every(task => task.model === 'fake/fake-model'))
+  const lifecycleChildren = (await ctx.subagents.listChildren(captain.id))
+    .filter(child => child.kind === 'child'
+      && child.mode === 'continuable'
+      && child.label.startsWith('agent-teams:lifecycle:'))
   check('team shutdown keeps retired members catalog-visible for historical transcripts',
-    (await ctx.subagents.listChildren(captain.id))
-      .filter(child => child.kind === 'child'
-        && child.mode === 'continuable'
-        && child.label.startsWith('agent-teams:lifecycle:')).length === 3)
+    ['alpha', 'beta', 'gamma'].every(name => lifecycleChildren.some(child => child.label === `agent-teams:lifecycle:${name}`))
+      // The recovery fixture retired one gamma activation; its row must stay
+      // readable even though the roster now records the replacement id.
+      && lifecycleChildren.some(child => child.id !== gamma.id && child.label === 'agent-teams:lifecycle:gamma'))
   let coldFollowupRejected = false
   const deliveriesBeforeColdFollowup = deliveries.length
   try {

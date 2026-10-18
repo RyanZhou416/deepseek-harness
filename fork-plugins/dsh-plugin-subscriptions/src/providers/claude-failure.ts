@@ -25,9 +25,13 @@ import {
 } from '@deepseek-ai/dsh-llm'
 import type { LlmErrorOptions, LlmFailure } from '@deepseek-ai/dsh-llm'
 import {
+  CONFLICT_CODE,
   ENFORCEMENT_CODE,
   isEnforcementRefusal,
+  MODEL_DENIED_CODE,
   namesBillingRefusal,
+  namesModelDenial,
+  namesRevokedCredential,
   sharedHttpFailureCode,
 } from './common.js'
 import { retryAfterInstant, waitFromReset } from './rate-limit.js'
@@ -169,6 +173,8 @@ const CLAUDE_CODE_RULES: Readonly<Record<string, ClaudeCodeRule>> = Object.freez
   [UNCLASSIFIED_PROVIDER_ERROR_CODE]: { retryDisposition: 'forbid', scope: 'unknown' },
   [PERMISSION_DENIED_CODE]: { retryDisposition: 'forbid', scope: 'operation' },
   [ENFORCEMENT_CODE]: { retryDisposition: 'forbid', scope: 'account' },
+  [MODEL_DENIED_CODE]: { retryDisposition: 'forbid', scope: 'model' },
+  [CONFLICT_CODE]: { retryDisposition: 'allow', scope: 'operation' },
   'INVALID_REQUEST': { retryDisposition: 'forbid', scope: 'operation' },
   [STREAM_INCOMPLETE_CODE]: { retryDisposition: 'forbid', scope: 'operation' },
   [CONTEXT_WINDOW_EXCEEDED_CODE]: { retryDisposition: 'allow', scope: 'operation' },
@@ -471,6 +477,14 @@ export function classifyClaudeHttpFailure(input: ClaudeHttpFailureInput): Claude
   // A refusal the provider stated is final outranks the status it arrived with: a 403 that
   // names billing or says not to retry is not an expired login.
   if (isEnforcementRefusal(response, body, reset, now)) return decisionFor(ENFORCEMENT_CODE, shared)
+  // The model, not the account, is the subject of a 403/404 that names one.
+  const envelopeText = `${envelope.codes.join(' ')} ${envelope.message ?? ''} ${envelope.text}`
+  if ((status === 403 || status === 404) && namesModelDenial(envelopeText)) {
+    return decisionFor(MODEL_DENIED_CODE, shared)
+  }
+  // A 403 that names a revoked credential or account is a refresh case before it is a
+  // permission refusal; a plain denial below stays terminal.
+  if (status === 403 && namesRevokedCredential(envelopeText)) return decisionFor('AUTH', shared)
   // 403 is a permission refusal, and this route must not read it as an expired login: a
   // plain 403 neither refreshes nor clears the stored credential.
   if (status === 403) return decisionFor(PERMISSION_DENIED_CODE, shared)
@@ -573,6 +587,11 @@ export function classifyClaudeSseFailure(input: ClaudeSseFailureInput): ClaudeFa
     return decisionFor(ENFORCEMENT_CODE, shared)
   }
   if (rule === undefined) return decisionFor(UNCLASSIFIED_PROVIDER_ERROR_CODE, shared)
+  // An in-band refusal that names one model is model-scoped, exactly as its HTTP form is.
+  if ((rule.code === PERMISSION_DENIED_CODE || rule.code === 'INVALID_REQUEST')
+    && namesModelDenial(message ?? '')) {
+    return decisionFor(MODEL_DENIED_CODE, shared)
+  }
   return decisionFor(rule.code, shared)
 }
 

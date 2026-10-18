@@ -115,6 +115,8 @@ import { CodexWebSearchProvider } from './providers/codex-search.js'
 import { PoolAdapter, usagePoolState } from './providers/pool.js'
 import { PoolSchedulingSchema, resolvePoolScheduling } from './providers/pool-scheduling.js'
 import type { PoolSchedulingPolicy } from './providers/pool-scheduling.js'
+import { PoolGateSchema } from './providers/pool-gate.js'
+import type { PoolGateConfig } from './providers/pool-gate.js'
 import { AccountPreferencesAdapter, accountAllowsPool, accountModelId, parseAccountModelId } from './providers/account-preferences.js'
 import { modelDisabledReason } from './providers/provider-catalog.js'
 export type { AccountPreferences, ProviderPreferences } from './provider-settings.js'
@@ -334,10 +336,14 @@ export interface Config {
     enabled?: boolean
     /** Member selection: plain priority failover, or quota-aware urgency scheduling. */
     strategy?: 'priority' | 'quota_aware'
-    /** A challenger must out-score the sticky member by this factor to take over (default 2). */
-    switchMargin?: number
     /** Bounded reset/finishing preferences and per-account concurrency penalty. */
     scheduling?: Partial<PoolSchedulingPolicy>
+    /**
+     * Account concurrency, request limiter and backoff. A subscription account
+     * serves at most this many sessions; each session sends one request at a
+     * time, and each account's request limiter is shared by all of them.
+     */
+    concurrency?: PoolGateConfig
     /** Auto-pool every catalog model across a provider's logged-in accounts (default true). */
     autoAccounts?: boolean
     /** Explicit account lists for one catalog model (same provider); replaces the auto pool. */
@@ -446,8 +452,8 @@ export const Config: z<Config> = z.object({
   pool: z.object({
     enabled: z.boolean().default(true),
     strategy: z.union(['priority', 'quota_aware']).default('quota_aware'),
-    switchMargin: z.number().min(1).default(2),
     scheduling: PoolSchedulingSchema,
+    concurrency: PoolGateSchema,
     autoAccounts: z.boolean().default(true),
     families: z.dict(z.array(poolMemberSchema)),
     tiers: z.dict(z.array(poolMemberSchema)),
@@ -3226,8 +3232,8 @@ export function apply(ctx: Context, config: Config, internals: SubscriptionInter
       health: poolHealth,
       usage: poolUsage,
       strategy: poolConfig?.strategy ?? 'quota_aware',
-      switchMargin: poolConfig?.switchMargin ?? 2,
       scheduling,
+      ...poolConfig?.concurrency === undefined ? {} : { concurrency: poolConfig.concurrency },
       defaultAccount: provider => accountTokens.get(provider)?.defaultAccount() ?? Promise.resolve(undefined),
       resolveAccount: (provider, account) => accountTokens.get(provider)?.resolveAccount(account) ?? Promise.resolve(account),
       families,
@@ -3236,6 +3242,18 @@ export function apply(ctx: Context, config: Config, internals: SubscriptionInter
         ? recoverCodexQuota(member.account, signal) : Promise.resolve(false),
       onWarn,
     })
+    // The pool binds each session's turns to one account and limits how many
+    // sessions one account serves; both need the session log's own turn
+    // boundaries, and both must forget a session the moment it is disposed.
+    const pool = poolAdapter
+    ctx.on('session/event', (session, event) => {
+      const sessionId = String(session.id)
+      if (event.type === 'turn/start') pool.noteTurnStart(sessionId, event.data.turn)
+      else if (event.type === 'turn/end') pool.noteTurnEnd(sessionId, event.data.turn)
+    }, { global: true })
+    ctx.on('session/disposed', (session) => { pool.forgetSession(String(session.id)) })
+    ctx.on('agent/disposed', ({ agent }) => { pool.forgetSession(String(agent.session.id)) })
+    ctx.effect(() => () => { pool.dispose() }, 'dsh-plugin-subscriptions: account pool gate')
   }
 
   // The `usage` endpoint's pool attribution: whether THIS account is parked,

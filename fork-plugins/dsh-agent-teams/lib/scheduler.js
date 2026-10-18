@@ -231,32 +231,37 @@ export function installTeamScheduler(ctx, config) {
                 let member = team.members.find(candidate => candidate.name === memberName && candidate.status !== 'removed');
                 if (member === undefined || !isMemberAvailable(ctx, member))
                     return;
-                // A mailbox-only fallback is real pending work. Deliver it before a
-                // fresh task and acknowledge only after Harness accepts the follow-up.
-                const unread = await withTeamLock(teamLockKey(stateRoot, team.id), async () => {
-                    const fresh = await readTeam(stateRoot, team.id);
-                    if (fresh === undefined)
-                        return [];
-                    const pending = await readPendingMailbox(stateRoot, fresh.id, member.name);
-                    await discardMailboxMessages(stateRoot, fresh.id, member.name, pending.filter(message => !isCurrentMail(fresh, message)).map(message => message.id));
-                    const current = pending.filter(message => isCurrentMail(fresh, message));
-                    await claimMailboxDelivery(stateRoot, fresh.id, member.name, current.map(message => message.id));
-                    return current;
-                });
-                if (unread.length > 0) {
-                    const prompt = mailboxPrompt(team.id, member.name, unread);
+                // One kick hands the member at most one unit of work. A ready task wins
+                // over unread mail; the mailbox is flushed only when no task is
+                // claimable, so an unconsumed message cannot starve assigned work.
+                const memberSnapshot = member;
+                const flushMailbox = async () => {
+                    const unread = await withTeamLock(teamLockKey(stateRoot, teamId), async () => {
+                        const fresh = await readTeam(stateRoot, teamId);
+                        if (fresh === undefined)
+                            return [];
+                        const pending = await readPendingMailbox(stateRoot, fresh.id, memberSnapshot.name);
+                        await discardMailboxMessages(stateRoot, fresh.id, memberSnapshot.name, pending.filter(message => !isCurrentMail(fresh, message)).map(message => message.id));
+                        const current = pending.filter(message => isCurrentMail(fresh, message));
+                        await claimMailboxDelivery(stateRoot, fresh.id, memberSnapshot.name, current.map(message => message.id));
+                        return current;
+                    });
+                    if (unread.length === 0)
+                        return;
+                    const prompt = mailboxPrompt(teamId, memberSnapshot.name, unread);
                     const signal = new AbortController().signal;
                     const accepted = config.dispatch === undefined
-                        ? await deliverToMember(ctx, captain, member.id, prompt, signal, 'steer')
-                        : await config.dispatch(captain, team.id, member.name, prompt, signal, 'steer');
+                        ? (await deliverToMember(ctx, captain, memberSnapshot.id, prompt, signal, 'steer')).accepted
+                        : await config.dispatch(captain, teamId, memberSnapshot.name, prompt, signal, 'steer');
                     if (accepted) {
-                        await withTeamLock(teamLockKey(stateRoot, team.id), () => (markMailboxDelivered(stateRoot, team.id, member.name, unread.map(message => message.id))));
+                        await withTeamLock(teamLockKey(stateRoot, teamId), () => (markMailboxDelivered(stateRoot, teamId, memberSnapshot.name, unread.map(message => message.id))));
                     }
                     else {
-                        await withTeamLock(teamLockKey(stateRoot, team.id), () => (releaseMailboxDelivery(stateRoot, team.id, member.name, unread.map(message => message.id))));
+                        await withTeamLock(teamLockKey(stateRoot, teamId), () => (releaseMailboxDelivery(stateRoot, teamId, memberSnapshot.name, unread.map(message => message.id))));
                     }
-                    return;
-                }
+                };
+                // A ready task is this member's primary work. Handling unread mail
+                // first would let an unconsumed message starve every assigned task.
                 const ticket = await withTeamLock(teamLockKey(stateRoot, team.id), async () => {
                     const fresh = await readTeam(stateRoot, team.id);
                     if (fresh === undefined || fresh.halted === true || fresh.phase === 'staged')
@@ -285,7 +290,7 @@ export function installTeamScheduler(ctx, config) {
                     }
                     const previousAssignee = task.assignee;
                     const previousStatus = recoverOwned ? task.status : undefined;
-                    const previousAttempt = recoverOwned ? task.attempt : undefined;
+                    const previousAttempt = task.attempt;
                     const previousAttemptId = recoverOwned ? task.attemptId : undefined;
                     const previousResult = recoverOwned ? {
                         output: task.output, verdict: task.verdict, findings: task.findings,
@@ -344,8 +349,10 @@ export function installTeamScheduler(ctx, config) {
                         dependencyOutputs: collectCompletedDependencyOutputs(fresh.tasks, task.id, (message) => ctx.logger.warn(message)),
                     };
                 });
-                if (ticket === undefined)
+                if (ticket === undefined) {
+                    await flushMailbox();
                     return;
+                }
                 const taskForWarning = team.tasks.find((item) => item.id === ticket.taskId);
                 const workOrderStale = taskForWarning?.contractSnapshot === undefined
                     ? []
@@ -353,7 +360,7 @@ export function installTeamScheduler(ctx, config) {
                 const prompt = assignmentPrompt(ticket, config.stateDir, team.id, workOrderStale);
                 const signal = new AbortController().signal;
                 const accepted = config.dispatch === undefined
-                    ? await deliverToMember(ctx, captain, ticket.memberId, prompt, signal)
+                    ? (await deliverToMember(ctx, captain, ticket.memberId, prompt, signal)).accepted
                     : await config.dispatch(captain, team.id, ticket.memberName, prompt, signal, 'queue', ticket.attemptId);
                 if (accepted)
                     return;
@@ -366,6 +373,11 @@ export function installTeamScheduler(ctx, config) {
                     const task = fresh.tasks.find(candidate => candidate.id === ticket.taskId);
                     if (task?.attemptId !== ticket.attemptId)
                         return;
+                    // A failed dispatch may have retired the dead activation and cleared
+                    // the member id. Park under the id the next kick will actually read,
+                    // or the recovery marker is lost and every kick mints a new attempt.
+                    const currentMember = fresh.members.find(candidate => candidate.name === ticket.memberName);
+                    const parkedKey = currentMember?.id ?? ticket.memberId;
                     if (ticket.recoveredOwned && ticket.previousStatus !== undefined && ticket.previousAttemptId !== undefined) {
                         // Recovery delivery failed. Restore the durable generation instead
                         // of returning it to pending, then keep it parked so later status
@@ -375,18 +387,23 @@ export function installTeamScheduler(ctx, config) {
                         task.attempt = ticket.previousAttempt;
                         task.attemptId = ticket.previousAttemptId;
                         Object.assign(task, ticket.previousResult);
-                        parkedAttempts.set(ticket.memberId, ticket.previousAttemptId);
+                        parkedAttempts.set(parkedKey, ticket.previousAttemptId);
                     }
                     else {
                         task.status = 'pending';
                         task.assignee = ticket.previousAssignee;
+                        // The dispatch never reached a member, so it must not spend a
+                        // generation. Leaving the incremented number behind made every
+                        // retry look like a new attempt and could park a `pending` task at
+                        // an attempt the member never observed.
+                        task.attempt = ticket.previousAttempt;
                         task.attemptId = undefined;
                         parkedAttempts.delete(ticket.memberId);
+                        parkedAttempts.delete(parkedKey);
                     }
                     task.handoffId = undefined;
                     task.reassigning = false;
                     task.updatedAt = Date.now();
-                    const currentMember = fresh.members.find(candidate => candidate.name === ticket.memberName);
                     if (currentMember !== undefined && currentMember.status !== 'removed')
                         currentMember.status = 'idle';
                     await writeTeam(stateRoot, fresh);

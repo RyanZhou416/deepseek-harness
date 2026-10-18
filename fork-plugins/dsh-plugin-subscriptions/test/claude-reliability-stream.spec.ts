@@ -252,11 +252,11 @@ test('a pool answers a version refusal on the first account without asking the s
   const health = new PoolHealthRegistry()
   const pool = new PoolAdapter({
     scheduling: resolvePoolScheduling(),
+    concurrency: { requestsPerMinute: 0, minGapMs: 0 },
     adapters: { claude: harness.adapter },
     health,
     usage: new PoolUsageTracker(() => undefined),
     strategy: 'priority',
-    switchMargin: 2,
     defaultAccount: async () => 'a1',
     families: async () => new Map([[poolKey('claude', MODEL), { members: [
       { provider: 'claude', account: 'a1', model: MODEL },
@@ -733,11 +733,11 @@ test('a pool never answers a forbidden failure from another account, whatever it
     const health = new PoolHealthRegistry()
     const pool = new PoolAdapter({
       scheduling: resolvePoolScheduling(),
+      concurrency: { requestsPerMinute: 0, minGapMs: 0 },
       adapters: { claude: fake as never },
       health,
       usage: new PoolUsageTracker(() => undefined),
       strategy: 'priority',
-      switchMargin: 2,
       defaultAccount: async () => 'a1',
       families: async () => new Map([[poolKey('claude', MODEL), { members: [
         { provider: 'claude', account: 'a1', model: MODEL },
@@ -755,24 +755,25 @@ test('a pool never answers a forbidden failure from another account, whatever it
   }
 })
 
-test('the pool still fails over for the same codes when nothing forbids a resend', async () => {
+test('the pool keeps the same account for a transient failure when nothing forbids a resend', async () => {
   const attempted: string[] = []
+  const transient = new LlmError('claude API SERVER', 'SERVER')
   const fake = {
     streamAccount: (_options: GenerateOptions, account?: string): AsyncIterable<StreamChunk> =>
       (async function* () {
         attempted.push(account ?? '')
-        if (account === 'a1') throw new LlmError('claude API SERVER', 'SERVER')
+        if (account === 'a1') throw transient
         yield { type: 'text-delta', index: 0, text: 'ok' } as StreamChunk
         yield { type: 'finish', reason: { kind: 'stop' } } as StreamChunk
       })(),
   }
   const pool = new PoolAdapter({
     scheduling: resolvePoolScheduling(),
+    concurrency: { requestsPerMinute: 0, minGapMs: 0 },
     adapters: { claude: fake as never },
     health: new PoolHealthRegistry(),
     usage: new PoolUsageTracker(() => undefined),
     strategy: 'priority',
-    switchMargin: 2,
     defaultAccount: async () => 'a1',
     families: async () => new Map([[poolKey('claude', MODEL), { members: [
       { provider: 'claude', account: 'a1', model: MODEL },
@@ -781,10 +782,12 @@ test('the pool still fails over for the same codes when nothing forbids a resend
     tiers: {},
     onWarn: () => {},
   })
-  const chunks: StreamChunk[] = []
-  for await (const chunk of pool.stream(OPTIONS)) chunks.push(chunk)
-  assert.deepEqual(attempted, ['a1', 'a2'], 'an ordinary transient failure still fails over')
-  assert.equal(chunks.at(-1)?.type, 'finish')
+  // A transient failure stays on its account; retry policy, not the pool, decides
+  // whether that account may be tried again.
+  await assert.rejects(async () => {
+    for await (const _chunk of pool.stream(OPTIONS)) { /* drain */ }
+  }, (error: unknown) => error === transient)
+  assert.deepEqual(attempted, ['a1'], 'the sibling account is not asked inside the turn')
 })
 
 test('a 401 rejected again after the one refresh hard-terminates the logical request', async t => {

@@ -138,9 +138,14 @@ test('a named request or model refusal is not resent, however the status reads',
 
 test('a code this route has no rule for is never allowed by omission', () => {
   // The table is an allow-list: an unnamed status must not read as permission.
-  const decision = classify('conflict', { status: 409 })
-  assert.equal(decision.reason, 'HTTP_409')
+  const decision = classify('conflict', { status: 418 })
+  assert.equal(decision.reason, 'HTTP_418')
   assert.equal(decision.retryDisposition, 'forbid')
+  // A status the taxonomy names transient keeps its declared recovery: a 409 is the
+  // provider failing to settle a target that changed, which the same account retries.
+  const conflict = classify('conflict', { status: 409 })
+  assert.equal(conflict.reason, 'CONFLICT')
+  assert.equal(conflict.retryDisposition, 'allow')
   // A status with a declared rule keeps it.
   assert.equal(classify('', { status: 402 }).retryDisposition, 'allow')
 })

@@ -3,21 +3,29 @@
  * member is cooling down after a failure, and for how long. Purely in-memory
  * — a restart re-probes members naturally, so nothing here is persisted.
  *
- * The failure classifier maps the adapters' stable `LlmError` codes (see
- * `httpLlmError`/`mapFetchFailure` in `common.ts`) to one of three actions:
- * switch to another member with a cooldown, switch without recording a
- * cooldown (transport blips say nothing about the account), or rethrow
- * (the request itself is at fault and another account would fail alike).
+ * The failure classifier states what one failure is evidence about. It never
+ * says "try the sibling account": a turn is bound to one account, and answering
+ * a request from a second account is the amplification the concurrency policy
+ * exists to stop. The effects it can name are:
  *
- * An enforcement-shaped refusal — a rate-limit refusal the provider stated is
- * final, and every credential refusal — is neither: it parks the account and
- * ends the turn on that refusal, because answering it from another account
- * multiplies the traffic the refusal was aimed at.
+ * - the session backs off alone (`session-backoff`), which is what a transient
+ *   status, an ordinary rate limit, a network fault or a timeout says;
+ * - the account is parked until a disclosed reset (`account-cooldown`), which is
+ *   what a window/quota 429, a spent allowance or an exhausted refresh budget says;
+ * - the credential is refreshed on the same account (`refresh`), which is what a
+ *   401 or a revoked 403 says;
+ * - the model is the subject and the account is untouched (`model-scoped`);
+ * - the member could not be used at all and no request was sent
+ *   (`member-ineligible`), which is the local account-policy refusal.
+ *
+ * Everything else is rethrown untouched: the request itself is at fault, the
+ * provider stated a version/policy/content refusal, or the failure may not be
+ * repeated.
  */
 
 import { CONTEXT_WINDOW_EXCEEDED_CODE, LlmError, QUOTA_EXCEEDED_CODE } from '@deepseek-ai/dsh-llm'
 import type { ProviderId } from '../auth/store.js'
-import { ENFORCEMENT_CODE } from './common.js'
+import { CONFLICT_CODE, ENFORCEMENT_CODE, MODEL_DENIED_CODE } from './common.js'
 import { CLIENT_VERSION_UNSUPPORTED_CODE, PERMISSION_DENIED_CODE } from './claude-failure.js'
 
 /** Registry key for one pool member. */
@@ -37,15 +45,13 @@ export const AUTH_COOLDOWN_MS = 24 * 60 * 60_000
 /** Transient server-side failures cool down briefly. */
 export const TRANSIENT_COOLDOWN_MS = 60_000
 
-/** Whether a failure parks one member or the account's whole quota. */
-export type PoolFailureScope = 'member' | 'account'
-
 /**
  * Codes naming a refusal the provider aimed at one identity: an
  * enforcement-shaped rejection, every credential refusal, and the two Claude
  * refusals that are evidence about the request's identity or its compatibility
- * profile rather than about an allowance. A pool answers none of them from
- * another account.
+ * profile rather than about an allowance.
+ *
+ * Used to name why a pool served nothing and to order those reasons.
  */
 const REFUSAL_CODES: readonly string[] = [
   ENFORCEMENT_CODE,
@@ -66,24 +72,9 @@ export function isRefusalCode(code: string): boolean {
 }
 
 /**
- * Whether a failure code ends the turn with no automatic recovery at all.
- *
- * Every refusal is one, and so is an error this route could not classify: the design
- * forbids reporting an unmapped failure as a transient server fault, so the pool's own
- * terminal error must not present it as one either.
- * @param code - the failure code a pool member reported.
- * @returns true when the terminal error must carry the hard stop.
- */
-export function isHardStopCode(code: string): boolean {
-  return code === 'UNCLASSIFIED_PROVIDER_ERROR' || isRefusalCode(code)
-}
-
-/**
  * The code naming why a pool served nothing: the refusal when its members
  * reported one, otherwise their single shared reason, otherwise the
- * cooling-down state they have in common. A refusal outranks a rate limit
- * another member reported, because naming the rate limit would hand a refused
- * account's turn back to the retry loop.
+ * cooling-down state they have in common.
  * @param codes - every reason a selection recorded or found parked.
  * @returns the terminal error's code.
  */
@@ -104,29 +95,35 @@ export function isAuthCooldownReason(reason: string): boolean {
   return reason === 'AUTH' || reason === 'INVALID_CREDENTIAL' || reason === 'MISSING_CREDENTIAL'
 }
 
-/** What the pool should do with a member that just failed. */
-type PoolFailureAction =
-  /** Park the failing member or account, then try the next one. */
-  | { action: 'switch'; cooldownMs: number; reason: string; scope: PoolFailureScope }
-  /** Try the next member without recording anything about this one. */
-  | { action: 'switch' }
-  /** Fail the turn with this error; another member would fail alike. */
-  | { action: 'throw' }
-  /**
-   * Park the account and fail the turn on this refusal. The provider refused
-   * this identity, so another account of the same subscription only repeats the
-   * refusal — which is the traffic such a refusal is meant to stop.
-   */
-  | { action: 'park'; cooldownMs: number; reason: string; scope: PoolFailureScope }
-
 /**
- * Providers whose quota windows are model-scoped, so a quota failure on one
- * model says nothing about its siblings (Claude's Opus/Sonnet lanes). Every
- * other provider meters the account as a whole: one member hitting the wall
- * means its siblings on the SAME account would too, so the cooldown parks
- * the account (other accounts of the provider are unaffected).
+ * What the pool does about a member failure.
+ *
+ * No effect switches accounts: the session keeps the account its turn is bound
+ * to, and the next turn decides whether a rematch is allowed.
  */
-const MODEL_SCOPED_QUOTA_PROVIDERS: ReadonlySet<ProviderId> = new Set(['claude'])
+export type PoolFailureAction =
+  /**
+   * Back off this session alone. `delayMs` is the provider's own disclosed wait
+   * when it sent one; absent means the session's local exponential backoff.
+   */
+  | { action: 'session-backoff'; reason: string; delayMs?: number }
+  /** Park the failing account for `cooldownMs`, shared by every session. */
+  | { action: 'account-cooldown'; cooldownMs: number; reason: string }
+  /**
+   * Refresh the credential and retry on the same account. The gate bounds how
+   * many refresh cycles a turn may spend and parks the account after that.
+   */
+  | { action: 'refresh'; reason: string }
+  /**
+   * The member could not be used: account policy or catalogue resolution
+   * refused it before any request was sent, so another member may take this
+   * request without contacting two accounts.
+   */
+  | { action: 'member-ineligible'; reason: string }
+  /** A model-scoped refusal: fail this model, do not touch the account or switch. */
+  | { action: 'model-scoped'; reason: string }
+  /** Fail the turn with this error; nothing about the account may be recorded. */
+  | { action: 'throw' }
 
 /** The `retry-after` an adapter propagated through `httpLlmError`, when any. */
 function retryAfterMs(error: LlmError): number | undefined {
@@ -134,94 +131,106 @@ function retryAfterMs(error: LlmError): number | undefined {
 }
 
 /**
- * Classify a member failure. Quota and rate-limit failures cool down (using
- * the provider's own `retry-after` when sent, which is more accurate than
- * any fixed guess) — account-wide for account-metered providers, per-member
- * for model-scoped ones; server/timeout failures get a short per-member
- * cooldown; transport failures switch without a record; everything else —
- * most importantly CONTEXT_WINDOW_EXCEEDED and ABORTED — is the request's own
- * fault and is rethrown untouched.
+ * Classify a member failure into the effect the pool applies.
  *
- * Enforcement-shaped refusals park the account and end the turn instead of
- * switching: a rate-limit refusal the provider stated is final
- * ({@link ENFORCEMENT_CODE}), and every credential refusal, since credentials
- * are account-level. Both record a cooldown — the disclosed reset when the
- * refusal carried one, {@link AUTH_COOLDOWN_MS} for a dead login — so the
- * account is not asked again until something may have changed.
+ * The table is the subscription account's error taxonomy:
+ *
+ * - transient statuses (408, 409, 500/502/503/504/529), an ordinary 429, and
+ *   network, TLS or timeout failures back only their session off, so the same
+ *   account may retry after the disclosed or local delay;
+ * - a window/quota 429, a spent allowance, or an exhausted refresh budget parks
+ *   the account until it can serve again, which every session sees;
+ * - 401 and a revoked 403 refresh the credential on the same account first;
+ * - a 403 or 404 that names one model is model-scoped and never changes the
+ *   account;
+ * - a stated final refusal, a request fault, an abort, a version/policy/content
+ *   refusal and a malformed post-delivery stream are terminal.
  *
  * A failure that already carries the hard stop is decided by that field before
- * its code is read: switching members is itself a resend, so a forbidden
- * failure may not be answered from another account however recoverable its code
- * looks. Its account-state side effects are still recorded where the code names
- * one.
+ * its code is read: the route stated the logical request may not be repeated.
  * @param error - the failure thrown by a member adapter's stream.
- * @param provider - the failing member's provider (decides the quota scope).
- * @returns the action the pool should take.
+ * @param _provider - the failing member's provider (kept for the classifier's stable call shape).
+ * @returns the effect the pool should apply.
  */
-export function classifyPoolFailure(error: unknown, provider: ProviderId): PoolFailureAction {
+export function classifyPoolFailure(error: unknown, _provider: ProviderId): PoolFailureAction {
   if (!(error instanceof LlmError)) return { action: 'throw' }
+  const status = error.failure.status
   if (error.failure.retryDisposition === 'forbid') {
     switch (error.code) {
       case ENFORCEMENT_CODE:
-        return {
-          action: 'park',
-          cooldownMs: retryAfterMs(error) ?? DEFAULT_QUOTA_COOLDOWN_MS,
-          reason: error.code,
-          scope: 'account',
-        }
-      case 'AUTH':
+        // A stated-final 429 is the window/quota refusal this account must sit out;
+        // a 403 refusal is the identity being unavailable. Any other stated-final
+        // refusal is terminal for the turn.
+        return status === 429 || status === 403 || retryAfterMs(error) !== undefined
+          ? { action: 'account-cooldown', cooldownMs: retryAfterMs(error) ?? DEFAULT_QUOTA_COOLDOWN_MS, reason: error.code }
+          : { action: 'throw' }
       case 'INVALID_CREDENTIAL':
       case 'MISSING_CREDENTIAL':
-        return { action: 'park', cooldownMs: AUTH_COOLDOWN_MS, reason: error.code, scope: 'account' }
+        return { action: 'account-cooldown', cooldownMs: AUTH_COOLDOWN_MS, reason: error.code }
+      case MODEL_DENIED_CODE:
+        // The hard stop forbids a resend of this model, but the account is the wrong
+        // subject: report the model scope, not an account or request failure.
+        return { action: 'model-scoped', reason: error.code }
       default:
-        // A protocol, permission or unclassified refusal says nothing about this account's
-        // allowance or its login, so it records no cooldown and simply ends the turn.
+        // A hard-stopped protocol, permission, request or unclassified refusal says
+        // nothing about this account's allowance or its login, and may not be repeated.
         return { action: 'throw' }
     }
   }
   switch (error.code) {
-    case QUOTA_EXCEEDED_CODE:
     case 'RATE_LIMIT':
+    case 'SERVER':
+    case 'TIMEOUT':
+    case 'TRANSPORT':
+    case 'EMPTY_RESPONSE':
+    case 'MALFORMED_RESPONSE':
+    case CONFLICT_CODE: {
+      const delayMs = retryAfterMs(error)
       return {
-        action: 'switch',
+        action: 'session-backoff',
+        reason: error.code,
+        ...delayMs === undefined ? {} : { delayMs },
+      }
+    }
+    case QUOTA_EXCEEDED_CODE:
+      return {
+        action: 'account-cooldown',
         cooldownMs: retryAfterMs(error) ?? DEFAULT_QUOTA_COOLDOWN_MS,
         reason: error.code,
-        scope: MODEL_SCOPED_QUOTA_PROVIDERS.has(provider) ? 'member' : 'account',
       }
     case ENFORCEMENT_CODE:
-      return {
-        action: 'park',
-        cooldownMs: retryAfterMs(error) ?? DEFAULT_QUOTA_COOLDOWN_MS,
-        reason: error.code,
-        scope: 'account',
-      }
+      // Only the window/quota 429 and an account-shaped 403 are account state. A
+      // stated-final refusal on any other status (a policy or request refusal) is
+      // terminal for this turn.
+      return status === 429 || status === 403
+        ? { action: 'account-cooldown', cooldownMs: retryAfterMs(error) ?? DEFAULT_QUOTA_COOLDOWN_MS, reason: error.code }
+        : { action: 'throw' }
+    case 'AUTH':
+      // 401 and a revoked 403 refresh the credential on the same account first; the
+      // gate parks the account when its refresh budget is spent.
+      return { action: 'refresh', reason: error.code }
+    case 'INVALID_CREDENTIAL':
+    case 'MISSING_CREDENTIAL':
+      return { action: 'account-cooldown', cooldownMs: AUTH_COOLDOWN_MS, reason: error.code }
+    case MODEL_DENIED_CODE:
+    case 'HTTP_404':
+      // The model, not the account, is the subject: the same account may serve
+      // another model, and the account is not parked.
+      return { action: 'model-scoped', reason: error.code }
+    case 'HTTP_402':
+      return { action: 'account-cooldown', cooldownMs: TRANSIENT_COOLDOWN_MS, reason: error.code }
+    case 'NO_ADAPTER':
+      // The local account-policy seam refused this member before any request.
+      return { action: 'member-ineligible', reason: error.code }
     case CLIENT_VERSION_UNSUPPORTED_CODE:
     case PERMISSION_DENIED_CODE:
     case 'UNCLASSIFIED_PROVIDER_ERROR':
-      // Terminal for this turn, and evidence about the compatibility profile, the request or a
-      // condition this route cannot name — never about the account's credentials or its
-      // allowance. So no account cooldown is recorded and no sibling account is asked, which
-      // is what a protocol refusal or an unmapped error exists to stop.
-      return { action: 'throw' }
-    case 'AUTH':
-    case 'INVALID_CREDENTIAL':
-    case 'MISSING_CREDENTIAL':
-      return { action: 'park', cooldownMs: AUTH_COOLDOWN_MS, reason: error.code, scope: 'account' }
-    case 'SERVER':
-    case 'TIMEOUT':
-    case 'EMPTY_RESPONSE':
-      return { action: 'switch', cooldownMs: TRANSIENT_COOLDOWN_MS, reason: error.code, scope: 'member' }
-    case 'TRANSPORT':
-      return { action: 'switch' }
-    case 'HTTP_402':
-    case 'HTTP_404':
-      // Plan/model availability is account-shaped: another account of the
-      // same subscription may still serve. A 400 that is not a context-window
-      // error stays HTTP_400 and throws (the request itself is at fault).
-      return { action: 'switch', cooldownMs: TRANSIENT_COOLDOWN_MS, reason: error.code, scope: 'member' }
+    case 'INVALID_REQUEST':
     case CONTEXT_WINDOW_EXCEEDED_CODE:
     case 'ABORTED':
     default:
+      // A request fault, a version/policy/content refusal, an abort or an unnamed
+      // status: nothing about the account is recorded and no sibling is asked.
       return { action: 'throw' }
   }
 }
@@ -294,8 +303,7 @@ export class PoolHealthRegistry {
    * `undefined` when none of them is cooling. The registry is shared by
    * every pool, so the caller passes the keys of ITS members (member and
    * account keys alike) — an unrelated pool's cooldown must not shape this
-   * pool's retry hint. Feeds the pool-exhausted error's
-   * `providerRetryAfterMs`.
+   * pool's retry hint.
    */
   earliestRecovery(keys: ReadonlySet<string>, now = Date.now()): number | undefined {
     let earliest: number | undefined

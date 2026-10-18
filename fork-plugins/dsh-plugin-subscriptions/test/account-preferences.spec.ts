@@ -98,7 +98,7 @@ test('singleton and explicit families/tiers enforce account and model exclusion 
     const route = new AccountPreferencesAdapter({ provider: 'codex', adapter: raw, settings, accounts: async () => accounts, pool: () => pool, onWarn: () => {} })
     await settings.set('codex', { accounts: { a: { poolModels: [] } } })
     await assert.rejects(consume(route, 'm:/模型'), /No eligible/)
-    pool = new PoolAdapter({ scheduling: resolvePoolScheduling(), adapters: { codex: route.poolMember() }, health: new PoolHealthRegistry(), usage: new PoolUsageTracker(() => undefined), strategy: 'priority', switchMargin: 2, defaultAccount: async () => 'a', families: async () => new Map([['codex/m:/模型', { members: [{ provider: 'codex', account: 'a', model: 'm:/模型' }] }]]), tiers: { tier: [{ provider: 'codex', model: 'm:/模型' }] }, onWarn: () => {} })
+    pool = new PoolAdapter({ scheduling: resolvePoolScheduling(), adapters: { codex: route.poolMember() }, health: new PoolHealthRegistry(), usage: new PoolUsageTracker(() => undefined), strategy: 'priority', concurrency: { requestsPerMinute: 0, minGapMs: 0 }, defaultAccount: async () => 'a', families: async () => new Map([['codex/m:/模型', { members: [{ provider: 'codex', account: 'a', model: 'm:/模型' }] }]]), tiers: { tier: [{ provider: 'codex', model: 'm:/模型' }] }, onWarn: () => {} })
     for (const id of ['m:/模型', 'tier']) {
       await assert.rejects(consume(route, id))
       await assert.rejects(route.resolveModel('codex', id), /no usable member/)
@@ -110,7 +110,7 @@ test('singleton and explicit families/tiers enforce account and model exclusion 
     assert.ok(raw.calls.includes('stream:a:m:/模型'))
     accounts = [...accounts, { key: 'b', label: 'B' }]
     await settings.set('codex', { accounts: { a: { poolEnabled: false } } })
-    pool = new PoolAdapter({ scheduling: resolvePoolScheduling(), adapters: { codex: route.poolMember() }, health: new PoolHealthRegistry(), usage: new PoolUsageTracker(() => undefined), strategy: 'priority', switchMargin: 2, defaultAccount: async () => 'a', families: async () => new Map(), tiers: { mixed: [{ provider: 'codex', account: 'a', model: 'm:/模型' }, { provider: 'codex', account: 'b', model: 'm:/模型' }] }, onWarn: () => {} })
+    pool = new PoolAdapter({ scheduling: resolvePoolScheduling(), adapters: { codex: route.poolMember() }, health: new PoolHealthRegistry(), usage: new PoolUsageTracker(() => undefined), strategy: 'priority', concurrency: { requestsPerMinute: 0, minGapMs: 0 }, defaultAccount: async () => 'a', families: async () => new Map(), tiers: { mixed: [{ provider: 'codex', account: 'a', model: 'm:/模型' }, { provider: 'codex', account: 'b', model: 'm:/模型' }] }, onWarn: () => {} })
     assert.equal((await route.resolveModel('codex', 'mixed')).context?.contextWindow, 200)
     await consume(route, 'mixed')
     assert.ok(raw.calls.includes('stream:b:m:/模型'))
@@ -159,7 +159,8 @@ function unownedPool(
   })
   const adapters: Partial<Record<ProviderId, AccountAwareAdapter>> = { [provider]: route.poolMember() }
   pool = new PoolAdapter({ scheduling: resolvePoolScheduling(), adapters, health,
-    usage: new PoolUsageTracker(usage), strategy: 'priority', switchMargin: 2,
+    usage: new PoolUsageTracker(usage), strategy: 'priority',
+    concurrency: { requestsPerMinute: 0, minGapMs: 0 },
     defaultAccount: async () => 'a', families: async () => new Map(), tiers: {}, onWarn: () => {} })
   return { route, raw, health, warnings }
 }

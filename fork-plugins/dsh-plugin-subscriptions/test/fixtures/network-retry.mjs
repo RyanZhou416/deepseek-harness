@@ -38,7 +38,7 @@ export function apply(ctx) {
   health.markUnavailable(memberKey(provider, 'cooling', model), 32 * 3_600_000, 'RATE_LIMIT')
   const pool = new PoolAdapter({
     adapters: { [provider]: adapter }, health, usage: new PoolUsageTracker(() => undefined),
-    strategy: 'priority', switchMargin: 2, scheduling: resolvePoolScheduling(),
+    strategy: 'priority', scheduling: resolvePoolScheduling(), concurrency: { requestsPerMinute: 0, minGapMs: 0 },
     defaultAccount: async () => 'online',
     families: async () => new Map([[`${provider}/${model}`, { members: ['cooling', 'online'].map(account => ({ provider, account, model })) }]]),
     tiers: {}, onWarn: () => {},

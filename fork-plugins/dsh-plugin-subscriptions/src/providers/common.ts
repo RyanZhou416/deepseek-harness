@@ -90,6 +90,22 @@ export function validateModels(models: readonly ModelEntry[], label: string): Mo
  */
 export const ENFORCEMENT_CODE = 'ENFORCEMENT'
 
+/**
+ * Failure code for a request the provider refused because the account may not
+ * use that model.
+ *
+ * Model-scoped: the same account may serve another model, so the pool never
+ * parks the account or asks a sibling for this one.
+ */
+export const MODEL_DENIED_CODE = 'MODEL_DENIED'
+
+/**
+ * Failure code for a request the provider could not settle because the target
+ * changed underneath it (HTTP 409). Transient and request-scoped: the same
+ * account may retry it after a backoff.
+ */
+export const CONFLICT_CODE = 'CONFLICT'
+
 /** The server's own instruction to stop retrying: `x-should-retry: false`. */
 const STOP_RETRY_HEADER = 'x-should-retry'
 
@@ -114,6 +130,50 @@ const DISABLED_REASONS: ReadonlySet<string> = new Set([
 
 /** A disabled reason named in the error body rather than in the unified headers. */
 const DISABLED_REASON_FIELD = /"?overage[_-]?disabled[_-]?reason"?\s*:\s*"([a-z_]+)"/i
+
+/**
+ * Provider wording and structured codes that name a denial aimed at one model
+ * rather than at the account: the model does not exist for this account, is not
+ * enabled, or is not one the account may call.
+ *
+ * Read only on a 403 or 404, where such a refusal is the only interpretation the
+ * status supports; a 5xx that happens to mention a model stays transient.
+ */
+const MODEL_DENIED_WORDS = new RegExp(
+  String.raw`model[_-]?(?:not[_-]?(?:found|available|enabled)|access[_-]?denied|denied|unsupported)`
+  + String.raw`|\bmodel\b.{0,80}\b(?:not found|does not exist|no access|do not have access|`
+  + String.raw`not available|not permitted|not allowed|not supported|is disabled)\b`
+  + String.raw`|\b(?:no access|do not have access|not authorized)\b.{0,80}\bmodel\b`,
+  'i',
+)
+
+/**
+ * Provider wording that names a credential or account that was revoked rather
+ * than a permission the request itself lacked.
+ */
+const REVOKED_CREDENTIAL_WORDS = new RegExp(
+  String.raw`\b(?:credential|token|account|session|oauth|grant)\b.{0,60}\b(?:revoked|invalidated|deactivated|terminated|expired)\b`
+  + String.raw`|\b(?:revoked|invalidated|deactivated)\b.{0,60}\b(?:credential|token|account|session|oauth|grant)\b`,
+  'i',
+)
+
+/**
+ * Whether bounded error text names a model-scoped denial.
+ * @param text - the bounded error body or message.
+ * @returns true when the text names the model, not the account, as the subject.
+ */
+export function namesModelDenial(text: string): boolean {
+  return text.length > 0 && MODEL_DENIED_WORDS.test(text)
+}
+
+/**
+ * Whether bounded error text names a revoked credential or account.
+ * @param text - the bounded error body or message.
+ * @returns true when a refresh is the applicable response before parking the account.
+ */
+export function namesRevokedCredential(text: string): boolean {
+  return text.length > 0 && REVOKED_CREDENTIAL_WORDS.test(text)
+}
 
 /** Wording that names a billing or credit refusal in the provider's error fields. */
 const BILLING_WORDS = /billing_error|credits?_required|out_of_credits|insufficient[\s_-]+credits?|credit[\s_-]+balance|extra[\s_-]+usage[\s_-]+is[\s_-]+required|usage[\s_-]+credits[\s_-]+are[\s_-]+required/i
@@ -260,11 +320,17 @@ export interface SharedHttpFailureInput {
 export function sharedHttpFailureCode(input: SharedHttpFailureInput): string | undefined {
   const { response, body, reset, now, rateLimited } = input
   const shown = body.slice(0, 500)
-  if (response.status === 401 || response.status === 403) return 'AUTH'
+  // A 403 or 404 that names one model is evidence about that model, not about
+  // the credential: the account may still serve another model.
+  if ((response.status === 403 || response.status === 404) && namesModelDenial(body)) return MODEL_DENIED_CODE
+  // A refusal the provider stated is final is account-shaped here: billing, credit or a
+  // disabled account is not an expired login, and a 429 no window closes.
   if (isEnforcementRefusal(response, body, reset, now)) return ENFORCEMENT_CODE
+  if (response.status === 401 || response.status === 403) return 'AUTH'
   if (rateLimited) return 'RATE_LIMIT'
   if (isQuotaExceededError(shown)) return QUOTA_EXCEEDED_CODE
   if (response.status === 400 && isContextWindowExceededError(shown)) return CONTEXT_WINDOW_EXCEEDED_CODE
+  if (response.status === 409) return CONFLICT_CODE
   if (response.status === 408 || response.status === 504) return 'TIMEOUT'
   if (response.status >= 500) return 'SERVER'
   return undefined

@@ -231,15 +231,40 @@ Antigravity 为 Gemini 使用 `parametersJsonSchema`，为 Claude/GPT-OSS 使用
   `account` 填 `status` 接口返回的稳定账号 key——Claude 是邮箱,Grok / Copilot / Antigravity 是登录名。两者都没有的账号使用随机 `account-…` id,重启后保持不变。Codex 的 key 同时包含 workspace 和用户(`["<workspace-id>","user","<user-id>"]`),因此 Codex 也可以直接填登录邮箱,或在该 workspace 只登录了一个用户时填 workspace ID;有歧义的引用不会解析到任何账号,以免打到别人的账号。
 - **档位额外项(`tiers`,可选)**：额外的选择器条目,failover 可以跨模型;出现在首个成员所在的 provider 分组。不会自动创建。
 
-选号会记住每个会话、提供方和模型池的账号。`priority` 保留配置的健康成员顺序及会话粘性。默认 `quota_aware` 在各可用性分组内归一化原有的“剩余额度 / 距重置时间”评分，再为 Claude、ChatGPT 的临近重置，以及 ChatGPT 的少量余额收尾增加有限权重。ChatGPT 的周窗口重置不足 24 小时，且有可用重置卡将在三天内到期时，只获得有限加分，不拥有绝对优先级。自动用卡须单独开启上文所述的设置。
+一个会话的各个 turn 绑定在同一个账号上。`priority` 保留配置的健康成员顺序;默认 `quota_aware` 在各可用性分组内归一化原有的“剩余额度 / 距重置时间”评分，再为 Claude、ChatGPT 的临近重置，以及 ChatGPT 的少量余额收尾增加有限权重。ChatGPT 的周窗口重置不足 24 小时，且有可用重置卡将在三天内到期时，只获得有限加分，不拥有绝对优先级。自动用卡须单独开启上文所述的设置。
 
 Claude 和 ChatGPT 在已用量低于 100% 时仍留在主要候选组，其他提供方保留 95% 阈值。任一适用窗口耗尽，都会把成员放入最后的候补组。模型专属窗口只影响匹配的模型。缓存中的重置时刻经过后，过期窗口不再贡献紧迫度或“额度已满”判定，并在下次需求时重新读取；接口持续返回同一个过期时间时，不会形成反复查询循环。
 
 进入 ChatGPT 收尾范围后，偏向余量充足账号的基础分按剩余比例减弱，收尾加分逐渐增强。因此，所有账号都只剩几个百分点时，也会更倾向收尾余量较少的账号。临近重置加分随截止时间接近而增加，但有明确上限，每类窗口均有可配置的观察范围。
 
-合并后的评分除以 `1 + loadPenalty * 活跃请求数`。请求在等待首个流块前预约账号负载，在完成、失败、取消或迭代器清理后释放。因此，同一提供方和账号下不同模型的并发池请求可以分散负载，无需串行执行。健康的粘性账号会继续服务，除非另一成员的调整后评分超过其 `switchMargin` 倍，默认值为 2。首个流块输出后不会切换账号。
+合并后的评分除以 `1 + loadPenalty * 活跃请求数`。请求在等待首个流块前预约账号负载，在完成、失败、取消或迭代器清理后释放。因此，同一提供方和账号下不同模型的并发池请求可以分散负载。
 
-负载计数覆盖当前 Host 的自动账号池与配置的 tiers。独立账号入口、其他 Harness 进程和外部客户端不在该计数范围内。没有用量数据的账号仍排在已测量账号后面作为备选；整组都没有可用紧迫度时，相同基础分仍可按负载分散。原有健康冷却与输出前故障切换保持生效。
+**会话-账号亲和。** 只要绑定的账号可用,会话在各 turn 之间保持同一账号,即使另一个账号评分更高。只有在 **turn 开始时**(会话日志里的 `turn/start`)才可能重新匹配(rematch),而且仅当绑定账号的窗口耗尽或账号被拒。每个 turn 最多重匹配一次,打开的 turn 内任何请求都不会发到第二个账号:普通 429、5xx 或传输失败会让本轮在该账号上失败,再由重试策略重试同一账号。新一轮若没有健康账号,会返回带类型的 `no_available_account`(`NO_AVAILABLE_ACCOUNT`),且不联系任何账号。首个流块输出后不会切换账号。
+
+### 账号并发
+
+每个订阅账号同时最多服务两个会话(`pool.concurrency.maxSessionsPerAccount`)。每个会话同一时间只发一个请求,所以同一会话的第二个 turn 会排在第一个请求之后。同一账号的第三个会话按 FIFO 等待空位;等待超过 `queueTimeoutMs` 会以带类型的 `rate_limited` 拒绝,而不是无限排队。turn 结束会立即释放槽位;未观察到 turn 结束的会话在 `sessionIdleMs` 后由空闲回退释放。
+
+每个账号还有一份由所有会话共享的请求限制器:令牌桶(`requestsPerMinute` 按该速率补充,`burst` 个令牌可一次性使用)加上最小间隔(`minGapMs`)。默认即生效:每分钟 20 次、突发 2 个令牌、请求间至少 1.5 秒;按套餐允许的速率调参或置零关闭。
+
+普通 429 只让收到它的那个会话退避(`backoff`,或 provider 披露的等待时长);该账号的其他会话在共享限制器下继续发送。一个会话连续退避达到 `backoff.maxRetries` 次后,本轮停止重试(返回带硬停止的 `rate_limited`);下一 turn 重新开始预算。窗口/额度 429 会把账号冷却到披露的重置时刻,该账号的所有会话都看到同一冷却。
+
+### 错误分类
+
+成员上报的每个失败都只对应一种调度效果。任何效果都不会在 turn 内换号,429 也绝不会重放到同池的其他账号。
+
+| 类别 | provider 信号 | 效果 |
+|---|---|---|
+| 瞬态 | 408、409、普通 429、500/502/503/504/529、网络、TLS、超时、交付前的 malformed | `session-backoff`:同一账号在披露或本地延迟后重试,上限为 `backoff.maxRetries` |
+| 账号冷却 | 429 窗口/额度(claim/reset);账号级 403(声明最终拒绝、计费/额度、账号被禁用) | 账号冷却至 reset,所有会话共享;仅下一 turn 重匹配,最多一次 |
+| 刷新 | 401、指明凭证/账号被吊销的 403 | 在同一账号上刷新并重试;超过 `maxRefreshAttempts`(2)次后冷却账号 |
+| 模型级 | 指明某个模型的 403、404 model not found、指明模型的带内拒绝 | 只让该模型失败;账号既不被冷却也不换号 |
+| 终止 | 400 `invalid_request`(上下文溢出除外)、413、版本/策略/内容拒绝、用户取消、交付后的 malformed/不完整流、非 403/429 上的 `x-should-retry: false` | 以 provider 错误结束本轮,不记录账号状态 |
+| 带内 `error` 事件 | 按 `error.type` 映射(`authentication_error`、`permission_error`、`policy_blocked`、`not_found_error`、`invalid_request_error`、`rate_limit_error`、`overloaded_error`、`api_error`、`timeout_error`) | 按其类型对应的类别处理;绝不换号 |
+
+硬停止字段优先于错误码:路由已声明该逻辑请求不可重放时,即使错误码看似瞬态也按终止处理。带 `x-should-retry: true` 的普通 429 仍属瞬态,同一账号可以重试。
+
+负载计数覆盖当前 Host 的自动账号池与配置的 tiers。独立账号入口、其他 Harness 进程和外部客户端不在该计数范围内。没有用量数据的账号仍排在已测量账号后面作为备选；整组都没有可用紧迫度时，相同基础分仍可按负载分散。
 
 可选的 `pool.scheduling` 字段在插件加载时解析和校验。权重设为零可关闭对应的额外偏好或负载惩罚，`codexDrainBelowPercent` 设为零可关闭收尾。时间范围必须是正整数毫秒，百分比必须在 0 到 100 之间，权重必须有限且非负。
 
@@ -254,6 +279,22 @@ Claude 和 ChatGPT 在已用量低于 100% 时仍留在主要候选组，其他�
 | `freshCreditWeight` | `0.5` | 周窗口刚重置且卡将到期的最大加分 |
 | `loadPenalty` | `1` | 账号每个活跃池请求的负载惩罚 |
 
+可选的 `pool.concurrency` 字段同样在插件加载时校验。
+
+| 字段 | 默认值 | 用途 |
+|---|---|---|
+| `maxSessionsPerAccount` | `2` | 一个账号同时服务的会话数 |
+| `queueTimeoutMs` | `120000` | 等待会话槽位或请求令牌的最长时间 |
+| `sessionIdleMs` | `600000` | 未观察到 turn 结束时的槽位回退释放 |
+| `requestsPerMinute` | `20` | 账号共享速率上限;零表示关闭 |
+| `burst` | `2` | 突发可一次使用的令牌数 |
+| `minGapMs` | `1500` | 账号两次请求之间的最小间隔 |
+| `maxRefreshAttempts` | `2` | 冷却账号前允许的凭证刷新次数 |
+| `backoff.initialDelayMs` | `1000` | 会话首次本地退避 |
+| `backoff.maxDelayMs` | `60000` | 会话退避上限 |
+| `backoff.jitterRatio` | `0.2` | 每次退避的对称抖动比例 |
+| `backoff.maxRetries` | `10` | 会话停止重试前可消耗的退避次数 |
+
 ```yaml
 - id: llm-subscriptions
   name: dsh-plugin-subscriptions
@@ -261,8 +302,12 @@ Claude 和 ChatGPT 在已用量低于 100% 时仍留在主要候选组，其他�
     pool:
       enabled: true                   # default; needs ≥2 accounts of one provider
       strategy: quota_aware           # or priority
-      switchMargin: 2                 # hysteresis factor for quota_aware
       autoAccounts: true              # pool each catalog model across that provider's accounts
+      concurrency:                    # account concurrency and 429 policy
+        maxSessionsPerAccount: 2
+        requestsPerMinute: 20         # shared account cap; 0 disables
+        burst: 2
+        minGapMs: 1500                # minimum spacing between account requests
       families:                       # explicit account list for one catalog model (same provider)
         claude-sonnet-5:
           - { provider: claude, model: claude-sonnet-5 }                   # default account
@@ -276,17 +321,17 @@ Claude 和 ChatGPT 在已用量低于 100% 时仍留在主要候选组，其他�
 
 ### 等待限流窗口
 
-订阅套餐天然是按限流窗口计费的 —— 5 小时会话窗口、周窗口，部分套餐还有按模型的周窗口 —— 所以普通的 429 并不是终点：窗口会在 provider 自己告知的时刻重开。每条路由从自己的 429 里读出这个时刻，把它变成该账号在模型池里的冷却时长（见上文「模型池」），而不是固定猜测的 5 分钟。
+订阅套餐天然是按限流窗口计费的 —— 5 小时会话窗口、周窗口，部分套餐还有按模型的周窗口 —— 所以普通的 429 并不是终点：窗口会在 provider 自己告知的时刻重开。每条路由从自己的 429 里读出这个时刻，把它变成该会话的本地退避(`pool.concurrency.backoff`)；窗口/额度类拒绝则升级为账号冷却，而不是固定猜测的 5 分钟。
 
-provider 声明为最终拒绝的响应既不等待也不重试，模型池也不会换一个账号去回答它。`x-should-retry: false`、unified 状态（`-status` 或 `-overage-status`）为 `rejected`、组织/席位/成员被禁用的原因、计费或额度类措辞，以及完全未披露重开时刻的 429，都会归类为 `ENFORCEMENT`：账号按已披露的重开时刻冷却（未披露时为 5 分钟），本轮立即失败，模型池中的其他账号不会被联系 —— 换个身份重放这种拒绝，正是它要阻止的流量。
+provider 声明为最终拒绝的响应既不等待也不重试，模型池也不会换一个账号去回答它。`x-should-retry: false`、unified 状态（`-status` 或 `-overage-status`）为 `rejected`、组织/席位/成员被禁用的原因、计费或额度类措辞，以及完全未披露重开时刻的 429，都会归类为 `ENFORCEMENT`：在 429 上账号按已披露的重开时刻冷却(未披露时为 5 分钟)且本轮立即失败;其他状态上则该拒绝终止本轮。两种情况都不会联系模型池中的其他账号 —— 换个身份重放这种拒绝，正是它要阻止的流量。
 
 只有能指明「是哪个窗口拒绝了这次请求」的信号才会被读取：Anthropic 的 `anthropic-ratelimit-unified-reset`、Codex 在 `usage_limit_reached` 上给出的秒数、xAI 在错误体里给出的延迟，或通用的 `retry-after`。各分桶的滚动快照（`anthropic-ratelimit-{requests,tokens,…}-reset`、`x-codex-*-reset-after-seconds`、`x-ratelimit-reset-*`）每个响应上都有，说不出是哪个桶拒绝的 —— 其中最早的那个往往正是还有余量的桶 —— 所以只带这些的 429 同样属于拒绝：告警回调仍会打印出相关 header 与响应体开头，而本轮就此结束，不再照着猜测挂起。
 
 读取只发生在 429 上。其他失败仍走各自的短本地退避:同样这些 header 也会出现在瞬时 500 上,在那里照办等于为一次一秒就恢复的过载把本轮挂满整个窗口。
 
-有模型池时，真正在做等待这件事的其实是账号 failover：某个账号 429 了就按它自己披露的重开时刻冷却下来，请求立刻切到同 provider 的下一个账号 —— 不等待，也不丢本轮对话。只有**整个池**（所有账号）都在冷却时，adapter 才会上报一个 `RATE_LIMIT`，携带池里**最早**的重开时刻作为应等待的时长。单账号（没配池，或该 provider 只登了一个号）时，同样的披露时刻会被直接上报。被判定为拒绝的响应在两种形态下都是例外：账号被冷却，本轮以该拒绝本身结束；如果池里同时有这种拒绝，上报的也是该拒绝而不是 `RATE_LIMIT`。
+有模型池时，真正做等待的是会话级退避：收到 429 的会话本地退避，本轮带着该账号自己的 `retry-after` 提示失败，`dsh-llm-retry` 再重试**同一账号**。请求不会改发到同池的其他账号；该账号的其他会话继续在共享请求限制器下发送。窗口/额度拒绝会把账号冷却到重置时刻，账号的所有会话都看到同一冷却；401 或指明凭证被吊销的 403 先在同一账号上刷新,超过 `maxRefreshAttempts` 次失败后才冷却账号。下一 turn 再重匹配到健康账号。若已无健康账号，下一 turn 返回带类型的 `no_available_account`，并附带已知的最早恢复时刻作为提示。单账号（没配池，或该 provider 只登了一个号）时，同样的披露时刻会被直接上报。
 
-真正执行这段等待的是 [`@deepseek-ai/dsh-llm-retry`](https://www.npmjs.com/package/@deepseek-ai/dsh-llm-retry)，六条路由的重试策略都是为它写的：把它加进编排，否则不会有任何等待，关闭的窗口仍旧直接让本轮失败（如果池里还有别的健康账号，会先 failover 过去）。Copilot 当前使用通用的 `retry-after` 信号；GitHub 未识别的限流 header 会通过插件告警回调暴露出来，后续再添加 provider 专用解析器。
+真正执行这段等待的是 [`@deepseek-ai/dsh-llm-retry`](https://www.npmjs.com/package/@deepseek-ai/dsh-llm-retry)，六条路由的重试策略都是为它写的：把它加进编排，否则不会有任何等待，关闭的窗口仍旧直接让本轮失败。Copilot 当前使用通用的 `retry-after` 信号；GitHub 未识别的限流 header 会通过插件告警回调暴露出来，后续再添加 provider 专用解析器。
 
 ```yaml
 - name: '@deepseek-ai/dsh-llm-retry'

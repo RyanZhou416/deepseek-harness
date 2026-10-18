@@ -506,14 +506,14 @@ export function registerAgentTeamsTools(ctx, config) {
     async function dispatchMember(captain, teamId, memberName, text, signal, mode, attemptId) {
         const root = stateRootOf(workspaceOf(captain), config);
         // Record why a member never started. The scheduler treats a failed dispatch as
-        // "not now" and retries, so without this the captain only ever sees an
-        // unexplained `unspawned` member and no diagnostic reaches any surface.
+        // "not now" and retries, so every failed path must leave a reason the captain
+        // can read instead of only a log line.
         const recordSpawnError = async (reason) => {
             try {
                 await withTeamLock(teamLockKey(root, teamId), async () => {
                     const fresh = await requireFreshCaptainTeam(ctx, root, teamId, captain.id);
                     const failed = fresh.members.find(item => item.name === memberName && item.status !== 'removed');
-                    if (failed === undefined || failed.id !== '')
+                    if (failed === undefined)
                         return;
                     failed.spawnError = reason;
                     await writeTeam(root, fresh);
@@ -534,8 +534,49 @@ export function registerAgentTeamsTools(ctx, config) {
                     return false;
                 if (attemptId !== undefined && !team.tasks.some(task => task.attemptId === attemptId && task.assignee === memberName && (task.status === 'claimed' || task.status === 'in_progress')))
                     return false;
-                if (member.id !== '')
-                    return deliverToMember(ctx, captain, member.id, text, signal, mode);
+                if (member.id !== '') {
+                    const delivered = await deliverToMember(ctx, captain, member.id, text, signal, mode);
+                    if (delivered.accepted) {
+                        if (member.spawnError !== undefined) {
+                            delete member.spawnError;
+                            await writeTeam(root, team);
+                        }
+                        return true;
+                    }
+                    const reason = `member delivery to ${member.id} failed: ${delivered.error ?? 'unknown error'}`;
+                    // Steering is progress guidance, not a work assignment. Keep its
+                    // durable mailbox contract intact: record why it failed and leave the
+                    // message unread instead of destroying a live activation for a retry.
+                    if (mode !== 'queue') {
+                        member.spawnError = reason;
+                        await writeTeam(root, team);
+                        return false;
+                    }
+                    // The durable member outlived its activation (Harness disposes a
+                    // continuable AgentHandle after settlement). Retire the exact dead
+                    // session and start one fresh activation for the same member, role and
+                    // current attempt. A failed task dispatch must never roll the task
+                    // back to pending with the attempt already spent.
+                    const previousId = member.id;
+                    const previous = { ...member };
+                    member.spawnError = reason;
+                    member.id = '';
+                    // The setup belongs to the retired activation; the replacement
+                    // recomputes it from the same member record.
+                    delete member.runtimeSetup;
+                    await writeTeam(root, team);
+                    // The guard rejects every later delivery before it can cold-resume the
+                    // retired id, so the replacement starts from a clean admission state.
+                    await recordRetiredMemberIds(root, [previousId]);
+                    try {
+                        await stopTeamMemberActivations(ctx, captain, [previous]);
+                    }
+                    catch (error) {
+                        // Retirement already blocks the id; a failed drain must not prevent
+                        // the member from continuing its current attempt.
+                        ctx.logger.warn(`agent-teams: could not drain retired member activation ${previousId}: ${String(error)}`);
+                    }
+                }
                 const selection = await resolveMemberLlmSelection(ctx, captain, {
                     provider: member.provider, model: member.model, reasoningEffort: member.reasoningEffort, fallback: member.fallback,
                 }, signal);

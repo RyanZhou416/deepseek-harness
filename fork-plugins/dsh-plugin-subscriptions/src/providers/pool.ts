@@ -1,11 +1,24 @@
 /**
  * The pool adapter: same-subscription account routing, plus optional
  * configured tier extras. The picker is the union of every account's
- * catalog. A model listed by several accounts failovers; a model listed by
- * one account is pinned to it. Tiers are extra picker rows. Member
- * selection is sticky per session (so prompt caches survive) and optionally
- * quota-aware; failures fail over to the next member as long as no stream
- * chunk has been emitted.
+ * catalog. A model listed by several accounts routes to one of them, and a
+ * session keeps the account its turn is bound to.
+ *
+ * Two scheduling rules keep the account pool inside one subscription's meter:
+ *
+ * - A session is bound to one account for a whole turn. No failure inside a turn
+ *   is answered from a sibling account, whatever its code; the turn fails and the
+ *   retry policy retries the SAME account. This is what stops one conversation
+ *   from being spread over several accounts, and what makes a 429 a pause rather
+ *   than an account switch.
+ * - A rematch — replacing an account that a window exhausted or a refusal
+ *   parked — happens only at a turn boundary, at most once per turn, and never
+ *   mid-turn. With no healthy account the pool reports the typed
+ *   `no_available_account` instead of walking the pool.
+ *
+ * Concurrency, per-session backoff, the account request limiter and account
+ * cooldowns live in {@link PoolGate}; this adapter owns selection and the
+ * session-to-account affinity that survives between turns.
  */
 
 import {
@@ -22,17 +35,27 @@ import type {
 } from '@deepseek-ai/dsh-llm'
 import type { ProviderId } from '../auth/store.js'
 import type { AccountAwareAdapter } from './accounts.js'
-import { ENFORCEMENT_CODE } from './common.js'
 import type { UsagePoolState, UsageWindow } from './common.js'
 import type { ConcretePoolMember, PoolDefinition, PoolMemberRef } from './pool-family.js'
 import { poolKey } from './pool-family.js'
-import { accountKey, classifyPoolFailure, exhaustionCode, isAuthCooldownReason, isHardStopCode, memberKey, PoolHealthRegistry } from './pool-health.js'
-import type { PoolFailureScope } from './pool-health.js'
+import {
+  accountKey,
+  AUTH_COOLDOWN_MS,
+  classifyPoolFailure,
+  isAuthCooldownReason,
+  isRefusalCode,
+  memberKey,
+  PoolHealthRegistry,
+} from './pool-health.js'
 import type { MemberQuota, PoolUsageTracker } from './pool-usage.js'
+import { CONSUMABLE_QUOTA_FULL_PERCENT, QUOTA_FULL_PERCENT } from './pool-usage.js'
 import { poolSchedulingScore } from './pool-scheduling.js'
 import type { PoolSchedulingPolicy } from './pool-scheduling.js'
+import { PoolGate, PoolGateError, SessionTurns } from './pool-gate.js'
+import type { AccountGateSnapshot, PoolGateConfig, PoolGateReason, SessionTurn } from './pool-gate.js'
+import { resolvePoolGatePolicy } from './pool-gate.js'
 
-/** Member-selection strategy: plain priority failover or quota-aware scheduling. */
+/** Member-selection strategy: plain priority or quota-aware scheduling. */
 type PoolStrategy = 'priority' | 'quota_aware'
 
 export interface PoolAdapterOptions {
@@ -41,10 +64,10 @@ export interface PoolAdapterOptions {
   health: PoolHealthRegistry
   usage: PoolUsageTracker
   strategy: PoolStrategy
-  /** A challenger must out-urgency the sticky member by this factor to take over. */
-  switchMargin: number
   /** Complete bounded preference and account-load policy, resolved at plugin load. */
   scheduling: PoolSchedulingPolicy
+  /** Account concurrency, request limiter and backoff policy; defaults apply when omitted. */
+  concurrency?: PoolGateConfig
   /** The default account of one provider (for config members omitting `account`). */
   defaultAccount: (provider: ProviderId) => Promise<string | undefined>
   /** Resolve legacy account aliases before pool deduplication and cache identity. */
@@ -59,7 +82,7 @@ export interface PoolAdapterOptions {
   families: (provider?: ProviderId) => Promise<Map<string, PoolDefinition>>
   /** User-configured extra picker entries (heterogeneous fallbacks), by pool id. */
   tiers: Record<string, PoolMemberRef[]>
-  /** Optional quota recovery for a depleted sticky account before choosing a replacement. */
+  /** Optional quota recovery for a depleted bound account before it is rematched. */
   recoverQuota?: (member: ConcretePoolMember, signal?: AbortSignal) => Promise<boolean>
   onWarn: (message: string) => void
 }
@@ -144,6 +167,26 @@ export function usageFloorBreaches(
 }
 
 /**
+ * The windows that keep one member out of selection: a Claude usage floor, or a
+ * window the account's own quota rule reports as full.
+ * @param member - the excluded member.
+ * @param quota - its retained reading, when usage is known.
+ * @param scheduling - the resolved policy naming both floors.
+ * @returns the blocking windows, in their original order.
+ */
+function blockingWindows(
+  member: ConcretePoolMember,
+  quota: MemberQuota | undefined,
+  scheduling: PoolSchedulingPolicy,
+): UsageWindow[] {
+  const full = member.provider === 'codex' || member.provider === 'claude'
+    ? CONSUMABLE_QUOTA_FULL_PERCENT : QUOTA_FULL_PERCENT
+  return floorWindows(quota).filter(window =>
+    window.usedPercent >= full
+    || breachingWindows([window], scheduling).length > 0)
+}
+
+/**
  * Epoch ms of the earliest window reset in `windows` that has not already elapsed.
  * @param windows - the windows excluded members are waiting on.
  * @param now - the current epoch milliseconds.
@@ -158,8 +201,16 @@ function earliestReset(windows: readonly UsageWindow[], now: number): number | u
   return earliest
 }
 
-/** Bound on sticky-session memory; oldest entries evict past it. */
-const STICKY_SESSION_LIMIT = 1000
+/** Bound on remembered session-account bindings; oldest entries evict past it. */
+const BINDING_LIMIT = 1_000
+
+/** A session's account affinity: the account its turns are bound to. */
+interface SessionBinding {
+  readonly provider: ProviderId
+  readonly account: string
+  /** Identity of the turn that last used this binding, from {@link SessionTurns}. */
+  turnKey: number | undefined
+}
 
 /** Display form of one member (account shown when pinned). */
 function memberLabel(member: PoolMemberRef): string {
@@ -172,12 +223,18 @@ function memberLabel(member: PoolMemberRef): string {
 const POOLS_CACHE_TTL_MS = 5_000
 
 export class PoolAdapter extends LlmAdapter {
-  /** sessionId|poolId → member key of the last member that served a chunk. */
-  private readonly sticky = new Map<string, string>()
+  /** sessionId|poolId → account the session's turns are bound to. */
+  private readonly bindings = new Map<string, SessionBinding>()
+  /** The open turn of every live session, fed by `turn/start` and `turn/end`. */
+  private readonly turns = new SessionTurns()
+  /** Concurrency, backoff and cooldown decisions for every account of this pool. */
+  private readonly gate: PoolGate
   /** Outstanding pool attempts, including first-byte waits, shared across models of each account. */
   private readonly active = new Map<string, number>()
   /** Messages already warned about — configuration diagnostics repeat every request otherwise. */
   private readonly warned = new Set<string>()
+  /** Identity of a sessionless request, so its transient bookings can be forgotten. */
+  private requestSerial = 0
   /**
    * Short-lived pools snapshots, one per provider route. `owns()` runs on every
    * resolveModel — the model picker issues one per entry — and assembly reads
@@ -192,6 +249,7 @@ export class PoolAdapter extends LlmAdapter {
 
   constructor(private readonly options: PoolAdapterOptions) {
     super()
+    this.gate = new PoolGate(resolvePoolGatePolicy(options.concurrency), options.health)
   }
 
   /** Drop the pools snapshots so the next read reflects the current accounts. */
@@ -199,6 +257,57 @@ export class PoolAdapter extends LlmAdapter {
     this.generation += 1
     this.poolsCache.clear()
     this.poolsInflight.clear()
+  }
+
+  /**
+   * Record that a session opened a turn. Every request of that turn is bound to
+   * one account; only the next turn may rematch.
+   * @param sessionId - the session whose turn opened.
+   * @param turn - the turn number the session log recorded.
+   */
+  noteTurnStart(sessionId: string, turn: number): void {
+    this.turns.noteTurnStart(sessionId, turn)
+  }
+
+  /**
+   * Record that a session closed a turn, releasing its account session slot.
+   * @param sessionId - the session whose turn closed.
+   * @param turn - the turn number that ended, when the event named it.
+   */
+  noteTurnEnd(sessionId: string, turn?: number): void {
+    const open = this.turns.current(sessionId)
+    this.turns.noteTurnEnd(sessionId, turn)
+    // A stale end (an earlier turn closing after a resume opened the next one)
+    // must not release the slot the open turn is using.
+    if (open === undefined || turn === undefined || open.turn === turn) this.gate.releaseTurn(sessionId)
+  }
+
+  /**
+   * Forget a disposed session's turn and bookings.
+   * @param sessionId - the disposed session.
+   */
+  forgetSession(sessionId: string): void {
+    this.turns.forget(sessionId)
+    this.gate.forget(sessionId)
+    const prefix = `${sessionId}|`
+    for (const key of [...this.bindings.keys()]) {
+      if (key.startsWith(prefix)) this.bindings.delete(key)
+    }
+  }
+
+  /**
+   * Report one account's concurrency and cooldown state (diagnostics only).
+   * @param provider - the account's provider route.
+   * @param account - the account key.
+   * @returns the account's slot, limiter and cooldown facts.
+   */
+  gateSnapshot(provider: ProviderId, account: string): AccountGateSnapshot {
+    return this.gate.snapshot(provider, account)
+  }
+
+  /** Refuse queued admissions; called when the plugin is disposed. */
+  dispose(): void {
+    this.gate.dispose()
   }
 
   /** Warn once per distinct message (pools() runs on every request). */
@@ -285,7 +394,7 @@ export class PoolAdapter extends LlmAdapter {
 
   /**
    * Whether `model` on `provider`'s route is served here (several accounts
-   * fail over, one account is pinned, or a configured tier).
+   * route, one account is pinned, or a configured tier).
    */
   async owns(provider: ProviderId, model: string): Promise<boolean> {
     return (await this.pools(provider)).has(poolKey(provider, model))
@@ -315,7 +424,7 @@ export class PoolAdapter extends LlmAdapter {
    * Resolve a pool model to the conservative INTERSECTION of its members'
    * capabilities: the smallest context window and output cap, the reasoning
    * efforts every member supports, and the modalities all of them accept —
-   * so a request valid for the pool stays valid after a failover. Capability
+   * so a request valid for the pool stays valid after a rematch. Capability
    * metadata is account-specific, so every distinct member is resolved.
    */
   override async resolveModel(provider: string, model: string): Promise<LlmResolvedModelInfo> {
@@ -329,7 +438,7 @@ export class PoolAdapter extends LlmAdapter {
       if (adapter === undefined) continue
       // Tolerate per-member failures (a misconfigured tier member, a
       // logged-out provider throwing AUTH): the pool serves as long as ONE
-      // member resolves, mirroring stream()'s failover semantics.
+      // member resolves.
       try {
         resolved.push(await adapter.resolveOwnModel(member.provider, member.model, member.account))
       } catch (error: unknown) {
@@ -366,139 +475,236 @@ export class PoolAdapter extends LlmAdapter {
     const definition = (await this.pools(options.provider as ProviderId)).get(identity)
     if (definition === undefined) throw new LlmError(`unknown pool model "${options.model}"`, 'NO_ADAPTER')
     const members = await this.concrete(definition.members)
-    // Priority mode reads no usage, except for Claude: its floors are a usability rule rather
-    // than a ranking preference, so an account past them is excluded whichever strategy runs.
-    // These are retained-reading reads only — ranking never performs an upstream request, since
-    // polling every peer to rank it is exactly the idle traffic the pool avoids.
-    const quotaMembers = this.options.strategy === 'priority'
-      ? members.filter(member => member.provider === 'claude')
-      : members
+    const sessionKey = options.sessionId === undefined ? undefined : String(options.sessionId)
+    const turn = sessionKey === undefined ? undefined : this.turns.current(sessionKey)
+    const bindingKey = sessionKey === undefined ? undefined : affinityKey(identity, sessionKey)
+    // A sessionless request gets its own transient bookings, forgotten when it ends.
+    const slotKey = sessionKey ?? `request:${String(this.requestSerial += 1)}`
+    // Retained readings are read before selection; only the account about to serve
+    // is verified with one upstream read, so an idle peer is never swept.
     const quotas = new Map<ConcretePoolMember, MemberQuota>()
-    for (const member of quotaMembers) {
+    for (const member of members) {
       if (!this.options.health.isMemberAvailable(member.provider, member.account, member.model)) continue
       quotas.set(member, this.options.usage.quotaFor(member))
     }
-    const sessionId = options.sessionId
-    const sticky = sessionId === undefined ? undefined : members.find(member =>
-      memberKey(member.provider, member.account, member.model) === this.sticky.get(stickyKey(identity, sessionId)))
-    if (sticky !== undefined && quotas.has(sticky)) {
-      // The sticky account is the likeliest candidate, so its own reading may be
-      // refreshed here — one request, never a peer's. A fresh reading costs
-      // nothing, and a stale one is exactly what an invalidation left behind, so
-      // recovery is judged against what the account reports now.
-      const stickyQuota = await this.options.usage.ensureForUse(sticky)
-      quotas.set(sticky, stickyQuota)
-      if (stickyQuota.available === false && await this.options.recoverQuota?.(sticky, options.signal)) {
-        this.options.usage.invalidate(sticky.provider, sticky.account)
-        quotas.set(sticky, await this.options.usage.ensureForUse(sticky))
-      }
-    }
-    let remaining = members
-    const failures = new Map<ConcretePoolMember, unknown>()
-    /** Cooldown reasons recorded during this selection, for the terminal error's code. */
+    const excluded = new Set<ConcretePoolMember>()
     const reasons: string[] = []
-    // A member the floors hold back leaves no health record, so the windows breaching a floor
-    // are the only statement of when it becomes selectable again. The terminal error reports the
-    // earliest of those; a window still under its floor releases nothing when it resets.
-    const floorBlocked = quotaMembers.filter(member =>
-      pastClaudeFloor(member, quotas.get(member), this.options.scheduling))
-    const excludedWindows = floorBlocked.flatMap(member =>
-      breachingWindows(floorWindows(quotas.get(member)), this.options.scheduling))
-    while (remaining.length > 0) {
-      options.signal?.throwIfAborted()
-      // Ranking and reservation are synchronous over retained readings.
-      // Concurrent requests therefore see earlier reservations before choosing.
-      const member = this.select(remaining, quotas, identity, options.sessionId)[0]
-      if (member === undefined) break
-      remaining = remaining.filter(candidate => candidate !== member)
-      // The reservation starts before the candidate's reading is verified, so
-      // concurrent selections see each other's outstanding first-byte wait and
-      // spread across accounts rather than all choosing the same cold leader.
-      const release = this.reserve(member)
-      let iterator: AsyncIterator<StreamChunk> | undefined
-      try {
-        // The one candidate about to serve is the only account whose reading may
-        // be refreshed. Peers were ranked from what was already known and are left
-        // alone, so a cold pool costs one usage request per attempt, not one per
-        // member, and an idle account is never swept to rank it.
-        const verified = await this.options.usage.ensureForUse(member)
-        quotas.set(member, verified)
-        // A cancellation during that read must not start a request.
+    try {
+      // A local account-policy refusal sends no request, so another member may
+      // take this request; every real failure below ends the turn on its account.
+      for (let attempt = 0; attempt <= members.length; attempt += 1) {
         options.signal?.throwIfAborted()
-        const breaching = usageFloorBreaches(member.provider, verified, this.options.scheduling)
-        if (breaching.length > 0) {
-          excludedWindows.push(...breaching)
-          continue
-        }
-        // A reading that just showed this account spent yields to any peer the
-        // pool would rank ahead of a last-resort member, instead of being tried
-        // first merely because it was the pool's cold-start leader.
-        if (verified.available === false && remaining.some(candidate =>
-          (quotas.get(candidate) ?? { available: true }).available !== false)) {
-          remaining = [...remaining, member]
-          continue
-        }
+        const chosen = await this.bindTurn({
+          model: options.model,
+          members,
+          quotas,
+          excluded,
+          slotKey,
+          turn,
+          bindingKey,
+          signal: options.signal,
+        })
+        const member = chosen.member
         const adapter = this.options.adapters[member.provider]
-        if (adapter === undefined) continue
-        let first: IteratorResult<StreamChunk>
+        if (adapter === undefined) {
+          chosen.release()
+          excluded.add(member)
+          this.dropBinding(bindingKey)
+          this.gate.releaseTurn(slotKey)
+          continue
+        }
+        let iterator: AsyncIterator<StreamChunk> | undefined
+        let admitted: (() => void) | undefined
+        let committed = false
         try {
+          admitted = await this.gate.admit(slotKey, member.provider, member.account, options.signal)
+          // The one account about to serve is the only one whose reading may be
+          // refreshed here; peers were ranked from what was already known.
           iterator = adapter.streamAccount(
             { ...options, provider: member.provider, model: member.model }, member.account,
           )[Symbol.asyncIterator]()
-          first = await iterator.next()
+          const first = await iterator.next()
           if (first.done === true) {
             throw new LlmError(`${memberLabel(member)} returned an empty stream`, EMPTY_RESPONSE_CODE)
           }
+          committed = true
+          // A visible stream stays on one account even if quota or load changes.
+          yield first.value
+          for (let next = await iterator.next(); next.done !== true; next = await iterator.next()) {
+            yield next.value
+          }
+          this.gate.noteSuccess(slotKey)
+          return
         } catch (error: unknown) {
+          if (error instanceof PoolGateError) throw error
           const classification = classifyPoolFailure(error, member.provider)
-          if (classification.action === 'throw') throw error
-          if (classification.action === 'park') {
-            // A refusal the provider aimed at this account: record it, then end the
-            // turn on it. Asking the next member would repeat the refusal under
-            // another identity, which is the traffic a refusal exists to stop.
-            this.recordCooldown(member, classification.scope, classification.cooldownMs, classification.reason)
-            this.options.onWarn(
-              `pool "${options.model}": ${memberLabel(member)} was refused`
-              + ` (${error instanceof Error ? error.message : String(error)}); ending the turn`,
-            )
-            throw error
+          if (classification.action === 'member-ineligible' && !committed) {
+            excluded.add(member)
+            this.dropBinding(bindingKey)
+            this.gate.releaseTurn(slotKey)
+            continue
           }
-          if ('cooldownMs' in classification) {
-            this.recordCooldown(member, classification.scope, classification.cooldownMs, classification.reason)
-            reasons.push(classification.reason)
-            // Only a spent allowance invalidates the usage reading. An auth
-            // cooldown says the login stopped working, which is no evidence
-            // about the allowance the usage endpoint last reported.
-            if (!isAuthCooldownReason(classification.reason)
-              && (classification.reason === QUOTA_EXCEEDED_CODE || classification.reason === 'RATE_LIMIT')) {
-              this.options.usage.invalidate(member.provider, member.account)
-            }
-          }
-          this.options.onWarn(
-            `pool "${options.model}": ${memberLabel(member)} failed before any output`
-            + ` (${error instanceof Error ? error.message : String(error)}); trying the next member`,
-          )
-          failures.set(member, error)
-          continue
-        }
-        this.remember(identity, options.sessionId, member)
-        // A visible stream stays on one account even if quota or load changes.
-        yield first.value
-        for (let next = await iterator.next(); next.done !== true; next = await iterator.next()) {
-          yield next.value
-        }
-        return
-      } finally {
-        try {
-          await iterator?.return?.()
-        } catch (_closeFailure) {
-          // Stream teardown must not replace the request's outcome.
+          this.recordFailure(member, slotKey, classification, reasons)
+          throw error
         } finally {
-          release()
+          try {
+            await iterator?.return?.()
+          } catch (_closeFailure) {
+            // Stream teardown must not replace the request's outcome.
+          } finally {
+            admitted?.()
+            chosen.release()
+          }
         }
       }
+      throw this.noAvailableAccount(options.model, members, reasons, quotas)
+    } finally {
+      if (sessionKey === undefined) this.gate.forget(slotKey)
     }
-    throw this.exhausted(options.model, members, failures, reasons, excludedWindows)
+  }
+
+  /**
+   * Choose the account one request is sent to, and reserve its load before the
+   * account's own reading is verified so concurrent selections spread rather
+   * than all taking the cold-start leader.
+   *
+   * The affinity rule: a request of an open turn keeps that turn's account. At a
+   * turn boundary the bound account is kept while it may serve, and replaced
+   * only when a window exhausted it or a refusal parked it. A turn boundary the
+   * plugin did not observe is not a boundary, so nothing is rematched.
+   */
+  private async bindTurn(input: {
+    model: string
+    members: readonly ConcretePoolMember[]
+    quotas: Map<ConcretePoolMember, MemberQuota>
+    excluded: ReadonlySet<ConcretePoolMember>
+    slotKey: string
+    turn: SessionTurn | undefined
+    bindingKey: string | undefined
+    signal: AbortSignal | undefined
+  }): Promise<{ member: ConcretePoolMember; release: () => void }> {
+    const { model, members, quotas, excluded, slotKey, turn, bindingKey, signal } = input
+    const usable = this.candidates(members, quotas, excluded)
+    const binding = bindingKey === undefined ? undefined : this.bindings.get(bindingKey)
+    const sameTurn = binding !== undefined && turn !== undefined && binding.turnKey === turn.key
+    // The retry budget is per logical request cycle: a new turn starts a fresh one.
+    if (turn !== undefined && !sameTurn) this.gate.beginTurn(slotKey)
+    const bound = binding === undefined ? undefined : usable.find(member =>
+      member.provider === binding.provider && member.account === binding.account)
+
+    if (binding !== undefined && sameTurn) {
+      if (bound === undefined) throw this.boundDenied(model, binding)
+      const release = this.reserve(bound)
+      try {
+        await this.gate.acquireTurn(slotKey, bound.provider, bound.account, signal)
+        this.touch(bindingKey, binding)
+        return { member: bound, release }
+      } catch (error: unknown) {
+        release()
+        throw error
+      }
+    }
+
+    if (binding !== undefined && bound !== undefined) {
+      // The bound account is still selectable: keep it unless its own reading says
+      // spent and a peer the pool could still verify is not.
+      const release = this.reserve(bound)
+      try {
+        const fresh = await this.verifyAccount(bound, signal)
+        quotas.set(bound, fresh)
+        if (!this.floorBlocked(bound, fresh)) {
+          const peerBetter = this.unavailable(fresh)
+            && usable.some(candidate => candidate !== bound && !this.spentReading(candidate))
+          if (!peerBetter) {
+            await this.gate.acquireTurn(slotKey, bound.provider, bound.account, signal)
+            this.remember(bindingKey, bound, turn)
+            return { member: bound, release }
+          }
+        }
+        release()
+      } catch (error: unknown) {
+        release()
+        throw error
+      }
+      if (turn === undefined) throw this.boundDenied(model, binding)
+    } else if (binding !== undefined && turn === undefined) {
+      throw this.boundDenied(model, binding)
+    }
+
+    // A spent leader is deferred to an unspent peer; when every candidate is spent
+    // the pool still tries one, which is its last resort rather than a refusal.
+    // A usage floor is different: it is a hard reserve, so such a member is skipped.
+    const ranked = this.select(usable, quotas)
+    const leader = ranked.find(candidate => !this.spentReading(candidate)) ?? ranked[0]
+    const alternate = leader === undefined ? undefined
+      : ranked.find(candidate => candidate !== leader && !this.spentReading(candidate))
+    const attempts = leader === undefined ? [] : alternate === undefined ? [leader] : [leader, alternate]
+    for (const candidate of attempts) {
+      const release = this.reserve(candidate)
+      try {
+        const fresh = await this.verifyAccount(candidate, signal)
+        quotas.set(candidate, fresh)
+        if (this.floorBlocked(candidate, fresh)) {
+          release()
+          continue
+        }
+        if (candidate === leader && alternate !== undefined && this.unavailable(fresh)) {
+          release()
+          continue
+        }
+        await this.gate.acquireTurn(slotKey, candidate.provider, candidate.account, signal)
+        this.remember(bindingKey, candidate, turn)
+        return { member: candidate, release }
+      } catch (error: unknown) {
+        release()
+        throw error
+      }
+    }
+    throw this.noAvailableAccount(model, members, [], quotas)
+  }
+
+  /**
+   * The members a turn may start on: health, usage floors and the catalogue
+   * adapter all permit them, and no earlier local refusal excluded them.
+   */
+  private candidates(
+    members: readonly ConcretePoolMember[],
+    quotas: ReadonlyMap<ConcretePoolMember, MemberQuota>,
+    excluded: ReadonlySet<ConcretePoolMember>,
+  ): ConcretePoolMember[] {
+    return members.filter(member =>
+      !excluded.has(member)
+      && this.options.adapters[member.provider] !== undefined
+      && this.options.health.isMemberAvailable(member.provider, member.account, member.model)
+      && !pastClaudeFloor(member, quotas.get(member), this.options.scheduling))
+  }
+
+  /**
+   * Verify the candidate about to serve with one upstream usage read, and give
+   * a depleted Codex account its reset-credit recovery before it is judged.
+   */
+  private async verifyAccount(member: ConcretePoolMember, signal?: AbortSignal): Promise<MemberQuota> {
+    let quota = await this.options.usage.ensureForUse(member)
+    if (quota.available === false && await this.options.recoverQuota?.(member, signal) === true) {
+      this.options.usage.invalidate(member.provider, member.account)
+      quota = await this.options.usage.ensureForUse(member)
+    }
+    return quota
+  }
+
+  /** Whether a reading breaches this account's configured usage floor (a hard reserve). */
+  private floorBlocked(member: ConcretePoolMember, quota: MemberQuota): boolean {
+    return usageFloorBreaches(member.provider, quota, this.options.scheduling).length > 0
+  }
+
+  /** Whether a reading reports the account's allowance as spent (a soft, last-resort signal). */
+  private unavailable(quota: MemberQuota): boolean {
+    return quota.available === false
+  }
+
+  /** Whether the candidate's retained reading already reports a spent allowance. */
+  private spentReading(member: ConcretePoolMember): boolean {
+    return this.unavailable(this.options.usage.quotaFor(member))
   }
 
   /**
@@ -567,39 +773,122 @@ export class PoolAdapter extends LlmAdapter {
     return { code: 'RATE_LIMIT', ...reset === undefined ? {} : { retryAfterMs: Math.max(reset - now, 1) } }
   }
 
+  /** Remember the account a session's turns are bound to, with bounded memory. */
+  private remember(bindingKey: string | undefined, member: ConcretePoolMember, turn: SessionTurn | undefined): void {
+    if (bindingKey === undefined) return
+    this.bindings.delete(bindingKey)
+    if (this.bindings.size >= BINDING_LIMIT) {
+      const oldest = this.bindings.keys().next()
+      if (oldest.done !== true) this.bindings.delete(oldest.value)
+    }
+    this.bindings.set(bindingKey, {
+      provider: member.provider,
+      account: member.account,
+      turnKey: turn?.key,
+    })
+  }
+
+  /** Drop one session's affinity (its account could not be used at all). */
+  private dropBinding(bindingKey: string | undefined): void {
+    if (bindingKey !== undefined) this.bindings.delete(bindingKey)
+  }
+
+  /**
+   * Apply one failure's effect to the gate.
+   *
+   * No branch switches accounts: the account is parked or the session backs off,
+   * and the turn fails with the provider's own error so retry policy decides
+   * whether the same account may be tried again.
+   */
+  private recordFailure(
+    member: ConcretePoolMember,
+    slotKey: string,
+    classification: ReturnType<typeof classifyPoolFailure>,
+    reasons: string[],
+  ): void {
+    switch (classification.action) {
+      case 'session-backoff': {
+        this.gate.noteSessionFailure(slotKey, {
+          reason: classification.reason,
+          ...classification.delayMs === undefined ? {} : { delayMs: classification.delayMs },
+        })
+        reasons.push(classification.reason)
+        this.options.onWarn(
+          `pool: ${memberLabel(member)} failed before any output`
+          + ` (${classification.reason}); backing this session off instead of switching accounts`,
+        )
+        return
+      }
+      case 'account-cooldown': {
+        this.gate.cooldown(member.provider, member.account, classification.cooldownMs, classification.reason)
+        reasons.push(classification.reason)
+        // A spent allowance invalidates the reading; a refusal says nothing about it.
+        if (classification.reason === QUOTA_EXCEEDED_CODE) {
+          this.options.usage.invalidate(member.provider, member.account)
+        }
+        this.options.onWarn(
+          `pool: ${memberLabel(member)} is parked for ${String(classification.cooldownMs)}ms`
+          + ` (${classification.reason}); this turn ends on that account`
+          + (isRefusalCode(classification.reason) ? ' and the next turn rematches' : ''),
+        )
+        return
+      }
+      case 'refresh': {
+        const refresh = this.gate.noteRefreshFailure(member.provider, member.account)
+        reasons.push(classification.reason)
+        if (refresh.exhausted) {
+          // The refresh budget is spent: only a re-login (or its expiry) can help,
+          // so the account is parked for the auth cooldown.
+          this.gate.cooldown(member.provider, member.account, AUTH_COOLDOWN_MS, classification.reason)
+          this.options.onWarn(
+            `pool: ${memberLabel(member)} exhausted its ${String(this.gate.concurrency.maxRefreshAttempts)}`
+            + ` credential refreshes (${classification.reason}); the account is parked`
+            + ' and the next turn rematches',
+          )
+        } else {
+          this.options.onWarn(
+            `pool: ${memberLabel(member)} credential refresh failed`
+            + ` (${String(refresh.attempts)}/${String(this.gate.concurrency.maxRefreshAttempts)},`
+            + ` ${classification.reason}); the same account is retried`,
+          )
+        }
+        return
+      }
+      case 'model-scoped': {
+        reasons.push(classification.reason)
+        this.options.onWarn(
+          `pool: ${memberLabel(member)} denied this model (${classification.reason}); the account is not switched`,
+        )
+        return
+      }
+      case 'member-ineligible': {
+        reasons.push(classification.reason)
+        return
+      }
+      case 'throw': {
+        return
+      }
+    }
+  }
+
   /**
    * Order the candidates for one request. Health filters both strategies;
    * `quota_aware` combines normalized urgency, bounded preferences, and
-   * account load. Quota-full members stay in a last-resort band. A healthy
-   * sticky member leads unless the same adjusted score beats its margin.
+   * account load. Quota-full members stay in a last-resort band.
    */
   private select(
     members: ConcretePoolMember[],
     quotas: ReadonlyMap<ConcretePoolMember, MemberQuota>,
-    poolId: string,
-    sessionId: GenerateOptions['sessionId'],
   ): ConcretePoolMember[] {
-    const usable = members.filter(member =>
-      this.options.adapters[member.provider] !== undefined
-      && this.options.health.isMemberAvailable(member.provider, member.account, member.model)
-      && !pastClaudeFloor(member, quotas.get(member), this.options.scheduling))
-    if (usable.length === 0) return []
-    const stickyMember = sessionId === undefined
-      ? undefined
-      : usable.find(member =>
-        memberKey(member.provider, member.account, member.model) === this.sticky.get(stickyKey(poolId, sessionId)))
-    if (this.options.strategy === 'priority') {
-      return stickyMember === undefined
-        ? usable
-        : [stickyMember, ...usable.filter(member => member !== stickyMember)]
-    }
+    if (members.length === 0) return []
+    if (this.options.strategy === 'priority') return members
     // Usage was read before selection, so a member whose cooldown expired since
     // has no entry. Unknown usage is not evidence of a spent allowance: leave
     // such a member in the primary band rather than in neither.
     const quotaOf = (member: ConcretePoolMember): MemberQuota =>
       quotas.get(member) ?? { available: true, urgency: 0, fetchedAt: 0, observation: 'unavailable' }
-    const scored = usable.filter(member => quotaOf(member).available)
-    const quotaFull = usable.filter(member => !quotaOf(member).available)
+    const scored = members.filter(member => quotaOf(member).available)
+    const quotaFull = members.filter(member => !quotaOf(member).available)
     const now = Date.now()
     const scores = new Map<ConcretePoolMember, number>()
     for (const band of [scored, quotaFull]) {
@@ -630,38 +919,78 @@ export class PoolAdapter extends LlmAdapter {
       return (this.active.get(accountKey(a.provider, a.account)) ?? 0) - (this.active.get(accountKey(b.provider, b.account)) ?? 0)
     }
     scored.sort(byQuota)
-    if (stickyMember !== undefined && scored.includes(stickyMember)) {
-      const best = scored[0]
-      const stickyScore = scores.get(stickyMember)!
-      const bestScore = scores.get(best)!
-      if (best === stickyMember || bestScore <= stickyScore * this.options.switchMargin) {
-        scored.splice(scored.indexOf(stickyMember), 1)
-        scored.unshift(stickyMember)
-      }
-    }
     return [...scored, ...quotaFull.sort(byQuota)]
   }
 
   /**
-   * Mark one member, or its whole account, unavailable for `cooldownMs`.
-   * @param member - the member that failed.
-   * @param scope - whether the record covers the member or its account.
-   * @param cooldownMs - how long the record holds.
-   * @param reason - the failure code the record names.
+   * The typed refusal of a pool that may not ask any account on this turn.
+   *
+   * It reports when the earliest exclusion recovers, when one is known, but it
+   * never walks the remaining members: a pool with nothing healthy must not
+   * generate one request per account.
    */
-  private recordCooldown(
-    member: ConcretePoolMember,
-    scope: PoolFailureScope,
-    cooldownMs: number,
-    reason: string,
-  ): void {
-    this.options.health.markUnavailable(
-      scope === 'account'
-        ? accountKey(member.provider, member.account)
-        : memberKey(member.provider, member.account, member.model),
-      cooldownMs,
-      reason,
+  private noAvailableAccount(
+    model: string,
+    pool: readonly ConcretePoolMember[],
+    reasons: readonly string[],
+    quotas: ReadonlyMap<ConcretePoolMember, MemberQuota>,
+    detail?: string,
+  ): PoolGateError {
+    const now = Date.now()
+    const keys = new Set<string>()
+    for (const member of pool) {
+      keys.add(memberKey(member.provider, member.account, member.model))
+      keys.add(accountKey(member.provider, member.account))
+    }
+    const recovery = this.options.health.earliestRecovery(keys, now)
+    // Only a window that actually holds the account back states a usable wait: a
+    // window under its floor releases nothing when it resets.
+    const blocked = pool.flatMap(member => blockingWindows(member, quotas.get(member), this.options.scheduling))
+    const windows = earliestReset(blocked, now)
+    const next = recovery === undefined ? windows
+      : windows === undefined ? recovery : Math.min(recovery, windows)
+    const retryAfterMs = next === undefined ? undefined : Math.max(next - now, 1)
+    const why = [...new Set(reasons)]
+    return new PoolGateError(
+      detail ?? `pool "${model}" has no available account: every member is cooling down or past its usage floor`
+        + (why.length > 0 ? ` (${why.join('; ')})` : ''),
+      'no_available_account',
+      { ...retryAfterMs === undefined ? {} : { providerRetryAfterMs: retryAfterMs } },
     )
+  }
+
+  /**
+   * The typed refusal of a turn whose bound account cannot serve.
+   *
+   * It is not a rematch point: the turn keeps its account, and the next turn
+   * decides again. The record's reason selects the typed outcome and the wait.
+   */
+  private boundDenied(model: string, binding: SessionBinding): PoolGateError {
+    const now = Date.now()
+    const cooling = this.options.health.accountCooling(binding.provider, binding.account, now)
+    const reason: PoolGateReason = cooling === undefined ? 'account_unavailable'
+      : isAuthCooldownReason(cooling.reason) ? 'account_unavailable'
+        : cooling.reason === QUOTA_EXCEEDED_CODE ? 'quota_exhausted'
+          : cooling.reason === 'RATE_LIMIT' ? 'rate_limited'
+            : 'account_unavailable'
+    const retryAfterMs = cooling === undefined ? undefined : Math.max(cooling.unavailableUntil - now, 1)
+    return new PoolGateError(
+      `pool "${model}": ${binding.provider}/${binding.account} cannot serve this turn;`
+      + ' the turn keeps its account and the next turn rematches',
+      reason,
+      { ...retryAfterMs === undefined ? {} : { providerRetryAfterMs: retryAfterMs } },
+      cooling?.reason,
+    )
+  }
+
+  /**
+   * Refresh one binding's position in the bounded map without changing it, so
+   * eviction follows recent affinity rather than first use.
+   */
+  private touch(bindingKey: string | undefined, binding: SessionBinding): void {
+    if (bindingKey === undefined) return
+    this.bindings.delete(bindingKey)
+    this.bindings.set(bindingKey, binding)
   }
 
   /** Hold account load through first-byte wait, streaming, and iterator teardown. */
@@ -674,82 +1003,6 @@ export class PoolAdapter extends LlmAdapter {
       else this.active.set(key, next)
     }
   }
-
-  /** Pin the serving member to the session (with bounded memory). */
-  private remember(poolId: string, sessionId: GenerateOptions['sessionId'], member: ConcretePoolMember): void {
-    if (sessionId === undefined) return
-    const key = stickyKey(poolId, sessionId)
-    this.sticky.delete(key)
-    if (this.sticky.size >= STICKY_SESSION_LIMIT) {
-      const oldest = this.sticky.keys().next()
-      if (oldest.done !== true) this.sticky.delete(oldest.value)
-    }
-    this.sticky.set(key, memberKey(member.provider, member.account, member.model))
-  }
-
-  /**
-   * A still-available member's failure keeps its own retry facts. A fully
-   * unavailable pool reports why it is unavailable and when it may serve again:
-   * the earliest health recovery, or the earliest reset among the windows that
-   * held a member back.
-   * @param model - the pool model being reported.
-   * @param pool - every member of that pool.
-   * @param failures - the failures this selection saw, by member.
-   * @param reasons - the cooldown reasons this selection recorded.
-   * @param excludedWindows - windows that breached an availability floor.
-   * @returns the terminal error for the exhausted pool.
-   */
-  private exhausted(
-    model: string,
-    pool: ConcretePoolMember[],
-    failures: ReadonlyMap<ConcretePoolMember, unknown>,
-    reasons: readonly string[],
-    excludedWindows: readonly UsageWindow[],
-  ): LlmError {
-    for (const [member, error] of failures) {
-      if (error instanceof LlmError && this.options.health.isMemberAvailable(member.provider, member.account, member.model)) return error
-    }
-    const cause = [...failures.values()].at(-1)
-    const keys = new Set<string>()
-    for (const member of pool) {
-      keys.add(memberKey(member.provider, member.account, member.model))
-      keys.add(accountKey(member.provider, member.account))
-    }
-    // The terminal code names why nothing served. Every member carries one reason — the failure
-    // it just reported, or the health record that parked it before this selection started (a pool
-    // parked by an auth failure says so rather than reporting a rate limit). A pool that reported
-    // an enforcement-shaped refusal reports that refusal, whatever its other members did: naming a
-    // rate limit instead would hand a refused account's turn back to the retry loop.
-    const codes = new Set<string>(reasons)
-    for (const member of pool) {
-      if (this.options.health.isMemberAvailable(member.provider, member.account, member.model)) continue
-      const cooling = this.options.health.accountCooling(member.provider, member.account)
-      if (cooling !== undefined) codes.add(cooling.reason)
-    }
-    const code = exhaustionCode(codes)
-    const now = Date.now()
-    const recovery = this.options.health.earliestRecovery(keys, now)
-    const reset = earliestReset(excludedWindows, now)
-    const next = recovery === undefined ? reset
-      : reset === undefined ? recovery : Math.min(recovery, reset)
-    const retryAfterMs = next === undefined ? undefined : Math.max(next - now, 1)
-    const detail = cause instanceof Error && cause.message.length > 0 ? cause.message : undefined
-    // A pool exhausted by a refusal, or by an error no route could classify, ends the turn
-    // without automatic recovery: the terminal error keeps that decision and discloses no
-    // wait, because a stopped turn must not present a retry countdown.
-    const hardStop = isHardStopCode(code)
-    return new LlmError(
-      detail === undefined
-        ? `pool "${model}" exhausted: every member is unavailable or failed`
-        : `pool "${model}" exhausted: ${detail}`,
-      code,
-      {
-        ...retryAfterMs === undefined || hardStop ? {} : { providerRetryAfterMs: retryAfterMs },
-        ...cause === undefined ? {} : { cause },
-        ...hardStop ? { retryDisposition: 'forbid' as const } : {},
-      },
-    )
-  }
 }
 
 /**
@@ -758,7 +1011,7 @@ export class PoolAdapter extends LlmAdapter {
  * A peer counts only when the pool would actually accept it: its account record is
  * clear AND, on a route that reserves usage floors, it has not reached one. Health
  * alone would let the card claim another account is serving while every peer sits
- * past its floor — a failover that cannot happen — so the floor check is required
+ * past its floor — a rematch that cannot happen — so the floor check is required
  * before a pool attribution is printed.
  * @param health - the pool's cooldown registry.
  * @param pool - the pool whose availability rule applies, or undefined when none is wired.
@@ -793,8 +1046,8 @@ export async function usagePoolState(
   }
 }
 
-function stickyKey(poolId: string, sessionId: NonNullable<GenerateOptions['sessionId']>): string {
-  return `${String(sessionId)}|${poolId}`
+function affinityKey(poolId: string, sessionId: string): string {
+  return `${sessionId}|${poolId}`
 }
 
 function isNumber(value: number | undefined): value is number {

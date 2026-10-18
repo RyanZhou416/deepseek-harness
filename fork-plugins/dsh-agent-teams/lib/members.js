@@ -825,8 +825,9 @@ export async function spawnMember(ctx, config, selections, llmSelection, captain
 }
 /**
  * Deliver one message to a member as its next FIFO turn. Best effort: a
- * failure (member gone or not continuable) is logged and reported as `false`
- * so the caller can decide (mailbox delivery still happened).
+ * failure (member gone or not continuable) is reported so the caller can
+ * decide (mailbox delivery still happened) and so the dispatcher can retire
+ * the dead activation and start a fresh one.
  *
  * Any team sender can route through this helper: the captain is the direct
  * parent of every member, and the caller passes the captain's live Agent
@@ -838,7 +839,8 @@ export async function spawnMember(ctx, config, selections, llmSelection, captain
  * @param childId - the member's durable child session id.
  * @param text - the message content.
  * @param signal - caller cancellation, forwarded to the delivery.
- * @returns whether the member inbox accepted the message.
+ * @param mode - queue a distinct turn, or steer the nearest step.
+ * @returns whether the member inbox accepted the message and, on failure, why.
  */
 export async function deliverToMember(ctx, captain, childId, text, signal, mode = 'queue') {
     try {
@@ -847,11 +849,14 @@ export async function deliverToMember(ctx, captain, childId, text, signal, mode 
             await steerMemberPrompt(ctx.subagents, captain, brandedSessionId(childId), content, signal, ctx.agents.get(brandedSessionId(childId)));
         else
             await queueMemberPrompt(ctx.subagents, captain, brandedSessionId(childId), content, signal);
-        return true;
+        return { accepted: true };
     }
     catch (error) {
         ctx.logger.warn(`agent-teams: prompt delivery to member ${childId} failed: ${String(error)}`);
-        return false;
+        return {
+            accepted: false,
+            error: error instanceof Error ? error.message : String(error),
+        };
     }
 }
 /**

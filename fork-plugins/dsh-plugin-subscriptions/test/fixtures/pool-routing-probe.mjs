@@ -61,7 +61,7 @@ export function apply(ctx) {
       const pool = new PoolAdapter({
         adapters: { [provider]: new AccountAdapter() }, health: new PoolHealthRegistry(),
         usage: new PoolUsageTracker((_provider, account) => async () => usage[account]),
-        strategy: 'quota_aware', switchMargin: 2, scheduling: resolvePoolScheduling(),
+        strategy: 'quota_aware', scheduling: resolvePoolScheduling(), concurrency: { requestsPerMinute: 0, minGapMs: 0 },
         defaultAccount: async () => accounts[0],
         families: async () => new Map([[`${provider}/probe`, { members: accounts.map(account => ({ provider, account, model: 'probe' })) }]]),
         tiers: {}, onWarn: () => {},

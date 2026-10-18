@@ -124,7 +124,7 @@ Team and task content starts immediately: wide panes use columns and narrow pane
 1. For a request to use AgentTeams, the captain follows the core protocol already in its system instructions. It continues an existing team and uses `agent_teams_status` when current state needs checking. When no team exists, the goal becomes a staged plan for review.
 2. The captain adds role-specific members backed by continuable sub-agents.
 3. The goal becomes tasks with owners and explicit dependencies.
-4. The shared scheduler uses real `running / idle / ready` state to atomically claim one ready task per idle member and wake it. An interrupted resident attempt stays parked and can resume through a direct message without losing its capability; after a cold process restart, the scheduler retries stranded open work with a fresh attempt.
+4. The shared scheduler uses real `running / idle / ready` state to atomically claim one ready task per idle member and wake it. An interrupted resident attempt stays parked and can resume through a direct message without losing its capability; after a cold process restart, the scheduler retries stranded open work with a fresh attempt. If waking a member fails because Harness disposed its activation, the dispatcher retires that session id and starts one fresh activation for the same member and attempt instead of returning the task to pending.
 5. Members update with the current `attempt_id`; reassignment or captain takeover revokes the old attempt and waits for the old worker to quiesce before a new attempt starts.
 6. The captain presents the combined result, then archives the complete team record.
 
@@ -201,7 +201,7 @@ This is model tool visibility and invocation policy for global tools, not an OS 
 ## Boundaries
 
 - One captain leads one active team at a time.
-- Idle members with no open task are automatically reused for ready work. An idle member that still owns an open attempt is parked until messaged or explicitly reassigned; messages that cannot be delivered live remain durable and are retried at a later status boundary.
+- Idle members with no open task are automatically reused for ready work. An idle member that still owns an open attempt is parked until messaged or explicitly reassigned; messages that cannot be delivered live remain durable and are retried at a later status boundary. A ready task is claimed before unread mail, so an unconsumed message cannot starve assigned work.
 - State is file-backed and serialized within one DSH process; concurrent processes editing the same team are not coordinated.
 - The activity panel reports persisted state as-is. Models may occasionally finish work without performing the expected task-state update.
 

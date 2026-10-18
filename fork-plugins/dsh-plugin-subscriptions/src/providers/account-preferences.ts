@@ -196,9 +196,10 @@ export class AccountPreferencesAdapter extends LlmAdapter {
       if (property === 'streamAccount') return async function* (options: GenerateOptions, account: string) {
         let key: string
         try { key = await keyFor(account, options.model, true) } catch (cause) {
-          // Skip policy-excluded members without poisoning account health. The
-          // pool treats TRANSPORT as switch-without-cooldown; raw is never called.
-          throw new LlmError('Pool member unavailable under account preferences', 'TRANSPORT', { cause })
+          // A member excluded by account policy is refused before any request is
+          // sent. `NO_ADAPTER` is the code that states exactly that: the pool may
+          // hand this request to another member because no account was contacted.
+          throw new LlmError('Pool member unavailable under account preferences', 'NO_ADAPTER', { cause })
         }
         yield* raw.streamAccount(options, key)
       }

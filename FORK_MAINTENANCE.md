@@ -231,7 +231,11 @@ Claude Messages 的 `retry-after-ms` 优先于 `retry-after`，429 的账号重�
 
 ### Subscription pool scheduling
 
-订阅插件的源码调度策略由 `pool.scheduling` 控制：Claude 与 ChatGPT 的临近重置、ChatGPT 的余额收尾及重置卡条件均采用有限加权，并用当前账号的活跃池请求数惩罚拥挤。保留按会话、提供方与模型池区分的粘性，统一按调整后评分应用切换门槛，首个输出后不切账号。并发预约覆盖首字节等待并在每条退出路径释放；已过期窗口不按无限紧迫度计分。保留 `pool.spec.ts` 的并发屏障和 `snapshots/session/subscription-pool-routing`。该策略包含在 `0.9.4-dsh017rc1.14` 制品中；部署须在 Host 停止后升级插件制品及版本固定记录。
+订阅插件的账号池并发与失败调度由 `pool.concurrency` 控制：每个账号默认 2 个并发会话、每会话 1 个 in-flight 请求，账号级 token bucket 默认 20 RPM、burst 2、minGap 1500ms；session backoff 1s 起、60s 封顶、最多 10 次；refresh 预算 2 次。普通 429 只退避当前会话、不换号；窗口/额度 429 冷却账号到 reset；rematch 只在 turn 边界且每 turn 最多一次。403 model permission/404 model 走 model-scoped，403 revoked 走 refresh；无健康账号返回 `NO_AVAILABLE_ACCOUNT`，不遍历池。`pool.switchMargin` 主动换号已移除，sticky 只保留会话-账号亲和。错误分类与默认值表见插件 README/FORK_MAINTENANCE；429 永不跨账号重放。
+
+**Preservation rule.** 保留 `pool.concurrency` 默认值、账号级 limiter、会话单 in-flight、普通 429 不换号、额度 429 账号冷却与 turn 边界 rematch；不得恢复 `switchMargin` 或跨账号重放 429。
+
+**Focused verification.** `fork-plugins/dsh-plugin-subscriptions` 的 `test/pool-gate.spec.ts`、`test/pool-failure-table.spec.ts`、`test/pool.spec.ts`、`test/pool-health.spec.ts`，以及 `pnpm test` 和两个 `tsc --noEmit`。
 
 ChatGPT 源码提供默认关闭的 `autoResetCredits` 开关，入口为订阅账号管理。当前账号额度耗尽且其可用卡在所有已登录 ChatGPT 账号中最早到期时才自动用卡，不要求其他账号也耗尽。保留全账号最新卡列表比较、使用前最新额度复核、手动/自动串行与落盘防重复记录；开关不能被模型编辑器的旧副本覆盖。验证入口为 `codex-auto-reset.spec.ts`、设置/RPC 与池测试、`account-manager-browser.mjs` 和上述无密钥会话回放。`0.9.4-dsh017rc1.14` 包含该功能，默认关闭，禁止在 Host 运行时替换安装目录；具体规则以[插件 README](fork-plugins/dsh-plugin-subscriptions/README.md)为准。
 
@@ -702,6 +706,12 @@ fork artifact 随 Git 提交，同事不依赖这台机器的外置 `.local-plug
 9. 只有明确 captain/team 对且不含 Captain 发现请求时，在原有 live/archive 目录枚举后先按 team id 过滤，再读取 `team.json` 并重新校验记录 id 与 captain。保留目录顺序、目录错误传播、目录类型过滤和旧 id；Captain 发现仍读取全部团队。Host 与面板复用按 assignee 精确值分组的任务索引，保留任务顺序、首个运行任务、完成数、removed roster、模型选择和详情；缺失 assignee 与显式空值不同。索引只跟随当前输入，不引入跨请求状态缓存。
 
 10. `state.ts` 的 `atomicWriteText` 在临时文件改名前、以及 Windows 直接覆盖回退中，都先 `FileHandle.sync()`，断电后不会留下长度正确而内容全零的 `team.json` 或 mailbox。`findTeamByCaptain`、`findTeamByParticipant` 与 capability 的 `currentTeam` 扫描工作区时跳过 JSON 或结构损坏的团队，并按目录与原因以 `DSH_AGENT_TEAMS_UNREADABLE_TEAM` 进程警告提示一次；按 team id 直接读取仍抛错，I/O 错误照常传播。2026-10-04 崩溃零填充了一个 3 MB `team.json`，该工作区每次插入收件箱消息后回合都以 JSON 解析失败结束。回归为 `capabilities.test.mjs` 的 unrelated unreadable team 用例（旧实现返回 JSON 错误）与 `verify.mjs` 的 zero-filled 查找检查。该修复随 `0.1.20-dsh017rc1.3` 发布；插件目录依赖须按锁文件对齐到 `0.2.1-rc.2` 后再构建（本机 pnpm store 已有时可 `--offline`），否则客户端类型检查失败。
+
+11. 成员已完成一轮且 activation 已释放时，任务派发失败必须退役旧 member session（retired index）并 fresh spawn 同一成员继续当前 attempt，不得把任务回滚成 `pending attempt N`；所有 dispatch 失败持久化 `spawnError`。scheduler 采用 task-first：有 ready task 时先派任务，未读 mailbox 不得饿死任务；未到达成员的派发失败不膨胀 attempt。保留 mailbox durable 重试、retired 拒绝与旧 attempt 证据恢复。
+
+**Preservation rule.** 保留 cold-member fallback spawn、task-first 调度与 `spawnError` 可见性；不要恢复“投递失败静默回滚 pending”或 mailbox 优先饿死 ready task 的行为。
+
+**Focused verification.** `fork-plugins/dsh-agent-teams` 的 `pnpm verify:dispatch-recovery`、`scripts/lifecycle-verify.mjs`、`scripts/member-failure-tdd.mjs`（含 modern/delivery 变体）与 `pnpm typecheck`。
 
 AgentTeams 的 `scripts/activity-state.perf.mjs` 使用 27/58 个合成团队、1,500/2,600 个任务。请求一个团队摘要时，live 响应由约 2.865 MB 的全量结果降至 10,416 字节，归档由约 5.003 MB 降至 8,458 字节；所选团队的 56/45 项任务完整保留，详情仍可单独读取。明确目标预筛选的构建产物对照每版各启动三个 Node 进程，按相同 case 顺序温热文件/邮箱缓存：live target-summary 为 `[20.27, 19.20, 20.16]` → `[1.12, 1.37, 1.38]` ms，中位数 20.16 → 1.37 ms；archive 为 `[37.28, 37.88, 39.56]` → `[1.45, 1.38, 1.30]` ms，中位数 37.88 → 1.38 ms。结果字节数及任务数相同，Captain 发现仍承担扫描成本。该测量覆盖命名目标的组件读取，不代表整页或模型延迟。成员分组另用 3×12 与 8×256 的合成单团队验证；参考算法访问次数只作复杂度对照，不作旧产品计时，包含邮箱 I/O 的单团队装配未显示稳定耗时收益。离线 verify、类型检查、兼容/HTTP/生命周期验证及旧 consumer 负对照构成后续合并的验证入口。
 

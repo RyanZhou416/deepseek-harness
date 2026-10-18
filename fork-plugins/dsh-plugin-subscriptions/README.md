@@ -231,15 +231,40 @@ When a provider has **two or more logged-in accounts**, the picker shows the **u
   `account` is the stable account key shown by the `status` endpoint — an email for Claude, a login for Grok / Copilot / Antigravity. An account whose provider reported neither takes a random `account-…` id, which stays with it across restarts. Codex keys are per workspace **and** user (`["<workspace-id>","user","<user-id>"]`), so for Codex you may instead pin the login email, or the bare workspace ID when only one user of that workspace is logged in; an ambiguous reference resolves to nothing rather than to the wrong user.
 - **Tier extras (`tiers`, optional).** Extra picker rows with heterogeneous fallbacks, listed under the first member's provider. Not created automatically.
 
-Selection is sticky per session, provider, and model pool. `priority` keeps its configured healthy-member order and session affinity. The default `quota_aware` strategy normalizes the existing `remaining quota / time until reset` scores within each availability band, then adds bounded preferences for Claude and ChatGPT resets and for finishing small ChatGPT remainders. A ChatGPT weekly window opened within 24 hours with an available reset card expiring within three days receives a finite bonus rather than an absolute priority. Automatic credit spending requires the separate opt-in setting described above.
+A session's turns are bound to one account. `priority` keeps the configured healthy-member order; the default `quota_aware` strategy normalizes the existing `remaining quota / time until reset` scores within each availability band, then adds bounded preferences for Claude and ChatGPT resets and for finishing small ChatGPT remainders. A ChatGPT weekly window opened within 24 hours with an available reset card expiring within three days receives a finite bonus rather than an absolute priority. Automatic credit spending requires the separate opt-in setting described above.
 
 Claude and ChatGPT remain in the primary quota band below 100% used; other providers keep the 95% threshold. Any applicable full window puts a member in the last-resort band. Model-scoped windows affect only matching models. When a cached reset passes, the expired window stops contributing urgency or a full-quota assertion, and the next demand re-reads it; an endpoint that continues returning that expired time does not cause a polling loop.
 
 Inside the ChatGPT finishing range, the ample-quota baseline fades in proportion to the remaining fraction and the finishing bonus grows. This also prefers a smaller remainder when every account has only a few percent left. Reset preference grows toward the reset deadline but stays bounded; each window kind has a configurable lookahead.
 
-The combined score is divided by `1 + loadPenalty * active requests`. An attempt reserves its account before waiting for the first chunk and releases it after completion, failure, cancellation, or iterator teardown. This balances simultaneous pool requests across models of the same provider/account without serializing them. A healthy sticky member stays unless another member exceeds its adjusted score by `switchMargin` (default 2). There is no account switch after the first stream chunk.
+The combined score is divided by `1 + loadPenalty * active requests`. An attempt reserves its account before waiting for the first chunk and releases it after completion, failure, cancellation, or iterator teardown. This balances simultaneous pool requests across models of the same provider/account.
 
-Load accounting covers this Host’s automatic pools and configured tiers. Independent account entries, other Harness processes, and external clients are outside that counter. Accounts without usage telemetry remain fallbacks behind measured accounts; when a band has no usable urgency, equal baseline scores can still be distributed by load. Existing health cooldowns and pre-output failover remain in effect.
+**Session-account affinity.** A session keeps the account its turn is bound to, across turns, while that account can serve — even when another account would score higher. A replacement (a *rematch*) happens only when a turn starts (`turn/start` on the session log) and only because the bound account's window closed or a refusal parked it. At most one rematch happens per turn, and no request of an open turn is ever sent to a second account: an ordinary 429, a server fault or a transport failure fails the turn on its account, which the retry policy then retries. A requeued turn that finds no healthy account reports the typed `no_available_account` (`NO_AVAILABLE_ACCOUNT`) and contacts nothing. There is no account switch after the first stream chunk.
+
+### Account concurrency
+
+Every subscription account serves at most two sessions at a time (`pool.concurrency.maxSessionsPerAccount`). A session sends one request at a time, so a second turn of the same session queues behind its first request. The third session of one account waits in FIFO order for a slot; a wait longer than `queueTimeoutMs` is refused with a typed `rate_limited` instead of queueing forever. A turn end releases the slot immediately, and a session whose turn end was never observed releases it after `sessionIdleMs`.
+
+Every account also has one request limiter shared by all of its sessions: a token bucket (`requestsPerMinute` refilled at that rate with `burst` tokens available at once) plus a minimum spacing (`minGapMs`). It is active by default at 20 requests per minute, two burst tokens and 1.5 s between requests; set any of them to disable or retune it for the plan.
+
+An ordinary 429 backs off only the session that received it (`backoff`, or the provider's disclosed wait when it sent one); the other sessions of the account keep sending under the shared limiter. Once a session spends `backoff.maxRetries` consecutive backoffs, its turn stops retrying (the gate reports a hard-stopped `rate_limited`); the next turn starts a fresh budget. A window/quota 429 parks the account until the disclosed reset, and every session of that account sees the same cooldown.
+
+### Error taxonomy
+
+Every failure a pool member reports resolves to exactly one scheduling effect. No effect switches accounts inside a turn; a 429 is never replayed on a sibling.
+
+| Class | Provider signal | Effect |
+|---|---|---|
+| Transient | 408, 409, ordinary 429, 500/502/503/504/529, network, TLS, timeout, malformed before delivery | `session-backoff`: the same account retries after the disclosed or local delay, bounded by `backoff.maxRetries` |
+| Account cooldown | 429 window/quota (claim/reset); an account-shaped 403 (stated-final, billing/credits, disabled account) | Park the account until the reset; all sessions share it; rematch only at the next turn, at most once |
+| Refresh | 401, a 403 that names a revoked credential/account | Refresh and retry the same account; after `maxRefreshAttempts` (2) failures the account is parked |
+| Model-scoped | 403 that names one model, 404 model not found, in-band refusal naming a model | Fail this model; the account is neither parked nor switched |
+| Terminal | 400 `invalid_request` (except context overflow), 413, version/policy/content refusal, user abort, malformed/incomplete stream after delivery, `x-should-retry: false` on a non-403/429 status | End the turn with the provider's error; nothing about the account is recorded |
+| In-band `error` event | mapped by `error.type` (`authentication_error`, `permission_error`, `policy_blocked`, `not_found_error`, `invalid_request_error`, `rate_limit_error`, `overloaded_error`, `api_error`, `timeout_error`) | The class its type names; never an account switch |
+
+The hard-stop field wins over the code: a route that stated the logical request may not be repeated is terminal even when its code reads transient. An ordinary 429 with `x-should-retry: true` stays transient, so the same account may retry.
+
+Load accounting covers this Host’s automatic pools and configured tiers. Independent account entries, other Harness processes, and external clients are outside that counter. Accounts without usage telemetry remain fallbacks behind measured accounts; when a band has no usable urgency, equal baseline scores can still be distributed by load.
 
 Optional `pool.scheduling` fields are resolved and validated at plugin load. Zero weights disable their additional preference or load penalty; zero `codexDrainBelowPercent` disables finishing. Horizons must be positive integer milliseconds, percentages must be between 0 and 100, and weights must be finite and nonnegative.
 
@@ -254,6 +279,22 @@ Optional `pool.scheduling` fields are resolved and validated at plugin load. Zer
 | `freshCreditWeight` | `0.5` | Maximum fresh-week/expiring-card bonus |
 | `loadPenalty` | `1` | Penalty per active pool request on the account |
 
+Optional `pool.concurrency` fields are validated at plugin load too.
+
+| Field | Default | Purpose |
+|---|---|---|
+| `maxSessionsPerAccount` | `2` | Concurrent sessions one account serves |
+| `queueTimeoutMs` | `120000` | Longest wait for a session slot or request token |
+| `sessionIdleMs` | `600000` | Fallback slot release when no turn end was observed |
+| `requestsPerMinute` | `20` | Shared account rate cap; zero disables it |
+| `burst` | `2` | Tokens a burst may consume at once |
+| `minGapMs` | `1500` | Minimum spacing between two account requests |
+| `maxRefreshAttempts` | `2` | Credential refresh cycles before the account is parked |
+| `backoff.initialDelayMs` | `1000` | First local session backoff |
+| `backoff.maxDelayMs` | `60000` | Session backoff ceiling |
+| `backoff.jitterRatio` | `0.2` | Symmetric jitter around each backoff |
+| `backoff.maxRetries` | `10` | Backoffs one session may spend before its turn stops retrying |
+
 ```yaml
 - id: llm-subscriptions
   name: dsh-plugin-subscriptions
@@ -261,8 +302,12 @@ Optional `pool.scheduling` fields are resolved and validated at plugin load. Zer
     pool:
       enabled: true                   # default; needs ≥2 accounts of one provider
       strategy: quota_aware           # or priority
-      switchMargin: 2                 # hysteresis factor for quota_aware
       autoAccounts: true              # pool each catalog model across that provider's accounts
+      concurrency:                    # account concurrency and 429 policy
+        maxSessionsPerAccount: 2
+        requestsPerMinute: 20         # shared account cap; 0 disables
+        burst: 2
+        minGapMs: 1500                # minimum spacing between account requests
       families:                       # explicit account list for one catalog model (same provider)
         claude-sonnet-5:
           - { provider: claude, model: claude-sonnet-5 }                   # default account
@@ -276,17 +321,17 @@ Optional `pool.scheduling` fields are resolved and validated at plugin load. Zer
 
 ### Waiting out a rate-limit window
 
-A subscription plan is rate-limit shaped by design — a 5-hour session window, a weekly one, and on some plans a per-model weekly one — so an ordinary 429 is not a dead end: the window reopens at a time the provider discloses. Each route reads that reset off its own 429 and turns it into that account's pool cooldown (see Model pools above) instead of a fixed 5-minute guess.
+A subscription plan is rate-limit shaped by design — a 5-hour session window, a weekly one, and on some plans a per-model weekly one — so an ordinary 429 is not a dead end: the window reopens at a time the provider discloses. Each route reads that reset off its own 429 and turns it into that session's backoff (`pool.concurrency.backoff`) and, for a window/quota rejection, into the account's cooldown instead of a fixed 5-minute guess.
 
-A refusal the provider states is final is neither waited out nor retried, and the pool does not answer it from another account. `x-should-retry: false`, a unified status of `rejected` (on `-status` or `-overage-status`), a disabled organisation/seat/member reason, billing or credit wording, and a 429 that disclosed no reset at all classify as `ENFORCEMENT`: the account is parked for the disclosed reset (5 minutes when none was disclosed), the turn fails immediately, and no other account of the pool is contacted — repeating such a refusal under another identity is the traffic it exists to stop.
+A refusal the provider states is final is neither waited out nor retried, and the pool does not answer it from another account. `x-should-retry: false`, a unified status of `rejected` (on `-status` or `-overage-status`), a disabled organisation/seat/member reason, billing or credit wording, and a 429 that disclosed no reset at all classify as `ENFORCEMENT`: on a 429 the account is parked for the disclosed reset (5 minutes when none was disclosed) and the turn fails immediately; on any other status the refusal is terminal for the turn. No other account of the pool is contacted in either case — repeating such a refusal under another identity is the traffic it exists to stop.
 
 Only a signal that names the window which actually rejected the request is read: Anthropic's `anthropic-ratelimit-unified-reset`, the seconds Codex puts on a `usage_limit_reached` rejection, the delay xAI names in the error body, or a plain `retry-after`. The per-bucket rollover snapshots (`anthropic-ratelimit-{requests,tokens,…}-reset`, `x-codex-*-reset-after-seconds`, `x-ratelimit-reset-*`) ride every response and cannot say which bucket refused — the earliest is usually one that still had room — so a 429 carrying nothing else is a refusal too: the warning sink still names the headers and the head of the body, and the turn ends there rather than parking on a guess.
 
 Reading is confined to a 429. Every other failure keeps its short local backoff: those same headers ride a transient 500 too, and honouring them there would hold a turn for the rest of the window over an overload that clears in a second.
 
-With a pool, this is what actually does the waiting: a 429'd account is parked until its own disclosed reset and the request fails over to another account of the same provider immediately — no wait, no lost turn. Only once **every** account (the whole pool) is cooling down does the adapter report a `RATE_LIMIT` carrying the pool's *earliest* reset as the wait to take. With a single account (no pool, or a provider with only one login), that same disclosed reset is reported directly. An enforcement-shaped refusal is the exception in both shapes: it parks the account and ends the turn on the refusal itself, and a pool that ran out alongside one reports the refusal rather than a `RATE_LIMIT`.
+With a pool, this is what actually does the waiting: a 429'd session backs off locally and the turn fails with that account's own retry hint, so `dsh-llm-retry` retries the same account. The request is not replayed on a sibling account, and the other sessions of the account keep sending under its shared request limiter. A window/quota rejection parks the account until its reset, which every session of the account sees; a 401 or a revoked 403 refreshes the credential on the same account first, and parks it only after `maxRefreshAttempts` failures. The next turn rematches to a healthy account. Once no account is healthy, the next turn reports the typed `no_available_account` carrying the earliest known recovery as its hint. With a single account (no pool, or a provider with only one login), the same disclosed reset is reported directly.
 
-Waiting on that reported delay is executed by [`@deepseek-ai/dsh-llm-retry`](https://www.npmjs.com/package/@deepseek-ai/dsh-llm-retry), which every route's retry policy is written for: add it to the composition, or nothing waits and a closed window fails the turn as before (falling back to whichever other pool accounts are healthy, if any).
+Waiting on that reported delay is executed by [`@deepseek-ai/dsh-llm-retry`](https://www.npmjs.com/package/@deepseek-ai/dsh-llm-retry), which every route's retry policy is written for: add it to the composition, or nothing waits and a closed window fails the turn as before.
 
 ```yaml
 - name: '@deepseek-ai/dsh-llm-retry'

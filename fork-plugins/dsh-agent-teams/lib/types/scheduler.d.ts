@@ -47,6 +47,7 @@ export interface DispatchTicket {
     readonly recoveredOwned: boolean;
     /** Original task generation, used to restore a failed automatic recovery. */
     readonly previousStatus?: 'claimed' | 'in_progress';
+    /** Task generation before this claim; restored when a dispatch never reached a member. */
     readonly previousAttempt?: number;
     readonly previousAttemptId?: string;
     readonly previousResult?: Pick<TeamTask, 'output' | 'verdict' | 'findings' | 'changedPaths' | 'acceptanceResults' | 'commandsRun'>;

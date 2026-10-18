@@ -22,6 +22,7 @@ import {
   requestAntigravityContent,
 } from '../src/providers/antigravity.js'
 import type { CatalogSnapshot, CatalogStoreFactory, FetchFn } from '../src/providers/common.js'
+import { ENFORCEMENT_CODE } from '../src/providers/common.js'
 import {
   AntigravityStreamTranslator,
   streamAntigravity,
@@ -539,13 +540,16 @@ test('Antigravity preserves tool-result images after parallel tool responses', (
   assert.equal(parts[imageIndex].inlineData?.data, 'aW1hZ2U=')
 })
 
-test('Antigravity fails over between accounts through the shared pool before emitting content', async () => {
+test('Antigravity keeps one account for an ordinary 429 and parks it for a refusal', async () => {
   const { tokens } = accountTokens()
   const { PoolAdapter } = await import('../src/providers/pool.js')
   const { PoolHealthRegistry } = await import('../src/providers/pool-health.js')
   const { PoolUsageTracker } = await import('../src/providers/pool-usage.js')
   const { poolKey } = await import('../src/providers/pool-family.js')
   const visited: string[] = []
+  let alice: Response | undefined = new Response('quota limited', {
+    status: 429, headers: { 'retry-after': '60' },
+  })
   let pool: InstanceType<typeof PoolAdapter> | undefined
   const adapter = new AntigravityAdapter({
     tokens, models: [{ id: 'gemini-3-flash' }], discovery: false, streamIdleTimeoutMs: 1000, runtime,
@@ -553,13 +557,14 @@ test('Antigravity fails over between accounts through the shared pool before emi
     fetchFn: async (_input, init) => {
       const token = new Headers(init?.headers).get('authorization')!
       visited.push(token)
-      if (token === 'Bearer alice') return new Response('quota limited', { status: 429, headers: { 'retry-after': '60' } })
+      if (token === 'Bearer alice') return alice!
       return new Response(byteStream(`data: ${JSON.stringify({ response: { candidates: [{ content: { parts: [{ text: 'ok' }] }, finishReason: 'STOP' }] } })}\n\n`))
     },
   })
+  const health = new PoolHealthRegistry()
   pool = new PoolAdapter({ scheduling: resolvePoolScheduling(),
-    adapters: { antigravity: adapter }, health: new PoolHealthRegistry(),
-    usage: new PoolUsageTracker(() => undefined), strategy: 'priority', switchMargin: 2,
+    adapters: { antigravity: adapter }, health,
+    usage: new PoolUsageTracker(() => undefined), strategy: 'priority', concurrency: { requestsPerMinute: 0, minGapMs: 0 },
     defaultAccount: () => tokens.defaultAccount(), onWarn: () => {}, tiers: {},
     families: async () => new Map([[poolKey('antigravity', 'gemini-3-flash'), { members: [
       { provider: 'antigravity', model: 'gemini-3-flash', account: 'alice' },
@@ -567,9 +572,34 @@ test('Antigravity fails over between accounts through the shared pool before emi
     ] }]]),
   })
   assert.equal((await adapter.resolveModel('antigravity', 'gemini-3-flash')).id, 'gemini-3-flash')
+
+  // An ordinary 429 is waited out on the account that received it, never replayed
+  // on the sibling.
+  await assert.rejects(async () => {
+    for await (const _chunk of adapter.stream(options([]))) { /* drain */ }
+  }, (error: unknown) => {
+    assert.equal((error as { code?: string }).code, 'RATE_LIMIT')
+    const retryAfter = (error as { failure?: { providerRetryAfterMs?: number } }).failure?.providerRetryAfterMs
+    assert.ok(retryAfter !== undefined && retryAfter > 0)
+    return true
+  })
+  assert.deepEqual(visited, ['Bearer alice'])
+
+  // A refusal the provider stated is final parks the account; the turn ends on
+  // it, and only a later request (a new turn) may use the sibling.
+  alice = new Response('refused', { status: 429, headers: { 'x-should-retry': 'false', 'retry-after': '600' } })
+  await assert.rejects(async () => {
+    for await (const _chunk of adapter.stream(options([]))) { /* drain */ }
+  }, (error: unknown) => {
+    assert.equal((error as { code?: string }).code, ENFORCEMENT_CODE)
+    return true
+  })
+  assert.deepEqual(visited, ['Bearer alice', 'Bearer alice'], 'the sibling is not asked inside the turn')
+  assert.equal(health.isMemberAvailable('antigravity', 'alice', 'gemini-3-flash'), false)
+
   const chunks: StreamChunk[] = []
   for await (const chunk of adapter.stream(options([]))) chunks.push(chunk)
-  assert.deepEqual(visited, ['Bearer alice', 'Bearer bob'])
+  assert.deepEqual(visited, ['Bearer alice', 'Bearer alice', 'Bearer bob'])
   assert.equal(chunks.at(-1)?.type, 'finish')
 })
 

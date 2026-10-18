@@ -263,10 +263,18 @@ export declare function memberWelcome(team: TeamState, memberName: string): stri
  *   declared is never silently removed.
  */
 export declare function spawnMember(ctx: Context, config: MemberRuntimeConfig, selections: MemberSelectionRuntime, llmSelection: MemberLlmSelection, captain: Agent, team: TeamState, member: TeamMember, stateDir: string, signal: AbortSignal, initialPrompt?: string, resolvedFilter?: MemberToolFilter, relaxableDeny?: readonly string[]): Promise<void>;
+/** Outcome of one member delivery attempt. */
+export interface MemberDeliveryResult {
+    /** Whether the member's inbox accepted the message. */
+    readonly accepted: boolean;
+    /** Failure reason, present only when `accepted` is false. */
+    readonly error?: string;
+}
 /**
  * Deliver one message to a member as its next FIFO turn. Best effort: a
- * failure (member gone or not continuable) is logged and reported as `false`
- * so the caller can decide (mailbox delivery still happened).
+ * failure (member gone or not continuable) is reported so the caller can
+ * decide (mailbox delivery still happened) and so the dispatcher can retire
+ * the dead activation and start a fresh one.
  *
  * Any team sender can route through this helper: the captain is the direct
  * parent of every member, and the caller passes the captain's live Agent
@@ -278,9 +286,10 @@ export declare function spawnMember(ctx: Context, config: MemberRuntimeConfig, s
  * @param childId - the member's durable child session id.
  * @param text - the message content.
  * @param signal - caller cancellation, forwarded to the delivery.
- * @returns whether the member inbox accepted the message.
+ * @param mode - queue a distinct turn, or steer the nearest step.
+ * @returns whether the member inbox accepted the message and, on failure, why.
  */
-export declare function deliverToMember(ctx: Context, captain: Agent, childId: string, text: string, signal: AbortSignal, mode?: 'queue' | 'steer'): Promise<boolean>;
+export declare function deliverToMember(ctx: Context, captain: Agent, childId: string, text: string, signal: AbortSignal, mode?: 'queue' | 'steer'): Promise<MemberDeliveryResult>;
 /**
  * Request cancellation of one live member's current turn. Best effort, fire
  * and return; the target may keep running until it observes the signal.
