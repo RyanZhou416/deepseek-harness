@@ -38,6 +38,8 @@ pwsh -NoProfile -File fork-plugins/dsh-plugin-aether-shell/scripts/run-local.ps1
 
 From the checkout, install the generated tarball with `pnpm dsh plugin --profile <profile> add <tarball> --ignore-scripts` in an isolated Harness home before activating it in the real profile. The bundle inserts one `aether-shell` plugin row and does not disable other shell rows. Back up profile configuration before activation. Use DSH package management to replace a package while the Host runs; the loaded module generation stays active until restart. Restart after installation to load the new package with its matching Host build. Do not manually overwrite loaded module files.
 
+This fork's `build.cmd` also stages and links the plugin into the selected `web` profile after the ordinary build, so a colleague needs no tarball handoff. That path requires the Host to be stopped, compiles `lib/lifecycle.mjs` from source, and keeps every `@deepseek-ai/*` peer external at `0.2.1-rc.2`; see [the fork plugin build instructions](../README.md#repo-integrated-build-and-install).
+
 ### Choose the appropriate tool
 
 | Tool | Input | Lifespan | Purpose |

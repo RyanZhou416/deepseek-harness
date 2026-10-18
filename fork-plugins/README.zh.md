@@ -4,6 +4,22 @@
 
 此目录存放必须与本 fork 的 DSH API 同步适配、并随 fork 一起分发的插件源码。它与官方 `packages/` 目录分离，避免常规 DSH 上游合并把第三方插件误当成官方 workspace package，也把未来冲突限制在 `fork-plugins/` 内。
 
+## 仓库内构建与安装
+
+Windows 的 `build.cmd` 在普通根构建之后从源码构建两个插件，并把它们链接到选定的 `web` profile。无需第二条命令、私有 registry 或手工提供的 tgz。构建会**修改 profile**，因此必须先停止 Host：Host 端口（`3080`）仍在监听时，构建会在触碰任何 profile 文件之前失败。
+
+`scripts/fork-plugins-build.ts` 使用 `DSH_HOME`（未设置时用 `%USERPROFILE%\.dsh`），目标是 `profiles\web`。它把两个包 staging 到被忽略的 `.build/fork-plugins/`，再用 `dsh plugin --profile web add <绝对 staging 目录>` 安装，记录为 pnpm `link:`。修改前会把 `package.json` 与 `cordis.patch.yml` 备份到 `.build/fork-plugins/backups/`，并记录源码 key，使未变化的第二次运行既不重建也不重装。全新的 `web` profile 会先初始化；不会读取或写入任何 Session、附件、凭据、projection cache 或 `.agent-teams` 数据。
+
+- Subscriptions 从源码编译 `lib/index.js` 与 `lib/client.js`。staged manifest 内联 `@tormentalabs/claude-code-wire-compat`（来自仓库 tgz）与 `undici`，删除仅类型使用的 `@deepseek-ai/dsh-llm-request-record` peer，且不声明运行时依赖。公开的 optional provider 条目（`@cursor/sdk`、`@oven/bun-*`）保留声明；link 安装不会安装被链接包的 optional 依赖，因此这些 provider 需要另行提供对应包。staged 包不附带声明文件；源码检出仍是类型来源。
+- AetherShell 从源码编译 `lib/lifecycle.mjs`，并保持所有 `@deepseek-ai/*` peer 为外部依赖 `0.2.1-rc.2`。
+
+诊断构建时可直接运行该步骤（仍须停止 Host）：
+
+```powershell
+$env:DSH_HOME = 'C:\path\to\isolated-home'
+pnpm exec tsx scripts/fork-plugins-build.ts
+```
+
 ## macOS profile setup
 
 `build.command` 成功后，`setup.command` 会校验并把当前 Agent Teams、Context 与 Subscriptions 产物安装到接收 Mac 的 `web` profile，移除 `dshmarket`，并应用 Context 低开销 bounds。它不会导入其他机器的运行数据，且只备份可能被改动的四个本机 profile 配置文件；可以先在零写入情况下查看精确动作：
