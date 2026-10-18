@@ -28,6 +28,7 @@ import type {} from '@deepseek-ai/dsh-system-prompt'
 import type { WorkspaceRegistry } from '@deepseek-ai/dsh-workspace'
 import {
   haltTeamWork,
+  resolveRecordedSession,
   stagedPlanApprovedContext,
   registerAgentTeamsTools,
   type StagedPlanMutation,
@@ -318,6 +319,7 @@ export function apply(ctx: Context, config: Config): void {
           return
         }
         const captain = ctx.agents.get(sessionId as import('@deepseek-ai/dsh-session').SessionId)
+          ?? await resolveRecordedSession(ctx, sessionId as import('@deepseek-ai/dsh-session').SessionId)
         if (captain === undefined) {
           res.writeHead(409, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
           res.end(JSON.stringify({ error: 'captain session is not attached' }))
@@ -374,6 +376,7 @@ export function apply(ctx: Context, config: Config): void {
           return
         }
         const captain = ctx.agents.get(sessionId as import('@deepseek-ai/dsh-session').SessionId)
+          ?? await resolveRecordedSession(ctx, sessionId as import('@deepseek-ai/dsh-session').SessionId)
         if (captain === undefined) {
           res.writeHead(409, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
           res.end(JSON.stringify({ error: 'captain session is not attached' }))

@@ -20,7 +20,7 @@
  */
 import z from '@deepseek-ai/schemastery';
 import { createUserMessage } from '@deepseek-ai/dsh-llm';
-import { haltTeamWork, stagedPlanApprovedContext, registerAgentTeamsTools, } from "./tools.js";
+import { haltTeamWork, resolveRecordedSession, stagedPlanApprovedContext, registerAgentTeamsTools, } from "./tools.js";
 import { installAgentTeamsGestureBoundary, registerAgentTeamsCommand } from "./command.js";
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -241,7 +241,8 @@ export function apply(ctx, config) {
                     res.end(JSON.stringify({ error: 'sessionId and teamId are required' }));
                     return;
                 }
-                const captain = ctx.agents.get(sessionId);
+                const captain = ctx.agents.get(sessionId)
+                    ?? await resolveRecordedSession(ctx, sessionId);
                 if (captain === undefined) {
                     res.writeHead(409, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
                     res.end(JSON.stringify({ error: 'captain session is not attached' }));
@@ -298,7 +299,8 @@ export function apply(ctx, config) {
                     res.end(JSON.stringify({ error: 'sessionId, teamId, and action are required' }));
                     return;
                 }
-                const captain = ctx.agents.get(sessionId);
+                const captain = ctx.agents.get(sessionId)
+                    ?? await resolveRecordedSession(ctx, sessionId);
                 if (captain === undefined) {
                     res.writeHead(409, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
                     res.end(JSON.stringify({ error: 'captain session is not attached' }));

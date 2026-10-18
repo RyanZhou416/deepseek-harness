@@ -40,7 +40,9 @@ export declare function isTopLevelSession(session: Session): boolean;
 /**
  * Durable ancestry of one session, nearest first. The calling session's own
  * header supplies the first hop; later hops come from resident sessions or
- * stored headers, so a fork resolves through sessions that are not loaded.
+ * stored headers, so a fork resolves through sessions that are not loaded. A
+ * chain shortened by an unreadable header is returned but never cached, so a
+ * transient persistence failure does not strand the identity for the process.
  * @param ctx - the plugin context (injects `agents`).
  * @param session - the calling session.
  * @returns ancestor session ids, bounded by {@link LINEAGE_MAX_DEPTH}.

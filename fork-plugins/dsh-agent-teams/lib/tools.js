@@ -285,7 +285,7 @@ async function memberOperationParent(ctx, team, caller) {
     const resident = ctx.agents.get(team.captainSessionId);
     if (resident !== undefined)
         return resident;
-    const resumed = await resumeLeadAnchor(ctx, team, caller);
+    const resumed = await resumeLeadAnchor(ctx, team);
     if (resumed !== undefined)
         return resumed;
     throw new Error(`member operations require the live captain session ${team.captainSessionId} that owns team "${team.name}"; this session is its fork and ${resumeUnavailableReason(ctx, team)}`);
@@ -307,15 +307,15 @@ async function liveLeadAnchorAgent(ctx, team, caller) {
     const resident = ctx.agents.get(team.captainSessionId);
     if (resident !== undefined)
         return resident;
-    return resumeLeadAnchor(ctx, team, caller);
+    return resumeLeadAnchor(ctx, team);
 }
 /** Why the recorded captain could not be resumed, for one bounded error message. */
 function resumeUnavailableReason(ctx, team) {
     const services = optionalTeamServices(ctx);
-    if (services.controller === undefined || services.registry === undefined) {
-        return 'this composition exposes no session controller to resume it, so add_member, member delivery and member drain are unavailable from the fork';
+    if (services.controller?.resolveAgent === undefined) {
+        return 'this composition exposes no session controller resolve operation, so add_member, member delivery and member drain cannot attach the recorded captain from the fork';
     }
-    return `resuming it through the session controller failed (its workspace is "${team.name}"'s workspace)`;
+    return `attaching it through the session controller failed for team "${team.name}"`;
 }
 /** Public optional services used only to attach the recorded captain session. */
 function optionalTeamServices(ctx) {
@@ -332,30 +332,61 @@ function optionalTeamServices(ctx) {
     };
     return {
         controller: read('sessionController'),
-        registry: read('workspaceRegistry'),
     };
 }
 /**
- * Attach the team's recorded captain session in this process without sending a
- * prompt: the Harness controller's create-with-existing-id path resumes the
- * session and leaves every durable field (including `captainSessionId`)
- * untouched.
- * @returns the resumed Agent, or undefined when this composition cannot resume it.
+ * Attach one recorded ordinary Session in this process without sending a
+ * prompt. The Session Controller's `resolveAgent` resumes a non-blank Session
+ * under its existing id; `create` is not a resume API and may mint a different
+ * id. Hosts predating `resolveAgent` fall back to the Agent service's resume.
+ * @param ctx - the plugin context (injects `agents`).
+ * @param captainSessionId - the durable Session id that must become live.
+ * @returns the resumed Agent, or undefined when it cannot be attached.
  */
-async function resumeLeadAnchor(ctx, team, caller) {
-    const { controller, registry } = optionalTeamServices(ctx);
-    if (controller?.create === undefined || registry?.create === undefined)
-        return undefined;
-    const cwd = caller.session.header.cwd ?? process.cwd();
+export async function resolveRecordedSession(ctx, captainSessionId) {
+    const { controller } = optionalTeamServices(ctx);
+    if (controller?.resolveAgent !== undefined) {
+        try {
+            const resolved = await controller.resolveAgent(captainSessionId);
+            if (resolved.agent !== undefined) {
+                if (resolved.agent.id !== captainSessionId) {
+                    ctx.logger.warn(`agent-teams: session controller attached ${resolved.agent.id} while resolving the recorded session ${captainSessionId}`);
+                    return undefined;
+                }
+                return resolved.agent;
+            }
+            ctx.logger.warn(`agent-teams: session controller did not attach the recorded session ${captainSessionId}: ${resolved.error?.message ?? 'no Agent returned'}`);
+            return undefined;
+        }
+        catch (error) {
+            ctx.logger.warn(`agent-teams: could not resolve the recorded session ${captainSessionId}: ${String(error)}`);
+            return undefined;
+        }
+    }
     try {
-        const workspace = await registry.create(cwd, cwd);
-        await controller.create({ sessionId: team.captainSessionId, workspaceId: workspace.id, agentPreset: 'standard' });
-        return ctx.agents.get(team.captainSessionId);
+        const handle = await ctx.agents.resume({ resumeSessionId: captainSessionId });
+        if (handle.agent.id !== captainSessionId) {
+            await handle.dispose();
+            ctx.logger.warn(`agent-teams: Agent resume attached ${handle.agent.id} instead of the recorded session ${captainSessionId}`);
+            return undefined;
+        }
+        ctx.effect(() => () => handle.dispose(), 'agent-teams: resumed captain session');
+        return handle.agent;
     }
     catch (error) {
-        ctx.logger.warn(`agent-teams: could not resume the recorded captain session ${team.captainSessionId}: ${String(error)}`);
+        ctx.logger.warn(`agent-teams: could not resume the recorded session ${captainSessionId}: ${String(error)}`);
         return undefined;
     }
+}
+/**
+ * Attach the team's recorded captain session in this process without sending a
+ * prompt.
+ * @param ctx - the plugin context (injects `agents`).
+ * @param team - the team whose recorded captain must become live.
+ * @returns the resumed Agent, or undefined when it cannot be attached.
+ */
+export async function resumeLeadAnchor(ctx, team) {
+    return resolveRecordedSession(ctx, team.captainSessionId);
 }
 async function stopTeamMemberActivations(ctx, captain, members, signal) {
     const memberIds = members.filter(member => member.id !== '').map(member => member.id);
@@ -414,7 +445,8 @@ export async function haltTeamWork(input) {
     // drain must run as that session when a fork requested the stop.
     const haltAnchor = input.captain.id === halted.captainSessionId
         ? input.captain
-        : input.ctx.agents.get(halted.captainSessionId);
+        : input.ctx.agents.get(halted.captainSessionId)
+            ?? await resumeLeadAnchor(input.ctx, { name: halted.teamName, captainSessionId: halted.captainSessionId });
     if (haltAnchor === undefined) {
         input.ctx.logger.warn(`agent-teams: captain session ${halted.captainSessionId} is not live; member activations of "${halted.teamName}" were not drained from this session`);
     }

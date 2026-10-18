@@ -10,7 +10,7 @@
  */
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { isTopLevelSession, teamLeadMatch } from '../lib/lineage.js'
+import { isTopLevelSession, leadIdentityOf, leadIdentityOfAsync, teamLeadMatch } from '../lib/lineage.js'
 
 /** Plain team record as `findTeamByCaptain`/`findTeamByParticipant` see it. */
 const team = members => ({ captainSessionId: 'session-captain', members })
@@ -74,4 +74,23 @@ test('only a top-level conversation may inherit lead identity', () => {
   assert.equal(isTopLevelSession({ header: { origin: 'subagent' } }), false)
   assert.equal(isTopLevelSession({ header: { delegationDepth: 1 } }), false)
   assert.equal(isTopLevelSession({ header: { origin: 'subagent', delegationDepth: 0 } }), false)
+})
+
+test('an unreadable parent hop is not cached as the final ancestry', async () => {
+  const session = {
+    id: 'session-fork',
+    header: { parentSession: 'session-mid', origin: 'user', delegationDepth: 0 },
+  }
+  let liveMid
+  const ctx = {
+    agents: { get: (id) => id === 'session-mid' ? liveMid : undefined },
+    get: (name) => name === 'sessionPersistence'
+      ? { stat: async () => { throw new Error('transient persistence failure') } }
+      : undefined,
+  }
+  assert.deepEqual((await leadIdentityOfAsync(ctx, session)).ancestry, ['session-mid'])
+  // A temporary unreadable hop must not make the synchronous path reuse the
+  // truncated chain forever.
+  liveMid = { id: 'session-mid', session: { header: { parentSession: 'session-captain' } } }
+  assert.deepEqual(leadIdentityOf(ctx, session).ancestry, ['session-mid', 'session-captain'])
 })

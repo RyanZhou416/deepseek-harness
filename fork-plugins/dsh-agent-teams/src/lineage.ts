@@ -78,26 +78,34 @@ export function isTopLevelSession(session: Session): boolean {
   return session.header.origin !== 'subagent' && (session.header.delegationDepth ?? 0) === 0
 }
 
+/** One durable parent hop: a missing parent is complete; an unreadable one is not. */
+type DurableParent =
+  | { readonly complete: true; readonly parent: string | undefined }
+  | { readonly complete: false; readonly parent: undefined }
+
 /** Durable parent of one session id: the live header, else the stored header. */
-async function durableParent(ctx: Context, id: string): Promise<string | undefined> {
+async function durableParent(ctx: Context, id: string): Promise<DurableParent> {
   const live = liveSession(ctx, id)
-  if (live !== undefined) return live.header.parentSession
+  if (live !== undefined) return { complete: true, parent: live.header.parentSession }
   const persistence = optionalService<SessionPersistenceView>(ctx, 'sessionPersistence')
+  if (persistence?.stat === undefined) return { complete: false, parent: undefined }
   try {
-    const snapshot = await persistence?.stat?.(id as SessionId)
+    const snapshot = await persistence.stat(id as SessionId)
     const parent: string | undefined = snapshot?.header?.parentSession
-    return parent
+    return { complete: true, parent }
   } catch {
-    // Unreadable stored metadata ends this chain; authorization then fails
-    // closed on the identity the caller itself provides.
-    return undefined
+    // An unreadable stored header is not evidence that the chain ended. The
+    // caller must keep the resolved prefix but must not cache it as final.
+    return { complete: false, parent: undefined }
   }
 }
 
 /**
  * Durable ancestry of one session, nearest first. The calling session's own
  * header supplies the first hop; later hops come from resident sessions or
- * stored headers, so a fork resolves through sessions that are not loaded.
+ * stored headers, so a fork resolves through sessions that are not loaded. A
+ * chain shortened by an unreadable header is returned but never cached, so a
+ * transient persistence failure does not strand the identity for the process.
  * @param ctx - the plugin context (injects `agents`).
  * @param session - the calling session.
  * @returns ancestor session ids, bounded by {@link LINEAGE_MAX_DEPTH}.
@@ -106,12 +114,19 @@ export async function resolveAncestry(ctx: Context, session: Session): Promise<r
   const ancestry: string[] = []
   const seen = new Set<string>([session.id])
   let parent: string | undefined = session.header.parentSession
+  let complete = true
   while (parent !== undefined && ancestry.length < LINEAGE_MAX_DEPTH && !seen.has(parent)) {
     seen.add(parent)
     ancestry.push(parent)
-    parent = await durableParent(ctx, parent)
+    const next = await durableParent(ctx, parent)
+    if (!next.complete) {
+      complete = false
+      break
+    }
+    parent = next.parent
   }
-  ancestryCache.set(session.id, ancestry)
+  if (parent !== undefined) complete = false
+  if (complete) ancestryCache.set(session.id, ancestry)
   return ancestry
 }
 

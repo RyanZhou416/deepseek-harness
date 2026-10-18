@@ -35,23 +35,27 @@ export function isTopLevelSession(session) {
 async function durableParent(ctx, id) {
     const live = liveSession(ctx, id);
     if (live !== undefined)
-        return live.header.parentSession;
+        return { complete: true, parent: live.header.parentSession };
     const persistence = optionalService(ctx, 'sessionPersistence');
+    if (persistence?.stat === undefined)
+        return { complete: false, parent: undefined };
     try {
-        const snapshot = await persistence?.stat?.(id);
+        const snapshot = await persistence.stat(id);
         const parent = snapshot?.header?.parentSession;
-        return parent;
+        return { complete: true, parent };
     }
     catch {
-        // Unreadable stored metadata ends this chain; authorization then fails
-        // closed on the identity the caller itself provides.
-        return undefined;
+        // An unreadable stored header is not evidence that the chain ended. The
+        // caller must keep the resolved prefix but must not cache it as final.
+        return { complete: false, parent: undefined };
     }
 }
 /**
  * Durable ancestry of one session, nearest first. The calling session's own
  * header supplies the first hop; later hops come from resident sessions or
- * stored headers, so a fork resolves through sessions that are not loaded.
+ * stored headers, so a fork resolves through sessions that are not loaded. A
+ * chain shortened by an unreadable header is returned but never cached, so a
+ * transient persistence failure does not strand the identity for the process.
  * @param ctx - the plugin context (injects `agents`).
  * @param session - the calling session.
  * @returns ancestor session ids, bounded by {@link LINEAGE_MAX_DEPTH}.
@@ -60,12 +64,21 @@ export async function resolveAncestry(ctx, session) {
     const ancestry = [];
     const seen = new Set([session.id]);
     let parent = session.header.parentSession;
+    let complete = true;
     while (parent !== undefined && ancestry.length < LINEAGE_MAX_DEPTH && !seen.has(parent)) {
         seen.add(parent);
         ancestry.push(parent);
-        parent = await durableParent(ctx, parent);
+        const next = await durableParent(ctx, parent);
+        if (!next.complete) {
+            complete = false;
+            break;
+        }
+        parent = next.parent;
     }
-    ancestryCache.set(session.id, ancestry);
+    if (parent !== undefined)
+        complete = false;
+    if (complete)
+        ancestryCache.set(session.id, ancestry);
     return ancestry;
 }
 /**

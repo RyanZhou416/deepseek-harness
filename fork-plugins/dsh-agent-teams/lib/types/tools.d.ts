@@ -10,6 +10,7 @@
  */
 import type { Context } from '@deepseek-ai/cordis';
 import type { Agent } from '@deepseek-ai/dsh-agent';
+import type { SessionId } from '@deepseek-ai/dsh-session';
 import { type MemberToolPolicy } from './tool-policies.ts';
 import type { ArtifactSnapshot } from './types.ts';
 import { type TeamState, type TeamTask } from './types.ts';
@@ -86,6 +87,24 @@ export interface AgentTeamsRuntime {
         teamId: string;
     }>;
 }
+/**
+ * Attach one recorded ordinary Session in this process without sending a
+ * prompt. The Session Controller's `resolveAgent` resumes a non-blank Session
+ * under its existing id; `create` is not a resume API and may mint a different
+ * id. Hosts predating `resolveAgent` fall back to the Agent service's resume.
+ * @param ctx - the plugin context (injects `agents`).
+ * @param captainSessionId - the durable Session id that must become live.
+ * @returns the resumed Agent, or undefined when it cannot be attached.
+ */
+export declare function resolveRecordedSession(ctx: Context, captainSessionId: SessionId): Promise<Agent | undefined>;
+/**
+ * Attach the team's recorded captain session in this process without sending a
+ * prompt.
+ * @param ctx - the plugin context (injects `agents`).
+ * @param team - the team whose recorded captain must become live.
+ * @returns the resumed Agent, or undefined when it cannot be attached.
+ */
+export declare function resumeLeadAnchor(ctx: Context, team: Pick<TeamState, 'captainSessionId' | 'name'>): Promise<Agent | undefined>;
 export declare function haltTeamWork(input: {
     ctx: Context;
     stateRoot: string;
