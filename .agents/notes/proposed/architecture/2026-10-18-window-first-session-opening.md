@@ -32,8 +32,8 @@ This removes the complete `observeSession` from the first opening. The expected 
 Whole-session values cannot be exact without either a full-log fold or a durable summary. The proposal therefore separates product latency from exact-stat latency:
 
 - an absent opening block is an explicit "not yet projected" state, not a claim that the window counts are whole-session values;
-- a single exact `session/projections` read is scheduled on demand when the statistics or Context surface is opened, or after the first frame on an idle task;
-- the result is merged into the same projection store with its watermark, and a later navigation cancels the pending read;
+- a single exact `session/projections` read is scheduled only by an explicit user interaction that opens the statistics dialog or the Context surface; mounting either surface, first paint, or an idle task must not trigger it;
+- the exact read replaces the absent state; the result is merged into the same projection store with its watermark, and a later navigation cancels the pending read;
 - the statistics UI must retain a visible loading/unavailable state instead of presenting window counts as exact. Only `sessionStats` has a window fallback; `tokenUsage`, `contextPressure`, and `contextBreakdown` currently have none and need explicit unavailable/loading presentation rather than fabricated values.
 
 The default path performs no full read. A user who never opens statistics never pays for it.
@@ -46,7 +46,7 @@ First opening and older-page loading are separate costs. The existing index buil
 
 Development runs in a clean clone at `tmp/window-first` (ignored by the repository, with its own `.git` and `node_modules`), on the `feat/window-first-opening` branch. The running Host keeps its current files and `node_modules`; no checkout, install, build, or test runs in the main worktree. All commands use the clone's own root, a private temporary `DSH_HOME`, and no listener on port 3080. The clone is created with `--no-hardlinks`; `vendor` and `node_modules` remain unshared.
 
-AgentTeams orchestration itself runs in the current Host: member Sessions are written under its `DSH_HOME`, and team state is written under the main checkout's ignored `.agent-teams`. That is orchestration state, not source or runtime mutation, but it is not invisible. Members are instructed to use absolute clone paths or `pnpm --dir <clone>`, to keep every edit under `tmp/window-first`, and to serialize build/test commands so eight workers do not collide in one clone's outputs. The clone is pushed as a feature branch. Integration into `master` waits for a deliberate Host-stop window; the running Host is never switched to the feature branch. The clone is removed only after the branch is merged and all paths are verified to be independent.
+AgentTeams orchestration itself runs in the current Host. The only permitted writes outside the clone are the orchestration artifacts of this team: newly created member Session records under the running Host's `DSH_HOME` and team state under the main checkout's ignored `.agent-teams`. No pre-existing user Session, profile, settings, credentials, source, vendor, or `node_modules` may be modified. Members are instructed to use absolute clone paths or `pnpm --dir <clone>`, to keep every source/doc edit under `tmp/window-first`, and to serialize build/test commands so eight workers do not collide in one clone's outputs. The clone is pushed as a feature branch. Integration into `master` waits for a deliberate Host-stop window; the running Host is never switched to the feature branch. The clone is removed only after the branch is merged and all paths are verified to be independent.
 
 ## Stage plan
 

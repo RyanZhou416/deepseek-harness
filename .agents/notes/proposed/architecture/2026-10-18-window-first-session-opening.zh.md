@@ -32,8 +32,8 @@ Status: proposed
 全 Session 数值如果没有完整日志 fold 或持久摘要，就不可能精确。因此本提案把产品延迟与精确统计延迟分开：
 
 - 缺失的 opening block 是明确的“尚未投影”状态，而不是声称窗口计数就是全会话数值；
-- 在统计或 Context 界面打开时按需调度一次精确 `session/projections` 读取，或在首帧后空闲时执行；
-- 结果带 watermark 合并进同一个 projection store，后续导航取消待处理读取；
+- 只在用户显式打开统计弹窗或 Context 界面时调度一次精确 `session/projections` 读取；界面挂载、首帧或空闲任务都不得触发；
+- 精确读取替换不可用状态；结果带 watermark 合并进同一个 projection store，后续导航取消待处理读取；
 - 统计 UI 必须保留可见的 loading/unavailable 状态，不能把窗口计数当作精确值。只有 `sessionStats` 有窗口回退；`tokenUsage`、`contextPressure` 与 `contextBreakdown` 当前没有，需要显式的不可用/加载展示，而不是伪造值。
 
 默认路径不执行完整读取；从不打开统计的用户不会付出这份成本。
@@ -46,7 +46,7 @@ Status: proposed
 
 开发在 `tmp/window-first` 的干净 clone 中进行（被仓库忽略，拥有自己的 `.git` 和 `node_modules`），分支为 `feat/window-first-opening`。运行中的 Host 保留当前文件和 `node_modules`；主工作树中不执行 checkout、install、build 或 test。所有命令使用 clone 自己的 root、私有临时 `DSH_HOME`，且不监听 3080 端口。Clone 用 `--no-hardlinks` 创建；`vendor` 与 `node_modules` 保持不共享。
 
-AgentTeams 编排本身仍运行在当前 Host：member Session 写入其 `DSH_HOME`，team state 写入主 checkout 的 ignored `.agent-teams`。这是编排状态，不是源码或运行时修改，但并非不可见。成员必须使用 clone 的绝对路径或 `pnpm --dir <clone>`，所有编辑限制在 `tmp/window-first`，并串行执行 build/test，避免 8 个 worker 在同一 clone 的输出目录冲突。Clone 会作为 feature branch 推送。合入 `master` 等待专门的 Host 停止窗口；运行中的 Host 永远不会切到 feature branch。只有在分支合并且所有路径确认独立后才删除 clone。
+AgentTeams 编排本身运行在当前 Host。clone 之外唯一允许的写入是本团队的编排产物：运行中 Host 的 `DSH_HOME` 下新建的 member Session 记录，以及主 checkout ignored `.agent-teams` 下的 team state。不得修改任何既有用户 Session、profile、settings、credentials、源码、vendor 或 `node_modules`。成员必须使用 clone 的绝对路径或 `pnpm --dir <clone>`，所有源码/文档编辑限制在 `tmp/window-first`，并串行执行 build/test，避免 8 个 worker 在同一 clone 的输出目录冲突。Clone 会作为 feature branch 推送。合入 `master` 等待专门的 Host 停止窗口；运行中的 Host 永远不会切到 feature branch。只有在分支合并且所有路径确认独立后才删除 clone。
 
 ## Stage plan
 
