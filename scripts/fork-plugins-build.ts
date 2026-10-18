@@ -8,6 +8,11 @@
  * `link:` dependency), and rewrites profile configuration only after backing
  * up `package.json` and `cordis.patch.yml`.
  *
+ * A clean checkout needs no plugin-local install or build. The script installs
+ * the pinned build-time runtime packages under `.build/fork-plugins/build-deps/`
+ * and emits the subscriptions transport files from source, so staged artifacts
+ * always match the checkout.
+ *
  * Safety: profile mutation while a Host is serving that profile is unsafe, so
  * a listener on the Host port refuses the run unless `--allow-running-host`
  * is passed explicitly. The script touches only profile package metadata and
@@ -34,7 +39,7 @@ const PROFILE_NAME = 'web'
 const HOST_PORT = 3080
 const SCHEMA_VERSION = 1
 /** Bump when the staging recipe changes in a way the source hash does not capture. */
-const SCRIPT_VERSION = 2
+const SCRIPT_VERSION = 3
 
 /** Plugin entries this script installs, in installation order. */
 const PLUGINS = [
@@ -73,6 +78,26 @@ const PLUGINS = [
 ] as const
 
 type PluginId = (typeof PLUGINS)[number]['id']
+
+/** One transport module the staged subscriptions package emits beside `lib/index.js`. */
+export interface SubscriptionsTransportModule {
+  /** Source file relative to the subscriptions package. */
+  readonly source: string
+  /** Emitted file relative to the staged package root. */
+  readonly output: string
+}
+
+/**
+ * Transport modules the subscriptions bundle loads as separate runtime files.
+ *
+ * The child entry and its frame codec must sit beside `lib/index.js`. Staging
+ * emits them from these sources with the repository TypeScript compiler, so an
+ * edited transport module can never be masked by a stale plugin-local build.
+ */
+export const SUBSCRIPTIONS_TRANSPORT_MODULES: readonly SubscriptionsTransportModule[] = [
+  { source: 'src/transport/bun-child.ts', output: 'lib/bun-child.js' },
+  { source: 'src/transport/frames.ts', output: 'lib/frames.js' },
+]
 
 /** Options accepted on the command line. */
 export interface BuildOptions {
@@ -259,13 +284,21 @@ function cliEntry(): string {
 /** Versions of the toolchain and harness cohort that shape the staged output. */
 async function toolchainVersions(): Promise<string> {
   const tsdown = await readJson<{ version?: string }>(join(REPOSITORY_ROOT, 'node_modules', 'tsdown', 'package.json'))
+  const typescript = await readJson<{ version?: string }>(join(REPOSITORY_ROOT, 'node_modules', 'typescript', 'package.json'))
   const cli = await readJson<{ version?: string }>(join(REPOSITORY_ROOT, 'apps', 'cli', 'package.json'))
-  return `${tsdown.version ?? 'unknown'}\n${cli.version ?? 'unknown'}`
+  return `${tsdown.version ?? 'unknown'}\n${typescript.version ?? 'unknown'}\n${cli.version ?? 'unknown'}`
 }
 
 function rootTsdown(): string {
   const entry = join(REPOSITORY_ROOT, 'node_modules', 'tsdown', 'dist', 'run.mjs')
   if (!existsSync(entry)) fail('tsdown is missing from node_modules; run the ordinary root install and build first')
+  return entry
+}
+
+/** The repository TypeScript compiler that emits the transport files. */
+function rootTypeScript(): string {
+  const entry = join(REPOSITORY_ROOT, 'node_modules', 'typescript', 'bin', 'tsc')
+  if (!existsSync(entry)) fail('typescript is missing from node_modules; run the ordinary root install first')
   return entry
 }
 
@@ -315,10 +348,22 @@ async function sourceHash(plugin: (typeof PLUGINS)[number]): Promise<string> {
   return createHash('sha256').update(lines.join('\n')).digest('hex')
 }
 
+/**
+ * The exact version a plugin lockfile selected for one dependency.
+ * @param lockfile - plugin `pnpm-lock.yaml` contents.
+ * @param packageName - dependency name to find.
+ * @param fallback - value used when the lockfile records no version.
+ * @returns the exact version or the fallback.
+ */
+export function lockedDependencyVersion(lockfile: string, packageName: string, fallback: string): string {
+  const escaped = packageName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  const match = new RegExp(`^\\s+'?${escaped}'?:\\s*\\n\\s+specifier: [^\\n]+\\n\\s+version: ([^\\s]+)`, 'm').exec(lockfile)
+  return match?.[1] ?? fallback
+}
+
 /** The exact `undici` version the plugin lockfile selected, with the declaration range as a fallback. */
 export function lockedUndiciVersion(lockfile: string, fallback: string): string {
-  const match = /^\s+undici:\s*\n\s+specifier: [^\n]+\n\s+version: ([^\s]+)/m.exec(lockfile)
-  return match?.[1] ?? fallback
+  return lockedDependencyVersion(lockfile, 'undici', fallback)
 }
 
 /** Read the source manifest of one plugin. */
@@ -498,14 +543,17 @@ interface BuildDependencies {
   readonly undiciEntry: string
   readonly wire: WorkspacePackage
   readonly undici: WorkspacePackage
+  readonly bunRuntime: BunRuntimeArtifact
 }
 
-/** Install the two runtime packages that the subscriptions build inlines. */
+/** Install the build-time runtime packages that staging inlines or copies into the staged package. */
 async function ensureBuildDependencies(): Promise<BuildDependencies> {
+  const bunRuntimeTarget = bunPlatformRuntime(process.platform, process.arch)
   const wireTarball = join(REPOSITORY_ROOT, 'fork-plugins', 'releases', 'tormentalabs-claude-code-wire-compat-0.7.2-dsh14.tgz')
   if (!existsSync(wireTarball)) fail(`missing inlined dependency artifact ${wireTarball}`)
   const lockfile = await readFile(join(PLUGINS[0].directory, 'pnpm-lock.yaml'), 'utf8')
-  const undiciVersion = lockedUndiciVersion(lockfile, '^7.0.0')
+  const undiciVersion = lockedDependencyVersion(lockfile, 'undici', '^7.0.0')
+  const bunVersion = lockedDependencyVersion(lockfile, bunRuntimeTarget.packageName, '^1.4.0')
   const dependencyManifest = {
     name: 'dsh-fork-plugin-build-deps',
     private: true,
@@ -513,6 +561,7 @@ async function ensureBuildDependencies(): Promise<BuildDependencies> {
     dependencies: {
       '@tormentalabs/claude-code-wire-compat': `file:${wireTarball.replaceAll('\\', '/')}`,
       undici: undiciVersion,
+      [bunRuntimeTarget.packageName]: bunVersion,
     },
   }
   await mkdir(DEPENDENCY_ROOT, { recursive: true })
@@ -524,11 +573,14 @@ async function ensureBuildDependencies(): Promise<BuildDependencies> {
 
   const wireDirectory = join(DEPENDENCY_ROOT, 'node_modules', '@tormentalabs', 'claude-code-wire-compat')
   const undiciDirectory = join(DEPENDENCY_ROOT, 'node_modules', 'undici')
+  const bunDirectory = join(DEPENDENCY_ROOT, 'node_modules', ...bunRuntimeTarget.packageName.split('/'))
   const installed = !manifestChanged
     && existsSync(join(wireDirectory, 'package.json'))
     && existsSync(join(undiciDirectory, 'package.json'))
+    && existsSync(join(bunDirectory, 'package.json'))
+    && existsSync(join(bunDirectory, bunRuntimeTarget.executable))
   if (!installed) {
-    log('installing the build-time runtime packages that staging inlines')
+    log('installing the build-time runtime packages that staging inlines and copies')
     const pnpm = pnpmCommand()
     run(pnpm.command, [
       ...pnpm.prefix,
@@ -542,13 +594,21 @@ async function ensureBuildDependencies(): Promise<BuildDependencies> {
   }
   const wire = await readJson<WorkspacePackage['manifest']>(join(wireDirectory, 'package.json'))
   const undici = await readJson<WorkspacePackage['manifest']>(join(undiciDirectory, 'package.json'))
+  const bun = await readJson<PluginManifest>(join(bunDirectory, 'package.json'))
   if (wire.name !== '@tormentalabs/claude-code-wire-compat') fail('build dependency resolution did not install the pinned wire-compat package')
   if (undici.name !== 'undici') fail('build dependency resolution did not install undici')
+  if (bun.name !== bunRuntimeTarget.packageName) fail(`build dependency resolution did not install ${bunRuntimeTarget.packageName}`)
   return {
     wireEntry: join(wireDirectory, 'dist', 'index.js'),
     undiciEntry: join(undiciDirectory, 'index.js'),
     wire: { name: wire.name, directory: wireDirectory, manifest: wire },
     undici: { name: undici.name, directory: undiciDirectory, manifest: undici },
+    bunRuntime: {
+      packageName: bunRuntimeTarget.packageName,
+      version: bun.version ?? bunVersion,
+      directory: bunDirectory,
+      executable: bunRuntimeTarget.executable,
+    },
   }
 }
 
@@ -602,6 +662,38 @@ async function subscriptionsConfig(stagingDirectory: string, wireEntry: string, 
   return path
 }
 
+/**
+ * Emit the transport child and its frame codec from source into the staged package.
+ *
+ * The emit mirrors the plugin's own `tsc` node-half output without needing the
+ * plugin's development dependencies, so the staged transport always matches the
+ * sources that produced the source key.
+ * @param pluginDirectory - subscriptions source package.
+ * @param stagingDirectory - staged package root.
+ */
+export function buildSubscriptionsTransport(pluginDirectory: string, stagingDirectory: string): void {
+  const sourceDirectory = join(pluginDirectory, 'src', 'transport')
+  const sources = SUBSCRIPTIONS_TRANSPORT_MODULES.map(module => join(pluginDirectory, module.source))
+  for (const source of sources) {
+    if (!existsSync(source)) fail(`subscriptions is missing its transport source ${source}`)
+  }
+  log('building the subscriptions transport from source')
+  run(process.execPath, [
+    rootTypeScript(),
+    // The repository TypeScript 6 rejects explicit files while a tsconfig is in
+    // scope, and this transpiles only: the plugin's development types are absent.
+    '--ignoreConfig',
+    '--noCheck',
+    '--skipLibCheck',
+    '--target', 'es2024',
+    '--module', 'nodenext',
+    '--moduleResolution', 'nodenext',
+    '--outDir', join(stagingDirectory, 'lib'),
+    '--rootDir', sourceDirectory,
+    ...sources,
+  ], { cwd: pluginDirectory })
+}
+
 /** Write the generated aether-shell tsdown config. */
 async function aetherConfig(stagingDirectory: string): Promise<string> {
   const path = join(CONFIG_ROOT, 'aether-shell.mjs')
@@ -641,30 +733,84 @@ const BUN_PLATFORM_PACKAGES: Readonly<Record<string, string>> = {
   'linux-arm64': '@oven/bun-linux-aarch64',
 }
 
+/** A pinned Bun platform package staged beside the subscriptions bundle. */
+export interface BunRuntimeArtifact {
+  /** Package name, for example `@oven/bun-windows-x64`. */
+  readonly packageName: string
+  /** Installed package version. */
+  readonly version: string
+  /** Installed package directory in the staging build dependencies. */
+  readonly directory: string
+  /** Executable path inside the package directory. */
+  readonly executable: string
+}
+
 /**
- * Stage the files the bundled Claude transport spawns beside `lib/index.js`.
+ * Resolve the pinned Bun package and executable for one platform.
+ * @param platform - Node platform name, for example `win32`.
+ * @param arch - Node architecture name, for example `x64`.
+ * @returns the package name and its executable path inside the package.
+ */
+export function bunPlatformRuntime(platform: string, arch: string): { packageName: string; executable: string } {
+  const packageName = BUN_PLATFORM_PACKAGES[`${platform}-${arch}`]
+  if (packageName === undefined) fail(`the pinned Bun transport has no runtime package for ${platform}-${arch}`)
+  return { packageName, executable: platform === 'win32' ? 'bin/bun.exe' : 'bin/bun' }
+}
+
+/**
+ * Files the staged subscriptions package needs beyond its two bundle outputs.
+ *
+ * The transport child, its frame codec, and the platform runtime are separate
+ * artifacts; a staged package missing any of them starts no bridge and reports
+ * an ambiguous transport failure instead of a missing build product.
+ * @param platform - Node platform name; defaults to the running platform.
+ * @param arch - Node architecture name; defaults to the running architecture.
+ * @returns staged files relative to the package root.
+ */
+export function subscriptionsRuntimeArtifacts(platform: string = process.platform, arch: string = process.arch): string[] {
+  const runtime = bunPlatformRuntime(platform, arch)
+  return [
+    ...SUBSCRIPTIONS_TRANSPORT_MODULES.map(module => module.output),
+    join('node_modules', ...runtime.packageName.split('/'), runtime.executable),
+  ]
+}
+
+/** Files staging and the installed profile must expose for one plugin. */
+function pluginArtifacts(plugin: (typeof PLUGINS)[number]): string[] {
+  return plugin.id === 'subscriptions'
+    ? [...plugin.outputs, ...subscriptionsRuntimeArtifacts()]
+    : [...plugin.outputs]
+}
+
+/**
+ * Copy the pinned Bun platform package into a staged package's `node_modules`.
+ * @param runtime - installed platform runtime selected by the build dependencies.
+ * @param stagingDirectory - staged package root.
+ */
+export async function stageBunRuntime(runtime: BunRuntimeArtifact, stagingDirectory: string): Promise<void> {
+  if (!existsSync(join(runtime.directory, runtime.executable))) {
+    fail(`the installed ${runtime.packageName} has no ${runtime.executable}`)
+  }
+  const destination = join(stagingDirectory, 'node_modules', ...runtime.packageName.split('/'))
+  await cp(runtime.directory, destination, { recursive: true })
+  if (!existsSync(join(destination, runtime.executable))) fail(`staging did not copy ${runtime.packageName}`)
+}
+
+/**
+ * Verify the staged transport files and copy the platform runtime beside them.
  *
  * The transport bundle keeps the child entry and its frame codec as separate
  * runtime files, so a staged package without them starts no bridge and every
  * Messages request becomes an ambiguous transport failure.
- * @param plugin - the subscriptions source package.
  * @param stagingDirectory - staged package root.
+ * @param runtime - pinned Bun platform package to copy.
  */
-async function stageSubscriptionsTransport(
-  plugin: (typeof PLUGINS)[number],
-  stagingDirectory: string,
-): Promise<void> {
-  for (const entry of ['bun-child.js', 'frames.js']) {
-    const source = join(plugin.directory, 'lib', 'transport', entry)
-    if (!existsSync(source)) fail(`subscriptions is missing its transport artifact ${entry}; build the plugin before staging it`)
-    await copyFile(source, join(stagingDirectory, 'lib', entry))
+async function stageSubscriptionsTransport(stagingDirectory: string, runtime: BunRuntimeArtifact): Promise<void> {
+  for (const module of SUBSCRIPTIONS_TRANSPORT_MODULES) {
+    const staged = join(stagingDirectory, module.output)
+    if (!existsSync(staged) || statSync(staged).size === 0) fail(`subscriptions staging did not produce ${module.output}`)
   }
-  const platform = `${process.platform}-${process.arch}`
-  const packageName = BUN_PLATFORM_PACKAGES[platform]
-  if (packageName === undefined) fail(`the pinned Bun transport has no runtime package for ${platform}`)
-  const source = join(plugin.directory, 'node_modules', ...packageName.split('/'))
-  if (!existsSync(source)) fail(`subscriptions is missing its pinned Bun runtime ${packageName}; run its dependency install before staging it`)
-  await cp(source, join(stagingDirectory, 'node_modules', ...packageName.split('/')), { recursive: true })
+  await stageBunRuntime(runtime, stagingDirectory)
 }
 
 /** Stage the plugin package files and its inlined-license notices. */
@@ -686,7 +832,7 @@ async function stagePackage(
     await copyIfPresent(join(dependencies.wire.directory, 'LICENSE'), join(notices, 'claude-code-wire-compat', 'LICENSE'))
     await copyIfPresent(join(dependencies.wire.directory, 'NOTICE'), join(notices, 'claude-code-wire-compat', 'NOTICE'))
     await copyIfPresent(join(dependencies.undici.directory, 'LICENSE'), join(notices, 'undici', 'LICENSE'))
-    await stageSubscriptionsTransport(plugin, stagingDirectory)
+    await stageSubscriptionsTransport(stagingDirectory, dependencies.bunRuntime)
   }
 }
 
@@ -722,12 +868,13 @@ async function buildPlugin(
       : await aetherConfig(stagingDirectory)
     log(`building ${plugin.name} from source`)
     run(process.execPath, [rootTsdown(), '--config', config], { cwd: REPOSITORY_ROOT })
+    if (plugin.id === 'subscriptions') buildSubscriptionsTransport(plugin.directory, stagingDirectory)
   } else {
     log(`staging prebuilt ${plugin.name}`)
   }
   await stagePackage(plugin, stagingDirectory, dependencies)
   if (plugin.mode === 'copy') await stageCopiedFiles(plugin, stagingDirectory)
-  for (const output of plugin.outputs) {
+  for (const output of pluginArtifacts(plugin)) {
     const path = join(stagingDirectory, output)
     if (!existsSync(path) || statSync(path).size === 0) fail(`${plugin.name} staging did not produce ${output}`)
   }
@@ -744,7 +891,7 @@ async function stagingIsCurrent(
   if (force) return false
   const recorded = state.plugins[plugin.id]
   if (recorded === undefined || recorded.key !== key || recorded.version !== (await sourceManifest(plugin)).version) return false
-  for (const file of ['package.json', 'cordis.patch.yml', ...plugin.outputs]) {
+  for (const file of ['package.json', 'cordis.patch.yml', ...pluginArtifacts(plugin)]) {
     if (!existsSync(join(stagingDirectory, file))) return false
   }
   const staged = await readJson<PluginManifest>(join(stagingDirectory, 'package.json'))
@@ -781,7 +928,7 @@ async function profileProblem(plugin: StagedPlugin, profileDirectory: string): P
   if (!samePath(recordedPath, plugin.directory)) return `the profile link for ${plugin.definition.name} points at ${recordedPath}, not ${plugin.directory}`
   const installed = join(profileDirectory, 'node_modules', plugin.definition.name)
   if (!existsSync(join(installed, 'package.json'))) return `the profile has no installed node_modules entry for ${plugin.definition.name}`
-  for (const output of plugin.definition.outputs) {
+  for (const output of pluginArtifacts(plugin.definition)) {
     if (!existsSync(join(installed, output))) return `${installed} does not expose ${output}`
   }
   if (!(manifest.dsh?.profile?.bundles ?? []).includes(plugin.definition.name)) {
@@ -838,6 +985,7 @@ export async function main(options: BuildOptions): Promise<void> {
     if (plugin.id === 'subscriptions') {
       keyParts.push(await hashFile(join(REPOSITORY_ROOT, 'fork-plugins', 'releases', 'tormentalabs-claude-code-wire-compat-0.7.2-dsh14.tgz')))
       keyParts.push(dependencies.wire.manifest.version ?? '', dependencies.undici.manifest.version ?? '')
+      keyParts.push(dependencies.bunRuntime.packageName, dependencies.bunRuntime.version)
     }
     const key = createHash('sha256').update(keyParts.join('\n')).digest('hex')
     const current = await stagingIsCurrent(plugin, stagingDirectory, state, key, options.forceRebuild)
