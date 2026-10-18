@@ -4,7 +4,7 @@
  * fiber-teardown removal (HMR safety) against the real InputTriggerService, then
  * the source behavior contract driven directly on the captured source with
  * real ClientSessionContext projections — sessionId addressing, the
- * session-keyed catalog cache (single-flight per key, scope-birth warm
+ * session-keyed catalog cache (single-flight per key, warm-hook
  * prewarm, plugin-manager/changed and connection/reset clears), shared fuzzy
  * name ranking, RPC-failure
  * rejection, pick → plain-text outcome (the plain-text-reference decision:
@@ -336,7 +336,7 @@ describe('catalog cache', () => {
     expect(payloads).toHaveLength(2)
   })
 
-  it('the scope-birth warm prewarms the session key fire-and-forget', async () => {
+  it('the warm hook prewarms the session key fire-and-forget', async () => {
     const { list, payloads } = countingList()
     const { source } = await bench(list)
     source.warm!(proj('s1'))

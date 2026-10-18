@@ -31,6 +31,8 @@ Use `ctx.sessionQuery` from application code when you need to read or search ses
 
 | Operation | What you get |
 |---|---|
+| `observeSession(id, options?)` | One exact live-preferred immutable cut with a caller-owned lease; cold reads retain a prepared Session until disposal |
+| `observeSessionMetadata(id, options?)` | The header plus log-free projection hints: a live Session's current cut, or a stored Session's retained checkpoint rows for the requested keys; never opens the stored log |
 | `listSessions()` | Every logical session, newest first, with `live` and `persisted` availability flags and optional `formatStatus`; an explicit `excludeSessionIds` set skips those ids before any persistence read (the Host uses it for archived Sessions), and `excludeSubagentSessions` omits subagent-origin Sessions (the Host's default list does, because subagent rows are reached through their parent's catalog) |
 | `readSession(id)` | The complete replay-validated raw event log, without making the session live |
 | `readWindow(id, request?)` | One bounded stored-history window plus its complete checkpoint projection baseline when available, or `undefined` when persistence or the window capability is absent |
@@ -113,6 +115,8 @@ The decision history lives in the [unified service decision](../../../.agents/no
 
 `observeSession` builds point observations without a listing preflight. A live observation fixes its cut as the current log length and materializes `events` on first read, so header-, cursor-, or projection-only consumers never copy the log; the log only appends, so a late first read still yields exactly that prefix. The cold path stats the stored session first and consults its own cache keyed by the persistence instance and the `stat` revision: an unchanged revision reuses the restored unpublished Session without re-reading the log; a changed revision, or a replaced persistence instance, reloads through the handle seam and replaces the entry. The cache retains at most `preparedSessionCacheSize` unpinned entries whose reported physical artifact size does not exceed `preparedSessionCacheMaxArtifactBytes`; backends without a size report use the entry count alone. Active observation leases keep their exact cuts until release, and a Session becoming live removes its cached cold entry. Physical size limits reuse rather than decoded heap bytes; compressed logs can occupy more memory while actively observed.
 
+`observeSessionMetadata` is the log-free alternative for consumers that need only the header and a few projection values on a cold Session. A stored Session costs one persistence `stat` and, when a projection cache is mounted, a zero-I/O checkpoint view of the requested keys; it never opens the stored log and never retains a prepared Session. The returned values are as stale as the checkpoint row and absent when that row was dropped or belongs to a different lifecycle, so a consumer must fall back per key. A live Session serves its exact current cut, so callers that only need metadata behave identically whether the Session is attached or cold.
+
 ### Reads and traces
 
 `readSession` replays the log through `Session.create` to reuse resume's validation. `readSurface`, `listEvents`, and `traceEvent` share one `foldSurface` pass that classifies events as `current`, `shadowed`, or `log-only` and validates zero-based contiguous seqs, surface-marker eligibility, and replacement or citation integrity; any violation fails with `SESSION_QUERY_INVALID_SURFACE`. Traces are one-shot: session lineage reads the corpus once and walks parents and descendant trees deterministically, and event traces follow positional replacers to the final node while keeping cited-source links non-transitive.
@@ -154,6 +158,7 @@ These limits define when this package is a poor fit or needs special operational
 - **No provider coordinator or fallback** — the service is abstract over search, so a composition must mount a concrete backend; there is no search-provider registry or fallback implementation.
 - **Exact reads replay whole logs** — `readSession`, `readSurface`, `filterEvents`, and event traces load and validate the complete logical log, so very large histories pay full inspection per call; `listSessions` stays lightweight.
 - **Window reads are validated slices, not exact observations** — `readWindow` returns boundedly read rows with a complete checkpoint baseline or none, and no complete-log replay; a follow opener may serve those rows without an exact cut, an attached baseline may trail the window cursor, and neither replaces `readSession` validation or an exact `observeSession` cut.
+- **Metadata reads are checkpoint hints, not exact values** — `observeSessionMetadata` never refolds a stored log; a dropped checkpoint row, an unrequested key, or a lifecycle mismatch leaves the value absent, so a consumer must fall back per key.
 - **Literal text scan, not full-text search** — the `text` filter scans extracted documents with a regular expression and does not rank; ranked search requires the mounted backend.
 
 <a id="dev-note"></a>

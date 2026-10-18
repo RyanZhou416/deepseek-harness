@@ -851,3 +851,134 @@ describe('SessionObservationReader cold projections', () => {
     await ctx.fiber.dispose()
   })
 })
+
+describe('SessionObservationReader metadata path', () => {
+  it('reads a cold header and checkpoint values without opening the log', async () => {
+    const ctx = await readerContext()
+    const meta = header('metadata-cold')
+    const store = new Map([[meta.id, { header: meta, events: [messageEvent(0, 'cold')], revision: 'r1' }]])
+    const counters = { stat: 0, open: 0, read: 0 }
+    ctx.provide('sessionPersistence', stubPersistence(store, counters))
+    const checkpoint = { asOfSeq: 0, values: { workingDirectory: '/project' } }
+    const cachedSnapshot = vi.fn(() => checkpoint)
+    ctx.provide('sessionProjectionCache', { cachedSnapshot } as never)
+
+    const observed = await new SessionObservationReader(ctx).metadata(meta.id, {
+      projectionKeys: ['workingDirectory'],
+    })
+
+    expect(observed.header).toEqual(meta)
+    expect(observed.projections).toBe(checkpoint)
+    expect(counters).toEqual({ stat: 1, open: 0, read: 0 })
+    expect(cachedSnapshot).toHaveBeenCalledWith(meta, ['workingDirectory'])
+    await ctx.fiber.dispose()
+  })
+
+  it('serves no projections when no checkpoint row is retained', async () => {
+    const ctx = await readerContext()
+    const meta = header('metadata-no-cache')
+    const store = new Map([[meta.id, { header: meta, events: [], revision: 'r1' }]])
+    const counters = { stat: 0, open: 0, read: 0 }
+    ctx.provide('sessionPersistence', stubPersistence(store, counters))
+
+    const observed = await new SessionObservationReader(ctx).metadata(meta.id)
+
+    expect(observed.header).toEqual(meta)
+    expect(observed.projections).toBeUndefined()
+    expect(counters).toEqual({ stat: 1, open: 0, read: 0 })
+    await ctx.fiber.dispose()
+  })
+
+  it('serves a live Session projection cut without persistence', async () => {
+    const ctx = await readerContext()
+    await ctx.plugin(SessionProjectionRegistry)
+    const session = ctx.sessions.create(SessionId('metadata-live'))
+    const reader = new SessionObservationReader(ctx)
+
+    const observed = await reader.metadata(session.id)
+    const retained = await reader.metadata(session.id, { projectionKeys: [] })
+
+    expect(observed.header).toBe(session.header)
+    expect(observed.projections).toBeDefined()
+    expect(retained.projections).toEqual({ asOfSeq: -1, values: {} })
+    await ctx.fiber.dispose()
+  })
+
+  it('serves a live header without projections when no registry is mounted', async () => {
+    const ctx = await readerContext()
+    const session = ctx.sessions.create(SessionId('metadata-live-plain'))
+
+    const observed = await new SessionObservationReader(ctx).metadata(session.id)
+
+    expect(observed.header).toBe(session.header)
+    expect(observed.projections).toBeUndefined()
+    await ctx.fiber.dispose()
+  })
+
+  it('prefers a live Session that attaches while the metadata is stated', async () => {
+    const ctx = await readerContext()
+    const meta = header('metadata-attached-during-stat')
+    const store = new Map([[meta.id, { header: meta, events: [], revision: 'r1' }]])
+    const counters = { stat: 0, open: 0, read: 0 }
+    ctx.provide('sessionPersistence', stubPersistence(store, counters, {
+      onStat: () => {
+        ctx.sessions.create(meta.id, {
+          meta: { createdAt: meta.createdAt, ...meta.cwd === undefined ? {} : { cwd: meta.cwd } },
+        })
+      },
+    }))
+    const cachedSnapshot = vi.fn()
+    ctx.provide('sessionProjectionCache', { cachedSnapshot } as never)
+
+    const observed = await new SessionObservationReader(ctx).metadata(meta.id)
+
+    expect(observed.header.id).toBe(meta.id)
+    expect(cachedSnapshot).not.toHaveBeenCalled()
+    expect(counters).toEqual({ stat: 1, open: 0, read: 0 })
+    await ctx.fiber.dispose()
+  })
+
+  it('reports a missing Session when no persistence is mounted', async () => {
+    const ctx = await readerContext()
+    await expect(new SessionObservationReader(ctx).metadata(SessionId('absent'))).rejects.toMatchObject({
+      code: 'SESSION_QUERY_SESSION_NOT_FOUND',
+    })
+    await ctx.fiber.dispose()
+  })
+
+  it('maps a stat failure and pre-abort cancellation', async () => {
+    const ctx = await readerContext()
+    const meta = header('metadata-failures')
+    const store = new Map([[meta.id, { header: meta, events: [], revision: 'r1' }]])
+    const counters = { stat: 0, open: 0, read: 0 }
+    const hooks: StubHooks = { statFailure: new Error('disk detached') }
+    ctx.provide('sessionPersistence', stubPersistence(store, counters, hooks))
+    const reader = new SessionObservationReader(ctx)
+
+    await expect(reader.metadata(meta.id)).rejects.toMatchObject({
+      code: 'SESSION_QUERY_PERSISTENCE_FAILED',
+      message: expect.stringContaining('disk detached') as string,
+    })
+
+    const preAborted = new AbortController()
+    preAborted.abort(new Error('before start'))
+    await expect(reader.metadata(meta.id, { signal: preAborted.signal })).rejects.toMatchObject({
+      code: 'SESSION_QUERY_ABORTED',
+    })
+    expect(counters.stat).toBe(1)
+    await ctx.fiber.dispose()
+  })
+
+  it('wraps a live projection failure as a corrupt-session failure', async () => {
+    const ctx = await readerContext()
+    await ctx.plugin(SessionProjectionRegistry)
+    const session = ctx.sessions.create(SessionId('metadata-live-projection-failure'))
+    vi.spyOn(ctx.sessionProjections, 'snapshot').mockImplementation(() => { throw new Error('projection failed') })
+
+    await expect(new SessionObservationReader(ctx).metadata(session.id)).rejects.toMatchObject({
+      code: 'SESSION_QUERY_CORRUPT_SESSION',
+      message: `failed to project session "${session.id}": projection failed`,
+    })
+    await ctx.fiber.dispose()
+  })
+})

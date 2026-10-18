@@ -47,7 +47,8 @@ export class InputTriggerService extends Service implements InputTriggerServiceC
 
   /**
    * Register one trigger source. Live session controllers are notified so a
-   * source arriving after scope birth still warms and joins the lexicon.
+   * source arriving after scope birth joins the lexicon and, once the
+   * controller has seen its first user intent, warms like the rest.
    * @param src - the source; (trigger, name) must be unique — duplicates throw.
    * @returns the disposer (callers wrap registration in ctx.effect). Disposal
    * while a controller shows the source's menu group drops that group.
@@ -78,9 +79,10 @@ export class InputTriggerService extends Service implements InputTriggerServiceC
 
   /**
    * Resolve the per-session controller for one session scope (lazy; the
-   * scope disposer removes and disposes it). Construction warms the source
-   * roster once — sessions are always agent-backed, so scope birth is the
-   * single prewarm moment.
+   * scope disposer removes and disposes it). Construction only wires the
+   * lexicon channels; the roster prewarms on the controller's first user
+   * intent, so mounting a composer for a cold Session starts no auxiliary
+   * catalog read.
    * @param actx - session-scope ctx.
    * @returns the resident controller.
    * @throws when the Context no longer belongs to a retained Session generation.

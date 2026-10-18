@@ -100,18 +100,18 @@ export class InputTriggerController {
   private drilled = false
   private fetch: AbortController | null = null
   private disposed = false
+  /** Whether the roster's one interaction-time prewarm has run (see {@link InputTriggerController.track}). */
+  private warmed = false
   /** Per-source lexicon unsubscribers (sources without the hook never enter). */
   private readonly lexiconOffs = new Map<InputTriggerSource, () => void>()
 
   constructor(private readonly deps: InputTriggerControllerDeps) {
-    // Scope-birth prewarm: sessions are always agent-backed, so the one-time
-    // roster warm here replaces the projection-transition watch — there are
-    // no capability steps to react to.
+    // Scope birth only wires the lexicon channels: a cold Session's roster warm
+    // can ride an expensive auxiliary catalog read (a stored-session metadata
+    // pass, or a cold Agent resume for a command catalog), and merely mounting
+    // the composer must not start one. The first real interaction warms.
     const projection = this.project()
-    for (const src of deps.roster.all()) {
-      src.warm?.(projection)
-      this.watchLexicon(src, projection)
-    }
+    for (const src of deps.roster.all()) this.watchLexicon(src, projection)
     this.refreshLexicon()
   }
 
@@ -125,6 +125,10 @@ export class InputTriggerController {
    */
   track(draft: string, caret: number, guard: TriggerGuard, draftRev: number): void {
     if (this.disposed) return
+    // A non-empty draft is the first user intent this controller sees: warm the
+    // roster then, so a mounted-but-idle composer costs no auxiliary catalog
+    // read. An empty-draft track is bookkeeping (focus, caret reset), not intent.
+    if (draft !== '') this.ensureWarm()
     const launched = this.launcher.getSnapshot() !== null
     this.clearLauncher()
     const raw = detectTrigger(draft, caret, guard)
@@ -186,6 +190,7 @@ export class InputTriggerController {
    */
   toggleSource(source: string, hit: TriggerHit): void {
     if (this.disposed) return
+    this.ensureWarm()
     if (this.launcher.getSnapshot() === source && this.menu.getSnapshot().open) {
       this.dismiss()
       return
@@ -359,6 +364,7 @@ export class InputTriggerController {
    */
   openReference(source: string | undefined, reference: Pick<ReferenceInsert, 'ref' | 'appearance'>): boolean {
     if (this.disposed) return false
+    this.ensureWarm()
     const session = this.project()
     for (const owner of this.deps.roster.all()) {
       const matches = source === undefined
@@ -434,14 +440,14 @@ export class InputTriggerController {
 
   /**
    * Admit a source registered after this controller's birth (root registry
-   * change notification): warm it and fold its roll into the live lexicon —
-   * the constructor-time prewarm covers only the roster present at scope
-   * birth.
+   * change notification): fold its roll into the live lexicon and warm it only
+   * when this controller's interaction-time prewarm has already run — a late
+   * source never restarts auxiliary catalog work for an idle composer.
    * @param source - the newly registered source.
    */
   sourceAdded(source: InputTriggerSource): void {
     const projection = this.project()
-    source.warm?.(projection)
+    if (this.warmed) source.warm?.(projection)
     this.watchLexicon(source, projection)
     this.refreshLexicon()
   }
@@ -477,6 +483,25 @@ export class InputTriggerController {
   /** The session projection handed to sources (agent-backed identity; constant per scope). */
   private project(): ClientSessionContext {
     return { sessionId: this.deps.sessionId }
+  }
+
+  /**
+   * Run the roster's single prewarm, on the first user intent this controller
+   * observes. Containment mirrors the candidate-fetch policy: one faulty source
+   * must not stop the others from prewarming, and a warm failure must not abort
+   * the interaction that requested it.
+   */
+  private ensureWarm(): void {
+    if (this.warmed) return
+    this.warmed = true
+    const projection = this.project()
+    for (const src of this.deps.roster.all()) {
+      try {
+        src.warm?.(projection)
+      } catch (error: unknown) {
+        console.error(`[ui-input-trigger] source "${src.name}" warm failed:`, error)
+      }
+    }
   }
 
   /** Execute a claim/insert/text outcome via the scoped input events (actx as dispatch subject); true = the input applied it. */

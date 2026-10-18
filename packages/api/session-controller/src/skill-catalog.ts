@@ -9,6 +9,13 @@ import type { ScopeKey } from '@deepseek-ai/dsh-scope'
 import { Remote, RemoteError, TypertRemoteService } from '@deepseek-ai/dsh-typert-protocol'
 import type { SkillListRequest, SkillListValue } from './types.ts'
 
+/**
+ * Projection keys the catalog reads. Both are retained checkpoint rows, so a
+ * cold Session resolves them without replaying its log; a dropped row leaves
+ * its key absent and the catalog falls back to the header.
+ */
+const CATALOG_PROJECTION_KEYS = ['workingDirectory', 'agentPreset'] as const
+
 declare module '@deepseek-ai/cordis' {
   interface Context {
     /** Host owner of the Session-addressed `skills` Remote namespace. */
@@ -27,6 +34,13 @@ export class SessionSkillCatalog extends TypertRemoteService {
 
   /**
    * List the user-invocable skills visible to one Session composition.
+   *
+   * A cold Session is addressed by durable metadata alone: its header supplies
+   * the recorded directory and the retained projection-cache rows supply the
+   * current directory and preset when they exist. The stored log is never
+   * materialized, so a large history costs no cold complete-log read here. A
+   * live Agent keeps its effective working directory and preset-owned
+   * registry.
    * @param request - Session identity whose cwd and preset select the catalog view.
    * @param signal - caller lifetime carried by the Remote transport; admitted catalog reads retain their existing completion semantics.
    * @returns user-invocable skill metadata without loading skill bodies.
@@ -38,14 +52,14 @@ export class SessionSkillCatalog extends TypertRemoteService {
     let cwd: string
     let agentPreset: string | undefined
     try {
-      using observation = await this.ctx.sessionQuery.observeSession(sessionId)
-      if (observation.projections === undefined) {
-        throw new Error('skill catalog requires a projected Session observation')
-      }
-      cwd = observation.projections.values.workingDirectory
-        ?? observation.header.cwd
+      const metadata = await this.ctx.sessionQuery.observeSessionMetadata(sessionId, {
+        signal,
+        projectionKeys: CATALOG_PROJECTION_KEYS,
+      })
+      cwd = metadata.projections?.values.workingDirectory
+        ?? metadata.header.cwd
         ?? this.ctx.workingDirectory.defaultDirectory
-      agentPreset = observation.projections.values.agentPreset ?? undefined
+      agentPreset = metadata.projections?.values.agentPreset ?? undefined
       const live = this.ctx.agents.get(sessionId)
       if (live !== undefined) cwd = await this.ctx.workingDirectory.ensure(live, signal)
     } catch (error: unknown) {

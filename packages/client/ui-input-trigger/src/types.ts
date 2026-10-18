@@ -207,9 +207,12 @@ export interface InputTriggerSource {
    */
   matchClaim?(session: ClientSessionContext, token: string, signal: AbortSignal): Promise<CommandClaim | undefined>
   /**
-   * Scope-birth prewarm hook (fire-and-forget): the per-session controller
-   * calls it once when the session scope comes alive so sources can fetch
-   * their backing data before the first interaction.
+   * Interaction-time prewarm hook (fire-and-forget): the per-session
+   * controller calls it once, when the first user intent reaches it — a
+   * non-empty draft, a launcher gesture, or a reference preview — so sources
+   * can fetch their backing data before the first menu render. Merely
+   * constructing the controller must not start auxiliary catalog work: a cold
+   * Session's catalog can be expensive to warm.
    */
   warm?(session: ClientSessionContext): void
   /**

@@ -31,6 +31,8 @@ kind: "package-reference"
 
 | 操作 | 你得到什么 |
 |---|---|
+| `observeSession(id, options?)` | 一份精确、优先实时的不可变切点，附调用方持有的租约；冷读取会保留 prepared Session 直到释放 |
+| `observeSessionMetadata(id, options?)` | header 加上不读日志的投影提示：实时会话的当前切点，或存储会话为所请求键保留的检查点行；绝不打开始储日志 |
 | `listSessions()` | 每个逻辑会话，最新的在前，带 `live` 与 `persisted` 可用性标志及可选 `formatStatus`；显式 `excludeSessionIds` 会在任何持久化读取之前跳过这些 id（Host 用它传入归档集合），`excludeSubagentSessions` 则省略子智能体来源的会话（Host 默认列表这样做，因为子智能体行通过其母会话的目录访问） |
 | `readSession(id)` | 经过回放校验的完整原始事件日志，且不会让该会话变为实时 |
 | `readWindow(id, request?)` | 一个有界存储历史窗口，以及可用时其完整检查点投影基线；持久化或窗口能力缺失时为 `undefined` |
@@ -113,6 +115,8 @@ kind: "package-reference"
 
 `observeSession` 不经过列表预检直接构建定点观察。实时观察以当前日志长度固定 cut，并在首次读取时才物化 `events`，因此只需要 header、cursor 或 projection 的消费者永远不会复制日志；日志只会追加，所以延后的首次读取得到的仍然正好是该前缀。冷路径先对存储会话执行 `stat`，再查询自有缓存，缓存键为持久化实例加 `stat` 修订：修订未变则复用已恢复的未发布 Session，不再重读日志；修订变化或持久化实例被替换则经句柄 seam 重新加载并替换条目。缓存至多保留 `preparedSessionCacheSize` 个未被租约钉住、且报告的物理文件大小不超过 `preparedSessionCacheMaxArtifactBytes` 的条目；未报告大小的后端仅受条目数限制。活跃观察租约保留精确 cut，直到释放；Session 转为实时状态时删除其冷缓存条目。物理文件大小限制的是复用，并非解码后的堆字节数；压缩日志在被活跃观察期间可能占用更多内存。
 
+`observeSessionMetadata` 是只需要冷会话 header 与少量投影值的消费者所用的免读日志路径。存储会话只付出一次持久化 `stat`，并在挂载投影缓存时对所请求的键做零 I/O 检查点读取；它绝不打开始储日志，也从不保留 prepared Session。返回值与检查点行同样可能过时，且当该行被丢弃或属于其他生命周期时缺席，因此消费方必须按键回退。实时会话返回其精确当前切点，因此只需要元数据的调用方在会话已挂载或冷态时行为一致。
+
 ### 读取与追踪
 
 `readSession` 通过 `Session.create` 回放日志，复用恢复的校验。`readSurface`、`listEvents` 与 `traceEvent` 共用一次 `foldSurface` 遍历，把事件分类为 `current`、`shadowed` 或 `log-only`，并校验从零开始且连续的 seq、表层标记的适用性以及替换或引用完整性；任何违规都以 `SESSION_QUERY_INVALID_SURFACE` 失败。追踪是一次性的：会话血缘只读取一次语料库并确定性遍历父级与后代树；事件追踪沿位置替换者跟进到最终节点，同时保持被引用源事件链接不传递。
@@ -154,6 +158,7 @@ kind: "package-reference"
 - **无提供方协调器或回退**——服务在搜索上是抽象的，组合必须挂载具体后端；没有搜索提供方注册表或回退实现。
 - **精确读取回放整个日志**——`readSession`、`readSurface`、`filterEvents` 与事件追踪会加载并校验完整逻辑日志，因此非常大的历史每次调用都要付出完整检查；`listSessions` 保持轻量。
 - **窗口读取是已校验切片，而非精确观察**——`readWindow` 返回有界读取的行，检查点基线要么完整要么缺席，且不做完整日志回放；follow 打开方可以在没有精确切点的情况下服务这些行，附加的基线可能落后于窗口 cursor，两者都不替代 `readSession` 校验或 `observeSession` 的精确切点。
+- **元数据读取是检查点提示，而非精确值**——`observeSessionMetadata` 从不重新折叠存储日志；被丢弃的检查点行、未请求的键或生命周期不匹配都会让值缺席，因此消费方必须按键回退。
 - **字面文本扫描，而非全文搜索**——`text` 过滤器用正则表达式扫描提取出的文档且不提供排名；带排名的搜索需要挂载后端。
 
 <a id="dev-note"></a>

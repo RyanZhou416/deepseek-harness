@@ -8,7 +8,7 @@ import type {
   SessionPersistenceRevision,
   SessionPersistenceSnapshot,
 } from '@deepseek-ai/dsh-session-persistence'
-import type { ProjectionSnapshot } from '@deepseek-ai/dsh-session-projection'
+import type { ProjectionSnapshot, SessionProjectionMap } from '@deepseek-ai/dsh-session-projection'
 import type {} from '@deepseek-ai/dsh-session-projection-cache'
 import {
   SESSION_QUERY_DEFAULT_PREPARED_SESSION_CACHE_MAX_ARTIFACT_BYTES,
@@ -50,6 +50,32 @@ export interface SessionObservationOptions {
   readonly signal?: AbortSignal
   /** Whether to compute every projection or leave projection state untouched. */
   readonly projectionMode?: 'all' | 'none'
+}
+
+/**
+ * Header-level Session facts available without materializing the event log.
+ *
+ * A stored Session's `projections` come only from its durable checkpoint row:
+ * they are as stale as that row and absent when the row was dropped or does
+ * not match the current lifecycle. A consumer must fall back when a key it
+ * needs is missing rather than treating the block as a complete baseline.
+ */
+export interface SessionMetadataObservation {
+  /** Immutable Session identity metadata. */
+  readonly header: SessionHeader
+  /**
+   * Projection values readable without the log: the exact current cut for a
+   * live Session, or the durable checkpoint view for a stored one.
+   */
+  readonly projections?: ProjectionSnapshot
+}
+
+/** Cancellation and projection selection for one metadata-only Session read. */
+export interface SessionMetadataOptions {
+  /** Optional cancellation for the persistence metadata read. */
+  readonly signal?: AbortSignal
+  /** Projection keys to serve; omitted values are not validated or viewed. */
+  readonly projectionKeys?: readonly Extract<keyof SessionProjectionMap, string>[]
 }
 
 /**
@@ -170,6 +196,64 @@ export class SessionObservationReader {
       }
       return this.preparedLease(sessionId, entry, projections)
     }
+  }
+
+  /**
+   * Observe one Session's durable metadata without materializing its log.
+   *
+   * A live Session serves its current cut. A stored Session is stat'ed and
+   * takes projection values only from the durable checkpoint row, so a cold
+   * Session costs one metadata read and never opens the stored log. A stored
+   * Session that becomes live while the snapshot is stated serves the live
+   * cut, matching {@link read}.
+   * @param sessionId - logical Session identity.
+   * @param options - cancellation and the projection keys to serve.
+   * @returns the durable header plus the log-free projection values.
+   * @throws {@link SessionQueryError} with code `SESSION_QUERY_SESSION_NOT_FOUND`
+   *   when no live Session or stored source exists, and
+   *   `SESSION_QUERY_CORRUPT_SESSION` when live projection computation fails.
+   */
+  async metadata(
+    sessionId: SessionId,
+    options: SessionMetadataOptions = {},
+  ): Promise<SessionMetadataObservation> {
+    const { signal, projectionKeys } = options
+    throwIfObservationAborted(signal)
+    const live = this.ctx.sessions.get(sessionId)
+    if (live !== undefined) return this.liveMetadata(live, projectionKeys)
+    const persistence = this.ctx.get('sessionPersistence')
+    if (persistence === undefined) throw notFound(sessionId)
+    const snapshot = await this.statSource(persistence, sessionId, signal)
+    const attached = this.ctx.sessions.get(sessionId)
+    if (attached !== undefined) return this.liveMetadata(attached, projectionKeys)
+    const projections = this.cachedProjections(snapshot.header, projectionKeys)
+    return { header: snapshot.header, ...projections === undefined ? {} : { projections } }
+  }
+
+  /** Serve a live Session's metadata from its current projection cut. */
+  private liveMetadata(
+    session: Session,
+    projectionKeys: SessionMetadataOptions['projectionKeys'],
+  ): SessionMetadataObservation {
+    let projections: ProjectionSnapshot | undefined
+    try {
+      projections = this.ctx.get('sessionProjections')?.snapshot(session, projectionKeys)
+    } catch (error: unknown) {
+      throw new SessionQueryError(
+        `failed to project session "${session.id}": ${errorMessage(error)}`,
+        'SESSION_QUERY_CORRUPT_SESSION',
+        { cause: error },
+      )
+    }
+    return { header: session.header, ...projections === undefined ? {} : { projections } }
+  }
+
+  /** Serve a stored Session's projection hints from its durable checkpoint row only. */
+  private cachedProjections(
+    header: SessionHeader,
+    projectionKeys: SessionMetadataOptions['projectionKeys'],
+  ): ProjectionSnapshot | undefined {
+    return this.ctx.get('sessionProjectionCache')?.cachedSnapshot(header, projectionKeys)
   }
 
   /** Observe the stored snapshot, mapping absence and backend failures to the query taxonomy. */
