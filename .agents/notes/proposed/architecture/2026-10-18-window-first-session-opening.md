@@ -52,15 +52,15 @@ AgentTeams orchestration itself runs in the current Host: member Sessions are wr
 
 The critical path is contract → three client/server implementation tracks → benchmark measurement → integration → review. Independent index, benchmark-scaffold, integration-prep, and review-prep work starts in the first wave, and the implementation tracks run concurrently after the shared contract.
 
-1. **Contract (t0)**: add the optional opening projection block, the projection-readiness type, and the benchmark/observation seam. This is the only shared-type edit; all other tracks import it.
+1. **Contract**: add the optional opening projection block, the projection-readiness type, and the benchmark/observation seam. This is the only shared-type edit; all other tracks import it.
 2. **Parallel implementation wave**:
-   - **Server window-first (t1)**: relax the complete-checkpoint gate for parent Sessions, omit the projection block, preserve subagent and small-Session fallbacks, and add window/opening tests.
-   - **Client absence/readiness (t2)**: do not clear cached list/subagent/token/stats rows on an absent block; add explicit unavailable/loading presentation for token and context projections.
-   - **On-demand lifecycle (t3)**: Manager-owned trigger, single-flight exact reads, per-generation readiness, navigation cancellation, watermark merge, and permission fallback.
-3. **Independent parallel tracks**: offset/newline index build `t4`, bounded parsed-index memo `t5`, follow-level benchmark scaffold and negative control `t6`, integration preparation `t7a`, and pre-review of the contract/risks `t8a`. These do not share write scopes with the implementation wave.
-4. **Benchmark measurement (t10)**: run the follow-level cold opening and exact-projection follow-up after t1–t3 and t6; keep the no-complete-observation negative control.
-5. **Integration (t7)**: integrate t1–t5 and t10 in the clone, resolve the single wiring point between the index build and memo, run focused suites/typecheck/docs/benchmarks, and hand off one feature-branch diff.
-6. **Independent review (t8)**: review the integrated diff and evidence after t7a and t7; verdict pass only with no open blockers.
+   - **Server window-first**: relax the complete-checkpoint gate for parent Sessions, omit the projection block, preserve subagent and small-Session fallbacks, and add window/opening tests.
+   - **Client absence/readiness**: do not clear cached list/subagent/token/stats rows on an absent block; add explicit unavailable/loading presentation for token and context projections.
+   - **On-demand lifecycle**: Manager-owned trigger, single-flight exact reads, per-generation readiness, navigation cancellation, watermark merge, and permission fallback.
+3. **Independent parallel tracks**: offset/newline index build, bounded parsed-index memo, follow-level benchmark scaffold and negative control, integration preparation, and pre-review of the contract/risks. These do not share write scopes with the implementation wave.
+4. **Benchmark measurement**: run the follow-level cold opening and exact-projection follow-up after the server/client tracks and the benchmark scaffold; keep the no-complete-observation negative control.
+5. **Integration**: integrate the implementation tracks and measurement in the clone, resolve the single wiring point between the index build and memo, run focused suites/typecheck/docs/benchmarks, and hand off one feature-branch diff.
+6. **Independent review**: review the integrated diff and evidence after integration prep and integration; verdict pass only with no open blockers.
 
 ## Alternatives considered
 

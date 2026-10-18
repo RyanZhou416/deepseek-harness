@@ -52,15 +52,15 @@ AgentTeams 编排本身仍运行在当前 Host：member Session 写入其 `DSH_H
 
 关键路径是契约 → 三条客户端/服务端实现线 → benchmark 测量 → 集成 → 审查。独立的索引、benchmark 脚手架、集成准备与预审查在第一波就开始；实现线在共享契约后并行。
 
-1. **契约（t0）**：添加可选 opening projection block、projection readiness 类型，以及 benchmark/observation seam。这是唯一共享类型改动；其他线导入它。
+1. **契约**：添加可选 opening projection block、projection readiness 类型，以及 benchmark/observation seam。这是唯一共享类型改动；其他线导入它。
 2. **并行实现波**：
-   - **服务端窗口优先（t1）**：对父 Session 放开完整 checkpoint 限制，省略 projection block，保留 subagent 与小 Session 回退，并添加窗口/opening 测试。
-   - **客户端缺失/readiness（t2）**：缺失 block 时不清掉缓存的 list/subagent/token/stats 行；为 token 与 context 投影添加显式不可用/加载展示。
-   - **按需生命周期（t3）**：Manager 拥有的触发、single-flight 精确读取、按 generation 的 readiness、导航取消、watermark 合并与权限回退。
-3. **独立并行线**：offset/newline 索引构建 `t4`、有界解析索引 memo `t5`、follow 级 benchmark 脚手架与负向对照 `t6`、集成准备 `t7a`、契约/风险预审查 `t8a`。它们不与实现波共享写入范围。
-4. **Benchmark 测量（t10）**：在 t1–t3 与 t6 之后运行 follow 级冷打开与精确投影后续读取；保留“未调用完整 observation”的负向对照。
-5. **集成（t7）**：在 clone 中集成 t1–t5 与 t10，解决索引构建与 memo 的唯一接线点，运行 focused suites/typecheck/docs/benchmark，并交付单一 feature-branch。
-6. **独立审查（t8）**：在 t7a 与 t7 之后审查集成 diff 与证据；只有无未决 blocker 才给 pass。
+   - **服务端窗口优先**：对父 Session 放开完整 checkpoint 限制，省略 projection block，保留 subagent 与小 Session 回退，并添加窗口/opening 测试。
+   - **客户端缺失/readiness**：缺失 block 时不清掉缓存的 list/subagent/token/stats 行；为 token 与 context 投影添加显式不可用/加载展示。
+   - **按需生命周期**：Manager 拥有的触发、single-flight 精确读取、按 generation 的 readiness、导航取消、watermark 合并与权限回退。
+3. **独立并行线**：offset/newline 索引构建、有界解析索引 memo、follow 级 benchmark 脚手架与负向对照、集成准备、契约/风险预审查。它们不与实现波共享写入范围。
+4. **Benchmark 测量**：在服务端/客户端实现线与 benchmark 脚手架完成后运行 follow 级冷打开与精确投影后续读取；保留“未调用完整 observation”的负向对照。
+5. **集成**：在 clone 中集成实现线与测量，解决索引构建与 memo 的唯一接线点，运行 focused suites/typecheck/docs/benchmark，并交付单一 feature-branch。
+6. **独立审查**：在集成准备与集成之后审查集成 diff 与证据；只有无未决 blocker 才给 pass。
 
 ## Alternatives considered
 
