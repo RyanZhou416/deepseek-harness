@@ -7,6 +7,7 @@ import { Context } from '@deepseek-ai/cordis'
 import AgentRegistry from '@deepseek-ai/dsh-agent'
 import type { Agent, AgentFactory } from '@deepseek-ai/dsh-agent'
 import { turnBoundaryProjectionDefinition } from '@deepseek-ai/dsh-agent-loop'
+import { createInboxStub } from '@deepseek-ai/dsh-agent-loop-testkit'
 import { agentPresetProjectionDefinition } from '@deepseek-ai/dsh-agent-preset-registry'
 import SessionStore, { SESSION_FORMAT_VERSION, SessionId, SessionSeq } from '@deepseek-ai/dsh-session'
 import type { Session, SessionEvent, SessionHeader } from '@deepseek-ai/dsh-session'
@@ -24,7 +25,8 @@ afterEach(async () => {
 })
 
 function stubAgent(session: Session): Agent {
-  return { id: session.id, session, status: 'idle' } as unknown as Agent
+  // Idle residency reads the Agent's pending Inbox work, so the stub needs a real empty Inbox.
+  return { id: session.id, session, status: 'idle', inbox: createInboxStub() } as unknown as Agent
 }
 
 /** A stored Session the persistence double serves until an Agent resumes it. */

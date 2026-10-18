@@ -148,7 +148,11 @@ class ScriptedSessionRemote implements SessionTransportRemote {
 }
 
 function surfaceEvent(type = 'user/message'): SessionWireEvent {
-  return { type, seq: 10, time: 10, data: {}, surfaceOp: 'append' }
+  // Current user/message payloads carry the source that event-local surface rules inspect.
+  const data = type === 'user/message'
+    ? { id: 'message-fixture', role: 'user', content: [{ type: 'text', text: 'fixture' }], source: { kind: 'user' } }
+    : {}
+  return { type, seq: 10, time: 10, data, surfaceOp: 'append' }
 }
 
 const invalidWireEvents: [string, unknown][] = [
