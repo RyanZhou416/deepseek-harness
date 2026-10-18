@@ -161,7 +161,7 @@ function nextStatsState(previous: SessionStatsState, next: SessionStatsState): S
 /** The `sessionStats` unit registered on `ctx.sessionProjections` (exported for the unit spec). */
 export const sessionStatsProjectionDefinition = {
   key: 'sessionStats',
-  stateVersion: 1,
+  stateVersion: 2,
   stateSchema: sessionStatsStateSchema,
   init: () => ({
     turns: 0,
