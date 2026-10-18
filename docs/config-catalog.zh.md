@@ -94,7 +94,7 @@ export interface Config {
 
 - `inject`: `agents` · `sessions` · `llm` · `tools` · `systemPrompt` · `sessionProjections`
 - `refs`: [`AgentOptions`](subsystems/core.zh.md) · [`SessionId`](subsystems/core.zh.md) · `Volatile` (`@deepseek-ai/cosmokit`)
-- `source`: [`packages/core/agent-loop/src/index.ts:303`](../packages/core/agent-loop/src/index.ts)
+- `source`: [`packages/core/agent-loop/src/index.ts:304`](../packages/core/agent-loop/src/index.ts)
 
 ```ts config-catalog
 /** Agent-loop plugin configuration. */
@@ -222,15 +222,19 @@ export interface Config {
 ## `@deepseek-ai/dsh-api-session-controller`
 
 - `inject`: `agentDefaultModel` · `agents` · `attachments` · `fileUploads` · `fs` · `llm` · `remoteAccess` · `sessions` · `sessionProjections` · `sessionQuery` · `typert` · `workspaceRegistry`
-- `source`: [`packages/api/session-controller/src/index.ts:94`](../packages/api/session-controller/src/index.ts)
+- `source`: [`packages/api/session-controller/src/index.ts:97`](../packages/api/session-controller/src/index.ts)
 
 ```ts config-catalog
 /** Session Controller deployment policy. */
 export interface Config {
   /** Override platform desktop-opener detection. */
   readonly nativeOpen?: boolean
+  /** Milliseconds an owned, durable idle Session remains live after activity; zero disables eviction. */
+  readonly idleSessionRetentionMs?: number
   /** Positive integral milliseconds of list work before yielding between complete rows. */
   readonly listWorkSliceMs?: number
+  /** Projection keys the catalog omits before rendering its hint values. */
+  readonly listProjectionExcludeKeys?: string[]
 }
 ```
 <!-- END GENERATED config-catalog:@deepseek-ai/dsh-api-session-controller -->
@@ -1702,7 +1706,7 @@ export interface TlsConfig {
 
 ## `@deepseek-ai/dsh-jobs-local`
 
-- `source`: [`packages/jobs/jobs-local/src/index.ts:46`](../packages/jobs/jobs-local/src/index.ts)
+- `source`: [`packages/jobs/jobs-local/src/index.ts:48`](../packages/jobs/jobs-local/src/index.ts)
 
 ```ts config-catalog
 /** Configuration for the process-local job registry. */
@@ -1722,6 +1726,10 @@ export interface Config {
   settledRetainBytes?: number
   /** Poll interval for a job's pull sources, in milliseconds; omission defaults to 150. */
   pumpPollMs?: number
+  /** Terminal-record idle retention in milliseconds; omission keeps records until owner or service disposal. */
+  terminalJobRetentionMs?: number
+  /** Target terminal records per exact owner; only model-read records are count-pruned. */
+  maxRetainedTerminalJobsPerOwner?: number
 }
 ```
 <!-- END GENERATED config-catalog:@deepseek-ai/dsh-jobs-local -->
@@ -2127,6 +2135,30 @@ export interface ReplayModelConfig {
 }
 ```
 <!-- END GENERATED config-catalog:@deepseek-ai/dsh-llm-replay -->
+
+<!-- BEGIN GENERATED config-catalog:@deepseek-ai/dsh-llm-request-record -->
+<a id="deepseek-aidsh-llm-request-record"></a>
+
+## `@deepseek-ai/dsh-llm-request-record`
+
+- `inject`: `sessions`
+- `source`: [`packages/llm/llm-request-record/src/index.ts:76`](../packages/llm/llm-request-record/src/index.ts)
+
+```ts config-catalog
+/** Loader configuration of the recording service. */
+export interface Config {
+  /**
+   * Milliseconds a prepared record may wait for `SessionStore.flush` before its
+   * producer is told the record is not durable.
+   *
+   * Required, never defaulted: the bound is what keeps a stalled durability
+   * listener from holding a model request open indefinitely, so a deployment
+   * states it instead of inheriting a compiled-in number.
+   */
+  readonly flushTimeoutMs: number
+}
+```
+<!-- END GENERATED config-catalog:@deepseek-ai/dsh-llm-request-record -->
 
 <!-- BEGIN GENERATED config-catalog:@deepseek-ai/dsh-llm-retry -->
 <a id="deepseek-aidsh-llm-retry"></a>
@@ -2814,7 +2846,7 @@ export type SessionLogCompressionLevel = 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9
 
 ## `@deepseek-ai/dsh-session-persistence-jsonl`
 
-- `source`: [`packages/session/session-persistence-jsonl/src/index.ts:94`](../packages/session/session-persistence-jsonl/src/index.ts)
+- `source`: [`packages/session/session-persistence-jsonl/src/index.ts:98`](../packages/session/session-persistence-jsonl/src/index.ts)
 
 ```ts config-catalog
 /** Plugin config for the JSONL backend's root, physical encoding, and listing concurrency. */
@@ -2829,6 +2861,8 @@ export interface Config {
   root: string
   /** Physical encoding; defaults to checksummed Zstandard frames. */
   compression?: JsonlCompression
+  /** Idle milliseconds a decoded cold log stays reusable; zero disables the memo. Defaults to 10000. */
+  coldLogMemoRetentionMs?: number
   /**
    * Maximum directory, header, and stat reads in flight across all concurrent
    * listings of this backend (`list()`, the root encoding check, and historical
@@ -2848,7 +2882,7 @@ export type JsonlCompression = 'zstd' | 'none'
 ## `@deepseek-ai/dsh-session-projection-cache`
 
 - `inject`: `storageDomain` · `sessionProjections` · `sessions`
-- `source`: [`packages/session/session-projection-cache/src/index.ts:75`](../packages/session/session-projection-cache/src/index.ts)
+- `source`: [`packages/session/session-projection-cache/src/index.ts:86`](../packages/session/session-projection-cache/src/index.ts)
 
 ```ts config-catalog
 /**
@@ -2863,6 +2897,14 @@ export interface Config {
   writeEveryEvents: number
   /** Longest time (milliseconds) a dirty checkpoint may stay unwritten between mandatory points. */
   writeIntervalMs: number
+  /**
+   * Largest total serialized checkpoint payload the cache retains across all
+   * Sessions. At init the newest records (ranked by their highest checkpoint
+   * seq) stay complete until this budget is reached and the rest are deleted;
+   * dropping a record only costs a longer cold replay. Defaults to
+   * {@link DEFAULT_MAX_RETAINED_BYTES}.
+   */
+  maxRetainedBytes?: number
 }
 ```
 <!-- END GENERATED config-catalog:@deepseek-ai/dsh-session-projection-cache -->
@@ -2874,7 +2916,7 @@ export interface Config {
 
 - `inject`: `sessions`
 - `refs`: [`SessionQueryConfig`](../packages/session-query/session-query/src/index.ts)
-- `source`: [`packages/session-query/session-query-sqlite/src/index.ts:92`](../packages/session-query/session-query-sqlite/src/index.ts)
+- `source`: [`packages/session-query/session-query-sqlite/src/index.ts:94`](../packages/session-query/session-query-sqlite/src/index.ts)
 
 ```ts config-catalog
 /** Combined session-query configuration backed by SQLite full-text search. */
@@ -2905,6 +2947,8 @@ export interface Config extends SessionQueryConfig {
   persistedReadConcurrency?: number
   /** Maximum cold prepared-Session observations the inherited reader retains for reuse. Defaults to 5. */
   preparedSessionCacheSize?: number
+  /** Maximum physical artifact size retained by the inherited cold reader. Defaults to 4 MiB. */
+  preparedSessionCacheMaxArtifactBytes?: number
 }
 
 /** SQLite module/handle opening phase; `never` disables full-text search entirely. */
@@ -3084,7 +3128,7 @@ export interface Config {
 ## `@deepseek-ai/dsh-skill-filesystem`
 
 - `inject`: `skills`
-- `source`: [`packages/skill/skill-filesystem/src/index.ts:48`](../packages/skill/skill-filesystem/src/index.ts)
+- `source`: [`packages/skill/skill-filesystem/src/index.ts:49`](../packages/skill/skill-filesystem/src/index.ts)
 
 ```ts config-catalog
 /** Local filesystem skill provider configuration. */
@@ -3327,7 +3371,7 @@ export type JournalMode = 'wal' | 'delete' | 'truncate' | 'persist'
 
 - `inject`: `workingDirectory`
 - `refs`: `Volatile` (`@deepseek-ai/cordis`)
-- `source`: [`packages/subagent/subagent/src/index.ts:186`](../packages/subagent/subagent/src/index.ts)
+- `source`: [`packages/subagent/subagent/src/index.ts:188`](../packages/subagent/subagent/src/index.ts)
 
 ```ts config-catalog
 /** Host configuration for continuable subagent capacity. */
@@ -3336,6 +3380,18 @@ export interface Config {
   maxActiveSubagents: Volatile<number>
   /** Default delegation depth for tools without an explicit limit; defaults to 1. */
   maxDepth: Volatile<number>
+  /** Forced model for new children except AgentTeams members; false disables it, unsupported backends reject while enabled. */
+  modelOverride: Volatile<SubagentModelOverride | false>
+}
+
+/** User-selected model configuration for newly created Harness-managed children. */
+export interface SubagentModelOverride {
+  /** Registered LLM provider id. */
+  readonly provider: string
+  /** Exact model id owned by that provider. */
+  readonly model: string
+  /** Explicit reasoning effort; omission selects this model's default without parent inheritance. */
+  readonly reasoningEffort?: string
 }
 ```
 <!-- END GENERATED config-catalog:@deepseek-ai/dsh-subagent -->
@@ -3543,7 +3599,7 @@ export interface Config {
 
 ## `@deepseek-ai/dsh-system-prompt`
 
-- `source`: [`packages/core/system-prompt/src/index.ts:258`](../packages/core/system-prompt/src/index.ts)
+- `source`: [`packages/core/system-prompt/src/index.ts:273`](../packages/core/system-prompt/src/index.ts)
 
 ```ts config-catalog
 /** Plugin config: the deployment-authored fragment of the system prompt (see {@link Config.personaPrefix} for its contract). */
@@ -3779,6 +3835,8 @@ export interface Config {
   readMaxLineLength?: number
   /** Maximum bytes returned for the selected lines of one `read` call. */
   readMaxBytes?: number
+  /** Maximum serialized bytes of the UI-only presentation meta persisted with one `read` result. */
+  readMaxMetaBytes?: number
   /** Files at or above this size stream instead of loading whole into memory. */
   readStreamMinSize?: number
 }
@@ -4694,6 +4752,7 @@ export interface Config {
 | `@deepseek-ai/dsh-tool-call-timeout-policy` | `tools` | [`packages/guard/timeout-policy/src/index.ts`](../packages/guard/timeout-policy/src/index.ts) |
 | `@deepseek-ai/dsh-tool-cordis` | `tools` · `cordisInspect` | [`packages/extensions/tool-cordis/src/index.ts`](../packages/extensions/tool-cordis/src/index.ts) |
 | `@deepseek-ai/dsh-tool-schedule` | `tools` | [`packages/schedule/tool-schedule/src/index.ts`](../packages/schedule/tool-schedule/src/index.ts) |
+| `@deepseek-ai/dsh-tool-session-message` | `tools` · `agents` · `sessionController` · `sessionReferenceResolver` · `sessionQuery` · `permissionPresets` | [`packages/api/tool-session-message/src/index.ts`](../packages/api/tool-session-message/src/index.ts) |
 | `@deepseek-ai/dsh-tool-subagent-control` | `tools` · `subagents` | [`packages/subagent/tool-subagent-control/src/index.ts`](../packages/subagent/tool-subagent-control/src/index.ts) |
 | `@deepseek-ai/dsh-tool-working-directory` | `tools` · `workingDirectory` | [`packages/session/tool-working-directory/src/index.ts`](../packages/session/tool-working-directory/src/index.ts) |
 | `@deepseek-ai/dsh-user-questions` | — | [`packages/interaction/user-questions/src/index.ts`](../packages/interaction/user-questions/src/index.ts) |

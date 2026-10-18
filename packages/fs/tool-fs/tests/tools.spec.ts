@@ -808,11 +808,65 @@ describe('read caps are plugin config', () => {
     expect(readSpy).not.toHaveBeenCalled()
   })
 
+  it('keeps presentation meta that fits the configured meta byte budget', async () => {
+    const { ctx, fs } = await setupWith({ readMaxMetaBytes: 4096 })
+    fs.files.set('key:a.txt', 'alpha\nbeta')
+    const result = await call(ctx, 'read', { file_path: 'a.txt' })
+    expect(result.isError).toBe(false)
+    if (result.isError) throw new Error('expected read success')
+    expect(result.meta).toEqual({
+      path: '/abs/a.txt',
+      offset: 1,
+      lines: [{ number: 1, text: 'alpha' }, { number: 2, text: 'beta' }],
+      totalLines: 2,
+    })
+  })
+
+  it('keeps meta exactly at the meta byte cap and omits it one byte over, leaving model content untouched', async () => {
+    const probe = await setupWith({})
+    probe.fs.files.set('key:a.txt', 'alpha\nbeta')
+    const uncapped = await call(probe.ctx, 'read', { file_path: 'a.txt' })
+    if (uncapped.isError) throw new Error('expected read success')
+    const metaBytes = Buffer.byteLength(JSON.stringify(uncapped.meta), 'utf8')
+    expect(metaBytes).toBeGreaterThan(0)
+
+    const atCap = await setupWith({ readMaxMetaBytes: metaBytes })
+    atCap.fs.files.set('key:a.txt', 'alpha\nbeta')
+    const kept = await call(atCap.ctx, 'read', { file_path: 'a.txt' })
+    if (kept.isError) throw new Error('expected read success')
+    expect(kept.meta).toEqual(uncapped.meta)
+    expect(text(kept)).toBe(text(uncapped))
+
+    const overCap = await setupWith({ readMaxMetaBytes: metaBytes - 1 })
+    overCap.fs.files.set('key:a.txt', 'alpha\nbeta')
+    const dropped = await call(overCap.ctx, 'read', { file_path: 'a.txt' })
+    if (dropped.isError) throw new Error('expected read success')
+    expect(dropped.meta).toBeUndefined()
+    // The model-facing envelope is byte-identical: only the UI-only meta is bounded.
+    expect(text(dropped)).toBe(text(uncapped))
+    // presentResult keeps its documented generic-card fallback when meta is absent.
+    expect(overCap.ctx.tools.get('read')?.presentResult?.({ file_path: 'a.txt' }, dropped)).toBeUndefined()
+  })
+
+  it('defaults to an 8192-byte meta budget, so a large read window persists no meta', async () => {
+    const { ctx, fs } = await setupWith({})
+    fs.files.set('key:big.txt', Array.from({ length: 400 }, (_, i) => `line ${i + 1} padding`).join('\n'))
+    const result = await call(ctx, 'read', { file_path: 'big.txt' })
+    expect(result.isError).toBe(false)
+    if (result.isError) throw new Error('expected read success')
+    expect(result.meta).toBeUndefined()
+    // Every line still reaches the model: the bound applies to meta only.
+    expect(text(result)).toContain('400: line 400 padding')
+    expect(text(result)).toContain('(End of file - total 400 lines)')
+    expect(ctx.tools.get('read')?.presentResult?.({ file_path: 'big.txt' }, result)).toBeUndefined()
+  })
+
   it.each([
     ['readLimit', { readLimit: 0 }],
     ['readLimit', { readLimit: 2.5 }],
     ['readMaxLineLength', { readMaxLineLength: -1 }],
     ['readMaxBytes', { readMaxBytes: Number.NaN }],
+    ['readMaxMetaBytes', { readMaxMetaBytes: 0 }],
     ['readStreamMinSize', { readStreamMinSize: 0 }],
   ] as const)('rejects a non-positive or fractional %s at load', async (name, config) => {
     const ctx = new Context()

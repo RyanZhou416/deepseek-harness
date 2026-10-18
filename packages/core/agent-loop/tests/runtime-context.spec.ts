@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import type { ContextFormed } from '@deepseek-ai/dsh-llm'
@@ -46,6 +46,34 @@ describe('RuntimeContextProjection', () => {
 
     const other = ctx.sessions.create(SessionId('runtime-context-other'))
     other.append('user/message', contextMessage('other'), { surfaceOp: 'append' })
+    expect(projection.project('retained', [])).toBeUndefined()
+  })
+
+  it('restores the newest visible snapshot from a large log without materializing a full event snapshot', async () => {
+    const ctx = new Context()
+    await ctx.plugin(SessionStore)
+    const session = ctx.sessions.create(SessionId('runtime-context-large'))
+    const retained = session.append('user/message', contextMessage('retained'), { surfaceOp: 'append' })
+    const shadowed = session.append('user/message', contextMessage('shadowed'), { surfaceOp: 'append' })
+    const summary = session.append('user/message', createUserMessage({
+      content: [{ type: 'text', text: 'summary' }],
+      source: { kind: 'test-compaction' },
+    }), {
+      surfaceOp: { op: 'replace', startSeq: shadowed.seq, endSeq: shadowed.seq },
+      sourceEventSeqs: [shadowed.seq],
+    })
+    // The reported large-Session scale: the restore once reversed a snapshot of
+    // every committed event before reading the newest owned message.
+    for (let step = 2; step < 180_002; step += 1) {
+      session.append('step/start', { turn: 1, step })
+    }
+
+    const snapshotEvents = vi.spyOn(session, 'snapshotEvents')
+    const projection = new RuntimeContextProjection(ctx, session)
+    expect(snapshotEvents).not.toHaveBeenCalled()
+    snapshotEvents.mockRestore()
+
+    expect(session.surface.nodes).toEqual([retained.seq, summary.seq])
     expect(projection.project('retained', [])).toBeUndefined()
   })
 })

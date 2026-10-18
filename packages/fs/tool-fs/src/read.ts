@@ -8,7 +8,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { GenericCallView, ReadResultView, ToolResult } from '@deepseek-ai/dsh-tools'
 import type {} from '@deepseek-ai/dsh-fs'
-import { buildWindow, formatReadOutput, langFromPath, readMetaFromMeta } from './read-render.ts'
+import { buildWindow, capReadMetaByBytes, formatReadOutput, langFromPath, readMetaFromMeta } from './read-render.ts'
 import { resolveRegularReadTarget } from './read-target.ts'
 
 /** Default and maximum number of lines returned by one `read` call (the `readLimit` config). */
@@ -28,6 +28,8 @@ export interface ReadToolCaps {
   maxLineLength: number
   /** Maximum bytes returned for selected file lines. */
   maxBytes: number
+  /** Maximum serialized bytes of the persisted presentation meta. */
+  maxMetaBytes: number
   /** Files at or above this size stream; smaller files read whole into memory. */
   streamMinSize: number
 }
@@ -122,15 +124,18 @@ export function applyReadTool(ctx: Context, caps: ReadToolCaps): void {
       // Project the structured window into persisted `meta` so a UI's read card
       // survives replay: the raw canonical output object is not on the wire, only
       // the model-facing text, from which the line/lang data cannot be recovered.
+      // A window over the meta byte budget persists no meta at all, so the live
+      // Session never keeps a second, unbounded copy of the file text; the model
+      // content is untouched and `presentResult` falls back to the generic card.
       presentationMeta: (_args, value) => {
         const lang = langFromPath(value.path)
-        return {
+        return capReadMetaByBytes({
           path: value.path,
           offset: value.offset,
           lines: value.lines.map(({ number, text }) => ({ number, text })),
           totalLines: value.totalLines,
           ...lang === undefined ? {} : { lang },
-        }
+        }, caps.maxMetaBytes)
       },
     },
     // Observation races fail closed because guarded mutations re-check the version in-lock.

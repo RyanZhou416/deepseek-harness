@@ -13,6 +13,14 @@ export const READ_MAX_LINE_LENGTH = 2000
 /** Default maximum bytes returned for selected file lines (the `readMaxBytes` config). */
 export const READ_MAX_BYTES = 50 * 1024
 
+/**
+ * Default maximum serialized bytes of one `read` result's presentation `meta`
+ * (the `readMaxMetaBytes` config). The meta repeats the model-facing window as
+ * structured lines, so the live Session would otherwise retain the same file
+ * text twice.
+ */
+export const READ_MAX_META_BYTES = 8 * 1024
+
 /** Resolved read window. The consumer applies its defaults/caps before calling. */
 export interface ReadWindow {
   /** 1-based first line to return. */
@@ -242,4 +250,19 @@ export function readMetaFromMeta(meta: unknown): FsReadMeta | undefined {
     previous = number
   }
   return { path, offset, lines, totalLines, ...lang === undefined ? {} : { lang } }
+}
+
+/**
+ * Bound a persisted presentation payload to a serialized byte budget.
+ *
+ * The read meta is UI-only presentation data; `presentResult` already declines
+ * to `undefined` for absent meta, so a window too large to persist falls back to
+ * the generic text card that carries the unchanged model-facing content.
+ *
+ * @param meta - the structured window the read produced.
+ * @param maxMetaBytes - maximum UTF-8 bytes of the serialized metadata.
+ * @returns the same value when it fits the budget (inclusive), else `undefined`.
+ */
+export function capReadMetaByBytes<T extends object>(meta: T, maxMetaBytes: number): T | undefined {
+  return Buffer.byteLength(JSON.stringify(meta), 'utf8') <= maxMetaBytes ? meta : undefined
 }

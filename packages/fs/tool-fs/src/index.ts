@@ -13,7 +13,7 @@ import { applyReadTool, READ_LIMIT, STREAM_MIN_SIZE } from './read.ts'
 import { applyWriteTool } from './write.ts'
 import { applyEditTool } from './edit.ts'
 import { applyReadImageTool } from './read-image.ts'
-import { READ_MAX_BYTES, READ_MAX_LINE_LENGTH } from './read-render.ts'
+import { READ_MAX_BYTES, READ_MAX_LINE_LENGTH, READ_MAX_META_BYTES } from './read-render.ts'
 import { FsSandboxController } from './sandbox.ts'
 
 /** Cordis plugin name used by loader diagnostics. */
@@ -38,6 +38,8 @@ export interface Config {
   readMaxLineLength?: number
   /** Maximum bytes returned for the selected lines of one `read` call. */
   readMaxBytes?: number
+  /** Maximum serialized bytes of the UI-only presentation meta persisted with one `read` result. */
+  readMaxMetaBytes?: number
   /** Files at or above this size stream instead of loading whole into memory. */
   readStreamMinSize?: number
 }
@@ -50,6 +52,7 @@ export const Config: z<Config> = z.object({
   readLimit: z.number().default(READ_LIMIT),
   readMaxLineLength: z.number().default(READ_MAX_LINE_LENGTH),
   readMaxBytes: z.number().default(READ_MAX_BYTES),
+  readMaxMetaBytes: z.number().default(READ_MAX_META_BYTES),
   readStreamMinSize: z.number().default(STREAM_MIN_SIZE),
 })
 
@@ -70,12 +73,14 @@ export function apply(ctx: Context, config: Config): void {
   assertPositiveInteger('readLimit', resolved.readLimit)
   assertPositiveInteger('readMaxLineLength', resolved.readMaxLineLength)
   assertPositiveInteger('readMaxBytes', resolved.readMaxBytes)
+  assertPositiveInteger('readMaxMetaBytes', resolved.readMaxMetaBytes)
   assertPositiveInteger('readStreamMinSize', resolved.readStreamMinSize)
   if (resolved.read) {
     applyReadTool(ctx, {
       limit: resolved.readLimit,
       maxLineLength: resolved.readMaxLineLength,
       maxBytes: resolved.readMaxBytes,
+      maxMetaBytes: resolved.readMaxMetaBytes,
       streamMinSize: resolved.readStreamMinSize,
     })
   }

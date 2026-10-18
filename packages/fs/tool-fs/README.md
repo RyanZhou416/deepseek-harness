@@ -65,6 +65,7 @@ All keys are optional. The `read`, `readImage`, `write`, and `edit` switches def
 | `readLimit` | `2000` | Default and maximum lines returned by one `read` call |
 | `readMaxLineLength` | `2000` | Characters kept per line before truncation |
 | `readMaxBytes` | `51200` | Byte cap on one `read` call's selected lines; overflow ends the window with a capped footer |
+| `readMaxMetaBytes` | `8192` | Byte cap on the UI-only presentation meta persisted with one `read` result; a larger window persists no meta and replays as the generic card |
 | `readStreamMinSize` | `10485760` | Files at or above this size (or of unknown size) stream instead of loading whole into memory |
 
 The generated [configuration catalog](../../../docs/config-catalog.md#deepseek-aidsh-tool-fs) is the exhaustive source for every accepted field and its JSDoc.

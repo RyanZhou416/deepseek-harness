@@ -56,6 +56,17 @@ type CurrentCheckpointIdentity = CheckpointIdentity & {
 
 const PREDECESSOR_TITLE_KEY = 'title' as Extract<keyof SessionProjectionMap, string>
 
+/**
+ * Default ceiling on the serialized checkpoint bytes the cache keeps resident.
+ * The storage domain materializes every stored record at open and holds it for
+ * the process lifetime, so this budget is what bounds that always-resident set;
+ * a deployment with a long history stores far more than it can use.
+ */
+export const DEFAULT_MAX_RETAINED_BYTES = 256 * 1024 * 1024
+
+/** Records visited between event-loop yields in the startup budget pass. */
+const BUDGET_YIELD_INTERVAL = 64
+
 export { checkpointIdentity, checkpointRecord, checkpointRow, projectionCacheDomainSpec } from './spec.ts'
 export type { CheckpointIdentity, CheckpointRecord } from './spec.ts'
 
@@ -77,11 +88,20 @@ export interface Config {
   writeEveryEvents: number
   /** Longest time (milliseconds) a dirty checkpoint may stay unwritten between mandatory points. */
   writeIntervalMs: number
+  /**
+   * Largest total serialized checkpoint payload the cache retains across all
+   * Sessions. At init the newest records (ranked by their highest checkpoint
+   * seq) stay complete until this budget is reached and the rest are deleted;
+   * dropping a record only costs a longer cold replay. Defaults to
+   * {@link DEFAULT_MAX_RETAINED_BYTES}.
+   */
+  maxRetainedBytes?: number
 }
 
 export const Config: z<Config> = z.object({
   writeEveryEvents: z.natural().min(1).required(),
   writeIntervalMs: z.natural().min(1).required(),
+  maxRetainedBytes: z.natural().min(1).default(DEFAULT_MAX_RETAINED_BYTES),
 })
 
 /** Per-session write-behind bookkeeping (live sessions only; dropped at retire). */
@@ -113,12 +133,15 @@ export class SessionProjectionCache extends Service {
     super(ctx, 'sessionProjectionCache')
   }
 
-  /** Open the domain and install the write-behind listeners. */
+  /** Open the domain, install the write-behind listeners, then bound the inherited records. */
   protected async [Service.init](): Promise<void> {
     const domain = await this.ctx.storageDomain.open(projectionCacheDomainSpec)
     this.ctx.effect(() => () => domain.close(), 'sessionProjectionCache.domainClose')
     this.table = domain.table('sessions')
     this.installWritePath()
+    // The domain materializes every stored record at open, so the byte budget
+    // only reaches an already-populated deployment through this first pass.
+    void this.boundRetainedBytes()
   }
 
   /**
@@ -309,6 +332,72 @@ export class SessionProjectionCache extends Service {
     return restored.snapshot
   }
 
+  /**
+   * Bound the always-resident checkpoint set to {@link Config.maxRetainedBytes}.
+   *
+   * The storage domain materializes every stored record at open, so a long
+   * history costs heap for records nothing can use. Records rank by their
+   * highest checkpoint seq (the recency proxy: a Session that commits further
+   * has a newer row); the newest stay complete until the budget is reached and
+   * every remaining record is deleted. A retained record keeps every row, so
+   * `readWindow`'s complete-checkpoint gate and cached reads are unchanged for
+   * it; a deleted record only costs a longer cold replay, never a value.
+   *
+   * The pass runs in the background after init, yields to the event loop while
+   * it scans, and never rejects: a failed delete warns and the pass continues,
+   * and a closed domain ends it. The newest record is always retained, so a
+   * deployment whose single newest record exceeds the budget still keeps one
+   * complete checkpoint.
+   */
+  private async boundRetainedBytes(): Promise<void> {
+    const table = this.table
+    if (table === undefined) return
+    const budget = this.config.maxRetainedBytes ?? DEFAULT_MAX_RETAINED_BYTES
+    let ranked: { id: SessionId; bytes: number; seq: number }[]
+    try {
+      ranked = [...table.entries()]
+        .map(([id, record]) => ({ id, bytes: jsonBytes(record.rows), seq: newestSeq(record.rows) }))
+        .sort((left, right) => right.seq - left.seq || (left.id < right.id ? -1 : 1))
+    } catch (error: unknown) {
+      /* v8 ignore start -- fail-soft scan fault; the suite has no fault-injecting domain */
+      this.ctx.logger.warn(`session projection cache: retained-byte scan failed (cache stays complete): ${String(error)}`)
+      return
+      /* v8 ignore stop */
+    }
+    let retainedBytes = 0
+    let retained = 0
+    let deleted = 0
+    let reclaimed = 0
+    let scanned = 0
+    let withinBudget = true
+    for (const entry of ranked) {
+      scanned += 1
+      if (scanned % BUDGET_YIELD_INTERVAL === 0) await yieldToEventLoop()
+      if (withinBudget && (retained === 0 || retainedBytes + entry.bytes <= budget)) {
+        retainedBytes += entry.bytes
+        retained += 1
+        continue
+      }
+      withinBudget = false
+      try {
+        if (await table.delete(entry.id)) {
+          deleted += 1
+          reclaimed += entry.bytes
+        }
+      } catch (error: unknown) {
+        /* v8 ignore start -- fail-soft domain close; the suite has no fault-injecting domain */
+        if (this.table === undefined) return
+        this.ctx.logger.warn(`session projection cache: delete of "${entry.id}" failed (record kept): ${String(error)}`)
+        /* v8 ignore stop */
+      }
+    }
+    if (deleted > 0 || retained > 0) {
+      this.ctx.logger.info(
+        `session projection cache: retained ${String(retained)} records (${String(retainedBytes)} bytes) within the ${String(budget)}-byte budget; pruned ${String(deleted)} records (${String(reclaimed)} bytes)`,
+      )
+    }
+  }
+
 
   // --- write-behind (throttle + mandatory points) ---
 
@@ -475,6 +564,40 @@ function lifecycleIdentityMatches(
   return stored.createdAt === expected.createdAt
     && stored.cwd === expected.cwd
     && (stored.isSeeded ?? false) === expected.isSeeded
+}
+
+/**
+ * Highest checkpoint watermark in one record, the retention plan's recency
+ * proxy: a Session that committed further has a newer row. An empty record
+ * ranks below every written one.
+ * @param rows - The record's checkpoint rows.
+ * @returns The highest row seq, or -1 when the record has no rows.
+ */
+function newestSeq(rows: CheckpointRecord['rows']): number {
+  let newest = -1
+  for (const row of Object.values(rows)) if (row.seq > newest) newest = row.seq
+  return newest
+}
+
+/**
+ * UTF-8 size of one serialized rows object; the retention budget's unit.
+ * Every row is validated plain JSON, so stringification is total.
+ * @param value - A record's rows object.
+ * @returns Its UTF-8 byte count.
+ */
+function jsonBytes(value: unknown): number {
+  const text: string | undefined = JSON.stringify(value)
+  // oxlint-disable-next-line typescript/no-unnecessary-condition -- tsc types JSON.stringify as string | undefined.
+  return Buffer.byteLength(text ?? '', 'utf8')
+}
+
+/**
+ * Yield to the event loop between budget-pass chunks so bounding a large
+ * history cannot stall the caller in one long synchronous pass.
+ * @returns Resolution on the next immediate turn.
+ */
+function yieldToEventLoop(): Promise<void> {
+  return new Promise<void>((resolve) => { setImmediate(resolve) })
 }
 
 export default SessionProjectionCache

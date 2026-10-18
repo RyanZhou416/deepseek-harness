@@ -132,6 +132,15 @@ export class SessionCorpus {
   }
 
   /**
+   * Resolve the live Session for a read that must not detach its complete log.
+   * @param sessionId - session to resolve.
+   * @returns the live Session, or undefined when the id is not live in this process.
+   */
+  liveSession(sessionId: SessionId): Session | undefined {
+    return this._ctx.sessions.get(sessionId)
+  }
+
+  /**
    * Project unique logical sources immediately from one persistence listing.
    *
    * The synchronous projector runs before a persisted worker claims its next id.

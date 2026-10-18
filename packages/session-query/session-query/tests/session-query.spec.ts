@@ -1166,6 +1166,76 @@ describe('session-query exact reads', () => {
     }
   })
 
+  it('reads one live event window without detaching the complete live log', async () => {
+    const ctx = await liveContext({ readWindowMax: 2 })
+    const session = ctx.sessions.create(SessionId('bounded-live-window'), { meta: { cwd: '/work' } })
+    session.append('turn/start', { turn: 1 })
+    const total = 2_000
+    for (let index = 0; index < total; index += 1) {
+      session.append(
+        'user/message',
+        createUserMessage({
+          content: [{ type: 'text', text: `event ${String(index)}` }], source: { kind: 'user' },
+        }),
+        { surfaceOp: 'append' },
+      )
+    }
+    // Same log through the persisted branch, which still loads the complete
+    // source, so both branches can be compared for identical results.
+    const twin = header('bounded-live-window-twin')
+    TestPersistence.reset([{ meta: twin, events: [...session.snapshotEvents()] }])
+    await ctx.plugin(TestPersistence)
+
+    const snapshot = vi.spyOn(session, 'snapshotEvents')
+    const targetSeq = SessionSeq(total - 10)
+    const liveRead = await ctx.sessionQuery.readEvent({
+      sessionId: session.id, seq: targetSeq, before: 2, after: 2,
+    })
+
+    // The live branch detaches only the requested window; the complete array is
+    // never materialized (the persisted branch below keeps calling the full read).
+    expect(snapshot.mock.calls).toEqual([[
+      SessionLogOffset(Number(targetSeq) - 2),
+      SessionLogOffset(Number(targetSeq) + 3),
+    ]])
+    expect(TestPersistence.readCalls).toEqual([])
+    expect(TestPersistence.listCalls).toBe(0)
+
+    expect(Number(liveRead.startSeq)).toBe(Number(targetSeq) - 2)
+    expect(Number(liveRead.endSeq)).toBe(Number(targetSeq) + 2)
+    expect(liveRead.events.map(event => Number(event.seq))).toEqual([
+      Number(targetSeq) - 2, Number(targetSeq) - 1, Number(targetSeq),
+      Number(targetSeq) + 1, Number(targetSeq) + 2,
+    ])
+    expect(liveRead.session).toEqual(session.header)
+    expect(liveRead.target).toEqual(session.eventAt(targetSeq))
+    expect(liveRead.target).not.toBe(session.eventAt(targetSeq))
+    expect(() => {
+      (liveRead.target.data as { content: unknown[] }).content = []
+    }).toThrow()
+
+    const persistedRead = await ctx.sessionQuery.readEvent({
+      sessionId: twin.id, seq: targetSeq, before: 2, after: 2,
+    })
+    expect(persistedRead.events).toEqual(liveRead.events)
+    expect(persistedRead.target).toEqual(liveRead.target)
+    expect([persistedRead.startSeq, persistedRead.endSeq]).toEqual([liveRead.startSeq, liveRead.endSeq])
+    expect(TestPersistence.readCalls).toEqual([twin.id])
+
+    // A missing seq and a cancelled read still fail with the documented codes
+    // without touching the log or persistence.
+    snapshot.mockClear()
+    await expect(ctx.sessionQuery.readEvent({ sessionId: session.id, seq: SessionSeq(10_000) }))
+      .rejects.toThrow(expectCode('SESSION_QUERY_EVENT_NOT_FOUND'))
+    const cancelled = new AbortController()
+    const reason = new Error('live window cancelled')
+    cancelled.abort(reason)
+    await expect(ctx.sessionQuery.readEvent({ sessionId: session.id, seq: targetSeq }, cancelled.signal))
+      .rejects.toBe(reason)
+    expect(snapshot.mock.calls).toEqual([])
+    expect(TestPersistence.readCalls).toEqual([twin.id])
+  })
+
   it('merges authoritative persistence with live precedence and detects conflicts', async () => {
     const shared = header('shared', 3, { cwd: '/same' })
     const durable = header('durable', 2)

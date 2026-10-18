@@ -7,8 +7,8 @@
 
 import { createSystemMessage, createUserMessage } from '@deepseek-ai/dsh-llm'
 import type { ContextFormed, ContextSnapshotSection, Message } from '@deepseek-ai/dsh-llm'
-import type { Session, SessionEvent, SessionSeq, SurfaceIntent, SystemMessage, UserMessage } from '@deepseek-ai/dsh-session'
-import { isReplacementSurfaceEvent } from '@deepseek-ai/dsh-session'
+import type { Session, SurfaceIntent, SystemMessage, UserMessage } from '@deepseek-ai/dsh-session'
+import { isReplacementSurfaceEvent, SessionSeq } from '@deepseek-ai/dsh-session'
 import type { Context } from '@deepseek-ai/cordis'
 declare module '@deepseek-ai/dsh-llm' {
   interface MessageSourceMap {
@@ -46,12 +46,6 @@ export interface SystemPromptDecisionInput {
    * changed on a route without tool-update support.
    */
   startsSeries: boolean
-}
-
-/** Committed events from the newest backward; the restore scans stop at the first match. */
-function eventsNewestFirst(session: Session): readonly SessionEvent[] {
-  // oxlint-disable-next-line typescript/no-deprecated -- Existing Session history read; migration deferred.
-  return session.snapshotEvents().toReversed()
 }
 
 /**
@@ -122,8 +116,14 @@ export class RuntimeContextProjection {
    */
   constructor(ctx: Context, session: Session) {
     const surface = new Set(session.surface.nodes)
-    for (const event of eventsNewestFirst(session)) {
-      if (event.type !== 'user/message' || !isOwned(event.data)) continue
+    // Scan the committed log newest-first through indexed reads instead of
+    // materializing a reversed full-log snapshot. An owned message anywhere
+    // proves a snapshot existed; only the newest one still on the surface
+    // restores the retained text.
+    for (let seq = session.seq - 1; seq >= 0; seq -= 1) {
+      // oxlint-disable-next-line typescript/no-deprecated -- Existing Session history read; migration deferred.
+      const event = session.eventAt(SessionSeq(seq))
+      if (event?.type !== 'user/message' || !isOwned(event.data)) continue
       this.retained ??= null
       if (surface.has(event.seq)) {
         this.retained = { seq: event.seq, text: textOf(event.data) }

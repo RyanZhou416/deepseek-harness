@@ -33,7 +33,7 @@ import {
 import {
   apply as storageDomainApply, Config as storageDomainConfig, inject as storageDomainInject, name as storageDomainName,
 } from '@deepseek-ai/dsh-storage-domain'
-import SessionProjectionCache from '../src/index.ts'
+import SessionProjectionCache, { DEFAULT_MAX_RETAINED_BYTES } from '../src/index.ts'
 import { checkpointRecord, projectionCacheDomainSpec } from '../src/spec.ts'
 import type { CheckpointRecord } from '../src/spec.ts'
 
@@ -954,5 +954,114 @@ describe('SessionProjectionCache cold-read seeding', () => {
     await vi.waitFor(() => {
       expect(warn).toHaveBeenCalledWith(expect.stringContaining('cold-read write-back for "cold-fail" failed'))
     }, { timeout: 5_000 })
+  })
+})
+
+describe('SessionProjectionCache retained-byte budget', () => {
+  /** One heavy client-only row; a retained record must keep it byte-identical. */
+  const heavyRow = (seq: number, label: string): CheckpointRecord['rows'][string] => ({
+    ver: 1,
+    seq: SessionSeq(seq),
+    val: { items: Array.from({ length: 40 }, (_, index) => `${label}-${String(index)}-${'x'.repeat(40)}`) },
+  })
+  const rowsFor = (seq: number, label: string): CheckpointRecord['rows'] => ({
+    contextTimeline: heavyRow(seq, label),
+    'cache-test/marks': { ver: 1, seq: SessionSeq(seq), val: { marks: [label] } },
+  })
+  /** The budget's unit: compact JSON bytes of one record's rows, as the cache measures it. */
+  const rowBytes = (rows: CheckpointRecord['rows']): number => Buffer.byteLength(JSON.stringify(rows))
+
+  /** Boot the storage/domain/cache composition with a logger spy installed before init. */
+  async function budgetHarness(root: string, maxRetainedBytes: number) {
+    const ctx = new Context()
+    contexts.push(ctx)
+    await ctx.plugin(Storage)
+    await ctx.plugin({ name: storageJsonName, inject: storageJsonInject, apply: storageJsonApply, Config: storageJsonConfig }, { root })
+    await ctx.plugin({ name: storageDomainName, inject: storageDomainInject, apply: storageDomainApply, Config: storageDomainConfig }, { backend: 'json' })
+    await ctx.plugin(SessionStore)
+    await ctx.plugin(SessionProjectionRegistry)
+    ctx.sessionProjections.register(marksUnit())
+    const info = vi.spyOn(ctx.logger, 'info').mockImplementation(() => {})
+    const warn = vi.spyOn(ctx.logger, 'warn').mockImplementation(() => {})
+    await ctx.plugin(SessionProjectionCache, { writeEveryEvents: 100, writeIntervalMs: 60_000, maxRetainedBytes })
+    return { ctx, cache: ctx.sessionProjectionCache, info, warn }
+  }
+
+  it('validates the budget with a default and rejects a non-positive or fractional value', () => {
+    const resolved = SessionProjectionCache.Config({ writeEveryEvents: 1, writeIntervalMs: 1 })
+    expect(resolved.maxRetainedBytes).toBe(DEFAULT_MAX_RETAINED_BYTES)
+    expect(() => SessionProjectionCache.Config({ writeEveryEvents: 1, writeIntervalMs: 1, maxRetainedBytes: 0 }))
+      .toThrow()
+    expect(() => SessionProjectionCache.Config({ writeEveryEvents: 1, writeIntervalMs: 1, maxRetainedBytes: 1.5 }))
+      .toThrow()
+  })
+
+  it('keeps the newest complete records within the budget and deletes the rest', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-projcache-'))
+    roots.push(root)
+    const newest = rowsFor(9, 'newest')
+    const middle = rowsFor(6, 'middle')
+    const oldest = rowsFor(2, 'oldest')
+    await seedRecord(root, 'newest', newest)
+    await seedRecord(root, 'middle', middle)
+    await seedRecord(root, 'oldest', oldest)
+    // Room for the two newest records and nothing else.
+    const { cache, info } = await budgetHarness(root, rowBytes(newest) + rowBytes(middle) + 16)
+    await vi.waitFor(async () => {
+      expect(await storedRecord(root, SessionId('oldest'))).toBeUndefined()
+    }, { timeout: 5_000 })
+    // Retained records are complete: no wire row was dropped, including the heavy one.
+    expect(await storedRows(root, SessionId('newest'))).toEqual(newest)
+    expect(await storedRows(root, SessionId('middle'))).toEqual(middle)
+    expect(cache.cachedSnapshot(headerOf(SessionId('newest')))?.values['cache-test/marks'])
+      .toEqual({ marks: ['newest'] })
+    // Bytes accounting: the pass reports exactly what it retained and pruned.
+    await vi.waitFor(() => {
+      expect(info).toHaveBeenCalledWith(expect.stringContaining(
+        `retained 2 records (${String(rowBytes(newest) + rowBytes(middle))} bytes)`,
+      ))
+    }, { timeout: 5_000 })
+    expect(info).toHaveBeenCalledWith(expect.stringContaining(
+      `pruned 1 records (${String(rowBytes(oldest))} bytes)`,
+    ))
+  })
+
+  it('keeps the newest record even when it alone exceeds the budget', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-projcache-'))
+    roots.push(root)
+    const newest = rowsFor(9, 'huge')
+    await seedRecord(root, 'huge', newest)
+    const { cache } = await budgetHarness(root, 16)
+    await new Promise<void>((resolve) => { setImmediate(resolve) })
+    expect(await storedRows(root, SessionId('huge'))).toEqual(newest)
+    expect(cache.cachedSnapshot(headerOf(SessionId('huge')))?.values['cache-test/marks'])
+      .toEqual({ marks: ['huge'] })
+  })
+
+  it('leaves an empty cache silent and throws nothing', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-projcache-'))
+    roots.push(root)
+    const { cache, info, warn } = await budgetHarness(root, 1024)
+    await new Promise<void>((resolve) => { setImmediate(resolve) })
+    expect(cache.cachedSnapshot(headerOf(SessionId('absent')))).toBeUndefined()
+    expect(info).not.toHaveBeenCalled()
+    expect(warn).not.toHaveBeenCalled()
+  })
+
+  it('bounds a history larger than one scan chunk and keeps the newest records', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-projcache-'))
+    roots.push(root)
+    for (let index = 0; index < 70; index += 1) {
+      await seedRecord(root, `chunk-${String(index)}`, rowsFor(index + 1, `chunk-${String(index)}`))
+    }
+    const newest = rowsFor(70, 'chunk-69')
+    const { cache } = await budgetHarness(root, rowBytes(newest) + 16)
+    await vi.waitFor(async () => {
+      expect(await storedRecord(root, SessionId('chunk-0'))).toBeUndefined()
+      expect(await storedRecord(root, SessionId('chunk-68'))).toBeUndefined()
+    }, { timeout: 5_000 })
+    expect(await storedRows(root, SessionId('chunk-69'))).toEqual(newest)
+    expect(cache.cachedSnapshot(headerOf(SessionId('chunk-69')))?.values['cache-test/marks'])
+      .toEqual({ marks: ['chunk-69'] })
   })
 })

@@ -8,6 +8,7 @@ import { currentSessionMessageProjections } from '@deepseek-ai/dsh-session-forma
 import { Context, Service } from '@deepseek-ai/cordis'
 import {
   Session,
+  SessionLogOffset,
   SessionSeq,
   snapshotSessionEvent,
   type SessionId,
@@ -427,6 +428,14 @@ export abstract class SessionQueryEngine extends Service {
     after: number,
     signal?: AbortSignal,
   ): Promise<SessionEventWindow> {
+    const live = this._corpus.liveSession(sessionId)
+    if (live !== undefined) {
+      // A live Session already owns its log in this process, so the requested
+      // cut and its bounded neighbors are detached directly. Reading through a
+      // corpus load here would deep-clone the complete log for one window.
+      signal?.throwIfAborted()
+      return this._liveEventWindow(sessionId, live, seq, before, after)
+    }
     const loaded = await this._corpus.load(sessionId, signal)
     signal?.throwIfAborted()
     const target = loaded.events[seq]
@@ -448,6 +457,49 @@ export abstract class SessionQueryEngine extends Service {
       inheritedEventCount: loaded.inheritedEventCount,
       target: targetSnapshot,
       events,
+      startSeq,
+      endSeq,
+    }
+  }
+
+  /**
+   * Detach the target event and its bounded neighbors straight from a live log.
+   * @param sessionId - session identity used in the not-found diagnostic.
+   * @param session - live Session holding the authoritative log.
+   * @param seq - exact target event sequence number.
+   * @param before - earlier neighbor count, validated by {@link readEvent}.
+   * @param after - later neighbor count, validated by {@link readEvent}.
+   * @returns the detached header, target, and bounded window.
+   * @throws {@link SessionQueryError} with code `SESSION_QUERY_EVENT_NOT_FOUND`
+   *   when the log has no event at `seq`.
+   */
+  private _liveEventWindow(
+    sessionId: SessionId,
+    session: Session,
+    seq: SessionSeqType,
+    before: number,
+    after: number,
+  ): SessionEventWindow {
+    // oxlint-disable-next-line typescript/no-deprecated -- Bounded live read: only the requested window is detached.
+    const target = session.eventAt(seq)
+    if (target === undefined || target.seq !== seq) {
+      throw new SessionQueryError(
+        `session "${sessionId}" has no event at seq ${seq}`,
+        'SESSION_QUERY_EVENT_NOT_FOUND',
+      )
+    }
+    const startSeq = SessionSeq(Math.max(0, seq - before))
+    const endSeq = SessionSeq(Math.min(session.seq - 1, seq + after))
+    const targetSnapshot = snapshotSessionEvent(target)
+    // Bounded live read: slice the requested window out of the log instead of
+    // materializing the complete event array.
+    // oxlint-disable-next-line typescript/no-deprecated -- see above
+    const window = session.snapshotEvents(SessionLogOffset(startSeq), SessionLogOffset(endSeq + 1))
+    return {
+      session: structuredClone(session.header),
+      inheritedEventCount: session.inheritedEventCount,
+      target: targetSnapshot,
+      events: window.map(event => event === target ? targetSnapshot : snapshotSessionEvent(event)),
       startSeq,
       endSeq,
     }

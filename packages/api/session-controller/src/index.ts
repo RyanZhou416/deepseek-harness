@@ -97,9 +97,9 @@ function addressedSession(request: { readonly address: SessionAddress }): Sessio
 export interface Config {
   /** Override platform desktop-opener detection. */
   readonly nativeOpen?: boolean
-  /** Positive integral milliseconds of list work before yielding between complete rows. */
   /** Milliseconds an owned, durable idle Session remains live after activity; zero disables eviction. */
   readonly idleSessionRetentionMs?: number
+  /** Positive integral milliseconds of list work before yielding between complete rows. */
   readonly listWorkSliceMs?: number
   /** Projection keys the catalog omits before rendering its hint values. */
   readonly listProjectionExcludeKeys?: string[]

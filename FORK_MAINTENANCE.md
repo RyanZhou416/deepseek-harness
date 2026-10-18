@@ -333,6 +333,12 @@ Session search 和 event search 使用 exact-generation/request/cursor key 的 i
 
 ### Runtime residency bounds
 
+#### Projection-cache budget and live-event reads
+
+`session-projection-cache` 的 domain 在启动时把每条历史记录加载进常驻内存表。fork 用 `maxRetainedBytes`（默认 256 MiB，按 checkpoint 最高 seq 作为最近性代理）在后台保留最新的完整记录，超预算的旧记录整体删除；不裁剪任何 wire 行，因此 `cachedSnapshot` 和 readWindow 的完整 checkpoint 门槛对保留会话保持不变。缓存始终是提示而非事实来源，删除只增加冷重放的 tail，不改变身份或值。本机 14,586 条 / 776.3 MB compact JSON 实测加载 1,163 MiB heap，256 MiB 预算保留 1,323 条 / 256.0 MB（约 384 MiB heap），删除 13,263 条（约 780 MiB 回收）；128 MiB 预算可回收约 972 MiB，是更激进的部署选择。`session-query` 的 live 原始 event 读取只取 `snapshotEvents(start,end)` 的有界窗口并快照该窗口，不再为读一条事件深拷贝完整日志；`read` 工具的 UI `meta.lines` 另有 `readMaxMetaBytes`（默认 8 KiB），超预算只省略可选 meta，模型文本不变。`RuntimeContextProjection` 用倒序 `eventAt` 扫描，不再物化完整事件数组。
+
+**Preservation rule.** 保留按保留字节预算裁剪历史记录的做法、只保留完整记录（绝不裁 wire 行）以及 live raw-event 的有界读取；这些优化只能让缓存/展示提示退化，不能改变 durable 值、Session 格式或模型内容。上游合并若替换 projection cache 或 session-query 读取路径，必须重新证明历史记录不会无界驻留、单事件读取不会深拷贝完整日志。
+
 #### Idle Web Agent eviction
 
 `packages/api/session-controller/src/agent.ts`、`index.ts`、`history.ts` 和 `commands.ts` 让 Session Controller 持有其 create/resume/fork 的 `AgentHandle`。默认 `idleSessionRetentionMs=60000`（1 分钟，可显式覆盖）；只有 durable、idle、无 pending inbox、无 live child、无 running/stopping job 的 owned Agent 才进入计时。history follower 仅在开场帧交付期间暂时阻止计时，不再使已打开的空闲 Session 永久驻留。
@@ -931,6 +937,9 @@ corepack pnpm@10.30.2 verify
 
 ## Known limitations
 
+- Host heap scales with **live decoded Session history**, not with the file corpus: measured ≈6.4 KB per live event (5,961–6,391 across runs). 18 GiB corresponds to ≈2.5–2.9M live events; current peak was 15.5 GiB at 1.68M events. Once live, each 153–163 MB Session is ≈1 GiB heap. Decoding and GC sawtooth add ~0.8 GiB; disposed Agents/Sessions are reclaimed (no retained-object leak), and followers/caches are not the root.
+- The projection-cache retained-byte budget, bounded live raw-event read, `readMaxMetaBytes` and runtime-context reverse scan reduce cache/transient copies (measured projection-cache reclaim ≈780 MiB at the 256 MiB default; 128 MiB reclaims ≈972 MiB), but they do not reduce the inherent live event payload. A further material reduction needs one of: fewer simultaneously live Agents/Sessions, a stream/assistant-message retention policy (assistant `stream` alone is ~22% of one session's event JSON and is format-adjacent), or an event-level lazy/compressed store. Tool-result spill is already active in the base bundle (`maxInlineTokens: 12500`); lowering it only bounds future results and changes what the model sees, and `read` is spill-exempt.
+- `readMaxMetaBytes` (default 8 KiB) only bounds future `read` result meta: existing Session logs keep their previously written `meta.lines`; the cap can make an oversized read card replay as the generic text card, while model-visible text is unchanged.
 - 运行中的 Agent 仍完整持有 Host `Session.log`；一个持续输出的单会话仍可能线性增长。`SessionHandle.read(offset, length)` 目前也先解码整份 JSONL/Zstd 再切片；非 live 普通 Session 的 follow 首帧和旧页已走窗口读取，但 live、seeded、历史代际、无完整 projection checkpoint 或索引不可用时仍回退完整观察，因此不是运行中 Agent 的 event-level paging。后续实现须先满足[同步事件读取弃用约束](.agents/notes/implemented/architecture/2026-09-09-deprecate-synchronous-session-event-reads.md)，不能只给 `read()` 增加分页参数。
 - 大会话首次 `beforeSeq` 仍在读取进程内同步构建代际索引，没有后台或并行预建：phase-3 在 161 MB / 182,347 事件上实测首次页 2,166.6 ms（建索引约 2,010.9 ms，旧 phase-2 约 14.1 s），预热 2000 事件页 155.7–182.8 ms，完整读取 3,198.5 ms；进程已保留约 1.3 GB 时首次页可慢到约 3.28 s。每个 warm page 重新解析约 7.3 MB sidecar，没有常驻 index cache；小于 2 MiB 的日志由 history 直接完整读取，因为无索引尾部可能慢于完整读取（949 KB：80–98 ms vs 26 ms）。`benchmarks/session-open/` 的尾部与 `beforeSeq` 用例真实执行 `readWindow`（tsc host 通过、2/2 通过；32k 事件夹具上尾部约 198 ms、冷 `beforeSeq` 约 2,470 ms、预热约 126 ms），断言窗口结构与索引复用，不设墙钟预算，因此不是 CI 性能门禁。
 - Alpha.2 已显著降低长会话初始化、流式更新、代码高亮、布局与导航预览成本，但仍不等价于完整 variable-height Chat virtualization；Tool lazy 也不能替代它。

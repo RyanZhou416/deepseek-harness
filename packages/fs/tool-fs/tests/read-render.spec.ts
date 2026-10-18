@@ -9,8 +9,8 @@ import { setFlagsFromString } from 'node:v8'
 import { runInNewContext } from 'node:vm'
 import { describe, expect, it } from 'vitest'
 import { languageForPath } from '@deepseek-ai/dsh-util-code-language'
-import { buildWindow, langFromPath, readMetaFromMeta, READ_MAX_BYTES, READ_MAX_LINE_LENGTH } from '../src/read-render.ts'
-import type { FileTextLine, ReadWindow } from '../src/read-render.ts'
+import { buildWindow, capReadMetaByBytes, langFromPath, readMetaFromMeta, READ_MAX_BYTES, READ_MAX_LINE_LENGTH } from '../src/read-render.ts'
+import type { FileTextLine, FsReadMeta, ReadWindow } from '../src/read-render.ts'
 
 const DEFAULT_CAPS = { maxLineLength: READ_MAX_LINE_LENGTH, maxBytes: READ_MAX_BYTES }
 const READ_ALL: ReadWindow = { offset: 1, limit: 2000, ...DEFAULT_CAPS }
@@ -296,5 +296,21 @@ describe('readMetaFromMeta', () => {
     expect(readMetaFromMeta({ ...twoLines, lines: [{ number: 2, text: 'b' }, { number: 1, text: 'a' }], totalLines: 2 })).toBeUndefined()
     // A line number past totalLines.
     expect(readMetaFromMeta({ ...twoLines, lines: [{ number: 3, text: 'c' }], totalLines: 2 })).toBeUndefined()
+  })
+})
+
+describe('capReadMetaByBytes', () => {
+  const meta: FsReadMeta = { path: '/abs/f', offset: 1, lines: [{ number: 1, text: 'héllo' }], totalLines: 1 }
+
+  it('keeps the meta exactly at the serialized byte budget and drops it one byte over', () => {
+    const bytes = Buffer.byteLength(JSON.stringify(meta), 'utf8')
+    expect(capReadMetaByBytes(meta, bytes)).toBe(meta)
+    expect(capReadMetaByBytes(meta, bytes + 1)).toBe(meta)
+    expect(capReadMetaByBytes(meta, bytes - 1)).toBeUndefined()
+  })
+
+  it('measures UTF-8 bytes rather than UTF-16 characters', () => {
+    // 'é' costs two UTF-8 bytes but one character: a character count would keep it.
+    expect(capReadMetaByBytes(meta, JSON.stringify(meta).length)).toBeUndefined()
   })
 })
