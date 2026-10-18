@@ -27,20 +27,20 @@ id: 2026-09-28-user-message-revisions
 baseline: false
 changes:
   - root: "event:agent/inbox/spliced"
-    previous: "2026-09-16-session-format-v4"
-    after: "5756ffc9009c737a18b010e3a3faf243141ede9e9fd622ab5f4df5f22d00b3c2"
+    previous: "2026-10-13-user-rpc-principal"
+    after: "ea1a81f67d4a0f20e95589b1d95fc879ea9e45d25b3fef040771e86a16254aea"
     decision: same-version
   - root: "event:developer/message"
-    previous: "2026-09-16-session-format-v4"
-    after: "801c7011d48ddb967e1c069a5161867661a6a0b6511b89896a1e153443144754"
+    previous: "2026-10-13-user-rpc-principal"
+    after: "c0c7977f3c84204e1d98cfa62430678b58df50994c9681a1c9e9fa2498c6ca3f"
     decision: same-version
   - root: "event:session/title-llm-request"
-    previous: "2026-09-16-session-format-v4"
-    after: "a48348e345a29814b0a5d98c088468456e6bbed2d1d2f5633ece02de9e60d2ad"
+    previous: "2026-10-13-user-rpc-principal"
+    after: "0ce71693ef964c3edacbff894b35177282d2b54e7fcc5abd7b3457f6aee0859d"
     decision: same-version
   - root: "event:user/message"
-    previous: "2026-09-16-session-format-v4"
-    after: "4a2f5a6fef33732bab391f140ce9bc45d031e7cd00f7a1c2597a58fd9860443a"
+    previous: "2026-10-13-user-rpc-principal"
+    after: "33bdc1a0000847a17f8500e4188cbddc52ae676fdffe525b5dae80d21dfadfdf"
     decision: same-version
 ```
 
