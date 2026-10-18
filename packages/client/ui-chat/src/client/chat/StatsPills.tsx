@@ -83,6 +83,44 @@ export function deriveStats(nodes: ChatSnapshot['legacy']['nodes']): WindowStats
   return { turns: turns.size, steps, llmMs, toolMs, ttftMs, ttftSteps, decodeMs, decodeTokens }
 }
 
+/** Output throughput of the most recent settled turn in the loaded history. */
+export interface TurnSpeed {
+  /** Host-assigned turn number. */
+  turn: number
+  /** Output tokens per second across that turn's timed assistant steps. */
+  tps: number
+}
+
+/**
+ * Fold the latest settled turn's assistant steps into its own output speed.
+ *
+ * Only the newest turn present in the loaded snapshot is considered: the
+ * session-wide TPS remains the durable whole-log figure, while this reading
+ * answers "how fast was this turn". A completed stream without decoder
+ * boundaries or provider output tokens has no honest turn throughput.
+ * @param nodes - snapshot nodes, including assistant steps with timing.
+ * @returns the latest turn's speed, or null when it cannot be derived.
+ */
+export function latestTurnSpeed(nodes: ChatSnapshot['legacy']['nodes']): TurnSpeed | null {
+  let latestTurn: number | undefined
+  for (const node of nodes) {
+    if (node.kind !== 'assistant') continue
+    if (latestTurn === undefined || node.turn > latestTurn) latestTurn = node.turn
+  }
+  if (latestTurn === undefined) return null
+  let decodeMs = 0
+  let decodeTokens = 0
+  for (const node of nodes) {
+    if (node.kind !== 'assistant' || node.turn !== latestTurn) continue
+    const reading = assistantStepReading(node)
+    if (reading.decodeMs === null || reading.outputTokens === null) continue
+    decodeMs += reading.decodeMs
+    decodeTokens += reading.outputTokens
+  }
+  if (decodeMs <= 0 || decodeTokens <= 0) return null
+  return { turn: latestTurn, tps: decodeTokens / (decodeMs / 1_000) }
+}
+
 /**
  * Compact duration: 45.2s under a minute, 2m42s from there on.
  * @param ms - duration in milliseconds.
@@ -237,6 +275,8 @@ function DialogPill({ stat, icon, label, ariaLabel, title, titleValue, children 
 export const ActivityPill = memo(function ActivityPill({ useChat, useProjection, usePerformanceUsage, t }: StatPillProps) {
   const mode = usePerformanceUsage(value => value)
   const stats = useSessionStats(useChat, useProjection)
+  const settledNodes = useChat(s => s.legacy.nodes)
+  const turnSpeed = useMemo(() => latestTurnSpeed(settledNodes), [settledNodes])
   const speed = stats.decodeMs > 0 ? decodeSpeed(stats, t) : null
   const icon = <IconGaugeOutlineRegular />
   if (mode === 'compact') return speed === null ? null : <PlainPill stat="activity" icon={icon} label={speed} />
@@ -271,6 +311,12 @@ export const ActivityPill = memo(function ActivityPill({ useChat, useProjection,
           <>
             <dt>{t('stats.dialog.speed')}</dt>
             <dd>{speed}</dd>
+          </>
+        )}
+        {turnSpeed !== null && (
+          <>
+            <dt>{t('stats.dialog.turnSpeed')}</dt>
+            <dd>{t('message.tokensPerSecond', { tps: formatTokensPerSecond(turnSpeed.tps) })}</dd>
           </>
         )}
       </dl>

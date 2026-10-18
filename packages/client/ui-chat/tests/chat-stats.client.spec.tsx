@@ -9,7 +9,7 @@ import { bindSnapshotSelector, makeTranslate } from '@deepseek-ai/dsh-client-tes
 import { en as commonEn } from '@deepseek-ai/dsh-client-locale/src/locales/en.ts'
 import { zh as commonZh } from '@deepseek-ai/dsh-client-locale/src/locales/zh.ts'
 import { PartialArguments } from '@deepseek-ai/dsh-util-values'
-import { ActivityPill, UsagePill, deriveStats, formatDuration, type StatPillProps } from '../src/client/chat/StatsPills.tsx'
+import { ActivityPill, UsagePill, deriveStats, formatDuration, latestTurnSpeed, type StatPillProps } from '../src/client/chat/StatsPills.tsx'
 import { formatTokens } from '../src/client/chat/token-format.ts'
 import { en, zh } from '../src/client/locale.ts'
 import { chatSnapshotFixture } from './chat-snapshot-fixture.client.ts'
@@ -74,6 +74,20 @@ describe('deriveStats', () => {
     expect(Object.keys(stats).sort()).toEqual(
       ['decodeMs', 'decodeTokens', 'llmMs', 'steps', 'toolMs', 'ttftMs', 'ttftSteps', 'turns'],
     )
+  })
+
+  it('derives this turn speed from only the latest settled turn', () => {
+    const first: AssistantMessageNode = {
+      ...assistant(1, 1, { outputTokens: 60 }),
+      timing: { stepStartTime: 1_000, firstTokenTime: 2_000, completedTime: 5_000 },
+    }
+    const second: AssistantMessageNode = {
+      ...assistant(2, 2, { outputTokens: 20 }),
+      timing: { stepStartTime: 6_000, firstTokenTime: 6_200, completedTime: 7_000 },
+    }
+    expect(latestTurnSpeed([first, second])).toEqual({ turn: 2, tps: 25 })
+    expect(latestTurnSpeed([first])).toEqual({ turn: 1, tps: 20 })
+    expect(latestTurnSpeed([assistant(3, 3)])).toBeNull()
   })
 
   it('ignores tool results with no call time', () => {
@@ -276,8 +290,25 @@ describe('composer stats pills', () => {
     expect(details.textContent).not.toContain('Tool time')
     expect(details.textContent).toContain('Avg time to first token (TTFT)0.8s')
     expect(details.textContent).toContain('Tokens per second (TPS)20 tok/s')
+    expect(details.textContent).toContain('This turn TPS20 tok/s')
     // Token accounting lives on the usage pill's own dialog, not here.
     expect(dialog.textContent).not.toContain('Token usage')
+  })
+
+  it('shows the latest turn speed alongside the whole-session speed', () => {
+    const previous: AssistantMessageNode = {
+      ...assistant(1, 1, { outputTokens: 60 }),
+      timing: { stepStartTime: 1_000, firstTokenTime: 2_000, completedTime: 5_000 },
+    }
+    const latest: AssistantMessageNode = {
+      ...assistant(2, 2, { outputTokens: 20 }),
+      timing: { stepStartTime: 6_000, firstTokenTime: 6_200, completedTime: 7_000 },
+    }
+    const { source } = makeSource({ nodes: [previous, latest] })
+    const view = render(<StatsPills {...props(source)} />)
+    fireEvent.click(view.getAllByRole('button')[0]!)
+    const details = view.getByRole('dialog').querySelector('[data-session-stats-details]') as HTMLElement
+    expect(details.textContent).toContain('This turn TPS25 tok/s')
   })
 
   it('click-opens the token-usage dialog carrying the headline total and exact buckets', () => {
@@ -368,6 +399,7 @@ describe('composer stats pills', () => {
     expect(timeDialog.textContent).toContain('模型用时3.8秒')
     expect(timeDialog.textContent).toContain('首 token 平均（TTFT）0.8秒')
     expect(timeDialog.textContent).toContain('输出速度（TPS）20 tok/s')
+    expect(timeDialog.textContent).toContain('本轮输出速度20 tok/s')
     fireEvent.keyDown(document, { key: 'Escape' })
     fireEvent.click(usagePill)
     const usageDialog = view.getByRole('dialog')
