@@ -216,8 +216,8 @@ describe('Session history paging through the real JSONL generation index', () =>
     const readWindow = vi.spyOn(backend.ctx.sessionQuery, 'readWindow')
     const open = vi.spyOn(backend.ctx.sessionPersistence, 'open')
 
-    // Without a projection checkpoint the opening falls back to the complete
-    // observation, so clear the full-read spy before the page walk.
+    // Without a projection checkpoint the opening still comes from the window,
+    // so clear the full-read spy before the page walk.
     const opening = await openSnapshot(backend.history, { maxMessages: 2 })
     expect(pageSeqs(opening)).toEqual([13, 14, 15, 16, 17])
     expect(opening.hasMore).toBe(true)
@@ -401,21 +401,22 @@ describe('Session history paging through the real JSONL generation index', () =>
     expect(open).toHaveBeenCalled()
   })
 
-  it('falls back to the exact observation when the real window carries no projection baseline', async () => {    const backend = await realBackend()
+  it('opens from the real window without a projection baseline and keeps pages windowed', async () => {
+    const backend = await realBackend()
     const readWindow = vi.spyOn(backend.ctx.sessionQuery, 'readWindow')
     const observe = vi.spyOn(backend.ctx.sessionQuery, 'observeSession')
 
     const frame = await openSnapshot(backend.history)
 
-    // The tail window itself succeeded; without a complete checkpoint baseline
-    // the opener takes the complete observation instead of inventing values.
+    // The tail window answers the opening; the absent checkpoint is not
+    // replaced with an empty exact cut, so the frame carries no block.
     expect(readWindow).toHaveBeenCalledOnce()
     expect(readWindow.mock.calls[0]?.[1]).not.toHaveProperty('beforeSeq')
-    expect(observe).toHaveBeenCalledOnce()
+    expect(observe).not.toHaveBeenCalled()
     expect(frame.records.map(record => record.event.seq)).toEqual(backend.events.map(event => event.seq))
     expect(frame.cursor).toBe(backend.events.length - 1)
     expect(frame.hasMore).toBe(false)
-    expect(frame.projections.asOfSeq).toBe(frame.cursor)
+    expect(frame.projections).toBeUndefined()
 
     // Pages carry no projection block, so the index still serves them.
     const page = await loadPage(backend.history, {
@@ -424,7 +425,7 @@ describe('Session history paging through the real JSONL generation index', () =>
       maxMessages: 2,
     })
     expect(pageSeqs(page)).toEqual([13, 14, 15, 16, 17])
-    expect(observe).toHaveBeenCalledOnce()
+    expect(observe).not.toHaveBeenCalled()
   })
 })
 

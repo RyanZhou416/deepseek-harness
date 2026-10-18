@@ -26,7 +26,9 @@ import { titleProjectionDefinition } from '@deepseek-ai/dsh-session-title'
 import Storage from '@deepseek-ai/dsh-storage'
 import * as StorageDomain from '@deepseek-ai/dsh-storage-domain'
 import * as StorageJson from '@deepseek-ai/dsh-storage-json'
-import type { SessionControlFrame, SessionFollowFrame } from '@deepseek-ai/dsh-api-session-controller/types'
+import type {
+  SessionControlFrame, SessionFollowFrame, SessionProjectionBaseline,
+} from '@deepseek-ai/dsh-api-session-controller/types'
 import {
   mountAgentLoopTestDependencies,
   mountAgentLoopTestHarness,
@@ -69,12 +71,17 @@ function page(
   })
 }
 
+/** A complete-observation opening, which always carries the exact projection block here. */
+type ProjectedSnapshot = Extract<SessionFollowFrame, { type: 'snapshot' }> & {
+  readonly projections: SessionProjectionBaseline
+}
+
 /** Read and close one snapshot-first follow generation. */
 async function opening(
   remote: TestSessionRemote,
   sessionId: SessionId,
   maxMessages?: number,
-): Promise<Extract<SessionFollowFrame, { type: 'snapshot' }>> {
+): Promise<ProjectedSnapshot> {
   const abort = new AbortController()
   const iterator = remote.follow({
     address: { kind: 'session', sessionId },
@@ -84,7 +91,10 @@ async function opening(
   abort.abort()
   await iterator.return?.()
   if (first.done || first.value.type !== 'snapshot') throw new Error('follow did not open with a snapshot')
-  return first.value
+  if (first.value.projections === undefined) {
+    throw new Error('a complete-observation opening carried no projection block')
+  }
+  return { ...first.value, projections: first.value.projections }
 }
 
 /** Whole-value unit folding the latest user/message text; null before the first. */

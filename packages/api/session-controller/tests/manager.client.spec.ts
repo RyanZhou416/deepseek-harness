@@ -9,7 +9,7 @@ import type { SessionId } from '@deepseek-ai/dsh-api-remotes/client'
 import type { SubagentAddress } from '@deepseek-ai/dsh-subagent/client'
 import { SessionSeq } from '@deepseek-ai/dsh-session/types'
 import { RemoteError } from '@deepseek-ai/dsh-typert-protocol'
-import { ok, type RemoteMock } from '@deepseek-ai/dsh-remote-mock'
+import { ok, type RemoteMock, type StreamScript } from '@deepseek-ai/dsh-remote-mock'
 import {
   createClientTest, type ClientTestFixtures, webApp,
 } from '@deepseek-ai/dsh-client-test-runtime/src/assembly/index.ts'
@@ -17,8 +17,9 @@ import type {} from '@deepseek-ai/dsh-session-title/client'
 import { SessionManager } from '../src/client/sessions/manager.ts'
 import { ClientSessions } from '../src/client/sessions/service.ts'
 import type { SessionRemotes } from '../src/client/sessions/remotes.ts'
+import type { SessionFollowRequest } from '../src/types.ts'
 import { entries, plainTurn } from './event-script.client.ts'
-import { FOLLOW, err, followScript, sessionWorld } from './remote/session.client.ts'
+import { FOLLOW, err, followScript, followSnapshot, sessionWorld } from './remote/session.client.ts'
 
 const S1 = 'fk-m1' as SessionId
 const S2 = 'fk-m2' as SessionId
@@ -426,37 +427,44 @@ describe('SessionManager query lifetime', () => {
       [S2]: { asOfSeq: -1 as const, values: {} },
     } } }
     manager.handleControlFrame(baseline)
+    // Publish the baseline's rows and readiness once before comparing snapshots.
+    await Promise.resolve()
     const initial = manager.getListSnapshot()
     const first = initial.projectionsBySession[S1]
     const second = initial.projectionsBySession[S2]
-    expect(first).toEqual({ values: {}, state: 'idle', error: null })
-    await Promise.resolve()
+    // An exact cut — even an empty one — makes the generation exact.
+    expect(first).toEqual({
+      values: {}, state: 'idle', error: null, availability: { state: 'exact', asOfSeq: -1 },
+    })
     expect(notify).toHaveBeenCalledOnce()
     manager.handleControlFrame(baseline)
     expect(manager.getListSnapshot()).toBe(initial)
     await Promise.resolve()
     expect(notify).toHaveBeenCalledOnce()
 
+    // A Session with no exact cut is the one an explicit request reads.
+    const requested = 'fk-explicit' as SessionId
     const pending = Promise.withResolvers<Awaited<ReturnType<typeof remote.session.projections>>>()
     remote.session.projections.mockReturnValueOnce(pending.promise)
-    const read = manager.refreshProjections(S1)
-    const loading = manager.getListSnapshot().projectionsBySession[S1]
-    expect(loading).not.toBe(first)
-    expect(loading?.values).toBe(first?.values)
-    expect(loading?.state).toBe('loading')
+    const read = manager.refreshProjections(requested)
+    const loading = manager.getListSnapshot().projectionsBySession[requested]
+    expect(loading?.values).toEqual({})
+    expect(loading).toMatchObject({ state: 'loading', availability: { state: 'loading', reason: 'opening-absent' } })
     const failure = new RemoteError('gateway/internal', 'synthetic projection failure', {})
     pending.resolve(err(failure))
     await read
-    const failed = manager.getListSnapshot().projectionsBySession[S1]
+    const failed = manager.getListSnapshot().projectionsBySession[requested]
     expect(failed).not.toBe(loading)
-    expect(failed).toEqual({ values: {}, state: 'error', error: failure })
-    expect(failed?.values).toBe(first?.values)
+    expect(failed).toEqual({
+      values: {}, state: 'error', error: failure, availability: { state: 'unavailable', reason: 'read-failed' },
+    })
+    expect(manager.getListSnapshot().projectionsBySession[S1]).toBe(first)
     expect(manager.getListSnapshot().projectionsBySession[S2]).toBe(second)
 
     remote.session.projections.mockResolvedValueOnce(ok({ kind: 'sequenced', asOfSeq: 0, values: { title: 'ready' } }))
-    await manager.refreshProjections(S1)
-    expect(manager.getListSnapshot().projectionsBySession[S1]).toEqual({
-      values: { title: 'ready' }, state: 'ready', error: null,
+    await manager.refreshProjections(requested)
+    expect(manager.getListSnapshot().projectionsBySession[requested]).toEqual({
+      values: { title: 'ready' }, state: 'ready', error: null, availability: { state: 'exact', asOfSeq: 0 },
     })
     expect(manager.getListSnapshot().projectionsBySession[S2]).toBe(second)
   })
@@ -489,7 +497,11 @@ describe('SessionManager query lifetime', () => {
   it('keeps stale control deliveries silent for every subscriber while accepted values remain immediately readable', async ({ mock, remote }) => {
     const manager = makeManager(mock, remote)
     onTestFinished(() => manager.dispose())
-    manager.handleControlFrame({ type: 'projection', sessionId: S1, key: 'title', value: 'latest', seq: 9 })
+    // The generation is already exact at 10, so no replayed or older delivery
+    // can change readiness or a value.
+    manager.handleControlFrame({ type: 'baseline', value: { projections: {
+      [S1]: { asOfSeq: 10, values: { title: 'latest' } },
+    } } })
     await Promise.resolve()
     const before = manager.getListSnapshot()
     const first = vi.fn()
@@ -505,23 +517,38 @@ describe('SessionManager query lifetime', () => {
       [S1]: { asOfSeq: 8, values: { title: 'old baseline' } },
     } } })
     expect(manager.getListSnapshot()).toBe(before)
+    expect(manager.getListSnapshot().projectionsBySession[S1]?.values.title).toBe('latest')
     await Promise.resolve()
     expect(first).not.toHaveBeenCalled()
     expect(second).not.toHaveBeenCalled()
 
-    manager.handleControlFrame({ type: 'projection', sessionId: S1, key: 'title', value: 'accepted', seq: 10 })
+    manager.handleControlFrame({ type: 'projection', sessionId: S1, key: 'title', value: 'accepted', seq: 11 })
     expect(manager.getListSnapshot().projectionsBySession[S1]?.values.title).toBe('accepted')
     await Promise.resolve()
     expect(first).toHaveBeenCalledOnce()
     expect(second).toHaveBeenCalledOnce()
     stopFirst()
     manager.handleControlFrame({ type: 'baseline', value: { projections: {
-      [S1]: { asOfSeq: 11, values: {} },
+      [S1]: { asOfSeq: 12, values: {} },
     } } })
     expect(manager.getListSnapshot().projectionsBySession[S1]?.values).toEqual({})
     await Promise.resolve()
     expect(first).toHaveBeenCalledOnce()
     expect(second).toHaveBeenCalledTimes(2)
+  })
+
+  it('establishes readiness from a stale-cut baseline without overwriting newer values', async ({ mock, remote }) => {
+    const manager = makeManager(mock, remote)
+    onTestFinished(() => manager.dispose())
+    manager.handleControlFrame({ type: 'projection', sessionId: S1, key: 'title', value: 'pushed', seq: 9 })
+
+    manager.handleControlFrame({ type: 'baseline', value: { projections: {
+      [S1]: { asOfSeq: 8, values: { title: 'older baseline' } },
+    } } })
+
+    expect(manager.getListSnapshot().projectionsBySession[S1]).toMatchObject({
+      values: { title: 'pushed' }, availability: { state: 'exact', asOfSeq: 8 },
+    })
   })
 
   it.for(['list', 'projection'] as const)('forwards an unexpected %s failure and still completes teardown', async (target, { mock, remote }) => {
@@ -560,12 +587,220 @@ describe('SessionManager query lifetime', () => {
       await manager.refreshProjections(S1)
       expect(manager.getListSnapshot().projectionsBySession[S1]).toMatchObject({
         state: 'error', error: failure, values: warm ? { subagentCatalog: entries } : {},
+        availability: { state: 'unavailable', reason: 'read-failed' },
       })
     } finally {
       await manager.dispose()
     }
   })
 
+})
+
+describe('on-demand exact projections', () => {
+  /** A window-first opening: the bounded window is served without a projection block. */
+  const absentOpening: StreamScript = ([request], stream) => {
+    const { projections: _omitted, ...snapshot } = followSnapshot(
+      ok({ records: [], hasMore: false }).value,
+      request as SessionFollowRequest,
+    )
+    stream.push(snapshot)
+  }
+
+  it('keeps a window-first opening unavailable without starting a read', async ({ mock, remote, start }) => {
+    mock.load(sessionWorld)
+    mock.stream(FOLLOW, absentOpening)
+    const client = await start()
+    const manager = new SessionManager(client.ctx.remote)
+    onTestFinished(() => manager.dispose())
+
+    await manager.get(S1).open()
+
+    expect(manager.getListSnapshot().projectionsBySession[S1]).toMatchObject({
+      state: 'idle', values: {}, availability: { state: 'unavailable', reason: 'opening-absent' },
+    })
+    expect(remote.session.projections).not.toHaveBeenCalled()
+  })
+
+  it('loads exact projections only on an explicit request and serves later requests from the generation', async ({ mock, remote, start }) => {
+    mock.load(sessionWorld)
+    mock.stream(FOLLOW, absentOpening)
+    const client = await start()
+    const manager = new SessionManager(client.ctx.remote)
+    onTestFinished(() => manager.dispose())
+    await manager.get(S1).open()
+    expect(remote.session.projections).not.toHaveBeenCalled()
+
+    const pending = Promise.withResolvers<Awaited<ReturnType<typeof remote.session.projections>>>()
+    remote.session.projections.mockReturnValueOnce(pending.promise)
+    const read = manager.refreshProjections(S1)
+    expect(remote.session.projections.mock.calls.map(([request]) => request)).toEqual([{ sessionId: S1 }])
+    expect(manager.getListSnapshot().projectionsBySession[S1]).toMatchObject({
+      state: 'loading', availability: { state: 'loading', reason: 'opening-absent' },
+    })
+
+    pending.resolve(ok({ kind: 'sequenced', asOfSeq: 9, values: { title: 'exact title' } }))
+    await read
+    expect(manager.getListSnapshot().projectionsBySession[S1]).toMatchObject({
+      state: 'ready', values: { title: 'exact title' }, availability: { state: 'exact', asOfSeq: 9 },
+    })
+
+    // The generation is already exact: another request issues no read.
+    await manager.refreshProjections(S1)
+    expect(remote.session.projections).toHaveBeenCalledOnce()
+  })
+
+  it('starts the exact read only when the statistics or Context surface requests it', async ({ mock, remote, start }) => {
+    mock.load(sessionWorld)
+    mock.stream(FOLLOW, absentOpening)
+    const client = await start()
+    const manager = new SessionManager(client.ctx.remote)
+    onTestFinished(() => manager.dispose())
+    const session = manager.get(S1)
+    await session.open()
+    expect(remote.session.projections).not.toHaveBeenCalled()
+    expect(session.projectionAvailability()).toEqual({ state: 'unavailable', reason: 'opening-absent' })
+
+    remote.session.projections.mockResolvedValueOnce(ok({
+      kind: 'sequenced', asOfSeq: 3, values: { title: 'requested' },
+    }))
+    session.requestExactProjections()
+
+    await vi.waitFor(() => {
+      expect(session.projectionAvailability()).toEqual({ state: 'exact', asOfSeq: 3 })
+    })
+    expect(remote.session.projections).toHaveBeenCalledOnce()
+    expect(session.getSnapshot().projectionAvailability).toEqual({ state: 'exact', asOfSeq: 3 })
+  })
+
+  it('does not read when the opening already served an exact cut', async ({ mock, remote, start }) => {
+    mock.stream(FOLLOW, followScript(ok({
+      records: [], hasMore: false, projections: { asOfSeq: 4, values: { title: 'from opening' } },
+    })))
+    const client = await start()
+    const manager = new SessionManager(client.ctx.remote)
+    onTestFinished(() => manager.dispose())
+
+    await manager.get(S1).open()
+    await manager.refreshProjections(S1)
+
+    expect(remote.session.projections).not.toHaveBeenCalled()
+    expect(manager.getListSnapshot().projectionsBySession[S1]).toMatchObject({
+      state: 'ready', values: { title: 'from opening' }, availability: { state: 'exact', asOfSeq: 4 },
+    })
+  })
+
+  it('refuses a cut older than an exact watermark that arrived while the read was in flight', async ({ mock, remote, start }) => {
+    mock.load(sessionWorld)
+    mock.stream(FOLLOW, absentOpening)
+    const client = await start()
+    const manager = new SessionManager(client.ctx.remote)
+    onTestFinished(() => manager.dispose())
+    await manager.get(S1).open()
+    const pending = Promise.withResolvers<Awaited<ReturnType<typeof remote.session.projections>>>()
+    remote.session.projections.mockReturnValueOnce(pending.promise)
+    const read = manager.refreshProjections(S1)
+
+    // A newer exact cut lands before the deferred read settles.
+    manager.handleControlFrame({ type: 'baseline', value: { projections: {
+      [S1]: { asOfSeq: 20, values: { title: 'newer' } },
+    } } })
+    pending.resolve(ok({ kind: 'sequenced', asOfSeq: 12, values: { title: 'staler' } }))
+    await read
+
+    expect(manager.getListSnapshot().projectionsBySession[S1]).toMatchObject({
+      state: 'ready', values: { title: 'newer' }, availability: { state: 'exact', asOfSeq: 20 },
+    })
+  })
+
+  it('keeps a permission refusal unavailable for the generation without issuing another read', async ({ mock, remote }) => {
+    const manager = makeManager(mock, remote)
+    onTestFinished(() => manager.dispose())
+    const refusal = new RemoteError('session/projections-unavailable', 'Session projections are unavailable', {})
+    remote.session.projections.mockResolvedValueOnce(err(refusal))
+
+    await manager.refreshProjections(S1)
+    expect(manager.getListSnapshot().projectionsBySession[S1]).toMatchObject({
+      state: 'error', availability: { state: 'unavailable', reason: 'refused' },
+    })
+    expect(manager.getListSnapshot().projectionsBySession[S1]?.error?.message).toBe('Session projections are unavailable')
+
+    await manager.refreshProjections(S1)
+    await manager.refreshProjections(S1)
+    expect(remote.session.projections).toHaveBeenCalledOnce()
+  })
+
+  it('retries a retryable read failure on a later request and never claims an inexact value', async ({ mock, remote }) => {
+    const manager = makeManager(mock, remote)
+    onTestFinished(() => manager.dispose())
+    const failure = new RemoteError('gateway/internal', 'projection read failed', {})
+    remote.session.projections.mockRejectedValueOnce(failure)
+
+    await manager.refreshProjections(S1)
+    expect(manager.getListSnapshot().projectionsBySession[S1]).toMatchObject({
+      state: 'error', availability: { state: 'unavailable', reason: 'read-failed' },
+    })
+    expect(manager.getListSnapshot().projectionsBySession[S1]?.error?.message).toBe('projection read failed')
+
+    remote.session.projections.mockResolvedValueOnce(ok({
+      kind: 'sequenced', asOfSeq: 2, values: { title: 'recovered' },
+    }))
+    await manager.refreshProjections(S1)
+    expect(manager.getListSnapshot().projectionsBySession[S1]).toMatchObject({
+      state: 'ready', values: { title: 'recovered' }, availability: { state: 'exact', asOfSeq: 2 },
+    })
+    expect(remote.session.projections).toHaveBeenCalledTimes(2)
+  })
+
+  it('cancels a pending exact read when its Session leaves the view and reads again on return', async ({ mock, remote }) => {
+    const manager = makeManager(mock, remote)
+    onTestFinished(() => manager.dispose())
+    const session = manager.get(S1)
+    const pending = Promise.withResolvers<Awaited<ReturnType<typeof remote.session.projections>>>()
+    remote.session.projections.mockReturnValueOnce(pending.promise)
+    const read = manager.refreshProjections(S1)
+    const signal = remote.session.projections.mock.calls[0]?.[1]
+    expect(signal?.aborted).toBe(false)
+
+    await manager.drop(S1, session)
+
+    expect(signal?.aborted).toBe(true)
+    expect(manager.getListSnapshot().projectionsBySession[S1]).toMatchObject({
+      state: 'idle', availability: { state: 'unavailable', reason: 'opening-absent' },
+    })
+    pending.resolve(ok({ kind: 'sequenced', asOfSeq: 5, values: { title: 'late' } }))
+    await read
+    expect(manager.projectionValues(S1)).toEqual({})
+
+    remote.session.projections.mockResolvedValueOnce(ok({
+      kind: 'sequenced', asOfSeq: 6, values: { title: 'fresh' },
+    }))
+    await manager.refreshProjections(S1)
+    expect(remote.session.projections).toHaveBeenCalledTimes(2)
+    expect(manager.projectionValues(S1)).toEqual({ title: 'fresh' })
+  })
+
+  it('does not duplicate a pending read when the Session resynchronizes in the same generation', async ({ mock, remote, start }) => {
+    mock.load(sessionWorld)
+    mock.stream(FOLLOW, absentOpening)
+    const client = await start()
+    const manager = new SessionManager(client.ctx.remote)
+    onTestFinished(() => manager.dispose())
+    const session = manager.get(S1)
+    await session.open()
+    const pending = Promise.withResolvers<Awaited<ReturnType<typeof remote.session.projections>>>()
+    remote.session.projections.mockReturnValueOnce(pending.promise)
+    const read = manager.refreshProjections(S1)
+
+    session.configureSubagent({ parentSessionId: S2, childSessionId: S1, mode: 'continuable' })
+    await vi.waitFor(() => { expect(mock.log.requests(FOLLOW)).toHaveLength(2) })
+    expect(session.projections.availability()).toEqual({ state: 'loading', reason: 'opening-absent' })
+    expect(remote.session.projections).toHaveBeenCalledOnce()
+
+    pending.resolve(ok({ kind: 'sequenced', asOfSeq: 6, values: { title: 'settled' } }))
+    await read
+    expect(session.projections.availability()).toEqual({ state: 'exact', asOfSeq: 6 })
+    expect(remote.session.projections).toHaveBeenCalledOnce()
+  })
 })
 
 describe('list lifecycle', () => {
@@ -1141,6 +1376,8 @@ describe('subagent catalogs', () => {
     response.resolve(ok({ kind: 'sequenced', asOfSeq: 3, values: { subagentCatalog: [] } }))
     await read
     expect(manager.getListSnapshot().projectionsBySession[S1]?.values.subagentCatalog?.[0]?.label).toBe('pushed')
+    // The generation is exact at the read's cut; the pushed row stays newer than it.
+    expect(manager.getListSnapshot().projectionsBySession[S1]?.availability).toEqual({ state: 'exact', asOfSeq: 3 })
     expect(remote.session.projections.mock.calls.map(([request]) => request)).toHaveLength(1)
   })
 
@@ -1148,13 +1385,14 @@ describe('subagent catalogs', () => {
     const manager = makeManager(mock, remote)
     remote.session.projections.mockResolvedValueOnce(ok({ kind: 'migration-required', values: {} }))
     await manager.refreshProjections(S1)
+    // Cached hints do not make a migration-deferred generation exact.
     expect(manager.getListSnapshot().projectionsBySession[S1]).toMatchObject({
-      state: 'migration-required', values: {},
+      state: 'migration-required', values: {}, availability: { state: 'unavailable', reason: 'refused' },
     })
     remote.session.projections.mockResolvedValueOnce(ok({ kind: 'sequenced', asOfSeq: 0, values: { subagentCatalog: [] } }))
     await manager.refreshProjections(S1)
     expect(manager.getListSnapshot().projectionsBySession[S1]).toMatchObject({
-      state: 'ready', values: { subagentCatalog: [] },
+      state: 'ready', values: { subagentCatalog: [] }, availability: { state: 'exact', asOfSeq: 0 },
     })
     expect(remote.session.projections).toHaveBeenCalledTimes(2)
   })
@@ -1275,10 +1513,13 @@ describe('subagent catalogs', () => {
     remote.session.projections.mockImplementation(() => response.promise)
     const manager = makeManager(mock, remote)
     const read = manager.refreshProjections(S1)
+    const signal = remote.session.projections.mock.calls[0]?.[1]
     manager.handleSessionRemoved(S1)
+    expect(signal?.aborted).toBe(true)
     response.resolve(ok({ kind: 'sequenced', asOfSeq: 0, values: { subagentCatalog: [] } }))
     await read
     expect(manager.getListSnapshot().items.some(item => item.sessionId === S1)).toBe(false)
+    expect(manager.projectionValues(S1)).toBeUndefined()
     expect(remote.session.projections.mock.calls.map(([request]) => request)).toHaveLength(1)
   })
 
@@ -1286,8 +1527,9 @@ describe('subagent catalogs', () => {
     remote.session.projections.mockImplementation(() => Promise.resolve(ok(null)))
     const manager = makeManager(mock, remote)
     await manager.refreshProjections(S1)
+    // A null answer holds no cut: the cleared values are unavailable, not exact.
     expect(manager.getListSnapshot().projectionsBySession[S1]).toEqual({
-      values: {}, state: 'ready', error: null,
+      values: {}, state: 'ready', error: null, availability: { state: 'unavailable', reason: 'refused' },
     })
   })
 })
@@ -1847,13 +2089,18 @@ describe('connected generation', () => {
     const manager = makeManager(mock, remote)
     try {
       const read = manager.refreshProjections(S1)
+      const previousSignal = remote.session.projections.mock.calls[0]?.[1]
       manager.handleConnected()
+      expect(previousSignal?.aborted).toBe(true)
+      // The new generation reset readiness and re-requested what the old one wanted.
+      expect(manager.getListSnapshot().projectionsBySession[S1]?.availability)
+        .toEqual({ state: 'loading', reason: 'opening-absent' })
       expect(remote.session.projections.mock.calls.map(([request]) => request)).toHaveLength(2)
       previous.resolve(ok({ kind: 'sequenced', asOfSeq: 0, values: { subagentCatalog: [{ createdAt: 1, id: S2, mode: 'continuable', label: 'worker' }] } }))
       await read
       await vi.waitFor(() => {
         expect(manager.getListSnapshot().projectionsBySession[S1]).toMatchObject({
-          values: {}, state: 'ready',
+          values: {}, state: 'ready', availability: { state: 'exact', asOfSeq: 0 },
         })
       })
       expect(remote.session.projections.mock.calls.map(([request]) => request)).toHaveLength(2)

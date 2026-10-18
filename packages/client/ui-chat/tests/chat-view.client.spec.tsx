@@ -111,6 +111,7 @@ function sessionSnapshot(overrides: Partial<TestSessionSnapshot> = {}): TestSess
     lastAgentError: null,
     promptAttempted: true,
     awaitingFirstTurn: false,
+    projectionAvailability: { state: 'unavailable', reason: 'opening-absent' },
     ...overrides,
   }
 }

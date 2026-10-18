@@ -53,7 +53,7 @@ export const InputBar = memo(function InputBar({
   retryFileUpload,
   toggleCommandMenu, stop, t,
   renderSlot, useBusyEnter, useFileUploads, useNotices, useLexicon, useMenuLauncher, useStopShortcut,
-  useProjection, sessionId, variant, disabled: inert = false, blocked,
+  useProjection, useProjectionAvailability, requestExactProjections, sessionId, variant, disabled: inert = false, blocked,
   workspacePickerOpen = false, onRequestWorkspace,
   placeholder, accessory,
 }: InputBarProps) {
@@ -526,7 +526,14 @@ export const InputBar = memo(function InputBar({
         {variant === 'composer' && input !== undefined && sessionId !== undefined
           ? renderSlot('conversation.composer.dock', {})
           : null}
-        {activity ? null : <ContextMeter useProjection={useProjection} t={t} />}
+        {activity ? null : (
+          <ContextMeter
+            useProjection={useProjection}
+            useProjectionAvailability={useProjectionAvailability}
+            requestExactProjections={requestExactProjections}
+            t={t}
+          />
+        )}
       </div>
     </div>
   )

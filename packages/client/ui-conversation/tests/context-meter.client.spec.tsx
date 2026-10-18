@@ -1,7 +1,8 @@
 // @vitest-environment jsdom
 
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render } from '@testing-library/react'
+import type { SessionSnapshot } from '@deepseek-ai/dsh-api-session-controller/client'
 import { makeTranslate } from '@deepseek-ai/dsh-client-test-runtime'
 import { en as commonEn, zh as commonZh } from '@deepseek-ai/dsh-client-locale/src/locales/index.ts'
 import { ContextMeter, type ContextMeterProps } from '../src/client/skeleton/ContextMeter.tsx'
@@ -23,8 +24,26 @@ function projections(values: Record<string, unknown>): ContextMeterProps['usePro
   return (key: string) => values[key]
 }
 
-function meter(values: Record<string, unknown>, translate: ContextMeterProps['t'] = t) {
-  return render(<ContextMeter useProjection={projections(values)} t={translate} />)
+/** Optional readiness/request seats; omitted, the meter behaves as a bare fixture before any exact cut. */
+interface MeterOptions {
+  readonly availability?: SessionSnapshot['projectionAvailability']
+  readonly requestExactProjections?: () => void
+}
+
+function meter(
+  values: Record<string, unknown>,
+  translate: ContextMeterProps['t'] = t,
+  options: MeterOptions = {},
+) {
+  const { availability, requestExactProjections } = options
+  return render(
+    <ContextMeter
+      useProjection={projections(values)}
+      {...(availability === undefined ? {} : { useProjectionAvailability: selector => selector(availability) })}
+      {...(requestExactProjections === undefined ? {} : { requestExactProjections })}
+      t={translate}
+    />,
+  )
 }
 
 describe('ContextMeter', () => {
@@ -43,6 +62,49 @@ describe('ContextMeter', () => {
     expect(meter({}).container.textContent).toBe('')
     expect(meter({ contextPressure: { pressureTokens: 32_000 } }).container.textContent).toBe('')
     expect(meter({ contextPressure: { contextWindow: 128_000 } }).container.textContent).toBe('')
+  })
+
+  it('presents the deferred read state instead of a fabricated occupancy', () => {
+    const request = vi.fn()
+    const loading = meter({}, t, {
+      availability: { state: 'loading', reason: 'opening-absent' },
+      requestExactProjections: request,
+    })
+    // A bare ring, no percentage and no dialog: nothing claims an occupancy
+    // before a provider reading exists.
+    expect(loading.container.textContent).toBe('')
+    expect(loading.queryByRole('dialog')).toBeNull()
+    fireEvent.click(loading.getByRole('button', { name: '上下文用量加载中…' }))
+    expect(request).toHaveBeenCalledTimes(1)
+
+    const failed = meter({}, t, {
+      availability: { state: 'unavailable', reason: 'read-failed' },
+      requestExactProjections: request,
+    })
+    expect(failed.getByRole('button', { name: '上下文用量不可用' })).toBeTruthy()
+
+    // A window-first opening no surface has opened yet renders nothing:
+    // absence is not a 0% reading.
+    const beforeRequest = meter({}, t, {
+      availability: { state: 'unavailable', reason: 'opening-absent' },
+      requestExactProjections: request,
+    })
+    expect(beforeRequest.container.textContent).toBe('')
+    expect(beforeRequest.container.querySelector('button')).toBeNull()
+  })
+
+  it('requests exact values only when the user opens the Context surface', () => {
+    const request = vi.fn()
+    const view = meter({
+      contextPressure: { pressureTokens: 32_000, contextWindow: 128_000 },
+      contextBreakdown: BREAKDOWN,
+    }, t, {
+      availability: { state: 'unavailable', reason: 'opening-absent' },
+      requestExactProjections: request,
+    })
+    expect(request).not.toHaveBeenCalled()
+    fireEvent.click(view.getByRole('button', { name: '上下文已用 25%' }))
+    expect(request).toHaveBeenCalledTimes(1)
   })
 
   it('shows the occupancy ring and opens the breakdown panel on click', () => {

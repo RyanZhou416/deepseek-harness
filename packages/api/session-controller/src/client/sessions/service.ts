@@ -345,8 +345,11 @@ export class ClientSessions implements ISessions {
   }
 
   /**
-   * Read projections without starting migration; retry failed or migration-deferred reads.
+   * Request exact whole-log projections without starting migration. An already
+   * exact generation, a Session already read in this Host generation, and a
+   * terminal access refusal are satisfied without another read.
    * @param sessionId - Session to inspect without opening its conversation.
+   * @returns completion of the current or newly started read.
    */
   refreshProjections(sessionId: SessionId): Promise<void> {
     return this.manager.refreshProjections(sessionId)

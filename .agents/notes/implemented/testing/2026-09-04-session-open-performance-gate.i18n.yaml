@@ -9,17 +9,20 @@
   en: 00ba1f66195351e2
   zh: a738b81adceda351
 /agent-note-required-ci-performance-gate-for-opening-large-sessions/decision:
-  en: 4f94b61c48cceaf4
-  zh: dbb51bfe1fb0f681
+  en: 694f54e1fa3a5ae0
+  zh: 67a8b03e76b26fce
 /agent-note-required-ci-performance-gate-for-opening-large-sessions/calibration-evidence:
-  en: f1001a139470f6b7
-  zh: b7b46f96b84b1271
+  en: b51b6cf962e42241
+  zh: d035d89247760b54
 /agent-note-required-ci-performance-gate-for-opening-large-sessions/calibration-evidence/indexed-traversal-of-stored-json-arrays:
   en: 4ff4df8437e978a8
   zh: 642ac8ab685c7a11
+/agent-note-required-ci-performance-gate-for-opening-large-sessions/calibration-evidence/follow-level-window-first-opening:
+  en: f643d13252d13912
+  zh: 3ebd32ae9cd8cb00
 /agent-note-required-ci-performance-gate-for-opening-large-sessions/alternatives-considered:
-  en: 5debbc2a0382ed13
-  zh: 415d11776f73f871
+  en: e33a9a545f953669
+  zh: b3cb1086759ba146
 /agent-note-required-ci-performance-gate-for-opening-large-sessions/consequences:
-  en: 845730942e93aa38
-  zh: f8d6cd2a8e5e6859
+  en: a71c9596bb90e18c
+  zh: a8ce4997f02a1734

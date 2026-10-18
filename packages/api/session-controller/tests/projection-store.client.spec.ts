@@ -10,17 +10,19 @@
  */
 import { describe, expect } from 'vitest'
 import type { SessionId } from '@deepseek-ai/dsh-api-remotes/client'
-import { SessionSeq } from '@deepseek-ai/dsh-session/types'
-import { ok, type RemoteMock } from '@deepseek-ai/dsh-remote-mock'
+import { SessionSeq, type SessionEvent } from '@deepseek-ai/dsh-session/types'
+import { ok, type RemoteMock, type StreamScript } from '@deepseek-ai/dsh-remote-mock'
 import {
   createClientTest, type ClientTestFixtures, webApp,
 } from '@deepseek-ai/dsh-client-test-runtime/src/assembly/index.ts'
 import { ProjectionValueStore } from '../src/client/sessions/projection-store.ts'
+import type { ProjectionAvailability } from '../src/client/contract/projection-availability.ts'
 import { SessionManager } from '../src/client/sessions/manager.ts'
 import type { SessionRemotes } from '../src/client/sessions/remotes.ts'
-import { entries, plainTurn } from './event-script.client.ts'
+import type { SessionFollowRequest } from '../src/types.ts'
+import { entries, historyValue, plainTurn } from './event-script.client.ts'
 import { sessionBench } from './remote/bench.client.ts'
-import { FOLLOW, followScript, sessionWorld } from './remote/session.client.ts'
+import { FOLLOW, followScript, followSnapshot, sessionWorld } from './remote/session.client.ts'
 
 // Test-domain keys merged into the projection map (the Service Definition package's
 // pure-type outlet), the same way domain host plugins merge theirs.
@@ -42,6 +44,77 @@ function makeManager(mock: RemoteMock, remote: ClientTestFixtures['remote']): Se
   // Manager-routing cases never open a Session, so they do not need the broader Client Remote's $stream member.
   return new SessionManager(remote as unknown as SessionRemotes)
 }
+
+/** One cached projection block as a Session list view of the persisted checkpoint serves it. */
+const CACHED_HINTS = {
+  title: 'Cached title',
+  sessionListMetadata: { blank: false },
+  subagentCatalog: [],
+  tokenUsage: { uncachedInputTokens: 1, outputTokens: 2, cacheReadTokens: 3, cacheWriteTokens: 0 },
+  sessionStats: { turns: 2, steps: 3 },
+} as const
+
+/**
+ * A window-first follow opening: the snapshot omits its projection block.
+ * @param events - opening window events.
+ * @param hasMore - whether older history exists.
+ * @returns the stream script.
+ */
+function followWithoutProjections(events: readonly SessionEvent[], hasMore = false): StreamScript {
+  return async ([request], stream) => {
+    const opening = followSnapshot(historyValue(events, hasMore), request as SessionFollowRequest)
+    stream.push({ ...opening, projections: undefined })
+  }
+}
+
+describe('Session projection availability', () => {
+  it('starts unavailable and never claims exactness from cached or pushed rows', () => {
+    const store = new ProjectionValueStore()
+    expect(store.availability()).toEqual({ state: 'unavailable', reason: 'opening-absent' })
+    store.applyCached({ title: 'Cached title', subagentCatalog: [] })
+    store.apply('test/marks', { marks: ['frame'] }, SessionSeq(4))
+    expect(store.values()).toEqual({
+      title: 'Cached title', subagentCatalog: [], 'test/marks': { marks: ['frame'] },
+    })
+    expect(store.availability()).toEqual({ state: 'unavailable', reason: 'opening-absent' })
+  })
+
+  it('publishes loading and unavailable transitions to availability and any-key consumers once per transition', async () => {
+    const store = new ProjectionValueStore()
+    const states: ProjectionAvailability[] = []
+    let anyTicks = 0
+    const unsubscribeState = store.subscribeAvailability(() => { states.push(store.availability()) })
+    const unsubscribeAny = store.subscribeAny(() => { anyTicks += 1 })
+    try {
+      store.markLoading('opening-absent')
+      await Promise.resolve()
+      // A repeated mark for the same state is not a transition.
+      store.markLoading('opening-absent')
+      await Promise.resolve()
+      expect(anyTicks).toBe(1)
+      store.markUnavailable('read-failed')
+      await Promise.resolve()
+      expect(states).toEqual([
+        { state: 'loading', reason: 'opening-absent' },
+        { state: 'unavailable', reason: 'read-failed' },
+      ])
+      expect(anyTicks).toBe(2)
+    } finally {
+      unsubscribeState()
+      unsubscribeAny()
+    }
+  })
+
+  it('an exact cut, even with empty values, is the only exact transition; clear resets readiness', () => {
+    const store = new ProjectionValueStore()
+    store.applyCached({ title: 'Cached title' })
+    store.seed({ asOfSeq: SessionSeq(7), values: {} })
+    expect(store.values()).toEqual({})
+    expect(store.availability()).toEqual({ state: 'exact', asOfSeq: 7 })
+    store.clear()
+    expect(store.availability()).toEqual({ state: 'unavailable', reason: 'opening-absent' })
+  })
+})
 
 describe('Session projection value semantics', () => {
   it('exposes a watermark only for current Host-sequenced values', () => {
@@ -198,6 +271,7 @@ describe('Session tail-page seeding', () => {
     } as never)))
     await session.open()
     expect(session.projections.get('test/marks')).toEqual({ marks: ['from-baseline'] })
+    expect(session.projectionAvailability()).toEqual({ state: 'exact', asOfSeq: 5 })
   }, COLD_BOOT_TIMEOUT_MS)
 
   it('a resync serving a stale block keeps the newer pushed value (seq rule end to end)', async ({ mock, start }) => {
@@ -212,14 +286,63 @@ describe('Session tail-page seeding', () => {
     expect(session.projections.get('test/marks')).toEqual({ marks: ['pushed-9'] })
   })
 
-  it('treats a blockless response as no reset: pushed values survive', async ({ mock, start }) => {
-    const session = await sessionBench(mock, start, SID)
-    mock.stream(FOLLOW, followScript(ok({ records: entries(plainTurn(SessionSeq(0), 0, 'a', 'b')) as never[], hasMore: false })))
-    await session.open()
+  it('treats an absent opening block as no reset: cached hints and pushed values survive without claiming a cut', async ({ mock, start }) => {
+    const openings: SessionId[] = []
+    const session = await sessionBench(mock, start, SID, {
+      onOpeningProjectionsAbsent: (opened) => { openings.push(opened.sessionId) },
+      onExactProjectionsRequested: () => {
+        throw new Error('an opening must never request an exact read')
+      },
+    })
+    session.projections.applyCached(CACHED_HINTS)
     session.projections.apply('test/marks', { marks: ['pushed'] }, SessionSeq(9))
+    mock.stream(FOLLOW, followWithoutProjections(plainTurn(SessionSeq(0), 0, 'a', 'b')))
+    await session.open()
+    expect(session.projections.values()).toEqual({ ...CACHED_HINTS, 'test/marks': { marks: ['pushed'] } })
+    expect(session.projectionAvailability()).toEqual({ state: 'unavailable', reason: 'opening-absent' })
+    expect(session.getSnapshot().projectionAvailability).toEqual({ state: 'unavailable', reason: 'opening-absent' })
+    expect(openings).toEqual([SID])
+
+    // A new open generation repeats the readiness edge and still never starts a read.
     await session.resync()
-    expect(session.projections.get('test/marks')).toEqual({ marks: ['pushed'] })
-  })
+    expect(openings).toEqual([SID, SID])
+    expect(session.projections.values()).toEqual({ ...CACHED_HINTS, 'test/marks': { marks: ['pushed'] } })
+  }, COLD_BOOT_TIMEOUT_MS)
+
+  it('clears cached hints and claims the exact cut of an explicit empty block', async ({ mock, start }) => {
+    const openings: SessionId[] = []
+    const session = await sessionBench(mock, start, SID, {
+      onOpeningProjectionsAbsent: (opened) => { openings.push(opened.sessionId) },
+    })
+    session.projections.applyCached(CACHED_HINTS)
+    mock.stream(FOLLOW, followScript(ok({
+      records: entries(plainTurn(SessionSeq(0), 0, 'a', 'b')) as never[], hasMore: false,
+      projections: { asOfSeq: 5, values: {} },
+    } as never)))
+    await session.open()
+    expect(session.projections.values()).toEqual({})
+    expect(session.projectionAvailability()).toEqual({ state: 'exact', asOfSeq: 5 })
+    expect(openings).toEqual([])
+  }, COLD_BOOT_TIMEOUT_MS)
+
+  it('requests an exact read only while readiness is unavailable', async ({ mock, start }) => {
+    const requests: SessionId[] = []
+    const session = await sessionBench(mock, start, SID, {
+      onExactProjectionsRequested: (requested) => { requests.push(requested.sessionId) },
+    })
+    mock.stream(FOLLOW, followWithoutProjections(plainTurn(SessionSeq(0), 0, 'a', 'b')))
+    await session.open()
+    session.requestExactProjections()
+    expect(requests).toEqual([SID])
+    // In flight and already exact are both no-ops: the surface may call this
+    // on every open without multiplying reads.
+    session.projections.markLoading('opening-absent')
+    session.requestExactProjections()
+    session.projections.seed({ asOfSeq: SessionSeq(5), values: {} })
+    session.requestExactProjections()
+    expect(requests).toEqual([SID])
+    expect(session.projectionAvailability()).toEqual({ state: 'exact', asOfSeq: 5 })
+  }, COLD_BOOT_TIMEOUT_MS)
 })
 
 describe('manager frame routing', () => {

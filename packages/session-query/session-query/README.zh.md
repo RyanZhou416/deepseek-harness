@@ -45,7 +45,7 @@ kind: "package-reference"
 
 不带正文的记录只公开 `SessionHeader.isSeeded`。返回事件正文的读取（`readSession`、`readSurface`、`readEvent`）与保留的 `SessionObservation` 值还携带精确 `inheritedEventCount`，因此调用方无需从日志推断切点即可区分继承事件与自有事件。
 
-`readWindow` 通过持久化后端可选的窗口能力读取一个有界存储历史窗口。它返回 `{ window, projections? }`：已校验的连续窗口，以及当挂载的投影缓存持有该会话的完整检查点时的一个 `ProjectionSnapshot`——其 `asOfSeq` 是检查点自身的存储水位，而不是关于窗口 cursor 的声明。查询层只在 `asOfSeq` 不超前于窗口 `cursor`，且该块携带挂载的投影注册表声明为客户端可见的每个键时附加该基线；缺少任一条件的检查点会被省略，使消费方回退到自己的精确路径，而不是用部分块播种客户端值。未挂载注册表时只应用水位规则。把附加的块视为基线，后续精确观察会取代它；它可以落后于窗口 cursor。查询层只做委派，不读取完整日志；能力缺失时返回 `undefined`。窗口校验所选行，而非完整日志的跨事件关系，因此需要回放校验的消费方继续使用 `readSession`。`readWindow` 自身不应用来源大小策略：小型存储来源是否改用完整读取，由决定是否使用窗口的消费方负责。首个 `beforeSeq` 窗口可能在返回前同步构建后端的 generation 索引。
+`readWindow` 通过持久化后端可选的窗口能力读取一个有界存储历史窗口。它返回 `{ window, projections? }`：已校验的连续窗口，以及当挂载的投影缓存持有该会话的完整检查点时的一个 `ProjectionSnapshot`——其 `asOfSeq` 是检查点自身的存储水位，而不是关于窗口 cursor 的声明。查询层只在 `asOfSeq` 不超前于窗口 `cursor`，且该块携带挂载的投影注册表声明为客户端可见的每个键时附加该基线；缺少任一条件的检查点会被省略；父 Session 的 follow 打开随后在没有精确块的情况下服务该窗口（window-first 打开），而不是回退到完整读取，而 subagent 地址仍要求完整 observation。未挂载注册表时只应用水位规则。把附加的块视为基线，后续精确观察会取代它；它可以落后于窗口 cursor。查询层只做委派，不读取完整日志；能力缺失时返回 `undefined`。窗口校验所选行，而非完整日志的跨事件关系，因此需要回放校验的消费方继续使用 `readSession`。`readWindow` 自身不应用来源大小策略：小型存储来源是否改用完整读取，由决定是否使用窗口的消费方负责。首个 `beforeSeq` 窗口可能在返回前同步构建后端的 generation 索引。
 
 ### 过滤器
 
@@ -153,7 +153,7 @@ kind: "package-reference"
 - **无调用方授权**——这是上下文范围内的可信基础设施；模型工具或 UI 必须限制调用方可检查的会话。
 - **无提供方协调器或回退**——服务在搜索上是抽象的，组合必须挂载具体后端；没有搜索提供方注册表或回退实现。
 - **精确读取回放整个日志**——`readSession`、`readSurface`、`filterEvents` 与事件追踪会加载并校验完整逻辑日志，因此非常大的历史每次调用都要付出完整检查；`listSessions` 保持轻量。
-- **窗口读取是已校验切片，而非精确观察**——`readWindow` 返回有界读取的行，检查点基线要么完整要么缺席，且不做完整日志回放；附加的基线可能落后于窗口 cursor，它不替代 `readSession` 校验或 `observeSession` 的精确切点。
+- **窗口读取是已校验切片，而非精确观察**——`readWindow` 返回有界读取的行，检查点基线要么完整要么缺席，且不做完整日志回放；follow 打开方可以在没有精确切点的情况下服务这些行，附加的基线可能落后于窗口 cursor，两者都不替代 `readSession` 校验或 `observeSession` 的精确切点。
 - **字面文本扫描，而非全文搜索**——`text` 过滤器用正则表达式扫描提取出的文档且不提供排名；带排名的搜索需要挂载后端。
 
 <a id="dev-note"></a>

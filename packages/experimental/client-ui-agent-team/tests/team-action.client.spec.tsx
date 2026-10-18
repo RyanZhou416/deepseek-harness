@@ -83,6 +83,7 @@ function bench(options: {
     lastAgentError: null,
     promptAttempted: false,
     awaitingFirstTurn: false,
+    projectionAvailability: { state: 'unavailable', reason: 'opening-absent' },
   })
   const useSessions = bindSnapshotSelector(sessions)
   const injected: TeamActionInjected = { openTeammate: vi.fn() }

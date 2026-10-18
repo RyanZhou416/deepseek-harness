@@ -240,7 +240,7 @@ describe('Session history for a small stored source', () => {
     expect(frame.hasMore).toBe(reference.hasMore)
     expect(frame.hasMore).toBe(false)
     expect(frame.projections).toEqual(exact)
-    expect(frame.projections.asOfSeq).toBe(frame.cursor)
+    expect(frame.projections?.asOfSeq).toBe(frame.cursor)
     expect(small.readWindow).not.toHaveBeenCalled()
     expect(small.observeSession).toHaveBeenCalledOnce()
     // The reference path is the same one every backend without a window serves.

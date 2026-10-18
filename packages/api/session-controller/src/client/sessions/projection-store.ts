@@ -15,6 +15,10 @@
 import type { SessionProjectionMap } from '@deepseek-ai/dsh-session-projection/types'
 import type { SessionSeqCursor } from '@deepseek-ai/dsh-session/types'
 import type { ObservableSnapshot } from '@deepseek-ai/dsh-client-store'
+import type {
+  ProjectionAvailability,
+  ProjectionUnavailableReason,
+} from '../contract/projection-availability.ts'
 import { Notifier } from './notifier.ts'
 
 // The single projection type table, typed end to end (host unit, wire block,
@@ -88,6 +92,12 @@ interface Channel {
  * per key (create-on-demand, cached) so the React side binds each exactly
  * once; the store-level channel (`subscribeAny`) serves coarse consumers (the
  * manager's list projection reads the `title` key).
+ *
+ * Availability is separate from any row: a value can be readable (a cached
+ * list hint, a push frame, a window-scoped fallback) while the generation
+ * still holds no exact whole-log cut. Only {@link seed} makes the generation
+ * exact; an absent opening block therefore changes no values and claims no
+ * emptiness.
  */
 export class ProjectionValueStore {
   private readonly rows = new Map<string, Row>()
@@ -95,6 +105,10 @@ export class ProjectionValueStore {
   private valuesCache: Readonly<Partial<SessionProjectionMap>> | undefined
   /** Coarse any-key channel (no snapshot cache to rebuild: reads hit rows directly). */
   private readonly anyNotifier = new Notifier(() => {})
+  /** Whole-log projection readiness; transitions are driven by the deferred-read owner. */
+  private availabilityState: ProjectionAvailability = { state: 'unavailable', reason: 'opening-absent' }
+  /** Availability transitions (microtask-batched); row changes use the any-key channel. */
+  private readonly availabilityNotifier = new Notifier(() => {})
 
   /**
    * Key-addressed bare observable face (the useProjection resolution path).
@@ -151,6 +165,48 @@ export class ProjectionValueStore {
   }
 
   /**
+   * Whole-log projection readiness of this Session generation.
+   *
+   * `unavailable` and `loading` are distinct from an exact cut: cached rows
+   * and a window-scoped fallback may still be readable, but presentation must
+   * not state them as whole-session values. A store created for a generation
+   * starts `unavailable` with `opening-absent`; a window-first opening that
+   * carried no projection block leaves it there, and a deferred exact read
+   * moves it through `loading` to `exact` or back to `unavailable`.
+   * @returns the current availability; the reference is stable until a transition.
+   */
+  availability(): ProjectionAvailability {
+    return this.availabilityState
+  }
+
+  /**
+   * Subscribe to availability transitions. Row changes fire
+   * {@link subscribeAny} instead; availability changes mark both channels
+   * because list snapshots read values and readiness together.
+   * @param listener - change callback.
+   * @returns the unsubscribe function.
+   */
+  subscribeAvailability(listener: () => void): () => void {
+    return this.availabilityNotifier.subscribe(listener)
+  }
+
+  /**
+   * Record that an exact whole-log read is in flight for this generation.
+   * @param reason - why the read started.
+   */
+  markLoading(reason: ProjectionUnavailableReason): void {
+    this.setAvailability({ state: 'loading', reason })
+  }
+
+  /**
+   * Record that this generation holds no exact whole-log values.
+   * @param reason - why they are unavailable.
+   */
+  markUnavailable(reason: ProjectionUnavailableReason): void {
+    this.setAvailability({ state: 'unavailable', reason })
+  }
+
+  /**
    * Apply one finished value from the Session control stream.
    * @param key - projection key.
    * @param value - whole value computed by the host unit.
@@ -191,6 +247,10 @@ export class ProjectionValueStore {
    * key the block omits is capability-absent as of the cut — its row clears
    * unless a newer frame already superseded the cut (a stale baseline can
    * neither overwrite nor clear newer sequenced values).
+   *
+   * A served cut also makes the generation exact, including one whose values
+   * are empty: empty values at a cut claim that no projection exists there. A
+   * window-first opening carries no block and must not call this method.
    * @param baseline - the response's projections block.
    * @returns whether any row was replaced or removed.
    */
@@ -217,15 +277,29 @@ export class ProjectionValueStore {
       this.changed(key)
       changed = true
     }
+    this.setAvailability({ state: 'exact', asOfSeq: baseline.asOfSeq })
     return changed
   }
 
-  /** Discard one Host generation's values and watermarks while preserving subscribed faces. */
+  /**
+   * Discard one Host generation's values, watermarks, and exactness while
+   * preserving subscribed faces. The store returns to `unavailable` with
+   * `opening-absent` until the next exact block or read lands.
+   */
   clear(): void {
     for (const key of this.rows.keys()) {
       this.rows.delete(key)
       this.changed(key)
     }
+    this.setAvailability({ state: 'unavailable', reason: 'opening-absent' })
+  }
+
+  /** Publish one availability transition; coarse list consumers rebuild for readiness too. */
+  private setAvailability(next: ProjectionAvailability): void {
+    if (sameAvailability(this.availabilityState, next)) return
+    this.availabilityState = next
+    this.availabilityNotifier.markDirty()
+    this.anyNotifier.markDirty()
   }
 
   private changed(key: string): void {
@@ -249,5 +323,22 @@ export class ProjectionValueStore {
       this.channels.set(key, channel)
     }
     return channel
+  }
+}
+
+/**
+ * Whether two availability values name the same state and detail.
+ * @param left - current availability.
+ * @param right - candidate availability.
+ * @returns whether publishing `right` would be a no-op transition.
+ */
+function sameAvailability(left: ProjectionAvailability, right: ProjectionAvailability): boolean {
+  switch (left.state) {
+    case 'exact':
+      return right.state === 'exact' && left.asOfSeq === right.asOfSeq
+    case 'loading':
+      return right.state === 'loading' && left.reason === right.reason
+    case 'unavailable':
+      return right.state === 'unavailable' && left.reason === right.reason
   }
 }

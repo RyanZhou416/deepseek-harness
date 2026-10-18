@@ -102,6 +102,7 @@ function createSessionsBench(ctx: Context): SessionsBench {
         lastAgentError: null,
         promptAttempted: false,
         awaitingFirstTurn: false,
+        projectionAvailability: { state: 'unavailable', reason: 'opening-absent' },
       })
       const projections = new Map<string, HostObservable<unknown>>()
       const session = {

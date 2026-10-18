@@ -80,6 +80,7 @@ export function sessionSnapshot(sessionId: SessionId): SessionSnapshot {
     lastAgentError: null,
     promptAttempted: false,
     awaitingFirstTurn: false,
+    projectionAvailability: { state: 'unavailable', reason: 'opening-absent' },
   }
 }
 

@@ -37,6 +37,7 @@ function sessionSnapshot(): SessionSnapshot {
     lastAgentError: null,
     promptAttempted: false,
     awaitingFirstTurn: false,
+    projectionAvailability: { state: 'unavailable', reason: 'opening-absent' },
   }
 }
 
@@ -45,6 +46,7 @@ function fakeSession(): SessionFace {
   return {
     sessionId: SESSION_ID,
     projections: { faceOf: () => createSnapshotStore<unknown>(undefined) },
+    requestExactProjections: () => {},
     getSnapshot: () => snapshot.getSnapshot(),
     subscribe: listener => snapshot.subscribe(listener),
     beginSubmission: () => ({ requestId: 'test-req' as never, abandon: () => {} }),

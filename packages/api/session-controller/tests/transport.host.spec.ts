@@ -365,7 +365,7 @@ describe('SessionHistoryController', () => {
     await expect(iterator.next()).resolves.toMatchObject({ done: true })
   })
 
-  it('publishes an empty projection baseline when the query has no registry', async () => {
+  it('omits the projection baseline when the query has no registry', async () => {
     const ctx = new Context()
     await ctx.plugin(SessionStore)
     const sessionId = SessionId('projectionless-follow')
@@ -392,9 +392,13 @@ describe('SessionHistoryController', () => {
     const iterator = history.follow({ address: { kind: 'session', sessionId } }, abort.signal)
       [Symbol.asyncIterator]()
 
-    await expect(iterator.next()).resolves.toMatchObject({
-      value: { type: 'snapshot', projections: { asOfSeq: -1, values: {} } },
-    })
+    const first = await iterator.next()
+    if (first.done || first.value.type !== 'snapshot') {
+      throw new Error('follow did not open with a snapshot')
+    }
+    // No exact cut exists without the registry; the frame omits the field
+    // instead of claiming an empty whole-log block.
+    expect('projections' in first.value).toBe(false)
     abort.abort()
     await expect(iterator.next()).resolves.toMatchObject({ done: true })
     await ctx.fiber.dispose()

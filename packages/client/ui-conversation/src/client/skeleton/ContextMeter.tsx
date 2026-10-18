@@ -6,7 +6,8 @@
 
 import { useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
-import type { UseProjection } from '@deepseek-ai/dsh-api-session-controller/client'
+import type { SessionSnapshot, UseProjection } from '@deepseek-ai/dsh-api-session-controller/client'
+import type { MaybeSnapshotSelectorHook } from '@deepseek-ai/dsh-client-ui-slots'
 // Type-only: the `contextPressure` / `contextBreakdown` projection key merges.
 import type {} from '@deepseek-ai/dsh-token-meter/client'
 import { Tooltip, useAnchoredPosition, useDismissOnOutsidePointer } from '@deepseek-ai/dsh-client-ui-primitives'
@@ -49,13 +50,23 @@ function formatTokens(value: number, t: ComposerBarProps['t']): string {
 
 export interface ContextMeterProps {
   useProjection: UseProjection
+  /** Whole-log projection readiness; absent in bare fixtures and without a Session. */
+  useProjectionAvailability?: MaybeSnapshotSelectorHook<SessionSnapshot['projectionAvailability']> | undefined
+  /** Request exact whole-log projections when the Context surface opens; never on mount. */
+  requestExactProjections?: (() => void) | undefined
   /** The owning bar's locale seat, passed down as a plain prop. */
   t: ComposerBarProps['t']
 }
 
-export function ContextMeter({ useProjection, t }: ContextMeterProps) {
+/** Availability read in bare fixtures and without a Session: nothing exact was served yet. */
+const FIXTURE_AVAILABILITY: NonNullable<ContextMeterProps['useProjectionAvailability']> = () => undefined
+
+export function ContextMeter({
+  useProjection, useProjectionAvailability, requestExactProjections, t,
+}: ContextMeterProps) {
   const pressure = useProjection('contextPressure')
   const breakdown = useProjection('contextBreakdown')
+  const availability = (useProjectionAvailability ?? FIXTURE_AVAILABILITY)(value => value)
   const [open, setOpen] = useState(false)
   const rootRef = useRef<HTMLSpanElement | null>(null)
   const panelRef = useRef<HTMLDivElement | null>(null)
@@ -86,7 +97,36 @@ export function ContextMeter({ useProjection, t }: ContextMeterProps) {
     return () => { document.removeEventListener('keydown', onKeyDown) }
   }, [available, open])
 
-  if (context === null) return null
+  if (context === null) {
+    // No occupancy can be computed yet. Only the deferred read's own state is
+    // presentable: a loading/refused generation shows a bare ring the user can
+    // click to request exact values, while an opening that never carried a
+    // cut renders nothing instead of a fabricated zero percentage.
+    const label = availability === undefined
+      ? undefined
+      : availability.state === 'loading'
+        ? t('context.loading')
+        : availability.state === 'unavailable' && availability.reason !== 'opening-absent'
+          ? t('context.unavailable')
+          : undefined
+    if (label === undefined) return null
+    return (
+      <span ref={rootRef} className={css.root} data-context-state={availability?.state}>
+        <Tooltip label={label} side="top" delayMs={200}>
+          <button
+            type="button"
+            className={css.trigger}
+            aria-label={label}
+            onClick={() => { requestExactProjections?.() }}
+          >
+            <svg viewBox="0 0 14 14" width="14" height="14" aria-hidden>
+              <circle className={css.track} cx="7" cy="7" r={RADIUS} />
+            </svg>
+          </button>
+        </Tooltip>
+      </span>
+    )
+  }
   const percent = context.percent
   const reading = `${percent}%`
   const [headBefore = '', headAfter = ''] = t('context.aria', { percent: READING_SLOT })
@@ -114,7 +154,10 @@ export function ContextMeter({ useProjection, t }: ContextMeterProps) {
           aria-label={t('context.aria', { percent: reading })}
           aria-haspopup="dialog"
           aria-expanded={open}
-          onClick={() => { setOpen(!open) }}
+          onClick={() => {
+            if (!open) requestExactProjections?.()
+            setOpen(!open)
+          }}
         >
           <svg viewBox="0 0 14 14" width="14" height="14" aria-hidden>
             <circle className={css.track} cx="7" cy="7" r={RADIUS} />

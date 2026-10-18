@@ -48,6 +48,7 @@ const sessionState: SessionState = {
   lastAgentError: null,
   promptAttempted: false,
   awaitingFirstTurn: false,
+  projectionAvailability: { state: 'unavailable', reason: 'opening-absent' },
 }
 const sessionList = {
   ids: [SID],
