@@ -73,9 +73,9 @@ async function writeFixture(root: string, name: string, payloads: readonly strin
 }
 
 /** Header line and parsed header value for one unseeded current generation. */
-function headerOf(id: string): { headerLine: string; headerValue: unknown } {
+function headerOf(id: string): { headerLine: string; headerValue: Record<string, unknown> } {
   const headerLine = JSON.stringify(toHeaderLine(meta(id, '/work')))
-  return { headerLine, headerValue: JSON.parse(headerLine) }
+  return { headerLine, headerValue: JSON.parse(headerLine) as Record<string, unknown> }
 }
 
 /** Dense event frames for one log, split at `batchSizes`. */
@@ -175,6 +175,26 @@ describe('JSONL window index build: synchronous multi-frame pass', () => {
     for (const path of [empty.path, extra.path, valid.path]) {
       await expect(stat(windowIndexPath(path))).rejects.toMatchObject({ code: 'ENOENT' })
     }
+  })
+
+  it('refuses seeded and unvalidated headers instead of recording a zero cut', async () => {
+    const root = await tempRoot()
+    const { headerLine, headerValue } = headerOf('build-header-guard')
+    const { path } = await writeFixture(root, 'header-guard', [
+      `${headerLine}\n`,
+      ...eventFrames(turnLog(4), [2, 2]),
+    ])
+
+    // The count-only build cannot establish a seeded generation's inherited cut,
+    // so it declines rather than publishing a sidecar with a zero cut.
+    expect(await rebuildWindowIndex(path, 'zstd', { ...headerValue, isSeeded: true }, headerLine)).toBeUndefined()
+    await expect(stat(windowIndexPath(path))).rejects.toMatchObject({ code: 'ENOENT' })
+    // A header the released codec rejects is not an indexable generation.
+    expect(await rebuildWindowIndex(path, 'zstd', {}, headerLine)).toBeUndefined()
+    await expect(stat(windowIndexPath(path))).rejects.toMatchObject({ code: 'ENOENT' })
+
+    // The same bytes with their genuine unseeded header still build.
+    expect(await rebuildWindowIndex(path, 'zstd', headerValue, headerLine)).toBeDefined()
   })
 
   it('refuses empty and non-record-aligned event frames', async () => {

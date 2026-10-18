@@ -60,7 +60,7 @@ Continuable-subagent Queue edit/remove/steer 由 alpha.2 的通用 `session.upda
 1. `C:\Project\deepseek-harness-data\sessions`、`attachments`、`storages`、`.credentials.yaml`、`settings.yaml`、`.anonymous-user-id` 和 `plugins` 是用户数据，不是可重建缓存。禁止删除、重命名、原地迁移或用验证副本覆盖。
 2. AgentTeams 状态位于各工作区的 `.agent-teams\<teamId>\team.json` 与 `inbox\*.jsonl`。它不在 DSH_HOME 内，但同样属于会话成果和恢复数据，任何代码 clean 都不得触碰。
 3. 会话或插件格式升级必须先复制到隔离 DSH_HOME 验证。integration 版本第一次启动禁止直接指向真实 DSH_HOME。
-4. Fork 改动不得新增或修改 Session event type、`SESSION_FORMAT_VERSION` 或源 generation 的 JSONL/Zstd 物理布局，除非用户明确批准迁移并已有可逆备份。窗口读取的 `<generation>.window-index.json` 是派生缓存，不是 Session 格式或源 generation 的一部分：必须可删除重建、只绑定源 size/mtime，且不能改变源文件；当前 fork 没有 Session 格式或版本变化。
+4. Fork 改动不得新增或修改 Session event type、`SESSION_FORMAT_VERSION` 或源 generation 的 JSONL/Zstd 物理布局，除非用户明确批准迁移并已有可逆备份。窗口读取的 `<generation>.window-index.json` 是派生缓存，不是 Session 格式或源 generation 的一部分：必须可删除重建、只绑定源 size/mtime，且不能改变源文件。索引构建只按帧统计换行记录以记录偏移，不逐行解码事件；实际服务的窗口仍由播种严格解码器校验，格式错误或非 1:1 的 generation 必须回退到完整读取。进程内已解析索引 memo 必须同时以 generation path、sizeBytes、mtimeMs 与伴随文件自身身份为键，有界，随 backend 销毁，且不得成为额外的验证路径——缺失、过期或不一致的伴随文件仍走同一次读取/重建路径。当前 fork 没有 Session 格式或版本变化。
 5. Host 内存压力不得触发静默自动重启。watchdog 可以优雅关闭并落盘，前端必须显示断线，恢复由用户手动启动。
 6. 上游冲突采用“官方结构优先、fork 行为逐项重做”。Session、API、schema、包布局、生成文件和 lockfile 不得整树保留旧 fork 版本。
 7. 外置 profile、preset、本地 tgz 和 DSH_HOME 不受 Git 保护；每次上游或插件更新前必须单独备份它们。
