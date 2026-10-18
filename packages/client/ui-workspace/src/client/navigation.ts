@@ -160,6 +160,8 @@ class UiWorkspaceService extends Service implements UiWorkspace {
     {}, { persist: { name: 'dsh.sessions.current' } },
   )
   private mainReference: SessionReference | undefined
+  /** Retained startup preload of the persisted selection (see {@link startRestoredPreload}). */
+  private preload: SessionReference | undefined
 
   /**
    * @param ctx - Client root Context.
@@ -186,6 +188,7 @@ class UiWorkspaceService extends Service implements UiWorkspace {
         const reference = this.mainReference
         this.mainReference = undefined
         reference?.release()
+        this.releasePreload()
       }
     }, 'ui-workspace: Workspace navigation policy')
   }
@@ -413,14 +416,24 @@ class UiWorkspaceService extends Service implements UiWorkspace {
       if (initial !== 'waiting') return
       const workspace = this.workspaces.list.getSnapshot()
       const sessions = this.sessions.list.getSnapshot()
+      // The catalog pull runs about a second behind the connection on large
+      // installs; following the persisted selection now keeps it off the
+      // first-open critical path. Reconciliation below adopts or releases it.
+      this.startRestoredPreload(sessions)
       if (workspace.phase !== 'ready' || sessions.phase !== 'ready') return
       if (this.mainReference !== undefined) {
         initial = 'done'
+        this.releasePreload()
         return
       }
       initial = 'connecting'
       void this.restoreSelection(workspace, sessions).then(
-        () => { initial = 'done' },
+        () => {
+          initial = 'done'
+          // A restoration that selected nothing (the persisted identity is gone
+          // and no fallback target exists) leaves the preload unreferenced.
+          if (this.mainReference === undefined) this.releasePreload()
+        },
         (reason: unknown) => {
           if (this.lifetime.signal.aborted) return
           initial = 'waiting'
@@ -437,6 +450,38 @@ class UiWorkspaceService extends Service implements UiWorkspace {
       disposeSessions()
       disposeWorkspaces()
     }
+  }
+
+  /**
+   * Start the persisted selection's history opening before the catalog arrives.
+   * The reference is bookkeeping only: it does not select or reveal anything, so
+   * the list snapshot stays the sole selection authority. A later
+   * {@link replaceMain} for the same identity joins this opening instead of
+   * restarting it; any real selection supersedes the preload.
+   * @param sessions - current catalog snapshot; a ready catalog needs no preload.
+   */
+  private startRestoredPreload(sessions: SessionListState): void {
+    if (this.preload !== undefined || this.mainReference !== undefined || sessions.phase === 'ready') return
+    if (this.lifetime.signal.aborted) return
+    const saved = this.selection.getSnapshot()
+    // An addressed child resolves through its parent's catalog, so only a plain
+    // identity is followed blind.
+    if (saved.sessionId === undefined || saved.subagentAddress !== undefined) return
+    try {
+      this.preload = this.sessions.retain(saved.sessionId, {
+        source: 'mainViewPreload',
+        allowUnknown: true,
+      })
+    } catch (reason: unknown) {
+      // The catalog path still restores or falls back when the Controller refuses.
+      console.warn('startup Session preload failed:', reason)
+    }
+  }
+
+  private releasePreload(): void {
+    const preload = this.preload
+    this.preload = undefined
+    preload?.release()
   }
 
   private async restoreSelection(workspaces: WorkspaceSnapshot, sessions: SessionListState): Promise<void> {
@@ -493,6 +538,7 @@ class UiWorkspaceService extends Service implements UiWorkspace {
     this.mainReference = undefined
     this.selection.set({})
     previous?.release()
+    this.releasePreload()
     this.ctx.layout.selectPanel(null)
   }
 
@@ -525,6 +571,9 @@ class UiWorkspaceService extends Service implements UiWorkspace {
     const previous = this.mainReference
     this.mainReference = reference
     previous?.release()
+    // Released after the new reference exists: a same-identity preload then
+    // hands its already-open window over instead of disposing and refetching it.
+    this.releasePreload()
     if (panel === 'reveal') this.ctx.layout.selectPanel(null)
   }
 

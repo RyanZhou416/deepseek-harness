@@ -1512,4 +1512,94 @@ describe('UiWorkspaceService', () => {
       rpcError: { code: 'directory-picker/exists' },
     })
   })
+
+  describe('optimistic startup restore', () => {
+    /** A pending catalog with one history Session and a persisted selection of it. */
+    function pendingRestore() {
+      const saved = sid('saved')
+      persistSelection({ sessionId: saved })
+      const b = bench({
+        workspaces: workspaceState([workspace('a', [saved])], [], 'pending'),
+        sessions: sessionState([summary('saved', { cwd: '/w/a' })], 'pending'),
+      })
+      return { saved, b, preload: b.sessions.retained[0]! }
+    }
+
+    it('follows the persisted Session before the catalog resolves, without selecting it', () => {
+      const { saved, b, preload } = pendingRestore()
+
+      expect(b.sessions.retain).toHaveBeenCalledExactlyOnceWith(saved, {
+        source: 'mainViewPreload',
+        allowUnknown: true,
+      })
+      expect(preload.reference.sessionId).toBe(saved)
+      expect(preload.release).not.toHaveBeenCalled()
+      // Selection and panel stay catalog-driven: the preload reveals nothing.
+      expect(b.selectPanel).not.toHaveBeenCalled()
+      expect(b.sessions.create).not.toHaveBeenCalled()
+    })
+
+    it('hands the preloaded opening to the mainView reference before releasing it', async () => {
+      const { saved, b, preload } = pendingRestore()
+
+      b.sessions.list.set(sessionState([summary('saved', { cwd: '/w/a' })]))
+      b.workspaces.list.set(workspaceState([workspace('a', [saved])]))
+
+      await vi.waitFor(() => {
+        expect(b.sessions.retain).toHaveBeenLastCalledWith(saved, { source: 'mainView' })
+      })
+      expect(b.sessions.retain).toHaveBeenCalledTimes(2)
+      expect(b.sessions.retained).toHaveLength(2)
+      // The acquiring reference exists before the preload is released, so a
+      // same-identity scope is never dropped (and never reopened).
+      expect(b.sessions.retain.mock.invocationCallOrder[1])
+        .toBeLessThan(preload.release.mock.invocationCallOrder[0]!)
+      expect(preload.release).toHaveBeenCalledOnce()
+      expect(b.sessions.retained[1]!.reference.sessionId).toBe(saved)
+      expect(b.sessions.retained[1]!.release).not.toHaveBeenCalled()
+      expect(b.sessions.create).not.toHaveBeenCalled()
+    })
+
+    it('releases the preload when the catalog disproves the persisted identity', async () => {
+      const gone = sid('gone')
+      persistSelection({ sessionId: gone })
+      const b = bench({
+        workspaces: workspaceState([], [], 'pending'),
+        sessions: sessionState([], 'pending'),
+      })
+      const preload = b.sessions.retained[0]!
+      expect(preload.reference.sessionId).toBe(gone)
+
+      // The list proves the identity gone and no Workspace exists to fall back to.
+      b.sessions.list.set(sessionState())
+      b.workspaces.list.set(workspaceState())
+
+      await vi.waitFor(() => { expect(preload.release).toHaveBeenCalledOnce() })
+      expect(b.sessions.retain).toHaveBeenCalledTimes(1)
+      expect(b.sessions.create).not.toHaveBeenCalled()
+      expect(b.notify).not.toHaveBeenCalled()
+    })
+
+    it('releases the preload when a manual selection supersedes the pending restore', () => {
+      const { b, preload } = pendingRestore()
+
+      b.uiWorkspace.openSession(sid('manual'))
+
+      expect(preload.release).toHaveBeenCalledOnce()
+      expect(b.sessions.retain.mock.calls.map(([target]) => target))
+        .toEqual([sid('saved'), sid('manual')])
+      // The catalog arriving later does not restore the superseded identity.
+      b.sessions.list.set(sessionState([summary('saved'), summary('manual')]))
+      b.workspaces.list.set(workspaceState([workspace('a', [sid('saved'), sid('manual')])]))
+      expect(b.sessions.retain).toHaveBeenCalledTimes(2)
+    })
+
+    it('releases the preload on disposal', async () => {
+      const { b, preload } = pendingRestore()
+
+      await b.ctx.fiber.dispose()
+
+      expect(preload.release).toHaveBeenCalledOnce()
+    })
+  })
 })

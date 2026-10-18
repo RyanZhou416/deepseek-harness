@@ -187,7 +187,7 @@ describe('Session history stored window path', () => {
       expect(seqs(fromWindow)).toEqual(seqs(complete))
       expect(fromWindow.hasMore).toBe(complete.hasMore)
       expect(readWindow).toHaveBeenCalledOnce()
-      expect(readWindow.mock.calls[0]?.[1]).toMatchObject({ beforeSeq: events.length })
+      expect(readWindow.mock.calls[0]?.[1]).toMatchObject({ beforeSeq: 6 })
     } finally {
       await windowed.ctx.fiber.dispose()
       await full.ctx.fiber.dispose()
@@ -208,7 +208,7 @@ describe('Session history stored window path', () => {
       expect(seqs(fallback)).toEqual(seqs(complete))
       expect(fallback.hasMore).toBe(complete.hasMore)
       expect(readWindow).toHaveBeenCalledOnce()
-      expect(readWindow.mock.calls[0]?.[1]).toMatchObject({ beforeSeq: events.length })
+      expect(readWindow.mock.calls[0]?.[1]).toMatchObject({ beforeSeq: 6 })
       expect(observe).toHaveBeenCalledOnce()
     } finally {
       await windowed.ctx.fiber.dispose()

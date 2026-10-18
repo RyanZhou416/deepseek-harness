@@ -77,7 +77,7 @@ function conversationEvents(): SessionEvent[] {
 }
 
 describe('sessions.list cold merge', () => {
-  it('preserves listed format status and prefers live readiness without extra persistence reads', async () => {
+  it('preserves listed format status and prefers live readiness without body reads', async () => {
     const ctx = new Context()
     try {
       await ctx.plugin(SessionStore)
@@ -113,7 +113,10 @@ describe('sessions.list cold merge', () => {
         expect(byId.get(shared.id)).toMatchObject({ formatStatus: 'current' })
         expect(byId.get(liveOnly.id)).toMatchObject({ formatStatus: 'current' })
         expect(list).toHaveBeenCalledTimes(1)
-        expect(stat).not.toHaveBeenCalled()
+        // The listing may read cheap metadata to judge whether a title fold is
+        // affordable (an absent size keeps the row unnamed); it never opens or
+        // inspects a body.
+        expect(stat).toHaveBeenCalledTimes(3)
         expect(open).not.toHaveBeenCalled()
         expect(observe).not.toHaveBeenCalled()
       } finally {
@@ -124,15 +127,15 @@ describe('sessions.list cold merge', () => {
     }
   })
 
-  it('uses a predecessor title hint with zero cold stat or body reads', async () => {
+  it('uses a predecessor title hint without reading that row stored log', async () => {
     const ctx = new Context()
     await ctx.plugin(SessionStore)
     const metas = [header('legacy-title', 100), header('uncached', 200)]
-    const stat = vi.fn(async (id: SessionId) => statSnapshot(
+    const stat = vi.fn(async (id: SessionId, _options?: { readonly signal?: AbortSignal }) => statSnapshot(
       metas.find(meta => meta.id === id)!,
       { sizeBytes: 1 },
     ))
-    const inspect = vi.fn(async (id: SessionId) => ({
+    const inspect = vi.fn(async (id: SessionId, _signal?: AbortSignal) => ({
       meta: metas.find(meta => meta.id === id)!,
       events: conversationEvents(),
     }))
@@ -169,8 +172,13 @@ describe('sessions.list cold merge', () => {
         projections: { kind: 'cached', asOfSeq: 2, values: { title: 'Cached predecessor title' } },
       }),
     ])
-    expect(stat).not.toHaveBeenCalled()
-    expect(inspect).not.toHaveBeenCalled()
+    // A cache-served title (current or predecessor) never costs a read; only
+    // the unnamed row pays the bounded size check and title fold.
+    expect(stat).toHaveBeenCalledTimes(1)
+    expect(stat.mock.calls[0]?.[0]).toBe(sid('uncached'))
+    expect(stat.mock.calls[0]?.[1]?.signal).toBeInstanceOf(AbortSignal)
+    expect(inspect).toHaveBeenCalledTimes(1)
+    expect(inspect.mock.calls[0]?.[0]).toBe(sid('uncached'))
     expect(observe).not.toHaveBeenCalled()
   })
 

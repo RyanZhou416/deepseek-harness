@@ -20,6 +20,16 @@ interface Row {
   cwd?: false
 }
 
+/** Stored title source used by the cold-row title backfill tests. */
+interface TitleSource {
+  /** Reported artifact size per Session id; `undefined` reports an unknown size. */
+  sizes: Readonly<Record<string, number | undefined>>
+  /** Latest folded title per Session id; a missing id rejects that observation. */
+  titles: Readonly<Record<string, string>>
+  /** Titles the projection cache already served per Session id. */
+  cachedTitles?: Readonly<Record<string, string>>
+}
+
 const contexts = new Set<Context>()
 const immediates = new Set<ReturnType<typeof setImmediate>>()
 
@@ -42,13 +52,20 @@ function betweenRows(action: () => void): void {
   immediates.add(handle)
 }
 
-async function harness(rows: readonly Row[], summaryMs = 8, workSliceMs = 8, archived: readonly string[] = []) {
+async function harness(
+  rows: readonly Row[],
+  summaryMs = 8,
+  workSliceMs = 8,
+  archived: readonly string[] = [],
+  titleSource?: TitleSource,
+  excludedKeys: readonly string[] = [],
+) {
   const ctx = new Context()
   contexts.add(ctx)
   await ctx.plugin(SessionStore)
   await ctx.plugin(SessionProjectionRegistry)
   await ctx.plugin(AgentRegistry)
-  const list = new ApiSessionList(ctx, workSliceMs)
+  const list = new ApiSessionList(ctx, workSliceMs, new Set(excludedKeys))
   const clock = { now: 0 }
   const prepared = new Map<string, Session>()
   const agents = new Map<string, { status: Agent['status'] }>()
@@ -88,12 +105,40 @@ async function harness(rows: readonly Row[], summaryMs = 8, workSliceMs = 8, arc
     records
       .filter(record => options?.excludeSessionIds?.has(record.header.id) !== true)
       .filter(record => options?.excludeSubagentSessions !== true || record.header.origin !== 'subagent'))
-  ctx.provide('sessionQuery', { listSessions } as never)
+  const readTitleSnapshots = vi.fn(async (ids: readonly SessionId[]) => ids.map((id) => {
+    const title = titleSource?.titles[String(id)]
+    if (title === undefined) {
+      return { sessionId: id, status: 'rejected' as const, reason: new Error(`no stored title for ${String(id)}`) }
+    }
+    return {
+      sessionId: id,
+      status: 'fulfilled' as const,
+      value: {
+        session: prepared.get(String(id))!.header,
+        title: { title, usedMessageSeqs: [], source: 'user', eventSeq: 7 },
+      },
+    }
+  }))
+  const statOf = (id: SessionId) => ({
+    header: prepared.get(String(id))!.header,
+    revision: 'list-scheduling',
+    sizeBytes: titleSource?.sizes[String(id)],
+  })
+  const stat = vi.fn(async (id: SessionId) => statOf(id))
+  ctx.provide('sessionQuery', { listSessions, readTitleSnapshots } as never)
+  if (titleSource !== undefined) ctx.provide('sessionPersistence', { stat } as never)
   if (archived.length > 0) ctx.provide('workspaceRegistry', { archivedSessionIds: archived.map(id => SessionId(id)) } as never)
   ctx.provide('sessionProjectionCache', {
     cachedSnapshot: (header: SessionRecord['header']) => {
       recordSummary('cold', header.id)
-      return { asOfSeq: -1, values: { sessionListMetadata: { blank: false, lastPromptAt: null } } }
+      const title = titleSource?.cachedTitles?.[String(header.id)]
+      return {
+        asOfSeq: -1,
+        values: {
+          sessionListMetadata: { blank: false, lastPromptAt: null },
+          ...(title === undefined ? {} : { title }),
+        },
+      }
     },
     cachedPredecessorTitle: () => undefined,
   } as never)
@@ -104,7 +149,7 @@ async function harness(rows: readonly Row[], summaryMs = 8, workSliceMs = 8, arc
     return summary
   })
   vi.spyOn(performance, 'now').mockImplementation(() => clock.now)
-  return { ctx, list, listSessions, trace, observer, attach, agents, detach, clock }
+  return { ctx, list, listSessions, stat, statOf, readTitleSnapshots, trace, observer, attach, agents, detach, clock }
 }
 
 describe('Session-list work slices', () => {
@@ -365,5 +410,156 @@ describe('archived Session filtering', () => {
     const all = await h.list.list(undefined, { includeArchived: true })
     expect(all.map(item => item.sessionId).sort()).toEqual(['archived-one', 'keep-one'])
     expect(h.listSessions).toHaveBeenLastCalledWith(undefined, { excludeSubagentSessions: true })
+  })
+})
+
+describe('cold-row title backfill', () => {
+  const metadata = { blank: false, lastPromptAt: null }
+
+  it('names a cold row from its small stored log when the cache served no title', async () => {
+    const h = await harness([{ id: 'named', phase: 'cold' }], 1, 8, [], {
+      sizes: { named: 4096 },
+      titles: { named: 'Folded from the stored log' },
+    })
+
+    const items = await h.list.list()
+
+    expect(h.stat).toHaveBeenCalledExactlyOnceWith(SessionId('named'), undefined)
+    expect(h.readTitleSnapshots).toHaveBeenCalledExactlyOnceWith([SessionId('named')], undefined)
+    expect(items[0]?.projections).toEqual({
+      kind: 'cached',
+      asOfSeq: -1,
+      values: { sessionListMetadata: metadata, title: 'Folded from the stored log' },
+    })
+  })
+
+  it('skips the title reader for large and unknown-size artifacts', async () => {
+    const h = await harness([
+      { id: 'large', phase: 'cold' },
+      { id: 'unknown', phase: 'cold' },
+    ], 1, 8, [], {
+      sizes: { large: 8 * 1024 * 1024, unknown: undefined },
+      titles: { large: 'never read', unknown: 'never read' },
+    })
+
+    const items = await h.list.list()
+
+    expect(h.stat).toHaveBeenCalledTimes(2)
+    expect(h.readTitleSnapshots).not.toHaveBeenCalled()
+    expect(items.map(item => item.projections?.values.title)).toEqual([undefined, undefined])
+    expect(items.map(item => item.blank)).toEqual([false, false])
+  })
+
+  it('keeps a cached title and never reads the stored log for it', async () => {
+    const h = await harness([{ id: 'cached', phase: 'cold' }], 1, 8, [], {
+      sizes: { cached: 4096 },
+      titles: { cached: 'backfilled competitor' },
+      cachedTitles: { cached: 'Cached title' },
+    })
+
+    const items = await h.list.list()
+
+    expect(h.stat).not.toHaveBeenCalled()
+    expect(h.readTitleSnapshots).not.toHaveBeenCalled()
+    expect(items[0]?.projections?.values.title).toBe('Cached title')
+  })
+
+  it('isolates a failed size read to its own row', async () => {
+    const h = await harness([
+      { id: 'broken', phase: 'cold' },
+      { id: 'named', phase: 'cold' },
+    ], 1, 8, [], { sizes: { named: 4096 }, titles: { named: 'Named title' } })
+    h.stat.mockImplementation(async (id) => {
+      if (id === SessionId('broken')) throw new Error('metadata unavailable')
+      return h.statOf(id)
+    })
+
+    const items = await h.list.list()
+
+    expect(items).toHaveLength(2)
+    expect(h.readTitleSnapshots).toHaveBeenCalledExactlyOnceWith([SessionId('named')], undefined)
+    expect(items.map(item => item.projections?.values.title)).toEqual([undefined, 'Named title'])
+  })
+
+  it('does not backfill a title the deployment excluded from list hints', async () => {
+    const h = await harness([{ id: 'excluded', phase: 'cold' }], 1, 8, [], {
+      sizes: { excluded: 4096 },
+      titles: { excluded: 'Excluded title' },
+    }, ['title'])
+
+    const items = await h.list.list()
+
+    expect(h.stat).not.toHaveBeenCalled()
+    expect(h.readTitleSnapshots).not.toHaveBeenCalled()
+    expect(items[0]?.projections?.values.title).toBeUndefined()
+  })
+
+  it('backs off at most sixteen rows per listing, newest first', async () => {
+    const rows = Array.from({ length: 20 }, (_, index) => ({ id: `row-${String(index)}`, phase: 'cold' as const }))
+    const h = await harness(rows, 1, 8, [], {
+      sizes: Object.fromEntries(rows.map(row => [row.id, 4096])),
+      titles: Object.fromEntries(rows.map(row => [row.id, `Title ${row.id}`])),
+    })
+
+    await h.list.list()
+
+    expect(h.stat).toHaveBeenCalledTimes(16)
+    expect(h.readTitleSnapshots).toHaveBeenCalledTimes(1)
+    expect(h.readTitleSnapshots.mock.calls[0]?.[0]).toEqual(rows.slice(0, 16).map(row => SessionId(row.id)))
+  })
+
+  it('does not refold a title whose artifact is unchanged, and refolds one that changed', async () => {
+    const sizes: Record<string, number> = { stable: 4096, changed: 4096 }
+    const h = await harness([
+      { id: 'stable', phase: 'cold' },
+      { id: 'changed', phase: 'cold' },
+    ], 1, 8, [], { sizes, titles: { stable: 'Stable title', changed: 'Changed title' } })
+
+    const first = await h.list.list()
+    expect(h.readTitleSnapshots).toHaveBeenCalledTimes(1)
+    expect(first.map(item => item.projections?.values.title)).toEqual(['Stable title', 'Changed title'])
+
+    const second = await h.list.list()
+    expect(h.stat).toHaveBeenCalledTimes(4)
+    expect(h.readTitleSnapshots).toHaveBeenCalledTimes(1)
+    expect(second.map(item => item.projections?.values.title)).toEqual(['Stable title', 'Changed title'])
+
+    // The artifact grew, so its memoized fold no longer describes it.
+    sizes.changed = 8192
+    const third = await h.list.list()
+    expect(h.readTitleSnapshots).toHaveBeenCalledTimes(2)
+    expect(h.readTitleSnapshots).toHaveBeenLastCalledWith([SessionId('changed')], undefined)
+    expect(third.map(item => item.projections?.values.title)).toEqual(['Stable title', 'Changed title'])
+  })
+
+  it('retries a title read that failed instead of memoizing the failure', async () => {
+    const h = await harness([{ id: 'flaky', phase: 'cold' }], 1, 8, [], {
+      sizes: { flaky: 4096 },
+      titles: { flaky: 'Recovered title' },
+    })
+    h.readTitleSnapshots.mockImplementationOnce(async (ids: readonly SessionId[]) =>
+      ids.map(id => ({ sessionId: id, status: 'rejected' as const, reason: new Error('read failed') })))
+
+    const first = await h.list.list()
+    expect(first[0]?.projections?.values.title).toBeUndefined()
+
+    const second = await h.list.list()
+    expect(h.readTitleSnapshots).toHaveBeenCalledTimes(2)
+    expect(second[0]?.projections?.values.title).toBe('Recovered title')
+  })
+
+  it('propagates cancellation raised during the stored title read', async () => {
+    const h = await harness([{ id: 'named', phase: 'cold' }], 1, 8, [], {
+      sizes: { named: 4096 },
+      titles: { named: 'Named title' },
+    })
+    const controller = new AbortController()
+    const reason = new Error('cancel during title read')
+    h.readTitleSnapshots.mockImplementation(async () => {
+      controller.abort(reason)
+      return []
+    })
+
+    await expect(h.list.list(controller.signal)).rejects.toBe(reason)
   })
 })

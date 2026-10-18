@@ -62,6 +62,42 @@ describe('Client reference sources', () => {
     stop()
   })
 
+  it('opens a catalog-unconfirmed identity on request and reuses that opening when the row arrives', async ({ mock, start }) => {
+    const b = await bench(mock, start, false)
+    const source = b.svc.retainInfo(ID)
+    using preload = b.svc.retain(ID, { source: viewSource, allowUnknown: true })
+    // Bookkeeping only: an unconfirmed identity creates no catalog row.
+    expect(b.svc.list.getSnapshot().byId[ID]).toBeUndefined()
+    await preload.ready
+    const binding = preload.binding
+    expect(binding.session.getSnapshot().openState).toBe('open')
+    expect(mock.log.requests(FOLLOW)).toHaveLength(1)
+
+    await b.feed(true)
+    using selection = b.svc.retain(ID, { source: workSource })
+    await selection.ready
+    // The catalog-confirmed acquisition joins the preload's scope instead of reopening history.
+    expect(selection.binding).toBe(binding)
+    expect(mock.log.requests(FOLLOW)).toHaveLength(1)
+    preload.release()
+    expect(source.getSnapshot()).toEqual({ referenceCount: 1, retainedBy: { referenceTestWork: 1 } })
+    expect(selection.binding.session.getSnapshot().openState).toBe('open')
+  })
+
+  it('settles a refused catalog-unconfirmed identity without a catalog row', async ({ mock, start }) => {
+    const b = await bench(mock, start, false)
+    mock.stream(FOLLOW, followScript(() => Promise.reject(
+      new RemoteError('session/not-found', 'this Session no longer exists', { sessionId: ID }),
+    )))
+    using preload = b.svc.retain(ID, { source: viewSource, allowUnknown: true })
+    await vi.waitFor(() => { expect(preload.binding.session.getSnapshot().openState).toBe('error') })
+    expect(b.svc.list.getSnapshot().byId[ID]).toBeUndefined()
+    preload.release()
+    expect(b.svc.binding(ID)).toBeUndefined()
+    expect(b.svc.retainInfo(ID).getSnapshot()).toEqual({ referenceCount: 0, retainedBy: {} })
+    expect(mock.log.requests(FOLLOW)).toHaveLength(1)
+  })
+
   it('shares initial opening while exposing independent source contributions before the await', async ({ mock, start }) => {
     const b = await bench(mock, start)
     const opening = Promise.withResolvers<Awaited<HistoryAnswer>>()

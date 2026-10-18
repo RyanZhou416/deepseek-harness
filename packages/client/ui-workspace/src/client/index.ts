@@ -85,6 +85,8 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
 declare module '@deepseek-ai/dsh-api-session-controller/client' {
   interface SessionReferenceSourceMap {
     workspaceOperation: unknown
+    /** Startup preload of the persisted selection, before the catalog confirms it. */
+    mainViewPreload: unknown
   }
 }
 

@@ -225,10 +225,12 @@ describe('Session history paging through the real JSONL generation index', () =>
 
     const walk = await loadOlderWalk(backend.history, opening, 2)
 
-    // Every older page was served by a backwards window read ending at the
-    // opening cursor; no handle-based full read ran for any of them.
+    // Every older page was served by a backwards window read ending at that
+    // page's own cut, so one page decodes one page; no handle-based full read
+    // ran for any of them.
     expect(readWindow.mock.calls.slice(1).map(([, request]) => request?.beforeSeq))
-      .toEqual(walk.requests.map(() => opening.cursor + 1))
+      .toEqual(walk.requests.map(request => request.beforeSeq))
+    expect(readWindow.mock.calls.slice(1).every(([, request]) => request?.maxEvents === 2_000)).toBe(true)
     expect(walk.requests.map(request => request.throughSeq)).toEqual(walk.requests.map(() => opening.cursor))
     expect(open).not.toHaveBeenCalled()
     // The walk is contiguous and covers the durable log exactly once. It stops
@@ -280,7 +282,10 @@ describe('Session history paging through the real JSONL generation index', () =>
 
     expect(open).not.toHaveBeenCalled()
     expect(readWindow.mock.calls.slice(1).map(([, request]) => request?.beforeSeq))
-      .toEqual(requests.map(() => tail + 1))
+      .toEqual(requests.map(request => request.beforeSeq))
+    // The window ends at each requested cut, never at the opening cursor, so a
+    // cut deep inside the generation reads only its own lookback.
+    expect(readWindow.mock.calls.slice(1).every(([, request]) => request?.maxEvents === 2_000)).toBe(true)
     expect(pageSeqs(windowed[0] as SessionPage)).toEqual([2_095, 2_096, 2_097, 2_098, 2_099])
 
     readWindow.mockResolvedValue(undefined)

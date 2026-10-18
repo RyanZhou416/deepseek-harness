@@ -49,7 +49,7 @@ The cache opens its domain through the storage stack, so base mounts `storage`, 
 |---|---|---|
 | `writeEveryEvents` | required | Committed events per session that force a durable checkpoint write between mandatory points |
 | `writeIntervalMs` | required | Longest time a dirty checkpoint may stay unwritten between mandatory points |
-| `maxRetainedBytes` | `268435456` (256 MiB) | Total serialized checkpoint bytes kept resident; at init the newest records stay complete until this budget is reached and the rest are deleted |
+| `maxRetainedBytes` | `268435456` (256 MiB) | Total serialized checkpoint bytes kept complete; at init the newest records stay complete until this budget is reached and every remaining record keeps only its listing hint rows (`title`, `sessionListMetadata`) or is deleted when it has none |
 
 The plugin injects `storageDomain`, `sessionProjections`, and `sessions`. The generated [configuration catalog](../../../docs/config-catalog.md#deepseek-aidsh-session-projection-cache) is the exhaustive source for every accepted field and its JSDoc.
 
@@ -59,7 +59,7 @@ Three mandatory points always write: session creation persists the seed-derived 
 
 ### Bounding retained bytes
 
-The storage domain materializes every stored record at open and keeps it for the process lifetime, so a long history costs heap for records nothing can use. At init the cache bounds that set to `maxRetainedBytes` (default 256 MiB): records rank by their highest checkpoint `seq` — a Session that committed further has a newer row — and the newest stay complete until the budget is reached, after which the remaining records are deleted. A retained record keeps every row, so cached reads and `readWindow`'s complete-checkpoint gate are exactly as before; a deleted record is only a lost fold shortcut, never a lost value. The newest record always survives even when it alone exceeds the budget. The pass runs in the background, yields to the event loop every 64 records, warns and continues on a failed delete, and ends at a closed domain.
+The storage domain materializes every stored record at open and keeps it for the process lifetime, so a long history costs heap for records nothing can use. At init the cache bounds the complete set to `maxRetainedBytes` (default 256 MiB): records rank by their highest checkpoint `seq` — a Session that committed further has a newer row — and the newest stay complete until the budget is reached. Every remaining record is replaced by a lightweight record that keeps its identity and only the listing hint rows `title` and `sessionListMetadata`, so the zero-I/O list face still names and orders that Session without opening it; a record with neither row is deleted. A retained record keeps every row, so cached reads and `readWindow`'s complete-checkpoint gate are exactly as before, and a lightweight record is deliberately incomplete, so that gate still falls back to the exact observation for it. A dropped fold row is only a lost fold shortcut, never a lost value. The newest record always survives even when it alone exceeds the budget. The pass runs in the background, sizes records as it reaches them, yields to the event loop every 64 records, leaves a record that a live Session rewrote meanwhile untouched, warns and continues on a failed replace or delete, and ends at a closed domain.
 
 ### Reading cached values
 
@@ -133,7 +133,7 @@ None; the cache never assembles or sends provider requests.
 
 These limits define where the cache needs operational care. They are current package constraints, not a task backlog.
 
-- **No age-based eviction** — records older than the retained-byte budget are deleted at init, but the cache never expires a record by age alone and does not re-run the bound while it runs; a deployment that grows past `maxRetainedBytes` during one process lifetime keeps that growth until the next start.
+- **No age-based eviction** — records outside the retained-byte budget are reduced to their listing hint rows at init (or deleted when they have none), but the cache never expires a record by age alone and does not re-run the bound while it runs; a deployment that grows past `maxRetainedBytes` during one process lifetime keeps that growth until the next start.
 - **Interval throttle is per-session coarse** — the timer arms at the first dirty event after a clean write; a steady sub-threshold trickle writes once per interval, not a sliding window.
 - **No cache-side cold refold** — the cache serves and refreshes its rows but never reads the session log (it does not depend on the persistence layer); a consumer that needs a guaranteed cold snapshot refolds from the log itself.
 - **Every schema or domain-version change must prove its upgrade story** — a change to the stored record schema or the domain version lands in the same PR with an archived fixture of the previously shipped on-disk format under `tests/fixtures/` and test cases in `tests/fixtures.spec.ts` proving the chosen disposition: read-compat recovery (`compatibleVersions`), current-version rewrite, or backup-and-skip salvage. A bump whose old records are simply discarded still proves that the discard neither causes startup to fail nor poisons the tree.

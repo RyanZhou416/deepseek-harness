@@ -2846,7 +2846,7 @@ export type SessionLogCompressionLevel = 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9
 
 ## `@deepseek-ai/dsh-session-persistence-jsonl`
 
-- `source`: [`packages/session/session-persistence-jsonl/src/index.ts:98`](../packages/session/session-persistence-jsonl/src/index.ts)
+- `source`: [`packages/session/session-persistence-jsonl/src/index.ts:117`](../packages/session/session-persistence-jsonl/src/index.ts)
 
 ```ts config-catalog
 /** Plugin config for the JSONL backend's root, physical encoding, and listing concurrency. */
@@ -2882,7 +2882,7 @@ export type JsonlCompression = 'zstd' | 'none'
 ## `@deepseek-ai/dsh-session-projection-cache`
 
 - `inject`: `storageDomain` · `sessionProjections` · `sessions`
-- `source`: [`packages/session/session-projection-cache/src/index.ts:86`](../packages/session/session-projection-cache/src/index.ts)
+- `source`: [`packages/session/session-projection-cache/src/index.ts:96`](../packages/session/session-projection-cache/src/index.ts)
 
 ```ts config-catalog
 /**
@@ -2898,11 +2898,14 @@ export interface Config {
   /** Longest time (milliseconds) a dirty checkpoint may stay unwritten between mandatory points. */
   writeIntervalMs: number
   /**
-   * Largest total serialized checkpoint payload the cache retains across all
-   * Sessions. At init the newest records (ranked by their highest checkpoint
-   * seq) stay complete until this budget is reached and the rest are deleted;
-   * dropping a record only costs a longer cold replay. Defaults to
-   * {@link DEFAULT_MAX_RETAINED_BYTES}.
+   * Largest total serialized checkpoint payload the cache keeps complete
+   * across all Sessions. At init the newest records (ranked by their highest
+   * checkpoint seq) stay complete until this budget is reached, and every
+   * remaining record is replaced by a lightweight record holding only its
+   * listing hint rows (`title`, `sessionListMetadata`) — or deleted when it
+   * has none. Dropping fold rows only costs a longer cold replay, never a
+   * value; the listing hints keep such a Session named and ordered in the
+   * list without opening it. Defaults to {@link DEFAULT_MAX_RETAINED_BYTES}.
    */
   maxRetainedBytes?: number
 }

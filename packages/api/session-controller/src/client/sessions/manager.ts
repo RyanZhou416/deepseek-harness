@@ -144,12 +144,13 @@ export class SessionManager {
   /**
    * Resolve an acquisition target without materializing a Session.
    * @param target - known identity or durable direct-parent address.
+   * @param allowUnknown - accept a catalog-unconfirmed identity (startup restore) instead of throwing.
    * @returns the resolved identity with its explicit or catalog-derived history route installed.
    */
-  resolveTarget(target: SessionTarget): SessionId {
+  resolveTarget(target: SessionTarget, allowUnknown = false): SessionId {
     const id = typeof target === 'string' ? target : target.childSessionId
     const address = typeof target === 'string' ? this.subagentAddress(id) : target
-    if (typeof target === 'string'
+    if (!allowUnknown && typeof target === 'string'
       && !this.sessions.has(id)
       && !this.summaries.some(summary => summary.sessionId === id)
       && address === undefined) {

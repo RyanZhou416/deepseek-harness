@@ -2332,38 +2332,35 @@ describe('JsonlSessionPersistence: durability and crash semantics', () => {
     expect(aggregate?.errors).toEqual([failure])
   })
 
-  it('omits a listed artifact removed after discovery', async () => {
+  it('lists an artifact removed after discovery from the scan identity, then drops it', async () => {
     const m = meta('vanishing-snapshot')
     await writeLog(ctx.sessionPersistence, m, oneTurnLog())
     const persistence = ctx.sessionPersistence as unknown as {
       listArtifacts(): Promise<Array<{ header: SessionHeader; path: string }>>
     }
     const listArtifacts = persistence.listArtifacts.bind(persistence)
-    const discovery = vi.spyOn(persistence, 'listArtifacts').mockImplementation(async () => {
+    const discovery = vi.spyOn(persistence, 'listArtifacts').mockImplementationOnce(async () => {
       const artifacts = await listArtifacts()
       await rm(artifacts[0]!.path)
       return artifacts
     })
 
+    // The listing reuses the identity its own scan observed, so a removal after
+    // that observation reaches the client as one stale row instead of a second
+    // stat per artifact; the next listing drops it.
+    await expect(ctx.sessionPersistence.list()).resolves.toMatchObject([{ header: { id: m.id } }])
     await expect(ctx.sessionPersistence.list()).resolves.toEqual([])
     discovery.mockRestore()
   })
 
-  it('surfaces non-ENOENT stat failures during listing', async () => {
+  it('surfaces non-ENOENT scan failures during listing', async () => {
     const persistence = ctx.sessionPersistence as unknown as {
       listArtifacts(): Promise<Array<{ header: SessionHeader; path: string }>>
     }
-    const path = `${root}\0snapshot-stat-failure`
-    const artifact = {
-      header: meta('snapshot-stat-failure'),
-      path,
-      selected: { sourcePath: path },
-      sourceVersion: SESSION_FORMAT_VERSION,
-      revision: 'test-revision',
-    }
-    const discovery = vi.spyOn(persistence, 'listArtifacts').mockResolvedValue([artifact])
+    const failure = Object.assign(new Error('listing denied'), { code: 'EACCES' })
+    const discovery = vi.spyOn(persistence, 'listArtifacts').mockRejectedValue(failure)
 
-    await expect(ctx.sessionPersistence.list()).rejects.toThrow(/null bytes/)
+    await expect(ctx.sessionPersistence.list()).rejects.toBe(failure)
     discovery.mockRestore()
   })
 
@@ -2397,7 +2394,7 @@ describe('JsonlSessionPersistence: durability and crash semantics', () => {
     await expect(pending).rejects.toBe(reason)
   })
 
-  it('checks cancellation after an uncancellable list stat settles', async () => {
+  it('checks cancellation after an uncancellable list scan settles', async () => {
     const m = meta('snapshot-stat-cancellation')
     await writeLog(ctx.sessionPersistence, m, oneTurnLog())
     const persistence = ctx.sessionPersistence as unknown as {
@@ -2418,7 +2415,7 @@ describe('JsonlSessionPersistence: durability and crash semantics', () => {
     queueMicrotask(() => { controller.abort(reason) })
 
     await expect(pending).rejects.toBe(reason)
-    expect(discovery).toHaveBeenCalledWith(controller.signal)
+    expect(discovery.mock.calls[0]?.[0]).toBe(controller.signal)
   })
 })
 
@@ -3157,6 +3154,89 @@ describe('JsonlSessionPersistence listing concurrency', () => {
   async function directoriesOf(dir: string): Promise<string[]> {
     return (await readdir(dir, { withFileTypes: true })).filter(entry => entry.isDirectory()).map(entry => join(dir, entry.name))
   }
+
+  it('shares one metadata scan between concurrent listings with the same exclusions', async () => {
+    await seed('/work', ['shared-a', 'shared-b'])
+    const original: (skip?: ReadonlySet<string>, excludeSubagentSessions?: boolean) => Promise<unknown>
+      = Reflect.get(listingCtx.sessionPersistence, 'scanArtifacts')
+    const scan = vi.fn(original)
+    Reflect.set(listingCtx.sessionPersistence, 'scanArtifacts', scan)
+
+    const [first, second] = await Promise.all([
+      listingCtx.sessionPersistence.list({ excludeSubagentSessions: true }),
+      listingCtx.sessionPersistence.list({ excludeSubagentSessions: true }),
+    ])
+
+    expect(scan).toHaveBeenCalledTimes(1)
+    expect(first.map(item => item.header.id).sort()).toEqual(['shared-a', 'shared-b'])
+    expect(second.map(item => item.header.id).sort()).toEqual(['shared-a', 'shared-b'])
+    Reflect.set(listingCtx.sessionPersistence, 'scanArtifacts', original)
+  })
+
+  it('keeps a grown log\u2019s new identity in process without rewriting the catalog', async () => {
+    await seed('/work', ['catalog-grown'])
+    const catalogPath = join(listingRoot, '.session-catalog.json')
+    await listingCtx.sessionPersistence.list({ excludeSubagentSessions: true })
+    const written = await stat(catalogPath)
+    const segments = JSON.parse(await readFile(catalogPath, 'utf8')) as {
+      sessions: Record<string, { sizeBytes: number }>
+    }
+    const segment = encodeSegment('catalog-grown')
+    const recordedSize = segments.sessions[segment]?.sizeBytes
+    expect(recordedSize).toBeGreaterThan(0)
+
+    // Growing a live log changes only this entry's identity, which a listing
+    // must record in process but never write back on the read path.
+    const handle = await listingCtx.sessionPersistence.open(SessionId('catalog-grown'), 'write')
+    await handle.append([{ type: 'turn/start', seq: SessionSeq(6), time: 9, data: { turn: 2 } }])
+    await handle.close()
+    const listed = await listingCtx.sessionPersistence.list({ excludeSubagentSessions: true })
+
+    expect(listed[0]?.sizeBytes).toBeGreaterThan(recordedSize as number)
+    expect((await stat(catalogPath)).mtimeMs).toBe(written.mtimeMs)
+    const reread = JSON.parse(await readFile(catalogPath, 'utf8')) as {
+      sessions: Record<string, { sizeBytes: number }>
+    }
+    expect(reread.sessions[segment]?.sizeBytes).toBe(recordedSize)
+  })
+
+  it('still publishes the catalog when a listing sees a new Session', async () => {
+    await seed('/work', ['catalog-first'])
+    const catalogPath = join(listingRoot, '.session-catalog.json')
+    await listingCtx.sessionPersistence.list({ excludeSubagentSessions: true })
+    await seed('/work', ['catalog-second'])
+    await listingCtx.sessionPersistence.list({ excludeSubagentSessions: true })
+
+    const written = JSON.parse(await readFile(catalogPath, 'utf8')) as { sessions: Record<string, unknown> }
+    expect(Object.keys(written.sessions).sort()).toEqual([
+      encodeSegment('catalog-first'),
+      encodeSegment('catalog-second'),
+    ])
+  })
+
+  it('reuses a project directory listing until that directory changes', async () => {
+    await seed('/work', ['reuse-one'])
+    await listingCtx.sessionPersistence.list({ excludeSubagentSessions: true })
+    const [project] = await directoriesOf(listingRoot) as [string]
+
+    // An unchanged project directory is proven complete by its own identity, so
+    // the next listing must not depend on being able to read it again.
+    readdirFailure.path = project
+    readdirFailure.error = Object.assign(new Error('project listing unavailable'), { code: 'EACCES' })
+    try {
+      await expect(listingCtx.sessionPersistence.list({ excludeSubagentSessions: true }))
+        .resolves.toMatchObject([{ header: { id: 'reuse-one' } }])
+
+      // A new Session directory changes that identity, so the next listing reads
+      // the project again and surfaces the failure instead of serving stale rows.
+      await seed('/work', ['reuse-two'])
+      await expect(listingCtx.sessionPersistence.list({ excludeSubagentSessions: true }))
+        .rejects.toThrow(/project listing unavailable/)
+    } finally {
+      readdirFailure.path = undefined
+      readdirFailure.error = undefined
+    }
+  })
 
   it('validates listConcurrency as a positive integer that defaults to 3', () => {
     expect(JsonlSessionPersistence.Config({ root: listingRoot }).listConcurrency).toBe(3)

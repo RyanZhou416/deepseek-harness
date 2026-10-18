@@ -47,12 +47,14 @@ declare module '@deepseek-ai/dsh-session-projection/types' {
     'cache-test/marks3': MarksState
     'cache-test/mutable': { marks: string[] }
     title: string | null
+    sessionListMetadata: ListMetadataState
   }
   interface SessionProjectionMap {
     'cache-test/marks': { marks: string[] }
     'cache-test/secondary-marks': { marks: string[] }
     'cache-test/marks3': { marks: string[] }
     title: string | null
+    sessionListMetadata: ListMetadataState
   }
 }
 
@@ -67,6 +69,7 @@ declare module '@deepseek-ai/dsh-session/types' {
 }
 
 type MarksState = { marks: string[] } | null
+type ListMetadataState = { readonly blank: boolean; readonly lastPromptAt: number | null }
 const marksUnit = (stateVersion = 1) => ({
   key: 'cache-test/marks',
   stateSchema: z.object({ marks: z.array(z.string()) }).nullable(),
@@ -120,6 +123,19 @@ const titleUnit = {
   wire: { viewSchema: z.string().nullable(), view: state => state },
   stateVersion: 1,
 } satisfies ProjectionDefinition<'title', string | null>
+
+/** Mirrors the shipped list-metadata unit's storage face (stateVersion 1). */
+const listMetadataUnit = {
+  key: 'sessionListMetadata',
+  stateSchema: z.object({ blank: z.boolean(), lastPromptAt: z.number().nullable() }),
+  init: (): ListMetadataState => ({ blank: true, lastPromptAt: null }),
+  apply: state => state,
+  wire: {
+    viewSchema: z.object({ blank: z.boolean(), lastPromptAt: z.number().nullable() }),
+    view: state => state,
+  },
+  stateVersion: 1,
+} satisfies ProjectionDefinition<'sessionListMetadata', ListMetadataState>
 
 /** One session's record document on the per-record medium. */
 const recordPath = (root: string, id: Session['id']): string =>
@@ -968,6 +984,11 @@ describe('SessionProjectionCache retained-byte budget', () => {
     contextTimeline: heavyRow(seq, label),
     'cache-test/marks': { ver: 1, seq: SessionSeq(seq), val: { marks: [label] } },
   })
+  /** The two listing hint rows a record outside the budget keeps. */
+  const titleRow = (seq: number, title: string): CheckpointRecord['rows'][string] =>
+    ({ ver: 1, seq: SessionSeq(seq), val: title })
+  const listMetadataRow = (seq: number): CheckpointRecord['rows'][string] =>
+    ({ ver: 1, seq: SessionSeq(seq), val: { blank: false, lastPromptAt: null } })
   /** The budget's unit: compact JSON bytes of one record's rows, as the cache measures it. */
   const rowBytes = (rows: CheckpointRecord['rows']): number => Buffer.byteLength(JSON.stringify(rows))
 
@@ -981,6 +1002,8 @@ describe('SessionProjectionCache retained-byte budget', () => {
     await ctx.plugin(SessionStore)
     await ctx.plugin(SessionProjectionRegistry)
     ctx.sessionProjections.register(marksUnit())
+    ctx.sessionProjections.register(titleUnit)
+    ctx.sessionProjections.register(listMetadataUnit)
     const info = vi.spyOn(ctx.logger, 'info').mockImplementation(() => {})
     const warn = vi.spyOn(ctx.logger, 'warn').mockImplementation(() => {})
     await ctx.plugin(SessionProjectionCache, { writeEveryEvents: 100, writeIntervalMs: 60_000, maxRetainedBytes })
@@ -1063,5 +1086,110 @@ describe('SessionProjectionCache retained-byte budget', () => {
     expect(await storedRows(root, SessionId('chunk-69'))).toEqual(newest)
     expect(cache.cachedSnapshot(headerOf(SessionId('chunk-69')))?.values['cache-test/marks'])
       .toEqual({ marks: ['chunk-69'] })
+  })
+
+  it('replaces an out-of-budget record with its listing hint rows', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-projcache-'))
+    roots.push(root)
+    const newest = rowsFor(9, 'newest')
+    const identity = {
+      formatVersion: SESSION_FORMAT_VERSION,
+      createdAt: 7,
+      cwd: '/work',
+      isSeeded: false,
+      inheritedEventCount: SessionLogOffset(0),
+    }
+    await seedRecord(root, 'newest', newest)
+    await seedRecord(root, 'oldest', {
+      contextTimeline: heavyRow(4, 'oldest'),
+      title: titleRow(4, 'Old title'),
+      sessionListMetadata: listMetadataRow(4),
+    }, identity)
+    const { cache, info } = await budgetHarness(root, rowBytes(newest) + 16)
+    // Only the two cheap rows survive; the heavy fold state is gone.
+    await vi.waitFor(async () => {
+      expect(await storedRows(root, SessionId('oldest'))).toEqual({
+        title: titleRow(4, 'Old title'),
+        sessionListMetadata: listMetadataRow(4),
+      })
+    }, { timeout: 5_000 })
+    expect(await storedRows(root, SessionId('newest'))).toEqual(newest)
+    // The lifecycle identity survives, so the listing read still serves the hints.
+    expect((await storedRecord(root, SessionId('oldest')))?.identity).toEqual(identity)
+    const block = cache.cachedSnapshot(headerOf(SessionId('oldest'), 7, '/work'))
+    expect(block?.values).toEqual({
+      title: 'Old title',
+      sessionListMetadata: { blank: false, lastPromptAt: null },
+    })
+    expect(block?.asOfSeq).toBe(4)
+    await vi.waitFor(() => {
+      expect(info).toHaveBeenCalledWith(expect.stringContaining('kept lightweight list rows for 1 records'))
+    }, { timeout: 5_000 })
+  })
+
+  it('deletes an out-of-budget record that has no listing hint rows', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-projcache-'))
+    roots.push(root)
+    const newest = rowsFor(9, 'newest')
+    await seedRecord(root, 'newest', newest)
+    await seedRecord(root, 'empty', {})
+    await seedRecord(root, 'heavy-only', { contextTimeline: heavyRow(2, 'heavy') })
+    const { cache, info, warn } = await budgetHarness(root, rowBytes(newest) + 16)
+    await vi.waitFor(async () => {
+      expect(await storedRecord(root, SessionId('empty'))).toBeUndefined()
+      expect(await storedRecord(root, SessionId('heavy-only'))).toBeUndefined()
+    }, { timeout: 5_000 })
+    expect(cache.cachedSnapshot(headerOf(SessionId('empty')))).toBeUndefined()
+    expect(cache.cachedSnapshot(headerOf(SessionId('heavy-only')))).toBeUndefined()
+    await vi.waitFor(() => {
+      expect(info).toHaveBeenCalledWith(expect.stringContaining('pruned 2 records'))
+    }, { timeout: 5_000 })
+    expect(warn).not.toHaveBeenCalled()
+  })
+
+  it('accounts an already-lightweight record without rewriting it', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-projcache-'))
+    roots.push(root)
+    const newest = rowsFor(9, 'newest')
+    const light: CheckpointRecord['rows'] = { title: titleRow(3, 'Kept title'), sessionListMetadata: listMetadataRow(3) }
+    await seedRecord(root, 'newest', newest)
+    await seedRecord(root, 'light', light)
+    const { cache, info } = await budgetHarness(root, rowBytes(newest) + 16)
+    await vi.waitFor(() => {
+      expect(info).toHaveBeenCalledWith(expect.stringContaining('kept lightweight list rows for 1 records'))
+    }, { timeout: 5_000 })
+    expect(await storedRows(root, SessionId('light'))).toEqual(light)
+    expect(cache.cachedSnapshot(headerOf(SessionId('light')))?.values.title).toBe('Kept title')
+  })
+
+  it('keeps listing hints across a scan larger than one chunk', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-projcache-'))
+    roots.push(root)
+    for (let index = 0; index < 70; index += 1) {
+      const seq = index + 1
+      await seedRecord(root, `hint-${String(index)}`, {
+        ...rowsFor(seq, `hint-${String(index)}`),
+        title: titleRow(seq, `title-${String(index)}`),
+        sessionListMetadata: listMetadataRow(seq),
+      })
+    }
+    const complete = {
+      ...rowsFor(70, 'hint-69'),
+      title: titleRow(70, 'title-69'),
+      sessionListMetadata: listMetadataRow(70),
+    }
+    const { cache } = await budgetHarness(root, rowBytes(complete) + 16)
+    await vi.waitFor(async () => {
+      expect(await storedRows(root, SessionId('hint-0'))).toEqual({
+        title: titleRow(1, 'title-0'),
+        sessionListMetadata: listMetadataRow(1),
+      })
+      expect(await storedRows(root, SessionId('hint-68'))).toEqual({
+        title: titleRow(69, 'title-68'),
+        sessionListMetadata: listMetadataRow(69),
+      })
+    }, { timeout: 5_000 })
+    expect(await storedRows(root, SessionId('hint-69'))).toEqual(complete)
+    expect(cache.cachedSnapshot(headerOf(SessionId('hint-0')))?.values.title).toBe('title-0')
   })
 })

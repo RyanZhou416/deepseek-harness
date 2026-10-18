@@ -34,7 +34,7 @@ import {
   type SessionWindow, type SessionWindowRequest,
 } from '@deepseek-ai/dsh-session-persistence'
 import { JsonlBackendTracker, JsonlSessionHandle, type StorageHandleState } from './storage.ts'
-import { SessionCatalog } from './catalog.ts'
+import { SessionCatalog, type SessionCatalogEntry } from './catalog.ts'
 import { SessionWriteLease } from './lease.ts'
 import { SESSION_FORMAT_VERSION, SessionId as makeSessionId, SessionLogOffset } from '@deepseek-ai/dsh-session'
 import type { SessionEvent, SessionId, SessionHeader, SessionLogOffset as SessionLogOffsetType } from '@deepseek-ai/dsh-session'
@@ -93,6 +93,25 @@ export const JsonlCompressionSchema: z<JsonlCompression> = z.union([
 
 /** Default maximum listing filesystem operations in flight per backend. */
 const DEFAULT_LIST_CONCURRENCY = 3
+
+/** The most one listing's directory discovery may reuse without a fresh readdir. */
+const PROJECT_LISTING_CACHE_LIMIT = 64
+
+/** Logical header paired with the catalog's selected physical-generation classification. */
+interface GenerationHeader {
+  readonly header: SessionHeader
+  readonly formatStatus: NonNullable<SessionPersistenceSnapshot['formatStatus']>
+}
+
+/** One selected stored artifact with the identity the scan already observed for it. */
+interface ScannedArtifact extends GenerationHeader {
+  readonly path: string
+  readonly sourceVersion: number
+  /** Log identity token observed while selecting this artifact. */
+  readonly revision: PersistenceRevision
+  /** Physical artifact size observed while selecting this artifact. */
+  readonly sizeBytes: number
+}
 
 /** Plugin config for the JSONL backend's root, physical encoding, and listing concurrency. */
 export interface Config {
@@ -240,6 +259,19 @@ interface MigrationPreparation {
   waiters: number
 }
 
+/**
+ * Identify one listing's exact exclusions, so concurrent callers that skipped
+ * the same directories share one metadata scan and a caller that skipped
+ * different ones never does.
+ * @param options - the listing request, when the caller passed one.
+ * @returns a stable key for the excluded-id set and the subagent exclusion.
+ */
+function scanKeyOf(options: SessionPersistenceListOptions | undefined): string {
+  const excluded = options?.excludeSessionIds
+  const ids = excluded === undefined ? '' : [...excluded].map(String).sort().join(',')
+  return `${options?.excludeSubagentSessions === true ? 'ordinary' : 'all'}:${ids}`
+}
+
 /** Build the stat-derived best-effort change token shared by full and lightweight reads. */
 function fileRevision(identity: JsonlPhysicalIdentity): PersistenceRevision {
   return SessionPersistenceRevision([
@@ -362,8 +394,18 @@ class JsonlSessionPersistence extends SessionPersistence {
   private readonly currentReads = new Map<SessionId, CurrentRead>()
   /** One validated header per artifact path, guarded by its exact stat-derived revision. */
   private readonly listedHeaders = new Map<string, { revision: PersistenceRevision; header: GenerationHeader }>()
-  /** One in-flight metadata scan shared by every concurrent list caller. */
-  private listing: Promise<Array<GenerationHeader & { path: string; sourceVersion: number }>> | undefined
+  /**
+   * One in-flight metadata scan per exclusion set, shared by every concurrent
+   * caller that asked for the same one. Entries leave as their scan settles, so
+   * the map only ever holds the scans of the requests in flight together.
+   */
+  private readonly scans = new Map<string, Promise<readonly ScannedArtifact[]>>()
+  /**
+   * Session directories per project, reused while that directory's own
+   * stat-derived revision is unchanged: adding or removing a Session changes it,
+   * so an unchanged revision proves the previous listing is still complete.
+   */
+  private readonly projectListings = new Map<string, { revision: PersistenceRevision; dirs: string[] }>()
   /** Immutable-header cache reused across processes; rebuilt from log reads when absent or stale. */
   private readonly catalog: SessionCatalog
 
@@ -395,6 +437,8 @@ class JsonlSessionPersistence extends SessionPersistence {
       this.coldLogMemoTimers.clear()
       this.coldLogMemo.clear()
       this.listedHeaders.clear()
+      this.projectListings.clear()
+      this.scans.clear()
     }, 'session-persistence-jsonl.coldLogMemo')
   }
 
@@ -594,35 +638,22 @@ class JsonlSessionPersistence extends SessionPersistence {
     // append lands mid-scan is then still in this snapshot (its artifact may
     // predate the scan), so create-to-list visibility never has a hole.
     const pending = [...this.tracker.pendingEntries()]
-    const artifacts = skipSegments === undefined && !excludeSubagentSessions
-      ? await this.listArtifacts(signal)
-      : await this.listArtifacts(signal, skipSegments, excludeSubagentSessions)
+    const artifacts = await this.listArtifacts(signal, skipSegments, excludeSubagentSessions, scanKeyOf(options))
     const corpusRevision = artifacts.some(artifact => artifact.sourceVersion < SESSION_FORMAT_VERSION)
       ? await this.historicalCorpusRevision(signal) : undefined
-    const statted = settledValues(await settleLimited(this.listLimit, artifacts, async (artifact) => {
+    for (const artifact of artifacts) {
       signal?.throwIfAborted()
-      try {
-        const identity = await stat(artifact.path, { bigint: true })
-        signal?.throwIfAborted()
-        return { artifact, identity }
-      } catch (error: unknown) {
-        signal?.throwIfAborted()
-        if (!isENOENT(error)) throw error
-        return undefined
-      }
-    }))
-    for (const entry of statted) {
-      if (entry === undefined) continue
-      const { artifact, identity } = entry
       if (excludeSubagentSessions && artifact.header.origin === 'subagent') continue
       listed.add(artifact.header.id)
       snapshots.push({
         header: artifact.header,
         formatStatus: artifact.formatStatus,
+        // The scan already observed this artifact's identity, so a listing never
+        // stats the same log twice.
         revision: artifact.sourceVersion < SESSION_FORMAT_VERSION
-          ? SessionPersistenceRevision(`${fileRevision(identity)}:${corpusRevision}`)
-          : fileRevision(identity),
-        sizeBytes: Number(identity.size),
+          ? SessionPersistenceRevision(`${artifact.revision}:${corpusRevision}`)
+          : artifact.revision,
+        sizeBytes: artifact.sizeBytes,
       })
     }
     for (const [id, entry] of pending) {
@@ -1371,32 +1402,66 @@ class JsonlSessionPersistence extends SessionPersistence {
     return hash.digest('hex')
   }
 
+  /**
+   * Share one metadata scan between every concurrent caller asking for the same
+   * exclusion set.
+   * @param signal - optional cancellation for this caller's wait.
+   * @param skipSegments - Session directories this listing need not read.
+   * @param excludeSubagentSessions - whether subagent-origin rows are filtered.
+   * @param key - exact exclusion identity; callers with different exclusions never share a scan.
+   * @returns the selected artifacts, each with its observed identity.
+   */
   private async listArtifacts(
     signal?: AbortSignal,
     skipSegments?: ReadonlySet<string>,
     excludeSubagentSessions = false,
-  ): Promise<Array<GenerationHeader & { path: string; sourceVersion: number }>> {
-    signal?.throwIfAborted()
-    if (skipSegments !== undefined || excludeSubagentSessions) {
-      return this.scanArtifacts(skipSegments, excludeSubagentSessions)
+    key = scanKeyOf(undefined),
+  ): Promise<readonly ScannedArtifact[]> {
+    if (skipSegments === undefined && !excludeSubagentSessions) {
+      // The unexcluded listing is the only one that must prove the root encoding
+      // before selecting artifacts; an excluded scan validates per directory.
+      await this.ensureRootEncoding()
+      signal?.throwIfAborted()
     }
-    await this.ensureRootEncoding()
-    signal?.throwIfAborted()
-    if (this.listing === undefined) {
-      const scan = this.scanArtifacts()
-      this.listing = scan
-      void scan.finally(() => {
-        if (this.listing === scan) this.listing = undefined
-      }).catch(() => undefined)
-    }
-    return waitWithAbort(this.listing, signal)
+    const shared = this.scans.get(key)
+    if (shared !== undefined) return waitWithAbort(shared, signal)
+    const scan = this.scanArtifacts(skipSegments, excludeSubagentSessions)
+    this.scans.set(key, scan)
+    void scan.finally(() => {
+      if (this.scans.get(key) === scan) this.scans.delete(key)
+    }).catch(() => undefined)
+    return waitWithAbort(scan, signal)
+  }
+
+  /**
+   * Publish accumulated catalog changes.
+   *
+   * A listing that only refreshed log identities left nothing pending, so the
+   * common read-only refresh writes nothing; a scan that discovered a new
+   * Session, changed a header, pruned a departed directory, or rebuilt from an
+   * absent catalog still persists what it learned before returning.
+   */
+  private async persistCatalog(): Promise<void> {
+    if (!this.catalog.needsFlush) return
+    await this.catalog.flush()
+  }
+
+  /**
+   * Record what a scan observed about one artifact, keeping a grown log's new
+   * identity in process without scheduling a durable catalog rewrite.
+   * @param segment - encoded Session directory name.
+   * @param entry - header and identity the scan just observed.
+   */
+  private recordCatalogEntry(segment: string, entry: SessionCatalogEntry): void {
+    if (this.catalog.refreshIdentity(segment, entry)) return
+    this.catalog.remember(segment, entry)
   }
 
   /** Select and validate one header per physical Session directory, reusing the durable catalog and in-process cache by exact revision. */
   private async scanArtifacts(
     skipSegments?: ReadonlySet<string>,
     excludeSubagentSessions = false,
-  ): Promise<Array<GenerationHeader & { path: string; sourceVersion: number }>> {
+  ): Promise<readonly ScannedArtifact[]> {
     await this.catalog.load()
     const generations = await this.listGenerations(undefined, skipSegments)
     const selectedPaths = new Set(generations.map(selected => selected.sourcePath))
@@ -1407,59 +1472,67 @@ class JsonlSessionPersistence extends SessionPersistence {
       try {
         const identity = await stat(selected.sourcePath, { bigint: true })
         const revision = fileRevision(identity)
+        const sizeBytes = Number(identity.size)
         const segment = basename(dirname(selected.sourcePath))
         const cataloged = this.catalog.lookup(segment, identity)
         if (cataloged !== undefined && encodeSegment(cataloged.header.id) === segment) {
-          return { selected, metadata: cataloged }
+          return { selected, metadata: cataloged, revision, sizeBytes }
         }
         const cached = this.listedHeaders.get(selected.sourcePath)
         if (cached !== undefined && cached.revision === revision) {
-          this.catalog.remember(segment, {
+          this.recordCatalogEntry(segment, {
             header: cached.header.header,
             formatStatus: cached.header.formatStatus,
-            sizeBytes: Number(identity.size),
+            sizeBytes,
             mtimeMs: Number(identity.mtimeMs),
           })
-          return { selected, metadata: cached.header }
+          return { selected, metadata: cached.header, revision, sizeBytes }
         }
         const metadata = await this.readGenerationHeader(selected, undefined, undefined)
         if (metadata === undefined) {
           this.listedHeaders.delete(selected.sourcePath)
-          return { selected, metadata }
+          return undefined
         }
         this.listedHeaders.set(selected.sourcePath, { revision, header: metadata })
-        this.catalog.remember(segment, {
+        this.recordCatalogEntry(segment, {
           header: metadata.header,
           formatStatus: metadata.formatStatus,
-          sizeBytes: Number(identity.size),
+          sizeBytes,
           mtimeMs: Number(identity.mtimeMs),
         })
-        return { selected, metadata }
+        return { selected, metadata, revision, sizeBytes }
       } catch (error: unknown) {
         if (isENOENT(error) || error instanceof SessionFormatUnsupportedError || error instanceof SessionPersistenceCorruptionError) {
           this.listedHeaders.delete(selected.sourcePath)
-          return { selected, metadata: undefined }
+          return undefined
         }
         throw error
       }
     })
-    const artifacts: Array<GenerationHeader & { path: string; sourceVersion: number }> = []
+    const artifacts: ScannedArtifact[] = []
     const ids = new Set<SessionId>()
     for (const outcome of headers) {
       if (outcome.status === 'rejected') throw outcome.reason
-      const { selected, metadata } = outcome.value
-      if (metadata === undefined) continue
+      const entry = outcome.value
+      if (entry === undefined) continue
+      const { selected, metadata, revision, sizeBytes } = entry
       if (excludeSubagentSessions && metadata.header.origin === 'subagent') continue
       if (ids.has(metadata.header.id)) {
         throw new Error(`duplicate JSONL session id "${metadata.header.id}" appears in multiple project directories`)
       }
       ids.add(metadata.header.id)
-      artifacts.push({ ...metadata, path: selected.sourcePath, sourceVersion: selected.sourceVersion })
+      artifacts.push({
+        ...metadata,
+        path: selected.sourcePath,
+        sourceVersion: selected.sourceVersion,
+        revision,
+        sizeBytes,
+      })
     }
     if (skipSegments === undefined && !excludeSubagentSessions) {
       this.catalog.prune(new Set(generations.map(selected => basename(dirname(selected.sourcePath)))))
     }
-    await this.catalog.flush()
+    await this.persistCatalog()
     return artifacts
   }
   /** Read and translate one selected generation header without inspecting its body. */
@@ -1974,15 +2047,42 @@ class JsonlSessionPersistence extends SessionPersistence {
     }
   }
 
-  /** List session-owned directories and reject the obsolete flat-file layout. */
+  /**
+   * List session-owned directories and reject the obsolete flat-file layout.
+   *
+   * A project directory's own stat identity changes whenever a Session
+   * directory is created, removed, or renamed inside it, so an unchanged
+   * revision proves the previous listing still names every Session there. That
+   * turns a listing of a large history from one readdir per project into one
+   * stat per project.
+   * @param project - absolute project directory.
+   * @param signal - optional cancellation for the stat and readdir.
+   * @returns absolute Session directories in readdir order.
+   */
   private async listSessionDirs(project: string, signal?: AbortSignal): Promise<string[]> {
     signal?.throwIfAborted()
+    let revision: PersistenceRevision | undefined
+    try {
+      revision = fileRevision(await stat(project, { bigint: true }))
+    } catch (error: unknown) {
+      signal?.throwIfAborted()
+      if (!isENOENT(error)) throw error
+      this.projectListings.delete(project)
+    }
+    signal?.throwIfAborted()
+    const cached = revision === undefined ? undefined : this.projectListings.get(project)
+    if (cached !== undefined && cached.revision === revision) return cached.dirs
     const entries = await readdir(project, { withFileTypes: true })
     signal?.throwIfAborted()
     const legacy = entries.find(entry =>
       entry.isFile() && (entry.name.endsWith('.jsonl') || entry.name.endsWith('.jsonl.zstd')))
     if (legacy !== undefined) throw this.legacyLayout(join(project, legacy.name))
-    return entries.filter(entry => entry.isDirectory()).map(entry => join(project, entry.name))
+    const dirs = entries.filter(entry => entry.isDirectory()).map(entry => join(project, entry.name))
+    if (revision !== undefined) {
+      if (this.projectListings.size >= PROJECT_LISTING_CACHE_LIMIT) this.projectListings.clear()
+      this.projectListings.set(project, { revision, dirs })
+    }
+    return dirs
   }
 
   /** Reject a root that already belongs to the other physical encoding. */

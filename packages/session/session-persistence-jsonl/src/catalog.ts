@@ -121,6 +121,40 @@ export class SessionCatalog {
   }
 
   /**
+   * Refresh the log identity of one already-known entry without scheduling a
+   * durable rewrite.
+   *
+   * A live Session's log grows continuously, so every listing observes a new
+   * size and modification time for it. That identity is worth remembering in
+   * process — the next scan then trusts the cached header again — but it is not
+   * worth rewriting the complete catalog file on the read path: the durable
+   * entry keeps describing the older log, and the next process re-reads at most
+   * one header per Session whose log grew after the last write.
+   * @param segment - encoded Session directory name.
+   * @param entry - the header and log identity just observed.
+   * @returns whether an entry with this exact header was refreshed; `false`
+   *   means the caller must record it through {@link remember}.
+   */
+  refreshIdentity(segment: string, entry: SessionCatalogEntry): boolean {
+    const current = this.entries.get(segment)
+    if (current === undefined) return false
+    if (current.formatStatus !== entry.formatStatus
+      || JSON.stringify(current.header) !== JSON.stringify(entry.header)) return false
+    if (current.sizeBytes !== entry.sizeBytes || current.mtimeMs !== entry.mtimeMs) {
+      this.entries.set(segment, entry)
+    }
+    return true
+  }
+
+  /**
+   * Whether this catalog holds changes that have not reached the medium yet.
+   * @returns true when a later {@link flush} would write the catalog file.
+   */
+  get needsFlush(): boolean {
+    return this.dirty
+  }
+
+  /**
    * Drop entries whose directory no longer exists.
    * @param segments - every Session directory segment the scan observed.
    */

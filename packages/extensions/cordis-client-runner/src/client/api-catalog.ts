@@ -185,7 +185,7 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
       {
         signature: 'retain(target: SessionTarget, options: SessionRetainOptions): SessionReference',
         description: 'Retain an exact Client generation and start its shared initial history opening.',
-        parameters: [{ name: 'target', description: 'known identity or durable direct-parent address.' }, { name: 'options', description: 'required consumer source and optional independent waiter cancellation.' }],
+        parameters: [{ name: 'target', description: 'known identity or durable direct-parent address.' }, { name: 'options', description: 'required consumer source, optional independent waiter cancellation, and optional provisional acceptance of a catalog-unconfirmed identity.' }],
         returns: 'an owned reference immediately; await `reference.ready` when the initial open attempt must settle first.',
       },
       {
@@ -945,7 +945,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'SessionRetainOptions',
-    declaration: 'export interface SessionRetainOptions {\n    readonly source: SessionReferenceSource;\n    readonly signal?: AbortSignal | undefined;\n}',
+    declaration: 'export interface SessionRetainOptions {\n    readonly source: SessionReferenceSource;\n    readonly signal?: AbortSignal | undefined;\n    readonly allowUnknown?: boolean;\n}',
   },
   {
     name: 'SessionSearchResultItem',

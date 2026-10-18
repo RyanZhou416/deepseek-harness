@@ -318,16 +318,17 @@ describe('JSONL durable generation index', () => {
     expect(largeBuild).toBeGreaterThanOrEqual(301)
 
     zstdProbe.decompressCalls = 0
+    zstdProbe.decodedFrames = 0
     expectWindow(await readWindow(persistence, small, { beforeSeq: 200, maxEvents: 10 }), smallEvents.slice(190, 200))
-    const smallPage = zstdProbe.decompressCalls
-    zstdProbe.decompressCalls = 0
+    const smallPage = zstdProbe.decodedFrames
+    zstdProbe.decodedFrames = 0
     expectWindow(await readWindow(persistence, large, { beforeSeq: 200, maxEvents: 10 }), largeEvents.slice(190, 200))
-    const largePage = zstdProbe.decompressCalls
-    // The header frame plus the segments covering rows 190..199, independent of log length.
+    const largePage = zstdProbe.decodedFrames
+    // The page decodes only the segments covering rows 190..199 in one batched
+    // pass: the same count for both logs, independent of log length.
     expect(smallPage).toBeGreaterThanOrEqual(2)
-    expect(smallPage).toBeLessThanOrEqual(6)
-    expect(largePage).toBeGreaterThanOrEqual(2)
-    expect(largePage).toBeLessThanOrEqual(6)
+    expect(smallPage).toBe(largePage)
+    expect(largePage).toBeLessThan(largeBuild)
   })
 
   it('reuses a durable sidecar from another backend instance', async () => {
@@ -338,9 +339,10 @@ describe('JSONL durable generation index', () => {
     expectWindow(await readWindow(writer.persistence, id, { beforeSeq: 200, maxEvents: 10 }), events.slice(190, 200))
 
     const reader = await mount('zstd', writer.root)
-    zstdProbe.decompressCalls = 0
+    zstdProbe.decodedFrames = 0
     expectWindow(await readWindow(reader.persistence, id, { beforeSeq: 200, maxEvents: 10 }), events.slice(190, 200))
-    expect(zstdProbe.decompressCalls).toBeLessThanOrEqual(6)
+    expect(zstdProbe.decodedFrames).toBeGreaterThanOrEqual(2)
+    expect(zstdProbe.decodedFrames).toBeLessThanOrEqual(6)
   })
 
   it('keeps the newest window index-free', async () => {

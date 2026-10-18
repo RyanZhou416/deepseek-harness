@@ -17,7 +17,7 @@ import type { SessionFormatEvent, SessionFormatMigrationContext } from '@deepsee
 import { assertV4RowAdmission, releasedV4SessionFormatCodec } from '@deepseek-ai/dsh-session-format-v3-to-v4'
 import type { JsonlCompression } from './format.ts'
 import { loadWindowIndex, readWindowIndexSource, rebuildWindowIndex, type JsonlWindowIndex, type JsonlWindowIndexFrame } from './window-index.ts'
-import { decompressZstdFrame, scanZstdFrames } from './zstd.ts'
+import { createZstdFrameDecoder, decompressZstdFrame, scanZstdFrames } from './zstd.ts'
 
 /** Default trailing event bound for one history window. */
 export const DEFAULT_WINDOW_EVENTS = 2_000
@@ -305,27 +305,71 @@ async function decodeIndexedWindow(
   if (current === undefined
     || current.sizeBytes !== index.source.sizeBytes
     || current.mtimeMs !== index.source.mtimeMs) return undefined
-  const plains: FramePlaintext[] = []
-  for (const frame of selected) {
-    signal?.throwIfAborted()
-    const slice = bytes.subarray(frame.offset - first.offset, frame.offset - first.offset + frame.length)
-    if (compression !== 'zstd') {
-      plains.push({ frame, plaintext: slice })
-      continue
-    }
-    try {
-      plains.push({ frame, plaintext: await decompressZstdFrame(slice) })
-    } catch {
+  return decodeIndexedFrames(
+    selectedPlains(bytes, first, selected, compression, signal),
+    startRow,
+    boundary,
+    headerValue,
+    index.inheritedEventCount,
+    signal,
+  )
+}
+
+/**
+ * Yield the selected segments' plaintext in file order, decoding them in one pass.
+ *
+ * One bounded page selects many small frames, so one awaited one-shot decode per
+ * frame dominates the read. The backend frame decoder instead decodes the complete
+ * contiguous byte range through one reused Zstandard context. Its plaintext
+ * buffers are scratch memory, so {@link decodeIndexedFrames} consumes each one
+ * before the iterator advances.
+ * @param bytes - exact bytes of the selected frame range.
+ * @param first - lowest selected segment, whose offset is byte 0 of `bytes`.
+ * @param selected - selected segments in file order.
+ * @param compression - configured physical encoding.
+ * @param signal - optional cancellation.
+ * @returns one plaintext segment per selected frame, paired with its index entry.
+ */
+function* selectedPlains(
+  bytes: Buffer,
+  first: JsonlWindowIndexFrame,
+  selected: readonly JsonlWindowIndexFrame[],
+  compression: JsonlCompression,
+  signal: AbortSignal | undefined,
+): Generator<FramePlaintext, void, void> {
+  if (compression !== 'zstd') {
+    for (const frame of selected) {
       signal?.throwIfAborted()
-      return undefined
+      const start = frame.offset - first.offset
+      yield { frame, plaintext: bytes.subarray(start, start + frame.length) }
     }
+    return
   }
-  return decodeIndexedFrames(plains, startRow, boundary, headerValue, index.inheritedEventCount, signal)
+  const ranges = selected.map(frame => ({
+    start: frame.offset - first.offset,
+    end: frame.offset - first.offset + frame.length,
+  }))
+  const frameDecoder = createZstdFrameDecoder()
+  try {
+    let position = 0
+    for (const plaintext of frameDecoder.decode(bytes, ranges)) {
+      signal?.throwIfAborted()
+      const frame = selected[position]
+      /* v8 ignore next -- the decoder yields exactly one plaintext per requested range. */
+      if (frame === undefined) throw new Error('Zstandard frame decoder produced an unrequested frame')
+      position += 1
+      yield { frame, plaintext }
+    }
+    /* v8 ignore next -- the decoder yields exactly one plaintext per requested range. */
+    if (position !== selected.length) throw new Error('Zstandard frame decoder omitted a requested frame')
+  } finally {
+    frameDecoder.close()
+  }
 }
 
 /** Decode the selected segments and prove the returned slice is the requested dense range. */
 function decodeIndexedFrames(
-  plains: readonly FramePlaintext[],
+  plains: Iterable<FramePlaintext>,
   startRow: number,
   boundary: number,
   headerValue: unknown,
@@ -344,17 +388,17 @@ function decodeIndexedFrames(
       for (const event of run.expand()) events.push(event as SessionEvent)
     },
   }
+  let decoder: ReturnType<typeof releasedV4SessionFormatCodec.createDecoder> | undefined
   let inherited: number
   try {
-    const first = plains[0] as FramePlaintext
-    const decoder = releasedV4SessionFormatCodec.createDecoder(headerValue, 'strict', {
-      rowIndex: first.frame.firstRow,
-      eventCount: first.frame.firstSeq,
-      partial: true,
-    })
     for (const { frame, plaintext } of plains) {
       signal?.throwIfAborted()
       if (plaintext.length === 0 || plaintext.at(-1) !== 0x0A) return undefined
+      decoder ??= releasedV4SessionFormatCodec.createDecoder(headerValue, 'strict', {
+        rowIndex: frame.firstRow,
+        eventCount: frame.firstSeq,
+        partial: true,
+      })
       let lineStart = 0
       let row = frame.firstRow
       let rows = 0
@@ -372,6 +416,8 @@ function decodeIndexedFrames(
       }
       if (rows !== frame.events) return undefined
     }
+    /* v8 ignore next -- one selected segment always exists for a non-empty range. */
+    if (decoder === undefined) return undefined
     inherited = decoder.finish(context)
   } catch {
     signal?.throwIfAborted()

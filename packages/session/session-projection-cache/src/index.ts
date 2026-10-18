@@ -57,10 +57,20 @@ type CurrentCheckpointIdentity = CheckpointIdentity & {
 const PREDECESSOR_TITLE_KEY = 'title' as Extract<keyof SessionProjectionMap, string>
 
 /**
- * Default ceiling on the serialized checkpoint bytes the cache keeps resident.
+ * Listing hint rows a record outside the retained-byte budget keeps. Both are
+ * small zero-fold values the Session list names and orders a row by; every
+ * other row is fold state that only an opened Session reads. The metadata key
+ * is contributed by the API layer, so it is matched by its stored name rather
+ * than through this package's projection-map declaration.
+ */
+const LIST_HINT_KEYS = ['title', 'sessionListMetadata'] as const
+
+/**
+ * Default ceiling on the serialized checkpoint bytes the cache keeps complete.
  * The storage domain materializes every stored record at open and holds it for
  * the process lifetime, so this budget is what bounds that always-resident set;
- * a deployment with a long history stores far more than it can use.
+ * a deployment with a long history stores far more than it can use. Records
+ * outside it keep only their listing hint rows.
  */
 export const DEFAULT_MAX_RETAINED_BYTES = 256 * 1024 * 1024
 
@@ -89,11 +99,14 @@ export interface Config {
   /** Longest time (milliseconds) a dirty checkpoint may stay unwritten between mandatory points. */
   writeIntervalMs: number
   /**
-   * Largest total serialized checkpoint payload the cache retains across all
-   * Sessions. At init the newest records (ranked by their highest checkpoint
-   * seq) stay complete until this budget is reached and the rest are deleted;
-   * dropping a record only costs a longer cold replay. Defaults to
-   * {@link DEFAULT_MAX_RETAINED_BYTES}.
+   * Largest total serialized checkpoint payload the cache keeps complete
+   * across all Sessions. At init the newest records (ranked by their highest
+   * checkpoint seq) stay complete until this budget is reached, and every
+   * remaining record is replaced by a lightweight record holding only its
+   * listing hint rows (`title`, `sessionListMetadata`) — or deleted when it
+   * has none. Dropping fold rows only costs a longer cold replay, never a
+   * value; the listing hints keep such a Session named and ordered in the
+   * list without opening it. Defaults to {@link DEFAULT_MAX_RETAINED_BYTES}.
    */
   maxRetainedBytes?: number
 }
@@ -171,11 +184,13 @@ export class SessionProjectionCache extends Service {
    * generation the cut is fixed at fork time, so it distinguishes no
    * lifecycle the other fields do not, and a viewed value never seeds a fold.
    * The view is as stale as the last durable checkpoint but never wrong and
-   * never from an unrelated log. Its `asOfSeq` is the lowest watermark among
-   * the served rows: the stored record's own position, which the header
-   * cannot relate to the log the caller later opens. The Session list
-   * therefore labels the block as cached, and the client lets every value the
-   * connected Session produces supersede it whatever this number says.
+   * never from an unrelated log. A record outside the retained-byte budget
+   * serves only its listing hint rows, so a caller that needs the complete
+   * block still sees such a block as partial. Its `asOfSeq` is the lowest
+   * watermark among the served rows: the stored record's own position, which
+   * the header cannot relate to the log the caller later opens. The Session
+   * list therefore labels the block as cached, and the client lets every value
+   * the connected Session produces supersede it whatever this number says.
    * @param meta - the listed session's header (identity witness; no log read).
    * @param keys - optional projection keys required by the caller's audience.
    * @param excludeKeys - keys omitted before state validation or viewing; stored rows remain available to other readers.
@@ -338,26 +353,35 @@ export class SessionProjectionCache extends Service {
    * The storage domain materializes every stored record at open, so a long
    * history costs heap for records nothing can use. Records rank by their
    * highest checkpoint seq (the recency proxy: a Session that commits further
-   * has a newer row); the newest stay complete until the budget is reached and
-   * every remaining record is deleted. A retained record keeps every row, so
-   * `readWindow`'s complete-checkpoint gate and cached reads are unchanged for
-   * it; a deleted record only costs a longer cold replay, never a value.
+   * has a newer row); the newest stay complete until the budget is reached.
+   * Every remaining record is then REPLACED by a lightweight record that keeps
+   * its identity and only the listing hint rows (`title`, `sessionListMetadata`)
+   * — the zero-I/O list face can still name and order the Session — and a
+   * record with no listing hint row is deleted. A retained record keeps every
+   * row, so `readWindow`'s complete-checkpoint gate and cached reads are
+   * unchanged for it; a dropped fold row only costs a longer cold replay, never
+   * a value.
    *
-   * The pass runs in the background after init, yields to the event loop while
-   * it scans, and never rejects: a failed delete warns and the pass continues,
-   * and a closed domain ends it. The newest record is always retained, so a
+   * The pass runs in the background after init, sizes records only as it
+   * reaches them, yields to the event loop while it scans, and never rejects:
+   * a failed replace or delete warns and the pass continues, and a closed
+   * domain ends it. A record rewritten by a live Session while the pass runs is
+   * left alone (the ranked reference no longer matches), so the pass never
+   * clobbers a fresher checkpoint. The newest record is always retained, so a
    * deployment whose single newest record exceeds the budget still keeps one
    * complete checkpoint.
    */
   private async boundRetainedBytes(): Promise<void> {
     const table = this.table
+    /* v8 ignore next -- Service.init assigns the table before this pass starts */
     if (table === undefined) return
+    /* v8 ignore next -- Config resolves maxRetainedBytes to its default before construction */
     const budget = this.config.maxRetainedBytes ?? DEFAULT_MAX_RETAINED_BYTES
-    let ranked: { id: SessionId; bytes: number; seq: number }[]
+    let ranked: { id: SessionId; record: CheckpointRecord; seq: number }[]
     try {
       ranked = [...table.entries()]
-        .map(([id, record]) => ({ id, bytes: jsonBytes(record.rows), seq: newestSeq(record.rows) }))
-        .sort((left, right) => right.seq - left.seq || (left.id < right.id ? -1 : 1))
+        .map(([id, record]) => ({ id, record, seq: newestSeq(record.rows) }))
+        .sort((left, right) => right.seq - left.seq || left.id.localeCompare(right.id))
     } catch (error: unknown) {
       /* v8 ignore start -- fail-soft scan fault; the suite has no fault-injecting domain */
       this.ctx.logger.warn(`session projection cache: retained-byte scan failed (cache stays complete): ${String(error)}`)
@@ -366,6 +390,9 @@ export class SessionProjectionCache extends Service {
     }
     let retainedBytes = 0
     let retained = 0
+    let lightened = 0
+    let lightBytes = 0
+    let droppedBytes = 0
     let deleted = 0
     let reclaimed = 0
     let scanned = 0
@@ -373,27 +400,60 @@ export class SessionProjectionCache extends Service {
     for (const entry of ranked) {
       scanned += 1
       if (scanned % BUDGET_YIELD_INTERVAL === 0) await yieldToEventLoop()
-      if (withinBudget && (retained === 0 || retainedBytes + entry.bytes <= budget)) {
-        retainedBytes += entry.bytes
+      const record = table.get(entry.id)
+      // A live Session's checkpoint write replaced this record since the scan:
+      // keep the fresh complete checkpoint instead of an older lightweight cut.
+      /* v8 ignore next -- interleaving a live checkpoint write with the startup pass is not reachable from the suite */
+      if (record === undefined || record !== entry.record) continue
+      const bytes = jsonBytes(record.rows)
+      if (withinBudget && (retained === 0 || retainedBytes + bytes <= budget)) {
+        retainedBytes += bytes
         retained += 1
         continue
       }
       withinBudget = false
-      try {
-        if (await table.delete(entry.id)) {
+      const light = listHintRows(record.rows)
+      if (light === undefined) {
+        try {
+          // `delete` is idempotent; the record was read from this table moments
+          // ago, so a missing key would only mean a concurrent delete.
+          await table.delete(entry.id)
           deleted += 1
-          reclaimed += entry.bytes
+          reclaimed += bytes
+        } catch (error: unknown) {
+          /* v8 ignore start -- fail-soft domain close; the suite has no fault-injecting domain */
+          if (this.table === undefined) return
+          this.ctx.logger.warn(`session projection cache: delete of "${entry.id}" failed (record kept): ${String(error)}`)
+          /* v8 ignore stop */
         }
+        continue
+      }
+      const keptBytes = jsonBytes(light)
+      if (keptBytes === bytes) {
+        // Written lightweight by an earlier pass: account it without rewriting.
+        lightened += 1
+        lightBytes += keptBytes
+        continue
+      }
+      try {
+        await table.put(entry.id, { identity: { ...record.identity }, rows: light })
+        lightened += 1
+        lightBytes += keptBytes
+        droppedBytes += bytes - keptBytes
       } catch (error: unknown) {
         /* v8 ignore start -- fail-soft domain close; the suite has no fault-injecting domain */
         if (this.table === undefined) return
-        this.ctx.logger.warn(`session projection cache: delete of "${entry.id}" failed (record kept): ${String(error)}`)
+        this.ctx.logger.warn(`session projection cache: lightweight replace of "${entry.id}" failed (record kept complete): ${String(error)}`)
         /* v8 ignore stop */
       }
     }
-    if (deleted > 0 || retained > 0) {
+    if (retained > 0 || lightened > 0 || deleted > 0) {
       this.ctx.logger.info(
-        `session projection cache: retained ${String(retained)} records (${String(retainedBytes)} bytes) within the ${String(budget)}-byte budget; pruned ${String(deleted)} records (${String(reclaimed)} bytes)`,
+        `session projection cache: retained ${String(retained)} records (${String(retainedBytes)} bytes) within the ${String(budget)}-byte budget; `
+        + `pruned ${String(deleted)} records (${String(reclaimed)} bytes)`
+        + (lightened === 0
+          ? ''
+          : `; kept lightweight list rows for ${String(lightened)} records (${String(lightBytes)} bytes), dropping ${String(droppedBytes)} bytes of fold state`),
       )
     }
   }
@@ -580,15 +640,31 @@ function newestSeq(rows: CheckpointRecord['rows']): number {
 }
 
 /**
+ * The listing hint rows a record keeps once it falls outside the retained-byte
+ * budget. Any other row is fold state that only an opened Session reads, so it
+ * is dropped; the value of a dropped row is never lost, only its fold shortcut.
+ * @param rows - The record's complete checkpoint rows.
+ * @returns A record holding only the present listing hint rows, or `undefined`
+ *   when the record carries none (nothing names the Session without a fold).
+ */
+function listHintRows(rows: CheckpointRecord['rows']): CheckpointRecord['rows'] | undefined {
+  const kept: CheckpointRecord['rows'] = {}
+  for (const key of LIST_HINT_KEYS) {
+    const row = rows[key]
+    if (row !== undefined) kept[key] = row
+  }
+  return Object.keys(kept).length === 0 ? undefined : kept
+}
+
+/**
  * UTF-8 size of one serialized rows object; the retention budget's unit.
  * Every row is validated plain JSON, so stringification is total.
  * @param value - A record's rows object.
  * @returns Its UTF-8 byte count.
  */
 function jsonBytes(value: unknown): number {
-  const text: string | undefined = JSON.stringify(value)
-  // oxlint-disable-next-line typescript/no-unnecessary-condition -- tsc types JSON.stringify as string | undefined.
-  return Buffer.byteLength(text ?? '', 'utf8')
+  // Stored rows passed the lossless-JSON write check, so stringification yields text.
+  return Buffer.byteLength(JSON.stringify(value), 'utf8')
 }
 
 /**

@@ -136,7 +136,7 @@ function windowBackend(
       header: structuredClone(meta),
       inheritedEventCount: SessionLogOffset(0),
       events: [...selected],
-      cursor: SessionSeq(selected.at(-1)?.seq ?? -1),
+      cursor: (selected.at(-1)?.seq ?? -1) as SessionWindow['cursor'],
       hasMore: selected.length < below.length,
     }
   }
@@ -390,6 +390,41 @@ describe('Session history page from a stored window', () => {
     expect(windowed.observeSession).toHaveBeenCalledOnce()
     expect(pageSeqs(page)).toEqual([6, 7, 8, 9, 10, 11])
     expect(page.hasMore).toBe(true)
+  })
+
+  it('reads one older page per request instead of everything above its cut', async () => {
+    const events = conversation()
+    const readWindow = vi.fn(windowBackend(header(), events, { beforeSeq: true }))
+    const windowed = await fixture({ readWindow, observation: observationOf(events) })
+    const complete = await fixture({ observation: observationOf(events) })
+    const request = { throughSeq: events.length - 1, beforeSeq: 6, maxMessages: 2 }
+
+    const fromWindow = await loadPage(windowed.history, request)
+    const fromComplete = await loadPage(complete.history, request)
+
+    expect(pageSeqs(fromWindow)).toEqual([2, 3, 4, 5])
+    expect(pageSeqs(fromWindow)).toEqual(pageSeqs(fromComplete))
+    expect(fromWindow.hasMore).toBe(fromComplete.hasMore)
+    // The window ends at this page's cut and looks back one bounded page, so it
+    // never decodes the rows between the cut and the caller's cursor.
+    expect(readWindow).toHaveBeenCalledExactlyOnceWith(SESSION, { beforeSeq: 6, maxEvents: 2_000, signal: expect.any(AbortSignal) })
+    expect(windowed.observeSession).not.toHaveBeenCalled()
+  })
+
+  it('serves the empty cut at seq 0 from the window path', async () => {
+    const events = conversation()
+    const readWindow = vi.fn(windowBackend(header(), events, { beforeSeq: true }))
+    const windowed = await fixture({ readWindow, observation: observationOf(events) })
+    const complete = await fixture({ observation: observationOf(events) })
+    const request = { throughSeq: events.length - 1, beforeSeq: 0, maxMessages: 2 }
+
+    const fromWindow = await loadPage(windowed.history, request)
+    const fromComplete = await loadPage(complete.history, request)
+
+    expect(fromWindow).toEqual({ records: [], hasMore: false })
+    expect(fromWindow).toEqual(fromComplete)
+    expect(readWindow).toHaveBeenCalledExactlyOnceWith(SESSION, { beforeSeq: 0, maxEvents: 2_000, signal: expect.any(AbortSignal) })
+    expect(windowed.observeSession).not.toHaveBeenCalled()
   })
 })
 

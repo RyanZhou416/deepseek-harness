@@ -154,11 +154,13 @@ export class SessionHistoryController {
    *
    * Only the empty tail cut (`throughSeq === -1`) and older pages (`beforeSeq`)
    * take this path: those cuts need no dense-array probe of the complete log.
-   * An older-page window ends at `throughSeq`, so its tail proves the requested
-   * cut's dense anchor. A cut above the stored window cursor falls back: an
-   * opening balances an interrupted Turn with synthetic closers that the stored
-   * window does not contain, so only the complete log owns the authoritative
-   * cursor. Returns undefined when the complete source must answer.
+   * An older-page window ends at the page's own cut, so its tail proves the
+   * dense anchor directly below that cut while the rows above it — already held
+   * by the caller — are never decoded. A window whose tail does not reach that
+   * anchor falls back: an opening balances an interrupted Turn with synthetic
+   * closers that the stored window does not contain, so only the complete log
+   * can serve a cut above the stored window cursor. Returns undefined when the
+   * complete source must answer.
    * @param sessionId - non-live Session addressed by the request.
    * @param request - validated page request.
    * @param throughSeq - inclusive cut derived from the request.
@@ -177,19 +179,21 @@ export class SessionHistoryController {
     const end = Math.min(throughSeq + 1, beforeSeq ?? throughSeq + 1)
     const read = await this.readStoredWindow(sessionId, older
       ? {
-        beforeSeq: throughSeq + 1,
+        // The page cut is the window end: the read decodes exactly the page's
+        // own span instead of every stored row between the cut and the cursor.
+        beforeSeq: end,
         signal,
-        maxEvents: windowEventBound(request, throughSeq + 1 - end),
+        maxEvents: windowEventBound(request),
       }
       : { signal, maxEvents: 1 })
     if (read === undefined) return undefined
     this.validateWindow(request.address, read.window, read.projections)
     // A negative cut ends before every event, so the validated page is empty.
     if (!older) return { records: [], hasMore: false }
-    // The window tail is the requested dense anchor; anything else needs the
-    // complete log, including a cut the complete observation's closers pushed
-    // above the stored cursor.
-    if (read.window.events.at(-1)?.seq !== throughSeq) return undefined
+    // A positive cut needs the stored row immediately below it; a cut at seq 0
+    // is the real empty page. Anything else needs the complete log, including a
+    // cut the complete observation's closers pushed above the stored cursor.
+    if (end > 0 && read.window.events.at(-1)?.seq !== end - 1) return undefined
     const page = paginateSlice(
       read.window.events,
       SessionLogOffset(read.window.events[0]?.seq ?? read.window.cursor + 1),
@@ -473,7 +477,7 @@ export class SessionHistoryController {
   ): Promise<FollowOpening | undefined> {
     const read = await this.readStoredWindow(sessionId, {
       signal,
-      maxEvents: windowEventBound(request, 0),
+      maxEvents: windowEventBound(request),
     })
     if (read === undefined || read.projections === undefined) return undefined
     signal.throwIfAborted()
@@ -736,19 +740,20 @@ function paginateSlice(
 
 /**
  * Events one bounded window request must cover for a message-aligned page.
+ *
+ * The window ends at the page's own cut, so this bound is the lookback depth
+ * below that cut: enough rows to reach the message and Turn minima.
  * @param request - caller history limits.
- * @param span - events between the window tail and the page's absolute end.
  * @returns the bounded `maxEvents` to request from persistence.
  */
 function windowEventBound(
   request: Pick<SessionPageRequest, 'maxMessages' | 'turnWindow'>,
-  span: number,
 ): number {
   const messages = request.maxMessages ?? DEFAULT_MAX_MESSAGES
   const turnHeadroom = (request.turnWindow?.minTurns ?? 0) * 64
   return Math.min(
     SESSION_WINDOW_MAX_EVENTS,
-    span + Math.max(SESSION_WINDOW_MIN_EVENTS, messages * 4 + turnHeadroom),
+    Math.max(SESSION_WINDOW_MIN_EVENTS, messages * 4 + turnHeadroom),
   )
 }
 

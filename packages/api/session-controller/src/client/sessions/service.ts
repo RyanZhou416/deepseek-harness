@@ -289,7 +289,7 @@ export class ClientSessions implements ISessions {
     const { source, signal } = options
     signal?.throwIfAborted()
     if (this.closed) throw new Error('Session Controller is disposed')
-    const id = this.manager.resolveTarget(target)
+    const id = this.manager.resolveTarget(target, options.allowUnknown === true)
     const reference = this.retainScope(id, source)
     try {
       reference.attachOpening(this.manager.get(id).open(), signal)

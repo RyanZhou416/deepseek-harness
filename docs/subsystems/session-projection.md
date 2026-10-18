@@ -129,11 +129,13 @@ The persisted projection cache service. Opens the `session_projcache` domain at 
  * generation the cut is fixed at fork time, so it distinguishes no
  * lifecycle the other fields do not, and a viewed value never seeds a fold.
  * The view is as stale as the last durable checkpoint but never wrong and
- * never from an unrelated log. Its `asOfSeq` is the lowest watermark among
- * the served rows: the stored record's own position, which the header
- * cannot relate to the log the caller later opens. The Session list
- * therefore labels the block as cached, and the client lets every value the
- * connected Session produces supersede it whatever this number says.
+ * never from an unrelated log. A record outside the retained-byte budget
+ * serves only its listing hint rows, so a caller that needs the complete
+ * block still sees such a block as partial. Its `asOfSeq` is the lowest
+ * watermark among the served rows: the stored record's own position, which
+ * the header cannot relate to the log the caller later opens. The Session
+ * list therefore labels the block as cached, and the client lets every value
+ * the connected Session produces supersede it whatever this number says.
  * @param meta - the listed session's header (identity witness; no log read).
  * @param keys - optional projection keys required by the caller's audience.
  * @param excludeKeys - keys omitted before state validation or viewing; stored rows remain available to other readers.

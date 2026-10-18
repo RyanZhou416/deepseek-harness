@@ -37,6 +37,13 @@ export interface SessionReference extends Disposable {
 export interface SessionRetainOptions {
   readonly source: SessionReferenceSource
   readonly signal?: AbortSignal | undefined
+  /**
+   * Start the shared history opening for an identity the catalog has not
+   * confirmed yet (startup restore). The caller owns reconciliation: release
+   * the reference when the arriving catalog disproves the identity. Omitted,
+   * an unknown identity throws.
+   */
+  readonly allowUnknown?: boolean
 }
 
 /** Local ownership counts, independent of catalog membership and never persisted. */
@@ -53,7 +60,8 @@ export interface ISessions {
   /**
    * Retain an exact Client generation and start its shared initial history opening.
    * @param target - known identity or durable direct-parent address.
-   * @param options - required consumer source and optional independent waiter cancellation.
+   * @param options - required consumer source, optional independent waiter cancellation, and
+   *   optional provisional acceptance of a catalog-unconfirmed identity.
    * @returns an owned reference immediately; await `reference.ready` when the initial open attempt must settle first.
    */
   retain(target: SessionTarget, options: SessionRetainOptions): SessionReference

@@ -288,13 +288,12 @@ describe('JSONL window index: sidecar schema and identity round-trip', () => {
     const past = new Date('2001-02-03T04:05:06.000Z')
     await utimes(sidecarPath(logPath), past, past)
     const reader = await mount('zstd', mounted.root)
-    zstdProbe.decompressCalls = 0
+    zstdProbe.decodedFrames = 0
     const reused = await readWindow(reader.persistence, id, { beforeSeq: 170, maxEvents: 25 })
     expectWindow(reused, full.events.slice(145, 170), full.header)
     const selected = segmentsCovering(sidecar, 145, 170)
     expect(selected).toBeGreaterThanOrEqual(2)
-    expect(zstdProbe.decompressCalls).toBeGreaterThanOrEqual(selected)
-    expect(zstdProbe.decompressCalls).toBeLessThanOrEqual(selected + 3)
+    expect(zstdProbe.decodedFrames).toBe(selected)
     expect(Number((await stat(sidecarPath(logPath), { bigint: true })).mtimeMs)).toBe(past.getTime())
   })
 
@@ -482,9 +481,9 @@ describe('JSONL window index: rebuild after a missing, stale, or corrupt sidecar
     const selected = segmentsCovering(original, 96, 106)
     // Exactly one complete synchronous rebuild walk (every frame once), then the
     // retry's page decodes only its selected segments.
-    expect(zstdProbe.decodedFrames).toBe(original.frames.length)
-    expect(zstdProbe.decompressCalls).toBeGreaterThanOrEqual(selected)
-    expect(zstdProbe.decompressCalls).toBeLessThanOrEqual(selected + 3)
+    expect(zstdProbe.decodedFrames).toBeGreaterThanOrEqual(original.frames.length + selected)
+    expect(zstdProbe.decodedFrames).toBeLessThanOrEqual(original.frames.length + 2 * selected)
+    expect(zstdProbe.decompressCalls).toBeLessThanOrEqual(3)
 
     const repaired = await sidecarOf(mounted, id)
     expect(repaired.frames).toStrictEqual(original.frames)
@@ -674,18 +673,17 @@ describe('JSONL window index: beforeSeq paging contract', () => {
     const selected = segmentsCovering(smallSidecar, 96, 106)
     expect(selected).toBe(2)
 
-    zstdProbe.decompressCalls = 0
+    zstdProbe.decodedFrames = 0
     expectWindow(await readWindow(persistence, smallId, { beforeSeq: 106, maxEvents: 10 }), smallEvents.slice(96, 106))
-    const smallPage = zstdProbe.decompressCalls
-    zstdProbe.decompressCalls = 0
+    const smallPage = zstdProbe.decodedFrames
+    zstdProbe.decodedFrames = 0
     expectWindow(await readWindow(persistence, largeId, { beforeSeq: 106, maxEvents: 10 }), largeEvents.slice(96, 106))
-    const largePage = zstdProbe.decompressCalls
+    const largePage = zstdProbe.decodedFrames
 
-    // The bounded page decompresses the header line plus the segments covering
-    // rows 96..105, independent of how many frames the generation holds.
+    // The bounded page decodes exactly the segments covering rows 96..105 in one
+    // batched pass, independent of how many frames the generation holds.
     for (const calls of [smallPage, largePage]) {
-      expect(calls).toBeGreaterThanOrEqual(selected)
-      expect(calls).toBeLessThanOrEqual(selected + 3)
+      expect(calls).toBe(selected)
       expect(calls).toBeLessThan(largeSidecar.frames.length)
     }
     expect(Math.abs(largePage - smallPage)).toBeLessThanOrEqual(1)
