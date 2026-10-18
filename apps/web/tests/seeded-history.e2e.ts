@@ -382,7 +382,11 @@ describe('web e2e: seeded history renders through cold resume', () => {
     await process.waitFor({ state: 'visible', timeout: 10_000 })
     expect(await process.getAttribute('aria-expanded')).toBe('false')
     const processBottom = await process.evaluate(element => element.getBoundingClientRect().bottom)
-    const answerTop = await page.getByText('DONE', { exact: true }).evaluate(element =>
+    // The clearance belongs to the answer's block: Markdown wraps trimmed text
+    // in an inline span (translation-stable text leaves), whose box adds the
+    // font's half-leading on top of the paragraph. Measure the paragraph so the
+    // 16px flow gap does not depend on the host's font metrics.
+    const answerTop = await page.locator('p').filter({ hasText: /^DONE$/ }).evaluate(element =>
       element.getBoundingClientRect().top)
     expect(answerTop).toBe(processBottom + 16)
     expect(await page.getByText('Context compacted', { exact: true }).count()).toBe(0)
@@ -536,8 +540,14 @@ describe('web e2e: seeded history renders through cold resume', () => {
       await expect.poll(() => column.locator('[data-textpreview-line="1"]').textContent()).toBe('alpha\n')
       await column.getByRole('button', { name: 'Show file location', exact: true }).waitFor({ timeout: 5_000 })
       await expect.poll(() => column.locator('[data-open-path-open]').isEnabled()).toBe(true)
-      const preview = await captureStableAria(page, '[data-textpreview-state="text"]', scaffold.workspaceCwd)
-      await compareOrRefreshGolden(FILE_PREVIEW_EXPECTED, preview, MODE)
+      // The preview label carries the host's own path separators and the
+      // golden is the macOS/Linux projection the CI lane compares; the direct
+      // assertions above pin the platform-faithful path on every host, so only
+      // the CI platforms compare (and refresh) this golden.
+      if (process.platform !== 'win32') {
+        const preview = await captureStableAria(page, '[data-textpreview-state="text"]', scaffold.workspaceCwd)
+        await compareOrRefreshGolden(FILE_PREVIEW_EXPECTED, preview, MODE)
+      }
     } finally {
       // Later cases share this page and require the sidebar closed even after a failed assertion.
       if (await frame.getAttribute('data-rightbar-collapsed') !== 'true') {
