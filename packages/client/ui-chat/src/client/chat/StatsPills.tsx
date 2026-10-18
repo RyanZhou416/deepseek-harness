@@ -291,8 +291,8 @@ function DialogPill({ stat, icon, label, ariaLabel, title, titleValue, children 
 }
 
 /**
- * Turn and step counts with whole-session speed, opening the time and speed
- * dialog; Compact keeps only the speed reading.
+ * Turn and step counts with this turn's output speed, opening the time and
+ * speed dialog; Compact keeps only the speed reading.
  */
 export const ActivityPill = memo(function ActivityPill({ useChat, useProjection, usePerformanceUsage, t }: StatPillProps) {
   const mode = usePerformanceUsage(value => value)
@@ -302,17 +302,23 @@ export const ActivityPill = memo(function ActivityPill({ useChat, useProjection,
     () => projectedTurnSpeed(stats) ?? latestTurnSpeed(settledNodes),
     [stats, settledNodes],
   )
+  const turnSpeedLabel = turnSpeed === null
+    ? null
+    : t('message.tokensPerSecond', { tps: formatTokensPerSecond(turnSpeed.tps) })
+  // The dialog keeps the durable whole-session TPS as its own row; the dock
+  // pill itself reports the latest measurable turn, which is what a reader
+  // wants without opening the dialog.
   const speed = stats.decodeMs > 0 ? decodeSpeed(stats, t) : null
   const icon = <IconGaugeOutlineRegular />
-  if (mode === 'compact') return speed === null ? null : <PlainPill stat="activity" icon={icon} label={speed} />
+  if (mode === 'compact') return turnSpeedLabel === null ? null : <PlainPill stat="activity" icon={icon} label={turnSpeedLabel} />
   if (stats.steps === 0) return null
   const counts = t('stats.counts', { turns: stats.turns, steps: stats.steps })
-  const content: PillContent = { stat: 'activity', icon, label: joined(counts, speed) }
+  const content: PillContent = { stat: 'activity', icon, label: joined(counts, turnSpeedLabel) }
   // A window without one timed figure has no dialog rows to show, so the pill
   // stays a plain reading instead of a button opening an empty dialog.
   if (stats.llmMs <= 0 && stats.toolMs <= 0 && stats.ttftSteps <= 0 && speed === null) return <PlainPill {...content} />
   return (
-    <DialogPill {...content} ariaLabel={speed === null ? counts : `${counts} · ${speed}`} title={t('stats.dialog.title')}>
+    <DialogPill {...content} ariaLabel={turnSpeedLabel === null ? counts : `${counts} · ${turnSpeedLabel}`} title={t('stats.dialog.title')}>
       <dl className={dialogCss.details} data-session-stats-details>
         {stats.llmMs > 0 && (
           <>

@@ -310,9 +310,27 @@ describe('composer stats pills', () => {
     }
     const { source } = makeSource({ nodes: [previous, latest] })
     const view = render(<StatsPills {...props(source)} />)
-    fireEvent.click(view.getAllByRole('button')[0]!)
+    const activityPill = view.getAllByRole('button')[0]!
+    expect(activityPill.textContent).toContain('25 tok/s')
+    expect(activityPill.textContent).not.toContain('20 tok/s')
+    fireEvent.click(activityPill)
     const details = view.getByRole('dialog').querySelector('[data-session-stats-details]') as HTMLElement
     expect(details.textContent).toContain('This turn TPS25 tok/s')
+  })
+
+  it('compact keeps the latest turn speed rather than the whole-session speed', () => {
+    const previous: AssistantMessageNode = {
+      ...assistant(1, 1, { outputTokens: 60 }),
+      timing: { stepStartTime: 1_000, firstTokenTime: 2_000, completedTime: 5_000 },
+    }
+    const latest: AssistantMessageNode = {
+      ...assistant(2, 2, { outputTokens: 20 }),
+      timing: { stepStartTime: 6_000, firstTokenTime: 6_200, completedTime: 7_000 },
+    }
+    const { source } = makeSource({ nodes: [previous, latest] })
+    const view = render(<StatsPills {...props(source)} usePerformanceUsage={selector => selector('compact')} />)
+    expect(view.container.textContent).toContain('25 tok/s')
+    expect(view.container.textContent).not.toContain('20 tok/s')
   })
 
   it('uses the durable projection turn speed when the window has no timed nodes', () => {
@@ -490,16 +508,17 @@ describe('composer stats pills', () => {
     expect(view.getByText('7 turns 44 steps')).toBeTruthy()
   })
 
-  it('renders whole-log speed and dialog figures from the projection, not the loaded window', () => {
-    // The 加载更早 hazard beyond counts: the pill's speed segment and the
-    // dialog's time split, TTFT, and throughput must not grow per loaded page
-    // either. An untimed 1-node window renders the projection's whole-log figures.
+  it('renders latest-turn pill speed and whole-log dialog figures from the projection', () => {
+    // The 加载更早 hazard beyond counts: the pill's latest-turn segment and the
+    // dialog's whole-log time split, TTFT, and throughput must not grow per
+    // loaded page. An untimed 1-node window renders the projection's figures.
     const { source } = makeSource({ nodes: [assistant(1, 1)] })
     const view = render(<StatsPills {...props(source, {
       tokenUsage: USAGE,
       sessionStats: sessionStats({
         turns: 200, steps: 200, llmMs: 100_000, toolMs: 62_000,
         ttftMs: 1_600, ttftSteps: 2, decodeMs: 3_000, decodeTokens: 60,
+        lastTurnSpeedTurn: 200, lastTurnSpeedDecodeMs: 3_000, lastTurnSpeedDecodeTokens: 60,
       }),
     })} />)
     const timePill = view.getAllByRole('button')[0]!
