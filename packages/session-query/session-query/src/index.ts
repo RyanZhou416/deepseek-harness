@@ -52,6 +52,8 @@ import {
 import { SessionCorpus } from './corpus.ts'
 import {
   SessionObservationReader,
+  type SessionMetadataObservation,
+  type SessionMetadataOptions,
   type SessionObservation,
   type SessionObservationOptions,
 } from './observation.ts'
@@ -91,6 +93,7 @@ export {
 } from './filters.ts'
 export { assertSessionHeadersCompatible } from './sources.ts'
 export type { SessionObservation, SessionObservationOptions } from './observation.ts'
+export type { SessionMetadataObservation, SessionMetadataOptions } from './observation.ts'
 
 declare module '@deepseek-ai/cordis' {
   interface Context {
@@ -160,6 +163,28 @@ export abstract class SessionQueryEngine extends Service {
     options: SessionObservationOptions = {},
   ): Promise<SessionObservation> {
     return this._observations.read(sessionId, options)
+  }
+
+  /**
+   * Observe one Session's header and log-free projection hints.
+   *
+   * Unlike {@link observeSession}, this never materializes a stored Session:
+   * a cold source costs one persistence `stat` and, when a projection cache is
+   * mounted, a zero-I/O checkpoint view of the requested keys. Values from a
+   * checkpoint can trail the stored log and are absent when the row was
+   * dropped, so a consumer must fall back per key rather than treating the
+   * block as an exact baseline. A live Session serves its current cut.
+   * @param sessionId - logical Session identity.
+   * @param options - cancellation and the projection keys to serve.
+   * @returns the durable header plus the log-free projection values.
+   * @throws {@link SessionQueryError} with code `SESSION_QUERY_SESSION_NOT_FOUND`
+   *   when neither a live Session nor a stored source exists.
+   */
+  observeSessionMetadata(
+    sessionId: SessionId,
+    options: SessionMetadataOptions = {},
+  ): Promise<SessionMetadataObservation> {
+    return this._observations.metadata(sessionId, options)
   }
 
   /**

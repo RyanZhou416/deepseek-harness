@@ -43,7 +43,7 @@ kind: "package-reference"
 <details>
 <summary>实现细节——点击展开</summary>
 
-`src/core/` 是纯内核——触发器检测、菜单归约与精确匹配，零 React／DOM／cordis——而 `src/client/service.ts` 把内核接到菜单快照存储、逐 hit 候选拉取（以 generation 把关、被后继请求通过 `AbortSignal` 取代、失败的 source 静默丢弃并留一条 console 记录）与 pick 路径上。每个会话 scope 各解析一个 `InputTriggerController`（`sessionOf`）；对话接线层在控制器上驱动 `track`／`arbitrate`／`onSpace`／`adjudicate`。source 会被预热进它能触达的每个会话控制器；`lexicon` 名录在预热后变化的 source 实现 `subscribeLexicon`，控制器每收到通知就重拉。`MenuView` 自注册进 `conversation.input.overlay`（列表类，会话 scope），菜单关闭期间渲染 null。`listbox` 角色落在其滚动视口而非有界外壳上，因为面包屑头部不是选项，listbox 也不得承载它；面包屑走菜单存储之外的独立快照存储，冻结的归约器因此对它一无所知。overlay 的 SlotMap 合并放在本包，因为依赖方向（ui-conversation → ui-input-trigger）不允许反向的类型导入。
+`src/core/` 是纯内核——触发器检测、菜单归约与精确匹配，零 React／DOM／cordis——而 `src/client/service.ts` 把内核接到菜单快照存储、逐 hit 候选拉取（以 generation 把关、被后继请求通过 `AbortSignal` 取代、失败的 source 静默丢弃并留一条 console 记录）与 pick 路径上。每个会话 scope 各解析一个 `InputTriggerController`（`sessionOf`）；对话接线层在控制器上驱动 `track`／`arbitrate`／`onSpace`／`adjudicate`。构造控制器只接上 lexicon 通道；每个 source 在控制器的首次用户意图时才预热一次（非空草稿、launcher 手势或引用预览），因此为冷 Session 挂载输入区不会启动任何辅助目录读取。`lexicon` 名录在预热后变化的 source 实现 `subscribeLexicon`，控制器每收到通知就重拉。`MenuView` 自注册进 `conversation.input.overlay`（列表类，会话 scope），菜单关闭期间渲染 null。`listbox` 角色落在其滚动视口而非有界外壳上，因为面包屑头部不是选项，listbox 也不得承载它；面包屑走菜单存储之外的独立快照存储，冻结的归约器因此对它一无所知。overlay 的 SlotMap 合并放在本包，因为依赖方向（ui-conversation → ui-input-trigger）不允许反向的类型导入。
 
 </details>
 
@@ -78,6 +78,7 @@ kind: "package-reference"
 这些限制界定了当前触发流水线。它们是当前包约束，不是通用菜单对比或任务积压。
 
 - **只有全局 source 层**——会话 scope 的 source 注册（逐会话遮蔽）已有设计但未启用；台账记录着触发条件，即真实的逐会话 source 需求。
+- **不做 scope 创建预热**——构造按会话的控制器只接上 lexicon 通道；每个 source 的 `warm` 钩子在首次用户意图时运行，因此预热成本高的 source 可能在首次打开菜单时仍在加载。这一延后是有意为之：空闲的输入区不得为冷 Session 启动辅助目录读取。
 - **overlay 的 SlotMap 合并归属与 slot 所有权分离**：唯一的 `conversation.input.overlay` 合并放在本包，而 ui-conversation 拥有其锚点、children 声明与生命周期，因为依赖方向是 ui-conversation → ui-input-trigger。
 
 <a id="dev-note"></a>

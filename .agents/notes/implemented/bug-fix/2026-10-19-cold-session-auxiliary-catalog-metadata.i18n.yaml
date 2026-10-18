@@ -1,0 +1,37 @@
+# Bilingual-pair consistency record for 2026-10-19-cold-session-auxiliary-catalog-metadata.md (docs/i18n/README.md): per heading
+# section, a hash of its English and Chinese blocks outside code blocks and generated regions.
+# After editing either side, bring the other along and re-record with:
+#   pnpm run verify-translation-pairing --write .agents/notes/implemented/bug-fix/2026-10-19-cold-session-auxiliary-catalog-metadata.md
+/agent-note-cold-session-auxiliary-catalogs-read-metadata-not-logs:
+  en: 8019ddeb5ebf73c2
+  zh: d3eca76866df214c
+/agent-note-cold-session-auxiliary-catalogs-read-metadata-not-logs/problem:
+  en: 04c3c72d7e954ff3
+  zh: 3cb4c8ca88556264
+/agent-note-cold-session-auxiliary-catalogs-read-metadata-not-logs/decision:
+  en: a15c7c13f167e5ac
+  zh: 63bcc2ef60c2f344
+/agent-note-cold-session-auxiliary-catalogs-read-metadata-not-logs/decision/a-metadata-only-session-observation:
+  en: 653bc35705b78b76
+  zh: a4f52cb2ae1e813e
+/agent-note-cold-session-auxiliary-catalogs-read-metadata-not-logs/decision/the-skill-catalog-uses-durable-metadata:
+  en: 6072ec7108809022
+  zh: 56145c3e5d8568d1
+/agent-note-cold-session-auxiliary-catalogs-read-metadata-not-logs/decision/the-roster-prewarms-on-first-user-intent:
+  en: 0a5e6a265967f306
+  zh: 4862f99363f47170
+/agent-note-cold-session-auxiliary-catalogs-read-metadata-not-logs/evidence:
+  en: ebee650f292f5d86
+  zh: 73421b05107dae82
+/agent-note-cold-session-auxiliary-catalogs-read-metadata-not-logs/alternatives-considered:
+  en: 504c3992965b0577
+  zh: 63deb3446eb15800
+/agent-note-cold-session-auxiliary-catalogs-read-metadata-not-logs/consequences:
+  en: f5df80fe77059383
+  zh: 79377a06c4037e25
+/agent-note-cold-session-auxiliary-catalogs-read-metadata-not-logs/verification:
+  en: 952955d181c319fc
+  zh: 2e6d939e5355ab36
+/agent-note-cold-session-auxiliary-catalogs-read-metadata-not-logs/relationship-to-existing-records:
+  en: e6c0e975c8d99ec3
+  zh: 6f2d977380041e44

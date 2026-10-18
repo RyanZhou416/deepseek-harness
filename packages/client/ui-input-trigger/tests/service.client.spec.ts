@@ -4,7 +4,7 @@
  * every session controller) and per-session controller resolution; all
  * interaction — track → menu store, pick execution via the scoped input
  * events, keyboard arbitration, space/enter adjudication, and the
- * scope-birth roster warm — is InputTriggerController behavior, tested on a real
+ * interaction-time roster warm — is InputTriggerController behavior, tested on a real
  * session scope (createScope).
  */
 import { Context } from '@deepseek-ai/cordis'
@@ -136,10 +136,12 @@ describe('registerSource', () => {
     inputTriggers.registerSource(deferredSource('/', 'beta').source)
   })
 
-  it('a source registered after controller birth warms in every live controller', async () => {
+  it('a source registered after the first intent warms in every live controller', async () => {
     const { inputTriggers, mint } = await serviceBench()
     const ca = inputTriggers.sessionOf(mint('a').actx)
     const cb = inputTriggers.sessionOf(mint('b').actx)
+    ca.track('x', 1, { tier: 'plain' }, 1)
+    cb.track('x', 1, { tier: 'plain' }, 1)
     const late = deferredSource('/', 'late', { lexicon: () => ['fresh'] })
     inputTriggers.registerSource(late.source)
     expect(late.warm).toHaveBeenNthCalledWith(1, { sessionId: sid('a') })
@@ -186,17 +188,27 @@ describe('sessionOf', () => {
     expect(() => inputTriggers.sessionOf(root)).toThrow(/requires a retained Session scope/)
   })
 
-  it('warms the roster once at controller birth with the session projection', async () => {
+  it('mounting a scope starts no warm; the first non-empty draft warms the roster once', async () => {
     const { inputTriggers, mint } = await serviceBench()
     const cmd = deferredSource('/', 'command')
     const sub = deferredSource('@', 'subagent')
     inputTriggers.registerSource(cmd.source)
     inputTriggers.registerSource(sub.source)
     const a = mint('a')
-    inputTriggers.sessionOf(a.actx)
+    const controller = inputTriggers.sessionOf(a.actx)
+    // Merely mounting the composer resolves the controller; auxiliary catalog
+    // work must wait for real user intent.
+    expect(cmd.warm).not.toHaveBeenCalled()
+    expect(sub.warm).not.toHaveBeenCalled()
+
+    controller.track('', 0, { tier: 'plain' }, 0)
+    expect(cmd.warm).not.toHaveBeenCalled()
+
+    controller.track('x', 1, { tier: 'plain' }, 1)
     expect(cmd.warm).toHaveBeenCalledExactlyOnceWith({ sessionId: sid('a') })
     expect(sub.warm).toHaveBeenCalledExactlyOnceWith({ sessionId: sid('a') })
-    // Re-resolution of the resident controller never re-warms.
+    // Re-resolution of the resident controller and further edits never re-warm.
+    controller.track('xy', 2, { tier: 'plain' }, 2)
     inputTriggers.sessionOf(a.actx)
     expect(cmd.warm).toHaveBeenCalledTimes(1)
   })
@@ -480,13 +492,34 @@ describe('programmatic source launcher', () => {
   })
 })
 
-describe('scope-birth warm', () => {
-  it('construction warms every source once with the session projection', () => {
+describe('interaction-time warm', () => {
+  it('construction does not warm, and a launcher gesture warms every source once with the session projection', () => {
     const cmd = deferredSource('/', 'command')
     const sub = deferredSource('@', 'subagent')
-    controllerBench([cmd.source, sub.source])
+    const { controller } = controllerBench([cmd.source, sub.source])
+    expect(cmd.warm).not.toHaveBeenCalled()
+    expect(sub.warm).not.toHaveBeenCalled()
+
+    controller.toggleSource('command', {
+      trigger: '/', query: '', quoted: false, position: 'leading', span: { start: 0, end: 0, draftRev: 1 },
+    })
     expect(cmd.warm).toHaveBeenCalledExactlyOnceWith({ sessionId: sid('a') })
     expect(sub.warm).toHaveBeenCalledExactlyOnceWith({ sessionId: sid('a') })
+  })
+
+  it('a reference preview is user intent: it warms the roster too', () => {
+    const seen: ClientSessionContext[] = []
+    const src: InputTriggerSource = {
+      trigger: '/',
+      name: 'skill',
+      candidates: () => Promise.resolve([]),
+      onPick: () => undefined,
+      warm: (session) => { seen.push(session) },
+      openReference: () => false,
+    }
+    const { controller } = controllerBench([src])
+    expect(controller.openReference(undefined, { ref: '/x' })).toBe(false)
+    expect(seen).toEqual([{ sessionId: sid('a') }])
   })
 
   it('hook-less sources are skipped', () => {
@@ -498,8 +531,26 @@ describe('scope-birth warm', () => {
     }
     const cmd = deferredSource('/', 'command')
     // No throw on the hook-less source; the implementing one still warms.
-    controllerBench([bare, cmd.source])
+    const { controller } = controllerBench([bare, cmd.source])
+    controller.track('x', 1, { tier: 'plain' }, 1)
     expect(cmd.warm).toHaveBeenCalledTimes(1)
+  })
+
+  it('contains a faulty warm and still warms the remaining sources', () => {
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const faulty: InputTriggerSource = {
+      trigger: '/',
+      name: 'faulty',
+      candidates: () => Promise.resolve([]),
+      onPick: () => undefined,
+      warm: () => { throw new Error('catalog broken') },
+    }
+    const cmd = deferredSource('/', 'command')
+    const { controller } = controllerBench([faulty, cmd.source])
+    controller.track('x', 1, { tier: 'plain' }, 1)
+    expect(cmd.warm).toHaveBeenCalledTimes(1)
+    expect(consoleError).toHaveBeenCalledWith('[ui-input-trigger] source "faulty" warm failed:', expect.any(Error))
+    consoleError.mockRestore()
   })
 
   it('dispose inerts every verb', () => {
@@ -866,7 +917,7 @@ describe('lexicon', () => {
     expect(notify).toBeUndefined()
   })
 
-  it('a source registered after scope birth is warmed and folded into the live lexicon', () => {
+  it('a source registered after scope birth joins the lexicon and warms only after first intent', () => {
     const { controller, sources } = controllerBench([])
     expect(controller.lexicon.getSnapshot().size).toBe(0)
     const warm = vi.fn()
@@ -880,8 +931,28 @@ describe('lexicon', () => {
     }
     sources.push(late)
     controller.sourceAdded(late)
-    expect(warm).toHaveBeenCalledWith({ sessionId: sid('a') })
+    expect(warm).not.toHaveBeenCalled()
     expect(controller.lexicon.getSnapshot().get('/')).toEqual(['fresh'])
+
+    // The controller's first intent warms every roster member, including this one.
+    controller.track('x', 1, { tier: 'plain' }, 1)
+    expect(warm).toHaveBeenCalledWith({ sessionId: sid('a') })
+  })
+
+  it('a source registered after the first intent warms immediately', () => {
+    const { controller, sources } = controllerBench([])
+    controller.track('x', 1, { tier: 'plain' }, 1)
+    const warm = vi.fn()
+    const late: InputTriggerSource = {
+      trigger: '/',
+      name: 'late',
+      candidates: () => Promise.resolve([]),
+      onPick: () => undefined,
+      warm,
+    }
+    sources.push(late)
+    controller.sourceAdded(late)
+    expect(warm).toHaveBeenCalledWith({ sessionId: sid('a') })
   })
 
   it('a removed source leaves the aggregated lexicon', () => {

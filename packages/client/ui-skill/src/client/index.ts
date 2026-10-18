@@ -16,8 +16,9 @@
  *
  * Catalog fetches are cached per session (the small twin of the ui-commands
  * directory): the per-keystroke candidates re-poll filters a settled
- * snapshot locally, so one session costs one RPC. The scope-birth warm hook
- * prewarms the session's key; a preset switch drops that one key (the
+ * snapshot locally, so one session costs one RPC. The warm hook (invoked by
+ * the trigger pipeline on the composer's first user intent) prewarms the
+ * session's key; a preset switch drops that one key (the
  * catalog is the preset's, and a blank session may switch after the warm);
  * plugin-manager/changed clears everything — a manager operation may add or
  * remove providers any session's catalog reads; connection/reset clears
@@ -184,7 +185,8 @@ export function apply(ctx: ClientContext): void {
         }))
     },
     warm(session) {
-      // Fire-and-forget scope-birth prewarm; the shared fetch reports
+      // Fire-and-forget interaction-time prewarm (the trigger pipeline calls
+      // this on the composer's first user intent); the shared fetch reports
       // through candidates.
       if (sessions.subagentAddress(session.sessionId) !== undefined) return
       fetchCatalog(session.sessionId).promise.catch(() => {})
