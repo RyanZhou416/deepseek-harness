@@ -81,7 +81,7 @@ The critical path is contract → three client/server implementation tracks → 
 - Deferred promotion is settled and verified: opening a stored Session without a cache either still permits continuation through the prompt path or explicitly reports that the Session is read-only until promoted.
 - Subagent openings still require and validate their projection identity; small stored Sessions keep their complete-observation path.
 - Reopening with a complete cache remains as fast as or faster than the current behavior.
-- The cold first-frame benchmark shows a material improvement against the recorded baseline, and a follow-level negative control on the old code fails the same assertion.
+- The cold first-frame benchmark shows a material improvement against the deferred complete-observation read recorded in the same process, and instrumented counters prove the fast path calls neither `sessionQuery.observeSession` nor a full persistence open; the pre-change checkpoint fallback is the negative control, so no historical checkout is required.
 - Existing history window, paging, subagent, projection-store, and statistics tests remain green; the full-history fallback still works when the stored window is unavailable or malformed.
 - All implementation edits, builds, and tests stay inside the clone; no source, `node_modules`, `vendor`, profile, or Session data in the running Host is modified.
 

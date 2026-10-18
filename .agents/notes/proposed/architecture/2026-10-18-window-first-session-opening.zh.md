@@ -81,7 +81,7 @@ AgentTeams 编排本身运行在当前 Host。clone 之外唯一允许的写入�
 - 延迟 promotion 已定案并验证：无缓存打开已存储 Session 时，要么仍可通过 prompt 路径继续，要么明确报告在 promote 前是只读。
 - subagent 打开仍要求并验证其投影 identity；小的已存储 Session 保持完整 observation 路径。
 - 有完整缓存时重新打开至少不慢于当前行为。
-- 冷首帧 benchmark 相对记录基线有实质改善，旧代码上的 follow 级负向对照会让同一断言失败。
+- 冷首帧 benchmark 相对同进程记录的延迟完整 observation 读取有实质改善，instrumented counters 证明快路径既不调用 `sessionQuery.observeSession` 也不执行完整 persistence open；改动前的 checkpoint fallback 即负向对照，不需要历史 checkout。
 - 现有 history window、paging、subagent、projection-store 与统计测试保持绿色；窗口不可用或格式错误时完整历史回退仍有效。
 - 所有实现编辑、build 与 test 都留在 clone 内；运行中 Host 的源码、`node_modules`、`vendor`、profile 或 Session 数据不被修改。
 
