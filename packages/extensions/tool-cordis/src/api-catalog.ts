@@ -2424,7 +2424,7 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
       },
       {
         signature: 'async readWindow( sessionId: SessionId, request: SessionWindowRequest = {}, ): Promise<SessionWindowRead | undefined>',
-        description: 'Read one bounded stored-history window through the persistence backend\'s optional generation index, with the stored projection checkpoint when that checkpoint is a complete baseline for the window.\n\nBackends without `readWindow` return nothing here, and callers fall back to the full observation path. A window validates its own rows, not the complete log\'s cross-event relationships; exact replay consumers keep using readSession. The baseline is attached only when it does not lead the window `cursor` and carries every registered client-visible key; a baseline missing either condition is omitted, so a history opener falls back to the complete observation instead of seeding client values from a partial block.',
+        description: 'Read one bounded stored-history window through the persistence backend\'s optional generation index, with the stored projection checkpoint when that checkpoint is a complete baseline for the window.\n\nBackends without `readWindow` return nothing here, and callers fall back to the full observation path. A window validates its own rows, not the complete log\'s cross-event relationships; exact replay consumers keep using readSession. The baseline is attached only when it does not lead the window `cursor` and carries every registered client-visible key; a baseline missing either condition is omitted; a parent-Session follow opener then serves the window without an exact block instead of falling back to the complete observation, while a subagent address still requires it.',
         parameters: [{ name: 'sessionId', description: 'stored session to read.' }, { name: 'request', description: 'optional cancellation, upper bound, and backwards cursor.' }],
         returns: 'the window plus its complete checkpoint projection baseline, or `undefined` when the backend cannot serve a validated window.',
       },
@@ -7259,7 +7259,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'SessionFollowFrame',
-    declaration: 'export type SessionFollowFrame = {\n    readonly type: \'snapshot\';\n    readonly header: SessionWireHeader;\n    readonly cursor: number;\n    readonly records: readonly SessionHistoryRecord[];\n    readonly hasMore: boolean;\n    readonly projections: SessionProjectionBaseline;\n    readonly assistantStream?: SessionAssistantStreamBaseline;\n} | SessionEventEntry | {\n    readonly type: \'assistant-stream\';\n    readonly frame: SessionAssistantStreamFrame;\n};',
+    declaration: 'export type SessionFollowFrame = {\n    readonly type: \'snapshot\';\n    readonly header: SessionWireHeader;\n    readonly cursor: number;\n    readonly records: readonly SessionHistoryRecord[];\n    readonly hasMore: boolean;\n    readonly projections?: SessionProjectionBaseline;\n    readonly assistantStream?: SessionAssistantStreamBaseline;\n} | SessionEventEntry | {\n    readonly type: \'assistant-stream\';\n    readonly frame: SessionAssistantStreamFrame;\n};',
   },
   {
     name: 'SessionFollowRequest',

@@ -108,7 +108,7 @@ async function fixture(options: FixtureOptions = {}): Promise<Fixture> {
   if (options.checkpoint !== undefined) {
     ctx.provide('sessionProjectionCache', { cachedSnapshot: () => options.checkpoint } as never)
   }
-  return { ctx, history: new SessionHistoryController(ctx, observation => { observation[Symbol.dispose]() }) }
+  return { ctx, history: new SessionHistoryController(ctx, (observation) => { observation[Symbol.dispose]() }) }
 }
 
 /** Read exactly one opening frame and release the follower. */
@@ -255,7 +255,7 @@ describe('Session history stored window path', () => {
     }
   })
 
-  it('falls back to the complete source when the window carries no projection checkpoint', async () => {
+  it('opens from the window without a projection block instead of the complete source', async () => {
     const events = conversation()
     const readWindow = vi.fn(storedWindowReader(header(), events))
     const windowed = await fixture({ readWindow })
@@ -263,12 +263,14 @@ describe('Session history stored window path', () => {
     try {
       const frame = await openSnapshot(windowed)
 
+      // The bounded window answers the opening; the absent checkpoint is not
+      // replaced with an empty exact cut, so the frame carries no block.
       expect(readWindow).toHaveBeenCalledOnce()
-      expect(observe).toHaveBeenCalledOnce()
-      // The exact observation reports its own watermark at the opening cursor.
-      expect(frame.projections.asOfSeq).toBe(frame.cursor)
+      expect(observe).not.toHaveBeenCalled()
+      expect(frame.projections).toBeUndefined()
       expect(frame.records.map(record => record.event.seq))
         .toEqual(events.map(event => event.seq))
+      expect(frame.cursor).toBe(events.length - 1)
     } finally {
       await windowed.ctx.fiber.dispose()
     }

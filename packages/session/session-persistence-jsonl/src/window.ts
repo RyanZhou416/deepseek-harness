@@ -16,7 +16,11 @@ import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import type { SessionFormatEvent, SessionFormatMigrationContext } from '@deepseek-ai/dsh-session-format'
 import { assertV4RowAdmission, releasedV4SessionFormatCodec } from '@deepseek-ai/dsh-session-format-v3-to-v4'
 import type { JsonlCompression } from './format.ts'
-import { loadWindowIndex, readWindowIndexSource, rebuildWindowIndex, type JsonlWindowIndex, type JsonlWindowIndexFrame } from './window-index.ts'
+import {
+  loadWindowIndex, readWindowIndex, readWindowIndexSource, rebuildWindowIndex,
+  type JsonlWindowIndex, type JsonlWindowIndexFrame, type JsonlWindowIndexSource, type LoadedWindowIndex,
+} from './window-index.ts'
+import type { WindowIndexMemo } from './window-index-memo.ts'
 import { createZstdFrameDecoder, decompressZstdFrame, scanZstdFrames } from './zstd.ts'
 
 /** Default trailing event bound for one history window. */
@@ -241,6 +245,7 @@ interface FramePlaintext {
  * @param beforeSeq - exclusive end of the requested window.
  * @param maxEvents - clamped positive window bound.
  * @param signal - optional cancellation.
+ * @param memo - backend-owned parsed-index memo; omit it to read the sidecar every time.
  * @returns the validated backwards window, or `undefined` when it cannot be established.
  */
 export async function readJsonlIndexedWindow(
@@ -251,9 +256,10 @@ export async function readJsonlIndexedWindow(
   beforeSeq: number,
   maxEvents: number,
   signal?: AbortSignal,
+  memo?: WindowIndexMemo,
 ): Promise<JsonlIndexedWindow | undefined> {
   signal?.throwIfAborted()
-  let loaded = await loadWindowIndex(sourcePath, compression, headerValue, headerLine, signal)
+  let loaded = await loadIndexedSource(sourcePath, compression, headerValue, headerLine, signal, memo)
   if (loaded === undefined) return undefined
   for (let attempt = 0; ; attempt += 1) {
     signal?.throwIfAborted()
@@ -265,10 +271,53 @@ export async function readJsonlIndexedWindow(
     // still disagree with the bytes it claims to index. Rebuild once instead of
     // disabling paging until the generation changes.
     if (!loaded.cached || attempt > 0) return undefined
+    memo?.delete(sourcePath)
     const rebuilt = await rebuildWindowIndex(sourcePath, compression, headerValue, headerLine, signal)
     if (rebuilt === undefined) return undefined
+    await memo?.set(sourcePath, rebuilt.source, rebuilt)
     loaded = { index: rebuilt, cached: false }
   }
+}
+
+/**
+ * Load one generation's index through the owner's memo when it has one.
+ *
+ * The memo is an optimization, never an additional validation path: a miss
+ * performs the same sidecar read and one rebuild, a rebuilt index is retained
+ * under the identity that build observed, and every load failure still returns
+ * `undefined` for the caller's complete-read fallback.
+ * @param sourcePath - selected current-generation file path.
+ * @param compression - configured physical encoding.
+ * @param headerValue - parsed physical header of the same revision.
+ * @param headerLine - exact header record text the index must reproduce.
+ * @param signal - optional cancellation.
+ * @param memo - backend-owned parsed-index memo, or `undefined` for a plain sidecar read.
+ * @returns the loaded index and whether it came from a sidecar, or `undefined`.
+ */
+async function loadIndexedSource(
+  sourcePath: string,
+  compression: JsonlCompression,
+  headerValue: unknown,
+  headerLine: string,
+  signal: AbortSignal | undefined,
+  memo: WindowIndexMemo | undefined,
+): Promise<LoadedWindowIndex | undefined> {
+  if (memo === undefined) return loadWindowIndex(sourcePath, compression, headerValue, headerLine, signal)
+  signal?.throwIfAborted()
+  const source: JsonlWindowIndexSource | undefined = await readWindowIndexSource(sourcePath, signal)
+  if (source === undefined) {
+    // A vanished or unreadable generation has no identity to reuse; release its
+    // retained parse now instead of keeping it until the bound evicts it.
+    memo.delete(sourcePath)
+    return undefined
+  }
+  const cached = await memo.load(sourcePath, source, () => readWindowIndex(sourcePath, source))
+  if (cached !== undefined) return { index: cached, cached: true }
+  signal?.throwIfAborted()
+  const rebuilt = await rebuildWindowIndex(sourcePath, compression, headerValue, headerLine, signal)
+  if (rebuilt === undefined) return undefined
+  await memo.set(sourcePath, rebuilt.source, rebuilt)
+  return { index: rebuilt, cached: false }
 }
 
 /** Select, read, and decode one backwards window from an accepted index. */

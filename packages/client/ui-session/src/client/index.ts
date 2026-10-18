@@ -170,6 +170,13 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
     sessionId: SessionId
     /** Host-computed projection values addressed by projection key. */
     useProjection: UseProjection
+    /** Whole-log projection readiness of the current Session generation. */
+    useProjectionAvailability?: SnapshotSelectorHook<SessionSnapshot['projectionAvailability']>
+    /**
+     * Request exact whole-log projections. Call only from the explicit user
+     * action that opens a statistics or Context surface, never on mount.
+     */
+    requestExactProjections?: () => void
     /** Whether the current Peer may call `action` on this Session resource. */
     useAccess: (action: RemoteEndpoint) => boolean
   }
@@ -181,6 +188,10 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
     sessionId: SessionId | undefined
     /** Host-computed projection values; every key is absent without a Session. */
     useProjection: UseProjection
+    /** Whole-log projection readiness; absent without a Session. */
+    useProjectionAvailability?: MaybeSnapshotSelectorHook<SessionSnapshot['projectionAvailability']>
+    /** Request exact whole-log projections; absent without a Session. */
+    requestExactProjections?: (() => void) | undefined
     /** The bound Session's access answer; `undefined` without a Session, which callers treat as not allowed. */
     useAccess: (action: RemoteEndpoint) => boolean | undefined
   }
@@ -729,6 +740,25 @@ export function apply(ctx: Context): void {
     keyedHooks: ['access'],
     resolve: binding => ({
       keyedHooks: { access: action => ctx.remoteAccess.source('session', binding.sessionId, action) },
+    }),
+  })
+  // Whole-log projection readiness and the on-demand exact read. The hook reads
+  // the binding's own Session snapshot (the Manager drives store transitions),
+  // and the request stays a plain callback so surfaces call it only from the
+  // user action that opens statistics or the Context panel.
+  service.provide({
+    hooks: ['projectionAvailability'],
+    props: ['requestExactProjections'],
+    resolve: binding => ({
+      hooks: {
+        projectionAvailability: {
+          getSnapshot: () => binding.session.getSnapshot().projectionAvailability,
+          subscribe: listener => binding.session.subscribe(listener),
+        },
+      },
+      props: {
+        requestExactProjections: () => { binding.session.requestExactProjections() },
+      },
     }),
   })
 }

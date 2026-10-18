@@ -108,9 +108,16 @@ export interface ISessions {
   subagentAddress(id: SessionId): SubagentAddress | undefined
 
   /**
-   * Read projections without starting migration; retry failed or migration-deferred reads.
-   * @param sessionId - Session to inspect without opening its conversation.
-   * @returns completion of the current or newly started refresh.
+   * Request exact whole-log projections for one Session without starting
+   * migration. Statistics and Context surfaces call this on an explicit user
+   * action that needs whole-session values; it is not mounted behavior. A
+   * generation that is already exact (a cache-hit opening baseline, a control
+   * baseline, or a completed read), a Session already read in this Host
+   * generation, and a terminal access refusal are satisfied without another
+   * read. A pending request belongs to the current Host generation and stops
+   * when its Session leaves the view.
+   * @param sessionId - Session whose exact projections are requested.
+   * @returns completion of the current or newly started read.
    */
   refreshProjections(sessionId: SessionId): Promise<void>
 

@@ -17,7 +17,7 @@ import { SESSION_FORMAT_VERSION, SessionId, SessionSeq } from '@deepseek-ai/dsh-
 import type { SessionEvent, SessionHeader } from '@deepseek-ai/dsh-session'
 import type { SessionPersistence, SessionWindow, SessionWindowRequest } from '@deepseek-ai/dsh-session-persistence'
 import * as JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
-import { eventLines, generationLogPath, toHeaderLine } from '../src/format.ts'
+import { generationLogPath, toHeaderLine } from '../src/format.ts'
 import { compressZstdFrame, scanZstdFrames, type ZstdFrameRange } from '../src/zstd.ts'
 import {
   WINDOW_INDEX_VERSION,
@@ -339,14 +339,15 @@ describe('JSONL window index build: cancellation', () => {
   it('stops an in-flight build on abort and leaves no sidecar or temporary file', async () => {
     const root = await tempRoot()
     const { headerLine, headerValue } = headerOf('index-speed-inflight')
-    // Enough rows that the decode pass definitely crosses its 50 ms yield
-    // interval; the timer can only run at that yield, so the abort lands inside
-    // the pass rather than before it.
-    const events = turnLog(240_000)
+    // The count pass is row-bound rather than byte-bound: many short records keep
+    // it running across its 50 ms yield interval without a large fixture, so the
+    // timer-driven abort lands inside the pass. The build never parses these rows;
+    // only the served decoder validates records.
+    const rows = 4_000_000
     const path = join(root, 'inflight.jsonl.zstd')
     await writeFile(path, Buffer.concat([
       await compressZstdFrame(`${headerLine}\n`),
-      await compressZstdFrame(`${eventLines(events)}\n`),
+      await compressZstdFrame('x\n'.repeat(rows)),
     ]))
 
     const controller = new AbortController()
@@ -363,7 +364,7 @@ describe('JSONL window index build: cancellation', () => {
 
     // Cancellation published nothing and the same generation still builds.
     const index = await rebuildWindowIndex(path, 'zstd', headerValue, headerLine)
-    expect(index?.frames.reduce((total, frame) => total + frame.events, 0)).toBe(events.length)
-    await expectValidSidecar(path, events.length)
+    expect(index?.frames.reduce((total, frame) => total + frame.events, 0)).toBe(rows)
+    await expectValidSidecar(path, rows)
   })
 })

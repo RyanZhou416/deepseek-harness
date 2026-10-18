@@ -9,6 +9,7 @@
     "src/index.ts",
     "src/types.ts",
     "src/remote-events.ts",
+    "src/client/contract/projection-availability.ts",
     "src/agent.ts",
     "src/assistant-stream.ts",
     "src/catalog.ts",

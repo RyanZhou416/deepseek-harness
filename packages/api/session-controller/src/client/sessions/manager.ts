@@ -10,9 +10,14 @@ import type {
   SessionControlFrame,
   SessionEditLastMessageRequest,
   SessionProjectionHints,
+  SessionProjectionsValue,
   SessionRenameValue,
   SessionSummary,
 } from '../../types.ts'
+import type {
+  ProjectionAvailability,
+  ProjectionUnavailableReason,
+} from '../contract/projection-availability.ts'
 import { mergeOrderedBaseline } from '../ordered-baseline.ts'
 import { isRemoteFailure } from '@deepseek-ai/dsh-api-gateway/client'
 import { assertNever } from '@deepseek-ai/dsh-util-values'
@@ -32,6 +37,24 @@ import type { SessionTarget } from '../contract/sessions.ts'
 function sessionSeqCursor(value: number): SessionSeqCursor {
   return value === -1 ? -1 : SessionSeq(value)
 }
+
+/**
+ * How one failed exact projection read affects readiness. A `terminal` code
+ * cannot succeed again in the same Host generation, so a later request is not
+ * sent; migration stays explicitly retryable because the Host can finish the
+ * migration while the connection generation lives on. The failure vocabulary
+ * is merge-extensible, so every unlisted code is a retryable read failure.
+ */
+const PROJECTION_FAILURES: ReadonlyMap<string, {
+  readonly reason: ProjectionUnavailableReason
+  readonly terminal: boolean
+}> = new Map([
+  ['remote-access/denied', { reason: 'refused', terminal: true }],
+  ['gateway/bad-request', { reason: 'refused', terminal: true }],
+  ['gateway/method-unavailable', { reason: 'refused', terminal: true }],
+  ['session/projections-unavailable', { reason: 'refused', terminal: true }],
+  ['session/migration-required', { reason: 'refused', terminal: false }],
+])
 
 /**
  * List arrival lifecycle, orthogonal to the pull-activity `state` axis:
@@ -60,19 +83,34 @@ export interface SessionListSnapshot {
 
 }
 
-/** Shared projection values and read lifecycle; identity remains stable while these fields are unchanged. */
+/** Shared projection values, readiness, and read lifecycle; identity remains stable while these fields are unchanged. */
 export interface SessionProjectionSnapshot {
   readonly values: Readonly<Partial<SessionProjectionMap>>
   readonly state: 'idle' | 'loading' | 'ready' | 'migration-required' | 'error'
   readonly error: RemoteFailure | null
+  /**
+   * Whole-log projection readiness of this Session generation (see
+   * ProjectionAvailability): only `exact` may drive whole-session statistics
+   * and Context values. Optional so a hand-built fixture without a
+   * projection store keeps compiling; every store-backed snapshot carries it.
+   */
+  readonly availability?: ProjectionAvailability
+}
+
+/**
+ * Read lifecycle of the on-demand exact projection request. `refused` marks a
+ * terminal permission/access failure for this Host generation, so another
+ * request must not issue the same read; a migration-deferred read stays
+ * explicitly retryable.
+ */
+type ProjectionLoad = Omit<SessionProjectionSnapshot, 'values' | 'availability'> & {
+  readonly refused?: true
 }
 
 interface ProjectionInflight {
   readonly promise: Promise<void>
   readonly controller: AbortController
 }
-
-type ProjectionLoad = Omit<SessionProjectionSnapshot, 'values'>
 
 interface ListEntryCache {
   readonly summary: SessionSummary
@@ -122,6 +160,13 @@ export class SessionManager {
   private readonly addresses = new Map<SessionId, SubagentAddress>()
   private readonly projectionLoads = new Map<SessionId, ProjectionLoad>()
   private readonly projectionInflight = new Map<SessionId, ProjectionInflight>()
+  /**
+   * Host connection generation. Projection readiness and every deferred exact
+   * read belong to one generation: `handleConnected` starts the next one,
+   * discards responses still in flight, and re-requests what was already
+   * wanted.
+   */
+  private hostGeneration = 0
 
 
   private listSnapshotCache: SessionListSnapshot
@@ -199,6 +244,8 @@ export class SessionManager {
 
   /**
    * Withdraw an exact Client instance before running its teardown callbacks.
+   * A pending exact projection read stops with the view that requested it;
+   * a later opening may request it again.
    * @param sessionId - identity to withdraw.
    * @param expected - instance being released; a replacement is left untouched.
    * @returns completion of the detached instance's stream teardown.
@@ -208,6 +255,7 @@ export class SessionManager {
     if (session !== expected) return Promise.resolve()
     this.sessions.delete(sessionId)
     this.addresses.delete(sessionId)
+    this.cancelProjectionRead(sessionId)
     this.pruneEngagement(sessionId, this.retainedIds(this.summaries))
     return this.startSessionDisposal(session)
   }
@@ -218,6 +266,8 @@ export class SessionManager {
    */
   async dispose(): Promise<void> {
     this.disposed = true
+    // A terminal generation: any read that ignores its abort still cannot land.
+    this.hostGeneration += 1
     this.listMutations = null
     this.listInflight = null
     this.engagedSessions.clear()
@@ -307,6 +357,11 @@ export class SessionManager {
         this.sessions.get(engaged.sessionId)?.handleBlank(false)
       },
       projections: this.projectionStore(sessionId),
+      // A window-first opening carries no cut. Readiness is recorded here; the
+      // exact read itself starts only when a statistics or Context surface
+      // explicitly requests it.
+      onOpeningProjectionsAbsent: (opened) => { this.noteOpeningProjectionsAbsent(opened.sessionId) },
+      onExactProjectionsRequested: (requested) => { void this.refreshProjections(requested.sessionId) },
     })
   }
 
@@ -358,54 +413,70 @@ export class SessionManager {
   }
 
   /**
-   * Read projections without starting migration; retry failed or migration-deferred reads.
+   * Record that a window-first opening served no projection block. An absent
+   * block neither writes nor clears rows, so only readiness changes: the
+   * generation holds no exact whole-log cut unless one already arrived through
+   * this generation's control baseline, list block, or exact read. No read
+   * starts here — statistics and Context surfaces request the exact read when
+   * they need it (see {@link refreshProjections}).
+   * @param sessionId - Session whose opening frame omitted the projection block.
+   */
+  noteOpeningProjectionsAbsent(sessionId: SessionId): void {
+    if (this.disposed || this.projectionInflight.has(sessionId)) return
+    const store = this.projectionStore(sessionId)
+    const availability = store.availability()
+    // An exact cut is already the whole-log answer, and a refusal keeps the
+    // reason it cannot be retried in this generation.
+    if (availability.state !== 'unavailable' || availability.reason === 'refused') return
+    store.markUnavailable('opening-absent')
+    this.notifier.markDirty()
+  }
+
+  /**
+   * Request exact whole-log projections on demand, without starting migration.
+   *
+   * An opening that already served an exact cut (a complete cache-hit
+   * baseline, control baseline, or list block) and a Session already read in
+   * this generation are satisfied without a request. Otherwise the request is
+   * single-flight and tied to the Host connection generation that started it:
+   * a result from a superseded generation is discarded, a cut older than the
+   * exact watermark already held is refused instead of regressing readiness,
+   * and a permission/access refusal is terminal for the generation.
    * @param sessionId - Session to inspect without opening its conversation.
    * @returns completion of the current or newly started read.
    */
   refreshProjections(sessionId: SessionId): Promise<void> {
+    if (this.disposed) return Promise.resolve()
     const existing = this.projectionInflight.get(sessionId)
     if (existing !== undefined) return existing.promise
-    if (this.projectionLoads.get(sessionId)?.state === 'ready') return Promise.resolve()
-    const controller = new AbortController()
+    const load = this.projectionLoads.get(sessionId)
+    if (load?.state === 'ready' || load?.refused === true) return Promise.resolve()
     const store = this.projectionStore(sessionId)
+    const availability = store.availability()
+    if (availability.state === 'exact') {
+      // Already exact at this generation's cut; a read cannot improve it.
+      this.projectionLoads.set(sessionId, { state: 'ready', error: null })
+      this.notifier.markDirty()
+      return Promise.resolve()
+    }
+    const controller = new AbortController()
+    const generation = this.hostGeneration
     const initialValues = store.values()
+    store.markLoading(availability.reason)
     this.projectionLoads.set(sessionId, { state: 'loading', error: null })
     this.notifier.markDirty()
     const operation = (async () => {
       try {
         const result = await this.remote.session.projections({ sessionId }, controller.signal)
-        if (controller.signal.aborted) return
-        if (result.ok) {
-          this.titlePresentationFallbacks.delete(sessionId)
-          const value = result.value
-          if (value !== null) {
-            switch (value.kind) {
-              case 'sequenced':
-                store.seed({ values: value.values, asOfSeq: sessionSeqCursor(value.asOfSeq) })
-                break
-              case 'migration-required':
-                store.applyCached(value.values)
-                break
-              default:
-                assertNever(value, 'session projections result')
-            }
-          } else if (store.values() === initialValues) {
-            // A later frame proves existence independently of an earlier missing read.
-            store.clear()
-          }
-          this.projectionLoads.set(sessionId, {
-            state: value?.kind === 'migration-required' ? 'migration-required' : 'ready',
-            error: null,
-          })
-        } else {
-          this.projectionLoads.set(sessionId, { state: 'error', error: result.error })
-        }
+        if (controller.signal.aborted || generation !== this.hostGeneration) return
+        if (result.ok) this.settleExactProjections(sessionId, store, result.value, initialValues)
+        else this.settleProjectionFailure(sessionId, store, result.error)
       } catch (error: unknown) {
-        if (controller.signal.aborted) return
+        if (controller.signal.aborted || generation !== this.hostGeneration) return
         if (!isRemoteFailure(error)) throw error
-        this.projectionLoads.set(sessionId, { state: 'error', error })
+        this.settleProjectionFailure(sessionId, store, error)
       } finally {
-        if (!controller.signal.aborted) {
+        if (this.projectionInflight.get(sessionId)?.controller === controller) {
           this.projectionInflight.delete(sessionId)
           this.notifier.markDirty()
         }
@@ -413,6 +484,77 @@ export class SessionManager {
     })()
     this.projectionInflight.set(sessionId, { promise: operation, controller })
     return operation
+  }
+
+  /** Apply one successful exact projection read (or its absent and migration branches). */
+  private settleExactProjections(
+    sessionId: SessionId,
+    store: ProjectionValueStore,
+    value: SessionProjectionsValue,
+    initialValues: Readonly<Partial<SessionProjectionMap>>,
+  ): void {
+    this.titlePresentationFallbacks.delete(sessionId)
+    if (value === null) {
+      // A later frame proves existence independently of an earlier missing read.
+      if (store.values() === initialValues) store.clear()
+      if (store.availability().state !== 'exact') store.markUnavailable('refused')
+      this.projectionLoads.set(sessionId, { state: 'ready', error: null })
+      return
+    }
+    switch (value.kind) {
+      case 'sequenced': {
+        const asOfSeq = sessionSeqCursor(value.asOfSeq)
+        const availability = store.availability()
+        // A deferred read must not regress a newer exact cut: rows merge per
+        // key under the store's watermark rule, and readiness follows only a
+        // cut at least as new as the one already held.
+        if (availability.state !== 'exact' || asOfSeq >= availability.asOfSeq) {
+          store.seed({ values: value.values, asOfSeq })
+        }
+        this.projectionLoads.set(sessionId, { state: 'ready', error: null })
+        return
+      }
+      case 'migration-required':
+        store.applyCached(value.values)
+        store.markUnavailable('refused')
+        this.projectionLoads.set(sessionId, { state: 'migration-required', error: null })
+        return
+      default:
+        assertNever(value, 'session projections result')
+    }
+  }
+
+  /** Record one failed exact projection read and whether the generation may retry it. */
+  private settleProjectionFailure(
+    sessionId: SessionId,
+    store: ProjectionValueStore,
+    failure: RemoteFailure,
+  ): void {
+    const classification = PROJECTION_FAILURES.get(failure.code)
+      ?? { reason: 'read-failed' as const, terminal: false }
+    if (store.availability().state !== 'exact') store.markUnavailable(classification.reason)
+    this.projectionLoads.set(sessionId, classification.terminal
+      ? { state: 'error', error: failure, refused: true }
+      : { state: 'error', error: failure })
+  }
+
+  /**
+   * Stop one deferred exact read because its Session left the view or was
+   * removed. The cancelled read cannot make the generation exact; a later
+   * opening or request starts a fresh one.
+   * @param sessionId - Session whose pending read no longer has a consumer.
+   */
+  private cancelProjectionRead(sessionId: SessionId): void {
+    const read = this.projectionInflight.get(sessionId)
+    if (read === undefined) return
+    this.projectionInflight.delete(sessionId)
+    if (this.projectionLoads.get(sessionId)?.state === 'loading') {
+      this.projectionLoads.set(sessionId, { state: 'idle', error: null })
+    }
+    const store = this.projectionStores.get(sessionId)
+    if (store?.availability().state === 'loading') store.markUnavailable('opening-absent')
+    read.controller.abort()
+    this.notifier.markDirty()
   }
 
   private agentAvailable(sessionId: SessionId): boolean | undefined {
@@ -704,6 +846,11 @@ export class SessionManager {
       if (this.titlePresentationFallbacks.delete(sessionId as SessionId)) changed = true
       const store = this.projectionStore(sessionId as SessionId)
       const asOfSeq = sessionSeqCursor(block.asOfSeq)
+      // A replayed or older baseline cannot regress a newer exact cut: every
+      // row it carries is at or before that cut, and the store's per-key
+      // watermark rule would reject each one anyway.
+      const availability = store.availability()
+      if (availability.state === 'exact' && asOfSeq < availability.asOfSeq) continue
       if (store.seed({ ...block, asOfSeq })) changed = true
     }
     if (changed || this.projectionStores.size !== previousSize) this.notifier.markDirty()
@@ -762,8 +909,7 @@ export class SessionManager {
       this.projectionStores.delete(sessionId)
     }
     this.pruneEngagement(sessionId, this.retainedIds(this.summaries))
-    this.projectionInflight.get(sessionId)?.controller.abort()
-    this.projectionInflight.delete(sessionId)
+    this.cancelProjectionRead(sessionId)
     this.projectionLoads.delete(sessionId)
     for (const [childId, address] of this.addresses) {
       if (address.parentSessionId === sessionId) {
@@ -804,17 +950,20 @@ export class SessionManager {
 
   /**
    * Repair one re-established Host-event generation with queryable baselines.
-   * Discard old projection cuts before new queries, including cold Sessions
-   * absent from the process-local control baseline.
-   * Opened Session follow streams resume independently through API Gateway.
+   * Starts the next projection generation: old cuts, readiness, and in-flight
+   * reads are discarded, and the reads the previous generation had wanted are
+   * requested again. Opened Session follow streams resume independently
+   * through API Gateway.
    */
   handleConnected(): void {
+    this.hostGeneration += 1
+    const requested = [...this.projectionLoads.keys()]
     this.captureTitlePresentationFallbacks()
     for (const store of this.projectionStores.values()) store.clear()
     this.listMutations = null
     this.listInflight = null
     void this.refreshList()
-    const parents = new Set(this.projectionLoads.keys())
+    const parents = new Set(requested)
     for (const id of this.sessions.keys()) {
       const address = this.addresses.get(id)
       if (address !== undefined) parents.add(address.parentSessionId)
@@ -887,10 +1036,14 @@ export class SessionManager {
       const load = this.projectionLoads.get(sessionId)
       const state = load?.state ?? 'idle'
       const error = load?.error ?? null
+      // The store keeps one availability value per generation until it
+      // transitions, so identity comparison also keeps the snapshot identity.
+      const availability = store.availability()
       const previous = previousProjections[sessionId]
-      return [sessionId, previous !== undefined && previous.values === values && previous.state === state && previous.error === error
+      return [sessionId, previous !== undefined && previous.values === values && previous.state === state
+        && previous.error === error && previous.availability === availability
         ? previous
-        : { values, state, error }]
+        : { values, state, error, availability }]
     })
     const projectionsBySession = Object.fromEntries(projectionEntries)
     return {

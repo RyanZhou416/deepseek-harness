@@ -1,7 +1,8 @@
 /**
  * Edges of the stored-history window path: a tail ending inside an interrupted
  * Turn, an opening cursor above the stored window, incomplete projection
- * checkpoints, and seeded/historical fallbacks that must not be windowed.
+ * checkpoints that omit the block, and seeded/historical fallbacks that must
+ * not be windowed.
  */
 
 import { Context } from '@deepseek-ai/cordis'
@@ -178,7 +179,7 @@ async function fixture(options: FixtureOptions = {}) {
   }
   const observeSession = vi.spyOn(ctx.sessionQuery, 'observeSession')
   if (options.observation !== undefined) observeSession.mockResolvedValue(options.observation)
-  const history = new SessionHistoryController(ctx, observation => { observation[Symbol.dispose]() })
+  const history = new SessionHistoryController(ctx, (observation) => { observation[Symbol.dispose]() })
   onTestFinished(() => ctx.fiber.dispose())
   return { ctx, history, observeSession, events, meta }
 }
@@ -320,7 +321,7 @@ describe('Session history window tail ending mid-turn', () => {
 })
 
 describe('Session history window projection checkpoint completeness', () => {
-  it('falls back for follow when the checkpoint omits a registered client-visible key', async () => {
+  it('opens from the window when the checkpoint omits a registered client-visible key and omits the block', async () => {
     const events = interruptedTurn()
     const balancedEvents = balanced(events)
     const readWindow = vi.fn(windowBackend(events))
@@ -334,16 +335,16 @@ describe('Session history window projection checkpoint completeness', () => {
 
     const frame = await openSnapshot(windowed.history)
 
-    // readWindow returns the window without a baseline; the opening falls back
-    // to the exact observation instead of adopting a partial projection block.
+    // readWindow returns the window without a complete baseline; the opening
+    // keeps the window and omits the block instead of seeding partial values.
     expect(readWindow).toHaveBeenCalledOnce()
-    expect(windowed.observeSession).toHaveBeenCalledOnce()
+    expect(windowed.observeSession).not.toHaveBeenCalled()
     expect(frameSeqs(frame)).toEqual(balancedEvents.map(event => event.seq))
-    expect(frame.projections).toEqual(exact)
-    expect(frame.projections?.asOfSeq).toBe(frame.cursor)
+    expect(frame.cursor).toBe(lastSeq(balancedEvents))
+    expect(frame.projections).toBeUndefined()
   })
 
-  it('falls back for follow when the checkpoint watermark leads the window cursor', async () => {
+  it('opens from the window when the checkpoint watermark leads the window cursor and omits the block', async () => {
     const events = interruptedTurn()
     const balancedEvents = balanced(events)
     const readWindow = vi.fn(windowBackend(events))
@@ -356,10 +357,13 @@ describe('Session history window projection checkpoint completeness', () => {
 
     const frame = await openSnapshot(windowed.history)
 
+    // A checkpoint ahead of the window cannot describe it; the window still
+    // opens and the frame carries no projection block.
     expect(readWindow).toHaveBeenCalledOnce()
-    expect(windowed.observeSession).toHaveBeenCalledOnce()
-    expect(frame.projections).toEqual(exact)
+    expect(windowed.observeSession).not.toHaveBeenCalled()
+    expect(frame.projections).toBeUndefined()
     expect(frameSeqs(frame)).toEqual(balancedEvents.map(event => event.seq))
+    expect(frame.cursor).toBe(lastSeq(balancedEvents))
   })
 
   it('keeps serving pages from a window whose checkpoint is incomplete', async () => {

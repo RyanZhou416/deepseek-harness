@@ -168,7 +168,7 @@ async function fixture(options: FixtureOptions = {}) {
   }
   const observeSession = vi.spyOn(ctx.sessionQuery, 'observeSession')
   if (options.observation !== undefined) observeSession.mockResolvedValue(options.observation)
-  const history = new SessionHistoryController(ctx, observation => { observation[Symbol.dispose]() })
+  const history = new SessionHistoryController(ctx, (observation) => { observation[Symbol.dispose]() })
   onTestFinished(() => ctx.fiber.dispose())
   return { ctx, history, observeSession }
 }
@@ -237,8 +237,8 @@ describe('Session history follow from a stored window', () => {
     expect(fromWindow.header.id).toBe(SESSION)
     // The checkpoint keeps its stored watermark instead of the opening cursor.
     expect(fromWindow.projections).toEqual(checkpoint)
-    expect(fromWindow.projections.asOfSeq).toBe(1)
-    expect(fromWindow.projections.asOfSeq).not.toBe(fromWindow.cursor)
+    expect(fromWindow.projections?.asOfSeq).toBe(1)
+    expect(fromWindow.projections?.asOfSeq).not.toBe(fromWindow.cursor)
     expect(windowed.observeSession).not.toHaveBeenCalled()
     expect(complete.observeSession).toHaveBeenCalledOnce()
     expect(readWindow).toHaveBeenCalledExactlyOnceWith(SESSION, expect.objectContaining({
@@ -262,7 +262,21 @@ describe('Session history follow from a stored window', () => {
     expect(frameSeqs(frame)).toEqual(events.map(event => event.seq))
     expect(frame.hasMore).toBe(false)
     expect(frame.projections).toEqual(exact)
-    expect(frame.projections.asOfSeq).toBe(frame.cursor)
+    expect(frame.projections?.asOfSeq).toBe(frame.cursor)
+  })
+
+  it('omits the block on a complete-source opening that has no exact projection cut', async () => {
+    const events = conversation()
+    // The window service is absent, so the complete observation answers; this
+    // observation carries no projection cut.
+    const windowed = await fixture({ observation: observationOf(events) })
+
+    const frame = await openSnapshot(windowed.history)
+
+    expect(windowed.observeSession).toHaveBeenCalledOnce()
+    expect('projections' in frame).toBe(false)
+    expect(frameSeqs(frame)).toEqual(events.map(event => event.seq))
+    expect(frame.hasMore).toBe(false)
   })
 })
 
@@ -361,21 +375,25 @@ describe('Session history page from a stored window', () => {
     expect(pageSeqs(page)).toEqual([0, 1, 2, 3, 4, 5])
   })
 
-  it('falls back for follow when the window has no projection checkpoint, while pages stay windowed', async () => {
+  it('opens the cold follow from the window without a projection block, while pages stay windowed', async () => {
     const events = conversation()
     const readWindow = vi.fn(windowBackend(header(), events, { beforeSeq: true }))
     const exact: ProjectionSnapshot = { asOfSeq: SessionSeq(11), values: { title: 'exact' } }
     const windowed = await fixture({ readWindow, observation: observationOf(events, exact) })
 
+    // Negative control: the bounded window answers the opening, so the
+    // complete observation (and its full persistence open) never runs.
     const frame = await openSnapshot(windowed.history)
-    expect(windowed.observeSession).toHaveBeenCalledOnce()
-    expect(frame.projections).toEqual(exact)
+    expect(windowed.observeSession).not.toHaveBeenCalled()
+    expect(frame.projections).toBeUndefined()
+    expect(frameSeqs(frame)).toEqual(events.map(event => event.seq))
+    expect(frame.cursor).toBe(events.length - 1)
 
     // A page carries no projection block, so the same stored window still
     // answers it without another complete observation.
     const page = await loadPage(windowed.history, { throughSeq: 5, beforeSeq: 6 })
     expect(pageSeqs(page)).toEqual([0, 1, 2, 3, 4, 5])
-    expect(windowed.observeSession).toHaveBeenCalledOnce()
+    expect(windowed.observeSession).not.toHaveBeenCalled()
     expect(readWindow).toHaveBeenCalledTimes(2)
   })
 
@@ -437,7 +455,7 @@ describe('Session history live Sessions', () => {
     await ctx.plugin(SessionStore)
     installSessionReadTestServices(ctx)
     ctx.provide('sessionPersistence', { readWindow } as never)
-    const history = new SessionHistoryController(ctx, observation => { observation[Symbol.dispose]() })
+    const history = new SessionHistoryController(ctx, (observation) => { observation[Symbol.dispose]() })
     onTestFinished(() => ctx.fiber.dispose())
     const session = ctx.sessions.create(undefined, { meta: { cwd: '/workspace' } })
     const events = appendConversation(session)

@@ -334,6 +334,9 @@ describe('web e2e: seeded history renders through cold resume', () => {
     }
     expect(first.value.cursor).toBe(seededThroughSeq)
     const projections = first.value.projections
+    // A seeded log opens through the complete observation; its exact cut must
+    // still be present on the opening snapshot.
+    if (projections === undefined) throw new Error('seeded opening snapshot omitted its projections baseline')
     expect(projections.asOfSeq).toBe(seededThroughSeq)
     // The seed carries a session/title event: the title unit is host-plane, so
     // it folds the detached log and serves the value with nothing composed.

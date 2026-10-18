@@ -7,7 +7,7 @@
 import { memo, useMemo, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import { IconDatabaseOutlineRegular, IconGaugeOutlineRegular } from '@deepseek-ai/dsh-client-ui-primitives'
-import type { UseProjection } from '@deepseek-ai/dsh-api-session-controller/client'
+import type { SessionSnapshot, UseProjection } from '@deepseek-ai/dsh-api-session-controller/client'
 import type { InjectFace, SnapshotSelectorHook } from '@deepseek-ai/dsh-client-ui-slots'
 // Type-only: merges the sessionStats key into SessionProjectionMap for useProjection.
 import type {} from '@deepseek-ai/dsh-session-stats/client'
@@ -185,6 +185,20 @@ type Translate = ChatViewSlotProps['t']
 export interface StatPillProps extends InjectFace<PerformanceUsageInjected> {
   useChat: SnapshotSelectorHook<ChatSnapshot>
   useProjection: UseProjection
+  /**
+   * Whole-log projection readiness for the bound Session. Bare presentation
+   * fixtures may omit the seat; a bound Session always supplies it. Without
+   * the seat, values render as they did before readiness existed (a fixture
+   * has no deferred read to describe); with it, a non-exact generation never
+   * presents cached or window-scoped values as whole-session values.
+   */
+  useProjectionAvailability?: SnapshotSelectorHook<SessionSnapshot['projectionAvailability']>
+  /**
+   * Request exact whole-log projections. Only the explicit user action that
+   * opens a statistics surface or clicks a non-exact value calls it; the
+   * pills never request on mount.
+   */
+  requestExactProjections?: () => void
   /** The owning dock's locale seat. */
   t: Translate
 }
@@ -242,14 +256,32 @@ function PlainPill({ stat, icon, label }: PillContent) {
 }
 
 /**
+ * A pill carrying one explicit action instead of a reading: used where a
+ * cached hint exists but the generation has no exact cut, so clicking requests
+ * the exact whole-log value rather than presenting the hint as exact.
+ */
+function ActionPill({ stat, icon, label, onClick }: PillContent & { label: string; onClick: () => void }) {
+  return (
+    <span className={css.anchor} data-composer-stat={stat}>
+      <button type="button" className={css.pill} aria-label={label} onClick={onClick}>
+        {icon}
+        <span className={css.label}>{label}</span>
+      </button>
+    </span>
+  )
+}
+
+/**
  * A pill button opening its own portaled dialog. Each pill owns its open
  * state; useStatDialog closes it on Escape or an outside pointerdown or click,
  * so at most one dialog is open across the dock.
  */
-function DialogPill({ stat, icon, label, ariaLabel, title, titleValue, children }: PillContent & {
+function DialogPill({ stat, icon, label, ariaLabel, title, titleValue, onOpen, children }: PillContent & {
   ariaLabel: string
   title: string
   titleValue?: string
+  /** Explicit user opening of this statistics surface; never fired by mounting. */
+  onOpen?: (() => void) | undefined
   children: ReactNode
 }) {
   const { open, setOpen, rootRef, panelRef, pos } = useStatDialog()
@@ -261,7 +293,10 @@ function DialogPill({ stat, icon, label, ariaLabel, title, titleValue, children 
         aria-haspopup="dialog"
         aria-expanded={open}
         aria-label={ariaLabel}
-        onClick={() => { setOpen(!open) }}
+        onClick={() => {
+          if (!open) onOpen?.()
+          setOpen(!open)
+        }}
       >
         {icon}
         <span className={css.label}>{label}</span>
@@ -294,7 +329,9 @@ function DialogPill({ stat, icon, label, ariaLabel, title, titleValue, children 
  * Turn and step counts with this turn's output speed, opening the time and
  * speed dialog; Compact keeps only the speed reading.
  */
-export const ActivityPill = memo(function ActivityPill({ useChat, useProjection, usePerformanceUsage, t }: StatPillProps) {
+export const ActivityPill = memo(function ActivityPill({
+  useChat, useProjection, requestExactProjections, usePerformanceUsage, t,
+}: StatPillProps) {
   const mode = usePerformanceUsage(value => value)
   const stats = useSessionStats(useChat, useProjection)
   const settledNodes = useChat(s => s.legacy.nodes)
@@ -318,7 +355,7 @@ export const ActivityPill = memo(function ActivityPill({ useChat, useProjection,
   // stays a plain reading instead of a button opening an empty dialog.
   if (stats.llmMs <= 0 && stats.toolMs <= 0 && stats.ttftSteps <= 0 && speed === null) return <PlainPill {...content} />
   return (
-    <DialogPill {...content} ariaLabel={turnSpeedLabel === null ? counts : `${counts} · ${turnSpeedLabel}`} title={t('stats.dialog.title')}>
+    <DialogPill {...content} ariaLabel={turnSpeedLabel === null ? counts : `${counts} · ${turnSpeedLabel}`} title={t('stats.dialog.title')} onOpen={requestExactProjections}>
       <dl className={dialogCss.details} data-session-stats-details>
         {stats.llmMs > 0 && (
           <>
@@ -356,15 +393,45 @@ export const ActivityPill = memo(function ActivityPill({ useChat, useProjection,
 })
 
 /** Whole-log token total and cache hit; Compact keeps only the cache hit. */
-export const UsagePill = memo(function UsagePill({ useProjection, usePerformanceUsage, t }: StatPillProps) {
+export const UsagePill = memo(function UsagePill({
+  useProjection, useProjectionAvailability, requestExactProjections, usePerformanceUsage, t,
+}: StatPillProps) {
   const mode = usePerformanceUsage(value => value)
   const usage = useProjection('tokenUsage')
+  // Without the readiness seat this is a bare fixture with no deferred read;
+  // with it, only `exact` may present a whole-session total.
+  const availability = useProjectionAvailability === undefined ? undefined : useProjectionAvailability(value => value)
+  const icon = <IconDatabaseOutlineRegular />
+  const hasActivity = usage !== undefined
+    && (billedInputTokens(usage) > 0 || usage.outputTokens > 0)
+  if (availability !== undefined && availability.state !== 'exact') {
+    // A cached hint or a window-scoped fold is not a whole-session total. Show
+    // the deferred read's own state, and let an explicit click request the cut
+    // instead of rendering the hint as exact.
+    if (availability.state === 'loading') {
+      return <PlainPill stat="usage" icon={icon} label={t('stats.usageLoading')} />
+    }
+    if (hasActivity) {
+      return (
+        <ActionPill
+          stat="usage"
+          icon={icon}
+          label={t('stats.usageUnavailable')}
+          onClick={() => { requestExactProjections?.() }}
+        />
+      )
+    }
+    if (availability.reason !== 'opening-absent') {
+      return <PlainPill stat="usage" icon={icon} label={t('stats.usageUnavailable')} />
+    }
+    return null
+  }
   // Gated on actual token activity: a session whose steps all settled without
-  // billing (e.g. every request failed) shows no usage pill.
-  if (usage === undefined || (billedInputTokens(usage) === 0 && usage.outputTokens === 0)) return null
+  // billing (e.g. every request failed) shows no usage pill. While the key is
+  // absent, only an exact cut can supply a whole-session total.
+  if (!hasActivity || usage === undefined) return null
   const cacheHit = cacheHitPercent(usage)
   const cacheHitText = cacheHit !== null ? t('stats.cacheHit', { percent: cacheHit }) : null
-  const icon = <IconDatabaseOutlineRegular />
   if (mode === 'compact') {
     return cacheHitText === null ? null : <PlainPill stat="usage" icon={icon} label={cacheHitText} />
   }
@@ -379,6 +446,7 @@ export const UsagePill = memo(function UsagePill({ useProjection, usePerformance
       ariaLabel={cacheHitText === null ? totalText : `${totalText} · ${cacheHitText}`}
       title={t('stats.dialog.usageTitle')}
       titleValue={exactCount(total, t)}
+      onOpen={requestExactProjections}
     >
       {/* jscpd:ignore-start -- the session-total bucket rows deliberately mirror
           TurnUsagePanel's per-turn dl: same skin, different data contract (the

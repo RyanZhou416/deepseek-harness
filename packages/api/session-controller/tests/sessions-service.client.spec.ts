@@ -7,14 +7,14 @@ import { RemoteError } from '@deepseek-ai/dsh-typert-protocol'
 import { LlmAttemptId } from '@deepseek-ai/dsh-llm'
 import { RemoteStreamCarrierError } from '@deepseek-ai/dsh-api-gateway/client'
 import { SESSION_FORMAT_VERSION, SessionSeq } from '@deepseek-ai/dsh-session/types'
-import { ok, streamHandle, type RemoteMock } from '@deepseek-ai/dsh-remote-mock'
+import { ok, streamHandle, type RemoteMock, type StreamScript } from '@deepseek-ai/dsh-remote-mock'
 import { createClientTest, webApp } from '@deepseek-ai/dsh-client-test-runtime/src/assembly/index.ts'
 import { ClientSessions, SessionCreateError, SessionForkError } from '../src/client/sessions/service.ts'
 import { scopeOf } from '../src/client/scope.ts'
 import type {
   SessionAssistantStreamBaseline, SessionFollowFrame, SessionFollowRequest,
 } from '../src/types.ts'
-import { FOLLOW, err, followScript, sessionWorld } from './remote/session.client.ts'
+import { FOLLOW, err, followScript, followSnapshot, sessionWorld } from './remote/session.client.ts'
 
 const sid = (s: string): SessionId => s as SessionId
 /** ClientSessions uses the Gateway client for stream supervision and the native Remote mocks for responses. */
@@ -76,6 +76,15 @@ async function feedList(b: Bench, rows: FeedRow[]): Promise<void> {
   }))
   await b.svc.refresh()
   await Promise.resolve() // manager notifier flush
+}
+
+/** A window-first opening: the bounded window is served without a projection block. */
+const absentOpening: StreamScript = ([request], stream) => {
+  const { projections: _omitted, ...snapshot } = followSnapshot(
+    ok({ records: [], hasMore: false }).value,
+    request as SessionFollowRequest,
+  )
+  stream.push(snapshot)
 }
 
 describe('list store projection', () => {
@@ -187,6 +196,32 @@ describe('scope tree', () => {
         .toEqual([{ id: sid('child'), createdAt: 1, mode: 'one-shot' }])
     })
     expect(b.mock.remote.session.projections).not.toHaveBeenCalled()
+  })
+
+  it('keeps a window-first opening unavailable until the Session surface requests exact projections', async ({ bench }) => {
+    const b = bench()
+    b.mock.stream(FOLLOW, absentOpening)
+    await feedList(b, [{ id: 's1' }])
+    using reference = b.svc.retain(sid('s1'), { source: 'controllerOperation' })
+    await reference.ready
+
+    expect(b.mock.remote.session.projections).not.toHaveBeenCalled()
+    expect(b.svc.list.getSnapshot().projectionsBySession[sid('s1')]?.availability)
+      .toEqual({ state: 'unavailable', reason: 'opening-absent' })
+    expect(reference.binding.session.getSnapshot().projectionAvailability)
+      .toEqual({ state: 'unavailable', reason: 'opening-absent' })
+
+    b.mock.remote.session.projections.mockResolvedValueOnce(ok({
+      kind: 'sequenced', asOfSeq: 2, values: { title: 'exact title' },
+    }))
+    reference.binding.session.requestExactProjections()
+
+    await vi.waitFor(() => {
+      expect(b.svc.list.getSnapshot().projectionsBySession[sid('s1')]?.availability)
+        .toEqual({ state: 'exact', asOfSeq: 2 })
+    })
+    expect(b.mock.remote.session.projections).toHaveBeenCalledOnce()
+    expect(b.svc.list.getSnapshot().projectionsBySession[sid('s1')]?.values.title).toBe('exact title')
   })
 
   it('publishes the final Assistant message before retiring transient chunks at Step end', async ({ bench }) => {

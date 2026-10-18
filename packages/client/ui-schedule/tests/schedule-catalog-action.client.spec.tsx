@@ -101,6 +101,7 @@ function sessionSnapshot(openState: SessionSnapshot['openState']): SessionSnapsh
     lastAgentError: null,
     promptAttempted: false,
     awaitingFirstTurn: false,
+    projectionAvailability: { state: 'unavailable', reason: 'opening-absent' },
   }
 }
 

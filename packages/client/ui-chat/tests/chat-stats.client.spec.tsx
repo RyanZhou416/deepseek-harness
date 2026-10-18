@@ -5,6 +5,7 @@ import { act, cleanup, fireEvent, render } from '@testing-library/react'
 import type {
   AssistantMessageNode, ChatSnapshot, LegacyConversationSlice, ToolResultNode,
 } from '@deepseek-ai/dsh-client-ui-chat/client'
+import type { SessionSnapshot } from '@deepseek-ai/dsh-api-session-controller/client'
 import { bindSnapshotSelector, makeTranslate } from '@deepseek-ai/dsh-client-test-runtime'
 import { en as commonEn } from '@deepseek-ai/dsh-client-locale/src/locales/en.ts'
 import { zh as commonZh } from '@deepseek-ai/dsh-client-locale/src/locales/zh.ts'
@@ -172,11 +173,28 @@ describe('composer stats pills', () => {
     return (key: string) => values[key]
   }
 
+  type Availability = SessionSnapshot['projectionAvailability']
+
+  /** Window-first opening: no exact cut was served, and no surface has requested one yet. */
+  const BEFORE_REQUEST: Availability = { state: 'unavailable', reason: 'opening-absent' }
+
+  /** A generation whose exact whole-log cut already arrived (a completed deferred read or cache hit). */
+  const EXACT: Availability = { state: 'exact', asOfSeq: 12 }
+
   function props(
     source: { getSnapshot(): ChatSnapshot; subscribe(fn: () => void): () => void },
     values: Record<string, unknown> = { tokenUsage: USAGE },
+    availability: Availability = EXACT,
+    requestExactProjections: () => void = () => {},
   ): StatPillProps {
-    return { usePerformanceUsage: selector => selector('detailed'), useChat: bindSnapshotSelector(source), useProjection: projections(values), t: tEn }
+    return {
+      usePerformanceUsage: selector => selector('detailed'),
+      useChat: bindSnapshotSelector(source),
+      useProjection: projections(values),
+      useProjectionAvailability: selector => selector(availability),
+      requestExactProjections,
+      t: tEn,
+    }
   }
 
   function tokenUsage(cacheReadTokens: number, uncachedInputTokens: number) {
@@ -461,6 +479,58 @@ describe('composer stats pills', () => {
     expect(view.container.textContent).toBe('1 turns 1 steps')
     // The untimed window has no dialog rows either, so no button renders at all.
     expect(view.queryAllByRole('button')).toHaveLength(0)
+  })
+
+  it('shows the deferred read state instead of fabricating a token total from the window', () => {
+    // Window nodes carry their own usage; billing still only rides the
+    // tokenUsage projection, so an unavailable key must never become a total.
+    const { source } = makeSource({ nodes: [timedStep(), assistant(2, 1, { inputTokens: 4, outputTokens: 6 })] })
+    const loading = render(<StatsPills {...props(source, {}, { state: 'loading', reason: 'opening-absent' })} />)
+    expect(loading.container.textContent).toContain('Loading token usage…')
+    expect(loading.container.textContent).not.toContain('tok·')
+    const unavailable = render(<StatsPills {...props(source, {}, { state: 'unavailable', reason: 'read-failed' })} />)
+    expect(unavailable.container.textContent).toContain('Token usage unavailable')
+    // Before any request an absent key stays invisible: sessionStats keeps the
+    // window fallback on the activity pill, and no usage pill is invented.
+    const beforeRequest = render(<StatsPills {...props(source, {}, BEFORE_REQUEST)} />)
+    expect(beforeRequest.container.textContent).toContain('1 turns 2 steps')
+    expect(beforeRequest.container.textContent).not.toContain('Token usage')
+  })
+
+  it('never presents a cached token total as exact before the deferred read completes', () => {
+    // The window/list hints can carry tokenUsage before any exact cut exists.
+    // It must stay a hint: no total and no cache-hit reading, only the deferred
+    // read's state and an explicit affordance that requests the exact cut.
+    const { source } = makeSource({ nodes: [timedStep()] })
+    const requestExactProjections = vi.fn()
+    const values = { tokenUsage: USAGE }
+    const view = render(<StatsPills {...props(source, values, BEFORE_REQUEST, requestExactProjections)} />)
+    expect(view.container.textContent).not.toContain('105 tok')
+    expect(view.container.textContent).not.toContain('Cache hit 90%')
+    fireEvent.click(view.getByRole('button', { name: 'Token usage unavailable' }))
+    expect(requestExactProjections).toHaveBeenCalledTimes(1)
+
+    view.rerender(<StatsPills {...props(source, values, { state: 'loading', reason: 'opening-absent' }, requestExactProjections)} />)
+    expect(view.container.textContent).toContain('Loading token usage…')
+    expect(view.container.textContent).not.toContain('105 tok')
+
+    view.rerender(<StatsPills {...props(source, values, EXACT, requestExactProjections)} />)
+    expect(view.container.textContent).toContain('105 tok')
+    expect(view.container.textContent).toContain('Cache hit 90%')
+  })
+
+  it('requests exact whole-log values only when a user opens a statistics dialog', () => {
+    const { source } = makeSource({ nodes: [timedStep()] })
+    const requestExactProjections = vi.fn()
+    const view = render(<StatsPills {...props(source, {}, BEFORE_REQUEST, requestExactProjections)} />)
+    // Mounting the pill is not a request: the same composer keeps it mounted.
+    expect(requestExactProjections).not.toHaveBeenCalled()
+    fireEvent.click(view.getAllByRole('button')[0]!)
+    expect(requestExactProjections).toHaveBeenCalledTimes(1)
+    // Closing and reopening the same dialog is another explicit user action.
+    fireEvent.click(view.getAllByRole('button')[0]!)
+    fireEvent.click(view.getAllByRole('button')[0]!)
+    expect(requestExactProjections).toHaveBeenCalledTimes(2)
   })
 
   it('renders whole-session counts from the sessionStats projection over the paged window', () => {

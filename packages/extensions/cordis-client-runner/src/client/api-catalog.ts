@@ -202,9 +202,9 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
       },
       {
         signature: 'refreshProjections(sessionId: SessionId): Promise<void>',
-        description: 'Read projections without starting migration; retry failed or migration-deferred reads.',
-        parameters: [{ name: 'sessionId', description: 'Session to inspect without opening its conversation.' }],
-        returns: 'completion of the current or newly started refresh.',
+        description: 'Request exact whole-log projections for one Session without starting migration. Statistics and Context surfaces call this on an explicit user action that needs whole-session values; it is not mounted behavior. A generation that is already exact (a cache-hit opening baseline, a control baseline, or a completed read), a Session already read in this Host generation, and a terminal access refusal are satisfied without another read. A pending request belongs to the current Host generation and stops when its Session leaves the view.',
+        parameters: [{ name: 'sessionId', description: 'Session whose exact projections are requested.' }],
+        returns: 'completion of the current or newly started read.',
       },
       {
         signature: 'search( query: string, signal: AbortSignal, ): Promise<RemoteResult<{ items: SessionSearchResultItem[]; hasMore: boolean }>>',
@@ -657,7 +657,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'ISession',
-    declaration: 'export interface ISession {\n    readonly sessionId: SessionId;\n    readonly projections: ProjectionsFace;\n    beginSubmission(input: BeginSubmissionInput): SubmissionHandle;\n    prompt(content: PromptContentPart[], mode: \'queue\' | \'steer\', signal?: AbortSignal, requestId?: SessionRequestId): Promise<RemoteResult<{\n        accepted: true;\n    }>>;\n    readAttachment(attachmentId: AttachmentIdType): Promise<RemoteResult<{\n        attachment: ImageAttachmentRef;\n        data: Uint8Array;\n    }>>;\n    updateQueue(itemId: MessageId, action: QueueAction): Promise<RemoteResult<{\n        accepted: true;\n    }>>;\n    cancel(): Promise<RemoteResult<{\n        accepted: true;\n    }>>;\n    rename(title: string): Promise<RemoteResult<{\n        title: string;\n        seq: SessionSeq;\n    }>>;\n    loadOlder(): Promise<void>;\n    loadThrough(seq: SessionSeq): Promise<void>;\n    command(line: string): Promise<RemoteResult<{\n        matched: boolean;\n    }>>;\n}',
+    declaration: 'export interface ISession {\n    readonly sessionId: SessionId;\n    readonly projections: ProjectionsFace;\n    requestExactProjections(): void;\n    beginSubmission(input: BeginSubmissionInput): SubmissionHandle;\n    prompt(content: PromptContentPart[], mode: \'queue\' | \'steer\', signal?: AbortSignal, requestId?: SessionRequestId): Promise<RemoteResult<{\n        accepted: true;\n    }>>;\n    readAttachment(attachmentId: AttachmentIdType): Promise<RemoteResult<{\n        attachment: ImageAttachmentRef;\n        data: Uint8Array;\n    }>>;\n    updateQueue(itemId: MessageId, action: QueueAction): Promise<RemoteResult<{\n        accepted: true;\n    }>>;\n    cancel(): Promise<RemoteResult<{\n        accepted: true;\n    }>>;\n    rename(title: string): Promise<RemoteResult<{\n        title: string;\n        seq: SessionSeq;\n    }>>;\n    loadOlder(): Promise<void>;\n    loadThrough(seq: SessionSeq): Promise<void>;\n    command(line: string): Promise<RemoteResult<{\n        matched: boolean;\n    }>>;\n}',
   },
   {
     name: 'ISessions',
@@ -776,8 +776,20 @@ export const TYPE_API: readonly TypeApiEntry[] = [
     declaration: 'export type PendingSubmissionRetirement = {\n    readonly reason: \'observed\';\n    readonly attachments: readonly (ImageAttachmentRef | FileAttachmentRef)[];\n} | {\n    readonly reason: \'failed\';\n};',
   },
   {
+    name: 'ProjectionAvailability',
+    declaration: 'export type ProjectionAvailability = {\n    readonly state: \'unavailable\';\n    readonly reason: ProjectionUnavailableReason;\n} | {\n    readonly state: \'loading\';\n    readonly reason: ProjectionUnavailableReason;\n} | {\n    readonly state: \'exact\';\n    readonly asOfSeq: ProjectionWatermark;\n};',
+  },
+  {
     name: 'ProjectionsFace',
     declaration: 'export interface ProjectionsFace {\n    faceOf(key: string): ObservableSnapshot<unknown>;\n}',
+  },
+  {
+    name: 'ProjectionUnavailableReason',
+    declaration: 'export type ProjectionUnavailableReason = \'opening-absent\' | \'read-failed\' | \'refused\';',
+  },
+  {
+    name: 'ProjectionWatermark',
+    declaration: 'export type ProjectionWatermark = number;',
   },
   {
     name: 'PromptContentPart',
@@ -917,7 +929,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'SessionProjectionSnapshot',
-    declaration: 'export interface SessionProjectionSnapshot {\n    readonly values: Readonly<Partial<SessionProjectionMap>>;\n    readonly state: \'idle\' | \'loading\' | \'ready\' | \'migration-required\' | \'error\';\n    readonly error: RemoteFailure | null;\n}',
+    declaration: 'export interface SessionProjectionSnapshot {\n    readonly values: Readonly<Partial<SessionProjectionMap>>;\n    readonly state: \'idle\' | \'loading\' | \'ready\' | \'migration-required\' | \'error\';\n    readonly error: RemoteFailure | null;\n    readonly availability?: ProjectionAvailability;\n}',
   },
   {
     name: 'SessionProviderComponent',
@@ -953,7 +965,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'SessionSnapshot',
-    declaration: 'export interface SessionSnapshot {\n    readonly sessionId: SessionId;\n    readonly pendingSubmissions: readonly PendingSubmission[];\n    readonly running: boolean;\n    readonly subagent: {\n        readonly address: SubagentAddress;\n        readonly parentAvailable?: boolean;\n    } | null;\n    readonly removed: boolean;\n    readonly openState: OpenState;\n    readonly openError: RemoteFailure | null;\n    readonly hasMore: boolean;\n    readonly loadingOlder: boolean;\n    readonly promptError: PromptError | null;\n    readonly blank: boolean;\n    readonly lastAgentError: string | null;\n    readonly promptAttempted: boolean;\n    readonly awaitingFirstTurn: boolean;\n}',
+    declaration: 'export interface SessionSnapshot {\n    readonly sessionId: SessionId;\n    readonly pendingSubmissions: readonly PendingSubmission[];\n    readonly running: boolean;\n    readonly subagent: {\n        readonly address: SubagentAddress;\n        readonly parentAvailable?: boolean;\n    } | null;\n    readonly removed: boolean;\n    readonly openState: OpenState;\n    readonly openError: RemoteFailure | null;\n    readonly hasMore: boolean;\n    readonly loadingOlder: boolean;\n    readonly promptError: PromptError | null;\n    readonly blank: boolean;\n    readonly lastAgentError: string | null;\n    readonly promptAttempted: boolean;\n    readonly awaitingFirstTurn: boolean;\n    readonly projectionAvailability: ProjectionAvailability;\n}',
   },
   {
     name: 'SessionStandardProps',

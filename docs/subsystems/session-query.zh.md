@@ -399,9 +399,9 @@ observeSession( sessionId: SessionId, options: SessionObservationOptions = {}, )
  * complete log's cross-event relationships; exact replay consumers keep
  * using {@link readSession}. The baseline is attached only when it does not
  * lead the window `cursor` and carries every registered client-visible key;
- * a baseline missing either condition is omitted, so a history opener falls
- * back to the complete observation instead of seeding client values from a
- * partial block.
+ * a baseline missing either condition is omitted; a parent-Session follow
+ * opener then serves the window without an exact block instead of falling
+ * back to the complete observation, while a subagent address still requires it.
  * @param sessionId - stored session to read.
  * @param request - optional cancellation, upper bound, and backwards cursor.
  * @returns the window plus its complete checkpoint projection baseline, or

@@ -50,6 +50,7 @@ import { ensureDurableDirectoryWin32, publishNewFileWin32 } from './win32.ts'
 import { verifyCurrentGenerationInWorker } from './migration-verifier.ts'
 import { prepareCatalogFacts } from './catalog-migration.ts'
 import { readJsonlIndexedWindow, readJsonlTailWindow, windowEventLimit } from './window.ts'
+import { WindowIndexMemo } from './window-index-memo.ts'
 import {
   JsonlGenerationSourceChangedError,
   JsonlGenerationUnsupportedMigrationError,
@@ -388,6 +389,8 @@ class JsonlSessionPersistence extends SessionPersistence {
   private readonly coldLogMemo = new Map<SessionId, StoredLog>()
   /** Idle-expiry timers for the memo; one unref'ed timer per retained log. */
   private readonly coldLogMemoTimers = new Map<SessionId, NodeJS.Timeout>()
+  /** Bounded parsed-index memo shared by this backend's warm backwards window pages. */
+  private readonly windowIndexMemo = new WindowIndexMemo()
   /** One joinable decode/migration operation per selected historical Session file revision. */
   private readonly migrationPreparations = new Map<SessionId, MigrationPreparation>()
   /** One joinable decode per session while callers observe the same physical revision. */
@@ -433,6 +436,7 @@ class JsonlSessionPersistence extends SessionPersistence {
     }
     this.assertUsableRoot()
     ctx.effect(() => () => {
+      this.windowIndexMemo.dispose()
       for (const timer of this.coldLogMemoTimers.values()) clearTimeout(timer)
       this.coldLogMemoTimers.clear()
       this.coldLogMemo.clear()
@@ -717,7 +721,7 @@ class JsonlSessionPersistence extends SessionPersistence {
       let indexed: Awaited<ReturnType<typeof readJsonlIndexedWindow>>
       try {
         indexed = await readJsonlIndexedWindow(
-          path, this.compression, headerValue, headerLine, beforeSeq, maxEvents, signal,
+          path, this.compression, headerValue, headerLine, beforeSeq, maxEvents, signal, this.windowIndexMemo,
         )
       } catch {
         signal?.throwIfAborted()

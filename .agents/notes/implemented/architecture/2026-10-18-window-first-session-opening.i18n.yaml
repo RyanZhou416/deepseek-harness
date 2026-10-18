@@ -1,0 +1,34 @@
+# Bilingual-pair consistency record for 2026-10-18-window-first-session-opening.md (docs/i18n/README.md): per heading
+# section, a hash of its English and Chinese blocks outside code blocks and generated regions.
+# After editing either side, bring the other along and re-record with:
+#   pnpm run verify-translation-pairing --write .agents/notes/implemented/architecture/2026-10-18-window-first-session-opening.md
+/agent-note-window-first-session-opening-without-a-projection-cache:
+  en: b90b77a18217e511
+  zh: 8e977390ade389c5
+/agent-note-window-first-session-opening-without-a-projection-cache/problem:
+  en: 36ccd5b99ef68d0b
+  zh: f1126382f059f74d
+/agent-note-window-first-session-opening-without-a-projection-cache/decision:
+  en: a15c7c13f167e5ac
+  zh: a15c7c13f167e5ac
+/agent-note-window-first-session-opening-without-a-projection-cache/decision/1-open-from-the-window-first:
+  en: 59517123c96d70a1
+  zh: d925bed35d999654
+/agent-note-window-first-session-opening-without-a-projection-cache/decision/2-load-exact-whole-log-projections-after-the-first-frame:
+  en: df40e6b969a28343
+  zh: 059f7c1fa59f6a25
+/agent-note-window-first-session-opening-without-a-projection-cache/decision/3-keep-older-page-work-independent:
+  en: 54956bd0492059f2
+  zh: a6d2e3e6a3ee2980
+/agent-note-window-first-session-opening-without-a-projection-cache/isolation:
+  en: 18e37d94c1652711
+  zh: c5794af9db343519
+/agent-note-window-first-session-opening-without-a-projection-cache/alternatives-considered:
+  en: d2340d59b8814493
+  zh: 5089819d9718acbf
+/agent-note-window-first-session-opening-without-a-projection-cache/consequences:
+  en: a6441716ea44a815
+  zh: 4b24d6f0214afca2
+/agent-note-window-first-session-opening-without-a-projection-cache/testing:
+  en: f36f0ca876591977
+  zh: 1ef6c819d5a7e854

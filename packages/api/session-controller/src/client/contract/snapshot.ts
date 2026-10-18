@@ -3,6 +3,7 @@ import type { FileAttachmentRef } from '@deepseek-ai/dsh-attachment'
 import type { SessionId } from '@deepseek-ai/dsh-session/types'
 import type { SubagentAddress } from '@deepseek-ai/dsh-subagent/client'
 import type { RemoteFailure } from '@deepseek-ai/dsh-typert-protocol'
+import type { ProjectionAvailability } from './projection-availability.ts'
 import type { SessionRequestId } from '../../types.ts'
 
 /** One image displayed by a local submission echo before durable admission. */
@@ -88,4 +89,9 @@ export interface SessionSnapshot {
   readonly promptAttempted: boolean
   /** The first accepted prompt has not reached a durable `turn/start` event. */
   readonly awaitingFirstTurn: boolean
+  /**
+   * Whole-log projection readiness (see projection-availability.ts).
+   * `unavailable`/`loading` never make cached or window-scoped hints exact.
+   */
+  readonly projectionAvailability: ProjectionAvailability
 }

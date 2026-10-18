@@ -443,9 +443,9 @@ export class SessionHistoryController {
         cursor,
         records: pageRecords(page.events),
         hasMore: page.hasMore,
-        projections: source.projections === undefined
-          ? { asOfSeq: cursor, values: {} }
-          : projectionBlock(source.projections),
+        // An observation without a projection cut carries no exact block; an
+        // empty block would claim whole-log emptiness and clear cached rows.
+        ...source.projections === undefined ? {} : { projections: projectionBlock(source.projections) },
         ...assistantStream === undefined ? {} : { assistantStream },
       },
       cursor,
@@ -460,10 +460,13 @@ export class SessionHistoryController {
    * Build the opening frame from one bounded stored window when the Session is
    * not live and the persistence index can serve it.
    *
-   * The window carries a projection checkpoint, never an exact cut, so a read
-   * without one falls back to the complete observation rather than inventing
-   * projection values. No prepared historical Session is materialized here.
-   * @param sessionId - non-live Session addressed by the request.
+   * A window without a complete projection checkpoint still opens: the frame
+   * omits its projection block instead of inventing an empty exact cut, which
+   * would clear the client's cached values. Only parent Session addresses use
+   * this path; subagent addresses stay on the complete observation because the
+   * `subagent` projection is part of address validation. No prepared historical
+   * Session is materialized here.
+   * @param sessionId - non-live parent Session addressed by the request.
    * @param request - follow request and caller history limits.
    * @param signal - stream cancellation.
    * @param ordinal - current assistant-stream frame watermark.
@@ -479,7 +482,7 @@ export class SessionHistoryController {
       signal,
       maxEvents: windowEventBound(request),
     })
-    if (read === undefined || read.projections === undefined) return undefined
+    if (read === undefined) return undefined
     signal.throwIfAborted()
     this.validateWindow(request.address, read.window, read.projections)
     // The complete observation balances an interrupted final turn with in-memory
@@ -507,7 +510,7 @@ export class SessionHistoryController {
         cursor,
         records: pageRecords(page.events),
         hasMore: page.hasMore,
-        projections: projectionBlock(read.projections),
+        ...read.projections === undefined ? {} : { projections: projectionBlock(read.projections) },
         ...assistantStream === undefined ? {} : { assistantStream },
       },
       cursor,

@@ -16,8 +16,8 @@ import { SESSION_FORMAT_VERSION, SessionId, SessionLogOffset, SessionSeq } from 
 import type { SessionEvent, SessionHeader } from '@deepseek-ai/dsh-session'
 import type { SessionPersistence, SessionWindow, SessionWindowRequest } from '@deepseek-ai/dsh-session-persistence'
 import * as JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
-import { generationLogPath } from '../src/format.ts'
-import { compressZstdFrame } from '../src/zstd.ts'
+import { generationLogPath, toHeaderLine } from '../src/format.ts'
+import { compressZstdFrame, decompressZstdFrame, scanZstdFrames } from '../src/zstd.ts'
 import type { ZstdFrameRange } from '../src/zstd.ts'
 import { meta } from '../../session-persistence/tests/contract.ts'
 
@@ -231,6 +231,31 @@ function totalEvents(sidecar: Sidecar): number {
   return sidecar.frames.reduce((total, frame) => total + frame.events, 0)
 }
 
+/**
+ * Expected segments derived from the generation's own bytes: one per complete
+ * frame, with rows counted from newline-terminated plaintext rather than from
+ * the build under test.
+ */
+async function countedFrames(logPath: string): Promise<Sidecar['frames']> {
+  const bytes = await readFile(logPath)
+  const scan = scanZstdFrames(bytes)
+  if (scan.tornStart !== undefined) throw new Error('counted fixture scan found a torn frame')
+  const frames: Array<Sidecar['frames'][number]> = []
+  let rows = 0
+  for (const [position, range] of scan.frames.entries()) {
+    const plaintext = await decompressZstdFrame(bytes.subarray(range.start, range.end))
+    let events = 0
+    if (position > 0) {
+      for (let lineStart = 0; lineStart < plaintext.length; lineStart = plaintext.indexOf(0x0A, lineStart) + 1) {
+        events += 1
+      }
+    }
+    frames.push({ offset: range.start, length: range.end - range.start, firstRow: rows, firstSeq: rows, events })
+    rows += events
+  }
+  return frames
+}
+
 describe('JSONL window index: sidecar schema and identity round-trip', () => {
   it('records a versioned contiguous zstd index that another backend instance reuses', async () => {
     const mounted = await mount('zstd')
@@ -279,6 +304,9 @@ describe('JSONL window index: sidecar schema and identity round-trip', () => {
     expect(offset).toBe(Number(generation.size))
     expect(rows).toBe(events.length)
     expect(totalEvents(sidecar)).toBe(events.length)
+    // The counted build records exactly the physical frames and rows an
+    // independent newline scan of the generation produces.
+    expect(sidecar.frames).toStrictEqual(await countedFrames(logPath))
 
     // The sidecar is a sibling cache file, not a selectable Session generation.
     expect((await persistence.list()).map(snapshot => snapshot.header.id)).toStrictEqual([id])
@@ -404,6 +432,27 @@ describe('JSONL window index: rebuild after a missing, stale, or corrupt sidecar
     await rm(path, { recursive: true })
     expectWindow(await readWindow(persistence, id, { beforeSeq: 250, maxEvents: 7 }), full.events.slice(243, 250))
     expect((await sidecarOf(mounted, id)).version).toBe(1)
+  })
+
+  it('declines a plaintext generation whose counted rows are not dense events', async () => {
+    const mounted = await mount('none')
+    const { persistence } = mounted
+    const id = 'before-index-counted-gap'
+    const path = logOf(mounted, id)
+    await mkdir(dirname(path), { recursive: true })
+    await writeFile(path, [
+      JSON.stringify(toHeaderLine(meta(id, '/work'))),
+      JSON.stringify({ type: 'turn/start', seq: 0, time: 0, data: { turn: 1 } }),
+      JSON.stringify({ type: 'step/start', seq: 2, time: 1, data: { turn: 1, step: 1 } }),
+      JSON.stringify({ type: 'turn/end', seq: 3, time: 2, data: { turn: 1, reason: { kind: 'completed' } } }),
+    ].join('\n') + '\n')
+
+    // The counted build records three physical rows; the seeded strict decoder
+    // proves they are not the dense event stream a window can serve.
+    expect(await readWindow(persistence, id, { beforeSeq: 3, maxEvents: 3 })).toBeUndefined()
+    expect(totalEvents(await sidecarOf(mounted, id))).toBe(3)
+    // The complete read is the fallback that diagnoses the committed hole.
+    await expect(readAll(persistence, id)).rejects.toThrow(/seq gap/)
   })
 
   it('rebuilds after an append and after a modification-time-only change', async () => {

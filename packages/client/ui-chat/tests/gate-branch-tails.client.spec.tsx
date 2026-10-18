@@ -36,11 +36,12 @@ describe('render branch tails', () => {
     expect(view.container.querySelector('[data-state="ok"]')).not.toBeNull()
   })
 
-  it('composer stats fall back to window-node counts and drop the usage pill without projections', () => {
+  it('composer stats fall back to window-node counts and drop the usage pill while the opening carried no projections', () => {
     // No sessionStats key → the window fold supplies the counts (the
-    // assembly-without-the-unit fallback). Node `usage` is deliberately
-    // ignored: billing rides the durable tokenUsage projection, so an absent
-    // projection leaves counts only.
+    // assembly-without-the-unit fallback, and the window-first opening state).
+    // Node `usage` is deliberately ignored: billing rides the durable
+    // tokenUsage projection, so an unavailable projection leaves counts only
+    // and never a total fabricated from the paged window.
     const nodes = [
       { kind: 'assistant', seq: 1, time: 1, turn: 1, step: 1, blocks: [] },
       { kind: 'assistant', seq: 2, time: 2, turn: 1, step: 2, blocks: [], usage: { inputTokens: 4, outputTokens: 6 } },
@@ -53,6 +54,8 @@ describe('render branch tails', () => {
       t,
       useChat: bindSnapshotSelector(source),
       useProjection: () => undefined,
+      useProjectionAvailability: selector => selector({ state: 'unavailable', reason: 'opening-absent' }),
+      requestExactProjections: () => {},
     }
     const view = render(
       <>

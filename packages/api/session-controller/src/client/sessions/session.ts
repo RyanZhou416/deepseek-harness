@@ -34,18 +34,27 @@ import { RemoteError } from '@deepseek-ai/dsh-typert-protocol'
 import type { RemoteFailure, RemoteResult } from '@deepseek-ai/dsh-typert-protocol'
 import type { SessionRemotes } from './remotes.ts'
 import { ProjectionValueStore } from './projection-store.ts'
-import type { ProjectionsBaseline } from './projection-store.ts'
+import type {
+  OpeningProjectionBlock,
+  ProjectionAvailability,
+} from '../contract/projection-availability.ts'
 import { resolvedClientTimeZone } from '../time-zone.ts'
 import {
   ClientAssistantStream,
   type ClientAssistantStreamResult,
 } from './assistant-stream.ts'
 
-function projectionsBaseline(value: SessionProjectionBaseline): ProjectionsBaseline {
-  return {
-    ...value,
-    asOfSeq: value.asOfSeq === -1 ? -1 : SessionSeq(value.asOfSeq),
-  }
+/**
+ * Interpret one follow snapshot's optional projection field as an opening
+ * block: an omitted field is a window-first opening (no exact whole-log cut),
+ * never an empty exact cut, which would claim whole-log emptiness.
+ * @param value - the wire baseline, or undefined when the Host served none.
+ * @returns the opening block.
+ */
+function openingProjections(value: SessionProjectionBaseline | undefined): OpeningProjectionBlock {
+  return value === undefined
+    ? { kind: 'absent' }
+    : { kind: 'exact', cut: { asOfSeq: value.asOfSeq, values: value.values } }
 }
 
 /** Minimum message count for ordinary history windows. */
@@ -85,6 +94,21 @@ export interface SessionOptions {
    * private store (bare object-layer construction).
    */
   projections?: ProjectionValueStore
+  /**
+   * Manager-owned deferred projection read: this open generation's first
+   * follow window carried no projection block, so the generation holds no
+   * exact whole-log cut and cached hints stay non-exact. Fired once per open
+   * generation after the window is installed; a first window carrying an
+   * exact block (even with empty values) never fires it, and neither does a
+   * later gap-repair replacement in the same generation. Readiness recording
+   * only: a read starts only from {@link Session.requestExactProjections}.
+   */
+  onOpeningProjectionsAbsent?(session: Session): void
+  /**
+   * Manager-owned on-demand exact projection read: a statistics or Context
+   * surface explicitly requested whole-log values for this generation.
+   */
+  onExactProjectionsRequested?(session: Session): void
 }
 
 /**
@@ -103,6 +127,8 @@ export class Session implements SessionFace {
   /** Bumped by stream replacement to invalidate an in-flight doOpen. Stale
    *  passes drop all writes once the generation moves on. */
   private openGeneration = 0
+  /** Whether this open generation already reported its opening projection block. */
+  private openingObserved = false
   private loadingOlder = false
   /** Shared low-water target of the running jump loop; null when no jump is paging. */
   private jumpTargetSeq: SessionSeq | null = null
@@ -110,6 +136,7 @@ export class Session implements SessionFace {
   private jumpPromise: Promise<void> | null = null
   private pendingHistory: PendingHistory | null = null
   private readonly stopObservingInbox: () => void
+  private readonly stopObservingProjections: () => void
   private readonly assistantStream = new ClientAssistantStream()
   private running = false
   private address: SubagentAddress | undefined
@@ -195,6 +222,11 @@ export class Session implements SessionFace {
     this.snapshotCache = this.buildSnapshot()
     this.stopObservingInbox = this.projections.faceOf('inbox').subscribe(() => {
       this.observeSubmissionInbox()
+    })
+    // Availability rides the Session snapshot: surfaces read readiness and the
+    // Manager's transitions must repaint without a separate subscription path.
+    this.stopObservingProjections = this.projections.subscribeAvailability(() => {
+      this.notifier.markDirty()
     })
   }
 
@@ -402,6 +434,17 @@ export class Session implements SessionFace {
     return promise
   }
 
+  /**
+   * Request exact whole-log projections for this generation. The Manager owns
+   * the single-flight read; a surface calls this only from the explicit user
+   * action that opens statistics or the Context panel. A no-op while a read is
+   * in flight or the generation already holds an exact cut.
+   */
+  requestExactProjections(): void {
+    if (this.projections.availability().state !== 'unavailable') return
+    this.options.onExactProjectionsRequested?.(this)
+  }
+
   /** Prepend one Turn-aligned page: at least 50 messages and two Turn starts, capped at 500 messages. */
   async loadOlder(): Promise<void> {
     if (this.openState !== 'open' || !this.hasMore || this.loadingOlder) return
@@ -520,6 +563,16 @@ export class Session implements SessionFace {
   // ---- Manager-only entry points (@internal; never called by the UI) ----
 
   /**
+   * Whole-log projection readiness for this Session generation: the Manager
+   * records unavailable/loading transitions on the shared store, and an exact
+   * opening or control baseline marks it exact.
+   * @returns the current availability.
+   */
+  projectionAvailability(): ProjectionAvailability {
+    return this.projections.availability()
+  }
+
+  /**
    * Running-bit relay from the host stream (list entry and snapshot stay consistent).
    * @param running - the new running state.
    */
@@ -598,6 +651,7 @@ export class Session implements SessionFace {
    */
   async dispose(): Promise<void> {
     this.stopObservingInbox()
+    this.stopObservingProjections()
     // Unsettled echoes retire as failed so their owners can restore or
     // release browser resources; admitted echoes keep their observed outcome.
     for (const [requestId, settlement] of [...this.submissionSettlements]) {
@@ -614,6 +668,7 @@ export class Session implements SessionFace {
 
   /** @param generation - openGeneration at launch; stale passes cannot publish after replacement. */
   private async doOpen(generation: number): Promise<void> {
+    this.openingObserved = false
     this.openState = 'loading'
     this.openError = null
     this.notifier.markDirty()
@@ -649,7 +704,7 @@ export class Session implements SessionFace {
         this.installWindow(
           change.entries,
           change.hasMore,
-          change.page.projections === undefined ? undefined : projectionsBaseline(change.page.projections),
+          openingProjections(change.page.projections),
           change.page.assistantStream,
         )
         return
@@ -664,11 +719,17 @@ export class Session implements SessionFace {
     }
   }
 
-  /** Replace the complete contiguous window and apply page-owned projection metadata. */
+  /**
+   * Replace the complete contiguous window and apply the opening projection
+   * block. An `absent` block (window-first opening) supplies no cut: it
+   * neither writes nor clears projection rows, so cached list/subagent/token/
+   * stats hints stay readable and only the readiness state says they are not
+   * exact.
+   */
   private installWindow(
     entries: readonly SessionEventLikeEntry[],
     hasMore: boolean,
-    projections?: ProjectionsBaseline,
+    opening: OpeningProjectionBlock,
     assistantStream?: SessionAssistantStreamBaseline,
   ): void {
     // A durable gap-repair page has no assistant baseline. Clearing transient
@@ -683,25 +744,38 @@ export class Session implements SessionFace {
       this.pendingHistory.pages.length = 0
     }
     if (visible.some(entry => entry.event.type === 'turn/start')) this.firstPromptPendingTurn = false
-    if (projections !== undefined) this.projections.seed(projections)
+    const cut = opening.kind === 'exact' ? opening.cut : undefined
+    if (cut !== undefined) {
+      this.projections.seed({
+        values: cut.values,
+        asOfSeq: cut.asOfSeq === -1 ? -1 : SessionSeq(cut.asOfSeq),
+      })
+    }
     this.eventSource.replace(visible, hasMore)
     // A new follow baseline replaces confirmed optimistic inputs with Host-owned rows.
     // Receipt-backed inputs are accepted, not failed, even if their history is outside this window.
-    if (projections !== undefined) {
+    if (cut !== undefined) {
       for (const [requestId, { receipt }] of this.submissionSettlements) {
-        if (receipt !== undefined && receipt.seq <= projections.asOfSeq) {
+        if (receipt !== undefined && receipt.seq <= cut.asOfSeq) {
           this.scheduleObservedRetirement(requestId, receipt.attachments)
         }
       }
     }
     for (const entry of visible) this.observeSubmissionEvent(entry.event)
-    if (projections !== undefined) {
-      const inbox = projections.values.inbox as InboxState | undefined
+    if (cut !== undefined) {
+      const inbox = cut.values.inbox as InboxState | undefined
       for (const target of ['next-turn', 'next-step'] as const) {
-        this.observeSubmissionInsertions(target, inbox?.[target] ?? [], 0, projections.asOfSeq)
+        this.observeSubmissionInsertions(target, inbox?.[target] ?? [], 0, cut.asOfSeq)
       }
     }
     this.notifier.markDirty()
+    // One opening decision per generation: a later gap-repair replacement must
+    // not restart the Manager's deferred exact read, and an exact opening
+    // block (even empty) is already the whole-log answer.
+    if (!this.openingObserved) {
+      this.openingObserved = true
+      if (opening.kind === 'absent') this.options.onOpeningProjectionsAbsent?.(this)
+    }
   }
 
   private publishAssistantEntry(result: ClientAssistantStreamResult): void {
@@ -917,6 +991,7 @@ export class Session implements SessionFace {
       lastAgentError: this.lastAgentError,
       promptAttempted: this.promptAttempted,
       awaitingFirstTurn: this.firstPromptPendingTurn,
+      projectionAvailability: this.projections.availability(),
     }
   }
 

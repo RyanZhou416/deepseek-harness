@@ -105,6 +105,9 @@ export class FixtureSession implements SessionFace {
     throw new Error(`test session "${this.sessionId}": prompt is not stubbed — supply it on the fixture's session face`)
   }
 
+  /** No-op exact-projection request; supply `requestExactProjections` on the fixture's session face to observe it. */
+  requestExactProjections(): void {}
+
   /**
    * Minimal local-echo registration: mints an identity without touching the
    * fixture snapshot (submission echoes are client-only presentation state).

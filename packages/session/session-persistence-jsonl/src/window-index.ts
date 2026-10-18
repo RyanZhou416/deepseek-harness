@@ -6,6 +6,12 @@
  * body. It lets a backwards `readWindow` seed the released v4 decoder at the
  * first selected segment and decode only that segment range.
  *
+ * The build counts newline-delimited records per frame instead of decoding
+ * every event; the served window's seeded strict decoder proves that the selected
+ * segment's counted rows are exactly its decoded events. A build declines when it
+ * cannot establish an unseeded header, when a frame is incomplete, or when a
+ * frame does not end on a record boundary.
+ *
  * The sidecar is a rebuildable cache, never a validating path. It is valid only
  * while the generation's size and modification time match the recorded source
  * identity; any read, parse, structural, or identity failure discards it and one
@@ -18,9 +24,7 @@ import { randomBytes } from 'node:crypto'
 import { open as openFile, readFile, rename, rm, stat, type FileHandle } from 'node:fs/promises'
 import { performance } from 'node:perf_hooks'
 import { scheduler } from 'node:timers/promises'
-import { KNOWN_SESSION_EVENT_TYPES } from '@deepseek-ai/dsh-session'
-import type { SessionFormatMigrationContext } from '@deepseek-ai/dsh-session-format'
-import { assertV4RowAdmission, releasedV4SessionFormatCodec } from '@deepseek-ai/dsh-session-format-v3-to-v4'
+import { releasedV4SessionFormatCodec } from '@deepseek-ai/dsh-session-format-v3-to-v4'
 import type { JsonlCompression } from './format.ts'
 import { readStableJsonlFile, type StablePhysicalFile } from './generation.ts'
 import { createZstdFrameDecoder, scanZstdFrames, type ZstdFrameRange, type ZstdFrameScan } from './zstd.ts'
@@ -37,7 +41,7 @@ const PLAIN_INDEX_SEGMENT_ROWS = 256
 /** Upper bound on a readable sidecar; a larger file is not an index this build wrote. */
 const MAX_WINDOW_INDEX_BYTES = 64 * 1024 * 1024
 
-/** Internal scheduling bound for one index-build decode slice, not deployment configuration. */
+/** Internal scheduling bound between cooperative yields during one index build; not deployment configuration. */
 const INDEX_BUILD_YIELD_INTERVAL_MS = 50
 
 const INDEX_KEYS = ['version', 'source', 'inheritedEventCount', 'frames'] as const
@@ -220,7 +224,7 @@ export async function loadWindowIndex(
 }
 
 /**
- * Build and persist one index from a complete validated frame walk.
+ * Build and persist one index from a complete counted frame walk.
  * @param generationPath - selected generation file path.
  * @param compression - configured physical encoding.
  * @param headerValue - parsed physical header of that generation.
@@ -251,6 +255,14 @@ export async function rebuildWindowIndex(
     ? await buildZstdIndex(source.bytes, headerValue, headerLine, signal)
     : await buildPlainIndex(source.bytes, headerValue, headerLine, signal)
   if (built === undefined) return undefined
+  if (signal !== undefined) {
+    // The count pass is synchronous between cooperative yields, so a timer-driven
+    // abort can become due after the last one. A zero-delay timer turn runs due
+    // timers before this build resumes, so cancellation still wins over a window
+    // this build already assembled.
+    await scheduler.wait(0)
+    signal.throwIfAborted()
+  }
   const index: JsonlWindowIndex = {
     version: WINDOW_INDEX_VERSION,
     source: {
@@ -307,13 +319,32 @@ export async function writeWindowIndex(
   }
 }
 
-/** Build index segments for one uncompressed generation from a complete row walk. */
+/**
+ * Decide whether the count-only build may index one physical header.
+ *
+ * Counting newline-delimited records cannot establish a seeded generation's
+ * inherited cut, which lives in the omitted prefix, so those builds keep the
+ * complete read. A header the released codec rejects is not indexable either.
+ * @param headerValue - parsed physical header of the generation being built.
+ * @returns true when the header identifies an unseeded current generation.
+ */
+function isUnseededIndexHeader(headerValue: unknown): boolean {
+  try {
+    return !releasedV4SessionFormatCodec.decodeHeader(headerValue).isSeeded
+  } catch {
+    // A header this build cannot validate is not an indexable generation.
+    return false
+  }
+}
+
+/** Build index segments for one uncompressed generation from counted records. */
 async function buildPlainIndex(
   bytes: Buffer,
   headerValue: unknown,
   headerLine: string,
   signal: AbortSignal | undefined,
 ): Promise<BuiltWindowIndex | undefined> {
+  if (!isUnseededIndexHeader(headerValue)) return undefined
   const headerEnd = bytes.indexOf(0x0A)
   if (headerEnd === -1) return undefined
   if (bytes.subarray(0, headerEnd).toString('utf8') !== headerLine) return undefined
@@ -327,48 +358,16 @@ async function buildPlainIndex(
     events: 0,
   }]
   let rows = 0
-  let emitted = 0
-  const context: SessionFormatMigrationContext = {
-    emitEvent() {
-      emitted += 1
-    },
-    emitRun(run) {
-      emitted += run.eventCount
-    },
-  }
-  try {
-    const decoder = releasedV4SessionFormatCodec.createDecoder(headerValue, 'strict')
-    let segmentStart = headerEnd + 1
-    let segmentRows = 0
-    let lineStart = headerEnd + 1
-    let yieldDeadline = performance.now() + INDEX_BUILD_YIELD_INTERVAL_MS
-    while (lineStart < bytes.length) {
-      const newline = bytes.indexOf(0x0A, lineStart)
-      if (newline === -1) return undefined
-      const row: unknown = JSON.parse(bytes.subarray(lineStart, newline).toString('utf8'))
-      assertV4RowAdmission(row, KNOWN_SESSION_EVENT_TYPES)
-      decoder.decodeRow(row, context)
-      lineStart = newline + 1
-      rows += 1
-      segmentRows += 1
-      if (segmentRows === PLAIN_INDEX_SEGMENT_ROWS && lineStart < bytes.length) {
-        frames.push({
-          offset: segmentStart,
-          length: lineStart - segmentStart,
-          firstRow: rows - segmentRows,
-          firstSeq: rows - segmentRows,
-          events: segmentRows,
-        })
-        segmentStart = lineStart
-        segmentRows = 0
-      }
-      if (performance.now() >= yieldDeadline) {
-        await scheduler.yield()
-        signal?.throwIfAborted()
-        yieldDeadline = performance.now() + INDEX_BUILD_YIELD_INTERVAL_MS
-      }
-    }
-    if (segmentRows > 0) {
+  let segmentStart = headerEnd + 1
+  let segmentRows = 0
+  let lineStart = headerEnd + 1
+  let yieldDeadline = performance.now() + INDEX_BUILD_YIELD_INTERVAL_MS
+  // The torn-tail check above makes every remaining record newline-terminated.
+  while (lineStart < bytes.length) {
+    lineStart = bytes.indexOf(0x0A, lineStart) + 1
+    rows += 1
+    segmentRows += 1
+    if (segmentRows === PLAIN_INDEX_SEGMENT_ROWS && lineStart < bytes.length) {
       frames.push({
         offset: segmentStart,
         length: lineStart - segmentStart,
@@ -376,23 +375,35 @@ async function buildPlainIndex(
         firstSeq: rows - segmentRows,
         events: segmentRows,
       })
+      segmentStart = lineStart
+      segmentRows = 0
     }
-    // One decoded event per physical row is what the window decoder relies on.
-    if (emitted !== rows) return undefined
-    return { inheritedEventCount: decoder.finish(context), frames }
-  } catch {
-    signal?.throwIfAborted()
-    return undefined
+    if ((rows & 0xFF) === 0 && performance.now() >= yieldDeadline) {
+      await scheduler.yield()
+      signal?.throwIfAborted()
+      yieldDeadline = performance.now() + INDEX_BUILD_YIELD_INTERVAL_MS
+    }
   }
+  if (segmentRows > 0) {
+    frames.push({
+      offset: segmentStart,
+      length: lineStart - segmentStart,
+      firstRow: rows - segmentRows,
+      firstSeq: rows - segmentRows,
+      events: segmentRows,
+    })
+  }
+  return { inheritedEventCount: 0, frames }
 }
 
-/** Build index segments for one concatenated Zstandard generation from a complete frame walk. */
+/** Build index segments for one concatenated Zstandard generation from counted frame records. */
 async function buildZstdIndex(
   bytes: Buffer,
   headerValue: unknown,
   headerLine: string,
   signal: AbortSignal | undefined,
 ): Promise<BuiltWindowIndex | undefined> {
+  if (!isUnseededIndexHeader(headerValue)) return undefined
   let scan: ZstdFrameScan
   try {
     scan = scanZstdFrames(bytes)
@@ -404,18 +415,8 @@ async function buildZstdIndex(
 
   const frames: JsonlWindowIndexFrame[] = []
   let rows = 0
-  let emitted = 0
-  const context: SessionFormatMigrationContext = {
-    emitEvent() {
-      emitted += 1
-    },
-    emitRun(run) {
-      emitted += run.eventCount
-    },
-  }
   const frameDecoder = createZstdFrameDecoder()
   try {
-    const decoder = releasedV4SessionFormatCodec.createDecoder(headerValue, 'strict')
     // One synchronous decode pass over the scanned frames: the decoder yields
     // exactly one plaintext buffer per range, header frame first, and reuses its
     // scratch buffer, so each frame is consumed before the iterator advances.
@@ -444,15 +445,11 @@ async function buildZstdIndex(
       if (plaintext.length === 0 || plaintext.at(-1) !== 0x0A) return undefined
       let frameRows = 0
       let lineStart = 0
+      // The trailing-newline check above makes every record newline-terminated.
       while (lineStart < plaintext.length) {
-        const newline = plaintext.indexOf(0x0A, lineStart)
-        if (newline === -1) return undefined
-        const row: unknown = JSON.parse(plaintext.subarray(lineStart, newline).toString('utf8'))
-        assertV4RowAdmission(row, KNOWN_SESSION_EVENT_TYPES)
-        decoder.decodeRow(row, context)
-        lineStart = newline + 1
+        lineStart = plaintext.indexOf(0x0A, lineStart) + 1
         frameRows += 1
-        if (performance.now() >= yieldDeadline) {
+        if ((frameRows & 0xFF) === 0 && performance.now() >= yieldDeadline) {
           await scheduler.yield()
           signal?.throwIfAborted()
           yieldDeadline = performance.now() + INDEX_BUILD_YIELD_INTERVAL_MS
@@ -466,11 +463,8 @@ async function buildZstdIndex(
         events: frameRows,
       })
       rows += frameRows
-      // One decoded event per physical row is what the window decoder relies on.
-      if (emitted !== rows) return undefined
     }
-    if (emitted !== rows) return undefined
-    return { inheritedEventCount: decoder.finish(context), frames }
+    return { inheritedEventCount: 0, frames }
   } catch {
     signal?.throwIfAborted()
     return undefined

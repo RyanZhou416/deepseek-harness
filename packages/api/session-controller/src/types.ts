@@ -587,7 +587,13 @@ export type SessionFollowFrame =
     readonly cursor: number
     readonly records: readonly SessionHistoryRecord[]
     readonly hasMore: boolean
-    readonly projections: SessionProjectionBaseline
+    /**
+     * Exact whole-log projection block at the Host's cut, or absent when the
+     * opening served a bounded stored window without a complete checkpoint.
+     * An absent block is not an empty exact cut: it neither supplies values
+     * nor clears the client's cached projection rows.
+     */
+    readonly projections?: SessionProjectionBaseline
     readonly assistantStream?: SessionAssistantStreamBaseline
   }
   | SessionEventEntry

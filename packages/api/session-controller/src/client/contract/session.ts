@@ -66,6 +66,14 @@ export interface ISession {
   /** Host-computed projection values by key (the useProjection seat). */
   readonly projections: ProjectionsFace
   /**
+   * Request exact whole-log projections for this Session generation. A
+   * statistics or Context surface calls this only when the user explicitly
+   * opens it; the Manager owns the single-flight read and readiness merge.
+   * A no-op while a read is in flight or the generation already holds an
+   * exact cut.
+   */
+  requestExactProjections(): void
+  /**
    * Register one local submission echo in `snapshot.pendingSubmissions`,
    * synchronously, before the caller serializes and sends the prompt. The
    * Chat echoes persist until durable admission; transcript identities also
