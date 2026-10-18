@@ -2423,6 +2423,13 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
         returns: 'a caller-owned observation lease.',
       },
       {
+        signature: 'observeSessionMetadata( sessionId: SessionId, options: SessionMetadataOptions = {}, ): Promise<SessionMetadataObservation>',
+        description: 'Observe one Session\'s header and log-free projection hints.\n\nUnlike observeSession, this never materializes a stored Session: a cold source costs one persistence `stat` and, when a projection cache is mounted, a zero-I/O checkpoint view of the requested keys. Values from a checkpoint can trail the stored log and are absent when the row was dropped, so a consumer must fall back per key rather than treating the block as an exact baseline. A live Session serves its current cut.',
+        parameters: [{ name: 'sessionId', description: 'logical Session identity.' }, { name: 'options', description: 'cancellation and the projection keys to serve.' }],
+        returns: 'the durable header plus the log-free projection values.',
+        throws: ['{@link SessionQueryError} with code `SESSION_QUERY_SESSION_NOT_FOUND` when neither a live Session nor a stored source exists.'],
+      },
+      {
         signature: 'async readWindow( sessionId: SessionId, request: SessionWindowRequest = {}, ): Promise<SessionWindowRead | undefined>',
         description: 'Read one bounded stored-history window through the persistence backend\'s optional generation index, with the stored projection checkpoint when that checkpoint is a complete baseline for the window.\n\nBackends without `readWindow` return nothing here, and callers fall back to the full observation path. A window validates its own rows, not the complete log\'s cross-event relationships; exact replay consumers keep using readSession. The baseline is attached only when it does not lead the window `cursor` and carries every registered client-visible key; a baseline missing either condition is omitted; a parent-Session follow opener then serves the window without an exact block instead of falling back to the complete observation, while a subagent address still requires it.',
         parameters: [{ name: 'sessionId', description: 'stored session to read.' }, { name: 'request', description: 'optional cancellation, upper bound, and backwards cursor.' }],
@@ -2616,7 +2623,7 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
     methods: [
       {
         signature: '@Remote async list(request: SkillListRequest, signal: AbortSignal): Promise<SkillListValue>',
-        description: 'List the user-invocable skills visible to one Session composition.',
+        description: 'List the user-invocable skills visible to one Session composition.\n\nA cold Session is addressed by durable metadata alone: its header supplies the recorded directory and the retained projection-cache rows supply the current directory and preset when they exist. The stored log is never materialized, so a large history costs no cold complete-log read here. A live Agent keeps its effective working directory and preset-owned registry.',
         parameters: [{ name: 'request', description: 'Session identity whose cwd and preset select the catalog view.' }, { name: 'signal', description: 'caller lifetime carried by the Remote transport; admitted catalog reads retain their existing completion semantics.' }],
         returns: 'user-invocable skill metadata without loading skill bodies.',
         throws: ['RemoteError when the Session cannot be inspected or no registry can serve it.'],
@@ -7364,6 +7371,14 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   {
     name: 'SessionMessageProjectionContext',
     declaration: 'export interface SessionMessageProjectionContext {\n    nodes: readonly SessionSeq[];\n    events: readonly SessionEvent[];\n    baseSeq: SessionLogOffset;\n    messages: ReadonlyMap<SessionSeq, Message>;\n}',
+  },
+  {
+    name: 'SessionMetadataObservation',
+    declaration: 'export interface SessionMetadataObservation {\n    readonly header: SessionHeader;\n    readonly projections?: ProjectionSnapshot;\n}',
+  },
+  {
+    name: 'SessionMetadataOptions',
+    declaration: 'export interface SessionMetadataOptions {\n    readonly signal?: AbortSignal;\n    readonly projectionKeys?: readonly Extract<keyof SessionProjectionMap, string>[];\n}',
   },
   {
     name: 'SessionObservation',

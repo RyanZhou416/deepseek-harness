@@ -390,6 +390,23 @@ Exact reads, filters, and traces are backend-independent concrete behavior. A ba
 observeSession( sessionId: SessionId, options: SessionObservationOptions = {}, ): Promise<SessionObservation>
 
 /**
+ * Observe one Session's header and log-free projection hints.
+ *
+ * Unlike {@link observeSession}, this never materializes a stored Session:
+ * a cold source costs one persistence `stat` and, when a projection cache is
+ * mounted, a zero-I/O checkpoint view of the requested keys. Values from a
+ * checkpoint can trail the stored log and are absent when the row was
+ * dropped, so a consumer must fall back per key rather than treating the
+ * block as an exact baseline. A live Session serves its current cut.
+ * @param sessionId - logical Session identity.
+ * @param options - cancellation and the projection keys to serve.
+ * @returns the durable header plus the log-free projection values.
+ * @throws {@link SessionQueryError} with code `SESSION_QUERY_SESSION_NOT_FOUND`
+ *   when neither a live Session nor a stored source exists.
+ */
+observeSessionMetadata( sessionId: SessionId, options: SessionMetadataOptions = {}, ): Promise<SessionMetadataObservation>
+
+/**
  * Read one bounded stored-history window through the persistence backend's
  * optional generation index, with the stored projection checkpoint when that
  * checkpoint is a complete baseline for the window.

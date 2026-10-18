@@ -253,6 +253,13 @@ Host service backing `ctx.remote.skills` without activating a cold Agent.
 ```ts cordis-catalog
 /**
  * List the user-invocable skills visible to one Session composition.
+ *
+ * A cold Session is addressed by durable metadata alone: its header supplies
+ * the recorded directory and the retained projection-cache rows supply the
+ * current directory and preset when they exist. The stored log is never
+ * materialized, so a large history costs no cold complete-log read here. A
+ * live Agent keeps its effective working directory and preset-owned
+ * registry.
  * @param request - Session identity whose cwd and preset select the catalog view.
  * @param signal - caller lifetime carried by the Remote transport; admitted catalog reads retain their existing completion semantics.
  * @returns user-invocable skill metadata without loading skill bodies.
