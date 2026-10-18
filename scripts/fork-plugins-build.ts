@@ -631,6 +631,42 @@ async function copyIfPresent(source: string, destination: string): Promise<void>
   if (existsSync(source)) await copyFile(source, destination)
 }
 
+/** Bun platform packages the pinned transport can run on. */
+const BUN_PLATFORM_PACKAGES: Readonly<Record<string, string>> = {
+  'win32-x64': '@oven/bun-windows-x64',
+  'win32-arm64': '@oven/bun-windows-aarch64',
+  'darwin-arm64': '@oven/bun-darwin-aarch64',
+  'darwin-x64': '@oven/bun-darwin-x64',
+  'linux-x64': '@oven/bun-linux-x64',
+  'linux-arm64': '@oven/bun-linux-aarch64',
+}
+
+/**
+ * Stage the files the bundled Claude transport spawns beside `lib/index.js`.
+ *
+ * The transport bundle keeps the child entry and its frame codec as separate
+ * runtime files, so a staged package without them starts no bridge and every
+ * Messages request becomes an ambiguous transport failure.
+ * @param plugin - the subscriptions source package.
+ * @param stagingDirectory - staged package root.
+ */
+async function stageSubscriptionsTransport(
+  plugin: (typeof PLUGINS)[number],
+  stagingDirectory: string,
+): Promise<void> {
+  for (const entry of ['bun-child.js', 'frames.js']) {
+    const source = join(plugin.directory, 'lib', 'transport', entry)
+    if (!existsSync(source)) fail(`subscriptions is missing its transport artifact ${entry}; build the plugin before staging it`)
+    await copyFile(source, join(stagingDirectory, 'lib', entry))
+  }
+  const platform = `${process.platform}-${process.arch}`
+  const packageName = BUN_PLATFORM_PACKAGES[platform]
+  if (packageName === undefined) fail(`the pinned Bun transport has no runtime package for ${platform}`)
+  const source = join(plugin.directory, 'node_modules', ...packageName.split('/'))
+  if (!existsSync(source)) fail(`subscriptions is missing its pinned Bun runtime ${packageName}; run its dependency install before staging it`)
+  await cp(source, join(stagingDirectory, 'node_modules', ...packageName.split('/')), { recursive: true })
+}
+
 /** Stage the plugin package files and its inlined-license notices. */
 async function stagePackage(
   plugin: (typeof PLUGINS)[number],
@@ -650,6 +686,7 @@ async function stagePackage(
     await copyIfPresent(join(dependencies.wire.directory, 'LICENSE'), join(notices, 'claude-code-wire-compat', 'LICENSE'))
     await copyIfPresent(join(dependencies.wire.directory, 'NOTICE'), join(notices, 'claude-code-wire-compat', 'NOTICE'))
     await copyIfPresent(join(dependencies.undici.directory, 'LICENSE'), join(notices, 'undici', 'LICENSE'))
+    await stageSubscriptionsTransport(plugin, stagingDirectory)
   }
 }
 
