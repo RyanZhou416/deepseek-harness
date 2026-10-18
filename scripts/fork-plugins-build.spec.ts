@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import { existsSync } from 'node:fs'
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { existsSync, lstatSync } from 'node:fs'
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises'
 import { homedir, tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -240,9 +240,45 @@ describe('subscriptions transport staging', () => {
         executable: target.executable,
       }
       await stageBunRuntime(runtime, staging)
-      const stagedExecutable = join(staging, 'node_modules', ...target.packageName.split('/'), target.executable)
-      expect(await readFile(stagedExecutable, 'utf8')).toBe('pinned bun')
+      const stagedDirectory = join(staging, 'node_modules', ...target.packageName.split('/'))
+      expect(lstatSync(stagedDirectory).isSymbolicLink()).toBe(false)
+      expect(await readFile(join(stagedDirectory, target.executable), 'utf8')).toBe('pinned bun')
+      await rm(runtimeDirectory, { recursive: true, force: true })
+      expect(await readFile(join(stagedDirectory, target.executable), 'utf8')).toBe('pinned bun')
       await expect(stageBunRuntime({ ...runtime, directory: join(root, 'missing') }, staging)).rejects.toThrow(/has no bin\//)
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  }, 30_000)
+
+  it('materializes a platform runtime installed through a link', async (context) => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-fork-plugins-runtime-'))
+    try {
+      const target = bunPlatformRuntime(process.platform, process.arch)
+      const realDirectory = join(root, 'runtime', ...target.packageName.split('/'))
+      await mkdir(join(realDirectory, 'bin'), { recursive: true })
+      await writeFile(join(realDirectory, target.executable), 'pinned bun')
+      const linkedDirectory = join(root, 'linked', ...target.packageName.split('/'))
+      await mkdir(dirname(linkedDirectory), { recursive: true })
+      try {
+        await symlink(realDirectory, linkedDirectory, process.platform === 'win32' ? 'junction' : 'dir')
+      } catch (error) {
+        context.skip(`this host cannot create a directory link: ${String(error)}`)
+        return
+      }
+      const staging = join(root, 'staged')
+      await mkdir(staging, { recursive: true })
+      const runtime = {
+        packageName: target.packageName,
+        version: '1.4.2',
+        directory: linkedDirectory,
+        executable: target.executable,
+      }
+      await stageBunRuntime(runtime, staging)
+      const destination = join(staging, 'node_modules', ...target.packageName.split('/'))
+      expect(lstatSync(destination).isSymbolicLink()).toBe(false)
+      await rm(realDirectory, { recursive: true, force: true })
+      expect(await readFile(join(destination, target.executable), 'utf8')).toBe('pinned bun')
     } finally {
       await rm(root, { recursive: true, force: true })
     }

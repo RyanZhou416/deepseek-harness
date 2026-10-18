@@ -26,7 +26,8 @@ afterEach(async () => {
 
 function stubAgent(session: Session): Agent {
   // Idle residency reads the Agent's pending Inbox work, so the stub needs a real empty Inbox.
-  return { id: session.id, session, status: 'idle', inbox: createInboxStub() } as unknown as Agent
+  const agent = { id: session.id, session, status: 'idle' } as unknown as Agent
+  return Object.assign(agent, { inbox: createInboxStub() })
 }
 
 /** A stored Session the persistence double serves until an Agent resumes it. */

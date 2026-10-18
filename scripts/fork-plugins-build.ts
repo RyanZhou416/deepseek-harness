@@ -23,7 +23,7 @@
  */
 import { spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { existsSync, realpathSync, statSync } from 'node:fs'
+import { existsSync, lstatSync, realpathSync, statSync } from 'node:fs'
 import { copyFile, cp, mkdir, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises'
 import { connect } from 'node:net'
 import { homedir } from 'node:os'
@@ -39,7 +39,7 @@ const PROFILE_NAME = 'web'
 const HOST_PORT = 3080
 const SCHEMA_VERSION = 1
 /** Bump when the staging recipe changes in a way the source hash does not capture. */
-const SCRIPT_VERSION = 3
+const SCRIPT_VERSION = 4
 
 /** Plugin entries this script installs, in installation order. */
 const PLUGINS = [
@@ -606,7 +606,10 @@ async function ensureBuildDependencies(): Promise<BuildDependencies> {
     bunRuntime: {
       packageName: bunRuntimeTarget.packageName,
       version: bun.version ?? bunVersion,
-      directory: bunDirectory,
+      // pnpm resolves the platform package through its virtual store. Copying
+      // the resolved directory keeps the staged package independent of
+      // `.build/fork-plugins/build-deps/`.
+      directory: realpathSync(bunDirectory),
       executable: bunRuntimeTarget.executable,
     },
   }
@@ -784,6 +787,10 @@ function pluginArtifacts(plugin: (typeof PLUGINS)[number]): string[] {
 
 /**
  * Copy the pinned Bun platform package into a staged package's `node_modules`.
+ *
+ * pnpm links the installed package through its virtual store, so the copy
+ * dereferences links: the staged package must keep working when the build
+ * dependencies directory is removed while the profile still links to it.
  * @param runtime - installed platform runtime selected by the build dependencies.
  * @param stagingDirectory - staged package root.
  */
@@ -791,8 +798,10 @@ export async function stageBunRuntime(runtime: BunRuntimeArtifact, stagingDirect
   if (!existsSync(join(runtime.directory, runtime.executable))) {
     fail(`the installed ${runtime.packageName} has no ${runtime.executable}`)
   }
+  const source = realpathSync(runtime.directory)
   const destination = join(stagingDirectory, 'node_modules', ...runtime.packageName.split('/'))
-  await cp(runtime.directory, destination, { recursive: true })
+  await cp(source, destination, { recursive: true, dereference: true })
+  if (lstatSync(destination).isSymbolicLink()) fail(`staging copied ${runtime.packageName} as a symbolic link`)
   if (!existsSync(join(destination, runtime.executable))) fail(`staging did not copy ${runtime.packageName}`)
 }
 
