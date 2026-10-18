@@ -419,7 +419,7 @@ Workspace 手动排序使用按 id 索引的双向节点和显式后序栈放置
 
 Session Controller 的 `listProjectionExcludeKeys` 默认 `[]`，保持上游和未知插件的完整提示值；fork Web 模板只排除已确认详情专用的 `contextHeaders` 与 `turnOutline`。注册表和 checkpoint cache 在 state 校验与 wire view 前执行可选排除，水位仅计实际服务的行；完整 follow、显式 projection、restore/hydrate 与持久行不受影响。`sessionListMetadata` 是 blank/recency 计算的必需输入，配置加载时禁止排除。合并上游时重查 Context Overview、schedule、subagent discovery、usage 和第三方提示消费者；详情键若新增目录消费者，需要同步改其按需读取。`fork-runtime/setup-profile.mjs` 只管理 controller 的该字段，保留其它配置与 `!!js` 原文；对无法安全定点更新的 flow/alias/重复配置报错并保持文件不动。
 
-`sessionStats` 与 `contextPressure` 用弱状态键保留仅含标量的公开视图，私有计时/表面记账变化仍完整折叠；值不变时复用 raw view，避免无效全局帧。WeakMap value 不得反向持有 state、Session、Agent 或事件。未读取 cell 的首次已知值仍发布，随后仅私有变化才静默；registry 的双槽比较、日志水位及持久格式不变。`subagentTiming` 对同一记录时间的普通活跃事件复用状态，descriptor/turn 边界仍完整处理。
+`sessionStats` 与 `contextPressure` 用弱状态键保留仅含标量的公开视图，私有计时/表面记账变化仍完整折叠；值不变时复用 raw view，避免无效全局帧。WeakMap value 不得反向持有 state、Session、Agent 或事件。未读取 cell 的首次已知值仍发布，随后仅私有变化才静默；registry 的双槽比较、日志水位及持久格式不变。`subagentTiming` 对同一记录时间的普通活跃事件复用状态，descriptor/turn 边界仍完整处理。fork 的 `sessionStats` 另保存最近可测量轮次的 `lastTurnSpeedTurn/lastTurnSpeedDecodeMs/lastTurnSpeedDecodeTokens`（`stateVersion: 2`，旧 checkpoint 重新折叠）；它们必须在分页/压缩后仍能直接给出“本轮输出速度”，并在新一轮流式输出尚无消息时保留上一轮，客户端只在无投影时回退窗口节点。
 
 control carrier 已开始恢复且仍等待 baseline 时，新的 Host generation ready 复用该 opening；若 baseline 已先到或旧流仍健康，则继续 restart，确保清水位后有新 baseline。保留 delayed initial ready、两种 baseline/ready 顺序、terminal failure 和 dispose 回归；旧代码在 pending-recovery 负对照中开三条流，候选仅开两条。
 
