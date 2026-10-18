@@ -23,18 +23,18 @@ The cold opening therefore spends roughly 90% of its time before the projection 
 
 ### 1. Open from the window first
 
-For a stored parent Session, serve the existing bounded tail window even when `read.projections` is absent or incomplete. The opening frame carries an empty projection baseline at the window cursor; the client uses its existing window-scoped fallback for statistics and context values. The subagent address path keeps requiring the complete observation because the `subagent` projection is part of address validation.
+For a stored parent Session, serve the existing bounded tail window even when `read.projections` is absent or incomplete. The opening frame omits the projection block rather than sending an empty one: the current client store treats an empty block as an exact cut and clears cached title, list metadata, subagent, token, and stats rows. An optional block leaves those cached hints intact and makes "projections unavailable" distinct from "empty projection cut". The subagent address path keeps requiring the complete observation because the `subagent` projection is part of address validation.
 
-This removes the complete `observeSession` from the first opening. The expected first frame moves from roughly 3.8 s to the measured 0.6–0.8 s window range, independent of cache state.
+This removes the complete `observeSession` from the first opening. The expected first frame moves from roughly 3.8 s to the measured 0.6–0.8 s window range, independent of cache state. Cache-warm window openings already skip cold-open promotion; a no-cache window opening matches that existing behavior. Resume/promotion becomes an explicit later step, and the prompt path must still be verified to promote on demand instead of silently losing the ability to continue the Session.
 
 ### 2. Load exact whole-log projections after the first frame
 
 Whole-session values cannot be exact without either a full-log fold or a durable summary. The proposal therefore separates product latency from exact-stat latency:
 
-- an empty opening baseline is an explicit "not yet projected" state, not a claim that the window counts are whole-session values;
+- an absent opening block is an explicit "not yet projected" state, not a claim that the window counts are whole-session values;
 - a single exact `session/projections` read is scheduled on demand when the statistics or Context surface is opened, or after the first frame on an idle task;
 - the result is merged into the same projection store with its watermark, and a later navigation cancels the pending read;
-- the statistics UI must retain a visible loading/unavailable state instead of presenting window counts as exact.
+- the statistics UI must retain a visible loading/unavailable state instead of presenting window counts as exact. Only `sessionStats` has a window fallback; `tokenUsage`, `contextPressure`, and `contextBreakdown` currently have none and need explicit unavailable/loading presentation rather than fabricated values.
 
 The default path performs no full read. A user who never opens statistics never pays for it.
 
@@ -44,17 +44,17 @@ First opening and older-page loading are separate costs. The existing index buil
 
 ## Isolation and integration
 
-Development runs in a clean clone at `tmp/window-first` (ignored by the repository, with its own `.git` and `node_modules`), on the `feat/window-first-opening` branch. The running Host keeps its current files and `node_modules`; no checkout, install, build, or test runs in the main worktree. All commands use the clone's own root, a private temporary `DSH_HOME`, and no listener on port 3080.
+Development runs in a clean clone at `tmp/window-first` (ignored by the repository, with its own `.git` and `node_modules`), on the `feat/window-first-opening` branch. The running Host keeps its current files and `node_modules`; no checkout, install, build, or test runs in the main worktree. All commands use the clone's own root, a private temporary `DSH_HOME`, and no listener on port 3080. The clone is created with `--no-hardlinks`; `vendor` and `node_modules` remain unshared.
 
-The clone is pushed as a feature branch. Integration into `master` waits for a deliberate Host-stop window; the running Host is never switched to the feature branch. The clone is removed only after the branch is merged and all paths are verified to be independent.
+AgentTeams orchestration itself runs in the current Host: member Sessions are written under its `DSH_HOME`, and team state is written under the main checkout's ignored `.agent-teams`. That is orchestration state, not source or runtime mutation, but it is not invisible. Members are instructed to use absolute clone paths or `pnpm --dir <clone>`, to keep every edit under `tmp/window-first`, and to serialize build/test commands so eight workers do not collide in one clone's outputs. The clone is pushed as a feature branch. Integration into `master` waits for a deliberate Host-stop window; the running Host is never switched to the feature branch. The clone is removed only after the branch is merged and all paths are verified to be independent.
 
 ## Stage plan
 
-1. **Contract and baseline**: freeze the empty-baseline semantics, define the projection readiness state, record the cold/warm measurement, and add the failing negative control that proves the current path performs the complete open.
-2. **Server window-first**: relax the complete-checkpoint gate for parent Sessions, preserve subagent fallback, and add window/opening tests.
-3. **Client readiness and loading**: propagate the empty baseline as an explicit loading state; keep window fallback for statistics while exact values are unavailable.
-4. **Projection on-demand lifecycle**: single-flight exact projection reads, navigation cancellation, watermark checks, and merge into the existing store.
-5. **Benchmark proof**: cold first opening with no cache, first frame, exact-projection follow-up, and no complete observation on the fast path.
+1. **Contract and baseline**: freeze the optional-block/readiness semantics, settle the deferred promotion behavior, record the cold/warm measurement, and add the failing negative control that proves the current path performs the complete open.
+2. **Server window-first**: relax the complete-checkpoint gate for parent Sessions, omit the projection block, preserve subagent and small-Session fallbacks, and add window/opening tests.
+3. **Client readiness and loading**: treat an absent block as a distinct unavailable state; keep the `sessionStats` window fallback while adding explicit loading/unavailable presentation for token and context projections.
+4. **Projection on-demand lifecycle**: add a Manager-owned trigger, single-flight exact projection reads, per-generation readiness, navigation cancellation, watermark checks, permission fallback, and merge into the existing store.
+5. **Benchmark proof**: cold first opening with no cache, first frame, exact-projection follow-up, and a follow-level negative control proving the complete observation was not called.
 6. **Older-page index build**: offset/newline build with strict served-window validation and complete-read fallback.
 7. **Older-page index memo**: bounded identity-keyed parsed-index reuse with disposal and invalidation tests.
 8. **Integration review**: cross-package behavior, negative controls, docs, and a single feature-branch handoff for the user's review.
@@ -72,17 +72,21 @@ The clone is pushed as a feature branch. Integration into `master` waits for a d
 ## Acceptance criteria
 
 - A cold parent-Session opening without a projection cache produces its first snapshot from the bounded window and does not call the complete observation path.
-- The opening frame explicitly marks projections as unavailable at its cursor; window-scoped statistics remain the client fallback and are not labeled as exact whole-session figures.
-- An on-demand exact projection read is single-flight, cancellable on navigation, watermark-checked, and eventually replaces the fallback values.
-- Subagent openings still require and validate their projection identity.
+- The opening frame omits the projection block rather than claiming an empty exact cut; cached list/subagent/token/stats values are not cleared, and unavailable projections are explicitly marked by the readiness state.
+- The client presents `sessionStats` from the window fallback while token and context projections show a loading/unavailable state until exact values arrive.
+- An on-demand exact projection read is single-flight, per-generation, cancellable on navigation, watermark-checked, permission-aware, and eventually replaces the unavailable state.
+- Deferred promotion is settled and verified: opening a stored Session without a cache either still permits continuation through the prompt path or explicitly reports that the Session is read-only until promoted.
+- Subagent openings still require and validate their projection identity; small stored Sessions keep their complete-observation path.
 - Reopening with a complete cache remains as fast as or faster than the current behavior.
-- The cold first-frame benchmark shows a material improvement against the recorded baseline, and a negative control on the old code fails the same assertion.
+- The cold first-frame benchmark shows a material improvement against the recorded baseline, and a follow-level negative control on the old code fails the same assertion.
 - Existing history window, paging, subagent, projection-store, and statistics tests remain green; the full-history fallback still works when the stored window is unavailable or malformed.
+- All implementation edits, builds, and tests stay inside the clone; no source, `node_modules`, `vendor`, profile, or Session data in the running Host is modified.
 
 ## Risks
 
 - Whole-session counts, token totals, context values, and a subset of status UI are temporarily unavailable on a cold opening; product copy and loading states must make that honest.
 - A background exact read can compete with scrolling and further navigation; the on-demand trigger and cancellation policy need browser evidence, not only Node timings.
-- Empty baselines must not be confused with a real empty projection cut by the client store; watermark and readiness semantics need explicit tests.
+- An omitted block must not be confused with a real empty projection cut by the client store; watermark and readiness semantics need explicit tests.
 - The older-page index-build change loses the build-time row-count gate; the served decoder must retain strict validation and the complete-read fallback, with a negative control for a malformed sidecar.
-- The clone-based isolation adds disk use and must never share `vendor` or `node_modules` links with the running checkout.
+- The clone-based isolation adds disk use and must never share `vendor` or `node_modules` links with the running checkout. AgentTeams member Sessions and team state still land in the running Host's storage even though source work stays in the clone; parallel workers also contend for machine CPU and must serialize build/test commands.
+- Deferred promotion changes when a cold Session becomes live; the prompt/resume path must be proven, not assumed.

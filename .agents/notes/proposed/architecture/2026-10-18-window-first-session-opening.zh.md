@@ -23,18 +23,18 @@ Status: proposed
 
 ### 1. 先走窗口
 
-对于已存储的父 Session，即使 `read.projections` 缺失或不完整，也直接提供现有的有界尾窗口。opening frame 在窗口 cursor 处携带空 projection baseline；客户端对统计与上下文使用已有的窗口口径回退。subagent 地址路径仍要求完整 observation，因为 `subagent` 投影是地址验证的一部分。
+对于已存储的父 Session，即使 `read.projections` 缺失或不完整，也直接提供现有的有界尾窗口。opening frame **省略 projection block**，而不是发送空 block：当前客户端 store 会把空 block 当成精确切面，清掉缓存的 title、list metadata、subagent、token 与 stats 行。可选 block 保留这些缓存提示，并把“投影不可用”与“空的投影切面”区分开。subagent 地址路径仍要求完整 observation，因为 `subagent` 投影是地址验证的一部分。
 
-这会移除首次打开中的完整 `observeSession`。预计首帧从约 3.8 s 降到实测窗口范围的 0.6–0.8 s，且不依赖缓存状态。
+这会移除首次打开中的完整 `observeSession`。预计首帧从约 3.8 s 降到实测窗口范围的 0.6–0.8 s，且不依赖缓存状态。缓存命中的窗口打开已经跳过冷打开 promotion；无缓存的窗口打开与这一既有行为一致。Resume/promotion 成为显式后续步骤，prompt 路径仍必须验证能按需 promote，而不是静默失去继续该 Session 的能力。
 
 ### 2. 首帧之后加载精确的全日志投影
 
 全 Session 数值如果没有完整日志 fold 或持久摘要，就不可能精确。因此本提案把产品延迟与精确统计延迟分开：
 
-- 空 opening baseline 是明确的“尚未投影”状态，而不是声称窗口计数就是全会话数值；
+- 缺失的 opening block 是明确的“尚未投影”状态，而不是声称窗口计数就是全会话数值；
 - 在统计或 Context 界面打开时按需调度一次精确 `session/projections` 读取，或在首帧后空闲时执行；
-- 结果带 watermark 合并进同一个 projection store，后续导航会取消待处理读取；
-- 统计 UI 必须保留可见的 loading/unavailable 状态，不能把窗口计数当作精确值。
+- 结果带 watermark 合并进同一个 projection store，后续导航取消待处理读取；
+- 统计 UI 必须保留可见的 loading/unavailable 状态，不能把窗口计数当作精确值。只有 `sessionStats` 有窗口回退；`tokenUsage`、`contextPressure` 与 `contextBreakdown` 当前没有，需要显式的不可用/加载展示，而不是伪造值。
 
 默认路径不执行完整读取；从不打开统计的用户不会付出这份成本。
 
@@ -44,17 +44,17 @@ Status: proposed
 
 ## Isolation and integration
 
-开发在 `tmp/window-first` 的干净 clone 中进行（被仓库忽略，拥有自己的 `.git` 和 `node_modules`），分支为 `feat/window-first-opening`。运行中的 Host 保留当前文件和 `node_modules`；主工作树中不执行 checkout、install、build 或 test。所有命令使用 clone 自己的 root、私有临时 `DSH_HOME`，且不监听 3080 端口。
+开发在 `tmp/window-first` 的干净 clone 中进行（被仓库忽略，拥有自己的 `.git` 和 `node_modules`），分支为 `feat/window-first-opening`。运行中的 Host 保留当前文件和 `node_modules`；主工作树中不执行 checkout、install、build 或 test。所有命令使用 clone 自己的 root、私有临时 `DSH_HOME`，且不监听 3080 端口。Clone 用 `--no-hardlinks` 创建；`vendor` 与 `node_modules` 保持不共享。
 
-Clone 会作为 feature branch 推送。合入 `master` 等待专门的 Host 停止窗口；运行中的 Host 永远不会切到 feature branch。只有在分支合并且所有路径确认独立后才删除 clone。
+AgentTeams 编排本身仍运行在当前 Host：member Session 写入其 `DSH_HOME`，team state 写入主 checkout 的 ignored `.agent-teams`。这是编排状态，不是源码或运行时修改，但并非不可见。成员必须使用 clone 的绝对路径或 `pnpm --dir <clone>`，所有编辑限制在 `tmp/window-first`，并串行执行 build/test，避免 8 个 worker 在同一 clone 的输出目录冲突。Clone 会作为 feature branch 推送。合入 `master` 等待专门的 Host 停止窗口；运行中的 Host 永远不会切到 feature branch。只有在分支合并且所有路径确认独立后才删除 clone。
 
 ## Stage plan
 
-1. **契约与基线**：冻结空 baseline 语义，定义投影 readiness 状态，记录 cold/warm 测量，并添加证明当前路径会执行完整 open 的失败负向对照。
-2. **服务端窗口优先**：对父 Session 放开完整 checkpoint 限制，保留 subagent 回退，并添加窗口/opening 测试。
-3. **客户端 readiness 与 loading**：把空 baseline 传播为明确的 loading 状态；精确值不可用时统计继续使用窗口回退。
-4. **投影按需生命周期**：single-flight 精确投影读取、导航取消、watermark 检查，并合并进现有 store。
-5. **Benchmark 证明**：无缓存冷首次打开、首帧、精确投影后续读取，以及快路径不执行完整 observation。
+1. **契约与基线**：冻结可选 block/readiness 语义，确定延迟 promotion 行为，记录 cold/warm 测量，并添加证明当前路径会执行完整 open 的失败负向对照。
+2. **服务端窗口优先**：对父 Session 放开完整 checkpoint 限制，省略 projection block，保留 subagent 与小 Session 回退，并添加窗口/opening 测试。
+3. **客户端 readiness 与 loading**：把缺失 block 当作独立的不可用状态；统计继续使用 `sessionStats` 窗口回退，同时为 token 与 context 投影添加显式加载/不可用展示。
+4. **投影按需生命周期**：增加 Manager 拥有的触发、single-flight 精确投影读取、按 generation 的 readiness、导航取消、watermark 检查、权限回退，并合并进现有 store。
+5. **Benchmark 证明**：无缓存冷首次打开、首帧、精确投影后续读取，以及证明完整 observation 未被调用的 follow 级负向对照。
 6. **老页面索引构建**：offset/newline 构建，配合严格服务页面验证与完整读取回退。
 7. **老页面索引 memo**：有界、按 identity 的解析索引复用，包含释放与失效测试。
 8. **集成审查**：跨包行为、负向对照、文档，以及交给用户审查的单一 feature-branch 交付。
@@ -72,17 +72,21 @@ Clone 会作为 feature branch 推送。合入 `master` 等待专门的 Host 停
 ## Acceptance criteria
 
 - 无投影缓存的冷父 Session 打开从有界窗口生成首个 snapshot，且不调用完整 observation 路径。
-- opening frame 明确标记其 cursor 处投影不可用；窗口口径统计继续作为客户端回退，且不被标成精确全会话数值。
-- 按需精确投影读取是 single-flight、可被导航取消、检查 watermark，并最终替换回退值。
-- subagent 打开仍要求并验证其投影 identity。
+- opening frame 省略 projection block，而不是声称一个空的精确切面；缓存的 list/subagent/token/stats 值不被清掉，不可用投影由 readiness 状态显式标记。
+- 客户端在精确值到达前用窗口回退展示 `sessionStats`，并对 token 与 context 投影显示加载/不可用状态。
+- 按需精确投影读取是 single-flight、按 generation、可被导航取消、检查 watermark、感知权限，并最终替换不可用状态。
+- 延迟 promotion 已定案并验证：无缓存打开已存储 Session 时，要么仍可通过 prompt 路径继续，要么明确报告在 promote 前是只读。
+- subagent 打开仍要求并验证其投影 identity；小的已存储 Session 保持完整 observation 路径。
 - 有完整缓存时重新打开至少不慢于当前行为。
-- 冷首帧 benchmark 相对记录基线有实质改善，旧代码上的负向对照会让同一断言失败。
+- 冷首帧 benchmark 相对记录基线有实质改善，旧代码上的 follow 级负向对照会让同一断言失败。
 - 现有 history window、paging、subagent、projection-store 与统计测试保持绿色；窗口不可用或格式错误时完整历史回退仍有效。
+- 所有实现编辑、build 与 test 都留在 clone 内；运行中 Host 的源码、`node_modules`、`vendor`、profile 或 Session 数据不被修改。
 
 ## Risks
 
 - 冷打开时全会话计数、token 总量、上下文值与部分状态 UI 会暂时不可用；产品文案与 loading 状态必须诚实表达。
 - 后台精确读取可能与滚动及后续导航竞争；按需触发与取消策略需要浏览器证据，而不只是 Node 计时。
-- 空 baseline 不能被客户端 store 误认为真实的空投影切面；watermark 与 readiness 语义需要明确测试。
+- 缺失 block 不能被客户端 store 误认为真实的空投影切面；watermark 与 readiness 语义需要明确测试。
 - 老页面索引构建改动会失去构建期的行数门禁；服务 decoder 必须保留严格验证与完整读取回退，并为损坏 sidecar 添加负向对照。
-- Clone 隔离会增加磁盘占用，并且绝不能与运行中的 checkout 共享 `vendor` 或 `node_modules` 链接。
+- Clone 隔离会增加磁盘占用，并且绝不能与运行中的 checkout 共享 `vendor` 或 `node_modules` 链接。AgentTeams 的 member Session 与 team state 仍会落到运行中 Host 的存储；并行 worker 也会争用机器 CPU，必须串行 build/test 命令。
+- 延迟 promotion 会改变冷 Session 变为 live 的时机；prompt/resume 路径必须被证明，而不能假设。
