@@ -617,8 +617,9 @@ describe('SessionHistoryController', () => {
       },
       throughSeq: -1,
     }, signal())).rejects.toMatchObject({ code: 'subagent/not-found' })
-    // Absence is decided by the stat preflight; no log open is attempted.
-    expect(stat).toHaveBeenCalledTimes(2)
+    // Absence is decided by stat: the small-source probe precedes the
+    // canonical observation preflight; no log open is attempted.
+    expect(stat).toHaveBeenCalledTimes(3)
     expect(inspect).not.toHaveBeenCalled()
   })
 

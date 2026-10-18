@@ -10,3 +10,5 @@ export const SYNTHETIC_SESSION_CWD = '/bench'
 export const SYNTHETIC_SESSION_DIRECTORY = join('--bench--', SYNTHETIC_SESSION_ID)
 /** Canonical released-v0 Zstandard generation filename. */
 export const SYNTHETIC_V0_FILENAME = 'session.jsonl.zstd'
+/** Event bound of every history-window sample; matches the production default window. */
+export const WINDOW_BENCHMARK_MAX_EVENTS = 2_000

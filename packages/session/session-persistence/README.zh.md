@@ -89,7 +89,7 @@ await ctx.sessionPersistence.flush()                           // backend-wide d
 - **无损 JSON 数据。** 批次与 header 经过共享的单遍校验并快照边界（`materializeAppendBatch`/`materializeCreateHeader`）；无法序列化的载荷在调用处被拒绝。
 - **持久性。** `append` 尽力而为地持久化；`flush`——逐句柄或服务级——是承诺存储并同时把空会话实体化的屏障。
 - **遇到未知或无效格式时拒绝读取。** `validateStoredEvents` 拒绝未知事件词汇与已废弃的预发布形态；`assertVersion` 拒绝外来格式版本。分片让出事件循环来采纳事件的后端先对整份日志运行 `assertStoredEventTypes`，再逐条调用 `adoptStoredEvent`，使更新版本写入的日志仍以"不支持"而非"损坏"被拒绝。
-- **要么返回已校验窗口，要么不返回。** 可选的 `readWindow` 要么返回连续且已逐行校验的 `SessionWindow`，要么返回 `undefined`；它绝不基于未校验切片猜测，消费方则回退到完整读取。后端可以持久化可重建索引来服务 `beforeSeq`，但该索引绝不替代对所选行的解码与校验。
+- **要么返回已校验窗口，要么不返回。** 可选的 `readWindow` 要么返回连续且已逐行校验的 `SessionWindow`，要么返回 `undefined`；它绝不基于未校验切片猜测，消费方则回退到完整读取。后端可以持久化可重建索引来服务 `beforeSeq`，但该索引绝不替代对所选行的解码与校验。构建该索引是在读取进程内的一次同步解码（在实测 161 MB Session 上约 2.0 秒），因此消费方可以对小型存储来源改用完整读取。
 - **每个后端实例单写者。** 提供方的进程内认领在 `create`/`open('write')` 时取得，在句柄关闭时释放。
 
 ### 源码地图

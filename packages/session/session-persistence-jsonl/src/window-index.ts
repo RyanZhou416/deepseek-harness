@@ -23,7 +23,7 @@ import type { SessionFormatMigrationContext } from '@deepseek-ai/dsh-session-for
 import { assertV4RowAdmission, releasedV4SessionFormatCodec } from '@deepseek-ai/dsh-session-format-v3-to-v4'
 import type { JsonlCompression } from './format.ts'
 import { readStableJsonlFile, type StablePhysicalFile } from './generation.ts'
-import { decompressZstdFrame, scanZstdFrames, type ZstdFrameRange, type ZstdFrameScan } from './zstd.ts'
+import { createZstdFrameDecoder, scanZstdFrames, type ZstdFrameRange, type ZstdFrameScan } from './zstd.ts'
 
 /** Schema version of the durable generation index this build reads and writes. */
 export const WINDOW_INDEX_VERSION = 1
@@ -401,24 +401,8 @@ async function buildZstdIndex(
     return undefined
   }
   if (scan.tornStart !== undefined || scan.frames.length === 0) return undefined
-  const headerFrame = scan.frames[0] as ZstdFrameRange
-  let headerPlaintext: Buffer
-  try {
-    headerPlaintext = await decompressZstdFrame(bytes.subarray(headerFrame.start, headerFrame.end))
-  } catch {
-    signal?.throwIfAborted()
-    return undefined
-  }
-  if (headerPlaintext.length === 0 || headerPlaintext.indexOf(0x0A) !== headerPlaintext.length - 1) return undefined
-  if (headerPlaintext.subarray(0, -1).toString('utf8') !== headerLine) return undefined
 
-  const frames: JsonlWindowIndexFrame[] = [{
-    offset: headerFrame.start,
-    length: headerFrame.end - headerFrame.start,
-    firstRow: 0,
-    firstSeq: 0,
-    events: 0,
-  }]
+  const frames: JsonlWindowIndexFrame[] = []
   let rows = 0
   let emitted = 0
   const context: SessionFormatMigrationContext = {
@@ -429,13 +413,32 @@ async function buildZstdIndex(
       emitted += run.eventCount
     },
   }
+  const frameDecoder = createZstdFrameDecoder()
   try {
     const decoder = releasedV4SessionFormatCodec.createDecoder(headerValue, 'strict')
+    // One synchronous decode pass over the scanned frames: the decoder yields
+    // exactly one plaintext buffer per range, header frame first, and reuses its
+    // scratch buffer, so each frame is consumed before the iterator advances.
+    const decoded = frameDecoder.decode(bytes, scan.frames)
     let yieldDeadline = performance.now() + INDEX_BUILD_YIELD_INTERVAL_MS
-    for (let index = 1; index < scan.frames.length; index += 1) {
+    let position = 0
+    for (const plaintext of decoded) {
       signal?.throwIfAborted()
-      const range = scan.frames[index] as ZstdFrameRange
-      const plaintext = await decompressZstdFrame(bytes.subarray(range.start, range.end))
+      const range = scan.frames[position] as ZstdFrameRange
+      position += 1
+      if (position === 1) {
+        // The header frame is the exact header record and nothing else.
+        if (plaintext.length === 0 || plaintext.indexOf(0x0A) !== plaintext.length - 1) return undefined
+        if (plaintext.subarray(0, -1).toString('utf8') !== headerLine) return undefined
+        frames.push({
+          offset: range.start,
+          length: range.end - range.start,
+          firstRow: 0,
+          firstSeq: 0,
+          events: 0,
+        })
+        continue
+      }
       // A complete frame that does not end on a record boundary is not a
       // window unit; the complete read owns that diagnosis and recovery.
       if (plaintext.length === 0 || plaintext.at(-1) !== 0x0A) return undefined
@@ -471,6 +474,8 @@ async function buildZstdIndex(
   } catch {
     signal?.throwIfAborted()
     return undefined
+  } finally {
+    frameDecoder.close()
   }
 }
 

@@ -847,8 +847,9 @@ describe('degenerate composition (no persistence, no factory)', () => {
     })
     expect(response.ok).toBe(false)
     if (!response.ok) expect(response.error.code).toBe('session/not-found')
-    // Absence is decided by the stat preflight; the log itself is never opened.
-    expect(stat).toHaveBeenCalledOnce()
+    // Absence is decided by stat: the small-source probe, then the canonical
+    // observation preflight; the log itself is never opened.
+    expect(stat).toHaveBeenCalledTimes(2)
     expect(inspect).not.toHaveBeenCalled()
   })
 })

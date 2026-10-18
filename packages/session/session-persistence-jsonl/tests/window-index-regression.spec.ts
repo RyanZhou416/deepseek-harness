@@ -18,9 +18,10 @@ import type { SessionPersistence, SessionWindow, SessionWindowRequest } from '@d
 import * as JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
 import { generationLogPath } from '../src/format.ts'
 import { compressZstdFrame } from '../src/zstd.ts'
+import type { ZstdFrameRange } from '../src/zstd.ts'
 import { meta } from '../../session-persistence/tests/contract.ts'
 
-const zstdProbe = vi.hoisted(() => ({ decompressCalls: 0 }))
+const zstdProbe = vi.hoisted(() => ({ decompressCalls: 0, decodedFrames: 0 }))
 
 vi.mock('../src/zstd.ts', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../src/zstd.ts')>()
@@ -29,6 +30,20 @@ vi.mock('../src/zstd.ts', async (importOriginal) => {
     async decompressZstdFrame(input: Buffer): Promise<Buffer> {
       zstdProbe.decompressCalls += 1
       return actual.decompressZstdFrame(input)
+    },
+    createZstdFrameDecoder(): ReturnType<typeof actual.createZstdFrameDecoder> {
+      const decoder = actual.createZstdFrameDecoder()
+      return {
+        *decode(source: Buffer, frames: readonly ZstdFrameRange[]): Generator<Buffer, void, void> {
+          for (const plaintext of decoder.decode(source, frames)) {
+            zstdProbe.decodedFrames += 1
+            yield plaintext
+          }
+        },
+        close(): void {
+          decoder.close()
+        },
+      }
     },
   }
 })
@@ -462,12 +477,14 @@ describe('JSONL window index: rebuild after a missing, stale, or corrupt sidecar
 
     // A page that has to decode the shifted segment disproves it and rebuilds.
     zstdProbe.decompressCalls = 0
+    zstdProbe.decodedFrames = 0
     expectWindow(await readWindow(persistence, id, { beforeSeq: 106, maxEvents: 10 }), full.events.slice(96, 106), full.header)
     const selected = segmentsCovering(original, 96, 106)
-    // One complete rebuild walk (every frame once), then the retry's page.
-    expect(zstdProbe.decompressCalls).toBeGreaterThanOrEqual(original.frames.length)
-    expect(zstdProbe.decompressCalls).toBeLessThanOrEqual(original.frames.length + selected + 3)
-    expect(zstdProbe.decompressCalls).toBeLessThan(2 * original.frames.length)
+    // Exactly one complete synchronous rebuild walk (every frame once), then the
+    // retry's page decodes only its selected segments.
+    expect(zstdProbe.decodedFrames).toBe(original.frames.length)
+    expect(zstdProbe.decompressCalls).toBeGreaterThanOrEqual(selected)
+    expect(zstdProbe.decompressCalls).toBeLessThanOrEqual(selected + 3)
 
     const repaired = await sidecarOf(mounted, id)
     expect(repaired.frames).toStrictEqual(original.frames)

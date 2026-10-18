@@ -15,7 +15,11 @@ import type {
   SessionLogOffset as SessionLogOffsetType,
   SessionSeqCursor,
 } from '@deepseek-ai/dsh-session'
-import type { SessionWindow, SessionWindowRequest } from '@deepseek-ai/dsh-session-persistence'
+import type {
+  SessionPersistenceSnapshot,
+  SessionWindow,
+  SessionWindowRequest,
+} from '@deepseek-ai/dsh-session-persistence'
 import { SessionQueryError, type SessionObservation, type SessionWindowRead } from '@deepseek-ai/dsh-session-query'
 import { interruptedTurnClosers } from '@deepseek-ai/dsh-session'
 import type {} from '@deepseek-ai/dsh-subagent'
@@ -43,6 +47,16 @@ const MESSAGE_TYPES = new Set(['user/message', 'assistant/message'])
 const SESSION_WINDOW_MAX_EVENTS = 10_000
 /** Smallest event budget one message-aligned page requests beyond its tail alignment span. */
 const SESSION_WINDOW_MIN_EVENTS = 2_000
+/**
+ * Stored artifact size below which a complete observation is cheaper than a
+ * cold window index build.
+ *
+ * Building the index and decoding frames exceeded the complete read for the
+ * audit's 949 KB Session (80-98 ms against 26 ms) and stayed well below it for
+ * the 161 MB Session, so a small stored artifact answers from the exact
+ * observation instead. Backends that report no size keep the window path.
+ */
+const SMALL_STORED_SESSION_BYTES = 2 * 1024 * 1024
 
 interface FollowOpening {
   readonly frame: Extract<SessionFollowFrame, { readonly type: 'snapshot' }>
@@ -98,10 +112,13 @@ export class SessionHistoryController {
       ? undefined
       : SessionLogOffset(request.beforeSeq)
     // Live Sessions and gap repairs keep the existing source path without an extra async hop.
-    const windowSessionId = this.windowSessionId(request.address)
-    const windowPage = windowSessionId === undefined || (throughSeq >= 0 && beforeSeq === undefined)
+    const windowSessionId = throughSeq >= 0 && beforeSeq === undefined
       ? undefined
-      : await this.pageFromWindow(windowSessionId, request, throughSeq, beforeSeq, signal)
+      : this.windowSessionId(request.address)
+    let windowPage: SessionPage | undefined
+    if (windowSessionId !== undefined && !await this.isSmallStoredSource(windowSessionId, signal)) {
+      windowPage = await this.pageFromWindow(windowSessionId, request, throughSeq, beforeSeq, signal)
+    }
     if (windowPage !== undefined) return windowPage
     using source = await this.sourceFor(request.address, signal, false)
     signal.throwIfAborted()
@@ -138,7 +155,10 @@ export class SessionHistoryController {
    * Only the empty tail cut (`throughSeq === -1`) and older pages (`beforeSeq`)
    * take this path: those cuts need no dense-array probe of the complete log.
    * An older-page window ends at `throughSeq`, so its tail proves the requested
-   * cut's dense anchor. Returns undefined when the complete source must answer.
+   * cut's dense anchor. A cut above the stored window cursor falls back: an
+   * opening balances an interrupted Turn with synthetic closers that the stored
+   * window does not contain, so only the complete log owns the authoritative
+   * cursor. Returns undefined when the complete source must answer.
    * @param sessionId - non-live Session addressed by the request.
    * @param request - validated page request.
    * @param throughSeq - inclusive cut derived from the request.
@@ -166,15 +186,9 @@ export class SessionHistoryController {
     this.validateWindow(request.address, read.window, read.projections)
     // A negative cut ends before every event, so the validated page is empty.
     if (!older) return { records: [], hasMore: false }
-    const sourceCursor: SessionSeqCursor = SessionSeq(read.window.cursor)
-    if (throughSeq > sourceCursor) {
-      throw new RemoteError(
-        'gateway/bad-request',
-        `session page through seq ${String(throughSeq)} is past cursor ${String(sourceCursor)}`,
-        {},
-      )
-    }
-    // The window tail is the requested dense anchor; anything else needs the complete log.
+    // The window tail is the requested dense anchor; anything else needs the
+    // complete log, including a cut the complete observation's closers pushed
+    // above the stored cursor.
     if (read.window.events.at(-1)?.seq !== throughSeq) return undefined
     const page = paginateSlice(
       read.window.events,
@@ -212,13 +226,42 @@ export class SessionHistoryController {
   }
 
   /**
-   * Resolve a non-live ordinary Session address the bounded window path may serve.
+   * Resolve a non-live ordinary Session the bounded window path may serve.
    * @param address - durable history address.
    * @returns the addressed Session id, or undefined when the complete source is required.
    */
   private windowSessionId(address: SessionAddress): SessionId | undefined {
     if (address.kind !== 'session') return undefined
     return this.ctx.sessions.get(address.sessionId) === undefined ? address.sessionId : undefined
+  }
+
+  /**
+   * Whether a stored artifact is small enough that the complete observation
+   * costs less than a window read.
+   *
+   * A window avoids materializing a large log, but below
+   * {@link SMALL_STORED_SESSION_BYTES} its cold index build costs more than the
+   * complete observation. Missing, unsized, or failed metadata keeps the window
+   * path.
+   * @param sessionId - stored Session to size.
+   * @param signal - caller cancellation for the metadata read.
+   * @returns true only when the backend reports a size below the threshold.
+   */
+  private async isSmallStoredSource(sessionId: SessionId, signal: AbortSignal): Promise<boolean> {
+    const persistence = this.ctx.get('sessionPersistence')
+    if (persistence === undefined) return false
+    let stored: SessionPersistenceSnapshot | undefined
+    try {
+      stored = await persistence.stat(sessionId, { signal })
+    } catch {
+      // An unknown size is not evidence of a small artifact, so the window path
+      // reports the canonical failure; caller cancellation still wins.
+      signal.throwIfAborted()
+      return false
+    }
+    signal.throwIfAborted()
+    const sizeBytes = stored?.sizeBytes
+    return sizeBytes !== undefined && sizeBytes < SMALL_STORED_SESSION_BYTES
   }
 
   /**
@@ -373,9 +416,10 @@ export class SessionHistoryController {
   ): Promise<FollowOpening> {
     // Live Sessions keep the existing source path without an extra async hop.
     const windowSessionId = this.windowSessionId(request.address)
-    const windowOpening = windowSessionId === undefined
-      ? undefined
-      : await this.openWindow(windowSessionId, request, signal, ordinal)
+    let windowOpening: FollowOpening | undefined
+    if (windowSessionId !== undefined && !await this.isSmallStoredSource(windowSessionId, signal)) {
+      windowOpening = await this.openWindow(windowSessionId, request, signal, ordinal)
+    }
     if (windowOpening !== undefined) return windowOpening
     using source = await this.sourceFor(request.address, signal, true)
     const events = source.events

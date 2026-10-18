@@ -16,9 +16,10 @@ import type { SessionPersistence, SessionWindow, SessionWindowRequest } from '@d
 import * as JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
 import { generationLogPath } from '../src/format.ts'
 import { readWindowIndex, WINDOW_INDEX_VERSION, windowIndexPath } from '../src/window-index.ts'
+import type { ZstdFrameRange } from '../src/zstd.ts'
 import { meta } from '../../session-persistence/tests/contract.ts'
 
-const zstdProbe = vi.hoisted(() => ({ decompressCalls: 0 }))
+const zstdProbe = vi.hoisted(() => ({ decompressCalls: 0, decodedFrames: 0 }))
 
 vi.mock('../src/zstd.ts', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../src/zstd.ts')>()
@@ -27,6 +28,20 @@ vi.mock('../src/zstd.ts', async (importOriginal) => {
     async decompressZstdFrame(input: Buffer): Promise<Buffer> {
       zstdProbe.decompressCalls += 1
       return actual.decompressZstdFrame(input)
+    },
+    createZstdFrameDecoder(): ReturnType<typeof actual.createZstdFrameDecoder> {
+      const decoder = actual.createZstdFrameDecoder()
+      return {
+        *decode(source: Buffer, frames: readonly ZstdFrameRange[]): Generator<Buffer, void, void> {
+          for (const plaintext of decoder.decode(source, frames)) {
+            zstdProbe.decodedFrames += 1
+            yield plaintext
+          }
+        },
+        close(): void {
+          decoder.close()
+        },
+      }
     },
   }
 })
@@ -292,12 +307,13 @@ describe('JSONL durable generation index', () => {
     await store(persistence, large, largeEvents, 3)
 
     zstdProbe.decompressCalls = 0
+    zstdProbe.decodedFrames = 0
     expectWindow(await readWindow(persistence, small, { beforeSeq: 200, maxEvents: 10 }), smallEvents.slice(190, 200))
-    const smallBuild = zstdProbe.decompressCalls
-    zstdProbe.decompressCalls = 0
+    const smallBuild = zstdProbe.decodedFrames
+    zstdProbe.decodedFrames = 0
     expectWindow(await readWindow(persistence, large, { beforeSeq: 200, maxEvents: 10 }), largeEvents.slice(190, 200))
-    const largeBuild = zstdProbe.decompressCalls
-    // A build walks every frame: 100 and 300 event frames plus the header frame.
+    const largeBuild = zstdProbe.decodedFrames
+    // A build decodes every scanned frame once: 100 and 300 event frames plus the header frame.
     expect(smallBuild).toBeGreaterThanOrEqual(101)
     expect(largeBuild).toBeGreaterThanOrEqual(301)
 

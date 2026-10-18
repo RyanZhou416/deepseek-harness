@@ -1,5 +1,7 @@
-/** Isolated worker for cold Session phase, first-history, and Agent-resume benchmarks. */
+/** Isolated worker for cold Session phase, first-history, Agent-resume, and history-window benchmarks. */
 
+import { readdir, stat } from 'node:fs/promises'
+import { join } from 'node:path'
 import { performance } from 'node:perf_hooks'
 import { scheduler } from 'node:timers/promises'
 import { Context } from '@deepseek-ai/cordis'
@@ -13,6 +15,7 @@ import SessionStore, {
   SessionPreparation,
 } from '@deepseek-ai/dsh-session'
 import type { AgentHandle } from '@deepseek-ai/dsh-agent'
+import type { SessionWindow } from '@deepseek-ai/dsh-session-persistence'
 import * as JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
 import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import SessionQueryEngine from '@deepseek-ai/dsh-session-query'
@@ -32,7 +35,11 @@ import TokenMeter from '@deepseek-ai/dsh-token-meter'
 import { SessionHistoryController } from '../../packages/api/session-controller/src/history.ts'
 import { installModelSelectionProjection } from '../../packages/api/session-controller/src/model-selection-projection.ts'
 import { assertBuiltBenchmarkRuntime } from '../support/built-worker.ts'
-import { SYNTHETIC_SESSION_ID } from './session-open.constants.ts'
+import {
+  SYNTHETIC_SESSION_DIRECTORY,
+  SYNTHETIC_SESSION_ID,
+  WINDOW_BENCHMARK_MAX_EVENTS,
+} from './session-open.constants.ts'
 
 /** Worker scenario selected by the parent benchmark. */
 export type SessionOpenBenchmarkScenario =
@@ -40,6 +47,8 @@ export type SessionOpenBenchmarkScenario =
   | 'phase-steady'
   | 'first-history'
   | 'agent-resume'
+  | 'window-tail'
+  | 'window-beforeSeq'
 
 /** One post-GC process memory observation. */
 export interface BenchmarkMemorySnapshot {
@@ -58,6 +67,38 @@ export interface BenchmarkMemoryDelta {
   readonly rssMb: number
 }
 
+/** One timed history-window call, with the process CPU time spent over the same interval. */
+export interface SessionWindowEndpointReport {
+  /** Wall-clock duration of the call. */
+  readonly ms: number
+  /** Process CPU time consumed by the call. */
+  readonly cpuMs: number
+  /** Events the call returned. */
+  readonly events: number
+}
+
+/** History-window facts from one isolated scenario: the first call and its warm repeat. */
+export interface SessionWindowBenchmarkReport {
+  /** Newest tail read, or the first `beforeSeq` page that also builds the index. */
+  readonly first: SessionWindowEndpointReport
+  /** Repeat of the same request, warm from the page cache and (for `beforeSeq`) the sidecar. */
+  readonly second: SessionWindowEndpointReport
+  /** The fixture's complete durable event count the worker was started with. */
+  readonly totalEvents: number
+  /** Events the request must return: the window bound, clamped to the fixture. */
+  readonly expectedEvents: number
+  /** Seq of the oldest event the request must return. */
+  readonly expectedFirstSeq: number
+  /** Cursor the window reported for its newest returned event. */
+  readonly cursor: number
+  /** Whether events below the window remain, as the window reported it. */
+  readonly hasMore: boolean
+  /** Whether the first call created the durable index sidecar; absent for the index-free tail read. */
+  readonly indexCreated?: boolean
+  /** Whether the warm repeat left the created sidecar's size and mtime unchanged. */
+  readonly indexReused?: boolean
+}
+
 /** Timings and memory emitted by one isolated scenario. */
 export interface SessionOpenWorkerReport {
   readonly scenario: SessionOpenBenchmarkScenario
@@ -68,6 +109,7 @@ export interface SessionOpenWorkerReport {
     readonly sessionRestoreMs: number
     readonly projectionMs: number
   }
+  readonly window?: SessionWindowBenchmarkReport
   readonly cpuUserMs: number
   readonly cpuSystemMs: number
   readonly events: number
@@ -128,6 +170,55 @@ function memoryDelta(
   }
 }
 
+/** One durable artifact's identity; the index sidecar binds to size and mtime. */
+interface ArtifactIdentity {
+  readonly sizeBytes: number
+  readonly mtimeMs: number
+}
+
+async function sessionArtifacts(root: string): Promise<ReadonlyMap<string, ArtifactIdentity>> {
+  const directory = join(root, SYNTHETIC_SESSION_DIRECTORY)
+  const artifacts = new Map<string, ArtifactIdentity>()
+  for (const name of await readdir(directory)) {
+    const info = await stat(join(directory, name))
+    if (info.isFile()) artifacts.set(name, { sizeBytes: info.size, mtimeMs: info.mtimeMs })
+  }
+  return artifacts
+}
+
+async function readTimed(
+  read: () => Promise<SessionWindow | undefined>,
+): Promise<{ readonly window: SessionWindow | undefined; readonly timing: SessionWindowEndpointReport }> {
+  const started = performance.now()
+  const cpu = process.cpuUsage()
+  const window = await read()
+  const used = process.cpuUsage(cpu)
+  return {
+    window,
+    timing: { ms: performance.now() - started, cpuMs: (used.user + used.system) / 1_000, events: window?.events.length ?? 0 },
+  }
+}
+
+function requireExpectedWindow(
+  window: SessionWindow | undefined,
+  firstSeq: number,
+  count: number,
+  label: string,
+): SessionWindow {
+  if (window === undefined) throw new Error(`${label} returned no window; the fixture did not satisfy window validation`)
+  if (window.header.id !== SessionId(SYNTHETIC_SESSION_ID)) throw new Error(`${label} returned header ${window.header.id}`)
+  if (window.inheritedEventCount !== 0) throw new Error(`${label} reported inheritedEventCount ${String(window.inheritedEventCount)}`)
+  if (window.hasMore !== (firstSeq > 0)) throw new Error(`${label} reported hasMore=${String(window.hasMore)} for first seq ${String(firstSeq)}`)
+  if (window.events.length !== count) throw new Error(`${label} returned ${String(window.events.length)} events, expected ${String(count)}`)
+  for (const [index, event] of window.events.entries()) {
+    const expected = firstSeq + index
+    if (Number(event.seq) !== expected) throw new Error(`${label} event ${String(index)} has seq ${String(event.seq)}, expected ${String(expected)}`)
+  }
+  const last = firstSeq + count - 1
+  if (window.cursor !== last) throw new Error(`${label} returned cursor ${String(window.cursor)}, expected ${String(last)}`)
+  return window
+}
+
 async function installProjectionSet(ctx: Context, agentLoopOwnsBoundary: boolean): Promise<void> {
   // Mirrors projection owners mounted by the base and web-app bundles without timing profile boot.
   if (!agentLoopOwnsBoundary) ctx.sessionProjections.register(turnBoundaryProjectionDefinition)
@@ -154,11 +245,21 @@ class SessionBenchmarkHost {
   private constructor(
     private readonly ctx: Context,
     private readonly scenario: SessionOpenBenchmarkScenario,
+    private readonly root: string,
     private readonly history: SessionHistoryController | undefined,
+    private readonly fixtureEvents: number | undefined,
   ) {}
 
-  static async create(root: string, scenario: SessionOpenBenchmarkScenario): Promise<SessionBenchmarkHost> {
+  static async create(
+    root: string,
+    scenario: SessionOpenBenchmarkScenario,
+    fixtureEvents?: number,
+  ): Promise<SessionBenchmarkHost> {
     const ctx = new Context()
+    if (scenario === 'window-tail' || scenario === 'window-beforeSeq') {
+      await ctx.plugin(JsonlSessionPersistence, { root, compression: 'zstd' })
+      return new SessionBenchmarkHost(ctx, scenario, root, undefined, fixtureEvents)
+    }
     const agentScenario = scenario === 'agent-resume'
     if (agentScenario) await mountAgentLoopTestDependencies(ctx)
     else {
@@ -176,7 +277,7 @@ class SessionBenchmarkHost {
       })
     }
     if (agentScenario) await ctx.plugin(AgentLoop, { agents: [] })
-    return new SessionBenchmarkHost(ctx, scenario, history)
+    return new SessionBenchmarkHost(ctx, scenario, root, history, undefined)
   }
 
   async measure(): Promise<SessionOpenWorkerReport> {
@@ -192,6 +293,7 @@ class SessionBenchmarkHost {
       scenario: this.scenario,
       totalMs,
       ...measured.phases === undefined ? {} : { phases: measured.phases },
+      ...measured.window === undefined ? {} : { window: measured.window },
       cpuUserMs: cpu.user / 1_000,
       cpuSystemMs: cpu.system / 1_000,
       events: measured.events,
@@ -213,6 +315,7 @@ class SessionBenchmarkHost {
   private runScenario(): Promise<{
     readonly events: number
     readonly phases?: SessionOpenWorkerReport['phases']
+    readonly window?: SessionWindowBenchmarkReport
   }> {
     switch (this.scenario) {
       case 'phase-migrate':
@@ -222,6 +325,93 @@ class SessionBenchmarkHost {
         return this.measureFirstHistory()
       case 'agent-resume':
         return this.measureAgentResume()
+      case 'window-tail':
+        return this.measureWindowTail()
+      case 'window-beforeSeq':
+        return this.measureWindowBeforeSeq()
+    }
+  }
+
+  private requireFixtureEvents(): number {
+    const events = this.fixtureEvents
+    if (events === undefined) throw new Error(`${this.scenario} requires the fixture event count`)
+    return events
+  }
+
+  private readWindow(request: { readonly beforeSeq?: number } = {}): Promise<SessionWindow | undefined> {
+    const persistence = this.ctx.sessionPersistence
+    const readWindow = persistence.readWindow
+    if (readWindow === undefined) throw new Error('Session persistence does not implement window reads')
+    return readWindow.call(persistence, SessionId(SYNTHETIC_SESSION_ID), {
+      ...request,
+      maxEvents: WINDOW_BENCHMARK_MAX_EVENTS,
+    })
+  }
+
+  private expectedRange(): { readonly firstSeq: number; readonly count: number } {
+    const totalEvents = this.requireFixtureEvents()
+    const count = Math.min(WINDOW_BENCHMARK_MAX_EVENTS, totalEvents)
+    return { firstSeq: totalEvents - count, count }
+  }
+
+  private async measureWindowTail(): Promise<{
+    readonly events: number
+    readonly window: SessionWindowBenchmarkReport
+  }> {
+    const { firstSeq, count } = this.expectedRange()
+    const firstRead = await readTimed(() => this.readWindow())
+    const first = requireExpectedWindow(firstRead.window, firstSeq, count, 'newest tail window')
+    const secondRead = await readTimed(() => this.readWindow())
+    requireExpectedWindow(secondRead.window, firstSeq, count, 'warm newest tail window')
+    this.retained = first
+    return {
+      events: this.requireFixtureEvents(),
+      window: {
+        first: firstRead.timing,
+        second: secondRead.timing,
+        totalEvents: this.requireFixtureEvents(),
+        expectedEvents: count,
+        expectedFirstSeq: firstSeq,
+        cursor: first.cursor,
+        hasMore: first.hasMore,
+      },
+    }
+  }
+
+  private async measureWindowBeforeSeq(): Promise<{
+    readonly events: number
+    readonly window: SessionWindowBenchmarkReport
+  }> {
+    const totalEvents = this.requireFixtureEvents()
+    const before = await sessionArtifacts(this.root)
+    const firstRead = await readTimed(() => this.readWindow({ beforeSeq: totalEvents }))
+    const { firstSeq, count } = this.expectedRange()
+    const first = requireExpectedWindow(firstRead.window, firstSeq, count, 'cold beforeSeq window')
+    const afterFirst = await sessionArtifacts(this.root)
+    const created = [...afterFirst.keys()].filter(name => !before.has(name))
+    if (created.length !== 1) {
+      throw new Error(`cold beforeSeq window created ${String(created.length)} artifacts, expected one index sidecar`)
+    }
+    const sidecarName = created[0] as string
+    const sidecar = afterFirst.get(sidecarName) as ArtifactIdentity
+    const secondRead = await readTimed(() => this.readWindow({ beforeSeq: totalEvents }))
+    requireExpectedWindow(secondRead.window, firstSeq, count, 'warm beforeSeq window')
+    const afterSecond = await sessionArtifacts(this.root)
+    const warmSidecar = afterSecond.get(sidecarName)
+    this.retained = first
+    return {
+      events: totalEvents,
+      window: {
+        first: firstRead.timing,
+        second: secondRead.timing,
+        totalEvents,
+        expectedEvents: count,
+        expectedFirstSeq: firstSeq,
+        cursor: first.cursor,
+        hasMore: first.hasMore,
+        indexCreated: true,
+        indexReused: warmSidecar?.sizeBytes === sidecar.sizeBytes && warmSidecar.mtimeMs === sidecar.mtimeMs,
+      },
     }
   }
 
@@ -294,18 +484,25 @@ assertBuiltBenchmarkRuntime(import.meta.url, {
   '@deepseek-ai/dsh-session-persistence-jsonl': import.meta.resolve('@deepseek-ai/dsh-session-persistence-jsonl'),
 })
 
-const [root, scenarioValue] = process.argv.slice(2)
+const [root, scenarioValue, fixtureEventsValue] = process.argv.slice(2)
 const scenarios: readonly SessionOpenBenchmarkScenario[] = [
   'phase-migrate',
   'phase-steady',
   'first-history',
   'agent-resume',
+  'window-tail',
+  'window-beforeSeq',
 ]
 if (root === undefined || !scenarios.includes(scenarioValue as SessionOpenBenchmarkScenario)) {
-  throw new Error('usage: session-open.worker.js <root> <phase-migrate|phase-steady|first-history|agent-resume>')
+  throw new Error('usage: session-open.worker.js <root> <phase-migrate|phase-steady|first-history|agent-resume|window-tail|window-beforeSeq> [fixtureEvents]')
 }
 const scenario = scenarioValue as SessionOpenBenchmarkScenario
-const host = await SessionBenchmarkHost.create(root, scenario)
+const fixtureEvents = fixtureEventsValue === undefined ? undefined : Number(fixtureEventsValue)
+if ((scenario === 'window-tail' || scenario === 'window-beforeSeq')
+  && (fixtureEvents === undefined || !Number.isSafeInteger(fixtureEvents) || fixtureEvents < 1)) {
+  throw new Error(`${scenario} requires the dense fixture's positive event count`)
+}
+const host = await SessionBenchmarkHost.create(root, scenario, fixtureEvents)
 let report: SessionOpenWorkerReport
 try {
   report = await host.measure()

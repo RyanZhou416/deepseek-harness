@@ -75,6 +75,24 @@ interface BackendOptions {
   readonly turns?: number
   /** Store a fork-inherited generation, which the backend refuses to window. */
   readonly seeded?: boolean
+  /** Leave the real few-KB artifact size so the small-source bypass applies. */
+  readonly realSize?: boolean
+}
+
+/**
+ * Size the fixture reports above the history controller's small-source
+ * threshold. These generations are only a few KB on disk, which would send
+ * every windowed case to the complete read instead of the durable index.
+ */
+const LARGE_STORED_SOURCE_BYTES = 3 * 1024 * 1024
+
+/** Report the stored artifact large enough that the window path stays engaged. */
+function reportLargeStoredSource(backend: RealBackend): void {
+  const stat = backend.ctx.sessionPersistence.stat.bind(backend.ctx.sessionPersistence)
+  vi.spyOn(backend.ctx.sessionPersistence, 'stat').mockImplementation(async (id, options) => {
+    const snapshot = await stat(id, options)
+    return snapshot === undefined ? undefined : { ...snapshot, sizeBytes: LARGE_STORED_SOURCE_BYTES }
+  })
 }
 
 async function realBackend(options: BackendOptions = {}): Promise<RealBackend> {
@@ -114,7 +132,14 @@ async function realBackend(options: BackendOptions = {}): Promise<RealBackend> {
     await handle.close()
   }
   const history = new SessionHistoryController(ctx, (observation) => { observation[Symbol.dispose]() })
-  return { ctx, history, events, generationPath: logPath(logs, '/workspace', STORED, compression) }
+  const backend: RealBackend = {
+    ctx,
+    history,
+    events,
+    generationPath: logPath(logs, '/workspace', STORED, compression),
+  }
+  if (options.realSize !== true) reportLargeStoredSource(backend)
+  return backend
 }
 
 async function loadPage(
@@ -350,8 +375,28 @@ describe('Session history paging through the real JSONL generation index', () =>
     expect(readWindow).toHaveBeenCalledOnce()
   })
 
-  it('falls back to the exact observation when the real window carries no projection baseline', async () => {
-    const backend = await realBackend()
+  it('skips the stored window for a small artifact and reads the complete source', async () => {
+    const backend = await realBackend({ realSize: true })
+    const stored = await backend.ctx.sessionPersistence.stat(STORED)
+    // The real artifact is far below the documented 2 MiB bypass threshold.
+    expect(stored?.sizeBytes).toBeLessThan(2 * 1024 * 1024)
+    const readWindow = vi.spyOn(backend.ctx.sessionQuery, 'readWindow')
+    const open = vi.spyOn(backend.ctx.sessionPersistence, 'open')
+    const tail = backend.events.length - 1
+    const request = { throughSeq: tail, beforeSeq: tail + 1, maxMessages: 2 }
+
+    const page = await loadPage(backend.history, request)
+    const frame = await openSnapshot(backend.history, { maxMessages: 2 })
+
+    expect(pageSeqs(page)).toEqual([13, 14, 15, 16, 17])
+    expect(page.hasMore).toBe(true)
+    expect(frame.cursor).toBe(tail)
+    expect(readWindow).not.toHaveBeenCalled()
+    // The complete read runs through the handle-based observation path.
+    expect(open).toHaveBeenCalled()
+  })
+
+  it('falls back to the exact observation when the real window carries no projection baseline', async () => {    const backend = await realBackend()
     const readWindow = vi.spyOn(backend.ctx.sessionQuery, 'readWindow')
     const observe = vi.spyOn(backend.ctx.sessionQuery, 'observeSession')
 

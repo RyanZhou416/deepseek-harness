@@ -587,9 +587,9 @@ Lexical 的 history 在每个窗口内合并连续输入，而窗口从上一次
 
 ### Stored history window reads
 
-`SessionPersistence.readWindow` 是可选能力；JSONL 后端为当前代际提供尾部窗口和 `beforeSeq` 窗口。尾部窗口不依赖索引，只扫描 zstd 帧边界并解码尾部帧；`beforeSeq` 使用代际旁的 `<generation>.window-index.json`（按帧/行段记录 offset、firstRow、firstSeq、events，源 size/mtime 绑定，原子发布，缺失/过期/损坏时完整重建），只读取选中段。v4 解码器支持 `{rowIndex, eventCount, partial}` 种子起点；窗口校验选中行，完整跨事件关系校验仍属于 open/write/resume。seeded、历史代际、无效边界、帧/行不连续或无法建立索引时返回 `undefined`，history 回退完整读取。真实 161 MB / 182,347 事件会话实测：尾部 2000 事件约 0.21–0.34 s，首次 `beforeSeq` 含一次性建索引约 12–14 s，索引预热后 2000 事件页约 0.14–0.16 s，完整读取约 2.75–2.91 s；小日志的尾部窗口可能慢于完整读取，消费方应允许回退。
+`SessionPersistence.readWindow` 是可选能力；JSONL 后端为当前代际提供尾部窗口和 `beforeSeq` 窗口。尾部窗口不依赖索引，只扫描 zstd 帧边界并解码尾部帧；`beforeSeq` 使用代际旁的 `<generation>.window-index.json`（按帧/行段记录 offset、firstRow、firstSeq、events，源 size/mtime 绑定，原子发布，缺失/过期/损坏时完整重建），只读取选中段。索引重建用一次同步多帧解码（`createZstdFrameDecoder`）遍历完整 generation，不再逐帧 await 解压。真实 161 MB / 182,347 事件会话 phase-3 实测：首次 `beforeSeq` 页 2,166.6 ms（其中建索引约 2,010.9 ms，旧 phase-2 建索引约 14.1 s），预热 2000 事件页 155.7–182.8 ms，完整读取 3,198.5 ms，因此冷首次页约为一次完整读取的 0.68 倍；建索引的解压阶段单独为 447.5 ms。进程已保留约 1.3 GB 完整读取内存时，首次页可慢到约 3.28 s。全部尾部/预热/92 页窗口都与完整读取切片逐事件相等，sidecar 与 phase-2 构建结果逐字节相同。v4 解码器支持 `{rowIndex, eventCount, partial}` 种子起点；窗口校验选中行，完整跨事件关系校验仍属于 open/write/resume。seeded、历史代际、无效边界、帧/行不连续或无法建立索引时返回 `undefined`，history 回退完整读取。该构建仍同步发生在读取进程内，没有后台或并行预建。history 在存储来源小于 2 MiB 时跳过窗口、直接完整读取（949 KB 日志的尾部窗口实测 80–98 ms，慢于完整读取 26 ms）；stat 缺失、无大小或失败时保留窗口路径。`benchmarks/session-open/` 的 `session-open/window/tail` 与 `session-open/window/beforeSeq` 真实执行 `readWindow`：tsc host 检查通过、2/2 用例通过，32k 事件夹具上尾部约 198 ms、冷 `beforeSeq` 约 2,470 ms、预热约 126 ms；用例断言窗口结构与索引复用，不设墙钟预算，因此审计与 benchmark 数字都不是 CI 性能门禁。
 
-**Preservation rule.** 上游合并后必须保留 `readWindow` 的可选回退语义、代际索引的 size/mtime 绑定与原子重建、窗口只做选中行校验（不得冒充完整 replay），以及 seeded/历史/损坏日志的完整读取回退。索引是派生缓存而不是事实来源：删除后只能触发重建，不能改写或删除源 generation。不要为窗口读取引入常驻多会话缓存。
+**Preservation rule.** 上游合并后必须保留 `readWindow` 的可选回退语义、代际索引的 size/mtime 绑定与原子重建、窗口只做选中行校验（不得冒充完整 replay）、seeded/历史/损坏日志的完整读取回退，以及小于 2 MiB 存储来源的完整读取旁路（`stat` 缺失、无大小或失败时保留窗口路径）。索引是派生缓存而不是事实来源：删除后只能触发重建，不能改写或删除源 generation。不要为窗口读取引入常驻多会话缓存。
 
 **Focused verification.** `packages/session/session-persistence-jsonl/tests/window*.spec.ts`、`packages/session-query/session-query/tests/window*.spec.ts`、`packages/api/session-controller/tests/*window*.host.spec.ts` 覆盖尾部/分页、索引重建、损坏/过期回退、投影完整性、真实后端 loadOlder 以及完整读取回退。
 
@@ -778,7 +778,7 @@ Profile 注册 `dsh-sdk-process-raw` 和 `subagent_process`：SDK profile、独�
 | Cold-read event-loop slices | Preserve | Keep cold-read decode and stored-event adoption slices at 50 ms with the whole-log type check before per-event adoption, unless upstream bounds them equally or tighter |
 | Five-minute idle Agent eviction | Preserve | Require opening-only follower pin, child/inbox/job exclusions, flush + persistence proof and cold resume |
 | History follow opening release | Preserve | Require window-first opening for non-live ordinary Sessions with complete checkpoint proof, bounded opening output, full-observation fallback/release, promotion ownership and gap-free delivery across eviction |
-| Stored history window reads / generation index | Preserve | Keep the optional `readWindow` fallback contract, index-free tail, size/mtime-bound atomic index rebuild, selected-row validation only (never a complete replay claim), and seeded/historical/corrupt full-read fallback; the sidecar is derived, never a source of truth |
+| Stored history window reads / generation index | Preserve | Keep the optional `readWindow` fallback contract, index-free tail, size/mtime-bound atomic index rebuild, selected-row validation only (never a complete replay claim), seeded/historical/corrupt full-read fallback, and the small-source complete-read bypass; the sidecar is derived, never a source of truth |
 | Reference-owned Client Session generations | Replaced by official references | Keep final-release withdrawal and projection-store retention; do not restore `suspendHistory()` |
 | 20k final-message packed rebase | Replaced by cursorless Assistant frames | Keep official transient-stream settlement; do not restore scalar chunk accumulation |
 | Tool output/card lazy calculation | Ported onto RC.1 | Preserve generic output-on-expand and card-array laziness; official already defers input formatting |
@@ -932,7 +932,7 @@ corepack pnpm@10.30.2 verify
 ## Known limitations
 
 - 运行中的 Agent 仍完整持有 Host `Session.log`；一个持续输出的单会话仍可能线性增长。`SessionHandle.read(offset, length)` 目前也先解码整份 JSONL/Zstd 再切片；非 live 普通 Session 的 follow 首帧和旧页已走窗口读取，但 live、seeded、历史代际、无完整 projection checkpoint 或索引不可用时仍回退完整观察，因此不是运行中 Agent 的 event-level paging。后续实现须先满足[同步事件读取弃用约束](.agents/notes/implemented/architecture/2026-09-09-deprecate-synchronous-session-event-reads.md)，不能只给 `read()` 增加分页参数。
-- 大会话首次 `beforeSeq` 会同步构建代际索引：161 MB / 182,347 事件实测 12–14 s，显著慢于一次完整读取（2.75–2.91 s）；预热后 2000 事件页约 138–161 ms，尾部窗口约 213–337 ms。每个 warm page 重新解析约 7.3 MB sidecar，没有常驻 index cache；小日志的 index-free tail 可能慢于完整读取（949 KB：80–98 ms vs 26 ms）。后台预建/并行建索引和真实 benchmark 仍是 deferred，当前 benchmark 数字来自一次性真实 Session 审计，不是 CI 门禁。
+- 大会话首次 `beforeSeq` 仍在读取进程内同步构建代际索引，没有后台或并行预建：phase-3 在 161 MB / 182,347 事件上实测首次页 2,166.6 ms（建索引约 2,010.9 ms，旧 phase-2 约 14.1 s），预热 2000 事件页 155.7–182.8 ms，完整读取 3,198.5 ms；进程已保留约 1.3 GB 时首次页可慢到约 3.28 s。每个 warm page 重新解析约 7.3 MB sidecar，没有常驻 index cache；小于 2 MiB 的日志由 history 直接完整读取，因为无索引尾部可能慢于完整读取（949 KB：80–98 ms vs 26 ms）。`benchmarks/session-open/` 的尾部与 `beforeSeq` 用例真实执行 `readWindow`（tsc host 通过、2/2 通过；32k 事件夹具上尾部约 198 ms、冷 `beforeSeq` 约 2,470 ms、预热约 126 ms），断言窗口结构与索引复用，不设墙钟预算，因此不是 CI 性能门禁。
 - Alpha.2 已显著降低长会话初始化、流式更新、代码高亮、布局与导航预览成本，但仍不等价于完整 variable-height Chat virtualization；Tool lazy 也不能替代它。
 - Host 的普通 Agent loop 仍主要运行在一个 Node event loop；process worker 是显式 one-shot 旁路，不是透明的全局多核调度。
 - 第一次不同的 broad SQLite query 仍可能同步占用一个 Host thread。
