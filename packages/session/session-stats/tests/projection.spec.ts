@@ -53,6 +53,7 @@ function appendEmptyAssistantMessage(session: Session, turn: number, step: numbe
 function totals(overrides: Partial<SessionStatsProjection> = {}): SessionStatsProjection {
   return {
     turns: 0, steps: 0, llmMs: 0, toolMs: 0, ttftMs: 0, ttftSteps: 0, decodeMs: 0, decodeTokens: 0,
+    lastTurnSpeedTurn: null, lastTurnSpeedDecodeMs: 0, lastTurnSpeedDecodeTokens: 0,
     ...overrides,
   }
 }
@@ -226,9 +227,10 @@ describe('sessionStats wall-time fold (controlled timestamps)', () => {
     time: number,
     chunks: readonly { readonly time: number; readonly chunk: StreamChunk }[] = [],
     usage?: TokenUsage,
+    turn = 1,
   ): SessionEvent {
     return at(time, 'assistant/message', {
-      turn: 1,
+      turn,
       step: 1,
       message,
       stream: chunks.map(member => ({ type: 'chunk', ...member })),
@@ -245,6 +247,21 @@ describe('sessionStats wall-time fold (controlled timestamps)', () => {
       at(4_900, 'step/end', { turn: 1, step: 1 }),
     ])).toEqual(totals({
       turns: 1, steps: 1, llmMs: 3_800, ttftMs: 800, ttftSteps: 1, decodeMs: 3_000, decodeTokens: 60,
+      lastTurnSpeedTurn: 1, lastTurnSpeedDecodeMs: 3_000, lastTurnSpeedDecodeTokens: 60,
+    }))
+  })
+
+  it('keeps the latest measurable turn while the next turn has no message yet', () => {
+    expect(fold([
+      at(1_000, 'step/start', { turn: 1, step: 1 }),
+      messageAt(1_800, [{
+        time: 1_200, chunk: { type: 'text-delta', index: 0, text: 'a' },
+      }], { inputTokens: 10, outputTokens: 60 }),
+      at(1_900, 'step/end', { turn: 1, step: 1 }),
+      at(3_000, 'step/start', { turn: 2, step: 1 }),
+    ])).toEqual(totals({
+      turns: 1, steps: 1, llmMs: 800, ttftMs: 200, ttftSteps: 1, decodeMs: 600, decodeTokens: 60,
+      lastTurnSpeedTurn: 1, lastTurnSpeedDecodeMs: 600, lastTurnSpeedDecodeTokens: 60,
     }))
   })
 

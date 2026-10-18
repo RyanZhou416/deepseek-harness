@@ -159,9 +159,10 @@ describe('composer stats pills', () => {
   const USAGE = { uncachedInputTokens: 10, outputTokens: 5, cacheReadTokens: 90, cacheWriteTokens: 0 }
 
   /** A whole-log sessionStats value: zeros plus overrides. */
-  function sessionStats(overrides: Record<string, number>): Record<string, number> {
+  function sessionStats(overrides: Record<string, number | null>): Record<string, number | null> {
     return {
       turns: 0, steps: 0, llmMs: 0, toolMs: 0, ttftMs: 0, ttftSteps: 0, decodeMs: 0, decodeTokens: 0,
+      lastTurnSpeedTurn: null, lastTurnSpeedDecodeMs: 0, lastTurnSpeedDecodeTokens: 0,
       ...overrides,
     }
   }
@@ -312,6 +313,20 @@ describe('composer stats pills', () => {
     fireEvent.click(view.getAllByRole('button')[0]!)
     const details = view.getByRole('dialog').querySelector('[data-session-stats-details]') as HTMLElement
     expect(details.textContent).toContain('This turn TPS25 tok/s')
+  })
+
+  it('uses the durable projection turn speed when the window has no timed nodes', () => {
+    const { source } = makeSource({ nodes: [assistant(1, 1)] })
+    const view = render(<StatsPills {...props(source, {
+      tokenUsage: USAGE,
+      sessionStats: sessionStats({
+        turns: 1, steps: 1, decodeMs: 3_000, decodeTokens: 60,
+        lastTurnSpeedTurn: 1, lastTurnSpeedDecodeMs: 3_000, lastTurnSpeedDecodeTokens: 60,
+      }),
+    })} />)
+    fireEvent.click(view.getAllByRole('button')[0]!)
+    const details = view.getByRole('dialog').querySelector('[data-session-stats-details]') as HTMLElement
+    expect(details.textContent).toContain('This turn TPS20 tok/s')
   })
 
   it('click-opens the token-usage dialog carrying the headline total and exact buckets', () => {

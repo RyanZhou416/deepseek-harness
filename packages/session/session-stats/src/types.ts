@@ -36,6 +36,16 @@ export interface SessionStatsProjection {
   decodeMs: number
   /** Summed provider output tokens over the same decode-timed steps. */
   decodeTokens: number
+  /**
+   * Host turn number of the latest measurable turn. Checkpoints written before
+   * this field existed are parsed with the default `null`; consumers then fall
+   * back to the paged window.
+   */
+  lastTurnSpeedTurn: number | null
+  /** Decode wall time of that latest measurable turn, ms. */
+  lastTurnSpeedDecodeMs: number
+  /** Provider output tokens of that latest measurable turn. */
+  lastTurnSpeedDecodeTokens: number
 }
 
 declare module '@deepseek-ai/dsh-session-projection/types' {

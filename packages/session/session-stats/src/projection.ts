@@ -47,6 +47,12 @@ interface SessionStatsTotals {
   decodeMs: number
   /** Summed provider output tokens over the same steps. */
   decodeTokens: number
+  /** Turn number of the latest measurable turn, when one exists. */
+  lastTurnSpeedTurn: number | null
+  /** Decode wall time of that turn, ms. */
+  lastTurnSpeedDecodeMs: number
+  /** Provider output tokens of that turn. */
+  lastTurnSpeedDecodeTokens: number
 }
 
 /**
@@ -62,6 +68,12 @@ interface SessionStatsState extends SessionStatsTotals {
   openStep: { turn: number; step: number; startTime: number; firstTokenTime: number | null } | null
   /** Dispatch times of tool calls whose result has not landed, by callId. */
   pendingCalls: Record<string, number>
+  /** Turn whose decode figures are being accumulated, when any. */
+  turnSpeedTurn: number | null
+  /** Accumulated decode time for that turn, ms. */
+  turnSpeedDecodeMs: number
+  /** Accumulated output tokens for that turn. */
+  turnSpeedDecodeTokens: number
 }
 
 declare module '@deepseek-ai/dsh-session-projection/types' {
@@ -79,6 +91,9 @@ const sessionStatsSchema = z.object({
   ttftSteps: z.number().int().nonnegative(),
   decodeMs: z.number().nonnegative(),
   decodeTokens: z.number().nonnegative(),
+  lastTurnSpeedTurn: z.number().int().nonnegative().nullable().default(null),
+  lastTurnSpeedDecodeMs: z.number().nonnegative().default(0),
+  lastTurnSpeedDecodeTokens: z.number().nonnegative().default(0),
 }).strict()
 
 /**
@@ -96,6 +111,9 @@ const sessionStatsStateSchema = sessionStatsSchema.extend({
     firstTokenTime: z.number().nonnegative().nullable(),
   }).nullable(),
   pendingCalls: z.record(z.string(), z.number().nonnegative()),
+  turnSpeedTurn: z.number().int().nonnegative().nullable().default(null),
+  turnSpeedDecodeMs: z.number().nonnegative().default(0),
+  turnSpeedDecodeTokens: z.number().nonnegative().default(0),
 })
 
 /**
@@ -125,6 +143,9 @@ function statsView(state: SessionStatsState): SessionStatsTotals {
     ttftSteps: state.ttftSteps,
     decodeMs: state.decodeMs,
     decodeTokens: state.decodeTokens,
+    lastTurnSpeedTurn: state.lastTurnSpeedTurn ?? null,
+    lastTurnSpeedDecodeMs: state.lastTurnSpeedDecodeMs ?? 0,
+    lastTurnSpeedDecodeTokens: state.lastTurnSpeedDecodeTokens ?? 0,
   }
   statsViews.set(state, value)
   return value
@@ -154,15 +175,26 @@ export const sessionStatsProjectionDefinition = {
     lastTurn: null,
     openStep: null,
     pendingCalls: {},
+    turnSpeedTurn: null,
+    turnSpeedDecodeMs: 0,
+    turnSpeedDecodeTokens: 0,
+    lastTurnSpeedTurn: null,
+    lastTurnSpeedDecodeMs: 0,
+    lastTurnSpeedDecodeTokens: 0,
   }),
   apply: (state, event) => {
     // Every uninteresting event returns the same reference (Object.is gates the change feed).
     switch (event.type) {
-      case 'step/start':
+      case 'step/start': {
+        const continuingTurn = state.turnSpeedTurn === event.data.turn
         return nextStatsState(state, {
           ...state,
           openStep: { turn: event.data.turn, step: event.data.step, startTime: event.time, firstTokenTime: null },
+          turnSpeedTurn: event.data.turn,
+          turnSpeedDecodeMs: continuingTurn ? state.turnSpeedDecodeMs ?? 0 : 0,
+          turnSpeedDecodeTokens: continuingTurn ? state.turnSpeedDecodeTokens ?? 0 : 0,
         })
+      }
       case 'assistant/attempt': {
         const open = state.openStep
         if (open === null || open.turn !== event.data.turn || open.step !== event.data.step) return state
@@ -186,8 +218,17 @@ export const sessionStatsProjectionDefinition = {
           next.ttftSteps += 1
           const outputTokens = usageOutputTokens(event.data.usage)
           if (outputTokens !== null) {
-            next.decodeMs += Math.max(0, event.time - firstToken)
+            const decodeMs = Math.max(0, event.time - firstToken)
+            next.decodeMs += decodeMs
             next.decodeTokens += outputTokens
+            const currentMs = (state.turnSpeedTurn === open.turn ? state.turnSpeedDecodeMs ?? 0 : 0) + decodeMs
+            const currentTokens = (state.turnSpeedTurn === open.turn ? state.turnSpeedDecodeTokens ?? 0 : 0) + outputTokens
+            next.turnSpeedTurn = open.turn
+            next.turnSpeedDecodeMs = currentMs
+            next.turnSpeedDecodeTokens = currentTokens
+            next.lastTurnSpeedTurn = open.turn
+            next.lastTurnSpeedDecodeMs = currentMs
+            next.lastTurnSpeedDecodeTokens = currentTokens
           }
         }
         return nextStatsState(state, next)

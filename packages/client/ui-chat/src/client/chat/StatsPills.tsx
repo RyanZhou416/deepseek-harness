@@ -36,6 +36,12 @@ interface WindowStats {
   decodeMs: number
   /** Summed output tokens over the same decode-timed steps. */
   decodeTokens: number
+  /** Latest measurable turn from the durable projection, when present. */
+  lastTurnSpeedTurn?: number | null
+  /** Decode wall time of that turn, ms. */
+  lastTurnSpeedDecodeMs?: number
+  /** Output tokens of that turn. */
+  lastTurnSpeedDecodeTokens?: number
 }
 
 /**
@@ -122,6 +128,19 @@ export function latestTurnSpeed(nodes: ChatSnapshot['legacy']['nodes']): TurnSpe
   if (latestTurn === undefined) return null
   const totals = turns.get(latestTurn) as { decodeMs: number; decodeTokens: number }
   return { turn: latestTurn, tps: totals.decodeTokens / (totals.decodeMs / 1_000) }
+}
+
+/**
+ * Read the durable projection's last measurable turn.
+ * @param stats - whole-log stats, with the optional turn-speed fields.
+ * @returns the turn speed, or null when this checkpoint predates the fields.
+ */
+function projectedTurnSpeed(stats: WindowStats): TurnSpeed | null {
+  const turn = stats.lastTurnSpeedTurn
+  const decodeMs = stats.lastTurnSpeedDecodeMs ?? 0
+  const decodeTokens = stats.lastTurnSpeedDecodeTokens ?? 0
+  if (turn === undefined || turn === null || decodeMs <= 0 || decodeTokens <= 0) return null
+  return { turn, tps: decodeTokens / (decodeMs / 1_000) }
 }
 
 /**
@@ -279,7 +298,10 @@ export const ActivityPill = memo(function ActivityPill({ useChat, useProjection,
   const mode = usePerformanceUsage(value => value)
   const stats = useSessionStats(useChat, useProjection)
   const settledNodes = useChat(s => s.legacy.nodes)
-  const turnSpeed = useMemo(() => latestTurnSpeed(settledNodes), [settledNodes])
+  const turnSpeed = useMemo(
+    () => projectedTurnSpeed(stats) ?? latestTurnSpeed(settledNodes),
+    [stats, settledNodes],
+  )
   const speed = stats.decodeMs > 0 ? decodeSpeed(stats, t) : null
   const icon = <IconGaugeOutlineRegular />
   if (mode === 'compact') return speed === null ? null : <PlainPill stat="activity" icon={icon} label={speed} />

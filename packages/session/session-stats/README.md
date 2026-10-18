@@ -45,8 +45,9 @@ Mount the plugin beside the session store and the projection registry when clien
 | `toolMs` | Summed matched `tool/call` → `tool/result` wall time |
 | `ttftMs` / `ttftSteps` | Summed first-token latency and the steps carrying it |
 | `decodeMs` / `decodeTokens` | Summed decode wall time and provider output tokens over usage-reporting steps |
+| `lastTurnSpeedTurn` / `lastTurnSpeedDecodeMs` / `lastTurnSpeedDecodeTokens` | The latest turn that actually recorded decode boundaries and output tokens; survives paging and keeps the previous measurable turn visible while the next one streams. `null` / `0` until one exists |
 
-Every field is 0 until its first contributing event; the composed registry always serves the key, so clients read the value rather than key presence. Clients render whole-log figures through the projection seam's snapshot and change feed; the reference consumer is the web chat stats strip, whose window fold mirrors these field names as its no-unit fallback.
+Every field is 0 (or `null` for `lastTurnSpeedTurn`) until its first contributing event; the composed registry always serves the key, so clients read the value rather than key presence. Clients render whole-log figures through the projection seam's snapshot and change feed; the reference consumer is the web chat stats strip, whose window fold mirrors these field names as its no-unit fallback and reads the latest-turn fields for its separate "this turn" TPS row.
 
 ### Failures and recovery
 
@@ -76,7 +77,7 @@ The unit is a pure fold over committed session events: `step/end` is the counted
 
 ### Data model
 
-The fold state holds the eight totals plus in-flight boundaries: `lastTurn` (turn of the last counted `step/end`), `openStep` (the open step's boundary facts, closed by its `assistant/message`), and `pendingCalls` (tool dispatch times by callId). The wire view is a strict subset — the eight totals — so the persisted-cache state schema extends the view schema with the boundary fields.
+The fold state holds the eleven wire figures plus in-flight boundaries: `lastTurn` (turn of the last counted `step/end`), `openStep` (the open step's boundary facts, closed by its `assistant/message`), `pendingCalls` (tool dispatch times by callId), and the current turn-speed accumulator. The wire view is a strict subset — the eleven totals — so the persisted-cache state schema extends the view schema with the boundary and accumulator fields.
 
 ### Fold rules
 

@@ -45,8 +45,9 @@ kind: "package-reference"
 | `toolMs` | 匹配的 `tool/call` → `tool/result` 墙钟时间之和 |
 | `ttftMs` / `ttftSteps` | 首 token 延迟之和及其承载步数 |
 | `decodeMs` / `decodeTokens` | 上报用量的步的解码墙钟时间与提供方输出 token 之和 |
+| `lastTurnSpeedTurn` / `lastTurnSpeedDecodeMs` / `lastTurnSpeedDecodeTokens` | 最近一个真正记录了 decode 边界与输出 token 的轮次；分页与压缩不会改变它，新一轮流式输出期间仍保留上一个可测量轮次。尚不存在时为 `null` / `0` |
 
-每个字段在首个贡献事件之前均为 0；已装配的注册表恒提供该键，因此客户端读取值本身，而非键的存在性。客户端通过投影 seam 的快照与变更流渲染全日志数字；参考消费者是 Web 聊天统计条，其窗口折叠以相同字段名充当无单元时的回退。
+每个字段在首个贡献事件之前均为 0（`lastTurnSpeedTurn` 为 `null`）；已装配的注册表恒提供该键，因此客户端读取值本身，而非键的存在性。客户端通过投影 seam 的快照与变更流渲染全日志数字；参考消费者是 Web 聊天统计条，其窗口折叠以相同字段名充当无单元时的回退，并读取最近轮次字段渲染独立的“本轮输出速度”。
 
 ### 失败与恢复
 
@@ -76,7 +77,7 @@ kind: "package-reference"
 
 ### 数据模型
 
-折叠状态保存八个总计外加进行中的边界：`lastTurn`（最近一次被计数 `step/end` 的轮次）、`openStep`（打开步的边界事实，由其 `assistant/message` 关闭）与 `pendingCalls`（按 callId 记录的工具分发时间）。wire 视图是严格子集——八个总计——因此持久缓存的状态 schema 以边界字段扩展视图 schema。
+折叠状态保存十一个 wire 数字外加进行中的边界：`lastTurn`（最近一次被计数 `step/end` 的轮次）、`openStep`（打开步的边界事实，由其 `assistant/message` 关闭）、`pendingCalls`（按 callId 记录的工具分发时间）以及当前轮次速度累加器。wire 视图是严格子集——十一个总计——因此持久缓存的状态 schema 以边界与累加器字段扩展视图 schema。
 
 ### 折叠规则
 
