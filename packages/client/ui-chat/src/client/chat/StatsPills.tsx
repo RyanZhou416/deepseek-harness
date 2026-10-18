@@ -187,28 +187,21 @@ export interface StatPillProps extends InjectFace<PerformanceUsageInjected> {
   useProjection: UseProjection
   /**
    * Whole-log projection readiness for the bound Session. Bare presentation
-   * fixtures omit the seat; it is then treated as before any exact cut, so no
-   * unavailable/loading pill is fabricated.
+   * fixtures may omit the seat; a bound Session always supplies it. Without
+   * the seat, values render as they did before readiness existed (a fixture
+   * has no deferred read to describe); with it, a non-exact generation never
+   * presents cached or window-scoped values as whole-session values.
    */
   useProjectionAvailability?: SnapshotSelectorHook<SessionSnapshot['projectionAvailability']>
   /**
    * Request exact whole-log projections. Only the explicit user action that
-   * opens a statistics dialog calls it; the pills never request on mount.
+   * opens a statistics surface or clicks a non-exact value calls it; the
+   * pills never request on mount.
    */
   requestExactProjections?: () => void
   /** The owning dock's locale seat. */
   t: Translate
 }
-
-/** Availability read in bare presentation fixtures: nothing exact was served yet. */
-const FIXTURE_AVAILABILITY: SessionSnapshot['projectionAvailability'] = {
-  state: 'unavailable',
-  reason: 'opening-absent',
-}
-
-/** Hook-shaped fallback keeping the call order stable when a fixture supplies no seat. */
-const FIXTURE_AVAILABILITY_HOOK: NonNullable<StatPillProps['useProjectionAvailability']> =
-  selector => selector(FIXTURE_AVAILABILITY)
 
 /** Dock entry id carried as `data-composer-stat` on each pill. */
 type StatId = 'activity' | 'usage'
@@ -258,6 +251,22 @@ function PlainPill({ stat, icon, label }: PillContent) {
         {icon}
         <span className={css.label}>{label}</span>
       </span>
+    </span>
+  )
+}
+
+/**
+ * A pill carrying one explicit action instead of a reading: used where a
+ * cached hint exists but the generation has no exact cut, so clicking requests
+ * the exact whole-log value rather than presenting the hint as exact.
+ */
+function ActionPill({ stat, icon, label, onClick }: PillContent & { label: string; onClick: () => void }) {
+  return (
+    <span className={css.anchor} data-composer-stat={stat}>
+      <button type="button" className={css.pill} aria-label={label} onClick={onClick}>
+        {icon}
+        <span className={css.label}>{label}</span>
+      </button>
     </span>
   )
 }
@@ -389,21 +398,38 @@ export const UsagePill = memo(function UsagePill({
 }: StatPillProps) {
   const mode = usePerformanceUsage(value => value)
   const usage = useProjection('tokenUsage')
-  const availability = (useProjectionAvailability ?? FIXTURE_AVAILABILITY_HOOK)(value => value)
+  // Without the readiness seat this is a bare fixture with no deferred read;
+  // with it, only `exact` may present a whole-session total.
+  const availability = useProjectionAvailability === undefined ? undefined : useProjectionAvailability(value => value)
   const icon = <IconDatabaseOutlineRegular />
-  // Gated on actual token activity: a session whose steps all settled without
-  // billing (e.g. every request failed) shows no usage pill. While the key is
-  // absent, only the deferred read's own state is presentable — never a total
-  // derived from the paged window.
-  if (usage === undefined || (billedInputTokens(usage) === 0 && usage.outputTokens === 0)) {
+  const hasActivity = usage !== undefined
+    && (billedInputTokens(usage) > 0 || usage.outputTokens > 0)
+  if (availability !== undefined && availability.state !== 'exact') {
+    // A cached hint or a window-scoped fold is not a whole-session total. Show
+    // the deferred read's own state, and let an explicit click request the cut
+    // instead of rendering the hint as exact.
     if (availability.state === 'loading') {
       return <PlainPill stat="usage" icon={icon} label={t('stats.usageLoading')} />
     }
-    if (availability.state === 'unavailable' && availability.reason !== 'opening-absent') {
+    if (hasActivity) {
+      return (
+        <ActionPill
+          stat="usage"
+          icon={icon}
+          label={t('stats.usageUnavailable')}
+          onClick={() => { requestExactProjections?.() }}
+        />
+      )
+    }
+    if (availability.reason !== 'opening-absent') {
       return <PlainPill stat="usage" icon={icon} label={t('stats.usageUnavailable')} />
     }
     return null
   }
+  // Gated on actual token activity: a session whose steps all settled without
+  // billing (e.g. every request failed) shows no usage pill. While the key is
+  // absent, only an exact cut can supply a whole-session total.
+  if (!hasActivity || usage === undefined) return null
   const cacheHit = cacheHitPercent(usage)
   const cacheHitText = cacheHit !== null ? t('stats.cacheHit', { percent: cacheHit }) : null
   if (mode === 'compact') {

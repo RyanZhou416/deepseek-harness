@@ -178,10 +178,13 @@ describe('composer stats pills', () => {
   /** Window-first opening: no exact cut was served, and no surface has requested one yet. */
   const BEFORE_REQUEST: Availability = { state: 'unavailable', reason: 'opening-absent' }
 
+  /** A generation whose exact whole-log cut already arrived (a completed deferred read or cache hit). */
+  const EXACT: Availability = { state: 'exact', asOfSeq: 12 }
+
   function props(
     source: { getSnapshot(): ChatSnapshot; subscribe(fn: () => void): () => void },
     values: Record<string, unknown> = { tokenUsage: USAGE },
-    availability: Availability = BEFORE_REQUEST,
+    availability: Availability = EXACT,
     requestExactProjections: () => void = () => {},
   ): StatPillProps {
     return {
@@ -489,9 +492,31 @@ describe('composer stats pills', () => {
     expect(unavailable.container.textContent).toContain('Token usage unavailable')
     // Before any request an absent key stays invisible: sessionStats keeps the
     // window fallback on the activity pill, and no usage pill is invented.
-    const beforeRequest = render(<StatsPills {...props(source, {})} />)
+    const beforeRequest = render(<StatsPills {...props(source, {}, BEFORE_REQUEST)} />)
     expect(beforeRequest.container.textContent).toContain('1 turns 2 steps')
     expect(beforeRequest.container.textContent).not.toContain('Token usage')
+  })
+
+  it('never presents a cached token total as exact before the deferred read completes', () => {
+    // The window/list hints can carry tokenUsage before any exact cut exists.
+    // It must stay a hint: no total and no cache-hit reading, only the deferred
+    // read's state and an explicit affordance that requests the exact cut.
+    const { source } = makeSource({ nodes: [timedStep()] })
+    const requestExactProjections = vi.fn()
+    const values = { tokenUsage: USAGE }
+    const view = render(<StatsPills {...props(source, values, BEFORE_REQUEST, requestExactProjections)} />)
+    expect(view.container.textContent).not.toContain('105 tok')
+    expect(view.container.textContent).not.toContain('Cache hit 90%')
+    fireEvent.click(view.getByRole('button', { name: 'Token usage unavailable' }))
+    expect(requestExactProjections).toHaveBeenCalledTimes(1)
+
+    view.rerender(<StatsPills {...props(source, values, { state: 'loading', reason: 'opening-absent' }, requestExactProjections)} />)
+    expect(view.container.textContent).toContain('Loading token usage…')
+    expect(view.container.textContent).not.toContain('105 tok')
+
+    view.rerender(<StatsPills {...props(source, values, EXACT, requestExactProjections)} />)
+    expect(view.container.textContent).toContain('105 tok')
+    expect(view.container.textContent).toContain('Cache hit 90%')
   })
 
   it('requests exact whole-log values only when a user opens a statistics dialog', () => {

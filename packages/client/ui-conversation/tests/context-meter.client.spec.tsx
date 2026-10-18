@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { cleanup, fireEvent, render } from '@testing-library/react'
+import { cleanup, fireEvent, render, within } from '@testing-library/react'
 import type { SessionSnapshot } from '@deepseek-ai/dsh-api-session-controller/client'
 import { makeTranslate } from '@deepseek-ai/dsh-client-test-runtime'
 import { en as commonEn, zh as commonZh } from '@deepseek-ai/dsh-client-locale/src/locales/index.ts'
@@ -30,20 +30,29 @@ interface MeterOptions {
   readonly requestExactProjections?: () => void
 }
 
-function meter(
+/** One meter element for a given projection table, locale, and readiness/request seats. */
+function meterElement(
   values: Record<string, unknown>,
   translate: ContextMeterProps['t'] = t,
   options: MeterOptions = {},
 ) {
   const { availability, requestExactProjections } = options
-  return render(
+  return (
     <ContextMeter
       useProjection={projections(values)}
       {...(availability === undefined ? {} : { useProjectionAvailability: selector => selector(availability) })}
       {...(requestExactProjections === undefined ? {} : { requestExactProjections })}
       t={translate}
-    />,
+    />
   )
+}
+
+function meter(
+  values: Record<string, unknown>,
+  translate: ContextMeterProps['t'] = t,
+  options: MeterOptions = {},
+) {
+  return render(meterElement(values, translate, options))
 }
 
 describe('ContextMeter', () => {
@@ -83,14 +92,16 @@ describe('ContextMeter', () => {
     })
     expect(failed.getByRole('button', { name: '上下文用量不可用' })).toBeTruthy()
 
-    // A window-first opening no surface has opened yet renders nothing:
-    // absence is not a 0% reading.
+    // A window-first opening shows the unavailable affordance, not a 0%
+    // reading: the Context surface stays reachable so a click can request
+    // the exact values.
     const beforeRequest = meter({}, t, {
       availability: { state: 'unavailable', reason: 'opening-absent' },
       requestExactProjections: request,
     })
     expect(beforeRequest.container.textContent).toBe('')
-    expect(beforeRequest.container.querySelector('button')).toBeNull()
+    fireEvent.click(within(beforeRequest.container).getByRole('button', { name: '上下文用量不可用' }))
+    expect(request).toHaveBeenCalledTimes(2)
   })
 
   it('requests exact values only when the user opens the Context surface', () => {
@@ -102,9 +113,44 @@ describe('ContextMeter', () => {
       availability: { state: 'unavailable', reason: 'opening-absent' },
       requestExactProjections: request,
     })
+    // Cached pressure is a hint, not an exact occupancy: no percentage reading
+    // is presentable before the deferred read answers.
+    expect(view.container.textContent).not.toContain('25%')
     expect(request).not.toHaveBeenCalled()
-    fireEvent.click(view.getByRole('button', { name: '上下文已用 25%' }))
+    fireEvent.click(view.getByRole('button', { name: '上下文用量不可用' }))
     expect(request).toHaveBeenCalledTimes(1)
+  })
+
+  it('never presents a cached context reading as exact before the deferred read completes', () => {
+    const request = vi.fn()
+    const values = {
+      contextPressure: { pressureTokens: 32_000, contextWindow: 128_000 },
+      contextBreakdown: BREAKDOWN,
+    }
+    const view = meter(values, t, {
+      availability: { state: 'unavailable', reason: 'opening-absent' },
+      requestExactProjections: request,
+    })
+    // The cached reading must not look like whole-session occupancy.
+    expect(view.container.textContent).not.toContain('25%')
+    expect(view.queryByRole('dialog')).toBeNull()
+    fireEvent.click(view.getByRole('button', { name: '上下文用量不可用' }))
+    expect(request).toHaveBeenCalledTimes(1)
+
+    view.rerender(meterElement(values, t, {
+      availability: { state: 'loading', reason: 'opening-absent' },
+      requestExactProjections: request,
+    }))
+    expect(view.getByRole('button', { name: '上下文用量加载中…' })).toBeTruthy()
+    expect(view.container.textContent).not.toContain('25%')
+
+    view.rerender(meterElement(values, t, {
+      availability: { state: 'exact', asOfSeq: 12 },
+      requestExactProjections: request,
+    }))
+    // The exact cut replaces the loading state with the real occupancy reading.
+    expect(view.getByRole('button', { name: '上下文已用 25%' })).toBeTruthy()
+    expect(view.container.textContent).toContain('25%')
   })
 
   it('shows the occupancy ring and opens the breakdown panel on click', () => {

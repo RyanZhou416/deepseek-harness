@@ -58,15 +58,15 @@ export interface ContextMeterProps {
   t: ComposerBarProps['t']
 }
 
-/** Availability read in bare fixtures and without a Session: nothing exact was served yet. */
-const FIXTURE_AVAILABILITY: NonNullable<ContextMeterProps['useProjectionAvailability']> = () => undefined
-
 export function ContextMeter({
   useProjection, useProjectionAvailability, requestExactProjections, t,
 }: ContextMeterProps) {
   const pressure = useProjection('contextPressure')
   const breakdown = useProjection('contextBreakdown')
-  const availability = (useProjectionAvailability ?? FIXTURE_AVAILABILITY)(value => value)
+  // Without the seat this is a bare fixture that has no deferred read to
+  // describe; render it as before readiness existed. With a bound Session,
+  // only an exact cut may present whole-session occupancy.
+  const availability = useProjectionAvailability === undefined ? undefined : useProjectionAvailability(value => value)
   const [open, setOpen] = useState(false)
   const rootRef = useRef<HTMLSpanElement | null>(null)
   const panelRef = useRef<HTMLDivElement | null>(null)
@@ -97,21 +97,14 @@ export function ContextMeter({
     return () => { document.removeEventListener('keydown', onKeyDown) }
   }, [available, open])
 
-  if (context === null) {
-    // No occupancy can be computed yet. Only the deferred read's own state is
-    // presentable: a loading/refused generation shows a bare ring the user can
-    // click to request exact values, while an opening that never carried a
-    // cut renders nothing instead of a fabricated zero percentage.
-    const label = availability === undefined
-      ? undefined
-      : availability.state === 'loading'
-        ? t('context.loading')
-        : availability.state === 'unavailable' && availability.reason !== 'opening-absent'
-          ? t('context.unavailable')
-          : undefined
-    if (label === undefined) return null
+  if (availability !== undefined && availability.state !== 'exact') {
+    // A cached or window-scoped reading is not whole-session occupancy. Keep
+    // the Context surface reachable so its explicit click requests the exact
+    // cut, and show loading/unavailable instead of a fabricated percentage.
+    const loading = availability.state === 'loading'
+    const label = loading ? t('context.loading') : t('context.unavailable')
     return (
-      <span ref={rootRef} className={css.root} data-context-state={availability?.state}>
+      <span ref={rootRef} className={css.root} data-context-state={availability.state}>
         <Tooltip label={label} side="top" delayMs={200}>
           <button
             type="button"
@@ -127,6 +120,7 @@ export function ContextMeter({
       </span>
     )
   }
+  if (context === null) return null
   const percent = context.percent
   const reading = `${percent}%`
   const [headBefore = '', headAfter = ''] = t('context.aria', { percent: READING_SLOT })

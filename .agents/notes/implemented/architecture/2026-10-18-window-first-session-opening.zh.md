@@ -35,7 +35,7 @@ follow opening 不再调用完整的 `observeSession`。在 follow 级合成 fix
 - 只在用户显式打开统计弹窗或 Context 界面时请求一次精确 `session/projections` 读取；界面挂载、首帧或空闲任务都不会触发；
 - 该读取按 Session 保持 single-flight，属于一个 Host connection generation，在 Session 离开视图时停止，并遵守投影 store 的 watermark 合并规则，使过期切点不能回退更新的值；
 - 权限或访问拒绝对该 generation 是终止性的，migration-required 读取仍可重试，readiness 回到不可用而不是空转；
-- 统计 UI 保留可见的 loading/unavailable 状态。只有 `sessionStats` 有窗口范围回退；`tokenUsage`、`contextPressure` 与 `contextBreakdown` 在精确切点到达前显示加载/不可用文案。
+- 统计与 Context 界面在 generation 尚未精确时保留可见的 loading/unavailable 供给。只有 `sessionStats` 有窗口范围回退；缓存的 `tokenUsage` 总量与缓存的 `contextPressure`/`contextBreakdown` 百分比绝不作为全会话数值呈现，且 Context 环与 token 用量 pill 保持可点击，由该显式操作请求精确读取。
 
 ### 3. 老页面工作保持独立
 
@@ -70,4 +70,5 @@ follow opening 不再调用完整的 `observeSession`。在 follow 级合成 fix
 - focused 集成套件（13 个文件、298 个测试）覆盖 history window 与边界、小 Session 路径、投影 store、Session manager 与 service，以及 JSONL 索引、窗口与 memo 文件。
 - adjacency 运行（79 个文件、1,906 个测试：1,892 通过、1 跳过）只复现了改动前基线同样失败的 13 个测试（`session-presets.host.spec.ts` ×12、`transport.client.spec.ts` ×1）；它们不是本改动造成的。
 - `benchmarks/session-open/window-first-follow.bench.ts` 记录冷打开首帧（约 30 ms，CI 上限 75 ms）且完整 observation 与完整 persistence open 均为零，延迟精确读取（约 449–456 ms）恰好各一次，缓存命中重开（约 37 ms，上限 95 ms）携带精确 block 且无延迟读取。冷首帧相对延迟读取的占比为 0.068，门禁为 0.5。
+- Client 展示测试在 opening-absent generation 上注入缓存的 `tokenUsage` 与 `contextPressure`，断言不出现看似精确的总量或百分比，再经过 loading 状态过渡到精确呈现（`ui-chat` chat-stats 与 `ui-conversation` context-meter 套件）。
 - typecheck、doc-quick 聚合、export-JSDoc 与 Cordis catalog 门禁通过。benchmark 门禁说明拥有记录的样本、workload、内存端点与校准。

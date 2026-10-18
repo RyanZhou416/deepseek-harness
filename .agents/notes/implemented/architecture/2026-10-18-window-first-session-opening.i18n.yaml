@@ -15,8 +15,8 @@
   en: 59517123c96d70a1
   zh: d925bed35d999654
 /agent-note-window-first-session-opening-without-a-projection-cache/decision/2-load-exact-whole-log-projections-after-the-first-frame:
-  en: e86de39bd0be4d71
-  zh: fc0159c87d0b00f8
+  en: df40e6b969a28343
+  zh: 059f7c1fa59f6a25
 /agent-note-window-first-session-opening-without-a-projection-cache/decision/3-keep-older-page-work-independent:
   en: 54956bd0492059f2
   zh: a6d2e3e6a3ee2980
@@ -30,5 +30,5 @@
   en: a6441716ea44a815
   zh: 4b24d6f0214afca2
 /agent-note-window-first-session-opening-without-a-projection-cache/testing:
-  en: 2ca92f6ea0a2e7fb
-  zh: ff8470c4978ce6ef
+  en: f36f0ca876591977
+  zh: 1ef6c819d5a7e854

@@ -35,7 +35,7 @@ Whole-session values cannot be exact without either a full-log fold or a durable
 - a single exact `session/projections` read is requested only by the explicit user action that opens the statistics dialog or the Context surface; mounting a surface, first paint, or an idle task does not trigger it;
 - the read is single-flight per Session, belongs to one Host connection generation, stops when the Session leaves the view, and merges under the projection store's watermark rule so a stale cut cannot regress a newer value;
 - a permission or access refusal is terminal for the generation, a migration-required read remains retryable, and readiness returns to unavailable instead of spinning;
-- the statistics UI keeps a visible loading/unavailable state. Only `sessionStats` has a window-scoped fallback; `tokenUsage`, `contextPressure`, and `contextBreakdown` present loading/unavailable copy until an exact cut arrives.
+- the statistics and Context surfaces keep a visible loading/unavailable affordance while the generation is not exact. Only `sessionStats` has a window-scoped fallback; cached `tokenUsage` totals and cached `contextPressure`/`contextBreakdown` percentages are never presented as whole-session values, and the Context ring and token-usage pill remain clickable so that explicit action requests the exact read.
 
 ### 3. Keep older-page work independent
 
@@ -70,4 +70,5 @@ Implementation and verification ran in the ignored clone `tmp/window-first` on `
 - The focused integrated suite (13 files, 298 tests) covers history windows and edges, the small-session path, the projection store, the Session manager and service, and the JSONL index, window, and memo files.
 - The adjacency run (79 files, 1,906 tests: 1,892 passed, 1 skipped) reproduces only the 13 failures that also fail at the pre-change base (`session-presets.host.spec.ts` ×12, `transport.client.spec.ts` ×1); they are not caused by this change.
 - `benchmarks/session-open/window-first-follow.bench.ts` records the cold first snapshot (about 30 ms against a 75 ms CI ceiling) with zero complete observations and zero full persistence opens, the deferred exact read (about 449–456 ms) with exactly one of each, and the cache-warm reopen (about 37 ms against a 95 ms ceiling) with an exact block and no deferred read. The cold first-frame share of the deferred read is 0.068 against the 0.5 gate.
+- Client presentation tests seed cached `tokenUsage` and `contextPressure` over an opening-absent generation and assert no exact-looking total or percentage, then step through the loading state to the exact rendering (`ui-chat` chat-stats and `ui-conversation` context-meter suites).
 - Typecheck, the doc-quick aggregate, export-JSDoc, and the Cordis catalog gates pass. The benchmark gate note owns the recorded samples, workload, memory endpoints, and calibration.
