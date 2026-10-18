@@ -92,33 +92,36 @@ export interface TurnSpeed {
 }
 
 /**
- * Fold the latest settled turn's assistant steps into its own output speed.
+ * Fold the most recent turn that has honest decode data into its own output
+ * speed.
  *
- * Only the newest turn present in the loaded snapshot is considered: the
- * session-wide TPS remains the durable whole-log figure, while this reading
- * answers "how fast was this turn". A completed stream without decoder
- * boundaries or provider output tokens has no honest turn throughput.
+ * The newest turn in the window can be an in-flight or interrupted step with
+ * no finalized timing or provider output tokens. Treating that empty turn as
+ * "this turn" would make the reading disappear while the next turn streams;
+ * this selects the latest turn that actually has both boundaries and usage, so
+ * the reading stays stable until the new turn can replace it.
  * @param nodes - snapshot nodes, including assistant steps with timing.
- * @returns the latest turn's speed, or null when it cannot be derived.
+ * @returns the latest measurable turn's speed, or null when none exists.
  */
 export function latestTurnSpeed(nodes: ChatSnapshot['legacy']['nodes']): TurnSpeed | null {
-  let latestTurn: number | undefined
+  const turns = new Map<number, { decodeMs: number; decodeTokens: number }>()
   for (const node of nodes) {
     if (node.kind !== 'assistant') continue
-    if (latestTurn === undefined || node.turn > latestTurn) latestTurn = node.turn
-  }
-  if (latestTurn === undefined) return null
-  let decodeMs = 0
-  let decodeTokens = 0
-  for (const node of nodes) {
-    if (node.kind !== 'assistant' || node.turn !== latestTurn) continue
     const reading = assistantStepReading(node)
     if (reading.decodeMs === null || reading.outputTokens === null) continue
-    decodeMs += reading.decodeMs
-    decodeTokens += reading.outputTokens
+    const totals = turns.get(node.turn) ?? { decodeMs: 0, decodeTokens: 0 }
+    totals.decodeMs += reading.decodeMs
+    totals.decodeTokens += reading.outputTokens
+    turns.set(node.turn, totals)
   }
-  if (decodeMs <= 0 || decodeTokens <= 0) return null
-  return { turn: latestTurn, tps: decodeTokens / (decodeMs / 1_000) }
+  let latestTurn: number | undefined
+  for (const [turn, totals] of turns) {
+    if (totals.decodeMs <= 0 || totals.decodeTokens <= 0) continue
+    if (latestTurn === undefined || turn > latestTurn) latestTurn = turn
+  }
+  if (latestTurn === undefined) return null
+  const totals = turns.get(latestTurn) as { decodeMs: number; decodeTokens: number }
+  return { turn: latestTurn, tps: totals.decodeTokens / (totals.decodeMs / 1_000) }
 }
 
 /**

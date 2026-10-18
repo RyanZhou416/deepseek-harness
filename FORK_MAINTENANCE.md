@@ -972,3 +972,23 @@ committed, so nothing here needs to survive a merge.
 
 **Verification.** `git check-ignore -v .cc-carve` reports the ignore rule, and
 `git status --porcelain` lists no path under `.cc-carve/`.
+
+## mac-pool provider preset (fork)
+
+The base bundle seeds one `llm-pi-ai` provider so teammates do not hand-write a
+provider block for the mac pool:
+
+- route: `cc-pool` (display name `CC 订阅池`)
+- transport: `api: anthropic-messages`, `baseURL: https://ccpool.tiancegames.com`
+- credential: `apiKeyEnv: CC_POOL_API_KEY` only; never commit the member key
+- request route: `headers.x-cc-backend: direct`
+- models: the 2.1.288 wire ids without the unsupported `claude-haiku-5-5`
+
+**Preservation rule.** Keep the route, `apiKeyEnv`, `baseURL`, `x-cc-backend`
+header, and model ids when syncing upstream. A profile-level `llm-pi-ai` config
+replaces this default for that profile; do not turn the preset into a shared
+credential store.
+
+**Focused verification.** Start a fresh profile with `CC_POOL_API_KEY` set,
+confirm `CC 订阅池` appears with its models, and send one local non-Claude
+fixture request. Do not run real account or provider requests from this check.

@@ -76,7 +76,7 @@ describe('deriveStats', () => {
     )
   })
 
-  it('derives this turn speed from only the latest settled turn', () => {
+  it('derives this turn speed from the latest turn that has decode data', () => {
     const first: AssistantMessageNode = {
       ...assistant(1, 1, { outputTokens: 60 }),
       timing: { stepStartTime: 1_000, firstTokenTime: 2_000, completedTime: 5_000 },
@@ -87,6 +87,9 @@ describe('deriveStats', () => {
     }
     expect(latestTurnSpeed([first, second])).toEqual({ turn: 2, tps: 25 })
     expect(latestTurnSpeed([first])).toEqual({ turn: 1, tps: 20 })
+    // A new in-flight turn without finalized timing/usage must not blank the
+    // reading while its stream is still running.
+    expect(latestTurnSpeed([first, second, assistant(3, 3)])).toEqual({ turn: 2, tps: 25 })
     expect(latestTurnSpeed([assistant(3, 3)])).toBeNull()
   })
 
