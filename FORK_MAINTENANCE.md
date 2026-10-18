@@ -613,6 +613,8 @@ Lexical 的 history 在每个窗口内合并连续输入，而窗口从上一次
 
 所有依赖安装入口都固定 `auto-install-peers=false`：Windows 由 [fork-windows-pnpm.cmd](scripts/fork-windows-pnpm.cmd) 导出 `pnpm_config_auto_install_peers=false`（`build.cmd` 的直连安装再加 `--config.auto-install-peers=false`），macOS 在 [build.command](build.command)、[clean.command](clean.command) 内联同名变量。`pnpm-lock.yaml` 记录的是 `settings.autoInstallPeers: false`；默认 `true` 的一次 `pnpm install` 会把锁文件改写约 600 行。聚焦验证为两个启动器 spec 的锁文件 pin 用例。
 
+根 [package.json](package.json) 的 `devDependencies` 显式提供 vendored 包需要的四个 workspace peer：`@deepseek-ai/cordis`、`@deepseek-ai/cordis-plugin-include`、`@deepseek-ai/cordis-plugin-loader` 和 `@deepseek-ai/cordis-plugin-timer`。保留这些声明及对应锁文件记录，直到各包自己声明等价的开发依赖；关闭 peer 自动安装时，干净安装不能依赖旧 `node_modules` 中残留的链接。验证包括 `build.cmd` 的完整构建、`scripts/fork-windows-launchers.spec.ts`，以及独立 `DSH_HOME` 下通过 `run.cmd` 启动真实 Web profile 并请求首页。
+
 所有启动 Host 的入口都显式传 `--expose-internals`：`run.cmd`/`run.command` 以 `pnpm exec node --expose-internals --import tsx/esm apps/cli/src/bin.ts web` 启动，根 `dsh`/`start:web`/`demo:inspector` 脚本与 `dev:web` 的 `dsh web` 子进程同样带上。缺少它时 Loader 无法解析 profile 的 link 插件（`dsh-context`、AgentTeams、Subscriptions），HMR 也会拒绝启动，控制台表现为 `4 entries did not activate`；`NODE_OPTIONS` 不接受该开关，必须放在 node argv 上。聚焦验证为两个启动器 spec 的启动参数断言。
 
 运行中的 Host 会监听外置 profile patch；修改 `cordis.patch.yml` 会触发 HMR 卸载/重挂载，重挂载窗口内 Gateway 可能短暂报 `active Service "sessionController" is unavailable`，正在加载的 `session/follow` 会失败。修改 profile 后应重启 Host，不要依赖 HMR 热重载；源码修改则需要重新构建或重启后才对运行中的 Host 生效。
