@@ -56,10 +56,12 @@ test('an omitted wire field stays undefined while an explicit one survives', () 
   assert.equal(stated.models?.claude?.[0]?.wire, 'responses')
 })
 
-test('the continuation budgets default to 1000 and 2000, and an explicit legal bound is kept', () => {
+test('the continuation budgets default to 5000 and 2000, and an explicit legal bound is kept', () => {
   const omitted = config([])
-  assert.equal(omitted.continuationStateDeadlineMs, 1_000)
+  assert.equal(omitted.continuationStateDeadlineMs, 5_000)
   assert.equal(omitted.continuationStateLockTimeoutMs, 2_000)
+  // A lock wait longer than the request budget can only end as a false unavailable refusal.
+  assert.ok(omitted.continuationStateDeadlineMs > omitted.continuationStateLockTimeoutMs)
 
   for (const bound of [100, 10_000] as const) {
     const stated = Config({

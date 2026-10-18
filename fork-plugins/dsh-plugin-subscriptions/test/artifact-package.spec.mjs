@@ -131,11 +131,11 @@ test('artifact lib/index.js imports under plain Node and resolves its schema def
   assert.deepEqual([...loaded.inject], ['llm'])
   assert.equal(typeof loaded.apply, 'function')
   assert.equal(typeof loaded.Config, 'function')
-  assert.equal(loaded.DEFAULT_CONTINUATION_STATE_DEADLINE_MS, 1000)
+  assert.equal(loaded.DEFAULT_CONTINUATION_STATE_DEADLINE_MS, 5000)
   assert.equal(loaded.DEFAULT_CONTINUATION_STATE_LOCK_TIMEOUT_MS, 2000)
   const resolved = loaded.Config({ providers: ['claude'] })
   assert.deepEqual([...resolved.providers], ['claude'])
-  assert.equal(resolved.continuationStateDeadlineMs, 1000)
+  assert.equal(resolved.continuationStateDeadlineMs, 5000)
   assert.equal(resolved.continuationStateLockTimeoutMs, 2000)
   // A zero budget is a misconfiguration the schema refuses at load.
   assert.throws(() => loaded.Config({ providers: ['claude'], continuationStateDeadlineMs: 0 }))

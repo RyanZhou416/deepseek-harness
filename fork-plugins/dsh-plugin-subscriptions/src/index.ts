@@ -347,9 +347,11 @@ export interface Config {
   }
   /**
    * How long one Claude continuation-state operation may wait before the request is refused
-   * (default 1000). The bound belongs to this plugin rather than to the client: it is what stops a
+   * (default 5000). The bound belongs to this plugin rather than to the client: it is what stops a
    * request from waiting on a document another process is writing, and a caller that reaches it
-   * sends nothing.
+   * sends nothing. It must outlast {@link continuationStateLockTimeoutMs}: an operation still
+   * waiting to own its lock at the request deadline cannot settle, so the request fails with
+   * `LOCAL_CONTINUATION_STATE_UNAVAILABLE` even though the state is healthy.
    */
   continuationStateDeadlineMs?: number
   /**
@@ -377,7 +379,7 @@ const poolMemberSchema: z<PoolMemberRef> = z.object({
 })
 
 /** The request-state budget in force when the configuration states none. */
-export const DEFAULT_CONTINUATION_STATE_DEADLINE_MS = 1_000
+export const DEFAULT_CONTINUATION_STATE_DEADLINE_MS = 5_000
 
 /** The lock budget in force when the configuration states none. */
 export const DEFAULT_CONTINUATION_STATE_LOCK_TIMEOUT_MS = 2_000
