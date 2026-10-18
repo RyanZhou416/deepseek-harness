@@ -155,7 +155,7 @@ local-exclusion yield. `test/pool-health.spec.ts` pins the failure effects.
 
 ### Wire fidelity, stream errors, and the store lock
 
-Four contracts the pinned wire and the credential lock depend on:
+Five contracts the pinned wire and the credential lock depend on:
 
 - **Temperature is forwarded, stop is refused.** A caller-set `temperature` reaches the body
   (absent leaves the library's own value); a non-empty `stop` rejects with `INVALID_REQUEST`
@@ -171,16 +171,28 @@ Four contracts the pinned wire and the credential lock depend on:
 - **The registered route reports the wrapped adapter's identity.** `AccountPreferencesAdapter`
   delegates `providerInfo`, so each route's display name reaches the model picker instead of the
   raw route id.
+- **An account key derived from the refresh token is replaced once and stays replaced.** A stored
+  key with the `token-` prefix is never served: `src/auth/store.ts` replaces it with the random
+  `account-<16 hex>` id the session carries (minting one only when the session has none), stores
+  that id with the session, and keeps the old key as an alias. The replacement reaches the browser
+  and the account-scoped state, and it is local metadata only — it is never a Claude API field.
+  The write-back runs inside the store's own serialization and re-reads under the store lock, so
+  concurrent reads (the status endpoint reads every provider at once) all adopt the first minted
+  key instead of each minting its own and overwriting the file with it.
 
 **Preservation rule.** Keep every one of these on the plugin side: the harness's retryable-code
 set, its provider-info contract, and the client's own lock protocol are the references. Do not
 add a fallback that hides a refusal (a replayed reasoning item a gateway rejects must surface),
-and do not reintroduce a lock that never removes an abandoned one.
+and do not reintroduce a lock that never removes an abandoned one. Keep the account key
+token-independent, persist the minted id with the session, and keep the rekey write inside the
+store's serialization; a rekey that writes outside it changes the key on the next mount.
 
 **Focused verification.** `test/claude-wire.spec.ts` (temperature/stop), `test/translate.spec.ts`
 and `test/chat-completions.spec.ts` (stream classification), `test/store-lock.spec.ts` (lease and
-takeover, run repeatedly because it is concurrent), and `test/account-preferences.spec.ts`
-(identity delegation).
+takeover, run repeatedly because it is concurrent), `test/account-preferences.spec.ts`
+(identity delegation), `test/store.spec.ts` (concurrent reads mint one durable key; a carried
+`accountKeyId` outlives a token-derived key) and `test/rpc.spec.ts` (two mounts report the same
+persisted key).
 
 ### Removed upstream indirection
 

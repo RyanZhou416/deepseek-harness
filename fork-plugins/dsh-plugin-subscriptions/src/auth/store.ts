@@ -458,6 +458,54 @@ function assertSessionShape(provider: ProviderId, account: string, value: unknow
   assertClaudeCredentialOwnershipMode(provider, account, entry)
 }
 
+/** One read of a store file, together with the write-back that read requires. */
+interface StoreRead {
+  /** The parsed session map. */
+  store: SessionMap
+  /** The read replaced a token-derived key, or migrated the pre-rename file. */
+  mustPersist: boolean
+  /** Pre-rename file whose contents were migrated; removed once they are persisted. */
+  legacyPath?: string
+}
+
+/**
+ * Read one store path without writing. A missing file is an empty store; malformed JSON or a
+ * malformed entry throws, because silently discarding tokens would strand the user without a
+ * diagnosis. The pre-rename file is read when the new path does not exist.
+ * @param path - store file path.
+ * @returns the parsed session map and the write-back the read requires.
+ */
+async function readStore(path: string): Promise<StoreRead> {
+  let text: string
+  try {
+    text = await readFile(path, 'utf8')
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+    // Migrate the pre-rename store once, preserving existing logins.
+    if (path !== authFilePath()) return { store: {}, mustPersist: false }
+    try {
+      text = await readFile(legacyAuthFilePath(), 'utf8')
+    } catch (legacyError) {
+      if ((legacyError as NodeJS.ErrnoException).code === 'ENOENT') return { store: {}, mustPersist: false }
+      throw legacyError
+    }
+    const migrated = parseStore(text, legacyAuthFilePath())
+    return { store: migrated.store, mustPersist: true, legacyPath: legacyAuthFilePath() }
+  }
+  const parsed = parseStore(text, path)
+  return { store: parsed.store, mustPersist: parsed.rekeyed }
+}
+
+/**
+ * Persist what {@link readStore} found, then retire the pre-rename file it read.
+ * @param read - the read whose write-back is persisted.
+ * @param path - store file path.
+ */
+async function persistStoreRead(read: StoreRead, path: string): Promise<void> {
+  await writeStore(read.store, path)
+  if (read.legacyPath !== undefined) await rm(read.legacyPath, { force: true })
+}
+
 /**
  * Read the whole store. A missing file is an empty store; malformed JSON or a
  * malformed entry throws, because silently discarding tokens would strand the
@@ -465,31 +513,50 @@ function assertSessionShape(provider: ProviderId, account: string, value: unknow
  * the next write persists the new shape. An account key that names the session's
  * refresh token is replaced here and written back immediately, so the account
  * keeps one key across restarts.
+ *
+ * A read that rewrites the file is a read-modify-write like any other. It runs after the writes
+ * already queued for this path and under the store lock, and it re-reads inside that critical
+ * section rather than overwriting a key another reader minted while it waited. Without that
+ * serialization two concurrent reads each mint a key for the same token-derived account, the
+ * last write wins, and the account's key changes on the next mount — the status endpoint reads
+ * every provider at once, so one status call races with itself.
  * @param path - store file path; defaults to {@link authFilePath}.
  * @returns the parsed session map.
  */
 export async function loadStore(path = authFilePath()): Promise<SessionMap> {
-  let text: string
-  try {
-    text = await readFile(path, 'utf8')
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
-    // Migrate the pre-rename store once, preserving existing logins.
-    if (path !== authFilePath()) return {}
-    try {
-      text = await readFile(legacyAuthFilePath(), 'utf8')
-    } catch (legacyError) {
-      if ((legacyError as NodeJS.ErrnoException).code === 'ENOENT') return {}
-      throw legacyError
-    }
-    const migrated = parseStore(text, legacyAuthFilePath())
-    await writeStore(migrated.store, path)
-    await rm(legacyAuthFilePath(), { force: true })
-    return migrated.store
+  return loadStoreFrom(path, false)
+}
+
+/**
+ * Read a store while already holding this path's serialization, so a required write-back runs
+ * in place instead of waiting on the chain that is already running it.
+ * @param path - store file path.
+ * @returns the parsed session map.
+ */
+async function loadStoreUnderLock(path: string): Promise<SessionMap> {
+  return loadStoreFrom(path, true)
+}
+
+/**
+ * Read one store path, serializing any write-back the read requires.
+ * @param path - store file path.
+ * @param underLock - the caller already holds this path's serialization and the store lock for
+ *   the whole call, so a write-back can run directly.
+ * @returns the parsed session map, or the one the serialized re-read found.
+ */
+async function loadStoreFrom(path: string, underLock: boolean): Promise<SessionMap> {
+  const read = await readStore(path)
+  if (!read.mustPersist) return read.store
+  if (underLock) {
+    await persistStoreRead(read, path)
+    return read.store
   }
-  const parsed = parseStore(text, path)
-  if (parsed.rekeyed) await writeStore(parsed.store, path)
-  return parsed.store
+  return serialize(path, async () => {
+    // Another reader may have persisted its key while this one waited; the file is the authority.
+    const current = await readStore(path)
+    if (current.mustPersist) await persistStoreRead(current, path)
+    return current.store
+  })
 }
 
 /**
@@ -923,7 +990,7 @@ export async function saveAccountSession<K extends ProviderId>(
 ): Promise<boolean> {
   assertSessionShape(provider, account, session)
   return serialize(path, async () => {
-    const store = await loadStore(path)
+    const store = await loadStoreUnderLock(path)
     const entry = store[provider] as ProviderAccounts<SessionOf<K>> | undefined
     if (entry !== undefined) {
       account = resolveAccount(entry, account)
@@ -1018,7 +1085,7 @@ export async function deleteAccountSession<K extends ProviderId>(
   options: { expectedPrior?: SessionOf<K>; expectedRevision?: CredentialRevision } = {},
 ): Promise<boolean> {
   return serialize(path, async () => {
-    const store = await loadStore(path)
+    const store = await loadStoreUnderLock(path)
     const entry = store[provider] as ProviderAccounts<SessionOf<K>> | undefined
     if (entry === undefined) return false
     account = resolveAccount(entry, account)
@@ -1073,7 +1140,7 @@ export async function setDefaultAccount(
   path = authFilePath(),
 ): Promise<void> {
   return serialize(path, async () => {
-    const store = await loadStore(path)
+    const store = await loadStoreUnderLock(path)
     const entry = store[provider]
     if (entry !== undefined) account = resolveAccount(entry, account)
     if (entry === undefined || !Object.hasOwn(entry.accounts, account)) {

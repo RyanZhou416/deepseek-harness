@@ -68,6 +68,58 @@ test('accountKeyOf keys on the stable identity', () => {
   assert.equal(key.includes(CLAUDE.refreshToken), false)
 })
 
+test('concurrent reads replace a token-derived key once and report the durable one', async () => {
+  const path = storePath()
+  const derived = 'token-4f2c0c8a1d3e5b6a'
+  const session: ClaudeSession = {
+    accessToken: 'at',
+    refreshToken: 'refresh-token-value',
+    expiresAt: Date.now() + 3600_000,
+    scopes: 'user:profile',
+  }
+  writeFileSync(path, JSON.stringify({ claude: { default: derived, accounts: { [derived]: session } } }))
+  // The status endpoint reads every provider at once, so several reads race on the same file.
+  // Each must adopt the first reader's minted key rather than mint its own and overwrite it.
+  const reported = await Promise.all(Array.from({ length: 8 }, () => listAccounts('claude', path)))
+  const minted = reported[0][0].key
+  for (const entries of reported) {
+    assert.deepEqual(entries.map(entry => entry.key), [minted], 'every reader reports the one minted key')
+  }
+  assert.match(minted, /^account-[0-9a-f]{16}$/)
+  assert.equal(minted.includes(session.refreshToken), false)
+  const stored = JSON.parse(readFileSync(path, 'utf8')) as {
+    claude: { default: string; accounts: Record<string, ClaudeSession>; aliases: Record<string, string> }
+  }
+  assert.deepEqual(Object.keys(stored.claude.accounts), [minted], 'the file holds exactly the minted key')
+  assert.equal(stored.claude.default, minted)
+  assert.equal(stored.claude.accounts[minted].accountKeyId, minted, 'the minted id is stored with the session')
+  assert.deepEqual(stored.claude.aliases, { [derived]: minted }, 'the token-derived key survives only as an alias')
+  assert.equal((await loadStore(path)).claude?.default, minted, 'a later read finds the same key')
+})
+
+test('a token-derived key yields to the account id its session already carries', async () => {
+  const path = storePath()
+  const derived = 'token-0000000000000000'
+  const carried = 'account-0123456789abcdef'
+  const session: ClaudeSession = {
+    accessToken: 'at',
+    refreshToken: 'another-refresh-token',
+    expiresAt: Date.now() + 3600_000,
+    scopes: 'user:profile',
+    accountKeyId: carried,
+  }
+  writeFileSync(path, JSON.stringify({ claude: { default: derived, accounts: { [derived]: session } } }))
+  const [entry] = await listAccounts('claude', path)
+  assert.equal(entry.key, carried, 'the id stored with the session outlives the key that named its token')
+  assert.deepEqual(JSON.parse(readFileSync(path, 'utf8')), {
+    claude: {
+      default: carried,
+      accounts: { [carried]: { ...session } },
+      aliases: { [derived]: carried },
+    },
+  })
+})
+
 function codexUser(user: string, field = 'chatgpt_user_id'): CodexSession {
   const payload = { 'https://api.openai.com/auth': { [field]: user } }
   return { ...CODEX, idToken: 'header.' + Buffer.from(JSON.stringify(payload)).toString('base64url') + '.signature' }

@@ -256,6 +256,11 @@ test('status endpoint: an account key holds no function of the refresh token', a
   assert.notEqual(key, derivedKey)
   assert.equal(key.includes(refreshToken), false)
 
+  // The first mount reports and persists the same key: the status call fans out to every
+  // provider, and those concurrent reads may not each mint a key of their own.
+  const afterFirst = JSON.parse(readFileSync(storePath, 'utf8')) as { claude: { accounts: Record<string, unknown> } }
+  assert.deepEqual(Object.keys(afterFirst.claude.accounts), [key], 'the first mount persisted the reported key')
+
   // The replacement is durable: a fresh plugin instance reports the same key.
   assert.equal((await claudeAccounts(await mount()))[0].key, key)
   const stored = JSON.parse(readFileSync(storePath, 'utf8')) as { claude: { accounts: Record<string, unknown> } }
