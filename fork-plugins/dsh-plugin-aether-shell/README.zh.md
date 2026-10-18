@@ -38,6 +38,8 @@ pwsh -NoProfile -File fork-plugins/dsh-plugin-aether-shell/scripts/run-local.ps1
 
 从 checkout 运行 `pnpm dsh plugin --profile <profile> add <tarball> --ignore-scripts`，先在隔离的 Harness home 中安装生成的压缩包，再在真实 profile 中启用。bundle 插入一个 `aether-shell` 插件条目，不禁用其他 shell 条目。启用前备份 profile 配置。Host 运行时可通过 DSH 包管理替换软件包；已加载的模块版本会继续运行，直到重启。安装后重启，以配套的 Host 构建加载新软件包。不要手工覆盖已加载的模块文件。
 
+本 fork 的 `build.cmd` 还会在普通构建之后从源码构建该插件并链接到选定的 `web` profile，同事无需手工转交 tarball。该路径要求先停止 Host，从源码编译 `lib/lifecycle.mjs`，并保持所有 `@deepseek-ai/*` peer 为外部依赖 `0.2.1-rc.2`；见 [fork 插件构建说明](../README.zh.md#repo-integrated-build-and-install)。
+
 ### 选择合适的工具
 
 | 工具 | 输入 | 生命周期 | 用途 |

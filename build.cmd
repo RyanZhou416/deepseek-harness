@@ -62,6 +62,9 @@ if errorlevel 1 goto :failed
 set "DSH_STEP=building the project"
 call "%~dp0scripts\fork-windows-pnpm.cmd" run build
 if errorlevel 1 goto :failed
+set "DSH_STEP=building and installing the fork plugins into the web profile"
+call "%~dp0scripts\fork-windows-pnpm.cmd" exec tsx "%~dp0scripts\fork-plugins-build.ts"
+if errorlevel 1 goto :failed
 
 :build_complete
 

@@ -481,9 +481,9 @@ Gateway 每个 socket 只保留一枚待确认 Ping。未完成写入时，`buff
 
 2026-10-18：主检出 `C:\Project\deepseek-harness` 从集成分支 tip 快进到 0.2.1-rc.2，随后 `build.cmd` 重建并以 `run.cmd` 重启 Host；当前 Host 为 0.2.1-rc.2，Web GUI 在 3080。回滚锚点记录在 profile 清单备份 `C:\Project\dsh-validation\landing\profile-backup` 中。
 
-四个插件在这一代改为 **profile `link:` 到主检出** —— `@nanmicoder/dsh-agent-teams`、`dsh-context`、`dsh-plugin-subscriptions`、`@ryanzhou416/dsh-plugin-aether-shell` 都指向 `fork-plugins/<name>`。打包成 tgz 再装进 profile 这条路走不通：subscriptions 的依赖里有相对路径 `file:../releases/tormentalabs-claude-code-wire-compat-*.tgz`（脱离插件目录即失效），另有 6 个 `@oven/bun-*` 可选依赖会在安装时拉取大包。link 方式已由隔离 profile 冒烟与真实 profile 启动共同验证。
+四个插件在这一代改为 **profile `link:`** —— `@nanmicoder/dsh-agent-teams` 与 `dsh-context` 指向主检出的 `fork-plugins/<name>`；`dsh-plugin-subscriptions` 与 `@ryanzhou416/dsh-plugin-aether-shell` 由 `build.cmd` 从源码构建到被忽略的 `.build/fork-plugins/<name>`，再由脚本 link 进 profile。打包成 tgz 再装进 profile 这条路走不通：subscriptions 的依赖里有相对路径 `file:../releases/tormentalabs-claude-code-wire-compat-*.tgz`（脱离插件目录即失效），另有 6 个 `@oven/bun-*` 可选依赖会在安装时拉取大包。staged 构建把 wire 与 undici 内联并删除可选依赖，因此 profile 只看到本地包。link 方式已由隔离 profile 冒烟与真实 profile 启动共同验证。
 
-**Preservation rule.** 这一代的 profile 不装 fork 插件的 tgz；升级或换机时重装应使用 `dsh plugin --profile web add <fork-plugins/<name>>`，不要回退到 `fork-plugins/releases/` 下的旧制品（那是 0.1.7 一代，会被 0.2.1 的兼容性检查拒绝）。插件源码改动在 Host 重启后生效，不需要重新打包。
+**Preservation rule.** 这一代的 profile 不装 fork 插件的 tgz；AgentTeams/Context 升级时用 `dsh plugin --profile web add <fork-plugins/<name>>`，Subscriptions/AetherShell 用 `build.cmd`（或手动运行 `scripts/fork-plugins-build.ts`）重新 staging 与 link，不要回退到 `fork-plugins/releases/` 下的旧制品（那是 0.1.7 一代，会被 0.2.1 的兼容性检查拒绝）。插件源码改动在 Host 重启后生效，不需要重新打包。
 
 旧的 0.1.7 一代插件 tgz 与 sha256 已移到 `fork-plugins/releases/archive/`（含说明 `README.txt`），只作历史；它们不会被任何 profile 安装，也不得用 `pnpm add` 回装。例外是 `@tormentalabs/claude-code-wire-compat-0.7.2-dsh14.tgz`：它是 subscriptions 的 `file:` 依赖，必须留在 `fork-plugins/releases/` 根目录，否则插件重装解析失败。
 
@@ -607,6 +607,18 @@ Lexical 的 history 在每个窗口内合并连续输入，而窗口从上一次
 
 上游替代必须保留这一区分与超时恢复指引；聚焦验证为 `packages/fs/tool-fs-search/tests/tools.spec.ts` 的 guidance/registration 测试，以及 recorded-session 的系统提示和 schema pins。
 
+### Repo-integrated fork plugin build
+
+`build.cmd` 在普通 `pnpm run build` 之后自动运行 [fork-plugins-build.ts](scripts/fork-plugins-build.ts)，从源码构建 Subscriptions 与 AetherShell，并把它们以本地 `link:` 安装进所选 `DSH_HOME` 的 `profiles\web`。同事克隆仓库后只需 `build.cmd` 再 `run.cmd`，不需要第二条安装命令、私有 registry 或人工交付的 tgz。构建会修改 web profile，**运行中的 Host 必须先停止**：脚本探测 `127.0.0.1:3080`，监听时直接失败，只有显式 `--allow-running-host` 才会警告后继续。
+
+脚本优先使用显式 `--dsh-home`，否则 `DSH_HOME`，再否则 `%USERPROFILE%\.dsh`；只操作 `profiles\web` 的包元数据与 pnpm 状态。修改前把 `package.json`、`cordis.patch.yml`（以及存在时的 lock/workspace/compatibility 文件）备份到被忽略的 `.build/fork-plugins/backups/`；全新的 profile 会先通过 `dsh plugin install` 初始化并记录“无旧配置可备份”。staging 位于被忽略的 `.build/fork-plugins/`，安装命令为 `dsh plugin --profile web add <staged 绝对目录>`，profile 记录 `link:`；重建与重装由源码 key（源文件、版本、内联依赖版本/tgz 哈希与脚本版本）决定，未变化的第二次运行不重建、不重装、不备份。脚本不读取或写入 Session、附件、凭据、projection cache 或 `.agent-teams` 数据。
+
+Subscriptions 的 staged 包从源码编译 `lib/index.js` 与 `lib/client.js`：node 半区把 `@tormentalabs/claude-code-wire-compat`（仓库 tgz）和 `undici` 内联进 bundle，staged manifest 删除这两个运行时依赖、全部 dev 依赖以及仅类型使用的 `@deepseek-ai/dsh-llm-request-record` peer；`@deepseek-ai/*` peer 保持 `0.2.1-rc.2`。公开的 optional provider 依赖（`@cursor/sdk`、`@oven/bun-*`）保留在 manifest 中，但 pnpm 的 `link:` 安装不会安装被链接包的 optional 依赖，因此 Cursor 与 pinned Bun transport 需要 profile 或环境另行提供；脚本不回退到 tgz。AetherShell 从源码编译 `lib/lifecycle.mjs`，保持 `@deepseek-ai/*` peer 外部且为 `0.2.1-rc.2`。两个 staged 包都不附带 `.d.ts`；类型来源仍是源码检出，构建使用仓库根工具的 tsdown bundle，而不是插件自带的 tsc 产物。
+
+**Preservation rule.** 保留端口拒绝、备份、源码 key 幂等、`.build/` staging 与本地 `link:` 安装路径；不要改回 tgz 交付或 `pnpm update --latest`。staged manifest 若再次出现 `file:`、`link:`、tgz、`@tormentalabs` 或 `undici` 运行时依赖，安装必须失败。
+
+**Focused verification.** `scripts/fork-plugins-build.spec.ts` 覆盖 staged manifest、私有依赖拒绝、DSH peer cohort、profile 路径解析与参数；`scripts/fork-windows-launchers.spec.ts` 断言 `build.cmd` 在普通构建之后才调用该脚本。端到端验证使用独立临时 `DSH_HOME`：首次运行 staging 并用 `link:` 解析两个包，第二次运行跳过构建与安装，staged manifest 与 bundle 中不存在私有 tarball/`file:` 依赖；验证期间不监听 3080。
+
 ### Local launch and build scripts
 
 仓库包含 [clean.cmd](clean.cmd)、[build.cmd](build.cmd)、[run.cmd](run.cmd)、[clean.command](clean.command)、[build.command](build.command)与 [run.command](run.command)。macOS 的旧 `setup.command` 已随 0.2.1 迁移退役（见下）。三个 Windows 入口共用 [fork-windows-pnpm.cmd](scripts/fork-windows-pnpm.cmd)：它读取 `package.json` 锁定的 pnpm 版本，通过 npm 在 `%TEMP%` 下准备私有副本，校验入口文件、命令 shim 与版本，并把私有 shim 目录置于子进程 `PATH` 首位；依赖安装脚本启动的 `pnpm` 因此也不会落到残缺的 Corepack 缓存。npm registry 默认使用 npmmirror，可用 `npm_config_registry` 覆盖。`clean.cmd` 只调用仓库拥有的 `pnpm run clean`，在依赖缺失时先安装依赖，不删除 `node_modules`、profile 或 Session 数据；`build.cmd` 执行 install + build，并关闭 pnpm 的 `optimistic-repeat-install` 快速跳过，让安装阶段检查和恢复缺失的本地命令入口（例如 `node_modules/.bin/tsx.cmd`）。两者安装依赖时默认限制 pnpm child concurrency 为 4，可用 `DSH_PNPM_CHILD_CONCURRENCY` 覆盖，避免大型升级后同时启动过多 worker；聚焦验证为 `scripts/fork-windows-launchers.spec.ts`。`run.cmd` 默认 `DSH_HOME=C:\Project\deepseek-harness-data`，创建 diagnostics，并追加 `--max-old-space-size=32768` 与 Node fatal/uncaught reports 后运行 Web profile。源码 CLI 为 profile 选择 link resolution，使配置的 workspace provider 与其内部 consumer 都解析到 `src/`；构建后入口仍使用 built runtime resolution。真实源码入口工具往返测试负责防止 `src/lib` 模块身份再次分裂。
@@ -655,14 +667,14 @@ Web profile 插入 `memory-watchdog.cjs`：250 ms 采样、60 s 日志、heap ra
 |---|---:|---|---|
 | `dshmarket` | — | Removed | 官方 Plugin Manager 接管安装、配置与运行时启停；profile 不恢复旧 package 或 bundle |
 | `@nanmicoder/dsh-agent-teams` | `0.1.24-dsh021rc2.1` | Installed, enabled | 真实 profile 以 `link:` 指向 `fork-plugins/dsh-agent-teams`；源码改动重启 Host 后生效，禁止被 npm latest/next 覆盖 |
-| `dsh-plugin-subscriptions` | `0.9.4-dsh021rc2.1` | Installed; Windows Web enabled | 真实 profile 以 `link:` 指向 `fork-plugins/dsh-plugin-subscriptions`；凭据文件原地保留，其他 profile 是否启用沿用显式插件配置。2026-10-18 前的 rc1.23/rc1.33 为上一代制品，仅归档 |
+| `dsh-plugin-subscriptions` | `0.9.4-dsh021rc2.1` | Installed; Windows Web enabled | 真实 profile 由 `build.cmd` 链接到 `.build/fork-plugins/subscriptions`（源码在 `fork-plugins/dsh-plugin-subscriptions`）；凭据文件原地保留，其他 profile 是否启用沿用显式插件配置。2026-10-18 前的 rc1.23/rc1.33 为上一代制品，仅归档 |
 | `@vlln/dsh-task-status` | Removed | Not installed | 已从依赖、bundle、patch、lockfile 和 `node_modules` 删除；profile 不得恢复 |
 | `dsh-context` | `0.73.0-dsh021rc2.1` | Installed, enabled | 真实 profile 以 `link:` 指向 `fork-plugins/dsh-context`，并保留 `300/60/100/400/100/100` bounds；源码与回滚规则见 `fork-plugins/dsh-context/FORK_MAINTENANCE.md` |
 | `dsh-shell-command` | Removed | No package or configuration | profile 不安装 |
 | `@deepseek-ai/dsh-subagent-dsh-sdk` | Link to source checkout | Enabled for process provider | 跟随源码构建，worker 数据与主 sessions 隔离 |
-| `@ryanzhou416/dsh-plugin-aether-shell` | `0.1.0-dsh021rc2.1` | Installed, enabled | 真实 profile 以 `link:` 指向 `fork-plugins/dsh-plugin-aether-shell`；纯 Host 插件，无客户端资源 |
+| `@ryanzhou416/dsh-plugin-aether-shell` | `0.1.0-dsh021rc2.1` | Installed, enabled | 真实 profile 由 `build.cmd` 链接到 `.build/fork-plugins/aether-shell`；纯 Host 插件，无客户端资源 |
 
-2026-10-18 起四个 fork 插件（AgentTeams、Context、Subscriptions、AetherShell）均以 `link:` 指向主检出的 `fork-plugins/<name>`，不再安装 `file:` tgz —— subscriptions 的相对 `file:` 依赖与 `@oven/bun-*` 可选依赖使 tgz 无法装进 profile。profile 不再安装 dshmarket；禁止 wildcard 和未经审计的 `pnpm update --latest`。
+2026-10-18 起 fork 插件均以 `link:` 安装且不再安装 `file:` tgz：AgentTeams 与 Context 指向主检出的 `fork-plugins/<name>`；Subscriptions 与 AetherShell 由 `build.cmd` 从源码构建到被忽略的 `.build/fork-plugins/<name>` 后链接（见 [仓库内 fork 插件构建](#repo-integrated-fork-plugin-build)）。profile 不再安装 dshmarket；禁止 wildcard 和未经审计的 `pnpm update --latest`。
 
 2026-09-24 的 Windows profile 升级先将四个配置文件备份到 `C:\Project\deepseek-harness-data\diagnostics\profile-backups\pre-017rc1-20260924-1900`，再用 DSH Plugin Manager 安装三个固定 tgz。`verify-profile`、`verify-patch` 与组合后的 `verify-dump` 均通过；没有修改 Session、附件或凭据。
 

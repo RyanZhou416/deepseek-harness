@@ -4,6 +4,22 @@ English | [中文](README.zh.md)
 
 This directory contains plugin sources that must track this fork's DSH APIs and ship with the fork. Keeping them outside the official `packages/` tree prevents routine upstream DSH merges from treating third-party plugins as official workspace packages and confines future conflicts to `fork-plugins/`.
 
+## Repo-integrated build and install
+
+On Windows, `build.cmd` builds both source plugins and links them into the selected `web` profile after the ordinary root build. No second command, private registry, or hand-supplied tarball is involved. The build **mutates the profile**, so stop the Host first: a listener on the Host port (`3080`) makes the build fail before any profile file is touched.
+
+`scripts/fork-plugins-build.ts` uses `DSH_HOME`, or `%USERPROFILE%\.dsh` when it is unset, and targets `profiles\web`. It stages both packages under the ignored `.build/fork-plugins/` directory and installs each stage with `dsh plugin --profile web add <absolute staged directory>`, which records a pnpm `link:`. It backs up `package.json` and `cordis.patch.yml` under `.build/fork-plugins/backups/` before changing them, and records a source key so an unchanged second run neither rebuilds nor reinstalls. A fresh `web` profile is initialized first; no Session, attachment, credential, projection-cache, or `.agent-teams` data is read or written.
+
+- Subscriptions compiles `lib/index.js` and `lib/client.js` from source. The staged manifest inlines `@tormentalabs/claude-code-wire-compat` (from the repository tarball) and `undici`, removes the type-only `@deepseek-ai/dsh-llm-request-record` peer, and declares no runtime dependency. Public optional provider entries (`@cursor/sdk`, `@oven/bun-*`) stay declared; a link install does not install a linked package's optional dependencies, so those providers need the package available separately. The staged package ships no declarations; the source checkout remains the type source.
+- AetherShell compiles `lib/lifecycle.mjs` from source and keeps every `@deepseek-ai/*` peer external at `0.2.1-rc.2`.
+
+Run the step directly when diagnosing a build (the Host-stopped rule still applies):
+
+```powershell
+$env:DSH_HOME = 'C:\path\to\isolated-home'
+pnpm exec tsx scripts/fork-plugins-build.ts
+```
+
 ## macOS profile setup
 
 After `build.command` succeeds, `setup.command` verifies and installs the current Agent Teams, Context, and Subscriptions artifacts into the receiving Mac's `web` profile, removes `dshmarket`, and applies the Context low-overhead bounds. It imports no other machine's runtime data and backs up only the four local profile configuration files it may change; inspect the exact actions without writing anything first:

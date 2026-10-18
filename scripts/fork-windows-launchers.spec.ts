@@ -52,6 +52,15 @@ describe('Windows fork launchers', () => {
     }
   })
 
+  it('builds the fork plugins from source after the ordinary build', () => {
+    const build = readFileSync(buildLauncher, 'utf8')
+    const nativeBuild = build.indexOf('scripts\\fork-windows-pnpm.cmd" run build')
+    const pluginBuild = build.indexOf('scripts\\fork-windows-pnpm.cmd" exec tsx')
+    expect(nativeBuild).toBeGreaterThan(-1)
+    expect(pluginBuild).toBeGreaterThan(nativeBuild)
+    expect(build).toContain('scripts\\fork-plugins-build.ts')
+  })
+
   function fixture(brokenCache: boolean) {
     const root = mkdtempSync(join(tmpdir(), 'dsh windows clean-'))
     temporaryRoots.push(root)
@@ -135,6 +144,7 @@ describe('Windows fork launchers', () => {
     expect(readFileSync(log, 'utf8').trim().split(/\r?\n/)).toEqual([
       'pnpm install --child-concurrency=4 --optimistic-repeat-install=false',
       'pnpm run build',
+      `pnpm exec tsx ${join(repositoryRoot, 'scripts', 'fork-plugins-build.ts')}`,
       `pnpm exec node --expose-internals --import tsx/esm ${join(repositoryRoot, 'apps', 'cli', 'src', 'bin.ts')} web --patch ${join(repositoryRoot, 'fork-runtime', 'diagnostics', 'cordis.patch.yml')}`,
     ])
   })

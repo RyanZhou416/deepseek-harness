@@ -138,6 +138,8 @@ cd dsh-plugin-subscriptions && pnpm install && pnpm build
 dsh plugin --profile web add ./dsh-plugin-subscriptions
 ```
 
+在本 fork 的检出中，`build.cmd` 会在普通构建之后从源码构建该包并链接到选定的 `web` profile；不需要转交 tarball，也不查询私有 registry。该路径要求先停止 Host，从源码编译 node 半区与 client bundle，内联固定版本的 `@tormentalabs/claude-code-wire-compat` 包与 `undici`，并从 staged manifest 删除仅类型使用的 `@deepseek-ai/dsh-llm-request-record` peer。见 [fork 插件构建说明](../README.zh.md#repo-integrated-build-and-install)。
+
 不装进 profile 的 headless 用法(先在 web 界面登录过 —— token 文件是共享的):
 
 ```sh

@@ -138,6 +138,8 @@ cd dsh-plugin-subscriptions && pnpm install && pnpm build
 dsh plugin --profile web add ./dsh-plugin-subscriptions
 ```
 
+In this fork's checkout, `build.cmd` stages and links the source-built package into the selected `web` profile after the ordinary build; no tarball is handed out and no private registry is queried. That path requires the Host to be stopped, compiles the Node half and client bundle from source, inlines the pinned `@tormentalabs/claude-code-wire-compat` package and `undici`, and removes the type-only `@deepseek-ai/dsh-llm-request-record` peer from the staged manifest. See [the fork plugin build instructions](../README.md#repo-integrated-build-and-install).
+
 Headless-only usage without installing into a profile (log in via the web UI first — the token file is shared):
 
 ```sh
