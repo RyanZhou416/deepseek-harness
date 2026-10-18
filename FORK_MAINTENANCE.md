@@ -684,6 +684,8 @@ Mac 主 checkout 已快进至同一 fork master；`clean.command`、`build.comma
 
 维护真源位于 `fork-plugins\dsh-agent-teams`，完整保留上游运行源码、测试、构建脚本和资产。当前安装为 `0.1.24-dsh021rc2.1` 的 `link:` 依赖；`fork-plugins\releases\archive\nanmicoder-dsh-agent-teams-0.1.20-dsh017rc1.3.tgz`（SHA256 `8CCAA66D5E026DBED6363CA569B25BB8D4869E931BD92DC495458175C151980A`）只作历史归档。该 package 标记为 private，禁止用上游 npm scope 发布；Windows profile 已安装该 artifact，更新须在 Host 停止后进行。
 
+Windows 的 `build.cmd` 现在通过 `scripts/fork-plugins-build.ts` 把四个 fork 插件（AgentTeams、Context、Subscriptions、AetherShell）全部以本地 `link:` 安装到 `profiles\web`：Subscriptions 和 AetherShell 从源码编译，AgentTeams 与 Context 使用仓库中提交的 `lib/` 预构建产物（Context 的 `zod` 从仓库安装解析）。全新 clone 无需手工 tgz；Host 在 3080 监听时脚本会在修改 profile 前拒绝执行。
+
 fork artifact 随 Git 提交，同事不依赖这台机器的外置 `.local-plugins-src`。保留当前与仍被已安装 profile 引用的制品及校验值，历史制品也可从 Git 历史恢复。
 
 必须保留的 fork 行为：

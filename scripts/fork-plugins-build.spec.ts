@@ -46,6 +46,32 @@ const aetherSource = {
   },
 } satisfies PluginManifest
 
+const agentTeamsSource = {
+  name: '@nanmicoder/dsh-agent-teams',
+  version: '0.1.24-dsh021rc2.1',
+  type: 'module',
+  exports: { '.': './lib/index.js', './client': './lib/client.js', './package.json': './package.json' },
+  scripts: { build: 'tsc' },
+  peerDependencies: {
+    '@deepseek-ai/cordis': '^4.0.2',
+    '@deepseek-ai/dsh-tools': '0.2.1-rc.2',
+  },
+} satisfies PluginManifest
+
+const contextSource = {
+  name: 'dsh-context',
+  version: '0.73.0-dsh021rc2.1',
+  type: 'module',
+  exports: { '.': './lib/index.js', './client': './lib/client.js', './package.json': './package.json' },
+  scripts: { build: 'tsdown' },
+  dependencies: { zod: '4.4.3' },
+  devDependencies: { tsdown: '^0.15.0' },
+  peerDependencies: {
+    '@deepseek-ai/cordis': '^4.0.5',
+    '@deepseek-ai/dsh-session': '>=0.2.1-rc.2',
+  },
+} satisfies PluginManifest
+
 describe('fork plugin staging manifests', () => {
   it('strips private runtime and development dependencies from the subscriptions package', () => {
     const staged = stagedManifest(subscriptionsSource, 'subscriptions')
@@ -76,6 +102,22 @@ describe('fork plugin staging manifests', () => {
       '@deepseek-ai/dsh-tools': '0.2.1-rc.2',
     })
     expect(() => { assertStagedManifest(staged, 'aether-shell') }).not.toThrow()
+  })
+
+  it('stages the two prebuilt plugins with their runtime files and context zod dependency', () => {
+    const agentTeams = stagedManifest(agentTeamsSource, 'agent-teams')
+    expect(agentTeams.dependencies).toBeUndefined()
+    expect(agentTeams.files).toContain('lib')
+    expect(() => { assertStagedManifest(agentTeams, 'agent-teams') }).not.toThrow()
+
+    const context = stagedManifest(contextSource, 'context')
+    expect(context.dependencies).toEqual({ zod: '4.4.3' })
+    expect(context.files).toContain('locale/*.json')
+    expect(() => { assertStagedManifest(context, 'context') }).not.toThrow()
+
+    const unexpected = stagedManifest(contextSource, 'context')
+    unexpected.dependencies = { zod: '4.4.3', private: 'file:../private.tgz' }
+    expect(() => { assertStagedManifest(unexpected, 'context') }).toThrow(/unexpected runtime dependency/)
   })
 
   it('rejects a staged manifest that keeps a private artifact or local path', () => {

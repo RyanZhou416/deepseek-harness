@@ -1,5 +1,5 @@
 /**
- * Build the two fork plugins from source and install them into the selected
+ * Build or stage the four fork plugins and install them into the selected
  * web profile by local path.
  *
  * `build.cmd` runs this after the ordinary root build. The script stages
@@ -19,7 +19,7 @@
 import { spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { existsSync, realpathSync, statSync } from 'node:fs'
-import { copyFile, mkdir, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises'
+import { copyFile, cp, mkdir, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises'
 import { connect } from 'node:net'
 import { homedir } from 'node:os'
 import { basename, delimiter, dirname, join, resolve } from 'node:path'
@@ -34,21 +34,41 @@ const PROFILE_NAME = 'web'
 const HOST_PORT = 3080
 const SCHEMA_VERSION = 1
 /** Bump when the staging recipe changes in a way the source hash does not capture. */
-const SCRIPT_VERSION = 1
+const SCRIPT_VERSION = 2
 
-/** Plugin entries this script builds, in installation order. */
+/** Plugin entries this script installs, in installation order. */
 const PLUGINS = [
   {
     id: 'subscriptions',
     name: 'dsh-plugin-subscriptions',
     directory: join(REPOSITORY_ROOT, 'fork-plugins', 'dsh-plugin-subscriptions'),
+    mode: 'build',
     outputs: ['lib/index.js', 'lib/client.js'],
+    copy: [] as string[],
   },
   {
     id: 'aether-shell',
     name: '@ryanzhou416/dsh-plugin-aether-shell',
     directory: join(REPOSITORY_ROOT, 'fork-plugins', 'dsh-plugin-aether-shell'),
+    mode: 'build',
     outputs: ['lib/lifecycle.mjs'],
+    copy: [] as string[],
+  },
+  {
+    id: 'agent-teams',
+    name: '@nanmicoder/dsh-agent-teams',
+    directory: join(REPOSITORY_ROOT, 'fork-plugins', 'dsh-agent-teams'),
+    mode: 'copy',
+    outputs: ['lib/index.js', 'lib/client.js', 'lib/types/index.d.ts'],
+    copy: ['lib', 'assets', 'release-notes', 'README.md', 'README_ZH.md', 'compatibility.json', 'cordis.patch.yml'],
+  },
+  {
+    id: 'context',
+    name: 'dsh-context',
+    directory: join(REPOSITORY_ROOT, 'fork-plugins', 'dsh-context'),
+    mode: 'copy',
+    outputs: ['lib/index.js', 'lib/client.js', 'lib/index.d.ts'],
+    copy: ['lib', 'locale', 'icon.svg', 'README.md', 'LICENSE', 'cordis.patch.yml'],
   },
 ] as const
 
@@ -104,7 +124,7 @@ function usage(): string {
   return [
     'Usage: tsx scripts/fork-plugins-build.ts [options]',
     '',
-    'Builds the fork plugins from source and links them into the selected web profile.',
+    'Builds or stages the fork plugins and links them into the selected web profile.',
     'Normally invoked by build.cmd after the ordinary root build.',
     '',
     'Options:',
@@ -256,8 +276,13 @@ function runDsh(args: readonly string[], home: string): void {
 }
 
 /** Files whose content decides whether a plugin must be rebuilt. */
-function sourcePaths(pluginId: PluginId): string[] {
-  return pluginId === 'subscriptions'
+function sourcePaths(plugin: (typeof PLUGINS)[number]): string[] {
+  if (plugin.mode === 'copy') {
+    return plugin.id === 'agent-teams'
+      ? ['lib', 'assets', 'release-notes', 'README.md', 'README_ZH.md', 'compatibility.json', 'package.json', 'cordis.patch.yml']
+      : ['lib', 'locale', 'icon.svg', 'README.md', 'LICENSE', 'package.json', 'cordis.patch.yml']
+  }
+  return plugin.id === 'subscriptions'
     ? ['src', 'package.json', 'cordis.patch.yml', 'tsconfig.json', 'tsdown.config.ts', 'tsdown.client.options.mjs']
     : ['src', 'package.json', 'cordis.patch.yml', 'tsconfig.json', 'tsdown.config.ts']
 }
@@ -269,11 +294,12 @@ async function hashFile(path: string): Promise<string> {
 /** Hash the files that change the staged output, excluding docs, tests, dependencies, and prior builds. */
 async function sourceHash(plugin: (typeof PLUGINS)[number]): Promise<string> {
   const lines: string[] = []
+  const includeLib = plugin.mode === 'copy'
   const visit = async (path: string, relative: string): Promise<void> => {
     const info = await stat(path)
     if (info.isDirectory()) {
       for (const entry of await readdir(path, { withFileTypes: true })) {
-        if (entry.name === 'node_modules' || entry.name === 'lib' || entry.name === 'lib-test' || entry.name === 'docs') continue
+        if (entry.name === 'node_modules' || (!includeLib && entry.name === 'lib') || entry.name === 'lib-test' || entry.name === 'docs') continue
         await visit(join(path, entry.name), `${relative}/${entry.name}`)
       }
       return
@@ -281,7 +307,7 @@ async function sourceHash(plugin: (typeof PLUGINS)[number]): Promise<string> {
     if (!info.isFile()) return
     lines.push(`${relative}\0${await hashFile(path)}`)
   }
-  for (const entry of sourcePaths(plugin.id)) {
+  for (const entry of sourcePaths(plugin)) {
     const path = join(plugin.directory, entry)
     if (existsSync(path)) await visit(path, entry)
   }
@@ -312,10 +338,12 @@ export function stagedManifest(source: PluginManifest, pluginId: PluginId): Plug
   const packageName = manifest.name
   const packageVersion = manifest.version
   if (packageName === undefined || packageVersion === undefined) fail('source package.json must declare name and version')
-  for (const field of ['scripts', 'devDependencies', 'dependencies', 'peerDependenciesMeta'] as const) {
+  for (const field of ['scripts', 'devDependencies'] as const) {
     Reflect.deleteProperty(manifest, field)
   }
   if (pluginId === 'subscriptions') {
+    delete manifest.dependencies
+    delete manifest.peerDependenciesMeta
     delete manifest.types
     const peers = Object.fromEntries(Object.entries(manifest.peerDependencies ?? {}).filter(([name]) => name !== '@deepseek-ai/dsh-llm-request-record'))
     if (Object.keys(peers).length > 0) manifest.peerDependencies = peers
@@ -326,9 +354,18 @@ export function stagedManifest(source: PluginManifest, pluginId: PluginId): Plug
       './package.json': './package.json',
     }
     manifest.files = ['lib/**/*.js', 'cordis.patch.yml', 'third-party-licenses/**']
-  } else {
+  } else if (pluginId === 'aether-shell') {
+    delete manifest.dependencies
+    delete manifest.peerDependenciesMeta
     manifest.exports = { '.': './lib/lifecycle.mjs', './package.json': './package.json' }
     manifest.files = ['lib', 'cordis.patch.yml']
+  } else if (pluginId === 'context') {
+    // zod is a real runtime dependency of the prebuilt context half; the
+    // profile link resolves it from the repository install.
+    manifest.files = ['lib/index.js', 'lib/client.js', 'lib/index.d.ts', 'icon.svg', 'locale/*.json', 'cordis.patch.yml', 'README.md', 'LICENSE']
+  } else {
+    delete manifest.dependencies
+    manifest.files = ['lib', 'assets/agent-teams', 'assets/readme', 'assets/ui.png', 'cordis.patch.yml', 'README.md', 'README_ZH.md', 'compatibility.json']
   }
   delete manifest.publishConfig
   return manifest
@@ -359,16 +396,23 @@ export function privateDependencySpecs(manifest: PluginManifest): string[] {
  * @param pluginId - which plugin the manifest belongs to.
  */
 export function assertStagedManifest(manifest: PluginManifest, pluginId: PluginId): void {
+  const allowedDependencies = pluginId === 'context' ? new Set(['zod']) : new Set<string>()
+  for (const [name, range] of Object.entries(manifest.dependencies ?? {})) {
+    if (!allowedDependencies.has(name)) fail(`staged ${pluginId} manifest has an unexpected runtime dependency: ${name}@${range}`)
+  }
   const offenders = privateDependencySpecs(manifest)
   if (offenders.length > 0) fail(`staged ${pluginId} manifest still has runtime/local dependencies: ${offenders.join(', ')}`)
-  if (manifest.devDependencies !== undefined || manifest.dependencies !== undefined) {
-    fail(`staged ${pluginId} manifest must not declare development or runtime dependencies`)
+  if (manifest.devDependencies !== undefined) {
+    fail(`staged ${pluginId} manifest must not declare development dependencies`)
   }
   if (pluginId === 'subscriptions' && manifest.peerDependencies?.['@deepseek-ai/dsh-llm-request-record'] !== undefined) {
     fail('staged subscriptions manifest still declares the type-only @deepseek-ai/dsh-llm-request-record peer')
   }
   for (const [name, range] of Object.entries(manifest.peerDependencies ?? {})) {
     if (!name.startsWith('@deepseek-ai/dsh-')) continue
+    // Prebuilt upstream plugins express compatibility as a range that includes
+    // the selected cohort; their source manifest is preserved verbatim.
+    if (pluginId === 'agent-teams' || pluginId === 'context') continue
     if (range !== '0.2.1-rc.2') fail(`staged ${pluginId} peer ${name} is ${range}; the staged cohort must stay 0.2.1-rc.2`)
   }
 }
@@ -609,6 +653,24 @@ async function stagePackage(
   }
 }
 
+/** Copy a prebuilt plugin's runtime files into its staging directory. */
+async function stageCopiedFiles(
+  plugin: (typeof PLUGINS)[number],
+  stagingDirectory: string,
+): Promise<void> {
+  for (const entry of plugin.copy) {
+    const source = join(plugin.directory, entry)
+    if (!existsSync(source)) {
+      if (plugin.mode === 'copy') fail(`${plugin.name} is missing its runtime entry ${entry}`)
+      continue
+    }
+    await cp(source, join(stagingDirectory, entry), {
+      recursive: true,
+      filter: path => !path.endsWith('.map'),
+    })
+  }
+}
+
 /** Build one plugin into its staging directory and verify the expected artifacts. */
 async function buildPlugin(
   plugin: (typeof PLUGINS)[number],
@@ -617,15 +679,20 @@ async function buildPlugin(
 ): Promise<void> {
   await rm(stagingDirectory, { recursive: true, force: true })
   await mkdir(stagingDirectory, { recursive: true })
-  const config = plugin.id === 'subscriptions'
-    ? await subscriptionsConfig(stagingDirectory, dependencies.wireEntry, dependencies.undiciEntry)
-    : await aetherConfig(stagingDirectory)
-  log(`building ${plugin.name} from source`)
-  run(process.execPath, [rootTsdown(), '--config', config], { cwd: REPOSITORY_ROOT })
+  if (plugin.mode === 'build') {
+    const config = plugin.id === 'subscriptions'
+      ? await subscriptionsConfig(stagingDirectory, dependencies.wireEntry, dependencies.undiciEntry)
+      : await aetherConfig(stagingDirectory)
+    log(`building ${plugin.name} from source`)
+    run(process.execPath, [rootTsdown(), '--config', config], { cwd: REPOSITORY_ROOT })
+  } else {
+    log(`staging prebuilt ${plugin.name}`)
+  }
   await stagePackage(plugin, stagingDirectory, dependencies)
+  if (plugin.mode === 'copy') await stageCopiedFiles(plugin, stagingDirectory)
   for (const output of plugin.outputs) {
     const path = join(stagingDirectory, output)
-    if (!existsSync(path) || statSync(path).size === 0) fail(`${plugin.name} build did not produce ${output}`)
+    if (!existsSync(path) || statSync(path).size === 0) fail(`${plugin.name} staging did not produce ${output}`)
   }
 }
 
@@ -697,7 +764,7 @@ function report(staged: readonly StagedPlugin[], profileDirectory: string, backu
 }
 
 /**
- * Build both plugins and make the selected web profile resolve them.
+ * Build or stage the four plugins and make the selected web profile resolve them.
  * @param options - parsed command-line options.
  */
 export async function main(options: BuildOptions): Promise<void> {
@@ -715,7 +782,7 @@ export async function main(options: BuildOptions): Promise<void> {
     try {
       previousState = await readJson<BuildState>(STATE_FILE)
     } catch {
-      warn(`${STATE_FILE} is not valid JSON; rebuilding both staged packages`)
+      warn(`${STATE_FILE} is not valid JSON; rebuilding all staged packages`)
     }
   }
   const state: BuildState = previousState.schema === SCHEMA_VERSION && previousState.scriptVersion === SCRIPT_VERSION
@@ -760,7 +827,7 @@ export async function main(options: BuildOptions): Promise<void> {
     if (problem !== undefined) problems.push(problem)
   }
   if (problems.length === 0 && !changed) {
-    log('profile already resolves both staged plugins; nothing to install')
+    log('profile already resolves all staged plugins; nothing to install')
     report(staged, profileDirectory, undefined)
     return
   }
