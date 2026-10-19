@@ -29,7 +29,7 @@ Mount this package where Web Agents need to create an independent Session or del
 
 ### When to choose it
 
-Choose `session_create` when the user explicitly wants a separate conversation to start a task. It optionally accepts a title, requested model and reasoning effort, and a pin request; the user's global model selection is authoritative, and the result reports the actual provider, model, effort, title, and pin state. Use `session_workspace` with action `archive` only after the user has authorized archiving in the conversation; its `pin` and `unpin` actions adjust exact-id Workspace ordering. Choose `session_send_message` for explicit cross-session handoff when the caller knows the exact destination id or the user names an independent Session that `session_find` can resolve. Use adjacent `send_message` for direct continuable parents and children, and AgentTeams messaging for Team coordination: those operations own their relationship-specific lifecycle. Use Session references when the current Agent only needs a read-only snapshot and the source Session should not run.
+Choose `session_create` when the user explicitly wants a separate conversation to start a task. It optionally accepts a title, requested model and reasoning effort, and a pin request; the user's global model selection is authoritative, and the result reports the actual provider, model, effort, title, and pin state. Use `session_workspace` with action `archive` only after the user has authorized archiving in the conversation; its `pin` and `unpin` actions adjust exact-id Workspace ordering, and its `rename` action changes the user-visible title. Choose `session_send_message` for explicit cross-session handoff when the caller knows the exact destination id or the user names an independent Session that `session_find` can resolve. Use adjacent `send_message` for direct continuable parents and children, and AgentTeams messaging for Team coordination: those operations own their relationship-specific lifecycle. Use Session references when the current Agent only needs a read-only snapshot and the source Session should not run.
 
 ### Minimal configuration
 
@@ -47,9 +47,9 @@ The package has no configuration. Target policy and frequency limits are deliber
 
 Creation requires a calling workspace and a configured permission preset; a delegated subagent and a caller with custom or current-session-only Auto permissions are rejected before creation. If setup or delivery fails after creation, the error includes the created Session id; the empty or partially configured Session may remain for inspection. No initial task is accepted in that case.
 
-### Archiving and pinning
+### Archiving, pinning, and renaming
 
-`session_workspace` takes `action: 'archive' | 'pin' | 'unpin'` and one exact Session id. For `archive`, its description requires the model to confirm from the current conversation that the user explicitly authorized this archive; the grant may cover one archive, multiple archives in the conversation, or a long-term authorization, exactly as the user stated. The tool does not verify a grant token or prompt again, so the model must remember the authorization and must not infer it from silence or an unrelated approval. A Session with running work is refused by the Workspace registry; stopping that work requires separate user authorization. `pin` and `unpin` return the actual pinned state and are idempotent.
+`session_workspace` takes `action: 'archive' | 'pin' | 'unpin' | 'rename'` and one exact Session id. For `archive`, its description requires the model to confirm from the current conversation that the user explicitly authorized this archive; the grant may cover one archive, multiple archives in the conversation, or a long-term authorization, exactly as the user stated. The tool does not verify a grant token or prompt again, so the model must remember the authorization and must not infer it from silence or an unrelated approval. A Session with running work is refused by the Workspace registry; stopping that work requires separate user authorization. `pin` and `unpin` return the actual pinned state and are idempotent. `rename` requires a non-blank `title`, writes it through the Session Controller title service, and returns the stored title.
 
 ### Finding an independent Session
 
@@ -140,11 +140,11 @@ The fixed tool schema is present while the plugin is mounted; each creation adds
 
 Prefix-stable tool schema; each result and initial task is append-only in its own Session.
 
-### Archive, pin, and unpin results
+### Archive, pin, unpin, and rename results
 
 #### What the model sees
 
-`session_workspace` applies `action: 'archive' | 'pin' | 'unpin'` to one exact id. After the model has confirmed user authorization in the conversation, `archive` performs the archive; authorization scope is a prompt-level obligation remembered by the model, not a runtime token. A Session with running work is refused by the Workspace registry. `pin` and `unpin` return the actual pinned state and are idempotent at the Workspace layer.
+`session_workspace` applies `action: 'archive' | 'pin' | 'unpin' | 'rename'` to one exact id. After the model has confirmed user authorization in the conversation, `archive` performs the archive; authorization scope is a prompt-level obligation remembered by the model, not a runtime token. A Session with running work is refused by the Workspace registry. `pin` and `unpin` return the actual pinned state and are idempotent at the Workspace layer. `rename` requires a non-blank title and returns the stored title from the title service.
 
 #### Token effect
 

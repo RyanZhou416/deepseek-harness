@@ -179,8 +179,9 @@ describe('dsh-tool-session-message', () => {
     expect(workspace?.description).toContain('user-authorized')
     expect(workspace?.description).toContain('one archive')
     expect(workspace?.description).toContain('long-term')
+    expect(workspace?.description).toContain('rename')
     expect(Object.keys((workspace?.parameters as { properties?: Record<string, unknown> }).properties ?? {}))
-      .toEqual(['action', 'session_id'])
+      .toEqual(['action', 'session_id', 'title'])
     expect(ctx.tools.schemas().some(candidate => candidate.name === 'session_archive')).toBe(false)
     expect(ctx.tools.schemas().some(candidate => candidate.name === 'session_pin')).toBe(false)
     expect(ctx.tools.schemas().some(candidate => candidate.name === 'session_unpin')).toBe(false)
@@ -256,8 +257,8 @@ describe('dsh-tool-session-message', () => {
     expect(text).not.toContain('low')
   })
 
-  it('archives, pins, and unpins an exact Session and reports actual state', async () => {
-    const { ctx, workspace } = await setup()
+  it('archives, pins, unpins, and renames an exact Session and reports actual state', async () => {
+    const { ctx, workspace, rename } = await setup()
     const caller = makeAgent(ctx, 'workspace-tool-caller', '/workspace')
     await ctx.agents.register(caller)
 
@@ -275,6 +276,14 @@ describe('dsh-tool-session-message', () => {
     expect(unpinned.isError).toBe(false)
     expect(workspace.unpinSession).toHaveBeenCalledWith(SessionId('pinned-session'))
     expect(resultText(unpinned)).toContain('pinned: false')
+
+    rename.mockResolvedValueOnce({ title: 'Renamed title', seq: SessionSeq(9) })
+    const renamed = await runSessionTool(ctx, 'session_workspace', {
+      action: 'rename', session_id: 'renamed-session', title: '  Renamed title  ',
+    }, caller)
+    expect(renamed.isError).toBe(false)
+    expect(rename).toHaveBeenCalledWith({ sessionId: SessionId('renamed-session'), title: 'Renamed title' })
+    expect(resultText(renamed)).toContain('renamed to "Renamed title"')
   })
 
   it('rejects a blank created name', async () => {

@@ -64,7 +64,8 @@ const CREATE_DESCRIPTION =
   + 'It does not report completion back; give the user the new id.'
 
 const WORKSPACE_DESCRIPTION =
-  'Archive, pin, or unpin one exact Session. Archive is a user-authorized operation: first confirm in the current '
+  'Archive, pin, unpin, or rename one exact Session. Rename sets a user-visible title and reports the stored title. '
+  + 'Archive is a user-authorized operation: first confirm in the current '
   + 'conversation that the user explicitly authorized it. Authorization may be for one archive, multiple archives in '
   + 'this conversation, or long-term, exactly as stated; remember the scope. This tool does not verify or re-prompt, '
   + 'and must not infer authorization from silence or an unrelated approval. If not authorized, ask first. Archiving a '
@@ -345,7 +346,7 @@ export function apply(ctx: Context): void {
     parameters: {
       action: {
         type: 'string',
-        enum: ['archive', 'pin', 'unpin'],
+        enum: ['archive', 'pin', 'unpin', 'rename'],
         required: true,
         description: 'Action to apply.',
       },
@@ -353,6 +354,10 @@ export function apply(ctx: Context): void {
         type: 'string',
         required: true,
         description: 'Exact Session id; never guess.',
+      },
+      title: {
+        type: 'string',
+        description: 'New title for rename; required for rename.',
       },
     },
     output: {
@@ -364,13 +369,16 @@ export function apply(ctx: Context): void {
           action: { type: 'string', required: true },
           archived: { type: 'boolean' },
           pinned: { type: 'boolean' },
+          title: { type: 'string' },
         },
       },
       render: (_args, value) => [{
         type: 'text',
         text: value.action === 'archive'
           ? `Session ${value.sessionId} archived: ${String(value.archived)}.`
-          : `Session ${value.sessionId} pinned: ${String(value.pinned)}.`,
+          : value.action === 'rename'
+            ? `Session ${value.sessionId} renamed to ${JSON.stringify(value.title)}.`
+            : `Session ${value.sessionId} pinned: ${String(value.pinned)}.`,
       }],
     },
     async execute(args, exec) {
@@ -380,8 +388,14 @@ export function apply(ctx: Context): void {
       const sessionIdText = args.session_id.trim()
       if (sessionIdText.length === 0) throw new TypeError('session_id must not be empty')
       const sessionId = SessionId(sessionIdText)
-      const registry = requireWorkspaceRegistry(ctx)
       exec.signal.throwIfAborted()
+      if (args.action === 'rename') {
+        const title = args.title?.trim()
+        if (title === undefined || title.length === 0) throw new TypeError('title must not be blank for rename')
+        const renamed = await ctx.sessionController.rename({ sessionId, title })
+        return { sessionId, action: args.action, title: renamed.title }
+      }
+      const registry = requireWorkspaceRegistry(ctx)
       if (args.action === 'archive') {
         await registry.archiveSession(sessionId)
         return { sessionId, action: args.action, archived: true }

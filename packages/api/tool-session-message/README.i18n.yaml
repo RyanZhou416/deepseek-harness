@@ -18,17 +18,17 @@
   en: 9d7c1f306ba9cf46
   zh: 346c4332a91285cb
 /deepseek-ai-dsh-tool-session-message/use-this-package/when-to-choose-it:
-  en: f476f9b31dab4500
-  zh: f3365876078920f7
+  en: dd37bd19dd3419cd
+  zh: 8a0ea1d199179582
 /deepseek-ai-dsh-tool-session-message/use-this-package/minimal-configuration:
   en: 38ac5f4df4a224b3
   zh: c33465a6d457e889
 /deepseek-ai-dsh-tool-session-message/use-this-package/creating-and-starting-an-independent-session:
   en: 40c1e0854aadecb4
   zh: 23fd9081f2eddba3
-/deepseek-ai-dsh-tool-session-message/use-this-package/archiving-and-pinning:
-  en: 769a413ba2d18943
-  zh: e7f6635a400957e5
+/deepseek-ai-dsh-tool-session-message/use-this-package/archiving-pinning-and-renaming:
+  en: 48f2c87f86273c14
+  zh: 7f3387c89d2cfc11
 /deepseek-ai-dsh-tool-session-message/use-this-package/finding-an-independent-session:
   en: f55fb69d829eab82
   zh: a0cb045edc3d79af
@@ -83,16 +83,16 @@
 /deepseek-ai-dsh-tool-session-message/model-experience/session-creation-result/kv-cache-effect:
   en: 9a9eee5d25b28aa7
   zh: bed3e34df864c339
-/deepseek-ai-dsh-tool-session-message/model-experience/archive-pin-and-unpin-results:
-  en: 4f2c1f5cb9db75de
-  zh: 94736044c4b5f6b2
-/deepseek-ai-dsh-tool-session-message/model-experience/archive-pin-and-unpin-results/what-the-model-sees:
-  en: fbbfb2784153bfa3
-  zh: b8f23358d4a1fedf
-/deepseek-ai-dsh-tool-session-message/model-experience/archive-pin-and-unpin-results/token-effect:
+/deepseek-ai-dsh-tool-session-message/model-experience/archive-pin-unpin-and-rename-results:
+  en: 3f1f31134d365e16
+  zh: 0abf48cebad59cc9
+/deepseek-ai-dsh-tool-session-message/model-experience/archive-pin-unpin-and-rename-results/what-the-model-sees:
+  en: 9b8e25372cc79636
+  zh: 8f4a3982e7c23afa
+/deepseek-ai-dsh-tool-session-message/model-experience/archive-pin-unpin-and-rename-results/token-effect:
   en: 0ece8bf8f4a50b08
   zh: d28ca0135e37ce3a
-/deepseek-ai-dsh-tool-session-message/model-experience/archive-pin-and-unpin-results/kv-cache-effect:
+/deepseek-ai-dsh-tool-session-message/model-experience/archive-pin-unpin-and-rename-results/kv-cache-effect:
   en: 2445491eba4211b9
   zh: f07db4822373ae9d
 /deepseek-ai-dsh-tool-session-message/model-experience/session-discovery-result:

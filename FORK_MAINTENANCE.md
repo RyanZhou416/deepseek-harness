@@ -576,6 +576,8 @@ Web bundle 的 `standard`、`ptc` 与 `cordis` preset 在 Agent 工具作用域�
 
 同包的 `session_message_status` 用目标 Session id 与已接受 `messageId` 只读折叠目标完整日志，不唤醒目标。它区分 pending-context、claimed、model-context、processing-tool、completed、rejected、discarded 与 unknown，并从顶层工具事件和 PTC sub-dispatch 同时识别未结算 `terminal_send` 的 terminal blocking；状态是时间点观察，不自动推送给发送方。
 
+同包的 `session_workspace` 对确切 Session id 执行 `archive`、`pin`、`unpin` 或 `rename`。`rename` 要求非空 `title`，通过 Session Controller 的 title 服务写入并返回实际存储的标题；archive 仍需对话内用户授权，运行中 Session 拒绝归档，pin/unpin 幂等。保持 action 枚举、可选 `title` 参数与输出 schema 同步；新增 rename 不能绕过 title 服务的规范化或 Session 解析。
+
 2026-10-18 合并到 0.2.1-rc.2 时，上游整体替换了 `packages/bundle/web-app/presets/{standard,ptc,cordis}.patch.yml`，三个文件中的 `tool-session-message` 行随之消失，Web 启动的工具目录对比因此报「移除 session_create / session_find / session_message_status / session_send_message」。修复是把 `- id: tool-session-message` 与 `name: '@deepseek-ai/dsh-tool-session-message'` 两行重新插回三个 preset 的 `tool-jobs` 之后，并同步外置 `chatgpt-dsh` 预设；该包继续以 `workspace:*` 列在 web-app bundle 依赖中。**Preservation rule.** 上游以后再次改写这些 preset 文件时，必须逐行核对这三处插入，不能整文件接受上游版本。**Focused verification.** `dsh --profile web --dump-config` 输出三条 `tool-session-message`；`apps/web/tests/shipped-composition.e2e.ts` 的 `EXPECTED_TOOLS` 含 `session_send_message`（Windows 上仅 bash/pwsh 平台差异失败）；`pnpm exec tsx scripts/verify-cordis-config.ts` 报告 350 个配置通过。
 
 #### Retired official Team scheduling patches

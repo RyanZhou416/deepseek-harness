@@ -41,7 +41,7 @@
 | `@deepseek-ai/dsh-tool-lsp` | `lsp` | `ctx.workingDirectory`、`ctx.tools`、`ctx.lsp`、`ctx.systemPrompt` | `tool/call`、`tool/result` | - | lsp 工具将提供方选择和语言服务器子进程置于 ctx.lsp 之后，因此其模型可见 schema 在更换提供方时保持稳定。运行时要求已注册提供方，例如 `@deepseek-ai/dsh-lsp-stdio`；如果没有提供方，查询会返回结构化 `LSP_UNAVAILABLE` 错误，而不会改变 schema。 |
 | `@deepseek-ai/dsh-tool-ralph` | `ralph` | `ctx.tools`、`ctx.workflowEngine`、`ctx.subagents`、`ctx.systemPrompt`、`a calling Agent (exec.agent parents every fresh round)` | `tool/call`、`tool/result`、`workflow and child session events during execution` | - | 固定的前台工作流会在每个 Round 启动一个全新的结构化子级；模型只能选择不可变目标和可选的 Round 上限。 |
 | `@deepseek-ai/dsh-tool-skill` | `skill` | `ctx.workingDirectory`、`ctx.tools`、`ctx.agents`、`ctx.skills` | `tool/call`、`tool/result`、`user/message replacement catalogs via agent.inject()` | - | - |
-| `@deepseek-ai/dsh-tool-session-message` | `session_create`、`session_find`、`session_message_status`、`session_send_message`、`session_workspace` | `ctx.tools`、`ctx.agents`、`ctx.sessionController`、`ctx.sessionReferenceResolver`、`ctx.sessionQuery`、`ctx.workspaceRegistry and ctx.permissionPresets (create only)`、`ctx.agentDefaultModel`、`an exact live calling Agent` | `tool/call`、`tool/result`、`ordinary Session creation and initial inbox message (create only)`、`Session-reference candidate and Session-header reads (find only)`、`target agent/inbox/spliced and user/message (send only)`、`target Session log read (status only)`、`Workspace archive/pin mutations (session_workspace)` | - | Web bundle 提供携带即时任务的普通 Session 创建，并可选设置标题、请求模型、思考强度与置顶；全局模型选择是权威值，结果报告实际值。它还提供按标题引导的根 Session 发现、无限制确切 id 上下文注入、只读状态检查，以及按确切 id 的 Workspace 动作（`session_workspace`：归档、置顶、取消置顶）。归档在提示词层要求模型确认用户授权；不检查 runtime 授权令牌。发送者来源取自确切调用 Agent；系统使用提示词指导而非 runtime 目标或频率策略来保留专用消息路径，并阻止循环与轮询。 |
+| `@deepseek-ai/dsh-tool-session-message` | `session_create`、`session_find`、`session_message_status`、`session_send_message`、`session_workspace` | `ctx.tools`、`ctx.agents`、`ctx.sessionController`、`ctx.sessionReferenceResolver`、`ctx.sessionQuery`、`ctx.workspaceRegistry and ctx.permissionPresets (create only)`、`ctx.agentDefaultModel`、`an exact live calling Agent` | `tool/call`、`tool/result`、`ordinary Session creation and initial inbox message (create only)`、`Session-reference candidate and Session-header reads (find only)`、`target agent/inbox/spliced and user/message (send only)`、`target Session log read (status only)`、`Workspace archive/pin/title mutations (session_workspace)` | - | Web bundle 提供携带即时任务的普通 Session 创建，并可选设置标题、请求模型、思考强度与置顶；全局模型选择是权威值，结果报告实际值。它还提供按标题引导的根 Session 发现、无限制确切 id 上下文注入、只读状态检查，以及按确切 id 的 Workspace 动作（`session_workspace`：归档、置顶、取消置顶、重命名）。归档在提示词层要求模型确认用户授权；不检查 runtime 授权令牌。发送者来源取自确切调用 Agent；系统使用提示词指导而非 runtime 目标或频率策略来保留专用消息路径，并阻止循环与轮询。 |
 | `@deepseek-ai/dsh-tool-session-query` | `session_event_read`、`session_event_search`、`session_event_trace`、`session_search`、`session_trace` | `ctx.tools`、`ctx.systemPrompt`、`ctx.sessionQuery`、`a calling Agent for workspace authority` | `tool/call`、`tool/result` | - | 这 5 个只读工具会隐藏提供方游标，并根据不可变的调用 agent 会话为每个结果授权。该包需要选择启用；需要强制截止时间或限制行内输出的组合还会挂载通用超时或 spill 策略。 |
 | `@deepseek-ai/dsh-tool-subagent` | `list_subagent_models`、`subagent` | `ctx.tools`、`ctx.subagents`、`ctx.systemPrompt`、`用于模型发现和所选路由校验的 ctx.llm` | `tool/call`、`tool/result`、`child session events through the chosen provider` | `subagent`、`subagent_fork` | 注册的委派工具名称取决于加载时 `toolName` 配置（默认为 `subagent`）；上述默认 schema 关闭模型选择，而发现 schema 则展示为已启用 Session 中可用的固定配套工具。Web preset 会在每个新顶层 Session 创建时读取插件页偏好，并为其子 Session 保留该决定；`subagent_fork` 始终使用固定路由。每个实例通过 `provider` 选择后端，通过 `modelSelectionSettings` 读取模型选择设置。每次委派都会立即返回子代理 id；本地子代理接受后续消息，外部后端自动汇报单次执行结果。 |
 | `@deepseek-ai/dsh-tool-subagent-control` | `interrupt_agent`、`list_agents`、`send_message` | `ctx.tools`、`ctx.subagents`、`ctx.agents and ctx.sessionProjections (list_agents only)` | `tool/call`、`tool/result`、`child session events through ctx.subagents` | - | 这些是用于发现、中断托管 subagent 和向本地子代理发送消息的全局命名工具：绑定提供方的 `tool-subagent` 实例注册不同的委派工具；本包注册一次 `send_message` 和 `interrupt_agent`，另由 `list_agents` 通过单独加载的 `/list-agents` 插件提供，其目录行使用 sessionProjections 和实时 Agent 注册表。 |
@@ -1950,7 +1950,7 @@ lsp 工具将提供方选择和语言服务器子进程置于 ctx.lsp 之后，�
 
 ### `session_workspace`
 
-归档、置顶或取消置顶一个确切 Session。归档是用户授权操作：选择 `archive` 前，必须从当前对话确认用户明确授权归档该 Session。授权可以覆盖一次归档、当前对话中的多次归档，或用户明确说明的长期授权；必须记住用户给出的授权范围。工具不验证授权令牌、不会再次弹出审批，也不能从沉默、无关的既有批准或 Session 空闲状态推断授权。用户未授权时，应先询问用户。仍有工作运行的 Session 会被拒绝；停止该工作需要用户另行授权。`pin` 与 `unpin` 是幂等的，并报告实际置顶状态。
+归档、置顶、取消置顶或重命名一个确切 Session。归档是用户授权操作：选择 `archive` 前，必须从当前对话确认用户明确授权归档该 Session。授权可以覆盖一次归档、当前对话中的多次归档，或用户明确说明的长期授权；必须记住用户给出的授权范围。工具不验证授权令牌、不会再次弹出审批，也不能从沉默、无关的既有批准或 Session 空闲状态推断授权。用户未授权时，应先询问用户。仍有工作运行的 Session 会被拒绝；停止该工作需要用户另行授权。`pin` 与 `unpin` 是幂等的，并报告实际置顶状态。`rename` 要求非空 `title`，并返回标题服务存储的实际标题。
 
 ```json
 {
@@ -1962,12 +1962,17 @@ lsp 工具将提供方选择和语言服务器子进程置于 ctx.lsp 之后，�
       "enum": [
         "archive",
         "pin",
-        "unpin"
+        "unpin",
+        "rename"
       ]
     },
     "session_id": {
       "type": "string",
       "description": "Exact Session id; never guess."
+    },
+    "title": {
+      "type": "string",
+      "description": "New title for rename; required for rename."
     }
   },
   "required": [
@@ -1979,7 +1984,7 @@ lsp 工具将提供方选择和语言服务器子进程置于 ctx.lsp 之后，�
 
 来源：[`packages/api/tool-session-message/src/index.ts`](../packages/api/tool-session-message/src/index.ts)
 
-Web bundle 提供携带即时任务的普通 Session 创建，并可选设置标题、请求模型、思考强度与置顶；全局模型选择是权威值，结果报告实际值。它还提供按标题引导的根 Session 发现、无限制确切 id 上下文注入、只读状态检查，以及按确切 id 的 Workspace 动作（`session_workspace`：归档、置顶、取消置顶）。归档在提示词层要求模型确认用户授权；不检查 runtime 授权令牌。发送者来源取自确切调用 Agent；系统使用提示词指导而非 runtime 目标或频率策略来保留专用消息路径，并阻止循环与轮询。
+Web bundle 提供携带即时任务的普通 Session 创建，并可选设置标题、请求模型、思考强度与置顶；全局模型选择是权威值，结果报告实际值。它还提供按标题引导的根 Session 发现、无限制确切 id 上下文注入、只读状态检查，以及按确切 id 的 Workspace 动作（`session_workspace`：归档、置顶、取消置顶、重命名）。归档在提示词层要求模型确认用户授权；不检查 runtime 授权令牌。发送者来源取自确切调用 Agent；系统使用提示词指导而非 runtime 目标或频率策略来保留专用消息路径，并阻止循环与轮询。
 
 <a id="deepseek-aidsh-tool-session-query"></a>
 

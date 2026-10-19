@@ -510,7 +510,7 @@ const TOOL_PACKAGES: ToolPackage[] = [
     dir: 'tool-session-message',
     source: 'packages/api/tool-session-message/src/index.ts',
     requires: ['ctx.tools', 'ctx.agents', 'ctx.sessionController', 'ctx.sessionReferenceResolver', 'ctx.sessionQuery', 'ctx.workspaceRegistry and ctx.permissionPresets (create only)', 'ctx.agentDefaultModel', 'an exact live calling Agent'],
-    writes: ['tool/call', 'tool/result', 'ordinary Session creation and initial inbox message (create only)', 'Session-reference candidate and Session-header reads (find only)', 'target agent/inbox/spliced and user/message (send only)', 'target Session log read (status only)', 'Workspace archive/pin mutations (session_workspace)'],
+    writes: ['tool/call', 'tool/result', 'ordinary Session creation and initial inbox message (create only)', 'Session-reference candidate and Session-header reads (find only)', 'target agent/inbox/spliced and user/message (send only)', 'target Session log read (status only)', 'Workspace archive/pin/title mutations (session_workspace)'],
     async mount(ctx) {
       await ctx.plugin(AgentRegistry)
       ctx.provide('sessionController', {
@@ -533,7 +533,7 @@ const TOOL_PACKAGES: ToolPackage[] = [
       'The Web bundle exposes ordinary Session creation with an immediate attributed task and optional title, model, '
       + 'reasoning-effort, and pin requests; the global model selection is authoritative and the result reports actual '
       + 'values. It also exposes title-guided root-Session discovery, unrestricted exact-id context injection, read-only '
-      + 'status inspection, and exact-id workspace actions (`session_workspace`: archive, pin, unpin). Archive requires '
+      + 'status inspection, and exact-id workspace actions (`session_workspace`: archive, pin, unpin, rename). Archive requires '
       + 'model-confirmed user authorization at the prompt level; no runtime grant token is checked. Sender attribution '
       + 'comes from the exact calling Agent; '
       + 'prompt guidance, rather than a runtime target or frequency policy, preserves specialized messaging and '
