@@ -34,6 +34,7 @@ import { connect } from 'node:net'
 import { homedir } from 'node:os'
 import { basename, delimiter, dirname, join, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
+import { seedPortableProfile } from './fork-profile-seed.ts'
 
 const REPOSITORY_ROOT = dirname(dirname(fileURLToPath(import.meta.url)))
 const BUILD_ROOT = join(REPOSITORY_ROOT, '.build', 'fork-plugins')
@@ -1044,8 +1045,8 @@ function runCaptured(
     stdio: ['ignore', 'pipe', 'pipe'],
     shell: process.platform === 'win32' && command.toLowerCase().endsWith('.cmd'),
   })
-  const stdout = result.stdout ?? ''
-  const stderr = result.stderr ?? ''
+  const stdout = result.stdout
+  const stderr = result.stderr
   if (stdout !== '') process.stdout.write(stdout)
   if (stderr !== '') process.stderr.write(stderr)
   return {
@@ -1337,6 +1338,11 @@ export async function main(options: BuildOptions): Promise<void> {
     runDsh(['plugin', '--profile', PROFILE_NAME, 'install', '--ignore-scripts'], home)
     profileCreated = true
   }
+  const seeded = await seedPortableProfile({ dshHome: home })
+  if (seeded.patchSeeded) {
+    log(`seeded portable profile configuration from ${join(REPOSITORY_ROOT, 'fork-runtime', 'web', 'portable-profile.patch.yml')}`)
+  }
+  for (const path of seeded.copied) log(`seeded profile file ${path}`)
   const problems: string[] = []
   for (const plugin of staged) {
     const problem = await profileProblem(plugin, profileDirectory)

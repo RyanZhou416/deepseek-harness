@@ -2,6 +2,8 @@
 setlocal EnableExtensions DisableDelayedExpansion
 cd /d "%~dp0"
 
+if not defined DSH_HOME for %%I in ("%~dp0..\deepseek-harness-data") do set "DSH_HOME=%%~fI"
+
 set "DSH_STEP=checking Node.js"
 where node >nul 2>&1
 if errorlevel 1 goto :missing_node

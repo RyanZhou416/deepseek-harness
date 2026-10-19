@@ -1,0 +1,11 @@
+# Loaded only by the Windows launchers at the next start; not a live profile edit.
+- id: local-memory-watchdog
+  config:
+    sampleIntervalMs: 250
+    logIntervalMs: 60000
+    warningRatio: 0.75
+    restartRatio: 0.90
+    sustainedSamples: 8
+    restartExitCode: 76
+    rssWarningMiB: 32768
+    rssRestartMiB: 40960

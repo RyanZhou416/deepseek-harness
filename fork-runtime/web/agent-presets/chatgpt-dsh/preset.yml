@@ -1,0 +1,2 @@
+name: ChatGPT DSH 纪律模式
+description: ChatGPT 专用：RC.1 standard 全量工具 + DSH 纪律契约。pwsh/write/edit 的 sandbox_permissions 与 justification 已从提示 schema 移除，并附带语义失败熔断、禁忙轮询和单资产单代理拆单规则。

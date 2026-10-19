@@ -269,6 +269,16 @@ ChatGPT 源码提供默认关闭的 `autoResetCredits` 开关，入口为订阅�
 
 部署前须在 Host 停止后同步外置 `chatgpt-dsh` 预设，禁用其 `command-goal` 与 `tool-goal` 两行。不得清空既有 Goal、会话或缓存来完成禁用。保留 `goal-round-driver/tests/disabled.spec.ts`、`apps/web/tests/goal-disabled.e2e.ts`、Web 预设组合测试和 `goal-disabled` 记录会话；合并上游时不得只关闭模型工具而恢复自动驱动。
 
+### Portable Web profile kit
+
+新同事的全新 `DSH_HOME` 必须由仓库内模板补齐，而不是依赖维护者机器上的 `profiles/web/cordis.patch.yml`。`fork-runtime/web/portable-profile.patch.yml` 是模板，`fork-runtime/web/memory-watchdog.cjs`、`chatgpt-subagent-preset.cjs`、`portable-memory-limits.patch.yml` 与 `fork-runtime/web/agent-presets/chatgpt-dsh/` 是模板所需的本地文件。`scripts/fork-profile-seed.ts` 把模板写入新建或仍为空 patch 的 web profile，并在缺失时复制支持文件；已有非空用户 patch 与已有文件一律保留。`build.cmd` 与 `run.cmd` 在未设置 `DSH_HOME` 时统一使用仓库同级 `..\deepseek-harness-data`，使构建与启动指向同一个 profile。
+
+模板包含插件开关（`dsh-context`、`llm-subscriptions`、`aether-shell`、`tool-goal` 的 preset 覆盖、模型 provider、locale、permission preset 等）；`DSH_HOME` 派生路径用 `!!js process.env.DSH_HOME`，AetherShell 路径可用 `AETHER_SHELL_EXE` 覆盖。API key 只保留环境变量名，不写入模板。订阅与 fork 插件包仍由 `build.cmd` 的 `fork-plugins-build.ts` 安装；模板不是 bundle 依赖清单的替代。
+
+**Preservation rule.** 只对新建或空 profile 应用模板；不得覆盖已有用户的 `cordis.patch.yml` 或支持文件。模板里的 preset `plugins` 列表必须与 `packages/bundle/web-app/presets/{standard,ptc,cordis}.patch.yml` 保持同步，否则 `tool-goal` 的禁用会漂移。保持 `build.cmd`、`run.cmd` 的默认 `DSH_HOME` 一致；显式环境变量优先。
+
+**Focused verification.** `pnpm exec vitest run scripts/fork-profile-seed.spec.ts scripts/fork-plugins-build.spec.ts scripts/fork-windows-launchers.spec.ts` 覆盖空 patch、保留用户 patch、force、支持文件复制和 launcher 的 profile 路径。模板本身必须能通过 `entryListSchema` 解析。
+
 ### Latest user-message revision
 
 Chat edits the latest ordinary text-only user message in its existing idle Session with no pending input. `session.editLastMessage` admits a durable queued revision; `agent/prepare-input` excludes the obsolete suffix before context assembly, and `agent/message-surface` finalizes the normally processed input at request admission. Preserve the Session identity and current model, strict exclusion of the old prompt and response from derived history, retry identity across request preparation, and hidden superseded Chat rows after reload. Original log events and spent-token totals remain; filesystem effects are not rolled back. Focused verification lives in `packages/api/session-controller/tests/edit-last-message.host.spec.ts`, Chat conversation-node tests, and the Web message-actions scenario.

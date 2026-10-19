@@ -3,7 +3,7 @@ setlocal
 cd /d "%~dp0"
 
 set "DSH_STEP=preparing runtime diagnostics"
-if not defined DSH_HOME set "DSH_HOME=C:\Project\deepseek-harness-data"
+if not defined DSH_HOME for %%I in ("%~dp0..\deepseek-harness-data") do set "DSH_HOME=%%~fI"
 set "DSH_DIAGNOSTICS=%DSH_HOME%\diagnostics"
 if not exist "%DSH_DIAGNOSTICS%" mkdir "%DSH_DIAGNOSTICS%"
 if errorlevel 1 goto :failed
