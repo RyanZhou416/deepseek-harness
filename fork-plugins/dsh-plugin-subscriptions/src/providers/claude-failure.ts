@@ -868,26 +868,47 @@ export function claudeRecoveryExhausted(error: LlmError): LlmError {
 }
 
 /**
- * Classify a Messages POST that failed after it was issued.
+ * Classify a Messages POST that failed after it was issued but before any response arrived.
  *
- * The request body has already left this process, so the server may have accepted and acted
- * on it before anything failed: the outcome is unknown, and repeating the logical request
- * could submit the same turn twice. This is the conservative disposition the design requires
- * where the send cannot be shown to have been refused — it is not a claim that the service
- * received the request, and it is deliberately not an assertion that the attempt is safe to
- * repeat. A failure raised before the POST is issued — request assembly, image resolution,
- * wire construction — keeps its own specific rule instead.
+ * The request body has already left this process, so the server may have accepted and acted on
+ * it before anything failed. The route keeps the failure retryable: the Host retry executor
+ * schedules its normal bounded backoff for the transport code. That is a deliberate availability
+ * trade-off for consumer subscription endpoints; a duplicate is possible, and a turn that
+ * already delivered output does not reach this helper. A failure raised before the POST is
+ * issued — request assembly, image resolution, wire construction — keeps its own specific rule.
  *
  * The failure's own code and safe facts are kept; only the disposition changes.
  * @param error - what the issued send threw.
- * @returns the error to surface, always carrying the hard stop.
+ * @returns the error to surface, without a hard stop so Host retry can schedule it.
  */
 export function claudeAmbiguousSend(error: unknown): LlmError {
-  if (error instanceof LlmError) return withHardStop(error)
-  return new LlmError('claude API request failed after the request was issued', 'TRANSPORT', {
-    cause: error,
-    retryDisposition: 'forbid',
+  if (error instanceof LlmError) return withRetryAllowed(error)
+  return new LlmError('claude API request failed', 'TRANSPORT', { cause: error })
+}
+
+/**
+ * Rebuild one issued-send failure without the hard stop, keeping its code, message and safe facts.
+ * @param error - the failure to make retryable.
+ * @returns the same failure with no `retryDisposition`.
+ */
+function withRetryAllowed(error: LlmError): LlmError {
+  const prior = failureDecisions.get(error)
+  // A classification that already forbids replay outranks the ordinary transport case; keep its
+  // hard stop instead of turning every issued-send failure into a resend.
+  if (prior?.retryDisposition === 'forbid') return withHardStop(error)
+  const retryable = new LlmError(error.message, error.code, {
+    cause: error.cause ?? error,
+    ...error.failure.status === undefined ? {} : { status: error.failure.status },
+    ...error.failure.providerRetryAfterMs === undefined
+      ? {}
+      : { providerRetryAfterMs: error.failure.providerRetryAfterMs },
+    ...error.failure.requestId === undefined ? {} : { requestId: error.failure.requestId },
+    ...error.failure.offloadImages === undefined ? {} : { offloadImages: error.failure.offloadImages },
   })
+  if (prior !== undefined) {
+    failureDecisions.set(retryable, { ...prior, retryDisposition: 'allow' })
+  }
+  return retryable
 }
 
 /**

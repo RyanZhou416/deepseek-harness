@@ -401,11 +401,11 @@ test('a version refusal on the Files upload records the profile block, so Messag
   }
 })
 
-test('a Messages POST that fails after it was issued is ambiguous, not replayable', async t => {
+test('a Messages POST that fails after issue but before a response is retryable', async t => {
   let issued = 0
   const harness = await adapter(t, async (_url, init) => {
     issued += 1
-    // The body left this process before the failure: the server may already have acted on it.
+    // The body left this process before the failure, and no response arrived.
     void init?.body
     throw new Error('connection reset')
   })
@@ -413,20 +413,21 @@ test('a Messages POST that fails after it was issued is ambiguous, not replayabl
     await assert.rejects(collect(harness.adapter, SessionId('sess-ambiguous-send')), (error: unknown) => {
       assert.ok(error instanceof LlmError)
       assert.equal(error.code, 'TRANSPORT')
-      assert.equal(error.failure.retryDisposition, 'forbid',
-        'the send cannot be shown to have been refused, so this logical request is not repeated')
+      assert.equal(error.failure.retryDisposition, undefined,
+        'the Host retry executor may back off and resend this transport failure')
       return true
     })
-    assert.equal(issued, 1, 'the ambiguous send is not repeated automatically')
+    assert.equal(issued, 1, 'the adapter leaves the retry to the Host executor')
   } finally {
     await cleanup(harness.directory)
   }
 })
 
-test('an idle deadline that lands while the POST is in flight stays ambiguous, not retryable', async (context) => {
-  // The watchdog fires while the request is already on the wire, so the server may have accepted
-  // it: the deadline must not hand the attempt back as a retryable TIMEOUT. The deadline is
-  // driven by the test's own clock, so the send is observed before it fires rather than raced.
+test('an idle deadline that lands while the POST is in flight is a retryable transport timeout', async (context) => {
+  // The watchdog fires while the request is already on the wire and no response arrived. The
+  // Host retry executor may resend it after its bounded backoff; delivered output remains a hard
+  // stop. The deadline is driven by the test's own clock, so the send is observed before it
+  // fires rather than raced.
   context.mock.timers.enable({ apis: ['setTimeout'] })
   let noteSendStarted: () => void = () => {}
   const sendStarted = new Promise<void>((resolve) => { noteSendStarted = resolve })
@@ -458,7 +459,8 @@ test('an idle deadline that lands while the POST is in flight stays ambiguous, n
     await assert.rejects(pending, (error: unknown) => {
       assert.ok(error instanceof LlmError)
       assert.equal(error.code, 'TIMEOUT', 'an idle expiry of an issued send is a timeout')
-      assert.equal(error.failure.retryDisposition, 'forbid', 'a deadline after the POST is not a safe repeat')
+      assert.equal(error.failure.retryDisposition, undefined,
+        'a deadline after the POST keeps the Host transport retry path')
       return true
     })
   } finally {

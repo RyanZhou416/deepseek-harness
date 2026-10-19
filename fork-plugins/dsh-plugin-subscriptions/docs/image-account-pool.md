@@ -16,6 +16,6 @@ Parameter errors, transport failures, timeouts, 5xx, and response decoding/stora
 - A later new GPT generation sent no references and went directly to account B, returning **200** on `/backend-api/codex/images/generations`.
 - Grok generation and editing both returned **200** on their respective endpoints. Editing selected the Grok source even with GPT images also in the conversation.
 - Visual inspection confirmed red-to-green cube editing with the blue sphere retained, and red-to-blue cylinder editing. New generations did not inherit old references.
-- Automated cases cover exhaustion, provider reset hints, sticky/removed accounts, auth-state clearing, bounded 401 recovery, disabled pooling, provider isolation, cancellation, and no retry after ambiguous failures.
+- Automated cases cover exhaustion, provider reset hints, sticky/removed accounts, auth-state clearing, bounded 401 recovery, disabled pooling, provider isolation, cancellation, retry of an issued send that received no response, and the non-replayable delivered-output case.
 
 The GPT endpoint returned dimensions different from the requested 1024×1024 during this run (1324×1188 and 1254×1254). The tool retained the returned image and its actual dimensions; account scheduling does not change size semantics. Browser checks used one reference per edit. Multi-reference and nested tool execution remain covered by automated tests.

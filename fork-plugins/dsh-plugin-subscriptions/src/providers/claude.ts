@@ -2208,8 +2208,8 @@ export class ClaudeAdapter extends PoolBackedAdapter {
     let ended: LlmError | undefined
     let cancelled = false
     // True while a POST is in flight with no response yet, and read by the failure projection
-    // below: a failure in that window is an ambiguous send, a failure before it is request
-    // assembly with its own rule, and once a response has arrived the stream rules decide.
+    // below: a failure in that window is a retryable transport failure, a failure before it is
+    // request assembly with its own rule, and once a response has arrived the stream rules decide.
     let sendOutstanding = false
     // The profile blocks this attempt must record. Recall is idempotent per identity — the store
     // keys a record by provider, origin and fingerprint — and this keeps one logical request from
@@ -2470,11 +2470,11 @@ export class ClaudeAdapter extends PoolBackedAdapter {
       }
       const mapped = mapFetchFailure('claude API', error, watchdog, options.signal)
       cancelled = mapped.code === 'ABORTED'
-      // A failure after the POST left this process stays ambiguous even when a transport
-      // classifier re-wraps it, because the disposition belongs to the send and not to the
-      // wrapper: the server may have accepted and acted on a request this process can no longer
-      // see. The caller's own cancel is not an ambiguity claim, and a failure raised before the
-      // POST was issued keeps whatever specific rule it already carried.
+      // A failure after the POST left this process but before any response arrived keeps the
+      // transport retry path: the Host schedules its bounded backoff for it. The caller's own
+      // cancel is not a transport retry, and a failure raised before the POST was issued keeps
+      // whatever specific rule it already carried. A response that already delivered output
+      // never reaches this branch.
       const projected = sendOutstanding && mapped.code !== 'ABORTED' ? claudeAmbiguousSend(mapped) : mapped
       // The first chunk the Host received commits this attempt; a failure after it may not be
       // replayed, which is why the delivery boundary travels with the failure.
@@ -2839,8 +2839,9 @@ export class ClaudeAdapter extends PoolBackedAdapter {
       )
     }
     // Everything above is local assembly and keeps its own specific rule. From here the request
-    // body is on its way out, so the caller records that the POST was issued: a failure after
-    // this point is an ambiguous send rather than a proven-safe repeat.
+    // body is on its way out, so the caller records that the POST was issued. A failure before
+    // any response is retryable through the Host's transport policy; delivered output remains a
+    // hard stop in claudeStreamFailure.
     onSend()
     return await fetchFn(built.url, {
       method: built.method,

@@ -618,4 +618,6 @@ test('every route reports a policy able to hold the configured wait', () => {
   assert.equal(claudePolicy?.mode === 'normal' && claudePolicy.maxRetries, DEFAULT_RETRY.maxRetries)
   assert.equal(claudePolicy?.initialDelayMs, 500)
   assert.equal(claudePolicy?.jitterRatio, 0.25)
+  assert.ok(claudePolicy?.mode === 'normal' && claudePolicy.retryableCodes.includes('TRANSPORT'),
+    'an issued send that received no response schedules the Host transport backoff')
 })
