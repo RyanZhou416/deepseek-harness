@@ -271,9 +271,9 @@ ChatGPT 源码提供默认关闭的 `autoResetCredits` 开关，入口为订阅�
 
 ### Portable Web profile kit
 
-新同事的全新 `DSH_HOME` 必须由仓库内模板补齐，而不是依赖维护者机器上的 `profiles/web/cordis.patch.yml`。`fork-runtime/web/portable-profile.patch.yml` 是模板，`fork-runtime/web/memory-watchdog.cjs`、`chatgpt-subagent-preset.cjs`、`portable-memory-limits.patch.yml` 与 `fork-runtime/web/agent-presets/chatgpt-dsh/` 是模板所需的本地文件。`scripts/fork-profile-seed.ts` 把模板写入新建或仍为空 patch 的 web profile，并在缺失时复制支持文件；已有非空用户 patch 与已有文件一律保留。`build.cmd` 与 `run.cmd` 在未设置 `DSH_HOME` 时统一使用仓库同级 `..\deepseek-harness-data`，使构建与启动指向同一个 profile。
+新同事的全新 `DSH_HOME` 必须由仓库内模板补齐，而不是依赖维护者机器上的 `profiles/web/cordis.patch.yml`。`fork-runtime/web/portable-profile.patch.yml` 是模板，`fork-runtime/web/memory-watchdog.cjs`、`goal-disabled.cjs`、`chatgpt-subagent-preset.cjs`、`portable-memory-limits.patch.yml` 与 `fork-runtime/web/agent-presets/chatgpt-dsh/` 是模板所需的本地文件。`scripts/fork-profile-seed.ts` 把模板写入新建或仍为空 patch 的 web profile，并在缺失时复制支持文件；已有非空用户 patch 与已有文件一律保留。`build.cmd` 与 `run.cmd` 在未设置 `DSH_HOME` 时统一使用仓库同级 `..\deepseek-harness-data`，使构建与启动指向同一个 profile。
 
-模板包含插件开关（`dsh-context`、`llm-subscriptions`、`aether-shell`、`tool-goal` 的 preset 覆盖、模型 provider、locale、permission preset 等）；`DSH_HOME` 派生路径用 `!!js process.env.DSH_HOME`，AetherShell 路径可用 `AETHER_SHELL_EXE` 覆盖。API key 只保留环境变量名，不写入模板。订阅与 fork 插件包仍由 `build.cmd` 的 `fork-plugins-build.ts` 安装；模板不是 bundle 依赖清单的替代。
+模板包含插件开关（`dsh-context`、`llm-subscriptions`、`aether-shell`、`goal`/`goal-round-driver`/`command-goal`/`ui-goal` 禁用、模型 provider、locale、permission preset 等）；`DSH_HOME` 派生路径用 `!!js process.env.DSH_HOME`，AetherShell 路径可用 `AETHER_SHELL_EXE` 覆盖。API key 只保留环境变量名，不写入模板。订阅与 fork 插件包仍由 `build.cmd` 的 `fork-plugins-build.ts` 安装；模板不是 bundle 依赖清单的替代。禁用 Goal 时同时复制本地 `goal-disabled.cjs`，拦截恢复会话中排队的旧 Goal 轮次。
 
 **Preservation rule.** 只对新建或空 profile 应用模板；不得覆盖已有用户的 `cordis.patch.yml` 或支持文件。模板里的 preset `plugins` 列表必须与 `packages/bundle/web-app/presets/{standard,ptc,cordis}.patch.yml` 保持同步，否则 `tool-goal` 的禁用会漂移。保持 `build.cmd`、`run.cmd` 的默认 `DSH_HOME` 一致；显式环境变量优先。
 

@@ -322,8 +322,6 @@
         name: '@deepseek-ai/dsh-skill-filesystem'
       - id: tool-skill
         name: '@deepseek-ai/dsh-tool-skill'
-      - id: command-goal
-        name: '@deepseek-ai/dsh-command-goal'
       - id: planning
         name: cordis:group
         group: true
@@ -446,8 +444,6 @@
         name: '@deepseek-ai/dsh-skill-filesystem'
       - id: tool-skill
         name: '@deepseek-ai/dsh-tool-skill'
-      - id: command-goal
-        name: '@deepseek-ai/dsh-command-goal'
       - id: planning
         name: cordis:group
         group: true
@@ -575,8 +571,6 @@
         name: '@deepseek-ai/dsh-tool-session-message'
       - id: tool-schedule
         name: '@deepseek-ai/dsh-tool-schedule'
-      - id: command-goal
-        name: '@deepseek-ai/dsh-command-goal'
       - id: planning
         name: cordis:group
         group: true
@@ -670,3 +664,18 @@
       - id: tool-plugin-market
         name: '@deepseek-ai/dsh-plugin-market/tools'
         disabled: !!js "!ctx.get('profileContext')"
+
+# Goal is disabled as a service, not only as a model-facing tool.
+- id: goal
+  disabled: true
+- id: goal-round-driver
+  disabled: true
+- id: command-goal
+  disabled: true
+- id: ui-goal
+  disabled: true
+
+# Suppress restored Goal rounds after the service is disabled.
+- insert:
+    - id: goal-disabled
+      name: ./goal-disabled.cjs

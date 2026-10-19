@@ -19,6 +19,7 @@ const DEFAULT_KIT_ROOT = join(REPOSITORY_ROOT, 'fork-runtime', 'web')
 const PROFILE_FILES = [
   ['memory-watchdog.cjs', 'memory-watchdog.cjs'],
   ['chatgpt-subagent-preset.cjs', 'chatgpt-subagent-preset.cjs'],
+  ['goal-disabled.cjs', 'goal-disabled.cjs'],
   ['portable-memory-limits.patch.yml', 'memory-limits.patch.yml'],
 ] as const
 
