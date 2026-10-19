@@ -29,7 +29,7 @@ kind: "package-reference"
 
 ### 何时选择
 
-用户明确要求启动单独的对话处理任务时，选择 `session_create`。调用方知道确切目标 id，或用户点名了可由 `session_find` 解析的独立 Session 时，选择 `session_send_message` 进行显式跨会话交接。直接可继续 parent 与 child 使用相邻 `send_message`，Team 协调使用 AgentTeams 消息；这些操作拥有各自关系专属的生命周期。如果当前 Agent 只需要另一会话的只读快照且不应运行源 Session，请使用 Session reference（会话引用）。
+用户明确要求启动单独的对话处理任务时，选择 `session_create`。它可选接受标题、请求的模型与思考强度、置顶请求；用户的全局模型选择是权威值，结果会返回实际的提供方、模型、思考强度、标题与置顶状态。只有在用户已在对话中授权归档后，才使用 `session_archive`；`session_pin` / `session_unpin` 用于按确切 id 调整 Workspace 排序。调用方知道确切目标 id，或用户点名了可由 `session_find` 解析的独立 Session 时，选择 `session_send_message` 进行显式跨会话交接。直接可继续 parent 与 child 使用相邻 `send_message`，Team 协调使用 AgentTeams 消息；这些操作拥有各自关系专属的生命周期。如果当前 Agent 只需要另一会话的只读快照且不应运行源 Session，请使用 Session reference（会话引用）。
 
 ### 最小配置
 
@@ -43,9 +43,15 @@ Web bundle 提供 Agent 注册表、Session Controller、Session-reference resol
 
 ### 创建并启动独立 Session
 
-`session_create` 接受一条非空白、自包含的 `task`。在线的普通调用 Agent 在当前工作区创建普通 Session，并立即经启用唤醒的 `next-step` inbox 投递任务。任务以 `agent-message` 来源和调用方 Session id 记录，不会冒充用户提示。新 Session 继承调用方的 Agent preset 和具名权限 preset；模型采用 profile 默认值，不复制按 Session 设置的模型。结果返回新 Session id 与已接受消息 id，但不等待任务完成。创建者应将 Session id 告知用户，用户可在该 Session 查看工作；新 Session 与工具都不会自动向创建者回报答案。
+`session_create` 接受一条非空白、自包含的 `task`。在线的普通调用 Agent 在当前工作区创建普通 Session，并立即经启用唤醒的 `next-step` inbox 投递任务。任务以 `agent-message` 来源和调用方 Session id 记录，不会冒充用户提示。新 Session 继承调用方的 Agent preset 和具名权限 preset。实际的提供方、模型与思考强度由 profile 的全局模型选择决定；可选的 `model` 与 `reasoning_effort` 只是请求，不能覆盖全局值。可选 `name` 设置标题，可选 `pinned` 置顶新 Session。结果返回新 Session id、已接受消息 id、实际提供方/模型/思考强度、存在时的实际标题与实际置顶状态，但不等待任务完成。创建者应将 Session id 告知用户，用户可在该 Session 查看工作；新 Session 与工具都不会自动向创建者回报答案。
 
 创建要求调用方具有工作区与已配置的权限 preset；委派的 subagent、使用自定义权限或仅限当前 Session 的 Auto 权限的调用方会在创建前被拒绝。如果创建后配置或投递失败，错误中会包含已创建的 Session id；空白或部分配置的 Session 可能仍可查看，但初始任务没有被接受。
+
+### 归档与置顶
+
+`session_archive` 归档一个确切 Session。其描述要求模型先确认用户在当前对话中明确授权了这次归档；授权可以覆盖一次归档、当前对话中的多次归档，或用户明确说明的长期授权。工具不会验证授权令牌，也不会再次弹出审批，因此模型必须记住该授权，不能从沉默或无关的既有批准推断授权。仍有工作运行的 Session 会被 Workspace 注册表拒绝；停止该工作需要用户另行授权。
+
+`session_pin` 与 `session_unpin` 接受一个确切 Session id，并返回实际置顶状态。它们通过 Workspace 注册表操作，不猜测目标或标题。
 
 ### 查找独立 Session
 
@@ -126,7 +132,7 @@ Web bundle 提供 Agent 注册表、Session Controller、Session-reference resol
 
 #### 模型看到什么
 
-生成的 [`session_create` schema](../../../docs/tool-catalog.zh.md#deepseek-aidsh-tool-session-message)仅在用户要求单独对话时接受一条初始 `task`。发送方看到 `Independent Session <targetSessionId> created; initial task <messageId> accepted`，并以结构化输出收到这两个 id 及自己的 id。新 Session 收到带 Agent 来源的任务并开始工作，不会成为 child Agent 或 teammate。
+生成的 [`session_create` schema](../../../docs/tool-catalog.zh.md#deepseek-aidsh-tool-session-message)仅在用户要求单独对话时接受一条初始 `task`，并可选接受 `name`、请求的 `model`、请求的 `reasoning_effort` 与 `pinned`。发送方看到 `Independent Session <targetSessionId> created; initial task <messageId> accepted`，随后是实际提供方/模型/思考强度、存在时的实际标题与实际置顶状态；结构化输出同时包含这些值、消息 id 与发送方 id。新 Session 收到带 Agent 来源的任务并开始工作，不会成为 child Agent 或 teammate。请求的模型与思考强度不会覆盖 profile 的全局模型选择。
 
 #### Token 影响
 
@@ -135,6 +141,20 @@ Web bundle 提供 Agent 注册表、Session Controller、Session-reference resol
 #### KV Cache 影响
 
 工具 schema 的前缀稳定；结果与初始任务在各自 Session 中仅追加。
+
+### 归档、置顶与取消置顶结果
+
+#### 模型看到什么
+
+模型先在对话中确认用户授权后，`session_archive` 才归档一个确切 id。schema 只携带 `session_id`：授权范围是模型必须记住的提示词层义务，不是 runtime 令牌。仍有工作运行的 Session 会被 Workspace 注册表拒绝。`session_pin` 与 `session_unpin` 接受一个确切 id，并返回实际置顶状态；两者在 Workspace 层都是幂等的。
+
+#### Token 影响
+
+这些工具在挂载期间增加固定 schema；每次调用向发送方历史追加一条简短结果。
+
+#### KV Cache 影响
+
+schema 前缀稳定；每个结果都追加在可复用请求前缀之后。
 
 ### Session 发现结果
 

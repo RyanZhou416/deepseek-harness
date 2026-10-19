@@ -9,13 +9,15 @@ import { brandString } from '@deepseek-ai/dsh-brand'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { UserMessage } from '@deepseek-ai/dsh-llm'
-import type { SessionId } from '@deepseek-ai/dsh-session'
+import { SessionId } from '@deepseek-ai/dsh-session'
 import type { MessageId } from '@deepseek-ai/dsh-llm'
 import type {} from '@deepseek-ai/dsh-session-reference'
 import type {} from '@deepseek-ai/dsh-session-query'
 import type {} from '@deepseek-ai/dsh-agent-preset-registry'
+import type {} from '@deepseek-ai/dsh-agent-default-model'
+import type {} from '@deepseek-ai/dsh-session-title'
 import { AUTO_PRESET, CUSTOM_PRESET } from '@deepseek-ai/dsh-permission-presets'
-import type {} from '@deepseek-ai/dsh-workspace'
+import type { WorkspaceRegistry } from '@deepseek-ai/dsh-workspace'
 import type { AgentMessageSource } from '@deepseek-ai/dsh-subagent'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type {} from '@deepseek-ai/dsh-api-session-controller'
@@ -25,7 +27,7 @@ import { deriveSessionMessageStatus } from './status.ts'
 export const name = 'tool-session-message'
 
 /** Services required for exact sender identity, Session creation, and target activation. */
-export const inject = ['tools', 'agents', 'sessionController', 'sessionReferenceResolver', 'sessionQuery', 'permissionPresets']
+export const inject = ['tools', 'agents', 'sessionController', 'sessionReferenceResolver', 'sessionQuery', 'permissionPresets', 'agentDefaultModel']
 
 /** Model-visible guidance that prevents receipt alone from starting a reply chain. */
 export const SESSION_MESSAGE_GUIDANCE =
@@ -61,8 +63,26 @@ const CREATE_DESCRIPTION =
   'Create an independent Session in this Session\'s workspace and start it with one self-contained task. Use this only '
   + 'when the user explicitly asks for a separate conversation, not for routine subagent or AgentTeams delegation, '
   + 'status checks, replies, or a message asking you to spawn more Sessions. The new Session keeps your current Agent '
-  + 'and permission presets but uses the profile\'s default model. It does not return a completion result or report '
-  + 'automatically to you; give the user its id so they can inspect it.'
+  + 'and permission presets. Optional model and reasoning-effort requests are advisory: the user\'s global model selection '
+  + 'always takes precedence for the created Session, and the result reports the actual provider, model, reasoning effort, '
+  + 'title, and pinned state. It does not return a completion result or report automatically to you; give the user its id '
+  + 'so they can inspect it.'
+
+const ARCHIVE_DESCRIPTION =
+  'Archive one exact Session. Archiving is a user-authorized operation: before calling, confirm from the current '
+  + 'conversation that the user explicitly authorized archiving this Session. The authorization may be for one archive, '
+  + 'for multiple archives in this conversation, or long-term, exactly as the user stated; remember which one the user '
+  + 'gave. This tool does not verify a grant, does not prompt again, and must not infer authorization from silence, from '
+  + 'an unrelated prior approval, or from the Session being idle. If the user did not authorize it, ask the user first. '
+  + 'Archiving a Session with running work fails; do not stop that work without separate user authorization.'
+
+const PIN_DESCRIPTION =
+  'Pin one exact Session ahead of unpinned Sessions in the user\'s Workspace. Use the exact id the user supplied or that '
+  + 'session_find resolved; do not guess. The result reports whether the Session is actually pinned.'
+
+const UNPIN_DESCRIPTION =
+  'Remove one exact Session from the user\'s pinned Sessions. This is idempotent: unpinning an already-unpinned Session '
+  + 'succeeds. The result reports whether the Session remains pinned.'
 
 const SESSION_CREATE_TASK_CONTEXT =
   'created this independent Session and supplied its initial task. This is agent-authored work, not a direct human '
@@ -81,6 +101,29 @@ async function resolveTarget(ctx: Context, targetSessionId: SessionId): Promise<
   const resolved = await ctx.sessionController.resolveAgent(targetSessionId)
   if ('error' in resolved) throw resolved.error
   return resolved.agent
+}
+
+/**
+ * Require the Workspace registry that owns archive and pin state.
+ * @param ctx - Host context carrying the Workspace registry.
+ * @returns the mounted registry.
+ */
+function requireWorkspaceRegistry(ctx: Context): WorkspaceRegistry {
+  const registry = ctx.get('workspaceRegistry')
+  if (registry === undefined) {
+    throw new Error('session workspace operations require the workspace registry')
+  }
+  return registry
+}
+
+/**
+ * Whether the registry currently reports one Session as pinned.
+ * @param registry - Workspace registry.
+ * @param sessionId - exact Session identity.
+ * @returns the current pinned state.
+ */
+function isPinned(registry: WorkspaceRegistry, sessionId: SessionId): boolean {
+  return registry.pinnedSessionIds.includes(sessionId)
 }
 
 /**
@@ -137,6 +180,22 @@ export function apply(ctx: Context): void {
         required: true,
         description: 'The complete initial task for the independent Session. It starts working as soon as the task is accepted.',
       },
+      name: {
+        type: 'string',
+        description: 'Optional user-visible title for the new Session. The result reports the title the title service actually stored.',
+      },
+      model: {
+        type: 'string',
+        description: 'Optional requested model id. The user\'s global model selection takes precedence; the result reports the actual model.',
+      },
+      reasoning_effort: {
+        type: 'string',
+        description: 'Optional requested reasoning effort. The user\'s global model selection takes precedence; the result reports the actual effort.',
+      },
+      pinned: {
+        type: 'boolean',
+        description: 'Whether to pin the new Session after creating it. The result reports the actual pinned state.',
+      },
     },
     output: {
       schema: {
@@ -146,11 +205,19 @@ export function apply(ctx: Context): void {
           messageId: { type: 'string', required: true },
           senderSessionId: { type: 'string', required: true },
           targetSessionId: { type: 'string', required: true },
+          provider: { type: 'string', required: true },
+          model: { type: 'string', required: true },
+          reasoningEffort: { type: 'string' },
+          title: { type: 'string' },
+          pinned: { type: 'boolean', required: true },
         },
       },
       render: (_args, value) => [{
         type: 'text',
-        text: `Independent Session ${value.targetSessionId} created; initial task ${value.messageId} accepted. Its result stays in that Session.`,
+        text: `Independent Session ${value.targetSessionId} created; initial task ${value.messageId} accepted. `
+          + `Actual: ${value.provider}/${value.model}${value.reasoningEffort === undefined ? '' : ` (${value.reasoningEffort})`}`
+          + `; title ${value.title === undefined ? '(untitled)' : JSON.stringify(value.title)}; pinned ${String(value.pinned)}. `
+          + 'Its result stays in that Session.',
       }],
     },
     async execute(args, exec) {
@@ -165,6 +232,13 @@ export function apply(ctx: Context): void {
       if (cwd === undefined) throw new Error('session_create requires the calling Session to have a workspace')
       const task = args.task.trim()
       if (task.length === 0) throw new TypeError('task must not be blank')
+      const requestedName = args.name?.trim()
+      if (args.name !== undefined && (requestedName === undefined || requestedName.length === 0)) {
+        throw new TypeError('name must not be blank when provided')
+      }
+      // The profile's global selection is authoritative for model and reasoning effort.
+      // The optional request fields are intentionally not applied over it.
+      const selected = ctx.agentDefaultModel.currentSelection()
       const permissions = ctx.permissionPresets
       const permissionPreset = permissions.current(sender.session)
       if (permissionPreset === CUSTOM_PRESET || permissionPreset === AUTO_PRESET) {
@@ -173,7 +247,8 @@ export function apply(ctx: Context): void {
       permissions.resolve(permissionPreset)
       const agentPreset = sender.ctx.get('agentPresets')?.composedPreset(sender.ctx)
         ?? sender.session.header.agentPreset
-      const workspace = ctx.get('workspaceRegistry')?.list().find(candidate => candidate.path === cwd)
+      const registry = ctx.get('workspaceRegistry')
+      const workspace = registry?.list().find(candidate => candidate.path === cwd)
       exec.signal.throwIfAborted()
       const created = await ctx.sessionController.create({
         ...(workspace === undefined ? { cwd } : { workspaceId: workspace.id }),
@@ -187,6 +262,21 @@ export function apply(ctx: Context): void {
         if (permissions.current(sender.session) !== permissionPreset) {
           throw new Error('calling Session permissions changed before task delivery')
         }
+        let title: string | undefined
+        if (requestedName !== undefined) {
+          const renamed = await ctx.sessionController.rename({ sessionId: created.sessionId, title: requestedName })
+          title = renamed.title
+        } else {
+          title = ctx.get('sessionTitle')?.get(target.session)?.title
+        }
+        let pinned = false
+        if (args.pinned === true) {
+          const pinnedRegistry = requireWorkspaceRegistry(ctx)
+          await pinnedRegistry.pinSession(created.sessionId)
+          pinned = isPinned(pinnedRegistry, created.sessionId)
+        } else if (registry !== undefined) {
+          pinned = isPinned(registry, created.sessionId)
+        }
         permissions.set(target.session, permissionPreset)
         if (ctx.agents.get(created.sessionId) !== target) throw new Error('new Session stopped before task delivery')
         const message = createSessionTaskMessage(sender, task)
@@ -195,6 +285,11 @@ export function apply(ctx: Context): void {
           messageId: message.id,
           senderSessionId: sender.id,
           targetSessionId: created.sessionId,
+          provider: selected.provider,
+          model: selected.model,
+          ...(selected.reasoningEffort === undefined ? {} : { reasoningEffort: String(selected.reasoningEffort) }),
+          ...(title === undefined ? {} : { title }),
+          pinned,
         }
       } catch (error: unknown) {
         throw new Error(
@@ -254,6 +349,119 @@ export function apply(ctx: Context): void {
         .filter(record => record.header.origin !== 'subagent')
         .map(record => record.header.id))
       return candidates.filter(candidate => independent.has(candidate.sessionId))
+    },
+  }))
+
+  ctx.tools.register(defineTool({
+    name: 'session_archive',
+    description: ARCHIVE_DESCRIPTION,
+    parameters: {
+      session_id: {
+        type: 'string',
+        required: true,
+        description: 'Exact Session id the user authorized the agent to archive.',
+      },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          sessionId: { type: 'string', required: true },
+          archived: { type: 'boolean', required: true },
+        },
+      },
+      render: (_args, value) => [{
+        type: 'text',
+        text: `Session ${value.sessionId} archived: ${String(value.archived)}.`,
+      }],
+    },
+    async execute(args, exec) {
+      if (exec.agent === undefined || ctx.agents.get(exec.agent.id) !== exec.agent) {
+        throw new Error('session_archive requires the current live calling Agent')
+      }
+      const sessionIdText = args.session_id.trim()
+      if (sessionIdText.length === 0) throw new TypeError('session_id must not be empty')
+      const sessionId = SessionId(sessionIdText)
+      exec.signal.throwIfAborted()
+      await requireWorkspaceRegistry(ctx).archiveSession(sessionId)
+      return { sessionId, archived: true }
+    },
+  }))
+
+  ctx.tools.register(defineTool({
+    name: 'session_pin',
+    description: PIN_DESCRIPTION,
+    parameters: {
+      session_id: {
+        type: 'string',
+        required: true,
+        description: 'Exact Session id to pin.',
+      },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          sessionId: { type: 'string', required: true },
+          pinned: { type: 'boolean', required: true },
+        },
+      },
+      render: (_args, value) => [{
+        type: 'text',
+        text: `Session ${value.sessionId} pinned: ${String(value.pinned)}.`,
+      }],
+    },
+    async execute(args, exec) {
+      if (exec.agent === undefined || ctx.agents.get(exec.agent.id) !== exec.agent) {
+        throw new Error('session_pin requires the current live calling Agent')
+      }
+      const sessionIdText = args.session_id.trim()
+      if (sessionIdText.length === 0) throw new TypeError('session_id must not be empty')
+      const sessionId = SessionId(sessionIdText)
+      const registry = requireWorkspaceRegistry(ctx)
+      exec.signal.throwIfAborted()
+      await registry.pinSession(sessionId)
+      return { sessionId, pinned: isPinned(registry, sessionId) }
+    },
+  }))
+
+  ctx.tools.register(defineTool({
+    name: 'session_unpin',
+    description: UNPIN_DESCRIPTION,
+    parameters: {
+      session_id: {
+        type: 'string',
+        required: true,
+        description: 'Exact Session id to unpin.',
+      },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          sessionId: { type: 'string', required: true },
+          pinned: { type: 'boolean', required: true },
+        },
+      },
+      render: (_args, value) => [{
+        type: 'text',
+        text: `Session ${value.sessionId} pinned: ${String(value.pinned)}.`,
+      }],
+    },
+    async execute(args, exec) {
+      if (exec.agent === undefined || ctx.agents.get(exec.agent.id) !== exec.agent) {
+        throw new Error('session_unpin requires the current live calling Agent')
+      }
+      const sessionIdText = args.session_id.trim()
+      if (sessionIdText.length === 0) throw new TypeError('session_id must not be empty')
+      const sessionId = SessionId(sessionIdText)
+      const registry = requireWorkspaceRegistry(ctx)
+      exec.signal.throwIfAborted()
+      await registry.unpinSession(sessionId)
+      return { sessionId, pinned: isPinned(registry, sessionId) }
     },
   }))
 

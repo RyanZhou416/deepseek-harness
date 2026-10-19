@@ -29,7 +29,7 @@ Mount this package where Web Agents need to create an independent Session or del
 
 ### When to choose it
 
-Choose `session_create` when the user explicitly wants a separate conversation to start a task. Choose `session_send_message` for explicit cross-session handoff when the caller knows the exact destination id or the user names an independent Session that `session_find` can resolve. Use adjacent `send_message` for direct continuable parents and children, and AgentTeams messaging for Team coordination: those operations own their relationship-specific lifecycle. Use Session references when the current Agent only needs a read-only snapshot and the source Session should not run.
+Choose `session_create` when the user explicitly wants a separate conversation to start a task. It optionally accepts a title, requested model and reasoning effort, and a pin request; the user's global model selection is authoritative, and the result reports the actual provider, model, effort, title, and pin state. Use `session_archive` only after the user has authorized archiving in the conversation, and use `session_pin` / `session_unpin` for exact-id Workspace ordering. Choose `session_send_message` for explicit cross-session handoff when the caller knows the exact destination id or the user names an independent Session that `session_find` can resolve. Use adjacent `send_message` for direct continuable parents and children, and AgentTeams messaging for Team coordination: those operations own their relationship-specific lifecycle. Use Session references when the current Agent only needs a read-only snapshot and the source Session should not run.
 
 ### Minimal configuration
 
@@ -43,9 +43,15 @@ The package has no configuration. Target policy and frequency limits are deliber
 
 ### Creating and starting an independent Session
 
-`session_create` accepts one non-blank, self-contained `task`. The live calling ordinary Agent creates a new ordinary Session in its current workspace and immediately delivers that task through the wake-enabled `next-step` inbox. The task is logged with `agent-message` source and the caller's Session id, never as a human prompt. The new Session inherits the caller's Agent preset and named permission preset; it uses the profile's default model rather than copying a per-Session model choice. The result returns the new Session id and accepted message id without waiting for completion. The creator should give the Session id to the user, who can inspect the work there. Neither the new Session nor the tool automatically reports the answer back to the creator.
+`session_create` accepts one non-blank, self-contained `task`. The live calling ordinary Agent creates a new ordinary Session in its current workspace and immediately delivers that task through the wake-enabled `next-step` inbox. The task is logged with `agent-message` source and the caller's Session id, never as a human prompt. The new Session inherits the caller's Agent preset and named permission preset. The profile's global model selection determines the actual provider, model, and reasoning effort; optional `model` and `reasoning_effort` arguments are advisory and cannot override it. Optional `name` applies a title, and optional `pinned` pins the new Session. The result returns the new Session id, accepted message id, actual provider/model/effort, actual title when one exists, and actual pinned state, without waiting for completion. The creator should give the Session id to the user, who can inspect the work there. Neither the new Session nor the tool automatically reports the answer back to the creator.
 
 Creation requires a calling workspace and a configured permission preset; a delegated subagent and a caller with custom or current-session-only Auto permissions are rejected before creation. If setup or delivery fails after creation, the error includes the created Session id; the empty or partially configured Session may remain for inspection. No initial task is accepted in that case.
+
+### Archiving and pinning
+
+`session_archive` archives one exact Session. Its description requires the model to confirm from the current conversation that the user explicitly authorized this archive; the grant may cover one archive, multiple archives in the conversation, or a long-term authorization, exactly as the user stated. The tool does not verify a grant token or prompt again, so the model must remember the authorization and must not infer it from silence or an unrelated approval. A Session with running work is refused by the Workspace registry; stopping that work requires separate user authorization.
+
+`session_pin` and `session_unpin` take one exact Session id and return the actual pinned state. They operate through the Workspace registry and do not infer targets or titles.
 
 ### Finding an independent Session
 
@@ -126,7 +132,7 @@ Prefix-stable; the schema and guidance do not change at runtime.
 
 #### What the model sees
 
-The generated [`session_create` schema](../../../docs/tool-catalog.md#deepseek-aidsh-tool-session-message) accepts one initial `task` only when the user requested a separate conversation. The sender sees `Independent Session <targetSessionId> created; initial task <messageId> accepted` and receives both ids plus its own id as structured output. The new Session receives an attributed Agent-authored task and starts work without becoming a child Agent or teammate.
+The generated [`session_create` schema](../../../docs/tool-catalog.md#deepseek-aidsh-tool-session-message) accepts one initial `task` only when the user requested a separate conversation, plus optional `name`, requested `model`, requested `reasoning_effort`, and `pinned`. The sender sees `Independent Session <targetSessionId> created; initial task <messageId> accepted`, followed by the actual provider/model/effort, actual title when available, and actual pinned state; it receives those values plus the message and sender ids as structured output. The new Session receives an attributed Agent-authored task and starts work without becoming a child Agent or teammate. Requested model and effort never override the profile's global model selection.
 
 #### Token effect
 
@@ -135,6 +141,20 @@ The fixed tool schema is present while the plugin is mounted; each creation adds
 #### KV Cache effect
 
 Prefix-stable tool schema; each result and initial task is append-only in its own Session.
+
+### Archive, pin, and unpin results
+
+#### What the model sees
+
+`session_archive` archives one exact id after the model has confirmed user authorization in the conversation. The schema carries only `session_id`: authorization scope is a prompt-level obligation remembered by the model, not a runtime token. A Session with running work is refused by the Workspace registry. `session_pin` and `session_unpin` take one exact id and return the actual pinned state; both are idempotent at the Workspace layer.
+
+#### Token effect
+
+These tools add fixed schemas while mounted; each call appends one short result to the sender's history.
+
+#### KV Cache effect
+
+Prefix-stable schemas; each result is append-only after the reusable request prefix.
 
 ### Session discovery result
 

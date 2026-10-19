@@ -40,6 +40,7 @@ describe('tool-session-message through a real Loader composition', () => {
       '- name: fixture-session-reference',
       '- name: fixture-session-query',
       '- name: fixture-permission-presets',
+      '- name: fixture-agent-default-model',
       "- name: '@deepseek-ai/dsh-tool-session-message'",
       '',
     ].join('\n'))
@@ -89,6 +90,16 @@ describe('tool-session-message through a real Loader composition', () => {
               name: 'fixture-permission-presets',
               apply(ctx: Context) { ctx.provide('permissionPresets', {} as never) },
             }
+          case 'fixture-agent-default-model':
+            return {
+              name: 'fixture-agent-default-model',
+              apply(ctx: Context) {
+                ctx.provide('agentDefaultModel', {
+                  currentSelection: () => ({ provider: 'fixture', model: 'fixture-model' }),
+                  saveSelection: () => Promise.resolve(),
+                } as never)
+              },
+            }
           default: throw new Error(`unexpected Loader import: ${specifier}`)
         }
       },
@@ -100,10 +111,13 @@ describe('tool-session-message through a real Loader composition', () => {
     await context.loader.await()
 
     expect(context.tools.schemas().map(schema => schema.name).toSorted()).toEqual([
+      'session_archive',
       'session_create',
       'session_find',
       'session_message_status',
+      'session_pin',
       'session_send_message',
+      'session_unpin',
     ])
 
     const senderSession = context.sessions.create(SessionId('loader-sender'), { meta: { cwd: '/sender' } })

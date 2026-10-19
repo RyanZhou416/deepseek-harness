@@ -18,14 +18,17 @@
   en: 9d7c1f306ba9cf46
   zh: 346c4332a91285cb
 /deepseek-ai-dsh-tool-session-message/use-this-package/when-to-choose-it:
-  en: 8974e2a3b675348c
-  zh: 06835ef5f5411205
+  en: fe62ec8e30f228bd
+  zh: e1df18a6a82a5038
 /deepseek-ai-dsh-tool-session-message/use-this-package/minimal-configuration:
   en: 38ac5f4df4a224b3
   zh: c33465a6d457e889
 /deepseek-ai-dsh-tool-session-message/use-this-package/creating-and-starting-an-independent-session:
-  en: b252e491f113c80b
-  zh: 05a7f02b9177897f
+  en: 40c1e0854aadecb4
+  zh: 23fd9081f2eddba3
+/deepseek-ai-dsh-tool-session-message/use-this-package/archiving-and-pinning:
+  en: 6d06fdac62e23c4b
+  zh: 0e79aa769d046b79
 /deepseek-ai-dsh-tool-session-message/use-this-package/finding-an-independent-session:
   en: f55fb69d829eab82
   zh: a0cb045edc3d79af
@@ -72,14 +75,26 @@
   en: 0db2460073983ef4
   zh: 6793e35b191b8afc
 /deepseek-ai-dsh-tool-session-message/model-experience/session-creation-result/what-the-model-sees:
-  en: 80e8825544893d05
-  zh: bbc37c0cd3f4d451
+  en: 7d50cf58647cc0ca
+  zh: dc23f250488bd4fb
 /deepseek-ai-dsh-tool-session-message/model-experience/session-creation-result/token-effect:
   en: f4c8c90800a83c2b
   zh: 0ab91fcb2e79f4eb
 /deepseek-ai-dsh-tool-session-message/model-experience/session-creation-result/kv-cache-effect:
   en: 9a9eee5d25b28aa7
   zh: bed3e34df864c339
+/deepseek-ai-dsh-tool-session-message/model-experience/archive-pin-and-unpin-results:
+  en: 4f2c1f5cb9db75de
+  zh: 94736044c4b5f6b2
+/deepseek-ai-dsh-tool-session-message/model-experience/archive-pin-and-unpin-results/what-the-model-sees:
+  en: e72c1695dd3e4022
+  zh: 11160f2bac5dcc07
+/deepseek-ai-dsh-tool-session-message/model-experience/archive-pin-and-unpin-results/token-effect:
+  en: 0ece8bf8f4a50b08
+  zh: d28ca0135e37ce3a
+/deepseek-ai-dsh-tool-session-message/model-experience/archive-pin-and-unpin-results/kv-cache-effect:
+  en: 2445491eba4211b9
+  zh: f07db4822373ae9d
 /deepseek-ai-dsh-tool-session-message/model-experience/session-discovery-result:
   en: 2ea3b95168f6653d
   zh: 437c320ada96cde2

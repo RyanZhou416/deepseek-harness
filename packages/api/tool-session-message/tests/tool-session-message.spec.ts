@@ -62,10 +62,19 @@ async function setup() {
   const resolveAgent = vi.fn<SessionController['resolveAgent']>()
   const inspect = vi.fn<SessionController['inspect']>()
   const create = vi.fn<SessionController['create']>()
+  const rename = vi.fn<SessionController['rename']>()
   const sessionController = Object.assign(Object.create(SessionController.prototype) as SessionController, {
-    inspect, resolveAgent, create,
+    inspect, resolveAgent, create, rename,
   })
   ctx.provide('sessionController', sessionController)
+  const currentSelection = vi.fn().mockReturnValue({ provider: 'test-provider', model: 'test-model' })
+  ctx.provide('agentDefaultModel', {
+    currentSelection,
+    saveSelection: vi.fn(),
+  } as never)
+  ctx.provide('sessionTitle', {
+    get: vi.fn(() => undefined),
+  } as never)
   const current = vi.fn<PermissionPresetService['current']>().mockReturnValue('workspace-write')
   const resolve = vi.fn<PermissionPresetService['resolve']>().mockReturnValue({
     sandbox: 'workspace-write', approval: 'ask',
@@ -79,8 +88,27 @@ async function setup() {
   ctx.provide('sessionReferenceResolver', { listCandidates } as unknown as SessionReferenceResolver)
   const listSessions = vi.fn<SessionQueryEngine['listSessions']>().mockResolvedValue([])
   ctx.provide('sessionQuery', { listSessions } as unknown as SessionQueryEngine)
+  const pinnedState: { ids: SessionId[] } = { ids: [] }
+  const pinSession = vi.fn(async (id: SessionId) => {
+    pinnedState.ids = [id, ...pinnedState.ids.filter(candidate => candidate !== id)]
+  })
+  const unpinSession = vi.fn(async (id: SessionId) => {
+    pinnedState.ids = pinnedState.ids.filter(candidate => candidate !== id)
+  })
+  const archiveSession = vi.fn(async () => undefined)
+  const workspaceRegistry = {
+    list: vi.fn(() => []),
+    get pinnedSessionIds() { return pinnedState.ids },
+    pinSession,
+    unpinSession,
+    archiveSession,
+  }
+  ctx.provide('workspaceRegistry', workspaceRegistry as never)
   const fiber = await ctx.plugin(tool)
-  return { ctx, fiber, inspect, listCandidates, listSessions, resolveAgent, create, permissions: { current, resolve, set } }
+  return {
+    ctx, fiber, inspect, listCandidates, listSessions, resolveAgent, create, rename, currentSelection,
+    permissions: { current, resolve, set }, workspace: { archiveSession, pinSession, unpinSession, pinnedState },
+  }
 }
 
 function execute(ctx: Context, args: unknown, agent?: Agent, signal = new AbortController().signal) {
@@ -98,6 +126,22 @@ function createSession(ctx: Context, args: unknown, agent?: Agent, signal = new 
     signal,
     callId: ToolCallId(`session-create-${String(++nextCall)}`),
     name: 'session_create',
+    arguments: args,
+    ...(agent === undefined ? {} : { agent }),
+  })
+}
+
+function runSessionTool(
+  ctx: Context,
+  name: string,
+  args: unknown,
+  agent?: Agent,
+  signal = new AbortController().signal,
+) {
+  return ctx.tools.execute({
+    signal,
+    callId: ToolCallId(`session-tool-${String(++nextCall)}`),
+    name,
     arguments: args,
     ...(agent === undefined ? {} : { agent }),
   })
@@ -128,8 +172,16 @@ describe('dsh-tool-session-message', () => {
     expect(sessionIdParameter.description).toContain('session_create result')
     const create = ctx.tools.schemas().find(candidate => candidate.name === 'session_create')
     expect(create?.description).toContain('user explicitly asks for a separate conversation')
-    expect(create?.description).toContain('profile\'s default model')
-    expect(Object.keys((create?.parameters as { properties?: Record<string, unknown> }).properties ?? {})).toEqual(['task'])
+    expect(create?.description).toContain('global model selection')
+    expect(Object.keys((create?.parameters as { properties?: Record<string, unknown> }).properties ?? {}))
+      .toEqual(['task', 'name', 'model', 'reasoning_effort', 'pinned'])
+    expect(ctx.tools.schemas().some(candidate => candidate.name === 'session_archive')).toBe(true)
+    expect(ctx.tools.schemas().some(candidate => candidate.name === 'session_pin')).toBe(true)
+    expect(ctx.tools.schemas().some(candidate => candidate.name === 'session_unpin')).toBe(true)
+    const archive = ctx.tools.schemas().find(candidate => candidate.name === 'session_archive')
+    expect(archive?.description).toContain('user-authorized')
+    expect(archive?.description).toContain('one archive')
+    expect(archive?.description).toContain('long-term')
     const status = ctx.tools.schemas().find(candidate => candidate.name === 'session_message_status')
     expect(status?.description).toContain('do not poll')
     expect(status?.description).toContain('terminal_send')
@@ -170,6 +222,69 @@ describe('dsh-tool-session-message', () => {
     expect(message.content[1]).toEqual({ type: 'text', text: 'Investigate the new work independently.' })
     expect(target.session.header.parentSession).toBeUndefined()
     expect(target.session.header.origin).toBeUndefined()
+  })
+
+  it('applies a title and pin, and reports the global model instead of requested overrides', async () => {
+    const { ctx, create, rename, currentSelection, workspace } = await setup()
+    const sender = makeAgent(ctx, 'creator-with-options', '/workspace')
+    const target = makeAgent(ctx, 'created-with-options', '/workspace')
+    await ctx.agents.register(sender)
+    await ctx.agents.register(target)
+    create.mockResolvedValueOnce({ sessionId: target.id })
+    rename.mockResolvedValueOnce({ title: 'Chosen title', seq: 7 })
+    currentSelection.mockReturnValueOnce({ provider: 'global-provider', model: 'global-model', reasoningEffort: 'high' })
+
+    const result = await createSession(ctx, {
+      task: 'Work with the selected options.',
+      name: '  Chosen title  ',
+      model: 'requested-model',
+      reasoning_effort: 'low',
+      pinned: true,
+    }, sender)
+
+    expect(result.isError).toBe(false)
+    expect(rename).toHaveBeenCalledWith({ sessionId: target.id, title: 'Chosen title' })
+    expect(workspace.pinSession).toHaveBeenCalledWith(target.id)
+    const text = resultText(result)
+    expect(text).toContain('global-provider/global-model')
+    expect(text).toContain('high')
+    expect(text).toContain('Chosen title')
+    expect(text).toContain('pinned true')
+    expect(text).not.toContain('requested-model')
+    expect(text).not.toContain('low')
+  })
+
+  it('archives, pins, and unpins an exact Session and reports actual state', async () => {
+    const { ctx, workspace } = await setup()
+    const caller = makeAgent(ctx, 'workspace-tool-caller', '/workspace')
+    await ctx.agents.register(caller)
+
+    const archived = await runSessionTool(ctx, 'session_archive', { session_id: 'archived-session' }, caller)
+    expect(archived.isError).toBe(false)
+    expect(workspace.archiveSession).toHaveBeenCalledExactlyOnceWith(SessionId('archived-session'))
+    expect(resultText(archived)).toContain('archived: true')
+
+    const pinned = await runSessionTool(ctx, 'session_pin', { session_id: 'pinned-session' }, caller)
+    expect(pinned.isError).toBe(false)
+    expect(workspace.pinSession).toHaveBeenCalledWith(SessionId('pinned-session'))
+    expect(resultText(pinned)).toContain('pinned: true')
+
+    const unpinned = await runSessionTool(ctx, 'session_unpin', { session_id: 'pinned-session' }, caller)
+    expect(unpinned.isError).toBe(false)
+    expect(workspace.unpinSession).toHaveBeenCalledWith(SessionId('pinned-session'))
+    expect(resultText(unpinned)).toContain('pinned: false')
+  })
+
+  it('rejects a blank created name', async () => {
+    const { ctx, create } = await setup()
+    const sender = makeAgent(ctx, 'option-validation-creator', '/workspace')
+    const target = makeAgent(ctx, 'option-validation-target', '/workspace')
+    await ctx.agents.register(sender)
+    await ctx.agents.register(target)
+    create.mockResolvedValue({ sessionId: target.id })
+
+    expect((await createSession(ctx, { task: 'task', name: '   ' }, sender)).isError).toBe(true)
+    expect(create).not.toHaveBeenCalled()
   })
 
   it('rejects delegated creators, missing workspaces, blank tasks, custom permissions, and cancellation before creation', async () => {
@@ -380,6 +495,10 @@ describe('dsh-tool-session-message', () => {
       listSessions: vi.fn<SessionQueryEngine['listSessions']>().mockResolvedValue([]),
     } as unknown as SessionQueryEngine)
     ctx.provide('permissionPresets', {} as never)
+    ctx.provide('agentDefaultModel', {
+      currentSelection: () => ({ provider: 'test-provider', model: 'test-model' }),
+      saveSelection: () => Promise.resolve(),
+    } as never)
     await ctx.plugin(tool)
     const harness = await mountAgentLoopTestHarness(ctx)
     const sender = await harness.create(SessionId('real-sender'))
@@ -622,6 +741,7 @@ describe('dsh-tool-session-message', () => {
     expect(tool.name).toBe('tool-session-message')
     expect(tool.inject).toEqual([
       'tools', 'agents', 'sessionController', 'sessionReferenceResolver', 'sessionQuery', 'permissionPresets',
+      'agentDefaultModel',
     ])
     expect(typeof tool.apply).toBe('function')
   })
