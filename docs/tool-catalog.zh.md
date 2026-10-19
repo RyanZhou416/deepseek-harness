@@ -1848,23 +1848,23 @@ lsp 工具将提供方选择和语言服务器子进程置于 ctx.lsp 之后，�
   "properties": {
     "task": {
       "type": "string",
-      "description": "The complete initial task for the independent Session. It starts working as soon as the task is accepted."
+      "description": "Initial task; the Session starts immediately."
     },
     "name": {
       "type": "string",
-      "description": "Optional user-visible title for the new Session. The result reports the title the title service actually stored."
+      "description": "Optional title; returns the stored title."
     },
     "model": {
       "type": "string",
-      "description": "Optional requested model id. The user's global model selection takes precedence; the result reports the actual model."
+      "description": "Optional requested model; global selection wins, actual returned."
     },
     "reasoning_effort": {
       "type": "string",
-      "description": "Optional requested reasoning effort. The user's global model selection takes precedence; the result reports the actual effort."
+      "description": "Optional requested effort; global selection wins, actual returned."
     },
     "pinned": {
       "type": "boolean",
-      "description": "Whether to pin the new Session after creating it. The result reports the actual pinned state."
+      "description": "Pin after creation; actual state returned."
     }
   },
   "required": [
@@ -1885,7 +1885,7 @@ lsp 工具将提供方选择和语言服务器子进程置于 ctx.lsp 之后，�
   "properties": {
     "query": {
       "type": "string",
-      "description": "Non-empty substring of the user-visible Session title, exact Session id, or workspace path."
+      "description": "Non-empty title, id, or workspace-path substring."
     }
   },
   "required": [
@@ -1932,11 +1932,11 @@ lsp 工具将提供方选择和语言服务器子进程置于 ctx.lsp 之后，�
   "properties": {
     "session_id": {
       "type": "string",
-      "description": "Exact independent target Session id from the user, an incoming Session message, a session_create result, a user-created Session reference, or an unambiguous session_find result. Do not use a subagent or teammate id here."
+      "description": "Exact independent target id from the user, an incoming message, a session_create result, an exposed Session reference, or an unambiguous session_find result. Do not use a subagent or teammate id here."
     },
     "message": {
       "type": "string",
-      "description": "New self-contained information that materially helps the target Session with the user's task."
+      "description": "New self-contained information for the target task."
     }
   },
   "required": [
@@ -1958,7 +1958,7 @@ lsp 工具将提供方选择和语言服务器子进程置于 ctx.lsp 之后，�
   "properties": {
     "action": {
       "type": "string",
-      "description": "Workspace action to apply to the exact Session.",
+      "description": "Action to apply.",
       "enum": [
         "archive",
         "pin",
@@ -1967,7 +1967,7 @@ lsp 工具将提供方选择和语言服务器子进程置于 ctx.lsp 之后，�
     },
     "session_id": {
       "type": "string",
-      "description": "Exact Session id supplied by the user or resolved by session_find."
+      "description": "Exact Session id; never guess."
     }
   },
   "required": [

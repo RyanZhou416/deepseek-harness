@@ -213,19 +213,19 @@
   en: 2186016b57bd29b9
   zh: 2186016b57bd29b9
 /tool-schema-catalog/deepseek-ai-dsh-tool-session-message/session-create:
-  en: 9fe909431f8be4d5
+  en: 34063d52a0c274e1
   zh: bcc8f225ebc25ba7
 /tool-schema-catalog/deepseek-ai-dsh-tool-session-message/session-find:
-  en: 8cb83d531f01e65b
+  en: 261c8c42932678d3
   zh: 0709534d9a96cd53
 /tool-schema-catalog/deepseek-ai-dsh-tool-session-message/session-message-status:
-  en: c8d2cde0504b9723
+  en: 1d2906de13ada18f
   zh: bf93d171a103885f
 /tool-schema-catalog/deepseek-ai-dsh-tool-session-message/session-send-message:
-  en: 8f2554f3c4eb9e0d
+  en: 2f6776b8853f3406
   zh: 0f9cb09b985a8f00
 /tool-schema-catalog/deepseek-ai-dsh-tool-session-message/session-workspace:
-  en: 30a6248e86a0343e
+  en: eb725473e3c61c9f
   zh: c91b79fb5450d858
 /tool-schema-catalog/deepseek-ai-dsh-tool-session-query:
   en: eac1dff4b6d9e195
