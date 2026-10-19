@@ -1,0 +1,41 @@
+# Keyless replay keeps the shipped headless composition and replaces only the model
+# adapter and the external AetherShell interpreter. The plugin, the subprocess seam,
+# the sandbox policy, the local jobs provider, and session persistence all stay
+# real; the scenario-local protocol fixture stands in for the binary this corpus
+# cannot install, and the scenario-local wait observer holds the promoted execution
+# open until the model's own `job_output` wait reads it.
+- id: llm-deepseek
+  name: '@deepseek-ai/dsh-llm-deepseek-api-key'
+  disabled: true
+
+- insert:
+    - id: aether-shell
+      name: '../../../fork-plugins/dsh-plugin-aether-shell/src/index.ts'
+      config:
+        executable: !!js process.execPath
+        executableArgs:
+          - !!js 'process.env.DSH_SNAPSHOT_FILE.replace(/[^\\/]+$/, "aether-handoff-fixture.mjs")'
+          # Trusted control root: the run's isolated DSH home plus the directory the
+          # observing jobs plugin publishes wait registrations into.
+          - !!js 'process.env.DSH_HOME + "/aether-handoff-waits"'
+
+    # Scenario-local instrumentation over the shipped registry: it binds one own
+    # `wait` property for this run and restores it on unload.
+    - id: jobs-wait-observer
+      name: './jobs-wait-observer.mjs'
+
+    - id: llm-replay
+      name: '@deepseek-ai/dsh-llm-replay'
+      config:
+        providers:
+          - id: deepseek-official
+            name: DeepSeek
+            models:
+              - id: deepseek-v4-flash
+              - id: deepseek-v4-pro
+
+- id: tool-bash
+  disabled: true
+
+- id: tool-pwsh
+  disabled: true

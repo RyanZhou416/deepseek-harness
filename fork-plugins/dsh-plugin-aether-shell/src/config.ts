@@ -15,6 +15,7 @@
 import { isAbsolute } from 'node:path'
 import z from '@deepseek-ai/schemastery'
 import { MAX_TIMER_DELAY_MS, clampTimeout } from '@deepseek-ai/dsh-timeout'
+import { HarnessError } from '@deepseek-ai/dsh-llm'
 
 /** Default deadline for one native request, in milliseconds. */
 const DEFAULT_TIMEOUT_MS = 120_000
@@ -133,8 +134,10 @@ export interface Config {
    * deletes. No tool argument can change the startup value.
    */
   allowShell?: boolean
-  /** Default deadline for one call, in milliseconds (default 120000). */
+  /** Default foreground wait for queries, or hard deadline when handoff is unavailable (default 120000). */
   timeoutMs?: number
+  /** Hand an owned running query to its original job when the foreground wait expires (default true). */
+  promoteOnTimeout?: boolean
   /** Upper bound for a per-call `timeoutMs` hint; at least `timeoutMs` (default 600000). */
   maxTimeoutMs?: number
   /** Cap on one encoded request or eval source, in bytes (default 1048576). */
@@ -162,7 +165,7 @@ export interface Config {
   sessionIdleTimeoutMs?: number
   /** Deadline for creating and handshaking one persistent interpreter (default 30000). */
   sessionStartupTimeoutMs?: number
-  /** Maximum background-job runtime; zero imposes no ceiling (default 0). */
+  /** Maximum raw-job and job-backed query runtime; zero imposes no ceiling (default 0). */
   maxBackgroundRuntimeMs?: number
   /**
    * Oversized results one agent may hold for later paging (default 8).
@@ -189,6 +192,7 @@ export const Config: z<Config> = z.object({
   structuredDataMode: z.union([...STRUCTURED_DATA_MODES]).default(DEFAULT_STRUCTURED_DATA_MODE),
   allowShell: z.boolean().default(false),
   timeoutMs: z.number().default(DEFAULT_TIMEOUT_MS),
+  promoteOnTimeout: z.boolean().default(true),
   maxTimeoutMs: z.number().default(DEFAULT_MAX_TIMEOUT_MS),
   maxRequestBytes: z.number().default(DEFAULT_MAX_REQUEST_BYTES),
   maxOutputBytes: z.number().default(DEFAULT_MAX_OUTPUT_BYTES),
@@ -215,6 +219,7 @@ export interface ResolvedConfig {
   readonly structuredDataMode: StructuredDataMode
   readonly allowShell: boolean
   readonly timeoutMs: number
+  readonly promoteOnTimeout: boolean
   readonly maxTimeoutMs: number
   readonly maxRequestBytes: number
   readonly maxOutputBytes: number
@@ -353,6 +358,7 @@ export function resolveConfig(config: Config = {}): ResolvedConfig {
     structuredDataMode: readStructuredDataMode(config.structuredDataMode ?? DEFAULT_STRUCTURED_DATA_MODE),
     allowShell: config.allowShell ?? false,
     timeoutMs,
+    promoteOnTimeout: config.promoteOnTimeout ?? true,
     maxTimeoutMs,
     maxRequestBytes: readPositive('maxRequestBytes', config.maxRequestBytes ?? DEFAULT_MAX_REQUEST_BYTES),
     maxOutputBytes: readPositive('maxOutputBytes', config.maxOutputBytes ?? DEFAULT_MAX_OUTPUT_BYTES),
@@ -382,4 +388,20 @@ export function resolveConfig(config: Config = {}): ResolvedConfig {
  */
 export function callTimeout(requested: number | undefined, resolved: ResolvedConfig): number {
   return clampTimeout(requested, resolved.timeoutMs, resolved.maxTimeoutMs, 'aether-shell: timeoutMs')
+}
+
+/**
+ * Resolve the independent query execution deadline; zero means no outer runtime cap.
+ * @param requested - optional positive per-call hard limit.
+ * @param resolved - deployment configuration, including the shared job runtime cap.
+ * @returns the positive hard limit, or zero when neither caller nor deployment limits execution.
+ * @throws Error when the caller's limit cannot be represented by a host timer.
+ */
+export function queryExecutionTimeout(requested: number | undefined, resolved: ResolvedConfig): number {
+  if (requested !== undefined && (!Number.isSafeInteger(requested) || requested < 1 || requested > MAX_TIMER_DELAY_MS)) {
+    throw new HarnessError(`executionTimeoutMs must be an integer from 1 through ${MAX_TIMER_DELAY_MS}`, 'E_INPUT_TIMEOUT')
+  }
+  const supplied = requested ?? 0
+  const cap = resolved.maxBackgroundRuntimeMs
+  return supplied === 0 ? cap : cap === 0 ? supplied : Math.min(supplied, cap)
 }

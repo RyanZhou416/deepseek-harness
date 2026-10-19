@@ -21,8 +21,8 @@
   en: 1cefa6bd1cbb36d9
   zh: 57433d078b9ad5ef
 /ryanzhou416-dsh-plugin-aether-shell/use-this-package/choose-the-appropriate-tool:
-  en: 498e859ab580458d
-  zh: 20e3e6d077d70bae
+  en: c84c59126a6e8103
+  zh: e0699cf9f7305b37
 /ryanzhou416-dsh-plugin-aether-shell/use-this-package/structured-data-compatibility:
   en: a6d25341edc556c0
   zh: be5181597834768e
@@ -32,18 +32,21 @@
 /ryanzhou416-dsh-plugin-aether-shell/use-this-package/persistent-sessions:
   en: 88397b033c5d5d35
   zh: 877649c2aafef84e
+/ryanzhou416-dsh-plugin-aether-shell/use-this-package/foreground-wait-and-original-job-handoff:
+  en: 28947fab12cc27fd
+  zh: f71e9e35646871f9
 /ryanzhou416-dsh-plugin-aether-shell/use-this-package/background-jobs:
   en: 8cc0a177bcc168c8
   zh: dbdf2c4b7c2922c5
 /ryanzhou416-dsh-plugin-aether-shell/use-this-package/execution-and-permissions:
-  en: b989f06b854cf470
-  zh: 28192179aef2365b
+  en: 32c7e0cc68b86715
+  zh: 0a84e9c74a740760
 /ryanzhou416-dsh-plugin-aether-shell/use-this-package/large-results-and-error-data:
   en: a3d2a0becbafca93
   zh: afe7554032df49a2
 /ryanzhou416-dsh-plugin-aether-shell/use-this-package/configuration:
-  en: 29037da9a9f01400
-  zh: f99fdaf6a07fd176
+  en: a3d03ccbdb4efd57
+  zh: 387f52dabae33e2f
 /ryanzhou416-dsh-plugin-aether-shell/understand-the-implementation:
   en: 0e56d5288eeb63e1
   zh: b047293b03e72338
@@ -57,8 +60,8 @@
   en: 277b98a757d382ca
   zh: c9c2665a1250a6af
 /ryanzhou416-dsh-plugin-aether-shell/known-limitations-and-deferred-work:
-  en: d478e102079cb16a
-  zh: 14c7c32a317e0511
+  en: 1e8e0b3562972431
+  zh: 12045354ccde6f6f
 /ryanzhou416-dsh-plugin-aether-shell/known-limitations-and-deferred-work/dev-note:
   en: 0a1253c6f7b5e8b9
   zh: 8cf5bc5201fe4738

@@ -18,6 +18,10 @@
           # path is derived from the harness's own absolute fixture path.
           - !!js 'process.env.DSH_SNAPSHOT_FILE.replace(/[^\\/]+$/, "aether-typed-data-fixture.mjs")'
         structuredDataMode: typed-v1
+        # This recording predates foreground-to-job promotion. Keeping it off is
+        # the compatibility opt-out that lets the committed session stay exactly
+        # as recorded, without query job lifecycle events it never contained.
+        promoteOnTimeout: false
 
     - id: llm-replay
       name: '@deepseek-ai/dsh-llm-replay'

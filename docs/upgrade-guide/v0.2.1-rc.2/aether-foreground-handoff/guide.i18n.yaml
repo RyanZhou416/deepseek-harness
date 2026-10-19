@@ -1,0 +1,16 @@
+# Bilingual-pair consistency record for guide.md (docs/i18n/README.md): per heading
+# section, a hash of its English and Chinese blocks outside code blocks and generated regions.
+# After editing either side, bring the other along and re-record with:
+#   pnpm run verify-translation-pairing --write docs/upgrade-guide/v0.2.1-rc.2/aether-foreground-handoff/guide.md
+/:
+  en: c719f21004318d9d
+  zh: 2b33d3725654eff9
+/aethershell-foreground-waits-hand-off-to-the-original-job:
+  en: 5616846b346ef739
+  zh: 402344e470e889b0
+/aethershell-foreground-waits-hand-off-to-the-original-job/change:
+  en: d7f020d11776a7d7
+  zh: 963d3f9397ebee18
+/aethershell-foreground-waits-hand-off-to-the-original-job/migration:
+  en: db46624a868ba678
+  zh: 957915bbdda19f42

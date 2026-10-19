@@ -1,9 +1,24 @@
 /** Deployment admission and timer bounds for live sessions and background jobs. */
 import { describe, expect, it } from 'vitest'
 import { MAX_TIMER_DELAY_MS } from '@deepseek-ai/dsh-timeout'
-import { resolveConfig } from '../src/config.ts'
+import { queryExecutionTimeout, resolveConfig } from '../src/config.ts'
 
 describe('aether lifecycle configuration', () => {
+  it('separates default foreground waiting from optional hard query execution limits', () => {
+    expect(resolveConfig().promoteOnTimeout).toBe(true)
+    expect(resolveConfig({ promoteOnTimeout: false }).promoteOnTimeout).toBe(false)
+    expect(queryExecutionTimeout(undefined, resolveConfig())).toBe(0)
+    expect(queryExecutionTimeout(900, resolveConfig())).toBe(900)
+    const capped = resolveConfig({ maxBackgroundRuntimeMs: 700 })
+    expect(queryExecutionTimeout(undefined, capped)).toBe(700)
+    expect(queryExecutionTimeout(900, capped)).toBe(700)
+    expect(queryExecutionTimeout(500, capped)).toBe(500)
+    expect(queryExecutionTimeout(MAX_TIMER_DELAY_MS, resolveConfig())).toBe(MAX_TIMER_DELAY_MS)
+  })
+
+  it.each([0, -1, 1.5, Number.NaN, Infinity, MAX_TIMER_DELAY_MS + 1])('rejects invalid query execution deadline %s before execution', value => {
+    expect(() => queryExecutionTimeout(value, resolveConfig())).toThrowError(expect.objectContaining({ code: 'E_INPUT_TIMEOUT' }))
+  })
   it('resolves explicit defaults without imposing a background deadline', () => {
     expect(resolveConfig()).toMatchObject({
       maxSessionsPerOwner: 4,

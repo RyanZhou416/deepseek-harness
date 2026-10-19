@@ -45,9 +45,9 @@ This fork's `build.cmd` also stages and links the plugin into the selected `web`
 | Tool | Input | Lifespan | Purpose |
 |---|---|---|---|
 | `aether_discover` | Optional exact category or flat builtin name, plus pagination | One call | Retrieve the native category index, a category's operations, or one operation's signature and examples. |
-| `aether_call` | Flat builtin name and positional JSON argument array | One call | Invoke one operation without generating AetherShell source. |
-| `aether_pipeline` | Ordered native steps and optional JSON input | One call | Filter, project and aggregate typed values in one execution. |
-| `aether_eval` | AetherShell source | One call | Evaluate expressions, lambdas and module calls in a fresh process. |
+| `aether_call` | Flat builtin name and positional JSON argument array | Inline or original job | Invoke one operation without generating AetherShell source. |
+| `aether_pipeline` | Ordered native steps and optional JSON input | Inline or original job | Filter, project and aggregate typed values in one execution. |
+| `aether_eval` | AetherShell source | Inline or original job | Evaluate expressions, lambdas and module calls in a fresh process. |
 | `aether_result_page` | Retained-result id, offset, format and optional drop | Until released | Read bounded pages of a complete result without repeating the operation. |
 | `aether_session_open` | Optional directory, label and deadline | Until closed | Start one persistent interpreter process and return an opaque session id. |
 | `aether_session_eval` | Session id and AetherShell source | One call | Evaluate a program in that process, where variables, functions, the current directory and the environment persist. |
@@ -94,6 +94,14 @@ Sessions are private to the agent that opened them. The deployment caps how many
 
 A deadline or cancellation terminates the whole session process, because the interpreter cannot abandon a running command. A session whose interpreter exits on its own is dropped. Neither case reopens or replays the session; open a new one to continue under the current policy. A program that fails partway leaves what earlier statements in that call already did in place: partial effects and bindings are not rolled back.
 
+### Foreground wait and original-job handoff
+
+`aether_call`, `aether_pipeline` and `aether_eval` register an owned job before their operation starts when `promoteOnTimeout` is enabled and job ownership is available. `timeoutMs` bounds the foreground wait. If the operation is still running, the tool returns `kind:"promoted"` and its original `jobId`: nothing is killed or executed again. Collect that id with `job_output`; the first read after settlement returns the complete canonical AetherShell outcome as JSON, including process/error metadata or a retained-result id. Query jobs expose no partial stdout document while running. Use `aether_job_start` instead when raw, potentially mixed output should stream.
+
+`executionTimeoutMs` independently bounds execution, including a typed capability probe; the probe also has its own bounded acquisition time. Omitted execution limits use `maxBackgroundRuntimeMs`, whose default zero means no outer runtime cap. Native limits such as `proc_run`'s `timeout_ms` still apply. Explicit cancellation before handoff stops and awaits the operation; after handoff, use `job_kill`. Owner disposal and plugin unload still stop owned work. No job survives Host restart by this mechanism.
+
+Without a live owner/job registry, with promotion disabled, or after admission refusal before work starts, queries retain a foreground kill deadline: the smaller of the wait and any explicit execution limit. Discovery and persistent-session deadlines are unchanged. Callers requiring the old kill-on-`timeoutMs` behavior can set `promoteOnTimeout:false` or pass `executionTimeoutMs`; see the [upgrade guide](../../docs/upgrade-guide/v0.2.1-rc.2/aether-foreground-handoff/guide.md).
+
 ### Background jobs
 
 `aether_job_start` starts one fresh interpreter process for one program and returns its job id immediately. It is the streaming counterpart of `aether_eval`: the program travels the interpreter's own command line, its raw stdout and stderr stream into the job's output ring, and no result document is read, so a program that prints logs, mixed JSON, or nothing at all still completes. Read the streams with `job_output`; the canonical exit facts and any spill file arrive with the first read after settlement. `job_kill` requests a stop and settlement follows managed-process cleanup, so a kill does not block and may settle after it returns.
@@ -104,7 +112,7 @@ A job runs without a deadline unless the deployment caps job runtime or the call
 
 ### Execution and permissions
 
-Query calls and session commands have explicit working directories and deadlines; background jobs have a deadline only when the call or deployment supplies one. The plugin clears inherited `AETHER_*` and `AE_*` control variables and uses its own configured runtime settings; DSH remains the permission authority. `sh()` starts disabled unless deployment configuration enables it. This startup setting is not a process-execution security boundary: other process builtins and expression code can change interpreter state, while DSH file policy still governs their file effects.
+Queries and sessions have explicit working directories. Query foreground waits and hard execution limits are separate when job handoff is available; session commands and discovery retain hard deadlines. Raw background jobs have a deadline only when the call or deployment supplies one. The plugin clears inherited `AETHER_*` and `AE_*` control variables and uses its own configured runtime settings; DSH remains the permission authority. `sh()` starts disabled unless deployment configuration enables it. This startup setting is not a process-execution security boundary: other process builtins and expression code can change interpreter state, while DSH file policy still governs their file effects.
 
 The response distinguishes a value, a native error, a file-sandbox denial, and an interruption. Interpreter exit facts and bounded stderr remain separate. Native API failures can occur with process exit zero. A returned application record containing `success:false` is ordinary data, not automatically a tool failure. AetherShell's child-program result remains inside that value; the interpreter's exit code is not the child's exit code.
 
@@ -127,7 +135,8 @@ Override the bundle's `aether-shell` row in the profile patch. The executable ma
 | `mode` | `human` | `human` preserves typed native JSON; `agent` explicitly opts into AECON and AetherShell's additional native approval rules. |
 | `structuredDataMode` | `legacy` | `legacy` keeps older data guards; `typed-v1` requires a successful capability probe before forwarding typed JSON data. |
 | `allowShell` | `false` | Enable the interpreter's `sh()` builtin without changing DSH file policy. |
-| `timeoutMs` / `maxTimeoutMs` | `120000` / `600000` | Default and maximum per-call hard deadlines. |
+| `timeoutMs` / `maxTimeoutMs` | `120000` / `600000` | Default/maximum query foreground waits, and hard deadlines when handoff is unavailable or for discovery. |
+| `promoteOnTimeout` | `true` | Transfer an owned running query to its original job when its foreground wait expires. |
 | `maxRequestBytes` | `1048576` | Encoded request or source byte cap. |
 | `maxOutputBytes` / `maxSpillBytes` | `262144` / `8388608` | Per-stream memory and full-stream spill caps. |
 | `maxResultBytes` | `65536` | Complete inline result, retained notice and page response cap. |
@@ -141,7 +150,7 @@ Override the bundle's `aether-shell` row in the profile patch. The executable ma
 | `maxSessionsPerOwner` | `4` | Live persistent sessions one agent may hold. |
 | `sessionIdleTimeoutMs` | `1800000` | Close a session idle this long; `0` disables idle expiry. |
 | `sessionStartupTimeoutMs` | `30000` | Deadline for creating and handshaking one persistent interpreter. |
-| `maxBackgroundRuntimeMs` | `0` | Cap on one job's total runtime; `0` imposes no ceiling. |
+| `maxBackgroundRuntimeMs` | `0` | Hard runtime cap for raw jobs and job-backed queries; `0` imposes no ceiling. |
 
 -----
 
@@ -179,7 +188,7 @@ The tool declarations and their guidance form a stable request prefix for one co
 
 ## Known Limitations and Deferred Work
 
-- Query calls are foreground-only with hard deadlines. A persistent session is the only way to keep native state between calls, and a background job is the only way to outlive a call's deadline.
+- Only the three value-returning queries support original-job handoff; discovery and persistent-session calls keep hard deadlines. Promoted query results arrive after settlement, not as live protocol fragments. A persistent session remains the way to keep native variables between calls.
 - A session's listed working directory is the initial directory its process started in. A program that changes the current directory changes the process's real `pwd()` while the listed value stays the start directory; read the process's own `pwd()` when the current directory matters.
 - A session's code state is never durable. A restart, a plugin unload, a deadline, cancellation, or a policy change loses the session's in-memory variables, functions and environment; files the program wrote remain, but there is no automatic reopen, replay, or history. Background jobs share the same no-checkpoint rule.
 - A denied call has no in-turn sandbox escalation fields; a user must change the Session's permission policy explicitly if broader file access is intended.

@@ -153,6 +153,8 @@ export interface AetherRetainedOutcome {
  */
 export interface AetherDeniedOutcome {
   kind: 'denied'
+  /** Preparation-stage facts when policy refused a preflight rather than the requested operation. */
+  metadata?: JsonValue
   /** Confinement facts; `denied` is true by construction. */
   sandbox: AetherSandboxFacts
   process: AetherProcessFacts
@@ -162,6 +164,8 @@ export interface AetherDeniedOutcome {
 /** An exchange that produced no result because this plugin stopped the interpreter. */
 export interface AetherInterruptedOutcome {
   kind: 'interrupted'
+  /** Preparation-stage facts when the requested operation was not yet sent. */
+  metadata?: JsonValue
   /** The deadline elapsed. */
   timedOut: boolean
   /** The plugin terminated the managed range from outside the call. */

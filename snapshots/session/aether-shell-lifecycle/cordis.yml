@@ -16,6 +16,10 @@
           # Trusted control root: the run's isolated DSH home plus the directory
           # the observing jobs provider publishes wait registrations into.
           - !!js 'process.env.DSH_HOME + "/aether-fixture-wait"'
+        # This recording predates foreground-to-job promotion. Keeping it off is
+        # the compatibility opt-out that lets the committed session stay exactly
+        # as recorded, without query job lifecycle events it never contained.
+        promoteOnTimeout: false
 
     - id: jobs-wait-observer
       name: './jobs-wait-observer.mjs'

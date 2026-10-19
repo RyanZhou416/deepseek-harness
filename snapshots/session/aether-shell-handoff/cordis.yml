@@ -1,0 +1,32 @@
+# Composition owner for the AetherShell handoff scenario. The scenario is authored,
+# so this live twin is never recorded; it exists so the composition has exactly one
+# owner and so the replay patch's plugin wiring has a reviewable counterpart. The
+# query tools keep their default foreground-to-job promotion: one `aether_eval`
+# waits 1 ms, hands the still-running execution to the original job, and the model
+# finishes it only through `job_output`'s wait.
+- insert:
+    - id: aether-shell
+      name: '../../../fork-plugins/dsh-plugin-aether-shell/src/index.ts'
+      config:
+        executable: !!js process.execPath
+        executableArgs:
+          # The fixture sits beside the selected Session fixture, so the sibling path
+          # is derived from the harness's own absolute fixture path.
+          - !!js 'process.env.DSH_SNAPSHOT_FILE.replace(/[^\\/]+$/, "aether-handoff-fixture.mjs")'
+          # Trusted control root: the run's isolated DSH home plus the directory the
+          # observing jobs plugin publishes wait registrations into.
+          - !!js 'process.env.DSH_HOME + "/aether-handoff-waits"'
+
+    # Scenario-local instrumentation over the shipped registry: it binds one own
+    # `wait` property for this run and restores it on unload.
+    - id: jobs-wait-observer
+      name: './jobs-wait-observer.mjs'
+
+# The recorded scenario exercises the native AetherShell query tools only. Both
+# shipped shell tools are disabled so the pinned header and prompt do not depend on
+# the host's shell dialect (tool-pwsh on Windows, tool-bash elsewhere).
+- id: tool-bash
+  disabled: true
+
+- id: tool-pwsh
+  disabled: true

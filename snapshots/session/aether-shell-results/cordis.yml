@@ -15,6 +15,10 @@
           - !!js 'process.env.DSH_SNAPSHOT_FILE.replace(/[^\\/]+$/, "aether-results-fixture.mjs")'
         structuredDataMode: typed-v1
         maxResultBytes: 4096
+        # This recording predates foreground-to-job promotion. Keeping it off is
+        # the compatibility opt-out that lets the committed session stay exactly
+        # as recorded, without query job lifecycle events it never contained.
+        promoteOnTimeout: false
 
 # The recorded scenario exercises the native AetherShell query tools only. Both
 # shipped shell tools are disabled so the pinned header and prompt do not depend

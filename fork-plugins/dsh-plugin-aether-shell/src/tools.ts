@@ -2,10 +2,10 @@
  * The four model-facing AetherShell tools: pageable ontology discovery, one
  * native builtin call, one native pipeline, and one interpreted program.
  *
- * Every tool is foreground-only under a hard deadline. There is no background
- * mode and no persistent interpreter: a job handle would promise a lifetime
- * this plugin does not own, and the interpreter's own process surface already
- * covers the long-running cases through its builtins.
+ * Discovery keeps a hard deadline. Queries register one owned job when available:
+ * foreground wait expiry hands back that job without restarting the operation.
+ * A separate execution deadline and explicit cancellation still stop the run.
+ * Persistent interpreter sessions remain a separate interface.
  *
  * The three tools that send argument data — discovery's query, one call, and one
  * pipeline — share their one deadline across every request they make. On the
@@ -26,11 +26,14 @@
 import { isAbsolute, resolve as resolvePath } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import { defineTool } from '@deepseek-ai/dsh-tools'
+import { HarnessError } from '@deepseek-ai/dsh-llm'
 import type { ToolDefinition, ToolRunContext } from '@deepseek-ai/dsh-tools'
 import type {} from '@deepseek-ai/dsh-sandbox'
 import type {} from '@deepseek-ai/dsh-sandbox-policy'
 import type {} from '@deepseek-ai/dsh-shell-env'
-import { callTimeout } from './config.ts'
+import { callTimeout, queryExecutionTimeout } from './config.ts'
+import { runForegroundQuery } from './foreground.ts'
+import type { AetherQueryResult, AetherPromotedOutcome } from './foreground.ts'
 import type { ResolvedConfig, StructuredDataMode } from './config.ts'
 import type { AetherDiscoverOutcome, AetherOntologyPage } from './discovery.ts'
 import { projectOntology } from './discovery.ts'
@@ -40,6 +43,7 @@ import { probeTypedCapabilities } from './capabilities.ts'
 import { applyResultLimit } from './limit.ts'
 import type { AetherRetention } from './limit.ts'
 import type { AetherOutcome, AetherValueOutcome } from './outcome.ts'
+import { isJsonObject } from './outcome.ts'
 import { renderDiscovery, renderOutcome } from './render.ts'
 import type { AetherResults } from './results.ts'
 import {
@@ -143,6 +147,7 @@ const DENIED_ARM = {
   additionalProperties: false,
   properties: {
     kind: { type: 'string', required: true, const: 'denied' },
+    metadata: { type: 'json' },
     sandbox: SANDBOX_SCHEMA,
     process: PROCESS_SCHEMA,
     stderr: DIAGNOSTICS_SCHEMA,
@@ -155,6 +160,7 @@ const INTERRUPTED_ARM = {
   additionalProperties: false,
   properties: {
     kind: { type: 'string', required: true, const: 'interrupted' },
+    metadata: { type: 'json' },
     timedOut: { type: 'boolean', required: true },
     aborted: { type: 'boolean', required: true },
     sandbox: SANDBOX_SCHEMA,
@@ -192,6 +198,37 @@ const RETAINED_ARM = {
 
 /** Canonical result of a call, a pipeline, or a program. */
 const OUTCOME_SCHEMA = { oneOf: [VALUE_ARM, RETAINED_ARM, ERROR_ARM, DENIED_ARM, INTERRUPTED_ARM] } as const
+
+/** A still-running query transferred to the same registered job. */
+const PROMOTED_ARM = {
+  type: 'object', additionalProperties: false,
+  properties: {
+    kind: { type: 'string', required: true, const: 'promoted' },
+    jobId: { type: 'string', required: true },
+    cwd: { type: 'string', required: true },
+    waitTimeoutMs: { type: 'number', required: true },
+    executionTimeoutMs: { type: 'number', required: true },
+  },
+} as const
+const QUERY_OUTCOME_SCHEMA = { oneOf: [...OUTCOME_SCHEMA.oneOf, PROMOTED_ARM] } as const
+
+/** Render an inline outcome or the original job's collection instructions. */
+function renderQueryOutcome(outcome: AetherOutcome | (Omit<AetherPromotedOutcome, 'jobId'> & { jobId: string })): string {
+  if (outcome.kind !== 'promoted') {
+    const preparation = (outcome.kind === 'denied' || outcome.kind === 'interrupted')
+      && isJsonObject(outcome.metadata) && outcome.metadata.operation_started === false
+    return `${preparation ? 'Capability preflight stopped; the requested operation was not started.\n' : ''}${renderOutcome(outcome)}`
+  }
+  const hard = outcome.executionTimeoutMs === 0 ? 'No outer execution deadline is set.' : `Execution remains bounded by ${outcome.executionTimeoutMs}ms.`
+  return `aether execution ${outcome.jobId}: still running after ${outcome.waitTimeoutMs}ms; handed off to the original background job. No command was restarted. ${hard} Read the final canonical JSON outcome with job_output {job_id:"${outcome.jobId}"}; use job_kill to stop it. Native proc_run limits still apply.`
+}
+
+const HANDOFF_GUIDANCE = 'When a job registry and live owning agent are available and promoteOnTimeout is enabled, '
+  + 'timeoutMs bounds only the foreground wait: expiry returns the original job id without stopping or repeating the operation. '
+  + 'Collect its final canonical JSON outcome with job_output; use job_kill to stop it. executionTimeoutMs is the independent hard runtime limit, '
+  + 'also capped by the deployment\'s maxBackgroundRuntimeMs. Omitted hard limits mean no outer runtime cap when that deployment cap is zero; '
+  + 'native proc_run timeout_ms is unchanged. Explicit call cancellation stops and awaits the owned run. '
+  + 'Without ownership/jobs, with promotion disabled, or if admission is refused before execution, the foreground wait remains a kill deadline. '
 
 /**
  * What a tool that returns a complete value says about an oversized one.
@@ -270,6 +307,13 @@ const TIMEOUT_PARAMETER = {
 /** The working-directory and deadline arguments every tool accepts. */
 const CWD_AND_TIMEOUT_ENTRIES = { cwd: CWD_PARAMETER, timeoutMs: TIMEOUT_PARAMETER } as const
 
+/** Independent query wait and execution limits; discovery keeps its existing hard deadline. */
+const QUERY_EXECUTION_ENTRIES = {
+  cwd: CWD_PARAMETER,
+  timeoutMs: { type: 'number', description: 'Foreground wait in milliseconds, capped by maxTimeoutMs. With job ownership and promotion enabled, expiry hands off the same execution; otherwise it is a kill deadline.' },
+  executionTimeoutMs: { type: 'number', description: 'Independent positive hard execution deadline in milliseconds. Omitted, only maxBackgroundRuntimeMs applies (zero means no outer cap). Native proc_run timeout_ms remains independent.' },
+} as const
+
 /**
  * The argument-channel facts a data tool states to the model, keyed by the mode
  * this deployment selected. The text matches the checks this deployment really
@@ -347,10 +391,14 @@ async function runNativeRequest(
   })
   if (options.structured === 'legacy') return request(options.timeoutMs)
   const startedAt = performance.now()
-  const probeBudget = remainingBudget(options.timeoutMs, startedAt)
+  const probeBudget = options.timeoutMs === 0 ? deps.config.maxTimeoutMs : Math.min(deps.config.maxTimeoutMs, remainingBudget(options.timeoutMs, startedAt))
   if (probeBudget < MIN_REQUEST_BUDGET_MS) return deadlineExhaustedOutcome(deps, options.timeoutMs)
   const probe = await probeTypedCapabilities(deps, { cwd: options.cwd, timeoutMs: probeBudget, signal: options.signal })
-  if (probe.kind === 'stopped') return probe.outcome
+  if (probe.kind === 'stopped') return {
+    ...probe.outcome,
+    metadata: { phase: 'capabilities', operation_started: false, side_effects: 'unknown', safe_to_retry: false },
+  }
+  if (options.timeoutMs === 0) return request(0)
   const budget = remainingBudget(options.timeoutMs, startedAt)
   if (budget < MIN_REQUEST_BUDGET_MS) return deadlineExhaustedOutcome(deps, options.timeoutMs)
   return request(budget)
@@ -494,6 +542,35 @@ export function createAetherTools(dependencies: AetherToolDependencies): ToolDef
     }
   }
 
+  /** Capture policy, result ownership and execution settings while the call is active. */
+  const query = (
+    exec: ToolRunContext,
+    args: { cwd?: string; timeoutMs?: number; executionTimeoutMs?: number },
+    label: string,
+    run: (deps: AetherExecDeps, cwd: string, signal: AbortSignal, timeoutMs: number) => Promise<AetherOutcome>,
+  ): Promise<AetherQueryResult> => {
+    const cwd = resolveWorkdir(args.cwd, exec)
+    const deps = depsFor(exec)
+    const retention = retentionFor(exec)
+    const jobs = ctx.get('jobs')
+    return runForegroundQuery({
+      ...jobs === undefined ? {} : { jobs },
+      ...exec.agent === undefined ? {} : { owner: exec.agent },
+      callId: exec.callId, rootCallId: exec.rootCallId ?? exec.callId,
+      label, cwd, waitTimeoutMs: callTimeout(args.timeoutMs, config),
+      executionTimeoutMs: queryExecutionTimeout(args.executionTimeoutMs, config),
+      signal: exec.signal, promote: config.promoteOnTimeout,
+      run: (signal, timeoutMs) => run(deps, cwd, signal, timeoutMs),
+      finish: outcome => applyResultLimit(outcome, renderQueryOutcome(outcome), config.maxResultBytes, retention),
+      validateHandoff: receipt => {
+        if (Math.max(Buffer.byteLength(JSON.stringify(receipt), 'utf8'), Buffer.byteLength(renderQueryOutcome(receipt), 'utf8')) > config.maxResultBytes) {
+          throw new HarnessError('The handoff receipt exceeds maxResultBytes; use a shorter cwd or raise the result budget. The requested operation was not started.', 'E_INPUT_RECEIPT')
+        }
+      },
+      report: message => { ctx.logger.warn(message) },
+    })
+  }
+
   const discover = defineTool({
     name: 'aether_discover',
     description: 'Read the native AetherShell ontology. Without `query`, return one page of the category manifest with '
@@ -548,7 +625,8 @@ export function createAetherTools(dependencies: AetherToolDependencies): ToolDef
       + CALL_ARGUMENT_CHANNEL[config.structuredDataMode]
       + 'A process-capable builtin runs under this call\'s DSH file policy, which governs writes and '
       + 'deletes rather than reads, network, or process control; the interpreter\'s own `sh` switch starts off as a '
-      + 'convenience default, not a boundary. Foreground only, under a hard deadline. '
+      + 'convenience default, not a boundary. '
+      + HANDOFF_GUIDANCE
       + RETENTION_GUIDANCE
       + DENIAL_GUIDANCE,
     parameters: {
@@ -558,25 +636,21 @@ export function createAetherTools(dependencies: AetherToolDependencies): ToolDef
         items: { type: 'json' },
         description: 'Positional arguments in the order the builtin\'s signature declares them; JSON data only.',
       },
-      ...CWD_AND_TIMEOUT_ENTRIES,
+      ...QUERY_EXECUTION_ENTRIES,
     },
     output: {
-      schema: OUTCOME_SCHEMA,
-      render: (_args, value) => [{ type: 'text', text: renderOutcome(value) }],
-      presentationMeta: (_args, value) => value.kind === 'retained' ? { resultId: value.result.id } : undefined,
+      schema: QUERY_OUTCOME_SCHEMA,
+      render: (_args, value) => [{ type: 'text', text: renderQueryOutcome(value) }],
+      presentationMeta: (_args, value) => value.kind === 'retained' ? { resultId: value.result.id }
+        : value.kind === 'promoted' ? { jobId: value.jobId } : undefined,
     },
     async execute(args, exec) {
       assertWorkdir(args.cwd)
       const requestText = encodeRequest(callRequest(args.builtin, args.args, config.structuredDataMode))
       assertRequestBytes(requestText, config)
-      const outcome = await runNativeRequest(depsFor(exec), {
-        cwd: resolveWorkdir(args.cwd, exec),
-        timeoutMs: callTimeout(args.timeoutMs, config),
-        signal: exec.signal,
-        structured: config.structuredDataMode,
-        requestText,
-      })
-      return applyResultLimit(outcome, renderOutcome(outcome), config.maxResultBytes, retentionFor(exec))
+      return query(exec, args, 'aether_call', (deps, cwd, signal, timeoutMs) => runNativeRequest(deps, {
+        cwd, timeoutMs, signal, structured: config.structuredDataMode, requestText,
+      }))
     },
   })
 
@@ -588,8 +662,7 @@ export function createAetherTools(dependencies: AetherToolDependencies): ToolDef
       + 'that step\'s builtin as its lambda first argument and replaces the step\'s `args`. `input` starts the '
       + 'pipeline from a value instead of from the first call. '
       + STEP_ARGUMENT_CHANNEL[config.structuredDataMode]
-      + 'Foreground only, '
-      + 'under a hard deadline. '
+      + HANDOFF_GUIDANCE
       + RETENTION_GUIDANCE
       + DENIAL_GUIDANCE,
     parameters: {
@@ -612,25 +685,21 @@ export function createAetherTools(dependencies: AetherToolDependencies): ToolDef
         type: 'json',
         description: PIPELINE_SEED_DESCRIPTION[config.structuredDataMode],
       },
-      ...CWD_AND_TIMEOUT_ENTRIES,
+      ...QUERY_EXECUTION_ENTRIES,
     },
     output: {
-      schema: OUTCOME_SCHEMA,
-      render: (_args, value) => [{ type: 'text', text: renderOutcome(value) }],
-      presentationMeta: (_args, value) => value.kind === 'retained' ? { resultId: value.result.id } : undefined,
+      schema: QUERY_OUTCOME_SCHEMA,
+      render: (_args, value) => [{ type: 'text', text: renderQueryOutcome(value) }],
+      presentationMeta: (_args, value) => value.kind === 'retained' ? { resultId: value.result.id }
+        : value.kind === 'promoted' ? { jobId: value.jobId } : undefined,
     },
     async execute(args, exec) {
       assertWorkdir(args.cwd)
       const requestText = encodeRequest(pipelineRequest(args.steps, args.input, config, config.structuredDataMode))
       assertRequestBytes(requestText, config)
-      const outcome = await runNativeRequest(depsFor(exec), {
-        cwd: resolveWorkdir(args.cwd, exec),
-        timeoutMs: callTimeout(args.timeoutMs, config),
-        signal: exec.signal,
-        structured: config.structuredDataMode,
-        requestText,
-      })
-      return applyResultLimit(outcome, renderOutcome(outcome), config.maxResultBytes, retentionFor(exec))
+      return query(exec, args, 'aether_pipeline', (deps, cwd, signal, timeoutMs) => runNativeRequest(deps, {
+        cwd, timeoutMs, signal, structured: config.structuredDataMode, requestText,
+      }))
     },
   })
 
@@ -645,28 +714,26 @@ export function createAetherTools(dependencies: AetherToolDependencies): ToolDef
       + 'interpreter\'s `sh` switch starts off, but that is a convenience default rather than a boundary, because '
       + 'the program can change its own environment and reach the process builtins either way. Numbers outside the '
       + 'exact integer range this runtime can carry are rejected rather than rounded, so ask for such a value as text. '
-      + 'Foreground only, under a hard deadline. '
+      + HANDOFF_GUIDANCE
       + RETENTION_GUIDANCE
       + DENIAL_GUIDANCE,
     parameters: {
       code: { type: 'string', required: true, description: 'AetherShell program text: an expression, a lambda, or a sequence of statements.' },
-      ...CWD_AND_TIMEOUT_ENTRIES,
+      ...QUERY_EXECUTION_ENTRIES,
     },
     output: {
-      schema: OUTCOME_SCHEMA,
-      render: (_args, value) => [{ type: 'text', text: renderOutcome(value) }],
-      presentationMeta: (_args, value) => value.kind === 'retained' ? { resultId: value.result.id } : undefined,
+      schema: QUERY_OUTCOME_SCHEMA,
+      render: (_args, value) => [{ type: 'text', text: renderQueryOutcome(value) }],
+      presentationMeta: (_args, value) => value.kind === 'retained' ? { resultId: value.result.id }
+        : value.kind === 'promoted' ? { jobId: value.jobId } : undefined,
     },
     async execute(args, exec) {
       assertWorkdir(args.cwd)
       assertEvalCode(args.code, config)
-      const outcome = await runAether(depsFor(exec), {
-        invocation: { transport: 'command-line', code: args.code },
-        cwd: resolveWorkdir(args.cwd, exec),
-        timeoutMs: callTimeout(args.timeoutMs, config),
-        signal: exec.signal,
-      })
-      return applyResultLimit(outcome, renderOutcome(outcome), config.maxResultBytes, retentionFor(exec))
+      const code = args.code
+      return query(exec, args, 'aether_eval', (deps, cwd, signal, timeoutMs) => runAether(deps, {
+        invocation: { transport: 'command-line', code }, cwd, timeoutMs, signal,
+      }))
     },
   })
 
