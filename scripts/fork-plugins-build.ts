@@ -2,16 +2,21 @@
  * Build or stage the four fork plugins and install them into the selected
  * web profile by local path.
  *
- * `build.cmd` runs this after the ordinary root build. The script stages
- * bundles under the ignored `.build/fork-plugins/` directory, installs them
- * with `dsh plugin --profile web add <absolute staged directory>` (a pnpm
- * `link:` dependency), and rewrites profile configuration only after backing
- * up `package.json` and `cordis.patch.yml`.
+ * `build.cmd` runs this after the ordinary root build. Every plugin is built
+ * from source: subscriptions and aether-shell emit their bundles directly into
+ * the staging directory, while agent-teams and context are copied into an
+ * isolated work directory under `.build/fork-plugins/work/` and run their own
+ * `build` script there. Staged packages live under the ignored
+ * `.build/fork-plugins/` directory, are installed with
+ * `dsh plugin --profile web add <absolute staged directory>` (a pnpm `link:`
+ * dependency), and profile configuration is rewritten only after backing up
+ * `package.json` and `cordis.patch.yml`.
  *
- * A clean checkout needs no plugin-local install or build. The script installs
- * the pinned build-time runtime packages under `.build/fork-plugins/build-deps/`
- * and emits the subscriptions transport files from source, so staged artifacts
- * always match the checkout.
+ * The tracked plugin `lib/` directories are never a build input: a clean clone
+ * needs no prebuilt output. Isolated builds install their pinned plugin-local
+ * dependencies from the checked-in lockfile (offline when the pnpm store
+ * already has them, otherwise with network access) and fail with an actionable
+ * message when preparation cannot finish.
  *
  * Safety: profile mutation while a Host is serving that profile is unsafe, so
  * a listener on the Host port refuses the run unless `--allow-running-host`
@@ -35,49 +40,100 @@ const BUILD_ROOT = join(REPOSITORY_ROOT, '.build', 'fork-plugins')
 const STATE_FILE = join(BUILD_ROOT, 'state.json')
 const CONFIG_ROOT = join(BUILD_ROOT, 'configs')
 const DEPENDENCY_ROOT = join(BUILD_ROOT, 'build-deps')
+const WORK_ROOT = join(BUILD_ROOT, 'work')
 const PROFILE_NAME = 'web'
 const HOST_PORT = 3080
 const SCHEMA_VERSION = 1
 /** Bump when the staging recipe changes in a way the source hash does not capture. */
-const SCRIPT_VERSION = 4
+const SCRIPT_VERSION = 5
+const WORK_MARKER_FILE = '.fork-plugin-build.json'
+const DEPENDENCY_MARKER_FILE = '.fork-plugin-deps.json'
+
+/** Plugin ids this script stages, in installation order. */
+export type PluginId = 'subscriptions' | 'aether-shell' | 'agent-teams' | 'context'
+
+/** How a plugin's staged package obtains its runtime files. */
+export type PluginBuilder = 'subscriptions' | 'aether-shell' | 'isolated'
+
+/** One fork plugin, its build recipe, and the files staging copies. */
+export interface PluginDefinition {
+  readonly id: PluginId
+  readonly name: string
+  readonly directory: string
+  readonly mode: 'build'
+  readonly builder: PluginBuilder
+  /** Built files the staged package and the installed profile must expose. */
+  readonly outputs: readonly string[]
+  /** Entries copied from the build directory into the staged package. */
+  readonly stage: readonly string[]
+  /** Entries copied from the source package into the isolated work directory. */
+  readonly workCopy: readonly string[]
+  /** Whether the isolated build needs a plugin-local `pnpm install` first. */
+  readonly installDependencies: boolean
+}
 
 /** Plugin entries this script installs, in installation order. */
-const PLUGINS = [
+const PLUGIN_DEFINITIONS = [
   {
     id: 'subscriptions',
     name: 'dsh-plugin-subscriptions',
     directory: join(REPOSITORY_ROOT, 'fork-plugins', 'dsh-plugin-subscriptions'),
     mode: 'build',
+    builder: 'subscriptions',
     outputs: ['lib/index.js', 'lib/client.js'],
-    copy: [] as string[],
+    stage: ['cordis.patch.yml'],
+    workCopy: [],
+    installDependencies: false,
   },
   {
     id: 'aether-shell',
     name: '@ryanzhou416/dsh-plugin-aether-shell',
     directory: join(REPOSITORY_ROOT, 'fork-plugins', 'dsh-plugin-aether-shell'),
     mode: 'build',
+    builder: 'aether-shell',
     outputs: ['lib/lifecycle.mjs'],
-    copy: [] as string[],
+    stage: ['cordis.patch.yml'],
+    workCopy: [],
+    installDependencies: false,
   },
   {
     id: 'agent-teams',
     name: '@nanmicoder/dsh-agent-teams',
     directory: join(REPOSITORY_ROOT, 'fork-plugins', 'dsh-agent-teams'),
-    mode: 'copy',
-    outputs: ['lib/index.js', 'lib/client.js', 'lib/types/index.d.ts'],
-    copy: ['lib', 'assets', 'release-notes', 'README.md', 'README_ZH.md', 'compatibility.json', 'cordis.patch.yml'],
+    mode: 'build',
+    builder: 'isolated',
+    outputs: ['lib/index.js', 'lib/client.js', 'lib/types/index.d.ts', 'lib/types/client/index.d.ts'],
+    stage: ['lib', 'assets', 'release-notes', 'README.md', 'README_ZH.md', 'compatibility.json', 'cordis.patch.yml'],
+    workCopy: [
+      'src', 'scripts', 'assets', 'release-notes', '.npmrc',
+      'pnpm-lock.yaml', 'pnpm-workspace.yaml', 'package.json',
+      'tsconfig.json', 'tsconfig.client.json', 'tsdown.config.ts',
+      'README.md', 'README_ZH.md', 'compatibility.json', 'cordis.patch.yml',
+    ],
+    installDependencies: true,
   },
   {
     id: 'context',
     name: 'dsh-context',
     directory: join(REPOSITORY_ROOT, 'fork-plugins', 'dsh-context'),
-    mode: 'copy',
+    mode: 'build',
+    builder: 'isolated',
     outputs: ['lib/index.js', 'lib/client.js', 'lib/index.d.ts'],
-    copy: ['lib', 'locale', 'icon.svg', 'README.md', 'LICENSE', 'cordis.patch.yml'],
+    stage: ['lib', 'locale', 'icon.svg', 'README.md', 'LICENSE', 'cordis.patch.yml'],
+    workCopy: [
+      'src', 'locale', 'icon.svg', 'LICENSE', 'README.md', 'README_zh.md',
+      'pnpm-lock.yaml', 'pnpm-workspace.yaml', 'package.json',
+      'tsconfig.json', 'tsdown.config.ts', 'cordis.patch.yml',
+    ],
+    installDependencies: true,
   },
-] as const
+] as const satisfies readonly PluginDefinition[]
 
-type PluginId = (typeof PLUGINS)[number]['id']
+/** The plugin definitions, for tests that assert the staging recipe. */
+export const PLUGINS: readonly PluginDefinition[] = PLUGIN_DEFINITIONS
+
+const SUBSCRIPTIONS_PLUGIN = PLUGIN_DEFINITIONS[0]
+const AETHER_SHELL_PLUGIN = PLUGIN_DEFINITIONS[1]
 
 /** One transport module the staged subscriptions package emits beside `lib/index.js`. */
 export interface SubscriptionsTransportModule {
@@ -120,17 +176,36 @@ export interface PluginManifest extends Record<string, unknown> {
   peerDependenciesMeta?: Record<string, unknown>
 }
 
-interface BuildState {
+/** One plugin's recorded staging generation. */
+export interface StagedPluginState {
+  key: string
+  version: string
+  installedAt: string
+}
+
+/** The staging state recorded after a successful build. */
+export interface BuildState {
   schema: number
   scriptVersion: number
-  plugins: Record<string, { key: string; version: string; installedAt: string }>
+  plugins: Record<string, StagedPluginState>
 }
 
 interface StagedPlugin {
-  readonly definition: (typeof PLUGINS)[number]
+  readonly definition: PluginDefinition
   readonly directory: string
   readonly version: string
   readonly changed: boolean
+}
+
+interface WorkMarker {
+  readonly schema: number
+  readonly key: string
+  readonly builtAt: string
+}
+
+interface DependencyMarker {
+  readonly schema: number
+  readonly key: string
 }
 
 function log(message: string): void {
@@ -285,8 +360,9 @@ function cliEntry(): string {
 async function toolchainVersions(): Promise<string> {
   const tsdown = await readJson<{ version?: string }>(join(REPOSITORY_ROOT, 'node_modules', 'tsdown', 'package.json'))
   const typescript = await readJson<{ version?: string }>(join(REPOSITORY_ROOT, 'node_modules', 'typescript', 'package.json'))
+  const pnpm = await readJson<{ version?: string }>(join(REPOSITORY_ROOT, 'node_modules', 'pnpm', 'package.json'))
   const cli = await readJson<{ version?: string }>(join(REPOSITORY_ROOT, 'apps', 'cli', 'package.json'))
-  return `${tsdown.version ?? 'unknown'}\n${typescript.version ?? 'unknown'}\n${cli.version ?? 'unknown'}`
+  return `${tsdown.version ?? 'unknown'}\n${typescript.version ?? 'unknown'}\n${pnpm.version ?? 'unknown'}\n${cli.version ?? 'unknown'}`
 }
 
 function rootTsdown(): string {
@@ -308,13 +384,14 @@ function runDsh(args: readonly string[], home: string): void {
   run(process.execPath, [cliEntry(), ...args], { cwd: REPOSITORY_ROOT, env: environment })
 }
 
+/** Directory names never treated as build inputs for a source hash. */
+const IGNORED_SOURCE_DIRECTORIES = new Set(['node_modules', 'lib', 'lib-test', 'docs', '.git', '.tmp', 'coverage'])
+
 /** Files whose content decides whether a plugin must be rebuilt. */
-function sourcePaths(plugin: (typeof PLUGINS)[number]): string[] {
-  if (plugin.mode === 'copy') {
-    return plugin.id === 'agent-teams'
-      ? ['lib', 'assets', 'release-notes', 'README.md', 'README_ZH.md', 'compatibility.json', 'package.json', 'cordis.patch.yml']
-      : ['lib', 'locale', 'icon.svg', 'README.md', 'LICENSE', 'package.json', 'cordis.patch.yml']
-  }
+export function sourcePaths(plugin: PluginDefinition): string[] {
+  if (plugin.builder === 'isolated') return [...plugin.workCopy]
+  // These builders read their sources directly and stage copied entries from
+  // the source package; `lib` stays out of the recipe either way.
   return plugin.id === 'subscriptions'
     ? ['src', 'package.json', 'cordis.patch.yml', 'tsconfig.json', 'tsdown.config.ts', 'tsdown.client.options.mjs']
     : ['src', 'package.json', 'cordis.patch.yml', 'tsconfig.json', 'tsdown.config.ts']
@@ -325,14 +402,13 @@ async function hashFile(path: string): Promise<string> {
 }
 
 /** Hash the files that change the staged output, excluding docs, tests, dependencies, and prior builds. */
-async function sourceHash(plugin: (typeof PLUGINS)[number]): Promise<string> {
+export async function sourceHash(plugin: PluginDefinition): Promise<string> {
   const lines: string[] = []
-  const includeLib = plugin.mode === 'copy'
   const visit = async (path: string, relative: string): Promise<void> => {
     const info = await stat(path)
     if (info.isDirectory()) {
       for (const entry of await readdir(path, { withFileTypes: true })) {
-        if (entry.name === 'node_modules' || (!includeLib && entry.name === 'lib') || entry.name === 'lib-test' || entry.name === 'docs') continue
+        if (IGNORED_SOURCE_DIRECTORIES.has(entry.name)) continue
         await visit(join(path, entry.name), `${relative}/${entry.name}`)
       }
       return
@@ -367,7 +443,7 @@ export function lockedUndiciVersion(lockfile: string, fallback: string): string 
 }
 
 /** Read the source manifest of one plugin. */
-async function sourceManifest(plugin: (typeof PLUGINS)[number]): Promise<PluginManifest> {
+async function sourceManifest(plugin: PluginDefinition): Promise<PluginManifest> {
   return readJson<PluginManifest>(join(plugin.directory, 'package.json'))
 }
 
@@ -405,8 +481,8 @@ export function stagedManifest(source: PluginManifest, pluginId: PluginId): Plug
     manifest.exports = { '.': './lib/lifecycle.mjs', './package.json': './package.json' }
     manifest.files = ['lib', 'cordis.patch.yml']
   } else if (pluginId === 'context') {
-    // zod is a real runtime dependency of the prebuilt context half; the
-    // profile link resolves it from the repository install.
+    // zod is a real runtime dependency of the context host half; the profile
+    // link resolves it from the repository install.
     manifest.files = ['lib/index.js', 'lib/client.js', 'lib/index.d.ts', 'icon.svg', 'locale/*.json', 'cordis.patch.yml', 'README.md', 'LICENSE']
   } else {
     delete manifest.dependencies
@@ -551,7 +627,7 @@ async function ensureBuildDependencies(): Promise<BuildDependencies> {
   const bunRuntimeTarget = bunPlatformRuntime(process.platform, process.arch)
   const wireTarball = join(REPOSITORY_ROOT, 'fork-plugins', 'releases', 'tormentalabs-claude-code-wire-compat-0.7.2-dsh14.tgz')
   if (!existsSync(wireTarball)) fail(`missing inlined dependency artifact ${wireTarball}`)
-  const lockfile = await readFile(join(PLUGINS[0].directory, 'pnpm-lock.yaml'), 'utf8')
+  const lockfile = await readFile(join(SUBSCRIPTIONS_PLUGIN.directory, 'pnpm-lock.yaml'), 'utf8')
   const undiciVersion = lockedDependencyVersion(lockfile, 'undici', '^7.0.0')
   const bunVersion = lockedDependencyVersion(lockfile, bunRuntimeTarget.packageName, '^1.4.0')
   const dependencyManifest = {
@@ -623,12 +699,12 @@ function quote(value: string): string {
 async function subscriptionsConfig(stagingDirectory: string, wireEntry: string, undiciEntry: string): Promise<string> {
   const aliases = await workspaceAliases()
   const path = join(CONFIG_ROOT, 'subscriptions.mjs')
-  const clientOptions = pathToFileURL(join(PLUGINS[0].directory, 'tsdown.client.options.mjs')).href
+  const clientOptions = pathToFileURL(join(SUBSCRIPTIONS_PLUGIN.directory, 'tsdown.client.options.mjs')).href
   const config = [
     "import { defineConfig } from 'tsdown'",
     `import { clientBuildOptions } from ${quote(clientOptions)}`,
     '',
-    `const cwd = ${quote(PLUGINS[0].directory)}`,
+    `const cwd = ${quote(SUBSCRIPTIONS_PLUGIN.directory)}`,
     `const alias = ${JSON.stringify(aliases, undefined, 2)}`,
     `alias['@tormentalabs/claude-code-wire-compat'] = ${quote(wireEntry)}`,
     `alias['undici'] = ${quote(undiciEntry)}`,
@@ -705,7 +781,7 @@ async function aetherConfig(stagingDirectory: string): Promise<string> {
     '',
     'export default defineConfig({',
     `  name: ${quote('dsh-plugin-aether-shell-staged')},`,
-    `  cwd: ${quote(PLUGINS[1].directory)},`,
+    `  cwd: ${quote(AETHER_SHELL_PLUGIN.directory)},`,
     "  entry: { lifecycle: 'src/index.ts' },",
     `  outDir: ${quote(join(stagingDirectory, 'lib'))},`,
     "  format: 'esm',",
@@ -779,7 +855,7 @@ export function subscriptionsRuntimeArtifacts(platform: string = process.platfor
 }
 
 /** Files staging and the installed profile must expose for one plugin. */
-function pluginArtifacts(plugin: (typeof PLUGINS)[number]): string[] {
+export function pluginArtifacts(plugin: PluginDefinition): string[] {
   return plugin.id === 'subscriptions'
     ? [...plugin.outputs, ...subscriptionsRuntimeArtifacts()]
     : [...plugin.outputs]
@@ -822,18 +898,58 @@ async function stageSubscriptionsTransport(stagingDirectory: string, runtime: Bu
   await stageBunRuntime(runtime, stagingDirectory)
 }
 
-/** Stage the plugin package files and its inlined-license notices. */
-async function stagePackage(
-  plugin: (typeof PLUGINS)[number],
-  stagingDirectory: string,
-  dependencies: Awaited<ReturnType<typeof ensureBuildDependencies>>,
-): Promise<void> {
+/** Write the validated staged package manifest. */
+export async function writeStagedManifest(plugin: PluginDefinition, stagingDirectory: string): Promise<void> {
   const manifest = await sourceManifest(plugin)
   const staged = stagedManifest(manifest, plugin.id)
   assertStagedManifest(staged, plugin.id)
   await writeJson(join(stagingDirectory, 'package.json'), staged)
-  await copyFile(join(plugin.directory, 'cordis.patch.yml'), join(stagingDirectory, 'cordis.patch.yml'))
-  await copyIfPresent(join(plugin.directory, 'LICENSE'), join(stagingDirectory, 'LICENSE'))
+}
+
+/**
+ * Verify every artifact the staged package and its profile link must expose.
+ * @param plugin - plugin definition that declares the artifacts.
+ * @param directory - staged or installed package root.
+ * @param label - where the directory came from, for the failure message.
+ */
+export function assertStagedArtifacts(plugin: PluginDefinition, directory: string, label = 'staging'): void {
+  for (const output of pluginArtifacts(plugin)) {
+    const path = join(directory, output)
+    if (!existsSync(path) || statSync(path).size === 0) fail(`${plugin.name} ${label} did not produce ${output}`)
+  }
+}
+
+/**
+ * Copy the plugin's declared staged entries from a build directory.
+ *
+ * Isolated builders pass their work copy, so a tracked `lib/` in the source
+ * checkout can never leak into the staged package; sourcemap files stay out.
+ * @param plugin - plugin definition that declares the entries.
+ * @param buildDirectory - directory holding the built package files.
+ * @param stagingDirectory - staged package root.
+ */
+export async function copyStagedEntries(
+  plugin: PluginDefinition,
+  buildDirectory: string,
+  stagingDirectory: string,
+): Promise<void> {
+  for (const entry of plugin.stage) {
+    const source = join(buildDirectory, entry)
+    if (!existsSync(source)) fail(`${plugin.name} is missing its staged entry ${entry} in ${buildDirectory}`)
+    await cp(source, join(stagingDirectory, entry), {
+      recursive: true,
+      filter: path => !path.endsWith('.map'),
+    })
+  }
+}
+
+/** Stage the plugin manifest and the subscriptions-only runtime extras. */
+async function stagePackage(
+  plugin: PluginDefinition,
+  stagingDirectory: string,
+  dependencies: Awaited<ReturnType<typeof ensureBuildDependencies>>,
+): Promise<void> {
+  await writeStagedManifest(plugin, stagingDirectory)
   if (plugin.id === 'subscriptions') {
     const notices = join(stagingDirectory, 'third-party-licenses')
     await mkdir(join(notices, 'claude-code-wire-compat'), { recursive: true })
@@ -845,53 +961,259 @@ async function stagePackage(
   }
 }
 
-/** Copy a prebuilt plugin's runtime files into its staging directory. */
-async function stageCopiedFiles(
-  plugin: (typeof PLUGINS)[number],
-  stagingDirectory: string,
+/** One captured child-process result used by dependency preparation. */
+export interface PluginCommandResult {
+  readonly status: number | null
+  readonly stdout?: string
+  readonly stderr?: string
+  readonly error?: string
+}
+
+/** Runs one plugin-local command; tests inject a failing runner. */
+export type PluginCommandRunner = (
+  command: string,
+  args: readonly string[],
+  options: { cwd: string; env?: NodeJS.ProcessEnv },
+) => PluginCommandResult
+
+/** Whether the plugin lockfile asks pnpm to auto-install peers. */
+export function lockfileAutoInstallPeers(lockfile: string): boolean {
+  const match = /^\s+autoInstallPeers:\s*(true|false)\s*$/m.exec(lockfile)
+  return match?.[1] !== 'false'
+}
+
+/**
+ * The exact dependency install invocation for one plugin work copy.
+ * @param lockfile - plugin `pnpm-lock.yaml` contents.
+ * @param offline - whether to require the local pnpm store.
+ * @returns pnpm arguments, excluding the repository pnpm entry prefix.
+ */
+export function pluginInstallArguments(lockfile: string, offline: boolean): string[] {
+  return [
+    'install',
+    '--frozen-lockfile',
+    '--ignore-scripts',
+    '--config.confirm-modules-purge=false',
+    // The lockfile is checked in, so offline preparation can trust it instead
+    // of fetching supply-chain metadata for every entry.
+    '--config.trust-lockfile=true',
+    `--config.auto-install-peers=${lockfileAutoInstallPeers(lockfile)}`,
+    '--config.verify-deps-before-run=false',
+    '--child-concurrency=2',
+    ...offline ? ['--offline'] : ['--prefer-offline'],
+  ]
+}
+
+/** One attempted dependency preparation command. */
+export interface DependencyAttempt {
+  readonly command: string
+  readonly status: number | null
+  readonly detail?: string
+}
+
+/** A plugin-local dependency preparation failure with actionable context. */
+export function dependencyPreparationError(
+  plugin: PluginDefinition,
+  workDirectory: string,
+  attempts: readonly DependencyAttempt[],
+): Error {
+  const details = attempts.map((attempt) => {
+    const tail = (attempt.detail ?? '').trim().split(/\r?\n/).filter(line => line !== '').slice(-4).join('\n    ')
+    return `  ${attempt.command} -> ${attempt.status === null ? 'did not start' : `exit code ${String(attempt.status)}`}${tail === '' ? '' : `\n    ${tail}`}`
+  })
+  return new Error([
+    `failed to prepare plugin-local dependencies for ${plugin.name} (${plugin.id})`,
+    `  source: ${plugin.directory}`,
+    `  build copy: ${workDirectory}`,
+    ...details,
+    'Fix: run `pnpm install --frozen-lockfile` in the build copy and review the reported error,',
+    `or delete ${workDirectory} to force a clean preparation on the next build.`,
+  ].join('\n'))
+}
+
+/** Run one child process, echoing its output and returning the exit facts. */
+function runCaptured(
+  command: string,
+  args: readonly string[],
+  options: { cwd: string; env?: NodeJS.ProcessEnv },
+): PluginCommandResult {
+  const result = spawnSync(command, [...args], {
+    cwd: options.cwd,
+    env: options.env ?? process.env,
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'pipe'],
+    shell: process.platform === 'win32' && command.toLowerCase().endsWith('.cmd'),
+  })
+  const stdout = result.stdout ?? ''
+  const stderr = result.stderr ?? ''
+  if (stdout !== '') process.stdout.write(stdout)
+  if (stderr !== '') process.stderr.write(stderr)
+  return {
+    status: result.status,
+    stdout,
+    stderr,
+    ...result.error === undefined ? {} : { error: String(result.error) },
+  }
+}
+
+/** Environment shared by plugin-local installs and builds. */
+function pluginBuildEnvironment(): NodeJS.ProcessEnv {
+  return {
+    ...process.env,
+    pnpm_config_verify_deps_before_run: 'false',
+    pnpm_config_trust_lockfile: 'true',
+  }
+}
+
+/**
+ * Install the isolated plugin's pinned dependencies.
+ *
+ * The local pnpm store is tried first so offline machines and CI caches need no
+ * network; a missing store entry retries with pnpm's normal network access.
+ * @param plugin - plugin being prepared.
+ * @param workDirectory - isolated copy that contains the lockfile.
+ * @param runner - command runner; tests inject a failing one.
+ */
+export async function ensurePluginDependencies(
+  plugin: PluginDefinition,
+  workDirectory: string,
+  runner: PluginCommandRunner = runCaptured,
 ): Promise<void> {
-  for (const entry of plugin.copy) {
-    const source = join(plugin.directory, entry)
-    if (!existsSync(source)) {
-      if (plugin.mode === 'copy') fail(`${plugin.name} is missing its runtime entry ${entry}`)
-      continue
+  const lockPath = join(workDirectory, 'pnpm-lock.yaml')
+  if (!existsSync(lockPath)) {
+    throw dependencyPreparationError(plugin, workDirectory, [{
+      command: 'pnpm install --frozen-lockfile',
+      status: null,
+      detail: `${lockPath} is missing; the isolated build copy must include the plugin lockfile`,
+    }])
+  }
+  const lockfile = await readFile(lockPath, 'utf8')
+  const workspacePath = join(workDirectory, 'pnpm-workspace.yaml')
+  const manifestPath = join(workDirectory, 'package.json')
+  const dependencyKey = createHash('sha256').update([
+    String(SCRIPT_VERSION),
+    lockfile,
+    existsSync(workspacePath) ? await readFile(workspacePath, 'utf8') : '',
+    existsSync(manifestPath) ? await readFile(manifestPath, 'utf8') : '',
+  ].join('\0')).digest('hex')
+  const markerPath = join(workDirectory, DEPENDENCY_MARKER_FILE)
+  if (existsSync(markerPath) && existsSync(join(workDirectory, 'node_modules'))) {
+    try {
+      const marker = await readJson<DependencyMarker>(markerPath)
+      if (marker.schema === 1 && marker.key === dependencyKey) {
+        log(`${plugin.name} plugin-local dependencies are current`)
+        return
+      }
+    } catch {
+      // A malformed marker is not authoritative; reinstall below.
     }
-    await cp(source, join(stagingDirectory, entry), {
-      recursive: true,
-      filter: path => !path.endsWith('.map'),
+  }
+  const pnpm = pnpmCommand()
+  const attempts: DependencyAttempt[] = []
+  for (const offline of [true, false]) {
+    if (!offline) warn(`offline dependency install for ${plugin.name} failed; retrying with network access`)
+    const args = pluginInstallArguments(lockfile, offline)
+    const commandLine = `${basename(pnpm.command)} ${[...pnpm.prefix, ...args].join(' ')}`
+    const result = runner(pnpm.command, [...pnpm.prefix, ...args], { cwd: workDirectory, env: pluginBuildEnvironment() })
+    if (result.status === 0 && existsSync(join(workDirectory, 'node_modules'))) {
+      await writeJson(markerPath, { schema: 1, key: dependencyKey })
+      log(`installed plugin-local dependencies for ${plugin.name}`)
+      return
+    }
+    const detail = result.error ?? result.stderr ?? (result.status === 0 ? 'pnpm install created no node_modules directory' : undefined)
+    attempts.push({
+      command: commandLine,
+      status: result.status,
+      ...detail === undefined ? {} : { detail },
     })
   }
+  throw dependencyPreparationError(plugin, workDirectory, attempts)
+}
+
+/** Whether an isolated work copy still matches the source key and has its outputs. */
+async function workIsCurrent(plugin: PluginDefinition, workDirectory: string, key: string): Promise<boolean> {
+  const markerPath = join(workDirectory, WORK_MARKER_FILE)
+  if (!existsSync(markerPath)) return false
+  try {
+    const marker = await readJson<WorkMarker>(markerPath)
+    if (marker.schema !== 1 || marker.key !== key) return false
+  } catch {
+    return false
+  }
+  if (plugin.installDependencies && !existsSync(join(workDirectory, 'node_modules'))) return false
+  return plugin.outputs.every(output => existsSync(join(workDirectory, output)))
+}
+
+/**
+ * Prepare and build one isolated plugin copy with the plugin's own build script.
+ * @param plugin - plugin definition whose sources are copied.
+ * @param key - source/toolchain key that decides whether the copy is current.
+ * @param force - rebuild even when the work marker matches.
+ * @returns the work directory holding the built package.
+ */
+export async function ensureIsolatedBuild(plugin: PluginDefinition, key: string, force = false): Promise<string> {
+  const workDirectory = join(WORK_ROOT, plugin.id)
+  if (!force && await workIsCurrent(plugin, workDirectory, key)) {
+    log(`${plugin.name} isolated build is current`)
+    return workDirectory
+  }
+  await rm(workDirectory, { recursive: true, force: true })
+  await mkdir(workDirectory, { recursive: true })
+  for (const entry of plugin.workCopy) {
+    const source = join(plugin.directory, entry)
+    if (!existsSync(source)) fail(`${plugin.name} cannot build from source: its ${entry} is missing`)
+    await cp(source, join(workDirectory, entry), { recursive: true })
+  }
+  if (plugin.installDependencies) await ensurePluginDependencies(plugin, workDirectory)
+  log(`building ${plugin.name} with its own build script in ${workDirectory}`)
+  const pnpm = pnpmCommand()
+  try {
+    run(pnpm.command, [...pnpm.prefix, 'run', 'build'], { cwd: workDirectory, env: pluginBuildEnvironment() })
+  } catch (error) {
+    fail(`${plugin.name} build failed in ${workDirectory}: ${error instanceof Error ? error.message : String(error)}. `
+      + `Review the build output above, then delete ${workDirectory} to force a clean rebuild.`)
+  }
+  for (const output of plugin.outputs) {
+    const path = join(workDirectory, output)
+    if (!existsSync(path) || statSync(path).size === 0) fail(`${plugin.name} build in ${workDirectory} did not produce ${output}`)
+  }
+  await writeJson(join(workDirectory, WORK_MARKER_FILE), {
+    schema: 1,
+    key,
+    builtAt: new Date().toISOString(),
+  } satisfies WorkMarker)
+  return workDirectory
 }
 
 /** Build one plugin into its staging directory and verify the expected artifacts. */
 async function buildPlugin(
-  plugin: (typeof PLUGINS)[number],
+  plugin: PluginDefinition,
   stagingDirectory: string,
   dependencies: Awaited<ReturnType<typeof ensureBuildDependencies>>,
+  key: string,
+  force: boolean,
 ): Promise<void> {
   await rm(stagingDirectory, { recursive: true, force: true })
   await mkdir(stagingDirectory, { recursive: true })
-  if (plugin.mode === 'build') {
-    const config = plugin.id === 'subscriptions'
+  if (plugin.builder === 'isolated') {
+    const workDirectory = await ensureIsolatedBuild(plugin, key, force)
+    await copyStagedEntries(plugin, workDirectory, stagingDirectory)
+  } else {
+    const config = plugin.builder === 'subscriptions'
       ? await subscriptionsConfig(stagingDirectory, dependencies.wireEntry, dependencies.undiciEntry)
       : await aetherConfig(stagingDirectory)
     log(`building ${plugin.name} from source`)
     run(process.execPath, [rootTsdown(), '--config', config], { cwd: REPOSITORY_ROOT })
-    if (plugin.id === 'subscriptions') buildSubscriptionsTransport(plugin.directory, stagingDirectory)
-  } else {
-    log(`staging prebuilt ${plugin.name}`)
+    if (plugin.builder === 'subscriptions') buildSubscriptionsTransport(plugin.directory, stagingDirectory)
+    await copyStagedEntries(plugin, plugin.directory, stagingDirectory)
   }
   await stagePackage(plugin, stagingDirectory, dependencies)
-  if (plugin.mode === 'copy') await stageCopiedFiles(plugin, stagingDirectory)
-  for (const output of pluginArtifacts(plugin)) {
-    const path = join(stagingDirectory, output)
-    if (!existsSync(path) || statSync(path).size === 0) fail(`${plugin.name} staging did not produce ${output}`)
-  }
+  assertStagedArtifacts(plugin, stagingDirectory)
 }
 
 /** Whether a previous staging still matches the current source and expected files. */
-async function stagingIsCurrent(
-  plugin: (typeof PLUGINS)[number],
+export async function stagingIsCurrent(
+  plugin: PluginDefinition,
   stagingDirectory: string,
   state: BuildState,
   key: string,
@@ -1001,7 +1323,7 @@ export async function main(options: BuildOptions): Promise<void> {
     if (current) {
       log(`${plugin.name} staging is current (${version})`)
     } else {
-      await buildPlugin(plugin, stagingDirectory, dependencies)
+      await buildPlugin(plugin, stagingDirectory, dependencies, key, options.forceRebuild)
       changed = true
       state.plugins[plugin.id] = { key, version, installedAt: new Date().toISOString() }
       await writeJson(STATE_FILE, state)

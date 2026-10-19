@@ -1,18 +1,28 @@
 import { describe, expect, it } from 'vitest'
 import { existsSync, lstatSync } from 'node:fs'
-import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises'
+import { cp, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises'
 import { homedir, tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import {
-  assertStagedManifest, buildSubscriptionsTransport, bunPlatformRuntime, localDependencyPath,
-  lockedDependencyVersion, lockedUndiciVersion, parseArguments, privateDependencySpecs, resolveHome,
-  stageBunRuntime, stagedManifest, subscriptionsRuntimeArtifacts, SUBSCRIPTIONS_TRANSPORT_MODULES,
-  type PluginManifest,
+  assertStagedArtifacts, assertStagedManifest, buildSubscriptionsTransport, bunPlatformRuntime,
+  copyStagedEntries, dependencyPreparationError, ensurePluginDependencies, lockfileAutoInstallPeers,
+  localDependencyPath, lockedDependencyVersion, lockedUndiciVersion, parseArguments, PLUGINS,
+  pluginInstallArguments, privateDependencySpecs, resolveHome, sourceHash, sourcePaths,
+  stageBunRuntime, stagedManifest, stagingIsCurrent, subscriptionsRuntimeArtifacts,
+  SUBSCRIPTIONS_TRANSPORT_MODULES, writeStagedManifest,
+  type BuildState, type PluginCommandRunner, type PluginDefinition, type PluginManifest,
 } from './fork-plugins-build.ts'
 
 const REPOSITORY_ROOT = dirname(dirname(fileURLToPath(import.meta.url)))
 const subscriptionsDirectory = join(REPOSITORY_ROOT, 'fork-plugins', 'dsh-plugin-subscriptions')
+
+/** Look up one staged plugin definition by id. */
+function plugin(id: PluginDefinition['id']): PluginDefinition {
+  const found = PLUGINS.find(candidate => candidate.id === id)
+  if (found === undefined) throw new Error(`missing plugin definition ${id}`)
+  return found
+}
 
 const subscriptionsSource = {
   name: 'dsh-plugin-subscriptions',
@@ -112,7 +122,7 @@ describe('fork plugin staging manifests', () => {
     expect(() => { assertStagedManifest(staged, 'aether-shell') }).not.toThrow()
   })
 
-  it('stages the two prebuilt plugins with their runtime files and context zod dependency', () => {
+  it('keeps the context zod dependency and the agent-teams file list', () => {
     const agentTeams = stagedManifest(agentTeamsSource, 'agent-teams')
     expect(agentTeams.dependencies).toBeUndefined()
     expect(agentTeams.files).toContain('lib')
@@ -139,6 +149,200 @@ describe('fork plugin staging manifests', () => {
     const wrongCohort = stagedManifest(aetherSource, 'aether-shell')
     wrongCohort.peerDependencies = { '@deepseek-ai/dsh-tools': '0.1.7' }
     expect(() => { assertStagedManifest(wrongCohort, 'aether-shell') }).toThrow(/0\.2\.1-rc\.2/)
+  })
+})
+
+describe('fork plugin build recipe', () => {
+  it('builds all four fork plugins from source', () => {
+    expect(PLUGINS.map(entry => entry.id)).toEqual(['subscriptions', 'aether-shell', 'agent-teams', 'context'])
+    for (const entry of PLUGINS) {
+      expect(entry.mode).toBe('build')
+      expect(entry.outputs.length).toBeGreaterThan(0)
+      expect(entry.stage.length).toBeGreaterThan(0)
+    }
+    expect(PLUGINS.filter(entry => entry.builder === 'isolated').map(entry => entry.id)).toEqual(['agent-teams', 'context'])
+  })
+
+  it('never treats a prebuilt lib directory as a build input', () => {
+    for (const entry of PLUGINS) {
+      expect(sourcePaths(entry)).not.toContain('lib')
+      expect(entry.workCopy).not.toContain('lib')
+      expect(entry.workCopy).not.toContain('node_modules')
+    }
+  })
+
+  it('changes the source hash for source edits but not for stale lib files', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-fork-plugin-hash-'))
+    try {
+      const directory = join(root, 'plugin')
+      await mkdir(join(directory, 'src'), { recursive: true })
+      await mkdir(join(directory, 'lib'), { recursive: true })
+      await writeFile(join(directory, 'package.json'), `${JSON.stringify(aetherSource, undefined, 2)}\n`)
+      await writeFile(join(directory, 'src', 'index.ts'), 'export const value = 1\n')
+      await writeFile(join(directory, 'lib', 'lifecycle.mjs'), 'stale prebuilt output\n')
+      const entry = { ...plugin('aether-shell'), directory }
+      const first = await sourceHash(entry)
+      await writeFile(join(directory, 'lib', 'lifecycle.mjs'), 'different stale prebuilt output\n')
+      expect(await sourceHash(entry)).toBe(first)
+      await writeFile(join(directory, 'src', 'index.ts'), 'export const value = 2\n')
+      expect(await sourceHash(entry)).not.toBe(first)
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('stages built files from the isolated work copy, never from the source lib', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-fork-plugin-isolated-'))
+    try {
+      const source = join(root, 'source')
+      const work = join(root, 'work')
+      const staging = join(root, 'staging')
+      await mkdir(join(source, 'lib'), { recursive: true })
+      await mkdir(join(work, 'lib'), { recursive: true })
+      await mkdir(staging, { recursive: true })
+      await writeFile(join(source, 'lib', 'index.js'), 'stale checkout output')
+      await writeFile(join(work, 'lib', 'index.js'), 'fresh isolated output')
+      const entry: PluginDefinition = {
+        ...plugin('agent-teams'),
+        directory: source,
+        stage: ['lib'],
+        outputs: ['lib/index.js'],
+      }
+      await copyStagedEntries(entry, work, staging)
+      expect(await readFile(join(staging, 'lib', 'index.js'), 'utf8')).toBe('fresh isolated output')
+      assertStagedArtifacts(entry, staging)
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('skips an unchanged staging and rebuilds when the source key changes', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-fork-plugin-staging-'))
+    try {
+      const directory = join(root, 'aether-shell')
+      const staging = join(root, 'staged')
+      await mkdir(join(directory, 'lib'), { recursive: true })
+      await mkdir(staging, { recursive: true })
+      await writeFile(join(directory, 'package.json'), `${JSON.stringify(aetherSource, undefined, 2)}\n`)
+      await writeFile(join(directory, 'lib', 'lifecycle.mjs'), 'stale\n')
+      await writeFile(join(staging, 'package.json'), `${JSON.stringify(stagedManifest(aetherSource, 'aether-shell'), undefined, 2)}\n`)
+      await writeFile(join(staging, 'cordis.patch.yml'), '- insert: []\n')
+      await mkdir(join(staging, 'lib'), { recursive: true })
+      await writeFile(join(staging, 'lib', 'lifecycle.mjs'), 'built\n')
+      const entry = { ...plugin('aether-shell'), directory }
+      const state: BuildState = {
+        schema: 1,
+        scriptVersion: 5,
+        plugins: { 'aether-shell': { key: 'unchanged', version: aetherSource.version, installedAt: '2026-10-19T00:00:00.000Z' } },
+      }
+      expect(await stagingIsCurrent(entry, staging, state, 'unchanged', false)).toBe(true)
+      expect(await stagingIsCurrent(entry, staging, state, 'changed', false)).toBe(false)
+      expect(await stagingIsCurrent(entry, staging, state, 'unchanged', true)).toBe(false)
+      await rm(join(staging, 'lib', 'lifecycle.mjs'))
+      expect(await stagingIsCurrent(entry, staging, state, 'unchanged', false)).toBe(false)
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('stages the declared manifest, assets, and outputs for every plugin', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-fork-plugin-stage-all-'))
+    try {
+      for (const entry of PLUGINS) {
+        const work = join(root, `${entry.id}-work`)
+        const staging = join(root, `${entry.id}-staging`)
+        await mkdir(work, { recursive: true })
+        await mkdir(staging, { recursive: true })
+        for (const stagedEntry of entry.stage) {
+          if (stagedEntry === 'lib') {
+            for (const output of entry.outputs) {
+              const path = join(work, output)
+              await mkdir(dirname(path), { recursive: true })
+              await writeFile(path, 'built output\n')
+            }
+            continue
+          }
+          const source = join(entry.directory, stagedEntry)
+          expect(existsSync(source), `${entry.id} is missing its staged ${stagedEntry}`).toBe(true)
+          await cp(source, join(work, stagedEntry), { recursive: true })
+        }
+        await copyStagedEntries(entry, work, staging)
+        await writeStagedManifest(entry, staging)
+        if (entry.builder !== 'isolated') {
+          // These builders emit their bundles straight into the staging root.
+          for (const output of entry.outputs) {
+            const path = join(staging, output)
+            await mkdir(dirname(path), { recursive: true })
+            await writeFile(path, 'built output\n')
+          }
+        }
+        expect(existsSync(join(staging, 'package.json')), `${entry.id} has no staged manifest`).toBe(true)
+        for (const stagedEntry of entry.stage) {
+          expect(existsSync(join(staging, stagedEntry)), `${entry.id} did not stage ${stagedEntry}`).toBe(true)
+        }
+        for (const output of entry.outputs) {
+          expect(existsSync(join(staging, output)), `${entry.id} is missing ${output}`).toBe(true)
+        }
+        if (entry.id !== 'subscriptions') assertStagedArtifacts(entry, staging)
+      }
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+})
+
+describe('fork plugin dependency preparation', () => {
+  it('reads the lockfile peer policy and selects offline or network installs', () => {
+    expect(lockfileAutoInstallPeers('settings:\n  autoInstallPeers: true\n')).toBe(true)
+    expect(lockfileAutoInstallPeers('settings:\n  autoInstallPeers: false\n')).toBe(false)
+    expect(lockfileAutoInstallPeers('lockfileVersion: 9\n')).toBe(true)
+    const lockfile = 'settings:\n  autoInstallPeers: false\n'
+    expect(pluginInstallArguments(lockfile, true)).toContain('--offline')
+    expect(pluginInstallArguments(lockfile, false)).toContain('--prefer-offline')
+    expect(pluginInstallArguments(lockfile, true)).toContain('--config.auto-install-peers=false')
+    expect(pluginInstallArguments(lockfile, true)).toContain('--frozen-lockfile')
+  })
+
+  it('fails with the plugin, work copy, commands, and a fix when preparation fails', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-fork-plugin-deps-'))
+    try {
+      const work = join(root, 'work')
+      await mkdir(work, { recursive: true })
+      await writeFile(join(work, 'package.json'), JSON.stringify({ name: 'dsh-context' }))
+      await writeFile(join(work, 'pnpm-lock.yaml'), 'settings:\n  autoInstallPeers: true\n')
+      const calls: string[] = []
+      const runner: PluginCommandRunner = (_command, args) => {
+        calls.push(args.join(' '))
+        return { status: 1, stderr: 'ERR_PNPM_NO_OFFLINE_META store is missing zod\n' }
+      }
+      const error = await ensurePluginDependencies(plugin('context'), work, runner).then(
+        () => undefined,
+        (failure: unknown) => failure as Error,
+      )
+      expect(error).toBeInstanceOf(Error)
+      const message = error?.message ?? ''
+      expect(message).toContain('failed to prepare plugin-local dependencies for dsh-context')
+      expect(message).toContain(`build copy: ${work}`)
+      expect(message).toContain('ERR_PNPM_NO_OFFLINE_META')
+      expect(message).toContain('Fix:')
+      expect(calls).toHaveLength(2)
+      expect(calls[0]).toContain('--offline')
+      expect(calls[1]).toContain('--prefer-offline')
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('formats an actionable dependency failure for an incomplete work copy', async () => {
+    const error = dependencyPreparationError(plugin('agent-teams'), join('C:', 'tmp', 'work', 'agent-teams'), [{
+      command: 'pnpm install --offline',
+      status: null,
+      detail: 'pnpm-lock.yaml is missing',
+    }])
+    expect(error.message).toContain('@nanmicoder/dsh-agent-teams')
+    expect(error.message).toContain('did not start')
+    expect(error.message).toContain('pnpm-lock.yaml is missing')
+    expect(error.message).toContain('Fix:')
   })
 })
 
