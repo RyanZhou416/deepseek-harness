@@ -163,10 +163,6 @@ describe('dsh-tool-session-message', () => {
     expect(schema.description).toContain('use send_message for a direct continuable parent or child')
     expect(schema.description).toContain('AgentTeams messaging for teammates')
     expect(schema.description).toContain('never guess or enumerate')
-    expect(schema.description).toContain('Never use it for acknowledgements')
-    expect(schema.description).toContain('does not authorize a reply')
-    expect(schema.description).toContain('wakes an idle target')
-    expect(schema.description).toContain('ordinary next-turn user queue')
     const sessionIdParameter = properties.session_id as { description?: unknown }
     expect(sessionIdParameter.description).toContain('Do not use a subagent or teammate id here.')
     expect(sessionIdParameter.description).toContain('session_create result')
@@ -221,7 +217,7 @@ describe('dsh-tool-session-message', () => {
     })
     const initialFrame = message.content[0]
     if (initialFrame?.type !== 'text') throw new Error('initial task frame is not text')
-    expect(initialFrame.text).toContain('initial task')
+    expect(initialFrame.text).toBe(`${tool.SESSION_MESSAGE_GUIDANCE} (${JSON.stringify(sender.id)}).`)
     expect(message.content[1]).toEqual({ type: 'text', text: 'Investigate the new work independently.' })
     expect(target.session.header.parentSession).toBeUndefined()
     expect(target.session.header.origin).toBeUndefined()
@@ -486,7 +482,7 @@ describe('dsh-tool-session-message', () => {
     expect(delivered.content).toEqual([
       {
         type: 'text',
-        text: `Session ${JSON.stringify(sender.id)} sent a message. ${tool.SESSION_MESSAGE_GUIDANCE}`,
+        text: `${tool.SESSION_MESSAGE_GUIDANCE} (${JSON.stringify(sender.id)}).`,
       },
       { type: 'text', text: 'New evidence for your current task.' },
     ])

@@ -535,9 +535,7 @@ const TOOL_PACKAGES: ToolPackage[] = [
       + 'values. It also exposes title-guided root-Session discovery, unrestricted exact-id context injection, read-only '
       + 'status inspection, and exact-id workspace actions (`session_workspace`: archive, pin, unpin, rename). Archive requires '
       + 'model-confirmed user authorization at the prompt level; no runtime grant token is checked. Sender attribution '
-      + 'comes from the exact calling Agent; '
-      + 'prompt guidance, rather than a runtime target or frequency policy, preserves specialized messaging and '
-      + 'discourages loops and polling.',
+      + 'comes from the exact calling Agent; the receiving Session decides whether and how to respond.',
   },
   {
     pkg: '@deepseek-ai/dsh-tool-session-query',

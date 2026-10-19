@@ -9,8 +9,8 @@
   en: 40416f304efeaee8
   zh: af9c890f4f7103a4
 /deepseek-ai-dsh-tool-session-message/summary:
-  en: a315f206826ee379
-  zh: 8ae7e3ca6ac5eef9
+  en: e67f32dd97eab588
+  zh: 646bcfc901e05ebc
 /deepseek-ai-dsh-tool-session-message/table-of-contents:
   en: d152484eb41ac6b4
   zh: 09388d293f9be9cb
@@ -45,14 +45,14 @@
   en: d2c1de77bf5512be
   zh: 5d460fef9975e489
 /deepseek-ai-dsh-tool-session-message/understand-the-implementation/design-concept:
-  en: f01b0742fbb36804
-  zh: 3c409a9417ba9dbd
+  en: d2b404d6e73ada9d
+  zh: 87ac017083211b30
 /deepseek-ai-dsh-tool-session-message/understand-the-implementation/source-and-trust:
-  en: 3aae9df1640cda66
-  zh: f36d6c71cbd7ebd3
+  en: 74419bbfaa4ff011
+  zh: e50607f9792a1307
 /deepseek-ai-dsh-tool-session-message/understand-the-implementation/source-map:
-  en: 8f3acf4a7f46e4e8
-  zh: 56a598d2ffea9e5a
+  en: ddf0d5fdf2e8cb7e
+  zh: 1b79fdce514cfd83
 /deepseek-ai-dsh-tool-session-message/further-exploration:
   en: b8214361abfdbe2a
   zh: 3fe90e05a6861320
@@ -63,8 +63,8 @@
   en: e4c7376d4f29dbd5
   zh: 6b7a9eaf69c9ea53
 /deepseek-ai-dsh-tool-session-message/model-experience/tool-schema/what-the-model-sees:
-  en: 9588909ee93e8ce1
-  zh: f58d625bd9afb672
+  en: 14d84934fb1cbd21
+  zh: f553d4595419bf56
 /deepseek-ai-dsh-tool-session-message/model-experience/tool-schema/token-effect:
   en: 5c43dbbde28c1f67
   zh: d799d05bfd4d98cb
@@ -113,9 +113,9 @@
 /deepseek-ai-dsh-tool-session-message/model-experience/received-peer-message/what-the-model-sees:
   en: a2e0353f9cebcea9
   zh: dc8aace166c06a8d
-/deepseek-ai-dsh-tool-session-message/model-experience/received-peer-message/what-the-model-sees/peer-framing:
-  en: 1bf5891b70f63336
-  zh: 55bb1233e2a54bac
+/deepseek-ai-dsh-tool-session-message/model-experience/received-peer-message/what-the-model-sees/source-framing:
+  en: e9cff51d758fb695
+  zh: 1f122ba9f6fd628a
 /deepseek-ai-dsh-tool-session-message/model-experience/received-peer-message/token-effect:
   en: edb4bb46191f9925
   zh: afb78971bac6fd33
@@ -147,8 +147,8 @@
   en: bdc61e68c8a2ed55
   zh: 51b69648c404b1f3
 /deepseek-ai-dsh-tool-session-message/known-limitations-and-deferred-work:
-  en: acc522bc25aeb000
-  zh: 3310b532fa441195
+  en: b1806a9b59947c5d
+  zh: 69924abf86b0139b
 /deepseek-ai-dsh-tool-session-message/known-limitations-and-deferred-work/dev-note:
   en: e67f633dc6fe7773
   zh: 3bb0c20c93f16f98
