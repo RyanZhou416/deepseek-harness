@@ -28,13 +28,11 @@ it('scopes Session-addressed tools to full Web Agent presets', async () => {
     const agent = scaffold.ctx.agents.get(id)
     if (agent === undefined) throw new Error(`${preset} Agent was not created`)
     expect(scaffold.ctx.tools.schemas(agent).map(schema => schema.name)).toEqual(expect.arrayContaining([
-      'session_archive',
       'session_create',
       'session_find',
       'session_message_status',
-      'session_pin',
       'session_send_message',
-      'session_unpin',
+      'session_workspace',
     ]))
   }
 
@@ -47,13 +45,11 @@ it('scopes Session-addressed tools to full Web Agent presets', async () => {
   const minimal = scaffold.ctx.agents.get(minimalId)
   if (minimal === undefined) throw new Error('minimal Agent was not created')
   expect(scaffold.ctx.tools.schemas(minimal).map(schema => schema.name)).not.toEqual(expect.arrayContaining([
-    'session_archive',
     'session_create',
     'session_find',
     'session_message_status',
-    'session_pin',
     'session_send_message',
-    'session_unpin',
+    'session_workspace',
   ]))
 })
 

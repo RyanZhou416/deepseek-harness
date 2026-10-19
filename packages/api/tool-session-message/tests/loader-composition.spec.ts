@@ -111,13 +111,11 @@ describe('tool-session-message through a real Loader composition', () => {
     await context.loader.await()
 
     expect(context.tools.schemas().map(schema => schema.name).toSorted()).toEqual([
-      'session_archive',
       'session_create',
       'session_find',
       'session_message_status',
-      'session_pin',
       'session_send_message',
-      'session_unpin',
+      'session_workspace',
     ])
 
     const senderSession = context.sessions.create(SessionId('loader-sender'), { meta: { cwd: '/sender' } })

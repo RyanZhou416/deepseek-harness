@@ -68,21 +68,14 @@ const CREATE_DESCRIPTION =
   + 'title, and pinned state. It does not return a completion result or report automatically to you; give the user its id '
   + 'so they can inspect it.'
 
-const ARCHIVE_DESCRIPTION =
-  'Archive one exact Session. Archiving is a user-authorized operation: before calling, confirm from the current '
-  + 'conversation that the user explicitly authorized archiving this Session. The authorization may be for one archive, '
-  + 'for multiple archives in this conversation, or long-term, exactly as the user stated; remember which one the user '
-  + 'gave. This tool does not verify a grant, does not prompt again, and must not infer authorization from silence, from '
-  + 'an unrelated prior approval, or from the Session being idle. If the user did not authorize it, ask the user first. '
-  + 'Archiving a Session with running work fails; do not stop that work without separate user authorization.'
-
-const PIN_DESCRIPTION =
-  'Pin one exact Session ahead of unpinned Sessions in the user\'s Workspace. Use the exact id the user supplied or that '
-  + 'session_find resolved; do not guess. The result reports whether the Session is actually pinned.'
-
-const UNPIN_DESCRIPTION =
-  'Remove one exact Session from the user\'s pinned Sessions. This is idempotent: unpinning an already-unpinned Session '
-  + 'succeeds. The result reports whether the Session remains pinned.'
+const WORKSPACE_DESCRIPTION =
+  'Archive, pin, or unpin one exact Session. Archive is a user-authorized operation: before choosing `archive`, confirm '
+  + 'from the current conversation that the user explicitly authorized archiving this Session. The authorization may be '
+  + 'for one archive, for multiple archives in this conversation, or long-term, exactly as the user stated; remember which '
+  + 'one the user gave. The tool does not verify a grant, does not prompt again, and must not infer authorization from '
+  + 'silence, an unrelated prior approval, or the Session being idle. If the user did not authorize it, ask the user '
+  + 'first. Archiving a Session with running work fails; do not stop that work without separate user authorization. '
+  + '`pin` and `unpin` are idempotent and report the actual pinned state.'
 
 const SESSION_CREATE_TASK_CONTEXT =
   'created this independent Session and supplied its initial task. This is agent-authored work, not a direct human '
@@ -353,13 +346,19 @@ export function apply(ctx: Context): void {
   }))
 
   ctx.tools.register(defineTool({
-    name: 'session_archive',
-    description: ARCHIVE_DESCRIPTION,
+    name: 'session_workspace',
+    description: WORKSPACE_DESCRIPTION,
     parameters: {
+      action: {
+        type: 'string',
+        enum: ['archive', 'pin', 'unpin'],
+        required: true,
+        description: 'Workspace action to apply to the exact Session.',
+      },
       session_id: {
         type: 'string',
         required: true,
-        description: 'Exact Session id the user authorized the agent to archive.',
+        description: 'Exact Session id supplied by the user or resolved by session_find.',
       },
     },
     output: {
@@ -368,100 +367,34 @@ export function apply(ctx: Context): void {
         additionalProperties: false,
         properties: {
           sessionId: { type: 'string', required: true },
-          archived: { type: 'boolean', required: true },
+          action: { type: 'string', required: true },
+          archived: { type: 'boolean' },
+          pinned: { type: 'boolean' },
         },
       },
       render: (_args, value) => [{
         type: 'text',
-        text: `Session ${value.sessionId} archived: ${String(value.archived)}.`,
+        text: value.action === 'archive'
+          ? `Session ${value.sessionId} archived: ${String(value.archived)}.`
+          : `Session ${value.sessionId} pinned: ${String(value.pinned)}.`,
       }],
     },
     async execute(args, exec) {
       if (exec.agent === undefined || ctx.agents.get(exec.agent.id) !== exec.agent) {
-        throw new Error('session_archive requires the current live calling Agent')
-      }
-      const sessionIdText = args.session_id.trim()
-      if (sessionIdText.length === 0) throw new TypeError('session_id must not be empty')
-      const sessionId = SessionId(sessionIdText)
-      exec.signal.throwIfAborted()
-      await requireWorkspaceRegistry(ctx).archiveSession(sessionId)
-      return { sessionId, archived: true }
-    },
-  }))
-
-  ctx.tools.register(defineTool({
-    name: 'session_pin',
-    description: PIN_DESCRIPTION,
-    parameters: {
-      session_id: {
-        type: 'string',
-        required: true,
-        description: 'Exact Session id to pin.',
-      },
-    },
-    output: {
-      schema: {
-        type: 'object',
-        additionalProperties: false,
-        properties: {
-          sessionId: { type: 'string', required: true },
-          pinned: { type: 'boolean', required: true },
-        },
-      },
-      render: (_args, value) => [{
-        type: 'text',
-        text: `Session ${value.sessionId} pinned: ${String(value.pinned)}.`,
-      }],
-    },
-    async execute(args, exec) {
-      if (exec.agent === undefined || ctx.agents.get(exec.agent.id) !== exec.agent) {
-        throw new Error('session_pin requires the current live calling Agent')
+        throw new Error('session_workspace requires the current live calling Agent')
       }
       const sessionIdText = args.session_id.trim()
       if (sessionIdText.length === 0) throw new TypeError('session_id must not be empty')
       const sessionId = SessionId(sessionIdText)
       const registry = requireWorkspaceRegistry(ctx)
       exec.signal.throwIfAborted()
-      await registry.pinSession(sessionId)
-      return { sessionId, pinned: isPinned(registry, sessionId) }
-    },
-  }))
-
-  ctx.tools.register(defineTool({
-    name: 'session_unpin',
-    description: UNPIN_DESCRIPTION,
-    parameters: {
-      session_id: {
-        type: 'string',
-        required: true,
-        description: 'Exact Session id to unpin.',
-      },
-    },
-    output: {
-      schema: {
-        type: 'object',
-        additionalProperties: false,
-        properties: {
-          sessionId: { type: 'string', required: true },
-          pinned: { type: 'boolean', required: true },
-        },
-      },
-      render: (_args, value) => [{
-        type: 'text',
-        text: `Session ${value.sessionId} pinned: ${String(value.pinned)}.`,
-      }],
-    },
-    async execute(args, exec) {
-      if (exec.agent === undefined || ctx.agents.get(exec.agent.id) !== exec.agent) {
-        throw new Error('session_unpin requires the current live calling Agent')
+      if (args.action === 'archive') {
+        await registry.archiveSession(sessionId)
+        return { sessionId, action: args.action, archived: true }
       }
-      const sessionIdText = args.session_id.trim()
-      if (sessionIdText.length === 0) throw new TypeError('session_id must not be empty')
-      const sessionId = SessionId(sessionIdText)
-      const registry = requireWorkspaceRegistry(ctx)
-      exec.signal.throwIfAborted()
-      await registry.unpinSession(sessionId)
-      return { sessionId, pinned: isPinned(registry, sessionId) }
+      if (args.action === 'pin') await registry.pinSession(sessionId)
+      else await registry.unpinSession(sessionId)
+      return { sessionId, action: args.action, pinned: isPinned(registry, sessionId) }
     },
   }))
 

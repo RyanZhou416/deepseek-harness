@@ -29,7 +29,7 @@ kind: "package-reference"
 
 ### 何时选择
 
-用户明确要求启动单独的对话处理任务时，选择 `session_create`。它可选接受标题、请求的模型与思考强度、置顶请求；用户的全局模型选择是权威值，结果会返回实际的提供方、模型、思考强度、标题与置顶状态。只有在用户已在对话中授权归档后，才使用 `session_archive`；`session_pin` / `session_unpin` 用于按确切 id 调整 Workspace 排序。调用方知道确切目标 id，或用户点名了可由 `session_find` 解析的独立 Session 时，选择 `session_send_message` 进行显式跨会话交接。直接可继续 parent 与 child 使用相邻 `send_message`，Team 协调使用 AgentTeams 消息；这些操作拥有各自关系专属的生命周期。如果当前 Agent 只需要另一会话的只读快照且不应运行源 Session，请使用 Session reference（会话引用）。
+用户明确要求启动单独的对话处理任务时，选择 `session_create`。它可选接受标题、请求的模型与思考强度、置顶请求；用户的全局模型选择是权威值，结果会返回实际的提供方、模型、思考强度、标题与置顶状态。只有在用户已在对话中授权归档后，才使用 `session_workspace` 的 `archive` 动作；其 `pin` 与 `unpin` 动作用于按确切 id 调整 Workspace 排序。调用方知道确切目标 id，或用户点名了可由 `session_find` 解析的独立 Session 时，选择 `session_send_message` 进行显式跨会话交接。直接可继续 parent 与 child 使用相邻 `send_message`，Team 协调使用 AgentTeams 消息；这些操作拥有各自关系专属的生命周期。如果当前 Agent 只需要另一会话的只读快照且不应运行源 Session，请使用 Session reference（会话引用）。
 
 ### 最小配置
 
@@ -49,9 +49,7 @@ Web bundle 提供 Agent 注册表、Session Controller、Session-reference resol
 
 ### 归档与置顶
 
-`session_archive` 归档一个确切 Session。其描述要求模型先确认用户在当前对话中明确授权了这次归档；授权可以覆盖一次归档、当前对话中的多次归档，或用户明确说明的长期授权。工具不会验证授权令牌，也不会再次弹出审批，因此模型必须记住该授权，不能从沉默或无关的既有批准推断授权。仍有工作运行的 Session 会被 Workspace 注册表拒绝；停止该工作需要用户另行授权。
-
-`session_pin` 与 `session_unpin` 接受一个确切 Session id，并返回实际置顶状态。它们通过 Workspace 注册表操作，不猜测目标或标题。
+`session_workspace` 接受 `action: 'archive' | 'pin' | 'unpin'` 与一个确切 Session id。执行 `archive` 时，其描述要求模型先确认用户在当前对话中明确授权了这次归档；授权可以覆盖一次归档、当前对话中的多次归档，或用户明确说明的长期授权。工具不会验证授权令牌，也不会再次弹出审批，因此模型必须记住该授权，不能从沉默或无关的既有批准推断授权。仍有工作运行的 Session 会被 Workspace 注册表拒绝；停止该工作需要用户另行授权。`pin` 与 `unpin` 返回实际置顶状态，且是幂等的。
 
 ### 查找独立 Session
 
@@ -146,7 +144,7 @@ Web bundle 提供 Agent 注册表、Session Controller、Session-reference resol
 
 #### 模型看到什么
 
-模型先在对话中确认用户授权后，`session_archive` 才归档一个确切 id。schema 只携带 `session_id`：授权范围是模型必须记住的提示词层义务，不是 runtime 令牌。仍有工作运行的 Session 会被 Workspace 注册表拒绝。`session_pin` 与 `session_unpin` 接受一个确切 id，并返回实际置顶状态；两者在 Workspace 层都是幂等的。
+`session_workspace` 对一个确切 id 执行 `action: 'archive' | 'pin' | 'unpin'`。模型先在对话中确认用户授权后，`archive` 才执行归档；授权范围是模型必须记住的提示词层义务，不是 runtime 令牌。仍有工作运行的 Session 会被 Workspace 注册表拒绝。`pin` 与 `unpin` 返回实际置顶状态，并在 Workspace 层幂等。
 
 #### Token 影响
 

@@ -92,7 +92,7 @@ When you launch `dsh --profile web` over SSH, the URL line still prints but the 
 
 Each browser session selects a shipped preset (`standard` by default). The Agent presets settings page changes the default and edits preset child plugins; saves persist in `$DSH_HOME/profiles/web/cordis.patch.yml`. Creator's plugin-management tool is enabled only when the Host provides an editable profile.
 
-This fork's `standard`, `ptc`, and `cordis` presets include `session_create`, `session_find`, `session_send_message`, `session_message_status`, `session_archive`, `session_pin`, and `session_unpin` for separately owned Sessions; `minimal` does not. Creation starts a separate task immediately and accepts optional title/model/effort/pin requests, with the global model selection authoritative. Archive requires the model to confirm user authorization in the conversation; no runtime grant token is checked. Sender attribution comes from the live Agent, and subagent/teammate coordination keeps its own tools.
+This fork's `standard`, `ptc`, and `cordis` presets include `session_create`, `session_find`, `session_send_message`, `session_message_status`, and `session_workspace` for separately owned Sessions; `minimal` does not. Creation starts a separate task immediately and accepts optional title/model/effort/pin requests, with the global model selection authoritative. Archive requires the model to confirm user authorization in the conversation; no runtime grant token is checked. Sender attribution comes from the live Agent, and subagent/teammate coordination keeps its own tools.
 
 -----
 

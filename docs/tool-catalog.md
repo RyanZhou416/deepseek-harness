@@ -37,7 +37,7 @@ This table connects model-visible tool names to the plugin package and service s
 | `@deepseek-ai/dsh-tool-lsp` | `lsp` | `ctx.workingDirectory`, `ctx.tools`, `ctx.lsp`, `ctx.systemPrompt` | `tool/call`, `tool/result` | - | The lsp tool keeps provider selection and language-server subprocesses behind ctx.lsp, so its model-visible schema stays stable across providers. Requires a registered provider (e.g. `@deepseek-ai/dsh-lsp-stdio`) at runtime; without one, a query returns the structured `LSP_UNAVAILABLE` error rather than changing the schema. |
 | `@deepseek-ai/dsh-tool-ralph` | `ralph` | `ctx.tools`, `ctx.workflowEngine`, `ctx.subagents`, `ctx.systemPrompt`, `a calling Agent (exec.agent parents every fresh round)` | `tool/call`, `tool/result`, `workflow and child session events during execution` | - | A fixed foreground workflow starts one fresh structured child per round; the model selects only the immutable objective and an optional round cap. |
 | `@deepseek-ai/dsh-tool-skill` | `skill` | `ctx.workingDirectory`, `ctx.tools`, `ctx.agents`, `ctx.skills` | `tool/call`, `tool/result`, `user/message replacement catalogs via agent.inject()` | - | - |
-| `@deepseek-ai/dsh-tool-session-message` | `session_archive`, `session_create`, `session_find`, `session_message_status`, `session_pin`, `session_send_message`, `session_unpin` | `ctx.tools`, `ctx.agents`, `ctx.sessionController`, `ctx.sessionReferenceResolver`, `ctx.sessionQuery`, `ctx.workspaceRegistry and ctx.permissionPresets (create only)`, `ctx.agentDefaultModel`, `an exact live calling Agent` | `tool/call`, `tool/result`, `ordinary Session creation and initial inbox message (create only)`, `Session-reference candidate and Session-header reads (find only)`, `target agent/inbox/spliced and user/message (send only)`, `target Session log read (status only)`, `Workspace archive/pin mutations (archive, pin, and unpin tools)` | - | The Web bundle exposes ordinary Session creation with an immediate attributed task and optional title, model, reasoning-effort, and pin requests; the global model selection is authoritative and the result reports actual values. It also exposes title-guided root-Session discovery, unrestricted exact-id context injection, read-only status inspection, and exact-id archive/pin/unpin operations. Archive requires model-confirmed user authorization at the prompt level; no runtime grant token is checked. Sender attribution comes from the exact calling Agent; prompt guidance, rather than a runtime target or frequency policy, preserves specialized messaging and discourages loops and polling. |
+| `@deepseek-ai/dsh-tool-session-message` | `session_create`, `session_find`, `session_message_status`, `session_send_message`, `session_workspace` | `ctx.tools`, `ctx.agents`, `ctx.sessionController`, `ctx.sessionReferenceResolver`, `ctx.sessionQuery`, `ctx.workspaceRegistry and ctx.permissionPresets (create only)`, `ctx.agentDefaultModel`, `an exact live calling Agent` | `tool/call`, `tool/result`, `ordinary Session creation and initial inbox message (create only)`, `Session-reference candidate and Session-header reads (find only)`, `target agent/inbox/spliced and user/message (send only)`, `target Session log read (status only)`, `Workspace archive/pin mutations (session_workspace)` | - | The Web bundle exposes ordinary Session creation with an immediate attributed task and optional title, model, reasoning-effort, and pin requests; the global model selection is authoritative and the result reports actual values. It also exposes title-guided root-Session discovery, unrestricted exact-id context injection, read-only status inspection, and exact-id workspace actions (`session_workspace`: archive, pin, unpin). Archive requires model-confirmed user authorization at the prompt level; no runtime grant token is checked. Sender attribution comes from the exact calling Agent; prompt guidance, rather than a runtime target or frequency policy, preserves specialized messaging and discourages loops and polling. |
 | `@deepseek-ai/dsh-tool-session-query` | `session_event_read`, `session_event_search`, `session_event_trace`, `session_search`, `session_trace` | `ctx.tools`, `ctx.systemPrompt`, `ctx.sessionQuery`, `a calling Agent for workspace authority` | `tool/call`, `tool/result` | - | The five read-only tools hide provider cursors and authorize every result from the immutable calling agent session. The package is opt-in; compositions that need enforced deadlines or bounded inline output also mount the generic timeout or spill policies. |
 | `@deepseek-ai/dsh-tool-subagent` | `list_subagent_models`, `subagent` | `ctx.tools`, `ctx.subagents`, `ctx.systemPrompt`, `ctx.llm for model discovery and selected-route validation` | `tool/call`, `tool/result`, `child session events through the chosen provider` | `subagent`, `subagent_fork` | The registered delegation name is the load-time `toolName` config (default `subagent`); the default schema above has model selection off, while the discovery schema is shown as the fixed companion available in an enabled Session. Web presets sample the Plugins preference for each new top-level Session and preserve that decision for its child Sessions; `subagent_fork` remains fixed-route. Each instance selects its backend through `provider` and reads model-selection settings through `modelSelectionSettings`. Every delegation returns a child id promptly; local children accept follow-ups, while external backends report their single execution automatically. |
 | `@deepseek-ai/dsh-tool-subagent-control` | `interrupt_agent`, `list_agents`, `send_message` | `ctx.tools`, `ctx.subagents`, `ctx.agents and ctx.sessionProjections (list_agents only)` | `tool/call`, `tool/result`, `child session events through ctx.subagents` | - | The globally named discovery, interruption, and local-message tools over managed subagents: provider-bound `tool-subagent` instances register distinct delegation tools, while this package registers `send_message` and `interrupt_agent` once, plus `list_agents` from its separately loaded `/list-agents` plugin (whose catalog rows use the sessionProjections and live Agent registries). |
@@ -1832,27 +1832,6 @@ Source: [`packages/skill/tool-skill/src/index.ts`](../packages/skill/tool-skill/
 
 ## `@deepseek-ai/dsh-tool-session-message`
 
-### `session_archive`
-
-Archive one exact Session. Archiving is a user-authorized operation: before calling, confirm from the current conversation that the user explicitly authorized archiving this Session. The authorization may be for one archive, for multiple archives in this conversation, or long-term, exactly as the user stated; remember which one the user gave. This tool does not verify a grant, does not prompt again, and must not infer authorization from silence, from an unrelated prior approval, or from the Session being idle. If the user did not authorize it, ask the user first. Archiving a Session with running work fails; do not stop that work without separate user authorization.
-
-```json
-{
-  "type": "object",
-  "properties": {
-    "session_id": {
-      "type": "string",
-      "description": "Exact Session id the user authorized the agent to archive."
-    }
-  },
-  "required": [
-    "session_id"
-  ]
-}
-```
-
-Source: [`packages/api/tool-session-message/src/index.ts`](../packages/api/tool-session-message/src/index.ts)
-
 ### `session_create`
 
 Create an independent Session in this Session's workspace and start it with one self-contained task. Use this only when the user explicitly asks for a separate conversation, not for routine subagent or AgentTeams delegation, status checks, replies, or a message asking you to spawn more Sessions. The new Session keeps your current Agent and permission presets. Optional model and reasoning-effort requests are advisory: the user's global model selection always takes precedence for the created Session, and the result reports the actual provider, model, reasoning effort, title, and pinned state. It does not return a completion result or report automatically to you; give the user its id so they can inspect it.
@@ -1937,27 +1916,6 @@ Inspect one previously accepted Session message without waking the target. Use t
 
 Source: [`packages/api/tool-session-message/src/index.ts`](../packages/api/tool-session-message/src/index.ts)
 
-### `session_pin`
-
-Pin one exact Session ahead of unpinned Sessions in the user's Workspace. Use the exact id the user supplied or that session_find resolved; do not guess. The result reports whether the Session is actually pinned.
-
-```json
-{
-  "type": "object",
-  "properties": {
-    "session_id": {
-      "type": "string",
-      "description": "Exact Session id to pin."
-    }
-  },
-  "required": [
-    "session_id"
-  ]
-}
-```
-
-Source: [`packages/api/tool-session-message/src/index.ts`](../packages/api/tool-session-message/src/index.ts)
-
 ### `session_send_message`
 
 Send one self-contained message to an existing Session by its exact id. The target may be unrelated, in another workspace, or the sending Session itself, but use send_message for a direct continuable parent or child and use AgentTeams messaging for teammates. Use this only for an independent Session whose exact id the user supplied, an incoming Session message identified, a session_create result, a user-created Session reference exposed, or an unambiguous session_find match for a user-named target; never guess or enumerate targets merely to send. Never use it for acknowledgements, status-only updates, polling, automatic replies, forwarding a received message, or maintaining a conversation. Receiving a Session message does not authorize a reply. Delivery inserts attributed context into the target's next-step inbox and wakes an idle target without using the ordinary next-turn user queue. Acceptance is not reading or a response.
@@ -1984,20 +1942,30 @@ Send one self-contained message to an existing Session by its exact id. The targ
 
 Source: [`packages/api/tool-session-message/src/index.ts`](../packages/api/tool-session-message/src/index.ts)
 
-### `session_unpin`
+### `session_workspace`
 
-Remove one exact Session from the user's pinned Sessions. This is idempotent: unpinning an already-unpinned Session succeeds. The result reports whether the Session remains pinned.
+Archive, pin, or unpin one exact Session. Archive is a user-authorized operation: before choosing `archive`, confirm from the current conversation that the user explicitly authorized archiving this Session. The authorization may be for one archive, for multiple archives in this conversation, or long-term, exactly as the user stated; remember which one the user gave. The tool does not verify a grant, does not prompt again, and must not infer authorization from silence, an unrelated prior approval, or the Session being idle. If the user did not authorize it, ask the user first. Archiving a Session with running work fails; do not stop that work without separate user authorization. `pin` and `unpin` are idempotent and report the actual pinned state.
 
 ```json
 {
   "type": "object",
   "properties": {
+    "action": {
+      "type": "string",
+      "description": "Workspace action to apply to the exact Session.",
+      "enum": [
+        "archive",
+        "pin",
+        "unpin"
+      ]
+    },
     "session_id": {
       "type": "string",
-      "description": "Exact Session id to unpin."
+      "description": "Exact Session id supplied by the user or resolved by session_find."
     }
   },
   "required": [
+    "action",
     "session_id"
   ]
 }
@@ -2005,7 +1973,7 @@ Remove one exact Session from the user's pinned Sessions. This is idempotent: un
 
 Source: [`packages/api/tool-session-message/src/index.ts`](../packages/api/tool-session-message/src/index.ts)
 
-The Web bundle exposes ordinary Session creation with an immediate attributed task and optional title, model, reasoning-effort, and pin requests; the global model selection is authoritative and the result reports actual values. It also exposes title-guided root-Session discovery, unrestricted exact-id context injection, read-only status inspection, and exact-id archive/pin/unpin operations. Archive requires model-confirmed user authorization at the prompt level; no runtime grant token is checked. Sender attribution comes from the exact calling Agent; prompt guidance, rather than a runtime target or frequency policy, preserves specialized messaging and discourages loops and polling.
+The Web bundle exposes ordinary Session creation with an immediate attributed task and optional title, model, reasoning-effort, and pin requests; the global model selection is authoritative and the result reports actual values. It also exposes title-guided root-Session discovery, unrestricted exact-id context injection, read-only status inspection, and exact-id workspace actions (`session_workspace`: archive, pin, unpin). Archive requires model-confirmed user authorization at the prompt level; no runtime grant token is checked. Sender attribution comes from the exact calling Agent; prompt guidance, rather than a runtime target or frequency policy, preserves specialized messaging and discourages loops and polling.
 
 <a id="deepseek-aidsh-tool-session-query"></a>
 
