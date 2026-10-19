@@ -35,7 +35,7 @@ Choose this adapter when the same composition serves several providers, when a r
 
 ### Configure provider routes
 
-Each profile may set a `retryPolicy`; omission uses normal mode with five retries. `apiKeyEnv` is a credential reference resolved per request through the harness credential seam, so no secret enters the configuration file; a reference that resolves to nothing fails the request with `MISSING_CREDENTIAL`. Omitting it leaves the route configured-but-keyless, which for an installed catalog route defers to pi-ai's provider-native ambient discovery.
+Each profile may set a `retryPolicy`; omission uses normal mode with five retries over the harness transient codes plus the pool codes this adapter classifies. A configured `retryableCodes` list is used exactly as written. `apiKeyEnv` is a credential reference resolved per request through the harness credential seam, so no secret enters the configuration file; a reference that resolves to nothing fails the request with `MISSING_CREDENTIAL`. Omitting it leaves the route configured-but-keyless, which for an installed catalog route defers to pi-ai's provider-native ambient discovery.
 
 ```yaml
 - name: '@deepseek-ai/dsh-llm-pi-ai'
@@ -86,7 +86,7 @@ Each profile may set a `retryPolicy`; omission uses normal mode with five retrie
 | `requestImagePixelBudget` | `4,194,304` | Total-pixel budget for each deterministic request image |
 | `requestImageMaxBytes` | `1 MiB` | Encoded-byte target for each request image before base64 expansion |
 | `maxRequestImageBytes` | `20 MiB` | Aggregate base64 image-payload bound; a request whose retained images exceed it fails with `IMAGE_OFFLOAD_REQUIRED` |
-| `retryPolicy` | normal, 5 retries | Provider-owned retry policy executed by `dsh-llm-retry` |
+| `retryPolicy` | normal, 5 retries | Provider-owned retry policy executed by `dsh-llm-retry`; the default set adds the pool codes this adapter classifies |
 
 The generated [configuration catalog](../../../docs/config-catalog.md#deepseek-aidsh-llm-pi-ai) is the exhaustive source for every accepted field and its JSDoc.
 
@@ -119,6 +119,8 @@ The plugin answers "which models can this provider serve?" for a route a configu
 ### Failures and recovery
 
 A route pi-ai does not ship needs `api`, `baseURL`, and a non-empty `models` list; an unserviceable profile is refused where it is written, naming the route and model. Failures carry stable codes: a credential that cannot be used fails with `INVALID_CREDENTIAL` naming the route and reference, a route whose `apiKeyEnv` reference resolves to nothing fails with `MISSING_CREDENTIAL`, an unconfigured model fails with `UNKNOWN_MODEL`, and terminal provider failures distinguish `QUOTA` from transient `RATE_LIMIT`. `GenerateOptions.stop` is rejected with `UNSUPPORTED_OPTION` because pi-ai's common streaming UI cannot guarantee it across providers.
+
+A shared-account pool that fronts several accounts answers inside the same Anthropic-style envelope with its own `cc_pool_*` code, `origin`, and retry facts. The adapter reads those fields instead of the HTTP status, so a pool refusal never becomes a Claude `RATE_LIMIT`: `POOL_CAPACITY`, `POOL_RATE_LIMITED`, and `POOL_NO_ACCOUNT` are retryable within the finite budget and honor the provider's `Retry-After`; `POOL_SESSION_BUSY` forbids an automatic resend because another turn holds the session; an unrecognized retryable pool code becomes `POOL_TRANSIENT`, and an unrecognized non-retryable one becomes `POOL_ERROR` with a forbidden resend. A `claude` origin keeps the original classification and wording. Account selection, cooldown, and session binding remain the pool's responsibility.
 
 Config updates strictly validate changed providers. Initial loading retains stored catalog failures as editable provider diagnostics; unchanged failed providers do not block edits elsewhere. Serviceable models remain selectable, and unresolved models fail before network I/O. Repairing or deleting the offending configuration clears its diagnostic.
 
@@ -257,7 +259,7 @@ These limits define where the adapter stops and future work begins. They are cur
 - **`GenerateOptions.stop` is unsupported** — pi-ai's common stream options cannot guarantee stop-sequence behavior across providers.
 - **Conversation update support comes only from the installed pi-ai catalog** — a route receives in-history prompt and tool updates only when its catalog model declares the mid-conversation compat flags, and profiles cannot set them; hand-declared routes and unflagged models receive the concatenated system messages and the complete current tool list at the start of each request.
 - **Images are accepted only in user and tool-result messages** — images in system, developer, or assistant history fail with `UNSUPPORTED_CONTENT` on both conversion paths.
-- **Provider HTTP status is unavailable** — pi-ai error events do not expose a stable HTTP status across providers.
+- **Provider HTTP status is not exposed by pi-ai** — an error event carries only text. The adapter captures the failed response's status and `Retry-After` through the request-level fetch replacement on `anthropic-messages`, `openai-completions`, and `openai-responses`; other protocols (Google rejects a custom fetch outright) keep the text classification from the message.
 - **Retry policy is provider-owned, not an SDK retry** — pi-ai SDK retries stay disabled so durable agent steps and `llm/retry` events own every visible attempt, and direct `ctx.llm.stream()` calls remain single-attempt.
 - **Streamed JSON tool-call arguments avoid per-delta reparsing** — the installed pi-ai carries [`patches/@earendil-works__pi-ai@1.1.0.patch`](../../../patches/@earendil-works__pi-ai@1.1.0.patch), which removes the per-delta re-parse of the whole accumulated argument JSON in every stream adapter (upstream [earendil-works/pi#9265](https://github.com/earendil-works/pi/issues/9265)); unpatched, a multi-megabyte argument stream costs O(n²) CPU on the event loop and stalls every session in the process. Completion events supply parsed arguments; Responses may parse at both argument completion and output-item completion. This adapter reads only delta strings and finalized arguments. Re-apply or retire the patch on every pi-ai upgrade.
 

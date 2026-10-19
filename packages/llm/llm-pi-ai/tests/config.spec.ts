@@ -1,4 +1,12 @@
 import { describe, expect, it } from 'vitest'
+import {
+  POOL_CAPACITY_CODE,
+  POOL_ERROR_CODE,
+  POOL_NO_ACCOUNT_CODE,
+  POOL_RATE_LIMITED_CODE,
+  POOL_SESSION_BUSY_CODE,
+  POOL_TRANSIENT_CODE,
+} from '@deepseek-ai/dsh-llm'
 import { assertServiceable, Config, resolveProfiles, type Options } from '../src/config.ts'
 
 /** Validate one hand-declared route, with the caller's fields layered onto it. */
@@ -105,5 +113,85 @@ describe('request image policy bounds', () => {
     expect(() => {
       assertServiceable(programmatic)
     }).toThrow(message)
+  })
+})
+
+describe('retry policy pool codes', () => {
+  const policyOf = (retryPolicy?: unknown) => resolveProfiles({
+    'cc-pool': {
+      api: 'anthropic-messages',
+      baseURL: 'https://pool.test',
+      models: [{ id: 'm' }],
+      ...retryPolicy === undefined ? {} : { retryPolicy: retryPolicy as never },
+    },
+  }).get('cc-pool')!.retryPolicy
+
+  /**
+   * Resolve one route the way production does: the `Config` schema parses the
+   * raw profile first, the resolved value is detached, and only then does
+   * `resolveProfiles` see it.
+   */
+  const parsedPolicyOf = (retryPolicy?: unknown) => {
+    const parsed = Config({
+      providers: {
+        'cc-pool': {
+          api: 'anthropic-messages',
+          baseURL: 'https://pool.test',
+          models: [{ id: 'm' }],
+          ...retryPolicy === undefined ? {} : { retryPolicy: retryPolicy as never },
+        },
+      },
+    }).providers.get() as NonNullable<Options['providers']>
+    const policy = resolveProfiles(structuredClone(parsed)).get('cc-pool')!.retryPolicy
+    return { parsed, policy }
+  }
+
+  it('extends the default policy with every retryable code its own classifier emits', () => {
+    const policy = policyOf()
+    expect(policy.mode).toBe('normal')
+    if (policy.mode !== 'normal') throw new Error('expected normal policy')
+    expect(policy.maxRetries).toBe(5)
+    for (const code of [POOL_CAPACITY_CODE, POOL_RATE_LIMITED_CODE, POOL_NO_ACCOUNT_CODE, POOL_TRANSIENT_CODE]) {
+      expect(policy.retryableCodes).toContain(code)
+    }
+    // A failure that must stop is never made retryable by the default.
+    expect(policy.retryableCodes).not.toContain(POOL_SESSION_BUSY_CODE)
+    expect(policy.retryableCodes).not.toContain(POOL_ERROR_CODE)
+  })
+
+  it('extends a policy that configures only its budget or backoff', () => {
+    const policy = policyOf({ mode: 'normal', maxRetries: 2, backoff: { initialDelayMs: 1 } })
+    expect(policy.mode).toBe('normal')
+    if (policy.mode !== 'normal') throw new Error('expected normal policy')
+    expect(policy.maxRetries).toBe(2)
+    expect(policy.initialDelayMs).toBe(1)
+    expect(policy.retryableCodes).toContain(POOL_CAPACITY_CODE)
+  })
+
+  it('keeps an explicitly configured retryable-code list exactly', () => {
+    const policy = policyOf({ mode: 'normal', retryableCodes: ['SERVER'] })
+    expect(policy.mode).toBe('normal')
+    if (policy.mode !== 'normal') throw new Error('expected normal policy')
+    expect(policy.retryableCodes).toEqual(['SERVER'])
+  })
+
+  it('extends a policy the configuration schema parsed without retryableCodes', () => {
+    const { parsed, policy } = parsedPolicyOf({ mode: 'normal', maxRetries: 2 })
+    // Parsing must not materialize the harness list: only its absence says the
+    // deployment configured no list.
+    expect(parsed['cc-pool']?.retryPolicy).not.toHaveProperty('retryableCodes')
+    expect(policy.mode).toBe('normal')
+    if (policy.mode !== 'normal') throw new Error('expected normal policy')
+    expect(policy.maxRetries).toBe(2)
+    for (const code of [POOL_CAPACITY_CODE, POOL_RATE_LIMITED_CODE, POOL_NO_ACCOUNT_CODE, POOL_TRANSIENT_CODE]) {
+      expect(policy.retryableCodes).toContain(code)
+    }
+  })
+
+  it('keeps a retryable-code list the configuration schema parsed exactly', () => {
+    const { policy } = parsedPolicyOf({ mode: 'normal', retryableCodes: ['SERVER'] })
+    expect(policy.mode).toBe('normal')
+    if (policy.mode !== 'normal') throw new Error('expected normal policy')
+    expect(policy.retryableCodes).toEqual(['SERVER'])
   })
 })

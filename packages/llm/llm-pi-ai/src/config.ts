@@ -41,6 +41,7 @@ import type {
   PiAiReasoningEfforts,
   RouteCatalog,
 } from './catalog.ts'
+import { POOL_RETRYABLE_CODES } from './pool-error.ts'
 import { buildProvider, supportedProtocols } from './provider.ts'
 
 /** Default maximum idle interval while an adapter stream read is outstanding. */
@@ -178,7 +179,12 @@ export interface PiAiProviderProfile {
    * the smallest quality-ladder output is used when no quality fits.
    */
   requestImageMaxBytes?: number
-  /** Provider-owned model-request retry policy; omission uses normal mode with five retries. */
+  /**
+   * Provider-owned model-request retry policy. Omission uses normal mode with
+   * five retries over the harness transient codes plus the pool codes this
+   * adapter classifies; a configured `retryableCodes` list is used exactly as
+   * written.
+   */
   retryPolicy?: RetryPolicyConfig
 }
 
@@ -400,6 +406,38 @@ function assertValidHeaders(provider: string, headers: Readonly<Record<string, s
 }
 
 /**
+ * Resolve one route's immutable retry policy.
+ *
+ * A route that names no `retryableCodes` — by omitting the policy or by setting
+ * only its budget or backoff — extends the harness transient codes with the
+ * pool codes this adapter's classifier emits, so a pool refusal that the
+ * client is allowed to repeat is retryable without every deployment restating
+ * the list. Configuration parsing leaves an omitted list unset, so this reads
+ * the deployment's own decision rather than a materialized default. A
+ * configured list is the deployment's decision and is kept exactly.
+ * @param config - the route's configured policy, if any.
+ * @param path - diagnostic path naming the provider config that owns the value.
+ * @returns the policy captured with route registration.
+ */
+function resolveProfileRetryPolicy(config: RetryPolicyConfig | undefined, path: string): ResolvedRetryPolicy {
+  const policy = resolveRetryPolicy(config, path)
+  if (policy.mode !== 'normal' || (config?.mode === 'normal' && config.retryableCodes !== undefined)) {
+    return policy
+  }
+  return resolveRetryPolicy({
+    mode: 'normal',
+    maxRetries: policy.maxRetries,
+    retryableCodes: [...policy.retryableCodes, ...POOL_RETRYABLE_CODES],
+    backoff: {
+      initialDelayMs: policy.initialDelayMs,
+      maxDelayMs: policy.maxDelayMs,
+      providerWaitMaxMs: policy.providerWaitMaxMs,
+      jitterRatio: policy.jitterRatio,
+    },
+  }, path)
+}
+
+/**
  * Resolve scalar defaults and materialize each route's serviceable models.
  * Deferred catalog validation retains diagnostics without deleting configured
  * routes. An omitted dict resolves to the empty, dormant route set.
@@ -497,7 +535,7 @@ export function resolveProfiles(
       maxRequestImageBytes,
       requestImagePixelBudget,
       requestImageMaxBytes,
-      retryPolicy: resolveRetryPolicy(retryPolicy, `llm-pi-ai: provider "${provider}" retryPolicy`),
+      retryPolicy: resolveProfileRetryPolicy(retryPolicy, `llm-pi-ai: provider "${provider}" retryPolicy`),
       ...rest.headers === undefined ? {} : { headers: { ...rest.headers } },
       ...rest.thinkingBudgets === undefined ? {} : { thinkingBudgets: { ...rest.thinkingBudgets } },
       configuredMaxTokens: catalog?.configuredMaxTokens ?? new Map(),

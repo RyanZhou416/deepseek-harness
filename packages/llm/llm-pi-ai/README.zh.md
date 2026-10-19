@@ -35,7 +35,7 @@ kind: "package-reference"
 
 ### 配置提供方路由
 
-每个 profile 都可以设置 `retryPolicy`；省略时使用 normal mode、最多重试五次。`apiKeyEnv` 是按请求经 harness 凭据 seam 解析的凭据引用，因此配置文件绝不包含密钥；解析为空的引用会让请求以 `MISSING_CREDENTIAL` 失败。省略它会让路由保持已配置但无密钥（configured-but-keyless）状态，对已安装目录路由而言即交由 pi-ai 提供方原生的环境发现。
+每个 profile 都可以设置 `retryPolicy`；省略时使用 normal mode、最多重试五次，并覆盖 harness 暂时性错误码与本适配器分类的 pool 错误码；显式配置 `retryableCodes` 时完全按配置使用。`apiKeyEnv` 是按请求经 harness 凭据 seam 解析的凭据引用，因此配置文件绝不包含密钥；解析为空的引用会让请求以 `MISSING_CREDENTIAL` 失败。省略它会让路由保持已配置但无密钥（configured-but-keyless）状态，对已安装目录路由而言即交由 pi-ai 提供方原生的环境发现。
 
 ```yaml
 - name: '@deepseek-ai/dsh-llm-pi-ai'
@@ -86,7 +86,7 @@ kind: "package-reference"
 | `requestImagePixelBudget` | `4,194,304` | 每张确定性请求图片的总像素预算 |
 | `requestImageMaxBytes` | `1 MiB` | 每张请求图片在 base64 扩展前的编码字节目标 |
 | `maxRequestImageBytes` | `20 MiB` | base64 图片载荷总上限，保留图片超过时请求以 `IMAGE_OFFLOAD_REQUIRED` 失败 |
-| `retryPolicy` | normal，5 次重试 | 由 `dsh-llm-retry` 执行的提供方自有重试策略 |
+| `retryPolicy` | normal，5 次重试 | 由 `dsh-llm-retry` 执行的提供方自有重试策略；默认集合还会加入本适配器分类的 pool 错误码 |
 
 生成的[配置目录](../../../docs/config-catalog.zh.md#deepseek-aidsh-llm-pi-ai)是每个受支持字段及其 JSDoc 的穷尽式真源。
 
@@ -119,6 +119,8 @@ profile 的 `models` 列表会替换而非扩展路由的已安装目录；每�
 ### 失败与恢复
 
 pi-ai 不提供的路由需要 `api`、`baseURL` 与非空 `models` 列表；无法服务的 profile 会在写入处被拒绝，并点名路由与模型。失败携带稳定 code：无法使用的凭据以 `INVALID_CREDENTIAL` 失败并点名路由与引用，`apiKeyEnv` 引用解析为空的路由以 `MISSING_CREDENTIAL` 失败，未配置模型以 `UNKNOWN_MODEL` 失败，终止性提供方失败则区分 `QUOTA` 与暂时性 `RATE_LIMIT`。`GenerateOptions.stop` 以 `UNSUPPORTED_OPTION` 被拒绝，因为 pi-ai 的通用流式 UI 无法跨提供方保证它。
+
+前置多个账号的共享账号池会在相同的 Anthropic 风格 envelope 中返回自己的 `cc_pool_*` code、`origin` 与重试事实。适配器读取这些字段而不是 HTTP 状态，因此 pool 拒绝永远不会变成 Claude 的 `RATE_LIMIT`：`POOL_CAPACITY`、`POOL_RATE_LIMITED` 与 `POOL_NO_ACCOUNT` 在有限重试预算内可重试，并遵守提供方的 `Retry-After`；`POOL_SESSION_BUSY` 禁止自动重发，因为另一个轮次正占用该 Session；无法识别的可重试 pool code 变为 `POOL_TRANSIENT`，无法识别的不可重试 code 变为 `POOL_ERROR` 并禁止重发。`claude` origin 保留原有分类与措辞。账号选择、冷却与 Session 绑定仍由 pool 负责。
 
 Config 更新严格验证发生变化的 provider。初始加载将已存储的目录故障保留为可编辑的 provider 诊断；未更改的故障 provider 不阻止其他编辑。可用模型仍可选择，无法解析的模型在网络 I/O 前失败。修复或删除问题配置会清除其诊断。
 
@@ -257,7 +259,7 @@ pi-ai 事件变成 harness 的推理、文本、工具调用、用量与 finish 
 - **不支持 `GenerateOptions.stop`**——pi-ai 的通用流式选项无法跨提供方保证停止序列行为。
 - **对话更新支持只来自已安装的 pi-ai 目录**——只有当路由的目录模型声明了对话中 compat 标志时，该路由才会在历史中接收提示词与工具更新，且 profile 不能设置这些标志；手工声明的路由与未标记的模型会在每次请求开头接收拼接后的系统消息与完整的当前工具列表。
 - **图片只在 user 与工具结果消息中被接受**——system、developer 或 assistant 历史中的图片在两条转换路径上都会以 `UNSUPPORTED_CONTENT` 失败。
-- **提供方 HTTP 状态不可用**——pi-ai 错误事件不跨提供方暴露稳定 HTTP 状态。
+- **pi-ai 不暴露提供方 HTTP 状态**——错误事件只携带文本。适配器在 `anthropic-messages`、`openai-completions` 与 `openai-responses` 上通过请求级 fetch 替换捕获失败响应的状态与 `Retry-After`；其他协议（Google 直接拒绝自定义 fetch）保留按消息文本分类。
 - **重试策略由提供方自有，而非 SDK 重试**——pi-ai SDK 重试保持禁用，因此持久 agent（智能体）步骤与 `llm/retry` 事件拥有每个可见尝试，直接 `ctx.llm.stream()` 调用仍是单次尝试。
 - **流式 JSON 工具调用参数避免逐 delta 重复解析**——安装的 pi-ai 带有 [`patches/@earendil-works__pi-ai@1.1.0.patch`](../../../patches/@earendil-works__pi-ai@1.1.0.patch)，它移除了每个流适配器中对整段累计参数 JSON 的逐 delta 重新解析（上游 [earendil-works/pi#9265](https://github.com/earendil-works/pi/issues/9265)）；未打补丁时，数 MB 的参数流会在事件循环上消耗 O(n²) CPU，并使进程内所有会话停滞。完成事件提供解析后的参数；Responses 可能在参数完成和输出项完成时分别解析。本适配器只读取 delta 字符串与最终参数。每次升级 pi-ai 时都要重新应用或撤销该补丁。
 

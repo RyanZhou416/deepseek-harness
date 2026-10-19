@@ -101,7 +101,11 @@ const backoffSchema: z<BackoffConfig> = z.object({
 const normalPolicySchema: z<NormalRetryPolicyConfig> = z.object({
   mode: z.const('normal').required(),
   maxRetries: z.number().step(1).min(0).max(Number.MAX_SAFE_INTEGER).default(DEFAULT_MAX_RETRIES),
-  retryableCodes: z.array(z.string()).default([...DEFAULT_RETRYABLE_CODES]),
+  // No schema default (`z.array` otherwise materializes `[]`): an omitted list
+  // must stay absent so an adapter can tell "not configured" from a list the
+  // deployment wrote. resolveRetryPolicy applies DEFAULT_RETRYABLE_CODES to the
+  // absent case.
+  retryableCodes: z.array(z.string()).extra('default', undefined),
   backoff: backoffSchema,
 })
 

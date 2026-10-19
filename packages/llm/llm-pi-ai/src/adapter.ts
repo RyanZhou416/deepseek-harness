@@ -61,6 +61,7 @@ import { idleWatchdog, timeoutOf } from '@deepseek-ai/dsh-timeout'
 import type { ResolvedPiAiProviderProfile } from './config.ts'
 import { requestImageTarget, toPiContext } from './context.ts'
 import { conversationUpdates, createModels, getSupportedThinkingLevels } from './models.ts'
+import { ProviderErrorCapture } from './pool-error.ts'
 import { toStreamChunks } from './stream.ts'
 
 /**
@@ -211,6 +212,17 @@ function reasoningInfo(
       ...defaultLevel === undefined ? {} : { defaultEffort: ReasoningEffortId(defaultLevel) },
     },
   }
+}
+
+/**
+ * Whether pi-ai's implementation for this protocol accepts a custom fetch.
+ * Google's SDKs reject one outright, and a protocol that never reads it would
+ * only add a wrapper without capturing anything.
+ * @param api - the resolved model's wire protocol.
+ * @returns true when a request-level fetch replacement is honored.
+ */
+function supportsFetchCapture(api: Api): boolean {
+  return api === 'anthropic-messages' || api === 'openai-completions' || api === 'openai-responses'
 }
 
 /** Merge deployment headers while removing case-insensitive attribution collisions. */
@@ -419,8 +431,13 @@ export class PiAiAdapter extends LlmAdapter {
               : {},
           },
         }, onReplayDegrade)
+      // pi-ai flattens the SDK error to its message and discards response
+      // headers, so the request's single failed response is recorded here for
+      // the pool classifier to read `Retry-After` from.
+      const providerError = new ProviderErrorCapture()
       const events = snapshot.models.streamSimple(model, context, {
         ...profileOptions(profile, reasoning, apiKey),
+        ...supportsFetchCapture(model.api) ? { fetch: providerError.fetch } : {},
         ...options.temperature === undefined ? {} : { temperature: options.temperature },
         ...options.maxTokens === undefined ? {} : { maxTokens: options.maxTokens },
         ...options.sessionId === undefined ? {} : { sessionId: String(options.sessionId) },
@@ -429,7 +446,9 @@ export class PiAiAdapter extends LlmAdapter {
         // Harness-owned and therefore win collisions.
         headers: requestHeaders(profile.headers),
       })
-      const iterator = toStreamChunks(events, model.contextWindow, options.signal, model.id)[Symbol.asyncIterator]()
+      const iterator = toStreamChunks(
+        events, model.contextWindow, options.signal, model.id, providerError,
+      )[Symbol.asyncIterator]()
       let exhausted = false
       try {
         while (true) {

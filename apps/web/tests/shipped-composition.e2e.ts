@@ -572,6 +572,8 @@ it('assembles the shipped Web transport, catalog, guidance, and defaults', async
       anthropic: { retryPolicy: { mode: 'always' } },
     },
   })
+  // The pi-ai adapter extends a defaulted normal policy with the pool codes its
+  // classifier emits, so a deployment does not restate them per route.
   expect(ctx.llm.providerRetryPolicy('openai')).toMatchInlineSnapshot(`
     {
       "initialDelayMs": 500,
@@ -586,6 +588,10 @@ it('assembles the shipped Web transport, catalog, guidance, and defaults', async
         "SERVER",
         "TIMEOUT",
         "TRANSPORT",
+        "POOL_CAPACITY",
+        "POOL_RATE_LIMITED",
+        "POOL_NO_ACCOUNT",
+        "POOL_TRANSIENT",
       ],
     }
   `)

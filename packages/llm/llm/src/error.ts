@@ -31,6 +31,48 @@ export const QUOTA_EXCEEDED_CODE = 'QUOTA'
 export const ACCOUNT_QUOTA_EXCEEDED_CODE = 'ACCOUNT_QUOTA'
 
 /**
+ * Canonical provider-neutral code for a shared-account pool that has no free
+ * session slot until a running session finishes. Retryable only after the
+ * provider-disclosed wait, distinct from a model-level `RATE_LIMIT`.
+ */
+export const POOL_CAPACITY_CODE = 'POOL_CAPACITY'
+
+/**
+ * Canonical provider-neutral code for a shared-account pool that is rate
+ * limiting this request through an account bucket or session backoff. The
+ * provider's `Retry-After` names the wait.
+ */
+export const POOL_RATE_LIMITED_CODE = 'POOL_RATE_LIMITED'
+
+/**
+ * Canonical provider-neutral code for a shared-account pool that already has a
+ * request in flight for this session. The client must wait for that turn to
+ * finish; an automatic resend would only collide with it again.
+ */
+export const POOL_SESSION_BUSY_CODE = 'POOL_SESSION_BUSY'
+
+/**
+ * Canonical provider-neutral code for a shared-account pool with no healthy
+ * account to place the request on. Retryable within the route's finite retry
+ * budget and the provider-disclosed wait, distinct from a permanent refusal.
+ */
+export const POOL_NO_ACCOUNT_CODE = 'POOL_NO_ACCOUNT'
+
+/**
+ * Canonical provider-neutral code for an unrecognized pool failure that the
+ * envelope marks retryable (or whose `client_action` asks for a repeated
+ * request). Retryable within the route's finite retry budget.
+ */
+export const POOL_TRANSIENT_CODE = 'POOL_TRANSIENT'
+
+/**
+ * Canonical provider-neutral code for an unrecognized pool failure the
+ * envelope marks non-retryable. Adapters that emit it also forbid an automatic
+ * resend.
+ */
+export const POOL_ERROR_CODE = 'POOL_ERROR'
+
+/**
  * Canonical provider-neutral code for a response that completed normally but
  * carried no content blocks at all. Providers occasionally emit a degenerate
  * completion (a terminal stop with zero output); adapters classify it as this

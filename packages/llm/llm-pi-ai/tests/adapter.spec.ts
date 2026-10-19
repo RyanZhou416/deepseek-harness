@@ -9,7 +9,7 @@ import type {
   SaveImageAttachment,
   StoredImageAttachment,
 } from '@deepseek-ai/dsh-attachment'
-import LlmRuntime, { createToolResultMessage, createUserMessage, CONTEXT_WINDOW_EXCEEDED_CODE, LlmError, ReasoningEffortId, userAgent } from '@deepseek-ai/dsh-llm'
+import LlmRuntime, { createToolResultMessage, createUserMessage, CONTEXT_WINDOW_EXCEEDED_CODE, LlmError, POOL_CAPACITY_CODE, ReasoningEffortId, userAgent } from '@deepseek-ai/dsh-llm'
 import * as LlmPiAi from '@deepseek-ai/dsh-llm-pi-ai'
 import { PiAiAdapter } from '@deepseek-ai/dsh-llm-pi-ai'
 import { MAX_TIMER_DELAY_MS } from '@deepseek-ai/dsh-timeout'
@@ -423,6 +423,71 @@ describe('PiAiAdapter provider routing', () => {
     const result = await assemble(ctx, { model: 'deepseek-flash', messages: [] })
     expect(result.finish).toMatchObject({ kind: 'error', failure: { code } })
     expect(server.paths).toEqual(['/chat/completions'])
+  })
+
+  it('classifies a pool refusal by its envelope and keeps the disclosed Retry-After', async () => {
+    const server = await mockServer([{
+      status: 429,
+      headers: { 'retry-after': '7' },
+      body: JSON.stringify({
+        type: 'error',
+        error: {
+          type: 'cc_pool_capacity_exhausted',
+          origin: 'pool',
+          scope: 'pool',
+          retryable: true,
+          message: 'all accounts are at their 2-session limit',
+        },
+      }),
+    }])
+    const ctx = new Context()
+    await ctx.plugin(LlmRuntime)
+    await ctx.plugin(LlmPiAi, {
+      providers: {
+        'cc-pool': {
+          apiKeyEnv: 'PI_TEST_KEY',
+          api: 'anthropic-messages',
+          baseURL: server.url,
+          models: [{ id: 'claude-sonnet-4-6' }],
+        },
+      },
+    })
+
+    const result = await assemble(ctx, { provider: 'cc-pool', model: 'claude-sonnet-4-6', messages: [] })
+
+    expect(server.paths).toHaveLength(1)
+    expect(server.paths[0]).toMatch(/^\/v1\/messages(?:\?|$)/)
+    expect(result.finish).toMatchObject({
+      kind: 'error',
+      failure: { code: POOL_CAPACITY_CODE, status: 429, providerRetryAfterMs: 7_000 },
+    })
+    expect(result.finish.kind === 'error' ? result.finish.failure.message : '')
+      .toMatch(/all accounts are at their 2-session limit.*retry after 7s/)
+  })
+
+  it('keeps text classification on a protocol that rejects a custom fetch', async () => {
+    const server = await mockServer([{
+      status: 429,
+      headers: { 'retry-after': '5' },
+      body: JSON.stringify({ error: { message: 'slow down' } }),
+    }])
+    const ctx = new Context()
+    await ctx.plugin(LlmRuntime)
+    await ctx.plugin(LlmPiAi, {
+      providers: {
+        mistral: {
+          apiKeyEnv: 'PI_TEST_KEY',
+          baseURL: server.url,
+          models: [{ id: 'mistral-small-latest' }],
+        },
+      },
+    })
+
+    const result = await assemble(ctx, { provider: 'mistral', model: 'mistral-small-latest', messages: [] })
+
+    expect(result.finish).toMatchObject({ kind: 'error', failure: { code: 'RATE_LIMIT' } })
+    expect(result.finish.kind === 'error' ? result.finish.failure.providerRetryAfterMs : undefined)
+      .toBeUndefined()
   })
 
   it('uses the resolved catalog context window for usage-based overflow detection', async () => {

@@ -71,6 +71,19 @@ describe('provider retry policy', () => {
     })
   })
 
+  it('keeps an omitted retryable-code list absent through schema validation', () => {
+    const parsed = RetryPolicySchema({ mode: 'normal', maxRetries: 2 })
+
+    // An adapter reads the absence as "not configured"; materializing the
+    // default here would erase that distinction before resolution.
+    expect(parsed).not.toHaveProperty('retryableCodes')
+    const policy = resolveRetryPolicy(parsed, 'provider.retryPolicy')
+    expect(policy.mode).toBe('normal')
+    if (policy.mode !== 'normal') throw new Error('expected normal policy')
+    expect(policy.maxRetries).toBe(2)
+    expect(policy.retryableCodes).toEqual(['EMPTY_RESPONSE', 'RATE_LIMIT', 'SERVER', 'TIMEOUT', 'TRANSPORT'])
+  })
+
   it('resolves always mode with default backoff', () => {
     expect(resolveRetryPolicy({ mode: 'always' }, 'provider.retryPolicy')).toEqual({
       mode: 'always',
