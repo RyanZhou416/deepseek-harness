@@ -264,6 +264,8 @@ Every failure a pool member reports resolves to exactly one scheduling effect. N
 
 The hard-stop field wins over the code: a route that stated the logical request may not be repeated is terminal even when its code reads transient. An ordinary 429 with `x-should-retry: true` stays transient, so the same account may retry.
 
+A credential refresh failure reports only safe facts in its error message: the HTTP status, the provider's OAuth `error` code when present, and `retry-after` seconds when disclosed. The provider response body, token values, and free-form detail are not included. A stated `403`/`invalid_grant` therefore identifies an account or grant refusal; a generic `AUTH` without those fields does not establish suspension.
+
 Load accounting covers this Host’s automatic pools and configured tiers. Independent account entries, other Harness processes, and external clients are outside that counter. Accounts without usage telemetry remain fallbacks behind measured accounts; when a band has no usable urgency, equal baseline scores can still be distributed by load.
 
 Optional `pool.scheduling` fields are resolved and validated at plugin load. Zero weights disable their additional preference or load penalty; zero `codexDrainBelowPercent` disables finishing. Horizons must be positive integer milliseconds, percentages must be between 0 and 100, and weights must be finite and nonnegative.

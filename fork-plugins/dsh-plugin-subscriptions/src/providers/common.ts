@@ -545,6 +545,34 @@ export async function oauthEndpointError(response: Response, label: string): Pro
   return new OAuthEndpointError(message, response.status, oauthCode, parseRetryAfterMs(response))
 }
 
+/**
+ * Describe a refresh failure without exposing credentials or response text.
+ *
+ * OAuth failures carry the HTTP status and the provider's fixed error code;
+ * transport failures may carry a stable platform code. The provider message
+ * and body are deliberately omitted because a token endpoint response can
+ * contain credentials.
+ * @param error - the failure that ended the refresh attempt.
+ * @returns a bounded, credential-free diagnostic suffix.
+ */
+function refreshFailureFacts(error: unknown): string {
+  if (error instanceof OAuthEndpointError) {
+    const code = error.oauthCode === undefined ? '' : ` ${error.oauthCode}`
+    const retry = error.retryAfterMs === undefined
+      ? ''
+      : `, retry-after ${String(Math.max(0, Math.ceil(error.retryAfterMs / 1000)))}s`
+    return `HTTP ${String(error.status)}${code}${retry}`
+  }
+  if (error instanceof Error) {
+    const platformCode = (error as { code?: unknown }).code
+    if (typeof platformCode === 'string' && /^[A-Z][A-Z0-9_]{0,63}$/.test(platformCode)) {
+      return `${error.name} (${platformCode})`
+    }
+    return error.name.length === 0 ? 'unknown failure' : error.name
+  }
+  return 'unknown failure'
+}
+
 /** A session fresh enough to serve a request without a refresh. */
 interface TimedSession {
   accessToken: string
@@ -731,7 +759,7 @@ export class TokenManager<S extends TimedSession> {
         // concurrent waiters that lost the removal stay silent.
         if (removed !== false) this.options.onRemoved?.()
         throw new LlmError(
-          `${this.options.displayName} login expired or was revoked; log in again via Settings → Subscriptions`,
+          `${this.options.displayName} login expired or was revoked (${refreshFailureFacts(error)}); log in again via Settings → Subscriptions`,
           'INVALID_CREDENTIAL',
           { cause: error },
         )
@@ -742,7 +770,11 @@ export class TokenManager<S extends TimedSession> {
       }
       throw error instanceof LlmError
         ? error
-        : new LlmError(`${this.options.displayName} token refresh failed`, 'AUTH', { cause: error })
+        : new LlmError(
+          `${this.options.displayName} token refresh failed (${refreshFailureFacts(error)})`,
+          'AUTH',
+          { cause: error },
+        )
     }
   }
 

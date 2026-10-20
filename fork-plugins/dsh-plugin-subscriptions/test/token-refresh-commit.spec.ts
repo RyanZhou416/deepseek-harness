@@ -28,6 +28,7 @@ import {
 } from '../src/auth/store.js'
 import type { ClaudeSession } from '../src/auth/store.js'
 import type { FetchFn } from '../src/providers/common.js'
+import { OAuthEndpointError } from '../src/providers/common.js'
 import { ownedClaudeContinuation } from './claude-maintenance-fixtures.js'
 import { PermittingRecordPort } from './recording-port.js'
 
@@ -252,6 +253,71 @@ test('a transient refresh failure still falls back to a still-valid stored token
   assert.equal(served.accessToken, 'at-a', 'the still-valid credential serves the turn')
   assert.deepEqual(h.writes, [], 'nothing was written for a grant that never arrived')
   assert.deepEqual(h.removed, [])
+})
+
+test('a failed refresh reports only safe status and error-code facts', async () => {
+  const cases = [
+    {
+      name: 'OAuth error with retry-after',
+      error: new OAuthEndpointError('claude token endpoint error (HTTP 401): raw-secret-body', 401, 'invalid_client', 30_000),
+      expected: 'HTTP 401 invalid_client, retry-after 30s',
+    },
+    {
+      name: 'OAuth error without an error code',
+      error: new OAuthEndpointError('claude token endpoint error (HTTP 500): raw-secret-body', 500),
+      expected: 'HTTP 500',
+    },
+    {
+      name: 'transport error with a platform code',
+      error: Object.assign(new Error('network down: raw-secret-body'), { code: 'ECONNRESET' }),
+      expected: 'Error (ECONNRESET)',
+    },
+    {
+      name: 'generic error',
+      error: new Error('raw-secret-body'),
+      expected: 'Error',
+    },
+    {
+      name: 'non-error rejection',
+      error: 'raw-secret-body',
+      expected: 'unknown failure',
+    },
+  ] as const
+
+  for (const entry of cases) {
+    const dir = storeDir()
+    const h = harness({
+      dir,
+      refresh: () => Promise.reject(entry.error),
+    })
+    await saveAccountSession('claude', ACCOUNT, session('at-a', -1_000), h.path)
+
+    await assert.rejects(h.tokens.session(ACCOUNT), (error: unknown) => {
+      assert.ok(error instanceof LlmError, entry.name)
+      assert.equal(error.code, 'AUTH', entry.name)
+      assert.match(error.message, new RegExp(entry.expected.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')), entry.name)
+      assert.doesNotMatch(error.message, /raw-secret-body|at-a/, `${entry.name} omits provider text and credentials`)
+      return true
+    })
+  }
+})
+
+test('a permanent refresh refusal reports safe facts', async () => {
+  const dir = storeDir()
+  const h = harness({
+    dir,
+    permanent: true,
+    refresh: () => Promise.reject(new OAuthEndpointError('raw-secret-body', 400, 'invalid_grant')),
+  })
+  await saveAccountSession('claude', ACCOUNT, session('at-a', -1_000), h.path)
+
+  await assert.rejects(h.tokens.session(ACCOUNT), (error: unknown) => {
+    assert.ok(error instanceof LlmError)
+    assert.equal(error.code, 'INVALID_CREDENTIAL')
+    assert.match(error.message, /HTTP 400 invalid_grant/)
+    assert.doesNotMatch(error.message, /raw-secret-body|at-a/)
+    return true
+  })
 })
 
 test('a logout during the refresh grant fails the Claude request before any Messages call', async (t) => {

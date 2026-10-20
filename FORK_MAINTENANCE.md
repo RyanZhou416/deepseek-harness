@@ -217,6 +217,8 @@ positions, the chained stream-to-rebuild replay, and the no-capture case.
 
 子进程入口按规范文件路径识别，保留带空格与 URL 转义字符路径、导入不自动运行的回归。共享启动 Promise 只覆盖进行中的启动，死亡子进程不阻塞后续独立请求重建，传输层不重放旧请求、不回退 Node。请求全程固定账号，401 重发前取消旧响应体，刷新后返回持久存储的获胜会话而非被拒绝写入的 grant。保留[插件合同与聚焦回归](fork-plugins/dsh-plugin-subscriptions/FORK_MAINTENANCE.md#claude-startup-rejected-responses-and-token-commits)和[恢复场景](snapshots/session/claude-request-recovery/snapshot.yml)。本地导入仍要求完整 OAuth 会话，不新增裸令牌支持；设备 ID 的账号／本机 OS 绑定策略不等于 CC 的配置根随机策略，迁移与缓存重建约定见下项；对比范围限于客户端责任，不以离线通过声称所有客户端分支已等价。
 
+凭据刷新失败（`AUTH`/`INVALID_CREDENTIAL`）的模型可见消息只追加安全事实：HTTP status、provider OAuth `error` code、存在时的 `retry-after` 秒数；不写入响应正文、token 或自由文本。`invalid_grant`/明确的 403 才能说明账号或授权被拒绝，泛化 `AUTH` 不能据此认定封号。保留 `token-refresh-commit.spec.ts` 对这些事实与脱敏的断言。
+
 **Preservation rule.** Claude 凭据所有权由 `credentialOwnershipMode` 的解析结果决定，其规则与能力只由 `src/auth/claude-credential-ownership.ts` 拥有：只读导入每次使用都按当前外部来源 winner 核对身份与来源自己声明的 scope，失败即停止，不回落本地缓存令牌、不花费共享 grant、不写外部存储、不删除已存授权；`legacy-writeback` 可能花费同一共享 grant，且仅在 `syncClaudeCodeCredentials` 启用时写回外部来源，其状态必须继续标注 `external-coordination-unproven`，不得称为安全的 single writer；只有 `independent-oauth` 拥有主动续期定时器，只读账号不进入任何会触发 grant 的 sweep；mode 不得豁免一方 OAuth 的组织政策资格；列表与状态读取不触外部来源、不发请求。模式 owner、导入与转换规则、聚焦测试名字与合成来源验证范围见[插件维护说明该节](fork-plugins/dsh-plugin-subscriptions/FORK_MAINTENANCE.md#claude-credential-ownership-modes)。
 
 ### Claude account and OS device identity
