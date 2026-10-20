@@ -163,6 +163,9 @@ interface AccountRecord {
     at: number
     retryAt: number
     reason: UsageFailureReason
+    errorCode?: string
+    cause?: UsageFailureCause
+    causeCode?: string
     status?: number
     code?: string
   }
@@ -592,13 +595,16 @@ export class PoolUsageTracker {
   /** Freshness metadata of one account's retained reading. */
   private meta(key: string, record: AccountRecord | undefined, now: number): UsageCacheMeta {
     const failure = record?.failure
-    const common: Pick<UsageCacheMeta, 'observedAt' | 'retryAt' | 'error' | 'status' | 'code'> = {
+    const common: Pick<UsageCacheMeta, 'observedAt' | 'retryAt' | 'error' | 'errorCode' | 'cause' | 'causeCode' | 'status' | 'code'> = {
       ...record?.observedAt === undefined ? {} : { observedAt: record.observedAt },
       ...failure === undefined
         ? {}
         : {
             retryAt: failure.retryAt,
             error: failure.reason,
+            ...failure.errorCode === undefined ? {} : { errorCode: failure.errorCode },
+            ...failure.cause === undefined ? {} : { cause: failure.cause },
+            ...failure.causeCode === undefined ? {} : { causeCode: failure.causeCode },
             ...failure.status === undefined ? {} : { status: failure.status },
             ...failure.code === undefined ? {} : { code: failure.code },
           },
@@ -1000,8 +1006,17 @@ function cooldownFor(error: unknown, defaultRetryMs: number): number {
   return error instanceof OAuthEndpointError && error.retryAfterMs !== undefined ? error.retryAfterMs : defaultRetryMs
 }
 
+/** Safe origin class of a failed usage read. */
+export type UsageFailureCause = 'endpoint' | 'timeout' | 'transport' | 'credential' | 'unknown'
+
 /** Safe HTTP/OAuth facts of a failed usage read, never a provider message or body. */
 export interface UsageFailureFacts {
+  /** Stable harness error code, when the failure object carried one. */
+  errorCode?: string
+  /** Origin class of the failure. */
+  cause?: UsageFailureCause
+  /** Platform transport code, when the origin was a transport failure. */
+  causeCode?: string
   /** HTTP status, when the failure came from an endpoint response. */
   status?: number
   /** Provider OAuth error code, when it is a bounded fixed code. */
@@ -1010,12 +1025,28 @@ export interface UsageFailureFacts {
 
 /** A provider OAuth code that is safe to persist and show. */
 const SAFE_OAUTH_CODE = /^[a-z][a-z0-9_]{0,63}$/i
+/** A harness or platform code that is safe to persist and show. */
+const SAFE_CODE = /^[A-Za-z][A-Za-z0-9_]{0,63}$/
+/** Fixed transport-shaped platform codes; arbitrary error codes stay out of the log. */
+const SAFE_TRANSPORT_CODE = /^(?:E[A-Z0-9]{2,31}|UND_ERR_[A-Z0-9_]+)$/
+
+/** A bounded error code from an Error object, or undefined. */
+function stableCodeOf(error: unknown): string | undefined {
+  if (!(error instanceof Error) || !('code' in error)) return undefined
+  const code = (error as { code?: unknown }).code
+  return typeof code === 'string' && SAFE_CODE.test(code) ? code : undefined
+}
+
+/** Whether an error is the abort/timeout shape callers use for an unreachable read. */
+function isTimeoutError(error: unknown): boolean {
+  return error instanceof Error && (error.name === 'AbortError' || error.name === 'TimeoutError')
+}
 
 /**
  * Extract credential-free facts from a failed usage read, following the cause
  * chain a wrapped token-refresh failure uses.
  * @param error - the failure the read reported.
- * @returns the safe HTTP status and OAuth code that were observed.
+ * @returns the safe HTTP status, OAuth code, stable error code, and origin class.
  */
 export function usageFailureFacts(error: unknown): UsageFailureFacts {
   return factsInChain(error, 0)
@@ -1023,19 +1054,49 @@ export function usageFailureFacts(error: unknown): UsageFailureFacts {
 
 /** Bound the cause walk and never follow a cycle. */
 function factsInChain(error: unknown, depth: number): UsageFailureFacts {
-  if (depth > 8) return {}
+  if (depth > 8) return { cause: 'unknown' }
   if (error instanceof OAuthEndpointError) {
     const code = error.oauthCode !== undefined && SAFE_OAUTH_CODE.test(error.oauthCode)
       ? error.oauthCode
       : undefined
     return {
+      cause: 'endpoint',
       status: error.status,
       ...code === undefined ? {} : { code },
     }
   }
+  if (isMissingOrInvalidCredential(error)) {
+    const errorCode = stableCodeOf(error)
+    return {
+      cause: 'credential',
+      ...errorCode === undefined ? {} : { errorCode },
+    }
+  }
+  if (error instanceof LlmError && error.code === 'AUTH') {
+    const cause = error.cause
+    const inner = cause === undefined || cause === error ? { cause: 'unknown' as const } : factsInChain(cause, depth + 1)
+    return { errorCode: 'AUTH', ...inner, cause: inner.cause ?? 'unknown' }
+  }
   const cause = error instanceof Error ? error.cause : undefined
-  if (cause === undefined || cause === error) return {}
-  return factsInChain(cause, depth + 1)
+  if (cause !== undefined && cause !== error) {
+    const inner = factsInChain(cause, depth + 1)
+    if (inner.cause !== undefined && inner.cause !== 'unknown') return inner
+  }
+  if (isTimeoutError(error)) {
+    const errorCode = stableCodeOf(error)
+    return {
+      cause: 'timeout',
+      ...errorCode === undefined ? {} : { errorCode },
+    }
+  }
+  const code = stableCodeOf(error)
+  if (code !== undefined && SAFE_TRANSPORT_CODE.test(code)) {
+    return { cause: 'transport', causeCode: code }
+  }
+  return {
+    cause: 'unknown',
+    ...code === undefined ? {} : { causeCode: code },
+  }
 }
 
 /**
@@ -1045,15 +1106,23 @@ function factsInChain(error: unknown, depth: number): UsageFailureFacts {
  * @returns the classification.
  */
 export function classifyUsageFailure(error: unknown): UsageFailureReason {
+  const facts = usageFailureFacts(error)
+  if (facts.cause === 'credential') return 'unauthorized'
+  if (facts.cause === 'timeout' || facts.cause === 'transport') return 'unreachable'
+  if (facts.cause === 'endpoint') {
+    if (facts.status === 401 || facts.status === 403) return 'unauthorized'
+    if (facts.status === 429) return 'rate_limited'
+    if (facts.status === undefined || facts.status >= 500) return 'unreachable'
+    return 'invalid_response'
+  }
   if (isMissingOrInvalidCredential(error)) return 'unauthorized'
-  if (error instanceof LlmError && error.code === 'AUTH') return 'unauthorized'
   if (error instanceof OAuthEndpointError) {
     if (error.status === 401 || error.status === 403) return 'unauthorized'
     if (error.status === 429) return 'rate_limited'
     if (error.status >= 500) return 'unreachable'
     return 'invalid_response'
   }
-  if (error instanceof Error && (error.name === 'AbortError' || error.name === 'TimeoutError')) return 'unreachable'
+  if (isTimeoutError(error)) return 'unreachable'
   return 'unknown'
 }
 

@@ -1342,6 +1342,9 @@ export class SubscriptionsAuthController implements AuthController {
       durationMs: Date.now() - startedAt,
       ...usage.cache?.state === undefined ? {} : { state: usage.cache.state },
       ...usage.cache?.error === undefined ? {} : { reason: usage.cache.error },
+      ...usage.cache?.errorCode === undefined ? {} : { errorCode: usage.cache.errorCode },
+      ...usage.cache?.cause === undefined ? {} : { cause: usage.cache.cause },
+      ...usage.cache?.causeCode === undefined ? {} : { causeCode: usage.cache.causeCode },
       ...usage.cache?.status === undefined ? {} : { status: usage.cache.status },
       ...usage.cache?.code === undefined ? {} : { code: usage.cache.code },
     })

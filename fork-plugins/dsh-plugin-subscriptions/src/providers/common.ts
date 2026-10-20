@@ -959,6 +959,12 @@ export interface UsageCacheMeta {
   retryAt?: number
   /** Why the last upstream read failed, when one did. */
   error?: UsageFailureReason
+  /** Stable harness code of a failure that threw before producing usage. */
+  errorCode?: string
+  /** Safe origin class of the failure. */
+  cause?: 'endpoint' | 'timeout' | 'transport' | 'credential' | 'unknown'
+  /** Platform transport code, when the origin was a transport failure. */
+  causeCode?: string
   /** HTTP status the failed read observed, when it was an endpoint response. */
   status?: number
   /** Provider OAuth error code the failed read observed, when it was a fixed code. */

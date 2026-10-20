@@ -37,6 +37,10 @@ export interface UsageRefreshTrace {
   code?: string
   /** Stable harness error code when the read threw before producing usage. */
   errorCode?: string
+  /** Safe origin class of the failure. */
+  cause?: string
+  /** Platform transport code when the origin was a transport failure. */
+  causeCode?: string
 }
 
 /** A fixed, bounded code is safe to write; free-form text is not. */
@@ -52,6 +56,7 @@ function safeCode(value: string | undefined): string | undefined {
 export function formatUsageRefreshTrace(trace: UsageRefreshTrace): string {
   const code = safeCode(trace.code)
   const errorCode = safeCode(trace.errorCode)
+  const causeCode = safeCode(trace.causeCode)
   return `${JSON.stringify({
     v: 1,
     at: trace.at,
@@ -62,9 +67,11 @@ export function formatUsageRefreshTrace(trace: UsageRefreshTrace): string {
     ...trace.durationMs === undefined ? {} : { durationMs: Math.max(0, Math.round(trace.durationMs)) },
     ...trace.state === undefined ? {} : { state: trace.state },
     ...trace.reason === undefined ? {} : { reason: trace.reason },
+    ...trace.cause === undefined ? {} : { cause: trace.cause },
     ...trace.status === undefined ? {} : { status: trace.status },
     ...code === undefined ? {} : { code },
     ...errorCode === undefined ? {} : { errorCode },
+    ...causeCode === undefined ? {} : { causeCode },
   })}\n`
 }
 

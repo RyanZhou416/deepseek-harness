@@ -141,7 +141,7 @@ test('refreshSnapshot: a rate limit cools the endpoint down, and force never pun
   assert.equal(calls.count, 1)
   assert.deepEqual(first, {
     supported: true,
-    cache: { state: 'error', retryAt: clock.at + 60_000, error: 'rate_limited', status: 429 },
+    cache: { state: 'error', retryAt: clock.at + 60_000, error: 'rate_limited', cause: 'endpoint', status: 429 },
   })
   await tracker.refreshSnapshot('claude', 'a1')
   await tracker.refreshSnapshot('claude', 'a1', true)
@@ -752,24 +752,27 @@ test('classifyUsageFailure: names a safe reason and never the provider message',
   assert.equal(classifyUsageFailure(new OAuthEndpointError('nope', 401)), 'unauthorized')
   assert.equal(classifyUsageFailure(new OAuthEndpointError('down', 503)), 'unreachable')
   assert.equal(classifyUsageFailure(new LlmError('logged out', 'INVALID_CREDENTIAL')), 'unauthorized')
-  assert.equal(classifyUsageFailure(new LlmError('token refresh failed', 'AUTH')), 'unauthorized')
+  assert.equal(classifyUsageFailure(new LlmError('token refresh failed', 'AUTH')), 'unknown')
+  assert.equal(classifyUsageFailure(new LlmError('token refresh failed', 'AUTH', {
+    cause: new OAuthEndpointError('raw-secret-body', 401, 'invalid_grant'),
+  })), 'unauthorized')
   assert.equal(classifyUsageFailure(new Error('socket hang up')), 'unknown')
 })
 
 test('usageFailureFacts: reads only a safe status and OAuth code, including through a cause', () => {
   assert.deepEqual(
     usageFailureFacts(new OAuthEndpointError('raw-secret-body', 401, 'invalid_grant')),
-    { status: 401, code: 'invalid_grant' },
+    { cause: 'endpoint', status: 401, code: 'invalid_grant' },
   )
   assert.deepEqual(
     usageFailureFacts(new Error('wrapper', { cause: new OAuthEndpointError('raw-secret-body', 403, '<raw>') })),
-    { status: 403 },
+    { cause: 'endpoint', status: 403 },
     'an unsafe or free-form code is omitted, while the status remains',
   )
-  assert.deepEqual(usageFailureFacts(new Error('plain failure')), {})
+  assert.deepEqual(usageFailureFacts(new Error('plain failure')), { cause: 'unknown' })
   const cyclic = new Error('cyclic failure')
   cyclic.cause = cyclic
-  assert.deepEqual(usageFailureFacts(cyclic), {})
+  assert.deepEqual(usageFailureFacts(cyclic), { cause: 'unknown' })
 })
 
 test('refreshSnapshot: a wrapped token-refresh failure keeps safe endpoint facts in its cache entry', async () => {
@@ -783,6 +786,8 @@ test('refreshSnapshot: a wrapped token-refresh failure keeps safe endpoint facts
     state: 'error',
     retryAt: clock.at,
     error: 'unauthorized',
+    errorCode: 'AUTH',
+    cause: 'endpoint',
     status: 401,
     code: 'invalid_client',
   })
