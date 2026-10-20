@@ -17,7 +17,7 @@ import { join } from 'node:path'
 import { LlmError } from '@deepseek-ai/dsh-llm'
 import { OAuthEndpointError } from '../src/providers/common.js'
 import type { ProviderUsage } from '../src/providers/common.js'
-import { classifyUsageFailure, PoolUsageTracker } from '../src/providers/pool-usage.js'
+import { classifyUsageFailure, PoolUsageTracker, usageFailureFacts } from '../src/providers/pool-usage.js'
 import { usageFloorBreaches } from '../src/providers/pool.js'
 import { resolvePoolScheduling } from '../src/providers/pool-scheduling.js'
 import { createFileUsageStore } from '../src/providers/usage-store.js'
@@ -141,7 +141,7 @@ test('refreshSnapshot: a rate limit cools the endpoint down, and force never pun
   assert.equal(calls.count, 1)
   assert.deepEqual(first, {
     supported: true,
-    cache: { state: 'error', retryAt: clock.at + 60_000, error: 'rate_limited' },
+    cache: { state: 'error', retryAt: clock.at + 60_000, error: 'rate_limited', status: 429 },
   })
   await tracker.refreshSnapshot('claude', 'a1')
   await tracker.refreshSnapshot('claude', 'a1', true)
@@ -752,7 +752,40 @@ test('classifyUsageFailure: names a safe reason and never the provider message',
   assert.equal(classifyUsageFailure(new OAuthEndpointError('nope', 401)), 'unauthorized')
   assert.equal(classifyUsageFailure(new OAuthEndpointError('down', 503)), 'unreachable')
   assert.equal(classifyUsageFailure(new LlmError('logged out', 'INVALID_CREDENTIAL')), 'unauthorized')
+  assert.equal(classifyUsageFailure(new LlmError('token refresh failed', 'AUTH')), 'unauthorized')
   assert.equal(classifyUsageFailure(new Error('socket hang up')), 'unknown')
+})
+
+test('usageFailureFacts: reads only a safe status and OAuth code, including through a cause', () => {
+  assert.deepEqual(
+    usageFailureFacts(new OAuthEndpointError('raw-secret-body', 401, 'invalid_grant')),
+    { status: 401, code: 'invalid_grant' },
+  )
+  assert.deepEqual(
+    usageFailureFacts(new Error('wrapper', { cause: new OAuthEndpointError('raw-secret-body', 403, '<raw>') })),
+    { status: 403 },
+    'an unsafe or free-form code is omitted, while the status remains',
+  )
+  assert.deepEqual(usageFailureFacts(new Error('plain failure')), {})
+  const cyclic = new Error('cyclic failure')
+  cyclic.cause = cyclic
+  assert.deepEqual(usageFailureFacts(cyclic), {})
+})
+
+test('refreshSnapshot: a wrapped token-refresh failure keeps safe endpoint facts in its cache entry', async () => {
+  const clock = clockAt()
+  const wrapped = new LlmError('token refresh failed', 'AUTH', {
+    cause: new OAuthEndpointError('raw-secret-body', 401, 'invalid_client'),
+  })
+  const { tracker } = trackerOf(() => Promise.reject(wrapped), { clock })
+  const failed = await tracker.refreshSnapshot('claude', 'a1')
+  assert.deepEqual(failed.cache, {
+    state: 'error',
+    retryAt: clock.at,
+    error: 'unauthorized',
+    status: 401,
+    code: 'invalid_client',
+  })
 })
 
 test('usage store: an unreadable file or record is discarded rather than read as current', async () => {
@@ -783,6 +816,31 @@ test('usage store: an unreadable file or record is discarded rather than read as
     const future = join(directory, 'future.json')
     writeFileSync(future, JSON.stringify({ version: 99, accounts: [{ provider: 'claude', account: 'a1', windows: [] }] }))
     assert.deepEqual(createFileUsageStore({ file: future }).records(), [])
+  } finally {
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test('usage store: safe endpoint facts survive a durable roundtrip', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'dsh-usage-store-'))
+  const file = join(directory, 'usage.json')
+  try {
+    const store = createFileUsageStore({ file })
+    store.save({
+      provider: 'claude',
+      account: 'a1',
+      windows: [],
+      failure: { at: 1_000, retryAt: 2_000, reason: 'unknown', status: 401, code: 'invalid_grant' },
+    })
+    await store.dispose()
+    const restored = createFileUsageStore({ file }).records()[0]
+    assert.deepEqual(restored?.failure, {
+      at: 1_000,
+      retryAt: 2_000,
+      reason: 'unknown',
+      status: 401,
+      code: 'invalid_grant',
+    })
   } finally {
     rmSync(directory, { recursive: true, force: true })
   }

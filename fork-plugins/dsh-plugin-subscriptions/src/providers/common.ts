@@ -959,6 +959,10 @@ export interface UsageCacheMeta {
   retryAt?: number
   /** Why the last upstream read failed, when one did. */
   error?: UsageFailureReason
+  /** HTTP status the failed read observed, when it was an endpoint response. */
+  status?: number
+  /** Provider OAuth error code the failed read observed, when it was a fixed code. */
+  code?: string
 }
 
 /** Subscription usage of one provider, as served by the `usage` RPC endpoint. */

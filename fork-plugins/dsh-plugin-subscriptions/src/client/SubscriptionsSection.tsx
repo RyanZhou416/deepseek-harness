@@ -291,6 +291,10 @@ export interface UsageCacheMetadata {
   retryAt?: number
   /** Coded reason of an `error` state (never raw provider text). */
   error?: string
+  /** HTTP status the failed read observed, when it was an endpoint response. */
+  status?: number
+  /** Provider OAuth error code the failed read observed, when it was a fixed code. */
+  code?: string
 }
 
 /** `usage` endpoint value: the node half owns this shape. */
@@ -829,6 +833,16 @@ export function usageBarColor(usedPercent: number): string {
 }
 
 /**
+ * Render the safe endpoint facts of a failed usage read.
+ * @param metadata - the cache metadata that recorded the failure.
+ * @returns `HTTP 401 invalid_grant`, a lone code, or undefined when neither was recorded.
+ */
+function usageFailureDetail(metadata: UsageCacheMetadata): string | undefined {
+  if (metadata.status === undefined) return metadata.code
+  return `HTTP ${String(metadata.status)}${metadata.code === undefined ? '' : ` ${metadata.code}`}`
+}
+
+/**
  * Localized freshness line of one cached usage entry: when the values were
  * observed, whether the node half kept a stale value, has none yet, failed its
  * last revalidation, or is refreshing now, plus the instant a forced read may
@@ -857,11 +871,14 @@ export function usageCacheNote(
   switch (metadata?.state) {
     case 'stale': parts.push(t('usageCacheStale')); break
     case 'missing': parts.push(t('usageCacheMissing')); break
-    case 'error':
-      parts.push(metadata.error === undefined
+    case 'error': {
+      const base = metadata.error === undefined
         ? t('usageCacheFailedNoReason')
-        : t('usageCacheFailed', { message: metadata.error }))
+        : t('usageCacheFailed', { message: metadata.error })
+      const detail = usageFailureDetail(metadata)
+      parts.push(detail === undefined ? base : `${base} (${detail})`)
       break
+    }
     case 'refreshing': parts.push(t('usageCacheRefreshing')); break
     case 'fresh':
     case undefined: break

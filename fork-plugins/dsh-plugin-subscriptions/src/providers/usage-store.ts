@@ -14,7 +14,8 @@
  * rewritten from a stale in-memory copy.
  *
  * No credential, token, request id or provider message is stored — only the
- * normalized window readings and a safe failure classification.
+ * normalized window readings, a safe failure classification, and the HTTP
+ * status/OAuth code of a failed usage read when one was observed.
  */
 
 import { readFileSync } from 'node:fs'
@@ -46,6 +47,10 @@ export interface PersistedUsageFailure {
   retryAt: number
   /** Safe classification; never a provider message or token. */
   reason: UsageFailureReason
+  /** HTTP status the failed read observed, when it was an endpoint response. */
+  status?: number
+  /** Provider OAuth error code the failed read observed, when it was a fixed code. */
+  code?: string
 }
 
 /** One account's durable usage state. */
@@ -129,13 +134,33 @@ function providerOf(value: unknown): ProviderId | undefined {
     : undefined
 }
 
+/** A persisted HTTP status, or undefined when the value is not a valid status. */
+function httpStatusOf(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isInteger(value) && value >= 100 && value <= 599
+    ? value
+    : undefined
+}
+
+/** A persisted fixed OAuth code, bounded so no provider text enters the cache. */
+function oauthCodeOf(value: unknown): string | undefined {
+  return typeof value === 'string' && /^[a-z][a-z0-9_]{0,63}$/i.test(value) ? value : undefined
+}
+
 function failureOf(value: unknown): PersistedUsageFailure | undefined {
   if (!isRecord(value)) return undefined
   const at = nonnegative(value.at)
   const retryAt = nonnegative(value.retryAt)
   const reason = failureReasonOf(value.reason)
   if (at === undefined || retryAt === undefined || reason === undefined) return undefined
-  return { at, retryAt, reason }
+  const status = httpStatusOf(value.status)
+  const code = oauthCodeOf(value.code)
+  return {
+    at,
+    retryAt,
+    reason,
+    ...status === undefined ? {} : { status },
+    ...code === undefined ? {} : { code },
+  }
 }
 
 function failureReasonOf(value: unknown): UsageFailureReason | undefined {

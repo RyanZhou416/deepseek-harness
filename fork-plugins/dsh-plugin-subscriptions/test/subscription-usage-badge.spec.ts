@@ -155,6 +155,14 @@ test('cached usage missing is stated as missing, never as zero percent', () => {
     assert.ok(stale?.includes(t('usageCacheStale')))
     assert.ok(usageCacheNote({ usage: { supported: true, windows, cache: { state: 'error', error: 'quota/read-failed', retryAt: Date.now() + 60_000 } } }, t)
       ?.includes(t('usageCacheFailed', { message: 'quota/read-failed' })))
+    const detailed = usageCacheNote({
+      usage: {
+        supported: true,
+        windows,
+        cache: { state: 'error', error: 'unauthorized', status: 401, code: 'invalid_grant' },
+      },
+    }, t)
+    assert.ok(detailed?.includes('HTTP 401 invalid_grant'))
     assert.equal(usageCacheNote(undefined, t), undefined)
   }
 })

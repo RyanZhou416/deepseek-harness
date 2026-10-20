@@ -14,6 +14,7 @@
  */
 
 import { isMissingOrInvalidCredential, OAuthEndpointError } from './common.js'
+import { LlmError } from '@deepseek-ai/dsh-llm'
 import type { ProviderUsage, UsageCacheMeta, UsageCacheState, UsageFailureReason, UsageWindow } from './common.js'
 import type { UnifiedRateLimitState } from './unified-rate-limit.js'
 import type { PersistedUsageAccount, UsageStore } from './usage-store.js'
@@ -158,7 +159,13 @@ interface AccountRecord {
   checkedAt?: number
   plan?: string
   resetCredits?: ProviderUsage['resetCredits']
-  failure?: { at: number; retryAt: number; reason: UsageFailureReason }
+  failure?: {
+    at: number
+    retryAt: number
+    reason: UsageFailureReason
+    status?: number
+    code?: string
+  }
   /**
    * Set when this reading must not be served as current: an invalidation
    * distrusted it. The windows stay — they still state what the account last
@@ -585,9 +592,16 @@ export class PoolUsageTracker {
   /** Freshness metadata of one account's retained reading. */
   private meta(key: string, record: AccountRecord | undefined, now: number): UsageCacheMeta {
     const failure = record?.failure
-    const common: Pick<UsageCacheMeta, 'observedAt' | 'retryAt' | 'error'> = {
+    const common: Pick<UsageCacheMeta, 'observedAt' | 'retryAt' | 'error' | 'status' | 'code'> = {
       ...record?.observedAt === undefined ? {} : { observedAt: record.observedAt },
-      ...failure === undefined ? {} : { retryAt: failure.retryAt, error: failure.reason },
+      ...failure === undefined
+        ? {}
+        : {
+            retryAt: failure.retryAt,
+            error: failure.reason,
+            ...failure.status === undefined ? {} : { status: failure.status },
+            ...failure.code === undefined ? {} : { code: failure.code },
+          },
     }
     if (this.refreshing(key)) return { state: 'refreshing', ...common }
     if (record === undefined || record.windows.length === 0 || record.observedAt === undefined) {
@@ -729,10 +743,12 @@ export class PoolUsageTracker {
     const record = this.records.get(key) ?? { windows: [] }
     const at = this.now()
     const reason = classifyUsageFailure(error)
+    const facts = usageFailureFacts(error)
     record.failure = {
       at,
       retryAt: at + (reason === 'unauthorized' ? 0 : cooldownFor(error, this.retryDelayMs)),
       reason,
+      ...facts,
     }
     this.records.set(key, record)
     // A live login failure costs no round trip and must stay live; persisting it
@@ -984,6 +1000,44 @@ function cooldownFor(error: unknown, defaultRetryMs: number): number {
   return error instanceof OAuthEndpointError && error.retryAfterMs !== undefined ? error.retryAfterMs : defaultRetryMs
 }
 
+/** Safe HTTP/OAuth facts of a failed usage read, never a provider message or body. */
+export interface UsageFailureFacts {
+  /** HTTP status, when the failure came from an endpoint response. */
+  status?: number
+  /** Provider OAuth error code, when it is a bounded fixed code. */
+  code?: string
+}
+
+/** A provider OAuth code that is safe to persist and show. */
+const SAFE_OAUTH_CODE = /^[a-z][a-z0-9_]{0,63}$/i
+
+/**
+ * Extract credential-free facts from a failed usage read, following the cause
+ * chain a wrapped token-refresh failure uses.
+ * @param error - the failure the read reported.
+ * @returns the safe HTTP status and OAuth code that were observed.
+ */
+export function usageFailureFacts(error: unknown): UsageFailureFacts {
+  return factsInChain(error, 0)
+}
+
+/** Bound the cause walk and never follow a cycle. */
+function factsInChain(error: unknown, depth: number): UsageFailureFacts {
+  if (depth > 8) return {}
+  if (error instanceof OAuthEndpointError) {
+    const code = error.oauthCode !== undefined && SAFE_OAUTH_CODE.test(error.oauthCode)
+      ? error.oauthCode
+      : undefined
+    return {
+      status: error.status,
+      ...code === undefined ? {} : { code },
+    }
+  }
+  const cause = error instanceof Error ? error.cause : undefined
+  if (cause === undefined || cause === error) return {}
+  return factsInChain(cause, depth + 1)
+}
+
 /**
  * A safe classification of a failed usage read. It is what gets persisted and
  * shown, so it must never carry a provider message, response body or token.
@@ -992,6 +1046,7 @@ function cooldownFor(error: unknown, defaultRetryMs: number): number {
  */
 export function classifyUsageFailure(error: unknown): UsageFailureReason {
   if (isMissingOrInvalidCredential(error)) return 'unauthorized'
+  if (error instanceof LlmError && error.code === 'AUTH') return 'unauthorized'
   if (error instanceof OAuthEndpointError) {
     if (error.status === 401 || error.status === 403) return 'unauthorized'
     if (error.status === 429) return 'rate_limited'
