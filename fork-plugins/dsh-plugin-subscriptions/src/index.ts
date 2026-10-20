@@ -33,6 +33,7 @@ import { DEFAULT_MAX_QUEUED_BYTES } from './transport/bridge.js'
 import { OAuthFlowManager, type OAuthAttempt } from './auth/oauth-flow.js'
 import { DeviceFlowManager, type DeviceAttempt } from './auth/device-flow.js'
 import { readFile } from 'node:fs/promises'
+import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import {
   readClaudeCodeCredentialSource,
@@ -1318,6 +1319,8 @@ export class SubscriptionsAuthController implements AuthController {
 
   /** Append one safe refresh-diagnostic line; a failed write never changes the read. */
   private traceUsageRefresh(trace: UsageRefreshTrace): void {
+    const enabledFile = dshHomePath('plugins', 'subscriptions', 'usage-refresh.enabled')
+    if (!existsSync(enabledFile)) return
     void appendUsageRefreshTrace(dshHomePath('plugins', 'subscriptions', 'usage-refresh.log'), trace)
       .catch(() => { /* Diagnostics must never change a usage read. */ })
   }
