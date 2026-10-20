@@ -219,7 +219,7 @@ positions, the chained stream-to-rebuild replay, and the no-capture case.
 
 凭据刷新失败（`AUTH`/`INVALID_CREDENTIAL`）的模型可见消息只追加安全事实：HTTP status、provider OAuth `error` code、存在时的 `retry-after` 秒数；不写入响应正文、token 或自由文本。`invalid_grant`/明确的 403 才能说明账号或授权被拒绝，泛化 `AUTH` 不能据此认定封号。保留 `token-refresh-commit.spec.ts` 对这些事实与脱敏的断言。
 
-usage 缓存失败记录同样只增加安全的 `status`/`code`（固定 OAuth code 才保留），并在订阅卡片显示 `刷新失败：<分类>（HTTP <status> <code>）`；不持久化 provider 消息、响应正文或 token。保留 `pool-usage.spec.ts` 的脱敏/回环断言与 `subscription-usage-badge.spec.ts` 的展示断言。
+usage 缓存失败记录同样只增加安全的 `status`/`code`（固定 OAuth code 才保留），并在订阅卡片显示 `刷新失败：<分类>（HTTP <status> <code>）`；不持久化 provider 消息、响应正文或 token。显式 usage Refresh 另写 `plugins/subscriptions/usage-refresh.log`（JSONL：phase、耗时、缓存状态、分类、HTTP status、固定 OAuth code），不写 token、正文或 provider 消息；无该行即表示点击未到达 Host 或未完成。保留 `pool-usage.spec.ts` 的脱敏/回环断言、`subscription-usage-badge.spec.ts` 的展示断言与 `usage-refresh-log.spec.ts` 的脱敏/追加断言。
 
 **Preservation rule.** Claude 凭据所有权由 `credentialOwnershipMode` 的解析结果决定，其规则与能力只由 `src/auth/claude-credential-ownership.ts` 拥有：只读导入每次使用都按当前外部来源 winner 核对身份与来源自己声明的 scope，失败即停止，不回落本地缓存令牌、不花费共享 grant、不写外部存储、不删除已存授权；`legacy-writeback` 可能花费同一共享 grant，且仅在 `syncClaudeCodeCredentials` 启用时写回外部来源，其状态必须继续标注 `external-coordination-unproven`，不得称为安全的 single writer；只有 `independent-oauth` 拥有主动续期定时器，只读账号不进入任何会触发 grant 的 sweep；mode 不得豁免一方 OAuth 的组织政策资格；列表与状态读取不触外部来源、不发请求。模式 owner、导入与转换规则、聚焦测试名字与合成来源验证范围见[插件维护说明该节](fork-plugins/dsh-plugin-subscriptions/FORK_MAINTENANCE.md#claude-credential-ownership-modes)。
 

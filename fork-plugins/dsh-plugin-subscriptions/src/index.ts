@@ -125,8 +125,10 @@ import { registerWithAlias } from './tools/registration.js'
 import { buildAccountPools, poolKey } from './providers/pool-family.js'
 import type { PoolDefinition, PoolMemberRef } from './providers/pool-family.js'
 import { PoolHealthRegistry, isAuthCooldownReason } from './providers/pool-health.js'
-import { PoolUsageTracker, USAGE_TTL_MS } from './providers/pool-usage.js'
+import { PoolUsageTracker, USAGE_TTL_MS, usageFailureFacts } from './providers/pool-usage.js'
 import type { UsageFetcher } from './providers/pool-usage.js'
+import { appendUsageRefreshTrace } from './providers/usage-refresh-log.js'
+import type { UsageRefreshMode, UsageRefreshTrace } from './providers/usage-refresh-log.js'
 import { forgetUnifiedRateLimit, renameUnifiedRateLimit, unifiedRateLimitFor } from './providers/unified-rate-limit.js'
 import {
   CodexAdapter,
@@ -555,6 +557,12 @@ type UsageFetchers = Partial<Record<ProviderId, (account: string, signal: AbortS
 function usageReadSignal(lifecycle?: AbortSignal): AbortSignal {
   const timeout = AbortSignal.timeout(POOL_USAGE_TIMEOUT_MS)
   return lifecycle === undefined ? timeout : AbortSignal.any([lifecycle, timeout])
+}
+
+/** A stable harness error code, without carrying a provider message into a trace. */
+function usageRefreshErrorCode(error: unknown): string | undefined {
+  if (!(error instanceof Error) || !('code' in error)) return undefined
+  return typeof error.code === 'string' ? error.code : undefined
 }
 
 /**
@@ -1308,22 +1316,77 @@ export class SubscriptionsAuthController implements AuthController {
     })
   }
 
+  /** Append one safe refresh-diagnostic line; a failed write never changes the read. */
+  private traceUsageRefresh(trace: UsageRefreshTrace): void {
+    void appendUsageRefreshTrace(dshHomePath('plugins', 'subscriptions', 'usage-refresh.log'), trace)
+      .catch(() => { /* Diagnostics must never change a usage read. */ })
+  }
+
+  /** Record the safe cache outcome of one explicit usage refresh. */
+  private traceUsageOutcome(
+    mode: UsageRefreshMode,
+    provider: ProviderId,
+    account: string,
+    startedAt: number,
+    usage: ProviderUsage,
+  ): void {
+    this.traceUsageRefresh({
+      at: startedAt,
+      provider,
+      account,
+      mode,
+      phase: 'ok',
+      durationMs: Date.now() - startedAt,
+      ...usage.cache?.state === undefined ? {} : { state: usage.cache.state },
+      ...usage.cache?.error === undefined ? {} : { reason: usage.cache.error },
+      ...usage.cache?.status === undefined ? {} : { status: usage.cache.status },
+      ...usage.cache?.code === undefined ? {} : { code: usage.cache.code },
+    })
+  }
+
   async usage(provider: ProviderId, account: string, signal: AbortSignal, force = false, refresh = false): Promise<ProviderUsage> {
-    await this.beforeRead()
-    signal.throwIfAborted()
-    const usage = force || refresh
-      ? await this.usageCache.refreshSnapshot(provider, account, force)
-      : this.usageCache.snapshotFor(provider, account)
-    signal.throwIfAborted()
-    if (!usage.supported) return usage
-    // Both additions are plugin-local state read without a round trip, so a
-    // provider or composition without them answers exactly as before.
-    const rateLimit = unifiedRateLimitFor(provider, account)
-    const pool = await this.poolState(provider, account)
-    return {
-      ...usage,
-      ...rateLimit === undefined ? {} : { rateLimit },
-      ...pool === undefined ? {} : { pool },
+    const mode: UsageRefreshMode | undefined = force ? 'force' : refresh ? 'refresh' : undefined
+    const startedAt = Date.now()
+    if (mode !== undefined) {
+      this.traceUsageRefresh({ at: startedAt, provider, account, mode, phase: 'start' })
+    }
+    try {
+      await this.beforeRead()
+      signal.throwIfAborted()
+      const usage = force || refresh
+        ? await this.usageCache.refreshSnapshot(provider, account, force)
+        : this.usageCache.snapshotFor(provider, account)
+      signal.throwIfAborted()
+      if (!usage.supported) {
+        if (mode !== undefined) this.traceUsageOutcome(mode, provider, account, startedAt, usage)
+        return usage
+      }
+      // Both additions are plugin-local state read without a round trip, so a
+      // provider or composition without them answers exactly as before.
+      const rateLimit = unifiedRateLimitFor(provider, account)
+      const pool = await this.poolState(provider, account)
+      const result = {
+        ...usage,
+        ...rateLimit === undefined ? {} : { rateLimit },
+        ...pool === undefined ? {} : { pool },
+      }
+      if (mode !== undefined) this.traceUsageOutcome(mode, provider, account, startedAt, result)
+      return result
+    } catch (error) {
+      if (mode !== undefined) {
+        const errorCode = usageRefreshErrorCode(error)
+        this.traceUsageRefresh({
+          at: startedAt,
+          provider,
+          account,
+          mode,
+          phase: 'error',
+          durationMs: Date.now() - startedAt,
+          ...usageFailureFacts(error),
+          ...errorCode === undefined ? {} : { errorCode },
+        })
+      }
+      throw error
     }
   }
 
