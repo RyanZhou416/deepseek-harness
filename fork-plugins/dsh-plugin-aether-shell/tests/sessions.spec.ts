@@ -54,7 +54,7 @@ async function setup(options: Parameters<typeof createSessionHarness>[0] = {}): 
 
 /** Open a session through the real tool and return its opaque id. */
 async function openSession(mounted: SessionHarness, owner: Agent, args: Record<string, unknown> = {}): Promise<string> {
-  const opened = valueOf(await mounted.call('aether_session_open', args, { agent: owner }))
+  const opened = valueOf(await mounted.call('aether_session', { action: 'open', ...args }, { agent: owner }))
   expect(opened['kind']).toBe('opened')
   return String(opened['session_id'])
 }
@@ -67,7 +67,7 @@ async function evaluate(
   code: string,
   extra: Record<string, unknown> = {},
 ): Promise<Record<string, unknown>> {
-  return valueOf(await mounted.call('aether_session_eval', { session_id: sessionId, code, ...extra }, { agent: owner }))
+  return valueOf(await mounted.call('aether_session', { action: 'eval', session_id: sessionId, code, ...extra }, { agent: owner }))
 }
 
 
@@ -230,7 +230,7 @@ describe.skipIf(interpreter === undefined)('aether session tools against the ins
   it('opens a session, reports its policy, and exposes only an opaque id', async () => {
     const mounted = await setup()
     const owner = await mounted.agent('sess-open-owner')
-    const result = await mounted.call('aether_session_open', { name: 'work' }, { agent: owner })
+    const result = await mounted.call('aether_session', { action: 'open', name: 'work' }, { agent: owner })
     const opened = valueOf(result)
     expect(opened['kind']).toBe('opened')
     expect(opened['name']).toBe('work')
@@ -308,12 +308,12 @@ describe.skipIf(interpreter === undefined)('aether session tools against the ins
     const stranger = await mounted.agent('sess-owner-b')
     const sessionId = await openSession(mounted, owner)
 
-    expect(await failure(mounted, 'aether_session_eval', { session_id: sessionId, code: '1' }, stranger))
+    expect(await failure(mounted, 'aether_session', { action: 'eval', session_id: sessionId, code: '1' }, stranger))
       .toContain('E_SESSION_FOREIGN')
-    expect(await failure(mounted, 'aether_session_close', { session_id: sessionId }, stranger))
+    expect(await failure(mounted, 'aether_session', { action: 'close', session_id: sessionId }, stranger))
       .toContain('E_SESSION_FOREIGN')
     // A listing is scoped to its caller: the stranger sees only its own (empty) set.
-    expect(valueOf(await mounted.call('aether_session_list', {}, { agent: stranger }))['sessions']).toEqual([])
+    expect(valueOf(await mounted.call('aether_session', { action: 'list',}, { agent: stranger }))['sessions']).toEqual([])
     // The owner's session is untouched by the refused calls.
     expect((await evaluate(mounted, owner, sessionId, '1 + 1')).value).toBe(2)
   })
@@ -322,7 +322,7 @@ describe.skipIf(interpreter === undefined)('aether session tools against the ins
     const mounted = await setup()
     const owner = await mounted.agent('sess-live-owner')
     const impostor = { ...owner } as Agent
-    expect(await failure(mounted, 'aether_session_open', {}, impostor)).toContain('E_SESSION_OWNER')
+    expect(await failure(mounted, 'aether_session', { action: 'open',}, impostor)).toContain('E_SESSION_OWNER')
   })
 
   it('reports the agent\'s own handles and never another agent\'s', async () => {
@@ -332,7 +332,7 @@ describe.skipIf(interpreter === undefined)('aether session tools against the ins
     const sessionId = await openSession(mounted, owner, { name: 'listing' })
     await openSession(mounted, stranger)
 
-    const listing = valueOf(await mounted.call('aether_session_list', {}, { agent: owner }))
+    const listing = valueOf(await mounted.call('aether_session', { action: 'list',}, { agent: owner }))
     expect(listing['kind']).toBe('listed')
     const sessions = listing['sessions'] as Array<Record<string, unknown>>
     expect(sessions).toHaveLength(1)
@@ -344,7 +344,7 @@ describe.skipIf(interpreter === undefined)('aether session tools against the ins
       usage: {},
     })
 
-    const withUsage = valueOf(await mounted.call('aether_session_list', { usage: true }, { agent: owner }))
+    const withUsage = valueOf(await mounted.call('aether_session', { action: 'list', usage: true }, { agent: owner }))
     const counters = (withUsage['sessions'] as Array<{ usage: Record<string, unknown> }>)[0]?.usage
     expect(typeof counters?.['evals']).toBe('number')
   })
@@ -354,14 +354,14 @@ describe.skipIf(interpreter === undefined)('aether session tools against the ins
     const owner = await mounted.agent('sess-close-owner')
     const sessionId = await openSession(mounted, owner)
 
-    const closed = valueOf(await mounted.call('aether_session_close', { session_id: sessionId }, { agent: owner }))
+    const closed = valueOf(await mounted.call('aether_session', { action: 'close', session_id: sessionId }, { agent: owner }))
     expect(closed).toMatchObject({ kind: 'closed', session_id: sessionId, closed: true, native_closed: true })
 
-    const again = valueOf(await mounted.call('aether_session_close', { session_id: sessionId }, { agent: owner }))
+    const again = valueOf(await mounted.call('aether_session', { action: 'close', session_id: sessionId }, { agent: owner }))
     expect(again).toMatchObject({ kind: 'closed', closed: false })
-    expect(await failure(mounted, 'aether_session_eval', { session_id: sessionId, code: '1' }, owner))
+    expect(await failure(mounted, 'aether_session', { action: 'eval', session_id: sessionId, code: '1' }, owner))
       .toContain('E_SESSION_UNKNOWN')
-    expect(valueOf(await mounted.call('aether_session_list', {}, { agent: owner }))['sessions']).toEqual([])
+    expect(valueOf(await mounted.call('aether_session', { action: 'list',}, { agent: owner }))['sessions']).toEqual([])
   })
 
   it('closes every session when the tools unload, as a plugin reload does', async () => {
@@ -371,8 +371,8 @@ describe.skipIf(interpreter === undefined)('aether session tools against the ins
 
     await mounted.unmount()
     // The tools are gone with their fiber, and the process they owned went with them.
-    expect(await failure(mounted, 'aether_session_eval', { session_id: sessionId, code: '1' }, owner)).toMatch(/unknown tool|UNKNOWN_TOOL/i)
-    expect(await failure(mounted, 'aether_session_list', {}, owner)).toMatch(/unknown tool|UNKNOWN_TOOL/i)
+    expect(await failure(mounted, 'aether_session', { action: 'eval', session_id: sessionId, code: '1' }, owner)).toMatch(/unknown tool|UNKNOWN_TOOL/i)
+    expect(await failure(mounted, 'aether_session', { action: 'list',}, owner)).toMatch(/unknown tool|UNKNOWN_TOOL/i)
   })
 
   it('refuses to run new work under a policy that changed after the session opened', async () => {
@@ -382,10 +382,10 @@ describe.skipIf(interpreter === undefined)('aether session tools against the ins
     expect((await evaluate(mounted, owner, sessionId, '1')).value).toBe(1)
 
     owner.session.append('sandbox/mode', { mode: 'read-only' })
-    expect(await failure(mounted, 'aether_session_eval', { session_id: sessionId, code: '2' }, owner))
+    expect(await failure(mounted, 'aether_session', { action: 'eval', session_id: sessionId, code: '2' }, owner))
       .toContain('E_SESSION_POLICY')
     // The refused call closed the handle instead of reusing the old process.
-    expect(await failure(mounted, 'aether_session_eval', { session_id: sessionId, code: '3' }, owner))
+    expect(await failure(mounted, 'aether_session', { action: 'eval', session_id: sessionId, code: '3' }, owner))
       .toContain('E_SESSION_UNKNOWN')
   })
 
@@ -395,7 +395,7 @@ describe.skipIf(interpreter === undefined)('aether session tools against the ins
     await openSession(mounted, owner)
     owner.session.append('sandbox/mode', { mode: 'read-only' })
 
-    const listing = valueOf(await mounted.call('aether_session_list', {}, { agent: owner }))
+    const listing = valueOf(await mounted.call('aether_session', { action: 'list',}, { agent: owner }))
     const sessions = listing['sessions'] as Array<Record<string, unknown>>
     expect(sessions).toHaveLength(1)
     expect(sessions[0]).toMatchObject({ phase: 'destroyed', policy_mode: 'danger-full-access' })
@@ -412,7 +412,7 @@ describe.skipIf(interpreter === undefined)('aether session tools against the ins
     expect((timedOut['error'] as { code?: string }).code).toBe('E_SESSION_TIMEOUT')
     // The whole process is gone, so no unknown command is left running behind
     // an apparently healthy handle.
-    expect(await failure(mounted, 'aether_session_eval', { session_id: sessionId, code: '1' }, owner))
+    expect(await failure(mounted, 'aether_session', { action: 'eval', session_id: sessionId, code: '1' }, owner))
       .toContain('E_SESSION_UNKNOWN')
   })
 
@@ -423,12 +423,12 @@ describe.skipIf(interpreter === undefined)('aether session tools against the ins
 
     const controller = new AbortController()
     setTimeout(() => { controller.abort() }, 300)
-    const result = await mounted.call('aether_session_eval', { session_id: sessionId, code: 'sleep(30000); 1' }, {
+    const result = await mounted.call('aether_session', { action: 'eval', session_id: sessionId, code: 'sleep(30000); 1' }, {
       agent: owner,
       signal: controller.signal,
     })
     expect(result.isError).toBe(true)
-    expect(await failure(mounted, 'aether_session_eval', { session_id: sessionId, code: '1' }, owner))
+    expect(await failure(mounted, 'aether_session', { action: 'eval', session_id: sessionId, code: '1' }, owner))
       .toContain('E_SESSION_UNKNOWN')
   })
 
@@ -439,16 +439,16 @@ describe.skipIf(interpreter === undefined)('aether session tools against the ins
 
     const gone = await evaluate(mounted, owner, sessionId, 'exit(0)')
     expect(gone['kind']).toBe('error')
-    expect(await failure(mounted, 'aether_session_eval', { session_id: sessionId, code: '1' }, owner))
+    expect(await failure(mounted, 'aether_session', { action: 'eval', session_id: sessionId, code: '1' }, owner))
       .toContain('E_SESSION_UNKNOWN')
-    expect(valueOf(await mounted.call('aether_session_list', {}, { agent: owner }))['sessions']).toEqual([])
+    expect(valueOf(await mounted.call('aether_session', { action: 'list',}, { agent: owner }))['sessions']).toEqual([])
   })
 
   it('refuses more sessions than the deployment allows one agent', async () => {
     const mounted = await setup({ settings: { maxSessionsPerOwner: 1 } })
     const owner = await mounted.agent('sess-limit-owner')
     await openSession(mounted, owner)
-    expect(await failure(mounted, 'aether_session_open', {}, owner)).toContain('E_SESSION_LIMIT')
+    expect(await failure(mounted, 'aether_session', { action: 'open',}, owner)).toContain('E_SESSION_LIMIT')
   })
 
   it('returns a program\'s printed output exactly once and then reports nothing unread', async () => {
@@ -457,20 +457,20 @@ describe.skipIf(interpreter === undefined)('aether session tools against the ins
     const sessionId = await openSession(mounted, owner)
 
     // The startup banner is consumed by the handshake, not by the first read.
-    const first = valueOf(await mounted.call('aether_session_read', { session_id: sessionId }, { agent: owner }))
+    const first = valueOf(await mounted.call('aether_session', { action: 'read', session_id: sessionId }, { agent: owner }))
     expect(first['kind']).toBe('read')
     expect((first['logs'] as { stdout: { text: string } }).stdout.text).toBe('')
 
     const printed = await evaluate(mounted, owner, sessionId, 'print("once-only"); 3')
     expect(JSON.stringify(printed['logs'])).toContain('once-only')
-    expect(text(await mounted.call('aether_session_read', { session_id: sessionId }, { agent: owner })))
+    expect(text(await mounted.call('aether_session', { action: 'read', session_id: sessionId }, { agent: owner })))
       .toContain('no unread output')
 
     // Output a failing program wrote is delivered too, not suppressed.
     const failing = await evaluate(mounted, owner, sessionId, 'print("before-failure"); no_such_builtin_xyz()')
     expect(failing['kind']).toBe('error')
     expect(JSON.stringify(failing['logs'])).toContain('before-failure')
-    expect(text(await mounted.call('aether_session_read', { session_id: sessionId }, { agent: owner })))
+    expect(text(await mounted.call('aether_session', { action: 'read', session_id: sessionId }, { agent: owner })))
       .toContain('no unread output')
   })
 
@@ -479,9 +479,9 @@ describe.skipIf(interpreter === undefined)('aether session tools against the ins
     const owner = await mounted.agent('sess-read-busy-owner')
     const sessionId = await openSession(mounted, owner)
 
-    const running = mounted.call('aether_session_eval', { session_id: sessionId, code: 'sleep(30000); 1', timeoutMs: 4_000 }, { agent: owner })
+    const running = mounted.call('aether_session', { action: 'eval', session_id: sessionId, code: 'sleep(30000); 1', timeoutMs: 4_000 }, { agent: owner })
     await expect.poll(() => mounted.sessions.list(owner).then(list => list[0]?.phase), { timeout: 5_000 }).toBe('busy')
-    expect(await failure(mounted, 'aether_session_read', { session_id: sessionId }, owner)).toContain('E_SESSION_BUSY')
+    expect(await failure(mounted, 'aether_session', { action: 'read', session_id: sessionId }, owner)).toContain('E_SESSION_BUSY')
     await running
   })
 
@@ -489,8 +489,8 @@ describe.skipIf(interpreter === undefined)('aether session tools against the ins
     const mounted = await setup()
     const owner = await mounted.agent('sess-read-unknown-owner')
     const sessionId = await openSession(mounted, owner)
-    await mounted.call('aether_session_close', { session_id: sessionId }, { agent: owner })
-    expect(await failure(mounted, 'aether_session_read', { session_id: sessionId }, owner)).toContain('E_SESSION_UNKNOWN')
+    await mounted.call('aether_session', { action: 'close', session_id: sessionId }, { agent: owner })
+    expect(await failure(mounted, 'aether_session', { action: 'read', session_id: sessionId }, owner)).toContain('E_SESSION_UNKNOWN')
   })
 
   it('drains output a spawned child writes between calls, exactly once', async () => {
@@ -523,7 +523,7 @@ describe.skipIf(interpreter === undefined)('aether session tools against the ins
       expect(typeof spawned['value']).toBe('number')
 
       const stdout = async (): Promise<string> => {
-        const result = valueOf(await mounted.call('aether_session_read', { session_id: sessionId }, { agent: owner }))
+        const result = valueOf(await mounted.call('aether_session', { action: 'read', session_id: sessionId }, { agent: owner }))
         return (result['logs'] as { stdout: { text: string } }).stdout.text
       }
 
@@ -538,7 +538,7 @@ describe.skipIf(interpreter === undefined)('aether session tools against the ins
     } finally {
       // Closing the session terminates the interpreter and the range it owns,
       // so the child is gone before the control directory is removed.
-      await mounted.call('aether_session_close', { session_id: sessionId }, { agent: owner })
+      await mounted.call('aether_session', { action: 'close', session_id: sessionId }, { agent: owner })
       await rm(control, { recursive: true, force: true })
     }
   })
@@ -549,16 +549,16 @@ describe.skipIf(interpreter === undefined)('aether session tools against the ins
     const sessionId = await openSession(mounted, owner)
 
     const results = await Promise.all([
-      mounted.call('aether_session_close', { session_id: sessionId }, { agent: owner }),
-      mounted.call('aether_session_close', { session_id: sessionId }, { agent: owner }),
+      mounted.call('aether_session', { action: 'close', session_id: sessionId }, { agent: owner }),
+      mounted.call('aether_session', { action: 'close', session_id: sessionId }, { agent: owner }),
     ])
     // Every closer asked for the same thing and every one of them got it: the
     // session is closed once, and no caller is told a session it asked to close
     // is still there.
     for (const result of results) expect(valueOf(result)).toMatchObject({ kind: 'closed', closed: true })
     // Whichever call reported it, both awaited the same join: the handle is gone.
-    expect(valueOf(await mounted.call('aether_session_list', {}, { agent: owner }))['sessions']).toEqual([])
-    expect(await failure(mounted, 'aether_session_eval', { session_id: sessionId, code: '1' }, owner))
+    expect(valueOf(await mounted.call('aether_session', { action: 'list',}, { agent: owner }))['sessions']).toEqual([])
+    expect(await failure(mounted, 'aether_session', { action: 'eval', session_id: sessionId, code: '1' }, owner))
       .toContain('E_SESSION_UNKNOWN')
   })
 
@@ -567,13 +567,13 @@ describe.skipIf(interpreter === undefined)('aether session tools against the ins
     const owner = await mounted.agent('sess-close-busy-owner')
     const sessionId = await openSession(mounted, owner)
 
-    const running = mounted.call('aether_session_eval', { session_id: sessionId, code: 'sleep(30000); 1', timeoutMs: 20_000 }, { agent: owner })
+    const running = mounted.call('aether_session', { action: 'eval', session_id: sessionId, code: 'sleep(30000); 1', timeoutMs: 20_000 }, { agent: owner })
     await expect.poll(() => mounted.sessions.list(owner).then(list => list[0]?.phase), { timeout: 5_000 }).toBe('busy')
     // A busy handle cannot answer a native close, so the process is terminated
     // without asking and the result says the interpreter did not confirm it.
-    const closed = valueOf(await mounted.call('aether_session_close', { session_id: sessionId }, { agent: owner }))
+    const closed = valueOf(await mounted.call('aether_session', { action: 'close', session_id: sessionId }, { agent: owner }))
     expect(closed).toMatchObject({ kind: 'closed', session_id: sessionId, closed: true, native_closed: false })
-    expect(valueOf(await mounted.call('aether_session_list', {}, { agent: owner }))['sessions']).toEqual([])
+    expect(valueOf(await mounted.call('aether_session', { action: 'list',}, { agent: owner }))['sessions']).toEqual([])
     await running
   })
 
@@ -582,9 +582,9 @@ describe.skipIf(interpreter === undefined)('aether session tools against the ins
     const owner = await mounted.agent('sess-list-busy-owner')
     const sessionId = await openSession(mounted, owner)
 
-    const running = mounted.call('aether_session_eval', { session_id: sessionId, code: 'sleep(30000); 1', timeoutMs: 4_000 }, { agent: owner })
+    const running = mounted.call('aether_session', { action: 'eval', session_id: sessionId, code: 'sleep(30000); 1', timeoutMs: 4_000 }, { agent: owner })
     await expect.poll(() => mounted.sessions.list(owner).then(list => list[0]?.phase), { timeout: 5_000 }).toBe('busy')
-    const listing = valueOf(await mounted.call('aether_session_list', { usage: true }, { agent: owner }))
+    const listing = valueOf(await mounted.call('aether_session', { action: 'list', usage: true }, { agent: owner }))
     const sessions = listing['sessions'] as Array<Record<string, unknown>>
     expect(sessions).toHaveLength(1)
     expect(sessions[0]).toMatchObject({ session_id: sessionId, phase: 'busy', usage: {} })
@@ -597,7 +597,7 @@ describe.skipIf(interpreter === undefined)('aether session tools against the ins
     const sessionId = await openSession(mounted, owner)
 
     owner.session.append('sandbox/mode', { mode: 'read-only' })
-    expect(await failure(mounted, 'aether_session_eval', { session_id: sessionId, code: '1' }, owner))
+    expect(await failure(mounted, 'aether_session', { action: 'eval', session_id: sessionId, code: '1' }, owner))
       .toContain('E_SESSION_POLICY')
     // The refusal is reported only after the process that held the old policy
     // was joined, so this owner's one slot is already free.
@@ -610,7 +610,7 @@ describe.skipIf(interpreter === undefined)('aether session tools against the ins
     // Hold the start inside confinement so the unload lands on a provably
     // in-flight start instead of racing a timer.
     const gate = mounted.holdConfine()
-    const pending = mounted.call('aether_session_open', {}, { agent: owner })
+    const pending = mounted.call('aether_session', { action: 'open',}, { agent: owner })
     await gate.reached
     await mounted.unmount()
     gate.release()
@@ -636,13 +636,13 @@ describe.skipIf(interpreter === undefined)('aether session tools against the ins
   it('reports the backend\'s real enforcement verdict instead of implying a full boundary', async () => {
     const mounted = await setup({ mode: 'workspace-write', enforcement: 'partial' })
     const owner = await mounted.agent('sess-partial-owner')
-    const opened = valueOf(await mounted.call('aether_session_open', {}, { agent: owner }))
+    const opened = valueOf(await mounted.call('aether_session', { action: 'open',}, { agent: owner }))
     expect(opened['policy']).toEqual({
       mode: 'workspace-write',
       workspace_root: mounted.workspace,
       enforcement: 'partial',
     })
-    expect(text(await mounted.call('aether_session_list', {}, { agent: owner }))).toContain('workspace-write')
+    expect(text(await mounted.call('aether_session', { action: 'list',}, { agent: owner }))).toContain('workspace-write')
   })
 
   it('leaves no interpreter process behind a close or a cancelled start', async () => {
@@ -652,7 +652,7 @@ describe.skipIf(interpreter === undefined)('aether session tools against the ins
 
     const sessionId = await openSession(mounted, owner)
     expect(mounted.liveProcesses()).toBe(1)
-    await mounted.call('aether_session_close', { session_id: sessionId }, { agent: owner })
+    await mounted.call('aether_session', { action: 'close', session_id: sessionId }, { agent: owner })
     // The close resolves only after the interpreter actually exited.
     expect(mounted.liveProcesses()).toBe(0)
   })
@@ -665,7 +665,7 @@ describe.skipIf(interpreter === undefined)('aether session tools against the ins
 
     // The registry may still resolve the object, but the lifetime a session
     // would be tied to is gone, so opening again is refused explicitly.
-    expect(await failure(mounted, 'aether_session_open', {}, owner)).toContain('E_SESSION_OWNER')
+    expect(await failure(mounted, 'aether_session', { action: 'open',}, owner)).toContain('E_SESSION_OWNER')
     expect(await mounted.sessions.list(owner)).toEqual([])
   })
 
@@ -676,7 +676,7 @@ describe.skipIf(interpreter === undefined)('aether session tools against the ins
 
     await owner.ctx.fiber.dispose()
     // The owner-scoped effect closed the session with its agent, so the handle is gone.
-    expect(await failure(mounted, 'aether_session_eval', { session_id: sessionId, code: '1' }, owner))
+    expect(await failure(mounted, 'aether_session', { action: 'eval', session_id: sessionId, code: '1' }, owner))
       .toContain('E_SESSION_UNKNOWN')
   })
 })

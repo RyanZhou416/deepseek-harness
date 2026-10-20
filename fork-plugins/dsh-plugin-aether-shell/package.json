@@ -1,6 +1,6 @@
 {
   "name": "@ryanzhou416/dsh-plugin-aether-shell",
-  "version": "0.1.0-dsh021rc2.3",
+  "version": "0.1.0-dsh021rc2.4",
   "private": true,
   "type": "module",
   "description": "Optional native AetherShell queries, persistent interpreter sessions and background jobs for DSH agents",

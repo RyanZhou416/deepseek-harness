@@ -28,8 +28,8 @@ function descriptionBytes(value: unknown): number {
 
 /** Assert the provider-neutral serialized and prose budgets independently. */
 function expectContextBudget(tools: unknown): void {
-  expect(Buffer.byteLength(JSON.stringify(tools), 'utf8')).toBeLessThanOrEqual(13_000)
-  expect(descriptionBytes(tools)).toBeLessThanOrEqual(9_500)
+  expect(Buffer.byteLength(JSON.stringify(tools), 'utf8')).toBeLessThanOrEqual(11_500)
+  expect(descriptionBytes(tools)).toBeLessThanOrEqual(8_700)
 }
 
 const PARAMETERS = {
@@ -39,16 +39,12 @@ const PARAMETERS = {
   aether_pipeline: ['steps', 'input', 'cwd', 'timeoutMs', 'executionTimeoutMs'],
   aether_job_start: ['code', 'label', 'cwd', 'timeoutMs'],
   aether_result_page: ['id', 'offset', 'limit', 'maxBytes', 'format', 'drop'],
-  aether_session_open: ['cwd', 'name', 'timeoutMs'],
-  aether_session_eval: ['session_id', 'code', 'timeoutMs'],
-  aether_session_read: ['session_id'],
-  aether_session_list: ['usage', 'timeoutMs'],
-  aether_session_close: ['session_id', 'timeoutMs'],
+  aether_session: ['action', 'session_id', 'code', 'cwd', 'name', 'usage', 'timeoutMs'],
 }
 
 for (const mode of ['legacy', 'typed-v1'] as const) {
   describe(`compact ${mode} AetherShell declarations`, () => {
-    it('keeps all eleven tools and arguments within the model context budget', async () => {
+    it('exposes seven tools with one explicit session action selector within the context budget', async () => {
       const tools = await schemas(mode)
       expect(tools.map(tool => tool.name).sort()).toEqual(Object.keys(PARAMETERS).sort())
       for (const tool of tools) {
@@ -74,7 +70,7 @@ for (const mode of ['legacy', 'typed-v1'] as const) {
         expect(description(name)).toContain('aether_result_page')
         expect(description(name)).toContain('Explicit cancellation stops and awaits cleanup')
       }
-      for (const name of ['aether_call', 'aether_pipeline', 'aether_eval', 'aether_job_start', 'aether_session_open', 'aether_session_eval']) {
+      for (const name of ['aether_call', 'aether_pipeline', 'aether_eval', 'aether_job_start', 'aether_session']) {
         expect(description(name)).toContain('DSH restricts writes/deletes, not reads, network or process control')
         expect(description(name)).toContain('no alternate-tool/shell or native-token retry')
         expect(description(name)).toContain('the user must change policy')
@@ -82,9 +78,9 @@ for (const mode of ['legacy', 'typed-v1'] as const) {
       expect(description('aether_call')).toContain('aether_discover')
       expect(description('aether_eval')).toContain('not PowerShell')
       expect(description('aether_job_start')).toContain('No persistent state or JSON decoding')
-      expect(description('aether_session_eval')).toContain('Timeout/cancel kills the whole session')
-      expect(description('aether_session_eval')).toContain('does not roll back earlier effects')
-      expect(description('aether_session_open')).toContain('No checkpoint/replay')
+      expect(description('aether_session')).toContain('Timeout/cancel kills the whole session')
+      expect(description('aether_session')).toContain('does not roll back earlier effects')
+      expect(description('aether_session')).toContain('No checkpoint/replay')
       expect(description('aether_result_page')).toContain('without rerunning code/effects')
       expect(description('aether_result_page')).toContain('concatenate data strings then JSON-parse once')
     })

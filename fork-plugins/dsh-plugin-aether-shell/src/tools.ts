@@ -671,7 +671,7 @@ export function createAetherTools(dependencies: AetherToolDependencies): ToolDef
     name: 'aether_eval',
     description: 'Run AetherShell source in a fresh process, not PowerShell: expressions, fn(x) => ..., modules (file.read("notes.txt")), and ; statements. '
       + 'Returns one canonical JSON value on success; no output means resultType:"none". Failure returns native error text; earlier effects are not rolled back. '
-      + 'Use aether_job_start for raw/mixed stdout, aether_session_eval for persistent state. Unsafe integers must be text. '
+      + 'Use aether_job_start for raw/mixed stdout, aether_session action:eval for persistent state. Unsafe integers must be text. '
       + HANDOFF_GUIDANCE + RETENTION_GUIDANCE + FILE_POLICY_GUIDANCE,
     parameters: {
       code: { type: 'string', required: true, description: 'AetherShell source; e.g. range(3) | map(fn(x) => x * 2).' },

@@ -344,7 +344,7 @@ export class AetherSessions {
   ): Promise<AetherSessionOpened> {
     this.assertUsable(owner)
     if (this.ownedBy(owner).length >= this.settings.maxSessionsPerOwner) {
-      throw new Error(`aether-shell [${E_LIMIT}]: this agent already holds ${this.settings.maxSessionsPerOwner} sessions, the configured maxSessionsPerOwner; close one with aether_session_close before opening another`)
+      throw new Error(`aether-shell [${E_LIMIT}]: this agent already holds ${this.settings.maxSessionsPerOwner} sessions, the configured maxSessionsPerOwner; close one with aether_session action:close before opening another`)
     }
     const policy = this.policyFor(owner)
     const live = new AetherLiveSession(
@@ -582,7 +582,7 @@ export class AetherSessions {
     this.assertUsable(owner)
     const live = this.byId.get(sessionId)
     if (live === undefined) {
-      throw new Error(`aether-shell [${E_UNKNOWN}]: no open session has the id ${JSON.stringify(sessionId)}; open one with aether_session_open or read aether_session_list`)
+      throw new Error(`aether-shell [${E_UNKNOWN}]: no open session has the id ${JSON.stringify(sessionId)}; use aether_session action:open or action:list`)
     }
     if (live.owner !== owner) {
       throw new Error(`aether-shell [${E_FOREIGN}]: session ${JSON.stringify(sessionId)} belongs to another agent; sessions are private to the agent that opened them`)

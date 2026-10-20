@@ -1,12 +1,13 @@
 # Keyless replay keeps the shipped headless composition and replaces only the
 # model adapter, the external AetherShell interpreter, and the local jobs
 # provider. The plugin, the subprocess seam, the sandbox policy, and session
-# persistence all stay real; the scenario-local protocol fixture stands in for the
-# binary this corpus cannot install, and the observing jobs provider publishes
-# each wait registration so that fixture can hold the recorded job open until the
+# persistence all stay real; the interpreter fixture stays in the retired
+# lifecycle scenario's directory and stands in for the binary this corpus cannot
+# install, and the observing jobs provider publishes each wait registration so
+# that fixture can hold the retired recording's background job open until the
 # model's own wait reads it.
 - id: llm-deepseek
-  name: '@deepseek-ai/dsh-llm-deepseek'
+  name: '@deepseek-ai/dsh-llm-deepseek-api-key'
   disabled: true
 
 - insert:
@@ -15,17 +16,18 @@
       config:
         executable: !!js process.execPath
         executableArgs:
-          - !!js 'process.env.DSH_SNAPSHOT_FILE.replace(/[^\\/]+$/, "aether-lifecycle-fixture.mjs")'
+          - !!js 'process.env.DSH_SNAPSHOT_FILE.replace(/[^\\/]+$/, "../aether-shell-lifecycle/aether-lifecycle-fixture.mjs")'
           # Trusted control root: the run's isolated DSH home plus the directory
           # the observing jobs provider publishes wait registrations into.
           - !!js 'process.env.DSH_HOME + "/aether-fixture-wait"'
-        # This recording predates foreground-to-job promotion. Keeping it off is
-        # the compatibility opt-out that lets the committed session stay exactly
-        # as recorded, without query job lifecycle events it never contained.
+        # This composition also replays the retired lifecycle recording, which
+        # predates foreground-to-job promotion. Keeping it off is the
+        # compatibility opt-out that lets that committed session stay exactly as
+        # recorded, without query job lifecycle events it never contained.
         promoteOnTimeout: false
 
     - id: jobs-wait-observer
-      name: './jobs-wait-observer.mjs'
+      name: '../aether-shell-lifecycle/jobs-wait-observer.mjs'
       config:
         terminalJobRetentionMs: 3600000
         maxRetainedTerminalJobsPerOwner: 100

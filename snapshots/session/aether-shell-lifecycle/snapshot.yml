@@ -4,8 +4,10 @@ profile: headless
 composition: aether-shell-lifecycle
 recording: authored
 permission: danger-full-access
+sessionFormat:
+  version: 4
+  coverage: [retired-tools]
 header:
   class: aether-shell-lifecycle
-  pin: true
 replay:
   override: true

@@ -1,0 +1,318 @@
+[
+  {
+    "kind": "chunks",
+    "chunks": [
+      {
+        "type": "block-start",
+        "index": 0,
+        "blockType": "tool-call"
+      },
+      {
+        "type": "tool-call-delta",
+        "index": 0,
+        "id": "call_session_open",
+        "name": "aether_session",
+        "argumentsDelta": "{\"action\":\"open\",\"name\":\"state\"}"
+      },
+      {
+        "type": "block-end",
+        "index": 0,
+        "block": {
+          "type": "tool-call",
+          "id": "call_session_open",
+          "name": "aether_session",
+          "arguments": "{\"action\":\"open\",\"name\":\"state\"}"
+        }
+      },
+      {
+        "type": "usage",
+        "usage": {
+          "inputTokens": 1200,
+          "outputTokens": 8
+        }
+      },
+      {
+        "type": "finish",
+        "reason": {
+          "kind": "tool-calls"
+        }
+      }
+    ]
+  },
+  {
+    "kind": "chunks",
+    "chunks": [
+      {
+        "type": "block-start",
+        "index": 0,
+        "blockType": "tool-call"
+      },
+      {
+        "type": "tool-call-delta",
+        "index": 0,
+        "id": "call_session_eval_41",
+        "name": "aether_session",
+        "argumentsDelta": "{\"action\":\"eval\",\"session_id\":\"{{fromRequest:(?:opened |\\\"session_id\\\":\\\")([0-9a-f-]{36})}}\",\"code\":\"let n = 41; n\"}"
+      },
+      {
+        "type": "block-end",
+        "index": 0,
+        "block": {
+          "type": "tool-call",
+          "id": "call_session_eval_41",
+          "name": "aether_session",
+          "arguments": "{\"action\":\"eval\",\"session_id\":\"{{fromRequest:(?:opened |\\\"session_id\\\":\\\")([0-9a-f-]{36})}}\",\"code\":\"let n = 41; n\"}"
+        }
+      },
+      {
+        "type": "usage",
+        "usage": {
+          "inputTokens": 1240,
+          "outputTokens": 8
+        }
+      },
+      {
+        "type": "finish",
+        "reason": {
+          "kind": "tool-calls"
+        }
+      }
+    ]
+  },
+  {
+    "kind": "chunks",
+    "chunks": [
+      {
+        "type": "block-start",
+        "index": 0,
+        "blockType": "tool-call"
+      },
+      {
+        "type": "tool-call-delta",
+        "index": 0,
+        "id": "call_session_eval_42",
+        "name": "aether_session",
+        "argumentsDelta": "{\"action\":\"eval\",\"session_id\":\"{{fromRequest:(?:opened |\\\"session_id\\\":\\\")([0-9a-f-]{36})}}\",\"code\":\"n + 1\"}"
+      },
+      {
+        "type": "block-end",
+        "index": 0,
+        "block": {
+          "type": "tool-call",
+          "id": "call_session_eval_42",
+          "name": "aether_session",
+          "arguments": "{\"action\":\"eval\",\"session_id\":\"{{fromRequest:(?:opened |\\\"session_id\\\":\\\")([0-9a-f-]{36})}}\",\"code\":\"n + 1\"}"
+        }
+      },
+      {
+        "type": "usage",
+        "usage": {
+          "inputTokens": 1280,
+          "outputTokens": 8
+        }
+      },
+      {
+        "type": "finish",
+        "reason": {
+          "kind": "tool-calls"
+        }
+      }
+    ]
+  },
+  {
+    "kind": "chunks",
+    "chunks": [
+      {
+        "type": "block-start",
+        "index": 0,
+        "blockType": "tool-call"
+      },
+      {
+        "type": "tool-call-delta",
+        "index": 0,
+        "id": "call_session_read",
+        "name": "aether_session",
+        "argumentsDelta": "{\"action\":\"read\",\"session_id\":\"{{fromRequest:(?:opened |\\\"session_id\\\":\\\")([0-9a-f-]{36})}}\"}"
+      },
+      {
+        "type": "block-end",
+        "index": 0,
+        "block": {
+          "type": "tool-call",
+          "id": "call_session_read",
+          "name": "aether_session",
+          "arguments": "{\"action\":\"read\",\"session_id\":\"{{fromRequest:(?:opened |\\\"session_id\\\":\\\")([0-9a-f-]{36})}}\"}"
+        }
+      },
+      {
+        "type": "usage",
+        "usage": {
+          "inputTokens": 1320,
+          "outputTokens": 8
+        }
+      },
+      {
+        "type": "finish",
+        "reason": {
+          "kind": "tool-calls"
+        }
+      }
+    ]
+  },
+  {
+    "kind": "chunks",
+    "chunks": [
+      {
+        "type": "block-start",
+        "index": 0,
+        "blockType": "tool-call"
+      },
+      {
+        "type": "tool-call-delta",
+        "index": 0,
+        "id": "call_session_list",
+        "name": "aether_session",
+        "argumentsDelta": "{\"action\":\"list\"}"
+      },
+      {
+        "type": "block-end",
+        "index": 0,
+        "block": {
+          "type": "tool-call",
+          "id": "call_session_list",
+          "name": "aether_session",
+          "arguments": "{\"action\":\"list\"}"
+        }
+      },
+      {
+        "type": "usage",
+        "usage": {
+          "inputTokens": 1360,
+          "outputTokens": 8
+        }
+      },
+      {
+        "type": "finish",
+        "reason": {
+          "kind": "tool-calls"
+        }
+      }
+    ]
+  },
+  {
+    "kind": "chunks",
+    "chunks": [
+      {
+        "type": "block-start",
+        "index": 0,
+        "blockType": "tool-call"
+      },
+      {
+        "type": "tool-call-delta",
+        "index": 0,
+        "id": "call_session_list_usage",
+        "name": "aether_session",
+        "argumentsDelta": "{\"action\":\"list\",\"usage\":true}"
+      },
+      {
+        "type": "block-end",
+        "index": 0,
+        "block": {
+          "type": "tool-call",
+          "id": "call_session_list_usage",
+          "name": "aether_session",
+          "arguments": "{\"action\":\"list\",\"usage\":true}"
+        }
+      },
+      {
+        "type": "usage",
+        "usage": {
+          "inputTokens": 1400,
+          "outputTokens": 8
+        }
+      },
+      {
+        "type": "finish",
+        "reason": {
+          "kind": "tool-calls"
+        }
+      }
+    ]
+  },
+  {
+    "kind": "chunks",
+    "chunks": [
+      {
+        "type": "block-start",
+        "index": 0,
+        "blockType": "tool-call"
+      },
+      {
+        "type": "tool-call-delta",
+        "index": 0,
+        "id": "call_session_close",
+        "name": "aether_session",
+        "argumentsDelta": "{\"action\":\"close\",\"session_id\":\"{{fromRequest:(?:opened |\\\"session_id\\\":\\\")([0-9a-f-]{36})}}\"}"
+      },
+      {
+        "type": "block-end",
+        "index": 0,
+        "block": {
+          "type": "tool-call",
+          "id": "call_session_close",
+          "name": "aether_session",
+          "arguments": "{\"action\":\"close\",\"session_id\":\"{{fromRequest:(?:opened |\\\"session_id\\\":\\\")([0-9a-f-]{36})}}\"}"
+        }
+      },
+      {
+        "type": "usage",
+        "usage": {
+          "inputTokens": 1440,
+          "outputTokens": 8
+        }
+      },
+      {
+        "type": "finish",
+        "reason": {
+          "kind": "tool-calls"
+        }
+      }
+    ]
+  },
+  {
+    "kind": "chunks",
+    "chunks": [
+      {
+        "type": "block-start",
+        "index": 0,
+        "blockType": "text"
+      },
+      {
+        "type": "text-delta",
+        "index": 0,
+        "text": "DONE"
+      },
+      {
+        "type": "block-end",
+        "index": 0,
+        "block": {
+          "type": "text",
+          "text": "DONE"
+        }
+      },
+      {
+        "type": "usage",
+        "usage": {
+          "inputTokens": 1480,
+          "outputTokens": 2
+        }
+      },
+      {
+        "type": "finish",
+        "reason": {
+          "kind": "stop"
+        }
+      }
+    ]
+  }
+]

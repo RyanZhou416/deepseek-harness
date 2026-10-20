@@ -26,16 +26,24 @@
  * values, so a wrong replay script fails loudly instead of passing on a guess.
  */
 
-import { existsSync } from 'node:fs'
-import { join } from 'node:path'
+import { readdirSync } from 'node:fs'
 
 /** The interpreter's own session id; one process holds one native session. */
 const NATIVE_SESSION = 'sess_fixture_0'
 
-/** The recorded command-line programs, each keyed to the job whose wait releases it. */
+/**
+ * The recorded command-line programs, each keyed to how many wait registrations
+ * the run must have published before this program may settle.
+ *
+ * A registry mints a fresh random job id per run, so a program cannot look up
+ * its own id in advance. The two recorded jobs run strictly one after the
+ * other: the first settles only after the model's first `job_output` wait is
+ * registered, and the second only after both waits are, because the first job's
+ * registration stays in the run's private control root.
+ */
 const GATED_PROGRAMS = {
-  'print("JOB_STARTED"); 7': 'aether-1',
-  'no_such_builtin()': 'aether-2',
+  'print("JOB_STARTED"); 7': 1,
+  'no_such_builtin()': 2,
 }
 
 /**
@@ -249,20 +257,27 @@ function serveInteractive() {
 }
 
 /**
- * Wait until the scenario's observing jobs provider publishes one job's wait.
+ * Wait until the scenario's observing jobs provider publishes one wait.
  *
- * The wait is bounded: an unregistered wait is a fixture failure reported on
- * stderr with a non-zero exit, never a silent hang and never a masked success.
+ * The jobs registry mints a random id per job, so the recorded program cannot
+ * name its own registration file; it waits for the count it owns instead. The
+ * wait is bounded: an unregistered wait is a fixture failure reported on stderr
+ * with a non-zero exit, never a silent hang and never a masked success.
  * @param controlRoot - trusted directory the provider publishes registrations in.
- * @param jobId - the job whose wait releases this program.
- * @returns true once the registration exists, false when the budget runs out.
+ * @param minimum - registrations this program's own wait requires.
+ * @returns true once the required registrations exist, false when the budget runs out.
  */
-function waitForWaitRegistration(controlRoot, jobId) {
-  const registration = join(controlRoot, jobId)
+function waitForWaitRegistrations(controlRoot, minimum) {
   const deadline = Date.now() + WAIT_TIMEOUT_MS
   return new Promise((resolve) => {
     const poll = () => {
-      if (existsSync(registration)) {
+      let count = 0
+      try {
+        count = readdirSync(controlRoot).length
+      } catch (error) {
+        if (error?.code !== 'ENOENT') throw error
+      }
+      if (count >= minimum) {
         resolve(true)
         return
       }
@@ -279,14 +294,14 @@ function waitForWaitRegistration(controlRoot, jobId) {
 /** Answer one command-line program, which the background tool reads as raw output. */
 async function serveProgram(controlRoot, code) {
   const source = code.trim()
-  const jobId = GATED_PROGRAMS[source]
-  if (jobId === undefined) {
+  const ordinal = GATED_PROGRAMS[source]
+  if (ordinal === undefined) {
     process.stderr.write(`error[E_MOCK_UNSUPPORTED]: this fixture evaluates only the recorded programs, not ${JSON.stringify(source)}\n`)
     process.exitCode = 1
     return
   }
-  if (!await waitForWaitRegistration(controlRoot, jobId)) {
-    process.stderr.write(`error[E_MOCK_WAIT]: the scenario's jobs observer never published the wait for ${jobId} under ${JSON.stringify(controlRoot)}\n`)
+  if (!await waitForWaitRegistrations(controlRoot, ordinal)) {
+    process.stderr.write(`error[E_MOCK_WAIT]: the scenario's jobs observer never published the wait for recorded program ${ordinal} under ${JSON.stringify(controlRoot)}\n`)
     process.exitCode = 3
     return
   }

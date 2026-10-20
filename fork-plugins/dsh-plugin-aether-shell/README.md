@@ -49,14 +49,10 @@ This fork's `build.cmd` also stages and links the plugin into the selected `web`
 | `aether_pipeline` | Ordered native steps and optional JSON input | Inline or original job | Filter, project and aggregate typed values in one execution. |
 | `aether_eval` | AetherShell source | Inline or original job | Evaluate expressions, lambdas and module calls in a fresh process. |
 | `aether_result_page` | Retained-result id, offset, format and optional drop | Until released | Read bounded pages of a complete result without repeating the operation. |
-| `aether_session_open` | Optional directory, label and deadline | Until closed | Start one persistent interpreter process and return an opaque session id. |
-| `aether_session_eval` | Session id and AetherShell source | One call | Evaluate a program in that process, where variables, functions, the current directory and the environment persist. |
-| `aether_session_read` | Session id | One call | Drain output a session wrote while no call was in flight, delivering it once. |
-| `aether_session_list` | Optional counters | One call | List this agent's handles with their state and file-policy mode. |
-| `aether_session_close` | Session id | One call | Ask the native session to close and terminate its process. |
+| `aether_session` | `action`: open, eval, read, list or close; action-specific arguments | Until closed | Manage agent-private persistent interpreter state through one tool. |
 | `aether_job_start` | AetherShell source, optional label, directory and deadline | Until done or killed | Start one background interpreter process and return its job id immediately. |
 
-The four query tools start a fresh interpreter each call; retained JSON results live separately in bounded plugin memory. The result-page tool registers only with the live-agent registry. They stay registered whenever the plugin is active, and none of them offers a background flag. The five session tools register while the live-agent registry is mounted, because a handle must belong to a calling agent; `aether_session_read` drains output written between calls, and a call in flight refuses a read because that output belongs to the call. `aether_job_start` registers while the job registry is mounted, with `job_output`, `job_list` and `job_kill` providing the read and stop controls.
+The four query tools start a fresh interpreter each call; retained JSON results live separately in bounded plugin memory. The result-page tool registers only with the live-agent registry. They stay registered whenever the plugin is active, and none of them offers a background flag. The session tool registers while the live-agent registry is mounted, because a handle must belong to a calling agent; `action:"read"` drains between-call output and refuses busy handles. `aether_job_start` registers while the job registry is mounted, with `job_output`, `job_list` and `job_kill` providing the read and stop controls.
 
 Use `aether_discover` before relying on an unfamiliar builtin. Call arguments are positional: `{"builtin":"len","args":[[1,2,3]]}` returns `3`; an array argument occupies one position. Named argument objects are not exposed; pass a record inside the positional array so its fields remain one argument.
 
@@ -86,11 +82,13 @@ The child environment is the provider's scrubbed parent environment plus the plu
 
 ### Persistent sessions
 
-A session is one real `ae agent interactive` process holding native mutable state: variables, functions, the process-global current directory, and the process environment. That state persists between `aether_session_eval` calls for as long as the process runs, and each handle owns exactly one process whose in-memory state other handles cannot observe.
+Use `aether_session` with `action:"open"` and optional `cwd`/`name`, then `action:"eval"` with the returned `session_id` and `code`. `read` and `close` require that id; `list` takes no id and optionally requests `usage`. `timeoutMs` applies to every action except `read`. Missing required or unrelated action arguments are refused before any session lookup or effect. The five retired tool names are not aliases; see the [migration guide](../../docs/upgrade-guide/v0.2.1-rc.2/aether-session-action/guide.md).
+
+A session is one real `ae agent interactive` process holding native mutable state: variables, functions, the process-global current directory, and the process environment. That state persists between `aether_session` calls with `action:"eval"` for as long as the process runs, and each handle owns exactly one process whose in-memory state other handles cannot observe.
 
 A session operates on the real host filesystem, so files it writes persist and other processes can observe them; only its own variables, functions and environment are per-process. The process itself keeps no session checkpoint on disk and nothing is replayed when a session is reopened.
 
-Sessions are private to the agent that opened them. The deployment caps how many one agent may hold, and an idle session is closed automatically. The handle reports the file policy it was opened under, and every request re-resolves the caller's policy first. If that policy changed since the session opened, the session is closed rather than run with stale privileges, and `aether_session_list` reports that handle as destroyed. Closing an unknown id changes nothing; another agent's session is refused.
+Sessions are private to the agent that opened them. The deployment caps how many one agent may hold, and an idle session is closed automatically. The handle reports the file policy it was opened under, and every request re-resolves the caller's policy first. If that policy changed since the session opened, the session is closed rather than run with stale privileges, and `action:"list"` reports that handle as destroyed. Closing an unknown id changes nothing; another agent's session is refused.
 
 A deadline or cancellation terminates the whole session process, because the interpreter cannot abandon a running command. A session whose interpreter exits on its own is dropped. Neither case reopens or replays the session; open a new one to continue under the current policy. A program that fails partway leaves what earlier statements in that call already did in place: partial effects and bindings are not rolled back.
 
@@ -180,7 +178,7 @@ The tool registry owns permission hooks and durable call/result events. The plug
 <a id="model-experience"></a>
 ## Model Experience
 
-The model reads eleven compact tool declarations, with no additional AetherShell system-prompt section. Descriptions distinguish JSON builtin calls/pipelines, fresh source evaluation, persistent sessions, raw-stream jobs and retained-value pages. Discover unfamiliar native signatures on demand rather than loading the entire ontology. Parameter descriptions own defaults and units; local guidance retains file-policy limits, final denials, same-job handoff, cancellation and no-replay rules. Tool names, arguments and execution behavior are unchanged.
+The model reads seven compact tool declarations, with no additional AetherShell system-prompt section. Descriptions distinguish JSON builtin calls/pipelines, fresh source evaluation, persistent sessions, raw-stream jobs and retained-value pages. Discover unfamiliar native signatures on demand rather than loading the entire ontology. Parameter descriptions own defaults and units; local guidance retains file-policy limits, final denials, same-job handoff, cancellation and no-replay rules. Session management uses one action selector; the six execution/discovery/retrieval tools remain separate. Session execution and ownership rules are shared across actions.
 
 #### KV Cache effect
 

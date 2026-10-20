@@ -64,7 +64,7 @@
     },
     {
       "name": "aether_eval",
-      "description": "Run AetherShell source in a fresh process, not PowerShell: expressions, fn(x) => ..., modules (file.read(\"notes.txt\")), and ; statements. Returns one canonical JSON value on success; no output means resultType:\"none\". Failure returns native error text; earlier effects are not rolled back. Use aether_job_start for raw/mixed stdout, aether_session_eval for persistent state. Unsafe integers must be text. Wait expiry may return the original jobId without stopping or rerunning work: collect its final JSON outcome with job_output; stop with job_kill. Explicit cancellation stops and awaits cleanup. Oversized values are retained whole for aether_result_page (no rerun), or fail explicitly if retention is unavailable. Real host effects: DSH restricts writes/deletes, not reads, network or process control; sh being off is not isolation. A denial is final: no alternate-tool/shell or native-token retry, no escalation; the user must change policy. ",
+      "description": "Run AetherShell source in a fresh process, not PowerShell: expressions, fn(x) => ..., modules (file.read(\"notes.txt\")), and ; statements. Returns one canonical JSON value on success; no output means resultType:\"none\". Failure returns native error text; earlier effects are not rolled back. Use aether_job_start for raw/mixed stdout, aether_session action:eval for persistent state. Unsafe integers must be text. Wait expiry may return the original jobId without stopping or rerunning work: collect its final JSON outcome with job_output; stop with job_kill. Explicit cancellation stops and awaits cleanup. Oversized values are retained whole for aether_result_page (no rerun), or fail explicitly if retention is unavailable. Real host effects: DSH restricts writes/deletes, not reads, network or process control; sh being off is not isolation. A denial is final: no alternate-tool/shell or native-token retry, no escalation; the user must change policy. ",
       "parameters": {
         "type": "object",
         "properties": {
@@ -216,101 +216,49 @@
       }
     },
     {
-      "name": "aether_session_close",
-      "description": "Close this agent's session, then terminate its process regardless of the native reply; no new policy grant needed. An unknown id returns closed:false without changes; a foreign agent's id is refused.",
+      "name": "aether_session",
+      "description": "One persistent interpreter session tool; action selects open, eval, read, list, or close. A session is one long-lived process: variables, functions, cwd and env persist across eval calls, while files, network and services are shared with this host. Sessions are agent-private, count- and idle-limited, and a policy change closes one. No checkpoint/replay, and none survive plugin unload or Host restart. One eval at a time; logs are bounded; a failed program does not roll back earlier effects. Timeout/cancel kills the whole session; open a new session instead of replaying. Real host effects: DSH restricts writes/deletes, not reads, network or process control; sh being off is not isolation. A denial is final: no alternate-tool/shell or native-token retry, no escalation; the user must change policy. ",
       "parameters": {
         "type": "object",
         "properties": {
-          "session_id": {
+          "action": {
             "type": "string",
-            "description": "Id from aether_session_open; private to this agent."
+            "description": "Session operation: open starts a process and returns its id; eval runs source in it; read drains unread output without running code; list reports this agent's handles; close terminates one. cwd and name apply only to open, usage only to list, and timeoutMs to every action except read.",
+            "enum": [
+              "open",
+              "eval",
+              "read",
+              "list",
+              "close"
+            ]
           },
-          "timeoutMs": {
-            "type": "number",
-            "description": "Hard deadline (ms); timeout/cancel kills the session. Deployment default/cap apply."
-          }
-        },
-        "required": [
-          "session_id"
-        ]
-      }
-    },
-    {
-      "name": "aether_session_eval",
-      "description": "Run AetherShell source/modules in the session process; variables/functions/cwd/env persist as in aether_session_open. Returns a typed value plus bounded printed logs (not result text); one evaluation at a time. Failure does not roll back earlier effects. Timeout/cancel kills the whole session; open a new one, without replay. Real host effects: DSH restricts writes/deletes, not reads, network or process control; sh being off is not isolation. A denial is final: no alternate-tool/shell or native-token retry, no escalation; the user must change policy. ",
-      "parameters": {
-        "type": "object",
-        "properties": {
           "session_id": {
             "type": "string",
-            "description": "Id from aether_session_open; private to this agent."
+            "description": "Id from action open; private to this agent. Required for eval, read, and close; omit for open and list."
           },
           "code": {
             "type": "string",
-            "description": "AetherShell source executed in the existing process."
+            "description": "AetherShell source executed in the existing process; required for eval only."
           },
-          "timeoutMs": {
-            "type": "number",
-            "description": "Hard deadline (ms); timeout/cancel kills the session. Deployment default/cap apply."
-          }
-        },
-        "required": [
-          "session_id",
-          "code"
-        ]
-      }
-    },
-    {
-      "name": "aether_session_list",
-      "description": "List only this agent's sessions: ids, labels, startup cwd, state and file-policy mode. Policy-mismatched sessions are closed and reported destroyed. usage adds counters with one request per ready session.",
-      "parameters": {
-        "type": "object",
-        "properties": {
-          "usage": {
-            "type": "boolean",
-            "description": "Include native evaluation/token counters (extra request per ready session)."
-          },
-          "timeoutMs": {
-            "type": "number",
-            "description": "Hard deadline (ms); timeout/cancel kills the session. Deployment default/cap apply."
-          }
-        }
-      }
-    },
-    {
-      "name": "aether_session_open",
-      "description": "Open a real persistent interpreter; use its id with aether_session_eval. Variables, functions, cwd and env persist per session, but files/network/services share this host. Agent-private, count/idle-limited; policy changes close it. No checkpoint/replay or survival across reopen, plugin unload or Host restart. Real host effects: DSH restricts writes/deletes, not reads, network or process control; sh being off is not isolation. A denial is final: no alternate-tool/shell or native-token retry, no escalation; the user must change policy. ",
-      "parameters": {
-        "type": "object",
-        "properties": {
           "cwd": {
             "type": "string",
-            "description": "Working directory; defaults to the session workspace, which also resolves relative paths."
+            "description": "Working directory; defaults to the session workspace, which also resolves relative paths. Only for action open."
           },
           "name": {
             "type": "string",
-            "description": "Label shown by aether_session_list."
+            "description": "Label for the handle, shown by action list; only for action open."
+          },
+          "usage": {
+            "type": "boolean",
+            "description": "Include native evaluation/token counters, one extra request per ready session; only for action list."
           },
           "timeoutMs": {
             "type": "number",
-            "description": "Hard deadline (ms); timeout/cancel kills the session. Deployment default/cap apply."
-          }
-        }
-      }
-    },
-    {
-      "name": "aether_session_read",
-      "description": "Drain unread between-call output once, without running code; eval already returns output it saw. No new output means empty logs. Busy/closed/unknown sessions are refused. Logs are bounded; cut tails include the full-stream path.",
-      "parameters": {
-        "type": "object",
-        "properties": {
-          "session_id": {
-            "type": "string",
-            "description": "Id from aether_session_open; private to this agent."
+            "description": "Hard deadline (ms); timeout/cancel kills the session. Deployment default/cap apply. Not accepted by action read."
           }
         },
         "required": [
-          "session_id"
+          "action"
         ]
       }
     },
