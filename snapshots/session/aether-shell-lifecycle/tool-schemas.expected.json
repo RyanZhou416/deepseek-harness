@@ -2,30 +2,30 @@
   "initial": [
     {
       "name": "aether_call",
-      "description": "Call one native AetherShell builtin with positional JSON arguments and return its typed result. `builtin` is one flat native name (`ls`, `crypto_hash`, `json_parse`); find names with `aether_discover`. Arguments are data, never AetherShell source: a string containing `${` is rejected because the interpreter would interpolate it as code, and every object key must be a plain identifier because the interpreter writes keys unquoted. A process-capable builtin runs under this call's DSH file policy, which governs writes and deletes rather than reads, network, or process control; the interpreter's own `sh` switch starts off as a convenience default, not a boundary. When a job registry and live owning agent are available and promoteOnTimeout is enabled, timeoutMs bounds only the foreground wait: expiry returns the original job id without stopping or repeating the operation. Collect its final canonical JSON outcome with job_output; use job_kill to stop it. executionTimeoutMs is the independent hard runtime limit, also capped by the deployment's maxBackgroundRuntimeMs. Omitted hard limits mean no outer runtime cap when that deployment cap is zero; native proc_run timeout_ms is unchanged. Explicit call cancellation stops and awaits the owned run. Without ownership/jobs, with promotion disabled, or if admission is refused before execution, the foreground wait remains a kill deadline. A result over the deployment's complete-result budget is retained whole and returned as an id you read with `aether_result_page`, which never runs the program again; when this deployment cannot retain it, the call fails loudly and names the narrowing remedy instead of returning a partial value. An access the DSH file policy denies is final for this call: retrying the same effect through another tool or shell is not a workaround, this plugin offers no in-turn escalation field, grants no permission automatically, and retries nothing with a native approval token — the user must change the policy explicitly for that effect to be allowed.",
+      "description": "Call one flat native builtin; discover unfamiliar names/signatures with aether_discover. Example: {\"builtin\":\"len\",\"args\":[[1,2,3]]} returns 3. Use aether_eval for module syntax. JSON data only; legacy mode rejects strings containing `${` and non-identifier object keys. Unsafe integers must be requested as text. Wait expiry may return the original jobId without stopping or rerunning work: collect its final JSON outcome with job_output; stop with job_kill. Explicit cancellation stops and awaits cleanup. Oversized values are retained whole for aether_result_page (no rerun), or fail explicitly if retention is unavailable. Real host effects: DSH restricts writes/deletes, not reads, network or process control; sh being off is not isolation. A denial is final: no alternate-tool/shell or native-token retry, no escalation; the user must change policy. ",
       "parameters": {
         "type": "object",
         "properties": {
           "builtin": {
             "type": "string",
-            "description": "Flat native builtin name, for example \"ls\" or \"crypto_hash\"."
+            "description": "Flat builtin name, e.g. len or crypto_hash (not file.read)."
           },
           "args": {
             "type": "array",
-            "description": "Positional arguments in the order the builtin's signature declares them; JSON data only.",
+            "description": "Positional JSON arguments in signature order; an array argument takes one slot.",
             "items": {}
           },
           "cwd": {
             "type": "string",
-            "description": "Working directory for this call. Defaults to the session workspace; a relative path is resolved against it."
+            "description": "Working directory; defaults to the session workspace, which also resolves relative paths."
           },
           "timeoutMs": {
             "type": "number",
-            "description": "Foreground wait in milliseconds, capped by maxTimeoutMs. With job ownership and promotion enabled, expiry hands off the same execution; otherwise it is a kill deadline."
+            "description": "Foreground wait (ms), deployment-capped. Jobs + live owner + promotion allow handoff; otherwise kills, including pre-start admission refusal."
           },
           "executionTimeoutMs": {
             "type": "number",
-            "description": "Independent positive hard execution deadline in milliseconds. Omitted, only maxBackgroundRuntimeMs applies (zero means no outer cap). Native proc_run timeout_ms remains independent."
+            "description": "Positive hard runtime (ms), capped by maxBackgroundRuntimeMs. Omitted: that cap only (0=unlimited). Native proc_run timeout_ms is unchanged."
           }
         },
         "required": [
@@ -35,54 +35,54 @@
     },
     {
       "name": "aether_discover",
-      "description": "Read the native AetherShell ontology. Without `query`, return one page of the category manifest with each category's builtin count and effect classes. With a category name, return one page of that category's builtins with their signatures and effects. With a builtin name, return its parameters, return type, effects, aliases, and examples. A name the ontology does not know returns the interpreter's own unknown-name reply, which is a successful result rather than a failure. Page a list with `offset` and `limit`; a page that leaves entries behind reports `nextOffset`. Foreground only, under a hard deadline.",
+      "description": "Look up unfamiliar native operations on demand. No query: category counts/effects; category: builtin signatures/effects; builtin: parameters, return type, effects, aliases, examples. Unknown names return a successful unknown-name reply. Lists are paged; continue with nextOffset. Hard-deadline foreground only.",
       "parameters": {
         "type": "object",
         "properties": {
           "query": {
             "type": "string",
-            "description": "Ontology category or builtin name to describe (for example \"Crypto\" or \"crypto_hash\"). Omit for the category manifest."
+            "description": "Category/builtin, e.g. Crypto or crypto_hash; omit for categories."
           },
           "offset": {
             "type": "number",
-            "description": "Zero-based index of the first entry to return (default 0). Continue a list with the previous page's nextOffset."
+            "description": "Start index (default 0); use the previous nextOffset."
           },
           "limit": {
             "type": "number",
-            "description": "Maximum entries in this page; the deployment's ontology-entry budget caps it."
+            "description": "Maximum entries; deployment-capped."
           },
           "cwd": {
             "type": "string",
-            "description": "Working directory for this call. Defaults to the session workspace; a relative path is resolved against it."
+            "description": "Working directory; defaults to the session workspace, which also resolves relative paths."
           },
           "timeoutMs": {
             "type": "number",
-            "description": "Deadline in milliseconds before this plugin kills the interpreter. The deployment applies its configured default and cap."
+            "description": "Hard deadline (ms); deployment default/cap apply."
           }
         }
       }
     },
     {
       "name": "aether_eval",
-      "description": "Evaluate one AetherShell program and return its canonical JSON value. Unlike the other tools, the program runs on the interpreter's own command line, so lambdas, modules such as `file.read(\"notes.txt\")`, and multi-statement programs work and are not limited to flat builtin names. The program must exit successfully for a value; a failing program returns the interpreter's own error text. A program that prints nothing reports `resultType: \"none\"`. Everything the program does runs under this call's DSH file policy, which governs writes and deletes rather than file reads, network access, or process control. The interpreter's `sh` switch starts off, but that is a convenience default rather than a boundary, because the program can change its own environment and reach the process builtins either way. Numbers outside the exact integer range this runtime can carry are rejected rather than rounded, so ask for such a value as text. When a job registry and live owning agent are available and promoteOnTimeout is enabled, timeoutMs bounds only the foreground wait: expiry returns the original job id without stopping or repeating the operation. Collect its final canonical JSON outcome with job_output; use job_kill to stop it. executionTimeoutMs is the independent hard runtime limit, also capped by the deployment's maxBackgroundRuntimeMs. Omitted hard limits mean no outer runtime cap when that deployment cap is zero; native proc_run timeout_ms is unchanged. Explicit call cancellation stops and awaits the owned run. Without ownership/jobs, with promotion disabled, or if admission is refused before execution, the foreground wait remains a kill deadline. A result over the deployment's complete-result budget is retained whole and returned as an id you read with `aether_result_page`, which never runs the program again; when this deployment cannot retain it, the call fails loudly and names the narrowing remedy instead of returning a partial value. An access the DSH file policy denies is final for this call: retrying the same effect through another tool or shell is not a workaround, this plugin offers no in-turn escalation field, grants no permission automatically, and retries nothing with a native approval token — the user must change the policy explicitly for that effect to be allowed.",
+      "description": "Run AetherShell source in a fresh process, not PowerShell: expressions, fn(x) => ..., modules (file.read(\"notes.txt\")), and ; statements. Returns one canonical JSON value on success; no output means resultType:\"none\". Failure returns native error text; earlier effects are not rolled back. Use aether_job_start for raw/mixed stdout, aether_session_eval for persistent state. Unsafe integers must be text. Wait expiry may return the original jobId without stopping or rerunning work: collect its final JSON outcome with job_output; stop with job_kill. Explicit cancellation stops and awaits cleanup. Oversized values are retained whole for aether_result_page (no rerun), or fail explicitly if retention is unavailable. Real host effects: DSH restricts writes/deletes, not reads, network or process control; sh being off is not isolation. A denial is final: no alternate-tool/shell or native-token retry, no escalation; the user must change policy. ",
       "parameters": {
         "type": "object",
         "properties": {
           "code": {
             "type": "string",
-            "description": "AetherShell program text: an expression, a lambda, or a sequence of statements."
+            "description": "AetherShell source; e.g. range(3) | map(fn(x) => x * 2)."
           },
           "cwd": {
             "type": "string",
-            "description": "Working directory for this call. Defaults to the session workspace; a relative path is resolved against it."
+            "description": "Working directory; defaults to the session workspace, which also resolves relative paths."
           },
           "timeoutMs": {
             "type": "number",
-            "description": "Foreground wait in milliseconds, capped by maxTimeoutMs. With job ownership and promotion enabled, expiry hands off the same execution; otherwise it is a kill deadline."
+            "description": "Foreground wait (ms), deployment-capped. Jobs + live owner + promotion allow handoff; otherwise kills, including pre-start admission refusal."
           },
           "executionTimeoutMs": {
             "type": "number",
-            "description": "Independent positive hard execution deadline in milliseconds. Omitted, only maxBackgroundRuntimeMs applies (zero means no outer cap). Native proc_run timeout_ms remains independent."
+            "description": "Positive hard runtime (ms), capped by maxBackgroundRuntimeMs. Omitted: that cap only (0=unlimited). Native proc_run timeout_ms is unchanged."
           }
         },
         "required": [
@@ -92,25 +92,25 @@
     },
     {
       "name": "aether_job_start",
-      "description": "Start one AetherShell program as a background job and return its job id immediately. This is the streaming counterpart of `aether_eval`: the program runs on the interpreter's own command line, but no result document is read, so a program that prints logs, mixed JSON, or nothing at all still completes. Read the interpreter's raw stdout and stderr with `job_output`; the canonical exit facts and any spill file arrive with the first read after settlement. `job_kill` requests a stop; settlement follows managed-process cleanup. Each job is a fresh interpreter process: no variables, functions, or directory changes persist. The job runs without a deadline unless this deployment caps job runtime or the call supplies `timeoutMs`. The job belongs to this session and is stopped when this session's agent is disposed or the plugin unloads. Output a program's own children produce through the interpreter's process builtins may be captured by the interpreter until it returns it, so realtime child logs are not promised. The job uses this session's DSH file policy as it stood when the job started, which governs writes and deletes rather than file reads, network access, or process control; the interpreter's `sh` switch starts off as a convenience default, not a boundary. An access the DSH file policy denies is final for this job: retrying the same effect through another tool or shell is not a workaround, this plugin offers no in-turn escalation field, grants no permission automatically, and retries nothing with a native approval token — the user must change the policy explicitly for that effect to be allowed.",
+      "description": "Start AetherShell source in a fresh background process; return jobId immediately. No persistent state or JSON decoding: logs, mixed JSON and no output are valid. job_output reads raw stdout/stderr; the first settled read adds exit facts/spill paths. job_kill requests stop; settlement follows cleanup. Survives the starting call, not owner disposal/plugin unload. Uses the start-time file policy; child logs may be buffered. Real host effects: DSH restricts writes/deletes, not reads, network or process control; sh being off is not isolation. A denial is final: no alternate-tool/shell or native-token retry, no escalation; the user must change policy. ",
       "parameters": {
         "type": "object",
         "properties": {
           "code": {
             "type": "string",
-            "description": "AetherShell program text to run in the background: an expression, a lambda, or a sequence of statements."
+            "description": "AetherShell source, as in aether_eval, not PowerShell."
           },
           "label": {
             "type": "string",
-            "description": "Short human-facing label for this job, shown in job listings and the UI. Omit to use the program's first line."
+            "description": "Job label; defaults to the first source line."
           },
           "cwd": {
             "type": "string",
-            "description": "Working directory for this job. Defaults to the session workspace; a relative path is resolved against it."
+            "description": "Working directory; defaults to the session workspace, which also resolves relative paths."
           },
           "timeoutMs": {
             "type": "number",
-            "description": "Deadline in milliseconds for the whole job. Omitted, the job runs until it finishes or `job_kill` stops it, bounded only by this deployment's job-runtime cap when one is set."
+            "description": "Whole-job hard deadline (ms). Omitted: deployment cap only; no cap means run until exit or stopped."
           }
         },
         "required": [
@@ -120,7 +120,7 @@
     },
     {
       "name": "aether_pipeline",
-      "description": "Run an ordered native AetherShell pipeline, each step calling one flat builtin and feeding its result to the next. `select` maps each item of that step's result through a dotted field path, so `select: \"name\"` reads the `name` field of every element. `predicate` is an AetherShell expression passed to that step's builtin as its lambda first argument and replaces the step's `args`. `input` starts the pipeline from a value instead of from the first call. Step arguments are data with the same `${` and object key limits as `aether_call`, and every step runs under this call's DSH file policy. When a job registry and live owning agent are available and promoteOnTimeout is enabled, timeoutMs bounds only the foreground wait: expiry returns the original job id without stopping or repeating the operation. Collect its final canonical JSON outcome with job_output; use job_kill to stop it. executionTimeoutMs is the independent hard runtime limit, also capped by the deployment's maxBackgroundRuntimeMs. Omitted hard limits mean no outer runtime cap when that deployment cap is zero; native proc_run timeout_ms is unchanged. Explicit call cancellation stops and awaits the owned run. Without ownership/jobs, with promotion disabled, or if admission is refused before execution, the foreground wait remains a kill deadline. A result over the deployment's complete-result budget is retained whole and returned as an id you read with `aether_result_page`, which never runs the program again; when this deployment cannot retain it, the call fails loudly and names the narrowing remedy instead of returning a partial value. An access the DSH file policy denies is final for this call: retrying the same effect through another tool or shell is not a workaround, this plugin offers no in-turn escalation field, grants no permission automatically, and retries nothing with a native approval token — the user must change the policy explicitly for that effect to be allowed.",
+      "description": "Run ordered flat-builtin steps, feeding each result to the next. Discover signatures with aether_discover. JSON args: legacy mode rejects `${` strings and non-identifier keys. Unsafe integers must be requested as text. Wait expiry may return the original jobId without stopping or rerunning work: collect its final JSON outcome with job_output; stop with job_kill. Explicit cancellation stops and awaits cleanup. Oversized values are retained whole for aether_result_page (no rerun), or fail explicitly if retention is unavailable. Real host effects: DSH restricts writes/deletes, not reads, network or process control; sh being off is not isolation. A denial is final: no alternate-tool/shell or native-token retry, no escalation; the user must change policy. ",
       "parameters": {
         "type": "object",
         "properties": {
@@ -142,11 +142,11 @@
                 },
                 "select": {
                   "type": "string",
-                  "description": "Dotted field path read from each element of this step's result, for example \"name\" or \"meta.size\"."
+                  "description": "Project this dotted field from every result item, e.g. name or meta.size."
                 },
                 "predicate": {
                   "type": "string",
-                  "description": "AetherShell expression passed to this step's builtin as `fn(x) => <predicate>`; replaces this step's args."
+                  "description": "Expression used as fn(x) => <predicate>, replacing args; e.g. x.size > 10."
                 }
               },
               "required": [
@@ -155,19 +155,19 @@
             }
           },
           "input": {
-            "description": "Value that starts the pipeline; omit it to start from the first step's call. An explicit null is rejected because the native request reads it as \"no input\" rather than the None value — seed None with aether_eval instead."
+            "description": "Pipeline seed; omit to start with the first call. Explicit null is rejected in legacy mode; use aether_eval for None."
           },
           "cwd": {
             "type": "string",
-            "description": "Working directory for this call. Defaults to the session workspace; a relative path is resolved against it."
+            "description": "Working directory; defaults to the session workspace, which also resolves relative paths."
           },
           "timeoutMs": {
             "type": "number",
-            "description": "Foreground wait in milliseconds, capped by maxTimeoutMs. With job ownership and promotion enabled, expiry hands off the same execution; otherwise it is a kill deadline."
+            "description": "Foreground wait (ms), deployment-capped. Jobs + live owner + promotion allow handoff; otherwise kills, including pre-start admission refusal."
           },
           "executionTimeoutMs": {
             "type": "number",
-            "description": "Independent positive hard execution deadline in milliseconds. Omitted, only maxBackgroundRuntimeMs applies (zero means no outer cap). Native proc_run timeout_ms remains independent."
+            "description": "Positive hard runtime (ms), capped by maxBackgroundRuntimeMs. Omitted: that cap only (0=unlimited). Native proc_run timeout_ms is unchanged."
           }
         },
         "required": [
@@ -177,29 +177,29 @@
     },
     {
       "name": "aether_result_page",
-      "description": "Read one page of a result this deployment retained because it was too large to return inline. `aether_call`, `aether_pipeline`, and `aether_eval` report such a result as an id and its shape; this tool returns its content one bounded page at a time. Paging reads the stored value and never runs the program again, so no side effect of the original call is repeated. Format `items` (the default) pages an array by whole elements and a record by whole fields; format `json` pages the canonical JSON encoding by UTF-8 byte offset, which also reads one element larger than a whole page. `offset`, `shown`, `total`, and `nextOffset` are counted in the returned `unit`, so pass back the previous page's `nextOffset` rather than computing an offset yourself. A result is private to the agent that produced it, is released when it expires idle, and is released when you pass `drop`.",
+      "description": "Page a complete oversized query value by its retained id, without rerunning code/effects. Continue with returned nextOffset (in unit) until complete. Agent-private; idle expiry, drop, owner disposal or plugin/Host shutdown release it. For json pages, concatenate data strings then JSON-parse once; this also retrieves an oversized single item.",
       "parameters": {
         "type": "object",
         "properties": {
           "id": {
             "type": "string",
-            "description": "Retrieval id of the retained result to read."
+            "description": "Retained result id from a query, not a job/session id."
           },
           "offset": {
             "type": "number",
-            "description": "Element index (format `items`) or UTF-8 byte offset (format `json`) to start at; defaults to the beginning. Pass back a previous page's `nextOffset`."
+            "description": "Start offset (default 0); pass back nextOffset, do not calculate it."
           },
           "limit": {
             "type": "number",
-            "description": "Most elements, fields, or bytes to include. The page budget bounds the result either way."
+            "description": "Maximum items/fields or UTF-8 bytes; page budget still applies."
           },
           "maxBytes": {
             "type": "number",
-            "description": "Most bytes this page may occupy; defaults to the deployment's maxResultBytes and cannot exceed it."
+            "description": "Response byte cap; defaults to maxResultBytes and cannot exceed it."
           },
           "format": {
             "type": "string",
-            "description": "`items` pages a container by whole elements or fields; `json` pages the canonical JSON encoding by UTF-8 byte offset.",
+            "description": "items (default): whole array elements/record fields. json: canonical JSON in UTF-8 byte chunks.",
             "enum": [
               "items",
               "json"
@@ -207,7 +207,7 @@
           },
           "drop": {
             "type": "boolean",
-            "description": "Release the retained result instead of reading it. Takes no other argument besides `id`."
+            "description": "Release instead of page; use with id only."
           }
         },
         "required": [
@@ -217,17 +217,17 @@
     },
     {
       "name": "aether_session_close",
-      "description": "Close one of this agent's persistent AetherShell sessions and terminate its interpreter process. The native session is asked to close first, and the process is terminated afterwards whatever the interpreter answered, so a closed session never keeps running. Closing needs no new policy grant and always releases the process. Closing an id this agent does not hold reports `closed: false` and changes nothing; another agent's session is refused.",
+      "description": "Close this agent's session, then terminate its process regardless of the native reply; no new policy grant needed. An unknown id returns closed:false without changes; a foreign agent's id is refused.",
       "parameters": {
         "type": "object",
         "properties": {
           "session_id": {
             "type": "string",
-            "description": "Opaque session id returned by aether_session_open."
+            "description": "Id from aether_session_open; private to this agent."
           },
           "timeoutMs": {
             "type": "number",
-            "description": "Deadline in milliseconds before this plugin terminates the session process. The deployment applies its configured default and cap."
+            "description": "Hard deadline (ms); timeout/cancel kills the session. Deployment default/cap apply."
           }
         },
         "required": [
@@ -237,21 +237,21 @@
     },
     {
       "name": "aether_session_eval",
-      "description": "Evaluate one AetherShell program inside a persistent session and return its typed value. Unlike `aether_eval`, the program runs in the session's own long-lived process, so variables, functions, the current directory, and the environment all persist between calls and modules such as `file.read(\"notes.txt\")` are available. A session is one real interpreter process on this host, holding native mutable state (variables, functions, the current directory, and the process environment) that survives between calls. That separation is the interpreter's own: two sessions do not share variables, functions, or a working directory, but they share the host itself, so files, network access, and every external service are common to all of them and to this machine. The plugin does not checkpoint interpreter state and does not replay commands, so nothing survives reopening a session and a session does not outlive the plugin or the harness process; the programs you send still read and write real host files. The code you send really runs, with real effects on this host. Its file writes and deletes run under the calling session's DSH file policy, which governs writes and deletes rather than file reads, network access, or process control; the interpreter's own `sh` switch starts off as a convenience default, not a boundary. The interpreter's evaluation surface is broad and is not restricted to builtin names. A failing program does not roll back what earlier statements in the same call already did. Requests carry a host-random nonce, so output the program prints is returned as bounded `logs` rather than mistaken for a result. One evaluation runs at a time per session. A call that reaches its deadline or is cancelled terminates the whole session process, because the interpreter cannot abandon a running command; open a new session to continue. An access the DSH file policy denies is final: retrying the same effect through another tool or shell is not a workaround, this plugin offers no in-turn escalation field, grants no permission automatically, and retries nothing with a native approval token — the user must change the policy explicitly for that effect to be allowed.",
+      "description": "Run AetherShell source/modules in the session process; variables/functions/cwd/env persist as in aether_session_open. Returns a typed value plus bounded printed logs (not result text); one evaluation at a time. Failure does not roll back earlier effects. Timeout/cancel kills the whole session; open a new one, without replay. Real host effects: DSH restricts writes/deletes, not reads, network or process control; sh being off is not isolation. A denial is final: no alternate-tool/shell or native-token retry, no escalation; the user must change policy. ",
       "parameters": {
         "type": "object",
         "properties": {
           "session_id": {
             "type": "string",
-            "description": "Opaque session id returned by aether_session_open."
+            "description": "Id from aether_session_open; private to this agent."
           },
           "code": {
             "type": "string",
-            "description": "AetherShell program text: an expression, a lambda, or a sequence of statements executed in the session."
+            "description": "AetherShell source executed in the existing process."
           },
           "timeoutMs": {
             "type": "number",
-            "description": "Deadline in milliseconds before this plugin terminates the session process. The deployment applies its configured default and cap."
+            "description": "Hard deadline (ms); timeout/cancel kills the session. Deployment default/cap apply."
           }
         },
         "required": [
@@ -262,51 +262,51 @@
     },
     {
       "name": "aether_session_list",
-      "description": "List the persistent AetherShell sessions this agent currently holds, with each one's opaque id, label, working directory, state, and file-policy mode. Sessions the calling session's DSH file policy no longer matches are closed here and reported as destroyed rather than shown as usable. Pass `usage: true` to add the interpreter's own evaluation and token counters for each live session, which costs one request per session. Another agent's sessions are never listed. An access the DSH file policy denies is final: retrying the same effect through another tool or shell is not a workaround, this plugin offers no in-turn escalation field, grants no permission automatically, and retries nothing with a native approval token — the user must change the policy explicitly for that effect to be allowed.",
+      "description": "List only this agent's sessions: ids, labels, startup cwd, state and file-policy mode. Policy-mismatched sessions are closed and reported destroyed. usage adds counters with one request per ready session.",
       "parameters": {
         "type": "object",
         "properties": {
           "usage": {
             "type": "boolean",
-            "description": "Also read each live session's counters from the interpreter (one request per session)."
+            "description": "Include native evaluation/token counters (extra request per ready session)."
           },
           "timeoutMs": {
             "type": "number",
-            "description": "Deadline in milliseconds before this plugin terminates the session process. The deployment applies its configured default and cap."
+            "description": "Hard deadline (ms); timeout/cancel kills the session. Deployment default/cap apply."
           }
         }
       }
     },
     {
       "name": "aether_session_open",
-      "description": "Open a persistent AetherShell session and return an opaque session id. A session is one real interpreter process on this host, holding native mutable state (variables, functions, the current directory, and the process environment) that survives between calls. That separation is the interpreter's own: two sessions do not share variables, functions, or a working directory, but they share the host itself, so files, network access, and every external service are common to all of them and to this machine. The plugin does not checkpoint interpreter state and does not replay commands, so nothing survives reopening a session and a session does not outlive the plugin or the harness process; the programs you send still read and write real host files. The code you send really runs, with real effects on this host. Its file writes and deletes run under the calling session's DSH file policy, which governs writes and deletes rather than file reads, network access, or process control; the interpreter's own `sh` switch starts off as a convenience default, not a boundary. The interpreter's evaluation surface is broad and is not restricted to builtin names. Use `aether_session_eval` to run programs in it. Sessions are private to the agent that opened them, the deployment caps how many one agent may hold, and an idle session is closed automatically. The returned handle carries the DSH file policy it was opened under; if that policy later changes the session is closed rather than reused. An access the DSH file policy denies is final: retrying the same effect through another tool or shell is not a workaround, this plugin offers no in-turn escalation field, grants no permission automatically, and retries nothing with a native approval token — the user must change the policy explicitly for that effect to be allowed.",
+      "description": "Open a real persistent interpreter; use its id with aether_session_eval. Variables, functions, cwd and env persist per session, but files/network/services share this host. Agent-private, count/idle-limited; policy changes close it. No checkpoint/replay or survival across reopen, plugin unload or Host restart. Real host effects: DSH restricts writes/deletes, not reads, network or process control; sh being off is not isolation. A denial is final: no alternate-tool/shell or native-token retry, no escalation; the user must change policy. ",
       "parameters": {
         "type": "object",
         "properties": {
           "cwd": {
             "type": "string",
-            "description": "Working directory for the interpreter process. Defaults to the session workspace; a relative path is resolved against it."
+            "description": "Working directory; defaults to the session workspace, which also resolves relative paths."
           },
           "name": {
             "type": "string",
-            "description": "Optional label echoed by aether_session_list so you can tell sessions apart."
+            "description": "Label shown by aether_session_list."
           },
           "timeoutMs": {
             "type": "number",
-            "description": "Deadline in milliseconds before this plugin terminates the session process. The deployment applies its configured default and cap."
+            "description": "Hard deadline (ms); timeout/cancel kills the session. Deployment default/cap apply."
           }
         }
       }
     },
     {
       "name": "aether_session_read",
-      "description": "Drain the output a persistent AetherShell session has written since the last drain, without running a program. A session may host a child or a service that keeps writing while no call is in flight, and every `aether_session_eval` already returns the output it saw; this tool reads whatever is left. Output is delivered exactly once: a second read with nothing new reports an empty result. Reading a session that has a call in flight is refused, because that output belongs to the call. Reading a closed or unknown session reports that the id is not open. Bounded like every other log, with the complete stream path when the retained tail was cut.",
+      "description": "Drain unread between-call output once, without running code; eval already returns output it saw. No new output means empty logs. Busy/closed/unknown sessions are refused. Logs are bounded; cut tails include the full-stream path.",
       "parameters": {
         "type": "object",
         "properties": {
           "session_id": {
             "type": "string",
-            "description": "Opaque session id returned by aether_session_open."
+            "description": "Id from aether_session_open; private to this agent."
           }
         },
         "required": [

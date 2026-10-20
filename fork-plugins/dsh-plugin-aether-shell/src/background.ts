@@ -35,6 +35,7 @@ import type { AetherExecDeps, AetherRunFacts, AetherRunStop } from './exec.ts'
 import { runAetherFacts } from './exec.ts'
 import { describeError, toolAborted } from './errors.ts'
 import { assertEvalCode } from './request.ts'
+import { CWD_DESCRIPTION, FILE_POLICY_GUIDANCE } from './guidance.ts'
 import type { AetherToolDependencies } from './tools.ts'
 
 declare module '@deepseek-ai/dsh-jobs' {
@@ -43,12 +44,6 @@ declare module '@deepseek-ai/dsh-jobs' {
     aether: 'aether'
   }
 }
-
-/** Denial guidance every background run carries, matching the foreground tools. */
-const DENIAL_GUIDANCE = 'An access the DSH file policy denies is final for this job: retrying the same '
-  + 'effect through another tool or shell is not a workaround, this plugin offers no in-turn escalation field, '
-  + 'grants no permission automatically, and retries nothing with a native approval token — the user must '
-  + 'change the policy explicitly for that effect to be allowed.'
 
 /**
  * Longest model-facing job label. The registry renders the label inside one
@@ -408,37 +403,27 @@ export function createAetherBackgroundTool(
   const { ctx, config, jobs } = dependencies
   return defineTool({
     name: 'aether_job_start',
-    description: 'Start one AetherShell program as a background job and return its job id immediately. '
-      + 'This is the streaming counterpart of `aether_eval`: the program runs on the interpreter\'s own command '
-      + 'line, but no result document is read, so a program that prints logs, mixed JSON, or nothing at all '
-      + 'still completes. Read the interpreter\'s raw stdout and stderr with `job_output`; the canonical exit '
-      + 'facts and any spill file arrive with the first read after settlement. `job_kill` requests a stop; '
-      + 'settlement follows managed-process cleanup. Each job is a fresh interpreter process: no variables, functions, '
-      + 'or directory changes persist. The job runs without a deadline unless this deployment caps job runtime '
-      + 'or the call supplies `timeoutMs`. The job belongs to this session and is stopped when this session\'s '
-      + 'agent is disposed or the plugin unloads. Output a program\'s own children produce through the '
-      + 'interpreter\'s process builtins may be captured by the interpreter until it returns it, so realtime '
-      + 'child logs are not promised. The job uses this session\'s DSH file policy as it stood when the job started, '
-      + 'which governs writes and deletes rather than file reads, network access, or process control; the '
-      + 'interpreter\'s `sh` switch starts off as a convenience default, not a boundary. '
-      + DENIAL_GUIDANCE,
+    description: 'Start AetherShell source in a fresh background process; return jobId immediately. No persistent state or JSON decoding: '
+      + 'logs, mixed JSON and no output are valid. job_output reads raw stdout/stderr; the first settled read adds exit facts/spill paths. '
+      + 'job_kill requests stop; settlement follows cleanup. Survives the starting call, not owner disposal/plugin unload. '
+      + 'Uses the start-time file policy; child logs may be buffered. ' + FILE_POLICY_GUIDANCE,
     parameters: {
       code: {
         type: 'string',
         required: true,
-        description: 'AetherShell program text to run in the background: an expression, a lambda, or a sequence of statements.',
+        description: 'AetherShell source, as in aether_eval, not PowerShell.',
       },
       label: {
         type: 'string',
-        description: 'Short human-facing label for this job, shown in job listings and the UI. Omit to use the program\'s first line.',
+        description: 'Job label; defaults to the first source line.',
       },
       cwd: {
         type: 'string',
-        description: 'Working directory for this job. Defaults to the session workspace; a relative path is resolved against it.',
+        description: CWD_DESCRIPTION,
       },
       timeoutMs: {
         type: 'number',
-        description: 'Deadline in milliseconds for the whole job. Omitted, the job runs until it finishes or `job_kill` stops it, bounded only by this deployment\'s job-runtime cap when one is set.',
+        description: 'Whole-job hard deadline (ms). Omitted: deployment cap only; no cap means run until exit or stopped.',
       },
     },
     isConcurrencySafe: () => true,

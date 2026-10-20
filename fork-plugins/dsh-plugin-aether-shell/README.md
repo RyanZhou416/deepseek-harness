@@ -180,7 +180,7 @@ The tool registry owns permission hooks and durable call/result events. The plug
 <a id="model-experience"></a>
 ## Model Experience
 
-Indirectly, through eleven registered tools whose declarations, ownership and policy guidance the model reads on every request.
+The model reads eleven compact tool declarations, with no additional AetherShell system-prompt section. Descriptions distinguish JSON builtin calls/pipelines, fresh source evaluation, persistent sessions, raw-stream jobs and retained-value pages. Discover unfamiliar native signatures on demand rather than loading the entire ontology. Parameter descriptions own defaults and units; local guidance retains file-policy limits, final denials, same-job handoff, cancellation and no-replay rules. Tool names, arguments and execution behavior are unchanged.
 
 #### KV Cache effect
 

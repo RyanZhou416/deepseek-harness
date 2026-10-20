@@ -32,6 +32,7 @@ import type {} from '@deepseek-ai/dsh-sandbox'
 import type {} from '@deepseek-ai/dsh-sandbox-policy'
 import type {} from '@deepseek-ai/dsh-shell-env'
 import { callTimeout, queryExecutionTimeout } from './config.ts'
+import { CWD_DESCRIPTION, FILE_POLICY_GUIDANCE } from './guidance.ts'
 import { runForegroundQuery } from './foreground.ts'
 import type { AetherQueryResult, AetherPromotedOutcome } from './foreground.ts'
 import type { ResolvedConfig, StructuredDataMode } from './config.ts'
@@ -223,12 +224,8 @@ function renderQueryOutcome(outcome: AetherOutcome | (Omit<AetherPromotedOutcome
   return `aether execution ${outcome.jobId}: still running after ${outcome.waitTimeoutMs}ms; handed off to the original background job. No command was restarted. ${hard} Read the final canonical JSON outcome with job_output {job_id:"${outcome.jobId}"}; use job_kill to stop it. Native proc_run limits still apply.`
 }
 
-const HANDOFF_GUIDANCE = 'When a job registry and live owning agent are available and promoteOnTimeout is enabled, '
-  + 'timeoutMs bounds only the foreground wait: expiry returns the original job id without stopping or repeating the operation. '
-  + 'Collect its final canonical JSON outcome with job_output; use job_kill to stop it. executionTimeoutMs is the independent hard runtime limit, '
-  + 'also capped by the deployment\'s maxBackgroundRuntimeMs. Omitted hard limits mean no outer runtime cap when that deployment cap is zero; '
-  + 'native proc_run timeout_ms is unchanged. Explicit call cancellation stops and awaits the owned run. '
-  + 'Without ownership/jobs, with promotion disabled, or if admission is refused before execution, the foreground wait remains a kill deadline. '
+const HANDOFF_GUIDANCE = 'Wait expiry may return the original jobId without stopping or rerunning work: collect its final JSON outcome with job_output; stop with job_kill. '
+  + 'Explicit cancellation stops and awaits cleanup. '
 
 /**
  * What a tool that returns a complete value says about an oversized one.
@@ -237,25 +234,7 @@ const HANDOFF_GUIDANCE = 'When a job registry and live owning agent are availabl
  * it is stated for the model: a retained result is still delivered, so a caller
  * that reads only this sentence knows to page rather than to give up.
  */
-const RETENTION_GUIDANCE = 'A result over the deployment\'s complete-result budget is retained whole and '
-  + 'returned as an id you read with `aether_result_page`, which never runs the program again; when this '
-  + 'deployment cannot retain it, the call fails loudly and names the narrowing remedy instead of returning a '
-  + 'partial value. '
-
-/**
- * Denial guidance every effect-capable tool carries.
- *
- * A backend can refuse a file effect and report it through the interpreter's
- * own failure envelope with a localized operating-system message, which this
- * plugin does not match against the backend's denial dialect; the refusal then
- * arrives as an ordinary failed result rather than the `denied` arm. The
- * guidance therefore states the rule for the model independently of how the
- * refusal was classified.
- */
-const DENIAL_GUIDANCE = 'An access the DSH file policy denies is final for this call: retrying the same '
-  + 'effect through another tool or shell is not a workaround, this plugin offers no in-turn escalation field, '
-  + 'grants no permission automatically, and retries nothing with a native approval token — the user must '
-  + 'change the policy explicitly for that effect to be allowed.'
+const RETENTION_GUIDANCE = 'Oversized values are retained whole for aether_result_page (no rerun), or fail explicitly if retention is unavailable. '
 
 /** How one page of ontology discovery was bounded. */
 const DISCOVERY_SCHEMA = {
@@ -295,13 +274,13 @@ const DISCOVERY_OUTCOME_SCHEMA = { oneOf: [DISCOVERY_VALUE_ARM, ERROR_ARM, DENIE
 /** Working-directory argument every tool accepts. */
 const CWD_PARAMETER = {
   type: 'string',
-  description: 'Working directory for this call. Defaults to the session workspace; a relative path is resolved against it.',
+  description: CWD_DESCRIPTION,
 } as const
 
 /** Deadline argument every tool accepts. */
 const TIMEOUT_PARAMETER = {
   type: 'number',
-  description: 'Deadline in milliseconds before this plugin kills the interpreter. The deployment applies its configured default and cap.',
+  description: 'Hard deadline (ms); deployment default/cap apply.',
 } as const
 
 /** The working-directory and deadline arguments every tool accepts. */
@@ -310,8 +289,8 @@ const CWD_AND_TIMEOUT_ENTRIES = { cwd: CWD_PARAMETER, timeoutMs: TIMEOUT_PARAMET
 /** Independent query wait and execution limits; discovery keeps its existing hard deadline. */
 const QUERY_EXECUTION_ENTRIES = {
   cwd: CWD_PARAMETER,
-  timeoutMs: { type: 'number', description: 'Foreground wait in milliseconds, capped by maxTimeoutMs. With job ownership and promotion enabled, expiry hands off the same execution; otherwise it is a kill deadline.' },
-  executionTimeoutMs: { type: 'number', description: 'Independent positive hard execution deadline in milliseconds. Omitted, only maxBackgroundRuntimeMs applies (zero means no outer cap). Native proc_run timeout_ms remains independent.' },
+  timeoutMs: { type: 'number', description: 'Foreground wait (ms), deployment-capped. Jobs + live owner + promotion allow handoff; otherwise kills, including pre-start admission refusal.' },
+  executionTimeoutMs: { type: 'number', description: 'Positive hard runtime (ms), capped by maxBackgroundRuntimeMs. Omitted: that cap only (0=unlimited). Native proc_run timeout_ms is unchanged.' },
 } as const
 
 /**
@@ -320,23 +299,20 @@ const QUERY_EXECUTION_ENTRIES = {
  * applies, because the mode is trusted configuration and never a call argument.
  */
 const CALL_ARGUMENT_CHANNEL: Record<StructuredDataMode, string> = {
-  legacy: 'Arguments are data, never AetherShell source: a string containing `${` is rejected because the interpreter '
-    + 'would interpolate it as code, and every object key must be a plain identifier because the interpreter writes '
-    + 'keys unquoted. ',
-  'typed-v1': 'Arguments travel on the interpreter\'s typed argument channel, which this call verified, so a string '
-    + 'containing `${` and a non-identifier object key are data rather than source. ',
+  legacy: 'JSON data only; legacy mode rejects strings containing `${` and non-identifier object keys. ',
+  'typed-v1': 'Verified typed argument channel: `${` strings, arbitrary keys and null stay data, not source. ',
 }
 
 /** The same fact for one pipeline step; the seed's null rule is stated by the `input` parameter instead. */
 const STEP_ARGUMENT_CHANNEL: Record<StructuredDataMode, string> = {
-  legacy: 'Step arguments are data with the same `${` and object key limits as `aether_call`, and every step runs under this call\'s DSH file policy. ',
-  'typed-v1': 'Step arguments travel on the same verified typed channel as `aether_call`, and every step runs under this call\'s DSH file policy. ',
+  legacy: 'JSON args: legacy mode rejects `${` strings and non-identifier keys. ',
+  'typed-v1': 'Verified typed JSON args: `${` strings and arbitrary keys stay data. ',
 }
 
 /** The `input` parameter's null rule, which only the converting channel cannot honour. */
 const PIPELINE_SEED_DESCRIPTION: Record<StructuredDataMode, string> = {
-  legacy: 'Value that starts the pipeline; omit it to start from the first step\'s call. An explicit null is rejected because the native request reads it as "no input" rather than the None value — seed None with aether_eval instead.',
-  'typed-v1': 'Value that starts the pipeline; omit it to start from the first step\'s call. An explicit null is sent as the None value, which this deployment verified the interpreter delivers.',
+  legacy: 'Pipeline seed; omit to start with the first call. Explicit null is rejected in legacy mode; use aether_eval for None.',
+  'typed-v1': 'Pipeline seed; omit to start with the first call. Explicit null delivers None.',
 }
 
 /** Smallest remaining budget that can still start one interpreter request. */
@@ -573,24 +549,21 @@ export function createAetherTools(dependencies: AetherToolDependencies): ToolDef
 
   const discover = defineTool({
     name: 'aether_discover',
-    description: 'Read the native AetherShell ontology. Without `query`, return one page of the category manifest with '
-      + 'each category\'s builtin count and effect classes. With a category name, return one page of that category\'s '
-      + 'builtins with their signatures and effects. With a builtin name, return its parameters, return type, effects, '
-      + 'aliases, and examples. A name the ontology does not know returns the interpreter\'s own unknown-name reply, '
-      + 'which is a successful result rather than a failure. Page a list with `offset` and `limit`; a page that leaves '
-      + 'entries behind reports `nextOffset`. Foreground only, under a hard deadline.',
+    description: 'Look up unfamiliar native operations on demand. No query: category counts/effects; category: builtin signatures/effects; '
+      + 'builtin: parameters, return type, effects, aliases, examples. Unknown names return a successful unknown-name reply. '
+      + 'Lists are paged; continue with nextOffset. Hard-deadline foreground only.',
     parameters: {
       query: {
         type: 'string',
-        description: 'Ontology category or builtin name to describe (for example "Crypto" or "crypto_hash"). Omit for the category manifest.',
+        description: 'Category/builtin, e.g. Crypto or crypto_hash; omit for categories.',
       },
       offset: {
         type: 'number',
-        description: 'Zero-based index of the first entry to return (default 0). Continue a list with the previous page\'s nextOffset.',
+        description: 'Start index (default 0); use the previous nextOffset.',
       },
       limit: {
         type: 'number',
-        description: 'Maximum entries in this page; the deployment\'s ontology-entry budget caps it.',
+        description: 'Maximum entries; deployment-capped.',
       },
       ...CWD_AND_TIMEOUT_ENTRIES,
     },
@@ -620,21 +593,17 @@ export function createAetherTools(dependencies: AetherToolDependencies): ToolDef
 
   const call = defineTool({
     name: 'aether_call',
-    description: 'Call one native AetherShell builtin with positional JSON arguments and return its typed result. '
-      + '`builtin` is one flat native name (`ls`, `crypto_hash`, `json_parse`); find names with `aether_discover`. '
+    description: 'Call one flat native builtin; discover unfamiliar names/signatures with aether_discover. '
+      + 'Example: {"builtin":"len","args":[[1,2,3]]} returns 3. Use aether_eval for module syntax. '
       + CALL_ARGUMENT_CHANNEL[config.structuredDataMode]
-      + 'A process-capable builtin runs under this call\'s DSH file policy, which governs writes and '
-      + 'deletes rather than reads, network, or process control; the interpreter\'s own `sh` switch starts off as a '
-      + 'convenience default, not a boundary. '
-      + HANDOFF_GUIDANCE
-      + RETENTION_GUIDANCE
-      + DENIAL_GUIDANCE,
+      + 'Unsafe integers must be requested as text. '
+      + HANDOFF_GUIDANCE + RETENTION_GUIDANCE + FILE_POLICY_GUIDANCE,
     parameters: {
-      builtin: { type: 'string', required: true, description: 'Flat native builtin name, for example "ls" or "crypto_hash".' },
+      builtin: { type: 'string', required: true, description: 'Flat builtin name, e.g. len or crypto_hash (not file.read).' },
       args: {
         type: 'array',
         items: { type: 'json' },
-        description: 'Positional arguments in the order the builtin\'s signature declares them; JSON data only.',
+        description: 'Positional JSON arguments in signature order; an array argument takes one slot.',
       },
       ...QUERY_EXECUTION_ENTRIES,
     },
@@ -656,15 +625,10 @@ export function createAetherTools(dependencies: AetherToolDependencies): ToolDef
 
   const pipeline = defineTool({
     name: 'aether_pipeline',
-    description: 'Run an ordered native AetherShell pipeline, each step calling one flat builtin and feeding its '
-      + 'result to the next. `select` maps each item of that step\'s result through a dotted field path, so '
-      + '`select: "name"` reads the `name` field of every element. `predicate` is an AetherShell expression passed to '
-      + 'that step\'s builtin as its lambda first argument and replaces the step\'s `args`. `input` starts the '
-      + 'pipeline from a value instead of from the first call. '
+    description: 'Run ordered flat-builtin steps, feeding each result to the next. Discover signatures with aether_discover. '
       + STEP_ARGUMENT_CHANNEL[config.structuredDataMode]
-      + HANDOFF_GUIDANCE
-      + RETENTION_GUIDANCE
-      + DENIAL_GUIDANCE,
+      + 'Unsafe integers must be requested as text. '
+      + HANDOFF_GUIDANCE + RETENTION_GUIDANCE + FILE_POLICY_GUIDANCE,
     parameters: {
       steps: {
         type: 'array',
@@ -676,8 +640,8 @@ export function createAetherTools(dependencies: AetherToolDependencies): ToolDef
           properties: {
             builtin: { type: 'string', required: true, description: 'Flat native builtin name this step calls.' },
             args: { type: 'array', items: { type: 'json' }, description: 'Positional arguments for this step; JSON data only.' },
-            select: { type: 'string', description: 'Dotted field path read from each element of this step\'s result, for example "name" or "meta.size".' },
-            predicate: { type: 'string', description: 'AetherShell expression passed to this step\'s builtin as `fn(x) => <predicate>`; replaces this step\'s args.' },
+            select: { type: 'string', description: 'Project this dotted field from every result item, e.g. name or meta.size.' },
+            predicate: { type: 'string', description: 'Expression used as fn(x) => <predicate>, replacing args; e.g. x.size > 10.' },
           },
         },
       },
@@ -705,20 +669,12 @@ export function createAetherTools(dependencies: AetherToolDependencies): ToolDef
 
   const evaluate = defineTool({
     name: 'aether_eval',
-    description: 'Evaluate one AetherShell program and return its canonical JSON value. Unlike the other tools, the '
-      + 'program runs on the interpreter\'s own command line, so lambdas, modules such as `file.read("notes.txt")`, '
-      + 'and multi-statement programs work and are not limited to flat builtin names. The program must exit '
-      + 'successfully for a value; a failing program returns the interpreter\'s own error text. A program that prints '
-      + 'nothing reports `resultType: "none"`. Everything the program does runs under this call\'s DSH file policy, '
-      + 'which governs writes and deletes rather than file reads, network access, or process control. The '
-      + 'interpreter\'s `sh` switch starts off, but that is a convenience default rather than a boundary, because '
-      + 'the program can change its own environment and reach the process builtins either way. Numbers outside the '
-      + 'exact integer range this runtime can carry are rejected rather than rounded, so ask for such a value as text. '
-      + HANDOFF_GUIDANCE
-      + RETENTION_GUIDANCE
-      + DENIAL_GUIDANCE,
+    description: 'Run AetherShell source in a fresh process, not PowerShell: expressions, fn(x) => ..., modules (file.read("notes.txt")), and ; statements. '
+      + 'Returns one canonical JSON value on success; no output means resultType:"none". Failure returns native error text; earlier effects are not rolled back. '
+      + 'Use aether_job_start for raw/mixed stdout, aether_session_eval for persistent state. Unsafe integers must be text. '
+      + HANDOFF_GUIDANCE + RETENTION_GUIDANCE + FILE_POLICY_GUIDANCE,
     parameters: {
-      code: { type: 'string', required: true, description: 'AetherShell program text: an expression, a lambda, or a sequence of statements.' },
+      code: { type: 'string', required: true, description: 'AetherShell source; e.g. range(3) | map(fn(x) => x * 2).' },
       ...QUERY_EXECUTION_ENTRIES,
     },
     output: {

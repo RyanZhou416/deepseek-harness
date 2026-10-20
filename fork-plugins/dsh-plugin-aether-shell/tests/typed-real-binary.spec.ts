@@ -2,6 +2,7 @@
 import { afterEach, describe, expect, it } from 'vitest'
 import { createHarness, valueOf } from './helpers/harness.ts'
 import type { Harness } from './helpers/harness.ts'
+import { isJsonObject } from '../src/outcome.ts'
 
 /** An opt-in native runtime; the protocol fixture cannot substitute for this suite. */
 const executable = process.env['DSH_AETHER_TYPED_TEST_EXECUTABLE']
@@ -18,6 +19,17 @@ async function setup(): Promise<Harness> {
 }
 
 describe.skipIf(executable === undefined)('source-built typed-data interpreter', () => {
+  it('executes the concise source example shown to the model', async () => {
+    const harness = await setup()
+    const definition = harness.ctx.tools.schemas().find(tool => tool.name === 'aether_eval')
+    const properties = definition?.parameters['properties']
+    if (!isJsonObject(properties) || !isJsonObject(properties.code) || typeof properties.code.description !== 'string') {
+      throw new Error('Missing model-facing source example')
+    }
+    const match = /e\.g\. (.+)\.$/u.exec(properties.code.description)
+    if (match?.[1] === undefined) throw new Error('Missing executable source example')
+    expect(valueOf(await harness.call('aether_eval', { code: match[1] }))['value']).toEqual([0, 2, 4])
+  })
   it('preserves nested literal text, arbitrary keys and nulls through the real tool', async () => {
     const harness = await setup()
     const input = JSON.parse('{"a-b":"literal ${1+2}","中文":null,"":"empty key","__proto__":{"safe":true},"nested":["quote \\\" slash \\\\ newline \\n",false,0]}')

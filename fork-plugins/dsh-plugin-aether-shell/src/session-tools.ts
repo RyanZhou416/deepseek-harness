@@ -24,6 +24,7 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { ToolDefinition, ToolRunContext } from '@deepseek-ai/dsh-tools'
 import type { JsonValue } from '@deepseek-ai/dsh-util-values'
 import { callTimeout } from './config.ts'
+import { CWD_DESCRIPTION, FILE_POLICY_GUIDANCE } from './guidance.ts'
 import type { ResolvedConfig } from './config.ts'
 import { describeError } from './errors.ts'
 import { RESULT_LIMIT_CODE } from './limit.ts'
@@ -329,44 +330,17 @@ const CLOSE_OUTCOME_SCHEMA = { oneOf: [CLOSED_ARM, LIMIT_ARM] } as const
 /** Read-tool result. */
 const READ_OUTCOME_SCHEMA = { oneOf: [READ_ARM, LIMIT_ARM] } as const
 
-/**
- * Denial guidance every effect-capable tool carries.
- *
- * The interpreter reports a refused file effect through its own failure
- * channel, sometimes with a localized operating-system message this plugin does
- * not match against the backend's denial dialect; the refusal then arrives as
- * an ordinary failed result. The guidance therefore states the rule for the
- * model independently of how the refusal was classified.
- */
-const DENIAL_GUIDANCE = 'An access the DSH file policy denies is final: retrying the same effect through '
-  + 'another tool or shell is not a workaround, this plugin offers no in-turn escalation field, grants no '
-  + 'permission automatically, and retries nothing with a native approval token — the user must change the '
-  + 'policy explicitly for that effect to be allowed.'
-
-/** The shared statement of what a persistent session actually is. */
-const SESSION_FACTS = 'A session is one real interpreter process on this host, holding native mutable state '
-  + '(variables, functions, the current directory, and the process environment) that survives between calls. '
-  + 'That separation is the interpreter\'s own: two sessions do not share variables, functions, or a working '
-  + 'directory, but they share the host itself, so files, network access, and every external service are '
-  + 'common to all of them and to this machine. The plugin does not checkpoint interpreter state and does not '
-  + 'replay commands, so nothing survives reopening a session and a session does not outlive the plugin or '
-  + 'the harness process; the programs you send still read and write real host files. The code you send '
-  + 'really runs, with real effects on this host. Its file writes and deletes run under the calling '
-  + 'session\'s DSH file policy, which governs writes and deletes rather than file reads, network access, or '
-  + 'process control; the interpreter\'s own `sh` switch starts off as a convenience default, not a boundary. '
-  + 'The interpreter\'s evaluation surface is broad and is not restricted to builtin names. '
-
 /** The session id argument every follow-up tool accepts. */
 const SESSION_ID_PARAMETER = {
   type: 'string',
   required: true,
-  description: 'Opaque session id returned by aether_session_open.',
+  description: 'Id from aether_session_open; private to this agent.',
 } as const
 
 /** Deadline argument shared with the foreground tools. */
 const TIMEOUT_PARAMETER = {
   type: 'number',
-  description: 'Deadline in milliseconds before this plugin terminates the session process. The deployment applies its configured default and cap.',
+  description: 'Hard deadline (ms); timeout/cancel kills the session. Deployment default/cap apply.',
 } as const
 
 /** The manager plus the tool definitions that register against it. */
@@ -570,17 +544,15 @@ export function createAetherSessionTools(
 
   const open = defineTool({
     name: 'aether_session_open',
-    description: 'Open a persistent AetherShell session and return an opaque session id. ' + SESSION_FACTS
-      + 'Use `aether_session_eval` to run programs in it. Sessions are private to the agent that opened them, '
-      + 'the deployment caps how many one agent may hold, and an idle session is closed automatically. '
-      + 'The returned handle carries the DSH file policy it was opened under; if that policy later changes the '
-      + 'session is closed rather than reused. ' + DENIAL_GUIDANCE,
+    description: 'Open a real persistent interpreter; use its id with aether_session_eval. Variables, functions, cwd and env persist per session, '
+      + 'but files/network/services share this host. Agent-private, count/idle-limited; policy changes close it. '
+      + 'No checkpoint/replay or survival across reopen, plugin unload or Host restart. ' + FILE_POLICY_GUIDANCE,
     parameters: {
       cwd: {
         type: 'string',
-        description: 'Working directory for the interpreter process. Defaults to the session workspace; a relative path is resolved against it.',
+        description: CWD_DESCRIPTION,
       },
-      name: { type: 'string', description: 'Optional label echoed by aether_session_list so you can tell sessions apart.' },
+      name: { type: 'string', description: 'Label shown by aether_session_list.' },
       timeoutMs: TIMEOUT_PARAMETER,
     },
     output: {
@@ -637,21 +609,16 @@ export function createAetherSessionTools(
 
   const evaluate = defineTool({
     name: 'aether_session_eval',
-    description: 'Evaluate one AetherShell program inside a persistent session and return its typed value. Unlike '
-      + '`aether_eval`, the program runs in the session\'s own long-lived process, so variables, functions, the '
-      + 'current directory, and the environment all persist between calls and modules such as '
-      + '`file.read("notes.txt")` are available. ' + SESSION_FACTS
-      + 'A failing program does not roll back what earlier statements in the same call already did. '
-      + 'Requests carry a host-random nonce, so output the program prints is returned as bounded `logs` rather '
-      + 'than mistaken for a result. One evaluation runs at a time per session. A call that reaches its deadline '
-      + 'or is cancelled terminates the whole session process, because the interpreter cannot abandon a running '
-      + 'command; open a new session to continue. ' + DENIAL_GUIDANCE,
+    description: 'Run AetherShell source/modules in the session process; variables/functions/cwd/env persist as in aether_session_open. '
+      + 'Returns a typed value plus bounded printed logs (not result text); one evaluation at a time. '
+      + 'Failure does not roll back earlier effects. Timeout/cancel kills the whole session; open a new one, without replay. '
+      + FILE_POLICY_GUIDANCE,
     parameters: {
       session_id: SESSION_ID_PARAMETER,
       code: {
         type: 'string',
         required: true,
-        description: 'AetherShell program text: an expression, a lambda, or a sequence of statements executed in the session.',
+        description: 'AetherShell source executed in the existing process.',
       },
       timeoutMs: TIMEOUT_PARAMETER,
     },
@@ -678,13 +645,10 @@ export function createAetherSessionTools(
 
   const list = defineTool({
     name: 'aether_session_list',
-    description: 'List the persistent AetherShell sessions this agent currently holds, with each one\'s opaque id, '
-      + 'label, working directory, state, and file-policy mode. Sessions the calling session\'s DSH file policy no '
-      + 'longer matches are closed here and reported as destroyed rather than shown as usable. Pass '
-      + '`usage: true` to add the interpreter\'s own evaluation and token counters for each live session, which '
-      + 'costs one request per session. Another agent\'s sessions are never listed. ' + DENIAL_GUIDANCE,
+    description: 'List only this agent\'s sessions: ids, labels, startup cwd, state and file-policy mode. '
+      + 'Policy-mismatched sessions are closed and reported destroyed. usage adds counters with one request per ready session.',
     parameters: {
-      usage: { type: 'boolean', description: 'Also read each live session\'s counters from the interpreter (one request per session).' },
+      usage: { type: 'boolean', description: 'Include native evaluation/token counters (extra request per ready session).' },
       timeoutMs: TIMEOUT_PARAMETER,
     },
     output: {
@@ -718,11 +682,8 @@ export function createAetherSessionTools(
 
   const close = defineTool({
     name: 'aether_session_close',
-    description: 'Close one of this agent\'s persistent AetherShell sessions and terminate its interpreter process. '
-      + 'The native session is asked to close first, and the process is terminated afterwards whatever the '
-      + 'interpreter answered, so a closed session never keeps running. Closing needs no new policy grant and '
-      + 'always releases the process. Closing an id this agent does not hold reports `closed: false` and changes '
-      + 'nothing; another agent\'s session is refused.',
+    description: 'Close this agent\'s session, then terminate its process regardless of the native reply; no new policy grant needed. '
+      + 'An unknown id returns closed:false without changes; a foreign agent\'s id is refused.',
     parameters: {
       session_id: SESSION_ID_PARAMETER,
       timeoutMs: TIMEOUT_PARAMETER,
@@ -753,13 +714,8 @@ export function createAetherSessionTools(
 
   const read = defineTool({
     name: 'aether_session_read',
-    description: 'Drain the output a persistent AetherShell session has written since the last drain, without '
-      + 'running a program. A session may host a child or a service that keeps writing while no call is in flight, '
-      + 'and every `aether_session_eval` already returns the output it saw; this tool reads whatever is left. '
-      + 'Output is delivered exactly once: a second read with nothing new reports an empty result. Reading a '
-      + 'session that has a call in flight is refused, because that output belongs to the call. Reading a closed '
-      + 'or unknown session reports that the id is not open. Bounded like every other log, with the complete '
-      + 'stream path when the retained tail was cut.',
+    description: 'Drain unread between-call output once, without running code; eval already returns output it saw. '
+      + 'No new output means empty logs. Busy/closed/unknown sessions are refused. Logs are bounded; cut tails include the full-stream path.',
     parameters: {
       session_id: SESSION_ID_PARAMETER,
     },

@@ -73,19 +73,19 @@ describe('aether-shell registration', () => {
     try {
       const descriptionOf = (mounted: Harness, name: string) =>
         mounted.ctx.tools.schemas().find(schema => schema.name === name)?.description ?? ''
-      expect(descriptionOf(legacy, 'aether_call')).toContain('a string containing `${` is rejected')
+      expect(descriptionOf(legacy, 'aether_call')).toContain('legacy mode rejects strings containing `${`')
       expect(descriptionOf(legacy, 'aether_call')).not.toContain('typed argument channel')
       expect(descriptionOf(typed, 'aether_call')).toContain('typed argument channel')
       expect(descriptionOf(typed, 'aether_call')).not.toContain('is rejected because the interpreter')
-      expect(descriptionOf(legacy, 'aether_pipeline')).toContain('object key limits')
-      expect(descriptionOf(typed, 'aether_pipeline')).toContain('same verified typed channel')
+      expect(descriptionOf(legacy, 'aether_pipeline')).toContain('legacy mode rejects `${` strings and non-identifier keys')
+      expect(descriptionOf(typed, 'aether_pipeline')).toContain('Verified typed JSON args')
       // The seed's null rule differs by channel, and the parameter is what the
       // model reads before it decides to send one.
       const seedOf = (mounted: Harness) =>
         (mounted.ctx.tools.schemas().find(schema => schema.name === 'aether_pipeline')
           ?.parameters as { properties: Record<string, { description?: string }> }).properties['input']?.description ?? ''
-      expect(seedOf(legacy)).toContain('An explicit null is rejected')
-      expect(seedOf(typed)).toContain('sent as the None value')
+      expect(seedOf(legacy)).toContain('Explicit null is rejected')
+      expect(seedOf(typed)).toContain('Explicit null delivers None')
     } finally {
       await typed.dispose()
     }

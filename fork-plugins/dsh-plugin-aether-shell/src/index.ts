@@ -35,7 +35,8 @@
  * optional and read per call, so the managed `DSH_*` facts are present exactly
  * when that registry is mounted.
  *
- * The four query tools use fresh processes under hard deadlines. A complete value
+ * Queries use fresh processes; value queries can hand off to their original owned
+ * job when foreground waiting expires, with a separate hard execution limit. A complete value
  * over the deployment's result budget from `aether_call`, `aether_pipeline`, or
  * `aether_eval` is retained in plugin process memory and returned as an id, which
  * `aether_result_page` reads one bounded page at a time; the store writes no file,

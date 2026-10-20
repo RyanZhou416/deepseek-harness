@@ -164,28 +164,22 @@ export function createAetherResultTools(dependencies: AetherResultToolDependenci
 
   const page = defineTool({
     name: 'aether_result_page',
-    description: 'Read one page of a result this deployment retained because it was too large to return inline. '
-      + '`aether_call`, `aether_pipeline`, and `aether_eval` report such a result as an id and its shape; this tool '
-      + 'returns its content one bounded page at a time. Paging reads the stored value and never runs the program '
-      + 'again, so no side effect of the original call is repeated. Format `items` (the default) pages an array by '
-      + 'whole elements and a record by whole fields; format `json` pages the canonical JSON encoding by UTF-8 byte '
-      + 'offset, which also reads one element larger than a whole page. `offset`, `shown`, `total`, and `nextOffset` '
-      + 'are counted in the returned `unit`, so pass back the previous page\'s `nextOffset` rather than computing an '
-      + 'offset yourself. A result is private to the agent that produced it, is released when it expires idle, and '
-      + 'is released when you pass `drop`.',
+    description: 'Page a complete oversized query value by its retained id, without rerunning code/effects. '
+      + 'Continue with returned nextOffset (in unit) until complete. Agent-private; idle expiry, drop, owner disposal or plugin/Host shutdown release it. '
+      + 'For json pages, concatenate data strings then JSON-parse once; this also retrieves an oversized single item.',
     parameters: {
-      id: { type: 'string', required: true, description: 'Retrieval id of the retained result to read.' },
+      id: { type: 'string', required: true, description: 'Retained result id from a query, not a job/session id.' },
       offset: {
         type: 'number',
-        description: 'Element index (format `items`) or UTF-8 byte offset (format `json`) to start at; defaults to the beginning. Pass back a previous page\'s `nextOffset`.',
+        description: 'Start offset (default 0); pass back nextOffset, do not calculate it.',
       },
-      limit: { type: 'number', description: 'Most elements, fields, or bytes to include. The page budget bounds the result either way.' },
+      limit: { type: 'number', description: 'Maximum items/fields or UTF-8 bytes; page budget still applies.' },
       maxBytes: {
         type: 'number',
-        description: 'Most bytes this page may occupy; defaults to the deployment\'s maxResultBytes and cannot exceed it.',
+        description: 'Response byte cap; defaults to maxResultBytes and cannot exceed it.',
       },
-      format: { type: 'string', enum: ['items', 'json'], description: '`items` pages a container by whole elements or fields; `json` pages the canonical JSON encoding by UTF-8 byte offset.' },
-      drop: { type: 'boolean', description: 'Release the retained result instead of reading it. Takes no other argument besides `id`.' },
+      format: { type: 'string', enum: ['items', 'json'], description: 'items (default): whole array elements/record fields. json: canonical JSON in UTF-8 byte chunks.' },
+      drop: { type: 'boolean', description: 'Release instead of page; use with id only.' },
     },
     output: {
       schema: RESULT_OUTCOME_SCHEMA,

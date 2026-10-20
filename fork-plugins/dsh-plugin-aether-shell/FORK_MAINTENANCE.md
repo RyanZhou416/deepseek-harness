@@ -24,6 +24,10 @@ Pages report their offset, unit, shown/total, next offset and final-page status.
 
 Native structured failures at `metadata.error` are forwarded as data, independently of a returned business record containing `success:false`. A failure does not authorize replay, rollback or an alternate-shell retry. The native strict default is not a file-policy setting or an agent-mode toggle.
 
+## Model context
+
+Keep eleven tools and their existing arguments. Concise descriptions distinguish typed JSON data from AetherShell source, fresh processes from persistent state, canonical results from raw streams, and retained ids from job/session ids. Parameter text carries units and defaults; native signatures are discovered on demand. Do not add a duplicate system-prompt tutorial or omit final-denial, real-host-effects, same-job/no-replay, cancellation and owner-lifetime guidance to meet a byte budget. The assembled legacy and typed tool schemas have UTF-8 byte budgets and usage-rule tests in `tests/guidance.spec.ts`; generated snapshot sidecars remain aligned with those declarations.
+
 ## Compatibility
 
 This build requires the fork's matching Host/tool-runtime build, which accepts undefined per-result presentation metadata. Package replacement alone does not upgrade an already running Host. The Host API cohort is DSH `0.2.1-rc.2`; legacy mode targets AetherShell `12.0.2`, and typed mode requires the capabilities implemented by the personal `12.0.2+ryan.2` runtime. The interpreter remains an external prerequisite and is not redistributed in this MIT-licensed plugin. Persistent sessions depend on the interpreter's own `sess_open`, `sess_eval`, `sess_usage` and `sess_close` builtins, which exist in the running interpreter but not in its published ontology, so no discovery result advertises them. An interpreter update requires real-binary verification of discovery, argument fidelity, pipelines, module evaluation, session state retention, session policy invalidation, background output and streaming, errors, and confinement before changing the supported protocol.
