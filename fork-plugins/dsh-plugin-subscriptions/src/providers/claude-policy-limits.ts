@@ -1072,9 +1072,11 @@ export class ClaudePolicyLimitsOwner {
       url: `${this.options.baseUrl}/api/claude_code/policy_limits`,
       accessToken,
       userAgent: this.options.userAgent,
-      // Only a document this process confirmed may serve as a conditional request: a
-      // validator restored from disk is not evidence that the same identity is still live.
-      ...state.verified && state.validator !== undefined ? { validator: state.validator } : {},
+      // Only a live document this process confirmed may serve as a conditional request. A
+      // retained document that has gone stale must be read in full: sending its validator
+      // would make the next read conditional, and the core correctly refuses a 304 that was
+      // not produced by a live prior as unsolicited.
+      ...state.prior === 'live' && state.verified && state.validator !== undefined ? { validator: state.validator } : {},
       transport: this.options.transport,
       clock,
       sleep: this.options.sleep ?? SYSTEM_SLEEP,

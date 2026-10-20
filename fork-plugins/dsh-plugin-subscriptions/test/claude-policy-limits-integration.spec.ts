@@ -441,6 +441,13 @@ test('a failed read keeps the adopted document, its fixed reason, and reports st
   assert.equal(cached.outcome, 'stale')
   assert.equal(transport.calls.length, before, 'a plain readiness check performs no request')
 
+  // Recovery after a stale read must be unconditional: a retained validator may not turn
+  // the next request into a conditional one whose 304 the core classifies as unsolicited.
+  transport.set({ status: 200, body: JSON.stringify({ restrictions: { allow_model_catalog: { allowed: false } } }) })
+  const recovered = await limits.ensure('acct', { force: true })
+  assert.equal(recovered.outcome, 'current')
+  assert.equal(transport.calls.at(-1)?.headers['if-none-match'], undefined)
+
   // An account that never adopted anything reports unavailable instead.
   const empty = owner(transport, {}, false)
   empty.bind('other', 's1', TEST_IDENTITY)
