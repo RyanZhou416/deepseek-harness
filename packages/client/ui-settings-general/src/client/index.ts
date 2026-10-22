@@ -97,7 +97,7 @@ export function apply(ctx: ClientContext): void {
   ctx.effect(() => ctx.configForms.whileServed(['tool-session-message'], () => ctx.slots.inject(
     'settings.general.item',
     () => ctx.slots.register({
-      name: 'settings.general.item', id: 'session-create-model-override', order: 17, locale: NS,
+      name: 'settings.general.item', id: 'session-create-model-override', order: 15.5, locale: NS,
       inject: (): SessionCreateOverrideRowInjected => ({
         hooks: {
           sessionCreateOverride: sessionCreateScope,
