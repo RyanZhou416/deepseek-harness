@@ -4,9 +4,10 @@
  * @module @deepseek-ai/dsh-tool-session-message
  */
 
-import type { Context } from '@deepseek-ai/cordis'
+import type { Context, Volatile } from '@deepseek-ai/cordis'
 import { brandString } from '@deepseek-ai/dsh-brand'
 import { createUserMessage, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
+import z from '@deepseek-ai/schemastery'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { UserMessage } from '@deepseek-ai/dsh-llm'
 import { SessionId } from '@deepseek-ai/dsh-session'
@@ -28,6 +29,34 @@ export const name = 'tool-session-message'
 
 /** Services required for exact sender identity, Session creation, and target activation. */
 export const inject = ['tools', 'agents', 'sessionController', 'sessionReferenceResolver', 'sessionQuery', 'permissionPresets', 'agentDefaultModel', 'llm']
+
+/** Model forced onto newly created independent Sessions. */
+export interface SessionCreateModelOverride {
+  /** Registered provider route. */
+  provider: string
+  /** Provider-owned model id. */
+  model: string
+  /** Adapter-owned reasoning effort; omission follows the model default. */
+  reasoningEffort?: string
+}
+
+/** Plugin configuration for `session_create`. */
+export interface Config {
+  /** Settings-page override; false lets a call request a model or inherit the global selection. */
+  modelOverride: Volatile<SessionCreateModelOverride | false>
+}
+
+/** Configuration schema; the override is live-editable from Settings. */
+export const Config = z.object({
+  modelOverride: z.union([
+    z.const(false),
+    z.object({
+      provider: z.string().min(1).required(),
+      model: z.string().min(1).required(),
+      reasoningEffort: z.string().min(1),
+    }),
+  ]).default(false).volatile(),
+})
 
 /** Model-visible source label for a relayed Session message. */
 export const SESSION_MESSAGE_GUIDANCE = 'Message from another Session'
@@ -53,9 +82,10 @@ const FIND_DESCRIPTION =
 const CREATE_DESCRIPTION =
   'Create an independent Session in this workspace and start it with one self-contained task. Use only when the user '
   + 'explicitly asks for a separate conversation, not for subagents, AgentTeams, status checks, or replies. It inherits '
-  + 'your Agent and permission presets. An explicitly requested model and reasoning effort apply to this new Session; '
-  + 'without a request it uses the current global selection. The result reports the actual provider, model, effort, '
-  + 'title, and pinned state. It does not report completion back; give the user the new id.'
+  + 'your Agent and permission presets. A model configured in Settings as the Session creation model override wins; '
+  + 'otherwise an explicitly requested model and reasoning effort apply to this new Session; without either it uses the '
+  + 'current global selection. The result reports the actual provider, model, effort, title, and pinned state. It does '
+  + 'not report completion back; give the user the new id.'
 
 const WORKSPACE_DESCRIPTION =
   'Archive, pin, unpin, or rename one exact Session. Rename sets a user-visible title and reports the stored title. '
@@ -231,7 +261,7 @@ function createSessionTaskMessage(sender: Agent, task: string): UserMessage {
  * Register independent Session creation, discovery, delivery, and status tools.
  * @param ctx - context carrying the tool registry, Agent registry, and Session Controller.
  */
-export function apply(ctx: Context): void {
+export function apply(ctx: Context, config: Config): void {
   ctx.tools.register(defineTool({
     name: 'session_create',
     description: CREATE_DESCRIPTION,
@@ -312,13 +342,22 @@ export function apply(ctx: Context): void {
       if (args.reasoning_effort !== undefined && requestedEffort?.length === 0) {
         throw new TypeError('reasoning_effort must not be blank when provided')
       }
-      const requestedSelection = await resolveRequestedSelection(
-        ctx,
-        baseSelection,
-        requestedProvider,
-        requestedModel,
-        requestedEffort,
-      )
+      const configuredOverride = config.modelOverride.get()
+      const requestedSelection = configuredOverride === false
+        ? await resolveRequestedSelection(
+          ctx,
+          baseSelection,
+          requestedProvider,
+          requestedModel,
+          requestedEffort,
+        )
+        : await resolveRequestedSelection(
+          ctx,
+          baseSelection,
+          configuredOverride.provider,
+          configuredOverride.model,
+          configuredOverride.reasoningEffort,
+        )
       let selected: RequestedSelection = {
         provider: baseSelection.provider,
         model: baseSelection.model,

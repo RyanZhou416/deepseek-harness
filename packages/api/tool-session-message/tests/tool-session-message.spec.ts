@@ -17,6 +17,7 @@ import type SessionReferenceResolver from '@deepseek-ai/dsh-session-reference'
 import type { SessionQueryEngine } from '@deepseek-ai/dsh-session-query'
 import { RemoteError } from '@deepseek-ai/dsh-typert-protocol'
 import * as tool from '../src/index.ts'
+import type { SessionCreateModelOverride } from '../src/index.ts'
 
 let context: Context | undefined
 let nextCall = 0
@@ -52,7 +53,7 @@ function sendOf(agent: Agent): ReturnType<typeof vi.fn<Agent['send']>> {
   return send
 }
 
-async function setup() {
+async function setup(config?: { modelOverride?: SessionCreateModelOverride | false }) {
   const ctx = new Context()
   context = ctx
   await ctx.plugin(SessionStore)
@@ -125,7 +126,7 @@ async function setup() {
     archiveSession,
   }
   ctx.provide('workspaceRegistry', workspaceRegistry as never)
-  const fiber = await ctx.plugin(tool)
+  const fiber = await ctx.plugin(tool, config)
   return {
     ctx, fiber, inspect, listCandidates, listSessions, resolveAgent, create, rename, selectModel, currentSelection,
     permissions: { current, resolve, set }, workspace: { archiveSession, pinSession, unpinSession, pinnedState },
@@ -277,6 +278,34 @@ describe('dsh-tool-session-message', () => {
     expect(text).toContain('Chosen title')
     expect(text).toContain('pinned true')
     expect(text).not.toContain('test-provider/test-model')
+  })
+
+  it('uses the Settings override instead of the call request', async () => {
+    const { ctx, create, selectModel } = await setup({
+      modelOverride: { provider: 'other-provider', model: 'requested-model', reasoningEffort: 'high' },
+    })
+    const sender = makeAgent(ctx, 'configured-override-creator', '/workspace')
+    const target = makeAgent(ctx, 'configured-override-target', '/workspace')
+    await ctx.agents.register(sender)
+    await ctx.agents.register(target)
+    create.mockResolvedValueOnce({ sessionId: target.id })
+
+    const result = await createSession(ctx, {
+      task: 'Use the configured override.',
+      model: 'test-model',
+      reasoning_effort: 'low',
+    }, sender)
+
+    expect(result.isError).toBe(false)
+    expect(selectModel).toHaveBeenCalledWith({
+      sessionId: target.id,
+      provider: 'other-provider',
+      model: 'requested-model',
+      reasoningEffort: 'high',
+      saveDefault: false,
+    })
+    expect(resultText(result)).toContain('other-provider/requested-model')
+    expect(resultText(result)).toContain('high')
   })
 
   it('archives, pins, unpins, and renames an exact Session and reports actual state', async () => {

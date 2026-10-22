@@ -1834,7 +1834,7 @@ Source: [`packages/skill/tool-skill/src/index.ts`](../packages/skill/tool-skill/
 
 ### `session_create`
 
-Create an independent Session in this workspace and start it with one self-contained task. Use only when the user explicitly asks for a separate conversation, not for subagents, AgentTeams, status checks, or replies. It inherits your Agent and permission presets. An explicitly requested model and reasoning effort apply to this new Session; without a request it uses the current global selection. The result reports the actual provider, model, effort, title, and pinned state. It does not report completion back; give the user the new id.
+Create an independent Session in this workspace and start it with one self-contained task. Use only when the user explicitly asks for a separate conversation, not for subagents, AgentTeams, status checks, or replies. It inherits your Agent and permission presets. A model configured in Settings as the Session creation model override wins; otherwise an explicitly requested model and reasoning effort apply to this new Session; without either it uses the current global selection. The result reports the actual provider, model, effort, title, and pinned state. It does not report completion back; give the user the new id.
 
 ```json
 {

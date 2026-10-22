@@ -37,6 +37,9 @@ import { CloseLabel, HeaderContent, TriggerContent } from './chrome.tsx'
 import { GeneralSection } from './GeneralSection.tsx'
 import { CurrentVersionRow } from './CurrentVersionRow.tsx'
 import { DeveloperToolsRow, type DeveloperToolsRowInjected } from './DeveloperToolsRow.tsx'
+import { SessionCreateOverrideRow, type SessionCreateOverrideRowInjected } from './SessionCreateOverrideRow.tsx'
+import type { SessionCreateOverrideSettings } from './SessionCreateOverrideRow.tsx'
+import { SessionCreateOverrideCatalogStore } from './session-create-override-store.ts'
 import { SettingsDocumentAction } from './SettingsDocumentAction.tsx'
 import type { SettingsDocumentActionInjected } from './SettingsDocumentAction.tsx'
 import { SettingsDocumentStore } from './settings-document-store.ts'
@@ -69,7 +72,7 @@ const NS = 'settings'
  * ui-settings' apply, whose activation order relative to this one is NOT
  * constrained; registrations depend on their slots through `slots.inject()`.
  */
-export const inject = ['slots', 'locale', 'connection', 'remote', 'remote.settings', 'configForms', 'shortcuts', 'modules']
+export const inject = ['slots', 'locale', 'connection', 'remote', 'remote.settings', 'remote.session', 'configForms', 'shortcuts', 'modules']
 
 /**
  * Register the `settings` dictionaries, the chrome content, and the General
@@ -88,6 +91,32 @@ export function apply(ctx: ClientContext): void {
   ctx.slots.inject('settings.general.item', () => ctx.slots.register({
     name: 'settings.general.item', id: 'current-version', order: 100, locale: NS,
   }, CurrentVersionRow))
+  const sessionCreateScope = ctx.configForms.get<SessionCreateOverrideSettings>('tool-session-message')
+  const sessionCreateCatalog = new SessionCreateOverrideCatalogStore(ctx)
+  ctx.effect(() => () => { sessionCreateCatalog.dispose() }, 'ui-settings-general: session-create catalog')
+  ctx.effect(() => ctx.configForms.whileServed(['tool-session-message'], () => ctx.slots.inject(
+    'settings.general.item',
+    () => ctx.slots.register({
+      name: 'settings.general.item', id: 'session-create-model-override', order: 17, locale: NS,
+      inject: (): SessionCreateOverrideRowInjected => ({
+        hooks: {
+          sessionCreateOverride: sessionCreateScope,
+          sessionCreateCatalog: sessionCreateCatalog.store,
+        },
+        selectOverride: (value, revision) => {
+          const snapshot = sessionCreateScope.getSnapshot()
+          if (snapshot.status !== 'ready' || !snapshot.writable || snapshot.value?.modelOverride === undefined) {
+            return Promise.resolve(false)
+          }
+          return sessionCreateScope.mutate(
+            [{ op: 'set', path: ['modelOverride'], value: value === false ? false : { ...value } }],
+            revision,
+          )
+        },
+        retryCatalog: () => { sessionCreateCatalog.load() },
+      }),
+    }, SessionCreateOverrideRow),
+  )), 'ui-settings-general: session-create model override')
   ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'ui-settings-general: dictionaries')
   const connection = ctx.get('connection') as ConnectionHandle
   const carrier = (globalThis as typeof globalThis & { dshDesktop?: { protocolVersion: number; updates?: DesktopUpdateBridge } }).dshDesktop

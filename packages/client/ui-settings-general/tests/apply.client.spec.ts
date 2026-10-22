@@ -51,6 +51,34 @@ function localeView(preference: string, revision = 0): SettingsNamespaceView {
   }
 }
 
+function sessionCreateView(revision = 0): SettingsNamespaceView {
+  return {
+    ns: 'tool-session-message',
+    schema: {
+      type: 'object',
+      properties: {
+        modelOverride: {
+          oneOf: [
+            { type: 'boolean', const: false },
+            {
+              type: 'object',
+              properties: {
+                provider: { type: 'string' },
+                model: { type: 'string' },
+                reasoningEffort: { type: 'string' },
+              },
+              required: ['provider', 'model'],
+            },
+          ],
+        },
+      },
+    },
+    value: { modelOverride: false },
+    autoGenerate: true, applies: 'live',
+    secrets: [], revision,
+  }
+}
+
 async function client(mock: RemoteMock, start: () => Promise<TestClient>, hasDocument = false) {
   const settings = mock.remote.settings
   settings.describe.mockResolvedValue(ok({ writable: true, hasDocument, namespaces: [localeView('zh')] }))
@@ -91,8 +119,20 @@ function setPageUrl(url: string): void {
 
 describe('ui-settings-general apply', () => {
   it('declares the services it uses', () => {
-    expect(inject).toEqual(['slots', 'locale', 'connection', 'remote', 'remote.settings', 'configForms', 'shortcuts', 'modules'])
+    expect(inject).toEqual(['slots', 'locale', 'connection', 'remote', 'remote.settings', 'remote.session', 'configForms', 'shortcuts', 'modules'])
   })
+
+  it('registers the Session-creation override row while its Host namespace is served', async ({ mock, start }) => {
+    mock.remote.settings.describe.mockResolvedValue(ok({
+      writable: true,
+      hasDocument: false,
+      namespaces: [localeView('zh'), sessionCreateView()],
+    }))
+    const c = await start()
+    await c.ctx.configForms.describe().ensure()
+    expect(c.ctx.slots.entries('settings.general.item').filter(row => row.locale === NS).map(row => row.options.id))
+      .toEqual(['developer-tools', 'session-create-model-override', 'current-version'])
+  }, COLD_BOOT_TIMEOUT_MS)
 
   it('fills the five seats of the shell it declares, with the locale-following General label', async ({ mock, start }) => {
     const { c } = await client(mock, start)

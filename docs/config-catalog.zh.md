@@ -4055,6 +4055,34 @@ export interface Config {
 ```
 <!-- END GENERATED config-catalog:@deepseek-ai/dsh-tool-ralph -->
 
+<!-- BEGIN GENERATED config-catalog:@deepseek-ai/dsh-tool-session-message -->
+<a id="deepseek-aidsh-tool-session-message"></a>
+
+## `@deepseek-ai/dsh-tool-session-message`
+
+- `inject`: `tools` · `agents` · `sessionController` · `sessionReferenceResolver` · `sessionQuery` · `permissionPresets` · `agentDefaultModel` · `llm`
+- `refs`: `Volatile` (`@deepseek-ai/cordis`)
+- `source`: [`packages/api/tool-session-message/src/index.ts:44`](../packages/api/tool-session-message/src/index.ts)
+
+```ts config-catalog
+/** Plugin configuration for `session_create`. */
+export interface Config {
+  /** Settings-page override; false lets a call request a model or inherit the global selection. */
+  modelOverride: Volatile<SessionCreateModelOverride | false>
+}
+
+/** Model forced onto newly created independent Sessions. */
+export interface SessionCreateModelOverride {
+  /** Registered provider route. */
+  provider: string
+  /** Provider-owned model id. */
+  model: string
+  /** Adapter-owned reasoning effort; omission follows the model default. */
+  reasoningEffort?: string
+}
+```
+<!-- END GENERATED config-catalog:@deepseek-ai/dsh-tool-session-message -->
+
 <!-- BEGIN GENERATED config-catalog:@deepseek-ai/dsh-tool-session-query -->
 <a id="deepseek-aidsh-tool-session-query"></a>
 
@@ -4760,7 +4788,6 @@ export interface Config {
 | `@deepseek-ai/dsh-tool-call-timeout-policy` | `tools` | [`packages/guard/timeout-policy/src/index.ts`](../packages/guard/timeout-policy/src/index.ts) |
 | `@deepseek-ai/dsh-tool-cordis` | `tools` · `cordisInspect` | [`packages/extensions/tool-cordis/src/index.ts`](../packages/extensions/tool-cordis/src/index.ts) |
 | `@deepseek-ai/dsh-tool-schedule` | `tools` | [`packages/schedule/tool-schedule/src/index.ts`](../packages/schedule/tool-schedule/src/index.ts) |
-| `@deepseek-ai/dsh-tool-session-message` | `tools` · `agents` · `sessionController` · `sessionReferenceResolver` · `sessionQuery` · `permissionPresets` · `agentDefaultModel` | [`packages/api/tool-session-message/src/index.ts`](../packages/api/tool-session-message/src/index.ts) |
 | `@deepseek-ai/dsh-tool-subagent-control` | `tools` · `subagents` | [`packages/subagent/tool-subagent-control/src/index.ts`](../packages/subagent/tool-subagent-control/src/index.ts) |
 | `@deepseek-ai/dsh-tool-working-directory` | `tools` · `workingDirectory` | [`packages/session/tool-working-directory/src/index.ts`](../packages/session/tool-working-directory/src/index.ts) |
 | `@deepseek-ai/dsh-user-questions` | — | [`packages/interaction/user-questions/src/index.ts`](../packages/interaction/user-questions/src/index.ts) |

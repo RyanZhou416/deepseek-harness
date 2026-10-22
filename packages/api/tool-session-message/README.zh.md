@@ -29,7 +29,7 @@ kind: "package-reference"
 
 ### 何时选择
 
-用户明确要求启动单独的对话处理任务时，选择 `session_create`。它可选接受标题、显式模型与思考强度、置顶请求；显式模型/思考强度仅用于这个新 Session，未传时继承当前全局选择，结果返回实际的提供方、模型、思考强度、标题与置顶状态。只有在用户已在对话中授权归档后，才使用 `session_workspace` 的 `archive` 动作；其 `pin` 与 `unpin` 动作用于按确切 id 调整 Workspace 排序，`rename` 动作用于修改用户可见标题。调用方知道确切目标 id，或用户点名了可由 `session_find` 解析的独立 Session 时，选择 `session_send_message` 进行显式跨会话交接。直接可继续 parent 与 child 使用相邻 `send_message`，Team 协调使用 AgentTeams 消息；这些操作拥有各自关系专属的生命周期。如果当前 Agent 只需要另一会话的只读快照且不应运行源 Session，请使用 Session reference（会话引用）。
+用户明确要求启动单独的对话处理任务时，选择 `session_create`。它可选接受标题、显式模型与思考强度、置顶请求。设置 → 通用中的“会话创建模型覆盖”启用时优先级最高；否则显式模型/思考强度仅用于这个新 Session，未传时继承当前全局选择。结果返回实际的提供方、模型、思考强度、标题与置顶状态。只有在用户已在对话中授权归档后，才使用 `session_workspace` 的 `archive` 动作；其 `pin` 与 `unpin` 动作用于按确切 id 调整 Workspace 排序，`rename` 动作用于修改用户可见标题。调用方知道确切目标 id，或用户点名了可由 `session_find` 解析的独立 Session 时，选择 `session_send_message` 进行显式跨会话交接。直接可继续 parent 与 child 使用相邻 `send_message`，Team 协调使用 AgentTeams 消息；这些操作拥有各自关系专属的生命周期。如果当前 Agent 只需要另一会话的只读快照且不应运行源 Session，请使用 Session reference（会话引用）。
 
 ### 最小配置
 
@@ -43,7 +43,7 @@ Web bundle 提供 Agent 注册表、Session Controller、Session-reference resol
 
 ### 创建并启动独立 Session
 
-`session_create` 接受一条非空白、自包含的 `task`。在线的普通调用 Agent 在当前工作区创建普通 Session，并立即经启用唤醒的 `next-step` inbox 投递任务。任务以 `agent-message` 来源和调用方 Session id 记录，不会冒充用户提示。新 Session 继承调用方的 Agent preset 和具名权限 preset。显式 `model`/`reasoning_effort` 只作用于这个新 Session，不修改 profile 默认值；未传时继承当前全局选择。模型 id 存在于多条路由时用 `provider` 消歧。可选 `name` 设置标题，可选 `pinned` 置顶新 Session。结果返回新 Session id、已接受消息 id、实际提供方/模型/思考强度、存在时的实际标题与实际置顶状态，但不等待任务完成。创建者应将 Session id 告知用户，用户可在该 Session 查看工作；新 Session 与工具都不会自动向创建者回报答案。
+`session_create` 接受一条非空白、自包含的 `task`。在线的普通调用 Agent 在当前工作区创建普通 Session，并立即经启用唤醒的 `next-step` inbox 投递任务。任务以 `agent-message` 来源和调用方 Session id 记录，不会冒充用户提示。新 Session 继承调用方的 Agent preset 和具名权限 preset。设置 → 通用中的“会话创建模型覆盖”优先于调用请求。否则显式 `model`/`reasoning_effort` 只作用于这个新 Session，不修改 profile 默认值；未传时继承当前全局选择。模型 id 存在于多条路由时用 `provider` 消歧。可选 `name` 设置标题，可选 `pinned` 置顶新 Session。结果返回新 Session id、已接受消息 id、实际提供方/模型/思考强度、存在时的实际标题与实际置顶状态，但不等待任务完成。创建者应将 Session id 告知用户，用户可在该 Session 查看工作；新 Session 与工具都不会自动向创建者回报答案。插件的 `tool-session-message.modelOverride` 配置支撑 **设置 → 通用 → 会话创建模型覆盖** 行；启用时对每次 `session_create` 强制使用该 provider/model/思考强度且不修改全局默认；选择“不覆盖”后恢复调用请求/全局选择的优先级。
 
 创建要求调用方具有工作区与已配置的权限 preset；委派的 subagent、使用自定义权限或仅限当前 Session 的 Auto 权限的调用方会在创建前被拒绝。如果创建后配置或投递失败，错误中会包含已创建的 Session id；空白或部分配置的 Session 可能仍可查看，但初始任务没有被接受。
 
