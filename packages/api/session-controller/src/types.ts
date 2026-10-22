@@ -309,6 +309,11 @@ export interface SessionCreateValue {
 /** Session model-selection request. */
 export interface SessionSelectModelRequest extends ModelSelection {
   readonly sessionId: SessionId
+  /**
+   * Whether this selection also becomes the global default. Defaults to true;
+   * a one-shot override (for example `session_create`) sets this to false.
+   */
+  readonly saveDefault?: boolean
 }
 
 /** Accepted model selection after Host resolution. */

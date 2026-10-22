@@ -486,6 +486,36 @@ describe('Web session model selection', () => {
     await ctx.fiber.dispose()
   })
 
+  it('does not save a one-shot Session selection as the global default', async () => {
+    const { ctx, sessionId } = await harness()
+    const saveDefaultModelSelection = vi.fn()
+    const remote = createSessionTestRemote(ctx, {
+      defaultModelSelection: () => ({ provider: 'deepseek-official', model: 'deepseek-chat' }),
+      saveDefaultModelSelection,
+      cwd: '/tmp',
+    })
+
+    const oneShot = expectValue(await remote.selectModel(request({
+      sessionId,
+      provider: 'deepseek-official',
+      model: 'deepseek-reasoner',
+      saveDefault: false,
+    })))
+    expect(oneShot.selected).toEqual({ provider: 'deepseek-official', model: 'deepseek-reasoner', reasoningEffort: 'high' })
+    await Promise.resolve()
+    expect(saveDefaultModelSelection).not.toHaveBeenCalled()
+
+    const persistent = expectValue(await remote.selectModel(request({
+      sessionId,
+      provider: 'deepseek-official',
+      model: 'deepseek-chat',
+    })))
+    expect(persistent.selected).toEqual({ provider: 'deepseek-official', model: 'deepseek-chat', reasoningEffort: 'high' })
+    await Promise.resolve()
+    expect(saveDefaultModelSelection).toHaveBeenCalledWith({ provider: 'deepseek-official', model: 'deepseek-chat', reasoningEffort: 'high' })
+    await ctx.fiber.dispose()
+  })
+
   it('rejects unlisted models and switches available models only after the next assembly', async () => {
     const { ctx, agent, sessionId } = await harness()
     const remote = createSessionTestRemote(ctx, { defaultModelSelection: () => ({ provider: 'deepseek-official', model: 'deepseek-chat' }), cwd: '/tmp' })

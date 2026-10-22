@@ -6,7 +6,7 @@
 
 import type { Context } from '@deepseek-ai/cordis'
 import { brandString } from '@deepseek-ai/dsh-brand'
-import { createUserMessage } from '@deepseek-ai/dsh-llm'
+import { createUserMessage, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { UserMessage } from '@deepseek-ai/dsh-llm'
 import { SessionId } from '@deepseek-ai/dsh-session'
@@ -27,7 +27,7 @@ import { deriveSessionMessageStatus } from './status.ts'
 export const name = 'tool-session-message'
 
 /** Services required for exact sender identity, Session creation, and target activation. */
-export const inject = ['tools', 'agents', 'sessionController', 'sessionReferenceResolver', 'sessionQuery', 'permissionPresets', 'agentDefaultModel']
+export const inject = ['tools', 'agents', 'sessionController', 'sessionReferenceResolver', 'sessionQuery', 'permissionPresets', 'agentDefaultModel', 'llm']
 
 /** Model-visible source label for a relayed Session message. */
 export const SESSION_MESSAGE_GUIDANCE = 'Message from another Session'
@@ -53,9 +53,9 @@ const FIND_DESCRIPTION =
 const CREATE_DESCRIPTION =
   'Create an independent Session in this workspace and start it with one self-contained task. Use only when the user '
   + 'explicitly asks for a separate conversation, not for subagents, AgentTeams, status checks, or replies. It inherits '
-  + 'your Agent and permission presets. Optional model and reasoning-effort requests are advisory: the user\'s global '
-  + 'model selection takes precedence, and the result reports actual provider, model, effort, title, and pinned state. '
-  + 'It does not report completion back; give the user the new id.'
+  + 'your Agent and permission presets. An explicitly requested model and reasoning effort apply to this new Session; '
+  + 'without a request it uses the current global selection. The result reports the actual provider, model, effort, '
+  + 'title, and pinned state. It does not report completion back; give the user the new id.'
 
 const WORKSPACE_DESCRIPTION =
   'Archive, pin, unpin, or rename one exact Session. Rename sets a user-visible title and reports the stored title. '
@@ -102,6 +102,83 @@ function requireWorkspaceRegistry(ctx: Context): WorkspaceRegistry {
  */
 function isPinned(registry: WorkspaceRegistry, sessionId: SessionId): boolean {
   return registry.pinnedSessionIds.includes(sessionId)
+}
+
+/** One normalized model selection for a newly created Session. */
+interface RequestedSelection {
+  provider: string
+  model: string
+  reasoningEffort?: string
+}
+
+/**
+ * Resolve a Session-creation model request without changing the global default.
+ *
+ * A provider hint wins; otherwise the caller's current provider is preferred,
+ * and a model found on exactly one other route is accepted. Ambiguous model ids
+ * require the caller to name a provider rather than silently choosing one.
+ * @param ctx - context carrying the LLM registry.
+ * @param base - the current global selection used when only effort is supplied.
+ * @param providerHint - explicit provider, when supplied.
+ * @param model - explicit model, when supplied.
+ * @param effort - explicit reasoning effort, when supplied.
+ * @returns the normalized selection, or undefined when the caller requested no override.
+ */
+async function resolveRequestedSelection(
+  ctx: Context,
+  base: { provider: string; model: string; reasoningEffort?: string },
+  providerHint: string | undefined,
+  model: string | undefined,
+  effort: string | undefined,
+): Promise<RequestedSelection | undefined> {
+  if (model === undefined && effort === undefined) return undefined
+  if (model === undefined) {
+    if (providerHint !== undefined) throw new Error('provider requires an explicit model for session_create')
+    const resolved = await ctx.llm.resolveCallConfig({
+      provider: base.provider,
+      model: base.model,
+      ...effort === undefined ? {} : { reasoningEffort: ReasoningEffortId(effort) },
+    })
+    return {
+      provider: resolved.provider,
+      model: resolved.model,
+      ...(resolved.reasoningEffort === undefined ? {} : { reasoningEffort: resolved.reasoningEffort }),
+    }
+  }
+  if (model.length === 0) throw new Error('model must not be blank when provided')
+  if (providerHint !== undefined && providerHint.length === 0) throw new Error('provider must not be blank when provided')
+  const providers = ctx.llm.listProviders().map(provider => provider.id)
+  if (providerHint !== undefined && !providers.includes(providerHint)) {
+    throw new Error(`session_create provider "${providerHint}" is not registered`)
+  }
+  const candidates = providerHint === undefined
+    ? [base.provider, ...providers.filter(provider => provider !== base.provider)]
+    : [providerHint]
+  const matches: string[] = []
+  for (const provider of candidates) {
+    try {
+      const models = await ctx.llm.listModels(provider)
+      if (models.some(candidate => candidate.id === model)) matches.push(provider)
+    } catch {
+      // A route that cannot list models cannot be selected; keep looking.
+    }
+  }
+  if (matches.length === 0) throw new Error(`session_create model "${model}" is not registered on any current route`)
+  if (matches.length > 1) {
+    throw new Error(`session_create model "${model}" is ambiguous across providers: ${matches.join(', ')}; pass provider`)
+  }
+  const matchedProvider = matches[0]
+  if (matchedProvider === undefined) throw new Error(`session_create model "${model}" is not registered on any current route`)
+  const resolved = await ctx.llm.resolveCallConfig({
+    provider: matchedProvider,
+    model,
+    ...effort === undefined ? {} : { reasoningEffort: ReasoningEffortId(effort) },
+  })
+  return {
+    provider: resolved.provider,
+    model: resolved.model,
+    ...(resolved.reasoningEffort === undefined ? {} : { reasoningEffort: String(resolved.reasoningEffort) }),
+  }
 }
 
 /**
@@ -170,11 +247,15 @@ export function apply(ctx: Context): void {
       },
       model: {
         type: 'string',
-        description: 'Optional requested model; global selection wins, actual returned.',
+        description: 'Optional model for this new Session; overrides the global default for this creation only.',
+      },
+      provider: {
+        type: 'string',
+        description: 'Optional provider for model; required when the model id exists on more than one route.',
       },
       reasoning_effort: {
         type: 'string',
-        description: 'Optional requested effort; global selection wins, actual returned.',
+        description: 'Optional effort for this new Session; applies with model, or to the current model when model is omitted.',
       },
       pinned: {
         type: 'boolean',
@@ -220,9 +301,31 @@ export function apply(ctx: Context): void {
       if (args.name !== undefined && (requestedName === undefined || requestedName.length === 0)) {
         throw new TypeError('name must not be blank when provided')
       }
-      // The profile's global selection is authoritative for model and reasoning effort.
-      // The optional request fields are intentionally not applied over it.
-      const selected = ctx.agentDefaultModel.currentSelection()
+      // An explicit request belongs to this new Session only; it must not change
+      // the global default that a later creation would inherit.
+      const baseSelection = ctx.agentDefaultModel.currentSelection()
+      const requestedModel = args.model?.trim()
+      const requestedProvider = args.provider?.trim()
+      const requestedEffort = args.reasoning_effort?.trim()
+      if (args.model !== undefined && requestedModel?.length === 0) throw new TypeError('model must not be blank when provided')
+      if (args.provider !== undefined && requestedProvider?.length === 0) throw new TypeError('provider must not be blank when provided')
+      if (args.reasoning_effort !== undefined && requestedEffort?.length === 0) {
+        throw new TypeError('reasoning_effort must not be blank when provided')
+      }
+      const requestedSelection = await resolveRequestedSelection(
+        ctx,
+        baseSelection,
+        requestedProvider,
+        requestedModel,
+        requestedEffort,
+      )
+      let selected: RequestedSelection = {
+        provider: baseSelection.provider,
+        model: baseSelection.model,
+        ...(baseSelection.reasoningEffort === undefined
+          ? {}
+          : { reasoningEffort: baseSelection.reasoningEffort }),
+      }
       const permissions = ctx.permissionPresets
       const permissionPreset = permissions.current(sender.session)
       if (permissionPreset === CUSTOM_PRESET || permissionPreset === AUTO_PRESET) {
@@ -245,6 +348,24 @@ export function apply(ctx: Context): void {
         if (ctx.agents.get(created.sessionId) !== target) throw new Error('new Session stopped before task delivery')
         if (permissions.current(sender.session) !== permissionPreset) {
           throw new Error('calling Session permissions changed before task delivery')
+        }
+        if (requestedSelection !== undefined) {
+          const installed = await ctx.sessionController.selectModel({
+            sessionId: created.sessionId,
+            provider: requestedSelection.provider,
+            model: requestedSelection.model,
+            ...requestedSelection.reasoningEffort === undefined
+              ? {}
+              : { reasoningEffort: ReasoningEffortId(requestedSelection.reasoningEffort) },
+            saveDefault: false,
+          })
+          selected = {
+            provider: installed.selected.provider,
+            model: installed.selected.model,
+            ...(installed.selected.reasoningEffort === undefined
+              ? {}
+              : { reasoningEffort: installed.selected.reasoningEffort }),
+          }
         }
         let title: string | undefined
         if (requestedName !== undefined) {
@@ -271,7 +392,7 @@ export function apply(ctx: Context): void {
           targetSessionId: created.sessionId,
           provider: selected.provider,
           model: selected.model,
-          ...(selected.reasoningEffort === undefined ? {} : { reasoningEffort: String(selected.reasoningEffort) }),
+          ...(selected.reasoningEffort === undefined ? {} : { reasoningEffort: selected.reasoningEffort }),
           ...(title === undefined ? {} : { title }),
           pinned,
         }

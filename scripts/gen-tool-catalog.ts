@@ -509,7 +509,7 @@ const TOOL_PACKAGES: ToolPackage[] = [
     pkg: '@deepseek-ai/dsh-tool-session-message',
     dir: 'tool-session-message',
     source: 'packages/api/tool-session-message/src/index.ts',
-    requires: ['ctx.tools', 'ctx.agents', 'ctx.sessionController', 'ctx.sessionReferenceResolver', 'ctx.sessionQuery', 'ctx.workspaceRegistry and ctx.permissionPresets (create only)', 'ctx.agentDefaultModel', 'an exact live calling Agent'],
+    requires: ['ctx.tools', 'ctx.agents', 'ctx.sessionController', 'ctx.sessionReferenceResolver', 'ctx.sessionQuery', 'ctx.workspaceRegistry and ctx.permissionPresets (create only)', 'ctx.agentDefaultModel', 'ctx.llm for requested-model resolution', 'an exact live calling Agent'],
     writes: ['tool/call', 'tool/result', 'ordinary Session creation and initial inbox message (create only)', 'Session-reference candidate and Session-header reads (find only)', 'target agent/inbox/spliced and user/message (send only)', 'target Session log read (status only)', 'Workspace archive/pin/title mutations (session_workspace)'],
     async mount(ctx) {
       await ctx.plugin(AgentRegistry)
@@ -527,13 +527,19 @@ const TOOL_PACKAGES: ToolPackage[] = [
         currentSelection: () => ({ provider: 'fixture', model: 'fixture' }),
         saveSelection: () => Promise.resolve(),
       } as never)
+      ctx.provide('llm', {
+        listProviders: () => [],
+        listModels: () => Promise.resolve([]),
+        resolveCallConfig: (selection: unknown) => Promise.resolve(selection),
+      } as never)
       await ctx.plugin(ToolSessionMessage)
     },
     note:
-      'The Web bundle exposes ordinary Session creation with an immediate attributed task and optional title, model, '
-      + 'reasoning-effort, and pin requests; the global model selection is authoritative and the result reports actual '
-      + 'values. It also exposes title-guided root-Session discovery, unrestricted exact-id context injection, read-only '
-      + 'status inspection, and exact-id workspace actions (`session_workspace`: archive, pin, unpin, rename). Archive requires '
+      'The Web bundle exposes ordinary Session creation with an immediate attributed task and optional title, explicit '
+      + 'model, reasoning-effort, provider disambiguation, and pin requests; an explicit request applies to the new '
+      + 'Session only, an omitted request inherits the global selection, and the result reports actual values. It also '
+      + 'exposes title-guided root-Session discovery, unrestricted exact-id context injection, read-only status '
+      + 'inspection, and exact-id workspace actions (`session_workspace`: archive, pin, unpin, rename). Archive requires '
       + 'model-confirmed user authorization at the prompt level; no runtime grant token is checked. Sender attribution '
       + 'comes from the exact calling Agent; the receiving Session decides whether and how to respond.',
   },
