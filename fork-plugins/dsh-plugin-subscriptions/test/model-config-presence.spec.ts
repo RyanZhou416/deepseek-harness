@@ -19,7 +19,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import z from '@deepseek-ai/schemastery'
-import { Config } from '../src/index.js'
+import { Config, resolveContinuationStateDeadlineMs } from '../src/index.js'
 import type { Config as SubscriptionsConfig, ModelEntry } from '../src/index.js'
 
 /** A config stating only Claude, with the entries this case names. */
@@ -56,21 +56,21 @@ test('an omitted wire field stays undefined while an explicit one survives', () 
   assert.equal(stated.models?.claude?.[0]?.wire, 'responses')
 })
 
-test('the continuation budgets default to 5000 and 2000, and an explicit legal bound is kept', () => {
+test('the continuation budgets default to 5000 and 2000, and the resolved deadline outlasts the lock', () => {
   const omitted = config([])
   assert.equal(omitted.continuationStateDeadlineMs, 5_000)
   assert.equal(omitted.continuationStateLockTimeoutMs, 2_000)
-  // A lock wait longer than the request budget can only end as a false unavailable refusal.
-  assert.ok(omitted.continuationStateDeadlineMs > omitted.continuationStateLockTimeoutMs)
+  assert.equal(resolveContinuationStateDeadlineMs(omitted), 5_000)
+  // A lock wait as long as the request budget can only end as a false unavailable refusal.
+  assert.ok(resolveContinuationStateDeadlineMs(omitted) > omitted.continuationStateLockTimeoutMs)
 
-  for (const bound of [100, 10_000] as const) {
-    const stated = Config({
-      providers: ['claude'], models: { claude: [] },
-      continuationStateDeadlineMs: bound, continuationStateLockTimeoutMs: bound,
-    })
-    assert.equal(stated.continuationStateDeadlineMs, bound)
-    assert.equal(stated.continuationStateLockTimeoutMs, bound)
-  }
+  const equal = Config({
+    providers: ['claude'], models: { claude: [] },
+    continuationStateDeadlineMs: 5_000, continuationStateLockTimeoutMs: 5_000,
+  })
+  assert.equal(equal.continuationStateDeadlineMs, 5_000)
+  assert.equal(resolveContinuationStateDeadlineMs(equal), 7_000)
+  assert.equal(equal.continuationStateLockTimeoutMs, 5_000)
 })
 
 test('each continuation budget refuses a value its own number bounds do not allow', () => {

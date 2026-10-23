@@ -451,7 +451,7 @@ A local identity or span preparation failure refuses the request before any cred
 
 | Field | Default | Purpose |
 |---|---|---|
-| `continuationStateDeadlineMs` | `5000` | One per-request budget, 100–10000 ms, shared by every continuation-state phase of that request: each phase continues with the remaining budget instead of starting a fresh one, and the bound covers the local state waits, not the provider's network time. It must outlast `continuationStateLockTimeoutMs`, or an operation still waiting for its lock reaches this deadline and refuses a healthy state |
+| `continuationStateDeadlineMs` | `5000` | One per-request budget, 100–10000 ms, shared by every continuation-state phase of that request: each phase continues with the remaining budget instead of starting a fresh one, and the bound covers the local state waits, not the provider's network time. The resolved value is raised to at least `continuationStateLockTimeoutMs` + 2000 ms, so a lock wait cannot consume the whole request budget and refuse a healthy state |
 | `continuationStateLockTimeoutMs` | `2000` | Bound, 100–10000 ms, on owning one continuation-state lock; a lock that cannot be owned refuses the operation instead of running it unowned |
 
 Identity changes are gated before the credential commit that would make them real: a token rotation does not advance the identity generation, an unknown active identity cannot take over automatically, and an identity recorded as failed recovers only through an explicit authorization; a request never fabricates a repaired identity.

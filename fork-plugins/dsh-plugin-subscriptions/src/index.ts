@@ -358,9 +358,10 @@ export interface Config {
    * How long one Claude continuation-state operation may wait before the request is refused
    * (default 5000). The bound belongs to this plugin rather than to the client: it is what stops a
    * request from waiting on a document another process is writing, and a caller that reaches it
-   * sends nothing. It must outlast {@link continuationStateLockTimeoutMs}: an operation still
-   * waiting to own its lock at the request deadline cannot settle, so the request fails with
-   * `LOCAL_CONTINUATION_STATE_UNAVAILABLE` even though the state is healthy.
+   * sends nothing. The resolved value is raised to at least the lock budget plus 2000 ms: an
+   * operation still waiting to own its lock at the request deadline cannot settle, so an equal or
+   * shorter budget would fail with `LOCAL_CONTINUATION_STATE_UNAVAILABLE` even though the state is
+   * healthy.
    */
   continuationStateDeadlineMs?: number
   /**
@@ -393,16 +394,23 @@ export const DEFAULT_CONTINUATION_STATE_DEADLINE_MS = 5_000
 /** The lock budget in force when the configuration states none. */
 export const DEFAULT_CONTINUATION_STATE_LOCK_TIMEOUT_MS = 2_000
 
+/** The margin by which the request budget must exceed the lock budget. */
+const CONTINUATION_STATE_DEADLINE_MARGIN_MS = 2_000
+
 /**
  * The validated request-state budget this installation runs with.
  *
  * The schema validates and defaults this field, so a configuration that reached `apply` states a
  * number; this is the one place that reads it, rather than defaulting it again at a call site.
+ * The request budget is raised to at least the lock budget plus
+ * {@link CONTINUATION_STATE_DEADLINE_MARGIN_MS}: a request whose lock wait can consume the whole
+ * budget would report a healthy state as unavailable.
  * @param config - the resolved plugin configuration.
  * @returns the budget in milliseconds.
  */
 export function resolveContinuationStateDeadlineMs(config: Config): number {
-  return config.continuationStateDeadlineMs ?? DEFAULT_CONTINUATION_STATE_DEADLINE_MS
+  const stated = config.continuationStateDeadlineMs ?? DEFAULT_CONTINUATION_STATE_DEADLINE_MS
+  return Math.max(stated, resolveContinuationStateLockTimeoutMs(config) + CONTINUATION_STATE_DEADLINE_MARGIN_MS)
 }
 
 /**
