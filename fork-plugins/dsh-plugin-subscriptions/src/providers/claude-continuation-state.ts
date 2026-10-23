@@ -9,11 +9,12 @@
  * decides a chain, invents an identity or keeps a second pin.
  *
  * The facts a request needs are fixed before the stages that can reach the network: the account
- * reference, the epoch, the committed wire session id and the pin are all prepared under one
- * budget, and the pin is frozen after the maintenance read that produces its candidate and before
- * anything is uploaded or built. A state that cannot be read or committed refuses the request with
- * the one fixed code every continuation store reports; no caller falls back to a random identity or
- * to a previous process's map.
+ * reference, the epoch, the committed wire session id and the pin are all prepared under the
+ * caller's cancellation, and the pin is frozen after the maintenance read that produces its
+ * candidate and before anything is uploaded or built. No wait in this chain ends on elapsed time.
+ * A state that cannot be read or committed refuses the request with the one fixed code every
+ * continuation store reports; no caller falls back to a random identity or to a previous process's
+ * map.
  *
  * @module dsh-plugin-subscriptions/providers/claude-continuation-state
  */
@@ -54,9 +55,9 @@ export type ClaudeRequestHeaderReason = 'initial' | 'resume' | 'change' | 'serie
 
 /** Constructor options for {@link ClaudeContinuationState}. */
 export interface ClaudeContinuationStateOptions {
-  /** How long one operation may wait before its caller is refused. */
+  /** Advisory accounting for one operation; elapsed time never ends its wait or refuses a caller. */
   readonly deadlineMs: number
-  /** How long one operation may wait for an owned lock. */
+  /** Backoff and lease input for the owned lock; it is not a wait bound. */
   readonly lockTimeoutMs: number
   /** Directory holding this installation's continuation documents. */
   readonly root: string
@@ -100,9 +101,9 @@ export interface ClaudeContinuationPrepareInput {
   readonly origin: ClaudeSpanOrigin
   /** The wire identity a verified session-log fact states for this restored span. */
   readonly restored?: ClaudeSpanRestoredIdentity
-  /** The identity already resolved under this same budget, so it is not derived twice. */
+  /** The identity already resolved under this same cancellation, so it is not derived twice. */
   readonly identity?: ClaudeContinuationIdentity
-  /** The one absolute budget the whole preparation chain shares. */
+  /** The caller's cancellation and advisory accounting, shared by the whole preparation chain. */
   readonly deadline: ContinuationDeadline
 }
 
@@ -123,7 +124,7 @@ export type ClaudeContinuationFreezeResult =
  * canonical account reference; every method reads that state through the store that owns it.
  */
 export class ClaudeContinuationState {
-  /** The resolved per-operation wait this installation's state uses, which callers share. */
+  /** The configured per-operation accounting input, which callers share. */
   readonly deadlineMs: number
   private readonly salt: ClaudeSaltStore
   private readonly spans: ClaudeSpanBindingStore
@@ -134,7 +135,8 @@ export class ClaudeContinuationState {
   private closed = false
 
   /**
-   * @param options - both configured budgets, the state directory and the injectable I/O boundary.
+   * @param options - both configured timing inputs, the state directory and the injectable I/O
+   *   boundary.
    */
   constructor(options: ClaudeContinuationStateOptions) {
     this.options = options
@@ -195,13 +197,14 @@ export class ClaudeContinuationState {
   }
 
   /**
-   * Resolve the reference and epoch one request is served under, under the caller's budget.
+   * Resolve the reference and epoch one request is served under.
    *
    * This reads the two independent durable facts and nothing else: it never creates a baseline, so
    * a request for an account the lifecycle has not established is refused rather than served under
-   * an identity the request invented.
+   * an identity the request invented. The wait for an in-flight transition ends only when that
+   * transition really settles, the caller cancels, or the state is disposed.
    * @param account - the canonical account key.
-   * @param deadline - the budget the whole preparation chain shares.
+   * @param deadline - the caller's cancellation and advisory accounting, shared by the chain.
    * @returns the identity, or the fixed reason the request cannot be served.
    */
   async resolveIdentity(
@@ -213,33 +216,34 @@ export class ClaudeContinuationState {
     if (resolved.kind === 'unavailable') return resolved
     // Disposal may have started while the salt read ran; no generation is created after that close.
     if (this.closed) return continuationUnavailable('the continuation state is being disposed')
-    // A request waits for the auth lifecycle's transition rather than racing it: a transition in
-    // flight is bounded by this same budget, and its own completion reads the durable row. A bound
-    // that elapses, a caller that stops and a transition that failed are all refusals — never the
-    // old epoch, which is what a request built from a stale read would carry.
+    // A request waits for the auth lifecycle's transition rather than racing it: the wait ends only
+    // when that transition settles, the caller stops, or disposal begins. It never ends by elapsed
+    // time, and a caller that stops is answered as a cancellation rather than from the old epoch.
     const settled = await this.generationFor(resolved.accountRef).waitSettled(deadline)
-    if (settled.kind === 'settled') return { accountRef: resolved.accountRef, spanEpoch: settled.generation }
+    if (settled.kind === 'settled') {
+      // Disposal may have started while the transition settled; no request is prepared after it.
+      if (this.closed) return continuationUnavailable('the continuation state is being disposed')
+      return { accountRef: resolved.accountRef, spanEpoch: settled.generation }
+    }
     if (settled.kind === 'failed') return continuationUnavailable(settled.reason)
-    return continuationUnavailable(
-      settled.kind === 'timed-out'
-        ? 'the identity transition did not settle within the deadline'
-        : 'the caller stopped waiting for the identity transition',
-    )
+    return continuationUnavailable('the caller stopped waiting for the identity transition')
   }
 
   /**
-   * Prepare one request's durable facts under the caller's own budget.
+   * Prepare one request's durable facts.
    *
    * The account reference, the current epoch and the committed wire identity are read or created in
    * that order, each inside the lock of the store that owns it, and the pin is deliberately not
    * frozen here: the maintenance read that produces its candidate has not run yet.
-   * @param input - the account, session, origin, restored fact and shared budget.
+   * @param input - the account, session, origin, restored fact and shared cancellation.
    * @returns the prepared facts, or the fixed reason nothing may be sent.
    */
   async prepareRequest(input: ClaudeContinuationPrepareInput): Promise<ClaudeContinuationPrepareResult> {
     if (this.closed) return continuationUnavailable('the continuation state is being disposed')
     const resolved = input.identity ?? await this.resolveIdentity(input.account, input.deadline)
     if (!('accountRef' in resolved)) return resolved
+    // The identity resolution is a wait; disposal may have started while it ran.
+    if (this.closed) return continuationUnavailable('the continuation state is being disposed')
     const identity: ClaudeSpanIdentity = {
       accountRef: resolved.accountRef,
       harnessSessionId: input.harnessSessionId,
@@ -250,6 +254,8 @@ export class ClaudeContinuationState {
       deadline: input.deadline,
     })
     if (prepared.kind !== 'ready') return prepared
+    // The span commit is a wait too; a request answered after disposal began sends nothing.
+    if (this.closed) return continuationUnavailable('the continuation state is being disposed')
     return {
       kind: 'ready',
       prepared: {
@@ -265,13 +271,15 @@ export class ClaudeContinuationState {
   /**
    * Freeze one prepared span's pin, once the maintenance read that produces its candidate settled.
    * @param prepared - the facts {@link prepareRequest} returned.
-   * @param deadline - the same budget the preparation chain shares.
+   * @param deadline - the same cancellation and advisory accounting the preparation chain shares.
    * @returns the frozen pin, or the fixed reason nothing may be sent.
    */
   async freezeRequest(
     prepared: ClaudeContinuationPrepared,
     deadline?: ContinuationDeadline,
   ): Promise<ClaudeContinuationFreezeResult> {
+    // A freeze after disposal began would be a write the close did not account for.
+    if (this.closed) return continuationUnavailable('the continuation state is being disposed')
     return await this.spans.freeze(this.identityOf(prepared), deadline)
   }
 
@@ -281,7 +289,8 @@ export class ClaudeContinuationState {
    * This runs between the maintenance read and the stages that upload or build, so a change that
    * landed meanwhile refuses the request instead of letting it carry an old span's identity.
    * @param prepared - the facts {@link prepareRequest} returned.
-   * @param deadline - the budget the request resolution and this read share.
+   * @param deadline - the cancellation and advisory accounting the request resolution and this read
+   *   share.
    * @returns the fixed refusal when the epoch moved or cannot be read, otherwise nothing.
    */
   async assertPreparedCurrent(
@@ -292,6 +301,8 @@ export class ClaudeContinuationState {
     // request was prepared must not be answered with an epoch read after the snapshot it took.
     if (this.closed) return continuationUnavailable('the continuation state is being disposed')
     const state = await this.generationFor(prepared.accountRef).current(deadline)
+    // The epoch read is a wait; disposal refuses rather than answering from it.
+    if (this.closed) return continuationUnavailable('the continuation state is being disposed')
     if (state.kind === 'ready' && state.generation === prepared.spanEpoch) return undefined
     return continuationUnavailable(
       state.kind === 'unavailable' ? state.reason : 'the identity generation changed while this request was prepared',
@@ -301,13 +312,15 @@ export class ClaudeContinuationState {
   /**
    * Claim the right to record what one bootstrap read discloses for an account.
    * @param account - the canonical account key the read belongs to.
-   * @param deadline - the budget the read's own chain shares.
+   * @param deadline - the cancellation and advisory accounting this read shares.
    * @returns the durable ticket, or the fixed refusal.
    */
   async beginCapture(account: string, deadline?: ContinuationDeadline): Promise<ClaudeCaptureBeginResult> {
     if (this.closed) return continuationUnavailable('the continuation state is being disposed')
     const derived = await this.salt.hashRef(account, deadline)
     if (derived.kind !== 'derived') return continuationUnavailable(derived.reason)
+    // The salt read is a wait; a capture claimed after disposal began owns nothing.
+    if (this.closed) return continuationUnavailable('the continuation state is being disposed')
     return await this.spans.beginCapture(derived.accountRef, deadline)
   }
 
@@ -315,7 +328,7 @@ export class ClaudeContinuationState {
    * Record what a successful bootstrap read disclosed, when its ticket still owns the account.
    * @param ticket - the ticket {@link beginCapture} returned.
    * @param disclosed - the raw value the read disclosed.
-   * @param deadline - the budget the read's own chain shares.
+   * @param deadline - the cancellation and advisory accounting this read shares.
    * @returns whether the capture became the account's candidate.
    */
   async commitCapture(
@@ -323,6 +336,8 @@ export class ClaudeContinuationState {
     disclosed: unknown,
     deadline?: ContinuationDeadline,
   ): Promise<ClaudeCaptureCommitResult> {
+    // A late capture commit after disposal began would be a write the close did not account for.
+    if (this.closed) return continuationUnavailable('the continuation state is being disposed')
     return await this.spans.commitCapture(ticket, disclosed, deadline)
   }
 
@@ -437,10 +452,19 @@ export class ClaudeContinuationState {
     if (this.closed) return continuationUnavailable('the continuation state is being disposed')
     const resolved = await this.resolveAccount(account)
     if (resolved.kind === 'unavailable') return resolved
+    // The salt read is a wait; a discard after disposal began would be a write close did not own.
+    if (this.closed) return continuationUnavailable('the continuation state is being disposed')
     return await this.spans.discard(resolved.accountRef)
   }
 
-  /** Stop accepting work and wait for every owned store to really settle. */
+  /**
+   * Stop accepting work and wait for every owned store to really settle.
+   *
+   * The closed flag is set synchronously, so every later call refuses before it can wait or write;
+   * each generation then wakes the requests waiting on its transition and awaits the transition it
+   * owns; the span and salt stores drain their own queues last, in the order their owners depend on
+   * each other.
+   */
   async close(): Promise<void> {
     this.closed = true
     this.headerReasons.clear()

@@ -81,15 +81,15 @@ export type ClaudeAccountRefResult =
 export interface ClaudeSaltStoreOptions {
   /** File holding the salt; absent uses the plugin's own home directory. */
   readonly path?: string
-  /** How long one operation may wait before its caller is refused. */
+  /** Advisory accounting for one operation; elapsed time never ends its wait or refuses a caller. */
   readonly deadlineMs: number
-  /** How long one operation may wait for the owned lock. */
+  /** Backoff and lease input for the owned lock; it is not a wait bound. */
   readonly lockTimeoutMs: number
   /** Sink for a diagnostic about the store itself; never used for a credential. */
   readonly onWarn?: (message: string) => void
   /** The private file operations; a test injects one to hold a write. */
   readonly files?: ContinuationFiles
-  /** The timers and abort listeners one bounded wait uses; a test injects one to observe it. */
+  /** The timers and abort listeners a wait may use; a test injects one to observe it. */
   readonly waits?: ContinuationWaitHost
 }
 
@@ -169,10 +169,10 @@ function parseSalt(text: string | undefined): SaltRead {
  * The durable salt of one plugin installation.
  *
  * Every operation is one guarded read-modify-write: it reads, decides and writes inside the
- * plugin's own lock, bounded by the caller's deadline and cancellation. The material is held
- * privately and never returned, and only a document this build cannot verify, or material that is
- * not the one this store adopted, is remembered as untrusted; a busy lock, an elapsed wait or a
- * removed document is answered again on the next call rather than becoming a permanent verdict.
+ * plugin's own lock, with the caller's cancellation. The material is held privately and never
+ * returned, and only a document this build cannot verify, or material that is not the one this
+ * store adopted, is remembered as untrusted; a busy lock or a removed document is answered again
+ * on the next call rather than becoming a permanent verdict.
  */
 export class ClaudeSaltStore {
   private readonly path: string
@@ -197,8 +197,8 @@ export class ClaudeSaltStore {
 
   /**
    * Read the salt, creating it in the same critical section when the installation has none.
-   * @param deadline - the bound and cancellation the caller resolved for its own chain; absent
-   *   uses the configured deadline and no signal.
+   * @param deadline - the cancellation and advisory accounting the caller resolved for its own
+   *   chain; absent uses the configured accounting and no signal.
    * @returns whether references can be derived, or why none may be used.
    */
   async ensure(deadline?: ContinuationDeadline): Promise<ClaudeSaltStatus> {
@@ -213,8 +213,8 @@ export class ClaudeSaltStore {
    * The material is read from the document in the same critical section that decides it, so a
    * substituted or deleted salt is refused rather than masked by a cached value.
    * @param account - the canonical account key.
-   * @param deadline - the bound and cancellation the caller resolved for its own chain; absent
-   *   uses the configured deadline and no signal.
+   * @param deadline - the cancellation and advisory accounting the caller resolved for its own
+   *   chain; absent uses the configured accounting and no signal.
    * @returns the derived reference, or the fixed refusal that no request may chain.
    */
   async hashRef(account: string, deadline?: ContinuationDeadline): Promise<ClaudeAccountRefResult> {

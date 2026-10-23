@@ -209,15 +209,20 @@ export interface ClaudeCatalogueCapture {
   /**
    * Claim the right to record what this read discloses.
    * @param account - the canonical account key the read belongs to.
+   * @param deadline - the read's own cancellation, when it has one; its expiry instant is advisory.
    * @returns the durable ticket, or the fixed refusal.
    */
-  beginCapture(account: string): Promise<{ readonly kind: 'ticket'; readonly ticket: ClaudeCaptureTicket } | ContinuationUnavailable>
+  beginCapture(
+    account: string,
+    deadline?: ContinuationDeadline,
+  ): Promise<{ readonly kind: 'ticket'; readonly ticket: ClaudeCaptureTicket } | ContinuationUnavailable>
   /**
    * Record what a successful read disclosed, when its ticket still owns the account.
    * @param ticket - the ticket {@link beginCapture} returned.
    * @param disclosed - the raw value the read disclosed.
+   * @param deadline - the read's own cancellation, when it has one.
    */
-  commitCapture(ticket: ClaudeCaptureTicket, disclosed: unknown): Promise<unknown>
+  commitCapture(ticket: ClaudeCaptureTicket, disclosed: unknown, deadline?: ContinuationDeadline): Promise<unknown>
 }
 
 /** The continuation one attempt was prepared under, as the request path carries it. */
@@ -253,37 +258,37 @@ export type ClaudeContinuationReadiness =
   | { readonly kind: 'failed'; readonly reason: string }
 
 /**
- * Wait for one already-running promise under a deadline and the caller's cancellation.
+ * Wait for one already-running promise until it settles or the caller stops.
  *
- * The work is not cancelled by either outcome: the hydration this waits on belongs to the plugin's
- * disposal, which awaits it itself, and this only stops this request from waiting for it. The timer
- * and the abort listener are removed on every outcome.
+ * No timer is involved: elapsed time is not an outcome, so a slow hydration is waited for instead
+ * of being refused. The work is not cancelled by either outcome: the hydration this waits on
+ * belongs to the plugin's disposal, which awaits it itself, and this only stops this request from
+ * waiting for it. The abort listener is removed on every outcome.
  * @param work - the running work, which reports its own result to whoever owns it.
- * @param budget - the absolute budget the state phase shares.
  * @param signal - the caller's own cancellation.
- * @returns what ended the wait.
+ * @throws the caller's abort reason when the caller stops; otherwise resolves after settlement.
  */
-async function waitBounded(
-  work: Promise<unknown>,
-  budget: ContinuationDeadline,
-  signal: AbortSignal | undefined,
-): Promise<'settled' | 'timed-out' | 'aborted'> {
-  if (signal?.aborted === true) return 'aborted'
-  const remaining = budget.expiresAt - Date.now()
-  if (remaining <= 0) return 'timed-out'
-  return await new Promise<'settled' | 'timed-out' | 'aborted'>(resolve => {
+async function waitForSettlement(work: Promise<unknown>, signal: AbortSignal | undefined): Promise<void> {
+  if (signal === undefined) {
+    await work.then(() => undefined, () => undefined)
+    return
+  }
+  if (signal.aborted) throw abortError(signal)
+  await new Promise<void>((resolve, reject) => {
     let finished = false
-    const finish = (outcome: 'settled' | 'timed-out' | 'aborted'): void => {
+    const finish = (stop: boolean): void => {
       if (finished) return
       finished = true
-      clearTimeout(timer)
-      signal?.removeEventListener('abort', onAbort)
-      resolve(outcome)
+      signal.removeEventListener('abort', onAbort)
+      if (stop) reject(abortError(signal))
+      else resolve()
     }
-    const onAbort = (): void => { finish('aborted') }
-    const timer = setTimeout(() => { finish('timed-out') }, Math.max(1, remaining))
-    signal?.addEventListener('abort', onAbort, { once: true })
-    void work.then(() => { finish('settled') }, () => { finish('settled') })
+    const onAbort = (): void => { finish(true) }
+    signal.addEventListener('abort', onAbort, { once: true })
+    // Subscribing before this check closes the window between the caller's own pre-abort check
+    // and this subscription: an abort landing in between still ends the wait.
+    if (signal.aborted) finish(true)
+    void work.then(() => { finish(false) }, () => { finish(false) })
   })
 }
 
@@ -1735,10 +1740,12 @@ export async function fetchClaudeCatalogue(
   // Claimed before the request is issued: the ticket is durable and carries the account version,
   // so a clear or an identity change that lands while this read is in flight stops it from writing
   // afterwards. A read with no wired state claims no candidate, so the spans then freeze empty
-  // rather than inheriting a token from a read nobody could attribute.
+  // rather than inheriting a token from a read nobody could attribute. The read's own cancellation
+  // is passed on, so a discovery that stopped cannot wait on the state queue after it.
+  const captureDeadline = signal === undefined ? undefined : continuationBudget(0, signal)
   const ticket = account === undefined || capture === undefined
     ? undefined
-    : await capture.beginCapture(account)
+    : await capture.beginCapture(account, captureDeadline)
   const claimed = ticket?.kind === 'ticket' ? ticket.ticket : undefined
   const response = await fetchFn(url.toString(), {
     headers: {
@@ -1765,7 +1772,7 @@ export async function fetchClaudeCatalogue(
   // clears the candidate: only a span that has not frozen yet can be affected, and it must
   // not inherit a token from an earlier read.
   if (claimed !== undefined && capture !== undefined) {
-    await capture.commitCapture(claimed, (payload.client_data as { atis?: unknown } | null | undefined)?.atis)
+    await capture.commitCapture(claimed, (payload.client_data as { atis?: unknown } | null | undefined)?.atis, captureDeadline)
   }
   const options = payload.additional_model_options
   if (!Array.isArray(options)) return claudeCatalogueListing()
@@ -1935,9 +1942,10 @@ interface ClaudeAdapterOptions {
    */
   continuation?: ClaudeContinuationState
   /**
-   * The plugin's startup hydration, read inside each request's state budget after it settled. A
-   * registration may run before that hydration finishes, and the first legitimate request must not
-   * succeed merely by winning that race; the request also must not wait for it unboundedly.
+   * The plugin's startup hydration, read after it settled. A registration may run before that
+   * hydration finishes, and the first legitimate request must not succeed merely by winning that
+   * race: a request waits until the hydration settles, and only its caller's cancellation or the
+   * plugin's disposal ends that wait.
    */
   continuationReady?: Promise<ClaudeContinuationReadiness>
 }
@@ -2245,9 +2253,10 @@ export class ClaudeAdapter extends PoolBackedAdapter {
       // report into a replacement account's usage state.
       const observeUsage = this.options.usageObserverFor?.(chainAccount)
       // The durable identity is prepared before anything that could reach the network — the
-      // credential read, the maintenance read and every upload come after it — and the whole chain
-      // shares one absolute budget, so no later step starts a fresh clock. A route with no owner
-      // refuses here rather than minting an identity of its own.
+      // credential read, the maintenance read and every upload come after it. Every state wait in
+      // the chain runs until its work really settles: `state.deadlineMs` is advisory accounting
+      // that never ends a wait, and only the caller's cancellation or disposal does. A route with
+      // no owner refuses here rather than minting an identity of its own.
       const state = this.options.continuation
       if (state === undefined) {
         throw new LlmError(
@@ -2256,50 +2265,33 @@ export class ClaudeAdapter extends PoolBackedAdapter {
           { retryDisposition: 'forbid' },
         )
       }
-      // This request's cumulative budget for waiting on local durable state and on the auth
-      // transition. Only the state phases are charged to it — the startup hydration, the identity
-      // resolve, the span preparation, the post-maintenance check and the pin freeze — while the
-      // network stages between them keep their existing budgets (the profile check, the credential
-      // read, maintenance and the upload). The spent amount is measured per state phase, so a slow
-      // network step cannot consume this budget and turn into a false refusal.
-      let stateSpentMs = 0
-      const stateBudget = (): ContinuationDeadline =>
-        continuationBudget(Math.max(0, state.deadlineMs - stateSpentMs), options.signal)
-      const chargeState = async <T>(phase: () => Promise<T>): Promise<T> => {
-        const startedAt = Date.now()
-        try {
-          return await phase()
-        } finally {
-          stateSpentMs += Date.now() - startedAt
-        }
+      // One cancellation for every state phase of this request — the startup hydration, the
+      // identity resolve, the span preparation, the post-maintenance check and the pin freeze. The
+      // configured duration is advisory accounting and never refuses a request: a state phase ends
+      // only when its work settles or the caller stops. The network stages between them keep their
+      // own budgets (the profile check, the credential read, maintenance and the upload).
+      const stateBound = continuationBudget(state.deadlineMs, options.signal)
+      // The startup fact is latched before the first state wait: a later request on the same
+      // session overwrites the observation, and a request that waited must still prepare with the
+      // origin it was appended with.
+      const origin = state.originFor(state.requestHeaderReason(harnessSessionId))
+      if (this.options.continuationReady !== undefined) {
+        await waitForSettlement(this.options.continuationReady, options.signal)
+        // The settled result is read, never a flag sampled while the work was still running: a
+        // hydration that failed afterwards must refuse this request rather than hand it an owner.
+        const settled = await this.options.continuationReady
+        if (settled.kind === 'failed') throw claudeContinuationRefusal(continuationUnavailable(settled.reason))
       }
-      const firstState = stateBudget()
-      const initial = await chargeState(async () => {
-        if (this.options.continuationReady !== undefined) {
-          const readiness = await waitBounded(this.options.continuationReady, firstState, options.signal)
-          if (readiness !== 'settled') {
-            throw claudeContinuationRefusal(continuationUnavailable(
-              readiness === 'aborted'
-                ? 'the caller stopped waiting for the continuation state'
-                : 'the continuation state did not settle within the deadline',
-            ))
-          }
-          // The settled result is read, never a flag sampled while the work was still running: a
-          // hydration that failed afterwards must refuse this request rather than hand it an owner.
-          const settled = await this.options.continuationReady
-          if (settled.kind === 'failed') throw claudeContinuationRefusal(continuationUnavailable(settled.reason))
-        }
-        const resolved = await state.resolveIdentity(chainAccount, firstState)
-        if (!('accountRef' in resolved)) return resolved
-        const restored = restoredWireSessionId(options.messages, resolved, harnessSessionId)
-        return await state.prepareRequest({
-          account: chainAccount,
-          harnessSessionId,
-          origin: state.originFor(state.requestHeaderReason(harnessSessionId)),
-          ...restored === undefined ? {} : { restored: { wireSessionId: restored } },
-          identity: resolved,
-          deadline: firstState,
-        })
+      const resolved = await state.resolveIdentity(chainAccount, stateBound)
+      if (!('accountRef' in resolved)) throw claudeContinuationRefusal(resolved)
+      const restored = restoredWireSessionId(options.messages, resolved, harnessSessionId)
+      const initial = await state.prepareRequest({
+        account: chainAccount,
+        harnessSessionId,
+        origin,
+        ...restored === undefined ? {} : { restored: { wireSessionId: restored } },
+        identity: resolved,
+        deadline: stateBound,
       })
       if (initial.kind !== 'ready') throw claudeContinuationRefusal(initial)
       const prepared = initial
@@ -2322,17 +2314,11 @@ export class ClaudeAdapter extends PoolBackedAdapter {
       session = await this.runBeforeAccountRequest(bound) ?? session
       if (session !== bound.session) attempt = { ...bound, session }
       // The maintenance read that discloses this span's candidate has settled, so the pin is
-      // decided now — before any upload or assembly — out of what remains of this request's state
-      // budget, which the epoch check and the freeze share instead of each resetting a fresh clock.
-      const postState = stateBudget()
-      if (postState.expiresAt <= Date.now()) {
-        throw claudeContinuationRefusal(continuationUnavailable('this request\'s continuation-state budget is spent'))
-      }
-      const frozen = await chargeState(async () => {
-        const stale = await state.assertPreparedCurrent(prepared.prepared, postState)
-        if (stale !== undefined) throw claudeContinuationRefusal(stale)
-        return await state.freezeRequest(prepared.prepared, postState)
-      })
+      // decided now — before any upload or assembly. The epoch check and the freeze share the
+      // request's cancellation; elapsed time never refuses them.
+      const stale = await state.assertPreparedCurrent(prepared.prepared, stateBound)
+      if (stale !== undefined) throw claudeContinuationRefusal(stale)
+      const frozen = await state.freezeRequest(prepared.prepared, stateBound)
       if (frozen.kind !== 'frozen') throw claudeContinuationRefusal(frozen)
       const continuation: ClaudeRequestContinuation = {
         account: chainAccount,
@@ -2370,20 +2356,14 @@ export class ClaudeAdapter extends PoolBackedAdapter {
         // credential revision is never left computed from the credential this request replaced.
         session = await this.runBeforeAccountRequest({ ...bound, session }) ?? session
         attempt = { ...bound, session }
-        // The replay sends a second Messages request, so this attempt's identity is checked once more
-        // against what remains of this request's state budget, before that request is built and
-        // recorded. A credential rotation keeps the epoch and the pinned token; an identity change
-        // that landed meanwhile, or a spent budget, refuses the replay instead of sending a second
-        // request under a retired span.
-        const replayState = stateBudget()
-        if (replayState.expiresAt <= Date.now()) {
-          throw claudeContinuationRefusal(continuationUnavailable('this request\'s continuation-state budget is spent'))
-        }
-        const rechecked = await chargeState(async () => {
-          const stale = await state.assertPreparedCurrent(continuation.prepared, replayState)
-          if (stale !== undefined) throw claudeContinuationRefusal(stale)
-          return await state.freezeRequest(continuation.prepared, replayState)
-        })
+        // The replay sends a second Messages request, so this attempt's identity is checked once
+        // more before that request is built and recorded. A credential rotation keeps the epoch and
+        // the pinned token; an identity change that landed meanwhile refuses the replay instead of
+        // sending a second request under a retired span. The request's own cancellation still ends
+        // the wait; elapsed time never does.
+        const stale = await state.assertPreparedCurrent(continuation.prepared, stateBound)
+        if (stale !== undefined) throw claudeContinuationRefusal(stale)
+        const rechecked = await state.freezeRequest(continuation.prepared, stateBound)
         if (rechecked.kind !== 'frozen') throw claudeContinuationRefusal(rechecked)
         response = await this.request(options, chainAccount, session, continuation, watchdog, onSend)
         sendOutstanding = false

@@ -19,9 +19,11 @@
  * a change's release and publication open, so no case observes `pending: { kind: 'active' }`. The
  * refusal a store compare-and-set produces is covered as the settled failure it durably states,
  * and one case then drives the public logout to prove an explicit identity operation can recover
- * that account. Two negative cases state the request's own refusal when its span state cannot be
- * read, or when another holder keeps that state's lock; the gate's remaining refusal branches are
- * not reachable from public state deterministically, and no case fakes one.
+ * that account. One negative case states the request's own refusal when its span state cannot be
+ * read, and another states the refusal of a request cancelled while another holder keeps that
+ * state's lock; a held lock itself is waited out rather than refused, and that wait is a case below.
+ * The gate's remaining refusal branches are not reachable from public state deterministically, and
+ * no case fakes one.
  */
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
@@ -133,8 +135,13 @@ interface Composition {
   readonly wire: Wire
   /** The Messages requests the injected transport answered, in order. */
   readonly messages: () => readonly WireCall[]
-  /** Drive one committed Claude request through the registered route and return its chunks. */
-  request: (sessionId: string) => Promise<StreamChunk[]>
+  /**
+   * Drive one committed Claude request through the registered route and return its chunks.
+   * @param sessionId - the harness session the request belongs to.
+   * @param signal - the caller's own cancellation, when the case exercises one.
+   * @returns the chunks the route produced.
+   */
+  request: (sessionId: string, signal?: AbortSignal) => Promise<StreamChunk[]>
   /** Drive the real `logout` endpoint for this account. */
   logout: () => Promise<RpcResult<unknown>>
   /** Drive the real `status` endpoint for the claude provider. */
@@ -396,16 +403,20 @@ async function mount(home: string, wire: Wire): Promise<Composition> {
   return {
     wire,
     messages: () => messageCalls,
-    request: async (sessionId) => {
+    request: async (sessionId, signal) => {
       assert.ok(route !== undefined, 'the plugin registered its Claude route')
       const requested = llmSessionId(sessionId)
-      if (ctx.sessions.get(requested) === undefined) ctx.sessions.create(requested)
+      // A case may drive the route after disposal to observe the refusal a late request produces;
+      // the session service is gone then, and the state owner is what must refuse it.
+      if (ctx.sessions !== undefined && ctx.sessions.get(requested) === undefined) ctx.sessions.create(requested)
       const stream = route.stream({
         provider: 'claude',
         model: MODEL.id,
         messages: MESSAGES,
         sessionId: requested,
-        signal: new AbortController().signal,
+        // Every request carries a signal: the case's own when it exercises cancellation, and an
+        // un-aborted one otherwise.
+        signal: signal ?? new AbortController().signal,
       })
       const chunks: StreamChunk[] = []
       for await (const chunk of stream as AsyncIterable<StreamChunk>) chunks.push(chunk)
@@ -672,36 +683,100 @@ test('a Claude request is refused, with nothing sent, when its span state cannot
   })
 })
 
-test('a Claude request is refused by the state budget while another holder keeps the lock', { timeout: 30_000 }, async () => {
+test('a Claude request waits out another holder\'s live state lock and is then answered', { timeout: 30_000 }, async () => {
   await withComposition(async (app, home) => {
-    const baseline = await waitForBaseline(home)
-    // Another cooperating holder's live lease: the lock directory carries a fresh owner, so the
-    // real acquire must wait it out instead of taking it over. The lock and its owner live in this
-    // case's own home and are removed with that root.
+    await waitForBaseline(home)
+    // Another cooperating holder's live lease: the lock directory carries a fresh owner, so the real
+    // acquire waits for it instead of taking it over. The lock and its owner live in this case's own
+    // home and are removed with that root.
     const lock = join(home, 'plugins', 'subscriptions', 'claude-continuation', 'spans.json.lock')
     mkdirSync(lock)
     writeFileSync(join(lock, 'owner'), 'synthetic-other-holder', { mode: 0o600 })
-    // An expired credential makes the counterexample sharp: a request that reached the credential
-    // read would spend the grant the assertions below find untouched.
+
+    const request = app.request('session-lock')
+    let answered = false
+    void request.then(() => { answered = true }, () => { answered = true })
+    // Held past the whole retry budget the bounded acquire this replaced allowed at the shipped lock
+    // setting, so a bounded implementation would already have refused. A queued request waits for
+    // the holder itself, and the credential stays untouched while it does.
+    await new Promise<void>((resolve) => { setTimeout(resolve, 1_800) })
+    assert.equal(answered, false, 'the request waits for the other holder instead of being refused')
+
+    rmSync(lock, { recursive: true, force: true })
+    const chunks = await request
+    assert.equal(finishKind(chunks), 'stop', 'the waited-out request was answered normally')
+    assert.equal(app.messages().length, 1, 'exactly one Messages request was issued')
+    assert.equal(app.wire.tokenCalls.length, 0, 'the fresh credential spent no grant')
+    assert.equal(app.wire.policyReads, 0, 'no managed settings were read')
+    assert.deepEqual(app.wire.refused, [], 'nothing outside the stated endpoints was reached')
+    await app.dispose()
+  })
+})
+
+test('a Claude request cancelled while its state lock is held is refused promptly, with nothing sent', { timeout: 30_000 }, async () => {
+  await withComposition(async (app, home) => {
+    const baseline = await waitForBaseline(home)
+    const lock = join(home, 'plugins', 'subscriptions', 'claude-continuation', 'spans.json.lock')
+    mkdirSync(lock)
+    writeFileSync(join(lock, 'owner'), 'synthetic-other-holder', { mode: 0o600 })
+    // An expired credential makes the counterexample sharp: a request that got past the state gate
+    // would spend the grant the assertions below find untouched.
     await app.expire()
 
+    const controller = new AbortController()
+    const request = app.request('session-lock-cancel', controller.signal)
+    // Give the request its first turns, then stop it while the lock is still held: cancellation is
+    // the only thing besides disposal that ends a state wait.
+    for (let turn = 0; turn < 8; turn += 1) await Promise.resolve()
+    controller.abort()
+
     await assert.rejects(
-      app.request('session-lock'),
+      request,
       (error: unknown) => {
         assert.ok(error instanceof LlmError, `the request was refused: ${String(error)}`)
-        assert.equal(error.code, LOCAL_CONTINUATION_STATE_UNAVAILABLE,
-          'the state owner refused it, not a missing service or a record')
-        assert.equal(error.failure.retryDisposition, 'forbid')
-        assert.match(error.message, /continuation state/)
+        // The route classifies a stopped caller as ABORTED and leaves its disposition to the Host, so
+        // that classification outranks the state's internal cancellation reason. What must hold is
+        // that the wait ended, and that nothing was sent under it.
+        assert.equal(error.code, 'ABORTED', 'the stopped caller is classified by the route')
+        assert.match(error.message, /aborted by caller/)
+        assert.equal(error.failure.retryDisposition, undefined,
+          'a caller stop is not a retry-forbidden state failure')
         return true
       },
     )
 
-    assert.equal(app.wire.tokenCalls.length, 0, 'the refusal spent no grant')
+    assert.equal(existsSync(lock), true, 'the other holder\'s lock was not taken over')
+    assert.equal(app.wire.tokenCalls.length, 0, 'the cancelled request spent no grant')
     assert.equal(app.messages().length, 0, 'no Messages request was issued')
     assert.equal(app.wire.policyReads, 0, 'no managed settings were read')
     assert.deepEqual(app.wire.refused, [], 'nothing outside the stated endpoints was reached')
     assert.equal(app.generation()[0]?.generation, baseline.generation, 'no identity change ran')
     await app.dispose()
+  })
+})
+
+test('a request after the state\'s disposal is refused before any provider read or state commit', { timeout: 30_000 }, async () => {
+  await withComposition(async (app, home) => {
+    const baseline = await waitForBaseline(home)
+    // The owner every request is prepared under is gone, so a later request must fail closed rather
+    // than bind policy state without an identity epoch and reach a provider.
+    await app.dispose()
+
+    await assert.rejects(
+      app.request('session-after-dispose'),
+      (error: unknown) => {
+        assert.ok(error instanceof LlmError, `the request was refused: ${String(error)}`)
+        assert.equal(error.code, LOCAL_CONTINUATION_STATE_UNAVAILABLE, 'the disposed state refuses it')
+        assert.equal(error.failure.retryDisposition, 'forbid', 'nothing may resend it as it stands')
+        assert.match(error.message, /continuation state/)
+        return true
+      },
+    )
+
+    assert.equal(app.wire.tokenCalls.length, 0, 'the refused request spent no grant')
+    assert.equal(app.messages().length, 0, 'no Messages request was issued')
+    assert.equal(app.wire.policyReads, 0, 'no managed settings were read after disposal')
+    assert.deepEqual(app.wire.refused, [], 'nothing outside the stated endpoints was reached')
+    assert.equal(app.generation()[0]?.generation, baseline.generation, 'no identity change was committed')
   })
 })

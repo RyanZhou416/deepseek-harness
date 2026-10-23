@@ -447,12 +447,12 @@ Bun 子进程使用 `--no-env-file` 启动，工作目录中的 `.env` 文件不
 
 链只有一个定义：保留的 assistant 消息中，其 trusted v1 metadata 声明了引用种类与版本、`ref`、`spanEpoch`、harness 与 wire 身份，以及可重放的 role 与 blocks，且其账号引用与本次请求一致。在合格的 assistant 续接记录内，`requestId` 缺失或为空时向前扫描上一条可信记录；账号引用缺失的记录整体跳过；被选中的 `requestId` 若为真值但校验失败则丢弃该次选择，不回溯到更早记录。换模型本身不阻断链，而 thinking replay 仍受既有模型门约束。
 
-本地身份或 span 准备失败会在任何凭据使用、Files 或 Messages 工作之前拒绝该请求：存储不可信、写入失败与状态等待耗尽额度都以 `LOCAL_CONTINUATION_STATE_UNAVAILABLE` 与 `retryDisposition: 'forbid'` 结束。维护之后的一次 epoch 核对失败、或 pin 持久化失败，会阻止其后的 Files 与 Messages 工作，但不撤销此前已经发生的维护或刷新。记录 flush 失败则只禁止 Messages 发送，对可能已经发生的 Files 工作不作承诺；不带 session 的请求在任何凭据、文件或 Messages 工作之前即被拒绝。
+本地身份或 span 准备失败会在任何凭据使用、Files 或 Messages 工作之前拒绝该请求：存储不可信或写入失败以 `LOCAL_CONTINUATION_STATE_UNAVAILABLE` 与 `retryDisposition: 'forbid'` 结束；状态等待则一直持续到其操作真正结束，只有调用方取消或插件销毁才会结束。维护之后的一次 epoch 核对失败、或 pin 持久化失败，会阻止其后的 Files 与 Messages 工作，但不撤销此前已经发生的维护或刷新。记录 flush 失败则只禁止 Messages 发送，对可能已经发生的 Files 工作不作承诺；不带 session 的请求在任何凭据、文件或 Messages 工作之前即被拒绝。
 
 | 字段 | 默认值 | 用途 |
 |---|---|---|
-| `continuationStateDeadlineMs` | `5000` | 每个请求一份的额度，取值 100–10000 毫秒，由该请求的每个续接状态阶段共享：每个阶段继续使用剩余额度而不是重新起算，且该界只覆盖本地状态等待，不含 provider 网络耗时。解析后的值至少为 `continuationStateLockTimeoutMs` + 2000 毫秒，避免等锁耗尽整个请求额度、把健康状态误报为不可用 |
-| `continuationStateLockTimeoutMs` | `2000` | 取得一次续接状态锁的上限，取值 100–10000 毫秒；无法取得锁时拒绝该操作，而不是无主运行 |
+| `continuationStateDeadlineMs` | `5000` | 每个请求一份的建议性计量，取值 100–10000 毫秒，用于该请求的续接状态各阶段：它从不结束等待，也从不拒绝请求 —— 等待会持续到其工作真正结束或调用方取消。解析后的值仍至少为 `continuationStateLockTimeoutMs` + 2000 毫秒，因此既有配置仍得到它原本解析到的值 |
+| `continuationStateLockTimeoutMs` | `2000` | 一次续接状态锁的退避与租约输入，取值 100–10000 毫秒；活着的持有者会被等待，只有无法创建的锁路径才会拒绝该操作，而不是无主运行 |
 
 身份变化在「使其成真的凭据提交」之前设门：token 轮换不推进身份代际，未知的 active 身份不能自动接管，被记录为失败的身份只能通过显式授权恢复；请求从不伪造一个已修复的身份。
 

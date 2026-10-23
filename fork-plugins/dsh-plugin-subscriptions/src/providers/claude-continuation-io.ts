@@ -1,34 +1,33 @@
 /**
- * The continuation stores' shared private-file machinery: owned work, bounded waits and
- * cross-process serialisation.
+ * The continuation stores' shared private-file machinery: the FIFO queue that owns a document,
+ * cancellation that never abandons started work, and cross-process serialisation.
  *
  * Four properties here are correctness requirements rather than conveniences:
  *
- * 1. One logical deadline bounds the *wait*, never the work. The bound is an absolute instant, so
- *    every step a caller passes it to shares what is left instead of starting a fresh clock, and a
- *    step whose budget already ended refuses before it starts new I/O. A caller that arrives while
- *    this document's operation is still running waits for that operation inside the same absolute
- *    budget and then runs its own change: waiting never adopts the earlier operation's result, and
- *    a wait that ends first starts none of the arriving caller's own I/O. The operation a caller
- *    started stays owned by this helper: it keeps running, and a caller whose own wait ended is
- *    told only that the state is unavailable. Every later caller waits for that operation's real
- *    settlement under its own absolute budget and then reads and changes the document inside the
- *    lock, so no caller decides from a document a pending write may still replace. An ended wait
- *    neither retries nor revokes the owned operation; that operation may still commit before its
- *    lock is released. The write runs inside the lock, so a process that honours this lock cannot
- *    decide from the document either while the abandoned work is still writing.
- * 2. Every outcome of a wait — elapsed, timed out, aborted — releases that wait's own timer and
- *    abort listener, so a caller that keeps sending requests accumulates neither.
- * 3. One read-modify-write runs entirely inside the lock this plugin already owns
- *    ({@link withStoreLockOwned}); locking only the write would let two processes read the same
- *    document and each drop the other's change. A lock that cannot be owned is a refusal, not a
- *    degraded unowned run. A held lock refuses under the lock budget, independently of the
- *    logical deadline. The lock's staleness bound is that primitive's own lease semantics: a
- *    holder that does not take this lock is not serialised by it.
+ * 1. One document has one queue. A caller waits for every earlier caller to settle, then runs its
+ *    own read-modify-write; only its own `AbortSignal` or this helper's disposal ends that wait.
+ *    Elapsed time never ends a wait, so a queued request waits for its turn rather than being
+ *    refused because a configured duration passed. Arrival order is the order of {@link
+ *    ContinuationIo.update} calls, and each admitted caller reads the text its predecessor
+ *    committed.
+ * 2. A caller cancelled before its turn starts no file work — no directory creation, no read, no
+ *    write, no lock. A caller whose operation already started cannot abandon it: it is answered
+ *    only after that operation really settled, and that settlement — not the caller's cancellation
+ *    — is what admits the next caller. Cancellation changes only the reported outcome.
+ * 3. Every read-modify-write runs entirely inside the lock this plugin already owns
+ *    ({@link withStoreLockWait}); locking only the write would let two processes read the same
+ *    document and each drop the other's change. A held lock is waited out with backoff until it is
+ *    released or its expired lease is taken over; a lock that cannot be created at all is a
+ *    refusal, not a degraded unowned run. Disposal cancels a lock acquisition, so teardown cannot
+ *    wait forever on another process's holder.
  * 4. A document is replaced by one exclusively created owner-only temporary file renamed into
  *    place, so a crash leaves either the old record or the new one, and a failed write removes
  *    only its own temporary file. The document's directory is created first, so the first use in
  *    a directory that does not exist yet is a creation rather than a lock that looks busy.
+ *
+ * Disposal stops new admissions, wakes every queued caller, cancels lock acquisitions, and resolves
+ * only once queued and running work has really settled — it never reports a settlement that did
+ * not happen.
  *
  * The failure code lives here rather than in one store because every store here reports the same
  * refusal, and a second spelling of it would let a caller route on the wrong one.
@@ -39,7 +38,7 @@
 import { randomUUID } from 'node:crypto'
 import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import { dirname } from 'node:path'
-import { withStoreLockOwned } from '../auth/store-lock.js'
+import { withStoreLockWait } from '../auth/store-lock.js'
 import type { LockTiming } from '../auth/store-lock.js'
 
 /** The fixed refusal every continuation store reports; a caller must then send nothing. */
@@ -62,27 +61,25 @@ export function continuationUnavailable(reason: string): ContinuationUnavailable
 }
 
 /**
- * One absolute budget a caller shares across a whole preparation chain.
+ * The accounting instant and cancellation one caller shares across a whole preparation chain.
  *
- * The instant, not a duration, is what makes the budget shared: a step that starts later computes
- * a smaller remaining wait from the same value, so a chain of steps cannot extend the caller's
- * bound by starting each one with a fresh duration. A step whose budget has already ended refuses
- * before it starts new I/O; work that already started stays owned until it really settles.
+ * A request preparation chain resolves this once and passes the same value to every step, so the
+ * steps share one cancellation. The instant is advisory accounting: a wait ends on settlement, the
+ * caller's own cancellation, or disposal, never because the instant passed.
  */
 export interface ContinuationDeadline {
-  /** The instant (epoch milliseconds) this budget ends. */
+  /** The instant (epoch milliseconds) this budget ends; advisory, never a refusal. */
   readonly expiresAt: number
-  /** The caller's own cancellation, which ends each wait and never the owned work. */
+  /** The caller's own cancellation, which ends each wait and never the started work. */
   readonly signal?: AbortSignal
 }
 
 /**
- * Start one absolute budget from a configured duration and the caller's cancellation.
+ * Start the accounting instant and cancellation one preparation chain shares.
  *
- * A request preparation chain resolves this once and passes the same value to every step.
- * @param deadlineMs - how long the chain may wait, from the configured deadline.
+ * @param deadlineMs - the configured duration the chain's accounting starts from.
  * @param signal - the caller's own cancellation, when it has one.
- * @returns the budget every step of that chain shares.
+ * @returns the deadline every step of that chain shares.
  */
 export function continuationBudget(deadlineMs: number, signal?: AbortSignal): ContinuationDeadline {
   const expiresAt = Date.now() + Math.max(0, Math.floor(deadlineMs))
@@ -93,9 +90,6 @@ export function continuationBudget(deadlineMs: number, signal?: AbortSignal): Co
 function isAborted(signal: AbortSignal | undefined): boolean {
   return signal !== undefined && signal.aborted
 }
-
-/** What ended a bounded wait. */
-export type ContinuationWaitOutcome = 'elapsed' | 'timed-out' | 'aborted'
 
 /** The private file operations one continuation document needs. */
 export interface ContinuationFiles {
@@ -118,11 +112,17 @@ export interface ContinuationFiles {
   writeAtomic(path: string, text: string): Promise<void>
 }
 
-/** The timers, clock and abort listeners one bounded wait uses; a test injects one to control them. */
+/**
+ * The timers, clock and abort listeners one wait uses; a test injects one to control and observe it.
+ *
+ * `schedule` is retained for compatibility with the host shape the stores accept, but this module's
+ * waits never schedule a timer: a sentinel "infinite" delay is forbidden because Node clamps a
+ * delay above 2147483647 ms to 1 ms, which would turn an unbounded wait into an immediate refusal.
+ */
 export interface ContinuationWaitHost {
   /**
    * Read the current instant.
-   * @returns epoch milliseconds, from which a remaining budget is computed.
+   * @returns epoch milliseconds, from which a budget's advisory expiry is derived.
    */
   now(): number
   /**
@@ -134,7 +134,7 @@ export interface ContinuationWaitHost {
   schedule(delayMs: number, fire: () => void): () => void
   /**
    * Subscribe to a signal's abort.
-   * @param signal - the caller's cancellation.
+   * @param signal - the cancellation to observe.
    * @param fire - what an abort calls.
    * @returns the disposer that removes the listener.
    */
@@ -205,8 +205,10 @@ export function isMissing(error: unknown): boolean {
  *
  * The staleness bound stays in the same order as the plugin's existing lock policy: a
  * continuation document is tiny and its critical sections are milliseconds, so a longer lease
- * only delays recovering a dead holder. The retry budget is what turns a live holder into a
- * refusal, and it is the configured lock bound rather than the request's deadline.
+ * only delays recovering a dead holder. The backoff is what keeps a live holder from being
+ * polled in a tight loop; the cooperative wait itself has no attempt budget, so this no longer
+ * turns a live holder into a refusal. The identity transition still takes its own lock through the
+ * bounded primitive, which reads `retries`.
  * @param lockTimeoutMs - the resolved `continuationStateLockTimeoutMs`.
  * @returns the timing the guarded read-modify-write runs under.
  */
@@ -235,9 +237,9 @@ export type ContinuationOutcome =
 export interface ContinuationIoOptions {
   /** The document every operation on this helper reads or replaces. */
   readonly path: string
-  /** How long one operation may wait for the owned lock. */
+  /** The backoff and lease input for the document's cooperative lock. */
   readonly lockTimeoutMs: number
-  /** How long one operation may wait when its caller passes no deadline. */
+  /** Advisory per-operation accounting; it never ends a wait. */
   readonly deadlineMs: number
   /** The private file operations; absent uses this host's filesystem. */
   readonly files?: ContinuationFiles
@@ -245,14 +247,26 @@ export interface ContinuationIoOptions {
   readonly waits?: ContinuationWaitHost
 }
 
+/** One caller's place in the queue. */
+interface QueueTicket {
+  /** Resolves when every earlier caller has settled. */
+  readonly turn: Promise<void>
+  /** Resolves when this caller has settled, or abandoned its queued turn. */
+  readonly done: Promise<void>
+  /** Advance the queue; idempotent, and called exactly once per ticket. */
+  readonly release: () => void
+}
+
+/** What ended a wait for this caller's turn. */
+type Admission = 'turn' | 'aborted' | 'disposed'
+
 /**
- * One continuation document's owned work.
+ * One continuation document's queue and cross-process lock.
  *
- * The helper is the document's owner in this process: it starts every read-modify-write under the
- * plugin's own lock, keeps a started operation alive past the caller's wait, makes a later caller
- * wait for that operation's real settlement before reading and changing the document itself, and
- * can be closed once the plugin is disposed. One caller at a time changes the document, so two
- * requests that merely overlap are serialised rather than refused.
+ * The helper is the document's owner in this process: it admits one read-modify-write at a time in
+ * arrival order, starts each under the plugin's own lock, makes a later caller wait for every
+ * earlier operation's real settlement, and can be closed once the plugin is disposed. Only the
+ * caller's cancellation or this helper's disposal ends a wait; a configured duration never does.
  */
 export class ContinuationIo {
   private readonly path: string
@@ -260,15 +274,21 @@ export class ContinuationIo {
   private readonly deadlineMs: number
   private readonly files: ContinuationFiles
   private readonly waits: ContinuationWaitHost
+  /** Callers that have enqueued and not yet settled, in arrival order. */
+  private readonly tickets = new Set<QueueTicket>()
+  /** Queued callers' wake callbacks, run once when disposal starts. */
+  private readonly disposalWaiters = new Set<() => void>()
+  /** Tripped by {@link close}, so in-flight lock acquisitions stop instead of waiting forever. */
+  private readonly disposal = new AbortController()
   /**
-   * Owned work that has not really settled yet. A later caller waits for every entry under its own
-   * budget, and settlement removes only its own entry.
+   * The tail of the admission chain: resolves once every caller enqueued so far has settled, or
+   * abandoned a queued place without starting work.
    */
-  private readonly settling = new Set<Promise<ContinuationOutcome>>()
+  private tail: Promise<void> = Promise.resolve()
   private closed = false
 
   /**
-   * @param options - the document, both configured budgets and the injectable I/O boundary.
+   * @param options - the document, the lock policy and the injectable I/O boundary.
    */
   constructor(options: ContinuationIoOptions) {
     this.path = options.path
@@ -279,20 +299,18 @@ export class ContinuationIo {
   }
 
   /**
-   * Run one read-modify-write under the plugin's own lock, bounded by the caller's budget.
+   * Run one read-modify-write under the plugin's own lock, after every earlier operation settled.
    *
    * The change runs inside the lock with the document it read, so two processes cannot each read
    * the same document and then drop the other's change. Returning `undefined` leaves the
    * document as it is, which is how a caller reads without writing. A caller whose signal is
-   * already aborted, and a caller whose budget has already ended, perform no file operation at
-   * all. A caller that arrives while an operation this helper owns is still running waits for that
-   * operation's real settlement under its own budget and then runs its own change; a wait that
-   * ends first starts none of this caller's work, and a caller that stopped waiting does not
-   * revoke the operation it started.
+   * already aborted starts no file operation, and a caller cancelled while queued starts none
+   * either. A caller cancelled after its operation started is answered only once that operation
+   * really settled; the started write is not revoked, the next caller is admitted by that
+   * settlement, and the answer is the cancellation refusal.
    * @param change - the pure change, given the current text (undefined when the document is
    *   absent); returning undefined means "write nothing".
-   * @param deadline - the absolute budget and cancellation the caller resolved; absent starts one
-   *   from the configured deadline and carries no signal.
+   * @param deadline - the cancellation the caller resolved; absent carries no signal.
    * @returns the text that stands, whether it was written, or the fixed refusal.
    */
   async update(
@@ -300,88 +318,39 @@ export class ContinuationIo {
     deadline?: ContinuationDeadline,
   ): Promise<ContinuationOutcome> {
     const bound: ContinuationDeadline = deadline ?? this.budget()
-    if (isAborted(bound.signal)) {
+    const signal = bound.signal
+    if (isAborted(signal)) {
       return continuationUnavailable('the caller stopped before the continuation state was touched')
     }
     if (this.closed) return continuationUnavailable('the continuation state is being disposed')
-    if (this.remainingMs(bound) <= 0) {
-      return continuationUnavailable('the caller\'s budget ended before the continuation state was touched')
-    }
-    // Admission: wait out the operation that holds the document, then re-read everything that can
-    // have changed while waiting. Every check and the admission below run in one synchronous turn,
-    // so waiters cannot pass them together, and each waiter reports its own change's result.
-    for (;;) {
-      if (isAborted(bound.signal)) {
+    const ticket = this.enqueue()
+    try {
+      const admission = await this.waitForTurn(ticket, signal)
+      if (admission === 'aborted') {
         return continuationUnavailable('the caller stopped waiting before the continuation state settled')
       }
-      if (this.closed) return continuationUnavailable('the continuation state is being disposed')
-      if (this.remainingMs(bound) <= 0) {
-        return continuationUnavailable('the continuation state did not settle within the deadline')
+      // The closed check shares the turn decision's synchronous continuation: no operation starts
+      // after disposal began, and a caller woken by disposal is refused without any file work.
+      if (admission === 'disposed' || this.closed) {
+        return continuationUnavailable('the continuation state is being disposed')
       }
-      const pending = [...this.settling]
-      if (pending.length === 0) break
-      const waited = await this.awaitSettlement(Promise.all(pending), bound)
-      if (waited !== 'elapsed') {
-        return continuationUnavailable(waited === 'aborted'
-          ? 'the caller stopped waiting before the continuation state settled'
-          : 'the continuation state did not settle within the deadline')
+      const outcome = await this.run(change, signal)
+      // The operation reached real settlement; a caller that stopped meanwhile learns only that it
+      // stopped. The settlement, not this answer, is what admitted the next caller.
+      if (isAborted(signal)) {
+        return continuationUnavailable('the caller stopped waiting before the continuation state settled')
       }
+      return outcome
+    } finally {
+      ticket.release()
     }
-    const owned = this.own(change)
-    const outcome = await this.awaitSettlement(owned, bound)
-    if (outcome === 'elapsed') return await owned
-    // Only this wait ended: the owned write keeps running, and a later caller waits for its real
-    // settlement instead of deciding from the document.
-    return continuationUnavailable(outcome === 'aborted'
-      ? 'the caller stopped waiting before the continuation state settled'
-      : 'the continuation state did not settle within the deadline')
-  }
-
-  /**
-   * Wait for one owned work promise under a budget and the caller's cancellation.
-   *
-   * The wait's own timer and abort listener are removed on every outcome. Neither outcome
-   * cancels the work: the caller learns only that it stopped waiting.
-   * @param work - the owned work; it reports its own outcome to its own caller and must not
-   *   reject.
-   * @param deadline - the absolute budget and cancellation.
-   * @returns 'elapsed' when the work settled first, otherwise what ended the wait.
-   */
-  async awaitSettlement(work: Promise<unknown>, deadline: ContinuationDeadline): Promise<ContinuationWaitOutcome> {
-    if (isAborted(deadline.signal)) return 'aborted'
-    const signal = deadline.signal
-    return await new Promise<ContinuationWaitOutcome>((resolve) => {
-      let finished = false
-      let cancelTimer: () => void = () => undefined
-      let cancelAbort: () => void = () => undefined
-      const finish = (outcome: ContinuationWaitOutcome): void => {
-        if (finished) return
-        finished = true
-        cancelTimer()
-        cancelAbort()
-        resolve(outcome)
-      }
-      if (signal !== undefined) cancelAbort = this.waits.onAbort(signal, () => { finish('aborted') })
-      cancelTimer = this.waits.schedule(Math.max(1, this.remainingMs(deadline)), () => { finish('timed-out') })
-      // Subscribing and scheduling before this check closes the window between the caller's own
-      // pre-abort check and this subscription: an abort landing in between still ends the wait.
-      if (isAborted(signal)) finish('aborted')
-      void work.then(() => { finish('elapsed') }, () => { finish('elapsed') })
-    })
-  }
-
-  /**
-   * How much of one budget is left.
-   * @param deadline - the caller's absolute budget.
-   * @returns the remaining milliseconds, never below zero; zero means no new I/O may start.
-   */
-  remainingMs(deadline: ContinuationDeadline): number {
-    return Math.max(0, deadline.expiresAt - this.waits.now())
   }
 
   /**
    * Start one budget from this document's configured deadline.
-   * @returns the budget one lifecycle step runs under.
+   *
+   * The instant is advisory accounting; no wait in this module refuses because of it.
+   * @returns the budget a caller that passed none runs under.
    */
   budget(): ContinuationDeadline {
     return { expiresAt: this.waits.now() + this.deadlineMs }
@@ -398,57 +367,158 @@ export class ContinuationIo {
   }
 
   /**
-   * Stop accepting new work and wait for the work already owned to reach real settlement.
+   * Stop accepting new work and wait for the queued and running work to reach real settlement.
    *
    * This is the plugin's dispose obligation: it reports settlement, not success, and each
-   * operation's own outcome was already returned to its caller. It must not be awaited from
+   * operation's own outcome was already returned to its caller. The closed flag is set in this
+   * call's first synchronous turn, so no operation starts after disposal began; every caller
+   * waiting for admission is woken and refused without file work; a lock acquisition already in
+   * flight is cancelled; and the returned promise resolves only once those callers and the owned
+   * operations have really settled. Repeated calls are harmless. It must not be awaited from
    * inside an operation this helper owns, and it never pretends a committed write was cancelled.
-   * A caller that is waiting for admission when this is called wakes to the closed state and is
-   * refused instead of admitted, so no work starts after disposal began. A caller that has to
-   * bound its own teardown does so around this call; this never reports a settlement it did not
-   * observe.
    */
   async close(): Promise<void> {
     this.closed = true
+    for (const wake of [...this.disposalWaiters]) wake()
+    this.disposalWaiters.clear()
+    this.disposal.abort()
     await this.drain()
   }
 
   /**
-   * Wait until every operation this helper owns has really settled.
+   * Wait until every caller enqueued at this instant has really settled.
    *
-   * Owned work reports its outcome to its caller and never rejects, so this waits for settlement
-   * rather than deciding anything about it.
+   * A caller's ticket is released only after its operation settled (or after it abandoned a queued
+   * place without starting work), so the snapshot covers both queued and running callers and
+   * callers admitted after this call cannot extend it. No work rejects, so this waits for
+   * settlement rather than deciding anything about it.
    */
   async drain(): Promise<void> {
-    while (this.settling.size > 0) await Promise.all([...this.settling])
+    const pending = [...this.tickets].map(ticket => ticket.done)
+    if (pending.length === 0) return
+    await Promise.all(pending)
   }
 
-  /** Start one owned read-modify-write and keep it tracked until it really settles. */
-  private own(change: (current: string | undefined) => string | undefined): Promise<ContinuationOutcome> {
-    const work = this.run(change)
-    this.settling.add(work)
-    const release = (): void => { this.settling.delete(work) }
-    void work.then(release, release)
-    return work
+  /** Take the next FIFO position synchronously, so arrival order is call order. */
+  private enqueue(): QueueTicket {
+    const turn = this.tail
+    let advance!: () => void
+    const done = new Promise<void>((resolve) => { advance = resolve })
+    // The next caller's turn waits for this ticket's turn as well as its settlement. A caller that
+    // stops while queued has settled without starting any work, but its abandoned place must not
+    // advance the queue past an earlier operation that has not settled: the next caller still
+    // waits for every operation admitted before it.
+    this.tail = Promise.all([turn, done]).then(() => undefined)
+    let released = false
+    const ticket: QueueTicket = {
+      turn,
+      done,
+      release: () => {
+        if (released) return
+        released = true
+        this.tickets.delete(ticket)
+        advance()
+      },
+    }
+    this.tickets.add(ticket)
+    return ticket
   }
 
-  /** The real operation: create the directory, take the lock, read, change, write. */
-  private async run(change: (current: string | undefined) => string | undefined): Promise<ContinuationOutcome> {
+  /**
+   * Wait for this caller's turn, its own cancellation, or disposal — whichever comes first.
+   *
+   * No timer and no polling: the turn is the earlier caller's settlement promise, and disposal is
+   * signalled by {@link close}. The abort listener and the disposal wake are removed on every
+   * outcome.
+   * @param ticket - this caller's queue position.
+   * @param signal - the caller's own cancellation, when it has one.
+   * @returns what ended the wait.
+   */
+  private async waitForTurn(ticket: QueueTicket, signal: AbortSignal | undefined): Promise<Admission> {
+    if (isAborted(signal)) return 'aborted'
+    if (this.closed) return 'disposed'
+    return await new Promise<Admission>((resolve) => {
+      let finished = false
+      let cancelAbort: () => void = () => undefined
+      const wakeDisposal = (): void => { finish('disposed') }
+      const finish = (outcome: Admission): void => {
+        if (finished) return
+        finished = true
+        cancelAbort()
+        this.disposalWaiters.delete(wakeDisposal)
+        resolve(outcome)
+      }
+      this.disposalWaiters.add(wakeDisposal)
+      if (signal !== undefined) cancelAbort = this.waits.onAbort(signal, () => { finish('aborted') })
+      void ticket.turn.then(() => { finish('turn') }, () => { finish('turn') })
+      // Re-read both enders after subscribing: an abort or disposal that landed during this
+      // synchronous turn still ends the wait, and nothing here schedules a timer.
+      if (isAborted(signal)) finish('aborted')
+      else if (this.closed) finish('disposed')
+    })
+  }
+
+  /**
+   * The cancellation one lock acquisition observes: the caller's stop and this helper's disposal.
+   *
+   * Disposal aborts the acquisition so teardown cannot wait forever on another process's live
+   * holder; it never aborts work that already holds the lock, which runs to its own settlement.
+   * @param signal - the caller's own cancellation, when it has one.
+   * @returns the cancellation to pass to the lock and the disposer that removes its listeners.
+   */
+  private lockCancellation(signal: AbortSignal | undefined): {
+    readonly signal: AbortSignal
+    readonly dispose: () => void
+  } {
+    const disposal = this.disposal.signal
+    if (signal === undefined) return { signal: disposal, dispose: () => undefined }
+    const controller = new AbortController()
+    const stop = (): void => { controller.abort() }
+    const cancelCaller = this.waits.onAbort(signal, stop)
+    const cancelDisposal = this.waits.onAbort(disposal, stop)
+    if (signal.aborted || disposal.aborted) controller.abort()
+    return {
+      signal: controller.signal,
+      dispose: () => {
+        cancelCaller()
+        cancelDisposal()
+      },
+    }
+  }
+
+  /**
+   * The real operation: create the directory, take the lock, read, change, write.
+   * @param change - the pure change applied inside the lock.
+   * @param signal - the caller's cancellation, when it has one.
+   * @returns the applied outcome or the fixed refusal.
+   */
+  private async run(
+    change: (current: string | undefined) => string | undefined,
+    signal: AbortSignal | undefined,
+  ): Promise<ContinuationOutcome> {
+    const cancellation = this.lockCancellation(signal)
     try {
       await this.files.ensureDirectory(dirname(this.path))
-      const locked = await withStoreLockOwned(this.path, async () => {
+      const locked = await withStoreLockWait(this.path, async () => {
         const current = await this.files.read(this.path)
         const next = change(current)
         if (next === undefined || next === current) return { text: current ?? '', written: false }
         await this.files.writeAtomic(this.path, next)
         return { text: next, written: true }
-      }, continuationLockTiming(this.lockTimeoutMs))
-      if (!locked.acquired) {
-        return continuationUnavailable('the continuation state lock is held by another holder')
+      }, continuationLockTiming(this.lockTimeoutMs), cancellation.signal)
+      if (locked.kind === 'aborted') {
+        return continuationUnavailable(this.closed
+          ? 'the continuation state is being disposed'
+          : 'the caller stopped waiting before the continuation state settled')
+      }
+      if (locked.kind === 'unavailable') {
+        return continuationUnavailable(`the continuation state could not be used (${locked.reason})`)
       }
       return { kind: 'applied', text: locked.value.text, written: locked.value.written }
     } catch (error: unknown) {
       return continuationUnavailable(`the continuation state could not be used (${errorCode(error)})`)
+    } finally {
+      cancellation.dispose()
     }
   }
 }

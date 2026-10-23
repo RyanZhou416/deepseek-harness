@@ -39,7 +39,7 @@
  *
  * **Disposal waits for the whole transition.** Closing the record stops new changes, waits for the
  * transition this instance owns — the operation's work and the publication — to really settle, and
- * only then drains its own file operations. A caller's elapsed wait never shortens that: the wait
+ * only then drains its own file operations. A caller's cancellation never shortens that: the wait
  * is the caller's, and the settlement is the account's.
  *
  * **Requests read the durable record; they never establish one.** Establishing a baseline is a
@@ -158,11 +158,9 @@ export type ClaudeGenerationAdvance =
 export type ClaudeGenerationWait =
   /** No transition is in flight; the generation is usable. */
   | { readonly kind: 'settled'; readonly generation: number }
-  /** A transition is in flight and did not settle within the caller's bound. */
-  | { readonly kind: 'timed-out' }
   /** The caller aborted the wait; no request may be built. */
   | { readonly kind: 'aborted' }
-  /** A transition failed, or the record cannot be read; this account is refused. */
+  /** A transition failed, the record cannot be read, or disposal began; this account is refused. */
   | { readonly kind: 'failed'; readonly reason: string }
 
 /**
@@ -195,15 +193,15 @@ export interface ClaudeIdentityGenerationOptions {
   readonly accountRef: ClaudeAccountRef
   /** File holding the record; absent uses the plugin's own home directory. */
   readonly path?: string
-  /** How long one operation may wait before its caller is refused. */
+  /** Advisory accounting for one operation; elapsed time never ends its wait or refuses a caller. */
   readonly deadlineMs: number
-  /** How long one operation may wait for the owned lock. */
+  /** Backoff and lease input for the owned lock; it is not a wait bound. */
   readonly lockTimeoutMs: number
   /** Sink for a diagnostic about the record itself; never used for a credential. */
   readonly onWarn?: (message: string) => void
   /** The private file operations; a test injects one to hold a write. */
   readonly files?: ContinuationFiles
-  /** The timers and abort listeners one bounded wait uses; a test injects one to observe it. */
+  /** The timers and abort listeners a wait may use; a test injects one to observe it. */
   readonly waits?: ContinuationWaitHost
 }
 
@@ -323,6 +321,9 @@ export class ClaudeIdentityGeneration {
   private readonly path: string
   private readonly accountRef: ClaudeAccountRef
   private readonly io: ContinuationIo
+  private readonly waits: ContinuationWaitHost
+  /** Waiters that disposal must wake, so no request waits on a transition being torn down. */
+  private readonly disposalWaiters = new Set<() => void>()
   private damaged: string | undefined
   private pending: PendingTransition | undefined
   private running: Promise<ClaudeGenerationAdvance> | undefined
@@ -330,17 +331,18 @@ export class ClaudeIdentityGeneration {
   private warned = false
 
   /**
-   * @param options - the account this counter belongs to, path, both budgets and the I/O boundary.
+   * @param options - the account this counter belongs to, path, the lock policy and the I/O boundary.
    */
   constructor(private readonly options: ClaudeIdentityGenerationOptions) {
     this.path = options.path ?? defaultPath()
     this.accountRef = options.accountRef
+    this.waits = options.waits ?? systemContinuationWaits
     this.io = new ContinuationIo({
       path: this.path,
       lockTimeoutMs: options.lockTimeoutMs,
       deadlineMs: options.deadlineMs,
       files: options.files ?? nodeContinuationFiles,
-      waits: options.waits ?? systemContinuationWaits,
+      waits: this.waits,
     })
   }
 
@@ -351,8 +353,8 @@ export class ClaudeIdentityGeneration {
    * cached number would get wrong. A missing baseline is `uninitialized` rather than an implicit
    * write, and a record that states an unfinished change refuses, because the epoch it names is
    * the one that change was meant to replace.
-   * @param deadline - the bound and cancellation the caller resolved; absent uses the configured
-   *   deadline and no signal.
+   * @param deadline - the cancellation and advisory accounting the caller resolved; absent uses the
+   *   configured accounting and no signal.
    * @returns the current generation, or why no request may be served.
    */
   async current(deadline?: ContinuationDeadline): Promise<ClaudeGenerationState> {
@@ -366,8 +368,8 @@ export class ClaudeIdentityGeneration {
    * The record is created only when the account has none, inside the lock that decides it, so a
    * normal restart establishes nothing, a later initialization cannot overwrite an advanced row
    * with zero, and two initializations that race leave one baseline. Only the lifecycle calls it.
-   * @param deadline - the bound and cancellation the caller resolved; absent uses the configured
-   *   deadline and no signal.
+   * @param deadline - the cancellation and advisory accounting the caller resolved; absent uses the
+   *   configured accounting and no signal.
    * @returns the generation in force, or why it could not be established.
    */
   async initialize(deadline?: ContinuationDeadline): Promise<ClaudeGenerationAdvance> {
@@ -451,46 +453,87 @@ export class ClaudeIdentityGeneration {
   }
 
   /**
-   * Wait for the transition this process is running, bounded by the caller's own budget.
+   * Wait for the transition this process is running until it settles, the caller stops, or disposal.
    *
    * The wait never starts a transition: a request waits for the auth lifecycle's work, which is the
-   * only owner allowed to begin one. A pre-aborted caller is answered before anything else, and a
-   * failure is a fixed state a later call reads rather than a wait. The durable read that follows a
-   * settled transition is part of the same budget and keeps the same cancellation, so a wait cannot
-   * hand the caller a state it read after the caller's bound had ended.
-   * @param deadline - the absolute budget and the caller's cancellation.
+   * only owner allowed to begin one. No timer bounds it — elapsed time is not an outcome — and a
+   * pre-aborted caller is answered before anything else. A failure is a fixed state a later call
+   * reads rather than a wait. The durable read that follows a settled transition keeps the same
+   * cancellation, and disposal wakes the wait with a refusal instead of answering it from the
+   * snapshot the transition was tearing down.
+   * @param deadline - the caller's cancellation; its expiry instant is advisory only.
    * @returns the settled generation, or the fixed reason this account is not served.
    */
   async waitSettled(deadline: ContinuationDeadline): Promise<ClaudeGenerationWait> {
     if (isAborted(deadline.signal)) return { kind: 'aborted' }
+    if (this.closing) return { kind: 'failed', reason: 'the identity generation is being disposed' }
     const transition = this.pending
     if (transition === undefined) {
-      if (this.io.remainingMs(deadline) <= 0) return { kind: 'timed-out' }
-      return await this.settledState(deadline)
+      const state = await this.settledState(deadline)
+      return state.kind === 'failed' && isAborted(deadline.signal) ? { kind: 'aborted' } : state
     }
-    const outcome = await this.io.awaitSettlement(transition.settled, deadline)
-    if (outcome === 'aborted') return { kind: 'aborted' }
-    // The bound ends this wait only: the transition keeps running and its gate stays closed.
-    if (outcome === 'timed-out') return { kind: 'timed-out' }
+    const ended = await this.waitForTransition(transition, deadline.signal)
+    if (ended === 'aborted') return { kind: 'aborted' }
+    if (ended === 'disposed') return { kind: 'failed', reason: 'the identity generation is being disposed' }
     if (isAborted(deadline.signal)) return { kind: 'aborted' }
-    if (this.io.remainingMs(deadline) <= 0) return { kind: 'timed-out' }
-    return await this.settledState(deadline)
+    const state = await this.settledState(deadline)
+    return state.kind === 'failed' && isAborted(deadline.signal) ? { kind: 'aborted' } : state
   }
 
   /**
    * Stop accepting new changes and wait for the whole transition this instance owns to settle.
    *
-   * The order matters: new changes are refused first, so no operation starts after this call; the
-   * running transition — its operation and its publication — is awaited to real settlement; only
-   * then are this record's own file operations drained. Disposal reports settlement, not success,
-   * and a caller's elapsed wait never shortens it. It must not be awaited from inside the
-   * operation, and it awaits no work of its own.
+   * The order matters: new changes are refused and every waiting request is woken first, so no
+   * operation starts after this call and no wait outlives disposal; the running transition — its
+   * operation and its publication — is then awaited to real settlement, and only after that are
+   * this record's own file operations drained. Disposal reports settlement, not success, and a
+   * caller's cancellation never shortens it. It must not be awaited from inside the operation, and
+   * it awaits no work of its own.
    */
   async close(): Promise<void> {
     this.closing = true
+    for (const wake of [...this.disposalWaiters]) wake()
+    this.disposalWaiters.clear()
     const running = this.running
     if (running !== undefined) await running
     await this.io.close()
+  }
+
+  /**
+   * Wait for one transition to settle, the caller to stop, or disposal to begin.
+   *
+   * No timer and no polling: the transition's own settlement promise is the only progress signal,
+   * and disposal is signalled by {@link close}. The abort listener and the disposal wake are
+   * removed on every outcome.
+   * @param transition - the in-flight transition.
+   * @param signal - the caller's own cancellation, when it has one.
+   * @returns what ended the wait.
+   */
+  private async waitForTransition(
+    transition: PendingTransition,
+    signal: AbortSignal | undefined,
+  ): Promise<'settled' | 'aborted' | 'disposed'> {
+    if (isAborted(signal)) return 'aborted'
+    if (this.closing) return 'disposed'
+    return await new Promise<'settled' | 'aborted' | 'disposed'>((resolve) => {
+      let finished = false
+      let cancelAbort: () => void = () => undefined
+      const wakeDisposal = (): void => { finish('disposed') }
+      const finish = (outcome: 'settled' | 'aborted' | 'disposed'): void => {
+        if (finished) return
+        finished = true
+        cancelAbort()
+        this.disposalWaiters.delete(wakeDisposal)
+        resolve(outcome)
+      }
+      this.disposalWaiters.add(wakeDisposal)
+      if (signal !== undefined) cancelAbort = this.waits.onAbort(signal, () => { finish('aborted') })
+      void transition.settled.then(() => { finish('settled') })
+      // Re-read both enders after subscribing: an abort or disposal that landed during this
+      // synchronous turn still ends the wait.
+      if (isAborted(signal)) finish('aborted')
+      else if (this.closing) finish('disposed')
+    })
   }
 
   /** Read the durable state this account is served under. */

@@ -10,7 +10,10 @@
  *
  * The continuation budgets carry a shipped default and the number bounds a stated value must
  * respect, so their cases read the resolved value for an omitted field and for an explicit legal
- * bound, and the refusal's own path for a value the bounds reject.
+ * bound, and the refusal's own path for a value the bounds reject. Neither value can refuse a
+ * request: the deadline is advisory accounting and the lock timeout is backoff/lease input, while
+ * both remain configurable and keep the shipped resolution (including the margin) an existing
+ * configuration already had.
  *
  * These cases call the plugin's real exported `Config`, which parses against the model-entry
  * schema and its own resolution rules; they mount no plugin, read no credential store and reach
@@ -61,7 +64,8 @@ test('the continuation budgets default to 5000 and 2000, and the resolved deadli
   assert.equal(omitted.continuationStateDeadlineMs, 5_000)
   assert.equal(omitted.continuationStateLockTimeoutMs, 2_000)
   assert.equal(resolveContinuationStateDeadlineMs(omitted), 5_000)
-  // A lock wait as long as the request budget can only end as a false unavailable refusal.
+  // The margin is kept so a configuration that states equal values still resolves as it did before;
+  // neither value can refuse a request now, because no wait ends on elapsed time.
   assert.ok(resolveContinuationStateDeadlineMs(omitted) > omitted.continuationStateLockTimeoutMs)
 
   const equal = Config({

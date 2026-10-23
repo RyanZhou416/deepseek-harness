@@ -29,8 +29,8 @@
  * The store is fail-closed. A document that cannot be read, parsed or verified, and a lock that
  * cannot be owned, report the same fixed refusal, and the caller must send nothing: a temporary
  * random identity would silently change the conversation's model-visible bytes and its ATIS
- * state. A refusal that will pass — a held lock, an elapsed deadline, an operation still settling
- * — is answered again on the next call rather than becoming a permanent verdict.
+ * state. A refusal that will pass — a held lock or an operation still settling — is answered again
+ * on the next call rather than becoming a permanent verdict.
  *
  * @module dsh-plugin-subscriptions/providers/claude-span-store
  */
@@ -64,15 +64,15 @@ export const CLAUDE_SPAN_LIMIT = 256
 export interface ClaudeSpanBindingStoreOptions {
   /** File holding the state; absent uses the plugin's own home directory. */
   readonly path?: string
-  /** How long one operation may wait before its caller is refused. */
+  /** Advisory accounting for one operation; elapsed time never ends its wait or refuses a caller. */
   readonly deadlineMs: number
-  /** How long one operation may wait for the owned lock. */
+  /** Backoff and lease input for the owned lock; it is not a wait bound. */
   readonly lockTimeoutMs: number
   /** Sink for a diagnostic about the store itself; never used for a credential. */
   readonly onWarn?: (message: string) => void
   /** The private file operations; a test injects one to hold a write. */
   readonly files?: ContinuationFiles
-  /** The timers and abort listeners one bounded wait uses; a test injects one to observe it. */
+  /** The timers and abort listeners a wait may use; a test injects one to observe it. */
   readonly waits?: ContinuationWaitHost
 }
 
@@ -108,11 +108,11 @@ export interface ClaudeSpanRestoredIdentity {
   readonly wireSessionId: string
 }
 
-/** What one {@link ClaudeSpanBindingStore.prepare} call may be told and bounded by. */
+/** What one {@link ClaudeSpanBindingStore.prepare} call may be told and how its wait can end. */
 export interface ClaudeSpanPrepareOptions {
   /** The wire identity a verified log fact states for this restored span. */
   readonly restored?: ClaudeSpanRestoredIdentity
-  /** The bound and cancellation the caller resolved for its own preparation chain. */
+  /** The cancellation and advisory accounting the caller resolved for its own preparation chain. */
   readonly deadline?: ContinuationDeadline
 }
 
@@ -365,7 +365,7 @@ export class ClaudeSpanBindingStore {
    * later cannot fill it in.
    * @param identity - the account, session and generation the span is keyed by.
    * @param origin - whether this is a new Session or a restored one.
-   * @param options - the restored identity fact and the caller's own bound, when it has them.
+   * @param options - the restored identity fact, the caller's cancellation and advisory accounting.
    * @returns the committed span, or the fixed reason nothing may be sent.
    */
   async prepare(
@@ -419,7 +419,7 @@ export class ClaudeSpanBindingStore {
   /**
    * The pin in force for one span, without freezing or creating anything.
    * @param identity - the span to look up.
-   * @param deadline - the caller's own bound, when it has one.
+   * @param deadline - the caller's cancellation and advisory accounting, when it has them.
    * @returns the pin, that no span exists, or why the state cannot be read.
    */
   async pinFor(identity: ClaudeSpanIdentity, deadline?: ContinuationDeadline): Promise<ClaudeSpanPinResult> {
@@ -443,7 +443,7 @@ export class ClaudeSpanBindingStore {
    * a bootstrap read that lands later cannot change what the span sends. A span whose identity was
    * never committed is refused rather than given an identity the request never declared.
    * @param identity - the span to freeze.
-   * @param deadline - the caller's own bound, when it has one.
+   * @param deadline - the caller's cancellation and advisory accounting, when it has them.
    * @returns the frozen pin, or the fixed reason nothing may be sent.
    */
   async freeze(identity: ClaudeSpanIdentity, deadline?: ContinuationDeadline): Promise<ClaudeSpanFreezeResult> {
@@ -481,7 +481,7 @@ export class ClaudeSpanBindingStore {
    * issued only when the claim was durably recorded: a store that cannot be written has no ticket,
    * and a caller can never mistake a failed claim for an owned attempt.
    * @param accountRef - the account the read belongs to.
-   * @param deadline - the caller's own bound, when it has one.
+   * @param deadline - the caller's cancellation and advisory accounting, when it has them.
    * @returns the ticket a commit needs, or the fixed refusal.
    */
   async beginCapture(accountRef: ClaudeAccountRef, deadline?: ContinuationDeadline): Promise<ClaudeCaptureBeginResult> {
@@ -502,7 +502,7 @@ export class ClaudeSpanBindingStore {
    * Record what a successful read disclosed, when the ticket still owns the account.
    * @param ticket - the ticket {@link beginCapture} returned.
    * @param disclosed - the raw value the document carried, if any.
-   * @param deadline - the caller's own bound, when it has one.
+   * @param deadline - the caller's cancellation and advisory accounting, when it has them.
    * @returns whether the capture became the account's candidate.
    */
   async commitCapture(
@@ -537,7 +537,7 @@ export class ClaudeSpanBindingStore {
    * A generation bump revokes in-flight tickets, and dropping the spans means a later request for
    * the same account starts without the pins and wire identity an older identity froze.
    * @param accountRef - the account whose state is dropped.
-   * @param deadline - the caller's own bound, when it has one.
+   * @param deadline - the caller's cancellation and advisory accounting, when it has them.
    * @returns that the state was dropped, or the fixed reason it was not.
    */
   async discard(accountRef: ClaudeAccountRef, deadline?: ContinuationDeadline): Promise<ClaudeSpanDiscardResult> {
@@ -572,7 +572,7 @@ export class ClaudeSpanBindingStore {
   /**
    * Apply one change under the plugin's own lock.
    * @param change - the pure change, given the current document.
-   * @param deadline - the caller's own bound, when it has one.
+   * @param deadline - the caller's cancellation and advisory accounting, when it has them.
    * @returns the change's value, or the fixed reason it could not be applied.
    */
   private async run<T>(

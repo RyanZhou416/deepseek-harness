@@ -158,6 +158,7 @@ import {
 } from './providers/claude.js'
 import { ClaudeMaintenanceController } from './providers/claude-maintenance.js'
 import { ClaudeContinuationState } from './providers/claude-continuation-state.js'
+import { LOCAL_CONTINUATION_STATE_UNAVAILABLE } from './providers/claude-continuation-io.js'
 import type { ClaudeContinuationReadiness } from './providers/claude.js'
 import { ClaudeProtocolBlockStore } from './providers/claude-protocol-state.js'
 import { CLAUDE_PROTOCOL_PROFILE, claudeProtocolFingerprint, claudeRoleHeaders } from './providers/claude-protocol.js'
@@ -355,19 +356,18 @@ export interface Config {
     tiers?: Record<string, PoolMemberRef[]>
   }
   /**
-   * How long one Claude continuation-state operation may wait before the request is refused
-   * (default 5000). The bound belongs to this plugin rather than to the client: it is what stops a
-   * request from waiting on a document another process is writing, and a caller that reaches it
-   * sends nothing. The resolved value is raised to at least the lock budget plus 2000 ms: an
-   * operation still waiting to own its lock at the request deadline cannot settle, so an equal or
-   * shorter budget would fail with `LOCAL_CONTINUATION_STATE_UNAVAILABLE` even though the state is
-   * healthy.
+   * Advisory accounting for one Claude continuation-state operation (default 5000).
+   *
+   * It never ends a wait and never refuses a request: every state wait runs until its operation
+   * settles and ends only when the caller cancels or the plugin is disposed. The resolved value is
+   * still raised to at least the lock input plus 2000 ms, so an existing configuration keeps the
+   * value it resolved before; that margin changes no outcome now.
    */
   continuationStateDeadlineMs?: number
   /**
-   * How long one continuation-state operation may wait for its own lock (default 2000). It is the
-   * same owner as the plugin's existing lock budget and never a UI switch: a lock that cannot be
-   * owned refuses the operation instead of running it unowned.
+   * Backoff and lease input for one continuation-state lock (default 2000). It is not a wait bound:
+   * a live holder is waited out, and only a lock path that cannot be created refuses the operation
+   * instead of running it unowned.
    */
   continuationStateLockTimeoutMs?: number
 }
@@ -388,25 +388,26 @@ const poolMemberSchema: z<PoolMemberRef> = z.object({
   model: z.string().required(),
 })
 
-/** The request-state budget in force when the configuration states none. */
+/** The per-operation accounting input in force when the configuration states none. */
 export const DEFAULT_CONTINUATION_STATE_DEADLINE_MS = 5_000
 
-/** The lock budget in force when the configuration states none. */
+/** The lock backoff and lease input in force when the configuration states none. */
 export const DEFAULT_CONTINUATION_STATE_LOCK_TIMEOUT_MS = 2_000
 
-/** The margin by which the request budget must exceed the lock budget. */
+/** The margin the resolved accounting input keeps above the lock input for compatibility. */
 const CONTINUATION_STATE_DEADLINE_MARGIN_MS = 2_000
 
 /**
- * The validated request-state budget this installation runs with.
+ * The validated accounting input this installation runs with.
  *
  * The schema validates and defaults this field, so a configuration that reached `apply` states a
  * number; this is the one place that reads it, rather than defaulting it again at a call site.
- * The request budget is raised to at least the lock budget plus
- * {@link CONTINUATION_STATE_DEADLINE_MARGIN_MS}: a request whose lock wait can consume the whole
- * budget would report a healthy state as unavailable.
+ * The value is raised to at least the lock input plus
+ * {@link CONTINUATION_STATE_DEADLINE_MARGIN_MS}, so an existing configuration keeps the value it
+ * resolved before. No wait ends or refuses because of either value, so the margin changes no
+ * outcome.
  * @param config - the resolved plugin configuration.
- * @returns the budget in milliseconds.
+ * @returns the accounting input in milliseconds.
  */
 export function resolveContinuationStateDeadlineMs(config: Config): number {
   const stated = config.continuationStateDeadlineMs ?? DEFAULT_CONTINUATION_STATE_DEADLINE_MS
@@ -414,9 +415,9 @@ export function resolveContinuationStateDeadlineMs(config: Config): number {
 }
 
 /**
- * The validated lock budget this installation runs with.
+ * The validated lock backoff and lease input this installation runs with.
  * @param config - the resolved plugin configuration.
- * @returns the budget in milliseconds.
+ * @returns the input in milliseconds.
  */
 export function resolveContinuationStateLockTimeoutMs(config: Config): number {
   return config.continuationStateLockTimeoutMs ?? DEFAULT_CONTINUATION_STATE_LOCK_TIMEOUT_MS
@@ -2246,7 +2247,7 @@ export function apply(ctx: Context, config: Config, internals: SubscriptionInter
   }
   /**
    * The Claude route's continuation options: the durable owner every request is prepared under, and
-   * the startup hydration each request reads as a settled result inside its own state budget.
+   * the startup hydration each request reads as a settled result.
    */
   const claudeRouteOptions = {
     continuation: claudeContinuation,
@@ -2848,7 +2849,7 @@ export function apply(ctx: Context, config: Config, internals: SubscriptionInter
           models: catalog.claude,
           requestRecord: claudeRecordPort,
           // The durable continuation owner and the startup hydration result: every request is
-          // prepared under the owner and reads the settled hydration inside its own state budget.
+          // prepared under the owner and reads the settled hydration result.
           ...claudeRouteOptions,
           ...config.claudeIdentityLine === undefined ? {} : { identityLine: config.claudeIdentityLine },
           // The Messages transport a deployment leaves to this plugin's own Bun child; an
@@ -2936,8 +2937,18 @@ export function apply(ctx: Context, config: Config, internals: SubscriptionInter
                   const scopeId = attempt.sessionId ?? `claude-request:${String(transientRequestScope)}`
                   // The epoch is the durable identity generation this account is served under, read
                   // from the one owner that keeps it: a maintenance record confirmed for one
-                  // identity is never reused for another, and no parallel counter can disagree.
-                  const epoch = (await claudeContinuation.currentEpoch(decision.account)) ?? 0
+                  // identity is never reused for another, and no parallel counter can disagree. An
+                  // undefined epoch is a refusal — a disposed or cancelled state, or an account with
+                  // no baseline — and never the baseline: binding epoch-less policy state here would
+                  // let a hook that began during disposal reach managed settings.
+                  const epoch = await claudeContinuation.currentEpoch(decision.account)
+                  if (epoch === undefined) {
+                    throw new LlmError(
+                      'claude request refused: the continuation state is unavailable (the identity generation could not be read)',
+                      LOCAL_CONTINUATION_STATE_UNAVAILABLE,
+                      { retryDisposition: 'forbid' },
+                    )
+                  }
                   // The binding is registered against this identity, and only its FIRST read
                   // issues a request: a later readiness check reuses the confirmed state. The
                   // UUID and organization are the credential's and the accepted policy's own,

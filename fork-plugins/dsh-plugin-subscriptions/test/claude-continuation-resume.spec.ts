@@ -100,65 +100,6 @@ function instrumentedFiles(options: {
   return { files, calls }
 }
 
-/** What one case observed of the wait resources it handed out. */
-interface WaitObservation {
-  scheduled: number
-  cancelled: number
-  subscribed: number
-  removed: number
-  fired: number
-}
-
-/**
- * A wait host whose clock a case moves and whose timer it fires itself.
- *
- * No real timer is created: a case that must prove a deadline fired does so by moving the clock past
- * the budget and invoking the captured callback, so the case cannot pass merely because a short
- * sleep elapsed on a fast host, and it observes that exactly one timer was live and disposed.
- * @returns the host, what it observed, and the controls the case drives it with.
- */
-function controlledWaits(): {
-  host: ContinuationWaitHost
-  record: WaitObservation
-  advanceBy: (milliseconds: number) => void
-  fireScheduled: () => void
-} {
-  const record: WaitObservation = { scheduled: 0, cancelled: 0, subscribed: 0, removed: 0, fired: 0 }
-  let now = 1_000_000
-  let pending: (() => void) | undefined
-  const host: ContinuationWaitHost = {
-    now: () => now,
-    schedule: (_delayMs, fire) => {
-      record.scheduled += 1
-      pending = fire
-      return () => {
-        record.cancelled += 1
-        if (pending === fire) pending = undefined
-      }
-    },
-    onAbort: (signal, fire) => {
-      record.subscribed += 1
-      signal.addEventListener('abort', fire, { once: true })
-      return () => {
-        record.removed += 1
-        signal.removeEventListener('abort', fire)
-      }
-    },
-  }
-  return {
-    host,
-    record,
-    advanceBy: (milliseconds) => { now += milliseconds },
-    fireScheduled: () => {
-      const fire = pending
-      pending = undefined
-      if (fire === undefined) return
-      record.fired += 1
-      fire()
-    },
-  }
-}
-
 /** A generation record over one private path. */
 function generationAt(
   path: string,
@@ -631,7 +572,7 @@ test('a caller can abort its wait, and its transition is untouched by that abort
   }
 })
 
-test('a wait that reaches its bound leaves the account closed until the transition settles', async () => {
+test('a wait for an in-flight transition reports settlement only after the transition settles', async () => {
   const root = privateRoot()
   const path = join(root, 'generation.json')
   const generation = generationAt(path)
@@ -646,12 +587,20 @@ test('a wait that reaches its bound leaves the account closed until the transiti
       await hold.promise
     })
     await started.promise
-    assert.deepEqual(await generation.waitSettled(continuationBudget(20)), { kind: 'timed-out' })
+    // The wait is started without awaiting it: under queue semantics the account stays closed until
+    // the transition really settles, and the caller's own elapsed budget never answers for it.
+    let answered = false
+    const waiting = generation.waitSettled(continuationBudget(DEADLINE_MS)).then((result) => {
+      answered = true
+      return result
+    })
+    for (let turn = 0; turn < 8; turn += 1) await Promise.resolve()
+    assert.equal(answered, false, 'the wait does not answer while the transition is in flight')
     assert.equal(generation.hasPendingTransition(), true)
 
     hold.resolve()
+    assert.deepEqual(await waiting, { kind: 'settled', generation: 1 })
     assert.deepEqual(await transition.result, { kind: 'advanced', generation: 1 })
-    assert.deepEqual(await generation.waitSettled(continuationBudget(200)), { kind: 'settled', generation: 1 })
   } finally {
     hold.resolve()
     await generation.close()
@@ -775,7 +724,7 @@ test('a publication that fails once is settled and recorded, so the next explici
   }
 })
 
-test('a deadline that fires while the publication read is pending still reports the generation that lands', async () => {
+test('a held publication read still reports the generation that lands', async () => {
   const root = privateRoot()
   const path = join(root, 'generation.json')
   const readStarted = deferred()
@@ -786,39 +735,33 @@ test('a deadline that fires while the publication read is pending still reports 
     holdRead: releaseRead.promise,
     onRead: (read) => { if (read === 3) readStarted.resolve() },
   })
-  const waits = controlledWaits()
-  const generation = generationAt(path, ACCOUNT, { files, waits: waits.host, deadlineMs: 30 })
+  const generation = generationAt(path, ACCOUNT, { files })
   const lifecycle = claudeIdentityLifecycle(generation)
   let operations = 0
   try {
     assert.deepEqual(await lifecycle.initialize(), { kind: 'advanced', generation: 0 })
     const transition = lifecycle.changed('logout', async () => { operations += 1 })
     await readStarted.promise
-    // The publication's read is genuinely pending and exactly one timer is live for it; the clock
-    // has not passed the budget, so this case cannot be passing because a short sleep elapsed.
-    assert.equal(waits.record.scheduled - waits.record.cancelled, 1, 'one timer is live')
-    assert.equal(waits.record.fired, 0, 'no deadline has fired yet')
-
-    // Move the clock past the budget and fire the captured timer: the deadline really fires once.
-    waits.advanceBy(1_000)
-    waits.fireScheduled()
-    assert.equal(waits.record.fired, 1, 'the deadline fired exactly once')
-    assert.equal(waits.record.scheduled - waits.record.cancelled, 0, 'the fired wait was disposed')
+    // The publication's own read is genuinely pending, so the change cannot report before it.
+    let answered = false
+    const result = transition.result.then((value) => {
+      answered = true
+      return value
+    })
+    for (let turn = 0; turn < 4; turn += 1) await Promise.resolve()
+    assert.equal(answered, false, 'the transition cannot answer before its publication read settles')
 
     // Only now does the owned read settle, and the decision it carries is the one that really lands.
     releaseRead.resolve()
-    assert.deepEqual(await transition.result, { kind: 'advanced', generation: 1 })
+    assert.deepEqual(await result, { kind: 'advanced', generation: 1 })
     assert.equal(operations, 1, 'the credential work ran once')
     assert.equal(calls.writes, 3, 'baseline, statement, one publication')
-    assert.equal(calls.reads, 4, 'baseline, statement, held publication read, reconciliation read')
+    assert.equal(calls.reads, 3, 'baseline, statement and the publication read that was held')
     const document = JSON.parse(readFileSync(path, 'utf8')) as {
       accounts: readonly { generation: number; pending: { kind: string } | null }[]
     }
     assert.equal(document.accounts[0]?.generation, 1)
     assert.equal(document.accounts[0]?.pending, null)
-    // Every wait handed out — the two that settled, the fired one and the reconciliation read's —
-    // was disposed, and no abort listener was ever subscribed.
-    assert.deepEqual(waits.record, { scheduled: 4, cancelled: 4, subscribed: 0, removed: 0, fired: 1 })
     assert.deepEqual(await generation.current(), { kind: 'ready', generation: 1 })
   } finally {
     releaseRead.resolve()
