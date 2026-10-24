@@ -222,6 +222,7 @@ export class SessionReferenceResolver extends TypertRemoteService {
         ...record.header.cwd === undefined ? {} : { cwd: record.header.cwd },
         sameWorkspace: record.header.cwd !== undefined && record.header.cwd === targetCwd,
         createdAt: record.header.createdAt,
+        ...record.header.origin === undefined ? {} : { origin: record.header.origin },
       }))
   }
 

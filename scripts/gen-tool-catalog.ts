@@ -509,7 +509,7 @@ const TOOL_PACKAGES: ToolPackage[] = [
     pkg: '@deepseek-ai/dsh-tool-session-message',
     dir: 'tool-session-message',
     source: 'packages/api/tool-session-message/src/index.ts',
-    requires: ['ctx.tools', 'ctx.agents', 'ctx.sessionController', 'ctx.sessionReferenceResolver', 'ctx.sessionQuery', 'ctx.workspaceRegistry and ctx.permissionPresets (create only)', 'ctx.agentDefaultModel', 'ctx.llm for requested-model resolution', 'an exact live calling Agent'],
+    requires: ['ctx.tools', 'ctx.agents', 'ctx.sessionController', 'ctx.sessionReferenceResolver', 'ctx.workspaceRegistry and ctx.permissionPresets (create only)', 'ctx.agentDefaultModel', 'ctx.llm for requested-model resolution', 'an exact live calling Agent'],
     writes: ['tool/call', 'tool/result', 'ordinary Session creation and initial inbox message (session create only)', 'Session-reference candidate and Session-header reads (session_query find/status only)', 'target agent/inbox/spliced and user/message (session send only)', 'target Session log read (session_query message_status only)', 'Workspace archive/pin/title mutations (session)'],
     async mount(ctx) {
       await ctx.plugin(AgentRegistry)
@@ -518,9 +518,6 @@ const TOOL_PACKAGES: ToolPackage[] = [
       } as never)
       ctx.provide('sessionReferenceResolver', {
         listCandidates: () => Promise.resolve([]),
-      } as never)
-      ctx.provide('sessionQuery', {
-        listSessions: () => Promise.resolve([]),
       } as never)
       ctx.provide('permissionPresets', {} as never)
       ctx.provide('agentDefaultModel', {

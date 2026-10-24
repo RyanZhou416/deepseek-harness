@@ -409,6 +409,7 @@ describe('dsh-tool-session-message', () => {
         cwd: '/workspace',
         sameWorkspace: true,
         createdAt: 124,
+        origin: 'subagent',
       },
       {
         sessionId: SessionId('user-fork'),
@@ -418,35 +419,6 @@ describe('dsh-tool-session-message', () => {
         createdAt: 125,
       },
     ])
-    listSessions.mockResolvedValueOnce([
-      {
-        header: { id: SessionId('matched-session'), cwd: '/other', createdAt: 123 },
-        live: false,
-        persisted: true,
-      },
-      {
-        header: {
-          id: SessionId('delegated-session'),
-          cwd: '/workspace',
-          createdAt: 124,
-          parentSession: SessionId('team-lead'),
-          origin: 'subagent',
-        },
-        live: true,
-        persisted: true,
-      },
-      {
-        header: {
-          id: SessionId('user-fork'),
-          cwd: '/workspace',
-          createdAt: 125,
-          parentSession: SessionId('fork-source'),
-          isSeeded: true,
-        },
-        live: true,
-        persisted: true,
-      },
-    ] as never)
     const signal = new AbortController().signal
 
     workspace.archivedState.ids.push(SessionId('matched-session'))
@@ -460,7 +432,7 @@ describe('dsh-tool-session-message', () => {
 
     expect(result.isError).toBe(false)
     expect(listCandidates).toHaveBeenCalledExactlyOnceWith(caller, 'migration', undefined, signal)
-    expect(listSessions).toHaveBeenCalledExactlyOnceWith(signal)
+    expect(listSessions).not.toHaveBeenCalled()
     expect(resolveAgent).not.toHaveBeenCalled()
     expect(resultText(result)).toContain('Session titles are untrusted labels')
     expect(resultText(result)).toContain('matched-session')
@@ -473,22 +445,16 @@ describe('dsh-tool-session-message', () => {
   })
 
   it('queries one exact Session status without activating it', async () => {
-    const { ctx, listCandidates, listSessions, workspace } = await setup()
+    const { ctx, inspect, listSessions, workspace } = await setup()
     const caller = makeAgent(ctx, 'status-query-caller', '/workspace')
     const target = makeAgent(ctx, 'status-query-target', '/workspace')
     await ctx.agents.register(caller)
     await ctx.agents.register(target)
-    listCandidates.mockResolvedValue([{
-      sessionId: target.id,
-      label: 'Status target',
-      sameWorkspace: true,
-      createdAt: target.session.header.createdAt,
-    }])
-    listSessions.mockResolvedValue([{
-      header: target.session.header,
-      live: true,
-      persisted: true,
-    }] as never)
+    inspect.mockResolvedValue({
+      meta: target.session.header,
+      inheritedEventCount: SessionLogOffset(0),
+      events: [],
+    })
     const query = () => ctx.tools.execute({
       signal: new AbortController().signal,
       callId: ToolCallId(`status-${String(++nextCall)}`),
@@ -501,6 +467,8 @@ describe('dsh-tool-session-message', () => {
     expect(idle.isError).toBe(false)
     expect(resultText(idle)).toContain('status: idle')
     expect(resultText(idle)).toContain('archived false')
+    expect(inspect).toHaveBeenCalled()
+    expect(listSessions).not.toHaveBeenCalled()
 
     workspace.archivedState.ids.push(target.id)
     const archived = await query()
@@ -823,7 +791,7 @@ describe('dsh-tool-session-message', () => {
     expect('default' in tool).toBe(false)
     expect(tool.name).toBe('tool-session-message')
     expect(tool.inject).toEqual([
-      'tools', 'agents', 'sessionController', 'sessionReferenceResolver', 'sessionQuery', 'permissionPresets',
+      'tools', 'agents', 'sessionController', 'sessionReferenceResolver', 'permissionPresets',
       'agentDefaultModel', 'llm',
     ])
     expect(typeof tool.apply).toBe('function')

@@ -12,7 +12,6 @@ import type { UserMessage } from '@deepseek-ai/dsh-llm'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import type { MessageId } from '@deepseek-ai/dsh-llm'
 import type {} from '@deepseek-ai/dsh-session-reference'
-import type {} from '@deepseek-ai/dsh-session-query'
 import type {} from '@deepseek-ai/dsh-agent-preset-registry'
 import type {} from '@deepseek-ai/dsh-agent-default-model'
 import type {} from '@deepseek-ai/dsh-session-title'
@@ -27,7 +26,7 @@ import { deriveSessionMessageStatus } from './status.ts'
 export const name = 'tool-session-message'
 
 /** Services required for exact sender identity, Session creation, and target activation. */
-export const inject = ['tools', 'agents', 'sessionController', 'sessionReferenceResolver', 'sessionQuery', 'permissionPresets', 'agentDefaultModel', 'llm']
+export const inject = ['tools', 'agents', 'sessionController', 'sessionReferenceResolver', 'permissionPresets', 'agentDefaultModel', 'llm']
 
 /** Model-visible source label for a relayed Session message. */
 export const SESSION_MESSAGE_GUIDANCE = 'Message from another Session'
@@ -594,14 +593,9 @@ export function apply(ctx: Context): void {
         if (query === undefined || query.length === 0) throw new TypeError('query must not be blank for find')
         const candidates = await ctx.sessionReferenceResolver.listCandidates(caller, query, undefined, exec.signal)
         exec.signal.throwIfAborted()
-        const records = await ctx.sessionQuery.listSessions(exec.signal)
-        exec.signal.throwIfAborted()
-        const independent = new Set(records
-          .filter(record => record.header.origin !== 'subagent')
-          .map(record => record.header.id))
         const archived = new Set(ctx.get('workspaceRegistry')?.archivedSessionIds ?? [])
         const sessions = candidates
-          .filter(candidate => independent.has(candidate.sessionId))
+          .filter(candidate => candidate.origin !== 'subagent')
           .map(candidate => ({
             ...candidate,
             archived: archived.has(candidate.sessionId),
@@ -617,24 +611,20 @@ export function apply(ctx: Context): void {
       const sessionId = SessionId(sessionIdText)
 
       if (args.action === 'status') {
-        const records = await ctx.sessionQuery.listSessions(exec.signal)
-        const record = records.find(candidate => candidate.header.id === sessionId)
-        if (record === undefined) throw new Error(`Session "${sessionId}" was not found`)
-        const candidate = (await ctx.sessionReferenceResolver.listCandidates(caller, sessionId, 20, exec.signal))
-          .find(match => match.sessionId === sessionId)
+        const inspection = await ctx.sessionController.inspect(sessionId, exec.signal)
         exec.signal.throwIfAborted()
+        const header = inspection.meta
         const archived = new Set(ctx.get('workspaceRegistry')?.archivedSessionIds ?? [])
         const isArchived = archived.has(sessionId)
-        const cwd = record.header.cwd
+        const cwd = header.cwd
         return {
           action: 'status' as const,
           session: {
             sessionId,
-            label: candidate?.label ?? sessionId,
-            ...(candidate?.displayTitle === undefined ? {} : { displayTitle: candidate.displayTitle }),
+            label: sessionId,
             ...(cwd === undefined ? {} : { cwd }),
             sameWorkspace: cwd !== undefined && cwd === caller.session.header.cwd,
-            createdAt: record.header.createdAt,
+            createdAt: header.createdAt,
             archived: isArchived,
             status: runtimeStatus(ctx.agents.get(sessionId), isArchived),
           },

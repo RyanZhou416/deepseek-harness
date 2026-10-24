@@ -63,6 +63,8 @@ export interface SessionReferenceCandidate {
   sameWorkspace: boolean
   /** Source session creation time in Unix epoch milliseconds. */
   createdAt: number
+  /** Durable origin marker; present only for delegated subagent Sessions. */
+  origin?: 'subagent'
 }
 
 /** One discovery candidate carrying its canonical prompt mention. */
