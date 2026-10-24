@@ -119,9 +119,11 @@ async function setup(sessionCreateOverride?: SessionCreateModelOverride) {
     pinnedState.ids = pinnedState.ids.filter(candidate => candidate !== id)
   })
   const archiveSession = vi.fn(async () => undefined)
+  const archivedState: { ids: SessionId[] } = { ids: [] }
   const workspaceRegistry = {
     list: vi.fn(() => []),
     get pinnedSessionIds() { return pinnedState.ids },
+    get archivedSessionIds() { return archivedState.ids },
     pinSession,
     unpinSession,
     archiveSession,
@@ -130,7 +132,7 @@ async function setup(sessionCreateOverride?: SessionCreateModelOverride) {
   const fiber = await ctx.plugin(tool)
   return {
     ctx, fiber, inspect, listCandidates, listSessions, resolveAgent, create, rename, selectModel, currentSelection,
-    permissions: { current, resolve, set }, workspace: { archiveSession, pinSession, unpinSession, pinnedState },
+    permissions: { current, resolve, set }, workspace: { archiveSession, pinSession, unpinSession, pinnedState, archivedState },
   }
 }
 
@@ -408,7 +410,7 @@ describe('dsh-tool-session-message', () => {
   })
 
   it('finds independent Session ids by untrusted title without activating delegated children', async () => {
-    const { ctx, listCandidates, listSessions, resolveAgent } = await setup()
+    const { ctx, listCandidates, listSessions, resolveAgent, workspace } = await setup()
     const caller = makeAgent(ctx, 'finder-caller', '/workspace')
     await ctx.agents.register(caller)
     listCandidates.mockResolvedValueOnce([
@@ -466,6 +468,7 @@ describe('dsh-tool-session-message', () => {
     ] as never)
     const signal = new AbortController().signal
 
+    workspace.archivedState.ids.push(SessionId('matched-session'))
     const result = await ctx.tools.execute({
       signal,
       callId: ToolCallId('find-session'),
@@ -482,6 +485,7 @@ describe('dsh-tool-session-message', () => {
     expect(resultText(result)).toContain('matched-session')
     expect(resultText(result)).toContain('Quarterly migration')
     expect(resultText(result)).toContain('Quarterly migration display')
+    expect(resultText(result)).toContain('"archived": true')
     expect(resultText(result)).not.toContain('delegated-session')
     expect(resultText(result)).toContain('user-fork')
   })
