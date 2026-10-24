@@ -69,7 +69,7 @@ export function apply(ctx: ClientContext): void {
   const limitsFace = limits.inject()
   const modelsFace = models.inject()
   ctx.effect(() => ctx.configForms.whileServed([SUBAGENT_NS], () => ctx.slots.inject('settings.general.item', () => ctx.slots.register({
-    name: 'settings.general.item', id: 'subagent-model-override', order: 16, locale: NS,
+    name: 'settings.general.item', id: 'subagent-model-override', order: 16.2, locale: NS,
     inject: (): SubagentOverrideRowInjected => ({
       hooks: { subagentOverride: overrideScope, ...modelsFace.hooks },
       retryCatalog: modelsFace.retryCatalog,
