@@ -91,10 +91,10 @@ export function apply(ctx: ClientContext): void {
   ctx.slots.inject('settings.general.item', () => ctx.slots.register({
     name: 'settings.general.item', id: 'current-version', order: 100, locale: NS,
   }, CurrentVersionRow))
-  const sessionCreateScope = ctx.configForms.get<SessionCreateOverrideSettings>('tool-session-message')
+  const sessionCreateScope = ctx.configForms.get<SessionCreateOverrideSettings>('agent-default-model')
   const sessionCreateCatalog = new SessionCreateOverrideCatalogStore(ctx)
   ctx.effect(() => () => { sessionCreateCatalog.dispose() }, 'ui-settings-general: session-create catalog')
-  ctx.effect(() => ctx.configForms.whileServed(['tool-session-message'], () => ctx.slots.inject(
+  ctx.effect(() => ctx.configForms.whileServed(['agent-default-model'], () => ctx.slots.inject(
     'settings.general.item',
     () => ctx.slots.register({
       name: 'settings.general.item', id: 'session-create-model-override', order: 15.5, locale: NS,
@@ -105,11 +105,11 @@ export function apply(ctx: ClientContext): void {
         },
         selectOverride: (value, revision) => {
           const snapshot = sessionCreateScope.getSnapshot()
-          if (snapshot.status !== 'ready' || !snapshot.writable || snapshot.value?.modelOverride === undefined) {
+          if (snapshot.status !== 'ready' || !snapshot.writable || snapshot.value?.sessionCreateModelOverride === undefined) {
             return Promise.resolve(false)
           }
           return sessionCreateScope.mutate(
-            [{ op: 'set', path: ['modelOverride'], value: value === false ? false : { ...value } }],
+            [{ op: 'set', path: ['sessionCreateModelOverride'], value: value === false ? false : { ...value } }],
             revision,
           )
         },

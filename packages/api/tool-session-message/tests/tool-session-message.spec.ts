@@ -17,7 +17,7 @@ import type SessionReferenceResolver from '@deepseek-ai/dsh-session-reference'
 import type { SessionQueryEngine } from '@deepseek-ai/dsh-session-query'
 import { RemoteError } from '@deepseek-ai/dsh-typert-protocol'
 import * as tool from '../src/index.ts'
-import type { SessionCreateModelOverride } from '../src/index.ts'
+import type { SessionCreateModelOverride } from '@deepseek-ai/dsh-agent-default-model'
 
 let context: Context | undefined
 let nextCall = 0
@@ -53,7 +53,7 @@ function sendOf(agent: Agent): ReturnType<typeof vi.fn<Agent['send']>> {
   return send
 }
 
-async function setup(config?: { modelOverride?: SessionCreateModelOverride | false }) {
+async function setup(sessionCreateOverride?: SessionCreateModelOverride) {
   const ctx = new Context()
   context = ctx
   await ctx.plugin(SessionStore)
@@ -85,6 +85,7 @@ async function setup(config?: { modelOverride?: SessionCreateModelOverride | fal
   ctx.provide('agentDefaultModel', {
     currentSelection,
     saveSelection: vi.fn(),
+    sessionCreateOverride: () => sessionCreateOverride,
   } as never)
   ctx.provide('llm', {
     listProviders: vi.fn(() => [{ id: 'test-provider' }, { id: 'other-provider' }]),
@@ -126,7 +127,7 @@ async function setup(config?: { modelOverride?: SessionCreateModelOverride | fal
     archiveSession,
   }
   ctx.provide('workspaceRegistry', workspaceRegistry as never)
-  const fiber = await ctx.plugin(tool, config)
+  const fiber = await ctx.plugin(tool)
   return {
     ctx, fiber, inspect, listCandidates, listSessions, resolveAgent, create, rename, selectModel, currentSelection,
     permissions: { current, resolve, set }, workspace: { archiveSession, pinSession, unpinSession, pinnedState },
@@ -282,7 +283,7 @@ describe('dsh-tool-session-message', () => {
 
   it('uses the Settings override instead of the call request', async () => {
     const { ctx, create, selectModel } = await setup({
-      modelOverride: { provider: 'other-provider', model: 'requested-model', reasoningEffort: 'high' },
+      provider: 'other-provider', model: 'requested-model', reasoningEffort: 'high',
     })
     const sender = makeAgent(ctx, 'configured-override-creator', '/workspace')
     const target = makeAgent(ctx, 'configured-override-target', '/workspace')
@@ -560,6 +561,7 @@ describe('dsh-tool-session-message', () => {
     ctx.provide('agentDefaultModel', {
       currentSelection: () => ({ provider: 'test-provider', model: 'test-model' }),
       saveSelection: () => Promise.resolve(),
+      sessionCreateOverride: () => undefined,
     } as never)
     await ctx.plugin(tool)
     const harness = await mountAgentLoopTestHarness(ctx)

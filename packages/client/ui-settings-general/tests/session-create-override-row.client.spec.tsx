@@ -19,7 +19,7 @@ afterEach(cleanup)
 function bench(override: SessionCreateOverrideValue | false = false, writable = true) {
   const settings = createSnapshotStore<SettingsFormScopeSnapshot<SessionCreateOverrideSettings>>({
     status: 'ready', writable, revision: 7, base: {}, user: {},
-    value: { modelOverride: override },
+    value: { sessionCreateModelOverride: override },
   })
   const catalog = createSnapshotStore<SessionCreateOverrideCatalog>({
     status: 'ready',
@@ -41,7 +41,7 @@ function bench(override: SessionCreateOverrideValue | false = false, writable = 
     settings.set({
       ...current,
       revision: (revision ?? 0) + 1,
-      value: { modelOverride: value },
+      value: { sessionCreateModelOverride: value },
     })
     return true
   })
@@ -73,7 +73,7 @@ describe('SessionCreateOverrideRow', () => {
     fireEvent.click(screen.getByRole('button', { name: en['sessionCreateOverride.model'] }))
     fireEvent.click(screen.getByRole('menuitem', { name: en['sessionCreateOverride.off'] }))
     await waitFor(() => { expect(select).toHaveBeenLastCalledWith(false, 9) })
-    expect(settings.getSnapshot().value).toEqual({ modelOverride: false })
+    expect(settings.getSnapshot().value).toEqual({ sessionCreateModelOverride: false })
   })
 
   it('keeps a saved unavailable route visible and retries the catalog', () => {

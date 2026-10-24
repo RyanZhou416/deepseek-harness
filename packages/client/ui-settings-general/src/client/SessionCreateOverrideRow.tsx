@@ -16,9 +16,9 @@ export interface SessionCreateOverrideValue {
   reasoningEffort?: string
 }
 
-/** Settings fields owned by the `tool-session-message` namespace. */
+/** Settings fields owned by the `agent-default-model` namespace. */
 export interface SessionCreateOverrideSettings {
-  modelOverride: SessionCreateOverrideValue | false
+  sessionCreateModelOverride: SessionCreateOverrideValue | false
 }
 
 /** One selectable provider/model route. */
@@ -80,7 +80,7 @@ export function SessionCreateOverrideRow({
   const effortRef = useRef<HTMLButtonElement>(null)
   const [busy, setBusy] = useState(false)
   const [failed, setFailed] = useState(false)
-  const value = settings.value?.modelOverride
+  const value = settings.value?.sessionCreateModelOverride
   const disabled = !settings.writable || busy
 
   useEffect(() => {

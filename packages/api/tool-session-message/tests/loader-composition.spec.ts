@@ -41,6 +41,7 @@ describe('tool-session-message through a real Loader composition', () => {
       '- name: fixture-session-query',
       '- name: fixture-permission-presets',
       '- name: fixture-agent-default-model',
+      '- name: fixture-llm',
       "- name: '@deepseek-ai/dsh-tool-session-message'",
       '',
     ].join('\n'))
@@ -97,6 +98,18 @@ describe('tool-session-message through a real Loader composition', () => {
                 ctx.provide('agentDefaultModel', {
                   currentSelection: () => ({ provider: 'fixture', model: 'fixture-model' }),
                   saveSelection: () => Promise.resolve(),
+                  sessionCreateOverride: () => undefined,
+                } as never)
+              },
+            }
+          case 'fixture-llm':
+            return {
+              name: 'fixture-llm',
+              apply(ctx: Context) {
+                ctx.provide('llm', {
+                  listProviders: () => [],
+                  listModels: () => Promise.resolve([]),
+                  resolveCallConfig: (selection: unknown) => Promise.resolve(selection),
                 } as never)
               },
             }

@@ -64,7 +64,6 @@
     "@deepseek-ai/dsh-workspace": "workspace:*"
   },
   "dependencies": {
-    "@deepseek-ai/dsh-brand": "workspace:*",
-    "@deepseek-ai/schemastery": "workspace:~"
+    "@deepseek-ai/dsh-brand": "workspace:*"
   }
 }

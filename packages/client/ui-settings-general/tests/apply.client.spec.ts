@@ -53,11 +53,11 @@ function localeView(preference: string, revision = 0): SettingsNamespaceView {
 
 function sessionCreateView(revision = 0): SettingsNamespaceView {
   return {
-    ns: 'tool-session-message',
+    ns: 'agent-default-model',
     schema: {
       type: 'object',
       properties: {
-        modelOverride: {
+        sessionCreateModelOverride: {
           oneOf: [
             { type: 'boolean', const: false },
             {
@@ -73,7 +73,7 @@ function sessionCreateView(revision = 0): SettingsNamespaceView {
         },
       },
     },
-    value: { modelOverride: false },
+    value: { sessionCreateModelOverride: false },
     autoGenerate: true, applies: 'live',
     secrets: [], revision,
   }

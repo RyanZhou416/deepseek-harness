@@ -17,6 +17,21 @@ it('reads complete selections from volatile config and clears omitted reasoning 
   expect(consumer.currentSelection()).toEqual({ provider: 'p', model: 'm' })
 })
 
+it('reads the optional session_create override live and treats false as absent', async () => {
+  const ctx = new Context()
+  onTestFinished(() => ctx.fiber.dispose())
+  const live = await liveConfig(ctx, DefaultModel, {
+    provider: 'p', model: 'm',
+    sessionCreateModelOverride: { provider: 'override', model: 'forced', reasoningEffort: 'high' },
+  })
+  expect(ctx.agentDefaultModel.sessionCreateOverride())
+    .toEqual({ provider: 'override', model: 'forced', reasoningEffort: 'high' })
+  await live.update({ provider: 'p', model: 'm', sessionCreateModelOverride: false })
+  expect(ctx.agentDefaultModel.sessionCreateOverride()).toBeUndefined()
+  await ctx.agentDefaultModel.saveSelection({ provider: 'p', model: 'next' })
+  expect(ctx.agentDefaultModel.sessionCreateOverride()).toBeUndefined()
+})
+
 it('persists complete selections through its owning profile entry', async () => {
   const { configurationFixture } = await import('../../../settings/settings/tests/configuration-fixture.ts')
   const { ReasoningEffortId } = await import('@deepseek-ai/dsh-llm')

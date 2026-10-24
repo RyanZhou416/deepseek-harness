@@ -52,6 +52,18 @@ export interface Config {
   model: Volatile<string>
   /** Adapter-owned reasoning effort; omission follows the provider default. */
   reasoningEffort: Volatile<string | undefined>
+  /** Optional forced route for `session_create`; false inherits the call/global choice. */
+  sessionCreateModelOverride: Volatile<SessionCreateModelOverride | false>
+}
+
+/** One exact model route a deployment may force onto `session_create` Sessions. */
+export interface SessionCreateModelOverride {
+  /** Registered provider route. */
+  provider: string
+  /** Provider-owned model id. */
+  model: string
+  /** Adapter-owned reasoning effort; omission follows the model default. */
+  reasoningEffort?: string
 }
 ```
 <!-- END GENERATED config-catalog:@deepseek-ai/dsh-agent-default-model -->

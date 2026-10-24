@@ -20,6 +20,16 @@ declare module '@deepseek-ai/cordis' {
   }
 }
 
+/** One exact model route a deployment may force onto `session_create` Sessions. */
+export interface SessionCreateModelOverride {
+  /** Registered provider route. */
+  provider: string
+  /** Provider-owned model id. */
+  model: string
+  /** Adapter-owned reasoning effort; omission follows the model default. */
+  reasoningEffort?: string
+}
+
 /** Default model selection supplied by plugin configuration. */
 export interface Config {
   /** Registered provider route. */
@@ -28,6 +38,8 @@ export interface Config {
   model: Volatile<string>
   /** Adapter-owned reasoning effort; omission follows the provider default. */
   reasoningEffort: Volatile<string | undefined>
+  /** Optional forced route for `session_create`; false inherits the call/global choice. */
+  sessionCreateModelOverride: Volatile<SessionCreateModelOverride | false>
 }
 
 /** Project stored settings onto the Agent-facing selection type. */
@@ -52,6 +64,14 @@ export class AgentDefaultModelConfig extends Service {
     provider: z.string().required().volatile(),
     model: z.string().required().volatile(),
     reasoningEffort: z.string().volatile(),
+    sessionCreateModelOverride: z.union([
+      z.const(false),
+      z.object({
+        provider: z.string().min(1).required(),
+        model: z.string().min(1).required(),
+        reasoningEffort: z.string().min(1),
+      }),
+    ]).default(false).volatile(),
   })
 
   constructor(private readonly ownerContext: Context, private config: Config) {
@@ -73,6 +93,15 @@ export class AgentDefaultModelConfig extends Service {
   }
 
   /**
+   * Read the optional forced route for independently created Sessions.
+   * @returns a detached route, or undefined when the user selected no override.
+   */
+  sessionCreateOverride(): SessionCreateModelOverride | undefined {
+    const value = this.config.sessionCreateModelOverride.get()
+    return value === false ? undefined : { ...value }
+  }
+
+  /**
    * Save the complete default model selection. A deployment without a configuration
    * editor keeps its composition entry. Saves commit in submission order; a failed
    * save rejects its caller without blocking later saves.
@@ -87,6 +116,8 @@ export class AgentDefaultModelConfig extends Service {
     const config = {
       provider: next.provider, model: next.model,
       ...next.reasoningEffort === undefined ? {} : { reasoningEffort: String(next.reasoningEffort) },
+      // A default-selection save must not erase the independent session-create override.
+      sessionCreateModelOverride: this.config.sessionCreateModelOverride.get(),
     }
     const saved = this.saves.then(() => editor.edit(entry, () => config))
     this.saves = saved.catch(() => {})
