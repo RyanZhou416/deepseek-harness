@@ -486,6 +486,8 @@ describe('dsh-tool-session-message', () => {
     expect(resultText(result)).toContain('Quarterly migration')
     expect(resultText(result)).toContain('Quarterly migration display')
     expect(resultText(result)).toContain('"archived": true')
+    expect(resultText(result)).toContain('"status": "archived"')
+    expect(resultText(result)).toContain('"running": false')
     expect(resultText(result)).not.toContain('delegated-session')
     expect(resultText(result)).toContain('user-fork')
   })
