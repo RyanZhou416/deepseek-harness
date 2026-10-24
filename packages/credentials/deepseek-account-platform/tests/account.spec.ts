@@ -22,6 +22,7 @@ afterEach(async () => {
 
 /** Client identity supplied with each account operation; the Host derives the Platform headers from it. */
 const clientMetadata = (locale = 'en'): AccountClientMetadata => ({ version: '1.2.3', locale, timezoneOffsetSeconds: 28_800 })
+const ACCOUNT = credentialKey('deepseek-account-platform', 'default')
 
 async function fixture(
   contact: { email: string; mobile?: string; mobile_number?: string; id?: string | null } = {
@@ -448,7 +449,8 @@ it('does not send an account grant to a different configured Platform environmen
   await f.ctx.credentials.modifyRecord(credentialKey('deepseek-account-platform', 'default'), () => Promise.resolve({
     kind: 'grant', payload: { version: 1, issuer: 'https://platform.deepseek.com', token: 'test-platform-grant' },
   }))
-  await expect(readDetails(f.account)).rejects.toThrow('account: protocol')
+  expect(await readDetails(f.account)).toBeNull()
+  expect(await f.account.getState()).toMatchObject({ status: 'needs-reauth', credentialIssue: 'issuer-mismatch' })
   expect(f.detailRequests).toEqual([])
 })
 
@@ -716,7 +718,8 @@ it('never exports an embedded Platform token to a different configured issuer', 
   await f.ctx.credentials.modifyRecord(credentialKey('deepseek-account-platform', 'default'), () => Promise.resolve({
     kind: 'grant', payload: { version: 1, token: 'fixture-secret', issuer: 'https://platform.deepseek.com' },
   }))
-  await expect(f.account.getPlatformSession()).rejects.toThrow()
+  expect(await f.account.getPlatformSession()).toBeNull()
+  expect(await f.account.getState()).toMatchObject({ status: 'needs-reauth', credentialIssue: 'issuer-mismatch' })
 })
 
 async function readDetails(account: Pick<PlatformAccount, 'getProfile' | 'getBalance'>) {
@@ -834,22 +837,27 @@ it('sends a development grant only to its configured inference origin', async ()
 })
 
 
-it('starts signed out after discarding another Platform issuer without remote logout or unrelated credential loss', async () => {
-  const accountKey = credentialKey('deepseek-account-platform', 'default')
+it('parks a foreign-issuer grant at startup without deleting it, logging out remotely, or losing unrelated credentials', async () => {
   const deviceKey = credentialKey('deepseek-account-platform', 'device')
   const apiKey = credentialRef('TEST_PLATFORM_SWITCH_API_KEY')
   const f = await fixture(undefined, {}, false, {}, undefined, async (ctx) => {
-    await ctx.credentials.modifyRecord(accountKey, () => Promise.resolve({
-      kind: 'grant', payload: { version: 1, issuer: 'https://old-platform.example.test', token: 'old-token' },
+    await ctx.credentials.modifyRecord(ACCOUNT, () => Promise.resolve({
+      kind: 'grant', payload: { version: 1, issuer: 'https://old-platform.example.test', token: 'old-token', ownerNote: 'retained' },
     }))
     await ctx.credentials.modifyRecord(deviceKey, () => Promise.resolve({ kind: 'grant', payload: { id: 'stable-device' } }))
     await ctx.credentials.set(apiKey, 'retained-api-key')
   })
-  expect((await f.account.getState()).status).toBe('signed-out')
+  expect(await f.account.getState()).toMatchObject({ status: 'needs-reauth', credentialIssue: 'issuer-mismatch' })
   expect(await f.account.getPlatformSession()).toBeNull()
   expect(await f.account.getProfile(clientMetadata())).toBeNull()
   expect(await f.account.getBalance(clientMetadata())).toBeNull()
-  expect(await f.ctx.credentials.readRecord(accountKey)).toBeUndefined()
+  expect(await f.account.resolveToken('https://api.deepseek.com')).toBeUndefined()
+  // Parking rewrites only the fields that state the condition; fields this provider does not
+  // interpret keep their stored value.
+  expect(await f.ctx.credentials.readRecord(ACCOUNT)).toEqual({ kind: 'grant', payload: {
+    version: 2, issuer: 'https://old-platform.example.test', token: 'old-token', ownerNote: 'retained',
+    invalid: { reason: 'issuer-mismatch', at: expect.any(String) as string },
+  } })
   expect(await f.ctx.credentials.readRecord(deviceKey)).toEqual({ kind: 'grant', payload: { id: 'stable-device' } })
   expect((await f.ctx.credentials.resolve(apiKey))?.value).toBe('retained-api-key')
   expect(f.receivedHeaders).toEqual([])
@@ -1001,7 +1009,7 @@ it.each([undefined, [{ currency: 'EUR', balance: '1' }], [{ currency: 'CNY', bal
   },
 )
 
-it.each(['profile', 'balance'] as const)('clears the rejected account grant after a %s HTTP 401', async (field) => {
+it.each(['profile', 'balance'] as const)('parks the rejected account grant after a %s HTTP 401 instead of deleting it', async (field) => {
   const f = await fixture()
   await storeAccount(f)
   let signedOut = 0
@@ -1010,13 +1018,16 @@ it.each(['profile', 'balance'] as const)('clears the rejected account grant afte
   f.ctx.on('deepseek-account/session-expired', expired)
   f.detailStatus(401)
   expect(await (field === 'profile' ? f.account.getProfile(clientMetadata()) : f.account.getBalance(clientMetadata()))).toBeNull()
-  expect(await f.account.getState()).toMatchObject({ status: 'signed-out', attempt: null })
-  expect(await f.ctx.credentials.readRecord(credentialKey('deepseek-account-platform', 'default'))).toBeUndefined()
-  expect(signedOut).toBe(1)
+  expect(await f.account.getState()).toMatchObject({ status: 'needs-reauth', credentialIssue: 'needs-reauth' })
+  expect(await f.ctx.credentials.readRecord(ACCOUNT)).toMatchObject({
+    kind: 'grant',
+    payload: { version: 2, token: 'test-platform-grant', invalid: { reason: 'needs-reauth', at: expect.any(String) as string } },
+  })
+  expect(signedOut).toBe(0)
   expect(expired).toHaveBeenCalledOnce()
 })
 
-it.each(['profile', 'balance'] as const)('clears the rejected account grant after a %s HTTP 200 with code 40003', async (field) => {
+it.each(['profile', 'balance'] as const)('parks the rejected account grant after a %s HTTP 200 with code 40003', async (field) => {
   const f = await fixture()
   await storeAccount(f)
   let signedOut = 0
@@ -1025,13 +1036,16 @@ it.each(['profile', 'balance'] as const)('clears the rejected account grant afte
   f.ctx.on('deepseek-account/session-expired', expired)
   f.detailCode(40003)
   expect(await (field === 'profile' ? f.account.getProfile(clientMetadata()) : f.account.getBalance(clientMetadata()))).toBeNull()
-  expect(await f.account.getState()).toMatchObject({ status: 'signed-out', attempt: null })
-  expect(await f.ctx.credentials.readRecord(credentialKey('deepseek-account-platform', 'default'))).toBeUndefined()
-  expect(signedOut).toBe(1)
+  expect(await f.account.getState()).toMatchObject({ status: 'needs-reauth', credentialIssue: 'needs-reauth' })
+  expect(await f.ctx.credentials.readRecord(ACCOUNT)).toMatchObject({
+    kind: 'grant',
+    payload: { version: 2, token: 'test-platform-grant', invalid: { reason: 'needs-reauth', at: expect.any(String) as string } },
+  })
+  expect(signedOut).toBe(0)
   expect(expired).toHaveBeenCalledOnce()
 })
 
-it('coalesces simultaneous unauthorized profile and balance responses', async () => {
+it('coalesces simultaneous unauthorized profile and balance responses into one parking write', async () => {
   const f = await fixture()
   await storeAccount(f)
   let signedOut = 0
@@ -1040,9 +1054,12 @@ it('coalesces simultaneous unauthorized profile and balance responses', async ()
   f.ctx.on('deepseek-account/session-expired', expired)
   f.detailStatus(401)
   await Promise.all([f.account.getProfile(clientMetadata()), f.account.getBalance(clientMetadata())])
-  expect(signedOut).toBe(1)
+  expect(signedOut).toBe(0)
   expect(expired).toHaveBeenCalledOnce()
-  expect(await f.account.getState()).toMatchObject({ status: 'signed-out' })
+  expect(await f.account.getState()).toMatchObject({ status: 'needs-reauth', credentialIssue: 'needs-reauth' })
+  expect(await f.ctx.credentials.readRecord(ACCOUNT)).toMatchObject({
+    payload: { version: 2, token: 'test-platform-grant', invalid: { reason: 'needs-reauth' } },
+  })
 })
 
 it.each([403, 500])('retains the account grant after HTTP %s', async (status) => {
@@ -1053,7 +1070,7 @@ it.each([403, 500])('retains the account grant after HTTP %s', async (status) =>
   expect(await f.account.getState()).toMatchObject({ status: 'credential-stored' })
 })
 
-it('does not remove a replacement grant when an older request is rejected', async () => {
+it('does not park a replacement grant when an older request is rejected', async () => {
   const f = await fixture()
   await storeAccount(f)
   f.detailStatus(401)
@@ -1061,7 +1078,7 @@ it('does not remove a replacement grant when an older request is rejected', asyn
   const pending = f.account.getBalance(clientMetadata())
   try {
     await f.detailsStarted.promise
-    await f.ctx.credentials.modifyRecord(credentialKey('deepseek-account-platform', 'default'), () => Promise.resolve({
+    await f.ctx.credentials.modifyRecord(ACCOUNT, () => Promise.resolve({
       kind: 'grant', payload: { version: 1, issuer: f.origin, token: 'replacement-grant' },
     }))
   } finally {
@@ -1069,8 +1086,8 @@ it('does not remove a replacement grant when an older request is rejected', asyn
   }
   expect(await pending).toBeNull()
   expect(await f.account.getState()).toMatchObject({ status: 'credential-stored' })
-  expect(await f.ctx.credentials.readRecord(credentialKey('deepseek-account-platform', 'default')))
-    .toMatchObject({ kind: 'grant', payload: { token: 'replacement-grant' } })
+  expect(await f.ctx.credentials.readRecord(ACCOUNT))
+    .toMatchObject({ kind: 'grant', payload: { version: 1, token: 'replacement-grant' } })
 })
 
 it.each(['0E-16', '1.25e+2', '-3E-4'])('preserves scientific-notation wallet balance %s', async (balance) => {
@@ -1105,13 +1122,16 @@ it('returns no credentials when signed out or disposed', async () => {
   await expect(f.account.signOut(clientMetadata())).rejects.toThrow('account: protocol')
 })
 
-it('rejects sign-out and inference grants issued by another environment', async () => {
+it('deletes a foreign-issuer grant only on explicit sign-out and never sends it to this origin', async () => {
   const f = await fixture(undefined, {}, false, {}, 'https://private.example')
-  await f.ctx.credentials.modifyRecord(credentialKey('deepseek-account-platform', 'default'), () => Promise.resolve({
+  await f.ctx.credentials.modifyRecord(ACCOUNT, () => Promise.resolve({
     kind: 'grant', payload: { version: 1, token: 'real-token', issuer: 'https://other.example' },
   }))
   expect(await f.account.resolveToken('https://private.example')).toBeUndefined()
-  await expect(f.account.signOut(clientMetadata())).rejects.toThrow('account: protocol')
+  expect(await f.account.getState()).toMatchObject({ status: 'needs-reauth', credentialIssue: 'issuer-mismatch' })
+  expect((await f.account.signOut(clientMetadata())).status).toBe('signed-out')
+  expect(await f.ctx.credentials.readRecord(ACCOUNT)).toBeUndefined()
+  expect(f.logoutCount()).toBe(0)
 })
 
 it('never sends a development issuer grant to official inference', async () => {
@@ -1527,60 +1547,127 @@ it('reuses the last profile identity without querying again', async () => {
   expect(f.detailRequests).toHaveLength(1)
 })
 
-it('cancels a pending sign-in when the current stored grant expires', async () => {
+it('retains a pending sign-in when the current stored grant is parked', async () => {
   const f = await fixture()
   await storeAccount(f)
   await f.account.startSignIn(clientMetadata('en'), f.callbackOrigin, 'desktop')
-  await f.wait('waiting-browser')
+  const waiting = await f.wait('waiting-browser')
   f.detailStatus(401)
   expect(await f.account.getBalance(clientMetadata())).toBeNull()
-  expect(await f.account.getState()).toMatchObject({ status: 'signed-out', attempt: null })
+  expect(await f.account.getState()).toMatchObject({
+    status: 'needs-reauth', credentialIssue: 'needs-reauth',
+    attempt: { id: waiting.attempt!.id, phase: 'waiting-browser' },
+  })
+  await f.account.cancelSignIn(waiting.attempt!.id)
 })
 
-it('retains the grant when local expiry removal fails and permits a later retry', async () => {
+it('surfaces a parking write failure and retries without deleting the grant', async () => {
   const f = await fixture()
   await storeAccount(f)
   f.detailStatus(401)
-  const remove = vi.spyOn(f.ctx.credentials, 'deleteRecord').mockRejectedValueOnce(new Error('storage failed'))
+  const modify = vi.spyOn(f.ctx.credentials, 'modifyRecord').mockRejectedValueOnce(new Error('storage failed'))
   try {
     await expect(f.account.getBalance(clientMetadata())).rejects.toThrow('storage failed')
     expect(await f.account.getState()).toMatchObject({ status: 'credential-stored' })
     expect(await f.account.getState()).not.toHaveProperty('signOutReason')
+    expect(await f.ctx.credentials.readRecord(ACCOUNT)).toMatchObject({ payload: { version: 1, token: 'test-platform-grant' } })
     expect(await f.account.getBalance(clientMetadata())).toBeNull()
-    expect(await f.account.getState()).toMatchObject({ status: 'signed-out' })
-  } finally { remove.mockRestore() }
+    expect(await f.account.getState()).toMatchObject({ status: 'needs-reauth' })
+  } finally { modify.mockRestore() }
 })
 
-it.each([
-  ['balance', 'invalidated'], ['balance', 'missing'], ['balance', 'other-kind'],
-  ['balance', 'token'], ['balance', 'issuer'], ['profile', 'missing'],
-] as const)(
-  'rechecks the stored grant before %s expiry removal: %s', async (field, change) => {
+it.each(['replacement', 'removed'] as const)(
+  'rechecks the stored grant before parking: %s', async (change) => {
     const f = await fixture()
     await storeAccount(f)
     f.detailStatus(401)
-    const key = credentialKey('deepseek-account-platform', 'default')
-    const original = f.ctx.credentials.readRecord.bind(f.ctx.credentials)
-    let reads = 0
-    const read = vi.spyOn(f.ctx.credentials, 'readRecord').mockImplementation(async (requested) => {
-      const record = await original(requested)
-      if (++reads !== 2) return record
-      if (change === 'invalidated') f.ctx.emit('credentials/record-updated', key)
-      if (change === 'missing') return undefined
-      if (change === 'other-kind') return { kind: 'api-key', key: 'another-kind' }
-      if (change === 'token' || change === 'issuer') return {
-        kind: 'grant', payload: { version: 1, issuer: change === 'issuer' ? 'https://another.example' : f.origin, token: change === 'issuer' ? 'test-platform-grant' : 'replacement-token' },
+    const original = f.ctx.credentials.modifyRecord.bind(f.ctx.credentials)
+    let armed = true
+    // The rejected request's generation is stale by the time its parking write is admitted.
+    const modify = vi.spyOn(f.ctx.credentials, 'modifyRecord').mockImplementation(async (key, mutate) => {
+      if (key === ACCOUNT && armed) {
+        armed = false
+        if (change === 'replacement') {
+          await original(key, async () => ({ kind: 'grant', payload: { version: 1, issuer: f.origin, token: 'replacement-grant' } }))
+        } else await f.ctx.credentials.deleteRecord(key)
       }
-      return record
+      return original(key, mutate)
     })
-    const remove = vi.spyOn(f.ctx.credentials, 'deleteRecord')
     try {
-      expect(await (field === 'profile' ? f.account.getProfile(clientMetadata()) : f.account.getBalance(clientMetadata()))).toBeNull()
-      expect(remove).not.toHaveBeenCalled()
-      expect(await f.account.getState()).toMatchObject({ status: 'credential-stored' })
-    } finally { read.mockRestore(); remove.mockRestore() }
+      expect(await f.account.getBalance(clientMetadata())).toBeNull()
+      expect(await f.ctx.credentials.readRecord(ACCOUNT)).toEqual(change === 'replacement'
+        ? { kind: 'grant', payload: { version: 1, issuer: f.origin, token: 'replacement-grant' } }
+        : undefined)
+      expect(await f.account.getState()).toMatchObject(change === 'replacement'
+        ? { status: 'credential-stored' }
+        : { status: 'signed-out' })
+    } finally { modify.mockRestore() }
   },
 )
+
+it('reads an existing version 1 grant as active after restart and leaves its bytes untouched', async () => {
+  const f = await fixture(undefined, {}, false, {}, undefined, async (ctx, origin) => {
+    await ctx.credentials.modifyRecord(ACCOUNT, () => Promise.resolve({
+      kind: 'grant', payload: { version: 1, issuer: origin, token: 'restart-token', ownerNote: 'keep-me' },
+    }))
+  })
+  expect(await f.account.getState()).toMatchObject({ status: 'credential-stored' })
+  expect(await f.account.getPlatformSession()).toMatchObject({ token: 'restart-token' })
+  expect(await f.ctx.credentials.readRecord(ACCOUNT)).toEqual({
+    kind: 'grant', payload: { version: 1, issuer: f.origin, token: 'restart-token', ownerNote: 'keep-me' },
+  })
+})
+
+it('reads a parked grant after restart as needing reauthentication without contacting Platform', async () => {
+  const parked = {
+    version: 2, issuer: 'PLACEHOLDER', token: 'parked-token', ownerNote: 'keep-me',
+    invalid: { reason: 'needs-reauth', at: '2026-10-24T00:00:00.000Z' },
+  }
+  const f = await fixture(undefined, {}, false, {}, undefined, async (ctx, origin) => {
+    await ctx.credentials.modifyRecord(ACCOUNT, () => Promise.resolve({
+      kind: 'grant', payload: { ...parked, issuer: origin },
+    }))
+  })
+  expect(await f.account.getState()).toMatchObject({ status: 'needs-reauth', credentialIssue: 'needs-reauth' })
+  expect(await f.account.getProfile(clientMetadata())).toBeNull()
+  expect(await f.account.getBalance(clientMetadata())).toBeNull()
+  expect(await f.account.getPlatformSession()).toBeNull()
+  expect(await f.account.resolveToken('https://api.deepseek.com')).toBeUndefined()
+  expect(f.detailRequests).toEqual([])
+  expect(await f.ctx.credentials.readRecord(ACCOUNT)).toEqual({
+    kind: 'grant', payload: { ...parked, issuer: f.origin },
+  })
+})
+
+it('parks a version 1 grant as version 2 while preserving unread fields', async () => {
+  const f = await fixture(undefined, {}, false, {}, undefined, async (ctx, origin) => {
+    await ctx.credentials.modifyRecord(ACCOUNT, () => Promise.resolve({
+      kind: 'grant', payload: { version: 1, issuer: origin, token: 'legacy-token', ownerNote: 'keep-me' },
+    }))
+  })
+  f.detailStatus(401)
+  expect(await f.account.getBalance(clientMetadata())).toBeNull()
+  expect(await f.ctx.credentials.readRecord(ACCOUNT)).toEqual({
+    kind: 'grant', payload: {
+      version: 2, issuer: f.origin, token: 'legacy-token', ownerNote: 'keep-me',
+      invalid: { reason: 'needs-reauth', at: expect.any(String) as string },
+    },
+  })
+})
+
+it('makes no further Platform request or inference token available for a parked grant', async () => {
+  const f = await fixture(undefined, {}, false, {}, 'http://inference.example.test:8094')
+  await storeAccount(f)
+  expect(await f.account.resolveToken('http://inference.example.test:8094/api')).toBe('test-platform-grant')
+  f.detailStatus(401)
+  expect(await f.account.getBalance(clientMetadata())).toBeNull()
+  const requests = f.detailRequests.length
+  expect(await f.account.getProfile(clientMetadata())).toBeNull()
+  expect(await f.account.getBalance(clientMetadata())).toBeNull()
+  expect(await f.account.getUnnotifiedBonuses(clientMetadata())).toBeNull()
+  expect(await f.account.resolveToken('http://inference.example.test:8094/api')).toBeUndefined()
+  expect(f.detailRequests).toHaveLength(requests)
+})
 
 it('ignores a 401 whose response cleanup overlaps a credential replacement', async () => {
   const f = await fixture()
@@ -1602,7 +1689,7 @@ it('ignores a 401 whose response cleanup overlaps a credential replacement', asy
   } finally { cleanup.mockRestore(); fetchResponse.mockRestore() }
 })
 
-it('expires an inference-rejected token without another Platform request', async () => {
+it('parks an inference-rejected token once without another Platform request or a signed-out notification', async () => {
   const f = await fixture()
   await storeAccount(f)
   const published: string[] = []
@@ -1611,17 +1698,36 @@ it('expires an inference-rejected token without another Platform request', async
   await f.account.rejectToken('test-platform-grant')
   await f.account.rejectToken('test-platform-grant')
   const state = await f.account.getState()
-  expect({ status: state.status, published, detailRequests: f.detailRequests })
+  expect({ status: state.status, issue: state.credentialIssue, published, detailRequests: f.detailRequests })
     .toMatchInlineSnapshot(`
       {
         "detailRequests": [],
+        "issue": "needs-reauth",
         "published": [
           "session-expired",
-          "signed-out",
         ],
-        "status": "signed-out",
+        "status": "needs-reauth",
       }
     `)
+  expect(await f.ctx.credentials.readRecord(ACCOUNT)).toMatchObject({
+    kind: 'grant',
+    payload: { version: 2, token: 'test-platform-grant', invalid: { reason: 'needs-reauth', at: expect.any(String) as string } },
+  })
+})
+
+it('deletes a parked grant only on explicit sign-out and revokes it once', async () => {
+  const f = await fixture()
+  await storeAccount(f)
+  f.detailStatus(401)
+  await f.account.getBalance(clientMetadata())
+  expect(await f.account.getState()).toMatchObject({ status: 'needs-reauth' })
+  let signedOut = 0
+  f.ctx.on('deepseek-account/signed-out', () => { signedOut++ })
+  expect(await f.account.signOut(clientMetadata())).toMatchObject({ status: 'signed-out' })
+  expect(await f.ctx.credentials.readRecord(ACCOUNT)).toBeUndefined()
+  expect(signedOut).toBe(1)
+  await expect.poll(f.logoutCount).toBe(1)
+  expect(f.logoutHeaders).toEqual(['test-platform-grant'])
 })
 
 it('retains a replacement login when inference rejects the previous token', async () => {
@@ -1630,7 +1736,7 @@ it('retains a replacement login when inference rejects the previous token', asyn
   await f.account.rejectToken('previous-platform-grant')
   expect(await f.account.getState()).toMatchObject({ status: 'credential-stored' })
   expect(await f.ctx.credentials.readRecord(credentialKey('deepseek-account-platform', 'default')))
-    .toMatchObject({ kind: 'grant', payload: { token: 'test-platform-grant' } })
+    .toMatchObject({ kind: 'grant', payload: { version: 1, token: 'test-platform-grant' } })
 })
 
 it('ignores an inference rejection while already signed out', async () => {

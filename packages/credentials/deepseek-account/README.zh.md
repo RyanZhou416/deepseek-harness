@@ -13,9 +13,11 @@ getPlatformSession 为原生 Platform 内嵌提供仅限 Host 的 origin/token �
 
 getUnnotifiedBonuses 返回平台尚未记录为已展示的赠金及其所属账号；ackBonusNotified 记录用户实际看到的那一笔赠金。确认请求携带该账号，因此在一个账号下读取的通知绝不会被确认到另一个账号。
 
-`rejectToken` 接收 Host 推理请求被拒绝的 token，仅删除与它匹配的当前登录凭据；延迟返回的拒绝不能清除替换后的凭据。
+`rejectToken` 接收 Host 推理请求被拒绝的 token，仅将与它匹配的当前登录凭据标记为需要重新认证；延迟返回的拒绝不能影响替换后的凭据。只有显式退登才会移除已存储的授权。
 
-`deepseek-account/session-expired` 在移除被拒绝的凭据后，向当前订阅方通知一次。账号快照不携带失效提示，因此重新连接不会重复弹出 toast。
+`deepseek-account/session-expired` 在服务端拒绝导致凭据被标记后，向当前订阅方通知一次。账号快照不携带失效提示，因此重新连接不会重复弹出 toast。
+
+`AccountView.status` 在保留已标记凭据时报告 `needs-reauth`；`credentialIssue` 区分服务端拒绝（`needs-reauth`）与存储的 issuer 和已配置 Platform 来源不一致（`issuer-mismatch`）。
 
 ## 概述
 

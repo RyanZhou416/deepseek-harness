@@ -4745,6 +4745,10 @@ export const TYPE_API: readonly TypeApiEntry[] = [
     declaration: 'export interface AccountClientMetadata {\n    readonly version: string;\n    readonly locale: string;\n    readonly timezoneOffsetSeconds: number;\n}',
   },
   {
+    name: 'AccountCredentialIssue',
+    declaration: 'export type AccountCredentialIssue = \'needs-reauth\' | \'issuer-mismatch\';',
+  },
+  {
     name: 'AccountDetails',
     declaration: 'export interface AccountDetails {\n    readonly profile: {\n        readonly status: \'ready\';\n        readonly value: AccountProfile;\n    } | {\n        readonly status: \'failed\';\n    };\n    readonly balance: {\n        readonly status: \'ready\';\n        readonly value: readonly AccountWallet[];\n        readonly bonusWallets: readonly AccountWallet[];\n    } | {\n        readonly status: \'failed\';\n    };\n}',
   },
@@ -4762,7 +4766,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'AccountView',
-    declaration: 'export interface AccountView {\n    readonly status: \'signed-out\' | \'credential-stored\';\n    readonly links: AccountLinks;\n    readonly attempt: SignInAttemptView | null;\n}',
+    declaration: 'export interface AccountView {\n    readonly status: \'signed-out\' | \'credential-stored\' | \'needs-reauth\';\n    readonly credentialIssue?: AccountCredentialIssue;\n    readonly links: AccountLinks;\n    readonly attempt: SignInAttemptView | null;\n}',
   },
   {
     name: 'AccountWallet',

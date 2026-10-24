@@ -28,7 +28,6 @@ function harness(options: {
 } = {}) {
   const stored = new Map<string, TestSession>(Object.entries(options.accounts ?? {}))
   const removed: string[] = []
-  const notified: string[] = []
   const refreshes: string[] = []
   const renames: [string, string][] = []
   const tokens = new AccountTokenManager<TestSession>({
@@ -43,9 +42,6 @@ function harness(options: {
       },
       isPermanent: error => options.permanent?.(account, error) ?? false,
     }),
-    onAccountRemoved: (account) => {
-      notified.push(account)
-    },
     onAccountRenamed: (from, to) => {
       renames.push([from, to])
       return Promise.resolve()
@@ -73,7 +69,7 @@ function harness(options: {
       },
     },
   })
-  return { tokens, stored, removed, notified, refreshes, renames }
+  return { tokens, stored, removed, refreshes, renames }
 }
 
 /**
@@ -268,8 +264,8 @@ test('an ordinary per-account refresh reports no rename', async () => {
   assert.deepEqual(renames, [])
 })
 
-test('a permanent refresh failure removes only that account and notifies once', async () => {
-  const { tokens, stored, removed, notified } = harness({
+test('a permanent refresh failure parks the account and deletes nothing', async () => {
+  const { tokens, stored, removed } = harness({
     accounts: { a1: session('at-1', 1000), a2: session('at-2') },
     refresh: () => Promise.reject(new Error('invalid_grant')),
     permanent: () => true,
@@ -278,9 +274,8 @@ test('a permanent refresh failure removes only that account and notifies once', 
     tokens.session('a1'),
     (error: unknown) => error instanceof LlmError && error.code === 'INVALID_CREDENTIAL',
   )
-  assert.deepEqual(removed, ['a1'])
-  assert.deepEqual(notified, ['a1'])
-  assert.equal(stored.has('a1'), false)
+  assert.deepEqual(removed, [], 'a refresh failure never deletes a credential')
+  assert.equal(stored.has('a1'), true, 'the refused account stays stored for an explicit logout')
   assert.equal(stored.has('a2'), true, 'the sibling account is untouched')
   // The survivor still serves.
   assert.equal((await tokens.session('a2')).accessToken, 'at-2')
@@ -325,7 +320,7 @@ test('peek and hasSession read without refreshing', async () => {
 test('a permanent refresh failure keeps a session that a concurrent re-login just saved', async () => {
   let reject!: (error: Error) => void
   const gate = new Promise<TestSession>((_, fail) => { reject = fail })
-  const { tokens, stored, removed, notified } = harness({
+  const { tokens, stored, removed } = harness({
     accounts: { a1: session('stale', -1) },
     refresh: () => gate,
     permanent: (_account, error) => error instanceof Error && error.message === 'invalid_grant',
@@ -336,20 +331,19 @@ test('a permanent refresh failure keeps a session that a concurrent re-login jus
   reject(new Error('invalid_grant'))
   assert.equal((await pending).accessToken, 'fresh-login', 'the re-login is served, not deleted')
   assert.deepEqual(removed, [])
-  assert.deepEqual(notified, [])
   assert.equal(stored.get('a1')?.accessToken, 'fresh-login')
 })
 
-test('a permanent refresh failure still removes the account when nothing replaced it', async () => {
-  const { tokens, stored, removed, notified } = harness({
+test('a permanent refresh failure still keeps the account when nothing replaced it', async () => {
+  const { tokens, stored, removed } = harness({
     accounts: { a1: session('stale', -1) },
     refresh: () => Promise.reject(new Error('invalid_grant')),
     permanent: (_account, error) => error instanceof Error && error.message === 'invalid_grant',
   })
   await assert.rejects(tokens.session('a1'), (error: unknown) => error instanceof LlmError && error.code === 'INVALID_CREDENTIAL')
-  assert.deepEqual(removed, ['a1'])
-  assert.deepEqual(notified, ['a1'])
-  assert.equal(stored.has('a1'), false)
+  assert.deepEqual(removed, [], 'only an explicit logout removes a stored credential')
+  assert.equal(stored.has('a1'), true)
+  assert.equal(stored.get('a1')?.accessToken, 'stale', 'the token the store held is preserved unchanged')
 })
 
 // ---------------------------------------------------------------------------

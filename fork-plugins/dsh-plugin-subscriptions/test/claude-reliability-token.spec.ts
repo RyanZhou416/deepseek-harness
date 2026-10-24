@@ -45,6 +45,48 @@ function pendingFetch(seen: { signals: AbortSignal[]; bodies: string[] }): Fetch
   }
 }
 
+test('a refresh response without a scope keeps the granted scopes', async () => {
+  const fetchFn: FetchFn = async () => new Response(JSON.stringify({
+    access_token: 'at-2',
+    refresh_token: 'rt-2',
+    expires_in: 3_600,
+  }), { status: 200, headers: { 'content-type': 'application/json' } })
+
+  const next = await refreshClaude(session(), { fetchFn })
+
+  assert.equal(next.accessToken, 'at-2')
+  assert.equal(next.refreshToken, 'rt-2')
+  assert.equal(next.scopes, 'user:inference user:profile',
+    'an omitted scope field does not replace the scopes the account was granted')
+})
+
+test('a refresh response with an empty scope keeps the granted scopes', async () => {
+  const fetchFn: FetchFn = async () => new Response(JSON.stringify({
+    access_token: 'at-2',
+    refresh_token: 'rt-2',
+    expires_in: 3_600,
+    scope: '   ',
+  }), { status: 200, headers: { 'content-type': 'application/json' } })
+
+  const next = await refreshClaude(session(), { fetchFn })
+
+  assert.equal(next.scopes, 'user:inference user:profile',
+    'a blank scope field does not erase the scopes the account was granted')
+})
+
+test('a refresh response that states a scope stores the stated one', async () => {
+  const fetchFn: FetchFn = async () => new Response(JSON.stringify({
+    access_token: 'at-2',
+    refresh_token: 'rt-2',
+    expires_in: 3_600,
+    scope: 'user:inference',
+  }), { status: 200, headers: { 'content-type': 'application/json' } })
+
+  const next = await refreshClaude(session(), { fetchFn })
+
+  assert.equal(next.scopes, 'user:inference', 'a response that states the grant is authoritative')
+})
+
 test('a refresh POST is bounded at the client deadline and is never replayed', async (context) => {
   context.mock.timers.enable({ apis: ['setTimeout'] })
   const seen = { signals: [] as AbortSignal[], bodies: [] as string[] }

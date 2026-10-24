@@ -10,8 +10,11 @@ export type AccountInvoke = (request: { namespace: string; method: string; args:
 /** Decode the UI-safe state received across HTTP or WebSocket. @param value - wire value. @returns account projection. */
 export function accountView(value: unknown): AccountView {
   if (typeof value !== 'object' || value === null || !('status' in value)
-    || !['signed-out', 'credential-stored'].includes(String(value.status)) || !('attempt' in value)) {
+    || !['signed-out', 'credential-stored', 'needs-reauth'].includes(String(value.status)) || !('attempt' in value)) {
     throw new Error('desktop account: invalid state')
+  }
+  if ('credentialIssue' in value && !['needs-reauth', 'issuer-mismatch'].includes(String(value.credentialIssue))) {
+    throw new Error('desktop account: invalid credential issue')
   }
   if (!('links' in value) || typeof value.links !== 'object' || value.links === null
     || !('usageUrl' in value.links) || typeof value.links.usageUrl !== 'string'
@@ -34,6 +37,7 @@ export function accountView(value: unknown): AccountView {
   const parsed = value as AccountView
   return {
     status: parsed.status,
+    ...parsed.credentialIssue === undefined ? {} : { credentialIssue: parsed.credentialIssue },
     links: { usageUrl: parsed.links.usageUrl, topUpUrl: parsed.links.topUpUrl },
     attempt: parsed.attempt === null ? null : {
       id: parsed.attempt.id, phase: parsed.attempt.phase,

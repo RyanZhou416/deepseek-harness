@@ -7,6 +7,7 @@
  */
 
 import { createHash, randomUUID } from 'node:crypto'
+import { setTimeout as delay } from 'node:timers/promises'
 import {
   CONTEXT_WINDOW_EXCEEDED_CODE,
   errorChain,
@@ -580,6 +581,28 @@ interface TimedSession {
   expiresAt: number
 }
 
+/**
+ * Durable journal for one account's refresh grant.
+ * @typeParam S - the provider's session type.
+ */
+export interface RefreshRotationJournal<S extends TimedSession> {
+  /**
+   * Persist the intent to spend a grant. Runs before the request; throwing aborts the refresh.
+   * @param session - the session whose refresh token will be spent.
+   * @param revision - its stored credential revision, when known.
+   */
+  begin(session: S, revision?: number): Promise<void>
+  /**
+   * Persist the freshly minted session before the store save.
+   * @param next - the new session.
+   * @param prior - the session whose refresh token was spent.
+   * @param revision - the prior credential's revision, when known.
+   */
+  record(next: S, prior: S, revision?: number): Promise<void>
+  /** Clear the marker after the store write landed. */
+  complete(): Promise<void>
+}
+
 /** Provider hooks the token manager needs. */
 export interface TokenManagerOptions<S extends TimedSession> {
   /** Human-readable provider name for error messages. */
@@ -607,23 +630,27 @@ export interface TokenManagerOptions<S extends TimedSession> {
    * @param expectedRevision - the revision that session was read under.
    */
   save(session: S, expectedPrior?: S, expectedRevision?: number): Promise<void>
-  /**
-   * Delete the stored session. With `expectedPrior`, the store deletes it only
-   * while it is still that session, so a removal cannot destroy a login or a
-   * rotation that landed after the caller read it.
-   * @param expectedPrior - the session this refresh spent, when one was attempted.
-   * @param expectedRevision - the revision that session was read under.
-   * @returns true when the session was removed, false when the removal was
-   *   refused because the store held something else. An implementation may
-   *   return nothing, which reads as removed.
-   */
-  remove(expectedPrior?: S, expectedRevision?: number): Promise<void | boolean>
   /** Perform the provider's refresh-token grant. */
   refresh(session: S): Promise<S>
-  /** Whether a refresh failure is permanent (re-login required). */
+  /**
+   * Whether a refresh failure means the provider will not accept the grant again without a new
+   * login.
+   *
+   * This classifies the failure for the caller; it never deletes the stored credential. A
+   * refused grant is reported as INVALID_CREDENTIAL and the account stays stored — parked as
+   * needing re-authentication — until the user logs it out explicitly.
+   */
   isPermanent(error: unknown): boolean
-  /** Called when a permanent refresh failure actually deleted the stored session. */
-  onRemoved?(): void
+  /**
+   * Durable intent/completion journal for one account's refresh grant.
+   *
+   * `begin` must run before the request: a failure there aborts the refresh without spending a
+   * grant. `record` must persist the freshly minted session before the store save, and
+   * `complete` clears the marker only after the store write landed. Absent disables journaling.
+   */
+  rotationJournal?: RefreshRotationJournal<S>
+  /** Warning sink for a journal that could not be written or cleared after a landed save. */
+  onWarn?: (message: string) => void
   /**
    * Run one account's whole refresh cycle — re-read the store, spend the grant, save —
    * under cross-process ownership, so two cooperating processes sharing one credential
@@ -664,6 +691,15 @@ function isMissingCredential(error: unknown): boolean {
 export const REFRESH_BUSY_CODE = 'REFRESH_BUSY'
 
 /**
+ * The failure a refresh reports when its durable intent marker could not be written.
+ *
+ * No grant was spent: the caller may retry once the journal is writable. Deliberately neither
+ * `AUTH` nor `INVALID_CREDENTIAL`, because the credential itself was not tested. When the held
+ * token is still valid the manager answers with it instead of this failure.
+ */
+export const CREDENTIAL_JOURNAL_UNAVAILABLE_CODE = 'CREDENTIAL_JOURNAL_UNAVAILABLE'
+
+/**
  * What a {@link TokenManagerOptions.withRefreshOwnership} implementation reports.
  * @typeParam T - the value the owned cycle produces.
  */
@@ -672,20 +708,42 @@ export type RefreshOwnershipOutcome<T> =
   | { readonly acquired: false }
 
 /**
+ * The failure a refresh reports when the provider minted a new credential but the store could
+ * not be written, so the token was not persisted.
+ *
+ * Deliberately not retryable as a transient token failure: the old refresh token may already be
+ * rotated out, and answering with it would send a credential the provider no longer accepts.
+ */
+export const CREDENTIAL_NOT_PERSISTED_CODE = 'CREDENTIAL_NOT_PERSISTED'
+
+/**
+ * How many times one refresh result is written before the save is reported as unpersisted.
+ *
+ * A rotated refresh token exists only in memory at that point: the old one may already be spent,
+ * so the write is retried before the caller is told the new credential was not stored.
+ */
+const CREDENTIAL_SAVE_ATTEMPTS = 3
+
+/** Backoff between those attempts. */
+const CREDENTIAL_SAVE_RETRY_MS = 50
+
+/**
  * Per-provider session freshness: loads the stored session, refreshes
  * proactively inside the preempt window or on demand after a 401, and
- * coalesces concurrent refreshes behind one in-flight promise. Permanent
- * refresh failures delete the stored session and surface INVALID_CREDENTIAL
- * with a re-login hint; transient failures fall back to a still-valid token.
+ * coalesces concurrent refreshes behind one in-flight promise.
+ *
+ * A permanently refused grant is reported as INVALID_CREDENTIAL and the stored record is left
+ * exactly as it is: the account is parked as needing re-authentication, and only the explicit
+ * logout removes it. A refresh result that could not be persisted is reported as
+ * {@link CREDENTIAL_NOT_PERSISTED_CODE} after a bounded retry, and never answered with the
+ * pre-refresh session, whose refresh token the provider may already have rotated out. A
+ * transient failure with a still-valid token may still answer with that token.
  *
  * The stored session is the authority. A refresh answers with what the store
  * holds after the write, so a save the store refused — a logout, a re-login or
  * a concurrent rotation that won the compare-and-set — is never returned, and a
  * scope whose session disappeared while the refresh ran fails
  * MISSING_CREDENTIAL instead of reviving the credential the caller still holds.
- * A permanent failure likewise deletes the session it spent only while the
- * store still holds it, serves a login that landed in the meantime, and reports
- * the removal once.
  */
 export class TokenManager<S extends TimedSession> {
   private inflight: Promise<S> | undefined
@@ -738,26 +796,23 @@ export class TokenManager<S extends TimedSession> {
     } catch (error) {
       // Nothing is stored for this scope any more: the account was removed while
       // the refresh ran. The transient fallback would send the pre-logout
-      // credential, and the permanent branch would report a removal and delete an
-      // account that is already gone, so the logged-out result is the whole answer.
+      // credential, so the logged-out result is the whole answer.
       if (isMissingCredential(error)) throw error
+      // The provider minted a new credential but this process could not store it. The old
+      // refresh token may already be spent, so the pre-refresh session is not a safe answer.
+      if (error instanceof LlmError && error.code === CREDENTIAL_NOT_PERSISTED_CODE) throw error
       if (this.options.isPermanent(error)) {
-        // Remove only the session this refresh was spending. The store performs
-        // the comparison inside its own lock, so a re-login or a concurrent
-        // rotation that stored a different session between the read and this
-        // call wins and the removal is refused.
+        // A permanently refused grant is reported, never deleted: the stored record stays for
+        // the user to log out explicitly, and the account reads as needing re-authentication.
+        // A login or a rotation that landed while this refresh ran is served instead.
         const attempted = this.attempted
-        const attemptedRevision = this.attemptedRevision
-        const removed = attempted === undefined
-          ? await this.options.remove(undefined, attemptedRevision)
-          : await this.options.remove(attempted, attemptedRevision)
-        // Read the winner: a login that landed while this refresh was failing is
-        // served instead of being reported as a dead credential.
         const stored = await this.options.load()
-        if (stored !== undefined) return stored
-        // Only the caller whose removal deleted the entry reports it, so
-        // concurrent waiters that lost the removal stay silent.
-        if (removed !== false) this.options.onRemoved?.()
+        if (stored !== undefined
+          && (attempted === undefined
+            || stored.accessToken !== attempted.accessToken
+            || stored.refreshToken !== attempted.refreshToken)) {
+          return stored
+        }
         throw new LlmError(
           `${this.options.displayName} login expired or was revoked (${refreshFailureFacts(error)}); log in again via Settings → Subscriptions`,
           'INVALID_CREDENTIAL',
@@ -825,8 +880,61 @@ export class TokenManager<S extends TimedSession> {
     this.attempted = attempted
     const attemptedRevision = read.revision
     this.attemptedRevision = attemptedRevision
-    const next = await this.options.refresh(attempted)
-    await this.options.save(next, attempted, attemptedRevision)
+    const journal = this.options.rotationJournal
+    if (journal !== undefined) {
+      try {
+        await journal.begin(attempted, attemptedRevision)
+      } catch (error: unknown) {
+        // No grant may be spent when its intent could not be made durable.
+        throw new LlmError(
+          `${this.options.displayName} could not record the refresh intent `
+          + `(${refreshFailureFacts(error)}); no grant was spent`,
+          CREDENTIAL_JOURNAL_UNAVAILABLE_CODE,
+          { cause: error },
+        )
+      }
+    }
+    let next: S
+    try {
+      next = await this.options.refresh(attempted)
+    } catch (error) {
+      // No new credential exists, so the intent marker has nothing to recover. Clearing it
+      // keeps a dead grant from leaving a startup warning behind; the stored tokens stay.
+      if (journal !== undefined) await this.clearJournalQuietly(journal)
+      throw error
+    }
+    let journalFailure: unknown
+    if (journal !== undefined) {
+      try {
+        // The new credential is written down before the store is asked to take it, so a crash
+        // between the response and the store write can recover the rotated token.
+        await journal.record(next, attempted, attemptedRevision)
+      } catch (error: unknown) {
+        journalFailure = error
+      }
+    }
+    if (journalFailure !== undefined) {
+      // The grant is spent. Store the result anyway, then report the unjournaled rotation.
+      try {
+        await this.saveRefreshed(next, attempted, attemptedRevision)
+      } catch (saveError: unknown) {
+        throw new LlmError(
+          `${this.options.displayName} refreshed the credential but could neither journal nor `
+          + `store it (${refreshFailureFacts(journalFailure)}; ${refreshFailureFacts(saveError)}); `
+          + 'the new token was not persisted — retry when the store is writable',
+          CREDENTIAL_NOT_PERSISTED_CODE,
+          { cause: new AggregateError([journalFailure, saveError], 'refresh journal and store write failed') },
+        )
+      }
+      this.options.onWarn?.(
+        `${this.options.displayName}: the rotated credential was stored, but its refresh journal `
+        + `entry could not be written (${refreshFailureFacts(journalFailure)})`,
+      )
+      if (journal !== undefined) await this.clearJournalQuietly(journal)
+    } else {
+      await this.saveRefreshed(next, attempted, attemptedRevision)
+      if (journal !== undefined) await this.clearJournalQuietly(journal)
+    }
     // The stored session is the authority, not the grant just minted: the save
     // may have been refused (a logout, a re-login or a concurrent rotation won
     // the compare-and-set) and the save hook need not report that. Re-read and
@@ -837,6 +945,53 @@ export class TokenManager<S extends TimedSession> {
     const stored = await this.options.load()
     if (stored === undefined) throw this.missingCredential()
     return stored
+  }
+
+  /**
+   * Clear a rotation marker whose store write already landed, reporting a failure without
+   * failing the refresh: recovery reconciles a marker that still matches the stored session.
+   * @param journal - the account's journal hooks.
+   */
+  private async clearJournalQuietly(journal: RefreshRotationJournal<S>): Promise<void> {
+    try {
+      await journal.complete()
+    } catch (error: unknown) {
+      this.options.onWarn?.(
+        `${this.options.displayName}: the refresh journal entry could not be cleared `
+        + `(${refreshFailureFacts(error)}); it will be reconciled on the next startup`,
+      )
+    }
+  }
+
+  /**
+   * Persist one freshly minted credential, retrying a bounded number of times.
+   *
+   * The grant has already been spent at this point. If the store cannot take the result, the
+   * failure says so as {@link CREDENTIAL_NOT_PERSISTED_CODE} rather than looking like a token
+   * failure the caller may answer with the stale session.
+   * @param session - the refreshed session to store.
+   * @param attempted - the session whose refresh token was spent.
+   * @param attemptedRevision - the revision that session was read under.
+   * @throws LlmError CREDENTIAL_NOT_PERSISTED_CODE when every attempt failed.
+   */
+  private async saveRefreshed(session: S, attempted: S, attemptedRevision: number | undefined): Promise<void> {
+    let last: unknown
+    for (let attempt = 0; attempt < CREDENTIAL_SAVE_ATTEMPTS; attempt++) {
+      try {
+        await this.options.save(session, attempted, attemptedRevision)
+        return
+      } catch (error) {
+        last = error
+        if (attempt === CREDENTIAL_SAVE_ATTEMPTS - 1) break
+        await delay(CREDENTIAL_SAVE_RETRY_MS * (attempt + 1))
+      }
+    }
+    throw new LlmError(
+      `${this.options.displayName} refreshed the credential but could not store it `
+      + `(${refreshFailureFacts(last)}); the new token was not persisted — retry when the store is writable`,
+      CREDENTIAL_NOT_PERSISTED_CODE,
+      { cause: last },
+    )
   }
 
   /**

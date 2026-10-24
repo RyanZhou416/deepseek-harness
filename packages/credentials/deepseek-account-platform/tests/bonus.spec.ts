@@ -285,15 +285,18 @@ it.each([
     f.failAck(0, 401)
     return f.account.ackBonusNotified(USER as AccountUserId, ORDER as AccountBonusOrderId, clientMetadata('en'))
   }, false],
-])('expires the rejected grant when %s returns HTTP 401', async (_name, run, signedOutOutcome) => {
+])('parks the rejected grant when %s returns HTTP 401', async (_name, run, parkedOutcome) => {
   const f = await fixture()
   await f.grant('test-account-token')
   const expired = vi.fn()
   f.ctx.on('deepseek-account/session-expired', expired)
-  // A rejected authenticated request names an invalid credential, so the provider drops it locally
-  // exactly as the profile and balance reads do; the caller sees its signed-out outcome.
-  expect(await run(f)).toBe(signedOutOutcome)
-  expect(await f.account.getState()).toMatchObject({ status: 'signed-out' })
+  // A rejected authenticated request names an invalid credential, so the provider parks it locally
+  // exactly as the profile and balance reads do; the caller sees its no-credential outcome.
+  expect(await run(f)).toBe(parkedOutcome)
+  expect(await f.account.getState()).toMatchObject({ status: 'needs-reauth', credentialIssue: 'needs-reauth' })
+  expect(await f.ctx.credentials.readRecord(f.key)).toMatchObject({
+    kind: 'grant', payload: { version: 2, token: 'test-account-token', invalid: { reason: 'needs-reauth' } },
+  })
   expect(expired).toHaveBeenCalledOnce()
 })
 

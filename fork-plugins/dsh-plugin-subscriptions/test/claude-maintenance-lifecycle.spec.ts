@@ -206,7 +206,8 @@ test('a permanent credential failure stops scheduling and reports re-authenticat
   const account = uniqueAccount('permanent')
   const clock = new ManualClock()
   const scheduler = new ManualScheduler(clock)
-  await seedClaudeSession(claudeSession(account, { expiresAt: Date.now() - 1_000 }))
+  const stored = claudeSession(account, { expiresAt: Date.now() - 1_000 })
+  await seedClaudeSession(stored)
   const tokens = claudeTokens({
     preemptMs: 0,
     refresh: () => Promise.reject(new LlmError('invalid_grant', 'INVALID_CREDENTIAL')),
@@ -223,7 +224,11 @@ test('a permanent credential failure stops scheduling and reports re-authenticat
     const [view] = controller.view()
     assert.equal(view?.credential.status, 'reauth_required', 'a dead credential is reported as such')
     assert.equal(scheduler.pending, 0, 'and no further check is scheduled')
-    assert.equal(await getAccountSession('claude', account), undefined, 'the store removed the dead login')
+    assert.deepEqual(
+      await getAccountSession('claude', account),
+      stored,
+      'the store keeps the dead login for an explicit logout',
+    )
   } finally {
     await controller.dispose()
   }

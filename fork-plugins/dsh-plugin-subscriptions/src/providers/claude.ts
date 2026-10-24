@@ -1456,6 +1456,10 @@ export async function refreshClaude(
     // The token response states a credential, not this account's ownership or its local
     // binding, so the stored record's reference fields ride along unchanged.
     ...withClaudeCredentialReference(session, next),
+    // A refresh response may omit `scope`, or state an empty one. The scopes the account was
+    // granted are the stored record's, not the plugin's default set, so neither case may
+    // overwrite them.
+    scopes: tokens.scope !== undefined && tokens.scope.trim().length > 0 ? tokens.scope : session.scopes,
     ...session.emailAddress === undefined ? {} : { emailAddress: session.emailAddress },
     ...session.subscriptionType === undefined ? {} : { subscriptionType: session.subscriptionType },
   }

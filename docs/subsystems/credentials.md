@@ -56,7 +56,7 @@ interface CredentialInfo {
 
 ## Embedded Platform credentials
 
-PlatformSession is a Host-only snapshot from getPlatformSession: origin names the configured Platform issuer and token contains its stored account credential. userId repeats the stable account ID from the most recent successful getProfile, and is null until one succeeds or when that profile carries no ID. The snapshot reuses that ID without issuing a profile request of its own, so an unknown ID leaves userId null instead of delaying the caller; a profile read whose stable ID first becomes available or changes notifies only Host subscribers using `watch(signal, true)`, which lets identity consumers re-read the snapshot. Consumers key persistent browser storage by origin and userId and fall back to temporary storage for null. Signed-out accounts and credentials changed during the credential read return no snapshot; a mismatched issuer fails. Native consumers own document invalidation when credentials change. This snapshot is excluded from account-controller RPC, AccountView, and AccountDetails.
+PlatformSession is a Host-only snapshot from getPlatformSession: origin names the configured Platform issuer and token contains its stored account credential. userId repeats the stable account ID from the most recent successful getProfile, and is null until one succeeds or when that profile carries no ID. The snapshot reuses that ID without issuing a profile request of its own, so an unknown ID leaves userId null instead of delaying the caller; a profile read whose stable ID first becomes available or changes notifies only Host subscribers using `watch(signal, true)`, which lets identity consumers re-read the snapshot. Consumers key persistent browser storage by origin and userId and fall back to temporary storage for null. Signed-out accounts, parked grants, and credentials changed during the credential read return no snapshot. Native consumers own document invalidation when credentials change. This snapshot is excluded from account-controller RPC, AccountView, and AccountDetails.
 
 AccountDetails.balance projects recharge wallets in value and promotional wallets in bonusWallets, with independent currency and decimal balance strings. Failed queries contain no wallet arrays.
 
@@ -270,7 +270,7 @@ Account operations; only Host consumers can obtain a request credential.
 ```ts cordis-catalog
 /**
  * Read stored-account presence and the latest login attempt.
- * @returns a snapshot without credentials or PKCE secrets.
+ * @returns a snapshot without credentials or PKCE secrets; `needs-reauth` names a parked grant that was retained.
  */
 abstract getState(): Promise<AccountView>
 
@@ -279,21 +279,21 @@ abstract getState(): Promise<AccountView>
  * A ready result whose stable profile ID first becomes available or changes notifies identity-enabled watch
  * consumers, so they re-read getPlatformSession; repeated IDs stay silent.
  * @param client - identity of the requesting UI for this call.
- * @returns profile outcome, or null if signed out or the grant changed during the query.
+ * @returns profile outcome, or null if signed out, the grant changed during the query, or the stored grant is parked.
  */
 abstract getProfile(client: AccountClientMetadata): Promise<AccountDetails['profile'] | null>
 
 /**
  * Query Platform recharge and bonus wallet balances independently of profile data.
  * @param client - identity of the requesting UI for this call.
- * @returns balance outcome, or null if signed out or the grant changed during the query.
+ * @returns balance outcome, or null if signed out, the grant changed during the query, or the stored grant is parked.
  */
 abstract getBalance(client: AccountClientMetadata): Promise<AccountDetails['balance'] | null>
 
 /**
  * Query the granted bonuses Platform has not yet recorded as displayed.
  * @param client - identity of the requesting UI for this call; its language selects the server-authored message.
- * @returns bonuses with their account, or null if signed out or the grant changed during the query.
+ * @returns bonuses with their account, or null if signed out, the grant changed during the query, or the stored grant is parked.
  */
 abstract getUnnotifiedBonuses(client: AccountClientMetadata): Promise<AccountBonusBatch | null>
 
@@ -302,7 +302,7 @@ abstract getUnnotifiedBonuses(client: AccountClientMetadata): Promise<AccountBon
  * @param accountId - account the notification was read for; a different current account is never acknowledged.
  * @param orderId - granted bonus order the user saw.
  * @param client - identity of the requesting UI for this call.
- * @returns true once Platform records the acknowledgement; false if signed out or the account changed.
+ * @returns true once Platform records the acknowledgement; false if signed out, the stored grant is parked, or the account changed.
  */
 abstract ackBonusNotified(accountId: AccountUserId, orderId: AccountBonusOrderId, client: AccountClientMetadata): Promise<boolean>
 
@@ -345,16 +345,16 @@ abstract watch(signal: AbortSignal, includeIdentityChanges?: boolean): AsyncIter
 abstract resolveToken(url: string): Promise<string | undefined>
 
 /**
- * Remove an inference-rejected token only while it still matches the stored login.
+ * Park an inference-rejected token while it still matches the stored login.
  * @param token - token captured by the rejected inference request.
- * @returns after matching credentials are removed and the expiry notification is emitted.
+ * @returns after the matching grant is marked invalid for reauthentication; the stored bytes are retained.
  */
 abstract rejectToken(token: string): Promise<void>
 
 /**
  * Read credentials for the configured Platform origin, bound to their issuing environment, and
  * pair them with the account ID from the last successful profile read; no profile request is made.
- * @returns a Host-only snapshot, or null while signed out or when the credential changed during the read.
+ * @returns a Host-only snapshot, or null while signed out, parked, or when the credential changed during the read.
  */
 abstract getPlatformSession(): Promise<PlatformSession | null>
 
@@ -461,10 +461,10 @@ Source: [`packages/credentials/deepseek-account/src/types.ts`](../../packages/cr
 
 #### `deepseek-account/session-expired` — emit
 
-Server rejection removed the current account credential; this notification is not replayed.
+Server rejection parked the current credential; the stored grant is retained. This notification is not replayed.
 
 ```ts cordis-catalog
-/** Server rejection removed the current account credential; this notification is not replayed.
+/** Server rejection parked the current credential; the stored grant is retained. This notification is not replayed.
  * @mode emit
  */
 'deepseek-account/session-expired'(): void
@@ -488,6 +488,6 @@ Local grant removal has completed.
 Source: [`packages/credentials/deepseek-account/src/index.ts`](../../packages/credentials/deepseek-account/src/index.ts)
 <!-- END GENERATED cordis-surface -->
 
-The account Service Definition exposes getState, getProfile, getBalance, getUnnotifiedBonuses, ackBonusNotified, startSignIn, cancelSignIn, signOut, watch, and Host-only resolveToken and getPlatformSession. The platform provider implements it with an AuthorizationFlow and a private GrantRecord. AccountView distinguishes stored presence from server validation; attempt IDs bind cancellation to one local flow. See [the account package](../../packages/credentials/deepseek-account/README.md).
+The account Service Definition exposes getState, getProfile, getBalance, getUnnotifiedBonuses, ackBonusNotified, startSignIn, cancelSignIn, signOut, watch, and Host-only resolveToken and getPlatformSession. The platform provider implements it with an AuthorizationFlow and a private GrantRecord. AccountView distinguishes stored presence, a parked grant that requires reauthentication, and server validation; attempt IDs bind cancellation to one local flow. See [the account package](../../packages/credentials/deepseek-account/README.md).
 
 `AccountClientMetadata` carries `version` from the caller’s `DSH_CLIENT_VERSION`, its active UI `locale`, and `timezoneOffsetSeconds` sampled when the operation begins. The offset is local time minus UTC in seconds: UTC+8 is `28800`. It contains no credentials. Login attempts retain their initiating metadata through exchange and cancellation; sign-out retains its metadata for revocation retries.

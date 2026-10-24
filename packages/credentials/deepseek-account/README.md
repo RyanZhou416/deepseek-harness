@@ -13,9 +13,11 @@ getPlatformSession returns a Host-only origin/token snapshot for native Platform
 
 getUnnotifiedBonuses returns the granted bonuses Platform has not yet recorded as displayed, together with the account they belong to; ackBonusNotified records one bonus the user actually saw. The acknowledgement names that account, so a notification read under one account is never confirmed for another.
 
-`rejectToken` accepts a Host inference request’s rejected token and removes only the matching current login; a late rejection cannot clear a replacement credential.
+`rejectToken` accepts a Host inference request’s rejected token and parks only the matching current login; a late rejection cannot park a replacement credential. Only explicit sign-out removes a stored grant.
 
-`deepseek-account/session-expired` notifies current subscribers once after a rejected credential is removed. Account snapshots carry no expiry notice, so reconnecting does not repeat the toast.
+`deepseek-account/session-expired` notifies current subscribers once when a server rejection parks the credential. Account snapshots carry no expiry notice, so reconnecting does not repeat the toast.
+
+`AccountView.status` reports `needs-reauth` while a parked grant remains stored; `credentialIssue` names `needs-reauth` for a rejected grant or `issuer-mismatch` when the stored issuer differs from the configured Platform origin.
 
 ## Summary
 

@@ -25,7 +25,7 @@ Authentication resolution returns `x-dsh-auth-token` and a failure callback capt
 <a id="use-this-package"></a>
 ## Use this package
 
-Only `deepseekAccount.resolveToken(url)` supplies the token; the account service validates the destination. Signed-out or ineligible requests fail with `ACCOUNT_SIGN_IN_REQUIRED` and discovery returns an empty catalog. The route never falls back to an API key. Other credential lookup errors propagate.
+Only `deepseekAccount.resolveToken(url)` supplies the token; the account service validates the destination. Signed-out, parked, or ineligible requests fail with `ACCOUNT_SIGN_IN_REQUIRED` and discovery returns an empty catalog. The route never falls back to an API key. Other credential lookup errors propagate.
 
 The route's catalog comes from the account's `GET /models` listing at the origin of the Messages `baseURL` (`https://api.deepseek.com/models` for the official endpoint); the listing endpoint is not configurable. Listing requests carry the account token in `x-dsh-auth-token` and the harness `User-Agent`, and reject redirects.
 
@@ -54,7 +54,7 @@ Offered models take the listing's name, `context_window`, input modalities, and 
 | `modelsMaxAgeMs` | `600,000` | Listing age after which the next access refreshes it; a failed load retries after the same age |
 | `modelOverrides` | `{}` | Field overrides by model id |
 
-An account request HTTP 401 maps to `ACCOUNT_TOKEN_INVALID` independently of the response body. The account service removes the credential only if it still matches the request token. HTTP 403 and other failures do not clear the login. The account module owns task cancellation after sign-out; this plugin does not inspect Agents.
+An account request HTTP 401 maps to `ACCOUNT_TOKEN_INVALID` independently of the response body. The account service parks the credential only if it still matches the request token; the stored record is retained for reauthentication, so later requests fail with `ACCOUNT_SIGN_IN_REQUIRED` without another HTTP attempt. HTTP 403 and other failures do not change the login. The account module owns task cancellation after sign-out; this plugin does not inspect Agents.
 
 The settings namespace is the Cordis entry id, or the plugin name without an entry. Product profiles retain the official entry id `llm-deepseek` and use `llm-deepseek-account` for the account route.
 

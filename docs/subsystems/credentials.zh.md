@@ -56,7 +56,7 @@ interface CredentialInfo {
 
 ## 内嵌 Platform 凭证
 
-PlatformSession 是 getPlatformSession 返回的仅限 Host 快照：origin 指定所配置的 Platform 签发来源，token 包含其已存账号凭证。userId 复制最近一次成功 getProfile 得到的稳定账号 ID；尚无一次成功读取或资料不含 ID 时为 null。快照复用该 ID，不自行发起资料请求，因此 ID 未知时只会让 userId 为 null，而不会延迟调用方；资料读取首次取得稳定 ID 或该 ID 变化时仅通知使用 `watch(signal, true)` 的 Host 订阅者，供标识使用方重新读取快照。使用方以 origin 和 userId 作为持久化浏览器存储的键，为 null 时退回临时存储。账号已退登或读取凭证期间凭证变化时不返回快照；签发来源不匹配时失败。原生使用方负责在凭证变化时使文档失效。账号控制器 RPC、AccountView 和 AccountDetails 均不包含此快照。
+PlatformSession 是 getPlatformSession 返回的仅限 Host 快照：origin 指定所配置的 Platform 签发来源，token 包含其已存账号凭证。userId 复制最近一次成功 getProfile 得到的稳定账号 ID；尚无一次成功读取或资料不含 ID 时为 null。快照复用该 ID，不自行发起资料请求，因此 ID 未知时只会让 userId 为 null，而不会延迟调用方；资料读取首次取得稳定 ID 或该 ID 变化时仅通知使用 `watch(signal, true)` 的 Host 订阅者，供标识使用方重新读取快照。使用方以 origin 和 userId 作为持久化浏览器存储的键，为 null 时退回临时存储。账号已退登、授权已被标记或读取凭证期间凭证变化时不返回快照。原生使用方负责在凭证变化时使文档失效。账号控制器 RPC、AccountView 和 AccountDetails 均不包含此快照。
 
 AccountDetails.balance 将充值钱包投影为 value、赠送钱包投影为 bonusWallets，分别保留币种和十进制余额字符串。查询失败不包含钱包数组。
 
@@ -270,7 +270,7 @@ Account operations; only Host consumers can obtain a request credential.
 ```ts cordis-catalog
 /**
  * Read stored-account presence and the latest login attempt.
- * @returns a snapshot without credentials or PKCE secrets.
+ * @returns a snapshot without credentials or PKCE secrets; `needs-reauth` names a parked grant that was retained.
  */
 abstract getState(): Promise<AccountView>
 
@@ -279,21 +279,21 @@ abstract getState(): Promise<AccountView>
  * A ready result whose stable profile ID first becomes available or changes notifies identity-enabled watch
  * consumers, so they re-read getPlatformSession; repeated IDs stay silent.
  * @param client - identity of the requesting UI for this call.
- * @returns profile outcome, or null if signed out or the grant changed during the query.
+ * @returns profile outcome, or null if signed out, the grant changed during the query, or the stored grant is parked.
  */
 abstract getProfile(client: AccountClientMetadata): Promise<AccountDetails['profile'] | null>
 
 /**
  * Query Platform recharge and bonus wallet balances independently of profile data.
  * @param client - identity of the requesting UI for this call.
- * @returns balance outcome, or null if signed out or the grant changed during the query.
+ * @returns balance outcome, or null if signed out, the grant changed during the query, or the stored grant is parked.
  */
 abstract getBalance(client: AccountClientMetadata): Promise<AccountDetails['balance'] | null>
 
 /**
  * Query the granted bonuses Platform has not yet recorded as displayed.
  * @param client - identity of the requesting UI for this call; its language selects the server-authored message.
- * @returns bonuses with their account, or null if signed out or the grant changed during the query.
+ * @returns bonuses with their account, or null if signed out, the grant changed during the query, or the stored grant is parked.
  */
 abstract getUnnotifiedBonuses(client: AccountClientMetadata): Promise<AccountBonusBatch | null>
 
@@ -302,7 +302,7 @@ abstract getUnnotifiedBonuses(client: AccountClientMetadata): Promise<AccountBon
  * @param accountId - account the notification was read for; a different current account is never acknowledged.
  * @param orderId - granted bonus order the user saw.
  * @param client - identity of the requesting UI for this call.
- * @returns true once Platform records the acknowledgement; false if signed out or the account changed.
+ * @returns true once Platform records the acknowledgement; false if signed out, the stored grant is parked, or the account changed.
  */
 abstract ackBonusNotified(accountId: AccountUserId, orderId: AccountBonusOrderId, client: AccountClientMetadata): Promise<boolean>
 
@@ -345,16 +345,16 @@ abstract watch(signal: AbortSignal, includeIdentityChanges?: boolean): AsyncIter
 abstract resolveToken(url: string): Promise<string | undefined>
 
 /**
- * Remove an inference-rejected token only while it still matches the stored login.
+ * Park an inference-rejected token while it still matches the stored login.
  * @param token - token captured by the rejected inference request.
- * @returns after matching credentials are removed and the expiry notification is emitted.
+ * @returns after the matching grant is marked invalid for reauthentication; the stored bytes are retained.
  */
 abstract rejectToken(token: string): Promise<void>
 
 /**
  * Read credentials for the configured Platform origin, bound to their issuing environment, and
  * pair them with the account ID from the last successful profile read; no profile request is made.
- * @returns a Host-only snapshot, or null while signed out or when the credential changed during the read.
+ * @returns a Host-only snapshot, or null while signed out, parked, or when the credential changed during the read.
  */
 abstract getPlatformSession(): Promise<PlatformSession | null>
 
@@ -461,10 +461,10 @@ Source: [`packages/credentials/deepseek-account/src/types.ts`](../../packages/cr
 
 #### `deepseek-account/session-expired` — emit
 
-Server rejection removed the current account credential; this notification is not replayed.
+Server rejection parked the current credential; the stored grant is retained. This notification is not replayed.
 
 ```ts cordis-catalog
-/** Server rejection removed the current account credential; this notification is not replayed.
+/** Server rejection parked the current credential; the stored grant is retained. This notification is not replayed.
  * @mode emit
  */
 'deepseek-account/session-expired'(): void
@@ -488,6 +488,6 @@ Local grant removal has completed.
 Source: [`packages/credentials/deepseek-account/src/index.ts`](../../packages/credentials/deepseek-account/src/index.ts)
 <!-- END GENERATED cordis-surface -->
 
-账号服务定义提供 getState、getProfile、getBalance、getUnnotifiedBonuses、ackBonusNotified、startSignIn、cancelSignIn、signOut、watch 及仅限 Host 的 resolveToken 和 getPlatformSession。平台提供者使用 AuthorizationFlow 和私有 GrantRecord 实现这些操作。AccountView 区分本地存在与服务器验证；尝试 ID 将取消绑定到单次本地流程。参见[账号包](../../packages/credentials/deepseek-account/README.zh.md)。
+账号服务定义提供 getState、getProfile、getBalance、getUnnotifiedBonuses、ackBonusNotified、startSignIn、cancelSignIn、signOut、watch 及仅限 Host 的 resolveToken 和 getPlatformSession。平台提供者使用 AuthorizationFlow 和私有 GrantRecord 实现这些操作。AccountView 区分本地存在、需要重新认证的被标记授权与服务器验证；尝试 ID 将取消绑定到单次本地流程。参见[账号包](../../packages/credentials/deepseek-account/README.zh.md)。
 
 `AccountClientMetadata` 携带调用方 `DSH_CLIENT_VERSION` 提供的 `version`、当前界面 `locale`，以及操作发起时采样的 `timezoneOffsetSeconds`。偏移为本地时间减 UTC 的秒数：UTC+8 对应 `28800`。其中不含凭证。登录申请在兑换及取消期间保留发起时的元数据；退出操作为撤销重试保留其元数据。

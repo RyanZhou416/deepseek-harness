@@ -1,8 +1,8 @@
 /**
  * Multi-account token plumbing: one {@link AccountTokenManager} per provider
  * owns a lazily-built {@link TokenManager} per account, so refresh coalescing
- * (`inflight`) and permanent-failure removal stay scoped to ONE account —
- * a revoked account deletes itself without touching its siblings.
+ * (`inflight`) stays scoped to ONE account. A permanently refused account is
+ * parked in place — never deleted — until the user logs it out explicitly.
  *
  * {@link AccountAwareAdapter} is the internal interface the pool uses to
  * stream through a specific account. A catalog model listed by several
@@ -15,10 +15,13 @@ import { TokenManager, withTimeout } from './common.js'
 import type { CatalogRefreshReport, RefreshOwnershipOutcome, TokenManagerOptions } from './common.js'
 import {
   authFilePath,
+  beginPendingRefreshRotation,
+  completePendingRefreshRotation,
   deleteAccountSession,
   getAccountCredential,
   getAccountSession,
   listAccounts,
+  recordPendingRefreshRotation,
   saveAccountSession,
   resolveAccountKey,
 } from '../auth/store.js'
@@ -185,12 +188,16 @@ interface AccountStoreIo<S> {
   get(account?: string): Promise<S | undefined>
   save(account: string, session: S, expectedPrior?: S, expectedRevision?: number): Promise<void>
   /**
-   * Remove the account's stored session. With `expectedPrior`, the store
-   * removes it only while it is still that session, and with `expectedRevision` only while
-   * the stored revision is still the one the caller read, so a removal cannot delete a
-   * login that landed after the caller read the account.
-   * @returns true when the session was removed, false when the store refused it.
-   *   An implementation may return nothing, which reads as removed.
+   * Remove one account's stored session. This is the explicit-logout operation only:
+   * {@link AccountTokenManager} never calls it, and a refresh failure leaves the credential in
+   * place. It stays on the backend seam so a caller that owns the account lifecycle can perform
+   * the removal through the same store abstraction; with `expectedPrior` the store removes the
+   * record only while it is still that session.
+   * @param account - the canonical account key.
+   * @param expectedPrior - the session the caller read, when the removal is conditional.
+   * @param expectedRevision - the revision that session was read under.
+   * @returns true when the session was removed, false when the store refused it; an
+   *   implementation may return nothing, which reads as removed.
    */
   remove(account: string, expectedPrior?: S, expectedRevision?: number): Promise<void | boolean>
   /** Resolve a legacy alias to the canonical account key. */
@@ -203,6 +210,15 @@ interface AccountStoreIo<S> {
    * @returns the snapshot, or `undefined` when nothing is stored.
    */
   credential?(account: string): Promise<AccountCredential<S> | undefined>
+  /**
+   * Durable pending-rotation journal for this backend. Absent disables journaling, as an
+   * in-memory test backend has no restart to recover from.
+   */
+  journal?: {
+    begin(account: string, session: S, revision: number | undefined): Promise<void>
+    record(account: string, next: S, prior: S, revision: number | undefined): Promise<void>
+    complete(account: string): Promise<void>
+  }
 }
 
 /**
@@ -219,8 +235,8 @@ export interface AccountTokenManagerOptions<S extends TimedSession> {
   provider: ProviderId
   /** Human-readable provider name for error messages. */
   displayName: string
-  /** Provider hooks shared by every account (load/save/remove are bound per account). */
-  makeOptions: (account: string) => Omit<TokenManagerOptions<S>, 'load' | 'save' | 'remove' | 'onRemoved' | 'displayName'>
+  /** Provider hooks shared by every account (load/save are bound per account). */
+  makeOptions: (account: string) => Omit<TokenManagerOptions<S>, 'load' | 'save' | 'displayName'>
   /**
    * Cross-process refresh ownership for one account, when its credential store is shared
    * with cooperating plugin processes. Absent keeps the in-process single-flight and the
@@ -246,22 +262,6 @@ export interface AccountTokenManagerOptions<S extends TimedSession> {
    * @returns the session to serve, or `undefined` to continue with the manager's own path.
    */
   prepareSession?: (account: string, forceRefresh: boolean) => Promise<S | undefined>
-  /** Called after a permanent refresh failure deleted one account's session. */
-  onAccountRemoved?: (account: string) => void
-  /**
-   * Gates one account's credential removal behind the provider's own identity change, when it owns
-   * durable identity state.
-   *
-   * `deleteCredential` performs the store removal and answers whether the record was really removed
-   * (`false` when its compare-and-set refused, in which case the account is not reported as
-   * removed). This callback must resolve as soon as that deletion has settled: the identity change
-   * it starts can await cleanup that is waiting on the very stack that asked for the removal — a
-   * permanent refresh failure removes the account from inside its own credential cycle — so
-   * awaiting the change here would deadlock. The change itself is owned by whoever supplied this
-   * callback, which tracks and reports its settlement, and the account stays closed to requests
-   * until that settlement rather than being treated as ready when the deletion returns.
-   */
-  removalGate?: (account: string, deleteCredential: () => Promise<boolean>) => Promise<boolean>
   /**
    * Called when a successful save proves the store renamed one account's
    * canonical key — a Codex identity that gained its stable user id, for
@@ -306,6 +306,13 @@ export class AccountTokenManager<S extends TimedSession> {
       }),
       resolve: account => resolveAccountKey(provider, account),
       credential: account => getAccountCredential(provider, account) as Promise<AccountCredential<S> | undefined>,
+      journal: {
+        begin: (account, session, revision) =>
+          beginPendingRefreshRotation(provider, account, session as never, revision),
+        record: (account, next, prior, revision) =>
+          recordPendingRefreshRotation(provider, account, next as never, prior as never, revision),
+        complete: account => completePendingRefreshRotation(provider, account),
+      },
     }
   }
 
@@ -420,6 +427,17 @@ export class AccountTokenManager<S extends TimedSession> {
       manager = new TokenManager<S>({
         displayName: this.options.displayName,
         ...this.options.makeOptions(account),
+        ...this.options.onWarn === undefined ? {} : { onWarn: this.options.onWarn },
+        ...io.journal === undefined
+          ? {}
+          : {
+            rotationJournal: {
+              begin: (session: S, revision?: number) => io.journal!.begin(boundAccount, session, revision),
+              record: (next: S, prior: S, revision?: number) =>
+                io.journal!.record(boundAccount, next, prior, revision),
+              complete: () => io.journal!.complete(boundAccount),
+            },
+          },
         ...this.options.refreshOwnership === undefined
           ? {}
           : { withRefreshOwnership: cycle => this.options.refreshOwnership!(boundAccount)(cycle) },
@@ -466,16 +484,6 @@ export class AccountTokenManager<S extends TimedSession> {
             boundAccount = canonical
           }
         },
-        remove: async (expectedPrior, expectedRevision) => {
-          // The store's own removal answers nothing when it deleted the record, so the absence of a
-          // refusal is the removal: the gate's boolean is that same fact, never a `void` read as one.
-          const deleteCredential = async (): Promise<boolean> =>
-            (await io.remove(boundAccount, expectedPrior, expectedRevision)) !== false
-          const gate = this.options.removalGate
-          // Without a gate the removal is the store's own compare-and-set, exactly as before.
-          return gate === undefined ? await deleteCredential() : await gate(boundAccount, deleteCredential)
-        },
-        onRemoved: () => { this.options.onAccountRemoved?.(boundAccount) },
       })
       this.managers.set(account, manager)
     }

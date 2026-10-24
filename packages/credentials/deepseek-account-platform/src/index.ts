@@ -7,8 +7,9 @@ import { promises as streamPromises } from 'node:stream'
 import { Context, Service } from '@deepseek-ai/cordis'
 import Schema from '@deepseek-ai/schemastery'
 import { z } from 'zod'
-import { DeepSeekAccount, installAccountTaskCancellation, mergePlatformCookies, platformClientHeaders, platformWireLocale, type AccountBonusBatch, type AccountBonusOrderId, type AccountClientMetadata, type AccountDetails, type AccountUserId, type AccountView, type PlatformSession, type SignInAttemptId, type SignInAttemptView } from '@deepseek-ai/dsh-deepseek-account'
+import { DeepSeekAccount, installAccountTaskCancellation, mergePlatformCookies, platformClientHeaders, platformWireLocale, type AccountBonusBatch, type AccountCredentialIssue, type AccountBonusOrderId, type AccountClientMetadata, type AccountDetails, type AccountUserId, type AccountView, type PlatformSession, type SignInAttemptId, type SignInAttemptView } from '@deepseek-ai/dsh-deepseek-account'
 import { credentialKey } from '@deepseek-ai/dsh-credentials'
+import type { CredentialRecord } from '@deepseek-ai/dsh-credentials'
 import type { AuthorizationSession } from '@deepseek-ai/dsh-authorization'
 import { profile, readAccountDetail, readUnnotifiedBonuses, sendBonusNotified } from './details.ts'
 import { revokeAccount, type LogoutRetryPolicy } from './logout.ts'
@@ -16,8 +17,22 @@ import { AccountUnauthorizedError, PlatformAuthError, platformHeaders, platformO
 
 const KEY = credentialKey('deepseek-account-platform', 'default')
 const DEVICE = credentialKey('deepseek-account-platform', 'device')
-const grant = z.object({ version: z.literal(1), token: z.string().min(1), issuer: z.url() })
+const token = z.string().min(1)
+// Version 1 is the active grant written by every earlier provider. Version 2 adds the parking
+// marker; an older build refuses an unknown version instead of treating it as active or deleting it.
+const activeGrant = z.object({ version: z.literal(1), token, issuer: z.url() })
+const parkedGrant = z.object({
+  version: z.literal(2), token, issuer: z.url(),
+  invalid: z.object({ reason: z.enum(['needs-reauth', 'issuer-mismatch']), at: z.string().min(1) }),
+})
+const grant = z.union([activeGrant, parkedGrant])
 const device = z.object({ id: z.uuid() })
+/** One stored grant and whether it can authenticate this configured origin. */
+interface StoredGrant {
+  readonly value: z.infer<typeof grant>
+  /** Parking reason; absent for a usable grant. */
+  readonly issue?: AccountCredentialIssue
+}
 
 /** Deployment-specific platform and request deadlines. */
 export interface Config {
@@ -165,25 +180,22 @@ export class PlatformAccount extends DeepSeekAccount {
   }
 
   async [Service.init](): Promise<void> {
-    const record = await this.ctx.credentials.readRecord(KEY)
-    if (record === undefined) return
-    if (record.kind !== 'grant') throw new PlatformAuthError('storage')
-    const parsed = grant.safeParse(record.payload)
-    if (!parsed.success) throw new PlatformAuthError('storage')
-    if (parsed.data.issuer === this.origin) return
-    await this.ctx.credentials.deleteRecord(KEY)
+    const stored = this.classify(await this.ctx.credentials.readRecord(KEY))
+    // A grant from another Platform origin is parked, not deleted: an explicit sign-out is the only
+    // removal path, and a later boot must keep reporting the same reauthentication requirement.
+    if (stored?.issue === 'issuer-mismatch' && stored.value.version === 1) {
+      await this.parkCredential(stored.value.token, 'issuer-mismatch', this.detailsLifetime)
+    }
   }
 
   override async getState(): Promise<AccountView> {
-    const record = await this.ctx.credentials.readRecord(KEY)
-    if (record !== undefined && (record.kind !== 'grant' || !grant.safeParse(record.payload).success)) {
-      throw new PlatformAuthError('storage')
-    }
+    const stored = this.classify(await this.ctx.credentials.readRecord(KEY))
     const attempt = this.attempt?.view ?? null
     return {
-      status: record === undefined ? 'signed-out' : 'credential-stored',
+      status: stored === undefined ? 'signed-out' : stored.issue === undefined ? 'credential-stored' : 'needs-reauth',
+      ...stored?.issue === undefined ? {} : { credentialIssue: stored.issue },
       // Credential removal can notify watchers before sign-out finishes clearing the attempt.
-      attempt: record === undefined && attempt?.phase === 'succeeded' ? null : attempt,
+      attempt: stored === undefined && attempt?.phase === 'succeeded' ? null : attempt,
       links: { usageUrl: new URL('/usage', this.origin).href, topUpUrl: new URL('/top_up', this.origin).href },
     }
   }
@@ -218,7 +230,7 @@ export class PlatformAccount extends DeepSeekAccount {
       return { accountId, bonuses }
     } catch (error) {
       if (error instanceof AccountUnauthorizedError) {
-        if (this.detailsLifetime === lifetime) await this.expireCredential(stored.token, lifetime)
+        if (this.detailsLifetime === lifetime) await this.parkCredential(stored.token, 'needs-reauth', lifetime)
         return null
       }
       throw error
@@ -238,7 +250,7 @@ export class PlatformAccount extends DeepSeekAccount {
       return true
     } catch (error) {
       if (error instanceof AccountUnauthorizedError) {
-        if (this.detailsLifetime === lifetime) await this.expireCredential(stored.token, lifetime)
+        if (this.detailsLifetime === lifetime) await this.parkCredential(stored.token, 'needs-reauth', lifetime)
         return false
       }
       throw error
@@ -306,9 +318,10 @@ export class PlatformAccount extends DeepSeekAccount {
       const details = await readAccountDetail(field, this.origin, stored.token,
         AbortSignal.any([lifetime.signal, AbortSignal.timeout(field === 'balance' ? this.balanceTimeout : this.requestTimeout)]), headers)
       return this.detailsLifetime !== lifetime ? null : details
-    } catch (_unauthorized) {
-      // readAccountDetail exposes only authenticated credential rejection failures.
-      if (this.detailsLifetime === lifetime) await this.expireCredential(stored.token, lifetime)
+    } catch (error) {
+      if (!(error instanceof AccountUnauthorizedError)) throw error
+      // Only an authenticated rejection parks the grant; transient failures keep it usable.
+      if (this.detailsLifetime === lifetime) await this.parkCredential(stored.token, 'needs-reauth', lifetime)
       return null
     }
   }
@@ -320,26 +333,36 @@ export class PlatformAccount extends DeepSeekAccount {
 
   override async rejectToken(token: string): Promise<void> {
     const lifetime = this.detailsLifetime
-    const stored = await this.readCurrentGrant(lifetime)
-    if (stored?.token !== token || this.detailsLifetime !== lifetime) return
-    await this.expireCredential(token, lifetime)
+    const stored = await this.readStoredGrant(lifetime)
+    if (stored === undefined || stored.issue !== undefined || stored.value.token !== token) return
+    await this.parkCredential(token, 'needs-reauth', lifetime)
   }
 
-  private async expireCredential(token: string, lifetime: AbortController): Promise<void> {
-    this.removing ??= (async () => {
-      if (this.attempt !== undefined) await this.cancelSignIn(this.attempt.view.id)
-      const record = await this.ctx.credentials.readRecord(KEY)
-      if (this.closed || this.detailsLifetime !== lifetime || record?.kind !== 'grant') return this.getState()
-      const current = grant.parse(record.payload)
-      if (current.token !== token || current.issuer !== this.origin) return this.getState()
-      await this.ctx.credentials.deleteRecord(KEY)
-      this.ctx.emit('deepseek-account/session-expired')
-      this.attempt = undefined
-      this.ctx.emit('deepseek-account/signed-out')
-      this.changed()
-      return this.getState()
-    })().finally(() => { this.removing = undefined })
-    await this.removing
+  /**
+   * Park one grant instead of deleting it, preserving the stored bytes and fields this provider does
+   * not interpret. A matching parked grant is left untouched, so a repeated rejection neither
+   * rewrites the record nor repeats the expiry notification.
+   * @param token - grant token the caller observed.
+   * @param reason - why the grant can no longer authenticate.
+   * @param lifetime - credential lifetime; a replacement or sign-out that settles first wins.
+   */
+  private async parkCredential(token: string, reason: AccountCredentialIssue, lifetime: AbortController): Promise<void> {
+    const outcome: { parked: boolean } = { parked: false }
+    await this.ctx.credentials.modifyRecord(KEY, (current) => {
+      if (this.closed || this.detailsLifetime !== lifetime) return Promise.resolve(undefined)
+      if (current?.kind !== 'grant') return Promise.resolve(undefined)
+      const parsed = grant.safeParse(current.payload)
+      if (!parsed.success || parsed.data.token !== token || parsed.data.version === 2) return Promise.resolve(undefined)
+      outcome.parked = true
+      return Promise.resolve({ kind: 'grant', payload: {
+        ...payloadFields(current.payload),
+        version: 2,
+        invalid: { reason, at: new Date().toISOString() },
+      } })
+    })
+    if (!outcome.parked || this.closed) return
+    if (reason === 'needs-reauth') this.ctx.emit('deepseek-account/session-expired')
+    this.changed()
   }
 
   override async getDeviceIdentity(): Promise<{ deviceId?: string; userId?: AccountUserId; osVersion: string }> {
@@ -369,16 +392,29 @@ export class PlatformAccount extends DeepSeekAccount {
       requestHeaders }
   }
 
-  private async readCurrentGrant(lifetime: AbortController): Promise<z.infer<typeof grant> | null> {
-    if (this.closed) return null
-    const record = await this.ctx.credentials.readRecord(KEY)
-    if (record === undefined || lifetime.signal.aborted) return null
+  /** Classify one stored account record; a malformed record stays a loud storage failure. */
+  private classify(record: CredentialRecord | undefined): StoredGrant | undefined {
+    if (record === undefined) return undefined
     if (record.kind !== 'grant') throw new PlatformAuthError('storage')
     const parsed = grant.safeParse(record.payload)
     if (!parsed.success) throw new PlatformAuthError('storage')
-    // A private origin override must never forward a grant issued by another environment.
-    if (parsed.data.issuer !== this.origin) throw new PlatformAuthError('protocol')
-    return parsed.data
+    // A parked marker or a foreign issuer keeps the bytes but requires reauthentication.
+    if (parsed.data.issuer !== this.origin) return { value: parsed.data, issue: 'issuer-mismatch' }
+    if (parsed.data.version === 2) return { value: parsed.data, issue: parsed.data.invalid.reason }
+    return { value: parsed.data }
+  }
+
+  private async readStoredGrant(lifetime: AbortController): Promise<StoredGrant | undefined> {
+    if (this.closed) return undefined
+    const record = await this.ctx.credentials.readRecord(KEY)
+    if (record === undefined || lifetime.signal.aborted) return undefined
+    return this.classify(record)
+  }
+
+  private async readCurrentGrant(lifetime: AbortController): Promise<z.infer<typeof grant> | null> {
+    const stored = await this.readStoredGrant(lifetime)
+    if (stored === undefined || stored.issue !== undefined) return null
+    return stored.value
   }
 
   override async resolveToken(url: string): Promise<string | undefined> {
@@ -390,6 +426,8 @@ export class PlatformAccount extends DeepSeekAccount {
     if (record.kind !== 'grant') throw new PlatformAuthError('storage')
     const result = grant.safeParse(record.payload)
     if (!result.success) throw new PlatformAuthError('storage')
+    // A parked grant is retained for reauthentication and never forwarded to an inference provider.
+    if (result.data.version === 2) return undefined
     // Development grants cannot authenticate production model or file requests.
     const issuer = new URL(result.data.issuer)
     if (result.data.token.startsWith('dsh_mock_')) return undefined
@@ -468,9 +506,11 @@ export class PlatformAccount extends DeepSeekAccount {
         if (record.kind !== 'grant') throw new PlatformAuthError('storage')
         const parsed = grant.safeParse(record.payload)
         if (!parsed.success) throw new PlatformAuthError('storage')
-        if (parsed.data.issuer !== this.origin) throw new PlatformAuthError('protocol')
+        // Explicit sign-out is the only removal path, including for a parked or foreign-issuer grant.
         await this.ctx.credentials.deleteRecord(KEY)
-        this.revoke(parsed.data.token, platformClientHeaders(this.platform, client))
+        // A grant this environment did not issue must never reach its logout endpoint, but the
+        // user's explicit local removal still applies.
+        if (parsed.data.issuer === this.origin) this.revoke(parsed.data.token, platformClientHeaders(this.platform, client))
       }
       this.attempt = undefined
       this.ctx.emit('deepseek-account/signed-out')
@@ -657,4 +697,15 @@ export default PlatformAccount
 /** OS identification shared by login and credential-free identity reads. */
 function deviceOsVersion(): string {
   return `${platform()} ${release()}`
+}
+
+/**
+ * Copy a validated grant payload before adding the parking marker. Owner fields this provider does
+ * not interpret survive the rewrite, so parking only changes the fields that state its condition.
+ * @param payload - the validated grant record payload.
+ * @returns a shallow copy of its top-level fields.
+ */
+function payloadFields(payload: unknown): Record<string, unknown> {
+  /* v8 ignore next -- classify() admits this payload only as an object holding version/token/issuer */
+  return typeof payload === 'object' && payload !== null && !Array.isArray(payload) ? { ...payload } : {}
 }

@@ -87,6 +87,8 @@ import {
   deleteAccountSession,
   getAccountCredential,
   listAccounts,
+  pendingRotationAccounts,
+  recoverPendingRefreshRotations,
   resolveAccountKey,
   saveAccountSession,
   setDefaultAccount,
@@ -1123,7 +1125,7 @@ function credentialOwnershipStatus(session: ClaudeSession): CredentialOwnershipS
  * plugin's store is deliberately not read again here: this runs while the manager holds its own
  * durable lock on that account, and a second read through the same lock would deadlock.
  * @param session - the credential the refresh cycle is about to spend.
- * @param deps - the sync opt-in and the one credential-source reader.
+ * @param deps - the sync opt-in, the one credential-source reader and a warning sink.
  * @returns the credential to store.
  */
 export function refreshForClaudeOwnership(
@@ -1131,6 +1133,7 @@ export function refreshForClaudeOwnership(
   deps: {
     readonly syncClaudeCodeCredentials: boolean
     readonly readSource: () => ClaudeSourceCredential | undefined
+    readonly onWarn?: (message: string) => void
   },
 ): Promise<ClaudeSession> {
   switch (resolveClaudeCredentialMode(session)) {
@@ -1138,7 +1141,7 @@ export function refreshForClaudeOwnership(
       return Promise.resolve(resolveClaudeReadOnlyRefresh(session, deps.readSource))
     case 'legacy-writeback':
       return deps.syncClaudeCodeCredentials
-        ? refreshClaudeSynced(session, refreshClaude)
+        ? refreshClaudeSynced(session, refreshClaude, deps.onWarn)
         : refreshClaude(session)
     case 'independent-oauth':
       return refreshClaude(session)
@@ -1502,6 +1505,7 @@ export class SubscriptionsAuthController implements AuthController {
 
   async status(provider: ProviderId): Promise<ProviderStatus> {
     const entries = await listAccounts(provider)
+    const pendingRotations = await pendingRotationAccounts(provider)
     const failure = this.lastError.get(provider)
     // A status read is a read: it uses the credential store and this plugin's
     // own recorded state, and never contacts the provider.
@@ -1515,8 +1519,12 @@ export class SubscriptionsAuthController implements AuthController {
         expiresAt: session.expiresAt,
         // The roster itself is the credential evidence: this account has a
         // stored authorization. A re-login requirement is stated by the
-        // dimension's own owner instead of being guessed from a cooldown.
-        credential: reported?.credential ?? { state: 'ready' },
+        // dimension's own owner instead of being guessed from a cooldown. A
+        // rotation marker the journal still holds is a second source: recovery
+        // could not confirm which credential is current, so the account reports
+        // needing re-authentication until it is resolved.
+        credential: reported?.credential
+          ?? (pendingRotations.has(key) ? { state: 'reauth_required' } : { state: 'ready' }),
         ...provider !== 'claude' ? {} : { credentialOwnership: credentialOwnershipStatus(session as ClaudeSession) },
         ...account === undefined ? {} : { account },
         ...plan === undefined ? {} : { plan },
@@ -2134,6 +2142,16 @@ export function apply(ctx: Context, config: Config, internals: SubscriptionInter
   const onWarn = (message: string): void => {
     ctx.logger.warn(`dsh-plugin-subscriptions: ${message}`)
   }
+  // A refresh that spent its grant but crashed before the store write left a durable marker
+  // beside the store. Recovery applies it only while the store still holds the credential the
+  // rotation started from; the pass never deletes a credential and never blocks startup.
+  void recoverPendingRefreshRotations({ onWarn }).then((report) => {
+    for (const { provider, account } of report.unresolved) {
+      onWarn(`refresh journal for ${provider}/${account} needs inspection`)
+    }
+  }, (error: unknown) => {
+    onWarn(`the pending-refresh journal could not be recovered (${errorChain(error)})`)
+  })
   /**
    * Which account each session's current request is judged by.
    *
@@ -2258,9 +2276,7 @@ export function apply(ctx: Context, config: Config, internals: SubscriptionInter
    *
    * This is the awaitable form an identity change's own operation uses: the change publishes only
    * after its release settled, and a release failure fails the change instead of being tracked as
-   * disposal accounting. The removal that triggers such a change never awaits the change itself,
-   * which is what keeps a permanent refresh failure from waiting on the credential cycle it is
-   * running inside.
+   * disposal accounting.
    * @param account - the account whose maintenance state is released.
    */
   const releaseClaudeAccountSettled = async (account: string): Promise<void> => {
@@ -2270,70 +2286,6 @@ export function apply(ctx: Context, config: Config, internals: SubscriptionInter
     if (limits !== undefined) await limits.releaseAccount(account)
     const controller = claudeMaintenance
     if (controller !== undefined) await controller.releaseAccount(account)
-  }
-  /**
-   * Gate one account's credential removal behind its identity change.
-   *
-   * The gate returns the removal's own result as soon as the credential is really gone (or its
-   * compare-and-set refused it, in which case the account is not reported as removed). The identity
-   * change runs around that deletion — closing the request gate first, dropping the account's spans,
-   * releasing its maintenance and publishing the generation — and is owned here, never awaited on
-   * the removal stack that a permanent refresh failure is running inside.
-   * @param account - the account being removed.
-   * @param deleteCredential - the store's own conditional removal.
-   * @returns whether the credential was really removed.
-   */
-  const claudeRemovalGate = async (
-    account: string,
-    deleteCredential: () => Promise<boolean>,
-  ): Promise<boolean> => {
-    const owner = claudeContinuation.owner(account)
-    if ('kind' in owner) {
-      // A removal this installation cannot gate is not performed behind the gate's back: the account
-      // has no durable identity owner (or the state is being disposed), so nothing may report an
-      // identity change for it and the caller is refused instead of handed a bare deletion.
-      throw new Error(`the claude identity owner for this account is unavailable (${owner.reason})`)
-    }
-    const committed = Promise.withResolvers<boolean>()
-    // The deletion's own failure is kept: the transition reports it fail-closed, and the removal
-    // rejects with that error rather than a replacement or a false.
-    let failure: unknown
-    const transition = owner.changed('removal', async () => {
-      let removed: boolean
-      try {
-        removed = await deleteCredential()
-      } catch (error: unknown) {
-        failure = error
-        throw error
-      }
-      committed.resolve(removed)
-      if (!removed) {
-        failure = new Error('the credential removal was refused by its compare-and-set')
-        throw failure
-      }
-      await releaseClaudeAccountSettled(account)
-    })
-    void claudeReleases.track(
-      transition.result.then(outcome => {
-        // `unconfirmed` states no reason of its own: the publication could not be confirmed, which is
-        // not a new winner and not a usable credential.
-        const unsettled = outcome.kind === 'advanced'
-          ? undefined
-          : outcome.kind === 'failed'
-            ? outcome.reason
-            : 'the generation publication could not be confirmed'
-        if (unsettled !== undefined) {
-          onWarn(`claude identity removal for ${account} did not settle: ${unsettled}`)
-        }
-        // A transition that ended before the deletion settled — a closed gate, an unowned intent, a
-        // failed span discard — must fail the removal rather than leave it pending. The deletion's own
-        // error is kept; a rejection after the deletion already answered is ignored, so a later
-        // cleanup failure is reported only. An absent `failure` is never read as a new winner.
-        committed.reject(failure ?? new Error(`the claude identity removal did not complete (${unsettled ?? outcome.kind})`))
-      }),
-      'claude identity removal did not settle',
-    )
-    return await committed.promise
   }
   /**
    * Release one account's maintenance state. The attribution change is synchronous; only the
@@ -2429,7 +2381,7 @@ export function apply(ctx: Context, config: Config, internals: SubscriptionInter
     )
   }
   let cacheActive = true
-  const authChanged = (provider: ProviderId, account?: string, reason: 'login' | 'logout' | 'default' | 'removed' | 'ownership' = 'login'): void => {
+  const authChanged = (provider: ProviderId, account?: string, reason: 'login' | 'logout' | 'default' | 'ownership' = 'login'): void => {
     if (!cacheActive) return
     if (provider === 'codex') refreshCodexPresence()
     poolAdapter?.invalidate()
@@ -2590,7 +2542,6 @@ export function apply(ctx: Context, config: Config, internals: SubscriptionInter
             refresh: refreshCodex,
             isPermanent: isCodexPermanentRefreshError,
           }),
-          onAccountRemoved: account => { authChanged('codex', account, 'removed') },
           onAccountRenamed: (from, to) => renameAccountState('codex', from, to),
           onWarn,
         })
@@ -2687,6 +2638,7 @@ export function apply(ctx: Context, config: Config, internals: SubscriptionInter
             refresh: session => refreshForClaudeOwnership(session, {
               syncClaudeCodeCredentials,
               readSource: readClaudeCredentialSource,
+              onWarn,
             }),
             isPermanent: isClaudePermanentRefreshError,
           }),
@@ -2696,12 +2648,6 @@ export function apply(ctx: Context, config: Config, internals: SubscriptionInter
           // store, or fails closed; `list()` and `snapshot()` never call it, so no status read
           // touches that store.
           prepareSession: account => claudeReadOnlyUse(account, readClaudeCredentialSource),
-          onAccountRemoved: account => { authChanged('claude', account, 'removed') },
-          // A permanent refresh failure removes the account from inside its own credential cycle,
-          // so the identity change that removal starts is owned here and never awaited on that
-          // stack: the gate returns the removal's own result while the change settles its cleanup
-          // and publication, keeping the account closed to requests until it does.
-          removalGate: claudeRemovalGate,
           // Cooperating plugin instances share this credential store: a rotation must
           // take the store's own refresh ownership before spending a grant.
           refreshOwnership: durableStoreRefreshOwnership(),
@@ -3092,7 +3038,7 @@ export function apply(ctx: Context, config: Config, internals: SubscriptionInter
             refresh: refreshGrok,
             isPermanent: isGrokPermanentRefreshError,
           }),
-          onAccountRemoved: account => { authChanged('grok', account, 'removed') },
+          onAccountRenamed: (from, to) => renameAccountState('grok', from, to),
         })
         grokTokens = tokens
         accountTokens.set('grok', tokens as AccountTokenManager<StoredSession>)
@@ -3128,7 +3074,7 @@ export function apply(ctx: Context, config: Config, internals: SubscriptionInter
             refresh: refreshCopilot,
             isPermanent: isCopilotPermanentRefreshError,
           }),
-          onAccountRemoved: account => { authChanged('copilot', account, 'removed') },
+          onAccountRenamed: (from, to) => renameAccountState('copilot', from, to),
         })
         accountTokens.set('copilot', tokens as AccountTokenManager<StoredSession>)
         copilotAdapter = new CopilotAdapter({
@@ -3161,7 +3107,7 @@ export function apply(ctx: Context, config: Config, internals: SubscriptionInter
             refresh: session => refreshAntigravity(session, resolveAntigravityOAuthConfig(config.antigravity)),
             isPermanent: isAntigravityPermanentRefreshError,
           }),
-          onAccountRemoved: account => { authChanged('antigravity', account, 'removed') },
+          onAccountRenamed: (from, to) => renameAccountState('antigravity', from, to),
         })
         accountTokens.set('antigravity', tokens as AccountTokenManager<StoredSession>)
         usageFetchers.antigravity = async (account, signal) => fetchAntigravityUsage(
@@ -3196,7 +3142,7 @@ export function apply(ctx: Context, config: Config, internals: SubscriptionInter
             refresh: refreshCursor,
             isPermanent: isCursorPermanentRefreshError,
           }),
-          onAccountRemoved: account => { authChanged('cursor', account, 'removed') },
+          onAccountRenamed: (from, to) => renameAccountState('cursor', from, to),
         })
         accountTokens.set('cursor', tokens as AccountTokenManager<StoredSession>)
         let adapter!: CursorAdapter
@@ -3683,7 +3629,8 @@ export function apply(ctx: Context, config: Config, internals: SubscriptionInter
         for (const { key, session } of accounts) {
           if (!claudeCredentialWritesBack(resolveClaudeCredentialMode(session))) continue
           tokens.session(key).catch(() => {
-            // Best-effort: TokenManager already surfaces failures via onRemoved.
+            // Best-effort: the manager reports a refused grant through the account's status and
+            // keeps the credential stored, so a later explicit logout is the only removal.
           })
         }
       }, () => undefined)

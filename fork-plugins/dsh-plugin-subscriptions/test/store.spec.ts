@@ -193,7 +193,6 @@ test('rekeyed Codex manager survives last-account logout and canonical re-login'
   let revoked = false
   const saved: string[] = []
   const removed: string[] = []
-  const notified: string[] = []
   const tokens = new AccountTokenManager<CodexSession>({
     provider: 'codex', displayName: 'Codex',
     makeOptions: () => ({
@@ -205,7 +204,6 @@ test('rekeyed Codex manager survives last-account logout and canonical re-login'
       },
       isPermanent: error => error instanceof Error && error.message === 'invalid_grant',
     }),
-    onAccountRemoved: account => { notified.push(account) },
     io: {
       list: () => listAccounts('codex', path),
       get: account => getAccountSession('codex', account, path),
@@ -243,9 +241,32 @@ test('rekeyed Codex manager survives last-account logout and canonical re-login'
   revoked = true
   await assert.rejects(tokens.session(userKey, true),
     (error: unknown) => error instanceof LlmError && error.code === 'INVALID_CREDENTIAL')
-  assert.deepEqual(removed, [userKey])
-  assert.deepEqual(notified, [userKey])
+  assert.deepEqual(removed, [], 'a permanent refresh failure deletes nothing')
+  assert.equal((await listAccounts('codex', path)).length, 1, 'the account stays for an explicit logout')
+  // The explicit logout is the one removal that really deletes it.
+  await deleteAccountSession('codex', userKey, path)
   assert.deepEqual(await listAccounts('codex', path), [])
+})
+
+test('a Codex rekey whose canonical key is occupied keeps both credentials', async () => {
+  const path = storePath()
+  const emailSession = { ...CODEX, emailAddress: 'alice@example.com', accessToken: 'email-at' }
+  const emailKey = accountKeyOf('codex', emailSession)
+  const userSession = { ...codexUser('alice-user'), emailAddress: 'alice@example.com', accessToken: 'user-at' }
+  const userKey = accountKeyOf('codex', userSession)
+  writeFileSync(path, JSON.stringify({
+    codex: { default: emailKey, accounts: { [emailKey]: emailSession, [userKey]: userSession } },
+  }), { mode: 0o600 })
+
+  // A refresh of the email-keyed record must neither overwrite nor delete the canonical one.
+  const refreshed = { ...emailSession, accessToken: 'email-refreshed' }
+  assert.equal(
+    await saveAccountSession('codex', emailKey, refreshed, path, { expectedPrior: emailSession }),
+    true,
+  )
+  const entry = (await loadStore(path)).codex!
+  assert.equal(entry.accounts[emailKey].accessToken, 'email-refreshed', 'the refreshed credential is stored in place')
+  assert.equal(entry.accounts[userKey].accessToken, 'user-at', 'the canonical record is untouched')
 })
 
 test('Codex migration does not overwrite a colliding canonical entry', async () => {
@@ -372,13 +393,16 @@ test('one corrupt provider entry does not blind the other providers', async () =
     codex: { default: 'acct-1', accounts: { 'acct-1': CODEX } },
     claude: { default: 'corrupt', accounts: { corrupt: { accessToken: '', refreshToken: '', expiresAt: 0 } } },
   }), { mode: 0o600 })
-  // Codex keeps its account; the corrupt claude entry is skipped, not fatal.
+  // Codex keeps its account; the corrupt claude entry is skipped by the typed view, not fatal.
   assert.equal((await listAccounts('codex', path)).length, 1)
   assert.equal((await listAccounts('claude', path)).length, 0)
-  // …and the next write persists the store without the corrupt entry.
+  // …and the next write keeps the unreadable entry verbatim instead of dropping the credential.
   await saveAccountSession('codex', 'acct-1', CODEX, path)
   const onDisk = JSON.parse(readFileSync(path, 'utf8')) as Record<string, unknown>
-  assert.equal(onDisk.claude, undefined, 'the corrupt entry is dropped on the next write')
+  assert.deepEqual(onDisk.claude, {
+    default: 'corrupt',
+    accounts: { corrupt: { accessToken: '', refreshToken: '', expiresAt: 0 } },
+  }, 'the corrupt entry is preserved for the user to fix')
 })
 
 test('a valid account survives alongside a corrupt sibling of the same provider', async () => {

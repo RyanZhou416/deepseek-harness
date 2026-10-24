@@ -20,13 +20,13 @@
  * inferred from or dropped, because it decides who may spend a shared refresh grant.
  */
 
-import { randomBytes } from 'node:crypto'
+import { createHash, randomBytes } from 'node:crypto'
 import { decodeJwtPayload } from './jwt.js'
-import { chmod, copyFile, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, open, readFile, rename, rm } from 'node:fs/promises'
 import { dirname } from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
 import { dshHomePath } from '@deepseek-ai/dsh-home-paths'
-import { withStoreLock } from './store-lock.js'
+import { withStoreLockOwned } from './store-lock.js'
 import { CLAUDE_CREDENTIAL_MODES, isClaudeCredentialMode } from './claude-credential-ownership.js'
 import type { ClaudeCredentialMode } from './claude-credential-ownership.js'
 
@@ -199,6 +199,83 @@ interface SessionMap {
   revisions?: Record<string, Record<string, number>>
 }
 
+/**
+ * One provider entry this build cannot fully represent, kept so a write can put it back.
+ *
+ * Parsing drops an entry from the in-memory store when it cannot be used (a provider value that
+ * is not an object, a single-account record without usable tokens, a missing accounts map, a
+ * non-string default, or an account without tokens). Dropping it from the FILE would destroy a
+ * credential this build merely failed to read, so the raw value is retained for write-back.
+ */
+interface PreservedProvider {
+  /** The provider's raw value, exactly as parsed. */
+  raw: unknown
+  /** The raw value when it is a JSON object; absent for a scalar or an array. */
+  rawObject?: Record<string, unknown>
+  /** Whether `rawObject.accounts` is a JSON object whose entries can be merged by key. */
+  accountsMap: boolean
+  /** Whether `raw` is the pre-multi-account shape (session fields at the provider level). */
+  legacy: boolean
+  /** Every raw account entry in file order; empty when {@link accountsMap} is false. */
+  rawAccounts: Record<string, unknown>
+  /** Raw account entries this build cannot use, and therefore keeps out of the typed store. */
+  preservedAccounts: Map<string, unknown>
+}
+
+/** What one parse kept outside the typed store, so a write can restore it. */
+interface StorePreservation {
+  /** The whole parsed file, for unknown keys, unknown providers and account order. */
+  root: Record<string, unknown>
+  /** Provider entries, or account entries inside them, the typed store does not represent. */
+  providers: Map<string, PreservedProvider>
+  /** Providers the parse turned into a typed entry; a later absence is an explicit removal. */
+  represented: Set<string>
+  /** Accounts an explicit `deleteAccountSession` removed. The only ones a write may omit. */
+  removedAccounts: Set<string>
+  /** Raw account keys a rekey retired; the same session now lives under the alias target. */
+  supersededAccounts: Set<string>
+}
+
+/**
+ * Preservation for every store object this module parsed, keyed by that object.
+ *
+ * A store constructed elsewhere has no raw file to preserve and writes as it is. A store read
+ * from disk carries every entry the typed view could not represent, so no read-modify-write can
+ * silently drop one.
+ */
+const preservedStores = new WeakMap<SessionMap, StorePreservation>()
+
+/** One account addressed exactly, as a set key. */
+function accountSlot(provider: string, account: string): string {
+  return `${provider}\u0000${account}`
+}
+
+/**
+ * Record that one account is being retired by an explicit logout, so a later write may omit it.
+ * @param store - the store the removal is applied to.
+ * @param provider - the provider route.
+ * @param account - the canonical account key.
+ */
+function markAccountRemoved(store: SessionMap, provider: ProviderId, account: string): void {
+  preservedStores.get(store)?.removedAccounts.add(accountSlot(provider, account))
+}
+
+/**
+ * Record that a rekey retired one raw account key. The session still exists under the alias
+ * target the typed store holds, so a write must not treat the raw key's absence as a loss.
+ * @param store - the store the rekey is applied to.
+ * @param provider - the provider route.
+ * @param account - the raw account key the rekey retired.
+ */
+function markAccountSuperseded(store: SessionMap, provider: ProviderId, account: string): void {
+  preservedStores.get(store)?.supersededAccounts.add(accountSlot(provider, account))
+}
+
+/** Whether a value is a JSON object (not null, not an array). */
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
 /** Any stored session, for provider-agnostic plumbing. */
 export type StoredSession = CodexSession | ClaudeSession | GrokSession | CopilotSession | AntigravitySession | CursorSession
 
@@ -350,7 +427,14 @@ function codexUserKey(session: CodexSession): string | undefined {
   }
 }
 
-/** Upgrade one unambiguous email fallback to the stable user key. */
+/**
+ * Upgrade one unambiguous email fallback to the stable user key, or leave the record where it is
+ * when the stable key already holds another session.
+ * @param entry - the provider's stored accounts.
+ * @param session - the session about to be stored.
+ * @returns the account key the session must be written under, or undefined when the record needs
+ *   no move.
+ */
 function reconcileCodexIdentity(entry: ProviderAccounts<CodexSession>, session: CodexSession): string | undefined {
   const userKey = codexUserKey(session)
   const email = codexEmail(session)
@@ -359,7 +443,14 @@ function reconcileCodexIdentity(entry: ProviderAccounts<CodexSession>, session: 
   const previous = entry.accounts[emailKey]
   if (previous === undefined || codexEmail(previous) !== email) return undefined
   // Never merge workspace-wide: the exact normalized workspace/email pair must match.
-  if (!Object.hasOwn(entry.accounts, userKey)) entry.accounts[userKey] = previous
+  if (Object.hasOwn(entry.accounts, userKey)) {
+    // The canonical key already holds a session. Moving this one onto it would overwrite that
+    // credential and moving it aside would delete this one, so the account keeps its stored key
+    // and both records survive. The caller writes the new session to `emailKey`, and its own
+    // compare-and-set still refuses a write derived from a credential another writer replaced.
+    return emailKey
+  }
+  entry.accounts[userKey] = previous
   delete entry.accounts[emailKey]
   entry.aliases = { ...entry.aliases, [emailKey]: userKey }
   for (const [alias, target] of Object.entries(entry.aliases)) {
@@ -369,7 +460,9 @@ function reconcileCodexIdentity(entry: ProviderAccounts<CodexSession>, session: 
   return userKey
 }
 
-function migrateCodex(entry: ProviderAccounts<CodexSession>): void {
+function migrateCodex(store: SessionMap, preservation: StorePreservation): void {
+  const entry = store.codex
+  if (entry === undefined) return
   for (const [oldKey, session] of Object.entries(entry.accounts)) {
     if (oldKey !== session.accountId) continue
     const key = accountKeyOf('codex', session)
@@ -378,6 +471,8 @@ function migrateCodex(entry: ProviderAccounts<CodexSession>): void {
     delete entry.accounts[oldKey]
     entry.aliases = { ...entry.aliases, [oldKey]: key }
     if (entry.default === oldKey) entry.default = key
+    // The raw file still names the retired key; its session is written under the alias target.
+    preservation.supersededAccounts.add(accountSlot('codex', oldKey))
   }
 }
 
@@ -498,12 +593,25 @@ async function readStore(path: string): Promise<StoreRead> {
 
 /**
  * Persist what {@link readStore} found, then retire the pre-rename file it read.
+ *
+ * The pre-rename file is removed only after the file just written has been read back and
+ * confirmed to still hold every entry it had. A migration that lost one — from a bug here or a
+ * concurrent writer — leaves the original in place instead of deleting the only copy.
  * @param read - the read whose write-back is persisted.
  * @param path - store file path.
  */
 async function persistStoreRead(read: StoreRead, path: string): Promise<void> {
   await writeStore(read.store, path)
-  if (read.legacyPath !== undefined) await rm(read.legacyPath, { force: true })
+  if (read.legacyPath === undefined) return
+  const preservation = preservedStores.get(read.store)
+  if (preservation !== undefined) {
+    const migrated: unknown = JSON.parse(await readFile(path, 'utf8'))
+    if (!isPlainObject(migrated)) {
+      throw preservationFailure('the migrated store did not read back as a JSON object')
+    }
+    assertStoreEntriesRetained(preservation.root, migrated)
+  }
+  await rm(read.legacyPath, { force: true })
 }
 
 /**
@@ -562,11 +670,13 @@ async function loadStoreFrom(path: string, underLock: boolean): Promise<SessionM
 /**
  * Parse and migrate store JSON read from `path`. An ACCOUNT entry whose shape
  * is invalid (empty or missing tokens — corruption seen in the wild from a
- * broken keychain import) is SKIPPED instead of rejected: one bad entry must
- * not blind every provider's status read, and a session without tokens is
- * unusable by definition, so nothing of value is discarded. The next write
- * persists the store without the skipped entry. Structural failures (invalid
- * JSON, a non-object file) still throw — those say the file itself is broken.
+ * broken keychain import) is left OUT of the typed store instead of rejecting
+ * the read: one bad entry must not blind every provider's status read, and a
+ * session without tokens is unusable by definition. The raw entry is retained
+ * in {@link StorePreserved} form, so the next write puts it back verbatim; a
+ * credential this build cannot read is never a credential it may delete.
+ * Structural failures (invalid JSON, a non-object file) still throw — those say
+ * the file itself is broken, and a write is refused rather than replacing it.
  *
  * A Claude entry stating an ownership mode this build does not implement is a structural
  * failure too: inferring an owner from it would decide who spends a shared refresh grant by
@@ -583,26 +693,64 @@ function parseStore(text: string, path: string): { store: SessionMap; rekeyed: b
   } catch {
     throw new Error(`subscriptions auth store at ${path} is not valid JSON; fix or delete the file`)
   }
-  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+  if (!isPlainObject(parsed)) {
     throw new Error(`subscriptions auth store at ${path} must be a JSON object keyed by provider; fix or delete the file`)
   }
-  const raw = parsed as Record<string, unknown>
+  const raw = parsed
   const store: SessionMap = {}
+  const preservation: StorePreservation = {
+    root: raw,
+    providers: new Map(),
+    represented: new Set(),
+    removedAccounts: new Set(),
+    supersededAccounts: new Set(),
+  }
+  /** Keep one provider entry the typed store cannot represent, exactly as written. */
+  const preserve = (provider: ProviderId, value: PreservedProvider): void => {
+    preservation.providers.set(provider, value)
+  }
   const tombstones = readRevisionTombstones(raw.revisions)
   if (Object.keys(tombstones).length > 0) store.revisions = tombstones
   let rekeyed = false
   for (const provider of PROVIDER_IDS) {
     const entry = raw[provider]
     if (entry === undefined) continue
-    if (typeof entry !== 'object' || entry === null || Array.isArray(entry)) {
-      console.warn(`subscriptions auth store: entry "${provider}" is not an object; skipped`)
+    if (!isPlainObject(entry)) {
+      console.warn(`subscriptions auth store: entry "${provider}" is not an object; kept as written`)
+      preserve(provider, {
+        raw: entry, accountsMap: false, legacy: false, rawAccounts: {}, preservedAccounts: new Map(),
+      })
       continue
     }
-    const record = entry as Record<string, unknown>
+    const record = entry
     if (typeof record.accessToken === 'string') {
+      if (record.accounts !== undefined) {
+        // Both the single-account session and an accounts map are present. Choosing one would
+        // drop the other, so the whole value is kept until the file is fixed.
+        console.warn(
+          `subscriptions auth store: entry "${provider}" carries both a bare session and an accounts map; kept as written`,
+        )
+        preserve(provider, {
+          raw: entry,
+          rawObject: record,
+          accountsMap: false,
+          legacy: true,
+          rawAccounts: {},
+          preservedAccounts: new Map(),
+        })
+        continue
+      }
       // Single-account format: wrap the bare session, preserving every field.
       if (!isValidSessionShape(record)) {
-        console.warn(`subscriptions auth store: legacy entry "${provider}" has no usable tokens; skipped`)
+        console.warn(`subscriptions auth store: legacy entry "${provider}" has no usable tokens; kept as written`)
+        preserve(provider, {
+          raw: entry,
+          rawObject: record,
+          accountsMap: false,
+          legacy: true,
+          rawAccounts: {},
+          preservedAccounts: new Map(),
+        })
         continue
       }
       const session = record as unknown as StoredSession
@@ -612,29 +760,60 @@ function parseStore(text: string, path: string): { store: SessionMap; rekeyed: b
       // keeps that key rather than taking a new one on the next read.
       if (accountIdentityOf(provider, session) === undefined) rekeyed = true
       ;(store as Record<string, unknown>)[provider] = { default: key, accounts: { [key]: session } }
+      preservation.represented.add(provider)
       continue
     }
     const accounts = record.accounts
-    if (typeof accounts !== 'object' || accounts === null || Array.isArray(accounts)) {
-      console.warn(`subscriptions auth store: entry "${provider}" has no accounts map; skipped`)
+    if (!isPlainObject(accounts)) {
+      console.warn(`subscriptions auth store: entry "${provider}" has no accounts map; kept as written`)
+      preserve(provider, {
+        raw: entry,
+        rawObject: record,
+        accountsMap: false,
+        legacy: false,
+        rawAccounts: {},
+        preservedAccounts: new Map(),
+      })
       continue
     }
     if (record.default !== undefined && typeof record.default !== 'string') {
-      console.warn(`subscriptions auth store: entry "${provider}" default is not a string; skipped`)
+      console.warn(`subscriptions auth store: entry "${provider}" default is not a string; kept as written`)
+      preserve(provider, {
+        raw: entry,
+        rawObject: record,
+        accountsMap: true,
+        legacy: false,
+        rawAccounts: accounts,
+        preservedAccounts: new Map(Object.entries(accounts)),
+      })
       continue
     }
     const kept: Record<string, StoredSession> = {}
+    const unusable = new Map<string, unknown>()
     for (const [account, session] of Object.entries(accounts)) {
       if (isValidSessionShape(session)) {
         assertClaudeCredentialOwnershipMode(provider, account, session as Record<string, unknown>)
         kept[account] = session as StoredSession
       } else {
         console.warn(
-          `subscriptions auth store: entry "${provider}/${account}" has no usable accessToken/refreshToken/expiresAt; skipped`,
+          `subscriptions auth store: entry "${provider}/${account}" has no usable accessToken/refreshToken/expiresAt; kept as written`,
         )
+        unusable.set(account, session)
       }
     }
-    if (Object.keys(kept).length === 0) continue
+    if (Object.keys(kept).length === 0) {
+      // Nothing usable to serve, but every entry is still the user's credential: keep the whole
+      // provider value, including the raw default pointer, for the next write.
+      preserve(provider, {
+        raw: entry,
+        rawObject: record,
+        accountsMap: true,
+        legacy: false,
+        rawAccounts: accounts,
+        preservedAccounts: new Map(Object.entries(accounts)),
+      })
+      continue
+    }
     let validDefault = record.default === undefined || record.default in kept
       ? record.default as string | undefined
       : Object.keys(kept)[0]
@@ -654,6 +833,7 @@ function parseStore(text: string, path: string): { store: SessionMap; rekeyed: b
       aliases = { ...aliases, [account]: minted }
       if (validDefault === account) validDefault = minted
       keyed[minted] = session
+      preservation.supersededAccounts.add(accountSlot(provider, account))
       rekeyed = true
     }
     const revisions = readRevisionMap(record.revisions)
@@ -664,8 +844,20 @@ function parseStore(text: string, path: string): { store: SessionMap; rekeyed: b
       accounts: keyed,
       ...Object.keys(revisions).length === 0 ? {} : { revisions },
     }
+    preservation.represented.add(provider)
+    if (unusable.size > 0) {
+      preserve(provider, {
+        raw: entry,
+        rawObject: record,
+        accountsMap: true,
+        legacy: false,
+        rawAccounts: accounts,
+        preservedAccounts: unusable,
+      })
+    }
   }
-  if (store.codex !== undefined) migrateCodex(store.codex)
+  if (store.codex !== undefined) migrateCodex(store, preservation)
+  preservedStores.set(store, preservation)
   return { store, rekeyed }
 }
 
@@ -678,7 +870,7 @@ function isValidSessionShape(value: unknown): boolean {
     && typeof entry.expiresAt === 'number' && Number.isFinite(entry.expiresAt)
 }
 
-/** How many times to retry a Windows replace before falling back to a copy. */
+/** How many times to retry a Windows replace before giving the write up. */
 const STORE_REPLACE_ATTEMPTS = 8
 
 /** Windows denies rename-over when a reader still has the destination open. */
@@ -689,9 +881,12 @@ function isRetryableReplaceError(error: unknown): boolean {
 }
 
 /**
- * Swap a finished temp file onto `path`. POSIX rename replaces an existing
- * file. Windows often returns EPERM for that replace while Defender, the
- * indexer, or a reader holds `auth.json`, so retry, then copy over it.
+ * Swap a finished temp file onto `path`. POSIX rename replaces an existing file atomically.
+ *
+ * Windows often returns EPERM for that replace while Defender, the indexer, or a reader holds
+ * the destination. It is retried, and then the write fails: copying over the live store instead
+ * would be a non-atomic replacement, and an interrupted copy would corrupt every credential the
+ * file holds. A failed write leaves the old file whole.
  */
 async function replaceStoreFile(tmp: string, path: string): Promise<void> {
   let last: unknown
@@ -705,28 +900,859 @@ async function replaceStoreFile(tmp: string, path: string): Promise<void> {
       await delay(50 * (attempt + 1))
     }
   }
-  if (!isRetryableReplaceError(last)) throw last
-  await copyFile(tmp, path)
-  await rm(tmp, { force: true })
+  throw last
 }
 
-/** Persist the whole store atomically with owner-only permissions. */
-async function writeStore(store: SessionMap, path: string): Promise<void> {
+/** Write a temp file and flush it to the device, so a crash cannot expose a torn store. */
+async function writeDurably(path: string, text: string): Promise<void> {
+  const handle = await open(path, 'w', 0o600)
+  try {
+    await handle.writeFile(text, 'utf8')
+    await handle.sync()
+  } finally {
+    await handle.close()
+  }
+}
+
+/** Error for a write whose existing bytes would be lost. */
+function preservationFailure(detail: string): Error {
+  return new Error(
+    `subscriptions auth store: refusing to write because ${detail}; nothing was written — `
+    + 'fix or delete the store file',
+  )
+}
+
+/** Whether every raw value in `expected` still appears in `actual` (objects may gain keys). */
+function rawContained(actual: unknown, expected: unknown): boolean {
+  if (Array.isArray(expected)) {
+    return Array.isArray(actual)
+      && actual.length === expected.length
+      && expected.every((value, index) => rawContained(actual[index], value))
+  }
+  if (isPlainObject(expected)) {
+    return isPlainObject(actual)
+      && Object.entries(expected).every(([key, value]) => rawContained(actual[key], value))
+  }
+  return actual === expected
+}
+
+/** Throw unless every raw value in `expected` still appears in `actual`. */
+function assertRawContained(actual: unknown, expected: unknown, label: string): void {
+  if (!rawContained(actual, expected)) throw preservationFailure(`a value in ${label} would be lost`)
+}
+
+/**
+ * Whether the provider's recorded aliases map `account` to an account the typed store holds.
+ * Used for a raw account key a rekey retired without an explicit removal.
+ */
+function aliasedAccount(
+  typed: ProviderAccounts<StoredSession>,
+  account: string,
+): string | undefined {
+  const target = typed.aliases?.[account]
+  return target !== undefined && Object.hasOwn(typed.accounts, target) ? target : undefined
+}
+
+/**
+ * Rebuild the provider's accounts map for one write.
+ * @param provider - the provider route.
+ * @param typed - the typed entry, when the store holds one.
+ * @param preserved - the raw entries the typed store cannot represent.
+ * @param preservation - the store's preserved raw document.
+ * @returns the merged accounts map, or undefined when the typed store holds no accounts.
+ */
+function mergedAccountsFor(
+  provider: ProviderId,
+  typed: ProviderAccounts<StoredSession>,
+  preserved: PreservedProvider | undefined,
+  preservation: StorePreservation,
+): Record<string, unknown> {
+  const accounts: Record<string, unknown> = {}
+  const rawAccounts = preserved?.accountsMap === true ? preserved.rawAccounts : typed.accounts
+  for (const [account, rawValue] of Object.entries(rawAccounts)) {
+    if (Object.hasOwn(typed.accounts, account)) {
+      accounts[account] = typed.accounts[account]
+      continue
+    }
+    if (preserved?.preservedAccounts.has(account) === true) {
+      accounts[account] = preserved.preservedAccounts.get(account)
+      continue
+    }
+    if (preservation.removedAccounts.has(accountSlot(provider, account))) continue
+    if (preservation.supersededAccounts.has(accountSlot(provider, account))) continue
+    if (aliasedAccount(typed, account) !== undefined) continue
+    throw preservationFailure(
+      `account "${provider}/${account}" has no typed value, no preserved raw value and no explicit removal`,
+    )
+  }
+  for (const [account, session] of Object.entries(typed.accounts)) {
+    if (!Object.hasOwn(accounts, account)) accounts[account] = session
+  }
+  return accounts
+}
+
+/**
+ * The document a write must persist for one parsed store.
+ *
+ * Unknown top-level entries are copied through, providers the typed store does not represent are
+ * kept whole, and preserved account entries are put back where they were. Only a typed account
+ * that an explicit removal retired — or a key a rekey superseded — is omitted.
+ * @param store - the store to serialize.
+ * @returns the JSON document for the file.
+ * @throws Error when a raw entry and a typed entry cannot both be written.
+ */
+function materializeStore(store: SessionMap): Record<string, unknown> {
+  const preservation = preservedStores.get(store)
+  if (preservation === undefined) return store as unknown as Record<string, unknown>
+  const typedRoot = store as unknown as Record<string, unknown>
+  const out: Record<string, unknown> = {}
+  for (const [key, value] of Object.entries(preservation.root)) {
+    if (key === 'revisions') continue
+    if (!(PROVIDER_IDS as readonly string[]).includes(key)) {
+      out[key] = value
+      continue
+    }
+    const provider = key as ProviderId
+    const typed = store[provider] as ProviderAccounts<StoredSession> | undefined
+    const preserved = preservation.providers.get(provider)
+    if (typed === undefined) {
+      if (preserved === undefined) continue
+      if (!preservation.represented.has(provider)) {
+        // The provider was never represented; keep exactly what was written.
+        out[provider] = preserved.accountsMap
+          ? { ...preserved.rawObject, accounts: Object.fromEntries(preserved.preservedAccounts) }
+          : preserved.raw
+        continue
+      }
+      // A represented provider whose last usable account was explicitly removed: keep the
+      // entries this build could not read, and drop the provider only when there are none.
+      if (preserved.preservedAccounts.size === 0) continue
+      out[provider] = { ...preserved.rawObject, accounts: Object.fromEntries(preserved.preservedAccounts) }
+      continue
+    }
+    if (preserved !== undefined && !preserved.accountsMap) {
+      throw preservationFailure(
+        `provider "${provider}" holds a value this build cannot read (${preserved.legacy
+          ? 'a single-account record without usable tokens or with an accounts map'
+          : 'a value that is not an account map'}) and a new value cannot be written beside it`,
+      )
+    }
+    const base = preserved?.rawObject === undefined ? { ...typed } : { ...preserved.rawObject, ...typed }
+    out[provider] = { ...base, accounts: mergedAccountsFor(provider, typed, preserved, preservation) }
+  }
+  // A provider stored for the first time has no raw entry to preserve.
+  for (const provider of PROVIDER_IDS) {
+    if (Object.hasOwn(out, provider)) continue
+    if (Object.hasOwn(preservation.root, provider)) continue
+    const value = typedRoot[provider]
+    if (value !== undefined) out[provider] = value
+  }
+  const revisions = materializeRevisions(preservation.root.revisions, store.revisions)
+  if (revisions !== undefined) out.revisions = revisions
+  return out
+}
+
+/**
+ * Merge the raw revision map with the typed one. Typed high-water marks win per account; raw
+ * entries this build did not validate (an unknown provider, a malformed value) are kept.
+ * @param rawRevisions - the parsed root `revisions` value, when the file had one.
+ * @param typedRevisions - the store's own revision map.
+ * @returns the merged map, or undefined when neither side has one.
+ */
+function materializeRevisions(
+  rawRevisions: unknown,
+  typedRevisions: SessionMap['revisions'],
+): unknown {
+  if (!isPlainObject(rawRevisions)) return typedRevisions ?? rawRevisions
+  const out: Record<string, unknown> = {}
+  for (const [provider, accounts] of Object.entries(rawRevisions)) {
+    const typed = typedRevisions?.[provider]
+    out[provider] = isPlainObject(accounts) ? { ...accounts, ...typed } : typed ?? accounts
+  }
+  for (const [provider, accounts] of Object.entries(typedRevisions ?? {})) {
+    if (!Object.hasOwn(out, provider)) out[provider] = accounts
+  }
+  return out
+}
+
+/**
+ * Verify that a materialized document still carries every entry the parse preserved.
+ *
+ * The writer already refuses a merge it cannot represent; this second check catches a mistake
+ * in the merge itself before the file is replaced.
+ * @param preservation - what the parse kept outside the typed store.
+ * @param output - the document about to be written.
+ * @throws Error when any preserved entry would be lost.
+ */
+function assertStorePreserved(preservation: StorePreservation, output: Record<string, unknown>): void {
+  for (const [key, value] of Object.entries(preservation.root)) {
+    if (key === 'revisions' || (PROVIDER_IDS as readonly string[]).includes(key)) continue
+    assertRawContained(output[key], value, `entry "${key}"`)
+  }
+  for (const provider of PROVIDER_IDS) {
+    const rawEntry = preservation.root[provider]
+    if (rawEntry === undefined) continue
+    const outEntry = output[provider]
+    if (!isPlainObject(rawEntry)) {
+      assertRawContained(outEntry, rawEntry, `entry "${provider}"`)
+      continue
+    }
+    const preserved = preservation.providers.get(provider)
+    if (typeof rawEntry.accessToken === 'string') {
+      // The single-account shape either stayed verbatim or was converted to one account entry.
+      if (preserved?.legacy === true) {
+        assertRawContained(outEntry, rawEntry, `entry "${provider}"`)
+        continue
+      }
+      const converted = isPlainObject(outEntry) && isPlainObject(outEntry.accounts)
+        ? outEntry.accounts : undefined
+      if (converted === undefined || Object.keys(converted).length === 0) {
+        throw preservationFailure(`the single-account record for "${provider}" would be lost`)
+      }
+      continue
+    }
+    if (outEntry === undefined) {
+      // A provider may disappear only when an explicit logout removed its every account and
+      // nothing inside it was preserved.
+      const rawAccounts = isPlainObject(rawEntry.accounts) ? rawEntry.accounts : undefined
+      const allRemoved = preserved === undefined
+        && rawAccounts !== undefined
+        && Object.keys(rawAccounts).every(account =>
+          preservation.removedAccounts.has(accountSlot(provider, account))
+          || preservation.supersededAccounts.has(accountSlot(provider, account)))
+      if (!allRemoved) throw preservationFailure(`provider "${provider}" would disappear`)
+      continue
+    }
+    for (const [field, value] of Object.entries(rawEntry)) {
+      if (field === 'default' || field === 'accounts' || field === 'aliases' || field === 'revisions') continue
+      assertRawContained((outEntry as Record<string, unknown>)[field], value, `entry "${provider}" field "${field}"`)
+    }
+    if (!isPlainObject(rawEntry.accounts)) continue
+    const outAccounts = isPlainObject(outEntry) && isPlainObject(outEntry.accounts)
+      ? outEntry.accounts : undefined
+    if (outAccounts === undefined) throw preservationFailure(`provider "${provider}" lost its accounts map`)
+    for (const [account, rawValue] of Object.entries(rawEntry.accounts)) {
+      if (preserved?.preservedAccounts.has(account) === true) {
+        assertRawContained(outAccounts[account], rawValue, `entry "${provider}/${account}"`)
+        continue
+      }
+      if (Object.hasOwn(outAccounts, account)) continue
+      if (preservation.removedAccounts.has(accountSlot(provider, account))) continue
+      if (preservation.supersededAccounts.has(accountSlot(provider, account))) continue
+      if (isPlainObject(outEntry) && isPlainObject(outEntry.aliases)) {
+        const target = outEntry.aliases[account]
+        if (typeof target === 'string' && Object.hasOwn(outAccounts, target)) continue
+      }
+      throw preservationFailure(`account "${provider}/${account}" would be lost`)
+    }
+  }
+}
+
+/**
+ * Throw when `next` would omit an entry `previous` holds, unless an explicit removal names it.
+ *
+ * This compares a document against a store file: for the write path, the file currently on disk
+ * against the document about to be written; for the pre-rename migration, the legacy file
+ * against the file just written. A rekey is accepted through the alias the store records.
+ * @param previous - the source document.
+ * @param next - the document that must retain its entries.
+ * @param allowAccountRemoval - whether this exact provider/account was explicitly logged out.
+ */
+function assertStoreEntriesRetained(
+  previous: Record<string, unknown>,
+  next: Record<string, unknown>,
+  allowAccountRemoval: (provider: string, account: string) => boolean = () => false,
+): void {
+  for (const [key, previousValue] of Object.entries(previous)) {
+    if (key === 'revisions') continue
+    if (!Object.hasOwn(next, key)) {
+      // An explicit removal may take a provider entry away with its last account; nothing else
+      // may disappear.
+      const removedProvider = (PROVIDER_IDS as readonly string[]).includes(key)
+        && isPlainObject(previousValue)
+        && typeof previousValue.accessToken !== 'string'
+        && isPlainObject(previousValue.accounts)
+        && Object.keys(previousValue.accounts).length > 0
+        && Object.keys(previousValue.accounts).every(account => allowAccountRemoval(key, account))
+      if (!removedProvider) {
+        throw preservationFailure(`entry "${key}" from the current file would disappear`)
+      }
+      continue
+    }
+    if (!(PROVIDER_IDS as readonly string[]).includes(key)) {
+      assertRawContained(next[key], previousValue, `entry "${key}"`)
+      continue
+    }
+    if (!isPlainObject(previousValue)) continue
+    const previousAccounts = isPlainObject(previousValue.accounts) && typeof previousValue.accessToken !== 'string'
+      ? previousValue.accounts : undefined
+    if (previousAccounts === undefined) continue
+    const nextEntry = next[key]
+    if (!isPlainObject(nextEntry)) continue
+    const nextAccounts = isPlainObject(nextEntry.accounts) ? nextEntry.accounts : undefined
+    for (const account of Object.keys(previousAccounts)) {
+      if (nextAccounts !== undefined && Object.hasOwn(nextAccounts, account)) continue
+      if (allowAccountRemoval(key, account)) continue
+      if (isPlainObject(nextEntry.aliases)) {
+        const target = nextEntry.aliases[account]
+        if (typeof target === 'string' && nextAccounts !== undefined && Object.hasOwn(nextAccounts, target)) continue
+      }
+      throw preservationFailure(
+        `account "${key}/${account}" would be dropped without an explicit logout`,
+      )
+    }
+  }
+}
+
+/**
+ * Keep one generation of the store beside it, so a bad write can be recovered by hand.
+ *
+ * The copy is written and flushed before the live file is replaced; a failure to write it fails
+ * the whole write instead of replacing the only copy. It carries bearer tokens, so it keeps
+ * mode 0600, and this module never reads it back.
+ * @param path - the store file the backup belongs to.
+ * @param bytes - the bytes to keep.
+ */
+async function writeBackup(path: string, bytes: Buffer): Promise<void> {
+  const backup = `${path}.bak`
+  const tmp = `${backup}.tmp-${process.pid}-${randomBytes(6).toString('hex')}`
+  try {
+    const handle = await open(tmp, 'w', 0o600)
+    try {
+      await handle.writeFile(bytes)
+      await handle.sync()
+    } finally {
+      await handle.close()
+    }
+    await chmod(tmp, 0o600)
+    await replaceStoreFile(tmp, backup)
+  } catch (error) {
+    await rm(tmp, { force: true })
+    throw error
+  }
+}
+
+/**
+ * Keep the previous generation of the store beside it.
+ * @param path - the store file about to be replaced.
+ */
+async function backupStoreFile(path: string): Promise<void> {
+  let bytes: Buffer
+  try {
+    bytes = await readFile(path)
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return
+    throw error
+  }
+  await writeBackup(path, bytes)
+}
+
+/**
+ * Persist the whole store atomically with owner-only permissions.
+ *
+ * The write is refused before anything is touched when a preserved entry cannot be carried, and
+ * again when the new document would drop an account the current file holds without an explicit
+ * removal. The previous generation is copied to `<path>.bak` first, the new bytes are flushed,
+ * and only then does the atomic rename replace the live file.
+ * @param store - the store to persist.
+ * @param path - the store file.
+ * @param options - `prune` marks an explicit account removal as the reason an entry may vanish.
+ * @throws Error when the write would lose data, or when the lock or the filesystem refuses it.
+ */
+async function writeStore(
+  store: SessionMap,
+  path: string,
+  options: { prune?: boolean } = {},
+): Promise<void> {
   // Before anything is written: one unusable mode would make every later read of this file
   // throw, so the store that is about to replace it is refused instead.
   assertStoredClaudeOwnershipModes(store)
-  await mkdir(dirname(path), { recursive: true })
-  const tmp = `${path}.tmp-${process.pid}-${Math.random().toString(36).slice(2)}`
+  const document = materializeStore(store)
+  const preservation = preservedStores.get(store)
+  if (preservation !== undefined) assertStorePreserved(preservation, document)
+  let previous: Record<string, unknown> | undefined
   try {
-    await writeFile(tmp, JSON.stringify(store, null, 2), { mode: 0o600 })
-    // An existing destination keeps its old mode through rename on some
-    // filesystems; enforce 0600 on the source before the swap.
+    const text = await readFile(path, 'utf8')
+    let parsed: unknown
+    try {
+      parsed = JSON.parse(text)
+    } catch {
+      throw preservationFailure('the file on disk is not valid JSON and cannot be compared before a rewrite')
+    }
+    if (!isPlainObject(parsed)) {
+      throw preservationFailure('the file on disk is not a JSON object and cannot be compared before a rewrite')
+    }
+    previous = parsed
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+  }
+  if (previous !== undefined) {
+    // Only the account this logout named may vanish; a sibling dropped by any other path is
+    // refused here even though the write declares itself a prune.
+    const removed = options.prune === true && preservation !== undefined
+      ? (provider: string, account: string): boolean =>
+        preservation.removedAccounts.has(accountSlot(provider, account))
+      : undefined
+    assertStoreEntriesRetained(previous, document, removed)
+  }
+  await mkdir(dirname(path), { recursive: true })
+  await backupStoreFile(path)
+  const tmp = `${path}.tmp-${process.pid}-${randomBytes(6).toString('hex')}`
+  try {
+    await writeDurably(tmp, JSON.stringify(document, null, 2))
+    // An existing destination keeps its old mode through rename on some filesystems; enforce
+    // 0600 on the source before the swap.
     await chmod(tmp, 0o600)
     await replaceStoreFile(tmp, path)
   } catch (error) {
     await rm(tmp, { force: true })
     throw error
   }
+}
+
+/**
+ * Layout version written by the pending-refresh journal.
+ *
+ * The journal is a sibling document of `auth.json`, so a refresh that has already spent the
+ * grant survives a crash between the token response and the store write.
+ */
+const REFRESH_JOURNAL_VERSION = 1
+
+/** Suffix of the pending-refresh journal beside the store file. */
+const REFRESH_JOURNAL_SUFFIX = '.pending-refresh.json'
+
+/**
+ * Absolute path of the durable pending-refresh journal beside a store file.
+ * @param storePath - store file path; defaults to {@link authFilePath}.
+ * @returns `${storePath}.pending-refresh.json`, for example
+ *   `$DSH_HOME/plugins/subscriptions/auth.json.pending-refresh.json`.
+ */
+export function pendingRefreshJournalPath(storePath = authFilePath()): string {
+  return `${storePath}${REFRESH_JOURNAL_SUFFIX}`
+}
+
+/**
+ * A session's stable, non-reversible identity: a digest of both tokens.
+ *
+ * The journal stores this instead of either token, so a marker cannot be replayed as a
+ * credential. It answers "is the stored session still the one this rotation started from".
+ * @param session - the session to fingerprint.
+ * @returns `sha256:<hex>` over the access and refresh tokens.
+ */
+function credentialFingerprint(session: { accessToken: string; refreshToken: string }): string {
+  return `sha256:${createHash('sha256')
+    .update(session.accessToken)
+    .update('\u0000')
+    .update(session.refreshToken)
+    .digest('hex')}`
+}
+
+/** A fresh journal document. */
+function emptyRefreshJournal(): Record<string, unknown> {
+  return { version: REFRESH_JOURNAL_VERSION, rotations: {} }
+}
+
+/**
+ * Read the journal, keeping its unknown keys and providers exactly as written.
+ *
+ * An unreadable document is an error, never an empty journal: replacing it would drop a
+ * rotation that may be the only copy of a newly minted credential.
+ * @param path - the journal file.
+ * @returns the parsed document, or a fresh one when the file does not exist.
+ * @throws Error when the file exists but is not this build's journal.
+ */
+async function readRefreshJournal(path: string): Promise<Record<string, unknown>> {
+  let text: string
+  try {
+    text = await readFile(path, 'utf8')
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return emptyRefreshJournal()
+    throw error
+  }
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(text)
+  } catch {
+    throw new Error(`subscriptions refresh journal at ${path} is not valid JSON; refusing to replace it`)
+  }
+  if (!isPlainObject(parsed)) {
+    throw new Error(`subscriptions refresh journal at ${path} is not a JSON object; refusing to replace it`)
+  }
+  if (parsed.version !== REFRESH_JOURNAL_VERSION) {
+    throw new Error(
+      `subscriptions refresh journal at ${path} states version ${String(parsed.version)}, `
+      + `this build writes ${REFRESH_JOURNAL_VERSION}; refusing to replace it`,
+    )
+  }
+  if (parsed.rotations !== undefined && !isPlainObject(parsed.rotations)) {
+    throw new Error(`subscriptions refresh journal at ${path} has no readable rotations map; refusing to replace it`)
+  }
+  return parsed
+}
+
+/**
+ * Atomically replace the journal with owner-only permissions.
+ * @param path - the journal file.
+ * @param root - the document to write.
+ */
+async function writeRefreshJournalFile(path: string, root: Record<string, unknown>): Promise<void> {
+  await mkdir(dirname(path), { recursive: true })
+  const tmp = `${path}.tmp-${process.pid}-${randomBytes(6).toString('hex')}`
+  try {
+    await writeDurably(tmp, JSON.stringify(root, null, 2))
+    await chmod(tmp, 0o600)
+    await replaceStoreFile(tmp, path)
+  } catch (error) {
+    await rm(tmp, { force: true })
+    throw error
+  }
+}
+
+/** The journal's rotations map, without dropping an unknown or malformed value. */
+function journalRotations(root: Record<string, unknown>): Record<string, unknown> {
+  return isPlainObject(root.rotations) ? root.rotations : {}
+}
+
+/** One provider's rotation map. */
+function journalProviderMap(root: Record<string, unknown>, provider: string): Record<string, unknown> {
+  const map = journalRotations(root)[provider]
+  return isPlainObject(map) ? map : {}
+}
+
+/** One account's marker, when it is a JSON object. */
+function journalEntry(
+  root: Record<string, unknown>,
+  provider: string,
+  account: string,
+): Record<string, unknown> | undefined {
+  const entry = journalProviderMap(root, provider)[account]
+  return isPlainObject(entry) ? entry : undefined
+}
+
+/** Store one account's marker, preserving every other entry and unknown field. */
+function setJournalEntry(
+  root: Record<string, unknown>,
+  provider: string,
+  account: string,
+  entry: Record<string, unknown>,
+): void {
+  const rotations = journalRotations(root)
+  const map = isPlainObject(rotations[provider]) ? rotations[provider] : {}
+  rotations[provider] = { ...map, [account]: entry }
+  root.rotations = rotations
+}
+
+/** Remove one account's marker; returns whether one was there. */
+function deleteJournalEntry(root: Record<string, unknown>, provider: string, account: string): boolean {
+  const rotations = journalRotations(root)
+  const map = rotations[provider]
+  if (!isPlainObject(map) || !Object.hasOwn(map, account)) return false
+  const next = { ...map }
+  delete next[account]
+  if (Object.keys(next).length === 0) delete rotations[provider]
+  else rotations[provider] = next
+  root.rotations = rotations
+  return true
+}
+
+/**
+ * Record the intent to spend one account's refresh grant, before the request is sent.
+ *
+ * The marker holds the provider/account, the credential revision and a fingerprint of the
+ * tokens the grant will spend — never the tokens themselves. It is written atomically with
+ * mode 0600; a write that fails leaves no marker, and the caller must not send the request.
+ * @param provider - the provider route.
+ * @param account - the canonical account key.
+ * @param session - the session whose refresh token is about to be spent.
+ * @param revision - the credential revision that session was read under, when known.
+ * @param path - store file path; defaults to {@link authFilePath}.
+ * @throws Error when a completed rotation is already waiting for recovery, or the write fails.
+ */
+export async function beginPendingRefreshRotation(
+  provider: ProviderId,
+  account: string,
+  session: StoredSession,
+  revision: CredentialRevision | undefined,
+  path = authFilePath(),
+): Promise<void> {
+  const journalPath = pendingRefreshJournalPath(path)
+  await serialize(journalPath, async () => {
+    const root = await readRefreshJournal(journalPath)
+    const existing = journalEntry(root, provider, account)
+    if (existing?.phase === 'completed') {
+      throw new Error(
+        `subscriptions refresh journal: a completed rotation for "${provider}/${account}" is `
+        + 'waiting for recovery; refusing to spend another grant',
+      )
+    }
+    const now = Date.now()
+    setJournalEntry(root, provider, account, {
+      ...existing,
+      phase: 'pending',
+      provider,
+      account,
+      startedAt: now,
+      updatedAt: now,
+      ...revision === undefined ? {} : { priorRevision: revision },
+      priorFingerprint: credentialFingerprint(session),
+    })
+    await writeRefreshJournalFile(journalPath, root)
+  })
+}
+
+/**
+ * Record the credential a spent grant produced, before the store is asked to persist it.
+ *
+ * A marker can only be completed by the attempt that wrote the pending phase for the same
+ * prior tokens; anything else is refused rather than overwritten.
+ * @param provider - the provider route.
+ * @param account - the canonical account key.
+ * @param next - the freshly minted session.
+ * @param prior - the session whose refresh token was spent.
+ * @param revision - the credential revision the prior session was read under, when known.
+ * @param path - store file path; defaults to {@link authFilePath}.
+ * @throws Error when the pending marker does not match, or the write fails.
+ */
+export async function recordPendingRefreshRotation(
+  provider: ProviderId,
+  account: string,
+  next: StoredSession,
+  prior: StoredSession,
+  revision: CredentialRevision | undefined,
+  path = authFilePath(),
+): Promise<void> {
+  const journalPath = pendingRefreshJournalPath(path)
+  await serialize(journalPath, async () => {
+    const root = await readRefreshJournal(journalPath)
+    const existing = journalEntry(root, provider, account)
+    if (existing?.phase !== 'pending' || existing.priorFingerprint !== credentialFingerprint(prior)) {
+      throw new Error(
+        `subscriptions refresh journal: no pending marker matches the credential being rotated `
+        + `for "${provider}/${account}"; refusing to overwrite the journal`,
+      )
+    }
+    setJournalEntry(root, provider, account, {
+      ...existing,
+      phase: 'completed',
+      updatedAt: Date.now(),
+      ...revision === undefined ? {} : { priorRevision: revision },
+      session: next,
+    })
+    await writeRefreshJournalFile(journalPath, root)
+  })
+}
+
+/** Whether the journal already holds a marker for one account. */
+async function journalEntryExists(journalPath: string, provider: string, account: string): Promise<boolean> {
+  return journalEntry(await readRefreshJournal(journalPath), provider, account) !== undefined
+}
+
+/**
+ * Clear one account's rotation marker. A missing journal, or a missing marker, is a no-op.
+ * @param provider - the provider route.
+ * @param account - the canonical account key.
+ * @param path - store file path; defaults to {@link authFilePath}.
+ * @throws Error when the journal cannot be read or written.
+ */
+export async function completePendingRefreshRotation(
+  provider: ProviderId,
+  account: string,
+  path = authFilePath(),
+): Promise<void> {
+  const journalPath = pendingRefreshJournalPath(path)
+  if (!await journalEntryExists(journalPath, provider, account)) return
+  await serialize(journalPath, async () => {
+    const root = await readRefreshJournal(journalPath)
+    if (!deleteJournalEntry(root, provider, account)) return
+    await writeRefreshJournalFile(journalPath, root)
+  })
+}
+
+/**
+ * Settle the rotation marker after a store write already landed.
+ *
+ * A completed marker is kept when the write stored the very credential the rotation started
+ * from: that write is a backfill (a device id or profile field), not a decision about which
+ * credential is current, and discarding the marker would throw away the rotated token recovery
+ * still holds. Any other landed write — the rotation's own session, a login, or a rotation from
+ * another writer — supersedes the marker.
+ * @param provider - the provider route.
+ * @param account - the canonical account key.
+ * @param stored - the session the write persisted.
+ * @param path - store file path.
+ */
+async function settleRotationMarker(
+  provider: ProviderId,
+  account: string,
+  stored: StoredSession,
+  path: string,
+): Promise<void> {
+  try {
+    const root = await readRefreshJournal(pendingRefreshJournalPath(path))
+    const entry = journalEntry(root, provider, account)
+    if (entry === undefined) return
+    if (entry.phase === 'completed'
+      && typeof entry.priorFingerprint === 'string'
+      && credentialFingerprint(stored) === entry.priorFingerprint) {
+      return
+    }
+    await completePendingRefreshRotation(provider, account, path)
+  } catch (error: unknown) {
+    // The credential is already stored; failing the write here would report a persistence failure
+    // that did not happen. Recovery reconciles the marker when it next runs.
+    void error
+  }
+}
+
+/**
+ * The accounts of one provider with a completed rotation marker the journal still holds.
+ *
+ * Used by the status projection to state `reauth_required` for an unsafe recovery. A journal
+ * read that fails reports nothing here; startup recovery reports the failure itself.
+ * @param provider - the provider route.
+ * @param path - store file path; defaults to {@link authFilePath}.
+ * @returns the account keys with a completed marker.
+ */
+export async function pendingRotationAccounts(
+  provider: ProviderId,
+  path = authFilePath(),
+): Promise<ReadonlySet<string>> {
+  try {
+    const root = await readRefreshJournal(pendingRefreshJournalPath(path))
+    const map = journalProviderMap(root, provider)
+    const accounts = Object.entries(map)
+      .filter(([, entry]) => isPlainObject(entry) && entry.phase === 'completed')
+      .map(([account]) => account)
+    return new Set(accounts)
+  } catch (error: unknown) {
+    // A status read must not fail on the optional journal; recovery owns reporting it.
+    void error
+    return new Set()
+  }
+}
+
+/** What one startup recovery pass did. */
+export interface PendingRotationRecovery {
+  /** Completed rotations written back into the store. */
+  readonly applied: number
+  /** Markers cleared because the store already held their result, or nothing was recoverable. */
+  readonly cleared: number
+  /** Markers left in place because applying them was unsafe or failed. */
+  readonly unresolved: readonly { readonly provider: ProviderId; readonly account: string }[]
+}
+
+/**
+ * Recover rotation markers after a restart.
+ *
+ * A completed marker is applied only while the store still holds the credential the rotation
+ * started from, and the write is compare-and-swapped on that credential's revision. When the
+ * store already holds the journal's session the marker is cleared; when it holds something
+ * else, the marker is left in place and reported rather than overwriting a newer login. A
+ * marker whose account is absent is discarded — an explicit logout must never be undone. This
+ * function never deletes a stored credential.
+ * @param options - store path and warning sink; defaults to the plugin's own store.
+ * @param options.path - store file path; defaults to {@link authFilePath}.
+ * @param options.onWarn - receives a safe diagnostic for each interrupted or unresolved marker.
+ * @returns what the pass applied, cleared and left unresolved.
+ * @throws Error when the journal cannot be read; the file is left untouched.
+ */
+export async function recoverPendingRefreshRotations(options: {
+  path?: string
+  onWarn?: (message: string) => void
+} = {}): Promise<PendingRotationRecovery> {
+  const path = options.path ?? authFilePath()
+  const journalPath = pendingRefreshJournalPath(path)
+  const root = await readRefreshJournal(journalPath)
+  const targets: { provider: ProviderId; account: string; entry: Record<string, unknown> }[] = []
+  for (const [provider, map] of Object.entries(journalRotations(root))) {
+    if (!(PROVIDER_IDS as readonly string[]).includes(provider) || !isPlainObject(map)) continue
+    for (const [account, entry] of Object.entries(map)) {
+      if (isPlainObject(entry)) targets.push({ provider: provider as ProviderId, account, entry })
+    }
+  }
+  let applied = 0
+  let cleared = 0
+  const unresolved: { provider: ProviderId; account: string }[] = []
+  /** Leave one marker in place and report why it could not be recovered. */
+  const retain = (provider: ProviderId, account: string, reason: string): void => {
+    unresolved.push({ provider, account })
+    options.onWarn?.(`dsh-plugin-subscriptions: refresh journal for "${provider}/${account}" ${reason}`)
+  }
+  for (const { provider, account, entry } of targets) {
+    if (entry.phase === 'pending') {
+      // The crash happened before a new credential was recorded: nothing to restore. The old
+      // tokens stay stored; the next real refresh either succeeds or parks the account.
+      options.onWarn?.(
+        `dsh-plugin-subscriptions: an interrupted refresh for "${provider}/${account}" left only `
+        + 'an intent marker; no new credential was recorded and the stored one is kept',
+      )
+      try {
+        await completePendingRefreshRotation(provider, account, path)
+        cleared += 1
+      } catch (error: unknown) {
+        retain(provider, account, `could not be cleared (${journalFailureText(error)})`)
+      }
+      continue
+    }
+    if (entry.phase !== 'completed' || !isValidSessionShape(entry.session)
+      || typeof entry.priorFingerprint !== 'string') {
+      retain(provider, account, 'states no usable completed credential and was left in place')
+      continue
+    }
+    const next = entry.session as StoredSession
+    const credential = await getAccountCredential(provider, account, path)
+    if (credential === undefined) {
+      // The account is gone: an explicit logout must not be undone by a recovery pass.
+      try {
+        await completePendingRefreshRotation(provider, account, path)
+        cleared += 1
+        options.onWarn?.(
+          `dsh-plugin-subscriptions: refresh journal for "${provider}/${account}" was discarded; `
+          + 'the account is no longer stored',
+        )
+      } catch (error: unknown) {
+        retain(provider, account, `could not be discarded (${journalFailureText(error)})`)
+      }
+      continue
+    }
+    const storedFingerprint = credentialFingerprint(credential.session)
+    if (storedFingerprint === credentialFingerprint(next)) {
+      try {
+        await completePendingRefreshRotation(provider, account, path)
+        cleared += 1
+      } catch (error: unknown) {
+        retain(provider, account, `could not be cleared (${journalFailureText(error)})`)
+      }
+      continue
+    }
+    if (storedFingerprint !== entry.priorFingerprint) {
+      retain(provider, account, 'was left in place: the store holds a different credential')
+      continue
+    }
+    try {
+      const written = await saveAccountSession(provider, account, next as never, path, {
+        expectedRevision: credential.revision,
+      })
+      if (!written) {
+        retain(provider, account, 'was not applied: the store changed while it was being recovered')
+        continue
+      }
+      applied += 1
+      try {
+        await completePendingRefreshRotation(provider, account, path)
+      } catch (error: unknown) {
+        retain(provider, account, `was applied but its marker could not be cleared (${journalFailureText(error)})`)
+      }
+    } catch (error: unknown) {
+      retain(provider, account, `could not be applied (${journalFailureText(error)})`)
+    }
+  }
+  return { applied, cleared, unresolved }
+}
+
+/** A safe one-line description of a journal failure; carries no credential. */
+function journalFailureText(error: unknown): string {
+  return error instanceof Error ? error.message : String(error)
 }
 
 /**
@@ -754,9 +1780,12 @@ const writeChains = new Map<string, Promise<unknown>>()
  * writer's load and rename adds an account key no guard is watching, and the
  * later rename drops it; {@link deleteAccountSession} and
  * {@link setDefaultAccount} carry no guard at all. The lock spans the load and
- * the rename, so two dsh processes sharing one DSH_HOME take turns instead. It
- * is the protocol store-lock.ts describes, and it degrades to the in-process
- * chain alone when a foreign holder cannot be waited out.
+ * the rename, so two dsh processes sharing one DSH_HOME take turns instead.
+ *
+ * A lock that cannot be acquired fails the whole write. This path used to degrade to the
+ * in-process chain when a foreign holder could not be waited out, and two writers then each read
+ * the same file and the later rename dropped the other's account. Refusing the write leaves the
+ * file whole, which is the outcome a credential store must choose.
  *
  * A read that rewrites what it read — the migration from the pre-rename store,
  * and the replacement of a token-derived account key — runs inside
@@ -765,10 +1794,23 @@ const writeChains = new Map<string, Promise<unknown>>()
  * @param path - the store file being mutated.
  * @param action - the read-modify-write to run.
  * @returns whatever `action` returns.
+ * @throws Error when another holder cannot be waited out; nothing is written.
  */
 async function serialize<T>(path: string, action: () => Promise<T>): Promise<T> {
   const previous = writeChains.get(path) ?? Promise.resolve()
-  const locked = (): Promise<T> => withStoreLock(path, action)
+  const locked = async (): Promise<T> => {
+    // The lock lives beside the store: its directory must exist before the lock can be created,
+    // which is also what the write itself needs.
+    await mkdir(dirname(path), { recursive: true })
+    const outcome = await withStoreLockOwned(path, action)
+    if (!outcome.acquired) {
+      throw new Error(
+        'subscriptions store: another process holds the store lock and the write was not '
+        + 'started; nothing was written, retry when the other holder finishes',
+      )
+    }
+    return outcome.value
+  }
   // Both handlers: a failed write must not strand everything queued behind it.
   const next = previous.then(locked, locked)
   const tail = next.then(() => undefined, () => undefined)
@@ -995,10 +2037,16 @@ export async function saveAccountSession<K extends ProviderId>(
     if (entry !== undefined) {
       account = resolveAccount(entry, account)
       if (provider === 'codex') {
+        const previousAccount = account
         account = reconcileCodexIdentity(
           entry as unknown as ProviderAccounts<CodexSession>,
           session as unknown as CodexSession,
         ) ?? accountKeyOf('codex', session as unknown as CodexSession)
+        // The raw file may still name the key this rekey retired; the session is written under
+        // the alias target, so the absence is a move rather than a loss.
+        if (account !== previousAccount && !Object.hasOwn(entry.accounts, previousAccount)) {
+          markAccountSuperseded(store, provider, previousAccount)
+        }
       }
     }
     // A refresh that started before a logout or a re-login must not put its own
@@ -1025,6 +2073,8 @@ export async function saveAccountSession<K extends ProviderId>(
     } satisfies ProviderAccounts<SessionOf<K>>
     recordCredentialRevision(store, provider, account, revision)
     await writeStore(store, path)
+    // The store now holds the newest credential: an intent or completed marker for it is stale.
+    await settleRotationMarker(provider, account, session as StoredSession, path)
     return true
   })
 }
@@ -1099,6 +2149,12 @@ export async function deleteAccountSession<K extends ProviderId>(
     // before a logout or a re-login cannot destroy the newer credential.
     if (options.expectedPrior !== undefined
       && !sameStoredSession(entry.accounts[account], options.expectedPrior)) return false
+    // A logged-out account must not be resurrected by a pending rotation, and a completed marker
+    // must not outlive the deletion. The clear runs before the deletion so a failure aborts the
+    // logout instead of leaving a marker that could be applied after a restart.
+    await completePendingRefreshRotation(provider, account, path)
+    // The one intent that may omit a stored credential is this explicit logout.
+    markAccountRemoved(store, provider, account)
     const accounts = { ...entry.accounts }
     delete accounts[account]
     // The removal is itself a credential change: a re-login must land on a higher revision
@@ -1123,7 +2179,7 @@ export async function deleteAccountSession<K extends ProviderId>(
         revisions: { ...entry.revisions, [account]: revision },
       }
     }
-    await writeStore(store, path)
+    await writeStore(store, path, { prune: true })
     return true
   })
 }

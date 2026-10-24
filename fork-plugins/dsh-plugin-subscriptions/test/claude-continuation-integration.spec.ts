@@ -1,5 +1,9 @@
 /**
- * The identity change a Claude credential removal starts, over the plugin's real composition.
+ * The Claude account lifecycle over the plugin's real composition.
+ *
+ * A permanently refused grant no longer deletes the account: it parks the credential as needing
+ * re-authentication, and only the explicit logout runs an identity change for the account. These
+ * cases cover both, plus the identity gate every credential mutation runs behind.
  *
  * Fixture contract. Every case mounts the real apply chain over a private home: the real
  * `SessionStore` and `SessionRequestRecordProvider` the Claude route registers under, the real
@@ -16,12 +20,10 @@
  * the process.
  *
  * Not covered here, and not claimed: the pending window inside the gate. Nothing injectable holds
- * a change's release and publication open, so no case observes `pending: { kind: 'active' }`. The
- * refusal a store compare-and-set produces is covered as the settled failure it durably states,
- * and one case then drives the public logout to prove an explicit identity operation can recover
- * that account. One negative case states the request's own refusal when its span state cannot be
- * read, and another states the refusal of a request cancelled while another holder keeps that
- * state's lock; a held lock itself is waited out rather than refused, and that wait is a case below.
+ * a change's release and publication open, so no case observes `pending: { kind: 'active' }`.
+ * One negative case states the request's own refusal when its span state cannot be read, and
+ * another states the refusal of a request cancelled while another holder keeps that state's lock;
+ * a held lock itself is waited out rather than refused, and that wait is a case below.
  * The gate's remaining refusal branches are not reachable from public state deterministically, and
  * no case fakes one.
  */
@@ -279,41 +281,6 @@ function storedAccounts(home: string): readonly Record<string, unknown>[] {
 }
 
 /**
- * Wait until the plugin's own store no longer holds the account.
- *
- * The wait is for that observable state, never a fixed delay: the removal commits inside the
- * maintenance cycle, and the absent record is the one public fact that says it did. The bound
- * turns a composition that never reached it into a failure instead of a hang.
- * @param home - the private harness home this composition reads and writes.
- */
-async function waitForRemoval(home: string): Promise<void> {
-  const bound = Date.now() + 20_000
-  while (storedAccounts(home).length > 0) {
-    assert.ok(Date.now() <= bound, 'the removal never reached the plugin store')
-    await new Promise<void>(resolve => { setTimeout(resolve, 5) })
-  }
-}
-
-/**
- * Wait until the refused removal is durably stated as a settled failure.
- *
- * The refresh cycle can settle before the transition it started records its own outcome, so the
- * document is read until it states that failure rather than assumed from the cycle's own status.
- * @param home - the private harness home this composition reads and writes.
- * @returns the record stating the failed removal.
- */
-async function waitForFailedRemoval(home: string): Promise<GenerationEntry> {
-  const bound = Date.now() + 20_000
-  while (true) {
-    const refused = generationOf(home)
-      .find(entry => entry.pending?.kind === 'failed' && entry.pending.change === 'removal')
-    if (refused !== undefined) return refused
-    assert.ok(Date.now() <= bound, 'the refused removal was never stated as a settled failure')
-    await new Promise<void>(resolve => { setTimeout(resolve, 5) })
-  }
-}
-
-/**
  * Mount the plugin's real composition over one private home.
  *
  * A mount that fails after its context exists disposes that context before reporting the failure,
@@ -514,21 +481,23 @@ async function credentialState(app: Composition): Promise<string | undefined> {
 }
 
 /**
- * Wait until the account's credential dimension leaves the owner's `refreshing` state.
+ * Wait until an account's credential timer settles the refresh cycle to one state.
  *
- * A case reached this only after asserting that state through the public status, so the wait sees
- * a real edge rather than guessing one. The bound turns a cycle that never settled into a failure.
+ * The status endpoint is the public projection of the owner's own state, so this waits for the
+ * state the cycle really reached rather than for a delay that guesses it. The bound turns a cycle
+ * that never settled into a failure.
  * @param app - the mounted composition.
+ * @param expected - the credential state the cycle must reach.
  */
-async function waitForCredentialSettled(app: Composition): Promise<void> {
+async function waitForCredentialState(app: Composition, expected: string): Promise<void> {
   const bound = Date.now() + 20_000
-  while (await credentialState(app) === 'refreshing') {
-    assert.ok(Date.now() <= bound, 'the maintenance cycle never settled its credential')
+  while (await credentialState(app) !== expected) {
+    assert.ok(Date.now() <= bound, `the credential never settled as ${expected}`)
     await new Promise<void>(resolve => { setTimeout(resolve, 5) })
   }
 }
 
-test('a permanent refresh failure in the credential cycle removes the account and settles the change', { timeout: 30_000 }, async () => {
+test('a permanent refresh failure parks the account and starts no identity change', { timeout: 30_000 }, async () => {
   await withComposition(async (app, home) => {
     const baseline = await waitForBaseline(home)
 
@@ -546,61 +515,57 @@ test('a permanent refresh failure in the credential cycle removes the account an
 
     // The maintenance cycle — not a second user request — is what reaches the token endpoint.
     await app.wire.reached
-    await waitForRemoval(home)
+    await waitForCredentialState(app, 'reauth_required')
 
-    // Disposal drains the change's own release and publication. A gate that never settled would
-    // hang here rather than pass.
+    // Disposal drains the cycle's own release and publication.
     await app.dispose()
 
-    assert.equal(app.accounts().length, 0, 'the removed account is gone from the plugin store')
+    const kept = app.accounts()
+    assert.equal(kept.length, 1, 'the refused credential stays in the plugin store')
+    assert.equal(kept[0]?.['accessToken'], ACCESS_TOKEN, 'its tokens are unchanged')
+    assert.equal(kept[0]?.['refreshToken'], REFRESH_TOKEN, 'including the refresh token the grant spent')
     assert.equal(app.wire.tokenCalls.length, 1, 'the maintenance cycle spent exactly one grant')
     assert.equal(app.messages().length, 1, 'no second user request was issued')
     const published = app.generation().find(entry => entry.reason === 'removal')
-    assert.ok(published !== undefined, 'the removal published a generation')
-    assert.equal(published.pending, null, 'no transition is left in flight')
-    assert.equal(published.baseline, false)
-    assert.ok(published.generation > baseline.generation, 'the generation advanced')
+    assert.equal(published, undefined, 'no removal identity change ran')
+    assert.equal(app.generation()[0]?.generation, baseline.generation, 'the generation did not advance')
     assert.deepEqual(app.wire.refused, [], 'nothing outside the stated endpoints was reached')
     assert.equal(app.wire.policyReads, 0, 'the ineligible account asked for no managed settings')
   })
 })
 
-test('a credential that moved while the grant was in flight survives the removal, and a later explicit logout can recover', { timeout: 30_000 }, async () => {
+test('a credential that moved while the grant was in flight survives, and an explicit logout still removes it', { timeout: 30_000 }, async () => {
   await withComposition(async (app, home) => {
     const baseline = await waitForBaseline(home)
     assert.equal(finishKind(await app.request('session-race')), 'stop', 'the first send ended as an ordinary stop')
 
     // The grant is held open by the case, and the cycle states `refreshing` before it reaches the
-    // token endpoint: the public status proves the removal is about to run on this credential.
+    // token endpoint: the public status proves the cycle is running on this credential.
     app.wire.holdToken = true
     await app.expire()
     await app.wire.reached
     assert.equal(await credentialState(app), 'refreshing', 'the cycle is running on the stored credential')
 
-    // The concurrent write lands inside the window the refresh already read, so the store's own
-    // compare-and-set is what must refuse the removal.
+    // The concurrent write lands inside the window the refresh already read. The refused grant
+    // must not delete or roll back the credential the winner holds.
     await app.rotate()
     app.wire.release()
-    await waitForCredentialSettled(app)
+    await waitForCredentialState(app, 'ready')
 
-    // The refusal kept the account the winner holds, and it settled as a stated failure rather
-    // than a statement still in flight.
-    const refused = await waitForFailedRemoval(home)
-    assert.equal(refused.generation, baseline.generation, 'the refused removal published nothing')
     const kept = app.accounts()
     assert.equal(kept.length, 1, 'the credential that won the store is kept')
     assert.equal(kept[0]?.['accessToken'], WINNER_ACCESS_TOKEN)
+    assert.equal(app.generation()[0]?.generation, baseline.generation, 'the refusal published nothing')
 
-    // An explicit identity operation is how a user recovers that account: the public logout must
-    // reach the same gate and replace the failed statement instead of refusing to begin.
+    // The only removal is the explicit one; it still runs the identity change.
     const result = await app.logout()
-    assert.equal(result.ok, true, `the explicit logout recovered the account: ${JSON.stringify(result)}`)
+    assert.equal(result.ok, true, `the explicit logout removed the account: ${JSON.stringify(result)}`)
     assert.equal(app.accounts().length, 0, 'the explicit logout removed the winning credential')
     const published = app.generation()[0]
     assert.ok(published !== undefined)
     assert.equal(published.reason, 'logout', 'the logout is the change that published')
-    assert.equal(published.pending, null, 'the recovered account states nothing in flight')
-    assert.equal(published.generation, baseline.generation + 1, 'only the logout advanced the generation')
+    assert.equal(published.pending, null, 'the removal states nothing in flight')
+    assert.equal(published.generation, baseline.generation + 1, 'the logout advanced the generation')
     assert.equal(app.wire.tokenCalls.length, 1, 'the recovery attempted no further grant')
     assert.equal(app.messages().length, 1, 'the recovery issued no Messages request')
     assert.deepEqual(app.wire.refused, [], 'nothing outside the stated endpoints was reached')

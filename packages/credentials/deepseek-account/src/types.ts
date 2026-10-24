@@ -34,9 +34,20 @@ export interface AccountLinks {
   readonly usageUrl: string
   readonly topUpUrl: string
 }
-/** Stored-account presence is not a claim that the server has validated its token. */
+/**
+ * Why a retained account grant cannot authenticate.
+ * `needs-reauth`: Platform or inference rejected the grant; `issuer-mismatch`: the grant was issued by a different Platform origin.
+ */
+export type AccountCredentialIssue = 'needs-reauth' | 'issuer-mismatch'
+/**
+ * Stored-account state. `signed-out` has no record; `credential-stored` has a usable grant;
+ * `needs-reauth` retains a parked grant that cannot authenticate until the user signs in again.
+ * Only explicit sign-out removes a grant, so a parked record survives restarts.
+ */
 export interface AccountView {
-  readonly status: 'signed-out' | 'credential-stored'
+  readonly status: 'signed-out' | 'credential-stored' | 'needs-reauth'
+  /** Why the retained grant cannot authenticate; present only with `needs-reauth`. */
+  readonly credentialIssue?: AccountCredentialIssue
   readonly links: AccountLinks
   readonly attempt: SignInAttemptView | null
 }
@@ -87,7 +98,7 @@ export interface AccountBonusBatch {
 
 declare module '@deepseek-ai/cordis' {
   interface Events {
-    /** Server rejection removed the current account credential; this notification is not replayed.
+    /** Server rejection parked the current credential; the stored grant is retained. This notification is not replayed.
      * @mode emit
      */
     'deepseek-account/session-expired'(): void

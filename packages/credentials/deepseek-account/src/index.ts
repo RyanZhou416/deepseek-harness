@@ -1,7 +1,7 @@
 /** Account Service Definition shared by platform, API, and model consumers. */
 import { Context, Service } from '@deepseek-ai/cordis'
 import type { AccountBonusBatch, AccountBonusOrderId, AccountClientMetadata, AccountDetails, AccountUserId, AccountView, SignInAttemptId } from './types.ts'
-export type { AccountBonusBatch, AccountBonusNotification, AccountBonusOrderId, AccountClientMetadata, AccountDetails, AccountProfile, AccountUserId, AccountWallet, AccountLinks, AccountView, SignInAttemptId, SignInAttemptView, SignInErrorCode } from './types.ts'
+export type { AccountBonusBatch, AccountBonusNotification, AccountBonusOrderId, AccountClientMetadata, AccountCredentialIssue, AccountDetails, AccountProfile, AccountUserId, AccountWallet, AccountLinks, AccountView, SignInAttemptId, SignInAttemptView, SignInErrorCode } from './types.ts'
 export { isRunningAccountTask, installAccountTaskCancellation } from './account-tasks.ts'
 
 declare module '@deepseek-ai/cordis' {
@@ -34,7 +34,7 @@ export abstract class DeepSeekAccount extends Service {
   constructor(ctx: Context) { super(ctx, 'deepseekAccount') }
   /**
    * Read stored-account presence and the latest login attempt.
-   * @returns a snapshot without credentials or PKCE secrets.
+   * @returns a snapshot without credentials or PKCE secrets; `needs-reauth` names a parked grant that was retained.
    */
   abstract getState(): Promise<AccountView>
   /**
@@ -42,19 +42,19 @@ export abstract class DeepSeekAccount extends Service {
    * A ready result whose stable profile ID first becomes available or changes notifies identity-enabled watch
    * consumers, so they re-read getPlatformSession; repeated IDs stay silent.
    * @param client - identity of the requesting UI for this call.
-   * @returns profile outcome, or null if signed out or the grant changed during the query.
+   * @returns profile outcome, or null if signed out, the grant changed during the query, or the stored grant is parked.
    */
   abstract getProfile(client: AccountClientMetadata): Promise<AccountDetails['profile'] | null>
   /**
    * Query Platform recharge and bonus wallet balances independently of profile data.
    * @param client - identity of the requesting UI for this call.
-   * @returns balance outcome, or null if signed out or the grant changed during the query.
+   * @returns balance outcome, or null if signed out, the grant changed during the query, or the stored grant is parked.
    */
   abstract getBalance(client: AccountClientMetadata): Promise<AccountDetails['balance'] | null>
   /**
    * Query the granted bonuses Platform has not yet recorded as displayed.
    * @param client - identity of the requesting UI for this call; its language selects the server-authored message.
-   * @returns bonuses with their account, or null if signed out or the grant changed during the query.
+   * @returns bonuses with their account, or null if signed out, the grant changed during the query, or the stored grant is parked.
    */
   abstract getUnnotifiedBonuses(client: AccountClientMetadata): Promise<AccountBonusBatch | null>
   /**
@@ -62,7 +62,7 @@ export abstract class DeepSeekAccount extends Service {
    * @param accountId - account the notification was read for; a different current account is never acknowledged.
    * @param orderId - granted bonus order the user saw.
    * @param client - identity of the requesting UI for this call.
-   * @returns true once Platform records the acknowledgement; false if signed out or the account changed.
+   * @returns true once Platform records the acknowledgement; false if signed out, the stored grant is parked, or the account changed.
    */
   abstract ackBonusNotified(accountId: AccountUserId, orderId: AccountBonusOrderId, client: AccountClientMetadata): Promise<boolean>
   /**
@@ -99,15 +99,15 @@ export abstract class DeepSeekAccount extends Service {
    */
   abstract resolveToken(url: string): Promise<string | undefined>
   /**
-   * Remove an inference-rejected token only while it still matches the stored login.
+   * Park an inference-rejected token while it still matches the stored login.
    * @param token - token captured by the rejected inference request.
-   * @returns after matching credentials are removed and the expiry notification is emitted.
+   * @returns after the matching grant is marked invalid for reauthentication; the stored bytes are retained.
    */
   abstract rejectToken(token: string): Promise<void>
   /**
    * Read credentials for the configured Platform origin, bound to their issuing environment, and
    * pair them with the account ID from the last successful profile read; no profile request is made.
-   * @returns a Host-only snapshot, or null while signed out or when the credential changed during the read.
+   * @returns a Host-only snapshot, or null while signed out, parked, or when the credential changed during the read.
    */
   abstract getPlatformSession(): Promise<PlatformSession | null>
   /**

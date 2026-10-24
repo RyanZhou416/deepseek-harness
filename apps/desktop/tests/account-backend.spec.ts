@@ -23,6 +23,14 @@ it('accepts a no-response login failure without discarding the account projectio
   expect(accountView(state)).toEqual(state)
 })
 
+it('keeps a parked credential issue in the native account projection', () => {
+  const state = { status: 'needs-reauth', credentialIssue: 'issuer-mismatch', attempt: null,
+    links: { usageUrl: 'https://platform.deepseek.com/usage', topUpUrl: 'https://platform.deepseek.com/top_up' } }
+  expect(accountView(state)).toEqual(state)
+  expect(() => accountView({ ...state, credentialIssue: 'raw-server-message' }))
+    .toThrow('desktop account: invalid credential issue')
+})
+
 it('uses account Remote commands without returning additional wire fields', async () => {
   const requests: unknown[] = []
   const backend = desktopAccountBackend('http://127.0.0.1:1234', (request) => {

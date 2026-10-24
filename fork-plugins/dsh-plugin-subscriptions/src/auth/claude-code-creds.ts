@@ -1,7 +1,7 @@
 import { execFileSync } from 'node:child_process'
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { LlmError } from '@deepseek-ai/dsh-llm'
-import { withStoreLock } from './store-lock.js'
+import { withStoreLockOwned } from './store-lock.js'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { getAccountSession } from './store.js'
@@ -319,6 +319,7 @@ function sameSourceAccount(source: ClaudeSession, session: ClaudeSession): boole
  * established, so no coordination with it is claimed.
  * @param session - the session TokenManager wants refreshed.
  * @param doRefresh - the actual OAuth refresh-token grant (network call).
+ * @param onWarn - sink for a write-back that did not land; absent stays quiet.
  * @returns the freshest available session.
  * @throws LlmError `CLAUDE_CREDENTIAL_SOURCE_CHANGED` when the store's credential changed and
  *   this account cannot be confirmed against it, unknown identity included.
@@ -326,10 +327,15 @@ function sameSourceAccount(source: ClaudeSession, session: ClaudeSession): boole
 export async function refreshClaudeSynced(
   session: ClaudeSession,
   doRefresh: (session: ClaudeSession) => Promise<ClaudeSession>,
+  onWarn?: (message: string) => void,
 ): Promise<ClaudeSession> {
   // Held across read-refresh-write so two cooperating processes sharing the account cannot both
-  // rotate its refresh token, which would invalidate whichever side lost the race.
-  return withStoreLock(credentialsFilePath(), async () => {
+  // rotate its refresh token, which would invalidate whichever side lost the race. A lock that
+  // cannot be acquired fails this write rather than running it unowned.
+  const path = credentialsFilePath()
+  // The lock lives beside the credential file; the directory must exist before it can be created.
+  mkdirSync(dirname(path), { recursive: true, mode: 0o700 })
+  const outcome = await withStoreLockOwned(path, async () => {
     const fromSource = readClaudeCodeCredentials()
     const sourceRotation = fromSource !== undefined && fromSource.accessToken !== session.accessToken
       ? fromSource
@@ -345,9 +351,25 @@ export async function refreshClaudeSynced(
     const base = withClaudeCredentialReference(session, sourceRotation ?? session)
     if (base.expiresAt > Date.now() + 60_000) return base
     const next = await doRefresh(base)
-    writeBackClaudeCodeCredentials(next, base.accessToken)
+    // The grant is spent; this plugin must still store the result even when the external copy
+    // cannot be updated. The boolean is not ignored: a failed write-back is reported so the
+    // operator knows Claude Code's copy no longer matches, and no token is deleted either way.
+    if (!writeBackClaudeCodeCredentials(next, base.accessToken)) {
+      onWarn?.(
+        "dsh-plugin-subscriptions: the refreshed Claude credential could not be written back to "
+        + "Claude Code's credential store; that copy is now stale and must be imported again",
+      )
+    }
     return withClaudeCredentialReference(session, next)
   })
+  if (!outcome.acquired) {
+    throw new LlmError(
+      'dsh-plugin-subscriptions: another process holds Claude Code\'s credential lock; '
+      + 'the refreshed credential was not written back, retry shortly',
+      'REFRESH_BUSY',
+    )
+  }
+  return outcome.value
 }
 
 /**

@@ -66,7 +66,7 @@ it('reports an in-band account balance stream error as ACCOUNT_QUOTA', async () 
   })
 })
 
-it('still expires the stored credential on an account-route 401', async () => {
+it('reports an account-route 401 as ACCOUNT_TOKEN_INVALID and lets the account service park the credential', async () => {
   const ctx = new Context()
   contexts.push(ctx)
   await ctx.plugin(LlmRuntime)

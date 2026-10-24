@@ -77,7 +77,6 @@ interface Harness {
   writes: ObservedWrite[]
   refreshes: string[]
   removed: string[]
-  notified: string[]
   tokens: AccountTokenManager<ClaudeSession>
 }
 
@@ -85,21 +84,19 @@ interface Harness {
  * An `AccountTokenManager` over the shipped store. `save` mirrors the durable
  * adapter — the store's boolean is discarded — and records whether the entry
  * held exactly the written session afterwards. `remove` mirrors the durable
- * adapter's conditional removal and records only the removals that deleted.
+ * adapter's conditional removal and records only the removals that deleted;
+ * token management never calls it, so those records stay explicit-logout only.
  */
 function harness(options: {
   dir: string
   refresh: (account: string, current: ClaudeSession, path: string) => Promise<ClaudeSession>
   preemptMs?: number
   permanent?: boolean
-  /** A barrier that runs inside the removal, before the store's own check. */
-  duringRemove?: (account: string, path: string) => Promise<void> | void
 }): Harness {
   const path = join(options.dir, 'auth.json')
   const writes: ObservedWrite[] = []
   const refreshes: string[] = []
   const removed: string[] = []
-  const notified: string[] = []
   const tokens = new AccountTokenManager<ClaudeSession>({
     provider: 'claude',
     displayName: 'Commit test',
@@ -111,7 +108,6 @@ function harness(options: {
       },
       isPermanent: () => options.permanent ?? false,
     }),
-    onAccountRemoved: (account) => { notified.push(account) },
     io: {
       list: () => listAccounts('claude', path),
       get: account => getAccountSession('claude', account, path),
@@ -127,7 +123,6 @@ function harness(options: {
         })
       },
       remove: async (account, expectedPrior) => {
-        await options.duringRemove?.(account, path)
         const deleted = await deleteAccountSession('claude', account, path,
           expectedPrior === undefined ? {} : { expectedPrior })
         if (deleted) removed.push(account)
@@ -136,7 +131,7 @@ function harness(options: {
       resolve: account => resolveAccountKey('claude', account, path),
     },
   })
-  return { path, writes, refreshes, removed, notified, tokens }
+  return { path, writes, refreshes, removed, tokens }
 }
 
 /** Assert that one settled caller rejected with the given LlmError code. */
@@ -187,7 +182,6 @@ test('a logout during the refresh grant fails MISSING_CREDENTIAL and revives not
   assert.deepEqual(h.writes, [{ key: ACCOUNT, landed: false }], 'the real compare-and-set refused the write')
   assert.equal(await getAccountSession('claude', ACCOUNT, h.path), undefined, 'the logged-out account is not resurrected')
   assert.deepEqual(h.removed, [], 'an account that is already gone is not removed again')
-  assert.deepEqual(h.notified, [], 'no removal is reported for a logout that already happened')
   await assert.rejects(
     h.tokens.session(ACCOUNT),
     (error: unknown) => error instanceof LlmError && error.code === 'MISSING_CREDENTIAL',
@@ -309,7 +303,8 @@ test('a permanent refresh refusal reports safe facts', async () => {
     permanent: true,
     refresh: () => Promise.reject(new OAuthEndpointError('raw-secret-body', 400, 'invalid_grant')),
   })
-  await saveAccountSession('claude', ACCOUNT, session('at-a', -1_000), h.path)
+  const stored = session('at-a', -1_000)
+  await saveAccountSession('claude', ACCOUNT, stored, h.path)
 
   await assert.rejects(h.tokens.session(ACCOUNT), (error: unknown) => {
     assert.ok(error instanceof LlmError)
@@ -318,6 +313,8 @@ test('a permanent refresh refusal reports safe facts', async () => {
     assert.doesNotMatch(error.message, /raw-secret-body|at-a/)
     return true
   })
+  assert.deepEqual(await getAccountSession('claude', ACCOUNT, h.path), stored,
+    'the refused credential is still stored, unchanged, for an explicit logout')
 })
 
 test('a logout during the refresh grant fails the Claude request before any Messages call', async (t) => {
@@ -362,26 +359,25 @@ test('a logout during the refresh grant fails the Claude request before any Mess
   assert.deepEqual(fetched, [], 'a logged-out credential starts no provider request')
 })
 
-test('a login that lands before the permanent failure’s removal is retained and served', async () => {
+test('a login that lands during a permanent failure is retained and served', async () => {
   const dir = storeDir()
   const h = harness({
     dir,
     permanent: true,
-    refresh: () => Promise.reject(new Error('invalid_grant')),
-    // The barrier is the removal itself: the login lands after the failure read
-    // the stored session and before the store can delete it.
-    duringRemove: async (account, path) => {
+    // The login lands while the failing refresh is still spending the old grant, so the
+    // permanent branch must serve the stored winner instead of reporting the dead credential.
+    refresh: async (account, _current, path) => {
       await saveAccountSession('claude', account, session('at-relogin', HOUR, { refreshToken: 'rt-relogin' }), path)
+      throw new Error('invalid_grant')
     },
   })
   await saveAccountSession('claude', ACCOUNT, session('at-a', -1_000, { refreshToken: 'rt-a' }), h.path)
 
   const served = await h.tokens.session(ACCOUNT)
 
-  assert.equal(served.accessToken, 'at-relogin', 'the credential a login stored during the removal is served')
+  assert.equal(served.accessToken, 'at-relogin', 'the credential a login stored during the failure is served')
   assert.deepEqual(served, await getAccountSession('claude', ACCOUNT, h.path), 'and it is still the stored session')
-  assert.deepEqual(h.removed, [], 'the refused removal deleted nothing')
-  assert.deepEqual(h.notified, [], 'a surviving login is not reported as a removal')
+  assert.deepEqual(h.removed, [], 'nothing was deleted')
 })
 
 test('the conditional removal deletes only the session it was given', async () => {
@@ -407,20 +403,21 @@ test('the conditional removal deletes only the session it was given', async () =
   assert.equal(await deleteAccountSession('claude', ACCOUNT, path), false, 'an absent account reports no deletion')
 })
 
-test('concurrent permanent failures remove and report the removal once', async () => {
+test('concurrent permanent failures keep the credential and report INVALID_CREDENTIAL', async () => {
   const dir = storeDir()
   const h = harness({
     dir,
     permanent: true,
     refresh: () => Promise.reject(new Error('invalid_grant')),
   })
-  await saveAccountSession('claude', ACCOUNT, session('at-a', -1_000, { refreshToken: 'rt-a' }), h.path)
+  const stored = session('at-a', -1_000, { refreshToken: 'rt-a' })
+  await saveAccountSession('claude', ACCOUNT, stored, h.path)
 
   const settled = await Promise.allSettled([h.tokens.session(ACCOUNT), h.tokens.session(ACCOUNT)])
 
   for (const result of settled) assertRejectedWithCode(result, 'INVALID_CREDENTIAL')
   assert.deepEqual(h.refreshes, [ACCOUNT], 'both waiters shared one grant')
-  assert.deepEqual(h.removed, [ACCOUNT], 'the failed login is removed once')
-  assert.deepEqual(h.notified, [ACCOUNT], 'only the waiter that deleted it reports the removal')
-  assert.equal(await getAccountSession('claude', ACCOUNT, h.path), undefined)
+  assert.deepEqual(h.removed, [], 'no waiter deletes the credential')
+  assert.deepEqual(await getAccountSession('claude', ACCOUNT, h.path), stored,
+    'the stored credential survives the refused grant')
 })

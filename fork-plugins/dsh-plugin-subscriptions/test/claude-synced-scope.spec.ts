@@ -325,7 +325,6 @@ async function runManager(
       },
       isPermanent: isClaudePermanentRefreshError,
     }),
-    onAccountRemoved: () => { removed = true },
     io: {
       list: async () => [{ key: 'acct', session: stored }],
       get: async () => stored,

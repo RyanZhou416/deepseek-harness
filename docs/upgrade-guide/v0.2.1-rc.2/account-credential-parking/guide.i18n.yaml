@@ -1,0 +1,16 @@
+# Bilingual-pair consistency record for guide.md (docs/i18n/README.md): per heading
+# section, a hash of its English and Chinese blocks outside code blocks and generated regions.
+# After editing either side, bring the other along and re-record with:
+#   pnpm run verify-translation-pairing --write docs/upgrade-guide/v0.2.1-rc.2/account-credential-parking/guide.md
+/:
+  en: ec1a08ec81150add
+  zh: d6d4db3c85890e5c
+/account-credential-parking:
+  en: 3448454361081b62
+  zh: 773d08f6de0bc5fb
+/account-credential-parking/change:
+  en: 76e172e5491bad5a
+  zh: c4d26f80142e8864
+/account-credential-parking/migration:
+  en: 3f39b6274615f5a3
+  zh: 44efd8fac97d7a43
