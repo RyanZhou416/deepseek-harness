@@ -92,7 +92,7 @@ dsh --profile web --no-open --host "$(hostname -i | awk '{print $1}')" --public-
 
 每个浏览器会话选择一个随发行版交付的 preset（默认 `standard`）。Agent 预设设置页可更改默认项并编辑预设的子插件；保存结果持久化到 `$DSH_HOME/profiles/web/cordis.patch.yml`。只有 Host 提供可编辑的 profile 时，Creator 的插件管理工具才会启用。
 
-本 fork 的 `standard`、`ptc` 与 `cordis` 预设包含 `session_create`、`session_find`、`session_send_message`、`session_message_status` 与 `session_workspace`，供彼此独立的 Session 使用；`minimal` 不包含。创建会立即启动独立任务，并可选设置标题、请求模型、思考强度与置顶；全局模型选择是权威值。归档要求模型在对话中确认用户授权；不检查 runtime 授权令牌。发送方身份由存活 Agent 提供，subagent／teammate 协调仍使用各自的工具。
+本 fork 的 `standard`、`ptc` 与 `cordis` 预设包含 `session` 和 `session_query`，供彼此独立的 Session 使用；`minimal` 不包含。`session` 负责创建、发送、归档、置顶/取消置顶与重命名；创建会立即启动独立任务，并可选设置标题、请求模型、思考强度与置顶，全局模型选择是权威值。`session_query` 负责查找会话与查询确切 id 或消息状态。归档要求模型在对话中确认用户授权；不检查 runtime 授权令牌。发送方身份由存活 Agent 提供，subagent／teammate 协调仍使用各自的工具。
 
 -----
 

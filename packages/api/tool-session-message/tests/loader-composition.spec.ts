@@ -124,11 +124,8 @@ describe('tool-session-message through a real Loader composition', () => {
     await context.loader.await()
 
     expect(context.tools.schemas().map(schema => schema.name).toSorted()).toEqual([
-      'session_create',
-      'session_find',
-      'session_message_status',
-      'session_send_message',
-      'session_workspace',
+      'session',
+      'session_query',
     ])
 
     const senderSession = context.sessions.create(SessionId('loader-sender'), { meta: { cwd: '/sender' } })
@@ -148,8 +145,8 @@ describe('tool-session-message through a real Loader composition', () => {
     const result = await context.tools.execute({
       signal: new AbortController().signal,
       callId: ToolCallId('loader-session-message'),
-      name: 'session_send_message',
-      arguments: { session_id: target.id, message: 'Loader-composed delivery.' },
+      name: 'session',
+      arguments: { action: 'send', session_id: target.id, message: 'Loader-composed delivery.' },
       agent: sender,
     })
 

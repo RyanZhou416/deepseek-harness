@@ -20,7 +20,7 @@ declare module '@deepseek-ai/cordis' {
   }
 }
 
-/** One exact model route a deployment may force onto `session_create` Sessions. */
+/** One exact model route a deployment may force onto the `session` create action Sessions. */
 export interface SessionCreateModelOverride {
   /** Registered provider route. */
   provider: string
@@ -38,7 +38,7 @@ export interface Config {
   model: Volatile<string>
   /** Adapter-owned reasoning effort; omission follows the provider default. */
   reasoningEffort: Volatile<string | undefined>
-  /** Optional forced route for `session_create`; false inherits the call/global choice. */
+  /** Optional forced route for the `session` create action; false inherits the call/global choice. */
   sessionCreateModelOverride: Volatile<SessionCreateModelOverride | false>
 }
 

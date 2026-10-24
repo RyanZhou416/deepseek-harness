@@ -28,11 +28,8 @@ it('scopes Session-addressed tools to full Web Agent presets', async () => {
     const agent = scaffold.ctx.agents.get(id)
     if (agent === undefined) throw new Error(`${preset} Agent was not created`)
     expect(scaffold.ctx.tools.schemas(agent).map(schema => schema.name)).toEqual(expect.arrayContaining([
-      'session_create',
-      'session_find',
-      'session_message_status',
-      'session_send_message',
-      'session_workspace',
+      'session',
+      'session_query',
     ]))
   }
 
@@ -45,11 +42,8 @@ it('scopes Session-addressed tools to full Web Agent presets', async () => {
   const minimal = scaffold.ctx.agents.get(minimalId)
   if (minimal === undefined) throw new Error('minimal Agent was not created')
   expect(scaffold.ctx.tools.schemas(minimal).map(schema => schema.name)).not.toEqual(expect.arrayContaining([
-    'session_create',
-    'session_find',
-    'session_message_status',
-    'session_send_message',
-    'session_workspace',
+    'session',
+    'session_query',
   ]))
 })
 
@@ -78,8 +72,8 @@ it('creates an ordinary Session in the caller workspace and starts its attribute
   const result = await ctx.tools.execute({
     signal: new AbortController().signal,
     callId: ToolCallId('session-create-web-task'),
-    name: 'session_create',
-    arguments: { task: 'Complete a separate, independent task.' },
+    name: 'session',
+    arguments: { action: 'create', task: 'Complete a separate, independent task.' },
     agent: caller,
   })
 

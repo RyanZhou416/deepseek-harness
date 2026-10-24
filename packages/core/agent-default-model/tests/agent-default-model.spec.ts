@@ -17,7 +17,7 @@ it('reads complete selections from volatile config and clears omitted reasoning 
   expect(consumer.currentSelection()).toEqual({ provider: 'p', model: 'm' })
 })
 
-it('reads the optional session_create override live and treats false as absent', async () => {
+it('reads the optional session create override live and treats false as absent', async () => {
   const ctx = new Context()
   onTestFinished(() => ctx.fiber.dispose())
   const live = await liveConfig(ctx, DefaultModel, {

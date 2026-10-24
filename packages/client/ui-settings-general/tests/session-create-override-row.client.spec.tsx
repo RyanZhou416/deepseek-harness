@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-/** General Settings edits the model `session_create` forces onto new Sessions. */
+/** General Settings edits the model the `session` create action forces onto new Sessions. */
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { bindSnapshotSelector } from '@deepseek-ai/dsh-client-test-runtime'

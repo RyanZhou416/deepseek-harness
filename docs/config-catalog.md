@@ -39,7 +39,7 @@ export interface AcpConfig {
 ## `@deepseek-ai/dsh-agent-default-model`
 
 - `refs`: `Volatile` (`@deepseek-ai/cordis`)
-- `source`: [`packages/core/agent-default-model/src/index.ts:24`](../packages/core/agent-default-model/src/index.ts)
+- `source`: [`packages/core/agent-default-model/src/index.ts:34`](../packages/core/agent-default-model/src/index.ts)
 
 ```ts config-catalog
 /** Default model selection supplied by plugin configuration. */
@@ -50,11 +50,11 @@ export interface Config {
   model: Volatile<string>
   /** Adapter-owned reasoning effort; omission follows the provider default. */
   reasoningEffort: Volatile<string | undefined>
-  /** Optional forced route for `session_create`; false inherits the call/global choice. */
+  /** Optional forced route for the `session` create action; false inherits the call/global choice. */
   sessionCreateModelOverride: Volatile<SessionCreateModelOverride | false>
 }
 
-/** One exact model route a deployment may force onto `session_create` Sessions. */
+/** One exact model route a deployment may force onto the `session` create action Sessions. */
 export interface SessionCreateModelOverride {
   /** Registered provider route. */
   provider: string

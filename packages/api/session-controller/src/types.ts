@@ -311,7 +311,7 @@ export interface SessionSelectModelRequest extends ModelSelection {
   readonly sessionId: SessionId
   /**
    * Whether this selection also becomes the global default. Defaults to true;
-   * a one-shot override (for example `session_create`) sets this to false.
+   * a one-shot override (for example the `session` tool's `create` action) sets this to false.
    */
   readonly saveDefault?: boolean
 }

@@ -140,8 +140,8 @@ function execute(ctx: Context, args: unknown, agent?: Agent, signal = new AbortC
   return ctx.tools.execute({
     signal,
     callId: ToolCallId(`session-message-${String(++nextCall)}`),
-    name: 'session_send_message',
-    arguments: args,
+    name: 'session',
+    arguments: { action: 'send', ...(args as Record<string, unknown>) },
     ...(agent === undefined ? {} : { agent }),
   })
 }
@@ -150,8 +150,8 @@ function createSession(ctx: Context, args: unknown, agent?: Agent, signal = new 
   return ctx.tools.execute({
     signal,
     callId: ToolCallId(`session-create-${String(++nextCall)}`),
-    name: 'session_create',
-    arguments: args,
+    name: 'session',
+    arguments: { action: 'create', ...(args as Record<string, unknown>) },
     ...(agent === undefined ? {} : { agent }),
   })
 }
@@ -177,42 +177,23 @@ function resultText(result: Awaited<ReturnType<typeof execute>>): string {
 }
 
 describe('dsh-tool-session-message', () => {
-  it('registers an exact-id context-injection tool with prompt-only loop guidance', async () => {
+  it('registers exactly the merged mutation and query tools', async () => {
     const { ctx } = await setup()
-    const schemas = ctx.tools.schemas().filter(schema => schema.name === 'session_send_message')
-    expect(schemas).toHaveLength(1)
-    const schema = schemas[0]!
-    const properties = (schema.parameters as { properties?: Record<string, unknown> }).properties ?? {}
-    expect(Object.keys(properties)).toEqual(['session_id', 'message'])
-    expect(schema.description).toContain('target may be unrelated')
-    expect(schema.description).toContain('use send_message for a direct continuable parent or child')
-    expect(schema.description).toContain('AgentTeams messaging for teammates')
-    expect(schema.description).toContain('never guess or enumerate')
-    const sessionIdParameter = properties.session_id as { description?: unknown }
-    expect(sessionIdParameter.description).toContain('Do not use a subagent or teammate id here.')
-    expect(sessionIdParameter.description).toContain('session_create result')
-    const create = ctx.tools.schemas().find(candidate => candidate.name === 'session_create')
-    expect(create?.description).toContain('user explicitly asks for a separate conversation')
-    expect(create?.description).toContain('explicitly requested model')
-    expect(Object.keys((create?.parameters as { properties?: Record<string, unknown> }).properties ?? {}))
-      .toEqual(['task', 'name', 'model', 'provider', 'reasoning_effort', 'pinned'])
-    const workspace = ctx.tools.schemas().find(candidate => candidate.name === 'session_workspace')
-    expect(workspace?.description).toContain('user-authorized')
-    expect(workspace?.description).toContain('one archive')
-    expect(workspace?.description).toContain('long-term')
-    expect(workspace?.description).toContain('rename')
-    expect(Object.keys((workspace?.parameters as { properties?: Record<string, unknown> }).properties ?? {}))
-      .toEqual(['action', 'session_id', 'title'])
-    expect(ctx.tools.schemas().some(candidate => candidate.name === 'session_archive')).toBe(false)
-    expect(ctx.tools.schemas().some(candidate => candidate.name === 'session_pin')).toBe(false)
-    expect(ctx.tools.schemas().some(candidate => candidate.name === 'session_unpin')).toBe(false)
-    const status = ctx.tools.schemas().find(candidate => candidate.name === 'session_message_status')
-    expect(status?.description).toContain('do not poll')
-    expect(status?.description).toContain('terminal_send')
-    const find = ctx.tools.schemas().find(candidate => candidate.name === 'session_find')
-    expect(find?.description).toContain('case-insensitive title')
-    expect(find?.description).toContain('Delegated child Sessions')
-    expect(find?.description).toContain('instead of guessing')
+    expect(ctx.tools.schemas().map(schema => schema.name).toSorted()).toEqual(['session', 'session_query'])
+    const mutation = ctx.tools.schemas().find(schema => schema.name === 'session')!
+    const mutationProperties = (mutation.parameters as { properties?: Record<string, unknown> }).properties ?? {}
+    expect(Object.keys(mutationProperties)).toEqual([
+      'action', 'task', 'title', 'session_id', 'message', 'model', 'provider', 'reasoning_effort', 'pinned',
+    ])
+    expect(mutation.description).toContain('`session_query`')
+    expect(mutation.description).toContain('Archive requires prior user authorization')
+    const query = ctx.tools.schemas().find(schema => schema.name === 'session_query')!
+    const queryProperties = (query.parameters as { properties?: Record<string, unknown> }).properties ?? {}
+    expect(Object.keys(queryProperties)).toEqual(['action', 'query', 'session_id', 'message_id'])
+    expect(query.description).toContain('`status` reports one exact Session')
+    expect(query.description).toContain('`archived`')
+    expect(ctx.tools.schemas().some(schema => ['session_create', 'session_find', 'session_message_status',
+      'session_send_message', 'session_workspace'].includes(schema.name))).toBe(false)
   })
 
   it('creates an independent Session and wakes its initial attributed task after copying permissions', async () => {
@@ -259,7 +240,7 @@ describe('dsh-tool-session-message', () => {
 
     const result = await createSession(ctx, {
       task: 'Work with the selected options.',
-      name: '  Chosen title  ',
+      title: '  Chosen title  ',
       model: 'requested-model',
       reasoning_effort: 'low',
       pinned: true,
@@ -316,23 +297,23 @@ describe('dsh-tool-session-message', () => {
     const caller = makeAgent(ctx, 'workspace-tool-caller', '/workspace')
     await ctx.agents.register(caller)
 
-    const archived = await runSessionTool(ctx, 'session_workspace', { action: 'archive', session_id: 'archived-session' }, caller)
+    const archived = await runSessionTool(ctx, 'session', { action: 'archive', session_id: 'archived-session' }, caller)
     expect(archived.isError).toBe(false)
     expect(workspace.archiveSession).toHaveBeenCalledExactlyOnceWith(SessionId('archived-session'))
     expect(resultText(archived)).toContain('archived: true')
 
-    const pinned = await runSessionTool(ctx, 'session_workspace', { action: 'pin', session_id: 'pinned-session' }, caller)
+    const pinned = await runSessionTool(ctx, 'session', { action: 'pin', session_id: 'pinned-session' }, caller)
     expect(pinned.isError).toBe(false)
     expect(workspace.pinSession).toHaveBeenCalledWith(SessionId('pinned-session'))
     expect(resultText(pinned)).toContain('pinned: true')
 
-    const unpinned = await runSessionTool(ctx, 'session_workspace', { action: 'unpin', session_id: 'pinned-session' }, caller)
+    const unpinned = await runSessionTool(ctx, 'session', { action: 'unpin', session_id: 'pinned-session' }, caller)
     expect(unpinned.isError).toBe(false)
     expect(workspace.unpinSession).toHaveBeenCalledWith(SessionId('pinned-session'))
     expect(resultText(unpinned)).toContain('pinned: false')
 
     rename.mockResolvedValueOnce({ title: 'Renamed title', seq: SessionSeq(9) })
-    const renamed = await runSessionTool(ctx, 'session_workspace', {
+    const renamed = await runSessionTool(ctx, 'session', {
       action: 'rename', session_id: 'renamed-session', title: '  Renamed title  ',
     }, caller)
     expect(renamed.isError).toBe(false)
@@ -348,7 +329,7 @@ describe('dsh-tool-session-message', () => {
     await ctx.agents.register(target)
     create.mockResolvedValue({ sessionId: target.id })
 
-    expect((await createSession(ctx, { task: 'task', name: '   ' }, sender)).isError).toBe(true)
+    expect((await createSession(ctx, { task: 'task', title: '   ' }, sender)).isError).toBe(true)
     expect(create).not.toHaveBeenCalled()
   })
 
@@ -388,7 +369,7 @@ describe('dsh-tool-session-message', () => {
     const result = await createSession(ctx, { task: 'Do not start after caller disposal.' }, sender)
 
     expect(result.isError).toBe(true)
-    expect(resultText(result)).toContain(`created Session "${target.id}" but did not accept its initial task`)
+    expect(resultText(result)).toContain(`session create started Session "${target.id}" but did not accept its initial task`)
     expect(sendOf(target)).not.toHaveBeenCalled()
   })
 
@@ -404,7 +385,7 @@ describe('dsh-tool-session-message', () => {
     const result = await createSession(ctx, { task: 'Do not run with changed access.' }, sender)
 
     expect(result.isError).toBe(true)
-    expect(resultText(result)).toContain(`created Session "${target.id}" but did not accept its initial task`)
+    expect(resultText(result)).toContain(`session create started Session "${target.id}" but did not accept its initial task`)
     expect(permissions.set).not.toHaveBeenCalled()
     expect(sendOf(target)).not.toHaveBeenCalled()
   })
@@ -472,8 +453,8 @@ describe('dsh-tool-session-message', () => {
     const result = await ctx.tools.execute({
       signal,
       callId: ToolCallId('find-session'),
-      name: 'session_find',
-      arguments: { query: '  migration  ' },
+      name: 'session_query',
+      arguments: { action: 'find', query: '  migration  ' },
       agent: caller,
     })
 
@@ -487,9 +468,45 @@ describe('dsh-tool-session-message', () => {
     expect(resultText(result)).toContain('Quarterly migration display')
     expect(resultText(result)).toContain('"archived": true')
     expect(resultText(result)).toContain('"status": "archived"')
-    expect(resultText(result)).toContain('"running": false')
     expect(resultText(result)).not.toContain('delegated-session')
     expect(resultText(result)).toContain('user-fork')
+  })
+
+  it('queries one exact Session status without activating it', async () => {
+    const { ctx, listCandidates, listSessions, workspace } = await setup()
+    const caller = makeAgent(ctx, 'status-query-caller', '/workspace')
+    const target = makeAgent(ctx, 'status-query-target', '/workspace')
+    await ctx.agents.register(caller)
+    await ctx.agents.register(target)
+    listCandidates.mockResolvedValue([{
+      sessionId: target.id,
+      label: 'Status target',
+      sameWorkspace: true,
+      createdAt: target.session.header.createdAt,
+    }])
+    listSessions.mockResolvedValue([{
+      header: target.session.header,
+      live: true,
+      persisted: true,
+    }] as never)
+    const query = () => ctx.tools.execute({
+      signal: new AbortController().signal,
+      callId: ToolCallId(`status-${String(++nextCall)}`),
+      name: 'session_query',
+      arguments: { action: 'status', session_id: target.id },
+      agent: caller,
+    })
+
+    const idle = await query()
+    expect(idle.isError).toBe(false)
+    expect(resultText(idle)).toContain('status: idle')
+    expect(resultText(idle)).toContain('archived false')
+
+    workspace.archivedState.ids.push(target.id)
+    const archived = await query()
+    expect(archived.isError).toBe(false)
+    expect(resultText(archived)).toContain('status: archived')
+    expect(resultText(archived)).toContain('archived true')
   })
 
   it('validates Session discovery and renders an empty match', async () => {
@@ -499,8 +516,8 @@ describe('dsh-tool-session-message', () => {
     const find = (query: string, signal = new AbortController().signal) => ctx.tools.execute({
       signal,
       callId: ToolCallId(`find-validation-${String(++nextCall)}`),
-      name: 'session_find',
-      arguments: { query },
+      name: 'session_query',
+      arguments: { action: 'find', query },
       agent: caller,
     })
 
@@ -750,8 +767,8 @@ describe('dsh-tool-session-message', () => {
     const result = await ctx.tools.execute({
       signal: new AbortController().signal,
       callId: ToolCallId('status-call'),
-      name: 'session_message_status',
-      arguments: { session_id: target.id, message_id: tracked.id },
+      name: 'session_query',
+      arguments: { action: 'message_status', session_id: target.id, message_id: tracked.id },
       agent: caller,
     })
 
@@ -772,8 +789,8 @@ describe('dsh-tool-session-message', () => {
     const status = (args: unknown, signal = new AbortController().signal) => ctx.tools.execute({
       signal,
       callId: ToolCallId(`status-validation-${String(++nextCall)}`),
-      name: 'session_message_status',
-      arguments: args,
+      name: 'session_query',
+      arguments: { action: 'message_status', ...(args as Record<string, unknown>) },
       agent: caller,
     })
 
@@ -795,15 +812,11 @@ describe('dsh-tool-session-message', () => {
 
   it('unregisters the tool with its plugin fiber', async () => {
     const { ctx, fiber } = await setup()
-    expect(ctx.tools.schemas().some(schema => schema.name === 'session_find')).toBe(true)
-    expect(ctx.tools.schemas().some(schema => schema.name === 'session_create')).toBe(true)
-    expect(ctx.tools.schemas().some(schema => schema.name === 'session_send_message')).toBe(true)
-    expect(ctx.tools.schemas().some(schema => schema.name === 'session_message_status')).toBe(true)
+    expect(ctx.tools.schemas().some(schema => schema.name === 'session')).toBe(true)
+    expect(ctx.tools.schemas().some(schema => schema.name === 'session_query')).toBe(true)
     await fiber.dispose()
-    expect(ctx.tools.schemas().some(schema => schema.name === 'session_find')).toBe(false)
-    expect(ctx.tools.schemas().some(schema => schema.name === 'session_create')).toBe(false)
-    expect(ctx.tools.schemas().some(schema => schema.name === 'session_send_message')).toBe(false)
-    expect(ctx.tools.schemas().some(schema => schema.name === 'session_message_status')).toBe(false)
+    expect(ctx.tools.schemas().some(schema => schema.name === 'session')).toBe(false)
+    expect(ctx.tools.schemas().some(schema => schema.name === 'session_query')).toBe(false)
   })
 
   it('has the namespace-plugin export shape', () => {

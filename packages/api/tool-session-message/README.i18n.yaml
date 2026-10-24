@@ -9,7 +9,7 @@
   en: 40416f304efeaee8
   zh: af9c890f4f7103a4
 /deepseek-ai-dsh-tool-session-message/summary:
-  en: e67f32dd97eab588
+  en: 6dec05c3e62f2fde
   zh: 646bcfc901e05ebc
 /deepseek-ai-dsh-tool-session-message/table-of-contents:
   en: d152484eb41ac6b4
@@ -18,26 +18,26 @@
   en: 9d7c1f306ba9cf46
   zh: 346c4332a91285cb
 /deepseek-ai-dsh-tool-session-message/use-this-package/when-to-choose-it:
-  en: 85d43ee52531bdc2
-  zh: d2eb7069aa53ba20
+  en: a88374699b780baa
+  zh: f00174501697671f
 /deepseek-ai-dsh-tool-session-message/use-this-package/minimal-configuration:
   en: 38ac5f4df4a224b3
   zh: c33465a6d457e889
 /deepseek-ai-dsh-tool-session-message/use-this-package/creating-and-starting-an-independent-session:
-  en: 103805f23b8ff7bb
-  zh: 9adb1b55754b4012
+  en: 905428d472783180
+  zh: d7316d6d3446a931
 /deepseek-ai-dsh-tool-session-message/use-this-package/archiving-pinning-and-renaming:
-  en: 48f2c87f86273c14
-  zh: 7f3387c89d2cfc11
+  en: 1db7238a9608a986
+  zh: 4df151eedbf476ea
 /deepseek-ai-dsh-tool-session-message/use-this-package/finding-an-independent-session:
-  en: 0cdb2c259e4e63fc
-  zh: ff343496a3c91160
+  en: 607695b70878cab3
+  zh: a5fcbe56e024bda4
 /deepseek-ai-dsh-tool-session-message/use-this-package/delivery:
-  en: 6f76696c098963bd
-  zh: 9d19715425303e9c
+  en: b0013d923da46b51
+  zh: 190ad0fabeed94f0
 /deepseek-ai-dsh-tool-session-message/use-this-package/status-inspection:
-  en: bc3d1a6aeaeb53bd
-  zh: 678918b3fcc87e5c
+  en: f0bc6b07df07b20c
+  zh: 00a07690bf58d4f0
 /deepseek-ai-dsh-tool-session-message/use-this-package/failure-and-cancellation:
   en: 8317f52304e27b85
   zh: d56f2471236bd6dd
@@ -63,8 +63,8 @@
   en: e4c7376d4f29dbd5
   zh: 6b7a9eaf69c9ea53
 /deepseek-ai-dsh-tool-session-message/model-experience/tool-schema/what-the-model-sees:
-  en: 14d84934fb1cbd21
-  zh: f553d4595419bf56
+  en: 558e943abb0ecf98
+  zh: 65762deeb2768cb1
 /deepseek-ai-dsh-tool-session-message/model-experience/tool-schema/token-effect:
   en: 5c43dbbde28c1f67
   zh: d799d05bfd4d98cb
@@ -75,8 +75,8 @@
   en: 0db2460073983ef4
   zh: 6793e35b191b8afc
 /deepseek-ai-dsh-tool-session-message/model-experience/session-creation-result/what-the-model-sees:
-  en: a754727f3c4c96d3
-  zh: c8b8b7df6c508ebf
+  en: 10ed4df1d6e90956
+  zh: 0c88de339d5c73ce
 /deepseek-ai-dsh-tool-session-message/model-experience/session-creation-result/token-effect:
   en: f4c8c90800a83c2b
   zh: 0ab91fcb2e79f4eb
@@ -87,8 +87,8 @@
   en: 3f1f31134d365e16
   zh: 0abf48cebad59cc9
 /deepseek-ai-dsh-tool-session-message/model-experience/archive-pin-unpin-and-rename-results/what-the-model-sees:
-  en: 9b8e25372cc79636
-  zh: 8f4a3982e7c23afa
+  en: 7ab472a7bed2a338
+  zh: 7d0ee75ee25b1d34
 /deepseek-ai-dsh-tool-session-message/model-experience/archive-pin-unpin-and-rename-results/token-effect:
   en: 0ece8bf8f4a50b08
   zh: d28ca0135e37ce3a
@@ -99,8 +99,8 @@
   en: 2ea3b95168f6653d
   zh: 437c320ada96cde2
 /deepseek-ai-dsh-tool-session-message/model-experience/session-discovery-result/what-the-model-sees:
-  en: 753c3b3bea135aa8
-  zh: ae7b0dc3af226da3
+  en: 08d6723130f41581
+  zh: e159a4c688caa130
 /deepseek-ai-dsh-tool-session-message/model-experience/session-discovery-result/token-effect:
   en: 5fb630907cab820d
   zh: 23d047793580a246
@@ -138,8 +138,8 @@
   en: 8a36bec4f4e65537
   zh: e3391d82a24a62f5
 /deepseek-ai-dsh-tool-session-message/model-experience/status-result/what-the-model-sees:
-  en: 3210ba0b059bfae4
-  zh: 45cf5aff451a0a18
+  en: b75d9126e0202612
+  zh: 872602fbeaeb04cb
 /deepseek-ai-dsh-tool-session-message/model-experience/status-result/token-effect:
   en: d4b02ae4ec51a52e
   zh: f7f3fcfaba138b79

@@ -1,4 +1,4 @@
-/** General Settings row for the model forced onto `session_create` Sessions. */
+/** General Settings row for the model forced onto the `session` create action Sessions. */
 
 import { useEffect, useRef, useState } from 'react'
 import type { ObservableSnapshot } from '@deepseek-ai/dsh-client-store'
@@ -66,7 +66,7 @@ function candidates(catalog: SessionCreateOverrideCatalog): ModelCandidate[] {
 }
 
 /**
- * Render the model and reasoning selectors for `session_create`.
+ * Render the model and reasoning selectors for the `session` create action.
  * @param props - Accepted settings, model directory, callbacks, and localized copy.
  * @returns One General Settings row, or nothing when the Host lacks the override field.
  */

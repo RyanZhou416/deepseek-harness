@@ -31,7 +31,7 @@ export interface DerivedSessionMessageStatus {
 /**
  * Fold one target log to locate a message and any currently unresolved tools.
  * @param events - complete validated target Session log.
- * @param messageId - accepted message identity returned by `session_send_message`.
+ * @param messageId - accepted message identity returned by `session` action `send`.
  * @param targetRunning - whether the target Agent currently reports running.
  * @returns the message phase and current blocking activity.
  */

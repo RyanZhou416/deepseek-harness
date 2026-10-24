@@ -22,7 +22,7 @@
  *   with job_kill; long ones may outlive their Agent), and root-turn delegation
  *   paths taken at most once per turn: `message` (send_message to a child of an
  *   earlier round, which cold-resumes an evicted child), `session`
- *   (session_send_message to another root in `sessionTargets`, which resumes an
+ *   (session to another root in `sessionTargets`, which resumes an
  *   evicted root), and `workflow` (a workflow run that starts two children).
  * - DSH_STRESS_FORK_PLUGINS: `1` for all fork bundles, or a comma list of
  *   dsh-context, dsh-agent-teams, dsh-plugin-subscriptions.
@@ -349,11 +349,12 @@ export class WorkloadAdapter extends LlmAdapter {
         } }
       }
     }
-    if (this.extraTools.has('session') && !taken.has('session_send_message') && tools.has('session_send_message') && this.random() < 0.15) {
+    if (this.extraTools.has('session') && !taken.has('session') && tools.has('session') && this.random() < 0.15) {
       // The model sees no Session id, so a target may be the sender itself, which the tool accepts.
       const targets = this.sessionTargets
       if (targets.length > 0) {
-        return { name: 'session_send_message', arguments: {
+        return { name: 'session', arguments: {
+          action: 'send',
           session_id: targets[Math.floor(this.random() * targets.length)]!,
           message: 'Module audit note: src/module-07.ts changed its cache order; take it into account.',
         } }
