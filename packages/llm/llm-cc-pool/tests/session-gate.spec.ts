@@ -174,6 +174,44 @@ describe('same-session ordering', () => {
     expect(gate.activeSessions).toBe(0)
   })
 
+  it('takes no lane until its stream is read, so a dropped iterable cannot wedge the session', async () => {
+    const gate = new SessionSerialGate()
+    let droppedOpened = 0
+    const dropped = gate.serialize({
+      sessionId: 's',
+      signal: undefined,
+      open: () => {
+        droppedOpened += 1
+        return scripted(...ANSWERED)
+      },
+    })
+    // Creating the iterable is not a request: nothing has been sent, so the
+    // session stays free even if its consumer never reads or closes it.
+    expect(gate.activeSessions).toBe(0)
+    void dropped
+
+    const sameSession = gate.serialize({
+      sessionId: 's',
+      signal: undefined,
+      open: () => scripted(...ANSWERED),
+    })
+    expect(await drain(sameSession)).toEqual(ANSWERED)
+    expect(droppedOpened).toBe(0)
+    expect(gate.activeSessions).toBe(0)
+  })
+
+  it('leaves no lane behind for a stream stopped before its first read', async () => {
+    const gate = new SessionSerialGate()
+    const iterator = gate.serialize({
+      sessionId: 's',
+      signal: undefined,
+      open: () => scripted(...ANSWERED),
+    })[Symbol.asyncIterator]()
+    if (iterator.return === undefined) throw new Error('the queue stream must expose return')
+    await iterator.return()
+    expect(gate.activeSessions).toBe(0)
+  })
+
   it('hands the session to the next request when a stream fails', async () => {
     const gate = new SessionSerialGate()
     const log: string[] = []
@@ -228,7 +266,7 @@ describe('queue cancellation and cleanup', () => {
     expect(gate.activeSessions).toBe(0)
   })
 
-  it('releases a queued slot when the stream is abandoned before it opens', async () => {
+  it('does not queue a stream that is abandoned before it is read', async () => {
     const gate = new SessionSerialGate()
     const log: string[] = []
     const first = heldStream('first', log)
@@ -240,6 +278,8 @@ describe('queue cancellation and cleanup', () => {
     const iterator = abandoned[Symbol.asyncIterator]()
     if (iterator.return === undefined) throw new Error('the queue stream must expose return')
     await iterator.return()
+    // Only the holder's lane exists: the abandoned stream never took a slot.
+    expect(gate.activeSessions).toBe(1)
 
     const thirdDone = drain(gate.serialize({ sessionId: 's', signal: undefined, open: () => third.stream }))
     first.release()
@@ -307,6 +347,7 @@ describe('queue cancellation and cleanup', () => {
     const holderIterator = holder[Symbol.asyncIterator]()
     const queued = gate.serialize({ sessionId: 's', signal: undefined, open })
     const queuedIterator = queued[Symbol.asyncIterator]()
+    const holderNext = holderIterator.next()
     const queuedNext = queuedIterator.next()
     if (holderIterator.return === undefined || queuedIterator.return === undefined) {
       throw new Error('the queue stream must expose return')
@@ -318,6 +359,7 @@ describe('queue cancellation and cleanup', () => {
     // it again instead of opening an upstream for a turn it no longer owns.
     const holderStop = holderIterator.return()
     const queuedStop = queuedIterator.return()
+    await expect(holderNext).resolves.toEqual({ done: true, value: undefined })
     await expect(queuedNext).resolves.toEqual({ done: true, value: undefined })
     await Promise.all([holderStop, queuedStop])
     expect(opened).toBe(0)

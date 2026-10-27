@@ -30,6 +30,7 @@ import type {
   ResolvedPiAiProviderProfile,
 } from '@deepseek-ai/dsh-llm-pi-ai'
 import type { RetryPolicyConfig } from '@deepseek-ai/dsh-llm'
+import { POOL_REQUEST_CLOSED_CODE } from '@deepseek-ai/dsh-llm'
 
 /** Harness route key, pi-ai provider key, and the only provider this plugin owns. */
 export const PROVIDER = 'cc-pool'
@@ -190,17 +191,23 @@ export function resolvePoolModels(configured?: readonly CcPoolModel[]): readonly
 
 /**
  * The pool route's fixed retry policy: two retries over rate limits and server
- * faults. The explicit list is used exactly as written, which keeps
- * `TRANSPORT`, `EMPTY_RESPONSE`, and `TIMEOUT` out of automatic resends: each
- * can follow an attempt that already reached the pool, so the pool may hold a
- * ledger record whose outcome is unknown and repeating it is the deployment's
- * decision. Pool refusals (`POOL_*` codes) are likewise not in the list, so a
- * capacity or rate-limit 429 still surfaces with its `Retry-After` instead of
+ * faults, plus a closed client request id. The explicit list is used exactly as
+ * written, which keeps `TRANSPORT`, `EMPTY_RESPONSE`, and `TIMEOUT` out of
+ * automatic resends: each can follow an attempt that already reached the pool,
+ * so the pool may hold a ledger record whose outcome is unknown and repeating it
+ * is the deployment's decision. A closed request id is different: the loop
+ * stamps a new attempt id on the retry, so the next send is a new ledger entry
+ * instead of a replay of the refused one. Capacity and rate-limit refusals are
+ * likewise not in the list, so their `Retry-After` reaches the caller instead of
  * being resent automatically.
  * @returns a detached policy the profile resolver captures at mount.
  */
 function retryPolicy(): RetryPolicyConfig {
-  return { mode: 'normal', maxRetries: 2, retryableCodes: ['RATE_LIMIT', 'SERVER'] }
+  return {
+    mode: 'normal',
+    maxRetries: 2,
+    retryableCodes: ['RATE_LIMIT', 'SERVER', POOL_REQUEST_CLOSED_CODE],
+  }
 }
 
 /**

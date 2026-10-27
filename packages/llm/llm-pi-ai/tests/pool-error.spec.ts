@@ -4,6 +4,7 @@ import {
   POOL_ERROR_CODE,
   POOL_NO_ACCOUNT_CODE,
   POOL_RATE_LIMITED_CODE,
+  POOL_REQUEST_CLOSED_CODE,
   POOL_SESSION_BUSY_CODE,
   POOL_TRANSIENT_CODE,
 } from '@deepseek-ai/dsh-llm'
@@ -95,6 +96,18 @@ const CATALOG_EXPECTED = [
     messageKey: 'pool.error.no_available_account',
     clientGuidance: 'no healthy pool account is currently available',
   },
+  {
+    type: 'cc_pool_request_closed',
+    code: POOL_REQUEST_CLOSED_CODE,
+    origin: 'pool',
+    httpStatus: 409,
+    scope: 'request',
+    retryable: true,
+    clientAction: 'retry_same',
+    poolAction: 'terminal',
+    messageKey: 'pool.error.request_closed',
+    clientGuidance: 'the pool already closed this client request id; only a new attempt with a fresh id is safe',
+  },
 ] as const
 
 /**
@@ -108,7 +121,6 @@ const NON_CATALOG_POOL_CODES = [
   'cc_pool_account_unavailable',
   'cc_pool_model_denied',
   'cc_pool_request_in_flight',
-  'cc_pool_request_closed',
   'cc_pool_outcome_unknown',
 ] as const
 
@@ -141,7 +153,7 @@ describe('pool error envelope', () => {
 })
 
 describe('generated pool error catalog', () => {
-  it('is the four-code single source in catalog order', () => {
+  it('is the five-code single source in catalog order', () => {
     expect(Object.keys(POOL_ERROR_CATALOG)).toEqual(CATALOG_EXPECTED.map(entry => entry.type))
     expect(Object.values(POOL_ERROR_CATALOG)).toEqual(CATALOG_EXPECTED)
     for (const [type, entry] of Object.entries(POOL_ERROR_CATALOG)) {
@@ -150,11 +162,11 @@ describe('generated pool error catalog', () => {
   })
 
   it('pins the catalog revision shared with the pool', () => {
-    expect(POOL_ERROR_CATALOG_VERSION).toBe('1.0.0')
+    expect(POOL_ERROR_CATALOG_VERSION).toBe('1.1.0')
     // The literal is a deliberate lock: regenerating from a different catalog
     // revision updates the artifact and this test in the same change.
     expect(POOL_ERROR_CATALOG_SHA256)
-      .toBe('2b31eaed88fddd812586795c22528bfcc8ba15118d5f6cf5ca4e3549c407861e')
+      .toBe('3f40dfb188bed6a135f3ab148e65079d3f9141282915d68e2622371e05056668')
   })
 
   it('excludes retired and direct-internal codes', () => {
@@ -230,6 +242,23 @@ describe('pool failure classification', () => {
       retryDisposition: 'forbid',
     })
     expect(failure?.message).toMatch(/wait for the current turn to finish before retrying/)
+  })
+
+  it('recovers a closed client request id with a retry instead of ending the turn', () => {
+    // The adapter stamps a fresh attempt id on every deliberate retry, so the
+    // resend is a new ledger entry; forbidding it would waste that recovery.
+    const failure = classifyPoolFailure(poolEnvelope({
+      type: 'cc_pool_request_closed',
+      retryable: false,
+      message: 'request already recorded',
+    }, 409))
+
+    expect(failure).toMatchObject({
+      code: POOL_REQUEST_CLOSED_CODE,
+      status: 409,
+    })
+    expect(failure?.retryDisposition).toBeUndefined()
+    expect(failure?.message).toMatch(/only a new attempt with a fresh id is safe/)
   })
 
   it('retries no-available-account within the finite retry budget', () => {

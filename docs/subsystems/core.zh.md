@@ -339,7 +339,18 @@ type PreStepDecision =
 
 ```ts type-equiv
 /** Action returned by a listener that owns model-request recovery. */
-type RequestErrorAction = { kind: 'retry' } | undefined
+type RequestErrorAction =
+  | {
+    kind: 'retry'
+    /**
+     * Opaque nonce for the attempt this retry opens, passed through as
+     * `GenerateOptions.attemptNonce`. A recovery owner that knows the retry's
+     * durable identity supplies it so every attempt of one request is
+     * distinguishable; omission lets the loop mint one.
+     */
+    attemptNonce?: string
+  }
+  | undefined
 ```
 
 `agent/pre-step` 是请求推导前唯一的 waterfall（瀑布式）监听器链。`agent/turn-stopping` 在轮次没有工具或 steering（中途引导）后续时运行，先于最后一次 steering 排空。

@@ -128,15 +128,13 @@ function messageIdentity(message: RequestMessage): string {
  *
  * The identity is the request's conversation position: its session, purpose,
  * route, model, and the messages it is about to send. Re-running the same step
- * — the retry path — reconstructs that position exactly, so the retry repeats
- * the id; adding a message, changing the route or model, or starting another
- * purpose produces a different position and therefore a new id. The value is
- * UUID v4 shaped, the form a conversation-aware endpoint accepts as a client
- * request id.
+ * reconstructs that position exactly, so a later attempt of it shares the base
+ * identity. The value is UUID v4 shaped, the form a conversation-aware endpoint
+ * accepts as a client request id.
  * @param provider - the route serving the request.
  * @param model - the resolved model on that route.
  * @param options - the assembled request.
- * @returns a stable UUID-shaped ledger identity for this logical request.
+ * @returns a stable UUID-shaped base identity for this logical request.
  */
 function logicalRequestId(provider: string, model: string, options: GenerateOptions): string {
   const digest = createHash('sha256').update(JSON.stringify([
@@ -146,8 +144,35 @@ function logicalRequestId(provider: string, model: string, options: GenerateOpti
     model,
     options.messages.map(messageIdentity),
   ])).digest()
+  return uuidV4(digest)
+}
+
+/**
+ * Derive one attempt's wire ledger identity from its logical request.
+ *
+ * A deliberate retry opens a new attempt at the same conversation position, and
+ * a shared-account pool records the attempt id it receives as a terminal ledger
+ * entry. Resending the logical id would therefore be read as a replay and
+ * refused once the first entry closed; the per-attempt nonce keeps each attempt
+ * distinct while leaving repeated dispatches of one attempt stable.
+ * @param logicalId - the logical request's base identity.
+ * @param attemptNonce - the loop's nonce for this attempt, when it is a retry.
+ * @returns the identity this attempt sends to the endpoint.
+ */
+function attemptRequestId(logicalId: string, attemptNonce: string | undefined): string {
+  if (attemptNonce === undefined) return logicalId
+  const digest = createHash('sha256').update(`${logicalId}\n${attemptNonce}`).digest()
+  return uuidV4(digest)
+}
+
+/**
+ * Render digest bytes as the RFC 9562 §5.4 UUID v4 shape a conversation-aware
+ * endpoint parses.
+ * @param digest - at least 16 digest bytes.
+ * @returns the UUID-shaped identity.
+ */
+function uuidV4(digest: Buffer): string {
   const bytes = Buffer.from(digest.subarray(0, 16))
-  // RFC 9562 §5.4: version 4 and variant 10, the shape such an endpoint parses.
   bytes.writeUInt8((bytes.readUInt8(6) & 0x0f) | 0x40, 6)
   bytes.writeUInt8((bytes.readUInt8(8) & 0x3f) | 0x80, 8)
   const hex = bytes.toString('hex')
@@ -178,13 +203,14 @@ function isSessionHeaderValue(value: string): boolean {
  * The session header carries the request's own session id unchanged, so every
  * turn and tool continuation of one conversation presents the same identity and
  * the endpoint can keep one conversation key and prompt identity. The request id
- * is the logical request's ledger identity: a retry of that request repeats it,
- * so the endpoint can correlate the attempts of one request instead of reading
- * them as unrelated sends. The name header is the pool's display label: it is
+ * is the attempt's ledger identity: each deliberate retry sends a new value, so
+ * an endpoint that records the id as a terminal ledger entry does not read the
+ * next attempt as a replay of the closed one; repeated dispatches of one attempt
+ * keep the same value. The name header is the pool's display label: it is
  * encoded for a header field and omitted when the request has no usable name.
  * @param provider - route the request targets, for diagnostics.
  * @param sessionId - the request's session id, when the caller supplied one.
- * @param clientRequestId - the logical request's ledger identity.
+ * @param clientRequestId - this attempt's ledger identity.
  * @param sessionName - the owning session's display name, when it has one.
  * @returns the headers to merge into the provider request.
  * @throws LlmError when the session id is not a value the endpoint accepts.
@@ -223,7 +249,7 @@ export interface PiAiRequestIdentity {
   readonly endpoint: string
   /** The request's session id, when the caller supplied one. */
   readonly sessionId?: string
-  /** Ledger identity of the logical request; a retry of it repeats this value. */
+  /** This attempt's wire ledger identity; a deliberate retry of the same request sends a new value. */
   readonly clientRequestId: string
   /** Whether the response is streamed; this adapter only requests streams. */
   readonly stream: true
@@ -421,6 +447,30 @@ function requestHeaders(headers: Readonly<Record<string, string>> | undefined): 
   }
 }
 
+/** Header names this adapter owns on a sessionHeaders route; a profile may not set them. */
+const ADAPTER_SESSION_HEADERS: ReadonlySet<string> = Object.freeze(new Set([
+  CLAUDE_SESSION_HEADER,
+  SESSION_NAME_HEADER,
+  CLIENT_REQUEST_ID_HEADER,
+].map(name => name.toLowerCase())))
+
+/**
+ * Remove adapter-owned session headers from deployment headers.
+ *
+ * Header names are case-insensitive, so a profile spelling
+ * `x-claude-code-session-id` beside the adapter's `X-Claude-Code-Session-Id`
+ * would leave two entries for one field; an HTTP client then sends one of them
+ * or joins both, and the pool may bind the wrong session or read a stale ledger
+ * id. The adapter's value therefore replaces the profile's under every casing.
+ * @param headers - deployment headers after attribution collision removal.
+ * @returns the headers without any adapter-owned session header.
+ */
+function withoutSessionHeaders(headers: Record<string, string>): Record<string, string> {
+  return Object.fromEntries(
+    Object.entries(headers).filter(([name]) => !ADAPTER_SESSION_HEADERS.has(name.toLowerCase())),
+  )
+}
+
 /**
  * pi-ai-backed multi-provider adapter. Each operation reads the current
  * profiles, so a configuration change reaches the next request without a
@@ -428,8 +478,8 @@ function requestHeaders(headers: Readonly<Record<string, string>> | undefined): 
  */
 export class PiAiAdapter extends LlmAdapter {
   private snapshot: PiAiSnapshot | undefined
-  /** The logical request each session last attempted, for numbering retries. */
-  private readonly attempts = new Map<string, { readonly clientRequestId: string; readonly attempt: number }>()
+  /** The logical request each session last attempted, for numbering attempts. */
+  private readonly attempts = new Map<string, { readonly logicalId: string; readonly attempt: number }>()
 
   constructor(private readonly config: PiAiAdapterOptions) {
     super()
@@ -438,21 +488,23 @@ export class PiAiAdapter extends LlmAdapter {
   /**
    * Number one attempt within its logical request.
    *
-   * A stream call that repeats the session's previous ledger id is a retry of
-   * that logical request; anything else starts a new one. The map is bounded,
-   * because it only serves diagnostics: eviction restarts numbering, which is
-   * the only observable effect.
+   * A stream call that repeats the session's previous logical identity is
+   * another attempt at that conversation position; anything else starts a new
+   * logical request. The attempt's wire id may differ from the logical identity
+   * (a deliberate retry adds its nonce), so counting stays keyed on the
+   * position. The map is bounded, because it only serves diagnostics: eviction
+   * restarts numbering, which is the only observable effect.
    * @param sessionId - the request's session id, when it has one.
-   * @param clientRequestId - the request's logical ledger identity.
+   * @param logicalId - the request's base conversation-position identity.
    * @returns the 1-based attempt number.
    */
-  private attemptOf(sessionId: string | undefined, clientRequestId: string): number {
+  private attemptOf(sessionId: string | undefined, logicalId: string): number {
     const key = sessionId ?? ''
     const previous = this.attempts.get(key)
-    const attempt = previous?.clientRequestId === clientRequestId ? previous.attempt + 1 : 1
+    const attempt = previous?.logicalId === logicalId ? previous.attempt + 1 : 1
     // Re-insert so the longest-idle session is the first eviction candidate.
     this.attempts.delete(key)
-    this.attempts.set(key, { clientRequestId, attempt })
+    this.attempts.set(key, { logicalId, attempt })
     if (this.attempts.size > MAX_TRACKED_SESSIONS) {
       for (const oldest of this.attempts.keys()) {
         this.attempts.delete(oldest)
@@ -639,9 +691,11 @@ export class PiAiAdapter extends LlmAdapter {
     try {
       const sessionId = options.sessionId === undefined ? undefined : String(options.sessionId)
       // Both taken before any await: a refused session id fails without
-      // resolving a credential or opening a request, and a retry of one logical
-      // request repeats its ledger id while only the attempt number advances.
-      const clientRequestId = logicalRequestId(options.provider, model.id, options)
+      // resolving a credential or opening a request. The attempt number counts
+      // attempts of one conversation position, while the wire id adds the
+      // loop's nonce so a deliberate retry is a distinct ledger entry.
+      const logicalId = logicalRequestId(options.provider, model.id, options)
+      const clientRequestId = attemptRequestId(logicalId, options.attemptNonce)
       identity = Object.freeze({
         provider: options.provider,
         model: model.id,
@@ -649,7 +703,7 @@ export class PiAiAdapter extends LlmAdapter {
         ...sessionId === undefined ? {} : { sessionId },
         clientRequestId,
         stream: true,
-        attempt: this.attemptOf(sessionId, clientRequestId),
+        attempt: this.attemptOf(sessionId, logicalId),
       })
       diagnose?.({ kind: 'request', ...identity })
       // The session identity is adapter-owned: a refused session id fails here,
@@ -701,6 +755,15 @@ export class PiAiAdapter extends LlmAdapter {
               : {},
           },
         }, onReplayDegrade)
+      // Profile headers are deployment-owned; attribution names are
+      // Harness-owned and therefore win collisions. The session identity is
+      // adapter-owned and replaces a profile header of the same name in any
+      // casing, so one field never carries two conflicting values.
+      const deploymentHeaders = requestHeaders(profile.headers)
+      const headers = {
+        ...sessionHeaders === undefined ? deploymentHeaders : withoutSessionHeaders(deploymentHeaders),
+        ...sessionHeaders,
+      }
       const events = snapshot.models.streamSimple(model, context, {
         ...profileOptions(profile, reasoning, apiKey),
         ...supportsFetchCapture(model.api) ? { fetch: providerError.fetch } : {},
@@ -708,10 +771,7 @@ export class PiAiAdapter extends LlmAdapter {
         ...options.maxTokens === undefined ? {} : { maxTokens: options.maxTokens },
         ...options.sessionId === undefined ? {} : { sessionId: String(options.sessionId) },
         signal: watchdog.signal,
-        // Profile headers are deployment-owned; attribution names are
-        // Harness-owned and therefore win collisions. The session identity is
-        // adapter-owned and outranks a static profile header of the same name.
-        headers: { ...requestHeaders(profile.headers), ...sessionHeaders },
+        headers,
       })
       const iterator = toStreamChunks(
         events, model.contextWindow, options.signal, model.id, providerError,

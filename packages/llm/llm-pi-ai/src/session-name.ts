@@ -34,13 +34,34 @@ function isUnreserved(byte: number): boolean {
 }
 
 /**
+ * Whether a code point cannot travel in the name header, so the encoder drops
+ * it instead of escaping it.
+ *
+ * The pool decodes the field and refuses a name carrying ASCII control
+ * characters (C0, DEL, and C1) or the Unicode line and paragraph separators.
+ * Percent-encoding such a code point would still present it after decoding and
+ * turn a display label into a refused request, so it is skipped.
+ * @param codePoint - one Unicode code point of the name.
+ * @returns true for C0 controls, DEL, C1 controls, U+2028, and U+2029.
+ */
+function isDroppedCodePoint(codePoint: number): boolean {
+  return codePoint <= 0x1f
+    || (codePoint >= 0x7f && codePoint <= 0x9f)
+    || codePoint === 0x2028
+    || codePoint === 0x2029
+}
+
+/**
  * Percent-encode a session display name for the pool's name header.
  *
  * Percent-encoding covers every byte outside the RFC 3986 unreserved set —
  * spaces included, unlike `encodeURIComponent` — so the value is printable
- * ASCII that a header field carries without further escaping. Values whose
- * encoding does not fit {@link MAX_SESSION_NAME_HEADER_LENGTH} are dropped
- * whole rather than truncated into a different name.
+ * ASCII that a header field carries without further escaping. Control
+ * characters and Unicode line separators are skipped rather than encoded: the
+ * pool refuses a decoded name that carries one, and a display hint must never
+ * fail the request. Values whose encoding does not fit
+ * {@link MAX_SESSION_NAME_HEADER_LENGTH} are dropped whole rather than truncated
+ * into a different name.
  * @param name - the session's display name.
  * @returns the ASCII header value, or undefined when the name is empty or too
  *   long to send.
@@ -48,13 +69,18 @@ function isUnreserved(byte: number): boolean {
 export function encodeSessionNameHeader(name: string): string | undefined {
   if (name.length === 0) return undefined
   let value = ''
-  for (const byte of Buffer.from(name, 'utf8')) {
-    if (isUnreserved(byte)) {
-      value += String.fromCharCode(byte)
-    } else {
-      value += `%${byte.toString(16).toUpperCase().padStart(2, '0')}`
+  for (const character of name) {
+    const codePoint = character.codePointAt(0)
+    /* v8 ignore next -- standalone code points always carry one; the guard only satisfies noUncheckedIndexedAccess. */
+    if (codePoint === undefined || isDroppedCodePoint(codePoint)) continue
+    for (const byte of Buffer.from(character, 'utf8')) {
+      if (isUnreserved(byte)) {
+        value += String.fromCharCode(byte)
+      } else {
+        value += `%${byte.toString(16).toUpperCase().padStart(2, '0')}`
+      }
+      if (value.length > MAX_SESSION_NAME_HEADER_LENGTH) return undefined
     }
-    if (value.length > MAX_SESSION_NAME_HEADER_LENGTH) return undefined
   }
-  return value
+  return value.length === 0 ? undefined : value
 }

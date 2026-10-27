@@ -15,7 +15,10 @@
  *
  * The pool owns account selection, cooldown, and session binding. This module
  * only decides what the client may do with the refusal: retry after the
- * disclosed wait, wait for the turn that holds the session, or stop.
+ * disclosed wait, wait for the turn that holds the session, or stop. A closed
+ * client request id is recoverable because this adapter stamps a new id on every
+ * deliberate attempt, so the catalog asks for a retry of the request rather than
+ * forbidding one: the next attempt is a fresh ledger entry, not a replay.
  *
  * @module dsh-llm-pi-ai/pool-error
  */
@@ -25,6 +28,7 @@ import {
   POOL_ERROR_CODE,
   POOL_NO_ACCOUNT_CODE,
   POOL_RATE_LIMITED_CODE,
+  POOL_REQUEST_CLOSED_CODE,
   POOL_TRANSIENT_CODE,
 } from '@deepseek-ai/dsh-llm'
 import type { LlmFailure } from '@deepseek-ai/dsh-llm'
@@ -43,6 +47,7 @@ export const POOL_RETRYABLE_CODES: readonly string[] = Object.freeze([
   POOL_CAPACITY_CODE,
   POOL_RATE_LIMITED_CODE,
   POOL_NO_ACCOUNT_CODE,
+  POOL_REQUEST_CLOSED_CODE,
   POOL_TRANSIENT_CODE,
 ])
 
@@ -163,9 +168,10 @@ export function parseProviderErrorEnvelope(message: string): ProviderErrorEnvelo
  *
  * Known pool codes take their failure code, retry guidance, and resend decision
  * from the generated catalog: capacity, rate limiting, and no-account wait out
- * the provider's delay, while a catalog `stop` action (session-busy) forbids
- * every automatic resend. Unrecognized pool codes follow the envelope's
- * `client_action`, `retryable`, and finally the HTTP status. A pool-authored
+ * the provider's delay, a closed client request id asks for another attempt
+ * (which the adapter sends under a fresh id), while a catalog `stop` action
+ * (session-busy) forbids every automatic resend. Unrecognized pool codes follow
+ * the envelope's `client_action`, `retryable`, and finally the HTTP status. A pool-authored
  * readiness refusal — identified by its body `pool_request_id` and
  * `retryable: false`, together with a 5xx status or its unverified-egress
  * detail — becomes a non-retryable `POOL_ERROR` even though it carries neither

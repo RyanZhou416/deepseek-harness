@@ -29,4 +29,15 @@ describe('session name header encoding', () => {
     expect(encodeSessionNameHeader('山'.repeat(56))).toBeDefined()
     expect(encodeSessionNameHeader('山'.repeat(57))).toBeUndefined()
   })
+
+  it('skips control characters and line separators the pool would refuse after decoding', () => {
+    // Percent-encoding these would still deliver them decoded, so the pool's
+    // name check would reject the whole request over a display label.
+    expect(encodeSessionNameHeader('a\u0000b\u001fc\u007fd\u0085e\u2028f\u2029g'))
+      .toBe('abcdefg')
+  })
+
+  it('sends no header when every character is dropped', () => {
+    expect(encodeSessionNameHeader('\u0000\u0007\u0080')).toBeUndefined()
+  })
 })

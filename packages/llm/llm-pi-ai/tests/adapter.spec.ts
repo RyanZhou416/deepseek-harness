@@ -731,22 +731,57 @@ describe('Claude Code session identity headers', () => {
     expect(server.requests[1]).toEqual(server.requests[0])
   })
 
-  it('repeats the ledger id when the same logical request is retried', async () => {
-    const server = await mockServer([{ events: anthropicTextEvents }, { events: anthropicTextEvents }, { events: anthropicTextEvents }])
+  it('replaces lowercase profile session headers instead of sending two values for one field', async () => {
+    const server = await mockServer([{ events: anthropicTextEvents }])
+    const ctx = await sessionHarness(server.url, 'cc-pool', {
+      headers: {
+        // Header names are case-insensitive, so these collide with the
+        // adapter-owned names the pool route always sends.
+        'x-claude-code-session-id': 'profile-session',
+        'x-cc-session-name': 'profile-name',
+        'x-client-request-id': 'profile-ledger-id',
+      },
+    })
+
+    await assemble(ctx, {
+      provider: 'cc-pool',
+      model: MODEL,
+      messages: [prompt('collision')],
+      sessionId: 'session-cc-pool-collision' as never,
+      sessionName: 'Adapter name',
+    })
+
+    expect(server.headers[0]?.['x-claude-code-session-id']).toBe('session-cc-pool-collision')
+    expect(server.headers[0]?.['x-cc-session-name']).toBe('Adapter%20name')
+    expect(server.headers[0]?.['x-client-request-id']).toMatch(UUID_PATTERN)
+    expect(server.headers[0]?.['x-client-request-id']).not.toBe('profile-ledger-id')
+  })
+
+  it('keeps one ledger id within an attempt and sends a new one for every deliberate retry', async () => {
+    const server = await mockServer([
+      { events: anthropicTextEvents },
+      { events: anthropicTextEvents },
+      { events: anthropicTextEvents },
+      { events: anthropicTextEvents },
+    ])
     const ctx = await sessionHarness(server.url, 'cc-pool')
     const sessionId = 'session-cc-pool-retry' as never
     const first = prompt('retry the same request')
+    const options = { provider: 'cc-pool', model: MODEL, messages: [first], sessionId }
 
-    await assemble(ctx, { provider: 'cc-pool', model: MODEL, messages: [first], sessionId })
-    await assemble(ctx, { provider: 'cc-pool', model: MODEL, messages: [first], sessionId })
-    await assemble(ctx, { provider: 'cc-pool', model: MODEL, messages: [prompt('a different request')], sessionId })
+    await assemble(ctx, options)
+    await assemble(ctx, options)
+    await assemble(ctx, { ...options, attemptNonce: 'retry-1' })
+    await assemble(ctx, { ...options, attemptNonce: 'retry-2' })
 
-    // A retry re-sends one conversation position, so the endpoint reads one
-    // ledger identity for both attempts; a request that adds a message is a new
-    // logical request and gets a new one.
-    expect(server.headers[0]?.['x-client-request-id']).toMatch(UUID_PATTERN)
-    expect(server.headers[1]?.['x-client-request-id']).toBe(server.headers[0]?.['x-client-request-id'])
-    expect(server.headers[2]?.['x-client-request-id']).not.toBe(server.headers[0]?.['x-client-request-id'])
+    // Dispatches of one attempt share the id; each retry stamps a new attempt
+    // id, so the pool's ledger never answers a retry as a replay.
+    const ids = server.headers.map(headers => headers['x-client-request-id'])
+    expect(ids[0]).toMatch(UUID_PATTERN)
+    expect(ids).toEqual([ids[0], ids[0], expect.any(String), expect.any(String)])
+    expect(new Set(ids).size).toBe(3)
+    expect(server.headers[1]?.['x-claude-code-session-id']).toBe('session-cc-pool-retry')
+    expect(server.headers[3]?.['x-claude-code-session-id']).toBe('session-cc-pool-retry')
   })
 
   it('keeps one conversation identity across a tool continuation', async () => {
@@ -920,7 +955,7 @@ describe('request diagnostics', () => {
     return ctx
   }
 
-  it('reports one structured request/response pair per attempt, repeating the ledger id on retries', async () => {
+  it('reports one structured request/response pair per attempt, with a distinct id per retry', async () => {
     const server = await mockServer([
       { events: anthropicTextEvents },
       { events: anthropicTextEvents },
@@ -933,7 +968,7 @@ describe('request diagnostics', () => {
     const options: GenerateOptions = { provider: 'cc-pool', model: MODEL, messages: [first], sessionId }
 
     await drain(adapter, options)
-    await drain(adapter, options)
+    await drain(adapter, { ...options, attemptNonce: 'retry-1' })
     await drain(adapter, { ...options, messages: [first, user('second')] })
 
     expect(events).toHaveLength(6)
@@ -949,8 +984,7 @@ describe('request diagnostics', () => {
       stream: true,
       attempt: 1,
     })
-    // The settled response repeats the identity, so one logical request's
-    // attempts and outcome share a correlation key.
+    // The settled response repeats the attempt's identity.
     expect(eventAt(events, 1)).toEqual({
       kind: 'response',
       provider: 'cc-pool',
@@ -962,8 +996,17 @@ describe('request diagnostics', () => {
       attempt: 1,
       status: 200,
     })
-    expect(eventAt(events, 2)).toMatchObject({ kind: 'request', attempt: 2, clientRequestId: request.clientRequestId })
-    expect(eventAt(events, 3)).toMatchObject({ kind: 'response', attempt: 2, status: 200 })
+    // The retry is the second attempt of the same logical request, but the
+    // endpoint receives a new ledger id so it cannot read it as a replay.
+    const retried = eventAt(events, 2)
+    expect(retried).toMatchObject({ kind: 'request', attempt: 2 })
+    expect(retried.clientRequestId).not.toBe(request.clientRequestId)
+    expect(eventAt(events, 3)).toMatchObject({
+      kind: 'response',
+      attempt: 2,
+      status: 200,
+      clientRequestId: retried.clientRequestId,
+    })
     const next = eventAt(events, 4)
     expect(next).toMatchObject({ kind: 'request', attempt: 1 })
     expect(next.clientRequestId).not.toBe(request.clientRequestId)

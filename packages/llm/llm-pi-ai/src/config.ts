@@ -255,10 +255,13 @@ export interface Config {
   /**
    * Provider routes whose requests carry the Claude Code session identity a
    * conversation-aware endpoint reads: `X-Claude-Code-Session-Id` from the
-   * request's `sessionId`, and one `x-client-request-id` per logical request
-   * that every retry of it repeats. One route name or a list of them; a route
-   * not named here is left alone. A name matching no configured route has no
-   * effect, because the route set is settings-owned and may be supplied after
+   * request's `sessionId`, `x-cc-session-name` from its display name when it has
+   * one, and one `x-client-request-id` per deliberate attempt, so a retry never
+   * resends the id the endpoint already recorded. These names are adapter-owned
+   * on such a route: a profile header spelled the same way in any casing is
+   * replaced rather than sent beside them. One route name or a list of them; a
+   * route not named here is left alone. A name matching no configured route has
+   * no effect, because the route set is settings-owned and may be supplied after
    * this composition layer.
    */
   sessionHeaders?: string | string[]

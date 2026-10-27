@@ -17,6 +17,7 @@ import type {
 } from '@deepseek-ai/dsh-agent'
 import { agentEvents, assembleContextFor } from '@deepseek-ai/dsh-agent'
 import type { GenerateOptions, LlmCallConfig, Message, PreparedLlmCall, SystemPromptSection } from '@deepseek-ai/dsh-llm'
+import { randomUUID } from 'node:crypto'
 import {
   LlmError,
   createAssistantMessage,
@@ -456,6 +457,9 @@ export class ReactLoopAgent implements Agent {
       renderPromptSections(assembly).map(section => Object.freeze({ ...section })),
     )
     let firstAttempt = true
+    // Fixed for the request already dispatched; the recovery action behind a
+    // retry replaces it before the next attempt is assembled.
+    let attemptNonce: string | undefined
     while (true) {
       const { config, preparedCall } = await this.prepareRequest(turn, step, signal)
       const currentContext = this.loopCtx.systemPrompt.refreshContext(assembly, assembleContextFor(this, signal))
@@ -492,7 +496,16 @@ export class ReactLoopAgent implements Agent {
         this.session.append('user/message', context, { surfaceOp: 'append' })
       }
       firstAttempt = false
-      const request = this.buildRequest(config, preparedCall, assembly.tools, { turn, step }, startsRequestSeries, signal, promptSections)
+      const request = this.buildRequest(
+        config,
+        preparedCall,
+        assembly.tools,
+        { turn, step },
+        startsRequestSeries,
+        signal,
+        promptSections,
+        attemptNonce,
+      )
       const live = new AssistantStreamAttempt(
         this.session.id,
         ++this.assistantAttemptCounter,
@@ -582,6 +595,10 @@ export class ReactLoopAgent implements Agent {
           if (action?.kind !== 'retry') {
             throw new LlmError(finish.failure.message, finish.failure.code, finish.failure)
           }
+          // A recovery owner that names the attempt keeps that identity; any
+          // other deliberate retry still gets a fresh one, because repeating the
+          // failed attempt's transport id can be read as a replay.
+          attemptNonce = action.attemptNonce ?? randomUUID()
           continue
         }
 
@@ -680,6 +697,7 @@ export class ReactLoopAgent implements Agent {
     startsRequestSeries: boolean,
     signal: AbortSignal,
     promptSections: readonly SystemPromptSection[],
+    attemptNonce: string | undefined,
   ): GenerateOptions {
     const { session } = this
     const sessionName = this.ctx.sessionProjections.stateOf(session, 'title') ?? undefined
@@ -761,6 +779,7 @@ export class ReactLoopAgent implements Agent {
       ...promptSections.length > 0 ? { systemSections: promptSections } : {},
       sessionId: this.session.id,
       ...sessionName === undefined || sessionName.length === 0 ? {} : { sessionName },
+      ...attemptNonce === undefined ? {} : { attemptNonce },
       signal,
     }))
     return request

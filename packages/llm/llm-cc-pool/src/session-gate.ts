@@ -122,9 +122,11 @@ function pause(delayMs: number, signal: AbortSignal | undefined): Promise<boolea
 /**
  * FIFO admission per session over the pool's one-in-flight request rule.
  *
- * A lane exists only while its session has a holder or waiters, so idle
- * sessions leave no entry behind. Aborting a waiting request removes it from
- * the queue immediately; skipping an unopened stream does the same, and a
+ * A lane exists only while its session has a started stream or waiters, so idle
+ * sessions leave no entry behind and merely creating a stream takes no lane: a
+ * stream whose consumer never reads it cannot wedge the session. The lane is
+ * acquired on the stream's first read. Aborting a waiting request removes it
+ * from the queue immediately; skipping an unopened stream does the same, and a
  * skipped or aborted holder hands its lane to the next waiter.
  */
 export class SessionSerialGate {
@@ -141,7 +143,7 @@ export class SessionSerialGate {
    * @returns a stream whose upstream opens only after the session's earlier streams settled.
    */
   serialize(request: SessionStreamRequest): AsyncIterable<StreamChunk> {
-    return new SerializedStream(request, this.acquire(request.sessionId, request.signal))
+    return new SerializedStream(request, () => this.acquire(request.sessionId, request.signal))
   }
 
   /**
@@ -277,15 +279,17 @@ export class SessionSerialGate {
 }
 
 /**
- * One queued stream. It waits for its turn, opens the upstream through the
- * supplied opener, and replaces a session-busy refusal with a bounded retry
- * until the stream has forwarded model content. An absorbed attempt contributes
- * nothing to the consumer: model content already forwarded is never repeated,
- * and the refusal's in-band usage sample is dropped with it.
+ * One queued stream. It takes its queue slot on the first read, waits for its
+ * turn, opens the upstream through the supplied opener, and replaces a
+ * session-busy refusal with a bounded retry until the stream has forwarded model
+ * content. An absorbed attempt contributes nothing to the consumer: model
+ * content already forwarded is never repeated, and the refusal's in-band usage
+ * sample is dropped with it.
  */
 class SerializedStream implements AsyncIterableIterator<StreamChunk> {
   private closed = false
   private acquired = false
+  private turn: SessionTurn | undefined
   private inner: AsyncIterator<StreamChunk> | undefined
   /** A chunk read ahead while a usage sample is held for the refusal check. */
   private held: StreamChunk | undefined
@@ -294,11 +298,11 @@ class SerializedStream implements AsyncIterableIterator<StreamChunk> {
 
   /**
    * @param request - session identity, caller cancellation, and the stream opener.
-   * @param turn - this request's place in the session queue.
+   * @param acquire - takes this request's queue slot once the stream is read.
    */
   constructor(
     private readonly request: SessionStreamRequest,
-    private readonly turn: SessionTurn,
+    private readonly acquire: () => SessionTurn,
   ) {}
 
   /** This stream is its own iterator; the queue owns one consumer. */
@@ -308,9 +312,10 @@ class SerializedStream implements AsyncIterableIterator<StreamChunk> {
 
   /**
    * Produce the next upstream chunk, waiting for the session and retrying a
-   * session-busy refusal while the stream has forwarded nothing yet. A failure
-   * to open or read the upstream releases the held session instead of leaving
-   * the lane behind.
+   * session-busy refusal while the stream has forwarded nothing yet. A stream
+   * that is never read never takes a queue slot, so dropping the iterable leaves
+   * the session free. A failure to open or read the upstream releases the held
+   * session instead of leaving the lane behind.
    * @returns the next chunk, or a done result once the upstream settled.
    */
   async next(): Promise<IteratorResult<StreamChunk>> {
@@ -384,12 +389,13 @@ class SerializedStream implements AsyncIterableIterator<StreamChunk> {
   }
 
   /**
-   * Wait for the session turn and apply the caller cancellation that arrived
-   * while the request was queued.
+   * Take this stream's queue slot if it has not taken it yet, then wait for it
+   * and apply the caller cancellation that arrived while the request was queued.
    * @returns true when the stream may open its upstream.
    */
   private async takeTurn(): Promise<boolean> {
-    const outcome = await this.turn.ready
+    const turn = this.turn ??= this.acquire()
+    const outcome = await turn.ready
     if (this.closed) {
       if (outcome.kind === 'granted') outcome.release()
       return false
@@ -462,6 +468,6 @@ class SerializedStream implements AsyncIterableIterator<StreamChunk> {
   private close(): void {
     if (this.closed) return
     this.closed = true
-    this.turn.skip()
+    this.turn?.skip()
   }
 }

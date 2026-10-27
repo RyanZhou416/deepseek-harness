@@ -1,7 +1,12 @@
 /** The mac-pool provider facts and catalogue resolved through the generic pi-ai resolver. */
 
 import { describe, expect, it } from 'vitest'
-import { POOL_CAPACITY_CODE, POOL_RATE_LIMITED_CODE, POOL_SESSION_BUSY_CODE } from '@deepseek-ai/dsh-llm'
+import {
+  POOL_CAPACITY_CODE,
+  POOL_RATE_LIMITED_CODE,
+  POOL_REQUEST_CLOSED_CODE,
+  POOL_SESSION_BUSY_CODE,
+} from '@deepseek-ai/dsh-llm'
 import { Config } from '../src/config.ts'
 import type { CcPoolModel, CcPoolReasoningLevel } from '../src/pool.ts'
 import {
@@ -46,12 +51,13 @@ describe('fixed mac-pool route', () => {
     expect(policy).toMatchObject({
       mode: 'normal',
       maxRetries: 2,
-      retryableCodes: ['RATE_LIMIT', 'SERVER'],
+      retryableCodes: ['RATE_LIMIT', 'SERVER', POOL_REQUEST_CLOSED_CODE],
     })
     if (policy?.mode !== 'normal') throw new Error('expected normal policy')
     // A TIMEOUT can follow an attempt that already reached the pool, and the
-    // pool's own refusals are not in the list: all of them stay with the
-    // caller instead of becoming an automatic resend.
+    // pool's own capacity/rate-limit refusals stay with the caller instead of
+    // becoming an automatic resend. A closed request id is retryable because the
+    // loop stamps a fresh id on the next attempt.
     expect(policy.retryableCodes).not.toContain('TIMEOUT')
     expect(policy.retryableCodes).not.toContain(POOL_CAPACITY_CODE)
     expect(policy.retryableCodes).not.toContain(POOL_RATE_LIMITED_CODE)

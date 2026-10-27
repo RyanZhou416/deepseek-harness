@@ -4,7 +4,13 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
-import LlmRuntime, { createMessage, createUserMessage, ReasoningEffortId, userAgent } from '@deepseek-ai/dsh-llm'
+import LlmRuntime, {
+  createMessage,
+  createUserMessage,
+  POOL_REQUEST_CLOSED_CODE,
+  ReasoningEffortId,
+  userAgent,
+} from '@deepseek-ai/dsh-llm'
 import LocalCredentialProvider from '@deepseek-ai/dsh-credentials-local'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import * as CcPool from '../src/index.ts'
@@ -90,7 +96,7 @@ describe('mac-pool plugin registration', () => {
     expect(ctx.llm.providerRetryPolicy(PROVIDER)).toMatchObject({
       mode: 'normal',
       maxRetries: 2,
-      retryableCodes: ['RATE_LIMIT', 'SERVER'],
+      retryableCodes: ['RATE_LIMIT', 'SERVER', POOL_REQUEST_CLOSED_CODE],
     })
   })
 

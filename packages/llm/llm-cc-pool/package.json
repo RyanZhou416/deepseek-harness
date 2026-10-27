@@ -55,6 +55,7 @@
     "@deepseek-ai/dsh-fs": "workspace:*",
     "@deepseek-ai/dsh-launch-environment": "workspace:*",
     "@deepseek-ai/dsh-llm": "workspace:*",
-    "@deepseek-ai/dsh-llm-pi-ai": "workspace:*"
+    "@deepseek-ai/dsh-llm-pi-ai": "workspace:*",
+    "@deepseek-ai/dsh-settings": "workspace:*"
   }
 }

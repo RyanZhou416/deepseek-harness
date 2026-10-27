@@ -11159,6 +11159,9 @@ importers:
       '@deepseek-ai/dsh-llm-pi-ai':
         specifier: workspace:*
         version: link:../llm-pi-ai
+      '@deepseek-ai/dsh-settings':
+        specifier: workspace:*
+        version: link:../../settings/settings
 
   packages/llm/llm-deepseek:
     dependencies:

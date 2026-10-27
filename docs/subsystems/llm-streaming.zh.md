@@ -695,11 +695,27 @@ interface GenerateOptions {
    */
   sessionId?: Branded<'SessionId'>
   /**
+   * The owning session's display name stamped by the loop for local routing
+   * surfaces that show a conversation by name. It is never conversation
+   * content and never reaches a model: an adapter may map it to model-hidden
+   * transport metadata. Unset while the session has no name.
+   */
+  sessionName?: string
+  /**
    * Provider-neutral classification for an auxiliary model call. Adapters may
    * map the purpose to model-hidden transport metadata. Ordinary conversation
    * requests leave it unset.
    */
   purpose?: 'compaction' | 'session-title'
+  /**
+   * Opaque nonce identifying one deliberate attempt of this request, stamped by
+   * the loop when it retries after a recoverable failure. It is model-hidden
+   * transport metadata: an adapter may map it to per-attempt request identity,
+   * so a reused request id cannot make a retried attempt look like a replay.
+   * Within one attempt the value is fixed, so repeated dispatches of the same
+   * request keep one identity; each retry carries a different value.
+   */
+  attemptNonce?: string
 }
 ```
 

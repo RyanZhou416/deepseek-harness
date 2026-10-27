@@ -1,0 +1,16 @@
+# Bilingual-pair consistency record for guide.md (docs/i18n/README.md): per heading
+# section, a hash of its English and Chinese blocks outside code blocks and generated regions.
+# After editing either side, bring the other along and re-record with:
+#   pnpm run verify-translation-pairing --write docs/upgrade-guide/v0.2.1-rc.2/cc-pool-provider-removed/guide.md
+/:
+  en: b74d2878826b40be
+  zh: 5a7260b6e4e3d8c3
+/the-base-cc-pool-provider-and-models-moved-into-deepseek-ai-dsh-llm-cc-pool:
+  en: 852b32e8667aa139
+  zh: bd6602f917926c04
+/the-base-cc-pool-provider-and-models-moved-into-deepseek-ai-dsh-llm-cc-pool/change:
+  en: ce0d914f1403e4b2
+  zh: e90d618e1f8edc4c
+/the-base-cc-pool-provider-and-models-moved-into-deepseek-ai-dsh-llm-cc-pool/migration:
+  en: afeb9dd7ad5f3c1a
+  zh: 6d73356411a9d88d

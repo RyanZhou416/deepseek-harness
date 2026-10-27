@@ -610,4 +610,13 @@ export interface GenerateOptions {
    * requests leave it unset.
    */
   purpose?: 'compaction' | 'session-title'
+  /**
+   * Opaque nonce identifying one deliberate attempt of this request, stamped by
+   * the loop when it retries after a recoverable failure. It is model-hidden
+   * transport metadata: an adapter may map it to per-attempt request identity,
+   * so a reused request id cannot make a retried attempt look like a replay.
+   * Within one attempt the value is fixed, so repeated dispatches of the same
+   * request keep one identity; each retry carries a different value.
+   */
+  attemptNonce?: string
 }

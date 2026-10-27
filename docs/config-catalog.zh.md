@@ -818,7 +818,7 @@ export interface Config {
 ## `@deepseek-ai/dsh-deepseek-account-platform`
 
 - `inject`: `credentials` · `authorization`
-- `source`: [`packages/credentials/deepseek-account-platform/src/index.ts:23`](../packages/credentials/deepseek-account-platform/src/index.ts)
+- `source`: [`packages/credentials/deepseek-account-platform/src/index.ts:38`](../packages/credentials/deepseek-account-platform/src/index.ts)
 
 ```ts config-catalog
 /** Deployment-specific platform and request deadlines. */
@@ -1753,7 +1753,7 @@ export interface Config {
 
 - `inject`: `llm`
 - `refs`: [`PiAiRequestLogProfile`](../packages/llm/llm-pi-ai/src/index.ts) · `Volatile` (`@deepseek-ai/cordis`)
-- `source`: [`packages/llm/llm-cc-pool/src/config.ts:23`](../packages/llm/llm-cc-pool/src/config.ts)
+- `source`: [`packages/llm/llm-cc-pool/src/config.ts:25`](../packages/llm/llm-cc-pool/src/config.ts)
 
 ```ts config-catalog
 /** Loader configuration for the mac-pool route. */
@@ -1769,6 +1769,15 @@ export interface Config {
    */
   requestLog?: PiAiRequestLogProfile
   /**
+   * Prompt-cache TTL this route declares for a request's `cache_control`
+   * markers: `5m` keeps the API's default five-minute lifetime, `1h` asks for
+   * the extended one, and `none` sends no marker. The default `5m` is the
+   * lifetime the route already served, stated explicitly so the choice cannot
+   * come from an ambient provider default; the value reaches the wire only
+   * through this route's profile, so no other provider's request changes.
+   */
+  cacheTtl: CcPoolCacheTtl
+  /**
    * The catalogue selector surfaces offer, replacing the built-in four-model
    * catalogue wholesale. Absent, or reset through the settings service, serves
    * the built-in catalogue. A provided list resolves through this package's
@@ -1779,6 +1788,9 @@ export interface Config {
    */
   models: Volatile<CcPoolModel[]>
 }
+
+/** One prompt-cache TTL this route may declare; see {@link CACHE_TTLS}. */
+export type CcPoolCacheTtl = (typeof CACHE_TTLS)[number]
 
 /**
  * A mac-pool model catalogue entry: the deployable facts of one wire model id.
@@ -1873,10 +1885,13 @@ export interface Config {
   /**
    * Provider routes whose requests carry the Claude Code session identity a
    * conversation-aware endpoint reads: `X-Claude-Code-Session-Id` from the
-   * request's `sessionId`, and one `x-client-request-id` per logical request
-   * that every retry of it repeats. One route name or a list of them; a route
-   * not named here is left alone. A name matching no configured route has no
-   * effect, because the route set is settings-owned and may be supplied after
+   * request's `sessionId`, `x-cc-session-name` from its display name when it has
+   * one, and one `x-client-request-id` per deliberate attempt, so a retry never
+   * resends the id the endpoint already recorded. These names are adapter-owned
+   * on such a route: a profile header spelled the same way in any casing is
+   * replaced rather than sent beside them. One route name or a list of them; a
+   * route not named here is left alone. A name matching no configured route has
+   * no effect, because the route set is settings-owned and may be supplied after
    * this composition layer.
    */
   sessionHeaders?: string | string[]
@@ -4888,7 +4903,7 @@ export interface Config {
 | `@deepseek-ai/dsh-tool-call-timeout-policy` | `tools` | [`packages/guard/timeout-policy/src/index.ts`](../packages/guard/timeout-policy/src/index.ts) |
 | `@deepseek-ai/dsh-tool-cordis` | `tools` · `cordisInspect` | [`packages/extensions/tool-cordis/src/index.ts`](../packages/extensions/tool-cordis/src/index.ts) |
 | `@deepseek-ai/dsh-tool-schedule` | `tools` | [`packages/schedule/tool-schedule/src/index.ts`](../packages/schedule/tool-schedule/src/index.ts) |
-| `@deepseek-ai/dsh-tool-session-message` | `tools` · `agents` · `sessionController` · `sessionReferenceResolver` · `sessionQuery` · `permissionPresets` · `agentDefaultModel` · `llm` | [`packages/api/tool-session-message/src/index.ts`](../packages/api/tool-session-message/src/index.ts) |
+| `@deepseek-ai/dsh-tool-session-message` | `tools` · `agents` · `sessionController` · `sessionReferenceResolver` · `permissionPresets` · `agentDefaultModel` · `llm` | [`packages/api/tool-session-message/src/index.ts`](../packages/api/tool-session-message/src/index.ts) |
 | `@deepseek-ai/dsh-tool-subagent-control` | `tools` · `subagents` | [`packages/subagent/tool-subagent-control/src/index.ts`](../packages/subagent/tool-subagent-control/src/index.ts) |
 | `@deepseek-ai/dsh-tool-working-directory` | `tools` · `workingDirectory` | [`packages/session/tool-working-directory/src/index.ts`](../packages/session/tool-working-directory/src/index.ts) |
 | `@deepseek-ai/dsh-user-questions` | — | [`packages/interaction/user-questions/src/index.ts`](../packages/interaction/user-questions/src/index.ts) |

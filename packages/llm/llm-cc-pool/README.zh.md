@@ -53,12 +53,12 @@ kind: "package-bundle"
 | 端点 | `https://ccpool.tiancegames.com` |
 | 凭据引用 | `CC_POOL_API_KEY` |
 | 部署 header | `x-cc-backend: direct` |
-| 会话身份 | 请求的 session id 作为 `X-Claude-Code-Session-Id`，外加每个逻辑请求一个 `x-client-request-id`，其重试沿用同一个 |
-| 重试策略 | `normal`，2 次重试，可重试码 `RATE_LIMIT`、`SERVER` 按原样使用；`TIMEOUT` 被排除，因为请求可能已经派发、结果未知 |
+| 会话身份 | 请求的 session id 作为 `X-Claude-Code-Session-Id`，所属 Session 的显示名作为 `x-cc-session-name`，每次有意尝试一个 `x-client-request-id` |
+| 重试策略 | `normal`，2 次重试，可重试码 `RATE_LIMIT`、`SERVER`、`POOL_REQUEST_CLOSED` 按原样使用；`TIMEOUT` 被排除，因为请求可能已经派发、结果未知 |
 
-`CC_POOL_API_KEY` 每个请求经凭据服务解析，其次读启动环境。解析不到时请求以 `MISSING_CREDENTIAL` 失败并点名该引用，绝不会回退到无关的环境密钥。会话 header 绑定池的会话键与 prompt 身份，因此同一会话的每一轮与工具续写都呈现同一会话，而增加消息的请求会取得新的 ledger id。
+`CC_POOL_API_KEY` 每个请求经凭据服务解析，其次读启动环境。解析不到时请求以 `MISSING_CREDENTIAL` 失败并点名该引用，绝不会回退到无关的环境密钥。会话 header 绑定池的会话键与 prompt 身份，因此同一会话的每一轮与工具续写都呈现同一会话。ledger id 属于单次尝试：有意 retry 会发送新 id，因此池不会把它当作已关闭 id 的 replay 来回答，而同一次尝试的重复分派沿用自己的 id。这类路由上这三个 header 名归适配器所有；profile header 中任意大小写拼写的同名项会被移除，而不是并排发送。
 
-池每个会话只允许一个在途 direct 请求；并发请求会被以 `cc_pool_session_busy` 拒绝，而不是排队等待。插件按请求的 session id 排序流：同一会话的第二个请求只在第一个流结束后才到达路由，不同会话仍并行运行，并照常经过池的全局槽位限制。请求只要尚未转发任何内容，被 `cc_pool_session_busy` 拒绝（上一个租约在最后一个 chunk 之后才释放）就会在 1.8 秒内最多重试八次，无论它是否排过队；中止请求会立即释放队列位，且不打开任何上游请求。其它拒绝——全局槽位 `cc_pool_rate_limited` 429、容量限制、provider 限速——原样返回并带上 `Retry-After`，由 `dsh-llm-retry` 处理；本插件不添加跨会话的全局或按 IP 队列，也不添加会话之间的节流。
+池每个会话只允许一个在途 direct 请求；并发请求会被以 `cc_pool_session_busy` 拒绝，而不是排队等待。插件按请求的 session id 排序流：同一会话的第二个请求只在第一个流结束后才到达路由，不同会话仍并行运行，并照常经过池的全局槽位限制。请求只要尚未转发任何内容，被 `cc_pool_session_busy` 拒绝（上一个租约在最后一个 chunk 之后才释放）就会在 1.8 秒内最多重试八次，无论它是否排过队；中止请求会立即释放队列位，且不打开任何上游请求。其它拒绝——全局槽位 `cc_pool_rate_limited` 429、容量限制、provider 限速——原样返回并带上 `Retry-After`，由 `dsh-llm-retry` 处理；点名已关闭 client request id 的拒绝（`cc_pool_request_closed`）在那里可重试，因为下一次尝试携带新 id。本插件不添加跨会话的全局或按 IP 队列，也不添加会话之间的节流。
 
 ### 提示缓存 TTL
 
@@ -97,7 +97,7 @@ profile 可以用 `models` 整体替换该列表。每个条目声明线路 id�
 
 ### 请求诊断
 
-每次尝试在开始时写一条结构化日志记录，在结束时再写一条：路由、模型、端点、session id、ledger id、尝试序号、响应状态、响应带有的池 `x-cc-pool-request-id`，以及失败的 code、message 与 cause 链。排过队的请求若在池释放上一租约时被拒绝，会作为同一逻辑请求的下一次尝试重试，因此其记录沿用同一 ledger id，尝试序号为 2、3……。记录绝不包含消息、请求体、凭据、token 数或会话标题。
+每次尝试在开始时写一条结构化日志记录，在结束时再写一条：路由、模型、端点、session id、本次尝试的 ledger id、该逻辑请求内的尝试序号、响应状态、响应带有的池 `x-cc-pool-request-id`，以及失败的 code、message 与 cause 链。排过队的请求若在池释放上一租约时被拒绝，会作为同一逻辑请求的下一次尝试重试：尝试序号推进，且重试发送新的 ledger id，因此它是池中新的 ledger 条目而不是 replay。记录绝不包含消息、请求体、凭据、token 数或会话标题。
 
 `requestLog` 把同样的记录持久化为 NDJSON。未配置时池路由写入 `$DSH_HOME/logs/llm-pi-ai-requests.jsonl`——沿用通用 pi-ai 适配器的路径，使既有证据收集在插件拆分后仍然有效。`path` 移动文件，`maxFileBytes`（默认 16 MiB）设定轮转点，`maxFiles`（默认 8）设定保留数量；轮转先删除最旧文件，保留集合不超过 128 MiB。写入排在请求路径之外，首次失败经插件 logger 报告一次，且不会使请求失败。
 

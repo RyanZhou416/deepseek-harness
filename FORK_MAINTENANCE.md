@@ -177,9 +177,9 @@ positions, the chained stream-to-rebuild replay, and the no-capture case.
 
 ### Shared-account pool failure classification
 
-共享账号池（`cc_pool_*`）把稳定错误放回 Anthropic 风格 error envelope；`llm-pi-ai` 在请求级 fetch 捕获失败响应的 HTTP status 与 `Retry-After`，解析 envelope 后发出 `POOL_CAPACITY`、`POOL_RATE_LIMITED`、`POOL_SESSION_BUSY`、`POOL_NO_ACCOUNT`、`POOL_TRANSIENT` 或 `POOL_ERROR`，而不是把池拒绝误分类为 Claude `RATE_LIMIT`。`POOL_SESSION_BUSY` 与不可重试的池失败带 `retryDisposition: 'forbid'`；池 origin 只是分类依据，账号选择、冷却和 session 绑仍由池负责。池的就绪拒绝不带 `cc_pool_*` code 与 `origin`：响应体顶层给出 `pool_request_id`、`error.retryable` 为 `false`，详情说明租约的出口路径尚未验证（`capability_not_ready`）。分类器把同时带这两个标记的 `5xx` 响应直接归为不可重试的 `POOL_ERROR`（`retryDisposition: 'forbid'`），`5xx` 时不再读取可能被改写的详情文本；非 `5xx` 才仍由详情文本识别该拒绝。重发会重复池已经记账的 ledger id（池以 409 回应），因此这条回退不能变回可重试的文本分类。默认 pi-ai `retryPolicy` 只在部署没有显式 `retryableCodes` 时追加池可重试码；显式列表必须逐字使用。生成目录 `pool-error-catalog.generated.ts` 绑定上游 catalog SHA，不能手工编辑。该行为不改变 Session 格式，也不改变 Claude-native 错误的原有分类。
+共享账号池（`cc_pool_*`）把稳定错误放回 Anthropic 风格 error envelope；`llm-pi-ai` 在请求级 fetch 捕获失败响应的 HTTP status 与 `Retry-After`，解析 envelope 后发出 `POOL_CAPACITY`、`POOL_RATE_LIMITED`、`POOL_SESSION_BUSY`、`POOL_NO_ACCOUNT`、`POOL_REQUEST_CLOSED`、`POOL_TRANSIENT` 或 `POOL_ERROR`，而不是把池拒绝误分类为 Claude `RATE_LIMIT`。`POOL_SESSION_BUSY` 与不可重试的池失败带 `retryDisposition: 'forbid'`；`POOL_REQUEST_CLOSED` 不禁止重发，因为每次有意尝试都携带新的 `x-client-request-id`，重发是新的 ledger 条目而不是 replay。池 origin 只是分类依据，账号选择、冷却和 session 绑仍由池负责。池的就绪拒绝不带 `cc_pool_*` code 与 `origin`：响应体顶层给出 `pool_request_id`、`error.retryable` 为 `false`，详情说明租约的出口路径尚未验证（`capability_not_ready`）。分类器把同时带这两个标记的 `5xx` 响应直接归为不可重试的 `POOL_ERROR`（`retryDisposition: 'forbid'`），`5xx` 时不再读取可能被改写的详情文本；非 `5xx` 才仍由详情文本识别该拒绝。重发会重复池已经记账的 ledger id（池以 409 回应），因此这条回退不能变回可重试的文本分类。默认 pi-ai `retryPolicy` 只在部署没有显式 `retryableCodes` 时追加池可重试码；显式列表必须逐字使用。生成目录 `pool-error-catalog.generated.ts` 绑定上游 catalog SHA（当前 1.1.0），不能手工编辑。该行为不改变 Session 格式，也不改变 Claude-native 错误的原有分类。
 
-**Preservation rule.** 保留 fetch 捕获的协议范围（`anthropic-messages`、`openai-completions`、`openai-responses`）；Google 拒绝自定义 fetch，必须继续走文本分类。不得把 `POOL_SESSION_BUSY` 加进默认可重试码，不得让 `claude` origin 走池分类，也不得把显式 `retryableCodes` 与默认列表合并。保留 readiness `5xx` 回退：`pool_request_id` 与 `retryable: false` 同时存在时按不可重试的 `POOL_ERROR` 处理，且 `5xx` 判定只看这两个标记、不依赖详情文本；不得把该拒绝交回可重试的文本分类。更新 catalog 时必须同时更新生成文件、SHA 断言和分类测试。
+**Preservation rule.** 保留 fetch 捕获的协议范围（`anthropic-messages`、`openai-completions`、`openai-responses`）；Google 拒绝自定义 fetch，必须继续走文本分类。不得把 `POOL_SESSION_BUSY` 加进默认可重试码，不得让 `claude` origin 走池分类，也不得把显式 `retryableCodes` 与默认列表合并。保留 `POOL_REQUEST_CLOSED` 的可重试映射与 cc-pool 路由的显式列表项；它的前提是每次有意尝试使用新的 ledger id，若恢复重复 id 就必须同时把它移出可重试码。保留 readiness `5xx` 回退：`pool_request_id` 与 `retryable: false` 同时存在时按不可重试的 `POOL_ERROR` 处理，且 `5xx` 判定只看这两个标记、不依赖详情文本；不得把该拒绝交回可重试的文本分类。更新 catalog 时必须同时更新上游 `swift/contracts/error-catalog.json`、生成文件、SHA 断言和分类测试。
 
 **Focused verification.** `pnpm exec vitest run packages/llm/llm-pi-ai/tests packages/llm/llm/tests packages/llm/llm-retry/tests` 覆盖 envelope、fetch 捕获、默认/显式重试策略、适配器分类与 retry executor；`pnpm run verify-config-catalog` 校验配置目录与 JSDoc 同步。
 
@@ -1038,45 +1038,55 @@ committed, so nothing here needs to survive a merge.
 
 **Behavior.** `llm-pi-ai` accepts a top-level `sessionHeaders` route switch. For
 a named route the adapter sends the request's `sessionId` as
-`X-Claude-Code-Session-Id` (omitted when the request carries no session id) and
-one `x-client-request-id` per logical request: the id is derived from the
+`X-Claude-Code-Session-Id` (omitted when the request carries no session id), the
+owning session's display name as `x-cc-session-name` when it has one, and one
+`x-client-request-id` per deliberate attempt. The base id is derived from the
 request's conversation position (session, purpose, route, model, and message
-identities), so every retry of one request repeats it while a request that adds
-a message, changes route or model, or starts another purpose gets a new one. A
-session id the member endpoint cannot accept fails with `INVALID_REQUEST`
-before any network I/O. Each attempt also reports structured logger records on
-start and settlement (route, model, endpoint URL, session id, ledger id,
-attempt number, response status, the response's `x-cc-pool-request-id`, a
-failure's code and message, and the cause chain of a rejected fetch); the
-records never carry messages, request bodies, credentials, token counts, or
-session titles. Routes named by `sessionHeaders` log at INFO, where a
-deployment's default sink retains them; other routes stay at DEBUG.
+identities), and `dsh-llm-retry` stamps an attempt nonce from its durable retry
+record (`retryId:retry`) into `GenerateOptions.attemptNonce`; the adapter hashes
+that nonce into the wire id, so a retry presents a new ledger id while repeated
+dispatches of one attempt repeat theirs, and the attempt number still advances
+within the logical request. A session id the member endpoint cannot accept fails
+with `INVALID_REQUEST` before any network I/O. On such a route the three header
+names are adapter-owned: a profile `headers` entry spelling one in any casing is
+removed before the adapter value is set, so one field never carries two values.
+A session display name is percent-encoded; C0/DEL/C1 controls and U+2028/U+2029
+are dropped because the pool refuses them once decoded. Each attempt also
+reports structured logger records on start and settlement (route, model,
+endpoint URL, session id, attempt ledger id, attempt number, response status,
+the response's `x-cc-pool-request-id`, a failure's code and message, and the
+cause chain of a rejected fetch); the records never carry messages, request
+bodies, credentials, token counts, or session titles. Routes named by
+`sessionHeaders` log at INFO, where a deployment's default sink retains them;
+other routes stay at DEBUG.
 
 The mac-pool route is the only consumer: the pool binds its persistent
 conversation key and its prompt identity, so every turn and tool continuation
 of one conversation presents the same session while the pool reuses one prompt
 identity for that prompt's tool continuations. The mac-pool plugin pins its
 route's retry policy to `maxRetries: 2` with
-`RATE_LIMIT`/`SERVER`, excluding `TIMEOUT`, `TRANSPORT`, and `EMPTY_RESPONSE`: a
-timeout can follow dispatch, so resending it has an unknown outcome. A
-DSH retry is a new attempt of the same logical request and now repeats its
-ledger id, so the client's own log and the pool audit can correlate the
-attempts. The explicit list is used exactly, so the pool's own retryable codes
-are not appended; those refusals surface with their `retry-after` instead of
-being retried automatically. Add the `POOL_*` codes to that list if the
-deployment decides pool refusals should retry.
+`RATE_LIMIT`/`SERVER`/`POOL_REQUEST_CLOSED`, excluding `TIMEOUT`, `TRANSPORT`,
+and `EMPTY_RESPONSE`: a timeout can follow dispatch, so resending it has an
+unknown outcome. `POOL_REQUEST_CLOSED` is recoverable because the loop stamps a
+fresh attempt id before the resend, making it a new pool ledger entry rather
+than a replay of the closed one. The explicit list is used exactly, so the
+pool's capacity and rate-limit codes are not appended; those refusals surface
+with their `retry-after` instead of being retried automatically. Add the other
+`POOL_*` codes to that list if the deployment decides those refusals should
+retry.
 
-**Preservation rule.** Keep `sessionHeaders` on the `cc-pool` route, and keep
-the ledger id derived from the logical-request position so a retry repeats it: a
-per-attempt random id would break the client-side correlation the pool audit
-reads. Keep the diagnostics free of messages, request bodies, credentials, token
-counts, and session titles. `TIMEOUT`/`TRANSPORT`/`EMPTY_RESPONSE` stay out of the
-deployed explicit `retryableCodes` until the deployment decides otherwise: the
-id-reuse prerequisite for allowing `TRANSPORT` now holds, but resending a step
-that may already have reached the model remains an open policy question. Do not
-stamp these Claude Code headers on routes the switch does not name, and do not
-let a static profile header of the same name override the adapter-owned session
-identity.
+**Preservation rule.** Keep `sessionHeaders` on the `cc-pool` route, and keep a
+deliberate retry on a new wire id: a retry that reuses the failed attempt's id is
+answered with `cc_pool_request_closed` and defeats recovery. Keep the attempt
+nonce sourced from the durable retry record, and keep the adapter's attempt
+numbering keyed on the conversation position so advances remain visible in the
+log. Keep adapter-owned session headers winning over a profile header of the same
+name in any casing. Keep the diagnostics free of messages, request bodies,
+credentials, token counts, and session titles.
+`TIMEOUT`/`TRANSPORT`/`EMPTY_RESPONSE` stay out of the deployed explicit
+`retryableCodes` until the deployment decides otherwise: resending a step that
+may already have reached the model remains an open policy question. Do not
+stamp these Claude Code headers on routes the switch does not name.
 
 **Focused verification.**
 `pnpm exec vitest run packages/llm/llm-pi-ai/tests/adapter.spec.ts packages/llm/llm-pi-ai/tests/config.spec.ts packages/llm/llm-pi-ai/tests/pool-error.spec.ts`
@@ -1163,10 +1173,12 @@ declares `dsh.bundle.patch`, so installing the bundle mounts exactly one
 `cc-pool` route and a composition without the bundle has no `cc-pool` provider
 at all. The route facts are fixed in source: `anthropic-messages` against
 `https://ccpool.tiancegames.com`, the `CC_POOL_API_KEY` reference, the
-`x-cc-backend: direct` header, `X-Claude-Code-Session-Id` plus a per-logical-
-request `x-client-request-id`, and a `normal` retry policy with 2 retries over
-`RATE_LIMIT`/`SERVER` used exactly as written; `TIMEOUT` stays out because the
-attempt can already have reached the pool. The fixed catalogue is
+`x-cc-backend: direct` header, `X-Claude-Code-Session-Id`, the session's display
+name as `x-cc-session-name`, and a per-attempt `x-client-request-id`, plus a
+`normal` retry policy with 2 retries over
+`RATE_LIMIT`/`SERVER`/`POOL_REQUEST_CLOSED` used exactly as written; `TIMEOUT`
+stays out because the attempt can already have reached the pool, and the closed
+request id is retryable because the loop stamps a fresh attempt id on the resend. The fixed catalogue is
 `claude-sonnet-5-5`/`claude-opus-5-5` (128k output, `medium` default) and
 `claude-fable-5-1`/`claude-mythos-5-1` (64k output, `high` default), all 1M
 context, offering `low`/`medium`/`high`/`xhigh`/`max` and never `off`, with
