@@ -66,7 +66,7 @@ import type { ResolvedPiAiProviderProfile } from './config.ts'
 import { requestImageTarget, toPiContext } from './context.ts'
 import { conversationUpdates, createModels, getSupportedThinkingLevels } from './models.ts'
 import { ProviderErrorCapture } from './pool-error.ts'
-import { encodeSessionNameHeader } from './session-name.ts'
+import { encodeSessionNameHeader, sanitizeSessionName } from './session-name.ts'
 import { toStreamChunks } from './stream.ts'
 
 /**
@@ -206,8 +206,9 @@ function isSessionHeaderValue(value: string): boolean {
  * is the attempt's ledger identity: each deliberate retry sends a new value, so
  * an endpoint that records the id as a terminal ledger entry does not read the
  * next attempt as a replay of the closed one; repeated dispatches of one attempt
- * keep the same value. The name header is the pool's display label: it is
- * encoded for a header field and omitted when the request has no usable name.
+ * keep the same value. The name header is the pool's display label: the name is
+ * sanitized to the pool's accepted display set, encoded for the header field,
+ * and omitted when no usable name remains.
  * @param provider - route the request targets, for diagnostics.
  * @param sessionId - the request's session id, when the caller supplied one.
  * @param clientRequestId - this attempt's ledger identity.
@@ -222,7 +223,8 @@ function sessionIdentityHeaders(
   sessionName: string | undefined,
 ): Record<string, string> {
   const headers: Record<string, string> = { [CLIENT_REQUEST_ID_HEADER]: clientRequestId }
-  const name = sessionName === undefined ? undefined : encodeSessionNameHeader(sessionName)
+  const sanitized = sessionName === undefined ? undefined : sanitizeSessionName(sessionName)
+  const name = sanitized === undefined ? undefined : encodeSessionNameHeader(sanitized)
   if (name !== undefined) headers[SESSION_NAME_HEADER] = name
   if (sessionId === undefined) return headers
   if (!isSessionHeaderValue(sessionId)) {

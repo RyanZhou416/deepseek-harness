@@ -714,6 +714,48 @@ describe('Claude Code session identity headers', () => {
     expect(server.headers[0]?.['x-claude-code-session-id']).toBe('session-cc-pool-long')
   })
 
+  it('sanitizes the bidi and zero-width scalars the pool refuses instead of failing the request', async () => {
+    const server = await mockServer([{ events: anthropicTextEvents }])
+    const ctx = await sessionHarness(server.url, 'cc-pool')
+
+    const result = await assemble(ctx, {
+      provider: 'cc-pool',
+      model: MODEL,
+      messages: [prompt('zwj emoji')],
+      sessionId: 'session-cc-pool-zwj' as never,
+      sessionName: '👨‍💻',
+    })
+
+    expect(result.finish).toMatchObject({ kind: 'stop' })
+    // The joiner is dropped; the adjacent emoji still travel percent-encoded.
+    expect(server.headers[0]?.['x-cc-session-name']).toBe('%F0%9F%91%A8%F0%9F%92%BB')
+    expect(server.headers[0]?.['x-claude-code-session-id']).toBe('session-cc-pool-zwj')
+  })
+
+  it('sends no name header when sanitation leaves nothing usable', async () => {
+    const server = await mockServer([{ events: anthropicTextEvents }, { events: anthropicTextEvents }])
+    const ctx = await sessionHarness(server.url, 'cc-pool')
+
+    await assemble(ctx, {
+      provider: 'cc-pool',
+      model: MODEL,
+      messages: [prompt('reserved name')],
+      sessionId: 'session-cc-pool-reserved' as never,
+      sessionName: '空闲',
+    })
+    await assemble(ctx, {
+      provider: 'cc-pool',
+      model: MODEL,
+      messages: [prompt('blank name')],
+      sessionId: 'session-cc-pool-blank' as never,
+      sessionName: ' \u200B ',
+    })
+
+    expect(server.headers[0]?.['x-cc-session-name']).toBeUndefined()
+    expect(server.headers[1]?.['x-cc-session-name']).toBeUndefined()
+    expect(server.headers[1]?.['x-claude-code-session-id']).toBe('session-cc-pool-blank')
+  })
+
   it('leaves the request body identical when a name is present', async () => {
     const server = await mockServer([{ events: anthropicTextEvents }, { events: anthropicTextEvents }])
     const ctx = await sessionHarness(server.url, 'cc-pool')

@@ -1050,9 +1050,14 @@ within the logical request. A session id the member endpoint cannot accept fails
 with `INVALID_REQUEST` before any network I/O. On such a route the three header
 names are adapter-owned: a profile `headers` entry spelling one in any casing is
 removed before the adapter value is set, so one field never carries two values.
-A session display name is percent-encoded; C0/DEL/C1 controls and U+2028/U+2029
-are dropped because the pool refuses them once decoded. Each attempt also
-reports structured logger records on start and settlement (route, model,
+A session display name is sanitized to the pool's accepted display set before
+encoding: C0/DEL/C1 controls and U+2028/U+2029, the bidi/zero-width formatting
+scalars (U+061C, U+200B–U+200F, U+202A–U+202E, U+2060–U+2064, U+2066–U+2069,
+U+FEFF), and the reserved placeholder names `空闲`/`未知` (after trimming) are
+refused by the pool, so the first two classes are dropped from the name and a
+name left blank or reserved is not sent. The encoder itself only percent-encodes
+the sanitized value. Each attempt also reports structured logger records on
+start and settlement (route, model,
 endpoint URL, session id, attempt ledger id, attempt number, response status,
 the response's `x-cc-pool-request-id`, a failure's code and message, and the
 cause chain of a rejected fetch); the records never carry messages, request

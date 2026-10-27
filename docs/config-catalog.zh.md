@@ -1889,10 +1889,12 @@ export interface Config {
    * one, and one `x-client-request-id` per deliberate attempt, so a retry never
    * resends the id the endpoint already recorded. These names are adapter-owned
    * on such a route: a profile header spelled the same way in any casing is
-   * replaced rather than sent beside them. One route name or a list of them; a
-   * route not named here is left alone. A name matching no configured route has
-   * no effect, because the route set is settings-owned and may be supplied after
-   * this composition layer.
+   * replaced rather than sent beside them. The display name is sanitized to the
+   * pool's accepted display set (no control, bidi, or zero-width scalars, and no
+   * reserved placeholder such as 空闲 or 未知) before it is encoded. One route
+   * name or a list of them; a route not named here is left alone. A name
+   * matching no configured route has no effect, because the route set is
+   * settings-owned and may be supplied after this composition layer.
    */
   sessionHeaders?: string | string[]
   /**
