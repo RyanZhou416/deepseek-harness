@@ -1,0 +1,9 @@
+# Bundle self-activation patch: installing this package into a profile
+# (`dsh plugin --profile web add ./packages/llm/llm-cc-pool`) mounts one Host
+# row. The provider facts live in the plugin's source, not this file: the route,
+# endpoint, credential reference, session headers, retry policy, and model
+# catalogue are fixed by the package version, so a profile patch only decides
+# whether the plugin is installed.
+- insert:
+    - id: llm-cc-pool
+      name: '@deepseek-ai/dsh-llm-cc-pool'

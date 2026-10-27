@@ -1746,6 +1746,66 @@ export interface Config {
 ```
 <!-- END GENERATED config-catalog:@deepseek-ai/dsh-jobs-local -->
 
+<!-- BEGIN GENERATED config-catalog:@deepseek-ai/dsh-llm-cc-pool -->
+<a id="deepseek-aidsh-llm-cc-pool"></a>
+
+## `@deepseek-ai/dsh-llm-cc-pool`
+
+- `inject`: `llm`
+- `refs`: [`PiAiRequestLogProfile`](../packages/llm/llm-pi-ai/src/index.ts) · `Volatile` (`@deepseek-ai/cordis`)
+- `source`: [`packages/llm/llm-cc-pool/src/config.ts:23`](../packages/llm/llm-cc-pool/src/config.ts)
+
+```ts config-catalog
+/** Loader configuration for the mac-pool route. */
+export interface Config {
+  /**
+   * Durable NDJSON sink for the same request/response diagnostics the plugin
+   * logger records. With no configuration the fixed pool route persists its
+   * records to the shared pool log below the harness home, so a request that
+   * never reaches the pool still leaves client-side evidence; `enabled: true`
+   * persists every route, `enabled: false` turns the file off, and `path`,
+   * `maxFileBytes`, and `maxFiles` locate and size the retained set. Loader
+   * configuration is read when the plugin mounts.
+   */
+  requestLog?: PiAiRequestLogProfile
+  /**
+   * The catalogue selector surfaces offer, replacing the built-in four-model
+   * catalogue wholesale. Absent, or reset through the settings service, serves
+   * the built-in catalogue. A provided list resolves through this package's
+   * strict catalogue check: at least one model, every non-empty id once,
+   * non-empty names, positive integer capacities, and a default effort among
+   * the five pool levels. Invalid input fails the plugin at load and is refused
+   * before a settings write persists.
+   */
+  models: Volatile<CcPoolModel[]>
+}
+
+/**
+ * A mac-pool model catalogue entry: the deployable facts of one wire model id.
+ * `defaultReasoning` is that model's default effort, materialized by the seam
+ * into a request that names none.
+ */
+export interface CcPoolModel {
+  /** Wire model id sent to the pool; non-empty and unique within the catalogue. */
+  id: string
+  /** Display name selector surfaces show; non-empty. */
+  name: string
+  /** Maximum combined request and response context in tokens. */
+  contextWindow: number
+  /** Maximum output tokens; also this model's per-request default cap. */
+  maxTokens: number
+  /** Default thinking level this model starts from; one of {@link REASONING_LEVELS}. */
+  defaultReasoning: CcPoolReasoningLevel
+}
+
+/**
+ * A default thinking level a pool model starts from. The pool offers the five
+ * escalating levels below; `off` and `minimal` are not part of its catalogue.
+ */
+export type CcPoolReasoningLevel = 'low' | 'medium' | 'high' | 'xhigh' | 'max'
+```
+<!-- END GENERATED config-catalog:@deepseek-ai/dsh-llm-cc-pool -->
+
 <!-- BEGIN GENERATED config-catalog:@deepseek-ai/dsh-llm-deepseek-account -->
 <a id="deepseek-aidsh-llm-deepseek-account"></a>
 
@@ -1799,7 +1859,7 @@ export interface Config extends ProtocolConfig {
 
 - `inject`: `llm`
 - `refs`: `Api` (`@earendil-works/pi-ai`) · `CacheRetention` (`@earendil-works/pi-ai`) · `Model` (`@earendil-works/pi-ai`) · `ModelThinkingLevel` (`@earendil-works/pi-ai`) · `OpenAICompletionsCompat` (`@earendil-works/pi-ai`) · [`RetryPolicyConfig`](../packages/llm/llm/src/index.ts) · `ThinkingBudgets` (`@earendil-works/pi-ai`) · `Transport` (`@earendil-works/pi-ai`) · `Volatile` (`@deepseek-ai/cordis`)
-- `source`: [`packages/llm/llm-pi-ai/src/config.ts:228`](../packages/llm/llm-pi-ai/src/config.ts)
+- `source`: [`packages/llm/llm-pi-ai/src/config.ts:248`](../packages/llm/llm-pi-ai/src/config.ts)
 
 ```ts config-catalog
 /** Plugin configuration: the provider routes this instance owns. */
@@ -1810,6 +1870,27 @@ export interface Config {
    * and registers them the moment a settings section supplies profiles.
    */
   providers: Volatile<Record<string, PiAiProviderProfile>>
+  /**
+   * Provider routes whose requests carry the Claude Code session identity a
+   * conversation-aware endpoint reads: `X-Claude-Code-Session-Id` from the
+   * request's `sessionId`, and one `x-client-request-id` per logical request
+   * that every retry of it repeats. One route name or a list of them; a route
+   * not named here is left alone. A name matching no configured route has no
+   * effect, because the route set is settings-owned and may be supplied after
+   * this composition layer.
+   */
+  sessionHeaders?: string | string[]
+  /**
+   * Optional durable NDJSON file for the same request diagnostics the plugin
+   * logger records. With no configuration, routes named by `sessionHeaders`
+   * still persist their records to `$DSH_HOME/logs/llm-pi-ai-requests.jsonl`,
+   * so a pool route keeps client-side evidence without extra configuration;
+   * `enabled: true` extends persistence to every route, and `enabled: false`
+   * turns the file off entirely. The file never carries messages, request
+   * bodies, credentials, token counts, or session titles. Loader configuration
+   * is read when the plugin mounts, so a change takes effect at the next start.
+   */
+  requestLog?: PiAiRequestLogProfile
 }
 
 /** Configuration for one pi-ai provider route; the `providers` dict key IS the route. */
@@ -1874,7 +1955,14 @@ export interface PiAiProviderProfile {
   defaultInput?: PiAiModality[]
   /** Provider request headers, validated against Fetch when the profile resolves; Harness attribution wins reserved names. */
   headers?: Record<string, string>
-  /** Provider-neutral pi-ai reasoning level. */
+  /**
+   * Route-level default pi-ai reasoning level: described as the default effort
+   * of every model on this route that configures no {@link PiAiModelProfile.reasoning}
+   * of its own, and materialized into a request that names no effort. A level
+   * describes only where the model offers it, so one model that cannot take it
+   * does not hide the rest; a request asking for such a level still fails
+   * before provider I/O.
+   */
   reasoning?: ModelThinkingLevel
   /** Token budgets used by reasoning providers that support them. */
   thinkingBudgets?: ThinkingBudgets
@@ -1909,6 +1997,25 @@ export interface PiAiProviderProfile {
    * written.
    */
   retryPolicy?: RetryPolicyConfig
+}
+
+/**
+ * Durable request-diagnostic log settings.
+ *
+ * Records rotate by size and the retained set stays within 128 MiB: the
+ * effective per-file bound is the smaller of `maxFileBytes` and that total, and
+ * the effective file count is the smaller of `maxFiles` and the total divided
+ * by the per-file bound. The oldest rotation is deleted first.
+ */
+export interface PiAiRequestLogProfile {
+  /** Absolute NDJSON file path; defaults to `$DSH_HOME/logs/llm-pi-ai-requests.jsonl`. */
+  path?: string
+  /** Bytes one file holds before it rotates (default 16 MiB). */
+  maxFileBytes?: number
+  /** Files retained including the active one (default 8). */
+  maxFiles?: number
+  /** Persist every route rather than only `sessionHeaders` routes (default false). */
+  enabled?: boolean
 }
 
 /** One configured model entry: an id plus the catalog fields it overrides. */
@@ -1946,6 +2053,14 @@ export interface PiAiModelProfile {
    * declares the offered levels and their wire spellings.
    */
   reasoningEfforts?: false | PiAiReasoningEfforts
+  /**
+   * Default thinking level for this model, preferred over the route-level
+   * `reasoning` when a caller names no effort. It must be a level the model
+   * offers — one declared in {@link reasoningEfforts}, or, when that field is
+   * absent, one the installed catalog entry declares — and only a reasoning
+   * model may set it. The seam materializes it as this model's `defaultEffort`.
+   */
+  reasoning?: ModelThinkingLevel
   /** pi-ai wire-compatibility switches for this model, winning over the route's per field; one its protocol does not declare is refused. */
   compat?: PiAiCompatProfile
 }
@@ -4067,34 +4182,6 @@ export interface Config {
 ```
 <!-- END GENERATED config-catalog:@deepseek-ai/dsh-tool-ralph -->
 
-<!-- BEGIN GENERATED config-catalog:@deepseek-ai/dsh-tool-session-message -->
-<a id="deepseek-aidsh-tool-session-message"></a>
-
-## `@deepseek-ai/dsh-tool-session-message`
-
-- `inject`: `tools` · `agents` · `sessionController` · `sessionReferenceResolver` · `sessionQuery` · `permissionPresets` · `agentDefaultModel` · `llm`
-- `refs`: `Volatile` (`@deepseek-ai/cordis`)
-- `source`: [`packages/api/tool-session-message/src/index.ts:44`](../packages/api/tool-session-message/src/index.ts)
-
-```ts config-catalog
-/** Plugin configuration for `session_create`. */
-export interface Config {
-  /** Settings-page override; false lets a call request a model or inherit the global selection. */
-  modelOverride: Volatile<SessionCreateModelOverride | false>
-}
-
-/** Model forced onto newly created independent Sessions. */
-export interface SessionCreateModelOverride {
-  /** Registered provider route. */
-  provider: string
-  /** Provider-owned model id. */
-  model: string
-  /** Adapter-owned reasoning effort; omission follows the model default. */
-  reasoningEffort?: string
-}
-```
-<!-- END GENERATED config-catalog:@deepseek-ai/dsh-tool-session-message -->
-
 <!-- BEGIN GENERATED config-catalog:@deepseek-ai/dsh-tool-session-query -->
 <a id="deepseek-aidsh-tool-session-query"></a>
 
@@ -4738,6 +4825,7 @@ export interface Config {
 | `@deepseek-ai/dsh-client-ui-session` | — | [`packages/client/ui-session/src/index.ts`](../packages/client/ui-session/src/index.ts) |
 | `@deepseek-ai/dsh-client-ui-settings` | — | [`packages/client/ui-settings/src/index.ts`](../packages/client/ui-settings/src/index.ts) |
 | `@deepseek-ai/dsh-client-ui-settings-agent-loop` | — | [`packages/client/ui-settings-agent-loop/src/index.ts`](../packages/client/ui-settings-agent-loop/src/index.ts) |
+| `@deepseek-ai/dsh-client-ui-settings-cc-pool` | — | [`packages/client/ui-settings-cc-pool/src/index.ts`](../packages/client/ui-settings-cc-pool/src/index.ts) |
 | `@deepseek-ai/dsh-client-ui-settings-general` | — | [`packages/client/ui-settings-general/src/index.ts`](../packages/client/ui-settings-general/src/index.ts) |
 | `@deepseek-ai/dsh-client-ui-settings-plugin-inventory` | — | [`packages/client/ui-settings-plugin-inventory/src/index.ts`](../packages/client/ui-settings-plugin-inventory/src/index.ts) |
 | `@deepseek-ai/dsh-client-ui-settings-plugins` | — | [`packages/client/ui-settings-plugins/src/index.ts`](../packages/client/ui-settings-plugins/src/index.ts) |
@@ -4800,6 +4888,7 @@ export interface Config {
 | `@deepseek-ai/dsh-tool-call-timeout-policy` | `tools` | [`packages/guard/timeout-policy/src/index.ts`](../packages/guard/timeout-policy/src/index.ts) |
 | `@deepseek-ai/dsh-tool-cordis` | `tools` · `cordisInspect` | [`packages/extensions/tool-cordis/src/index.ts`](../packages/extensions/tool-cordis/src/index.ts) |
 | `@deepseek-ai/dsh-tool-schedule` | `tools` | [`packages/schedule/tool-schedule/src/index.ts`](../packages/schedule/tool-schedule/src/index.ts) |
+| `@deepseek-ai/dsh-tool-session-message` | `tools` · `agents` · `sessionController` · `sessionReferenceResolver` · `sessionQuery` · `permissionPresets` · `agentDefaultModel` · `llm` | [`packages/api/tool-session-message/src/index.ts`](../packages/api/tool-session-message/src/index.ts) |
 | `@deepseek-ai/dsh-tool-subagent-control` | `tools` · `subagents` | [`packages/subagent/tool-subagent-control/src/index.ts`](../packages/subagent/tool-subagent-control/src/index.ts) |
 | `@deepseek-ai/dsh-tool-working-directory` | `tools` · `workingDirectory` | [`packages/session/tool-working-directory/src/index.ts`](../packages/session/tool-working-directory/src/index.ts) |
 | `@deepseek-ai/dsh-user-questions` | — | [`packages/interaction/user-questions/src/index.ts`](../packages/interaction/user-questions/src/index.ts) |

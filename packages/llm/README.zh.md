@@ -29,6 +29,7 @@ llm 组提供 harness 的模型调用能力：一个提供方无关的服务，�
 | [`llm-deepseek-api-key/`](llm-deepseek-api-key/README.zh.md) | API key 鉴权与 official 模型发现 | `ctx.llm` |
 | [`llm-deepseek-account/`](llm-deepseek-account/README.zh.md) | 账号 token 鉴权、失效处理与模型发现 | `ctx.llm` |
 | [`llm-pi-ai/`](llm-pi-ai/README.zh.md) | 通过 pi-ai 目录与协议格式服务配置的提供方路由，包括手工声明的网关 | 注册到 `ctx.llm` |
+| [`llm-cc-pool/`](llm-cc-pool/README.zh.md) | 仅供本 fork 的 mac 池 provider：一条固定 `cc-pool` 路由与随包版本化的目录，以可选 profile bundle 安装 | 注册到 `ctx.llm` |
 | [`deepseek-llm-api-extensions/`](deepseek-llm-api-extensions/README.zh.md) | 在官方 DeepSeek 请求上注册具有生命周期归属的顶层字段 | `ctx.deepseekLlmApiExtensions` |
 | [`plugin-package-inventory-deepseek/`](plugin-package-inventory-deepseek/README.zh.md) | 为官方 DeepSeek 请求贡献当前启用的 Loader 包清单 | 贡献 `dsh_plugin_packages` |
 | [`llm-request-record/`](llm-request-record/README.zh.md) | 把一次模型请求的准备记录写入其会话日志，并在该路由获准发送前等待该记录到达持久存储 | `ctx.llmRequestRecord` |

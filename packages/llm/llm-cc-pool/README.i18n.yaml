@@ -1,0 +1,61 @@
+# Bilingual-pair consistency record for README.md (docs/i18n/README.md): per heading
+# section, a hash of its English and Chinese blocks outside code blocks and generated regions.
+# After editing either side, bring the other along and re-record with:
+#   pnpm run verify-translation-pairing --write packages/llm/llm-cc-pool/README.md
+/:
+  en: fa759e87a885f8f2
+  zh: a097d08963cf6198
+/deepseek-ai-dsh-llm-cc-pool:
+  en: 7dc8f9480ed9352e
+  zh: f799f0917a984588
+/deepseek-ai-dsh-llm-cc-pool/summary:
+  en: 8c732b50bb902c0c
+  zh: fd0517900c9f91fa
+/deepseek-ai-dsh-llm-cc-pool/table-of-contents:
+  en: d152484eb41ac6b4
+  zh: 364c80ee00a374ff
+/deepseek-ai-dsh-llm-cc-pool/use-this-package:
+  en: c4d10cdbdb271665
+  zh: fd80db48b1413412
+/deepseek-ai-dsh-llm-cc-pool/use-this-package/fixed-route-facts:
+  en: 80e6cb259d4c528a
+  zh: 560d1fa6c00a6c96
+/deepseek-ai-dsh-llm-cc-pool/use-this-package/prompt-cache-ttl:
+  en: 7475425c9d809db2
+  zh: 62ba907106272b9f
+/deepseek-ai-dsh-llm-cc-pool/use-this-package/model-catalogue:
+  en: 2ee818fb19948b02
+  zh: 8ce427ea0411251d
+/deepseek-ai-dsh-llm-cc-pool/use-this-package/pool-model-sync:
+  en: 5d56169fcc251c2b
+  zh: 879999c7f574ca67
+/deepseek-ai-dsh-llm-cc-pool/use-this-package/request-diagnostics:
+  en: 2f2426867400df2d
+  zh: a64a1d747c112ec4
+/deepseek-ai-dsh-llm-cc-pool/understand-the-implementation:
+  en: 5a744fda926e0886
+  zh: 37f8f8e7c039bcb2
+/deepseek-ai-dsh-llm-cc-pool/further-exploration:
+  en: 3d804c80f0c0afdb
+  zh: 73938cc25b3c01c8
+/deepseek-ai-dsh-llm-cc-pool/model-experience:
+  en: 215e7ba838619b7b
+  zh: a311da3843709f90
+/deepseek-ai-dsh-llm-cc-pool/model-experience/provider-request-through-the-mac-pool:
+  en: c113819d24809037
+  zh: c54251a0ae03d43b
+/deepseek-ai-dsh-llm-cc-pool/model-experience/provider-request-through-the-mac-pool/what-the-model-sees:
+  en: 9bc120d5c006982f
+  zh: c7b22008715c03ae
+/deepseek-ai-dsh-llm-cc-pool/model-experience/provider-request-through-the-mac-pool/token-effect:
+  en: 82ac0d562e2e1a77
+  zh: ff0efad0e929efc7
+/deepseek-ai-dsh-llm-cc-pool/model-experience/provider-request-through-the-mac-pool/kv-cache-effect:
+  en: 631c2fcbc2c7bd0d
+  zh: 15e8416ccf79e91b
+/deepseek-ai-dsh-llm-cc-pool/known-limitations-and-deferred-work:
+  en: 876e606d7f09219c
+  zh: 8815bd98be2c1d6f
+/deepseek-ai-dsh-llm-cc-pool/known-limitations-and-deferred-work/dev-note:
+  en: 13ea28810459eeab
+  zh: 0e178ddae277d493

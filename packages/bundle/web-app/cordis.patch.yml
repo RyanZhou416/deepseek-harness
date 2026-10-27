@@ -312,6 +312,12 @@
     - id: ui-settings-models
       name: '@deepseek-ai/dsh-client-ui-settings-models'
 
+    # The CC subscription pool page edits the llm-cc-pool entry's model
+    # catalogue and its pool credential. It joins Settings only while that Host
+    # plugin is composed, so a deployment without the plugin shows no page.
+    - id: ui-settings-cc-pool
+      name: '@deepseek-ai/dsh-client-ui-settings-cc-pool'
+
     # Plugin management: the sidebar Plugins page installs, enables, disables,
     # and removes the profile's bundles through the `pluginManager` Remote.
     # Without a profile-backed Host it reports itself unavailable.

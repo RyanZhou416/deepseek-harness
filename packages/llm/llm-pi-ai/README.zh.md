@@ -69,7 +69,9 @@ kind: "package-reference"
             contextWindow: 262144
             reasoningEfforts:
               off:
+              medium: medium
               high: high
+            reasoning: medium
 ```
 
 | 字段 | 默认值 | 含义 |
@@ -90,6 +92,10 @@ kind: "package-reference"
 
 生成的[配置目录](../../../docs/config-catalog.zh.md#deepseek-aidsh-llm-pi-ai)是每个受支持字段及其 JSDoc 的穷尽式真源。
 
+`sessionHeaders` 指定哪些提供方路由的请求必须携带会话感知端点读取的 Claude Code 会话身份：`X-Claude-Code-Session-Id` 取请求自身的 `sessionId`（原样），以及每个逻辑请求一个、被该请求的所有 retry 复用的 `x-client-request-id`——端点因此能关联同一请求的各次尝试，而追加了消息的请求会得到新 id。可以写一个路由名或一个列表；不在其中的路由两个头都不发。会话 id 必须是端点接受的、1 到 256 个字符的可打印 ASCII，其他取值会让请求在发生任何网络 I/O 前以 `INVALID_REQUEST` 失败。名字若不匹配任何已配置路由则不产生效果，因为路由集合可能在本组合层之后由设置提供。该开关用于按此头绑定会话及其 prompt 身份的共享账号池；它不改变提供方请求的其他部分。
+
+`requestLog` 为 logger 记录的同一批请求诊断增加一个持久 NDJSON 文件。未配置时，被 `sessionHeaders` 命名的路由会把记录写到 `$DSH_HOME/logs/llm-pi-ai-requests.jsonl`；`enabled: true` 持久化每个路由，`enabled: false` 完全关闭该文件。每行携带时间戳、记录类型、路由、模型、端点、Session id、ledger id、尝试序号、流式标志，以及响应的状态、pool request id、失败 code 与 message、cause 链——绝不包含 messages、请求体、凭据、token 计数或 Session 标题。`path` 可移动文件位置，`maxFileBytes`（默认 16 MiB）决定滚动阈值，`maxFiles`（默认 8）决定保留文件数；滚动先删除最旧文件，保留集合始终不超过 128 MiB。在 POSIX 上，文件与该写入器创建的目录为所有者私有（`0600` 与 `0700`）；写入失败只通过插件 logger 报告一次，绝不让请求延迟或失败。Loader 配置在插件挂载时读取，因此更改在下次启动时生效。
+
 Anthropic Messages 路由还会把每张图片的长边限制为 8,000 像素；完整请求保留超过 20 次图片出现时，长边上限为 2,000 像素。用户图片、工具结果和重复附件均计数，日志标记已卸载的图片不计数。上下文窗口不超过 200,000 token 的模型最多接收 100 张图片，更大窗口接收 600 张。这些协议上限也约束自定义像素预算。其他协议继续使用各自配置的预算，切换路由时从保存的规范化附件重新计算目标。
 
 ### 登录提供方
@@ -104,7 +110,7 @@ profile 的 `models` 列表会替换而非扩展路由的已安装目录；每�
 
 `reasoningEfforts` 声明模型可选择的 thinking 等级：每个键都是选择器提供的等级，其值是分派时在协议中发送的拼写，因此 `max: ultra` 可以为拥有自有词汇的网关重命名等级。省略该字段时保留已安装目录条目的能力；`false` 声明非推理模型。对于 pi-ai 无法识别的端点，`compat` 开关重塑请求——哪个角色携带系统提示词、哪个字段限制输出、thinking 等级如何传递——可逐路由、逐模型配置。条目与已安装目录都没有尺寸的模型，会采用路由的 `defaultContextWindow` 与 `defaultMaxTokens` 回退值。
 
-确切模型元数据将 `reasoning.efforts` 按可选强度从低到高排列。配置函数可从该列表中选择，再由 `prepareCall()` 校验具体强度。适配器只接收解析后的控制项。选择 `off` 不保证禁用推理：以省略推理字段表达该值的协议会沿用网关默认行为。所选等级下产生的推理 token 都计入该请求的输出上限。
+确切模型元数据将 `reasoning.efforts` 按可选强度从低到高排列，并给出会被 seam 物化进未点名强度请求的 `defaultEffort`。模型条目自身的 `reasoning` 提供该默认值；它必须是该模型提供的等级——`reasoningEfforts` 中声明的等级，或该字段缺席时已安装目录条目声明的等级——非推理模型不得设置，因此在写入处就会拒绝不可能生效的默认值。未点名默认值的模型采用路由级 `reasoning` 作为回退。配置函数可在 `prepareCall()` 校验具体强度前从 `reasoning.efforts` 中选择。适配器只接收解析后的控制项。选择 `off` 不保证禁用推理：以省略推理字段表达该值的协议会沿用网关默认行为。所选等级下产生的推理 token 都计入该请求的输出上限。
 
 对于自托管 Chat Completions 端点，`thinkingTokenBudgetField` 选择推理预算参数，`vllmPriority` 在服务端启用优先级调度时设置整数调度优先级。模板参数接受 `$var: thinking.budget`。`openai-responses` 网关可设置 `supportsMaxOutputTokens: false` 来省略 `max_output_tokens`；Azure 与 Codex 传输会忽略这个共享兼容字段。这些控制均需显式启用；目录拥有的 Anthropic effort 和回退能力不是可配置开关。
 
@@ -120,7 +126,9 @@ profile 的 `models` 列表会替换而非扩展路由的已安装目录；每�
 
 pi-ai 不提供的路由需要 `api`、`baseURL` 与非空 `models` 列表；无法服务的 profile 会在写入处被拒绝，并点名路由与模型。失败携带稳定 code：无法使用的凭据以 `INVALID_CREDENTIAL` 失败并点名路由与引用，`apiKeyEnv` 引用解析为空的路由以 `MISSING_CREDENTIAL` 失败，未配置模型以 `UNKNOWN_MODEL` 失败，终止性提供方失败则区分 `QUOTA` 与暂时性 `RATE_LIMIT`。`GenerateOptions.stop` 以 `UNSUPPORTED_OPTION` 被拒绝，因为 pi-ai 的通用流式 UI 无法跨提供方保证它。
 
-前置多个账号的共享账号池会在相同的 Anthropic 风格 envelope 中返回自己的 `cc_pool_*` code、`origin` 与重试事实。适配器读取这些字段而不是 HTTP 状态，因此 pool 拒绝永远不会变成 Claude 的 `RATE_LIMIT`：`POOL_CAPACITY`、`POOL_RATE_LIMITED` 与 `POOL_NO_ACCOUNT` 在有限重试预算内可重试，并遵守提供方的 `Retry-After`；`POOL_SESSION_BUSY` 禁止自动重发，因为另一个轮次正占用该 Session；无法识别的可重试 pool code 变为 `POOL_TRANSIENT`，无法识别的不可重试 code 变为 `POOL_ERROR` 并禁止重发。`claude` origin 保留原有分类与措辞。账号选择、冷却与 Session 绑定仍由 pool 负责。
+前置多个账号的共享账号池会在相同的 Anthropic 风格 envelope 中返回自己的 `cc_pool_*` code、`origin` 与重试事实。适配器读取这些字段而不是 HTTP 状态，因此 pool 拒绝永远不会变成 Claude 的 `RATE_LIMIT`：`POOL_CAPACITY`、`POOL_RATE_LIMITED` 与 `POOL_NO_ACCOUNT` 在有限重试预算内可重试，并遵守提供方的 `Retry-After`；`POOL_SESSION_BUSY` 禁止自动重发，因为另一个轮次正占用该 Session；无法识别的可重试 pool code 变为 `POOL_TRANSIENT`，无法识别的不可重试 code 变为 `POOL_ERROR` 并禁止重发。readiness 拒绝两者都不携带：pool 在 body 中写入 `pool_request_id`，并在 `retryable: false` 旁给出 lease 未验证的 egress 路径（`capability_not_ready`）。只要 5xx 同时带有这两个 pool 标记，即使 pool 改写了该文案，也会被报告为不可重试的 `POOL_ERROR`，因此没有任何重发会重复 pool 已记录的 ledger id；低于 5xx 时仍由该文案识别拒绝。`claude` origin 保留原有分类与措辞。账号选择、冷却与 Session 绑定仍由 pool 负责。
+
+每次请求尝试都通过插件 logger 记录两条结构化记录（开始一条、结算一条）：路由、模型、端点 URL、Session id、ledger id、尝试序号与响应状态；响应带回 pool 自己的 request id 时一并记录，失败时还记录 code 与 message。fetch 被拒绝的传输故障还会记录原始错误的 cause 链——pi-ai 自身只保留 message 文本。任何记录都不包含 messages、请求体、凭据或 token 计数。被 `sessionHeaders` 命名的路由以 INFO 级记录，部署默认 sink 会保留它们，并把同样的记录持久化到请求日志；其他路由保持 DEBUG 级，除非显式启用请求日志。
 
 Config 更新严格验证发生变化的 provider。初始加载将已存储的目录故障保留为可编辑的 provider 诊断；未更改的故障 provider 不阻止其他编辑。可用模型仍可选择，无法解析的模型在网络 I/O 前失败。修复或删除问题配置会清除其诊断。
 
@@ -159,7 +167,13 @@ Config 更新严格验证发生变化的 provider。初始加载将已存储的�
 | [`src/context.ts`](src/context.ts) | Harness 到 pi-ai 的上下文转换、图片处理、回放恢复 |
 | [`src/stream.ts`](src/stream.ts) | 把 pi-ai 事件转换为 harness `StreamChunk` 值 |
 | [`src/replay.ts`](src/replay.ts) | 带版本的 `ReplayEnvelope` 存储与校验 |
+| [`src/request-log.ts`](src/request-log.ts) | 按体积滚动的持久 NDJSON 请求诊断 |
 | [`src/discovery.ts`](src/discovery.ts) | 面向配置界面的端点询问 |
+| [`src/reuse.ts`](src/reuse.ts) | 供其他 provider 插件挂载固定路由集合的复用面：严格 profile 解析、auth 注入、请求日志 sink 与诊断回调 |
+
+### 复用面
+
+`src/reuse.ts` 导出另一个 provider 插件在本传输之上挂载固定路由集合所需的通用部件：`resolvePiAiProfiles` 做一次性的严格解析，`piAiAuthFrom` 提供 `Models` collection 所需的凭据存储与 ambient auth 组合，`createPiAiRequestLog` 提供持久 sink，`piAiDiagnosticHooks` 生成请求/响应日志记录。它们都不读取 settings 命名空间、不注册路由、也不提供发现；这些决定属于挂载方插件。mac 池插件是首个消费者。
 
 ### 注册与目录
 
@@ -249,6 +263,7 @@ pi-ai 事件变成 harness 的推理、文本、工具调用、用量与 finish 
 - **OpenAI 不提供 ChatGPT 登录**——pi-ai 的 Sign in with ChatGPT 用应用提供的稳定 UUID 向 OpenAI 标识安装实例，而 harness 没有用于第三方账号登录的安装 ID；`openai` 路由改用 API key 登录。
 - **提供方原生发现经本插件的 ambient context 回答**——不点名凭据的路由交由目录提供方自身解析，它会询问环境值（`AZURE_OPENAI_API_KEY`、`AWS_PROFILE` 及各提供方自有集合）与本地凭据文件。两个问题都在这里得到回答：凭据 seam 先于进程环境被查询，文件存在性则针对宿主进程的文件系统以 `~` 展开后检查。它做不到的是*读取*凭据文件内容——自行解析 `~/.aws/credentials` 的提供方会直接读取，不经该 seam。
 - **重置恢复继承配置**——重置下层 profile 提供的路由会恢复该路由。
+- **请求日志是尽力而为的持久化**——记录排队后追加，不做 `fsync`，因此崩溃可能丢失进程已接受的日志行。两个进程写同一路径不会协调滚动；日志保护的是机密性（所有者私有、无内容的记录），而不是恰好一次投递。
 - **完整替换 Config 可以移除继承的字典条目**——字段重置则恢复其继承值。
 - **`headers` 可以携带 redactor 永远看不到的凭据**——profile 解析会拒绝 Fetch 无法表示的名称与值，但该字典仍是纯字符串；以 `apiKeyEnv` 引用存储凭据。
 - **发现操作不更改已配置模型**——需显式将发现结果采纳到路由配置中。
