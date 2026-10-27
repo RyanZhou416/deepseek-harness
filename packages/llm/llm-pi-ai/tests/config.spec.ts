@@ -7,7 +7,7 @@ import {
   POOL_SESSION_BUSY_CODE,
   POOL_TRANSIENT_CODE,
 } from '@deepseek-ai/dsh-llm'
-import { assertServiceable, Config, resolveProfiles, type Options } from '../src/config.ts'
+import { assertServiceable, Config, resolveProfiles, resolveSessionHeaders, type Options } from '../src/config.ts'
 
 /** Validate one hand-declared route, with the caller's fields layered onto it. */
 const routeWith = (profile: Record<string, unknown>): (() => unknown) =>
@@ -39,6 +39,7 @@ describe('reasoning schema boundary', () => {
   it('rejects a level pi-ai does not know at the write that produced it', () => {
     expect(configWith({ reasoningEfforts: { ultra: 'x' } })).toThrow(/"off"/)
     expect(configWith({ reasoningEfforts: { high: 42 } })).toThrow()
+    expect(configWith({ reasoning: 'ultra' })).toThrow(/"off"/)
   })
 
   it('keeps false distinguishable from an absent declaration', () => {
@@ -113,6 +114,62 @@ describe('request image policy bounds', () => {
     expect(() => {
       assertServiceable(programmatic)
     }).toThrow(message)
+  })
+})
+
+describe('session identity headers', () => {
+  it('accepts one route or a list and resolves it as an immutable set', () => {
+    expect([...resolveSessionHeaders(undefined)]).toEqual([])
+    expect([...resolveSessionHeaders([])]).toEqual([])
+    expect([...resolveSessionHeaders('cc-pool')]).toEqual(['cc-pool'])
+    expect([...resolveSessionHeaders(['cc-pool', 'acme-gateway'])]).toEqual(['cc-pool', 'acme-gateway'])
+    expect(Object.isFrozen(resolveSessionHeaders(['cc-pool']))).toBe(true)
+  })
+
+  it('refuses an empty or repeated route name', () => {
+    expect(() => resolveSessionHeaders('')).toThrow(/empty provider route/)
+    expect(() => resolveSessionHeaders(['cc-pool', 'cc-pool'])).toThrow(/twice/)
+    expect(() => Config({ providers: {}, sessionHeaders: '' })).toThrow()
+    expect(() => Config({ providers: {}, sessionHeaders: [''] })).toThrow()
+  })
+
+  it('parses the route switch beside the provider profiles', () => {
+    const parsed = Config({
+      sessionHeaders: 'cc-pool',
+      providers: {
+        'cc-pool': { api: 'anthropic-messages', baseURL: 'https://pool.test', models: [{ id: 'm' }] },
+      },
+    })
+    expect(parsed.sessionHeaders).toBe('cc-pool')
+    expect(Config({ providers: {} }).sessionHeaders).toBeUndefined()
+  })
+
+  it('leaves every route of an unconfigured composition untouched', () => {
+    expect(resolveSessionHeaders(Config({ providers: {} }).sessionHeaders).size).toBe(0)
+  })
+})
+
+describe('request log schema', () => {
+  it('accepts the optional sink and leaves it unset without one', () => {
+    const parsed = Config({
+      providers: {},
+      requestLog: { path: 'requests.jsonl', maxFileBytes: 1024, maxFiles: 3, enabled: true },
+    })
+    expect(parsed.requestLog).toEqual({ path: 'requests.jsonl', maxFileBytes: 1024, maxFiles: 3, enabled: true })
+    // The schema materializes an absent optional object as an empty one; every
+    // field inside it still means "unset", which resolution reads as the default.
+    expect(Config({ providers: {}, requestLog: {} }).requestLog).toEqual({})
+    expect(Config({ providers: {} }).requestLog).toEqual({})
+  })
+
+  it.each<[string, Record<string, unknown>]>([
+    ['an empty path', { path: '' }],
+    ['a fractional per-file bound', { maxFileBytes: 1.5 }],
+    ['a zero file count', { maxFiles: 0 }],
+    ['a non-boolean switch', { enabled: 'yes' }],
+  ])('rejects %s at parse time', (_case, requestLog) => {
+    // The invalid value is the case under test; the schema is what refuses it.
+    expect(() => Config({ providers: {}, requestLog })).toThrow()
   })
 })
 
@@ -193,5 +250,26 @@ describe('retry policy pool codes', () => {
     expect(policy.mode).toBe('normal')
     if (policy.mode !== 'normal') throw new Error('expected normal policy')
     expect(policy.retryableCodes).toEqual(['SERVER'])
+  })
+
+  it('honors the persisted pool decision without resending a possibly-issued step', () => {
+    // The deployed mac-pool profile pins this exact set. A transport,
+    // empty-response, or timeout replay carries no idempotency guarantee — the
+    // attempt may already have reached the model — so none may enter the list;
+    // an explicit list is also not extended with the pool codes the default
+    // policy would add.
+    const { policy } = parsedPolicyOf({
+      mode: 'normal',
+      maxRetries: 2,
+      retryableCodes: ['RATE_LIMIT', 'SERVER'],
+    })
+    expect(policy.mode).toBe('normal')
+    if (policy.mode !== 'normal') throw new Error('expected normal policy')
+    expect(policy.maxRetries).toBe(2)
+    expect(policy.retryableCodes).toEqual(['RATE_LIMIT', 'SERVER'])
+    expect(policy.retryableCodes).not.toContain('TRANSPORT')
+    expect(policy.retryableCodes).not.toContain('EMPTY_RESPONSE')
+    expect(policy.retryableCodes).not.toContain('TIMEOUT')
+    expect(policy.retryableCodes).not.toContain(POOL_CAPACITY_CODE)
   })
 })

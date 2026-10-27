@@ -50,6 +50,8 @@
  *               off:
  *               high: high
  *               max: ultra
+ *             # This model's default; must be one of the levels above.
+ *             reasoning: high
  * ```
  *
  * @module @deepseek-ai/dsh-llm-pi-ai
@@ -67,16 +69,23 @@ import { deepEqualJson } from '@deepseek-ai/dsh-util-values'
 import { PiAiAdapter } from './adapter.ts'
 import { authContextFrom, credentialStoreFrom } from './auth.ts'
 import { catalogProvider, catalogProviderIds } from './catalog.ts'
-import { assertServiceable, Config, resolveProfiles } from './config.ts'
+import { assertServiceable, Config, resolveProfiles, resolveRequestLog, resolveSessionHeaders } from './config.ts'
 import type { ResolvedPiAiProviderProfile } from './config.ts'
 import { discoverModels } from './discovery.ts'
 import type { StoredModelDiscoveryProfile } from './discovery.ts'
 import { registerPiAiFlows } from './login.ts'
 import { providerDefaultsOf } from './provider-data.ts'
+import { RequestDiagnosticLog } from './request-log.ts'
+import { piAiDiagnosticHooks } from './reuse.ts'
 
 export { PiAiAdapter } from './adapter.ts'
-export type { PiAiAdapterOptions } from './adapter.ts'
-export { Config } from './config.ts'
+export type {
+  PiAiAdapterOptions,
+  PiAiRequestDiagnostic,
+  PiAiRequestIdentity,
+  PiAiResponseDiagnostic,
+} from './adapter.ts'
+export { Config, PiAiRequestLogProfileSchema } from './config.ts'
 export type {
   Options,
   PiAiCompatProfile,
@@ -85,11 +94,14 @@ export type {
   PiAiModelProfile,
   PiAiProviderProfile,
   PiAiReasoningEfforts,
+  PiAiRequestLogProfile,
   PiAiThinkingFormat,
   ResolvedPiAiProviderProfile,
 } from './config.ts'
 export { recordKeyFor } from './auth.ts'
 export { supportedProtocols } from './provider.ts'
+export { createPiAiRequestLog, piAiAuthFrom, piAiDiagnosticHooks, resolvePiAiProfiles } from './reuse.ts'
+export type { PiAiDiagnosticChannel, PiAiDiagnosticLogger, PiAiRequestLogSink } from './reuse.ts'
 
 export const name = 'llm-pi-ai'
 export const inject = ['llm']
@@ -214,22 +226,39 @@ export function apply(ctx: Context, config: Config): void {
   // through `ctx` per call, so they stay correct across the collection rebuilds
   // a configuration change causes, and a sign-in survives one.
   const auth = { credentials: credentialStoreFrom(ctx), authContext: authContextFrom(ctx) }
+  const sessionHeaders = resolveSessionHeaders(config.sessionHeaders)
+  // The durable sink is mounted once, from loader configuration: its path and
+  // bounds are deployment facts a settings edit cannot move under a running
+  // request. A failed write is reported once and never reaches a request.
+  const requestLogSettings = resolveRequestLog(config.requestLog, sessionHeaders)
+  const requestLog = requestLogSettings === undefined
+    ? undefined
+    : new RequestDiagnosticLog(requestLogSettings, (message) => { ctx.logger.warn(message) })
+  if (requestLog !== undefined) ctx.effect(() => () => requestLog.close(), 'llm-pi-ai.request-log')
+  // Same rule as the logger's level: a pool route persists by default, and an
+  // explicitly enabled log persists every route.
+  const diagnostics = piAiDiagnosticHooks({
+    label: 'llm-pi-ai',
+    retainedRoutes: sessionHeaders,
+    logger: ctx.logger,
+    ...requestLog === undefined ? {} : {
+      append: (event) => {
+        if (requestLogSettings?.allRoutes === true || sessionHeaders.has(event.provider)) requestLog.append(event)
+      },
+    },
+  })
   const adapter = new PiAiAdapter({
     profiles,
     resolveApiKey,
     auth,
+    sessionHeaders,
     resolveAttachments: () => ctx.get('attachments'),
     resolveImageAccess: (attachments, ref) => resolveImageAttachmentAccess(
       attachments,
       hostPath => ctx.get('fs')?.processPathFromHostPath(hostPath),
       ref,
     ),
-    onReplayDegrade: ({ provider, model, reason }) => {
-      ctx.logger.warn(
-        `llm-pi-ai: unusable replay state on assistant history for route "${provider}/${model}";`
-        + ` sending that message as provider-neutral content (${reason})`,
-      )
-    },
+    ...diagnostics,
   })
   // Independent of the route set: signing in is what makes a route worth
   // adding, so the flows are offered before any profile names their provider.

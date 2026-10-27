@@ -598,6 +598,13 @@ export interface GenerateOptions {
    */
   sessionId?: Branded<'SessionId'>
   /**
+   * The owning session's display name stamped by the loop for local routing
+   * surfaces that show a conversation by name. It is never conversation
+   * content and never reaches a model: an adapter may map it to model-hidden
+   * transport metadata. Unset while the session has no name.
+   */
+  sessionName?: string
+  /**
    * Provider-neutral classification for an auxiliary model call. Adapters may
    * map the purpose to model-hidden transport metadata. Ordinary conversation
    * requests leave it unset.

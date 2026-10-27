@@ -32,6 +32,7 @@ import { canonicalHeader, headerEquals, ToolCallRecovery } from '@deepseek-ai/ds
 import { joinContextSections, renderContextSections, renderPrompt, renderPromptSections } from '@deepseek-ai/dsh-system-prompt'
 import type { PromptAssembly } from '@deepseek-ai/dsh-system-prompt'
 import type {} from '@deepseek-ai/dsh-session-projection'
+import type {} from '@deepseek-ai/dsh-session-title'
 import { FiberState, type Context } from '@deepseek-ai/cordis'
 import { ReactLoopInbox } from './inbox.ts'
 import { RuntimeContextProjection } from './runtime-context.ts'
@@ -681,6 +682,7 @@ export class ReactLoopAgent implements Agent {
     promptSections: readonly SystemPromptSection[],
   ): GenerateOptions {
     const { session } = this
+    const sessionName = this.ctx.sessionProjections.stateOf(session, 'title') ?? undefined
     const surfaceGeneration = session.surface.contentGeneration
     const header = canonicalHeader({
       config,
@@ -758,6 +760,7 @@ export class ReactLoopAgent implements Agent {
       ...header.tools !== undefined ? { tools: header.tools } : {},
       ...promptSections.length > 0 ? { systemSections: promptSections } : {},
       sessionId: this.session.id,
+      ...sessionName === undefined || sessionName.length === 0 ? {} : { sessionName },
       signal,
     }))
     return request

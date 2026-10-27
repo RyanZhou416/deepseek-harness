@@ -37,9 +37,11 @@ import type {
   SimpleStreamOptions,
   ThinkingLevel,
 } from '@earendil-works/pi-ai'
+import { createHash } from 'node:crypto'
 import {
   attributionHeaders,
   contentHasImage,
+  errorChain,
   LlmAdapter,
   LlmError,
   ReasoningEffortId,
@@ -47,11 +49,13 @@ import {
 import type {
   GenerateOptions,
   ImageAttachmentAccess,
+  LlmFailure,
   LlmModelInfo,
   LlmProviderInfo,
   LlmResolvedModelInfo,
   PreparedAdapterCall,
   ReasoningEffortId as ReasoningEffortIdType,
+  RequestMessage,
   ResolvedRetryPolicy,
   StreamChunk,
   ToolSchema,
@@ -62,6 +66,7 @@ import type { ResolvedPiAiProviderProfile } from './config.ts'
 import { requestImageTarget, toPiContext } from './context.ts'
 import { conversationUpdates, createModels, getSupportedThinkingLevels } from './models.ts'
 import { ProviderErrorCapture } from './pool-error.ts'
+import { encodeSessionNameHeader } from './session-name.ts'
 import { toStreamChunks } from './stream.ts'
 
 /**
@@ -81,6 +86,172 @@ interface PiAiSnapshot {
   /** Providers for exactly those profiles; never mutated once published. */
   models: Models
 }
+
+/** The session identity header a conversation-aware Claude endpoint reads. */
+const CLAUDE_SESSION_HEADER = 'X-Claude-Code-Session-Id'
+
+/** The session display name header the pool decodes for display; never forwarded to a provider. */
+const SESSION_NAME_HEADER = 'x-cc-session-name'
+
+/** The request's ledger identity, derived once per logical request and repeated by its retries. */
+const CLIENT_REQUEST_ID_HEADER = 'x-client-request-id'
+
+/** Longest session identity such an endpoint accepts. */
+const MAX_SESSION_HEADER_LENGTH = 256
+
+/**
+ * Sessions whose attempt counters for diagnostics are retained. The bound caps
+ * the adapter state a long-lived host accumulates; eviction only restarts
+ * attempt numbering.
+ */
+const MAX_TRACKED_SESSIONS = 64
+
+/**
+ * One message's contribution to a logical request's identity.
+ *
+ * A durable message carries its own stable identity, so the request position
+ * does not depend on content. A one-shot request input carries none, and
+ * digesting its content is what keeps two different inputs from sharing a
+ * position.
+ * @param message - one message of the assembled request.
+ * @returns the message's stable identity within the request.
+ */
+function messageIdentity(message: RequestMessage): string {
+  const identity = message.id === undefined
+    ? createHash('sha256').update(JSON.stringify(message.content)).digest('hex')
+    : message.id
+  return `${message.role}:${identity}`
+}
+
+/**
+ * Derive the ledger identity of one logical request.
+ *
+ * The identity is the request's conversation position: its session, purpose,
+ * route, model, and the messages it is about to send. Re-running the same step
+ * — the retry path — reconstructs that position exactly, so the retry repeats
+ * the id; adding a message, changing the route or model, or starting another
+ * purpose produces a different position and therefore a new id. The value is
+ * UUID v4 shaped, the form a conversation-aware endpoint accepts as a client
+ * request id.
+ * @param provider - the route serving the request.
+ * @param model - the resolved model on that route.
+ * @param options - the assembled request.
+ * @returns a stable UUID-shaped ledger identity for this logical request.
+ */
+function logicalRequestId(provider: string, model: string, options: GenerateOptions): string {
+  const digest = createHash('sha256').update(JSON.stringify([
+    options.sessionId === undefined ? '' : String(options.sessionId),
+    options.purpose ?? '',
+    provider,
+    model,
+    options.messages.map(messageIdentity),
+  ])).digest()
+  const bytes = Buffer.from(digest.subarray(0, 16))
+  // RFC 9562 §5.4: version 4 and variant 10, the shape such an endpoint parses.
+  bytes.writeUInt8((bytes.readUInt8(6) & 0x0f) | 0x40, 6)
+  bytes.writeUInt8((bytes.readUInt8(8) & 0x3f) | 0x80, 8)
+  const hex = bytes.toString('hex')
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`
+}
+
+/**
+ * Whether a session id is printable ASCII 1..{@link MAX_SESSION_HEADER_LENGTH}
+ * characters, the only form the member endpoint of a shared-account pool
+ * accepts for the session header. It is a durable key and an echoed response
+ * header there, so control characters and unbounded values are refused rather
+ * than truncated.
+ * @param value - the request's session id.
+ * @returns true when the endpoint would accept the value.
+ */
+function isSessionHeaderValue(value: string): boolean {
+  if (value.length === 0 || value.length > MAX_SESSION_HEADER_LENGTH) return false
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index)
+    if (code < 0x20 || code > 0x7e) return false
+  }
+  return true
+}
+
+/**
+ * The Claude Code identity headers one opted-in route stamps on a request.
+ *
+ * The session header carries the request's own session id unchanged, so every
+ * turn and tool continuation of one conversation presents the same identity and
+ * the endpoint can keep one conversation key and prompt identity. The request id
+ * is the logical request's ledger identity: a retry of that request repeats it,
+ * so the endpoint can correlate the attempts of one request instead of reading
+ * them as unrelated sends. The name header is the pool's display label: it is
+ * encoded for a header field and omitted when the request has no usable name.
+ * @param provider - route the request targets, for diagnostics.
+ * @param sessionId - the request's session id, when the caller supplied one.
+ * @param clientRequestId - the logical request's ledger identity.
+ * @param sessionName - the owning session's display name, when it has one.
+ * @returns the headers to merge into the provider request.
+ * @throws LlmError when the session id is not a value the endpoint accepts.
+ */
+function sessionIdentityHeaders(
+  provider: string,
+  sessionId: string | undefined,
+  clientRequestId: string,
+  sessionName: string | undefined,
+): Record<string, string> {
+  const headers: Record<string, string> = { [CLIENT_REQUEST_ID_HEADER]: clientRequestId }
+  const name = sessionName === undefined ? undefined : encodeSessionNameHeader(sessionName)
+  if (name !== undefined) headers[SESSION_NAME_HEADER] = name
+  if (sessionId === undefined) return headers
+  if (!isSessionHeaderValue(sessionId)) {
+    throw new LlmError(
+      `pi-ai provider "${provider}" cannot send its session id as ${CLAUDE_SESSION_HEADER}:`
+      + ` expected printable ASCII, 1 to ${MAX_SESSION_HEADER_LENGTH} characters`,
+      'INVALID_REQUEST',
+    )
+  }
+  headers[CLAUDE_SESSION_HEADER] = sessionId
+  return headers
+}
+
+/**
+ * Identity every diagnostic record of one request attempt carries. None of it
+ * is conversation content.
+ */
+export interface PiAiRequestIdentity {
+  /** Route the request targets. */
+  readonly provider: string
+  /** Model id on that route. */
+  readonly model: string
+  /** Effective endpoint URL the route sends to. */
+  readonly endpoint: string
+  /** The request's session id, when the caller supplied one. */
+  readonly sessionId?: string
+  /** Ledger identity of the logical request; a retry of it repeats this value. */
+  readonly clientRequestId: string
+  /** Whether the response is streamed; this adapter only requests streams. */
+  readonly stream: true
+  /** 1-based attempt number within its logical request. */
+  readonly attempt: number
+}
+
+/** One attempt's settled response, with non-content failure facts. */
+export interface PiAiResponseDiagnostic extends PiAiRequestIdentity {
+  /** HTTP status of the provider response, when one arrived. */
+  readonly status?: number
+  /** Pool-issued request id echoed by the response, when the pool issued one. */
+  readonly poolRequestId?: string
+  /** Stable harness failure code, when the attempt failed. */
+  readonly code?: string
+  /** Provider or transport failure message, when the attempt failed. */
+  readonly message?: string
+  /** Rendered cause chain of a thrown failure, when it carried one. */
+  readonly cause?: string
+}
+
+/**
+ * One diagnostic record of a provider request attempt: the request about to be
+ * sent, or the response that settled it.
+ */
+export type PiAiRequestDiagnostic =
+  | ({ readonly kind: 'request' } & PiAiRequestIdentity)
+  | ({ readonly kind: 'response' } & PiAiResponseDiagnostic)
 
 /** Constructor options for {@link PiAiAdapter}: the two resolution hooks the plugin owns. */
 export interface PiAiAdapterOptions {
@@ -109,6 +280,21 @@ export interface PiAiAdapterOptions {
   resolveAttachments?: () => AttachmentStore | undefined
   /** Bridge one attachment reference into the current model-tool execution world. */
   resolveImageAccess?: (attachments: AttachmentStore, ref: ImageAttachmentRef) => ImageAttachmentAccess | undefined
+  /**
+   * Provider routes whose requests carry the Claude Code session identity
+   * (`X-Claude-Code-Session-Id` from the request's session id plus the logical
+   * request's ledger `x-client-request-id`). Empty or omitted leaves every route
+   * untouched.
+   */
+  sessionHeaders?: ReadonlySet<string>
+  /**
+   * Observe every provider request attempt and its settled response: the
+   * route, model, endpoint, session, ledger id, attempt number, HTTP status,
+   * pool request id, and failure facts. The callback never receives messages,
+   * request bodies, credentials, or token counts. Omitting it leaves the
+   * adapter silent.
+   */
+  onRequestDiagnostic?: (event: PiAiRequestDiagnostic) => void
   /**
    * Observe one assistant history message degrading to provider-neutral
    * conversion because its stored replay state is unusable by this build.
@@ -154,7 +340,7 @@ function profileOptions(
  * belongs: describing what a model can do must not fail because a deployment
  * asked it for something it cannot.
  * @param model - the resolved model descriptor.
- * @param effort - the profile's configured level, if any.
+ * @param effort - the default level configured for this model or its route, if any.
  * @returns the level when this model supports it, otherwise undefined.
  */
 function describableReasoningLevel(
@@ -242,9 +428,38 @@ function requestHeaders(headers: Readonly<Record<string, string>> | undefined): 
  */
 export class PiAiAdapter extends LlmAdapter {
   private snapshot: PiAiSnapshot | undefined
+  /** The logical request each session last attempted, for numbering retries. */
+  private readonly attempts = new Map<string, { readonly clientRequestId: string; readonly attempt: number }>()
 
   constructor(private readonly config: PiAiAdapterOptions) {
     super()
+  }
+
+  /**
+   * Number one attempt within its logical request.
+   *
+   * A stream call that repeats the session's previous ledger id is a retry of
+   * that logical request; anything else starts a new one. The map is bounded,
+   * because it only serves diagnostics: eviction restarts numbering, which is
+   * the only observable effect.
+   * @param sessionId - the request's session id, when it has one.
+   * @param clientRequestId - the request's logical ledger identity.
+   * @returns the 1-based attempt number.
+   */
+  private attemptOf(sessionId: string | undefined, clientRequestId: string): number {
+    const key = sessionId ?? ''
+    const previous = this.attempts.get(key)
+    const attempt = previous?.clientRequestId === clientRequestId ? previous.attempt + 1 : 1
+    // Re-insert so the longest-idle session is the first eviction candidate.
+    this.attempts.delete(key)
+    this.attempts.set(key, { clientRequestId, attempt })
+    if (this.attempts.size > MAX_TRACKED_SESSIONS) {
+      for (const oldest of this.attempts.keys()) {
+        this.attempts.delete(oldest)
+        break
+      }
+    }
+    return attempt
   }
 
   override imageRequestTarget(provider: string, model: string, image: ImageAttachmentRef) {
@@ -337,7 +552,14 @@ export class PiAiAdapter extends LlmAdapter {
   private modelInfo(snapshot: PiAiSnapshot, provider: string, model: string): LlmResolvedModelInfo {
     const profile = this.profileOf(snapshot, provider)
     const resolvedModel = this.modelOf(snapshot, provider, model)
-    const defaultLevel = describableReasoningLevel(resolvedModel, profile.reasoning)
+    // The model's own default wins: it picks among the levels this model
+    // offers, while the route-level level is the fallback for models that name
+    // none. The seam materializes the described effort into requests that name
+    // none.
+    const defaultLevel = describableReasoningLevel(
+      resolvedModel,
+      profile.defaultReasoning.get(model) ?? profile.reasoning,
+    )
     // Only a cap the deployment configured is a request default; the
     // catalog's `maxTokens` sizes the model and stops there.
     const configuredMaxTokens = profile.configuredMaxTokens.get(model)
@@ -379,21 +601,33 @@ export class PiAiAdapter extends LlmAdapter {
     // the one it started with and the next call picks up the new one.
     const profile = this.profileOf(snapshot, options.provider)
     const model = this.modelOf(snapshot, options.provider, options.model)
-    const updates = conversationUpdates(model)
-    // pi-ai collapses Anthropic tool updates without an initially active declaration.
-    const tools = options.tools ?? []
-    const needsPlaceholder = model.api === 'anthropic-messages' && updates.toolUpdate === 'in-history'
-      && tools.every(tool => tool.deferLoading === true)
-      && options.messages.some(message => message.role === 'developer'
-        && message.content.some(block => block.type === 'tool-addition' || block.type === 'tool-removal'))
-    const request = needsPlaceholder
-      ? { ...options, tools: [ANTHROPIC_TOOL_UPDATE_PLACEHOLDER, ...tools] }
-      : options
-    const reasoning = resolveReasoningLevel(
-      model,
-      options.reasoningEffort ?? profile.reasoning,
-    )
-    const apiKey = await this.config.resolveApiKey(options.provider, profile)
+    const diagnose = this.config.onRequestDiagnostic
+    // pi-ai flattens the SDK error to its message and discards response
+    // headers, so the request's single response is recorded here for the pool
+    // classifier to read `Retry-After` from and for the response diagnostic.
+    const providerError = new ProviderErrorCapture()
+    /** The attempt's identity, absent while the request identity is still unresolved. */
+    let identity: PiAiRequestIdentity | undefined
+    /** Report the response that settled this attempt, with its identity fields. */
+    const reportResponse = (failure?: LlmFailure, thrownCause?: string): void => {
+      if (diagnose === undefined || identity === undefined) return
+      const observed = providerError.readResponse()
+      const status = failure?.status ?? observed?.status
+      // pi-ai flattens a transport failure to its message text; the fetch
+      // capture retains the original Error, so the diagnostic can still report
+      // the cause chain of a request that never got a response.
+      const transportError = providerError.readTransportError()
+      const cause = thrownCause
+        ?? (transportError === undefined ? undefined : errorChain(transportError))
+      diagnose({
+        kind: 'response',
+        ...identity,
+        ...status === undefined ? {} : { status },
+        ...observed?.poolRequestId === undefined ? {} : { poolRequestId: observed.poolRequestId },
+        ...failure === undefined ? {} : { code: failure.code, message: failure.message },
+        ...cause === undefined ? {} : { cause },
+      })
+    }
 
     const consumer = new AbortController()
     const upstream = options.signal === undefined
@@ -403,6 +637,42 @@ export class PiAiAdapter extends LlmAdapter {
     using watchdog = idleWatchdog(upstream, streamIdleTimeoutMs, 'LLM_STREAM_IDLE_TIMEOUT')
 
     try {
+      const sessionId = options.sessionId === undefined ? undefined : String(options.sessionId)
+      // Both taken before any await: a refused session id fails without
+      // resolving a credential or opening a request, and a retry of one logical
+      // request repeats its ledger id while only the attempt number advances.
+      const clientRequestId = logicalRequestId(options.provider, model.id, options)
+      identity = Object.freeze({
+        provider: options.provider,
+        model: model.id,
+        endpoint: model.baseUrl,
+        ...sessionId === undefined ? {} : { sessionId },
+        clientRequestId,
+        stream: true,
+        attempt: this.attemptOf(sessionId, clientRequestId),
+      })
+      diagnose?.({ kind: 'request', ...identity })
+      // The session identity is adapter-owned: a refused session id fails here,
+      // before the request opens, and outranks a static profile header of the
+      // same name lower down.
+      const sessionHeaders = this.config.sessionHeaders?.has(options.provider) === true
+        ? sessionIdentityHeaders(options.provider, sessionId, clientRequestId, options.sessionName)
+        : undefined
+      const updates = conversationUpdates(model)
+      // pi-ai collapses Anthropic tool updates without an initially active declaration.
+      const tools = options.tools ?? []
+      const needsPlaceholder = model.api === 'anthropic-messages' && updates.toolUpdate === 'in-history'
+        && tools.every(tool => tool.deferLoading === true)
+        && options.messages.some(message => message.role === 'developer'
+          && message.content.some(block => block.type === 'tool-addition' || block.type === 'tool-removal'))
+      const request = needsPlaceholder
+        ? { ...options, tools: [ANTHROPIC_TOOL_UPDATE_PLACEHOLDER, ...tools] }
+        : options
+      const reasoning = resolveReasoningLevel(
+        model,
+        options.reasoningEffort ?? profile.reasoning,
+      )
+      const apiKey = await this.config.resolveApiKey(options.provider, profile)
       const containsImage = options.messages.some(message => contentHasImage(message.content))
       if (containsImage && !model.input.includes('image')) {
         throw new LlmError(`pi-ai model "${model.id}" does not support image input`, 'UNSUPPORTED_CONTENT')
@@ -431,10 +701,6 @@ export class PiAiAdapter extends LlmAdapter {
               : {},
           },
         }, onReplayDegrade)
-      // pi-ai flattens the SDK error to its message and discards response
-      // headers, so the request's single failed response is recorded here for
-      // the pool classifier to read `Retry-After` from.
-      const providerError = new ProviderErrorCapture()
       const events = snapshot.models.streamSimple(model, context, {
         ...profileOptions(profile, reasoning, apiKey),
         ...supportsFetchCapture(model.api) ? { fetch: providerError.fetch } : {},
@@ -443,8 +709,9 @@ export class PiAiAdapter extends LlmAdapter {
         ...options.sessionId === undefined ? {} : { sessionId: String(options.sessionId) },
         signal: watchdog.signal,
         // Profile headers are deployment-owned; attribution names are
-        // Harness-owned and therefore win collisions.
-        headers: requestHeaders(profile.headers),
+        // Harness-owned and therefore win collisions. The session identity is
+        // adapter-owned and outranks a static profile header of the same name.
+        headers: { ...requestHeaders(profile.headers), ...sessionHeaders },
       })
       const iterator = toStreamChunks(
         events, model.contextWindow, options.signal, model.id, providerError,
@@ -457,7 +724,11 @@ export class PiAiAdapter extends LlmAdapter {
             exhausted = true
             return
           }
-          yield result.value
+          const chunk = result.value
+          if (chunk.type === 'finish') {
+            reportResponse(chunk.reason.kind === 'error' ? chunk.reason.failure : undefined)
+          }
+          yield chunk
         }
       } finally {
         if (!exhausted) {
@@ -470,11 +741,20 @@ export class PiAiAdapter extends LlmAdapter {
       }
     } catch (error: unknown) {
       if (timeoutOf(watchdog.signal, 'LLM_STREAM_IDLE_TIMEOUT') !== undefined) {
-        throw new LlmError(`pi-ai stream idle timeout after ${streamIdleTimeoutMs}ms`, 'TIMEOUT', { cause: error })
+        const failure: LlmFailure = {
+          message: `pi-ai stream idle timeout after ${streamIdleTimeoutMs}ms`,
+          code: 'TIMEOUT',
+        }
+        reportResponse(failure, errorChain(error))
+        throw new LlmError(failure.message, failure.code, { cause: error })
       }
       if (options.signal?.aborted) {
         throw new LlmError('pi-ai request aborted by caller', 'ABORTED', { cause: error })
       }
+      reportResponse(
+        error instanceof LlmError ? error.failure : undefined,
+        errorChain(error),
+      )
       throw error
     } finally {
       consumer.abort('pi-ai stream consumer stopped')
