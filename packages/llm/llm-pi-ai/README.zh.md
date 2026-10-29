@@ -114,7 +114,7 @@ profile 的 `models` 列表会替换而非扩展路由的已安装目录；每�
 
 对于自托管 Chat Completions 端点，`thinkingTokenBudgetField` 选择推理预算参数，`vllmPriority` 在服务端启用优先级调度时设置整数调度优先级。模板参数接受 `$var: thinking.budget`。`openai-responses` 网关可设置 `supportsMaxOutputTokens: false` 来省略 `max_output_tokens`；Azure 与 Codex 传输会忽略这个共享兼容字段。这些控制均需显式启用；目录拥有的 Anthropic effort 和回退能力不是可配置开关。
 
-`cacheRetention` 选择该路由 pi-ai 实现放置的提示缓存标记——`none`、`short`，或让每个标记携带 `ttl: "1h"` 的 `long`——未设置时跟随 pi-ai 的 `PI_CACHE_RETENTION` 默认值。`extendedCacheBeta: true` 还会在 SDK 序列化 header 之前，把 `extended-cache-ttl-2025-04-11` 追加到 Anthropic Messages 请求的 `betas` 列表；它绝不从 long 存活期推断，且模型都不使用 Anthropic Messages 协议的路由会拒绝该选项。适配器不添加 `scope` 字段或 scope beta。两项设置都按路由生效，因此包含多条 Anthropic 路由的组合会为每条路由显式声明自己的存活期与 beta。
+`cacheRetention` 选择该路由 pi-ai 实现放置的提示缓存标记——`none`、`short`，或让每个标记携带 `ttl: "1h"` 的 `long`——未设置时跟随 pi-ai 的 `PI_CACHE_RETENTION` 默认值。`extendedCacheBeta: true` 还会在 SDK 序列化 header 之前，把 `extended-cache-ttl-2025-04-11` 追加到 Anthropic Messages 请求的 `betas` 列表；它绝不从 long 存活期推断，且模型都不使用 Anthropic Messages 协议的路由会拒绝该选项。`cacheMarkerPolicy: cc4` 则接管标记放置：适配器先移除 `system`、`tools` 和 `messages` 上的全部 `cache_control`，然后只在四个 Claude Code 标记位置放置标记——`system[0]`、最后一个工具声明、最后一个可缓存的用户内容块，以及最后一个可缓存的助手内容块——每处均为 `{type: "ephemeral", ttl: "1h"}`。请求没有工具声明或没有助手轮次时只携带它实际拥有的位置；助手消息末尾若是 `thinking` 或 `redacted_thinking` 块则跳过，且不向前回溯。`cc4` 优先于 `cacheRetention` 与 `compat.supportsCacheControlOnTools` 选择的放置方式，在模型都不使用 Anthropic Messages 协议的路由会被拒绝，并且本身不声明 extended beta。适配器不添加 `scope` 字段或 scope beta。这些设置都按路由生效，因此包含多条 Anthropic 路由的组合会为每条路由显式声明自己的存活期、beta 与放置方式。
 
 ### 运行时更改配置
 

@@ -69,6 +69,20 @@ export const DEFAULT_REQUEST_IMAGE_PIXEL_BUDGET = 2048 * 2048
 /** Default raw encoded-byte target before inline base64 expansion; the smallest quality-ladder output is used when no quality fits. */
 export const DEFAULT_REQUEST_IMAGE_MAX_BYTES = 1024 * 1024
 
+/**
+ * Prompt-cache marker placement policies a route may opt into.
+ *
+ * Omission leaves placement to pi-ai's `cacheRetention` handling. `cc4` is the
+ * Claude Code four-marker layout: the first system block, the last tool
+ * declaration, the last cacheable user content block, and the last cacheable
+ * assistant content block. The policy owns the complete marker set on the
+ * route, so it removes every marker pi-ai or a caller placed first.
+ */
+export const CACHE_MARKER_POLICIES = ['cc4'] as const
+
+/** One placement policy from {@link CACHE_MARKER_POLICIES}. */
+export type PiAiCacheMarkerPolicy = (typeof CACHE_MARKER_POLICIES)[number]
+
 /** Context capacity assumed for a model neither configuration nor the catalog sizes. */
 export const DEFAULT_CONTEXT_WINDOW = 262_144
 
@@ -182,6 +196,21 @@ export interface PiAiProviderProfile {
    * `anthropic-messages`.
    */
   extendedCacheBeta?: boolean
+  /**
+   * Prompt-cache marker placement this route's adapter performs on an Anthropic
+   * Messages request. Omission keeps pi-ai's placement from
+   * {@link cacheRetention}. `cc4` places exactly the Claude Code four-marker
+   * layout — the first system block, the last tool declaration, the last user
+   * content block, and the last assistant content block — with
+   * `{type: "ephemeral", ttl: "1h"}` on each and discards every other marker on
+   * the route. It owns placement outright, so it takes precedence over
+   * `cacheRetention` and over `compat.supportsCacheControlOnTools`; a request
+   * with no tool declaration or no assistant turn carries only the slots it
+   * has. The policy adds no `scope` field and no scope beta, and
+   * {@link extendedCacheBeta} stays a separate explicit opt-in. Refused when
+   * no model on the route speaks `anthropic-messages`.
+   */
+  cacheMarkerPolicy?: PiAiCacheMarkerPolicy
   /** Streaming transport preference. */
   transport?: Transport
   /** HTTP/provider SDK timeout in milliseconds. */
@@ -422,6 +451,7 @@ const profile = z.object({
   thinkingBudgets,
   cacheRetention: z.union(['none', 'short', 'long']),
   extendedCacheBeta: z.boolean(),
+  cacheMarkerPolicy: z.union(CACHE_MARKER_POLICIES),
   transport: z.union(['sse', 'websocket', 'websocket-cached', 'auto']),
   timeoutMs: z.natural(),
   websocketConnectTimeoutMs: z.natural(),
@@ -680,11 +710,11 @@ export function resolveProfiles(
       catalogError ??= error.message
     }
     if (validation === 'strict'
-      && source.extendedCacheBeta === true
+      && (source.extendedCacheBeta === true || source.cacheMarkerPolicy !== undefined)
       && !catalog?.models.some(model => model.api === 'anthropic-messages')) {
+      const field = source.cacheMarkerPolicy === undefined ? 'extendedCacheBeta' : 'cacheMarkerPolicy'
       throw new Error(
-        `llm-pi-ai: provider "${provider}" sets extendedCacheBeta, but no model on the route speaks`
-        + ' anthropic-messages',
+        `llm-pi-ai: provider "${provider}" sets ${field}, but no model on the route speaks anthropic-messages`,
       )
     }
     const { apiKeyEnv, retryPolicy, models: _models, displayName: _displayName, ...rest } = source

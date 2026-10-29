@@ -85,9 +85,10 @@ export type {
   PiAiRequestIdentity,
   PiAiResponseDiagnostic,
 } from './adapter.ts'
-export { Config, PiAiRequestLogProfileSchema } from './config.ts'
+export { CACHE_MARKER_POLICIES, Config, PiAiRequestLogProfileSchema } from './config.ts'
 export type {
   Options,
+  PiAiCacheMarkerPolicy,
   PiAiCompatProfile,
   PiAiModality,
   PiAiModelOverride,

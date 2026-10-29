@@ -1750,7 +1750,7 @@ export interface Config {
 ## `@deepseek-ai/dsh-llm-cc-pool`
 
 - `inject`: `llm`
-- `refs`: [`PiAiRequestLogProfile`](../packages/llm/llm-pi-ai/src/index.ts) · `Volatile` (`@deepseek-ai/cordis`)
+- `refs`: [`PiAiCacheMarkerPolicy`](../packages/llm/llm-pi-ai/src/index.ts) · [`PiAiRequestLogProfile`](../packages/llm/llm-pi-ai/src/index.ts) · `Volatile` (`@deepseek-ai/cordis`)
 - `source`: [`packages/llm/llm-cc-pool/src/config.ts:25`](../packages/llm/llm-cc-pool/src/config.ts)
 
 ```ts config-catalog
@@ -1773,6 +1773,7 @@ export interface Config {
    * lifetime the route already served, stated explicitly so the choice cannot
    * come from an ambient provider default; the value reaches the wire only
    * through this route's profile, so no other provider's request changes.
+   * {@link cacheMarkerPolicy} replaces this placement when it is configured.
    */
   cacheTtl: CcPoolCacheTtl
   /**
@@ -1787,8 +1788,21 @@ export interface Config {
    * The default `true` keeps the marker pi-ai places; `false` is this route's
    * opt-in to the Claude Code 2.1.288 layout, which marks the system prompt and
    * the last user content block but never a tool definition.
+   * {@link cacheMarkerPolicy} replaces this placement when it is configured.
    */
   toolCacheBreakpoint: boolean
+  /**
+   * Prompt-cache marker placement this route asks pi-ai to perform. Omission
+   * keeps the placement {@link cacheTtl} and {@link toolCacheBreakpoint}
+   * select. `cc4` places exactly the four Claude Code markers — the first
+   * system block, the last tool declaration, the last user content block, and
+   * the last assistant content block — with `{type: "ephemeral", ttl: "1h"}` on
+   * each. The policy owns placement, so it takes precedence over both of those
+   * fields, and a request with no tool declaration or no assistant turn carries
+   * only the slots it has. {@link extendedCacheBeta} stays a separate explicit
+   * opt-in. No other provider route reads this value.
+   */
+  cacheMarkerPolicy?: PiAiCacheMarkerPolicy
   /**
    * The catalogue selector surfaces offer, replacing the built-in four-model
    * catalogue wholesale. Absent, or reset through the settings service, serves
@@ -1883,7 +1897,7 @@ export interface Config extends ProtocolConfig {
 
 - `inject`: `llm`
 - `refs`: `Api` (`@earendil-works/pi-ai`) · `CacheRetention` (`@earendil-works/pi-ai`) · `Model` (`@earendil-works/pi-ai`) · `ModelThinkingLevel` (`@earendil-works/pi-ai`) · `OpenAICompletionsCompat` (`@earendil-works/pi-ai`) · [`RetryPolicyConfig`](../packages/llm/llm/src/index.ts) · `ThinkingBudgets` (`@earendil-works/pi-ai`) · `Transport` (`@earendil-works/pi-ai`) · `Volatile` (`@deepseek-ai/cordis`)
-- `source`: [`packages/llm/llm-pi-ai/src/config.ts:259`](../packages/llm/llm-pi-ai/src/config.ts)
+- `source`: [`packages/llm/llm-pi-ai/src/config.ts:288`](../packages/llm/llm-pi-ai/src/config.ts)
 
 ```ts config-catalog
 /** Plugin configuration: the provider routes this instance owns. */
@@ -2008,6 +2022,21 @@ export interface PiAiProviderProfile {
    * `anthropic-messages`.
    */
   extendedCacheBeta?: boolean
+  /**
+   * Prompt-cache marker placement this route's adapter performs on an Anthropic
+   * Messages request. Omission keeps pi-ai's placement from
+   * {@link cacheRetention}. `cc4` places exactly the Claude Code four-marker
+   * layout — the first system block, the last tool declaration, the last user
+   * content block, and the last assistant content block — with
+   * `{type: "ephemeral", ttl: "1h"}` on each and discards every other marker on
+   * the route. It owns placement outright, so it takes precedence over
+   * `cacheRetention` and over `compat.supportsCacheControlOnTools`; a request
+   * with no tool declaration or no assistant turn carries only the slots it
+   * has. The policy adds no `scope` field and no scope beta, and
+   * {@link extendedCacheBeta} stays a separate explicit opt-in. Refused when
+   * no model on the route speaks `anthropic-messages`.
+   */
+  cacheMarkerPolicy?: PiAiCacheMarkerPolicy
   /** Streaming transport preference. */
   transport?: Transport
   /** HTTP/provider SDK timeout in milliseconds. */
@@ -2208,6 +2237,9 @@ export interface PiAiCompatProfile {
 
 /** One request modality a pi-ai model may accept. */
 export type PiAiModality = Model<Api>['input'][number]
+
+/** One placement policy from {@link CACHE_MARKER_POLICIES}. */
+export type PiAiCacheMarkerPolicy = (typeof CACHE_MARKER_POLICIES)[number]
 
 /**
  * Selectable reasoning efforts for one model: each key is a level the model

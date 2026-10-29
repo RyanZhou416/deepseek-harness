@@ -361,6 +361,20 @@ function profileOptions(
 /** Anthropic beta that permits a one-hour prompt-cache lifetime on the markers. */
 const EXTENDED_CACHE_TTL_BETA = 'extended-cache-ttl-2025-04-11'
 
+/** The one-hour `cache_control` value the four-marker policy writes on each slot. */
+function cc4CacheControl(): Record<string, string> {
+  return { type: 'ephemeral', ttl: '1h' }
+}
+
+/**
+ * Assistant content types that end a message with no place for a breakpoint.
+ *
+ * A marker on either would cache no assistant content, and the policy does not
+ * search earlier blocks: the trailing block is the message's whole prefix
+ * boundary.
+ */
+const UNCACHEABLE_ASSISTANT_TAIL: ReadonlySet<string> = new Set(['thinking', 'redacted_thinking'])
+
 /**
  * Whether provider payload data can carry request fields.
  * @param value - any value pi-ai hands an `onPayload` hook.
@@ -371,25 +385,206 @@ function isRequestPayload(value: unknown): value is Record<string, unknown> {
 }
 
 /**
+ * Copy one request object without its `cache_control` field.
+ * @param value - a system block, tool declaration, or message content block.
+ * @returns the same fields without the marker.
+ */
+function withoutCacheControl(value: Record<string, unknown>): Record<string, unknown> {
+  const { cache_control: _cacheControl, ...rest } = value
+  return rest
+}
+
+/**
+ * Read one array field of a request object.
+ * @param value - any field pi-ai placed on the request.
+ * @returns the array elements as unknown values, or undefined when the field is not an array.
+ */
+function arrayOf(value: unknown): unknown[] | undefined {
+  // `Array.isArray` narrows `unknown` to `any[]`; the assertion restores the
+  // element type this module actually handles without weakening the check.
+  return Array.isArray(value) ? value as unknown[] : undefined
+}
+
+/**
+ * Copy one block without its `cache_control` field.
+ * @param value - a block pi-ai built for the request.
+ * @returns the block without the marker.
+ */
+function stripBlock(value: unknown): unknown {
+  /* v8 ignore next -- pi-ai builds every block as an object; the guard keeps a future value from a dereference */
+  if (!isRequestPayload(value)) return value
+  return withoutCacheControl(value)
+}
+
+/**
+ * Copy one message without the markers its content blocks carried.
+ * @param value - one message pi-ai built for the request.
+ * @returns the message with unmarked content blocks, or the value when its content is not a block array.
+ */
+function stripMessage(value: unknown): unknown {
+  /* v8 ignore next -- pi-ai builds every message as an object */
+  if (!isRequestPayload(value)) return value
+  const content = arrayOf(value['content'])
+  if (content === undefined) return value
+  return { ...value, content: content.map(stripBlock) }
+}
+
+/**
+ * Copy one request object with the four-marker `cache_control` value added.
+ * @param value - a system block, tool declaration, or message content block.
+ * @returns the block carrying the explicit one-hour marker.
+ */
+function withCc4Marker(value: Record<string, unknown>): Record<string, unknown> {
+  return { ...value, cache_control: cc4CacheControl() }
+}
+
+/**
+ * The index of the last message with one role.
+ * @param messages - the request's messages in wire order.
+ * @param role - the message role to find.
+ * @returns the last matching index, or -1 when no message has that role.
+ */
+function lastRoleIndex(messages: readonly unknown[], role: string): number {
+  return messages.findLastIndex(message => isRequestPayload(message) && message['role'] === role)
+}
+
+/**
+ * Mark the last block of one user message.
+ *
+ * A text-only user message is serialized as a bare string when no block needs a
+ * marker; placing the marker expands it to the one-block array the transport
+ * already uses for marked messages.
+ * @param message - the final user message pi-ai built.
+ * @returns the message with its last content block marked.
+ */
+function markLastUserBlock(message: Record<string, unknown>): Record<string, unknown> {
+  const content = message['content']
+  if (typeof content === 'string') {
+    return { ...message, content: [{ type: 'text', text: content, cache_control: cc4CacheControl() }] }
+  }
+  const blocks = arrayOf(content)
+  /* v8 ignore next 2 -- pi-ai emits user content as a string or a non-empty block array */
+  if (blocks === undefined || blocks.length === 0) return message
+  const last = blocks[blocks.length - 1]
+  /* v8 ignore next -- pi-ai builds every content block as an object */
+  if (!isRequestPayload(last)) return message
+  return { ...message, content: [...blocks.slice(0, -1), withCc4Marker(last)] }
+}
+
+/**
+ * Mark the last block of one assistant message, unless it cannot carry a marker.
+ *
+ * A trailing `thinking` or `redacted_thinking` block is the one case the policy
+ * skips rather than searching backward: a marker before it would not cache the
+ * reasoning that follows.
+ * @param message - the final assistant message pi-ai built.
+ * @returns the marked message, or undefined when its trailing block is skipped.
+ */
+function markLastAssistantBlock(message: Record<string, unknown>): Record<string, unknown> | undefined {
+  const blocks = arrayOf(message['content'])
+  /* v8 ignore next 2 -- pi-ai emits assistant content as a non-empty block array */
+  if (blocks === undefined || blocks.length === 0) return undefined
+  const last = blocks[blocks.length - 1]
+  /* v8 ignore next -- pi-ai builds every content block as an object */
+  if (!isRequestPayload(last)) return undefined
+  if (UNCACHEABLE_ASSISTANT_TAIL.has(String(last['type']))) return undefined
+  return { ...message, content: [...blocks.slice(0, -1), withCc4Marker(last)] }
+}
+
+/**
+ * Place the Claude Code four-marker layout on one Anthropic Messages request.
+ *
+ * The policy owns placement: every `cache_control` the transport or a caller
+ * placed is removed from `system`, `tools`, and `messages` first, then exactly
+ * the slots present are marked with `{type: "ephemeral", ttl: "1h"}`. A request
+ * with no tool declaration or no assistant turn carries the smaller set rather
+ * than gaining a block it did not have.
+ * @param payload - the Anthropic Messages request fields pi-ai built.
+ * @returns the fields with the policy's markers in place.
+ */
+function withCc4Markers(payload: Record<string, unknown>): Record<string, unknown> {
+  const systemBlocks = arrayOf(payload['system'])
+  const toolBlocks = arrayOf(payload['tools'])
+  const messageBlocks = arrayOf(payload['messages'])
+  const stripped: Record<string, unknown> = {
+    ...payload,
+    ...systemBlocks === undefined ? {} : { system: systemBlocks.map(stripBlock) },
+    ...toolBlocks === undefined ? {} : { tools: toolBlocks.map(stripBlock) },
+    ...messageBlocks === undefined ? {} : { messages: messageBlocks.map(stripMessage) },
+  }
+  const system = arrayOf(stripped['system'])
+  if (system !== undefined && system.length > 0) {
+    const first = system[0]
+    /* v8 ignore next -- pi-ai builds every system block as an object */
+    if (isRequestPayload(first)) stripped['system'] = [withCc4Marker(first), ...system.slice(1)]
+  }
+  const tools = arrayOf(stripped['tools'])
+  if (tools !== undefined && tools.length > 0) {
+    const last = tools[tools.length - 1]
+    /* v8 ignore next -- pi-ai builds every tool declaration as an object */
+    if (isRequestPayload(last)) stripped['tools'] = [...tools.slice(0, -1), withCc4Marker(last)]
+  }
+  const messages = arrayOf(stripped['messages'])
+  if (messages !== undefined) {
+    const marked: unknown[] = [...messages]
+    const userIndex = lastRoleIndex(messages, 'user')
+    if (userIndex >= 0) {
+      const message = messages[userIndex]
+      /* v8 ignore next -- lastRoleIndex only matches message objects */
+      if (isRequestPayload(message)) marked[userIndex] = markLastUserBlock(message)
+    }
+    const assistantIndex = lastRoleIndex(messages, 'assistant')
+    if (assistantIndex >= 0) {
+      const message = messages[assistantIndex]
+      /* v8 ignore next -- lastRoleIndex only matches message objects */
+      if (isRequestPayload(message)) {
+        const assistant = markLastAssistantBlock(message)
+        if (assistant !== undefined) marked[assistantIndex] = assistant
+      }
+    }
+    stripped['messages'] = marked
+  }
+  return stripped
+}
+
+/**
  * Add the extended prompt-cache TTL beta to one Anthropic Messages request.
  *
- * The hook receives the request fields after pi-ai has built them and before
- * its SDK serializes them; a returned object replaces those fields. Appending
- * to `betas` keeps every automatic beta pi-ai derived for the route, and the
- * Anthropic SDK turns the list into the `anthropic-beta` header. Only the
- * route option declares this beta — a `long` retention tier writes
+ * Appending to `betas` keeps every automatic beta pi-ai derived for the route,
+ * and the Anthropic SDK turns the list into the `anthropic-beta` header. Only
+ * the route option declares this beta — a `long` retention tier writes
  * `ttl: "1h"` on its markers and stays without it.
  * @param payload - the Anthropic Messages request fields.
- * @returns the fields with the beta appended, or undefined to leave them as built.
+ * @returns the fields with the beta appended, or the same object when it already declares it.
  */
-function withExtendedCacheBeta(payload: unknown): Record<string, unknown> | undefined {
-  if (!isRequestPayload(payload)) return undefined
+function withExtendedCacheBeta(payload: Record<string, unknown>): Record<string, unknown> {
   const existing = payload['betas']
   const betas = Array.isArray(existing)
     ? existing.filter((beta): beta is string => typeof beta === 'string')
     : []
-  if (betas.includes(EXTENDED_CACHE_TTL_BETA)) return undefined
+  if (betas.includes(EXTENDED_CACHE_TTL_BETA)) return payload
   return { ...payload, betas: [...betas, EXTENDED_CACHE_TTL_BETA] }
+}
+
+/**
+ * Apply one route's Anthropic payload policy.
+ *
+ * One hook owns both transformations, so a route never installs two
+ * `onPayload` assignments: the beta alone preserves pi-ai's own markers, while
+ * the four-marker policy replaces them.
+ * @param payload - the Anthropic Messages request fields pi-ai built.
+ * @param profile - the resolved route whose payload policy applies.
+ * @returns replacement fields, or undefined to leave them as built.
+ */
+function withAnthropicPayloadPolicy(
+  payload: unknown,
+  profile: ResolvedPiAiProviderProfile,
+): Record<string, unknown> | undefined {
+  /* v8 ignore next -- pi-ai hands the hook the request fields it built, always an object */
+  if (!isRequestPayload(payload)) return undefined
+  let next = profile.cacheMarkerPolicy === 'cc4' ? withCc4Markers(payload) : payload
+  if (profile.extendedCacheBeta === true) next = withExtendedCacheBeta(next)
+  return next === payload ? undefined : next
 }
 
 
@@ -803,8 +998,9 @@ export class PiAiAdapter extends LlmAdapter {
       }
       const events = snapshot.models.streamSimple(model, context, {
         ...profileOptions(profile, reasoning, apiKey),
-        ...profile.extendedCacheBeta === true && model.api === 'anthropic-messages'
-          ? { onPayload: withExtendedCacheBeta }
+        ...(profile.extendedCacheBeta === true || profile.cacheMarkerPolicy === 'cc4')
+          && model.api === 'anthropic-messages'
+          ? { onPayload: (payload: unknown) => withAnthropicPayloadPolicy(payload, profile) }
           : {},
         ...supportsFetchCapture(model.api) ? { fetch: providerError.fetch } : {},
         ...options.temperature === undefined ? {} : { temperature: options.temperature },

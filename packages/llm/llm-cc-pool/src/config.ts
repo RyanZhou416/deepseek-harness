@@ -16,8 +16,8 @@
  */
 import type { Volatile } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
-import { PiAiRequestLogProfileSchema } from '@deepseek-ai/dsh-llm-pi-ai'
-import type { PiAiRequestLogProfile } from '@deepseek-ai/dsh-llm-pi-ai'
+import { CACHE_MARKER_POLICIES, PiAiRequestLogProfileSchema } from '@deepseek-ai/dsh-llm-pi-ai'
+import type { PiAiCacheMarkerPolicy, PiAiRequestLogProfile } from '@deepseek-ai/dsh-llm-pi-ai'
 import { CACHE_TTLS, MODELS, REASONING_LEVELS } from './pool.ts'
 import type { CcPoolCacheTtl, CcPoolModel } from './pool.ts'
 
@@ -40,6 +40,7 @@ export interface Config {
    * lifetime the route already served, stated explicitly so the choice cannot
    * come from an ambient provider default; the value reaches the wire only
    * through this route's profile, so no other provider's request changes.
+   * {@link cacheMarkerPolicy} replaces this placement when it is configured.
    */
   cacheTtl: CcPoolCacheTtl
   /**
@@ -54,8 +55,21 @@ export interface Config {
    * The default `true` keeps the marker pi-ai places; `false` is this route's
    * opt-in to the Claude Code 2.1.288 layout, which marks the system prompt and
    * the last user content block but never a tool definition.
+   * {@link cacheMarkerPolicy} replaces this placement when it is configured.
    */
   toolCacheBreakpoint: boolean
+  /**
+   * Prompt-cache marker placement this route asks pi-ai to perform. Omission
+   * keeps the placement {@link cacheTtl} and {@link toolCacheBreakpoint}
+   * select. `cc4` places exactly the four Claude Code markers — the first
+   * system block, the last tool declaration, the last user content block, and
+   * the last assistant content block — with `{type: "ephemeral", ttl: "1h"}` on
+   * each. The policy owns placement, so it takes precedence over both of those
+   * fields, and a request with no tool declaration or no assistant turn carries
+   * only the slots it has. {@link extendedCacheBeta} stays a separate explicit
+   * opt-in. No other provider route reads this value.
+   */
+  cacheMarkerPolicy?: PiAiCacheMarkerPolicy
   /**
    * The catalogue selector surfaces offer, replacing the built-in four-model
    * catalogue wholesale. Absent, or reset through the settings service, serves
@@ -74,6 +88,7 @@ export type Options = {
   cacheTtl?: CcPoolCacheTtl
   extendedCacheBeta?: boolean
   toolCacheBreakpoint?: boolean
+  cacheMarkerPolicy?: PiAiCacheMarkerPolicy
   models?: CcPoolModel[]
 }
 
@@ -95,5 +110,6 @@ export const Config = z.object({
   cacheTtl: z.union(CACHE_TTLS).default('5m'),
   extendedCacheBeta: z.boolean().default(false),
   toolCacheBreakpoint: z.boolean().default(true),
+  cacheMarkerPolicy: z.union(CACHE_MARKER_POLICIES),
   models: z.array(modelSetting).default(builtInModels).volatile(),
 })

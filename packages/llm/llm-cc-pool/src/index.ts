@@ -19,10 +19,11 @@
  * request per session and refuses a concurrent one instead of waiting.
  * `cacheTtl` declares the prompt-cache lifetime of this route's
  * `cache_control` markers — 5 minutes by default, 1 hour, or no marker —
- * `extendedCacheBeta` declares the beta a one-hour lifetime requires, and
- * `toolCacheBreakpoint` selects whether a tool definition carries a marker.
- * All three reach the wire only through this route's profile; no other
- * provider's request is touched.
+ * `extendedCacheBeta` declares the beta a one-hour lifetime requires,
+ * `toolCacheBreakpoint` selects whether a tool definition carries a marker, and
+ * `cacheMarkerPolicy: cc4` replaces that placement with the four-marker Claude
+ * Code layout. All of them reach the wire only through this route's profile; no
+ * other provider's request is touched.
  *
  * ```yaml
  * - id: llm-cc-pool
@@ -231,6 +232,7 @@ export function apply(ctx: Context, config: Config): void {
     cacheTtl: config.cacheTtl,
     extendedCacheBeta: config.extendedCacheBeta,
     toolCacheBreakpoint: config.toolCacheBreakpoint,
+    ...config.cacheMarkerPolicy === undefined ? {} : { cacheMarkerPolicy: config.cacheMarkerPolicy },
   }
   /**
    * The snapshot for the current `models` value, memoized by that value's

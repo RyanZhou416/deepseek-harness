@@ -5,7 +5,7 @@
  */
 
 import { Context } from '@deepseek-ai/cordis'
-import LlmRuntime from '@deepseek-ai/dsh-llm'
+import LlmRuntime, { createAssistantMessage } from '@deepseek-ai/dsh-llm'
 import type { ToolSchema } from '@deepseek-ai/dsh-llm'
 import * as PiAi from '@deepseek-ai/dsh-llm-pi-ai'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -154,19 +154,31 @@ function betasOf(request: CapturedRequest): string[] {
 /**
  * Send the probe through a fresh mount and return the captured request.
  * @param config - loader configuration for the pool plugin.
+ * @param options - request fields overriding the default probe.
  * @returns the request the pool route built.
  */
-async function probe(config: Record<string, unknown> = {}): Promise<CapturedRequest> {
+async function probe(
+  config: Record<string, unknown> = {},
+  options: Partial<typeof PROBE> = {},
+): Promise<CapturedRequest> {
   vi.stubEnv('CC_POOL_API_KEY', 'pool-member-key')
   const ctx = await mount(config)
   const capture = capturePoolFetch()
   vi.stubGlobal('fetch', capture.fetch)
-  await assemble(ctx, PROBE)
+  await assemble(ctx, { ...PROBE, ...options })
   const call = capture.calls[0]
   if (call === undefined) throw new Error('the pool route sent no request')
   await ctx.fiber.dispose()
   context = undefined
   return call
+}
+
+/** An assistant turn whose content is plain text, so a request carries an assistant block. */
+function assistant(text: string) {
+  return createAssistantMessage({
+    content: [{ type: 'text', text }],
+    source: { provider: 'cc-pool', model: 'claude-sonnet-5-5' },
+  })
 }
 
 describe('pool prompt-cache policy', () => {
@@ -226,6 +238,31 @@ describe('pool prompt-cache policy', () => {
     expect(JSON.stringify(body)).not.toContain('"scope"')
     expect(JSON.stringify(body)).not.toContain('betas')
     expect(JSON.stringify(body)).not.toContain(CACHE_SCOPE_BETA)
+  })
+
+  it('places exactly the four Claude Code markers when cc4 is configured', async () => {
+    const request = await probe(
+      { cacheMarkerPolicy: 'cc4', extendedCacheBeta: true, toolCacheBreakpoint: false },
+      {
+        messages: [
+          user('hello'),
+          assistant('hi'),
+          user('continue'),
+        ],
+      },
+    )
+
+    expect(markersOf(request.body)).toEqual([
+      ['.messages[1].content[0].cache_control', { type: 'ephemeral', ttl: '1h' }],
+      ['.messages[2].content[0].cache_control', { type: 'ephemeral', ttl: '1h' }],
+      ['.system[0].cache_control', { type: 'ephemeral', ttl: '1h' }],
+      ['.tools[1].cache_control', { type: 'ephemeral', ttl: '1h' }],
+    ])
+    // The policy owns placement, so `toolCacheBreakpoint: false` cannot remove
+    // the tool marker. No scope field or scope beta is written.
+    expect(JSON.stringify(request.body)).not.toContain('"scope"')
+    expect(betasOf(request)).toEqual([EXTENDED_CACHE_TTL_BETA])
+    expect(betasOf(request)).not.toContain(CACHE_SCOPE_BETA)
   })
 
   it('changes nothing but the markers and the declared beta across the policy opt-ins', async () => {
@@ -292,6 +329,7 @@ describe('pool prompt-cache policy', () => {
       cacheTtl: '1h',
       extendedCacheBeta: true,
       toolCacheBreakpoint: false,
+      cacheMarkerPolicy: 'cc4',
     })
     // A second Anthropic Messages route states its own retention explicitly, as
     // every non-pool route must, and opts into no beta.
@@ -319,6 +357,7 @@ describe('pool prompt-cache policy', () => {
     expect(markersOf(capture.calls[0]?.body ?? {})).toEqual([
       ['.messages[0].content[0].cache_control', { type: 'ephemeral', ttl: '1h' }],
       ['.system[0].cache_control', { type: 'ephemeral', ttl: '1h' }],
+      ['.tools[1].cache_control', { type: 'ephemeral', ttl: '1h' }],
     ])
     expect(markersOf(capture.calls[1]?.body ?? {})).toEqual([
       ['.messages[0].content[0].cache_control', { type: 'ephemeral' }],

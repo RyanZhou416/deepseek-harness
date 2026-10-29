@@ -16,18 +16,20 @@
  *
  * Prompt-cache policy is the third deployment choice: {@link CACHE_TTLS} names
  * the route's marker value, {@link CcPoolCachePolicy.extendedCacheBeta} declares
- * the beta a one-hour lifetime requires, and
+ * the beta a one-hour lifetime requires,
  * {@link CcPoolCachePolicy.toolCacheBreakpoint} selects whether a tool
- * definition carries a marker. The profile resolver carries all three as the
- * route's pi-ai `cacheRetention`, `extendedCacheBeta`, and
- * `compat.supportsCacheControlOnTools`; pi-ai builds the `cache_control` markers
- * and beta from them, and nothing here rewrites a request body. No other route
- * reads these values.
+ * definition carries a marker, and {@link CcPoolCachePolicy.cacheMarkerPolicy}
+ * hands placement to pi-ai's four-marker layout when set. The profile resolver
+ * carries these as the route's pi-ai `cacheRetention`, `extendedCacheBeta`,
+ * `cacheMarkerPolicy`, and `compat.supportsCacheControlOnTools`; pi-ai builds
+ * the `cache_control` markers and beta from them, and nothing here rewrites a
+ * request body. No other route reads these values.
  *
  * @module dsh-llm-cc-pool/pool
  */
 import { resolvePiAiProfiles } from '@deepseek-ai/dsh-llm-pi-ai'
 import type {
+  PiAiCacheMarkerPolicy,
   PiAiModality,
   PiAiProviderProfile,
   PiAiReasoningEfforts,
@@ -75,8 +77,9 @@ export type CcPoolCacheTtl = (typeof CACHE_TTLS)[number]
  *
  * A policy applies to the whole route and reaches the wire only through this
  * route's profile: `cacheTtl` selects the marker lifetime, `extendedCacheBeta`
- * adds the beta a one-hour lifetime declares, and `toolCacheBreakpoint`
- * selects whether the last tool definition carries a marker.
+ * adds the beta a one-hour lifetime declares, `toolCacheBreakpoint` selects
+ * whether the last tool definition carries a marker, and `cacheMarkerPolicy`
+ * replaces that placement with the four-marker layout when configured.
  */
 export interface CcPoolCachePolicy {
   /** Marker lifetime every block marked on this route declares; see {@link CACHE_TTLS}. */
@@ -93,6 +96,14 @@ export interface CcPoolCachePolicy {
    * prompt and the last user content block and no tool definition.
    */
   toolCacheBreakpoint: boolean
+  /**
+   * Prompt-cache marker placement pi-ai performs for this route, or omission
+   * for the transport's own placement. `cc4` places the four Claude Code
+   * markers and takes precedence over every other marker field on this route:
+   * it discards the markers {@link cacheTtl} and {@link toolCacheBreakpoint}
+   * select and writes `{type: "ephemeral", ttl: "1h"}` on the slots it owns.
+   */
+  cacheMarkerPolicy?: PiAiCacheMarkerPolicy
 }
 
 /** The policy this route served before its fields were configurable. */
@@ -266,6 +277,7 @@ export function poolProviderProfile(
     headers: { ...REQUEST_HEADERS },
     cacheRetention: CACHE_RETENTION[policy.cacheTtl],
     extendedCacheBeta: policy.extendedCacheBeta,
+    ...policy.cacheMarkerPolicy === undefined ? {} : { cacheMarkerPolicy: policy.cacheMarkerPolicy },
     compat: { supportsCacheControlOnTools: policy.toolCacheBreakpoint },
     retryPolicy: retryPolicy(),
     models: models.map(model => ({
