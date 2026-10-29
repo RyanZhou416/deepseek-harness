@@ -41,7 +41,7 @@ kind: "package-bundle"
         defaultReasoning: medium
 ```
 
-包 manifest 声明了 `dsh.bundle.patch`，因此 `dsh plugin --profile web add ./packages/llm/llm-cc-pool` 会把依赖记入 profile，由 profile loader 应用本包的 patch。组合中不需要任何其它 `cc-pool` 配置块：路由事实都在插件源码里，`models` 是部署唯一改动的模型事实。
+包 manifest 声明了 `dsh.bundle.patch`，因此 `dsh plugin --profile web add ./packages/llm/llm-cc-pool` 会把依赖记入 profile，由 profile loader 应用本包的 patch。fork 的 `build.cmd` 会自动完成同样的事：`scripts/fork-plugins-build.ts` 把这个 workspace 包与 fork 插件一起 staging 并链接进 web profile，便携模板也把 `cc-pool` 留给本 bundle，不再声明 `llm-pi-ai` provider。组合中不需要任何其它 `cc-pool` 配置块：路由事实都在插件源码里，`models` 是部署唯一改动的模型事实。
 
 ### 固定路由事实
 
@@ -146,7 +146,7 @@ profile 可以用 `models` 整体替换该列表。每个条目声明线路 id�
 - **只公布生效目录中的 id**——服务层仍接受未列出的模型 id，但选择器表面展示该列表，配置后的目录是唯一事实来源。
 - **图片模态是声明而非探测**——每个目录条目都会得到 `text` 与 `image`；拒绝图片的池端点会在轮次中途以 provider 拒绝的形式浮现。
 - **缓存布局是固定的四标记策略，而不是 CC 的完整 planner**——路由标记 `system[0]`、最后一个工具声明、最后一个用户内容块与最后一个助手内容块，并在助手末尾是 `thinking` 块时跳过、不向前回溯。它不复制客户端的 `markerIndices`、fork point 或 compact 断点规划。`cc4` 掌管放置时 `toolCacheBreakpoint` 会被接受但忽略；缺少必需的一小时/beta 组合的策略会在装载时被拒绝，而不是静默回退。
-- **默认产品不安装本包**——只有安装了该 bundle 的 profile 才存在该路由。base bundle 中 `llm-pi-ai` 的既有预设属于独立组合决策，必须与安装本插件的 profile 变更一起移除，否则两个适配器都会占用 `cc-pool`。
+- **base bundle 不包含本包**——只有链接了该 bundle 的 profile 才存在该路由。fork 的 `build.cmd` 会为 web profile 完成链接，但未经过该构建的 profile 没有 `cc-pool` 路由。仍声明 `llm-pi-ai` `cc-pool` provider 的 profile 必须移除它，否则两个适配器都会占用 `cc-pool`，插件装载失败。
 - **同会话排序仅限单个 Host 进程**——队列属于一个插件实例，因此另一个 DSH 进程或其它 CC 客户端使用同一池会话时并不受协调。有界重试只能吸收稍晚释放的租约；若该会话仍在别处活跃，调用方会看到 `POOL_SESSION_BUSY`。
 
 <a id="dev-note"></a>

@@ -1,8 +1,13 @@
 import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
+import yaml from 'js-yaml'
 import { afterEach, describe, expect, it } from 'vitest'
+import { WORKSPACE_PLUGINS } from './fork-plugins-build.ts'
 import { isEmptyProfilePatch, seedPortableProfile } from './fork-profile-seed.ts'
+
+const REPOSITORY_ROOT = dirname(dirname(fileURLToPath(import.meta.url)))
 
 const roots: string[] = []
 
@@ -29,6 +34,37 @@ async function kit(root: string): Promise<string> {
 afterEach(async () => {
   await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true })))
 })
+
+/** One parsed patch row. */
+type Row = Record<string, unknown>
+
+/**
+ * Parse a tracked YAML patch. The portable template carries `!!js` tags, so
+ * those value lines are removed before parsing; no managed row uses one.
+ * @param path - repository-relative patch path.
+ * @returns the top-level rows.
+ */
+async function readPatch(path: string): Promise<Row[]> {
+  const source = (await readFile(join(REPOSITORY_ROOT, path), 'utf8'))
+    .split(/\r?\n/)
+    .filter(line => !line.includes('!!js'))
+    .join('\n')
+  const parsed: unknown = yaml.load(source)
+  if (!Array.isArray(parsed)) throw new Error(`${path} is not a top-level list`)
+  return parsed.filter((row): row is Row => row !== null && typeof row === 'object' && !Array.isArray(row))
+}
+
+/**
+ * Flatten `- insert:` wrappers into the rows they install.
+ * @param rows - top-level patch rows.
+ * @returns every managed row.
+ */
+function insertedRows(rows: readonly Row[]): Row[] {
+  return rows.flatMap((row) => {
+    const inserted = row['insert']
+    return Array.isArray(inserted) ? inserted.filter((entry): entry is Row => entry !== null && typeof entry === 'object') : [row]
+  })
+}
 
 describe('portable profile seed', () => {
   it('recognizes an unedited profile patch', () => {
@@ -81,5 +117,38 @@ describe('portable profile seed', () => {
 
     expect(result.patchSeeded).toBe(true)
     expect(await readFile(join(profile, 'cordis.patch.yml'), 'utf8')).toContain('id: template')
+  })
+})
+
+describe('cc-pool route ownership', () => {
+  it('leaves the route to the dedicated plugin and links that plugin into the profile', async () => {
+    const templateRows = await readPatch('fork-runtime/web/portable-profile.patch.yml')
+    const template = insertedRows(templateRows)
+    const llm = template.find(row => row['id'] === 'llm-pi-ai')
+    expect(llm).toBeDefined()
+    const providers = (llm?.['config'] as Record<string, unknown>)['providers'] as Record<string, unknown>
+    // The old generic route is gone; the dedicated bundle owns cc-pool.
+    expect(providers).not.toHaveProperty('cc-pool')
+    expect(providers).toHaveProperty('anthropic')
+    // The template must not install the plugin row itself: the bundle patch does.
+    expect(template.some(row => row['id'] === 'llm-cc-pool')).toBe(false)
+
+    const pluginRows = insertedRows(await readPatch('packages/llm/llm-cc-pool/cordis.patch.yml'))
+    const ccPool = pluginRows.filter(row => row['id'] === 'llm-cc-pool')
+    expect(ccPool).toHaveLength(1)
+    expect(ccPool[0]).toMatchObject({ name: '@deepseek-ai/dsh-llm-cc-pool' })
+    // Exactly one cc-pool route across the template and the installed bundle.
+    expect(pluginRows.filter(row => row['name'] === '@deepseek-ai/dsh-llm-cc-pool')).toHaveLength(1)
+
+    // The fork build links exactly that workspace package into a fresh profile.
+    const workspace = WORKSPACE_PLUGINS.find(entry => entry.name === '@deepseek-ai/dsh-llm-cc-pool')
+    expect(workspace?.directory).toBe(join(REPOSITORY_ROOT, 'packages', 'llm', 'llm-cc-pool'))
+    expect(workspace?.outputs).toEqual(['lib/index.js'])
+    const manifest = JSON.parse(await readFile(join(REPOSITORY_ROOT, 'packages/llm/llm-cc-pool/package.json'), 'utf8')) as {
+      dsh?: unknown
+      files?: unknown
+    }
+    expect(manifest.dsh).toEqual({ bundle: { patch: './cordis.patch.yml' } })
+    expect(manifest.files).toContain('cordis.patch.yml')
   })
 })

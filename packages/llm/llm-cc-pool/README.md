@@ -41,7 +41,7 @@ Install the package into a profile, or mount its one row from a profile patch:
         defaultReasoning: medium
 ```
 
-The package manifest declares `dsh.bundle.patch`, so `dsh plugin --profile web add ./packages/llm/llm-cc-pool` records the dependency in the profile and the profile loader applies its patch. Nothing else in the composition needs a `cc-pool` block: the route facts are plugin source, and `models` is the one model fact a deployment changes.
+The package manifest declares `dsh.bundle.patch`, so `dsh plugin --profile web add ./packages/llm/llm-cc-pool` records the dependency in the profile and the profile loader applies its patch. The fork's `build.cmd` does the same automatically: `scripts/fork-plugins-build.ts` stages this workspace package beside the fork plugins and links it into the web profile, and the portable seed leaves `cc-pool` to this bundle instead of declaring an `llm-pi-ai` provider. Nothing else in the composition needs a `cc-pool` block: the route facts are plugin source, and `models` is the one model fact a deployment changes.
 
 ### Fixed route facts
 
@@ -146,7 +146,7 @@ The fixed catalogue, endpoint, and headers are stable across requests, so they d
 - **Only the effective catalogue ids are advertised** — routing accepts unlisted model ids at the service level, but selector surfaces show this list and the configured catalogue is the source of truth.
 - **Image modalities are a declaration, not a probe** — every catalogue entry receives `text` and `image`; a pool endpoint refusing images surfaces as a provider refusal mid-turn.
 - **The cache layout is a fixed four-marker policy, not CC's full planner** — the route marks `system[0]`, the last tool declaration, the last user content block, and the last assistant content block, and skips a trailing assistant `thinking` block without searching backward. It does not reproduce the client's `markerIndices`, fork-point, or compaction breakpoint planning. `toolCacheBreakpoint` is accepted but ignored while `cc4` owns placement, and a policy without the required one-hour/beta combination is refused at load rather than silently falling back.
-- **The default product does not install this package** — the route exists only in a profile that installs the bundle. The shipped base-bundle `llm-pi-ai` preset is a separate composition decision and must be removed in the same profile change that installs this plugin, or both adapters would claim `cc-pool`.
+- **The base bundles do not include this package** — the route exists only in a profile that links the bundle. The fork's `build.cmd` does that for the web profile, but a profile created without it has no `cc-pool` route. A profile that still declares an `llm-pi-ai` `cc-pool` provider must remove it, or both adapters would claim `cc-pool` and plugin loading fails.
 - **Same-session ordering is per Host process** — the queue belongs to one plugin instance, so a second DSH process or another CC client using the same pool session is not coordinated. The bounded retry absorbs a lease that releases slightly late, but a session still active elsewhere surfaces `POOL_SESSION_BUSY` to the caller.
 
 <a id="dev-note"></a>
