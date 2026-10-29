@@ -12,7 +12,7 @@ import type {
   ProviderStreams,
 } from '@earendil-works/pi-ai'
 import type { LlmResolvedModelInfo } from '@deepseek-ai/dsh-llm'
-import { THINKING_LEVELS } from './catalog.ts'
+import { supportedThinkingLevels } from './catalog.ts'
 
 /** Input accepted by the static, single-protocol providers this package builds. */
 interface StaticProviderOptions {
@@ -58,13 +58,7 @@ export function createProvider(input: StaticProviderOptions): Provider {
  * @returns supported levels in pi-ai's escalation order.
  */
 export function getSupportedThinkingLevels(model: Model<Api>): ModelThinkingLevel[] {
-  if (!model.reasoning) return ['off']
-  return THINKING_LEVELS.filter((level) => {
-    const mapped = model.thinkingLevelMap?.[level]
-    if (mapped === null) return false
-    if (level === 'xhigh' || level === 'max') return mapped !== undefined
-    return true
-  })
+  return supportedThinkingLevels(model)
 }
 
 /**

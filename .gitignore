@@ -25,6 +25,9 @@ oxlint-contract-*.ts
 tmp/
 # Root-local investigation scratch; keep it off the source change list.
 /.tmp/
+# Agent review diffs and verification scripts; never source.
+/.tmp-review-diff.txt
+/.tmp-verify/
 .claude/commands/
 .claude/launch.json
 .claude/settings.json

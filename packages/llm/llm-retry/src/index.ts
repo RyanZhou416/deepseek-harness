@@ -189,7 +189,10 @@ export function apply(ctx: Context, config: Config = {}, internals: RetryInterna
     agent.session.append('llm/retry', eventData)
     if (!await cancellableDelay(delayMs, fusedSignal)) return
     agent.session.append('llm/retry-started', { retryId, turn, step, retry })
-    return { kind: 'retry' }
+    // The durable retry record names this attempt: one retry id and attempt
+    // number pair identifies exactly one resend, so a consumer can distinguish
+    // the attempts of one logical request without inventing another identity.
+    return { kind: 'retry', attemptNonce: `${retryId}:${retry}` }
   }
 
   async function recover(

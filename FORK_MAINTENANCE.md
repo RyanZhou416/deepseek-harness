@@ -177,9 +177,9 @@ positions, the chained stream-to-rebuild replay, and the no-capture case.
 
 ### Shared-account pool failure classification
 
-共享账号池（`cc_pool_*`）把稳定错误放回 Anthropic 风格 error envelope；`llm-pi-ai` 在请求级 fetch 捕获失败响应的 HTTP status 与 `Retry-After`，解析 envelope 后发出 `POOL_CAPACITY`、`POOL_RATE_LIMITED`、`POOL_SESSION_BUSY`、`POOL_NO_ACCOUNT`、`POOL_TRANSIENT` 或 `POOL_ERROR`，而不是把池拒绝误分类为 Claude `RATE_LIMIT`。`POOL_SESSION_BUSY` 与不可重试的池失败带 `retryDisposition: 'forbid'`；池 origin 只是分类依据，账号选择、冷却和 session 绑仍由池负责。默认 pi-ai `retryPolicy` 只在部署没有显式 `retryableCodes` 时追加池可重试码；显式列表必须逐字使用。生成目录 `pool-error-catalog.generated.ts` 绑定上游 catalog SHA，不能手工编辑。该行为不改变 Session 格式，也不改变 Claude-native 错误的原有分类。
+共享账号池（`cc_pool_*`）把稳定错误放回 Anthropic 风格 error envelope；`llm-pi-ai` 在请求级 fetch 捕获失败响应的 HTTP status 与 `Retry-After`，解析 envelope 后发出 `POOL_CAPACITY`、`POOL_RATE_LIMITED`、`POOL_SESSION_BUSY`、`POOL_NO_ACCOUNT`、`POOL_REQUEST_CLOSED`、`POOL_TRANSIENT` 或 `POOL_ERROR`，而不是把池拒绝误分类为 Claude `RATE_LIMIT`。`POOL_SESSION_BUSY` 与不可重试的池失败带 `retryDisposition: 'forbid'`；`POOL_REQUEST_CLOSED` 不禁止重发，因为每次有意尝试都携带新的 `x-client-request-id`，重发是新的 ledger 条目而不是 replay。池 origin 只是分类依据，账号选择、冷却和 session 绑仍由池负责。池的就绪拒绝不带 `cc_pool_*` code 与 `origin`：响应体顶层给出 `pool_request_id`、`error.retryable` 为 `false`，详情说明租约的出口路径尚未验证（`capability_not_ready`）。分类器把同时带这两个标记的 `5xx` 响应直接归为不可重试的 `POOL_ERROR`（`retryDisposition: 'forbid'`），`5xx` 时不再读取可能被改写的详情文本；非 `5xx` 才仍由详情文本识别该拒绝。重发会重复池已经记账的 ledger id（池以 409 回应），因此这条回退不能变回可重试的文本分类。默认 pi-ai `retryPolicy` 只在部署没有显式 `retryableCodes` 时追加池可重试码；显式列表必须逐字使用。生成目录 `pool-error-catalog.generated.ts` 绑定上游 catalog SHA（当前 1.1.0），不能手工编辑。该行为不改变 Session 格式，也不改变 Claude-native 错误的原有分类。
 
-**Preservation rule.** 保留 fetch 捕获的协议范围（`anthropic-messages`、`openai-completions`、`openai-responses`）；Google 拒绝自定义 fetch，必须继续走文本分类。不得把 `POOL_SESSION_BUSY` 加进默认可重试码，不得让 `claude` origin 走池分类，也不得把显式 `retryableCodes` 与默认列表合并。更新 catalog 时必须同时更新生成文件、SHA 断言和分类测试。
+**Preservation rule.** 保留 fetch 捕获的协议范围（`anthropic-messages`、`openai-completions`、`openai-responses`）；Google 拒绝自定义 fetch，必须继续走文本分类。不得把 `POOL_SESSION_BUSY` 加进默认可重试码，不得让 `claude` origin 走池分类，也不得把显式 `retryableCodes` 与默认列表合并。保留 `POOL_REQUEST_CLOSED` 的可重试映射与 cc-pool 路由的显式列表项；它的前提是每次有意尝试使用新的 ledger id，若恢复重复 id 就必须同时把它移出可重试码。保留 readiness `5xx` 回退：`pool_request_id` 与 `retryable: false` 同时存在时按不可重试的 `POOL_ERROR` 处理，且 `5xx` 判定只看这两个标记、不依赖详情文本；不得把该拒绝交回可重试的文本分类。更新 catalog 时必须同时更新上游 `swift/contracts/error-catalog.json`、生成文件、SHA 断言和分类测试。
 
 **Focused verification.** `pnpm exec vitest run packages/llm/llm-pi-ai/tests packages/llm/llm/tests packages/llm/llm-retry/tests` 覆盖 envelope、fetch 捕获、默认/显式重试策略、适配器分类与 retry executor；`pnpm run verify-config-catalog` 校验配置目录与 JSDoc 同步。
 
@@ -285,7 +285,7 @@ ChatGPT 源码提供默认关闭的 `autoResetCredits` 开关，入口为订阅�
 
 新同事的全新 `DSH_HOME` 必须由仓库内模板补齐，而不是依赖维护者机器上的 `profiles/web/cordis.patch.yml`。`fork-runtime/web/portable-profile.patch.yml` 是模板，`fork-runtime/web/memory-watchdog.cjs`、`goal-disabled.cjs`、`chatgpt-subagent-preset.cjs`、`portable-memory-limits.patch.yml` 与 `fork-runtime/web/agent-presets/chatgpt-dsh/` 是模板所需的本地文件。`scripts/fork-profile-seed.ts` 把模板写入新建或仍为空 patch 的 web profile，并在缺失时复制支持文件；已有非空用户 patch 与已有文件一律保留。`build.cmd` 与 `run.cmd` 在未设置 `DSH_HOME` 时统一使用仓库同级 `..\deepseek-harness-data`，使构建与启动指向同一个 profile。
 
-模板包含插件开关（`dsh-context`、`llm-subscriptions`、`aether-shell`、`goal`/`goal-round-driver`/`command-goal`/`ui-goal` 禁用、模型 provider、locale、permission preset 等）；`DSH_HOME` 派生路径用 `!!js process.env.DSH_HOME`，AetherShell 路径可用 `AETHER_SHELL_EXE` 覆盖。API key 只保留环境变量名，不写入模板。订阅与 fork 插件包仍由 `build.cmd` 的 `fork-plugins-build.ts` 安装；模板不是 bundle 依赖清单的替代。禁用 Goal 时同时复制本地 `goal-disabled.cjs`，拦截恢复会话中排队的旧 Goal 轮次。
+模板包含插件开关（`dsh-context`、`llm-subscriptions`、`aether-shell`、`goal`/`goal-round-driver`/`command-goal`/`ui-goal` 禁用、模型 provider、locale、permission preset 等）；`DSH_HOME` 派生路径用 `!!js process.env.DSH_HOME`，AetherShell 路径可用 `AETHER_SHELL_EXE` 覆盖。API key 只保留环境变量名，不写入模板。订阅与 fork 插件包仍由 `build.cmd` 的 `fork-plugins-build.ts` 安装；模板不是 bundle 依赖清单的替代。禁用 Goal 时同时复制本地 `goal-disabled.cjs`，拦截恢复会话中排队的旧 Goal 轮次。模板的 `llm-pi-ai` 行只保留 `anthropic` provider：`cc-pool` 由 `fork-plugins-build.ts` 链接进 profile 的 `@deepseek-ai/dsh-llm-cc-pool` bundle 插入，模板不得再声明 `providers.cc-pool`，否则同一端点会有两条路由。
 
 **Preservation rule.** 只对新建或空 profile 应用模板；不得覆盖已有用户的 `cordis.patch.yml` 或支持文件。模板里的 preset `plugins` 列表必须与 `packages/bundle/web-app/presets/{standard,ptc,cordis}.patch.yml` 保持同步，否则 `tool-goal` 的禁用会漂移。保持 `build.cmd`、`run.cmd` 的默认 `DSH_HOME` 一致；显式环境变量优先。
 
@@ -1034,26 +1034,336 @@ committed, so nothing here needs to survive a merge.
 **Verification.** `git check-ignore -v .cc-carve` reports the ignore rule, and
 `git status --porcelain` lists no path under `.cc-carve/`.
 
-## mac-pool provider preset (fork)
+## mac-pool session identity and retry (fork)
 
-The base bundle seeds one `llm-pi-ai` provider so teammates do not hand-write a
-provider block for the mac pool:
+**Behavior.** `llm-pi-ai` accepts a top-level `sessionHeaders` route switch. For
+a named route the adapter sends the request's `sessionId` as
+`X-Claude-Code-Session-Id` (omitted when the request carries no session id), the
+owning session's display name as `x-cc-session-name` when it has one, and one
+`x-client-request-id` per deliberate attempt. The base id is derived from the
+request's conversation position (session, purpose, route, model, and message
+identities), and `dsh-llm-retry` stamps an attempt nonce from its durable retry
+record (`retryId:retry`) into `GenerateOptions.attemptNonce`; the adapter hashes
+that nonce into the wire id, so a retry presents a new ledger id while repeated
+dispatches of one attempt repeat theirs, and the attempt number still advances
+within the logical request. A session id the member endpoint cannot accept fails
+with `INVALID_REQUEST` before any network I/O. On such a route the three header
+names are adapter-owned: a profile `headers` entry spelling one in any casing is
+removed before the adapter value is set, so one field never carries two values.
+A session display name is sanitized to the pool's accepted display set before
+encoding: C0/DEL/C1 controls and U+2028/U+2029, the bidi/zero-width formatting
+scalars (U+061C, U+200B–U+200F, U+202A–U+202E, U+2060–U+2064, U+2066–U+2069,
+U+FEFF), and the reserved placeholder names `空闲`/`未知` (after trimming) are
+refused by the pool, so the first two classes are dropped from the name and a
+name left blank or reserved is not sent. The encoder itself only percent-encodes
+the sanitized value. Each attempt also reports structured logger records on
+start and settlement (route, model,
+endpoint URL, session id, attempt ledger id, attempt number, response status,
+the response's `x-cc-pool-request-id`, a failure's code and message, and the
+cause chain of a rejected fetch); the records never carry messages, request
+bodies, credentials, token counts, or session titles. Routes named by
+`sessionHeaders` log at INFO, where a deployment's default sink retains them;
+other routes stay at DEBUG.
 
-- route: `cc-pool` (display name `CC 订阅池`)
-- transport: `api: anthropic-messages`, `baseURL: https://ccpool.tiancegames.com`
-- credential: `apiKeyEnv: CC_POOL_API_KEY` only; never commit the member key
-- request route: `headers.x-cc-backend: direct`
-- models: the 2.1.288 wire ids without the unsupported `claude-haiku-5-5`
+The mac-pool route is the only consumer: the pool binds its persistent
+conversation key and its prompt identity, so every turn and tool continuation
+of one conversation presents the same session while the pool reuses one prompt
+identity for that prompt's tool continuations. The mac-pool plugin pins its
+route's retry policy to `maxRetries: 2` with
+`RATE_LIMIT`/`SERVER`/`POOL_REQUEST_CLOSED`, excluding `TIMEOUT`, `TRANSPORT`,
+and `EMPTY_RESPONSE`: a timeout can follow dispatch, so resending it has an
+unknown outcome. `POOL_REQUEST_CLOSED` is recoverable because the loop stamps a
+fresh attempt id before the resend, making it a new pool ledger entry rather
+than a replay of the closed one. The explicit list is used exactly, so the
+pool's capacity and rate-limit codes are not appended; those refusals surface
+with their `retry-after` instead of being retried automatically. Add the other
+`POOL_*` codes to that list if the deployment decides those refusals should
+retry.
 
-**Preservation rule.** Keep the route, `apiKeyEnv`, `baseURL`, `x-cc-backend`
-header, and model ids when syncing upstream. A profile-level `llm-pi-ai` config
-replaces this default for that profile; do not turn the preset into a shared
-credential store. The generated `apps/cli/composition.md` must keep these
-`claude-*` model rows: regenerate it with `pnpm run gen-doc-graphs` after a
-preset or provider change, and never hand-edit the graph or accept an upstream
-composition doc that drops them.
+**Preservation rule.** Keep `sessionHeaders` on the `cc-pool` route, and keep a
+deliberate retry on a new wire id: a retry that reuses the failed attempt's id is
+answered with `cc_pool_request_closed` and defeats recovery. Keep the attempt
+nonce sourced from the durable retry record, and keep the adapter's attempt
+numbering keyed on the conversation position so advances remain visible in the
+log. Keep adapter-owned session headers winning over a profile header of the same
+name in any casing. Keep the diagnostics free of messages, request bodies,
+credentials, token counts, and session titles.
+`TIMEOUT`/`TRANSPORT`/`EMPTY_RESPONSE` stay out of the deployed explicit
+`retryableCodes` until the deployment decides otherwise: resending a step that
+may already have reached the model remains an open policy question. Do not
+stamp these Claude Code headers on routes the switch does not name.
 
-**Focused verification.** Start a fresh profile with `CC_POOL_API_KEY` set,
-confirm `CC 订阅池` appears with its models, and send one local non-Claude
-fixture request. Do not run real account or provider requests from this check.
-`pnpm run verify-doc-graphs` reports the generated graph docs up to date.
+**Focused verification.**
+`pnpm exec vitest run packages/llm/llm-pi-ai/tests/adapter.spec.ts packages/llm/llm-pi-ai/tests/config.spec.ts packages/llm/llm-pi-ai/tests/pool-error.spec.ts`
+covers the stable session header, ledger-id reuse across a retry, a new id for a
+new request, per-attempt numbering, the structured logger fields and their
+levels, tool-continuation identity, an unconfigured route, the invalid-session
+refusal, and the response/pool-request-id/cause capture.
+
+## mac-pool durable request diagnostics (fork)
+
+**Behavior.** `llm-pi-ai` accepts an optional top-level `requestLog` config that
+persists the same structured request/response diagnostics as its logger to an
+NDJSON file, because the deployment profile configures no logger exporter and
+the process ring is lost on restart. Without `requestLog`, routes named by
+`sessionHeaders` write to `$DSH_HOME/logs/llm-pi-ai-requests.jsonl`; `enabled:
+true` writes every route, and `enabled: false` disables the file. `path`,
+`maxFileBytes` (default 16 MiB), and `maxFiles` (default 8) locate and size the
+file; rotation deletes the oldest rotation first and the retained set is capped
+at 128 MiB (the per-file bound is clamped to that total and the file count to
+the total divided by it). Records carry `ts`, `kind`, provider, model, endpoint,
+session id, client request id, attempt, stream, and the settled status, pool
+request id, failure code, message, and cause chain — never messages, request
+bodies, credentials, tokens, or session titles; the writer projects onto that
+field list, so a later adapter field cannot leak content. Files are created
+`0600` and directories `0700`. Writes are queued off the request path; the first
+failure warns once through the plugin logger and later records keep trying. The
+plugin mount reads loader configuration, so a profile change takes effect at the
+next DSH start.
+
+**Preservation rule.** Keep pool-route diagnostics persisted by default so a
+request that never reaches the pool still leaves client-side evidence, and keep
+the record projection free of messages, request bodies, credentials, token
+counts, and session titles. Keep writes off the synchronous request path and
+keep the one-warning failure behavior: a full disk or read-only path must not
+fail a model request. Do not remove the 128 MiB retained-set bound when changing
+the rotation bounds.
+
+**Focused verification.**
+`pnpm exec vitest run packages/llm/llm-pi-ai/tests/request-log.spec.ts packages/llm/llm-pi-ai/tests/adapter.spec.ts packages/llm/llm-pi-ai/tests/loader-composition.spec.ts`
+covers temporary-directory writes, owner-private modes, size rotation and
+oldest-file eviction, the exact NDJSON field set and excluded content, the
+non-blocking one-warning write failure, disabled and enabled switches, the real
+Loader composition, and per-file 100% coverage of `src/request-log.ts`.
+
+## mac-pool per-model reasoning defaults (fork)
+
+**Behavior.** `llm-pi-ai` accepts an optional `reasoning` level on a `models`
+entry or a `modelOverrides` value. It is that model's default thinking effort:
+`resolveModel` reports it as `reasoning.defaultEffort`, winning over the route's
+own `reasoning`, and the LLM seam materializes it into a request that names no
+effort. Resolution refuses a default the model does not offer — checked against
+the levels the entry declares in `reasoningEfforts`, or the installed catalog
+entry's levels when that field is absent, so `off` counts only where it is
+declared — and refuses any default on a model that does not reason. A stored
+configuration keeps a refused default as that one model's diagnostic; a write
+refuses it where it was written. No level is mapped, renamed, or clamped: a
+configured level is either offered by the model or refused.
+
+The mac-pool web profile gives each pool model its own default — `medium` for
+`sonnet-5-5`/`opus-5-5`, `high` for `fable-5-1`/`mythos-5-1` — with
+`low`/`medium`/`high`/`xhigh`/`max` declared and no `off`, so a request that
+names no effort sends that model's level instead of leaving the provider's own
+default in effect.
+
+**Preservation rule.** Keep the model-level default winning over the route-level
+fallback, and keep the model's offered levels as the only accepted values,
+including the rule that `off` exists only when declared. Keep a non-reasoning
+model refused rather than described without a default. Do not introduce level
+aliasing or mapping.
+
+**Focused verification.**
+`pnpm exec vitest run packages/llm/llm-pi-ai/tests/catalog.spec.ts packages/llm/llm-pi-ai/tests/config.spec.ts packages/llm/llm-pi-ai/tests/adapter.spec.ts`
+covers the materialized per-model default map, model-over-route precedence and
+the route fallback in `resolveModel`, rejection of a level the model does not
+offer (including `off`), rejection on a non-reasoning model, a catalog model's
+inherited levels, a later duplicate invalidation, and the schema vocabulary.
+
+## mac-pool dedicated DSH plugin (fork)
+
+**Behavior.** `packages/llm/llm-cc-pool` owns the mac-pool route instead of a
+profile `llm-pi-ai` provider block. It is a named Cordis function plugin
+(`name`/`inject`/`Config`/`apply`, no default export) whose package manifest
+declares `dsh.bundle.patch`, so installing the bundle mounts exactly one
+`cc-pool` route and a composition without the bundle has no `cc-pool` provider
+at all. The route facts are fixed in source: `anthropic-messages` against
+`https://ccpool.tiancegames.com`, the `CC_POOL_API_KEY` reference, the
+`x-cc-backend: direct` header, `X-Claude-Code-Session-Id`, the session's display
+name as `x-cc-session-name`, and a per-attempt `x-client-request-id`, plus a
+`normal` retry policy with 2 retries over
+`RATE_LIMIT`/`SERVER`/`POOL_REQUEST_CLOSED` used exactly as written; `TIMEOUT`
+stays out because the attempt can already have reached the pool, and the closed
+request id is retryable because the loop stamps a fresh attempt id on the resend. The fixed catalogue is
+`claude-sonnet-5-5`/`claude-opus-5-5` (128k output, `medium` default) and
+`claude-fable-5-1`/`claude-mythos-5-1` (64k output, `high` default), all 1M
+context, offering `low`/`medium`/`high`/`xhigh`/`max` and never `off`, with
+`compat.forceAdaptiveThinking` on `text`+`image` input. The plugin registers no
+configurable-provider entry, so the Models page cannot draft a route of its
+own. It registers model discovery for the `llm-cc-pool` namespace as an
+explicit read of the pool's `GET /v1/models` with the member credential as a
+bearer token; the answer carries only `{ id, name }`, an empty listing is an
+empty candidate list (not an error), and a missing credential, transport
+failure, refused status, unreadable body, or non-JSON reply is a typed failure
+rather than a fallback to the configured catalogue. Discovery never adopts or
+writes a model. It reuses `dsh-llm-pi-ai`'s `PiAiAdapter`, credential
+store/auth-context plumbing, profile resolver, request-log writer, and pool-error
+classifier; it copies no transport or stream projection. `listModels` answers
+from the compiled catalogue so the four models appear before a key is stored,
+while a request without the key still fails loud with `MISSING_CREDENTIAL`. The
+adapter also orders streams by the request's session id: the pool admits one
+in-flight direct request per session and refuses a concurrent one with
+`cc_pool_session_busy`, so a same-session request opens only after its
+predecessor's stream settled, while different sessions stay concurrent and still
+pass through the pool's global slot limiter. Any same-session request refused
+with `cc_pool_session_busy` before it forwarded content — queued behind the
+release or not — gets at most eight retries over 1.8 s, and a failure to open or
+read the upstream releases the held session instead of leaking its lane; an
+abort settles the wait immediately without opening an upstream request. No other
+failure is retried there, so `cc_pool_rate_limited`/capacity 429s keep their
+`Retry-After` for `dsh-llm-retry`, and the plugin adds no global or per-IP queue.
+
+**Preservation rule.** Keep the route facts, catalogue capacities, default
+efforts, and retry policy in plugin source and change them only with a plugin
+version; a profile `llm-pi-ai` `cc-pool` provider block must not come back. Keep
+the plugin free of a configurable-provider entry, and keep model discovery a
+read-only candidate listing: it must not adopt models, write the profile, or
+fall back to the catalogue when the pool cannot be read. Keep the discovery
+endpoint (`GET /v1/models` on the fixed route base URL) and its bearer
+credential tied to the route's fixed facts.
+Keep pool failure classification in the generic adapter until a
+dedicated move lands; do not add mac-pool-only branches to `llm-pi-ai`, and do
+not duplicate its HTTP/SSE transport, context conversion, or stream projection.
+Keep the base bundle and the shipped web profile free of an `llm-pi-ai`
+`cc-pool` provider: the plugin is the only owner. `scripts/fork-plugins-build.ts`
+stages this workspace package beside the four fork plugins and links it with
+`dsh plugin --profile web add <staged directory>`, so a fresh profile installed
+by `build.cmd` gets exactly that one `cc-pool` route. A provider block in
+`llm-pi-ai` — including in `fork-runtime/web/portable-profile.patch.yml` — would
+make both adapters claim the route and plugin loading fails.
+Keep the durable sink's default path
+(`$DSH_HOME/logs/llm-pi-ai-requests.jsonl`) so evidence collection survives the
+split.
+Keep session ordering in this plugin and per session only: different sessions
+must not be serialized or throttled, no global or per-IP queue may be added, the
+retry must cover `POOL_SESSION_BUSY` alone (never `POOL_RATE_LIMITED`, capacity,
+or a plain 429) for any request that has not forwarded content, an aborted wait
+must leave the queue without opening an upstream request, and an open or read
+failure must release the lane. Fiber disposal must settle requests still waiting
+in a queue.
+
+**Focused verification.**
+`pnpm exec vitest run packages/llm/llm-cc-pool` covers the resolved profile and
+catalogue, per-model default efforts, the retry policy, the read-only discovery
+listing (endpoint, bearer header, `id` + `display_name` parsing, empty listing,
+missing credential, refused status, malformed body, no adoption), absence of the
+configurable directory, credential-free model listing, the fixed wire
+request (endpoint, `x-api-key`, `x-cc-backend`, session headers, attribution,
+adaptive thinking effort, output cap, no `speed`/`context_management`),
+`MISSING_CREDENTIAL` before network I/O, durable request-log records, fiber
+disposal, session ordering (same-session request order, cross-session
+parallelism, abort and abandoned-wait queue cleanup, error release, queued
+request settlement on fiber disposal, the bounded `POOL_SESSION_BUSY` retry
+including its dropped usage sample and an unqueued next request, a thrown opener
+releasing the lane, and a promptly returned `cc_pool_rate_limited` 429 that is
+never retried), and a real Loader composition proving the route exists
+only with the plugin row installed.
+`pnpm exec vitest run scripts/fork-plugins-build.spec.ts scripts/fork-profile-seed.spec.ts`
+covers the staged workspace manifest (workspace peer ranges converted, no
+build-time dependencies), the staged package/files, the legacy
+`providers.cc-pool` guard, the portable template owning no `cc-pool` provider,
+and the single dedicated bundle/route selection.
+
+## CC pool one-hour prompt-cache policy (fork)
+
+**Behavior.** `llm-cc-pool` defaults to the four-marker Claude Code policy:
+`cacheTtl: 1h`, `extendedCacheBeta: true`, `cacheMarkerPolicy: cc4`. The other
+schema values (`cacheTtl` `5m`/`none`, `extendedCacheBeta: false`,
+`toolCacheBreakpoint`) are accepted at the field level but a combination that
+cannot serve is refused by `resolvePoolCachePolicy`: `cacheTtl: "1h"` requires
+`extendedCacheBeta: true`, and `cacheMarkerPolicy: "cc4"` requires
+`cacheTtl: "1h"` and `extendedCacheBeta: true`. `toolCacheBreakpoint` is
+accepted and ignored while `cc4` owns placement. Validation runs in `apply`
+before the route registers and in the `internal/config` waterfall for settings
+writes, so an impossible combination fails at load rather than at request time.
+Its profile maps the fields to pi-ai `cacheRetention`, the `extendedCacheBeta`
+route option, `compat.supportsCacheControlOnTools`, and the route's own
+`cacheMarkerPolicy`. `llm-pi-ai` accepts `extendedCacheBeta` on a route whose
+models speak `anthropic-messages` and, through pi-ai's single `onPayload` hook,
+appends `extended-cache-ttl-2025-04-11` to the request's `betas` list; the
+Anthropic SDK sends that list as `anthropic-beta`. The beta is never inferred
+from `cacheRetention: long`, and no route adds a `scope` field or
+`prompt-caching-scope-2026-01-05`.
+
+The four-marker policy is the route's only placement by configuration. The same
+`onPayload` hook removes every `cache_control` the transport or a caller placed
+from `system`, `tools`, and `messages`, then marks exactly the slots the request
+has: `system[0]`, the last tool declaration, the last cacheable user content
+block, and the last cacheable assistant content block, each with
+`{type: "ephemeral", ttl: "1h"}`. A final assistant block that is `thinking` or
+`redacted_thinking` is skipped without searching backward; a request with no
+tool declaration or no assistant turn carries only the remaining slots and never
+gains an invented block. Other Anthropic pi-ai routes keep their explicitly
+configured retention and betas.
+
+**Preservation rule.** Keep the four-marker defaults and the loud cross-field
+validation: do not weaken them into a request-time failure or a silent fallback,
+and do not let `toolCacheBreakpoint` remove the tool marker while `cc4` owns
+placement. Keep the policy route-scoped: no default outside `llm-cc-pool`, no
+beta from the retention tier, no `scope` field, no scope beta, and no change to
+another pi-ai Anthropic route, `llm-deepseek`, or the subscription routes. Keep
+every other pi-ai Anthropic route's `cacheRetention` explicit; do not add a
+global payload or header hook, a `fetch` rewrite, or a mac-pool branch to
+`llm-pi-ai`. Keep both transformations on the one `onPayload` assignment; a
+second assignment on the same route would silently drop the other policy. The
+layout deliberately stops at the stable four breakpoints: do not reproduce CC's
+`markerIndices` fork/compaction planner or infer one hour from a subscription.
+
+**Focused verification.**
+`pnpm exec vitest run packages/llm/llm-cc-pool packages/llm/llm-pi-ai/tests/cache-policy.spec.ts`
+covers the default four-marker body, the assistant slot, the ignored
+`toolCacheBreakpoint`, the load-time refusal of `5m`/`none`/missing-beta
+combinations, the beta header only on the pool route, a second Anthropic route's
+unchanged retention, DeepSeek with no marker or cache beta, the refusal of
+`cc4` on a non-Anthropic route, and the Loader composition.
+
+## CC subscription pool settings page (fork)
+
+**Behavior.** `packages/client/ui-settings-cc-pool` adds the **CC subscription
+pool** Settings page. It edits the `llm-cc-pool` profile entry through the
+shared configuration form (the volatile `models` field, written as one whole
+array or removed with `unset` to return to the composition's catalogue) and the
+`CC_POOL_API_KEY` credential through the credentials domain (write-only: the
+value never returns through a read). **Sync from pool** calls
+`ctx.remote.llm.discoverModels('llm-cc-pool', { provider: 'cc-pool' })` and
+stages a merge into the rows on screen: an id the table already holds keeps its
+name, capacities, and default effort, an id only the pool lists is appended with
+placeholder capacities (1M context, 128k output, medium effort) and a
+*From pool* marker, and rows the pool no longer lists are dropped only after the
+confirmation dialog (keep-and-sync stages the additions without deletions). The
+merge is a draft; the existing **Save** is still the only write. An empty,
+repeated, or unreadable listing, a refused interrogation, or a missing token
+reports the reason and leaves both the rows and the settings document untouched.
+The page registers into `settings.section`
+with `ctx.configForms.whileServed(['llm-cc-pool'])`, so it appears only while
+the Host plugin is composed, and it is enabled from the base web bundle
+(`packages/bundle/web-app`) rather than from the provider bundle. The Host
+plugin now declares the volatile catalogue and calls
+`settings.configure({ auto: false })`, so the generic auto-generated configuration
+page is not the surface for this entry; the earlier section's "no settings
+namespace" rule is superseded for that catalogue field only.
+
+**Preservation rule.** Keep the page out of the generic Models page and the
+`llm-pi-ai` configurable-provider directory: the catalogue is edited here or by
+the Host bundle's configuration, and pool candidates reach it only through the
+explicit sync plus a save, never through automatic adoption. Keep the
+credential literal out of the settings document and out of the page's snapshot.
+Keep the sync's merge rules: existing rows keep their own fields, added models
+start from the safe placeholders, and a removal needs the confirmation.
+Keep `src/client/contract.ts` in step with `packages/llm/llm-cc-pool`'s
+`pool.ts` and `config.ts` (entry id `llm-cc-pool`, provider `cc-pool`,
+`CC_POOL_API_KEY`, the five efforts, the `CcPoolModel` fields); a browser bundle
+cannot import those Host values, so the mirror is intentional and must change
+with them.
+
+**Focused verification.**
+`pnpm exec vitest run packages/client/ui-settings-cc-pool` covers the draft
+validation (blank/duplicate ids, blank names, non-positive capacities, levels
+outside the five, empty list), the staged form and its revision fence, the
+credential read/write outcomes, the pool listing validation and id merge, the
+sync's empty/duplicate/invalid/refused/no-token outcomes with no settings write,
+the removal confirmation and its keep-and-sync alternative, the section
+registration and teardown, the component's fields and error reporting, and a
+synthetic Host round trip (load built-ins, edit, sync, save, reset, reload) that
+also proves no other provider's section is touched.
+`pnpm run verify-client-ui-i18n`, `verify-client-packages`,
+and `verify-package-readme-model-experience` cover the package surface and copy.

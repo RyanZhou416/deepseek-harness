@@ -1,6 +1,6 @@
 /**
  * Generated from the mac-pool `swift/contracts/error-catalog.json`.
- * Version 1.0.0, sha256 2b31eaed88fddd812586795c22528bfcc8ba15118d5f6cf5ca4e3549c407861e.
+ * Version 1.1.0, sha256 3f40dfb188bed6a135f3ab148e65079d3f9141282915d68e2622371e05056668.
  *
  * generated, do not edit.
  *
@@ -38,10 +38,10 @@ export interface PoolErrorCatalogEntry {
 }
 
 /** Version of the catalog document these entries were generated from. */
-export const POOL_ERROR_CATALOG_VERSION = '1.0.0'
+export const POOL_ERROR_CATALOG_VERSION = '1.1.0'
 
 /** SHA-256 of the catalog document these entries were generated from. */
-export const POOL_ERROR_CATALOG_SHA256 = '2b31eaed88fddd812586795c22528bfcc8ba15118d5f6cf5ca4e3549c407861e'
+export const POOL_ERROR_CATALOG_SHA256 = '3f40dfb188bed6a135f3ab148e65079d3f9141282915d68e2622371e05056668'
 
 /** Catalog entries keyed by their unique wire code. */
 export const POOL_ERROR_CATALOG = {
@@ -92,6 +92,18 @@ export const POOL_ERROR_CATALOG = {
     poolAction: 'none',
     messageKey: 'pool.error.no_available_account',
     clientGuidance: 'no healthy pool account is currently available',
+  },
+  cc_pool_request_closed: {
+    type: 'cc_pool_request_closed',
+    code: 'POOL_REQUEST_CLOSED',
+    origin: 'pool',
+    httpStatus: 409,
+    scope: 'request',
+    retryable: true,
+    clientAction: 'retry_same',
+    poolAction: 'terminal',
+    messageKey: 'pool.error.request_closed',
+    clientGuidance: 'the pool already closed this client request id; only a new attempt with a fresh id is safe',
   },
 } as const satisfies Record<string, PoolErrorCatalogEntry>
 

@@ -1,0 +1,259 @@
+/**
+ * Prompt-cache policy: the route's default four-marker one-hour layout, its
+ * exact placement, the loud refusal of impossible combinations at load, and the
+ * guarantee that no other provider route changes.
+ */
+
+import { Context } from '@deepseek-ai/cordis'
+import LlmRuntime, { createAssistantMessage } from '@deepseek-ai/dsh-llm'
+import type { ToolSchema } from '@deepseek-ai/dsh-llm'
+import * as PiAi from '@deepseek-ai/dsh-llm-pi-ai'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import * as CcPool from '../src/index.ts'
+import { assemble, capturePoolFetch, user } from './harness.ts'
+import type { CapturedRequest } from './harness.ts'
+
+/** The Anthropic beta a one-hour prompt-cache lifetime declares. */
+const EXTENDED_CACHE_TTL_BETA = 'extended-cache-ttl-2025-04-11'
+
+/** The beta that selects a cache scope; this route never declares one. */
+const CACHE_SCOPE_BETA = 'prompt-caching-scope-2026-01-05'
+
+let context: Context | undefined
+
+afterEach(async () => {
+  await context?.fiber.dispose()
+  context = undefined
+  vi.unstubAllEnvs()
+  vi.unstubAllGlobals()
+})
+
+/**
+ * Mount the real LLM service and the pool plugin under test, with the durable
+ * sink off so a case writes nothing below the ambient harness home.
+ * @param config - loader configuration for the plugin.
+ * @returns the isolated context.
+ */
+async function mount(config: Record<string, unknown> = {}): Promise<Context> {
+  const ctx = new Context()
+  context = ctx
+  await ctx.plugin(LlmRuntime)
+  await ctx.plugin(CcPool, { requestLog: { enabled: false }, ...config })
+  return ctx
+}
+
+/** One tool declaration, so the body carries the tool-list marker. */
+const ECHO: ToolSchema = {
+  name: 'echo',
+  description: 'Echo text back.',
+  parameters: { type: 'object', properties: { text: { type: 'string' } } },
+}
+
+/** A second tool declaration, so the marker has a last entry to sit on. */
+const LOOKUP: ToolSchema = {
+  name: 'lookup',
+  description: 'Look up a value.',
+  parameters: { type: 'object', properties: { key: { type: 'string' } } },
+}
+
+/**
+ * The request every case sends: a system prompt, two tools, and one user turn,
+ * the three slots a request without an assistant turn has.
+ */
+const PROBE = {
+  model: 'claude-sonnet-5-5',
+  system: 'You are the pool test assistant.',
+  tools: [ECHO, LOOKUP],
+  messages: [user('hello')],
+}
+
+/** One `cache_control` value and the JSON path it occupies in the request body. */
+type Marker = readonly [path: string, value: unknown]
+
+/**
+ * Every `cache_control` marker in a request body, by path.
+ * @param body - the captured Anthropic Messages body.
+ * @returns the markers sorted by path.
+ */
+function markersOf(body: Record<string, unknown>): Marker[] {
+  const found: Marker[] = []
+  const walk = (value: unknown, path: string): void => {
+    if (Array.isArray(value)) {
+      value.forEach((item, index) => { walk(item, `${path}[${String(index)}]`) })
+      return
+    }
+    if (value === null || typeof value !== 'object') return
+    for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
+      if (key === 'cache_control') found.push([`${path}.cache_control`, child])
+      else walk(child, `${path}.${key}`)
+    }
+  }
+  walk(body, '')
+  return found.sort(([left], [right]) => left.localeCompare(right))
+}
+
+/**
+ * The betas a captured request declares, split from its `anthropic-beta` header.
+ * @param request - the captured request.
+ * @returns the declared beta names, empty when the header is absent.
+ */
+function betasOf(request: CapturedRequest): string[] {
+  const header = request.headers.get('anthropic-beta')
+  return header === null ? [] : header.split(',').map(beta => beta.trim()).filter(beta => beta.length > 0)
+}
+
+/**
+ * Send the probe through a fresh mount and return the captured request.
+ * @param config - loader configuration for the pool plugin.
+ * @param options - request fields overriding the default probe.
+ * @returns the request the pool route built.
+ */
+async function probe(
+  config: Record<string, unknown> = {},
+  options: Partial<typeof PROBE> = {},
+): Promise<CapturedRequest> {
+  vi.stubEnv('CC_POOL_API_KEY', 'pool-member-key')
+  const ctx = await mount(config)
+  const capture = capturePoolFetch()
+  vi.stubGlobal('fetch', capture.fetch)
+  await assemble(ctx, { ...PROBE, ...options })
+  const call = capture.calls[0]
+  if (call === undefined) throw new Error('the pool route sent no request')
+  await ctx.fiber.dispose()
+  context = undefined
+  return call
+}
+
+/** An assistant turn whose content is plain text, so a request carries an assistant block. */
+function assistant(text: string) {
+  return createAssistantMessage({
+    content: [{ type: 'text', text }],
+    source: { provider: 'cc-pool', model: 'claude-sonnet-5-5' },
+  })
+}
+
+describe('pool prompt-cache policy', () => {
+  it('enables the four-marker one-hour policy by default', async () => {
+    const request = await probe()
+
+    // PROBE has no assistant turn, so the policy places exactly the three slots
+    // it has; every marker carries the explicit one-hour lifetime.
+    expect(markersOf(request.body)).toEqual([
+      ['.messages[0].content[0].cache_control', { type: 'ephemeral', ttl: '1h' }],
+      ['.system[0].cache_control', { type: 'ephemeral', ttl: '1h' }],
+      ['.tools[1].cache_control', { type: 'ephemeral', ttl: '1h' }],
+    ])
+    expect(betasOf(request)).toEqual([EXTENDED_CACHE_TTL_BETA])
+    expect(betasOf(request)).not.toContain(CACHE_SCOPE_BETA)
+    expect(JSON.stringify(request.body)).not.toContain('"scope"')
+    expect(JSON.stringify(request.body)).not.toContain(CACHE_SCOPE_BETA)
+  })
+
+  it('uses the assistant slot when the conversation has an assistant turn', async () => {
+    const request = await probe({}, {
+      messages: [
+        user('hello'),
+        assistant('hi'),
+        user('continue'),
+      ],
+    })
+
+    expect(markersOf(request.body)).toEqual([
+      ['.messages[1].content[0].cache_control', { type: 'ephemeral', ttl: '1h' }],
+      ['.messages[2].content[0].cache_control', { type: 'ephemeral', ttl: '1h' }],
+      ['.system[0].cache_control', { type: 'ephemeral', ttl: '1h' }],
+      ['.tools[1].cache_control', { type: 'ephemeral', ttl: '1h' }],
+    ])
+  })
+
+  it('ignores toolCacheBreakpoint while the four-marker policy owns placement', async () => {
+    const ignored = await probe({ toolCacheBreakpoint: false })
+    const defaulted = await probe()
+
+    // The switch can no longer remove the tool marker: the policy writes it.
+    expect(markersOf(ignored.body)).toEqual([
+      ['.messages[0].content[0].cache_control', { type: 'ephemeral', ttl: '1h' }],
+      ['.system[0].cache_control', { type: 'ephemeral', ttl: '1h' }],
+      ['.tools[1].cache_control', { type: 'ephemeral', ttl: '1h' }],
+    ])
+    expect(ignored.body).toEqual(defaulted.body)
+  })
+
+  it('leaves another provider route at its own placement and betas', async () => {
+    vi.stubEnv('CC_POOL_API_KEY', 'pool-member-key')
+    vi.stubEnv('OTHER_GATEWAY_KEY', 'other-key')
+    const ctx = new Context()
+    context = ctx
+    await ctx.plugin(LlmRuntime)
+    // The pool route is mounted without cache configuration: its new defaults
+    // must enable the four-marker policy without reaching any other route.
+    await ctx.plugin(CcPool, { requestLog: { enabled: false } })
+    // A second Anthropic Messages route states its own retention explicitly, as
+    // every non-pool route must, and opts into no beta.
+    await ctx.plugin(PiAi, {
+      providers: {
+        'other-gateway': {
+          displayName: 'Other Gateway',
+          apiKeyEnv: 'OTHER_GATEWAY_KEY',
+          api: 'anthropic-messages',
+          baseURL: 'https://other.example',
+          cacheRetention: 'short',
+          models: [{ id: 'other-model', name: 'Other Model', contextWindow: 200_000, maxTokens: 1_024 }],
+        },
+      },
+    })
+    const capture = capturePoolFetch()
+    vi.stubGlobal('fetch', capture.fetch)
+
+    await assemble(ctx, PROBE)
+    await assemble(ctx, { ...PROBE, model: 'other-model' }, 'other-gateway')
+
+    expect(capture.calls).toHaveLength(2)
+    expect(capture.calls[0]?.url.startsWith('https://ccpool.tiancegames.com')).toBe(true)
+    expect(capture.calls[1]?.url.startsWith('https://other.example')).toBe(true)
+    expect(markersOf(capture.calls[0]?.body ?? {})).toEqual([
+      ['.messages[0].content[0].cache_control', { type: 'ephemeral', ttl: '1h' }],
+      ['.system[0].cache_control', { type: 'ephemeral', ttl: '1h' }],
+      ['.tools[1].cache_control', { type: 'ephemeral', ttl: '1h' }],
+    ])
+    expect(markersOf(capture.calls[1]?.body ?? {})).toEqual([
+      ['.messages[0].content[0].cache_control', { type: 'ephemeral' }],
+      ['.system[0].cache_control', { type: 'ephemeral' }],
+      ['.tools[1].cache_control', { type: 'ephemeral' }],
+    ])
+    const other = capture.calls[1]
+    if (other === undefined) throw new Error('the second route sent no request')
+    expect(JSON.stringify(other.body)).not.toContain('"ttl"')
+    expect(betasOf(other)).toEqual([])
+    // The pool route's beta and marker policy reached only the pool route.
+    const pool = capture.calls[0]
+    if (pool === undefined) throw new Error('the pool route sent no request')
+    expect(betasOf(pool)).toEqual([EXTENDED_CACHE_TTL_BETA])
+  })
+
+  it('refuses an impossible cache policy at load, before registering the route', async () => {
+    const cases: readonly [label: string, config: Record<string, unknown>, error: RegExp][] = [
+      ['five-minute lifetime', { cacheTtl: '5m' }, /cacheMarkerPolicy "cc4" requires cacheTtl "1h"/],
+      ['no lifetime', { cacheTtl: 'none' }, /cacheMarkerPolicy "cc4" requires cacheTtl "1h"/],
+      ['one hour without the beta', { cacheTtl: '1h', extendedCacheBeta: false }, /cacheMarkerPolicy "cc4" requires extendedCacheBeta: true/],
+    ]
+    for (const [label, config, error] of cases) {
+      const ctx = new Context()
+      context = ctx
+      await ctx.plugin(LlmRuntime)
+      await expect(ctx.plugin(CcPool, { requestLog: { enabled: false }, ...config }), label).rejects.toThrow(error)
+      expect(ctx.llm.listProviders()).toEqual([])
+      await ctx.fiber.dispose()
+      context = undefined
+    }
+  })
+
+  it('refuses a lifetime the route does not offer before it registers', async () => {
+    const ctx = new Context()
+    context = ctx
+    await ctx.plugin(LlmRuntime)
+    await expect(ctx.plugin(CcPool, { requestLog: { enabled: false }, cacheTtl: '24h' } as never))
+      .rejects.toThrow(/cacheTtl/)
+    expect(ctx.llm.listProviders()).toEqual([])
+  })
+})

@@ -4,6 +4,7 @@ import {
   POOL_ERROR_CODE,
   POOL_NO_ACCOUNT_CODE,
   POOL_RATE_LIMITED_CODE,
+  POOL_REQUEST_CLOSED_CODE,
   POOL_SESSION_BUSY_CODE,
   POOL_TRANSIENT_CODE,
 } from '@deepseek-ai/dsh-llm'
@@ -23,6 +24,25 @@ function poolEnvelope(error: Record<string, unknown>, status = 429): string {
   return `${status} ${JSON.stringify({
     type: 'error',
     error: { origin: 'pool', scope: 'pool', ...error },
+  })}`
+}
+
+/** The readiness refusal's detail: an unverified lease egress path, reported as pool maintenance. */
+const READINESS_DETAIL = 'the egress path is not verified for this lease; worker detail:'
+  + ' capability_not_ready: the lease maintenance is not ready (retry after 10.7s)'
+
+/**
+ * The pool's readiness refusal as the online gateway writes it: a body request
+ * id and a non-retryable error, with neither a `cc_pool_*` code nor `origin`.
+ */
+function readinessEnvelope(
+  error: Record<string, unknown> = {},
+  poolRequestId: string | undefined = 'pool-request-readiness',
+): string {
+  return `503 ${JSON.stringify({
+    ...poolRequestId === undefined ? {} : { pool_request_id: poolRequestId },
+    type: 'error',
+    error: { message: READINESS_DETAIL, type: 'api_error', retryable: false, ...error },
   })}`
 }
 
@@ -76,6 +96,18 @@ const CATALOG_EXPECTED = [
     messageKey: 'pool.error.no_available_account',
     clientGuidance: 'no healthy pool account is currently available',
   },
+  {
+    type: 'cc_pool_request_closed',
+    code: POOL_REQUEST_CLOSED_CODE,
+    origin: 'pool',
+    httpStatus: 409,
+    scope: 'request',
+    retryable: true,
+    clientAction: 'retry_same',
+    poolAction: 'terminal',
+    messageKey: 'pool.error.request_closed',
+    clientGuidance: 'the pool already closed this client request id; only a new attempt with a fresh id is safe',
+  },
 ] as const
 
 /**
@@ -89,7 +121,6 @@ const NON_CATALOG_POOL_CODES = [
   'cc_pool_account_unavailable',
   'cc_pool_model_denied',
   'cc_pool_request_in_flight',
-  'cc_pool_request_closed',
   'cc_pool_outcome_unknown',
 ] as const
 
@@ -122,7 +153,7 @@ describe('pool error envelope', () => {
 })
 
 describe('generated pool error catalog', () => {
-  it('is the four-code single source in catalog order', () => {
+  it('is the five-code single source in catalog order', () => {
     expect(Object.keys(POOL_ERROR_CATALOG)).toEqual(CATALOG_EXPECTED.map(entry => entry.type))
     expect(Object.values(POOL_ERROR_CATALOG)).toEqual(CATALOG_EXPECTED)
     for (const [type, entry] of Object.entries(POOL_ERROR_CATALOG)) {
@@ -131,11 +162,11 @@ describe('generated pool error catalog', () => {
   })
 
   it('pins the catalog revision shared with the pool', () => {
-    expect(POOL_ERROR_CATALOG_VERSION).toBe('1.0.0')
+    expect(POOL_ERROR_CATALOG_VERSION).toBe('1.1.0')
     // The literal is a deliberate lock: regenerating from a different catalog
     // revision updates the artifact and this test in the same change.
     expect(POOL_ERROR_CATALOG_SHA256)
-      .toBe('2b31eaed88fddd812586795c22528bfcc8ba15118d5f6cf5ca4e3549c407861e')
+      .toBe('3f40dfb188bed6a135f3ab148e65079d3f9141282915d68e2622371e05056668')
   })
 
   it('excludes retired and direct-internal codes', () => {
@@ -211,6 +242,23 @@ describe('pool failure classification', () => {
       retryDisposition: 'forbid',
     })
     expect(failure?.message).toMatch(/wait for the current turn to finish before retrying/)
+  })
+
+  it('recovers a closed client request id with a retry instead of ending the turn', () => {
+    // The adapter stamps a fresh attempt id on every deliberate retry, so the
+    // resend is a new ledger entry; forbidding it would waste that recovery.
+    const failure = classifyPoolFailure(poolEnvelope({
+      type: 'cc_pool_request_closed',
+      retryable: false,
+      message: 'request already recorded',
+    }, 409))
+
+    expect(failure).toMatchObject({
+      code: POOL_REQUEST_CLOSED_CODE,
+      status: 409,
+    })
+    expect(failure?.retryDisposition).toBeUndefined()
+    expect(failure?.message).toMatch(/only a new attempt with a fresh id is safe/)
   })
 
   it('retries no-available-account within the finite retry budget', () => {
@@ -368,6 +416,149 @@ describe('pool failure classification', () => {
   })
 })
 
+describe('pool readiness refusal', () => {
+  it('reads the body request id beside the error fields', () => {
+    expect(parseProviderErrorEnvelope(readinessEnvelope())).toEqual({
+      poolRequestId: 'pool-request-readiness',
+      type: 'api_error',
+      retryable: false,
+      message: READINESS_DETAIL,
+    })
+  })
+
+  it('forbids resending the refusal so the ledger never sees a repeated request id', () => {
+    const failure = classifyPoolFailure(readinessEnvelope(), { status: 503 })
+
+    expect(failure).toMatchObject({
+      code: POOL_ERROR_CODE,
+      status: 503,
+      retryDisposition: 'forbid',
+    })
+    expect(failure?.message).toBe(
+      `${READINESS_DETAIL} (POOL_ERROR: the pool has not verified the egress path for this lease)`,
+    )
+  })
+
+  it('recognizes the capability_not_ready lease detail without the egress wording', () => {
+    const failure = classifyPoolFailure(readinessEnvelope({
+      message: 'worker detail: capability_not_ready: the lease maintenance is not ready',
+    }))
+
+    expect(failure).toMatchObject({ code: POOL_ERROR_CODE, retryDisposition: 'forbid' })
+    expect(failure?.status).toBe(503)
+  })
+
+  it('reads the readiness status from its own message prefix when no response was captured', () => {
+    expect(classifyPoolFailure(readinessEnvelope())).toMatchObject({
+      code: POOL_ERROR_CODE,
+      status: 503,
+      retryDisposition: 'forbid',
+    })
+  })
+
+  it('recognizes the readiness detail when the message carries no status prefix', () => {
+    const message = JSON.stringify({
+      pool_request_id: 'pool-request-readiness',
+      type: 'error',
+      error: { message: READINESS_DETAIL, type: 'api_error', retryable: false },
+    })
+
+    expect(classifyPoolFailure(message)).toMatchObject({
+      code: POOL_ERROR_CODE,
+      retryDisposition: 'forbid',
+    })
+  })
+
+  it.each([
+    ['a Claude api_error 5xx', `503 ${JSON.stringify({
+      type: 'error',
+      error: { type: 'api_error', message: 'Anthropic API is temporarily overloaded', retryable: false },
+    })}`],
+    ['a third-party 503 body', `503 ${JSON.stringify({
+      error: { type: 'server_error', message: 'The server is overloaded' },
+    })}`],
+    ['the readiness detail without a pool request id', `503 ${JSON.stringify({
+      type: 'error',
+      error: { type: 'api_error', retryable: false, message: READINESS_DETAIL },
+    })}`],
+    ['a readiness-looking 503 without a pool retry decision', `503 ${JSON.stringify({
+      pool_request_id: 'pool-request-unknown',
+      type: 'error',
+      error: { type: 'api_error', message: READINESS_DETAIL },
+    })}`],
+  ])('leaves %s to the text classifier', (_label, message) => {
+    expect(classifyPoolFailure(message)).toBeUndefined()
+  })
+
+  it('requires the pool non-retryable decision before it recognizes a readiness refusal', () => {
+    expect(classifyPoolFailure(readinessEnvelope({ retryable: true }))).toBeUndefined()
+  })
+
+  it('forbids a readiness 5xx whose detail wording drifted', () => {
+    const drifted = 'the lease is still being verified; retry this request later'
+    const failure = classifyPoolFailure(readinessEnvelope({ message: drifted }), { status: 503 })
+
+    expect(failure).toMatchObject({
+      code: POOL_ERROR_CODE,
+      status: 503,
+      retryDisposition: 'forbid',
+    })
+    expect(failure?.message).toBe(
+      `${drifted} (POOL_ERROR: the pool has not verified the egress path for this lease)`,
+    )
+  })
+
+  it('forbids a readiness 5xx even when its detail is absent', () => {
+    const failure = classifyPoolFailure(readinessEnvelope({ message: undefined }), { status: 503 })
+
+    expect(failure).toMatchObject({
+      code: POOL_ERROR_CODE,
+      status: 503,
+      retryDisposition: 'forbid',
+    })
+    expect(failure?.message).toContain('pool_request_id')
+  })
+
+  it('scopes the pool-marker fallback to 5xx responses', () => {
+    // A non-5xx rejection carrying the same markers is not the readiness
+    // refusal; it keeps the text classifier instead of gaining a pool code.
+    const rejection = `400 ${JSON.stringify({
+      pool_request_id: 'pool-request-rejected',
+      type: 'error',
+      error: { type: 'api_error', retryable: false, message: 'the lease is still being verified' },
+    })}`
+    // Below 5xx the markers alone do not identify the refusal; its lease detail
+    // still does, and a body carrying neither stays with the text classifier.
+    const markerOnly = JSON.stringify({
+      pool_request_id: 'pool-request-marker',
+      type: 'error',
+      error: { type: 'api_error', retryable: false },
+    })
+
+    expect(classifyPoolFailure(rejection, { status: 400 })).toBeUndefined()
+    expect(classifyPoolFailure(markerOnly)).toBeUndefined()
+  })
+
+  it('keeps a claude origin ahead of the readiness markers', () => {
+    expect(classifyPoolFailure(readinessEnvelope({ origin: 'claude' }))).toBeUndefined()
+  })
+
+  it('keeps a retryable pool code retryable when the body also echoes a request id', () => {
+    const failure = classifyPoolFailure(`429 ${JSON.stringify({
+      pool_request_id: 'pool-request-33',
+      type: 'error',
+      error: { type: 'cc_pool_rate_limited', retryable: true, message: 'account token bucket is empty' },
+    })}`, { status: 429, providerRetryAfterMs: 12_000 })
+
+    expect(failure).toMatchObject({
+      code: POOL_RATE_LIMITED_CODE,
+      status: 429,
+      providerRetryAfterMs: 12_000,
+    })
+    expect(failure?.retryDisposition).toBeUndefined()
+  })
+})
+
 describe('provider error capture', () => {
   it('records the failed status and Retry-After without consuming the body', async () => {
     const capture = new ProviderErrorCapture(async () => new Response('error body', {
@@ -430,5 +621,36 @@ describe('provider error capture', () => {
     await failing.fetch('http://127.0.0.1/one', {})
     await failing.fetch('http://127.0.0.1/two', {})
     expect(failing.read()).toEqual({ status: 429 })
+  })
+
+  it('retains the response status and pool request id for diagnostics', async () => {
+    const capture = new ProviderErrorCapture(async () => new Response('ok', {
+      status: 201,
+      headers: { 'x-cc-pool-request-id': 'pool-request-4' },
+    }))
+
+    await capture.fetch('http://127.0.0.1/one', {})
+
+    expect(capture.readResponse()).toEqual({ status: 201, poolRequestId: 'pool-request-4' })
+    expect(capture.read()).toBeUndefined()
+
+    const plain = new ProviderErrorCapture(async () => new Response('ok', { status: 200 }))
+    await plain.fetch('http://127.0.0.1/two', {})
+    expect(plain.readResponse()).toEqual({ status: 200 })
+  })
+
+  it('retains the transport Error that rejected the fetch', async () => {
+    const failure = new TypeError('fetch failed', { cause: new Error('connect ECONNREFUSED') })
+    const capture = new ProviderErrorCapture(() => Promise.reject(failure))
+
+    await expect(capture.fetch('http://127.0.0.1:1/unused', {})).rejects.toBe(failure)
+
+    expect(capture.readTransportError()).toBe(failure)
+    expect(capture.readResponse()).toBeUndefined()
+    expect(capture.read()).toBeUndefined()
+
+    const connected = new ProviderErrorCapture(async () => new Response('ok'))
+    await connected.fetch('http://127.0.0.1/unused', {})
+    expect(connected.readTransportError()).toBeUndefined()
   })
 })

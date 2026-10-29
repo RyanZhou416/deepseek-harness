@@ -59,6 +59,14 @@ export const POOL_SESSION_BUSY_CODE = 'POOL_SESSION_BUSY'
 export const POOL_NO_ACCOUNT_CODE = 'POOL_NO_ACCOUNT'
 
 /**
+ * Canonical provider-neutral code for a pool that already closed the ledger
+ * entry of the client request id an attempt sent. The attempt itself cannot be
+ * repeated under that id; the next deliberate attempt sends a fresh id, so the
+ * failure is recoverable within the retry budget rather than terminal.
+ */
+export const POOL_REQUEST_CLOSED_CODE = 'POOL_REQUEST_CLOSED'
+
+/**
  * Canonical provider-neutral code for an unrecognized pool failure that the
  * envelope marks retryable (or whose `client_action` asks for a repeated
  * request). Retryable within the route's finite retry budget.

@@ -85,6 +85,30 @@ const THINKING_LEVEL_GATE: Record<ModelThinkingLevel, true> = {
 /** Every pi-ai thinking level a profile may declare, in escalation order. */
 export const THINKING_LEVELS = Object.keys(THINKING_LEVEL_GATE) as readonly ModelThinkingLevel[]
 
+/**
+ * Selectable thinking levels for one materialized model, in pi-ai's escalation
+ * order.
+ *
+ * A model pi-ai reports as non-reasoning supports the single level `off`, which
+ * callers either withhold from selectors or translate to omitting the reasoning
+ * option. A reasoning model offers every level its map does not pin to `null`;
+ * `xhigh` and `max` are offered only when the map names them, matching pi-ai's
+ * asymmetric defaulting.
+ * @param model - the model's reasoning capability and wire map.
+ * @returns the offered levels in escalation order.
+ */
+export function supportedThinkingLevels(
+  model: Pick<Model<Api>, 'reasoning' | 'thinkingLevelMap'>,
+): ModelThinkingLevel[] {
+  if (!model.reasoning) return ['off']
+  return THINKING_LEVELS.filter((level) => {
+    const mapped = model.thinkingLevelMap?.[level]
+    if (mapped === null) return false
+    if (level === 'xhigh' || level === 'max') return mapped !== undefined
+    return true
+  })
+}
+
 /** One reasoning-dispatch wire format a profile may name. */
 export type PiAiThinkingFormat = NonNullable<OpenAICompletionsCompat['thinkingFormat']>
 
@@ -634,6 +658,14 @@ export interface PiAiModelProfile {
    * declares the offered levels and their wire spellings.
    */
   reasoningEfforts?: false | PiAiReasoningEfforts
+  /**
+   * Default thinking level for this model, preferred over the route-level
+   * `reasoning` when a caller names no effort. It must be a level the model
+   * offers — one declared in {@link reasoningEfforts}, or, when that field is
+   * absent, one the installed catalog entry declares — and only a reasoning
+   * model may set it. The seam materializes it as this model's `defaultEffort`.
+   */
+  reasoning?: ModelThinkingLevel
   /** pi-ai wire-compatibility switches for this model, winning over the route's per field; one its protocol does not declare is refused. */
   compat?: PiAiCompatProfile
 }
@@ -843,6 +875,16 @@ export interface RouteCatalog {
    * picked, so only an explicit configuration lands here.
    */
   configuredMaxTokens: ReadonlyMap<string, number>
+  /**
+   * Per-model default thinking levels this profile explicitly configured, by
+   * model id.
+   *
+   * Separate from the route-level `reasoning` fallback because the two answer
+   * different questions: a model's own value picks among the levels that model
+   * offers, while a model that configures none takes the route's level. Only an
+   * explicit configuration lands here.
+   */
+  defaultReasoning: ReadonlyMap<string, ModelThinkingLevel>
 }
 
 /**
@@ -852,7 +894,7 @@ export interface RouteCatalog {
  * `providers: { deepseek: { apiKeyEnv: … } }` profile working untouched.
  * @param request - the route-level catalog facts.
  * @param validation - strict writes reject every error; deferred reads retain model diagnostics.
- * @returns the materialized models and the explicitly configured request caps.
+ * @returns the materialized models plus the explicitly configured request caps and model defaults.
  */
 export function resolveRouteModels(
   request: RouteCatalogRequest,
@@ -908,6 +950,7 @@ export function resolveRouteModels(
   assertOfferedCompatFields(provider, 'route', request.compat)
   const seen = new Set<string>()
   const configuredMaxTokens = new Map<string, number>()
+  const defaultReasoning = new Map<string, ModelThinkingLevel>()
   const resolveEntry = (entry: PiAiModelProfile): Model<Api> => {
     assertOfferedCompatFields(provider, `model "${entry.id}"`, entry.compat)
     if (entry.id.length === 0) invalid(provider, 'has a model with an empty id')
@@ -938,7 +981,7 @@ export function resolveRouteModels(
     // Only a value the profile named is a deployment choice; the catalog's is
     // the model's capability and stays out of request defaults.
     if (entry.maxTokens !== undefined) configuredMaxTokens.set(entry.id, entry.maxTokens)
-    return {
+    const model: Model<Api> = {
       // The installed entry lays the floor, and the fields below override it.
       // Enumerating instead would silently drop every `Model` field this
       // package does not model — reasoning-level spellings, compatibility
@@ -957,6 +1000,25 @@ export function resolveRouteModels(
       ...resolveModelReasoning(provider, entry, base),
       ...resolveModelCompat(provider, entry, request.compat, base, api),
     }
+    // A model default is the deployment's choice among this model's own
+    // levels, so it is validated against the capability the model actually
+    // materialized — the declared efforts, or the installed entry's map when
+    // the field is absent. The route-level `reasoning` instead stays a
+    // describing fallback: a level one model cannot take must not hide the
+    // other models on the route.
+    if (entry.reasoning !== undefined) {
+      if (!model.reasoning) {
+        invalid(provider, `model "${entry.id}" sets reasoning "${entry.reasoning}" but does not reason; set`
+          + ' reasoningEfforts to the levels this model offers, or remove reasoning')
+      }
+      const offered = supportedThinkingLevels(model)
+      if (!offered.includes(entry.reasoning)) {
+        invalid(provider, `model "${entry.id}" sets reasoning "${entry.reasoning}", which this model does not`
+          + ` offer; it offers ${offered.join(', ')}`)
+      }
+      defaultReasoning.set(entry.id, entry.reasoning)
+    }
+    return model
   }
   const models: Model<Api>[] = []
   for (const entry of entries) {
@@ -970,8 +1032,10 @@ export function resolveRouteModels(
     }
     models.push(model)
   }
-  // A later duplicate invalidates the id, including an earlier resolved entry.
+  // A later duplicate invalidates the id, including an earlier resolved entry
+  // and the default it materialized.
   const serviceableModels = models.filter(model => !modelErrors.has(model.id))
+  const serviceableDefaults = new Map([...defaultReasoning].filter(([id]) => !modelErrors.has(id)))
   // Per field, not per block: a route may default a switch its completions
   // models take beside one only its anthropic models do, and neither should
   // fail for the other's sake. What is refused is a route default no model on
@@ -982,5 +1046,5 @@ export function resolveRouteModels(
     invalid(provider, `sets compat "${field}", but no model on the route speaks a protocol that takes it;`
       + ` it exists on ${takers.join(', ')}`)
   }
-  return { models: serviceableModels, configuredMaxTokens, modelErrors }
+  return { models: serviceableModels, configuredMaxTokens, defaultReasoning: serviceableDefaults, modelErrors }
 }

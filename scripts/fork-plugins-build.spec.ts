@@ -6,11 +6,11 @@ import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import {
   assertStagedArtifacts, assertStagedManifest, buildSubscriptionsTransport, bunPlatformRuntime,
-  copyStagedEntries, dependencyPreparationError, ensurePluginDependencies, lockfileAutoInstallPeers,
+  copyStagedEntries, declaresLegacyPoolProvider, dependencyPreparationError, ensurePluginDependencies, lockfileAutoInstallPeers,
   localDependencyPath, lockedDependencyVersion, lockedUndiciVersion, parseArguments, PLUGINS,
-  pluginInstallArguments, privateDependencySpecs, resolveHome, sourceHash, sourcePaths,
-  stageBunRuntime, stagedManifest, stagingIsCurrent, subscriptionsRuntimeArtifacts,
-  SUBSCRIPTIONS_TRANSPORT_MODULES, writeStagedManifest,
+  pluginInstallArguments, privateDependencySpecs, registryPeerRange, resolveHome, sourceHash, sourcePaths,
+  stageBunRuntime, stagedManifest, stagedWorkspaceManifest, stageWorkspacePlugin, stagingIsCurrent,
+  subscriptionsRuntimeArtifacts, SUBSCRIPTIONS_TRANSPORT_MODULES, WORKSPACE_PLUGINS, writeStagedManifest,
   type BuildState, type PluginCommandRunner, type PluginDefinition, type PluginManifest,
 } from './fork-plugins-build.ts'
 
@@ -487,4 +487,86 @@ describe('subscriptions transport staging', () => {
       await rm(root, { recursive: true, force: true })
     }
   }, 30_000)
+})
+
+describe('workspace plugin staging', () => {
+  it('detects a legacy llm-pi-ai pool provider without matching the dedicated row', () => {
+    expect(declaresLegacyPoolProvider('    providers:\n      cc-pool:\n        api: anthropic-messages\n')).toBe(true)
+    expect(declaresLegacyPoolProvider('  cc-pool: # stale\n')).toBe(true)
+    expect(declaresLegacyPoolProvider('- insert:\n    - id: llm-cc-pool\n      name: \'@deepseek-ai/dsh-llm-cc-pool\'\n')).toBe(false)
+    expect(declaresLegacyPoolProvider('# providers.cc-pool was removed\n')).toBe(false)
+  })
+
+  it('links the llm-cc-pool workspace package into the profile', () => {
+    expect(WORKSPACE_PLUGINS.map(entry => entry.name)).toEqual(['@deepseek-ai/dsh-llm-cc-pool'])
+    const entry = WORKSPACE_PLUGINS[0]
+    expect(entry).toBeDefined()
+    expect(entry?.builder).toBe('workspace')
+    expect(entry?.directory).toBe(join(REPOSITORY_ROOT, 'packages', 'llm', 'llm-cc-pool'))
+    expect(entry?.outputs).toEqual(['lib/index.js'])
+    expect(entry?.stage).toEqual(['lib', 'cordis.patch.yml'])
+  })
+
+  it('converts workspace peer ranges into registry ranges', () => {
+    expect(registryPeerRange('workspace:*', '0.2.1-rc.2')).toBe('0.2.1-rc.2')
+    expect(registryPeerRange('workspace:~', '4.0.5')).toBe('~4.0.5')
+    expect(registryPeerRange('workspace:^', '1.2.3')).toBe('^1.2.3')
+    expect(registryPeerRange('workspace:^1.2.3', '9.9.9')).toBe('^1.2.3')
+    expect(registryPeerRange('^2.0.0', '9.9.9')).toBe('^2.0.0')
+  })
+
+  it('stages a workspace manifest without build-time or workspace dependencies', async () => {
+    const manifest = await stagedWorkspaceManifest({
+      name: '@deepseek-ai/dsh-llm-cc-pool',
+      version: '0.2.1-rc.2',
+      type: 'module',
+      main: 'lib/index.js',
+      scripts: { build: 'tsdown' },
+      dependencies: { '@deepseek-ai/schemastery': 'workspace:~' },
+      devDependencies: { vitest: '4.1.11' },
+      peerDependencies: {
+        '@deepseek-ai/cordis': 'workspace:~',
+        '@deepseek-ai/dsh-llm': 'workspace:*',
+      },
+      peerDependenciesMeta: { '@deepseek-ai/cordis': { optional: true } },
+      publishConfig: { access: 'public' },
+      dsh: { bundle: { patch: './cordis.patch.yml' } },
+    }, async name => name === '@deepseek-ai/cordis' ? '4.0.5' : '0.2.1-rc.2')
+
+    expect(manifest).toMatchObject({
+      name: '@deepseek-ai/dsh-llm-cc-pool',
+      dsh: { bundle: { patch: './cordis.patch.yml' } },
+      peerDependencies: { '@deepseek-ai/cordis': '~4.0.5', '@deepseek-ai/dsh-llm': '0.2.1-rc.2' },
+    })
+    for (const field of ['scripts', 'dependencies', 'devDependencies', 'peerDependenciesMeta', 'publishConfig']) {
+      expect(manifest[field]).toBeUndefined()
+    }
+  })
+
+  it('copies the root build output and the bundle patch into staging', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-fork-workspace-stage-'))
+    try {
+      const source = join(root, 'source')
+      await mkdir(join(source, 'lib'), { recursive: true })
+      await writeFile(join(source, 'lib', 'index.js'), 'export const plugin = true\n')
+      await writeFile(join(source, 'cordis.patch.yml'), '- insert: []\n')
+      await writeFile(join(source, 'package.json'), `${JSON.stringify({
+        name: '@deepseek-ai/dsh-llm-cc-pool',
+        version: '0.2.1-rc.2',
+        peerDependencies: { '@deepseek-ai/dsh-llm': 'workspace:*' },
+        dsh: { bundle: { patch: './cordis.patch.yml' } },
+      }, undefined, 2)}\n`)
+      const definition: PluginDefinition = { ...WORKSPACE_PLUGINS[0]!, directory: source }
+      const staging = join(root, 'staging')
+
+      await stageWorkspacePlugin(definition, staging)
+
+      expect(await readFile(join(staging, 'lib', 'index.js'), 'utf8')).toBe('export const plugin = true\n')
+      expect(await readFile(join(staging, 'cordis.patch.yml'), 'utf8')).toBe('- insert: []\n')
+      const staged = JSON.parse(await readFile(join(staging, 'package.json'), 'utf8')) as PluginManifest
+      expect(staged.peerDependencies).toEqual({ '@deepseek-ai/dsh-llm': '0.2.1-rc.2' })
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
 })

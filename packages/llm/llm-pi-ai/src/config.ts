@@ -43,6 +43,13 @@ import type {
 } from './catalog.ts'
 import { POOL_RETRYABLE_CODES } from './pool-error.ts'
 import { buildProvider, supportedProtocols } from './provider.ts'
+import {
+  DEFAULT_REQUEST_LOG_MAX_FILE_BYTES,
+  DEFAULT_REQUEST_LOG_MAX_FILES,
+  defaultRequestLogPath,
+  MAX_REQUEST_LOG_TOTAL_BYTES,
+} from './request-log.ts'
+import type { ResolvedRequestLogConfig } from './request-log.ts'
 
 /** Default maximum idle interval while an adapter stream read is outstanding. */
 export const DEFAULT_STREAM_IDLE_TIMEOUT_MS = 300_000
@@ -61,6 +68,20 @@ export const DEFAULT_MAX_REQUEST_IMAGE_BYTES = 20 * 1024 * 1024
 export const DEFAULT_REQUEST_IMAGE_PIXEL_BUDGET = 2048 * 2048
 /** Default raw encoded-byte target before inline base64 expansion; the smallest quality-ladder output is used when no quality fits. */
 export const DEFAULT_REQUEST_IMAGE_MAX_BYTES = 1024 * 1024
+
+/**
+ * Prompt-cache marker placement policies a route may opt into.
+ *
+ * Omission leaves placement to pi-ai's `cacheRetention` handling. `cc4` is the
+ * Claude Code four-marker layout: the first system block, the last tool
+ * declaration, the last cacheable user content block, and the last cacheable
+ * assistant content block. The policy owns the complete marker set on the
+ * route, so it removes every marker pi-ai or a caller placed first.
+ */
+export const CACHE_MARKER_POLICIES = ['cc4'] as const
+
+/** One placement policy from {@link CACHE_MARKER_POLICIES}. */
+export type PiAiCacheMarkerPolicy = (typeof CACHE_MARKER_POLICIES)[number]
 
 /** Context capacity assumed for a model neither configuration nor the catalog sizes. */
 export const DEFAULT_CONTEXT_WINDOW = 262_144
@@ -151,12 +172,45 @@ export interface PiAiProviderProfile {
   defaultInput?: PiAiModality[]
   /** Provider request headers, validated against Fetch when the profile resolves; Harness attribution wins reserved names. */
   headers?: Record<string, string>
-  /** Provider-neutral pi-ai reasoning level. */
+  /**
+   * Route-level default pi-ai reasoning level: described as the default effort
+   * of every model on this route that configures no {@link PiAiModelProfile.reasoning}
+   * of its own, and materialized into a request that names no effort. A level
+   * describes only where the model offers it, so one model that cannot take it
+   * does not hide the rest; a request asking for such a level still fails
+   * before provider I/O.
+   */
   reasoning?: ModelThinkingLevel
   /** Token budgets used by reasoning providers that support them. */
   thinkingBudgets?: ThinkingBudgets
   /** Prompt-cache retention preference. */
   cacheRetention?: CacheRetention
+  /**
+   * Add `extended-cache-ttl-2025-04-11` to the `anthropic-beta` header of an
+   * Anthropic Messages request. Opt-in and independent of
+   * {@link cacheRetention}: `long` retention writes `ttl: "1h"` on the cache
+   * markers but does not declare the beta, so a route that needs the extended
+   * lifetime sets both. The beta joins the request's `betas` list before the
+   * Anthropic SDK serializes it, which keeps every automatic beta pi-ai derives
+   * for the route. Refused when no model on the route speaks
+   * `anthropic-messages`.
+   */
+  extendedCacheBeta?: boolean
+  /**
+   * Prompt-cache marker placement this route's adapter performs on an Anthropic
+   * Messages request. Omission keeps pi-ai's placement from
+   * {@link cacheRetention}. `cc4` places exactly the Claude Code four-marker
+   * layout — the first system block, the last tool declaration, the last user
+   * content block, and the last assistant content block — with
+   * `{type: "ephemeral", ttl: "1h"}` on each and discards every other marker on
+   * the route. It owns placement outright, so it takes precedence over
+   * `cacheRetention` and over `compat.supportsCacheControlOnTools`; a request
+   * with no tool declaration or no assistant turn carries only the slots it
+   * has. The policy adds no `scope` field and no scope beta, and
+   * {@link extendedCacheBeta} stays a separate explicit opt-in. Refused when
+   * no model on the route speaks `anthropic-messages`.
+   */
+  cacheMarkerPolicy?: PiAiCacheMarkerPolicy
   /** Streaming transport preference. */
   transport?: Transport
   /** HTTP/provider SDK timeout in milliseconds. */
@@ -222,6 +276,12 @@ export interface ResolvedPiAiProviderProfile
    * own, so a catalog capability must not appear here.
    */
   configuredMaxTokens: ReadonlyMap<string, number>
+  /**
+   * Per-model default reasoning effort this profile explicitly configured, by
+   * model id. One of these wins over the route-level {@link PiAiProviderProfile.reasoning}
+   * when the adapter describes the model's default effort.
+   */
+  defaultReasoning: ReadonlyMap<string, ModelThinkingLevel>
 }
 
 /** Plugin configuration: the provider routes this instance owns. */
@@ -232,6 +292,51 @@ export interface Config {
    * and registers them the moment a settings section supplies profiles.
    */
   providers: Volatile<Record<string, PiAiProviderProfile>>
+  /**
+   * Provider routes whose requests carry the Claude Code session identity a
+   * conversation-aware endpoint reads: `X-Claude-Code-Session-Id` from the
+   * request's `sessionId`, `x-cc-session-name` from its display name when it has
+   * one, and one `x-client-request-id` per deliberate attempt, so a retry never
+   * resends the id the endpoint already recorded. These names are adapter-owned
+   * on such a route: a profile header spelled the same way in any casing is
+   * replaced rather than sent beside them. The display name is sanitized to the
+   * pool's accepted display set (no control, bidi, or zero-width scalars, and no
+   * reserved placeholder such as 空闲 or 未知) before it is encoded. One route
+   * name or a list of them; a route not named here is left alone. A name
+   * matching no configured route has no effect, because the route set is
+   * settings-owned and may be supplied after this composition layer.
+   */
+  sessionHeaders?: string | string[]
+  /**
+   * Optional durable NDJSON file for the same request diagnostics the plugin
+   * logger records. With no configuration, routes named by `sessionHeaders`
+   * still persist their records to `$DSH_HOME/logs/llm-pi-ai-requests.jsonl`,
+   * so a pool route keeps client-side evidence without extra configuration;
+   * `enabled: true` extends persistence to every route, and `enabled: false`
+   * turns the file off entirely. The file never carries messages, request
+   * bodies, credentials, token counts, or session titles. Loader configuration
+   * is read when the plugin mounts, so a change takes effect at the next start.
+   */
+  requestLog?: PiAiRequestLogProfile
+}
+
+/**
+ * Durable request-diagnostic log settings.
+ *
+ * Records rotate by size and the retained set stays within 128 MiB: the
+ * effective per-file bound is the smaller of `maxFileBytes` and that total, and
+ * the effective file count is the smaller of `maxFiles` and the total divided
+ * by the per-file bound. The oldest rotation is deleted first.
+ */
+export interface PiAiRequestLogProfile {
+  /** Absolute NDJSON file path; defaults to `$DSH_HOME/logs/llm-pi-ai-requests.jsonl`. */
+  path?: string
+  /** Bytes one file holds before it rotates (default 16 MiB). */
+  maxFileBytes?: number
+  /** Files retained including the active one (default 8). */
+  maxFiles?: number
+  /** Persist every route rather than only `sessionHeaders` routes (default false). */
+  enabled?: boolean
 }
 
 /** Plain options accepted by the provider resolver. */
@@ -318,6 +423,7 @@ const modelFields = {
   // `{}`, and absent must stay distinguishable — it means "inherit the
   // installed catalog's capability", while `false` disables reasoning.
   reasoningEfforts: z.union([z.const(false), reasoningEfforts]),
+  reasoning: z.union(THINKING_LEVELS),
   compat: compatProfile,
 }
 
@@ -344,6 +450,8 @@ const profile = z.object({
   reasoning: z.union(THINKING_LEVELS),
   thinkingBudgets,
   cacheRetention: z.union(['none', 'short', 'long']),
+  extendedCacheBeta: z.boolean(),
+  cacheMarkerPolicy: z.union(CACHE_MARKER_POLICIES),
   transport: z.union(['sse', 'websocket', 'websocket-cached', 'auto']),
   timeoutMs: z.natural(),
   websocketConnectTimeoutMs: z.natural(),
@@ -354,10 +462,86 @@ const profile = z.object({
   retryPolicy: RetryPolicySchema,
 })
 
+/** Runtime schema for one {@link PiAiRequestLogProfile}. */
+export const PiAiRequestLogProfileSchema: z<PiAiRequestLogProfile> = z.object({
+  path: z.string().min(1),
+  maxFileBytes: z.number().step(1).min(1),
+  maxFiles: z.number().step(1).min(1),
+  enabled: z.boolean(),
+})
+
 /** Runtime schema for {@link Config}. */
 export const Config = z.object({
   providers: z.dict(profile).default({}).volatile(),
+  sessionHeaders: z.union([z.string().min(1), z.array(z.string().min(1))]),
+  requestLog: PiAiRequestLogProfileSchema,
 })
+
+/** The route set of a composition that opted no provider into session headers. */
+const NO_SESSION_HEADERS: ReadonlySet<string> = new Set()
+
+/**
+ * Resolve the configured `sessionHeaders` value into the immutable route set
+ * the adapter tests per request.
+ *
+ * One route name and a list are both accepted so a composition with a single
+ * conversation-aware route need not spell out a list. A repeated or empty name
+ * is refused rather than deduplicated: both are configuration mistakes whose
+ * effect would otherwise depend on order.
+ * @param value - the configured route name, route names, or omission.
+ * @returns frozen provider routes that receive session identity headers.
+ * @throws Error naming the empty or repeated route.
+ */
+export function resolveSessionHeaders(value: string | readonly string[] | undefined): ReadonlySet<string> {
+  if (value === undefined) return NO_SESSION_HEADERS
+  const names = typeof value === 'string' ? [value] : [...value]
+  const routes = new Set<string>()
+  for (const name of names) {
+    if (name.length === 0) throw new Error('llm-pi-ai: sessionHeaders names an empty provider route')
+    if (routes.has(name)) throw new Error(`llm-pi-ai: sessionHeaders names provider route "${name}" twice`)
+    routes.add(name)
+  }
+  return routes.size === 0 ? NO_SESSION_HEADERS : Object.freeze(routes)
+}
+
+/**
+ * Resolve the request-log configuration into the settings one sink runs with.
+ *
+ * The sink exists when the deployment configured it or when a route carries
+ * the session identity: a pool route is the one whose client-side evidence
+ * matters when a request never reaches the pool, so it persists without
+ * opting in. `enabled: true` extends persistence to every route, while
+ * `enabled: false` turns the file off even for `sessionHeaders` routes.
+ *
+ * The retained set stays within {@link MAX_REQUEST_LOG_TOTAL_BYTES}: the
+ * per-file bound is clamped to that total and the file count to the total
+ * divided by the per-file bound, so configured bounds cannot exceed it.
+ * @param value - the configured request-log settings, if any.
+ * @param sessionHeaders - routes that receive the session identity headers.
+ * @returns the resolved settings, or undefined when no file is written.
+ * @throws Error naming a bound that is not a positive integer or an empty path.
+ */
+export function resolveRequestLog(
+  value: PiAiRequestLogProfile | undefined,
+  sessionHeaders: ReadonlySet<string>,
+): ResolvedRequestLogConfig | undefined {
+  if (value?.enabled === false) return undefined
+  const allRoutes = value?.enabled === true
+  if (!allRoutes && sessionHeaders.size === 0) return undefined
+  const path = value?.path ?? defaultRequestLogPath()
+  if (path.length === 0) throw new Error('llm-pi-ai: requestLog.path must be a non-empty file path')
+  const maxFileBytes = value?.maxFileBytes ?? DEFAULT_REQUEST_LOG_MAX_FILE_BYTES
+  if (!Number.isSafeInteger(maxFileBytes) || maxFileBytes < 1) {
+    throw new Error('llm-pi-ai: requestLog.maxFileBytes must be a positive integer')
+  }
+  const maxFiles = value?.maxFiles ?? DEFAULT_REQUEST_LOG_MAX_FILES
+  if (!Number.isSafeInteger(maxFiles) || maxFiles < 1) {
+    throw new Error('llm-pi-ai: requestLog.maxFiles must be a positive integer')
+  }
+  const fileBytes = Math.min(maxFileBytes, MAX_REQUEST_LOG_TOTAL_BYTES)
+  const files = Math.min(maxFiles, Math.floor(MAX_REQUEST_LOG_TOTAL_BYTES / fileBytes))
+  return Object.freeze({ path, maxFileBytes: fileBytes, maxFiles: files, allRoutes })
+}
 
 /**
  * Reject new or changed provider profiles that cannot be served. Unchanged
@@ -525,6 +709,14 @@ export function resolveProfiles(
       if (validation === 'strict' || !(error instanceof PiAiCatalogError)) throw error
       catalogError ??= error.message
     }
+    if (validation === 'strict'
+      && (source.extendedCacheBeta === true || source.cacheMarkerPolicy !== undefined)
+      && !catalog?.models.some(model => model.api === 'anthropic-messages')) {
+      const field = source.cacheMarkerPolicy === undefined ? 'extendedCacheBeta' : 'cacheMarkerPolicy'
+      throw new Error(
+        `llm-pi-ai: provider "${provider}" sets ${field}, but no model on the route speaks anthropic-messages`,
+      )
+    }
     const { apiKeyEnv, retryPolicy, models: _models, displayName: _displayName, ...rest } = source
     resolved.set(provider, {
       ...rest,
@@ -539,6 +731,7 @@ export function resolveProfiles(
       ...rest.headers === undefined ? {} : { headers: { ...rest.headers } },
       ...rest.thinkingBudgets === undefined ? {} : { thinkingBudgets: { ...rest.thinkingBudgets } },
       configuredMaxTokens: catalog?.configuredMaxTokens ?? new Map(),
+      defaultReasoning: catalog?.defaultReasoning ?? new Map(),
       modelErrors: catalog?.modelErrors ?? new Map(),
       ...piProvider === undefined ? {} : { piProvider },
       ...catalogError === undefined ? {} : { catalogError },

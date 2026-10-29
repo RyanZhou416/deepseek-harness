@@ -1,6 +1,6 @@
 /** Profile patch edits and credential updates reach the next real adapter request. */
 
-import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
@@ -14,7 +14,7 @@ import LocalCredentialProvider from '@deepseek-ai/dsh-credentials-local'
 import { profileComposition } from '../../../settings/settings/tests/profile-composition.ts'
 import * as LlmPiAi from '@deepseek-ai/dsh-llm-pi-ai'
 import { assemble } from './assemble.ts'
-import { closeMockServers, mockServer, textEvents } from './mock-server.ts'
+import { anthropicTextEvents, closeMockServers, mockServer, textEvents } from './mock-server.ts'
 
 /** One text block, then a tool call truncated by the output-token ceiling. */
 const truncatedToolCallEvents = [
@@ -37,8 +37,13 @@ afterEach(async () => {
   vi.unstubAllEnvs()
 })
 
-/** Boot the dormant composition: a bare `llm-pi-ai` row with no config at all. */
-async function loadComposition(): Promise<{ ctx: Context; settingsPath: string }> {
+/**
+ * Boot the dormant composition: a bare `llm-pi-ai` row with no config at all.
+ * @param extraConfig - lines appended to the `llm-pi-ai` row's `config:`
+ *   section; the callback receives the private temporary root, so a case can
+ *   point the durable request log inside it.
+ */
+async function loadComposition(extraConfig?: (root: string) => string[]): Promise<{ ctx: Context; settingsPath: string; root: string }> {
   root = await mkdtemp(join(tmpdir(), 'dsh-pi-composition-'))
   await writeFile(join(root, '.credentials.yaml'), 'version: 1\nrefs:\n  PI_COMPOSITION_KEY: key-from-store\n', { mode: 0o600 })
 
@@ -55,6 +60,7 @@ async function loadComposition(): Promise<{ ctx: Context; settingsPath: string }
     "  name: '@deepseek-ai/dsh-authorization'",
     '- id: llm-pi-ai',
     "  name: '@deepseek-ai/dsh-llm-pi-ai'",
+    ...extraConfig === undefined ? [] : ['  config:', ...extraConfig(root)],
     '',
   ].join('\n'))
 
@@ -83,7 +89,7 @@ async function loadComposition(): Promise<{ ctx: Context; settingsPath: string }
   }
   ctx.loader.internal = internal
   const patchPath = await profileComposition(ctx, root, configPath)
-  return { ctx, settingsPath: patchPath }
+  return { ctx, settingsPath: patchPath, root }
 }
 
 describe('llm-pi-ai real dormant composition', () => {
@@ -289,4 +295,37 @@ describe('llm-pi-ai real dormant composition', () => {
       ],
     })
   })
+
+  it('persists pool-route diagnostics to the composed request log', async () => {
+    const server = await mockServer([{ events: anthropicTextEvents }])
+    const { ctx, root: profileRoot } = await loadComposition(home => [
+      '    sessionHeaders: cc-pool',
+      '    requestLog:',
+      `      path: ${JSON.stringify(join(home, 'requests.jsonl'))}`,
+      '    providers:',
+      '      cc-pool:',
+      '        apiKeyEnv: PI_COMPOSITION_KEY',
+      '        api: anthropic-messages',
+      `        baseURL: ${server.url}`,
+      '        models:',
+      '          - id: claude-sonnet-4-6',
+    ])
+    await vi.waitFor(() => {
+      expect(ctx.llm.listProviders().map(provider => provider.id)).toEqual(['cc-pool'])
+    }, { timeout: 5000 })
+
+    await assemble(ctx, {
+      provider: 'cc-pool',
+      model: 'claude-sonnet-4-6',
+      messages: [createUserMessage({ content: [{ type: 'text', text: 'composed' }], source: { kind: 'user' } })],
+      sessionId: 'session-composed-log' as never,
+    })
+    const logPath = join(profileRoot, 'requests.jsonl')
+    await vi.waitFor(async () => {
+      const records = (await readFile(logPath, 'utf8')).trim().split('\n').map(line => JSON.parse(line) as Record<string, unknown>)
+      expect(records.map(record => record['kind'])).toEqual(['request', 'response'])
+      expect(records[0]).toMatchObject({ provider: 'cc-pool', sessionId: 'session-composed-log', attempt: 1 })
+      expect(records[1]).toMatchObject({ status: 200 })
+    }, { timeout: 5000 })
+  }, 15_000)
 })

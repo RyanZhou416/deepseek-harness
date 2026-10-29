@@ -240,6 +240,10 @@ describe('provider-routed retry policy', () => {
     await idle
 
     expect(adapter.requests).toHaveLength(2)
+    // The retried attempt carries the durable retry record's identity, so the
+    // adapter can give it a fresh transport id instead of replaying the first.
+    expect(adapter.requests[0]?.attemptNonce).toBeUndefined()
+    expect(adapter.requests[1]?.attemptNonce).toBe(`${event.data.retryId}:1`)
     expect(agent.session.snapshotEvents().filter(item => item.type === 'step/start').map(item => item.data))
       .toEqual([{ turn: 1, step: 1 }])
     expect(agent.session.deriveMessages().at(-1)).toEqual({

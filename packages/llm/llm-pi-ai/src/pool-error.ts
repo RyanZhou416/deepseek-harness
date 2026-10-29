@@ -6,13 +6,19 @@
  * accounts puts its own stable `cc_pool_*` code, origin, and retry decision in
  * that body; the HTTP status alone cannot distinguish those failures from the
  * Claude errors the same endpoint returns. This module reads the envelope for
- * pool-origin failures and leaves every other failure to the existing text
- * classifier in `stream.ts`, so a Claude-native rejection keeps its original
- * code and wording.
+ * pool-origin failures and for the pool's readiness refusal, which carries a
+ * body request id and retry decision instead; every other failure keeps the
+ * existing text classifier in `stream.ts`, so a Claude-native rejection keeps
+ * its original code and wording. A 5xx refusal carrying both readiness markers
+ * is terminal without reading the pool's detail text, so a reworded refusal
+ * cannot drift back into the retryable text classification.
  *
  * The pool owns account selection, cooldown, and session binding. This module
  * only decides what the client may do with the refusal: retry after the
- * disclosed wait, wait for the turn that holds the session, or stop.
+ * disclosed wait, wait for the turn that holds the session, or stop. A closed
+ * client request id is recoverable because this adapter stamps a new id on every
+ * deliberate attempt, so the catalog asks for a retry of the request rather than
+ * forbidding one: the next attempt is a fresh ledger entry, not a replay.
  *
  * @module dsh-llm-pi-ai/pool-error
  */
@@ -22,6 +28,7 @@ import {
   POOL_ERROR_CODE,
   POOL_NO_ACCOUNT_CODE,
   POOL_RATE_LIMITED_CODE,
+  POOL_REQUEST_CLOSED_CODE,
   POOL_TRANSIENT_CODE,
 } from '@deepseek-ai/dsh-llm'
 import type { LlmFailure } from '@deepseek-ai/dsh-llm'
@@ -40,6 +47,7 @@ export const POOL_RETRYABLE_CODES: readonly string[] = Object.freeze([
   POOL_CAPACITY_CODE,
   POOL_RATE_LIMITED_CODE,
   POOL_NO_ACCOUNT_CODE,
+  POOL_REQUEST_CLOSED_CODE,
   POOL_TRANSIENT_CODE,
 ])
 
@@ -58,6 +66,8 @@ function catalogEntryFor(identity: string): PoolErrorCatalogEntry | undefined {
 
 /** Envelope fields a pool response may carry; every one is optional because the online shape predates the full catalog. */
 export interface ProviderErrorEnvelope {
+  /** Pool-issued request id, echoed at the body's top level when the pool authored this refusal. */
+  readonly poolRequestId?: string
   /** Stable error code, preferred over {@link type} when both are present. */
   readonly code?: string
   /** Anthropic-style error type, sometimes the only code a response carries. */
@@ -82,6 +92,30 @@ export interface ProviderErrorResponse {
   readonly providerRetryAfterMs?: number
 }
 
+/** Response facts retained for request diagnostics, independent of failure classification. */
+export interface ProviderResponseFacts {
+  /** HTTP status of the response. */
+  readonly status: number
+  /** Pool-issued request id echoed by the response, when the pool issued one. */
+  readonly poolRequestId?: string
+}
+
+/** The member pool's per-request id, echoed on a response when the pool issues one. */
+const POOL_REQUEST_ID_HEADER = 'x-cc-pool-request-id'
+
+/**
+ * The readiness refusal's body field naming the pool-issued request id. The
+ * pool writes it as a sibling of `error`; other pool failures carry their
+ * identity inside `error` as a `cc_pool_*` code.
+ */
+const POOL_REQUEST_ID_FIELD = 'pool_request_id'
+
+/**
+ * The readiness refusal's detail text: the lease's egress path has not been
+ * verified, which the pool reports as `capability_not_ready` lease maintenance.
+ */
+const POOL_READINESS_DETAIL = /the egress path is not verified for this lease|capability_not_ready/i
+
 /**
  * Parse the JSON error envelope carried by a pi-ai failure message.
  *
@@ -101,21 +135,24 @@ export function parseProviderErrorEnvelope(message: string): ProviderErrorEnvelo
     // Only a non-JSON body: no envelope to read, so the caller keeps its text classification.
     return undefined
   }
-  const error = (parsed as Record<string, unknown>)['error']
+  const body = parsed as Record<string, unknown>
+  const error = body['error']
   if (typeof error !== 'object' || error === null) return undefined
   const fields = error as Record<string, unknown>
-  const text = (name: string): string | undefined => {
-    const value = fields[name]
+  const text = (record: Record<string, unknown>, name: string): string | undefined => {
+    const value = record[name]
     return typeof value === 'string' && value.length > 0 ? value : undefined
   }
-  const code = text('code')
-  const type = text('type')
-  const origin = text('origin')
-  const scope = text('scope')
-  const clientAction = text('client_action')
-  const detail = text('message')
+  const poolRequestId = text(body, POOL_REQUEST_ID_FIELD)
+  const code = text(fields, 'code')
+  const type = text(fields, 'type')
+  const origin = text(fields, 'origin')
+  const scope = text(fields, 'scope')
+  const clientAction = text(fields, 'client_action')
+  const detail = text(fields, 'message')
   const retryable = fields['retryable']
   return {
+    ...poolRequestId === undefined ? {} : { poolRequestId },
     ...code === undefined ? {} : { code },
     ...type === undefined ? {} : { type },
     ...origin === undefined ? {} : { origin },
@@ -131,11 +168,16 @@ export function parseProviderErrorEnvelope(message: string): ProviderErrorEnvelo
  *
  * Known pool codes take their failure code, retry guidance, and resend decision
  * from the generated catalog: capacity, rate limiting, and no-account wait out
- * the provider's delay, while a catalog `stop` action (session-busy) forbids
- * every automatic resend. Unrecognized pool codes follow the envelope's
- * `client_action`, `retryable`, and finally the HTTP status. A `claude` origin,
- * a non-pool code, or an unparseable message returns undefined so the caller
- * keeps the pre-existing classification.
+ * the provider's delay, a closed client request id asks for another attempt
+ * (which the adapter sends under a fresh id), while a catalog `stop` action
+ * (session-busy) forbids every automatic resend. Unrecognized pool codes follow
+ * the envelope's `client_action`, `retryable`, and finally the HTTP status. A pool-authored
+ * readiness refusal — identified by its body `pool_request_id` and
+ * `retryable: false`, together with a 5xx status or its unverified-egress
+ * detail — becomes a non-retryable `POOL_ERROR` even though it carries neither
+ * a pool code nor `origin`. A `claude` origin, a non-pool code, or an
+ * unparseable message returns undefined so the caller keeps the pre-existing
+ * classification.
  * @param message - pi-ai's terminal error text.
  * @param response - status and retry delay captured from the failed HTTP response.
  * @returns a pool-semantic failure, or undefined when this is not a pool failure.
@@ -153,7 +195,6 @@ export function classifyPoolFailure(
   const poolByCode = envelope.origin !== 'claude'
     && identity !== undefined
     && identity.startsWith(POOL_CODE_PREFIX)
-  if (!poolByOrigin && !poolByCode) return undefined
 
   const status = response?.status ?? statusOf(message)
   const retryAfterMs = response?.providerRetryAfterMs
@@ -164,6 +205,18 @@ export function classifyPoolFailure(
     ...status === undefined ? {} : { status },
     ...retryAfterMs === undefined ? {} : { providerRetryAfterMs: retryAfterMs },
   })
+
+  if (!poolByOrigin && !poolByCode) {
+    // The pool's readiness refusal omits the `cc_pool_*` code and `origin` its
+    // other failures carry, so its own body markers identify it. A repeated
+    // clientRequestId cannot make the lease ready, and the pool's ledger answers
+    // that repeat with a 409 instead of the original request's outcome.
+    if (!isPoolReadinessFailure(envelope, status)) return undefined
+    return {
+      ...failure(POOL_ERROR_CODE, 'the pool has not verified the egress path for this lease'),
+      retryDisposition: 'forbid',
+    }
+  }
 
   // Known pool codes take their client semantics from the generated catalog, so
   // the wire code, failure code, and retry guidance have one source.
@@ -186,14 +239,43 @@ export function classifyPoolFailure(
 }
 
 /**
- * Retain the response facts a later terminal error event needs.
+ * Whether an envelope is the pool's readiness refusal rather than a provider failure.
+ *
+ * The pool withholds its `cc_pool_*` code and `origin` from this refusal. It
+ * authors a body `pool_request_id`, states `retryable: false`, and names the
+ * lease's unverified egress path (or its `capability_not_ready` maintenance
+ * detail). The refusal is terminal because a resend repeats the same ledger id
+ * that the pool has already recorded. A 5xx carrying both pool markers is
+ * terminal on those markers alone: the detail is documentation of why, and a
+ * pool that rewords it must not drift the refusal back into a retryable
+ * provider failure. Below 5xx the detail still identifies the refusal, so an
+ * ordinary provider rejection stays with the text classifier.
+ * @param envelope - the recognized error envelope.
+ * @param status - the failed HTTP status, when known.
+ * @returns whether the envelope is the pool's readiness refusal.
+ */
+function isPoolReadinessFailure(envelope: ProviderErrorEnvelope, status: number | undefined): boolean {
+  // An explicit claude origin outranks the pool markers: the pool is not
+  // allowed to relabel a native Claude error, and neither is this adapter.
+  if (envelope.origin === 'claude') return false
+  if (envelope.poolRequestId === undefined || envelope.retryable !== false) return false
+  // HTTP statuses stop at 599, so the server-error range needs no upper bound.
+  if (status !== undefined && status >= 500) return true
+  return POOL_READINESS_DETAIL.test(envelope.message ?? '')
+}
+
+/**
+ * Retain the response facts a later terminal error event and the request
+ * diagnostic need.
  *
  * pi-ai flattens the SDK error to its message, discarding headers, so the one
- * request in a call (SDK retries are disabled) records its failed response
- * here. The body is left untouched: the SDK still reads it.
+ * request in a call (SDK retries are disabled) records its response here. The
+ * body is left untouched: the SDK still reads it.
  */
 export class ProviderErrorCapture {
   private response: ProviderErrorResponse | undefined
+  private observed: ProviderResponseFacts | undefined
+  private transportError: unknown
 
   /** Fetch replacement for one stream call; delegates every request to {@link base}. */
   readonly fetch: FetchFunction
@@ -203,7 +285,20 @@ export class ProviderErrorCapture {
    */
   constructor(base: FetchFunction = globalThis.fetch) {
     this.fetch = async (input, init) => {
-      const response = await base(input, init)
+      let response: Response
+      try {
+        response = await base(input, init)
+      } catch (error: unknown) {
+        // pi-ai reduces a transport failure to its message text; this keeps the
+        // original Error so the request diagnostic can report its cause chain.
+        this.transportError = error
+        throw error
+      }
+      const poolRequestId = response.headers.get(POOL_REQUEST_ID_HEADER) ?? undefined
+      this.observed = Object.freeze({
+        status: response.status,
+        ...poolRequestId === undefined ? {} : { poolRequestId },
+      })
       if (!response.ok && this.response === undefined) {
         this.response = Object.freeze({
           status: response.status,
@@ -220,6 +315,22 @@ export class ProviderErrorCapture {
    */
   read(): ProviderErrorResponse | undefined {
     return this.response
+  }
+
+  /**
+   * The response observed during this call, successful or failed.
+   * @returns status and the pool's request id, or undefined when no response arrived.
+   */
+  readResponse(): ProviderResponseFacts | undefined {
+    return this.observed
+  }
+
+  /**
+   * The transport Error that rejected this call's fetch, if one did.
+   * @returns the first transport failure, or undefined when every request got a response.
+   */
+  readTransportError(): unknown {
+    return this.transportError
   }
 }
 

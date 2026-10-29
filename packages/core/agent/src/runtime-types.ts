@@ -119,7 +119,18 @@ export type PreStepDecision =
   }
 
 /** Action returned by a listener that owns model-request recovery. */
-export type RequestErrorAction = { kind: 'retry' } | undefined
+export type RequestErrorAction =
+  | {
+    kind: 'retry'
+    /**
+     * Opaque nonce for the attempt this retry opens, passed through as
+     * `GenerateOptions.attemptNonce`. A recovery owner that knows the retry's
+     * durable identity supplies it so every attempt of one request is
+     * distinguishable; omission lets the loop mint one.
+     */
+    attemptNonce?: string
+  }
+  | undefined
 
 /** Why a session lifecycle began; seeded creates are `startup`, while persisted loads are `resume`. */
 export type SessionStartSource = 'startup' | 'resume' | 'clear' | 'compact'
@@ -358,7 +369,9 @@ declare module '@deepseek-ai/cordis' {
      * Handle one failed model-request attempt before the loop retries or closes
      * its step. A listener returns `{ kind: 'retry' }` without calling `next()`
      * when it owns recovery, or calls `next()` to delegate. The default
-     * `undefined` leaves the failure terminal.
+     * `undefined` leaves the failure terminal. A retry action may carry the
+     * `attemptNonce` that distinguishes the attempt it opens; without one the
+     * loop mints a nonce, so every deliberate retry is a distinct attempt.
      * @param payload.agent - the agent whose request failed.
      * @param payload.turn - the turn containing the failed request.
      * @param payload.step - the step containing the failed request attempt.

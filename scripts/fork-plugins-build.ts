@@ -1,16 +1,18 @@
 /**
- * Build or stage the four fork plugins and install them into the selected
- * web profile by local path.
+ * Build or stage the four fork plugins and the workspace llm-cc-pool package,
+ * then install them into the selected web profile by local path.
  *
- * `build.cmd` runs this after the ordinary root build. Every plugin is built
- * from source: subscriptions and aether-shell emit their bundles directly into
- * the staging directory, while agent-teams and context are copied into an
+ * `build.cmd` runs this after the ordinary root build. Every fork plugin is
+ * built from source: subscriptions and aether-shell emit their bundles directly
+ * into the staging directory, while agent-teams and context are copied into an
  * isolated work directory under `.build/fork-plugins/work/` and run their own
- * `build` script there. Staged packages live under the ignored
- * `.build/fork-plugins/` directory, are installed with
- * `dsh plugin --profile web add <absolute staged directory>` (a pnpm `link:`
- * dependency), and profile configuration is rewritten only after backing up
- * `package.json` and `cordis.patch.yml`.
+ * `build` script there. The workspace llm-cc-pool package is copied from the
+ * root build output into the same staging root, with its `workspace:` peer
+ * ranges converted to the versions a profile install can resolve. Staged
+ * packages live under the ignored `.build/fork-plugins/` directory, are
+ * installed with `dsh plugin --profile web add <absolute staged directory>` (a
+ * pnpm `link:` dependency), and profile configuration is rewritten only after
+ * backing up `package.json` and `cordis.patch.yml`.
  *
  * The tracked plugin `lib/` directories are never a build input: a clean clone
  * needs no prebuilt output. Isolated builds install their pinned plugin-local
@@ -46,15 +48,15 @@ const PROFILE_NAME = 'web'
 const HOST_PORT = 3080
 const SCHEMA_VERSION = 1
 /** Bump when the staging recipe changes in a way the source hash does not capture. */
-const SCRIPT_VERSION = 5
+const SCRIPT_VERSION = 6
 const WORK_MARKER_FILE = '.fork-plugin-build.json'
 const DEPENDENCY_MARKER_FILE = '.fork-plugin-deps.json'
 
-/** Plugin ids this script stages, in installation order. */
-export type PluginId = 'subscriptions' | 'aether-shell' | 'agent-teams' | 'context'
+/** Plugin ids this script stages or copies from the workspace, in installation order. */
+export type PluginId = 'subscriptions' | 'aether-shell' | 'agent-teams' | 'context' | 'llm-cc-pool'
 
 /** How a plugin's staged package obtains its runtime files. */
-export type PluginBuilder = 'subscriptions' | 'aether-shell' | 'isolated'
+export type PluginBuilder = 'subscriptions' | 'aether-shell' | 'isolated' | 'workspace'
 
 /** One fork plugin, its build recipe, and the files staging copies. */
 export interface PluginDefinition {
@@ -132,6 +134,29 @@ const PLUGIN_DEFINITIONS = [
 
 /** The plugin definitions, for tests that assert the staging recipe. */
 export const PLUGINS: readonly PluginDefinition[] = PLUGIN_DEFINITIONS
+
+/**
+ * Workspace packages the root build compiles and this script links into the
+ * profile beside the fork plugins. Their `lib/` output is the root build's, so
+ * staging copies it instead of building a second time; only the manifest is
+ * rewritten for a profile install.
+ */
+const WORKSPACE_PLUGIN_DEFINITIONS = [
+  {
+    id: 'llm-cc-pool',
+    name: '@deepseek-ai/dsh-llm-cc-pool',
+    directory: join(REPOSITORY_ROOT, 'packages', 'llm', 'llm-cc-pool'),
+    mode: 'build',
+    builder: 'workspace',
+    outputs: ['lib/index.js'],
+    stage: ['lib', 'cordis.patch.yml'],
+    workCopy: [],
+    installDependencies: false,
+  },
+] as const satisfies readonly PluginDefinition[]
+
+/** The workspace packages this script links into the profile, in installation order. */
+export const WORKSPACE_PLUGINS: readonly PluginDefinition[] = WORKSPACE_PLUGIN_DEFINITIONS
 
 const SUBSCRIPTIONS_PLUGIN = PLUGIN_DEFINITIONS[0]
 const AETHER_SHELL_PLUGIN = PLUGIN_DEFINITIONS[1]
@@ -537,6 +562,89 @@ export function assertStagedManifest(manifest: PluginManifest, pluginId: PluginI
     if (pluginId === 'agent-teams' || pluginId === 'context') continue
     if (range !== '0.2.1-rc.2') fail(`staged ${pluginId} peer ${name} is ${range}; the staged cohort must stay 0.2.1-rc.2`)
   }
+}
+
+/**
+ * Convert a workspace protocol range into the registry range a profile install
+ * can resolve.
+ * @param range - peer range from a workspace manifest.
+ * @param version - installed version of the referenced package.
+ * @returns the registry-facing range.
+ */
+export function registryPeerRange(range: string, version: string): string {
+  if (range === 'workspace:*') return version
+  if (range === 'workspace:^') return `^${version}`
+  if (range === 'workspace:~') return `~${version}`
+  if (range.startsWith('workspace:')) return range.slice('workspace:'.length)
+  return range
+}
+
+/**
+ * The version the repository install exposes for one package.
+ * @param name - package name.
+ * @returns the installed version.
+ */
+async function installedPackageVersion(name: string): Promise<string> {
+  for (const path of [
+    join(REPOSITORY_ROOT, 'node_modules', '.pnpm', 'node_modules', ...name.split('/'), 'package.json'),
+    join(REPOSITORY_ROOT, 'node_modules', ...name.split('/'), 'package.json'),
+  ]) {
+    if (!existsSync(path)) continue
+    const manifest = await readJson<PluginManifest>(path)
+    if (typeof manifest.version === 'string' && manifest.version.length > 0) return manifest.version
+  }
+  fail(`the repository install does not expose ${name}; run the ordinary root install before the fork plugin build`)
+}
+
+/**
+ * Build the staged manifest of a workspace package.
+ *
+ * A profile install is not a workspace, so `workspace:` peer ranges must become
+ * registry ranges and the package's own build-time dependencies stay out of the
+ * staged manifest; its runtime imports resolve from the repository install the
+ * staged package is linked beside.
+ * @param source - workspace package `package.json`.
+ * @param resolveVersion - version lookup for each peer; defaults to the repository install.
+ * @returns the manifest written into the staging directory.
+ */
+export async function stagedWorkspaceManifest(
+  source: PluginManifest,
+  resolveVersion: (name: string) => Promise<string> = installedPackageVersion,
+): Promise<PluginManifest> {
+  const manifest = structuredClone(source)
+  for (const field of ['scripts', 'devDependencies', 'dependencies', 'peerDependenciesMeta', 'publishConfig'] as const) {
+    Reflect.deleteProperty(manifest, field)
+  }
+  const peers: Record<string, string> = {}
+  for (const [name, range] of Object.entries(manifest.peerDependencies ?? {})) {
+    peers[name] = registryPeerRange(range, await resolveVersion(name))
+  }
+  if (Object.keys(peers).length === 0) Reflect.deleteProperty(manifest, 'peerDependencies')
+  else manifest.peerDependencies = peers
+  return manifest
+}
+
+/**
+ * Stage one workspace package from the root build output.
+ *
+ * The root build is the only build input, so a missing `lib/` entry fails here
+ * with the command the operator still needs to run instead of installing a
+ * package that cannot load.
+ * @param plugin - workspace plugin definition.
+ * @param stagingDirectory - staging root to replace.
+ */
+export async function stageWorkspacePlugin(plugin: PluginDefinition, stagingDirectory: string): Promise<void> {
+  assertStagedArtifacts(plugin, plugin.directory, 'root build')
+  await rm(stagingDirectory, { recursive: true, force: true })
+  await mkdir(stagingDirectory, { recursive: true })
+  const source = await readJson<PluginManifest>(join(plugin.directory, 'package.json'))
+  await writeJson(join(stagingDirectory, 'package.json'), await stagedWorkspaceManifest(source))
+  for (const entry of plugin.stage) {
+    const path = join(plugin.directory, entry)
+    if (!existsSync(path)) fail(`${plugin.name} is missing its staged entry ${entry} in ${plugin.directory}`)
+    await cp(path, join(stagingDirectory, entry), { recursive: true, filter: candidate => !candidate.endsWith('.map') })
+  }
+  assertStagedArtifacts(plugin, stagingDirectory)
 }
 
 interface WorkspacePackage {
@@ -1248,6 +1356,20 @@ async function backupProfile(profileDirectory: string, created: boolean): Promis
   return destination
 }
 
+/**
+ * Whether a profile patch still declares the generic `llm-pi-ai` provider for
+ * the pool route.
+ *
+ * The dedicated bundle owns `cc-pool`; a profile that keeps both declarations
+ * makes two adapters claim the same route and plugin loading fails. The
+ * dedicated row's `- id: llm-cc-pool` never matches this provider-key pattern.
+ * @param patch - profile patch text.
+ * @returns whether an `llm-pi-ai` provider keyed `cc-pool` remains.
+ */
+export function declaresLegacyPoolProvider(patch: string): boolean {
+  return /^\s+cc-pool:\s*(?:#.*)?$/m.test(patch)
+}
+
 /** Why the profile still does not resolve one staged plugin, if that is the case. */
 async function profileProblem(plugin: StagedPlugin, profileDirectory: string): Promise<string | undefined> {
   const manifestPath = join(profileDirectory, 'package.json')
@@ -1280,7 +1402,8 @@ function report(staged: readonly StagedPlugin[], profileDirectory: string, backu
 }
 
 /**
- * Build or stage the four plugins and make the selected web profile resolve them.
+ * Build or stage the four fork plugins and the workspace llm-cc-pool package,
+ * then make the selected web profile resolve them.
  * @param options - parsed command-line options.
  */
 export async function main(options: BuildOptions): Promise<void> {
@@ -1331,6 +1454,14 @@ export async function main(options: BuildOptions): Promise<void> {
     }
     staged.push({ definition: plugin, directory: stagingDirectory, version, changed: !current })
   }
+  for (const plugin of WORKSPACE_PLUGINS) {
+    const stagingDirectory = join(BUILD_ROOT, plugin.id)
+    const version = (await sourceManifest(plugin)).version
+    if (version === undefined) fail(`${plugin.name} source manifest has no version`)
+    await stageWorkspacePlugin(plugin, stagingDirectory)
+    log(`${plugin.name} staged from the root build (${version})`)
+    staged.push({ definition: plugin, directory: stagingDirectory, version, changed: false })
+  }
 
   let profileCreated = false
   if (!existsSync(join(profileDirectory, 'package.json'))) {
@@ -1343,6 +1474,11 @@ export async function main(options: BuildOptions): Promise<void> {
     log(`seeded portable profile configuration from ${join(REPOSITORY_ROOT, 'fork-runtime', 'web', 'portable-profile.patch.yml')}`)
   }
   for (const path of seeded.copied) log(`seeded profile file ${path}`)
+  const profilePatchPath = join(profileDirectory, 'cordis.patch.yml')
+  if (existsSync(profilePatchPath) && declaresLegacyPoolProvider(await readFile(profilePatchPath, 'utf8'))) {
+    fail(`the profile patch at ${profilePatchPath} still declares an llm-pi-ai "providers.cc-pool" route; `
+      + 'remove that block before installing @deepseek-ai/dsh-llm-cc-pool, or both adapters claim the cc-pool route')
+  }
   const problems: string[] = []
   for (const plugin of staged) {
     const problem = await profileProblem(plugin, profileDirectory)

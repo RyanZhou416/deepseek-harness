@@ -102,6 +102,32 @@ describe('agent/request-error', () => {
       event.type === 'request/header' ? [event.data.reason] : [])).toEqual(['initial'])
   })
 
+  it('carries the recovery attempt nonce into the retried request and mints one when absent', async () => {
+    const adapter = new MockAdapter([
+      fail('busy', 'RATE_LIMIT'),
+      fail('unavailable', 'SERVICE_UNAVAILABLE'),
+      textResponse('ok'),
+    ])
+    const ctx = await harness(adapter)
+    const agent = await ctx.agentLoop.create(SessionId('request-error-nonce'), { provider: 'mock', model: 'mock' })
+    let recoveries = 0
+    ctx.on('agent/request-error', async () => {
+      recoveries += 1
+      return recoveries === 1 ? { kind: 'retry', attemptNonce: 'declared-attempt' } : { kind: 'retry' }
+    })
+
+    agent.followup(createUserMessage({ content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } }))
+    await agent.whenIdle()
+
+    expect(recoveries).toBe(2)
+    // The first attempt has no nonce; the owner-named attempt uses its value;
+    // a retry action without one still gets a fresh nonce from the loop.
+    expect(adapter.requests[0]?.attemptNonce).toBeUndefined()
+    expect(adapter.requests[1]?.attemptNonce).toBe('declared-attempt')
+    expect(adapter.requests[2]?.attemptNonce).toEqual(expect.any(String))
+    expect(adapter.requests[2]?.attemptNonce).not.toBe('declared-attempt')
+  })
+
   it('lets cancellation win over a retry action', async () => {
     const adapter = new MockAdapter([fail('busy', 'RATE_LIMIT'), textResponse('unused')])
     const ctx = await harness(adapter)

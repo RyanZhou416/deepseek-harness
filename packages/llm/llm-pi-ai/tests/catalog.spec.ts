@@ -768,6 +768,71 @@ describe('per-model reasoning efforts', () => {
   })
 })
 
+describe('per-model default reasoning', () => {
+  /** One hand-declared route holding exactly the given models. */
+  function declared(models: LlmPiAi.PiAiModelProfile[]): Record<string, LlmPiAi.PiAiProviderProfile> {
+    return { 'acme-gateway': { api: 'openai-completions', baseURL: 'https://acme.test', models } }
+  }
+
+  /** The per-model defaults one route materialized, or throw. */
+  function defaultsOf(providers: Record<string, LlmPiAi.PiAiProviderProfile>, route = 'acme-gateway') {
+    const profile = resolveProfiles(providers).get(route)
+    if (profile === undefined) throw new Error(`route "${route}" resolved no profile`)
+    return profile.defaultReasoning
+  }
+
+  it('materializes only the levels models name, keyed by model id', () => {
+    // The route-level level is the fallback for models that name none, not a
+    // materialized per-model default.
+    expect(defaultsOf({
+      'acme-gateway': {
+        api: 'openai-completions',
+        baseURL: 'https://acme.test',
+        reasoning: 'low',
+        models: [
+          { id: 'named', reasoningEfforts: { off: null, low: 'low', medium: 'medium', high: 'high' }, reasoning: 'medium' },
+          { id: 'unnamed', reasoningEfforts: { off: null, low: 'low', high: 'high' } },
+        ],
+      },
+    })).toEqual(new Map([['named', 'medium']]))
+  })
+
+  it('validates the default against the levels the model offers', () => {
+    const resolve = (model: LlmPiAi.PiAiModelProfile): (() => unknown) => () => resolveProfiles(declared([model]))
+    expect(resolve({ id: 'm', reasoningEfforts: { off: null, low: 'low' }, reasoning: 'high' }))
+      .toThrow(/sets reasoning "high", which this model does not offer; it offers off, low/)
+    // `off` is offered only where the model declares it: leaving it out means
+    // the model cannot stop thinking.
+    expect(resolve({ id: 'm', reasoningEfforts: { high: 'high' }, reasoning: 'off' }))
+      .toThrow(/sets reasoning "off", which this model does not offer; it offers high/)
+  })
+
+  it('validates a catalog model default against the levels the installed entry declares', () => {
+    const [catalogModel] = getBuiltinModels('deepseek')
+    if (catalogModel === undefined) throw new Error('the installed catalog ships no deepseek model')
+    // `reasoningEfforts` is absent, so the model keeps the catalog's map; the
+    // default is still checked against the levels that map offers.
+    const defaults = defaultsOf({
+      deepseek: { reasoning: 'low', models: [{ id: catalogModel.id, reasoning: 'high' }] },
+    }, 'deepseek')
+    expect(defaults).toEqual(new Map([[catalogModel.id, 'high']]))
+  })
+
+  it('rejects a default on a model that does not reason', () => {
+    const resolve = (model: LlmPiAi.PiAiModelProfile): (() => unknown) => () => resolveProfiles(declared([model]))
+    expect(resolve({ id: 'plain', reasoning: 'high' })).toThrow(/does not reason/)
+    expect(resolve({ id: 'plain', reasoningEfforts: false, reasoning: 'high' })).toThrow(/does not reason/)
+  })
+
+  it('drops the default of a model a later duplicate invalidates', () => {
+    const resolved = resolveProfiles(declared([
+      { id: 'm', reasoningEfforts: { off: null, high: 'high' }, reasoning: 'high' },
+      { id: 'm', reasoningEfforts: { off: null, high: 'high' } },
+    ]), 'deferred')
+    expect(resolved.get('acme-gateway')?.defaultReasoning.size).toBe(0)
+  })
+})
+
 describe('modelOverrides', () => {
   const deepseekModel = (): Model<Api> => {
     const [model] = getBuiltinModels('deepseek')
