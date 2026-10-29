@@ -1776,6 +1776,20 @@ export interface Config {
    */
   cacheTtl: CcPoolCacheTtl
   /**
+   * Declare `extended-cache-ttl-2025-04-11` on this route's Anthropic Messages
+   * requests. Opt-in and independent of {@link cacheTtl}: `1h` writes
+   * `ttl: "1h"` on the markers, but only this flag adds the beta that permits
+   * it. The default `false` keeps the header this route already served.
+   */
+  extendedCacheBeta: boolean
+  /**
+   * Mark the last tool declaration with the route's `cache_control` marker.
+   * The default `true` keeps the marker pi-ai places; `false` is this route's
+   * opt-in to the Claude Code 2.1.288 layout, which marks the system prompt and
+   * the last user content block but never a tool definition.
+   */
+  toolCacheBreakpoint: boolean
+  /**
    * The catalogue selector surfaces offer, replacing the built-in four-model
    * catalogue wholesale. Absent, or reset through the settings service, serves
    * the built-in catalogue. A provided list resolves through this package's
@@ -1869,7 +1883,7 @@ export interface Config extends ProtocolConfig {
 
 - `inject`: `llm`
 - `refs`: `Api` (`@earendil-works/pi-ai`) · `CacheRetention` (`@earendil-works/pi-ai`) · `Model` (`@earendil-works/pi-ai`) · `ModelThinkingLevel` (`@earendil-works/pi-ai`) · `OpenAICompletionsCompat` (`@earendil-works/pi-ai`) · [`RetryPolicyConfig`](../packages/llm/llm/src/index.ts) · `ThinkingBudgets` (`@earendil-works/pi-ai`) · `Transport` (`@earendil-works/pi-ai`) · `Volatile` (`@deepseek-ai/cordis`)
-- `source`: [`packages/llm/llm-pi-ai/src/config.ts:248`](../packages/llm/llm-pi-ai/src/config.ts)
+- `source`: [`packages/llm/llm-pi-ai/src/config.ts:259`](../packages/llm/llm-pi-ai/src/config.ts)
 
 ```ts config-catalog
 /** Plugin configuration: the provider routes this instance owns. */
@@ -1983,6 +1997,17 @@ export interface PiAiProviderProfile {
   thinkingBudgets?: ThinkingBudgets
   /** Prompt-cache retention preference. */
   cacheRetention?: CacheRetention
+  /**
+   * Add `extended-cache-ttl-2025-04-11` to the `anthropic-beta` header of an
+   * Anthropic Messages request. Opt-in and independent of
+   * {@link cacheRetention}: `long` retention writes `ttl: "1h"` on the cache
+   * markers but does not declare the beta, so a route that needs the extended
+   * lifetime sets both. The beta joins the request's `betas` list before the
+   * Anthropic SDK serializes it, which keeps every automatic beta pi-ai derives
+   * for the route. Refused when no model on the route speaks
+   * `anthropic-messages`.
+   */
+  extendedCacheBeta?: boolean
   /** Streaming transport preference. */
   transport?: Transport
   /** HTTP/provider SDK timeout in milliseconds. */

@@ -188,7 +188,7 @@ it('installs a configured catalogue through a real profile and serves it', async
   })
 })
 
-it('sends the configured one-hour cache markers through a real profile', async () => {
+it('sends the configured one-hour opt-in layout through a real profile', async () => {
   vi.stubEnv('CC_POOL_API_KEY', 'pool-member-key')
   const { ctx } = await loadComposition(() => [
     '- id: llm',
@@ -197,6 +197,8 @@ it('sends the configured one-hour cache markers through a real profile', async (
     "  name: '@deepseek-ai/dsh-llm-cc-pool'",
     '  config:',
     '    cacheTtl: 1h',
+    '    extendedCacheBeta: true',
+    '    toolCacheBreakpoint: false',
     '    requestLog:',
     '      enabled: false',
   ])
@@ -209,14 +211,20 @@ it('sends the configured one-hour cache markers through a real profile', async (
     messages: [user('composed cache lifetime')],
   })
 
-  const body = capture.calls[0]?.body ?? {}
+  const call = capture.calls[0]
+  if (call === undefined) throw new Error('the pool route sent no request')
+  const body = call.body
   expect(body).toMatchObject({
     system: [{ cache_control: { type: 'ephemeral', ttl: '1h' } }],
-    tools: [{ cache_control: { type: 'ephemeral', ttl: '1h' } }],
+    tools: [{ name: 'echo' }],
   })
-  // Exactly the three markers the transport places: system prompt, last tool,
-  // and the last user block.
-  expect(JSON.stringify(body).match(/"ttl":"1h"/gu)).toHaveLength(3)
+  // Exactly the two markers the CC 2.1.288 layout places: the system prompt and
+  // the last user block. The tool definition carries none, and the body carries
+  // no scope field.
+  expect(JSON.stringify(body).match(/"ttl":"1h"/gu)).toHaveLength(2)
+  expect(JSON.stringify(body)).not.toContain('"scope"')
+  expect(call.headers.get('anthropic-beta')).toBe('extended-cache-ttl-2025-04-11')
+  expect(call.headers.get('anthropic-beta')).not.toContain('prompt-caching-scope')
 })
 
 it('refuses an invalid catalogue write instead of persisting it', async () => {

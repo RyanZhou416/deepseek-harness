@@ -114,6 +114,8 @@ profile 的 `models` 列表会替换而非扩展路由的已安装目录；每�
 
 对于自托管 Chat Completions 端点，`thinkingTokenBudgetField` 选择推理预算参数，`vllmPriority` 在服务端启用优先级调度时设置整数调度优先级。模板参数接受 `$var: thinking.budget`。`openai-responses` 网关可设置 `supportsMaxOutputTokens: false` 来省略 `max_output_tokens`；Azure 与 Codex 传输会忽略这个共享兼容字段。这些控制均需显式启用；目录拥有的 Anthropic effort 和回退能力不是可配置开关。
 
+`cacheRetention` 选择该路由 pi-ai 实现放置的提示缓存标记——`none`、`short`，或让每个标记携带 `ttl: "1h"` 的 `long`——未设置时跟随 pi-ai 的 `PI_CACHE_RETENTION` 默认值。`extendedCacheBeta: true` 还会在 SDK 序列化 header 之前，把 `extended-cache-ttl-2025-04-11` 追加到 Anthropic Messages 请求的 `betas` 列表；它绝不从 long 存活期推断，且模型都不使用 Anthropic Messages 协议的路由会拒绝该选项。适配器不添加 `scope` 字段或 scope beta。两项设置都按路由生效，因此包含多条 Anthropic 路由的组合会为每条路由显式声明自己的存活期与 beta。
+
 ### 运行时更改配置
 
 每次操作捕获当前 `providers` Config 引用。新增或修改的 provider 配置在表单持久化前验证；未更改的目录故障仍可编辑。路由集合或重试策略变化时原子更新注册；如果其他适配器已拥有所请求的路由，则保留先前路由。

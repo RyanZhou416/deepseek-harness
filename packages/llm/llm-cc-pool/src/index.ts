@@ -18,15 +18,19 @@
  * ordered before they open, because the pool admits one in-flight direct
  * request per session and refuses a concurrent one instead of waiting.
  * `cacheTtl` declares the prompt-cache lifetime of this route's
- * `cache_control` markers — 5 minutes by default, 1 hour, or no marker — and
- * reaches the wire only through this route's profile; no other provider's
- * request is touched.
+ * `cache_control` markers — 5 minutes by default, 1 hour, or no marker —
+ * `extendedCacheBeta` declares the beta a one-hour lifetime requires, and
+ * `toolCacheBreakpoint` selects whether a tool definition carries a marker.
+ * All three reach the wire only through this route's profile; no other
+ * provider's request is touched.
  *
  * ```yaml
  * - id: llm-cc-pool
  *   name: '@deepseek-ai/dsh-llm-cc-pool'
  *   config:
  *     cacheTtl: 1h
+ *     extendedCacheBeta: true
+ *     toolCacheBreakpoint: false
  *     requestLog:
  *       path: /var/log/dsh/cc-pool-requests.jsonl
  *       maxFileBytes: 16777216
@@ -57,7 +61,7 @@ import type { PiAiAdapterOptions, ResolvedPiAiProviderProfile } from '@deepseek-
 import { Config } from './config.ts'
 import { DISCOVERY_NAMESPACE, discoverPoolModels } from './discovery.ts'
 import { API_KEY_REF, MODEL_INPUT, PROVIDER, resolvePoolModels, resolvePoolProfiles } from './pool.ts'
-import type { CcPoolModel } from './pool.ts'
+import type { CcPoolCachePolicy, CcPoolModel } from './pool.ts'
 import { SessionSerialGate } from './session-gate.ts'
 
 export { Config } from './config.ts'
@@ -65,13 +69,14 @@ export type { Options } from './config.ts'
 export { DISCOVERY_NAMESPACE } from './discovery.ts'
 export {
   CACHE_TTLS,
+  DEFAULT_CACHE_POLICY,
   MODELS,
   REASONING_EFFORTS,
   REASONING_LEVELS,
   resolvePoolModels,
   resolvePoolProfiles,
 } from './pool.ts'
-export type { CcPoolCacheTtl, CcPoolModel, CcPoolReasoningLevel } from './pool.ts'
+export type { CcPoolCachePolicy, CcPoolCacheTtl, CcPoolModel, CcPoolReasoningLevel } from './pool.ts'
 
 export const name = 'llm-cc-pool'
 export const inject = ['llm']
@@ -219,10 +224,14 @@ export function apply(ctx: Context, config: Config): void {
 
   let lastRaw: readonly CcPoolModel[] | undefined
   let snapshot: PoolSnapshot | undefined
-  // Read once, with the rest of the loader configuration: the cache lifetime a
-  // deployment asks for is not a per-request setting, and it is captured here
-  // so every resolution of this route's profiles carries the same tier.
-  const cacheTtl = config.cacheTtl
+  // Read once, with the rest of the loader configuration: the cache policy a
+  // deployment asks for is not a per-request setting, and it is captured here so
+  // every resolution of this route's profiles carries the same policy.
+  const cachePolicy: CcPoolCachePolicy = {
+    cacheTtl: config.cacheTtl,
+    extendedCacheBeta: config.extendedCacheBeta,
+    toolCacheBreakpoint: config.toolCacheBreakpoint,
+  }
   /**
    * The snapshot for the current `models` value, memoized by that value's
    * identity so both a request and the listing it precedes share one profile
@@ -233,7 +242,7 @@ export function apply(ctx: Context, config: Config): void {
     const raw = config.models.get()
     if (snapshot === undefined || raw !== lastRaw) {
       const models = resolvePoolModels(raw)
-      snapshot = { models, profiles: resolvePoolProfiles(models, cacheTtl) }
+      snapshot = { models, profiles: resolvePoolProfiles(models, cachePolicy) }
       lastRaw = raw
     }
     return snapshot

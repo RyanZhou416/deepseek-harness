@@ -171,6 +171,17 @@ export interface PiAiProviderProfile {
   thinkingBudgets?: ThinkingBudgets
   /** Prompt-cache retention preference. */
   cacheRetention?: CacheRetention
+  /**
+   * Add `extended-cache-ttl-2025-04-11` to the `anthropic-beta` header of an
+   * Anthropic Messages request. Opt-in and independent of
+   * {@link cacheRetention}: `long` retention writes `ttl: "1h"` on the cache
+   * markers but does not declare the beta, so a route that needs the extended
+   * lifetime sets both. The beta joins the request's `betas` list before the
+   * Anthropic SDK serializes it, which keeps every automatic beta pi-ai derives
+   * for the route. Refused when no model on the route speaks
+   * `anthropic-messages`.
+   */
+  extendedCacheBeta?: boolean
   /** Streaming transport preference. */
   transport?: Transport
   /** HTTP/provider SDK timeout in milliseconds. */
@@ -410,6 +421,7 @@ const profile = z.object({
   reasoning: z.union(THINKING_LEVELS),
   thinkingBudgets,
   cacheRetention: z.union(['none', 'short', 'long']),
+  extendedCacheBeta: z.boolean(),
   transport: z.union(['sse', 'websocket', 'websocket-cached', 'auto']),
   timeoutMs: z.natural(),
   websocketConnectTimeoutMs: z.natural(),
@@ -666,6 +678,14 @@ export function resolveProfiles(
     } catch (error) {
       if (validation === 'strict' || !(error instanceof PiAiCatalogError)) throw error
       catalogError ??= error.message
+    }
+    if (validation === 'strict'
+      && source.extendedCacheBeta === true
+      && !catalog?.models.some(model => model.api === 'anthropic-messages')) {
+      throw new Error(
+        `llm-pi-ai: provider "${provider}" sets extendedCacheBeta, but no model on the route speaks`
+        + ' anthropic-messages',
+      )
     }
     const { apiKeyEnv, retryPolicy, models: _models, displayName: _displayName, ...rest } = source
     resolved.set(provider, {

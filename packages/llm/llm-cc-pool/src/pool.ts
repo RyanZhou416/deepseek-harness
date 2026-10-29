@@ -14,11 +14,15 @@
  * this route through the validated catalogue, and the separate discovery read
  * reports candidates without writing that catalogue.
  *
- * Prompt-cache TTL is the third deployment choice: {@link CACHE_TTLS} names the
- * route's marker value, and the profile resolver carries it as the route's
- * `cacheRetention` tier. The tier is the whole policy — pi-ai builds the
- * `cache_control` markers and their value from it, and nothing here rewrites a
- * request body. No other route reads this value.
+ * Prompt-cache policy is the third deployment choice: {@link CACHE_TTLS} names
+ * the route's marker value, {@link CcPoolCachePolicy.extendedCacheBeta} declares
+ * the beta a one-hour lifetime requires, and
+ * {@link CcPoolCachePolicy.toolCacheBreakpoint} selects whether a tool
+ * definition carries a marker. The profile resolver carries all three as the
+ * route's pi-ai `cacheRetention`, `extendedCacheBeta`, and
+ * `compat.supportsCacheControlOnTools`; pi-ai builds the `cache_control` markers
+ * and beta from them, and nothing here rewrites a request body. No other route
+ * reads these values.
  *
  * @module dsh-llm-cc-pool/pool
  */
@@ -65,6 +69,38 @@ export const CACHE_TTLS = Object.freeze(['5m', '1h', 'none'] as const)
 
 /** One prompt-cache TTL this route may declare; see {@link CACHE_TTLS}. */
 export type CcPoolCacheTtl = (typeof CACHE_TTLS)[number]
+
+/**
+ * The route's prompt-cache policy, one explicit choice per field.
+ *
+ * A policy applies to the whole route and reaches the wire only through this
+ * route's profile: `cacheTtl` selects the marker lifetime, `extendedCacheBeta`
+ * adds the beta a one-hour lifetime declares, and `toolCacheBreakpoint`
+ * selects whether the last tool definition carries a marker.
+ */
+export interface CcPoolCachePolicy {
+  /** Marker lifetime every block marked on this route declares; see {@link CACHE_TTLS}. */
+  cacheTtl: CcPoolCacheTtl
+  /**
+   * Add `extended-cache-ttl-2025-04-11` to the request's `anthropic-beta`
+   * header. Independent of {@link cacheTtl}: `1h` writes `ttl: "1h"` on the
+   * markers, while this field alone declares the beta that permits it.
+   */
+  extendedCacheBeta: boolean
+  /**
+   * Mark the last tool declaration with `cache_control`. `false` keeps the
+   * Claude Code 2.1.288 layout this route mirrors, which marks the system
+   * prompt and the last user content block and no tool definition.
+   */
+  toolCacheBreakpoint: boolean
+}
+
+/** The policy this route served before its fields were configurable. */
+export const DEFAULT_CACHE_POLICY: CcPoolCachePolicy = Object.freeze({
+  cacheTtl: '5m',
+  extendedCacheBeta: false,
+  toolCacheBreakpoint: true,
+})
 
 /** The profile field that carries a TTL choice to pi-ai. */
 type PiAiCacheRetention = NonNullable<PiAiProviderProfile['cacheRetention']>
@@ -213,13 +249,14 @@ function retryPolicy(): RetryPolicyConfig {
 /**
  * The one configured profile this plugin resolves.
  * @param models - the effective catalogue; omission serves the built-in catalogue.
- * @param cacheTtl - prompt-cache TTL this route declares; omission declares the
- *   five-minute lifetime the route served before the choice was configurable.
+ * @param policy - prompt-cache policy this route declares; omission declares the
+ *   five-minute lifetime and tool marker the route served before the policy was
+ *   configurable.
  * @returns the raw profile the generic resolver validates.
  */
 export function poolProviderProfile(
   models: readonly CcPoolModel[] = MODELS,
-  cacheTtl: CcPoolCacheTtl = '5m',
+  policy: CcPoolCachePolicy = DEFAULT_CACHE_POLICY,
 ): PiAiProviderProfile {
   return {
     displayName: DISPLAY_NAME,
@@ -227,7 +264,9 @@ export function poolProviderProfile(
     api: 'anthropic-messages',
     baseURL: BASE_URL,
     headers: { ...REQUEST_HEADERS },
-    cacheRetention: CACHE_RETENTION[cacheTtl],
+    cacheRetention: CACHE_RETENTION[policy.cacheTtl],
+    extendedCacheBeta: policy.extendedCacheBeta,
+    compat: { supportsCacheControlOnTools: policy.toolCacheBreakpoint },
     retryPolicy: retryPolicy(),
     models: models.map(model => ({
       id: model.id,
@@ -248,13 +287,13 @@ export function poolProviderProfile(
  * Resolve one catalogue strictly, so a malformed entry fails the plugin at load
  * instead of at the first request.
  * @param models - the effective catalogue; omission serves the built-in catalogue.
- * @param cacheTtl - prompt-cache TTL this route declares; omission declares the
- *   five-minute lifetime.
+ * @param policy - prompt-cache policy this route declares; omission declares the
+ *   five-minute lifetime and tool marker.
  * @returns the resolved profiles keyed by {@link PROVIDER}.
  */
 export function resolvePoolProfiles(
   models: readonly CcPoolModel[] = MODELS,
-  cacheTtl: CcPoolCacheTtl = '5m',
+  policy: CcPoolCachePolicy = DEFAULT_CACHE_POLICY,
 ): ReadonlyMap<string, ResolvedPiAiProviderProfile> {
-  return resolvePiAiProfiles({ [PROVIDER]: poolProviderProfile(models, cacheTtl) })
+  return resolvePiAiProfiles({ [PROVIDER]: poolProviderProfile(models, policy) })
 }

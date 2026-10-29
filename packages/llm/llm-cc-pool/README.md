@@ -9,7 +9,7 @@ English | [中文](README.zh.md)
 
 ## Summary
 
-`@deepseek-ai/dsh-llm-cc-pool` adds the mac pool as an optional provider: one Anthropic Messages route whose endpoint, credential reference, and retry policy are fixed, present only when installed. The route serves the built-in four-model catalogue until a deployment replaces it through `models`, which the settings service projects as an editable form. A `cacheTtl` choice sets the route prompt-cache lifetime: five minutes by default, one hour, or no marker. The plugin registers no configurable-provider entry; its discovery read reports the pool `/v1/models` listing as candidates and never writes the catalogue, so a model enters this route only through validated configuration.
+`@deepseek-ai/dsh-llm-cc-pool` adds the mac pool as an optional provider: one Anthropic Messages route whose endpoint, credential reference, and retry policy are fixed, present only when installed. The route serves the built-in four-model catalogue until a deployment replaces it through `models`, which the settings service projects as an editable form. A prompt-cache policy sets the route's marker lifetime, whether a one-hour lifetime declares the extended-cache beta, and whether a tool definition carries a marker. The plugin registers no configurable-provider entry; its discovery read reports the pool `/v1/models` listing as candidates and never writes the catalogue, so a model enters this route only through validated configuration.
 
 ## Table of Contents
 
@@ -31,7 +31,9 @@ Install the package into a profile, or mount its one row from a profile patch:
 - id: llm-cc-pool
   name: '@deepseek-ai/dsh-llm-cc-pool'
   config:
-    cacheTtl: 5m
+    cacheTtl: 1h
+    extendedCacheBeta: true
+    toolCacheBreakpoint: false
     requestLog:
       path: /var/log/dsh/cc-pool-requests.jsonl
     models:
@@ -60,13 +62,13 @@ The package manifest declares `dsh.bundle.patch`, so `dsh plugin --profile web a
 
 The pool admits one in-flight direct request per session and refuses a concurrent one with `cc_pool_session_busy` instead of waiting. The plugin orders streams by the request's session id: a second request for one session reaches the route only after the first stream settled, while different sessions keep running concurrently and still pass through the pool's global slot limiter. A request that is refused with `cc_pool_session_busy` before it forwarded any content (the previous lease releases slightly after its last chunk) is retried up to eight times over 1.8 s, whether or not it queued behind that lease; aborting the request releases its queue slot immediately and opens nothing. Every other refusal — the global-slot `cc_pool_rate_limited` 429, capacity limits, provider rate limits — is returned unchanged with its `Retry-After`, so `dsh-llm-retry` owns it; a refusal naming an already-closed client request id (`cc_pool_request_closed`) is retryable there because the next attempt carries a fresh id. This plugin adds no global or per-IP queue and no throttle between sessions.
 
-### Prompt-cache TTL
+### Prompt-cache policy
 
-`cacheTtl` declares the lifetime of the `cache_control` markers this route asks Anthropic to cache the request prefix under: `5m` (the default) uses the API's default five-minute lifetime, `1h` asks for the extended one, and `none` sends no marker. It is loader configuration read when the plugin mounts, and it applies to this route alone: a request to any other provider is untouched.
+`cacheTtl` declares the lifetime of the `cache_control` markers this route asks Anthropic to cache the request prefix under: `5m` (the default) uses the API's default five-minute lifetime, `1h` asks for the extended one, and `none` sends no marker. `extendedCacheBeta` declares `extended-cache-ttl-2025-04-11` on the request, which is what the one-hour lifetime requires; it is a separate opt-in and is never inferred from `cacheTtl: 1h`. `toolCacheBreakpoint` (default `true`) keeps pi-ai's marker on the last tool declaration; `false` selects the Claude Code 2.1.288 layout, which marks no tool definition. All three are loader configuration read when the plugin mounts, and they apply to this route alone: a request to any other provider is untouched.
 
-The shared `anthropic-messages` transport places the markers, and this plugin selects only their value. One marker sits on the system-prompt text block, one on the last tool declaration when the request declares tools, and one on the last block of the final user or system message when that block is text, an image, a `tool_result`, a `tool_addition`, or a `tool_removal`; a conversation ending on an assistant message carries no conversation marker. `5m` sends `{"type": "ephemeral"}`, `1h` sends `{"type": "ephemeral", "ttl": "1h"}`, and `none` omits the keys. Nothing else in the body changes: the two marker-bearing lifetimes differ in the marker value alone, and `none` is the same request with the marker keys removed, which leaves a single-text message in the compact string form the transport uses when no block carries a marker.
+The shared `anthropic-messages` transport places the markers, and this plugin selects their value and which blocks receive them. With the default tool marker, one marker sits on the system-prompt text block, one on the last tool declaration, and one on the last block of the final user or system message when that block is text, an image, a `tool_result`, a `tool_addition`, or a `tool_removal`; a conversation ending on an assistant message carries no conversation marker. With `toolCacheBreakpoint: false`, only the system-prompt and last-user markers remain. `5m` sends `{"type": "ephemeral"}`, `1h` sends `{"type": "ephemeral", "ttl": "1h"}`, and `none` omits the keys. Nothing else in the body changes: the marker-bearing lifetimes differ in the marker value and placement alone, and `none` is the same request with the marker keys removed, which leaves a single-text message in the compact string form the transport uses when no block carries a marker. The beta is carried on the request's `anthropic-beta` header, and the body carries no `scope` field; this route never declares `prompt-caching-scope-2026-01-05`.
 
-The default states the lifetime the route already served, explicitly, so an ambient provider preference (`PI_CACHE_RETENTION`, which other routes may still follow) cannot move it. A value outside the three is refused when the plugin loads.
+The default states the lifetime the route already served, explicitly, so an ambient provider preference (`PI_CACHE_RETENTION`, which other routes may still follow) cannot move it. A value outside the three lifetimes is refused when the plugin loads. Every other pi-ai Anthropic Messages route states its own `cacheRetention` explicitly, so this route's policy cannot reach it and none of them declares the extended beta.
 
 ### Model catalogue
 
@@ -104,7 +106,7 @@ Each attempt is recorded as one structured log record when it starts and one whe
 <a id="understand-the-implementation"></a>
 ## Understand the implementation
 
-The package is a named Cordis function plugin (`name`, `inject`, `Config`, `apply`) with no default export. `apply` resolves the effective catalogue through `dsh-llm-pi-ai`'s generic profile resolver, so a malformed catalogue fails at plugin load rather than at the first request, and registers it on `ctx.llm`. That profile also carries the configured `cacheTtl` as its pi-ai `cacheRetention` tier, which is how the lifetime reaches the request without this plugin touching a body. The resolved catalogue and profiles are memoized by the raw `models` value, so an unchanged configuration keeps one snapshot while a settings write produces the next one.
+The package is a named Cordis function plugin (`name`, `inject`, `Config`, `apply`) with no default export. `apply` resolves the effective catalogue through `dsh-llm-pi-ai`'s generic profile resolver, so a malformed catalogue fails at plugin load rather than at the first request, and registers it on `ctx.llm`. That profile carries the configured `cacheTtl` as its pi-ai `cacheRetention` tier, `extendedCacheBeta` as the profile's own opt-in, and `toolCacheBreakpoint` as the route compat switch `supportsCacheControlOnTools`, which is how the policy reaches the request without this plugin touching a body. The resolved catalogue and profiles are memoized by the raw `models` value, so an unchanged configuration keeps one snapshot while a settings write produces the next one.
 
 The adapter is `dsh-llm-pi-ai`'s `PiAiAdapter` with two overrides: `listModels` answers from the effective catalogue instead of resolving the credential first, and `stream`/`prepareCall` route each dispatch through the per-session queue. The generic adapter's HTTP/SSE transport, context conversion, stream projection, pool-error classification, and replay handling are reused, not copied. The plugin contributes the route facts, the catalogue, the fixed retry policy, session headers, session ordering, logging, and the durable sink.
 
@@ -133,7 +135,7 @@ The effective catalogue's `maxTokens` becomes the per-request output cap when th
 
 #### KV Cache effect
 
-The fixed catalogue, endpoint, and headers are stable across requests, so they do not disturb the provider's reusable prefix. The session identity is derived from the request session and its conversation position, so a retry repeats it while a request with new content starts a new conversation key. `cacheTtl` chooses how long the provider keeps that prefix: five minutes by default, one hour when configured, or no cache marker at all; the marker set is fixed for a configuration, so it does not vary between requests.
+The fixed catalogue, endpoint, and headers are stable across requests, so they do not disturb the provider's reusable prefix. The session identity is derived from the request session and its conversation position, so a retry repeats it while a request with new content starts a new conversation key. `cacheTtl` chooses how long the provider keeps that prefix: five minutes by default, one hour when configured, or no cache marker at all. `extendedCacheBeta` declares the beta a one-hour lifetime requires, and `toolCacheBreakpoint` selects whether a tool definition carries a marker; the policy is fixed for a configuration, so the marker set does not vary between requests.
 
 ## Known Limitations and Deferred Work
 
@@ -144,6 +146,7 @@ The fixed catalogue, endpoint, and headers are stable across requests, so they d
 - **The catalogue is edited through this plugin's own field** — a deployment changes its model set through `models`, and the pool sync only reports candidates: adopting one is an explicit settings write through the validated catalogue, never a silent overwrite, and the read cannot adopt into the generic Models page. Adding a level, removing adaptive thinking, or changing a route fact ships with a plugin version.
 - **Only the effective catalogue ids are advertised** — routing accepts unlisted model ids at the service level, but selector surfaces show this list and the configured catalogue is the source of truth.
 - **Image modalities are a declaration, not a probe** — every catalogue entry receives `text` and `image`; a pool endpoint refusing images surfaces as a provider refusal mid-turn.
+- **The cache layout is a fixed two-breakpoint policy, not CC's full planner** — with `toolCacheBreakpoint: false` the route marks the system prompt and the last user content block, which is the stable part of the Claude Code 2.1.288 layout. It does not reproduce the client's `markerIndices`, fork-point, or compaction breakpoint planning, and it never upgrades a five-minute marker to one hour automatically: the lifetime and the extended beta are configuration facts.
 - **The default product does not install this package** — the route exists only in a profile that installs the bundle. The shipped base-bundle `llm-pi-ai` preset is a separate composition decision and must be removed in the same profile change that installs this plugin, or both adapters would claim `cc-pool`.
 - **Same-session ordering is per Host process** — the queue belongs to one plugin instance, so a second DSH process or another CC client using the same pool session is not coordinated. The bounded retry absorbs a lease that releases slightly late, but a session still active elsewhere surfaces `POOL_SESSION_BUSY` to the caller.
 
@@ -152,4 +155,4 @@ The fixed catalogue, endpoint, and headers are stable across requests, so they d
 
 - A route fact, a capacity the deployment does not configure, or the level set changes with a plugin version. The package owns those values so no profile edit can drift from the deployed pool; the deployment's own model set is configuration, not a version fact.
 - The session-busy retry schedule is a pool behavior fact, not a deployment tunable: the lease releases shortly after a stream ends, and the fixed 100-250 ms steps bound the wait without letting a stuck session hang a turn. Only `POOL_SESSION_BUSY` is retried here; the global slot limit and provider rate limits remain `dsh-llm-retry`'s business.
-- The plugin's `Config` has three fields: `requestLog`, an installation fact, `models`, the deployment's catalogue, and `cacheTtl`, the route's prompt-cache lifetime. None admits a level map, a compat switch, a retry schedule, or a credential literal.
+- The plugin's `Config` has five fields: `requestLog`, an installation fact, `models`, the deployment's catalogue, and `cacheTtl`, `extendedCacheBeta`, and `toolCacheBreakpoint`, the route's prompt-cache policy. None admits a level map, an arbitrary compat switch, a retry schedule, or a credential literal.

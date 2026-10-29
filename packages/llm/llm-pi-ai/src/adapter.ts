@@ -358,6 +358,41 @@ function profileOptions(
   }
 }
 
+/** Anthropic beta that permits a one-hour prompt-cache lifetime on the markers. */
+const EXTENDED_CACHE_TTL_BETA = 'extended-cache-ttl-2025-04-11'
+
+/**
+ * Whether provider payload data can carry request fields.
+ * @param value - any value pi-ai hands an `onPayload` hook.
+ * @returns whether the value is a plain JSON object.
+ */
+function isRequestPayload(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+}
+
+/**
+ * Add the extended prompt-cache TTL beta to one Anthropic Messages request.
+ *
+ * The hook receives the request fields after pi-ai has built them and before
+ * its SDK serializes them; a returned object replaces those fields. Appending
+ * to `betas` keeps every automatic beta pi-ai derived for the route, and the
+ * Anthropic SDK turns the list into the `anthropic-beta` header. Only the
+ * route option declares this beta — a `long` retention tier writes
+ * `ttl: "1h"` on its markers and stays without it.
+ * @param payload - the Anthropic Messages request fields.
+ * @returns the fields with the beta appended, or undefined to leave them as built.
+ */
+function withExtendedCacheBeta(payload: unknown): Record<string, unknown> | undefined {
+  if (!isRequestPayload(payload)) return undefined
+  const existing = payload['betas']
+  const betas = Array.isArray(existing)
+    ? existing.filter((beta): beta is string => typeof beta === 'string')
+    : []
+  if (betas.includes(EXTENDED_CACHE_TTL_BETA)) return undefined
+  return { ...payload, betas: [...betas, EXTENDED_CACHE_TTL_BETA] }
+}
+
+
 /**
  * The profile default this exact model can actually take, for DESCRIBING it.
  * A configured level the model does not support yields none rather than
@@ -768,6 +803,9 @@ export class PiAiAdapter extends LlmAdapter {
       }
       const events = snapshot.models.streamSimple(model, context, {
         ...profileOptions(profile, reasoning, apiKey),
+        ...profile.extendedCacheBeta === true && model.api === 'anthropic-messages'
+          ? { onPayload: withExtendedCacheBeta }
+          : {},
         ...supportsFetchCapture(model.api) ? { fetch: providerError.fetch } : {},
         ...options.temperature === undefined ? {} : { temperature: options.temperature },
         ...options.maxTokens === undefined ? {} : { maxTokens: options.maxTokens },

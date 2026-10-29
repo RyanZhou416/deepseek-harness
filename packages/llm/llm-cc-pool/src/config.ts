@@ -2,15 +2,15 @@
  * Loader configuration for the fixed mac-pool route.
  *
  * The route, endpoint, credential reference, and headers are plugin-version
- * facts, so they are not configurable. Three deployment-varying choices are: the
+ * facts, so they are not configurable. The deployment-varying choices are: the
  * durable request-diagnostic sink, because a host's log location and retention
  * bounds differ per installation, the model catalogue, because a pool
  * deployment may serve a different model set than the built-in one, and the
- * prompt-cache TTL, because how long a cached prefix must survive is the
- * deployment's cost decision. The catalogue is a live field: the settings
- * service projects it, and an edit reaches the next request and the next model
- * listing without remounting the plugin. `cacheTtl` is loader configuration read
- * when the plugin mounts.
+ * prompt-cache policy, because how long a cached prefix must survive and which
+ * markers carry it are the deployment's cost decision. The catalogue is a live
+ * field: the settings service projects it, and an edit reaches the next request
+ * and the next model listing without remounting the plugin. The cache policy is
+ * loader configuration read when the plugin mounts.
  *
  * @module dsh-llm-cc-pool/config
  */
@@ -43,6 +43,20 @@ export interface Config {
    */
   cacheTtl: CcPoolCacheTtl
   /**
+   * Declare `extended-cache-ttl-2025-04-11` on this route's Anthropic Messages
+   * requests. Opt-in and independent of {@link cacheTtl}: `1h` writes
+   * `ttl: "1h"` on the markers, but only this flag adds the beta that permits
+   * it. The default `false` keeps the header this route already served.
+   */
+  extendedCacheBeta: boolean
+  /**
+   * Mark the last tool declaration with the route's `cache_control` marker.
+   * The default `true` keeps the marker pi-ai places; `false` is this route's
+   * opt-in to the Claude Code 2.1.288 layout, which marks the system prompt and
+   * the last user content block but never a tool definition.
+   */
+  toolCacheBreakpoint: boolean
+  /**
    * The catalogue selector surfaces offer, replacing the built-in four-model
    * catalogue wholesale. Absent, or reset through the settings service, serves
    * the built-in catalogue. A provided list resolves through this package's
@@ -58,6 +72,8 @@ export interface Config {
 export type Options = {
   requestLog?: PiAiRequestLogProfile
   cacheTtl?: CcPoolCacheTtl
+  extendedCacheBeta?: boolean
+  toolCacheBreakpoint?: boolean
   models?: CcPoolModel[]
 }
 
@@ -77,5 +93,7 @@ const builtInModels: CcPoolModel[] = MODELS.map(model => ({ ...model }))
 export const Config = z.object({
   requestLog: PiAiRequestLogProfileSchema,
   cacheTtl: z.union(CACHE_TTLS).default('5m'),
+  extendedCacheBeta: z.boolean().default(false),
+  toolCacheBreakpoint: z.boolean().default(true),
   models: z.array(modelSetting).default(builtInModels).volatile(),
 })

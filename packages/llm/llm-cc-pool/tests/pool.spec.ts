@@ -8,11 +8,12 @@ import {
   POOL_SESSION_BUSY_CODE,
 } from '@deepseek-ai/dsh-llm'
 import { Config } from '../src/config.ts'
-import type { CcPoolModel, CcPoolReasoningLevel } from '../src/pool.ts'
+import type { CcPoolCachePolicy, CcPoolCacheTtl, CcPoolModel, CcPoolReasoningLevel } from '../src/pool.ts'
 import {
   API_KEY_REF,
   BASE_URL,
   CACHE_TTLS,
+  DEFAULT_CACHE_POLICY,
   DISPLAY_NAME,
   MODELS,
   PROVIDER,
@@ -22,6 +23,16 @@ import {
   resolvePoolModels,
   resolvePoolProfiles,
 } from '../src/pool.ts'
+
+/**
+ * One cache policy with explicit overrides.
+ * @param cacheTtl - the marker lifetime.
+ * @param overrides - the other policy fields, defaulted from the route's baseline.
+ * @returns the policy a profile is built from.
+ */
+function cachePolicy(cacheTtl: CcPoolCacheTtl, overrides: Partial<CcPoolCachePolicy> = {}): CcPoolCachePolicy {
+  return { ...DEFAULT_CACHE_POLICY, cacheTtl, ...overrides }
+}
 
 /** One deliberately different deployment catalogue: capacities and defaults the built-in four do not share. */
 const CONFIGURED: CcPoolModel[] = [
@@ -194,32 +205,61 @@ describe('configured model catalogue', () => {
   })
 })
 
-describe('prompt-cache TTL policy', () => {
+describe('prompt-cache policy', () => {
   it('offers the three lifetimes and maps each to its pi-ai retention tier', () => {
     expect(CACHE_TTLS).toEqual(['5m', '1h', 'none'])
     expect(Object.isFrozen(CACHE_TTLS)).toBe(true)
-    expect(poolProviderProfile(MODELS, '5m').cacheRetention).toBe('short')
-    expect(poolProviderProfile(MODELS, '1h').cacheRetention).toBe('long')
-    expect(poolProviderProfile(MODELS, 'none').cacheRetention).toBe('none')
+    expect(poolProviderProfile(MODELS, cachePolicy('5m')).cacheRetention).toBe('short')
+    expect(poolProviderProfile(MODELS, cachePolicy('1h')).cacheRetention).toBe('long')
+    expect(poolProviderProfile(MODELS, cachePolicy('none')).cacheRetention).toBe('none')
     // The default states the lifetime the route already served.
     expect(poolProviderProfile().cacheRetention).toBe('short')
-    expect(resolvePoolProfiles(MODELS, '1h').get(PROVIDER)?.cacheRetention).toBe('long')
+    expect(resolvePoolProfiles(MODELS, cachePolicy('1h')).get(PROVIDER)?.cacheRetention).toBe('long')
+  })
+
+  it('carries the extended beta and tool marker opt-ins on the one pool profile', () => {
+    const profile = poolProviderProfile(MODELS, cachePolicy('1h', {
+      extendedCacheBeta: true,
+      toolCacheBreakpoint: false,
+    }))
+    expect(profile).toMatchObject({
+      cacheRetention: 'long',
+      extendedCacheBeta: true,
+      compat: { supportsCacheControlOnTools: false },
+    })
+    // Both opt-ins are off in the baseline policy, and neither is inferred from
+    // the one-hour tier: a 1h profile without them keeps the header it served.
+    expect(poolProviderProfile()).toMatchObject({
+      extendedCacheBeta: false,
+      compat: { supportsCacheControlOnTools: true },
+    })
+    expect(poolProviderProfile(MODELS, cachePolicy('1h'))).toMatchObject({
+      extendedCacheBeta: false,
+    })
   })
 
   it('declares the policy on the one pool profile and on no model', () => {
-    const profiles = resolvePoolProfiles(MODELS, '1h')
+    const profiles = resolvePoolProfiles(MODELS, cachePolicy('1h', {
+      extendedCacheBeta: true,
+      toolCacheBreakpoint: false,
+    }))
     expect([...profiles.keys()]).toEqual([PROVIDER])
-    // The TTL rides on the profile, which the adapter passes to pi-ai; a model
-    // descriptor carries no lifetime of its own.
+    // The TTL and beta ride on the profile, which the adapter passes to pi-ai;
+    // a model descriptor carries no lifetime or beta of its own. The marker
+    // policy is a route compat switch, which every pool model materializes.
     for (const model of profiles.get(PROVIDER)?.piProvider?.getModels() ?? []) {
       expect(JSON.stringify(model)).not.toContain('ttl')
+      expect(JSON.stringify(model)).not.toContain('extended-cache-ttl')
+      expect(model.compat).toMatchObject({ supportsCacheControlOnTools: false })
     }
   })
 
-  it('defaults the config field to five minutes and refuses any other lifetime', () => {
-    expect(Config({}).cacheTtl).toBe('5m')
+  it('defaults the config fields and refuses any lifetime outside the three', () => {
+    expect(Config({})).toMatchObject({ cacheTtl: '5m', extendedCacheBeta: false, toolCacheBreakpoint: true })
     expect(Config({ cacheTtl: '1h' }).cacheTtl).toBe('1h')
     expect(Config({ cacheTtl: 'none' }).cacheTtl).toBe('none')
+    expect(Config({ extendedCacheBeta: true, toolCacheBreakpoint: false }))
+      .toMatchObject({ extendedCacheBeta: true, toolCacheBreakpoint: false })
     expect(() => Config({ cacheTtl: '24h' } as never)).toThrow(/cacheTtl/)
     expect(() => Config({ cacheTtl: '5min' } as never)).toThrow(/cacheTtl/)
   })

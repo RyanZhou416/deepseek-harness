@@ -9,7 +9,7 @@ kind: "package-bundle"
 
 ## 概述
 
-`@deepseek-ai/dsh-llm-cc-pool` 把 mac 池作为可选 provider 加入组合：安装后恰好提供一条 Anthropic Messages 路由，其端点、凭据引用与重试策略固定。该路由默认提供内置的四模型目录，部署可用 `models` 整体替换它，设置服务会把该目录投影为可编辑表单。`cacheTtl` 选择该路由的提示缓存存活时间：默认五分钟、一小时，或完全不发标记。插件不注册可配置 provider 目录项；它的发现读取把池的 `/v1/models` 清单作为候选报告，绝不写目录，因此模型只能经校验过的配置进入本路由。
+`@deepseek-ai/dsh-llm-cc-pool` 把 mac 池作为可选 provider 加入组合：安装后恰好提供一条 Anthropic Messages 路由，其端点、凭据引用与重试策略固定。该路由默认提供内置的四模型目录，部署可用 `models` 整体替换它，设置服务会把该目录投影为可编辑表单。提示缓存策略决定该路由的标记存活时间、一小时存活期是否声明 extended-cache beta，以及工具定义是否携带标记。插件不注册可配置 provider 目录项；它的发现读取把池的 `/v1/models` 清单作为候选报告，绝不写目录，因此模型只能经校验过的配置进入本路由。
 
 ## 目录
 
@@ -31,7 +31,9 @@ kind: "package-bundle"
 - id: llm-cc-pool
   name: '@deepseek-ai/dsh-llm-cc-pool'
   config:
-    cacheTtl: 5m
+    cacheTtl: 1h
+    extendedCacheBeta: true
+    toolCacheBreakpoint: false
     requestLog:
       path: /var/log/dsh/cc-pool-requests.jsonl
     models:
@@ -60,13 +62,13 @@ kind: "package-bundle"
 
 池每个会话只允许一个在途 direct 请求；并发请求会被以 `cc_pool_session_busy` 拒绝，而不是排队等待。插件按请求的 session id 排序流：同一会话的第二个请求只在第一个流结束后才到达路由，不同会话仍并行运行，并照常经过池的全局槽位限制。请求只要尚未转发任何内容，被 `cc_pool_session_busy` 拒绝（上一个租约在最后一个 chunk 之后才释放）就会在 1.8 秒内最多重试八次，无论它是否排过队；中止请求会立即释放队列位，且不打开任何上游请求。其它拒绝——全局槽位 `cc_pool_rate_limited` 429、容量限制、provider 限速——原样返回并带上 `Retry-After`，由 `dsh-llm-retry` 处理；点名已关闭 client request id 的拒绝（`cc_pool_request_closed`）在那里可重试，因为下一次尝试携带新 id。本插件不添加跨会话的全局或按 IP 队列，也不添加会话之间的节流。
 
-### 提示缓存 TTL
+### 提示缓存策略
 
-`cacheTtl` 声明本路由要求 Anthropic 缓存请求前缀时使用的 `cache_control` 标记存活时间：`5m`（默认）使用 API 默认的五分钟存活期，`1h` 要求延长存活期，`none` 不发送任何标记。它是插件装载时读取的 loader 配置，且只作用于本路由：发往其它 provider 的请求不受影响。
+`cacheTtl` 声明本路由要求 Anthropic 缓存请求前缀时使用的 `cache_control` 标记存活时间：`5m`（默认）使用 API 默认的五分钟存活期，`1h` 要求延长存活期，`none` 不发送任何标记。`extendedCacheBeta` 在请求上声明 `extended-cache-ttl-2025-04-11`，这是一小时存活期所需要的；它是独立开关，绝不从 `cacheTtl: 1h` 推断。`toolCacheBreakpoint`（默认 `true`）保留 pi-ai 放在最后一个工具声明上的标记；设为 `false` 则采用 Claude Code 2.1.288 的布局，不给任何工具定义加标记。三者都是插件装载时读取的 loader 配置，且只作用于本路由：发往其它 provider 的请求不受影响。
 
-标记由共享的 `anthropic-messages` 传输放置，本插件只选择其值。一个标记位于 system prompt 的文本块，一个位于最后一个工具声明（当请求声明工具时），一个位于最终 user 或 system 消息的最后一个 block（当该 block 是 text、image、`tool_result`、`tool_addition` 或 `tool_removal` 时）；以 assistant 消息结束的对话不携带对话标记。`5m` 发送 `{"type": "ephemeral"}`，`1h` 发送 `{"type": "ephemeral", "ttl": "1h"}`，`none` 省略这些键。请求体的其它字节不变：两个带标记的存活期只在标记值上不同，而 `none` 就是去掉标记键的同一请求，此时单条文本消息保持传输在没有 block 需要标记时使用的紧凑字符串形式。
+标记由共享的 `anthropic-messages` 传输放置，本插件选择其值以及哪些 block 接收标记。保留默认工具标记时，一个标记位于 system prompt 的文本块，一个位于最后一个工具声明，一个位于最终 user 或 system 消息的最后一个 block（当该 block 是 text、image、`tool_result`、`tool_addition` 或 `tool_removal` 时）；以 assistant 消息结束的对话不携带对话标记。设为 `toolCacheBreakpoint: false` 后，只剩 system prompt 与最后一个 user block 的标记。`5m` 发送 `{"type": "ephemeral"}`，`1h` 发送 `{"type": "ephemeral", "ttl": "1h"}`，`none` 省略这些键。请求体的其它字节不变：带标记的存活期只在标记值与位置上不同，而 `none` 就是去掉标记键的同一请求，此时单条文本消息保持传输在没有 block 需要标记时使用的紧凑字符串形式。beta 走请求的 `anthropic-beta` header，请求体不带 `scope` 字段；本路由也绝不声明 `prompt-caching-scope-2026-01-05`。
 
-默认值就是本路由此前已经在使用的存活期，只是被显式声明，因此环境中的 provider 偏好（`PI_CACHE_RETENTION`，其它路由仍可跟随它）无法改变它。三个取值之外的值会在插件装载时被拒绝。
+默认值就是本路由此前已经在使用的存活期，只是被显式声明，因此环境中的 provider 偏好（`PI_CACHE_RETENTION`，其它路由仍可跟随它）无法改变它。三个存活期之外的值会在插件装载时被拒绝。其它每一条 pi-ai Anthropic Messages 路由都会显式声明自己的 `cacheRetention`，因此本路由的策略无法到达它们，它们也都不声明 extended beta。
 
 ### 模型目录
 
@@ -104,7 +106,7 @@ profile 可以用 `models` 整体替换该列表。每个条目声明线路 id�
 <a id="understand-the-implementation"></a>
 ## 理解实现
 
-本包是 named Cordis function plugin（`name`、`inject`、`Config`、`apply`），没有 default export。`apply` 用 `dsh-llm-pi-ai` 的通用 profile resolver 解析生效目录，因此畸形的目录会在插件装载时失败而不是等到首个请求，然后把它注册到 `ctx.llm`。该 profile 同时把配置的 `cacheTtl` 作为 pi-ai 的 `cacheRetention` 档位携带，因此存活期无需本插件改写任何请求体即可到达请求。解析出的目录与 profile 按原始 `models` 值做记忆化，未变化的配置保持同一快照，而设置写入产出下一个快照。
+本包是 named Cordis function plugin（`name`、`inject`、`Config`、`apply`），没有 default export。`apply` 用 `dsh-llm-pi-ai` 的通用 profile resolver 解析生效目录，因此畸形的目录会在插件装载时失败而不是等到首个请求，然后把它注册到 `ctx.llm`。该 profile 把配置的 `cacheTtl` 作为 pi-ai 的 `cacheRetention` 档位、把 `extendedCacheBeta` 作为 profile 自己的开关、把 `toolCacheBreakpoint` 作为路由 compat 开关 `supportsCacheControlOnTools` 携带，因此策略无需本插件改写任何请求体即可到达请求。解析出的目录与 profile 按原始 `models` 值做记忆化，未变化的配置保持同一快照，而设置写入产出下一个快照。
 
 适配器是 `dsh-llm-pi-ai` 的 `PiAiAdapter`，覆盖两个方法：`listModels` 直接回答生效目录，而不先解析凭据；`stream`/`prepareCall` 把每次派发送入按会话串行门。通用适配器的 HTTP/SSE 传输、上下文转换、流投影、pool-error 分类与 replay 处理都被复用而非复制。插件自身贡献路由事实、目录、固定重试策略、会话 header、会话排序、日志与持久化 sink。
 
@@ -133,7 +135,7 @@ profile 可以用 `models` 整体替换该列表。每个条目声明线路 id�
 
 #### KV Cache effect
 
-固定目录、端点与 header 跨请求稳定，因此不扰动 provider 可复用的前缀。会话身份由请求会话与其对话位置派生：重试沿用同一身份，而带新内容的请求开启新的会话键。`cacheTtl` 决定 provider 保留该前缀的时长：默认五分钟、配置后一小时，或完全不发缓存标记；标记集合对一份配置固定，不会在请求之间变化。
+固定目录、端点与 header 跨请求稳定，因此不扰动 provider 可复用的前缀。会话身份由请求会话与其对话位置派生：重试沿用同一身份，而带新内容的请求开启新的会话键。`cacheTtl` 决定 provider 保留该前缀的时长：默认五分钟、配置后一小时，或完全不发缓存标记。`extendedCacheBeta` 声明一小时存活期所需的 beta，`toolCacheBreakpoint` 选择工具定义是否携带标记；策略对一份配置固定，标记集合不会在请求之间变化。
 
 ## 已知限制与后续工作
 
@@ -144,6 +146,7 @@ profile 可以用 `models` 整体替换该列表。每个条目声明线路 id�
 - **目录经本插件自己的字段编辑**——部署通过 `models` 改动自己的模型集，而池同步只报告候选：采纳需要一次显式的设置写入并经过目录校验，绝不会静默覆盖，该读取也无法采纳进通用 Models 页面。新增档位、移除 adaptive thinking 或修改路由事实都随插件版本发布。
 - **只公布生效目录中的 id**——服务层仍接受未列出的模型 id，但选择器表面展示该列表，配置后的目录是唯一事实来源。
 - **图片模态是声明而非探测**——每个目录条目都会得到 `text` 与 `image`；拒绝图片的池端点会在轮次中途以 provider 拒绝的形式浮现。
+- **缓存布局是固定的两断点策略，而不是 CC 的完整 planner**——`toolCacheBreakpoint: false` 时路由标记 system prompt 与最后一个 user 内容块，这是 Claude Code 2.1.288 布局中稳定的部分。它不复制客户端的 `markerIndices`、fork point 或 compact 断点规划，也不会自动把五分钟标记升级为一小时：存活期与 extended beta 都是配置事实。
 - **默认产品不安装本包**——只有安装了该 bundle 的 profile 才存在该路由。base bundle 中 `llm-pi-ai` 的既有预设属于独立组合决策，必须与安装本插件的 profile 变更一起移除，否则两个适配器都会占用 `cc-pool`。
 - **同会话排序仅限单个 Host 进程**——队列属于一个插件实例，因此另一个 DSH 进程或其它 CC 客户端使用同一池会话时并不受协调。有界重试只能吸收稍晚释放的租约；若该会话仍在别处活跃，调用方会看到 `POOL_SESSION_BUSY`。
 
@@ -152,4 +155,4 @@ profile 可以用 `models` 整体替换该列表。每个条目声明线路 id�
 
 - 路由事实、部署未配置的容量或档位集合都随插件版本发布。本包拥有这些值，因此任何 profile 编辑都无法偏离已部署的池；部署自己的模型集属于配置，而不是版本事实。
 - 会话忙碌重试计划属于池行为事实，而不是部署可调项：租约在流结束后很快释放，固定的 100-250 ms 步进限定等待时间，既不拖慢正常请求，也不让卡住的会话挂住整轮。这里只重试 `POOL_SESSION_BUSY`；全局槽位限制与 provider 限速仍归 `dsh-llm-retry` 处理。
-- 插件的 `Config` 有三个字段：`requestLog` 是安装事实，`models` 是部署的目录，`cacheTtl` 是本路由的提示缓存存活期。三者都不接受档位映射、compat 开关、重试计划或凭据字面量。
+- 插件的 `Config` 有五个字段：`requestLog` 是安装事实，`models` 是部署的目录，`cacheTtl`、`extendedCacheBeta` 与 `toolCacheBreakpoint` 是本路由的提示缓存策略。它们都不接受档位映射、任意 compat 开关、重试计划或凭据字面量。

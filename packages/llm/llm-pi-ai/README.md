@@ -114,6 +114,8 @@ Exact-model metadata lists `reasoning.efforts` from least to greatest selectable
 
 For self-hosted Chat Completions endpoints, `thinkingTokenBudgetField` selects the reasoning-budget parameter, and `vllmPriority` sets an integer scheduler priority when the server enables priority scheduling. Template arguments accept `$var: thinking.budget`. `openai-responses` gateways can set `supportsMaxOutputTokens: false` to omit `max_output_tokens`; Azure and Codex transports ignore this shared compatibility field. These controls are opt-in; catalog-owned Anthropic effort and fallback capabilities are not configurable switches.
 
+`cacheRetention` selects the prompt-cache markers a route's pi-ai provider places — `none`, `short`, or `long` with `ttl: "1h"` on each marker — and an unset value follows pi-ai's `PI_CACHE_RETENTION` default. `extendedCacheBeta: true` additionally appends `extended-cache-ttl-2025-04-11` to an Anthropic Messages request's `betas` list before the SDK serializes the header; it is never inferred from long retention, and a route whose models speak no Anthropic Messages protocol refuses the option. The adapter adds no `scope` field or scope beta. Both settings are route-scoped, so a composition with several Anthropic routes states each route's retention and beta.
+
 ### Change configuration at runtime
 
 Each operation captures the current `providers` Config reference. New or changed provider profiles are validated before form persistence; unchanged catalog failures remain editable. Route-set or retry-policy changes update registration atomically, preserving previous routes if another adapter owns a requested route.

@@ -1,7 +1,7 @@
 /**
- * Prompt-cache TTL policy: the `cache_control` markers the pool route asks for
- * with each `cacheTtl` choice, their exact placement, and the guarantee that no
- * other provider route changes.
+ * Prompt-cache policy: the `cache_control` markers and `anthropic-beta` header
+ * the pool route asks for under each policy, their exact placement, and the
+ * guarantee that no other provider route changes.
  */
 
 import { Context } from '@deepseek-ai/cordis'
@@ -10,8 +10,14 @@ import type { ToolSchema } from '@deepseek-ai/dsh-llm'
 import * as PiAi from '@deepseek-ai/dsh-llm-pi-ai'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import * as CcPool from '../src/index.ts'
-import type { CcPoolCacheTtl } from '../src/pool.ts'
 import { assemble, capturePoolFetch, user } from './harness.ts'
+import type { CapturedRequest } from './harness.ts'
+
+/** The Anthropic beta a one-hour prompt-cache lifetime declares. */
+const EXTENDED_CACHE_TTL_BETA = 'extended-cache-ttl-2025-04-11'
+
+/** The beta that selects a cache scope; this route never declares one. */
+const CACHE_SCOPE_BETA = 'prompt-caching-scope-2026-01-05'
 
 let context: Context | undefined
 
@@ -136,111 +142,159 @@ function expandCompactMessages(body: Record<string, unknown>): Record<string, un
 }
 
 /**
- * Send the probe on a fresh mount and return the body the pool route built.
- * @param cacheTtl - the TTL choice to mount; omission leaves the key unset.
- * @returns the captured Anthropic Messages body.
+ * The betas a captured request declares, split from its `anthropic-beta` header.
+ * @param request - the captured request.
+ * @returns the declared beta names, empty when the header is absent.
  */
-async function probeBody(cacheTtl: CcPoolCacheTtl | undefined): Promise<Record<string, unknown>> {
-  const ctx = await mount(cacheTtl === undefined ? {} : { cacheTtl })
+function betasOf(request: CapturedRequest): string[] {
+  const header = request.headers.get('anthropic-beta')
+  return header === null ? [] : header.split(',').map(beta => beta.trim()).filter(beta => beta.length > 0)
+}
+
+/**
+ * Send the probe through a fresh mount and return the captured request.
+ * @param config - loader configuration for the pool plugin.
+ * @returns the request the pool route built.
+ */
+async function probe(config: Record<string, unknown> = {}): Promise<CapturedRequest> {
+  vi.stubEnv('CC_POOL_API_KEY', 'pool-member-key')
+  const ctx = await mount(config)
   const capture = capturePoolFetch()
   vi.stubGlobal('fetch', capture.fetch)
   await assemble(ctx, PROBE)
-  const body = capture.calls[0]?.body
-  if (body === undefined) throw new Error('the pool route sent no request')
+  const call = capture.calls[0]
+  if (call === undefined) throw new Error('the pool route sent no request')
   await ctx.fiber.dispose()
   context = undefined
-  return body
+  return call
 }
 
-describe('pool prompt-cache TTL', () => {
+describe('pool prompt-cache policy', () => {
   it('sends the five-minute marker on the system prompt, last tool, and last user block by default', async () => {
-    vi.stubEnv('CC_POOL_API_KEY', 'pool-member-key')
-    const ctx = await mount()
-    const capture = capturePoolFetch()
-    vi.stubGlobal('fetch', capture.fetch)
-    await assemble(ctx, PROBE)
-
-    expect(markersOf(capture.calls[0]?.body ?? {})).toEqual([
+    const request = await probe()
+    expect(markersOf(request.body)).toEqual([
       ['.messages[0].content[0].cache_control', { type: 'ephemeral' }],
       ['.system[0].cache_control', { type: 'ephemeral' }],
       ['.tools[1].cache_control', { type: 'ephemeral' }],
     ])
-    // 5 minutes is the API's default lifetime, so the marker carries no `ttl`.
-    expect(JSON.stringify(capture.calls[0]?.body)).not.toContain('"ttl"')
+    // 5 minutes is the API's default lifetime, so the marker carries no `ttl`,
+    // and the default policy declares no beta.
+    expect(JSON.stringify(request.body)).not.toContain('"ttl"')
+    expect(betasOf(request)).toEqual([])
   })
 
-  it('sends one-hour markers at the same three places when configured', async () => {
-    vi.stubEnv('CC_POOL_API_KEY', 'pool-member-key')
-    const ctx = await mount({ cacheTtl: '1h' })
-    const capture = capturePoolFetch()
-    vi.stubGlobal('fetch', capture.fetch)
-    await assemble(ctx, PROBE)
-
-    expect(markersOf(capture.calls[0]?.body ?? {})).toEqual([
+  it('sends one-hour markers at the same three places without adding the beta', async () => {
+    const request = await probe({ cacheTtl: '1h' })
+    expect(markersOf(request.body)).toEqual([
       ['.messages[0].content[0].cache_control', { type: 'ephemeral', ttl: '1h' }],
       ['.system[0].cache_control', { type: 'ephemeral', ttl: '1h' }],
       ['.tools[1].cache_control', { type: 'ephemeral', ttl: '1h' }],
     ])
+    // The one-hour tier writes `ttl` but does not declare the beta that permits
+    // it: only the explicit route opt-in does.
+    expect(betasOf(request)).toEqual([])
   })
 
-  it('sends no marker at all when configured with none', async () => {
-    vi.stubEnv('CC_POOL_API_KEY', 'pool-member-key')
-    const ctx = await mount({ cacheTtl: 'none' })
-    const capture = capturePoolFetch()
-    vi.stubGlobal('fetch', capture.fetch)
-    await assemble(ctx, PROBE)
+  it('sends the CC 2.1.288 one-hour layout when both opt-ins are set', async () => {
+    const request = await probe({ cacheTtl: '1h', extendedCacheBeta: true, toolCacheBreakpoint: false })
+    const body = request.body
 
-    const body = capture.calls[0]?.body ?? {}
-    expect(markersOf(body)).toEqual([])
-    expect(JSON.stringify(body)).not.toContain('cache_control')
+    // Exactly the two blocks CC's main loop marks: the system prompt and the
+    // final user content block, with the one-hour value on each.
+    expect(markersOf(body)).toEqual([
+      ['.messages[0].content[0].cache_control', { type: 'ephemeral', ttl: '1h' }],
+      ['.system[0].cache_control', { type: 'ephemeral', ttl: '1h' }],
+    ])
+    expect(body['system']).toEqual([{
+      type: 'text',
+      text: 'You are the pool test assistant.',
+      cache_control: { type: 'ephemeral', ttl: '1h' },
+    }])
+    expect(body['messages']).toEqual([{
+      role: 'user',
+      content: [{ type: 'text', text: 'hello', cache_control: { type: 'ephemeral', ttl: '1h' } }],
+    }])
+    // CC 2.1.288 does not mark a tool definition, so neither tool carries one.
+    const tools = body['tools']
+    expect(Array.isArray(tools)).toBe(true)
+    for (const tool of tools as Record<string, unknown>[]) expect(tool).not.toHaveProperty('cache_control')
+
+    // The beta is a header fact; the body declares no beta field, no scope, and
+    // no scope beta.
+    expect(betasOf(request)).toEqual([EXTENDED_CACHE_TTL_BETA])
+    expect(betasOf(request)).not.toContain(CACHE_SCOPE_BETA)
+    expect(JSON.stringify(body)).not.toContain('"scope"')
+    expect(JSON.stringify(body)).not.toContain('betas')
+    expect(JSON.stringify(body)).not.toContain(CACHE_SCOPE_BETA)
+  })
+
+  it('changes nothing but the markers and the declared beta across the policy opt-ins', async () => {
+    const marked = await probe({ cacheTtl: '1h' })
+    const cc = await probe({ cacheTtl: '1h', extendedCacheBeta: true, toolCacheBreakpoint: false })
+
+    // Removing the markers from both requests leaves the same payload: the CC
+    // layout differs only in which blocks carry a marker, and the beta travels
+    // in the header rather than the body.
+    expect(withoutMarkers(cc.body)).toEqual(withoutMarkers(marked.body))
+    expect(markersOf(cc.body)).toHaveLength(2)
+    expect(markersOf(marked.body)).toHaveLength(3)
+  })
+
+  it('sends no marker and no beta when configured with none', async () => {
+    const request = await probe({ cacheTtl: 'none' })
+    expect(markersOf(request.body)).toEqual([])
+    expect(JSON.stringify(request.body)).not.toContain('cache_control')
+    expect(betasOf(request)).toEqual([])
   })
 
   it('changes nothing but the marker value across the TTL choices', async () => {
-    vi.stubEnv('CC_POOL_API_KEY', 'pool-member-key')
-    const unset = await probeBody(undefined)
-    const fiveMinutes = await probeBody('5m')
-    const oneHour = await probeBody('1h')
-    const none = await probeBody('none')
+    const unset = await probe()
+    const fiveMinutes = await probe({ cacheTtl: '5m' })
+    const oneHour = await probe({ cacheTtl: '1h' })
+    const none = await probe({ cacheTtl: 'none' })
 
     // The two marker-bearing lifetimes differ in the marker value alone.
-    expect(withoutMarkers(fiveMinutes)).toEqual(withoutMarkers(oneHour))
+    expect(withoutMarkers(fiveMinutes.body)).toEqual(withoutMarkers(oneHour.body))
     // Removing the markers is the whole of `none`: the remaining payload is the
     // same request, with pi-ai keeping the single-text message in its compact
     // string form because no block needs a marker.
-    expect(markersOf(none)).toEqual([])
-    expect(expandCompactMessages(withoutMarkers(none)))
-      .toEqual(expandCompactMessages(withoutMarkers(fiveMinutes)))
+    expect(markersOf(none.body)).toEqual([])
+    expect(expandCompactMessages(withoutMarkers(none.body)))
+      .toEqual(expandCompactMessages(withoutMarkers(fiveMinutes.body)))
     // An unset key is the route's pre-existing request, and the schema default
     // states that same lifetime explicitly: the two bodies are identical.
-    expect(unset).toEqual(fiveMinutes)
+    expect(unset.body).toEqual(fiveMinutes.body)
+    expect(betasOf(unset)).toEqual(betasOf(fiveMinutes))
   })
 
-  it('keeps its configured lifetime when the ambient retention preference says otherwise', async () => {
-    vi.stubEnv('CC_POOL_API_KEY', 'pool-member-key')
+  it('keeps its configured policy when the ambient retention preference says otherwise', async () => {
     vi.stubEnv('PI_CACHE_RETENTION', 'long')
-    const ctx = await mount()
-    const capture = capturePoolFetch()
-    vi.stubGlobal('fetch', capture.fetch)
-    await assemble(ctx, PROBE)
+    const request = await probe({ cacheTtl: '5m' })
 
     // The route's policy is explicit: an ambient provider preference cannot
-    // upgrade the declared 5-minute lifetime.
-    expect(markersOf(capture.calls[0]?.body ?? {})).toEqual([
+    // upgrade the declared 5-minute lifetime or add the extended beta.
+    expect(markersOf(request.body)).toEqual([
       ['.messages[0].content[0].cache_control', { type: 'ephemeral' }],
       ['.system[0].cache_control', { type: 'ephemeral' }],
       ['.tools[1].cache_control', { type: 'ephemeral' }],
     ])
+    expect(betasOf(request)).toEqual([])
   })
 
-  it('leaves another provider route at its own marker policy', async () => {
+  it('leaves another provider route at its own explicit retention and betas', async () => {
     vi.stubEnv('CC_POOL_API_KEY', 'pool-member-key')
     vi.stubEnv('OTHER_GATEWAY_KEY', 'other-key')
     const ctx = new Context()
     context = ctx
     await ctx.plugin(LlmRuntime)
-    await ctx.plugin(CcPool, { requestLog: { enabled: false }, cacheTtl: '1h' })
-    // A hand-declared route that configures no cache retention: pi-ai's own
-    // default applies to it, and this plugin's choice must not reach it.
+    await ctx.plugin(CcPool, {
+      requestLog: { enabled: false },
+      cacheTtl: '1h',
+      extendedCacheBeta: true,
+      toolCacheBreakpoint: false,
+    })
+    // A second Anthropic Messages route states its own retention explicitly, as
+    // every non-pool route must, and opts into no beta.
     await ctx.plugin(PiAi, {
       providers: {
         'other-gateway': {
@@ -248,6 +302,7 @@ describe('pool prompt-cache TTL', () => {
           apiKeyEnv: 'OTHER_GATEWAY_KEY',
           api: 'anthropic-messages',
           baseURL: 'https://other.example',
+          cacheRetention: 'short',
           models: [{ id: 'other-model', name: 'Other Model', contextWindow: 200_000, maxTokens: 1_024 }],
         },
       },
@@ -264,14 +319,20 @@ describe('pool prompt-cache TTL', () => {
     expect(markersOf(capture.calls[0]?.body ?? {})).toEqual([
       ['.messages[0].content[0].cache_control', { type: 'ephemeral', ttl: '1h' }],
       ['.system[0].cache_control', { type: 'ephemeral', ttl: '1h' }],
-      ['.tools[1].cache_control', { type: 'ephemeral', ttl: '1h' }],
     ])
     expect(markersOf(capture.calls[1]?.body ?? {})).toEqual([
       ['.messages[0].content[0].cache_control', { type: 'ephemeral' }],
       ['.system[0].cache_control', { type: 'ephemeral' }],
       ['.tools[1].cache_control', { type: 'ephemeral' }],
     ])
-    expect(JSON.stringify(capture.calls[1]?.body)).not.toContain('"ttl"')
+    const other = capture.calls[1]
+    if (other === undefined) throw new Error('the second route sent no request')
+    expect(JSON.stringify(other.body)).not.toContain('"ttl"')
+    expect(betasOf(other)).toEqual([])
+    // The pool route's beta and marker policy reached only the pool route.
+    const pool = capture.calls[0]
+    if (pool === undefined) throw new Error('the pool route sent no request')
+    expect(betasOf(pool)).toEqual([EXTENDED_CACHE_TTL_BETA])
   })
 
   it('refuses a lifetime the route does not offer before it registers', async () => {
