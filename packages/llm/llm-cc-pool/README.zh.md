@@ -9,7 +9,7 @@ kind: "package-bundle"
 
 ## 概述
 
-`@deepseek-ai/dsh-llm-cc-pool` 把 mac 池作为可选 provider 加入组合：安装后恰好提供一条 Anthropic Messages 路由，其端点、凭据引用与重试策略固定。该路由默认提供内置的四模型目录，部署可用 `models` 整体替换它，设置服务会把该目录投影为可编辑表单。提示缓存策略决定该路由的标记存活时间、一小时存活期是否声明 extended-cache beta，以及采用两断点布局还是四标记的 Claude Code 布局。插件不注册可配置 provider 目录项；它的发现读取把池的 `/v1/models` 清单作为候选报告，绝不写目录，因此模型只能经校验过的配置进入本路由。
+`@deepseek-ai/dsh-llm-cc-pool` 把 mac 池作为可选 provider 加入组合：安装后恰好提供一条 Anthropic Messages 路由，其端点、凭据引用与重试策略固定。该路由默认提供内置的四模型目录，部署可用 `models` 整体替换它，设置服务会把该目录投影为可编辑表单。其默认提示缓存策略是四标记 Claude Code 布局，带显式一小时存活期与 extended-cache beta。插件不注册可配置 provider 目录项；它的发现读取把池的 `/v1/models` 清单作为候选报告，绝不写目录，因此模型只能经校验过的配置进入本路由。
 
 ## 目录
 
@@ -31,8 +31,6 @@ kind: "package-bundle"
 - id: llm-cc-pool
   name: '@deepseek-ai/dsh-llm-cc-pool'
   config:
-    cacheMarkerPolicy: cc4
-    extendedCacheBeta: true
     requestLog:
       path: /var/log/dsh/cc-pool-requests.jsonl
     models:
@@ -63,13 +61,13 @@ kind: "package-bundle"
 
 ### 提示缓存策略
 
-`cacheTtl` 声明本路由要求 Anthropic 缓存请求前缀时使用的 `cache_control` 标记存活时间：`5m`（默认）使用 API 默认的五分钟存活期，`1h` 要求延长存活期，`none` 不发送任何标记。`extendedCacheBeta` 在请求上声明 `extended-cache-ttl-2025-04-11`，这是一小时存活期所需要的；它是独立开关，绝不从 `cacheTtl: 1h` 推断。`toolCacheBreakpoint`（默认 `true`）保留 pi-ai 放在最后一个工具声明上的标记；设为 `false` 则采用 Claude Code 2.1.288 的布局，不给任何工具定义加标记。`cacheMarkerPolicy: cc4` 则把放置交给下文的四标记 Claude Code 布局；它默认未设置，因此不配置它的部署保持两断点布局。这些都是插件装载时读取的 loader 配置，且只作用于本路由：发往其它 provider 的请求不受影响。
+本路由的默认策略是四标记 Claude Code 布局，带显式一小时存活期：`cacheMarkerPolicy: cc4`、`cacheTtl: 1h`、`extendedCacheBeta: true`。三者都不配置的 profile 就使用这套策略。这些字段是插件装载时读取的 loader 配置，只作用于本路由，并且只经本路由的 profile 到达请求。`cacheTtl` 命名标记存活期，`extendedCacheBeta` 声明一小时存活期所需的 `extended-cache-ttl-2025-04-11`，`cacheMarkerPolicy: cc4` 掌管放置，`toolCacheBreakpoint` 只在没有 `cc4` 的策略放置标记时选择工具标记。
 
-标记由共享的 `anthropic-messages` 传输放置，本插件选择其值以及哪些 block 接收标记。保留默认工具标记时，一个标记位于 system prompt 的文本块，一个位于最后一个工具声明，一个位于最终 user 或 system 消息的最后一个 block（当该 block 是 text、image、`tool_result`、`tool_addition` 或 `tool_removal` 时）；以 assistant 消息结束的对话不携带对话标记。设为 `toolCacheBreakpoint: false` 后，只剩 system prompt 与最后一个 user block 的标记。`5m` 发送 `{"type": "ephemeral"}`，`1h` 发送 `{"type": "ephemeral", "ttl": "1h"}`，`none` 省略这些键。请求体的其它字节不变：带标记的存活期只在标记值与位置上不同，而 `none` 就是去掉标记键的同一请求，此时单条文本消息保持传输在没有 block 需要标记时使用的紧凑字符串形式。beta 走请求的 `anthropic-beta` header，请求体不带 `scope` 字段；本路由也绝不声明 `prompt-caching-scope-2026-01-05`。
+不可能成立的组合会在插件装载时被拒绝，设置写入也走同一校验，绝不会拖到请求时才失败：`cacheTtl: 1h` 缺少 `extendedCacheBeta: true` 是错误，`cacheMarkerPolicy: cc4` 还要求 `cacheTtl: 1h`。schema 仍接受三个存活期取值，但由配置的策略决定哪些能真正服务，因此路由不会留下来不带其标记所需 beta 的状态。`toolCacheBreakpoint` 会被接受但在 `cc4` 掌管放置时被忽略：策略总是亲自标记最后一个工具声明，设为 `false` 也移除不了它。
 
-配置 `cacheMarkerPolicy: cc4` 后，放置由本路由的适配器接管：先移除 `system`、`tools` 和 `messages` 上传输或调用方放置的全部 `cache_control`，然后只给请求实际拥有的位置加上 `{"type": "ephemeral", "ttl": "1h"}`——`system[0]`、最后一个工具声明、最后一个可缓存的用户内容块，以及最后一个可缓存的助手内容块。因此 `cc4` 优先于 `toolCacheBreakpoint`，也优先于 `cacheTtl` 会写入的存活期；beta 仍只来自 `extendedCacheBeta`。没有工具声明或没有助手轮次的请求只携带较小的一组标记，而不会凭空增加请求里没有的 block；助手消息末尾若是 `thinking` 或 `redacted_thinking` 块则跳过，且不向前回溯。转发的请求体不增加 `scope` 字段，也不声明 scope beta。
+使用 `cc4` 时，放置由本路由的适配器接管：先移除 `system`、`tools` 和 `messages` 上共享传输或调用方放置的全部 `cache_control`，然后只给请求实际拥有的位置加上 `{"type": "ephemeral", "ttl": "1h"}`——`system[0]`、最后一个工具声明、最后一个可缓存的用户内容块，以及最后一个可缓存的助手内容块。没有工具声明或没有助手轮次的请求只携带较小的一组标记，而不会凭空增加请求里没有的 block；助手消息末尾若是 `thinking` 或 `redacted_thinking` 块则跳过，且不向前回溯。beta 走请求的 `anthropic-beta` header；转发的请求体不增加 `scope` 字段，也不声明 scope beta。
 
-默认值就是本路由此前已经在使用的存活期，只是被显式声明，因此环境中的 provider 偏好（`PI_CACHE_RETENTION`，其它路由仍可跟随它）无法改变它。三个存活期之外的值会在插件装载时被拒绝。其它每一条 pi-ai Anthropic Messages 路由都会显式声明自己的 `cacheRetention`，因此本路由的策略无法到达它们，它们也都不声明 extended beta。
+由于策略显式落在 profile 上，环境中的 provider 偏好（`PI_CACHE_RETENTION`，其它路由仍可跟随它）无法改变它。其它每一条 pi-ai Anthropic Messages 路由都会显式声明自己的 `cacheRetention`，因此本路由的策略无法到达它们，它们也都不声明 extended beta。
 
 ### 模型目录
 
@@ -107,7 +105,7 @@ profile 可以用 `models` 整体替换该列表。每个条目声明线路 id�
 <a id="understand-the-implementation"></a>
 ## 理解实现
 
-本包是 named Cordis function plugin（`name`、`inject`、`Config`、`apply`），没有 default export。`apply` 用 `dsh-llm-pi-ai` 的通用 profile resolver 解析生效目录，因此畸形的目录会在插件装载时失败而不是等到首个请求，然后把它注册到 `ctx.llm`。该 profile 把配置的 `cacheTtl` 作为 pi-ai 的 `cacheRetention` 档位、把 `extendedCacheBeta` 作为 profile 自己的开关、把 `toolCacheBreakpoint` 作为路由 compat 开关 `supportsCacheControlOnTools`、把 `cacheMarkerPolicy` 作为 profile 的四标记策略携带，因此策略无需本插件改写任何请求体即可到达请求（`cc4` 的改写由 `dsh-llm-pi-ai` 的同一个 `onPayload` 钩子完成）。解析出的目录与 profile 按原始 `models` 值做记忆化，未变化的配置保持同一快照，而设置写入产出下一个快照。
+本包是 named Cordis function plugin（`name`、`inject`、`Config`、`apply`），没有 default export。`apply` 用 `dsh-llm-pi-ai` 的通用 profile resolver 解析生效目录，因此畸形的目录会在插件装载时失败而不是等到首个请求，然后把它注册到 `ctx.llm`。在解析之前它会校验缓存策略的跨字段约束，同一检查也跑在设置写入的 waterfall 上，因此不可能的存活期/beta 组合会在写入处被拒绝。该 profile 把配置的 `cacheTtl` 作为 pi-ai 的 `cacheRetention` 档位、把 `extendedCacheBeta` 作为 profile 的 beta 声明、把 `toolCacheBreakpoint` 作为路由 compat 开关 `supportsCacheControlOnTools`、把 `cacheMarkerPolicy` 作为 profile 的四标记策略携带，因此策略无需本插件改写任何请求体即可到达请求（`cc4` 的改写由 `dsh-llm-pi-ai` 的同一个 `onPayload` 钩子完成）。解析出的目录与 profile 按原始 `models` 值做记忆化，未变化的配置保持同一快照，而设置写入产出下一个快照。
 
 适配器是 `dsh-llm-pi-ai` 的 `PiAiAdapter`，覆盖两个方法：`listModels` 直接回答生效目录，而不先解析凭据；`stream`/`prepareCall` 把每次派发送入按会话串行门。通用适配器的 HTTP/SSE 传输、上下文转换、流投影、pool-error 分类与 replay 处理都被复用而非复制。插件自身贡献路由事实、目录、固定重试策略、会话 header、会话排序、日志与持久化 sink。
 
@@ -136,7 +134,7 @@ profile 可以用 `models` 整体替换该列表。每个条目声明线路 id�
 
 #### KV Cache effect
 
-固定目录、端点与 header 跨请求稳定，因此不扰动 provider 可复用的前缀。会话身份由请求会话与其对话位置派生：重试沿用同一身份，而带新内容的请求开启新的会话键。`cacheTtl` 决定 provider 保留该前缀的时长：默认五分钟、配置后一小时，或完全不发缓存标记。`extendedCacheBeta` 声明一小时存活期所需的 beta，`toolCacheBreakpoint` 选择工具定义是否携带标记，`cacheMarkerPolicy: cc4` 则用四标记布局替代上述放置；策略对一份配置固定，标记集合不会在请求之间变化。
+固定目录、端点与 header 跨请求稳定，因此不扰动 provider 可复用的前缀。会话身份由请求会话与其对话位置派生：重试沿用同一身份，而带新内容的请求开启新的会话键。默认的 `cc4` 策略用显式一小时存活期标记四个固定位置并声明 extended beta；`cacheTtl`、`extendedCacheBeta` 与 `toolCacheBreakpoint` 仍是本路由的字段，但策略要求一小时且声明 beta 的组合，并由策略掌管标记集合，因此标记布局不会在请求之间变化。
 
 ## 已知限制与后续工作
 
@@ -147,7 +145,7 @@ profile 可以用 `models` 整体替换该列表。每个条目声明线路 id�
 - **目录经本插件自己的字段编辑**——部署通过 `models` 改动自己的模型集，而池同步只报告候选：采纳需要一次显式的设置写入并经过目录校验，绝不会静默覆盖，该读取也无法采纳进通用 Models 页面。新增档位、移除 adaptive thinking 或修改路由事实都随插件版本发布。
 - **只公布生效目录中的 id**——服务层仍接受未列出的模型 id，但选择器表面展示该列表，配置后的目录是唯一事实来源。
 - **图片模态是声明而非探测**——每个目录条目都会得到 `text` 与 `image`；拒绝图片的池端点会在轮次中途以 provider 拒绝的形式浮现。
-- **缓存布局是固定的断点策略，而不是 CC 的完整 planner**——`toolCacheBreakpoint: false` 时路由标记 system prompt 与最后一个 user 内容块，这是 Claude Code 2.1.288 布局中稳定的部分；`cacheMarkerPolicy: cc4` 时改为 system[0]、最后一个工具声明、最后一个用户内容块与最后一个助手内容块这四个固定位置。两者都不复制客户端的 `markerIndices`、fork point 或 compact 断点规划，也不会自动把五分钟标记升级为一小时：存活期与 extended beta 都是配置事实。
+- **缓存布局是固定的四标记策略，而不是 CC 的完整 planner**——路由标记 `system[0]`、最后一个工具声明、最后一个用户内容块与最后一个助手内容块，并在助手末尾是 `thinking` 块时跳过、不向前回溯。它不复制客户端的 `markerIndices`、fork point 或 compact 断点规划。`cc4` 掌管放置时 `toolCacheBreakpoint` 会被接受但忽略；缺少必需的一小时/beta 组合的策略会在装载时被拒绝，而不是静默回退。
 - **默认产品不安装本包**——只有安装了该 bundle 的 profile 才存在该路由。base bundle 中 `llm-pi-ai` 的既有预设属于独立组合决策，必须与安装本插件的 profile 变更一起移除，否则两个适配器都会占用 `cc-pool`。
 - **同会话排序仅限单个 Host 进程**——队列属于一个插件实例，因此另一个 DSH 进程或其它 CC 客户端使用同一池会话时并不受协调。有界重试只能吸收稍晚释放的租约；若该会话仍在别处活跃，调用方会看到 `POOL_SESSION_BUSY`。
 
@@ -156,4 +154,4 @@ profile 可以用 `models` 整体替换该列表。每个条目声明线路 id�
 
 - 路由事实、部署未配置的容量或档位集合都随插件版本发布。本包拥有这些值，因此任何 profile 编辑都无法偏离已部署的池；部署自己的模型集属于配置，而不是版本事实。
 - 会话忙碌重试计划属于池行为事实，而不是部署可调项：租约在流结束后很快释放，固定的 100-250 ms 步进限定等待时间，既不拖慢正常请求，也不让卡住的会话挂住整轮。这里只重试 `POOL_SESSION_BUSY`；全局槽位限制与 provider 限速仍归 `dsh-llm-retry` 处理。
-- 插件的 `Config` 有六个字段：`requestLog` 是安装事实，`models` 是部署的目录，`cacheTtl`、`extendedCacheBeta`、`toolCacheBreakpoint` 与 `cacheMarkerPolicy` 是本路由的提示缓存策略。它们都不接受档位映射、任意 compat 开关、重试计划或凭据字面量。
+- 插件的 `Config` 有六个字段：`requestLog` 是安装事实，`models` 是部署的目录，`cacheTtl`、`extendedCacheBeta`、`toolCacheBreakpoint` 与 `cacheMarkerPolicy` 是本路由的提示缓存策略。缓存默认值就是四标记一小时策略（`cacheTtl: 1h`、`extendedCacheBeta: true`、`cacheMarkerPolicy: cc4`），不可能的组合会在装载时被拒绝。这些字段都不接受档位映射、任意 compat 开关、重试计划或凭据字面量。

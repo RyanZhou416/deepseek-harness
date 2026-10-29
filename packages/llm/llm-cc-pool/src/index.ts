@@ -18,20 +18,19 @@
  * ordered before they open, because the pool admits one in-flight direct
  * request per session and refuses a concurrent one instead of waiting.
  * `cacheTtl` declares the prompt-cache lifetime of this route's
- * `cache_control` markers — 5 minutes by default, 1 hour, or no marker —
- * `extendedCacheBeta` declares the beta a one-hour lifetime requires,
- * `toolCacheBreakpoint` selects whether a tool definition carries a marker, and
- * `cacheMarkerPolicy: cc4` replaces that placement with the four-marker Claude
- * Code layout. All of them reach the wire only through this route's profile; no
- * other provider's request is touched.
+ * `cache_control` markers, `extendedCacheBeta` declares the beta a one-hour
+ * lifetime requires, and `toolCacheBreakpoint` selects whether a tool
+ * definition carries a marker when the four-marker policy does not own
+ * placement. The defaults enable the four-marker Claude Code layout —
+ * `cacheTtl: 1h`, `extendedCacheBeta: true`, `cacheMarkerPolicy: cc4` — and an
+ * impossible combination is refused when the plugin loads. All of them reach
+ * the wire only through this route's profile; no other provider's request is
+ * touched.
  *
  * ```yaml
  * - id: llm-cc-pool
  *   name: '@deepseek-ai/dsh-llm-cc-pool'
  *   config:
- *     cacheTtl: 1h
- *     extendedCacheBeta: true
- *     toolCacheBreakpoint: false
  *     requestLog:
  *       path: /var/log/dsh/cc-pool-requests.jsonl
  *       maxFileBytes: 16777216
@@ -61,7 +60,7 @@ import {
 import type { PiAiAdapterOptions, ResolvedPiAiProviderProfile } from '@deepseek-ai/dsh-llm-pi-ai'
 import { Config } from './config.ts'
 import { DISCOVERY_NAMESPACE, discoverPoolModels } from './discovery.ts'
-import { API_KEY_REF, MODEL_INPUT, PROVIDER, resolvePoolModels, resolvePoolProfiles } from './pool.ts'
+import { API_KEY_REF, MODEL_INPUT, PROVIDER, resolvePoolCachePolicy, resolvePoolModels, resolvePoolProfiles } from './pool.ts'
 import type { CcPoolCachePolicy, CcPoolModel } from './pool.ts'
 import { SessionSerialGate } from './session-gate.ts'
 
@@ -74,6 +73,7 @@ export {
   MODELS,
   REASONING_EFFORTS,
   REASONING_LEVELS,
+  resolvePoolCachePolicy,
   resolvePoolModels,
   resolvePoolProfiles,
 } from './pool.ts'
@@ -216,6 +216,20 @@ interface PoolSnapshot {
   readonly profiles: ReadonlyMap<string, ResolvedPiAiProviderProfile>
 }
 
+/**
+ * The prompt-cache policy one configuration snapshot declares.
+ * @param config - schema-validated loader configuration.
+ * @returns the policy fields, with marker placement present only when configured.
+ */
+function cachePolicyOf(config: Config): CcPoolCachePolicy {
+  return {
+    cacheTtl: config.cacheTtl,
+    extendedCacheBeta: config.extendedCacheBeta,
+    toolCacheBreakpoint: config.toolCacheBreakpoint,
+    ...config.cacheMarkerPolicy === undefined ? {} : { cacheMarkerPolicy: config.cacheMarkerPolicy },
+  }
+}
+
 /** Register the fixed mac-pool route on the harness LLM seam. */
 export function apply(ctx: Context, config: Config): void {
   // The dedicated CC-pool settings page owns presentation; the generic
@@ -228,12 +242,10 @@ export function apply(ctx: Context, config: Config): void {
   // Read once, with the rest of the loader configuration: the cache policy a
   // deployment asks for is not a per-request setting, and it is captured here so
   // every resolution of this route's profiles carries the same policy.
-  const cachePolicy: CcPoolCachePolicy = {
-    cacheTtl: config.cacheTtl,
-    extendedCacheBeta: config.extendedCacheBeta,
-    toolCacheBreakpoint: config.toolCacheBreakpoint,
-    ...config.cacheMarkerPolicy === undefined ? {} : { cacheMarkerPolicy: config.cacheMarkerPolicy },
-  }
+  const cachePolicy = cachePolicyOf(config)
+  // Fail loud at load, before the route is registered: an impossible marker
+  // combination belongs here, not in a provider rejection at the first request.
+  resolvePoolCachePolicy(cachePolicy)
   /**
    * The snapshot for the current `models` value, memoized by that value's
    * identity so both a request and the listing it precedes share one profile
@@ -253,15 +265,16 @@ export function apply(ctx: Context, config: Config): void {
   current()
 
   // The settings service validates the complete candidate through the schema
-  // before persisting, but unique ids and a non-empty catalogue are
-  // catalogue-wide facts no field schema can express; check them on the same
-  // waterfall so an invalid settings write is refused instead of stored and
-  // re-loaded as a broken route.
+  // before persisting, but unique ids, a non-empty catalogue, and the cache
+  // policy's cross-field requirements are facts no single field schema can
+  // express; check them on the same waterfall so an invalid settings write is
+  // refused instead of stored and re-loaded as a broken route.
   ctx.on('internal/config', function (this: Fiber, _raw, next) {
     const raw: unknown = next()
     if (this !== ctx.fiber) return raw
     const candidate = Config(raw as import('./config.ts').Options)
     resolvePoolModels(candidate.models.get())
+    resolvePoolCachePolicy(cachePolicyOf(candidate))
     return raw
   })
 

@@ -18,9 +18,12 @@
  * the route's marker value, {@link CcPoolCachePolicy.extendedCacheBeta} declares
  * the beta a one-hour lifetime requires,
  * {@link CcPoolCachePolicy.toolCacheBreakpoint} selects whether a tool
- * definition carries a marker, and {@link CcPoolCachePolicy.cacheMarkerPolicy}
- * hands placement to pi-ai's four-marker layout when set. The profile resolver
- * carries these as the route's pi-ai `cacheRetention`, `extendedCacheBeta`,
+ * definition carries a marker without `cc4`, and
+ * {@link CcPoolCachePolicy.cacheMarkerPolicy} hands placement to pi-ai's
+ * four-marker layout. The default policy is `cc4` with `cacheTtl: "1h"` and
+ * `extendedCacheBeta: true`, and {@link resolvePoolCachePolicy} refuses a
+ * combination that cannot serve a request. The profile resolver carries these
+ * as the route's pi-ai `cacheRetention`, `extendedCacheBeta`,
  * `cacheMarkerPolicy`, and `compat.supportsCacheControlOnTools`; pi-ai builds
  * the `cache_control` markers and beta from them, and nothing here rewrites a
  * request body. No other route reads these values.
@@ -65,7 +68,10 @@ export const MODEL_INPUT: readonly PiAiModality[] = Object.freeze(['text', 'imag
  * `cache_control: {type: "ephemeral"}`, `1h` extends it with
  * `cache_control: {type: "ephemeral", ttl: "1h"}`, and `none` sends no marker
  * at all. The value reaches the wire only through this route's profile, so a
- * request to another provider never reads it.
+ * request to another provider never reads it. The route's default policy
+ * declares `1h` and the four-marker layout, and that combination also requires
+ * {@link CcPoolCachePolicy.extendedCacheBeta}; {@link resolvePoolCachePolicy}
+ * refuses the other lifetimes while `cc4` owns placement.
  */
 export const CACHE_TTLS = Object.freeze(['5m', '1h', 'none'] as const)
 
@@ -80,20 +86,24 @@ export type CcPoolCacheTtl = (typeof CACHE_TTLS)[number]
  * adds the beta a one-hour lifetime declares, `toolCacheBreakpoint` selects
  * whether the last tool definition carries a marker, and `cacheMarkerPolicy`
  * replaces that placement with the four-marker layout when configured.
+ * {@link resolvePoolCachePolicy} refuses a policy whose fields cannot serve a
+ * request together.
  */
 export interface CcPoolCachePolicy {
   /** Marker lifetime every block marked on this route declares; see {@link CACHE_TTLS}. */
   cacheTtl: CcPoolCacheTtl
   /**
    * Add `extended-cache-ttl-2025-04-11` to the request's `anthropic-beta`
-   * header. Independent of {@link cacheTtl}: `1h` writes `ttl: "1h"` on the
-   * markers, while this field alone declares the beta that permits it.
+   * header. `1h` writes `ttl: "1h"` on the markers, while this field alone
+   * declares the beta that permits it; {@link resolvePoolCachePolicy} refuses
+   * a one-hour lifetime without it.
    */
   extendedCacheBeta: boolean
   /**
-   * Mark the last tool declaration with `cache_control`. `false` keeps the
-   * Claude Code 2.1.288 layout this route mirrors, which marks the system
-   * prompt and the last user content block and no tool definition.
+   * Mark the last tool declaration with `cache_control`. Ignored while
+   * {@link cacheMarkerPolicy} is `cc4`, because that policy owns the complete
+   * marker set; without `cc4`, `false` keeps the Claude Code 2.1.288 layout,
+   * which marks no tool definition.
    */
   toolCacheBreakpoint: boolean
   /**
@@ -102,16 +112,50 @@ export interface CcPoolCachePolicy {
    * markers and takes precedence over every other marker field on this route:
    * it discards the markers {@link cacheTtl} and {@link toolCacheBreakpoint}
    * select and writes `{type: "ephemeral", ttl: "1h"}` on the slots it owns.
+   * It requires `cacheTtl: "1h"` and `extendedCacheBeta: true`.
    */
   cacheMarkerPolicy?: PiAiCacheMarkerPolicy
 }
 
-/** The policy this route served before its fields were configurable. */
+/**
+ * The policy this route serves by default: four Claude Code markers with the
+ * explicit one-hour lifetime and the beta that permits it.
+ */
 export const DEFAULT_CACHE_POLICY: CcPoolCachePolicy = Object.freeze({
-  cacheTtl: '5m',
-  extendedCacheBeta: false,
+  cacheTtl: '1h',
+  extendedCacheBeta: true,
   toolCacheBreakpoint: true,
+  cacheMarkerPolicy: 'cc4',
 })
+
+/**
+ * Validate one prompt-cache policy before it can become a route profile.
+ *
+ * The one-hour lifetime requires the extended beta, and the four-marker policy
+ * requires both; a policy that names one without the other would only fail at
+ * the provider, after the request left the host. This runs at plugin load and
+ * on every profile resolution — including the settings-write validation — so an
+ * impossible combination is refused where it is written.
+ * @param policy - the policy a deployment or caller supplied.
+ * @returns the same policy, unchanged, when it can serve a request.
+ * @throws Error naming the field combination that cannot serve a request.
+ */
+export function resolvePoolCachePolicy(policy: CcPoolCachePolicy): CcPoolCachePolicy {
+  if (policy.cacheMarkerPolicy === 'cc4') {
+    if (policy.cacheTtl !== '1h') {
+      throw new Error(
+        `llm-cc-pool: cacheMarkerPolicy "cc4" requires cacheTtl "1h"; got ${JSON.stringify(policy.cacheTtl)}`,
+      )
+    }
+    if (!policy.extendedCacheBeta) {
+      throw new Error('llm-cc-pool: cacheMarkerPolicy "cc4" requires extendedCacheBeta: true')
+    }
+  }
+  if (policy.cacheTtl === '1h' && !policy.extendedCacheBeta) {
+    throw new Error('llm-cc-pool: cacheTtl "1h" requires extendedCacheBeta: true')
+  }
+  return policy
+}
 
 /** The profile field that carries a TTL choice to pi-ai. */
 type PiAiCacheRetention = NonNullable<PiAiProviderProfile['cacheRetention']>
@@ -261,14 +305,15 @@ function retryPolicy(): RetryPolicyConfig {
  * The one configured profile this plugin resolves.
  * @param models - the effective catalogue; omission serves the built-in catalogue.
  * @param policy - prompt-cache policy this route declares; omission declares the
- *   five-minute lifetime and tool marker the route served before the policy was
- *   configurable.
+ *   four-marker, one-hour policy with the extended beta.
  * @returns the raw profile the generic resolver validates.
+ * @throws Error when the policy combination cannot serve a request.
  */
 export function poolProviderProfile(
   models: readonly CcPoolModel[] = MODELS,
   policy: CcPoolCachePolicy = DEFAULT_CACHE_POLICY,
 ): PiAiProviderProfile {
+  resolvePoolCachePolicy(policy)
   return {
     displayName: DISPLAY_NAME,
     apiKeyEnv: API_KEY_REF,
@@ -300,8 +345,9 @@ export function poolProviderProfile(
  * instead of at the first request.
  * @param models - the effective catalogue; omission serves the built-in catalogue.
  * @param policy - prompt-cache policy this route declares; omission declares the
- *   five-minute lifetime and tool marker.
+ *   four-marker, one-hour policy with the extended beta.
  * @returns the resolved profiles keyed by {@link PROVIDER}.
+ * @throws Error when the policy combination cannot serve a request.
  */
 export function resolvePoolProfiles(
   models: readonly CcPoolModel[] = MODELS,

@@ -285,7 +285,7 @@ ChatGPT 源码提供默认关闭的 `autoResetCredits` 开关，入口为订阅�
 
 新同事的全新 `DSH_HOME` 必须由仓库内模板补齐，而不是依赖维护者机器上的 `profiles/web/cordis.patch.yml`。`fork-runtime/web/portable-profile.patch.yml` 是模板，`fork-runtime/web/memory-watchdog.cjs`、`goal-disabled.cjs`、`chatgpt-subagent-preset.cjs`、`portable-memory-limits.patch.yml` 与 `fork-runtime/web/agent-presets/chatgpt-dsh/` 是模板所需的本地文件。`scripts/fork-profile-seed.ts` 把模板写入新建或仍为空 patch 的 web profile，并在缺失时复制支持文件；已有非空用户 patch 与已有文件一律保留。`build.cmd` 与 `run.cmd` 在未设置 `DSH_HOME` 时统一使用仓库同级 `..\deepseek-harness-data`，使构建与启动指向同一个 profile。
 
-模板包含插件开关（`dsh-context`、`llm-subscriptions`、`aether-shell`、`goal`/`goal-round-driver`/`command-goal`/`ui-goal` 禁用、模型 provider、locale、permission preset 等）；`DSH_HOME` 派生路径用 `!!js process.env.DSH_HOME`，AetherShell 路径可用 `AETHER_SHELL_EXE` 覆盖。API key 只保留环境变量名，不写入模板。订阅与 fork 插件包仍由 `build.cmd` 的 `fork-plugins-build.ts` 安装；模板不是 bundle 依赖清单的替代。禁用 Goal 时同时复制本地 `goal-disabled.cjs`，拦截恢复会话中排队的旧 Goal 轮次。
+模板包含插件开关（`dsh-context`、`llm-subscriptions`、`aether-shell`、`goal`/`goal-round-driver`/`command-goal`/`ui-goal` 禁用、模型 provider、locale、permission preset 等）；`DSH_HOME` 派生路径用 `!!js process.env.DSH_HOME`，AetherShell 路径可用 `AETHER_SHELL_EXE` 覆盖。API key 只保留环境变量名，不写入模板。订阅与 fork 插件包仍由 `build.cmd` 的 `fork-plugins-build.ts` 安装；模板不是 bundle 依赖清单的替代。禁用 Goal 时同时复制本地 `goal-disabled.cjs`，拦截恢复会话中排队的旧 Goal 轮次。模板的 `llm-pi-ai` `cc-pool` 路由显式声明 `cacheRetention: long`、`extendedCacheBeta: true` 与 `cacheMarkerPolicy: cc4`，让新生 profile 的池路由与 `llm-cc-pool` 插件默认的四标记策略一致；模板目前仍用 `llm-pi-ai` 声明该路由，而不是安装独立插件包。
 
 **Preservation rule.** 只对新建或空 profile 应用模板；不得覆盖已有用户的 `cordis.patch.yml` 或支持文件。模板里的 preset `plugins` 列表必须与 `packages/bundle/web-app/presets/{standard,ptc,cordis}.patch.yml` 保持同步，否则 `tool-goal` 的禁用会漂移。保持 `build.cmd`、`run.cmd` 的默认 `DSH_HOME` 一致；显式环境变量优先。
 
@@ -1257,58 +1257,56 @@ only with the plugin row installed.
 
 ## CC pool one-hour prompt-cache policy (fork)
 
-**Behavior.** `llm-cc-pool` exposes `cacheTtl` (`5m`/`1h`/`none`, default `5m`),
-`extendedCacheBeta` (default `false`), `toolCacheBreakpoint` (default `true`),
-and `cacheMarkerPolicy` (unset by default, `cc4` opt-in). Its profile maps them
-to pi-ai `cacheRetention`, the `extendedCacheBeta` route option,
-`compat.supportsCacheControlOnTools`, and the route's own `cacheMarkerPolicy`.
-`llm-pi-ai` accepts the opt-in `extendedCacheBeta` on a route whose models speak
-`anthropic-messages` and, through pi-ai's single `onPayload` hook, appends
-`extended-cache-ttl-2025-04-11` to the request's `betas` list; the Anthropic SDK
-sends that list as `anthropic-beta`. The beta is never inferred from
-`cacheRetention: long`, and no route adds a `scope` field or
-`prompt-caching-scope-2026-01-05`. The earlier CC 2.1.288 layout remains
-available as `cacheTtl: 1h`, `extendedCacheBeta: true`,
-`toolCacheBreakpoint: false`: `system[0]` and the last user content block carry
-`cache_control.ttl: "1h"`, tools carry none, and other Anthropic pi-ai routes
-keep their explicitly configured retention and betas.
+**Behavior.** `llm-cc-pool` defaults to the four-marker Claude Code policy:
+`cacheTtl: 1h`, `extendedCacheBeta: true`, `cacheMarkerPolicy: cc4`. The other
+schema values (`cacheTtl` `5m`/`none`, `extendedCacheBeta: false`,
+`toolCacheBreakpoint`) are accepted at the field level but a combination that
+cannot serve is refused by `resolvePoolCachePolicy`: `cacheTtl: "1h"` requires
+`extendedCacheBeta: true`, and `cacheMarkerPolicy: "cc4"` requires
+`cacheTtl: "1h"` and `extendedCacheBeta: true`. `toolCacheBreakpoint` is
+accepted and ignored while `cc4` owns placement. Validation runs in `apply`
+before the route registers and in the `internal/config` waterfall for settings
+writes, so an impossible combination fails at load rather than at request time.
+Its profile maps the fields to pi-ai `cacheRetention`, the `extendedCacheBeta`
+route option, `compat.supportsCacheControlOnTools`, and the route's own
+`cacheMarkerPolicy`. `llm-pi-ai` accepts `extendedCacheBeta` on a route whose
+models speak `anthropic-messages` and, through pi-ai's single `onPayload` hook,
+appends `extended-cache-ttl-2025-04-11` to the request's `betas` list; the
+Anthropic SDK sends that list as `anthropic-beta`. The beta is never inferred
+from `cacheRetention: long`, and no route adds a `scope` field or
+`prompt-caching-scope-2026-01-05`.
 
-The decided four-marker layout is `cacheMarkerPolicy: cc4` (with
-`extendedCacheBeta: true` when the one-hour lifetime must be permitted under
-the extended beta). The same `onPayload` hook removes every `cache_control` the
-transport or a caller placed from `system`, `tools`, and `messages`, then marks
-exactly the slots the request has: `system[0]`, the last tool declaration, the
-last cacheable user content block, and the last cacheable assistant content
-block, each with `{type: "ephemeral", ttl: "1h"}`. A final assistant block that
-is `thinking` or `redacted_thinking` is skipped without searching backward; a
-request with no tool declaration or no assistant turn carries only the
-remaining slots and never gains an invented block. `cc4` owns placement, so it
-takes precedence over `toolCacheBreakpoint` and over the markers
-`cacheRetention` would write, while `extendedCacheBeta` stays an independent
-explicit opt-in.
+The four-marker policy is the route's only placement by configuration. The same
+`onPayload` hook removes every `cache_control` the transport or a caller placed
+from `system`, `tools`, and `messages`, then marks exactly the slots the request
+has: `system[0]`, the last tool declaration, the last cacheable user content
+block, and the last cacheable assistant content block, each with
+`{type: "ephemeral", ttl: "1h"}`. A final assistant block that is `thinking` or
+`redacted_thinking` is skipped without searching backward; a request with no
+tool declaration or no assistant turn carries only the remaining slots and never
+gains an invented block. Other Anthropic pi-ai routes keep their explicitly
+configured retention and betas.
 
-**Preservation rule.** Keep the policy route-scoped and opt-in: no default
-outside `llm-cc-pool`, no beta from the retention tier, no `scope` field, no
-scope beta, and no tool marker when `toolCacheBreakpoint` is `false`. Keep every
-other pi-ai Anthropic route's `cacheRetention` explicit; do not add a global
-payload or header hook, a `fetch` rewrite, or a mac-pool branch to
-`llm-pi-ai`. Keep `llm-deepseek` unchanged. Keep both transformations on the one
-`onPayload` assignment; a second assignment on the same route would silently
-drop the other policy. The layout deliberately stops at the stable four
-breakpoints: do not reproduce CC's `markerIndices` fork/compaction planner,
-infer one hour from a subscription, or upgrade a five-minute marker
-automatically. Only `cc4` performs marker placement; a route that does not set
-`cacheMarkerPolicy` keeps pi-ai's placement byte-for-byte.
+**Preservation rule.** Keep the four-marker defaults and the loud cross-field
+validation: do not weaken them into a request-time failure or a silent fallback,
+and do not let `toolCacheBreakpoint` remove the tool marker while `cc4` owns
+placement. Keep the policy route-scoped: no default outside `llm-cc-pool`, no
+beta from the retention tier, no `scope` field, no scope beta, and no change to
+another pi-ai Anthropic route, `llm-deepseek`, or the subscription routes. Keep
+every other pi-ai Anthropic route's `cacheRetention` explicit; do not add a
+global payload or header hook, a `fetch` rewrite, or a mac-pool branch to
+`llm-pi-ai`. Keep both transformations on the one `onPayload` assignment; a
+second assignment on the same route would silently drop the other policy. The
+layout deliberately stops at the stable four breakpoints: do not reproduce CC's
+`markerIndices` fork/compaction planner or infer one hour from a subscription.
 
 **Focused verification.**
 `pnpm exec vitest run packages/llm/llm-cc-pool packages/llm/llm-pi-ai/tests/cache-policy.spec.ts`
-covers the cc-pool body (the four one-hour markers under `cc4`, the tool marker
-even with `toolCacheBreakpoint: false`, no scope), the beta header only on the
-opted route, the assistant slot skipped for trailing thinking, the subset a
-tool-less or assistant-less request gets, a second Anthropic route's unchanged
-retention, a `cacheRetention: long` route without the beta, DeepSeek with no
-marker or cache beta, the refusal of `cc4` on a non-Anthropic route, and the
-Loader composition.
+covers the default four-marker body, the assistant slot, the ignored
+`toolCacheBreakpoint`, the load-time refusal of `5m`/`none`/missing-beta
+combinations, the beta header only on the pool route, a second Anthropic route's
+unchanged retention, DeepSeek with no marker or cache beta, the refusal of
+`cc4` on a non-Anthropic route, and the Loader composition.
 
 ## CC subscription pool settings page (fork)
 

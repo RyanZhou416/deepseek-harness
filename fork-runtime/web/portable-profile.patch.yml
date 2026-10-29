@@ -174,6 +174,11 @@
         apiKeyEnv: CC_POOL_API_KEY
         api: anthropic-messages
         baseURL: https://ccpool.tiancegames.com
+        # 四标记一小时提示缓存，仅作用于本路由；等价于内置 llm-cc-pool 插件
+        # 现在默认启用的策略。
+        cacheRetention: long
+        extendedCacheBeta: true
+        cacheMarkerPolicy: cc4
         defaultContextWindow: 200000
         defaultMaxTokens: 32000
         models:

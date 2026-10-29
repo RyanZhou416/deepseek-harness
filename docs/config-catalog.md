@@ -1769,38 +1769,41 @@ export interface Config {
   /**
    * Prompt-cache TTL this route declares for a request's `cache_control`
    * markers: `5m` keeps the API's default five-minute lifetime, `1h` asks for
-   * the extended one, and `none` sends no marker. The default `5m` is the
-   * lifetime the route already served, stated explicitly so the choice cannot
-   * come from an ambient provider default; the value reaches the wire only
-   * through this route's profile, so no other provider's request changes.
-   * {@link cacheMarkerPolicy} replaces this placement when it is configured.
+   * the extended one, and `none` sends no marker. The default `1h` is the
+   * lifetime the route serves now; `5m` and `none` are refused while
+   * {@link cacheMarkerPolicy} is `cc4`, because that policy writes one-hour
+   * markers on its own. The value reaches the wire only through this route's
+   * profile, so no other provider's request changes.
    */
   cacheTtl: CcPoolCacheTtl
   /**
    * Declare `extended-cache-ttl-2025-04-11` on this route's Anthropic Messages
-   * requests. Opt-in and independent of {@link cacheTtl}: `1h` writes
-   * `ttl: "1h"` on the markers, but only this flag adds the beta that permits
-   * it. The default `false` keeps the header this route already served.
+   * requests. The default `true` is what the default `cacheTtl: 1h` and
+   * {@link cacheMarkerPolicy} require; an explicit `false` is refused instead
+   * of producing a request the provider would reject.
    */
   extendedCacheBeta: boolean
   /**
-   * Mark the last tool declaration with the route's `cache_control` marker.
-   * The default `true` keeps the marker pi-ai places; `false` is this route's
-   * opt-in to the Claude Code 2.1.288 layout, which marks the system prompt and
-   * the last user content block but never a tool definition.
-   * {@link cacheMarkerPolicy} replaces this placement when it is configured.
+   * Mark the last tool declaration with the route's `cache_control` marker
+   * when {@link cacheMarkerPolicy} does not own placement. It has no effect
+   * while the default `cc4` policy is set: that policy always marks the last
+   * tool declaration itself. Without `cc4`, `true` keeps the marker pi-ai
+   * places and `false` selects the Claude Code 2.1.288 layout, which marks the
+   * system prompt and the last user content block but no tool definition.
    */
   toolCacheBreakpoint: boolean
   /**
-   * Prompt-cache marker placement this route asks pi-ai to perform. Omission
-   * keeps the placement {@link cacheTtl} and {@link toolCacheBreakpoint}
-   * select. `cc4` places exactly the four Claude Code markers — the first
+   * Prompt-cache marker placement this route asks pi-ai to perform. The
+   * default `cc4` places exactly the four Claude Code markers — the first
    * system block, the last tool declaration, the last user content block, and
    * the last assistant content block — with `{type: "ephemeral", ttl: "1h"}` on
-   * each. The policy owns placement, so it takes precedence over both of those
-   * fields, and a request with no tool declaration or no assistant turn carries
-   * only the slots it has. {@link extendedCacheBeta} stays a separate explicit
-   * opt-in. No other provider route reads this value.
+   * each. The policy owns placement, so it takes precedence over
+   * {@link toolCacheBreakpoint} and over the lifetime {@link cacheTtl} selects,
+   * and a request with no tool declaration or no assistant turn carries only
+   * the slots it has. It requires `cacheTtl: "1h"` and
+   * {@link extendedCacheBeta}: an impossible combination is refused at load and
+   * on a settings write, never at request time. No other provider route reads
+   * this value.
    */
   cacheMarkerPolicy?: PiAiCacheMarkerPolicy
   /**

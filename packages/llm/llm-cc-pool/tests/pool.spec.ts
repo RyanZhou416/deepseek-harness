@@ -20,18 +20,19 @@ import {
   REASONING_EFFORTS,
   REQUEST_HEADERS,
   poolProviderProfile,
+  resolvePoolCachePolicy,
   resolvePoolModels,
   resolvePoolProfiles,
 } from '../src/pool.ts'
 
 /**
- * One cache policy with explicit overrides.
+ * One policy without the four-marker opt-in, for the transport placement cases.
  * @param cacheTtl - the marker lifetime.
- * @param overrides - the other policy fields, defaulted from the route's baseline.
+ * @param overrides - the other policy fields, defaulted to the pre-`cc4` values.
  * @returns the policy a profile is built from.
  */
-function cachePolicy(cacheTtl: CcPoolCacheTtl, overrides: Partial<CcPoolCachePolicy> = {}): CcPoolCachePolicy {
-  return { ...DEFAULT_CACHE_POLICY, cacheTtl, ...overrides }
+function legacyPolicy(cacheTtl: CcPoolCacheTtl, overrides: Partial<CcPoolCachePolicy> = {}): CcPoolCachePolicy {
+  return { cacheTtl, extendedCacheBeta: false, toolCacheBreakpoint: true, ...overrides }
 }
 
 /** One deliberately different deployment catalogue: capacities and defaults the built-in four do not share. */
@@ -209,16 +210,27 @@ describe('prompt-cache policy', () => {
   it('offers the three lifetimes and maps each to its pi-ai retention tier', () => {
     expect(CACHE_TTLS).toEqual(['5m', '1h', 'none'])
     expect(Object.isFrozen(CACHE_TTLS)).toBe(true)
-    expect(poolProviderProfile(MODELS, cachePolicy('5m')).cacheRetention).toBe('short')
-    expect(poolProviderProfile(MODELS, cachePolicy('1h')).cacheRetention).toBe('long')
-    expect(poolProviderProfile(MODELS, cachePolicy('none')).cacheRetention).toBe('none')
-    // The default states the lifetime the route already served.
-    expect(poolProviderProfile().cacheRetention).toBe('short')
-    expect(resolvePoolProfiles(MODELS, cachePolicy('1h')).get(PROVIDER)?.cacheRetention).toBe('long')
+    expect(poolProviderProfile(MODELS, legacyPolicy('5m')).cacheRetention).toBe('short')
+    expect(poolProviderProfile(MODELS, legacyPolicy('1h', { extendedCacheBeta: true })).cacheRetention).toBe('long')
+    expect(poolProviderProfile(MODELS, legacyPolicy('none')).cacheRetention).toBe('none')
+    // The default now states the four-marker, one-hour policy the route serves.
+    expect(DEFAULT_CACHE_POLICY).toEqual({
+      cacheTtl: '1h',
+      extendedCacheBeta: true,
+      toolCacheBreakpoint: true,
+      cacheMarkerPolicy: 'cc4',
+    })
+    expect(poolProviderProfile()).toMatchObject({
+      cacheRetention: 'long',
+      extendedCacheBeta: true,
+      cacheMarkerPolicy: 'cc4',
+      compat: { supportsCacheControlOnTools: true },
+    })
+    expect(resolvePoolProfiles(MODELS).get(PROVIDER)?.cacheRetention).toBe('long')
   })
 
-  it('carries the extended beta and tool marker opt-ins on the one pool profile', () => {
-    const profile = poolProviderProfile(MODELS, cachePolicy('1h', {
+  it('carries the beta and tool-marker fields on one pool profile without cc4', () => {
+    const profile = poolProviderProfile(MODELS, legacyPolicy('1h', {
       extendedCacheBeta: true,
       toolCacheBreakpoint: false,
     }))
@@ -227,40 +239,56 @@ describe('prompt-cache policy', () => {
       extendedCacheBeta: true,
       compat: { supportsCacheControlOnTools: false },
     })
-    // Both opt-ins are off in the baseline policy, and neither is inferred from
-    // the one-hour tier: a 1h profile without them keeps the header it served.
-    expect(poolProviderProfile()).toMatchObject({
-      extendedCacheBeta: false,
-      compat: { supportsCacheControlOnTools: true },
-    })
-    expect(poolProviderProfile(MODELS, cachePolicy('1h'))).toMatchObject({
-      extendedCacheBeta: false,
-    })
+    expect(profile.cacheMarkerPolicy).toBeUndefined()
   })
 
   it('declares the policy on the one pool profile and on no model', () => {
-    const profiles = resolvePoolProfiles(MODELS, cachePolicy('1h', {
-      extendedCacheBeta: true,
-      toolCacheBreakpoint: false,
-    }))
+    const profiles = resolvePoolProfiles(MODELS)
     expect([...profiles.keys()]).toEqual([PROVIDER])
-    // The TTL and beta ride on the profile, which the adapter passes to pi-ai;
-    // a model descriptor carries no lifetime or beta of its own. The marker
-    // policy is a route compat switch, which every pool model materializes.
+    expect(profiles.get(PROVIDER)?.cacheMarkerPolicy).toBe('cc4')
+    // The TTL, beta, and marker policy ride on the profile, which the adapter
+    // passes to pi-ai; a model descriptor carries none of them.
     for (const model of profiles.get(PROVIDER)?.piProvider?.getModels() ?? []) {
       expect(JSON.stringify(model)).not.toContain('ttl')
       expect(JSON.stringify(model)).not.toContain('extended-cache-ttl')
-      expect(model.compat).toMatchObject({ supportsCacheControlOnTools: false })
+      expect(JSON.stringify(model)).not.toContain('cacheMarkerPolicy')
     }
   })
 
-  it('defaults the config fields and refuses any lifetime outside the three', () => {
-    expect(Config({})).toMatchObject({ cacheTtl: '5m', extendedCacheBeta: false, toolCacheBreakpoint: true })
-    expect(Config({ cacheTtl: '1h' }).cacheTtl).toBe('1h')
-    expect(Config({ cacheTtl: 'none' }).cacheTtl).toBe('none')
-    expect(Config({ extendedCacheBeta: true, toolCacheBreakpoint: false }))
-      .toMatchObject({ extendedCacheBeta: true, toolCacheBreakpoint: false })
+  it('defaults the config fields to the four-marker one-hour policy', () => {
+    expect(Config({})).toMatchObject({
+      cacheTtl: '1h',
+      extendedCacheBeta: true,
+      toolCacheBreakpoint: true,
+      cacheMarkerPolicy: 'cc4',
+    })
+    // The schema still accepts the lifetime enum; resolution refuses the values
+    // the configured policy cannot combine.
+    expect(Config({ cacheTtl: '5m' }).cacheTtl).toBe('5m')
+    expect(Config({ toolCacheBreakpoint: false })).toMatchObject({ toolCacheBreakpoint: false })
     expect(() => Config({ cacheTtl: '24h' } as never)).toThrow(/cacheTtl/)
     expect(() => Config({ cacheTtl: '5min' } as never)).toThrow(/cacheTtl/)
+  })
+
+  it('refuses a policy whose lifetime or beta cannot serve a request', () => {
+    const explicit: CcPoolCachePolicy = { cacheTtl: '1h', extendedCacheBeta: true, toolCacheBreakpoint: true }
+    expect(() => resolvePoolCachePolicy({ ...explicit, cacheMarkerPolicy: 'cc4', cacheTtl: '5m' }))
+      .toThrow(/cacheMarkerPolicy "cc4" requires cacheTtl "1h"/)
+    expect(() => resolvePoolCachePolicy({ ...explicit, cacheMarkerPolicy: 'cc4', cacheTtl: 'none' }))
+      .toThrow(/cacheMarkerPolicy "cc4" requires cacheTtl "1h"/)
+    expect(() => resolvePoolCachePolicy({ ...explicit, cacheMarkerPolicy: 'cc4', extendedCacheBeta: false }))
+      .toThrow(/cacheMarkerPolicy "cc4" requires extendedCacheBeta: true/)
+    expect(() => resolvePoolCachePolicy({ ...explicit, extendedCacheBeta: false }))
+      .toThrow(/cacheTtl "1h" requires extendedCacheBeta: true/)
+    // Valid combinations: the default four-marker policy, and a non-cc4 layout.
+    expect(resolvePoolCachePolicy({ ...explicit, cacheMarkerPolicy: 'cc4' }))
+      .toMatchObject({ cacheMarkerPolicy: 'cc4' })
+    expect(resolvePoolCachePolicy(legacyPolicy('5m'))).toMatchObject({ cacheTtl: '5m' })
+    expect(resolvePoolCachePolicy(legacyPolicy('none'))).toMatchObject({ cacheTtl: 'none' })
+    // Profile and profile-set resolution reject the same combination.
+    expect(() => poolProviderProfile(MODELS, { ...explicit, cacheMarkerPolicy: 'cc4', cacheTtl: '5m' }))
+      .toThrow(/requires cacheTtl "1h"/)
+    expect(() => resolvePoolProfiles(MODELS, { ...explicit, cacheMarkerPolicy: 'cc4', extendedCacheBeta: false }))
+      .toThrow(/requires extendedCacheBeta: true/)
   })
 })

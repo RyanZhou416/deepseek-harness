@@ -188,7 +188,7 @@ it('installs a configured catalogue through a real profile and serves it', async
   })
 })
 
-it('sends the configured one-hour opt-in layout through a real profile', async () => {
+it('enables the four-marker one-hour layout by default through a real profile', async () => {
   vi.stubEnv('CC_POOL_API_KEY', 'pool-member-key')
   const { ctx } = await loadComposition(() => [
     '- id: llm',
@@ -196,9 +196,6 @@ it('sends the configured one-hour opt-in layout through a real profile', async (
     '- id: llm-cc-pool',
     "  name: '@deepseek-ai/dsh-llm-cc-pool'",
     '  config:',
-    '    cacheTtl: 1h',
-    '    extendedCacheBeta: true',
-    '    toolCacheBreakpoint: false',
     '    requestLog:',
     '      enabled: false',
   ])
@@ -216,12 +213,12 @@ it('sends the configured one-hour opt-in layout through a real profile', async (
   const body = call.body
   expect(body).toMatchObject({
     system: [{ cache_control: { type: 'ephemeral', ttl: '1h' } }],
-    tools: [{ name: 'echo' }],
+    tools: [{ name: 'echo', cache_control: { type: 'ephemeral', ttl: '1h' } }],
   })
-  // Exactly the two markers the CC 2.1.288 layout places: the system prompt and
-  // the last user block. The tool definition carries none, and the body carries
-  // no scope field.
-  expect(JSON.stringify(body).match(/"ttl":"1h"/gu)).toHaveLength(2)
+  // The default policy marks the slots this request has: the system block, the
+  // last tool declaration, and the last user block, each for one hour. The body
+  // carries no scope field and the header no scope beta.
+  expect(JSON.stringify(body).match(/"ttl":"1h"/gu)).toHaveLength(3)
   expect(JSON.stringify(body)).not.toContain('"scope"')
   expect(call.headers.get('anthropic-beta')).toBe('extended-cache-ttl-2025-04-11')
   expect(call.headers.get('anthropic-beta')).not.toContain('prompt-caching-scope')

@@ -1,6 +1,6 @@
 /**
- * Prompt-cache policy: the `cache_control` markers and `anthropic-beta` header
- * the pool route asks for under each policy, their exact placement, and the
+ * Prompt-cache policy: the route's default four-marker one-hour layout, its
+ * exact placement, the loud refusal of impossible combinations at load, and the
  * guarantee that no other provider route changes.
  */
 
@@ -58,7 +58,7 @@ const LOOKUP: ToolSchema = {
 
 /**
  * The request every case sends: a system prompt, two tools, and one user turn,
- * the three places a marker can appear.
+ * the three slots a request without an assistant turn has.
  */
 const PROBE = {
   model: 'claude-sonnet-5-5',
@@ -90,55 +90,6 @@ function markersOf(body: Record<string, unknown>): Marker[] {
   }
   walk(body, '')
   return found.sort(([left], [right]) => left.localeCompare(right))
-}
-
-/**
- * A deep copy of a request body with every `cache_control` marker removed.
- * @param value - any JSON value from the captured body.
- * @returns the same value without cache markers.
- */
-function stripMarkers(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(stripMarkers)
-  if (value === null || typeof value !== 'object') return value
-  return Object.fromEntries(
-    Object.entries(value as Record<string, unknown>)
-      .filter(([key]) => key !== 'cache_control')
-      .map(([key, child]) => [key, stripMarkers(child)]),
-  )
-}
-
-/**
- * A request body without cache markers.
- * @param body - the captured Anthropic Messages body.
- * @returns the body with every `cache_control` key removed.
- */
-function withoutMarkers(body: Record<string, unknown>): Record<string, unknown> {
-  return stripMarkers(body) as Record<string, unknown>
-}
-
-/**
- * Expand pi-ai's compact rendering of a single-text message.
- *
- * A message with one text block is sent as a bare string when no block of it
- * needs a marker, and as one text block when it does. Both are the same
- * payload, so a comparison between a marked and an unmarked body expands the
- * compact form first.
- * @param body - a request body.
- * @returns the body whose message contents are all block arrays.
- */
-function expandCompactMessages(body: Record<string, unknown>): Record<string, unknown> {
-  const messages = body['messages']
-  if (!Array.isArray(messages)) return body
-  return {
-    ...body,
-    messages: messages.map((message: unknown) => {
-      if (message === null || typeof message !== 'object') return message
-      const entry = message as Record<string, unknown>
-      return typeof entry['content'] === 'string'
-        ? { ...entry, content: [{ type: 'text', text: entry['content'] }] }
-        : entry
-    }),
-  }
 }
 
 /**
@@ -182,75 +133,30 @@ function assistant(text: string) {
 }
 
 describe('pool prompt-cache policy', () => {
-  it('sends the five-minute marker on the system prompt, last tool, and last user block by default', async () => {
+  it('enables the four-marker one-hour policy by default', async () => {
     const request = await probe()
-    expect(markersOf(request.body)).toEqual([
-      ['.messages[0].content[0].cache_control', { type: 'ephemeral' }],
-      ['.system[0].cache_control', { type: 'ephemeral' }],
-      ['.tools[1].cache_control', { type: 'ephemeral' }],
-    ])
-    // 5 minutes is the API's default lifetime, so the marker carries no `ttl`,
-    // and the default policy declares no beta.
-    expect(JSON.stringify(request.body)).not.toContain('"ttl"')
-    expect(betasOf(request)).toEqual([])
-  })
 
-  it('sends one-hour markers at the same three places without adding the beta', async () => {
-    const request = await probe({ cacheTtl: '1h' })
+    // PROBE has no assistant turn, so the policy places exactly the three slots
+    // it has; every marker carries the explicit one-hour lifetime.
     expect(markersOf(request.body)).toEqual([
       ['.messages[0].content[0].cache_control', { type: 'ephemeral', ttl: '1h' }],
       ['.system[0].cache_control', { type: 'ephemeral', ttl: '1h' }],
       ['.tools[1].cache_control', { type: 'ephemeral', ttl: '1h' }],
     ])
-    // The one-hour tier writes `ttl` but does not declare the beta that permits
-    // it: only the explicit route opt-in does.
-    expect(betasOf(request)).toEqual([])
-  })
-
-  it('sends the CC 2.1.288 one-hour layout when both opt-ins are set', async () => {
-    const request = await probe({ cacheTtl: '1h', extendedCacheBeta: true, toolCacheBreakpoint: false })
-    const body = request.body
-
-    // Exactly the two blocks CC's main loop marks: the system prompt and the
-    // final user content block, with the one-hour value on each.
-    expect(markersOf(body)).toEqual([
-      ['.messages[0].content[0].cache_control', { type: 'ephemeral', ttl: '1h' }],
-      ['.system[0].cache_control', { type: 'ephemeral', ttl: '1h' }],
-    ])
-    expect(body['system']).toEqual([{
-      type: 'text',
-      text: 'You are the pool test assistant.',
-      cache_control: { type: 'ephemeral', ttl: '1h' },
-    }])
-    expect(body['messages']).toEqual([{
-      role: 'user',
-      content: [{ type: 'text', text: 'hello', cache_control: { type: 'ephemeral', ttl: '1h' } }],
-    }])
-    // CC 2.1.288 does not mark a tool definition, so neither tool carries one.
-    const tools = body['tools']
-    expect(Array.isArray(tools)).toBe(true)
-    for (const tool of tools as Record<string, unknown>[]) expect(tool).not.toHaveProperty('cache_control')
-
-    // The beta is a header fact; the body declares no beta field, no scope, and
-    // no scope beta.
     expect(betasOf(request)).toEqual([EXTENDED_CACHE_TTL_BETA])
     expect(betasOf(request)).not.toContain(CACHE_SCOPE_BETA)
-    expect(JSON.stringify(body)).not.toContain('"scope"')
-    expect(JSON.stringify(body)).not.toContain('betas')
-    expect(JSON.stringify(body)).not.toContain(CACHE_SCOPE_BETA)
+    expect(JSON.stringify(request.body)).not.toContain('"scope"')
+    expect(JSON.stringify(request.body)).not.toContain(CACHE_SCOPE_BETA)
   })
 
-  it('places exactly the four Claude Code markers when cc4 is configured', async () => {
-    const request = await probe(
-      { cacheMarkerPolicy: 'cc4', extendedCacheBeta: true, toolCacheBreakpoint: false },
-      {
-        messages: [
-          user('hello'),
-          assistant('hi'),
-          user('continue'),
-        ],
-      },
-    )
+  it('uses the assistant slot when the conversation has an assistant turn', async () => {
+    const request = await probe({}, {
+      messages: [
+        user('hello'),
+        assistant('hi'),
+        user('continue'),
+      ],
+    })
 
     expect(markersOf(request.body)).toEqual([
       ['.messages[1].content[0].cache_control', { type: 'ephemeral', ttl: '1h' }],
@@ -258,79 +164,30 @@ describe('pool prompt-cache policy', () => {
       ['.system[0].cache_control', { type: 'ephemeral', ttl: '1h' }],
       ['.tools[1].cache_control', { type: 'ephemeral', ttl: '1h' }],
     ])
-    // The policy owns placement, so `toolCacheBreakpoint: false` cannot remove
-    // the tool marker. No scope field or scope beta is written.
-    expect(JSON.stringify(request.body)).not.toContain('"scope"')
-    expect(betasOf(request)).toEqual([EXTENDED_CACHE_TTL_BETA])
-    expect(betasOf(request)).not.toContain(CACHE_SCOPE_BETA)
   })
 
-  it('changes nothing but the markers and the declared beta across the policy opt-ins', async () => {
-    const marked = await probe({ cacheTtl: '1h' })
-    const cc = await probe({ cacheTtl: '1h', extendedCacheBeta: true, toolCacheBreakpoint: false })
+  it('ignores toolCacheBreakpoint while the four-marker policy owns placement', async () => {
+    const ignored = await probe({ toolCacheBreakpoint: false })
+    const defaulted = await probe()
 
-    // Removing the markers from both requests leaves the same payload: the CC
-    // layout differs only in which blocks carry a marker, and the beta travels
-    // in the header rather than the body.
-    expect(withoutMarkers(cc.body)).toEqual(withoutMarkers(marked.body))
-    expect(markersOf(cc.body)).toHaveLength(2)
-    expect(markersOf(marked.body)).toHaveLength(3)
-  })
-
-  it('sends no marker and no beta when configured with none', async () => {
-    const request = await probe({ cacheTtl: 'none' })
-    expect(markersOf(request.body)).toEqual([])
-    expect(JSON.stringify(request.body)).not.toContain('cache_control')
-    expect(betasOf(request)).toEqual([])
-  })
-
-  it('changes nothing but the marker value across the TTL choices', async () => {
-    const unset = await probe()
-    const fiveMinutes = await probe({ cacheTtl: '5m' })
-    const oneHour = await probe({ cacheTtl: '1h' })
-    const none = await probe({ cacheTtl: 'none' })
-
-    // The two marker-bearing lifetimes differ in the marker value alone.
-    expect(withoutMarkers(fiveMinutes.body)).toEqual(withoutMarkers(oneHour.body))
-    // Removing the markers is the whole of `none`: the remaining payload is the
-    // same request, with pi-ai keeping the single-text message in its compact
-    // string form because no block needs a marker.
-    expect(markersOf(none.body)).toEqual([])
-    expect(expandCompactMessages(withoutMarkers(none.body)))
-      .toEqual(expandCompactMessages(withoutMarkers(fiveMinutes.body)))
-    // An unset key is the route's pre-existing request, and the schema default
-    // states that same lifetime explicitly: the two bodies are identical.
-    expect(unset.body).toEqual(fiveMinutes.body)
-    expect(betasOf(unset)).toEqual(betasOf(fiveMinutes))
-  })
-
-  it('keeps its configured policy when the ambient retention preference says otherwise', async () => {
-    vi.stubEnv('PI_CACHE_RETENTION', 'long')
-    const request = await probe({ cacheTtl: '5m' })
-
-    // The route's policy is explicit: an ambient provider preference cannot
-    // upgrade the declared 5-minute lifetime or add the extended beta.
-    expect(markersOf(request.body)).toEqual([
-      ['.messages[0].content[0].cache_control', { type: 'ephemeral' }],
-      ['.system[0].cache_control', { type: 'ephemeral' }],
-      ['.tools[1].cache_control', { type: 'ephemeral' }],
+    // The switch can no longer remove the tool marker: the policy writes it.
+    expect(markersOf(ignored.body)).toEqual([
+      ['.messages[0].content[0].cache_control', { type: 'ephemeral', ttl: '1h' }],
+      ['.system[0].cache_control', { type: 'ephemeral', ttl: '1h' }],
+      ['.tools[1].cache_control', { type: 'ephemeral', ttl: '1h' }],
     ])
-    expect(betasOf(request)).toEqual([])
+    expect(ignored.body).toEqual(defaulted.body)
   })
 
-  it('leaves another provider route at its own explicit retention and betas', async () => {
+  it('leaves another provider route at its own placement and betas', async () => {
     vi.stubEnv('CC_POOL_API_KEY', 'pool-member-key')
     vi.stubEnv('OTHER_GATEWAY_KEY', 'other-key')
     const ctx = new Context()
     context = ctx
     await ctx.plugin(LlmRuntime)
-    await ctx.plugin(CcPool, {
-      requestLog: { enabled: false },
-      cacheTtl: '1h',
-      extendedCacheBeta: true,
-      toolCacheBreakpoint: false,
-      cacheMarkerPolicy: 'cc4',
-    })
+    // The pool route is mounted without cache configuration: its new defaults
+    // must enable the four-marker policy without reaching any other route.
+    await ctx.plugin(CcPool, { requestLog: { enabled: false } })
     // A second Anthropic Messages route states its own retention explicitly, as
     // every non-pool route must, and opts into no beta.
     await ctx.plugin(PiAi, {
@@ -372,6 +229,23 @@ describe('pool prompt-cache policy', () => {
     const pool = capture.calls[0]
     if (pool === undefined) throw new Error('the pool route sent no request')
     expect(betasOf(pool)).toEqual([EXTENDED_CACHE_TTL_BETA])
+  })
+
+  it('refuses an impossible cache policy at load, before registering the route', async () => {
+    const cases: readonly [label: string, config: Record<string, unknown>, error: RegExp][] = [
+      ['five-minute lifetime', { cacheTtl: '5m' }, /cacheMarkerPolicy "cc4" requires cacheTtl "1h"/],
+      ['no lifetime', { cacheTtl: 'none' }, /cacheMarkerPolicy "cc4" requires cacheTtl "1h"/],
+      ['one hour without the beta', { cacheTtl: '1h', extendedCacheBeta: false }, /cacheMarkerPolicy "cc4" requires extendedCacheBeta: true/],
+    ]
+    for (const [label, config, error] of cases) {
+      const ctx = new Context()
+      context = ctx
+      await ctx.plugin(LlmRuntime)
+      await expect(ctx.plugin(CcPool, { requestLog: { enabled: false }, ...config }), label).rejects.toThrow(error)
+      expect(ctx.llm.listProviders()).toEqual([])
+      await ctx.fiber.dispose()
+      context = undefined
+    }
   })
 
   it('refuses a lifetime the route does not offer before it registers', async () => {
