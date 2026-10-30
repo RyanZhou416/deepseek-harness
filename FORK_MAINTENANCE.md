@@ -1407,96 +1407,85 @@ non-Anthropic route, and the Loader composition.
 ## CC parity A (accepted design, not implemented)
 
 **Status.** A is the accepted target for the cc-pool route: reproduce the
-genuine Claude Code 2.1.288 first-party desktop wire as closely as the
-deployment permits. It supersedes the earlier deliberate omissions: no scope,
-no cache-diagnosis, no request class, and helper calls keeping 1h. The full
-evidence table, target body/header, ownership split, required interface facts,
-implementation order and open items live in
+genuine Claude Code 2.1.288 first-party desktop wire as a conservative subset.
+It supersedes the earlier deliberate omissions (no scope, no cache-diagnosis,
+no request class, helper calls keeping 1h). The authoritative evidence table,
+body/header rules, code delta and acceptance corpus live in
 `mac-pool:development/CC-PARITY-A-DESIGN.md`; this section is the DSH-side
 summary and must stay consistent with it.
 
-**Evidence, not profile constants.** The 2.1.288 carve proves the predicates;
-the pinned `claude-code-wire-compat` profile only hardcodes a first-party
-default branch and is not evidence. In particular:
+**Anchor rule.** DSH and the pool emit only what the carve supports and take the
+less-emitting branch when a fact is unknown: no global scope, no one-hour TTL,
+no cache-diagnosis, no class header, no helper markers. Server acceptance is
+not a design input; a rejection removes a token or fails the request, never
+adds one.
 
-- `scope: "global"` is written only on the static system run, and only when
-  `Tse()` holds (firstParty or anthropicAws, official base URL or explicit
-  first-party assumption), experimental betas are enabled, no HIPAA taint,
-  prompt caching is enabled, a dynamic boundary exists, and at least one
-  shared section produced it. `skipGlobalCacheForSystemPrompt` does not remove
-  an existing global marker; the MCP fact only changes the no-boundary
-  fallback. Google Cloud, Foundry, Bedrock, Vertex, Mantle and gateway never
-  get the scope.
-- `cache-diagnosis-2026-04-07` is armed per conversation by `zWo()` on
-  firstParty/Google-Cloud default base URLs with experimental betas and no
-  HIPAA; it is latched, and a 400 naming the beta clears it. It is not
-  unconditional, and anthropicAws does not receive it.
-- `ttl:"1h"` and `extended-cache-ttl-2025-04-11` follow the `loe(querySource)`
-  allowlist: `repl_main_thread*`, `sdk`, `auto_mode`, `memdir_relevance`.
-  `compact` and `generate_session_title` default to 5m, omit the ttl key and
-  the extended beta; the title helper and compact fallback send no markers.
-  Environment/settings/frontmatter overrides can force 1h.
-- `x-claude-code-request-class` has five 2.1.288 values: `main`,
-  `compaction`, `auxiliary`, `subagent`, `workflow`. Compaction is the main
-  client with `source:"compact"`; session-title is the main client with
-  `source:"generate_session_title"` and class `auxiliary` via `es`, not the
-  `side_query` client. `side_reply` does not exist in 2.1.288. The header is
-  emitted only when `$pn()` allows it.
-- HIPAA is an org-policy taint from `/api/claude_code/policy_limits`, cached
-  with a principal-bound stamp and latched in-process; it is not an env var or
-  settings key. `i$()` is exactly `anthropicAws` and `anthropicGoogleCloud`;
-  `Fm()` = `Nse()` and not experimental-off/HIPAA; `Tse()` adds the provider
-  and base-URL gates.
+**Ownership and capability.** The worker is the executable cache-policy owner;
+the Swift pool is transport only; DSH supplies structure and class. A-on DSH
+must require a pool capability advertisement (`ccParityA`) before enabling A.
+The current v2 pool silently ignores unknown member headers, so new DSH against
+old pool is refused, not silently served uncached. Roll out the new pool with A
+off first; disable DSH A before any pool rollback.
 
-**Target.** Body: billing (pool), unmarked identity, static shared run with
-`{type:"ephemeral",ttl:"1h",scope:"global"}`, dynamic run with
-`{type:"ephemeral",ttl:"1h"}`, last user block with `{type:"ephemeral",ttl:"1h"}`;
-no previous-message or tool marker; pinned top-level order with `metadata` in
-its canonical slot; `thinking.display:"updates"` plus its beta; no eager tool
-streaming. Header: worker-composed full canonical beta site order including
-scope, context-hint and cache-diagnosis; request class from the declared
-source; cache-diagnosis latch/rejection state; one-hour only on allowlisted
-main sources.
+**Member contract.** Three bounded headers, all present or all absent:
+`x-cc-request-class` (`main|compaction|auxiliary|subagent`; `workflow` reserved
+and not produced), `x-cc-system-layout` (`boundary|none`), `x-cc-cache-intent`
+(`main|helper`). No `mcpTools`/`disabled` header or value. Partial, repeated,
+empty, oversize, unknown or wrong-prefix names are typed 400s; v1 refusal is
+required at member API, pool encoder and worker parser. A-off keeps today's
+`x-claude-code-request-class: main` and byte-identical behavior; A-on replaces
+the plan value with the frame class.
 
-**Interface contract before coding.** The executable owner is the **worker**,
-not the Swift server. The worker holds the policy-limits/HIPAA state,
-`user:inference`/overage eligibility, the header plan, the body forward path and
-the upstream error record; the server does not parse cache TTL/scope. A mode
-(default off) adds four bounded member headers from DSH to the pool:
-`x-dsh-cc-request-class` (`main|compaction|auxiliary|subagent|workflow`),
-`x-dsh-cc-system-layout` (`boundary|none`), `x-dsh-cc-cache-intent`
-(`main|helper|disabled`), and `x-dsh-cc-mcp-tools` (`present|none`, blocked
-until the member API accepts `mcp__` names). The server validates them and maps
-them to new v2 request-frame fields; v1 must refuse A mode rather than drop the
-headers. DSH stops writing `cache_control` TTL/scope and the extended beta for
-the A route; the worker writes markers, applies TTL/scope, composes the full
-canonical beta site order (scope@9, extended@19, context-hint@20, diagnosis@21,
-base sites interleaved—not a grouped scope/extended/diagnosis list), owns the
-per-session cache-diagnosis latch and rejected-beta fact, and emits the class.
-HIPAA/eligibility/overage stay worker-side and never travel to DSH. This
-changes the current byte-preserving/no-marker-edit and "worker adds no
-undeclared beta" rules; the frozen v2 `requestMemberBeta`/`notCarried` wording
-must be rewritten with the A fields and their v1 absence rule.
+**Body.** Main body is `[identity, static, dynamic]`, only when the section join
+equals the effective system text; in-history updates or any mismatch set layout
+`none`, and main+none is refused (the no-boundary fallback marks identity `org`
+and is out of A). Use the subscription route's stable partition/reorder, drop
+`harness:source`/`app:web-surface`, replace `harness:identity` with the CC line.
+DSH sends no cache markers; the worker writes identity unmarked, static and
+dynamic and last-user with the same single TTL decision. On 5m the static marker
+is `{type:"ephemeral",scope:"global"}` with no ttl. Scope is independent of TTL;
+TTL is never 1h under unknown eligibility/overage/allowlist. Helper compaction
+and title have layout `none` and no markers. Billing/identity are main-only;
+side-query bodies do not get them.
 
-The same change must update `ipc/messages.ts`/`validate.ts`,
-`MemberRequestHeaders.swift`, `MemberAPI` allowlist/MCP gate,
-`DirectSSEAdapter.sendRequest`, `forward-body.ts`, `forward-betas.ts`,
-`cc-profile-overlay.ts`, `cache-observation.ts` (A needs unmarked identity plus
-marked static and dynamic runs), audit facts, the DSH `llm-pi-ai` payload hook,
-`llm-cc-pool` profile/config, package READMEs/JSDoc, generated catalogs, and
-the tests that currently assert no scope/no diagnosis/no extended change. The
-current docs are current-behavior contracts, not optional prose. Resolve the
-policy-limits path spelling (`/api/claude_code/policy_limits` in the carve vs
-the worker's underscore variant) before claiming parity; without these contract
-changes A cannot be implemented honestly.
+**Beta and thinking.** The carve order is extended, context-hint, evict,
+diagnosis, keepalive, message-threads; A emits only the subset it can anchor:
+scope when `Tse` holds, extended only on the 1h decision, diagnosis only when
+armed, context-hint omitted (profile disables it), evict/keepalive/threads
+omitted as a documented deviation. Do not call the vendored plan "full
+canonical". Strip member cache markers and `anthropic-beta` cache tokens in A;
+DSH deletes `payload.betas` rather than sending an empty header. `rejectedBeta`
+is a v2-only error-record fact with a v1 absence rule and a per-`sessionKey`
+latch; the first cut is fact+latch, not transparent replay. DSH writes
+`thinking.display:"updates"` only with the capability/summaries gate; the
+worker probe keeps display inactive so site 16 plans the beta; the forwarded
+body keeps `updates`.
 
-**Preservation during implementation.** The current three-marker/no-scope
-behavior remains the shipped behavior until the A change lands with its
-differential corpus and tests. A future merge must not revert the compaction
-overflow fix, the request-log default-off behavior, the one-time migration
-guard, or the pool error contract. When A lands, rewrite this preservation
-rule to the A target and update the referenced design document; do not leave
-both the old "no scope" rule and the A target as simultaneous requirements.
+**Facts.** HIPAA is tainted/clear/unknown/not-applicable, not the worker's
+`settled` bit; pro/max are not-applicable for the policy read but still need
+separate 1h eligibility. Overage needs a lease-level last-observed fact; until
+then A is 5m. `XNe` is only the allowlist fallback, never proof of the live
+gate. Fix the policy-limits URL to `/api/claude_code/policy_limits` before
+claiming HIPAA parity. Add a typed worker cache plan and thread `cacheTtl` to
+the engine; if engine modules change, widen the digest or bump
+`expectedEngineBuild`.
+
+**DSH implementation.** Add `GenerateOptions.requestClass`; derive from
+`requestClass ?? purpose` and stamp `subagent` from the session origin;
+compaction/title are helper/auxiliary. Add a pool-scoped `ccParityA` flag; do not
+extend the global `cacheMarkerPolicy`, and ignore/refuse `cacheTtl`,
+`extendedCacheBeta` and `cacheRetention` under A. Install one payload hook that
+strips markers, applies field order/metadata, thinks updates, strips
+`eager_input_streaming` (without enabling the fine-grained beta), deletes
+`payload.betas`, and adds the three headers. Adapter-owned names must not be
+injectable through profile headers. The old four-header `x-dsh-cc-*` summary
+must not be implemented.
+
+**Preservation.** Current three-marker/no-scope behavior remains shipped until
+A lands with its differential corpus, raw-byte flag-off proof, simulation and
+old/new capability matrix. A future merge must not revert the compaction
+overflow fix, request-log default-off, migration guard, or pool error contract.
+When A lands, rewrite this preservation rule and the referenced design together.
 
 ## CC subscription pool settings page (fork)
 
