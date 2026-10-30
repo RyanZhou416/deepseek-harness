@@ -13,6 +13,7 @@ import {
   resolveProfiles,
   resolveSessionHeaders,
   type Options,
+  type PiAiCcWireParityProofs,
   type PiAiProviderProfile,
   type ResolvedPiAiProviderProfile,
 } from '../src/config.ts'
@@ -282,8 +283,20 @@ describe('retry policy pool codes', () => {
   })
 })
 
+/**
+ * The capability proof a fixed-route plugin would supply for the test route: the
+ * capability endpoint on the route's own origin, naming a pool build.
+ */
+const POOL_PROOF = { endpoint: 'https://pool.test/v1/capabilities', buildId: 'test-build' } as const
+
+/** The proof map a fixed-route plugin supplies for the single `pool` route. */
+const POOL_PROOFS: PiAiCcWireParityProofs = new Map([['pool', POOL_PROOF]])
+
 /** Resolve one parity A route, with the caller's fields layered onto it. */
-const wireParityRoute = (profile: PiAiProviderProfile): ResolvedPiAiProviderProfile | undefined =>
+const wireParityRoute = (
+  profile: PiAiProviderProfile,
+  proofs: PiAiCcWireParityProofs = POOL_PROOFS,
+): ResolvedPiAiProviderProfile | undefined =>
   resolveProfiles({
     pool: {
       api: 'anthropic-messages',
@@ -291,7 +304,49 @@ const wireParityRoute = (profile: PiAiProviderProfile): ResolvedPiAiProviderProf
       models: [{ id: 'm' }],
       ...profile,
     },
-  }).get('pool')
+  }, 'strict', proofs).get('pool')
+
+describe('CC wire parity capability proof', () => {
+  it('refuses the flag on a configured profile, which carries no proof', () => {
+    // The generic plugin resolves loader configuration without any probe result,
+    // so a profile can request the body but never grant itself the wire.
+    expect(() => wireParityRoute({ ccWireParity: true }, new Map()))
+      .toThrow(/ccWireParity.*proved the capability|capability proof/)
+  })
+
+  it('refuses a proof whose endpoint does not cover the route origin', () => {
+    expect(() => wireParityRoute({ ccWireParity: true }, new Map([['pool', {
+      endpoint: 'https://other.test/v1/capabilities',
+      buildId: 'test-build',
+    }]]))).toThrow(/does not cover baseURL/)
+  })
+
+  it('refuses a proof for a route that does not request the wire', () => {
+    expect(() => wireParityRoute({}, POOL_PROOFS))
+      .toThrow(/capability proof.*does not set ccWireParity/)
+  })
+
+  it('refuses a proof naming a route no profile declares', () => {
+    expect(() => resolveProfiles({}, 'strict', new Map([['pool', POOL_PROOF]])))
+      .toThrow(/names route "pool", which no profile declares/)
+  })
+
+  it('refuses a proof without a usable endpoint or build identity', () => {
+    expect(() => wireParityRoute({ ccWireParity: true }, new Map([['pool', {
+      endpoint: 'not a url',
+      buildId: 'test-build',
+    }]]))).toThrow(/not an absolute URL/)
+    expect(() => wireParityRoute({ ccWireParity: true }, new Map([['pool', {
+      endpoint: 'https://pool.test/v1/capabilities',
+      buildId: '',
+    }]]))).toThrow(/empty build id/)
+  })
+
+  it('enables the wire only with a proof covering the route', () => {
+    expect(wireParityRoute({ ccWireParity: true })?.ccWireParity).toBe(true)
+    expect(wireParityRoute({}, new Map())?.ccWireParity).toBeUndefined()
+  })
+})
 
 describe('CC wire parity cache intent', () => {
   it('accepts both intents on a parity A route and resolves the default', () => {
@@ -301,7 +356,7 @@ describe('CC wire parity cache intent', () => {
     // the adapter reads a decided value rather than defaulting per request. A
     // route that never enables A carries the same resolved default, unread.
     expect(wireParityRoute({ ccWireParity: true })?.ccWireParityCache).toBe('main')
-    expect(wireParityRoute({})?.ccWireParityCache).toBe('main')
+    expect(wireParityRoute({}, new Map())?.ccWireParityCache).toBe('main')
   })
 
   it('refuses an intent on a route that never sends the A headers', () => {

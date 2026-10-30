@@ -114,6 +114,32 @@ export const CC_WIRE_PARITY_CACHE_MODES = ['main', 'off'] as const
 /** One wire-parity cache intent from {@link CC_WIRE_PARITY_CACHE_MODES}. */
 export type PiAiCcWireParityCache = (typeof CC_WIRE_PARITY_CACHE_MODES)[number]
 
+/**
+ * The capability answer that may enable one route's CC wire parity wire.
+ *
+ * A proof is runtime evidence, not configuration: a fixed-route plugin that
+ * interrogated its own capability endpoint passes it to profile resolution
+ * after a positive answer. Profile resolution refuses
+ * {@link PiAiProviderProfile.ccWireParity} without one, so loader
+ * configuration cannot enable the wire, and the proof binds to the origin that
+ * answered.
+ */
+export interface PiAiCcWireParityProof {
+  /** Absolute capability-endpoint URL that answered. */
+  readonly endpoint: string
+  /** Pool build identity that the answer named. */
+  readonly buildId: string
+}
+
+/**
+ * Capability proofs keyed by the route each one may enable CC wire parity for.
+ *
+ * Only the plugin that owns the probe supplies these to
+ * {@link resolvePiAiProfiles}; the generic plugin's loader configuration has
+ * none, which confines the wire to the route that proved it.
+ */
+export type PiAiCcWireParityProofs = ReadonlyMap<string, PiAiCcWireParityProof>
+
 /** Context capacity assumed for a model neither configuration nor the catalog sizes. */
 export const DEFAULT_CONTEXT_WINDOW = 262_144
 
@@ -262,8 +288,11 @@ export interface PiAiProviderProfile {
    * route, and the flag replaces {@link cacheMarkerPolicy} `cc3` on a
    * wire-parity request while a wire-parity-off request keeps that policy's
    * body. {@link ccWireParityCache} selects the cache intent a main or subagent
-   * request declares. Refused when no model on the route speaks
-   * `anthropic-messages`.
+   * request declares. Resolution refuses the flag unless the plugin that
+   * probed the route's endpoint supplies a capability proof whose origin covers
+   * {@link baseURL}, so loader configuration cannot enable this wire; a proof
+   * for a different origin is refused rather than carried over. Refused when no
+   * model on the route speaks `anthropic-messages`.
    */
   ccWireParity?: boolean
   /**
@@ -750,16 +779,97 @@ function anthropicOnlyProfileField(
 }
 
 /**
+ * The scheme and authority of one absolute URL.
+ * @param value - a configured base URL or capability-proof endpoint.
+ * @returns the origin, or undefined when the value is not an absolute URL.
+ */
+function urlOrigin(value: string): string | undefined {
+  try {
+    return new URL(value).origin
+  } catch {
+    // Not an absolute URL, so no request can reach it and it binds no proof.
+    return undefined
+  }
+}
+
+/**
+ * Refuse a wire-parity flag the supplied capability proofs do not grant.
+ *
+ * The gate runs in resolution, which is the operation that decides the resolved
+ * profile the adapter reads: a route enables the wire only when the plugin that
+ * interrogated its endpoint supplied a proof for this exact route, and that
+ * proof's endpoint shares the profile's origin. A proof supplied for a route
+ * that does not request the wire is a caller bug and is refused instead of
+ * silently dropped.
+ * @param provider - the route being resolved.
+ * @param source - its configured profile.
+ * @param proofs - capability proofs supplied by the probing plugin, if any.
+ * @throws Error when the flag and the proofs disagree, or the proof does not
+ *   cover the route's origin.
+ */
+function assertCcWireParityProof(
+  provider: string,
+  source: PiAiProviderProfile,
+  proofs: PiAiCcWireParityProofs | undefined,
+): void {
+  const proof = proofs?.get(provider)
+  if (source.ccWireParity !== true) {
+    if (proof !== undefined) {
+      throw new Error(
+        `llm-pi-ai: provider "${provider}" has a CC wire parity capability proof`
+        + ' but does not set ccWireParity: true',
+      )
+    }
+    return
+  }
+  if (proof === undefined) {
+    throw new Error(
+      `llm-pi-ai: provider "${provider}" sets ccWireParity, which only a route whose endpoint proved the`
+      + ' capability may enable; the fixed-route plugin that interrogated the endpoint supplies that proof,'
+      + ' and profile configuration cannot',
+    )
+  }
+  if (proof.buildId.length === 0) {
+    throw new Error(`llm-pi-ai: provider "${provider}" has a CC wire parity proof with an empty build id`)
+  }
+  const origin = source.baseURL === undefined ? undefined : urlOrigin(source.baseURL)
+  if (origin === undefined) {
+    throw new Error(
+      `llm-pi-ai: provider "${provider}" sets ccWireParity but names no absolute baseURL a capability proof could cover`,
+    )
+  }
+  const proofOrigin = urlOrigin(proof.endpoint)
+  if (proofOrigin === undefined) {
+    throw new Error(
+      `llm-pi-ai: provider "${provider}" has a CC wire parity proof endpoint that is not an absolute URL:`
+      + ` ${JSON.stringify(proof.endpoint)}`,
+    )
+  }
+  if (proofOrigin !== origin) {
+    throw new Error(
+      `llm-pi-ai: provider "${provider}" sets ccWireParity, but its capability proof for`
+      + ` ${JSON.stringify(proof.endpoint)} does not cover baseURL ${JSON.stringify(source.baseURL)}`,
+    )
+  }
+}
+
+/**
  * Resolve scalar defaults and materialize each route's serviceable models.
  * Deferred catalog validation retains diagnostics without deleting configured
  * routes. An omitted dict resolves to the empty, dormant route set.
  * @param providers - configured provider profiles keyed by route.
  * @param validation - writes require a complete catalog; stored reads retain catalog diagnostics.
+ * @param proofs - capability proofs a fixed-route plugin obtained from its
+ *   endpoint probe, keyed by the route each one may enable wire parity for.
+ *   Omitted for loader configuration, whose profiles therefore cannot enable
+ *   the wire.
  * @returns validated profiles in configuration order.
+ * @throws Error when the configured profiles and the supplied proofs disagree.
  */
 export function resolveProfiles(
   providers: Readonly<Record<string, PiAiProviderProfile>> | undefined,
   validation: 'strict' | 'deferred' = 'strict',
+  proofs?: PiAiCcWireParityProofs,
 ): Map<string, ResolvedPiAiProviderProfile> {
   if (Array.isArray(providers)) {
     throw new Error('llm-pi-ai: providers is now a dict keyed by provider route, not an array of profiles')
@@ -783,6 +893,7 @@ export function resolveProfiles(
         + ' a route that sends no wire-parity headers declares no cache intent',
       )
     }
+    assertCcWireParityProof(provider, source, proofs)
     const streamIdleTimeoutMs = source.streamIdleTimeoutMs ?? DEFAULT_STREAM_IDLE_TIMEOUT_MS
     if (!Number.isFinite(streamIdleTimeoutMs)
       || streamIdleTimeoutMs <= 0
@@ -877,6 +988,16 @@ export function resolveProfiles(
       ...piProvider === undefined ? {} : { piProvider },
       ...catalogError === undefined ? {} : { catalogError },
     })
+  }
+  // A proof names the route it covers, so one that covers no resolved profile is
+  // a caller bug rather than an unused extra: accepting it would let a stale
+  // probe grant look applied while no request reads it.
+  for (const provider of proofs?.keys() ?? []) {
+    if (!resolved.has(provider)) {
+      throw new Error(
+        `llm-pi-ai: a CC wire parity capability proof names route "${provider}", which no profile declares`,
+      )
+    }
   }
   return resolved
 }

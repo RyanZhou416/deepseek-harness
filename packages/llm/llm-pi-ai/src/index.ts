@@ -90,6 +90,8 @@ export type {
   Options,
   PiAiCacheMarkerPolicy,
   PiAiCcWireParityCache,
+  PiAiCcWireParityProof,
+  PiAiCcWireParityProofs,
   PiAiCompatProfile,
   PiAiModality,
   PiAiModelOverride,

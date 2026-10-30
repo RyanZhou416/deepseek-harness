@@ -310,7 +310,7 @@ export function apply(ctx: Context, config: Config): void {
     const buildId = proof?.buildId
     if (snapshot === undefined || raw !== lastRaw || buildId !== lastBuildId) {
       const models = resolvePoolModels(raw)
-      snapshot = { models, profiles: resolvePoolProfiles(models, cachePolicy, proof !== undefined) }
+      snapshot = { models, profiles: resolvePoolProfiles(models, cachePolicy, proof) }
       lastRaw = raw
       lastBuildId = buildId
     }

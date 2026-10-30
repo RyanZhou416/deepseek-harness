@@ -48,6 +48,9 @@ const CONFIGURED: CcPoolModel[] = [
   { id: 'claude-opus-5-5', name: 'Claude Opus 5.5 (pool)', contextWindow: 1_000_000, maxTokens: 128_000, defaultReasoning: 'max' },
 ]
 
+/** The proof the member endpoint answers for this deployment's endpoint and build. */
+const POOL_PROOF = { endpoint: CAPABILITIES_URL, buildId: 'test-build' } as const
+
 describe('fixed mac-pool route', () => {
   it('resolves one fixed Anthropic Messages route with the deployment facts', () => {
     const profiles = resolvePoolProfiles()
@@ -301,23 +304,32 @@ describe('prompt-cache policy', () => {
   it('declares the parity A cache intent the policy disables or keeps', () => {
     // A writes no marker of its own, so its profile accepts every policy the
     // route's own rules admit; only the declared intent follows the policy.
-    expect(poolProviderProfile(MODELS, legacyPolicy('none'), true)).toMatchObject({
+    expect(poolProviderProfile(MODELS, legacyPolicy('none'), POOL_PROOF)).toMatchObject({
       ccWireParity: true,
       ccWireParityCache: 'off',
     })
-    expect(poolProviderProfile(MODELS, legacyPolicy('5m'), true)).toMatchObject({
+    expect(poolProviderProfile(MODELS, legacyPolicy('5m'), POOL_PROOF)).toMatchObject({
       ccWireParity: true,
       ccWireParityCache: 'main',
     })
-    expect(poolProviderProfile(MODELS, DEFAULT_CACHE_POLICY, true)).toMatchObject({
+    expect(poolProviderProfile(MODELS, DEFAULT_CACHE_POLICY, POOL_PROOF)).toMatchObject({
       ccWireParity: true,
       ccWireParityCache: 'main',
     })
     // The resolved profile carries the same mapping, so the plugin's raw profile
     // and the one the adapter reads agree on the intent.
-    expect(resolvePoolProfiles(MODELS, legacyPolicy('none'), true).get(PROVIDER)?.ccWireParityCache).toBe('off')
+    expect(resolvePoolProfiles(MODELS, legacyPolicy('none'), POOL_PROOF).get(PROVIDER)?.ccWireParityCache).toBe('off')
     // A route that does not ask for A declares no intent at all.
     expect(poolProviderProfile(MODELS, legacyPolicy('none')).ccWireParityCache).toBeUndefined()
+  })
+
+  it('refuses a capability proof that does not cover the pool origin', () => {
+    // The proof is the gate, not a boolean: evidence for another endpoint never
+    // enables this route's body.
+    expect(() => resolvePoolProfiles(MODELS, DEFAULT_CACHE_POLICY, {
+      endpoint: 'https://other.test/v1/capabilities',
+      buildId: 'test-build',
+    })).toThrow(/does not cover baseURL/)
   })
 })
 

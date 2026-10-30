@@ -57,6 +57,7 @@ import type {
 } from '@deepseek-ai/dsh-llm-pi-ai'
 import type { RetryPolicyConfig } from '@deepseek-ai/dsh-llm'
 import { POOL_REQUEST_CLOSED_CODE } from '@deepseek-ai/dsh-llm'
+import type { PoolCapabilityProof } from './discovery.ts'
 
 /** Harness route key, pi-ai provider key, and the only provider this plugin owns. */
 export const PROVIDER = 'cc-pool'
@@ -360,12 +361,12 @@ function retryPolicy(): RetryPolicyConfig {
  * @param models - the effective catalogue; omission serves the built-in catalogue.
  * @param policy - prompt-cache policy this route declares; omission declares the
  *   three-marker, one-hour policy with the extended beta.
- * @param ccWireParity - whether the member endpoint proved the CC wire parity wire for
- *   this route. `false` keeps the profile on the current three-marker wire; `true`
- *   adds the adapter-owned flag and the cache intent its main and subagent
- *   requests declare — `off` for a `cacheTtl` of `none`, the route's
- *   caching-disabled state, and `main` otherwise. The policy fields stay as the
- *   wire-parity-off fallback the adapter reproduces.
+ * @param proof - the capability proof the member endpoint answered for this
+ *   endpoint and pool build. Omission keeps the profile on the current
+ *   three-marker wire; a proof adds the adapter-owned flag and the cache intent
+ *   its main and subagent requests declare — `off` for a `cacheTtl` of `none`,
+ *   the route's caching-disabled state, and `main` otherwise. The policy fields
+ *   stay as the wire-parity-off fallback the adapter reproduces.
  * @returns the raw profile the generic resolver validates.
  * @throws {CcPoolCachePolicyError} when the policy combination cannot serve a
  *   request.
@@ -373,7 +374,7 @@ function retryPolicy(): RetryPolicyConfig {
 export function poolProviderProfile(
   models: readonly CcPoolModel[] = MODELS,
   policy: CcPoolCachePolicy = DEFAULT_CACHE_POLICY,
-  ccWireParity = false,
+  proof?: PoolCapabilityProof,
 ): PiAiProviderProfile {
   const resolved = resolvePoolCachePolicy(policy)
   return {
@@ -385,7 +386,7 @@ export function poolProviderProfile(
     cacheRetention: CACHE_RETENTION[resolved.cacheTtl],
     extendedCacheBeta: resolved.extendedCacheBeta,
     ...resolved.cacheMarkerPolicy === undefined ? {} : { cacheMarkerPolicy: resolved.cacheMarkerPolicy },
-    ...ccWireParity ? { ccWireParity: true, ccWireParityCache: wireParityCacheIntent(resolved) } : {},
+    ...proof === undefined ? {} : { ccWireParity: true, ccWireParityCache: wireParityCacheIntent(resolved) },
     retryPolicy: retryPolicy(),
     models: models.map(model => ({
       id: model.id,
@@ -408,16 +409,20 @@ export function poolProviderProfile(
  * @param models - the effective catalogue; omission serves the built-in catalogue.
  * @param policy - prompt-cache policy this route declares; omission declares the
  *   three-marker, one-hour policy with the extended beta.
- * @param ccWireParity - whether the member endpoint proved the CC wire parity wire; see
- *   {@link poolProviderProfile}. A `true` value declares the cache intent the
- *   policy maps to.
+ * @param proof - the capability proof the member endpoint answered; see
+ *   {@link poolProviderProfile}. The proof is passed to the generic resolver as
+ *   the capability grant, so the flag it enables is backed by evidence for this
+ *   route instead of by profile configuration.
  * @returns the resolved profiles keyed by {@link PROVIDER}.
  * @throws {CcPoolCachePolicyError} when the policy combination cannot serve a request.
  */
 export function resolvePoolProfiles(
   models: readonly CcPoolModel[] = MODELS,
   policy: CcPoolCachePolicy = DEFAULT_CACHE_POLICY,
-  ccWireParity = false,
+  proof?: PoolCapabilityProof,
 ): ReadonlyMap<string, ResolvedPiAiProviderProfile> {
-  return resolvePiAiProfiles({ [PROVIDER]: poolProviderProfile(models, policy, ccWireParity) })
+  return resolvePiAiProfiles(
+    { [PROVIDER]: poolProviderProfile(models, policy, proof) },
+    proof === undefined ? undefined : new Map([[PROVIDER, proof]]),
+  )
 }

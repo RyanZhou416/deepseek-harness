@@ -9,7 +9,7 @@ kind: "package-bundle"
 
 ## 概述
 
-`@deepseek-ai/dsh-llm-cc-pool` 把 mac 池作为可选 provider 加入组合：安装后恰好提供一条 Anthropic Messages 路由，其端点、凭据引用与重试策略固定。该路由默认提供内置的四模型目录，部署可用 `models` 整体替换它，设置服务会把该目录投影为可编辑表单。其默认提示缓存策略是 CC 2.1.288 的三标记布局，带显式一小时存活期、客户端 identity system 块与 extended-cache beta。可选的 `ccWireParity` 请求在成员端点证明该能力后改用 CC wire parity 请求体与 header，默认关闭。插件不注册可配置 provider 目录项；发现读取把池的 `/v1/models` 清单作为候选报告，绝不写目录，因此模型只能经校验过的配置进入。
+`@deepseek-ai/dsh-llm-cc-pool` 把 mac 池作为可选 provider 加入组合：安装后恰好提供一条 Anthropic Messages 路由，其端点、凭据与重试策略固定。该路由默认提供内置的四模型目录，部署可用 `models` 整体替换它，设置服务会把该目录投影为可编辑表单。其默认提示缓存策略是 CC 2.1.288 的三标记布局，带显式一小时存活期、identity 块与 extended beta。可选的 `ccWireParity` 请求在成员端点证明该能力后才改用 parity 请求体与 header。插件不注册可配置 provider 目录项，因此只有经校验的配置才能加入模型。
 
 ## 目录
 
@@ -75,7 +75,7 @@ kind: "package-bundle"
 
 ### CC wire parity
 
-`ccWireParity` 为本路由请求 CC wire parity 线路，默认 `false`。该请求是偏好而不是授权：标志关闭时插件不发送任何探测；即使打开，路由也只在成员端点用本路由的成员凭据回答 `GET https://ccpool.tiancegames.com/v1/capabilities` 并返回 `{protocol: 2, ccWireParity: 1, buildId}` 之后，才在 profile 上公布该标志。只有携带该精确三元组的 `200` 才能证明能力；`buildId` 是池构建自身的稳定身份（`MacPoolBuildId`），未打包构建不报告它，因而证明不了任何东西。被拒绝、畸形、超时或不可达的回答都会让路由留在默认的三标记线路上，缺少成员凭据同样保持关闭，而不是让装载失败。
+`ccWireParity` 为本路由请求 CC wire parity 线路，默认 `false`。该请求是偏好而不是授权：标志关闭时插件不发送任何探测；即使打开，路由也只在成员端点用本路由的成员凭据回答 `GET https://ccpool.tiancegames.com/v1/capabilities` 并返回 `{protocol: 2, ccWireParity: 1, buildId}` 之后，才在 profile 上公布该标志。只有携带该精确三元组的 `200` 才能证明能力；`buildId` 是池构建自身的稳定身份（`MacPoolBuildId`），未打包构建不报告它，因而证明不了任何东西。被拒绝、畸形、超时或不可达的回答都会让路由留在默认的三标记线路上，缺少成员凭据同样保持关闭，而不是让装载失败。通用 pi-ai resolver 会拒绝任何没有容量证明的 profile 上的 `ccWireParity`，且该证明的 endpoint 必须与该路由同源；只有本插件会提供这样的证明——取自它对上述端点的探测——因此手写 profile 无法启用该线路。
 
 正面证明只属于作出回答的端点与池构建。插件在 profile 装载时以及 `CC_POOL_API_KEY` 被替换时再次询问，绝不轮询。它也没有重连接缝：新构建上的池重启在其中一个触发器运行之前不会被重新探测，因此路由可能继续为上一个构建证明过的线路服务。池标记为 `x-cc-wire-parity-unavailable: 1` 的 `503` 是对能力的反证，而不是再问一次的理由：插件丢弃证明，下一个请求改用默认线路，且不重新探测。
 
@@ -117,7 +117,7 @@ profile 可以用 `models` 整体替换该列表。每个条目声明线路 id�
 <a id="understand-the-implementation"></a>
 ## 理解实现
 
-本包是 named Cordis function plugin（`name`、`inject`、`Config`、`apply`），没有 default export。`apply` 用 `dsh-llm-pi-ai` 的通用 profile resolver 解析生效目录，因此畸形的目录会在插件装载时失败而不是等到首个请求，然后把它注册到 `ctx.llm`。在解析之前它会校验缓存策略的跨字段约束，同一检查也跑在设置写入的 waterfall 上，因此不可能的存活期/beta 组合会在写入处被拒绝。该 profile 把配置的 `cacheTtl` 作为 pi-ai 的 `cacheRetention` 档位、把 `extendedCacheBeta` 作为 profile 的 beta 声明、把 `cacheMarkerPolicy` 作为 profile 的三标记策略携带，因此策略无需本插件改写任何请求体即可到达请求（`cc3` 的 identity 块与标记改写由 `dsh-llm-pi-ai` 的同一个 `onPayload` 钩子完成）。它不声明任何 compat 开关，因为放置归策略所有且不标记工具声明。解析出的目录与 profile 按原始 `models` 值与当前线路证明做记忆化，未变化的配置保持同一快照，而设置写入或新的探测结果产出下一个快照。能力探测在装载时与成员凭据被替换时运行，并只对覆盖本端点与构建的证明在 profile 上公布 `ccWireParity` 标志；下一个请求与模型列表无需重启即可看到新快照。
+本包是 named Cordis function plugin（`name`、`inject`、`Config`、`apply`），没有 default export。`apply` 用 `dsh-llm-pi-ai` 的通用 profile resolver 解析生效目录，因此畸形的目录会在插件装载时失败而不是等到首个请求，然后把它注册到 `ctx.llm`。在解析之前它会校验缓存策略的跨字段约束，同一检查也跑在设置写入的 waterfall 上，因此不可能的存活期/beta 组合会在写入处被拒绝。该 profile 把配置的 `cacheTtl` 作为 pi-ai 的 `cacheRetention` 档位、把 `extendedCacheBeta` 作为 profile 的 beta 声明、把 `cacheMarkerPolicy` 作为 profile 的三标记策略携带，因此策略无需本插件改写任何请求体即可到达请求（`cc3` 的 identity 块与标记改写由 `dsh-llm-pi-ai` 的同一个 `onPayload` 钩子完成）。它不声明任何 compat 开关，因为放置归策略所有且不标记工具声明。解析出的目录与 profile 按原始 `models` 值与当前线路证明做记忆化，未变化的配置保持同一快照，而设置写入或新的探测结果产出下一个快照。能力探测在装载时与成员凭据被替换时运行，并只对覆盖本端点与构建的证明在 profile 上公布 `ccWireParity` 标志；同一证明也是通用 resolver 接受该标志的前提，因此标志与证据一起到达 profile。下一个请求与模型列表无需重启即可看到新快照。
 
 适配器是 `dsh-llm-pi-ai` 的 `PiAiAdapter`，覆盖两个方法：`listModels` 直接回答生效目录，而不先解析凭据；`stream`/`prepareCall` 把每次派发送入按会话串行门。通用适配器的 HTTP/SSE 传输、上下文转换、流投影、pool-error 分类与 replay 处理都被复用而非复制。插件自身贡献路由事实、目录、固定重试策略、会话 header、会话排序、能力探测、日志与持久化 sink。
 
@@ -154,6 +154,7 @@ profile 可以用 `models` 整体替换该列表。每个条目声明线路 id�
 
 - **池失败分类仍位于 `dsh-llm-pi-ai`**——本插件复用通用适配器的 pool-error 分类器与 `dsh-llm-retry` 的执行器，因此没有 `dsh-llm-pi-ai` 的组合无法挂载该路由。把 mac 池专属分类移入本包属于后续工作；迁移不得向通用包加入 mac 池分支。
 - **持久化日志需显式启用并使用自己的文件名**——未配置的插件不写任何文件，因为会话 header 本身不隐含 sink。配置 `requestLog` 但未给 `path` 时写入 `$DSH_HOME/logs/llm-cc-pool-requests.jsonl`，从而避开通用 pi-ai 文件，也不会在同一默认路径上出现两个写入者。
+- **parity 的 system 改写没有持久记录**——该线路的 `[identity, static, dynamic]` system 文本，以及被丢弃或重排的 section，会到达模型却没有对应的 `llm/request-record` 条目。订阅插件的 Claude 路由会发布该记录；在此照做需要修改 required-on-read 的 `llm/request-record` 持久类型（producer 为字面量、payload 没有 section plan 字段），因此这是对 model-visible⟺logged 规则的有意例外，而不是静默的格式改动。理由与后续工作记录在 `FORK_MAINTENANCE.md`；请求日志只记录尝试、不含请求体，不能替代它。这只是可观测性缺口——请求字节、缓存布局与线路行为均不改变。
 - **目录经本插件自己的字段编辑**——部署通过 `models` 改动自己的模型集，而池同步只报告候选：采纳需要一次显式的设置写入并经过目录校验，绝不会静默覆盖，该读取也无法采纳进通用 Models 页面。新增档位、移除 adaptive thinking 或修改路由事实都随插件版本发布。
 - **只公布生效目录中的 id**——服务层仍接受未列出的模型 id，但选择器表面展示该列表，配置后的目录是唯一事实来源。
 - **图片模态是声明而非探测**——每个目录条目都会得到 `text` 与 `image`；拒绝图片的池端点会在轮次中途以 provider 拒绝的形式浮现。

@@ -1556,6 +1556,25 @@ describe('provider profile lifecycle', () => {
     expect(ctx.llm.listProviders()).toEqual([])
   })
 
+  it('refuses the CC wire parity flag on a loader-configured profile', async () => {
+    // The generic plugin has no capability probe, so loader configuration can
+    // request the wire but never enable it; only the fixed-route plugin that
+    // proves the capability supplies the grant.
+    const ctx = new Context()
+    await ctx.plugin(LlmRuntime)
+    await expect(ctx.plugin(LlmPiAi, {
+      providers: {
+        pool: {
+          api: 'anthropic-messages',
+          baseURL: 'https://pool.test',
+          ccWireParity: true,
+          models: [{ id: 'model' }],
+        },
+      },
+    })).rejects.toThrow(/ccWireParity.*proved the capability/)
+    expect(ctx.llm.listProviders()).toEqual([])
+  })
+
   it('exposes the installed pi-ai model catalog through provider-neutral metadata', async () => {
     const ctx = new Context()
     await ctx.plugin(LlmRuntime)

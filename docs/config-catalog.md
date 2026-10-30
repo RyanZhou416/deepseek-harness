@@ -1922,7 +1922,7 @@ export interface Config extends ProtocolConfig {
 
 - `inject`: `llm`
 - `refs`: `Api` (`@earendil-works/pi-ai`) · `CacheRetention` (`@earendil-works/pi-ai`) · `Model` (`@earendil-works/pi-ai`) · `ModelThinkingLevel` (`@earendil-works/pi-ai`) · `OpenAICompletionsCompat` (`@earendil-works/pi-ai`) · [`RetryPolicyConfig`](../packages/llm/llm/src/index.ts) · `ThinkingBudgets` (`@earendil-works/pi-ai`) · `Transport` (`@earendil-works/pi-ai`) · `Volatile` (`@deepseek-ai/cordis`)
-- `source`: [`packages/llm/llm-pi-ai/src/config.ts:364`](../packages/llm/llm-pi-ai/src/config.ts)
+- `source`: [`packages/llm/llm-pi-ai/src/config.ts:393`](../packages/llm/llm-pi-ai/src/config.ts)
 
 ```ts config-catalog
 /** Plugin configuration: the provider routes this instance owns. */
@@ -2086,8 +2086,11 @@ export interface PiAiProviderProfile {
    * route, and the flag replaces {@link cacheMarkerPolicy} `cc3` on a
    * wire-parity request while a wire-parity-off request keeps that policy's
    * body. {@link ccWireParityCache} selects the cache intent a main or subagent
-   * request declares. Refused when no model on the route speaks
-   * `anthropic-messages`.
+   * request declares. Resolution refuses the flag unless the plugin that
+   * probed the route's endpoint supplies a capability proof whose origin covers
+   * {@link baseURL}, so loader configuration cannot enable this wire; a proof
+   * for a different origin is refused rather than carried over. Refused when no
+   * model on the route speaks `anthropic-messages`.
    */
   ccWireParity?: boolean
   /**

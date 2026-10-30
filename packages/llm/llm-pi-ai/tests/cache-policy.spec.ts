@@ -11,7 +11,9 @@ import LlmRuntime, { createAssistantMessage, createUserMessage, ToolCallId } fro
 import type { ToolSchema } from '@deepseek-ai/dsh-llm'
 import * as LlmPiAi from '@deepseek-ai/dsh-llm-pi-ai'
 import * as DeepSeek from '@deepseek-ai/dsh-llm-deepseek-api-key'
+import { resolveProfiles } from '../src/config.ts'
 import { assemble } from './assemble.ts'
+import { memoryAuth } from './auth-double.ts'
 import { anthropicTextEvents, closeMockServers, mockServer } from './mock-server.ts'
 
 /** The Anthropic beta a one-hour prompt-cache lifetime declares. */
@@ -601,7 +603,6 @@ const WIRE_PARITY_PROBE = {
 
 describe('CC wire parity cache intent', () => {
   it('declares the route cache intent in the headers and sends one A body', async () => {
-    vi.stubEnv('CACHE_POLICY_KEY', 'test-key')
     const [mainServer, offServer] = await Promise.all([
       mockServer([{ events: anthropicTextEvents }]),
       // The off route answers its main request and its helper request.
@@ -610,28 +611,37 @@ describe('CC wire parity cache intent', () => {
     const ctx = new Context()
     contexts.push(ctx)
     await ctx.plugin(LlmRuntime)
-    await ctx.plugin(LlmPiAi, {
-      providers: {
-        'parity-main': {
-          api: 'anthropic-messages',
-          baseURL: mainServer.url,
-          apiKeyEnv: 'CACHE_POLICY_KEY',
-          ccWireParity: true,
-          models: [{ id: 'model' }],
-        },
-        'parity-off': {
-          api: 'anthropic-messages',
-          baseURL: offServer.url,
-          apiKeyEnv: 'CACHE_POLICY_KEY',
-          ccWireParity: true,
-          ccWireParityCache: 'off',
-          // The route also declares the extended beta; an A request must send
-          // no cache beta even so.
-          extendedCacheBeta: true,
-          models: [{ id: 'model' }],
-        },
+    // The wire is reachable only through a capability proof, which the generic
+    // plugin's loader configuration cannot supply. This composition stands in
+    // for the fixed-route plugin that probed these two endpoints, so the body
+    // and headers still go through the shipped adapter.
+    const proofOf = (url: string) => ({ endpoint: `${url}/v1/capabilities`, buildId: 'test-build' })
+    const profiles = resolveProfiles({
+      'parity-main': {
+        api: 'anthropic-messages',
+        baseURL: mainServer.url,
+        ccWireParity: true,
+        models: [{ id: 'model' }],
       },
-    })
+      'parity-off': {
+        api: 'anthropic-messages',
+        baseURL: offServer.url,
+        ccWireParity: true,
+        ccWireParityCache: 'off',
+        // The route also declares the extended beta; an A request must send
+        // no cache beta even so.
+        extendedCacheBeta: true,
+        models: [{ id: 'model' }],
+      },
+    }, 'strict', new Map([
+      ['parity-main', proofOf(mainServer.url)],
+      ['parity-off', proofOf(offServer.url)],
+    ]))
+    ctx.llm.registerAdapter(['parity-main', 'parity-off'], new LlmPiAi.PiAiAdapter({
+      profiles: () => profiles,
+      resolveApiKey: async () => 'test-key',
+      auth: memoryAuth(),
+    }))
 
     await assemble(ctx, { ...WIRE_PARITY_PROBE, provider: 'parity-main' })
     await assemble(ctx, { ...WIRE_PARITY_PROBE, provider: 'parity-off' })

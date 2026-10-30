@@ -1566,7 +1566,14 @@ written/remote-worker-src/artifact manifests, update `dependency-pins.json`,
 **DSH implementation.** The wire is implemented once in `llm-pi-ai`, gated by
 `PiAiProviderProfile.ccWireParity` (default false); only `llm-cc-pool` sets it,
 and only after `config.ccWireParity` is true and a live capability proof exists
-(`packages/llm/llm-cc-pool/src/index.ts`). `PiAiProviderProfile.ccWireParityCache`
+(`packages/llm/llm-cc-pool/src/index.ts`). The flag is not self-granting:
+`resolveProfiles` refuses `ccWireParity` unless the resolving caller supplies a
+capability proof (`PiAiCcWireParityProofs`, endpoint plus build id) for that
+route, and the proof endpoint must share the profile's origin
+(`packages/llm/llm-pi-ai/src/config.ts`). `llm-cc-pool` passes the proof its
+probe returned, and the generic plugin resolves loader configuration with no
+proof, so a hand-written or settings-written profile cannot enable the wire.
+`PiAiProviderProfile.ccWireParityCache`
 (`main|off`, default `main`, refused without `ccWireParity`) is the cache intent
 a main or subagent wire request declares; `llm-cc-pool` maps `cacheTtl: none` —
 the route's caching-disabled state — to `off` and every other lifetime to
@@ -1595,6 +1602,33 @@ drops the proof and the next request serves the default wire without
 re-probing. Routes without the wire and other providers keep their current
 bytes. The request log records the attempt's route, model, endpoint, status and
 pool request id; it never carries the body, the headers, or the section plan.
+
+**Known limitation: no durable record of the parity system prompt.** The parity
+wire's model-visible system text — `[identity, static, dynamic]`, including the
+sections it drops (`harness:source`, `app:web-surface`), the identity section it
+replaces, and the stable/session reorder — has no per-request record in the
+session log. This is a deliberate exception to the repo's model-visible⟺logged
+rule for this rewrite: the source system text is in the log as
+`system/message`, but the shipped grouping depends on the adapter version and is
+not reconstructable from the log alone. The subscription Claude route publishes a
+record through `ctx.llmRequestRecord` (`llm/request-record`,
+`packages/llm/llm-request-record`); the pi-ai path cannot publish the same record
+without changing that persisted type, so this checkout does not attempt it. The
+seam is otherwise ready: the
+pi-ai `onPayload` hook is awaited before every send, so `llm-cc-pool` could pass
+a recorder into `PiAiAdapter` and record the built system before the POST. What
+blocks it is the durable vocabulary: `LlmRequestRecordData` is a `v:1`,
+required-on-read session event whose `provider` is the literal `'claude'` and
+whose payload carries only `systemBlocks` — no section plan. Recording a
+cc-pool parity request therefore needs an optional section-plan field (and a
+producer discriminant that distinguishes this builder), which is a Session
+persistence-type change under `docs/persistence-changes/` and needs its own
+`same-version` or `version-bump` acknowledgement; recording it under
+`provider: 'claude'` would corrupt the discriminant's meaning. The request log is
+not a substitute: it is deployment-local, opt-in, deliberately content-free, and
+never tied to the session. Do not add a field or event there without that
+acknowledgement record and the reader-compatibility review; the follow-up is a
+separate change that also documents the new field in the record service README.
 
 **Acceptance.** The wire parity change commits
 `mac-pool:development/CC-WIRE-PARITY-corpus/` with cases, pinned identities,

@@ -17,7 +17,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { PiAiAdapterOptions, PiAiAuthInjection, PiAiRequestDiagnostic } from './adapter.ts'
 import { authContextFrom, credentialStoreFrom } from './auth.ts'
 import { resolveProfiles, resolveRequestLog } from './config.ts'
-import type { PiAiProviderProfile, PiAiRequestLogProfile, ResolvedPiAiProviderProfile } from './config.ts'
+import type { PiAiCcWireParityProofs, PiAiProviderProfile, PiAiRequestLogProfile, ResolvedPiAiProviderProfile } from './config.ts'
 import { redactEndpoint, RequestDiagnosticLog } from './request-log.ts'
 
 /**
@@ -26,14 +26,23 @@ import { redactEndpoint, RequestDiagnosticLog } from './request-log.ts'
  * Strict resolution is the write path: a profile that cannot be served throws
  * where the plugin mounts, rather than leaving a route that fails at its first
  * request.
+ *
+ * `proofs` carries the runtime capability evidence a fixed-route plugin
+ * obtained from its endpoint probe. The generic plugin never passes one, so a
+ * configured profile cannot enable the CC wire parity wire; a route the proof
+ * covers must also request the wire, and the proof's endpoint must share that
+ * profile's origin.
  * @param providers - provider profiles keyed by route.
+ * @param proofs - capability proofs keyed by the route each may enable wire parity for.
  * @returns the resolved profiles in configuration order.
  * @throws {PiAiCatalogError} when a profile or model cannot be served.
+ * @throws Error when the profiles and the supplied proofs disagree.
  */
 export function resolvePiAiProfiles(
   providers: Readonly<Record<string, PiAiProviderProfile>>,
+  proofs?: PiAiCcWireParityProofs,
 ): Map<string, ResolvedPiAiProviderProfile> {
-  return resolveProfiles(providers, 'strict')
+  return resolveProfiles(providers, 'strict', proofs)
 }
 
 /**
