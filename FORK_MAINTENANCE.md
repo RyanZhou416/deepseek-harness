@@ -177,7 +177,7 @@ positions, the chained stream-to-rebuild replay, and the no-capture case.
 
 ### Shared-account pool failure classification
 
-共享账号池（`cc_pool_*`）把稳定错误放回 Anthropic 风格 error envelope；`llm-pi-ai` 在请求级 fetch 捕获失败响应的 HTTP status 与 `Retry-After`，解析 envelope 后发出 `POOL_CAPACITY`、`POOL_RATE_LIMITED`、`POOL_SESSION_BUSY`、`POOL_NO_ACCOUNT`、`POOL_TRANSIENT` 或 `POOL_ERROR`，而不是把池拒绝误分类为 Claude `RATE_LIMIT`。`POOL_SESSION_BUSY` 与不可重试的池失败带 `retryDisposition: 'forbid'`；池 origin 只是分类依据，账号选择、冷却和 session 绑仍由池负责。默认 pi-ai `retryPolicy` 只在部署没有显式 `retryableCodes` 时追加池可重试码；显式列表必须逐字使用。生成目录 `pool-error-catalog.generated.ts` 绑定上游 catalog SHA，不能手工编辑。该行为不改变 Session 格式，也不改变 Claude-native 错误的原有分类。
+共享账号池（`cc_pool_*`）把稳定错误放回 Anthropic 风格 error envelope；`llm-pi-ai` 在请求级 fetch 捕获失败响应的 HTTP status 与 `Retry-After`，解析 envelope 后发出 `POOL_CAPACITY`、`POOL_RATE_LIMITED`、`POOL_SESSION_BUSY`、`POOL_NO_ACCOUNT`、`POOL_TRANSIENT` 或 `POOL_ERROR`，而不是把池拒绝误分类为 Claude `RATE_LIMIT`。`POOL_SESSION_BUSY`、`terminal: true` 与不可重试的池失败带 `retryDisposition: 'forbid'`；池 origin 只是分类依据，账号选择、冷却和 session 绑仍由池负责。默认 pi-ai `retryPolicy` 只在部署没有显式 `retryableCodes` 时追加池可重试码；显式列表必须逐字使用。失败行显示池返回的 `error.message`，先压成单行、限制为 1,024 个字符并拒绝标记、实体与凭据样式文本；缺失或不安全时使用带失败码的通用回退。生成目录 `pool-error-catalog.generated.ts` 只提供机器语义（canonical code 与 client action），绑定上游 catalog SHA，不能手工编辑；不得把 `messageKey` 或 `clientGuidance` 恢复为显示文案。该行为不改变 Session 格式，也不改变 Claude-native 错误的原有分类。
 
 **Preservation rule.** 保留 fetch 捕获的协议范围（`anthropic-messages`、`openai-completions`、`openai-responses`）；Google 拒绝自定义 fetch，必须继续走文本分类。不得把 `POOL_SESSION_BUSY` 加进默认可重试码，不得让 `claude` origin 走池分类，也不得把显式 `retryableCodes` 与默认列表合并。更新 catalog 时必须同时更新生成文件、SHA 断言和分类测试。
 

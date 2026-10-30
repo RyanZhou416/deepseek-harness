@@ -120,7 +120,7 @@ profile 的 `models` 列表会替换而非扩展路由的已安装目录；每�
 
 pi-ai 不提供的路由需要 `api`、`baseURL` 与非空 `models` 列表；无法服务的 profile 会在写入处被拒绝，并点名路由与模型。失败携带稳定 code：无法使用的凭据以 `INVALID_CREDENTIAL` 失败并点名路由与引用，`apiKeyEnv` 引用解析为空的路由以 `MISSING_CREDENTIAL` 失败，未配置模型以 `UNKNOWN_MODEL` 失败，终止性提供方失败则区分 `QUOTA` 与暂时性 `RATE_LIMIT`。`GenerateOptions.stop` 以 `UNSUPPORTED_OPTION` 被拒绝，因为 pi-ai 的通用流式 UI 无法跨提供方保证它。
 
-前置多个账号的共享账号池会在相同的 Anthropic 风格 envelope 中返回自己的 `cc_pool_*` code、`origin` 与重试事实。适配器读取这些字段而不是 HTTP 状态，因此 pool 拒绝永远不会变成 Claude 的 `RATE_LIMIT`：`POOL_CAPACITY`、`POOL_RATE_LIMITED` 与 `POOL_NO_ACCOUNT` 在有限重试预算内可重试，并遵守提供方的 `Retry-After`；`POOL_SESSION_BUSY` 禁止自动重发，因为另一个轮次正占用该 Session；无法识别的可重试 pool code 变为 `POOL_TRANSIENT`，无法识别的不可重试 code 变为 `POOL_ERROR` 并禁止重发。`claude` origin 保留原有分类与措辞。账号选择、冷却与 Session 绑定仍由 pool 负责。
+前置多个账号的共享账号池会在相同的 Anthropic 风格 envelope 中返回自己的 `cc_pool_*` code、`origin` 与重试事实。适配器读取这些字段而不是 HTTP 状态，因此 pool 拒绝永远不会变成 Claude 的 `RATE_LIMIT`：`POOL_CAPACITY`、`POOL_RATE_LIMITED` 与 `POOL_NO_ACCOUNT` 在有限重试预算内可重试，并遵守提供方的 `Retry-After`；`POOL_SESSION_BUSY` 禁止自动重发，因为另一个轮次正占用该 Session，显式的 `terminal` 标记会禁止任何 pool 失败的自动重发；无法识别的可重试 pool code 变为 `POOL_TRANSIENT`，无法识别的不可重试 code 变为 `POOL_ERROR` 并禁止重发。失败行直接显示池返回的 `error.message`，但会先压成单行、限制在 1,024 个字符内，并拒绝标记、实体和凭据样式文本；消息缺失或不安全时改用带失败码的通用池拒绝文案。生成目录只提供机器语义，不提供显示文案。`claude` origin 保留原有分类与措辞。账号选择、冷却与 Session 绑定仍由 pool 负责。
 
 Config 更新严格验证发生变化的 provider。初始加载将已存储的目录故障保留为可编辑的 provider 诊断；未更改的故障 provider 不阻止其他编辑。可用模型仍可选择，无法解析的模型在网络 I/O 前失败。修复或删除问题配置会清除其诊断。
 

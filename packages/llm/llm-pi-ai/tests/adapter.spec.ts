@@ -462,7 +462,7 @@ describe('PiAiAdapter provider routing', () => {
       failure: { code: POOL_CAPACITY_CODE, status: 429, providerRetryAfterMs: 7_000 },
     })
     expect(result.finish.kind === 'error' ? result.finish.failure.message : '')
-      .toMatch(/all accounts are at their 2-session limit.*retry after 7s/)
+      .toBe('all accounts are at their 2-session limit')
   })
 
   it('keeps text classification on a protocol that rejects a custom fetch', async () => {
