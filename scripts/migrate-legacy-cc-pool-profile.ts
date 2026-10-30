@@ -18,13 +18,23 @@
  *
  *   pnpm install
  *   pnpm run build
- *   pnpm exec tsx scripts/migrate-legacy-cc-pool-profile.ts [--dsh-home <path>] [--allow-running-host]
+ *   pnpm exec tsx scripts/migrate-legacy-cc-pool-profile.ts [--dsh-home <path>] [--host <address>] [--port <port>] [--allow-running-host]
  *   build.cmd
  *
- * The Harness home is `--dsh-home`, else `DSH_HOME`, else the launchers'
- * default (`<checkout parent>/deepseek-harness-data`). A Host listening on
- * 127.0.0.1:3080 refuses the run unless `--allow-running-host` is passed,
- * because this migration rewrites files a running Host reads.
+ * The Harness home is `--dsh-home`, else `DSH_HOME`, else the platform
+ * launcher default: `<checkout parent>/deepseek-harness-data` on Windows,
+ * `~/.dsh` on macOS and Linux. A leading `~` in either setting is expanded.
+ * `settings.yaml` is migrated even when no web profile exists yet, because a
+ * Host imports that home document into the profile it starts; that rewrite is
+ * backed up like the profile rewrite, and no profile marker is written when
+ * there is no profile to complete.
+ *
+ * The running-Host guard probes `--host`/`--port`, default 127.0.0.1:3080. A
+ * Host on another endpoint (another `--host`/`--port`, or a profile override of
+ * the bound address) must be named through those options because the guard
+ * cannot discover it, and an endpoint the guard cannot verify fails the run
+ * instead of assuming no Host is running. Pass `--allow-running-host` only to
+ * accept the risk; the migration never rewrites silently under a live Host.
  *
  * Every non-profile composition layer is inspected even when the profile patch
  * is already clean, so a home patch or `--patch` overlay cannot hide the legacy
@@ -46,8 +56,13 @@ import { isDeepStrictEqual } from 'node:util'
 import * as yaml from 'js-yaml'
 import {
   assertHostNotRunning,
+  DEFAULT_HOST_ADDRESS,
+  DEFAULT_HOST_PORT,
   ensureProfileBundles,
+  parseHostOption,
+  parsePortOption,
   pluginProfileProblem,
+  resolveDshHome,
   runProfileCommand,
   stagedPluginDirectory,
   stageWorkspacePlugin,
@@ -59,8 +74,6 @@ import { seedPortableProfile, type SeedResult } from './fork-profile-seed.ts'
 const REPOSITORY_ROOT = dirname(dirname(fileURLToPath(import.meta.url)))
 const BUILD_ROOT = join(REPOSITORY_ROOT, '.build', 'fork-plugins')
 const PROFILE_NAME = 'web'
-/** Directory name `build.cmd` and `run.cmd` use for their default Harness home. */
-export const LAUNCHER_HOME_DIRECTORY = 'deepseek-harness-data'
 /** Live settings document the removed settings service imports on Host start. */
 export const SETTINGS_FILE = 'settings.yaml'
 /** Marker written after a successful migration; build ignores it. */
@@ -248,14 +261,17 @@ export function migrateLegacySettingsProviders(source: string, label = SETTINGS_
 }
 
 /**
- * Resolve the Harness home exactly as `build.cmd` and `run.cmd` do.
+ * Resolve the Harness home exactly as the platform launchers do.
  *
- * An explicit `--dsh-home` wins, then `DSH_HOME`, then the launchers' default
- * directory beside the checkout. Those launchers export `DSH_HOME` before
- * invoking any script, so the default only matters for a manual run.
+ * An explicit `--dsh-home` wins, then `DSH_HOME`; a blank value counts as
+ * unset. The platform launchers own the default — the Windows launchers keep
+ * `<checkout parent>/deepseek-harness-data`, while the macOS and Linux
+ * launchers use `~/.dsh` — and a leading `~` in either configured value is
+ * expanded. Those launchers export `DSH_HOME` before invoking any script, so
+ * the default only matters for a manual run.
  * @param explicit - `--dsh-home` value.
  * @param env - environment to read `DSH_HOME` from.
- * @param repositoryRoot - checkout root the default sits beside.
+ * @param repositoryRoot - checkout root the Windows default sits beside.
  * @returns the absolute Harness home.
  */
 export function resolveMigrationHome(
@@ -263,9 +279,7 @@ export function resolveMigrationHome(
   env: NodeJS.ProcessEnv = process.env,
   repositoryRoot = REPOSITORY_ROOT,
 ): string {
-  const configured = explicit ?? env.DSH_HOME
-  if (configured !== undefined && configured.trim() !== '') return resolve(configured)
-  return resolve(join(dirname(repositoryRoot), LAUNCHER_HOME_DIRECTORY))
+  return resolveDshHome(explicit, env, repositoryRoot)
 }
 
 /**
@@ -908,7 +922,7 @@ export interface MigrationHooks {
 
 /** Input for {@link migrateLegacyProfile}. */
 export interface MigrateLegacyProfileOptions {
-  /** Harness home; defaults to `DSH_HOME`, then the launchers' sibling directory. */
+  /** Harness home; defaults to `DSH_HOME`, then the platform launcher default. */
   readonly dshHome?: string
   /** Profile directory override; defaults to `<home>/profiles/web`. */
   readonly profileDirectory?: string
@@ -916,8 +930,12 @@ export interface MigrateLegacyProfileOptions {
   readonly repositoryRoot?: string
   /** Additional `--patch` overlays to inspect for the legacy route. */
   readonly overlays?: readonly string[]
-  /** Continue while a Host listens on the Host port, after a loud warning. */
+  /** Continue while the guarded Host endpoint answers, after a loud warning. */
   readonly allowRunningHost?: boolean
+  /** Host address to guard; defaults to 127.0.0.1. */
+  readonly host?: string
+  /** Host port to guard; defaults to 3080. */
+  readonly port?: number
   /** Test hooks for the install and seed steps. */
   readonly hooks?: MigrationHooks
 }
@@ -929,7 +947,10 @@ export interface MigrationOutcome {
    * completion state of an already-clean profile, and `skipped` changed nothing.
    */
   readonly status: 'migrated' | 'completed' | 'skipped'
-  /** Why the migration skipped, when it did. */
+  /**
+   * Why the migration skipped, or why `settings.yaml` was migrated without
+   * completing a profile.
+   */
   readonly reason?: string
   /** Backup directory written before mutation, when the run wrote anything. */
   readonly backup?: string
@@ -1010,60 +1031,81 @@ function assertOnlyProfileHasLegacy(source: PatchSource, sourceText: string): vo
 /**
  * Migrate one legacy web profile.
  *
- * A missing profile patch is skipped without a write, and a profile that
- * already records the migration and declares the route nowhere is a no-op. A
- * clean profile without the marker — hand-migrated, or left clean by an
- * interrupted run — still verifies the dedicated bundle, seeds, and writes the
- * marker, so the completion state is reachable without reintroducing the legacy
- * declaration.
- * @param options - Harness home, profile override, host override, and test hooks.
+ * `settings.yaml` is migrated first, before the missing-profile and
+ * missing-package.json skips: a Host imports that home document into the
+ * profile it starts, so a home whose web profile does not exist yet must not
+ * keep the removed route. That rewrite is backed up and guarded like the
+ * profile rewrite, and it runs without a profile completion or marker when
+ * there is no profile to complete.
+ *
+ * A profile that already records the migration and declares the route nowhere
+ * is a no-op. A clean profile without the marker — hand-migrated, or left clean
+ * by an interrupted run — still verifies the dedicated bundle, seeds, and
+ * writes the marker, so the completion state is reachable without
+ * reintroducing the legacy declaration.
+ * @param options - Harness home, profile override, host endpoint, and test hooks.
  * @returns what was migrated, completed, or why it was skipped.
  */
 export async function migrateLegacyProfile(options: MigrateLegacyProfileOptions = {}): Promise<MigrationOutcome> {
   const home = resolveMigrationHome(options.dshHome)
   const profileDirectory = options.profileDirectory ?? join(home, 'profiles', PROFILE_NAME)
   const profilePatch = join(profileDirectory, 'cordis.patch.yml')
-  if (!existsSync(profilePatch)) {
-    return { status: 'skipped', reason: `no profile patch exists at ${profilePatch}` }
-  }
-  const current = await readFile(profilePatch, 'utf8')
-  const profileFindings = findLegacyPoolProviders(current, profilePatch)
+  const profileHasPatch = existsSync(profilePatch)
+  const profileHasManifest = existsSync(join(profileDirectory, 'package.json'))
+  const current = profileHasPatch ? await readFile(profilePatch, 'utf8') : ''
+  const profileFindings = profileHasPatch ? findLegacyPoolProviders(current, profilePatch) : []
 
-  // Every other composition layer is inspected before the profile decides to
-  // skip: a home patch or --patch overlay that still declares the route fails
+  // Every non-profile composition layer is inspected before the profile decides
+  // to skip: a home patch or --patch overlay that still declares the route fails
   // loudly instead of being skipped with an already-clean profile patch.
-  const sources = compositionPatchSources({
-    home,
-    profileDirectory,
-    ...options.repositoryRoot === undefined ? {} : { repositoryRoot: options.repositoryRoot },
-    ...options.overlays === undefined ? {} : { overlays: options.overlays },
-  })
-  for (const source of sources) {
-    if (source.kind === 'profile' || !existsSync(source.path)) continue
-    assertOnlyProfileHasLegacy(source, await readFile(source.path, 'utf8'))
+  if (profileHasPatch) {
+    const sources = compositionPatchSources({
+      home,
+      profileDirectory,
+      ...options.repositoryRoot === undefined ? {} : { repositoryRoot: options.repositoryRoot },
+      ...options.overlays === undefined ? {} : { overlays: options.overlays },
+    })
+    for (const source of sources) {
+      if (source.kind === 'profile' || !existsSync(source.path)) continue
+      assertOnlyProfileHasLegacy(source, await readFile(source.path, 'utf8'))
+    }
   }
 
+  // The removed settings service imports this document on Host start, so the
+  // legacy route is cleaned even when no web profile exists beside it.
   const settingsPath = join(home, SETTINGS_FILE)
   const settingsText = existsSync(settingsPath) ? await readFile(settingsPath, 'utf8') : undefined
   const settings = settingsText === undefined
     ? undefined
     : migrateLegacySettingsProviders(settingsText, settingsPath)
+  const removedSettings = settings?.removed ?? 0
+
   const markerPath = join(profileDirectory, MIGRATION_MARKER_FILE)
-  const marked = await hasMigrationMarker(markerPath)
-  if (profileFindings.length === 0 && (settings?.removed ?? 0) === 0 && marked) {
+  if (profileFindings.length === 0 && removedSettings === 0 && await hasMigrationMarker(markerPath)) {
     return { status: 'skipped', reason: `the profile already records ${LEGACY_MIGRATION_ID}` }
   }
-  if (!existsSync(join(profileDirectory, 'package.json'))) {
+  const canCompleteProfile = profileHasPatch && profileHasManifest
+  if (!canCompleteProfile) {
     if (profileFindings.length > 0) {
+      // Only a profile patch that exists can carry findings.
       throw new Error(`the legacy profile at ${profileDirectory} has no package.json; restore the profile before migrating it`)
     }
-    return { status: 'skipped', reason: `the profile directory at ${profileDirectory} has no package.json` }
+    if (removedSettings === 0) {
+      return {
+        status: 'skipped',
+        reason: profileHasPatch
+          ? `the profile directory at ${profileDirectory} has no package.json`
+          : `no profile patch exists at ${profilePatch}`,
+      }
+    }
   }
   // Mutating from here: refuse while a Host could read or import these files.
   await assertHostNotRunning({
     allowRunningHost: options.allowRunningHost === true,
-    action: 'migrating the profile',
+    action: canCompleteProfile ? 'migrating the profile' : 'migrating the home settings document',
     warn,
+    ...options.host === undefined ? {} : { host: options.host },
+    ...options.port === undefined ? {} : { port: options.port },
   })
   const migrated = profileFindings.length === 0
     ? { source: current, removed: 0 }
@@ -1074,21 +1116,33 @@ export async function migrateLegacyProfile(options: MigrateLegacyProfileOptions 
       await writeTextAtomic(profilePatch, migrated.source)
       log(`removed ${String(migrated.removed)} legacy llm-pi-ai "providers.cc-pool" declaration(s) from ${profilePatch}`)
     }
-    const removedSettings = settings?.removed ?? 0
-    if (settings !== undefined && removedSettings > 0) {
+    if (removedSettings > 0 && settings !== undefined) {
       await writeTextAtomic(settingsPath, settings.source)
       log(`removed ${String(removedSettings)} legacy llm-pi-ai "providers.cc-pool" declaration(s) from ${settingsPath}`
         + ' (the rewrite normalizes YAML formatting; the original document is in the backup)')
     }
-    const context: MigrationContext = { home, profileDirectory, backup }
-    await (options.hooks?.ensurePlugin ?? ensureDedicatedPlugin)(context)
-    await (options.hooks?.seed ?? seedProfile)(context)
-    const written = await writeMigrationMarker(profileDirectory, migrated.removed)
-    log(`wrote migration marker ${written}`)
+    let written: string | undefined
+    if (canCompleteProfile) {
+      const context: MigrationContext = { home, profileDirectory, backup }
+      await (options.hooks?.ensurePlugin ?? ensureDedicatedPlugin)(context)
+      await (options.hooks?.seed ?? seedProfile)(context)
+      written = await writeMigrationMarker(profileDirectory, migrated.removed)
+      log(`wrote migration marker ${written}`)
+    } else {
+      log(`no web profile to complete at ${profileDirectory}; migrated the home settings document only`)
+    }
+    // The settings removal is reported even when it happens beside no profile:
+    // the caller must not describe a partial run as a completed migration.
+    const partialReason = canCompleteProfile
+      ? undefined
+      : profileHasPatch
+        ? `the profile directory at ${profileDirectory} has no package.json; migrated settings.yaml only`
+        : `no profile patch exists at ${profilePatch}; migrated settings.yaml only`
     return {
       status: migrated.removed > 0 || removedSettings > 0 ? 'migrated' : 'completed',
       backup: backup.directory,
-      markerPath: written,
+      ...partialReason === undefined ? {} : { reason: partialReason },
+      ...written === undefined ? {} : { markerPath: written },
       removed: migrated.removed,
       ...removedSettings === 0 ? {} : { removedSettings },
     }
@@ -1124,11 +1178,23 @@ function usage(): string {
     'ensures the dedicated @deepseek-ai/dsh-llm-cc-pool bundle/link, seeds the portable',
     'profile, and writes .dsh-profile-migrations.json. A marked, clean profile is a no-op;',
     'a clean profile without the marker is completed without reintroducing the route.',
+    'settings.yaml is cleaned even when no web profile exists yet, without writing a',
+    'profile marker because there is no profile to complete.',
     '',
     'Options:',
-    '  --dsh-home <path>     Harness home instead of DSH_HOME or the launchers\' default',
-    '  --allow-running-host  Continue while 127.0.0.1:3080 listens (unsafe; warns loudly)',
+    `  --host <address>      Host address to guard; default ${DEFAULT_HOST_ADDRESS}`,
+    `  --port <port>         Host port to guard; default ${String(DEFAULT_HOST_PORT)}`,
+    '  --dsh-home <path>     Harness home instead of DSH_HOME or the launcher default',
+    '  --allow-running-host  Continue while the guarded endpoint listens (unsafe; warns loudly)',
     '  --help                Show this help',
+    '',
+    'A Host on a non-default endpoint (another --host/--port, or a profile that',
+    'overrides the bound address) must be named here: the guard probes one endpoint',
+    'and cannot discover another. When the endpoint cannot be verified the run',
+    'fails instead of assuming no Host is running.',
+    '',
+    'The launcher default home is <checkout parent>/deepseek-harness-data on Windows',
+    'and ~/.dsh elsewhere; a leading ~ in DSH_HOME or --dsh-home is expanded.',
     '',
     'Preconditions: run the ordinary root build (`pnpm run build`) once before this',
     'script, because staging the dedicated plugin needs its lib/ output. Run build.cmd',
@@ -1142,11 +1208,21 @@ function usage(): string {
 export function parseArguments(argv: readonly string[]): MigrateLegacyProfileOptions | undefined {
   let dshHome: string | undefined
   let allowRunningHost = false
+  let host = DEFAULT_HOST_ADDRESS
+  let port = DEFAULT_HOST_PORT
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index]
     if (argument === undefined) continue
     if (argument === '--help' || argument === '-h') return undefined
     if (argument === '--allow-running-host') allowRunningHost = true
+    else if (argument === '--host') {
+      host = parseHostOption(argv[index + 1])
+      index += 1
+    } else if (argument.startsWith('--host=')) host = parseHostOption(argument.slice('--host='.length))
+    else if (argument === '--port') {
+      port = parsePortOption(argv[index + 1])
+      index += 1
+    } else if (argument.startsWith('--port=')) port = parsePortOption(argument.slice('--port='.length))
     else if (argument === '--dsh-home') {
       const value = argv[index + 1]
       if (value === undefined || value.startsWith('--')) fail('--dsh-home requires a path')
@@ -1158,6 +1234,8 @@ export function parseArguments(argv: readonly string[]): MigrateLegacyProfileOpt
   return {
     ...dshHome === undefined ? {} : { dshHome },
     allowRunningHost,
+    host,
+    port,
   }
 }
 
@@ -1174,9 +1252,12 @@ if (process.argv[1] !== undefined && pathToFileURL(resolve(process.argv[1])).hre
       if (outcome.status === 'completed') {
         log('no legacy declaration remained; verified the dedicated bundle, seeded the profile, and wrote the marker')
       } else {
-        log(`migration complete (${String(outcome.removed ?? 0)} profile declaration(s) removed)`)
+        log(`migration complete (${String(outcome.removed ?? 0)} profile declaration(s), `
+          + `${String(outcome.removedSettings ?? 0)} settings declaration(s) removed)`)
       }
+      if (outcome.reason !== undefined) log(outcome.reason)
       log(`backup: ${outcome.backup}`)
+      if (outcome.markerPath === undefined) return
       log(`marker: ${outcome.markerPath}`)
       log('run build.cmd now to build and install the current profile format')
     }).catch((error: unknown) => {

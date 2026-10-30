@@ -26,10 +26,15 @@
  * message when preparation cannot finish.
  *
  * Safety: profile mutation while a Host is serving that profile is unsafe, so
- * a listener on the Host port refuses the run unless `--allow-running-host`
- * is passed explicitly. The script touches only profile package metadata and
- * pnpm state; it never reads or writes Sessions, attachments, credentials,
- * `.agent-teams` data, or projection caches.
+ * the run refuses while a Host answers on the probed endpoint unless
+ * `--allow-running-host` is passed explicitly. `--host` and `--port` select
+ * that endpoint and default to the composed Host address, 127.0.0.1:3080; a
+ * Host on any other endpoint (another `--host`/`--port`, or a profile override
+ * of the bound address) must be named through them, because the guard cannot
+ * discover it. An endpoint the guard cannot verify fails the run too, so a
+ * missing answer never counts as "no Host". The script touches only profile
+ * package metadata and pnpm state; it never reads or writes Sessions,
+ * attachments, credentials, `.agent-teams` data, or projection caches.
  *
  * @module scripts/fork-plugins-build
  */
@@ -50,7 +55,15 @@ const CONFIG_ROOT = join(BUILD_ROOT, 'configs')
 const DEPENDENCY_ROOT = join(BUILD_ROOT, 'build-deps')
 const WORK_ROOT = join(BUILD_ROOT, 'work')
 const PROFILE_NAME = 'web'
-const HOST_PORT = 3080
+/** Loopback address the Host guard probes unless `--host` names another one. */
+export const DEFAULT_HOST_ADDRESS = '127.0.0.1'
+/** Host port the guard probes unless `--port` names another one. */
+export const DEFAULT_HOST_PORT = 3080
+/**
+ * Directory name the Windows launchers use for their default Harness home
+ * beside the checkout.
+ */
+export const LAUNCHER_HOME_DIRECTORY = 'deepseek-harness-data'
 const SCHEMA_VERSION = 1
 /** Bump when the staging recipe changes in a way the source hash does not capture. */
 const SCRIPT_VERSION = 7
@@ -188,11 +201,15 @@ export const SUBSCRIPTIONS_TRANSPORT_MODULES: readonly SubscriptionsTransportMod
 
 /** Options accepted on the command line. */
 export interface BuildOptions {
-  /** Continue while the Host port is listening, after a loud warning. */
+  /** Continue while the Host endpoint listens, after a loud warning. */
   readonly allowRunningHost: boolean
   /** Rebuild even when the recorded source key matches. */
   readonly forceRebuild: boolean
-  /** Override the Harness home; defaults to `DSH_HOME`, then `~/.dsh`. */
+  /** Address of the Host this run must not disturb. */
+  readonly host: string
+  /** Port of the Host this run must not disturb. */
+  readonly port: number
+  /** Override the Harness home; defaults to `DSH_HOME`, then the launcher default. */
   readonly dshHome?: string
 }
 
@@ -259,18 +276,52 @@ function usage(): string {
     'Normally invoked by build.cmd after the ordinary root build.',
     '',
     'Options:',
-    '  --allow-running-host  Continue while the Host port is listening (unsafe; warns loudly)',
+    `  --host <address>      Host address to guard; default ${DEFAULT_HOST_ADDRESS}`,
+    `  --port <port>         Host port to guard; default ${String(DEFAULT_HOST_PORT)}`,
+    '  --allow-running-host  Continue while the guarded endpoint listens (unsafe; warns loudly)',
     '  --force-rebuild       Rebuild staged bundles even when the source key is unchanged',
-    '  --dsh-home <path>     Harness home to use instead of DSH_HOME or ~/.dsh',
+    '  --dsh-home <path>     Harness home instead of DSH_HOME or the launcher default',
     '  --help                Show this help',
     '',
+    'A Host on a non-default endpoint (another --host/--port, or a profile that',
+    'overrides the bound address) must be named here: the guard probes one endpoint',
+    'and cannot discover another. When the endpoint cannot be verified the run',
+    'fails instead of assuming no Host is running.',
+    '',
+    'The launcher default home is <checkout parent>/deepseek-harness-data on Windows',
+    'and ~/.dsh elsewhere; a leading ~ in DSH_HOME or --dsh-home is expanded.',
+    '',
   ].join('\n')
+}
+
+/**
+ * Validate a `--host` option value.
+ * @param value - option value, or undefined when the flag had none.
+ * @returns the address to probe.
+ */
+export function parseHostOption(value: string | undefined): string {
+  if (value === undefined || value.trim() === '' || value.startsWith('--')) fail('--host requires an address')
+  return value
+}
+
+/**
+ * Validate a `--port` option value.
+ * @param value - option value, or undefined when the flag had none.
+ * @returns the port to probe.
+ */
+export function parsePortOption(value: string | undefined): number {
+  if (value === undefined || !/^\d+$/.test(value)) fail('--port requires an integer from 1 through 65535')
+  const port = Number(value)
+  if (port < 1 || port > 65535) fail('--port requires an integer from 1 through 65535')
+  return port
 }
 
 /** Parse only the options this script owns. */
 export function parseArguments(argv: readonly string[]): BuildOptions | undefined {
   let allowRunningHost = false
   let forceRebuild = false
+  let host = DEFAULT_HOST_ADDRESS
+  let port = DEFAULT_HOST_PORT
   let dshHome: string | undefined
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index]
@@ -278,6 +329,14 @@ export function parseArguments(argv: readonly string[]): BuildOptions | undefine
     if (argument === '--allow-running-host') allowRunningHost = true
     else if (argument === '--force-rebuild') forceRebuild = true
     else if (argument === '--help' || argument === '-h') return undefined
+    else if (argument === '--host') {
+      host = parseHostOption(argv[index + 1])
+      index += 1
+    } else if (argument.startsWith('--host=')) host = parseHostOption(argument.slice('--host='.length))
+    else if (argument === '--port') {
+      port = parsePortOption(argv[index + 1])
+      index += 1
+    } else if (argument.startsWith('--port=')) port = parsePortOption(argument.slice('--port='.length))
     else if (argument === '--dsh-home') {
       const value = argv[index + 1]
       if (value === undefined || value.startsWith('--')) fail('--dsh-home requires a path')
@@ -289,14 +348,51 @@ export function parseArguments(argv: readonly string[]): BuildOptions | undefine
   return {
     allowRunningHost,
     forceRebuild,
+    host,
+    port,
     ...dshHome === undefined ? {} : { dshHome },
   }
 }
 
+/**
+ * Expand a leading `~` segment the way the launchers do.
+ * @param value - configured path.
+ * @param home - user home directory; defaults to the platform home.
+ * @returns the expanded path.
+ */
+export function expandHomePath(value: string, home = homedir()): string {
+  if (value === '~') return home
+  if (value.startsWith('~/') || value.startsWith('~\\')) return join(home, value.slice(2))
+  return value
+}
+
+/**
+ * Resolve the Harness home exactly as the platform launchers do.
+ *
+ * An explicit override wins, then `DSH_HOME`; a blank value counts as unset. The
+ * Windows launchers keep their default beside the checkout, while the macOS and
+ * Linux launchers use `~/.dsh`. A leading `~` in the configured value is
+ * expanded before resolution.
+ * @param explicit - `--dsh-home` value.
+ * @param env - environment to read `DSH_HOME` from.
+ * @param repositoryRoot - checkout root the Windows default sits beside.
+ * @returns the absolute Harness home.
+ */
+export function resolveDshHome(
+  explicit?: string,
+  env: NodeJS.ProcessEnv = process.env,
+  repositoryRoot = REPOSITORY_ROOT,
+): string {
+  const configured = explicit ?? env.DSH_HOME
+  if (configured !== undefined && configured.trim() !== '') return resolve(expandHomePath(configured))
+  return process.platform === 'win32'
+    ? resolve(join(dirname(repositoryRoot), LAUNCHER_HOME_DIRECTORY))
+    : resolve(join(homedir(), '.dsh'))
+}
+
 /** Resolve the Harness home exactly as the launcher does, with an explicit override first. */
 export function resolveHome(explicit?: string, env: NodeJS.ProcessEnv = process.env): string {
-  const configured = explicit ?? env.DSH_HOME
-  return resolve(configured !== undefined && configured.trim() !== '' ? configured : join(homedir(), '.dsh'))
+  return resolveDshHome(explicit, env)
 }
 
 /** Windows file systems compare paths case-insensitively; every other platform does not. */
@@ -336,52 +432,97 @@ async function writeJson(path: string, value: unknown): Promise<void> {
   await rename(temporary, path)
 }
 
-/** Whether a TCP listener accepts connections on the loopback address. */
-function portIsListening(port: number, timeoutMs = 750): Promise<boolean> {
+/** What one probe learned about the guarded endpoint. */
+type ListenerProbe =
+  | { readonly state: 'listening' }
+  | { readonly state: 'clear' }
+  | { readonly state: 'unverified'; readonly detail: string }
+
+/**
+ * Probe one TCP endpoint.
+ *
+ * Only a refused connection proves that nothing listens there. A timeout, an
+ * unresolvable address, or any other failure leaves the endpoint unverified,
+ * because that outcome is also what a Host behind a filter or another interface
+ * produces.
+ * @param host - address to connect to.
+ * @param port - port to connect to.
+ * @param timeoutMs - budget for the connection attempt.
+ * @returns whether the endpoint listens, is clear, or could not be verified.
+ */
+function probeHostEndpoint(host: string, port: number, timeoutMs = 750): Promise<ListenerProbe> {
   return new Promise((settle) => {
-    const socket = connect({ host: '127.0.0.1', port })
-    const finish = (listening: boolean): void => {
+    const socket = connect({ host, port })
+    let settled = false
+    const finish = (probe: ListenerProbe): void => {
+      if (settled) return
+      settled = true
       socket.destroy()
-      settle(listening)
+      settle(probe)
     }
     socket.setTimeout(timeoutMs)
-    socket.once('connect', () => { finish(true) })
-    socket.once('timeout', () => { finish(false) })
-    socket.once('error', () => { finish(false) })
+    socket.once('connect', () => { finish({ state: 'listening' }) })
+    socket.once('timeout', () => { finish({ state: 'unverified', detail: `no answer within ${String(timeoutMs)} ms` }) })
+    socket.once('error', (error: NodeJS.ErrnoException) => {
+      finish(error.code === 'ECONNREFUSED'
+        ? { state: 'clear' }
+        : { state: 'unverified', detail: error.message })
+    })
   })
 }
 
 /** Options for {@link assertHostNotRunning}. */
 export interface HostGuardOptions {
-  /** Continue while the Host port listens, after a loud warning. */
+  /** Continue while the guarded endpoint listens, after a loud warning. */
   readonly allowRunningHost: boolean
   /** What the caller is about to change, for both messages. */
   readonly action: string
   /** Receives the warning emitted when the override allows the run. */
   readonly warn: (message: string) => void
-  /** Port to probe; defaults to the Host's own. */
+  /** Host address to probe; defaults to {@link DEFAULT_HOST_ADDRESS}. */
+  readonly host?: string
+  /** Port to probe; defaults to {@link DEFAULT_HOST_PORT}. */
   readonly port?: number
 }
 
 /**
- * Refuse a profile change while a Host listens on the loopback Host port.
+ * Refuse a profile change while a Host answers on the guarded endpoint.
  *
  * Profile package links must not change under a running Host, and a Host that
- * already started would read the configuration this caller is about to
- * rewrite. The override proceeds after one warning so an operator can accept
- * that risk explicitly.
- * @param options - override, action, warning sink, and port.
- * @throws When a Host listens and the override was not passed.
+ * already started would read the configuration this caller is about to rewrite.
+ * The guard probes exactly one endpoint: a Host started on another endpoint
+ * (another `--host`/`--port`, or a profile override of the bound address) is
+ * invisible here, so the caller must pass the same options. An endpoint that
+ * cannot be verified also fails the run — an absent answer never counts as "no
+ * Host". The override proceeds after one warning so an operator can accept
+ * either risk explicitly.
+ * @param options - override, action, warning sink, and the endpoint to probe.
+ * @throws When a Host answers, when the endpoint cannot be verified, or when a
+ * failure occurs and the override was not passed.
  */
 export async function assertHostNotRunning(options: HostGuardOptions): Promise<void> {
-  const port = options.port ?? HOST_PORT
-  if (!await portIsListening(port)) return
+  const host = options.host ?? DEFAULT_HOST_ADDRESS
+  const port = options.port ?? DEFAULT_HOST_PORT
+  const endpoint = `${host}:${String(port)}`
+  const probe = await probeHostEndpoint(host, port)
+  if (probe.state === 'clear') return
+  if (probe.state === 'listening') {
+    if (!options.allowRunningHost) {
+      fail(`a Host is listening on ${endpoint}; stop it before ${options.action}. `
+        + 'Profile package links must not change under a running Host. '
+        + 'Pass --allow-running-host only if you accept that risk.')
+    }
+    options.warn(`a Host is listening on ${endpoint}; continuing only because --allow-running-host was passed`)
+    return
+  }
+  const cause = `could not verify whether a Host is listening on ${endpoint} (${probe.detail}). `
+    + `Stop the Host before ${options.action}, or pass --host/--port matching the Host launch `
+    + `(default ${DEFAULT_HOST_ADDRESS}:${String(DEFAULT_HOST_PORT)}); `
   if (!options.allowRunningHost) {
-    fail(`a Host is listening on 127.0.0.1:${String(port)}; stop it before ${options.action}. `
-      + 'Profile package links must not change under a running Host. '
+    fail(`${cause}a Host on another address or port is invisible to this guard, so the run fails closed. `
       + 'Pass --allow-running-host only if you accept that risk.')
   }
-  options.warn(`a Host is listening on 127.0.0.1:${String(port)}; continuing only because --allow-running-host was passed`)
+  options.warn(`${cause}continuing only because --allow-running-host was passed`)
 }
 
 /** Run one child process with inherited output, failing on a nonzero exit. */
@@ -1566,7 +1707,13 @@ export async function main(options: BuildOptions): Promise<void> {
   cliEntry()
   const home = resolveHome(options.dshHome)
   const profileDirectory = join(home, 'profiles', PROFILE_NAME)
-  await assertHostNotRunning({ allowRunningHost: options.allowRunningHost, action: 'rebuilding the profile', warn })
+  await assertHostNotRunning({
+    allowRunningHost: options.allowRunningHost,
+    action: 'rebuilding the profile',
+    warn,
+    host: options.host,
+    port: options.port,
+  })
   let previousState: BuildState = { schema: SCHEMA_VERSION, scriptVersion: SCRIPT_VERSION, plugins: {} }
   if (existsSync(STATE_FILE)) {
     try {

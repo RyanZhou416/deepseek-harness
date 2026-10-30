@@ -2,14 +2,13 @@ import { describe, expect, it, vi } from 'vitest'
 import { existsSync } from 'node:fs'
 import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { createServer, type AddressInfo, type Server } from 'node:net'
-import { tmpdir } from 'node:os'
+import { homedir, tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import * as yaml from 'js-yaml'
-import { assertHostNotRunning } from './fork-plugins-build.ts'
+import { assertHostNotRunning, DEFAULT_HOST_ADDRESS, DEFAULT_HOST_PORT, LAUNCHER_HOME_DIRECTORY } from './fork-plugins-build.ts'
 import {
   findLegacyPoolProviders,
   findLegacySettingsProviders,
-  LAUNCHER_HOME_DIRECTORY,
   MIGRATION_MARKER_FILE,
   migrateLegacyProfile,
   migrateLegacyPoolProvider,
@@ -181,6 +180,7 @@ describe('migration host and home policy', () => {
         allowRunningHost: false,
         action: 'migrating the profile',
         warn: () => {},
+        host: DEFAULT_HOST_ADDRESS,
         port,
       })).rejects.toThrow(/a Host is listening on 127\.0\.0\.1:\d+; stop it before migrating the profile/)
 
@@ -189,9 +189,11 @@ describe('migration host and home policy', () => {
         allowRunningHost: true,
         action: 'migrating the profile',
         warn,
+        host: DEFAULT_HOST_ADDRESS,
         port,
       })).resolves.toBeUndefined()
       expect(warn).toHaveBeenCalledTimes(1)
+      expect(warn.mock.calls[0]?.[0]).toContain(`127.0.0.1:${String(port)}`)
     } finally {
       await stop(server)
     }
@@ -208,24 +210,67 @@ describe('migration host and home policy', () => {
     })).resolves.toBeUndefined()
   })
 
-  it('parses the running-Host override and the home override', () => {
-    expect(parseArguments(['--allow-running-host'])).toEqual({ allowRunningHost: true })
+  it('fails closed when the guarded endpoint cannot be verified', async () => {
+    // An address no resolver turns into a reachable endpoint; the probe may fail
+    // on lookup or time out, and both outcomes must refuse instead of reading
+    // as clear.
+    const endpoint = { host: '256.256.256.256', port: DEFAULT_HOST_PORT }
+    await expect(assertHostNotRunning({
+      allowRunningHost: false,
+      action: 'migrating the profile',
+      warn: () => {},
+      ...endpoint,
+    })).rejects.toThrow(/could not verify whether a Host is listening on 256\.256\.256\.256:3080[\s\S]*fails closed/)
+
+    const warn = vi.fn()
+    await expect(assertHostNotRunning({
+      allowRunningHost: true,
+      action: 'migrating the profile',
+      warn,
+      ...endpoint,
+    })).resolves.toBeUndefined()
+    expect(warn).toHaveBeenCalledTimes(1)
+    expect(warn.mock.calls[0]?.[0]).toContain('continuing only because --allow-running-host was passed')
+  })
+
+  it('parses the host endpoint, running-Host override, and home override', () => {
+    expect(parseArguments(['--allow-running-host'])).toEqual({
+      allowRunningHost: true,
+      host: DEFAULT_HOST_ADDRESS,
+      port: DEFAULT_HOST_PORT,
+    })
     expect(parseArguments(['--dsh-home', 'C:/home', '--allow-running-host']))
-      .toEqual({ dshHome: 'C:/home', allowRunningHost: true })
+      .toEqual({ dshHome: 'C:/home', allowRunningHost: true, host: DEFAULT_HOST_ADDRESS, port: DEFAULT_HOST_PORT })
+    expect(parseArguments(['--host', '10.0.0.7', '--port', '8080']))
+      .toEqual({ allowRunningHost: false, host: '10.0.0.7', port: 8080 })
+    expect(parseArguments(['--host=10.0.0.7', '--port=8080']))
+      .toEqual({ allowRunningHost: false, host: '10.0.0.7', port: 8080 })
+    expect(() => parseArguments(['--host'])).toThrow(/--host requires an address/)
+    expect(() => parseArguments(['--port'])).toThrow(/--port requires an integer from 1 through 65535/)
+    expect(() => parseArguments(['--port', '0'])).toThrow(/--port requires an integer from 1 through 65535/)
+    expect(() => parseArguments(['--port', '65536'])).toThrow(/--port requires an integer from 1 through 65535/)
+    expect(() => parseArguments(['--port', 'eighty'])).toThrow(/--port requires an integer from 1 through 65535/)
     expect(parseArguments(['--help'])).toBeUndefined()
     expect(() => parseArguments(['--unknown'])).toThrow(/unknown argument/)
   })
 
-  it('defaults the home exactly as the Windows launchers do', () => {
+  it('defaults the home exactly as the platform launchers do', () => {
     const repositoryRoot = join(tmpdir(), 'dsh-launcher-home', 'deepseek-harness')
-    const launcherDefault = resolve(join(dirname(repositoryRoot), LAUNCHER_HOME_DIRECTORY))
+    const launcherDefault = process.platform === 'win32'
+      ? resolve(join(dirname(repositoryRoot), LAUNCHER_HOME_DIRECTORY))
+      : join(homedir(), '.dsh')
 
     expect(resolveMigrationHome(undefined, {}, repositoryRoot)).toBe(launcherDefault)
     expect(resolveMigrationHome(undefined, { DSH_HOME: '' }, repositoryRoot)).toBe(launcherDefault)
+    expect(resolveMigrationHome(undefined, { DSH_HOME: '   ' }, repositoryRoot)).toBe(launcherDefault)
     expect(resolveMigrationHome(undefined, { DSH_HOME: join(repositoryRoot, 'env-home') }, repositoryRoot))
       .toBe(resolve(join(repositoryRoot, 'env-home')))
     expect(resolveMigrationHome(join(repositoryRoot, 'flag-home'), { DSH_HOME: 'ignored' }, repositoryRoot))
       .toBe(resolve(join(repositoryRoot, 'flag-home')))
+    expect(resolveMigrationHome(undefined, { DSH_HOME: '~/env-home' }, repositoryRoot))
+      .toBe(join(homedir(), 'env-home'))
+    expect(resolveMigrationHome('~', {}, repositoryRoot)).toBe(homedir())
+    expect(resolveMigrationHome('~\\nested', {}, repositoryRoot)).toBe(join(homedir(), 'nested'))
   })
 })
 
@@ -390,6 +435,110 @@ describe('one-time profile migration', () => {
       })).rejects.toThrow(/seed failed/)
 
       expect(await readFile(settingsPath, 'utf8')).toBe(LEGACY_SETTINGS)
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('cleans settings.yaml when no web profile exists yet', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-cc-pool-settings-no-profile-'))
+    try {
+      const home = join(root, 'home')
+      const settingsPath = join(home, 'settings.yaml')
+      await writePatch(settingsPath, LEGACY_SETTINGS)
+      const before = await backupCount()
+      let called = false
+
+      const outcome = await migrateLegacyProfile({
+        dshHome: home,
+        allowRunningHost: true,
+        hooks: {
+          ensurePlugin: () => { called = true },
+          seed: () => { called = true },
+        },
+      })
+
+      expect(outcome.status).toBe('migrated')
+      expect(outcome.removed).toBe(0)
+      expect(outcome.removedSettings).toBe(1)
+      expect(outcome.reason).toMatch(/no profile patch exists .*migrated settings\.yaml only/)
+      expect(outcome.markerPath).toBeUndefined()
+      expect(called).toBe(false)
+      expect(existsSync(join(home, 'profiles', 'web'))).toBe(false)
+      expect(await readFile(join(outcome.backup!, 'home', 'settings.yaml'), 'utf8')).toBe(LEGACY_SETTINGS)
+      expect(findLegacySettingsProviders(await readFile(settingsPath, 'utf8'))).toEqual([])
+      expect(await backupCount()).toBe(before + 1)
+
+      const second = await migrateLegacyProfile({
+        dshHome: home,
+        hooks: { ensurePlugin: () => { throw new Error('must not run') } },
+      })
+      expect(second.status).toBe('skipped')
+      expect(second.reason).toMatch(/no profile patch exists/)
+      expect(await backupCount()).toBe(before + 1)
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('refuses to clean settings.yaml under a live Host', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-cc-pool-settings-guard-'))
+    const { server, port } = await listen()
+    try {
+      const home = join(root, 'home')
+      const settingsPath = join(home, 'settings.yaml')
+      await writePatch(settingsPath, LEGACY_SETTINGS)
+      const before = await backupCount()
+
+      await expect(migrateLegacyProfile({
+        dshHome: home,
+        host: DEFAULT_HOST_ADDRESS,
+        port,
+        hooks: { ensurePlugin: () => { throw new Error('must not run') } },
+      })).rejects.toThrow(/a Host is listening on 127\.0\.0\.1:\d+; stop it before migrating the home settings document/)
+
+      expect(await readFile(settingsPath, 'utf8')).toBe(LEGACY_SETTINGS)
+      expect(await backupCount()).toBe(before)
+    } finally {
+      await stop(server)
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('cleans settings.yaml before skipping a profile without package.json', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-cc-pool-settings-no-manifest-'))
+    try {
+      const home = join(root, 'home')
+      const profile = join(home, 'profiles', 'web')
+      const patch = join(profile, 'cordis.patch.yml')
+      const settingsPath = join(home, 'settings.yaml')
+      await writePatch(patch, CURRENT_PATCH)
+      await writePatch(settingsPath, LEGACY_SETTINGS)
+      let called = false
+
+      const outcome = await migrateLegacyProfile({
+        dshHome: home,
+        allowRunningHost: true,
+        hooks: {
+          ensurePlugin: () => { called = true },
+          seed: () => { called = true },
+        },
+      })
+
+      expect(outcome.status).toBe('migrated')
+      expect(outcome.removed).toBe(0)
+      expect(outcome.removedSettings).toBe(1)
+      expect(outcome.reason).toMatch(/has no package\.json; migrated settings\.yaml only/)
+      expect(outcome.markerPath).toBeUndefined()
+      expect(called).toBe(false)
+      expect(existsSync(join(profile, MIGRATION_MARKER_FILE))).toBe(false)
+      expect(await readFile(join(outcome.backup!, 'home', 'settings.yaml'), 'utf8')).toBe(LEGACY_SETTINGS)
+      expect(findLegacySettingsProviders(await readFile(settingsPath, 'utf8'))).toEqual([])
+      expect(await readFile(patch, 'utf8')).toBe(CURRENT_PATCH)
+
+      const second = await migrateLegacyProfile({ dshHome: home })
+      expect(second.status).toBe('skipped')
+      expect(second.reason).toMatch(/has no package\.json/)
     } finally {
       await rm(root, { recursive: true, force: true })
     }

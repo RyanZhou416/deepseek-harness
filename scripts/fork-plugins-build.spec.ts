@@ -6,7 +6,8 @@ import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import {
   assertStagedArtifacts, assertStagedManifest, buildSubscriptionsTransport, bunPlatformRuntime,
-  copyStagedEntries, dependencyPreparationError, ensurePluginDependencies, installAndSeedProfile,
+  copyStagedEntries, DEFAULT_HOST_ADDRESS, DEFAULT_HOST_PORT, dependencyPreparationError, ensurePluginDependencies,
+  installAndSeedProfile, LAUNCHER_HOME_DIRECTORY,
   lockfileAutoInstallPeers, localDependencyPath, lockedDependencyVersion, lockedUndiciVersion, parseArguments, PLUGINS,
   pluginInstallArguments, privateDependencySpecs, registryPeerRange, resolveHome, sourceHash, sourcePaths,
   stageBunRuntime, stagedManifest, stagedWorkspaceManifest, stageWorkspacePlugin, stagingIsCurrent,
@@ -354,11 +355,16 @@ describe('fork plugin dependency preparation', () => {
 })
 
 describe('fork plugin profile install helpers', () => {
-  it('resolves the Harness home from the override, the environment, then the user home', () => {
+  it('resolves the Harness home from the override, the environment, then the platform launcher default', () => {
+    const launcherDefault = process.platform === 'win32'
+      ? resolve(join(dirname(REPOSITORY_ROOT), LAUNCHER_HOME_DIRECTORY))
+      : join(homedir(), '.dsh')
     expect(resolveHome('C:\\custom\\home', {})).toBe(resolve('C:\\custom\\home'))
     expect(resolveHome(undefined, { DSH_HOME: 'C:\\env\\home' })).toBe(resolve('C:\\env\\home'))
-    expect(resolveHome(undefined, {})).toBe(join(homedir(), '.dsh'))
-    expect(resolveHome(undefined, { DSH_HOME: '   ' })).toBe(join(homedir(), '.dsh'))
+    expect(resolveHome(undefined, {})).toBe(launcherDefault)
+    expect(resolveHome(undefined, { DSH_HOME: '   ' })).toBe(launcherDefault)
+    expect(resolveHome(undefined, { DSH_HOME: '~/env-home' })).toBe(join(homedir(), 'env-home'))
+    expect(resolveHome('~', {})).toBe(homedir())
   })
 
   it('resolves only local link and file dependency values', () => {
@@ -375,20 +381,44 @@ describe('fork plugin profile install helpers', () => {
   })
 
   it('parses only the options the build script owns', () => {
-    expect(parseArguments([])).toEqual({ allowRunningHost: false, forceRebuild: false })
+    expect(parseArguments([])).toEqual({
+      allowRunningHost: false,
+      forceRebuild: false,
+      host: DEFAULT_HOST_ADDRESS,
+      port: DEFAULT_HOST_PORT,
+    })
     expect(parseArguments(['--allow-running-host', '--force-rebuild', '--dsh-home', 'C:\\home'])).toEqual({
       allowRunningHost: true,
       forceRebuild: true,
+      host: DEFAULT_HOST_ADDRESS,
+      port: DEFAULT_HOST_PORT,
       dshHome: 'C:\\home',
     })
     expect(parseArguments(['--dsh-home=C:\\home'])).toEqual({
       allowRunningHost: false,
       forceRebuild: false,
+      host: DEFAULT_HOST_ADDRESS,
+      port: DEFAULT_HOST_PORT,
       dshHome: 'C:\\home',
+    })
+    expect(parseArguments(['--host', '10.0.0.7', '--port', '8080'])).toEqual({
+      allowRunningHost: false,
+      forceRebuild: false,
+      host: '10.0.0.7',
+      port: 8080,
+    })
+    expect(parseArguments(['--host=::1', '--port=8080'])).toEqual({
+      allowRunningHost: false,
+      forceRebuild: false,
+      host: '::1',
+      port: 8080,
     })
     expect(parseArguments(['--help'])).toBeUndefined()
     expect(() => parseArguments(['--unknown'])).toThrow(/unknown argument/)
     expect(() => parseArguments(['--dsh-home'])).toThrow(/requires a path/)
+    expect(() => parseArguments(['--host'])).toThrow(/--host requires an address/)
+    expect(() => parseArguments(['--port'])).toThrow(/--port requires an integer from 1 through 65535/)
+    expect(() => parseArguments(['--port', '65536'])).toThrow(/--port requires an integer from 1 through 65535/)
     expect(() => parseArguments(['--patch', 'legacy.yml'])).toThrow(/unknown argument/)
   })
 })

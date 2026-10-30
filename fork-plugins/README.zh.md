@@ -6,11 +6,11 @@
 
 ## 仓库内构建与安装
 
-Windows 的 `build.cmd` 在普通根构建之后构建源码插件，并把四个 fork 插件（AgentTeams、Context、Subscriptions、AetherShell）全部链接到选定的 `web` profile。当前格式的 profile 无需第二条命令、私有 registry 或手工提供的 tgz。构建会**修改 profile**，因此必须先停止 Host：Host 端口（`3080`）仍在监听时，构建会在触碰任何 profile 文件之前失败。
+Windows 的 `build.cmd` 在普通根构建之后构建源码插件，并把四个 fork 插件（AgentTeams、Context、Subscriptions、AetherShell）全部链接到选定的 `web` profile。当前格式的 profile 无需第二条命令、私有 registry 或手工提供的 tgz。构建会**修改 profile**，因此必须先停止 Host：构建探测 `--host`/`--port`（默认 `127.0.0.1:3080`），该端点仍有响应时会在触碰任何 profile 文件之前失败。Host 处于任何其他端点——另一个 `--host`/`--port`，或 profile 覆盖了绑定地址——时必须用这些选项标出该端点，守卫无法自行发现；端点无法验证时构建同样失败，不会假定没有 Host 在运行。
 
-构建只面向当前 profile 格式：没有 legacy 检测、守卫、备份或迁移。仍声明 `llm-pi-ai` `providers.cc-pool` 的旧 profile 必须先运行一次性 [`scripts/migrate-legacy-cc-pool-profile.ts`](../scripts/migrate-legacy-cc-pool-profile.ts)，再运行 `build.cmd`。该脚本备份 profile 与 seed 文件、结构移除 legacy 声明、确保专用 bundle/link、按需 seed、写入 `.dsh-profile-migrations.json` 后退出；它是唯一持有 legacy 知识的位置，所有维护中的 profile 迁移完成后可删除。
+构建只面向当前 profile 格式：没有旧 profile 检测、转换、备份或迁移。仍声明 `llm-pi-ai` `providers.cc-pool` 的旧 profile 必须先运行一次性 [`scripts/migrate-legacy-cc-pool-profile.ts`](../scripts/migrate-legacy-cc-pool-profile.ts)，再运行 `build.cmd`。该脚本备份 profile、seed 文件与 `$DSH_HOME/settings.yaml`，结构移除 legacy 声明，并在“无 profile / 无 package.json”跳过之前清理 `settings.yaml` 中的同名声明——即使 web profile 尚不存在，Home 里的旧声明也会被清理（不写 profile marker）。随后它确保专用 bundle/link、按需 seed、写入 `.dsh-profile-migrations.json` 后退出；其 Host 守卫接受与构建相同的 `--host`/`--port` 选项。它是唯一持有 legacy 知识的位置，所有维护中的 profile 迁移完成后可删除。
 
-`scripts/fork-plugins-build.ts` 使用 `DSH_HOME`（未设置时用 `%USERPROFILE%\.dsh`），目标是 `profiles\web`。它把包 staging 到被忽略的 `.build/fork-plugins/`，再用 `dsh plugin --profile web add <绝对 staging 目录>` 安装，记录为 pnpm `link:`；源码 key 使未变化的第二次运行既不重建也不重装，全新的 profile 在安装成功后才 seed。不会读取或写入任何 Session、附件、凭据、projection cache 或 `.agent-teams` 数据。
+`scripts/fork-plugins-build.ts` 优先使用 `--dsh-home`，其次 `DSH_HOME`，再其次平台启动器默认 home（Windows 为 `<仓库父目录>\deepseek-harness-data`，macOS/Linux 为 `~/.dsh`；开头的 `~` 会展开），目标是 `profiles/web`。它把包 staging 到被忽略的 `.build/fork-plugins/`，再用 `dsh plugin --profile web add <绝对 staging 目录>` 安装，记录为 pnpm `link:`；源码 key 使未变化的第二次运行既不重建也不重装，全新的 profile 在安装成功后才 seed。不会读取或写入任何 Session、附件、凭据、projection cache 或 `.agent-teams` 数据。
 
 - Subscriptions 从源码编译 `lib/index.js` 与 `lib/client.js`。staged manifest 内联 `@tormentalabs/claude-code-wire-compat`（来自仓库 tgz）与 `undici`，删除仅类型使用的 `@deepseek-ai/dsh-llm-request-record` peer，且不声明运行时依赖。公开的 optional provider 条目（`@cursor/sdk`、`@oven/bun-*`）保留声明；link 安装不会安装被链接包的 optional 依赖，因此这些 provider 需要另行提供对应包。staged 包不附带声明文件；源码检出仍是类型来源。
 - AetherShell 从源码编译 `lib/lifecycle.mjs`，并保持所有 `@deepseek-ai/*` peer 为外部依赖 `0.2.1-rc.2`。
