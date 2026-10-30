@@ -3,22 +3,25 @@
  *
  * pi-ai reports a rejected request as a terminal stream event whose message is
  * the provider SDK's `<status> <body>` text. A pool that fronts several
- * accounts puts its own stable `cc_pool_*` code, origin, and retry decision in
- * that body; the HTTP status alone cannot distinguish those failures from the
- * Claude errors the same endpoint returns. This module reads the envelope for
- * pool-origin failures and for the pool's readiness refusal, which carries a
- * body request id and retry decision instead; every other failure keeps the
- * existing text classifier in `stream.ts`, so a Claude-native rejection keeps
- * its original code and wording. A 5xx refusal carrying both readiness markers
- * is terminal without reading the pool's detail text, so a reworded refusal
- * cannot drift back into the retryable text classification.
+ * accounts puts its own stable `cc_pool_*` code, origin, retry decision, and
+ * user-facing detail in that body; the HTTP status alone cannot distinguish
+ * those failures from the Claude errors the same endpoint returns. This module
+ * reads the envelope for pool-origin failures and for the pool's readiness
+ * refusal, which carries a body request id and retry decision instead; every
+ * other failure keeps the existing text classifier in `stream.ts`, so a
+ * Claude-native rejection keeps its original code and wording. A 5xx refusal
+ * carrying both readiness markers is terminal without reading the pool's detail
+ * text, so a reworded refusal cannot drift back into the retryable text
+ * classification.
  *
  * The pool owns account selection, cooldown, and session binding. This module
  * only decides what the client may do with the refusal: retry after the
  * disclosed wait, wait for the turn that holds the session, or stop. A closed
  * client request id is recoverable because this adapter stamps a new id on every
  * deliberate attempt, so the catalog asks for a retry of the request rather than
- * forbidding one: the next attempt is a fresh ledger entry, not a replay.
+ * forbidding one: the next attempt is a fresh ledger entry, not a replay. It
+ * also displays the pool's own message after sanitizing it; the generated
+ * catalog contributes machine semantics only, never display text.
  *
  * @module dsh-llm-pi-ai/pool-error
  */
@@ -42,6 +45,12 @@ import {
 /** The pool's stable code prefix; every pool error carries one. */
 const POOL_CODE_PREFIX = 'cc_pool_'
 
+/** Longest provider-authored pool message retained for display. */
+export const POOL_ERROR_MESSAGE_MAX_LENGTH = 1_024
+
+/** Generic display fallback when the pool supplies no safe message. */
+export const POOL_ERROR_FALLBACK_MESSAGE = 'The provider pool rejected this request'
+
 /** Retryable pool codes this adapter's classifier can emit for a normal policy. */
 export const POOL_RETRYABLE_CODES: readonly string[] = Object.freeze([
   POOL_CAPACITY_CODE,
@@ -56,7 +65,7 @@ export const POOL_RETRYABLE_CODES: readonly string[] = Object.freeze([
  *
  * `Object.hasOwn` keeps inherited object keys (`constructor`, `toString`) out of
  * the lookup, so only catalog-defined wire codes take the known path.
- * @param identity - the envelope's `code ?? type`.
+ * @param identity - the envelope's `code ?? type ?? kind`.
  * @returns the matching catalog entry, or undefined for a code outside the catalog.
  */
 function catalogEntryFor(identity: string): PoolErrorCatalogEntry | undefined {
@@ -68,16 +77,20 @@ function catalogEntryFor(identity: string): PoolErrorCatalogEntry | undefined {
 export interface ProviderErrorEnvelope {
   /** Pool-issued request id, echoed at the body's top level when the pool authored this refusal. */
   readonly poolRequestId?: string
-  /** Stable error code, preferred over {@link type} when both are present. */
+  /** Stable error code, preferred over {@link type} and {@link kind} when present. */
   readonly code?: string
   /** Anthropic-style error type, sometimes the only code a response carries. */
   readonly type?: string
+  /** Coarser machine category, used only when neither {@link code} nor {@link type} names one. */
+  readonly kind?: string
   /** Error origin: `claude` for native Anthropic errors, `pool` for pool failures. */
   readonly origin?: string
   /** Failure scope: request, session, account, model, or pool. */
   readonly scope?: string
   /** Pool-side retry decision; a known pool code has its own client semantics. */
   readonly retryable?: boolean
+  /** Pool-side finality marker; true forbids every automatic resend. */
+  readonly terminal?: boolean
   /** Requested client action: stop, retry_same, retry_after, or refresh. */
   readonly clientAction?: string
   /** Provider-authored human-readable detail. */
@@ -146,33 +159,92 @@ export function parseProviderErrorEnvelope(message: string): ProviderErrorEnvelo
   const poolRequestId = text(body, POOL_REQUEST_ID_FIELD)
   const code = text(fields, 'code')
   const type = text(fields, 'type')
+  const kind = text(fields, 'kind')
   const origin = text(fields, 'origin')
   const scope = text(fields, 'scope')
   const clientAction = text(fields, 'client_action')
   const detail = text(fields, 'message')
   const retryable = fields['retryable']
+  const terminal = fields['terminal']
   return {
     ...poolRequestId === undefined ? {} : { poolRequestId },
     ...code === undefined ? {} : { code },
     ...type === undefined ? {} : { type },
+    ...kind === undefined ? {} : { kind },
     ...origin === undefined ? {} : { origin },
     ...scope === undefined ? {} : { scope },
     ...typeof retryable === 'boolean' ? { retryable } : {},
+    ...typeof terminal === 'boolean' ? { terminal } : {},
     ...clientAction === undefined ? {} : { clientAction },
     ...detail === undefined ? {} : { message: detail },
   }
 }
 
 /**
+ * The envelope's machine identity, most specific field first.
+ * @param envelope - parsed pool or provider error envelope.
+ * @returns the `code`, `type`, or `kind` value when one is present.
+ */
+function identityOf(envelope: ProviderErrorEnvelope): string | undefined {
+  return envelope.code ?? envelope.type ?? envelope.kind
+}
+
+/** Markup, entities, and executable URL schemes that never belong in a plain-text error row. */
+const UNSAFE_MARKUP = /<\/?[a-z][^>]*>|<!--|&(?:#[0-9]+|#x[0-9a-f]+|[a-z]+);/iu
+
+/** Credential material a provider might echo inside a failure message. */
+const CREDENTIAL_MATERIAL: readonly RegExp[] = [
+  /\bBearer\s+[a-z0-9._~+/=-]{8,}/iu,
+  /\bsk-[a-z0-9_-]{8,}/iu,
+  /\b(?:api[_-]?key|access[_-]?token|refresh[_-]?token|client[_-]?secret|password)\b\s*[:=]\s*\S+/iu,
+  /\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/u,
+  /\bAKIA[0-9A-Z]{16}\b/u,
+  /[?&](?:key|token|api[_-]?key|access[_-]?token)=/iu,
+  /\b(?:javascript|data):/iu,
+]
+
+/**
+ * Reduce the provider's user-facing detail to one bounded, plain-text line.
+ *
+ * Control characters become spaces, runs of whitespace collapse, and the
+ * result is trimmed. A message that is empty, oversized, contains markup or
+ * entities, or carries credential-like material is rejected so the caller can
+ * show the generic pool refusal instead.
+ * @param message - the envelope's `error.message`, when present.
+ * @returns the display-safe one-line message, or undefined when none is safe.
+ */
+function sanitizeProviderMessage(message: string | undefined): string | undefined {
+  if (message === undefined) return undefined
+  const singleLine = message.replace(/[\u0000-\u001f\u007f-\u009f]+/gu, ' ')
+    .replace(/\s+/gu, ' ')
+    .trim()
+  if (singleLine === '' || singleLine.length > POOL_ERROR_MESSAGE_MAX_LENGTH) return undefined
+  if (UNSAFE_MARKUP.test(singleLine)) return undefined
+  if (CREDENTIAL_MATERIAL.some(pattern => pattern.test(singleLine))) return undefined
+  return singleLine
+}
+
+/**
+ * The provider-facing text for a pool failure whose own message cannot be shown.
+ * @param code - canonical failure code selected for this refusal.
+ * @returns one generic sentence naming the refusal class.
+ */
+function fallbackMessage(code: string): string {
+  return `${POOL_ERROR_FALLBACK_MESSAGE} (${code}).`
+}
+
+/**
  * Classify a pi-ai failure that belongs to a shared-account pool.
  *
- * Known pool codes take their failure code, retry guidance, and resend decision
- * from the generated catalog: capacity, rate limiting, and no-account wait out
- * the provider's delay, a closed client request id asks for another attempt
- * (which the adapter sends under a fresh id), while a catalog `stop` action
- * (session-busy) forbids every automatic resend. Unrecognized pool codes follow
- * the envelope's `client_action`, `retryable`, and finally the HTTP status. A pool-authored
- * readiness refusal — identified by its body `pool_request_id` and
+ * Known pool codes take their canonical failure code and resend decision from
+ * the generated catalog's machine fields: capacity, rate limiting, and
+ * no-account wait out the provider's delay, a closed client request id asks for
+ * another attempt (which the adapter sends under a fresh id), while a catalog
+ * `stop` action (session-busy) forbids every automatic resend. Unrecognized pool
+ * codes follow an explicit `terminal` marker, then `client_action`, `retryable`,
+ * and finally the HTTP status. The failure message is the pool's sanitized
+ * `message`, or a generic refusal when that detail is missing or unsafe. A
+ * pool-authored readiness refusal — identified by its body `pool_request_id` and
  * `retryable: false`, together with a 5xx status or its unverified-egress
  * detail — becomes a non-retryable `POOL_ERROR` even though it carries neither
  * a pool code nor `origin`. A `claude` origin, a non-pool code, or an
@@ -188,7 +260,7 @@ export function classifyPoolFailure(
 ): LlmFailure | undefined {
   const envelope = parseProviderErrorEnvelope(message)
   if (envelope === undefined) return undefined
-  const identity = envelope.code ?? envelope.type
+  const identity = identityOf(envelope)
   const poolByOrigin = envelope.origin === 'pool'
   // An explicit claude origin outranks a pool-looking code: the pool is not
   // allowed to relabel a native Claude error, and neither is this adapter.
@@ -198,9 +270,9 @@ export function classifyPoolFailure(
 
   const status = response?.status ?? statusOf(message)
   const retryAfterMs = response?.providerRetryAfterMs
-  const detail = envelope.message ?? message
-  const failure = (code: string, guidance: string): LlmFailure => ({
-    message: `${detail} (${code}: ${guidance}${retrySuffix(retryAfterMs)})`,
+  const detail = sanitizeProviderMessage(envelope.message)
+  const failure = (code: string): LlmFailure => ({
+    message: detail ?? fallbackMessage(code),
     code,
     ...status === undefined ? {} : { status },
     ...retryAfterMs === undefined ? {} : { providerRetryAfterMs: retryAfterMs },
@@ -213,27 +285,27 @@ export function classifyPoolFailure(
     // that repeat with a 409 instead of the original request's outcome.
     if (!isPoolReadinessFailure(envelope, status)) return undefined
     return {
-      ...failure(POOL_ERROR_CODE, 'the pool has not verified the egress path for this lease'),
+      ...failure(POOL_ERROR_CODE),
       retryDisposition: 'forbid',
     }
   }
 
-  // Known pool codes take their client semantics from the generated catalog, so
-  // the wire code, failure code, and retry guidance have one source.
+  // Known pool codes take their client semantics from the generated catalog's
+  // machine fields, so the canonical code and stop decision have one source.
   const entry = identity === undefined ? undefined : catalogEntryFor(identity)
   if (entry !== undefined) {
-    const known = failure(entry.code, entry.clientGuidance)
+    const known = failure(entry.code)
     // A catalog `stop` action forbids every automatic resend: session-busy takes
     // this path even though the online pool marks it retryable for its own recovery.
-    return entry.clientAction === 'stop' ? { ...known, retryDisposition: 'forbid' } : known
+    return entry.clientAction === 'stop' || envelope.terminal === true
+      ? { ...known, retryDisposition: 'forbid' }
+      : known
   }
 
   const retry = retryDecision(envelope, status)
-  if (retry) return failure(POOL_TRANSIENT_CODE, 'the pool reports a transient failure')
+  if (retry) return failure(POOL_TRANSIENT_CODE)
   return {
-    ...failure(POOL_ERROR_CODE, envelope.clientAction === 'refresh'
-      ? 're-authenticate this provider route before retrying'
-      : 'the pool reports a non-retryable failure'),
+    ...failure(POOL_ERROR_CODE),
     retryDisposition: 'forbid',
   }
 }
@@ -345,11 +417,13 @@ function statusOf(message: string): number | undefined {
 /**
  * Whether an unrecognized pool failure may be retried.
  *
- * `client_action` is the pool's direct answer; `retryable` covers responses
- * that predate it. Absent both, an unknown pool failure stops: repeating it is
- * only safe when the producer said so.
+ * An explicit `terminal` marker stops first. `client_action` is the pool's
+ * direct answer; `retryable` covers responses that predate it. Absent both, an
+ * unknown pool failure stops: repeating it is only safe when the producer said
+ * so.
  */
 function retryDecision(envelope: ProviderErrorEnvelope, status: number | undefined): boolean {
+  if (envelope.terminal === true) return false
   switch (envelope.clientAction) {
     case 'retry_same':
     case 'retry_after':
@@ -362,10 +436,6 @@ function retryDecision(envelope: ProviderErrorEnvelope, status: number | undefin
   }
   if (envelope.retryable !== undefined) return envelope.retryable
   return status === 429 || (status !== undefined && status >= 500)
-}
-
-function retrySuffix(retryAfterMs: number | undefined): string {
-  return retryAfterMs === undefined ? '' : `; retry after ${Math.ceil(retryAfterMs / 1_000)}s`
 }
 
 function retryAfterFacts(headers: Headers): Pick<ProviderErrorResponse, 'providerRetryAfterMs'> | Record<string, never> {

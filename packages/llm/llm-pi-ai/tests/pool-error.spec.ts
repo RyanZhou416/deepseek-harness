@@ -16,6 +16,8 @@ import {
 import {
   classifyPoolFailure,
   parseProviderErrorEnvelope,
+  POOL_ERROR_FALLBACK_MESSAGE,
+  POOL_ERROR_MESSAGE_MAX_LENGTH,
   ProviderErrorCapture,
 } from '../src/pool-error.ts'
 
@@ -46,7 +48,12 @@ function readinessEnvelope(
   })}`
 }
 
-/** Catalog fields that both the pool envelope and the DSH classifier must agree on. */
+/** The generic display sentence for a refusal whose own message is unusable. */
+function fallback(code: string): string {
+  return `${POOL_ERROR_FALLBACK_MESSAGE} (${code}).`
+}
+
+/** Catalog machine fields that both the pool envelope and the DSH classifier must agree on. */
 const CATALOG_EXPECTED = [
   {
     type: 'cc_pool_capacity_exhausted',
@@ -57,8 +64,6 @@ const CATALOG_EXPECTED = [
     retryable: true,
     clientAction: 'retry_after',
     poolAction: 'none',
-    messageKey: 'pool.error.capacity_exhausted',
-    clientGuidance: 'all pool session slots are in use',
   },
   {
     type: 'cc_pool_rate_limited',
@@ -69,8 +74,6 @@ const CATALOG_EXPECTED = [
     retryable: true,
     clientAction: 'retry_after',
     poolAction: 'session_backoff',
-    messageKey: 'pool.error.rate_limited',
-    clientGuidance: 'the pool rate limit applies to this request',
   },
   {
     type: 'cc_pool_session_busy',
@@ -81,8 +84,6 @@ const CATALOG_EXPECTED = [
     retryable: false,
     clientAction: 'stop',
     poolAction: 'none',
-    messageKey: 'pool.error.session_busy',
-    clientGuidance: 'wait for the current turn to finish before retrying',
   },
   {
     type: 'cc_pool_no_available_account',
@@ -93,8 +94,6 @@ const CATALOG_EXPECTED = [
     retryable: true,
     clientAction: 'retry_after',
     poolAction: 'none',
-    messageKey: 'pool.error.no_available_account',
-    clientGuidance: 'no healthy pool account is currently available',
   },
   {
     type: 'cc_pool_request_closed',
@@ -125,11 +124,13 @@ const NON_CATALOG_POOL_CODES = [
 ] as const
 
 describe('pool error envelope', () => {
-  it('reads the code, origin, scope, retry decision, and message from the body', () => {
+  it('reads the code, origin, scope, retry facts, terminal marker, and message from the body', () => {
     const parsed = parseProviderErrorEnvelope(poolEnvelope({
       type: 'cc_pool_capacity_exhausted',
       code: 'cc_pool_capacity_exhausted',
+      kind: 'capacity',
       retryable: true,
+      terminal: false,
       client_action: 'retry_after',
       message: 'all accounts are at their 2-session limit',
     }))
@@ -137,15 +138,18 @@ describe('pool error envelope', () => {
     expect(parsed).toEqual({
       code: 'cc_pool_capacity_exhausted',
       type: 'cc_pool_capacity_exhausted',
+      kind: 'capacity',
       origin: 'pool',
       scope: 'pool',
       retryable: true,
+      terminal: false,
       clientAction: 'retry_after',
       message: 'all accounts are at their 2-session limit',
     })
   })
 
-  it('returns undefined for a message without a JSON object', () => {
+  it('ignores non-boolean retry facts and returns undefined for a message without a JSON object', () => {
+    expect(parseProviderErrorEnvelope('500 {"error":{"retryable":"yes","terminal":"yes"}}')).toEqual({})
     expect(parseProviderErrorEnvelope('429 status code (no body)')).toBeUndefined()
     expect(parseProviderErrorEnvelope('provider timed out')).toBeUndefined()
     expect(parseProviderErrorEnvelope('500 {not json}')).toBeUndefined()
@@ -155,9 +159,8 @@ describe('pool error envelope', () => {
 describe('generated pool error catalog', () => {
   it('is the five-code single source in catalog order', () => {
     expect(Object.keys(POOL_ERROR_CATALOG)).toEqual(CATALOG_EXPECTED.map(entry => entry.type))
-    expect(Object.values(POOL_ERROR_CATALOG)).toEqual(CATALOG_EXPECTED)
-    for (const [type, entry] of Object.entries(POOL_ERROR_CATALOG)) {
-      expect(entry.type).toBe(type)
+    for (const entry of CATALOG_EXPECTED) {
+      expect(POOL_ERROR_CATALOG[entry.type]).toMatchObject(entry)
     }
   })
 
@@ -175,13 +178,13 @@ describe('generated pool error catalog', () => {
     }
   })
 
-  it('classifies every catalog code from its table entry', () => {
+  it('classifies every catalog code from its machine entry without catalog wording', () => {
     for (const entry of CATALOG_EXPECTED) {
+      const providerMessage = `${entry.type} probe`
       const failure = classifyPoolFailure(
-        poolEnvelope({ type: entry.type, message: `${entry.type} probe` }, entry.httpStatus),
+        poolEnvelope({ type: entry.type, message: providerMessage }, entry.httpStatus),
       )
-      expect(failure).toMatchObject({ code: entry.code, status: entry.httpStatus })
-      expect(failure?.message).toContain(`(${entry.code}: ${entry.clientGuidance}`)
+      expect(failure).toMatchObject({ code: entry.code, status: entry.httpStatus, message: providerMessage })
       if (entry.clientAction === 'stop') {
         expect(failure?.retryDisposition).toBe('forbid')
       } else {
@@ -191,8 +194,106 @@ describe('generated pool error catalog', () => {
   })
 
   it('reads the known code from `code` when `type` is absent', () => {
-    const failure = classifyPoolFailure(poolEnvelope({ code: 'cc_pool_session_busy' }, 409))
-    expect(failure).toMatchObject({ code: POOL_SESSION_BUSY_CODE, retryDisposition: 'forbid' })
+    const failure = classifyPoolFailure(poolEnvelope({ code: 'cc_pool_session_busy', message: 'busy' }, 409))
+    expect(failure).toMatchObject({ code: POOL_SESSION_BUSY_CODE, retryDisposition: 'forbid', message: 'busy' })
+  })
+
+  it('reads a known code from `kind` when `code` and `type` are absent', () => {
+    const failure = classifyPoolFailure(poolEnvelope({
+      kind: 'cc_pool_no_available_account',
+      message: 'no healthy account',
+    }, 503))
+    expect(failure).toMatchObject({ code: POOL_NO_ACCOUNT_CODE, message: 'no healthy account' })
+    expect(failure?.retryDisposition).toBeUndefined()
+  })
+})
+
+describe('pool message display', () => {
+  it('passthroughs the provider message exactly instead of appending catalog text', () => {
+    const providerMessage = 'All accounts are at their 2-session limit.'
+    const failure = classifyPoolFailure(poolEnvelope({
+      type: 'cc_pool_capacity_exhausted',
+      message: providerMessage,
+    }), { status: 429, providerRetryAfterMs: 30_000 })
+
+    expect(failure?.message).toBe(providerMessage)
+    expect(failure?.message).not.toContain('all pool session slots')
+    expect(failure?.message).not.toContain('POOL_CAPACITY')
+    expect(failure).toMatchObject({ code: POOL_CAPACITY_CODE, providerRetryAfterMs: 30_000 })
+  })
+
+  it('renders a multi-line message as one line', () => {
+    const failure = classifyPoolFailure(poolEnvelope({
+      type: 'cc_pool_rate_limited',
+      message: 'first line\n\tsecond   line\r\nthird',
+    }))
+
+    expect(failure?.message).toBe('first line second line third')
+  })
+
+  it('falls back when the provider message is missing or empty', () => {
+    const missing = classifyPoolFailure(poolEnvelope({ type: 'cc_pool_capacity_exhausted' }))
+    const empty = classifyPoolFailure(poolEnvelope({
+      type: 'cc_pool_capacity_exhausted',
+      message: '  \n\t ',
+    }))
+
+    expect(missing?.message).toBe(fallback(POOL_CAPACITY_CODE))
+    expect(empty?.message).toBe(fallback(POOL_CAPACITY_CODE))
+  })
+
+  it('rejects an oversized provider message', () => {
+    const atLimit = classifyPoolFailure(poolEnvelope({
+      type: 'cc_pool_capacity_exhausted',
+      message: 'a'.repeat(POOL_ERROR_MESSAGE_MAX_LENGTH),
+    }))
+    const oversized = classifyPoolFailure(poolEnvelope({
+      type: 'cc_pool_capacity_exhausted',
+      message: 'a'.repeat(POOL_ERROR_MESSAGE_MAX_LENGTH + 1),
+    }))
+
+    expect(atLimit?.message).toBe('a'.repeat(POOL_ERROR_MESSAGE_MAX_LENGTH))
+    expect(oversized?.message).toBe(fallback(POOL_CAPACITY_CODE))
+  })
+
+  it('rejects markup and HTML entities in a provider message', () => {
+    const markup = classifyPoolFailure(poolEnvelope({
+      type: 'cc_pool_capacity_exhausted',
+      message: 'pool <img src=x onerror=alert(1)> failure',
+    }))
+    const entity = classifyPoolFailure(poolEnvelope({
+      type: 'cc_pool_capacity_exhausted',
+      message: 'pool &lt;script&gt; failure',
+    }))
+
+    expect(markup?.message).toBe(fallback(POOL_CAPACITY_CODE))
+    expect(entity?.message).toBe(fallback(POOL_CAPACITY_CODE))
+  })
+
+  it('rejects credential-like material in a provider message', () => {
+    const bearer = classifyPoolFailure(poolEnvelope({
+      type: 'cc_pool_rate_limited',
+      message: 'rejected Authorization: Bearer sk-live-abcdefgh',
+    }))
+    const assignment = classifyPoolFailure(poolEnvelope({
+      type: 'cc_pool_rate_limited',
+      message: 'request failed with api_key=super-secret-value',
+    }))
+
+    expect(bearer?.message).toBe(fallback(POOL_RATE_LIMITED_CODE))
+    expect(assignment?.message).toBe(fallback(POOL_RATE_LIMITED_CODE))
+  })
+
+  it('names the canonical failure code in the fallback for an unknown pool failure', () => {
+    const retryable = classifyPoolFailure(poolEnvelope({
+      type: 'cc_pool_engine_starting',
+    }, 503))
+    const terminal = classifyPoolFailure(poolEnvelope({
+      type: 'cc_pool_bad_route',
+    }, 400))
+
+    expect(retryable?.message).toBe(fallback(POOL_TRANSIENT_CODE))
+    expect(terminal?.message).toBe(fallback(POOL_ERROR_CODE))
   })
 })
 
@@ -205,8 +306,7 @@ describe('pool failure classification', () => {
     }), { status: 429, providerRetryAfterMs: 30_000 })
 
     expect(failure).toEqual({
-      message: 'all accounts are at their 2-session limit; no capacity until a session finishes'
-        + ' (POOL_CAPACITY: all pool session slots are in use; retry after 30s)',
+      message: 'all accounts are at their 2-session limit; no capacity until a session finishes',
       code: POOL_CAPACITY_CODE,
       status: 429,
       providerRetryAfterMs: 30_000,
@@ -221,11 +321,11 @@ describe('pool failure classification', () => {
     }), { status: 429, providerRetryAfterMs: 12_000 })
 
     expect(failure).toMatchObject({
+      message: 'account token bucket is empty',
       code: POOL_RATE_LIMITED_CODE,
       status: 429,
       providerRetryAfterMs: 12_000,
     })
-    expect(failure?.message).toMatch(/account token bucket is empty.*retry after 12s/)
     expect(failure?.retryDisposition).toBeUndefined()
   })
 
@@ -237,11 +337,11 @@ describe('pool failure classification', () => {
     }, 409))
 
     expect(failure).toMatchObject({
+      message: 'this session already has an in-flight request',
       code: POOL_SESSION_BUSY_CODE,
       status: 409,
       retryDisposition: 'forbid',
     })
-    expect(failure?.message).toMatch(/wait for the current turn to finish before retrying/)
   })
 
   it('recovers a closed client request id with a retry instead of ending the turn', () => {
@@ -258,7 +358,7 @@ describe('pool failure classification', () => {
       status: 409,
     })
     expect(failure?.retryDisposition).toBeUndefined()
-    expect(failure?.message).toMatch(/only a new attempt with a fresh id is safe/)
+    expect(failure?.message).toBe('request already recorded')
   })
 
   it('retries no-available-account within the finite retry budget', () => {
@@ -272,6 +372,7 @@ describe('pool failure classification', () => {
     }, 503))
 
     expect(failure).toMatchObject({
+      message: 'no healthy account can serve this model',
       code: POOL_NO_ACCOUNT_CODE,
       status: 503,
     })
@@ -304,6 +405,42 @@ describe('pool failure classification', () => {
     expect(failure).toMatchObject({ code: POOL_ERROR_CODE, retryDisposition: 'forbid' })
   })
 
+  it('lets an explicit terminal marker forbid a resend even for a retryable refusal', () => {
+    const unknown = classifyPoolFailure(poolEnvelope({
+      type: 'cc_pool_engine_starting',
+      retryable: true,
+      terminal: true,
+      message: 'the pool gave up',
+    }, 503))
+    const known = classifyPoolFailure(poolEnvelope({
+      type: 'cc_pool_capacity_exhausted',
+      retryable: true,
+      terminal: true,
+      message: 'capacity exhausted',
+    }, 429))
+
+    expect(unknown).toMatchObject({
+      message: 'the pool gave up',
+      code: POOL_ERROR_CODE,
+      retryDisposition: 'forbid',
+    })
+    expect(known).toMatchObject({
+      message: 'capacity exhausted',
+      code: POOL_CAPACITY_CODE,
+      retryDisposition: 'forbid',
+    })
+  })
+
+  it('keeps an explicit terminal=false from adding a retry decision', () => {
+    const failure = classifyPoolFailure(poolEnvelope({
+      type: 'cc_pool_engine_starting',
+      terminal: false,
+      message: 'starting',
+    }, 400))
+
+    expect(failure).toMatchObject({ code: POOL_ERROR_CODE, retryDisposition: 'forbid' })
+  })
+
   it('leaves a Claude-native error alone, even when its envelope names a pool code', () => {
     const claude = `429 ${JSON.stringify({
       type: 'error',
@@ -323,8 +460,13 @@ describe('pool failure classification', () => {
       type: 'error',
       error: { type: 'rate_limit_error', origin: 'claude', retryable: true, message: 'slow down' },
     })}`
+    const native = `429 ${JSON.stringify({
+      type: 'error',
+      error: { type: 'rate_limit_error', message: 'slow down' },
+    })}`
 
     expect(classifyPoolFailure(claude)).toBeUndefined()
+    expect(classifyPoolFailure(native)).toBeUndefined()
     expect(classifyPoolFailure('429 rate limit exceeded')).toBeUndefined()
   })
 
@@ -334,7 +476,7 @@ describe('pool failure classification', () => {
       error: { type: 'rate_limit_error', origin: 'pool', retryable: true, message: 'pool slow down' },
     })}`)
 
-    expect(failure).toMatchObject({ code: POOL_TRANSIENT_CODE })
+    expect(failure).toMatchObject({ code: POOL_TRANSIENT_CODE, message: 'pool slow down' })
   })
 
   it('recognizes the online envelope, which carries a pool code but no origin', () => {
@@ -343,7 +485,7 @@ describe('pool failure classification', () => {
       error: { type: 'cc_pool_session_busy', retryable: true, message: 'busy' },
     })}`)
 
-    expect(failure).toMatchObject({ code: POOL_SESSION_BUSY_CODE, status: 429 })
+    expect(failure).toMatchObject({ code: POOL_SESSION_BUSY_CODE, status: 429, message: 'busy' })
     expect(failure?.providerRetryAfterMs).toBeUndefined()
   })
 
@@ -357,9 +499,8 @@ describe('pool failure classification', () => {
       error: { type: 'cc_pool_account_unavailable', origin: 'pool', client_action: 'refresh', message: 'sign in again' },
     })}`)
 
-    expect(retry).toMatchObject({ code: POOL_TRANSIENT_CODE })
-    expect(refresh).toMatchObject({ code: POOL_ERROR_CODE, retryDisposition: 'forbid' })
-    expect(refresh?.message).toMatch(/re-authenticate this provider route before retrying/)
+    expect(retry).toMatchObject({ code: POOL_TRANSIENT_CODE, message: fallback(POOL_TRANSIENT_CODE) })
+    expect(refresh).toMatchObject({ code: POOL_ERROR_CODE, retryDisposition: 'forbid', message: 'sign in again' })
   })
 
   it('falls back to the HTTP status only when the envelope states no retry decision', () => {
@@ -382,6 +523,16 @@ describe('pool failure classification', () => {
     expect(unknownStatus?.status).toBeUndefined()
   })
 
+  it('treats a 429 status as retryable for an unrecognized pool failure with no retry facts', () => {
+    const failure = classifyPoolFailure(poolEnvelope({
+      type: 'cc_pool_engine_starting',
+      message: 'try later',
+    }, 429))
+
+    expect(failure).toMatchObject({ code: POOL_TRANSIENT_CODE, status: 429 })
+    expect(failure?.retryDisposition).toBeUndefined()
+  })
+
   it('does not treat an inherited object key as a catalog code', () => {
     const failure = classifyPoolFailure(poolEnvelope({ type: 'constructor', origin: 'pool' }, 500))
 
@@ -394,8 +545,7 @@ describe('pool failure classification', () => {
       error: { origin: 'pool', retryable: false, message: 'no route' },
     }))
 
-    expect(failure).toMatchObject({ code: POOL_ERROR_CODE, retryDisposition: 'forbid' })
-    expect(failure?.message).toContain('no route')
+    expect(failure).toMatchObject({ code: POOL_ERROR_CODE, retryDisposition: 'forbid', message: 'no route' })
   })
 
   it('omits an out-of-range status prefix instead of reporting it', () => {
@@ -434,9 +584,7 @@ describe('pool readiness refusal', () => {
       status: 503,
       retryDisposition: 'forbid',
     })
-    expect(failure?.message).toBe(
-      `${READINESS_DETAIL} (POOL_ERROR: the pool has not verified the egress path for this lease)`,
-    )
+    expect(failure?.message).toBe(READINESS_DETAIL)
   })
 
   it('recognizes the capability_not_ready lease detail without the egress wording', () => {
@@ -503,9 +651,7 @@ describe('pool readiness refusal', () => {
       status: 503,
       retryDisposition: 'forbid',
     })
-    expect(failure?.message).toBe(
-      `${drifted} (POOL_ERROR: the pool has not verified the egress path for this lease)`,
-    )
+    expect(failure?.message).toBe(drifted)
   })
 
   it('forbids a readiness 5xx even when its detail is absent', () => {
@@ -516,7 +662,7 @@ describe('pool readiness refusal', () => {
       status: 503,
       retryDisposition: 'forbid',
     })
-    expect(failure?.message).toContain('pool_request_id')
+    expect(failure?.message).toBe(fallback(POOL_ERROR_CODE))
   })
 
   it('scopes the pool-marker fallback to 5xx responses', () => {

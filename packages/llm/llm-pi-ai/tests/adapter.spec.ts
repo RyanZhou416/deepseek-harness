@@ -475,7 +475,7 @@ describe('PiAiAdapter provider routing', () => {
       failure: { code: POOL_CAPACITY_CODE, status: 429, providerRetryAfterMs: 7_000 },
     })
     expect(result.finish.kind === 'error' ? result.finish.failure.message : '')
-      .toMatch(/all accounts are at their 2-session limit.*retry after 7s/)
+      .toBe('all accounts are at their 2-session limit')
   })
 
   it.each([
@@ -483,12 +483,12 @@ describe('PiAiAdapter provider routing', () => {
       'its pinned lease detail',
       'the egress path is not verified for this lease; worker detail:'
         + ' capability_not_ready: the lease maintenance is not ready',
-      /egress path is not verified for this lease.*\(POOL_ERROR: /,
+      /^the egress path is not verified for this lease; worker detail: capability_not_ready: the lease maintenance is not ready$/,
     ],
     [
       'a rewritten lease detail',
       'the lease is still being verified; retry this request later',
-      /the lease is still being verified.*\(POOL_ERROR: /,
+      /^the lease is still being verified; retry this request later$/,
     ],
   ] as const)('stops on a pool readiness refusal carrying %s instead of resending its ledger id', async (
     _label,
