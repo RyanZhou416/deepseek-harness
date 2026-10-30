@@ -1457,13 +1457,28 @@ streaming. Header: pool-composed canonical beta membership/order including
 scope and cache-diagnosis; request class from the declared source; cache-diagnosis
 latch/rejection state; one-hour only on allowlisted main sources.
 
-**Inputs required before coding.** DSH must expose the request source/purpose,
-the system static/dynamic boundary and whether it exists, caching enabled, and
-the MCP tool fact. The pool must expose first-party mode, official base URL,
-HIPAA taint, `user:inference`/overage eligibility, and the cache-diagnosis
-latch/rejection state. Without these, A cannot be implemented honestly; the
-current code must not be changed to emit scope/cache-diagnosis/class on
-assumption.
+**Interface contract before coding.** The previous draft assigned DSH a TTL it
+could not compute and left the beta/scope owner undefined. A now makes the pool
+the cache-policy owner, because only the pool holds first-party mode, official
+base URL, HIPAA taint, `user:inference`/overage eligibility and the upstream
+400 path. DSH sends on the v2 request frame: `requestClass`
+(`main|compaction|auxiliary|subagent|workflow`), `systemLayout` (whether a
+static/shared boundary exists and which system block is static/dynamic),
+`cacheIntent` (main 1h, helper 5m/no-marker default, or caching-disabled), and
+`mcpTools` (blocked until the member API accepts `mcp__` names). The pool applies
+TTL/scope to `cache_control`, composes the canonical beta order (scope only with
+global, then extended, then diagnosis), owns the cache-diagnosis latch and
+rejection state, and emits the request class. This deliberately changes the
+current byte-preserving/no-marker-edit rule; the alternative pre-request
+capability endpoint is not chosen.
+
+The frozen v2 contract, `ipc/messages.ts`/`validate.ts`, member API MCP-name
+gate, observer positions (A needs unmarked identity plus marked static and
+dynamic runs), DSH profile mapping, package READMEs/JSDoc and the tests that
+currently assert "no scope/no diagnosis" all change in the same A change. The
+current docs are current-behavior contracts, not optional prose. Without this
+contract work, A cannot be implemented honestly; do not emit scope,
+cache-diagnosis or a class on assumption.
 
 **Preservation during implementation.** The current three-marker/no-scope
 behavior remains the shipped behavior until the A change lands with its
