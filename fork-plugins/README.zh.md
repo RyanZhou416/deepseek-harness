@@ -8,11 +8,11 @@
 
 Windows 的 `build.cmd` 在普通根构建之后构建源码插件，并把四个 fork 插件（AgentTeams、Context、Subscriptions、AetherShell）全部链接到选定的 `web` profile。无需第二条命令、私有 registry 或手工提供的 tgz。构建会**修改 profile**，因此必须先停止 Host：Host 端口（`3080`）仍在监听时，构建会在触碰任何 profile 文件之前失败。
 
-`scripts/fork-plugins-build.ts` 使用 `DSH_HOME`（未设置时用 `%USERPROFILE%\.dsh`），目标是 `profiles\web`。它把包 staging 到被忽略的 `.build/fork-plugins/`，再用 `dsh plugin --profile web add <绝对 staging 目录>` 安装，记录为 pnpm `link:`。修改前会把 `package.json` 与 `cordis.patch.yml` 备份到 `.build/fork-plugins/backups/`，并记录源码 key，使未变化的第二次运行既不重建也不重装。全新的 `web` profile 会先初始化；不会读取或写入任何 Session、附件、凭据、projection cache 或 `.agent-teams` 数据。
+`scripts/fork-plugins-build.ts` 使用 `DSH_HOME`（未设置时用 `%USERPROFILE%\.dsh`），目标是 `profiles\web`。它把包 staging 到被忽略的 `.build/fork-plugins/`，再用 `dsh plugin --profile web add <绝对 staging 目录>` 安装，记录为 pnpm `link:`。在任何 staging 或 profile 写入前，它会解析仓库 base bundle、portable 模板、目标 profile patch、home patch 以及已知或显式 `--patch` overlay 中的 legacy `llm-pi-ai` `providers.cc-pool` 路由；只有目标 profile patch 会被自动迁移，其他位置的声明会带着要修改的文件失败。修改前会把 profile 与 portable seed 文件备份到 `.build/fork-plugins/backups/`，并记录源码 key，使未变化的第二次运行既不重建也不重装。全新的 `web` profile 由安装步骤初始化，安装成功后才 seed；之后的失败会从备份回滚 profile。不会读取或写入任何 Session、附件、凭据、projection cache 或 `.agent-teams` 数据。
 
 - Subscriptions 从源码编译 `lib/index.js` 与 `lib/client.js`。staged manifest 内联 `@tormentalabs/claude-code-wire-compat`（来自仓库 tgz）与 `undici`，删除仅类型使用的 `@deepseek-ai/dsh-llm-request-record` peer，且不声明运行时依赖。公开的 optional provider 条目（`@cursor/sdk`、`@oven/bun-*`）保留声明；link 安装不会安装被链接包的 optional 依赖，因此这些 provider 需要另行提供对应包。staged 包不附带声明文件；源码检出仍是类型来源。
 - AetherShell 从源码编译 `lib/lifecycle.mjs`，并保持所有 `@deepseek-ai/*` peer 为外部依赖 `0.2.1-rc.2`。
-- AgentTeams 与 Context 使用仓库中已提交的预构建 `lib/` 产物；源码树仍是维护来源。Context 保留 `zod` 运行时依赖，由仓库安装解析。
+- AgentTeams 与 Context 在 `.build/fork-plugins/work/` 的隔离副本中构建；staging 只读取该副本的构建产物，不读取提交的 `lib/`。Context 保留 `zod` 运行时依赖，由仓库安装解析。
 
 诊断构建时可直接运行该步骤（仍须停止 Host）：
 

@@ -11,8 +11,18 @@
  * ranges converted to the versions a profile install can resolve. Staged
  * packages live under the ignored `.build/fork-plugins/` directory, are
  * installed with `dsh plugin --profile web add <absolute staged directory>` (a
- * pnpm `link:` dependency), and profile configuration is rewritten only after
- * backing up `package.json` and `cordis.patch.yml`.
+ * pnpm `link:` dependency).
+ *
+ * The guarded profile mutation is transactional: the script inspects the
+ * repository base bundle, the portable templates, the profile patch, the home
+ * patch, and the known `--patch` overlays for a legacy `llm-pi-ai`
+ * `providers.cc-pool` route before writing anything. A safe declaration in the
+ * profile patch is backed up and removed structurally (block, quoted, and
+ * flow-map forms); any declaration elsewhere fails with the exact file to edit.
+ * The backup covers the profile files and the portable seed files and is used
+ * to roll the profile back when a later step fails. Staging is written through a
+ * temporary directory and swapped into place, so a failed build leaves the
+ * previous staging generation intact.
  *
  * The tracked plugin `lib/` directories are never a build input: a clean clone
  * needs no prebuilt output. Isolated builds install their pinned plugin-local
@@ -36,7 +46,9 @@ import { connect } from 'node:net'
 import { homedir } from 'node:os'
 import { basename, delimiter, dirname, join, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
-import { seedPortableProfile } from './fork-profile-seed.ts'
+import { isDeepStrictEqual } from 'node:util'
+import * as yaml from 'js-yaml'
+import { seedPortableProfile, type SeedResult } from './fork-profile-seed.ts'
 
 const REPOSITORY_ROOT = dirname(dirname(fileURLToPath(import.meta.url)))
 const BUILD_ROOT = join(REPOSITORY_ROOT, '.build', 'fork-plugins')
@@ -48,7 +60,7 @@ const PROFILE_NAME = 'web'
 const HOST_PORT = 3080
 const SCHEMA_VERSION = 1
 /** Bump when the staging recipe changes in a way the source hash does not capture. */
-const SCRIPT_VERSION = 6
+const SCRIPT_VERSION = 7
 const WORK_MARKER_FILE = '.fork-plugin-build.json'
 const DEPENDENCY_MARKER_FILE = '.fork-plugin-deps.json'
 
@@ -189,6 +201,8 @@ export interface BuildOptions {
   readonly forceRebuild: boolean
   /** Override the Harness home; defaults to `DSH_HOME`, then `~/.dsh`. */
   readonly dshHome?: string
+  /** Extra `--patch` overlays whose composition the guard must inspect. */
+  readonly patchOverlays: readonly string[]
 }
 
 /** Shape of a plugin `package.json` the script reads and rewrites. */
@@ -257,6 +271,7 @@ function usage(): string {
     '  --allow-running-host  Continue while the Host port is listening (unsafe; warns loudly)',
     '  --force-rebuild       Rebuild staged bundles even when the source key is unchanged',
     '  --dsh-home <path>     Harness home to use instead of DSH_HOME or ~/.dsh',
+    '  --patch <file>        Also inspect this --patch overlay for a legacy cc-pool route (repeatable)',
     '  --help                Show this help',
     '',
   ].join('\n')
@@ -267,6 +282,7 @@ export function parseArguments(argv: readonly string[]): BuildOptions | undefine
   let allowRunningHost = false
   let forceRebuild = false
   let dshHome: string | undefined
+  const patchOverlays: string[] = []
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index]
     if (argument === undefined) continue
@@ -279,11 +295,18 @@ export function parseArguments(argv: readonly string[]): BuildOptions | undefine
       dshHome = value
       index += 1
     } else if (argument.startsWith('--dsh-home=')) dshHome = argument.slice('--dsh-home='.length)
+    else if (argument === '--patch') {
+      const value = argv[index + 1]
+      if (value === undefined || value.startsWith('--')) fail('--patch requires a path')
+      patchOverlays.push(value)
+      index += 1
+    } else if (argument.startsWith('--patch=')) patchOverlays.push(argument.slice('--patch='.length))
     else fail(`unknown argument ${JSON.stringify(argument)}; pass --help to see supported options`)
   }
   return {
     allowRunningHost,
     forceRebuild,
+    patchOverlays,
     ...dshHome === undefined ? {} : { dshHome },
   }
 }
@@ -328,6 +351,12 @@ async function readJson<T>(path: string): Promise<T> {
 async function writeJson(path: string, value: unknown): Promise<void> {
   const temporary = `${path}.${process.pid}.tmp`
   await writeFile(temporary, `${JSON.stringify(value, undefined, 2)}\n`)
+  await rename(temporary, path)
+}
+
+async function writeTextAtomic(path: string, text: string): Promise<void> {
+  const temporary = `${path}.${process.pid}.tmp`
+  await writeFile(temporary, text)
   await rename(temporary, path)
 }
 
@@ -634,17 +663,71 @@ export async function stagedWorkspaceManifest(
  * @param stagingDirectory - staging root to replace.
  */
 export async function stageWorkspacePlugin(plugin: PluginDefinition, stagingDirectory: string): Promise<void> {
-  assertStagedArtifacts(plugin, plugin.directory, 'root build')
-  await rm(stagingDirectory, { recursive: true, force: true })
-  await mkdir(stagingDirectory, { recursive: true })
-  const source = await readJson<PluginManifest>(join(plugin.directory, 'package.json'))
-  await writeJson(join(stagingDirectory, 'package.json'), await stagedWorkspaceManifest(source))
-  for (const entry of plugin.stage) {
-    const path = join(plugin.directory, entry)
-    if (!existsSync(path)) fail(`${plugin.name} is missing its staged entry ${entry} in ${plugin.directory}`)
-    await cp(path, join(stagingDirectory, entry), { recursive: true, filter: candidate => !candidate.endsWith('.map') })
+  await replaceStagingDirectory(stagingDirectory, async (temporary) => {
+    assertStagedArtifacts(plugin, plugin.directory, 'root build')
+    const source = await readJson<PluginManifest>(join(plugin.directory, 'package.json'))
+    await writeJson(join(temporary, 'package.json'), await stagedWorkspaceManifest(source))
+    for (const entry of plugin.stage) {
+      const path = join(plugin.directory, entry)
+      if (!existsSync(path)) fail(`${plugin.name} is missing its staged entry ${entry} in ${plugin.directory}`)
+      await cp(path, join(temporary, entry), { recursive: true, filter: candidate => !candidate.endsWith('.map') })
+    }
+    assertStagedArtifacts(plugin, temporary)
+  })
+}
+
+/** A unique sibling path for an atomic staging replacement. */
+function stagingSibling(stagingDirectory: string, kind: 'partial' | 'retired'): string {
+  return `${stagingDirectory}.${kind}-${process.pid}-${Date.now().toString(36)}`
+}
+
+/**
+ * Populate a temporary sibling and swap it into the staging path.
+ *
+ * The previous generation is retired only after the replacement is complete, so
+ * a failed build removes only the partial directory and leaves the last usable
+ * staging output in place for the profile link and the next incremental run.
+ * @param stagingDirectory - final staging directory.
+ * @param populate - writes the complete staged package into the given directory.
+ */
+async function replaceStagingDirectory(
+  stagingDirectory: string,
+  populate: (temporaryDirectory: string) => Promise<void>,
+): Promise<void> {
+  const temporary = stagingSibling(stagingDirectory, 'partial')
+  const retired = stagingSibling(stagingDirectory, 'retired')
+  await rm(temporary, { recursive: true, force: true })
+  await mkdir(temporary, { recursive: true })
+  try {
+    await populate(temporary)
+    const previous = existsSync(stagingDirectory)
+    if (previous) await rename(stagingDirectory, retired)
+    try {
+      await rename(temporary, stagingDirectory)
+    } catch (error) {
+      if (!previous) throw error
+      try {
+        await rename(retired, stagingDirectory)
+      } catch (restoreError) {
+        throw new AggregateError(
+          [error, restoreError],
+          `could not replace ${stagingDirectory} and could not restore it from ${retired}`,
+        )
+      }
+      throw error
+    }
+    if (previous) {
+      try {
+        await rm(retired, { recursive: true, force: true })
+      } catch (error) {
+        // The replacement is in place; a leftover retired copy only occupies space.
+        warn(`could not remove retired staging directory ${retired}: ${String(error)}`)
+      }
+    }
+  } catch (error) {
+    await rm(temporary, { recursive: true, force: true })
+    throw error
   }
-  assertStagedArtifacts(plugin, stagingDirectory)
 }
 
 interface WorkspacePackage {
@@ -1302,22 +1385,22 @@ async function buildPlugin(
   key: string,
   force: boolean,
 ): Promise<void> {
-  await rm(stagingDirectory, { recursive: true, force: true })
-  await mkdir(stagingDirectory, { recursive: true })
-  if (plugin.builder === 'isolated') {
-    const workDirectory = await ensureIsolatedBuild(plugin, key, force)
-    await copyStagedEntries(plugin, workDirectory, stagingDirectory)
-  } else {
-    const config = plugin.builder === 'subscriptions'
-      ? await subscriptionsConfig(stagingDirectory, dependencies.wireEntry, dependencies.undiciEntry)
-      : await aetherConfig(stagingDirectory)
-    log(`building ${plugin.name} from source`)
-    run(process.execPath, [rootTsdown(), '--config', config], { cwd: REPOSITORY_ROOT })
-    if (plugin.builder === 'subscriptions') buildSubscriptionsTransport(plugin.directory, stagingDirectory)
-    await copyStagedEntries(plugin, plugin.directory, stagingDirectory)
-  }
-  await stagePackage(plugin, stagingDirectory, dependencies)
-  assertStagedArtifacts(plugin, stagingDirectory)
+  await replaceStagingDirectory(stagingDirectory, async (temporary) => {
+    if (plugin.builder === 'isolated') {
+      const workDirectory = await ensureIsolatedBuild(plugin, key, force)
+      await copyStagedEntries(plugin, workDirectory, temporary)
+    } else {
+      const config = plugin.builder === 'subscriptions'
+        ? await subscriptionsConfig(temporary, dependencies.wireEntry, dependencies.undiciEntry)
+        : await aetherConfig(temporary)
+      log(`building ${plugin.name} from source`)
+      run(process.execPath, [rootTsdown(), '--config', config], { cwd: REPOSITORY_ROOT })
+      if (plugin.builder === 'subscriptions') buildSubscriptionsTransport(plugin.directory, temporary)
+      await copyStagedEntries(plugin, plugin.directory, temporary)
+    }
+    await stagePackage(plugin, temporary, dependencies)
+    assertStagedArtifacts(plugin, temporary)
+  })
 }
 
 /** Whether a previous staging still matches the current source and expected files. */
@@ -1343,31 +1426,781 @@ export async function stagingIsCurrent(
   return true
 }
 
-/** Back up the profile files this script may change. */
-async function backupProfile(profileDirectory: string, created: boolean): Promise<string> {
-  const stamp = new Date().toISOString().replaceAll(':', '-').replaceAll('.', '-')
-  const destination = join(BUILD_ROOT, 'backups', `${PROFILE_NAME}-${stamp}`)
-  await mkdir(destination, { recursive: true })
-  for (const file of ['package.json', 'cordis.patch.yml', 'pnpm-lock.yaml', 'pnpm-workspace.yaml', 'compatibility.json']) {
-    await copyIfPresent(join(profileDirectory, file), join(destination, file))
-  }
-  await writeFile(join(destination, 'profile-path.txt'), `${profileDirectory}\n`)
-  if (created) await writeFile(join(destination, 'profile-created-by-build.txt'), 'The profile did not exist before this run; no prior configuration existed to back up.\n')
-  return destination
+/** One patch layer the legacy-provider guard reads before any write. */
+export interface PatchSource {
+  /** Human label used by the failure report. */
+  readonly label: string
+  /** Absolute patch file path. */
+  readonly path: string
+  /** Whether a legacy declaration here may be rewritten automatically. */
+  readonly migrate?: boolean
+  /** Whether a missing file is a configuration error instead of an absent layer. */
+  readonly required?: boolean
+}
+
+/** One legacy `providers.cc-pool` declaration inside an `llm-pi-ai` row. */
+export interface LegacyPoolFinding {
+  /** Path to the `cc-pool` key from the document root. */
+  readonly path: readonly (string | number)[]
+}
+
+/** One profile patch rewrite planned by the guard. */
+export interface ProfilePatchMigration {
+  /** Patch file the migration rewrites after the backup exists. */
+  readonly path: string
+  /** Number of legacy declarations the rewrite removes. */
+  readonly removed: number
+}
+
+/** Guard result: patches that still need a rewrite before the profile is used. */
+export interface LegacyPoolGuardResult {
+  readonly migrations: readonly ProfilePatchMigration[]
 }
 
 /**
- * Whether a profile patch still declares the generic `llm-pi-ai` provider for
- * the pool route.
- *
- * The dedicated bundle owns `cc-pool`; a profile that keeps both declarations
- * makes two adapters claim the same route and plugin loading fails. The
- * dedicated row's `- id: llm-cc-pool` never matches this provider-key pattern.
- * @param patch - profile patch text.
- * @returns whether an `llm-pi-ai` provider keyed `cc-pool` remains.
+ * YAML type for the loader's `!!js` scalar expressions. Guard and migration only
+ * read structure, so the expression text is kept verbatim as an opaque value.
  */
-export function declaresLegacyPoolProvider(patch: string): boolean {
-  return /^\s+cc-pool:\s*(?:#.*)?$/m.test(patch)
+const JAVASCRIPT_EXPRESSION_TAG = new yaml.Type('tag:yaml.org,2002:js', {
+  kind: 'scalar',
+  construct: (data: string) => ({ jsExpression: data }),
+})
+
+/** Schema that parses every tracked patch, including its `!!js` expressions. */
+const PATCH_YAML_SCHEMA = yaml.DEFAULT_SCHEMA.extend([JAVASCRIPT_EXPRESSION_TAG])
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error)
+}
+
+/**
+ * Parse a patch file structurally.
+ * @param source - YAML text.
+ * @param label - file label for the diagnostic.
+ * @returns the parsed document.
+ */
+function parsePatchDocument(source: string, label = 'patch'): unknown {
+  try {
+    return yaml.load(source, { schema: PATCH_YAML_SCHEMA })
+  } catch (error) {
+    throw new Error(`${label} is not readable YAML: ${errorMessage(error)}`)
+  }
+}
+
+function ownsLegacyPoolRow(record: Record<string, unknown>): boolean {
+  return record['id'] === 'llm-pi-ai' || record['name'] === '@deepseek-ai/dsh-llm-pi-ai'
+}
+
+function formatFindingPath(path: readonly (string | number)[]): string {
+  return path.reduce<string>(
+    (current, segment) => typeof segment === 'number' ? `${current}[${String(segment)}]` : `${current}.${segment}`,
+    '$',
+  )
+}
+
+/**
+ * Find every legacy `llm-pi-ai` `providers.cc-pool` declaration.
+ *
+ * This is structural: quoted keys, flow mappings, `insert` wrappers, and rows
+ * identified by package name all resolve through the parsed YAML. Comments and
+ * the dedicated `llm-cc-pool` row are never findings.
+ * @param source - patch text.
+ * @param label - file label for a parse diagnostic.
+ * @returns the declarations in document order.
+ */
+export function findLegacyPoolProviders(source: string, label = 'patch'): LegacyPoolFinding[] {
+  const document = parsePatchDocument(source, label)
+  const findings: LegacyPoolFinding[] = []
+  const visited = new WeakSet<object>()
+  const visit = (value: unknown, path: (string | number)[]): void => {
+    if (typeof value !== 'object' || value === null) return
+    if (visited.has(value)) return
+    visited.add(value)
+    if (Array.isArray(value)) {
+      value.forEach((entry, index) => { visit(entry, [...path, index]) })
+      return
+    }
+    const record = value as Record<string, unknown>
+    if (ownsLegacyPoolRow(record)) {
+      const config = record['config']
+      if (isRecord(config)) {
+        const providers = config['providers']
+        if (isRecord(providers) && Object.hasOwn(providers, 'cc-pool')) {
+          findings.push({ path: [...path, 'config', 'providers', 'cc-pool'] })
+        }
+      }
+    }
+    for (const [key, child] of Object.entries(record)) visit(child, [...path, key])
+  }
+  visit(document, [])
+  return findings
+}
+
+function childAt(value: unknown, key: string | number): unknown {
+  if (Array.isArray(value) && typeof key === 'number') return value[key]
+  if (isRecord(value)) return value[String(key)]
+  throw new Error(`cannot follow ${String(key)} in the parsed patch`)
+}
+
+/**
+ * The parsed document with one legacy provider removed.
+ *
+ * A `providers` mapping that becomes empty is kept as `{}`: the declaration is
+ * gone, but the profile still states that this adapter configures no routes.
+ * @param document - parsed patch.
+ * @param path - finding path to the `cc-pool` key.
+ * @returns a new document value.
+ */
+function withoutLegacyPoolProvider(document: unknown, path: readonly (string | number)[]): unknown {
+  const clone = structuredClone(document)
+  const parentPath = path.slice(0, -1)
+  let parent: unknown = clone
+  for (const key of parentPath) parent = childAt(parent, key)
+  if (!isRecord(parent)) throw new Error(`the legacy provider at ${formatFindingPath(path)} has no mapping parent`)
+  Reflect.deleteProperty(parent, String(path[path.length - 1]))
+  return clone
+}
+
+function isSpace(character: string | undefined): boolean {
+  return character === ' ' || character === '\t'
+}
+
+function isWhitespace(character: string | undefined): boolean {
+  return character === ' ' || character === '\t' || character === '\r' || character === '\n'
+}
+
+function skipSpaces(source: string, index: number): number {
+  let position = index
+  while (isSpace(source[position])) position += 1
+  return position
+}
+
+function skipWhitespace(source: string, index: number): number {
+  let position = index
+  while (isWhitespace(source[position])) position += 1
+  return position
+}
+
+function previousNonWhitespace(source: string, index: number): number {
+  let position = index
+  while (position >= 0 && isWhitespace(source[position])) position -= 1
+  return position
+}
+
+/** End index (exclusive) of a quoted scalar, or undefined when it is unterminated. */
+function quotedScalarEnd(source: string, start: number): number | undefined {
+  const quote = source[start]
+  let index = start + 1
+  while (index < source.length) {
+    const character = source[index]
+    if (quote === "'" && character === "'") {
+      if (source[index + 1] === "'") {
+        index += 2
+        continue
+      }
+      return index + 1
+    }
+    if (quote === '"' && character === '\\') {
+      index += 2
+      continue
+    }
+    if (quote === '"' && character === '"') return index + 1
+    index += 1
+  }
+  return undefined
+}
+
+/** Whether the position starts a mapping key in block or flow context. */
+function isKeyPosition(source: string, start: number): boolean {
+  const lineStart = source.lastIndexOf('\n', start - 1) + 1
+  const prefix = source.slice(lineStart, start)
+  if (/^[ \t]*$/.test(prefix)) return true
+  if (/^[ \t]*-[ \t]+$/.test(prefix)) return true
+  const previous = previousNonWhitespace(source, start - 1)
+  return previous >= 0 && (source[previous] === '{' || source[previous] === ',')
+}
+
+function isKeyColon(source: string, index: number): boolean {
+  return source[skipSpaces(source, index)] === ':'
+}
+
+function hasNameBoundary(source: string, index: number, length: number): boolean {
+  const before = index === 0 ? '' : source[index - 1] ?? ''
+  const after = source[index + length] ?? ''
+  return !/[A-Za-z0-9_-]/.test(before) && !/[A-Za-z0-9_-]/.test(after)
+}
+
+interface KeyOccurrence {
+  readonly start: number
+  readonly end: number
+  readonly name: string
+}
+
+/** Every plain or quoted mapping-key occurrence of one name, outside comments and values. */
+function keyOccurrences(source: string, name: string): KeyOccurrence[] {
+  const occurrences: KeyOccurrence[] = []
+  let index = 0
+  while (index < source.length) {
+    const character = source[index]
+    if (character === '#') {
+      const before = index === 0 ? '\n' : source[index - 1]
+      if (before !== undefined && /\s/.test(before)) {
+        const newline = source.indexOf('\n', index)
+        index = newline < 0 ? source.length : newline + 1
+        continue
+      }
+    }
+    const tokenStart = index === 0 || /[\s{[,:-]/.test(source[index - 1] ?? '')
+    if ((character === "'" || character === '"') && tokenStart) {
+      const end = quotedScalarEnd(source, index)
+      if (end === undefined) {
+        index += 1
+        continue
+      }
+      const inner = character === '"' ? source.slice(index + 1, end - 1) : source.slice(index + 1, end - 1).replaceAll("''", "'")
+      if (inner === name && isKeyPosition(source, index) && isKeyColon(source, end)) {
+        occurrences.push({ start: index, end, name })
+      }
+      index = end
+      continue
+    }
+    if (source.startsWith(name, index)
+      && hasNameBoundary(source, index, name.length)
+      && isKeyPosition(source, index)
+      && isKeyColon(source, index + name.length)) {
+      occurrences.push({ start: index, end: index + name.length, name })
+      index += name.length
+      continue
+    }
+    index += 1
+  }
+  return occurrences
+}
+
+interface SourceRange {
+  readonly start: number
+  readonly end: number
+}
+
+/** End index of one flow collection starting at `start`, quotes and comments aware. */
+function matchingFlowEnd(source: string, start: number): number | undefined {
+  const expected: string[] = []
+  let index = start
+  while (index < source.length) {
+    const character = source[index]
+    if (character === "'" || character === '"') {
+      const end = quotedScalarEnd(source, index)
+      if (end === undefined) return undefined
+      index = end
+      continue
+    }
+    if (character === '#' && /\s/.test(source[index - 1] ?? '\n')) {
+      const newline = source.indexOf('\n', index)
+      index = newline < 0 ? source.length : newline + 1
+      continue
+    }
+    if (character === '{') expected.push('}')
+    else if (character === '[') expected.push(']')
+    else if (character === '}' || character === ']') {
+      if (expected.pop() !== character) return undefined
+      if (expected.length === 0) return index + 1
+    }
+    index += 1
+  }
+  return undefined
+}
+
+/** End index of a flow value beginning at `start`. */
+function flowValueEnd(source: string, start: number): number | undefined {
+  const character = source[start]
+  if (character === undefined) return undefined
+  if (character === '{' || character === '[') return matchingFlowEnd(source, start)
+  if (character === "'" || character === '"') return quotedScalarEnd(source, start)
+  let index = start
+  while (index < source.length) {
+    const current = source[index]
+    if (current === ',' || current === '}' || current === ']') return index
+    if (current === '#' && /\s/.test(source[index - 1] ?? '\n')) return index
+    index += 1
+  }
+  return index
+}
+
+/** End index of a nested block mapping or sequence value starting at `start`. */
+function nestedBlockEnd(source: string, start: number, keyIndent: number): number {
+  let position = start
+  while (position < source.length) {
+    const lineEnd = source.indexOf('\n', position)
+    const next = lineEnd < 0 ? source.length : lineEnd + 1
+    const line = source.slice(position, lineEnd < 0 ? source.length : lineEnd)
+    const trimmed = line.trim()
+    if (trimmed === '') {
+      position = next
+      continue
+    }
+    const indent = /^[ \t]*/.exec(line)?.[0].length ?? 0
+    if (trimmed.startsWith('#') && indent <= keyIndent) return position
+    if (indent <= keyIndent) return position
+    position = next
+  }
+  return source.length
+}
+
+/** Removal range for a block mapping entry. */
+function blockKeyRange(source: string, occurrence: KeyOccurrence): SourceRange | undefined {
+  const colon = skipSpaces(source, occurrence.end)
+  if (source[colon] !== ':') return undefined
+  const lineStart = source.lastIndexOf('\n', occurrence.start - 1) + 1
+  const prefix = source.slice(lineStart, occurrence.start)
+  if (!/^[ \t]*$/.test(prefix) && !/^[ \t]*-[ \t]+$/.test(prefix)) return undefined
+  const keyIndent = /^[ \t]*/.exec(prefix)?.[0].length ?? 0
+  const inlineStart = skipSpaces(source, colon + 1)
+  const rawLineEnd = source.indexOf('\n', colon)
+  const lineEnd = rawLineEnd < 0 ? source.length : rawLineEnd
+  const inline = source.slice(inlineStart, lineEnd)
+  const hasInlineValue = inline.trim() !== '' && !inline.trimStart().startsWith('#')
+  if (!hasInlineValue) return { start: lineStart, end: nestedBlockEnd(source, lineEnd + 1, keyIndent) }
+  const first = source[inlineStart]
+  if (first === '{' || first === '[') {
+    const close = matchingFlowEnd(source, inlineStart)
+    if (close === undefined) return undefined
+    const tail = source.slice(skipSpaces(source, close), lineEnd)
+    const finish = tail.trim() === '' || tail.trimStart().startsWith('#') ? (rawLineEnd < 0 ? source.length : rawLineEnd + 1) : close
+    return { start: lineStart, end: finish }
+  }
+  const trimmed = inline.trimStart()
+  if (trimmed.startsWith('|') || trimmed.startsWith('>')) {
+    return { start: lineStart, end: nestedBlockEnd(source, lineEnd + 1, keyIndent) }
+  }
+  return { start: lineStart, end: rawLineEnd < 0 ? source.length : rawLineEnd + 1 }
+}
+
+/** Removal range for one entry inside a flow mapping. */
+function flowEntryRange(source: string, occurrence: KeyOccurrence): SourceRange | undefined {
+  const colon = skipSpaces(source, occurrence.end)
+  if (source[colon] !== ':') return undefined
+  const valueStart = skipWhitespace(source, colon + 1)
+  const valueEnd = flowValueEnd(source, valueStart)
+  if (valueEnd === undefined) return undefined
+  const afterValue = skipWhitespace(source, valueEnd)
+  if (source[afterValue] === ',') return { start: occurrence.start, end: afterValue + 1 }
+  const beforeEntry = previousNonWhitespace(source, occurrence.start - 1)
+  if (source[beforeEntry] === ',') return { start: beforeEntry, end: valueEnd }
+  return { start: occurrence.start, end: valueEnd }
+}
+
+interface TextEdit extends SourceRange {
+  readonly replacement: string
+}
+
+/** Replace a block mapping value with an empty flow mapping. */
+function blockValueEmptyMapEdit(source: string, occurrence: KeyOccurrence): TextEdit | undefined {
+  const colon = skipSpaces(source, occurrence.end)
+  if (source[colon] !== ':') return undefined
+  const lineStart = source.lastIndexOf('\n', occurrence.start - 1) + 1
+  const prefix = source.slice(lineStart, occurrence.start)
+  if (!/^[ \t]*$/.test(prefix) && !/^[ \t]*-[ \t]+$/.test(prefix)) return undefined
+  const keyIndent = /^[ \t]*/.exec(prefix)?.[0].length ?? 0
+  const inlineStart = skipSpaces(source, colon + 1)
+  const rawLineEnd = source.indexOf('\n', colon)
+  const lineEnd = rawLineEnd < 0 ? source.length : rawLineEnd
+  const inline = source.slice(inlineStart, lineEnd)
+  if (inline.trim() === '') {
+    const blockEnd = nestedBlockEnd(source, lineEnd + 1, keyIndent)
+    const newline = blockEnd > colon + 1 && source[blockEnd - 1] === '\n' ? '\n' : ''
+    return { start: colon + 1, end: blockEnd, replacement: ` {}${newline}` }
+  }
+  if (inline.trimStart().startsWith('#')) {
+    // A comment between the key and its nested value is kept, so the empty map
+    // is inserted before it instead of replacing the comment.
+    const blockEnd = nestedBlockEnd(source, lineEnd + 1, keyIndent)
+    const newline = blockEnd > inlineStart && source[blockEnd - 1] === '\n' ? '\n' : ''
+    return { start: inlineStart, end: blockEnd, replacement: `{} ${source.slice(inlineStart, lineEnd)}${newline}` }
+  }
+  if (source[inlineStart] !== '{' && source[inlineStart] !== '[') return undefined
+  const close = matchingFlowEnd(source, inlineStart)
+  return close === undefined ? undefined : { start: inlineStart, end: close, replacement: '{}' }
+}
+
+/** Replace a flow mapping entry's value with an empty flow mapping. */
+function flowValueEmptyMapEdit(source: string, occurrence: KeyOccurrence): TextEdit | undefined {
+  const colon = skipSpaces(source, occurrence.end)
+  if (source[colon] !== ':') return undefined
+  const valueStart = skipWhitespace(source, colon + 1)
+  const valueEnd = flowValueEnd(source, valueStart)
+  return valueEnd === undefined ? undefined : { start: valueStart, end: valueEnd, replacement: '{}' }
+}
+
+/** Try every textual edit that reproduces the structurally computed target. */
+function findTextualRemoval(source: string, target: unknown): string | undefined {
+  const edits: TextEdit[] = []
+  for (const name of ['cc-pool', 'providers'] as const) {
+    for (const occurrence of keyOccurrences(source, name)) {
+      const block = blockKeyRange(source, occurrence)
+      if (block !== undefined) edits.push({ ...block, replacement: '' })
+      const flow = flowEntryRange(source, occurrence)
+      if (flow !== undefined) edits.push({ ...flow, replacement: '' })
+      if (name !== 'providers') continue
+      const blockValue = blockValueEmptyMapEdit(source, occurrence)
+      if (blockValue !== undefined) edits.push(blockValue)
+      const flowValue = flowValueEmptyMapEdit(source, occurrence)
+      if (flowValue !== undefined) edits.push(flowValue)
+    }
+  }
+  const attempted = new Set<string>()
+  for (const edit of edits) {
+    const key = `${edit.start}:${edit.end}:${edit.replacement}`
+    if (attempted.has(key) || edit.end < edit.start) continue
+    attempted.add(key)
+    const candidate = source.slice(0, edit.start) + edit.replacement + source.slice(edit.end)
+    let parsed: unknown
+    try {
+      parsed = parsePatchDocument(candidate)
+    } catch {
+      continue
+    }
+    if (isDeepStrictEqual(parsed, target)) return candidate
+  }
+  return undefined
+}
+
+/** Outcome of removing every legacy provider declaration from one patch. */
+export interface LegacyPoolMigration {
+  readonly source: string
+  readonly removed: number
+}
+
+/**
+ * Remove the legacy `llm-pi-ai` `providers.cc-pool` declaration structurally.
+ *
+ * The rewrite is accepted only when re-parsing the edited text equals the parsed
+ * document with that provider removed, so comments and unrelated rows are kept
+ * and an unusual layout fails instead of producing a half-edited profile.
+ * @param source - profile patch text.
+ * @param label - file label for diagnostics.
+ * @returns the migrated text and the number of declarations removed.
+ */
+export function migrateLegacyPoolProvider(source: string, label = 'profile patch'): LegacyPoolMigration {
+  let current = source
+  let removed = 0
+  for (;;) {
+    const findings = findLegacyPoolProviders(current, label)
+    if (findings.length === 0) return { source: current, removed }
+    const finding = findings[0]
+    if (finding === undefined) return { source: current, removed }
+    const document = parsePatchDocument(current, label)
+    const target = withoutLegacyPoolProvider(document, finding.path)
+    const candidate = findTextualRemoval(current, target)
+    if (candidate === undefined) {
+      throw new Error(`${label} declares ${formatFindingPath(finding.path)} in a layout this build cannot rewrite safely`)
+    }
+    current = candidate
+    removed += 1
+    if (removed > 32) throw new Error(`${label} has too many legacy cc-pool declarations to migrate`)
+  }
+}
+
+function legacyDeclarationError(source: PatchSource, findings: readonly LegacyPoolFinding[]): Error {
+  const locations = findings.map(finding => formatFindingPath(finding.path)).join(', ')
+  return new Error([
+    `${source.label} at ${source.path} still declares the legacy llm-pi-ai "providers.cc-pool" route (${locations}).`,
+    `Remove the "cc-pool" key under the llm-pi-ai row's config.providers in ${source.path} (block, quoted, or flow-map form), then run build.cmd again.`,
+    'The dedicated @deepseek-ai/dsh-llm-cc-pool bundle must be the only owner of the cc-pool route; keeping both makes two adapters claim it and plugin loading fails.',
+    'No profile or staging file was changed.',
+  ].join('\n'))
+}
+
+/**
+ * Every patch layer the web profile composes before and around seeding.
+ * @param input - repository root, Harness home, profile directory, and extra overlays.
+ * @returns the guard sources in composition order.
+ */
+export function compositionPatchSources(input: {
+  readonly home: string
+  readonly profileDirectory: string
+  readonly repositoryRoot?: string
+  readonly overlays?: readonly string[]
+}): PatchSource[] {
+  const repositoryRoot = input.repositoryRoot ?? REPOSITORY_ROOT
+  const sources: PatchSource[] = [
+    { label: 'repository base bundle patch', path: join(repositoryRoot, 'packages', 'bundle', 'base', 'cordis.patch.yml') },
+    { label: 'repository web bundle patch', path: join(repositoryRoot, 'packages', 'bundle', 'web-app', 'cordis.patch.yml') },
+    { label: 'portable profile template', path: join(repositoryRoot, 'fork-runtime', 'web', 'portable-profile.patch.yml') },
+    { label: 'portable memory-limits template', path: join(repositoryRoot, 'fork-runtime', 'web', 'portable-memory-limits.patch.yml') },
+    { label: 'repository diagnostics overlay', path: join(repositoryRoot, 'fork-runtime', 'diagnostics', 'cordis.patch.yml') },
+    { label: 'profile patch', path: join(input.profileDirectory, 'cordis.patch.yml'), migrate: true },
+    { label: 'profile memory-limits overlay', path: join(input.profileDirectory, 'memory-limits.patch.yml') },
+    { label: 'home patch', path: join(input.home, 'cordis.patch.yml') },
+  ]
+  for (const overlay of input.overlays ?? []) {
+    sources.push({ label: `--patch overlay ${overlay}`, path: resolve(overlay), required: true })
+  }
+  return sources
+}
+
+/**
+ * Inspect every composition source before the build writes staging or profile files.
+ *
+ * A legacy declaration outside the target profile patch is never rewritten: the
+ * guard fails with the exact file and key to remove. The target profile patch is
+ * only accepted when the structural rewrite reproduces the expected document.
+ * @param sources - patch layers to inspect.
+ * @returns the profile rewrites the caller must apply after taking the backup.
+ */
+export async function guardLegacyPoolProviders(sources: readonly PatchSource[]): Promise<LegacyPoolGuardResult> {
+  const migrations: ProfilePatchMigration[] = []
+  for (const source of sources) {
+    if (!existsSync(source.path)) {
+      if (source.required === true) throw new Error(`required patch ${source.label} is missing at ${source.path}`)
+      continue
+    }
+    const text = await readFile(source.path, 'utf8')
+    let findings: LegacyPoolFinding[]
+    try {
+      findings = findLegacyPoolProviders(text, source.label)
+    } catch (error) {
+      throw new Error(`${source.label} at ${source.path} could not be inspected: ${errorMessage(error)}. No profile or staging file was changed.`)
+    }
+    if (findings.length === 0) continue
+    if (source.migrate !== true) throw legacyDeclarationError(source, findings)
+    try {
+      const migrated = migrateLegacyPoolProvider(text, `${source.label} at ${source.path}`)
+      migrations.push({ path: source.path, removed: migrated.removed })
+    } catch (error) {
+      throw new Error([
+        `cannot safely migrate ${source.path}: ${errorMessage(error)}`,
+        `Edit ${source.path} and delete the "cc-pool" key under the llm-pi-ai row's config.providers (block, quoted, or flow-map form), then run build.cmd again.`,
+        'No profile or staging file was changed.',
+      ].join('\n'))
+    }
+  }
+  return { migrations }
+}
+
+/** Profile files the build may rewrite or create. */
+const PROFILE_BACKUP_FILES = [
+  'package.json',
+  'cordis.patch.yml',
+  'pnpm-lock.yaml',
+  'pnpm-workspace.yaml',
+  'compatibility.json',
+  'memory-watchdog.cjs',
+  'chatgpt-subagent-preset.cjs',
+  'goal-disabled.cjs',
+  'memory-limits.patch.yml',
+] as const
+
+/** Home files the portable seed may create. */
+const HOME_BACKUP_FILES = [
+  '.agent-presets/chatgpt-dsh/agent.cordis.yml',
+  '.agent-presets/chatgpt-dsh/preset.yml',
+  '.agent-presets/chatgpt-dsh/no-escalation.cjs',
+] as const
+
+/** One file recorded by a profile backup. */
+export interface ProfileBackupEntry {
+  /** Root that owns the file: the profile or the Harness home. */
+  readonly root: 'profile' | 'home'
+  /** Portable relative path below that root. */
+  readonly relative: string
+  /** Whether the file existed when the backup was taken. */
+  readonly existed: boolean
+}
+
+/** Snapshot of every profile and seed file the build may change. */
+export interface ProfileBackup {
+  /** Backup directory holding `backup.json` and the copied files. */
+  readonly directory: string
+  /** Profile directory the backup belongs to. */
+  readonly profileDirectory: string
+  /** Harness home that owns the seed files. */
+  readonly home: string
+  /** Whether the profile directory existed before the build. */
+  readonly profileDirectoryExisted: boolean
+  /** Whether the profile manifest existed before the build. */
+  readonly profileExisted: boolean
+  /** Recorded files and whether each existed. */
+  readonly entries: readonly ProfileBackupEntry[]
+}
+
+/** Files restored or removed by a rollback. */
+export interface ProfileRollbackResult {
+  readonly restored: readonly string[]
+  readonly removed: readonly string[]
+  readonly profileRemoved: boolean
+  readonly failures: readonly string[]
+}
+
+function backupFileDestination(directory: string, entry: ProfileBackupEntry): string {
+  return join(directory, entry.root, ...entry.relative.split('/'))
+}
+
+/**
+ * Snapshot the profile and portable seed files before the build mutates them.
+ * @param options - profile directory and Harness home.
+ * @returns the recorded backup.
+ */
+export async function backupProfile(options: {
+  readonly profileDirectory: string
+  readonly home: string
+}): Promise<ProfileBackup> {
+  const stamp = new Date().toISOString().replaceAll(':', '-').replaceAll('.', '-')
+  const directory = join(BUILD_ROOT, 'backups', `${PROFILE_NAME}-${stamp}-${process.pid}`)
+  await mkdir(directory, { recursive: true })
+  const entries: ProfileBackupEntry[] = []
+  for (const [root, base, files] of [
+    ['profile', options.profileDirectory, PROFILE_BACKUP_FILES],
+    ['home', options.home, HOME_BACKUP_FILES],
+  ] as const) {
+    for (const relative of files) {
+      const source = join(base, ...relative.split('/'))
+      const existed = existsSync(source)
+      const entry: ProfileBackupEntry = { root, relative, existed }
+      entries.push(entry)
+      if (!existed) continue
+      const destination = backupFileDestination(directory, entry)
+      await mkdir(dirname(destination), { recursive: true })
+      await copyFile(source, destination)
+    }
+  }
+  const backup: ProfileBackup = {
+    directory,
+    profileDirectory: options.profileDirectory,
+    home: options.home,
+    profileDirectoryExisted: existsSync(options.profileDirectory),
+    profileExisted: existsSync(join(options.profileDirectory, 'package.json')),
+    entries,
+  }
+  await writeFile(join(directory, 'backup.json'), `${JSON.stringify(backup, undefined, 2)}\n`)
+  await writeFile(join(directory, 'profile-path.txt'), `${options.profileDirectory}\n`)
+  if (!backup.profileExisted) {
+    await writeFile(
+      join(directory, 'profile-created-by-build.txt'),
+      'The profile did not exist before this run; no prior configuration existed to back up.\n',
+    )
+  }
+  return backup
+}
+
+function safeRelativePath(root: string, relative: string): string | undefined {
+  const normalized = relative.replaceAll('\\', '/')
+  const parts = normalized.split('/')
+  if (normalized.startsWith('/') || parts.some(part => part === '' || part === '.' || part === '..')) return undefined
+  return join(root, ...parts)
+}
+
+/**
+ * Restore the profile and seed files recorded by {@link backupProfile}.
+ *
+ * A profile directory that did not exist before the build is removed entirely;
+ * otherwise every recorded file is restored byte-for-byte and every file the
+ * build created is removed. Package-manager state under `node_modules` is not
+ * copied; the restored manifest and lockfile are the next build's input.
+ * @param backup - snapshot returned by {@link backupProfile}.
+ * @returns what was restored or removed, plus any rollback failures.
+ */
+export async function rollbackProfileBackup(backup: ProfileBackup): Promise<ProfileRollbackResult> {
+  const restored: string[] = []
+  const removed: string[] = []
+  const failures: string[] = []
+  for (const entry of backup.entries) {
+    if (!backup.profileDirectoryExisted && entry.root === 'profile') continue
+    const root = entry.root === 'profile' ? backup.profileDirectory : backup.home
+    const target = safeRelativePath(root, entry.relative)
+    if (target === undefined) {
+      failures.push(`refused unsafe backup path ${entry.relative}`)
+      continue
+    }
+    if (entry.existed) {
+      const source = backupFileDestination(backup.directory, entry)
+      if (!existsSync(source)) {
+        failures.push(`backup copy of ${entry.relative} is missing from ${backup.directory}`)
+        continue
+      }
+      try {
+        await mkdir(dirname(target), { recursive: true })
+        await copyFile(source, target)
+        restored.push(target)
+      } catch (error) {
+        failures.push(`could not restore ${target}: ${errorMessage(error)}`)
+      }
+      continue
+    }
+    if (!existsSync(target)) continue
+    try {
+      await rm(target, { force: true })
+      removed.push(target)
+    } catch (error) {
+      failures.push(`could not remove ${target}: ${errorMessage(error)}`)
+    }
+  }
+  let profileRemoved = false
+  if (!backup.profileDirectoryExisted && existsSync(backup.profileDirectory)) {
+    try {
+      await rm(backup.profileDirectory, { recursive: true, force: true })
+      profileRemoved = true
+    } catch (error) {
+      failures.push(`could not remove ${backup.profileDirectory}: ${errorMessage(error)}`)
+    }
+  }
+  return { restored, removed, profileRemoved, failures }
+}
+
+/** Profile manifest fields the bundle reconciliation owns. */
+interface ProfileManifest extends PluginManifest {
+  dsh?: { profile?: { bundles?: string[] } }
+}
+
+/**
+ * Add missing bundle-layer entries to an installed profile manifest.
+ * @param profileDirectory - profile whose manifest records the bundle order.
+ * @param names - bundle package names that must contribute a layer.
+ */
+export async function ensureProfileBundles(profileDirectory: string, names: readonly string[]): Promise<void> {
+  const manifestPath = join(profileDirectory, 'package.json')
+  if (!existsSync(manifestPath)) fail(`cannot add profile bundle entries: ${manifestPath} is missing`)
+  const manifest = await readJson<ProfileManifest>(manifestPath)
+  const bundles = manifest.dsh?.profile?.bundles ?? []
+  const missing = names.filter(name => !bundles.includes(name))
+  if (missing.length === 0) return
+  manifest.dsh = { ...manifest.dsh, profile: { ...manifest.dsh?.profile, bundles: [...bundles, ...missing] } }
+  await writeJson(manifestPath, manifest)
+  log(`added profile bundle entr${missing.length === 1 ? 'y' : 'ies'} ${missing.join(', ')}`)
+}
+
+/** One install-then-seed pass for the selected profile. */
+export interface ProfileInstallAndSeedOptions {
+  /** Harness home that owns the profile. */
+  readonly home: string
+  /** Profile directory being installed into. */
+  readonly profileDirectory: string
+  /** Bundle-layer names the installed packages must contribute. */
+  readonly bundleNames: readonly string[]
+  /** Runs the package installation; omitted when the profile already resolves. */
+  readonly install?: () => void | Promise<void>
+  /** Seed override for tests; defaults to the portable profile kit. */
+  readonly seed?: () => Promise<SeedResult>
+}
+
+/**
+ * Ensure the installed profile's bundle entries, then seed it.
+ *
+ * Seeding happens only after the install callback returns, so a failed install
+ * cannot leave a freshly seeded profile behind. The caller owns backup and
+ * rollback around this step.
+ * @param options - install callback, bundle names, and optional seed override.
+ * @returns the seed result.
+ */
+export async function installAndSeedProfile(options: ProfileInstallAndSeedOptions): Promise<SeedResult> {
+  await options.install?.()
+  await ensureProfileBundles(options.profileDirectory, options.bundleNames)
+  return options.seed === undefined
+    ? seedPortableProfile({ dshHome: options.home })
+    : options.seed()
 }
 
 /** Why the profile still does not resolve one staged plugin, if that is the case. */
@@ -1402,8 +2235,47 @@ function report(staged: readonly StagedPlugin[], profileDirectory: string, backu
 }
 
 /**
+ * Apply the guard's planned profile rewrites, re-reading the file first so an
+ * external edit cannot make the build write text the guard never validated.
+ * @param migrations - profile patches to migrate.
+ */
+async function applyProfileMigrations(migrations: readonly ProfilePatchMigration[]): Promise<void> {
+  for (const migration of migrations) {
+    if (!existsSync(migration.path)) continue
+    const current = await readFile(migration.path, 'utf8')
+    const migrated = migrateLegacyPoolProvider(current, migration.path)
+    if (migrated.removed === 0) continue
+    await writeTextAtomic(migration.path, migrated.source)
+    log(`removed ${String(migrated.removed)} legacy llm-pi-ai "providers.cc-pool" declaration(s) from ${migration.path}`)
+  }
+}
+
+/** Verify the installed profile resolves every staged package and owns only one cc-pool route. */
+async function verifyInstalledProfile(
+  staged: readonly StagedPlugin[],
+  profileDirectory: string,
+  sources: readonly PatchSource[],
+): Promise<void> {
+  const problems: string[] = []
+  for (const plugin of staged) {
+    const problem = await profileProblem(plugin, profileDirectory)
+    if (problem !== undefined) problems.push(problem)
+  }
+  if (problems.length > 0) {
+    throw new Error(`the profile does not resolve the staged plugins after installation:\n  ${problems.join('\n  ')}`)
+  }
+  const post = await guardLegacyPoolProviders(sources)
+  if (post.migrations.length > 0) {
+    throw new Error(`the profile still declares the legacy llm-pi-ai "providers.cc-pool" route after migration:\n  ${post.migrations.map(item => item.path).join('\n  ')}`)
+  }
+}
+
+/**
  * Build or stage the four fork plugins and the workspace llm-cc-pool package,
  * then make the selected web profile resolve them.
+ *
+ * The composition guard runs before staging or profile work. The profile backup
+ * then precedes every mutation, and a later failure restores it.
  * @param options - parsed command-line options.
  */
 export async function main(options: BuildOptions): Promise<void> {
@@ -1427,81 +2299,99 @@ export async function main(options: BuildOptions): Promise<void> {
   const state: BuildState = previousState.schema === SCHEMA_VERSION && previousState.scriptVersion === SCRIPT_VERSION
     ? previousState
     : { schema: SCHEMA_VERSION, scriptVersion: SCRIPT_VERSION, plugins: {} }
-  await mkdir(CONFIG_ROOT, { recursive: true })
-  const dependencies = await ensureBuildDependencies()
-  const staged: StagedPlugin[] = []
-  let changed = false
-  const toolchain = await toolchainVersions()
-  for (const plugin of PLUGINS) {
-    const stagingDirectory = join(BUILD_ROOT, plugin.id)
-    const version = (await sourceManifest(plugin)).version
-    if (version === undefined) fail(`${plugin.name} source manifest has no version`)
-    const keyParts = [String(SCRIPT_VERSION), await sourceHash(plugin), version, toolchain]
-    if (plugin.id === 'subscriptions') {
-      keyParts.push(await hashFile(join(REPOSITORY_ROOT, 'fork-plugins', 'releases', 'tormentalabs-claude-code-wire-compat-0.7.2-dsh14.tgz')))
-      keyParts.push(dependencies.wire.manifest.version ?? '', dependencies.undici.manifest.version ?? '')
-      keyParts.push(dependencies.bunRuntime.packageName, dependencies.bunRuntime.version)
-    }
-    const key = createHash('sha256').update(keyParts.join('\n')).digest('hex')
-    const current = await stagingIsCurrent(plugin, stagingDirectory, state, key, options.forceRebuild)
-    if (current) {
-      log(`${plugin.name} staging is current (${version})`)
-    } else {
-      await buildPlugin(plugin, stagingDirectory, dependencies, key, options.forceRebuild)
-      changed = true
-      state.plugins[plugin.id] = { key, version, installedAt: new Date().toISOString() }
-      await writeJson(STATE_FILE, state)
-    }
-    staged.push({ definition: plugin, directory: stagingDirectory, version, changed: !current })
+  const sources = compositionPatchSources({ home, profileDirectory, overlays: options.patchOverlays })
+  const guard = await guardLegacyPoolProviders(sources)
+  for (const migration of guard.migrations) {
+    log(`profile patch ${migration.path} still declares the legacy llm-pi-ai "providers.cc-pool" route; it will be removed after the backup`)
   }
-  for (const plugin of WORKSPACE_PLUGINS) {
-    const stagingDirectory = join(BUILD_ROOT, plugin.id)
-    const version = (await sourceManifest(plugin)).version
-    if (version === undefined) fail(`${plugin.name} source manifest has no version`)
-    await stageWorkspacePlugin(plugin, stagingDirectory)
-    log(`${plugin.name} staged from the root build (${version})`)
-    staged.push({ definition: plugin, directory: stagingDirectory, version, changed: false })
-  }
+  const backup = await backupProfile({ profileDirectory, home })
+  try {
+    await applyProfileMigrations(guard.migrations)
+    await mkdir(CONFIG_ROOT, { recursive: true })
+    const dependencies = await ensureBuildDependencies()
+    const staged: StagedPlugin[] = []
+    let changed = false
+    const toolchain = await toolchainVersions()
+    for (const plugin of PLUGINS) {
+      const stagingDirectory = join(BUILD_ROOT, plugin.id)
+      const version = (await sourceManifest(plugin)).version
+      if (version === undefined) fail(`${plugin.name} source manifest has no version`)
+      const keyParts = [String(SCRIPT_VERSION), await sourceHash(plugin), version, toolchain]
+      if (plugin.id === 'subscriptions') {
+        keyParts.push(await hashFile(join(REPOSITORY_ROOT, 'fork-plugins', 'releases', 'tormentalabs-claude-code-wire-compat-0.7.2-dsh14.tgz')))
+        keyParts.push(dependencies.wire.manifest.version ?? '', dependencies.undici.manifest.version ?? '')
+        keyParts.push(dependencies.bunRuntime.packageName, dependencies.bunRuntime.version)
+      }
+      const key = createHash('sha256').update(keyParts.join('\n')).digest('hex')
+      const current = await stagingIsCurrent(plugin, stagingDirectory, state, key, options.forceRebuild)
+      if (current) {
+        log(`${plugin.name} staging is current (${version})`)
+      } else {
+        await buildPlugin(plugin, stagingDirectory, dependencies, key, options.forceRebuild)
+        changed = true
+        state.plugins[plugin.id] = { key, version, installedAt: new Date().toISOString() }
+        await writeJson(STATE_FILE, state)
+      }
+      staged.push({ definition: plugin, directory: stagingDirectory, version, changed: !current })
+    }
+    for (const plugin of WORKSPACE_PLUGINS) {
+      const stagingDirectory = join(BUILD_ROOT, plugin.id)
+      const version = (await sourceManifest(plugin)).version
+      if (version === undefined) fail(`${plugin.name} source manifest has no version`)
+      await stageWorkspacePlugin(plugin, stagingDirectory)
+      log(`${plugin.name} staged from the root build (${version})`)
+      staged.push({ definition: plugin, directory: stagingDirectory, version, changed: false })
+    }
 
-  let profileCreated = false
-  if (!existsSync(join(profileDirectory, 'package.json'))) {
-    log(`initializing profile ${PROFILE_NAME} at ${profileDirectory}`)
-    runDsh(['plugin', '--profile', PROFILE_NAME, 'install', '--ignore-scripts'], home)
-    profileCreated = true
+    const problems: string[] = []
+    for (const plugin of staged) {
+      const problem = await profileProblem(plugin, profileDirectory)
+      if (problem !== undefined) problems.push(problem)
+    }
+    const install = !existsSync(join(profileDirectory, 'package.json'))
+      || problems.length > 0
+      || changed
+    if (install) {
+      log(`installing ${staged.map(plugin => plugin.definition.name).join(' and ')} into profile ${PROFILE_NAME}`)
+    } else {
+      log('profile already resolves all staged plugins; reconciling bundle entries only')
+    }
+    const optionsForInstall: ProfileInstallAndSeedOptions = {
+      home,
+      profileDirectory,
+      bundleNames: staged.map(plugin => plugin.definition.name),
+      ...install
+        ? { install: () => { runDsh(['plugin', '--profile', PROFILE_NAME, 'add', ...staged.map(plugin => plugin.directory)], home) } }
+        : {},
+    }
+    const seeded = await installAndSeedProfile(optionsForInstall)
+    if (seeded.patchSeeded) {
+      log(`seeded portable profile configuration from ${join(REPOSITORY_ROOT, 'fork-runtime', 'web', 'portable-profile.patch.yml')}`)
+    }
+    for (const path of seeded.copied) log(`seeded profile file ${path}`)
+    await verifyInstalledProfile(staged, profileDirectory, sources)
+    report(staged, profileDirectory, backup.directory)
+  } catch (error) {
+    let rollbackText: string
+    try {
+      const rollback = await rollbackProfileBackup(backup)
+      const actions: string[] = []
+      if (rollback.restored.length > 0) actions.push(`restored ${String(rollback.restored.length)} file(s)`)
+      if (rollback.removed.length > 0) actions.push(`removed ${String(rollback.removed.length)} file(s) created by this run`)
+      if (rollback.profileRemoved) actions.push('removed the profile created by this run')
+      rollbackText = rollback.failures.length === 0
+        ? `Profile rollback: ${actions.length > 0 ? actions.join(', ') : 'no profile files needed changing'}.`
+        : `Profile rollback is incomplete: ${rollback.failures.join('; ')}.`
+    } catch (rollbackError) {
+      rollbackText = `Profile rollback failed: ${errorMessage(rollbackError)}.`
+    }
+    throw new Error([
+      errorMessage(error),
+      `Profile backup: ${backup.directory}`,
+      rollbackText,
+      'Do not start the Host until the reported problem is fixed.',
+    ].join('\n'), { cause: error })
   }
-  const seeded = await seedPortableProfile({ dshHome: home })
-  if (seeded.patchSeeded) {
-    log(`seeded portable profile configuration from ${join(REPOSITORY_ROOT, 'fork-runtime', 'web', 'portable-profile.patch.yml')}`)
-  }
-  for (const path of seeded.copied) log(`seeded profile file ${path}`)
-  const profilePatchPath = join(profileDirectory, 'cordis.patch.yml')
-  if (existsSync(profilePatchPath) && declaresLegacyPoolProvider(await readFile(profilePatchPath, 'utf8'))) {
-    fail(`the profile patch at ${profilePatchPath} still declares an llm-pi-ai "providers.cc-pool" route; `
-      + 'remove that block before installing @deepseek-ai/dsh-llm-cc-pool, or both adapters claim the cc-pool route')
-  }
-  const problems: string[] = []
-  for (const plugin of staged) {
-    const problem = await profileProblem(plugin, profileDirectory)
-    if (problem !== undefined) problems.push(problem)
-  }
-  if (problems.length === 0 && !changed) {
-    log('profile already resolves all staged plugins; nothing to install')
-    report(staged, profileDirectory, undefined)
-    return
-  }
-  const backup = await backupProfile(profileDirectory, profileCreated)
-  log(`installing ${staged.map(plugin => plugin.definition.name).join(' and ')} into profile ${PROFILE_NAME}`)
-  runDsh(['plugin', '--profile', PROFILE_NAME, 'add', ...staged.map(plugin => plugin.directory)], home)
-  const remaining: string[] = []
-  for (const plugin of staged) {
-    const problem = await profileProblem(plugin, profileDirectory)
-    if (problem !== undefined) remaining.push(problem)
-  }
-  if (remaining.length > 0) {
-    fail(`the profile does not resolve the staged plugins after installation:\n  ${remaining.join('\n  ')}\n`
-      + `Backup: ${backup}. Do not start the Host until this is repaired.`)
-  }
-  report(staged, profileDirectory, backup)
 }
 
 if (process.argv[1] !== undefined && pathToFileURL(resolve(process.argv[1])).href === import.meta.url) {
