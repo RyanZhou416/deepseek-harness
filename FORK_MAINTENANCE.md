@@ -1425,9 +1425,11 @@ empty static/dynamic run, an in-history prompt mismatch, an unclassified
 one-shot or no-system is A-off for that request (current non-A body/headers),
 not a 400. Custom base URL, gateway, non-firstParty and experimental off mean A
 is not enabled at all; current behavior is retained and not claimed as parity.
-HIPAA tainted/unknown and caching off stay A-on with 5m and no scope; they are
-never A-off, because A-off would retain cc3's 1h and exceed the anchor.
-`workflow`, agent-type and `disabled` are outside A.
+HIPAA tainted/unknown and prompt caching disabled (`enablePromptCaching=false`)
+stay A-on with 5m and no scope; they are never A-off, because A-off would
+retain cc3's 1h and exceed the anchor. The rejected `disabled` token is a
+header/intent value, not the "caching disabled" deployment state; they are
+distinct. `workflow`, agent-type and the `disabled` token are outside A.
 
 **Capability and ownership.** The worker is the executable cache-policy owner;
 the Swift pool is transport and member validation. Add member
@@ -1483,8 +1485,10 @@ Billing/identity are main/subagent only; helpers get neither. The worker uses
 **TTL and facts.** 1h requires all of: first-party OAuth/committed token with
 `user:inference` (pro/max included), a lease overage fact positively saying
 overage is not in use (accountEpoch/credentialRevision/proxyRevision/observedAt/
-status; stale/absent => 5m), an explicit worker allowlist config that is known
-true (default absent), and no force-5m/env/settings/frontmatter override. `XNe`
+status; stale/absent => 5m), HIPAA `clear` or `not-applicable` (tainted/unknown
+=> 5m even with a declared allowlist), an explicit worker allowlist config that
+is known true (default absent), and no force-5m/env/settings/frontmatter
+override. `XNe`
 is carve's fallback that grants 1h; A does not use it. Unknown => 5m; the first
 release is 5m-only unless the allowlist is explicitly declared (those tests are
 override, not parity). HIPAA is tainted/clear/unknown/not-applicable: clear is a
@@ -1562,7 +1566,8 @@ checklist. No install until all pass.
 
 **Explicit exclusions.** Helpers under-emit billing/identity versus the carve
 title/compaction; evict/keepalive/message-threads/context-hint are omitted;
-`workflow`, agent-type and `disabled` are not A; no live capture; live allowlist
+`workflow`, agent-type and the `disabled` token are not A; prompt caching
+disabled is still A-on at 5m/no-scope; no live capture; live allowlist
 unknown; first request has no overage fact; HIPAA unknown means no scope/5m.
 The current three-marker/no-scope behavior remains shipped until A lands.
 
