@@ -7,21 +7,23 @@
  * user-facing detail in that body; the HTTP status alone cannot distinguish
  * those failures from the Claude errors the same endpoint returns. This module
  * reads the envelope for pool-origin failures and for the pool's readiness
- * refusal, which carries a body request id and retry decision instead; every
- * other failure keeps the existing text classifier in `stream.ts`, so a
- * Claude-native rejection keeps its original code and wording. A 5xx refusal
- * carrying both readiness markers is terminal without reading the pool's detail
- * text, so a reworded refusal cannot drift back into the retryable text
- * classification.
+ * refusal, which carries a body request id, a retry decision, and its lease
+ * detail instead; every other failure keeps the existing text classifier in
+ * `stream.ts`, so a Claude-native rejection keeps its original code and wording.
+ * The pool echoes `pool_request_id` on every error body, including native
+ * provider failures, so that id cannot identify the refusal; its
+ * unverified-egress/`capability_not_ready` detail does, and a 5xx carrying only
+ * the generic markers stays with the text classifier.
  *
  * The pool owns account selection, cooldown, and session binding. This module
  * only decides what the client may do with the refusal: retry after the
  * disclosed wait, wait for the turn that holds the session, or stop. A closed
  * client request id is recoverable because this adapter stamps a new id on every
  * deliberate attempt, so the catalog asks for a retry of the request rather than
- * forbidding one: the next attempt is a fresh ledger entry, not a replay. It
- * also displays the pool's own message after sanitizing it; the generated
- * catalog contributes machine semantics only, never display text.
+ * forbidding one: the pool's `terminal` marker refuses a replay of the same id,
+ * not the fresh ledger entry that attempt creates. It also displays the pool's
+ * own message after sanitizing it; the generated catalog contributes machine
+ * semantics only, never display text.
  *
  * @module dsh-llm-pi-ai/pool-error
  */
@@ -89,10 +91,12 @@ export interface ProviderErrorEnvelope {
   readonly scope?: string
   /** Pool-side retry decision; a known pool code has its own client semantics. */
   readonly retryable?: boolean
-  /** Pool-side finality marker; true forbids every automatic resend. */
+  /** Pool-side finality marker; true forbids a replay of the same request id. */
   readonly terminal?: boolean
   /** Requested client action: stop, retry_same, retry_after, or refresh. */
   readonly clientAction?: string
+  /** Pool-declared HTTP status, used only when no response or status prefix supplies one. */
+  readonly status?: number
   /** Provider-authored human-readable detail. */
   readonly message?: string
 }
@@ -166,6 +170,7 @@ export function parseProviderErrorEnvelope(message: string): ProviderErrorEnvelo
   const detail = text(fields, 'message')
   const retryable = fields['retryable']
   const terminal = fields['terminal']
+  const declaredStatus = fields['status']
   return {
     ...poolRequestId === undefined ? {} : { poolRequestId },
     ...code === undefined ? {} : { code },
@@ -176,6 +181,9 @@ export function parseProviderErrorEnvelope(message: string): ProviderErrorEnvelo
     ...typeof retryable === 'boolean' ? { retryable } : {},
     ...typeof terminal === 'boolean' ? { terminal } : {},
     ...clientAction === undefined ? {} : { clientAction },
+    ...typeof declaredStatus === 'number' && Number.isInteger(declaredStatus)
+      && declaredStatus >= 100 && declaredStatus <= 599
+      ? { status: declaredStatus } : {},
     ...detail === undefined ? {} : { message: detail },
   }
 }
@@ -238,18 +246,22 @@ function fallbackMessage(code: string): string {
  *
  * Known pool codes take their canonical failure code and resend decision from
  * the generated catalog's machine fields: capacity, rate limiting, and
- * no-account wait out the provider's delay, a closed client request id asks for
- * another attempt (which the adapter sends under a fresh id), while a catalog
- * `stop` action (session-busy) forbids every automatic resend. Unrecognized pool
- * codes follow an explicit `terminal` marker, then `client_action`, `retryable`,
- * and finally the HTTP status. The failure message is the pool's sanitized
- * `message`, or a generic refusal when that detail is missing or unsafe. A
- * pool-authored readiness refusal — identified by its body `pool_request_id` and
- * `retryable: false`, together with a 5xx status or its unverified-egress
- * detail — becomes a non-retryable `POOL_ERROR` even though it carries neither
- * a pool code nor `origin`. A `claude` origin, a non-pool code, or an
- * unparseable message returns undefined so the caller keeps the pre-existing
- * classification.
+ * no-account wait out the provider's delay, while a catalog `stop` action
+ * (session-busy) forbids every automatic resend. A closed client request id
+ * keeps its `retry_same` action even when the pool marks the envelope
+ * `terminal`, because that marker refuses a replay of the same id and the retry
+ * sends a fresh one; a `retryable: false` answer still forbids it. Unrecognized
+ * pool codes follow an explicit `terminal` marker, then `client_action`,
+ * `retryable`, and finally the HTTP status; `error.status` supplies the status
+ * when neither the captured response nor the message prefix does. The failure
+ * message is the pool's sanitized `message`, or a generic refusal when that
+ * detail is missing or unsafe. A pool-authored readiness refusal — identified by
+ * its body `pool_request_id`, `retryable: false`, and unverified-egress or
+ * `capability_not_ready` detail — becomes a non-retryable `POOL_ERROR` even
+ * though it carries neither a pool code nor `origin`. The pool echoes the id on
+ * every error body, so the lease detail, not the id, distinguishes it from a
+ * native provider 5xx. A `claude` origin, a non-pool code, or an unparseable
+ * message returns undefined so the caller keeps the pre-existing classification.
  * @param message - pi-ai's terminal error text.
  * @param response - status and retry delay captured from the failed HTTP response.
  * @returns a pool-semantic failure, or undefined when this is not a pool failure.
@@ -268,7 +280,7 @@ export function classifyPoolFailure(
     && identity !== undefined
     && identity.startsWith(POOL_CODE_PREFIX)
 
-  const status = response?.status ?? statusOf(message)
+  const status = response?.status ?? statusOf(message) ?? envelope.status
   const retryAfterMs = response?.providerRetryAfterMs
   const detail = sanitizeProviderMessage(envelope.message)
   const failure = (code: string): LlmFailure => ({
@@ -280,10 +292,10 @@ export function classifyPoolFailure(
 
   if (!poolByOrigin && !poolByCode) {
     // The pool's readiness refusal omits the `cc_pool_*` code and `origin` its
-    // other failures carry, so its own body markers identify it. A repeated
-    // clientRequestId cannot make the lease ready, and the pool's ledger answers
-    // that repeat with a 409 instead of the original request's outcome.
-    if (!isPoolReadinessFailure(envelope, status)) return undefined
+    // other failures carry. Its lease detail is the only marker a native
+    // provider 5xx does not share now that `pool_request_id` rides every error
+    // body, so the detail decides; anything else stays with the text classifier.
+    if (!isPoolReadinessFailure(envelope)) return undefined
     return {
       ...failure(POOL_ERROR_CODE),
       retryDisposition: 'forbid',
@@ -297,7 +309,12 @@ export function classifyPoolFailure(
     const known = failure(entry.code)
     // A catalog `stop` action forbids every automatic resend: session-busy takes
     // this path even though the online pool marks it retryable for its own recovery.
-    return entry.clientAction === 'stop' || envelope.terminal === true
+    // The closed-request code is `terminal` too, but that marker refuses a replay
+    // of the same id: the catalog's `retry_same` action asks for a fresh attempt
+    // id, which is exactly what a deliberate retry sends, so it outranks the
+    // marker while the envelope still calls the code retryable.
+    const retryUnderFreshId = entry.clientAction === 'retry_same' && envelope.retryable !== false
+    return entry.clientAction === 'stop' || (envelope.terminal === true && !retryUnderFreshId)
       ? { ...known, retryDisposition: 'forbid' }
       : known
   }
@@ -316,23 +333,19 @@ export function classifyPoolFailure(
  * The pool withholds its `cc_pool_*` code and `origin` from this refusal. It
  * authors a body `pool_request_id`, states `retryable: false`, and names the
  * lease's unverified egress path (or its `capability_not_ready` maintenance
- * detail). The refusal is terminal because a resend repeats the same ledger id
- * that the pool has already recorded. A 5xx carrying both pool markers is
- * terminal on those markers alone: the detail is documentation of why, and a
- * pool that rewords it must not drift the refusal back into a retryable
- * provider failure. Below 5xx the detail still identifies the refusal, so an
- * ordinary provider rejection stays with the text classifier.
+ * detail). It also echoes `pool_request_id` on every error body, including a
+ * native provider failure, so that id no longer identifies the refusal; the
+ * lease detail does. The refusal is terminal because a resend repeats the same
+ * ledger id that the pool has already recorded, so an envelope without that
+ * detail keeps the text classifier.
  * @param envelope - the recognized error envelope.
- * @param status - the failed HTTP status, when known.
  * @returns whether the envelope is the pool's readiness refusal.
  */
-function isPoolReadinessFailure(envelope: ProviderErrorEnvelope, status: number | undefined): boolean {
+function isPoolReadinessFailure(envelope: ProviderErrorEnvelope): boolean {
   // An explicit claude origin outranks the pool markers: the pool is not
   // allowed to relabel a native Claude error, and neither is this adapter.
   if (envelope.origin === 'claude') return false
   if (envelope.poolRequestId === undefined || envelope.retryable !== false) return false
-  // HTTP statuses stop at 599, so the server-error range needs no upper bound.
-  if (status !== undefined && status >= 500) return true
   return POOL_READINESS_DETAIL.test(envelope.message ?? '')
 }
 
