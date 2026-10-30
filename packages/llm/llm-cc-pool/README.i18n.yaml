@@ -21,8 +21,8 @@
   en: 8bef5dfa8713b1c1
   zh: 8e1f5b6107663855
 /deepseek-ai-dsh-llm-cc-pool/use-this-package/prompt-cache-policy:
-  en: 658aa8f40152fc52
-  zh: d7e63f0c0a1d2a5c
+  en: 51874c3e89b5c918
+  zh: d6d082d4b25df052
 /deepseek-ai-dsh-llm-cc-pool/use-this-package/cc-wire-parity:
   en: 48f32e12530a486a
   zh: 91739cdc933986e2
@@ -60,5 +60,5 @@
   en: 93818c38af589dab
   zh: 0da3977ce7d00f3c
 /deepseek-ai-dsh-llm-cc-pool/known-limitations-and-deferred-work/dev-note:
-  en: de06becb3e937fd6
-  zh: 518067557bb6b00e
+  en: 020894f38748f582
+  zh: 8dbb8a08c8d661bf
