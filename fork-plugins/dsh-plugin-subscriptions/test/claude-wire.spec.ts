@@ -10,6 +10,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
 import {
+  BETA_REGISTRY_2_1_288,
   CLAUDE_CODE_2_1_288_PROFILE,
   ClaudeCodeWireError,
 } from '@tormentalabs/claude-code-wire-compat'
@@ -255,7 +256,9 @@ test('the body states no context-management field on any model', async () => {
   // The route applies no server-side context edits: it states no clear_tool_uses and no
   // clear_thinking policy. The beta that declares the feature may still ride with the model's
   // capabilities, but the body field the caller would have to supply must never appear.
-  for (const model of ['claude-opus-5', 'claude-sonnet-4-5']) {
+  // The loop is the pinned catalogue itself, so every model the route lists is covered: a
+  // sampled pair let a per-model gate restore the field on the other nineteen unnoticed.
+  for (const model of Object.keys(CLAUDE_CODE_2_1_288_PROFILE.supportedModels)) {
     const built = await buildClaudeWireRequest(
       options({ model }), session(), history(), 32_000, undefined, undefined,
       wireSessionId(`sess-no-context-management-${model}`), ACCOUNT,
@@ -263,6 +266,27 @@ test('the body states no context-management field on any model', async () => {
     assert.equal('context_management' in parseBody(built), false, `${model} states no context-management policy`)
     assert.equal(String(built.body).includes('clear_tool_uses'), false)
     assert.equal(String(built.body).includes('clear_thinking'), false)
+  }
+})
+
+test('a model whose catalogue entry declares context management keeps the beta', async () => {
+  // Removing the server-side edits does not remove the capability beta: the pinned builder
+  // composes context-management-2025-06-27 from the catalogue entry's own capability string.
+  // The entry answers before the library's exclusion-list fallback — Mythos 5's entry is empty,
+  // though that fallback would admit the id — so the catalogue stays the single source.
+  const contextManagementBeta = BETA_REGISTRY_2_1_288.CONTEXT_MANAGEMENT.header
+  for (const [model, entry] of Object.entries(CLAUDE_CODE_2_1_288_PROFILE.supportedModels)) {
+    const built = await buildClaudeWireRequest(
+      options({ model }), session(), history(), 32_000, undefined, undefined,
+      wireSessionId(`sess-context-management-beta-${model}`), ACCOUNT,
+    )
+    const betas = (headerMap(built).get('anthropic-beta') ?? '').split(',').map(value => value.trim())
+    const capable = entry.capabilities.includes('context_management')
+    assert.equal(
+      betas.includes(contextManagementBeta),
+      capable,
+      `${model} ${capable ? 'retains' : 'omits'} ${contextManagementBeta}`,
+    )
   }
 })
 

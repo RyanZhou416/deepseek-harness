@@ -24,6 +24,9 @@ import { ownedClaudeContinuation } from './claude-maintenance-fixtures.js'
 
 const ONE_MILLION_BETA = BETA_REGISTRY_2_1_288.LONG_CONTEXT.header
 const SPEED_BETA = BETA_REGISTRY_2_1_288.SPEED.header
+const CONTEXT_MANAGEMENT_BETA = BETA_REGISTRY_2_1_288.CONTEXT_MANAGEMENT.header
+const MID_CONVERSATION_SYSTEM_BETA = BETA_REGISTRY_2_1_288.MID_CONVERSATION_SYSTEM.header
+const MID_CONVERSATION_SYSTEM_CLEAR_AT_BETA = BETA_REGISTRY_2_1_288.MID_CONVERSATION_SYSTEM_CLEAR_AT.header
 
 /** A synthetic machine fingerprint; never this host's own identifier. */
 const FINGERPRINT = 'f'.repeat(64)
@@ -58,15 +61,30 @@ function history(): TranslatableMessage[] {
   return [{ role: 'user', content: [{ type: 'text', text: 'hello' }] }]
 }
 
+/** A turn, then mid-conversation context: what a capable model receives as a system message. */
+function midConversationHistory(): TranslatableMessage[] {
+  return [
+    { role: 'user', content: [{ type: 'text', text: 'hello' }] },
+    { role: 'assistant', content: [{ type: 'text', text: 'hi' }] },
+    { role: 'system', content: [{ type: 'text', text: 'mid-conversation context' }] },
+    { role: 'user', content: [{ type: 'text', text: 'again' }] },
+  ]
+}
+
+/** The composed beta identifiers of one sent request, trimmed as the header separates them. */
+function betasOf(request: { headers: Map<string, string> }): string[] {
+  return (request.headers.get('anthropic-beta') ?? '').split(',').map(value => value.trim())
+}
+
 /** An in-memory account store holding one claude session; refresh never fires here. */
-function tokens(): AccountTokenManager<ClaudeSession> {
+function tokens(session: ClaudeSession = SESSION): AccountTokenManager<ClaudeSession> {
   return new AccountTokenManager<ClaudeSession>({
     provider: 'claude',
     displayName: 'Test',
-    makeOptions: () => ({ preemptMs: 0, refresh: async () => SESSION, isPermanent: () => false }),
+    makeOptions: () => ({ preemptMs: 0, refresh: async () => session, isPermanent: () => false }),
     io: {
-      list: async () => [{ key: 'acct', session: SESSION }],
-      get: async () => SESSION,
+      list: async () => [{ key: 'acct', session }],
+      get: async () => session,
       save: async () => {},
       remove: async () => {},
     },
@@ -81,15 +99,17 @@ function tokens(): AccountTokenManager<ClaudeSession> {
  * @param t - the case that owns the continuation state.
  * @param fetchFn - the synthetic egress, when the case sends one.
  * @param fast - the model's stored Speed tier, when the test wires one.
+ * @param session - the account session to serve, when the case needs one that differs.
  * @returns the adapter over this case's state.
  */
 async function adapter(
   t: Pick<TestContext, 'after'>,
   fetchFn?: FetchFn,
   fast?: boolean,
+  session: ClaudeSession = SESSION,
 ): Promise<ClaudeAdapter> {
   return new ClaudeAdapter({
-    models: [], discovery: false, streamIdleTimeoutMs: 60_000, tokens: tokens(),
+    models: [], discovery: false, streamIdleTimeoutMs: 60_000, tokens: tokens(session),
     deviceFingerprint: () => FINGERPRINT,
     continuation: await ownedClaudeContinuation(t, ['acct']),
     requestRecord: new PermittingRecordPort(),
@@ -217,4 +237,90 @@ test('a stored fast tier never reaches a model whose catalogue entry lacks fast_
   assert.equal('speed' in refused.body, false)
   assert.equal((refused.headers.get('anthropic-beta') ?? '').includes(SPEED_BETA), false)
   assert.equal(refused.chunks.at(-1)?.type, 'finish', 'the request still completes')
+})
+
+test('two requests 65 idle minutes apart still carry no context-management field', async t => {
+  // The removed planner decided a server-side clear from a per-session idle clock and latched
+  // that decision for the rest of the conversation. The wall clock was the only input it read
+  // here, so mocking Date is the whole reproduction: same adapter, same wire session, and a gap
+  // wider than its idle window. Both requests must reach the transport with no field.
+  const start = Date.now()
+  t.mock.timers.enable({ apis: ['Date'], now: start })
+  // The fixture expiry is stated against the real clock; the mocked one starts there and only
+  // moves forward, so the session must outlive the gap or a refresh would replace it mid-case.
+  const account: ClaudeSession = { ...SESSION, expiresAt: start + 24 * 3_600_000 }
+  const captured: { body: Record<string, any>; headers: Map<string, string> }[] = []
+  const fetchFn: FetchFn = async (_url, init) => {
+    captured.push({
+      body: JSON.parse(String(init?.body ?? '')) as Record<string, any>,
+      headers: new Map(Object.entries(init?.headers ?? {}).map(([name, value]) => [name.toLowerCase(), value])),
+    })
+    return new Response(RESPONSE_SSE, { headers: { 'content-type': 'text/event-stream' } })
+  }
+  const instance = await adapter(t, fetchFn, undefined, account)
+  const generate: GenerateOptions = {
+    provider: 'claude',
+    messages: history() as never,
+    sessionId: 'sess-idle-gap' as NonNullable<GenerateOptions['sessionId']>,
+    model: 'claude-opus-5',
+  }
+  for await (const _chunk of instance.stream(generate)) { /* drained: this is a request-side case */ }
+  t.mock.timers.tick(66 * 60_000)
+  for await (const _chunk of instance.stream(generate)) { /* drained: this is a request-side case */ }
+
+  assert.equal(captured.length, 2, 'both requests reached the transport')
+  assert.equal(Date.now(), start + 66 * 60_000, 'the second request is 66 minutes after the first')
+  const sessionIds = captured.map(request => request.headers.get('x-claude-code-session-id'))
+  assert.equal(sessionIds[0], sessionIds[1], 'both requests declare the same wire session')
+  for (const [index, request] of captured.entries()) {
+    const label = `request ${String(index + 1)}`
+    assert.equal('context_management' in request.body, false, `${label} states no context-management field`)
+    const text = JSON.stringify(request.body)
+    assert.equal(text.includes('clear_tool_uses'), false, `${label} states no tool-use clear`)
+    assert.equal(text.includes('clear_thinking'), false, `${label} states no thinking clear`)
+    // Removing the edits removes the field, not the model's capability: the beta declaring the
+    // feature still rides every request for a catalogued model.
+    assert.equal(betasOf(request).includes(CONTEXT_MANAGEMENT_BETA), true, `${label} retains the capability beta`)
+  }
+})
+
+test('a capable model and its marked ids decide the mid-conversation form the same way', async t => {
+  // The capability now comes from the pinned catalogue rather than a duplicated local list, so
+  // the loop asks the model the catalogue names (including Sonnet 5 and Opus 5.5, which the old
+  // list missed) and reads the same answer off the adapter's model info and the sent request.
+  const instance = await adapter(t)
+  for (const model of ['claude-sonnet-5', 'claude-opus-5-5']) {
+    assert.equal(
+      (await instance.resolveModel('claude', model)).systemPromptUpdate,
+      'in-history',
+      `${model} tells the loop it accepts the in-history form`,
+    )
+    const request = await sent(t, { model, messages: midConversationHistory() as never })
+    const messages = request.body.messages as { role: string; content: unknown }[]
+    const system = messages.filter(message => message.role === 'system')
+    assert.equal(system.length, 1, `${model} carries the mid-conversation system message`)
+    assert.equal(system[0]?.content, 'mid-conversation context')
+    // The form is the client's: the context rides a system-role message in place, ahead of
+    // the turn that follows it, rather than merging into a neighbour.
+    assert.deepEqual(messages.map(message => message.role), ['user', 'assistant', 'system', 'user'])
+    // The pinned builder's cache-control pass rebuilds every message from its role and
+    // content, so the translated `clear_at` does not survive serialization; the field is not
+    // what this case pins. What it pins is the capability decision: the form above and the
+    // two betas that declare it, composed together from the catalogue entry.
+    assert.equal(betasOf(request).includes(MID_CONVERSATION_SYSTEM_BETA), true, `${model} composes the beta`)
+    assert.equal(betasOf(request).includes(MID_CONVERSATION_SYSTEM_CLEAR_AT_BETA), true)
+  }
+
+  // The marker exists only on the 200K catalogue entries, and none of them is capable: a
+  // marked id must not become capable through the suffix, nor lose the capability it has.
+  assert.equal(claudeOneMillionModelId('claude-opus-4-6'), 'claude-opus-4-6[1m]')
+  for (const model of ['claude-opus-4-6', 'claude-opus-4-6[1m]', 'claude-sonnet-4-6[1m]']) {
+    assert.equal((await instance.resolveModel('claude', model)).systemPromptUpdate, undefined, model)
+    const request = await sent(t, { model, messages: midConversationHistory() as never })
+    const system = (request.body.messages as { role: string }[])
+      .filter(message => message.role === 'system')
+    assert.equal(system.length, 0, `${model} keeps the reminder fallback`)
+    assert.equal(betasOf(request).includes(MID_CONVERSATION_SYSTEM_BETA), false, `${model} composes no mid-conversation beta`)
+    assert.equal(betasOf(request).includes(MID_CONVERSATION_SYSTEM_CLEAR_AT_BETA), false, `${model} composes no clear-at beta`)
+  }
 })

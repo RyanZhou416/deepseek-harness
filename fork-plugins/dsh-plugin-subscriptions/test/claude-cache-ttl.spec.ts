@@ -45,13 +45,17 @@ function history(): TranslatableMessage[] {
   return [{ role: 'user', content: [{ type: 'text', text: 'hello' }] }]
 }
 
-function options(purpose?: GenerateOptions['purpose']): GenerateOptions {
+function options(
+  purpose?: GenerateOptions['purpose'],
+  requestClass?: GenerateOptions['requestClass'],
+): GenerateOptions {
   return {
     provider: 'claude',
     model: 'claude-opus-5',
     messages: history() as never,
     system: 'be terse',
     ...purpose === undefined ? {} : { purpose },
+    ...requestClass === undefined ? {} : { requestClass },
   }
 }
 
@@ -69,15 +73,23 @@ function wireSessionId(name: string): string {
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`
 }
 
-/** Whether one built request declares the hour and carries the beta that states it. */
+/**
+ * Whether one built request declares the hour and carries the beta that states it.
+ * @param account - the canonical account key the report is filed under.
+ * @param accountSession - the account session the request is made under.
+ * @param purpose - the call kind the caller classified, when it classified one.
+ * @param requestClass - the caller's explicit call class, when it set one.
+ * @returns whether the request declares the hour and its beta.
+ */
 async function declaresHour(
   account: string,
   accountSession: ClaudeSession,
   purpose?: GenerateOptions['purpose'],
+  requestClass?: GenerateOptions['requestClass'],
 ): Promise<{ ttl: boolean; beta: boolean }> {
   const built = await buildClaudeWireRequest(
-    options(purpose), accountSession, history(), 32_000, undefined, undefined,
-    { sessionId: wireSessionId(`${account}:${purpose ?? 'main'}:${accountSession.scopes}`),
+    options(purpose, requestClass), accountSession, history(), 32_000, undefined, undefined,
+    { sessionId: wireSessionId(`${account}:${purpose ?? 'main'}:${requestClass ?? 'purpose'}:${accountSession.scopes}`),
       atisPin: undefined, previousRequestId: undefined }, account,
   )
   const beta = String(built.headers.find(([name]) => name.toLowerCase() === 'anthropic-beta')?.[1] ?? '')
@@ -140,6 +152,33 @@ test('a helper call takes the server default even for a scoped session', async (
   assert.deepEqual(await declaresHour('acct-compact', session(), 'compaction'), { ttl: false, beta: false })
   assert.deepEqual(await declaresHour('acct-title', session(), 'session-title'), { ttl: false, beta: false })
   assert.deepEqual(await declaresHour('acct-main', session()), { ttl: true, beta: true })
+})
+
+test('an explicit class decides the hour the way the purpose it outranks would', async () => {
+  forgetUnifiedRateLimit()
+  // The three helper classes take the default lifetime however the purpose reads, and an
+  // explicit main keeps the hour even when the purpose names a helper call.
+  for (const requestClass of ['auxiliary', 'subagent', 'compaction'] as const) {
+    assert.deepEqual(
+      await declaresHour(`acct-class-${requestClass}`, session(), undefined, requestClass),
+      { ttl: false, beta: false },
+      `${requestClass} takes the default lifetime`,
+    )
+  }
+  assert.deepEqual(await declaresHour('acct-class-main', session(), 'session-title', 'main'), { ttl: true, beta: true })
+
+  // The explicit main class still answers to the scope grant and to the overage reading:
+  // the class is one input, not an override of the client's own predicate.
+  assert.deepEqual(
+    await declaresHour('acct-class-main-unscoped', session({ scopes: UNSCOPED }), undefined, 'main'),
+    { ttl: false, beta: false },
+  )
+  rememberUnifiedRateLimit('claude', 'acct-class-main-overage', report({ status: 'rejected', overageStatus: 'allowed' }))
+  assert.deepEqual(
+    await declaresHour('acct-class-main-overage', session(), undefined, 'main'),
+    { ttl: false, beta: false },
+  )
+  forgetUnifiedRateLimit()
 })
 
 test('one account report is never read for another account', async () => {
